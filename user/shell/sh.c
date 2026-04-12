@@ -764,7 +764,7 @@ static int builtin_help(int argc, char *argv[]) {
     printf("  env                  Print environment\n");
     printf("  exit [code]          Exit shell\n");
     printf("\n\033[1mExternal commands (in /bin):\033[0m\n");
-    printf("  ls, cat, cp, rm, mkdir, ps\n");
+    printf("  ls, cat, cp, rm, mkdir, ps, aed\n");
     printf("\n\033[1mSample files:\033[0m\n");
     printf("  /hello.txt           ramfs test file\n");
     printf("  /mnt/test.txt        FAT32 test file\n");
