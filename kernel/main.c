@@ -22,7 +22,7 @@ void init_kthread(void);
 void kernel_main(void) {
     printf("\n");
     printf("======================================\n");
-    printf("    A20OS Kernel v1.0\n");
+    printf("    A20OS Kernel \n");
     printf("======================================\n");
     printf("Initializing system...\n");
 
@@ -63,6 +63,15 @@ void kernel_main(void) {
 
     printf("[INIT] Starting scheduler...\n");
     printf("[INIT] System ready\n\n");
+
+    printf("\033[1;36m"); // 设置青色高亮
+    printf("    _    ____   ___   ___  ____  \n");
+    printf("   / \\  |___ \\ / _ \\ / _ \\/ ___| \n");
+    printf("  / _ \\   __) | | | | | | \\___ \\ \n");
+    printf(" / ___ \\ / __/| |_| | |_| |___) |\n");
+    printf("/_/   \\_\\_____|\\___/ \\___/|____/ \n");
+    printf("\033[0m"); // 重置颜色
+    printf("Welcome to AAAAAAAAAAAAAAAAAAAAOS!\n\n");
 
     /* Start scheduler — switches to init_kthread. When idle is later
      * restored via context_switch, execution returns here. Enter

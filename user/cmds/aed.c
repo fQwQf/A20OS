@@ -401,7 +401,7 @@ static void ed_show_help(editor_t *ed) {
     term_write("  Ctrl+Q           Quit (twice if unsaved)\n");
     term_write("\n");
     term_color(32);
-    term_write("  aed v1.0 — A20OS Text Editor\n");
+    term_write("  aed — A20OS Text Editor\n");
     term_normal();
 
     getchar();

@@ -735,21 +735,6 @@ static void print_prompt(void) {
            cwd, last_exit ? "1;31" : "0");
 }
 
-/* ============================================================
- * Banner
- * ============================================================ */
-
-static void print_banner(void) {
-    printf("\033[1;36m"); // 设置青色高亮
-    printf("    _    ____   ___   ___  ____  \n");
-    printf("   / \\  |___ \\ / _ \\ / _ \\/ ___| \n");
-    printf("  / _ \\   __) | | | | | | \\___ \\ \n");
-    printf(" / ___ \\ / __/| |_| | |_| |___) |\n");
-    printf("/_/   \\_\\_____|\\___/ \\___/|____/ \n");
-    printf("\033[0m"); // 重置颜色
-    printf("A20OS v1.0.0 — RISC-V Shell  [Type 'help' for commands]\n\n");
-}
-
 static int builtin_help(int argc, char *argv[]) {
     (void)argc; (void)argv;
     printf("\033[1mBuilt-in commands:\033[0m\n");
@@ -790,7 +775,7 @@ int main(int argc, char *argv[], char *envp[]) {
     if (!getenv("PATH"))     { /* set via export */ }
     if (!getenv("HOME"))     { /* set via export */ }
 
-    print_banner();
+    printf("A20 Shell  [Type 'help' for commands]\n\n");
 
     /* Install default aliases */
     snprintf(g_aliases[0].name, 64, "ll");
