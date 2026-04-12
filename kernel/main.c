@@ -45,19 +45,31 @@ void kernel_main(void) {
 
     /* Initialize virtio-blk for block filesystem */
     if (virtio_blk_init(0) == 0) {
-        printf("[INIT] Virtio-blk initialized\n");
-        fs_mkdir("/mnt");
-        /* Auto-detect: probe for ext4 superblock, fall back to FAT32 */
-        uint16_t fs_magic = 0;
-        bcache_init(virtio_blk_get_dev());
-        bcache_read_bytes(1024 + 56, &fs_magic, 2);
-        if (fs_magic == 0xEF53) {
-            vfs_mount(NULL, "/mnt", "ext4", 0);
-        } else {
-            vfs_mount(NULL, "/mnt", "fat32", 0);
+        printf("[INIT] Virtio-blk 0 initialized\n");
+        block_dev_t *dev0 = virtio_blk_get_dev(0);
+        if (dev0) {
+            bcache_t *bc0 = bcache_create(dev0);
+            if (bc0) {
+                fs_mkdir("/mnt");
+                vfs_mount_bc("/mnt", "fat32", bc0);
+            }
         }
     } else {
-        printf("[INIT] Warning: Virtio-blk initialization failed\n");
+        printf("[INIT] Warning: Virtio-blk 0 initialization failed\n");
+    }
+
+    if (virtio_blk_init(0) == 0) {
+        printf("[INIT] Virtio-blk 1 initialized\n");
+        block_dev_t *dev1 = virtio_blk_get_dev(1);
+        if (dev1) {
+            bcache_t *bc1 = bcache_create(dev1);
+            if (bc1) {
+                fs_mkdir("/mnt2");
+                vfs_mount_bc("/mnt2", "ext4", bc1);
+            }
+        }
+    } else {
+        printf("[INIT] Warning: Virtio-blk 1 initialization failed\n");
     }
 
     /* Initialize process management */

@@ -3,7 +3,7 @@
 
 #include "types.h"
 #include "vfs.h"
-#include "virtio_blk.h"
+#include "block_cache.h"
 
 #define EXT4_DISK_MAGIC        0xEF53
 
@@ -248,7 +248,7 @@ typedef struct ext4_sb_info {
     uint32_t s_feature_ro_compat;
     uint64_t block_group_desc_table_byte;
     ext4_group_desc_t *group_descs;
-    block_dev_t *dev;
+    bcache_t *bc;
 } ext4_sb_info_t;
 
 typedef struct ext4_vnode_priv {
@@ -267,7 +267,7 @@ typedef struct ext4_fctx {
     size_t          dir_off;
 } ext4_fctx_t;
 
-vnode_t *ext4_mount(block_dev_t *dev);
+vnode_t *ext4_mount(bcache_t *bc);
 void     ext4_unmount(vnode_t *root);
 vfile_t *ext4_open_vnode(vnode_t *vn, int flags);
 

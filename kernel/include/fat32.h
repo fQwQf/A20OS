@@ -3,7 +3,7 @@
 
 #include "types.h"
 #include "vfs.h"
-#include "virtio_blk.h"
+#include "block_cache.h"
 
 /* ============================================================
  * FAT32 Filesystem Driver
@@ -96,7 +96,7 @@ typedef struct fat32_sb {
     uint32_t sectors_per_cluster;
     uint32_t bytes_per_cluster;
     uint32_t total_clusters;
-    block_dev_t *dev;
+    bcache_t *bc;
 } fat32_sb_t;
 
 /* ---- Per-file/dir handle ---- */
@@ -119,7 +119,7 @@ typedef struct fat32_file {
 
 /* Mount FAT32 on the given block device.
  * Returns a vnode_t* representing the root directory, or NULL on error. */
-vnode_t *fat32_mount(block_dev_t *dev);
+vnode_t *fat32_mount(bcache_t *bc);
 
 /* Called by VFS to free resources on unmount */
 void fat32_unmount(vnode_t *root);

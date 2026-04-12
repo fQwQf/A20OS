@@ -145,20 +145,22 @@ typedef struct block_dev {
  * Public API
  * ============================================================ */
 
-/* Initialize virtio-blk at given MMIO base address */
+#define VIRTIO_MAX_DEVS  2
+
+/* Initialize virtio-blk at given MMIO base address (auto-assigns slot) */
 int  virtio_blk_init(uintptr_t mmio_base);
 
-/* Read/write N sectors starting at LBA */
-int  virtio_blk_read(uint64_t lba, void *buf, size_t sectors);
-int  virtio_blk_write(uint64_t lba, const void *buf, size_t sectors);
+/* Read/write N sectors starting at LBA on device idx */
+int  virtio_blk_read(int idx, uint64_t lba, void *buf, size_t sectors);
+int  virtio_blk_write(int idx, uint64_t lba, const void *buf, size_t sectors);
 
-/* Total sector count */
-uint64_t virtio_blk_capacity(void);
+/* Total sector count for device idx */
+uint64_t virtio_blk_capacity(int idx);
 
-/* Get block_dev pointer for VFS/FAT32 use */
-block_dev_t *virtio_blk_get_dev(void);
+/* Get block_dev pointer for VFS/FS use by device index */
+block_dev_t *virtio_blk_get_dev(int idx);
 
-/* Check if device is ready */
-int virtio_blk_ready(void);
+/* Check if device idx is ready */
+int  virtio_blk_ready(int idx);
 
 #endif /* _VIRTIO_BLK_H */
