@@ -20,6 +20,7 @@ else ifeq ($(ARCH), loongarch64)
 endif
 
 QEMU_FLAGS += -drive file=fs.img,if=none,format=raw,id=x0 -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0
+QEMU_FLAGS += -drive file=ext4.img,if=none,format=raw,id=x1 -device virtio-blk-device,drive=x1,bus=virtio-mmio-bus.1
 
 
 # Directories
@@ -60,8 +61,8 @@ KERNEL_BIN = kernel.bin
 # Targets
 .PHONY: all clean run-riscv64 run-loongarch64 user_apps fs_img
 
-all: $(KERNEL_BIN) user_apps fs_img
-	@echo "Build complete: $(KERNEL_BIN) and fs.img"
+all: $(KERNEL_BIN) user_apps fs_img ext4_img_only
+	@echo "Build complete: $(KERNEL_BIN), fs.img and ext4.img"
 
 user_apps:
 	$(MAKE) -C user ARCH=$(ARCH)
@@ -84,26 +85,24 @@ fs_img: user_apps
 	@printf 'Hello from A20OS FAT32!\nThis file is on the FAT32 filesystem at /mnt/test.txt\n' | mcopy -i fs.img - ::/test.txt
 	cp fs.img fs_test.img
 
-ext4_img: user_apps
+ext4_img_only: user_apps
 	@echo "Building ext4 image..."
-	dd if=/dev/zero of=fs.img bs=1M count=32
-	mkfs.ext4 -F -O ^has_journal,extent,huge_file,flex_bg,uninit_bg,dir_index fs.img
+	dd if=/dev/zero of=ext4.img bs=1M count=32
+	mkfs.ext4 -F -O ^has_journal,extent,huge_file,flex_bg,uninit_bg,dir_index ext4.img
 	mount_fs_img=$$(mktemp -d) && \
-	sudo mount -o loop fs.img "$$mount_fs_img" && \
-	sudo cp user/build/init "$$mount_fs_img/init" && \
-	sudo cp user/build/sh "$$mount_fs_img/sh" && \
+	sudo mount -o loop ext4.img "$$mount_fs_img" && \
 	sudo mkdir -p "$$mount_fs_img/bin" && \
 	sudo cp user/build/ls "$$mount_fs_img/bin/ls" && \
 	sudo cp user/build/cat "$$mount_fs_img/bin/cat" && \
 	sudo cp user/build/mkdir "$$mount_fs_img/bin/mkdir" && \
 	sudo cp user/build/rm "$$mount_fs_img/bin/rm" && \
 	sudo cp user/build/cp "$$mount_fs_img/bin/cp" && \
-	sudo cp user/build/ps "$$mount_fs_img/bin/ps" && \
-	sudo cp user/build/aed "$$mount_fs_img/bin/aed" && \
-	sudo bash -c 'printf "Hello from A20OS ext4!\nThis file is on the ext4 filesystem at /mnt/test.txt\n" > "$$mount_fs_img/test.txt"' && \
+	sudo bash -c 'printf "Hello from ext4!\nThis file is on the ext4 filesystem.\n" > "$$mount_fs_img/test.txt"' && \
 	sudo umount "$$mount_fs_img" && \
 	rmdir "$$mount_fs_img"
-	cp fs.img fs_test.img
+
+ext4_img: user_apps ext4_img_only
+	cp ext4.img fs_test.img
 
 $(KERNEL_BIN): $(KERNEL_ELF)
 	$(CROSS_PREFIX)objcopy -O binary $< $@
@@ -118,7 +117,7 @@ $(KERNEL_ELF): $(KERNEL_OBJ) $(ASM_OBJ)
 	$(CROSS_PREFIX)gcc $(CFLAGS) -c $< -o $@
 
 clean:
-	rm -f $(KERNEL_OBJ) $(ASM_OBJ) $(KERNEL_ELF) $(KERNEL_BIN) fs.img
+	rm -f $(KERNEL_OBJ) $(ASM_OBJ) $(KERNEL_ELF) $(KERNEL_BIN) fs.img ext4.img
 	$(MAKE) -C user clean
 
 run-riscv64:

@@ -28,7 +28,7 @@ static int ext4_read_inode(ext4_sb_info_t *sb, uint32_t ino, ext4_inode_t *out) 
                   ((uint64_t)sb->group_descs[g].bg_inode_table_hi << 32);
     uint64_t off = it * sb->block_size + (uint64_t)i * sb->inode_size;
     memset(out, 0, sizeof(*out));
-    return bcache_read_bytes(off, out, EXT4_INODE_SIZE_STATIC) < 0 ? -EIO : 0;
+    return bcache_read_bytes(sb->bc, off, out, EXT4_INODE_SIZE_STATIC) < 0 ? -EIO : 0;
 }
 
 static int ext4_write_inode(ext4_sb_info_t *sb, uint32_t ino, ext4_inode_t *inp) {
@@ -39,7 +39,7 @@ static int ext4_write_inode(ext4_sb_info_t *sb, uint32_t ino, ext4_inode_t *inp)
     uint64_t it = (uint64_t)sb->group_descs[g].bg_inode_table_lo |
                   ((uint64_t)sb->group_descs[g].bg_inode_table_hi << 32);
     uint64_t off = it * sb->block_size + (uint64_t)i * sb->inode_size;
-    return bcache_write_bytes(off, inp, EXT4_INODE_SIZE_STATIC) < 0 ? -EIO : 0;
+    return bcache_write_bytes(sb->bc, off, inp, EXT4_INODE_SIZE_STATIC) < 0 ? -EIO : 0;
 }
 
 /* ================================================================
@@ -50,18 +50,18 @@ static void ext4_writeback_gd(ext4_sb_info_t *sb, uint32_t group) {
     uint64_t off = sb->block_group_desc_table_byte + (uint64_t)group * sb->desc_size;
     uint32_t n = sb->desc_size < sizeof(ext4_group_desc_t) ?
                  sb->desc_size : sizeof(ext4_group_desc_t);
-    bcache_write_bytes(off, &sb->group_descs[group], n);
+    bcache_write_bytes(sb->bc, off, &sb->group_descs[group], n);
 }
 
 static int ext4_bitmap_alloc(ext4_sb_info_t *sb, uint64_t bm_blk, uint32_t max) {
     char *buf = (char *)kmalloc(sb->block_size);
     if (!buf) return -1;
-    if (bcache_read_bytes(bm_blk * sb->block_size, buf, sb->block_size) < 0)
+    if (bcache_read_bytes(sb->bc, bm_blk * sb->block_size, buf, sb->block_size) < 0)
         { kfree(buf); return -1; }
     for (uint32_t i = 0; i < max; i++) {
         if (!(buf[i / 8] & (1 << (i % 8)))) {
             buf[i / 8] |= (1 << (i % 8));
-            bcache_write_bytes(bm_blk * sb->block_size, buf, sb->block_size);
+            bcache_write_bytes(sb->bc, bm_blk * sb->block_size, buf, sb->block_size);
             kfree(buf); return (int)i;
         }
     }
@@ -71,10 +71,10 @@ static int ext4_bitmap_alloc(ext4_sb_info_t *sb, uint64_t bm_blk, uint32_t max) 
 static void ext4_bitmap_free(ext4_sb_info_t *sb, uint64_t bm_blk, uint32_t bit) {
     char *buf = (char *)kmalloc(sb->block_size);
     if (!buf) return;
-    if (bcache_read_bytes(bm_blk * sb->block_size, buf, sb->block_size) < 0)
+    if (bcache_read_bytes(sb->bc, bm_blk * sb->block_size, buf, sb->block_size) < 0)
         { kfree(buf); return; }
     buf[bit / 8] &= ~(1 << (bit % 8));
-    bcache_write_bytes(bm_blk * sb->block_size, buf, sb->block_size);
+    bcache_write_bytes(sb->bc, bm_blk * sb->block_size, buf, sb->block_size);
     kfree(buf);
 }
 
@@ -91,7 +91,7 @@ static uint64_t ext4_alloc_block(ext4_sb_info_t *sb) {
                         (uint64_t)g * sb->blocks_per_group + bit;
         char *z = (char *)kmalloc(sb->block_size);
         if (z) { memset(z, 0, sb->block_size);
-                  bcache_write_bytes(phys * sb->block_size, z, sb->block_size);
+                  bcache_write_bytes(sb->bc, phys * sb->block_size, z, sb->block_size);
                   kfree(z); }
         return phys;
     }
@@ -180,7 +180,7 @@ static uint64_t ext4_extent_map(ext4_sb_info_t *sb, ext4_inode_t *inode, uint32_
     for (int d = 1; d <= (int)hdr.eh_depth; d++) {
         char *b = (char *)kmalloc(sb->block_size);
         if (!b) return 0;
-        if (bcache_read_bytes(next * sb->block_size, b, sb->block_size) < 0)
+        if (bcache_read_bytes(sb->bc, next * sb->block_size, b, sb->block_size) < 0)
             { kfree(b); return 0; }
         ext4_extent_header_t eh; memcpy(&eh, b, sizeof(eh));
         if (eh.eh_magic != EXT4_EXT_MAGIC) { kfree(b); return 0; }
@@ -253,7 +253,7 @@ static int ext4_extent_grow(ext4_sb_info_t *sb, ext4_inode_t *inode,
         lh1.eh_entries = n; lh1.eh_max = epb; lh1.eh_depth = 0; lh1.eh_generation = 0;
         memcpy(b1, &lh1, sizeof(lh1));
         memcpy(b1 + sizeof(lh1), ext, n * sizeof(ext4_extent_t));
-        bcache_write_bytes(l1 * sb->block_size, b1, sb->block_size);
+        bcache_write_bytes(sb->bc, l1 * sb->block_size, b1, sb->block_size);
 
         memset(b2, 0, sb->block_size);
         ext4_extent_header_t lh2; lh2.eh_magic = EXT4_EXT_MAGIC;
@@ -262,7 +262,7 @@ static int ext4_extent_grow(ext4_sb_info_t *sb, ext4_inode_t *inode,
         ne.ee_start_hi = (uint16_t)(pb >> 32); ne.ee_start_lo = (uint32_t)(pb & 0xFFFFFFFF);
         memcpy(b2, &lh2, sizeof(lh2));
         memcpy(b2 + sizeof(lh2), &ne, sizeof(ne));
-        bcache_write_bytes(l2 * sb->block_size, b2, sb->block_size);
+        bcache_write_bytes(sb->bc, l2 * sb->block_size, b2, sb->block_size);
         kfree(b1); kfree(b2);
 
         hdr.eh_depth = 1; hdr.eh_entries = 2; hdr.eh_max = 4;
@@ -290,7 +290,7 @@ static int ext4_extent_grow(ext4_sb_info_t *sb, ext4_inode_t *inode,
 
     char *leaf = (char *)kmalloc(sb->block_size);
     if (!leaf) return -ENOMEM;
-    if (bcache_read_bytes(lb * sb->block_size, leaf, sb->block_size) < 0)
+    if (bcache_read_bytes(sb->bc, lb * sb->block_size, leaf, sb->block_size) < 0)
         { kfree(leaf); return -EIO; }
     ext4_extent_header_t lh; memcpy(&lh, leaf, sizeof(lh));
 
@@ -301,7 +301,7 @@ static int ext4_extent_grow(ext4_sb_info_t *sb, ext4_inode_t *inode,
         uint64_t lp = (uint64_t)le->ee_start_lo | ((uint64_t)le->ee_start_hi << 32);
         if (lblk == le->ee_block + ll && pb == lp + ll && ll < 0x8000) {
             le->ee_len++;
-            bcache_write_bytes(lb * sb->block_size, leaf, sb->block_size);
+            bcache_write_bytes(sb->bc, lb * sb->block_size, leaf, sb->block_size);
             kfree(leaf); return 0;
         }
     }
@@ -312,7 +312,7 @@ static int ext4_extent_grow(ext4_sb_info_t *sb, ext4_inode_t *inode,
         ep[lh.eh_entries].ee_start_lo = (uint32_t)(pb & 0xFFFFFFFF);
         lh.eh_entries++;
         memcpy(leaf, &lh, sizeof(lh));
-        bcache_write_bytes(lb * sb->block_size, leaf, sb->block_size);
+        bcache_write_bytes(sb->bc, lb * sb->block_size, leaf, sb->block_size);
         kfree(leaf); return 0;
     }
     kfree(leaf);
@@ -327,7 +327,7 @@ static int ext4_extent_grow(ext4_sb_info_t *sb, ext4_inode_t *inode,
     newe.ee_start_hi = (uint16_t)(pb >> 32); newe.ee_start_lo = (uint32_t)(pb & 0xFFFFFFFF);
     memcpy(nb, &nlh, sizeof(nlh));
     memcpy(nb + sizeof(nlh), &newe, sizeof(newe));
-    bcache_write_bytes(nl * sb->block_size, nb, sb->block_size);
+    bcache_write_bytes(sb->bc, nl * sb->block_size, nb, sb->block_size);
     kfree(nb);
 
     if (ni < 4) {
@@ -365,7 +365,7 @@ static void ext4_extent_truncate(ext4_sb_info_t *sb, ext4_inode_t *inode) {
             uint64_t lb = (uint64_t)idx[i].ei_leaf_lo | ((uint64_t)idx[i].ei_leaf_hi << 32);
             char *b = (char *)kmalloc(sb->block_size);
             if (!b) continue;
-            if (bcache_read_bytes(lb * sb->block_size, b, sb->block_size) < 0)
+            if (bcache_read_bytes(sb->bc, lb * sb->block_size, b, sb->block_size) < 0)
                 { kfree(b); continue; }
             ext4_extent_header_t lh; memcpy(&lh, b, sizeof(lh));
             if (lh.eh_magic == EXT4_EXT_MAGIC) {
@@ -397,19 +397,19 @@ static uint64_t ext4_indirect_map(ext4_sb_info_t *sb, ext4_inode_t *inode, uint3
         if (!b[12]) return 0;
         uint32_t *ind = (uint32_t *)kmalloc(sb->block_size);
         if (!ind) return 0;
-        bcache_read_bytes((uint64_t)b[12] * sb->block_size, ind, sb->block_size);
+        bcache_read_bytes(sb->bc, (uint64_t)b[12] * sb->block_size, ind, sb->block_size);
         uint32_t r = ind[lblk]; kfree(ind); return (uint64_t)r;
     }
     lblk -= apb;
     if (lblk < apb * apb && b[13]) {
         uint32_t *di = (uint32_t *)kmalloc(sb->block_size);
         if (!di) return 0;
-        bcache_read_bytes((uint64_t)b[13] * sb->block_size, di, sb->block_size);
+        bcache_read_bytes(sb->bc, (uint64_t)b[13] * sb->block_size, di, sb->block_size);
         uint32_t ii = lblk / apb, ib = di[ii]; kfree(di);
         if (!ib) return 0;
         uint32_t *ind = (uint32_t *)kmalloc(sb->block_size);
         if (!ind) return 0;
-        bcache_read_bytes((uint64_t)ib * sb->block_size, ind, sb->block_size);
+        bcache_read_bytes(sb->bc, (uint64_t)ib * sb->block_size, ind, sb->block_size);
         uint32_t r = ind[lblk % apb]; kfree(ind); return (uint64_t)r;
     }
     return 0;
@@ -424,27 +424,27 @@ static int ext4_indirect_grow(ext4_sb_info_t *sb, ext4_inode_t *inode,
     } else if ((lblk - 12) < apb) {
         if (!b[12]) { uint64_t nb = ext4_alloc_block(sb); if (!nb) return -ENOSPC; b[12] = (uint32_t)nb; }
         uint32_t *ind = (uint32_t *)kmalloc(sb->block_size); if (!ind) return -ENOMEM;
-        bcache_read_bytes((uint64_t)b[12] * sb->block_size, ind, sb->block_size);
+        bcache_read_bytes(sb->bc, (uint64_t)b[12] * sb->block_size, ind, sb->block_size);
         ind[lblk - 12] = (uint32_t)phys;
-        bcache_write_bytes((uint64_t)b[12] * sb->block_size, ind, sb->block_size);
+        bcache_write_bytes(sb->bc, (uint64_t)b[12] * sb->block_size, ind, sb->block_size);
         kfree(ind);
     } else if ((lblk - 12 - apb) < apb * apb) {
         uint32_t li = lblk - 12 - apb;
         if (!b[13]) { uint64_t nb = ext4_alloc_block(sb); if (!nb) return -ENOSPC; b[13] = (uint32_t)nb; }
         uint32_t *di = (uint32_t *)kmalloc(sb->block_size); if (!di) return -ENOMEM;
-        bcache_read_bytes((uint64_t)b[13] * sb->block_size, di, sb->block_size);
+        bcache_read_bytes(sb->bc, (uint64_t)b[13] * sb->block_size, di, sb->block_size);
         uint32_t ii = li / apb;
         if (!di[ii]) {
             uint64_t nb = ext4_alloc_block(sb);
             if (!nb) { kfree(di); return -ENOSPC; }
             di[ii] = (uint32_t)nb;
-            bcache_write_bytes((uint64_t)b[13] * sb->block_size, di, sb->block_size);
+            bcache_write_bytes(sb->bc, (uint64_t)b[13] * sb->block_size, di, sb->block_size);
         }
         uint32_t ib = di[ii]; kfree(di);
         uint32_t *ind = (uint32_t *)kmalloc(sb->block_size); if (!ind) return -ENOMEM;
-        bcache_read_bytes((uint64_t)ib * sb->block_size, ind, sb->block_size);
+        bcache_read_bytes(sb->bc, (uint64_t)ib * sb->block_size, ind, sb->block_size);
         ind[li % apb] = (uint32_t)phys;
-        bcache_write_bytes((uint64_t)ib * sb->block_size, ind, sb->block_size);
+        bcache_write_bytes(sb->bc, (uint64_t)ib * sb->block_size, ind, sb->block_size);
         kfree(ind);
     } else return -ENOSPC;
     memcpy(inode->i_block.i_data.i_block, b, sizeof(b));
@@ -457,17 +457,17 @@ static void ext4_indirect_truncate(ext4_sb_info_t *sb, ext4_inode_t *inode) {
     for (int i = 0; i < 12; i++) if (b[i]) ext4_free_block(sb, b[i]);
     if (b[12]) {
         uint32_t *ind = (uint32_t *)kmalloc(sb->block_size);
-        if (ind) { bcache_read_bytes((uint64_t)b[12]*sb->block_size,ind,sb->block_size);
+        if (ind) { bcache_read_bytes(sb->bc, (uint64_t)b[12]*sb->block_size,ind,sb->block_size);
                     for (uint32_t i=0;i<apb;i++) if(ind[i]) ext4_free_block(sb,ind[i]);
                     kfree(ind); }
         ext4_free_block(sb, b[12]);
     }
     if (b[13]) {
         uint32_t *di = (uint32_t *)kmalloc(sb->block_size);
-        if (di) { bcache_read_bytes((uint64_t)b[13]*sb->block_size,di,sb->block_size);
+        if (di) { bcache_read_bytes(sb->bc, (uint64_t)b[13]*sb->block_size,di,sb->block_size);
                    for (uint32_t i=0;i<apb;i++) if(di[i]) {
                        uint32_t *ind=(uint32_t *)kmalloc(sb->block_size);
-                       if(ind){bcache_read_bytes((uint64_t)di[i]*sb->block_size,ind,sb->block_size);
+                       if(ind){bcache_read_bytes(sb->bc, (uint64_t)di[i]*sb->block_size,ind,sb->block_size);
                                for(uint32_t j=0;j<apb;j++) if(ind[j]) ext4_free_block(sb,ind[j]);
                                kfree(ind);}
                        ext4_free_block(sb,di[i]);
@@ -504,7 +504,7 @@ static int ext4_dir_find(ext4_sb_info_t *sb, ext4_inode_t *di, uint32_t dsz,
     for (uint32_t b = 0; b < nb; b++) {
         uint64_t p = ext4_block_map(sb, di, b); if (!p) continue;
         char *blk = (char *)kmalloc(bs); if (!blk) return -ENOMEM;
-        if (bcache_read_bytes(p * bs, blk, bs) < 0) { kfree(blk); return -EIO; }
+        if (bcache_read_bytes(sb->bc, p * bs, blk, bs) < 0) { kfree(blk); return -EIO; }
         uint32_t off = 0;
         while (off < bs) {
             ext4_dir_entry_t *de = (ext4_dir_entry_t *)(blk + off);
@@ -531,7 +531,7 @@ static int ext4_dir_add(ext4_sb_info_t *sb, ext4_inode_t *di, uint32_t *dsz,
     for (uint32_t b = 0; b < nb; b++) {
         uint64_t p = ext4_block_map(sb, di, b); if (!p) continue;
         char *blk = (char *)kmalloc(bs); if (!blk) return -ENOMEM;
-        if (bcache_read_bytes(p * bs, blk, bs) < 0) { kfree(blk); return -EIO; }
+        if (bcache_read_bytes(sb->bc, p * bs, blk, bs) < 0) { kfree(blk); return -EIO; }
         uint32_t off = 0;
         while (off < bs) {
             ext4_dir_entry_t *de = (ext4_dir_entry_t *)(blk + off);
@@ -545,7 +545,7 @@ static int ext4_dir_add(ext4_sb_info_t *sb, ext4_inode_t *di, uint32_t *dsz,
                     ext4_dir_entry_t *nx = (ext4_dir_entry_t *)(blk + off + need);
                     nx->inode = 0; nx->rec_len = left; nx->name_len = 0; nx->file_type = 0;
                 }
-                bcache_write_bytes(p * bs, blk, bs); kfree(blk); return 0;
+                bcache_write_bytes(sb->bc, p * bs, blk, bs); kfree(blk); return 0;
             }
             if (de->rec_len - actual >= need) {
                 uint16_t old = de->rec_len; de->rec_len = actual;
@@ -553,7 +553,7 @@ static int ext4_dir_add(ext4_sb_info_t *sb, ext4_inode_t *di, uint32_t *dsz,
                 nx->inode = ino; nx->rec_len = old - actual;
                 nx->name_len = (uint8_t)nl; nx->file_type = ft;
                 memcpy(nx->name, name, nl);
-                bcache_write_bytes(p * bs, blk, bs); kfree(blk); return 0;
+                bcache_write_bytes(sb->bc, p * bs, blk, bs); kfree(blk); return 0;
             }
             off += de->rec_len;
         }
@@ -572,7 +572,7 @@ static int ext4_dir_add(ext4_sb_info_t *sb, ext4_inode_t *di, uint32_t *dsz,
         ext4_dir_entry_t *tail = (ext4_dir_entry_t *)(blk + need);
         tail->inode = 0; tail->rec_len = (uint16_t)(bs - need); tail->name_len = 0;
     } else de->rec_len = (uint16_t)bs;
-    bcache_write_bytes(nb_blk * bs, blk, bs); kfree(blk);
+    bcache_write_bytes(sb->bc, nb_blk * bs, blk, bs); kfree(blk);
     *dsz += bs;
     return 0;
 }
@@ -584,7 +584,7 @@ static int ext4_dir_remove(ext4_sb_info_t *sb, ext4_inode_t *di, uint32_t dsz,
     for (uint32_t b = 0; b < nb; b++) {
         uint64_t p = ext4_block_map(sb, di, b); if (!p) continue;
         char *blk = (char *)kmalloc(bs); if (!blk) return -ENOMEM;
-        if (bcache_read_bytes(p * bs, blk, bs) < 0) { kfree(blk); return -EIO; }
+        if (bcache_read_bytes(sb->bc, p * bs, blk, bs) < 0) { kfree(blk); return -EIO; }
         uint32_t off = 0, prev = 0; int hp = 0;
         while (off < bs) {
             ext4_dir_entry_t *de = (ext4_dir_entry_t *)(blk + off);
@@ -592,7 +592,7 @@ static int ext4_dir_remove(ext4_sb_info_t *sb, ext4_inode_t *di, uint32_t dsz,
             if (de->inode && de->name_len == nl && memcmp(de->name, name, nl) == 0) {
                 if (hp) ((ext4_dir_entry_t *)(blk + prev))->rec_len += de->rec_len;
                 else de->inode = 0;
-                bcache_write_bytes(p * bs, blk, bs); kfree(blk); return 0;
+                bcache_write_bytes(sb->bc, p * bs, blk, bs); kfree(blk); return 0;
             }
             prev = off; hp = 1; off += de->rec_len;
         }
@@ -775,7 +775,7 @@ static int ext4_vn_mkdir(vnode_t *dir, const char *name, int mode) {
     dotdot->rec_len = (uint16_t)(p->sb->block_size - 12);
     dotdot->name[0] = '.'; dotdot->name[1] = '.';
 
-    bcache_write_bytes(blk * p->sb->block_size, buf, p->sb->block_size);
+    bcache_write_bytes(p->sb->bc, blk * p->sb->block_size, buf, p->sb->block_size);
     kfree(buf);
 
     /* Add entry in parent directory */
@@ -907,7 +907,7 @@ static int ext4_fread(vfile_t *vf, char *buf, size_t count) {
         uint64_t phys = ext4_block_map(fc->sb, &inode, lblk);
         if (!phys) break;
 
-        int r = bcache_read_bytes(phys * bs + loff, buf + done, chunk);
+        int r = bcache_read_bytes(fc->sb->bc, phys * bs + loff, buf + done, chunk);
         if (r < 0) break;
         done += chunk;
     }
@@ -944,7 +944,7 @@ static int ext4_fwrite(vfile_t *vf, const char *buf, size_t count) {
             phys = nb;
         }
 
-        int r = bcache_write_bytes(phys * bs + loff, buf + done, chunk);
+        int r = bcache_write_bytes(fc->sb->bc, phys * bs + loff, buf + done, chunk);
         if (r < 0) break;
         done += chunk;
     }
@@ -993,7 +993,7 @@ static int ext4_freaddir(vfile_t *vf, void *dirp, size_t count) {
         if (!p) continue;
         char *blk = (char *)kmalloc(bs);
         if (!blk) break;
-        if (bcache_read_bytes(p * bs, blk, bs) < 0) { kfree(blk); break; }
+        if (bcache_read_bytes(fc->sb->bc, p * bs, blk, bs) < 0) { kfree(blk); break; }
 
         uint32_t start = (b == (uint32_t)(fc->dir_off / bs)) ? (uint32_t)(fc->dir_off % bs) : 0;
         uint32_t off = start;
@@ -1077,10 +1077,10 @@ static vnode_t *ext4_make_vnode(ext4_sb_info_t *sb, uint32_t ino, uint32_t sz,
 
 static ext4_sb_info_t g_ext4_sb;
 
-vnode_t *ext4_mount(block_dev_t *dev) {
+vnode_t *ext4_mount(bcache_t *bc) {
     ext4_superblock_t sb;
     /* Superblock is at byte offset 1024 */
-    if (bcache_read_bytes(1024, &sb, sizeof(sb)) < 0) {
+    if (bcache_read_bytes(bc, 1024, &sb, sizeof(sb)) < 0) {
         printf("[EXT4] Failed to read superblock\n");
         return NULL;
     }
@@ -1114,7 +1114,7 @@ vnode_t *ext4_mount(block_dev_t *dev) {
     g_ext4_sb.desc_size     = desc_size;
     g_ext4_sb.s_feature_incompat = sb.s_feature_incompat;
     g_ext4_sb.s_feature_ro_compat = sb.s_feature_ro_compat;
-    g_ext4_sb.dev          = dev;
+    g_ext4_sb.bc           = bc;
 
     /* Block group descriptor table starts in the block after the superblock */
     uint64_t gd_start;
@@ -1132,7 +1132,7 @@ vnode_t *ext4_mount(block_dev_t *dev) {
         return NULL;
     }
     memset(g_ext4_sb.group_descs, 0, gd_total);
-    if (bcache_read_bytes(gd_start, g_ext4_sb.group_descs, gd_total) < 0) {
+    if (bcache_read_bytes(bc, gd_start, g_ext4_sb.group_descs, gd_total) < 0) {
         printf("[EXT4] Failed to read group descriptors\n");
         kfree(g_ext4_sb.group_descs);
         return NULL;
@@ -1160,7 +1160,7 @@ vnode_t *ext4_mount(block_dev_t *dev) {
 }
 
 void ext4_unmount(vnode_t *root) {
-    bcache_sync();
+    bcache_sync(g_ext4_sb.bc);
     if (root && root->ops && root->ops->release) root->ops->release(root);
     if (g_ext4_sb.group_descs) {
         kfree(g_ext4_sb.group_descs);
