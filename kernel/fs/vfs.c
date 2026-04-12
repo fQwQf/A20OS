@@ -11,7 +11,7 @@
  */
 
 #include "vfs.h"
-#include "fs.h"      /* ramfs — existing implementation */
+#include "fs.h"
 #include "fat32.h"
 #include "ext4.h"
 #include "mm.h"
@@ -367,7 +367,7 @@ static const char *strip_mount_prefix(const char *path, const mount_t *mnt) {
  * VFS path resolution → vnode
  * ============================================================ */
 
-static char g_cwd[MAX_PATH_LEN] = "/";
+
 
 /* Resolve an absolute path within a vnode tree */
 static vnode_t *vnode_lookup_path(vnode_t *root, const char *path) {
@@ -416,7 +416,9 @@ static vnode_t *vnode_lookup_path(vnode_t *root, const char *path) {
 }
 
 vnode_t *vfs_resolve(const char *path) {
-    return vfs_resolve_at(path, g_cwd);
+    task_t *cur = proc_current();
+    const char *cwd = (cur && cur->cwd[0]) ? cur->cwd : "/";
+    return vfs_resolve_at(path, cwd);
 }
 
 vnode_t *vfs_resolve_at(const char *path, const char *cwd) {
@@ -915,22 +917,18 @@ int vfs_fcntl(int fd, int cmd, long arg) {
  * ============================================================ */
 
 int vfs_mount(const char *dev, const char *path, const char *fstype, int flags) {
-    (void)flags;
+    (void)dev; (void)path; (void)fstype; (void)flags;
+    printf("[VFS] vfs_mount: use vfs_mount_bc() for block filesystems\n");
+    return -EINVAL;
+}
+
+int vfs_mount_bc(const char *path, const char *fstype, bcache_t *bc) {
     if (g_nmounts >= MAX_MOUNTS) return -ENOMEM;
 
-    if (strcmp(fstype, "ramfs") == 0 || strcmp(fstype, "tmpfs") == 0) {
-        /* ramfs is already the root */
-        return 0;
-    }
-
     if (strcmp(fstype, "fat32") == 0 || strcmp(fstype, "vfat") == 0) {
-        block_dev_t *bdev = virtio_blk_get_dev();
-        if (!bdev) { printf("[VFS] No block device for FAT32 mount\n"); return -ENODEV; }
+        if (!bc) { printf("[VFS] No bcache for FAT32 mount\n"); return -ENODEV; }
 
-        /* Initialize block cache if not done */
-        bcache_init(bdev);
-
-        vnode_t *root = fat32_mount(bdev);
+        vnode_t *root = fat32_mount(bc);
         if (!root) return -EIO;
 
         mount_t *mnt = &g_mounts[g_nmounts++];
@@ -940,20 +938,16 @@ int vfs_mount(const char *dev, const char *path, const char *fstype, int flags) 
         mnt->root  = root;
         mnt->fs_data = NULL;
 
-        /* Set vnode mount back-pointer */
         root->mnt = mnt;
 
-        printf("[VFS] Mounted FAT32 from %s at %s\n", dev ? dev : "virtio0", path);
+        printf("[VFS] Mounted FAT32 at %s\n", path);
         return 0;
     }
 
     if (strcmp(fstype, "ext4") == 0) {
-        block_dev_t *bdev = virtio_blk_get_dev();
-        if (!bdev) { printf("[VFS] No block device for ext4 mount\n"); return -ENODEV; }
+        if (!bc) { printf("[VFS] No bcache for ext4 mount\n"); return -ENODEV; }
 
-        bcache_init(bdev);
-
-        vnode_t *root = ext4_mount(bdev);
+        vnode_t *root = ext4_mount(bc);
         if (!root) return -EIO;
 
         mount_t *mnt = &g_mounts[g_nmounts++];
@@ -965,7 +959,7 @@ int vfs_mount(const char *dev, const char *path, const char *fstype, int flags) 
 
         root->mnt = mnt;
 
-        printf("[VFS] Mounted ext4 from %s at %s\n", dev ? dev : "virtio0", path);
+        printf("[VFS] Mounted ext4 at %s\n", path);
         return 0;
     }
 
@@ -1028,22 +1022,6 @@ void vfs_init(void) {
     mnt->root = ramfs_make_vnode(mnt, fs_get_root());
 
     printf("[VFS] Initialized (root=ramfs)\n");
-
-    /* Try to mount block device filesystem if virtio-blk is available */
-    if (virtio_blk_ready()) {
-        /* Create /mnt in ramfs */
-        fs_mkdir("/mnt");
-        /* Auto-detect filesystem type by probing the superblock */
-        bcache_init(virtio_blk_get_dev());
-        uint16_t magic = 0;
-        /* ext4 magic (0xEF53) lives at offset 56 within the superblock,
-         * which itself starts at byte 1024 on disk */
-        if (bcache_read_bytes(1024 + 56, &magic, 2) == 0 && magic == 0xEF53) {
-            vfs_mount(NULL, "/mnt", "ext4", 0);
-        } else {
-            vfs_mount(NULL, "/mnt", "fat32", 0);
-        }
-    }
 
     /* Mount procfs at /proc */
     {

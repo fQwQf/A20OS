@@ -44,7 +44,7 @@ static uint64_t fat_entry_offset(fat32_sb_t *sb, uint32_t cluster) {
 static uint32_t fat_read(fat32_sb_t *sb, uint32_t cluster) {
     uint32_t val;
     uint64_t off = fat_entry_offset(sb, cluster);
-    bcache_read_bytes(off, &val, 4);
+    bcache_read_bytes(sb->bc, off, &val, 4);
     return val & 0x0FFFFFFF; /* mask upper nibble */
 }
 
@@ -53,9 +53,9 @@ static void fat_write(fat32_sb_t *sb, uint32_t cluster, uint32_t next) {
     /* Read-modify-write to preserve top nibble */
     uint32_t val;
     uint64_t off = fat_entry_offset(sb, cluster);
-    bcache_read_bytes(off, &val, 4);
+    bcache_read_bytes(sb->bc, off, &val, 4);
     val = (val & 0xF0000000) | (next & 0x0FFFFFFF);
-    bcache_write_bytes(off, &val, 4);
+    bcache_write_bytes(sb->bc, off, &val, 4);
 }
 
 /* Follow cluster chain, reading N bytes at file offset */
@@ -80,7 +80,7 @@ static int fat32_chain_read(fat32_sb_t *sb, uint32_t first_cluster,
         size_t   chunk = len - done;
         if (chunk > avail) chunk = avail;
 
-        int r = bcache_read_bytes(base, dst + done, chunk);
+        int r = bcache_read_bytes(sb->bc, base, dst + done, chunk);
         if (r < 0) return (int)done;
 
         done        += chunk;
@@ -100,7 +100,7 @@ static uint32_t fat32_alloc_cluster(fat32_sb_t *sb) {
             char zeros[FAT32_SECTOR_SIZE];
             memset(zeros, 0, FAT32_SECTOR_SIZE);
             for (uint32_t s = 0; s < sb->sectors_per_cluster; s++) {
-                bcache_write_bytes(base + s * FAT32_SECTOR_SIZE, zeros, FAT32_SECTOR_SIZE);
+                bcache_write_bytes(sb->bc, base + s * FAT32_SECTOR_SIZE, zeros, FAT32_SECTOR_SIZE);
             }
             return c;
         }
@@ -308,7 +308,7 @@ static int fat32_vn_mkdir(vnode_t *dir, const char *name, int mode) {
     dot.fst_clus_hi = (uint16_t)(new_cluster >> 16);
     dot.fst_clus_lo = (uint16_t)(new_cluster & 0xFFFF);
     uint64_t new_base = cluster_byte_offset(sb, new_cluster);
-    bcache_write_bytes(new_base, &dot, sizeof(dot));
+    bcache_write_bytes(sb->bc, new_base, &dot, sizeof(dot));
 
     memset(&dot, 0, sizeof(dot));
     memset(dot.name, ' ', 11);
@@ -316,7 +316,7 @@ static int fat32_vn_mkdir(vnode_t *dir, const char *name, int mode) {
     dot.attr = FAT_ATTR_DIRECTORY;
     dot.fst_clus_hi = (uint16_t)(p->first_cluster >> 16);
     dot.fst_clus_lo = (uint16_t)(p->first_cluster & 0xFFFF);
-    bcache_write_bytes(new_base + 32, &dot, sizeof(dot));
+    bcache_write_bytes(sb->bc, new_base + 32, &dot, sizeof(dot));
 
     /* Write short 8.3 entry in parent directory */
     /* Find free slot in parent dir */
@@ -350,7 +350,7 @@ static int fat32_vn_mkdir(vnode_t *dir, const char *name, int mode) {
                 cluster = fat_read(sb, cluster);
             }
             uint64_t write_off = cluster_byte_offset(sb, cluster) + remaining;
-            bcache_write_bytes(write_off, &nde, sizeof(nde));
+            bcache_write_bytes(sb->bc, write_off, &nde, sizeof(nde));
             return 0;
         }
         off += 32;
@@ -396,7 +396,7 @@ static int fat32_vn_create(vnode_t *dir, const char *name, int mode, vnode_t **o
                 cluster = fat_read(sb, cluster);
             }
             uint64_t write_off = cluster_byte_offset(sb, cluster) + remaining;
-            bcache_write_bytes(write_off, &nde, sizeof(nde));
+            bcache_write_bytes(sb->bc, write_off, &nde, sizeof(nde));
 
             if (out) {
                 *out = fat32_make_vnode(sb, new_cluster, 0, 0, dir, (uint64_t)new_cluster);
@@ -429,7 +429,7 @@ static int fat32_vn_unlink(vnode_t *dir, const char *name) {
     }
     uint64_t off = cluster_byte_offset(sb, dc) + rem;
     uint8_t deleted = 0xE5;
-    bcache_write_bytes(off, &deleted, 1);
+    bcache_write_bytes(sb->bc, off, &deleted, 1);
 
     /* Free cluster chain */
     while (cluster < FAT32_CLUSTER_END) {
@@ -554,7 +554,7 @@ static int fat32_fwrite(vfile_t *vf, const char *buf, size_t count) {
         if (chunk > avail) chunk = avail;
 
         uint64_t base = cluster_byte_offset(sb, cluster) + off;
-        int r = bcache_write_bytes(base, src + done, chunk);
+        int r = bcache_write_bytes(sb->bc, base, src + done, chunk);
         if (r < 0) break;
 
         done += chunk;
@@ -670,9 +670,10 @@ static vfile_ops_t g_fat32_fops = {
 
 static fat32_sb_t g_sb;
 
-vnode_t *fat32_mount(block_dev_t *dev) {
+vnode_t *fat32_mount(bcache_t *bc) {
+    g_sb.bc = bc;
     fat32_bpb_t bpb;
-    if (bcache_read_bytes(0, &bpb, sizeof(bpb)) < 0) {
+    if (bcache_read_bytes(g_sb.bc, 0, &bpb, sizeof(bpb)) < 0) {
         printf("[FAT32] Failed to read boot sector\n");
         return NULL;
     }
@@ -695,7 +696,7 @@ vnode_t *fat32_mount(block_dev_t *dev) {
     g_sb.bytes_per_cluster  = bpb.sectors_per_cluster * bpb.bytes_per_sector;
     g_sb.total_clusters     = (bpb.total_sectors_32 - g_sb.first_data_sector)
                                / bpb.sectors_per_cluster;
-    g_sb.dev                = dev;
+
 
     printf("[FAT32] Mounted: cluster=%d sectors, FAT starts @%d, data @%d, root_cluster=%d\n",
            bpb.sectors_per_cluster,
@@ -709,7 +710,7 @@ vnode_t *fat32_mount(block_dev_t *dev) {
 }
 
 void fat32_unmount(vnode_t *root) {
-    bcache_sync();
+    bcache_sync(g_sb.bc);
     if (root && root->ops && root->ops->release) root->ops->release(root);
 }
 
