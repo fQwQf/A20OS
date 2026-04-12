@@ -84,6 +84,27 @@ fs_img: user_apps
 	@printf 'Hello from A20OS FAT32!\nThis file is on the FAT32 filesystem at /mnt/test.txt\n' | mcopy -i fs.img - ::/test.txt
 	cp fs.img fs_test.img
 
+ext4_img: user_apps
+	@echo "Building ext4 image..."
+	dd if=/dev/zero of=fs.img bs=1M count=32
+	mkfs.ext4 -F -O ^has_journal,extent,huge_file,flex_bg,uninit_bg,dir_index fs.img
+	mount_fs_img=$$(mktemp -d) && \
+	sudo mount -o loop fs.img "$$mount_fs_img" && \
+	sudo cp user/build/init "$$mount_fs_img/init" && \
+	sudo cp user/build/sh "$$mount_fs_img/sh" && \
+	sudo mkdir -p "$$mount_fs_img/bin" && \
+	sudo cp user/build/ls "$$mount_fs_img/bin/ls" && \
+	sudo cp user/build/cat "$$mount_fs_img/bin/cat" && \
+	sudo cp user/build/mkdir "$$mount_fs_img/bin/mkdir" && \
+	sudo cp user/build/rm "$$mount_fs_img/bin/rm" && \
+	sudo cp user/build/cp "$$mount_fs_img/bin/cp" && \
+	sudo cp user/build/ps "$$mount_fs_img/bin/ps" && \
+	sudo cp user/build/aed "$$mount_fs_img/bin/aed" && \
+	sudo bash -c 'printf "Hello from A20OS ext4!\nThis file is on the ext4 filesystem at /mnt/test.txt\n" > "$$mount_fs_img/test.txt"' && \
+	sudo umount "$$mount_fs_img" && \
+	rmdir "$$mount_fs_img"
+	cp fs.img fs_test.img
+
 $(KERNEL_BIN): $(KERNEL_ELF)
 	$(CROSS_PREFIX)objcopy -O binary $< $@
 

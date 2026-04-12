@@ -18,6 +18,7 @@
 /* Filesystem type IDs */
 #define FS_TYPE_RAMFS    1
 #define FS_TYPE_FAT32    2
+#define FS_TYPE_EXT4     3
 #define FS_TYPE_PROCFS   4
 
 /* ---- Forward declarations ---- */
