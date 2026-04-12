@@ -28,6 +28,9 @@ struct vfs_ops;
 struct vnode_ops;
 struct mount;
 
+struct bcache;
+struct block_dev;
+
 /* ---- stat structure (Linux compatible) ---- */
 typedef struct kstat {
     uint64_t st_dev;
@@ -160,6 +163,7 @@ int      vfs_getcwd(char *buf, size_t size);
 
 /* Mount */
 int      vfs_mount(const char *dev, const char *path, const char *fstype, int flags);
+int      vfs_mount_bc(const char *path, const char *fstype, struct bcache *bc);
 int      vfs_umount(const char *path);
 
 /* Pipe */
