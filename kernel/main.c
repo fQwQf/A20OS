@@ -16,19 +16,20 @@
 #include "virtio_blk.h"
 #include "block_cache.h"
 #include "klog.h"
+#include "arch_ops.h"
 
 /* Forward declarations */
 void init_kthread(void);
 
 void kernel_main(void) {
+    uart_init();
+
     printf("\n");
     printf("======================================\n");
     printf("    A20OS Kernel \n");
     printf("======================================\n");
     printf("Initializing system...\n");
-
     /* Initialize subsystems */
-    uart_init();
     printf("[INIT] UART initialized\n");
 
     timer_init();
@@ -37,11 +38,11 @@ void kernel_main(void) {
     plic_init();
     printf("[INIT] PLIC initialized\n");
 
-    mm_init();
-    printf("[INIT] Memory manager initialized\n");
+    // mm_init();
+    // printf("[INIT] Memory manager initialized\n");
 
-    vfs_init();
-    printf("[INIT] VFS initialized\n");
+    // vfs_init();
+    // printf("[INIT] VFS initialized\n");
 
     /* Initialize virtio-blk for block filesystem */
     if (virtio_blk_init(0) == 0) {
@@ -72,15 +73,15 @@ void kernel_main(void) {
         printf("[INIT] Warning: Virtio-blk 1 initialization failed\n");
     }
 
-    /* Initialize process management */
-    proc_init();
-    printf("[INIT] Process manager initialized\n");
+    // /* Initialize process management */
+    // proc_init();
+    // printf("[INIT] Process manager initialized\n");
 
-    /* Create init kthread */
-    int ret = proc_alloc(init_kthread);
-    if (ret < 0) {
-        panic("Failed to create init_kthread");
-    }
+    // /* Create init kthread */
+    // int ret = proc_alloc(init_kthread);
+    // if (ret < 0) {
+    //     panic("Failed to create init_kthread");
+    // }
 
     printf("[INIT] Starting scheduler...\n");
     printf("[INIT] System ready\n\n");
@@ -106,7 +107,7 @@ void init_kthread(void) {
     kdebug("[INIT] Init process started (pid=%d)\n", cur ? cur->pid : 0);
 
     for (int i = 0; i < 1000000; i++) {
-        __asm__ volatile("nop");
+        arch_cpu_relax();
     }
 
     kdebug("[INIT] Loading init program...\n");

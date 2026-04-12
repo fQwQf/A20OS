@@ -7,31 +7,31 @@
 #include "stdio.h"
 #include "string.h"
 #include "panic.h"
-#include "defs.h"
 #include "consts.h"
 #include "klog.h"
+#include "arch_ops.h"
 
 void trap_init(void) {
-    w_stvec((uint64_t)__trap_from_kernel);
-    w_sscratch(0);
+    arch_trap_vector_set((uint64_t)__trap_from_kernel);
+    arch_trap_scratch_set(0);
 }
 
 static void handle_irq(uint64_t irq, uint64_t sepc, int from_user) {
-    if (irq == IRQ_S_TIMER) {
+    if (irq == ARCH_IRQ_CAUSE_TIMER) {
         timer_set_interval(TICKS_PER_SEC / 100);
         if (from_user) {
             task_t *cur = proc_current();
             if (cur) cur->total_time++;
         }
         proc_yield();
-    } else if (irq == IRQ_S_EXT) {
+    } else if (irq == ARCH_IRQ_CAUSE_EXTERNAL) {
         uint32_t irq_id = plic_claim();
         if (irq_id == UART0_IRQ)
             uart_handle_irq();
         if (irq_id != 0)
             plic_complete(irq_id);
-    } else if (irq == IRQ_S_SOFT) {
-        w_sip(r_sip() & ~SIE_SSIE);
+    } else if (irq == ARCH_IRQ_CAUSE_SOFT) {
+        arch_softirq_clear();
         timer_set_interval(TICKS_PER_SEC / 100);
         proc_yield();
     } else {
@@ -40,15 +40,15 @@ static void handle_irq(uint64_t irq, uint64_t sepc, int from_user) {
 }
 
 void trap_handler(trap_context_t *ctx) {
-    uint64_t scause = r_scause();
-    uint64_t stval = r_stval();
-    uint64_t sepc = r_sepc();
+    uint64_t scause = arch_trap_cause();
+    uint64_t stval = arch_trap_tval();
+    uint64_t sepc = arch_trap_epc();
 
-    if (scause & CAUSE_INTR_MASK) {
-        handle_irq(scause & CAUSE_CODE_MASK, sepc, 1);
+    if (scause & ARCH_TRAP_INTERRUPT_MASK) {
+        handle_irq(scause & ARCH_TRAP_CODE_MASK, sepc, 1);
     } else {
-        uint64_t code = scause & CAUSE_CODE_MASK;
-        if (code == CAUSE_ECALL_U) {
+        uint64_t code = scause & ARCH_TRAP_CODE_MASK;
+        if (code == ARCH_TRAP_ECALL_FROM_U) {
             ctx->sepc += 4;
             syscall_dispatch(ctx);
         } else {
@@ -60,15 +60,15 @@ void trap_handler(trap_context_t *ctx) {
 }
 
 void kernel_trap_handler(trap_context_t *ctx) {
-    uint64_t scause = r_scause();
-    uint64_t sepc = r_sepc();
-    uint64_t stval = r_stval();
+    uint64_t scause = arch_trap_cause();
+    uint64_t sepc = arch_trap_epc();
+    uint64_t stval = arch_trap_tval();
 
-    if (scause & CAUSE_INTR_MASK) {
-        handle_irq(scause & CAUSE_CODE_MASK, sepc, 0);
+    if (scause & ARCH_TRAP_INTERRUPT_MASK) {
+        handle_irq(scause & ARCH_TRAP_CODE_MASK, sepc, 0);
     } else {
-        uint64_t code = scause & CAUSE_CODE_MASK;
-        if (code == CAUSE_ECALL_U) {
+        uint64_t code = scause & ARCH_TRAP_CODE_MASK;
+        if (code == ARCH_TRAP_ECALL_FROM_U) {
             ctx->sepc += 4;
         } else {
             kdebug("KERNEL TRAP: scause=0x%lx sepc=0x%lx stval=0x%lx\n",

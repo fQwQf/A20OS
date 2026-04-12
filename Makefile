@@ -3,6 +3,11 @@
 # Architecture selection
 ARCH ?= riscv64
 MODE ?= release
+BRINGUP ?= 0
+
+# Directories
+KERNEL_DIR = kernel
+INCLUDE_DIR = $(KERNEL_DIR)/include
 
 # Compiler and tools
 ifeq ($(ARCH), riscv64)
@@ -12,46 +17,74 @@ ifeq ($(ARCH), riscv64)
     QEMU = qemu-system-riscv64
     QEMU_FLAGS = -machine virt -m 128M -nographic -smp 1 -bios default -global virtio-mmio.force-legacy=false
 else ifeq ($(ARCH), loongarch64)
-    CROSS_PREFIX = loongarch64-unknown-elf-
+    CROSS_PREFIX = loongarch64-linux-gnu-
     ARCH_CFLAGS = -march=loongarch64 -mabi=lp64d
     ARCH_LDFLAGS =
     QEMU = qemu-system-loongarch64
     QEMU_FLAGS = -machine virt -m 128M -nographic -smp 1
+else
+$(error Unsupported ARCH='$(ARCH)')
 endif
 
+# In bringup mode, boot kernel only (no fs image dependency).
+ifneq ($(BRINGUP),1)
 QEMU_FLAGS += -drive file=fs.img,if=none,format=raw,id=x0 -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0
 QEMU_FLAGS += -drive file=ext4.img,if=none,format=raw,id=x1 -device virtio-blk-device,drive=x1,bus=virtio-mmio-bus.1
 
 
-# Directories
-KERNEL_DIR = kernel
-INCLUDE_DIR = $(KERNEL_DIR)/include
+
 
 # Compiler flags
 CFLAGS = -Wall -Wextra -O2 -ffreestanding -nostdlib \
          -nostartfiles -fno-builtin -fno-common -std=gnu99 \
-         -I$(INCLUDE_DIR) $(ARCH_CFLAGS) \
+         -I$(INCLUDE_DIR) \
+         -I$(KERNEL_DIR)/arch/$(ARCH)/include \
+         $(ARCH_CFLAGS) \
          -D$(shell echo $(ARCH) | tr a-z A-Z) \
          -DCONFIG_$(shell echo $(ARCH) | tr a-z A-Z)
+
+# Bringup compile mode marker for conditional code.
+ifeq ($(BRINGUP),1)
+CFLAGS += -DBRINGUP
+endif
 
 LDFLAGS = -nostdlib -nostartfiles -T $(KERNEL_DIR)/arch/$(ARCH)/ldscript.ld $(ARCH_LDFLAGS)
 
 # Source files
-KERNEL_SRC = $(wildcard $(KERNEL_DIR)/*.c) \
-             $(wildcard $(KERNEL_DIR)/lib/*.c) \
-             $(wildcard $(KERNEL_DIR)/mm/*.c) \
-             $(wildcard $(KERNEL_DIR)/proc/*.c) \
-             $(wildcard $(KERNEL_DIR)/fs/*.c) \
-             $(wildcard $(KERNEL_DIR)/drv/*.c) \
-             $(wildcard $(KERNEL_DIR)/syscall/*.c) \
-             $(wildcard $(KERNEL_DIR)/trap/*.c) \
-             $(wildcard $(KERNEL_DIR)/shell/*.c)
+DRV_SRC = $(wildcard $(KERNEL_DIR)/drv/*.c)
+ARCH_SRC = $(wildcard $(KERNEL_DIR)/arch/$(ARCH)/*.c)
+ARCH_SRC_NO_STUBS = $(filter-out $(KERNEL_DIR)/arch/$(ARCH)/bringup_stubs.c,$(ARCH_SRC))
+
+KERNEL_SRC_FULL = $(wildcard $(KERNEL_DIR)/*.c) \
+                  $(wildcard $(KERNEL_DIR)/lib/*.c) \
+                  $(wildcard $(KERNEL_DIR)/mm/*.c) \
+                  $(wildcard $(KERNEL_DIR)/proc/*.c) \
+                  $(wildcard $(KERNEL_DIR)/fs/*.c) \
+                  $(DRV_SRC) \
+                  $(wildcard $(KERNEL_DIR)/syscall/*.c) \
+                  $(wildcard $(KERNEL_DIR)/trap/*.c) \
+                  $(wildcard $(KERNEL_DIR)/shell/*.c) \
+                  $(ARCH_SRC_NO_STUBS)
+
+KERNEL_SRC_BRINGUP = $(KERNEL_DIR)/main.c \
+                     $(KERNEL_DIR)/lib/printf.c \
+                     $(KERNEL_DIR)/lib/string.c \
+                     $(KERNEL_DIR)/drv/uart.c \
+                     $(KERNEL_DIR)/drv/clint.c \
+                     $(KERNEL_DIR)/drv/plic.c \
+                     $(ARCH_SRC_NO_STUBS) \
+                     $(KERNEL_DIR)/arch/$(ARCH)/bringup_stubs.c
+
+ifeq ($(BRINGUP),1)
+KERNEL_SRC = $(KERNEL_SRC_BRINGUP)
+ASM_SRC = $(KERNEL_DIR)/arch/$(ARCH)/entry.S
+else
+KERNEL_SRC = $(KERNEL_SRC_FULL)
+ASM_SRC = $(wildcard $(KERNEL_DIR)/arch/$(ARCH)/*.S)
+endif
 
 # Object files
 KERNEL_OBJ = $(KERNEL_SRC:.c=.o)
-
-# ASM sources
-ASM_SRC = $(wildcard $(KERNEL_DIR)/arch/$(ARCH)/*.S)
 ASM_OBJ = $(ASM_SRC:.S=.o)
 
 # Kernel image
@@ -59,10 +92,13 @@ KERNEL_ELF = kernel.elf
 KERNEL_BIN = kernel.bin
 
 # Targets
-.PHONY: all clean run-riscv64 run-loongarch64 user_apps fs_img
+.PHONY: all clean run-riscv64 run-loongarch64 user_apps fs_img kernel-only
 
 all: $(KERNEL_BIN) user_apps fs_img ext4_img_only
 	@echo "Build complete: $(KERNEL_BIN), fs.img and ext4.img"
+
+kernel-only: $(KERNEL_BIN)
+	@echo "Build complete: $(KERNEL_BIN)"
 
 user_apps:
 	$(MAKE) -C user ARCH=$(ARCH)
@@ -120,16 +156,25 @@ $(KERNEL_ELF): $(KERNEL_OBJ) $(ASM_OBJ)
 	$(CROSS_PREFIX)gcc $(CFLAGS) -c $< -o $@
 
 clean:
-	rm -f $(KERNEL_OBJ) $(ASM_OBJ) $(KERNEL_ELF) $(KERNEL_BIN) fs.img ext4.img
+	find $(KERNEL_DIR) -name '*.o' -delete
+	rm -f $(KERNEL_ELF) $(KERNEL_BIN) fs.img
 	$(MAKE) -C user clean
 
 run-riscv64:
+ifeq ($(BRINGUP),1)
+	$(MAKE) ARCH=riscv64 BRINGUP=1 kernel-only
+else
 	$(MAKE) ARCH=riscv64 all
+endif
 	$(QEMU) $(QEMU_FLAGS) -kernel $(KERNEL_BIN)
 
 run-loongarch64:
+ifeq ($(BRINGUP),1)
+	$(MAKE) ARCH=loongarch64 BRINGUP=1 kernel-only
+else
 	$(MAKE) ARCH=loongarch64 all
-	$(QEMU) $(QEMU_FLAGS) -kernel $(KERNEL_BIN)
+endif
+	$(QEMU) $(QEMU_FLAGS) -kernel $(KERNEL_ELF)
 
 # --- Debug Targets ---
 

@@ -1,11 +1,11 @@
 #include "plic.h"
 #include "consts.h"
-#include "defs.h"
+#include "arch_ops.h"
 
 void plic_init(void) {
     *(volatile uint32_t *)(PLIC_PRIORITY + UART0_IRQ * 4) = 1;
     plic_init_hart();
-    w_sie(r_sie() | SIE_SEIE);
+    arch_irq_enable_external();
 }
 
 void plic_init_hart(void) {
