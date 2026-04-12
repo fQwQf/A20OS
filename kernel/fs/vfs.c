@@ -13,6 +13,7 @@
 #include "vfs.h"
 #include "fs.h"      /* ramfs — existing implementation */
 #include "fat32.h"
+#include "ext4.h"
 #include "mm.h"
 #include "proc.h"
 #include "string.h"
@@ -470,6 +471,7 @@ vnode_t *vfs_resolve_at(const char *path, const char *cwd) {
 
 /* Forward declaration */
 extern vfile_t *fat32_open_vnode(vnode_t *vn, int flags);
+extern vfile_t *ext4_open_vnode(vnode_t *vn, int flags);
 
 static vfile_t *ramfs_open_vnode(vnode_t *vn, int flags) {
     vfile_t *vf = (vfile_t *)kmalloc(sizeof(vfile_t));
@@ -551,6 +553,8 @@ int vfs_open(const char *path, int flags, int mode) {
     vfile_t *vf = NULL;
     if (mnt->type == FS_TYPE_FAT32) {
         vf = fat32_open_vnode(vn, flags);
+    } else if (mnt->type == FS_TYPE_EXT4) {
+        vf = ext4_open_vnode(vn, flags);
     } else if (mnt->type == FS_TYPE_RAMFS) {
         vf = ramfs_open_vnode(vn, flags);
     }
@@ -943,6 +947,28 @@ int vfs_mount(const char *dev, const char *path, const char *fstype, int flags) 
         return 0;
     }
 
+    if (strcmp(fstype, "ext4") == 0) {
+        block_dev_t *bdev = virtio_blk_get_dev();
+        if (!bdev) { printf("[VFS] No block device for ext4 mount\n"); return -ENODEV; }
+
+        bcache_init(bdev);
+
+        vnode_t *root = ext4_mount(bdev);
+        if (!root) return -EIO;
+
+        mount_t *mnt = &g_mounts[g_nmounts++];
+        strncpy(mnt->path, path, MAX_PATH_LEN - 1);
+        mnt->path[MAX_PATH_LEN - 1] = '\0';
+        mnt->type  = FS_TYPE_EXT4;
+        mnt->root  = root;
+        mnt->fs_data = NULL;
+
+        root->mnt = mnt;
+
+        printf("[VFS] Mounted ext4 from %s at %s\n", dev ? dev : "virtio0", path);
+        return 0;
+    }
+
     printf("[VFS] Unknown fstype: %s\n", fstype);
     return -EINVAL;
 }
@@ -952,6 +978,8 @@ int vfs_umount(const char *path) {
         if (strcmp(g_mounts[i].path, path) == 0) {
             if (g_mounts[i].type == FS_TYPE_FAT32) {
                 fat32_unmount(g_mounts[i].root);
+            } else if (g_mounts[i].type == FS_TYPE_EXT4) {
+                ext4_unmount(g_mounts[i].root);
             }
             /* Compact mount table */
             for (int j = i; j < g_nmounts - 1; j++) g_mounts[j] = g_mounts[j + 1];
@@ -1001,11 +1029,20 @@ void vfs_init(void) {
 
     printf("[VFS] Initialized (root=ramfs)\n");
 
-    /* Try to mount FAT32 if virtio-blk is available */
+    /* Try to mount block device filesystem if virtio-blk is available */
     if (virtio_blk_ready()) {
         /* Create /mnt in ramfs */
         fs_mkdir("/mnt");
-        vfs_mount(NULL, "/mnt", "fat32", 0);
+        /* Auto-detect filesystem type by probing the superblock */
+        bcache_init(virtio_blk_get_dev());
+        uint16_t magic = 0;
+        /* ext4 magic (0xEF53) lives at offset 56 within the superblock,
+         * which itself starts at byte 1024 on disk */
+        if (bcache_read_bytes(1024 + 56, &magic, 2) == 0 && magic == 0xEF53) {
+            vfs_mount(NULL, "/mnt", "ext4", 0);
+        } else {
+            vfs_mount(NULL, "/mnt", "fat32", 0);
+        }
     }
 
     /* Mount procfs at /proc */

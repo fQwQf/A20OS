@@ -14,6 +14,7 @@
 #include "panic.h"
 #include "vfs.h"
 #include "virtio_blk.h"
+#include "block_cache.h"
 #include "klog.h"
 
 /* Forward declarations */
@@ -42,11 +43,19 @@ void kernel_main(void) {
     vfs_init();
     printf("[INIT] VFS initialized\n");
 
-    /* Initialize virtio-blk for FAT32 filesystem */
+    /* Initialize virtio-blk for block filesystem */
     if (virtio_blk_init(0) == 0) {
         printf("[INIT] Virtio-blk initialized\n");
         fs_mkdir("/mnt");
-        vfs_mount(NULL, "/mnt", "fat32", 0);
+        /* Auto-detect: probe for ext4 superblock, fall back to FAT32 */
+        uint16_t fs_magic = 0;
+        bcache_init(virtio_blk_get_dev());
+        bcache_read_bytes(1024 + 56, &fs_magic, 2);
+        if (fs_magic == 0xEF53) {
+            vfs_mount(NULL, "/mnt", "ext4", 0);
+        } else {
+            vfs_mount(NULL, "/mnt", "fat32", 0);
+        }
     } else {
         printf("[INIT] Warning: Virtio-blk initialization failed\n");
     }
