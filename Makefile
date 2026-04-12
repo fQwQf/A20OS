@@ -80,6 +80,7 @@ fs_img: user_apps
 	mcopy -i fs.img user/build/rm ::/bin/rm
 	mcopy -i fs.img user/build/cp ::/bin/cp
 	mcopy -i fs.img user/build/ps ::/bin/ps
+	mcopy -i fs.img user/build/aed ::/bin/aed
 	@printf 'Hello from A20OS FAT32!\nThis file is on the FAT32 filesystem at /mnt/test.txt\n' | mcopy -i fs.img - ::/test.txt
 	cp fs.img fs_test.img
 
