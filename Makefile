@@ -8,6 +8,7 @@ BRINGUP ?= 0
 # Directories
 KERNEL_DIR = kernel
 INCLUDE_DIR = $(KERNEL_DIR)/include
+ARCH_DIR = $(KERNEL_DIR)/arch/$(ARCH)
 
 # Compiler and tools
 ifeq ($(ARCH), riscv64)
@@ -38,7 +39,7 @@ QEMU_FLAGS += -drive file=ext4.img,if=none,format=raw,id=x1 -device virtio-blk-d
 CFLAGS = -Wall -Wextra -O2 -ffreestanding -nostdlib \
          -nostartfiles -fno-builtin -fno-common -std=gnu99 \
          -I$(INCLUDE_DIR) \
-         -I$(KERNEL_DIR)/arch/$(ARCH)/include \
+         -I$(ARCH_DIR)/include \
          $(ARCH_CFLAGS) \
          -D$(shell echo $(ARCH) | tr a-z A-Z) \
          -DCONFIG_$(shell echo $(ARCH) | tr a-z A-Z)
@@ -48,39 +49,42 @@ ifeq ($(BRINGUP),1)
 CFLAGS += -DBRINGUP
 endif
 
-LDFLAGS = -nostdlib -nostartfiles -T $(KERNEL_DIR)/arch/$(ARCH)/ldscript.ld $(ARCH_LDFLAGS)
+LDFLAGS = -nostdlib -nostartfiles -T $(ARCH_DIR)/boot/ldscript.ld $(ARCH_LDFLAGS)
 
 # Source files
-DRV_SRC = $(wildcard $(KERNEL_DIR)/drv/*.c)
-ARCH_SRC = $(wildcard $(KERNEL_DIR)/arch/$(ARCH)/*.c)
-ARCH_SRC_NO_STUBS = $(filter-out $(KERNEL_DIR)/arch/$(ARCH)/bringup_stubs.c,$(ARCH_SRC))
+ARCH_SRC = $(wildcard $(ARCH_DIR)/*.c)
+ARCH_SRC_NO_STUBS = $(filter-out $(ARCH_DIR)/bringup_stubs.c,$(ARCH_SRC))
+ARCH_EXTRA_C = $(wildcard $(ARCH_DIR)/boot/*.c) \
+               $(wildcard $(ARCH_DIR)/drv/*.c)
 
 KERNEL_SRC_FULL = $(wildcard $(KERNEL_DIR)/*.c) \
                   $(wildcard $(KERNEL_DIR)/lib/*.c) \
                   $(wildcard $(KERNEL_DIR)/mm/*.c) \
                   $(wildcard $(KERNEL_DIR)/proc/*.c) \
                   $(wildcard $(KERNEL_DIR)/fs/*.c) \
-                  $(DRV_SRC) \
                   $(wildcard $(KERNEL_DIR)/syscall/*.c) \
                   $(wildcard $(KERNEL_DIR)/trap/*.c) \
                   $(wildcard $(KERNEL_DIR)/shell/*.c) \
-                  $(ARCH_SRC_NO_STUBS)
+                  $(wildcard $(KERNEL_DIR)/drv/*.c) \
+                  $(ARCH_SRC_NO_STUBS) \
+                  $(ARCH_EXTRA_C)
 
 KERNEL_SRC_BRINGUP = $(KERNEL_DIR)/main.c \
                      $(KERNEL_DIR)/lib/printf.c \
                      $(KERNEL_DIR)/lib/string.c \
                      $(KERNEL_DIR)/drv/uart.c \
                      $(KERNEL_DIR)/drv/clint.c \
-                     $(KERNEL_DIR)/drv/plic.c \
                      $(ARCH_SRC_NO_STUBS) \
-                     $(KERNEL_DIR)/arch/$(ARCH)/bringup_stubs.c
+					 $(ARCH_DIR)/drv/plat_irq.c \
+                     $(ARCH_DIR)/bringup_stubs.c
 
 ifeq ($(BRINGUP),1)
 KERNEL_SRC = $(KERNEL_SRC_BRINGUP)
-ASM_SRC = $(KERNEL_DIR)/arch/$(ARCH)/entry.S
+ASM_SRC = $(ARCH_DIR)/boot/entry.S
 else
 KERNEL_SRC = $(KERNEL_SRC_FULL)
-ASM_SRC = $(wildcard $(KERNEL_DIR)/arch/$(ARCH)/*.S)
+ASM_SRC = $(wildcard $(ARCH_DIR)/*.S) \
+          $(wildcard $(ARCH_DIR)/boot/*.S)
 endif
 
 # Object files

@@ -7,7 +7,7 @@
 #include "syscall.h"
 #include "fs.h"
 #include "timer.h"
-#include "plic.h"
+#include "plat_irq.h"
 #include "string.h"
 #include "consts.h"
 #include "defs.h"
@@ -35,8 +35,8 @@ void kernel_main(void) {
     timer_init();
     printf("[INIT] Timer initialized\n");
 
-    plic_init();
-    printf("[INIT] PLIC initialized\n");
+    plat_irq_init();
+    printf("[INIT] IRQ controller initialized\n");
 
     // mm_init();
     // printf("[INIT] Memory manager initialized\n");
@@ -95,10 +95,10 @@ void kernel_main(void) {
     printf("\033[0m"); // 重置颜色
     printf("Welcome to AAAAAAAAAAAAAAAAAAAAOS!\n\n");
 
-    /* Start scheduler — switches to init_kthread. When idle is later
-     * restored via context_switch, execution returns here. Enter
-     * idle_loop so the scheduler keeps running (wfi + proc_yield). */
-    sched();
+    // /* Start scheduler — switches to init_kthread. When idle is later
+    //  * restored via context_switch, execution returns here. Enter
+    //  * idle_loop so the scheduler keeps running (wfi + proc_yield). */
+    // sched();
     idle_loop();
 }
 

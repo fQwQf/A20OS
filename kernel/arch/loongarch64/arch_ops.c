@@ -1,5 +1,5 @@
 #include "arch_ops.h"
-#include "consts.h"
+#include "loongarch64_consts.h"
 
 /* LoongArch CSR indices used by this backend. */
 #define LA_CSR_CRMD    0x0

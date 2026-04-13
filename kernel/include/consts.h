@@ -20,8 +20,10 @@
 #define MAX_CMD_LEN        1024
 #define MAX_HISTORY        64
 
-#if defined(CONFIG_RISCV64) || defined(CONFIG_LOONGARCH64)
-#include "arch_consts.h"
+#if defined(CONFIG_RISCV64)
+#include "riscv64_consts.h"
+#elif defined(CONFIG_LOONGARCH64)
+#include "loongarch64_consts.h"
 #else
 #error "Unsupported architecture: expected CONFIG_RISCV64 or CONFIG_LOONGARCH64"
 #endif

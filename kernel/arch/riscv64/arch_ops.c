@@ -1,6 +1,6 @@
 #include "arch_ops.h"
 #include "sbi.h"
-#include "consts.h"
+#include "riscv64_consts.h"
 
 #define RISCV_SSTATUS_SIE (1UL << 1)
 #define RISCV_SIE_SSIE    (1UL << 1)

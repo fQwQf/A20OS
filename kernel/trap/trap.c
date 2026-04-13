@@ -3,7 +3,7 @@
 #include "syscall.h"
 #include "timer.h"
 #include "uart.h"
-#include "plic.h"
+#include "plat_irq.h"
 #include "stdio.h"
 #include "string.h"
 #include "panic.h"
@@ -25,11 +25,11 @@ static void handle_irq(uint64_t irq, uint64_t sepc, int from_user) {
         }
         proc_yield();
     } else if (irq == ARCH_IRQ_CAUSE_EXTERNAL) {
-        uint32_t irq_id = plic_claim();
+        uint32_t irq_id = plat_irq_claim();
         if (irq_id == UART0_IRQ)
             uart_handle_irq();
         if (irq_id != 0)
-            plic_complete(irq_id);
+            plat_irq_complete(irq_id);
     } else if (irq == ARCH_IRQ_CAUSE_SOFT) {
         arch_softirq_clear();
         timer_set_interval(TICKS_PER_SEC / 100);

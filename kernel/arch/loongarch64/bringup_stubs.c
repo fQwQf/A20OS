@@ -44,10 +44,12 @@ void klog_write(const char *fmt, ...) {
 // void timer_enable(void) {}
 // void timer_disable(void) {}
 
-// void plic_init(void) {}
-// void plic_init_hart(void) {}
-// uint32_t plic_claim(void) { return 0; }
-// void plic_complete(uint32_t irq) { (void)irq; }
+// void plat_irq_init(void) {}
+// void plat_irq_init_cpu(void) {}
+// void plat_irq_enable(unsigned int irq) {}
+// void plat_irq_disable(unsigned int irq) {}
+// uint32_t  plat_irq_claim(void) {}
+// void plat_irq_complete(unsigned int irq) {}
 
 void mm_init(void) {}
 void vfs_init(void) {}
