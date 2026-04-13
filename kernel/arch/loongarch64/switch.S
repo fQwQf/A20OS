@@ -9,9 +9,9 @@
  */
 
     .section .text
-    .global __switch_la64
+    .global __switch
 
-__switch_la64:
+__switch:
     /* $a0 = old_sp (pointer to save current sp into) */
     /* $a1 = new_sp (sp of next task) */
 

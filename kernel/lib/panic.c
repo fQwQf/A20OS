@@ -1,7 +1,7 @@
 #include "panic.h"
 #include "uart.h"
 #include "stdio.h"
-#include "defs.h"
+#include "arch_ops.h"
 
 NORETURN void panic(const char *fmt, ...) {
     va_list args;
@@ -12,6 +12,6 @@ NORETURN void panic(const char *fmt, ...) {
     uart_puts("\n\nSystem halted.\n");
     va_end(args);
 
-    __asm__ volatile("csrw sie, zero");
-    while (1) __asm__ volatile("wfi");
+    arch_irq_disable();
+    while (1) arch_cpu_wait();
 }

@@ -51,6 +51,10 @@ _start:
     la.global $sp, boot_stack_top
     sub.d   $sp, $sp, $t1
 
+#ifdef BRINGUP
+    b           bss_clear
+#endif
+
     /* ---- Configure DMW windows ----
      * We use the same approach as RocketOS:
      * Detect current segment (hi bits of PC) and set DMW1 to map it.
@@ -84,8 +88,8 @@ _start:
     jirl        $zero, $t0, 0
 
     /* ---- Clear BSS ---- */
-    la.global   $t0, __bss_start
-    la.global   $t1, __bss_end
+    la.global   $t0, _bss_start
+    la.global   $t1, _bss_end
 bss_clear:
     bgeu        $t0, $t1, bss_done
     st.d        $zero, $t0, 0
@@ -101,7 +105,7 @@ bss_done:
 
     /* Should never return */
 halt:
-    idle        0x0, 0
+    nop
     b           halt
 
     .section .bss.stack
