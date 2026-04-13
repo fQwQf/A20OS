@@ -20,6 +20,7 @@
 #include "defs.h"
 #include "klog.h"
 #include "sbi.h"
+#include "arch_ops.h"
 
 void syscall_init(void) {
     kdebug("[SYSCALL] Initialized\n");
@@ -554,7 +555,7 @@ int64_t sys_nanosleep(void *req, void *rem) {
         t->state     = PROC_BLOCKED;
         sched();
     } else {
-        while (timer_get_ticks() < until) __asm__ volatile("nop");
+        while (timer_get_ticks() < until) arch_cpu_relax();
     }
     return 0;
 }

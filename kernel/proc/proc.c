@@ -24,6 +24,7 @@
 #include "consts.h"
 #include "defs.h"
 #include "klog.h"
+#include "arch_ops.h"
 
 static task_t proc_table[MAX_PROCS];
 static uint64_t *kernel_pgdir_shared;
@@ -34,7 +35,7 @@ static uint64_t g_idle_kstack;
 
 void idle_loop(void) {
     while (1) {
-        __asm__ volatile("wfi");
+        arch_cpu_wait();
         proc_yield();
     }
 }
@@ -81,13 +82,13 @@ void proc_init(void) {
     if (kpdir) pt_map_kernel(kpdir);
     kernel_pgdir_shared = kpdir;
     idle->pgdir = kpdir;
-    ctx->satp = kpdir ? MAKE_SATP(kpdir) : 0;
-    ctx->sstatus = SSTATUS_SIE;
+    ctx->satp = arch_mmu_token_from_pgdir(kpdir);
+    ctx->sstatus = arch_task_status_kernel_default();
     idle->kstack_base = idle_stack;
     idle->kstack = (uint64_t)ctx;
     g_idle_kstack = idle->kstack;
 
-    __asm__ volatile("mv tp, %0" :: "r"(idle));
+    arch_set_current_task_ptr(idle);
     current_task = idle;
 
     kdebug("[PROC] Initialized, idle task pid=0\n");
@@ -174,8 +175,8 @@ int proc_alloc(void (*entry)(void)) {
     ctx->ra   = (uint64_t)entry;
     ctx->tp   = (uint64_t)t;
     t->pgdir  = kernel_pgdir_shared;
-    ctx->satp = kernel_pgdir_shared ? MAKE_SATP(kernel_pgdir_shared) : 0;
-    ctx->sstatus = SSTATUS_SIE;
+    ctx->satp = arch_mmu_token_from_pgdir(kernel_pgdir_shared);
+    ctx->sstatus = arch_task_status_kernel_default();
     t->kstack_base = stack;
     t->kstack = (uint64_t)ctx;
 
@@ -204,7 +205,7 @@ int proc_alloc_user(uint64_t entry, uint64_t sp, uint64_t *pgdir) {
     trap_context_t *trap = (trap_context_t *)(ks_top - sizeof(trap_context_t));
     memset(trap, 0, sizeof(*trap));
     trap->sepc   = entry;
-    trap->x[0]   = pgdir ? MAKE_SATP(pgdir) : 0;
+    trap->x[0]   = arch_mmu_token_from_pgdir(pgdir);
     trap->x[2]   = sp;
     trap->sstatus = 0;
 
@@ -216,8 +217,8 @@ int proc_alloc_user(uint64_t entry, uint64_t sp, uint64_t *pgdir) {
     extern void user_trap_return(void);
     ctx->ra   = (uint64_t)user_trap_return;
     ctx->tp   = (uint64_t)t;
-    ctx->satp = pgdir ? MAKE_SATP(pgdir) : 0;
-    ctx->sstatus = SSTATUS_SIE;
+    ctx->satp = arch_mmu_token_from_pgdir(pgdir);
+    ctx->sstatus = arch_task_status_kernel_default();
     t->kstack = (uint64_t)ctx;
 
     kdebug("[PROC] user task pid=%d entry=0x%lx sp=0x%lx pgdir=0x%lx\n", t->pid,
@@ -263,7 +264,7 @@ int proc_clone(uint64_t flags, uint64_t stack, int *ptid, int *ctid, uint64_t tl
     if (parent->trap_ctx) {
         trap_context_t *trap = (trap_context_t *)(ks_top - sizeof(trap_context_t));
         *trap = *parent->trap_ctx;
-        trap->x[0]  = t->pgdir ? MAKE_SATP(t->pgdir) : 0;
+        trap->x[0]   = arch_mmu_token_from_pgdir(t->pgdir);
         trap->x[10] = 0;
         trap->kernel_tp = (uint64_t)(uintptr_t)t;
         t->trap_ctx = trap;
@@ -273,7 +274,7 @@ int proc_clone(uint64_t flags, uint64_t stack, int *ptid, int *ctid, uint64_t tl
         extern void user_trap_return(void);
         ctx->ra   = (uint64_t)user_trap_return;
         ctx->tp   = (uint64_t)t;
-        ctx->satp = t->pgdir ? MAKE_SATP(t->pgdir) : 0;
+        ctx->satp = arch_mmu_token_from_pgdir(t->pgdir);
         t->kstack = (uint64_t)ctx;
     } else {
         task_context_t *ctx = (task_context_t *)(ks_top - sizeof(task_context_t));
@@ -362,7 +363,7 @@ int proc_exec(const char *path, char *const argv[], char *const envp[]) {
         extern void user_trap_return(void);
         ctx->ra = (uint64_t)user_trap_return;
         ctx->tp = (uint64_t)(uintptr_t)t;
-        ctx->satp = MAKE_SATP(info.pgdir);
+        ctx->satp = arch_mmu_token_from_pgdir(info.pgdir);
         t->trap_ctx = trap;
         t->kstack   = (uint64_t)ctx;
     }
@@ -371,13 +372,13 @@ int proc_exec(const char *path, char *const argv[], char *const envp[]) {
         trap_context_t *trap = t->trap_ctx;
         memset(trap, 0, sizeof(*trap));
         trap->sepc      = saved_entry;
-        trap->x[0]      = MAKE_SATP(info.pgdir);
+        trap->x[0]      = arch_mmu_token_from_pgdir(info.pgdir);
         trap->x[2]      = saved_sp;
         trap->kernel_tp = (uint64_t)(uintptr_t)t;
         trap->sstatus   = 0x0UL;
 
         task_context_t *ctx = (task_context_t *)((uint64_t)trap - sizeof(task_context_t));
-        ctx->satp = MAKE_SATP(info.pgdir);
+        ctx->satp = arch_mmu_token_from_pgdir(info.pgdir);
     }
 
     t->exec_load_addr = info.load_addr;
@@ -390,7 +391,7 @@ int proc_exec(const char *path, char *const argv[], char *const envp[]) {
 
     kfree(k_path);
 
-    __asm__ volatile("fence.i" ::: "memory");
+    arch_sync_icache();
 
     t->state = PROC_RUNNING;
     return 0;
