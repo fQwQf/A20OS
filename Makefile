@@ -71,35 +71,38 @@ fs_img: user_apps
 	@echo "Building FAT32 image..."
 	dd if=/dev/zero of=fs.img bs=1M count=32
 	mkfs.fat -F 32 fs.img
-	# Need tools like mcopy from mtools to copy files without root
 	mcopy -i fs.img user/build/init ::/init
 	mcopy -i fs.img user/build/sh ::/sh
-	mmd -i fs.img ::/bin
-	mcopy -i fs.img user/build/ls ::/bin/ls
-	mcopy -i fs.img user/build/cat ::/bin/cat
-	mcopy -i fs.img user/build/mkdir ::/bin/mkdir
-	mcopy -i fs.img user/build/rm ::/bin/rm
-	mcopy -i fs.img user/build/cp ::/bin/cp
-	mcopy -i fs.img user/build/ps ::/bin/ps
-	mcopy -i fs.img user/build/aed ::/bin/aed
-	@printf 'Hello from A20OS FAT32!\nThis file is on the FAT32 filesystem at /mnt/test.txt\n' | mcopy -i fs.img - ::/test.txt
+	mcopy -i fs.img user/build/ls ::/ls
+	mcopy -i fs.img user/build/cat ::/cat
+	mcopy -i fs.img user/build/mkdir ::/mkdir
+	mcopy -i fs.img user/build/rm ::/rm
+	mcopy -i fs.img user/build/cp ::/cp
+	mcopy -i fs.img user/build/ps ::/ps
+	mcopy -i fs.img user/build/aed ::/aed
+	mcopy -i fs.img user/build/touch ::/touch
+	mcopy -i fs.img user/build/poweroff ::/poweroff
+	mcopy -i fs.img user/build/reboot ::/reboot
+	mcopy -i fs.img user/build/pwd ::/pwd
+	mcopy -i fs.img user/build/echo ::/echo
+	mcopy -i fs.img user/build/env ::/env
+	mcopy -i fs.img user/build/clear ::/clear
+	mcopy -i fs.img user/build/help ::/help
+	@printf 'Hello from A20OS FAT32!\n' | mcopy -i fs.img - ::/test.txt
 	cp fs.img fs_test.img
 
 ext4_img_only: user_apps
 	@echo "Building ext4 image..."
+	@rm -rf /tmp/a20os_ext4_staging && mkdir -p /tmp/a20os_ext4_staging
+	cp user/build/ls   /tmp/a20os_ext4_staging/ls
+	cp user/build/cat  /tmp/a20os_ext4_staging/cat
+	cp user/build/mkdir /tmp/a20os_ext4_staging/mkdir
+	cp user/build/rm   /tmp/a20os_ext4_staging/rm
+	cp user/build/cp   /tmp/a20os_ext4_staging/cp
+	printf 'Hello from ext4!\nThis file is on the ext4 filesystem.\n' > /tmp/a20os_ext4_staging/test.txt
 	dd if=/dev/zero of=ext4.img bs=1M count=32
-	mkfs.ext4 -F -O ^has_journal,extent,huge_file,flex_bg,uninit_bg,dir_index ext4.img
-	mount_fs_img=$$(mktemp -d) && \
-	sudo mount -o loop ext4.img "$$mount_fs_img" && \
-	sudo mkdir -p "$$mount_fs_img/bin" && \
-	sudo cp user/build/ls "$$mount_fs_img/bin/ls" && \
-	sudo cp user/build/cat "$$mount_fs_img/bin/cat" && \
-	sudo cp user/build/mkdir "$$mount_fs_img/bin/mkdir" && \
-	sudo cp user/build/rm "$$mount_fs_img/bin/rm" && \
-	sudo cp user/build/cp "$$mount_fs_img/bin/cp" && \
-	sudo bash -c 'printf "Hello from ext4!\nThis file is on the ext4 filesystem.\n" > "$$mount_fs_img/test.txt"' && \
-	sudo umount "$$mount_fs_img" && \
-	rmdir "$$mount_fs_img"
+	mkfs.ext4 -F -O ^has_journal,extent,huge_file,flex_bg,uninit_bg,dir_index -d /tmp/a20os_ext4_staging ext4.img
+	@rm -rf /tmp/a20os_ext4_staging
 
 ext4_img: user_apps ext4_img_only
 	cp ext4.img fs_test.img

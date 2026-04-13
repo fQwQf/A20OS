@@ -12,6 +12,13 @@
 static inode_t inode_table[MAX_INODES];
 static int next_inum = 1;
 
+inode_t *fs_find_inode_by_inum(int inum) {
+    for (int i = 0; i < MAX_INODES; i++)
+        if (inode_table[i].ref_count > 0 && inode_table[i].inum == inum)
+            return &inode_table[i];
+    return NULL;
+}
+
 inode_t *alloc_inode(int type) {
     for (int i = 0; i < MAX_INODES; i++) {
         if (inode_table[i].ref_count == 0) {
