@@ -214,7 +214,7 @@ static int virtio_blk_rw(int idx, uint64_t lba, void *buf, size_t sectors, int w
     avail->idx++;
     arch_wmb();
 
-    mmio_write32((uintptr_t)g_blk.base, VIRTIO_MMIO_QUEUE_NOTIFY, 0);
+    mmio_write32((uintptr_t)inst->blk.base, VIRTIO_MMIO_QUEUE_NOTIFY, 0);
     arch_mb();
 
     uint32_t timeout = 10000000;

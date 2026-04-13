@@ -38,11 +38,11 @@ void kernel_main(void) {
     plat_irq_init();
     printf("[INIT] IRQ controller initialized\n");
 
-    // mm_init();
-    // printf("[INIT] Memory manager initialized\n");
+    mm_init();
+    printf("[INIT] Memory manager initialized\n");
 
-    // vfs_init();
-    // printf("[INIT] VFS initialized\n");
+    vfs_init();
+    printf("[INIT] VFS initialized\n");
 
     /* Initialize virtio-blk for block filesystem */
     if (virtio_blk_init(0) == 0) {
@@ -73,15 +73,15 @@ void kernel_main(void) {
         printf("[INIT] Warning: Virtio-blk 1 initialization failed\n");
     }
 
-    // /* Initialize process management */
-    // proc_init();
-    // printf("[INIT] Process manager initialized\n");
+    /* Initialize process management */
+    proc_init();
+    printf("[INIT] Process manager initialized\n");
 
-    // /* Create init kthread */
-    // int ret = proc_alloc(init_kthread);
-    // if (ret < 0) {
-    //     panic("Failed to create init_kthread");
-    // }
+    /* Create init kthread */
+    int ret = proc_alloc(init_kthread);
+    if (ret < 0) {
+        panic("Failed to create init_kthread");
+    }
 
     printf("[INIT] Starting scheduler...\n");
     printf("[INIT] System ready\n\n");
@@ -98,7 +98,7 @@ void kernel_main(void) {
     // /* Start scheduler — switches to init_kthread. When idle is later
     //  * restored via context_switch, execution returns here. Enter
     //  * idle_loop so the scheduler keeps running (wfi + proc_yield). */
-    // sched();
+    sched();
     idle_loop();
 }
 
