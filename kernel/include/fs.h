@@ -46,6 +46,7 @@ int  fs_getcwd(char *buf, size_t size);
 inode_t *fs_find_inode(const char *path);
 inode_t *fs_get_root(void);
 int      fs_inode_lookup(inode_t *dir, const char *name, inode_t **out);
+inode_t *fs_find_inode_by_inum(int inum);
 void fs_resolve_path(const char *path, char *resolved, size_t max_len);
 inode_t *alloc_inode(int type);
 int add_dir_entry(inode_t *dir, const char *name, int inum);

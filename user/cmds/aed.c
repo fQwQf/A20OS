@@ -620,9 +620,9 @@ int main(int argc, char *argv[]) {
 
     while (1) {
         int c = ed_read_key();
-        g_ed.quit_request = 0;
 
         if (c >= 32 && c < 127) {
+            g_ed.quit_request = 0;
             ed_insert_char(&g_ed, c);
             ed_adjust_scroll(&g_ed);
             ed_draw(&g_ed);
@@ -678,6 +678,7 @@ int main(int argc, char *argv[]) {
             continue;
 
         case 7: /* Ctrl+G */
+            g_ed.quit_request = 0;
             ed_show_help(&g_ed);
             break;
 
@@ -724,7 +725,7 @@ int main(int argc, char *argv[]) {
         case KEY_END:  g_ed.cx = (int)strlen(g_ed.lines[g_ed.cy]); break;
         case KEY_DEL:  ed_delete_forward(&g_ed); break;
 
-        default: continue;
+        default: g_ed.quit_request = 0; continue;
         }
 
         ed_clamp_cursor(&g_ed);

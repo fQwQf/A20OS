@@ -29,6 +29,11 @@ int sbi_console_getchar(void) {
 }
 
 void sbi_shutdown(void) {
-    sbi_call(SBI_SHUTDOWN_EID, 0, 0, 0, 0);
+    sbi_call(SBI_SRST_EID, 0, SBI_SRST_SHUTDOWN, 0, 0);
+    while (1) __asm__ volatile("wfi");
+}
+
+void sbi_reboot(void) {
+    sbi_call(SBI_SRST_EID, 0, SBI_SRST_COLD_REBOOT, 0, 0);
     while (1) __asm__ volatile("wfi");
 }
