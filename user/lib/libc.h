@@ -90,6 +90,7 @@ extern int errno;
 #define SYS_sigprocmask 135
 #define SYS_prctl       167
 #define SYS_faccessat   48
+#define SYS_reboot      142
 #define SYS_statfs      43
 #define SYS_writev      66
 #define SYS_readlinkat  78

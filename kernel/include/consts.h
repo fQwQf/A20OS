@@ -101,6 +101,7 @@
 #define SYS_clock_getres   114
 #define SYS_sched_yield    124
 #define SYS_kill           129
+#define SYS_reboot         142
 #define SYS_tgkill         131
 #define SYS_sigaction      134
 #define SYS_sigprocmask    135

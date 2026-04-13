@@ -312,7 +312,12 @@ static int ramfs_freaddir(vfile_t *vf, void *dirp, size_t count) {
             d->d_ino    = (uint64_t)de->inum;
             d->d_off    = (int64_t)(total + reclen);
             d->d_reclen = (uint16_t)reclen;
-            d->d_type   = 0; /* Unknown for now */
+            d->d_type   = DT_UNKNOWN;
+            inode_t *child = fs_find_inode_by_inum(de->inum);
+            if (child) {
+                if (child->type == FT_DIRECTORY) d->d_type = DT_DIR;
+                else if (child->type == FT_REGULAR) d->d_type = DT_REG;
+            }
             memcpy(d->d_name, de->name, namelen + 1);
             total += reclen;
         }
