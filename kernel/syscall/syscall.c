@@ -19,6 +19,7 @@
 #include "consts.h"
 #include "defs.h"
 #include "klog.h"
+#include "sbi.h"
 
 void syscall_init(void) {
     kdebug("[SYSCALL] Initialized\n");
@@ -157,6 +158,10 @@ int64_t syscall_dispatch(trap_context_t *ctx) {
     case SYS_execve:      ret = sys_execve((const char*)a0,(char**)a1,(char**)a2);   break;
     case SYS_wait4:       ret = sys_wait4((int)a0,(int*)a1,(int)a2,(void*)a3);       break;
     case SYS_sched_yield: ret = sys_sched_yield();                                    break;
+    case SYS_reboot:
+        if ((int)a0 == 0x424F4F54) sbi_reboot();
+        else sbi_shutdown();
+        break;
     case SYS_prctl:       ret = sys_prctl((int)a0,a1,a2,a3,a4);                      break;
     case SYS_prlimit64: {
         int resource = (int)a1;

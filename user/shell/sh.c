@@ -71,8 +71,219 @@ static void clear_line(int len) {
     }
 }
 
+/* Redraw buf[cursor..len-1], clear to EOL, reposition cursor back */
+static void refresh_tail(char *buf, int cursor, int len) {
+    int tail = len - cursor;
+    if (tail > 0)
+        write(1, &buf[cursor], tail);
+    write(1, "\033[K", 3);          /* clear to end of line */
+    if (tail > 0) {
+        char esc[16];
+        snprintf(esc, sizeof(esc), "\033[%dD", tail);
+        write(1, esc, strlen(esc));
+    }
+}
+
+/* Forward declaration — print_prompt() defined later */
+static void print_prompt(void);
+
+/* ============================================================
+ * Tab auto-completion
+ * ============================================================ */
+
+#define TC_MAX 128
+
+static void tab_complete(char *buf, int *pos, int *len, size_t sz) {
+    int p = *pos, l = *len;
+
+    /* ---- Locate the word being typed ---- */
+    int ws = p;                              /* word start */
+    while (ws > 0 && buf[ws - 1] != ' ') ws--;
+
+    /* First word? (everything before ws is whitespace) */
+    int first_word = 1;
+    for (int i = 0; i < ws; i++)
+        if (buf[i] != ' ') { first_word = 0; break; }
+
+    int prefix_len = p - ws;                 /* chars already typed */
+
+    int has_slash = 0;
+    for (int i = ws; i < p; i++)
+        if (buf[i] == '/') { has_slash = 1; break; }
+
+    int is_command = first_word && !has_slash;
+
+    /* ---- For file/path words: split into dir + filename prefix ---- */
+    char dirpath[512];
+    char fpbuf[256];
+    int  fp_len = 0;
+
+    if (!is_command) {
+        int last_slash = -1;
+        for (int i = ws; i < p; i++)
+            if (buf[i] == '/') last_slash = i;
+
+        if (last_slash >= 0) {
+            if (buf[ws] == '/') {            /* absolute */
+                int dlen = last_slash - ws;
+                if (dlen == 0) { dirpath[0] = '/'; dirpath[1] = '\0'; }
+                else { memcpy(dirpath, &buf[ws], dlen); dirpath[dlen] = '\0'; }
+            } else {                         /* relative with '/' */
+                getcwd(dirpath, sizeof(dirpath));
+                int cl = (int)strlen(dirpath);
+                if (cl > 0 && dirpath[cl - 1] != '/')
+                    dirpath[cl++] = '/';
+                memcpy(dirpath + cl, &buf[ws], last_slash - ws);
+                dirpath[cl + last_slash - ws] = '\0';
+            }
+            fp_len = p - last_slash - 1;
+            if (fp_len > 0) memcpy(fpbuf, &buf[last_slash + 1], fp_len);
+            fpbuf[fp_len] = '\0';
+        } else {
+            getcwd(dirpath, sizeof(dirpath));
+            fp_len = prefix_len;
+            if (fp_len > 0) memcpy(fpbuf, &buf[ws], fp_len);
+            fpbuf[fp_len] = '\0';
+        }
+    }
+
+    /* ---- Collect matching candidates ---- */
+    static char matches[TC_MAX][256];
+    static int  is_dir[TC_MAX];
+    int nmatch = 0;
+
+    if (is_command) {
+        /* Built-in commands */
+        static const char *bnames[] = {
+            "cd","exit","quit","export",
+            "alias","unalias","history","type", NULL
+        };
+        for (int i = 0; bnames[i] && nmatch < TC_MAX; i++)
+            if (strncmp(bnames[i], &buf[ws], prefix_len) == 0)
+                strcpy(matches[nmatch++], bnames[i]);
+
+        /* Executables in PATH */
+        char *pe = getenv("PATH");
+        if (!pe) pe = "/bin";
+        char pbuf[512];
+        strncpy(pbuf, pe, sizeof(pbuf) - 1);
+        pbuf[sizeof(pbuf) - 1] = '\0';
+        char *pp = pbuf;
+        while (*pp && nmatch < TC_MAX) {
+            char *end = pp;
+            while (*end && *end != ':') end++;
+            char sv = *end; *end = '\0';
+            DIR *d = opendir(pp);
+            if (d) {
+                struct dirent *de;
+                while ((de = readdir(d)) != NULL && nmatch < TC_MAX) {
+                    if (de->d_name[0] == '.') continue;
+                    if (strncmp(de->d_name, &buf[ws], prefix_len) != 0) continue;
+                    int dup = 0;
+                    for (int k = 0; k < nmatch; k++)
+                        if (strcmp(matches[k], de->d_name) == 0) { dup = 1; break; }
+                    if (!dup) strcpy(matches[nmatch++], de->d_name);
+                }
+                closedir(d);
+            }
+            *end = sv;
+            pp = end;
+            if (sv == ':') pp++;
+        }
+    } else {
+        /* Files in the relevant directory */
+        DIR *d = opendir(dirpath);
+        if (d) {
+            struct dirent *de;
+            while ((de = readdir(d)) != NULL && nmatch < TC_MAX) {
+                if (de->d_name[0] == '.' && (fp_len == 0 || fpbuf[0] != '.')) continue;
+                if (strncmp(de->d_name, fpbuf, fp_len) != 0) continue;
+                strcpy(matches[nmatch], de->d_name);
+                is_dir[nmatch] = (de->d_type == DT_DIR);
+                if (is_dir[nmatch]) strcat(matches[nmatch], "/");
+                nmatch++;
+            }
+            closedir(d);
+        }
+    }
+
+    if (nmatch == 0) return;
+
+    int ep_len = is_command ? prefix_len : fp_len;   /* effective prefix */
+
+    if (nmatch == 1) {
+        /* ---- Single match: insert completion suffix ---- */
+        char *suffix = matches[0] + ep_len;
+        int slen = (int)strlen(suffix);
+        int add_sp = first_word ? 1 : (slen == 0 || suffix[slen - 1] != '/');
+        int total = slen + (add_sp ? 1 : 0);
+        if (l + total >= (int)sz - 1) return;
+
+        memmove(&buf[p + total], &buf[p], l - p);
+        memcpy(&buf[p], suffix, slen);
+        if (add_sp) buf[p + slen] = ' ';
+        l += total; p += total; buf[l] = '\0';
+
+        write(1, suffix, slen);
+        if (add_sp) write(1, " ", 1);
+        refresh_tail(buf, p, l);
+    } else {
+        /* ---- Multiple matches: partial complete, then list if stuck ---- */
+        int clen = (int)strlen(matches[0]);
+        for (int i = 1; i < nmatch && clen > 0; i++) {
+            int j = 0;
+            while (j < clen && matches[i][j] == matches[0][j]) j++;
+            clen = j;
+        }
+        if (clen > ep_len) {
+            /* Common prefix extends beyond what's typed — just complete,
+             * don't show the list yet (user needs another Tab for that). */
+            int extra = clen - ep_len;
+            if (l + extra < (int)sz - 1) {
+                memmove(&buf[p + extra], &buf[p], l - p);
+                memcpy(&buf[p], matches[0] + ep_len, extra);
+                l += extra; p += extra; buf[l] = '\0';
+                write(1, matches[0] + ep_len, extra);
+                refresh_tail(buf, p, l);
+            }
+        } else {
+            /* Already at the longest common prefix — show all matches */
+            write(1, "\n", 1);
+            for (int i = 0; i < nmatch; i++) {
+                int mlen = (int)strlen(matches[i]);
+                if (is_dir[i]) {
+                    write(1, "\033[1;34m", 7);
+                    write(1, matches[i], mlen - 1);
+                    write(1, "\033[0m", 4);
+                    write(1, "/", 1);
+                } else {
+                    write(1, matches[i], mlen);
+                }
+                write(1, "  ", 2);
+            }
+            write(1, "\n", 1);
+            print_prompt();
+            write(1, buf, l);
+            int back = l - p;
+            if (back > 0) {
+                char esc[16];
+                snprintf(esc, sizeof(esc), "\033[%dD", back);
+                write(1, esc, strlen(esc));
+            }
+        }
+    }
+
+    *pos = p;
+    *len = l;
+}
+
+/* ============================================================
+ * Main readline — insert mode + Tab completion
+ * ============================================================ */
+
 static int readline_with_history(char *buf, size_t sz) {
-    int pos = 0;
+    int pos = 0;       /* cursor position within buf */
+    int len = 0;       /* total characters in buf    */
     hist_idx = hist_len;
 
     while (1) {
@@ -81,52 +292,66 @@ static int readline_with_history(char *buf, size_t sz) {
 
         if (c == '\n' || c == '\r') {
             write(1, "\n", 1);
-            buf[pos] = '\0';
-            return pos;
+            buf[len] = '\0';
+            return len;
         }
 
-        if (c == 127 || c == '\b') { /* Backspace */
+        if (c == 127 || c == '\b') {            /* Backspace */
             if (pos > 0) {
-                pos--;
-                write(1, "\b \b", 3);
+                memmove(&buf[pos - 1], &buf[pos], len - pos);
+                pos--; len--;
+                buf[len] = '\0';
+                write(1, "\b", 1);
+                refresh_tail(buf, pos, len);
             }
             continue;
         }
 
-        if (c == 4) { /* Ctrl+D */
-            if (pos == 0) { write(1, "\n", 1); buf[0] = '\0'; return -1; }
+        if (c == 4) {                            /* Ctrl+D */
+            if (len == 0) { write(1, "\n", 1); buf[0] = '\0'; return -1; }
             continue;
         }
 
-        if (c == 3) { /* Ctrl+C */
+        if (c == 3) {                            /* Ctrl+C */
             write(1, "^C\n", 3);
             buf[0] = '\0';
             return 0;
         }
 
-        if (c == 12) { /* Ctrl+L: clear screen */
+        if (c == 12) {                           /* Ctrl+L: clear screen */
             write(1, "\033[2J\033[H", 7);
-            /* Redraw prompt and current line */
-            write(1, "\033[1;32m$ \033[0m", 13);
-            write(1, buf, pos);
+            print_prompt();
+            write(1, buf, len);
+            int back = len - pos;
+            if (back > 0) {
+                char esc[16];
+                snprintf(esc, sizeof(esc), "\033[%dD", back);
+                write(1, esc, strlen(esc));
+            }
             continue;
         }
 
-        if (c == 27) { /* Escape sequence (arrows) */
+        if (c == '\t') {                         /* Tab completion */
+            tab_complete(buf, &pos, &len, sz);
+            continue;
+        }
+
+        if (c == 27) {                           /* Escape sequence */
             int c2 = getchar();
             if (c2 == '[') {
                 int c3 = getchar();
-                if (c3 == 'A') { /* Up arrow */
+                if (c3 == 'A') {                 /* Up arrow */
                     if (hist_idx > 0) {
-                        clear_line(pos);
+                        clear_line(len);
                         hist_idx--;
                         strncpy(buf, history[hist_idx], sz - 1);
                         buf[sz - 1] = '\0';
-                        pos = (int)strlen(buf);
-                        write(1, buf, pos);
+                        len = (int)strlen(buf);
+                        pos = len;
+                        write(1, buf, len);
                     }
-                } else if (c3 == 'B') { /* Down arrow */
-                    clear_line(pos);
+                } else if (c3 == 'B') {          /* Down arrow */
+                    clear_line(len);
                     if (hist_idx < hist_len - 1) {
                         hist_idx++;
                         strncpy(buf, history[hist_idx], sz - 1);
@@ -134,25 +359,60 @@ static int readline_with_history(char *buf, size_t sz) {
                         hist_idx = hist_len;
                         buf[0] = '\0';
                     }
-                    pos = (int)strlen(buf);
-                    write(1, buf, pos);
-                } else if (c3 == 'C') { /* Right */ }
-                else if (c3 == 'D') { /* Left */
-                    if (pos > 0) { pos--; write(1, "\b", 1); }
+                    len = (int)strlen(buf);
+                    pos = len;
+                    write(1, buf, len);
+                } else if (c3 == 'C') {          /* Right arrow */
+                    if (pos < len) {
+                        pos++;
+                        write(1, "\033[C", 3);
+                    }
+                } else if (c3 == 'D') {          /* Left arrow */
+                    if (pos > 0) {
+                        pos--;
+                        write(1, "\b", 1);
+                    }
+                } else if (c3 == '3') {          /* Delete: ESC [ 3 ~ */
+                    int c4 = getchar();
+                    if (c4 == '~' && pos < len) {
+                        memmove(&buf[pos], &buf[pos + 1], len - pos - 1);
+                        len--;
+                        buf[len] = '\0';
+                        refresh_tail(buf, pos, len);
+                    }
+                } else if (c3 == 'H') {          /* Home */
+                    while (pos > 0) { pos--; write(1, "\b", 1); }
+                } else if (c3 == 'F') {          /* End */
+                    while (pos < len) {
+                        write(1, &buf[pos], 1);
+                        pos++;
+                    }
                 }
             }
             continue;
         }
 
-        if ((unsigned char)c < 32) continue; /* ignore other control chars */
+        if ((unsigned char)c < 32) continue;     /* ignore other control */
 
-        if ((size_t)pos < sz - 1) {
-            buf[pos++] = (char)c;
-            write(1, (char *)&c, 1); /* echo */
+        /* ---- Printable character: insert at cursor ---- */
+        if ((size_t)(len + 1) < sz) {
+            memmove(&buf[pos + 1], &buf[pos], len - pos);
+            buf[pos] = (char)c;
+            pos++; len++;
+            buf[len] = '\0';
+            /* Echo: write the new char + shifted tail */
+            write(1, &buf[pos - 1], len - pos + 1);
+            /* Move cursor back to pos */
+            int back = len - pos;
+            if (back > 0) {
+                char esc[16];
+                snprintf(esc, sizeof(esc), "\033[%dD", back);
+                write(1, esc, strlen(esc));
+            }
         }
     }
-    buf[pos] = '\0';
-    return pos;
+    buf[len] = '\0';
+    return len;
 }
 
 /* ============================================================
@@ -253,7 +513,7 @@ static int find_in_path(const char *cmd, char *out, size_t osz) {
         return access(out, 0) == 0 ? 0 : -1;
     }
     char *path = getenv("PATH");
-    if (!path) path = "/bin:/usr/bin:/mnt/bin";
+    if (!path) path = "/bin";
     char pathbuf[512];
     strncpy(pathbuf, path, sizeof(pathbuf) - 1);
     char *tok = strtok(pathbuf, ":");
@@ -266,48 +526,12 @@ static int find_in_path(const char *cmd, char *out, size_t osz) {
 }
 
 /* ============================================================
- * Built-in commands
+ * Built-in commands (must run in shell process)
  * ============================================================ */
 
 static int builtin_cd(int argc, char *argv[]) {
     const char *dir = argc > 1 ? argv[1] : "/";
     if (chdir(dir) < 0) { printf("cd: %s: No such directory\n", dir); return 1; }
-    return 0;
-}
-
-static int builtin_pwd(int argc, char *argv[]) {
-    (void)argc; (void)argv;
-    char buf[256];
-    if (getcwd(buf, sizeof(buf))) printf("%s\n", buf);
-    return 0;
-}
-
-static int builtin_echo(int argc, char *argv[]) {
-    int newline = 1;
-    int start = 1;
-    if (argc > 1 && strcmp(argv[1], "-n") == 0) { newline = 0; start = 2; }
-    for (int i = start; i < argc; i++) {
-        if (i > start) write(1, " ", 1);
-        /* Process escape sequences */
-        const char *s = argv[i];
-        while (*s) {
-            if (*s == '\\' && s[1]) {
-                s++;
-                switch (*s) {
-                    case 'n': putchar('\n'); break;
-                    case 't': putchar('\t'); break;
-                    case 'r': putchar('\r'); break;
-                    case 'e': putchar(27); break;
-                    case '\\': putchar('\\'); break;
-                    default: putchar('\\'); putchar(*s); break;
-                }
-            } else {
-                putchar(*s);
-            }
-            s++;
-        }
-    }
-    if (newline) putchar('\n');
     return 0;
 }
 
@@ -322,7 +546,6 @@ static int builtin_export(int argc, char *argv[]) {
     for (int i = 1; i < argc; i++) {
         char *eq = strchr(argv[i], '=');
         if (!eq) continue;
-        /* Store in env_store */
         if (env_count < MAX_ENV) {
             strncpy(env_store[env_count], argv[i], 255);
             env_count++;
@@ -344,7 +567,6 @@ static int builtin_alias(int argc, char *argv[]) {
         if (g_nalias < MAX_ALIASES) {
             strncpy(g_aliases[g_nalias].name, argv[i], 63);
             strncpy(g_aliases[g_nalias].val, eq + 1, 255);
-            /* Remove surrounding quotes */
             char *v = g_aliases[g_nalias].val;
             int vl = (int)strlen(v);
             if (vl > 1 && (v[0] == '\'' || v[0] == '"') && v[vl-1] == v[0]) {
@@ -378,25 +600,29 @@ static int builtin_history(int argc, char *argv[]) {
 }
 
 static int builtin_exit(int argc, char *argv[]) {
-    int code = argc > 1 ? atoi(argv[1]) : last_exit;
+    int code = argc > 1 ? atoi(argv[1]) : 0;
     _exit(code);
 }
 
 static int builtin_type(int argc, char *argv[]) {
+    static const char *bnames[] = {
+        "cd","exit","quit","export","alias","unalias",
+        "history","type", NULL
+    };
     for (int i = 1; i < argc; i++) {
         const char *al = alias_lookup(argv[i]);
         if (al) { printf("%s: alias for '%s'\n", argv[i], al); continue; }
+        int is_bi = 0;
+        for (int j = 0; bnames[j]; j++) {
+            if (strcmp(bnames[j], argv[i]) == 0) { is_bi = 1; break; }
+        }
+        if (is_bi) { printf("%s: shell built-in\n", argv[i]); continue; }
         char path[256];
-        if (find_in_path(argv[i], path, sizeof(path)) == 0) printf("%s is %s\n", argv[i], path);
-        else printf("%s: not found\n", argv[i]);
+        if (find_in_path(argv[i], path, sizeof(path)) == 0)
+            printf("%s is %s\n", argv[i], path);
+        else
+            printf("%s: not found\n", argv[i]);
     }
-    return 0;
-}
-
-static int builtin_env(int argc, char *argv[]) {
-    (void)argc; (void)argv;
-    for (char **e = environ; e && *e; e++) printf("%s\n", *e);
-    for (int i = 0; i < env_count; i++) printf("%s\n", env_store[i]);
     return 0;
 }
 
@@ -444,8 +670,6 @@ typedef struct { const char *name; builtin_fn fn; } builtin_t;
 
 static const builtin_t builtins[] = {
     { "cd",       builtin_cd      },
-    { "pwd",      builtin_pwd     },
-    { "echo",     builtin_echo    },
     { "exit",     builtin_exit    },
     { "quit",     builtin_exit    },
     { "export",   builtin_export  },
@@ -453,7 +677,6 @@ static const builtin_t builtins[] = {
     { "unalias",  builtin_unalias },
     { "history",  builtin_history },
     { "type",     builtin_type    },
-    { "env",      builtin_env     },
     { NULL, NULL }
 };
 
@@ -479,13 +702,18 @@ static int execute_cmd(cmd_t *cmd) {
     /* Check alias */
     const char *al = alias_lookup(name);
     if (al) {
-        /* Re-tokenize aliased command */
-        char aline[512];
+        char aline[MAX_LINE];
         strncpy(aline, al, sizeof(aline) - 1);
+        aline[sizeof(aline) - 1] = '\0';
+        int alen = (int)strlen(aline);
         for (int i = 1; i < cmd->argc; i++) {
-            strcat(aline, " ");
-            strcat(aline, cmd->argv[i]);
+            int avlen = (int)strlen(cmd->argv[i]);
+            if (alen + 1 + avlen + 1 >= (int)sizeof(aline)) break;
+            aline[alen++] = ' ';
+            memcpy(aline + alen, cmd->argv[i], avlen);
+            alen += avlen;
         }
+        aline[alen] = '\0';
         char *aargv[MAX_ARGS];
         int aargc = tokenize(aline, aargv, MAX_ARGS);
         cmd_t acmd;
@@ -735,34 +963,6 @@ static void print_prompt(void) {
            cwd, last_exit ? "1;31" : "0");
 }
 
-static int builtin_help(int argc, char *argv[]) {
-    (void)argc; (void)argv;
-    printf("\033[1mBuilt-in commands:\033[0m\n");
-    printf("  cd [dir]             Change directory\n");
-    printf("  pwd                  Print working directory\n");
-    printf("  echo [-n] [args]     Print text\n");
-    printf("  export [VAR=val]     Set environment variable\n");
-    printf("  alias [name=cmd]     Set/list aliases\n");
-    printf("  unalias name         Remove alias\n");
-    printf("  history              Show command history\n");
-    printf("  type cmd             Show command location\n");
-    printf("  env                  Print environment\n");
-    printf("  exit [code]          Exit shell\n");
-    printf("\n\033[1mExternal commands (in /bin):\033[0m\n");
-    printf("  ls, cat, cp, rm, mkdir, ps, aed\n");
-    printf("\n\033[1mSample files:\033[0m\n");
-    printf("  /hello.txt           ramfs test file\n");
-    printf("  /mnt/test.txt        FAT32 test file\n");
-    printf("\n\033[1mFeatures:\033[0m\n");
-    printf("  Pipelines:    cmd1 | cmd2\n");
-    printf("  Redirection:  cmd > file, cmd >> file, cmd < file\n");
-    printf("  Background:   cmd &\n");
-    printf("  Conditionals: cmd1 && cmd2, cmd1 || cmd2\n");
-    printf("  Variables:    $VAR, $?, $$\n");
-    printf("  History:      Use arrow keys\n");
-    return 0;
-}
-
 /* ============================================================
  * main
  * ============================================================ */
@@ -812,11 +1012,8 @@ int main(int argc, char *argv[], char *envp[]) {
         int ntoks = tokenize(line, toks, MAX_ARGS);
         if (ntoks == 0) continue;
 
-        /* Help is a special built-in */
-        if (strcmp(toks[0], "help") == 0) { builtin_help(ntoks, toks); last_exit = 0; continue; }
-
         last_exit = execute_line(toks, ntoks);
     }
 
-    _exit(last_exit);
+    _exit(0);
 }

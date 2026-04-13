@@ -50,8 +50,8 @@ void kernel_main(void) {
         if (dev0) {
             bcache_t *bc0 = bcache_create(dev0);
             if (bc0) {
-                fs_mkdir("/mnt");
-                vfs_mount_bc("/mnt", "fat32", bc0);
+                fs_mkdir("/bin");
+                vfs_mount_bc("/bin", "fat32", bc0);
             }
         }
     } else {
@@ -64,8 +64,8 @@ void kernel_main(void) {
         if (dev1) {
             bcache_t *bc1 = bcache_create(dev1);
             if (bc1) {
-                fs_mkdir("/mnt2");
-                vfs_mount_bc("/mnt2", "ext4", bc1);
+                fs_mkdir("/mnt");
+                vfs_mount_bc("/mnt", "ext4", bc1);
             }
         }
     } else {
@@ -112,14 +112,14 @@ void init_kthread(void) {
     kdebug("[INIT] Loading init program...\n");
 
     /* Open init program from FAT32 filesystem */
-    int fd = vfs_open("/mnt/init", O_RDONLY, 0);
+    int fd = vfs_open("/bin/init", O_RDONLY, 0);
     if (fd < 0) {
-        printf("[INIT] Cannot open /mnt/init: %d\n", fd);
+        printf("[INIT] Cannot open /bin/init: %d\n", fd);
         kdebug("[INIT] Falling back to ramfs /init...\n");
 
         fd = vfs_open("/init", O_RDONLY, 0);
         if (fd < 0) {
-            panic("init: no init program found (tried /mnt/init and /init)");
+            panic("init: no init program found (tried /bin/init and /init)");
         }
     }
 
