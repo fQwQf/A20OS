@@ -1,5 +1,6 @@
 #include "sbi.h"
 #include "defs.h"
+#include "arch_ops.h"
 
 uint64_t sbi_call(uint64_t eid, uint64_t fid, uint64_t arg0, uint64_t arg1, uint64_t arg2) {
     register uint64_t a0 __asm__("a0") = arg0;

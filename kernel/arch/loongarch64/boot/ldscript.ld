@@ -1,12 +1,13 @@
 /* LoongArch64 Linker Script
  * Kernel loaded at 0x200000 physical (QEMU loongarch64 virt default)
+ * TODO: 将0x2000000改回0x200000
  */
 
 OUTPUT_ARCH(loongarch)
 ENTRY(_start)
 
 SECTIONS {
-    . = 0x200000;
+    . = 0x2000000;
 
     .text : {
         *(.text.entry)
@@ -26,12 +27,13 @@ SECTIONS {
 
     . = ALIGN(4096);
     .bss : {
-        __bss_start = .;
+        /* Export both GNU-style and project-style BSS symbols. */
+        _bss_start = .;
         *(.bss .bss.*)
         *(.sbss .sbss.*)
         *(.bss.stack)
         . = ALIGN(4096);
-        __bss_end = .;
+        _bss_end = .;
     }
 
     _end = .;
