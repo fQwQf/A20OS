@@ -95,6 +95,7 @@
 #define SYS_exit           93
 #define SYS_exit_group     94
 #define SYS_set_tid_address 96
+#define SYS_set_robust_list 99
 #define SYS_futex          98
 #define SYS_nanosleep      101
 #define SYS_clock_gettime  113
@@ -220,8 +221,22 @@
 #define SIGUSR1      10
 #define SIGUSR2      12
 
-/* scause exception code for ecall from U-mode */
-#define CAUSE_ECALL_U    8
+/* scause exception codes */
+#define CAUSE_INSN_MISALIGNED   0
+#define CAUSE_INSN_FAULT        1
+#define CAUSE_ILLEGAL_INSN      2
+#define CAUSE_BREAKPOINT        3
+#define CAUSE_LOAD_MISALIGNED   4
+#define CAUSE_LOAD_FAULT        5
+#define CAUSE_STORE_MISALIGNED  6
+#define CAUSE_STORE_FAULT       7
+#define CAUSE_ECALL_U           8
+#define CAUSE_INSN_PAGE_FAULT   12
+#define CAUSE_LOAD_PAGE_FAULT   13
+#define CAUSE_STORE_PAGE_FAULT  15
+
+#define CAUSE_INTR_MASK         (1UL << 63)
+#define CAUSE_CODE_MASK         ((1UL << 63) - 1)
 
 /* Memory protection flags */
 #define PROT_READ      1
@@ -287,5 +302,15 @@
 
 /* Kernel trap context size (without last_a0 and kernel_tp) */
 #define KTRAP_CONTEXT_SIZE  (34 * 8)
+
+/* sstatus bits */
+#define SSTATUS_SIE     (1UL << 1)
+#define SSTATUS_SPIE    (1UL << 5)
+#define SSTATUS_SPP     (1UL << 8)
+#define SSTATUS_FS_OFF    (0UL << 13)
+#define SSTATUS_FS_INITIAL (1UL << 13)
+#define SSTATUS_FS_CLEAN   (2UL << 13)
+#define SSTATUS_FS_DIRTY   (3UL << 13)
+#define SSTATUS_FS_MASK    (3UL << 13)
 
 #endif /* _CONSTS_H */

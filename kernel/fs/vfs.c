@@ -527,6 +527,16 @@ int vfs_open(const char *path, int flags, int mode) {
         if (fd < 0) { kfree(vf); return -EMFILE; }
         return fd;
     }
+    if (strcmp(resolved, "/dev/tty") == 0) {
+        vfile_t *vf = (vfile_t *)kmalloc(sizeof(vfile_t));
+        if (!vf) return -ENOMEM;
+        memset(vf, 0, sizeof(*vf));
+        /* Map it directly to UART (stdin/stdout) for now */
+        vf->ops = &g_stdin_ops; vf->ref_count = 1;
+        int fd = vfs_alloc_fd(vf);
+        if (fd < 0) { kfree(vf); return -EMFILE; }
+        return fd;
+    }
 
     /* Find mount point */
     mount_t *mnt = vfs_find_mount(resolved);
@@ -795,8 +805,7 @@ static int pipe_read(vfile_t *vf, char *buf, size_t count) {
     if (!pb) return -EBADF;
     while (pb->used == 0) {
         if (pb->writer_closed) return 0; /* EOF */
-        /* Busy-wait (simple implementation) */
-        __asm__ volatile("nop");
+        proc_yield();
     }
     size_t n = pb->used < count ? pb->used : count;
     for (size_t i = 0; i < n; i++) {
@@ -813,7 +822,7 @@ static int pipe_write(vfile_t *vf, const char *buf, size_t count) {
     if (pb->reader_closed) return -EPIPE;
     size_t n = 0;
     while (n < count) {
-        while (pb->used == PIPE_BUF_SIZE) __asm__ volatile("nop");
+        while (pb->used == PIPE_BUF_SIZE) proc_yield();
         pb->data[pb->head] = buf[n++];
         pb->head = (pb->head + 1) % PIPE_BUF_SIZE;
         pb->used++;

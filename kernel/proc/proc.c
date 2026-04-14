@@ -142,7 +142,7 @@ static void init_task_common(task_t *t, task_t *parent) {
     t->fd_table[1] = 1;
     t->fd_table[2] = 2;
     if (parent) {
-        for (int i = 3; i < MAX_FILES; i++) t->fd_table[i] = parent->fd_table[i];
+        vfs_proc_copy_fds(parent->fd_table, t->fd_table);
     }
 
     /* Signal state */
@@ -206,10 +206,11 @@ int proc_alloc_user(uint64_t entry, uint64_t sp, uint64_t *pgdir) {
     trap->sepc   = entry;
     trap->x[0]   = pgdir ? MAKE_SATP(pgdir) : 0;
     trap->x[2]   = sp;
-    trap->sstatus = 0;
+    trap->sstatus = SSTATUS_SPIE | SSTATUS_FS_CLEAN;
 
     t->trap_ctx = trap;
     t->ustack   = sp;
+    t->mmap_base = 0x40000000UL;
 
     task_context_t *ctx = (task_context_t *)((uint64_t)trap - sizeof(task_context_t));
     memset(ctx, 0, sizeof(*ctx));
@@ -374,7 +375,7 @@ int proc_exec(const char *path, char *const argv[], char *const envp[]) {
         trap->x[0]      = MAKE_SATP(info.pgdir);
         trap->x[2]      = saved_sp;
         trap->kernel_tp = (uint64_t)(uintptr_t)t;
-        trap->sstatus   = 0x0UL;
+        trap->sstatus   = SSTATUS_SPIE | SSTATUS_FS_CLEAN;
 
         task_context_t *ctx = (task_context_t *)((uint64_t)trap - sizeof(task_context_t));
         ctx->satp = MAKE_SATP(info.pgdir);
@@ -382,6 +383,7 @@ int proc_exec(const char *path, char *const argv[], char *const envp[]) {
 
     t->exec_load_addr = info.load_addr;
     t->exec_load_size = info.load_size;
+    t->mmap_base = 0x40000000UL;
 
     pt_destroy_user(old_pgdir);
 
