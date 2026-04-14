@@ -147,6 +147,7 @@ int64_t syscall_dispatch(trap_context_t *ctx) {
     case SYS_getppid:     ret = sys_getppid();                                        break;
     case SYS_gettid:      ret = sys_getpid();                                         break;
     case SYS_set_tid_address: ret = sys_getpid();                                     break;
+    case SYS_set_robust_list: ret = 0;                                                break;
     case SYS_getuid:      ret = 0;                                                    break;
     case SYS_geteuid:     ret = 0;                                                    break;
     case SYS_getgid:      ret = 0;                                                    break;
