@@ -51,10 +51,17 @@ void trap_handler(trap_context_t *ctx) {
         if (code == CAUSE_ECALL_U) {
             ctx->sepc += 4;
             syscall_dispatch(ctx);
+        } else if (code == CAUSE_LOAD_PAGE_FAULT || code == CAUSE_STORE_PAGE_FAULT || code == CAUSE_INSN_PAGE_FAULT) {
+            kerr("User Page Fault: scause=0x%lx sepc=0x%lx stval=0x%lx\n",
+                    scause, sepc, stval);
+            proc_exit(-SIGSEGV);
+        } else if (code == CAUSE_ILLEGAL_INSN) {
+            kerr("User Illegal Instruction: sepc=0x%lx\n", sepc);
+            proc_exit(-SIGILL);
         } else {
-            kdebug("TRAP: scause=0x%lx sepc=0x%lx stval=0x%lx\n",
-                   scause, sepc, stval);
-            panic("Unhandled user trap");
+            kerr("TRAP EXCEPTION: scause=0x%lx code=%lu sepc=0x%lx stval=0x%lx\n",
+                   scause, code, sepc, stval);
+            proc_exit(-1);
         }
     }
 }
