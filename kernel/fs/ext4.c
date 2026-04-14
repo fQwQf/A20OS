@@ -1075,11 +1075,8 @@ static vnode_t *ext4_make_vnode(ext4_sb_info_t *sb, uint32_t ino, uint32_t sz,
  * Mount / Unmount
  * ================================================================ */
 
-static ext4_sb_info_t g_ext4_sb;
-
 vnode_t *ext4_mount(bcache_t *bc) {
     ext4_superblock_t sb;
-    /* Superblock is at byte offset 1024 */
     if (bcache_read_bytes(bc, 1024, &sb, sizeof(sb)) < 0) {
         printf("[EXT4] Failed to read superblock\n");
         return NULL;
@@ -1095,77 +1092,86 @@ vnode_t *ext4_mount(bcache_t *bc) {
     if (sb.s_rev_level == EXT4_DYNAMIC_REV && sb.s_desc_size >= 32)
         desc_size = sb.s_desc_size;
 
-    if (sb.s_rev_level == EXT4_DYNAMIC_REV && sb.s_feature_incompat & EXT4_FEATURE_INCOMPAT_64BIT)
-        g_ext4_sb.inodes_count = sb.s_inodes_count;
-    else
-        g_ext4_sb.inodes_count = sb.s_inodes_count;
+    ext4_sb_info_t *esi = (ext4_sb_info_t *)kmalloc(sizeof(ext4_sb_info_t));
+    if (!esi) {
+        printf("[EXT4] Failed to allocate sb_info\n");
+        return NULL;
+    }
+    memset(esi, 0, sizeof(*esi));
+
+    esi->inodes_count = sb.s_inodes_count;
 
     uint32_t blocks_count = sb.s_blocks_count_lo;
     uint32_t groups = (blocks_count - sb.s_first_data_block + sb.s_blocks_per_group - 1)
                       / sb.s_blocks_per_group;
 
-    g_ext4_sb.block_size   = block_size;
-    g_ext4_sb.blocks_per_group = sb.s_blocks_per_group;
-    g_ext4_sb.inodes_per_group = sb.s_inodes_per_group;
-    g_ext4_sb.inode_size   = (sb.s_rev_level == EXT4_DYNAMIC_REV) ? sb.s_inode_size : 128;
-    g_ext4_sb.first_data_block = sb.s_first_data_block;
-    g_ext4_sb.groups_count = groups;
-    g_ext4_sb.addr_per_block = block_size / 4;
-    g_ext4_sb.desc_size     = desc_size;
-    g_ext4_sb.s_feature_incompat = sb.s_feature_incompat;
-    g_ext4_sb.s_feature_ro_compat = sb.s_feature_ro_compat;
-    g_ext4_sb.bc           = bc;
+    esi->block_size   = block_size;
+    esi->blocks_per_group = sb.s_blocks_per_group;
+    esi->inodes_per_group = sb.s_inodes_per_group;
+    esi->inode_size   = (sb.s_rev_level == EXT4_DYNAMIC_REV) ? sb.s_inode_size : 128;
+    esi->first_data_block = sb.s_first_data_block;
+    esi->groups_count = groups;
+    esi->addr_per_block = block_size / 4;
+    esi->desc_size     = desc_size;
+    esi->s_feature_incompat = sb.s_feature_incompat;
+    esi->s_feature_ro_compat = sb.s_feature_ro_compat;
+    esi->bc           = bc;
 
-    /* Block group descriptor table starts in the block after the superblock */
     uint64_t gd_start;
     if (block_size == 1024)
-        gd_start = 2048; /* block 2 */
+        gd_start = 2048;
     else
         gd_start = (uint64_t)(sb.s_first_data_block + 1) * block_size;
-    g_ext4_sb.block_group_desc_table_byte = gd_start;
+    esi->block_group_desc_table_byte = gd_start;
 
-    /* Read group descriptors */
     size_t gd_total = (size_t)groups * desc_size;
-    g_ext4_sb.group_descs = (ext4_group_desc_t *)kmalloc(gd_total);
-    if (!g_ext4_sb.group_descs) {
+    esi->group_descs = (ext4_group_desc_t *)kmalloc(gd_total);
+    if (!esi->group_descs) {
         printf("[EXT4] Failed to allocate group descriptors\n");
+        kfree(esi);
         return NULL;
     }
-    memset(g_ext4_sb.group_descs, 0, gd_total);
-    if (bcache_read_bytes(bc, gd_start, g_ext4_sb.group_descs, gd_total) < 0) {
+    memset(esi->group_descs, 0, gd_total);
+    if (bcache_read_bytes(bc, gd_start, esi->group_descs, gd_total) < 0) {
         printf("[EXT4] Failed to read group descriptors\n");
-        kfree(g_ext4_sb.group_descs);
+        kfree(esi->group_descs);
+        kfree(esi);
         return NULL;
     }
 
     printf("[EXT4] Mounted: block_size=%u groups=%u inode_size=%u inodes/group=%u\n",
-           block_size, groups, g_ext4_sb.inode_size, sb.s_inodes_per_group);
+           block_size, groups, esi->inode_size, sb.s_inodes_per_group);
 
-    /* Read root inode */
     ext4_inode_t root_inode;
-    if (ext4_read_inode(&g_ext4_sb, EXT4_ROOT_INO, &root_inode) < 0) {
+    if (ext4_read_inode(esi, EXT4_ROOT_INO, &root_inode) < 0) {
         printf("[EXT4] Failed to read root inode\n");
-        kfree(g_ext4_sb.group_descs);
+        kfree(esi->group_descs);
+        kfree(esi);
         return NULL;
     }
 
-    vnode_t *root = ext4_make_vnode(&g_ext4_sb, EXT4_ROOT_INO,
+    vnode_t *root = ext4_make_vnode(esi, EXT4_ROOT_INO,
                                      root_inode.i_size_lo, 1, NULL);
     if (!root) {
-        kfree(g_ext4_sb.group_descs);
+        kfree(esi->group_descs);
+        kfree(esi);
         return NULL;
     }
-    root->parent = root; /* root's parent is itself */
+    root->parent = root;
     return root;
 }
 
 void ext4_unmount(vnode_t *root) {
-    bcache_sync(g_ext4_sb.bc);
-    if (root && root->ops && root->ops->release) root->ops->release(root);
-    if (g_ext4_sb.group_descs) {
-        kfree(g_ext4_sb.group_descs);
-        g_ext4_sb.group_descs = NULL;
+    if (!root || !root->fs_data) return;
+    ext4_vnode_priv_t *fp = (ext4_vnode_priv_t *)root->fs_data;
+    ext4_sb_info_t *esi = fp->sb;
+    bcache_sync(esi->bc);
+    if (root->ops && root->ops->release) root->ops->release(root);
+    if (esi->group_descs) {
+        kfree(esi->group_descs);
+        esi->group_descs = NULL;
     }
+    kfree(esi);
 }
 
 /* ================================================================
