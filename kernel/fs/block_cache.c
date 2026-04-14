@@ -100,6 +100,8 @@ bcache_entry_t *bcache_get(bcache_t *bc, uint64_t lba) {
         if (r < 0) {
             printf("[BCACHE] read error lba=%lu\n", (unsigned long)lba);
             e->ref = 0;
+            e->lba = (uint64_t)-1;
+            lru_insert_front(bc, e);
             return NULL;
         }
     } else {
