@@ -694,6 +694,66 @@ static int is_builtin_cmd(const char *name) {
     return 0;
 }
 
+static int execute_line(char *argv[], int argc);
+
+static int run_script(const char *path, int argc, char *argv[]) {
+    int fd = open(path, O_RDONLY, 0);
+    if (fd < 0) { printf("sh: %s: cannot open\n", path); return 126; }
+
+    off_t sz = lseek(fd, 0, SEEK_END);
+    if (sz <= 0) { close(fd); return 0; }
+    lseek(fd, 0, SEEK_SET);
+
+    char *buf = (char *)malloc(sz + 1);
+    if (!buf) { close(fd); printf("sh: out of memory\n"); return 126; }
+    int n = read(fd, buf, sz);
+    close(fd);
+    if (n < 0) { free(buf); return 126; }
+    buf[n] = '\0';
+
+    /* Skip shebang line */
+    char *p = buf;
+    if (p[0] == '#' && p[1] == '!') {
+        while (*p && *p != '\n') p++;
+        if (*p == '\n') p++;
+    }
+
+    /* Set script positional parameters: $0=script path, $1..$n=arguments */
+    char *saved_argv0 = NULL;
+    char old0buf[256];
+    if (argc > 0) {
+        saved_argv0 = argv[0];
+        strncpy(old0buf, argv[0], sizeof(old0buf) - 1);
+        old0buf[sizeof(old0buf) - 1] = '\0';
+        argv[0] = (char *)path;
+    }
+
+    int ret = 0;
+    while (*p) {
+        char *line_start = p;
+        while (*p && *p != '\n') p++;
+        int line_len = p - line_start;
+        if (*p == '\n') p++;
+
+        char line[MAX_LINE];
+        if (line_len >= MAX_LINE) line_len = MAX_LINE - 1;
+        memcpy(line, line_start, line_len);
+        line[line_len] = '\0';
+
+        while (line_len > 0 && (line[line_len-1] == ' ' || line[line_len-1] == '\t'
+              || line[line_len-1] == '\r')) { line[--line_len] = '\0'; }
+        if (!line[0] || line[0] == '#') continue;
+
+        char *toks[MAX_ARGS];
+        int ntoks = tokenize(line, toks, MAX_ARGS);
+        if (ntoks > 0) ret = execute_line(toks, ntoks);
+    }
+
+    if (saved_argv0) argv[0] = old0buf;
+    free(buf);
+    return ret;
+}
+
 static int execute_cmd(cmd_t *cmd) {
     if (cmd->argc == 0) return 0;
 
@@ -758,6 +818,21 @@ static int execute_cmd(cmd_t *cmd) {
     if (find_in_path(name, path, sizeof(path)) < 0) {
         printf("sh: %s: command not found\n", name);
         return 127;
+    }
+
+    /* Check if the file is a script (not ELF) */
+    {
+        int fd = open(path, O_RDONLY, 0);
+        if (fd >= 0) {
+            char magic[4];
+            int n = read(fd, magic, 4);
+            close(fd);
+            if (n < 4 || magic[0] != 0x7f || magic[1] != 'E'
+                       || magic[2] != 'L'  || magic[3] != 'F') {
+                /* Not ELF — execute as shell script */
+                return run_script(path, cmd->argc, cmd->argv);
+            }
+        }
     }
 
     /*

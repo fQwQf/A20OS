@@ -145,7 +145,7 @@ typedef struct block_dev {
  * Public API
  * ============================================================ */
 
-#define VIRTIO_MAX_DEVS  2
+#define VIRTIO_MAX_DEVS 5
 
 /* Initialize virtio-blk at given MMIO base address (auto-assigns slot) */
 int  virtio_blk_init(uintptr_t mmio_base);
