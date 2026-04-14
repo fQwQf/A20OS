@@ -78,10 +78,21 @@ int virtio_blk_init(uintptr_t mmio_base) {
     arch_mb();
 
     mmio_write32(base, VIRTIO_MMIO_DEVICE_FEATURES_SEL, 0);
-    uint32_t features = mmio_read32(base, VIRTIO_MMIO_DEVICE_FEATURES);
-    features &= 0x0;
+    mmio_read32(base, VIRTIO_MMIO_DEVICE_FEATURES);
     mmio_write32(base, VIRTIO_MMIO_DRIVER_FEATURES_SEL, 0);
-    mmio_write32(base, VIRTIO_MMIO_DRIVER_FEATURES, features);
+    mmio_write32(base, VIRTIO_MMIO_DRIVER_FEATURES, 0);
+
+    /* Negotiate feature bits 32-63 — MUST accept VIRTIO_F_VERSION_1 (bit 32)
+     * for non-legacy (v2) devices, otherwise QEMU's virtio core may silently
+     * reject requests or behave unpredictably. */
+    mmio_write32(base, VIRTIO_MMIO_DEVICE_FEATURES_SEL, 1);
+    uint32_t features_hi = mmio_read32(base, VIRTIO_MMIO_DEVICE_FEATURES);
+    uint32_t driver_hi = 0;
+    if (!inst->blk.legacy) {
+        driver_hi = features_hi & VIRTIO_F_VERSION_1_BIT;
+    }
+    mmio_write32(base, VIRTIO_MMIO_DRIVER_FEATURES_SEL, 1);
+    mmio_write32(base, VIRTIO_MMIO_DRIVER_FEATURES, driver_hi);
     arch_mb();
 
     if (!inst->blk.legacy) {
@@ -91,7 +102,8 @@ int virtio_blk_init(uintptr_t mmio_base) {
 
         uint32_t s = mmio_read32(base, VIRTIO_MMIO_STATUS);
         if (!(s & VIRTIO_STATUS_FEATURES_OK)) {
-            printf("[VIRTIO%d] Device rejected features\n", idx);
+            printf("[VIRTIO%d] Device rejected features (lo=0x%x hi=0x%x)\n",
+                   idx, 0, driver_hi);
             return -1;
         }
     }
@@ -224,14 +236,18 @@ static int virtio_blk_rw(int idx, uint64_t lba, void *buf, size_t sectors, int w
     }
 
     if (timeout == 0) {
-        printf("[VIRTIO%d] I/O timeout!\n", idx);
+        uint32_t dev_status = mmio_read32((uintptr_t)inst->blk.base, VIRTIO_MMIO_STATUS);
+        printf("[VIRTIO%d] I/O timeout! lba=%lu dev_status=0x%x\n",
+               idx, (unsigned long)lba, dev_status);
         return -1;
     }
 
+    arch_rmb();
     inst->blk.last_used = used->idx;
 
     if (inst->status[0] != VIRTIO_BLK_S_OK) {
-        printf("[VIRTIO%d] I/O error: status=%d\n", idx, inst->status[0]);
+        printf("[VIRTIO%d] I/O error: status=%d lba=%lu\n",
+               idx, inst->status[0], (unsigned long)lba);
         return -1;
     }
 
