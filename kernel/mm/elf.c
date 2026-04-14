@@ -18,7 +18,7 @@
 #include "defs.h"
 
 #define USER_STACK_TOP_VA  0x7FFFF000UL
-#define USER_STACK_PAGES   16
+#define USER_STACK_PAGES   64
 #define USER_DYN_BASE      0x10000UL
 
 int elf_check_header(const Elf64_Ehdr *eh) {
@@ -123,7 +123,7 @@ int elf_load_from_buf(const void *buf, size_t len, elf_load_info_t *info) {
     info->base      = base;
     info->end_va    = max_va;
     info->brk       = ROUND_UP(max_va, PAGE_SIZE);
-    info->phdr_va   = eh->e_phoff + load_bias;
+    info->phdr_va   = base + eh->e_phoff;
     info->phnum     = eh->e_phnum;
     info->phentsize = eh->e_phentsize;
     info->load_addr = base;
@@ -158,9 +158,20 @@ int elf_load(int fd, elf_load_info_t *info) {
     pt_map_kernel(pgdir);
 
     uint64_t load_bias = (eh.e_type == ET_DYN) ? USER_DYN_BASE : 0;
-    uint64_t base = 0, max_va = 0;
+    uint64_t base = 0, max_va = 0, head_va = 0;
+
+    int has_interp = 0;
+    char interp_path[MAX_PATH_LEN];
 
     for (int i = 0; i < nph; i++) {
+        if (phdrs[i].p_type == PT_INTERP) {
+            has_interp = 1;
+            vfs_lseek(fd, (long)phdrs[i].p_offset, SEEK_SET);
+            int len = phdrs[i].p_filesz < MAX_PATH_LEN ? (int)phdrs[i].p_filesz : MAX_PATH_LEN - 1;
+            vfs_read(fd, interp_path, (size_t)len);
+            interp_path[len] = '\0';
+            continue;
+        }
         if (phdrs[i].p_type != PT_LOAD) continue;
 
         uint64_t seg_va = phdrs[i].p_vaddr + load_bias;
@@ -181,8 +192,15 @@ int elf_load(int fd, elf_load_info_t *info) {
 
         uint64_t seg_start = seg_va & ~(PAGE_SIZE - 1);
         uint64_t seg_end   = ROUND_UP(seg_va + phdrs[i].p_memsz, PAGE_SIZE);
+        if (phdrs[i].p_offset == 0) head_va = phdrs[i].p_vaddr + load_bias;
         if (base == 0) base = seg_start;
         if (seg_end > max_va) max_va = seg_end;
+    }
+
+    if (has_interp) {
+        printf("[ELF] Dynamic interpreter required: %s (not supported yet)\n", interp_path);
+        pt_destroy_user(pgdir);
+        return -ENOSYS;
     }
 
     uint64_t stack_top;
@@ -193,7 +211,7 @@ int elf_load(int fd, elf_load_info_t *info) {
     info->base      = base;
     info->end_va    = max_va;
     info->brk       = ROUND_UP(max_va, PAGE_SIZE);
-    info->phdr_va   = eh.e_phoff + load_bias;
+    info->phdr_va   = head_va ? (head_va + eh.e_phoff) : (base + eh.e_phoff);
     info->phnum     = (uint32_t)nph;
     info->phentsize = eh.e_phentsize;
     info->load_addr = base;
@@ -213,6 +231,12 @@ int elf_load(int fd, elf_load_info_t *info) {
 #define AT_FLAGS    8
 #define AT_ENTRY    9
 #define AT_RANDOM   25
+#define AT_UID      11
+#define AT_EUID     12
+#define AT_GID      13
+#define AT_EGID     14
+#define AT_CLKTCK   17
+#define AT_HWCAP    16
 
 static void *phys_for_va(uint64_t *pgdir, uint64_t va) {
     paddr_t pa = pt_translate(pgdir, va);
@@ -252,15 +276,31 @@ uint64_t elf_setup_stack(uint64_t stack_top, int argc, char *const argv[],
     arg_ptrs[argc] = 0;
 
     sp_va &= ~15UL;
+    
+    /* 16 bytes for AT_RANDOM */
+    sp_va -= 16;
+    uint64_t random_va = sp_va;
+    {
+        void *dst = phys_for_va(pgdir, sp_va);
+        if (!dst) return 0;
+        /* Put some semi-random entropy */
+        for (int i = 0; i < 16; i++) ((uint8_t *)dst)[i] = (uint8_t)(i ^ 0xAA);
+    }
 
     uint64_t auxv[][2] = {
         { AT_PHDR,   info->phdr_va  },
         { AT_PHENT,  info->phentsize },
         { AT_PHNUM,  info->phnum     },
         { AT_PAGESZ, PAGE_SIZE       },
-        { AT_BASE,   info->base      },
+        { AT_BASE,   0               }, /* 0 for static binaries */
         { AT_FLAGS,  0               },
         { AT_ENTRY,  info->entry     },
+        { AT_UID,    0               },
+        { AT_EUID,   0               },
+        { AT_GID,    0               },
+        { AT_EGID,   0               },
+        { AT_CLKTCK, 100             },
+        { AT_RANDOM, random_va       },
         { AT_NULL,   0               },
     };
     int naux = (int)(sizeof(auxv) / sizeof(auxv[0]));
@@ -292,5 +332,9 @@ uint64_t elf_setup_stack(uint64_t stack_top, int argc, char *const argv[],
         *(uint64_t *)dst = (uint64_t)argc;
     }
 
+    uint64_t total_pushed = (1 + argc + 1 + envc + 1) * 8 + naux * 16;
+    if (total_pushed % 16 != 0) sp_va -= 16 - (total_pushed % 16);
+    sp_va &= ~15UL;
+    
     return sp_va;
 }
