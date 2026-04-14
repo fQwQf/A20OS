@@ -7,7 +7,7 @@
 #include "syscall.h"
 #include "fs.h"
 #include "timer.h"
-#include "plat_irq.h"
+#include "plic.h"
 #include "string.h"
 #include "consts.h"
 #include "defs.h"
@@ -16,7 +16,6 @@
 #include "virtio_blk.h"
 #include "block_cache.h"
 #include "klog.h"
-#include "arch_ops.h"
 
 /* Forward declarations */
 void init_kthread(void);
@@ -88,8 +87,6 @@ static int try_mount(int dev_idx, const char *mnt, const char *fstype) {
 }
 
 void kernel_main(void) {
-    uart_init();
-
     printf("\n");
     printf("======================================\n");
     printf("    A20OS Kernel \n");
@@ -98,13 +95,15 @@ void kernel_main(void) {
     printf("  (contest mode)\n");
 #endif
     printf("Initializing system...\n");
+    /* Initialize subsystems */
+    uart_init();
     printf("[INIT] UART initialized\n");
 
     timer_init();
     printf("[INIT] Timer initialized\n");
 
-    plat_irq_init();
-    printf("[INIT] IRQ controller initialized\n");
+    plic_init();
+    printf("[INIT] PLIC initialized\n");
 
     mm_init();
     printf("[INIT] Memory manager initialized\n");
@@ -157,6 +156,9 @@ void kernel_main(void) {
     printf("Welcome to AAAAAAAAAAAAAAAAAAAAOS!\n\n");
 #endif
 
+    /* Start scheduler — switches to init_kthread. When idle is later
+     * restored via context_switch, execution returns here. Enter
+     * idle_loop so the scheduler keeps running (wfi + proc_yield). */
     sched();
     idle_loop();
 }
@@ -166,7 +168,7 @@ void init_kthread(void) {
     kdebug("[INIT] Init process started (pid=%d)\n", cur ? cur->pid : 0);
 
     for (int i = 0; i < 1000000; i++) {
-        arch_cpu_relax();
+        __asm__ volatile("nop");
     }
 
     kdebug("[INIT] Loading init program...\n");

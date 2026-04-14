@@ -1,6 +1,5 @@
 #include "virtio_blk.h"
 #include "mm.h"
-#include "arch_ops.h"
 #include "string.h"
 #include "stdio.h"
 #include "panic.h"
@@ -71,11 +70,11 @@ int virtio_blk_init(uintptr_t mmio_base) {
            idx, (unsigned long)base, version);
 
     mmio_write32(base, VIRTIO_MMIO_STATUS, 0);
-    arch_mb();
+    mb();
 
     uint32_t status = VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER;
     mmio_write32(base, VIRTIO_MMIO_STATUS, status);
-    arch_mb();
+    mb();
 
     mmio_write32(base, VIRTIO_MMIO_DEVICE_FEATURES_SEL, 0);
     mmio_read32(base, VIRTIO_MMIO_DEVICE_FEATURES);
@@ -93,13 +92,12 @@ int virtio_blk_init(uintptr_t mmio_base) {
     }
     mmio_write32(base, VIRTIO_MMIO_DRIVER_FEATURES_SEL, 1);
     mmio_write32(base, VIRTIO_MMIO_DRIVER_FEATURES, driver_hi);
-    arch_mb();
+    mb();
 
     if (!inst->blk.legacy) {
         status |= VIRTIO_STATUS_FEATURES_OK;
         mmio_write32(base, VIRTIO_MMIO_STATUS, status);
-        arch_mb();
-
+        mb();
         uint32_t s = mmio_read32(base, VIRTIO_MMIO_STATUS);
         if (!(s & VIRTIO_STATUS_FEATURES_OK)) {
             printf("[VIRTIO%d] Device rejected features (lo=0x%x hi=0x%x)\n",
@@ -137,9 +135,9 @@ int virtio_blk_init(uintptr_t mmio_base) {
 
         uint64_t vq_pa = (uint64_t)(uintptr_t)inst->legacy_vq;
         mmio_write32(base, VIRTIO_MMIO_GUEST_PAGE_SIZE, 4096);
-        arch_mb();
+        mb();
         mmio_write32(base, VIRTIO_MMIO_QUEUE_PFN, (uint32_t)(vq_pa / 4096));
-        arch_mb();
+        mb();
     } else {
         uint64_t desc_pa  = (uint64_t)(uintptr_t)inst->desc;
         uint64_t avail_pa = (uint64_t)(uintptr_t)&inst->avail;
@@ -151,15 +149,14 @@ int virtio_blk_init(uintptr_t mmio_base) {
         mmio_write32(base, VIRTIO_MMIO_QUEUE_DRIVER_HIGH,(uint32_t)(avail_pa >> 32));
         mmio_write32(base, VIRTIO_MMIO_QUEUE_DEVICE_LOW, (uint32_t)(used_pa));
         mmio_write32(base, VIRTIO_MMIO_QUEUE_DEVICE_HIGH,(uint32_t)(used_pa  >> 32));
-        arch_mb();
-
+        mb();
         mmio_write32(base, VIRTIO_MMIO_QUEUE_READY, 1);
-        arch_mb();
+        mb();
     }
 
     status |= VIRTIO_STATUS_DRIVER_OK;
     mmio_write32(base, VIRTIO_MMIO_STATUS, status);
-    arch_mb();
+    mb();
 
     uint64_t cap_lo = mmio_read32(base, VIRTIO_MMIO_CONFIG + 0);
     uint64_t cap_hi = mmio_read32(base, VIRTIO_MMIO_CONFIG + 4);
@@ -222,17 +219,17 @@ static int virtio_blk_rw(int idx, uint64_t lba, void *buf, size_t sectors, int w
 
     uint16_t avail_slot = avail->idx % VIRTIO_QUEUE_SIZE;
     avail->ring[avail_slot] = 0;
-    arch_wmb();
+    wmb();
     avail->idx++;
-    arch_wmb();
+    wmb();
 
     mmio_write32((uintptr_t)inst->blk.base, VIRTIO_MMIO_QUEUE_NOTIFY, 0);
-    arch_mb();
+    mb();
 
     uint32_t timeout = 10000000;
     while (used->idx == inst->blk.last_used && timeout > 0) {
         timeout--;
-        arch_cpu_relax();
+        __asm__ volatile("nop");
     }
 
     if (timeout == 0) {
@@ -242,7 +239,7 @@ static int virtio_blk_rw(int idx, uint64_t lba, void *buf, size_t sectors, int w
         return -1;
     }
 
-    arch_rmb();
+    rmb();
     inst->blk.last_used = used->idx;
 
     if (inst->status[0] != VIRTIO_BLK_S_OK) {

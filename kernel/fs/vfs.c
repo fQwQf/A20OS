@@ -22,7 +22,6 @@
 #include "consts.h"
 #include "defs.h"
 #include "klog.h"
-#include "arch_ops.h"
 #include "virtio_blk.h"
 #include "block_cache.h"
 
@@ -797,7 +796,7 @@ static int pipe_read(vfile_t *vf, char *buf, size_t count) {
     while (pb->used == 0) {
         if (pb->writer_closed) return 0; /* EOF */
         /* Busy-wait (simple implementation) */
-        arch_cpu_relax();
+        __asm__ volatile("nop");
     }
     size_t n = pb->used < count ? pb->used : count;
     for (size_t i = 0; i < n; i++) {
@@ -814,7 +813,7 @@ static int pipe_write(vfile_t *vf, const char *buf, size_t count) {
     if (pb->reader_closed) return -EPIPE;
     size_t n = 0;
     while (n < count) {
-        while (pb->used == PIPE_BUF_SIZE) arch_cpu_relax();
+        while (pb->used == PIPE_BUF_SIZE) __asm__ volatile("nop");
         pb->data[pb->head] = buf[n++];
         pb->head = (pb->head + 1) % PIPE_BUF_SIZE;
         pb->used++;

@@ -1,5 +1,6 @@
-#include "arch_ops.h"
+#include "defs.h"
 #include "timer.h"
+#include "sbi.h"
 
 static uint64_t timer_freq;
 
@@ -10,17 +11,21 @@ void timer_init(void) {
 
 void timer_set_interval(uint64_t ticks) {
     uint64_t now = timer_get_ticks();
-    arch_timer_program(now + ticks);
+    sbi_set_timer(now + ticks);
 }
 
 uint64_t timer_get_ticks(void) {
-    return arch_timer_counter();
+    uint64_t val;
+    __asm__ volatile("csrr %0, time" : "=r"(val));
+    return val;
 }
 
 void timer_enable(void) {
-    arch_irq_enable_timer();
+    uint64_t sie = r_sie();
+    w_sie(sie | SIE_STIE);
 }
 
 void timer_disable(void) {
-    arch_irq_disable_timer();
+    uint64_t sie = r_sie();
+    w_sie(sie & ~SIE_STIE);
 }
