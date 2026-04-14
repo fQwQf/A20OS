@@ -64,6 +64,10 @@ int uart_try_getc(void) {
     return (int)(unsigned char)c;
 }
 
+int uart_has_input(void) {
+    return rx_head != rx_tail;
+}
+
 void uart_puts(const char *s) {
     while (*s) uart_putc(*s++);
 }

@@ -39,18 +39,23 @@ typedef struct kstat {
     uint32_t st_nlink;
     uint32_t st_uid;
     uint32_t st_gid;
+    uint64_t st_rdev;
     uint64_t st_size;
     uint64_t st_blksize;
     uint64_t st_blocks;
     uint64_t st_atime;
+    uint64_t st_atime_nsec;
     uint64_t st_mtime;
+    uint64_t st_mtime_nsec;
     uint64_t st_ctime;
+    uint64_t st_ctime_nsec;
 } kstat_t;
 
 /* ---- Mode bits ---- */
 #define S_IFMT   0170000
 #define S_IFREG  0100000
 #define S_IFDIR  0040000
+#define S_IFCHR  0020000
 #define S_IRUSR  0400
 #define S_IWUSR  0200
 #define S_IXUSR  0100
@@ -69,6 +74,8 @@ typedef struct vnode_ops {
     int     (*unlink)(struct vnode *dir, const char *name);
     int     (*rename)(struct vnode *old_dir, const char *old_name,
                       struct vnode *new_dir, const char *new_name);
+    int     (*link)(struct vnode *dir, const char *name, struct vnode *target);
+    int     (*symlink)(struct vnode *dir, const char *name, const char *target);
     int     (*stat)(struct vnode *vn, kstat_t *st);
     int     (*truncate)(struct vnode *vn, size_t size);
     void    (*release)(struct vnode *vn);
@@ -156,6 +163,8 @@ int      vfs_fstat(int fd, kstat_t *st);
 int      vfs_fstatat(int dirfd, const char *path, kstat_t *st, int flags);
 int      vfs_faccessat(int dirfd, const char *path, int mode);
 int      vfs_readlinkat(int dirfd, const char *path, char *buf, size_t sz);
+int      vfs_link(const char *oldpath, const char *newpath);
+int      vfs_symlink(const char *target, const char *linkpath);
 
 /* Working directory */
 int      vfs_chdir(const char *path);
