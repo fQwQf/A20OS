@@ -68,8 +68,11 @@
 
 /* VirtIO descriptor flags */
 #define VIRTQ_DESC_F_NEXT        1
-#define VIRTQ_DESC_F_WRITE       2   /* device writes (read from guest perspective) */
+#define VIRTQ_DESC_F_WRITE       2
 #define VIRTQ_DESC_F_INDIRECT    4
+
+/* VIRTIO_F_VERSION_1 is bit 32 (in the upper 32-bit feature word) */
+#define VIRTIO_F_VERSION_1_BIT   1
 
 /* Queue size (must be power of 2) */
 #define VIRTIO_QUEUE_SIZE        8
