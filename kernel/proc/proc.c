@@ -379,6 +379,11 @@ int proc_exec(const char *path, char *const argv[], char *const envp[]) {
 
         task_context_t *ctx = (task_context_t *)((uint64_t)trap - sizeof(task_context_t));
         ctx->satp = MAKE_SATP(info.pgdir);
+
+        kdebug("[EXEC] trap setup: sepc=0x%lx sp=0x%lx satp=0x%lx ctx=0x%lx kstack=0x%lx\n",
+               (unsigned long)trap->sepc, (unsigned long)trap->x[2],
+               (unsigned long)trap->x[0], (unsigned long)(uintptr_t)ctx,
+               (unsigned long)t->kstack);
     }
 
     t->exec_load_addr = info.load_addr;

@@ -34,6 +34,7 @@
 #define PT_DYNAMIC  2
 #define PT_INTERP   3
 #define PT_NOTE     4
+#define PT_TLS      7
 #define PT_PHDR     6
 #define PT_GNU_STACK 0x6474e551
 
@@ -94,6 +95,9 @@ typedef struct elf_load_info {
     uint64_t  load_addr;
     size_t    load_size;
     uint64_t *pgdir;
+    uint64_t  tls_va;
+    uint64_t  tls_size;
+    uint64_t  tls_tp;
 } elf_load_info_t;
 
 /* ---- API ---- */
