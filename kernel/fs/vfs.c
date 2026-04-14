@@ -305,7 +305,7 @@ static int ramfs_freaddir(vfile_t *vf, void *dirp, size_t count) {
         dir_entry_t *de = &entries[idx];
         if (de->name[0] != '\0') {
             size_t namelen = strlen(de->name);
-            size_t reclen  = (sizeof(linux_dirent64_t) + namelen + 1 + 7) & ~7UL;
+            size_t reclen  = (offsetof(linux_dirent64_t, d_name) + namelen + 1 + 7) & ~7UL;
             if (total + reclen > count) break;
 
             linux_dirent64_t *d = (linux_dirent64_t *)(out + total);
@@ -642,13 +642,24 @@ int vfs_getdents64(int fd, void *dirp, size_t count) {
 }
 
 int vfs_ioctl(int fd, unsigned long req, void *arg) {
-    (void)fd; (void)req; (void)arg;
-    /* TIOCGWINSZ — terminal window size */
-    if (req == 0x5413 /* TIOCGWINSZ */) {
-        uint16_t *ws = (uint16_t *)arg;
-        ws[0] = 24; ws[1] = 80; ws[2] = 0; ws[3] = 0; /* rows, cols */
-        return 0;
+    vfile_t *vf = vfs_get_file(fd);
+    if (!vf) return -EBADF;
+
+    if (fd >= 0 && fd <= 2 && arg) {
+        if (req == TCGETS) {
+            memset(arg, 0, 36);
+            return 0;
+        }
+        if (req == TCSETS || req == TCSETSW || req == TCSETSF) {
+            return 0;
+        }
+        if (req == TIOCGWINSZ) {
+            memset(arg, 0, 8);
+            return 0;
+        }
     }
+
+    if (vf->ops && vf->ops->ioctl) return vf->ops->ioctl(vf, req, arg);
     return -ENOTTY;
 }
 
@@ -724,6 +735,14 @@ int vfs_rename(const char *old, const char *newpath) {
 }
 
 int vfs_stat(const char *path, kstat_t *st) {
+    if (strcmp(path, "/dev/null") == 0 || strcmp(path, "/dev/zero") == 0 ||
+        strcmp(path, "/dev/tty") == 0) {
+        memset(st, 0, sizeof(*st));
+        st->st_mode = S_IFCHR | 0666;
+        st->st_nlink = 1;
+        st->st_blksize = 4096;
+        return 0;
+    }
     vnode_t *vn = vfs_resolve(path);
     if (!vn) return -ENOENT;
     if (vn->ops && vn->ops->stat) {
@@ -740,6 +759,13 @@ int vfs_fstat(int fd, kstat_t *st) {
         vfile_t *vf = g_files[fd];
         if (vf->vnode && vf->vnode->ops && vf->vnode->ops->stat)
             return vf->vnode->ops->stat(vf->vnode, st);
+        if (fd >= 0 && fd <= 2) {
+            memset(st, 0, sizeof(*st));
+            st->st_mode = S_IFCHR | 0666;
+            st->st_nlink = 1;
+            st->st_blksize = 4096;
+            return 0;
+        }
     }
     return -EBADF;
 }
@@ -763,7 +789,17 @@ int vfs_faccessat(int dirfd, const char *path, int mode) {
 
 int vfs_readlinkat(int dirfd, const char *path, char *buf, size_t sz) {
     (void)dirfd; (void)path; (void)buf; (void)sz;
-    return -EINVAL; /* No symlinks in A20OS */
+    return -EINVAL;
+}
+
+int vfs_link(const char *oldpath, const char *newpath) {
+    (void)oldpath; (void)newpath;
+    return -ENOSYS;
+}
+
+int vfs_symlink(const char *target, const char *linkpath) {
+    (void)target; (void)linkpath;
+    return -ENOSYS;
 }
 
 int vfs_chdir(const char *path) {
