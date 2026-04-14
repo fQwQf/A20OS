@@ -1,4 +1,5 @@
 ARCH ?= riscv64
+CONTEST ?= 0
 
 ifeq ($(ARCH), riscv64)
 CROSS_COMPILE ?= riscv64-unknown-elf-
@@ -8,6 +9,10 @@ else ifeq ($(ARCH), loongarch64)
 CROSS_COMPILE ?= loongarch64-unknown-elf-
 CFLAGS = -Wall -Wextra -O2 -fno-builtin -nostdlib -mabi=lp64d -march=loongarch64 -I./lib
 LDFLAGS = -static -nostdlib -Ttext 0x10000
+endif
+
+ifeq ($(CONTEST),1)
+CFLAGS += -DCONTEST
 endif
 
 CC = $(CROSS_COMPILE)gcc
