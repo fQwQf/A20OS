@@ -3,6 +3,7 @@
 
 #include "types.h"
 #include "consts.h"
+#include "trap.h"
 
 /* ============================================================
  * POSIX Signal Handling
@@ -36,8 +37,8 @@ void signal_copy(const signal_state_t *src, signal_state_t *dst);
 /* Queue a signal to a process */
 int  signal_send(int pid, int signum);
 
-/* Check and deliver pending signals for current process */
 void signal_deliver(void);
+void signal_deliver_user(trap_context_t *ctx);
 
 /* System call handlers */
 int  sys_sigaction_impl(int signum, const sigaction_t *act, sigaction_t *oldact);

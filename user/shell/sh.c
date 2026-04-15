@@ -15,7 +15,17 @@
  * Delegates all other commands to execve (via PATH lookup).
  */
 
-#include "../lib/libc.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <termios.h>
+#include <sys/wait.h>
+#include <sys/stat.h>
+#include <dirent.h>
+
+extern char **environ;
 
 /* ============================================================
  * Configuration

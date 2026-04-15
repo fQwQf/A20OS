@@ -44,6 +44,8 @@ void trap_handler(trap_context_t *ctx) {
     uint64_t stval = r_stval();
     uint64_t sepc = r_sepc();
 
+    ctx->x[0] = r_satp();
+
     if (scause & CAUSE_INTR_MASK) {
         handle_irq(scause & CAUSE_CODE_MASK, sepc, 1);
     } else {

@@ -98,6 +98,7 @@ typedef struct elf_load_info {
     uint64_t  tls_va;
     uint64_t  tls_size;
     uint64_t  tls_tp;
+    uint64_t  interp_base;
 } elf_load_info_t;
 
 /* ---- API ---- */
@@ -105,7 +106,7 @@ typedef struct elf_load_info {
 /* Load an ELF file from the filesystem (fd) into current process page tables.
  * Returns 0 on success, negative errno on failure.
  * On success, fills *info with entry point and memory layout. */
-int elf_load(int fd, elf_load_info_t *info);
+int elf_load(int fd, const char *path, elf_load_info_t *info);
 
 /* Load an ELF from a memory buffer (for embedded init binary) */
 int elf_load_from_buf(const void *buf, size_t len, elf_load_info_t *info);
