@@ -89,6 +89,14 @@ void *kmalloc(size_t size) {
         while (blk) {
             if (blk->free && blk->size >= size) {
                 blk->free = 0;
+                if (blk->size >= size + sizeof(struct heap_block) + 16) {
+                    struct heap_block *rem = (struct heap_block *)((char *)blk + sizeof(struct heap_block) + size);
+                    rem->size = blk->size - size - sizeof(struct heap_block);
+                    rem->free = 1;
+                    rem->next = blk->next;
+                    blk->size = size;
+                    blk->next = rem;
+                }
                 return (void *)((char *)blk + sizeof(struct heap_block));
             }
             blk = blk->next;
