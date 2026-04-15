@@ -84,6 +84,7 @@ int64_t sys_sigaction(int signum, void *act, void *oldact);
 int64_t sys_sigprocmask(int how, void *set, void *oldset);
 int64_t sys_sigreturn(void);
 int64_t sys_sigsuspend(void *mask);
+int64_t sys_sigtimedwait(const uint64_t *set, void *info, const void *timeout);
 
 int64_t sys_brk(uint64_t addr);
 int64_t sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, long off);

@@ -55,6 +55,11 @@ typedef struct task_t {
     int       umask;
 
     char      name[64];
+    char      exec_path[MAX_PATH_LEN];
+
+    trap_context_t sig_saved_ctx;
+    uint64_t       sig_old_blocked;
+    int            sig_handling;
 } task_t;
 
 /* ---- Process management API ---- */

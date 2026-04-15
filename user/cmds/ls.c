@@ -1,5 +1,8 @@
 /* ls — list directory contents */
-#include "../lib/libc.h"
+#include <stdio.h>
+#include <string.h>
+#include <dirent.h>
+#include <sys/stat.h>
 
 static void print_size(unsigned long sz) {
     if (sz >= 1024*1024*1024) printf("%4lu G", sz/(1024*1024*1024));

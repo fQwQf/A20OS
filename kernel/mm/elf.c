@@ -20,6 +20,7 @@
 #define USER_STACK_TOP_VA  0x7FFFF000UL
 #define USER_STACK_PAGES   64
 #define USER_DYN_BASE      0x10000UL
+#define INTERP_BASE        0x40000000UL
 #define USER_TLS_VA        0x7F000000UL
 #define TLS_TCB_SIZE       128
 
@@ -76,7 +77,7 @@ static int map_stack(uint64_t *pgdir, uint64_t *stack_top_out) {
         if (!frame) return -ENOMEM;
         memset(frame, 0, PAGE_SIZE);
         int r = pt_map(pgdir, va, (paddr_t)(uintptr_t)frame,
-                        PTE_V | PTE_R | PTE_W | PTE_U | PTE_A | PTE_D);
+                        PTE_V | PTE_R | PTE_W | PTE_X | PTE_U | PTE_A | PTE_D);
         if (r < 0) { frame_free(frame); return r; }
     }
     *stack_top_out = USER_STACK_TOP_VA;
@@ -191,9 +192,10 @@ int elf_load_from_buf(const void *buf, size_t len, elf_load_info_t *info) {
     info->load_size = (size_t)(max_va - base);
     info->pgdir     = pgdir;
     info->stack_top = stack_top;
-    info->tls_va    = 0;
-    info->tls_size  = 0;
-    info->tls_tp    = 0;
+    info->tls_va      = 0;
+    info->tls_size    = 0;
+    info->tls_tp      = 0;
+    info->interp_base = 0;
 
     (void)tls_data;
     (void)tls_filesz;
@@ -207,7 +209,60 @@ int elf_load_from_buf(const void *buf, size_t len, elf_load_info_t *info) {
     return 0;
 }
 
-int elf_load(int fd, elf_load_info_t *info) {
+static int elf_load_interp(uint64_t *pgdir, const char *path, uint64_t *entry_out, uint64_t *base_out) {
+    int fd = vfs_open(path, O_RDONLY, 0);
+    if (fd < 0) return fd;
+
+    Elf64_Ehdr eh;
+    if (vfs_lseek(fd, 0, SEEK_SET) < 0 || vfs_read(fd, (char *)&eh, sizeof(eh)) < (int)sizeof(eh)) {
+        vfs_close(fd);
+        return -ENOEXEC;
+    }
+
+    int r = elf_check_header(&eh);
+    if (r < 0) { vfs_close(fd); return r; }
+
+    Elf64_Phdr phdrs[64];
+    int nph = eh.e_phnum < 64 ? eh.e_phnum : 64;
+    vfs_lseek(fd, (long)eh.e_phoff, SEEK_SET);
+    r = vfs_read(fd, (char *)phdrs, nph * sizeof(Elf64_Phdr));
+    if (r < nph * (int)sizeof(Elf64_Phdr)) { vfs_close(fd); return -ENOEXEC; }
+
+    uint64_t load_bias = INTERP_BASE;
+    uint64_t base = 0, max_va = 0;
+
+    for (int i = 0; i < nph; i++) {
+        if (phdrs[i].p_type != PT_LOAD) continue;
+
+        uint64_t seg_va = phdrs[i].p_vaddr + load_bias;
+
+        void *seg_buf = NULL;
+        if (phdrs[i].p_filesz > 0) {
+            seg_buf = kmalloc((size_t)phdrs[i].p_filesz);
+            if (!seg_buf) { vfs_close(fd); return -ENOMEM; }
+            vfs_lseek(fd, (long)phdrs[i].p_offset, SEEK_SET);
+            int nr = vfs_read(fd, (char *)seg_buf, (size_t)phdrs[i].p_filesz);
+            if (nr < 0) { kfree(seg_buf); vfs_close(fd); return -EIO; }
+        }
+
+        r = map_segment(pgdir, seg_va, phdrs[i].p_memsz,
+                         seg_buf, phdrs[i].p_filesz, seg_flags(phdrs[i].p_flags));
+        if (seg_buf) kfree(seg_buf);
+        if (r < 0) { vfs_close(fd); return r; }
+
+        uint64_t seg_start = seg_va & ~(PAGE_SIZE - 1);
+        uint64_t seg_end   = ROUND_UP(seg_va + phdrs[i].p_memsz, PAGE_SIZE);
+        if (base == 0) base = seg_start;
+        if (seg_end > max_va) max_va = seg_end;
+    }
+
+    vfs_close(fd);
+    *entry_out = eh.e_entry + load_bias;
+    *base_out  = base;
+    return 0;
+}
+
+int elf_load(int fd, const char *path, elf_load_info_t *info) {
     Elf64_Ehdr eh;
     if (vfs_lseek(fd, 0, SEEK_SET) < 0) return -EIO;
     int r = vfs_read(fd, (char *)&eh, sizeof(eh));
@@ -281,32 +336,79 @@ int elf_load(int fd, elf_load_info_t *info) {
         if (seg_end > max_va) max_va = seg_end;
     }
 
+    uint64_t interp_entry = 0;
+    uint64_t interp_base  = 0;
     if (has_interp) {
-        printf("[ELF] Dynamic interpreter required: %s (not supported yet)\n", interp_path);
-        pt_destroy_user(pgdir);
-        return -ENOSYS;
+        const char *interp_to_load = interp_path;
+        char alt_path[512];
+        int interp_fd = vfs_open(interp_path, O_RDONLY, 0);
+        if (interp_fd < 0 && path) {
+            int path_len = (int)strlen(path);
+            int interp_len = (int)strlen(interp_path);
+            for (int i = path_len - 1; i >= 0; i--) {
+                if (path[i] == '/') {
+                    if (i + interp_len + 1 < 512) {
+                        memcpy(alt_path, path, i);
+                        strcpy(alt_path + i, interp_path);
+                        interp_fd = vfs_open(alt_path, O_RDONLY, 0);
+                        if (interp_fd >= 0) { interp_to_load = alt_path; break; }
+                    }
+                }
+            }
+            if (interp_fd < 0 && strstr(interp_path, "ld-musl-riscv64.so.1")) {
+                const char *musl_fallback = "/lib/libc.so";
+                int fallback_len = (int)strlen(musl_fallback);
+                for (int i = path_len - 1; i >= 0; i--) {
+                    if (path[i] == '/') {
+                        if (i + fallback_len + 1 < 512) {
+                            memcpy(alt_path, path, i);
+                            strcpy(alt_path + i, musl_fallback);
+                            interp_fd = vfs_open(alt_path, O_RDONLY, 0);
+                            if (interp_fd >= 0) { interp_to_load = alt_path; break; }
+                        }
+                    }
+                }
+            }
+            if (interp_fd < 0 && strstr(interp_path, "ld-linux-riscv64-lp64d.so.1")) {
+                interp_fd = vfs_open("/testrv/glibc/lib/ld-linux-riscv64-lp64d.so.1", O_RDONLY, 0);
+                if (interp_fd >= 0) interp_to_load = "/testrv/glibc/lib/ld-linux-riscv64-lp64d.so.1";
+            }
+        }
+        if (interp_fd >= 0) vfs_close(interp_fd);
+        if (interp_fd < 0) {
+            printf("[ELF] Cannot open interpreter '%s': %d\n", interp_path, interp_fd);
+            pt_destroy_user(pgdir);
+            return -ENOENT;
+        }
+        r = elf_load_interp(pgdir, interp_to_load, &interp_entry, &interp_base);
+        if (r < 0) {
+            printf("[ELF] Failed to load interpreter '%s': %d\n", interp_to_load, r);
+            pt_destroy_user(pgdir);
+            return r;
+        }
     }
 
     uint64_t stack_top;
     r = map_stack(pgdir, &stack_top);
     if (r < 0) { pt_destroy_user(pgdir); return r; }
 
-    info->entry     = eh.e_entry + load_bias;
-    info->base      = base;
-    info->end_va    = max_va;
-    info->brk       = ROUND_UP(max_va, PAGE_SIZE);
-    info->phdr_va   = head_va ? (head_va + eh.e_phoff) : (base + eh.e_phoff);
-    info->phnum     = (uint32_t)nph;
-    info->phentsize = eh.e_phentsize;
-    info->load_addr = base;
-    info->load_size = (size_t)(max_va - base);
-    info->pgdir     = pgdir;
-    info->stack_top = stack_top;
-    info->tls_va    = 0;
-    info->tls_size  = 0;
-    info->tls_tp    = 0;
+    info->entry      = has_interp ? interp_entry : (eh.e_entry + load_bias);
+    info->base       = base;
+    info->end_va     = max_va;
+    info->brk        = ROUND_UP(max_va, PAGE_SIZE);
+    info->phdr_va    = head_va ? (head_va + eh.e_phoff) : (base + eh.e_phoff);
+    info->phnum      = (uint32_t)nph;
+    info->phentsize  = eh.e_phentsize;
+    info->load_addr  = base;
+    info->load_size  = (size_t)(max_va - base);
+    info->pgdir      = pgdir;
+    info->stack_top  = stack_top;
+    info->tls_va     = 0;
+    info->tls_size   = 0;
+    info->tls_tp     = 0;
+    info->interp_base = interp_base;
 
-    (void)tls_data;
+    kfree(tls_data);
     (void)tls_filesz;
     (void)tls_memsz;
     (void)tls_align;
@@ -389,7 +491,7 @@ uint64_t elf_setup_stack(uint64_t stack_top, int argc, char *const argv[],
         { AT_PHENT,  info->phentsize },
         { AT_PHNUM,  info->phnum     },
         { AT_PAGESZ, PAGE_SIZE       },
-        { AT_BASE,   0               },
+        { AT_BASE,   info->interp_base },
         { AT_FLAGS,  0               },
         { AT_ENTRY,  info->entry     },
         { AT_UID,    0               },

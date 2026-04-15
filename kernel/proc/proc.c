@@ -60,7 +60,7 @@ void proc_init(void) {
     idle->rlim_nofile = MAX_FILES;
     proc_set_name(idle, "idle");
 
-    for (int i = 0; i < MAX_FILES; i++) idle->fd_table[i] = -1;
+    vfs_proc_init_fds(idle->fd_table);
     idle->parent  = NULL;
 
     /* Allocate signal state */
@@ -132,18 +132,17 @@ static void init_task_common(task_t *t, task_t *parent) {
 
     if (parent) {
         memcpy(t->cwd, parent->cwd, MAX_PATH_LEN);
+        memcpy(t->exec_path, parent->exec_path, MAX_PATH_LEN);
     } else {
         t->cwd[0] = '/'; t->cwd[1] = '\0';
+        t->exec_path[0] = '\0';
     }
 
     for (int i = 0; i < MAX_FILES; i++) t->fd_table[i] = -1;
-    /* stdin/stdout/stderr from parent or defaults */
-    t->fd_table[0] = 0;
-    t->fd_table[1] = 1;
-    t->fd_table[2] = 2;
     if (parent) {
         vfs_proc_copy_fds(parent->fd_table, t->fd_table);
     }
+    vfs_proc_init_stdio_defaults(t->fd_table);
 
     /* Signal state */
     t->signals = kmalloc(sizeof(signal_state_t));
@@ -164,7 +163,7 @@ int proc_alloc(void (*entry)(void)) {
     proc_set_name(t, "kthread");
 
     void *stack = kmalloc(KERNEL_STACK_SIZE);
-    if (!stack) { t->state = PROC_UNUSED; return -ENOMEM; }
+    if (!stack) { if (t->signals) { kfree(t->signals); t->signals = NULL; } t->state = PROC_UNUSED; return -ENOMEM; }
     memset(stack, 0, KERNEL_STACK_SIZE);
 
     uint64_t stack_top = (uint64_t)stack + KERNEL_STACK_SIZE;
@@ -195,7 +194,7 @@ int proc_alloc_user(uint64_t entry, uint64_t sp, uint64_t *pgdir) {
     proc_set_name(t, "user");
 
     void *kstack = kmalloc(KERNEL_STACK_SIZE);
-    if (!kstack) { t->state = PROC_UNUSED; return -ENOMEM; }
+    if (!kstack) { if (t->signals) { kfree(t->signals); t->signals = NULL; } t->state = PROC_UNUSED; return -ENOMEM; }
     memset(kstack, 0, KERNEL_STACK_SIZE);
     t->kstack_base = kstack;
 
@@ -237,6 +236,7 @@ int proc_clone(uint64_t flags, uint64_t stack, int *ptid, int *ctid, uint64_t tl
     (void)flags; (void)ptid; (void)ctid; (void)tls;
 
     task_t *parent = current_task;
+    kdebug("[FORK] parent=%d start\n", parent ? parent->pid : -1);
     task_t *t = alloc_task_slot();
     if (!t) return -EAGAIN;
     memset(t, 0, sizeof(*t));
@@ -251,11 +251,11 @@ int proc_clone(uint64_t flags, uint64_t stack, int *ptid, int *ctid, uint64_t tl
 
     if (parent->pgdir) {
         t->pgdir = pt_clone(parent->pgdir);
-        if (!t->pgdir) { t->state = PROC_UNUSED; return -ENOMEM; }
+        if (!t->pgdir) { if (t->signals) { kfree(t->signals); t->signals = NULL; } t->state = PROC_UNUSED; return -ENOMEM; }
     }
 
     void *kstack = kmalloc(KERNEL_STACK_SIZE);
-    if (!kstack) { pt_destroy_user(t->pgdir); t->state = PROC_UNUSED; return -ENOMEM; }
+    if (!kstack) { if (t->signals) { kfree(t->signals); t->signals = NULL; } pt_destroy_user(t->pgdir); t->state = PROC_UNUSED; return -ENOMEM; }
     memset(kstack, 0, KERNEL_STACK_SIZE);
     t->kstack_base = kstack;
 
@@ -284,8 +284,7 @@ int proc_clone(uint64_t flags, uint64_t stack, int *ptid, int *ctid, uint64_t tl
         t->kstack = (uint64_t)ctx;
     }
 
-    kdebug("[PROC] clone: parent=%d child=%d pgdir=0x%lx\n",
-          parent->pid, t->pid, (unsigned long)(uintptr_t)t->pgdir);
+    kdebug("[FORK] child=%d parent=%d done\n", t->pid, parent ? parent->pid : -1);
     return t->pid;
 }
 
@@ -294,10 +293,25 @@ int proc_clone(uint64_t flags, uint64_t stack, int *ptid, int *ctid, uint64_t tl
  * ============================================================ */
 
 int proc_exec(const char *path, char *const argv[], char *const envp[]) {
+    kdebug("[EXEC] pid=%d path=%s\n", proc_current() ? proc_current()->pid : -1, path);
     int fd = vfs_open(path, O_RDONLY, 0);
     if (fd < 0) { printf("[EXEC] Cannot open %s: %d\n", path, fd); return fd; }
 
     task_t *t = current_task;
+
+    char abs_path[MAX_PATH_LEN];
+    if (path[0] == '/') {
+        strncpy(abs_path, path, MAX_PATH_LEN - 1);
+        abs_path[MAX_PATH_LEN - 1] = '\0';
+    } else {
+        const char *cwd = t ? t->cwd : "/";
+        size_t cwd_len = strlen(cwd);
+        if (cwd_len > 0 && cwd[cwd_len - 1] == '/') {
+            snprintf(abs_path, MAX_PATH_LEN, "%s%s", cwd, path);
+        } else {
+            snprintf(abs_path, MAX_PATH_LEN, "%s/%s", cwd, path);
+        }
+    }
 
     char *k_path = kmalloc(strlen(path) + 1);
     strcpy(k_path, path);
@@ -323,19 +337,66 @@ int proc_exec(const char *path, char *const argv[], char *const envp[]) {
 
     elf_load_info_t info;
     memset(&info, 0, sizeof(info));
-    int r = elf_load(fd, &info);
-    vfs_close(fd);
+    int r = elf_load(fd, k_path, &info);
     if (r < 0) {
+        if (r == -ENOEXEC) {
+            vfs_lseek(fd, 0, SEEK_SET);
+            char buf[128];
+            int n = vfs_read(fd, buf, sizeof(buf) - 1);
+            if (n >= 2 && buf[0] == '#' && buf[1] == '!') {
+                buf[n] = '\0';
+                char *cp = buf + 2;
+                while (*cp == ' ' || *cp == '\t') ++cp;
+                if (*cp != '\0' && *cp != '\n') {
+                    char *interp_start = cp;
+                    while (*cp && *cp != '\n' && *cp != ' ' && *cp != '\t') ++cp;
+                    char interp_path[128];
+                    size_t ilen = cp - interp_start;
+                    if (ilen > 0 && ilen < sizeof(interp_path)) {
+                        memcpy(interp_path, interp_start, ilen);
+                        interp_path[ilen] = '\0';
+
+                        char arg_buf[128] = {0};
+                        int has_arg = 0;
+                        while (*cp == ' ' || *cp == '\t') ++cp;
+                        if (*cp && *cp != '\n') {
+                            char *arg_start = cp;
+                            while (*cp && *cp != '\n') ++cp;
+                            size_t alen = cp - arg_start;
+                            if (alen > 0 && alen < sizeof(arg_buf)) {
+                                memcpy(arg_buf, arg_start, alen);
+                                arg_buf[alen] = '\0';
+                                has_arg = 1;
+                            }
+                        }
+
+                        char *new_argv[64];
+                        int na = 0;
+                        new_argv[na++] = interp_path;
+                        if (has_arg) new_argv[na++] = arg_buf;
+                        new_argv[na++] = k_path;
+                        for (int i = 1; i < argc && na < 63; i++)
+                            new_argv[na++] = k_argv[i];
+                        new_argv[na] = NULL;
+
+                        vfs_close(fd);
+                        int ret = proc_exec(interp_path, new_argv, envp);
+                        for(int i=0; i<argc; i++) kfree(k_argv[i]);
+                        for(int i=0; i<envc; i++) kfree(k_envp[i]);
+                        kfree(k_path);
+                        return ret;
+                    }
+                }
+            }
+        }
+        vfs_close(fd);
         printf("[EXEC] ELF load failed: %d\n", r);
         for(int i=0; i<argc; i++) kfree(k_argv[i]);
         for(int i=0; i<envc; i++) kfree(k_envp[i]);
         kfree(k_path);
         return r;
     }
-    kdebug("[EXEC] ELF loaded: entry=0x%lx base=0x%lx brk=0x%lx stack=0x%lx\n",
-           (unsigned long)info.entry, (unsigned long)info.base,
-           (unsigned long)info.brk, (unsigned long)info.stack_top);
-
+    vfs_close(fd);
     uint64_t sp = elf_setup_stack(info.stack_top, argc,
                                    (char *const *)k_argv,
                                    (char *const *)k_envp, &info);
@@ -343,12 +404,22 @@ int proc_exec(const char *path, char *const argv[], char *const envp[]) {
     for(int i=0; i<argc; i++) kfree(k_argv[i]);
     for(int i=0; i<envc; i++) kfree(k_envp[i]);
 
+    vm_area_t *va = t->vm_areas;
+    while (va) {
+        vm_area_t *next = va->next;
+        kfree(va);
+        va = next;
+    }
+    t->vm_areas = NULL;
+
     uint64_t *old_pgdir = t->pgdir;
     t->pgdir = info.pgdir;
     t->entry = info.entry;
     t->ustack = sp;
     t->brk   = info.brk;
     proc_set_name(t, path);
+    strncpy(t->exec_path, abs_path, MAX_PATH_LEN - 1);
+    t->exec_path[MAX_PATH_LEN - 1] = '\0';
 
     if (t->signals) signal_init((signal_state_t *)t->signals);
 
@@ -380,10 +451,7 @@ int proc_exec(const char *path, char *const argv[], char *const envp[]) {
         task_context_t *ctx = (task_context_t *)((uint64_t)trap - sizeof(task_context_t));
         ctx->satp = MAKE_SATP(info.pgdir);
 
-        kdebug("[EXEC] trap setup: sepc=0x%lx sp=0x%lx satp=0x%lx ctx=0x%lx kstack=0x%lx\n",
-               (unsigned long)trap->sepc, (unsigned long)trap->x[2],
-               (unsigned long)trap->x[0], (unsigned long)(uintptr_t)ctx,
-               (unsigned long)t->kstack);
+
     }
 
     t->exec_load_addr = info.load_addr;
@@ -391,9 +459,6 @@ int proc_exec(const char *path, char *const argv[], char *const envp[]) {
     t->mmap_base = 0x40000000UL;
 
     pt_destroy_user(old_pgdir);
-
-    kdebug("[EXEC] Executing %s pid=%d entry=0x%lx pgdir=0x%lx\n", k_path, t->pid,
-           (unsigned long)saved_entry, (unsigned long)(uintptr_t)info.pgdir);
 
     kfree(k_path);
 
@@ -424,10 +489,9 @@ void proc_free_pid(int pid) {
     }
 
     if (t->kstack) {
-        uintptr_t sp = (uintptr_t)t->kstack;
-        void *stack_base = (void *)(sp & ~((uintptr_t)KERNEL_STACK_SIZE - 1));
-        kfree(stack_base);
+        kfree(t->kstack_base);
         t->kstack = 0;
+        t->kstack_base = NULL;
     }
 
     memset(t, 0, sizeof(*t));
@@ -436,12 +500,11 @@ void proc_free_pid(int pid) {
 void proc_exit(int exit_code) {
     task_t *t = current_task;
     if (!t) panic("proc_exit: no current task");
-
-    kdebug("[PROC] pid=%d exit_code=%d\n", t->pid, exit_code);
+    kdebug("[EXIT] pid=%d code=%d\n", t->pid, exit_code);
 
     /* Close all file descriptors */
     for (int i = 0; i < MAX_FILES; i++) {
-        if (t->fd_table[i] > 2) {
+        if (t->fd_table[i] >= 0) {
             vfs_close(t->fd_table[i]);
             t->fd_table[i] = -1;
         }
@@ -466,7 +529,6 @@ void proc_exit(int exit_code) {
     t->state     = PROC_ZOMBIE;
     t->exit_code = exit_code;
 
-    kdebug("[PROC] pid=%d calling sched()...\n", t->pid);
     sched();
     panic("proc_exit: sched returned");
 }
@@ -556,7 +618,6 @@ void sched(void) {
         /* Skip current task and UNUSED tasks */
         if (t == current_task || t->state == PROC_UNUSED) continue;
         if (t->state == PROC_READY) {
-            kdebug("[SCHED] Found ready task: pid=%d idx=%d\n", t->pid, idx);
             context_switch(t);
             return;
         }
@@ -571,7 +632,6 @@ void sched(void) {
     }
 
     /* No runnable task — run idle */
-    kdebug("[SCHED] No ready tasks found, switching to idle\n");
     if (current_task != &proc_table[0]) {
         context_switch(&proc_table[0]);
     }
