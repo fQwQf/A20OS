@@ -272,7 +272,7 @@ static int fat32_stat(vnode_t *vn, kstat_t *st) {
     st->st_size = p->file_size;
     st->st_blksize = 512;
     st->st_blocks  = (p->file_size + 511) / 512;
-    st->st_mode = p->is_dir ? (S_IFDIR | 0755) : (S_IFREG | 0644);
+    st->st_mode = p->is_dir ? (S_IFDIR | 0755) : (S_IFREG | 0755);
     st->st_nlink = 1;
     return 0;
 }
@@ -478,7 +478,7 @@ static vnode_t *fat32_make_vnode(fat32_sb_t *sb, uint32_t cluster,
     memset(vn, 0, sizeof(*vn));
     vn->ino       = ino;
     vn->type      = is_dir ? VFS_FT_DIR : VFS_FT_REGULAR;
-    vn->mode      = is_dir ? (S_IFDIR | 0755) : (S_IFREG | 0644);
+    vn->mode      = is_dir ? (S_IFDIR | 0755) : (S_IFREG | 0755);
     vn->size      = size;
     vn->ref_count = 1;
     vn->parent    = parent;

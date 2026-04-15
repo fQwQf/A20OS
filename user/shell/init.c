@@ -1,4 +1,10 @@
-#include "../lib/libc.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <dirent.h>
+#include <sys/wait.h>
+#include <sys/syscall.h>
 
 #ifdef CONTEST
 
@@ -43,7 +49,7 @@ int main(int argc, char *argv[])
     DIR *d = opendir(TEST_DIR);
     if (!d) {
         printf("[CONTEST] Cannot open %s, shutting down\n", TEST_DIR);
-        syscall1(SYS_reboot, 0);
+        syscall(SYS_reboot, 0);
     }
 
     char *tests[MAX_TESTS];
@@ -74,9 +80,9 @@ int main(int argc, char *argv[])
         if (pid < 0) {
             printf("[CONTEST] fork failed, skipping %s\n", fname);
         } else if (pid == 0) {
-            char *sh_argv[] = { "sh", tests[i], NULL };
+            char *sh_argv[] = { "mksh", tests[i], NULL };
             char *envp[] = { "PATH=/bin:" TEST_DIR, "HOME=/", NULL };
-            execve("/bin/sh", sh_argv, envp);
+            execve("/bin/mksh", sh_argv, envp);
             printf("[CONTEST] execve failed: %s\n", tests[i]);
             _exit(127);
         } else {
@@ -89,7 +95,7 @@ int main(int argc, char *argv[])
     }
 
     printf("[CONTEST] All tests done, powering off\n");
-    syscall1(SYS_reboot, 0);
+    syscall(SYS_reboot, 0);
 
     while (1) {}
     return 0;
@@ -106,12 +112,12 @@ int main(int argc, char *argv[])
     if (pid < 0)
     {
         printf("[INIT] fork failed, shutting down.\n");
-        syscall1(SYS_reboot, 0);
+        syscall(SYS_reboot, 0);
     }
     if (pid == 0)
     {
-        char *sh_argv[] = {"sh", NULL};
-        execve("/bin/sh", sh_argv, NULL);
+        char *sh_argv[] = {"mksh", NULL};
+        execve("/bin/mksh", sh_argv, NULL);
         printf("[INIT] execve failed.\n");
         _exit(127);
     }
@@ -122,7 +128,7 @@ int main(int argc, char *argv[])
     if (WIFEXITED(status) && WEXITSTATUS(status) == 0)
     {
         printf("[INIT] Shell exited cleanly. Powering off.\n");
-        syscall1(SYS_reboot, 0);
+        syscall(SYS_reboot, 0);
     }
 
     while (1)

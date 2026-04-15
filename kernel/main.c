@@ -54,6 +54,7 @@ static const mount_entry_t mount_table[] = {
     { "/mnt", "ext4"  },    /* Device 1: ext4 data */
 };
 #define MOUNT_COUNT  2
+#endif /* CONTEST */
 
 /* Optional extra devices (sdcard images) — mounted if present */
 static const mount_entry_t extra_mount_table[] = {
@@ -61,7 +62,6 @@ static const mount_entry_t extra_mount_table[] = {
     { "/testla", "ext4" },  /* Device 3 */
 };
 #define EXTRA_MOUNT_COUNT  2
-#endif /* CONTEST */
 
 /* Try to initialise, create a block cache, mkdir and mount.
  * Returns 0 on success, <0 on any failure (already logged). */
@@ -82,6 +82,7 @@ static int try_mount(int dev_idx, const char *mnt, const char *fstype) {
         printf("[INIT] Device %d -> %s (%s)\n", dev_idx, mnt, fstype);
     } else {
         printf("[INIT] Device %d: mount %s failed (%d)\n", dev_idx, mnt, r);
+        bcache_destroy(bc);
     }
     return r;
 }
@@ -117,10 +118,15 @@ void kernel_main(void) {
             printf("[INIT] Device %d: probe failed, skipping\n", i);
             continue;
         }
-        try_mount(i, mount_table[i].mount_point, mount_table[i].fs_type);
+        const char *mnt = mount_table[i].mount_point;
+        const char *fstype = mount_table[i].fs_type;
+        if (try_mount(i, mnt, fstype) != 0) {
+            const char *alt = (strcmp(fstype, "ext4") == 0) ? "fat32" : "ext4";
+            printf("[INIT] Device %d: retrying as %s\n", i, alt);
+            try_mount(i, mnt, alt);
+        }
     }
 
-#ifndef CONTEST
     /* Best-effort: try optional extra sdcard images */
     for (int j = 0; j < EXTRA_MOUNT_COUNT; j++) {
         if (virtio_blk_init(0) != 0)
@@ -130,7 +136,6 @@ void kernel_main(void) {
                   extra_mount_table[j].mount_point,
                   extra_mount_table[j].fs_type);
     }
-#endif
 
     /* Initialize process management */
     proc_init();
@@ -174,12 +179,14 @@ void init_kthread(void) {
     kdebug("[INIT] Loading init program...\n");
 
     /* Open init program from FAT32 filesystem */
-    int fd = vfs_open("/bin/init", O_RDONLY, 0);
+    const char *init_path = "/bin/init";
+    int fd = vfs_open(init_path, O_RDONLY, 0);
     if (fd < 0) {
         printf("[INIT] Cannot open /bin/init: %d\n", fd);
         kdebug("[INIT] Falling back to ramfs /init...\n");
 
-        fd = vfs_open("/init", O_RDONLY, 0);
+        init_path = "/init";
+        fd = vfs_open(init_path, O_RDONLY, 0);
         if (fd < 0) {
             panic("init: no init program found (tried /bin/init and /init)");
         }
@@ -187,7 +194,7 @@ void init_kthread(void) {
 
     /* Load ELF program */
     elf_load_info_t info;
-    int ret = elf_load(fd, &info);
+    int ret = elf_load(fd, init_path, &info);
     vfs_close(fd);
 
     if (ret < 0) {

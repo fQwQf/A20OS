@@ -116,6 +116,7 @@ _contest_disk: user_apps
 	dd if=/dev/zero of=$(DISK_OUT) bs=1M count=16 2>/dev/null
 	mkfs.fat -F 32 $(DISK_OUT)
 	mcopy -i $(DISK_OUT) user/build/init  ::/init
+	mcopy -i $(DISK_OUT) user/build/mksh  ::/mksh
 	mcopy -i $(DISK_OUT) user/build/sh    ::/sh
 	mcopy -i $(DISK_OUT) user/build/ls    ::/ls
 	mcopy -i $(DISK_OUT) user/build/cat   ::/cat
@@ -148,6 +149,7 @@ fs_img: user_apps
 	dd if=/dev/zero of=fat32.img bs=1M count=32
 	mkfs.fat -F 32 fat32.img
 	mcopy -i fat32.img user/build/init ::/init
+	mcopy -i fat32.img user/build/mksh ::/mksh
 	mcopy -i fat32.img user/build/sh ::/sh
 	mcopy -i fat32.img user/build/ls ::/ls
 	mcopy -i fat32.img user/build/cat ::/cat

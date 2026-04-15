@@ -231,6 +231,7 @@ static int procfs_stat(vnode_t *vn, kstat_t *st) {
 
 static void procfs_release(vnode_t *vn) {
     if (vn->fs_data) kfree(vn->fs_data);
+    if (vn->ino) kfree((void *)(uintptr_t)vn->ino);
     kfree(vn);
 }
 
@@ -241,8 +242,8 @@ static vnode_ops_t g_procfs_vnode_ops = {
 };
 
 static int procfs_fread(vfile_t *vf, char *buf, size_t count) {
-    if (!vf || !vf->vnode || !vf->vnode->fs_data) return -EBADF;
-    procfs_priv_t *p = (procfs_priv_t *)vf->vnode->fs_data;
+    if (!vf || !vf->priv) return -EBADF;
+    procfs_priv_t *p = (procfs_priv_t *)vf->priv;
     if (vf->offset >= p->content_len) return 0;
     size_t avail = p->content_len - vf->offset;
     size_t n = count < avail ? count : avail;
@@ -294,7 +295,7 @@ static int procfs_freaddir(vfile_t *vf, void *dirp, size_t count) {
 }
 
 static int procfs_fclose(vfile_t *vf) {
-    (void)vf;
+    if (vf && vf->priv) { kfree(vf->priv); vf->priv = NULL; }
     return 0;
 }
 
@@ -310,7 +311,7 @@ vnode_t *procfs_mount(void) {
     vnode_t *root = (vnode_t *)kmalloc(sizeof(vnode_t));
     if (!root) return NULL;
     memset(root, 0, sizeof(*root));
-    root->ino = 1;
+    root->ino = 0;  /* 0 = no pf_entry_t to free in release */
     root->type = VFS_FT_DIR;
     root->mode = S_IFDIR | 0555;
     root->ref_count = 1;
@@ -330,8 +331,10 @@ vfile_t *procfs_open_vnode(vnode_t *vn, int flags) {
     vf->vnode = vn;
     vf->ops = &g_procfs_fops;
     vf->ref_count = 1;
-    if (vn->type == VFS_FT_DIR) {
-        vf->ops = &g_procfs_fops;
-    }
+
+    procfs_priv_t *vn_priv = (procfs_priv_t *)vn->fs_data;
+    procfs_priv_t *priv = procfs_priv_create(vn_priv ? vn_priv->type : PF_ROOT, vn_priv ? vn_priv->pid : 0);
+    if (!priv) { kfree(vf); return NULL; }
+    vf->priv = priv;
     return vf;
 }

@@ -6,8 +6,8 @@
 #include "panic.h"
 #include "defs.h"
 
-#define MAX_INODES       256
-#define MAX_DIR_ENTRIES   64
+#define MAX_INODES       1024
+#define MAX_DIR_ENTRIES   256
 
 static inode_t inode_table[MAX_INODES];
 static int next_inum = 1;
