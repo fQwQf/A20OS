@@ -255,7 +255,7 @@ typedef struct ext4_vnode_priv {
     ext4_sb_info_t *sb;
     uint32_t        inode_num;
     uint32_t        file_size;
-    int             is_dir;
+    int             type;
 } ext4_vnode_priv_t;
 
 typedef struct ext4_fctx {
