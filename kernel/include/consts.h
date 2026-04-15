@@ -7,13 +7,13 @@
 #define PAGE_SIZE_BITS     12
 #define PAGE_OFFSET_MASK   ((1UL << PAGE_SIZE_BITS) - 1)
 
-#define KERNEL_STACK_SIZE  (64 * 1024)
-#define USER_STACK_SIZE    (16 * PAGE_SIZE)
+#define KERNEL_STACK_SIZE  (128 * 1024)
+#define USER_STACK_SIZE    (512 * PAGE_SIZE)
 #define TRAP_CONTEXT_SIZE  (36 * 8)
 #define TASK_CONTEXT_SIZE  (16 * 8)
 
-#define MAX_PROCS          64
-#define MAX_FILES          256
+#define MAX_PROCS          256
+#define MAX_FILES          1024
 #define MAX_PATH_LEN       256
 #define MAX_NAME_LEN       128
 #define MAX_ARGS           64
@@ -40,7 +40,7 @@
 #define CLINT_MTIMECMP(h)  (CLINT_BASE + 0x4000UL + ((unsigned long)(h) * 8))
 #define CLINT_TIMER_FREQ   10000000UL
 
-#define KERNEL_HEAP_SIZE   (32 * 1024 * 1024)
+#define KERNEL_HEAP_SIZE   (96 * 1024 * 1024)
 
 #define PTE_V    (1UL << 0)
 #define PTE_R    (1UL << 1)
@@ -106,6 +106,7 @@
 #define SYS_tgkill         131
 #define SYS_sigaction      134
 #define SYS_sigprocmask    135
+#define SYS_sigtimedwait   137
 #define SYS_sigreturn      139
 #define SYS_sigsuspend     133
 #define SYS_setpgid        154
@@ -190,7 +191,7 @@
 #define O_RDONLY     0
 #define O_WRONLY     1
 #define O_RDWR       2
-#define O_CREAT      0x100
+#define O_CREAT      0x40
 #define O_TRUNC      0x200
 #define O_APPEND     0x400
 #define O_DIRECTORY  0x10000

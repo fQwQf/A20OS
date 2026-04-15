@@ -22,6 +22,14 @@ void syscall_init(void) {
     kdebug("[SYSCALL] Initialized\n");
 }
 
+static inline int64_t get_global_fd(int fd) {
+    task_t *t = proc_current();
+    if (!t || fd < 0 || fd >= MAX_FILES) return -EBADF;
+    int gfd = t->fd_table[fd];
+    if (gfd < 0) return -EBADF;
+    return gfd;
+}
+
 int64_t syscall_dispatch(trap_context_t *ctx) {
     uint64_t num = ctx->x[17];
     uint64_t a0  = ctx->x[10];
@@ -105,7 +113,17 @@ int64_t syscall_dispatch(trap_context_t *ctx) {
     case SYS_tgkill:      ret = sys_tgkill((int)a0, (int)a1, (int)a2); break;
     case SYS_sigaction:   ret = sys_sigaction((int)a0, (void*)a1, (void*)a2); break;
     case SYS_sigprocmask: ret = sys_sigprocmask((int)a0, (void*)a1, (void*)a2); break;
-    case SYS_sigreturn:   ret = sys_sigreturn(); break;
+    case SYS_sigtimedwait: ret = sys_sigtimedwait((const uint64_t*)a0, (void*)a1, (const void*)a2); break;
+    case SYS_sigreturn:
+        ret = sys_sigreturn();
+        if (ret == 0) {
+            task_t *cur = proc_current();
+            if (cur && cur->sig_handling) {
+                *ctx = cur->sig_saved_ctx;
+                cur->sig_handling = 0;
+            }
+        }
+        break;
     case SYS_sigsuspend:  ret = sys_sigsuspend((void*)a0); break;
 
     case SYS_brk:         ret = sys_brk(a0); break;
@@ -141,9 +159,7 @@ int64_t syscall_dispatch(trap_context_t *ctx) {
     }
 
     ctx->x[10] = (uint64_t)ret;
-    if (num != 73 && num != 63 && num != 64) {
-        kdebug("[SYSCALL] num=%lu ret=%ld\n", num, (long)ret);
-    }
+    signal_deliver_user(ctx);
     return ret;
 }
 
@@ -154,37 +170,47 @@ int64_t syscall_dispatch(trap_context_t *ctx) {
 int64_t sys_read(int fd, char *buf, size_t count) {
     if (!buf) return -EFAULT;
     if (count == 0) return 0;
-    return vfs_read(fd, buf, count);
+    int64_t gfd = get_global_fd(fd);
+    if (gfd < 0) return gfd;
+    return vfs_read(gfd, buf, count);
 }
 
 int64_t sys_write(int fd, const char *buf, size_t count) {
     if (!buf) return -EFAULT;
-    return vfs_write(fd, buf, count);
+    int64_t gfd = get_global_fd(fd);
+    if (gfd < 0) return gfd;
+    return vfs_write(gfd, buf, count);
 }
 
 int64_t sys_pread64(int fd, char *buf, size_t count, long off) {
-    long curoff = vfs_lseek(fd, 0, SEEK_CUR);
-    vfs_lseek(fd, off, SEEK_SET);
-    int64_t r = vfs_read(fd, buf, count);
-    vfs_lseek(fd, curoff, SEEK_SET);
+    int64_t gfd = get_global_fd(fd);
+    if (gfd < 0) return gfd;
+    long curoff = vfs_lseek(gfd, 0, SEEK_CUR);
+    vfs_lseek(gfd, off, SEEK_SET);
+    int64_t r = vfs_read(gfd, buf, count);
+    vfs_lseek(gfd, curoff, SEEK_SET);
     return r;
 }
 
 int64_t sys_pwrite64(int fd, char *buf, size_t count, long off) {
-    long curoff = vfs_lseek(fd, 0, SEEK_CUR);
-    vfs_lseek(fd, off, SEEK_SET);
-    int64_t r = vfs_write(fd, buf, count);
-    vfs_lseek(fd, curoff, SEEK_SET);
+    int64_t gfd = get_global_fd(fd);
+    if (gfd < 0) return gfd;
+    long curoff = vfs_lseek(gfd, 0, SEEK_CUR);
+    vfs_lseek(gfd, off, SEEK_SET);
+    int64_t r = vfs_write(gfd, buf, count);
+    vfs_lseek(gfd, curoff, SEEK_SET);
     return r;
 }
 
 int64_t sys_writev(int fd, const void *iov, int iovcnt) {
+    int64_t gfd = get_global_fd(fd);
+    if (gfd < 0) return gfd;
     struct iovec { char *base; size_t len; };
     const struct iovec *v = (const struct iovec *)iov;
     int64_t total = 0;
     for (int i = 0; i < iovcnt; i++) {
         if (!v[i].base || v[i].len == 0) continue;
-        int64_t n = vfs_write(fd, v[i].base, v[i].len);
+        int64_t n = vfs_write(gfd, v[i].base, v[i].len);
         if (n < 0) return n;
         total += n;
     }
@@ -192,12 +218,14 @@ int64_t sys_writev(int fd, const void *iov, int iovcnt) {
 }
 
 int64_t sys_readv(int fd, const void *iov, int iovcnt) {
+    int64_t gfd = get_global_fd(fd);
+    if (gfd < 0) return gfd;
     struct iovec { char *base; size_t len; };
     const struct iovec *v = (const struct iovec *)iov;
     int64_t total = 0;
     for (int i = 0; i < iovcnt; i++) {
         if (!v[i].base || v[i].len == 0) continue;
-        int64_t n = vfs_read(fd, v[i].base, v[i].len);
+        int64_t n = vfs_read(gfd, v[i].base, v[i].len);
         if (n < 0) return n;
         total += n;
         if ((size_t)n < v[i].len) break;
@@ -208,39 +236,89 @@ int64_t sys_readv(int fd, const void *iov, int iovcnt) {
 int64_t sys_openat(int dirfd, const char *path, int flags, int mode) {
     (void)dirfd;
     if (!path) return -EFAULT;
-    return vfs_open(path, flags, mode);
+    int fd = vfs_open(path, flags, mode);
+    if (fd >= 0) {
+        task_t *t = proc_current();
+        if (t && fd >= 0 && fd < MAX_FILES) t->fd_table[fd] = fd;
+    }
+    return fd;
 }
 
 int64_t sys_close(int fd) {
     task_t *t = proc_current();
-    if (t && fd >= 0 && fd < MAX_FILES) t->fd_table[fd] = -1;
-    return vfs_close(fd);
+    if (!t || fd < 0 || fd >= MAX_FILES) return -EBADF;
+    int gfd = t->fd_table[fd];
+    if (gfd < 0) return -EBADF;
+    t->fd_table[fd] = -1;
+    return vfs_close(gfd);
 }
 
 int64_t sys_lseek(int fd, long offset, int whence) {
-    return vfs_lseek(fd, offset, whence);
+    task_t *t = proc_current();
+    if (!t || fd < 0 || fd >= MAX_FILES) return -EBADF;
+    int gfd = t->fd_table[fd];
+    if (gfd < 0) return -EBADF;
+    return vfs_lseek(gfd, offset, whence);
 }
 
 int64_t sys_dup(int fd) {
-    return vfs_dup(fd);
+    task_t *t = proc_current();
+    if (!t || fd < 0 || fd >= MAX_FILES) return -EBADF;
+    int gfd = t->fd_table[fd];
+    if (gfd < 0) return -EBADF;
+    int newfd = vfs_dup(gfd);
+    if (newfd >= 0) {
+        if (newfd < MAX_FILES) t->fd_table[newfd] = newfd;
+    }
+    return newfd;
 }
 
 int64_t sys_dup3(int oldfd, int newfd, int flags) {
-    return vfs_dup3(oldfd, newfd, flags);
+    (void)flags;
+    task_t *t = proc_current();
+    if (!t || oldfd < 0 || oldfd >= MAX_FILES || newfd < 0 || newfd >= MAX_FILES) return -EBADF;
+    int old_gfd = t->fd_table[oldfd];
+    if (old_gfd < 0) return -EBADF;
+    if (oldfd == newfd) return newfd;
+    int cur_gfd = t->fd_table[newfd];
+    if (cur_gfd >= 0) {
+        vfs_close(cur_gfd);
+    }
+    int dup_gfd = vfs_dup(old_gfd);
+    if (dup_gfd < 0) return dup_gfd;
+    t->fd_table[newfd] = dup_gfd;
+    return newfd;
 }
 
 int64_t sys_fcntl(int fd, int cmd, long arg) {
-    return vfs_fcntl(fd, cmd, arg);
+    int64_t gfd = get_global_fd(fd);
+    if (gfd < 0) return gfd;
+    int64_t r = vfs_fcntl(gfd, cmd, arg);
+    if ((cmd == 0 || cmd == 1030) && r >= 0) {
+        task_t *t = proc_current();
+        if (t && r >= 0 && r < MAX_FILES) t->fd_table[r] = (int)r;
+    }
+    return r;
 }
 
 int64_t sys_pipe2(int *pipefd, int flags) {
     (void)flags;
     if (!pipefd) return -EFAULT;
-    return vfs_pipe(pipefd);
+    int r = vfs_pipe(pipefd);
+    if (r == 0) {
+        task_t *t = proc_current();
+        if (t) {
+            if (pipefd[0] >= 0 && pipefd[0] < MAX_FILES) t->fd_table[pipefd[0]] = pipefd[0];
+            if (pipefd[1] >= 0 && pipefd[1] < MAX_FILES) t->fd_table[pipefd[1]] = pipefd[1];
+        }
+    }
+    return r;
 }
 
 int64_t sys_ioctl(int fd, unsigned long req, void *arg) {
-    return vfs_ioctl(fd, req, arg);
+    int64_t gfd = get_global_fd(fd);
+    if (gfd < 0) return gfd;
+    return vfs_ioctl(gfd, req, arg);
 }
 
 int64_t sys_sync(void) {
@@ -253,7 +331,9 @@ int64_t sys_fsync(int fd) {
 }
 
 int64_t sys_ftruncate(int fd, size_t size) {
-    return vfs_ftruncate(fd, size);
+    int64_t gfd = get_global_fd(fd);
+    if (gfd < 0) return gfd;
+    return vfs_ftruncate(gfd, size);
 }
 
 int64_t sys_truncate(const char *path, size_t size) {
@@ -262,24 +342,30 @@ int64_t sys_truncate(const char *path, size_t size) {
 
 int64_t sys_sendfile(int out_fd, int in_fd, long *off, size_t count) {
     if (count == 0) return 0;
-    long cur_off = off ? *off : vfs_lseek(in_fd, 0, SEEK_CUR);
+    int64_t out_gfd = get_global_fd(out_fd);
+    if (out_gfd < 0) return out_gfd;
+    int64_t in_gfd = get_global_fd(in_fd);
+    if (in_gfd < 0) return in_gfd;
+    long cur_off = off ? *off : vfs_lseek(in_gfd, 0, SEEK_CUR);
+    long saved = off ? vfs_lseek(in_gfd, 0, SEEK_CUR) : 0;
     int64_t total = 0;
     char sbuf[4096];
     while ((size_t)total < count) {
         size_t chunk = count - (size_t)total;
         if (chunk > sizeof(sbuf)) chunk = sizeof(sbuf);
-        long saved = vfs_lseek(in_fd, 0, SEEK_CUR);
-        vfs_lseek(in_fd, cur_off, SEEK_SET);
-        int64_t n = vfs_read(in_fd, sbuf, chunk);
-        vfs_lseek(in_fd, saved, SEEK_SET);
+        if (off) vfs_lseek(in_gfd, cur_off, SEEK_SET);
+        int64_t n = vfs_read(in_gfd, sbuf, chunk);
         if (n <= 0) break;
-        int64_t w = vfs_write(out_fd, sbuf, (size_t)n);
+        int64_t w = vfs_write(out_gfd, sbuf, (size_t)n);
         if (w < 0) { if (total == 0) total = w; break; }
         total += w;
         cur_off += w;
         if (w < n) break;
     }
-    if (off) *off = cur_off;
+    if (off) {
+        *off = cur_off;
+        vfs_lseek(in_gfd, saved, SEEK_SET);
+    }
     return total;
 }
 
@@ -291,7 +377,8 @@ int64_t sys_ppoll(void *fds, int nfds, void *tmo, void *sigmask) {
     for (int i = 0; i < nfds; i++) {
         pfds[i].revents = 0;
         if (pfds[i].fd < 0) continue;
-        vfile_t *vf = vfs_get_file(pfds[i].fd);
+        int64_t gfd = get_global_fd(pfds[i].fd);
+        vfile_t *vf = (gfd >= 0) ? vfs_get_file(gfd) : NULL;
         if (vf) {
             if (pfds[i].events & 0x001) pfds[i].revents |= 0x001;
             if (pfds[i].events & 0x004) pfds[i].revents |= 0x004;
@@ -345,34 +432,57 @@ int64_t sys_getcwd(char *buf, size_t size) {
 }
 
 static void copy_kstat_to_user(void *st, const kstat_t *kst) {
-    /* Linux 64-bit struct stat layout (128 bytes) */
+    /* Match RISC-V glibc struct stat layout (128 bytes, asm-generic/stat.h):
+     *   unsigned long st_dev       offset 0
+     *   unsigned long st_ino       offset 8
+     *   unsigned int  st_mode      offset 16
+     *   unsigned int  st_nlink     offset 20
+     *   unsigned int  st_uid       offset 24
+     *   unsigned int  st_gid       offset 28
+     *   unsigned long st_rdev      offset 32
+     *   unsigned long __pad1       offset 40
+     *   unsigned long st_size      offset 48
+     *   unsigned int  st_blksize   offset 56
+     *   unsigned int  __pad2       offset 60
+     *   unsigned long st_blocks    offset 64
+     *   unsigned long st_atime     offset 72
+     *   unsigned long st_atime_nsec offset 80
+     *   unsigned long st_mtime     offset 88
+     *   unsigned long st_mtime_nsec offset 96
+     *   unsigned long st_ctime     offset 104
+     *   unsigned long st_ctime_nsec offset 112
+     *   unsigned int  __unused4    offset 120
+     *   unsigned int  __unused5    offset 124
+     */
     uint64_t *u64 = (uint64_t *)st;
     uint32_t *u32 = (uint32_t *)st;
-    u64[0] = kst->st_dev;
-    u64[1] = kst->st_ino;
-    u32[4] = kst->st_mode;
-    u32[5] = kst->st_nlink;
-    u32[6] = kst->st_uid;
-    u32[7] = kst->st_gid;
-    u64[4] = kst->st_rdev;
-    u64[5] = 0;
-    u64[6] = kst->st_size;
-    u32[14] = (uint32_t)kst->st_blksize;
-    u32[15] = 0;
-    u64[8] = kst->st_blocks;
-    u64[9] = kst->st_atime;
+    u64[0]  = kst->st_dev;
+    u64[1]  = kst->st_ino;
+    u32[4]  = kst->st_mode;
+    u32[5]  = kst->st_nlink;
+    u32[6]  = kst->st_uid;
+    u32[7]  = kst->st_gid;
+    u64[4]  = kst->st_rdev;
+    u64[5]  = 0;            /* __pad1 */
+    u64[6]  = kst->st_size;
+    u32[14] = kst->st_blksize;
+    u32[15] = 0;            /* __pad2 */
+    u64[8]  = kst->st_blocks;
+    u64[9]  = kst->st_atime;
     u64[10] = kst->st_atime_nsec;
     u64[11] = kst->st_mtime;
     u64[12] = kst->st_mtime_nsec;
     u64[13] = kst->st_ctime;
     u64[14] = kst->st_ctime_nsec;
-    u32[30] = 0;
-    u32[31] = 0;
+    u32[30] = 0;            /* __unused4 */
+    u32[31] = 0;            /* __unused5 */
 }
 
 int64_t sys_fstat(int fd, void *st) {
+    int64_t gfd = get_global_fd(fd);
+    if (gfd < 0) return gfd;
     kstat_t kst;
-    int r = vfs_fstat(fd, &kst);
+    int r = vfs_fstat(gfd, &kst);
     if (r < 0) return r;
     if (!st) return -EFAULT;
     copy_kstat_to_user(st, &kst);
@@ -398,7 +508,9 @@ int64_t sys_faccessat(int dirfd, const char *path, int mode) {
 }
 
 int64_t sys_getdents64(int fd, void *dirp, size_t count) {
-    return vfs_getdents64(fd, dirp, count);
+    int64_t gfd = get_global_fd(fd);
+    if (gfd < 0) return gfd;
+    return vfs_getdents64(gfd, dirp, count);
 }
 
 int64_t sys_linkat(int olddirfd, const char *oldpath,
@@ -622,12 +734,74 @@ int64_t sys_sigprocmask(int how, void *set, void *oldset) {
 }
 
 int64_t sys_sigreturn(void) {
+    task_t *t = proc_current();
+    if (t && t->signals) {
+        signal_state_t *ss = (signal_state_t *)t->signals;
+        if (t->sig_handling) {
+            ss->blocked = t->sig_old_blocked;
+        }
+    }
     return 0;
 }
 
 int64_t sys_sigsuspend(void *mask) {
-    (void)mask;
+    task_t *t = proc_current();
+    if (!t || !t->signals || !mask) return -EINVAL;
+
+    signal_state_t *ss = (signal_state_t *)t->signals;
+    uint64_t old_blocked = ss->blocked;
+    uint64_t new_mask = *(const uint64_t *)mask;
+
+    /* Can't block SIGKILL or SIGSTOP */
+    new_mask &= ~((1ULL << SIGKILL) | (1ULL << SIGSTOP));
+    ss->blocked = new_mask;
+
+    uint64_t deliverable = ss->pending & ~ss->blocked;
+    if (!deliverable) {
+        t->state = PROC_BLOCKED;
+        sched();
+    }
+
+    /* Deliver/clear any signals that were pending with the temporary mask */
+    signal_deliver();
+
+    ss->blocked = old_blocked;
     return -EINTR;
+}
+
+int64_t sys_sigtimedwait(const uint64_t *set, void *info, const void *timeout) {
+    task_t *t = proc_current();
+    if (!t || !t->signals || !set) return -EINVAL;
+
+    signal_state_t *ss = (signal_state_t *)t->signals;
+    uint64_t mask = *set;
+    uint64_t deliverable = ss->pending & ~ss->blocked & mask;
+
+    if (!deliverable) {
+        if (timeout) {
+            uint64_t sec = ((const uint64_t *)timeout)[0];
+            uint64_t nsec = ((const uint64_t *)timeout)[1];
+            if (sec == 0 && nsec == 0)
+                return -EAGAIN;
+        }
+        t->state = PROC_BLOCKED;
+        sched();
+        deliverable = ss->pending & ~ss->blocked & mask;
+        if (!deliverable)
+            return -EAGAIN;
+    }
+
+    for (int sig = 1; sig < NSIG; sig++) {
+        if (deliverable & (1ULL << sig)) {
+            ss->pending &= ~(1ULL << sig);
+            if (info) {
+                memset(info, 0, 128);
+                *(int *)info = sig;
+            }
+            return sig;
+        }
+    }
+    return -EAGAIN;
 }
 
 /* ============================================================

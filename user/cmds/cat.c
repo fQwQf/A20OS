@@ -1,5 +1,8 @@
 /* cat — concatenate files and print on the standard output */
-#include "../lib/libc.h"
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+#include <fcntl.h>
 
 static void cat_file(int fd) {
     char buf[4096];

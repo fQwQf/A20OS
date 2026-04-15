@@ -14,6 +14,7 @@
 #define VFS_FT_UNKNOWN   0
 #define VFS_FT_REGULAR   1
 #define VFS_FT_DIR       2
+#define VFS_FT_SYMLINK   3
 
 /* Filesystem type IDs */
 #define FS_TYPE_RAMFS    1
@@ -76,6 +77,7 @@ typedef struct vnode_ops {
                       struct vnode *new_dir, const char *new_name);
     int     (*link)(struct vnode *dir, const char *name, struct vnode *target);
     int     (*symlink)(struct vnode *dir, const char *name, const char *target);
+    int     (*readlink)(struct vnode *vn, char *buf, size_t sz);
     int     (*stat)(struct vnode *vn, kstat_t *st);
     int     (*truncate)(struct vnode *vn, size_t size);
     void    (*release)(struct vnode *vn);
@@ -124,7 +126,7 @@ typedef struct mount {
 } mount_t;
 
 /* ---- Open file table (global) ---- */
-#define VFS_MAX_OPEN   512
+#define VFS_MAX_OPEN   2048
 
 /* ---- linux_dirent64 (for getdents64 syscall) ---- */
 typedef struct linux_dirent64 {
@@ -191,6 +193,7 @@ int      vfs_ftruncate(int fd, size_t size);
 
 /* Per-process fd table management */
 void     vfs_proc_init_fds(int *fd_table);
+void     vfs_proc_init_stdio_defaults(int *fd_table);
 void     vfs_proc_copy_fds(const int *src, int *dst);
 void     vfs_proc_close_all_fds(int *fd_table);
 
