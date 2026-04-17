@@ -50,8 +50,8 @@ static const mount_entry_t mount_table[] = {
 #define MOUNT_COUNT  2
 #else
 static const mount_entry_t mount_table[] = {
-    { "/bin", "fat32" },    /* Device 0: user apps (FAT32) */
-    { "/mnt", "ext4"  },    /* Device 1: ext4 data */
+    { "/bin", "fat32" },
+    { "/mnt",  "ext4"  },
 };
 #define MOUNT_COUNT  2
 #endif /* CONTEST */

@@ -48,14 +48,6 @@ static pf_entry_t *new_entry(const char *name, pf_type_t type, int pid) {
     return e;
 }
 
-static void free_entries(pf_entry_t *e) {
-    while (e) {
-        pf_entry_t *n = e->next;
-        kfree(e);
-        e = n;
-    }
-}
-
 static int is_pid_str(const char *s) {
     if (!s || !*s) return 0;
     while (*s) { if (*s < '0' || *s > '9') return 0; s++; }
@@ -210,6 +202,7 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
     vn->mode = (vn->type == VFS_FT_DIR) ? (S_IFDIR | 0555) : (S_IFREG | 0444);
     vn->ref_count = 1;
     vn->parent = dir;
+    dir->ref_count++;
     vn->ops = dir->ops;
 
     procfs_priv_t *priv = procfs_priv_create(child->type, child->pid);
@@ -232,6 +225,7 @@ static int procfs_stat(vnode_t *vn, kstat_t *st) {
 static void procfs_release(vnode_t *vn) {
     if (vn->fs_data) kfree(vn->fs_data);
     if (vn->ino) kfree((void *)(uintptr_t)vn->ino);
+    vnode_put(vn->parent);
     kfree(vn);
 }
 
@@ -329,6 +323,7 @@ vfile_t *procfs_open_vnode(vnode_t *vn, int flags) {
     if (!vf) return NULL;
     memset(vf, 0, sizeof(*vf));
     vf->vnode = vn;
+    vn->ref_count++;
     vf->ops = &g_procfs_fops;
     vf->ref_count = 1;
 

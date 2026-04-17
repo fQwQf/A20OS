@@ -16,13 +16,13 @@ ifeq ($(ARCH), riscv64)
     ARCH_CFLAGS = -march=rv64gc -mabi=lp64d -mcmodel=medany
     ARCH_LDFLAGS =
     QEMU = qemu-system-riscv64
-    QEMU_FLAGS = -machine virt -m 128M -nographic -smp 1 -bios default -global virtio-mmio.force-legacy=false
+    QEMU_FLAGS = -machine virt -m 512M -nographic -smp 1 -bios default -global virtio-mmio.force-legacy=false
 else ifeq ($(ARCH), loongarch64)
     CROSS_PREFIX = loongarch64-unknown-elf-
     ARCH_CFLAGS = -march=loongarch64 -mabi=lp64d
     ARCH_LDFLAGS =
     QEMU = qemu-system-loongarch64
-    QEMU_FLAGS = -machine virt -m 128M -nographic -smp 1
+    QEMU_FLAGS = -machine virt -m 512M -nographic -smp 1
 endif
 
 # In bringup mode, boot kernel only (no fs image dependency).
@@ -83,8 +83,8 @@ KERNEL_BIN = kernel.bin
 # Targets
 # ================================================================
 
-.PHONY: all clean run-riscv64 run-loongarch64 user_apps fs_img \
-        kernel-only dev-build contest-rv contest-la
+.PHONY: all clean run-riscv64 run-loongarch64 debug-riscv64 debug-loongarch64 \
+        user_apps fs_img kernel-only dev-build contest-rv contest-la
 
 # ----------------------------------------------------------------
 # Competition build: produces kernel-rv, kernel-la, disk.img,
@@ -172,6 +172,8 @@ fs_img: user_apps
 ext4_img_only: user_apps
 	@echo "Building ext4 image..."
 	@rm -rf /tmp/a20os_ext4_staging && mkdir -p /tmp/a20os_ext4_staging
+	cp user/build/init /tmp/a20os_ext4_staging/init
+	cp user/build/mksh /tmp/a20os_ext4_staging/mksh
 	cp user/build/ls   /tmp/a20os_ext4_staging/ls
 	cp user/build/cat  /tmp/a20os_ext4_staging/cat
 	cp user/build/mkdir /tmp/a20os_ext4_staging/mkdir
@@ -203,6 +205,9 @@ clean:
 	rm -f kernel-rv kernel-la disk.img disk-la.img
 	$(MAKE) -C user clean
 
+kernel-only: $(KERNEL_BIN)
+	@echo "Kernel-only build complete: $(KERNEL_BIN)"
+
 # ----------------------------------------------------------------
 # Run targets (development mode)
 # ----------------------------------------------------------------
@@ -213,7 +218,7 @@ ifeq ($(BRINGUP),1)
 else
 	$(MAKE) ARCH=riscv64 dev-build
 endif
-	$(QEMU) $(QEMU_FLAGS) -kernel $(KERNEL_BIN)
+	$(QEMU) $(QEMU_FLAGS) -kernel $(KERNEL_ELF)
 
 run-loongarch64:
 ifeq ($(BRINGUP),1)
@@ -227,15 +232,20 @@ endif
 
 DEBUG_CFLAGS = $(filter-out -O2,$(CFLAGS)) -O0 -g -DDEBUG
 
-debug-build:
-	$(MAKE) CFLAGS="$(DEBUG_CFLAGS)" clean dev-build
+debug-riscv64:
+ifeq ($(BRINGUP),1)
+	$(MAKE) ARCH=riscv64 BRINGUP=1 CFLAGS="$(DEBUG_CFLAGS)" kernel-only
+else
+	$(MAKE) ARCH=riscv64 CFLAGS="$(DEBUG_CFLAGS)" dev-build
+endif
+	@echo "Waiting for GDB connection on port 1234..."
+	$(QEMU) $(QEMU_FLAGS) -kernel $(KERNEL_ELF) -S -s
 
-debug-riscv64: debug-build
-	$(MAKE) ARCH=riscv64 run-qemu-debug
-
-debug-loongarch64: debug-build
-	$(MAKE) ARCH=loongarch64 run-qemu-debug
-
-run-qemu-debug:
+debug-loongarch64:
+ifeq ($(BRINGUP),1)
+	$(MAKE) ARCH=loongarch64 BRINGUP=1 CFLAGS="$(DEBUG_CFLAGS)" kernel-only
+else
+	$(MAKE) ARCH=loongarch64 CFLAGS="$(DEBUG_CFLAGS)" dev-build
+endif
 	@echo "Waiting for GDB connection on port 1234..."
 	$(QEMU) $(QEMU_FLAGS) -kernel $(KERNEL_ELF) -S -s
