@@ -6,18 +6,9 @@
 #include "trap.h"
 #include "defs.h"
 
-/* Forward declaration */
 struct signal_state;
-struct vm_area;
-
-/* ---- vm_area: Virtual memory area mapping ---- */
-typedef struct vm_area {
-    uint64_t        start;
-    uint64_t        end;
-    int             prot;       /* PROT_* flags */
-    int             flags;      /* MAP_* flags */
-    struct vm_area *next;
-} vm_area_t;
+struct mm_struct;
+typedef struct mm_struct mm_struct_t;
 
 typedef struct task_t {
     uint64_t kstack;
@@ -38,9 +29,7 @@ typedef struct task_t {
 
     struct signal_state *signals;
 
-    vm_area_t *vm_areas;
-    uint64_t   brk;
-    uint64_t   mmap_base;
+    mm_struct_t *mm;
 
     uint64_t  entry;
     uint64_t  exec_load_addr;
