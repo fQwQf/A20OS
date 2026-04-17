@@ -1,7 +1,7 @@
 ARCH ?= riscv64
 CONTEST ?= 0
 
-MUSL_BASE  := $(HOME)/project/musl
+MUSL_BASE  := $(shell pwd)/external/musl
 MUSL_BUILD := $(MUSL_BASE)/build-riscv64
 
 ifeq ($(ARCH), riscv64)
@@ -17,7 +17,8 @@ CFLAGS  = -Wall -Wextra -O2 -ffreestanding -nostdinc $(MUSL_INC) \
           -mabi=lp64 -march=rv64g -mcmodel=medany
 LDFLAGS = -static -nostdlib -Ttext 0x10000
 
-LIBGCC := /usr/lib/gcc/riscv64-unknown-elf/14.2.0/rv64i/lp64/libgcc.a
+GCC_VER := $(shell $(CROSS_COMPILE)gcc -dumpversion 2>/dev/null)
+LIBGCC  := /usr/lib/gcc/riscv64-unknown-elf/$(GCC_VER)/rv64i/lp64/libgcc.a
 
 LIB_A20OS := lib/brk.o
 CRT_START = $(MUSL_CRT)/crt1.o $(MUSL_CRT)/crti.o
