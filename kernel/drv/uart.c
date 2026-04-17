@@ -79,6 +79,15 @@ void uart_flush(void) {
 void uart_handle_irq(void) {
     while (UART0[LSR] & LSR_RX_READY) {
         char c = UART0[RHR];
+        if (c == 0x03) {
+            /* proc_current() in IRQ context = the task that was preempted,
+             * which is the foreground process. Signal its whole group. */
+            task_t *cur = proc_current();
+            if (cur && cur->pid > 0 && cur->pgid > 0) {
+                proc_kill_pgid(cur->pgid, SIGINT, 0);
+            }
+            continue;
+        }
         uint32_t next = (rx_head + 1) % RX_BUF_SIZE;
         if (next != rx_tail) {
             rx_buffer[rx_head] = c;

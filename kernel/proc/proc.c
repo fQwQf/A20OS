@@ -595,11 +595,13 @@ void proc_exit(int exit_code) {
         }
     }
 
-    /* Re-parent children to idle */
+    /* Re-parent orphaned children to init (pid 1) or idle */
+    task_t *reaper = proc_find(1);
+    if (!reaper || reaper == t) reaper = &proc_table[0];
     for (int i = 0; i < MAX_PROCS; i++) {
         if (proc_table[i].ppid == t->pid && proc_table[i].state != PROC_UNUSED) {
-            proc_table[i].ppid   = 0;
-            proc_table[i].parent = &proc_table[0];
+            proc_table[i].ppid   = reaper->pid;
+            proc_table[i].parent = reaper;
         }
     }
 
@@ -636,7 +638,8 @@ retry:;
         if (cstate == PROC_UNUSED) continue;
         if (child->ppid != t->pid) continue;
         if (pid > 0 && child->pid != pid) continue;
-        if (pid <= -1 && pid != -1 && child->pgid != (-pid)) continue;
+        if (pid == 0 && child->pgid != t->pgid) continue;
+        if (pid < -1 && child->pgid != (-pid)) continue;
 
         found = 1;
         if (cstate == PROC_ZOMBIE) {
@@ -672,6 +675,21 @@ int proc_wait(int *status) {
 
 int proc_kill(int pid, int signum) {
     return signal_send(pid, signum);
+}
+
+int proc_kill_pgid(int pgid, int signum, int skip_self) {
+    if (signum <= 0 || signum >= NSIG) return -EINVAL;
+    task_t *self = current_task;
+    int count = 0;
+    for (int i = 1; i < MAX_PROCS; i++) {
+        task_t *t = &proc_table[i];
+        if (t->state == PROC_UNUSED) continue;
+        if (t->pgid != pgid) continue;
+        if (skip_self && t == self) continue;
+        signal_send(t->pid, signum);
+        count++;
+    }
+    return count > 0 ? count : -ESRCH;
 }
 
 /* ============================================================

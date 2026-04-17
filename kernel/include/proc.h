@@ -66,6 +66,7 @@ void     sched(void);
 void     context_switch(task_t *next);
 void     proc_dump(void);
 int      proc_kill(int pid, int signum);
+int      proc_kill_pgid(int pgid, int signum, int skip_self);
 void     proc_set_name(task_t *t, const char *name);
 
 /* For execve: replace current process image */
