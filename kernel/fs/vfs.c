@@ -182,7 +182,7 @@ static int ramfs_vnode_lookup(vnode_t *dir, const char *name, vnode_t **out) {
     int r = fs_inode_lookup(dinode, name, &found);
     if (r < 0) return r;
     *out = ramfs_make_vnode(dir->mnt, found);
-    if (*out) (*out)->parent = dir;
+    if (*out) { (*out)->parent = dir; dir->ref_count++; }
     return (*out) ? 0 : -ENOMEM;
 }
 
@@ -223,11 +223,12 @@ static int ramfs_vnode_create(vnode_t *dir, const char *name, int mode, vnode_t 
     if (!child->data) { child->ref_count = 0; return -ENOMEM; }
     add_dir_entry(dinode, name, child->inum);
     *out = ramfs_make_vnode(dir->mnt, child);
-    if (*out) (*out)->parent = dir;
+    if (*out) { (*out)->parent = dir; dir->ref_count++; }
     return *out ? 0 : -ENOMEM;
 }
 
 static void ramfs_vnode_release(vnode_t *vn) {
+    vnode_put(vn->parent);
     kfree(vn);
 }
 
@@ -271,6 +272,72 @@ static int ramfs_vnode_symlink(vnode_t *dir, const char *name, const char *targe
     return 0;
 }
 
+static int ramfs_vnode_rename(vnode_t *old_dir, const char *old_name,
+                              vnode_t *new_dir, const char *new_name) {
+    inode_t *old_dinode = (inode_t *)old_dir->fs_data;
+    inode_t *new_dinode = (inode_t *)new_dir->fs_data;
+    if (old_dinode->type != FT_DIRECTORY || new_dinode->type != FT_DIRECTORY)
+        return -ENOTDIR;
+
+    dir_entry_t *old_entries = (dir_entry_t *)old_dinode->data;
+    int n_old = old_dinode->size / sizeof(dir_entry_t);
+    int old_idx = -1;
+    int inum = 0;
+    for (int i = 0; i < n_old; i++) {
+        if (old_entries[i].name[0] != '\0' && strcmp(old_entries[i].name, old_name) == 0) {
+            old_idx = i;
+            inum = old_entries[i].inum;
+            break;
+        }
+    }
+    if (old_idx < 0) return -ENOENT;
+
+    dir_entry_t *new_entries = (dir_entry_t *)new_dinode->data;
+    int n_new = new_dinode->size / sizeof(dir_entry_t);
+    int new_idx = -1;
+    for (int i = 0; i < n_new; i++) {
+        if (new_entries[i].name[0] != '\0' && strcmp(new_entries[i].name, new_name) == 0) {
+            new_idx = i;
+            break;
+        }
+    }
+    if (new_idx >= 0) {
+        new_entries[new_idx].inum = inum;
+        memcpy(new_entries[new_idx].name, new_name, MAX_NAME_LEN);
+    } else {
+        add_dir_entry(new_dinode, new_name, inum);
+    }
+
+    old_entries[old_idx].name[0] = '\0';
+
+    inode_t *moved = fs_find_inode_by_inum(inum);
+    if (moved) moved->parent = new_dinode;
+    return 0;
+}
+
+static int ramfs_vnode_rmdir(vnode_t *dir, const char *name) {
+    inode_t *dinode = (inode_t *)dir->fs_data;
+    dir_entry_t *entries = (dir_entry_t *)dinode->data;
+    int n_entries = dinode->size / sizeof(dir_entry_t);
+
+    for (int i = 0; i < n_entries; i++) {
+        if (entries[i].name[0] != '\0' && strcmp(entries[i].name, name) == 0) {
+            inode_t *child = fs_find_inode_by_inum(entries[i].inum);
+            if (!child || child->type != FT_DIRECTORY) return -ENOTDIR;
+            dir_entry_t *centries = (dir_entry_t *)child->data;
+            int cn = child->size / sizeof(dir_entry_t);
+            int active = 0;
+            for (int j = 0; j < cn; j++) {
+                if (centries[j].name[0] != '\0') active++;
+            }
+            if (active > 2) return -ENOTEMPTY;
+            entries[i].name[0] = '\0';
+            return 0;
+        }
+    }
+    return -ENOENT;
+}
+
 static vnode_ops_t g_ramfs_vnode_ops = {
     .lookup   = ramfs_vnode_lookup,
     .stat     = ramfs_vnode_stat,
@@ -278,6 +345,8 @@ static vnode_ops_t g_ramfs_vnode_ops = {
     .mkdir    = ramfs_vnode_mkdir,
     .create   = ramfs_vnode_create,
     .unlink   = ramfs_vnode_unlink,
+    .rmdir    = ramfs_vnode_rmdir,
+    .rename   = ramfs_vnode_rename,
     .symlink  = ramfs_vnode_symlink,
     .readlink = ramfs_vnode_readlink,
 };
@@ -497,6 +566,7 @@ static vnode_t *vnode_lookup_path(vnode_t *root, const char *path) {
                     cur->ref_count++;
                 } else {
                     cur = parent;
+                    cur->ref_count++;   /* compensate: we reuse parent, but it gets decremented below */
                 }
                 old->ref_count--;
                 parent->ref_count--;
@@ -516,8 +586,12 @@ static vnode_t *vnode_lookup_path(vnode_t *root, const char *path) {
     return cur;
 }
 
-static void vnode_put(vnode_t *vn) {
+void vnode_put(vnode_t *vn) {
     if (!vn) return;
+    if (vn->ref_count <= 0) {
+        printf("[VFS BUG] vnode_put on freed vnode %p ino=%lu\n", (void *)vn, vn->ino);
+        return;
+    }
     vn->ref_count--;
     if (vn->ref_count <= 0) {
         if (vn->ops && vn->ops->release)
@@ -590,6 +664,7 @@ static vfile_t *ramfs_open_vnode(vnode_t *vn, int flags) {
     if (!vf) return NULL;
     memset(vf, 0, sizeof(*vf));
     vf->vnode     = vn;
+    vn->ref_count++;
     vf->flags     = flags;
     vf->offset    = (flags & O_APPEND) ? vn->size : 0;
     vf->ref_count = 1;
@@ -708,6 +783,7 @@ int vfs_open(const char *path, int flags, int mode) {
         kfree(vf);
         return -EMFILE;
     }
+    vnode_put(vn);
     return gfd;
 }
 
@@ -870,8 +946,111 @@ int vfs_unlink(const char *path) {
 }
 
 int vfs_rename(const char *old, const char *newpath) {
-    (void)old; (void)newpath;
-    return -ENOSYS; /* TODO: unified rename */
+    if (!old || !newpath) return -EINVAL;
+
+    task_t *cur = proc_current();
+    const char *cwd = cur ? cur->cwd : "/";
+
+    char old_resolved[MAX_PATH_LEN];
+    char new_resolved[MAX_PATH_LEN];
+    if (old[0] == '/') strncpy(old_resolved, old, MAX_PATH_LEN - 1);
+    else snprintf(old_resolved, MAX_PATH_LEN, "%s/%s", cwd, old);
+    old_resolved[MAX_PATH_LEN - 1] = '\0';
+
+    if (newpath[0] == '/') strncpy(new_resolved, newpath, MAX_PATH_LEN - 1);
+    else snprintf(new_resolved, MAX_PATH_LEN, "%s/%s", cwd, newpath);
+    new_resolved[MAX_PATH_LEN - 1] = '\0';
+
+    char old_parent[MAX_PATH_LEN], old_name[MAX_NAME_LEN];
+    char new_parent[MAX_PATH_LEN], new_name[MAX_NAME_LEN];
+
+    char *slash = strrchr(old_resolved, '/');
+    if (!slash) return -EINVAL;
+    if (slash == old_resolved) { old_parent[0] = '/'; old_parent[1] = '\0'; }
+    else {
+        size_t plen = slash - old_resolved;
+        memcpy(old_parent, old_resolved, plen);
+        old_parent[plen] = '\0';
+    }
+    strncpy(old_name, slash + 1, MAX_NAME_LEN - 1);
+    old_name[MAX_NAME_LEN - 1] = '\0';
+
+    slash = strrchr(new_resolved, '/');
+    if (!slash) return -EINVAL;
+    if (slash == new_resolved) { new_parent[0] = '/'; new_parent[1] = '\0'; }
+    else {
+        size_t plen = slash - new_resolved;
+        memcpy(new_parent, new_resolved, plen);
+        new_parent[plen] = '\0';
+    }
+    strncpy(new_name, slash + 1, MAX_NAME_LEN - 1);
+    new_name[MAX_NAME_LEN - 1] = '\0';
+
+    mount_t *old_mnt = vfs_find_mount(old_parent);
+    mount_t *new_mnt = vfs_find_mount(new_parent);
+    if (!old_mnt || !new_mnt) return -ENOENT;
+    if (old_mnt != new_mnt) return -EXDEV;
+
+    vnode_t *old_dir = vnode_lookup_path(old_mnt->root, strip_mount_prefix(old_parent, old_mnt));
+    vnode_t *new_dir = vnode_lookup_path(new_mnt->root, strip_mount_prefix(new_parent, new_mnt));
+    if (!old_dir || !new_dir) {
+        vnode_put(old_dir);
+        vnode_put(new_dir);
+        return -ENOENT;
+    }
+    if (old_dir->type != VFS_FT_DIR || new_dir->type != VFS_FT_DIR) {
+        vnode_put(old_dir);
+        vnode_put(new_dir);
+        return -ENOTDIR;
+    }
+    if (!old_dir->ops || !old_dir->ops->rename) {
+        vnode_put(old_dir);
+        vnode_put(new_dir);
+        return -ENOSYS;
+    }
+    int r = old_dir->ops->rename(old_dir, old_name, new_dir, new_name);
+    vnode_put(old_dir);
+    vnode_put(new_dir);
+    return r;
+}
+
+int vfs_rmdir(const char *path) {
+    if (!path) return -EINVAL;
+
+    task_t *cur = proc_current();
+    const char *cwd = cur ? cur->cwd : "/";
+
+    char resolved[MAX_PATH_LEN];
+    if (path[0] == '/') strncpy(resolved, path, MAX_PATH_LEN - 1);
+    else snprintf(resolved, MAX_PATH_LEN, "%s/%s", cwd, path);
+    resolved[MAX_PATH_LEN - 1] = '\0';
+
+    char parent_path[MAX_PATH_LEN];
+    char *slash = strrchr(resolved, '/');
+    if (!slash) return -EINVAL;
+    if (slash == resolved) { parent_path[0] = '/'; parent_path[1] = '\0'; }
+    else {
+        size_t plen = slash - resolved;
+        memcpy(parent_path, resolved, plen);
+        parent_path[plen] = '\0';
+    }
+    const char *name = slash + 1;
+
+    mount_t *mnt = vfs_find_mount(parent_path);
+    if (!mnt || !mnt->root) return -ENOENT;
+
+    vnode_t *parent = vnode_lookup_path(mnt->root, strip_mount_prefix(parent_path, mnt));
+    if (!parent || parent->type != VFS_FT_DIR) {
+        vnode_put(parent);
+        return -ENOENT;
+    }
+    if (!parent->ops || !parent->ops->rmdir) {
+        vnode_put(parent);
+        return -ENOSYS;
+    }
+    int r = parent->ops->rmdir(parent, name);
+    vnode_put(parent);
+    return r;
 }
 
 int vfs_stat(const char *path, kstat_t *st) {
@@ -1101,7 +1280,10 @@ static int pipe_write(vfile_t *vf, const char *buf, size_t count) {
     if (pb->reader_closed) return -EPIPE;
     size_t n = 0;
     while (n < count) {
-        while (pb->used == PIPE_BUF_SIZE) proc_yield();
+        while (pb->used == PIPE_BUF_SIZE) {
+            if (pb->reader_closed) return n ? (int)n : -EPIPE;
+            proc_yield();
+        }
         pb->data[pb->head] = buf[n++];
         pb->head = (pb->head + 1) % PIPE_BUF_SIZE;
         pb->used++;
@@ -1112,14 +1294,12 @@ static int pipe_write(vfile_t *vf, const char *buf, size_t count) {
 static int pipe_read_close(vfile_t *vf) {
     pipe_buf_t *pb = (pipe_buf_t *)vf->priv;
     if (pb) { pb->reader_closed = 1; pb->ref--; if (!pb->ref) kfree(pb); }
-    kfree(vf);
     return 0;
 }
 
 static int pipe_write_close(vfile_t *vf) {
     pipe_buf_t *pb = (pipe_buf_t *)vf->priv;
     if (pb) { pb->writer_closed = 1; pb->ref--; if (!pb->ref) kfree(pb); }
-    kfree(vf);
     return 0;
 }
 
@@ -1142,7 +1322,8 @@ int vfs_pipe(int pipefd[2]) {
     int fdrd = vfs_alloc_fd(rd);
     int fdwr = vfs_alloc_fd(wr);
     if (fdrd < 0 || fdwr < 0) {
-        if (fdrd >= 0) vfs_free_gfd(fdrd);
+        if (fdrd >= 0) { vfs_close(fdrd); vfs_free_gfd(fdrd); }
+        if (fdwr >= 0) { vfs_close(fdwr); vfs_free_gfd(fdwr); }
         kfree(rd); kfree(wr); kfree(pb);
         return -EMFILE;
     }

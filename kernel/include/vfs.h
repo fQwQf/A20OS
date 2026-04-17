@@ -73,6 +73,7 @@ typedef struct vnode_ops {
     int     (*create)(struct vnode *dir, const char *name, int mode, struct vnode **out);
     int     (*mkdir)(struct vnode *dir, const char *name, int mode);
     int     (*unlink)(struct vnode *dir, const char *name);
+    int     (*rmdir)(struct vnode *dir, const char *name);
     int     (*rename)(struct vnode *old_dir, const char *old_name,
                       struct vnode *new_dir, const char *new_name);
     int     (*link)(struct vnode *dir, const char *name, struct vnode *target);
@@ -126,7 +127,7 @@ typedef struct mount {
 } mount_t;
 
 /* ---- Open file table (global) ---- */
-#define VFS_MAX_OPEN   2048
+#define VFS_MAX_OPEN   8192
 
 /* ---- linux_dirent64 (for getdents64 syscall) ---- */
 typedef struct linux_dirent64 {
@@ -144,6 +145,7 @@ typedef struct linux_dirent64 {
 void     vfs_init(void);
 
 /* Path resolution */
+void     vnode_put(vnode_t *vn);
 vnode_t *vfs_resolve(const char *path);
 vnode_t *vfs_resolve_at(const char *path, const char *cwd);
 
@@ -159,6 +161,7 @@ int      vfs_ioctl(int fd, unsigned long req, void *arg);
 /* Directory operations */
 int      vfs_mkdir(const char *path, int mode);
 int      vfs_unlink(const char *path);
+int      vfs_rmdir(const char *path);
 int      vfs_rename(const char *old, const char *newpath);
 int      vfs_stat(const char *path, kstat_t *st);
 int      vfs_fstat(int fd, kstat_t *st);

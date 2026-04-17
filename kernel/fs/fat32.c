@@ -250,7 +250,12 @@ static int fat32_lookup(vnode_t *dir, const char *name, vnode_t **out) {
     /* Special entries */
     if (strcmp(name, ".") == 0)  { *out = dir; dir->ref_count++; return 0; }
     if (strcmp(name, "..") == 0) {
-        if (dir->parent) { *out = dir->parent; dir->parent->ref_count++; return 0; }
+        if (dir->parent) {
+            *out = dir->parent;
+            dir->parent->ref_count++;
+            dir->ref_count++;          /* vnode_lookup_path will vnode_put(dir) */
+            return 0;
+        }
         *out = dir; dir->ref_count++; return 0;
     }
 
@@ -261,6 +266,7 @@ static int fat32_lookup(vnode_t *dir, const char *name, vnode_t **out) {
     /* Assign a unique inode number from cluster */
     *out = fat32_make_vnode(p->sb, cluster, sz, is_dir, dir, (uint64_t)cluster);
     if (!*out) return -ENOMEM;
+    /* parent ref_count bumped in make_vnode */
     return 0;
 }
 
@@ -280,6 +286,7 @@ static int fat32_stat(vnode_t *vn, kstat_t *st) {
 /* vnode_ops: release */
 static void fat32_release_vn(vnode_t *vn) {
     if (vn->fs_data) { kfree(vn->fs_data); vn->fs_data = NULL; }
+    vnode_put(vn->parent);
     kfree(vn);
 }
 
@@ -459,11 +466,60 @@ static int fat32_vn_truncate(vnode_t *vn, size_t size) {
     return 0;
 }
 
+static int fat32_dir_is_empty(fat32_sb_t *sb, uint32_t dir_cluster) {
+    size_t off = 0;
+    int active = 0;
+    while (1) {
+        fat32_dirent_t de;
+        int r = read_raw_dirent(sb, dir_cluster, off, &de);
+        if (r <= 0) break;
+        if (de.name[0] == 0x00) break;
+        off += 32;
+        if ((uint8_t)de.name[0] == 0xE5) continue;
+        if (de.attr == FAT_ATTR_LFN) continue;
+        if (de.attr & FAT_ATTR_VOL_LABEL) continue;
+        active++;
+    }
+    return active <= 2 ? 0 : -ENOTEMPTY;
+}
+
+static int fat32_vn_rmdir(vnode_t *dir, const char *name) {
+    fat32_vnode_priv_t *p = (fat32_vnode_priv_t *)dir->fs_data;
+    if (!p->is_dir) return -ENOTDIR;
+
+    int is_dir; size_t sz; size_t doff;
+    uint32_t cluster = fat32_dir_lookup(p->sb, p->first_cluster, name, &is_dir, &sz, &doff);
+    if (!cluster) return -ENOENT;
+    if (!is_dir) return -ENOTDIR;
+
+    fat32_sb_t *sb = p->sb;
+    int r = fat32_dir_is_empty(sb, cluster);
+    if (r < 0) return r;
+
+    uint32_t dc = p->first_cluster;
+    size_t rem = doff;
+    while (rem >= sb->bytes_per_cluster) {
+        rem -= sb->bytes_per_cluster;
+        dc = fat_read(sb, dc);
+    }
+    uint64_t off = cluster_byte_offset(sb, dc) + rem;
+    uint8_t deleted = 0xE5;
+    bcache_write_bytes(sb->bc, off, &deleted, 1);
+
+    while (cluster < FAT32_CLUSTER_END) {
+        uint32_t next = fat_read(sb, cluster);
+        fat_write(sb, cluster, FAT32_CLUSTER_FREE);
+        cluster = next;
+    }
+    return 0;
+}
+
 static vnode_ops_t g_fat32_vnode_ops = {
     .lookup   = fat32_lookup,
     .create   = fat32_vn_create,
     .mkdir    = fat32_vn_mkdir,
     .unlink   = fat32_vn_unlink,
+    .rmdir    = fat32_vn_rmdir,
     .rename   = NULL,
     .stat     = fat32_stat,
     .truncate = fat32_vn_truncate,
@@ -482,6 +538,7 @@ static vnode_t *fat32_make_vnode(fat32_sb_t *sb, uint32_t cluster,
     vn->size      = size;
     vn->ref_count = 1;
     vn->parent    = parent;
+    if (parent) parent->ref_count++;
     vn->ops       = &g_fat32_vnode_ops;
 
     fat32_vnode_priv_t *fp = (fat32_vnode_priv_t *)kmalloc(sizeof(fat32_vnode_priv_t));
@@ -737,6 +794,7 @@ vfile_t *fat32_open_vnode(vnode_t *vn, int flags) {
     if (!vf) { kfree(fc); return NULL; }
     memset(vf, 0, sizeof(*vf));
     vf->vnode     = vn;
+    vn->ref_count++;
     vf->flags     = flags;
     vf->offset    = fc->file_off;
     vf->ref_count = 1;
