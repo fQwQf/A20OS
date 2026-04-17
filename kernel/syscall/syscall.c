@@ -9,6 +9,7 @@
 #include "proc.h"
 #include "signal.h"
 #include "mm.h"
+#include "vm.h"
 #include "timer.h"
 #include "uart.h"
 #include "stdio.h"
@@ -123,7 +124,8 @@ int64_t syscall_dispatch(trap_context_t *ctx) {
                 cur->sig_handling = 0;
             }
         }
-        break;
+        signal_deliver_user(ctx);
+        return ret;
     case SYS_sigsuspend:  ret = sys_sigsuspend((void*)a0); break;
 
     case SYS_brk:         ret = sys_brk(a0); break;
@@ -236,10 +238,15 @@ int64_t sys_readv(int fd, const void *iov, int iovcnt) {
 int64_t sys_openat(int dirfd, const char *path, int flags, int mode) {
     (void)dirfd;
     if (!path) return -EFAULT;
-    int fd = vfs_open(path, flags, mode);
+    char kpath[MAX_PATH_LEN];
+    if (user_strncpy(kpath, path, MAX_PATH_LEN) < 0) return -EFAULT;
+    int fd = vfs_open(kpath, flags, mode);
     if (fd >= 0) {
         task_t *t = proc_current();
-        if (t && fd >= 0 && fd < MAX_FILES) t->fd_table[fd] = fd;
+        if (t && fd >= 0 && fd < MAX_FILES) {
+            if (t->fd_table[fd] >= 0) vfs_close(t->fd_table[fd]);
+            t->fd_table[fd] = fd;
+        }
     }
     return fd;
 }
@@ -266,11 +273,16 @@ int64_t sys_dup(int fd) {
     if (!t || fd < 0 || fd >= MAX_FILES) return -EBADF;
     int gfd = t->fd_table[fd];
     if (gfd < 0) return -EBADF;
-    int newfd = vfs_dup(gfd);
-    if (newfd >= 0) {
-        if (newfd < MAX_FILES) t->fd_table[newfd] = newfd;
+    int new_gfd = vfs_dup(gfd);
+    if (new_gfd < 0) return new_gfd;
+    for (int newfd = 0; newfd < MAX_FILES; newfd++) {
+        if (t->fd_table[newfd] < 0) {
+            t->fd_table[newfd] = new_gfd;
+            return newfd;
+        }
     }
-    return newfd;
+    vfs_close(new_gfd);
+    return -EMFILE;
 }
 
 int64_t sys_dup3(int oldfd, int newfd, int flags) {
@@ -296,7 +308,10 @@ int64_t sys_fcntl(int fd, int cmd, long arg) {
     int64_t r = vfs_fcntl(gfd, cmd, arg);
     if ((cmd == 0 || cmd == 1030) && r >= 0) {
         task_t *t = proc_current();
-        if (t && r >= 0 && r < MAX_FILES) t->fd_table[r] = (int)r;
+        if (t && r >= 0 && r < MAX_FILES) {
+            if (t->fd_table[r] >= 0) vfs_close(t->fd_table[r]);
+            t->fd_table[r] = (int)r;
+        }
     }
     return r;
 }
@@ -308,8 +323,14 @@ int64_t sys_pipe2(int *pipefd, int flags) {
     if (r == 0) {
         task_t *t = proc_current();
         if (t) {
-            if (pipefd[0] >= 0 && pipefd[0] < MAX_FILES) t->fd_table[pipefd[0]] = pipefd[0];
-            if (pipefd[1] >= 0 && pipefd[1] < MAX_FILES) t->fd_table[pipefd[1]] = pipefd[1];
+            if (pipefd[0] >= 0 && pipefd[0] < MAX_FILES) {
+                if (t->fd_table[pipefd[0]] >= 0) vfs_close(t->fd_table[pipefd[0]]);
+                t->fd_table[pipefd[0]] = pipefd[0];
+            }
+            if (pipefd[1] >= 0 && pipefd[1] < MAX_FILES) {
+                if (t->fd_table[pipefd[1]] >= 0) vfs_close(t->fd_table[pipefd[1]]);
+                t->fd_table[pipefd[1]] = pipefd[1];
+            }
         }
     }
     return r;
@@ -337,7 +358,10 @@ int64_t sys_ftruncate(int fd, size_t size) {
 }
 
 int64_t sys_truncate(const char *path, size_t size) {
-    return vfs_truncate(path, size);
+    if (!path) return -EFAULT;
+    char kpath[MAX_PATH_LEN];
+    if (user_strncpy(kpath, path, MAX_PATH_LEN) < 0) return -EFAULT;
+    return vfs_truncate(kpath, size);
 }
 
 int64_t sys_sendfile(int out_fd, int in_fd, long *off, size_t count) {
@@ -408,22 +432,36 @@ int64_t sys_epoll_create1(int flags) {
 
 int64_t sys_mkdirat(int dirfd, const char *path, int mode) {
     (void)dirfd;
-    return vfs_mkdir(path, mode);
+    if (!path) return -EFAULT;
+    char kpath[MAX_PATH_LEN];
+    if (user_strncpy(kpath, path, MAX_PATH_LEN) < 0) return -EFAULT;
+    return vfs_mkdir(kpath, mode);
 }
 
 int64_t sys_unlinkat(int dirfd, const char *path, int flags) {
-    (void)dirfd; (void)flags;
-    return vfs_unlink(path);
+    (void)dirfd;
+    if (!path) return -EFAULT;
+    char kpath[MAX_PATH_LEN];
+    if (user_strncpy(kpath, path, MAX_PATH_LEN) < 0) return -EFAULT;
+    if (flags & AT_REMOVEDIR) return vfs_rmdir(kpath);
+    return vfs_unlink(kpath);
 }
 
 int64_t sys_renameat2(int olddir, const char *oldpath,
                        int newdir, const char *newpath, int flags) {
     (void)olddir; (void)newdir; (void)flags;
-    return vfs_rename(oldpath, newpath);
+    if (!oldpath || !newpath) return -EFAULT;
+    char kold[MAX_PATH_LEN], knew[MAX_PATH_LEN];
+    if (user_strncpy(kold, oldpath, MAX_PATH_LEN) < 0) return -EFAULT;
+    if (user_strncpy(knew, newpath, MAX_PATH_LEN) < 0) return -EFAULT;
+    return vfs_rename(kold, knew);
 }
 
 int64_t sys_chdir(const char *path) {
-    return vfs_chdir(path);
+    if (!path) return -EFAULT;
+    char kpath[MAX_PATH_LEN];
+    if (user_strncpy(kpath, path, MAX_PATH_LEN) < 0) return -EFAULT;
+    return vfs_chdir(kpath);
 }
 
 int64_t sys_getcwd(char *buf, size_t size) {
@@ -491,20 +529,28 @@ int64_t sys_fstat(int fd, void *st) {
 
 int64_t sys_fstatat(int dirfd, const char *path, void *st, int flags) {
     (void)dirfd; (void)flags;
+    if (!path || !st) return -EFAULT;
+    char kpath[MAX_PATH_LEN];
+    if (user_strncpy(kpath, path, MAX_PATH_LEN) < 0) return -EFAULT;
     kstat_t kst;
-    int r = vfs_fstatat(dirfd, path, &kst, flags);
+    int r = vfs_fstatat(dirfd, kpath, &kst, flags);
     if (r < 0) return r;
-    if (!st) return -EFAULT;
     copy_kstat_to_user(st, &kst);
     return 0;
 }
 
 int64_t sys_readlinkat(int dirfd, const char *path, char *buf, size_t sz) {
-    return vfs_readlinkat(dirfd, path, buf, sz);
+    if (!path) return -EFAULT;
+    char kpath[MAX_PATH_LEN];
+    if (user_strncpy(kpath, path, MAX_PATH_LEN) < 0) return -EFAULT;
+    return vfs_readlinkat(dirfd, kpath, buf, sz);
 }
 
 int64_t sys_faccessat(int dirfd, const char *path, int mode) {
-    return vfs_faccessat(dirfd, path, mode);
+    if (!path) return -EFAULT;
+    char kpath[MAX_PATH_LEN];
+    if (user_strncpy(kpath, path, MAX_PATH_LEN) < 0) return -EFAULT;
+    return vfs_faccessat(dirfd, kpath, mode);
 }
 
 int64_t sys_getdents64(int fd, void *dirp, size_t count) {
@@ -517,13 +563,19 @@ int64_t sys_linkat(int olddirfd, const char *oldpath,
                     int newdirfd, const char *newpath, int flags) {
     (void)olddirfd; (void)newdirfd; (void)flags;
     if (!oldpath || !newpath) return -EFAULT;
-    return vfs_link(oldpath, newpath);
+    char kold[MAX_PATH_LEN], knew[MAX_PATH_LEN];
+    if (user_strncpy(kold, oldpath, MAX_PATH_LEN) < 0) return -EFAULT;
+    if (user_strncpy(knew, newpath, MAX_PATH_LEN) < 0) return -EFAULT;
+    return vfs_link(kold, knew);
 }
 
 int64_t sys_symlinkat(const char *target, int newdirfd, const char *linkpath) {
     (void)newdirfd;
     if (!target || !linkpath) return -EFAULT;
-    return vfs_symlink(target, linkpath);
+    char ktarget[MAX_PATH_LEN], klink[MAX_PATH_LEN];
+    if (user_strncpy(ktarget, target, MAX_PATH_LEN) < 0) return -EFAULT;
+    if (user_strncpy(klink, linkpath, MAX_PATH_LEN) < 0) return -EFAULT;
+    return vfs_symlink(ktarget, klink);
 }
 
 int64_t sys_statfs(const char *path, void *buf) {
@@ -546,12 +598,20 @@ int64_t sys_fstatfs(int fd, void *buf) {
 
 int64_t sys_mount(const char *src, const char *target,
                    const char *fstype, int flags) {
-    return vfs_mount(src, target, fstype, flags);
+    if (!src || !target || !fstype) return -EFAULT;
+    char ksrc[MAX_PATH_LEN], ktarget[MAX_PATH_LEN], kfstype[32];
+    if (user_strncpy(ksrc, src, MAX_PATH_LEN) < 0) return -EFAULT;
+    if (user_strncpy(ktarget, target, MAX_PATH_LEN) < 0) return -EFAULT;
+    if (user_strncpy(kfstype, fstype, 32) < 0) return -EFAULT;
+    return vfs_mount(ksrc, ktarget, kfstype, flags);
 }
 
 int64_t sys_umount2(const char *target, int flags) {
     (void)flags;
-    return vfs_umount(target);
+    if (!target) return -EFAULT;
+    char ktarget[MAX_PATH_LEN];
+    if (user_strncpy(ktarget, target, MAX_PATH_LEN) < 0) return -EFAULT;
+    return vfs_umount(ktarget);
 }
 
 int64_t sys_utimensat(int dirfd, const char *path, void *times, int flags) {
@@ -622,7 +682,11 @@ int64_t sys_clone(uint64_t flags, void *stack, int *ptid, int *ctid, uint64_t tl
 }
 
 int64_t sys_execve(const char *path, char **argv, char **envp) {
-    return proc_exec(path, argv, envp);
+    if (!path) return -EFAULT;
+    char kpath[MAX_PATH_LEN];
+    long r = user_strncpy(kpath, path, MAX_PATH_LEN);
+    if (r < 0) return -EFAULT;
+    return proc_exec(kpath, argv, envp);
 }
 
 int64_t sys_wait4(int pid, int *status, int options, void *rusage) {
@@ -821,8 +885,9 @@ int64_t sys_munmap(uint64_t addr, size_t len) {
 }
 
 int64_t sys_mprotect(uint64_t addr, size_t len, int prot) {
-    (void)addr; (void)len; (void)prot;
-    return 0;
+    task_t *t = proc_current();
+    if (!t || !t->mm) return -EINVAL;
+    return mm_mprotect(t->mm, addr, len, prot);
 }
 
 int64_t sys_madvise(uint64_t addr, size_t len, int advice) {
@@ -831,9 +896,80 @@ int64_t sys_madvise(uint64_t addr, size_t len, int advice) {
 }
 
 int64_t sys_mremap(uint64_t old_addr, size_t old_size, size_t new_size, int flags, uint64_t new_addr) {
-    (void)old_addr; (void)old_size; (void)flags; (void)new_addr;
+#define MREMAP_MAYMOVE   1
+#define MREMAP_FIXED     2
+    task_t *t = proc_current();
+    if (!t || !t->mm) return -EINVAL;
+
     if (new_size == 0) return -EINVAL;
-    return (int64_t)proc_mmap(0, new_size, 3, 0x20 | 0x02, -1, 0);
+    if (old_addr & (PAGE_SIZE - 1)) return -EINVAL;
+
+    size_t old_len = ROUND_UP(old_size, PAGE_SIZE);
+    size_t new_len = ROUND_UP(new_size, PAGE_SIZE);
+
+    vm_area_t *vma = mm_find_vma(t->mm, old_addr);
+    if (!vma || vma->start != old_addr) return -EFAULT;
+    if (old_size == 0) old_len = vma->end - vma->start;
+    if (!old_len) return -EINVAL;
+
+    if (new_len <= old_len) {
+        if (new_len < old_len)
+            mm_munmap(t->mm, old_addr + new_len, old_len - new_len);
+        return (int64_t)old_addr;
+    }
+
+    uint64_t grow_by = new_len - old_len;
+    uint64_t new_end = old_addr + new_len;
+    int can_grow = 1;
+
+    if ((flags & MREMAP_FIXED) && new_addr != old_addr)
+        can_grow = 0;
+    for (vm_area_t *v = t->mm->mmap; v; v = v->next) {
+        if (v == vma) continue;
+        if (v->start < new_end && v->end > old_addr + old_len) {
+            can_grow = 0;
+            break;
+        }
+    }
+
+    if (can_grow) {
+        vma->end = new_end;
+        t->mm->total_vm += grow_by / PAGE_SIZE;
+        return (int64_t)old_addr;
+    }
+
+    if (!(flags & MREMAP_MAYMOVE)) return -ENOMEM;
+
+    int prot = ((vma->pte_flags & PTE_R) ? PROT_READ : 0) |
+               ((vma->pte_flags & PTE_W) ? PROT_WRITE : 0) |
+               ((vma->pte_flags & PTE_X) ? PROT_EXEC : 0);
+    uint64_t target = (flags & MREMAP_FIXED) ? new_addr : 0;
+    uint64_t dst = mm_mmap(t->mm, target, new_len, prot,
+                            (target ? MAP_FIXED : 0) | MAP_ANONYMOUS | MAP_PRIVATE);
+    if ((int64_t)dst < 0) return dst;
+
+    for (uint64_t off = 0; off < old_len; off += PAGE_SIZE) {
+        paddr_t pa = pt_translate(t->mm->pgdir, old_addr + off);
+        if (pa == 0) continue;
+        void *src = (void *)((uint64_t)pa + PAGE_OFFSET);
+
+        void *frame = frame_alloc();
+        if (!frame) {
+            mm_munmap(t->mm, dst, new_len);
+            return -ENOMEM;
+        }
+        memcpy(frame, src, PAGE_SIZE);
+        paddr_t frame_pa = (paddr_t)((uint64_t)(uintptr_t)frame - PAGE_OFFSET);
+        int r = pt_map(t->mm->pgdir, dst + off, frame_pa, vma->pte_flags);
+        if (r < 0) {
+            frame_free(frame);
+            mm_munmap(t->mm, dst, new_len);
+            return -ENOMEM;
+        }
+    }
+
+    mm_munmap(t->mm, old_addr, old_len);
+    return (int64_t)dst;
 }
 
 int64_t sys_shm_open(const char *name, int oflag, int mode) {
@@ -868,7 +1004,8 @@ int64_t sys_clock_getres(int clk, void *tp) {
 int64_t sys_nanosleep(void *req, void *rem) {
     (void)rem;
     if (!req) return -EFAULT;
-    uint64_t *ts = (uint64_t *)req;
+    uint64_t ts[2];
+    if (copy_from_user(ts, req, sizeof(ts)) < 0) return -EFAULT;
     uint64_t sec  = ts[0];
     uint64_t nsec = ts[1];
     uint64_t ticks = sec * TICKS_PER_SEC + nsec * TICKS_PER_SEC / 1000000000UL;

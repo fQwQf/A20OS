@@ -2,6 +2,7 @@
 #define _DEFS_H
 
 #include "types.h"
+#include "consts.h"
 
 #define ALWAYS_INLINE __attribute__((always_inline)) inline static
 #define NORETURN __attribute__((noreturn))
@@ -74,6 +75,6 @@ static inline void csr_clear(uint64_t csr, uint64_t val) {
 #define IRQ_S_TIMER      5
 #define IRQ_S_EXT        9
 #define CAUSE_ECALL_U    8
-#define MAKE_SATP(pgdir) ((0x8UL << 60) | ((uint64_t)(uintptr_t)(pgdir) >> 12))
+#define MAKE_SATP(pgdir) ((0x8UL << 60) | (((uint64_t)(uintptr_t)(pgdir) - PAGE_OFFSET) >> 12))
 
 #endif /* _DEFS_H */

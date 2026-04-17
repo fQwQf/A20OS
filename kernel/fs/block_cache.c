@@ -66,7 +66,10 @@ static bcache_entry_t *bcache_evict(bcache_t *bc) {
     while (e != &bc->lru_head) {
         if (e->ref == 0) {
             if (e->dirty && bc->dev && e->valid) {
-                bc->dev->write_sector(bc->dev, e->lba, e->data, 1);
+                if (bc->dev->write_sector(bc->dev, e->lba, e->data, 1) < 0) {
+                    e = e->prev;
+                    continue;
+                }
                 e->dirty = 0;
             }
             lru_remove(e);
@@ -126,8 +129,8 @@ void bcache_sync(bcache_t *bc) {
     if (!bc || !bc->dev) return;
     for (int i = 0; i < bc->pool_size; i++) {
         if (bc->pool[i].valid && bc->pool[i].dirty) {
-            bc->dev->write_sector(bc->dev, bc->pool[i].lba, bc->pool[i].data, 1);
-            bc->pool[i].dirty = 0;
+            if (bc->dev->write_sector(bc->dev, bc->pool[i].lba, bc->pool[i].data, 1) >= 0)
+                bc->pool[i].dirty = 0;
         }
     }
 }

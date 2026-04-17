@@ -6,9 +6,13 @@
 #include "defs.h"
 #include "consts.h"
 
-#define VIRTIO0_BASE    0x10001000UL
+#define VIRTIO0_BASE    VIRTIO_BASE
 
 #define VQ_SIZE  VIRTIO_QUEUE_SIZE
+
+static inline uint64_t va_to_pa(const void *va) {
+    return (uint64_t)(uintptr_t)va - PAGE_OFFSET;
+}
 
 typedef struct {
     virtio_blk_t       blk;
@@ -133,15 +137,15 @@ int virtio_blk_init(uintptr_t mmio_base) {
         inst->blk.avail = l_avail;
         inst->blk.used  = l_used;
 
-        uint64_t vq_pa = (uint64_t)(uintptr_t)inst->legacy_vq;
+        uint64_t vq_pa = va_to_pa(inst->legacy_vq);
         mmio_write32(base, VIRTIO_MMIO_GUEST_PAGE_SIZE, 4096);
         mb();
         mmio_write32(base, VIRTIO_MMIO_QUEUE_PFN, (uint32_t)(vq_pa / 4096));
         mb();
     } else {
-        uint64_t desc_pa  = (uint64_t)(uintptr_t)inst->desc;
-        uint64_t avail_pa = (uint64_t)(uintptr_t)&inst->avail;
-        uint64_t used_pa  = (uint64_t)(uintptr_t)&inst->used;
+        uint64_t desc_pa  = va_to_pa(inst->desc);
+        uint64_t avail_pa = va_to_pa(&inst->avail);
+        uint64_t used_pa  = va_to_pa(&inst->used);
 
         mmio_write32(base, VIRTIO_MMIO_QUEUE_DESC_LOW,   (uint32_t)(desc_pa));
         mmio_write32(base, VIRTIO_MMIO_QUEUE_DESC_HIGH,  (uint32_t)(desc_pa  >> 32));
@@ -202,17 +206,17 @@ static int virtio_blk_rw(int idx, uint64_t lba, void *buf, size_t sectors, int w
     virtq_avail_t *avail = inst->blk.avail;
     virtq_used_t  *used  = inst->blk.used;
 
-    desc[0].addr  = (uint64_t)(uintptr_t)&inst->req_hdr[0];
+    desc[0].addr  = va_to_pa(&inst->req_hdr[0]);
     desc[0].len   = sizeof(virtio_blk_req_hdr_t);
     desc[0].flags = VIRTQ_DESC_F_NEXT;
     desc[0].next  = 1;
 
-    desc[1].addr  = (uint64_t)(uintptr_t)buf;
+    desc[1].addr  = va_to_pa(buf);
     desc[1].len   = (uint32_t)bytes;
     desc[1].flags = (write ? 0 : VIRTQ_DESC_F_WRITE) | VIRTQ_DESC_F_NEXT;
     desc[1].next  = 2;
 
-    desc[2].addr  = (uint64_t)(uintptr_t)&inst->status[0];
+    desc[2].addr  = va_to_pa(&inst->status[0]);
     desc[2].len   = 1;
     desc[2].flags = VIRTQ_DESC_F_WRITE;
     desc[2].next  = 0;
