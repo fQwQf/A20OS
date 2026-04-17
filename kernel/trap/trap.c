@@ -175,27 +175,32 @@ void trap_handler(trap_context_t *ctx) {
             }
             {
                 uint32_t insn = 0;
-                uint64_t *pte_sepc = pt_walk(cur->mm->pgdir, sepc, 0);
                 pfn_t dbg_pfn = 0;
-                if (pte_sepc && (*pte_sepc & PTE_V)) {
-                    dbg_pfn = phys_to_pfn(SV39_PTE_ADDR(*pte_sepc));
-                    uint8_t *kva = (uint8_t *)(SV39_PTE_ADDR(*pte_sepc) + PAGE_OFFSET + (sepc & 0xFFF));
-                    insn = *(uint32_t *)kva;
+                uint64_t stval_pte = 0;
+                uint64_t pte2 = 0, pte1 = 0, pte0 = 0;
+                uint64_t *l1 = NULL, *l0 = NULL;
+                if (cur && cur->mm && cur->mm->pgdir) {
+                    uint64_t *pte_sepc = pt_walk(cur->mm->pgdir, sepc, 0);
+                    if (pte_sepc && (*pte_sepc & PTE_V)) {
+                        dbg_pfn = phys_to_pfn(SV39_PTE_ADDR(*pte_sepc));
+                        uint8_t *kva = (uint8_t *)(SV39_PTE_ADDR(*pte_sepc) + PAGE_OFFSET + (sepc & 0xFFF));
+                        insn = *(uint32_t *)kva;
+                    }
+                    uint64_t *pte_stval = pt_walk(cur->mm->pgdir, stval, 0);
+                    stval_pte = pte_stval ? *pte_stval : 0;
+                    uint64_t *pgdir = cur->mm->pgdir;
+                    pte2 = pgdir ? pgdir[0] : 0;
+                    l1 = (pte2 & PTE_V) ? PTE_TO_PTR(pte2) : NULL;
+                    pte1 = l1 ? l1[0] : 0;
+                    l0 = (pte1 & PTE_V) ? PTE_TO_PTR(pte1) : NULL;
+                    pte0 = l0 ? l0[0x2f] : 0;
                 }
-                uint64_t *pte_stval = pt_walk(cur->mm->pgdir, stval, 0);
-                uint64_t stval_pte = pte_stval ? *pte_stval : 0;
-                uint64_t *pgdir = cur->mm->pgdir;
-                uint64_t pte2 = pgdir ? pgdir[0] : 0;
-                uint64_t *l1 = (pte2 & PTE_V) ? PTE_TO_PTR(pte2) : NULL;
-                uint64_t pte1 = l1 ? l1[0] : 0;
-                uint64_t *l0 = (pte1 & PTE_V) ? PTE_TO_PTR(pte1) : NULL;
-                uint64_t pte0 = l0 ? l0[0x2f] : 0;
                 kerr("User Page Fault: pid=%d scause=0x%lx sepc=0x%lx stval=0x%lx insn=0x%08x ctx_sepc=0x%lx pfn=%u flags=%u rc=%u\n",
                         cur ? cur->pid : -1, scause, sepc, stval, insn, ctx->sepc,
                         (unsigned)dbg_pfn, dbg_pfn < pfa.total_frames ? pfa.meta[dbg_pfn].flags : 99,
                         dbg_pfn < pfa.total_frames ? pfa.meta[dbg_pfn].refcount : 99);
                 kerr("[PTEWALK] pgdir=0x%lx pgdir[0]=0x%lx l1=0x%lx l1[0]=0x%lx l0=0x%lx l0[0x2f]=0x%lx stval_pte=0x%lx\n",
-                        (unsigned long)pgdir, pte2, (unsigned long)l1, pte1, (unsigned long)l0, pte0, stval_pte);
+                        (unsigned long)(cur && cur->mm ? cur->mm->pgdir : NULL), pte2, (unsigned long)l1, pte1, (unsigned long)l0, pte0, stval_pte);
             }
             proc_exit(-SIGSEGV);
         } else if (code == CAUSE_ILLEGAL_INSN) {
