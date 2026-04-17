@@ -19,9 +19,10 @@ LDFLAGS = -static -nostdlib -Ttext 0x10000
 
 LIBGCC := /usr/lib/gcc/riscv64-unknown-elf/14.2.0/rv64i/lp64/libgcc.a
 
+LIB_A20OS := lib/brk.o
 CRT_START = $(MUSL_CRT)/crt1.o $(MUSL_CRT)/crti.o
 CRT_END   = $(MUSL_CRT)/crtn.o
-LIBC      = $(MUSL_CRT)/libc.a $(LIBGCC)
+LIBC      = $(LIB_A20OS) $(MUSL_CRT)/libc.a $(LIBGCC)
 
 else ifeq ($(ARCH), loongarch64)
 CROSS_COMPILE ?= loongarch64-unknown-elf-
@@ -71,25 +72,28 @@ build_dir:
 %.o: %.S
 	$(CC) $(CFLAGS) -c $< -o $@
 
-build/sh: $(SH_SRC)
+lib/%.o: lib/%.c
+	$(CC) $(CFLAGS) -c $< -o $@
+
+build/sh: $(SH_SRC) $(LIB_A20OS)
 	$(CC) $(CFLAGS) -c $< -o build/sh.o
 	$(CC) $(LDFLAGS) -o $@ $(CRT_START) build/sh.o $(CRT_END) $(LIBC)
 
-build/mksh: $(MKSH_OBJS)
-	$(CC) $(LDFLAGS) -o $@ $(CRT_START) $^ $(CRT_END) $(LIBC)
+build/mksh: $(MKSH_OBJS) $(LIB_A20OS)
+	$(CC) $(LDFLAGS) -o $@ $(CRT_START) $(MKSH_OBJS) $(CRT_END) $(LIBC)
 
 $(MKSH_DIR)/%.o: $(MKSH_DIR)/%.c
 	$(CC) $(MKSH_CFLAGS) -c $< -o $@
 
-build/init: shell/init.c
+build/init: shell/init.c $(LIB_A20OS)
 	$(CC) $(CFLAGS) -c $< -o build/init.o
 	$(CC) $(LDFLAGS) -o $@ $(CRT_START) build/init.o $(CRT_END) $(LIBC)
 
-build/%: cmds/%.c
+build/%: cmds/%.c $(LIB_A20OS)
 	$(CC) $(CFLAGS) -c $< -o build/$*.o
 	$(CC) $(LDFLAGS) -o $@ $(CRT_START) build/$*.o $(CRT_END) $(LIBC)
 
 clean:
-	rm -rf build $(MKSH_DIR)/*.o
+	rm -rf build $(MKSH_DIR)/*.o lib/*.o
 
 .PHONY: all clean build_dir

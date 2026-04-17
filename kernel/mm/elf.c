@@ -5,24 +5,40 @@
  *   - User segments mapped at their ELF virtual addresses (PTE_USER)
  *   - Kernel space identity-mapped (PTE_KERN, no PTE_U)
  *   - MMIO devices identity-mapped (PTE_KERN, no PTE_U)
- *   - User stack mapped at VA 0x7FFFF000 downward
+ *   - User stack mapped at VA 0x3FFFF000 downward
  */
 
 #include "elf.h"
 #include "mm.h"
+#include "vm.h"
 #include "vfs.h"
 #include "string.h"
 #include "stdio.h"
 #include "panic.h"
 #include "consts.h"
 #include "defs.h"
+#include "timer.h"
 
-#define USER_STACK_TOP_VA  0x7FFFF000UL
-#define USER_STACK_PAGES   64
+static inline paddr_t va_to_pa(const void *va) {
+    return (paddr_t)((uint64_t)(uintptr_t)va - PAGE_OFFSET);
+}
+
+#define USER_STACK_TOP_VA  0x3FFFF000UL
 #define USER_DYN_BASE      0x10000UL
 #define INTERP_BASE        0x40000000UL
-#define USER_TLS_VA        0x7F000000UL
+#define USER_TLS_VA        0x3E000000UL
 #define TLS_TCB_SIZE       128
+#define PTE_STACK          (PTE_V | PTE_R | PTE_W | PTE_X | PTE_U | PTE_A | PTE_D)
+
+#define ASLR_BITS          8
+#define ASLR_MASK          (((1UL << ASLR_BITS) - 1) << 16)
+#define ASLR_MIN_ALIGN     (1UL << 16)
+
+static uint64_t elf_aslr_bias(void) {
+    uint64_t t = timer_get_ticks();
+    uint64_t bits = ((t >> 3) ^ (t >> 17) ^ (t >> 37)) & ((1UL << ASLR_BITS) - 1);
+    return bits << 16;
+}
 
 int elf_check_header(const Elf64_Ehdr *eh) {
     if (*(uint32_t *)eh->e_ident != ELF_MAGIC) return -ENOEXEC;
@@ -39,10 +55,11 @@ static uint64_t seg_flags(uint32_t p_flags) {
     if (p_flags & PF_R) f |= PTE_R;
     if (p_flags & PF_W) f |= PTE_W;
     if (p_flags & PF_X) f |= PTE_X;
+    if (f & PTE_W) f |= PTE_R;
     return f;
 }
 
-static int map_segment(uint64_t *pgdir, uint64_t va, uint64_t memsz,
+static int map_segment(mm_struct_t *mm, uint64_t *pgdir, uint64_t va, uint64_t memsz,
                        const void *data, uint64_t filesz, uint64_t flags) {
     uint64_t start = va & ~(PAGE_SIZE - 1);
     uint64_t end   = ROUND_UP(va + memsz, PAGE_SIZE);
@@ -51,7 +68,11 @@ static int map_segment(uint64_t *pgdir, uint64_t va, uint64_t memsz,
         void *frame = frame_alloc();
         if (!frame) return -ENOMEM;
 
-        memset(frame, 0, PAGE_SIZE);
+        uint64_t *old_pte = pt_walk(pgdir, page, 0);
+        if (old_pte && (*old_pte & PTE_V)) {
+            paddr_t old_pa = SV39_PTE_ADDR(*old_pte);
+            memcpy(frame, (void *)(old_pa + PAGE_OFFSET), PAGE_SIZE);
+        }
 
         if (page < va + filesz) {
             uint64_t copy_off = (page < va) ? (va - page) : 0;
@@ -64,30 +85,100 @@ static int map_segment(uint64_t *pgdir, uint64_t va, uint64_t memsz,
                        (const char *)data + src_off, to_copy);
         }
 
-        int r = pt_map(pgdir, page, (paddr_t)(uintptr_t)frame, flags);
+        int r = pt_map(pgdir, page, va_to_pa(frame), flags);
         if (r < 0) { frame_free(frame); return r; }
+    }
+    __asm__ volatile("sfence.vma" ::: "memory");
+
+    if (mm) {
+        vm_area_t *vma = kcalloc(1, sizeof(vm_area_t));
+        if (vma) {
+            vma->start = start;
+            vma->end = end;
+            vma->pte_flags = flags;
+            vma->vm_flags = VM_ANON;
+            if (flags & PTE_R) vma->vm_flags |= VM_READ;
+            if (flags & PTE_W) vma->vm_flags |= VM_WRITE;
+            if (flags & PTE_X) vma->vm_flags |= VM_EXEC;
+            mm_insert_vma(mm, vma);
+            mm->total_vm += (end - start) / PAGE_SIZE;
+        }
+    }
+    return 0;
+}
+
+static int map_segment_from_fd(mm_struct_t *mm, uint64_t *pgdir, uint64_t va, uint64_t memsz,
+                               int fd, long file_offset, uint64_t filesz, uint64_t flags) {
+    uint64_t start = va & ~(PAGE_SIZE - 1);
+    uint64_t end   = ROUND_UP(va + memsz, PAGE_SIZE);
+    char *tmp = kmalloc(PAGE_SIZE);
+    if (!tmp) return -ENOMEM;
+
+    for (uint64_t page = start; page < end; page += PAGE_SIZE) {
+        void *frame = frame_alloc();
+        if (!frame) { kfree(tmp); return -ENOMEM; }
+
+        uint64_t *old_pte = pt_walk(pgdir, page, 0);
+        if (old_pte && (*old_pte & PTE_V)) {
+            paddr_t old_pa = SV39_PTE_ADDR(*old_pte);
+            memcpy(frame, (void *)(old_pa + PAGE_OFFSET), PAGE_SIZE);
+        }
+
+        if (page < va + filesz) {
+            uint64_t copy_off = (page < va) ? (va - page) : 0;
+            uint64_t src_off  = (page < va) ? 0 : (page - va);
+            uint64_t to_copy  = filesz - src_off;
+            if (to_copy > PAGE_SIZE - copy_off)
+                to_copy = PAGE_SIZE - copy_off;
+            if (to_copy > 0) {
+                vfs_lseek(fd, file_offset + (long)src_off, SEEK_SET);
+                int nr = vfs_read(fd, tmp, (size_t)to_copy);
+                if (nr < 0) { frame_free(frame); kfree(tmp); return -EIO; }
+                memcpy((char *)frame + copy_off, tmp, (size_t)nr);
+            }
+        }
+
+        int r = pt_map(pgdir, page, va_to_pa(frame), flags);
+        if (r < 0) { frame_free(frame); kfree(tmp); return r; }
+    }
+    kfree(tmp);
+    __asm__ volatile("sfence.vma" ::: "memory");
+
+    if (mm) {
+        vm_area_t *vma = kcalloc(1, sizeof(vm_area_t));
+        if (vma) {
+            vma->start = start;
+            vma->end = end;
+            vma->pte_flags = flags;
+            vma->vm_flags = VM_ANON;
+            if (flags & PTE_R) vma->vm_flags |= VM_READ;
+            if (flags & PTE_W) vma->vm_flags |= VM_WRITE;
+            if (flags & PTE_X) vma->vm_flags |= VM_EXEC;
+            mm_insert_vma(mm, vma);
+            mm->total_vm += (end - start) / PAGE_SIZE;
+        }
     }
     return 0;
 }
 
 static int map_stack(uint64_t *pgdir, uint64_t *stack_top_out) {
-    for (int i = 0; i < USER_STACK_PAGES; i++) {
-        uint64_t va = USER_STACK_TOP_VA - (uint64_t)(USER_STACK_PAGES - 1 - i) * PAGE_SIZE;
+    for (int i = 0; i < INITIAL_STACK_PAGES; i++) {
+        uint64_t va = USER_STACK_TOP_VA - (uint64_t)(INITIAL_STACK_PAGES - 1 - i) * PAGE_SIZE;
         void *frame = frame_alloc();
         if (!frame) return -ENOMEM;
-        memset(frame, 0, PAGE_SIZE);
-        int r = pt_map(pgdir, va, (paddr_t)(uintptr_t)frame,
-                        PTE_V | PTE_R | PTE_W | PTE_X | PTE_U | PTE_A | PTE_D);
+        int r = pt_map(pgdir, va, va_to_pa(frame),
+                        PTE_STACK);
         if (r < 0) { frame_free(frame); return r; }
     }
     *stack_top_out = USER_STACK_TOP_VA;
+    __asm__ volatile("sfence.vma" ::: "memory");
     return 0;
 }
 
 static void *phys_for_va(uint64_t *pgdir, uint64_t va) {
     paddr_t pa = pt_translate(pgdir, va);
     if (pa == 0) return NULL;
-    return (void *)(uintptr_t)pa;
+    return (void *)((uint64_t)pa + PAGE_OFFSET);
 }
 
 static int setup_tls(uint64_t *pgdir, const void *tls_data, uint64_t tls_filesz,
@@ -100,9 +191,8 @@ static int setup_tls(uint64_t *pgdir, const void *tls_data, uint64_t tls_filesz,
     for (uint64_t page = 0; page < total_pages; page++) {
         void *frame = frame_alloc();
         if (!frame) return -ENOMEM;
-        memset(frame, 0, PAGE_SIZE);
         int r = pt_map(pgdir, USER_TLS_VA + page * PAGE_SIZE,
-                       (paddr_t)(uintptr_t)frame,
+                       va_to_pa(frame),
                        PTE_V | PTE_R | PTE_W | PTE_U | PTE_A | PTE_D);
         if (r < 0) { frame_free(frame); return r; }
     }
@@ -132,6 +222,7 @@ static int setup_tls(uint64_t *pgdir, const void *tls_data, uint64_t tls_filesz,
 
     *tls_va_out = tls_va;
     *tls_tp_out = tcb_va;
+    __asm__ volatile("sfence.vma" ::: "memory");
     return 0;
 }
 
@@ -146,7 +237,12 @@ int elf_load_from_buf(const void *buf, size_t len, elf_load_info_t *info) {
     if (!pgdir) return -ENOMEM;
     pt_map_kernel(pgdir);
 
-    uint64_t load_bias = (eh->e_type == ET_DYN) ? USER_DYN_BASE : 0;
+    mm_struct_t mm;
+    memset(&mm, 0, sizeof(mm));
+    mm.pgdir = pgdir;
+    mm.mmap_base = MMAP_BASE_ADDR;
+
+    uint64_t load_bias = (eh->e_type == ET_DYN) ? (USER_DYN_BASE + elf_aslr_bias()) : 0;
     uint64_t base = 0, max_va = 0;
     const void *tls_data = NULL;
     uint64_t tls_filesz = 0, tls_memsz = 0, tls_align = 1;
@@ -167,7 +263,7 @@ int elf_load_from_buf(const void *buf, size_t len, elf_load_info_t *info) {
         uint64_t seg_va = ph->p_vaddr + load_bias;
         const void *seg_data = (const char *)buf + ph->p_offset;
 
-        r = map_segment(pgdir, seg_va, ph->p_memsz,
+        r = map_segment(&mm, pgdir, seg_va, ph->p_memsz,
                          seg_data, ph->p_filesz, seg_flags(ph->p_flags));
         if (r < 0) { pt_destroy_user(pgdir); return r; }
 
@@ -181,6 +277,12 @@ int elf_load_from_buf(const void *buf, size_t len, elf_load_info_t *info) {
     r = map_stack(pgdir, &stack_top);
     if (r < 0) { pt_destroy_user(pgdir); return r; }
 
+    uint64_t tls_va = 0, tls_tp = 0;
+    if (tls_data && tls_filesz > 0) {
+        r = setup_tls(pgdir, tls_data, tls_filesz, tls_memsz, tls_align, &tls_va, &tls_tp);
+        if (r < 0) { pt_destroy_user(pgdir); return r; }
+    }
+
     info->entry     = eh->e_entry + load_bias;
     info->base      = base;
     info->end_va    = max_va;
@@ -192,24 +294,16 @@ int elf_load_from_buf(const void *buf, size_t len, elf_load_info_t *info) {
     info->load_size = (size_t)(max_va - base);
     info->pgdir     = pgdir;
     info->stack_top = stack_top;
-    info->tls_va      = 0;
-    info->tls_size    = 0;
-    info->tls_tp      = 0;
+    info->tls_va    = tls_va;
+    info->tls_size  = tls_memsz;
+    info->tls_tp    = tls_tp;
     info->interp_base = 0;
+    info->mmap      = mm.mmap;
 
-    (void)tls_data;
-    (void)tls_filesz;
-    (void)tls_memsz;
-    (void)tls_align;
-
-    printf("[ELF] buf load: entry=0x%lx base=0x%lx brk=0x%lx sp=0x%lx pgdir=0x%lx\n",
-           (unsigned long)info->entry, (unsigned long)info->base,
-           (unsigned long)info->brk, (unsigned long)info->stack_top,
-           (unsigned long)(uintptr_t)pgdir);
     return 0;
 }
 
-static int elf_load_interp(uint64_t *pgdir, const char *path, uint64_t *entry_out, uint64_t *base_out) {
+static int elf_load_interp(mm_struct_t *mm, uint64_t *pgdir, const char *path, uint64_t *entry_out, uint64_t *base_out) {
     int fd = vfs_open(path, O_RDONLY, 0);
     if (fd < 0) return fd;
 
@@ -228,26 +322,16 @@ static int elf_load_interp(uint64_t *pgdir, const char *path, uint64_t *entry_ou
     r = vfs_read(fd, (char *)phdrs, nph * sizeof(Elf64_Phdr));
     if (r < nph * (int)sizeof(Elf64_Phdr)) { vfs_close(fd); return -ENOEXEC; }
 
-    uint64_t load_bias = INTERP_BASE;
+    uint64_t load_bias = INTERP_BASE + elf_aslr_bias();
     uint64_t base = 0, max_va = 0;
 
     for (int i = 0; i < nph; i++) {
         if (phdrs[i].p_type != PT_LOAD) continue;
 
         uint64_t seg_va = phdrs[i].p_vaddr + load_bias;
-
-        void *seg_buf = NULL;
-        if (phdrs[i].p_filesz > 0) {
-            seg_buf = kmalloc((size_t)phdrs[i].p_filesz);
-            if (!seg_buf) { vfs_close(fd); return -ENOMEM; }
-            vfs_lseek(fd, (long)phdrs[i].p_offset, SEEK_SET);
-            int nr = vfs_read(fd, (char *)seg_buf, (size_t)phdrs[i].p_filesz);
-            if (nr < 0) { kfree(seg_buf); vfs_close(fd); return -EIO; }
-        }
-
-        r = map_segment(pgdir, seg_va, phdrs[i].p_memsz,
-                         seg_buf, phdrs[i].p_filesz, seg_flags(phdrs[i].p_flags));
-        if (seg_buf) kfree(seg_buf);
+        r = map_segment_from_fd(mm, pgdir, seg_va, phdrs[i].p_memsz,
+                                fd, (long)phdrs[i].p_offset,
+                                phdrs[i].p_filesz, seg_flags(phdrs[i].p_flags));
         if (r < 0) { vfs_close(fd); return r; }
 
         uint64_t seg_start = seg_va & ~(PAGE_SIZE - 1);
@@ -267,21 +351,25 @@ int elf_load(int fd, const char *path, elf_load_info_t *info) {
     if (vfs_lseek(fd, 0, SEEK_SET) < 0) return -EIO;
     int r = vfs_read(fd, (char *)&eh, sizeof(eh));
     if (r < (int)sizeof(eh)) return -ENOEXEC;
-
     r = elf_check_header(&eh);
-    if (r < 0) return r;
+    if (r < 0) goto fail_early;
 
     Elf64_Phdr phdrs[64];
     int nph = eh.e_phnum < 64 ? eh.e_phnum : 64;
     vfs_lseek(fd, (long)eh.e_phoff, SEEK_SET);
     r = vfs_read(fd, (char *)phdrs, nph * sizeof(Elf64_Phdr));
-    if (r < nph * (int)sizeof(Elf64_Phdr)) return -ENOEXEC;
+    if (r < nph * (int)sizeof(Elf64_Phdr)) { r = -ENOEXEC; goto fail_early; }
 
     uint64_t *pgdir = pt_create();
-    if (!pgdir) return -ENOMEM;
+    if (!pgdir) { r = -ENOMEM; goto fail_early; }
     pt_map_kernel(pgdir);
 
-    uint64_t load_bias = (eh.e_type == ET_DYN) ? USER_DYN_BASE : 0;
+    mm_struct_t mm;
+    memset(&mm, 0, sizeof(mm));
+    mm.pgdir = pgdir;
+    mm.mmap_base = MMAP_BASE_ADDR;
+
+    uint64_t load_bias = (eh.e_type == ET_DYN) ? (USER_DYN_BASE + elf_aslr_bias()) : 0;
     uint64_t base = 0, max_va = 0, head_va = 0;
     void *tls_data = NULL;
     uint64_t tls_filesz = 0, tls_memsz = 0, tls_align = 1;
@@ -304,30 +392,21 @@ int elf_load(int fd, const char *path, elf_load_info_t *info) {
             tls_align  = phdrs[i].p_align < 1 ? 1 : phdrs[i].p_align;
             if (tls_filesz > 0) {
                 tls_data = kmalloc((size_t)tls_filesz);
-                if (!tls_data) { pt_destroy_user(pgdir); return -ENOMEM; }
+                if (!tls_data) { r = -ENOMEM; goto fail_elf; }
                 vfs_lseek(fd, (long)phdrs[i].p_offset, SEEK_SET);
                 int nr = vfs_read(fd, (char *)tls_data, (size_t)tls_filesz);
-                if (nr < 0) { kfree(tls_data); pt_destroy_user(pgdir); return -EIO; }
+                if (nr < 0) { kfree(tls_data); tls_data = NULL; r = -EIO; goto fail_elf; }
             }
             continue;
         }
         if (phdrs[i].p_type != PT_LOAD) continue;
 
         uint64_t seg_va = phdrs[i].p_vaddr + load_bias;
-
-        void *seg_buf = NULL;
-        if (phdrs[i].p_filesz > 0) {
-            seg_buf = kmalloc((size_t)phdrs[i].p_filesz);
-            if (!seg_buf) { pt_destroy_user(pgdir); return -ENOMEM; }
-            vfs_lseek(fd, (long)phdrs[i].p_offset, SEEK_SET);
-            int nr = vfs_read(fd, (char *)seg_buf, (size_t)phdrs[i].p_filesz);
-            if (nr < 0) { kfree(seg_buf); pt_destroy_user(pgdir); return -EIO; }
-        }
-
-        r = map_segment(pgdir, seg_va, phdrs[i].p_memsz,
-                         seg_buf, phdrs[i].p_filesz, seg_flags(phdrs[i].p_flags));
-        kfree(seg_buf);
-        if (r < 0) { pt_destroy_user(pgdir); return r; }
+        uint64_t seg_flags_val = seg_flags(phdrs[i].p_flags);
+        r = map_segment_from_fd(&mm, pgdir, seg_va, phdrs[i].p_memsz,
+                                fd, (long)phdrs[i].p_offset,
+                                phdrs[i].p_filesz, seg_flags_val);
+        if (r < 0) { goto fail_elf; }
 
         uint64_t seg_start = seg_va & ~(PAGE_SIZE - 1);
         uint64_t seg_end   = ROUND_UP(seg_va + phdrs[i].p_memsz, PAGE_SIZE);
@@ -376,21 +455,16 @@ int elf_load(int fd, const char *path, elf_load_info_t *info) {
         }
         if (interp_fd >= 0) vfs_close(interp_fd);
         if (interp_fd < 0) {
-            printf("[ELF] Cannot open interpreter '%s': %d\n", interp_path, interp_fd);
-            pt_destroy_user(pgdir);
-            return -ENOENT;
+            r = -ENOENT;
+            goto fail_elf;
         }
-        r = elf_load_interp(pgdir, interp_to_load, &interp_entry, &interp_base);
-        if (r < 0) {
-            printf("[ELF] Failed to load interpreter '%s': %d\n", interp_to_load, r);
-            pt_destroy_user(pgdir);
-            return r;
-        }
+        r = elf_load_interp(&mm, pgdir, interp_to_load, &interp_entry, &interp_base);
+        if (r < 0) goto fail_elf;
     }
 
     uint64_t stack_top;
     r = map_stack(pgdir, &stack_top);
-    if (r < 0) { pt_destroy_user(pgdir); return r; }
+    if (r < 0) { goto fail_elf; }
 
     info->entry      = has_interp ? interp_entry : (eh.e_entry + load_bias);
     info->base       = base;
@@ -401,19 +475,35 @@ int elf_load(int fd, const char *path, elf_load_info_t *info) {
     info->phentsize  = eh.e_phentsize;
     info->load_addr  = base;
     info->load_size  = (size_t)(max_va - base);
+    uint64_t tls_va = 0, tls_tp = 0;
+    if (tls_data && tls_filesz > 0) {
+        r = setup_tls(pgdir, tls_data, tls_filesz, tls_memsz, tls_align, &tls_va, &tls_tp);
+        if (r < 0) { kfree(tls_data); pt_destroy_user(pgdir); return r; }
+    }
+
     info->pgdir      = pgdir;
     info->stack_top  = stack_top;
-    info->tls_va     = 0;
-    info->tls_size   = 0;
-    info->tls_tp     = 0;
+    info->tls_va     = tls_va;
+    info->tls_size   = tls_memsz;
+    info->tls_tp     = tls_tp;
     info->interp_base = interp_base;
+    info->mmap       = mm.mmap;
 
     kfree(tls_data);
-    (void)tls_filesz;
-    (void)tls_memsz;
-    (void)tls_align;
-
     return 0;
+fail_elf:
+    kfree(tls_data);
+    {
+        vm_area_t *vma = mm.mmap;
+        while (vma) {
+            vm_area_t *next = vma->next;
+            kfree(vma);
+            vma = next;
+        }
+    }
+    pt_destroy_user(pgdir);
+fail_early:
+    return r;
 }
 
 #define AT_NULL     0

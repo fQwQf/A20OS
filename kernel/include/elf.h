@@ -82,6 +82,8 @@ typedef struct {
     Elf64_Xword p_align;
 } Elf64_Phdr;
 
+struct vm_area;
+
 /* ---- Load result ---- */
 typedef struct elf_load_info {
     uint64_t  entry;
@@ -99,6 +101,7 @@ typedef struct elf_load_info {
     uint64_t  tls_size;
     uint64_t  tls_tp;
     uint64_t  interp_base;
+    struct vm_area *mmap;
 } elf_load_info_t;
 
 /* ---- API ---- */

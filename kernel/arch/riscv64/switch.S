@@ -80,10 +80,11 @@ __switch:
         .set n, n+1
     .endr
 
-    /* Restore satp and sstatus */
+    /* Restore satp and sstatus (ensure SIE is enabled so timer ints fire) */
     ld      t0, 14*8(a0)
     csrw    satp, t0
     ld      t0, 15*8(a0)
+    ori     t0, t0, 2
     csrw    sstatus, t0
 
     /* Flush TLB */

@@ -71,10 +71,8 @@ void signal_deliver(void) {
                 case SIGSEGV:
                 case SIGILL:
                 case SIGABRT:
-                    kdebug("[SIGNAL] pid=%d killed by signal %d\n", t->pid, sig);
                     proc_exit(128 + sig);
                 default:
-                    kdebug("[SIGNAL] pid=%d default action for sig %d: terminate\n", t->pid, sig);
                     proc_exit(128 + sig);
             }
         }

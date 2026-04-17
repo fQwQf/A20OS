@@ -3,6 +3,7 @@
 
 #include "types.h"
 #include "consts.h"
+#include "slab.h"
 
 /* Physical frame allocator */
 void mm_init(void);
@@ -17,6 +18,12 @@ size_t frame_free_count(void);
 #define SV39_VPN(va, lvl) (((va) >> (12 + 9 * (lvl))) & SV39_VPN_MASK)
 #define SV39_PTE_PPN(pte) (((pte) >> 10) & 0x3FFFFFFFFFFFFFUL)
 #define SV39_PTE_ADDR(pte) (SV39_PTE_PPN(pte) << 12)
+#define PTE_FROM_PA(pa)  (((uint64_t)(pa) >> 12) << 10)
+
+/* PTE entries store physical addresses. Use this to get a kernel VA pointer. */
+#define PTE_TO_PTR(pte)  ((uint64_t *)((uint64_t)SV39_PTE_ADDR(pte) + PAGE_OFFSET))
+
+extern uint64_t boot_pgdir[512];
 
 #define PA2PFN(pa) ((paddr_t)(pa) >> PAGE_SIZE_BITS)
 #define PFN2PA(pfn) ((paddr_t)(pfn) << PAGE_SIZE_BITS)
@@ -35,10 +42,8 @@ int  pt_map_range(uint64_t *pgdir, vaddr_t va, paddr_t pa, size_t size, uint64_t
 uint64_t *pt_clone(uint64_t *src_pgdir);
 void pt_destroy_user(uint64_t *pgdir);
 
-/* Kernel heap */
-void *kmalloc(size_t size);
-void kfree(void *ptr);
-void *krealloc(void *ptr, size_t new_size);
-void *kcalloc(size_t nmemb, size_t size);
+long copy_from_user(void *dst, const void *src, size_t n);
+long copy_to_user(void *dst, const void *src, size_t n);
+long user_strncpy(char *dst, const char *src, size_t max);
 
-#endif /* _MM_H */
+#endif
