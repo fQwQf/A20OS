@@ -22,7 +22,6 @@
 #include "consts.h"
 #include "defs.h"
 #include "klog.h"
-#include "arch_ops.h"
 #include "virtio_blk.h"
 #include "block_cache.h"
 
@@ -66,11 +65,15 @@ vfile_t *vfs_get_file(int fd) {
 
 void vfs_proc_init_fds(int *fd_table) {
     for (int i = 0; i < MAX_FILES; i++) fd_table[i] = -1;
-    /* Allocate stdin/stdout/stderr as devfs entries on first init */
-    /* These are special: fd 0,1,2 map to devfs uart entries */
-    fd_table[0] = 0;
-    fd_table[1] = 1;
-    fd_table[2] = 2;
+    fd_table[0] = 0; if (g_files[0]) g_files[0]->ref_count++;
+    fd_table[1] = 1; if (g_files[1]) g_files[1]->ref_count++;
+    fd_table[2] = 2; if (g_files[2]) g_files[2]->ref_count++;
+}
+
+void vfs_proc_init_stdio_defaults(int *fd_table) {
+    if (fd_table[0] < 0) { fd_table[0] = 0; if (g_files[0]) g_files[0]->ref_count++; }
+    if (fd_table[1] < 0) { fd_table[1] = 1; if (g_files[1]) g_files[1]->ref_count++; }
+    if (fd_table[2] < 0) { fd_table[2] = 2; if (g_files[2]) g_files[2]->ref_count++; }
 }
 
 void vfs_proc_copy_fds(const int *src, int *dst) {
@@ -84,7 +87,7 @@ void vfs_proc_copy_fds(const int *src, int *dst) {
 
 void vfs_proc_close_all_fds(int *fd_table) {
     for (int i = 0; i < MAX_FILES; i++) {
-        if (fd_table[i] >= 3) {
+        if (fd_table[i] >= 0) {
             vfs_close(fd_table[i]);
         }
         fd_table[i] = -1;
@@ -105,6 +108,7 @@ static int devfs_stdin_read(vfile_t *vf, char *buf, size_t count) {
     if (count == 0) return 0;
     int c = uart_getc();
     if (c < 0) return 0;
+    if (c == '\r') c = '\n';
     buf[0] = (char)c;
     return 1;
 }
@@ -133,9 +137,14 @@ static vfile_ops_t g_stderr_ops = { .read = devfs_null_read,  .write = devfs_std
 static vfile_ops_t g_null_ops   = { .read = devfs_null_read,  .write = devfs_null_write   };
 static vfile_ops_t g_zero_ops   = { .read = devfs_zero_read,  .write = devfs_null_write   };
 
-static vfile_t g_stdin_file  = { .ref_count = 999, .ops = &g_stdin_ops  };
-static vfile_t g_stdout_file = { .ref_count = 999, .ops = &g_stdout_ops };
-static vfile_t g_stderr_file = { .ref_count = 999, .ops = &g_stderr_ops };
+static vfile_t g_stdin_file  = { .ref_count = 999, .ops = &g_stdin_ops,  .flags = O_RDONLY };
+static vfile_t g_stdout_file = { .ref_count = 999, .ops = &g_stdout_ops, .flags = O_WRONLY };
+static vfile_t g_stderr_file = { .ref_count = 999, .ops = &g_stderr_ops, .flags = O_WRONLY };
+
+/* Check if a vfile is one of the special stdin/stdout/stderr char devices */
+static int is_special_tty(vfile_t *vf) {
+    return (vf == &g_stdin_file || vf == &g_stdout_file || vf == &g_stderr_file);
+}
 
 /* ============================================================
  * RAMFS — VFS Bridge
@@ -152,8 +161,12 @@ static vnode_t *ramfs_make_vnode(mount_t *mnt, inode_t *inode) {
     if (!vn) return NULL;
     memset(vn, 0, sizeof(*vn));
     vn->ino        = (uint64_t)inode->inum;
-    vn->type       = (inode->type == FT_DIRECTORY) ? VFS_FT_DIR : VFS_FT_REGULAR;
-    vn->mode       = (inode->type == FT_DIRECTORY) ? (S_IFDIR | 0755) : (S_IFREG | 0644);
+    if (inode->type == FT_DIRECTORY) vn->type = VFS_FT_DIR;
+    else if (inode->type == FT_SYMLINK) vn->type = VFS_FT_SYMLINK;
+    else vn->type = VFS_FT_REGULAR;
+    if (vn->type == VFS_FT_DIR) vn->mode = S_IFDIR | 0755;
+    else if (vn->type == VFS_FT_SYMLINK) vn->mode = S_IFLNK | 0777;
+    else vn->mode = S_IFREG | 0755;
     vn->size       = inode->size;
     vn->ref_count  = 1;
     vn->mnt        = mnt;
@@ -169,7 +182,7 @@ static int ramfs_vnode_lookup(vnode_t *dir, const char *name, vnode_t **out) {
     int r = fs_inode_lookup(dinode, name, &found);
     if (r < 0) return r;
     *out = ramfs_make_vnode(dir->mnt, found);
-    if (*out) (*out)->parent = dir;
+    if (*out) { (*out)->parent = dir; dir->ref_count++; }
     return (*out) ? 0 : -ENOMEM;
 }
 
@@ -210,11 +223,12 @@ static int ramfs_vnode_create(vnode_t *dir, const char *name, int mode, vnode_t 
     if (!child->data) { child->ref_count = 0; return -ENOMEM; }
     add_dir_entry(dinode, name, child->inum);
     *out = ramfs_make_vnode(dir->mnt, child);
-    if (*out) (*out)->parent = dir;
+    if (*out) { (*out)->parent = dir; dir->ref_count++; }
     return *out ? 0 : -ENOMEM;
 }
 
 static void ramfs_vnode_release(vnode_t *vn) {
+    vnode_put(vn->parent);
     kfree(vn);
 }
 
@@ -232,6 +246,98 @@ static int ramfs_vnode_unlink(vnode_t *dir, const char *name) {
     return -ENOENT;
 }
 
+static int ramfs_vnode_readlink(vnode_t *vn, char *buf, size_t sz) {
+    inode_t *inode = (inode_t *)vn->fs_data;
+    if (inode->type != FT_SYMLINK) return -EINVAL;
+    size_t len = inode->size;
+    if (len >= sz) len = sz - 1;
+    if (len > 0 && inode->data) memcpy(buf, inode->data, len);
+    buf[len] = '\0';
+    return (int)len;
+}
+
+static int ramfs_vnode_symlink(vnode_t *dir, const char *name, const char *target) {
+    inode_t *dinode = (inode_t *)dir->fs_data;
+    if (dinode->type != FT_DIRECTORY) return -ENOTDIR;
+    inode_t *child = alloc_inode(FT_SYMLINK);
+    if (!child) return -ENOMEM;
+    child->parent = dinode;
+    size_t tlen = strlen(target);
+    child->capacity = tlen + 1;
+    child->data = kmalloc(child->capacity);
+    if (!child->data) { child->ref_count = 0; return -ENOMEM; }
+    memcpy(child->data, target, tlen + 1);
+    child->size = tlen;
+    add_dir_entry(dinode, name, child->inum);
+    return 0;
+}
+
+static int ramfs_vnode_rename(vnode_t *old_dir, const char *old_name,
+                              vnode_t *new_dir, const char *new_name) {
+    inode_t *old_dinode = (inode_t *)old_dir->fs_data;
+    inode_t *new_dinode = (inode_t *)new_dir->fs_data;
+    if (old_dinode->type != FT_DIRECTORY || new_dinode->type != FT_DIRECTORY)
+        return -ENOTDIR;
+
+    dir_entry_t *old_entries = (dir_entry_t *)old_dinode->data;
+    int n_old = old_dinode->size / sizeof(dir_entry_t);
+    int old_idx = -1;
+    int inum = 0;
+    for (int i = 0; i < n_old; i++) {
+        if (old_entries[i].name[0] != '\0' && strcmp(old_entries[i].name, old_name) == 0) {
+            old_idx = i;
+            inum = old_entries[i].inum;
+            break;
+        }
+    }
+    if (old_idx < 0) return -ENOENT;
+
+    dir_entry_t *new_entries = (dir_entry_t *)new_dinode->data;
+    int n_new = new_dinode->size / sizeof(dir_entry_t);
+    int new_idx = -1;
+    for (int i = 0; i < n_new; i++) {
+        if (new_entries[i].name[0] != '\0' && strcmp(new_entries[i].name, new_name) == 0) {
+            new_idx = i;
+            break;
+        }
+    }
+    if (new_idx >= 0) {
+        new_entries[new_idx].inum = inum;
+        memcpy(new_entries[new_idx].name, new_name, MAX_NAME_LEN);
+    } else {
+        add_dir_entry(new_dinode, new_name, inum);
+    }
+
+    old_entries[old_idx].name[0] = '\0';
+
+    inode_t *moved = fs_find_inode_by_inum(inum);
+    if (moved) moved->parent = new_dinode;
+    return 0;
+}
+
+static int ramfs_vnode_rmdir(vnode_t *dir, const char *name) {
+    inode_t *dinode = (inode_t *)dir->fs_data;
+    dir_entry_t *entries = (dir_entry_t *)dinode->data;
+    int n_entries = dinode->size / sizeof(dir_entry_t);
+
+    for (int i = 0; i < n_entries; i++) {
+        if (entries[i].name[0] != '\0' && strcmp(entries[i].name, name) == 0) {
+            inode_t *child = fs_find_inode_by_inum(entries[i].inum);
+            if (!child || child->type != FT_DIRECTORY) return -ENOTDIR;
+            dir_entry_t *centries = (dir_entry_t *)child->data;
+            int cn = child->size / sizeof(dir_entry_t);
+            int active = 0;
+            for (int j = 0; j < cn; j++) {
+                if (centries[j].name[0] != '\0') active++;
+            }
+            if (active > 2) return -ENOTEMPTY;
+            entries[i].name[0] = '\0';
+            return 0;
+        }
+    }
+    return -ENOENT;
+}
+
 static vnode_ops_t g_ramfs_vnode_ops = {
     .lookup   = ramfs_vnode_lookup,
     .stat     = ramfs_vnode_stat,
@@ -239,6 +345,10 @@ static vnode_ops_t g_ramfs_vnode_ops = {
     .mkdir    = ramfs_vnode_mkdir,
     .create   = ramfs_vnode_create,
     .unlink   = ramfs_vnode_unlink,
+    .rmdir    = ramfs_vnode_rmdir,
+    .rename   = ramfs_vnode_rename,
+    .symlink  = ramfs_vnode_symlink,
+    .readlink = ramfs_vnode_readlink,
 };
 
 /* File operations */
@@ -306,7 +416,7 @@ static int ramfs_freaddir(vfile_t *vf, void *dirp, size_t count) {
         dir_entry_t *de = &entries[idx];
         if (de->name[0] != '\0') {
             size_t namelen = strlen(de->name);
-            size_t reclen  = (sizeof(linux_dirent64_t) + namelen + 1 + 7) & ~7UL;
+            size_t reclen  = (offsetof(linux_dirent64_t, d_name) + namelen + 1 + 7) & ~7UL;
             if (total + reclen > count) break;
 
             linux_dirent64_t *d = (linux_dirent64_t *)(out + total);
@@ -317,6 +427,7 @@ static int ramfs_freaddir(vfile_t *vf, void *dirp, size_t count) {
             inode_t *child = fs_find_inode_by_inum(de->inum);
             if (child) {
                 if (child->type == FT_DIRECTORY) d->d_type = DT_DIR;
+                else if (child->type == FT_SYMLINK) d->d_type = DT_LNK;
                 else if (child->type == FT_REGULAR) d->d_type = DT_REG;
             }
             memcpy(d->d_name, de->name, namelen + 1);
@@ -378,10 +489,11 @@ static const char *strip_mount_prefix(const char *path, const mount_t *mnt) {
 /* Resolve an absolute path within a vnode tree */
 static vnode_t *vnode_lookup_path(vnode_t *root, const char *path) {
     if (!root) return NULL;
-    if (!path || !*path) return root;
 
     vnode_t *cur = root;
     cur->ref_count++;
+
+    if (!path || !*path) return cur;
 
     char buf[MAX_PATH_LEN];
     strncpy(buf, path, MAX_PATH_LEN - 1);
@@ -390,11 +502,14 @@ static vnode_t *vnode_lookup_path(vnode_t *root, const char *path) {
     char *p = buf;
     while (*p == '/') p++;
 
+    int symlink_depth = 0;
+
     while (*p) {
         char *sep = strchr(p, '/');
         if (sep) *sep = '\0';
 
-        if (strcmp(p, ".") == 0) {
+        if (*p == '\0') {
+        } else if (strcmp(p, ".") == 0) {
             /* stay */
         } else if (strcmp(p, "..") == 0) {
             if (cur->parent && cur->parent != cur) {
@@ -410,15 +525,78 @@ static vnode_t *vnode_lookup_path(vnode_t *root, const char *path) {
             }
             vnode_t *next = NULL;
             int r = cur->ops->lookup(cur, p, &next);
-            cur->ref_count--;
-            if (r < 0 || !next) return NULL;
+            if (r < 0 || !next) {
+                cur->ref_count--;
+                return NULL;
+            }
+            vnode_t *parent = cur;
             cur = next;
+
+            if (cur->type == VFS_FT_SYMLINK) {
+                if (++symlink_depth > 8) {
+                    parent->ref_count--;
+                    cur->ref_count--;
+                    return NULL;
+                }
+                if (!cur->ops || !cur->ops->readlink) {
+                    parent->ref_count--;
+                    cur->ref_count--;
+                    return NULL;
+                }
+                char link_target[MAX_PATH_LEN];
+                int len = cur->ops->readlink(cur, link_target, sizeof(link_target));
+                if (len < 0) {
+                    parent->ref_count--;
+                    cur->ref_count--;
+                    return NULL;
+                }
+                link_target[len] = '\0';
+
+                char rest[MAX_PATH_LEN];
+                if (sep) {
+                    snprintf(rest, sizeof(rest), "%s/%s", link_target, sep + 1);
+                } else {
+                    strncpy(rest, link_target, sizeof(rest) - 1);
+                    rest[sizeof(rest) - 1] = '\0';
+                }
+
+                vnode_t *old = cur;
+                if (link_target[0] == '/') {
+                    cur = root;
+                    cur->ref_count++;
+                } else {
+                    cur = parent;
+                    cur->ref_count++;   /* compensate: we reuse parent, but it gets decremented below */
+                }
+                old->ref_count--;
+                parent->ref_count--;
+
+                strncpy(buf, rest, MAX_PATH_LEN - 1);
+                buf[MAX_PATH_LEN - 1] = '\0';
+                p = buf;
+                while (*p == '/') p++;
+                continue;
+            }
+            parent->ref_count--;
         }
 
         if (sep) p = sep + 1;
         else break;
     }
     return cur;
+}
+
+void vnode_put(vnode_t *vn) {
+    if (!vn) return;
+    if (vn->ref_count <= 0) {
+        printf("[VFS BUG] vnode_put on freed vnode %p ino=%lu\n", (void *)vn, vn->ino);
+        return;
+    }
+    vn->ref_count--;
+    if (vn->ref_count <= 0) {
+        if (vn->ops && vn->ops->release)
+            vn->ops->release(vn);
+    }
 }
 
 vnode_t *vfs_resolve(const char *path) {
@@ -486,6 +664,7 @@ static vfile_t *ramfs_open_vnode(vnode_t *vn, int flags) {
     if (!vf) return NULL;
     memset(vf, 0, sizeof(*vf));
     vf->vnode     = vn;
+    vn->ref_count++;
     vf->flags     = flags;
     vf->offset    = (flags & O_APPEND) ? vn->size : 0;
     vf->ref_count = 1;
@@ -528,6 +707,22 @@ int vfs_open(const char *path, int flags, int mode) {
         if (fd < 0) { kfree(vf); return -EMFILE; }
         return fd;
     }
+    if (strcmp(resolved, "/dev/tty") == 0) {
+        vfile_t *vf = (vfile_t *)kmalloc(sizeof(vfile_t));
+        if (!vf) return -ENOMEM;
+        memset(vf, 0, sizeof(*vf));
+        /* Map it directly to UART (stdin/stdout) for now */
+        vf->ops = &g_stdin_ops; vf->ref_count = 1;
+        int fd = vfs_alloc_fd(vf);
+        if (fd < 0) { kfree(vf); return -EMFILE; }
+        return fd;
+    }
+
+    if (strcmp(resolved, "/proc/self/exe") == 0) {
+        task_t *cur = proc_current();
+        const char *exe = cur && cur->exec_path[0] ? cur->exec_path : "/bin/sh";
+        return vfs_open(exe, flags, mode);
+    }
 
     /* Find mount point */
     mount_t *mnt = vfs_find_mount(resolved);
@@ -548,10 +743,19 @@ int vfs_open(const char *path, int flags, int mode) {
         else parent_path[0] = '\0';
 
         vnode_t *parent = vnode_lookup_path(mnt->root, parent_path);
-        if (!parent || parent->type != VFS_FT_DIR) { kdebug("[VFS] open '%s': parent '%s' not found\n", resolved, parent_path); return -ENOENT; }
-        if (!parent->ops || !parent->ops->create) { kdebug("[VFS] open '%s': parent has no create\n", resolved); return -ENOSYS; }
+        if (!parent || parent->type != VFS_FT_DIR) {
+            kdebug("[VFS] open '%s': parent '%s' not found\n", resolved, parent_path);
+            vnode_put(parent);
+            return -ENOENT;
+        }
+        if (!parent->ops || !parent->ops->create) {
+            kdebug("[VFS] open '%s': parent has no create\n", resolved);
+            vnode_put(parent);
+            return -ENOSYS;
+        }
 
         int r = parent->ops->create(parent, fname, mode, &vn);
+        vnode_put(parent);
         if (r < 0) { kdebug("[VFS] open '%s': create failed r=%d\n", resolved, r); return r; }
     }
 
@@ -565,16 +769,21 @@ int vfs_open(const char *path, int flags, int mode) {
         vf = ext4_open_vnode(vn, flags);
     } else if (mnt->type == FS_TYPE_RAMFS) {
         vf = ramfs_open_vnode(vn, flags);
+    } else if (mnt->type == FS_TYPE_PROCFS) {
+        extern vfile_t *procfs_open_vnode(vnode_t *vn, int flags);
+        vf = procfs_open_vnode(vn, flags);
     }
 
-    if (!vf) return -ENOMEM;
+    if (!vf) { vnode_put(vn); return -ENOMEM; }
 
     int gfd = vfs_alloc_fd(vf);
     if (gfd < 0) {
+        vnode_put(vn);
         if (vf->ops && vf->ops->close) vf->ops->close(vf);
         kfree(vf);
         return -EMFILE;
     }
+    vnode_put(vn);
     return gfd;
 }
 
@@ -586,9 +795,11 @@ int vfs_close(int fd) {
 
     vf->ref_count--;
     if (vf->ref_count <= 0) {
+        vnode_t *vn = vf->vnode;
         if (vf->ops && vf->ops->close) vf->ops->close(vf);
         kfree(vf);
         g_files[fd] = NULL;
+        vnode_put(vn);
     }
     return 0;
 }
@@ -618,6 +829,7 @@ int vfs_write(int fd, const char *buf, size_t count) {
 long vfs_lseek(int fd, long offset, int whence) {
     if (fd >= 0 && fd < GFILE_MAX && g_files[fd]) {
         vfile_t *vf = g_files[fd];
+        if (is_special_tty(vf)) return -ESPIPE;
         if (vf->ops && vf->ops->lseek) return vf->ops->lseek(vf, offset, whence);
     }
     return -EBADF;
@@ -633,13 +845,24 @@ int vfs_getdents64(int fd, void *dirp, size_t count) {
 }
 
 int vfs_ioctl(int fd, unsigned long req, void *arg) {
-    (void)fd; (void)req; (void)arg;
-    /* TIOCGWINSZ — terminal window size */
-    if (req == 0x5413 /* TIOCGWINSZ */) {
-        uint16_t *ws = (uint16_t *)arg;
-        ws[0] = 24; ws[1] = 80; ws[2] = 0; ws[3] = 0; /* rows, cols */
-        return 0;
+    vfile_t *vf = vfs_get_file(fd);
+    if (!vf) return -EBADF;
+
+    if (is_special_tty(vf) && arg) {
+        if (req == TCGETS) {
+            memset(arg, 0, 36);
+            return 0;
+        }
+        if (req == TCSETS || req == TCSETSW || req == TCSETSF) {
+            return 0;
+        }
+        if (req == TIOCGWINSZ) {
+            memset(arg, 0, 8);
+            return 0;
+        }
     }
+
+    if (vf->ops && vf->ops->ioctl) return vf->ops->ioctl(vf, req, arg);
     return -ENOTTY;
 }
 
@@ -673,9 +896,17 @@ int vfs_mkdir(const char *path, int mode) {
     else parent_path[0] = '\0';
 
     vnode_t *parent = vnode_lookup_path(mnt->root, parent_path);
-    if (!parent || parent->type != VFS_FT_DIR) return -ENOENT;
-    if (!parent->ops || !parent->ops->mkdir) return -ENOTDIR;
-    return parent->ops->mkdir(parent, name, mode);
+    if (!parent || parent->type != VFS_FT_DIR) {
+        vnode_put(parent);
+        return -ENOENT;
+    }
+    if (!parent->ops || !parent->ops->mkdir) {
+        vnode_put(parent);
+        return -ENOTDIR;
+    }
+    int r = parent->ops->mkdir(parent, name, mode);
+    vnode_put(parent);
+    return r;
 }
 
 int vfs_unlink(const char *path) {
@@ -705,24 +936,140 @@ int vfs_unlink(const char *path) {
 
     vnode_t *parent = vnode_lookup_path(mnt->root, parent_path);
     if (!parent) return -ENOENT;
-    if (!parent->ops || !parent->ops->unlink) return -ENOTDIR;
-    return parent->ops->unlink(parent, name);
+    if (!parent->ops || !parent->ops->unlink) {
+        vnode_put(parent);
+        return -ENOTDIR;
+    }
+    int r = parent->ops->unlink(parent, name);
+    vnode_put(parent);
+    return r;
 }
 
 int vfs_rename(const char *old, const char *newpath) {
-    (void)old; (void)newpath;
-    return -ENOSYS; /* TODO: unified rename */
+    if (!old || !newpath) return -EINVAL;
+
+    task_t *cur = proc_current();
+    const char *cwd = cur ? cur->cwd : "/";
+
+    char old_resolved[MAX_PATH_LEN];
+    char new_resolved[MAX_PATH_LEN];
+    if (old[0] == '/') strncpy(old_resolved, old, MAX_PATH_LEN - 1);
+    else snprintf(old_resolved, MAX_PATH_LEN, "%s/%s", cwd, old);
+    old_resolved[MAX_PATH_LEN - 1] = '\0';
+
+    if (newpath[0] == '/') strncpy(new_resolved, newpath, MAX_PATH_LEN - 1);
+    else snprintf(new_resolved, MAX_PATH_LEN, "%s/%s", cwd, newpath);
+    new_resolved[MAX_PATH_LEN - 1] = '\0';
+
+    char old_parent[MAX_PATH_LEN], old_name[MAX_NAME_LEN];
+    char new_parent[MAX_PATH_LEN], new_name[MAX_NAME_LEN];
+
+    char *slash = strrchr(old_resolved, '/');
+    if (!slash) return -EINVAL;
+    if (slash == old_resolved) { old_parent[0] = '/'; old_parent[1] = '\0'; }
+    else {
+        size_t plen = slash - old_resolved;
+        memcpy(old_parent, old_resolved, plen);
+        old_parent[plen] = '\0';
+    }
+    strncpy(old_name, slash + 1, MAX_NAME_LEN - 1);
+    old_name[MAX_NAME_LEN - 1] = '\0';
+
+    slash = strrchr(new_resolved, '/');
+    if (!slash) return -EINVAL;
+    if (slash == new_resolved) { new_parent[0] = '/'; new_parent[1] = '\0'; }
+    else {
+        size_t plen = slash - new_resolved;
+        memcpy(new_parent, new_resolved, plen);
+        new_parent[plen] = '\0';
+    }
+    strncpy(new_name, slash + 1, MAX_NAME_LEN - 1);
+    new_name[MAX_NAME_LEN - 1] = '\0';
+
+    mount_t *old_mnt = vfs_find_mount(old_parent);
+    mount_t *new_mnt = vfs_find_mount(new_parent);
+    if (!old_mnt || !new_mnt) return -ENOENT;
+    if (old_mnt != new_mnt) return -EXDEV;
+
+    vnode_t *old_dir = vnode_lookup_path(old_mnt->root, strip_mount_prefix(old_parent, old_mnt));
+    vnode_t *new_dir = vnode_lookup_path(new_mnt->root, strip_mount_prefix(new_parent, new_mnt));
+    if (!old_dir || !new_dir) {
+        vnode_put(old_dir);
+        vnode_put(new_dir);
+        return -ENOENT;
+    }
+    if (old_dir->type != VFS_FT_DIR || new_dir->type != VFS_FT_DIR) {
+        vnode_put(old_dir);
+        vnode_put(new_dir);
+        return -ENOTDIR;
+    }
+    if (!old_dir->ops || !old_dir->ops->rename) {
+        vnode_put(old_dir);
+        vnode_put(new_dir);
+        return -ENOSYS;
+    }
+    int r = old_dir->ops->rename(old_dir, old_name, new_dir, new_name);
+    vnode_put(old_dir);
+    vnode_put(new_dir);
+    return r;
+}
+
+int vfs_rmdir(const char *path) {
+    if (!path) return -EINVAL;
+
+    task_t *cur = proc_current();
+    const char *cwd = cur ? cur->cwd : "/";
+
+    char resolved[MAX_PATH_LEN];
+    if (path[0] == '/') strncpy(resolved, path, MAX_PATH_LEN - 1);
+    else snprintf(resolved, MAX_PATH_LEN, "%s/%s", cwd, path);
+    resolved[MAX_PATH_LEN - 1] = '\0';
+
+    char parent_path[MAX_PATH_LEN];
+    char *slash = strrchr(resolved, '/');
+    if (!slash) return -EINVAL;
+    if (slash == resolved) { parent_path[0] = '/'; parent_path[1] = '\0'; }
+    else {
+        size_t plen = slash - resolved;
+        memcpy(parent_path, resolved, plen);
+        parent_path[plen] = '\0';
+    }
+    const char *name = slash + 1;
+
+    mount_t *mnt = vfs_find_mount(parent_path);
+    if (!mnt || !mnt->root) return -ENOENT;
+
+    vnode_t *parent = vnode_lookup_path(mnt->root, strip_mount_prefix(parent_path, mnt));
+    if (!parent || parent->type != VFS_FT_DIR) {
+        vnode_put(parent);
+        return -ENOENT;
+    }
+    if (!parent->ops || !parent->ops->rmdir) {
+        vnode_put(parent);
+        return -ENOSYS;
+    }
+    int r = parent->ops->rmdir(parent, name);
+    vnode_put(parent);
+    return r;
 }
 
 int vfs_stat(const char *path, kstat_t *st) {
+    if (strcmp(path, "/dev/null") == 0 || strcmp(path, "/dev/zero") == 0 ||
+        strcmp(path, "/dev/tty") == 0) {
+        memset(st, 0, sizeof(*st));
+        st->st_mode = S_IFCHR | 0666;
+        st->st_nlink = 1;
+        st->st_blksize = 4096;
+        return 0;
+    }
     vnode_t *vn = vfs_resolve(path);
     if (!vn) return -ENOENT;
     if (vn->ops && vn->ops->stat) {
         int r = vn->ops->stat(vn, st);
-        vn->ref_count--;
+        vnode_put(vn);
         return r;
     }
-    vn->ref_count--;
+    vnode_put(vn);
     return -ENOSYS;
 }
 
@@ -731,6 +1078,13 @@ int vfs_fstat(int fd, kstat_t *st) {
         vfile_t *vf = g_files[fd];
         if (vf->vnode && vf->vnode->ops && vf->vnode->ops->stat)
             return vf->vnode->ops->stat(vf->vnode, st);
+        if (is_special_tty(vf)) {
+            memset(st, 0, sizeof(*st));
+            st->st_mode = S_IFCHR | 0666;
+            st->st_nlink = 1;
+            st->st_blksize = 4096;
+            return 0;
+        }
     }
     return -EBADF;
 }
@@ -748,13 +1102,126 @@ int vfs_faccessat(int dirfd, const char *path, int mode) {
         if (fs_stat(path, &rfs) < 0) return -ENOENT;
         return 0;
     }
-    vn->ref_count--;
+    vnode_put(vn);
     return 0;
 }
 
 int vfs_readlinkat(int dirfd, const char *path, char *buf, size_t sz) {
-    (void)dirfd; (void)path; (void)buf; (void)sz;
-    return -EINVAL; /* No symlinks in A20OS */
+    (void)dirfd;
+    if (!path || !buf || sz == 0) return -EINVAL;
+    char resolved[MAX_PATH_LEN];
+    if (path[0] == '/') {
+        strncpy(resolved, path, MAX_PATH_LEN - 1);
+    } else {
+        task_t *cur = proc_current();
+        const char *cwd = cur ? cur->cwd : "/";
+        snprintf(resolved, MAX_PATH_LEN, "%s/%s", cwd, path);
+    }
+    resolved[MAX_PATH_LEN - 1] = '\0';
+
+    if (strcmp(resolved, "/proc/self/exe") == 0) {
+        task_t *cur = proc_current();
+        const char *exe = cur && cur->exec_path[0] ? cur->exec_path : "/bin/sh";
+        size_t len = strlen(exe);
+        if (len >= sz) len = sz - 1;
+        memcpy(buf, exe, len);
+        buf[len] = '\0';
+        return (int)len;
+    }
+
+    char parent_path[MAX_PATH_LEN];
+    char name[MAX_NAME_LEN];
+    char *last_slash = strrchr(resolved, '/');
+    if (!last_slash) return -EINVAL;
+    if (last_slash == resolved) {
+        strcpy(parent_path, "/");
+    } else {
+        size_t plen = last_slash - resolved;
+        memcpy(parent_path, resolved, plen);
+        parent_path[plen] = '\0';
+    }
+    strncpy(name, last_slash + 1, MAX_NAME_LEN - 1);
+    name[MAX_NAME_LEN - 1] = '\0';
+
+    mount_t *mnt = vfs_find_mount(parent_path);
+    if (!mnt) return -ENOENT;
+    const char *rel = strip_mount_prefix(parent_path, mnt);
+    vnode_t *parent = vnode_lookup_path(mnt->root, rel);
+    if (!parent || parent->type != VFS_FT_DIR) {
+        vnode_put(parent);
+        return -ENOENT;
+    }
+
+    vnode_t *vn = NULL;
+    if (parent->ops && parent->ops->lookup) {
+        int r = parent->ops->lookup(parent, name, &vn);
+        if (r < 0 || !vn) {
+            vnode_put(parent);
+            return r < 0 ? r : -ENOENT;
+        }
+    } else {
+        vnode_put(parent);
+        return -ENOTDIR;
+    }
+    vnode_put(parent);
+
+    if (vn->type != VFS_FT_SYMLINK || !vn->ops || !vn->ops->readlink) {
+        vnode_put(vn);
+        return -EINVAL;
+    }
+    int r = vn->ops->readlink(vn, buf, sz);
+    vnode_put(vn);
+    return r;
+}
+
+int vfs_link(const char *oldpath, const char *newpath) {
+    (void)oldpath; (void)newpath;
+    return -ENOSYS;
+}
+
+int vfs_symlink(const char *target, const char *linkpath) {
+    if (!target || !linkpath) return -EINVAL;
+
+    char resolved[MAX_PATH_LEN];
+    if (linkpath[0] == '/') {
+        strncpy(resolved, linkpath, MAX_PATH_LEN - 1);
+    } else {
+        task_t *cur = proc_current();
+        const char *cwd = cur ? cur->cwd : "/";
+        snprintf(resolved, MAX_PATH_LEN, "%s/%s", cwd, linkpath);
+    }
+    resolved[MAX_PATH_LEN - 1] = '\0';
+
+    char parent_path[MAX_PATH_LEN];
+    char name[MAX_NAME_LEN];
+    char *last_slash = strrchr(resolved, '/');
+    if (!last_slash) return -EINVAL;
+    if (last_slash == resolved) {
+        strcpy(parent_path, "/");
+    } else {
+        size_t plen = last_slash - resolved;
+        memcpy(parent_path, resolved, plen);
+        parent_path[plen] = '\0';
+    }
+    strncpy(name, last_slash + 1, MAX_NAME_LEN - 1);
+    name[MAX_NAME_LEN - 1] = '\0';
+
+    mount_t *mnt = vfs_find_mount(parent_path);
+    if (!mnt) return -ENOENT;
+    const char *rel = strip_mount_prefix(parent_path, mnt);
+    vnode_t *parent = vnode_lookup_path(mnt->root, rel);
+    if (!parent || parent->type != VFS_FT_DIR) {
+        vnode_put(parent);
+        return -ENOENT;
+    }
+
+    if (!parent->ops || !parent->ops->symlink) {
+        vnode_put(parent);
+        return -ENOSYS;
+    }
+    int r = parent->ops->symlink(parent, name, target);
+    vnode_put(parent);
+    return r;
 }
 
 int vfs_chdir(const char *path) {
@@ -768,8 +1235,8 @@ int vfs_chdir(const char *path) {
         if (rfs.st_type != FT_DIRECTORY) return -ENOTDIR;
         return fs_chdir(path);
     }
-    if (vn->type != VFS_FT_DIR) { vn->ref_count--; return -ENOTDIR; }
-    vn->ref_count--;
+    if (vn->type != VFS_FT_DIR) { vnode_put(vn); return -ENOTDIR; }
+    vnode_put(vn);
     return fs_chdir(path);
 }
 
@@ -796,8 +1263,7 @@ static int pipe_read(vfile_t *vf, char *buf, size_t count) {
     if (!pb) return -EBADF;
     while (pb->used == 0) {
         if (pb->writer_closed) return 0; /* EOF */
-        /* Busy-wait (simple implementation) */
-        arch_cpu_relax();
+        proc_yield();
     }
     size_t n = pb->used < count ? pb->used : count;
     for (size_t i = 0; i < n; i++) {
@@ -814,7 +1280,10 @@ static int pipe_write(vfile_t *vf, const char *buf, size_t count) {
     if (pb->reader_closed) return -EPIPE;
     size_t n = 0;
     while (n < count) {
-        while (pb->used == PIPE_BUF_SIZE) arch_cpu_relax();
+        while (pb->used == PIPE_BUF_SIZE) {
+            if (pb->reader_closed) return n ? (int)n : -EPIPE;
+            proc_yield();
+        }
         pb->data[pb->head] = buf[n++];
         pb->head = (pb->head + 1) % PIPE_BUF_SIZE;
         pb->used++;
@@ -825,14 +1294,12 @@ static int pipe_write(vfile_t *vf, const char *buf, size_t count) {
 static int pipe_read_close(vfile_t *vf) {
     pipe_buf_t *pb = (pipe_buf_t *)vf->priv;
     if (pb) { pb->reader_closed = 1; pb->ref--; if (!pb->ref) kfree(pb); }
-    kfree(vf);
     return 0;
 }
 
 static int pipe_write_close(vfile_t *vf) {
     pipe_buf_t *pb = (pipe_buf_t *)vf->priv;
     if (pb) { pb->writer_closed = 1; pb->ref--; if (!pb->ref) kfree(pb); }
-    kfree(vf);
     return 0;
 }
 
@@ -855,7 +1322,8 @@ int vfs_pipe(int pipefd[2]) {
     int fdrd = vfs_alloc_fd(rd);
     int fdwr = vfs_alloc_fd(wr);
     if (fdrd < 0 || fdwr < 0) {
-        if (fdrd >= 0) vfs_free_gfd(fdrd);
+        if (fdrd >= 0) { vfs_close(fdrd); vfs_free_gfd(fdrd); }
+        if (fdwr >= 0) { vfs_close(fdwr); vfs_free_gfd(fdwr); }
         kfree(rd); kfree(wr); kfree(pb);
         return -EMFILE;
     }
@@ -868,23 +1336,30 @@ int vfs_pipe(int pipefd[2]) {
  * dup / dup3 / fcntl
  * ============================================================ */
 
-int vfs_dup(int fd) {
+static int vfs_dupfd(int fd, int minfd) {
+    if (minfd < 0) minfd = 0;
     if (fd == 0 || fd == 1 || fd == 2) {
-        /* Find a new slot and alias it */
-        for (int i = 3; i < GFILE_MAX; i++) {
-            if (!g_files[i]) { g_files[i] = fd == 0 ? &g_stdin_file :
-                               fd == 1 ? &g_stdout_file : &g_stderr_file; return i; }
+        for (int i = minfd; i < GFILE_MAX; i++) {
+            if (!g_files[i]) {
+                g_files[i] = (fd == 0) ? &g_stdin_file :
+                             (fd == 1) ? &g_stdout_file : &g_stderr_file;
+                return i;
+            }
         }
         return -EMFILE;
     }
     if (fd < 0 || fd >= GFILE_MAX || !g_files[fd]) return -EBADF;
     vfile_t *vf = g_files[fd];
     vf->ref_count++;
-    for (int i = 3; i < GFILE_MAX; i++) {
+    for (int i = minfd; i < GFILE_MAX; i++) {
         if (!g_files[i]) { g_files[i] = vf; return i; }
     }
     vf->ref_count--;
     return -EMFILE;
+}
+
+int vfs_dup(int fd) {
+    return vfs_dupfd(fd, 3);
 }
 
 int vfs_dup3(int oldfd, int newfd, int flags) {
@@ -911,7 +1386,10 @@ int vfs_fcntl(int fd, int cmd, long arg) {
         return 0;
     }
     if (cmd == 0) { /* F_DUPFD */
-        return vfs_dup(fd);
+        return vfs_dupfd(fd, (int)arg);
+    }
+    if (cmd == 1030) { /* F_DUPFD_CLOEXEC */
+        return vfs_dupfd(fd, (int)arg);
     }
     if (cmd == 1) return 0; /* F_GETFD */
     if (cmd == 2) return 0; /* F_SETFD */
@@ -996,7 +1474,7 @@ int vfs_truncate(const char *path, size_t size) {
     if (!vn) return -ENOENT;
     int r = -ENOSYS;
     if (vn->ops && vn->ops->truncate) r = vn->ops->truncate(vn, size);
-    vn->ref_count--;
+    vnode_put(vn);
     return r;
 }
 
@@ -1028,6 +1506,8 @@ void vfs_init(void) {
     mnt->root = ramfs_make_vnode(mnt, fs_get_root());
 
     printf("[VFS] Initialized (root=ramfs)\n");
+
+    fs_mkdir("/tmp");
 
     /* Mount procfs at /proc */
     {

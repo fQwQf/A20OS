@@ -1,5 +1,9 @@
 /* cp — copy files */
-#include "../lib/libc.h"
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/stat.h>
 
 int main(int argc, char *argv[]) {
     if (argc < 3) {

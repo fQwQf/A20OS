@@ -6,3 +6,5 @@
 user/build/
 .clangd
 .vscode/
+kernel-rv
+kernel-la
