@@ -16,6 +16,8 @@
 #include "elf.h"
 #include "vfs.h"
 #include "mm.h"
+#include "frame.h"
+#include "vm.h"
 #include "trap.h"
 #include "timer.h"
 #include "stdio.h"
@@ -24,7 +26,6 @@
 #include "consts.h"
 #include "defs.h"
 #include "klog.h"
-#include "arch_ops.h"
 
 static task_t proc_table[MAX_PROCS];
 static uint64_t *kernel_pgdir_shared;
@@ -35,7 +36,7 @@ static uint64_t g_idle_kstack;
 
 void idle_loop(void) {
     while (1) {
-        arch_cpu_wait();
+        __asm__ volatile("wfi");
         proc_yield();
     }
 }
@@ -61,7 +62,7 @@ void proc_init(void) {
     idle->rlim_nofile = MAX_FILES;
     proc_set_name(idle, "idle");
 
-    for (int i = 0; i < MAX_FILES; i++) idle->fd_table[i] = -1;
+    vfs_proc_init_fds(idle->fd_table);
     idle->parent  = NULL;
 
     /* Allocate signal state */
@@ -79,16 +80,17 @@ void proc_init(void) {
     ctx->tp   = (uint64_t)idle;
 
     uint64_t *kpdir = pt_create();
-    if (kpdir) pt_map_kernel(kpdir);
+    if (!kpdir) panic("proc_init: pt_create failed");
+    pt_map_kernel(kpdir);
     kernel_pgdir_shared = kpdir;
     idle->pgdir = kpdir;
-    ctx->satp = arch_mmu_token_from_pgdir(kpdir);
-    ctx->sstatus = arch_task_status_kernel_default();
+    ctx->satp = kpdir ? MAKE_SATP(kpdir) : 0;
+    ctx->sstatus = SSTATUS_SIE;
     idle->kstack_base = idle_stack;
     idle->kstack = (uint64_t)ctx;
     g_idle_kstack = idle->kstack;
 
-    arch_set_current_task_ptr(idle);
+    __asm__ volatile("mv tp, %0" :: "r"(idle));
     current_task = idle;
 
     kdebug("[PROC] Initialized, idle task pid=0\n");
@@ -127,24 +129,21 @@ static void init_task_common(task_t *t, task_t *parent) {
     t->sid       = parent ? parent->sid  : t->pid;
     t->umask     = parent ? parent->umask : 022;
     t->rlim_nofile = MAX_FILES;
-    t->brk       = 0;
-    t->mmap_base = 0x40000000UL; /* 1GB base for mmap */
-    t->vm_areas  = NULL;
+    t->mm        = NULL;
 
     if (parent) {
         memcpy(t->cwd, parent->cwd, MAX_PATH_LEN);
+        memcpy(t->exec_path, parent->exec_path, MAX_PATH_LEN);
     } else {
         t->cwd[0] = '/'; t->cwd[1] = '\0';
+        t->exec_path[0] = '\0';
     }
 
     for (int i = 0; i < MAX_FILES; i++) t->fd_table[i] = -1;
-    /* stdin/stdout/stderr from parent or defaults */
-    t->fd_table[0] = 0;
-    t->fd_table[1] = 1;
-    t->fd_table[2] = 2;
     if (parent) {
-        for (int i = 3; i < MAX_FILES; i++) t->fd_table[i] = parent->fd_table[i];
+        vfs_proc_copy_fds(parent->fd_table, t->fd_table);
     }
+    vfs_proc_init_stdio_defaults(t->fd_table);
 
     /* Signal state */
     t->signals = kmalloc(sizeof(signal_state_t));
@@ -165,7 +164,12 @@ int proc_alloc(void (*entry)(void)) {
     proc_set_name(t, "kthread");
 
     void *stack = kmalloc(KERNEL_STACK_SIZE);
-    if (!stack) { t->state = PROC_UNUSED; return -ENOMEM; }
+    if (!stack) {
+        vfs_proc_close_all_fds(t->fd_table);
+        if (t->signals) { kfree(t->signals); t->signals = NULL; }
+        t->state = PROC_UNUSED;
+        return -ENOMEM;
+    }
     memset(stack, 0, KERNEL_STACK_SIZE);
 
     uint64_t stack_top = (uint64_t)stack + KERNEL_STACK_SIZE;
@@ -175,8 +179,8 @@ int proc_alloc(void (*entry)(void)) {
     ctx->ra   = (uint64_t)entry;
     ctx->tp   = (uint64_t)t;
     t->pgdir  = kernel_pgdir_shared;
-    ctx->satp = arch_mmu_token_from_pgdir(kernel_pgdir_shared);
-    ctx->sstatus = arch_task_status_kernel_default();
+    ctx->satp = kernel_pgdir_shared ? MAKE_SATP(kernel_pgdir_shared) : 0;
+    ctx->sstatus = SSTATUS_SIE;
     t->kstack_base = stack;
     t->kstack = (uint64_t)ctx;
 
@@ -196,7 +200,12 @@ int proc_alloc_user(uint64_t entry, uint64_t sp, uint64_t *pgdir) {
     proc_set_name(t, "user");
 
     void *kstack = kmalloc(KERNEL_STACK_SIZE);
-    if (!kstack) { t->state = PROC_UNUSED; return -ENOMEM; }
+    if (!kstack) {
+        vfs_proc_close_all_fds(t->fd_table);
+        if (t->signals) { kfree(t->signals); t->signals = NULL; }
+        t->state = PROC_UNUSED;
+        return -ENOMEM;
+    }
     memset(kstack, 0, KERNEL_STACK_SIZE);
     t->kstack_base = kstack;
 
@@ -205,20 +214,37 @@ int proc_alloc_user(uint64_t entry, uint64_t sp, uint64_t *pgdir) {
     trap_context_t *trap = (trap_context_t *)(ks_top - sizeof(trap_context_t));
     memset(trap, 0, sizeof(*trap));
     trap->sepc   = entry;
-    trap->x[0]   = arch_mmu_token_from_pgdir(pgdir);
+    trap->x[0]   = pgdir ? MAKE_SATP(pgdir) : 0;
     trap->x[2]   = sp;
-    trap->sstatus = 0;
+    trap->sstatus = SSTATUS_SPIE | SSTATUS_FS_CLEAN;
+    trap->kernel_tp = (uint64_t)(uintptr_t)t;
 
     t->trap_ctx = trap;
     t->ustack   = sp;
+    t->pgdir = pgdir;
+
+    mm_struct_t *mm = kcalloc(1, sizeof(mm_struct_t));
+    if (mm) {
+        mm->pgdir       = pgdir;
+        mm->brk         = 0;
+        mm->start_brk   = 0;
+        mm->mmap_base   = MMAP_BASE_ADDR;
+        mm->stack_top   = sp;
+        mm->stack_bottom = sp - (INITIAL_STACK_PAGES - 1) * PAGE_SIZE;
+        mm->total_vm    = 0;
+        mm->rss         = 0;
+        mm->refcount    = 1;
+        mm->mmap        = NULL;
+        t->mm = mm;
+    }
 
     task_context_t *ctx = (task_context_t *)((uint64_t)trap - sizeof(task_context_t));
     memset(ctx, 0, sizeof(*ctx));
     extern void user_trap_return(void);
     ctx->ra   = (uint64_t)user_trap_return;
     ctx->tp   = (uint64_t)t;
-    ctx->satp = arch_mmu_token_from_pgdir(pgdir);
-    ctx->sstatus = arch_task_status_kernel_default();
+    ctx->satp = pgdir ? MAKE_SATP(pgdir) : 0;
+    ctx->sstatus = SSTATUS_SIE;
     t->kstack = (uint64_t)ctx;
 
     kdebug("[PROC] user task pid=%d entry=0x%lx sp=0x%lx pgdir=0x%lx\n", t->pid,
@@ -246,16 +272,34 @@ int proc_clone(uint64_t flags, uint64_t stack, int *ptid, int *ctid, uint64_t tl
 
     t->exec_load_addr = parent->exec_load_addr;
     t->exec_load_size = parent->exec_load_size;
-    t->brk            = parent->brk;
-    t->mmap_base      = parent->mmap_base;
 
     if (parent->pgdir) {
-        t->pgdir = pt_clone(parent->pgdir);
-        if (!t->pgdir) { t->state = PROC_UNUSED; return -ENOMEM; }
+        if (parent->mm) {
+            t->mm = mm_fork(parent->mm);
+            if (!t->mm) {
+                vfs_proc_close_all_fds(t->fd_table);
+                if (t->signals) { kfree(t->signals); t->signals = NULL; }
+                t->state = PROC_UNUSED;
+                return -ENOMEM;
+            }
+            t->pgdir = t->mm->pgdir;
+
+        } else {
+            /* Kernel thread — just share the kernel page directory */
+            t->pgdir = parent->pgdir;
+        }
     }
 
     void *kstack = kmalloc(KERNEL_STACK_SIZE);
-    if (!kstack) { pt_destroy_user(t->pgdir); t->state = PROC_UNUSED; return -ENOMEM; }
+    if (!kstack) {
+        if (t->mm) { mm_destroy(t->mm); t->mm = NULL; t->pgdir = NULL; }
+        else if (t->pgdir && t->pgdir != kernel_pgdir_shared) { pt_destroy_user(t->pgdir); t->pgdir = NULL; }
+        for (int i = 0; i < MAX_FILES; i++) {
+            if (t->fd_table[i] >= 0) { vfs_close(t->fd_table[i]); t->fd_table[i] = -1; }
+        }
+        if (t->signals) { kfree(t->signals); t->signals = NULL; }
+        t->state = PROC_UNUSED; return -ENOMEM;
+    }
     memset(kstack, 0, KERNEL_STACK_SIZE);
     t->kstack_base = kstack;
 
@@ -264,17 +308,18 @@ int proc_clone(uint64_t flags, uint64_t stack, int *ptid, int *ctid, uint64_t tl
     if (parent->trap_ctx) {
         trap_context_t *trap = (trap_context_t *)(ks_top - sizeof(trap_context_t));
         *trap = *parent->trap_ctx;
-        trap->x[0]   = arch_mmu_token_from_pgdir(t->pgdir);
+        trap->x[0]  = t->pgdir ? MAKE_SATP(t->pgdir) : 0;
         trap->x[10] = 0;
         trap->kernel_tp = (uint64_t)(uintptr_t)t;
         t->trap_ctx = trap;
         t->ustack = stack ? stack : parent->ustack;
+        if (stack) trap->x[2] = stack;
 
         task_context_t *ctx = (task_context_t *)((uint64_t)trap - sizeof(task_context_t));
         extern void user_trap_return(void);
         ctx->ra   = (uint64_t)user_trap_return;
         ctx->tp   = (uint64_t)t;
-        ctx->satp = arch_mmu_token_from_pgdir(t->pgdir);
+        ctx->satp = t->pgdir ? MAKE_SATP(t->pgdir) : 0;
         t->kstack = (uint64_t)ctx;
     } else {
         task_context_t *ctx = (task_context_t *)(ks_top - sizeof(task_context_t));
@@ -284,8 +329,6 @@ int proc_clone(uint64_t flags, uint64_t stack, int *ptid, int *ctid, uint64_t tl
         t->kstack = (uint64_t)ctx;
     }
 
-    kdebug("[PROC] clone: parent=%d child=%d pgdir=0x%lx\n",
-          parent->pid, t->pid, (unsigned long)(uintptr_t)t->pgdir);
     return t->pid;
 }
 
@@ -294,48 +337,139 @@ int proc_clone(uint64_t flags, uint64_t stack, int *ptid, int *ctid, uint64_t tl
  * ============================================================ */
 
 int proc_exec(const char *path, char *const argv[], char *const envp[]) {
-    int fd = vfs_open(path, O_RDONLY, 0);
-    if (fd < 0) { printf("[EXEC] Cannot open %s: %d\n", path, fd); return fd; }
-
     task_t *t = current_task;
+    int fd = vfs_open(path, O_RDONLY, 0);
+    if (fd < 0) return fd;
+
+    char abs_path[MAX_PATH_LEN];
+    if (path[0] == '/') {
+        strncpy(abs_path, path, MAX_PATH_LEN - 1);
+        abs_path[MAX_PATH_LEN - 1] = '\0';
+    } else {
+        const char *cwd = t ? t->cwd : "/";
+        size_t cwd_len = strlen(cwd);
+        if (cwd_len > 0 && cwd[cwd_len - 1] == '/') {
+            snprintf(abs_path, MAX_PATH_LEN, "%s%s", cwd, path);
+        } else {
+            snprintf(abs_path, MAX_PATH_LEN, "%s/%s", cwd, path);
+        }
+    }
 
     char *k_path = kmalloc(strlen(path) + 1);
-    strcpy(k_path, path);
+    if (k_path) strcpy(k_path, path);
 
     char *k_argv[32] = {0};
     char *k_envp[32] = {0};
     int argc = 0, envc = 0;
-    
+
+    auto int is_kptr(const void *p) { return (uintptr_t)p >= PAGE_OFFSET; }
+
     if (argv) {
-        while (argv[argc] && argc < 31) {
-            k_argv[argc] = kmalloc(strlen(argv[argc]) + 1);
-            strcpy(k_argv[argc], argv[argc]);
+        while (argc < 31) {
+            char *arg;
+            if (is_kptr(argv)) {
+                arg = argv[argc];
+            } else {
+                if (copy_from_user(&arg, &argv[argc], sizeof(char*)) < 0) break;
+            }
+            if (!arg) break;
+            k_argv[argc] = kmalloc(MAX_PATH_LEN);
+            if (!k_argv[argc]) break;
+            if (is_kptr(arg)) {
+                strncpy(k_argv[argc], arg, MAX_PATH_LEN - 1);
+                k_argv[argc][MAX_PATH_LEN - 1] = '\0';
+            } else {
+                if (user_strncpy(k_argv[argc], arg, MAX_PATH_LEN) < 0) {
+                    kfree(k_argv[argc]); k_argv[argc] = NULL; break;
+                }
+            }
             argc++;
         }
     }
     if (envp) {
-        while (envp[envc] && envc < 31) {
-            k_envp[envc] = kmalloc(strlen(envp[envc]) + 1);
-            strcpy(k_envp[envc], envp[envc]);
+        while (envc < 31) {
+            char *env;
+            if (is_kptr(envp)) {
+                env = envp[envc];
+            } else {
+                if (copy_from_user(&env, &envp[envc], sizeof(char*)) < 0) break;
+            }
+            if (!env) break;
+            k_envp[envc] = kmalloc(MAX_PATH_LEN);
+            if (!k_envp[envc]) break;
+            if (is_kptr(env)) {
+                strncpy(k_envp[envc], env, MAX_PATH_LEN - 1);
+                k_envp[envc][MAX_PATH_LEN - 1] = '\0';
+            } else {
+                if (user_strncpy(k_envp[envc], env, MAX_PATH_LEN) < 0) {
+                    kfree(k_envp[envc]); k_envp[envc] = NULL; break;
+                }
+            }
             envc++;
         }
     }
 
     elf_load_info_t info;
     memset(&info, 0, sizeof(info));
-    int r = elf_load(fd, &info);
-    vfs_close(fd);
+    int r = elf_load(fd, k_path, &info);
     if (r < 0) {
-        printf("[EXEC] ELF load failed: %d\n", r);
+        if (r == -ENOEXEC) {
+            vfs_lseek(fd, 0, SEEK_SET);
+            char buf[128];
+            int n = vfs_read(fd, buf, sizeof(buf) - 1);
+            if (n >= 2 && buf[0] == '#' && buf[1] == '!') {
+                buf[n] = '\0';
+                char *cp = buf + 2;
+                while (*cp == ' ' || *cp == '\t') ++cp;
+                if (*cp != '\0' && *cp != '\n') {
+                    char *interp_start = cp;
+                    while (*cp && *cp != '\n' && *cp != ' ' && *cp != '\t') ++cp;
+                    char interp_path[128];
+                    size_t ilen = cp - interp_start;
+                    if (ilen > 0 && ilen < sizeof(interp_path)) {
+                        memcpy(interp_path, interp_start, ilen);
+                        interp_path[ilen] = '\0';
+
+                        char arg_buf[128] = {0};
+                        int has_arg = 0;
+                        while (*cp == ' ' || *cp == '\t') ++cp;
+                        if (*cp && *cp != '\n') {
+                            char *arg_start = cp;
+                            while (*cp && *cp != '\n') ++cp;
+                            size_t alen = cp - arg_start;
+                            if (alen > 0 && alen < sizeof(arg_buf)) {
+                                memcpy(arg_buf, arg_start, alen);
+                                arg_buf[alen] = '\0';
+                                has_arg = 1;
+                            }
+                        }
+
+                        char *new_argv[64];
+                        int na = 0;
+                        new_argv[na++] = interp_path;
+                        if (has_arg) new_argv[na++] = arg_buf;
+                        new_argv[na++] = k_path;
+                        for (int i = 1; i < argc && na < 63; i++)
+                            new_argv[na++] = k_argv[i];
+                        new_argv[na] = NULL;
+
+                        vfs_close(fd);
+                        int ret = proc_exec(interp_path, new_argv, envp);
+                        for(int i=0; i<argc; i++) kfree(k_argv[i]);
+                        for(int i=0; i<envc; i++) kfree(k_envp[i]);
+                        kfree(k_path);
+                        return ret;
+                    }
+                }
+            }
+        }
+        vfs_close(fd);
         for(int i=0; i<argc; i++) kfree(k_argv[i]);
         for(int i=0; i<envc; i++) kfree(k_envp[i]);
         kfree(k_path);
         return r;
     }
-    kdebug("[EXEC] ELF loaded: entry=0x%lx base=0x%lx brk=0x%lx stack=0x%lx\n",
-           (unsigned long)info.entry, (unsigned long)info.base,
-           (unsigned long)info.brk, (unsigned long)info.stack_top);
-
+    vfs_close(fd);
     uint64_t sp = elf_setup_stack(info.stack_top, argc,
                                    (char *const *)k_argv,
                                    (char *const *)k_envp, &info);
@@ -343,14 +477,35 @@ int proc_exec(const char *path, char *const argv[], char *const envp[]) {
     for(int i=0; i<argc; i++) kfree(k_argv[i]);
     for(int i=0; i<envc; i++) kfree(k_envp[i]);
 
+    /* Destroy old address space */
+    mm_struct_t *old_mm = t->mm;
+    t->mm = NULL;
+
+    /* Build fresh mm_struct wrapping the ELF loader's page directory */
+    mm_struct_t *mm = kcalloc(1, sizeof(mm_struct_t));
+    if (!mm) { mm_destroy(old_mm); kfree(k_path); return -ENOMEM; }
+    mm->pgdir       = info.pgdir;
+    mm->brk         = info.brk;
+    mm->start_brk   = info.brk;
+    mm->mmap_base   = MMAP_BASE_ADDR;
+    mm->stack_top   = info.stack_top;
+    mm->stack_bottom = info.stack_top - (INITIAL_STACK_PAGES - 1) * PAGE_SIZE;
+    mm->total_vm    = 0;
+    mm->rss         = 0;
+    mm->refcount    = 1;
+    mm->mmap        = info.mmap;
+    t->mm           = mm;
+
     uint64_t *old_pgdir = t->pgdir;
     t->pgdir = info.pgdir;
     t->entry = info.entry;
     t->ustack = sp;
-    t->brk   = info.brk;
     proc_set_name(t, path);
+    strncpy(t->exec_path, abs_path, MAX_PATH_LEN - 1);
+    t->exec_path[MAX_PATH_LEN - 1] = '\0';
 
     if (t->signals) signal_init((signal_state_t *)t->signals);
+    t->sig_handling = 0;
 
     uint64_t saved_entry = info.entry;
     uint64_t saved_sp    = sp;
@@ -363,7 +518,7 @@ int proc_exec(const char *path, char *const argv[], char *const envp[]) {
         extern void user_trap_return(void);
         ctx->ra = (uint64_t)user_trap_return;
         ctx->tp = (uint64_t)(uintptr_t)t;
-        ctx->satp = arch_mmu_token_from_pgdir(info.pgdir);
+        ctx->satp = MAKE_SATP(info.pgdir);
         t->trap_ctx = trap;
         t->kstack   = (uint64_t)ctx;
     }
@@ -372,26 +527,33 @@ int proc_exec(const char *path, char *const argv[], char *const envp[]) {
         trap_context_t *trap = t->trap_ctx;
         memset(trap, 0, sizeof(*trap));
         trap->sepc      = saved_entry;
-        trap->x[0]      = arch_mmu_token_from_pgdir(info.pgdir);
+        trap->x[0]      = MAKE_SATP(info.pgdir);
         trap->x[2]      = saved_sp;
+        trap->x[4]      = info.tls_tp;
         trap->kernel_tp = (uint64_t)(uintptr_t)t;
-        trap->sstatus   = 0x0UL;
+        trap->sstatus   = SSTATUS_SPIE | SSTATUS_FS_CLEAN;
 
         task_context_t *ctx = (task_context_t *)((uint64_t)trap - sizeof(task_context_t));
-        ctx->satp = arch_mmu_token_from_pgdir(info.pgdir);
+        extern void user_trap_return(void);
+        ctx->ra   = (uint64_t)user_trap_return;
+        ctx->tp   = (uint64_t)(uintptr_t)t;
+        ctx->satp = MAKE_SATP(info.pgdir);
     }
 
     t->exec_load_addr = info.load_addr;
     t->exec_load_size = info.load_size;
 
-    pt_destroy_user(old_pgdir);
-
-    kdebug("[EXEC] Executing %s pid=%d entry=0x%lx pgdir=0x%lx\n", k_path, t->pid,
-           (unsigned long)saved_entry, (unsigned long)(uintptr_t)info.pgdir);
+    /* Destroy old address space (page tables + old mm if any) */
+    if (old_mm) {
+        /* old_mm->pgdir was old_pgdir — mm_destroy handles pt_destroy_user */
+        mm_destroy(old_mm);
+    } else if (old_pgdir && old_pgdir != kernel_pgdir_shared) {
+        pt_destroy_user(old_pgdir);
+    }
 
     kfree(k_path);
 
-    arch_sync_icache();
+    __asm__ volatile("fence.i" ::: "memory");
 
     t->state = PROC_RUNNING;
     return 0;
@@ -405,23 +567,18 @@ void proc_free_pid(int pid) {
     task_t *t = proc_find(pid);
     if (!t) return;
 
-    pt_destroy_user(t->pgdir);
+    if (t->mm) {
+        mm_destroy(t->mm);
+        t->mm = NULL;
+    }
     t->pgdir = NULL;
 
     if (t->signals) { kfree(t->signals); t->signals = NULL; }
 
-    vm_area_t *va = t->vm_areas;
-    while (va) {
-        vm_area_t *next = va->next;
-        kfree(va);
-        va = next;
-    }
-
     if (t->kstack) {
-        uintptr_t sp = (uintptr_t)t->kstack;
-        void *stack_base = (void *)(sp & ~((uintptr_t)KERNEL_STACK_SIZE - 1));
-        kfree(stack_base);
+        kfree(t->kstack_base);
         t->kstack = 0;
+        t->kstack_base = NULL;
     }
 
     memset(t, 0, sizeof(*t));
@@ -430,24 +587,27 @@ void proc_free_pid(int pid) {
 void proc_exit(int exit_code) {
     task_t *t = current_task;
     if (!t) panic("proc_exit: no current task");
-
-    kdebug("[PROC] pid=%d exit_code=%d\n", t->pid, exit_code);
-
     /* Close all file descriptors */
     for (int i = 0; i < MAX_FILES; i++) {
-        if (t->fd_table[i] > 2) {
+        if (t->fd_table[i] >= 0) {
             vfs_close(t->fd_table[i]);
             t->fd_table[i] = -1;
         }
     }
 
-    /* Re-parent children to idle */
+    /* Re-parent orphaned children to init (pid 1) or idle */
+    task_t *reaper = proc_find(1);
+    if (!reaper || reaper == t) reaper = &proc_table[0];
     for (int i = 0; i < MAX_PROCS; i++) {
         if (proc_table[i].ppid == t->pid && proc_table[i].state != PROC_UNUSED) {
-            proc_table[i].ppid   = 0;
-            proc_table[i].parent = &proc_table[0];
+            proc_table[i].ppid   = reaper->pid;
+            proc_table[i].parent = reaper;
         }
     }
+
+    t->exit_code = exit_code;
+    __atomic_thread_fence(__ATOMIC_RELEASE);
+    t->state     = PROC_ZOMBIE;
 
     /* Wake up parent if blocked in wait */
     if (t->parent && t->parent->state == PROC_BLOCKED) {
@@ -457,10 +617,6 @@ void proc_exit(int exit_code) {
     /* Send SIGCHLD to parent */
     if (t->parent) signal_send(t->parent->pid, SIGCHLD);
 
-    t->state     = PROC_ZOMBIE;
-    t->exit_code = exit_code;
-
-    kdebug("[PROC] pid=%d calling sched()...\n", t->pid);
     sched();
     panic("proc_exit: sched returned");
 }
@@ -478,14 +634,22 @@ retry:;
     int found = 0;
     for (int i = 0; i < MAX_PROCS; i++) {
         task_t *child = &proc_table[i];
-        if (child->state == PROC_UNUSED) continue;
+        int cstate = __atomic_load_n(&child->state, __ATOMIC_ACQUIRE);
+        if (cstate == PROC_UNUSED) continue;
         if (child->ppid != t->pid) continue;
         if (pid > 0 && child->pid != pid) continue;
-        if (pid <= -1 && pid != -1 && child->pgid != (-pid)) continue;
+        if (pid == 0 && child->pgid != t->pgid) continue;
+        if (pid < -1 && child->pgid != (-pid)) continue;
 
         found = 1;
-        if (child->state == PROC_ZOMBIE) {
-            if (status) *status = (child->exit_code & 0xFF) << 8;
+        if (cstate == PROC_ZOMBIE) {
+            int code = __atomic_load_n(&child->exit_code, __ATOMIC_ACQUIRE);
+            if (status) {
+                if (code >= 0)
+                    *status = (code & 0xFF) << 8;
+                else
+                    *status = (-code) & 0x7F;
+            }
             int child_pid = child->pid;
             proc_free_pid(child_pid);
             return child_pid;
@@ -513,6 +677,21 @@ int proc_kill(int pid, int signum) {
     return signal_send(pid, signum);
 }
 
+int proc_kill_pgid(int pgid, int signum, int skip_self) {
+    if (signum <= 0 || signum >= NSIG) return -EINVAL;
+    task_t *self = current_task;
+    int count = 0;
+    for (int i = 1; i < MAX_PROCS; i++) {
+        task_t *t = &proc_table[i];
+        if (t->state == PROC_UNUSED) continue;
+        if (t->pgid != pgid) continue;
+        if (skip_self && t == self) continue;
+        signal_send(t->pid, signum);
+        count++;
+    }
+    return count > 0 ? count : -ESRCH;
+}
+
 /* ============================================================
  * Scheduler
  * ============================================================ */
@@ -531,10 +710,6 @@ void sched(void) {
         if (&proc_table[i] == current_task) { cur_idx = i; break; }
     }
 
-    // kinfo("[SCHED] cur_idx=%d cur_pid=%d cur_state=%d\n",
-    //      cur_idx, current_task ? current_task->pid : -1,
-    //      current_task ? current_task->state : -1);
-
     /* Wake up sleeping processes */
     for (int i = 0; i < MAX_PROCS; i++) {
         if (proc_table[i].state == PROC_BLOCKED && proc_table[i].wake_time > 0
@@ -550,7 +725,6 @@ void sched(void) {
         /* Skip current task and UNUSED tasks */
         if (t == current_task || t->state == PROC_UNUSED) continue;
         if (t->state == PROC_READY) {
-            kdebug("[SCHED] Found ready task: pid=%d idx=%d\n", t->pid, idx);
             context_switch(t);
             return;
         }
@@ -565,7 +739,6 @@ void sched(void) {
     }
 
     /* No runnable task — run idle */
-    kdebug("[SCHED] No ready tasks found, switching to idle\n");
     if (current_task != &proc_table[0]) {
         context_switch(&proc_table[0]);
     }
@@ -583,87 +756,21 @@ void proc_yield(void) {
 
 uint64_t proc_brk(uint64_t newbrk) {
     task_t *t = current_task;
-    if (!t) return -1;
-    if (newbrk == 0) return t->brk;
-    if (newbrk < t->brk) return t->brk;
-
-    uint64_t old_brk = ROUND_UP(t->brk, PAGE_SIZE);
-    uint64_t target  = ROUND_UP(newbrk, PAGE_SIZE);
-
-    if (t->pgdir) {
-        for (uint64_t va = old_brk; va < target; va += PAGE_SIZE) {
-            if (pt_translate(t->pgdir, va) == 0) {
-                void *frame = frame_alloc();
-                if (!frame) { printf("[BRK] OOM at va=0x%lx\n", (unsigned long)va); return t->brk; }
-                memset(frame, 0, PAGE_SIZE);
-                pt_map(t->pgdir, va, (paddr_t)(uintptr_t)frame,
-                        PTE_V | PTE_R | PTE_W | PTE_U | PTE_A | PTE_D);
-            }
-        }
-    }
-
-    t->brk = newbrk;
-    return t->brk;
+    if (!t || !t->mm) return -1;
+    return mm_brk(t->mm, newbrk);
 }
 
 uint64_t proc_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, long off) {
     (void)fd; (void)off;
     task_t *t = current_task;
-    if (!t) return (uint64_t)-1;
-
-    len = ROUND_UP(len, PAGE_SIZE);
-
-    uint64_t va = addr ? addr : t->mmap_base;
-    if (!addr) t->mmap_base += len;
-
-    if (t->pgdir) {
-        for (uint64_t off2 = 0; off2 < len; off2 += PAGE_SIZE) {
-            void *frame = frame_alloc();
-            if (!frame) return (uint64_t)-ENOMEM;
-            memset(frame, 0, PAGE_SIZE);
-            uint64_t pte_flags = PTE_V | PTE_U | PTE_A | PTE_D;
-            if (prot & 1) pte_flags |= PTE_R;
-            if (prot & 2) pte_flags |= PTE_W;
-            if (prot & 4) pte_flags |= PTE_X;
-            pt_map(t->pgdir, va + off2, (paddr_t)(uintptr_t)frame, pte_flags);
-        }
-    }
-
-    vm_area_t *va_node = (vm_area_t *)kmalloc(sizeof(vm_area_t));
-    if (!va_node) return (uint64_t)-ENOMEM;
-    va_node->start = va;
-    va_node->end   = va + len;
-    va_node->prot  = prot;
-    va_node->flags = flags;
-    va_node->next  = t->vm_areas;
-    t->vm_areas    = va_node;
-
-    return va;
+    if (!t || !t->mm) return (uint64_t)-1;
+    return mm_mmap(t->mm, addr, len, prot, flags);
 }
 
 int proc_munmap(uint64_t addr, size_t len) {
-    (void)len;
     task_t *t = current_task;
-    if (!t) return -1;
-
-    vm_area_t **pp = &t->vm_areas;
-    while (*pp) {
-        if ((*pp)->start == addr) {
-            vm_area_t *doomed = *pp;
-            *pp = doomed->next;
-            if (t->pgdir) {
-                for (uint64_t va = doomed->start; va < doomed->end; va += PAGE_SIZE) {
-                    paddr_t pa = pt_translate(t->pgdir, va);
-                    pt_unmap(t->pgdir, va);
-                    if (pa) frame_free((void *)(uintptr_t)pa);
-                }
-            }
-            kfree(doomed);
-            return 0;
-        }
-        pp = &(*pp)->next;
-    }
-    return 0;
+    if (!t || !t->mm) return -1;
+    return mm_munmap(t->mm, addr, len);
 }
 
 void proc_dump(void) {

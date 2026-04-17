@@ -2,6 +2,7 @@
 #define _DEFS_H
 
 #include "types.h"
+#include "consts.h"
 
 #define ALWAYS_INLINE __attribute__((always_inline)) inline static
 #define NORETURN __attribute__((noreturn))
@@ -52,6 +53,10 @@ static inline void csr_clear(uint64_t csr, uint64_t val) {
 #define w_sstatus(x)   __asm__ volatile("csrw sstatus, %0" :: "r"((uint64_t)(x)))
 #define r_sie()        ({ uint64_t x; __asm__ volatile("csrr %0, sie" : "=r"(x)); x; })
 #define w_sie(x)       __asm__ volatile("csrw sie, %0" :: "r"((uint64_t)(x)))
+
+#define SIE_SSIE       (1L << 1)
+#define SIE_STIE       (1L << 5)
+#define SIE_SEIE       (1L << 9)
 #define r_stvec()      ({ uint64_t x; __asm__ volatile("csrr %0, stvec" : "=r"(x)); x; })
 #define w_stvec(x)     __asm__ volatile("csrw stvec, %0" :: "r"((uint64_t)(x)))
 #define r_scause()     ({ uint64_t x; __asm__ volatile("csrr %0, scause" : "=r"(x)); x; })
@@ -65,25 +70,11 @@ static inline void csr_clear(uint64_t csr, uint64_t val) {
 #define r_sip()        ({ uint64_t x; __asm__ volatile("csrr %0, sip" : "=r"(x)); x; })
 #define w_sip(x)       __asm__ volatile("csrw sip, %0" :: "r"((uint64_t)(x)))
 
-/* SSTATUS bits */
-#define SSTATUS_SIE    (1UL << 1)
-#define SSTATUS_SPP    (1UL << 8)
-#define SSTATUS_SUM    (1UL << 18)
-
-/* SIE bits */
-#define SIE_SSIE       (1UL << 1)
-#define SIE_STIE       (1UL << 5)
-#define SIE_SEIE       (1UL << 9)
-
-/* scause decoding */
-#define CAUSE_INTR_MASK  (1UL << 63)
-#define CAUSE_CODE_MASK  0xFFUL
+/* scause exception codes */
 #define IRQ_S_SOFT       1
 #define IRQ_S_TIMER      5
 #define IRQ_S_EXT        9
-
-/* scause exception codes */
-#define CAUSE_ECALL_U  8
-#define MAKE_SATP(pgdir) ((0x8UL << 60) | ((uint64_t)(uintptr_t)(pgdir) >> 12))
+#define CAUSE_ECALL_U    8
+#define MAKE_SATP(pgdir) ((0x8UL << 60) | (((uint64_t)(uintptr_t)(pgdir) - PAGE_OFFSET) >> 12))
 
 #endif /* _DEFS_H */
