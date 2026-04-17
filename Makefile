@@ -4,11 +4,11 @@
 ARCH ?= riscv64
 MODE ?= release
 BRINGUP ?= 0
+CONTEST ?= 0
 
 # Directories
 KERNEL_DIR = kernel
 INCLUDE_DIR = $(KERNEL_DIR)/include
-ARCH_DIR = $(KERNEL_DIR)/arch/$(ARCH)
 
 # Compiler and tools
 ifeq ($(ARCH), riscv64)
@@ -16,124 +16,164 @@ ifeq ($(ARCH), riscv64)
     ARCH_CFLAGS = -march=rv64gc -mabi=lp64d -mcmodel=medany
     ARCH_LDFLAGS =
     QEMU = qemu-system-riscv64
-    QEMU_FLAGS = -machine virt -m 128M -nographic -smp 1 -bios default -global virtio-mmio.force-legacy=false
+    QEMU_FLAGS = -machine virt -m 512M -nographic -smp 1 -bios default -global virtio-mmio.force-legacy=false
 else ifeq ($(ARCH), loongarch64)
-    CROSS_PREFIX = loongarch64-linux-gnu-
+    CROSS_PREFIX = loongarch64-unknown-elf-
     ARCH_CFLAGS = -march=loongarch64 -mabi=lp64d
     ARCH_LDFLAGS =
     QEMU = qemu-system-loongarch64
-    QEMU_FLAGS = -machine virt -m 128M -nographic -smp 1
-else
-$(error Unsupported ARCH='$(ARCH)')
+    QEMU_FLAGS = -machine virt -m 512M -nographic -smp 1
 endif
 
 # In bringup mode, boot kernel only (no fs image dependency).
 ifneq ($(BRINGUP),1)
-QEMU_FLAGS += -drive file=fs.img,if=none,format=raw,id=x0 -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0
+QEMU_FLAGS += -drive file=fat32.img,if=none,format=raw,id=x0 -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0
 QEMU_FLAGS += -drive file=ext4.img,if=none,format=raw,id=x1 -device virtio-blk-device,drive=x1,bus=virtio-mmio-bus.1
+
+ifneq ($(wildcard sdcard-rv.img),)
+QEMU_FLAGS += -drive file=sdcard-rv.img,if=none,format=raw,id=x2 -device virtio-blk-device,drive=x2,bus=virtio-mmio-bus.2
 endif
 
+ifneq ($(wildcard sdcard-la.img),)
+QEMU_FLAGS += -drive file=sdcard-la.img,if=none,format=raw,id=x3 -device virtio-blk-device,drive=x3,bus=virtio-mmio-bus.3
+endif
 
+endif
 
 # Compiler flags
 CFLAGS = -Wall -Wextra -O2 -ffreestanding -nostdlib \
          -nostartfiles -fno-builtin -fno-common -std=gnu99 \
-         -I$(INCLUDE_DIR) \
-         -I$(ARCH_DIR)/include \
-         $(ARCH_CFLAGS) \
+         -I$(INCLUDE_DIR) $(ARCH_CFLAGS) \
          -D$(shell echo $(ARCH) | tr a-z A-Z) \
          -DCONFIG_$(shell echo $(ARCH) | tr a-z A-Z)
 
-# Bringup compile mode marker for conditional code.
+# Bringup / contest mode markers for conditional compilation.
 ifeq ($(BRINGUP),1)
 CFLAGS += -DBRINGUP
 endif
+ifeq ($(CONTEST),1)
+CFLAGS += -DCONTEST
+endif
 
-LDFLAGS = -nostdlib -nostartfiles -T $(ARCH_DIR)/boot/ldscript.ld $(ARCH_LDFLAGS)
+LDFLAGS = -nostdlib -nostartfiles -T $(KERNEL_DIR)/arch/$(ARCH)/ldscript.ld $(ARCH_LDFLAGS)
 
 # Source files
-ARCH_SRC = $(wildcard $(ARCH_DIR)/*.c)
-ARCH_SRC_NO_STUBS = $(filter-out $(ARCH_DIR)/bringup_stubs.c,$(ARCH_SRC))
-ARCH_EXTRA_C = $(wildcard $(ARCH_DIR)/boot/*.c) \
-               $(wildcard $(ARCH_DIR)/drv/*.c)
-
-KERNEL_SRC_FULL = $(wildcard $(KERNEL_DIR)/*.c) \
-                  $(wildcard $(KERNEL_DIR)/lib/*.c) \
-                  $(wildcard $(KERNEL_DIR)/mm/*.c) \
-                  $(wildcard $(KERNEL_DIR)/proc/*.c) \
-                  $(wildcard $(KERNEL_DIR)/fs/*.c) \
-                  $(wildcard $(KERNEL_DIR)/syscall/*.c) \
-                  $(wildcard $(KERNEL_DIR)/trap/*.c) \
-                  $(wildcard $(KERNEL_DIR)/shell/*.c) \
-                  $(wildcard $(KERNEL_DIR)/drv/*.c) \
-                  $(ARCH_SRC_NO_STUBS) \
-                  $(ARCH_EXTRA_C)
-
-KERNEL_SRC_BRINGUP = $(KERNEL_DIR)/main.c \
-                     $(KERNEL_DIR)/lib/printf.c \
-                     $(KERNEL_DIR)/lib/string.c \
-                     $(KERNEL_DIR)/drv/uart.c \
-                     $(KERNEL_DIR)/drv/clint.c \
-                     $(ARCH_SRC_NO_STUBS) \
-					 $(ARCH_DIR)/drv/plat_irq.c \
-                     $(ARCH_DIR)/bringup_stubs.c
-
-ifeq ($(BRINGUP),1)
-KERNEL_SRC = $(KERNEL_SRC_BRINGUP)
-ASM_SRC = $(ARCH_DIR)/boot/entry.S
-else
-KERNEL_SRC = $(KERNEL_SRC_FULL)
-ASM_SRC = $(wildcard $(ARCH_DIR)/*.S) \
-          $(wildcard $(ARCH_DIR)/boot/*.S)
-endif
+KERNEL_SRC = $(wildcard $(KERNEL_DIR)/*.c) \
+             $(wildcard $(KERNEL_DIR)/lib/*.c) \
+             $(wildcard $(KERNEL_DIR)/mm/*.c) \
+             $(wildcard $(KERNEL_DIR)/proc/*.c) \
+             $(wildcard $(KERNEL_DIR)/fs/*.c) \
+             $(wildcard $(KERNEL_DIR)/drv/*.c) \
+             $(wildcard $(KERNEL_DIR)/syscall/*.c) \
+             $(wildcard $(KERNEL_DIR)/trap/*.c) \
+             $(wildcard $(KERNEL_DIR)/shell/*.c)
 
 # Object files
 KERNEL_OBJ = $(KERNEL_SRC:.c=.o)
+
+# ASM sources
+ASM_SRC = $(wildcard $(KERNEL_DIR)/arch/$(ARCH)/*.S)
 ASM_OBJ = $(ASM_SRC:.S=.o)
 
 # Kernel image
 KERNEL_ELF = kernel.elf
 KERNEL_BIN = kernel.bin
 
+# ================================================================
 # Targets
-.PHONY: all clean run-riscv64 run-loongarch64 user_apps fs_img kernel-only
+# ================================================================
 
-all: $(KERNEL_BIN) user_apps fs_img ext4_img_only
-	@echo "Build complete: $(KERNEL_BIN), fs.img and ext4.img"
+.PHONY: all clean run-riscv64 run-loongarch64 debug-riscv64 debug-loongarch64 \
+        user_apps fs_img kernel-only dev-build contest-rv contest-la
 
-kernel-only: $(KERNEL_BIN)
-	@echo "Build complete: $(KERNEL_BIN)"
+# ----------------------------------------------------------------
+# Competition build: produces kernel-rv, kernel-la, disk.img,
+# disk-la.img (what the judge expects from `make all`).
+# ----------------------------------------------------------------
+all: contest-rv contest-la
+	@echo "=== Competition build complete ==="
+	@echo "  kernel-rv  kernel-la  disk.img  disk-la.img"
+
+contest-rv:
+	@echo "--- Building RISC-V 64 (contest) ---"
+	$(MAKE) ARCH=riscv64 CONTEST=1 _reset_obj
+	$(MAKE) ARCH=riscv64 CONTEST=1 _contest_build KERNEL_OUT=kernel-rv DISK_OUT=disk.img
+
+contest-la:
+	@echo "--- Building LoongArch 64 (contest) ---"
+	$(MAKE) ARCH=loongarch64 CONTEST=1 _reset_obj
+	$(MAKE) ARCH=loongarch64 CONTEST=1 _contest_build KERNEL_OUT=kernel-la DISK_OUT=disk-la.img
+
+_reset_obj:
+	find $(KERNEL_DIR) -name '*.o' -delete
+	$(MAKE) -C user clean
+
+_contest_build: $(KERNEL_ELF) user_apps _contest_disk
+	cp $(KERNEL_ELF) $(KERNEL_OUT)
+	@echo "  -> $(KERNEL_OUT) + $(DISK_OUT)"
+
+_contest_disk: user_apps
+	dd if=/dev/zero of=$(DISK_OUT) bs=1M count=16 2>/dev/null
+	mkfs.fat -F 32 $(DISK_OUT)
+	mcopy -i $(DISK_OUT) user/build/init  ::/init
+	mcopy -i $(DISK_OUT) user/build/mksh  ::/mksh
+	mcopy -i $(DISK_OUT) user/build/sh    ::/sh
+	mcopy -i $(DISK_OUT) user/build/ls    ::/ls
+	mcopy -i $(DISK_OUT) user/build/cat   ::/cat
+	mcopy -i $(DISK_OUT) user/build/mkdir ::/mkdir
+	mcopy -i $(DISK_OUT) user/build/rm    ::/rm
+	mcopy -i $(DISK_OUT) user/build/cp    ::/cp
+	mcopy -i $(DISK_OUT) user/build/ps    ::/ps
+	mcopy -i $(DISK_OUT) user/build/aed   ::/aed
+	mcopy -i $(DISK_OUT) user/build/touch ::/touch
+	mcopy -i $(DISK_OUT) user/build/poweroff ::/poweroff
+	mcopy -i $(DISK_OUT) user/build/reboot   ::/reboot
+	mcopy -i $(DISK_OUT) user/build/pwd   ::/pwd
+	mcopy -i $(DISK_OUT) user/build/echo  ::/echo
+	mcopy -i $(DISK_OUT) user/build/env   ::/env
+	mcopy -i $(DISK_OUT) user/build/clear ::/clear
+	mcopy -i $(DISK_OUT) user/build/help  ::/help
+
+# ----------------------------------------------------------------
+# Development build (for `make run-riscv64` / `make run-loongarch64`)
+# ----------------------------------------------------------------
+
+dev-build: $(KERNEL_BIN) user_apps fs_img ext4_img_only
+	@echo "Dev build complete: $(KERNEL_BIN), fat32.img, ext4.img"
 
 user_apps:
-	$(MAKE) -C user ARCH=$(ARCH)
+	$(MAKE) -C user ARCH=$(ARCH) CONTEST=$(CONTEST)
 
 fs_img: user_apps
 	@echo "Building FAT32 image..."
-	dd if=/dev/zero of=fs.img bs=1M count=32
-	mkfs.fat -F 32 fs.img
-	mcopy -i fs.img user/build/init ::/init
-	mcopy -i fs.img user/build/sh ::/sh
-	mcopy -i fs.img user/build/ls ::/ls
-	mcopy -i fs.img user/build/cat ::/cat
-	mcopy -i fs.img user/build/mkdir ::/mkdir
-	mcopy -i fs.img user/build/rm ::/rm
-	mcopy -i fs.img user/build/cp ::/cp
-	mcopy -i fs.img user/build/ps ::/ps
-	mcopy -i fs.img user/build/aed ::/aed
-	mcopy -i fs.img user/build/touch ::/touch
-	mcopy -i fs.img user/build/poweroff ::/poweroff
-	mcopy -i fs.img user/build/reboot ::/reboot
-	mcopy -i fs.img user/build/pwd ::/pwd
-	mcopy -i fs.img user/build/echo ::/echo
-	mcopy -i fs.img user/build/env ::/env
-	mcopy -i fs.img user/build/clear ::/clear
-	mcopy -i fs.img user/build/help ::/help
-	@printf 'Hello from A20OS FAT32!\n' | mcopy -i fs.img - ::/test.txt
-	cp fs.img fs_test.img
+	dd if=/dev/zero of=fat32.img bs=1M count=32
+	mkfs.fat -F 32 fat32.img
+	mcopy -i fat32.img user/build/init ::/init
+	mcopy -i fat32.img user/build/mksh ::/mksh
+	mcopy -i fat32.img user/build/sh ::/sh
+	mcopy -i fat32.img user/build/ls ::/ls
+	mcopy -i fat32.img user/build/cat ::/cat
+	mcopy -i fat32.img user/build/mkdir ::/mkdir
+	mcopy -i fat32.img user/build/rm ::/rm
+	mcopy -i fat32.img user/build/cp ::/cp
+	mcopy -i fat32.img user/build/ps ::/ps
+	mcopy -i fat32.img user/build/aed ::/aed
+	mcopy -i fat32.img user/build/touch ::/touch
+	mcopy -i fat32.img user/build/poweroff ::/poweroff
+	mcopy -i fat32.img user/build/reboot ::/reboot
+	mcopy -i fat32.img user/build/pwd ::/pwd
+	mcopy -i fat32.img user/build/echo ::/echo
+	mcopy -i fat32.img user/build/env ::/env
+	mcopy -i fat32.img user/build/clear ::/clear
+	mcopy -i fat32.img user/build/help ::/help
+	@printf 'Hello from A20OS FAT32!\n' | mcopy -i fat32.img - ::/test.txt
+	cp fat32.img fs_test.img
 
 ext4_img_only: user_apps
 	@echo "Building ext4 image..."
 	@rm -rf /tmp/a20os_ext4_staging && mkdir -p /tmp/a20os_ext4_staging
+	cp user/build/init /tmp/a20os_ext4_staging/init
+	cp user/build/mksh /tmp/a20os_ext4_staging/mksh
 	cp user/build/ls   /tmp/a20os_ext4_staging/ls
 	cp user/build/cat  /tmp/a20os_ext4_staging/cat
 	cp user/build/mkdir /tmp/a20os_ext4_staging/mkdir
@@ -161,44 +201,51 @@ $(KERNEL_ELF): $(KERNEL_OBJ) $(ASM_OBJ)
 
 clean:
 	find $(KERNEL_DIR) -name '*.o' -delete
-	rm -f $(KERNEL_ELF) $(KERNEL_BIN) fs.img
+	rm -f $(KERNEL_ELF) $(KERNEL_BIN) fat32.img ext4.img
+	rm -f kernel-rv kernel-la disk.img disk-la.img
 	$(MAKE) -C user clean
+
+kernel-only: $(KERNEL_BIN)
+	@echo "Kernel-only build complete: $(KERNEL_BIN)"
+
+# ----------------------------------------------------------------
+# Run targets (development mode)
+# ----------------------------------------------------------------
 
 run-riscv64:
 ifeq ($(BRINGUP),1)
 	$(MAKE) ARCH=riscv64 BRINGUP=1 kernel-only
 else
-	$(MAKE) ARCH=riscv64 all
+	$(MAKE) ARCH=riscv64 dev-build
 endif
-	$(QEMU) $(QEMU_FLAGS) -kernel $(KERNEL_BIN)
+	$(QEMU) $(QEMU_FLAGS) -kernel $(KERNEL_ELF)
 
 run-loongarch64:
 ifeq ($(BRINGUP),1)
 	$(MAKE) ARCH=loongarch64 BRINGUP=1 kernel-only
 else
-	$(MAKE) ARCH=loongarch64 all
+	$(MAKE) ARCH=loongarch64 dev-build
 endif
 	$(QEMU) $(QEMU_FLAGS) -kernel $(KERNEL_ELF)
 
 # --- Debug Targets ---
 
-# 过滤掉 -O2，替换为 -O0 以获得更好的单步调试体验，并加上 -g
 DEBUG_CFLAGS = $(filter-out -O2,$(CFLAGS)) -O0 -g -DDEBUG
 
-# 编译调试版内核
-debug-build:
-	$(MAKE) CFLAGS="$(DEBUG_CFLAGS)" clean all
+debug-riscv64:
+ifeq ($(BRINGUP),1)
+	$(MAKE) ARCH=riscv64 BRINGUP=1 CFLAGS="$(DEBUG_CFLAGS)" kernel-only
+else
+	$(MAKE) ARCH=riscv64 CFLAGS="$(DEBUG_CFLAGS)" dev-build
+endif
+	@echo "Waiting for GDB connection on port 1234..."
+	$(QEMU) $(QEMU_FLAGS) -kernel $(KERNEL_ELF) -S -s
 
-# RISC-V 64 调试运行 (启动 QEMU 并冻结，等待 GDB 连接)
-debug-riscv64: debug-build
-	$(MAKE) ARCH=riscv64 run-qemu-debug
-
-# LoongArch 64 调试运行
-debug-loongarch64: debug-build
-	$(MAKE) ARCH=loongarch64 run-qemu-debug
-
-# 实际启动 QEMU 的内部目标
-# 注意：这里使用 $(KERNEL_ELF) 而不是 $(KERNEL_BIN)
-run-qemu-debug:
+debug-loongarch64:
+ifeq ($(BRINGUP),1)
+	$(MAKE) ARCH=loongarch64 BRINGUP=1 CFLAGS="$(DEBUG_CFLAGS)" kernel-only
+else
+	$(MAKE) ARCH=loongarch64 CFLAGS="$(DEBUG_CFLAGS)" dev-build
+endif
 	@echo "Waiting for GDB connection on port 1234..."
 	$(QEMU) $(QEMU_FLAGS) -kernel $(KERNEL_ELF) -S -s

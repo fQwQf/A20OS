@@ -7,28 +7,42 @@
 #define PAGE_SIZE_BITS     12
 #define PAGE_OFFSET_MASK   ((1UL << PAGE_SIZE_BITS) - 1)
 
-#define KERNEL_STACK_SIZE  (64 * 1024)
-#define USER_STACK_SIZE    (16 * PAGE_SIZE)
+#define KERNEL_STACK_SIZE  (256 * 1024)
+#define USER_STACK_SIZE    (512 * PAGE_SIZE)
 #define TRAP_CONTEXT_SIZE  (36 * 8)
 #define TASK_CONTEXT_SIZE  (16 * 8)
 
-#define MAX_PROCS          64
-#define MAX_FILES          256
-#define MAX_PATH_LEN       256
-#define MAX_NAME_LEN       128
-#define MAX_ARGS           64
-#define MAX_CMD_LEN        1024
-#define MAX_HISTORY        64
+#define MAX_PROCS          1024
+#define MAX_FILES          4096
+#define MAX_PATH_LEN       512
+#define MAX_NAME_LEN       256
+#define MAX_ARGS           256
+#define MAX_CMD_LEN        4096
+#define MAX_HISTORY        256
 
-#if defined(CONFIG_RISCV64)
-#include "riscv64_consts.h"
-#elif defined(CONFIG_LOONGARCH64)
-#include "loongarch64_consts.h"
-#else
-#error "Unsupported architecture: expected CONFIG_RISCV64 or CONFIG_LOONGARCH64"
-#endif
+#define PHYS_MEMORY_BASE   0x80000000UL
+#define PHYS_MEMORY_END    0xA0000000UL
+#define KERNEL_ENTRY       0x80200000UL
 
-#define KERNEL_HEAP_SIZE   (32 * 1024 * 1024)
+#define PAGE_OFFSET        0xFFFFFFC000000000UL
+
+#define UART0_BASE         (0x10000000UL + PAGE_OFFSET)
+#define CLINT_BASE         (0x02000000UL + PAGE_OFFSET)
+#define VIRTIO_BASE        (0x10001000UL + PAGE_OFFSET)
+#define PLIC_BASE          (0x0C000000UL + PAGE_OFFSET)
+#define UART0_IRQ          10
+
+#define PLIC_PRIORITY      (PLIC_BASE + 0x0000UL)
+#define PLIC_PENDING       (PLIC_BASE + 0x1000UL)
+#define PLIC_SENABLE(h)    (PLIC_BASE + 0x2080UL + (uint64_t)(h) * 0x100UL)
+#define PLIC_SPRIORITY(h)  (PLIC_BASE + 0x201000UL + (uint64_t)(h) * 0x2000UL)
+#define PLIC_SCLAIM(h)     (PLIC_BASE + 0x201004UL + (uint64_t)(h) * 0x2000UL)
+
+#define CLINT_MTIME        (CLINT_BASE + 0xBFF8UL)
+#define CLINT_MTIMECMP(h)  (CLINT_BASE + 0x4000UL + ((unsigned long)(h) * 8))
+#define CLINT_TIMER_FREQ   10000000UL
+
+#define KERNEL_HEAP_SIZE   (256 * 1024 * 1024)
 
 #define PTE_V    (1UL << 0)
 #define PTE_R    (1UL << 1)
@@ -41,6 +55,7 @@
 
 #define PTE_KERN (PTE_V | PTE_R | PTE_W | PTE_X)
 #define PTE_USER (PTE_V | PTE_R | PTE_W | PTE_X | PTE_U)
+#define PTE_COW  (1UL << 8)
 
 #define SYS_getcwd         17
 #define SYS_dup            23
@@ -83,6 +98,7 @@
 #define SYS_exit           93
 #define SYS_exit_group     94
 #define SYS_set_tid_address 96
+#define SYS_set_robust_list 99
 #define SYS_futex          98
 #define SYS_nanosleep      101
 #define SYS_clock_gettime  113
@@ -93,6 +109,7 @@
 #define SYS_tgkill         131
 #define SYS_sigaction      134
 #define SYS_sigprocmask    135
+#define SYS_sigtimedwait   137
 #define SYS_sigreturn      139
 #define SYS_sigsuspend     133
 #define SYS_setpgid        154
@@ -145,6 +162,7 @@
 #define EFAULT       14
 #define EBUSY        16
 #define EEXIST       17
+#define EXDEV        18
 #define ENODEV       19
 #define ENOTDIR      20
 #define EISDIR       21
@@ -177,7 +195,7 @@
 #define O_RDONLY     0
 #define O_WRONLY     1
 #define O_RDWR       2
-#define O_CREAT      0x100
+#define O_CREAT      0x40
 #define O_TRUNC      0x200
 #define O_APPEND     0x400
 #define O_DIRECTORY  0x10000
@@ -187,6 +205,7 @@
 #define STDERR_FILENO  2
 
 #define AT_FDCWD       (-100)
+#define AT_REMOVEDIR   0x200
 
 #define SEEK_SET  0
 #define SEEK_CUR  1
@@ -208,8 +227,22 @@
 #define SIGUSR1      10
 #define SIGUSR2      12
 
-/* scause exception code for ecall from U-mode */
-#define CAUSE_ECALL_U    8
+/* scause exception codes */
+#define CAUSE_INSN_MISALIGNED   0
+#define CAUSE_INSN_FAULT        1
+#define CAUSE_ILLEGAL_INSN      2
+#define CAUSE_BREAKPOINT        3
+#define CAUSE_LOAD_MISALIGNED   4
+#define CAUSE_LOAD_FAULT        5
+#define CAUSE_STORE_MISALIGNED  6
+#define CAUSE_STORE_FAULT       7
+#define CAUSE_ECALL_U           8
+#define CAUSE_INSN_PAGE_FAULT   12
+#define CAUSE_LOAD_PAGE_FAULT   13
+#define CAUSE_STORE_PAGE_FAULT  15
+
+#define CAUSE_INTR_MASK         (1UL << 63)
+#define CAUSE_CODE_MASK         ((1UL << 63) - 1)
 
 /* Memory protection flags */
 #define PROT_READ      1
@@ -219,6 +252,7 @@
 /* Memory mapping flags */
 #define MAP_SHARED     0x01
 #define MAP_PRIVATE    0x02
+#define MAP_FIXED      0x10
 #define MAP_ANONYMOUS  0x20
 
 /* Resource limits */
@@ -245,12 +279,17 @@
 #define EXT4_SUPER_MAGIC  0x4006
 
 /* Process mapping */
-#define MMAP_BASE_ADDR    0x40000000UL
-#define USER_STACK_TOP    0x7FFFF000UL
-#define USER_STACK_PAGES  16
+#define MMAP_BASE_ADDR    0x60000000UL
+#define USER_STACK_TOP    0x3FFFF000UL
+#define USER_STACK_PAGES  64
+#define INITIAL_STACK_PAGES 16
 #define USER_DYN_BASE     0x10000UL
 
 /* Terminal ioctl */
+#define TCGETS        0x5401
+#define TCSETS        0x5402
+#define TCSETSW       0x5403
+#define TCSETSF       0x5404
 #define TIOCGWINSZ    0x5413
 
 /* Misc */
@@ -275,5 +314,15 @@
 
 /* Kernel trap context size (without last_a0 and kernel_tp) */
 #define KTRAP_CONTEXT_SIZE  (34 * 8)
+
+/* sstatus bits */
+#define SSTATUS_SIE     (1UL << 1)
+#define SSTATUS_SPIE    (1UL << 5)
+#define SSTATUS_SPP     (1UL << 8)
+#define SSTATUS_FS_OFF    (0UL << 13)
+#define SSTATUS_FS_INITIAL (1UL << 13)
+#define SSTATUS_FS_CLEAN   (2UL << 13)
+#define SSTATUS_FS_DIRTY   (3UL << 13)
+#define SSTATUS_FS_MASK    (3UL << 13)
 
 #endif /* _CONSTS_H */
