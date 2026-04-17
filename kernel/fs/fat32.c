@@ -226,6 +226,27 @@ static uint32_t fat32_dir_lookup(fat32_sb_t *sb, uint32_t dir_cluster,
     return 0; /* not found */
 }
 
+static void encode_83_name(const char *name, uint8_t out[11]) {
+    memset(out, ' ', 11);
+    const char *dot = strrchr(name, '.');
+    int name_len = dot ? (int)(dot - name) : (int)strlen(name);
+    const char *ext = dot ? dot + 1 : NULL;
+    int ni = 0;
+    for (int k = 0; k < name_len && ni < 8; k++) {
+        char c = name[k];
+        if (c >= 'a' && c <= 'z') c -= 32;
+        out[ni++] = (uint8_t)c;
+    }
+    int ei = 8;
+    if (ext) {
+        for (int k = 0; ext[k] && ei < 11; k++) {
+            char c = ext[k];
+            if (c >= 'a' && c <= 'z') c -= 32;
+            out[ei++] = (uint8_t)c;
+        }
+    }
+}
+
 /* ============================================================
  * VNode operations (FAT32 implementation)
  * ============================================================ */
@@ -336,14 +357,7 @@ static int fat32_vn_mkdir(vnode_t *dir, const char *name, int mode) {
             /* Free slot found */
             fat32_dirent_t nde;
             memset(&nde, 0, sizeof(nde));
-            memset(nde.name, ' ', 11);
-            /* Encode name as 8.3 uppercase, truncated */
-            int ni = 0;
-            for (int k = 0; name[k] && ni < 8; k++) {
-                char c = name[k];
-                if (c >= 'a' && c <= 'z') c -= 32;
-                nde.name[ni++] = (uint8_t)c;
-            }
+            encode_83_name(name, nde.name);
             nde.attr = FAT_ATTR_DIRECTORY;
             nde.fst_clus_hi = (uint16_t)(new_cluster >> 16);
             nde.fst_clus_lo = (uint16_t)(new_cluster & 0xFFFF);
@@ -384,13 +398,7 @@ static int fat32_vn_create(vnode_t *dir, const char *name, int mode, vnode_t **o
         if (de.name[0] == 0x00 || (uint8_t)de.name[0] == 0xE5) {
             fat32_dirent_t nde;
             memset(&nde, 0, sizeof(nde));
-            memset(nde.name, ' ', 11);
-            int ni = 0;
-            for (int k = 0; name[k] && ni < 8; k++) {
-                char c = name[k];
-                if (c >= 'a' && c <= 'z') c -= 32;
-                nde.name[ni++] = (uint8_t)c;
-            }
+            encode_83_name(name, nde.name);
             nde.attr = FAT_ATTR_ARCHIVE;
             nde.fst_clus_hi = (uint16_t)(new_cluster >> 16);
             nde.fst_clus_lo = (uint16_t)(new_cluster & 0xFFFF);
@@ -567,6 +575,10 @@ typedef struct fat32_fctx {
     size_t      file_off;        /* total file offset */
     /* For directory iteration (getdents) */
     size_t      dir_byte_off;
+    /* For updating directory entry on close */
+    uint32_t    parent_cluster;
+    size_t      parent_dirent_off;
+    int         dirty;           /* file_size changed, needs writeback */
 } fat32_fctx_t;
 
 static int fat32_fread(vfile_t *vf, char *buf, size_t count) {
@@ -629,7 +641,7 @@ static int fat32_fwrite(vfile_t *vf, const char *buf, size_t count) {
     fc->file_off += done;
     if (fc->file_off > fc->file_size) {
         fc->file_size = fc->file_off;
-        /* TODO: update directory entry with new file_size */
+        fc->dirty = 1;
     }
     vf->offset += done;
     return (int)done;
@@ -708,6 +720,37 @@ static int fat32_freaddir(vfile_t *vf, void *dirp, size_t count) {
 }
 
 static int fat32_fclose(vfile_t *vf) {
+    fat32_fctx_t *fc = (fat32_fctx_t *)vf->priv;
+    if (fc && fc->dirty && !fc->is_dir && fc->first_cluster >= 2) {
+        fat32_sb_t *sb = fc->sb;
+        /* Search root directory for matching cluster and update file_size.
+         * TODO: recurse into subdirectories for nested files. */
+        size_t off = 0;
+        while (1) {
+            fat32_dirent_t de;
+            int r = fat32_chain_read(sb, sb->root_cluster, off, &de, sizeof(de));
+            if (r <= 0) break;
+            if (de.name[0] == 0x00) break;
+            if ((uint8_t)de.name[0] == 0xE5 || de.attr == FAT_ATTR_LFN) {
+                off += 32;
+                continue;
+            }
+            uint32_t clus = ((uint32_t)de.fst_clus_hi << 16) | de.fst_clus_lo;
+            if (clus == fc->first_cluster) {
+                de.file_size = (uint32_t)fc->file_size;
+                uint32_t dc = sb->root_cluster;
+                size_t rem = off;
+                while (rem >= sb->bytes_per_cluster) {
+                    rem -= sb->bytes_per_cluster;
+                    dc = fat_read(sb, dc);
+                }
+                uint64_t write_off = cluster_byte_offset(sb, dc) + rem;
+                bcache_write_bytes(sb->bc, write_off, &de, sizeof(de));
+                break;
+            }
+            off += 32;
+        }
+    }
     if (vf->priv) { kfree(vf->priv); vf->priv = NULL; }
     return 0;
 }

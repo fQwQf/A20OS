@@ -211,5 +211,9 @@ void init_kthread(void) {
 
     kdebug("[INIT] Init process created: pid=%d\n", ret);
 
-    proc_exit(0);
+    /* Become the init reaper: wait for any children (including the user init
+     * process) so they don't become un-reaped zombies. */
+    while (1) {
+        proc_wait4(-1, NULL, 0);
+    }
 }

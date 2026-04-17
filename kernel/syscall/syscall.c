@@ -31,6 +31,21 @@ static inline int64_t get_global_fd(int fd) {
     return gfd;
 }
 
+/* Allocate a local fd slot and store the global fd.
+ * Returns local fd on success, or -EMFILE if the per-process table is full.
+ * On failure, the global fd is closed. */
+static int alloc_local_fd(task_t *t, int gfd) {
+    if (!t || gfd < 0) return -EBADF;
+    for (int i = 0; i < MAX_FILES; i++) {
+        if (t->fd_table[i] < 0) {
+            t->fd_table[i] = gfd;
+            return i;
+        }
+    }
+    vfs_close(gfd);
+    return -EMFILE;
+}
+
 int64_t syscall_dispatch(trap_context_t *ctx) {
     uint64_t num = ctx->x[17];
     uint64_t a0  = ctx->x[10];
@@ -240,15 +255,10 @@ int64_t sys_openat(int dirfd, const char *path, int flags, int mode) {
     if (!path) return -EFAULT;
     char kpath[MAX_PATH_LEN];
     if (user_strncpy(kpath, path, MAX_PATH_LEN) < 0) return -EFAULT;
-    int fd = vfs_open(kpath, flags, mode);
-    if (fd >= 0) {
-        task_t *t = proc_current();
-        if (t && fd >= 0 && fd < MAX_FILES) {
-            if (t->fd_table[fd] >= 0) vfs_close(t->fd_table[fd]);
-            t->fd_table[fd] = fd;
-        }
-    }
-    return fd;
+    int gfd = vfs_open(kpath, flags, mode);
+    if (gfd < 0) return gfd;
+    task_t *t = proc_current();
+    return alloc_local_fd(t, gfd);
 }
 
 int64_t sys_close(int fd) {
@@ -273,15 +283,17 @@ int64_t sys_dup(int fd) {
     if (!t || fd < 0 || fd >= MAX_FILES) return -EBADF;
     int gfd = t->fd_table[fd];
     if (gfd < 0) return -EBADF;
-    int new_gfd = vfs_dup(gfd);
-    if (new_gfd < 0) return new_gfd;
+    vfile_t *vf = vfs_get_file(gfd);
+    if (!vf) return -EBADF;
+    /* Share the same global fd — just add a local fd table entry.
+     * This matches Linux semantics: dup shares the open file description. */
     for (int newfd = 0; newfd < MAX_FILES; newfd++) {
         if (t->fd_table[newfd] < 0) {
-            t->fd_table[newfd] = new_gfd;
+            t->fd_table[newfd] = gfd;
+            vf->ref_count++;
             return newfd;
         }
     }
-    vfs_close(new_gfd);
     return -EMFILE;
 }
 
@@ -292,45 +304,60 @@ int64_t sys_dup3(int oldfd, int newfd, int flags) {
     int old_gfd = t->fd_table[oldfd];
     if (old_gfd < 0) return -EBADF;
     if (oldfd == newfd) return newfd;
+    vfile_t *vf = vfs_get_file(old_gfd);
+    if (!vf) return -EBADF;
     int cur_gfd = t->fd_table[newfd];
     if (cur_gfd >= 0) {
         vfs_close(cur_gfd);
     }
-    int dup_gfd = vfs_dup(old_gfd);
-    if (dup_gfd < 0) return dup_gfd;
-    t->fd_table[newfd] = dup_gfd;
+    t->fd_table[newfd] = old_gfd;
+    vf->ref_count++;
     return newfd;
 }
 
 int64_t sys_fcntl(int fd, int cmd, long arg) {
+    /* F_DUPFD=0, F_DUPFD_CLOEXEC=1030: share the same global fd */
+    if (cmd == 0 || cmd == 1030) {
+        task_t *t = proc_current();
+        if (!t) return -ESRCH;
+        if (fd < 0 || fd >= MAX_FILES) return -EBADF;
+        int gfd = t->fd_table[fd];
+        if (gfd < 0) return -EBADF;
+        vfile_t *vf = vfs_get_file(gfd);
+        if (!vf) return -EBADF;
+        int minfd = (int)arg;
+        if (minfd < 0) minfd = 0;
+        for (int i = minfd; i < MAX_FILES; i++) {
+            if (t->fd_table[i] < 0) {
+                t->fd_table[i] = gfd;
+                vf->ref_count++;
+                return i;
+            }
+        }
+        return -EMFILE;
+    }
     int64_t gfd = get_global_fd(fd);
     if (gfd < 0) return gfd;
-    int64_t r = vfs_fcntl(gfd, cmd, arg);
-    if ((cmd == 0 || cmd == 1030) && r >= 0) {
-        task_t *t = proc_current();
-        if (t && r >= 0 && r < MAX_FILES) {
-            if (t->fd_table[r] >= 0) vfs_close(t->fd_table[r]);
-            t->fd_table[r] = (int)r;
-        }
-    }
-    return r;
+    return vfs_fcntl(gfd, cmd, arg);
 }
 
 int64_t sys_pipe2(int *pipefd, int flags) {
     (void)flags;
     if (!pipefd) return -EFAULT;
-    int r = vfs_pipe(pipefd);
+    int gfd[2];
+    int r = vfs_pipe(gfd);
     if (r == 0) {
         task_t *t = proc_current();
-        if (t) {
-            if (pipefd[0] >= 0 && pipefd[0] < MAX_FILES) {
-                if (t->fd_table[pipefd[0]] >= 0) vfs_close(t->fd_table[pipefd[0]]);
-                t->fd_table[pipefd[0]] = pipefd[0];
-            }
-            if (pipefd[1] >= 0 && pipefd[1] < MAX_FILES) {
-                if (t->fd_table[pipefd[1]] >= 0) vfs_close(t->fd_table[pipefd[1]]);
-                t->fd_table[pipefd[1]] = pipefd[1];
-            }
+        pipefd[0] = alloc_local_fd(t, gfd[0]);
+        if (pipefd[0] < 0) {
+            vfs_close(gfd[1]);
+            return pipefd[0];
+        }
+        pipefd[1] = alloc_local_fd(t, gfd[1]);
+        if (pipefd[1] < 0) {
+            t->fd_table[pipefd[0]] = -1;
+            vfs_close(gfd[1]);
+            return pipefd[1];
         }
     }
     return r;

@@ -196,35 +196,47 @@ static int virtio_blk_rw(int idx, uint64_t lba, void *buf, size_t sectors, int w
 
     size_t bytes = sectors * VIRTIO_BLK_SECTOR_SIZE;
 
-    inst->req_hdr[0].type     = write ? VIRTIO_BLK_T_OUT : VIRTIO_BLK_T_IN;
-    inst->req_hdr[0].reserved = 0;
-    inst->req_hdr[0].sector   = lba;
+    /*
+     * Allocate 3 consecutive descriptor slots for the 3-chain request
+     * (header, data, status).  Use the current avail index as the base
+     * slot so that each in-flight request occupies its own slot triplet.
+     * Since virtio_blk_rw is synchronous (busy-waits for completion), the
+     * slot will be free again before the next call reuses it.
+     */
+    uint16_t slot = inst->blk.desc_idx % VIRTIO_QUEUE_SIZE;
+    if (slot + 2 >= VIRTIO_QUEUE_SIZE)
+        slot = 0;
 
-    inst->status[0] = 0xFF;
+    inst->req_hdr[slot].type     = write ? VIRTIO_BLK_T_OUT : VIRTIO_BLK_T_IN;
+    inst->req_hdr[slot].reserved = 0;
+    inst->req_hdr[slot].sector   = lba;
+
+    inst->status[slot] = 0xFF;
 
     virtq_desc_t *desc  = inst->blk.desc;
     virtq_avail_t *avail = inst->blk.avail;
     virtq_used_t  *used  = inst->blk.used;
 
-    desc[0].addr  = va_to_pa(&inst->req_hdr[0]);
-    desc[0].len   = sizeof(virtio_blk_req_hdr_t);
-    desc[0].flags = VIRTQ_DESC_F_NEXT;
-    desc[0].next  = 1;
+    desc[slot].addr  = va_to_pa(&inst->req_hdr[slot]);
+    desc[slot].len   = sizeof(virtio_blk_req_hdr_t);
+    desc[slot].flags = VIRTQ_DESC_F_NEXT;
+    desc[slot].next  = slot + 1;
 
-    desc[1].addr  = va_to_pa(buf);
-    desc[1].len   = (uint32_t)bytes;
-    desc[1].flags = (write ? 0 : VIRTQ_DESC_F_WRITE) | VIRTQ_DESC_F_NEXT;
-    desc[1].next  = 2;
+    desc[slot + 1].addr  = va_to_pa(buf);
+    desc[slot + 1].len   = (uint32_t)bytes;
+    desc[slot + 1].flags = (write ? 0 : VIRTQ_DESC_F_WRITE) | VIRTQ_DESC_F_NEXT;
+    desc[slot + 1].next  = slot + 2;
 
-    desc[2].addr  = va_to_pa(&inst->status[0]);
-    desc[2].len   = 1;
-    desc[2].flags = VIRTQ_DESC_F_WRITE;
-    desc[2].next  = 0;
+    desc[slot + 2].addr  = va_to_pa(&inst->status[slot]);
+    desc[slot + 2].len   = 1;
+    desc[slot + 2].flags = VIRTQ_DESC_F_WRITE;
+    desc[slot + 2].next  = 0;
 
     uint16_t avail_slot = avail->idx % VIRTIO_QUEUE_SIZE;
-    avail->ring[avail_slot] = 0;
+    avail->ring[avail_slot] = slot;
     wmb();
     avail->idx++;
+    inst->blk.desc_idx++;
     wmb();
 
     mmio_write32((uintptr_t)inst->blk.base, VIRTIO_MMIO_QUEUE_NOTIFY, 0);
@@ -246,9 +258,9 @@ static int virtio_blk_rw(int idx, uint64_t lba, void *buf, size_t sectors, int w
     rmb();
     inst->blk.last_used = used->idx;
 
-    if (inst->status[0] != VIRTIO_BLK_S_OK) {
+    if (inst->status[slot] != VIRTIO_BLK_S_OK) {
         printf("[VIRTIO%d] I/O error: status=%d lba=%lu\n",
-               idx, inst->status[0], (unsigned long)lba);
+               idx, inst->status[slot], (unsigned long)lba);
         return -1;
     }
 
