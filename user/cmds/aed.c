@@ -11,7 +11,13 @@
  *   Backspace    Delete before cursor
  */
 
-#include "../lib/libc.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <termios.h>
+#include <sys/ioctl.h>
 
 #define MAX_LINES     4096
 #define MAX_LINE_LEN  1024

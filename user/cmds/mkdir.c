@@ -1,5 +1,6 @@
 /* mkdir — make directories */
-#include "../lib/libc.h"
+#include <stdio.h>
+#include <sys/stat.h>
 
 int main(int argc, char *argv[]) {
     if (argc < 2) {

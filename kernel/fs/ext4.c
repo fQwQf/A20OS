@@ -6,14 +6,75 @@
 #include "stdio.h"
 #include "consts.h"
 #include "defs.h"
+#include "klog.h"
 
 static int      ext4_read_inode(ext4_sb_info_t *sb, uint32_t ino, ext4_inode_t *out);
 static int      ext4_write_inode(ext4_sb_info_t *sb, uint32_t ino, ext4_inode_t *inp);
 static uint64_t ext4_block_map(ext4_sb_info_t *sb, ext4_inode_t *inode, uint32_t lblk);
 static int      ext4_block_grow(ext4_sb_info_t *sb, ext4_inode_t *inode, uint32_t lblk, uint64_t phys);
 static void     ext4_block_truncate(ext4_sb_info_t *sb, ext4_inode_t *inode);
-static vnode_t *ext4_make_vnode(ext4_sb_info_t *sb, uint32_t ino, uint32_t sz, int d, vnode_t *par);
+static vnode_t *ext4_make_vnode(ext4_sb_info_t *sb, uint32_t ino, uint32_t sz, int type, vnode_t *par);
 static int      ext4_inode_remove(ext4_sb_info_t *sb, uint32_t dir_ino, ext4_inode_t *di, const char *name, uint32_t ino);
+
+/* ================================================================
+ * Vnode cache — deduplicate vnodes by (sb, inode_num)
+ * Prevents use-after-free when the same inode is looked up
+ * multiple times and slab reuses the freed vnode address.
+ * ================================================================ */
+
+#define VNODE_CACHE_SIZE  256
+
+typedef struct vnode_cache_entry {
+    ext4_sb_info_t   *sb;
+    uint32_t          inode_num;
+    vnode_t          *vn;
+    struct vnode_cache_entry *next;
+} vnode_cache_entry_t;
+
+static vnode_cache_entry_t *vnode_cache_table[VNODE_CACHE_SIZE];
+
+static uint32_t vnode_cache_hash(ext4_sb_info_t *sb, uint32_t ino) {
+    return ((uint32_t)(uintptr_t)sb ^ ino) & (VNODE_CACHE_SIZE - 1);
+}
+
+/* Look up an existing vnode in the cache. If found, bump ref_count and return it. */
+static vnode_t *ext4_vnode_cache_lookup(ext4_sb_info_t *sb, uint32_t ino) {
+    uint32_t h = vnode_cache_hash(sb, ino);
+    for (vnode_cache_entry_t *e = vnode_cache_table[h]; e; e = e->next) {
+        if (e->sb == sb && e->inode_num == ino) {
+            e->vn->ref_count++;
+            return e->vn;
+        }
+    }
+    return NULL;
+}
+
+/* Insert a newly created vnode into the cache. */
+static void ext4_vnode_cache_insert(ext4_sb_info_t *sb, uint32_t ino, vnode_t *vn) {
+    uint32_t h = vnode_cache_hash(sb, ino);
+    vnode_cache_entry_t *e = (vnode_cache_entry_t *)kmalloc(sizeof(vnode_cache_entry_t));
+    if (!e) return; /* non-fatal: just no caching */
+    e->sb = sb;
+    e->inode_num = ino;
+    e->vn = vn;
+    e->next = vnode_cache_table[h];
+    vnode_cache_table[h] = e;
+}
+
+/* Remove a vnode from the cache (called when ref_count drops to 0). */
+static void ext4_vnode_cache_remove(ext4_sb_info_t *sb, uint32_t ino) {
+    uint32_t h = vnode_cache_hash(sb, ino);
+    vnode_cache_entry_t **pp = &vnode_cache_table[h];
+    while (*pp) {
+        if ((*pp)->sb == sb && (*pp)->inode_num == ino) {
+            vnode_cache_entry_t *victim = *pp;
+            *pp = victim->next;
+            kfree(victim);
+            return;
+        }
+        pp = &(*pp)->next;
+    }
+}
 
 /* ================================================================
  * Inode I/O
@@ -28,7 +89,8 @@ static int ext4_read_inode(ext4_sb_info_t *sb, uint32_t ino, ext4_inode_t *out) 
                   ((uint64_t)sb->group_descs[g].bg_inode_table_hi << 32);
     uint64_t off = it * sb->block_size + (uint64_t)i * sb->inode_size;
     memset(out, 0, sizeof(*out));
-    return bcache_read_bytes(sb->bc, off, out, EXT4_INODE_SIZE_STATIC) < 0 ? -EIO : 0;
+    int r = bcache_read_bytes(sb->bc, off, out, EXT4_INODE_SIZE_STATIC);
+    return r < 0 ? -EIO : 0;
 }
 
 static int ext4_write_inode(ext4_sb_info_t *sb, uint32_t ino, ext4_inode_t *inp) {
@@ -619,6 +681,7 @@ static int ext4_inode_remove(ext4_sb_info_t *sb, uint32_t dir_ino __attribute__(
     victim.i_dtime = 1;
     ext4_write_inode(sb, ino, &victim);
     ext4_free_inode(sb, ino);
+    ext4_vnode_cache_remove(sb, ino);
     return 0;
 }
 
@@ -628,11 +691,16 @@ static int ext4_inode_remove(ext4_sb_info_t *sb, uint32_t dir_ino __attribute__(
 
 static int ext4_lookup(vnode_t *dir, const char *name, vnode_t **out) {
     ext4_vnode_priv_t *p = (ext4_vnode_priv_t *)dir->fs_data;
-    if (!p->is_dir) return -ENOTDIR;
+    if (p->type != VFS_FT_DIR) return -ENOTDIR;
 
     if (strcmp(name, ".") == 0)  { *out = dir; dir->ref_count++; return 0; }
     if (strcmp(name, "..") == 0) {
-        if (dir->parent) { *out = dir->parent; dir->parent->ref_count++; return 0; }
+        if (dir->parent) {
+            *out = dir->parent;
+            dir->parent->ref_count++;
+            dir->ref_count++;          /* vnode_lookup_path will vnode_put(dir) */
+            return 0;
+        }
         *out = dir; dir->ref_count++; return 0;
     }
 
@@ -646,33 +714,50 @@ static int ext4_lookup(vnode_t *dir, const char *name, vnode_t **out) {
     ext4_inode_t ci;
     if (ext4_read_inode(p->sb, child_ino, &ci) < 0) return -EIO;
 
-    int is_dir = (ft == EXT4_FT_DIR);
-    *out = ext4_make_vnode(p->sb, child_ino, ci.i_size_lo, is_dir, dir);
+    int type = VFS_FT_REGULAR;
+    if (ft == EXT4_FT_DIR) type = VFS_FT_DIR;
+    else if (ft == EXT4_FT_SYMLINK) type = VFS_FT_SYMLINK;
+    *out = ext4_make_vnode(p->sb, child_ino, ci.i_size_lo, type, dir);
     if (!*out) return -ENOMEM;
+    /* parent ref_count bumped in make_vnode */
     return 0;
 }
 
 static int ext4_stat(vnode_t *vn, kstat_t *st) {
     ext4_vnode_priv_t *p = (ext4_vnode_priv_t *)vn->fs_data;
+    uint64_t sz = p->file_size;
+    ext4_inode_t dinode;
+    if (ext4_read_inode(p->sb, p->inode_num, &dinode) == 0) {
+        sz = dinode.i_size_lo;
+        p->file_size = sz;
+        vn->size = sz;
+    }
     memset(st, 0, sizeof(*st));
     st->st_ino  = vn->ino;
-    st->st_size = p->file_size;
+    st->st_size = sz;
     st->st_blksize = p->sb->block_size;
-    st->st_blocks  = (p->file_size + 511) / 512;
-    st->st_mode = p->is_dir ? (S_IFDIR | 0755) : (S_IFREG | 0644);
+    st->st_blocks  = (sz + 511) / 512;
+    if (vn->type == VFS_FT_DIR) st->st_mode = S_IFDIR | 0755;
+    else if (vn->type == VFS_FT_SYMLINK) st->st_mode = S_IFLNK | 0777;
+    else st->st_mode = S_IFREG | 0755;
     st->st_nlink = 1;
     return 0;
 }
 
 static void ext4_release_vn(vnode_t *vn) {
+    /* With permanent cache refs, this should only fire during unmount.
+     * Normal vnode_put only decrements to 1 (cache ref), never triggers release. */
+    ext4_vnode_priv_t *p = (ext4_vnode_priv_t *)vn->fs_data;
+    if (p) ext4_vnode_cache_remove(p->sb, p->inode_num);
     if (vn->fs_data) { kfree(vn->fs_data); vn->fs_data = NULL; }
+    vnode_put(vn->parent);
     kfree(vn);
 }
 
 static int ext4_vn_create(vnode_t *dir, const char *name, int mode, vnode_t **out) {
     ext4_vnode_priv_t *p = (ext4_vnode_priv_t *)dir->fs_data;
     (void)mode;
-    if (!p->is_dir) return -ENOTDIR;
+    if (p->type != VFS_FT_DIR) return -ENOTDIR;
 
     ext4_inode_t di;
     if (ext4_read_inode(p->sb, p->inode_num, &di) < 0) return -EIO;
@@ -688,7 +773,7 @@ static int ext4_vn_create(vnode_t *dir, const char *name, int mode, vnode_t **ou
     /* Initialize new inode */
     ext4_inode_t ni;
     memset(&ni, 0, sizeof(ni));
-    ni.i_mode = S_IFREG | 0644;
+    ni.i_mode = S_IFREG | 0755;
     ni.i_links_count = 1;
     ext4_write_inode(p->sb, new_ino, &ni);
 
@@ -707,7 +792,7 @@ static int ext4_vn_create(vnode_t *dir, const char *name, int mode, vnode_t **ou
     }
 
     if (out) {
-        *out = ext4_make_vnode(p->sb, new_ino, 0, 0, dir);
+        *out = ext4_make_vnode(p->sb, new_ino, 0, VFS_FT_REGULAR, dir);
         if (!*out) return -ENOMEM;
     }
     return 0;
@@ -716,7 +801,7 @@ static int ext4_vn_create(vnode_t *dir, const char *name, int mode, vnode_t **ou
 static int ext4_vn_mkdir(vnode_t *dir, const char *name, int mode) {
     ext4_vnode_priv_t *p = (ext4_vnode_priv_t *)dir->fs_data;
     (void)mode;
-    if (!p->is_dir) return -ENOTDIR;
+    if (p->type != VFS_FT_DIR) return -ENOTDIR;
 
     ext4_inode_t di;
     if (ext4_read_inode(p->sb, p->inode_num, &di) < 0) return -EIO;
@@ -797,7 +882,7 @@ static int ext4_vn_mkdir(vnode_t *dir, const char *name, int mode) {
 
 static int ext4_vn_unlink(vnode_t *dir, const char *name) {
     ext4_vnode_priv_t *p = (ext4_vnode_priv_t *)dir->fs_data;
-    if (!p->is_dir) return -ENOTDIR;
+    if (p->type != VFS_FT_DIR) return -ENOTDIR;
 
     ext4_inode_t di;
     if (ext4_read_inode(p->sb, p->inode_num, &di) < 0) return -EIO;
@@ -810,11 +895,53 @@ static int ext4_vn_unlink(vnode_t *dir, const char *name) {
     return ext4_inode_remove(p->sb, p->inode_num, &di, name, child_ino);
 }
 
+static int ext4_dir_empty(ext4_sb_info_t *sb, ext4_inode_t *di, uint32_t dsz) {
+    uint32_t bs = sb->block_size, nb = (dsz + bs - 1) / bs;
+    for (uint32_t b = 0; b < nb; b++) {
+        uint64_t p = ext4_block_map(sb, di, b); if (!p) continue;
+        char *blk = (char *)kmalloc(bs); if (!blk) return -ENOMEM;
+        if (bcache_read_bytes(sb->bc, p * bs, blk, bs) < 0) { kfree(blk); return -EIO; }
+        uint32_t off = 0;
+        while (off < bs) {
+            ext4_dir_entry_t *de = (ext4_dir_entry_t *)(blk + off);
+            if (de->rec_len == 0) break;
+            if (de->inode) {
+                if (de->name_len == 1 && de->name[0] == '.') { off += de->rec_len; continue; }
+                if (de->name_len == 2 && de->name[0] == '.' && de->name[1] == '.') { off += de->rec_len; continue; }
+                kfree(blk); return -ENOTEMPTY;
+            }
+            off += de->rec_len;
+        }
+        kfree(blk);
+    }
+    return 0;
+}
+
+static int ext4_vn_rmdir(vnode_t *dir, const char *name) {
+    ext4_vnode_priv_t *p = (ext4_vnode_priv_t *)dir->fs_data;
+    if (p->type != VFS_FT_DIR) return -ENOTDIR;
+
+    ext4_inode_t di;
+    if (ext4_read_inode(p->sb, p->inode_num, &di) < 0) return -EIO;
+
+    uint32_t child_ino; uint8_t ft;
+    int r = ext4_dir_find(p->sb, &di, p->file_size, name, &child_ino, &ft);
+    if (r < 0) return r;
+    if (ft != EXT4_FT_DIR) return -ENOTDIR;
+
+    ext4_inode_t cdi;
+    if (ext4_read_inode(p->sb, child_ino, &cdi) < 0) return -EIO;
+    r = ext4_dir_empty(p->sb, &cdi, cdi.i_size_lo);
+    if (r < 0) return r;
+
+    return ext4_inode_remove(p->sb, p->inode_num, &di, name, child_ino);
+}
+
 static int ext4_vn_rename(vnode_t *old_dir, const char *old_name,
                             vnode_t *new_dir, const char *new_name) {
     ext4_vnode_priv_t *op = (ext4_vnode_priv_t *)old_dir->fs_data;
     ext4_vnode_priv_t *np = (ext4_vnode_priv_t *)new_dir->fs_data;
-    if (!op->is_dir || !np->is_dir) return -ENOTDIR;
+    if (op->type != VFS_FT_DIR || np->type != VFS_FT_DIR) return -ENOTDIR;
 
     ext4_inode_t odi, ndi;
     if (ext4_read_inode(op->sb, op->inode_num, &odi) < 0) return -EIO;
@@ -853,6 +980,61 @@ static int ext4_vn_rename(vnode_t *old_dir, const char *old_name,
     return 0;
 }
 
+static int ext4_readlink(vnode_t *vn, char *buf, size_t sz) {
+    ext4_vnode_priv_t *p = (ext4_vnode_priv_t *)vn->fs_data;
+    if (vn->type != VFS_FT_SYMLINK) return -EINVAL;
+    ext4_inode_t inode;
+    if (ext4_read_inode(p->sb, p->inode_num, &inode) < 0) return -EIO;
+    size_t len = p->file_size;
+    if (len > 60) len = 60; /* fast symlink limit */
+    if (len >= sz) len = sz - 1;
+    if (len > 0) {
+        const char *target = (const char *)inode.i_block.i_data.i_block;
+        memcpy(buf, target, len);
+    }
+    buf[len] = '\0';
+    return (int)len;
+}
+
+static int ext4_vn_symlink(vnode_t *dir, const char *name, const char *target) {
+    ext4_vnode_priv_t *p = (ext4_vnode_priv_t *)dir->fs_data;
+    if (p->type != VFS_FT_DIR) return -ENOTDIR;
+
+    ext4_inode_t di;
+    if (ext4_read_inode(p->sb, p->inode_num, &di) < 0) return -EIO;
+
+    uint32_t existing_ino;
+    if (ext4_dir_find(p->sb, &di, p->file_size, name, &existing_ino, NULL) == 0)
+        return -EEXIST;
+
+    size_t tlen = strlen(target);
+    if (tlen > 60) return -ENAMETOOLONG; /* fast symlink only */
+
+    uint32_t new_ino = ext4_alloc_inode(p->sb);
+    if (!new_ino) return -ENOSPC;
+
+    ext4_inode_t ni;
+    memset(&ni, 0, sizeof(ni));
+    ni.i_mode = S_IFLNK | 0777;
+    ni.i_links_count = 1;
+    ni.i_size_lo = (uint32_t)tlen;
+    memcpy(ni.i_block.i_data.i_block, target, tlen);
+    ext4_write_inode(p->sb, new_ino, &ni);
+
+    uint32_t dsz = di.i_size_lo;
+    int r = ext4_dir_add(p->sb, &di, &dsz, name, new_ino, EXT4_FT_SYMLINK);
+    if (r < 0) {
+        ext4_free_inode(p->sb, new_ino);
+        return r;
+    }
+    if (dsz != di.i_size_lo) {
+        di.i_size_lo = dsz;
+        ext4_write_inode(p->sb, p->inode_num, &di);
+        p->file_size = dsz;
+    }
+    return 0;
+}
+
 static int ext4_vn_truncate(vnode_t *vn, size_t size) {
     ext4_vnode_priv_t *p = (ext4_vnode_priv_t *)vn->fs_data;
     if (size != 0) return -EINVAL; /* only support truncation to 0 */
@@ -873,7 +1055,10 @@ static vnode_ops_t g_ext4_vnode_ops = {
     .create   = ext4_vn_create,
     .mkdir    = ext4_vn_mkdir,
     .unlink   = ext4_vn_unlink,
+    .rmdir    = ext4_vn_rmdir,
     .rename   = ext4_vn_rename,
+    .symlink  = ext4_vn_symlink,
+    .readlink = ext4_readlink,
     .stat     = ext4_stat,
     .truncate = ext4_vn_truncate,
     .release  = ext4_release_vn,
@@ -913,6 +1098,7 @@ static int ext4_fread(vfile_t *vf, char *buf, size_t count) {
     }
 
     fc->file_off += done;
+    vf->offset = fc->file_off;
     return (int)done;
 }
 
@@ -955,6 +1141,11 @@ static int ext4_fwrite(vfile_t *vf, const char *buf, size_t count) {
             fc->file_size = fc->file_off;
             inode.i_size_lo = (uint32_t)fc->file_size;
             ext4_write_inode(fc->sb, fc->inode_num, &inode);
+            if (vf->vnode && vf->vnode->fs_data) {
+                ext4_vnode_priv_t *fp = (ext4_vnode_priv_t *)vf->vnode->fs_data;
+                fp->file_size = fc->file_size;
+                vf->vnode->size = fc->file_size;
+            }
         }
         vf->offset = fc->file_off;
     }
@@ -1008,7 +1199,7 @@ static int ext4_freaddir(vfile_t *vf, void *dirp, size_t count) {
             memcpy(fname, de->name, nl);
             fname[nl] = '\0';
 
-            size_t reclen = sizeof(linux_dirent64_t) + nl + 1;
+            size_t reclen = offsetof(linux_dirent64_t, d_name) + nl + 1;
             reclen = (reclen + 7) & ~7UL;
             if (total + reclen > count) { kfree(blk); goto out; }
 
@@ -1016,7 +1207,8 @@ static int ext4_freaddir(vfile_t *vf, void *dirp, size_t count) {
             dent->d_ino    = de->inode;
             dent->d_off    = (int64_t)(b * bs + off);
             dent->d_reclen = (uint16_t)reclen;
-            dent->d_type   = (de->file_type == EXT4_FT_DIR) ? DT_DIR : DT_REG;
+            dent->d_type   = (de->file_type == EXT4_FT_DIR) ? DT_DIR :
+                             (de->file_type == EXT4_FT_SYMLINK) ? DT_LNK : DT_REG;
             memcpy(dent->d_name, fname, nl + 1);
             total += reclen;
 
@@ -1049,16 +1241,29 @@ static vfile_ops_t g_ext4_fops = {
  * ================================================================ */
 
 static vnode_t *ext4_make_vnode(ext4_sb_info_t *sb, uint32_t ino, uint32_t sz,
-                                 int is_dir, vnode_t *parent) {
+                                 int type, vnode_t *parent) {
+    /* Check the vnode cache first — return existing vnode if present.
+     * The cache holds a permanent reference (ref_count never drops to 0),
+     * preventing use-after-free when slab reuses freed vnode addresses. */
+    vnode_t *cached = ext4_vnode_cache_lookup(sb, ino);
+    if (cached) {
+        /* Don't bump parent ref_count: the cached vnode already holds
+         * a parent reference from when it was first created. */
+        return cached;
+    }
+
     vnode_t *vn = (vnode_t *)kmalloc(sizeof(vnode_t));
     if (!vn) return NULL;
     memset(vn, 0, sizeof(*vn));
     vn->ino       = (uint64_t)ino;
-    vn->type      = is_dir ? VFS_FT_DIR : VFS_FT_REGULAR;
-    vn->mode      = is_dir ? (S_IFDIR | 0755) : (S_IFREG | 0644);
+    vn->type      = type;
+    if (type == VFS_FT_DIR) vn->mode = S_IFDIR | 0755;
+    else if (type == VFS_FT_SYMLINK) vn->mode = S_IFLNK | 0777;
+    else vn->mode = S_IFREG | 0755;
     vn->size      = sz;
-    vn->ref_count = 1;
+    vn->ref_count = 1;            /* 1 for the caller */
     vn->parent    = parent;
+    if (parent) parent->ref_count++;
     vn->ops       = &g_ext4_vnode_ops;
 
     ext4_vnode_priv_t *fp = (ext4_vnode_priv_t *)kmalloc(sizeof(ext4_vnode_priv_t));
@@ -1066,8 +1271,11 @@ static vnode_t *ext4_make_vnode(ext4_sb_info_t *sb, uint32_t ino, uint32_t sz,
     fp->sb        = sb;
     fp->inode_num = ino;
     fp->file_size = sz;
-    fp->is_dir    = is_dir;
+    fp->type      = type;
     vn->fs_data   = fp;
+
+    ext4_vnode_cache_insert(sb, ino, vn);
+    vn->ref_count++;              /* +1 permanent "cache reference" — vnode is never freed */
     return vn;
 }
 
@@ -1075,11 +1283,8 @@ static vnode_t *ext4_make_vnode(ext4_sb_info_t *sb, uint32_t ino, uint32_t sz,
  * Mount / Unmount
  * ================================================================ */
 
-static ext4_sb_info_t g_ext4_sb;
-
 vnode_t *ext4_mount(bcache_t *bc) {
     ext4_superblock_t sb;
-    /* Superblock is at byte offset 1024 */
     if (bcache_read_bytes(bc, 1024, &sb, sizeof(sb)) < 0) {
         printf("[EXT4] Failed to read superblock\n");
         return NULL;
@@ -1095,77 +1300,86 @@ vnode_t *ext4_mount(bcache_t *bc) {
     if (sb.s_rev_level == EXT4_DYNAMIC_REV && sb.s_desc_size >= 32)
         desc_size = sb.s_desc_size;
 
-    if (sb.s_rev_level == EXT4_DYNAMIC_REV && sb.s_feature_incompat & EXT4_FEATURE_INCOMPAT_64BIT)
-        g_ext4_sb.inodes_count = sb.s_inodes_count;
-    else
-        g_ext4_sb.inodes_count = sb.s_inodes_count;
+    ext4_sb_info_t *esi = (ext4_sb_info_t *)kmalloc(sizeof(ext4_sb_info_t));
+    if (!esi) {
+        printf("[EXT4] Failed to allocate sb_info\n");
+        return NULL;
+    }
+    memset(esi, 0, sizeof(*esi));
+
+    esi->inodes_count = sb.s_inodes_count;
 
     uint32_t blocks_count = sb.s_blocks_count_lo;
     uint32_t groups = (blocks_count - sb.s_first_data_block + sb.s_blocks_per_group - 1)
                       / sb.s_blocks_per_group;
 
-    g_ext4_sb.block_size   = block_size;
-    g_ext4_sb.blocks_per_group = sb.s_blocks_per_group;
-    g_ext4_sb.inodes_per_group = sb.s_inodes_per_group;
-    g_ext4_sb.inode_size   = (sb.s_rev_level == EXT4_DYNAMIC_REV) ? sb.s_inode_size : 128;
-    g_ext4_sb.first_data_block = sb.s_first_data_block;
-    g_ext4_sb.groups_count = groups;
-    g_ext4_sb.addr_per_block = block_size / 4;
-    g_ext4_sb.desc_size     = desc_size;
-    g_ext4_sb.s_feature_incompat = sb.s_feature_incompat;
-    g_ext4_sb.s_feature_ro_compat = sb.s_feature_ro_compat;
-    g_ext4_sb.bc           = bc;
+    esi->block_size   = block_size;
+    esi->blocks_per_group = sb.s_blocks_per_group;
+    esi->inodes_per_group = sb.s_inodes_per_group;
+    esi->inode_size   = (sb.s_rev_level == EXT4_DYNAMIC_REV) ? sb.s_inode_size : 128;
+    esi->first_data_block = sb.s_first_data_block;
+    esi->groups_count = groups;
+    esi->addr_per_block = block_size / 4;
+    esi->desc_size     = desc_size;
+    esi->s_feature_incompat = sb.s_feature_incompat;
+    esi->s_feature_ro_compat = sb.s_feature_ro_compat;
+    esi->bc           = bc;
 
-    /* Block group descriptor table starts in the block after the superblock */
     uint64_t gd_start;
     if (block_size == 1024)
-        gd_start = 2048; /* block 2 */
+        gd_start = 2048;
     else
         gd_start = (uint64_t)(sb.s_first_data_block + 1) * block_size;
-    g_ext4_sb.block_group_desc_table_byte = gd_start;
+    esi->block_group_desc_table_byte = gd_start;
 
-    /* Read group descriptors */
     size_t gd_total = (size_t)groups * desc_size;
-    g_ext4_sb.group_descs = (ext4_group_desc_t *)kmalloc(gd_total);
-    if (!g_ext4_sb.group_descs) {
+    esi->group_descs = (ext4_group_desc_t *)kmalloc(gd_total);
+    if (!esi->group_descs) {
         printf("[EXT4] Failed to allocate group descriptors\n");
+        kfree(esi);
         return NULL;
     }
-    memset(g_ext4_sb.group_descs, 0, gd_total);
-    if (bcache_read_bytes(bc, gd_start, g_ext4_sb.group_descs, gd_total) < 0) {
+    memset(esi->group_descs, 0, gd_total);
+    if (bcache_read_bytes(bc, gd_start, esi->group_descs, gd_total) < 0) {
         printf("[EXT4] Failed to read group descriptors\n");
-        kfree(g_ext4_sb.group_descs);
+        kfree(esi->group_descs);
+        kfree(esi);
         return NULL;
     }
 
     printf("[EXT4] Mounted: block_size=%u groups=%u inode_size=%u inodes/group=%u\n",
-           block_size, groups, g_ext4_sb.inode_size, sb.s_inodes_per_group);
+           block_size, groups, esi->inode_size, sb.s_inodes_per_group);
 
-    /* Read root inode */
     ext4_inode_t root_inode;
-    if (ext4_read_inode(&g_ext4_sb, EXT4_ROOT_INO, &root_inode) < 0) {
+    if (ext4_read_inode(esi, EXT4_ROOT_INO, &root_inode) < 0) {
         printf("[EXT4] Failed to read root inode\n");
-        kfree(g_ext4_sb.group_descs);
+        kfree(esi->group_descs);
+        kfree(esi);
         return NULL;
     }
 
-    vnode_t *root = ext4_make_vnode(&g_ext4_sb, EXT4_ROOT_INO,
-                                     root_inode.i_size_lo, 1, NULL);
+    vnode_t *root = ext4_make_vnode(esi, EXT4_ROOT_INO,
+                                     root_inode.i_size_lo, VFS_FT_DIR, NULL);
     if (!root) {
-        kfree(g_ext4_sb.group_descs);
+        kfree(esi->group_descs);
+        kfree(esi);
         return NULL;
     }
-    root->parent = root; /* root's parent is itself */
+    root->parent = root;
     return root;
 }
 
 void ext4_unmount(vnode_t *root) {
-    bcache_sync(g_ext4_sb.bc);
-    if (root && root->ops && root->ops->release) root->ops->release(root);
-    if (g_ext4_sb.group_descs) {
-        kfree(g_ext4_sb.group_descs);
-        g_ext4_sb.group_descs = NULL;
+    if (!root || !root->fs_data) return;
+    ext4_vnode_priv_t *fp = (ext4_vnode_priv_t *)root->fs_data;
+    ext4_sb_info_t *esi = fp->sb;
+    bcache_sync(esi->bc);
+    if (root->ops && root->ops->release) root->ops->release(root);
+    if (esi->group_descs) {
+        kfree(esi->group_descs);
+        esi->group_descs = NULL;
     }
+    kfree(esi);
 }
 
 /* ================================================================
@@ -1179,15 +1393,23 @@ vfile_t *ext4_open_vnode(vnode_t *vn, int flags) {
     memset(fc, 0, sizeof(*fc));
     fc->sb        = fp->sb;
     fc->inode_num = fp->inode_num;
-    fc->file_size = fp->file_size;
-    fc->is_dir    = fp->is_dir;
-    fc->file_off  = (flags & O_APPEND) ? fp->file_size : 0;
+    uint64_t current_size = fp->file_size;
+    ext4_inode_t dinode;
+    if (ext4_read_inode(fp->sb, fp->inode_num, &dinode) == 0) {
+        current_size = dinode.i_size_lo;
+        fp->file_size = current_size;
+        vn->size = current_size;
+    }
+    fc->file_size = current_size;
+    fc->is_dir    = (fp->type == VFS_FT_DIR);
+    fc->file_off  = (flags & O_APPEND) ? current_size : 0;
     fc->dir_off   = 0;
 
     vfile_t *vf = (vfile_t *)kmalloc(sizeof(vfile_t));
     if (!vf) { kfree(fc); return NULL; }
     memset(vf, 0, sizeof(*vf));
     vf->vnode     = vn;
+    vn->ref_count++;
     vf->flags     = flags;
     vf->offset    = fc->file_off;
     vf->ref_count = 1;
