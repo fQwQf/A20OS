@@ -14,6 +14,7 @@
 #define VFS_FT_UNKNOWN   0
 #define VFS_FT_REGULAR   1
 #define VFS_FT_DIR       2
+#define VFS_FT_SYMLINK   3
 
 /* Filesystem type IDs */
 #define FS_TYPE_RAMFS    1
@@ -39,18 +40,23 @@ typedef struct kstat {
     uint32_t st_nlink;
     uint32_t st_uid;
     uint32_t st_gid;
+    uint64_t st_rdev;
     uint64_t st_size;
     uint64_t st_blksize;
     uint64_t st_blocks;
     uint64_t st_atime;
+    uint64_t st_atime_nsec;
     uint64_t st_mtime;
+    uint64_t st_mtime_nsec;
     uint64_t st_ctime;
+    uint64_t st_ctime_nsec;
 } kstat_t;
 
 /* ---- Mode bits ---- */
 #define S_IFMT   0170000
 #define S_IFREG  0100000
 #define S_IFDIR  0040000
+#define S_IFCHR  0020000
 #define S_IRUSR  0400
 #define S_IWUSR  0200
 #define S_IXUSR  0100
@@ -67,8 +73,12 @@ typedef struct vnode_ops {
     int     (*create)(struct vnode *dir, const char *name, int mode, struct vnode **out);
     int     (*mkdir)(struct vnode *dir, const char *name, int mode);
     int     (*unlink)(struct vnode *dir, const char *name);
+    int     (*rmdir)(struct vnode *dir, const char *name);
     int     (*rename)(struct vnode *old_dir, const char *old_name,
                       struct vnode *new_dir, const char *new_name);
+    int     (*link)(struct vnode *dir, const char *name, struct vnode *target);
+    int     (*symlink)(struct vnode *dir, const char *name, const char *target);
+    int     (*readlink)(struct vnode *vn, char *buf, size_t sz);
     int     (*stat)(struct vnode *vn, kstat_t *st);
     int     (*truncate)(struct vnode *vn, size_t size);
     void    (*release)(struct vnode *vn);
@@ -117,7 +127,7 @@ typedef struct mount {
 } mount_t;
 
 /* ---- Open file table (global) ---- */
-#define VFS_MAX_OPEN   512
+#define VFS_MAX_OPEN   8192
 
 /* ---- linux_dirent64 (for getdents64 syscall) ---- */
 typedef struct linux_dirent64 {
@@ -135,6 +145,7 @@ typedef struct linux_dirent64 {
 void     vfs_init(void);
 
 /* Path resolution */
+void     vnode_put(vnode_t *vn);
 vnode_t *vfs_resolve(const char *path);
 vnode_t *vfs_resolve_at(const char *path, const char *cwd);
 
@@ -150,12 +161,15 @@ int      vfs_ioctl(int fd, unsigned long req, void *arg);
 /* Directory operations */
 int      vfs_mkdir(const char *path, int mode);
 int      vfs_unlink(const char *path);
+int      vfs_rmdir(const char *path);
 int      vfs_rename(const char *old, const char *newpath);
 int      vfs_stat(const char *path, kstat_t *st);
 int      vfs_fstat(int fd, kstat_t *st);
 int      vfs_fstatat(int dirfd, const char *path, kstat_t *st, int flags);
 int      vfs_faccessat(int dirfd, const char *path, int mode);
 int      vfs_readlinkat(int dirfd, const char *path, char *buf, size_t sz);
+int      vfs_link(const char *oldpath, const char *newpath);
+int      vfs_symlink(const char *target, const char *linkpath);
 
 /* Working directory */
 int      vfs_chdir(const char *path);
@@ -182,6 +196,7 @@ int      vfs_ftruncate(int fd, size_t size);
 
 /* Per-process fd table management */
 void     vfs_proc_init_fds(int *fd_table);
+void     vfs_proc_init_stdio_defaults(int *fd_table);
 void     vfs_proc_copy_fds(const int *src, int *dst);
 void     vfs_proc_close_all_fds(int *fd_table);
 
