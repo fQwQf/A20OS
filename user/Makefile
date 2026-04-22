@@ -18,7 +18,7 @@ CFLAGS  = -Wall -Wextra -O2 -ffreestanding -nostdinc $(MUSL_INC) \
 LDFLAGS = -static -nostdlib -Ttext 0x10000
 
 GCC_VER := $(shell $(CROSS_COMPILE)gcc -dumpversion 2>/dev/null)
-LIBGCC  := /usr/lib/gcc/riscv64-unknown-elf/$(GCC_VER)/rv64i/lp64/libgcc.a
+LIBGCC  := $(shell $(CROSS_COMPILE)gcc -print-libgcc-file-name 2>/dev/null)
 
 LIB_A20OS := lib/brk.o
 CRT_START = $(MUSL_CRT)/crt1.o $(MUSL_CRT)/crti.o
@@ -86,9 +86,16 @@ build/mksh: $(MKSH_OBJS) $(LIB_A20OS)
 $(MKSH_DIR)/%.o: $(MKSH_DIR)/%.c
 	$(CC) $(MKSH_CFLAGS) -c $< -o $@
 
+ifeq ($(CONTEST),1)
+build/init: shell/init_nolib.c
+	$(CC) -Wall -Wextra -O2 -ffreestanding -fno-builtin -nostdlib -nostartfiles \
+	      -mabi=lp64 -march=rv64g -mcmodel=medany -c $< -o build/init.o
+	$(CC) -static -nostdlib -nostartfiles -Ttext 0x10000 -o $@ build/init.o $(LIBGCC)
+else
 build/init: shell/init.c $(LIB_A20OS)
 	$(CC) $(CFLAGS) -c $< -o build/init.o
 	$(CC) $(LDFLAGS) -o $@ $(CRT_START) build/init.o $(CRT_END) $(LIBC)
+endif
 
 build/%: cmds/%.c $(LIB_A20OS)
 	$(CC) $(CFLAGS) -c $< -o build/$*.o
