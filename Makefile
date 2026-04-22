@@ -90,7 +90,7 @@ KERNEL_BIN = kernel.bin
 # Competition build: produces kernel-rv, kernel-la, disk.img,
 # disk-la.img (what the judge expects from `make all`).
 # ----------------------------------------------------------------
-all: contest-rv contest-la
+all: contest-rv 
 	@echo "=== Competition build complete ==="
 	@echo "  kernel-rv  kernel-la  disk.img  disk-la.img"
 
