@@ -6,26 +6,32 @@
 #include <fcntl.h>
 #include <stdint.h>
 #include <errno.h>
+#include <sys/stat.h>
+#include <signal.h>
 #include <sys/wait.h>
 #include <sys/syscall.h>
 
 #ifdef CONTEST
 
 /* ============================================================
- * Contest mode — scan-only helper
+ * Contest mode — auto test runner
  *
- * Recursively scans /test (competition EXT4 disk), prints a
- * directory tree view, lists *_testcode.sh files, then shuts down.
+ * Recursively scans /test for *_testcode.sh and executes each
+ * script serially. Output includes required START/END markers.
  * ============================================================ */
 
-#define MAX_TESTS 64
-#define TEST_DIR "/"
+#define MAX_TESTS 128
+#define TEST_DIR "/test"
 #define SUFFIX "_testcode.sh"
 #define SUFFIX_LEN 13
+#define GLOBAL_TIMEOUT_SEC 300
 
 typedef struct {
-    char path[256];
+    char path[512];
 } test_entry_t;
+
+/* Avoid large stack frame in init: keep test table in static storage. */
+static test_entry_t g_tests[MAX_TESTS];
 
 static int ends_with(const char *s, const char *suffix)
 {
@@ -48,8 +54,7 @@ static void scan_tree(const char *dir, int depth, test_entry_t tests[], int *nte
 {
     int fd = syscall(SYS_openat, AT_FDCWD, dir, O_RDONLY, 0);
     if (fd < 0) {
-        for (int i = 0; i < depth; i++) printf("  ");
-        printf("[DIR] %s (open failed: errno=%d)\n", dir, errno);
+        printf("[CONTEST] Cannot open dir %s (errno=%d)\n", dir, errno);
         return;
     }
 
@@ -74,12 +79,11 @@ static void scan_tree(const char *dir, int depth, test_entry_t tests[], int *nte
 
                 int is_dir = (de->d_type == DT_DIR);
 
-                for (int i = 0; i < depth; i++) printf("  ");
-                printf("%s %s\n", is_dir ? "[D]" : "[F]", full);
-
                 if (!is_dir && ends_with(name, SUFFIX) && *ntests < MAX_TESTS) {
                     strncpy(tests[*ntests].path, full, sizeof(tests[*ntests].path) - 1);
                     tests[*ntests].path[sizeof(tests[*ntests].path) - 1] = '\0';
+                    printf("[CONTEST][SCAN] found[%d] depth=%d path=%s\n",
+                           *ntests, depth, tests[*ntests].path);
                     (*ntests)++;
                 }
 
@@ -94,26 +98,244 @@ static void scan_tree(const char *dir, int depth, test_entry_t tests[], int *nte
     close(fd);
 }
 
+static void extract_group(const char *path, char *out, size_t out_sz)
+{
+    const char *fname = strrchr(path, '/');
+    fname = fname ? fname + 1 : path;
+
+    size_t fl = strlen(fname);
+    size_t copy = fl;
+    if (fl > SUFFIX_LEN && ends_with(fname, SUFFIX))
+        copy = fl - SUFFIX_LEN;
+    if (copy >= out_sz)
+        copy = out_sz - 1;
+
+    memcpy(out, fname, copy);
+    out[copy] = '\0';
+}
+
+static int split_dir_file(const char *path, char *dir, size_t dir_sz, char *file, size_t file_sz)
+{
+    const char *slash = strrchr(path, '/');
+    if (!slash) {
+        snprintf(dir, dir_sz, ".");
+        snprintf(file, file_sz, "%s", path);
+        return 0;
+    }
+    if (slash == path) {
+        snprintf(dir, dir_sz, "/");
+    } else {
+        size_t n = (size_t)(slash - path);
+        if (n >= dir_sz)
+            n = dir_sz - 1;
+        memcpy(dir, path, n);
+        dir[n] = '\0';
+    }
+    snprintf(file, file_sz, "%s", slash + 1);
+    return 0;
+}
+
+static void ensure_dir(const char *path)
+{
+    if (mkdir(path, 0755) == 0 || errno == EEXIST)
+        return;
+    printf("[CONTEST][COMPAT] mkdir(%s) failed errno=%d\n", path, errno);
+}
+
+static void ensure_link(const char *target, const char *linkpath)
+{
+    if (symlink(target, linkpath) == 0) {
+        printf("[CONTEST][COMPAT] link %s -> %s\n", linkpath, target);
+        return;
+    }
+    if (errno == EEXIST)
+        return;
+    printf("[CONTEST][COMPAT] symlink(%s -> %s) failed errno=%d\n",
+           linkpath, target, errno);
+}
+
+static int copy_file(const char *src, const char *dst)
+{
+    int sfd = open(src, O_RDONLY, 0);
+    if (sfd < 0) {
+        printf("[CONTEST][COMPAT] open src failed %s errno=%d\n", src, errno);
+        return -1;
+    }
+
+    int dfd = open(dst, O_WRONLY | O_CREAT | O_TRUNC, 0755);
+    if (dfd < 0) {
+        printf("[CONTEST][COMPAT] open dst failed %s errno=%d\n", dst, errno);
+        close(sfd);
+        return -1;
+    }
+
+    char buf[4096];
+    for (;;) {
+        int n = read(sfd, buf, sizeof(buf));
+        if (n == 0)
+            break;
+        if (n < 0) {
+            printf("[CONTEST][COMPAT] read failed %s errno=%d\n", src, errno);
+            close(sfd);
+            close(dfd);
+            return -1;
+        }
+        int off = 0;
+        while (off < n) {
+            int w = write(dfd, buf + off, (size_t)(n - off));
+            if (w < 0) {
+                printf("[CONTEST][COMPAT] write failed %s errno=%d\n", dst, errno);
+                close(sfd);
+                close(dfd);
+                return -1;
+            }
+            off += w;
+        }
+    }
+
+    close(sfd);
+    close(dfd);
+    return 0;
+}
+
+static void materialize_runtime_libs(void)
+{
+    const char *src_dir = "/test/glibc/lib";
+    int fd = syscall(SYS_openat, AT_FDCWD, src_dir, O_RDONLY, 0);
+    if (fd < 0) {
+        printf("[CONTEST][COMPAT] cannot open %s errno=%d\n", src_dir, errno);
+        return;
+    }
+
+    char dbuf[2048];
+    for (;;) {
+        int nread = syscall(SYS_getdents64, fd, dbuf, sizeof(dbuf));
+        if (nread <= 0)
+            break;
+
+        int bpos = 0;
+        while (bpos < nread) {
+            struct linux_dirent64_local *de =
+                (struct linux_dirent64_local *)(dbuf + bpos);
+            const char *name = de->d_name;
+            if (strcmp(name, ".") != 0 && strcmp(name, "..") != 0 && de->d_type != DT_DIR) {
+                char src[512];
+                char dst[512];
+                snprintf(src, sizeof(src), "%s/%s", src_dir, name);
+                snprintf(dst, sizeof(dst), "/lib/%s", name);
+                copy_file(src, dst);
+            }
+            bpos += de->d_reclen;
+        }
+    }
+    close(fd);
+}
+
+static void setup_compat_paths(void)
+{
+    /* Judge images often assume dynamic loader/libs under /lib and /usr/lib. */
+    ensure_dir("/lib");
+    ensure_dir("/usr");
+    ensure_dir("/etc");
+    {
+        int fd = open("/etc/ld.so.cache", O_WRONLY | O_CREAT, 0644);
+        if (fd >= 0) close(fd);
+    }
+
+    /* Current VFS symlink resolution does not cross mounts reliably.
+     * Copy runtime libs from test image into /lib instead of linking. */
+    materialize_runtime_libs();
+
+    ensure_link("/lib", "/usr/lib");
+    ensure_link("/lib", "/lib64");
+}
+
 int main(int argc, char *argv[])
 {
     (void)argc;
     (void)argv;
 
-    printf("[CONTEST] Scan-only init started\n");
+    printf("[CONTEST] Auto-test runner started\n");
     printf("[CONTEST] Scanning target image at %s\n", TEST_DIR);
+    printf("[CONTEST] Global timeout: %d seconds\n", GLOBAL_TIMEOUT_SEC);
+    setup_compat_paths();
 
-    test_entry_t tests[MAX_TESTS];
-    int ntests = 0;
-    memset(tests, 0, sizeof(tests));
-
-    scan_tree(TEST_DIR, 0, tests, &ntests);
-
-    printf("[CONTEST] Found %d test script(s) matching %s\n", ntests, SUFFIX);
-    for (int i = 0; i < ntests; i++) {
-        printf("[CONTEST] TEST[%d] %s\n", i, tests[i].path);
+    {
+        int wpid = fork();
+        if (wpid == 0) {
+            sleep(GLOBAL_TIMEOUT_SEC);
+            printf("[CONTEST] Global timeout reached (%d s), powering off\n", GLOBAL_TIMEOUT_SEC);
+            syscall(SYS_reboot, 0);
+            while (1) { }
+        } else if (wpid < 0) {
+            printf("[CONTEST] watchdog fork failed errno=%d\n", errno);
+        }
     }
 
-    printf("[CONTEST] Scan complete, powering off\n");
+    int ntests = 0;
+    memset(g_tests, 0, sizeof(g_tests));
+
+    scan_tree(TEST_DIR, 0, g_tests, &ntests);
+
+    printf("[CONTEST] Found %d test script(s)\n", ntests);
+
+    for (int i = 0; i < ntests; i++) {
+        char group[128];
+        extract_group(g_tests[i].path, group, sizeof(group));
+        printf("[CONTEST][RUN] preparing #%d group=%s script=%s\n", i, group, g_tests[i].path);
+
+        printf("#### OS COMP TEST GROUP START %s ####\n", group);
+
+        int pid = fork();
+        if (pid < 0) {
+            printf("[CONTEST] fork failed, skip: %s\n", g_tests[i].path);
+        } else if (pid == 0) {
+            char script_dir[512];
+            char script_file[256];
+            split_dir_file(g_tests[i].path, script_dir, sizeof(script_dir),
+                           script_file, sizeof(script_file));
+
+            if (chdir(script_dir) != 0) {
+                printf("[CONTEST][RUN] chdir(%s) failed errno=%d\n", script_dir, errno);
+            } else {
+                printf("[CONTEST][RUN] cwd set to %s for %s\n", script_dir, script_file);
+            }
+
+            char *run_argv[] = { script_file, NULL };
+            char *envp[] = {
+                "PATH=/bin:/test:/test/glibc",
+                "LD_LIBRARY_PATH=/lib:/usr/lib:/test/glibc/lib",
+                "HOME=/",
+                NULL
+            };
+            printf("[CONTEST][RUN] child pid=%d execve(path=%s argv0=%s)\n",
+                   getpid(), g_tests[i].path, run_argv[0]);
+
+            execve(g_tests[i].path, run_argv, envp);
+            printf("[CONTEST][RUN] direct execve failed: path=%s errno=%d\n",
+                   g_tests[i].path, errno);
+
+            /* Fallback to /bin/sh when direct exec fails */
+            {
+                char *sh_argv[] = { "sh", g_tests[i].path, NULL };
+                printf("[CONTEST][RUN] fallback execve(path=/bin/sh argv1=%s)\n", g_tests[i].path);
+                execve("/bin/sh", sh_argv, envp);
+                printf("[CONTEST][RUN] fallback /bin/sh execve failed: script=%s errno=%d\n",
+                       g_tests[i].path, errno);
+            }
+
+            printf("[CONTEST] exec failed: %s\n", g_tests[i].path);
+            _exit(127);
+        } else {
+            int status = 0;
+            int w = waitpid(pid, &status, 0);
+            printf("[CONTEST][RUN] waitpid(pid=%d) => %d status=0x%x\n", pid, w, status);
+        }
+
+        printf("#### OS COMP TEST GROUP END %s ####\n", group);
+    }
+
+    printf("[CONTEST] All tests done, powering off\n");
     syscall(SYS_reboot, 0);
 
     while (1)

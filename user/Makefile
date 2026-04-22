@@ -18,7 +18,10 @@ CFLAGS  = -Wall -Wextra -O2 -ffreestanding -nostdinc $(MUSL_INC) \
 LDFLAGS = -static -nostdlib -Ttext 0x10000
 
 GCC_VER := $(shell $(CROSS_COMPILE)gcc -dumpversion 2>/dev/null)
-LIBGCC  := $(shell $(CROSS_COMPILE)gcc -print-libgcc-file-name 2>/dev/null)
+LIBGCC_DEFAULT := $(shell $(CROSS_COMPILE)gcc -print-libgcc-file-name 2>/dev/null)
+LIBGCC_LP64 := $(dir $(LIBGCC_DEFAULT))rv64i/lp64/libgcc.a
+LIBGCC  := $(if $(wildcard $(LIBGCC_LP64)),$(LIBGCC_LP64),$(LIBGCC_DEFAULT))
+LIBGCC_DIR := $(dir $(LIBGCC))
 
 LIB_A20OS := lib/brk.o
 CRT_START = $(MUSL_CRT)/crt1.o $(MUSL_CRT)/crti.o
@@ -64,44 +67,66 @@ MKSH_CFLAGS = $(CFLAGS) -I$(MKSH_DIR) \
 
 all: build_dir build/init build/mksh build/sh $(CMDS)
 
+ifeq ($(ARCH),riscv64)
+all: musl_prepare
+MUSL_DEPS := musl_prepare
+endif
+
 build_dir:
 	@mkdir -p build
 
-%.o: %.c
+musl_prepare:
+ifeq ($(ARCH),riscv64)
+	@if [ ! -f "$(MUSL_BUILD)/lib/crt1.o" ] || [ ! -f "$(MUSL_BUILD)/lib/libc.a" ] || [ ! -f "$(MUSL_BUILD)/obj/include/bits/alltypes.h" ]; then \
+		echo "[MUSL] build-riscv64 missing, rebuilding..."; \
+		rm -rf "$(MUSL_BUILD)"; \
+		mkdir -p "$(MUSL_BUILD)"; \
+		cd "$(MUSL_BUILD)" && ../configure \
+			--target=riscv64 \
+			--prefix=/opt/musl-riscv64 \
+			--disable-shared \
+			--disable-wrapper \
+			CC=$(CROSS_COMPILE)gcc \
+			CROSS_COMPILE=$(CROSS_COMPILE) \
+			CFLAGS='-O2 -mcmodel=medany -march=rv64g -mabi=lp64' \
+			LDFLAGS='-L$(LIBGCC_DIR)'; \
+		$(MAKE) -C "$(MUSL_BUILD)" -j$$(nproc); \
+	else \
+		echo "[MUSL] build-riscv64 ready"; \
+	fi
+endif
+
+%.o: %.c $(MUSL_DEPS)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-%.o: %.S
+%.o: %.S $(MUSL_DEPS)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-lib/%.o: lib/%.c
+lib/%.o: lib/%.c $(MUSL_DEPS)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-build/sh: $(SH_SRC) $(LIB_A20OS)
+build/sh: $(SH_SRC) $(LIB_A20OS) $(MUSL_DEPS)
 	$(CC) $(CFLAGS) -c $< -o build/sh.o
 	$(CC) $(LDFLAGS) -o $@ $(CRT_START) build/sh.o $(CRT_END) $(LIBC)
 
-build/mksh: $(MKSH_OBJS) $(LIB_A20OS)
+build/mksh: $(MKSH_OBJS) $(LIB_A20OS) $(MUSL_DEPS)
 	$(CC) $(LDFLAGS) -o $@ $(CRT_START) $(MKSH_OBJS) $(CRT_END) $(LIBC)
 
-$(MKSH_DIR)/%.o: $(MKSH_DIR)/%.c
+$(MKSH_DIR)/%.o: $(MKSH_DIR)/%.c $(MUSL_DEPS)
 	$(CC) $(MKSH_CFLAGS) -c $< -o $@
 
-ifeq ($(CONTEST),1)
-build/init: shell/init_nolib.c
-	$(CC) -Wall -Wextra -O2 -ffreestanding -fno-builtin -nostdlib -nostartfiles \
-	      -mabi=lp64 -march=rv64g -mcmodel=medany -c $< -o build/init.o
-	$(CC) -static -nostdlib -nostartfiles -Ttext 0x10000 -o $@ build/init.o $(LIBGCC)
-else
-build/init: shell/init.c $(LIB_A20OS)
+build/init: shell/init.c $(LIB_A20OS) $(MUSL_DEPS)
 	$(CC) $(CFLAGS) -c $< -o build/init.o
 	$(CC) $(LDFLAGS) -o $@ $(CRT_START) build/init.o $(CRT_END) $(LIBC)
-endif
 
-build/%: cmds/%.c $(LIB_A20OS)
+build/%: cmds/%.c $(LIB_A20OS) $(MUSL_DEPS)
 	$(CC) $(CFLAGS) -c $< -o build/$*.o
 	$(CC) $(LDFLAGS) -o $@ $(CRT_START) build/$*.o $(CRT_END) $(LIBC)
 
 clean:
 	rm -rf build $(MKSH_DIR)/*.o lib/*.o
 
-.PHONY: all clean build_dir
+distclean: clean
+	rm -rf $(MUSL_BASE)/build-riscv64 $(MUSL_BASE)/build-loongarch64
+
+.PHONY: all clean distclean build_dir musl_prepare

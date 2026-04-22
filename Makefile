@@ -116,6 +116,9 @@ _contest_disk: user_apps
 	dd if=/dev/zero of=$(DISK_OUT) bs=1M count=16 2>/dev/null
 	mkfs.fat -F 32 $(DISK_OUT)
 	mcopy -i $(DISK_OUT) user/build/init  ::/init
+	mcopy -i $(DISK_OUT) user/build/mksh  ::/mksh
+	mcopy -i $(DISK_OUT) user/build/mksh  ::/sh
+	mcopy -i $(DISK_OUT) user/build/mksh  ::/bash
 
 # ----------------------------------------------------------------
 # Development build (for `make run-riscv64` / `make run-loongarch64`)
@@ -126,7 +129,7 @@ dev-build: $(KERNEL_BIN) user_apps fs_img ext4_img_only
 
 user_apps:
 ifeq ($(CONTEST),1)
-	$(MAKE) -C user ARCH=$(ARCH) CONTEST=$(CONTEST) build_dir build/init
+	$(MAKE) -C user ARCH=$(ARCH) CONTEST=$(CONTEST) build_dir build/init build/mksh
 else
 	$(MAKE) -C user ARCH=$(ARCH) CONTEST=$(CONTEST)
 endif
