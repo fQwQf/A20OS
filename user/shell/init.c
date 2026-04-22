@@ -3,23 +3,29 @@
 #include <string.h>
 #include <unistd.h>
 #include <dirent.h>
+#include <fcntl.h>
+#include <stdint.h>
+#include <errno.h>
 #include <sys/wait.h>
 #include <sys/syscall.h>
 
 #ifdef CONTEST
 
 /* ============================================================
- * Contest mode — auto-test runner
+ * Contest mode — scan-only helper
  *
- * Scans /test (competition EXT4 disk) for *_testcode.sh scripts,
- * runs each one sequentially via /bin/sh, prints the required
- * markers, then shuts down.
+ * Recursively scans /test (competition EXT4 disk), prints a
+ * directory tree view, lists *_testcode.sh files, then shuts down.
  * ============================================================ */
 
 #define MAX_TESTS 64
-#define TEST_DIR "/test"
+#define TEST_DIR "/"
 #define SUFFIX "_testcode.sh"
 #define SUFFIX_LEN 13
+
+typedef struct {
+    char path[256];
+} test_entry_t;
 
 static int ends_with(const char *s, const char *suffix)
 {
@@ -30,14 +36,62 @@ static int ends_with(const char *s, const char *suffix)
     return strcmp(s + sl - xl, suffix) == 0;
 }
 
-static void extract_group(const char *filename, char *out, size_t out_sz)
+struct linux_dirent64_local {
+    uint64_t       d_ino;
+    int64_t        d_off;
+    unsigned short d_reclen;
+    unsigned char  d_type;
+    char           d_name[];
+};
+
+static void scan_tree(const char *dir, int depth, test_entry_t tests[], int *ntests)
 {
-    size_t fl = strlen(filename);
-    size_t copy = fl - SUFFIX_LEN;
-    if (copy >= out_sz)
-        copy = out_sz - 1;
-    memcpy(out, filename, copy);
-    out[copy] = '\0';
+    int fd = syscall(SYS_openat, AT_FDCWD, dir, O_RDONLY, 0);
+    if (fd < 0) {
+        for (int i = 0; i < depth; i++) printf("  ");
+        printf("[DIR] %s (open failed: errno=%d)\n", dir, errno);
+        return;
+    }
+
+    char buf[2048];
+    for (;;) {
+        int nread = syscall(SYS_getdents64, fd, buf, sizeof(buf));
+        if (nread <= 0)
+            break;
+
+        int bpos = 0;
+        while (bpos < nread) {
+            struct linux_dirent64_local *de =
+                (struct linux_dirent64_local *)(buf + bpos);
+
+            const char *name = de->d_name;
+            if (strcmp(name, ".") != 0 && strcmp(name, "..") != 0) {
+                char full[256];
+                if (strcmp(dir, "/") == 0)
+                    snprintf(full, sizeof(full), "/%s", name);
+                else
+                    snprintf(full, sizeof(full), "%s/%s", dir, name);
+
+                int is_dir = (de->d_type == DT_DIR);
+
+                for (int i = 0; i < depth; i++) printf("  ");
+                printf("%s %s\n", is_dir ? "[D]" : "[F]", full);
+
+                if (!is_dir && ends_with(name, SUFFIX) && *ntests < MAX_TESTS) {
+                    strncpy(tests[*ntests].path, full, sizeof(tests[*ntests].path) - 1);
+                    tests[*ntests].path[sizeof(tests[*ntests].path) - 1] = '\0';
+                    (*ntests)++;
+                }
+
+                if (is_dir)
+                    scan_tree(full, depth + 1, tests, ntests);
+            }
+
+            bpos += de->d_reclen;
+        }
+    }
+
+    close(fd);
 }
 
 int main(int argc, char *argv[])
@@ -45,68 +99,21 @@ int main(int argc, char *argv[])
     (void)argc;
     (void)argv;
 
-    printf("[CONTEST] Auto-test runner started\n");
+    printf("[CONTEST] Scan-only init started\n");
+    printf("[CONTEST] Scanning target image at %s\n", TEST_DIR);
 
-    chdir(TEST_DIR);
-
-    DIR *d = opendir(TEST_DIR);
-    if (!d)
-    {
-        printf("[CONTEST] Cannot open %s, shutting down\n", TEST_DIR);
-        syscall(SYS_reboot, 0);
-    }
-
-    char *tests[MAX_TESTS];
+    test_entry_t tests[MAX_TESTS];
     int ntests = 0;
+    memset(tests, 0, sizeof(tests));
 
-    struct dirent *de;
-    while ((de = readdir(d)) != NULL && ntests < MAX_TESTS)
-    {
-        if (ends_with(de->d_name, SUFFIX))
-        {
-            char *path = malloc(256);
-            snprintf(path, 256, "%s/%s", TEST_DIR, de->d_name);
-            tests[ntests++] = path;
-        }
-    }
-    closedir(d);
+    scan_tree(TEST_DIR, 0, tests, &ntests);
 
-    printf("[CONTEST] Found %d test(s)\n", ntests);
-
-    for (int i = 0; i < ntests; i++)
-    {
-        const char *slash = strrchr(tests[i], '/');
-        const char *fname = slash ? slash + 1 : tests[i];
-
-        char group[128];
-        extract_group(fname, group, sizeof(group));
-
-        printf("#### OS COMP TEST GROUP START %s ####\n", group);
-
-        int pid = fork();
-        if (pid < 0)
-        {
-            printf("[CONTEST] fork failed, skipping %s\n", fname);
-        }
-        else if (pid == 0)
-        {
-            char *sh_argv[] = {"mksh", tests[i], NULL};
-            char *envp[] = {"PATH=/bin:" TEST_DIR, "HOME=/", NULL};
-            execve("/bin/mksh", sh_argv, envp);
-            printf("[CONTEST] execve failed: %s\n", tests[i]);
-            _exit(127);
-        }
-        else
-        {
-            int status = 0;
-            waitpid(pid, &status, 0);
-        }
-
-        printf("#### OS COMP TEST GROUP END %s ####\n", group);
-        free(tests[i]);
+    printf("[CONTEST] Found %d test script(s) matching %s\n", ntests, SUFFIX);
+    for (int i = 0; i < ntests; i++) {
+        printf("[CONTEST] TEST[%d] %s\n", i, tests[i].path);
     }
 
-    printf("[CONTEST] All tests done, powering off\n");
+    printf("[CONTEST] Scan complete, powering off\n");
     syscall(SYS_reboot, 0);
 
     while (1)
