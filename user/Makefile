@@ -51,6 +51,8 @@ OBJCOPY = $(CROSS_COMPILE)objcopy
 SH_SRC = shell/sh.c
 CMD_SRCS = $(wildcard cmds/*.c)
 CMDS = $(patsubst cmds/%.c, build/%, $(CMD_SRCS))
+INIT_TEST_SRCS = $(shell find shell/tests -type f -name '*.c')
+INIT_TEST_OBJS = $(patsubst shell/tests/%.c, build/tests/%.o, $(INIT_TEST_SRCS))
 
 # mksh
 MKSH_DIR = external/mksh-cvs2git
@@ -73,7 +75,7 @@ MUSL_DEPS := musl_prepare
 endif
 
 build_dir:
-	@mkdir -p build
+	@mkdir -p build build/tests
 
 musl_prepare:
 ifeq ($(ARCH),riscv64)
@@ -115,9 +117,13 @@ build/mksh: $(MKSH_OBJS) $(LIB_A20OS) $(MUSL_DEPS)
 $(MKSH_DIR)/%.o: $(MKSH_DIR)/%.c $(MUSL_DEPS)
 	$(CC) $(MKSH_CFLAGS) -c $< -o $@
 
-build/init: shell/init.c $(LIB_A20OS) $(MUSL_DEPS)
+build/init: shell/init.c $(INIT_TEST_OBJS) $(LIB_A20OS) $(MUSL_DEPS)
 	$(CC) $(CFLAGS) -c $< -o build/init.o
-	$(CC) $(LDFLAGS) -o $@ $(CRT_START) build/init.o $(CRT_END) $(LIBC)
+	$(CC) $(LDFLAGS) -o $@ $(CRT_START) build/init.o $(INIT_TEST_OBJS) $(CRT_END) $(LIBC)
+
+build/tests/%.o: shell/tests/%.c $(MUSL_DEPS)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -c $< -o $@
 
 build/%: cmds/%.c $(LIB_A20OS) $(MUSL_DEPS)
 	$(CC) $(CFLAGS) -c $< -o build/$*.o

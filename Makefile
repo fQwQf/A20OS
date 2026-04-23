@@ -140,7 +140,7 @@ fs_img: user_apps
 	mkfs.fat -F 32 fat32.img
 	mcopy -i fat32.img user/build/init ::/init
 	mcopy -i fat32.img user/build/mksh ::/mksh
-	mcopy -i fat32.img user/build/sh ::/sh
+	mcopy -i fat32.img user/build/mksh ::/sh
 	mcopy -i fat32.img user/build/ls ::/ls
 	mcopy -i fat32.img user/build/cat ::/cat
 	mcopy -i fat32.img user/build/mkdir ::/mkdir

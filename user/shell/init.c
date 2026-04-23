@@ -10,6 +10,7 @@
 #include <signal.h>
 #include <sys/wait.h>
 #include <sys/syscall.h>
+#include "tests/test_runners.h"
 
 #ifdef CONTEST
 
@@ -114,140 +115,36 @@ static void extract_group(const char *path, char *out, size_t out_sz)
     out[copy] = '\0';
 }
 
-static int split_dir_file(const char *path, char *dir, size_t dir_sz, char *file, size_t file_sz)
+static const char *path_basename(const char *path)
 {
-    const char *slash = strrchr(path, '/');
-    if (!slash) {
-        snprintf(dir, dir_sz, ".");
-        snprintf(file, file_sz, "%s", path);
-        return 0;
-    }
-    if (slash == path) {
-        snprintf(dir, dir_sz, "/");
-    } else {
-        size_t n = (size_t)(slash - path);
-        if (n >= dir_sz)
-            n = dir_sz - 1;
-        memcpy(dir, path, n);
-        dir[n] = '\0';
-    }
-    snprintf(file, file_sz, "%s", slash + 1);
-    return 0;
+    const char *name = strrchr(path, '/');
+    return name ? (name + 1) : path;
 }
 
-static void ensure_dir(const char *path)
+static const char *runtime_from_path(const char *path)
 {
-    if (mkdir(path, 0755) == 0 || errno == EEXIST)
-        return;
-    printf("[CONTEST][COMPAT] mkdir(%s) failed errno=%d\n", path, errno);
+    if (!path)
+        return "unknown";
+    if (strstr(path, "/glibc/"))
+        return "glibc";
+    if (strstr(path, "/musl/"))
+        return "musl";
+    return "unknown";
 }
 
-static void ensure_link(const char *target, const char *linkpath)
+static int dispatch_test_script(const char *script_path)
 {
-    if (symlink(target, linkpath) == 0) {
-        printf("[CONTEST][COMPAT] link %s -> %s\n", linkpath, target);
-        return;
-    }
-    if (errno == EEXIST)
-        return;
-    printf("[CONTEST][COMPAT] symlink(%s -> %s) failed errno=%d\n",
-           linkpath, target, errno);
-}
+    const char *script_name = path_basename(script_path);
+    const char *runtime = runtime_from_path(script_path);
 
-static int copy_file(const char *src, const char *dst)
-{
-    int sfd = open(src, O_RDONLY, 0);
-    if (sfd < 0) {
-        printf("[CONTEST][COMPAT] open src failed %s errno=%d\n", src, errno);
-        return -1;
+    if (strcmp(script_name, "basic_testcode.sh") == 0) {
+        if (strcmp(runtime, "glibc") == 0)
+            return run_glibc_basic_test(script_path);
+        if (strcmp(runtime, "musl") == 0)
+            return run_musl_basic_test(script_path);
     }
 
-    int dfd = open(dst, O_WRONLY | O_CREAT | O_TRUNC, 0755);
-    if (dfd < 0) {
-        printf("[CONTEST][COMPAT] open dst failed %s errno=%d\n", dst, errno);
-        close(sfd);
-        return -1;
-    }
-
-    char buf[4096];
-    for (;;) {
-        int n = read(sfd, buf, sizeof(buf));
-        if (n == 0)
-            break;
-        if (n < 0) {
-            printf("[CONTEST][COMPAT] read failed %s errno=%d\n", src, errno);
-            close(sfd);
-            close(dfd);
-            return -1;
-        }
-        int off = 0;
-        while (off < n) {
-            int w = write(dfd, buf + off, (size_t)(n - off));
-            if (w < 0) {
-                printf("[CONTEST][COMPAT] write failed %s errno=%d\n", dst, errno);
-                close(sfd);
-                close(dfd);
-                return -1;
-            }
-            off += w;
-        }
-    }
-
-    close(sfd);
-    close(dfd);
-    return 0;
-}
-
-static void materialize_runtime_libs(void)
-{
-    const char *src_dir = "/test/glibc/lib";
-    int fd = syscall(SYS_openat, AT_FDCWD, src_dir, O_RDONLY, 0);
-    if (fd < 0) {
-        printf("[CONTEST][COMPAT] cannot open %s errno=%d\n", src_dir, errno);
-        return;
-    }
-
-    char dbuf[2048];
-    for (;;) {
-        int nread = syscall(SYS_getdents64, fd, dbuf, sizeof(dbuf));
-        if (nread <= 0)
-            break;
-
-        int bpos = 0;
-        while (bpos < nread) {
-            struct linux_dirent64_local *de =
-                (struct linux_dirent64_local *)(dbuf + bpos);
-            const char *name = de->d_name;
-            if (strcmp(name, ".") != 0 && strcmp(name, "..") != 0 && de->d_type != DT_DIR) {
-                char src[512];
-                char dst[512];
-                snprintf(src, sizeof(src), "%s/%s", src_dir, name);
-                snprintf(dst, sizeof(dst), "/lib/%s", name);
-                copy_file(src, dst);
-            }
-            bpos += de->d_reclen;
-        }
-    }
-    close(fd);
-}
-
-static void setup_compat_paths(void)
-{
-    /* Judge images often assume dynamic loader/libs under /lib and /usr/lib. */
-    ensure_dir("/lib");
-    ensure_dir("/usr");
-    ensure_dir("/etc");
-    {
-        int fd = open("/etc/ld.so.cache", O_WRONLY | O_CREAT, 0644);
-        if (fd >= 0) close(fd);
-    }
-
-    /* Current VFS symlink resolution does not cross mounts reliably.
-     * Copy runtime libs from test image into /lib instead of linking. */
-    materialize_runtime_libs();
-
-    ensure_link("/lib", "/usr/lib");
-    ensure_link("/lib", "/lib64");
+    return -1;
 }
 
 int main(int argc, char *argv[])
@@ -258,7 +155,6 @@ int main(int argc, char *argv[])
     printf("[CONTEST] Auto-test runner started\n");
     printf("[CONTEST] Scanning target image at %s\n", TEST_DIR);
     printf("[CONTEST] Global timeout: %d seconds\n", GLOBAL_TIMEOUT_SEC);
-    setup_compat_paths();
 
     {
         int wpid = fork();
@@ -280,57 +176,28 @@ int main(int argc, char *argv[])
     printf("[CONTEST] Found %d test script(s)\n", ntests);
 
     for (int i = 0; i < ntests; i++) {
+        const char *script_name = path_basename(g_tests[i].path);
+        const char *runtime = runtime_from_path(g_tests[i].path);
+        if (strcmp(runtime, "unknown") == 0) {
+            printf("[CONTEST][SKIP] unknown runtime class: %s\n", g_tests[i].path);
+            continue;
+        }
+
+        if (strcmp(script_name, "basic_testcode.sh") != 0) {
+            printf("[CONTEST][SKIP] unregistered %s test script: %s\n", runtime, g_tests[i].path);
+            continue;
+        }
+
         char group[128];
         extract_group(g_tests[i].path, group, sizeof(group));
-        printf("[CONTEST][RUN] preparing #%d group=%s script=%s\n", i, group, g_tests[i].path);
+        printf("[CONTEST][RUN] preparing #%d runtime=%s group=%s script=%s\n",
+               i, runtime, group, g_tests[i].path);
+        printf("[CONTEST][DISPATCH] %s -> dedicated C runner\n", script_name);
 
         printf("#### OS COMP TEST GROUP START %s ####\n", group);
 
-        int pid = fork();
-        if (pid < 0) {
-            printf("[CONTEST] fork failed, skip: %s\n", g_tests[i].path);
-        } else if (pid == 0) {
-            char script_dir[512];
-            char script_file[256];
-            split_dir_file(g_tests[i].path, script_dir, sizeof(script_dir),
-                           script_file, sizeof(script_file));
-
-            if (chdir(script_dir) != 0) {
-                printf("[CONTEST][RUN] chdir(%s) failed errno=%d\n", script_dir, errno);
-            } else {
-                printf("[CONTEST][RUN] cwd set to %s for %s\n", script_dir, script_file);
-            }
-
-            char *run_argv[] = { script_file, NULL };
-            char *envp[] = {
-                "PATH=/bin:/test:/test/glibc",
-                "LD_LIBRARY_PATH=/lib:/usr/lib:/test/glibc/lib",
-                "HOME=/",
-                NULL
-            };
-            printf("[CONTEST][RUN] child pid=%d execve(path=%s argv0=%s)\n",
-                   getpid(), g_tests[i].path, run_argv[0]);
-
-            execve(g_tests[i].path, run_argv, envp);
-            printf("[CONTEST][RUN] direct execve failed: path=%s errno=%d\n",
-                   g_tests[i].path, errno);
-
-            /* Fallback to /bin/sh when direct exec fails */
-            {
-                char *sh_argv[] = { "sh", g_tests[i].path, NULL };
-                printf("[CONTEST][RUN] fallback execve(path=/bin/sh argv1=%s)\n", g_tests[i].path);
-                execve("/bin/sh", sh_argv, envp);
-                printf("[CONTEST][RUN] fallback /bin/sh execve failed: script=%s errno=%d\n",
-                       g_tests[i].path, errno);
-            }
-
-            printf("[CONTEST] exec failed: %s\n", g_tests[i].path);
-            _exit(127);
-        } else {
-            int status = 0;
-            int w = waitpid(pid, &status, 0);
-            printf("[CONTEST][RUN] waitpid(pid=%d) => %d status=0x%x\n", pid, w, status);
-        }
+        int rc = dispatch_test_script(g_tests[i].path);
+        printf("[CONTEST][RUN] rc=%d script=%s\n", rc, g_tests[i].path);
 
         printf("#### OS COMP TEST GROUP END %s ####\n", group);
     }
