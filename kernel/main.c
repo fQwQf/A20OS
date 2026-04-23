@@ -206,7 +206,17 @@ void init_kthread(void) {
     kdebug("[INIT] ELF loaded: entry=0x%lx stack=0x%lx\n",
            (unsigned long)info.entry, (unsigned long)info.stack_top);
 
-    ret = proc_alloc_user(info.entry, info.stack_top, info.pgdir);
+    /* Set up the initial user stack with argc/argv/envp/auxv so the
+     * C runtime (crt1.o / musl) finds a valid stack layout.  Without
+     * this, __libc_start_main dereferences garbage and the init
+     * process crashes silently before ever reaching main(). */
+    char *init_argv[] = { (char *)init_path, NULL };
+    uint64_t user_sp = elf_setup_stack(info.stack_top, 1, init_argv, NULL, &info);
+    if (user_sp == 0) {
+        panic("init: elf_setup_stack failed");
+    }
+
+    ret = proc_alloc_user(info.entry, user_sp, info.pgdir);
     if (ret < 0) {
         panic("init: proc_alloc_user failed: %d\n", ret);
     }

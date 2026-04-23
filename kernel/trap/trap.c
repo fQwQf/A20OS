@@ -19,27 +19,33 @@ int handle_cow_fault(task_t *t, uint64_t stval) {
 
     uint64_t *pte = pt_walk(t->mm->pgdir, stval, 0);
     if (!pte || !(*pte & PTE_V)) return -1;
-    if (*pte & PTE_W) return -1;
-    if (!(*pte & PTE_COW)) return -1;
 
-    paddr_t old_pa = arch_pte_addr(*pte);
-    pfn_t old_pfn = phys_to_pfn(old_pa);
-    if (!pfn_valid(old_pfn)) return -1;
+    if (*pte & PTE_COW) {
+        paddr_t old_pa = arch_pte_addr(*pte);
+        pfn_t old_pfn = phys_to_pfn(old_pa);
+        if (!pfn_valid(old_pfn)) return -1;
 
-    uint16_t rc = pfa.meta[old_pfn].refcount;
-
-    if (rc > 1) {
-        pfn_t new_pfn = pfa_alloc_page();
-        if (new_pfn == PFN_NONE) return -1;
-        memcpy(pfn_to_virt(new_pfn), pfn_to_virt(old_pfn), PAGE_SIZE);
-        frame_put(old_pfn);
-        *pte = arch_pte_from_pa(pfn_to_phys(new_pfn)) | (*pte & (PTE_R | PTE_X | PTE_U | PTE_A | PTE_D | PTE_MAT1 | PTE_LEAF)) | PTE_W | PTE_V;
-    } else {
-        *pte = (*pte & ~PTE_COW) | PTE_W;
+        uint16_t rc = pfa.meta[old_pfn].refcount;
+        if (rc > 1) {
+            pfn_t new_pfn = pfa_alloc_page();
+            if (new_pfn == PFN_NONE) return -1;
+            memcpy(pfn_to_virt(new_pfn), pfn_to_virt(old_pfn), PAGE_SIZE);
+            frame_put(old_pfn);
+            *pte = arch_pte_from_pa(pfn_to_phys(new_pfn)) | (*pte & (PTE_R | PTE_X | PTE_U | PTE_A | PTE_MAT1 | PTE_LEAF)) | PTE_W | PTE_D | PTE_V;
+        } else {
+            *pte = (*pte & ~PTE_COW) | PTE_W | PTE_D;
+        }
+        arch_tlb_flush_page(stval);
+        return 0;
     }
 
-    arch_tlb_flush_page(stval);
-    return 0;
+    if (*pte & PTE_W) {
+        *pte |= PTE_D;
+        arch_tlb_flush_page(stval);
+        return 0;
+    }
+
+    return -1;
 }
 
 /*
@@ -122,10 +128,17 @@ extern void trap_entry_la64(void);
 void trap_init(void) {
 #ifdef CONFIG_LOONGARCH64
     arch_write_tvec((uint64_t)trap_entry_la64);
-    /* ECFG: enable timer interrupt (IS bit 11) */
+    /*
+     * ECFG (CSR 0x4) — Local Interrupt Enable:
+     *   IS[11] = TI  (Timer Interrupt)
+     *   IS[2]  = HWI0 (Hardware Interrupt 0, used by Virtio/PCIe on QEMU virt)
+     *
+     * Without enabling IS[2], Virtio block-device completion interrupts pile
+     * up in ESTAT.IS but are never delivered, causing the device to stall.
+     */
     uint64_t ecfg;
     __asm__ __volatile__("csrrd %0, 0x4" : "=r"(ecfg));
-    ecfg |= (1UL << 11);
+    ecfg |= (1UL << 11) | (1UL << 2);
     __asm__ __volatile__("csrwr %0, 0x4" :: "r"(ecfg));
 #else
     arch_write_tvec((uint64_t)__trap_from_kernel);
@@ -137,6 +150,14 @@ static int ktrap_diag_count = 0;
 
 static void handle_irq(uint64_t irq, uint64_t sepc, int from_user) {
     if (irq == IRQ_S_TIMER) {
+#ifdef CONFIG_LOONGARCH64
+        /*
+         * LoongArch timer interrupt must be acknowledged via TICLR (CSR 0x44)
+         * before re-programming the interval, otherwise the CPU will
+         * immediately re-enter the timer handler in an infinite loop.
+         */
+        __asm__ __volatile__("csrwr %0, 0x44" :: "r"(1UL) : "memory");
+#endif
         timer_set_interval(TICKS_PER_SEC / 100);
         if (from_user) {
             task_t *cur = proc_current();
@@ -167,6 +188,17 @@ void trap_handler(trap_context_t *ctx) {
 
     TRAP_CTX_KScratch0(ctx) = arch_read_satp();
 
+    {
+        static int first_user_trap = 0;
+        if (first_user_trap < 20) {
+            first_user_trap++;
+            task_t *cur = proc_current();
+            kdebug("[UTRAP#%d] pid=%d scause=0x%lx sepc=0x%lx stval=0x%lx a7=%lu\n",
+                   first_user_trap, cur ? cur->pid : -1, scause, sepc, stval,
+                   (unsigned long)TRAP_CTX_SYSCALL_NUM(ctx));
+        }
+    }
+
     if (scause & CAUSE_INTR_MASK) {
         handle_irq(scause & CAUSE_CODE_MASK, sepc, 1);
     } else {
@@ -176,46 +208,61 @@ void trap_handler(trap_context_t *ctx) {
             syscall_dispatch(ctx);
         } else if (code == CAUSE_LOAD_PAGE_FAULT || code == CAUSE_STORE_PAGE_FAULT || code == CAUSE_INSN_PAGE_FAULT) {
             task_t *cur = proc_current();
-            /* Try COW first (store fault on read-only mapped page) */
             if (code == CAUSE_STORE_PAGE_FAULT) {
                 if (handle_cow_fault(cur, stval) == 0) {
                     signal_deliver_user(ctx);
                     return;
                 }
             }
-            /* Then try demand paging / stack growth */
             if (handle_demand_fault(cur, stval) == 0) {
                 signal_deliver_user(ctx);
                 return;
+            }
+            kerr("User PF unresolved: pid=%d code=%lu sepc=0x%lx stval=0x%lx\n",
+                 cur ? cur->pid : -1, code, sepc, stval);
+            if (cur && cur->mm && cur->mm->pgdir) {
+                uint64_t *pte = pt_walk(cur->mm->pgdir, stval, 0);
+                kerr("  pte=%p *pte=0x%lx\n", (void*)pte, pte ? *pte : 0UL);
+            }
+            proc_exit(-SIGSEGV);
+        } else if (code == CAUSE_PAGE_MODIFICATION) {
+            /*
+             * LoongArch PME: hardware write to a V=1, D=0 page.
+             * Two cases:
+             *   1. COW page: PTE_COW set, D=0 intentionally → allocate copy.
+             *   2. Clean tracking: page is writable but D was 0 (e.g. after
+             *      fork/exec page-table copy). Set D=1 and retry.
+             */
+            task_t *cur = proc_current();
+            /* Case 1: try COW resolution first */
+            if (handle_cow_fault(cur, stval) == 0) {
+                return;
+            }
+            /* Case 2: just set D=1 in the existing PTE if it's writable */
+            if (cur && cur->mm && cur->mm->pgdir) {
+                uint64_t *pte = pt_walk(cur->mm->pgdir, stval, 0);
+                if (pte && (*pte & PTE_V) && (*pte & PTE_W)) {
+                    *pte |= PTE_D;   /* PTE_D == PTE_W == bit 1, set dirty */
+                    arch_tlb_flush_page(stval);
+                    return;
+                }
             }
             {
                 uint32_t insn = 0;
                 pfn_t dbg_pfn = 0;
                 uint64_t stval_pte = 0;
-                uint64_t pte2 = 0, pte1 = 0, pte0 = 0;
-                uint64_t *l1 = NULL, *l0 = NULL;
                 if (cur && cur->mm && cur->mm->pgdir) {
                     uint64_t *pte_sepc = pt_walk(cur->mm->pgdir, sepc, 0);
                     if (pte_sepc && (*pte_sepc & PTE_V)) {
-                        dbg_pfn = phys_to_pfn(arch_pte_addr(*pte_sepc));
                         uint8_t *kva = (uint8_t *)(arch_pte_addr(*pte_sepc) + PAGE_OFFSET + (sepc & 0xFFF));
                         insn = *(uint32_t *)kva;
+                        dbg_pfn = phys_to_pfn(arch_pte_addr(*pte_sepc));
                     }
                     uint64_t *pte_stval = pt_walk(cur->mm->pgdir, stval, 0);
                     stval_pte = pte_stval ? *pte_stval : 0;
-                    uint64_t *pgdir = cur->mm->pgdir;
-                    pte2 = pgdir ? pgdir[0] : 0;
-                    l1 = (pte2 & PTE_V) ? arch_pte_to_ptr(pte2) : NULL;
-                    pte1 = l1 ? l1[0] : 0;
-                    l0 = (pte1 & PTE_V) ? arch_pte_to_ptr(pte1) : NULL;
-                    pte0 = l0 ? l0[0x2f] : 0;
                 }
-                kerr("User Page Fault: pid=%d scause=0x%lx sepc=0x%lx stval=0x%lx insn=0x%08x ctx_sepc=0x%lx pfn=%u flags=%u rc=%u\n",
-                        cur ? cur->pid : -1, scause, sepc, stval, insn, TRAP_CTX_EPC(ctx),
-                        (unsigned)dbg_pfn, dbg_pfn < pfa.total_frames ? pfa.meta[dbg_pfn].flags : 99,
-                        dbg_pfn < pfa.total_frames ? pfa.meta[dbg_pfn].refcount : 99);
-                kerr("[PTEWALK] pgdir=0x%lx pgdir[0]=0x%lx l1=0x%lx l1[0]=0x%lx l0=0x%lx l0[0x2f]=0x%lx stval_pte=0x%lx\n",
-                        (unsigned long)(cur && cur->mm ? cur->mm->pgdir : NULL), pte2, (unsigned long)l1, pte1, (unsigned long)l0, pte0, stval_pte);
+                kerr("User Page Fault: pid=%d scause=0x%lx sepc=0x%lx stval=0x%lx insn=0x%08x pte=0x%lx pfn=%u\n",
+                        cur ? cur->pid : -1, scause, sepc, stval, insn, stval_pte, (unsigned)dbg_pfn);
             }
             proc_exit(-SIGSEGV);
         } else if (code == CAUSE_ILLEGAL_INSN) {
@@ -238,11 +285,19 @@ void kernel_trap_handler(trap_context_t *ctx) {
         handle_irq(scause & CAUSE_CODE_MASK, sepc, 0);
     } else {
         uint64_t code = scause & CAUSE_CODE_MASK;
+        task_t *cur = proc_current();
+        kdebug("KERNEL TRAP: scause=0x%lx sepc=0x%lx stval=0x%lx code=%lu\n",
+               scause, sepc, stval, code);
+        kdebug("[KTRAP] pid=%d name=%s ra=0x%lx a0=0x%lx era_ctx=0x%lx prmd_ctx=0x%lx\n",
+                cur ? cur->pid : -1, cur ? cur->name : "?",
+                TRAP_CTX_RA(ctx), TRAP_CTX_ARG0(ctx),
+                TRAP_CTX_EPC(ctx), TRAP_CTX_STATUS(ctx));
         if (code == CAUSE_ECALL_U) {
             TRAP_CTX_EPC(ctx) += 4;
         } else if (code == CAUSE_LOAD_PAGE_FAULT ||
                    code == CAUSE_STORE_PAGE_FAULT ||
-                   code == CAUSE_INSN_PAGE_FAULT) {
+                   code == CAUSE_INSN_PAGE_FAULT ||
+                   code == CAUSE_PAGE_MODIFICATION) {
             /*
              * Kernel took a page fault on a user-space address while
              * executing a syscall (e.g. memset/memcpy on a user buffer).
@@ -253,7 +308,7 @@ void kernel_trap_handler(trap_context_t *ctx) {
              */
             task_t *cur = proc_current();
             if (cur && cur->mm && stval < 0x4000000000UL) {
-                if (code == CAUSE_STORE_PAGE_FAULT) {
+                if (code == CAUSE_STORE_PAGE_FAULT || code == CAUSE_PAGE_MODIFICATION) {
                     if (handle_cow_fault(cur, stval) == 0)
                         return;
                 }

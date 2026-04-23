@@ -348,16 +348,24 @@ int64_t sys_pipe2(int *pipefd, int flags) {
     int r = vfs_pipe(gfd);
     if (r == 0) {
         task_t *t = proc_current();
-        pipefd[0] = alloc_local_fd(t, gfd[0]);
-        if (pipefd[0] < 0) {
+        int fd0 = alloc_local_fd(t, gfd[0]);
+        if (fd0 < 0) {
             vfs_close(gfd[1]);
-            return pipefd[0];
+            return fd0;
         }
-        pipefd[1] = alloc_local_fd(t, gfd[1]);
-        if (pipefd[1] < 0) {
-            t->fd_table[pipefd[0]] = -1;
+        int fd1 = alloc_local_fd(t, gfd[1]);
+        if (fd1 < 0) {
+            t->fd_table[fd0] = -1;
             vfs_close(gfd[1]);
-            return pipefd[1];
+            return fd1;
+        }
+        int user_fds[2] = {fd0, fd1};
+        if (copy_to_user(pipefd, user_fds, sizeof(user_fds)) < 0) {
+            t->fd_table[fd0] = -1;
+            t->fd_table[fd1] = -1;
+            vfs_close(gfd[0]);
+            vfs_close(gfd[1]);
+            return -EFAULT;
         }
     }
     return r;
@@ -397,7 +405,9 @@ int64_t sys_sendfile(int out_fd, int in_fd, long *off, size_t count) {
     if (out_gfd < 0) return out_gfd;
     int64_t in_gfd = get_global_fd(in_fd);
     if (in_gfd < 0) return in_gfd;
-    long cur_off = off ? *off : vfs_lseek(in_gfd, 0, SEEK_CUR);
+    long user_off = 0;
+    if (off && copy_from_user(&user_off, off, sizeof(long)) < 0) return -EFAULT;
+    long cur_off = off ? user_off : vfs_lseek(in_gfd, 0, SEEK_CUR);
     long saved = off ? vfs_lseek(in_gfd, 0, SEEK_CUR) : 0;
     int64_t total = 0;
     char sbuf[4096];
@@ -414,30 +424,37 @@ int64_t sys_sendfile(int out_fd, int in_fd, long *off, size_t count) {
         if (w < n) break;
     }
     if (off) {
-        *off = cur_off;
+        copy_to_user(off, &cur_off, sizeof(long));
         vfs_lseek(in_gfd, saved, SEEK_SET);
     }
     return total;
 }
 
 int64_t sys_ppoll(void *fds, int nfds, void *tmo, void *sigmask) {
-    struct pollfd { int fd; short events; short revents; } *pfds = (void*)fds;
+    struct pollfd { int fd; short events; short revents; };
+    struct pollfd *pfds = (struct pollfd *)fds;
     (void)tmo; (void)sigmask;
     if (!pfds || nfds <= 0) return 0;
     int ready = 0;
     for (int i = 0; i < nfds; i++) {
-        pfds[i].revents = 0;
-        if (pfds[i].fd < 0) continue;
-        int64_t gfd = get_global_fd(pfds[i].fd);
+        struct pollfd pfd;
+        if (copy_from_user(&pfd, &pfds[i], sizeof(pfd)) < 0) return -EFAULT;
+        pfd.revents = 0;
+        if (pfd.fd < 0) {
+            copy_to_user(&pfds[i].revents, &pfd.revents, sizeof(short));
+            continue;
+        }
+        int64_t gfd = get_global_fd(pfd.fd);
         vfile_t *vf = (gfd >= 0) ? vfs_get_file(gfd) : NULL;
         if (vf) {
-            if (pfds[i].events & 0x001) pfds[i].revents |= 0x001;
-            if (pfds[i].events & 0x004) pfds[i].revents |= 0x004;
+            if (pfd.events & 0x001) pfd.revents |= 0x001;
+            if (pfd.events & 0x004) pfd.revents |= 0x004;
             ready++;
         } else {
-            pfds[i].revents = 0x008;
+            pfd.revents = 0x008;
             ready++;
         }
+        copy_to_user(&pfds[i].revents, &pfd.revents, sizeof(short));
     }
     return ready;
 }
@@ -497,30 +514,11 @@ int64_t sys_getcwd(char *buf, size_t size) {
 }
 
 static void copy_kstat_to_user(void *st, const kstat_t *kst) {
-    /* Match RISC-V glibc struct stat layout (128 bytes, asm-generic/stat.h):
-     *   unsigned long st_dev       offset 0
-     *   unsigned long st_ino       offset 8
-     *   unsigned int  st_mode      offset 16
-     *   unsigned int  st_nlink     offset 20
-     *   unsigned int  st_uid       offset 24
-     *   unsigned int  st_gid       offset 28
-     *   unsigned long st_rdev      offset 32
-     *   unsigned long __pad1       offset 40
-     *   unsigned long st_size      offset 48
-     *   unsigned int  st_blksize   offset 56
-     *   unsigned int  __pad2       offset 60
-     *   unsigned long st_blocks    offset 64
-     *   unsigned long st_atime     offset 72
-     *   unsigned long st_atime_nsec offset 80
-     *   unsigned long st_mtime     offset 88
-     *   unsigned long st_mtime_nsec offset 96
-     *   unsigned long st_ctime     offset 104
-     *   unsigned long st_ctime_nsec offset 112
-     *   unsigned int  __unused4    offset 120
-     *   unsigned int  __unused5    offset 124
-     */
-    uint64_t *u64 = (uint64_t *)st;
-    uint32_t *u32 = (uint32_t *)st;
+    /* Match RISC-V glibc struct stat layout (128 bytes, asm-generic/stat.h) */
+    uint8_t buf[128];
+    memset(buf, 0, sizeof(buf));
+    uint64_t *u64 = (uint64_t *)buf;
+    uint32_t *u32 = (uint32_t *)buf;
     u64[0]  = kst->st_dev;
     u64[1]  = kst->st_ino;
     u32[4]  = kst->st_mode;
@@ -541,6 +539,7 @@ static void copy_kstat_to_user(void *st, const kstat_t *kst) {
     u64[14] = kst->st_ctime_nsec;
     u32[30] = 0;            /* __unused4 */
     u32[31] = 0;            /* __unused5 */
+    copy_to_user(st, buf, sizeof(buf));
 }
 
 int64_t sys_fstat(int fd, void *st) {
@@ -608,13 +607,14 @@ int64_t sys_symlinkat(const char *target, int newdirfd, const char *linkpath) {
 int64_t sys_statfs(const char *path, void *buf) {
     (void)path;
     if (!buf) return -EFAULT;
-    uint64_t *sb = (uint64_t *)buf;
-    memset(sb, 0, 64);
+    uint64_t sb[8];
+    memset(sb, 0, sizeof(sb));
     sb[0] = 0x4006;
     sb[1] = 4096;
     sb[2] = 1024*1024;
     sb[3] = 512*1024;
     sb[4] = 512*1024;
+    if (copy_to_user(buf, sb, 64) < 0) return -EFAULT;
     return 0;
 }
 
@@ -718,7 +718,12 @@ int64_t sys_execve(const char *path, char **argv, char **envp) {
 
 int64_t sys_wait4(int pid, int *status, int options, void *rusage) {
     (void)rusage;
-    return proc_wait4(pid, status, options);
+    int kstatus = 0;
+    int ret = proc_wait4(pid, status ? &kstatus : NULL, options);
+    if (ret >= 0 && status) {
+        if (copy_to_user(status, &kstatus, sizeof(int)) < 0) return -EFAULT;
+    }
+    return ret;
 }
 
 int64_t sys_sched_yield(void) {
@@ -736,7 +741,11 @@ int64_t sys_prctl(int op, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
     (void)a1; (void)a2; (void)a3; (void)a4;
     if (op == 15) {
         task_t *t = proc_current();
-        if (t) proc_set_name(t, (const char *)a1);
+        if (t) {
+            char name[64];
+            if (user_strncpy(name, (const char *)a1, sizeof(name)) >= 0)
+                proc_set_name(t, name);
+        }
     }
     return 0;
 }
@@ -744,16 +753,18 @@ int64_t sys_prctl(int op, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
 int64_t sys_prlimit64(int pid, int resource, void *new_rlim, void *old_rlim) {
     (void)pid;
     if (old_rlim) {
-        uint64_t *r = (uint64_t *)old_rlim;
+        uint64_t r[2] = {0};
         task_t *t = proc_current();
         switch (resource) {
             case 3: r[0] = 0; r[1] = t ? t->rlim_stack : 8*1024*1024; break;
             case 7: r[0] = 0; r[1] = t ? t->rlim_nofile : MAX_FILES; break;
             default: r[0] = 0; r[1] = (uint64_t)-1; break;
         }
+        if (copy_to_user(old_rlim, r, sizeof(r)) < 0) return -EFAULT;
     }
     if (new_rlim) {
-        uint64_t *r = (uint64_t *)new_rlim;
+        uint64_t r[2];
+        if (copy_from_user(r, new_rlim, sizeof(r)) < 0) return -EFAULT;
         task_t *t = proc_current();
         if (!t) return -ESRCH;
         switch (resource) {
@@ -767,19 +778,21 @@ int64_t sys_prlimit64(int pid, int resource, void *new_rlim, void *old_rlim) {
 
 int64_t sys_getrlimit(int resource, void *rlim) {
     if (!rlim) return -EFAULT;
-    uint64_t *r = (uint64_t *)rlim;
+    uint64_t r[2] = {0};
     task_t *t = proc_current();
     switch (resource) {
         case 3: r[0] = 0; r[1] = t ? t->rlim_stack : 8*1024*1024; break;
         case 7: r[0] = 0; r[1] = t ? t->rlim_nofile : MAX_FILES; break;
         default: r[0] = 0; r[1] = (uint64_t)-1; break;
     }
+    if (copy_to_user(rlim, r, sizeof(r)) < 0) return -EFAULT;
     return 0;
 }
 
 int64_t sys_setrlimit(int resource, void *rlim) {
     if (!rlim) return -EFAULT;
-    uint64_t *r = (uint64_t *)rlim;
+    uint64_t r[2];
+    if (copy_from_user(r, rlim, sizeof(r)) < 0) return -EFAULT;
     task_t *t = proc_current();
     if (!t) return -ESRCH;
     switch (resource) {
@@ -793,13 +806,14 @@ int64_t sys_setrlimit(int resource, void *rlim) {
 int64_t sys_getrusage(int who, void *usage) {
     (void)who;
     if (!usage) return -EFAULT;
-    memset(usage, 0, 144);
+    uint64_t u[18]; /* 144 bytes / 8 */
+    memset(u, 0, sizeof(u));
     task_t *t = proc_current();
     if (t) {
-        uint64_t *u = (uint64_t *)usage;
         u[0] = t->total_time / TICKS_PER_SEC;
         u[1] = (t->total_time % TICKS_PER_SEC) * 1000000000UL / TICKS_PER_SEC / 1000;
     }
+    if (copy_to_user(usage, u, 144) < 0) return -EFAULT;
     return 0;
 }
 
@@ -841,7 +855,8 @@ int64_t sys_sigsuspend(void *mask) {
 
     signal_state_t *ss = (signal_state_t *)t->signals;
     uint64_t old_blocked = ss->blocked;
-    uint64_t new_mask = *(const uint64_t *)mask;
+    uint64_t new_mask;
+    if (copy_from_user(&new_mask, mask, sizeof(new_mask)) < 0) return -EFAULT;
 
     /* Can't block SIGKILL or SIGSTOP */
     new_mask &= ~((1ULL << SIGKILL) | (1ULL << SIGSTOP));
@@ -865,13 +880,16 @@ int64_t sys_sigtimedwait(const uint64_t *set, void *info, const void *timeout) {
     if (!t || !t->signals || !set) return -EINVAL;
 
     signal_state_t *ss = (signal_state_t *)t->signals;
-    uint64_t mask = *set;
+    uint64_t mask;
+    if (copy_from_user(&mask, set, sizeof(mask)) < 0) return -EFAULT;
     uint64_t deliverable = ss->pending & ~ss->blocked & mask;
 
     if (!deliverable) {
         if (timeout) {
-            uint64_t sec = ((const uint64_t *)timeout)[0];
-            uint64_t nsec = ((const uint64_t *)timeout)[1];
+            uint64_t to[2];
+            if (copy_from_user(to, timeout, sizeof(to)) < 0) return -EFAULT;
+            uint64_t sec = to[0];
+            uint64_t nsec = to[1];
             if (sec == 0 && nsec == 0)
                 return -EAGAIN;
         }
@@ -886,8 +904,10 @@ int64_t sys_sigtimedwait(const uint64_t *set, void *info, const void *timeout) {
         if (deliverable & (1ULL << sig)) {
             ss->pending &= ~(1ULL << sig);
             if (info) {
-                memset(info, 0, 128);
-                *(int *)info = sig;
+                uint8_t infobuf[128];
+                memset(infobuf, 0, 128);
+                *(int *)infobuf = sig;
+                copy_to_user(info, infobuf, 128);
             }
             return sig;
         }
@@ -1012,18 +1032,20 @@ int64_t sys_clock_gettime(int clk, void *tp) {
     (void)clk;
     if (!tp) return -EFAULT;
     uint64_t ticks = timer_get_ticks();
-    uint64_t *ts = (uint64_t *)tp;
+    uint64_t ts[2];
     ts[0] = ticks / TICKS_PER_SEC;
     ts[1] = (ticks % TICKS_PER_SEC) * 1000000000UL / TICKS_PER_SEC;
+    if (copy_to_user(tp, ts, sizeof(ts)) < 0) return -EFAULT;
     return 0;
 }
 
 int64_t sys_clock_getres(int clk, void *tp) {
     (void)clk;
     if (tp) {
-        uint64_t *ts = (uint64_t *)tp;
+        uint64_t ts[2];
         ts[0] = 0;
         ts[1] = 1000000000UL / TICKS_PER_SEC;
+        if (copy_to_user(tp, ts, sizeof(ts)) < 0) return -EFAULT;
     }
     return 0;
 }
@@ -1053,9 +1075,10 @@ int64_t sys_gettimeofday(void *tv, void *tz) {
     (void)tz;
     if (tv) {
         uint64_t ticks = timer_get_ticks();
-        uint64_t *t = (uint64_t *)tv;
+        uint64_t t[2];
         t[0] = ticks / TICKS_PER_SEC;
         t[1] = (ticks % TICKS_PER_SEC) * 1000000UL / TICKS_PER_SEC;
+        if (copy_to_user(tv, t, sizeof(t)) < 0) return -EFAULT;
     }
     return 0;
 }
@@ -1063,16 +1086,20 @@ int64_t sys_gettimeofday(void *tv, void *tz) {
 int64_t sys_times(void *buf) {
     task_t *t = proc_current();
     if (t && buf) {
-        uint64_t *tm = (uint64_t *)buf;
-        memset(tm, 0, 32);
+        uint64_t tm[4];
+        memset(tm, 0, sizeof(tm));
         tm[0] = t->total_time;
+        if (copy_to_user(buf, tm, sizeof(tm)) < 0) return -EFAULT;
     }
     return (int64_t)(timer_get_ticks());
 }
 
 int64_t sys_time(long *tloc) {
     uint64_t t = timer_get_ticks() / TICKS_PER_SEC;
-    if (tloc) *tloc = (long)t;
+    if (tloc) {
+        long tl = (long)t;
+        if (copy_to_user(tloc, &tl, sizeof(long)) < 0) return -EFAULT;
+    }
     return (int64_t)t;
 }
 
@@ -1082,29 +1109,31 @@ int64_t sys_time(long *tloc) {
 
 int64_t sys_uname(void *buf) {
     struct uname { char s[65],n[65],r[65],v[65],m[65],d[65]; };
-    struct uname *u = (struct uname *)buf;
-    if (!u) return -EFAULT;
-    memset(u, 0, sizeof(*u));
-    strcpy(u->s, "Linux");
-    strcpy(u->n, "A20OS");
-    strcpy(u->r, "6.1.0-A20OS");
-    strcpy(u->v, "#1 SMP A20OS 2025");
+    if (!buf) return -EFAULT;
+    struct uname u;
+    memset(&u, 0, sizeof(u));
+    strcpy(u.s, "Linux");
+    strcpy(u.n, "A20OS");
+    strcpy(u.r, "6.1.0-A20OS");
+    strcpy(u.v, "#1 SMP A20OS 2025");
 #ifdef ARCH_RISCV64
-    strcpy(u->m, "riscv64");
+    strcpy(u.m, "riscv64");
 #elif defined(ARCH_LOONGARCH64)
-    strcpy(u->m, "loongarch64");
+    strcpy(u.m, "loongarch64");
 #else
-    strcpy(u->m, "riscv64");
+    strcpy(u.m, "riscv64");
 #endif
+    if (copy_to_user(buf, &u, sizeof(u)) < 0) return -EFAULT;
     return 0;
 }
 
 int64_t sys_sysinfo(void *info) {
     if (!info) return -EFAULT;
-    memset(info, 0, 112);
-    uint64_t *si = (uint64_t *)info;
+    uint64_t si[14]; /* 112 bytes */
+    memset(si, 0, sizeof(si));
     si[0] = timer_get_ticks() / TICKS_PER_SEC;
     si[1] = 1;
+    if (copy_to_user(info, si, sizeof(si)) < 0) return -EFAULT;
     return 0;
 }
 
@@ -1138,13 +1167,19 @@ int64_t sys_syslog(int type, char *buf, int len) {
 int64_t sys_getrandom(void *buf, size_t len, int flags) {
     (void)flags;
     if (!buf) return -EFAULT;
-    uint8_t *p = (uint8_t *)buf;
+    uint8_t tmp[128];
     uint64_t seed = timer_get_ticks();
-    for (size_t i = 0; i < len; i++) {
-        seed ^= seed << 13;
-        seed ^= seed >> 7;
-        seed ^= seed << 17;
-        p[i] = (uint8_t)(seed & 0xFF);
+    size_t done = 0;
+    while (done < len) {
+        size_t chunk = len - done > sizeof(tmp) ? sizeof(tmp) : len - done;
+        for (size_t i = 0; i < chunk; i++) {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            tmp[i] = (uint8_t)(seed & 0xFF);
+        }
+        if (copy_to_user((char*)buf + done, tmp, chunk) < 0) return -EFAULT;
+        done += chunk;
     }
     return (int64_t)len;
 }
@@ -1154,7 +1189,9 @@ int64_t sys_futex(int *uaddr, int op, int val, void *timeout, int *uaddr2, int v
     if (!uaddr) return -EFAULT;
     int opc = op & 0x7F;
     if (opc == 0 || opc == 9) {
-        if (*uaddr != val) return -EAGAIN;
+        int uval;
+        if (copy_from_user(&uval, uaddr, sizeof(int)) < 0) return -EFAULT;
+        if (uval != val) return -EAGAIN;
         proc_yield();
         return 0;
     } else if (opc == 1 || opc == 10) {
@@ -1167,7 +1204,12 @@ int64_t sys_futex(int *uaddr, int op, int val, void *timeout, int *uaddr2, int v
  * select / poll
  * ============================================================ */
 
-#define FD_ISSET(f, s) (((s)[(f)/8/sizeof(long)] & (1UL<<((f)%(8*sizeof(long))))) != 0)
+/* Read user fd_set bit without direct pointer dereference */
+static int fd_isset_user(int f, void *s) {
+    long mask = 0;
+    if (copy_from_user(&mask, &((long *)s)[f / 8 / sizeof(long)], sizeof(long)) < 0) return 0;
+    return (mask & (1UL << (f % (8 * sizeof(long))))) != 0;
+}
 
 int64_t sys_select(int nfds, void *readfds, void *writefds,
                    void *exceptfds, void *timeout) {
@@ -1179,7 +1221,7 @@ int64_t sys_select(int nfds, void *readfds, void *writefds,
 
     if (readfds) {
         for (int i = 0; i < nfds; i++) {
-            if (FD_ISSET(i, (long *)readfds)) {
+            if (fd_isset_user(i, readfds)) {
                 if (i == 0) {
                     extern int uart_has_input(void);
                     if (uart_has_input()) ready_count++;
@@ -1192,7 +1234,7 @@ int64_t sys_select(int nfds, void *readfds, void *writefds,
 
     if (writefds) {
         for (int i = 0; i < nfds; i++) {
-            if (FD_ISSET(i, (long *)writefds)) {
+            if (fd_isset_user(i, writefds)) {
                 if (i == 1 || i == 2) {
                     ready_count++;
                 } else if (i >= 0 && i < MAX_FILES && t->fd_table[i] >= 0) {
@@ -1205,8 +1247,10 @@ int64_t sys_select(int nfds, void *readfds, void *writefds,
     if (ready_count > 0) return ready_count;
 
     if (timeout) {
-        uint64_t *tv = (uint64_t *)timeout;
-        if (tv[0] == 0 && tv[1] == 0) return 0;
+        uint64_t tv[2];
+        if (copy_from_user(tv, timeout, sizeof(tv)) == 0) {
+            if (tv[0] == 0 && tv[1] == 0) return 0;
+        }
     }
 
     proc_yield();

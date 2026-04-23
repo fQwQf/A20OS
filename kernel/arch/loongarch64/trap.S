@@ -191,6 +191,15 @@ __trap_from_user:
 .Lrestore_and_return:
 __return_to_user:
 user_trap_return:
+    /* Restore PGDL (page table base) from regs[0] / KScratch0.
+     * This is critical after exec(): proc_exec sets regs[0] to the
+     * new page directory's satp value, but the PGDL CSR still points
+     * to the old (now freed) page directory.  Without this, TLB
+     * refills after ertn would walk freed page tables. */
+    ld.d    $t0, $sp, REG_OFF(0)
+    csrwr   $t0, 0x19              /* PGDL */
+    invtlb  0x3, $zero, $zero      /* Flush non-global TLB entries */
+
     ld.d    $t0, $sp, ERA_OFF
     csrwr   $t0, 0x6               /* ERA */
     ld.d    $t1, $sp, PRMD_OFF
