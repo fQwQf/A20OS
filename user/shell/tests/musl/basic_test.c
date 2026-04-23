@@ -167,7 +167,7 @@ static int run_musl_script_with_fallback(const char *script_path)
     return 127;
 }
 
-int run_musl_basic_test(const char *script_path)
+static int run_musl_script(const char *script_path, int allow_basic_fallback, const char *tag)
 {
     prepare_musl_runtime();
 
@@ -178,7 +178,13 @@ int run_musl_basic_test(const char *script_path)
     }
 
     if (pid == 0) {
-        int rc = run_musl_script_with_fallback(script_path);
+        int rc;
+        if (allow_basic_fallback) {
+            rc = run_musl_script_with_fallback(script_path);
+        } else {
+            rc = run_script_via_mksh(script_path, tag,
+                                     "PATH=.:/bin:/test:/test/musl:/test/glibc");
+        }
         _exit((rc < 0) ? 127 : (rc & 0xFF));
     }
 
@@ -191,4 +197,14 @@ int run_musl_basic_test(const char *script_path)
     if (WIFEXITED(status))
         return WEXITSTATUS(status);
     return 127;
+}
+
+int run_musl_basic_test(const char *script_path)
+{
+    return run_musl_script(script_path, 1, "TEST][musl][basic");
+}
+
+int run_musl_busybox_test(const char *script_path)
+{
+    return run_musl_script(script_path, 0, "TEST][musl][busybox");
 }

@@ -25,7 +25,7 @@
 #define TEST_DIR "/test"
 #define SUFFIX "_testcode.sh"
 #define SUFFIX_LEN 13
-#define GLOBAL_TIMEOUT_SEC 300
+#define GLOBAL_TIMEOUT_SEC 1800
 
 typedef struct {
     char path[512];
@@ -143,6 +143,12 @@ static int dispatch_test_script(const char *script_path)
         if (strcmp(runtime, "musl") == 0)
             return run_musl_basic_test(script_path);
     }
+    if (strcmp(script_name, "busybox_testcode.sh") == 0) {
+        if (strcmp(runtime, "glibc") == 0)
+            return run_glibc_busybox_test(script_path);
+        if (strcmp(runtime, "musl") == 0)
+            return run_musl_busybox_test(script_path);
+    }
 
     return -1;
 }
@@ -183,7 +189,8 @@ int main(int argc, char *argv[])
             continue;
         }
 
-        if (strcmp(script_name, "basic_testcode.sh") != 0) {
+        if (strcmp(script_name, "basic_testcode.sh") != 0 &&
+            strcmp(script_name, "busybox_testcode.sh") != 0) {
             printf("[CONTEST][SKIP] unregistered %s test script: %s\n", runtime, g_tests[i].path);
             continue;
         }

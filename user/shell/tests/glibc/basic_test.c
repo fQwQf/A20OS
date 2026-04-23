@@ -144,7 +144,7 @@ static void cleanup_glibc_runtime(void)
     (void)unlink("/lib/ld-linux-riscv64-lp64d.so.1");
 }
 
-int run_glibc_basic_test(const char *script_path)
+static int run_glibc_script(const char *script_path, const char *tag)
 {
     prepare_glibc_runtime();
 
@@ -156,7 +156,7 @@ int run_glibc_basic_test(const char *script_path)
 
     if (pid == 0) {
         int rc = run_script_via_mksh(script_path,
-                                     "TEST][glibc][basic",
+                                     tag,
                                      "PATH=.:/bin:/test:/test/glibc:/test/musl");
         _exit((rc < 0) ? 127 : (rc & 0xFF));
     }
@@ -170,4 +170,14 @@ int run_glibc_basic_test(const char *script_path)
     if (WIFEXITED(status))
         return WEXITSTATUS(status);
     return 127;
+}
+
+int run_glibc_basic_test(const char *script_path)
+{
+    return run_glibc_script(script_path, "TEST][glibc][basic");
+}
+
+int run_glibc_busybox_test(const char *script_path)
+{
+    return run_glibc_script(script_path, "TEST][glibc][busybox");
 }
