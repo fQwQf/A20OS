@@ -18,15 +18,16 @@ ifeq ($(ARCH), riscv64)
     QEMU = qemu-system-riscv64
     QEMU_FLAGS = -machine virt -m 512M -nographic -smp 1 -bios default -global virtio-mmio.force-legacy=false
 else ifeq ($(ARCH), loongarch64)
-    CROSS_PREFIX = loongarch64-unknown-elf-
-    ARCH_CFLAGS = -march=loongarch64 -mabi=lp64d
-    ARCH_LDFLAGS =
+    CROSS_PREFIX = loongarch64-linux-gnu-
+    ARCH_CFLAGS = -march=loongarch64 -mabi=lp64d -mcmodel=normal -fno-pic -static
+    ARCH_LDFLAGS = -static -no-pie
     QEMU = qemu-system-loongarch64
     QEMU_FLAGS = -machine virt -m 512M -nographic -smp 1
 endif
 
 # In bringup mode, boot kernel only (no fs image dependency).
 ifneq ($(BRINGUP),1)
+ifeq ($(ARCH), riscv64)
 QEMU_FLAGS += -drive file=fat32.img,if=none,format=raw,id=x0 -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0
 QEMU_FLAGS += -drive file=ext4.img,if=none,format=raw,id=x1 -device virtio-blk-device,drive=x1,bus=virtio-mmio-bus.1
 
@@ -38,12 +39,16 @@ ifneq ($(wildcard sdcard-la.img),)
 QEMU_FLAGS += -drive file=sdcard-la.img,if=none,format=raw,id=x3 -device virtio-blk-device,drive=x3,bus=virtio-mmio-bus.3
 endif
 
+else ifeq ($(ARCH), loongarch64)
+QEMU_FLAGS += -drive file=fat32.img,if=none,format=raw,id=x0 -device virtio-blk-pci,drive=x0
+QEMU_FLAGS += -drive file=ext4.img,if=none,format=raw,id=x1 -device virtio-blk-pci,drive=x1
+endif
 endif
 
 # Compiler flags
 CFLAGS = -Wall -Wextra -O2 -ffreestanding -nostdlib \
          -nostartfiles -fno-builtin -fno-common -std=gnu99 \
-         -I$(INCLUDE_DIR) $(ARCH_CFLAGS) \
+         -I$(INCLUDE_DIR) -I$(KERNEL_DIR) -I$(KERNEL_DIR)/arch/$(ARCH) $(ARCH_CFLAGS) \
          -D$(shell echo $(ARCH) | tr a-z A-Z) \
          -DCONFIG_$(shell echo $(ARCH) | tr a-z A-Z)
 
@@ -66,7 +71,8 @@ KERNEL_SRC = $(wildcard $(KERNEL_DIR)/*.c) \
              $(wildcard $(KERNEL_DIR)/drv/*.c) \
              $(wildcard $(KERNEL_DIR)/syscall/*.c) \
              $(wildcard $(KERNEL_DIR)/trap/*.c) \
-             $(wildcard $(KERNEL_DIR)/shell/*.c)
+             $(wildcard $(KERNEL_DIR)/shell/*.c) \
+             $(wildcard $(KERNEL_DIR)/arch/$(ARCH)/*.c)
 
 # Object files
 KERNEL_OBJ = $(KERNEL_SRC:.c=.o)
@@ -200,18 +206,16 @@ kernel-only: $(KERNEL_BIN)
 # ----------------------------------------------------------------
 
 run-riscv64:
-ifeq ($(BRINGUP),1)
-	$(MAKE) ARCH=riscv64 BRINGUP=1 kernel-only
-else
-	$(MAKE) ARCH=riscv64 dev-build
-endif
-	$(QEMU) $(QEMU_FLAGS) -kernel $(KERNEL_ELF)
+	$(MAKE) ARCH=riscv64 BRINGUP=$(BRINGUP) CONTEST=$(CONTEST) _run_impl
 
 run-loongarch64:
+	$(MAKE) ARCH=loongarch64 BRINGUP=$(BRINGUP) CONTEST=$(CONTEST) _run_impl
+
+_run_impl:
 ifeq ($(BRINGUP),1)
-	$(MAKE) ARCH=loongarch64 BRINGUP=1 kernel-only
+	$(MAKE) ARCH=$(ARCH) BRINGUP=1 kernel-only
 else
-	$(MAKE) ARCH=loongarch64 dev-build
+	$(MAKE) ARCH=$(ARCH) dev-build
 endif
 	$(QEMU) $(QEMU_FLAGS) -kernel $(KERNEL_ELF)
 
@@ -220,19 +224,16 @@ endif
 DEBUG_CFLAGS = $(filter-out -O2,$(CFLAGS)) -O0 -g -DDEBUG
 
 debug-riscv64:
-ifeq ($(BRINGUP),1)
-	$(MAKE) ARCH=riscv64 BRINGUP=1 CFLAGS="$(DEBUG_CFLAGS)" kernel-only
-else
-	$(MAKE) ARCH=riscv64 CFLAGS="$(DEBUG_CFLAGS)" dev-build
-endif
-	@echo "Waiting for GDB connection on port 1234..."
-	$(QEMU) $(QEMU_FLAGS) -kernel $(KERNEL_ELF) -S -s
+	$(MAKE) ARCH=riscv64 BRINGUP=$(BRINGUP) CONTEST=$(CONTEST) _debug_impl
 
 debug-loongarch64:
+	$(MAKE) ARCH=loongarch64 BRINGUP=$(BRINGUP) CONTEST=$(CONTEST) _debug_impl
+
+_debug_impl:
 ifeq ($(BRINGUP),1)
-	$(MAKE) ARCH=loongarch64 BRINGUP=1 CFLAGS="$(DEBUG_CFLAGS)" kernel-only
+	$(MAKE) ARCH=$(ARCH) BRINGUP=1 CFLAGS="$(DEBUG_CFLAGS)" kernel-only
 else
-	$(MAKE) ARCH=loongarch64 CFLAGS="$(DEBUG_CFLAGS)" dev-build
+	$(MAKE) ARCH=$(ARCH) CFLAGS="$(DEBUG_CFLAGS)" dev-build
 endif
 	@echo "Waiting for GDB connection on port 1234..."
 	$(QEMU) $(QEMU_FLAGS) -kernel $(KERNEL_ELF) -S -s

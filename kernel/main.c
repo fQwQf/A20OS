@@ -103,6 +103,7 @@ void kernel_main(void) {
     timer_init();
     printf("[INIT] Timer initialized\n");
 
+    trap_init();
     plic_init();
     printf("[INIT] PLIC initialized\n");
 
@@ -113,6 +114,9 @@ void kernel_main(void) {
     printf("[INIT] VFS initialized\n");
 
     /* ---- Mount block devices ---- */
+#ifdef BRINGUP
+    printf("[INIT] BRINGUP mode: skipping block device probe\n");
+#else
     for (int i = 0; i < MOUNT_COUNT; i++) {
         if (virtio_blk_init(0) != 0) {
             printf("[INIT] Device %d: probe failed, skipping\n", i);
@@ -136,6 +140,7 @@ void kernel_main(void) {
                   extra_mount_table[j].mount_point,
                   extra_mount_table[j].fs_type);
     }
+#endif
 
     /* Initialize process management */
     proc_init();
@@ -172,9 +177,6 @@ void init_kthread(void) {
     task_t *cur = proc_current();
     kdebug("[INIT] Init process started (pid=%d)\n", cur ? cur->pid : 0);
 
-    for (int i = 0; i < 1000000; i++) {
-        __asm__ volatile("nop");
-    }
 
     kdebug("[INIT] Loading init program...\n");
 

@@ -6,20 +6,23 @@
 #include "stdio.h"
 #include "string.h"
 
+// 虚拟地址转换为物理地址
 static inline paddr_t va_to_pa(const void *va) {
     return (paddr_t)((uint64_t)(uintptr_t)va - PAGE_OFFSET);
 }
 
+// 内存管理初始化函数
 void mm_init(void) {
     extern char _bss_end[];
     pfa_init(PHYS_MEMORY_BASE, PHYS_MEMORY_END,
-             va_to_pa(_bss_end));
-    slab_init();
+             va_to_pa(_bss_end)); // Buddy 物理页分配器
+    slab_init(); // Slab 对象分配器
     printf("[MM] Buddy+Slab: %d frames, %d free (%d MB)\n",
            (int)pfa.total_frames, (int)pfa.free_frames,
            (int)(pfa.free_frames * PAGE_SIZE / 1024 / 1024));
 }
 
+// 分配一个物理帧并清零
 void *frame_alloc(void) {
     pfn_t pfn = pfa_alloc_page();
     if (pfn == PFN_NONE) return NULL;
@@ -28,6 +31,7 @@ void *frame_alloc(void) {
     return p;
 }
 
+// 释放一个物理帧
 void frame_free(void *addr) {
     if (!addr) return;
     pfn_t pfn = virt_to_pfn(addr);
@@ -35,20 +39,23 @@ void frame_free(void *addr) {
         pfa_free_page(pfn);
 }
 
+// 查询空闲物理帧数量
 size_t frame_free_count(void) {
     return pfa_free_count();
 }
 
+// 创建一个新的页表
 uint64_t *pt_create(void) {
     return (uint64_t *)frame_alloc();
 }
 
+// 递归销毁页表及其子页表
 void pt_destroy(uint64_t *pgdir) {
     if (!pgdir) return;
-    for (int i = 0; i < 512; i++) {
+    for (int i = 0; i < ARCH_PT_ENTRIES; i++) {
         uint64_t pte = pgdir[i];
-        if ((pte & PTE_V) && !(pte & PTE_R) && !(pte & PTE_W) && !(pte & PTE_X)) {
-            uint64_t *next = PTE_TO_PTR(pte);
+        if ((pte & PTE_V) && !arch_pte_is_leaf(pte)) {
+            uint64_t *next = arch_pte_to_ptr(pte);
             pt_destroy(next);
             pgdir[i] = 0;
         }
@@ -56,39 +63,42 @@ void pt_destroy(uint64_t *pgdir) {
     frame_free(pgdir);
 }
 
+// 遍历页表结构，查找或创建指定虚拟地址对应的 PTE
 uint64_t *pt_walk(uint64_t *pgdir, vaddr_t va, int alloc) {
     uint64_t *table = pgdir;
-    for (int level = 2; level > 0; level--) {
-        int vpn = SV39_VPN(va, level);
+    for (int level = ARCH_PT_ROOT_LEVEL; level > 0; level--) {
+        int vpn = arch_pt_vpn(va, level);
         uint64_t pte = table[vpn];
         if (pte & PTE_V) {
-            table = PTE_TO_PTR(pte);
+            table = arch_pte_to_ptr(pte);
         } else {
             if (!alloc) return NULL;
             uint64_t *next = (uint64_t *)frame_alloc();
             if (!next) return NULL;
-            table[vpn] = PTE_FROM_PA(va_to_pa(next)) | PTE_V;
+            table[vpn] = arch_pte_from_pa(va_to_pa(next)) | PTE_V;
             table = next;
         }
     }
-    return &table[SV39_VPN(va, 0)];
+    return &table[arch_pt_vpn(va, 0)];
 }
 
+// 建立虚拟地址到物理地址的映射
 int pt_map(uint64_t *pgdir, vaddr_t va, paddr_t pa, uint64_t flags) {
     uint64_t *pte = pt_walk(pgdir, va, 1);
     if (!pte) return -ENOMEM;
     if (*pte & PTE_V) {
-        paddr_t old_pa = SV39_PTE_ADDR(*pte);
+        paddr_t old_pa = arch_pte_addr(*pte);
         if (old_pa != pa) {
-            int is_leaf = (*pte & PTE_R) || (*pte & PTE_W) || (*pte & PTE_X);
+            int is_leaf = arch_pte_is_leaf(*pte);
             if (is_leaf)
                 frame_put(phys_to_pfn(old_pa));
         }
     }
-    *pte = PTE_FROM_PA(pa) | flags | PTE_V;
+    *pte = arch_pte_from_pa(pa) | flags | PTE_V;
     return 0;
 }
 
+// 取消虚拟地址的映射
 int pt_unmap(uint64_t *pgdir, vaddr_t va) {
     uint64_t *pte = pt_walk(pgdir, va, 0);
     if (!pte || !(*pte & PTE_V)) return -EINVAL;
@@ -96,19 +106,22 @@ int pt_unmap(uint64_t *pgdir, vaddr_t va) {
     return 0;
 }
 
+// 将虚拟地址转换为物理地址
 paddr_t pt_translate(uint64_t *pgdir, vaddr_t va) {
     uint64_t *pte = pt_walk(pgdir, va, 0);
     if (!pte || !(*pte & PTE_V)) return 0;
-    return SV39_PTE_ADDR(*pte) | (va & 0xFFF);
+    return arch_pte_addr(*pte) | (va & 0xFFF);
 }
 
+// 将内核空间映射复制到新页表（内核空间共享）
 void pt_map_kernel(uint64_t *pgdir) {
-    for (int i = 256; i < 512; i++) {
+    for (int i = ARCH_PT_USER_END; i < ARCH_PT_ENTRIES; i++) {
         if (boot_pgdir[i] & PTE_V)
             pgdir[i] = boot_pgdir[i];
     }
 }
 
+// 批量映射一段连续的虚拟地址范围
 int pt_map_range(uint64_t *pgdir, vaddr_t va, paddr_t pa, size_t size, uint64_t flags) {
     size = ROUND_UP(size, PAGE_SIZE);
     for (size_t off = 0; off < size; off += PAGE_SIZE) {
@@ -118,57 +131,60 @@ int pt_map_range(uint64_t *pgdir, vaddr_t va, paddr_t pa, size_t size, uint64_t 
     return 0;
 }
 
+// 递归克隆指定层级的页表项
 static uint64_t *pt_clone_level(uint64_t *src, int level) {
     uint64_t *dst = (uint64_t *)frame_alloc();
     if (!dst) return NULL;
 
-    for (int i = 0; i < 512; i++) {
+    for (int i = 0; i < ARCH_PT_ENTRIES; i++) {
         uint64_t pte = src[i];
         if (!(pte & PTE_V)) continue;
 
-        int is_leaf = (pte & PTE_R) || (pte & PTE_W) || (pte & PTE_X);
+        int is_leaf = arch_pte_is_leaf(pte);
 
         if (is_leaf) {
             if (pte & PTE_U) {
                 void *nf = frame_alloc();
                 if (!nf) { pt_destroy(dst); return NULL; }
-                memcpy(nf, PTE_TO_PTR(pte), PAGE_SIZE);
-                dst[i] = PTE_FROM_PA(va_to_pa(nf)) | (pte & 0x3FF);
+                memcpy(nf, arch_pte_to_ptr(pte), PAGE_SIZE);
+                dst[i] = arch_pte_from_pa(va_to_pa(nf)) | (pte & 0x3FF);
             } else {
                 dst[i] = pte;
             }
         } else {
-            uint64_t *next_src = PTE_TO_PTR(pte);
+            uint64_t *next_src = arch_pte_to_ptr(pte);
             uint64_t *next_dst = pt_clone_level(next_src, level - 1);
             if (!next_dst) { pt_destroy(dst); return NULL; }
-            dst[i] = PTE_FROM_PA(va_to_pa(next_dst)) | PTE_V;
+            dst[i] = arch_pte_from_pa(va_to_pa(next_dst)) | PTE_V;
         }
     }
     return dst;
 }
 
+// 克隆整个页表（从根节点开始）
 uint64_t *pt_clone(uint64_t *src_pgdir) {
     if (!src_pgdir) return NULL;
-    return pt_clone_level(src_pgdir, 2);
+    return pt_clone_level(src_pgdir, ARCH_PT_ROOT_LEVEL);
 }
 
+// 递归销毁用户空间的页表项（不释放内核共享部分）
 static void pt_destroy_user_recursive(uint64_t *table, int level) {
     if (!table) return;
-    /* Only the user half (0..255) lives at the root; kernel half is shared
+    /* Only user half (0..255) lives at root; kernel half is shared
      * and must not be freed.  Lower levels may span all 512 entries. */
-    int limit = (level == 2) ? 256 : 512;
+    int limit = (level == ARCH_PT_ROOT_LEVEL) ? ARCH_PT_USER_END : ARCH_PT_ENTRIES;
     for (int i = 0; i < limit; i++) {
         uint64_t pte = table[i];
         if (!(pte & PTE_V)) continue;
 
-        int is_leaf = (pte & PTE_R) || (pte & PTE_W) || (pte & PTE_X);
+        int is_leaf = arch_pte_is_leaf(pte);
 
         if (is_leaf) {
             if (pte & PTE_U)
-                frame_put(phys_to_pfn(SV39_PTE_ADDR(pte)));
+                frame_put(phys_to_pfn(arch_pte_addr(pte)));
             table[i] = 0;
         } else {
-            uint64_t *next = PTE_TO_PTR(pte);
+            uint64_t *next = arch_pte_to_ptr(pte);
             pt_destroy_user_recursive(next, level - 1);
             frame_free(next);
             table[i] = 0;
@@ -176,9 +192,10 @@ static void pt_destroy_user_recursive(uint64_t *table, int level) {
     }
 }
 
+// 销毁用户空间页表
 void pt_destroy_user(uint64_t *pgdir) {
     if (!pgdir) return;
-    pt_destroy_user_recursive(pgdir, 2);
+    pt_destroy_user_recursive(pgdir, ARCH_PT_ROOT_LEVEL);
     frame_free(pgdir);
 }
 
@@ -186,6 +203,7 @@ void pt_destroy_user(uint64_t *pgdir) {
 #include "proc.h"
 #include "trap.h"
 
+// 从用户空间拷贝数据到内核空间
 long copy_from_user(void *dst, const void *src, size_t n) {
     task_t *t = proc_current();
     if (!t || !t->mm) return -EFAULT;
@@ -195,11 +213,12 @@ long copy_from_user(void *dst, const void *src, size_t n) {
         if (va >= 0x4000000000UL) return -EFAULT;
         uint64_t *pte = pt_walk(t->pgdir, va, 0);
         if (!pte || !(*pte & PTE_V)) {
+            // 处理缺页异常
             if (handle_demand_fault(t, va) < 0) return -EFAULT;
             pte = pt_walk(t->pgdir, va, 0);
             if (!pte || !(*pte & PTE_V)) return -EFAULT;
         }
-        paddr_t pa = SV39_PTE_ADDR(*pte);
+        paddr_t pa = arch_pte_addr(*pte);
         size_t page_off = va & (PAGE_SIZE - 1);
         size_t chunk = PAGE_SIZE - page_off;
         if (chunk > n) chunk = n;
@@ -210,6 +229,7 @@ long copy_from_user(void *dst, const void *src, size_t n) {
     return (long)copied;
 }
 
+// 从内核空间拷贝数据到用户空间
 long copy_to_user(void *dst, const void *src, size_t n) {
     task_t *t = proc_current();
     if (!t || !t->mm) return -EFAULT;
@@ -219,6 +239,7 @@ long copy_to_user(void *dst, const void *src, size_t n) {
         if (va >= 0x4000000000UL) return -EFAULT;
         uint64_t *pte = pt_walk(t->pgdir, va, 0);
         if (!pte || !(*pte & PTE_V)) {
+            // 处理缺页异常
             if (handle_demand_fault(t, va) < 0) return -EFAULT;
             pte = pt_walk(t->pgdir, va, 0);
             if (!pte || !(*pte & PTE_V)) return -EFAULT;
@@ -228,7 +249,7 @@ long copy_to_user(void *dst, const void *src, size_t n) {
             pte = pt_walk(t->pgdir, va, 0);
             if (!pte || !(*pte & PTE_V) || !(*pte & PTE_W)) return -EFAULT;
         }
-        paddr_t pa = SV39_PTE_ADDR(*pte);
+        paddr_t pa = arch_pte_addr(*pte);
         size_t page_off = va & (PAGE_SIZE - 1);
         size_t chunk = PAGE_SIZE - page_off;
         if (chunk > n) chunk = n;
@@ -239,6 +260,7 @@ long copy_to_user(void *dst, const void *src, size_t n) {
     return (long)copied;
 }
 
+// 从用户空间拷贝字符串到内核空间
 long user_strncpy(char *dst, const char *src, size_t max) {
     task_t *t = proc_current();
     if (!t || !t->mm) return -EFAULT;
@@ -249,11 +271,12 @@ long user_strncpy(char *dst, const char *src, size_t max) {
         if (va >= 0x4000000000UL) return -EFAULT;
         uint64_t *pte = pt_walk(t->pgdir, va, 0);
         if (!pte || !(*pte & PTE_V)) {
+            // 处理缺页异常
             if (handle_demand_fault(t, va) < 0) return -EFAULT;
             pte = pt_walk(t->pgdir, va, 0);
             if (!pte || !(*pte & PTE_V)) return -EFAULT;
         }
-        paddr_t pa = SV39_PTE_ADDR(*pte);
+        paddr_t pa = arch_pte_addr(*pte);
         size_t page_off = va & (PAGE_SIZE - 1);
         size_t chunk = PAGE_SIZE - page_off;
         if (chunk > max - 1 - i) chunk = max - 1 - i;

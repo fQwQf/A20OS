@@ -3,59 +3,48 @@
 
 #include "types.h"
 
+/* ---------- Generic page size (same on all supported archs) ---------- */
 #define PAGE_SIZE          4096UL
 #define PAGE_SIZE_BITS     12
 #define PAGE_OFFSET_MASK   ((1UL << PAGE_SIZE_BITS) - 1)
 
-#define KERNEL_STACK_SIZE  (256 * 1024)
+/* ---------- Kernel / user stack sizes ---------- */
+#define KERNEL_STACK_SIZE  (16 * 1024)
 #define USER_STACK_SIZE    (512 * PAGE_SIZE)
-#define TRAP_CONTEXT_SIZE  (36 * 8)
-#define TASK_CONTEXT_SIZE  (16 * 8)
 
-#define MAX_PROCS          1024
-#define MAX_FILES          4096
+/* ---------- Limits ---------- */
+#define MAX_PROCS          64
+#define MAX_FILES          64
 #define MAX_PATH_LEN       512
 #define MAX_NAME_LEN       256
 #define MAX_ARGS           256
 #define MAX_CMD_LEN        4096
 #define MAX_HISTORY        256
 
-#define PHYS_MEMORY_BASE   0x80000000UL
-#define PHYS_MEMORY_END    0xA0000000UL
-#define KERNEL_ENTRY       0x80200000UL
-
-#define PAGE_OFFSET        0xFFFFFFC000000000UL
-
-#define UART0_BASE         (0x10000000UL + PAGE_OFFSET)
-#define CLINT_BASE         (0x02000000UL + PAGE_OFFSET)
-#define VIRTIO_BASE        (0x10001000UL + PAGE_OFFSET)
-#define PLIC_BASE          (0x0C000000UL + PAGE_OFFSET)
-#define UART0_IRQ          10
-
-#define PLIC_PRIORITY      (PLIC_BASE + 0x0000UL)
-#define PLIC_PENDING       (PLIC_BASE + 0x1000UL)
-#define PLIC_SENABLE(h)    (PLIC_BASE + 0x2080UL + (uint64_t)(h) * 0x100UL)
-#define PLIC_SPRIORITY(h)  (PLIC_BASE + 0x201000UL + (uint64_t)(h) * 0x2000UL)
-#define PLIC_SCLAIM(h)     (PLIC_BASE + 0x201004UL + (uint64_t)(h) * 0x2000UL)
-
-#define CLINT_MTIME        (CLINT_BASE + 0xBFF8UL)
-#define CLINT_MTIMECMP(h)  (CLINT_BASE + 0x4000UL + ((unsigned long)(h) * 8))
-#define CLINT_TIMER_FREQ   10000000UL
-
+/* ---------- Heap ---------- */
 #define KERNEL_HEAP_SIZE   (256 * 1024 * 1024)
 
-#define PTE_V    (1UL << 0)
-#define PTE_R    (1UL << 1)
-#define PTE_W    (1UL << 2)
-#define PTE_X    (1UL << 3)
-#define PTE_U    (1UL << 4)
-#define PTE_G    (1UL << 5)
-#define PTE_A    (1UL << 6)
-#define PTE_D    (1UL << 7)
-
-#define PTE_KERN (PTE_V | PTE_R | PTE_W | PTE_X)
-#define PTE_USER (PTE_V | PTE_R | PTE_W | PTE_X | PTE_U)
-#define PTE_COW  (1UL << 8)
+/*
+ * NOTE: The following have been MOVED to arch-specific headers:
+ *
+ *   From platform.h:  PHYS_MEMORY_BASE, PHYS_MEMORY_END, KERNEL_ENTRY,
+ *                      PAGE_OFFSET, UART0_BASE, CLINT_BASE, VIRTIO_BASE,
+ *                      PLIC_BASE, UART0_IRQ, PLIC_*, CLINT_*,
+ *                      IRQ_S_*, CAUSE_*, CAUSE_INTR/CODE_MASK,
+ *                      SIE_*, SSTATUS_*, boot_pgdir
+ *
+ *   From arch/mm.h:    PTE_V/R/W/X/U/G/A/D/COW, PTE_KERN, PTE_USER,
+ *                      ARCH_PT_*, arch_pte_*, arch_make_satp
+ *
+ *   From arch/trap.h:  TRAP_CONTEXT_SIZE, TASK_CONTEXT_SIZE,
+ *                      KTRAP_CONTEXT_SIZE, trap_context_t, task_context_t
+ *
+ *   From arch/cpu.h:   arch_mb/rmb/wmb, arch_wfi, arch_* (CSR accessors)
+ *
+ *   From firmware.h:   sbi_* / firmware_* function prototypes
+ *
+ * All kernel code should include "arch.h" (via "defs.h") to get these.
+ */
 
 #define SYS_getcwd         17
 #define SYS_dup            23
@@ -227,23 +216,6 @@
 #define SIGUSR1      10
 #define SIGUSR2      12
 
-/* scause exception codes */
-#define CAUSE_INSN_MISALIGNED   0
-#define CAUSE_INSN_FAULT        1
-#define CAUSE_ILLEGAL_INSN      2
-#define CAUSE_BREAKPOINT        3
-#define CAUSE_LOAD_MISALIGNED   4
-#define CAUSE_LOAD_FAULT        5
-#define CAUSE_STORE_MISALIGNED  6
-#define CAUSE_STORE_FAULT       7
-#define CAUSE_ECALL_U           8
-#define CAUSE_INSN_PAGE_FAULT   12
-#define CAUSE_LOAD_PAGE_FAULT   13
-#define CAUSE_STORE_PAGE_FAULT  15
-
-#define CAUSE_INTR_MASK         (1UL << 63)
-#define CAUSE_CODE_MASK         ((1UL << 63) - 1)
-
 /* Memory protection flags */
 #define PROT_READ      1
 #define PROT_WRITE     2
@@ -311,18 +283,5 @@
 #define DT_BLK      6
 #define DT_REG      8
 #define DT_LNK     10
-
-/* Kernel trap context size (without last_a0 and kernel_tp) */
-#define KTRAP_CONTEXT_SIZE  (34 * 8)
-
-/* sstatus bits */
-#define SSTATUS_SIE     (1UL << 1)
-#define SSTATUS_SPIE    (1UL << 5)
-#define SSTATUS_SPP     (1UL << 8)
-#define SSTATUS_FS_OFF    (0UL << 13)
-#define SSTATUS_FS_INITIAL (1UL << 13)
-#define SSTATUS_FS_CLEAN   (2UL << 13)
-#define SSTATUS_FS_DIRTY   (3UL << 13)
-#define SSTATUS_FS_MASK    (3UL << 13)
 
 #endif /* _CONSTS_H */

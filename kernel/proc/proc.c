@@ -27,26 +27,29 @@
 #include "defs.h"
 #include "klog.h"
 
-static task_t proc_table[MAX_PROCS];
-static uint64_t *kernel_pgdir_shared;
-static task_t *current_task = NULL;
+static task_t proc_table[MAX_PROCS];  // 进程表
+static uint64_t *kernel_pgdir_shared;  // 共享的内核页表
+static task_t *current_task = NULL;    // 当前运行的任务
 
 /* Boot stack (for schedule back to idle) */
-static uint64_t g_idle_kstack;
+static uint64_t g_idle_kstack;  // idle 进程的内核栈
 
+// idle 进程的主循环，系统无任务时运行
 void idle_loop(void) {
     while (1) {
-        __asm__ volatile("wfi");
-        proc_yield();
+        arch_wfi();  // 等待中断
+        proc_yield();              // 主动让出 CPU
     }
 }
 
+// 设置进程名称
 void proc_set_name(task_t *t, const char *name) {
     if (!t) return;
     strncpy(t->name, name, sizeof(t->name) - 1);
     t->name[sizeof(t->name) - 1] = '\0';
 }
 
+// 初始化进程管理模块，创建 idle 进程
 void proc_init(void) {
     memset(proc_table, 0, sizeof(proc_table));
 
@@ -62,42 +65,47 @@ void proc_init(void) {
     idle->rlim_nofile = MAX_FILES;
     proc_set_name(idle, "idle");
 
-    vfs_proc_init_fds(idle->fd_table);
+    vfs_proc_init_fds(idle->fd_table);  // 初始化文件描述符
     idle->parent  = NULL;
 
     /* Allocate signal state */
     idle->signals = (struct signal_state *)kmalloc(sizeof(signal_state_t));
     if (idle->signals) signal_init((signal_state_t *)idle->signals);
 
+    // 分配内核栈
     void *idle_stack = kmalloc(KERNEL_STACK_SIZE);
     if (!idle_stack) panic("proc_init: no memory for idle stack");
     memset(idle_stack, 0, KERNEL_STACK_SIZE);
 
+    // 设置任务上下文
     uint64_t stack_top = (uint64_t)idle_stack + KERNEL_STACK_SIZE;
     task_context_t *ctx = (task_context_t *)(stack_top - sizeof(task_context_t));
     memset(ctx, 0, sizeof(*ctx));
-    ctx->ra   = (uint64_t)idle_loop;
-    ctx->tp   = (uint64_t)idle;
+    ctx->ra   = (uint64_t)idle_loop;  // 返回地址为 idle_loop
+    ctx->tp   = (uint64_t)idle;       // tp 寄存器指向任务结构
 
+    // 创建并映射内核页表
     uint64_t *kpdir = pt_create();
     if (!kpdir) panic("proc_init: pt_create failed");
     pt_map_kernel(kpdir);
     kernel_pgdir_shared = kpdir;
     idle->pgdir = kpdir;
-    ctx->satp = kpdir ? MAKE_SATP(kpdir) : 0;
-    ctx->sstatus = SSTATUS_SIE;
+    TASK_CTX_PAGE_TABLE(ctx) = kpdir ? arch_make_satp(kpdir) : 0;
+    TASK_CTX_STATUS(ctx) = SSTATUS_SIE;  // 启用中断
     idle->kstack_base = idle_stack;
     idle->kstack = (uint64_t)ctx;
     g_idle_kstack = idle->kstack;
 
-    __asm__ volatile("mv tp, %0" :: "r"(idle));
+    arch_set_task_pointer(idle);  // 设置 tp 寄存器
     current_task = idle;
 
     kdebug("[PROC] Initialized, idle task pid=0\n");
 }
 
+// 获取当前运行的任务
 task_t *proc_current(void) { return current_task; }
 
+// 根据 PID 查找进程
 task_t *proc_find(int pid) {
     for (int i = 0; i < MAX_PROCS; i++) {
         if (proc_table[i].state != PROC_UNUSED && proc_table[i].pid == pid)
@@ -108,8 +116,9 @@ task_t *proc_find(int pid) {
 
 /* ---- Base task allocation ---- */
 
-static int next_pid = 1;
+static int next_pid = 1;  // 下一个可用的 PID
 
+// 分配一个空闲的任务槽
 static task_t *alloc_task_slot(void) {
     for (int i = 1; i < MAX_PROCS; i++) {
         if (proc_table[i].state == PROC_UNUSED) return &proc_table[i];
@@ -117,6 +126,7 @@ static task_t *alloc_task_slot(void) {
     return NULL;
 }
 
+// 初始化任务的公共字段
 static void init_task_common(task_t *t, task_t *parent) {
     t->ppid      = parent ? parent->pid : 0;
     t->state     = PROC_READY;
@@ -131,6 +141,7 @@ static void init_task_common(task_t *t, task_t *parent) {
     t->rlim_nofile = MAX_FILES;
     t->mm        = NULL;
 
+    // 继承父进程的工作目录和执行路径
     if (parent) {
         memcpy(t->cwd, parent->cwd, MAX_PATH_LEN);
         memcpy(t->exec_path, parent->exec_path, MAX_PATH_LEN);
@@ -139,6 +150,7 @@ static void init_task_common(task_t *t, task_t *parent) {
         t->exec_path[0] = '\0';
     }
 
+    // 处理文件描述符
     for (int i = 0; i < MAX_FILES; i++) t->fd_table[i] = -1;
     if (parent) {
         vfs_proc_copy_fds(parent->fd_table, t->fd_table);
@@ -155,6 +167,7 @@ static void init_task_common(task_t *t, task_t *parent) {
     }
 }
 
+// 分配一个内核线程
 int proc_alloc(void (*entry)(void)) {
     task_t *t = alloc_task_slot();
     if (!t) return -EAGAIN;
@@ -179,8 +192,8 @@ int proc_alloc(void (*entry)(void)) {
     ctx->ra   = (uint64_t)entry;
     ctx->tp   = (uint64_t)t;
     t->pgdir  = kernel_pgdir_shared;
-    ctx->satp = kernel_pgdir_shared ? MAKE_SATP(kernel_pgdir_shared) : 0;
-    ctx->sstatus = SSTATUS_SIE;
+    TASK_CTX_PAGE_TABLE(ctx) = kernel_pgdir_shared ? arch_make_satp(kernel_pgdir_shared) : 0;
+    TASK_CTX_STATUS(ctx) = SSTATUS_SIE;
     t->kstack_base = stack;
     t->kstack = (uint64_t)ctx;
 
@@ -189,6 +202,7 @@ int proc_alloc(void (*entry)(void)) {
 }
 
 /* Allocate a user-mode task with given entry point and stack */
+// 分配一个用户态任务
 int proc_alloc_user(uint64_t entry, uint64_t sp, uint64_t *pgdir) {
     task_t *t = alloc_task_slot();
     if (!t) return -EAGAIN;
@@ -213,10 +227,9 @@ int proc_alloc_user(uint64_t entry, uint64_t sp, uint64_t *pgdir) {
 
     trap_context_t *trap = (trap_context_t *)(ks_top - sizeof(trap_context_t));
     memset(trap, 0, sizeof(*trap));
-    trap->sepc   = entry;
-    trap->x[0]   = pgdir ? MAKE_SATP(pgdir) : 0;
-    trap->x[2]   = sp;
-    trap->sstatus = SSTATUS_SPIE | SSTATUS_FS_CLEAN;
+    TRAP_CTX_EPC(trap)   = entry;
+    TRAP_CTX_SP(trap)   = sp;
+    TRAP_CTX_STATUS(trap) = SSTATUS_SPIE | SSTATUS_FS_CLEAN;
     trap->kernel_tp = (uint64_t)(uintptr_t)t;
 
     t->trap_ctx = trap;
@@ -240,16 +253,14 @@ int proc_alloc_user(uint64_t entry, uint64_t sp, uint64_t *pgdir) {
 
     task_context_t *ctx = (task_context_t *)((uint64_t)trap - sizeof(task_context_t));
     memset(ctx, 0, sizeof(*ctx));
-    extern void user_trap_return(void);
     ctx->ra   = (uint64_t)user_trap_return;
     ctx->tp   = (uint64_t)t;
-    ctx->satp = pgdir ? MAKE_SATP(pgdir) : 0;
-    ctx->sstatus = SSTATUS_SIE;
+    TASK_CTX_PAGE_TABLE(ctx) = pgdir ? arch_make_satp(pgdir) : 0;
+    TASK_CTX_STATUS(ctx) = SSTATUS_SPIE | SSTATUS_FS_CLEAN;
     t->kstack = (uint64_t)ctx;
 
-    kdebug("[PROC] user task pid=%d entry=0x%lx sp=0x%lx pgdir=0x%lx\n", t->pid,
-          (unsigned long)entry, (unsigned long)sp,
-          (unsigned long)(uintptr_t)pgdir);
+    kinfo("[PROC] user task pid=%d entry=0x%lx sp=0x%lx\n", t->pid,
+          (unsigned long)entry, (unsigned long)sp);
 
     t->state = PROC_READY;
     return t->pid;
@@ -259,6 +270,7 @@ int proc_alloc_user(uint64_t entry, uint64_t sp, uint64_t *pgdir) {
  * Clone (fork)
  * ============================================================ */
 
+// 克隆当前进程（fork 系统调用的实现）
 int proc_clone(uint64_t flags, uint64_t stack, int *ptid, int *ctid, uint64_t tls) {
     (void)flags; (void)ptid; (void)ctid; (void)tls;
 
@@ -308,18 +320,16 @@ int proc_clone(uint64_t flags, uint64_t stack, int *ptid, int *ctid, uint64_t tl
     if (parent->trap_ctx) {
         trap_context_t *trap = (trap_context_t *)(ks_top - sizeof(trap_context_t));
         *trap = *parent->trap_ctx;
-        trap->x[0]  = t->pgdir ? MAKE_SATP(t->pgdir) : 0;
-        trap->x[10] = 0;
+        TRAP_CTX_ARG0(trap) = 0;
         trap->kernel_tp = (uint64_t)(uintptr_t)t;
         t->trap_ctx = trap;
         t->ustack = stack ? stack : parent->ustack;
-        if (stack) trap->x[2] = stack;
+        if (stack) TRAP_CTX_SP(trap) = stack;
 
         task_context_t *ctx = (task_context_t *)((uint64_t)trap - sizeof(task_context_t));
-        extern void user_trap_return(void);
         ctx->ra   = (uint64_t)user_trap_return;
         ctx->tp   = (uint64_t)t;
-        ctx->satp = t->pgdir ? MAKE_SATP(t->pgdir) : 0;
+        TASK_CTX_PAGE_TABLE(ctx) = t->pgdir ? arch_make_satp(t->pgdir) : 0;
         t->kstack = (uint64_t)ctx;
     } else {
         task_context_t *ctx = (task_context_t *)(ks_top - sizeof(task_context_t));
@@ -336,6 +346,7 @@ int proc_clone(uint64_t flags, uint64_t stack, int *ptid, int *ctid, uint64_t tl
  * Exec — replace process image with ELF
  * ============================================================ */
 
+// 执行新的程序（execve 系统调用的实现）
 int proc_exec(const char *path, char *const argv[], char *const envp[]) {
     task_t *t = current_task;
     int fd = vfs_open(path, O_RDONLY, 0);
@@ -417,7 +428,7 @@ int proc_exec(const char *path, char *const argv[], char *const envp[]) {
             vfs_lseek(fd, 0, SEEK_SET);
             char buf[128];
             int n = vfs_read(fd, buf, sizeof(buf) - 1);
-            if (n >= 2 && buf[0] == '#' && buf[1] == '!') {
+            if (n >= 2 && buf[0] == '#' && buf[1] == '!') { // 有必要吗？也许shell会完成
                 buf[n] = '\0';
                 char *cp = buf + 2;
                 while (*cp == ' ' || *cp == '\t') ++cp;
@@ -515,10 +526,9 @@ int proc_exec(const char *path, char *const argv[], char *const envp[]) {
         trap_context_t *trap = (trap_context_t *)(ks_top - sizeof(trap_context_t));
         task_context_t *ctx  = (task_context_t *)((uint64_t)trap - sizeof(task_context_t));
         memset(ctx, 0, sizeof(*ctx));
-        extern void user_trap_return(void);
         ctx->ra = (uint64_t)user_trap_return;
         ctx->tp = (uint64_t)(uintptr_t)t;
-        ctx->satp = MAKE_SATP(info.pgdir);
+        TASK_CTX_PAGE_TABLE(ctx) = arch_make_satp(info.pgdir);
         t->trap_ctx = trap;
         t->kstack   = (uint64_t)ctx;
     }
@@ -526,18 +536,16 @@ int proc_exec(const char *path, char *const argv[], char *const envp[]) {
     {
         trap_context_t *trap = t->trap_ctx;
         memset(trap, 0, sizeof(*trap));
-        trap->sepc      = saved_entry;
-        trap->x[0]      = MAKE_SATP(info.pgdir);
-        trap->x[2]      = saved_sp;
-        trap->x[4]      = info.tls_tp;
+        TRAP_CTX_EPC(trap)      = saved_entry;
+        TRAP_CTX_SP(trap)      = saved_sp;
+        TRAP_CTX_TP(trap)      = info.tls_tp;
         trap->kernel_tp = (uint64_t)(uintptr_t)t;
-        trap->sstatus   = SSTATUS_SPIE | SSTATUS_FS_CLEAN;
+        TRAP_CTX_STATUS(trap)   = SSTATUS_SPIE | SSTATUS_FS_CLEAN;
 
         task_context_t *ctx = (task_context_t *)((uint64_t)trap - sizeof(task_context_t));
-        extern void user_trap_return(void);
         ctx->ra   = (uint64_t)user_trap_return;
         ctx->tp   = (uint64_t)(uintptr_t)t;
-        ctx->satp = MAKE_SATP(info.pgdir);
+        TASK_CTX_PAGE_TABLE(ctx) = arch_make_satp(info.pgdir);
     }
 
     t->exec_load_addr = info.load_addr;
@@ -553,7 +561,7 @@ int proc_exec(const char *path, char *const argv[], char *const envp[]) {
 
     kfree(k_path);
 
-    __asm__ volatile("fence.i" ::: "memory");
+    arch_fence_i();
 
     t->state = PROC_RUNNING;
     return 0;
@@ -563,6 +571,7 @@ int proc_exec(const char *path, char *const argv[], char *const envp[]) {
  * Free / Exit
  * ============================================================ */
 
+// 释放指定 PID 的进程资源
 void proc_free_pid(int pid) {
     task_t *t = proc_find(pid);
     if (!t) return;
@@ -584,6 +593,8 @@ void proc_free_pid(int pid) {
     memset(t, 0, sizeof(*t));
 }
 
+// 进程退出（exit 系统调用的实现）
+// SIGCHLD
 void proc_exit(int exit_code) {
     task_t *t = current_task;
     if (!t) panic("proc_exit: no current task");
@@ -625,6 +636,7 @@ void proc_exit(int exit_code) {
  * Wait4
  * ============================================================ */
 
+// 等待子进程结束（wait4 系统调用的实现）
 int proc_wait4(int pid, int *status, int options) {
     task_t *t = current_task;
 
@@ -657,6 +669,8 @@ retry:;
     }
 
     if (!found) return -ECHILD;
+    // 设置WNOHANG就非阻塞wait
+    // 非阻塞wait还叫wait吗？
     if (options & WNOHANG) return 0;
 
     /* Block until a child exits */
@@ -673,6 +687,7 @@ int proc_wait(int *status) {
  * Kill
  * ============================================================ */
 
+// 向指定进程发送信号（kill 系统调用的实现）
 int proc_kill(int pid, int signum) {
     return signal_send(pid, signum);
 }
@@ -681,6 +696,7 @@ int proc_kill_pgid(int pgid, int signum, int skip_self) {
     if (signum <= 0 || signum >= NSIG) return -EINVAL;
     task_t *self = current_task;
     int count = 0;
+    // 向进程组中的所有进程发送信号
     for (int i = 1; i < MAX_PROCS; i++) {
         task_t *t = &proc_table[i];
         if (t->state == PROC_UNUSED) continue;
@@ -696,12 +712,14 @@ int proc_kill_pgid(int pgid, int signum, int skip_self) {
  * Scheduler
  * ============================================================ */
 
+// 上下文切换到指定任务
 void context_switch(task_t *next) {
     current_task = next;
     next->state  = PROC_RUNNING;
     __switch(next->kstack);
 }
 
+// 调度器：选择下一个运行的任务
 void sched(void) {
     uint64_t now = timer_get_ticks();
     int cur_idx  = -1;
@@ -744,6 +762,7 @@ void sched(void) {
     }
 }
 
+// 主动让出 CPU（yield 系统调用的实现）
 void proc_yield(void) {
     if (current_task && current_task->state == PROC_RUNNING)
         current_task->state = PROC_READY;
@@ -754,12 +773,14 @@ void proc_yield(void) {
  * mmap / brk
  * ============================================================ */
 
+// 调整堆大小（brk 系统调用的实现）
 uint64_t proc_brk(uint64_t newbrk) {
     task_t *t = current_task;
     if (!t || !t->mm) return -1;
     return mm_brk(t->mm, newbrk);
 }
 
+// 创建内存映射（mmap 系统调用的实现）
 uint64_t proc_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, long off) {
     (void)fd; (void)off;
     task_t *t = current_task;
@@ -767,12 +788,14 @@ uint64_t proc_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, long 
     return mm_mmap(t->mm, addr, len, prot, flags);
 }
 
+// 取消内存映射（munmap 系统调用的实现）
 int proc_munmap(uint64_t addr, size_t len) {
     task_t *t = current_task;
     if (!t || !t->mm) return -1;
     return mm_munmap(t->mm, addr, len);
 }
 
+// 打印所有进程信息
 void proc_dump(void) {
     printf("  PID  PPID  STATE  PRI  NAME\n");
     for (int i = 0; i < MAX_PROCS; i++) {

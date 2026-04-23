@@ -1,12 +1,8 @@
-/* LoongArch64 Linker Script
- * Kernel loaded at 0x200000 physical (QEMU loongarch64 virt default)
- */
-
 OUTPUT_ARCH(loongarch)
 ENTRY(_start)
 
 SECTIONS {
-    . = 0x200000;
+    . = 0x80000000;
 
     .text : {
         *(.text.entry)
@@ -25,18 +21,18 @@ SECTIONS {
     }
 
     . = ALIGN(4096);
-    .bss : {
-        __bss_start = .;
+    .bss (NOLOAD) : {
+        _bss_start = .;
         *(.bss .bss.*)
         *(.sbss .sbss.*)
+        *(COMMON)
         *(.bss.stack)
         . = ALIGN(4096);
-        __bss_end = .;
+        _bss_end = .;
     }
 
     _end = .;
 
-    /* Discard unnecessary sections */
     /DISCARD/ : {
         *(.comment)
         *(.note*)

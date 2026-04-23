@@ -11,19 +11,7 @@ void *frame_alloc(void);
 void frame_free(void *addr);
 size_t frame_free_count(void);
 
-/* SV39 page table helpers */
-#define SV39_LEVELS     3
-#define SV39_VPN_BITS   9
-#define SV39_VPN_MASK   0x1FF
-#define SV39_VPN(va, lvl) (((va) >> (12 + 9 * (lvl))) & SV39_VPN_MASK)
-#define SV39_PTE_PPN(pte) (((pte) >> 10) & 0x3FFFFFFFFFFFFFUL)
-#define SV39_PTE_ADDR(pte) (SV39_PTE_PPN(pte) << 12)
-#define PTE_FROM_PA(pa)  (((uint64_t)(pa) >> 12) << 10)
-
-/* PTE entries store physical addresses. Use this to get a kernel VA pointer. */
-#define PTE_TO_PTR(pte)  ((uint64_t *)((uint64_t)SV39_PTE_ADDR(pte) + PAGE_OFFSET))
-
-extern uint64_t boot_pgdir[512];
+/* Page table helpers and boot_pgdir are in arch/mm.h and arch/platform.h */
 
 #define PA2PFN(pa) ((paddr_t)(pa) >> PAGE_SIZE_BITS)
 #define PFN2PA(pfn) ((paddr_t)(pfn) << PAGE_SIZE_BITS)

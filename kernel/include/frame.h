@@ -3,6 +3,7 @@
 
 #include "types.h"
 #include "consts.h"
+#include "arch.h"
 
 /*
  * A20OS Buddy Physical Frame Allocator
@@ -56,7 +57,9 @@ void   frame_get(pfn_t pfn);
 void   frame_put(pfn_t pfn);
 size_t pfa_free_count(void);
 
-/* Address helpers — identity-mapped mode: pfn 0 ↔ PA 0x80000000 */
+// 内核使用恒等映射
+// 虚拟地址 (VA)，物理地址 (PA)和页帧号 (PFN) 的辅助函数
+
 static inline void *pfn_to_virt(pfn_t pfn) {
     return (void *)(PAGE_OFFSET + PHYS_MEMORY_BASE + ((paddr_t)pfn << PAGE_SIZE_BITS));
 }

@@ -5,7 +5,7 @@
 #include "virtio_blk.h"
 
 #define BCACHE_BLOCK_SIZE   512
-#define BCACHE_MAX_BLOCKS   8192
+#define BCACHE_MAX_BLOCKS   64
 
 typedef struct bcache_entry {
     uint64_t    lba;

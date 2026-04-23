@@ -2,9 +2,9 @@ ARCH ?= riscv64
 CONTEST ?= 0
 
 MUSL_BASE  := $(shell pwd)/external/musl
-MUSL_BUILD := $(MUSL_BASE)/build-riscv64
 
 ifeq ($(ARCH), riscv64)
+MUSL_BUILD := $(MUSL_BASE)/build-riscv64
 CROSS_COMPILE ?= riscv64-unknown-elf-
 
 MUSL_CRT  := $(MUSL_BUILD)/lib
@@ -18,7 +18,7 @@ CFLAGS  = -Wall -Wextra -O2 -ffreestanding -nostdinc $(MUSL_INC) \
 LDFLAGS = -static -nostdlib -Ttext 0x10000
 
 GCC_VER := $(shell $(CROSS_COMPILE)gcc -dumpversion 2>/dev/null)
-LIBGCC  := $(shell $(CROSS_COMPILE)gcc -print-libgcc-file-name 2>/dev/null)
+LIBGCC  := $(shell $(CROSS_COMPILE)gcc $(CFLAGS) -print-libgcc-file-name 2>/dev/null)
 
 LIB_A20OS := lib/brk.o
 CRT_START = $(MUSL_CRT)/crt1.o $(MUSL_CRT)/crti.o
@@ -26,13 +26,26 @@ CRT_END   = $(MUSL_CRT)/crtn.o
 LIBC      = $(LIB_A20OS) $(MUSL_CRT)/libc.a $(LIBGCC)
 
 else ifeq ($(ARCH), loongarch64)
-CROSS_COMPILE ?= loongarch64-unknown-elf-
-CFLAGS = -Wall -Wextra -O2 -fno-builtin -nostdlib -mabi=lp64d -march=loongarch64 -I./lib
-LDFLAGS = -static -nostdlib -Ttext 0x10000
+MUSL_BUILD := $(MUSL_BASE)/build-loongarch64
+CROSS_COMPILE ?= loongarch64-linux-gnu-
 
-CRT_START = lib/crt0.o lib/syscall.o lib/libc.o
-CRT_END   =
-LIBC      =
+MUSL_CRT  := $(MUSL_BUILD)/lib
+MUSL_INC  := -isystem $(MUSL_BUILD)/obj/include \
+             -isystem $(MUSL_BASE)/include \
+             -isystem $(MUSL_BASE)/arch/loongarch64 \
+             -isystem $(MUSL_BASE)/arch/generic
+
+CFLAGS  = -Wall -Wextra -O2 -ffreestanding -nostdinc $(MUSL_INC) \
+          -mabi=lp64d -march=loongarch64 -mcmodel=normal -fno-pic
+LDFLAGS = -static -nostdlib -Ttext 0x10000 -no-pie
+
+GCC_VER := $(shell $(CROSS_COMPILE)gcc -dumpversion 2>/dev/null)
+LIBGCC  := $(shell $(CROSS_COMPILE)gcc $(CFLAGS) -print-libgcc-file-name 2>/dev/null)
+
+LIB_A20OS := lib/brk.o
+CRT_START = $(MUSL_CRT)/crt1.o $(MUSL_CRT)/crti.o
+CRT_END   = $(MUSL_CRT)/crtn.o
+LIBC      = $(LIB_A20OS) $(MUSL_CRT)/libc.a $(LIBGCC)
 
 endif
 
@@ -89,8 +102,8 @@ $(MKSH_DIR)/%.o: $(MKSH_DIR)/%.c
 ifeq ($(CONTEST),1)
 build/init: shell/init_nolib.c
 	$(CC) -Wall -Wextra -O2 -ffreestanding -fno-builtin -nostdlib -nostartfiles \
-	      -mabi=lp64 -march=rv64g -mcmodel=medany -c $< -o build/init.o
-	$(CC) -static -nostdlib -nostartfiles -Ttext 0x10000 -o $@ build/init.o $(LIBGCC)
+	      $(CFLAGS) -c $< -o build/init.o
+	$(CC) -static -nostdlib -nostartfiles -Ttext 0x10000 $(ARCH_LDFLAGS) -o $@ build/init.o $(LIBGCC)
 else
 build/init: shell/init.c $(LIB_A20OS)
 	$(CC) $(CFLAGS) -c $< -o build/init.o
