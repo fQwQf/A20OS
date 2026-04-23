@@ -30,15 +30,16 @@
  * ============================================================ */
 #define GFILE_MAX   VFS_MAX_OPEN
 
-static vfile_t *g_files[GFILE_MAX];
+static vfile_t *g_files[GFILE_MAX];  // 全局文件表
 
 /* Mount table (simple linear) */
 #define MAX_MOUNTS  8
-static mount_t g_mounts[MAX_MOUNTS];
-static int     g_nmounts = 0;
+static mount_t g_mounts[MAX_MOUNTS];  // 挂载表
+static int     g_nmounts = 0;  // 已挂载数量
 
 /* ---- File descriptor allocation ---- */
 
+// 分配全局文件描述符
 int vfs_alloc_fd(vfile_t *vf) {
     /* Find slot in global file table */
     int gfd = -1;
@@ -48,10 +49,12 @@ int vfs_alloc_fd(vfile_t *vf) {
     return gfd;
 }
 
+// 释放全局文件描述符
 static void vfs_free_gfd(int gfd) {
     if (gfd >= 0 && gfd < GFILE_MAX) g_files[gfd] = NULL;
 }
 
+// 获取文件描述符对应的 vfile
 vfile_t *vfs_get_file(int fd) {
     if (fd < 0 || fd >= GFILE_MAX) return NULL;
     return g_files[fd];
@@ -63,6 +66,7 @@ vfile_t *vfs_get_file(int fd) {
  * For simplicity, the per-process fd IS the global gfd.
  * ============================================================ */
 
+// 初始化进程的文件描述符表
 void vfs_proc_init_fds(int *fd_table) {
     for (int i = 0; i < MAX_FILES; i++) fd_table[i] = -1;
     fd_table[0] = 0; if (g_files[0]) g_files[0]->ref_count++;
@@ -70,12 +74,14 @@ void vfs_proc_init_fds(int *fd_table) {
     fd_table[2] = 2; if (g_files[2]) g_files[2]->ref_count++;
 }
 
+// 初始化进程的标准 I/O 文件描述符（如果未设置）
 void vfs_proc_init_stdio_defaults(int *fd_table) {
     if (fd_table[0] < 0) { fd_table[0] = 0; if (g_files[0]) g_files[0]->ref_count++; }
     if (fd_table[1] < 0) { fd_table[1] = 1; if (g_files[1]) g_files[1]->ref_count++; }
     if (fd_table[2] < 0) { fd_table[2] = 2; if (g_files[2]) g_files[2]->ref_count++; }
 }
 
+// 复制进程文件描述符表（用于 fork）
 void vfs_proc_copy_fds(const int *src, int *dst) {
     for (int i = 0; i < MAX_FILES; i++) {
         dst[i] = src[i];
