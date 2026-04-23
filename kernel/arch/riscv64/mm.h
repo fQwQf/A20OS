@@ -22,6 +22,10 @@
 #define PTE_D    (1UL << 7)
 #define PTE_COW  (1UL << 8)
 
+/* LoongArch compat aliases — no hardware equivalent on RISC-V */
+#define PTE_MAT1  0UL
+#define PTE_LEAF  0UL
+
 #define PTE_KERN (PTE_V | PTE_R | PTE_W | PTE_X)
 #define PTE_USER (PTE_V | PTE_R | PTE_W | PTE_X | PTE_U)
 
