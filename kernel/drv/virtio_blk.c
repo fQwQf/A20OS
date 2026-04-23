@@ -1,12 +1,11 @@
 #include "virtio_blk.h"
+#include "virtio_transport.h"
 #include "mm.h"
 #include "string.h"
 #include "stdio.h"
 #include "panic.h"
 #include "defs.h"
 #include "consts.h"
-
-#define VIRTIO0_BASE    VIRTIO_BASE
 
 #define VQ_SIZE  VIRTIO_QUEUE_SIZE
 
@@ -17,6 +16,7 @@ static inline uint64_t va_to_pa(const void *va) {
 typedef struct {
     virtio_blk_t       blk;
     block_dev_t        blk_dev;
+    virtio_transport_t vt;
     virtq_desc_t       desc[VIRTIO_QUEUE_SIZE]  ALIGNED(16);
     virtq_avail_t      avail                    ALIGNED(2);
     virtq_used_t       used                     ALIGNED(4);
@@ -29,15 +29,8 @@ typedef struct {
 static virtio_blk_inst_t g_insts[VIRTIO_MAX_DEVS];
 static int g_ninst = 0;
 
-static uint32_t mmio_read32(uintptr_t base, uint32_t off) {
-    return *(volatile uint32_t *)(base + off);
-}
-
-static void mmio_write32(uintptr_t base, uint32_t off, uint32_t val) {
-    *(volatile uint32_t *)(base + off) = val;
-}
-
 int virtio_blk_init(uintptr_t mmio_base) {
+    (void)mmio_base;
     if (g_ninst >= VIRTIO_MAX_DEVS) {
         printf("[VIRTIO] Too many devices (max %d)\n", VIRTIO_MAX_DEVS);
         return -1;
@@ -45,78 +38,60 @@ int virtio_blk_init(uintptr_t mmio_base) {
 
     int idx = g_ninst;
     virtio_blk_inst_t *inst = &g_insts[idx];
-    uintptr_t base = mmio_base ? mmio_base : (VIRTIO0_BASE + (unsigned long)idx * 0x1000);
-    volatile uint32_t *regs = (volatile uint32_t *)base;
 
-    inst->blk.base  = regs;
+    if (arch_virtio_blk_probe(idx, &inst->vt) != 0) {
+        printf("[VIRTIO%d] Probe failed\n", idx);
+        return -1;
+    }
+
+    virtio_transport_t *vt = &inst->vt;
     inst->blk.valid = 0;
     inst->slot      = idx;
+    inst->blk.legacy = vt->legacy;
 
-    uint32_t magic   = mmio_read32(base, VIRTIO_MMIO_MAGIC);
-    uint32_t version = mmio_read32(base, VIRTIO_MMIO_VERSION);
-    uint32_t dev_id  = mmio_read32(base, VIRTIO_MMIO_DEVICE_ID);
+    printf("[VIRTIO%d] Found block device (legacy=%d)\n", idx, vt->legacy);
 
-    if (magic != 0x74726976) {
-        printf("[VIRTIO%d] Bad magic: 0x%x\n", idx, magic);
-        return -1;
-    }
-    if (version != 1 && version != 2) {
-        printf("[VIRTIO%d] Unsupported version: %d\n", idx, version);
-        return -1;
-    }
-    inst->blk.legacy = (version == 1);
-    if (dev_id != 2) {
-        printf("[VIRTIO%d] Not a block device: dev_id=%d\n", idx, dev_id);
-        return -1;
-    }
-
-    printf("[VIRTIO%d] Found block device at 0x%lx (version %d)\n",
-           idx, (unsigned long)base, version);
-
-    mmio_write32(base, VIRTIO_MMIO_STATUS, 0);
+    vt->write32(vt, VIRTIO_MMIO_STATUS, 0);
     mb();
 
     uint32_t status = VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER;
-    mmio_write32(base, VIRTIO_MMIO_STATUS, status);
+    vt->write32(vt, VIRTIO_MMIO_STATUS, status);
     mb();
 
-    mmio_write32(base, VIRTIO_MMIO_DEVICE_FEATURES_SEL, 0);
-    mmio_read32(base, VIRTIO_MMIO_DEVICE_FEATURES);
-    mmio_write32(base, VIRTIO_MMIO_DRIVER_FEATURES_SEL, 0);
-    mmio_write32(base, VIRTIO_MMIO_DRIVER_FEATURES, 0);
+    vt->write32(vt, VIRTIO_MMIO_DEVICE_FEATURES_SEL, 0);
+    vt->read32(vt, VIRTIO_MMIO_DEVICE_FEATURES);
+    vt->write32(vt, VIRTIO_MMIO_DRIVER_FEATURES_SEL, 0);
+    vt->write32(vt, VIRTIO_MMIO_DRIVER_FEATURES, 0);
 
-    /* Negotiate feature bits 32-63 — MUST accept VIRTIO_F_VERSION_1 (bit 32)
-     * for non-legacy (v2) devices, otherwise QEMU's virtio core may silently
-     * reject requests or behave unpredictably. */
-    mmio_write32(base, VIRTIO_MMIO_DEVICE_FEATURES_SEL, 1);
-    uint32_t features_hi = mmio_read32(base, VIRTIO_MMIO_DEVICE_FEATURES);
+    vt->write32(vt, VIRTIO_MMIO_DEVICE_FEATURES_SEL, 1);
+    uint32_t features_hi = vt->read32(vt, VIRTIO_MMIO_DEVICE_FEATURES);
     uint32_t driver_hi = 0;
     if (!inst->blk.legacy) {
         driver_hi = features_hi & VIRTIO_F_VERSION_1_BIT;
     }
-    mmio_write32(base, VIRTIO_MMIO_DRIVER_FEATURES_SEL, 1);
-    mmio_write32(base, VIRTIO_MMIO_DRIVER_FEATURES, driver_hi);
+    vt->write32(vt, VIRTIO_MMIO_DRIVER_FEATURES_SEL, 1);
+    vt->write32(vt, VIRTIO_MMIO_DRIVER_FEATURES, driver_hi);
     mb();
 
     if (!inst->blk.legacy) {
         status |= VIRTIO_STATUS_FEATURES_OK;
-        mmio_write32(base, VIRTIO_MMIO_STATUS, status);
+        vt->write32(vt, VIRTIO_MMIO_STATUS, status);
         mb();
-        uint32_t s = mmio_read32(base, VIRTIO_MMIO_STATUS);
+        uint32_t s = vt->read32(vt, VIRTIO_MMIO_STATUS);
         if (!(s & VIRTIO_STATUS_FEATURES_OK)) {
-            printf("[VIRTIO%d] Device rejected features (lo=0x%x hi=0x%x)\n",
-                   idx, 0, driver_hi);
+            printf("[VIRTIO%d] Device rejected features (hi=0x%x)\n",
+                   idx, driver_hi);
             return -1;
         }
     }
 
-    mmio_write32(base, VIRTIO_MMIO_QUEUE_SEL, 0);
-    uint32_t qmax = mmio_read32(base, VIRTIO_MMIO_QUEUE_NUM_MAX);
+    vt->write32(vt, VIRTIO_MMIO_QUEUE_SEL, 0);
+    uint32_t qmax = vt->read32(vt, VIRTIO_MMIO_QUEUE_NUM_MAX);
     if (qmax == 0 || qmax < VIRTIO_QUEUE_SIZE) {
         printf("[VIRTIO%d] Queue max too small: %d\n", idx, qmax);
         return -1;
     }
-    mmio_write32(base, VIRTIO_MMIO_QUEUE_NUM, VIRTIO_QUEUE_SIZE);
+    vt->write32(vt, VIRTIO_MMIO_QUEUE_NUM, VIRTIO_QUEUE_SIZE);
 
     memset(inst->desc,    0, sizeof(inst->desc));
     memset(&inst->avail,  0, sizeof(inst->avail));
@@ -138,32 +113,32 @@ int virtio_blk_init(uintptr_t mmio_base) {
         inst->blk.used  = l_used;
 
         uint64_t vq_pa = va_to_pa(inst->legacy_vq);
-        mmio_write32(base, VIRTIO_MMIO_GUEST_PAGE_SIZE, 4096);
+        vt->write32(vt, VIRTIO_MMIO_GUEST_PAGE_SIZE, 4096);
         mb();
-        mmio_write32(base, VIRTIO_MMIO_QUEUE_PFN, (uint32_t)(vq_pa / 4096));
+        vt->write32(vt, VIRTIO_MMIO_QUEUE_PFN, (uint32_t)(vq_pa / 4096));
         mb();
     } else {
         uint64_t desc_pa  = va_to_pa(inst->desc);
         uint64_t avail_pa = va_to_pa(&inst->avail);
         uint64_t used_pa  = va_to_pa(&inst->used);
 
-        mmio_write32(base, VIRTIO_MMIO_QUEUE_DESC_LOW,   (uint32_t)(desc_pa));
-        mmio_write32(base, VIRTIO_MMIO_QUEUE_DESC_HIGH,  (uint32_t)(desc_pa  >> 32));
-        mmio_write32(base, VIRTIO_MMIO_QUEUE_DRIVER_LOW, (uint32_t)(avail_pa));
-        mmio_write32(base, VIRTIO_MMIO_QUEUE_DRIVER_HIGH,(uint32_t)(avail_pa >> 32));
-        mmio_write32(base, VIRTIO_MMIO_QUEUE_DEVICE_LOW, (uint32_t)(used_pa));
-        mmio_write32(base, VIRTIO_MMIO_QUEUE_DEVICE_HIGH,(uint32_t)(used_pa  >> 32));
+        vt->write32(vt, VIRTIO_MMIO_QUEUE_DESC_LOW,   (uint32_t)(desc_pa));
+        vt->write32(vt, VIRTIO_MMIO_QUEUE_DESC_HIGH,  (uint32_t)(desc_pa  >> 32));
+        vt->write32(vt, VIRTIO_MMIO_QUEUE_DRIVER_LOW, (uint32_t)(avail_pa));
+        vt->write32(vt, VIRTIO_MMIO_QUEUE_DRIVER_HIGH,(uint32_t)(avail_pa >> 32));
+        vt->write32(vt, VIRTIO_MMIO_QUEUE_DEVICE_LOW, (uint32_t)(used_pa));
+        vt->write32(vt, VIRTIO_MMIO_QUEUE_DEVICE_HIGH,(uint32_t)(used_pa  >> 32));
         mb();
-        mmio_write32(base, VIRTIO_MMIO_QUEUE_READY, 1);
+        vt->write32(vt, VIRTIO_MMIO_QUEUE_READY, 1);
         mb();
     }
 
     status |= VIRTIO_STATUS_DRIVER_OK;
-    mmio_write32(base, VIRTIO_MMIO_STATUS, status);
+    vt->write32(vt, VIRTIO_MMIO_STATUS, status);
     mb();
 
-    uint64_t cap_lo = mmio_read32(base, VIRTIO_MMIO_CONFIG + 0);
-    uint64_t cap_hi = mmio_read32(base, VIRTIO_MMIO_CONFIG + 4);
+    uint64_t cap_lo = vt->read32(vt, VIRTIO_MMIO_CONFIG + 0);
+    uint64_t cap_hi = vt->read32(vt, VIRTIO_MMIO_CONFIG + 4);
     inst->blk.capacity = cap_lo | (cap_hi << 32);
 
     if (!inst->blk.legacy) {
@@ -195,14 +170,8 @@ static int virtio_blk_rw(int idx, uint64_t lba, void *buf, size_t sectors, int w
     if (!inst->blk.valid) return -1;
 
     size_t bytes = sectors * VIRTIO_BLK_SECTOR_SIZE;
+    virtio_transport_t *vt = &inst->vt;
 
-    /*
-     * Allocate 3 consecutive descriptor slots for the 3-chain request
-     * (header, data, status).  Use the current avail index as the base
-     * slot so that each in-flight request occupies its own slot triplet.
-     * Since virtio_blk_rw is synchronous (busy-waits for completion), the
-     * slot will be free again before the next call reuses it.
-     */
     uint16_t slot = inst->blk.desc_idx % VIRTIO_QUEUE_SIZE;
     if (slot + 2 >= VIRTIO_QUEUE_SIZE)
         slot = 0;
@@ -239,17 +208,16 @@ static int virtio_blk_rw(int idx, uint64_t lba, void *buf, size_t sectors, int w
     inst->blk.desc_idx++;
     wmb();
 
-    mmio_write32((uintptr_t)inst->blk.base, VIRTIO_MMIO_QUEUE_NOTIFY, 0);
+    vt->write32(vt, VIRTIO_MMIO_QUEUE_NOTIFY, 0);
     mb();
 
-    uint32_t timeout = 10000000;
-    while (used->idx == inst->blk.last_used && timeout > 0) {
-        timeout--;
+    uint32_t timeout = 0x0FFFFFFF;
+    while (((volatile virtq_used_t *)used)->idx == inst->blk.last_used && timeout > 0) {        timeout--;
         __asm__ volatile("nop");
     }
 
     if (timeout == 0) {
-        uint32_t dev_status = mmio_read32((uintptr_t)inst->blk.base, VIRTIO_MMIO_STATUS);
+        uint32_t dev_status = vt->read32(vt, VIRTIO_MMIO_STATUS);
         printf("[VIRTIO%d] I/O timeout! lba=%lu dev_status=0x%x\n",
                idx, (unsigned long)lba, dev_status);
         return -1;

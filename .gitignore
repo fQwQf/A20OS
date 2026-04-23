@@ -8,3 +8,4 @@ user/build/
 .vscode/
 kernel-rv
 kernel-la
+.DS_Store

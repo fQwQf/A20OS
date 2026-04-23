@@ -11,15 +11,18 @@
 #include "stdio.h"
 #include "klog.h"
 
+// 初始化信号状态
 void signal_init(signal_state_t *ss) {
     memset(ss, 0, sizeof(*ss));
 }
 
+// 复制信号状态（用于 fork 时继承父进程的信号处理函数）
 void signal_copy(const signal_state_t *src, signal_state_t *dst) {
     memcpy(dst, src, sizeof(*dst));
-    dst->pending = 0;
+    dst->pending = 0;  // 子进程不继承未处理的信号
 }
 
+// 向指定进程发送信号
 int signal_send(int pid, int signum) {
     if (signum <= 0 || signum >= NSIG) return -EINVAL;
     task_t *t = proc_find(pid);
@@ -39,6 +42,7 @@ int signal_send(int pid, int signum) {
     return 0;
 }
 
+// 传递信号（内核线程使用）
 void signal_deliver(void) {
     task_t *t = proc_current();
     if (!t || !t->signals) return;
@@ -87,6 +91,7 @@ void signal_deliver(void) {
     }
 }
 
+// 传递信号到用户空间（用户进程使用）
 void signal_deliver_user(trap_context_t *ctx) {
     task_t *t = proc_current();
     if (!t || !t->signals || !t->pgdir) return;
@@ -122,21 +127,27 @@ void signal_deliver_user(trap_context_t *ctx) {
         ss->blocked |= sa->sa_mask;
         ss->blocked |= (1ULL << sig);
 
-        uint64_t sp = ctx->x[2];
+        uint64_t sp = TRAP_CTX_SP(ctx);
         sp -= 16;
         sp &= ~15ULL;
         uint32_t *tramp = (uint32_t *)sp;
-        tramp[0] = 0x08b00893;
+#ifdef CONFIG_RISCV64
+        tramp[0] = 0x08b00893; // 硬编码的riscv指令
         tramp[1] = 0x00000073;
-        ctx->x[2] = sp;
+#elif defined(CONFIG_LOONGARCH64)
+        tramp[0] = 0x0380c093;  /* li.w a7, 139 */
+        tramp[1] = 0x00200000;  /* syscall 0 */
+#endif
+        TRAP_CTX_SP(ctx) = sp;
 
-        ctx->sepc = sa->sa_handler;
-        ctx->x[10] = sig;
-        ctx->x[1] = sp;
+        TRAP_CTX_EPC(ctx) = sa->sa_handler;
+        TRAP_CTX_ARG0(ctx) = sig;
+        TRAP_CTX_RA(ctx) = sp;
         return;
     }
 }
 
+// 设置信号处理函数（sigaction 系统调用的实现）
 int sys_sigaction_impl(int signum, const sigaction_t *act, sigaction_t *oldact) {
     if (signum <= 0 || signum >= NSIG) return -EINVAL;
     if (signum == SIGKILL || signum == SIGSTOP) return -EINVAL;
@@ -150,6 +161,7 @@ int sys_sigaction_impl(int signum, const sigaction_t *act, sigaction_t *oldact) 
     return 0;
 }
 
+// 修改信号掩码（sigprocmask 系统调用的实现）
 int sys_sigprocmask_impl(int how, const uint64_t *set, uint64_t *oldset) {
     task_t *t = proc_current();
     if (!t || !t->signals) return -EINVAL;

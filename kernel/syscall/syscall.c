@@ -47,13 +47,13 @@ static int alloc_local_fd(task_t *t, int gfd) {
 }
 
 int64_t syscall_dispatch(trap_context_t *ctx) {
-    uint64_t num = ctx->x[17];
-    uint64_t a0  = ctx->x[10];
-    uint64_t a1  = ctx->x[11];
-    uint64_t a2  = ctx->x[12];
-    uint64_t a3  = ctx->x[13];
-    uint64_t a4  = ctx->x[14];
-    uint64_t a5  = ctx->x[15];
+    uint64_t num = TRAP_CTX_SYSCALL_NUM(ctx);
+    uint64_t a0  = TRAP_CTX_ARG0(ctx);
+    uint64_t a1  = TRAP_CTX_ARG1(ctx);
+    uint64_t a2  = TRAP_CTX_ARG2(ctx);
+    uint64_t a3  = TRAP_CTX_ARG3(ctx);
+    uint64_t a4  = TRAP_CTX_ARG4(ctx);
+    uint64_t a5  = TRAP_CTX_ARG5(ctx);
     (void)a4; (void)a5;
 
     int64_t ret = -ENOSYS;
@@ -175,7 +175,7 @@ int64_t syscall_dispatch(trap_context_t *ctx) {
         break;
     }
 
-    ctx->x[10] = (uint64_t)ret;
+    TRAP_CTX_SET_RET(ctx, ret);
     signal_deliver_user(ctx);
     return ret;
 }

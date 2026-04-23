@@ -4,7 +4,7 @@
 #include "types.h"
 #include "consts.h"
 
-/* Timer frequency = 10 MHz for QEMU virt */
+/* Timer frequency — provided by arch/platform.h (CLINT_TIMER_FREQ or equivalent) */
 #define TICKS_PER_SEC   CLINT_TIMER_FREQ
 #define MS_TO_TICKS(ms) ((uint64_t)(ms) * TICKS_PER_SEC / 1000)
 #define US_TO_TICKS(us) ((uint64_t)(us) * TICKS_PER_SEC / 1000000)
