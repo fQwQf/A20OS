@@ -117,9 +117,9 @@ void mm_insert_vma(mm_struct_t *mm, vm_area_t *newv) {
 
 // 将保护标志转换为页表项标志
 uint64_t prot_to_pte(int prot) {
-    uint64_t f = PTE_V | PTE_U | PTE_A | PTE_D | PTE_MAT1 | PTE_LEAF;
+    uint64_t f = PTE_V | PTE_U | PTE_A | PTE_MAT1 | PTE_LEAF;
     if (prot & 1) f |= PTE_R;
-    if (prot & 2) f |= PTE_W;
+    if (prot & 2) f |= (PTE_W | PTE_D);
     if (prot & 4) f |= PTE_X;
     if (f & PTE_W) f |= PTE_R;
     return f;

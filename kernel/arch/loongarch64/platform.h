@@ -42,19 +42,23 @@
  *   Interrupts: (1UL << 63) | irq_number
  *   Exceptions: Ecode value
  */
-#define CAUSE_ECALL_U      0x07  /* SYS — syscall instruction */
+#define CAUSE_ECALL_U           0x0B /* SYS (11) — syscall instruction */
 
-#define CAUSE_INSN_MISALIGNED   0xFF /* not defined on LA64 */
-#define CAUSE_INSN_FAULT        0x04 /* ADEF — address error for fetch */
-#define CAUSE_ILLEGAL_INSN      0x09 /* INE — instruction not exist */
-#define CAUSE_BREAKPOINT        0x08 /* BRK — break instruction */
-#define CAUSE_LOAD_MISALIGNED   0xFF /* not defined on LA64 */
-#define CAUSE_LOAD_FAULT        0x05 /* ALE — address error for load */
-#define CAUSE_STORE_MISALIGNED  0xFF /* not defined on LA64 */
-#define CAUSE_STORE_FAULT       0x06 /* ASE — address error for store */
-#define CAUSE_INSN_PAGE_FAULT   0x03 /* PIF — page invalid for fetch */
-#define CAUSE_LOAD_PAGE_FAULT   0x01 /* PIL — page invalid for load */
-#define CAUSE_STORE_PAGE_FAULT  0x02 /* PIS — page invalid for store */
+#define CAUSE_INSN_PAGE_FAULT   0x03 /* PIF (3)  — page invalid for fetch */
+#define CAUSE_LOAD_PAGE_FAULT   0x01 /* PIL (1)  — page invalid for load */
+#define CAUSE_STORE_PAGE_FAULT  0x02 /* PIS (2)  — page invalid for store */
+#define CAUSE_PAGE_MODIFICATION 0x04 /* PME (4)  — Page Modification Exception (用于 COW) */
+
+#define CAUSE_INSN_FAULT        0x08 /* ADEF (8) — address error for fetch */
+#define CAUSE_LOAD_FAULT        0x09 /* ALE (9)  — address error for load/store */
+#define CAUSE_STORE_FAULT       0x09 /* ALE (9)  — address error for load/store */
+
+#define CAUSE_BREAKPOINT        0x0C /* BRK (12) — break instruction */
+#define CAUSE_ILLEGAL_INSN      0x0D /* INE (13) — instruction not exist */
+
+#define CAUSE_INSN_MISALIGNED   0xFF /* not defined directly as single ecode on LA64, merged in ALE/ADEF */
+#define CAUSE_LOAD_MISALIGNED   0xFF /* not defined directly on LA64, merged in ALE */
+#define CAUSE_STORE_MISALIGNED  0xFF /* not defined directly on LA64, merged in ALE */
 
 #define CAUSE_INTR_MASK         (1UL << 63)
 #define CAUSE_CODE_MASK         ((1UL << 63) - 1)
