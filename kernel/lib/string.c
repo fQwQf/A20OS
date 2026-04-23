@@ -69,12 +69,29 @@ int memcmp(const void *s1, const void *s2, size_t n) {
 
 void *memset(void *s, int c, size_t n) {
     unsigned char *p = s;
-    while (n--) *p++ = (unsigned char)c;
+    unsigned char v = (unsigned char)c;
+    /* Word-fill the bulk (8 bytes at a time) */
+    while (n >= 8 && ((uintptr_t)p & 7)) {
+        *p++ = v;
+        n--;
+    }
+    if (n >= 8) {
+        uint64_t w = v;
+        w |= w << 8;  w |= w << 16; w |= w << 32;
+        uint64_t *wp = (uint64_t *)p;
+        while (n >= 8) { *wp++ = w; n -= 8; }
+        p = (unsigned char *)wp;
+    }
+    while (n--) *p++ = v;
     return s;
 }
 
 void *memcpy(void *d, const void *s, size_t n) {
     unsigned char *dp = d; const unsigned char *sp = s;
+    while (n >= 8 && !((uintptr_t)dp & 7) && !((uintptr_t)sp & 7)) {
+        *(uint64_t *)dp = *(const uint64_t *)sp;
+        dp += 8; sp += 8; n -= 8;
+    }
     while (n--) *dp++ = *sp++;
     return d;
 }
