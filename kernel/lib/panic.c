@@ -12,6 +12,5 @@ NORETURN void panic(const char *fmt, ...) {
     uart_puts("\n\nSystem halted.\n");
     va_end(args);
 
-    __asm__ volatile("csrw sie, zero");
-    while (1) __asm__ volatile("wfi");
+    arch_halt();
 }
