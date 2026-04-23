@@ -7,6 +7,7 @@
 
 #include "signal.h"
 #include "proc.h"
+#include "mm.h"
 #include "string.h"
 #include "stdio.h"
 #include "klog.h"
@@ -130,14 +131,15 @@ void signal_deliver_user(trap_context_t *ctx) {
         uint64_t sp = TRAP_CTX_SP(ctx);
         sp -= 16;
         sp &= ~15ULL;
-        uint32_t *tramp = (uint32_t *)sp;
 #ifdef CONFIG_RISCV64
-        tramp[0] = 0x08b00893; // 硬编码的riscv指令
-        tramp[1] = 0x00000073;
+        uint32_t tramp[2] = { 0x08b00893, 0x00000073 };
 #elif defined(CONFIG_LOONGARCH64)
-        tramp[0] = 0x0380c093;  /* li.w a7, 139 */
-        tramp[1] = 0x00200000;  /* syscall 0 */
+        uint32_t tramp[2] = { 0x0380c093, 0x00200000 };
+#else
+        uint32_t tramp[2] = { 0, 0 };
 #endif
+        /* Write signal trampoline to user stack via page table (not direct ptr) */
+        copy_to_user((void *)sp, tramp, sizeof(tramp));
         TRAP_CTX_SP(ctx) = sp;
 
         TRAP_CTX_EPC(ctx) = sa->sa_handler;
@@ -156,8 +158,17 @@ int sys_sigaction_impl(int signum, const sigaction_t *act, sigaction_t *oldact) 
     if (!t || !t->signals) return -EINVAL;
     signal_state_t *ss = (signal_state_t *)t->signals;
 
-    if (oldact) *oldact = ss->actions[signum];
-    if (act)    ss->actions[signum] = *act;
+    if (oldact) {
+        /* Write to user pointer via page table walk, not direct dereference */
+        if (copy_to_user(oldact, &ss->actions[signum], sizeof(sigaction_t)) < 0)
+            return -EFAULT;
+    }
+    if (act) {
+        sigaction_t kact;
+        if (copy_from_user(&kact, act, sizeof(sigaction_t)) < 0)
+            return -EFAULT;
+        ss->actions[signum] = kact;
+    }
     return 0;
 }
 
@@ -167,10 +178,17 @@ int sys_sigprocmask_impl(int how, const uint64_t *set, uint64_t *oldset) {
     if (!t || !t->signals) return -EINVAL;
     signal_state_t *ss = (signal_state_t *)t->signals;
 
-    if (oldset) *oldset = ss->blocked;
+    if (oldset) {
+        /* Write old mask to user pointer via page table walk */
+        if (copy_to_user(oldset, &ss->blocked, sizeof(uint64_t)) < 0)
+            return -EFAULT;
+    }
     if (!set) return 0;
 
-    uint64_t mask = *set & ~((1ULL << SIGKILL) | (1ULL << SIGSTOP));
+    uint64_t mask;
+    if (copy_from_user(&mask, set, sizeof(uint64_t)) < 0)
+        return -EFAULT;
+    mask &= ~((1ULL << SIGKILL) | (1ULL << SIGSTOP));
 
     switch (how) {
         case SIG_BLOCK:   ss->blocked |=  mask; break;

@@ -230,6 +230,7 @@ int proc_alloc_user(uint64_t entry, uint64_t sp, uint64_t *pgdir) {
     TRAP_CTX_EPC(trap)   = entry;
     TRAP_CTX_SP(trap)   = sp;
     TRAP_CTX_STATUS(trap) = SSTATUS_SPIE | SSTATUS_FS_CLEAN;
+    TRAP_CTX_KScratch0(trap) = pgdir ? arch_make_satp(pgdir) : 0;
     trap->kernel_tp = (uint64_t)(uintptr_t)t;
 
     t->trap_ctx = trap;
@@ -321,6 +322,7 @@ int proc_clone(uint64_t flags, uint64_t stack, int *ptid, int *ctid, uint64_t tl
         trap_context_t *trap = (trap_context_t *)(ks_top - sizeof(trap_context_t));
         *trap = *parent->trap_ctx;
         TRAP_CTX_ARG0(trap) = 0;
+        TRAP_CTX_KScratch0(trap) = t->pgdir ? arch_make_satp(t->pgdir) : 0;
         trap->kernel_tp = (uint64_t)(uintptr_t)t;
         t->trap_ctx = trap;
         t->ustack = stack ? stack : parent->ustack;
@@ -330,6 +332,7 @@ int proc_clone(uint64_t flags, uint64_t stack, int *ptid, int *ctid, uint64_t tl
         ctx->ra   = (uint64_t)user_trap_return;
         ctx->tp   = (uint64_t)t;
         TASK_CTX_PAGE_TABLE(ctx) = t->pgdir ? arch_make_satp(t->pgdir) : 0;
+        TASK_CTX_STATUS(ctx) = TRAP_CTX_STATUS(trap);
         t->kstack = (uint64_t)ctx;
     } else {
         task_context_t *ctx = (task_context_t *)(ks_top - sizeof(task_context_t));
@@ -373,7 +376,13 @@ int proc_exec(const char *path, char *const argv[], char *const envp[]) {
     char *k_envp[32] = {0};
     int argc = 0, envc = 0;
 
-    auto int is_kptr(const void *p) { return (uintptr_t)p >= PAGE_OFFSET; }
+    auto int is_kptr(const void *p) {
+#ifdef CONFIG_LOONGARCH64
+        return (uintptr_t)p >= 0x80000000UL;
+#else
+        return (uintptr_t)p >= PAGE_OFFSET;
+#endif
+    }
 
     if (argv) {
         while (argc < 31) {
@@ -423,6 +432,8 @@ int proc_exec(const char *path, char *const argv[], char *const envp[]) {
     elf_load_info_t info;
     memset(&info, 0, sizeof(info));
     int r = elf_load(fd, k_path, &info);
+    kdebug("[EXEC] elf_load returned %d entry=0x%lx pgdir=0x%lx stack=0x%lx\n",
+           r, info.entry, (uint64_t)info.pgdir, info.stack_top);
     if (r < 0) {
         if (r == -ENOEXEC) {
             vfs_lseek(fd, 0, SEEK_SET);
@@ -484,6 +495,7 @@ int proc_exec(const char *path, char *const argv[], char *const envp[]) {
     uint64_t sp = elf_setup_stack(info.stack_top, argc,
                                    (char *const *)k_argv,
                                    (char *const *)k_envp, &info);
+    kdebug("[EXEC] setup_stack sp=0x%lx argc=%d\n", sp, argc);
 
     for(int i=0; i<argc; i++) kfree(k_argv[i]);
     for(int i=0; i<envc; i++) kfree(k_envp[i]);
@@ -536,33 +548,44 @@ int proc_exec(const char *path, char *const argv[], char *const envp[]) {
     {
         trap_context_t *trap = t->trap_ctx;
         memset(trap, 0, sizeof(*trap));
+        TRAP_CTX_KScratch0(trap) = arch_make_satp(info.pgdir);
         TRAP_CTX_EPC(trap)      = saved_entry;
         TRAP_CTX_SP(trap)      = saved_sp;
         TRAP_CTX_TP(trap)      = info.tls_tp;
         trap->kernel_tp = (uint64_t)(uintptr_t)t;
         TRAP_CTX_STATUS(trap)   = SSTATUS_SPIE | SSTATUS_FS_CLEAN;
 
-        task_context_t *ctx = (task_context_t *)((uint64_t)trap - sizeof(task_context_t));
-        ctx->ra   = (uint64_t)user_trap_return;
-        ctx->tp   = (uint64_t)(uintptr_t)t;
-        TASK_CTX_PAGE_TABLE(ctx) = arch_make_satp(info.pgdir);
+        /* Do NOT rewrite task_context_t here — it overlaps with our
+         * own call frame (proc_exec → sys_execve → trap_handler).
+         * The task_context was already set up correctly during fork
+         * (or the first-time branch above) and is no longer consumed
+         * by the context switcher once the task is running. */
     }
 
     t->exec_load_addr = info.load_addr;
     t->exec_load_size = info.load_size;
 
-    /* Destroy old address space (page tables + old mm if any) */
+    kdebug("[EXEC] about to switch satp pgdir=0x%lx old_mm=0x%lx\n", (uint64_t)info.pgdir, (uint64_t)old_mm);
+    arch_write_satp(arch_make_satp(info.pgdir));
+    arch_tlb_flush();
+    kdebug("[EXEC] satp switched OK, old_mm=0x%lx\n", (uint64_t)old_mm);
+
+    /* On RISC-V the CPU fetches instructions through satp,
+     * so we must switch BEFORE destroying old page tables. */
     if (old_mm) {
-        /* old_mm->pgdir was old_pgdir — mm_destroy handles pt_destroy_user */
+        kdebug("[EXEC] mm_destroy enter\n");
         mm_destroy(old_mm);
+        kdebug("[EXEC] mm_destroy done\n");
     } else if (old_pgdir && old_pgdir != kernel_pgdir_shared) {
         pt_destroy_user(old_pgdir);
     }
 
+    kdebug("[EXEC] kfree k_path=%p\n", k_path);
     kfree(k_path);
-
+    kdebug("[EXEC] fence_i\n");
     arch_fence_i();
 
+    kdebug("[EXEC] return entry=0x%lx sp=0x%lx\n", saved_entry, saved_sp);
     t->state = PROC_RUNNING;
     return 0;
 }
@@ -714,9 +737,11 @@ int proc_kill_pgid(int pgid, int signum, int skip_self) {
 
 // 上下文切换到指定任务
 void context_switch(task_t *next) {
+    kdebug("[SCHED] switch to pid=%d kstack=0x%lx\n", next->pid, (unsigned long)next->kstack);
     current_task = next;
     next->state  = PROC_RUNNING;
     __switch(next->kstack);
+    kdebug("[SCHED] returned to pid=%d\n", current_task ? current_task->pid : -1);
 }
 
 // 调度器：选择下一个运行的任务
@@ -743,6 +768,8 @@ void sched(void) {
         /* Skip current task and UNUSED tasks */
         if (t == current_task || t->state == PROC_UNUSED) continue;
         if (t->state == PROC_READY) {
+            kdebug("[SCHED] cur=%d picking pid=%d state=%d\n",
+                   current_task ? current_task->pid : -1, t->pid, t->state);
             context_switch(t);
             return;
         }

@@ -44,6 +44,7 @@
 #define CAUSE_INSN_PAGE_FAULT   12
 #define CAUSE_LOAD_PAGE_FAULT   13
 #define CAUSE_STORE_PAGE_FAULT  15
+#define CAUSE_PAGE_MODIFICATION 0xFF  /* Not a real RISC-V exception; placeholder to satisfy trap.c */
 
 #define CAUSE_INTR_MASK         (1UL << 63)
 #define CAUSE_CODE_MASK         ((1UL << 63) - 1)
