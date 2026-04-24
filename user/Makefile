@@ -43,6 +43,12 @@ ifeq ($(CONTEST),1)
 CFLAGS += -DCONTEST
 endif
 
+ifeq ($(ARCH),riscv64)
+MUSL_DEPS = musl_prepare
+else
+MUSL_DEPS =
+endif
+
 CC = $(CROSS_COMPILE)gcc
 LD = $(CROSS_COMPILE)ld
 OBJCOPY = $(CROSS_COMPILE)objcopy
@@ -88,7 +94,7 @@ build_dir:
 
 musl_prepare:
 ifeq ($(ARCH),riscv64)
-	@if [ ! -f "$(MUSL_BUILD)/lib/crt1.o" ] || [ ! -f "$(MUSL_BUILD)/lib/libc.a" ] || [ ! -f "$(MUSL_BUILD)/obj/include/bits/alltypes.h" ]; then \
+	@if [ ! -f "$(MUSL_BUILD)/lib/crt1.o" ] || [ ! -f "$(MUSL_BUILD)/lib/crti.o" ] || [ ! -f "$(MUSL_BUILD)/lib/crtn.o" ] || [ ! -f "$(MUSL_BUILD)/lib/libc.a" ] || [ ! -f "$(MUSL_BUILD)/obj/include/bits/alltypes.h" ]; then \
 		echo "[MUSL] build-riscv64 missing, rebuilding..."; \
 		rm -rf "$(MUSL_BUILD)"; \
 		mkdir -p "$(MUSL_BUILD)"; \
@@ -116,17 +122,17 @@ endif
 lib/%.o: lib/%.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
-build/sh: $(SH_SRC) $(LIB_A20OS)
+build/sh: $(SH_SRC) $(MUSL_DEPS) $(LIB_A20OS)
 	$(CC) $(CFLAGS) -c $< -o build/sh.o
 	$(CC) $(LDFLAGS) -o $@ $(CRT_START) build/sh.o $(CRT_END) $(LIBC)
 
-build/mksh: $(MKSH_OBJS) $(LIB_A20OS)
+build/mksh: $(MUSL_DEPS) $(MKSH_OBJS) $(LIB_A20OS)
 	$(CC) $(LDFLAGS) -o $@ $(CRT_START) $(MKSH_OBJS) $(CRT_END) $(LIBC)
 
 $(MKSH_DIR)/%.o: $(MKSH_DIR)/%.c
 	$(CC) $(MKSH_CFLAGS) -c $< -o $@
 
-build/init: $(INIT_MAIN_SRC) $(INIT_EXTRA_OBJS) $(LIB_A20OS)
+build/init: $(INIT_MAIN_SRC) $(MUSL_DEPS) $(INIT_EXTRA_OBJS) $(LIB_A20OS)
 	$(CC) $(CFLAGS) -c $< -o build/init.o
 	$(CC) $(LDFLAGS) -o $@ $(CRT_START) build/init.o $(INIT_EXTRA_OBJS) $(CRT_END) $(LIBC)
 
@@ -134,7 +140,7 @@ build/contest_init/%.o: contest_init/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-build/%: cmds/%.c $(LIB_A20OS)
+build/%: cmds/%.c $(MUSL_DEPS) $(LIB_A20OS)
 	$(CC) $(CFLAGS) -c $< -o build/$*.o
 	$(CC) $(LDFLAGS) -o $@ $(CRT_START) build/$*.o $(CRT_END) $(LIBC)
 
