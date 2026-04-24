@@ -51,8 +51,18 @@ OBJCOPY = $(CROSS_COMPILE)objcopy
 SH_SRC = shell/sh.c
 CMD_SRCS = $(wildcard cmds/*.c)
 CMDS = $(patsubst cmds/%.c, build/%, $(CMD_SRCS))
-INIT_TEST_SRCS = $(shell find shell/tests -type f -name '*.c')
-INIT_TEST_OBJS = $(patsubst shell/tests/%.c, build/tests/%.o, $(INIT_TEST_SRCS))
+
+CONTEST_INIT_MAIN = contest_init/contest_init.c
+CONTEST_INIT_SRCS = $(filter-out $(CONTEST_INIT_MAIN),$(wildcard contest_init/*.c))
+CONTEST_INIT_OBJS = $(patsubst contest_init/%.c, build/contest_init/%.o, $(CONTEST_INIT_SRCS))
+
+ifeq ($(CONTEST),1)
+INIT_MAIN_SRC = $(CONTEST_INIT_MAIN)
+INIT_EXTRA_OBJS = $(CONTEST_INIT_OBJS)
+else
+INIT_MAIN_SRC = shell/init.c
+INIT_EXTRA_OBJS =
+endif
 
 # mksh
 MKSH_DIR = external/mksh-cvs2git
@@ -71,11 +81,10 @@ all: build_dir build/init build/mksh build/sh $(CMDS)
 
 ifeq ($(ARCH),riscv64)
 all: musl_prepare
-MUSL_DEPS := musl_prepare
 endif
 
 build_dir:
-	@mkdir -p build build/tests
+	@mkdir -p build build/contest_init
 
 musl_prepare:
 ifeq ($(ARCH),riscv64)
@@ -98,34 +107,34 @@ ifeq ($(ARCH),riscv64)
 	fi
 endif
 
-%.o: %.c $(MUSL_DEPS)
+%.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
-%.o: %.S $(MUSL_DEPS)
+%.o: %.S
 	$(CC) $(CFLAGS) -c $< -o $@
 
-lib/%.o: lib/%.c $(MUSL_DEPS)
+lib/%.o: lib/%.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
-build/sh: $(SH_SRC) $(LIB_A20OS) $(MUSL_DEPS)
+build/sh: $(SH_SRC) $(LIB_A20OS)
 	$(CC) $(CFLAGS) -c $< -o build/sh.o
 	$(CC) $(LDFLAGS) -o $@ $(CRT_START) build/sh.o $(CRT_END) $(LIBC)
 
-build/mksh: $(MKSH_OBJS) $(LIB_A20OS) $(MUSL_DEPS)
+build/mksh: $(MKSH_OBJS) $(LIB_A20OS)
 	$(CC) $(LDFLAGS) -o $@ $(CRT_START) $(MKSH_OBJS) $(CRT_END) $(LIBC)
 
-$(MKSH_DIR)/%.o: $(MKSH_DIR)/%.c $(MUSL_DEPS)
+$(MKSH_DIR)/%.o: $(MKSH_DIR)/%.c
 	$(CC) $(MKSH_CFLAGS) -c $< -o $@
 
-build/init: shell/init.c $(INIT_TEST_OBJS) $(LIB_A20OS) $(MUSL_DEPS)
+build/init: $(INIT_MAIN_SRC) $(INIT_EXTRA_OBJS) $(LIB_A20OS)
 	$(CC) $(CFLAGS) -c $< -o build/init.o
-	$(CC) $(LDFLAGS) -o $@ $(CRT_START) build/init.o $(INIT_TEST_OBJS) $(CRT_END) $(LIBC)
+	$(CC) $(LDFLAGS) -o $@ $(CRT_START) build/init.o $(INIT_EXTRA_OBJS) $(CRT_END) $(LIBC)
 
-build/tests/%.o: shell/tests/%.c $(MUSL_DEPS)
+build/contest_init/%.o: contest_init/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-build/%: cmds/%.c $(LIB_A20OS) $(MUSL_DEPS)
+build/%: cmds/%.c $(LIB_A20OS)
 	$(CC) $(CFLAGS) -c $< -o build/$*.o
 	$(CC) $(LDFLAGS) -o $@ $(CRT_START) build/$*.o $(CRT_END) $(LIBC)
 

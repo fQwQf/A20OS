@@ -96,12 +96,10 @@ all: contest-rv
 
 contest-rv:
 	@echo "--- Building RISC-V 64 (contest) ---"
-	$(MAKE) ARCH=riscv64 CONTEST=1 _reset_obj
 	$(MAKE) ARCH=riscv64 CONTEST=1 _contest_build KERNEL_OUT=kernel-rv DISK_OUT=disk.img
 
 contest-la:
 	@echo "--- Building LoongArch 64 (contest) ---"
-	$(MAKE) ARCH=loongarch64 CONTEST=1 _reset_obj
 	$(MAKE) ARCH=loongarch64 CONTEST=1 _contest_build KERNEL_OUT=kernel-la DISK_OUT=disk-la.img
 
 _reset_obj:
