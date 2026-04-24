@@ -180,11 +180,13 @@ void trap_handler(trap_context_t *ctx) {
                 uint64_t pte2 = 0, pte1 = 0, pte0 = 0;
                 uint64_t *l1 = NULL, *l0 = NULL;
                 if (cur && cur->mm && cur->mm->pgdir) {
-                    uint64_t *pte_sepc = pt_walk(cur->mm->pgdir, sepc, 0);
-                    if (pte_sepc && (*pte_sepc & PTE_V)) {
-                        dbg_pfn = phys_to_pfn(SV39_PTE_ADDR(*pte_sepc));
-                        uint8_t *kva = (uint8_t *)(SV39_PTE_ADDR(*pte_sepc) + PAGE_OFFSET + (sepc & 0xFFF));
-                        insn = *(uint32_t *)kva;
+                    if (sepc < 0x4000000000UL) {
+                        uint64_t *pte_sepc = pt_walk(cur->mm->pgdir, sepc, 0);
+                        if (pte_sepc && (*pte_sepc & PTE_V)) {
+                            dbg_pfn = phys_to_pfn(SV39_PTE_ADDR(*pte_sepc));
+                            uint8_t *kva = (uint8_t *)(SV39_PTE_ADDR(*pte_sepc) + PAGE_OFFSET + (sepc & 0xFFF));
+                            insn = *(uint32_t *)kva;
+                        }
                     }
                     uint64_t *pte_stval = pt_walk(cur->mm->pgdir, stval, 0);
                     stval_pte = pte_stval ? *pte_stval : 0;

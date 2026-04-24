@@ -10,6 +10,11 @@ CONTEST ?= 0
 KERNEL_DIR = kernel
 INCLUDE_DIR = $(KERNEL_DIR)/include
 
+# Disk images used by the run targets. The kernel mounts virtio block
+# devices by probe order, so QEMU's bus order must match kernel/main.c.
+FS_IMG ?= fat32.img
+EXT4_IMG ?= ext4.img
+
 # Compiler and tools
 ifeq ($(ARCH), riscv64)
     CROSS_PREFIX = riscv64-unknown-elf-
@@ -27,8 +32,13 @@ endif
 
 # In bringup mode, boot kernel only (no fs image dependency).
 ifneq ($(BRINGUP),1)
-QEMU_FLAGS += -drive file=fat32.img,if=none,format=raw,id=x0 -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0
-QEMU_FLAGS += -drive file=ext4.img,if=none,format=raw,id=x1 -device virtio-blk-device,drive=x1,bus=virtio-mmio-bus.1
+ifeq ($(CONTEST),1)
+QEMU_FLAGS += -drive file=$(EXT4_IMG),if=none,format=raw,id=x0 -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0
+QEMU_FLAGS += -drive file=$(FS_IMG),if=none,format=raw,id=x1 -device virtio-blk-device,drive=x1,bus=virtio-mmio-bus.1
+else
+QEMU_FLAGS += -drive file=$(FS_IMG),if=none,format=raw,id=x0 -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0
+QEMU_FLAGS += -drive file=$(EXT4_IMG),if=none,format=raw,id=x1 -device virtio-blk-device,drive=x1,bus=virtio-mmio-bus.1
+endif
 
 ifneq ($(wildcard sdcard-rv.img),)
 QEMU_FLAGS += -drive file=sdcard-rv.img,if=none,format=raw,id=x2 -device virtio-blk-device,drive=x2,bus=virtio-mmio-bus.2
@@ -83,7 +93,7 @@ KERNEL_BIN = kernel.bin
 # Targets
 # ================================================================
 
-.PHONY: all clean run-riscv64 run-loongarch64 debug-riscv64 debug-loongarch64 \
+.PHONY: all clean run-riscv64 run-loongarch64 _run debug-riscv64 debug-loongarch64 _debug \
         user_apps fs_img kernel-only dev-build contest-rv contest-la
 
 # ----------------------------------------------------------------
@@ -123,7 +133,7 @@ _contest_disk: user_apps
 # ----------------------------------------------------------------
 
 dev-build: $(KERNEL_BIN) user_apps fs_img ext4_img_only
-	@echo "Dev build complete: $(KERNEL_BIN), fat32.img, ext4.img"
+	@echo "Dev build complete: $(KERNEL_BIN), $(FS_IMG), $(EXT4_IMG)"
 
 user_apps:
 ifeq ($(CONTEST),1)
@@ -134,28 +144,28 @@ endif
 
 fs_img: user_apps
 	@echo "Building FAT32 image..."
-	dd if=/dev/zero of=fat32.img bs=1M count=32
-	mkfs.fat -F 32 fat32.img
-	mcopy -i fat32.img user/build/init ::/init
-	mcopy -i fat32.img user/build/mksh ::/mksh
-	mcopy -i fat32.img user/build/mksh ::/sh
-	mcopy -i fat32.img user/build/ls ::/ls
-	mcopy -i fat32.img user/build/cat ::/cat
-	mcopy -i fat32.img user/build/mkdir ::/mkdir
-	mcopy -i fat32.img user/build/rm ::/rm
-	mcopy -i fat32.img user/build/cp ::/cp
-	mcopy -i fat32.img user/build/ps ::/ps
-	mcopy -i fat32.img user/build/aed ::/aed
-	mcopy -i fat32.img user/build/touch ::/touch
-	mcopy -i fat32.img user/build/poweroff ::/poweroff
-	mcopy -i fat32.img user/build/reboot ::/reboot
-	mcopy -i fat32.img user/build/pwd ::/pwd
-	mcopy -i fat32.img user/build/echo ::/echo
-	mcopy -i fat32.img user/build/env ::/env
-	mcopy -i fat32.img user/build/clear ::/clear
-	mcopy -i fat32.img user/build/help ::/help
-	@printf 'Hello from A20OS FAT32!\n' | mcopy -i fat32.img - ::/test.txt
-	cp fat32.img fs_test.img
+	dd if=/dev/zero of=$(FS_IMG) bs=1M count=32
+	mkfs.fat -F 32 $(FS_IMG)
+	mcopy -i $(FS_IMG) user/build/init ::/init
+	mcopy -i $(FS_IMG) user/build/mksh ::/mksh
+	mcopy -i $(FS_IMG) user/build/mksh ::/sh
+	mcopy -i $(FS_IMG) user/build/ls ::/ls
+	mcopy -i $(FS_IMG) user/build/cat ::/cat
+	mcopy -i $(FS_IMG) user/build/mkdir ::/mkdir
+	mcopy -i $(FS_IMG) user/build/rm ::/rm
+	mcopy -i $(FS_IMG) user/build/cp ::/cp
+	mcopy -i $(FS_IMG) user/build/ps ::/ps
+	mcopy -i $(FS_IMG) user/build/aed ::/aed
+	mcopy -i $(FS_IMG) user/build/touch ::/touch
+	mcopy -i $(FS_IMG) user/build/poweroff ::/poweroff
+	mcopy -i $(FS_IMG) user/build/reboot ::/reboot
+	mcopy -i $(FS_IMG) user/build/pwd ::/pwd
+	mcopy -i $(FS_IMG) user/build/echo ::/echo
+	mcopy -i $(FS_IMG) user/build/env ::/env
+	mcopy -i $(FS_IMG) user/build/clear ::/clear
+	mcopy -i $(FS_IMG) user/build/help ::/help
+	@printf 'Hello from A20OS FAT32!\n' | mcopy -i $(FS_IMG) - ::/test.txt
+	cp $(FS_IMG) fs_test.img
 
 ext4_img_only: user_apps
 	@echo "Building ext4 image..."
@@ -168,12 +178,12 @@ ext4_img_only: user_apps
 	cp user/build/rm   /tmp/a20os_ext4_staging/rm
 	cp user/build/cp   /tmp/a20os_ext4_staging/cp
 	printf 'Hello from ext4!\nThis file is on the ext4 filesystem.\n' > /tmp/a20os_ext4_staging/test.txt
-	dd if=/dev/zero of=ext4.img bs=1M count=32
-	mkfs.ext4 -F -O ^has_journal,extent,huge_file,flex_bg,uninit_bg,dir_index -d /tmp/a20os_ext4_staging ext4.img
+	dd if=/dev/zero of=$(EXT4_IMG) bs=1M count=32
+	mkfs.ext4 -F -O ^has_journal,extent,huge_file,flex_bg,uninit_bg,dir_index -d /tmp/a20os_ext4_staging $(EXT4_IMG)
 	@rm -rf /tmp/a20os_ext4_staging
 
 ext4_img: user_apps ext4_img_only
-	cp ext4.img fs_test.img
+	cp $(EXT4_IMG) fs_test.img
 
 $(KERNEL_BIN): $(KERNEL_ELF)
 	$(CROSS_PREFIX)objcopy -O binary $< $@
@@ -189,7 +199,7 @@ $(KERNEL_ELF): $(KERNEL_OBJ) $(ASM_OBJ)
 
 clean:
 	find $(KERNEL_DIR) -name '*.o' -delete
-	rm -f $(KERNEL_ELF) $(KERNEL_BIN) fat32.img ext4.img
+	rm -f $(KERNEL_ELF) $(KERNEL_BIN) $(FS_IMG) $(EXT4_IMG)
 	rm -f kernel-rv kernel-la disk.img disk-la.img
 	$(MAKE) -C user clean
 
@@ -201,18 +211,16 @@ kernel-only: $(KERNEL_BIN)
 # ----------------------------------------------------------------
 
 run-riscv64:
-ifeq ($(BRINGUP),1)
-	$(MAKE) ARCH=riscv64 BRINGUP=1 kernel-only
-else
-	$(MAKE) ARCH=riscv64 dev-build
-endif
-	$(QEMU) $(QEMU_FLAGS) -kernel $(KERNEL_ELF)
+	$(MAKE) ARCH=riscv64 _run
 
 run-loongarch64:
+	$(MAKE) ARCH=loongarch64 _run
+
+_run:
 ifeq ($(BRINGUP),1)
-	$(MAKE) ARCH=loongarch64 BRINGUP=1 kernel-only
+	$(MAKE) ARCH=$(ARCH) BRINGUP=1 kernel-only
 else
-	$(MAKE) ARCH=loongarch64 dev-build
+	$(MAKE) ARCH=$(ARCH) dev-build
 endif
 	$(QEMU) $(QEMU_FLAGS) -kernel $(KERNEL_ELF)
 
@@ -221,19 +229,17 @@ endif
 DEBUG_CFLAGS = $(filter-out -O2,$(CFLAGS)) -O0 -g -DDEBUG
 
 debug-riscv64:
-ifeq ($(BRINGUP),1)
-	$(MAKE) ARCH=riscv64 BRINGUP=1 CFLAGS="$(DEBUG_CFLAGS)" kernel-only
-else
-	$(MAKE) ARCH=riscv64 CFLAGS="$(DEBUG_CFLAGS)" dev-build
-endif
-	@echo "Waiting for GDB connection on port 1234..."
-	$(QEMU) $(QEMU_FLAGS) -kernel $(KERNEL_ELF) -S -s
+	$(MAKE) ARCH=riscv64 _debug
 
 debug-loongarch64:
+	$(MAKE) ARCH=loongarch64 _debug
+
+_debug:
 ifeq ($(BRINGUP),1)
-	$(MAKE) ARCH=loongarch64 BRINGUP=1 CFLAGS="$(DEBUG_CFLAGS)" kernel-only
+	$(MAKE) ARCH=$(ARCH) BRINGUP=1 CFLAGS="$(DEBUG_CFLAGS)" kernel-only
 else
-	$(MAKE) ARCH=loongarch64 CFLAGS="$(DEBUG_CFLAGS)" dev-build
+	$(MAKE) ARCH=$(ARCH) dev-build
+	$(MAKE) ARCH=$(ARCH) CFLAGS="$(DEBUG_CFLAGS)" -B $(KERNEL_ELF)
 endif
 	@echo "Waiting for GDB connection on port 1234..."
 	$(QEMU) $(QEMU_FLAGS) -kernel $(KERNEL_ELF) -S -s
