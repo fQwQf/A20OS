@@ -22,16 +22,18 @@ typedef struct {
 
 typedef struct {
     char *test_name;
-    unsigned long func;
+    int (*func)(const char *script_name, const char *script_dir);
 } Test;
 
 static test_entry_t g_tests[MAX_TESTS];
 static Test test_table[] = {
-    // {"glibc_basic",   (unsigned long)run_glibc_basic_test},
-    // {"glibc_busybox", (unsigned long)run_glibc_busybox_test},
-    {"glibc_lua", (unsigned long)run_glibc_lua_test},
-    // {"musl_basic",    (unsigned long)run_musl_basic_test},
-    // {"musl_busybox",  (unsigned long)run_musl_busybox_test},
+    {"glibc_basic",   run_glibc_basic_test},
+    {"glibc_busybox", run_glibc_busybox_test},
+    {"glibc_lua",     run_glibc_lua_test},
+    // {"glibc_libctest", run_glibc_libctest_test},
+    {"musl_basic",    run_musl_basic_test},
+    {"musl_busybox",  run_musl_busybox_test},
+    {"musl_lua", run_musl_lua_test},
 };
 
 static int ends_with(const char *s, const char *suffix)
@@ -162,7 +164,7 @@ static const char *runtime_from_path(const char *path)
     return "unknown";
 }
 
-static bool is_registered(const char *script, const char *runtime)
+static int (*is_registered(const char *script, const char *runtime))(const char *, const char *)
 {
     const char *script_name = path_basename(script);
     char prefix[64];
@@ -173,33 +175,9 @@ static bool is_registered(const char *script, const char *runtime)
     int n = (int)(sizeof(test_table) / sizeof(test_table[0]));
     for (int i = 0; i < n; i++) {
         if (strcmp(test_table[i].test_name, key) == 0)
-            return true;
+            return test_table[i].func;
     }
-    return false;
-}
-
-static int dispatch_test_script(const char *script_path)
-{
-    const char *script_name = path_basename(script_path);
-    const char *runtime = runtime_from_path(script_path);
-    char script_dir[512];
-
-    path_dirname(script_path, script_dir, sizeof(script_dir));
-
-    if (strcmp(script_name, "basic_testcode.sh") == 0) {
-        if (strcmp(runtime, "glibc") == 0)
-            return run_glibc_basic_test(script_name, script_dir);
-        if (strcmp(runtime, "musl") == 0)
-            return run_musl_basic_test(script_name, script_dir);
-    }
-    if (strcmp(script_name, "busybox_testcode.sh") == 0) {
-        if (strcmp(runtime, "glibc") == 0)
-            return run_glibc_busybox_test(script_name, script_dir);
-        if (strcmp(runtime, "musl") == 0)
-            return run_musl_busybox_test(script_name, script_dir);
-    }
-
-    return -1;
+    return NULL;
 }
 
 int main(int argc, char *argv[])
@@ -234,23 +212,24 @@ int main(int argc, char *argv[])
     for (int i = 0; i < ntests; i++) {
         const char *script_name = path_basename(g_tests[i].path);
         const char *runtime = runtime_from_path(g_tests[i].path);
-        bool registered = is_registered(script_name, runtime);
+        int (*runner)(const char *, const char *) = is_registered(script_name, runtime);
 
         char group[128];
         extract_group(g_tests[i].path, group, sizeof(group));
+        (void)group;
         // printf("[CONTEST][RUN] preparing #%d runtime=%s group=%s script=%s\n",
             //    i, runtime, group, g_tests[i].path);
-        // printf("[CONTEST][REGISTER] script=%s registered=%d\n", script_name, (int)registered);
-        // printf("[CONTEST][DISPATCH] %s -> dedicated C runner\n", script_name);
+        // printf("[CONTEST][REGISTER] script=%s registered=%d\n", script_name, runner != NULL);
+        // printf("[CONTEST][DISPATCH] %s -> direct function call\n", script_name);
 
         // printf("[CONTEST] #### OS COMP TEST GROUP START %s ####\n", group);
 
-        int rc = -1;
-        if (registered){
+        if (runner) {
+            char script_dir[512];
+            path_dirname(g_tests[i].path, script_dir, sizeof(script_dir));
             printf("[CONTEST] run %s\n", g_tests[i].path);
-            rc = dispatch_test_script(g_tests[i].path);
+            runner(script_name, script_dir);
         }
-        // printf("[CONTEST][RUN] rc=%d script=%s\n", rc, g_tests[i].path);
 
         // printf("[CONTEST] #### OS COMP TEST GROUP END %s ####\n", group);
     }
