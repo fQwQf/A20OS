@@ -347,6 +347,7 @@ static int elf_load_interp(mm_struct_t *mm, uint64_t *pgdir, const char *path, u
 }
 
 int elf_load(int fd, const char *path, elf_load_info_t *info) {
+    (void)path;
     Elf64_Ehdr eh;
     if (vfs_lseek(fd, 0, SEEK_SET) < 0) return -EIO;
     int r = vfs_read(fd, (char *)&eh, sizeof(eh));
@@ -418,47 +419,14 @@ int elf_load(int fd, const char *path, elf_load_info_t *info) {
     uint64_t interp_entry = 0;
     uint64_t interp_base  = 0;
     if (has_interp) {
-        const char *interp_to_load = interp_path;
-        char alt_path[512];
         int interp_fd = vfs_open(interp_path, O_RDONLY, 0);
-        if (interp_fd < 0 && path) {
-            int path_len = (int)strlen(path);
-            int interp_len = (int)strlen(interp_path);
-            for (int i = path_len - 1; i >= 0; i--) {
-                if (path[i] == '/') {
-                    if (i + interp_len + 1 < 512) {
-                        memcpy(alt_path, path, i);
-                        strcpy(alt_path + i, interp_path);
-                        interp_fd = vfs_open(alt_path, O_RDONLY, 0);
-                        if (interp_fd >= 0) { interp_to_load = alt_path; break; }
-                    }
-                }
-            }
-            if (interp_fd < 0 && strstr(interp_path, "ld-musl-riscv64.so.1")) {
-                const char *musl_fallback = "/lib/libc.so";
-                int fallback_len = (int)strlen(musl_fallback);
-                for (int i = path_len - 1; i >= 0; i--) {
-                    if (path[i] == '/') {
-                        if (i + fallback_len + 1 < 512) {
-                            memcpy(alt_path, path, i);
-                            strcpy(alt_path + i, musl_fallback);
-                            interp_fd = vfs_open(alt_path, O_RDONLY, 0);
-                            if (interp_fd >= 0) { interp_to_load = alt_path; break; }
-                        }
-                    }
-                }
-            }
-            if (interp_fd < 0 && strstr(interp_path, "ld-linux-riscv64-lp64d.so.1")) {
-                interp_fd = vfs_open("/testrv/glibc/lib/ld-linux-riscv64-lp64d.so.1", O_RDONLY, 0);
-                if (interp_fd >= 0) interp_to_load = "/testrv/glibc/lib/ld-linux-riscv64-lp64d.so.1";
-            }
-        }
-        if (interp_fd >= 0) vfs_close(interp_fd);
-        if (interp_fd < 0) {
+        if (interp_fd >= 0) {
+            vfs_close(interp_fd);
+        } else {
             r = -ENOENT;
             goto fail_elf;
         }
-        r = elf_load_interp(&mm, pgdir, interp_to_load, &interp_entry, &interp_base);
+        r = elf_load_interp(&mm, pgdir, interp_path, &interp_entry, &interp_base);
         if (r < 0) goto fail_elf;
     }
 
@@ -467,6 +435,7 @@ int elf_load(int fd, const char *path, elf_load_info_t *info) {
     if (r < 0) { goto fail_elf; }
 
     info->entry      = has_interp ? interp_entry : (eh.e_entry + load_bias);
+    info->exec_entry = eh.e_entry + load_bias;
     info->base       = base;
     info->end_va     = max_va;
     info->brk        = ROUND_UP(max_va, PAGE_SIZE);
@@ -583,7 +552,7 @@ uint64_t elf_setup_stack(uint64_t stack_top, int argc, char *const argv[],
         { AT_PAGESZ, PAGE_SIZE       },
         { AT_BASE,   info->interp_base },
         { AT_FLAGS,  0               },
-        { AT_ENTRY,  info->entry     },
+        { AT_ENTRY,  info->exec_entry },
         { AT_UID,    0               },
         { AT_EUID,   0               },
         { AT_GID,    0               },

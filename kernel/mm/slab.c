@@ -83,6 +83,13 @@ static void slab_list_push(slab_page_t **head, slab_page_t *sp) {
     *head = sp;
 }
 
+static int slab_list_contains(slab_page_t *head, slab_page_t *sp) {
+    for (slab_page_t *p = head; p; p = p->next) {
+        if (p == sp) return 1;
+    }
+    return 0;
+}
+
 static void slab_validate_sp(slab_page_t *sp, const char *where, size_t obj_size) {
     int free_count = 0;
     for (void *p = sp->free_list; p; p = *(void **)p) {
@@ -131,6 +138,13 @@ void *kmalloc(size_t size) {
 
     slab_cache_t *c = &caches[idx];
     slab_page_t *sp = c->partial;
+
+    /* Self-heal stale partial list entries that are already full. */
+    while (sp && sp->free_list == NULL) {
+        slab_list_remove(&c->partial, sp);
+        slab_list_push(&c->full, sp);
+        sp = c->partial;
+    }
 
     if (!sp) {
         sp = c->spare;
@@ -209,6 +223,7 @@ void kfree(void *ptr) {
 
     *(void **)ptr = sp->free_list;
     sp->free_list = ptr;
+    uint16_t old_in_use = sp->in_use;
     sp->in_use--;
 
     slab_validate_sp(sp, "kfree-post", obj_size);
@@ -216,12 +231,20 @@ void kfree(void *ptr) {
     int idx = sp->cache_idx;
     slab_cache_t *c = &caches[idx];
 
-    if (sp->in_use == sp->total - 1 && sp == c->full) {
-        slab_list_remove(&c->full, sp);
-        slab_list_push(&c->partial, sp);
-    } else if (sp->in_use == 0 && sp != c->spare) {
-        if (sp == c->full) slab_list_remove(&c->full, sp);
-        else if (sp == c->partial) slab_list_remove(&c->partial, sp);
+    /* Transition full -> partial when first object gets freed. */
+    if (old_in_use == sp->total) {
+        if (slab_list_contains(c->full, sp))
+            slab_list_remove(&c->full, sp);
+        if (!slab_list_contains(c->partial, sp))
+            slab_list_push(&c->partial, sp);
+    }
+
+    /* Empty slab: keep one spare page, release others. */
+    if (sp->in_use == 0 && sp != c->spare) {
+        if (slab_list_contains(c->full, sp))
+            slab_list_remove(&c->full, sp);
+        if (slab_list_contains(c->partial, sp))
+            slab_list_remove(&c->partial, sp);
         if (!c->spare) {
             c->spare = sp;
         } else {
