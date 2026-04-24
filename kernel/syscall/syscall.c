@@ -19,7 +19,27 @@
 #include "klog.h"
 #include "sbi.h"
 
+syscall_prof_t sys_prof[SYSCALL_PROFILE_MAX];
+
+static inline uint64_t syscall_profile_now(void) {
+    return timer_get_ticks();
+}
+
+static inline void syscall_profile_record(uint64_t num, uint64_t start, uint64_t end) {
+    if (num >= SYSCALL_PROFILE_MAX) return;
+
+    uint64_t elapsed = (end >= start) ? (end - start) : 0;
+    syscall_prof_t *prof = &sys_prof[num];
+    __atomic_fetch_add(&prof->count, 1, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&prof->cycles, elapsed, __ATOMIC_RELAXED);
+}
+
+void syscall_profile_reset(void) {
+    memset(sys_prof, 0, sizeof(sys_prof));
+}
+
 void syscall_init(void) {
+    syscall_profile_reset();
     kdebug("[SYSCALL] Initialized\n");
 }
 
@@ -48,6 +68,7 @@ static int alloc_local_fd(task_t *t, int gfd) {
 
 int64_t syscall_dispatch(trap_context_t *ctx) {
     uint64_t num = ctx->x[17];
+    uint64_t start_time = syscall_profile_now();
     uint64_t a0  = ctx->x[10];
     uint64_t a1  = ctx->x[11];
     uint64_t a2  = ctx->x[12];
@@ -100,8 +121,12 @@ int64_t syscall_dispatch(trap_context_t *ctx) {
     case SYS_umount2:     ret = sys_umount2((const char*)a0, (int)a1); break;
     case SYS_utimensat:   ret = sys_utimensat((int)a0, (const char*)a1, (void*)a2, (int)a3); break;
 
-    case SYS_exit:        ret = sys_exit((int)a0); break;
-    case SYS_exit_group:  ret = sys_exit_group((int)a0); break;
+    case SYS_exit:
+        syscall_profile_record(num, start_time, syscall_profile_now());
+        return sys_exit((int)a0);
+    case SYS_exit_group:
+        syscall_profile_record(num, start_time, syscall_profile_now());
+        return sys_exit_group((int)a0);
     case SYS_getpid:      ret = sys_getpid(); break;
     case SYS_getppid:     ret = sys_getppid(); break;
     case SYS_gettid:      ret = sys_gettid(); break;
@@ -139,6 +164,7 @@ int64_t syscall_dispatch(trap_context_t *ctx) {
                 cur->sig_handling = 0;
             }
         }
+        syscall_profile_record(num, start_time, syscall_profile_now());
         signal_deliver_user(ctx);
         return ret;
     case SYS_sigsuspend:  ret = sys_sigsuspend((void*)a0); break;
@@ -176,6 +202,7 @@ int64_t syscall_dispatch(trap_context_t *ctx) {
     }
 
     ctx->x[10] = (uint64_t)ret;
+    syscall_profile_record(num, start_time, syscall_profile_now());
     signal_deliver_user(ctx);
     return ret;
 }
