@@ -242,7 +242,7 @@ static int virtio_blk_rw(int idx, uint64_t lba, void *buf, size_t sectors, int w
     mmio_write32((uintptr_t)inst->blk.base, VIRTIO_MMIO_QUEUE_NOTIFY, 0);
     mb();
 
-    uint32_t timeout = 10000000;
+    uint32_t timeout = 1000000000;
     while (used->idx == inst->blk.last_used && timeout > 0) {
         timeout--;
         __asm__ volatile("nop");
