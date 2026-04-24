@@ -18,7 +18,10 @@ CFLAGS  = -Wall -Wextra -O2 -ffreestanding -nostdinc $(MUSL_INC) \
 LDFLAGS = -static -nostdlib -Ttext 0x10000
 
 GCC_VER := $(shell $(CROSS_COMPILE)gcc -dumpversion 2>/dev/null)
-LIBGCC  := /usr/lib/gcc/riscv64-unknown-elf/$(GCC_VER)/rv64i/lp64/libgcc.a
+LIBGCC_DEFAULT := $(shell $(CROSS_COMPILE)gcc -print-libgcc-file-name 2>/dev/null)
+LIBGCC_LP64 := $(dir $(LIBGCC_DEFAULT))rv64i/lp64/libgcc.a
+LIBGCC  := $(if $(wildcard $(LIBGCC_LP64)),$(LIBGCC_LP64),$(LIBGCC_DEFAULT))
+LIBGCC_DIR := $(dir $(LIBGCC))
 
 LIB_A20OS := lib/brk.o
 CRT_START = $(MUSL_CRT)/crt1.o $(MUSL_CRT)/crti.o
@@ -40,6 +43,12 @@ ifeq ($(CONTEST),1)
 CFLAGS += -DCONTEST
 endif
 
+ifeq ($(ARCH),riscv64)
+MUSL_DEPS = musl_prepare
+else
+MUSL_DEPS =
+endif
+
 CC = $(CROSS_COMPILE)gcc
 LD = $(CROSS_COMPILE)ld
 OBJCOPY = $(CROSS_COMPILE)objcopy
@@ -48,6 +57,18 @@ OBJCOPY = $(CROSS_COMPILE)objcopy
 SH_SRC = shell/sh.c
 CMD_SRCS = $(wildcard cmds/*.c)
 CMDS = $(patsubst cmds/%.c, build/%, $(CMD_SRCS))
+
+CONTEST_INIT_MAIN = contest_init/contest_init.c
+CONTEST_INIT_SRCS = $(filter-out $(CONTEST_INIT_MAIN),$(wildcard contest_init/*.c))
+CONTEST_INIT_OBJS = $(patsubst contest_init/%.c, build/contest_init/%.o, $(CONTEST_INIT_SRCS))
+
+ifeq ($(CONTEST),1)
+INIT_MAIN_SRC = $(CONTEST_INIT_MAIN)
+INIT_EXTRA_OBJS = $(CONTEST_INIT_OBJS)
+else
+INIT_MAIN_SRC = shell/init.c
+INIT_EXTRA_OBJS =
+endif
 
 # mksh
 MKSH_DIR = external/mksh-cvs2git
@@ -64,8 +85,33 @@ MKSH_CFLAGS = $(CFLAGS) -I$(MKSH_DIR) \
 
 all: build_dir build/init build/mksh build/sh $(CMDS)
 
+ifeq ($(ARCH),riscv64)
+all: musl_prepare
+endif
+
 build_dir:
-	@mkdir -p build
+	@mkdir -p build build/contest_init
+
+musl_prepare:
+ifeq ($(ARCH),riscv64)
+	@if [ ! -f "$(MUSL_BUILD)/lib/crt1.o" ] || [ ! -f "$(MUSL_BUILD)/lib/crti.o" ] || [ ! -f "$(MUSL_BUILD)/lib/crtn.o" ] || [ ! -f "$(MUSL_BUILD)/lib/libc.a" ] || [ ! -f "$(MUSL_BUILD)/obj/include/bits/alltypes.h" ]; then \
+		echo "[MUSL] build-riscv64 missing, rebuilding..."; \
+		rm -rf "$(MUSL_BUILD)"; \
+		mkdir -p "$(MUSL_BUILD)"; \
+		cd "$(MUSL_BUILD)" && ../configure \
+			--target=riscv64 \
+			--prefix=/opt/musl-riscv64 \
+			--disable-shared \
+			--disable-wrapper \
+			CC=$(CROSS_COMPILE)gcc \
+			CROSS_COMPILE=$(CROSS_COMPILE) \
+			CFLAGS='-O2 -mcmodel=medany -march=rv64g -mabi=lp64' \
+			LDFLAGS='-L$(LIBGCC_DIR)'; \
+		$(MAKE) -C "$(MUSL_BUILD)" -j$$(nproc); \
+	else \
+		echo "[MUSL] build-riscv64 ready"; \
+	fi
+endif
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
@@ -76,25 +122,32 @@ build_dir:
 lib/%.o: lib/%.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
-build/sh: $(SH_SRC) $(LIB_A20OS)
+build/sh: $(SH_SRC) $(MUSL_DEPS) $(LIB_A20OS)
 	$(CC) $(CFLAGS) -c $< -o build/sh.o
 	$(CC) $(LDFLAGS) -o $@ $(CRT_START) build/sh.o $(CRT_END) $(LIBC)
 
-build/mksh: $(MKSH_OBJS) $(LIB_A20OS)
+build/mksh: $(MUSL_DEPS) $(MKSH_OBJS) $(LIB_A20OS)
 	$(CC) $(LDFLAGS) -o $@ $(CRT_START) $(MKSH_OBJS) $(CRT_END) $(LIBC)
 
 $(MKSH_DIR)/%.o: $(MKSH_DIR)/%.c
 	$(CC) $(MKSH_CFLAGS) -c $< -o $@
 
-build/init: shell/init.c $(LIB_A20OS)
+build/init: $(INIT_MAIN_SRC) $(MUSL_DEPS) $(INIT_EXTRA_OBJS) $(LIB_A20OS)
 	$(CC) $(CFLAGS) -c $< -o build/init.o
-	$(CC) $(LDFLAGS) -o $@ $(CRT_START) build/init.o $(CRT_END) $(LIBC)
+	$(CC) $(LDFLAGS) -o $@ $(CRT_START) build/init.o $(INIT_EXTRA_OBJS) $(CRT_END) $(LIBC)
 
-build/%: cmds/%.c $(LIB_A20OS)
+build/contest_init/%.o: contest_init/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+build/%: cmds/%.c $(MUSL_DEPS) $(LIB_A20OS)
 	$(CC) $(CFLAGS) -c $< -o build/$*.o
 	$(CC) $(LDFLAGS) -o $@ $(CRT_START) build/$*.o $(CRT_END) $(LIBC)
 
 clean:
 	rm -rf build $(MKSH_DIR)/*.o lib/*.o
 
-.PHONY: all clean build_dir
+distclean: clean
+	rm -rf $(MUSL_BASE)/build-riscv64 $(MUSL_BASE)/build-loongarch64
+
+.PHONY: all clean distclean build_dir musl_prepare

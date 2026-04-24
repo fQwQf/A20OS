@@ -1,4 +1,5 @@
 *.o
+*.a
 *.img
 *.log
 *.bin
@@ -8,3 +9,4 @@ user/build/
 .vscode/
 kernel-rv
 kernel-la
+.DS_Store
