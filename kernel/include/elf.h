@@ -87,6 +87,7 @@ struct vm_area;
 /* ---- Load result ---- */
 typedef struct elf_load_info {
     uint64_t  entry;
+    uint64_t  exec_entry;
     uint64_t  base;
     uint64_t  end_va;
     uint64_t  stack_top;
