@@ -5,7 +5,17 @@
 #include "trap.h"
 #include "signal.h"
 
+#define SYSCALL_PROFILE_MAX 1024
+
+typedef struct syscall_prof {
+    uint64_t count;
+    uint64_t cycles;
+} syscall_prof_t;
+
+extern syscall_prof_t sys_prof[SYSCALL_PROFILE_MAX];
+
 void syscall_init(void);
+void syscall_profile_reset(void);
 int64_t syscall_dispatch(trap_context_t *ctx);
 
 int64_t sys_read(int fd, char *buf, size_t count);
