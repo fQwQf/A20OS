@@ -2,6 +2,7 @@
 #include "uart.h"
 #include "stdio.h"
 #include "defs.h"
+#include "sbi.h"
 
 NORETURN void panic(const char *fmt, ...) {
     va_list args;
@@ -9,9 +10,14 @@ NORETURN void panic(const char *fmt, ...) {
 
     uart_puts("\n\n========== KERNEL PANIC ==========\n");
     vprintf(fmt, args);
-    uart_puts("\n\nSystem halted.\n");
     va_end(args);
 
+#ifdef CONTEST
+    uart_puts("\n\nSystem panic. Powering off.\n");
+    sbi_shutdown();
+#else
+    uart_puts("\n\nSystem halted.\n");
     __asm__ volatile("csrw sie, zero");
     while (1) __asm__ volatile("wfi");
+#endif
 }

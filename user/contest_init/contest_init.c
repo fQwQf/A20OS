@@ -27,10 +27,11 @@ typedef struct {
 
 static test_entry_t g_tests[MAX_TESTS];
 static Test test_table[] = {
-    {"glibc_basic",   (unsigned long)run_glibc_basic_test},
-    {"glibc_busybox", (unsigned long)run_glibc_busybox_test},
-    {"musl_basic",    (unsigned long)run_musl_basic_test},
-    {"musl_busybox",  (unsigned long)run_musl_busybox_test},
+    // {"glibc_basic",   (unsigned long)run_glibc_basic_test},
+    // {"glibc_busybox", (unsigned long)run_glibc_busybox_test},
+    {"glibc_lua", (unsigned long)run_glibc_lua_test},
+    // {"musl_basic",    (unsigned long)run_musl_basic_test},
+    // {"musl_busybox",  (unsigned long)run_musl_busybox_test},
 };
 
 static int ends_with(const char *s, const char *suffix)

@@ -70,3 +70,7 @@ int run_glibc_busybox_test(const char *script_name, const char *script_dir)
     // cp_lib();
     return run_script_in_dir(script_name, script_dir, "TEST][glibc][busybox");
 }
+
+int run_glibc_lua_test(const char *script_name, const char *script_dir) {
+    return run_script_in_dir(script_name, script_dir, "TEST][glibc][lua");
+}
