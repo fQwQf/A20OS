@@ -56,6 +56,19 @@ void uart_putc(char c) {
 // 阻塞式读取一个字符（如果没有数据则让出 CPU）
 int uart_getc(void) {
     while (rx_head == rx_tail) {
+#ifdef CONFIG_LOONGARCH64
+        /* LoongArch virt QEMU: poll UART directly since ExtIOI
+         * interrupt routing may not be initialized. */
+        if (UART0[LSR] & LSR_RX_READY) {
+            char c = UART0[RHR];
+            uint32_t next = (rx_head + 1) % RX_BUF_SIZE;
+            if (next != rx_tail) {
+                rx_buffer[rx_head] = c;
+                rx_head = next;
+            }
+            continue;
+        }
+#endif
         arch_local_irq_enable();
         proc_yield();
         arch_local_irq_disable();

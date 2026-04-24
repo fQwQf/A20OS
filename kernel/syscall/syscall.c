@@ -94,6 +94,7 @@ int64_t syscall_dispatch(trap_context_t *ctx) {
     case SYS_getdents64:  ret = sys_getdents64((int)a0, (void*)a1, (size_t)a2); break;
     case SYS_linkat:      ret = sys_linkat((int)a0, (const char*)a1, (int)a2, (const char*)a3, (int)a4); break;
     case SYS_symlinkat:   ret = sys_symlinkat((const char*)a0, (int)a1, (const char*)a2); break;
+    case SYS_statx:       ret = sys_statx((int)a0, (const char*)a1, (int)a2, (unsigned)a3, (void*)a4); break;
     case SYS_statfs:      ret = sys_statfs((const char*)a0, (void*)a1); break;
     case SYS_fstatfs:     ret = sys_fstatfs((int)a0, (void*)a1); break;
     case SYS_mount:       ret = sys_mount((const char*)a0, (const char*)a1, (const char*)a2, (int)a3); break;
@@ -189,47 +190,104 @@ int64_t sys_read(int fd, char *buf, size_t count) {
     if (count == 0) return 0;
     int64_t gfd = get_global_fd(fd);
     if (gfd < 0) return gfd;
-    return vfs_read(gfd, buf, count);
+    char kbuf[4096];
+    int64_t total = 0;
+    while ((size_t)total < count) {
+        size_t chunk = count - (size_t)total;
+        if (chunk > sizeof(kbuf)) chunk = sizeof(kbuf);
+        int64_t n = vfs_read(gfd, kbuf, chunk);
+        if (n <= 0) return total > 0 ? total : n;
+        if (copy_to_user(buf + total, kbuf, (size_t)n) < 0) return -EFAULT;
+        total += n;
+        if ((size_t)n < chunk) break;
+    }
+    return total;
 }
 
 int64_t sys_write(int fd, const char *buf, size_t count) {
     if (!buf) return -EFAULT;
+    if (count == 0) return 0;
     int64_t gfd = get_global_fd(fd);
     if (gfd < 0) return gfd;
-    return vfs_write(gfd, buf, count);
+    char kbuf[4096];
+    int64_t total = 0;
+    while ((size_t)total < count) {
+        size_t chunk = count - (size_t)total;
+        if (chunk > sizeof(kbuf)) chunk = sizeof(kbuf);
+        if (copy_from_user(kbuf, buf + total, chunk) < 0) return -EFAULT;
+        int64_t n = vfs_write(gfd, kbuf, chunk);
+        if (n <= 0) return total > 0 ? total : n;
+        total += n;
+        if ((size_t)n < chunk) break;
+    }
+    return total;
 }
 
 int64_t sys_pread64(int fd, char *buf, size_t count, long off) {
+    if (!buf) return -EFAULT;
+    if (count == 0) return 0;
     int64_t gfd = get_global_fd(fd);
     if (gfd < 0) return gfd;
     long curoff = vfs_lseek(gfd, 0, SEEK_CUR);
     vfs_lseek(gfd, off, SEEK_SET);
-    int64_t r = vfs_read(gfd, buf, count);
+    char kbuf[4096];
+    int64_t total = 0;
+    while ((size_t)total < count) {
+        size_t chunk = count - (size_t)total;
+        if (chunk > sizeof(kbuf)) chunk = sizeof(kbuf);
+        int64_t n = vfs_read(gfd, kbuf, chunk);
+        if (n <= 0) { if (total > 0) break; vfs_lseek(gfd, curoff, SEEK_SET); return n; }
+        if (copy_to_user(buf + total, kbuf, (size_t)n) < 0) { vfs_lseek(gfd, curoff, SEEK_SET); return -EFAULT; }
+        total += n;
+        if ((size_t)n < chunk) break;
+    }
     vfs_lseek(gfd, curoff, SEEK_SET);
-    return r;
+    return total;
 }
 
 int64_t sys_pwrite64(int fd, char *buf, size_t count, long off) {
+    if (!buf) return -EFAULT;
+    if (count == 0) return 0;
     int64_t gfd = get_global_fd(fd);
     if (gfd < 0) return gfd;
     long curoff = vfs_lseek(gfd, 0, SEEK_CUR);
     vfs_lseek(gfd, off, SEEK_SET);
-    int64_t r = vfs_write(gfd, buf, count);
+    char kbuf[4096];
+    int64_t total = 0;
+    while ((size_t)total < count) {
+        size_t chunk = count - (size_t)total;
+        if (chunk > sizeof(kbuf)) chunk = sizeof(kbuf);
+        if (copy_from_user(kbuf, buf + total, chunk) < 0) { vfs_lseek(gfd, curoff, SEEK_SET); return -EFAULT; }
+        int64_t n = vfs_write(gfd, kbuf, chunk);
+        if (n <= 0) { if (total > 0) break; vfs_lseek(gfd, curoff, SEEK_SET); return n; }
+        total += n;
+        if ((size_t)n < chunk) break;
+    }
     vfs_lseek(gfd, curoff, SEEK_SET);
-    return r;
+    return total;
 }
 
 int64_t sys_writev(int fd, const void *iov, int iovcnt) {
     int64_t gfd = get_global_fd(fd);
     if (gfd < 0) return gfd;
     struct iovec { char *base; size_t len; };
-    const struct iovec *v = (const struct iovec *)iov;
     int64_t total = 0;
+    char kbuf[4096];
     for (int i = 0; i < iovcnt; i++) {
-        if (!v[i].base || v[i].len == 0) continue;
-        int64_t n = vfs_write(gfd, v[i].base, v[i].len);
-        if (n < 0) return n;
-        total += n;
+        struct iovec v;
+        if (copy_from_user(&v, (const char *)iov + (size_t)i * sizeof(struct iovec), sizeof(v)) < 0) return -EFAULT;
+        if (!v.base || v.len == 0) continue;
+        size_t done = 0;
+        while (done < v.len) {
+            size_t chunk = v.len - done;
+            if (chunk > sizeof(kbuf)) chunk = sizeof(kbuf);
+            if (copy_from_user(kbuf, v.base + done, chunk) < 0) return -EFAULT;
+            int64_t n = vfs_write(gfd, kbuf, chunk);
+            if (n < 0) return n;
+            total += n;
+            done += (size_t)n;
+            if ((size_t)n < chunk) break;
+        }
     }
     return total;
 }
@@ -238,14 +296,23 @@ int64_t sys_readv(int fd, const void *iov, int iovcnt) {
     int64_t gfd = get_global_fd(fd);
     if (gfd < 0) return gfd;
     struct iovec { char *base; size_t len; };
-    const struct iovec *v = (const struct iovec *)iov;
     int64_t total = 0;
+    char kbuf[4096];
     for (int i = 0; i < iovcnt; i++) {
-        if (!v[i].base || v[i].len == 0) continue;
-        int64_t n = vfs_read(gfd, v[i].base, v[i].len);
-        if (n < 0) return n;
-        total += n;
-        if ((size_t)n < v[i].len) break;
+        struct iovec v;
+        if (copy_from_user(&v, (const char *)iov + (size_t)i * sizeof(struct iovec), sizeof(v)) < 0) return -EFAULT;
+        if (!v.base || v.len == 0) continue;
+        size_t done = 0;
+        while (done < v.len) {
+            size_t chunk = v.len - done;
+            if (chunk > sizeof(kbuf)) chunk = sizeof(kbuf);
+            int64_t n = vfs_read(gfd, kbuf, chunk);
+            if (n <= 0) return total > 0 ? total : n;
+            if (copy_to_user(v.base + done, kbuf, (size_t)n) < 0) return -EFAULT;
+            total += n;
+            done += (size_t)n;
+            if ((size_t)n < chunk) break;
+        }
     }
     return total;
 }
@@ -510,7 +577,12 @@ int64_t sys_chdir(const char *path) {
 
 int64_t sys_getcwd(char *buf, size_t size) {
     if (!buf || size == 0) return -EFAULT;
-    return vfs_getcwd(buf, size);
+    task_t *t = proc_current();
+    if (!t) return -EFAULT;
+    size_t len = strlen(t->cwd) + 1;
+    if (size < len) return -ERANGE;
+    if (copy_to_user(buf, t->cwd, len) < 0) return -EFAULT;
+    return (int64_t)len;
 }
 
 static void copy_kstat_to_user(void *st, const kstat_t *kst) {
@@ -569,7 +641,13 @@ int64_t sys_readlinkat(int dirfd, const char *path, char *buf, size_t sz) {
     if (!path) return -EFAULT;
     char kpath[MAX_PATH_LEN];
     if (user_strncpy(kpath, path, MAX_PATH_LEN) < 0) return -EFAULT;
-    return vfs_readlinkat(dirfd, kpath, buf, sz);
+    if (sz > 4096) sz = 4096;
+    char kbuf[4096];
+    int64_t r = vfs_readlinkat(dirfd, kpath, kbuf, sz);
+    if (r > 0) {
+        if (copy_to_user(buf, kbuf, (size_t)r) < 0) return -EFAULT;
+    }
+    return r;
 }
 
 int64_t sys_faccessat(int dirfd, const char *path, int mode) {
@@ -579,10 +657,87 @@ int64_t sys_faccessat(int dirfd, const char *path, int mode) {
     return vfs_faccessat(dirfd, kpath, mode);
 }
 
+int64_t sys_statx(int dirfd, const char *path, int flags, unsigned mask, void *buf) {
+    if (!path || !buf) return -EFAULT;
+    char kpath[MAX_PATH_LEN];
+    if (user_strncpy(kpath, path, MAX_PATH_LEN) < 0) return -EFAULT;
+    kstat_t kst;
+    int r = vfs_fstatat(dirfd, kpath, &kst, flags);
+    if (r < 0) return r;
+
+    /* struct statx layout (256 bytes total):
+     *   0:  stx_mask          u32
+     *   4:  stx_blksize       u32
+     *   8:  stx_attributes    u64
+     *  16:  stx_nlink         u32
+     *  20:  stx_uid           u32
+     *  24:  stx_gid           u32
+     *  28:  stx_mode          u16 + pad u16
+     *  32:  stx_ino           u64
+     *  40:  stx_size          u64
+     *  48:  stx_blocks        u64
+     *  56:  stx_attributes_mask u64
+     *  64:  stx_atime {sec:i64, nsec:u32, pad:i32}  = 16 bytes
+     *  80:  stx_btime {sec:i64, nsec:u32, pad:i32}  = 16 bytes
+     *  96:  stx_ctime {sec:i64, nsec:u32, pad:i32}  = 16 bytes
+     * 112:  stx_mtime {sec:i64, nsec:u32, pad:i32}  = 16 bytes
+     * 128:  stx_rdev_major    u32
+     * 132:  stx_rdev_minor    u32
+     * 136:  stx_dev_major     u32
+     * 140:  stx_dev_minor     u32
+     * 144:  spare[14]         u64 × 14
+     */
+    uint8_t stx[256];
+    memset(stx, 0, sizeof(stx));
+    uint32_t *u32 = (uint32_t *)stx;
+    uint64_t *u64 = (uint64_t *)stx;
+    uint16_t *u16 = (uint16_t *)stx;
+
+    u32[0]  = (uint32_t)mask;
+    u32[1]  = (uint32_t)kst.st_blksize;
+    /* u64[1] = stx_attributes = 0 */
+    u32[4]  = kst.st_nlink;
+    u32[5]  = kst.st_uid;
+    u32[6]  = kst.st_gid;
+    u16[14] = (uint16_t)kst.st_mode;
+    u16[15] = 0;
+    u64[4]  = kst.st_ino;
+    u64[5]  = kst.st_size;
+    u64[6]  = kst.st_blocks;
+    /* u64[7] = stx_attributes_mask = 0 */
+
+    /* stx_atime at offset 64 */
+    *(int64_t *)(stx + 64)  = (int64_t)kst.st_atime;
+    *(uint32_t *)(stx + 72) = (uint32_t)kst.st_atime_nsec;
+    /* stx_btime at offset 80 — not available */
+    /* stx_ctime at offset 96 */
+    *(int64_t *)(stx + 96)  = (int64_t)kst.st_ctime;
+    *(uint32_t *)(stx + 104) = (uint32_t)kst.st_ctime_nsec;
+    /* stx_mtime at offset 112 */
+    *(int64_t *)(stx + 112)  = (int64_t)kst.st_mtime;
+    *(uint32_t *)(stx + 120) = (uint32_t)kst.st_mtime_nsec;
+
+    /* stx_rdev_major/minor at offset 128 */
+    u32[32] = (uint32_t)(kst.st_rdev >> 8);
+    u32[33] = (uint32_t)(kst.st_rdev & 0xff) | (uint32_t)((kst.st_rdev >> 12) & 0xffffff00);
+    /* stx_dev_major/minor at offset 136 */
+    u32[34] = (uint32_t)(kst.st_dev >> 8);
+    u32[35] = (uint32_t)(kst.st_dev & 0xff) | (uint32_t)((kst.st_dev >> 12) & 0xffffff00);
+
+    if (copy_to_user(buf, stx, sizeof(stx)) < 0) return -EFAULT;
+    return 0;
+}
+
 int64_t sys_getdents64(int fd, void *dirp, size_t count) {
     int64_t gfd = get_global_fd(fd);
     if (gfd < 0) return gfd;
-    return vfs_getdents64(gfd, dirp, count);
+    if (count > 4096) count = 4096;
+    char kbuf[4096];
+    int64_t n = vfs_getdents64(gfd, kbuf, count);
+    if (n > 0) {
+        if (copy_to_user(dirp, kbuf, (size_t)n) < 0) return -EFAULT;
+    }
+    return n;
 }
 
 int64_t sys_linkat(int olddirfd, const char *oldpath,

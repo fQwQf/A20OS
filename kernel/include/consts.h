@@ -135,6 +135,7 @@
 #define SYS_prlimit64      261
 #define SYS_renameat2      276
 #define SYS_getrandom      278
+#define SYS_statx          291
 #define SYS_shm_open       1021
 #define SYS_setgroups      159
 

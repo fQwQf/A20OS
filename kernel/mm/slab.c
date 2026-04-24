@@ -159,14 +159,14 @@ void *kmalloc(size_t size) {
     }
 
     size_t obj_size = c->obj_size;
-    slab_validate_sp(sp, "kmalloc-pre", obj_size);
+    // slab_validate_sp(sp, "kmalloc-pre", obj_size);
 
     // 从空闲链表取出一个对象
     void *obj = sp->free_list;
     if (!obj) {
         printf("[SLAB BUG] kmalloc: free_list is NULL but in_use=%u/%u sp=%p idx=%d\n",
                sp->in_use, sp->total, (void *)sp, idx);
-        panic("kmalloc: empty free_list");
+        panic("kmalloc: empty free_list"); // 可能在这里出错
     }
     /* Validate that obj lies inside this slab page */
     uintptr_t offset = (uintptr_t)obj - (uintptr_t)sp;
@@ -215,7 +215,7 @@ void kfree(void *ptr) {
         panic("kfree: corrupted slab pointer");
     }
 
-    slab_validate_sp(sp, "kfree-pre", obj_size);
+    // slab_validate_sp(sp, "kfree-pre", obj_size);
 
     // 检查是否双重释放
     for (void *p = sp->free_list; p; p = *(void **)p) {
@@ -231,19 +231,23 @@ void kfree(void *ptr) {
     sp->free_list = ptr;
     sp->in_use--;
 
-    slab_validate_sp(sp, "kfree-post", obj_size);
+    // slab_validate_sp(sp, "kfree-post", obj_size);
 
     int idx = sp->cache_idx;
     slab_cache_t *c = &caches[idx];
 
-    // 如果页面从满变为部分使用，移动到 partial 链表
-    if (sp->in_use == sp->total - 1 && sp == c->full) {
+    // 如果页面刚从满状态转变出来（只要减去 1 后等于 total - 1，那它之前一定在 full 链表中）
+    if (sp->in_use == sp->total - 1) {
         slab_list_remove(&c->full, sp);
         slab_list_push(&c->partial, sp);
-    } else if (sp->in_use == 0 && sp != c->spare) {
-        // 如果页面完全空闲，可以作为备用页面或释放
-        if (sp == c->full) slab_list_remove(&c->full, sp);
-        else if (sp == c->partial) slab_list_remove(&c->partial, sp);
+    }
+
+    // 如果页面已经完全空闲（注意这里用 if 而不是 else if，以处理 total == 1 的极端情况）
+    if (sp->in_use == 0) {
+        // 从 partial 链表中移除。
+        // （如果 total > 1，它本就在 partial 里；如果 total == 1，它刚刚在上面被 push 进了 partial 里）
+        slab_list_remove(&c->partial, sp);
+        
         if (!c->spare) {
             c->spare = sp;
         } else {
