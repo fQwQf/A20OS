@@ -856,14 +856,18 @@ int vfs_ioctl(int fd, unsigned long req, void *arg) {
 
     if (is_special_tty(vf) && arg) {
         if (req == TCGETS) {
-            memset(arg, 0, 36);
+            char zeros[36];
+            memset(zeros, 0, 36);
+            if (copy_to_user(arg, zeros, 36) < 0) return -EFAULT;
             return 0;
         }
         if (req == TCSETS || req == TCSETSW || req == TCSETSF) {
             return 0;
         }
         if (req == TIOCGWINSZ) {
-            memset(arg, 0, 8);
+            char zeros[8];
+            memset(zeros, 0, 8);
+            if (copy_to_user(arg, zeros, 8) < 0) return -EFAULT;
             return 0;
         }
     }

@@ -200,7 +200,7 @@ static int setup_tls(uint64_t *pgdir, const void *tls_data, uint64_t tls_filesz,
                      uint64_t *tls_va_out, uint64_t *tls_tp_out) {
     uint64_t tcb_offset = ROUND_UP(tls_memsz, tls_align);
     uint64_t total_size = tcb_offset + TLS_TCB_SIZE;
-    uint64_t total_pages = ROUND_UP(total_size, PAGE_SIZE);
+    uint64_t total_pages = ROUND_UP(total_size, PAGE_SIZE) / PAGE_SIZE;
 
     // 分配并映射 TLS 内存
     for (uint64_t page = 0; page < total_pages; page++) {
@@ -262,7 +262,7 @@ int elf_load_from_buf(const void *buf, size_t len, elf_load_info_t *info) {
 
     // 计算 ASLR 偏移（仅对动态链接库）
     uint64_t load_bias = (eh->e_type == ET_DYN) ? (USER_DYN_BASE + elf_aslr_bias()) : 0;
-    uint64_t base = 0, max_va = 0;
+    uint64_t base = 0, max_va = 0, brk_va = 0;
     const void *tls_data = NULL;
     uint64_t tls_filesz = 0, tls_memsz = 0, tls_align = 1;
 
@@ -291,6 +291,7 @@ int elf_load_from_buf(const void *buf, size_t len, elf_load_info_t *info) {
         uint64_t seg_end   = ROUND_UP(seg_va + ph->p_memsz, PAGE_SIZE);
         if (base == 0) base = seg_start;
         if (seg_end > max_va) max_va = seg_end;
+        if ((ph->p_flags & PF_W) && seg_end > brk_va) brk_va = seg_end;
     }
 
     // 映射用户栈
@@ -298,18 +299,16 @@ int elf_load_from_buf(const void *buf, size_t len, elf_load_info_t *info) {
     r = map_stack(pgdir, &stack_top);
     if (r < 0) { pt_destroy_user(pgdir); return r; }
 
-    // 设置 TLS
+    /* Always set up TLS/TCB so that tp is valid for musl. */
     uint64_t tls_va = 0, tls_tp = 0;
-    if (tls_data && tls_filesz > 0) {
-        r = setup_tls(pgdir, tls_data, tls_filesz, tls_memsz, tls_align, &tls_va, &tls_tp);
-        if (r < 0) { pt_destroy_user(pgdir); return r; }
-    }
+    r = setup_tls(pgdir, tls_data, tls_filesz, tls_memsz, tls_align, &tls_va, &tls_tp);
+    if (r < 0) { pt_destroy_user(pgdir); return r; }
 
     // 填充加载信息
     info->entry     = eh->e_entry + load_bias;
     info->base      = base;
     info->end_va    = max_va;
-    info->brk       = ROUND_UP(max_va, PAGE_SIZE);
+    info->brk       = ROUND_UP(brk_va ? brk_va : max_va, PAGE_SIZE);
     info->phdr_va   = base + eh->e_phoff;
     info->phnum     = eh->e_phnum;
     info->phentsize = eh->e_phentsize;
@@ -396,7 +395,7 @@ int elf_load(int fd, const char *path, elf_load_info_t *info) {
     mm.mmap_base = MMAP_BASE_ADDR;
 
     uint64_t load_bias = (eh.e_type == ET_DYN) ? (USER_DYN_BASE + elf_aslr_bias()) : 0;
-    uint64_t base = 0, max_va = 0, head_va = 0;
+    uint64_t base = 0, max_va = 0, brk_va = 0, head_va = 0;
     void *tls_data = NULL;
     uint64_t tls_filesz = 0, tls_memsz = 0, tls_align = 1;
 
@@ -439,6 +438,7 @@ int elf_load(int fd, const char *path, elf_load_info_t *info) {
         if (phdrs[i].p_offset == 0) head_va = phdrs[i].p_vaddr + load_bias;
         if (base == 0) base = seg_start;
         if (seg_end > max_va) max_va = seg_end;
+        if ((phdrs[i].p_flags & PF_W) && seg_end > brk_va) brk_va = seg_end;
     }
 
     uint64_t interp_entry = 0;
@@ -497,17 +497,16 @@ int elf_load(int fd, const char *path, elf_load_info_t *info) {
     info->entry      = has_interp ? interp_entry : (eh.e_entry + load_bias);
     info->base       = base;
     info->end_va     = max_va;
-    info->brk        = ROUND_UP(max_va, PAGE_SIZE);
+    info->brk        = ROUND_UP(brk_va ? brk_va : max_va, PAGE_SIZE);
     info->phdr_va    = head_va ? (head_va + eh.e_phoff) : (base + eh.e_phoff);
     info->phnum      = (uint32_t)nph;
     info->phentsize  = eh.e_phentsize;
     info->load_addr  = base;
     info->load_size  = (size_t)(max_va - base);
+    /* Always set up TLS/TCB so that tp is valid for musl. */
     uint64_t tls_va = 0, tls_tp = 0;
-    if (tls_data && tls_filesz > 0) {
-        r = setup_tls(pgdir, tls_data, tls_filesz, tls_memsz, tls_align, &tls_va, &tls_tp);
-        if (r < 0) { kfree(tls_data); pt_destroy_user(pgdir); return r; }
-    }
+    r = setup_tls(pgdir, tls_data, tls_filesz, tls_memsz, tls_align, &tls_va, &tls_tp);
+    if (r < 0) { kfree(tls_data); pt_destroy_user(pgdir); return r; }
 
     info->pgdir      = pgdir;
     info->stack_top  = stack_top;

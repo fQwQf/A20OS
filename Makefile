@@ -42,6 +42,15 @@ endif
 else ifeq ($(ARCH), loongarch64)
 QEMU_FLAGS += -drive file=fat32.img,if=none,format=raw,id=x0 -device virtio-blk-pci,drive=x0
 QEMU_FLAGS += -drive file=ext4.img,if=none,format=raw,id=x1 -device virtio-blk-pci,drive=x1
+
+ifneq ($(wildcard sdcard-rv.img),)
+QEMU_FLAGS += -drive file=sdcard-rv.img,if=none,format=raw,id=x2 -device virtio-blk-pci,drive=x2
+endif
+
+ifneq ($(wildcard sdcard-la.img),)
+QEMU_FLAGS += -drive file=sdcard-la.img,if=none,format=raw,id=x3 -device virtio-blk-pci,drive=x3
+endif
+
 endif
 endif
 

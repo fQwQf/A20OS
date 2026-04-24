@@ -491,8 +491,10 @@ int main(int argc, char *argv[])
         syscall(SYS_reboot, 0);
     }
 
+    printf("[INIT] Shell exited abnormally (status=%d). Powering off.\n", status);
     while (1)
     {
+        syscall(SYS_reboot, 0);
     }
     return 0;
 }

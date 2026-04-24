@@ -134,7 +134,7 @@ void signal_deliver_user(trap_context_t *ctx) {
 #ifdef CONFIG_RISCV64
         uint32_t tramp[2] = { 0x08b00893, 0x00000073 };
 #elif defined(CONFIG_LOONGARCH64)
-        uint32_t tramp[2] = { 0x0380c093, 0x00200000 };
+        uint32_t tramp[2] = { 0x02c22c0b, 0x002b0000 };
 #else
         uint32_t tramp[2] = { 0, 0 };
 #endif
