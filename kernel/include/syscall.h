@@ -46,6 +46,7 @@ int64_t sys_getdents64(int fd, void *dirp, size_t count);
 int64_t sys_linkat(int olddirfd, const char *oldpath,
                     int newdirfd, const char *newpath, int flags);
 int64_t sys_symlinkat(const char *target, int newdirfd, const char *linkpath);
+int64_t sys_statx(int dirfd, const char *path, int flags, unsigned mask, void *buf);
 int64_t sys_statfs(const char *path, void *buf);
 int64_t sys_fstatfs(int fd, void *buf);
 int64_t sys_mount(const char *src, const char *target,

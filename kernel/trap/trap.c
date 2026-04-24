@@ -76,7 +76,7 @@ int handle_demand_fault(task_t *t, uint64_t stval) {
             if (pfn == PFN_NONE) return -1;
             memset(pfn_to_virt(pfn), 0, PAGE_SIZE);
 
-            uint64_t pte_flags = PTE_V | PTE_R | PTE_W | PTE_X | PTE_U | PTE_A | PTE_D;
+            uint64_t pte_flags = PTE_V | PTE_R | PTE_W | PTE_X | PTE_U | PTE_A | PTE_D | PTE_MAT1 | PTE_LEAF;
             int r = pt_map(t->mm->pgdir, page_va, pfn_to_phys(pfn), pte_flags);
             if (r < 0) { frame_put(pfn); return -1; }
 
@@ -93,7 +93,7 @@ int handle_demand_fault(task_t *t, uint64_t stval) {
         if (pfn == PFN_NONE) return -1;
         memset(pfn_to_virt(pfn), 0, PAGE_SIZE);
 
-        uint64_t pte_flags = PTE_V | PTE_R | PTE_W | PTE_U | PTE_A | PTE_D;
+        uint64_t pte_flags = PTE_V | PTE_R | PTE_W | PTE_U | PTE_A | PTE_D | PTE_MAT1 | PTE_LEAF;
         int r = pt_map(t->mm->pgdir, page_va, pfn_to_phys(pfn), pte_flags);
         if (r < 0) { frame_put(pfn); return -1; }
 
@@ -176,6 +176,10 @@ static void handle_irq(uint64_t irq, uint64_t sepc, int from_user) {
         timer_set_interval(TICKS_PER_SEC / 100);
         if (from_user) proc_yield();
 #endif
+#ifdef CONFIG_LOONGARCH64
+    } else if (irq == IRQ_S_EXT) {
+        uart_handle_irq();
+#endif
     } else {
         (void)sepc;
     }
@@ -193,9 +197,25 @@ void trap_handler(trap_context_t *ctx) {
         if (first_user_trap < 20) {
             first_user_trap++;
             task_t *cur = proc_current();
+            uint64_t code_check = scause & CAUSE_CODE_MASK;
             kdebug("[UTRAP#%d] pid=%d scause=0x%lx sepc=0x%lx stval=0x%lx a7=%lu\n",
                    first_user_trap, cur ? cur->pid : -1, scause, sepc, stval,
                    (unsigned long)TRAP_CTX_SYSCALL_NUM(ctx));
+            if (code_check == CAUSE_STORE_PAGE_FAULT || code_check == CAUSE_LOAD_PAGE_FAULT) {
+#ifdef CONFIG_LOONGARCH64
+                kdebug("  >> a0=0x%lx a1=0x%lx a2=0x%lx a3=0x%lx\n",
+                       (unsigned long)TRAP_CTX_ARG0(ctx), (unsigned long)TRAP_CTX_ARG1(ctx),
+                       (unsigned long)TRAP_CTX_ARG2(ctx), (unsigned long)TRAP_CTX_ARG3(ctx));
+                kdebug("  >> t0=0x%lx t1=0x%lx t2=0x%lx t3=0x%lx t4=0x%lx t5=0x%lx\n",
+                       (unsigned long)ctx->regs[12], (unsigned long)ctx->regs[13],
+                       (unsigned long)ctx->regs[14], (unsigned long)ctx->regs[15],
+                       (unsigned long)ctx->regs[16], (unsigned long)ctx->regs[17]);
+                kdebug("  >> t6=0x%lx t7=0x%lx t8=0x%lx tp=0x%lx sp=0x%lx ra=0x%lx\n",
+                       (unsigned long)ctx->regs[18], (unsigned long)ctx->regs[19],
+                       (unsigned long)ctx->regs[20], (unsigned long)TRAP_CTX_TP(ctx),
+                       (unsigned long)TRAP_CTX_SP(ctx), (unsigned long)TRAP_CTX_RA(ctx));
+#endif
+            }
         }
     }
 
@@ -220,10 +240,80 @@ void trap_handler(trap_context_t *ctx) {
             }
             kerr("User PF unresolved: pid=%d code=%lu sepc=0x%lx stval=0x%lx\n",
                  cur ? cur->pid : -1, code, sepc, stval);
+#ifdef CONFIG_LOONGARCH64
+            /* Dump instruction at sepc and register state for crash diagnosis */
+            if (cur && cur->mm && cur->mm->pgdir) {
+                uint64_t *pte_sepc = pt_walk(cur->mm->pgdir, sepc, 0);
+                if (pte_sepc && (*pte_sepc & PTE_V)) {
+                    uint8_t *insn_kva = (uint8_t *)(arch_pte_addr(*pte_sepc) + PAGE_OFFSET + (sepc & 0xFFF));
+                    uint32_t insn = *(uint32_t *)insn_kva;
+                    kerr("  insn@sepc=0x%08x  ", insn);
+                    /* Decode common LoongArch store patterns */
+                    uint32_t opcode = insn & 0xFF;
+                    if (opcode >= 0x20 && opcode <= 0x27) {
+                        uint32_t rj = (insn >> 5) & 0x1F;
+                        uint32_t rk = (insn >> 10) & 0x1F;
+                        uint32_t rd = (insn >> 15) & 0x1F;
+                        kerr("st.%s $r%d, $r%d, $r%d",
+                             opcode == 0x20 ? "b" : opcode == 0x21 ? "h" :
+                             opcode == 0x22 ? "w" : opcode == 0x23 ? "d" :
+                             opcode == 0x24 ? "xb" : opcode == 0x25 ? "xh" :
+                             opcode == 0x26 ? "xw" : "xd",
+                             rd, rj, rk);
+                    } else if ((insn & 0xFE000000) == 0x28000000 ||
+                               (insn & 0xFE000000) == 0x2C000000) {
+                        /* stptr.w / stptr.d: [28/2C] rd, rj, si12 */
+                        uint32_t rd = (insn >> 5) & 0x1F;
+                        uint32_t rj = (insn >> 10) & 0x1F;
+                        int32_t si12 = ((int32_t)(insn >> 10)) >> 20; /* sign-extend bits[21:10] */
+                        kerr("stptr.? $r%d, $r%d, %d", rd, rj, si12);
+                    }
+                    kerr("\n");
+                }
+                kerr("  regs: a0=0x%lx a1=0x%lx a2=0x%lx a3=0x%lx\n",
+                     (unsigned long)TRAP_CTX_ARG0(ctx), (unsigned long)TRAP_CTX_ARG1(ctx),
+                     (unsigned long)TRAP_CTX_ARG2(ctx), (unsigned long)TRAP_CTX_ARG3(ctx));
+                kerr("  regs: a4=0x%lx a5=0x%lx a6=0x%lx a7=0x%lx\n",
+                     (unsigned long)ctx->regs[8], (unsigned long)ctx->regs[9],
+                     (unsigned long)ctx->regs[10], (unsigned long)ctx->regs[11]);
+                kerr("  regs: t0=0x%lx t1=0x%lx t2=0x%lx t3=0x%lx t4=0x%lx t5=0x%lx\n",
+                     (unsigned long)ctx->regs[12], (unsigned long)ctx->regs[13],
+                     (unsigned long)ctx->regs[14], (unsigned long)ctx->regs[15],
+                     (unsigned long)ctx->regs[16], (unsigned long)ctx->regs[17]);
+                kerr("  regs: t6=0x%lx t7=0x%lx t8=0x%lx tp=0x%lx sp=0x%lx fp=0x%lx ra=0x%lx\n",
+                     (unsigned long)ctx->regs[18], (unsigned long)ctx->regs[19],
+                     (unsigned long)ctx->regs[20], (unsigned long)TRAP_CTX_TP(ctx),
+                     (unsigned long)TRAP_CTX_SP(ctx), (unsigned long)ctx->regs[22],
+                     (unsigned long)TRAP_CTX_RA(ctx));
+                kerr("  regs: s0=0x%lx s1=0x%lx s2=0x%lx s3=0x%lx s4=0x%lx\n",
+                     (unsigned long)ctx->regs[23], (unsigned long)ctx->regs[24],
+                     (unsigned long)ctx->regs[25], (unsigned long)ctx->regs[26],
+                     (unsigned long)ctx->regs[27]);
+                kerr("  regs: s5=0x%lx s6=0x%lx s7=0x%lx s8=0x%lx\n",
+                     (unsigned long)ctx->regs[28], (unsigned long)ctx->regs[29],
+                     (unsigned long)ctx->regs[30], (unsigned long)ctx->regs[31]);
+                if (cur && cur->mm && cur->mm->pgdir) {
+                    uint64_t *pte_sepc = pt_walk(cur->mm->pgdir, sepc, 0);
+                    if (pte_sepc && (*pte_sepc & PTE_V)) {
+                        uint8_t *insn_kva = (uint8_t *)(arch_pte_addr(*pte_sepc) + PAGE_OFFSET + (sepc & 0xFFF));
+                        uint32_t insn = *(uint32_t *)insn_kva;
+                        kerr("  insn=0x%08x", insn);
+                        if (insn == 0x38103d80) {
+                            uint64_t expected = (uint64_t)((int64_t)ctx->regs[12] + (int64_t)ctx->regs[15]);
+                            kerr("  stx.b t0+t3=0x%lx %s stval\n",
+                                 (unsigned long)expected,
+                                 expected == stval ? "==" : "!=");
+                        } else { kerr("\n"); }
+                    }
+                }
+            }
             if (cur && cur->mm && cur->mm->pgdir) {
                 uint64_t *pte = pt_walk(cur->mm->pgdir, stval, 0);
-                kerr("  pte=%p *pte=0x%lx\n", (void*)pte, pte ? *pte : 0UL);
+                kerr("  pte=%p *pte=0x%lx brk=0x%lx start_brk=0x%lx\n",
+                     (void*)pte, pte ? *pte : 0UL,
+                     (unsigned long)cur->mm->brk, (unsigned long)cur->mm->start_brk);
             }
+#endif
             proc_exit(-SIGSEGV);
         } else if (code == CAUSE_PAGE_MODIFICATION) {
             /*

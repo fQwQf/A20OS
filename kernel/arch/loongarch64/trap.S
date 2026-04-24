@@ -45,6 +45,11 @@
  * If PPLV==0 (kernel mode): sp = kernel sp.
  */
 trap_entry_la64:
+    /* Save original $t0 before we clobber it (TLBRSAVE is free here;
+     * TLB refill handler only uses it during TLB miss, which has
+     * returned by the time we reach the general exception path). */
+    csrwr   $t0, 0x8B             /* TLBRSAVE = original $t0 */
+
     /* Read PRMD.PPLV to decide user vs kernel trap path */
     csrrd   $t0, 0x1              /* PRMD */
     andi    $t0, $t0, 0x3         /* PPLV bits [1:0] */
@@ -71,6 +76,8 @@ __trap_from_kernel:
     st.d    $a5,   $sp, REG_OFF(9)
     st.d    $a6,   $sp, REG_OFF(10)
     st.d    $a7,   $sp, REG_OFF(11)
+    /* Retrieve original $t0 from TLBRSAVE (saved in trap_entry_la64) */
+    csrrd   $t0, 0x8B
     st.d    $t0,   $sp, REG_OFF(12)
     st.d    $t1,   $sp, REG_OFF(13)
     st.d    $t2,   $sp, REG_OFF(14)
@@ -123,7 +130,9 @@ __trap_from_user:
     /* Now we are on the kernel stack! Allocate trap frame. */
     addi.d  $sp, $sp, -CTX_SIZE
 
-    /* Save $t0 and $t1 so we can use them as temporaries */
+    /* Retrieve original $t0 from TLBRSAVE (saved in trap_entry_la64),
+     * then save both $t0 and $t1 so we can use them as temporaries */
+    csrrd   $t0, 0x8B
     st.d    $t0, $sp, REG_OFF(12)
     st.d    $t1, $sp, REG_OFF(13)
 
@@ -197,8 +206,14 @@ user_trap_return:
      * to the old (now freed) page directory.  Without this, TLB
      * refills after ertn would walk freed page tables. */
     ld.d    $t0, $sp, REG_OFF(0)
+    csrrd   $t1, 0x19              /* current PGDL */
+    bne     $t0, $t1, .Lflush_tlb
+    csrwr   $t0, 0x19              /* PGDL unchanged, skip flush */
+    b       .Lpgdl_done
+.Lflush_tlb:
     csrwr   $t0, 0x19              /* PGDL */
-    invtlb  0x3, $zero, $zero      /* Flush non-global TLB entries */
+    invtlb  0x3, $zero, $zero
+.Lpgdl_done:
 
     ld.d    $t0, $sp, ERA_OFF
     csrwr   $t0, 0x6               /* ERA */
@@ -263,32 +278,32 @@ user_trap_return:
  */
     .align 12
 tlb_refill_entry_la64:
-    csrwr   $t0, 0x8B              /* TLBRSAVE = save $t0 */
+    csrwr   $r21, 0x8B             /* TLBRSAVE = save $r21 (reserved, not used by user) */
 
-    csrrd   $t0, 0x19              /* $t0 = PGDL */
-    beqz    $t0, .Ltlb_miss
+    csrrd   $r21, 0x19             /* $r21 = PGDL */
+    beqz    $r21, .Ltlb_miss
 
-    lddir   $t0, $t0, 2
-    beqz    $t0, .Ltlb_miss
-    srli.d  $t0, $t0, 12
-    slli.d  $t0, $t0, 12
+    lddir   $r21, $r21, 2
+    beqz    $r21, .Ltlb_miss
+    srli.d  $r21, $r21, 12
+    slli.d  $r21, $r21, 12
 
-    lddir   $t0, $t0, 1
-    beqz    $t0, .Ltlb_miss
-    srli.d  $t0, $t0, 12
-    slli.d  $t0, $t0, 12
+    lddir   $r21, $r21, 1
+    beqz    $r21, .Ltlb_miss
+    srli.d  $r21, $r21, 12
+    slli.d  $r21, $r21, 12
 
-    ldpte   $t0, 0
-    ldpte   $t0, 1
+    ldpte   $r21, 0
+    ldpte   $r21, 1
     tlbfill
 
-    csrrd   $t0, 0x8B              /* restore $t0 */
+    csrrd   $r21, 0x8B             /* restore $r21 */
     ertn
 
 .Ltlb_miss:
     csrwr   $zero, 0x8C
     csrwr   $zero, 0x8D
     tlbfill
-    csrrd   $t0, 0x8B              /* restore $t0 */
+    csrrd   $r21, 0x8B             /* restore $r21 */
     ertn
 
