@@ -5,10 +5,19 @@
 #include "panic.h"
 #include "stdio.h"
 #include "string.h"
+#include "klog.h"
 
 // 虚拟地址转换为物理地址
 static inline paddr_t va_to_pa(const void *va) {
     return (paddr_t)((uint64_t)(uintptr_t)va - PAGE_OFFSET);
+}
+
+static inline int pte_user_readable(uint64_t pte) {
+    return arch_pte_is_leaf(pte) && (pte & PTE_U) && (pte & PTE_R);
+}
+
+static inline int pte_user_writable(uint64_t pte) {
+    return arch_pte_is_leaf(pte) && (pte & PTE_U) && (pte & PTE_W);
 }
 
 // 内存管理初始化函数
@@ -55,6 +64,14 @@ void pt_destroy(uint64_t *pgdir) {
     for (int i = 0; i < ARCH_PT_ENTRIES; i++) {
         uint64_t pte = pgdir[i];
         if ((pte & PTE_V) && !arch_pte_is_leaf(pte)) {
+            paddr_t next_pa = arch_pte_addr(pte);
+            pfn_t next_pfn = phys_to_pfn(next_pa);
+            if ((next_pa & (PAGE_SIZE - 1)) || !pfn_valid(next_pfn)) {
+                kerr("pt_destroy: skip invalid non-leaf pte[%d]=0x%lx pa=0x%lx\n",
+                     i, (unsigned long)pte, (unsigned long)next_pa);
+                pgdir[i] = 0;
+                continue;
+            }
             uint64_t *next = arch_pte_to_ptr(pte);
             pt_destroy(next);
             pgdir[i] = 0;
@@ -70,6 +87,8 @@ uint64_t *pt_walk(uint64_t *pgdir, vaddr_t va, int alloc) {
         int vpn = arch_pt_vpn(va, level);
         uint64_t pte = table[vpn];
         if (pte & PTE_V) {
+            if (arch_pte_is_leaf(pte))
+                return NULL;
             table = arch_pte_to_ptr(pte);
         } else {
             if (!alloc) return NULL;
@@ -94,7 +113,7 @@ int pt_map(uint64_t *pgdir, vaddr_t va, paddr_t pa, uint64_t flags) {
                 frame_put(phys_to_pfn(old_pa));
         }
     }
-    *pte = arch_pte_from_pa(pa) | flags | PTE_V;
+    *pte = arch_pte_leaf(pa, flags);
     return 0;
 }
 
@@ -109,11 +128,13 @@ int pt_unmap(uint64_t *pgdir, vaddr_t va) {
 // 将虚拟地址转换为物理地址
 paddr_t pt_translate(uint64_t *pgdir, vaddr_t va) {
     uint64_t *pte = pt_walk(pgdir, va, 0);
-    if (!pte || !(*pte & PTE_V)) return 0;
-    return arch_pte_addr(*pte) | (va & 0xFFF);
+    if (!pte || !(*pte & PTE_V) || !arch_pte_is_leaf(*pte)) return 0;
+    return arch_pte_addr(*pte) | (va & (PAGE_SIZE - 1));
 }
 
 // 将内核空间映射复制到新页表（内核空间共享）
+// LoongArch 的内核空间是通过 DMW 直接翻译的，完全绕过了 TLB 和多级页表机制
+// 可以置空来节省开销
 void pt_map_kernel(uint64_t *pgdir) {
     for (int i = ARCH_PT_USER_END; i < ARCH_PT_ENTRIES; i++) {
         if (boot_pgdir[i] & PTE_V)
@@ -147,7 +168,7 @@ static uint64_t *pt_clone_level(uint64_t *src, int level) {
                 void *nf = frame_alloc();
                 if (!nf) { pt_destroy(dst); return NULL; }
                 memcpy(nf, arch_pte_to_ptr(pte), PAGE_SIZE);
-                dst[i] = arch_pte_from_pa(va_to_pa(nf)) | (pte & 0x3FF);
+                dst[i] = arch_pte_from_pa(va_to_pa(nf)) | arch_pte_flags(pte);
             } else {
                 dst[i] = pte;
             }
@@ -184,6 +205,14 @@ static void pt_destroy_user_recursive(uint64_t *table, int level) {
                 frame_put(phys_to_pfn(arch_pte_addr(pte)));
             table[i] = 0;
         } else {
+            paddr_t next_pa = arch_pte_addr(pte);
+            pfn_t next_pfn = phys_to_pfn(next_pa);
+            if ((next_pa & (PAGE_SIZE - 1)) || !pfn_valid(next_pfn)) {
+                kerr("pt_destroy_user: skip invalid non-leaf level=%d idx=%d pte=0x%lx pa=0x%lx\n",
+                     level, i, (unsigned long)pte, (unsigned long)next_pa);
+                table[i] = 0;
+                continue;
+            }
             uint64_t *next = arch_pte_to_ptr(pte);
             pt_destroy_user_recursive(next, level - 1);
             frame_free(next);
@@ -218,6 +247,7 @@ long copy_from_user(void *dst, const void *src, size_t n) {
             pte = pt_walk(t->pgdir, va, 0);
             if (!pte || !(*pte & PTE_V)) return -EFAULT;
         }
+        if (!pte_user_readable(*pte)) return -EFAULT;
         paddr_t pa = arch_pte_addr(*pte);
         size_t page_off = va & (PAGE_SIZE - 1);
         size_t chunk = PAGE_SIZE - page_off;
@@ -244,10 +274,11 @@ long copy_to_user(void *dst, const void *src, size_t n) {
             pte = pt_walk(t->pgdir, va, 0);
             if (!pte || !(*pte & PTE_V)) return -EFAULT;
         }
+        if (!arch_pte_is_leaf(*pte) || !(*pte & PTE_U)) return -EFAULT;
         if (!(*pte & PTE_W)) {
             if (handle_cow_fault(t, va) < 0) return -EFAULT;
             pte = pt_walk(t->pgdir, va, 0);
-            if (!pte || !(*pte & PTE_V) || !(*pte & PTE_W)) return -EFAULT;
+            if (!pte || !(*pte & PTE_V) || !pte_user_writable(*pte)) return -EFAULT;
         }
         paddr_t pa = arch_pte_addr(*pte);
         size_t page_off = va & (PAGE_SIZE - 1);
@@ -276,6 +307,7 @@ long user_strncpy(char *dst, const char *src, size_t max) {
             pte = pt_walk(t->pgdir, va, 0);
             if (!pte || !(*pte & PTE_V)) return -EFAULT;
         }
+        if (!pte_user_readable(*pte)) return -EFAULT;
         paddr_t pa = arch_pte_addr(*pte);
         size_t page_off = va & (PAGE_SIZE - 1);
         size_t chunk = PAGE_SIZE - page_off;

@@ -2,6 +2,7 @@
 #define _ARCH_RISCV64_H
 
 #include "platform.h"
+#include "console.h"
 #include "cpu.h"
 #include "mm.h"
 #include "trap.h"

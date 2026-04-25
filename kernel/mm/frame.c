@@ -5,36 +5,51 @@
 
 pfa_t pfa;
 
-/* Free-block link stored inside the frame's own memory (zero overhead) */
-typedef struct free_node {
-    pfn_t prev;
-    pfn_t next;
-} free_node_t;
-
-// 将页帧号转换为指向自由节点虚拟地址的指针
-static inline free_node_t *node_of(pfn_t pfn) {
-    return (free_node_t *)pfn_to_virt(pfn);
+static inline frame_meta_t *meta_of(pfn_t pfn) {
+    return &pfa.meta[pfn];
 }
 
 // Buddy System 各阶的空闲块的入队和出队
 static void fl_push(pfn_t pfn, int order) {
-    free_node_t *n = node_of(pfn);
-    n->prev = PFN_NONE;
-    n->next = pfa.free_lists[order].head;
-    if (n->next != PFN_NONE)
-        node_of(n->next)->prev = pfn;
+    frame_meta_t *m = meta_of(pfn);
+    m->prev = PFN_NONE;
+    m->next = pfa.free_lists[order].head;
+    if (m->next != PFN_NONE)
+        meta_of(m->next)->prev = pfn;
     pfa.free_lists[order].head = pfn;
     pfa.free_lists[order].count++;
 }
 
 static void fl_remove(pfn_t pfn, int order) {
-    free_node_t *n = node_of(pfn);
-    if (n->prev != PFN_NONE)
-        node_of(n->prev)->next = n->next;
+    frame_meta_t *m = meta_of(pfn);
+    if (m->prev != PFN_NONE) {
+        if (!pfn_valid(m->prev) || pfa.meta[m->prev].order != (uint8_t)order ||
+            pfa.meta[m->prev].flags != FRAME_F_FREE) {
+            printf("[PFA BUG] fl_remove(%u,o=%d): bad prev=%u flags=%u order=%u ref=%u\n",
+                   (unsigned)pfn, order, (unsigned)m->prev,
+                   pfn_valid(m->prev) ? pfa.meta[m->prev].flags : 0U,
+                   pfn_valid(m->prev) ? pfa.meta[m->prev].order : 0U,
+                   pfn_valid(m->prev) ? pfa.meta[m->prev].refcount : 0U);
+            panic("pfa: corrupted prev link");
+        }
+        meta_of(m->prev)->next = m->next;
+    }
     else
-        pfa.free_lists[order].head = n->next;
-    if (n->next != PFN_NONE)
-        node_of(n->next)->prev = n->prev;
+        pfa.free_lists[order].head = m->next;
+    if (m->next != PFN_NONE) {
+        if (!pfn_valid(m->next) || pfa.meta[m->next].order != (uint8_t)order ||
+            pfa.meta[m->next].flags != FRAME_F_FREE) {
+            printf("[PFA BUG] fl_remove(%u,o=%d): bad next=%u flags=%u order=%u ref=%u\n",
+                   (unsigned)pfn, order, (unsigned)m->next,
+                   pfn_valid(m->next) ? pfa.meta[m->next].flags : 0U,
+                   pfn_valid(m->next) ? pfa.meta[m->next].order : 0U,
+                   pfn_valid(m->next) ? pfa.meta[m->next].refcount : 0U);
+            panic("pfa: corrupted next link");
+        }
+        meta_of(m->next)->prev = m->prev;
+    }
+    m->prev = PFN_NONE;
+    m->next = PFN_NONE;
     pfa.free_lists[order].count--;
 }
 
@@ -64,6 +79,8 @@ void pfa_init(paddr_t ram_base, paddr_t ram_end, paddr_t kernel_end) {
         meta[i].flags    = FRAME_F_KDATA;
         meta[i].refcount = 1;
         meta[i].order    = 0;
+        meta[i].prev     = PFN_NONE;
+        meta[i].next     = PFN_NONE;
     }
 
     // 构建空闲链表
@@ -73,7 +90,10 @@ void pfa_init(paddr_t ram_base, paddr_t ram_end, paddr_t kernel_end) {
     // 处理对齐产生的碎片
     for (pfn_t i = used_pfn; i < start && i < pfa.total_frames; i++) {
         meta[i].flags = FRAME_F_FREE;
+        meta[i].refcount = 0;
         meta[i].order = 0;
+        meta[i].prev = PFN_NONE;
+        meta[i].next = PFN_NONE;
         fl_push(i, 0);
         pfa.free_frames++;
     }
@@ -85,6 +105,10 @@ void pfa_init(paddr_t ram_base, paddr_t ram_end, paddr_t kernel_end) {
         pfn_t sz = 1u << o;
         while (remain >= sz) {
             meta[start].flags = FRAME_F_FREE;
+            meta[start].refcount = 0;
+            meta[start].order = (uint8_t)o;
+            meta[start].prev = PFN_NONE;
+            meta[start].next = PFN_NONE;
             fl_push(start, o);
             start  += sz;
             remain -= sz;
@@ -115,7 +139,10 @@ pfn_t pfa_alloc(int order) {
         o--;
         pfn_t buddy = blk ^ (1u << o);
         pfa.meta[buddy].flags = FRAME_F_FREE;
+        pfa.meta[buddy].refcount = 0;
         pfa.meta[buddy].order = (uint8_t)o;
+        pfa.meta[buddy].prev = PFN_NONE;
+        pfa.meta[buddy].next = PFN_NONE;
         fl_push(buddy, o);
     }
 
@@ -123,6 +150,8 @@ pfn_t pfa_alloc(int order) {
     pfa.meta[blk].flags    = FRAME_F_ALLOC;
     pfa.meta[blk].refcount = 1;
     pfa.meta[blk].order    = (uint8_t)order;
+    pfa.meta[blk].prev     = PFN_NONE;
+    pfa.meta[blk].next     = PFN_NONE;
     pfa.free_frames -= (1u << order);
     return blk;
 }
@@ -153,7 +182,10 @@ void pfa_free(pfn_t pfn, int order) {
 
     // 标记释放并放回链表
     pfa.meta[pfn].flags = FRAME_F_FREE;
+    pfa.meta[pfn].refcount = 0;
     pfa.meta[pfn].order = (uint8_t)actual_order;
+    pfa.meta[pfn].prev = PFN_NONE;
+    pfa.meta[pfn].next = PFN_NONE;
     fl_push(pfn, actual_order);
 }
 
