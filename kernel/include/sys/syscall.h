@@ -97,10 +97,12 @@ int64_t sys_mremap(uint64_t old_addr, size_t old_size, size_t new_size,
                     int flags, uint64_t new_addr);
 int64_t sys_shm_open(const char *name, int oflag, int mode);
 
+int64_t sys_clock_settime(int clk, void *tp);
 int64_t sys_clock_gettime(int clk, void *tp);
 int64_t sys_clock_getres(int clk, void *tp);
 int64_t sys_nanosleep(void *req, void *rem);
 int64_t sys_gettimeofday(void *tv, void *tz);
+int64_t sys_settimeofday(void *tv, void *tz);
 int64_t sys_times(void *buf);
 int64_t sys_time(long *tloc);
 
