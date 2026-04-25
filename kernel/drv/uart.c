@@ -31,6 +31,25 @@ static volatile char rx_buffer[RX_BUF_SIZE];
 static volatile uint32_t rx_head;  // 缓冲区头指针
 static volatile uint32_t rx_tail;  // 缓冲区尾指针
 
+static void uart_rx_push(char c) {
+    if (c == 0x03) {  // Ctrl-C
+        /* This kernel has pgid/sid bookkeeping but no real tty foreground
+         * process-group tracking yet. Signal the task currently attached to
+         * the console path instead of broadcasting to the whole pgid. */
+        task_t *cur = proc_current();
+        if (cur && cur->pid > 0) {
+            proc_kill(cur->pid, SIGINT);
+        }
+        return;
+    }
+
+    uint32_t next = (rx_head + 1) % RX_BUF_SIZE;
+    if (next != rx_tail) {
+        rx_buffer[rx_head] = c;
+        rx_head = next;
+    }
+}
+
 // 初始化 UART 设备
 void uart_init(void) {
     rx_head = 0;
@@ -56,19 +75,11 @@ void uart_putc(char c) {
 // 阻塞式读取一个字符（如果没有数据则让出 CPU）
 int uart_getc(void) {
     while (rx_head == rx_tail) {
-#ifdef CONFIG_LOONGARCH64
-        /* LoongArch virt QEMU: poll UART directly since ExtIOI
-         * interrupt routing may not be initialized. */
-        if (UART0[LSR] & LSR_RX_READY) {
-            char c = UART0[RHR];
-            uint32_t next = (rx_head + 1) % RX_BUF_SIZE;
-            if (next != rx_tail) {
-                rx_buffer[rx_head] = c;
-                rx_head = next;
-            }
+        int c = arch_uart_poll_getc();
+        if (c >= 0) {
+            uart_rx_push((char)c);
             continue;
         }
-#endif
         arch_local_irq_enable();
         proc_yield();
         arch_local_irq_disable();
@@ -106,19 +117,6 @@ void uart_flush(void) {
 void uart_handle_irq(void) {
     while (UART0[LSR] & LSR_RX_READY) {
         char c = UART0[RHR];
-        if (c == 0x03) {  // Ctrl-C
-            /* proc_current() in IRQ context = the task that was preempted,
-             * which is the foreground process. Signal its whole group. */
-            task_t *cur = proc_current();
-            if (cur && cur->pid > 0 && cur->pgid > 0) {
-                proc_kill_pgid(cur->pgid, SIGINT, 0);
-            }
-            continue;
-        }
-        uint32_t next = (rx_head + 1) % RX_BUF_SIZE;
-        if (next != rx_tail) {
-            rx_buffer[rx_head] = c;
-            rx_head = next;
-        }
+        uart_rx_push(c);
     }
 }

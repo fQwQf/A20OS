@@ -2,6 +2,7 @@
 #include "vfs.h"
 #include "block_cache.h"
 #include "mm.h"
+#include "frame.h"
 #include "string.h"
 #include "stdio.h"
 #include "consts.h"
@@ -17,63 +18,32 @@ static vnode_t *ext4_make_vnode(ext4_sb_info_t *sb, uint32_t ino, uint32_t sz, i
 static int      ext4_inode_remove(ext4_sb_info_t *sb, uint32_t dir_ino, ext4_inode_t *di, const char *name, uint32_t ino);
 
 /* ================================================================
- * Vnode cache — deduplicate vnodes by (sb, inode_num)
- * Prevents use-after-free when the same inode is looked up
- * multiple times and slab reuses the freed vnode address.
+ * Vnode lifecycle
+ *
+ * Ext4 now follows the same short-lived vnode model as FAT32: every lookup
+ * creates a fresh vnode, and the vnode is freed when its refcount drops to 0.
+ *
+ * The previous ext4-specific vnode cache tried to keep permanent references
+ * by inode number, but in practice it amplified stale-pointer bugs into
+ * deterministic panics on both architectures.  Keeping ext4 aligned with the
+ * rest of the VFS is simpler and more robust.
  * ================================================================ */
 
-#define VNODE_CACHE_SIZE  256
-
-typedef struct vnode_cache_entry {
-    ext4_sb_info_t   *sb;
-    uint32_t          inode_num;
-    vnode_t          *vn;
-    struct vnode_cache_entry *next;
-} vnode_cache_entry_t;
-
-static vnode_cache_entry_t *vnode_cache_table[VNODE_CACHE_SIZE];
-
-static uint32_t vnode_cache_hash(ext4_sb_info_t *sb, uint32_t ino) {
-    return ((uint32_t)(uintptr_t)sb ^ ino) & (VNODE_CACHE_SIZE - 1);
-}
-
-/* Look up an existing vnode in the cache. If found, bump ref_count and return it. */
 static vnode_t *ext4_vnode_cache_lookup(ext4_sb_info_t *sb, uint32_t ino) {
-    uint32_t h = vnode_cache_hash(sb, ino);
-    for (vnode_cache_entry_t *e = vnode_cache_table[h]; e; e = e->next) {
-        if (e->sb == sb && e->inode_num == ino) {
-            e->vn->ref_count++;
-            return e->vn;
-        }
-    }
+    (void)sb;
+    (void)ino;
     return NULL;
 }
 
-/* Insert a newly created vnode into the cache. */
 static void ext4_vnode_cache_insert(ext4_sb_info_t *sb, uint32_t ino, vnode_t *vn) {
-    uint32_t h = vnode_cache_hash(sb, ino);
-    vnode_cache_entry_t *e = (vnode_cache_entry_t *)kmalloc(sizeof(vnode_cache_entry_t));
-    if (!e) return; /* non-fatal: just no caching */
-    e->sb = sb;
-    e->inode_num = ino;
-    e->vn = vn;
-    e->next = vnode_cache_table[h];
-    vnode_cache_table[h] = e;
+    (void)sb;
+    (void)ino;
+    (void)vn;
 }
 
-/* Remove a vnode from the cache (called when ref_count drops to 0). */
 static void ext4_vnode_cache_remove(ext4_sb_info_t *sb, uint32_t ino) {
-    uint32_t h = vnode_cache_hash(sb, ino);
-    vnode_cache_entry_t **pp = &vnode_cache_table[h];
-    while (*pp) {
-        if ((*pp)->sb == sb && (*pp)->inode_num == ino) {
-            vnode_cache_entry_t *victim = *pp;
-            *pp = victim->next;
-            kfree(victim);
-            return;
-        }
-        pp = &(*pp)->next;
-    }
+    (void)sb;
+    (void)ino;
 }
 
 /* ================================================================
@@ -745,8 +715,6 @@ static int ext4_stat(vnode_t *vn, kstat_t *st) {
 }
 
 static void ext4_release_vn(vnode_t *vn) {
-    /* With permanent cache refs, this should only fire during unmount.
-     * Normal vnode_put only decrements to 1 (cache ref), never triggers release. */
     ext4_vnode_priv_t *p = (ext4_vnode_priv_t *)vn->fs_data;
     if (p) ext4_vnode_cache_remove(p->sb, p->inode_num);
     if (vn->fs_data) { kfree(vn->fs_data); vn->fs_data = NULL; }
@@ -1090,10 +1058,13 @@ static int ext4_fread(vfile_t *vf, char *buf, size_t count) {
         if (chunk > count - done) chunk = count - done;
 
         uint64_t phys = ext4_block_map(fc->sb, &inode, lblk);
-        if (!phys) break;
-
-        int r = bcache_read_bytes(fc->sb->bc, phys * bs + loff, buf + done, chunk);
-        if (r < 0) break;
+        if (!phys) {
+            /* Sparse files read back as zero-filled holes, not EOF. */
+            memset(buf + done, 0, chunk);
+        } else {
+            int r = bcache_read_bytes(fc->sb->bc, phys * bs + loff, buf + done, chunk);
+            if (r < 0) break;
+        }
         done += chunk;
     }
 
@@ -1242,15 +1213,10 @@ static vfile_ops_t g_ext4_fops = {
 
 static vnode_t *ext4_make_vnode(ext4_sb_info_t *sb, uint32_t ino, uint32_t sz,
                                  int type, vnode_t *parent) {
-    /* Check the vnode cache first — return existing vnode if present.
-     * The cache holds a permanent reference (ref_count never drops to 0),
-     * preventing use-after-free when slab reuses freed vnode addresses. */
+    /* The cache hook is currently disabled; keep the lookup call so the
+     * make_vnode path stays self-contained if we ever reintroduce it. */
     vnode_t *cached = ext4_vnode_cache_lookup(sb, ino);
-    if (cached) {
-        /* Don't bump parent ref_count: the cached vnode already holds
-         * a parent reference from when it was first created. */
-        return cached;
-    }
+    if (cached) return cached;
 
     vnode_t *vn = (vnode_t *)kmalloc(sizeof(vnode_t));
     if (!vn) return NULL;
@@ -1275,7 +1241,6 @@ static vnode_t *ext4_make_vnode(ext4_sb_info_t *sb, uint32_t ino, uint32_t sz,
     vn->fs_data   = fp;
 
     ext4_vnode_cache_insert(sb, ino, vn);
-    vn->ref_count++;              /* +1 permanent "cache reference" — vnode is never freed */
     return vn;
 }
 

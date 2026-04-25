@@ -18,7 +18,8 @@ int handle_cow_fault(task_t *t, uint64_t stval) {
     if (!t->mm || !t->mm->pgdir) return -1;
 
     uint64_t *pte = pt_walk(t->mm->pgdir, stval, 0);
-    if (!pte || !(*pte & PTE_V)) return -1;
+    if (!pte || !(*pte & PTE_V) || !arch_pte_is_leaf(*pte) || !(*pte & PTE_U))
+        return -1;
 
     if (*pte & PTE_COW) {
         paddr_t old_pa = arch_pte_addr(*pte);
@@ -31,16 +32,25 @@ int handle_cow_fault(task_t *t, uint64_t stval) {
             if (new_pfn == PFN_NONE) return -1;
             memcpy(pfn_to_virt(new_pfn), pfn_to_virt(old_pfn), PAGE_SIZE);
             frame_put(old_pfn);
-            *pte = arch_pte_from_pa(pfn_to_phys(new_pfn)) | (*pte & (PTE_R | PTE_X | PTE_U | PTE_A | PTE_MAT1 | PTE_LEAF)) | PTE_W | PTE_D | PTE_V;
+            uint64_t flags = (*pte & (PTE_R | PTE_X | PTE_U | PTE_A |
+                                      PTE_G | PTE_MAT1 | PTE_LEAF)) |
+                             PTE_W | PTE_D;
+            *pte = arch_pte_leaf(pfn_to_phys(new_pfn), flags);
         } else {
-            *pte = (*pte & ~PTE_COW) | PTE_W | PTE_D;
+            uint64_t flags = (*pte & (PTE_R | PTE_X | PTE_U | PTE_A |
+                                      PTE_G | PTE_MAT1 | PTE_LEAF)) |
+                             PTE_W | PTE_D;
+            *pte = arch_pte_leaf(old_pa, flags);
         }
         arch_tlb_flush_page(stval);
         return 0;
     }
 
     if (*pte & PTE_W) {
-        *pte |= PTE_D;
+        uint64_t flags = (*pte & (PTE_R | PTE_W | PTE_X | PTE_U |
+                                  PTE_G | PTE_A | PTE_MAT1 |
+                                  PTE_LEAF | PTE_COW)) | PTE_D;
+        *pte = arch_pte_leaf(arch_pte_addr(*pte), flags);
         arch_tlb_flush_page(stval);
         return 0;
     }
@@ -106,6 +116,7 @@ int handle_demand_fault(task_t *t, uint64_t stval) {
     if (vma) {
         uint64_t *pte = pt_walk(t->mm->pgdir, page_va, 0);
         if (pte && (*pte & PTE_V)) return -1;
+        if (!(vma->pte_flags & (PTE_R | PTE_W | PTE_X))) return -1;
 
         pfn_t pfn = pfa_alloc_page();
         if (pfn == PFN_NONE) return -1;
@@ -158,6 +169,7 @@ static void handle_irq(uint64_t irq, uint64_t sepc, int from_user) {
          */
         __asm__ __volatile__("csrwr %0, 0x44" :: "r"(1UL) : "memory");
 #endif
+        timer_irq_tick();
         timer_set_interval(TICKS_PER_SEC / 100);
         if (from_user) {
             task_t *cur = proc_current();
@@ -223,11 +235,22 @@ void trap_handler(trap_context_t *ctx) {
         handle_irq(scause & CAUSE_CODE_MASK, sepc, 1);
     } else {
         uint64_t code = scause & CAUSE_CODE_MASK;
+        uint32_t user_insn = 0;
+        int have_user_insn = 0;
+        task_t *cur = proc_current();
+
+        if (cur && cur->mm && cur->mm->pgdir) {
+            uint64_t *pte_sepc = pt_walk(cur->mm->pgdir, sepc, 0);
+            if (pte_sepc && (*pte_sepc & PTE_V)) {
+                uint8_t *insn_kva = (uint8_t *)(arch_pte_addr(*pte_sepc) + PAGE_OFFSET + (sepc & (PAGE_SIZE - 1)));
+                user_insn = *(uint32_t *)insn_kva;
+                have_user_insn = 1;
+            }
+        }
         if (code == CAUSE_ECALL_U) {
             TRAP_CTX_EPC(ctx) += 4;
             syscall_dispatch(ctx);
         } else if (code == CAUSE_LOAD_PAGE_FAULT || code == CAUSE_STORE_PAGE_FAULT || code == CAUSE_INSN_PAGE_FAULT) {
-            task_t *cur = proc_current();
             if (code == CAUSE_STORE_PAGE_FAULT) {
                 if (handle_cow_fault(cur, stval) == 0) {
                     signal_deliver_user(ctx);
@@ -240,6 +263,26 @@ void trap_handler(trap_context_t *ctx) {
             }
             kerr("User PF unresolved: pid=%d code=%lu sepc=0x%lx stval=0x%lx\n",
                  cur ? cur->pid : -1, code, sepc, stval);
+#ifdef CONFIG_RISCV64
+            if (have_user_insn)
+                kerr("  insn@sepc=0x%08x\n", user_insn);
+            if (cur) {
+                kerr("  regs: ra=0x%lx sp=0x%lx tp=0x%lx\n",
+                     (unsigned long)TRAP_CTX_RA(ctx),
+                     (unsigned long)TRAP_CTX_SP(ctx),
+                     (unsigned long)TRAP_CTX_TP(ctx));
+                kerr("  regs: a0=0x%lx a1=0x%lx a2=0x%lx a3=0x%lx\n",
+                     (unsigned long)TRAP_CTX_ARG0(ctx),
+                     (unsigned long)TRAP_CTX_ARG1(ctx),
+                     (unsigned long)TRAP_CTX_ARG2(ctx),
+                     (unsigned long)TRAP_CTX_ARG3(ctx));
+                kerr("  regs: a4=0x%lx a5=0x%lx a6=0x%lx a7=0x%lx\n",
+                     (unsigned long)TRAP_CTX_ARG4(ctx),
+                     (unsigned long)TRAP_CTX_ARG5(ctx),
+                     (unsigned long)ctx->x[16],
+                     (unsigned long)TRAP_CTX_SYSCALL_NUM(ctx));
+            }
+#endif
 #ifdef CONFIG_LOONGARCH64
             /* Dump instruction at sepc and register state for crash diagnosis */
             if (cur && cur->mm && cur->mm->pgdir) {
@@ -319,7 +362,7 @@ void trap_handler(trap_context_t *ctx) {
             /*
              * LoongArch PME: hardware write to a V=1, D=0 page.
              * Two cases:
-             *   1. COW page: PTE_COW set, D=0 intentionally → allocate copy.
+             *   1. COW page: PTE_COW set, W/D cleared intentionally → allocate copy.
              *   2. Clean tracking: page is writable but D was 0 (e.g. after
              *      fork/exec page-table copy). Set D=1 and retry.
              */
@@ -332,7 +375,10 @@ void trap_handler(trap_context_t *ctx) {
             if (cur && cur->mm && cur->mm->pgdir) {
                 uint64_t *pte = pt_walk(cur->mm->pgdir, stval, 0);
                 if (pte && (*pte & PTE_V) && (*pte & PTE_W)) {
-                    *pte |= PTE_D;   /* PTE_D == PTE_W == bit 1, set dirty */
+                    uint64_t flags = (*pte & (PTE_R | PTE_W | PTE_X | PTE_U |
+                                              PTE_G | PTE_A | PTE_MAT1 |
+                                              PTE_LEAF | PTE_COW)) | PTE_D;
+                    *pte = arch_pte_leaf(arch_pte_addr(*pte), flags);
                     arch_tlb_flush_page(stval);
                     return;
                 }
@@ -355,8 +401,34 @@ void trap_handler(trap_context_t *ctx) {
                         cur ? cur->pid : -1, scause, sepc, stval, insn, stval_pte, (unsigned)dbg_pfn);
             }
             proc_exit(-SIGSEGV);
+        } else if (code == CAUSE_INSN_FAULT || code == CAUSE_LOAD_FAULT || code == CAUSE_STORE_FAULT) {
+            kerr("User Address Error (ADE/ALE): pid=%d sepc=0x%lx stval=0x%lx code=%lu\n", 
+                 cur ? cur->pid : -1, sepc, stval, code);
+            // 非法地址访问，直接终止进程
+            proc_exit(-SIGSEGV); 
         } else if (code == CAUSE_ILLEGAL_INSN) {
-            kerr("User Illegal Instruction: sepc=0x%lx\n", sepc);
+            kerr("User Illegal Instruction: pid=%d sepc=0x%lx stval=0x%lx\n",
+                 cur ? cur->pid : -1, sepc, stval);
+            if (have_user_insn)
+                kerr("  insn@sepc=0x%08x\n", user_insn);
+#ifdef CONFIG_RISCV64
+            if (cur) {
+                kerr("  regs: ra=0x%lx sp=0x%lx tp=0x%lx\n",
+                     (unsigned long)TRAP_CTX_RA(ctx),
+                     (unsigned long)TRAP_CTX_SP(ctx),
+                     (unsigned long)TRAP_CTX_TP(ctx));
+                kerr("  regs: a0=0x%lx a1=0x%lx a2=0x%lx a3=0x%lx\n",
+                     (unsigned long)TRAP_CTX_ARG0(ctx),
+                     (unsigned long)TRAP_CTX_ARG1(ctx),
+                     (unsigned long)TRAP_CTX_ARG2(ctx),
+                     (unsigned long)TRAP_CTX_ARG3(ctx));
+                kerr("  regs: a4=0x%lx a5=0x%lx a6=0x%lx a7=0x%lx\n",
+                     (unsigned long)TRAP_CTX_ARG4(ctx),
+                     (unsigned long)TRAP_CTX_ARG5(ctx),
+                     (unsigned long)ctx->x[16],
+                     (unsigned long)TRAP_CTX_SYSCALL_NUM(ctx));
+            }
+#endif
             proc_exit(-SIGILL);
         } else {
             kerr("TRAP EXCEPTION: scause=0x%lx code=%lu sepc=0x%lx stval=0x%lx\n",
@@ -376,27 +448,15 @@ void kernel_trap_handler(trap_context_t *ctx) {
     } else {
         uint64_t code = scause & CAUSE_CODE_MASK;
         task_t *cur = proc_current();
-        kdebug("KERNEL TRAP: scause=0x%lx sepc=0x%lx stval=0x%lx code=%lu\n",
-               scause, sepc, stval, code);
-        kdebug("[KTRAP] pid=%d name=%s ra=0x%lx a0=0x%lx era_ctx=0x%lx prmd_ctx=0x%lx\n",
-                cur ? cur->pid : -1, cur ? cur->name : "?",
-                TRAP_CTX_RA(ctx), TRAP_CTX_ARG0(ctx),
-                TRAP_CTX_EPC(ctx), TRAP_CTX_STATUS(ctx));
+
         if (code == CAUSE_ECALL_U) {
             TRAP_CTX_EPC(ctx) += 4;
         } else if (code == CAUSE_LOAD_PAGE_FAULT ||
                    code == CAUSE_STORE_PAGE_FAULT ||
                    code == CAUSE_INSN_PAGE_FAULT ||
                    code == CAUSE_PAGE_MODIFICATION) {
-            /*
-             * Kernel took a page fault on a user-space address while
-             * executing a syscall (e.g. memset/memcpy on a user buffer).
-             * Try demand-fault resolution: COW → demand-paging → stack-growth.
-             * If the faulting address is in user space (below 0x4000000000,
-             * i.e. vpn2 < 256) and we can resolve it, just return — the
-             * faulting instruction will retry successfully.
+            /* * 处理内核态因为访问用户空间地址而触发的 Page Fault (例如 copy_from_user) 
              */
-            task_t *cur = proc_current();
             if (cur && cur->mm && stval < 0x4000000000UL) {
                 if (code == CAUSE_STORE_PAGE_FAULT || code == CAUSE_PAGE_MODIFICATION) {
                     if (handle_cow_fault(cur, stval) == 0)
@@ -405,21 +465,47 @@ void kernel_trap_handler(trap_context_t *ctx) {
                 if (handle_demand_fault(cur, stval) == 0)
                     return;
             }
-            task_t *cur2 = proc_current();
-            if (ktrap_diag_count < 5) {
-                ktrap_diag_count++;
-                kdebug("KERNEL TRAP: scause=0x%lx sepc=0x%lx stval=0x%lx\n",
-                       scause, sepc, stval);
-                kdebug("[KTRAP] pid=%d name=%s ra=0x%lx a0=0x%lx a1=0x%lx\n",
-                        cur2 ? cur2->pid : -1, cur2 ? cur2->name : "?",
-                        TRAP_CTX_RA(ctx), TRAP_CTX_ARG0(ctx), TRAP_CTX_ARG1(ctx));
-            }
+            
+            kerr("\n========== KERNEL PAGE FAULT ==========\n");
+            kerr("Kernel failed to access user address. code=%lu\n", code);
+            kerr("pid=%d sepc(ERA)=0x%lx stval(BADV)=0x%lx\n", cur ? cur->pid : -1, sepc, stval);
+            kerr("ra=0x%lx sp=0x%lx a0=0x%lx a1=0x%lx a2=0x%lx a3=0x%lx\n",
+                 (unsigned long)TRAP_CTX_RA(ctx), (unsigned long)TRAP_CTX_SP(ctx),
+                 (unsigned long)TRAP_CTX_ARG0(ctx), (unsigned long)TRAP_CTX_ARG1(ctx),
+                 (unsigned long)TRAP_CTX_ARG2(ctx), (unsigned long)TRAP_CTX_ARG3(ctx));
+            
             if (cur && cur->mm && stval < 0x4000000000UL) {
                 proc_exit(-SIGSEGV);
             }
-            panic("Unhandled kernel trap");
+            panic("Unhandled kernel page fault");
+
+        } else if (code == CAUSE_INSN_FAULT || code == CAUSE_LOAD_FAULT || code == CAUSE_STORE_FAULT) {
+            /* * 关键新增分支：拦截 LoongArch 的 Ecode 8 (ADE) 和 9 (ALE)
+             * 当内核解引用非法的野指针（例如 ASCII 字符串）时会触发此处
+             */
+            kerr("\n========== KERNEL OOPS ==========\n");
+            kerr("FATAL: Kernel Address Error (Wild Pointer Dereference)!\n");
+            kerr("LoongArch Ecode: %lu (8=ADE, 9=ALE)\n", code);
+            kerr("Faulting PC (ERA): 0x%lx\n", sepc);
+            kerr("Illegal Address (BADV): 0x%lx\n", stval);
+            kerr("Current Task: pid=%d name=%s\n", cur ? cur->pid : -1, cur ? cur->name : "?");
+
+#ifdef CONFIG_LOONGARCH64
+            kerr("  [Reg Dump] a0=0x%lx a1=0x%lx a2=0x%lx a3=0x%lx\n",
+                 (unsigned long)TRAP_CTX_ARG0(ctx), (unsigned long)TRAP_CTX_ARG1(ctx),
+                 (unsigned long)TRAP_CTX_ARG2(ctx), (unsigned long)TRAP_CTX_ARG3(ctx));
+            kerr("  [Reg Dump] ra=0x%lx tp=0x%lx sp=0x%lx\n",
+                 (unsigned long)TRAP_CTX_RA(ctx), (unsigned long)TRAP_CTX_TP(ctx),
+                 (unsigned long)TRAP_CTX_SP(ctx));
+#endif
+            kerr("=================================\n");
+            panic("Kernel Address Error (ADE/ALE)");
+
+        } else if (code == CAUSE_ILLEGAL_INSN) {
+            kerr("\n========== KERNEL OOPS ==========\n");
+            kerr("Kernel Illegal Instruction at sepc=0x%lx\n", sepc);
+            panic("Kernel Illegal Instruction");
         } else {
-            task_t *cur = proc_current();
             if (ktrap_diag_count < 5) {
                 ktrap_diag_count++;
                 kdebug("KERNEL TRAP: scause=0x%lx sepc=0x%lx stval=0x%lx code=%lu\n",

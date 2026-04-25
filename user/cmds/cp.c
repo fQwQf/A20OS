@@ -64,6 +64,8 @@ int main(int argc, char *argv[]) {
         }
     }
 
+    fsync(fd_out);
+
     close(fd_in);
     close(fd_out);
     return 0;

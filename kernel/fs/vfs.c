@@ -142,6 +142,8 @@ static vfile_ops_t g_stdout_ops = { .read = devfs_null_read,  .write = devfs_std
 static vfile_ops_t g_stderr_ops = { .read = devfs_null_read,  .write = devfs_stdout_write };
 static vfile_ops_t g_null_ops   = { .read = devfs_null_read,  .write = devfs_null_write   };
 static vfile_ops_t g_zero_ops   = { .read = devfs_zero_read,  .write = devfs_null_write   };
+static vfile_ops_t g_pipe_read_ops;
+static vfile_ops_t g_pipe_write_ops;
 
 static vfile_t g_stdin_file  = { .ref_count = 999, .ops = &g_stdin_ops,  .flags = O_RDONLY };
 static vfile_t g_stdout_file = { .ref_count = 999, .ops = &g_stdout_ops, .flags = O_WRONLY };
@@ -149,7 +151,80 @@ static vfile_t g_stderr_file = { .ref_count = 999, .ops = &g_stderr_ops, .flags 
 
 /* Check if a vfile is one of the special stdin/stdout/stderr char devices */
 static int is_special_tty(vfile_t *vf) {
-    return (vf == &g_stdin_file || vf == &g_stdout_file || vf == &g_stderr_file);
+    if (!vf) return 0;
+    return (vf == &g_stdin_file || vf == &g_stdout_file || vf == &g_stderr_file ||
+            vf->ops == &g_stdin_ops || vf->ops == &g_stdout_ops || vf->ops == &g_stderr_ops);
+}
+
+static int is_pipe_vfile(vfile_t *vf) {
+    return vf && (vf->ops == &g_pipe_read_ops || vf->ops == &g_pipe_write_ops);
+}
+
+static int is_char_device_vfile(vfile_t *vf) {
+    return vf && (is_special_tty(vf) || vf->ops == &g_null_ops || vf->ops == &g_zero_ops);
+}
+
+static void fill_char_kstat(kstat_t *st) {
+    memset(st, 0, sizeof(*st));
+    st->st_mode = S_IFCHR | 0666;
+    st->st_nlink = 1;
+    st->st_blksize = 4096;
+}
+
+static void fill_pipe_kstat(kstat_t *st) {
+    memset(st, 0, sizeof(*st));
+    st->st_mode = S_IFIFO | 0600;
+    st->st_nlink = 1;
+    st->st_blksize = 4096;
+}
+
+typedef struct {
+    uint32_t c_iflag;
+    uint32_t c_oflag;
+    uint32_t c_cflag;
+    uint32_t c_lflag;
+    uint8_t  c_line;
+    uint8_t  c_cc[32];
+    uint32_t c_ispeed;
+    uint32_t c_ospeed;
+} ktermios_compat_t;
+
+typedef struct {
+    uint16_t ws_row;
+    uint16_t ws_col;
+    uint16_t ws_xpixel;
+    uint16_t ws_ypixel;
+} kwinsize_t;
+
+static void fill_default_termios(ktermios_compat_t *tio) {
+    memset(tio, 0, sizeof(*tio));
+    tio->c_iflag = 0x500;      /* ICRNL | IXON */
+    tio->c_oflag = 0x5;        /* OPOST | ONLCR */
+    tio->c_cflag = 0xB0;       /* CREAD | CS8 | B38400 */
+    tio->c_lflag = 0x8a3b;     /* ISIG | ICANON | ECHO | ECHOE | ECHOK | IEXTEN | ECHOCTL | ECHOKE */
+    tio->c_cc[0] = 3;          /* VINTR  */
+    tio->c_cc[1] = 28;         /* VQUIT  */
+    tio->c_cc[2] = 127;        /* VERASE */
+    tio->c_cc[3] = 21;         /* VKILL  */
+    tio->c_cc[4] = 4;          /* VEOF   */
+    tio->c_cc[5] = 0;          /* VTIME  */
+    tio->c_cc[6] = 1;          /* VMIN   */
+    tio->c_cc[8] = 17;         /* VSTART */
+    tio->c_cc[9] = 19;         /* VSTOP  */
+    tio->c_cc[10] = 26;        /* VSUSP  */
+    tio->c_cc[12] = 18;        /* VREPRINT */
+    tio->c_cc[13] = 15;        /* VDISCARD */
+    tio->c_cc[14] = 23;        /* VWERASE */
+    tio->c_cc[15] = 22;        /* VLNEXT */
+    tio->c_ispeed = 15;        /* B38400 */
+    tio->c_ospeed = 15;        /* B38400 */
+}
+
+static void fill_default_winsize(kwinsize_t *ws) {
+    ws->ws_row = 24;
+    ws->ws_col = 80;
+    ws->ws_xpixel = 0;
+    ws->ws_ypixel = 0;
 }
 
 /* ============================================================
@@ -835,7 +910,7 @@ int vfs_write(int fd, const char *buf, size_t count) {
 long vfs_lseek(int fd, long offset, int whence) {
     if (fd >= 0 && fd < GFILE_MAX && g_files[fd]) {
         vfile_t *vf = g_files[fd];
-        if (is_special_tty(vf)) return -ESPIPE;
+        if (is_special_tty(vf) || is_pipe_vfile(vf)) return -ESPIPE;
         if (vf->ops && vf->ops->lseek) return vf->ops->lseek(vf, offset, whence);
     }
     return -EBADF;
@@ -856,18 +931,18 @@ int vfs_ioctl(int fd, unsigned long req, void *arg) {
 
     if (is_special_tty(vf) && arg) {
         if (req == TCGETS) {
-            char zeros[36];
-            memset(zeros, 0, 36);
-            if (copy_to_user(arg, zeros, 36) < 0) return -EFAULT;
+            ktermios_compat_t tio;
+            fill_default_termios(&tio);
+            if (copy_to_user(arg, &tio, sizeof(tio)) < 0) return -EFAULT;
             return 0;
         }
         if (req == TCSETS || req == TCSETSW || req == TCSETSF) {
             return 0;
         }
         if (req == TIOCGWINSZ) {
-            char zeros[8];
-            memset(zeros, 0, 8);
-            if (copy_to_user(arg, zeros, 8) < 0) return -EFAULT;
+            kwinsize_t ws;
+            fill_default_winsize(&ws);
+            if (copy_to_user(arg, &ws, sizeof(ws)) < 0) return -EFAULT;
             return 0;
         }
     }
@@ -1088,11 +1163,12 @@ int vfs_fstat(int fd, kstat_t *st) {
         vfile_t *vf = g_files[fd];
         if (vf->vnode && vf->vnode->ops && vf->vnode->ops->stat)
             return vf->vnode->ops->stat(vf->vnode, st);
-        if (is_special_tty(vf)) {
-            memset(st, 0, sizeof(*st));
-            st->st_mode = S_IFCHR | 0666;
-            st->st_nlink = 1;
-            st->st_blksize = 4096;
+        if (is_char_device_vfile(vf)) {
+            fill_char_kstat(st);
+            return 0;
+        }
+        if (is_pipe_vfile(vf)) {
+            fill_pipe_kstat(st);
             return 0;
         }
     }

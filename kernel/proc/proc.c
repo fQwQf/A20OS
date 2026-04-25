@@ -30,6 +30,9 @@
 static task_t proc_table[MAX_PROCS];  // 进程表
 static uint64_t *kernel_pgdir_shared;  // 共享的内核页表
 static task_t *current_task = NULL;    // 当前运行的任务
+static int wait_diag_count = 0;
+static int sched_diag_count = 0;
+static int fork_diag_count = 0;
 
 /* Boot stack (for schedule back to idle) */
 static uint64_t g_idle_kstack;  // idle 进程的内核栈
@@ -273,7 +276,8 @@ int proc_alloc_user(uint64_t entry, uint64_t sp, uint64_t *pgdir) {
 
 // 克隆当前进程（fork 系统调用的实现）
 int proc_clone(uint64_t flags, uint64_t stack, int *ptid, int *ctid, uint64_t tls) {
-    (void)flags; (void)ptid; (void)ctid; (void)tls;
+    (void)flags;
+    (void)ptid; (void)ctid; (void)tls;
 
     task_t *parent = current_task;
     task_t *t = alloc_task_slot();
@@ -282,6 +286,12 @@ int proc_clone(uint64_t flags, uint64_t stack, int *ptid, int *ctid, uint64_t tl
     t->pid = next_pid++;
     init_task_common(t, parent);
     proc_set_name(t, parent->name);
+    if (fork_diag_count < 128) {
+        fork_diag_count++;
+        kdebug("[FORKDBG] parent=%d child=%d flags=0x%lx stack=0x%lx\n",
+              parent ? parent->pid : -1, t->pid,
+              (unsigned long)flags, (unsigned long)stack);
+    }
 
     t->exec_load_addr = parent->exec_load_addr;
     t->exec_load_size = parent->exec_load_size;
@@ -378,7 +388,8 @@ int proc_exec(const char *path, char *const argv[], char *const envp[]) {
 
     auto int is_kptr(const void *p) {
 #ifdef CONFIG_LOONGARCH64
-        return (uintptr_t)p >= 0x80000000UL;
+        uintptr_t v = (uintptr_t)p;
+        return v >= PHYS_MEMORY_BASE && v < PHYS_MEMORY_END;
 #else
         return (uintptr_t)p >= PAGE_OFFSET;
 #endif
@@ -445,7 +456,7 @@ int proc_exec(const char *path, char *const argv[], char *const envp[]) {
                 while (*cp == ' ' || *cp == '\t') ++cp;
                 if (*cp != '\0' && *cp != '\n') {
                     char *interp_start = cp;
-                    while (*cp && *cp != '\n' && *cp != ' ' && *cp != '\t') ++cp;
+                    while (*cp && *cp != '\n' && *cp != '\r' && *cp != ' ' && *cp != '\t') ++cp;
                     char interp_path[128];
                     size_t ilen = cp - interp_start;
                     if (ilen > 0 && ilen < sizeof(interp_path)) {
@@ -457,7 +468,7 @@ int proc_exec(const char *path, char *const argv[], char *const envp[]) {
                         while (*cp == ' ' || *cp == '\t') ++cp;
                         if (*cp && *cp != '\n') {
                             char *arg_start = cp;
-                            while (*cp && *cp != '\n') ++cp;
+                            while (*cp && *cp != '\n' && *cp != '\r') ++cp;
                             size_t alen = cp - arg_start;
                             if (alen > 0 && alen < sizeof(arg_buf)) {
                                 memcpy(arg_buf, arg_start, alen);
@@ -621,6 +632,11 @@ void proc_free_pid(int pid) {
 void proc_exit(int exit_code) {
     task_t *t = current_task;
     if (!t) panic("proc_exit: no current task");
+    if (wait_diag_count < 128) {
+        wait_diag_count++;
+        kdebug("[WAITDBG] exit pid=%d ppid=%d code=%d state=%d\n",
+              t->pid, t->ppid, exit_code, t->state);
+    }
     /* Close all file descriptors */
     for (int i = 0; i < MAX_FILES; i++) {
         if (t->fd_table[i] >= 0) {
@@ -665,6 +681,12 @@ int proc_wait4(int pid, int *status, int options) {
 
 #define WNOHANG   1
 
+    if (wait_diag_count < 128) {
+        wait_diag_count++;
+        kdebug("[WAITDBG] enter cur=%d pid=%d opt=0x%x\n",
+               t ? t->pid : -1, pid, options);
+    }
+
 retry:;
     int found = 0;
     for (int i = 0; i < MAX_PROCS; i++) {
@@ -686,19 +708,85 @@ retry:;
                     *status = (-code) & 0x7F;
             }
             int child_pid = child->pid;
+            if (wait_diag_count < 128) {
+                wait_diag_count++;
+                kdebug("[WAITDBG] reap cur=%d child=%d status=0x%x\n",
+                      t ? t->pid : -1, child_pid, status ? *status : code);
+            }
             proc_free_pid(child_pid);
             return child_pid;
         }
     }
 
-    if (!found) return -ECHILD;
+    if (!found) {
+        if (wait_diag_count < 128) {
+            wait_diag_count++;
+            kdebug("[WAITDBG] no-child cur=%d pid=%d\n",
+                  t ? t->pid : -1, pid);
+        }
+        return -ECHILD;
+    }
     // 设置WNOHANG就非阻塞wait
     // 非阻塞wait还叫wait吗？
-    if (options & WNOHANG) return 0;
+    if (options & WNOHANG) {
+        if (wait_diag_count < 128) {
+            wait_diag_count++;
+            kdebug("[WAITDBG] nohang cur=%d pid=%d\n",
+                  t ? t->pid : -1, pid);
+        }
+        return 0;
+    }
 
-    /* Block until a child exits */
+    /*
+     * Avoid the classic lost-wakeup race:
+     * a child can exit after the scan above but before we actually block.
+     * Mark ourselves blocked first, then rescan once before scheduling.
+     */
     t->state = PROC_BLOCKED;
-    sched();
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    if (wait_diag_count < 128) {
+        wait_diag_count++;
+        kdebug("[WAITDBG] block cur=%d pid=%d\n",
+              t ? t->pid : -1, pid);
+    }
+
+    for (int i = 0; i < MAX_PROCS; i++) {
+        task_t *child = &proc_table[i];
+        int cstate = __atomic_load_n(&child->state, __ATOMIC_ACQUIRE);
+        if (cstate == PROC_UNUSED) continue;
+        if (child->ppid != t->pid) continue;
+        if (pid > 0 && child->pid != pid) continue;
+        if (pid == 0 && child->pgid != t->pgid) continue;
+        if (pid < -1 && child->pgid != (-pid)) continue;
+
+        if (cstate == PROC_ZOMBIE) {
+            int code = __atomic_load_n(&child->exit_code, __ATOMIC_ACQUIRE);
+            t->state = PROC_RUNNING;
+            if (status) {
+                if (code >= 0)
+                    *status = (code & 0xFF) << 8;
+                else
+                    *status = (-code) & 0x7F;
+            }
+            int child_pid = child->pid;
+            if (wait_diag_count < 128) {
+                wait_diag_count++;
+                kdebug("[WAITDBG] reap-race cur=%d child=%d status=0x%x\n",
+                      t ? t->pid : -1, child_pid, status ? *status : code);
+            }
+            proc_free_pid(child_pid);
+            return child_pid;
+        }
+    }
+
+    if (t->state == PROC_BLOCKED)
+        sched();
+    t->state = PROC_RUNNING;
+    if (wait_diag_count < 128) {
+        wait_diag_count++;
+        kdebug("[WAITDBG] wake cur=%d pid=%d\n",
+              t ? t->pid : -1, pid);
+    }
     goto retry;
 }
 
@@ -737,11 +825,9 @@ int proc_kill_pgid(int pgid, int signum, int skip_self) {
 
 // 上下文切换到指定任务
 void context_switch(task_t *next) {
-    kdebug("[SCHED] switch to pid=%d kstack=0x%lx\n", next->pid, (unsigned long)next->kstack);
     current_task = next;
     next->state  = PROC_RUNNING;
     __switch(next->kstack);
-    kdebug("[SCHED] returned to pid=%d\n", current_task ? current_task->pid : -1);
 }
 
 // 调度器：选择下一个运行的任务
@@ -757,6 +843,13 @@ void sched(void) {
     for (int i = 0; i < MAX_PROCS; i++) {
         if (proc_table[i].state == PROC_BLOCKED && proc_table[i].wake_time > 0
             && now >= proc_table[i].wake_time) {
+            if (sched_diag_count < 128) {
+                sched_diag_count++;
+                kdebug("[SCHEDDBG] wake pid=%d now=%lu wake=%lu\n",
+                      proc_table[i].pid,
+                      (unsigned long)now,
+                      (unsigned long)proc_table[i].wake_time);
+            }
             proc_table[i].state     = PROC_READY;
             proc_table[i].wake_time = 0;
         }
@@ -765,11 +858,16 @@ void sched(void) {
     for (int i = 1; i <= MAX_PROCS; i++) {
         int idx = (cur_idx >= 0) ? (cur_idx + i) % MAX_PROCS : i;
         task_t *t = &proc_table[idx];
+        /* Idle is a fallback-only task; do not round-robin into it. */
+        if (t == &proc_table[0]) continue;
         /* Skip current task and UNUSED tasks */
         if (t == current_task || t->state == PROC_UNUSED) continue;
         if (t->state == PROC_READY) {
-            kdebug("[SCHED] cur=%d picking pid=%d state=%d\n",
-                   current_task ? current_task->pid : -1, t->pid, t->state);
+            if (sched_diag_count < 256) {
+                sched_diag_count++;
+                kdebug("[SCHEDDBG] pick cur=%d next=%d state=%d\n",
+                      current_task ? current_task->pid : -1, t->pid, t->state);
+            }
             context_switch(t);
             return;
         }
@@ -791,7 +889,8 @@ void sched(void) {
 
 // 主动让出 CPU（yield 系统调用的实现）
 void proc_yield(void) {
-    if (current_task && current_task->state == PROC_RUNNING)
+    if (current_task && current_task != &proc_table[0] &&
+        current_task->state == PROC_RUNNING)
         current_task->state = PROC_READY;
     sched();
 }
@@ -803,7 +902,13 @@ void proc_yield(void) {
 // 调整堆大小（brk 系统调用的实现）
 uint64_t proc_brk(uint64_t newbrk) {
     task_t *t = current_task;
-    if (!t || !t->mm) return -1;
+    if (!t || !t->mm) return 0; // 理论上不应发生
+
+    // 如果 newbrk 为 0，通常是 C 库在查询当前堆位置
+    if (newbrk == 0) return t->mm->brk;
+
+    // mm_brk 内部已经处理了 newbrk < start_brk 的情况（返回旧 brk）
+    // 同时也处理了分配失败的情况
     return mm_brk(t->mm, newbrk);
 }
 

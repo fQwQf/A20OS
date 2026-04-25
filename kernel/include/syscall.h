@@ -71,6 +71,7 @@ int64_t sys_setsid(void);
 int64_t sys_clone(uint64_t flags, void *stack, int *ptid, int *ctid, uint64_t tls);
 int64_t sys_execve(const char *path, char **argv, char **envp);
 int64_t sys_wait4(int pid, int *status, int options, void *rusage);
+int64_t sys_waitid(int type, int id, void *info, int options, void *rusage);
 int64_t sys_sched_yield(void);
 int64_t sys_reboot(int cmd);
 int64_t sys_prctl(int op, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4);
