@@ -1,5 +1,5 @@
-#include "string.h"
-#include "mm.h"
+#include "core/string.h"
+#include "mm/mm.h"
 
 size_t strlen(const char *s) {
     size_t n = 0;

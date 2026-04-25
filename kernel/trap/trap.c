@@ -1,18 +1,17 @@
-#include "trap.h"
-#include "proc.h"
-#include "syscall.h"
-#include "timer.h"
-#include "uart.h"
-#include "plic.h"
-#include "mm.h"
-#include "frame.h"
-#include "vm.h"
-#include "stdio.h"
-#include "string.h"
-#include "panic.h"
-#include "defs.h"
-#include "consts.h"
-#include "klog.h"
+#include "core/trap.h"
+#include "proc/proc.h"
+#include "sys/syscall.h"
+#include "core/timer.h"
+#include "drv/uart.h"
+#include "mm/mm.h"
+#include "mm/frame.h"
+#include "mm/vm.h"
+#include "core/stdio.h"
+#include "core/string.h"
+#include "core/panic.h"
+#include "core/defs.h"
+#include "core/consts.h"
+#include "core/klog.h"
 
 int handle_cow_fault(task_t *t, uint64_t stval) {
     if (!t->mm || !t->mm->pgdir) return -1;
@@ -80,7 +79,11 @@ int handle_demand_fault(task_t *t, uint64_t stval) {
     uint64_t page_va = stval & ~(PAGE_SIZE - 1);
 
     if (t->mm->stack_top != 0) {
-        uint64_t stack_limit = t->mm->stack_top - DEFAULT_STACK_SIZE;
+        uint64_t stack_size_limit = t->rlim_stack ? t->rlim_stack : USER_STACK_MAX_SIZE;
+        if (stack_size_limit > USER_STACK_MAX_SIZE)
+            stack_size_limit = USER_STACK_MAX_SIZE;
+        stack_size_limit = ROUND_UP(stack_size_limit, PAGE_SIZE);
+        uint64_t stack_limit = t->mm->stack_top - stack_size_limit;
         if (page_va >= stack_limit && page_va < t->mm->stack_bottom) {
             pfn_t pfn = pfa_alloc_page();
             if (pfn == PFN_NONE) return -1;
@@ -90,11 +93,11 @@ int handle_demand_fault(task_t *t, uint64_t stval) {
             int r = pt_map(t->mm->pgdir, page_va, pfn_to_phys(pfn), pte_flags);
             if (r < 0) { frame_put(pfn); return -1; }
 
-        t->mm->stack_bottom = page_va;
-        t->mm->rss++;
-        arch_tlb_flush_page(stval);
-        return 0;
-    }
+            t->mm->stack_bottom = page_va;
+            t->mm->rss++;
+            arch_tlb_flush_page(stval);
+            return 0;
+        }
     }
 
     if (page_va >= t->mm->start_brk &&
@@ -134,67 +137,44 @@ int handle_demand_fault(task_t *t, uint64_t stval) {
     return -1;
 }
 
-extern void trap_entry_la64(void);
+static int fetch_user_insn(task_t *task, uint64_t va, uint32_t *insn_out) {
+    if (!task || !task->mm || !task->mm->pgdir || !insn_out)
+        return 0;
 
-void trap_init(void) {
-#ifdef CONFIG_LOONGARCH64
-    arch_write_tvec((uint64_t)trap_entry_la64);
-    /*
-     * ECFG (CSR 0x4) — Local Interrupt Enable:
-     *   IS[11] = TI  (Timer Interrupt)
-     *   IS[2]  = HWI0 (Hardware Interrupt 0, used by Virtio/PCIe on QEMU virt)
-     *
-     * Without enabling IS[2], Virtio block-device completion interrupts pile
-     * up in ESTAT.IS but are never delivered, causing the device to stall.
-     */
-    uint64_t ecfg;
-    __asm__ __volatile__("csrrd %0, 0x4" : "=r"(ecfg));
-    ecfg |= (1UL << 11) | (1UL << 2);
-    __asm__ __volatile__("csrwr %0, 0x4" :: "r"(ecfg));
-#else
-    arch_write_tvec((uint64_t)__trap_from_kernel);
-    arch_write_sscratch(0);
-#endif
+    uint64_t *pte = pt_walk(task->mm->pgdir, va, 0);
+    if (!pte || !(*pte & PTE_V))
+        return 0;
+
+    uint8_t *insn_kva = (uint8_t *)(arch_pte_addr(*pte) + PAGE_OFFSET +
+                                    (va & PAGE_OFFSET_MASK));
+    *insn_out = *(uint32_t *)insn_kva;
+    return 1;
 }
 
 static int ktrap_diag_count = 0;
 
-static void handle_irq(uint64_t irq, uint64_t sepc, int from_user) {
-    if (irq == IRQ_S_TIMER) {
-#ifdef CONFIG_LOONGARCH64
-        /*
-         * LoongArch timer interrupt must be acknowledged via TICLR (CSR 0x44)
-         * before re-programming the interval, otherwise the CPU will
-         * immediately re-enter the timer handler in an infinite loop.
-         */
-        __asm__ __volatile__("csrwr %0, 0x44" :: "r"(1UL) : "memory");
-#endif
-        timer_irq_tick();
-        timer_set_interval(TICKS_PER_SEC / 100);
-        if (from_user) {
-            task_t *cur = proc_current();
-            if (cur) cur->total_time++;
-            proc_yield();
-        }
-#ifdef CONFIG_RISCV64
-    } else if (irq == IRQ_S_EXT) {
-        uint32_t irq_id = plic_claim();
-        if (irq_id == UART0_IRQ)
-            uart_handle_irq();
-        if (irq_id != 0)
-            plic_complete(irq_id);
-    } else if (irq == IRQ_S_SOFT) {
-        arch_write_sip(arch_read_sip() & ~SIE_SSIE);
-        timer_set_interval(TICKS_PER_SEC / 100);
-        if (from_user) proc_yield();
-#endif
-#ifdef CONFIG_LOONGARCH64
-    } else if (irq == IRQ_S_EXT) {
-        uart_handle_irq();
-#endif
-    } else {
-        (void)sepc;
-    }
+static void dump_trap_context(trap_context_t *ctx) {
+    kerr("  regs: ra=0x%lx sp=0x%lx tp=0x%lx\n",
+         (unsigned long)TRAP_CTX_RA(ctx),
+         (unsigned long)TRAP_CTX_SP(ctx),
+         (unsigned long)TRAP_CTX_TP(ctx));
+    kerr("  regs: a0=0x%lx a1=0x%lx a2=0x%lx a3=0x%lx\n",
+         (unsigned long)TRAP_CTX_ARG0(ctx),
+         (unsigned long)TRAP_CTX_ARG1(ctx),
+         (unsigned long)TRAP_CTX_ARG2(ctx),
+         (unsigned long)TRAP_CTX_ARG3(ctx));
+    kerr("  regs: a4=0x%lx a5=0x%lx a7=0x%lx\n",
+         (unsigned long)TRAP_CTX_ARG4(ctx),
+         (unsigned long)TRAP_CTX_ARG5(ctx),
+         (unsigned long)TRAP_CTX_SYSCALL_NUM(ctx));
+}
+
+static void dump_fault_pte(task_t *task, uint64_t va) {
+    if (!task || !task->mm || !task->mm->pgdir)
+        return;
+
+    uint64_t *pte = pt_walk(task->mm->pgdir, va, 0);
+    kerr("  pte=%p value=0x%lx\n", (void *)pte, pte ? *pte : 0UL);
 }
 
 void trap_handler(trap_context_t *ctx) {
@@ -204,49 +184,13 @@ void trap_handler(trap_context_t *ctx) {
 
     TRAP_CTX_KScratch0(ctx) = arch_read_satp();
 
-    {
-        static int first_user_trap = 0;
-        if (first_user_trap < 20) {
-            first_user_trap++;
-            task_t *cur = proc_current();
-            uint64_t code_check = scause & CAUSE_CODE_MASK;
-            kdebug("[UTRAP#%d] pid=%d scause=0x%lx sepc=0x%lx stval=0x%lx a7=%lu\n",
-                   first_user_trap, cur ? cur->pid : -1, scause, sepc, stval,
-                   (unsigned long)TRAP_CTX_SYSCALL_NUM(ctx));
-            if (code_check == CAUSE_STORE_PAGE_FAULT || code_check == CAUSE_LOAD_PAGE_FAULT) {
-#ifdef CONFIG_LOONGARCH64
-                kdebug("  >> a0=0x%lx a1=0x%lx a2=0x%lx a3=0x%lx\n",
-                       (unsigned long)TRAP_CTX_ARG0(ctx), (unsigned long)TRAP_CTX_ARG1(ctx),
-                       (unsigned long)TRAP_CTX_ARG2(ctx), (unsigned long)TRAP_CTX_ARG3(ctx));
-                kdebug("  >> t0=0x%lx t1=0x%lx t2=0x%lx t3=0x%lx t4=0x%lx t5=0x%lx\n",
-                       (unsigned long)ctx->regs[12], (unsigned long)ctx->regs[13],
-                       (unsigned long)ctx->regs[14], (unsigned long)ctx->regs[15],
-                       (unsigned long)ctx->regs[16], (unsigned long)ctx->regs[17]);
-                kdebug("  >> t6=0x%lx t7=0x%lx t8=0x%lx tp=0x%lx sp=0x%lx ra=0x%lx\n",
-                       (unsigned long)ctx->regs[18], (unsigned long)ctx->regs[19],
-                       (unsigned long)ctx->regs[20], (unsigned long)TRAP_CTX_TP(ctx),
-                       (unsigned long)TRAP_CTX_SP(ctx), (unsigned long)TRAP_CTX_RA(ctx));
-#endif
-            }
-        }
-    }
-
     if (scause & CAUSE_INTR_MASK) {
-        handle_irq(scause & CAUSE_CODE_MASK, sepc, 1);
+        arch_handle_irq(scause & CAUSE_CODE_MASK, 1);
     } else {
         uint64_t code = scause & CAUSE_CODE_MASK;
         uint32_t user_insn = 0;
-        int have_user_insn = 0;
         task_t *cur = proc_current();
-
-        if (cur && cur->mm && cur->mm->pgdir) {
-            uint64_t *pte_sepc = pt_walk(cur->mm->pgdir, sepc, 0);
-            if (pte_sepc && (*pte_sepc & PTE_V)) {
-                uint8_t *insn_kva = (uint8_t *)(arch_pte_addr(*pte_sepc) + PAGE_OFFSET + (sepc & (PAGE_SIZE - 1)));
-                user_insn = *(uint32_t *)insn_kva;
-                have_user_insn = 1;
-            }
-        }
+        int have_user_insn = fetch_user_insn(cur, sepc, &user_insn);
         if (code == CAUSE_ECALL_U) {
             TRAP_CTX_EPC(ctx) += 4;
             syscall_dispatch(ctx);
@@ -263,100 +207,10 @@ void trap_handler(trap_context_t *ctx) {
             }
             kerr("User PF unresolved: pid=%d code=%lu sepc=0x%lx stval=0x%lx\n",
                  cur ? cur->pid : -1, code, sepc, stval);
-#ifdef CONFIG_RISCV64
             if (have_user_insn)
                 kerr("  insn@sepc=0x%08x\n", user_insn);
-            if (cur) {
-                kerr("  regs: ra=0x%lx sp=0x%lx tp=0x%lx\n",
-                     (unsigned long)TRAP_CTX_RA(ctx),
-                     (unsigned long)TRAP_CTX_SP(ctx),
-                     (unsigned long)TRAP_CTX_TP(ctx));
-                kerr("  regs: a0=0x%lx a1=0x%lx a2=0x%lx a3=0x%lx\n",
-                     (unsigned long)TRAP_CTX_ARG0(ctx),
-                     (unsigned long)TRAP_CTX_ARG1(ctx),
-                     (unsigned long)TRAP_CTX_ARG2(ctx),
-                     (unsigned long)TRAP_CTX_ARG3(ctx));
-                kerr("  regs: a4=0x%lx a5=0x%lx a6=0x%lx a7=0x%lx\n",
-                     (unsigned long)TRAP_CTX_ARG4(ctx),
-                     (unsigned long)TRAP_CTX_ARG5(ctx),
-                     (unsigned long)ctx->x[16],
-                     (unsigned long)TRAP_CTX_SYSCALL_NUM(ctx));
-            }
-#endif
-#ifdef CONFIG_LOONGARCH64
-            /* Dump instruction at sepc and register state for crash diagnosis */
-            if (cur && cur->mm && cur->mm->pgdir) {
-                uint64_t *pte_sepc = pt_walk(cur->mm->pgdir, sepc, 0);
-                if (pte_sepc && (*pte_sepc & PTE_V)) {
-                    uint8_t *insn_kva = (uint8_t *)(arch_pte_addr(*pte_sepc) + PAGE_OFFSET + (sepc & 0xFFF));
-                    uint32_t insn = *(uint32_t *)insn_kva;
-                    kerr("  insn@sepc=0x%08x  ", insn);
-                    /* Decode common LoongArch store patterns */
-                    uint32_t opcode = insn & 0xFF;
-                    if (opcode >= 0x20 && opcode <= 0x27) {
-                        uint32_t rj = (insn >> 5) & 0x1F;
-                        uint32_t rk = (insn >> 10) & 0x1F;
-                        uint32_t rd = (insn >> 15) & 0x1F;
-                        kerr("st.%s $r%d, $r%d, $r%d",
-                             opcode == 0x20 ? "b" : opcode == 0x21 ? "h" :
-                             opcode == 0x22 ? "w" : opcode == 0x23 ? "d" :
-                             opcode == 0x24 ? "xb" : opcode == 0x25 ? "xh" :
-                             opcode == 0x26 ? "xw" : "xd",
-                             rd, rj, rk);
-                    } else if ((insn & 0xFE000000) == 0x28000000 ||
-                               (insn & 0xFE000000) == 0x2C000000) {
-                        /* stptr.w / stptr.d: [28/2C] rd, rj, si12 */
-                        uint32_t rd = (insn >> 5) & 0x1F;
-                        uint32_t rj = (insn >> 10) & 0x1F;
-                        int32_t si12 = ((int32_t)(insn >> 10)) >> 20; /* sign-extend bits[21:10] */
-                        kerr("stptr.? $r%d, $r%d, %d", rd, rj, si12);
-                    }
-                    kerr("\n");
-                }
-                kerr("  regs: a0=0x%lx a1=0x%lx a2=0x%lx a3=0x%lx\n",
-                     (unsigned long)TRAP_CTX_ARG0(ctx), (unsigned long)TRAP_CTX_ARG1(ctx),
-                     (unsigned long)TRAP_CTX_ARG2(ctx), (unsigned long)TRAP_CTX_ARG3(ctx));
-                kerr("  regs: a4=0x%lx a5=0x%lx a6=0x%lx a7=0x%lx\n",
-                     (unsigned long)ctx->regs[8], (unsigned long)ctx->regs[9],
-                     (unsigned long)ctx->regs[10], (unsigned long)ctx->regs[11]);
-                kerr("  regs: t0=0x%lx t1=0x%lx t2=0x%lx t3=0x%lx t4=0x%lx t5=0x%lx\n",
-                     (unsigned long)ctx->regs[12], (unsigned long)ctx->regs[13],
-                     (unsigned long)ctx->regs[14], (unsigned long)ctx->regs[15],
-                     (unsigned long)ctx->regs[16], (unsigned long)ctx->regs[17]);
-                kerr("  regs: t6=0x%lx t7=0x%lx t8=0x%lx tp=0x%lx sp=0x%lx fp=0x%lx ra=0x%lx\n",
-                     (unsigned long)ctx->regs[18], (unsigned long)ctx->regs[19],
-                     (unsigned long)ctx->regs[20], (unsigned long)TRAP_CTX_TP(ctx),
-                     (unsigned long)TRAP_CTX_SP(ctx), (unsigned long)ctx->regs[22],
-                     (unsigned long)TRAP_CTX_RA(ctx));
-                kerr("  regs: s0=0x%lx s1=0x%lx s2=0x%lx s3=0x%lx s4=0x%lx\n",
-                     (unsigned long)ctx->regs[23], (unsigned long)ctx->regs[24],
-                     (unsigned long)ctx->regs[25], (unsigned long)ctx->regs[26],
-                     (unsigned long)ctx->regs[27]);
-                kerr("  regs: s5=0x%lx s6=0x%lx s7=0x%lx s8=0x%lx\n",
-                     (unsigned long)ctx->regs[28], (unsigned long)ctx->regs[29],
-                     (unsigned long)ctx->regs[30], (unsigned long)ctx->regs[31]);
-                if (cur && cur->mm && cur->mm->pgdir) {
-                    uint64_t *pte_sepc = pt_walk(cur->mm->pgdir, sepc, 0);
-                    if (pte_sepc && (*pte_sepc & PTE_V)) {
-                        uint8_t *insn_kva = (uint8_t *)(arch_pte_addr(*pte_sepc) + PAGE_OFFSET + (sepc & 0xFFF));
-                        uint32_t insn = *(uint32_t *)insn_kva;
-                        kerr("  insn=0x%08x", insn);
-                        if (insn == 0x38103d80) {
-                            uint64_t expected = (uint64_t)((int64_t)ctx->regs[12] + (int64_t)ctx->regs[15]);
-                            kerr("  stx.b t0+t3=0x%lx %s stval\n",
-                                 (unsigned long)expected,
-                                 expected == stval ? "==" : "!=");
-                        } else { kerr("\n"); }
-                    }
-                }
-            }
-            if (cur && cur->mm && cur->mm->pgdir) {
-                uint64_t *pte = pt_walk(cur->mm->pgdir, stval, 0);
-                kerr("  pte=%p *pte=0x%lx brk=0x%lx start_brk=0x%lx\n",
-                     (void*)pte, pte ? *pte : 0UL,
-                     (unsigned long)cur->mm->brk, (unsigned long)cur->mm->start_brk);
-            }
-#endif
+            dump_trap_context(ctx);
+            dump_fault_pte(cur, stval);
             proc_exit(-SIGSEGV);
         } else if (code == CAUSE_PAGE_MODIFICATION) {
             /*
@@ -383,52 +237,24 @@ void trap_handler(trap_context_t *ctx) {
                     return;
                 }
             }
-            {
-                uint32_t insn = 0;
-                pfn_t dbg_pfn = 0;
-                uint64_t stval_pte = 0;
-                if (cur && cur->mm && cur->mm->pgdir) {
-                    uint64_t *pte_sepc = pt_walk(cur->mm->pgdir, sepc, 0);
-                    if (pte_sepc && (*pte_sepc & PTE_V)) {
-                        uint8_t *kva = (uint8_t *)(arch_pte_addr(*pte_sepc) + PAGE_OFFSET + (sepc & 0xFFF));
-                        insn = *(uint32_t *)kva;
-                        dbg_pfn = phys_to_pfn(arch_pte_addr(*pte_sepc));
-                    }
-                    uint64_t *pte_stval = pt_walk(cur->mm->pgdir, stval, 0);
-                    stval_pte = pte_stval ? *pte_stval : 0;
-                }
-                kerr("User Page Fault: pid=%d scause=0x%lx sepc=0x%lx stval=0x%lx insn=0x%08x pte=0x%lx pfn=%u\n",
-                        cur ? cur->pid : -1, scause, sepc, stval, insn, stval_pte, (unsigned)dbg_pfn);
-            }
+            kerr("User page modification fault: pid=%d sepc=0x%lx stval=0x%lx\n",
+                 cur ? cur->pid : -1, sepc, stval);
+            if (have_user_insn)
+                kerr("  insn@sepc=0x%08x\n", user_insn);
+            dump_trap_context(ctx);
+            dump_fault_pte(cur, stval);
             proc_exit(-SIGSEGV);
         } else if (code == CAUSE_INSN_FAULT || code == CAUSE_LOAD_FAULT || code == CAUSE_STORE_FAULT) {
             kerr("User Address Error (ADE/ALE): pid=%d sepc=0x%lx stval=0x%lx code=%lu\n", 
                  cur ? cur->pid : -1, sepc, stval, code);
-            // 非法地址访问，直接终止进程
+            dump_trap_context(ctx);
             proc_exit(-SIGSEGV); 
         } else if (code == CAUSE_ILLEGAL_INSN) {
             kerr("User Illegal Instruction: pid=%d sepc=0x%lx stval=0x%lx\n",
                  cur ? cur->pid : -1, sepc, stval);
             if (have_user_insn)
                 kerr("  insn@sepc=0x%08x\n", user_insn);
-#ifdef CONFIG_RISCV64
-            if (cur) {
-                kerr("  regs: ra=0x%lx sp=0x%lx tp=0x%lx\n",
-                     (unsigned long)TRAP_CTX_RA(ctx),
-                     (unsigned long)TRAP_CTX_SP(ctx),
-                     (unsigned long)TRAP_CTX_TP(ctx));
-                kerr("  regs: a0=0x%lx a1=0x%lx a2=0x%lx a3=0x%lx\n",
-                     (unsigned long)TRAP_CTX_ARG0(ctx),
-                     (unsigned long)TRAP_CTX_ARG1(ctx),
-                     (unsigned long)TRAP_CTX_ARG2(ctx),
-                     (unsigned long)TRAP_CTX_ARG3(ctx));
-                kerr("  regs: a4=0x%lx a5=0x%lx a6=0x%lx a7=0x%lx\n",
-                     (unsigned long)TRAP_CTX_ARG4(ctx),
-                     (unsigned long)TRAP_CTX_ARG5(ctx),
-                     (unsigned long)ctx->x[16],
-                     (unsigned long)TRAP_CTX_SYSCALL_NUM(ctx));
-            }
-#endif
+            dump_trap_context(ctx);
             proc_exit(-SIGILL);
         } else {
             kerr("TRAP EXCEPTION: scause=0x%lx code=%lu sepc=0x%lx stval=0x%lx\n",
@@ -444,7 +270,7 @@ void kernel_trap_handler(trap_context_t *ctx) {
     uint64_t stval = arch_read_tval();
 
     if (scause & CAUSE_INTR_MASK) {
-        handle_irq(scause & CAUSE_CODE_MASK, sepc, 0);
+        arch_handle_irq(scause & CAUSE_CODE_MASK, 0);
     } else {
         uint64_t code = scause & CAUSE_CODE_MASK;
         task_t *cur = proc_current();
@@ -455,9 +281,7 @@ void kernel_trap_handler(trap_context_t *ctx) {
                    code == CAUSE_STORE_PAGE_FAULT ||
                    code == CAUSE_INSN_PAGE_FAULT ||
                    code == CAUSE_PAGE_MODIFICATION) {
-            /* * 处理内核态因为访问用户空间地址而触发的 Page Fault (例如 copy_from_user) 
-             */
-            if (cur && cur->mm && stval < 0x4000000000UL) {
+            if (cur && cur->mm && stval < USER_VA_LIMIT) {
                 if (code == CAUSE_STORE_PAGE_FAULT || code == CAUSE_PAGE_MODIFICATION) {
                     if (handle_cow_fault(cur, stval) == 0)
                         return;
@@ -469,41 +293,27 @@ void kernel_trap_handler(trap_context_t *ctx) {
             kerr("\n========== KERNEL PAGE FAULT ==========\n");
             kerr("Kernel failed to access user address. code=%lu\n", code);
             kerr("pid=%d sepc(ERA)=0x%lx stval(BADV)=0x%lx\n", cur ? cur->pid : -1, sepc, stval);
-            kerr("ra=0x%lx sp=0x%lx a0=0x%lx a1=0x%lx a2=0x%lx a3=0x%lx\n",
-                 (unsigned long)TRAP_CTX_RA(ctx), (unsigned long)TRAP_CTX_SP(ctx),
-                 (unsigned long)TRAP_CTX_ARG0(ctx), (unsigned long)TRAP_CTX_ARG1(ctx),
-                 (unsigned long)TRAP_CTX_ARG2(ctx), (unsigned long)TRAP_CTX_ARG3(ctx));
+            dump_trap_context(ctx);
             
-            if (cur && cur->mm && stval < 0x4000000000UL) {
+            if (cur && cur->mm && stval < USER_VA_LIMIT) {
                 proc_exit(-SIGSEGV);
             }
             panic("Unhandled kernel page fault");
 
         } else if (code == CAUSE_INSN_FAULT || code == CAUSE_LOAD_FAULT || code == CAUSE_STORE_FAULT) {
-            /* * 关键新增分支：拦截 LoongArch 的 Ecode 8 (ADE) 和 9 (ALE)
-             * 当内核解引用非法的野指针（例如 ASCII 字符串）时会触发此处
-             */
             kerr("\n========== KERNEL OOPS ==========\n");
-            kerr("FATAL: Kernel Address Error (Wild Pointer Dereference)!\n");
-            kerr("LoongArch Ecode: %lu (8=ADE, 9=ALE)\n", code);
+            kerr("Kernel Address Error: code=%lu\n", code);
             kerr("Faulting PC (ERA): 0x%lx\n", sepc);
-            kerr("Illegal Address (BADV): 0x%lx\n", stval);
+            kerr("Fault Address (BADV): 0x%lx\n", stval);
             kerr("Current Task: pid=%d name=%s\n", cur ? cur->pid : -1, cur ? cur->name : "?");
-
-#ifdef CONFIG_LOONGARCH64
-            kerr("  [Reg Dump] a0=0x%lx a1=0x%lx a2=0x%lx a3=0x%lx\n",
-                 (unsigned long)TRAP_CTX_ARG0(ctx), (unsigned long)TRAP_CTX_ARG1(ctx),
-                 (unsigned long)TRAP_CTX_ARG2(ctx), (unsigned long)TRAP_CTX_ARG3(ctx));
-            kerr("  [Reg Dump] ra=0x%lx tp=0x%lx sp=0x%lx\n",
-                 (unsigned long)TRAP_CTX_RA(ctx), (unsigned long)TRAP_CTX_TP(ctx),
-                 (unsigned long)TRAP_CTX_SP(ctx));
-#endif
+            dump_trap_context(ctx);
             kerr("=================================\n");
-            panic("Kernel Address Error (ADE/ALE)");
+            panic("Kernel Address Error");
 
         } else if (code == CAUSE_ILLEGAL_INSN) {
             kerr("\n========== KERNEL OOPS ==========\n");
             kerr("Kernel Illegal Instruction at sepc=0x%lx\n", sepc);
+            dump_trap_context(ctx);
             panic("Kernel Illegal Instruction");
         } else {
             if (ktrap_diag_count < 5) {
