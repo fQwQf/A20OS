@@ -4,9 +4,8 @@
 #include "types.h"
 
 /* ============================================================
- * VirtIO Block Device Driver — MMIO transport
- * Supports both RISC-V (bus=virtio-mmio-bus) and LoongArch
- * (PCI/PCIe — detected via DTB, transparent to upper layers)
+ * VirtIO Block Device Driver — transport-neutral core
+ * Supports both RISC-V (virtio-mmio) and LoongArch (virtio-pci).
  *
  * References:
  *   • VirtIO spec v1.1 §5.2 (Block Device)
@@ -121,7 +120,6 @@ typedef struct {
 
 /* ---- Driver state ---- */
 typedef struct virtio_blk {
-    volatile uint32_t *base;        /* MMIO base address */
     virtq_desc_t      *desc;        /* descriptor table */
     virtq_avail_t     *avail;       /* available ring */
     virtq_used_t      *used;        /* used ring */
@@ -150,8 +148,8 @@ typedef struct block_dev {
 
 #define VIRTIO_MAX_DEVS 5
 
-/* Initialize virtio-blk at given MMIO base address (auto-assigns slot) */
-int  virtio_blk_init(uintptr_t mmio_base);
+/* Probe the next transport-provided virtio-blk device and assign a slot. */
+int  virtio_blk_init(void);
 
 /* Read/write N sectors starting at LBA on device idx */
 int  virtio_blk_read(int idx, uint64_t lba, void *buf, size_t sectors);

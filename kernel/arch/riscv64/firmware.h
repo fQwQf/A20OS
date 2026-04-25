@@ -11,6 +11,12 @@
 #define SBI_SRST_SHUTDOWN       0
 #define SBI_SRST_COLD_REBOOT    1
 
+void firmware_set_timer(uint64_t time);
+void firmware_console_putchar(char c);
+int  firmware_console_getchar(void);
+void firmware_shutdown(void);
+void firmware_reboot(void);
+
 uint64_t sbi_call(uint64_t eid, uint64_t fid, uint64_t a0, uint64_t a1, uint64_t a2);
 void sbi_set_timer(uint64_t time);
 void sbi_console_putchar(char c);

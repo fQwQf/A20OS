@@ -9,7 +9,7 @@
 #define PAGE_OFFSET_MASK   ((1UL << PAGE_SIZE_BITS) - 1)
 
 /* ---------- Kernel / user stack sizes ---------- */
-#define KERNEL_STACK_SIZE  (16 * 1024)
+#define KERNEL_STACK_SIZE  (32 * 1024)
 #define USER_STACK_SIZE    (512 * PAGE_SIZE)
 
 /* ---------- Limits ---------- */
@@ -40,6 +40,8 @@
  *                      KTRAP_CONTEXT_SIZE, trap_context_t, task_context_t
  *
  *   From arch/cpu.h:   arch_mb/rmb/wmb, arch_wfi, arch_* (CSR accessors)
+ *
+ *   From arch/console.h: arch_uart_poll_getc
  *
  *   From firmware.h:   sbi_* / firmware_* function prototypes
  *
@@ -86,6 +88,7 @@
 #define SYS_fstat          80
 #define SYS_exit           93
 #define SYS_exit_group     94
+#define SYS_waitid         95
 #define SYS_set_tid_address 96
 #define SYS_set_robust_list 99
 #define SYS_futex          98
@@ -196,6 +199,14 @@
 
 #define AT_FDCWD       (-100)
 #define AT_REMOVEDIR   0x200
+#define AT_EMPTY_PATH  0x1000
+#define AT_SYMLINK_NOFOLLOW 0x100
+
+/* statx mask bits (Linux ABI) */
+#define STATX_BASIC_STATS  0x07ffU
+
+/* LoongArch uses faccessat2 instead of faccessat */
+#define SYS_faccessat2  439
 
 #define SEEK_SET  0
 #define SEEK_CUR  1

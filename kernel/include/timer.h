@@ -12,6 +12,7 @@
 void timer_init(void);
 void timer_set_interval(uint64_t ticks);
 uint64_t timer_get_ticks(void);
+void timer_irq_tick(void);
 void timer_enable(void);
 void timer_disable(void);
 

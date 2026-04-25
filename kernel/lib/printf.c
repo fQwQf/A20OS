@@ -157,6 +157,13 @@ int vsnprintf(char *out, size_t size, const char *fmt, va_list args) {
             nlen = utoa(v, num_buf, 16, 0);
             break;
         }
+        case 'p': {
+            uintptr_t ptr = (uintptr_t)va_arg(args, void*);
+            OUTC2('0'); 
+            OUTC2('x'); // 手动加上 0x 前缀
+            nlen = utoa((uint64_t)ptr, num_buf, 16, 0);
+            break;
+        }
         case 's': {
             const char *s = va_arg(args, const char*);
             if (!s) s = "(null)";

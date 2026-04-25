@@ -115,6 +115,51 @@ void mm_insert_vma(mm_struct_t *mm, vm_area_t *newv) {
     }
 }
 
+static vm_area_t *vma_split(vm_area_t *vma, uint64_t split) {
+    if (!vma) return NULL;
+    if (split <= vma->start || split >= vma->end) return vma;
+
+    vm_area_t *tail = kcalloc(1, sizeof(vm_area_t));
+    if (!tail) return NULL;
+
+    *tail = *vma;
+    tail->start = split;
+    tail->prev = vma;
+    tail->next = vma->next;
+    if (tail->next) tail->next->prev = tail;
+
+    vma->end = split;
+    vma->next = tail;
+    return tail;
+}
+
+static void vma_try_merge(vm_area_t *vma) {
+    if (!vma) return;
+
+    if (vma->prev &&
+        vma->prev->end == vma->start &&
+        vma->prev->vm_flags == vma->vm_flags &&
+        vma->prev->pte_flags == vma->pte_flags) {
+        vm_area_t *prev = vma->prev;
+        prev->end = vma->end;
+        prev->next = vma->next;
+        if (vma->next) vma->next->prev = prev;
+        kfree(vma);
+        vma = prev;
+    }
+
+    if (vma->next &&
+        vma->end == vma->next->start &&
+        vma->next->vm_flags == vma->vm_flags &&
+        vma->next->pte_flags == vma->pte_flags) {
+        vm_area_t *next = vma->next;
+        vma->end = next->end;
+        vma->next = next->next;
+        if (next->next) next->next->prev = vma;
+        kfree(next);
+    }
+}
+
 // 将保护标志转换为页表项标志
 uint64_t prot_to_pte(int prot) {
     uint64_t f = PTE_V | PTE_U | PTE_A | PTE_MAT1 | PTE_LEAF;
@@ -127,6 +172,8 @@ uint64_t prot_to_pte(int prot) {
 
 // 创建内存映射（mmap 系统调用的实现）
 uint64_t mm_mmap(mm_struct_t *mm, uint64_t addr, size_t len, int prot, int flags) {
+    kdebug("[MMAP] req_addr=0x%lx len=%lu prot=%d -> ", addr, len, prot);
+
     len = ROUND_UP(len, PAGE_SIZE);
     if (len == 0) return (uint64_t)-EINVAL;
 
@@ -161,6 +208,8 @@ uint64_t mm_mmap(mm_struct_t *mm, uint64_t addr, size_t len, int prot, int flags
 
     mm_insert_vma(mm, vma);
     mm->total_vm += len / PAGE_SIZE;
+
+    kdebug("ret=0x%lx\n", addr);
 
     return addr;
 }
@@ -246,27 +295,50 @@ uint64_t mm_brk(mm_struct_t *mm, uint64_t newbrk) {
 int mm_mprotect(mm_struct_t *mm, uint64_t addr, size_t len, int prot) {
     if (!mm || !mm->pgdir) return -EINVAL;
     len = ROUND_UP(len, PAGE_SIZE);
+    if (len == 0) return 0;
+    if (addr & (PAGE_SIZE - 1)) return -EINVAL;
+
     uint64_t ptef = prot_to_pte(prot);
-    uint64_t vmf = VM_ANON;
-    if (prot & 1) vmf |= VM_READ;
-    if (prot & 2) vmf |= VM_WRITE;
-    if (prot & 4) vmf |= VM_EXEC;
+    uint64_t vm_prot = 0;
+    if (prot & 1) vm_prot |= VM_READ;
+    if (prot & 2) vm_prot |= VM_WRITE;
+    if (prot & 4) vm_prot |= VM_EXEC;
     uint64_t end = addr + len;
     int touched = 0;
 
-    // 更新所有受影响的 VMA 和页表项的权限
-    for (vm_area_t *v = mm->mmap; v; v = v->next) {
-        if (v->start >= end || v->end <= addr) continue;
+    for (vm_area_t *v = mm_find_vma(mm, addr); v && v->start < end; ) {
+        vm_area_t *next = v->next;
         uint64_t s = v->start < addr ? addr : v->start;
         uint64_t e = v->end > end ? end : v->end;
-        for (uint64_t va = s; va < e; va += PAGE_SIZE) {
-            uint64_t *pte = pt_walk(mm->pgdir, va, 0);
-            if (pte && *pte & PTE_V)
-                *pte = (*pte & ~(PTE_R | PTE_W | PTE_X)) | (ptef & (PTE_R | PTE_W | PTE_X));
+
+        if (s > v->start) {
+            v = vma_split(v, s);
+            if (!v) return -ENOMEM;
+            next = v->next;
         }
-        v->pte_flags = (v->pte_flags & ~(PTE_R | PTE_W | PTE_X)) | (ptef & (PTE_R | PTE_W | PTE_X));
-        v->vm_flags  = (v->vm_flags & ~(VM_READ | VM_WRITE | VM_EXEC)) | vmf;
+        if (e < v->end) {
+            if (!vma_split(v, e)) return -ENOMEM;
+            next = v->next;
+        }
+
+        for (uint64_t va = v->start; va < v->end; va += PAGE_SIZE) {
+            uint64_t *pte = pt_walk(mm->pgdir, va, 0);
+            if (pte && (*pte & PTE_V)) {
+                uint64_t flags = *pte & (PTE_R | PTE_W | PTE_X | PTE_U |
+                                         PTE_G | PTE_A | PTE_D | PTE_COW |
+                                         PTE_LEAF | PTE_MAT1);
+                flags &= ~(uint64_t)(PTE_R | PTE_W | PTE_X | PTE_D);
+                flags |= ptef & (PTE_R | PTE_W | PTE_X | PTE_D);
+                *pte = arch_pte_leaf(arch_pte_addr(*pte), flags);
+            }
+        }
+        v->pte_flags = (v->pte_flags & ~(uint64_t)(PTE_R | PTE_W | PTE_X | PTE_D)) |
+                       (ptef & (PTE_R | PTE_W | PTE_X | PTE_D));
+        v->vm_flags  = (v->vm_flags & ~(uint64_t)(VM_READ | VM_WRITE | VM_EXEC)) |
+                       vm_prot;
+        vma_try_merge(v);
         touched = 1;
+        v = next;
     }
 
     if (touched)
@@ -292,6 +364,7 @@ mm_struct_t *mm_fork(mm_struct_t *parent) {
     vm_area_t **tail = &child->mmap;
     vm_area_t *prev = NULL;
     for (vm_area_t *pv = parent->mmap; pv; pv = pv->next) {
+        kdebug("VMA: pv=%p\n", pv);
         vm_area_t *cv = kcalloc(1, sizeof(vm_area_t));
         if (!cv) goto fail;
         *cv = *pv;
@@ -322,6 +395,9 @@ mm_struct_t *mm_fork(mm_struct_t *parent) {
             if (is_leaf0) continue;
 
             uint64_t *l0p = arch_pte_to_ptr(pte1);
+
+            kdebug("PT: l0p=%p\n", l0p);
+            
             uint64_t *l0c = (uint64_t *)frame_alloc();
             if (!l0c) goto fail;
             memset(l0c, 0, PAGE_SIZE);
@@ -338,11 +414,11 @@ mm_struct_t *mm_fork(mm_struct_t *parent) {
                 // 设置写时复制标志
                 uint64_t new_flags = pte & (PTE_R | PTE_X | PTE_U | PTE_A | PTE_D | PTE_G | PTE_MAT1 | PTE_LEAF);
                 if (pte & PTE_W || pte & PTE_COW) {
-                    new_flags &= ~(uint64_t)PTE_W;
+                    new_flags &= ~(uint64_t)(PTE_W | PTE_D);
                     new_flags |= PTE_COW;
-                    l0p[vpn0] = (pte & ~PTE_W) | PTE_COW;  // 同时修改父进程的页表项
+                    l0p[vpn0] = arch_pte_leaf(arch_pte_addr(pte), new_flags);  // 同时修改父进程的页表项
                 }
-                l0c[vpn0] = arch_pte_from_pa(arch_pte_addr(pte)) | new_flags | PTE_V;
+                l0c[vpn0] = arch_pte_leaf(arch_pte_addr(pte), new_flags);
             }
         }
     }
