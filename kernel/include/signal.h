@@ -28,6 +28,25 @@ typedef struct signal_state {
     uint64_t    blocked;     /* signal mask */
 } signal_state_t;
 
+/*
+ * Internal masks use bit position == signum (bit 0 unused) to keep the code
+ * readable when iterating `for (sig = 1; sig < NSIG; sig++)`.
+ *
+ * The user/kernel syscall ABI, however, follows Linux and encodes signal N at
+ * bit (N-1). Convert at the syscall boundary.
+ */
+static inline uint64_t signal_mask_bit(int sig) {
+    return (sig > 0 && sig < 64) ? (1ULL << sig) : 0;
+}
+
+static inline uint64_t signal_mask_from_user(uint64_t user_mask) {
+    return user_mask << 1;
+}
+
+static inline uint64_t signal_mask_to_user(uint64_t kernel_mask) {
+    return kernel_mask >> 1;
+}
+
 /* Initialize signal state for a new process */
 void signal_init(signal_state_t *ss);
 

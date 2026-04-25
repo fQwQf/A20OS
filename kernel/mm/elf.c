@@ -55,9 +55,9 @@ int elf_check_header(const Elf64_Ehdr *eh) {
 
 // 将 ELF 段标志转换为页表项标志
 static uint64_t seg_flags(uint32_t p_flags) {
-    uint64_t f = PTE_V | PTE_U | PTE_MAT1 | PTE_A | PTE_D | PTE_LEAF;
+    uint64_t f = PTE_V | PTE_U | PTE_MAT1 | PTE_A | PTE_LEAF;
     if (p_flags & PF_R) f |= PTE_R;
-    if (p_flags & PF_W) f |= PTE_W;
+    if (p_flags & PF_W) f |= (PTE_W | PTE_D);
     if (p_flags & PF_X) f |= PTE_X;
     if (f & PTE_W) f |= PTE_R;
     return f;
@@ -586,7 +586,17 @@ uint64_t elf_setup_stack(uint64_t stack_top, int argc, char *const argv[],
 
     sp_va &= ~15UL;
 
-    const char *platform = ARCH_NAME; // 何意味？
+    /* Pad so that the total fixed-size data pushed below is a multiple of 16.
+     * Fixed items: platform(8) + random(16) + auxv(naux*16) +
+     *              envp_ptrs((envc+1)*8) + argv_ptrs((argc+1)*8) + argc(8)
+     * naux*16 and 32 are always 0 mod 16, so the remainder is
+     * (envc+argc+2)*8 mod 16, which is 8 when (envc+argc+2) is odd. */
+    {
+        size_t fixed = (size_t)(envc + argc + 2) * 8;
+        sp_va -= (fixed & 15);
+    }
+
+    const char *platform = ARCH_NAME;
     int plat_len = 8;
     sp_va -= plat_len;
     uint64_t platform_va = sp_va;

@@ -20,8 +20,12 @@ void timer_set_interval(uint64_t ticks) {
 
 uint64_t timer_get_ticks(void) {
     uint64_t val;
-    __asm__ __volatile("csrrd %0, 0x42" : "=r"(val));
+    __asm__ __volatile__("rdtime.d %0, $zero" : "=r"(val));
     return val;
+}
+
+void timer_irq_tick(void) {
+    /* LoongArch uses the monotonic rdtime.d counter directly. */
 }
 
 void timer_enable(void) {

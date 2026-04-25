@@ -23,7 +23,7 @@ void init_kthread(void);
 /* ============================================================
  * Block-device mount configuration
  *
- * virtio_blk_init(0) auto-assigns the next MMIO slot, so each
+ * virtio_blk_init() auto-assigns the next transport slot, so each
  * call probes the next virtio-blk device in sequence.
  * virtio_blk_get_dev(i) then returns the block_dev_t for slot i.
  *
@@ -118,7 +118,7 @@ void kernel_main(void) {
     printf("[INIT] BRINGUP mode: skipping block device probe\n");
 #else
     for (int i = 0; i < MOUNT_COUNT; i++) {
-        if (virtio_blk_init(0) != 0) {
+        if (virtio_blk_init() != 0) {
             printf("[INIT] Device %d: probe failed, skipping\n", i);
             continue;
         }
@@ -133,7 +133,7 @@ void kernel_main(void) {
 
     /* Best-effort: try optional extra sdcard images */
     for (int j = 0; j < EXTRA_MOUNT_COUNT; j++) {
-        if (virtio_blk_init(0) != 0)
+        if (virtio_blk_init() != 0)
             break;  /* no more devices */
         int dev_idx = MOUNT_COUNT + j;
         try_mount(dev_idx,

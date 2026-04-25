@@ -19,11 +19,15 @@
 
 typedef uint32_t pfn_t;
 
-/* Per-frame metadata — 8 bytes × ~131072 frames ≈ 1MB */
+/* Per-frame metadata.
+ * prev/next live here instead of inside the free page itself, so a stray
+ * write into a freed frame cannot corrupt the buddy free lists. */
 typedef struct {
     uint16_t refcount;   /* 0 = free, >0 = in-use */
     uint8_t  order;      /* buddy order */
     uint8_t  flags;      /* FRAME_F_* */
+    pfn_t    prev;       /* free-list prev (valid when FRAME_F_FREE) */
+    pfn_t    next;       /* free-list next (valid when FRAME_F_FREE) */
 } frame_meta_t;
 
 #define FRAME_F_FREE    0x00
