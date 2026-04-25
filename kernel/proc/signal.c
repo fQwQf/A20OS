@@ -12,6 +12,19 @@
 #include "stdio.h"
 #include "klog.h"
 
+static int sig_diag_count = 0;
+
+typedef struct user_rt_sigaction {
+    uintptr_t handler;
+    uint64_t  flags;
+    uint32_t  mask[2];
+    uint64_t  restorer_or_unused;
+} user_rt_sigaction_t;
+
+typedef struct user_sigset {
+    uint64_t bits[1];
+} user_sigset_t;
+
 // 初始化信号状态
 void signal_init(signal_state_t *ss) {
     memset(ss, 0, sizeof(*ss));
@@ -31,7 +44,12 @@ int signal_send(int pid, int signum) {
     if (!t->signals) return -EINVAL;
 
     signal_state_t *ss = (signal_state_t *)t->signals;
-    ss->pending |= (1ULL << signum);
+    ss->pending |= signal_mask_bit(signum);
+    if (sig_diag_count < 64 && signum == SIGCHLD) {
+        sig_diag_count++;
+        kdebug("[SIGDBG] send pid=%d sig=%d pending=0x%lx state=%d\n",
+              pid, signum, (unsigned long)ss->pending, t->state);
+    }
 
     if (t->state == PROC_BLOCKED) {
         t->state = PROC_READY;
@@ -60,12 +78,12 @@ void signal_deliver(void) {
         sigaction_t *sa = &ss->actions[sig];
 
         if (sa->sa_handler == SIG_IGN) {
-            ss->pending &= ~(1ULL << sig);
+            ss->pending &= ~signal_mask_bit(sig);
             continue;
         }
 
         if (sa->sa_handler == SIG_DFL) {
-            ss->pending &= ~(1ULL << sig);
+            ss->pending &= ~signal_mask_bit(sig);
             switch (sig) {
                 case SIGCHLD:  continue;
                 case SIGPIPE:  proc_exit(128 + sig);
@@ -86,7 +104,7 @@ void signal_deliver(void) {
             continue;
         }
 
-        ss->pending &= ~(1ULL << sig);
+        ss->pending &= ~signal_mask_bit(sig);
         void (*handler)(int) = (void (*)(int))(uintptr_t)sa->sa_handler;
         handler(sig);
     }
@@ -106,27 +124,36 @@ void signal_deliver_user(trap_context_t *ctx) {
 
         sigaction_t *sa = &ss->actions[sig];
 
+        if (sig_diag_count < 64 && (sig == SIGCHLD || sig == SIGINT || sig == SIGTERM)) {
+            sig_diag_count++;
+            kdebug("[SIGDBG] deliver pid=%d sig=%d handler=0x%lx flags=0x%x pending=0x%lx blocked=0x%lx epc=0x%lx\n",
+                  t->pid, sig, (unsigned long)sa->sa_handler, sa->sa_flags,
+                  (unsigned long)ss->pending, (unsigned long)ss->blocked,
+                  (unsigned long)TRAP_CTX_EPC(ctx));
+        }
+
         if (sa->sa_handler == SIG_IGN) {
-            ss->pending &= ~(1ULL << sig);
+            ss->pending &= ~signal_mask_bit(sig);
             continue;
         }
 
         if (sa->sa_handler == SIG_DFL) {
-            ss->pending &= ~(1ULL << sig);
+            ss->pending &= ~signal_mask_bit(sig);
             switch (sig) {
                 case SIGCHLD: continue;
                 default: proc_exit(128 + sig);
             }
         }
 
-        ss->pending &= ~(1ULL << sig);
+        ss->pending &= ~signal_mask_bit(sig);
 
         t->sig_saved_ctx = *ctx;
         t->sig_handling = sig;
-        t->sig_old_blocked = ss->blocked;
+        t->sig_old_blocked = t->sigsuspend_active ? t->sigsuspend_old_blocked : ss->blocked;
+        t->sigsuspend_active = 0;
 
         ss->blocked |= sa->sa_mask;
-        ss->blocked |= (1ULL << sig);
+        ss->blocked |= signal_mask_bit(sig);
 
         uint64_t sp = TRAP_CTX_SP(ctx);
         sp -= 16;
@@ -134,12 +161,17 @@ void signal_deliver_user(trap_context_t *ctx) {
 #ifdef CONFIG_RISCV64
         uint32_t tramp[2] = { 0x08b00893, 0x00000073 };
 #elif defined(CONFIG_LOONGARCH64)
-        uint32_t tramp[2] = { 0x02c22c0b, 0x002b0000 };
+        /* Match musl's loongarch64 restore.s exactly:
+         *   li.w    $a7, 139   ; SYS_rt_sigreturn
+         *   syscall 0
+         */
+        uint32_t tramp[2] = { 0x03822c0b, 0x002b0000 };
 #else
         uint32_t tramp[2] = { 0, 0 };
 #endif
         /* Write signal trampoline to user stack via page table (not direct ptr) */
-        copy_to_user((void *)sp, tramp, sizeof(tramp));
+        if (copy_to_user((void *)sp, tramp, sizeof(tramp)) < 0)
+            proc_exit(128 + SIGSEGV);
         TRAP_CTX_SP(ctx) = sp;
 
         TRAP_CTX_EPC(ctx) = sa->sa_handler;
@@ -159,15 +191,32 @@ int sys_sigaction_impl(int signum, const sigaction_t *act, sigaction_t *oldact) 
     signal_state_t *ss = (signal_state_t *)t->signals;
 
     if (oldact) {
-        /* Write to user pointer via page table walk, not direct dereference */
-        if (copy_to_user(oldact, &ss->actions[signum], sizeof(sigaction_t)) < 0)
+        user_rt_sigaction_t oldk;
+        memset(&oldk, 0, sizeof(oldk));
+        oldk.handler = ss->actions[signum].sa_handler;
+        oldk.flags = (uint64_t)(unsigned)ss->actions[signum].sa_flags;
+        uint64_t old_user_mask = signal_mask_to_user(ss->actions[signum].sa_mask);
+        oldk.mask[0] = (uint32_t)(old_user_mask & 0xffffffffU);
+        oldk.mask[1] = (uint32_t)(old_user_mask >> 32);
+        if (copy_to_user(oldact, &oldk, sizeof(oldk)) < 0)
             return -EFAULT;
     }
     if (act) {
-        sigaction_t kact;
-        if (copy_from_user(&kact, act, sizeof(sigaction_t)) < 0)
+        user_rt_sigaction_t ukact;
+        if (copy_from_user(&ukact, act, sizeof(ukact)) < 0)
             return -EFAULT;
-        ss->actions[signum] = kact;
+        ss->actions[signum].sa_handler = ukact.handler;
+        ss->actions[signum].sa_mask = signal_mask_from_user(
+            ((uint64_t)ukact.mask[1] << 32) | (uint64_t)ukact.mask[0]);
+        ss->actions[signum].sa_flags = (int)ukact.flags;
+        if (sig_diag_count < 64 && (signum == SIGCHLD || signum == SIGINT || signum == SIGTERM)) {
+            sig_diag_count++;
+            kdebug("[SIGDBG] install pid=%d sig=%d handler=0x%lx flags=0x%lx mask=0x%lx unused=0x%lx\n",
+                  t->pid, signum, (unsigned long)ukact.handler,
+                  (unsigned long)ukact.flags,
+                  (unsigned long)(((uint64_t)ukact.mask[1] << 32) | (uint64_t)ukact.mask[0]),
+                  (unsigned long)ukact.restorer_or_unused);
+        }
     }
     return 0;
 }
@@ -179,16 +228,17 @@ int sys_sigprocmask_impl(int how, const uint64_t *set, uint64_t *oldset) {
     signal_state_t *ss = (signal_state_t *)t->signals;
 
     if (oldset) {
-        /* Write old mask to user pointer via page table walk */
-        if (copy_to_user(oldset, &ss->blocked, sizeof(uint64_t)) < 0)
+        user_sigset_t oldmask = { .bits = { signal_mask_to_user(ss->blocked) } };
+        if (copy_to_user(oldset, &oldmask, sizeof(oldmask)) < 0)
             return -EFAULT;
     }
     if (!set) return 0;
 
-    uint64_t mask;
-    if (copy_from_user(&mask, set, sizeof(uint64_t)) < 0)
+    user_sigset_t usermask;
+    if (copy_from_user(&usermask, set, sizeof(usermask)) < 0)
         return -EFAULT;
-    mask &= ~((1ULL << SIGKILL) | (1ULL << SIGSTOP));
+    uint64_t mask = signal_mask_from_user(usermask.bits[0]);
+    mask &= ~(signal_mask_bit(SIGKILL) | signal_mask_bit(SIGSTOP));
 
     switch (how) {
         case SIG_BLOCK:   ss->blocked |=  mask; break;

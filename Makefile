@@ -9,6 +9,10 @@ CONTEST ?= 0
 # Directories
 KERNEL_DIR = kernel
 INCLUDE_DIR = $(KERNEL_DIR)/include
+BUILD_DIR = .kernel-build/$(ARCH)
+FAT32_IMG = $(BUILD_DIR)/fat32.img
+EXT4_IMG = $(BUILD_DIR)/ext4.img
+FS_TEST_IMG = $(BUILD_DIR)/fs_test.img
 
 # Compiler and tools
 ifeq ($(ARCH), riscv64)
@@ -28,8 +32,8 @@ endif
 # In bringup mode, boot kernel only (no fs image dependency).
 ifneq ($(BRINGUP),1)
 ifeq ($(ARCH), riscv64)
-QEMU_FLAGS += -drive file=fat32.img,if=none,format=raw,id=x0 -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0
-QEMU_FLAGS += -drive file=ext4.img,if=none,format=raw,id=x1 -device virtio-blk-device,drive=x1,bus=virtio-mmio-bus.1
+QEMU_FLAGS += -drive file=$(FAT32_IMG),if=none,format=raw,id=x0 -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0
+QEMU_FLAGS += -drive file=$(EXT4_IMG),if=none,format=raw,id=x1 -device virtio-blk-device,drive=x1,bus=virtio-mmio-bus.1
 
 ifneq ($(wildcard sdcard-rv.img),)
 QEMU_FLAGS += -drive file=sdcard-rv.img,if=none,format=raw,id=x2 -device virtio-blk-device,drive=x2,bus=virtio-mmio-bus.2
@@ -40,8 +44,8 @@ QEMU_FLAGS += -drive file=sdcard-la.img,if=none,format=raw,id=x3 -device virtio-
 endif
 
 else ifeq ($(ARCH), loongarch64)
-QEMU_FLAGS += -drive file=fat32.img,if=none,format=raw,id=x0 -device virtio-blk-pci,drive=x0
-QEMU_FLAGS += -drive file=ext4.img,if=none,format=raw,id=x1 -device virtio-blk-pci,drive=x1
+QEMU_FLAGS += -drive file=$(FAT32_IMG),if=none,format=raw,id=x0 -device virtio-blk-pci,drive=x0
+QEMU_FLAGS += -drive file=$(EXT4_IMG),if=none,format=raw,id=x1 -device virtio-blk-pci,drive=x1
 
 ifneq ($(wildcard sdcard-rv.img),)
 QEMU_FLAGS += -drive file=sdcard-rv.img,if=none,format=raw,id=x2 -device virtio-blk-pci,drive=x2
@@ -84,15 +88,15 @@ KERNEL_SRC = $(wildcard $(KERNEL_DIR)/*.c) \
              $(wildcard $(KERNEL_DIR)/arch/$(ARCH)/*.c)
 
 # Object files
-KERNEL_OBJ = $(KERNEL_SRC:.c=.o)
+KERNEL_OBJ = $(patsubst $(KERNEL_DIR)/%.c,$(BUILD_DIR)/%.o,$(KERNEL_SRC))
 
 # ASM sources
 ASM_SRC = $(wildcard $(KERNEL_DIR)/arch/$(ARCH)/*.S)
-ASM_OBJ = $(ASM_SRC:.S=.o)
+ASM_OBJ = $(patsubst $(KERNEL_DIR)/%.S,$(BUILD_DIR)/%.o,$(ASM_SRC))
 
 # Kernel image
-KERNEL_ELF = kernel.elf
-KERNEL_BIN = kernel.bin
+KERNEL_ELF = $(BUILD_DIR)/kernel.elf
+KERNEL_BIN = $(BUILD_DIR)/kernel.bin
 
 # ================================================================
 # Targets
@@ -121,6 +125,7 @@ contest-la:
 
 _reset_obj:
 	find $(KERNEL_DIR) -name '*.o' -delete
+	rm -rf .kernel-build
 	$(MAKE) -C user clean
 
 _contest_build: $(KERNEL_ELF) user_apps _contest_disk
@@ -137,7 +142,7 @@ _contest_disk: user_apps
 # ----------------------------------------------------------------
 
 dev-build: $(KERNEL_BIN) user_apps fs_img ext4_img_only
-	@echo "Dev build complete: $(KERNEL_BIN), fat32.img, ext4.img"
+	@echo "Dev build complete: $(KERNEL_BIN), $(FAT32_IMG), $(EXT4_IMG)"
 
 user_apps:
 ifeq ($(CONTEST),1)
@@ -148,28 +153,29 @@ endif
 
 fs_img: user_apps
 	@echo "Building FAT32 image..."
-	dd if=/dev/zero of=fat32.img bs=1M count=32
-	mkfs.fat -F 32 fat32.img
-	mcopy -i fat32.img user/build/init ::/init
-	mcopy -i fat32.img user/build/mksh ::/mksh
-	mcopy -i fat32.img user/build/sh ::/sh
-	mcopy -i fat32.img user/build/ls ::/ls
-	mcopy -i fat32.img user/build/cat ::/cat
-	mcopy -i fat32.img user/build/mkdir ::/mkdir
-	mcopy -i fat32.img user/build/rm ::/rm
-	mcopy -i fat32.img user/build/cp ::/cp
-	mcopy -i fat32.img user/build/ps ::/ps
-	mcopy -i fat32.img user/build/aed ::/aed
-	mcopy -i fat32.img user/build/touch ::/touch
-	mcopy -i fat32.img user/build/poweroff ::/poweroff
-	mcopy -i fat32.img user/build/reboot ::/reboot
-	mcopy -i fat32.img user/build/pwd ::/pwd
-	mcopy -i fat32.img user/build/echo ::/echo
-	mcopy -i fat32.img user/build/env ::/env
-	mcopy -i fat32.img user/build/clear ::/clear
-	mcopy -i fat32.img user/build/help ::/help
-	@printf 'Hello from A20OS FAT32!\n' | mcopy -i fat32.img - ::/test.txt
-	cp fat32.img fs_test.img
+	@mkdir -p $(BUILD_DIR)
+	dd if=/dev/zero of=$(FAT32_IMG) bs=1M count=32
+	mkfs.fat -F 32 $(FAT32_IMG)
+	mcopy -i $(FAT32_IMG) user/build/init ::/init
+	mcopy -i $(FAT32_IMG) user/build/mksh ::/mksh
+	mcopy -i $(FAT32_IMG) user/build/sh ::/sh
+	mcopy -i $(FAT32_IMG) user/build/ls ::/ls
+	mcopy -i $(FAT32_IMG) user/build/cat ::/cat
+	mcopy -i $(FAT32_IMG) user/build/mkdir ::/mkdir
+	mcopy -i $(FAT32_IMG) user/build/rm ::/rm
+	mcopy -i $(FAT32_IMG) user/build/cp ::/cp
+	mcopy -i $(FAT32_IMG) user/build/ps ::/ps
+	mcopy -i $(FAT32_IMG) user/build/aed ::/aed
+	mcopy -i $(FAT32_IMG) user/build/touch ::/touch
+	mcopy -i $(FAT32_IMG) user/build/poweroff ::/poweroff
+	mcopy -i $(FAT32_IMG) user/build/reboot ::/reboot
+	mcopy -i $(FAT32_IMG) user/build/pwd ::/pwd
+	mcopy -i $(FAT32_IMG) user/build/echo ::/echo
+	mcopy -i $(FAT32_IMG) user/build/env ::/env
+	mcopy -i $(FAT32_IMG) user/build/clear ::/clear
+	mcopy -i $(FAT32_IMG) user/build/help ::/help
+	@printf 'Hello from A20OS FAT32!\n' | mcopy -i $(FAT32_IMG) - ::/test.txt
+	cp $(FAT32_IMG) $(FS_TEST_IMG)
 
 ext4_img_only: user_apps
 	@echo "Building ext4 image..."
@@ -182,28 +188,33 @@ ext4_img_only: user_apps
 	cp user/build/rm   /tmp/a20os_ext4_staging/rm
 	cp user/build/cp   /tmp/a20os_ext4_staging/cp
 	printf 'Hello from ext4!\nThis file is on the ext4 filesystem.\n' > /tmp/a20os_ext4_staging/test.txt
-	dd if=/dev/zero of=ext4.img bs=1M count=32
-	mkfs.ext4 -F -O ^has_journal,extent,huge_file,flex_bg,uninit_bg,dir_index -d /tmp/a20os_ext4_staging ext4.img
+	@mkdir -p $(BUILD_DIR)
+	dd if=/dev/zero of=$(EXT4_IMG) bs=1M count=32
+	mkfs.ext4 -F -O ^has_journal,extent,huge_file,flex_bg,uninit_bg,dir_index -d /tmp/a20os_ext4_staging $(EXT4_IMG)
 	@rm -rf /tmp/a20os_ext4_staging
 
 ext4_img: user_apps ext4_img_only
-	cp ext4.img fs_test.img
+	cp $(EXT4_IMG) $(FS_TEST_IMG)
 
 $(KERNEL_BIN): $(KERNEL_ELF)
 	$(CROSS_PREFIX)objcopy -O binary $< $@
 
 $(KERNEL_ELF): $(KERNEL_OBJ) $(ASM_OBJ)
+	@mkdir -p $(dir $@)
 	$(CROSS_PREFIX)gcc $(LDFLAGS) $^ -o $@
 
-%.o: %.c
+$(BUILD_DIR)/%.o: $(KERNEL_DIR)/%.c
+	@mkdir -p $(dir $@)
 	$(CROSS_PREFIX)gcc $(CFLAGS) -c $< -o $@
 
-%.o: %.S
+$(BUILD_DIR)/%.o: $(KERNEL_DIR)/%.S
+	@mkdir -p $(dir $@)
 	$(CROSS_PREFIX)gcc $(CFLAGS) -c $< -o $@
 
 clean:
 	find $(KERNEL_DIR) -name '*.o' -delete
-	rm -f $(KERNEL_ELF) $(KERNEL_BIN) fat32.img ext4.img
+	rm -rf .kernel-build
+	rm -f kernel.elf kernel.bin fat32.img ext4.img
 	rm -f kernel-rv kernel-la disk.img disk-la.img
 	$(MAKE) -C user clean
 
