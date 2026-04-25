@@ -13,6 +13,8 @@ BUILD_DIR = .kernel-build/$(ARCH)
 FAT32_IMG = $(BUILD_DIR)/fat32.img
 EXT4_IMG = $(BUILD_DIR)/ext4.img
 FS_TEST_IMG = $(BUILD_DIR)/fs_test.img
+ARCH_INCLUDE_DIR = $(KERNEL_DIR)/arch/$(ARCH)/include
+EXT4_STAGING_DIR = $(BUILD_DIR)/ext4-staging
 
 # Compiler and tools
 ifeq ($(ARCH), riscv64)
@@ -61,7 +63,8 @@ endif
 # Compiler flags
 CFLAGS = -Wall -Wextra -O2 -ffreestanding -nostdlib \
          -nostartfiles -fno-builtin -fno-common -std=gnu99 \
-         -I$(INCLUDE_DIR) -I$(KERNEL_DIR) -I$(KERNEL_DIR)/arch/$(ARCH) $(ARCH_CFLAGS) \
+         -MMD -MP \
+         -I$(INCLUDE_DIR) -I$(KERNEL_DIR) -I$(ARCH_INCLUDE_DIR) $(ARCH_CFLAGS) \
          -D$(shell echo $(ARCH) | tr a-z A-Z) \
          -DCONFIG_$(shell echo $(ARCH) | tr a-z A-Z)
 
@@ -73,7 +76,7 @@ ifeq ($(CONTEST),1)
 CFLAGS += -DCONTEST
 endif
 
-LDFLAGS = -nostdlib -nostartfiles -T $(KERNEL_DIR)/arch/$(ARCH)/ldscript.ld $(ARCH_LDFLAGS)
+LDFLAGS = -nostdlib -nostartfiles -T $(KERNEL_DIR)/arch/$(ARCH)/boot/ldscript.ld $(ARCH_LDFLAGS)
 
 # Source files
 KERNEL_SRC = $(wildcard $(KERNEL_DIR)/*.c) \
@@ -85,14 +88,15 @@ KERNEL_SRC = $(wildcard $(KERNEL_DIR)/*.c) \
              $(wildcard $(KERNEL_DIR)/syscall/*.c) \
              $(wildcard $(KERNEL_DIR)/trap/*.c) \
              $(wildcard $(KERNEL_DIR)/shell/*.c) \
-             $(wildcard $(KERNEL_DIR)/arch/$(ARCH)/*.c)
+             $(shell find $(KERNEL_DIR)/arch/$(ARCH) -type f -name '*.c' | sort)
 
 # Object files
 KERNEL_OBJ = $(patsubst $(KERNEL_DIR)/%.c,$(BUILD_DIR)/%.o,$(KERNEL_SRC))
 
 # ASM sources
-ASM_SRC = $(wildcard $(KERNEL_DIR)/arch/$(ARCH)/*.S)
+ASM_SRC = $(shell find $(KERNEL_DIR)/arch/$(ARCH) -type f -name '*.S' | sort)
 ASM_OBJ = $(patsubst $(KERNEL_DIR)/%.S,$(BUILD_DIR)/%.o,$(ASM_SRC))
+DEP_FILES = $(KERNEL_OBJ:.o=.d) $(ASM_OBJ:.o=.d)
 
 # Kernel image
 KERNEL_ELF = $(BUILD_DIR)/kernel.elf
@@ -179,19 +183,19 @@ fs_img: user_apps
 
 ext4_img_only: user_apps
 	@echo "Building ext4 image..."
-	@rm -rf /tmp/a20os_ext4_staging && mkdir -p /tmp/a20os_ext4_staging
-	cp user/build/init /tmp/a20os_ext4_staging/init
-	cp user/build/mksh /tmp/a20os_ext4_staging/mksh
-	cp user/build/ls   /tmp/a20os_ext4_staging/ls
-	cp user/build/cat  /tmp/a20os_ext4_staging/cat
-	cp user/build/mkdir /tmp/a20os_ext4_staging/mkdir
-	cp user/build/rm   /tmp/a20os_ext4_staging/rm
-	cp user/build/cp   /tmp/a20os_ext4_staging/cp
-	printf 'Hello from ext4!\nThis file is on the ext4 filesystem.\n' > /tmp/a20os_ext4_staging/test.txt
+	@rm -rf $(EXT4_STAGING_DIR) && mkdir -p $(EXT4_STAGING_DIR)
+	cp user/build/init $(EXT4_STAGING_DIR)/init
+	cp user/build/mksh $(EXT4_STAGING_DIR)/mksh
+	cp user/build/ls   $(EXT4_STAGING_DIR)/ls
+	cp user/build/cat  $(EXT4_STAGING_DIR)/cat
+	cp user/build/mkdir $(EXT4_STAGING_DIR)/mkdir
+	cp user/build/rm   $(EXT4_STAGING_DIR)/rm
+	cp user/build/cp   $(EXT4_STAGING_DIR)/cp
+	printf 'Hello from ext4!\nThis file is on the ext4 filesystem.\n' > $(EXT4_STAGING_DIR)/test.txt
 	@mkdir -p $(BUILD_DIR)
 	dd if=/dev/zero of=$(EXT4_IMG) bs=1M count=32
-	mkfs.ext4 -F -O ^has_journal,extent,huge_file,flex_bg,uninit_bg,dir_index -d /tmp/a20os_ext4_staging $(EXT4_IMG)
-	@rm -rf /tmp/a20os_ext4_staging
+	mkfs.ext4 -F -O ^has_journal,extent,huge_file,flex_bg,uninit_bg,dir_index -d $(EXT4_STAGING_DIR) $(EXT4_IMG)
+	@rm -rf $(EXT4_STAGING_DIR)
 
 ext4_img: user_apps ext4_img_only
 	cp $(EXT4_IMG) $(FS_TEST_IMG)
@@ -217,6 +221,8 @@ clean:
 	rm -f kernel.elf kernel.bin fat32.img ext4.img
 	rm -f kernel-rv kernel-la disk.img disk-la.img
 	$(MAKE) -C user clean
+
+-include $(DEP_FILES)
 
 kernel-only: $(KERNEL_BIN)
 	@echo "Kernel-only build complete: $(KERNEL_BIN)"

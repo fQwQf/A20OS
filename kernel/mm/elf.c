@@ -8,26 +8,22 @@
  *   - User stack mapped at VA 0x3FFFF000 downward
  */
 
-#include "elf.h"
-#include "mm.h"
-#include "vm.h"
-#include "vfs.h"
-#include "string.h"
-#include "stdio.h"
-#include "panic.h"
-#include "consts.h"
-#include "defs.h"
-#include "timer.h"
+#include "mm/elf.h"
+#include "mm/mm.h"
+#include "mm/vm.h"
+#include "fs/vfs.h"
+#include "core/string.h"
+#include "core/stdio.h"
+#include "core/panic.h"
+#include "core/consts.h"
+#include "core/defs.h"
+#include "core/timer.h"
 
 // 虚拟地址转换为物理地址
 static inline paddr_t va_to_pa(const void *va) {
     return (paddr_t)((uint64_t)(uintptr_t)va - PAGE_OFFSET);
 }
 
-#define USER_STACK_TOP_VA  0x3FFFF000UL
-#define USER_DYN_BASE      0x10000UL
-#define INTERP_BASE        0x40000000UL
-#define USER_TLS_VA        0x3E000000UL
 #define TLS_TCB_SIZE       128
 #define PTE_STACK          (PTE_V | PTE_R | PTE_W | PTE_X | PTE_U | PTE_A | PTE_D | PTE_MAT1 | PTE_LEAF)
 
@@ -174,15 +170,16 @@ static int map_segment_from_fd(mm_struct_t *mm, uint64_t *pgdir, uint64_t va, ui
 
 // 映射用户栈
 static int map_stack(uint64_t *pgdir, uint64_t *stack_top_out) {
-    for (int i = 0; i < INITIAL_STACK_PAGES; i++) {
-        uint64_t va = USER_STACK_TOP_VA - (uint64_t)(INITIAL_STACK_PAGES - 1 - i) * PAGE_SIZE;
+    for (int i = 0; i < USER_STACK_INITIAL_PAGES; i++) {
+        uint64_t va = USER_STACK_TOP -
+                      (uint64_t)(USER_STACK_INITIAL_PAGES - 1 - i) * PAGE_SIZE;
         void *frame = frame_alloc();
         if (!frame) return -ENOMEM;
         int r = pt_map(pgdir, va, va_to_pa(frame),
                         PTE_STACK);
         if (r < 0) { frame_free(frame); return r; }
     }
-    *stack_top_out = USER_STACK_TOP_VA;
+    *stack_top_out = USER_STACK_TOP;
     arch_tlb_flush();
     return 0;
 }
@@ -206,13 +203,13 @@ static int setup_tls(uint64_t *pgdir, const void *tls_data, uint64_t tls_filesz,
     for (uint64_t page = 0; page < total_pages; page++) {
         void *frame = frame_alloc();
         if (!frame) return -ENOMEM;
-        int r = pt_map(pgdir, USER_TLS_VA + page * PAGE_SIZE,
+        int r = pt_map(pgdir, USER_TLS_BASE + page * PAGE_SIZE,
                        va_to_pa(frame),
                         PTE_V | PTE_R | PTE_W | PTE_U | PTE_A | PTE_D | PTE_MAT1 | PTE_LEAF);
         if (r < 0) { frame_free(frame); return r; }
     }
 
-    uint64_t tls_va = USER_TLS_VA;
+    uint64_t tls_va = USER_TLS_BASE;
     // 拷贝 TLS 数据
     if (tls_data && tls_filesz > 0) {
         for (uint64_t off = 0; off < tls_filesz; ) {
@@ -345,7 +342,7 @@ static int elf_load_interp(mm_struct_t *mm, uint64_t *pgdir, const char *path, u
     r = vfs_read(fd, (char *)phdrs, nph * sizeof(Elf64_Phdr));
     if (r < nph * (int)sizeof(Elf64_Phdr)) { vfs_close(fd); return -ENOEXEC; }
 
-    uint64_t load_bias = INTERP_BASE + elf_aslr_bias();
+    uint64_t load_bias = INTERP_BASE_ADDR + elf_aslr_bias();
     uint64_t base = 0, max_va = 0;
 
     // 加载解释器的所有 LOAD 段
@@ -460,26 +457,12 @@ int elf_load(int fd, const char *path, elf_load_info_t *info) {
                     }
                 }
             }
-#ifdef CONFIG_RISCV64
-            if (interp_fd < 0 && strstr(interp_path, "ld-musl-riscv64.so.1")) {
-                const char *musl_fallback = "/lib/libc.so";
-                int fallback_len = (int)strlen(musl_fallback);
-                for (int i = path_len - 1; i >= 0; i--) {
-                    if (path[i] == '/') {
-                        if (i + fallback_len + 1 < 512) {
-                            memcpy(alt_path, path, i);
-                            strcpy(alt_path + i, musl_fallback);
-                            interp_fd = vfs_open(alt_path, O_RDONLY, 0);
-                            if (interp_fd >= 0) { interp_to_load = alt_path; break; }
-                        }
-                    }
-                }
+            if (interp_fd < 0 &&
+                arch_resolve_interp_fallback(path, interp_path, alt_path, sizeof(alt_path)) == 0) {
+                interp_fd = vfs_open(alt_path, O_RDONLY, 0);
+                if (interp_fd >= 0)
+                    interp_to_load = alt_path;
             }
-            if (interp_fd < 0 && strstr(interp_path, "ld-linux-riscv64-lp64d.so.1")) {
-                interp_fd = vfs_open("/testrv/glibc/lib/ld-linux-riscv64-lp64d.so.1", O_RDONLY, 0);
-                if (interp_fd >= 0) interp_to_load = "/testrv/glibc/lib/ld-linux-riscv64-lp64d.so.1";
-            }
-#endif
         }
         if (interp_fd >= 0) vfs_close(interp_fd);
         if (interp_fd < 0) {

@@ -1,11 +1,11 @@
-#include "defs.h"
-#include "mm.h"
-#include "frame.h"
-#include "slab.h"
-#include "panic.h"
-#include "stdio.h"
-#include "string.h"
-#include "klog.h"
+#include "core/defs.h"
+#include "mm/mm.h"
+#include "mm/frame.h"
+#include "mm/slab.h"
+#include "core/panic.h"
+#include "core/stdio.h"
+#include "core/string.h"
+#include "core/klog.h"
 
 // 虚拟地址转换为物理地址
 static inline paddr_t va_to_pa(const void *va) {
@@ -23,8 +23,7 @@ static inline int pte_user_writable(uint64_t pte) {
 // 内存管理初始化函数
 void mm_init(void) {
     extern char _bss_end[];
-    pfa_init(PHYS_MEMORY_BASE, PHYS_MEMORY_END,
-             va_to_pa(_bss_end)); // Buddy 物理页分配器
+    pfa_init(va_to_pa(_bss_end)); // Buddy 物理页分配器
     slab_init(); // Slab 对象分配器
     printf("[MM] Buddy+Slab: %d frames, %d free (%d MB)\n",
            (int)pfa.total_frames, (int)pfa.free_frames,
@@ -228,9 +227,9 @@ void pt_destroy_user(uint64_t *pgdir) {
     frame_free(pgdir);
 }
 
-#include "vm.h"
-#include "proc.h"
-#include "trap.h"
+#include "mm/vm.h"
+#include "proc/proc.h"
+#include "core/trap.h"
 
 // 从用户空间拷贝数据到内核空间
 long copy_from_user(void *dst, const void *src, size_t n) {
@@ -239,7 +238,7 @@ long copy_from_user(void *dst, const void *src, size_t n) {
     size_t copied = 0;
     while (n > 0) {
         uint64_t va = (uint64_t)src + copied;
-        if (va >= 0x4000000000UL) return -EFAULT;
+        if (va >= USER_VA_LIMIT) return -EFAULT;
         uint64_t *pte = pt_walk(t->pgdir, va, 0);
         if (!pte || !(*pte & PTE_V)) {
             // 处理缺页异常
@@ -266,7 +265,7 @@ long copy_to_user(void *dst, const void *src, size_t n) {
     size_t copied = 0;
     while (n > 0) {
         uint64_t va = (uint64_t)dst + copied;
-        if (va >= 0x4000000000UL) return -EFAULT;
+        if (va >= USER_VA_LIMIT) return -EFAULT;
         uint64_t *pte = pt_walk(t->pgdir, va, 0);
         if (!pte || !(*pte & PTE_V)) {
             // 处理缺页异常
@@ -299,7 +298,7 @@ long user_strncpy(char *dst, const char *src, size_t max) {
     size_t i = 0;
     while (i < max - 1) {
         uint64_t va = (uint64_t)(src + i);
-        if (va >= 0x4000000000UL) return -EFAULT;
+        if (va >= USER_VA_LIMIT) return -EFAULT;
         uint64_t *pte = pt_walk(t->pgdir, va, 0);
         if (!pte || !(*pte & PTE_V)) {
             // 处理缺页异常
