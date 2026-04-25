@@ -1,6 +1,8 @@
 ARCH ?= riscv64
 CONTEST ?= 0
 
+.DEFAULT_GOAL := all
+
 MUSL_BASE  := $(shell pwd)/external/musl
 
 ifeq ($(ARCH), riscv64)
@@ -47,6 +49,28 @@ CRT_START = $(MUSL_CRT)/crt1.o $(MUSL_CRT)/crti.o
 CRT_END   = $(MUSL_CRT)/crtn.o
 LIBC      = $(LIB_A20OS) $(MUSL_CRT)/libc.a $(LIBGCC)
 
+else ifeq ($(ARCH), aarch64)
+MUSL_BUILD := $(MUSL_BASE)/build-aarch64
+CROSS_COMPILE ?= aarch64-linux-gnu-
+
+MUSL_CRT  := $(MUSL_BUILD)/lib
+MUSL_INC  := -isystem $(MUSL_BUILD)/obj/include \
+             -isystem $(MUSL_BASE)/include \
+             -isystem $(MUSL_BASE)/arch/aarch64 \
+             -isystem $(MUSL_BASE)/arch/generic
+
+CFLAGS  = -Wall -Wextra -O2 -ffreestanding -nostdinc $(MUSL_INC) \
+          -march=armv8-a -fno-pic
+LDFLAGS = -static -nostdlib -Ttext 0x10000 -no-pie
+
+GCC_VER := $(shell $(CROSS_COMPILE)gcc -dumpversion 2>/dev/null)
+LIBGCC  := $(shell $(CROSS_COMPILE)gcc $(CFLAGS) -print-libgcc-file-name 2>/dev/null)
+
+LIB_A20OS := lib/brk.o
+CRT_START = $(MUSL_CRT)/crt1.o $(MUSL_CRT)/crti.o
+CRT_END   = $(MUSL_CRT)/crtn.o
+LIBC      = $(LIB_A20OS) $(MUSL_CRT)/libc.a $(LIBGCC)
+
 endif
 
 ifeq ($(CONTEST),1)
@@ -56,6 +80,24 @@ endif
 CC = $(CROSS_COMPILE)gcc
 LD = $(CROSS_COMPILE)ld
 OBJCOPY = $(CROSS_COMPILE)objcopy
+
+MUSL_TARGETS = $(MUSL_CRT)/crt1.o $(MUSL_CRT)/crti.o $(MUSL_CRT)/crtn.o $(MUSL_CRT)/libc.a
+
+$(MUSL_TARGETS):
+	@if [ "$(ARCH)" = "aarch64" ]; then \
+		mkdir -p "$(MUSL_BUILD)"; \
+		if [ ! -f "$(MUSL_BUILD)/config.mak" ]; then \
+			cd "$(MUSL_BUILD)" && ../configure \
+				--target=aarch64-linux-gnu \
+				--prefix=/opt/musl-aarch64 \
+				--disable-shared --disable-wrapper \
+				CC=$(CROSS_COMPILE)gcc CROSS_COMPILE=$(CROSS_COMPILE) \
+				CFLAGS='-O2 -fno-pic -static'; \
+		fi; \
+		$(MAKE) -C "$(MUSL_BUILD)" >/dev/null; \
+	else \
+		test -f "$(MUSL_CRT)/libc.a"; \
+	fi
 
 # Shell and Commands
 SH_SRC = shell/sh.c
@@ -75,7 +117,7 @@ MKSH_CFLAGS = $(CFLAGS) -I$(MKSH_DIR) \
               -DMKSH_UNEMPLOYED \
               -DMKSH_DONT_EMIT_IDSTRING -DMKSH_BUILDSH -DMKSH_BUILD_R=599
 
-all: build_dir build/init build/mksh build/sh $(CMDS)
+all: $(MUSL_TARGETS) build_dir build/init build/mksh build/sh $(CMDS)
 
 build_dir:
 	@mkdir -p build
@@ -89,28 +131,28 @@ build_dir:
 lib/%.o: lib/%.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
-build/sh: $(SH_SRC) $(LIB_A20OS)
+build/sh: $(SH_SRC) $(LIB_A20OS) $(MUSL_TARGETS)
 	$(CC) $(CFLAGS) -c $< -o build/sh.o
 	$(CC) $(LDFLAGS) -o $@ $(CRT_START) build/sh.o $(CRT_END) $(LIBC)
 
-build/mksh: $(MKSH_OBJS) $(LIB_A20OS)
+build/mksh: $(MKSH_OBJS) $(LIB_A20OS) $(MUSL_TARGETS)
 	$(CC) $(LDFLAGS) -o $@ $(CRT_START) $(MKSH_OBJS) $(CRT_END) $(LIBC)
 
 $(MKSH_DIR)/%.o: $(MKSH_DIR)/%.c
 	$(CC) $(MKSH_CFLAGS) -c $< -o $@
 
 ifeq ($(CONTEST),1)
-build/init: shell/init_nolib.c
+build/init: shell/init_nolib.c $(MUSL_TARGETS)
 	$(CC) -Wall -Wextra -O2 -ffreestanding -fno-builtin -nostdlib -nostartfiles \
 	      $(CFLAGS) -c $< -o build/init.o
 	$(CC) -static -nostdlib -nostartfiles -Ttext 0x10000 $(ARCH_LDFLAGS) -o $@ build/init.o $(LIBGCC)
 else
-build/init: shell/init.c $(LIB_A20OS)
+build/init: shell/init.c $(LIB_A20OS) $(MUSL_TARGETS)
 	$(CC) $(CFLAGS) -c $< -o build/init.o
 	$(CC) $(LDFLAGS) -o $@ $(CRT_START) build/init.o $(CRT_END) $(LIBC)
 endif
 
-build/%: cmds/%.c $(LIB_A20OS)
+build/%: cmds/%.c $(LIB_A20OS) $(MUSL_TARGETS)
 	$(CC) $(CFLAGS) -c $< -o build/$*.o
 	$(CC) $(LDFLAGS) -o $@ $(CRT_START) build/$*.o $(CRT_END) $(LIBC)
 
