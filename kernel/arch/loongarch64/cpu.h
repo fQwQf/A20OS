@@ -7,8 +7,13 @@ static inline void arch_mb(void)  { __asm__ __volatile__("dbar 0" ::: "memory");
 static inline void arch_rmb(void) { __asm__ __volatile__("dbar 0" ::: "memory"); }
 static inline void arch_wmb(void) { __asm__ __volatile__("dbar 0" ::: "memory"); }
 static inline void arch_wfi(void) { __asm__ __volatile__("idle 0"); }
-static inline void arch_fence_i(void) { __asm__ __volatile__("ibar 0" ::: "memory"); }
-
+static inline void arch_fence_i(void) { 
+    __asm__ __volatile__(
+        "dbar 0\n\t"
+        "ibar 0\n\t"
+        ::: "memory"
+    ); 
+}
 static inline void arch_local_irq_disable(void) {
     uint64_t val;
     __asm__ __volatile("csrrd %0, 0x0" : "=r"(val));
@@ -134,6 +139,18 @@ static inline void arch_write_sscratch(uint64_t v) { (void)v; }
 static inline void arch_halt(void) {
     arch_local_irq_disable();
     while (1) __asm__ __volatile__("idle 0");
+}
+
+static inline void arch_dcache_flush(uintptr_t addr, size_t size) {
+    uintptr_t end = addr + size;
+    addr &= ~(64UL - 1); // 按照 64 字节对齐
+    while (addr < end) {
+        // op=0x11: 对 L1 D-Cache 执行 Hit Writeback Invalidate
+        __asm__ __volatile__("cacop 0x11, %0, 0" :: "r"(addr) : "memory");
+        addr += 64;
+    }
+    // 确保所有的 Cache 写回操作彻底完成
+    __asm__ __volatile__("dbar 0" ::: "memory"); 
 }
 
 #endif

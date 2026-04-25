@@ -7,6 +7,7 @@ typedef struct {
     uint64_t x[32];
     uint64_t sstatus;
     uint64_t sepc;
+    uint64_t last_a0;
     uint64_t kernel_tp;
 } __attribute__((aligned(16))) trap_context_t;
 
@@ -49,6 +50,7 @@ extern void user_trap_return(void);
 
 #define TRAP_CTX_EPC(ctx)          ((ctx)->sepc)
 #define TRAP_CTX_STATUS(ctx)         ((ctx)->sstatus)
+#define TRAP_CTX_LAST_A0(ctx)      ((ctx)->last_a0)
 #define TRAP_CTX_KScratch0(ctx)    ((ctx)->x[0])
 
 #define TASK_CTX_PAGE_TABLE(ctx)   ((ctx)->satp)

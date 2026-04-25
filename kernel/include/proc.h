@@ -49,6 +49,8 @@ typedef struct task_t {
     trap_context_t sig_saved_ctx;
     uint64_t       sig_old_blocked;
     int            sig_handling;
+    uint64_t       sigsuspend_old_blocked;
+    int            sigsuspend_active;
 } task_t;
 
 /* ---- Process management API ---- */

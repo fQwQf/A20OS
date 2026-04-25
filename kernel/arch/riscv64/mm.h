@@ -30,7 +30,16 @@
 #define PTE_USER (PTE_V | PTE_R | PTE_W | PTE_X | PTE_U)
 
 static inline int arch_pte_is_leaf(uint64_t pte) {
-    return (pte & PTE_V) && ((pte & PTE_R) || (pte & PTE_W) || (pte & PTE_X));
+    /*
+     * Sv39 non-leaf entries in this kernel are created as bare PTE_V with
+     * only the next-level PPN. User mappings may legitimately be PROT_NONE,
+     * which leaves R/W/X cleared but still carries software/user bits such as
+     * U/A/COW. Treat those as leaf mappings too so walkers and teardown do not
+     * recurse into a data page as if it were a lower-level page table.
+     */
+    return (pte & PTE_V) &&
+           (pte & (PTE_R | PTE_W | PTE_X |
+                   PTE_U | PTE_G | PTE_A | PTE_D | PTE_COW));
 }
 
 static inline int arch_pt_vpn(uint64_t va, int level) {
@@ -55,6 +64,13 @@ static inline uint64_t *arch_pte_to_ptr(uint64_t pte) {
 
 static inline uint64_t arch_make_satp(void *pgdir) {
     return (0x8UL << 60) | (((uint64_t)(uintptr_t)pgdir - PAGE_OFFSET) >> 12);
+}
+
+#define ARCH_PTE_PPN_MASK  0x3FF
+#define arch_pte_flags(pte) ((pte) & ARCH_PTE_PPN_MASK)
+
+static inline uint64_t arch_pte_leaf(paddr_t pa, uint64_t flags) {
+    return arch_pte_from_pa(pa) | flags | PTE_V;
 }
 
 #endif
