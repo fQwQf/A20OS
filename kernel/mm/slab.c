@@ -1,8 +1,8 @@
-#include "slab.h"
-#include "frame.h"
-#include "string.h"
-#include "panic.h"
-#include "stdio.h"
+#include "mm/slab.h"
+#include "mm/frame.h"
+#include "core/string.h"
+#include "core/panic.h"
+#include "core/stdio.h"
 
 #define SLAB_NR_CACHES  7  // Slab 缓存数量
 #define SLAB_MAX_OBJ   2048  // 最大对象大小，超过此大小直接使用 buddy 分配器

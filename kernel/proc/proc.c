@@ -11,21 +11,21 @@
  *   - Process name
  */
 
-#include "proc.h"
-#include "signal.h"
-#include "elf.h"
-#include "vfs.h"
-#include "mm.h"
-#include "frame.h"
-#include "vm.h"
-#include "trap.h"
-#include "timer.h"
-#include "stdio.h"
-#include "string.h"
-#include "panic.h"
-#include "consts.h"
-#include "defs.h"
-#include "klog.h"
+#include "proc/proc.h"
+#include "proc/signal.h"
+#include "mm/elf.h"
+#include "fs/vfs.h"
+#include "mm/mm.h"
+#include "mm/frame.h"
+#include "mm/vm.h"
+#include "core/trap.h"
+#include "core/timer.h"
+#include "core/stdio.h"
+#include "core/string.h"
+#include "core/panic.h"
+#include "core/consts.h"
+#include "core/defs.h"
+#include "core/klog.h"
 
 static task_t proc_table[MAX_PROCS];  // 进程表
 static uint64_t *kernel_pgdir_shared;  // 共享的内核页表
@@ -65,6 +65,7 @@ void proc_init(void) {
     idle->pgid   = 0;
     idle->sid    = 0;
     idle->umask  = 022;
+    idle->rlim_stack = USER_STACK_MAX_SIZE;
     idle->rlim_nofile = MAX_FILES;
     proc_set_name(idle, "idle");
 
@@ -141,7 +142,8 @@ static void init_task_common(task_t *t, task_t *parent) {
     t->pgid      = parent ? parent->pgid : t->pid;
     t->sid       = parent ? parent->sid  : t->pid;
     t->umask     = parent ? parent->umask : 022;
-    t->rlim_nofile = MAX_FILES;
+    t->rlim_stack = parent ? parent->rlim_stack : USER_STACK_MAX_SIZE;
+    t->rlim_nofile = parent ? parent->rlim_nofile : MAX_FILES;
     t->mm        = NULL;
 
     // 继承父进程的工作目录和执行路径
@@ -247,7 +249,7 @@ int proc_alloc_user(uint64_t entry, uint64_t sp, uint64_t *pgdir) {
         mm->start_brk   = 0;
         mm->mmap_base   = MMAP_BASE_ADDR;
         mm->stack_top   = sp;
-        mm->stack_bottom = sp - (INITIAL_STACK_PAGES - 1) * PAGE_SIZE;
+        mm->stack_bottom = sp - (USER_STACK_INITIAL_PAGES - 1) * PAGE_SIZE;
         mm->total_vm    = 0;
         mm->rss         = 0;
         mm->refcount    = 1;
@@ -387,18 +389,14 @@ int proc_exec(const char *path, char *const argv[], char *const envp[]) {
     int argc = 0, envc = 0;
 
     auto int is_kptr(const void *p) {
-#ifdef CONFIG_LOONGARCH64
-        uintptr_t v = (uintptr_t)p;
-        return v >= PHYS_MEMORY_BASE && v < PHYS_MEMORY_END;
-#else
-        return (uintptr_t)p >= PAGE_OFFSET;
-#endif
+        return arch_is_kernel_address(p);
     }
 
+    int argv_is_kernel = argv && is_kptr(argv);
     if (argv) {
         while (argc < 31) {
             char *arg;
-            if (is_kptr(argv)) {
+            if (argv_is_kernel) {
                 arg = argv[argc];
             } else {
                 if (copy_from_user(&arg, &argv[argc], sizeof(char*)) < 0) break;
@@ -406,7 +404,7 @@ int proc_exec(const char *path, char *const argv[], char *const envp[]) {
             if (!arg) break;
             k_argv[argc] = kmalloc(MAX_PATH_LEN);
             if (!k_argv[argc]) break;
-            if (is_kptr(arg)) {
+            if (argv_is_kernel) {
                 strncpy(k_argv[argc], arg, MAX_PATH_LEN - 1);
                 k_argv[argc][MAX_PATH_LEN - 1] = '\0';
             } else {
@@ -417,10 +415,11 @@ int proc_exec(const char *path, char *const argv[], char *const envp[]) {
             argc++;
         }
     }
+    int envp_is_kernel = envp && is_kptr(envp);
     if (envp) {
         while (envc < 31) {
             char *env;
-            if (is_kptr(envp)) {
+            if (envp_is_kernel) {
                 env = envp[envc];
             } else {
                 if (copy_from_user(&env, &envp[envc], sizeof(char*)) < 0) break;
@@ -428,7 +427,7 @@ int proc_exec(const char *path, char *const argv[], char *const envp[]) {
             if (!env) break;
             k_envp[envc] = kmalloc(MAX_PATH_LEN);
             if (!k_envp[envc]) break;
-            if (is_kptr(env)) {
+            if (envp_is_kernel) {
                 strncpy(k_envp[envc], env, MAX_PATH_LEN - 1);
                 k_envp[envc][MAX_PATH_LEN - 1] = '\0';
             } else {
@@ -523,7 +522,7 @@ int proc_exec(const char *path, char *const argv[], char *const envp[]) {
     mm->start_brk   = info.brk;
     mm->mmap_base   = MMAP_BASE_ADDR;
     mm->stack_top   = info.stack_top;
-    mm->stack_bottom = info.stack_top - (INITIAL_STACK_PAGES - 1) * PAGE_SIZE;
+    mm->stack_bottom = info.stack_top - (USER_STACK_INITIAL_PAGES - 1) * PAGE_SIZE;
     mm->total_vm    = 0;
     mm->rss         = 0;
     mm->refcount    = 1;

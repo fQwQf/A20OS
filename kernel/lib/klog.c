@@ -1,9 +1,9 @@
-#include "klog.h"
-#include "uart.h"
-#include "stdio.h"
-#include "string.h"
-#include "types.h"
-#include "defs.h"
+#include "core/klog.h"
+#include "drv/uart.h"
+#include "core/stdio.h"
+#include "core/string.h"
+#include "core/types.h"
+#include "core/defs.h"
 
 int klog_level = KLOG_INFO;
 

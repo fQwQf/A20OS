@@ -11,15 +11,15 @@
  * Integrates with VFS layer via vnode_ops / vfile_ops.
  */
 
-#include "fat32.h"
-#include "vfs.h"
-#include "block_cache.h"
-#include "mm.h"
-#include "string.h"
-#include "stdio.h"
-#include "panic.h"
-#include "consts.h"
-#include "defs.h"
+#include "fs/fat32.h"
+#include "fs/vfs.h"
+#include "fs/block_cache.h"
+#include "mm/mm.h"
+#include "core/string.h"
+#include "core/stdio.h"
+#include "core/panic.h"
+#include "core/consts.h"
+#include "core/defs.h"
 
 /* ============================================================
  * Low-level cluster/FAT helpers

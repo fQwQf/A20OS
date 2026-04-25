@@ -1,7 +1,7 @@
-#include "panic.h"
-#include "uart.h"
-#include "stdio.h"
-#include "defs.h"
+#include "core/panic.h"
+#include "drv/uart.h"
+#include "core/stdio.h"
+#include "core/defs.h"
 
 NORETURN void panic(const char *fmt, ...) {
     va_list args;

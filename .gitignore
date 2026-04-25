@@ -9,3 +9,5 @@ user/build/
 kernel-rv
 kernel-la
 .DS_Store
+.kernel-build/
+.dtb
