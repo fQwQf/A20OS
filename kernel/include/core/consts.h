@@ -93,6 +93,7 @@
 #define SYS_set_robust_list 99
 #define SYS_futex          98
 #define SYS_nanosleep      101
+#define SYS_clock_settime  112
 #define SYS_clock_gettime  113
 #define SYS_clock_getres   114
 #define SYS_sched_yield    124
@@ -111,6 +112,7 @@
 #define SYS_uname          160
 #define SYS_syslog         116
 #define SYS_gettimeofday   169
+#define SYS_settimeofday   170
 #define SYS_times          153
 #define SYS_time           235
 #define SYS_getrlimit      163

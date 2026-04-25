@@ -9,12 +9,15 @@ CONTEST ?= 0
 # Directories
 KERNEL_DIR = kernel
 INCLUDE_DIR = $(KERNEL_DIR)/include
-BUILD_DIR = .kernel-build/$(ARCH)
+BUILD_VARIANT = $(if $(filter 1,$(CONTEST)),contest,$(if $(filter 1,$(BRINGUP)),bringup,dev))
+BUILD_DIR = .kernel-build/$(ARCH)-$(BUILD_VARIANT)
 FAT32_IMG = $(BUILD_DIR)/fat32.img
 EXT4_IMG = $(BUILD_DIR)/ext4.img
 FS_TEST_IMG = $(BUILD_DIR)/fs_test.img
+USER_BUILD_STAMP = user/build/.build-id
 ARCH_INCLUDE_DIR = $(KERNEL_DIR)/arch/$(ARCH)/include
 EXT4_STAGING_DIR = $(BUILD_DIR)/ext4-staging
+BUILD_TIME_HDR = $(BUILD_DIR)/generated/build_time.h
 
 # Compiler and tools
 ifeq ($(ARCH), riscv64)
@@ -29,6 +32,12 @@ else ifeq ($(ARCH), loongarch64)
     ARCH_LDFLAGS = -static -no-pie
     QEMU = qemu-system-loongarch64
     QEMU_FLAGS = -machine virt -m 512M -nographic -smp 1
+else ifeq ($(ARCH), aarch64)
+    CROSS_PREFIX = aarch64-linux-gnu-
+    ARCH_CFLAGS = -march=armv8-a -mgeneral-regs-only -fno-pic -mcmodel=large
+    ARCH_LDFLAGS = -static -no-pie
+    QEMU = qemu-system-aarch64
+    QEMU_FLAGS = -machine virt -cpu cortex-a57 -m 512M -nographic -smp 1 -global virtio-mmio.force-legacy=false
 endif
 
 # In bringup mode, boot kernel only (no fs image dependency).
@@ -57,6 +66,18 @@ ifneq ($(wildcard sdcard-la.img),)
 QEMU_FLAGS += -drive file=sdcard-la.img,if=none,format=raw,id=x3 -device virtio-blk-pci,drive=x3
 endif
 
+else ifeq ($(ARCH), aarch64)
+QEMU_FLAGS += -drive file=$(FAT32_IMG),if=none,format=raw,id=x0 -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0
+QEMU_FLAGS += -drive file=$(EXT4_IMG),if=none,format=raw,id=x1 -device virtio-blk-device,drive=x1,bus=virtio-mmio-bus.1
+
+ifneq ($(wildcard sdcard-rv.img),)
+QEMU_FLAGS += -drive file=sdcard-rv.img,if=none,format=raw,id=x2 -device virtio-blk-device,drive=x2,bus=virtio-mmio-bus.2
+endif
+
+ifneq ($(wildcard sdcard-la.img),)
+QEMU_FLAGS += -drive file=sdcard-la.img,if=none,format=raw,id=x3 -device virtio-blk-device,drive=x3,bus=virtio-mmio-bus.3
+endif
+
 endif
 endif
 
@@ -64,7 +85,7 @@ endif
 CFLAGS = -Wall -Wextra -O2 -ffreestanding -nostdlib \
          -nostartfiles -fno-builtin -fno-common -std=gnu99 \
          -MMD -MP \
-         -I$(INCLUDE_DIR) -I$(KERNEL_DIR) -I$(ARCH_INCLUDE_DIR) $(ARCH_CFLAGS) \
+         -I$(INCLUDE_DIR) -I$(KERNEL_DIR) -I$(ARCH_INCLUDE_DIR) -I$(BUILD_DIR)/generated $(ARCH_CFLAGS) \
          -D$(shell echo $(ARCH) | tr a-z A-Z) \
          -DCONFIG_$(shell echo $(ARCH) | tr a-z A-Z)
 
@@ -106,8 +127,15 @@ KERNEL_BIN = $(BUILD_DIR)/kernel.bin
 # Targets
 # ================================================================
 
-.PHONY: all clean run-riscv64 run-loongarch64 debug-riscv64 debug-loongarch64 \
+.PHONY: all clean run-riscv64 run-loongarch64 run-arm64 debug-riscv64 debug-loongarch64 debug-arm64 \
+        FORCE \
         user_apps fs_img kernel-only dev-build contest-rv contest-la
+
+FORCE:
+
+$(BUILD_TIME_HDR): FORCE
+	@mkdir -p $(dir $@)
+	@printf '#ifndef A20_BUILD_UNIX_TIME\n#define A20_BUILD_UNIX_TIME %sULL\n#endif\n' "$$(date -u +%s)" > $@
 
 # ----------------------------------------------------------------
 # Competition build: produces kernel-rv, kernel-la, disk.img,
@@ -149,11 +177,16 @@ dev-build: $(KERNEL_BIN) user_apps fs_img ext4_img_only
 	@echo "Dev build complete: $(KERNEL_BIN), $(FAT32_IMG), $(EXT4_IMG)"
 
 user_apps:
+	@mkdir -p $(dir $(USER_BUILD_STAMP))
+	@if [ ! -f "$(USER_BUILD_STAMP)" ] || [ "$$(cat "$(USER_BUILD_STAMP)")" != "$(ARCH):$(CONTEST)" ]; then \
+		$(MAKE) -C user clean; \
+	fi
 ifeq ($(CONTEST),1)
 	$(MAKE) -C user ARCH=$(ARCH) CONTEST=$(CONTEST) build_dir build/init
 else
 	$(MAKE) -C user ARCH=$(ARCH) CONTEST=$(CONTEST)
 endif
+	@printf '%s\n' '$(ARCH):$(CONTEST)' > $(USER_BUILD_STAMP)
 
 fs_img: user_apps
 	@echo "Building FAT32 image..."
@@ -207,7 +240,7 @@ $(KERNEL_ELF): $(KERNEL_OBJ) $(ASM_OBJ)
 	@mkdir -p $(dir $@)
 	$(CROSS_PREFIX)gcc $(LDFLAGS) $^ -o $@
 
-$(BUILD_DIR)/%.o: $(KERNEL_DIR)/%.c
+$(BUILD_DIR)/%.o: $(KERNEL_DIR)/%.c | $(BUILD_TIME_HDR)
 	@mkdir -p $(dir $@)
 	$(CROSS_PREFIX)gcc $(CFLAGS) -c $< -o $@
 
@@ -237,6 +270,9 @@ run-riscv64:
 run-loongarch64:
 	$(MAKE) ARCH=loongarch64 BRINGUP=$(BRINGUP) CONTEST=$(CONTEST) _run_impl
 
+run-arm64:
+	$(MAKE) ARCH=aarch64 BRINGUP=$(BRINGUP) CONTEST=$(CONTEST) _run_impl
+
 _run_impl:
 ifeq ($(BRINGUP),1)
 	$(MAKE) ARCH=$(ARCH) BRINGUP=1 kernel-only
@@ -254,6 +290,9 @@ debug-riscv64:
 
 debug-loongarch64:
 	$(MAKE) ARCH=loongarch64 BRINGUP=$(BRINGUP) CONTEST=$(CONTEST) _debug_impl
+
+debug-arm64:
+	$(MAKE) ARCH=aarch64 BRINGUP=$(BRINGUP) CONTEST=$(CONTEST) _debug_impl
 
 _debug_impl:
 ifeq ($(BRINGUP),1)

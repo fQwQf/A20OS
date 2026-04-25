@@ -3,26 +3,6 @@
 #include "core/defs.h"
 #include "proc/proc.h"
 
-#define UART0 ((volatile uint8_t *)UART0_BASE)
-
-// UART 寄存器偏移
-#define RHR 0  // 接收保持寄存器
-#define THR 0  // 发送保持寄存器
-#define IER 1  // 中断使能寄存器
-#define FCR 2  // FIFO 控制寄存器
-#define LCR 3  // 线路控制寄存器
-#define MCR 4  // 调制解调器控制寄存器
-#define LSR 5  // 线路状态寄存器
-
-// 中断使能位
-#define IER_RX_ENABLE (1 << 0)  // 接收中断使能
-#define IER_TX_ENABLE (1 << 1)  // 发送中断使能
-
-// 线路状态位
-#define LSR_RX_READY  (1 << 0)  // 接收数据就绪
-#define LSR_TX_IDLE   (1 << 5)  // 发送空闲
-#define LSR_TX_EMPTY  (1 << 6)  // 发送空
-
 // 接收缓冲区大小
 #define RX_BUF_SIZE 256
 
@@ -54,22 +34,13 @@ static void uart_rx_push(char c) {
 void uart_init(void) {
     rx_head = 0;
     rx_tail = 0;
-
-    UART0[IER] = 0x00;  // 禁用中断
-    UART0[LCR] = 0x80;  // 设置 DLAB 位，配置波特率
-    UART0[0] = 0x03;  // 低字节：波特率除数低 8 位
-    UART0[1] = 0x00;  // 高字节：波特率除数高 8 位
-    UART0[LCR] = 0x03;  // 清除 DLAB，设置 8 位数据，无校验，1 停止位
-    UART0[FCR] = 0x07;  // 启用 FIFO，清空接收/发送 FIFO
-    UART0[MCR] = 0x0B;  // 设置 RTS/DTR，启用中断
-    UART0[IER] = IER_RX_ENABLE;  // 启用接收中断
+    arch_uart_init();
     uart_flush();  // 等待发送完成
 }
 
 // 发送一个字符
 void uart_putc(char c) {
-    while (!(UART0[LSR] & LSR_TX_IDLE));
-    UART0[THR] = (uint8_t)c;
+    arch_uart_putc(c);
 }
 
 // 阻塞式读取一个字符（如果没有数据则让出 CPU）
@@ -110,13 +81,14 @@ void uart_puts(const char *s) {
 
 // 等待发送完成
 void uart_flush(void) {
-    while (!(UART0[LSR] & LSR_TX_EMPTY));
+    arch_uart_flush();
 }
 
 // UART 中断处理函数
 void uart_handle_irq(void) {
-    while (UART0[LSR] & LSR_RX_READY) {
-        char c = UART0[RHR];
+    int c;
+    while ((c = arch_uart_poll_getc()) >= 0) {
         uart_rx_push(c);
     }
+    arch_uart_ack_irq();
 }
