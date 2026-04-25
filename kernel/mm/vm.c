@@ -12,6 +12,53 @@ static inline paddr_t va_to_pa(const void *va) {
     return (paddr_t)((uint64_t)(uintptr_t)va - PAGE_OFFSET);
 }
 
+static int mm_fork_clone_tables(uint64_t *child_table, uint64_t *parent_table, int level) {
+    int limit = (level == ARCH_PT_ROOT_LEVEL) ? ARCH_PT_USER_END : ARCH_PT_ENTRIES;
+
+    for (int idx = 0; idx < limit; idx++) {
+        uint64_t pte = parent_table[idx];
+        if (!(pte & PTE_V))
+            continue;
+
+        if (arch_pte_is_leaf(pte)) {
+            if (!(pte & PTE_U)) {
+                child_table[idx] = pte;
+                continue;
+            }
+
+            paddr_t pa = arch_pte_addr(pte);
+            pfn_t pfn = phys_to_pfn(pa);
+            if (!pfn_valid(pfn))
+                return -ENOMEM;
+            frame_get(pfn);
+
+            uint64_t new_flags = pte & (PTE_R | PTE_X | PTE_U | PTE_A |
+                                        PTE_D | PTE_G | PTE_MAT1 |
+                                        PTE_LEAF | PTE_COW);
+            if (pte & (PTE_W | PTE_COW)) {
+                new_flags &= ~(uint64_t)(PTE_W | PTE_D);
+                new_flags |= PTE_COW;
+                parent_table[idx] = arch_pte_leaf(pa, new_flags);
+            }
+            child_table[idx] = arch_pte_leaf(pa, new_flags);
+            continue;
+        }
+
+        uint64_t *next_parent = arch_pte_to_ptr(pte);
+        uint64_t *next_child = (uint64_t *)frame_alloc();
+        if (!next_child)
+            return -ENOMEM;
+        memset(next_child, 0, PAGE_SIZE);
+        child_table[idx] = arch_pte_from_pa(va_to_pa(next_child)) | PTE_V;
+
+        int r = mm_fork_clone_tables(next_child, next_parent, level - 1);
+        if (r < 0)
+            return r;
+    }
+
+    return 0;
+}
+
 // 创建一个新的内存描述符
 mm_struct_t *mm_create(void) {
     mm_struct_t *mm = kcalloc(1, sizeof(mm_struct_t));
@@ -375,53 +422,8 @@ mm_struct_t *mm_fork(mm_struct_t *parent) {
         prev = cv;
     }
 
-    // 遍历页表，对用户空间页实现写时复制
-    for (int vpn2 = 0; vpn2 < ARCH_PT_USER_END; vpn2++) {
-        uint64_t pte2 = parent->pgdir[vpn2];
-        if (!(pte2 & PTE_V)) continue;
-        uint64_t *l1p = arch_pte_to_ptr(pte2);
-        int is_leaf1 = arch_pte_is_leaf(pte2);
-        if (is_leaf1) continue;
-
-        uint64_t *l1c = (uint64_t *)frame_alloc();
-        if (!l1c) goto fail;
-        memset(l1c, 0, PAGE_SIZE);
-        child->pgdir[vpn2] = arch_pte_from_pa(va_to_pa(l1c)) | PTE_V;
-
-        for (int vpn1 = 0; vpn1 < ARCH_PT_ENTRIES; vpn1++) {
-            uint64_t pte1 = l1p[vpn1];
-            if (!(pte1 & PTE_V)) continue;
-            int is_leaf0 = arch_pte_is_leaf(pte1);
-            if (is_leaf0) continue;
-
-            uint64_t *l0p = arch_pte_to_ptr(pte1);
-
-            kdebug("PT: l0p=%p\n", l0p);
-            
-            uint64_t *l0c = (uint64_t *)frame_alloc();
-            if (!l0c) goto fail;
-            memset(l0c, 0, PAGE_SIZE);
-            l1c[vpn1] = arch_pte_from_pa(va_to_pa(l0c)) | PTE_V;
-
-            for (int vpn0 = 0; vpn0 < ARCH_PT_ENTRIES; vpn0++) {
-                uint64_t pte = l0p[vpn0];
-                if (!(pte & PTE_V) || !(pte & PTE_U)) continue;
-
-                // 增加物理页面引用计数（父子进程共享）
-                pfn_t pfn = phys_to_pfn(arch_pte_addr(pte));
-                frame_get(pfn);
-
-                // 设置写时复制标志
-                uint64_t new_flags = pte & (PTE_R | PTE_X | PTE_U | PTE_A | PTE_D | PTE_G | PTE_MAT1 | PTE_LEAF);
-                if (pte & PTE_W || pte & PTE_COW) {
-                    new_flags &= ~(uint64_t)(PTE_W | PTE_D);
-                    new_flags |= PTE_COW;
-                    l0p[vpn0] = arch_pte_leaf(arch_pte_addr(pte), new_flags);  // 同时修改父进程的页表项
-                }
-                l0c[vpn0] = arch_pte_leaf(arch_pte_addr(pte), new_flags);
-            }
-        }
-    }
+    if (mm_fork_clone_tables(child->pgdir, parent->pgdir, ARCH_PT_ROOT_LEVEL) < 0)
+        goto fail;
 
     arch_tlb_flush();  // 刷新 TLB
     return child;
