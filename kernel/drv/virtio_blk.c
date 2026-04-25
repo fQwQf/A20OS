@@ -1,11 +1,11 @@
-#include "virtio_blk.h"
-#include "virtio_transport.h"
-#include "mm.h"
-#include "string.h"
-#include "stdio.h"
-#include "panic.h"
-#include "defs.h"
-#include "consts.h"
+#include "drv/virtio_blk.h"
+#include "drv/virtio_transport.h"
+#include "mm/mm.h"
+#include "core/string.h"
+#include "core/stdio.h"
+#include "core/panic.h"
+#include "core/defs.h"
+#include "core/consts.h"
 
 #define VQ_SIZE  VIRTIO_QUEUE_SIZE
 
@@ -207,33 +207,22 @@ static int virtio_blk_rw(int idx, uint64_t lba, void *buf, size_t sectors, int w
     inst->blk.desc_idx++;
     wmb();
 
-#ifdef CONFIG_LOONGARCH64
-    // 在通知 VirtIO 去搬运数据之前，必须先处理 Cache 一致性
-    // 无论是读（强制后续从内存读新数据）还是写（强制脏数据写回物理内存），
-    // 统一执行 Flush 操作即可保证安全。
-    arch_dcache_flush((uintptr_t)buf, bytes);
-    // 请求头里包含 type/sector；如果这里仍是旧 cache line，
-    // 设备就会访问错误的 LBA，表现为复制后的 ELF 内容随机损坏。
-    arch_dcache_flush((uintptr_t)&inst->req_hdr[slot], sizeof(inst->req_hdr[slot]));
-    // 同时，VirtIO 的描述符表 (desc, avail) 本身也可能停留在 Cache 中，
-    // 为了极致稳妥，可以将当前的 ring 状态也刷回内存：
-    arch_dcache_flush((uintptr_t)&desc[slot], sizeof(virtq_desc_t) * 3);
-    arch_dcache_flush((uintptr_t)&avail->flags, sizeof(avail->flags));
-    arch_dcache_flush((uintptr_t)&avail->ring[avail_slot], sizeof(uint16_t));
-    arch_dcache_flush((uintptr_t)&avail->idx, sizeof(uint16_t));
-    arch_dcache_flush((uintptr_t)&used->idx, sizeof(uint16_t));
-    arch_dcache_flush((uintptr_t)&inst->status[slot], 1);
-#endif
+    arch_dma_sync_for_device(buf, bytes);
+    arch_dma_sync_for_device(&inst->req_hdr[slot], sizeof(inst->req_hdr[slot]));
+    arch_dma_sync_for_device(&desc[slot], sizeof(virtq_desc_t) * 3);
+    arch_dma_sync_for_device(&avail->flags, sizeof(avail->flags));
+    arch_dma_sync_for_device(&avail->ring[avail_slot], sizeof(uint16_t));
+    arch_dma_sync_for_device(&avail->idx, sizeof(uint16_t));
+    arch_dma_sync_for_device(&used->idx, sizeof(uint16_t));
+    arch_dma_sync_for_device(&inst->status[slot], 1);
 
     vt->write32(vt, VIRTIO_MMIO_QUEUE_NOTIFY, 0);
     mb();
 
     uint32_t timeout = 0x0FFFFFFF;
     while (timeout > 0) {
-#ifdef CONFIG_LOONGARCH64
-        arch_dcache_flush((uintptr_t)&used->idx, sizeof(uint16_t));
-        arch_dcache_flush((uintptr_t)&inst->status[slot], 1);
-#endif
+        arch_dma_sync_for_cpu(&used->idx, sizeof(uint16_t));
+        arch_dma_sync_for_cpu(&inst->status[slot], 1);
         if (((volatile virtq_used_t *)used)->idx != inst->blk.last_used)
             break;
         timeout--;
@@ -248,12 +237,10 @@ static int virtio_blk_rw(int idx, uint64_t lba, void *buf, size_t sectors, int w
     }
 
     rmb();
-#ifdef CONFIG_LOONGARCH64
-    arch_dcache_flush((uintptr_t)&used->idx, sizeof(uint16_t));
-    arch_dcache_flush((uintptr_t)&inst->status[slot], 1);
+    arch_dma_sync_for_cpu(&used->idx, sizeof(uint16_t));
+    arch_dma_sync_for_cpu(&inst->status[slot], 1);
     if (!write)
-        arch_dcache_flush((uintptr_t)buf, bytes);
-#endif
+        arch_dma_sync_for_cpu(buf, bytes);
     inst->blk.last_used = used->idx;
 
     if (inst->status[slot] != VIRTIO_BLK_S_OK) {
