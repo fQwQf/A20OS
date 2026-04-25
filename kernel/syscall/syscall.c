@@ -1,22 +1,22 @@
 /*
  * A20OS — Complete Syscall Dispatcher
  *
- * Implements the full Linux-compatible RISC-V syscall ABI.
+ * Implements the Linux-compatible syscall ABI used by the supported archs.
  */
-#include "syscall.h"
-#include "vfs.h"
-#include "fs.h"
-#include "proc.h"
-#include "signal.h"
-#include "mm.h"
-#include "vm.h"
-#include "timer.h"
-#include "uart.h"
-#include "stdio.h"
-#include "string.h"
-#include "consts.h"
-#include "defs.h"
-#include "klog.h"
+#include "sys/syscall.h"
+#include "fs/vfs.h"
+#include "fs/fs.h"
+#include "proc/proc.h"
+#include "proc/signal.h"
+#include "mm/mm.h"
+#include "mm/vm.h"
+#include "core/timer.h"
+#include "drv/uart.h"
+#include "core/stdio.h"
+#include "core/string.h"
+#include "core/consts.h"
+#include "core/defs.h"
+#include "core/klog.h"
 
 #define CLD_EXITED     1
 #define CLD_KILLED     2
@@ -26,6 +26,25 @@
 
 static int sigsys_diag_count = 0;
 static int sleep_diag_count = 0;
+
+static uint64_t clamp_stack_rlimit(uint64_t cur, uint64_t max) {
+    uint64_t limit = cur < max ? cur : max;
+    if (limit > USER_STACK_MAX_SIZE)
+        limit = USER_STACK_MAX_SIZE;
+    return limit;
+}
+
+static uint64_t clamp_nofile_rlimit(uint64_t cur, uint64_t max) {
+    uint64_t limit = cur < max ? cur : max;
+    if (limit > MAX_FILES)
+        limit = MAX_FILES;
+    return limit;
+}
+
+static void set_uniform_rlimit(uint64_t pair[2], uint64_t limit) {
+    pair[0] = limit;
+    pair[1] = limit;
+}
 
 void syscall_init(void) {
     kdebug("[SYSCALL] Initialized\n");
@@ -69,11 +88,7 @@ int64_t syscall_dispatch(trap_context_t *ctx) {
         static int syscall_diag_count = 0;
         task_t *cur = proc_current();
         if (syscall_diag_count < 160 && cur &&
-#ifdef CONFIG_LOONGARCH64
-            cur->pid >= 3 &&
-#else
-            cur->pid >= 5 &&
-#endif
+            cur->pid >= ARCH_SYSCALL_TRACE_MIN_PID &&
             num != SYS_read && num != SYS_write) {
             syscall_diag_count++;
             kdebug("[SYSCALL DBG] pid=%d name=%s num=%lu a0=0x%lx a1=0x%lx a2=0x%lx a3=0x%lx\n",
@@ -1032,8 +1047,8 @@ int64_t sys_prlimit64(int pid, int resource, void *new_rlim, void *old_rlim) {
         uint64_t r[2] = {0};
         task_t *t = proc_current();
         switch (resource) {
-            case 3: r[0] = 0; r[1] = t ? t->rlim_stack : 8*1024*1024; break;
-            case 7: r[0] = 0; r[1] = t ? t->rlim_nofile : MAX_FILES; break;
+            case 3: set_uniform_rlimit(r, t ? t->rlim_stack : USER_STACK_MAX_SIZE); break;
+            case 7: set_uniform_rlimit(r, t ? t->rlim_nofile : MAX_FILES); break;
             default: r[0] = 0; r[1] = (uint64_t)-1; break;
         }
         if (copy_to_user(old_rlim, r, sizeof(r)) < 0) return -EFAULT;
@@ -1044,8 +1059,8 @@ int64_t sys_prlimit64(int pid, int resource, void *new_rlim, void *old_rlim) {
         task_t *t = proc_current();
         if (!t) return -ESRCH;
         switch (resource) {
-            case 3: t->rlim_stack = r[1]; break;
-            case 7: t->rlim_nofile = r[1]; break;
+            case 3: t->rlim_stack = clamp_stack_rlimit(r[0], r[1]); break;
+            case 7: t->rlim_nofile = clamp_nofile_rlimit(r[0], r[1]); break;
             default: break;
         }
     }
@@ -1057,8 +1072,8 @@ int64_t sys_getrlimit(int resource, void *rlim) {
     uint64_t r[2] = {0};
     task_t *t = proc_current();
     switch (resource) {
-        case 3: r[0] = 0; r[1] = t ? t->rlim_stack : 8*1024*1024; break;
-        case 7: r[0] = 0; r[1] = t ? t->rlim_nofile : MAX_FILES; break;
+        case 3: set_uniform_rlimit(r, t ? t->rlim_stack : USER_STACK_MAX_SIZE); break;
+        case 7: set_uniform_rlimit(r, t ? t->rlim_nofile : MAX_FILES); break;
         default: r[0] = 0; r[1] = (uint64_t)-1; break;
     }
     if (copy_to_user(rlim, r, sizeof(r)) < 0) return -EFAULT;
@@ -1072,8 +1087,8 @@ int64_t sys_setrlimit(int resource, void *rlim) {
     task_t *t = proc_current();
     if (!t) return -ESRCH;
     switch (resource) {
-        case 3: t->rlim_stack = r[1]; break;
-        case 7: t->rlim_nofile = r[1]; break;
+        case 3: t->rlim_stack = clamp_stack_rlimit(r[0], r[1]); break;
+        case 7: t->rlim_nofile = clamp_nofile_rlimit(r[0], r[1]); break;
         default: break;
     }
     return 0;
@@ -1412,13 +1427,7 @@ int64_t sys_uname(void *buf) {
     strcpy(u.n, "A20OS");
     strcpy(u.r, "6.1.0-A20OS");
     strcpy(u.v, "#1 SMP A20OS 2025");
-#ifdef ARCH_RISCV64
-    strcpy(u.m, "riscv64");
-#elif defined(ARCH_LOONGARCH64)
-    strcpy(u.m, "loongarch64");
-#else
-    strcpy(u.m, "riscv64");
-#endif
+    strcpy(u.m, ARCH_NAME);
     if (copy_to_user(buf, &u, sizeof(u)) < 0) return -EFAULT;
     return 0;
 }

@@ -5,12 +5,14 @@
  * Entries are generated on-demand during lookup and read.
  */
 
-#include "procfs.h"
-#include "proc.h"
-#include "mm.h"
-#include "timer.h"
-#include "string.h"
-#include "stdio.h"
+#include "fs/procfs.h"
+#include "proc/proc.h"
+#include "mm/mm.h"
+#include "mm/frame.h"
+#include "core/timer.h"
+#include "core/string.h"
+#include "core/stdio.h"
+#include "core/version.h"
 
 extern task_t *proc_current(void);
 extern task_t *proc_find(int pid);
@@ -64,7 +66,7 @@ static int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
     switch (type) {
     case PF_MEMINFO: {
         size_t free_frames = frame_free_count();
-        size_t total_kb = (PHYS_MEMORY_END - PHYS_MEMORY_BASE) / 1024;
+        size_t total_kb = pfa.total_frames * PAGE_SIZE / 1024;
         size_t free_kb = free_frames * PAGE_SIZE / 1024;
         snprintf(buf, bufsz,
             "MemTotal:       %lu kB\n"
@@ -76,7 +78,7 @@ static int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
         break;
     }
     case PF_VERSION:
-        snprintf(buf, bufsz, "A20OS version 0.1 (" ARCH_NAME ")\n"); 
+        snprintf(buf, bufsz, "A20OS version " VERSION " (" ARCH_NAME ")\n"); 
         break;
     case PF_UPTIME: {  // 生成运行时间
         uint64_t ticks = timer_get_ticks();

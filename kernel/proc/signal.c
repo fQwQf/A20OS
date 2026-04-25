@@ -5,12 +5,12 @@
  * Signals are delivered synchronously at the next trap boundary.
  */
 
-#include "signal.h"
-#include "proc.h"
-#include "mm.h"
-#include "string.h"
-#include "stdio.h"
-#include "klog.h"
+#include "proc/signal.h"
+#include "proc/proc.h"
+#include "mm/mm.h"
+#include "core/string.h"
+#include "core/stdio.h"
+#include "core/klog.h"
 
 static int sig_diag_count = 0;
 
@@ -158,17 +158,8 @@ void signal_deliver_user(trap_context_t *ctx) {
         uint64_t sp = TRAP_CTX_SP(ctx);
         sp -= 16;
         sp &= ~15ULL;
-#ifdef CONFIG_RISCV64
-        uint32_t tramp[2] = { 0x08b00893, 0x00000073 };
-#elif defined(CONFIG_LOONGARCH64)
-        /* Match musl's loongarch64 restore.s exactly:
-         *   li.w    $a7, 139   ; SYS_rt_sigreturn
-         *   syscall 0
-         */
-        uint32_t tramp[2] = { 0x03822c0b, 0x002b0000 };
-#else
-        uint32_t tramp[2] = { 0, 0 };
-#endif
+        uint32_t tramp[2];
+        arch_signal_prepare_trampoline(tramp);
         /* Write signal trampoline to user stack via page table (not direct ptr) */
         if (copy_to_user((void *)sp, tramp, sizeof(tramp)) < 0)
             proc_exit(128 + SIGSEGV);

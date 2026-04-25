@@ -1,13 +1,13 @@
-#include "ext4.h"
-#include "vfs.h"
-#include "block_cache.h"
-#include "mm.h"
-#include "frame.h"
-#include "string.h"
-#include "stdio.h"
-#include "consts.h"
-#include "defs.h"
-#include "klog.h"
+#include "fs/ext4.h"
+#include "fs/vfs.h"
+#include "fs/block_cache.h"
+#include "mm/mm.h"
+#include "mm/frame.h"
+#include "core/string.h"
+#include "core/stdio.h"
+#include "core/consts.h"
+#include "core/defs.h"
+#include "core/klog.h"
 
 static int      ext4_read_inode(ext4_sb_info_t *sb, uint32_t ino, ext4_inode_t *out);
 static int      ext4_write_inode(ext4_sb_info_t *sb, uint32_t ino, ext4_inode_t *inp);
