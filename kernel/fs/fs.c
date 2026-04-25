@@ -1,10 +1,10 @@
-#include "fs.h"
-#include "mm.h"
-#include "string.h"
-#include "stdio.h"
-#include "proc.h"
-#include "panic.h"
-#include "defs.h"
+#include "fs/fs.h"
+#include "mm/mm.h"
+#include "core/string.h"
+#include "core/stdio.h"
+#include "proc/proc.h"
+#include "core/panic.h"
+#include "core/defs.h"
 
 #define MAX_INODES       1024  // 最大 inode 数量
 #define MAX_DIR_ENTRIES   256  // 每个目录的最大条目数

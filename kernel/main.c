@@ -1,21 +1,19 @@
-#include "stdio.h"
-#include "uart.h"
-#include "mm.h"
-#include "elf.h"
-#include "trap.h"
-#include "proc.h"
-#include "syscall.h"
-#include "fs.h"
-#include "timer.h"
-#include "plic.h"
-#include "string.h"
-#include "consts.h"
-#include "defs.h"
-#include "panic.h"
-#include "vfs.h"
-#include "virtio_blk.h"
-#include "block_cache.h"
-#include "klog.h"
+#include "core/stdio.h"
+#include "drv/uart.h"
+#include "mm/mm.h"
+#include "mm/elf.h"
+#include "core/trap.h"
+#include "proc/proc.h"
+#include "sys/syscall.h"
+#include "core/timer.h"
+#include "core/string.h"
+#include "core/consts.h"
+#include "core/defs.h"
+#include "core/panic.h"
+#include "fs/vfs.h"
+#include "drv/virtio_blk.h"
+#include "fs/block_cache.h"
+#include "core/klog.h"
 
 /* Forward declarations */
 void init_kthread(void);
@@ -76,7 +74,12 @@ static int try_mount(int dev_idx, const char *mnt, const char *fstype) {
         printf("[INIT] Device %d: block-cache creation failed\n", dev_idx);
         return -1;
     }
-    fs_mkdir(mnt);
+    int mkret = vfs_mkdir(mnt, 0755);
+    if (mkret < 0 && mkret != -EEXIST) {
+        printf("[INIT] Device %d: mkdir %s failed (%d)\n", dev_idx, mnt, mkret);
+        bcache_destroy(bc);
+        return mkret;
+    }
     int r = vfs_mount_bc(mnt, fstype, bc);
     if (r == 0) {
         printf("[INIT] Device %d -> %s (%s)\n", dev_idx, mnt, fstype);
@@ -97,15 +100,14 @@ void kernel_main(void) {
 #endif
     printf("Initializing system...\n");
     /* Initialize subsystems */
+    trap_init();
+    printf("[INIT] Trap subsystem initialized\n");
+
     uart_init();
     printf("[INIT] UART initialized\n");
 
     timer_init();
     printf("[INIT] Timer initialized\n");
-
-    trap_init();
-    plic_init();
-    printf("[INIT] PLIC initialized\n");
 
     mm_init();
     printf("[INIT] Memory manager initialized\n");

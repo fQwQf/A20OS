@@ -1,10 +1,10 @@
-#include "vm.h"
-#include "mm.h"
-#include "frame.h"
-#include "slab.h"
-#include "string.h"
-#include "panic.h"
-#include "klog.h"
+#include "mm/vm.h"
+#include "mm/mm.h"
+#include "mm/frame.h"
+#include "mm/slab.h"
+#include "core/string.h"
+#include "core/panic.h"
+#include "core/klog.h"
 
 // 虚拟地址转换为物理地址
 // 这里专为线性映射区

@@ -1,7 +1,7 @@
-#include "uart.h"
-#include "consts.h"
-#include "defs.h"
-#include "proc.h"
+#include "drv/uart.h"
+#include "core/consts.h"
+#include "core/defs.h"
+#include "proc/proc.h"
 
 #define UART0 ((volatile uint8_t *)UART0_BASE)
 

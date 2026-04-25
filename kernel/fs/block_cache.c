@@ -1,8 +1,8 @@
-#include "block_cache.h"
-#include "mm.h"
-#include "string.h"
-#include "stdio.h"
-#include "panic.h"
+#include "fs/block_cache.h"
+#include "mm/mm.h"
+#include "core/string.h"
+#include "core/stdio.h"
+#include "core/panic.h"
 
 // 从 LRU 链表中移除一个条目
 static void lru_remove(bcache_entry_t *e) {
