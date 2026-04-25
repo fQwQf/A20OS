@@ -17,6 +17,7 @@
 #include "core/consts.h"
 #include "core/defs.h"
 #include "core/klog.h"
+#include "core/timekeeping.h"
 
 #define CLD_EXITED     1
 #define CLD_KILLED     2
@@ -26,6 +27,45 @@
 
 static int sigsys_diag_count = 0;
 static int sleep_diag_count = 0;
+
+enum {
+    CLOCK_REALTIME_ID = 0,
+    CLOCK_MONOTONIC_ID = 1,
+    CLOCK_PROCESS_CPUTIME_ID = 2,
+    CLOCK_THREAD_CPUTIME_ID = 3,
+    CLOCK_MONOTONIC_RAW_ID = 4,
+    CLOCK_REALTIME_COARSE_ID = 5,
+    CLOCK_MONOTONIC_COARSE_ID = 6,
+    CLOCK_BOOTTIME_ID = 7,
+    CLOCK_REALTIME_ALARM_ID = 8,
+    CLOCK_BOOTTIME_ALARM_ID = 9,
+    CLOCK_TAI_ID = 11,
+};
+
+static int clock_is_realtime(int clk) {
+    switch (clk) {
+    case CLOCK_REALTIME_ID:
+    case CLOCK_REALTIME_COARSE_ID:
+    case CLOCK_REALTIME_ALARM_ID:
+    case CLOCK_TAI_ID:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+static int clock_is_monotonic(int clk) {
+    switch (clk) {
+    case CLOCK_MONOTONIC_ID:
+    case CLOCK_MONOTONIC_RAW_ID:
+    case CLOCK_MONOTONIC_COARSE_ID:
+    case CLOCK_BOOTTIME_ID:
+    case CLOCK_BOOTTIME_ALARM_ID:
+        return 1;
+    default:
+        return 0;
+    }
+}
 
 static uint64_t clamp_stack_rlimit(uint64_t cur, uint64_t max) {
     uint64_t limit = cur < max ? cur : max;
@@ -194,10 +234,12 @@ int64_t syscall_dispatch(trap_context_t *ctx) {
     case SYS_mremap:      ret = sys_mremap(a0, (size_t)a1, (size_t)a2, (int)a3, (uint64_t)a4); break;
     case SYS_shm_open:    ret = sys_shm_open((const char*)a0, (int)a1, (int)a2); break;
 
+    case SYS_clock_settime: ret = sys_clock_settime((int)a0, (void*)a1); break;
     case SYS_clock_gettime: ret = sys_clock_gettime((int)a0, (void*)a1); break;
     case SYS_clock_getres:  ret = sys_clock_getres((int)a0, (void*)a1); break;
     case SYS_nanosleep:     ret = sys_nanosleep((void*)a0, (void*)a1); break;
     case SYS_gettimeofday:  ret = sys_gettimeofday((void*)a0, (void*)a1); break;
+    case SYS_settimeofday:  ret = sys_settimeofday((void*)a0, (void*)a1); break;
     case SYS_times:         ret = sys_times((void*)a0); break;
     case SYS_time:          ret = sys_time((long*)a0); break;
 
@@ -1327,19 +1369,29 @@ int64_t sys_shm_open(const char *name, int oflag, int mode) {
  * Time
  * ============================================================ */
 
-int64_t sys_clock_gettime(int clk, void *tp) {
-    (void)clk;
-    if (!tp) return -EFAULT;
-    uint64_t ticks = timer_get_ticks();
+int64_t sys_clock_settime(int clk, void *tp) {
     uint64_t ts[2];
-    ts[0] = ticks / TICKS_PER_SEC;
-    ts[1] = (ticks % TICKS_PER_SEC) * 1000000000UL / TICKS_PER_SEC;
+    if (clk != CLOCK_REALTIME_ID) return -EINVAL;
+    if (!tp) return -EFAULT;
+    if (copy_from_user(ts, tp, sizeof(ts)) < 0) return -EFAULT;
+    if (ts[1] >= 1000000000ULL) return -EINVAL;
+    return timekeeping_set_realtime(ts[0], ts[1]);
+}
+
+int64_t sys_clock_gettime(int clk, void *tp) {
+    uint64_t ts[2];
+    if (!tp) return -EFAULT;
+    /* glibc prefers CLOCK_REALTIME_COARSE for date/time formatting. */
+    if (clock_is_realtime(clk)) timekeeping_get_realtime(ts);
+    else if (clock_is_monotonic(clk)) timekeeping_get_monotonic(ts);
+    else return -EINVAL;
     if (copy_to_user(tp, ts, sizeof(ts)) < 0) return -EFAULT;
     return 0;
 }
 
 int64_t sys_clock_getres(int clk, void *tp) {
-    (void)clk;
+    if (!clock_is_realtime(clk) && !clock_is_monotonic(clk))
+        return -EINVAL;
     if (tp) {
         uint64_t ts[2];
         ts[0] = 0;
@@ -1385,13 +1437,23 @@ int64_t sys_nanosleep(void *req, void *rem) {
 int64_t sys_gettimeofday(void *tv, void *tz) {
     (void)tz;
     if (tv) {
-        uint64_t ticks = timer_get_ticks();
         uint64_t t[2];
-        t[0] = ticks / TICKS_PER_SEC;
-        t[1] = (ticks % TICKS_PER_SEC) * 1000000UL / TICKS_PER_SEC;
+        uint64_t ts[2];
+        timekeeping_get_realtime(ts);
+        t[0] = ts[0];
+        t[1] = ts[1] / 1000ULL;
         if (copy_to_user(tv, t, sizeof(t)) < 0) return -EFAULT;
     }
     return 0;
+}
+
+int64_t sys_settimeofday(void *tv, void *tz) {
+    uint64_t t[2];
+    (void)tz;
+    if (!tv) return -EINVAL;
+    if (copy_from_user(t, tv, sizeof(t)) < 0) return -EFAULT;
+    if (t[1] >= 1000000ULL) return -EINVAL;
+    return timekeeping_set_realtime(t[0], t[1] * 1000ULL);
 }
 
 int64_t sys_times(void *buf) {
@@ -1406,7 +1468,10 @@ int64_t sys_times(void *buf) {
 }
 
 int64_t sys_time(long *tloc) {
-    uint64_t t = timer_get_ticks() / TICKS_PER_SEC;
+    uint64_t ts[2];
+    uint64_t t;
+    timekeeping_get_realtime(ts);
+    t = ts[0];
     if (tloc) {
         long tl = (long)t;
         if (copy_to_user(tloc, &tl, sizeof(long)) < 0) return -EFAULT;
