@@ -27,6 +27,7 @@
 /* ELF machine type */
 #define EM_RISCV    243
 #define EM_LOONGARCH 258
+#define EM_AARCH64  183
 
 /* ELF program header type */
 #define PT_NULL     0

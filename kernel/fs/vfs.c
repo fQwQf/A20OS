@@ -17,6 +17,7 @@
 #include "fs/ext4.h"
 #include "mm/mm.h"
 #include "proc/proc.h"
+#include "core/timekeeping.h"
 #include "core/string.h"
 #include "core/stdio.h"
 #include "core/panic.h"
@@ -138,17 +139,19 @@ static int devfs_zero_read(vfile_t *vf, char *buf, size_t count) {
     (void)vf; memset(buf, 0, count); return (int)count;
 }
 
+static int devfs_rtc_ioctl(vfile_t *vf, unsigned long req, void *arg);
+
 static vfile_ops_t g_stdin_ops  = { .read = devfs_stdin_read, .write = devfs_stdout_write };
 static vfile_ops_t g_stdout_ops = { .read = devfs_null_read,  .write = devfs_stdout_write };
 static vfile_ops_t g_stderr_ops = { .read = devfs_null_read,  .write = devfs_stdout_write };
 static vfile_ops_t g_null_ops   = { .read = devfs_null_read,  .write = devfs_null_write   };
 static vfile_ops_t g_zero_ops   = { .read = devfs_zero_read,  .write = devfs_null_write   };
+static vfile_ops_t g_rtc_ops    = { .read = devfs_null_read,  .write = devfs_null_write, .ioctl = devfs_rtc_ioctl };
 static vfile_ops_t g_pipe_read_ops;
 static vfile_ops_t g_pipe_write_ops;
-
-static vfile_t g_stdin_file  = { .ref_count = 999, .ops = &g_stdin_ops,  .flags = O_RDONLY };
-static vfile_t g_stdout_file = { .ref_count = 999, .ops = &g_stdout_ops, .flags = O_WRONLY };
-static vfile_t g_stderr_file = { .ref_count = 999, .ops = &g_stderr_ops, .flags = O_WRONLY };
+static vfile_t g_stdin_file;
+static vfile_t g_stdout_file;
+static vfile_t g_stderr_file;
 
 /* Check if a vfile is one of the special stdin/stdout/stderr char devices */
 static int is_special_tty(vfile_t *vf) {
@@ -161,8 +164,13 @@ static int is_pipe_vfile(vfile_t *vf) {
     return vf && (vf->ops == &g_pipe_read_ops || vf->ops == &g_pipe_write_ops);
 }
 
+static int is_rtc_vfile(vfile_t *vf) {
+    return vf && vf->ops == &g_rtc_ops;
+}
+
 static int is_char_device_vfile(vfile_t *vf) {
-    return vf && (is_special_tty(vf) || vf->ops == &g_null_ops || vf->ops == &g_zero_ops);
+    return vf && (is_special_tty(vf) || is_rtc_vfile(vf) ||
+                  vf->ops == &g_null_ops || vf->ops == &g_zero_ops);
 }
 
 static void fill_char_kstat(kstat_t *st) {
@@ -179,16 +187,16 @@ static void fill_pipe_kstat(kstat_t *st) {
     st->st_blksize = 4096;
 }
 
+#define KTTY_NCCS 19
+
 typedef struct {
     uint32_t c_iflag;
     uint32_t c_oflag;
     uint32_t c_cflag;
     uint32_t c_lflag;
     uint8_t  c_line;
-    uint8_t  c_cc[32];
-    uint32_t c_ispeed;
-    uint32_t c_ospeed;
-} ktermios_compat_t;
+    uint8_t  c_cc[KTTY_NCCS];
+} ktty_termios_t;
 
 typedef struct {
     uint16_t ws_row;
@@ -197,11 +205,22 @@ typedef struct {
     uint16_t ws_ypixel;
 } kwinsize_t;
 
-static void fill_default_termios(ktermios_compat_t *tio) {
+typedef struct {
+    ktty_termios_t termios;
+    kwinsize_t winsize;
+} tty_state_t;
+
+static tty_state_t g_console_tty;
+
+static vfile_t g_stdin_file  = { .ref_count = 999, .ops = &g_stdin_ops,  .flags = O_RDONLY, .priv = &g_console_tty };
+static vfile_t g_stdout_file = { .ref_count = 999, .ops = &g_stdout_ops, .flags = O_WRONLY, .priv = &g_console_tty };
+static vfile_t g_stderr_file = { .ref_count = 999, .ops = &g_stderr_ops, .flags = O_WRONLY, .priv = &g_console_tty };
+
+static void fill_default_termios(ktty_termios_t *tio) {
     memset(tio, 0, sizeof(*tio));
     tio->c_iflag = 0x500;      /* ICRNL | IXON */
     tio->c_oflag = 0x5;        /* OPOST | ONLCR */
-    tio->c_cflag = 0xB0;       /* CREAD | CS8 | B38400 */
+    tio->c_cflag = 0xBF;       /* CREAD | CS8 | B38400 */
     tio->c_lflag = 0x8a3b;     /* ISIG | ICANON | ECHO | ECHOE | ECHOK | IEXTEN | ECHOCTL | ECHOKE */
     tio->c_cc[0] = 3;          /* VINTR  */
     tio->c_cc[1] = 28;         /* VQUIT  */
@@ -217,8 +236,6 @@ static void fill_default_termios(ktermios_compat_t *tio) {
     tio->c_cc[13] = 15;        /* VDISCARD */
     tio->c_cc[14] = 23;        /* VWERASE */
     tio->c_cc[15] = 22;        /* VLNEXT */
-    tio->c_ispeed = 15;        /* B38400 */
-    tio->c_ospeed = 15;        /* B38400 */
 }
 
 static void fill_default_winsize(kwinsize_t *ws) {
@@ -226,6 +243,147 @@ static void fill_default_winsize(kwinsize_t *ws) {
     ws->ws_col = 80;
     ws->ws_xpixel = 0;
     ws->ws_ypixel = 0;
+}
+
+static void init_default_tty_state(tty_state_t *tty) {
+    fill_default_termios(&tty->termios);
+    fill_default_winsize(&tty->winsize);
+}
+
+static tty_state_t *tty_state_for_vfile(vfile_t *vf) {
+    if (vf && vf->priv) return (tty_state_t *)vf->priv;
+    return &g_console_tty;
+}
+
+#define RTC_RD_TIME    0x80247009UL
+#define RTC_SET_TIME   0x4024700aUL
+#define RTC_IRQP_READ  0x8008700bUL
+#define RTC_EPOCH_READ 0x8008700dUL
+
+typedef struct {
+    int32_t tm_sec;
+    int32_t tm_min;
+    int32_t tm_hour;
+    int32_t tm_mday;
+    int32_t tm_mon;
+    int32_t tm_year;
+    int32_t tm_wday;
+    int32_t tm_yday;
+    int32_t tm_isdst;
+} krtc_time_t;
+
+static int is_special_rtc_path(const char *path) {
+    return strcmp(path, "/dev/misc/rtc") == 0 ||
+           strcmp(path, "/dev/rtc") == 0 ||
+           strcmp(path, "/dev/rtc0") == 0;
+}
+
+static int is_leap_year(int year) {
+    return (year % 4 == 0) && ((year % 100) != 0 || (year % 400) == 0);
+}
+
+static int rtc_time_to_unix_seconds(const krtc_time_t *rt, uint64_t *secs) {
+    static const int month_days[12] = { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+    int year = rt->tm_year + 1900;
+    int month = rt->tm_mon + 1;
+    int hour = rt->tm_hour;
+    int min = rt->tm_min;
+    int sec = rt->tm_sec;
+    int mday = rt->tm_mday;
+    int mdays;
+    int64_t z;
+    int64_t era;
+    unsigned yoe;
+    unsigned doy;
+    unsigned doe;
+
+    if (year < 1970 || month < 1 || month > 12 || mday < 1 ||
+        hour < 0 || hour > 23 || min < 0 || min > 59 || sec < 0 || sec > 59)
+        return -EINVAL;
+
+    mdays = month_days[month - 1];
+    if (month == 2 && is_leap_year(year)) mdays = 29;
+    if (mday > mdays) return -EINVAL;
+
+    year -= month <= 2;
+    era = (year >= 0 ? year : year - 399) / 400;
+    yoe = (unsigned)(year - era * 400);
+    doy = (153U * (unsigned)(month + (month > 2 ? -3 : 9)) + 2U) / 5U + (unsigned)mday - 1U;
+    doe = yoe * 365U + yoe / 4U - yoe / 100U + doy;
+    z = era * 146097 + (int64_t)doe - 719468;
+    if (z < 0) return -EINVAL;
+
+    *secs = (uint64_t)z * 86400ULL + (uint64_t)hour * 3600ULL +
+            (uint64_t)min * 60ULL + (uint64_t)sec;
+    return 0;
+}
+
+static void unix_seconds_to_rtc_time(uint64_t secs, krtc_time_t *rt) {
+    static const int month_yday[2][12] = {
+        { 0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334 },
+        { 0, 31, 60, 91, 121, 152, 182, 213, 244, 274, 305, 335 },
+    };
+    uint64_t days = secs / 86400ULL;
+    uint64_t rem = secs % 86400ULL;
+    int64_t z = (int64_t)days + 719468;
+    int64_t era = (z >= 0 ? z : z - 146096) / 146097;
+    unsigned doe = (unsigned)(z - era * 146097);
+    unsigned yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    int year = (int)(yoe + era * 400);
+    unsigned doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    unsigned mp = (5 * doy + 2) / 153;
+    unsigned mday = doy - (153 * mp + 2) / 5 + 1;
+    unsigned month = mp + (mp < 10 ? 3 : (unsigned)-9);
+
+    year += (month <= 2);
+    memset(rt, 0, sizeof(*rt));
+    rt->tm_sec = (int32_t)(rem % 60ULL);
+    rem /= 60ULL;
+    rt->tm_min = (int32_t)(rem % 60ULL);
+    rem /= 60ULL;
+    rt->tm_hour = (int32_t)rem;
+    rt->tm_mday = (int32_t)mday;
+    rt->tm_mon = (int32_t)(month - 1);
+    rt->tm_year = (int32_t)(year - 1900);
+    rt->tm_wday = (int32_t)((days + 4ULL) % 7ULL);
+    rt->tm_yday = month_yday[is_leap_year(year)][month - 1] + (int)mday - 1;
+    rt->tm_isdst = 0;
+}
+
+static int devfs_rtc_ioctl(vfile_t *vf, unsigned long req, void *arg) {
+    (void)vf;
+    if ((req == RTC_RD_TIME || req == RTC_IRQP_READ || req == RTC_EPOCH_READ) && !arg)
+        return -EFAULT;
+
+    switch (req) {
+    case RTC_RD_TIME: {
+        krtc_time_t tm;
+        uint64_t ts[2];
+        timekeeping_get_realtime(ts);
+        unix_seconds_to_rtc_time(ts[0], &tm);
+        if (copy_to_user(arg, &tm, sizeof(tm)) < 0) return -EFAULT;
+        return 0;
+    }
+    case RTC_IRQP_READ: {
+        unsigned long irqp = 1;
+        if (copy_to_user(arg, &irqp, sizeof(irqp)) < 0) return -EFAULT;
+        return 0;
+    }
+    case RTC_EPOCH_READ: {
+        unsigned long epoch = 1900;
+        if (copy_to_user(arg, &epoch, sizeof(epoch)) < 0) return -EFAULT;
+        return 0;
+    }
+    case RTC_SET_TIME: {
+        krtc_time_t tm;
+        uint64_t secs;
+        if (copy_from_user(&tm, arg, sizeof(tm)) < 0) return -EFAULT;
+        if (rtc_time_to_unix_seconds(&tm, &secs) < 0) return -EINVAL;
+        return timekeeping_set_realtime(secs, 0);
+    }
+    default:
+        return -ENOTTY;
+    }
 }
 
 /* ============================================================
@@ -469,12 +627,21 @@ int vfs_open(const char *path, int flags, int mode) {
         if (fd < 0) { kfree(vf); return -EMFILE; }
         return fd;
     }
+    if (is_special_rtc_path(resolved)) {
+        vfile_t *vf = (vfile_t *)kmalloc(sizeof(vfile_t));
+        if (!vf) return -ENOMEM;
+        memset(vf, 0, sizeof(*vf));
+        vf->ops = &g_rtc_ops; vf->ref_count = 1;
+        int fd = vfs_alloc_fd(vf);
+        if (fd < 0) { kfree(vf); return -EMFILE; }
+        return fd;
+    }
     if (strcmp(resolved, "/dev/tty") == 0) {
         vfile_t *vf = (vfile_t *)kmalloc(sizeof(vfile_t));
         if (!vf) return -ENOMEM;
         memset(vf, 0, sizeof(*vf));
         /* Map it directly to UART (stdin/stdout) for now */
-        vf->ops = &g_stdin_ops; vf->ref_count = 1;
+        vf->ops = &g_stdin_ops; vf->ref_count = 1; vf->priv = &g_console_tty;
         int fd = vfs_alloc_fd(vf);
         if (fd < 0) { kfree(vf); return -EMFILE; }
         return fd;
@@ -610,20 +777,21 @@ int vfs_ioctl(int fd, unsigned long req, void *arg) {
     vfile_t *vf = vfs_get_file(fd);
     if (!vf) return -EBADF;
 
-    if (is_special_tty(vf) && arg) {
+    if (is_special_tty(vf)) {
+        tty_state_t *tty = tty_state_for_vfile(vf);
+        if (!arg) return -EFAULT;
         if (req == TCGETS) {
-            ktermios_compat_t tio;
-            fill_default_termios(&tio);
-            if (copy_to_user(arg, &tio, sizeof(tio)) < 0) return -EFAULT;
+            if (copy_to_user(arg, &tty->termios, sizeof(tty->termios)) < 0) return -EFAULT;
             return 0;
         }
         if (req == TCSETS || req == TCSETSW || req == TCSETSF) {
+            ktty_termios_t tio;
+            if (copy_from_user(&tio, arg, sizeof(tio)) < 0) return -EFAULT;
+            tty->termios = tio;
             return 0;
         }
         if (req == TIOCGWINSZ) {
-            kwinsize_t ws;
-            fill_default_winsize(&ws);
-            if (copy_to_user(arg, &ws, sizeof(ws)) < 0) return -EFAULT;
+            if (copy_to_user(arg, &tty->winsize, sizeof(tty->winsize)) < 0) return -EFAULT;
             return 0;
         }
     }
@@ -821,7 +989,7 @@ int vfs_rmdir(const char *path) {
 
 int vfs_stat(const char *path, kstat_t *st) {
     if (strcmp(path, "/dev/null") == 0 || strcmp(path, "/dev/zero") == 0 ||
-        strcmp(path, "/dev/tty") == 0) {
+        strcmp(path, "/dev/tty") == 0 || is_special_rtc_path(path)) {
         memset(st, 0, sizeof(*st));
         st->st_mode = S_IFCHR | 0666;
         st->st_nlink = 1;
@@ -863,6 +1031,7 @@ int vfs_fstatat(int dirfd, const char *path, kstat_t *st, int flags) {
 
 int vfs_faccessat(int dirfd, const char *path, int mode) {
     (void)dirfd; (void)mode;
+    if (path && is_special_rtc_path(path)) return 0;
     vnode_t *vn = vfs_resolve(path);
     if (!vn) {
         stat_t rfs;
@@ -1257,6 +1426,7 @@ void vfs_init(void) {
     memset(g_files, 0, sizeof(g_files));
     memset(g_mounts, 0, sizeof(g_mounts));
     g_nmounts = 0;
+    init_default_tty_state(&g_console_tty);
 
     /* Install std streams at global fds 0,1,2 */
     g_files[STDIN_FILENO]  = &g_stdin_file;

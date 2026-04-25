@@ -62,4 +62,18 @@ static inline void arch_signal_prepare_trampoline(uint32_t tramp[2]) {
     tramp[1] = 0x00000073;
 }
 
+static inline void arch_trap_ctx_set_kernel_stack(trap_context_t *ctx, uint64_t ksp) {
+    (void)ctx;
+    (void)ksp;
+}
+
+static inline uint64_t arch_trap_ctx_get_kernel_stack(const trap_context_t *ctx, uint64_t fallback) {
+    (void)ctx;
+    return fallback;
+}
+
+static inline void arch_advance_syscall_epc(trap_context_t *ctx) {
+    TRAP_CTX_EPC(ctx) += 4;
+}
+
 #endif

@@ -192,7 +192,7 @@ void trap_handler(trap_context_t *ctx) {
         task_t *cur = proc_current();
         int have_user_insn = fetch_user_insn(cur, sepc, &user_insn);
         if (code == CAUSE_ECALL_U) {
-            TRAP_CTX_EPC(ctx) += 4;
+            arch_advance_syscall_epc(ctx);
             syscall_dispatch(ctx);
         } else if (code == CAUSE_LOAD_PAGE_FAULT || code == CAUSE_STORE_PAGE_FAULT || code == CAUSE_INSN_PAGE_FAULT) {
             if (code == CAUSE_STORE_PAGE_FAULT) {
@@ -276,7 +276,7 @@ void kernel_trap_handler(trap_context_t *ctx) {
         task_t *cur = proc_current();
 
         if (code == CAUSE_ECALL_U) {
-            TRAP_CTX_EPC(ctx) += 4;
+            arch_advance_syscall_epc(ctx);
         } else if (code == CAUSE_LOAD_PAGE_FAULT ||
                    code == CAUSE_STORE_PAGE_FAULT ||
                    code == CAUSE_INSN_PAGE_FAULT ||

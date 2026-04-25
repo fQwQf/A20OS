@@ -10,6 +10,7 @@
 #include "core/consts.h"
 #include "core/defs.h"
 #include "core/panic.h"
+#include "core/timekeeping.h"
 #include "fs/vfs.h"
 #include "drv/virtio_blk.h"
 #include "fs/block_cache.h"
@@ -108,6 +109,9 @@ void kernel_main(void) {
 
     timer_init();
     printf("[INIT] Timer initialized\n");
+
+    timekeeping_init();
+    printf("[INIT] Timekeeping initialized\n");
 
     mm_init();
     printf("[INIT] Memory manager initialized\n");

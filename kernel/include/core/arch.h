@@ -2,8 +2,8 @@
  * A20OS Architecture Abstraction Layer
  *
  * This header dispatches to the correct arch-specific headers based on
- * the CONFIG_* define set by the Makefile (-DCONFIG_RISCV64 or
- * -DCONFIG_LOONGARCH64).
+ * the CONFIG_* define set by the Makefile (-DCONFIG_RISCV64,
+ * -DCONFIG_LOONGARCH64 or -DCONFIG_AARCH64).
  *
  * All arch-specific code (inline asm, register access, page table format,
  * trap context layout, hardware addresses) lives under kernel/arch/$(ARCH)/.
@@ -30,8 +30,10 @@
 # include "arch/riscv64/include/arch.h"
 #elif defined(CONFIG_LOONGARCH64)
 # include "arch/loongarch64/include/arch.h"
+#elif defined(CONFIG_AARCH64)
+# include "arch/aarch64/include/arch.h"
 #else
-# error "No architecture defined. Set ARCH=riscv64 or ARCH=loongarch64."
+# error "No architecture defined. Set ARCH=riscv64, ARCH=loongarch64 or ARCH=aarch64."
 #endif
 
 /* Arch name string (for uname, procfs, etc.) */
@@ -39,6 +41,8 @@
 # define ARCH_NAME "riscv64"
 #elif defined(CONFIG_LOONGARCH64)
 # define ARCH_NAME "loongarch64"
+#elif defined(CONFIG_AARCH64)
+# define ARCH_NAME "aarch64"
 #endif
 
 /* Optional arch hook used by the ELF loader for dynamic-linker fallbacks. */

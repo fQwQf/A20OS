@@ -237,6 +237,7 @@ int proc_alloc_user(uint64_t entry, uint64_t sp, uint64_t *pgdir) {
     TRAP_CTX_STATUS(trap) = SSTATUS_SPIE | SSTATUS_FS_CLEAN;
     TRAP_CTX_KScratch0(trap) = pgdir ? arch_make_satp(pgdir) : 0;
     trap->kernel_tp = (uint64_t)(uintptr_t)t;
+    arch_trap_ctx_set_kernel_stack(trap, ks_top);
 
     t->trap_ctx = trap;
     t->ustack   = sp;
@@ -336,6 +337,7 @@ int proc_clone(uint64_t flags, uint64_t stack, int *ptid, int *ctid, uint64_t tl
         TRAP_CTX_ARG0(trap) = 0;
         TRAP_CTX_KScratch0(trap) = t->pgdir ? arch_make_satp(t->pgdir) : 0;
         trap->kernel_tp = (uint64_t)(uintptr_t)t;
+        arch_trap_ctx_set_kernel_stack(trap, ks_top);
         t->trap_ctx = trap;
         t->ustack = stack ? stack : parent->ustack;
         if (stack) TRAP_CTX_SP(trap) = stack;
@@ -543,6 +545,8 @@ int proc_exec(const char *path, char *const argv[], char *const envp[]) {
     uint64_t saved_entry = info.entry;
     uint64_t saved_sp    = sp;
 
+    uint64_t saved_kernel_sp = (uint64_t)(uintptr_t)t->kstack_base + KERNEL_STACK_SIZE;
+
     if (!t->trap_ctx) {
         uint64_t ks_top = (uint64_t)(uintptr_t)t->kstack_base + KERNEL_STACK_SIZE;
         trap_context_t *trap = (trap_context_t *)(ks_top - sizeof(trap_context_t));
@@ -553,16 +557,19 @@ int proc_exec(const char *path, char *const argv[], char *const envp[]) {
         TASK_CTX_PAGE_TABLE(ctx) = arch_make_satp(info.pgdir);
         t->trap_ctx = trap;
         t->kstack   = (uint64_t)ctx;
+        saved_kernel_sp = ks_top;
     }
 
     {
         trap_context_t *trap = t->trap_ctx;
+        saved_kernel_sp = arch_trap_ctx_get_kernel_stack(trap, saved_kernel_sp);
         memset(trap, 0, sizeof(*trap));
         TRAP_CTX_KScratch0(trap) = arch_make_satp(info.pgdir);
         TRAP_CTX_EPC(trap)      = saved_entry;
         TRAP_CTX_SP(trap)      = saved_sp;
         TRAP_CTX_TP(trap)      = info.tls_tp;
         trap->kernel_tp = (uint64_t)(uintptr_t)t;
+        arch_trap_ctx_set_kernel_stack(trap, saved_kernel_sp);
         TRAP_CTX_STATUS(trap)   = SSTATUS_SPIE | SSTATUS_FS_CLEAN;
 
         /* Do NOT rewrite task_context_t here — it overlaps with our
