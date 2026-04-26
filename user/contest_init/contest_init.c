@@ -8,6 +8,7 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 
+#include "busybox_setup.h"
 #include "test_runners.h"
 
 #define MAX_TESTS 128
@@ -27,13 +28,14 @@ typedef struct {
 
 static test_entry_t g_tests[MAX_TESTS];
 static Test test_table[] = {
-    {"glibc_basic",   run_glibc_basic_test},
-    {"glibc_busybox", run_glibc_busybox_test},
-    {"glibc_lua",     run_glibc_lua_test},
+    // {"glibc_basic",   run_glibc_basic_test},
+    // {"glibc_busybox", run_glibc_busybox_test},
+    // {"glibc_lua",     run_glibc_lua_test},
     // {"glibc_libctest", run_glibc_libctest_test},
-    {"musl_basic",    run_musl_basic_test},
-    {"musl_busybox",  run_musl_busybox_test},
-    {"musl_lua", run_musl_lua_test},
+    {"glibc_ltp", run_glibc_ltp_test}
+    // {"musl_basic",    run_musl_basic_test},
+    // {"musl_busybox",  run_musl_busybox_test},
+    // {"musl_lua", run_musl_lua_test},
 };
 
 static int ends_with(const char *s, const char *suffix)
@@ -188,6 +190,7 @@ int main(int argc, char *argv[])
     printf("[CONTEST] Auto-test runner started\n");
     printf("[CONTEST] Scanning target image at %s\n", TEST_DIR);
     printf("[CONTEST] Global timeout: %d seconds\n", GLOBAL_TIMEOUT_SEC);
+    setup_bbin_busybox();
 
     {
         int wpid = fork();
