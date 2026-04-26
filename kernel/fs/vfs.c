@@ -10,35 +10,38 @@
  * Inspired by RocketOS fs/ and Linux VFS.
  */
 
-#include "vfs.h"
-#include "fs.h"
-#include "fat32.h"
-#include "ext4.h"
-#include "mm.h"
-#include "proc.h"
-#include "string.h"
-#include "stdio.h"
-#include "panic.h"
-#include "consts.h"
-#include "defs.h"
-#include "klog.h"
-#include "virtio_blk.h"
-#include "block_cache.h"
+#include "fs/vfs.h"
+#include "fs/ramfs.h"
+#include "fs/fs.h"
+#include "fs/fat32.h"
+#include "fs/ext4.h"
+#include "mm/mm.h"
+#include "proc/proc.h"
+#include "core/timekeeping.h"
+#include "core/string.h"
+#include "core/stdio.h"
+#include "core/panic.h"
+#include "core/consts.h"
+#include "core/defs.h"
+#include "core/klog.h"
+#include "drv/virtio_blk.h"
+#include "fs/block_cache.h"
 
 /* ============================================================
  * Global open-file table
  * ============================================================ */
 #define GFILE_MAX   VFS_MAX_OPEN
 
-static vfile_t *g_files[GFILE_MAX];
+static vfile_t *g_files[GFILE_MAX];  // 全局文件表
 
 /* Mount table (simple linear) */
 #define MAX_MOUNTS  8
-static mount_t g_mounts[MAX_MOUNTS];
-static int     g_nmounts = 0;
+static mount_t g_mounts[MAX_MOUNTS];  // 挂载表
+static int     g_nmounts = 0;  // 已挂载数量
 
 /* ---- File descriptor allocation ---- */
 
+// 分配全局文件描述符
 int vfs_alloc_fd(vfile_t *vf) {
     /* Find slot in global file table */
     int gfd = -1;
@@ -48,10 +51,12 @@ int vfs_alloc_fd(vfile_t *vf) {
     return gfd;
 }
 
+// 释放全局文件描述符
 static void vfs_free_gfd(int gfd) {
     if (gfd >= 0 && gfd < GFILE_MAX) g_files[gfd] = NULL;
 }
 
+// 获取文件描述符对应的 vfile
 vfile_t *vfs_get_file(int fd) {
     if (fd < 0 || fd >= GFILE_MAX) return NULL;
     return g_files[fd];
@@ -63,6 +68,7 @@ vfile_t *vfs_get_file(int fd) {
  * For simplicity, the per-process fd IS the global gfd.
  * ============================================================ */
 
+// 初始化进程的文件描述符表
 void vfs_proc_init_fds(int *fd_table) {
     for (int i = 0; i < MAX_FILES; i++) fd_table[i] = -1;
     fd_table[0] = 0; if (g_files[0]) g_files[0]->ref_count++;
@@ -70,12 +76,14 @@ void vfs_proc_init_fds(int *fd_table) {
     fd_table[2] = 2; if (g_files[2]) g_files[2]->ref_count++;
 }
 
+// 初始化进程的标准 I/O 文件描述符（如果未设置）
 void vfs_proc_init_stdio_defaults(int *fd_table) {
     if (fd_table[0] < 0) { fd_table[0] = 0; if (g_files[0]) g_files[0]->ref_count++; }
     if (fd_table[1] < 0) { fd_table[1] = 1; if (g_files[1]) g_files[1]->ref_count++; }
     if (fd_table[2] < 0) { fd_table[2] = 2; if (g_files[2]) g_files[2]->ref_count++; }
 }
 
+// 复制进程文件描述符表（用于 fork）
 void vfs_proc_copy_fds(const int *src, int *dst) {
     for (int i = 0; i < MAX_FILES; i++) {
         dst[i] = src[i];
@@ -131,326 +139,252 @@ static int devfs_zero_read(vfile_t *vf, char *buf, size_t count) {
     (void)vf; memset(buf, 0, count); return (int)count;
 }
 
+static int devfs_rtc_ioctl(vfile_t *vf, unsigned long req, void *arg);
+
 static vfile_ops_t g_stdin_ops  = { .read = devfs_stdin_read, .write = devfs_stdout_write };
 static vfile_ops_t g_stdout_ops = { .read = devfs_null_read,  .write = devfs_stdout_write };
 static vfile_ops_t g_stderr_ops = { .read = devfs_null_read,  .write = devfs_stdout_write };
 static vfile_ops_t g_null_ops   = { .read = devfs_null_read,  .write = devfs_null_write   };
 static vfile_ops_t g_zero_ops   = { .read = devfs_zero_read,  .write = devfs_null_write   };
-
-static vfile_t g_stdin_file  = { .ref_count = 999, .ops = &g_stdin_ops,  .flags = O_RDONLY };
-static vfile_t g_stdout_file = { .ref_count = 999, .ops = &g_stdout_ops, .flags = O_WRONLY };
-static vfile_t g_stderr_file = { .ref_count = 999, .ops = &g_stderr_ops, .flags = O_WRONLY };
+static vfile_ops_t g_rtc_ops    = { .read = devfs_null_read,  .write = devfs_null_write, .ioctl = devfs_rtc_ioctl };
+static vfile_ops_t g_pipe_read_ops;
+static vfile_ops_t g_pipe_write_ops;
+static vfile_t g_stdin_file;
+static vfile_t g_stdout_file;
+static vfile_t g_stderr_file;
 
 /* Check if a vfile is one of the special stdin/stdout/stderr char devices */
 static int is_special_tty(vfile_t *vf) {
-    return (vf == &g_stdin_file || vf == &g_stdout_file || vf == &g_stderr_file);
+    if (!vf) return 0;
+    return (vf == &g_stdin_file || vf == &g_stdout_file || vf == &g_stderr_file ||
+            vf->ops == &g_stdin_ops || vf->ops == &g_stdout_ops || vf->ops == &g_stderr_ops);
 }
 
-/* ============================================================
- * RAMFS — VFS Bridge
- * Bridges the legacy fs.c into the modern vnode system.
- * ============================================================ */
-
-/* Forward declarations for ops */
-static vnode_ops_t g_ramfs_vnode_ops;
-static vfile_ops_t g_ramfs_fops;
-
-static vnode_t *ramfs_make_vnode(mount_t *mnt, inode_t *inode) {
-    if (!inode) return NULL;
-    vnode_t *vn = (vnode_t *)kmalloc(sizeof(vnode_t));
-    if (!vn) return NULL;
-    memset(vn, 0, sizeof(*vn));
-    vn->ino        = (uint64_t)inode->inum;
-    if (inode->type == FT_DIRECTORY) vn->type = VFS_FT_DIR;
-    else if (inode->type == FT_SYMLINK) vn->type = VFS_FT_SYMLINK;
-    else vn->type = VFS_FT_REGULAR;
-    if (vn->type == VFS_FT_DIR) vn->mode = S_IFDIR | 0755;
-    else if (vn->type == VFS_FT_SYMLINK) vn->mode = S_IFLNK | 0777;
-    else vn->mode = S_IFREG | 0755;
-    vn->size       = inode->size;
-    vn->ref_count  = 1;
-    vn->mnt        = mnt;
-    vn->fs_data    = (void *)inode;
-    vn->ops        = &g_ramfs_vnode_ops;
-    /* parent will be set during lookup if needed */
-    return vn;
+static int is_pipe_vfile(vfile_t *vf) {
+    return vf && (vf->ops == &g_pipe_read_ops || vf->ops == &g_pipe_write_ops);
 }
 
-static int ramfs_vnode_lookup(vnode_t *dir, const char *name, vnode_t **out) {
-    inode_t *dinode = (inode_t *)dir->fs_data;
-    inode_t *found = NULL;
-    int r = fs_inode_lookup(dinode, name, &found);
-    if (r < 0) return r;
-    *out = ramfs_make_vnode(dir->mnt, found);
-    if (*out) { (*out)->parent = dir; dir->ref_count++; }
-    return (*out) ? 0 : -ENOMEM;
+static int is_rtc_vfile(vfile_t *vf) {
+    return vf && vf->ops == &g_rtc_ops;
 }
 
-static int ramfs_vnode_stat(vnode_t *vn, kstat_t *st) {
-    inode_t *inode = (inode_t *)vn->fs_data;
+static int is_char_device_vfile(vfile_t *vf) {
+    return vf && (is_special_tty(vf) || is_rtc_vfile(vf) ||
+                  vf->ops == &g_null_ops || vf->ops == &g_zero_ops);
+}
+
+static void fill_char_kstat(kstat_t *st) {
     memset(st, 0, sizeof(*st));
-    st->st_ino  = inode->inum;
-    st->st_mode = vn->mode;
-    st->st_size = inode->size;
+    st->st_mode = S_IFCHR | 0666;
     st->st_nlink = 1;
+    st->st_blksize = 4096;
+}
+
+static void fill_pipe_kstat(kstat_t *st) {
+    memset(st, 0, sizeof(*st));
+    st->st_mode = S_IFIFO | 0600;
+    st->st_nlink = 1;
+    st->st_blksize = 4096;
+}
+
+#define KTTY_NCCS 19
+
+typedef struct {
+    uint32_t c_iflag;
+    uint32_t c_oflag;
+    uint32_t c_cflag;
+    uint32_t c_lflag;
+    uint8_t  c_line;
+    uint8_t  c_cc[KTTY_NCCS];
+} ktty_termios_t;
+
+typedef struct {
+    uint16_t ws_row;
+    uint16_t ws_col;
+    uint16_t ws_xpixel;
+    uint16_t ws_ypixel;
+} kwinsize_t;
+
+typedef struct {
+    ktty_termios_t termios;
+    kwinsize_t winsize;
+} tty_state_t;
+
+static tty_state_t g_console_tty;
+
+static vfile_t g_stdin_file  = { .ref_count = 999, .ops = &g_stdin_ops,  .flags = O_RDONLY, .priv = &g_console_tty };
+static vfile_t g_stdout_file = { .ref_count = 999, .ops = &g_stdout_ops, .flags = O_WRONLY, .priv = &g_console_tty };
+static vfile_t g_stderr_file = { .ref_count = 999, .ops = &g_stderr_ops, .flags = O_WRONLY, .priv = &g_console_tty };
+
+static void fill_default_termios(ktty_termios_t *tio) {
+    memset(tio, 0, sizeof(*tio));
+    tio->c_iflag = 0x500;      /* ICRNL | IXON */
+    tio->c_oflag = 0x5;        /* OPOST | ONLCR */
+    tio->c_cflag = 0xBF;       /* CREAD | CS8 | B38400 */
+    tio->c_lflag = 0x8a3b;     /* ISIG | ICANON | ECHO | ECHOE | ECHOK | IEXTEN | ECHOCTL | ECHOKE */
+    tio->c_cc[0] = 3;          /* VINTR  */
+    tio->c_cc[1] = 28;         /* VQUIT  */
+    tio->c_cc[2] = 127;        /* VERASE */
+    tio->c_cc[3] = 21;         /* VKILL  */
+    tio->c_cc[4] = 4;          /* VEOF   */
+    tio->c_cc[5] = 0;          /* VTIME  */
+    tio->c_cc[6] = 1;          /* VMIN   */
+    tio->c_cc[8] = 17;         /* VSTART */
+    tio->c_cc[9] = 19;         /* VSTOP  */
+    tio->c_cc[10] = 26;        /* VSUSP  */
+    tio->c_cc[12] = 18;        /* VREPRINT */
+    tio->c_cc[13] = 15;        /* VDISCARD */
+    tio->c_cc[14] = 23;        /* VWERASE */
+    tio->c_cc[15] = 22;        /* VLNEXT */
+}
+
+static void fill_default_winsize(kwinsize_t *ws) {
+    ws->ws_row = 24;
+    ws->ws_col = 80;
+    ws->ws_xpixel = 0;
+    ws->ws_ypixel = 0;
+}
+
+static void init_default_tty_state(tty_state_t *tty) {
+    fill_default_termios(&tty->termios);
+    fill_default_winsize(&tty->winsize);
+}
+
+static tty_state_t *tty_state_for_vfile(vfile_t *vf) {
+    if (vf && vf->priv) return (tty_state_t *)vf->priv;
+    return &g_console_tty;
+}
+
+#define RTC_RD_TIME    0x80247009UL
+#define RTC_SET_TIME   0x4024700aUL
+#define RTC_IRQP_READ  0x8008700bUL
+#define RTC_EPOCH_READ 0x8008700dUL
+
+typedef struct {
+    int32_t tm_sec;
+    int32_t tm_min;
+    int32_t tm_hour;
+    int32_t tm_mday;
+    int32_t tm_mon;
+    int32_t tm_year;
+    int32_t tm_wday;
+    int32_t tm_yday;
+    int32_t tm_isdst;
+} krtc_time_t;
+
+static int is_special_rtc_path(const char *path) {
+    return strcmp(path, "/dev/misc/rtc") == 0 ||
+           strcmp(path, "/dev/rtc") == 0 ||
+           strcmp(path, "/dev/rtc0") == 0;
+}
+
+static int is_leap_year(int year) {
+    return (year % 4 == 0) && ((year % 100) != 0 || (year % 400) == 0);
+}
+
+static int rtc_time_to_unix_seconds(const krtc_time_t *rt, uint64_t *secs) {
+    static const int month_days[12] = { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+    int year = rt->tm_year + 1900;
+    int month = rt->tm_mon + 1;
+    int hour = rt->tm_hour;
+    int min = rt->tm_min;
+    int sec = rt->tm_sec;
+    int mday = rt->tm_mday;
+    int mdays;
+    int64_t z;
+    int64_t era;
+    unsigned yoe;
+    unsigned doy;
+    unsigned doe;
+
+    if (year < 1970 || month < 1 || month > 12 || mday < 1 ||
+        hour < 0 || hour > 23 || min < 0 || min > 59 || sec < 0 || sec > 59)
+        return -EINVAL;
+
+    mdays = month_days[month - 1];
+    if (month == 2 && is_leap_year(year)) mdays = 29;
+    if (mday > mdays) return -EINVAL;
+
+    year -= month <= 2;
+    era = (year >= 0 ? year : year - 399) / 400;
+    yoe = (unsigned)(year - era * 400);
+    doy = (153U * (unsigned)(month + (month > 2 ? -3 : 9)) + 2U) / 5U + (unsigned)mday - 1U;
+    doe = yoe * 365U + yoe / 4U - yoe / 100U + doy;
+    z = era * 146097 + (int64_t)doe - 719468;
+    if (z < 0) return -EINVAL;
+
+    *secs = (uint64_t)z * 86400ULL + (uint64_t)hour * 3600ULL +
+            (uint64_t)min * 60ULL + (uint64_t)sec;
     return 0;
 }
 
-static int ramfs_vnode_mkdir(vnode_t *dir, const char *name, int mode) {
-    (void)mode;
-    inode_t *dinode = (inode_t *)dir->fs_data;
-    inode_t *child = alloc_inode(FT_DIRECTORY);
-    if (!child) return -ENOMEM;
-    child->parent = dinode;
-    child->capacity = 64 * sizeof(dir_entry_t);
-    child->data = kmalloc(child->capacity);
-    if (!child->data) { child->ref_count = 0; return -ENOMEM; }
-    memset(child->data, 0, child->capacity);
-    add_dir_entry(child, ".", child->inum);
-    add_dir_entry(child, "..", dinode->inum);
-    add_dir_entry(dinode, name, child->inum);
-    return 0;
+static void unix_seconds_to_rtc_time(uint64_t secs, krtc_time_t *rt) {
+    static const int month_yday[2][12] = {
+        { 0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334 },
+        { 0, 31, 60, 91, 121, 152, 182, 213, 244, 274, 305, 335 },
+    };
+    uint64_t days = secs / 86400ULL;
+    uint64_t rem = secs % 86400ULL;
+    int64_t z = (int64_t)days + 719468;
+    int64_t era = (z >= 0 ? z : z - 146096) / 146097;
+    unsigned doe = (unsigned)(z - era * 146097);
+    unsigned yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    int year = (int)(yoe + era * 400);
+    unsigned doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    unsigned mp = (5 * doy + 2) / 153;
+    unsigned mday = doy - (153 * mp + 2) / 5 + 1;
+    unsigned month = mp + (mp < 10 ? 3 : (unsigned)-9);
+
+    year += (month <= 2);
+    memset(rt, 0, sizeof(*rt));
+    rt->tm_sec = (int32_t)(rem % 60ULL);
+    rem /= 60ULL;
+    rt->tm_min = (int32_t)(rem % 60ULL);
+    rem /= 60ULL;
+    rt->tm_hour = (int32_t)rem;
+    rt->tm_mday = (int32_t)mday;
+    rt->tm_mon = (int32_t)(month - 1);
+    rt->tm_year = (int32_t)(year - 1900);
+    rt->tm_wday = (int32_t)((days + 4ULL) % 7ULL);
+    rt->tm_yday = month_yday[is_leap_year(year)][month - 1] + (int)mday - 1;
+    rt->tm_isdst = 0;
 }
 
-static int ramfs_vnode_create(vnode_t *dir, const char *name, int mode, vnode_t **out) {
-    (void)mode;
-    inode_t *dinode = (inode_t *)dir->fs_data;
-    inode_t *child = alloc_inode(FT_REGULAR);
-    if (!child) return -ENOMEM;
-    child->parent = dinode;
-    child->capacity = 4096;
-    child->data = kmalloc(child->capacity);
-    if (!child->data) { child->ref_count = 0; return -ENOMEM; }
-    add_dir_entry(dinode, name, child->inum);
-    *out = ramfs_make_vnode(dir->mnt, child);
-    if (*out) { (*out)->parent = dir; dir->ref_count++; }
-    return *out ? 0 : -ENOMEM;
-}
-
-static void ramfs_vnode_release(vnode_t *vn) {
-    vnode_put(vn->parent);
-    kfree(vn);
-}
-
-static int ramfs_vnode_unlink(vnode_t *dir, const char *name) {
-    inode_t *dinode = (inode_t *)dir->fs_data;
-    dir_entry_t *entries = (dir_entry_t *)dinode->data;
-    int n_entries = dinode->size / sizeof(dir_entry_t);
-
-    for (int i = 0; i < n_entries; i++) {
-        if (entries[i].name[0] != '\0' && strcmp(entries[i].name, name) == 0) {
-            entries[i].name[0] = '\0';
-            return 0;
-        }
-    }
-    return -ENOENT;
-}
-
-static int ramfs_vnode_readlink(vnode_t *vn, char *buf, size_t sz) {
-    inode_t *inode = (inode_t *)vn->fs_data;
-    if (inode->type != FT_SYMLINK) return -EINVAL;
-    size_t len = inode->size;
-    if (len >= sz) len = sz - 1;
-    if (len > 0 && inode->data) memcpy(buf, inode->data, len);
-    buf[len] = '\0';
-    return (int)len;
-}
-
-static int ramfs_vnode_symlink(vnode_t *dir, const char *name, const char *target) {
-    inode_t *dinode = (inode_t *)dir->fs_data;
-    if (dinode->type != FT_DIRECTORY) return -ENOTDIR;
-    inode_t *child = alloc_inode(FT_SYMLINK);
-    if (!child) return -ENOMEM;
-    child->parent = dinode;
-    size_t tlen = strlen(target);
-    child->capacity = tlen + 1;
-    child->data = kmalloc(child->capacity);
-    if (!child->data) { child->ref_count = 0; return -ENOMEM; }
-    memcpy(child->data, target, tlen + 1);
-    child->size = tlen;
-    add_dir_entry(dinode, name, child->inum);
-    return 0;
-}
-
-static int ramfs_vnode_rename(vnode_t *old_dir, const char *old_name,
-                              vnode_t *new_dir, const char *new_name) {
-    inode_t *old_dinode = (inode_t *)old_dir->fs_data;
-    inode_t *new_dinode = (inode_t *)new_dir->fs_data;
-    if (old_dinode->type != FT_DIRECTORY || new_dinode->type != FT_DIRECTORY)
-        return -ENOTDIR;
-
-    dir_entry_t *old_entries = (dir_entry_t *)old_dinode->data;
-    int n_old = old_dinode->size / sizeof(dir_entry_t);
-    int old_idx = -1;
-    int inum = 0;
-    for (int i = 0; i < n_old; i++) {
-        if (old_entries[i].name[0] != '\0' && strcmp(old_entries[i].name, old_name) == 0) {
-            old_idx = i;
-            inum = old_entries[i].inum;
-            break;
-        }
-    }
-    if (old_idx < 0) return -ENOENT;
-
-    dir_entry_t *new_entries = (dir_entry_t *)new_dinode->data;
-    int n_new = new_dinode->size / sizeof(dir_entry_t);
-    int new_idx = -1;
-    for (int i = 0; i < n_new; i++) {
-        if (new_entries[i].name[0] != '\0' && strcmp(new_entries[i].name, new_name) == 0) {
-            new_idx = i;
-            break;
-        }
-    }
-    if (new_idx >= 0) {
-        new_entries[new_idx].inum = inum;
-        memcpy(new_entries[new_idx].name, new_name, MAX_NAME_LEN);
-    } else {
-        add_dir_entry(new_dinode, new_name, inum);
-    }
-
-    old_entries[old_idx].name[0] = '\0';
-
-    inode_t *moved = fs_find_inode_by_inum(inum);
-    if (moved) moved->parent = new_dinode;
-    return 0;
-}
-
-static int ramfs_vnode_rmdir(vnode_t *dir, const char *name) {
-    inode_t *dinode = (inode_t *)dir->fs_data;
-    dir_entry_t *entries = (dir_entry_t *)dinode->data;
-    int n_entries = dinode->size / sizeof(dir_entry_t);
-
-    for (int i = 0; i < n_entries; i++) {
-        if (entries[i].name[0] != '\0' && strcmp(entries[i].name, name) == 0) {
-            inode_t *child = fs_find_inode_by_inum(entries[i].inum);
-            if (!child || child->type != FT_DIRECTORY) return -ENOTDIR;
-            dir_entry_t *centries = (dir_entry_t *)child->data;
-            int cn = child->size / sizeof(dir_entry_t);
-            int active = 0;
-            for (int j = 0; j < cn; j++) {
-                if (centries[j].name[0] != '\0') active++;
-            }
-            if (active > 2) return -ENOTEMPTY;
-            entries[i].name[0] = '\0';
-            return 0;
-        }
-    }
-    return -ENOENT;
-}
-
-static vnode_ops_t g_ramfs_vnode_ops = {
-    .lookup   = ramfs_vnode_lookup,
-    .stat     = ramfs_vnode_stat,
-    .release  = ramfs_vnode_release,
-    .mkdir    = ramfs_vnode_mkdir,
-    .create   = ramfs_vnode_create,
-    .unlink   = ramfs_vnode_unlink,
-    .rmdir    = ramfs_vnode_rmdir,
-    .rename   = ramfs_vnode_rename,
-    .symlink  = ramfs_vnode_symlink,
-    .readlink = ramfs_vnode_readlink,
-};
-
-/* File operations */
-static int ramfs_fread(vfile_t *vf, char *buf, size_t count) {
-    inode_t *inode = (inode_t *)vf->vnode->fs_data;
-    if (vf->offset >= inode->size) return 0;
-    size_t avail = inode->size - vf->offset;
-    size_t n = count < avail ? count : avail;
-    if (n > 0) {
-        memcpy(buf, inode->data + vf->offset, n);
-        vf->offset += n;
-    }
-    return (int)n;
-}
-
-static int ramfs_fwrite(vfile_t *vf, const char *buf, size_t count) {
-    inode_t *inode = (inode_t *)vf->vnode->fs_data;
-    if (inode->type == FT_DIRECTORY) return -EISDIR;
-
-    size_t needed = vf->offset + count;
-    if (needed > inode->capacity) {
-        size_t new_cap = needed * 2;
-        char *new_data = (char *)kmalloc(new_cap);
-        if (!new_data) return -ENOMEM;
-        if (inode->data) {
-            memcpy(new_data, inode->data, inode->size);
-            kfree(inode->data);
-        }
-        memset(new_data + inode->size, 0, new_cap - inode->size);
-        inode->data = new_data;
-        inode->capacity = new_cap;
-    }
-
-    memcpy(inode->data + vf->offset, buf, count);
-    vf->offset += count;
-    if (vf->offset > inode->size) inode->size = vf->offset;
-    return (int)count;
-}
-
-static long ramfs_flseek(vfile_t *vf, long offset, int whence) {
-    inode_t *inode = (inode_t *)vf->vnode->fs_data;
-    long new_off;
-    switch (whence) {
-        case SEEK_SET: new_off = offset; break;
-        case SEEK_CUR: new_off = (long)vf->offset + offset; break;
-        case SEEK_END: new_off = (long)inode->size + offset; break;
-        default: return -EINVAL;
-    }
-    if (new_off < 0) return -EINVAL;
-    vf->offset = (size_t)new_off;
-    return new_off;
-}
-
-static int ramfs_freaddir(vfile_t *vf, void *dirp, size_t count) {
-    inode_t *inode = (inode_t *)vf->vnode->fs_data;
-    if (inode->type != FT_DIRECTORY) return -ENOTDIR;
-
-    dir_entry_t *entries = (dir_entry_t *)inode->data;
-    int n_entries = inode->size / sizeof(dir_entry_t);
-    char *out = (char *)dirp;
-    size_t total = 0;
-
-    int idx = (int)(vf->offset / sizeof(dir_entry_t));
-    while (idx < n_entries) {
-        dir_entry_t *de = &entries[idx];
-        if (de->name[0] != '\0') {
-            size_t namelen = strlen(de->name);
-            size_t reclen  = (offsetof(linux_dirent64_t, d_name) + namelen + 1 + 7) & ~7UL;
-            if (total + reclen > count) break;
-
-            linux_dirent64_t *d = (linux_dirent64_t *)(out + total);
-            d->d_ino    = (uint64_t)de->inum;
-            d->d_off    = (int64_t)(total + reclen);
-            d->d_reclen = (uint16_t)reclen;
-            d->d_type   = DT_UNKNOWN;
-            inode_t *child = fs_find_inode_by_inum(de->inum);
-            if (child) {
-                if (child->type == FT_DIRECTORY) d->d_type = DT_DIR;
-                else if (child->type == FT_SYMLINK) d->d_type = DT_LNK;
-                else if (child->type == FT_REGULAR) d->d_type = DT_REG;
-            }
-            memcpy(d->d_name, de->name, namelen + 1);
-            total += reclen;
-        }
-        idx++;
-        vf->offset += sizeof(dir_entry_t);
-    }
-    return (int)total;
-}
-
-static int ramfs_fclose(vfile_t *vf) {
+static int devfs_rtc_ioctl(vfile_t *vf, unsigned long req, void *arg) {
     (void)vf;
-    return 0;
-}
+    if ((req == RTC_RD_TIME || req == RTC_IRQP_READ || req == RTC_EPOCH_READ) && !arg)
+        return -EFAULT;
 
-static vfile_ops_t g_ramfs_fops = {
-    .read    = ramfs_fread,
-    .write   = ramfs_fwrite,
-    .lseek   = ramfs_flseek,
-    .readdir = ramfs_freaddir,
-    .close   = ramfs_fclose,
-};
+    switch (req) {
+    case RTC_RD_TIME: {
+        krtc_time_t tm;
+        uint64_t ts[2];
+        timekeeping_get_realtime(ts);
+        unix_seconds_to_rtc_time(ts[0], &tm);
+        if (copy_to_user(arg, &tm, sizeof(tm)) < 0) return -EFAULT;
+        return 0;
+    }
+    case RTC_IRQP_READ: {
+        unsigned long irqp = 1;
+        if (copy_to_user(arg, &irqp, sizeof(irqp)) < 0) return -EFAULT;
+        return 0;
+    }
+    case RTC_EPOCH_READ: {
+        unsigned long epoch = 1900;
+        if (copy_to_user(arg, &epoch, sizeof(epoch)) < 0) return -EFAULT;
+        return 0;
+    }
+    case RTC_SET_TIME: {
+        krtc_time_t tm;
+        uint64_t secs;
+        if (copy_from_user(&tm, arg, sizeof(tm)) < 0) return -EFAULT;
+        if (rtc_time_to_unix_seconds(&tm, &secs) < 0) return -EINVAL;
+        return timekeeping_set_realtime(secs, 0);
+    }
+    default:
+        return -ENOTTY;
+    }
+}
 
 /* ============================================================
  * Mount resolution — find which mount owns a path
@@ -655,22 +589,8 @@ vnode_t *vfs_resolve_at(const char *path, const char *cwd) {
  * VFS open / close
  * ============================================================ */
 
-/* Forward declaration */
 extern vfile_t *fat32_open_vnode(vnode_t *vn, int flags);
 extern vfile_t *ext4_open_vnode(vnode_t *vn, int flags);
-
-static vfile_t *ramfs_open_vnode(vnode_t *vn, int flags) {
-    vfile_t *vf = (vfile_t *)kmalloc(sizeof(vfile_t));
-    if (!vf) return NULL;
-    memset(vf, 0, sizeof(*vf));
-    vf->vnode     = vn;
-    vn->ref_count++;
-    vf->flags     = flags;
-    vf->offset    = (flags & O_APPEND) ? vn->size : 0;
-    vf->ref_count = 1;
-    vf->ops       = &g_ramfs_fops;
-    return vf;
-}
 
 int vfs_open(const char *path, int flags, int mode) {
     /* Resolve cwd from current process */
@@ -707,12 +627,21 @@ int vfs_open(const char *path, int flags, int mode) {
         if (fd < 0) { kfree(vf); return -EMFILE; }
         return fd;
     }
+    if (is_special_rtc_path(resolved)) {
+        vfile_t *vf = (vfile_t *)kmalloc(sizeof(vfile_t));
+        if (!vf) return -ENOMEM;
+        memset(vf, 0, sizeof(*vf));
+        vf->ops = &g_rtc_ops; vf->ref_count = 1;
+        int fd = vfs_alloc_fd(vf);
+        if (fd < 0) { kfree(vf); return -EMFILE; }
+        return fd;
+    }
     if (strcmp(resolved, "/dev/tty") == 0) {
         vfile_t *vf = (vfile_t *)kmalloc(sizeof(vfile_t));
         if (!vf) return -ENOMEM;
         memset(vf, 0, sizeof(*vf));
         /* Map it directly to UART (stdin/stdout) for now */
-        vf->ops = &g_stdin_ops; vf->ref_count = 1;
+        vf->ops = &g_stdin_ops; vf->ref_count = 1; vf->priv = &g_console_tty;
         int fd = vfs_alloc_fd(vf);
         if (fd < 0) { kfree(vf); return -EMFILE; }
         return fd;
@@ -829,7 +758,7 @@ int vfs_write(int fd, const char *buf, size_t count) {
 long vfs_lseek(int fd, long offset, int whence) {
     if (fd >= 0 && fd < GFILE_MAX && g_files[fd]) {
         vfile_t *vf = g_files[fd];
-        if (is_special_tty(vf)) return -ESPIPE;
+        if (is_special_tty(vf) || is_pipe_vfile(vf)) return -ESPIPE;
         if (vf->ops && vf->ops->lseek) return vf->ops->lseek(vf, offset, whence);
     }
     return -EBADF;
@@ -848,16 +777,21 @@ int vfs_ioctl(int fd, unsigned long req, void *arg) {
     vfile_t *vf = vfs_get_file(fd);
     if (!vf) return -EBADF;
 
-    if (is_special_tty(vf) && arg) {
+    if (is_special_tty(vf)) {
+        tty_state_t *tty = tty_state_for_vfile(vf);
+        if (!arg) return -EFAULT;
         if (req == TCGETS) {
-            memset(arg, 0, 36);
+            if (copy_to_user(arg, &tty->termios, sizeof(tty->termios)) < 0) return -EFAULT;
             return 0;
         }
         if (req == TCSETS || req == TCSETSW || req == TCSETSF) {
+            ktty_termios_t tio;
+            if (copy_from_user(&tio, arg, sizeof(tio)) < 0) return -EFAULT;
+            tty->termios = tio;
             return 0;
         }
         if (req == TIOCGWINSZ) {
-            memset(arg, 0, 8);
+            if (copy_to_user(arg, &tty->winsize, sizeof(tty->winsize)) < 0) return -EFAULT;
             return 0;
         }
     }
@@ -1116,7 +1050,7 @@ static vnode_t *vfs_resolve_no_follow_final(const char *path) {
 
 int vfs_stat(const char *path, kstat_t *st) {
     if (strcmp(path, "/dev/null") == 0 || strcmp(path, "/dev/zero") == 0 ||
-        strcmp(path, "/dev/tty") == 0) {
+        strcmp(path, "/dev/tty") == 0 || is_special_rtc_path(path)) {
         memset(st, 0, sizeof(*st));
         st->st_mode = S_IFCHR | 0666;
         st->st_nlink = 1;
@@ -1139,11 +1073,12 @@ int vfs_fstat(int fd, kstat_t *st) {
         vfile_t *vf = g_files[fd];
         if (vf->vnode && vf->vnode->ops && vf->vnode->ops->stat)
             return vf->vnode->ops->stat(vf->vnode, st);
-        if (is_special_tty(vf)) {
-            memset(st, 0, sizeof(*st));
-            st->st_mode = S_IFCHR | 0666;
-            st->st_nlink = 1;
-            st->st_blksize = 4096;
+        if (is_char_device_vfile(vf)) {
+            fill_char_kstat(st);
+            return 0;
+        }
+        if (is_pipe_vfile(vf)) {
+            fill_pipe_kstat(st);
             return 0;
         }
     }
@@ -1169,6 +1104,7 @@ int vfs_fstatat(int dirfd, const char *path, kstat_t *st, int flags) {
 
 int vfs_faccessat(int dirfd, const char *path, int mode) {
     (void)dirfd; (void)mode;
+    if (path && is_special_rtc_path(path)) return 0;
     vnode_t *vn = vfs_resolve(path);
     if (!vn) {
         stat_t rfs;
@@ -1320,8 +1256,6 @@ int vfs_getcwd(char *buf, size_t size) {
 /* ============================================================
  * Pipe
  * ============================================================ */
-
-#define PIPE_BUF_SIZE   4096
 
 typedef struct pipe_buf {
     char     data[PIPE_BUF_SIZE];
@@ -1565,6 +1499,7 @@ void vfs_init(void) {
     memset(g_files, 0, sizeof(g_files));
     memset(g_mounts, 0, sizeof(g_mounts));
     g_nmounts = 0;
+    init_default_tty_state(&g_console_tty);
 
     /* Install std streams at global fds 0,1,2 */
     g_files[STDIN_FILENO]  = &g_stdin_file;
@@ -1576,17 +1511,17 @@ void vfs_init(void) {
     memset(mnt, 0, sizeof(*mnt));
     strcpy(mnt->path, "/");
     mnt->type = FS_TYPE_RAMFS;
-    mnt->root = ramfs_make_vnode(mnt, fs_get_root());
+    mnt->root = ramfs_mount(mnt);
 
     printf("[VFS] Initialized (root=ramfs)\n");
 
-    fs_mkdir("/tmp");
+    vfs_mkdir("/tmp", 0755);
 
     /* Mount procfs at /proc */
     {
         extern vnode_t *procfs_mount(void);
         extern vfile_t *procfs_open_vnode(vnode_t *vn, int flags);
-        fs_mkdir("/proc");
+        vfs_mkdir("/proc", 0755);
         vnode_t *procfs_root = procfs_mount();
         if (procfs_root) {
             mount_t *mnt = &g_mounts[g_nmounts++];
