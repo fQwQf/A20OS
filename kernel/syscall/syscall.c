@@ -931,7 +931,13 @@ int64_t sys_brk(uint64_t addr) {
 }
 
 int64_t sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, long off) {
-    return (int64_t)proc_mmap(addr, len, prot, flags, fd, off);
+    int gfd = fd;
+    if (!(flags & MAP_ANONYMOUS) && fd >= 0) {
+        int64_t r = get_global_fd(fd);
+        if (r < 0) return r;
+        gfd = (int)r;
+    }
+    return (int64_t)proc_mmap(addr, len, prot, flags, gfd, off);
 }
 
 int64_t sys_munmap(uint64_t addr, size_t len) {
