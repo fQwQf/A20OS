@@ -62,7 +62,9 @@
 
 #define EXT4_ROOT_INO      2
 
+#ifndef S_IFLNK
 #define S_IFLNK            0120000
+#endif
 
 typedef struct __attribute__((packed)) ext4_superblock {
     uint32_t s_inodes_count;

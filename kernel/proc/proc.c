@@ -761,10 +761,81 @@ uint64_t proc_brk(uint64_t newbrk) {
 }
 
 uint64_t proc_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, long off) {
-    (void)fd; (void)off;
     task_t *t = current_task;
     if (!t || !t->mm) return (uint64_t)-1;
-    return mm_mmap(t->mm, addr, len, prot, flags);
+
+    size_t map_len = ROUND_UP(len, PAGE_SIZE);
+    if (map_len == 0) return (uint64_t)-EINVAL;
+
+    if ((flags & MAP_ANONYMOUS) || fd < 0)
+        return mm_mmap(t->mm, addr, len, prot, flags);
+
+    if (off < 0 || ((uint64_t)off & (PAGE_SIZE - 1)))
+        return (uint64_t)-EINVAL;
+
+    uint64_t mapped = mm_mmap(t->mm, addr, len, prot, flags);
+    if ((int64_t)mapped < 0)
+        return mapped;
+
+    long saved_off = vfs_lseek(fd, 0, SEEK_CUR);
+    if (saved_off < 0) {
+        mm_munmap(t->mm, mapped, map_len);
+        return (uint64_t)-EIO;
+    }
+    if (vfs_lseek(fd, off, SEEK_SET) < 0) {
+        mm_munmap(t->mm, mapped, map_len);
+        return (uint64_t)-EIO;
+    }
+
+    uint64_t pte_flags = prot_to_pte(prot);
+    for (size_t done = 0; done < map_len; done += PAGE_SIZE) {
+        pfn_t pfn = pfa_alloc_page();
+        if (pfn == PFN_NONE) {
+            vfs_lseek(fd, saved_off, SEEK_SET);
+            mm_munmap(t->mm, mapped, map_len);
+            return (uint64_t)-ENOMEM;
+        }
+
+        char *page = pfn_to_virt(pfn);
+        memset(page, 0, PAGE_SIZE);
+
+        size_t want = 0;
+        if (done < len) {
+            want = len - done;
+            if (want > PAGE_SIZE)
+                want = PAGE_SIZE;
+        }
+
+        if (want > 0) {
+            size_t copied = 0;
+            while (copied < want) {
+                int nr = vfs_read(fd, page + copied, want - copied);
+                if (nr < 0) {
+                    frame_put(pfn);
+                    vfs_lseek(fd, saved_off, SEEK_SET);
+                    mm_munmap(t->mm, mapped, map_len);
+                    return (uint64_t)-EIO;
+                }
+                if (nr == 0)
+                    break;
+                copied += (size_t)nr;
+            }
+        }
+
+        int r = pt_map(t->mm->pgdir, mapped + done, pfn_to_phys(pfn), pte_flags);
+        if (r < 0) {
+            frame_put(pfn);
+            vfs_lseek(fd, saved_off, SEEK_SET);
+            mm_munmap(t->mm, mapped, map_len);
+            return (uint64_t)r;
+        }
+
+        t->mm->rss++;
+    }
+
+    vfs_lseek(fd, saved_off, SEEK_SET);
+    __asm__ volatile("sfence.vma" ::: "memory");
+    return mapped;
 }
 
 int proc_munmap(uint64_t addr, size_t len) {

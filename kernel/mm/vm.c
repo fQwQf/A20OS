@@ -104,6 +104,27 @@ void mm_insert_vma(mm_struct_t *mm, vm_area_t *newv) {
     }
 }
 
+static int mm_split_vma_at(mm_struct_t *mm, uint64_t addr) {
+    vm_area_t *v = mm_find_vma(mm, addr);
+    if (!v || addr <= v->start || addr >= v->end)
+        return 0;
+
+    vm_area_t *tail = kcalloc(1, sizeof(vm_area_t));
+    if (!tail)
+        return -ENOMEM;
+
+    *tail = *v;
+    tail->start = addr;
+    tail->prev = v;
+    tail->next = v->next;
+    if (tail->next)
+        tail->next->prev = tail;
+
+    v->end = addr;
+    v->next = tail;
+    return 0;
+}
+
 uint64_t prot_to_pte(int prot) {
     uint64_t f = PTE_V | PTE_U | PTE_A | PTE_D;
     if (prot & 1) f |= PTE_R;
@@ -220,14 +241,21 @@ uint64_t mm_brk(mm_struct_t *mm, uint64_t newbrk) {
 
 int mm_mprotect(mm_struct_t *mm, uint64_t addr, size_t len, int prot) {
     if (!mm || !mm->pgdir) return -EINVAL;
+    if (addr & (PAGE_SIZE - 1)) return -EINVAL;
     len = ROUND_UP(len, PAGE_SIZE);
+    if (len == 0) return 0;
     uint64_t ptef = prot_to_pte(prot);
-    uint64_t vmf = VM_ANON;
+    uint64_t vmf = 0;
     if (prot & 1) vmf |= VM_READ;
     if (prot & 2) vmf |= VM_WRITE;
     if (prot & 4) vmf |= VM_EXEC;
     uint64_t end = addr + len;
     int touched = 0;
+
+    int r = mm_split_vma_at(mm, addr);
+    if (r < 0) return r;
+    r = mm_split_vma_at(mm, end);
+    if (r < 0) return r;
 
     for (vm_area_t *v = mm->mmap; v; v = v->next) {
         if (v->start >= end || v->end <= addr) continue;

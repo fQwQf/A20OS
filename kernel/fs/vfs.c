@@ -1053,6 +1053,67 @@ int vfs_rmdir(const char *path) {
     return r;
 }
 
+static vnode_t *vfs_resolve_no_follow_final(const char *path) {
+    if (!path || !*path) return NULL;
+
+    task_t *cur = proc_current();
+    const char *cwd = cur ? cur->cwd : "/";
+
+    char resolved[MAX_PATH_LEN];
+    if (path[0] == '/') {
+        strncpy(resolved, path, MAX_PATH_LEN - 1);
+    } else {
+        size_t cwd_len = strlen(cwd);
+        if (cwd_len > 0 && cwd[cwd_len - 1] == '/')
+            snprintf(resolved, MAX_PATH_LEN, "%s%s", cwd, path);
+        else
+            snprintf(resolved, MAX_PATH_LEN, "%s/%s", cwd, path);
+    }
+    resolved[MAX_PATH_LEN - 1] = '\0';
+
+    size_t len = strlen(resolved);
+    while (len > 1 && resolved[len - 1] == '/')
+        resolved[--len] = '\0';
+
+    if (strcmp(resolved, "/") == 0)
+        return vfs_resolve(resolved);
+
+    char parent_path[MAX_PATH_LEN];
+    char name[MAX_NAME_LEN];
+    char *last_slash = strrchr(resolved, '/');
+    if (!last_slash) return NULL;
+    if (last_slash == resolved) {
+        strcpy(parent_path, "/");
+    } else {
+        size_t plen = last_slash - resolved;
+        memcpy(parent_path, resolved, plen);
+        parent_path[plen] = '\0';
+    }
+    strncpy(name, last_slash + 1, MAX_NAME_LEN - 1);
+    name[MAX_NAME_LEN - 1] = '\0';
+    if (name[0] == '\0') return NULL;
+
+    mount_t *mnt = vfs_find_mount(parent_path);
+    if (!mnt) return NULL;
+    const char *rel = strip_mount_prefix(parent_path, mnt);
+    vnode_t *parent = vnode_lookup_path(mnt->root, rel);
+    if (!parent || parent->type != VFS_FT_DIR) {
+        vnode_put(parent);
+        return NULL;
+    }
+
+    vnode_t *vn = NULL;
+    if (!parent->ops || !parent->ops->lookup) {
+        vnode_put(parent);
+        return NULL;
+    }
+    int r = parent->ops->lookup(parent, name, &vn);
+    vnode_put(parent);
+    if (r < 0 || !vn)
+        return NULL;
+    return vn;
+}
+
 int vfs_stat(const char *path, kstat_t *st) {
     if (strcmp(path, "/dev/null") == 0 || strcmp(path, "/dev/zero") == 0 ||
         strcmp(path, "/dev/tty") == 0) {
@@ -1090,7 +1151,19 @@ int vfs_fstat(int fd, kstat_t *st) {
 }
 
 int vfs_fstatat(int dirfd, const char *path, kstat_t *st, int flags) {
-    (void)dirfd; (void)flags;
+    (void)dirfd;
+    if (flags & AT_SYMLINK_NOFOLLOW) {
+        vnode_t *vn = vfs_resolve_no_follow_final(path);
+        if (vn) {
+            if (vn->ops && vn->ops->stat) {
+                int r = vn->ops->stat(vn, st);
+                vnode_put(vn);
+                return r;
+            }
+            vnode_put(vn);
+            return -ENOSYS;
+        }
+    }
     return vfs_stat(path, st);
 }
 
