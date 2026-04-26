@@ -1,14 +1,15 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <stdint.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/syscall.h>
 #include <unistd.h>
 
-#include "test_runners.h"
+#include "common_runner.h"
 
 #define MAX_TESTS 128
 #define TEST_DIR "/test"
@@ -21,21 +22,30 @@ typedef struct {
 } test_entry_t;
 
 typedef struct {
-    char *test_name;
-    int (*func)(const char *script_name, const char *script_dir);
+    const char *test_name;
+    const char *runtime;
+    const char *tag;
 } Test;
 
 static test_entry_t g_tests[MAX_TESTS];
 static Test test_table[] = {
-    // {"glibc_basic",   run_glibc_basic_test},
-    // {"glibc_busybox", run_glibc_busybox_test},
-    // {"glibc_lua",     run_glibc_lua_test},
-    // {"glibc_libctest", run_glibc_libctest_test},
-    {"glibc_ltp", run_glibc_ltp_test}
-    // {"musl_basic",    run_musl_basic_test},
-    // {"musl_busybox",  run_musl_busybox_test},
-    // {"musl_lua", run_musl_lua_test},
+    {"glibc_basic", "glibc", "TEST][glibc][basic"},
+    {"glibc_busybox", "glibc", "TEST][glibc][busybox"},
+    {"glibc_lua", "glibc", "TEST][glibc][lua"},
+    {"glibc_libctest", "glibc", "TEST][glibc][libctest"},
+    {"glibc_ltp", "glibc", "TEST][glibc][ltp"},
+    {"musl_basic", "musl", "TEST][musl][basic"},
+    {"musl_busybox", "musl", "TEST][musl][busybox"},
+    {"musl_lua", "musl", "TEST][musl][lua"},
+    {"musl_ltp", "musl", "TEST][musl][ltp"},
 };
+
+static int compare_test_entry(const void *lhs, const void *rhs)
+{
+    const test_entry_t *a = (const test_entry_t *)lhs;
+    const test_entry_t *b = (const test_entry_t *)rhs;
+    return strcmp(a->path, b->path);
+}
 
 static int ends_with(const char *s, const char *suffix)
 {
@@ -165,18 +175,17 @@ static const char *runtime_from_path(const char *path)
     return "unknown";
 }
 
-static int (*is_registered(const char *script, const char *runtime))(const char *, const char *)
+static const Test *find_test_entry(const char *script, const char *runtime)
 {
     const char *script_name = path_basename(script);
     char prefix[64];
     char key[128];
     script_prefix(script_name, prefix, sizeof(prefix));
     snprintf(key, sizeof(key), "%s_%s", runtime, prefix);
-    // printf("[CONTEST] script_name = %s  runtime = %s key = %s\n", script_name, runtime, key);
     int n = (int)(sizeof(test_table) / sizeof(test_table[0]));
     for (int i = 0; i < n; i++) {
         if (strcmp(test_table[i].test_name, key) == 0)
-            return test_table[i].func;
+            return &test_table[i];
     }
     return NULL;
 }
@@ -206,34 +215,47 @@ int main(int argc, char *argv[])
     memset(g_tests, 0, sizeof(g_tests));
 
     scan_tree(TEST_DIR, 0, g_tests, &ntests);
+    if (ntests > 1)
+        qsort(g_tests, (size_t)ntests, sizeof(g_tests[0]), compare_test_entry);
 
     printf("[CONTEST] Found %d test script(s)\n", ntests);
+    int executed = 0;
+    int failed = 0;
+    int skipped = 0;
 
     for (int i = 0; i < ntests; i++) {
         const char *script_name = path_basename(g_tests[i].path);
         const char *runtime = runtime_from_path(g_tests[i].path);
-        int (*runner)(const char *, const char *) = is_registered(script_name, runtime);
+        const Test *test = find_test_entry(script_name, runtime);
 
         char group[128];
         extract_group(g_tests[i].path, group, sizeof(group));
-        (void)group;
-        // printf("[CONTEST][RUN] preparing #%d runtime=%s group=%s script=%s\n",
-            //    i, runtime, group, g_tests[i].path);
-        // printf("[CONTEST][REGISTER] script=%s registered=%d\n", script_name, runner != NULL);
-        // printf("[CONTEST][DISPATCH] %s -> direct function call\n", script_name);
 
-        // printf("[CONTEST] #### OS COMP TEST GROUP START %s ####\n", group);
-
-        if (runner) {
-            char script_dir[512];
-            path_dirname(g_tests[i].path, script_dir, sizeof(script_dir));
-            printf("[CONTEST] run %s\n", g_tests[i].path);
-            runner(script_name, script_dir);
+        if (!test) {
+            skipped++;
+            printf("[CONTEST][SKIP] runtime=%s script=%s has no registered runner\n",
+                   runtime, g_tests[i].path);
+            continue;
         }
 
-        // printf("[CONTEST] #### OS COMP TEST GROUP END %s ####\n", group);
+        char script_dir[512];
+        path_dirname(g_tests[i].path, script_dir, sizeof(script_dir));
+        printf("[CONTEST][RUN] runtime=%s group=%s script=%s\n",
+               runtime, group, g_tests[i].path);
+        int rc = run_script_in_dir(test->runtime, script_name, script_dir, test->tag);
+        executed++;
+        if (rc != 0) {
+            failed++;
+            printf("[CONTEST][FAIL] runtime=%s group=%s status=%d script=%s\n",
+                   runtime, group, rc, g_tests[i].path);
+        } else {
+            printf("[CONTEST][PASS] runtime=%s group=%s script=%s\n",
+                   runtime, group, g_tests[i].path);
+        }
     }
 
+    printf("[CONTEST] Summary: executed=%d failed=%d skipped=%d\n",
+           executed, failed, skipped);
     printf("[CONTEST] All tests done, powering off\n");
     syscall(SYS_reboot, 0);
 

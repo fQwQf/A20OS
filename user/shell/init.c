@@ -12,7 +12,51 @@
 #include <sys/syscall.h>
 #include <sys/mman.h>
 
-#include "busybox_setup.h"
+#include "runtime_setup.h"
+
+static int dir_exists(const char *path)
+{
+    struct stat st;
+    return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
+}
+
+static void append_existing_dir(char *buf, size_t buf_size, const char *path)
+{
+    size_t len;
+    int n;
+
+    if (!dir_exists(path))
+        return;
+
+    len = strlen(buf);
+    n = snprintf(buf + len, buf_size - len, "%s%s", len == 0 ? "" : ":", path);
+    if (n < 0 || (size_t)n >= buf_size - len)
+        buf[buf_size - 1] = '\0';
+}
+
+static void build_glibc_shell_env(char *path_env, size_t path_env_size,
+                                  char *ld_env, size_t ld_env_size)
+{
+    char path_value[512];
+    char ld_value[512];
+
+    snprintf(path_value, sizeof(path_value), "/bin");
+    append_existing_dir(path_value, sizeof(path_value), "/test");
+    append_existing_dir(path_value, sizeof(path_value), "/test/glibc");
+    append_existing_dir(path_value, sizeof(path_value), "/testrv/glibc");
+    append_existing_dir(path_value, sizeof(path_value), "/testla/glibc");
+
+    ld_value[0] = '\0';
+    append_existing_dir(ld_value, sizeof(ld_value), "/test/glibc/lib");
+    append_existing_dir(ld_value, sizeof(ld_value), "/testrv/glibc/lib");
+    append_existing_dir(ld_value, sizeof(ld_value), "/testla/glibc/lib");
+    append_existing_dir(ld_value, sizeof(ld_value), "/glibc/lib");
+    if (ld_value[0] == '\0')
+        snprintf(ld_value, sizeof(ld_value), "/lib");
+
+    snprintf(path_env, path_env_size, "PATH=%s", path_value);
+    snprintf(ld_env, ld_env_size, "LD_LIBRARY_PATH=%s", ld_value);
+}
 
 static int test_file_io(void)
 {
@@ -323,13 +367,16 @@ static int test_stress(void)
         if (pid == 0)
         {
             char cmd[256];
+            char path_env[576];
+            char ld_env[576];
             snprintf(cmd, sizeof(cmd),
                      "i=1; while [ $i -le %d ]; do mksh -c 'echo 1' & i=$((i+1)); done; wait",
                      10);
+            build_glibc_shell_env(path_env, sizeof(path_env), ld_env, sizeof(ld_env));
             char *mksh_argv[] = {"mksh", "-c", cmd, NULL};
             char *envp[] = {
-                "PATH=/bin",
-                "LD_LIBRARY_PATH=/lib/glibc:/lib/riscv64-linux-gnu",
+                path_env,
+                ld_env,
                 "HOME=/",
                 NULL,
             };
@@ -353,7 +400,7 @@ int main(int argc, char *argv[])
     (void)argc;
     (void)argv;
 
-    setup_dev_runtime_lib_links();
+    setup_runtime_links();
 
     int pid = fork();
     if (pid < 0)
@@ -363,10 +410,13 @@ int main(int argc, char *argv[])
     }
     if (pid == 0)
     {
+        char path_env[576];
+        char ld_env[576];
+        build_glibc_shell_env(path_env, sizeof(path_env), ld_env, sizeof(ld_env));
         char *sh_argv[] = {"mksh", NULL};
         char *envp[] = {
-            "PATH=/bin:/test:/test/glibc:/test/musl:/testrv/glibc:/testrv/musl",
-            "LD_LIBRARY_PATH=/lib/glibc:/lib/riscv64-linux-gnu",
+            path_env,
+            ld_env,
             "HOME=/",
             NULL,
         };
