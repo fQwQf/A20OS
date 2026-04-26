@@ -12,6 +12,8 @@
 #include <sys/syscall.h>
 #include <sys/mman.h>
 
+#include "busybox_setup.h"
+
 static int test_file_io(void)
 {
     const char *path = "/testrv/testfile.txt";
@@ -325,7 +327,12 @@ static int test_stress(void)
                      "i=1; while [ $i -le %d ]; do mksh -c 'echo 1' & i=$((i+1)); done; wait",
                      10);
             char *mksh_argv[] = {"mksh", "-c", cmd, NULL};
-            char *envp[] = {"PATH=/bin", "HOME=/", NULL};
+            char *envp[] = {
+                "PATH=/bbin:/bin",
+                "LD_LIBRARY_PATH=/lib/glibc:/lib/riscv64-linux-gnu",
+                "HOME=/",
+                NULL,
+            };
             execve("/bin/mksh", mksh_argv, envp);
             _exit(1);
         }
@@ -346,6 +353,9 @@ int main(int argc, char *argv[])
     (void)argc;
     (void)argv;
 
+    setup_bbin_busybox();
+    setup_dev_runtime_lib_links();
+
     int pid = fork();
     if (pid < 0)
     {
@@ -355,7 +365,13 @@ int main(int argc, char *argv[])
     if (pid == 0)
     {
         char *sh_argv[] = {"mksh", NULL};
-        execve("/bin/mksh", sh_argv, NULL);
+        char *envp[] = {
+            "PATH=/bbin:/bin:/test:/test/glibc:/test/musl:/testrv/glibc:/testrv/musl",
+            "LD_LIBRARY_PATH=/lib/glibc:/lib/riscv64-linux-gnu",
+            "HOME=/",
+            NULL,
+        };
+        execve("/bin/mksh", sh_argv, envp);
         printf("[INIT] execve failed.\n");
         _exit(127);
     }
