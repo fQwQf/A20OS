@@ -328,7 +328,7 @@ static int test_stress(void)
                      10);
             char *mksh_argv[] = {"mksh", "-c", cmd, NULL};
             char *envp[] = {
-                "PATH=/bbin:/bin",
+                "PATH=/bin",
                 "LD_LIBRARY_PATH=/lib/glibc:/lib/riscv64-linux-gnu",
                 "HOME=/",
                 NULL,
@@ -353,7 +353,6 @@ int main(int argc, char *argv[])
     (void)argc;
     (void)argv;
 
-    setup_bbin_busybox();
     setup_dev_runtime_lib_links();
 
     int pid = fork();
@@ -366,7 +365,7 @@ int main(int argc, char *argv[])
     {
         char *sh_argv[] = {"mksh", NULL};
         char *envp[] = {
-            "PATH=/bbin:/bin:/test:/test/glibc:/test/musl:/testrv/glibc:/testrv/musl",
+            "PATH=/bin:/test:/test/glibc:/test/musl:/testrv/glibc:/testrv/musl",
             "LD_LIBRARY_PATH=/lib/glibc:/lib/riscv64-linux-gnu",
             "HOME=/",
             NULL,
@@ -385,8 +384,10 @@ int main(int argc, char *argv[])
         syscall(SYS_reboot, 0);
     }
 
+    printf("[INIT] Shell exited abnormally (status=%d). Powering off.\n", status);
     while (1)
     {
+        syscall(SYS_reboot, 0);
     }
     return 0;
 }

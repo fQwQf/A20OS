@@ -5,39 +5,44 @@
  * Entries are generated on-demand during lookup and read.
  */
 
-#include "procfs.h"
-#include "proc.h"
-#include "mm.h"
-#include "timer.h"
-#include "string.h"
-#include "stdio.h"
+#include "fs/procfs.h"
+#include "proc/proc.h"
+#include "mm/mm.h"
+#include "mm/frame.h"
+#include "core/timer.h"
+#include "core/string.h"
+#include "core/stdio.h"
+#include "core/version.h"
 
 extern task_t *proc_current(void);
 extern task_t *proc_find(int pid);
 extern size_t  frame_free_count(void);
 
+// procfs 文件类型枚举
 typedef enum {
-    PF_ROOT,
-    PF_MEMINFO,
-    PF_VERSION,
-    PF_UPTIME,
-    PF_CMDLINE,
-    PF_CPUINFO,
-    PF_MOUNTS,
-    PF_LOADAVG,
-    PF_PID_STAT,
-    PF_PID_STATUS,
-    PF_SELF,
-    PF_FSTYPE,
+    PF_ROOT,          // 根目录或进程目录
+    PF_MEMINFO,       // /proc/meminfo - 内存信息
+    PF_VERSION,       // /proc/version - 内核版本
+    PF_UPTIME,        // /proc/uptime - 运行时间
+    PF_CMDLINE,       // /proc/cmdline - 启动参数
+    PF_CPUINFO,       // /proc/cpuinfo - CPU 信息
+    PF_MOUNTS,       // /proc/mounts - 挂载信息
+    PF_LOADAVG,      // /proc/loadavg - 负载平均值
+    PF_PID_STAT,     // /proc/[pid]/stat - 进程状态
+    PF_PID_STATUS,   // /proc/[pid]/status - 进程状态详情
+    PF_SELF,         // /proc/self - 当前进程的 pid
+    PF_FSTYPE,       // /proc/filesystems - 支持的文件系统
 } pf_type_t;
 
+// procfs 目录项结构
 typedef struct pf_entry {
-    char name[32];
-    pf_type_t type;
-    int pid;
+    char name[32];           // 文件名
+    pf_type_t type;         // 文件类型
+    int pid;                // 进程 ID（仅对进程相关文件有效）
     struct pf_entry *next;
 } pf_entry_t;
 
+// 创建一个新的目录项
 static pf_entry_t *new_entry(const char *name, pf_type_t type, int pid) {
     pf_entry_t *e = (pf_entry_t *)kmalloc(sizeof(*e));
     if (!e) return NULL;
@@ -48,18 +53,20 @@ static pf_entry_t *new_entry(const char *name, pf_type_t type, int pid) {
     return e;
 }
 
+// 判断字符串是否为纯数字（进程 ID）
 static int is_pid_str(const char *s) {
     if (!s || !*s) return 0;
     while (*s) { if (*s < '0' || *s > '9') return 0; s++; }
     return 1;
 }
 
+// 生成 procfs 文件的内容
 static int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
     buf[0] = '\0';
     switch (type) {
     case PF_MEMINFO: {
         size_t free_frames = frame_free_count();
-        size_t total_kb = (PHYS_MEMORY_END - PHYS_MEMORY_BASE) / 1024;
+        size_t total_kb = pfa.total_frames * PAGE_SIZE / 1024;
         size_t free_kb = free_frames * PAGE_SIZE / 1024;
         snprintf(buf, bufsz,
             "MemTotal:       %lu kB\n"
@@ -71,9 +78,9 @@ static int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
         break;
     }
     case PF_VERSION:
-        snprintf(buf, bufsz, "A20OS version 0.1 (riscv64)\n");
+        snprintf(buf, bufsz, "A20OS version " VERSION " (" ARCH_NAME ")\n"); 
         break;
-    case PF_UPTIME: {
+    case PF_UPTIME: {  // 生成运行时间
         uint64_t ticks = timer_get_ticks();
         uint64_t sec = ticks / TICKS_PER_SEC;
         uint64_t frac = (ticks % TICKS_PER_SEC) * 100 / TICKS_PER_SEC;
@@ -83,23 +90,23 @@ static int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
     case PF_CMDLINE:
         snprintf(buf, bufsz, "console=ttyS0\n");
         break;
-    case PF_CPUINFO:
+    case PF_CPUINFO:  // 生成 CPU 信息
         snprintf(buf, bufsz,
             "processor\t: 0\n"
             "hart\t\t: 0\n"
             "isa\t\t: rv64gc\n"
             "mmu\t\t: sv39\n\n");
         break;
-    case PF_MOUNTS:
+    case PF_MOUNTS:  // 生成挂载信息
         snprintf(buf, bufsz,
             "none / ramfs rw 0 0\n"
             "/dev/vda /mnt vfat rw 0 0\n"
             "none /proc proc rw 0 0\n");
         break;
-    case PF_LOADAVG:
+    case PF_LOADAVG:  // 生成负载平均值
         snprintf(buf, bufsz, "0.00 0.00 0.00 1/64 1\n");
         break;
-    case PF_PID_STAT: {
+    case PF_PID_STAT: {  // 生成进程 stat 信息
         task_t *t = proc_find(pid);
         if (!t) { snprintf(buf, bufsz, "%d (unknown) S 0 0\n", pid); break; }
         snprintf(buf, bufsz,
@@ -108,7 +115,7 @@ static int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
             (unsigned long)t->total_time);
         break;
     }
-    case PF_PID_STATUS: {
+    case PF_PID_STATUS: {  // 生成进程 status 信息
         task_t *t = proc_find(pid);
         if (!t) { snprintf(buf, bufsz, "Name:\tunknown\nPid:\t%d\n", pid); break; }
         const char *state = "S (sleeping)";
@@ -126,12 +133,12 @@ static int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
             t->name, t->pid, t->ppid, t->pgid, t->sid, state);
         break;
     }
-    case PF_SELF: {
+    case PF_SELF: {  // 生成当前进程的 pid
         task_t *t = proc_current();
         snprintf(buf, bufsz, "%d\n", t ? t->pid : 0);
         break;
     }
-    case PF_FSTYPE:
+    case PF_FSTYPE:  // 生成支持的文件系统列表
         snprintf(buf, bufsz, "nodev\tproc\n\text4\n\tvfat\n\tramfs\n\ttmpfs\n");
         break;
     default:
@@ -140,6 +147,7 @@ static int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
     return (int)strlen(buf);
 }
 
+// 根据名称解析文件类型（如果需要同时解析出 pid）
 static pf_type_t name_to_type(const char *name, int *out_pid) {
     *out_pid = 0;
     if (strcmp(name, "meminfo") == 0) return PF_MEMINFO;
@@ -160,13 +168,15 @@ static pf_type_t name_to_type(const char *name, int *out_pid) {
     return PF_ROOT;
 }
 
+// procfs 私有数据结构
 typedef struct {
-    pf_type_t type;
-    int pid;
-    char content[4096];
-    size_t content_len;
+    pf_type_t type;         // 文件类型
+    int pid;               // 进程 ID
+    char content[4096];    // 文件内容
+    size_t content_len;    // 内容长度
 } procfs_priv_t;
 
+// 创建 procfs 私有数据并生成内容
 static procfs_priv_t *procfs_priv_create(pf_type_t type, int pid) {
     procfs_priv_t *p = (procfs_priv_t *)kmalloc(sizeof(*p));
     if (!p) return NULL;
@@ -177,6 +187,7 @@ static procfs_priv_t *procfs_priv_create(pf_type_t type, int pid) {
     return p;
 }
 
+// procfs 的 lookup 操作（查找目录项）
 static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
     if (!name || !*name) return -ENOENT;
 
@@ -213,6 +224,7 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
     return 0;
 }
 
+// procfs 的 stat 操作（获取文件状态）
 static int procfs_stat(vnode_t *vn, kstat_t *st) {
     memset(st, 0, sizeof(*st));
     st->st_ino = vn->ino;
@@ -222,6 +234,7 @@ static int procfs_stat(vnode_t *vn, kstat_t *st) {
     return 0;
 }
 
+// procfs 的 release 操作（释放 vnode）
 static void procfs_release(vnode_t *vn) {
     if (vn->fs_data) kfree(vn->fs_data);
     if (vn->ino) kfree((void *)(uintptr_t)vn->ino);
@@ -229,12 +242,14 @@ static void procfs_release(vnode_t *vn) {
     kfree(vn);
 }
 
+// procfs vnode 操作表
 static vnode_ops_t g_procfs_vnode_ops = {
     .lookup  = procfs_lookup,
     .stat    = procfs_stat,
     .release = procfs_release,
 };
 
+// procfs 的 read 操作（读取文件内容）
 static int procfs_fread(vfile_t *vf, char *buf, size_t count) {
     if (!vf || !vf->priv) return -EBADF;
     procfs_priv_t *p = (procfs_priv_t *)vf->priv;
@@ -246,6 +261,7 @@ static int procfs_fread(vfile_t *vf, char *buf, size_t count) {
     return (int)n;
 }
 
+// procfs 的 lseek 操作（设置文件偏移）
 static long procfs_flseek(vfile_t *vf, long offset, int whence) {
     if (!vf || !vf->vnode || !vf->vnode->fs_data) return -EBADF;
     procfs_priv_t *p = (procfs_priv_t *)vf->vnode->fs_data;
@@ -261,6 +277,7 @@ static long procfs_flseek(vfile_t *vf, long offset, int whence) {
     return new_off;
 }
 
+// procfs 的 readdir 操作（读取目录项）
 static int procfs_freaddir(vfile_t *vf, void *dirp, size_t count) {
     static const char *entries[] = {
         ".", "..", "meminfo", "version", "uptime", "cmdline",
@@ -288,11 +305,13 @@ static int procfs_freaddir(vfile_t *vf, void *dirp, size_t count) {
     return (int)total;
 }
 
+// procfs 的 close 操作（关闭文件）
 static int procfs_fclose(vfile_t *vf) {
     if (vf && vf->priv) { kfree(vf->priv); vf->priv = NULL; }
     return 0;
 }
 
+// procfs vfile 操作表
 static vfile_ops_t g_procfs_fops = {
     .read    = procfs_fread,
     .write   = NULL,
@@ -301,6 +320,7 @@ static vfile_ops_t g_procfs_fops = {
     .close   = procfs_fclose,
 };
 
+// 挂载 procfs 文件系统
 vnode_t *procfs_mount(void) {
     vnode_t *root = (vnode_t *)kmalloc(sizeof(vnode_t));
     if (!root) return NULL;
@@ -317,6 +337,7 @@ vnode_t *procfs_mount(void) {
     return root;
 }
 
+// 打开 procfs vnode
 vfile_t *procfs_open_vnode(vnode_t *vn, int flags) {
     (void)flags;
     vfile_t *vf = (vfile_t *)kmalloc(sizeof(vfile_t));

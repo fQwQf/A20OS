@@ -1,61 +1,66 @@
-#include "uart.h"
-#include "consts.h"
-#include "defs.h"
-#include "proc.h"
+#include "drv/uart.h"
+#include "core/consts.h"
+#include "core/defs.h"
+#include "proc/proc.h"
 
-#define UART0 ((volatile uint8_t *)UART0_BASE)
-
-#define RHR 0
-#define THR 0
-#define IER 1
-#define FCR 2
-#define LCR 3
-#define MCR 4
-#define LSR 5
-
-#define IER_RX_ENABLE (1 << 0)
-#define IER_TX_ENABLE (1 << 1)
-#define LSR_RX_READY  (1 << 0)
-#define LSR_TX_IDLE   (1 << 5)
-#define LSR_TX_EMPTY  (1 << 6)
-
+// 接收缓冲区大小
 #define RX_BUF_SIZE 256
 
+// 接收缓冲区（环形缓冲区）
 static volatile char rx_buffer[RX_BUF_SIZE];
-static volatile uint32_t rx_head;
-static volatile uint32_t rx_tail;
+static volatile uint32_t rx_head;  // 缓冲区头指针
+static volatile uint32_t rx_tail;  // 缓冲区尾指针
 
+static void uart_rx_push(char c) {
+    if (c == 0x03) {  // Ctrl-C
+        /* This kernel has pgid/sid bookkeeping but no real tty foreground
+         * process-group tracking yet. Signal the task currently attached to
+         * the console path instead of broadcasting to the whole pgid. */
+        task_t *cur = proc_current();
+        if (cur && cur->pid > 0) {
+            proc_kill(cur->pid, SIGINT);
+        }
+        return;
+    }
+
+    uint32_t next = (rx_head + 1) % RX_BUF_SIZE;
+    if (next != rx_tail) {
+        rx_buffer[rx_head] = c;
+        rx_head = next;
+    }
+}
+
+// 初始化 UART 设备
 void uart_init(void) {
     rx_head = 0;
     rx_tail = 0;
-
-    UART0[IER] = 0x00;
-    UART0[LCR] = 0x80;
-    UART0[0] = 0x03;
-    UART0[1] = 0x00;
-    UART0[LCR] = 0x03;
-    UART0[FCR] = 0x07;
-    UART0[MCR] = 0x0B;
-    UART0[IER] = IER_RX_ENABLE;
-    uart_flush();
+    arch_uart_init();
+    uart_flush();  // 等待发送完成
 }
 
+// 发送一个字符
 void uart_putc(char c) {
-    while (!(UART0[LSR] & LSR_TX_IDLE));
-    UART0[THR] = (uint8_t)c;
+    arch_uart_putc(c);
 }
 
+// 阻塞式读取一个字符（如果没有数据则让出 CPU）
 int uart_getc(void) {
     while (rx_head == rx_tail) {
-        w_sstatus(r_sstatus() | 0x2); /* SSTATUS_SIE is bit 1 */
+        int c = arch_uart_poll_getc();
+        if (c >= 0) {
+            uart_rx_push((char)c);
+            continue;
+        }
+        arch_local_irq_enable();
         proc_yield();
-        w_sstatus(r_sstatus() & ~0x2);
+        arch_local_irq_disable();
     }
     char c = rx_buffer[rx_tail];
     rx_tail = (rx_tail + 1) % RX_BUF_SIZE;
     return (int)(unsigned char)c;
 }
 
+// 非阻塞式尝试读取一个字符
 int uart_try_getc(void) {
     if (rx_head == rx_tail)
         return -1;
@@ -64,34 +69,26 @@ int uart_try_getc(void) {
     return (int)(unsigned char)c;
 }
 
+// 检查是否有输入数据
 int uart_has_input(void) {
     return rx_head != rx_tail;
 }
 
+// 发送字符串
 void uart_puts(const char *s) {
     while (*s) uart_putc(*s++);
 }
 
+// 等待发送完成
 void uart_flush(void) {
-    while (!(UART0[LSR] & LSR_TX_EMPTY));
+    arch_uart_flush();
 }
 
+// UART 中断处理函数
 void uart_handle_irq(void) {
-    while (UART0[LSR] & LSR_RX_READY) {
-        char c = UART0[RHR];
-        if (c == 0x03) {
-            /* proc_current() in IRQ context = the task that was preempted,
-             * which is the foreground process. Signal its whole group. */
-            task_t *cur = proc_current();
-            if (cur && cur->pid > 0 && cur->pgid > 0) {
-                proc_kill_pgid(cur->pgid, SIGINT, 0);
-            }
-            continue;
-        }
-        uint32_t next = (rx_head + 1) % RX_BUF_SIZE;
-        if (next != rx_tail) {
-            rx_buffer[rx_head] = c;
-            rx_head = next;
-        }
+    int c;
+    while ((c = arch_uart_poll_getc()) >= 0) {
+        uart_rx_push(c);
     }
+    arch_uart_ack_irq();
 }
