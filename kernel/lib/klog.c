@@ -1,11 +1,11 @@
-#include "klog.h"
-#include "uart.h"
-#include "stdio.h"
-#include "string.h"
-#include "types.h"
-#include "defs.h"
+#include "core/klog.h"
+#include "drv/uart.h"
+#include "core/stdio.h"
+#include "core/string.h"
+#include "core/types.h"
+#include "core/defs.h"
 
-int klog_level = KLOG_DEBUG;
+int klog_level = KLOG_INFO;
 
 static char   klog_buf[KLOG_BUF_SIZE];
 static size_t klog_head __attribute__((section(".data"))) = 0;
