@@ -14,6 +14,7 @@ MUSL_INC  := -isystem $(MUSL_BUILD)/obj/include \
              -isystem $(MUSL_BASE)/arch/generic
 
 CFLAGS  = -Wall -Wextra -O2 -ffreestanding -nostdinc $(MUSL_INC) \
+          -Iinit_common \
           -mabi=lp64 -march=rv64g -mcmodel=medany
 LDFLAGS = -static -nostdlib -Ttext 0x10000
 
@@ -30,7 +31,7 @@ LIBC      = $(LIB_A20OS) $(MUSL_CRT)/libc.a $(LIBGCC)
 
 else ifeq ($(ARCH), loongarch64)
 CROSS_COMPILE ?= loongarch64-unknown-elf-
-CFLAGS = -Wall -Wextra -O2 -fno-builtin -nostdlib -mabi=lp64d -march=loongarch64 -I./lib
+CFLAGS = -Wall -Wextra -O2 -fno-builtin -nostdlib -mabi=lp64d -march=loongarch64 -I./lib -Iinit_common
 LDFLAGS = -static -nostdlib -Ttext 0x10000
 
 CRT_START = lib/crt0.o lib/syscall.o lib/libc.o
@@ -61,13 +62,15 @@ CMDS = $(patsubst cmds/%.c, build/%, $(CMD_SRCS))
 CONTEST_INIT_MAIN = contest_init/contest_init.c
 CONTEST_INIT_SRCS = $(filter-out $(CONTEST_INIT_MAIN),$(wildcard contest_init/*.c))
 CONTEST_INIT_OBJS = $(patsubst contest_init/%.c, build/contest_init/%.o, $(CONTEST_INIT_SRCS))
+INIT_COMMON_SRCS = $(wildcard init_common/*.c)
+INIT_COMMON_OBJS = $(patsubst init_common/%.c, build/init_common/%.o, $(INIT_COMMON_SRCS))
 
 ifeq ($(CONTEST),1)
 INIT_MAIN_SRC = $(CONTEST_INIT_MAIN)
-INIT_EXTRA_OBJS = $(CONTEST_INIT_OBJS)
+INIT_EXTRA_OBJS = $(INIT_COMMON_OBJS) $(CONTEST_INIT_OBJS)
 else
 INIT_MAIN_SRC = shell/init.c
-INIT_EXTRA_OBJS =
+INIT_EXTRA_OBJS = $(INIT_COMMON_OBJS)
 endif
 
 # mksh
@@ -90,7 +93,7 @@ all: musl_prepare
 endif
 
 build_dir:
-	@mkdir -p build build/contest_init
+	@mkdir -p build build/contest_init build/init_common
 
 musl_prepare:
 ifeq ($(ARCH),riscv64)
@@ -137,6 +140,10 @@ build/init: $(INIT_MAIN_SRC) $(MUSL_DEPS) $(INIT_EXTRA_OBJS) $(LIB_A20OS)
 	$(CC) $(LDFLAGS) -o $@ $(CRT_START) build/init.o $(INIT_EXTRA_OBJS) $(CRT_END) $(LIBC)
 
 build/contest_init/%.o: contest_init/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+build/init_common/%.o: init_common/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
 
