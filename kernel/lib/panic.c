@@ -1,8 +1,7 @@
-#include "panic.h"
-#include "uart.h"
-#include "stdio.h"
-#include "defs.h"
-#include "sbi.h"
+#include "core/panic.h"
+#include "drv/uart.h"
+#include "core/stdio.h"
+#include "core/defs.h"
 
 NORETURN void panic(const char *fmt, ...) {
     va_list args;
@@ -12,12 +11,5 @@ NORETURN void panic(const char *fmt, ...) {
     vprintf(fmt, args);
     va_end(args);
 
-#ifdef CONTEST
-    uart_puts("\n\nSystem panic. Powering off.\n");
-    sbi_shutdown();
-#else
-    uart_puts("\n\nSystem halted.\n");
-    __asm__ volatile("csrw sie, zero");
-    while (1) __asm__ volatile("wfi");
-#endif
+    arch_halt();
 }

@@ -198,61 +198,6 @@ static void cp_lib_riscv64_linux_gnu() {
     close(dir_fd);
 }
 
-static void cp_busybox() {
-    static const char *src = "/test/glibc/busybox";
-    static const char *dst = "/bin/busybox";
-    struct stat st;
-
-    if (stat(dst, &st) == 0)
-        return;
-
-    if (ensure_dir("/bin") != 0)
-        return;
-
-    int src_fd = open(src, O_RDONLY);
-    if (src_fd < 0) {
-        printf("[TEST][glibc] open(%s) failed errno=%d\n", src, errno);
-        return;
-    }
-
-    int dst_fd = open(dst, O_WRONLY | O_CREAT | O_TRUNC, 0755);
-    if (dst_fd < 0) {
-        printf("[TEST][glibc] open(%s) failed errno=%d\n", dst, errno);
-        close(src_fd);
-        return;
-    }
-
-    char buf[16384];
-    int ok = 1;
-    for (;;) {
-        ssize_t n = read(src_fd, buf, sizeof(buf));
-        if (n == 0)
-            break;
-        if (n < 0) {
-            printf("[TEST][glibc] read(%s) failed errno=%d\n", src, errno);
-            ok = 0;
-            break;
-        }
-
-        ssize_t off = 0;
-        while (off < n) {
-            ssize_t w = write(dst_fd, buf + off, (size_t)(n - off));
-            if (w <= 0) {
-                printf("[TEST][glibc] write(%s) failed errno=%d\n", dst, errno);
-                close(src_fd);
-                close(dst_fd);
-                return;
-            }
-            off += w;
-        }
-    }
-
-    close(src_fd);
-    close(dst_fd);
-    if (ok)
-        printf("[TEST][glibc] copied %s\n", dst);
-}
-
 int run_glibc_basic_test(const char *script_name, const char *script_dir)
 {
     cp_lib();
@@ -271,7 +216,6 @@ int run_glibc_libctest_test(const char *script_name, const char *script_dir) {
 }
 
 int run_glibc_lua_test(const char *script_name, const char *script_dir) {
-    cp_busybox();
     return run_script_in_dir(script_name, script_dir, "TEST][glibc][lua");
 }
 
