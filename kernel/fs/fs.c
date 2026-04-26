@@ -1,17 +1,19 @@
-#include "fs.h"
-#include "mm.h"
-#include "string.h"
-#include "stdio.h"
-#include "proc.h"
-#include "panic.h"
-#include "defs.h"
+#include "fs/fs.h"
+#include "mm/mm.h"
+#include "core/string.h"
+#include "core/stdio.h"
+#include "proc/proc.h"
+#include "core/panic.h"
+#include "core/defs.h"
 
-#define MAX_INODES       1024
-#define MAX_DIR_ENTRIES   256
+#define MAX_INODES       1024  // 最大 inode 数量
+#define MAX_DIR_ENTRIES   256  // 每个目录的最大条目数
 
+// inode 表（内存文件系统）
 static inode_t inode_table[MAX_INODES];
-static int next_inum = 1;
+static int next_inum = 1;  // 下一个可用的 inode 编号
 
+// 通过 inode 编号查找 inode
 inode_t *fs_find_inode_by_inum(int inum) {
     for (int i = 0; i < MAX_INODES; i++)
         if (inode_table[i].ref_count > 0 && inode_table[i].inum == inum)
@@ -19,6 +21,7 @@ inode_t *fs_find_inode_by_inum(int inum) {
     return NULL;
 }
 
+// 分配一个新的 inode，类型为 file 或 directory
 inode_t *alloc_inode(int type) {
     for (int i = 0; i < MAX_INODES; i++) {
         if (inode_table[i].ref_count == 0) {
@@ -35,14 +38,17 @@ inode_t *alloc_inode(int type) {
     return NULL;
 }
 
+// 获取目录的目录项数组
 static dir_entry_t *get_dir_entries(inode_t *dir) {
     return (dir_entry_t *)dir->data;
 }
 
+// 获取目录中的条目数量
 static int dir_entry_count(inode_t *dir) {
     return dir->size / sizeof(dir_entry_t);
 }
 
+// 在目录中添加一个目录项
 int add_dir_entry(inode_t *dir, const char *name, int inum) {
     int count = dir_entry_count(dir);
     if (count >= MAX_DIR_ENTRIES) return -ENOSPC;
@@ -68,6 +74,7 @@ int add_dir_entry(inode_t *dir, const char *name, int inum) {
     return 0;
 }
 
+// 在目录中查找指定名称的 inode
 static inode_t *find_in_dir(inode_t *dir, const char *name) {
     dir_entry_t *entries = get_dir_entries(dir);
     int count = dir_entry_count(dir);
@@ -83,10 +90,12 @@ static inode_t *find_in_dir(inode_t *dir, const char *name) {
     return NULL;
 }
 
+// 获取根目录 inode
 inode_t *fs_get_root(void) {
     return &inode_table[0];
 }
 
+// 在目录中查找指定的 inode
 int fs_inode_lookup(inode_t *dir, const char *name, inode_t **out) {
     if (!dir || dir->type != FT_DIRECTORY) return -ENOTDIR;
     inode_t *found = find_in_dir(dir, name);
@@ -95,6 +104,7 @@ int fs_inode_lookup(inode_t *dir, const char *name, inode_t **out) {
     return 0;
 }
 
+// 解析路径（处理相对路径、. 和 ..）
 void fs_resolve_path(const char *path, char *resolved, size_t max_len) {
     task_t *t = proc_current();
     const char *cwd = (t && t->cwd[0]) ? t->cwd : "/";
@@ -142,6 +152,7 @@ void fs_resolve_path(const char *path, char *resolved, size_t max_len) {
     }
 }
 
+// 根据路径查找 inode
 inode_t *fs_find_inode(const char *path) {
     if (!path) return NULL;
 
@@ -175,6 +186,7 @@ inode_t *fs_find_inode(const char *path) {
     return cur;
 }
 
+// 初始化文件系统
 void fs_init(void) {
     memset(inode_table, 0, sizeof(inode_table));
 
@@ -215,6 +227,7 @@ void fs_init(void) {
     printf("[FS] Initialized, root inode 0\n");
 }
 
+// 创建目录
 int fs_mkdir(const char *path) {
     if (fs_find_inode(path)) return -EEXIST;
 
@@ -254,6 +267,7 @@ int fs_mkdir(const char *path) {
     return 0;
 }
 
+// 获取文件状态信息
 int fs_stat(const char *path, stat_t *st) {
     inode_t *inode = fs_find_inode(path);
     if (!inode) return -ENOENT;
@@ -264,6 +278,8 @@ int fs_stat(const char *path, stat_t *st) {
     return 0;
 }
 
+// 规范化路径（处理冗余的 /）
+// 真的有必要吗？
 static void path_normalize(char *path) {
     char parts[64][MAX_NAME_LEN];
     int depth = 0;
@@ -297,6 +313,7 @@ static void path_normalize(char *path) {
     path[pos] = '\0';
 }
 
+// 改变当前工作目录
 int fs_chdir(const char *path) {
     task_t *t = proc_current();
     if (!t) return -EINVAL;
@@ -313,6 +330,7 @@ int fs_chdir(const char *path) {
     return 0;
 }
 
+// 获取当前工作目录
 int fs_getcwd(char *buf, size_t size) {
     task_t *t = proc_current();
     if (!t) return -EINVAL;

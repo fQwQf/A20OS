@@ -1,6 +1,6 @@
-#include "stdio.h"
-#include "string.h"
-#include "uart.h"
+#include "core/stdio.h"
+#include "core/string.h"
+#include "drv/uart.h"
 
 static int utoa(uint64_t value, char *buf, int base, int upper) {
     char tmp[32];
@@ -155,6 +155,13 @@ int vsnprintf(char *out, size_t size, const char *fmt, va_list args) {
         case 'x': {
             uint64_t v = long_mode ? va_arg(args, uint64_t) : va_arg(args, unsigned int);
             nlen = utoa(v, num_buf, 16, 0);
+            break;
+        }
+        case 'p': {
+            uintptr_t ptr = (uintptr_t)va_arg(args, void*);
+            OUTC2('0'); 
+            OUTC2('x'); // 手动加上 0x 前缀
+            nlen = utoa((uint64_t)ptr, num_buf, 16, 0);
             break;
         }
         case 's': {
