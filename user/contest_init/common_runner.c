@@ -18,7 +18,7 @@ int run_script_in_dir(const char *script_name, const char *script_dir, const cha
         }
 
         char *envp[] = {
-            "PATH=.:/bin:/test:/test/glibc:/test/musl",
+            "PATH=/bbin:.:/bin:/test:/test/glibc:/test/musl:/testrv/glibc:/testrv/musl",
             "HOME=/",
             NULL,
         };
