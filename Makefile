@@ -149,6 +149,7 @@ fs_img: user_apps
 	mcopy -i $(FS_IMG) user/build/init ::/init
 	mcopy -i $(FS_IMG) user/build/mksh ::/mksh
 	mcopy -i $(FS_IMG) user/build/mksh ::/sh
+	mcopy -i $(FS_IMG) user/build/mksh ::/bash
 	mcopy -i $(FS_IMG) user/build/ls ::/ls
 	mcopy -i $(FS_IMG) user/build/cat ::/cat
 	mcopy -i $(FS_IMG) user/build/mkdir ::/mkdir
