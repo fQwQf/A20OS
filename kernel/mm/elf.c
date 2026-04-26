@@ -8,38 +8,37 @@
  *   - User stack mapped at VA 0x3FFFF000 downward
  */
 
-#include "elf.h"
-#include "mm.h"
-#include "vm.h"
-#include "vfs.h"
-#include "string.h"
-#include "stdio.h"
-#include "panic.h"
-#include "consts.h"
-#include "defs.h"
-#include "timer.h"
+#include "mm/elf.h"
+#include "mm/mm.h"
+#include "mm/vm.h"
+#include "fs/vfs.h"
+#include "core/string.h"
+#include "core/stdio.h"
+#include "core/panic.h"
+#include "core/consts.h"
+#include "core/defs.h"
+#include "core/timer.h"
 
+// 虚拟地址转换为物理地址
 static inline paddr_t va_to_pa(const void *va) {
     return (paddr_t)((uint64_t)(uintptr_t)va - PAGE_OFFSET);
 }
 
-#define USER_STACK_TOP_VA  0x3FFFF000UL
-#define USER_DYN_BASE      0x10000UL
-#define INTERP_BASE        0x40000000UL
-#define USER_TLS_VA        0x3E000000UL
 #define TLS_TCB_SIZE       128
-#define PTE_STACK          (PTE_V | PTE_R | PTE_W | PTE_X | PTE_U | PTE_A | PTE_D)
+#define PTE_STACK          (PTE_V | PTE_R | PTE_W | PTE_X | PTE_U | PTE_A | PTE_D | PTE_MAT1 | PTE_LEAF)
 
 #define ASLR_BITS          8
 #define ASLR_MASK          (((1UL << ASLR_BITS) - 1) << 16)
 #define ASLR_MIN_ALIGN     (1UL << 16)
 
+// 生成 ASLR（地址空间布局随机化）偏移
 static uint64_t elf_aslr_bias(void) {
     uint64_t t = timer_get_ticks();
     uint64_t bits = ((t >> 3) ^ (t >> 17) ^ (t >> 37)) & ((1UL << ASLR_BITS) - 1);
     return bits << 16;
 }
 
+// 检查 ELF 文件头是否合法
 int elf_check_header(const Elf64_Ehdr *eh) {
     if (*(uint32_t *)eh->e_ident != ELF_MAGIC) return -ENOEXEC;
     if (eh->e_ident[4] != ELFCLASS64)           return -ENOEXEC;
@@ -50,15 +49,17 @@ int elf_check_header(const Elf64_Ehdr *eh) {
     return 0;
 }
 
+// 将 ELF 段标志转换为页表项标志
 static uint64_t seg_flags(uint32_t p_flags) {
-    uint64_t f = PTE_V | PTE_U | PTE_A | PTE_D;
+    uint64_t f = PTE_V | PTE_U | PTE_MAT1 | PTE_A | PTE_LEAF;
     if (p_flags & PF_R) f |= PTE_R;
-    if (p_flags & PF_W) f |= PTE_W;
+    if (p_flags & PF_W) f |= (PTE_W | PTE_D);
     if (p_flags & PF_X) f |= PTE_X;
     if (f & PTE_W) f |= PTE_R;
     return f;
 }
 
+// 映射一个 ELF 段到内存（从内存缓冲区）
 static int map_segment(mm_struct_t *mm, uint64_t *pgdir, uint64_t va, uint64_t memsz,
                        const void *data, uint64_t filesz, uint64_t flags) {
     uint64_t start = va & ~(PAGE_SIZE - 1);
@@ -68,12 +69,14 @@ static int map_segment(mm_struct_t *mm, uint64_t *pgdir, uint64_t va, uint64_t m
         void *frame = frame_alloc();
         if (!frame) return -ENOMEM;
 
+        // 如果页面已存在，拷贝旧内容
         uint64_t *old_pte = pt_walk(pgdir, page, 0);
         if (old_pte && (*old_pte & PTE_V)) {
-            paddr_t old_pa = SV39_PTE_ADDR(*old_pte);
+            paddr_t old_pa = arch_pte_addr(*old_pte);
             memcpy(frame, (void *)(old_pa + PAGE_OFFSET), PAGE_SIZE);
         }
 
+        // 拷贝段数据到新页面
         if (page < va + filesz) {
             uint64_t copy_off = (page < va) ? (va - page) : 0;
             uint64_t src_off  = (page < va) ? 0 : (page - va);
@@ -88,8 +91,9 @@ static int map_segment(mm_struct_t *mm, uint64_t *pgdir, uint64_t va, uint64_t m
         int r = pt_map(pgdir, page, va_to_pa(frame), flags);
         if (r < 0) { frame_free(frame); return r; }
     }
-    __asm__ volatile("sfence.vma" ::: "memory");
+    arch_tlb_flush();
 
+    // 创建对应的 VMA
     if (mm) {
         vm_area_t *vma = kcalloc(1, sizeof(vm_area_t));
         if (vma) {
@@ -107,6 +111,7 @@ static int map_segment(mm_struct_t *mm, uint64_t *pgdir, uint64_t va, uint64_t m
     return 0;
 }
 
+// 映射一个 ELF 段到内存（从文件描述符）
 static int map_segment_from_fd(mm_struct_t *mm, uint64_t *pgdir, uint64_t va, uint64_t memsz,
                                int fd, long file_offset, uint64_t filesz, uint64_t flags) {
     uint64_t start = va & ~(PAGE_SIZE - 1);
@@ -120,10 +125,11 @@ static int map_segment_from_fd(mm_struct_t *mm, uint64_t *pgdir, uint64_t va, ui
 
         uint64_t *old_pte = pt_walk(pgdir, page, 0);
         if (old_pte && (*old_pte & PTE_V)) {
-            paddr_t old_pa = SV39_PTE_ADDR(*old_pte);
+            paddr_t old_pa = arch_pte_addr(*old_pte);
             memcpy(frame, (void *)(old_pa + PAGE_OFFSET), PAGE_SIZE);
         }
 
+        // 从文件读取段数据
         if (page < va + filesz) {
             uint64_t copy_off = (page < va) ? (va - page) : 0;
             uint64_t src_off  = (page < va) ? 0 : (page - va);
@@ -142,8 +148,9 @@ static int map_segment_from_fd(mm_struct_t *mm, uint64_t *pgdir, uint64_t va, ui
         if (r < 0) { frame_free(frame); kfree(tmp); return r; }
     }
     kfree(tmp);
-    __asm__ volatile("sfence.vma" ::: "memory");
+    arch_tlb_flush();
 
+    // 创建对应的 VMA
     if (mm) {
         vm_area_t *vma = kcalloc(1, sizeof(vm_area_t));
         if (vma) {
@@ -161,43 +168,49 @@ static int map_segment_from_fd(mm_struct_t *mm, uint64_t *pgdir, uint64_t va, ui
     return 0;
 }
 
+// 映射用户栈
 static int map_stack(uint64_t *pgdir, uint64_t *stack_top_out) {
-    for (int i = 0; i < INITIAL_STACK_PAGES; i++) {
-        uint64_t va = USER_STACK_TOP_VA - (uint64_t)(INITIAL_STACK_PAGES - 1 - i) * PAGE_SIZE;
+    for (int i = 0; i < USER_STACK_INITIAL_PAGES; i++) {
+        uint64_t va = USER_STACK_TOP -
+                      (uint64_t)(USER_STACK_INITIAL_PAGES - 1 - i) * PAGE_SIZE;
         void *frame = frame_alloc();
         if (!frame) return -ENOMEM;
         int r = pt_map(pgdir, va, va_to_pa(frame),
                         PTE_STACK);
         if (r < 0) { frame_free(frame); return r; }
     }
-    *stack_top_out = USER_STACK_TOP_VA;
-    __asm__ volatile("sfence.vma" ::: "memory");
+    *stack_top_out = USER_STACK_TOP;
+    arch_tlb_flush();
     return 0;
 }
 
+// 获取虚拟地址对应的内核虚拟地址
 static void *phys_for_va(uint64_t *pgdir, uint64_t va) {
     paddr_t pa = pt_translate(pgdir, va);
     if (pa == 0) return NULL;
     return (void *)((uint64_t)pa + PAGE_OFFSET);
 }
 
+// 设置线程局部存储（TLS）
 static int setup_tls(uint64_t *pgdir, const void *tls_data, uint64_t tls_filesz,
                      uint64_t tls_memsz, uint64_t tls_align,
                      uint64_t *tls_va_out, uint64_t *tls_tp_out) {
     uint64_t tcb_offset = ROUND_UP(tls_memsz, tls_align);
     uint64_t total_size = tcb_offset + TLS_TCB_SIZE;
-    uint64_t total_pages = ROUND_UP(total_size, PAGE_SIZE);
+    uint64_t total_pages = ROUND_UP(total_size, PAGE_SIZE) / PAGE_SIZE;
 
+    // 分配并映射 TLS 内存
     for (uint64_t page = 0; page < total_pages; page++) {
         void *frame = frame_alloc();
         if (!frame) return -ENOMEM;
-        int r = pt_map(pgdir, USER_TLS_VA + page * PAGE_SIZE,
+        int r = pt_map(pgdir, USER_TLS_BASE + page * PAGE_SIZE,
                        va_to_pa(frame),
-                       PTE_V | PTE_R | PTE_W | PTE_U | PTE_A | PTE_D);
+                        PTE_V | PTE_R | PTE_W | PTE_U | PTE_A | PTE_D | PTE_MAT1 | PTE_LEAF);
         if (r < 0) { frame_free(frame); return r; }
     }
 
-    uint64_t tls_va = USER_TLS_VA;
+    uint64_t tls_va = USER_TLS_BASE;
+    // 拷贝 TLS 数据
     if (tls_data && tls_filesz > 0) {
         for (uint64_t off = 0; off < tls_filesz; ) {
             uint64_t page_va = tls_va + off;
@@ -211,6 +224,7 @@ static int setup_tls(uint64_t *pgdir, const void *tls_data, uint64_t tls_filesz,
         }
     }
 
+    // 初始化线程控制块（TCB）
     uint64_t tcb_va = tls_va + tcb_offset;
     {
         void *dst = phys_for_va(pgdir, tcb_va);
@@ -222,10 +236,11 @@ static int setup_tls(uint64_t *pgdir, const void *tls_data, uint64_t tls_filesz,
 
     *tls_va_out = tls_va;
     *tls_tp_out = tcb_va;
-    __asm__ volatile("sfence.vma" ::: "memory");
+    arch_tlb_flush();
     return 0;
 }
 
+// 从内存缓冲区加载 ELF 文件
 int elf_load_from_buf(const void *buf, size_t len, elf_load_info_t *info) {
     if (len < sizeof(Elf64_Ehdr)) return -ENOEXEC;
     const Elf64_Ehdr *eh = (const Elf64_Ehdr *)buf;
@@ -242,11 +257,13 @@ int elf_load_from_buf(const void *buf, size_t len, elf_load_info_t *info) {
     mm.pgdir = pgdir;
     mm.mmap_base = MMAP_BASE_ADDR;
 
+    // 计算 ASLR 偏移（仅对动态链接库）
     uint64_t load_bias = (eh->e_type == ET_DYN) ? (USER_DYN_BASE + elf_aslr_bias()) : 0;
-    uint64_t base = 0, max_va = 0;
+    uint64_t base = 0, max_va = 0, brk_va = 0;
     const void *tls_data = NULL;
     uint64_t tls_filesz = 0, tls_memsz = 0, tls_align = 1;
 
+    // 遍历程序头表，加载各段
     for (int i = 0; i < eh->e_phnum; i++) {
         if (eh->e_phoff + (i + 1) * eh->e_phentsize > len) continue;
         const Elf64_Phdr *ph = (const Elf64_Phdr *)
@@ -271,22 +288,24 @@ int elf_load_from_buf(const void *buf, size_t len, elf_load_info_t *info) {
         uint64_t seg_end   = ROUND_UP(seg_va + ph->p_memsz, PAGE_SIZE);
         if (base == 0) base = seg_start;
         if (seg_end > max_va) max_va = seg_end;
+        if ((ph->p_flags & PF_W) && seg_end > brk_va) brk_va = seg_end;
     }
 
+    // 映射用户栈
     uint64_t stack_top;
     r = map_stack(pgdir, &stack_top);
     if (r < 0) { pt_destroy_user(pgdir); return r; }
 
+    /* Always set up TLS/TCB so that tp is valid for musl. */
     uint64_t tls_va = 0, tls_tp = 0;
-    if (tls_data && tls_filesz > 0) {
-        r = setup_tls(pgdir, tls_data, tls_filesz, tls_memsz, tls_align, &tls_va, &tls_tp);
-        if (r < 0) { pt_destroy_user(pgdir); return r; }
-    }
+    r = setup_tls(pgdir, tls_data, tls_filesz, tls_memsz, tls_align, &tls_va, &tls_tp);
+    if (r < 0) { pt_destroy_user(pgdir); return r; }
 
+    // 填充加载信息
     info->entry     = eh->e_entry + load_bias;
     info->base      = base;
     info->end_va    = max_va;
-    info->brk       = ROUND_UP(max_va, PAGE_SIZE);
+    info->brk       = ROUND_UP(brk_va ? brk_va : max_va, PAGE_SIZE);
     info->phdr_va   = base + eh->e_phoff;
     info->phnum     = eh->e_phnum;
     info->phentsize = eh->e_phentsize;
@@ -303,6 +322,7 @@ int elf_load_from_buf(const void *buf, size_t len, elf_load_info_t *info) {
     return 0;
 }
 
+// 加载解释器（动态链接器）
 static int elf_load_interp(mm_struct_t *mm, uint64_t *pgdir, const char *path, uint64_t *entry_out, uint64_t *base_out) {
     int fd = vfs_open(path, O_RDONLY, 0);
     if (fd < 0) return fd;
@@ -322,9 +342,10 @@ static int elf_load_interp(mm_struct_t *mm, uint64_t *pgdir, const char *path, u
     r = vfs_read(fd, (char *)phdrs, nph * sizeof(Elf64_Phdr));
     if (r < nph * (int)sizeof(Elf64_Phdr)) { vfs_close(fd); return -ENOEXEC; }
 
-    uint64_t load_bias = INTERP_BASE + elf_aslr_bias();
+    uint64_t load_bias = INTERP_BASE_ADDR + elf_aslr_bias();
     uint64_t base = 0, max_va = 0;
 
+    // 加载解释器的所有 LOAD 段
     for (int i = 0; i < nph; i++) {
         if (phdrs[i].p_type != PT_LOAD) continue;
 
@@ -347,7 +368,6 @@ static int elf_load_interp(mm_struct_t *mm, uint64_t *pgdir, const char *path, u
 }
 
 int elf_load(int fd, const char *path, elf_load_info_t *info) {
-    (void)path;
     Elf64_Ehdr eh;
     if (vfs_lseek(fd, 0, SEEK_SET) < 0) return -EIO;
     int r = vfs_read(fd, (char *)&eh, sizeof(eh));
@@ -371,7 +391,7 @@ int elf_load(int fd, const char *path, elf_load_info_t *info) {
     mm.mmap_base = MMAP_BASE_ADDR;
 
     uint64_t load_bias = (eh.e_type == ET_DYN) ? (USER_DYN_BASE + elf_aslr_bias()) : 0;
-    uint64_t base = 0, max_va = 0, head_va = 0;
+    uint64_t base = 0, max_va = 0, brk_va = 0, head_va = 0;
     void *tls_data = NULL;
     uint64_t tls_filesz = 0, tls_memsz = 0, tls_align = 1;
 
@@ -414,19 +434,41 @@ int elf_load(int fd, const char *path, elf_load_info_t *info) {
         if (phdrs[i].p_offset == 0) head_va = phdrs[i].p_vaddr + load_bias;
         if (base == 0) base = seg_start;
         if (seg_end > max_va) max_va = seg_end;
+        if ((phdrs[i].p_flags & PF_W) && seg_end > brk_va) brk_va = seg_end;
     }
 
     uint64_t interp_entry = 0;
     uint64_t interp_base  = 0;
     if (has_interp) {
+        char alt_path[MAX_PATH_LEN];
+        const char *interp_to_load = interp_path;
         int interp_fd = vfs_open(interp_path, O_RDONLY, 0);
-        if (interp_fd >= 0) {
-            vfs_close(interp_fd);
-        } else {
+        if (interp_fd < 0 && path) {
+            int path_len = (int)strlen(path);
+            int interp_len = (int)strlen(interp_path);
+            for (int i = path_len - 1; i >= 0; i--) {
+                if (path[i] == '/') {
+                    if ((size_t)i + (size_t)interp_len < sizeof(alt_path)) {
+                        memcpy(alt_path, path, i);
+                        strcpy(alt_path + i, interp_path);
+                        interp_fd = vfs_open(alt_path, O_RDONLY, 0);
+                        if (interp_fd >= 0) { interp_to_load = alt_path; break; }
+                    }
+                }
+            }
+            if (interp_fd < 0 &&
+                arch_resolve_interp_fallback(path, interp_path, alt_path, sizeof(alt_path)) == 0) {
+                interp_fd = vfs_open(alt_path, O_RDONLY, 0);
+                if (interp_fd >= 0)
+                    interp_to_load = alt_path;
+            }
+        }
+        if (interp_fd >= 0) vfs_close(interp_fd);
+        if (interp_fd < 0) {
             r = -ENOENT;
             goto fail_elf;
         }
-        r = elf_load_interp(&mm, pgdir, interp_path, &interp_entry, &interp_base);
+        r = elf_load_interp(&mm, pgdir, interp_to_load, &interp_entry, &interp_base);
         if (r < 0) goto fail_elf;
     }
 
@@ -438,17 +480,16 @@ int elf_load(int fd, const char *path, elf_load_info_t *info) {
     info->exec_entry = eh.e_entry + load_bias;
     info->base       = base;
     info->end_va     = max_va;
-    info->brk        = ROUND_UP(max_va, PAGE_SIZE);
+    info->brk        = ROUND_UP(brk_va ? brk_va : max_va, PAGE_SIZE);
     info->phdr_va    = head_va ? (head_va + eh.e_phoff) : (base + eh.e_phoff);
     info->phnum      = (uint32_t)nph;
     info->phentsize  = eh.e_phentsize;
     info->load_addr  = base;
     info->load_size  = (size_t)(max_va - base);
+    /* Always set up TLS/TCB so that tp is valid for musl. */
     uint64_t tls_va = 0, tls_tp = 0;
-    if (tls_data && tls_filesz > 0) {
-        r = setup_tls(pgdir, tls_data, tls_filesz, tls_memsz, tls_align, &tls_va, &tls_tp);
-        if (r < 0) { kfree(tls_data); pt_destroy_user(pgdir); return r; }
-    }
+    r = setup_tls(pgdir, tls_data, tls_filesz, tls_memsz, tls_align, &tls_va, &tls_tp);
+    if (r < 0) { kfree(tls_data); pt_destroy_user(pgdir); return r; }
 
     info->pgdir      = pgdir;
     info->stack_top  = stack_top;
@@ -494,6 +535,7 @@ fail_early:
 #define AT_RANDOM   25
 #define AT_HWCAP2   26
 
+// 设置程序启动栈（argc, argv, envp, auxv）
 uint64_t elf_setup_stack(uint64_t stack_top, int argc, char *const argv[],
                           char *const envp[], const elf_load_info_t *info) {
     uint64_t *pgdir = info->pgdir;
@@ -527,8 +569,17 @@ uint64_t elf_setup_stack(uint64_t stack_top, int argc, char *const argv[],
 
     sp_va &= ~15UL;
 
-    const char *platform = "riscv64";
-    int plat_len = 8;
+    const char *platform = ARCH_NAME;
+    int plat_len = (int)strlen(platform) + 1;
+
+    /* Pad so that the total fixed-size data pushed below preserves the
+     * ABI-required 16-byte stack alignment. random and auxv are already
+     * multiples of 16, so only platform, envp, argv and argc affect it. */
+    {
+        size_t fixed = (size_t)plat_len + (size_t)(envc + argc + 3) * 8;
+        sp_va -= (16 - (fixed & 15)) & 15;
+    }
+
     sp_va -= plat_len;
     uint64_t platform_va = sp_va;
     {

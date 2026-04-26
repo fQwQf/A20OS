@@ -8,7 +8,6 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 
-#include "busybox_setup.h"
 #include "test_runners.h"
 
 #define MAX_TESTS 128
@@ -190,8 +189,6 @@ int main(int argc, char *argv[])
     printf("[CONTEST] Auto-test runner started\n");
     printf("[CONTEST] Scanning target image at %s\n", TEST_DIR);
     printf("[CONTEST] Global timeout: %d seconds\n", GLOBAL_TIMEOUT_SEC);
-    setup_bbin_busybox();
-
     {
         int wpid = fork();
         if (wpid == 0) {

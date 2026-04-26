@@ -1,21 +1,20 @@
-#include "stdio.h"
-#include "uart.h"
-#include "mm.h"
-#include "elf.h"
-#include "trap.h"
-#include "proc.h"
-#include "syscall.h"
-#include "fs.h"
-#include "timer.h"
-#include "plic.h"
-#include "string.h"
-#include "consts.h"
-#include "defs.h"
-#include "panic.h"
-#include "vfs.h"
-#include "virtio_blk.h"
-#include "block_cache.h"
-#include "klog.h"
+#include "core/stdio.h"
+#include "drv/uart.h"
+#include "mm/mm.h"
+#include "mm/elf.h"
+#include "core/trap.h"
+#include "proc/proc.h"
+#include "sys/syscall.h"
+#include "core/timer.h"
+#include "core/string.h"
+#include "core/consts.h"
+#include "core/defs.h"
+#include "core/panic.h"
+#include "core/timekeeping.h"
+#include "fs/vfs.h"
+#include "drv/virtio_blk.h"
+#include "fs/block_cache.h"
+#include "core/klog.h"
 
 /* Forward declarations */
 void init_kthread(void);
@@ -23,7 +22,7 @@ void init_kthread(void);
 /* ============================================================
  * Block-device mount configuration
  *
- * virtio_blk_init(0) auto-assigns the next MMIO slot, so each
+ * virtio_blk_init() auto-assigns the next transport slot, so each
  * call probes the next virtio-blk device in sequence.
  * virtio_blk_get_dev(i) then returns the block_dev_t for slot i.
  *
@@ -37,6 +36,7 @@ void init_kthread(void);
  *   Device 2..3      = optional sdcard images (best-effort)
  * ============================================================ */
 
+#ifndef BRINGUP
 typedef struct {
     const char *mount_point;
     const char *fs_type;
@@ -76,7 +76,12 @@ static int try_mount(int dev_idx, const char *mnt, const char *fstype) {
         printf("[INIT] Device %d: block-cache creation failed\n", dev_idx);
         return -1;
     }
-    fs_mkdir(mnt);
+    int mkret = vfs_mkdir(mnt, 0755);
+    if (mkret < 0 && mkret != -EEXIST) {
+        printf("[INIT] Device %d: mkdir %s failed (%d)\n", dev_idx, mnt, mkret);
+        bcache_destroy(bc);
+        return mkret;
+    }
     int r = vfs_mount_bc(mnt, fstype, bc);
     if (r == 0) {
         printf("[INIT] Device %d -> %s (%s)\n", dev_idx, mnt, fstype);
@@ -86,6 +91,7 @@ static int try_mount(int dev_idx, const char *mnt, const char *fstype) {
     }
     return r;
 }
+#endif /* BRINGUP */
 
 void kernel_main(void) {
     printf("\n");
@@ -97,14 +103,17 @@ void kernel_main(void) {
 #endif
     printf("Initializing system...\n");
     /* Initialize subsystems */
+    trap_init();
+    printf("[INIT] Trap subsystem initialized\n");
+
     uart_init();
     printf("[INIT] UART initialized\n");
 
     timer_init();
     printf("[INIT] Timer initialized\n");
 
-    plic_init();
-    printf("[INIT] PLIC initialized\n");
+    timekeeping_init();
+    printf("[INIT] Timekeeping initialized\n");
 
     mm_init();
     printf("[INIT] Memory manager initialized\n");
@@ -113,8 +122,11 @@ void kernel_main(void) {
     printf("[INIT] VFS initialized\n");
 
     /* ---- Mount block devices ---- */
+#ifdef BRINGUP
+    printf("[INIT] BRINGUP mode: skipping block device probe\n");
+#else
     for (int i = 0; i < MOUNT_COUNT; i++) {
-        if (virtio_blk_init(0) != 0) {
+        if (virtio_blk_init() != 0) {
             printf("[INIT] Device %d: probe failed, skipping\n", i);
             continue;
         }
@@ -129,18 +141,24 @@ void kernel_main(void) {
 
     /* Best-effort: try optional extra sdcard images */
     for (int j = 0; j < EXTRA_MOUNT_COUNT; j++) {
-        if (virtio_blk_init(0) != 0)
+        if (virtio_blk_init() != 0)
             break;  /* no more devices */
         int dev_idx = MOUNT_COUNT + j;
         try_mount(dev_idx,
                   extra_mount_table[j].mount_point,
                   extra_mount_table[j].fs_type);
     }
+#endif
 
     /* Initialize process management */
     proc_init();
     printf("[INIT] Process manager initialized\n");
 
+#ifdef BRINGUP
+    printf("[INIT] BRINGUP mode: no userspace init; entering idle loop\n");
+    printf("[INIT] System ready\n\n");
+    idle_loop();
+#else
     /* Create init kthread */
     int ret = proc_alloc(init_kthread);
     if (ret < 0) {
@@ -166,15 +184,13 @@ void kernel_main(void) {
      * idle_loop so the scheduler keeps running (wfi + proc_yield). */
     sched();
     idle_loop();
+#endif
 }
 
 void init_kthread(void) {
     task_t *cur = proc_current();
     kdebug("[INIT] Init process started (pid=%d)\n", cur ? cur->pid : 0);
 
-    for (int i = 0; i < 1000000; i++) {
-        __asm__ volatile("nop");
-    }
 
     kdebug("[INIT] Loading init program...\n");
 
@@ -204,7 +220,17 @@ void init_kthread(void) {
     kdebug("[INIT] ELF loaded: entry=0x%lx stack=0x%lx\n",
            (unsigned long)info.entry, (unsigned long)info.stack_top);
 
-    ret = proc_alloc_user(info.entry, info.stack_top, info.pgdir);
+    /* Set up the initial user stack with argc/argv/envp/auxv so the
+     * C runtime (crt1.o / musl) finds a valid stack layout.  Without
+     * this, __libc_start_main dereferences garbage and the init
+     * process crashes silently before ever reaching main(). */
+    char *init_argv[] = { (char *)init_path, NULL };
+    uint64_t user_sp = elf_setup_stack(info.stack_top, 1, init_argv, NULL, &info);
+    if (user_sp == 0) {
+        panic("init: elf_setup_stack failed");
+    }
+
+    ret = proc_alloc_user(info.entry, user_sp, info.pgdir);
     if (ret < 0) {
         panic("init: proc_alloc_user failed: %d\n", ret);
     }
