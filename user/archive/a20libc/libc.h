@@ -157,8 +157,8 @@ struct stat {
 #define S_ISDIR(m)  (((m) & S_IFMT) == S_IFDIR)
 #define S_ISLNK(m)  (((m) & S_IFMT) == S_IFLNK)
 
-/* ---- linux_dirent64 ---- */
-struct linux_dirent64 {
+/* ---- a20_dirent64 ---- */
+struct a20_dirent64 {
     unsigned long  d_ino;
     long           d_off;
     unsigned short d_reclen;

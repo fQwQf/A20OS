@@ -26,6 +26,9 @@
 #include "core/consts.h"
 #include "core/defs.h"
 #include "core/klog.h"
+#include "core/lock.h"
+#include "drv/virtio_blk.h"
+#include "net/lwip_stack.h"
 
 static task_t proc_table[MAX_PROCS];  // 进程表
 static uint64_t *kernel_pgdir_shared;  // 共享的内核页表
@@ -34,8 +37,113 @@ static int wait_diag_count = 0;
 static int sched_diag_count = 0;
 static int fork_diag_count = 0;
 
+#define SCHED_LEVELS 8
+
+static spinlock_t proc_lock = SPINLOCK_INIT;
+static task_t *runq_head[SCHED_LEVELS];
+static task_t *runq_tail[SCHED_LEVELS];
+static uint32_t runq_bitmap;
+static int next_pid = 1;  // 下一个可用的 PID
+
 /* Boot stack (for schedule back to idle) */
 static uint64_t g_idle_kstack;  // idle 进程的内核栈
+
+static int sched_level_clamp(int level) {
+    if (level < 0) return 0;
+    if (level >= SCHED_LEVELS) return SCHED_LEVELS - 1;
+    return level;
+}
+
+static void runq_enqueue_locked(task_t *t) {
+    if (!t || t == &proc_table[0] || t->state != PROC_READY || t->on_rq)
+        return;
+
+    int q = sched_level_clamp(t->sched_level);
+    t->sched_level = q;
+    t->rq_next = NULL;
+    t->rq_prev = runq_tail[q];
+    if (runq_tail[q])
+        runq_tail[q]->rq_next = t;
+    else
+        runq_head[q] = t;
+    runq_tail[q] = t;
+    t->on_rq = 1;
+    runq_bitmap |= (1U << q);
+}
+
+static void runq_remove_locked(task_t *t) {
+    if (!t || !t->on_rq)
+        return;
+
+    int q = sched_level_clamp(t->sched_level);
+    if (t->rq_prev)
+        t->rq_prev->rq_next = t->rq_next;
+    else
+        runq_head[q] = t->rq_next;
+    if (t->rq_next)
+        t->rq_next->rq_prev = t->rq_prev;
+    else
+        runq_tail[q] = t->rq_prev;
+    if (!runq_head[q])
+        runq_bitmap &= ~(1U << q);
+
+    t->rq_next = NULL;
+    t->rq_prev = NULL;
+    t->on_rq = 0;
+}
+
+static task_t *runq_pick_locked(void) {
+    if (!runq_bitmap)
+        return NULL;
+
+    int q = 0;
+    while (q < SCHED_LEVELS && !(runq_bitmap & (1U << q)))
+        q++;
+    if (q >= SCHED_LEVELS)
+        return NULL;
+    task_t *t = runq_head[q];
+    runq_remove_locked(t);
+    return t;
+}
+
+static int proc_alloc_pid(void) {
+    uint64_t flags = spin_lock_irqsave(&proc_lock);
+    int pid = next_pid++;
+    spin_unlock_irqrestore(&proc_lock, flags);
+    return pid;
+}
+
+void proc_make_ready(task_t *t) {
+    if (!t || t->state == PROC_UNUSED || t->state == PROC_ZOMBIE)
+        return;
+
+    uint64_t flags = spin_lock_irqsave(&proc_lock);
+    if (t->state != PROC_READY) {
+        t->state = PROC_READY;
+        if (t->wake_time == 0 && t->sched_level > 0)
+            t->sched_level--;
+    }
+    runq_enqueue_locked(t);
+    spin_unlock_irqrestore(&proc_lock, flags);
+}
+
+static int proc_ignores_sigchld(task_t *parent) {
+    if (!parent || !parent->signals)
+        return 0;
+    signal_state_t *ss = (signal_state_t *)parent->signals;
+    return ss->actions[SIGCHLD].sa_handler == SIG_IGN;
+}
+
+static void proc_reap_ignored_sigchld_children(void) {
+    for (int i = 1; i < MAX_PROCS; i++) {
+        task_t *child = &proc_table[i];
+        if (child == current_task || child->state != PROC_ZOMBIE)
+            continue;
+        task_t *parent = child->parent ? child->parent : proc_find(child->ppid);
+        if (proc_ignores_sigchld(parent))
+            proc_free_pid(child->pid);
+    }
+}
 
 // idle 进程的主循环，系统无任务时运行
 void idle_loop(void) {
@@ -55,6 +163,10 @@ void proc_set_name(task_t *t, const char *name) {
 // 初始化进程管理模块，创建 idle 进程
 void proc_init(void) {
     memset(proc_table, 0, sizeof(proc_table));
+    memset(runq_head, 0, sizeof(runq_head));
+    memset(runq_tail, 0, sizeof(runq_tail));
+    runq_bitmap = 0;
+    spin_init(&proc_lock);
 
     task_t *idle = &proc_table[0];
     idle->pid    = 0;
@@ -67,6 +179,7 @@ void proc_init(void) {
     idle->umask  = 022;
     idle->rlim_stack = USER_STACK_MAX_SIZE;
     idle->rlim_nofile = MAX_FILES;
+    idle->sched_level = SCHED_LEVELS - 1;
     proc_set_name(idle, "idle");
 
     vfs_proc_init_fds(idle->fd_table);  // 初始化文件描述符
@@ -120,13 +233,18 @@ task_t *proc_find(int pid) {
 
 /* ---- Base task allocation ---- */
 
-static int next_pid = 1;  // 下一个可用的 PID
-
 // 分配一个空闲的任务槽
 static task_t *alloc_task_slot(void) {
+    uint64_t flags = spin_lock_irqsave(&proc_lock);
     for (int i = 1; i < MAX_PROCS; i++) {
-        if (proc_table[i].state == PROC_UNUSED) return &proc_table[i];
+        if (proc_table[i].state == PROC_UNUSED) {
+            memset(&proc_table[i], 0, sizeof(proc_table[i]));
+            proc_table[i].state = PROC_BLOCKED;
+            spin_unlock_irqrestore(&proc_lock, flags);
+            return &proc_table[i];
+        }
     }
+    spin_unlock_irqrestore(&proc_lock, flags);
     return NULL;
 }
 
@@ -137,6 +255,10 @@ static void init_task_common(task_t *t, task_t *parent) {
     t->parent    = parent;
     t->exit_code = 0;
     t->priority  = parent ? parent->priority : 0;
+    t->sched_level = parent ? parent->sched_level : 0;
+    t->on_rq     = 0;
+    t->rq_next   = NULL;
+    t->rq_prev   = NULL;
     t->wake_time = 0;
     t->total_time = 0;
     t->pgid      = parent ? parent->pgid : t->pid;
@@ -154,13 +276,24 @@ static void init_task_common(task_t *t, task_t *parent) {
         t->cwd[0] = '/'; t->cwd[1] = '\0';
         t->exec_path[0] = '\0';
     }
+    if (t->cwd[0] == '\0') {
+        t->cwd[0] = '/';
+        t->cwd[1] = '\0';
+    }
 
     // 处理文件描述符
-    for (int i = 0; i < MAX_FILES; i++) t->fd_table[i] = -1;
+    for (int i = 0; i < MAX_FILES; i++) {
+        t->fd_table[i] = -1;
+        t->fd_cloexec[i] = 0;
+    }
     if (parent) {
         vfs_proc_copy_fds(parent->fd_table, t->fd_table);
+        memcpy(t->fd_cloexec, parent->fd_cloexec, sizeof(t->fd_cloexec));
     }
     vfs_proc_init_stdio_defaults(t->fd_table);
+    t->fd_cloexec[0] = 0;
+    t->fd_cloexec[1] = 0;
+    t->fd_cloexec[2] = 0;
 
     /* Signal state */
     t->signals = kmalloc(sizeof(signal_state_t));
@@ -176,9 +309,13 @@ static void init_task_common(task_t *t, task_t *parent) {
 int proc_alloc(void (*entry)(void)) {
     task_t *t = alloc_task_slot();
     if (!t) return -EAGAIN;
-    memset(t, 0, sizeof(*t));
-    t->pid = next_pid++;
+    t->pid = proc_alloc_pid();
     init_task_common(t, current_task);
+    vfs_proc_close_all_fds(t->fd_table);
+    memset(t->fd_cloexec, 0, sizeof(t->fd_cloexec));
+    vfs_proc_init_stdio_defaults(t->fd_table);
+    t->cwd[0] = '/';
+    t->cwd[1] = '\0';
     proc_set_name(t, "kthread");
 
     void *stack = kmalloc(KERNEL_STACK_SIZE);
@@ -203,16 +340,18 @@ int proc_alloc(void (*entry)(void)) {
     t->kstack = (uint64_t)ctx;
 
     kdebug("[PROC] kthread pid=%d\n", t->pid);
+    proc_make_ready(t);
     return t->pid;
 }
 
 /* Allocate a user-mode task with given entry point and stack */
 // 分配一个用户态任务
-int proc_alloc_user(uint64_t entry, uint64_t sp, uint64_t *pgdir) {
+int proc_alloc_user_image(uint64_t entry, uint64_t sp, uint64_t *pgdir,
+                          vm_area_t *mmap, uint64_t brk,
+                          uint64_t stack_top, size_t total_vm) {
     task_t *t = alloc_task_slot();
     if (!t) return -EAGAIN;
-    memset(t, 0, sizeof(*t));
-    t->pid = next_pid++;
+    t->pid = proc_alloc_pid();
     init_task_common(t, current_task);
     t->entry = entry;
     t->pgdir = pgdir;
@@ -246,15 +385,15 @@ int proc_alloc_user(uint64_t entry, uint64_t sp, uint64_t *pgdir) {
     mm_struct_t *mm = kcalloc(1, sizeof(mm_struct_t));
     if (mm) {
         mm->pgdir       = pgdir;
-        mm->brk         = 0;
-        mm->start_brk   = 0;
+        mm->brk         = brk;
+        mm->start_brk   = brk;
         mm->mmap_base   = MMAP_BASE_ADDR;
-        mm->stack_top   = sp;
-        mm->stack_bottom = sp - (USER_STACK_INITIAL_PAGES - 1) * PAGE_SIZE;
-        mm->total_vm    = 0;
+        mm->stack_top   = stack_top ? stack_top : sp;
+        mm->stack_bottom = mm->stack_top - USER_STACK_INITIAL_PAGES * PAGE_SIZE;
+        mm->total_vm    = total_vm;
         mm->rss         = 0;
         mm->refcount    = 1;
-        mm->mmap        = NULL;
+        mm->mmap        = mmap;
         t->mm = mm;
     }
 
@@ -269,8 +408,12 @@ int proc_alloc_user(uint64_t entry, uint64_t sp, uint64_t *pgdir) {
     kinfo("[PROC] user task pid=%d entry=0x%lx sp=0x%lx\n", t->pid,
           (unsigned long)entry, (unsigned long)sp);
 
-    t->state = PROC_READY;
+    proc_make_ready(t);
     return t->pid;
+}
+
+int proc_alloc_user(uint64_t entry, uint64_t sp, uint64_t *pgdir) {
+    return proc_alloc_user_image(entry, sp, pgdir, NULL, 0, sp, 0);
 }
 
 /* ============================================================
@@ -285,8 +428,7 @@ int proc_clone(uint64_t flags, uint64_t stack, int *ptid, int *ctid, uint64_t tl
     task_t *parent = current_task;
     task_t *t = alloc_task_slot();
     if (!t) return -EAGAIN;
-    memset(t, 0, sizeof(*t));
-    t->pid = next_pid++;
+    t->pid = proc_alloc_pid();
     init_task_common(t, parent);
     proc_set_name(t, parent->name);
     if (fork_diag_count < 128) {
@@ -304,6 +446,7 @@ int proc_clone(uint64_t flags, uint64_t stack, int *ptid, int *ctid, uint64_t tl
             t->mm = mm_fork(parent->mm);
             if (!t->mm) {
                 vfs_proc_close_all_fds(t->fd_table);
+                memset(t->fd_cloexec, 0, sizeof(t->fd_cloexec));
                 if (t->signals) { kfree(t->signals); t->signals = NULL; }
                 t->state = PROC_UNUSED;
                 return -ENOMEM;
@@ -322,6 +465,7 @@ int proc_clone(uint64_t flags, uint64_t stack, int *ptid, int *ctid, uint64_t tl
         else if (t->pgdir && t->pgdir != kernel_pgdir_shared) { pt_destroy_user(t->pgdir); t->pgdir = NULL; }
         for (int i = 0; i < MAX_FILES; i++) {
             if (t->fd_table[i] >= 0) { vfs_close(t->fd_table[i]); t->fd_table[i] = -1; }
+            t->fd_cloexec[i] = 0;
         }
         if (t->signals) { kfree(t->signals); t->signals = NULL; }
         t->state = PROC_UNUSED; return -ENOMEM;
@@ -356,6 +500,7 @@ int proc_clone(uint64_t flags, uint64_t stack, int *ptid, int *ctid, uint64_t tl
         t->kstack = (uint64_t)ctx;
     }
 
+    proc_make_ready(t);
     return t->pid;
 }
 
@@ -504,6 +649,15 @@ int proc_exec(const char *path, char *const argv[], char *const envp[]) {
         return r;
     }
     vfs_close(fd);
+
+    for (int i = 0; i < MAX_FILES; i++) {
+        if (t->fd_cloexec[i] && t->fd_table[i] >= 0) {
+            vfs_close(t->fd_table[i]);
+            t->fd_table[i] = -1;
+        }
+        t->fd_cloexec[i] = 0;
+    }
+    vfs_proc_init_stdio_defaults(t->fd_table);
     uint64_t sp = elf_setup_stack(info.stack_top, argc,
                                    (char *const *)k_argv,
                                    (char *const *)k_envp, &info);
@@ -524,7 +678,7 @@ int proc_exec(const char *path, char *const argv[], char *const envp[]) {
     mm->start_brk   = info.brk;
     mm->mmap_base   = MMAP_BASE_ADDR;
     mm->stack_top   = info.stack_top;
-    mm->stack_bottom = info.stack_top - (USER_STACK_INITIAL_PAGES - 1) * PAGE_SIZE;
+    mm->stack_bottom = info.stack_top - USER_STACK_INITIAL_PAGES * PAGE_SIZE;
     mm->total_vm    = 0;
     mm->rss         = 0;
     mm->refcount    = 1;
@@ -616,6 +770,10 @@ void proc_free_pid(int pid) {
     task_t *t = proc_find(pid);
     if (!t) return;
 
+    uint64_t flags = spin_lock_irqsave(&proc_lock);
+    runq_remove_locked(t);
+    spin_unlock_irqrestore(&proc_lock, flags);
+
     if (t->mm) {
         mm_destroy(t->mm);
         t->mm = NULL;
@@ -649,6 +807,7 @@ void proc_exit(int exit_code) {
             vfs_close(t->fd_table[i]);
             t->fd_table[i] = -1;
         }
+        t->fd_cloexec[i] = 0;
     }
 
     /* Re-parent orphaned children to init (pid 1) or idle */
@@ -663,15 +822,21 @@ void proc_exit(int exit_code) {
 
     t->exit_code = exit_code;
     __atomic_thread_fence(__ATOMIC_RELEASE);
+    {
+        uint64_t flags = spin_lock_irqsave(&proc_lock);
+        runq_remove_locked(t);
+        spin_unlock_irqrestore(&proc_lock, flags);
+    }
     t->state     = PROC_ZOMBIE;
 
     /* Wake up parent if blocked in wait */
     if (t->parent && t->parent->state == PROC_BLOCKED) {
-        t->parent->state = PROC_READY;
+        proc_make_ready(t->parent);
     }
 
-    /* Send SIGCHLD to parent */
-    if (t->parent) signal_send(t->parent->pid, SIGCHLD);
+    /* Send SIGCHLD unless the parent asked POSIX-style auto-reap behavior. */
+    if (t->parent && !proc_ignores_sigchld(t->parent))
+        signal_send(t->parent->pid, SIGCHLD);
 
     sched();
     panic("proc_exit: sched returned");
@@ -831,19 +996,24 @@ int proc_kill_pgid(int pgid, int signum, int skip_self) {
 
 // 上下文切换到指定任务
 void context_switch(task_t *next) {
+    if (next == current_task) {
+        next->state = PROC_RUNNING;
+        next->on_rq = 0;
+        return;
+    }
     current_task = next;
     next->state  = PROC_RUNNING;
+    next->on_rq  = 0;
     __switch(next->kstack);
 }
 
 // 调度器：选择下一个运行的任务
 void sched(void) {
     uint64_t now = timer_get_ticks();
-    int cur_idx  = -1;
 
-    for (int i = 0; i < MAX_PROCS; i++) {
-        if (&proc_table[i] == current_task) { cur_idx = i; break; }
-    }
+    proc_reap_ignored_sigchld_children();
+    virtio_blk_poll_all();
+    a20_lwip_poll();
 
     /* Wake up sleeping processes */
     for (int i = 0; i < MAX_PROCS; i++) {
@@ -856,27 +1026,25 @@ void sched(void) {
                       (unsigned long)now,
                       (unsigned long)proc_table[i].wake_time);
             }
-            proc_table[i].state     = PROC_READY;
             proc_table[i].wake_time = 0;
+            proc_table[i].sched_level = 0;
+            proc_make_ready(&proc_table[i]);
         }
     }
 
-    for (int i = 1; i <= MAX_PROCS; i++) {
-        int idx = (cur_idx >= 0) ? (cur_idx + i) % MAX_PROCS : i;
-        task_t *t = &proc_table[idx];
-        /* Idle is a fallback-only task; do not round-robin into it. */
-        if (t == &proc_table[0]) continue;
-        /* Skip current task and UNUSED tasks */
-        if (t == current_task || t->state == PROC_UNUSED) continue;
-        if (t->state == PROC_READY) {
-            if (sched_diag_count < 256) {
-                sched_diag_count++;
-                kdebug("[SCHEDDBG] pick cur=%d next=%d state=%d\n",
-                      current_task ? current_task->pid : -1, t->pid, t->state);
-            }
-            context_switch(t);
-            return;
+    uint64_t flags = spin_lock_irqsave(&proc_lock);
+    task_t *next = runq_pick_locked();
+    spin_unlock_irqrestore(&proc_lock, flags);
+
+    if (next) {
+        if (sched_diag_count < 256) {
+            sched_diag_count++;
+            kdebug("[SCHEDDBG] pick cur=%d next=%d level=%d state=%d\n",
+                  current_task ? current_task->pid : -1, next->pid,
+                  next->sched_level, next->state);
         }
+        context_switch(next);
+        return;
     }
 
 
@@ -896,8 +1064,12 @@ void sched(void) {
 // 主动让出 CPU（yield 系统调用的实现）
 void proc_yield(void) {
     if (current_task && current_task != &proc_table[0] &&
-        current_task->state == PROC_RUNNING)
+        current_task->state == PROC_RUNNING) {
+        if (current_task->sched_level < SCHED_LEVELS - 1)
+            current_task->sched_level++;
         current_task->state = PROC_READY;
+        proc_make_ready(current_task);
+    }
     sched();
 }
 

@@ -10,3 +10,7 @@
 [submodule "user/external/sbase"]
 	path = user/external/sbase
 	url = https://github.com/fQwQf/sbase.git
+
+[submodule "user/external/tlse"]
+	path = user/external/tlse
+	url = https://github.com/fQwQf/tlse.git

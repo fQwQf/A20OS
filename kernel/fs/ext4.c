@@ -1170,11 +1170,11 @@ static int ext4_freaddir(vfile_t *vf, void *dirp, size_t count) {
             memcpy(fname, de->name, nl);
             fname[nl] = '\0';
 
-            size_t reclen = offsetof(linux_dirent64_t, d_name) + nl + 1;
+            size_t reclen = offsetof(a20_dirent64_t, d_name) + nl + 1;
             reclen = (reclen + 7) & ~7UL;
             if (total + reclen > count) { kfree(blk); goto out; }
 
-            linux_dirent64_t *dent = (linux_dirent64_t *)(out + total);
+            a20_dirent64_t *dent = (a20_dirent64_t *)(out + total);
             dent->d_ino    = de->inode;
             dent->d_off    = (int64_t)(b * bs + off);
             dent->d_reclen = (uint16_t)reclen;

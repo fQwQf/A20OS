@@ -567,7 +567,7 @@ struct dirent *readdir(DIR *d) {
         d->len = n;
         d->pos = 0;
     }
-    struct linux_dirent64 *ld = (struct linux_dirent64 *)(d->buf + d->pos);
+    struct a20_dirent64 *ld = (struct a20_dirent64 *)(d->buf + d->pos);
     d->pos += ld->d_reclen;
     d->ent.d_type = ld->d_type;
     strncpy(d->ent.d_name, ld->d_name, 255);

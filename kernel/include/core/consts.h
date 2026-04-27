@@ -115,6 +115,20 @@
 #define SYS_settimeofday   170
 #define SYS_times          153
 #define SYS_time           235
+#define SYS_socket         198
+#define SYS_socketpair     199
+#define SYS_bind           200
+#define SYS_listen         201
+#define SYS_accept         202
+#define SYS_connect        203
+#define SYS_getsockname    204
+#define SYS_getpeername    205
+#define SYS_sendto         206
+#define SYS_recvfrom       207
+#define SYS_setsockopt     208
+#define SYS_getsockopt     209
+#define SYS_shutdown       210
+#define SYS_accept4        242
 #define SYS_getrlimit      163
 #define SYS_setrlimit      164
 #define SYS_getrusage      165
@@ -177,8 +191,17 @@
 #define EOPNOTSUPP   95
 #define EAFNOSUPPORT 97
 #define ENOTSOCK     88
+#define EMSGSIZE     90
+#define EPROTOTYPE   91
+#define EPROTONOSUPPORT 93
 #define EADDRINUSE   98
+#define EADDRNOTAVAIL 99
 #define ENETUNREACH  101
+#define EISCONN      106
+#define ENOTCONN     107
+#define EDESTADDRREQ 89
+#define ECONNREFUSED 111
+#define ETIMEDOUT    110
 
 #define FT_REGULAR    1
 #define FT_DIRECTORY  2
@@ -193,6 +216,7 @@
 #define O_CREAT      0x40
 #define O_TRUNC      0x200
 #define O_APPEND     0x400
+#define O_CLOEXEC    0x80000
 #define O_DIRECTORY  0x10000
 
 #define STDIN_FILENO   0
@@ -288,6 +312,8 @@
 #define F_SETFD   2
 #define F_GETFL   3
 #define F_SETFL   4
+#define F_DUPFD_CLOEXEC 1030
+#define FD_CLOEXEC 1
 
 /* Dirent types */
 #define DT_UNKNOWN  0

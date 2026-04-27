@@ -17,7 +17,7 @@
 #include "core/panic.h"
 #include "core/consts.h"
 #include "core/defs.h"
-#include "core/timer.h"
+#include "core/random.h"
 
 // 虚拟地址转换为物理地址
 static inline paddr_t va_to_pa(const void *va) {
@@ -33,9 +33,25 @@ static inline paddr_t va_to_pa(const void *va) {
 
 // 生成 ASLR（地址空间布局随机化）偏移
 static uint64_t elf_aslr_bias(void) {
-    uint64_t t = timer_get_ticks();
-    uint64_t bits = ((t >> 3) ^ (t >> 17) ^ (t >> 37)) & ((1UL << ASLR_BITS) - 1);
+    uint64_t r = random_u64();
+    uint64_t bits = (r ^ (r >> 29) ^ (r >> 47)) & ((1UL << ASLR_BITS) - 1);
     return bits << 16;
+}
+
+static int elf_add_vma(mm_struct_t *mm, uint64_t start, uint64_t end,
+                       uint64_t vm_flags, uint64_t pte_flags) {
+    if (!mm)
+        return 0;
+    vm_area_t *vma = kcalloc(1, sizeof(vm_area_t));
+    if (!vma)
+        return -ENOMEM;
+    vma->start = start;
+    vma->end = end;
+    vma->vm_flags = vm_flags;
+    vma->pte_flags = pte_flags;
+    mm_insert_vma(mm, vma);
+    mm->total_vm += (end - start) / PAGE_SIZE;
+    return 0;
 }
 
 // 检查 ELF 文件头是否合法
@@ -169,7 +185,11 @@ static int map_segment_from_fd(mm_struct_t *mm, uint64_t *pgdir, uint64_t va, ui
 }
 
 // 映射用户栈
-static int map_stack(uint64_t *pgdir, uint64_t *stack_top_out) {
+static int map_stack(mm_struct_t *mm, uint64_t *pgdir, uint64_t *stack_top_out) {
+    uint64_t stack_top = USER_STACK_TOP + PAGE_SIZE;
+    uint64_t stack_bottom = stack_top -
+        (uint64_t)USER_STACK_INITIAL_PAGES * PAGE_SIZE;
+
     for (int i = 0; i < USER_STACK_INITIAL_PAGES; i++) {
         uint64_t va = USER_STACK_TOP -
                       (uint64_t)(USER_STACK_INITIAL_PAGES - 1 - i) * PAGE_SIZE;
@@ -179,8 +199,12 @@ static int map_stack(uint64_t *pgdir, uint64_t *stack_top_out) {
                         PTE_STACK);
         if (r < 0) { frame_free(frame); return r; }
     }
-    *stack_top_out = USER_STACK_TOP;
+    *stack_top_out = stack_top;
     arch_tlb_flush();
+    int r = elf_add_vma(mm, stack_bottom, stack_top,
+                        VM_ANON | VM_READ | VM_WRITE | VM_STACK, PTE_STACK);
+    if (r < 0)
+        return r;
     return 0;
 }
 
@@ -192,7 +216,7 @@ static void *phys_for_va(uint64_t *pgdir, uint64_t va) {
 }
 
 // 设置线程局部存储（TLS）
-static int setup_tls(uint64_t *pgdir, const void *tls_data, uint64_t tls_filesz,
+static int setup_tls(mm_struct_t *mm, uint64_t *pgdir, const void *tls_data, uint64_t tls_filesz,
                      uint64_t tls_memsz, uint64_t tls_align,
                      uint64_t *tls_va_out, uint64_t *tls_tp_out) {
     uint64_t tcb_offset = ROUND_UP(tls_memsz, tls_align);
@@ -237,6 +261,11 @@ static int setup_tls(uint64_t *pgdir, const void *tls_data, uint64_t tls_filesz,
     *tls_va_out = tls_va;
     *tls_tp_out = tcb_va;
     arch_tlb_flush();
+    int r = elf_add_vma(mm, USER_TLS_BASE, USER_TLS_BASE + total_pages * PAGE_SIZE,
+                        VM_ANON | VM_READ | VM_WRITE,
+                        PTE_V | PTE_R | PTE_W | PTE_U | PTE_A | PTE_D | PTE_MAT1 | PTE_LEAF);
+    if (r < 0)
+        return r;
     return 0;
 }
 
@@ -293,12 +322,12 @@ int elf_load_from_buf(const void *buf, size_t len, elf_load_info_t *info) {
 
     // 映射用户栈
     uint64_t stack_top;
-    r = map_stack(pgdir, &stack_top);
+    r = map_stack(&mm, pgdir, &stack_top);
     if (r < 0) { pt_destroy_user(pgdir); return r; }
 
     /* Always set up TLS/TCB so that tp is valid for musl. */
     uint64_t tls_va = 0, tls_tp = 0;
-    r = setup_tls(pgdir, tls_data, tls_filesz, tls_memsz, tls_align, &tls_va, &tls_tp);
+    r = setup_tls(&mm, pgdir, tls_data, tls_filesz, tls_memsz, tls_align, &tls_va, &tls_tp);
     if (r < 0) { pt_destroy_user(pgdir); return r; }
 
     // 填充加载信息
@@ -473,7 +502,7 @@ int elf_load(int fd, const char *path, elf_load_info_t *info) {
     }
 
     uint64_t stack_top;
-    r = map_stack(pgdir, &stack_top);
+    r = map_stack(&mm, pgdir, &stack_top);
     if (r < 0) { goto fail_elf; }
 
     info->entry      = has_interp ? interp_entry : (eh.e_entry + load_bias);
@@ -488,7 +517,7 @@ int elf_load(int fd, const char *path, elf_load_info_t *info) {
     info->load_size  = (size_t)(max_va - base);
     /* Always set up TLS/TCB so that tp is valid for musl. */
     uint64_t tls_va = 0, tls_tp = 0;
-    r = setup_tls(pgdir, tls_data, tls_filesz, tls_memsz, tls_align, &tls_va, &tls_tp);
+    r = setup_tls(&mm, pgdir, tls_data, tls_filesz, tls_memsz, tls_align, &tls_va, &tls_tp);
     if (r < 0) { kfree(tls_data); pt_destroy_user(pgdir); return r; }
 
     info->pgdir      = pgdir;
@@ -593,7 +622,7 @@ uint64_t elf_setup_stack(uint64_t stack_top, int argc, char *const argv[],
     {
         void *dst = phys_for_va(pgdir, sp_va);
         if (!dst) return 0;
-        for (int i = 0; i < 16; i++) ((uint8_t *)dst)[i] = (uint8_t)(i ^ 0xAA);
+        random_fill(dst, 16);
     }
 
     uint64_t auxv[][2] = {
