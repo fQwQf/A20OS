@@ -164,4 +164,7 @@ block_dev_t *virtio_blk_get_dev(int idx);
 /* Check if device idx is ready */
 int  virtio_blk_ready(int idx);
 
+/* Poll used rings and complete in-flight requests. Called by scheduler paths. */
+void virtio_blk_poll_all(void);
+
 #endif /* _VIRTIO_BLK_H */

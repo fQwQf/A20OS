@@ -163,18 +163,16 @@ void pci_init(void) {
         if (vendor != PCI_VENDOR_ID_REDHAT)
             continue;
 
-        int is_blk = 0;
+        int virtio_type = 0;
         if (device >= 0x1040) {
-            if (device == 0x1040 + 2)
-                is_blk = 1;
+            virtio_type = device - 0x1040;
         } else {
             uint32_t sub = ecam_read(0, dev, 0, 0x2C);
             uint16_t sub_dev = (sub >> 16) & 0xFFFF;
-            if (sub_dev == 2)
-                is_blk = 1;
+            virtio_type = sub_dev;
         }
 
-        if (!is_blk)
+        if (virtio_type != 1 && virtio_type != 2)
             continue;
 
         alloc_device_bars(dev);
@@ -183,16 +181,18 @@ void pci_init(void) {
         pci_virtio_dev_t *vd = &pci_devs[pci_ndevs];
         memset(vd, 0, sizeof(*vd));
         vd->dev_num = dev;
+        vd->device_type = virtio_type;
 
         if (find_virtio_caps(dev, vd) != 0)
             continue;
 
         vd->valid = 1;
         pci_ndevs++;
-        printf("[PCI] Found virtio-blk at 00:%02x.0\n", dev);
+        printf("[PCI] Found virtio-%s at 00:%02x.0\n",
+               virtio_type == 1 ? "net" : "blk", dev);
     }
 
-    printf("[PCI] Found %d virtio-blk device(s)\n", pci_ndevs);
+    printf("[PCI] Found %d virtio device(s)\n", pci_ndevs);
 }
 
 /* ---- PCI modern transport ---- */
@@ -352,18 +352,27 @@ static void pci_vt_write32(virtio_transport_t *t, uint32_t mmio_off, uint32_t va
 }
 
 static pci_transport_priv_t pci_privs[8];
+static int pci_npriv;
 
-int arch_virtio_blk_probe(int index, virtio_transport_t *vt) {
+static int arch_virtio_probe_type(int type, int index, virtio_transport_t *vt) {
     pci_init();
 
-    if (index >= pci_ndevs)
+    pci_virtio_dev_t *vd = NULL;
+    int seen = 0;
+    for (int i = 0; i < pci_ndevs; i++) {
+        if (!pci_devs[i].valid || pci_devs[i].device_type != type)
+            continue;
+        if (seen++ == index) {
+            vd = &pci_devs[i];
+            break;
+        }
+    }
+    if (!vd)
         return -1;
 
-    pci_virtio_dev_t *vd = &pci_devs[index];
-    if (!vd->valid)
+    if (pci_npriv >= (int)(sizeof(pci_privs) / sizeof(pci_privs[0])))
         return -1;
-
-    pci_transport_priv_t *priv = &pci_privs[index];
+    pci_transport_priv_t *priv = &pci_privs[pci_npriv++];
     priv->pdev = vd;
 
     vt->read32 = pci_vt_read32;
@@ -371,4 +380,12 @@ int arch_virtio_blk_probe(int index, virtio_transport_t *vt) {
     vt->priv = priv;
     vt->legacy = 0;
     return 0;
+}
+
+int arch_virtio_blk_probe(int index, virtio_transport_t *vt) {
+    return arch_virtio_probe_type(2, index, vt);
+}
+
+int arch_virtio_net_probe(int index, virtio_transport_t *vt) {
+    return arch_virtio_probe_type(1, index, vt);
 }

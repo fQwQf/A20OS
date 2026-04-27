@@ -2,6 +2,7 @@
 #include "drv/uart.h"
 #include "mm/mm.h"
 #include "mm/elf.h"
+#include "mm/vm.h"
 #include "core/trap.h"
 #include "proc/proc.h"
 #include "sys/syscall.h"
@@ -11,10 +12,12 @@
 #include "core/defs.h"
 #include "core/panic.h"
 #include "core/timekeeping.h"
+#include "core/random.h"
 #include "fs/vfs.h"
 #include "drv/virtio_blk.h"
 #include "fs/block_cache.h"
 #include "core/klog.h"
+#include "net/socket.h"
 
 /* Forward declarations */
 void init_kthread(void);
@@ -118,8 +121,14 @@ void kernel_main(void) {
     mm_init();
     printf("[INIT] Memory manager initialized\n");
 
+    random_init();
+    printf("[INIT] Random subsystem initialized\n");
+
     vfs_init();
     printf("[INIT] VFS initialized\n");
+
+    net_init();
+    printf("[INIT] Network initialized\n");
 
     /* ---- Mount block devices ---- */
 #ifdef BRINGUP
@@ -230,7 +239,12 @@ void init_kthread(void) {
         panic("init: elf_setup_stack failed");
     }
 
-    ret = proc_alloc_user(info.entry, user_sp, info.pgdir);
+    size_t init_total_vm = 0;
+    for (vm_area_t *v = info.mmap; v; v = v->next)
+        init_total_vm += (v->end - v->start) / PAGE_SIZE;
+
+    ret = proc_alloc_user_image(info.entry, user_sp, info.pgdir, info.mmap,
+                                info.brk, info.stack_top, init_total_vm);
     if (ret < 0) {
         panic("init: proc_alloc_user failed: %d\n", ret);
     }

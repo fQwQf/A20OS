@@ -56,7 +56,7 @@ static int ends_with(const char *s, const char *suffix)
     return strcmp(s + sl - xl, suffix) == 0;
 }
 
-struct linux_dirent64_local {
+struct a20_dirent64_local {
     uint64_t d_ino;
     int64_t d_off;
     unsigned short d_reclen;
@@ -80,8 +80,8 @@ static void scan_tree(const char *dir, int depth, test_entry_t tests[], int *nte
 
         int bpos = 0;
         while (bpos < nread) {
-            struct linux_dirent64_local *de =
-                (struct linux_dirent64_local *)(buf + bpos);
+            struct a20_dirent64_local *de =
+                (struct a20_dirent64_local *)(buf + bpos);
 
             const char *name = de->d_name;
             if (strcmp(name, ".") != 0 && strcmp(name, "..") != 0) {

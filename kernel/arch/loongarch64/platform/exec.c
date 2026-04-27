@@ -2,15 +2,6 @@
 #include "core/string.h"
 #include "core/consts.h"
 
-static int copy_fixed_path(const char *path, char *resolved, size_t resolved_size) {
-    if (!path || !resolved || resolved_size == 0)
-        return -ENOENT;
-    if (strlen(path) >= resolved_size)
-        return -ENOENT;
-    strcpy(resolved, path);
-    return 0;
-}
-
 static int build_sibling_path(const char *exec_path, const char *suffix,
                               char *resolved, size_t resolved_size) {
     if (!exec_path || !suffix || !resolved || resolved_size == 0)
@@ -30,6 +21,23 @@ static int build_sibling_path(const char *exec_path, const char *suffix,
     return -ENOENT;
 }
 
+static int build_mount_root_path(const char *exec_path, const char *suffix,
+                                 char *resolved, size_t resolved_size) {
+    if (!exec_path || exec_path[0] != '/' || !suffix || suffix[0] != '/' ||
+        !resolved || resolved_size == 0)
+        return -ENOENT;
+
+    int end = 1;
+    while (exec_path[end] && exec_path[end] != '/')
+        end++;
+
+    if ((size_t)end + strlen(suffix) >= resolved_size)
+        return -ENOENT;
+    memcpy(resolved, exec_path, (size_t)end);
+    strcpy(resolved + end, suffix);
+    return 0;
+}
+
 int arch_resolve_interp_fallback(const char *exec_path, const char *interp_path,
                                  char *resolved, size_t resolved_size) {
     if (interp_path && strstr(interp_path, "ld-musl-loongarch64.so.1") &&
@@ -37,16 +45,9 @@ int arch_resolve_interp_fallback(const char *exec_path, const char *interp_path,
         return 0;
 
     if (interp_path && strstr(interp_path, "ld-linux-loongarch-lp64d.so.1")) {
-        static const char *const glibc_candidates[] = {
-            "/test/glibc/lib/ld-linux-loongarch-lp64d.so.1",
-            "/testla/glibc/lib/ld-linux-loongarch-lp64d.so.1",
-            "/testrv/glibc/lib/ld-linux-loongarch-lp64d.so.1",
-            NULL,
-        };
-        for (int i = 0; glibc_candidates[i]; i++) {
-            if (copy_fixed_path(glibc_candidates[i], resolved, resolved_size) == 0)
-                return 0;
-        }
+        if (build_mount_root_path(exec_path, "/glibc/lib/ld-linux-loongarch-lp64d.so.1",
+                                  resolved, resolved_size) == 0)
+            return 0;
     }
 
     return -ENOENT;

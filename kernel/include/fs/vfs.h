@@ -21,6 +21,7 @@
 #define FS_TYPE_FAT32    2
 #define FS_TYPE_EXT4     3
 #define FS_TYPE_PROCFS   4
+#define FS_TYPE_DEVFS    5
 
 /* ---- Forward declarations ---- */
 struct vnode;
@@ -131,14 +132,14 @@ typedef struct mount {
 /* ---- Open file table (global) ---- */
 #define VFS_MAX_OPEN   8192
 
-/* ---- linux_dirent64 (for getdents64 syscall) ---- */
-typedef struct linux_dirent64 {
+/* ---- a20_dirent64 (for getdents64 syscall) ---- */
+typedef struct a20_dirent64 {
     uint64_t d_ino;
     int64_t  d_off;
     uint16_t d_reclen;
     uint8_t  d_type;
     char     d_name[1];           /* variable length */
-} __attribute__((packed)) linux_dirent64_t;
+} __attribute__((packed)) a20_dirent64_t;
 
 /* ============================================================
  * VFS API

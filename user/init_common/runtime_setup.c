@@ -138,9 +138,19 @@ static int prepare_glibc_lib_links(void)
 {
     static int done;
     static const char *const glibc_candidates[] = {
+#if defined(__loongarch64)
+        "/testla/glibc/lib",
+        "/test/glibc/lib",
+        "/testrv/glibc/lib",
+#elif defined(__riscv)
+        "/testrv/glibc/lib",
+        "/test/glibc/lib",
+        "/testla/glibc/lib",
+#else
         "/test/glibc/lib",
         "/testrv/glibc/lib",
         "/testla/glibc/lib",
+#endif
         "/glibc/lib",
         NULL,
     };
@@ -168,9 +178,19 @@ static int prepare_musl_lib_links(void)
 {
     static int done;
     static const char *const musl_candidates[] = {
+#if defined(__loongarch64)
+        "/testla/musl/lib",
+        "/test/musl/lib",
+        "/testrv/musl/lib",
+#elif defined(__riscv)
+        "/testrv/musl/lib",
+        "/test/musl/lib",
+        "/testla/musl/lib",
+#else
         "/test/musl/lib",
         "/testrv/musl/lib",
         "/testla/musl/lib",
+#endif
         "/musl/lib",
         NULL,
     };
