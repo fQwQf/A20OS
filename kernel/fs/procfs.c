@@ -13,6 +13,7 @@
 #include "core/string.h"
 #include "core/stdio.h"
 #include "core/version.h"
+#include "net/socket.h"
 
 extern task_t *proc_current(void);
 extern task_t *proc_find(int pid);
@@ -28,6 +29,7 @@ typedef enum {
     PF_CPUINFO,       // /proc/cpuinfo - CPU 信息
     PF_MOUNTS,       // /proc/mounts - 挂载信息
     PF_LOADAVG,      // /proc/loadavg - 负载平均值
+    PF_NET,          // /proc/net - 网络协议栈状态
     PF_PID_STAT,     // /proc/[pid]/stat - 进程状态
     PF_PID_STATUS,   // /proc/[pid]/status - 进程状态详情
     PF_SELF,         // /proc/self - 当前进程的 pid
@@ -106,6 +108,9 @@ static int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
     case PF_LOADAVG:  // 生成负载平均值
         snprintf(buf, bufsz, "0.00 0.00 0.00 1/64 1\n");
         break;
+    case PF_NET:
+        net_format_status(buf, bufsz);
+        break;
     case PF_PID_STAT: {  // 生成进程 stat 信息
         task_t *t = proc_find(pid);
         if (!t) { snprintf(buf, bufsz, "%d (unknown) S 0 0\n", pid); break; }
@@ -158,6 +163,7 @@ static pf_type_t name_to_type(const char *name, int *out_pid) {
     if (strcmp(name, "mounts") == 0) return PF_MOUNTS;
     if (strcmp(name, "self") == 0) return PF_SELF;
     if (strcmp(name, "loadavg") == 0) return PF_LOADAVG;
+    if (strcmp(name, "net") == 0) return PF_NET;
     if (strcmp(name, "filesystems") == 0) return PF_FSTYPE;
     if (is_pid_str(name)) {
         *out_pid = atoi(name);
@@ -281,7 +287,7 @@ static long procfs_flseek(vfile_t *vf, long offset, int whence) {
 static int procfs_freaddir(vfile_t *vf, void *dirp, size_t count) {
     static const char *entries[] = {
         ".", "..", "meminfo", "version", "uptime", "cmdline",
-        "cpuinfo", "mounts", "self", "loadavg", "filesystems", NULL
+        "cpuinfo", "mounts", "self", "loadavg", "net", "filesystems", NULL
     };
     int idx = (int)(vf->offset);
     size_t total = 0;
@@ -289,10 +295,10 @@ static int procfs_freaddir(vfile_t *vf, void *dirp, size_t count) {
 
     while (entries[idx] && total < count) {
         size_t namelen = strlen(entries[idx]);
-        size_t reclen = (sizeof(linux_dirent64_t) + namelen + 1 + 7) & ~7UL;
+        size_t reclen = (sizeof(a20_dirent64_t) + namelen + 1 + 7) & ~7UL;
         if (total + reclen > count) break;
 
-        linux_dirent64_t *d = (linux_dirent64_t *)(out + total);
+        a20_dirent64_t *d = (a20_dirent64_t *)(out + total);
         d->d_ino = (uint64_t)idx;
         d->d_off = (int64_t)(total + reclen);
         d->d_reclen = (uint16_t)reclen;

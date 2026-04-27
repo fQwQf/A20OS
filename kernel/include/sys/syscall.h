@@ -41,6 +41,22 @@ int64_t sys_select(int nfds, void *readfds, void *writefds,
                    void *exceptfds, void *timeout);
 int64_t sys_ppoll(void *fds, int nfds, void *tmo, void *sigmask);
 int64_t sys_epoll_create1(int flags);
+int64_t sys_socket(int domain, int type, int protocol);
+int64_t sys_socketpair(int domain, int type, int protocol, int *sv);
+int64_t sys_bind(int fd, const void *addr, size_t addrlen);
+int64_t sys_listen(int fd, int backlog);
+int64_t sys_accept(int fd, void *addr, void *addrlen);
+int64_t sys_accept4(int fd, void *addr, void *addrlen, int flags);
+int64_t sys_connect(int fd, const void *addr, size_t addrlen);
+int64_t sys_getsockname(int fd, void *addr, void *addrlen);
+int64_t sys_getpeername(int fd, void *addr, void *addrlen);
+int64_t sys_sendto(int fd, const void *buf, size_t len, int flags,
+                   const void *addr, size_t addrlen);
+int64_t sys_recvfrom(int fd, void *buf, size_t len, int flags,
+                     void *addr, void *addrlen);
+int64_t sys_setsockopt(int fd, int level, int optname, const void *optval, size_t optlen);
+int64_t sys_getsockopt(int fd, int level, int optname, void *optval, void *optlen);
+int64_t sys_shutdown(int fd, int how);
 
 int64_t sys_mkdirat(int dirfd, const char *path, int mode);
 int64_t sys_unlinkat(int dirfd, const char *path, int flags);
@@ -83,7 +99,7 @@ int64_t sys_execve(const char *path, char **argv, char **envp);
 int64_t sys_wait4(int pid, int *status, int options, void *rusage);
 int64_t sys_waitid(int type, int id, void *info, int options, void *rusage);
 int64_t sys_sched_yield(void);
-int64_t sys_reboot(int cmd);
+int64_t sys_reboot(uint64_t magic1, uint64_t magic2, uint64_t cmd);
 int64_t sys_prctl(int op, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4);
 int64_t sys_prlimit64(int pid, int resource, void *new_rlim, void *old_rlim);
 int64_t sys_getrlimit(int resource, void *rlim);
@@ -94,7 +110,7 @@ int64_t sys_kill(int pid, int sig);
 int64_t sys_tgkill(int tgid, int tid, int sig);
 int64_t sys_sigaction(int signum, void *act, void *oldact);
 int64_t sys_sigprocmask(int how, void *set, void *oldset);
-int64_t sys_sigreturn(void);
+int64_t sys_sigreturn(trap_context_t *ctx);
 int64_t sys_sigsuspend(void *mask);
 int64_t sys_sigtimedwait(const uint64_t *set, void *info, const void *timeout);
 

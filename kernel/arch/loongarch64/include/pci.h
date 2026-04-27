@@ -32,6 +32,7 @@
 typedef struct {
     int      valid;
     int      dev_num;
+    int      device_type;
     uintptr_t common_base;
     uintptr_t notify_base;
     uintptr_t config_base;

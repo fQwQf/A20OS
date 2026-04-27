@@ -154,15 +154,20 @@ static inline int arch_is_kernel_address(const void *ptr) {
 }
 
 static inline void arch_dma_sync_for_device(const void *addr, size_t size) {
-    (void)addr;
-    (void)size;
-    __asm__ __volatile__("dsb ishst" ::: "memory");
+    uintptr_t start = (uintptr_t)addr & ~(uintptr_t)63;
+    uintptr_t end = ((uintptr_t)addr + size + 63) & ~(uintptr_t)63;
+    for (uintptr_t p = start; p < end; p += 64)
+        __asm__ __volatile__("dc civac, %0" :: "r"(p) : "memory");
+    __asm__ __volatile__("dsb sy" ::: "memory");
 }
 
 static inline void arch_dma_sync_for_cpu(const void *addr, size_t size) {
-    (void)addr;
-    (void)size;
-    __asm__ __volatile__("dsb ish" ::: "memory");
+    uintptr_t start = (uintptr_t)addr & ~(uintptr_t)63;
+    uintptr_t end = ((uintptr_t)addr + size + 63) & ~(uintptr_t)63;
+    __asm__ __volatile__("dsb sy" ::: "memory");
+    for (uintptr_t p = start; p < end; p += 64)
+        __asm__ __volatile__("dc ivac, %0" :: "r"(p) : "memory");
+    __asm__ __volatile__("dsb sy" ::: "memory");
 }
 
 #endif

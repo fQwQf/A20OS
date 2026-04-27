@@ -1,13 +1,153 @@
 #include "fs/ramfs.h"
-#include "fs/fs.h"
 #include "mm/mm.h"
 #include "core/string.h"
+#include "core/stdio.h"
+#include "core/panic.h"
 #include "core/defs.h"
+
+#define RAMFS_MAX_INODES       1024
+#define RAMFS_MAX_DIR_ENTRIES   256
+
+typedef struct ramfs_inode {
+    int inum;
+    int type;
+    int ref_count;
+    size_t size;
+    char *data;
+    size_t capacity;
+    struct ramfs_inode *parent;
+} ramfs_inode_t;
+
+typedef struct {
+    int inum;
+    char name[MAX_NAME_LEN];
+} ramfs_dir_entry_t;
+
+static ramfs_inode_t g_inode_table[RAMFS_MAX_INODES];
+static int g_next_inum = 1;
+static int g_ramfs_ready = 0;
 
 static vnode_ops_t g_ramfs_vnode_ops;
 static vfile_ops_t g_ramfs_fops;
 
-static vnode_t *ramfs_make_vnode(mount_t *mnt, inode_t *inode) {
+static ramfs_inode_t *ramfs_find_inode_by_inum(int inum) {
+    for (int i = 0; i < RAMFS_MAX_INODES; i++) {
+        if (g_inode_table[i].ref_count > 0 && g_inode_table[i].inum == inum)
+            return &g_inode_table[i];
+    }
+    return NULL;
+}
+
+static ramfs_inode_t *ramfs_alloc_inode(int type) {
+    for (int i = 0; i < RAMFS_MAX_INODES; i++) {
+        if (g_inode_table[i].ref_count == 0) {
+            memset(&g_inode_table[i], 0, sizeof(g_inode_table[i]));
+            g_inode_table[i].inum = g_next_inum++;
+            g_inode_table[i].type = type;
+            g_inode_table[i].ref_count = 1;
+            return &g_inode_table[i];
+        }
+    }
+    return NULL;
+}
+
+static ramfs_dir_entry_t *ramfs_dir_entries(ramfs_inode_t *dir) {
+    return (ramfs_dir_entry_t *)dir->data;
+}
+
+static int ramfs_dir_entry_count(ramfs_inode_t *dir) {
+    return (int)(dir->size / sizeof(ramfs_dir_entry_t));
+}
+
+static int ramfs_add_dir_entry(ramfs_inode_t *dir, const char *name, int inum) {
+    int count = ramfs_dir_entry_count(dir);
+    if (count >= RAMFS_MAX_DIR_ENTRIES) return -ENOSPC;
+
+    size_t needed = (count + 1) * sizeof(ramfs_dir_entry_t);
+    if (needed > dir->capacity) {
+        size_t new_cap = needed * 2;
+        char *new_data = kmalloc(new_cap);
+        if (!new_data) return -ENOMEM;
+        if (dir->data) {
+            memcpy(new_data, dir->data, dir->size);
+            kfree(dir->data);
+        }
+        memset(new_data + dir->size, 0, new_cap - dir->size);
+        dir->data = new_data;
+        dir->capacity = new_cap;
+    }
+
+    ramfs_dir_entry_t *entries = ramfs_dir_entries(dir);
+    strncpy(entries[count].name, name, MAX_NAME_LEN - 1);
+    entries[count].name[MAX_NAME_LEN - 1] = '\0';
+    entries[count].inum = inum;
+    dir->size = needed;
+    return 0;
+}
+
+static ramfs_inode_t *ramfs_find_in_dir(ramfs_inode_t *dir, const char *name) {
+    ramfs_dir_entry_t *entries = ramfs_dir_entries(dir);
+    int count = ramfs_dir_entry_count(dir);
+    for (int i = 0; i < count; i++) {
+        if (entries[i].name[0] != '\0' && strcmp(entries[i].name, name) == 0)
+            return ramfs_find_inode_by_inum(entries[i].inum);
+    }
+    return NULL;
+}
+
+static int ramfs_inode_lookup(ramfs_inode_t *dir, const char *name, ramfs_inode_t **out) {
+    if (!dir || dir->type != FT_DIRECTORY) return -ENOTDIR;
+    ramfs_inode_t *found = ramfs_find_in_dir(dir, name);
+    if (!found) return -ENOENT;
+    *out = found;
+    return 0;
+}
+
+static void ramfs_init_storage(void) {
+    memset(g_inode_table, 0, sizeof(g_inode_table));
+    g_next_inum = 1;
+
+    ramfs_inode_t *root = &g_inode_table[0];
+    root->inum = 0;
+    root->type = FT_DIRECTORY;
+    root->ref_count = 1;
+    root->capacity = RAMFS_MAX_DIR_ENTRIES * sizeof(ramfs_dir_entry_t);
+    root->data = kmalloc(root->capacity);
+    root->parent = root;
+    if (!root->data) panic("ramfs_init: no memory for root dir");
+    memset(root->data, 0, root->capacity);
+
+    ramfs_add_dir_entry(root, ".", 0);
+    ramfs_add_dir_entry(root, "..", 0);
+
+    const char *text = "Hello from A20OS!\n"
+        "A20 is an abbreviation of AAAAAAAAAAAAAAAAAAAAOS.\n"
+        "This is a sample text file for testing.\n"
+        "You can try: cat /hello.txt\n"
+        "Supported commands: ls, cat, mkdir, rm, cp, pwd, cd, echo, help\n";
+    size_t tlen = strlen(text);
+    ramfs_inode_t *f = ramfs_alloc_inode(FT_REGULAR);
+    if (f) {
+        f->parent = root;
+        f->capacity = tlen + 64;
+        f->data = kmalloc(f->capacity);
+        if (f->data) {
+            memcpy(f->data, text, tlen);
+            f->size = tlen;
+        }
+        ramfs_add_dir_entry(root, "hello.txt", f->inum);
+    }
+
+    g_ramfs_ready = 1;
+    printf("[RAMFS] Initialized, root inode 0\n");
+}
+
+static ramfs_inode_t *ramfs_get_root(void) {
+    ramfs_init_storage();
+    return &g_inode_table[0];
+}
+
+static vnode_t *ramfs_make_vnode(mount_t *mnt, ramfs_inode_t *inode) {
     if (!inode) return NULL;
 
     vnode_t *vn = (vnode_t *)kmalloc(sizeof(vnode_t));
@@ -32,9 +172,9 @@ static vnode_t *ramfs_make_vnode(mount_t *mnt, inode_t *inode) {
 }
 
 static int ramfs_vnode_lookup(vnode_t *dir, const char *name, vnode_t **out) {
-    inode_t *dinode = (inode_t *)dir->fs_data;
-    inode_t *found = NULL;
-    int r = fs_inode_lookup(dinode, name, &found);
+    ramfs_inode_t *dinode = (ramfs_inode_t *)dir->fs_data;
+    ramfs_inode_t *found = NULL;
+    int r = ramfs_inode_lookup(dinode, name, &found);
     if (r < 0) return r;
 
     *out = ramfs_make_vnode(dir->mnt, found);
@@ -46,7 +186,7 @@ static int ramfs_vnode_lookup(vnode_t *dir, const char *name, vnode_t **out) {
 }
 
 static int ramfs_vnode_stat(vnode_t *vn, kstat_t *st) {
-    inode_t *inode = (inode_t *)vn->fs_data;
+    ramfs_inode_t *inode = (ramfs_inode_t *)vn->fs_data;
     memset(st, 0, sizeof(*st));
     st->st_ino = inode->inum;
     st->st_mode = vn->mode;
@@ -58,12 +198,12 @@ static int ramfs_vnode_stat(vnode_t *vn, kstat_t *st) {
 static int ramfs_vnode_mkdir(vnode_t *dir, const char *name, int mode) {
     (void)mode;
 
-    inode_t *dinode = (inode_t *)dir->fs_data;
-    inode_t *child = alloc_inode(FT_DIRECTORY);
+    ramfs_inode_t *dinode = (ramfs_inode_t *)dir->fs_data;
+    ramfs_inode_t *child = ramfs_alloc_inode(FT_DIRECTORY);
     if (!child) return -ENOMEM;
 
     child->parent = dinode;
-    child->capacity = 64 * sizeof(dir_entry_t);
+    child->capacity = 64 * sizeof(ramfs_dir_entry_t);
     child->data = kmalloc(child->capacity);
     if (!child->data) {
         child->ref_count = 0;
@@ -71,17 +211,17 @@ static int ramfs_vnode_mkdir(vnode_t *dir, const char *name, int mode) {
     }
 
     memset(child->data, 0, child->capacity);
-    add_dir_entry(child, ".", child->inum);
-    add_dir_entry(child, "..", dinode->inum);
-    add_dir_entry(dinode, name, child->inum);
+    ramfs_add_dir_entry(child, ".", child->inum);
+    ramfs_add_dir_entry(child, "..", dinode->inum);
+    ramfs_add_dir_entry(dinode, name, child->inum);
     return 0;
 }
 
 static int ramfs_vnode_create(vnode_t *dir, const char *name, int mode, vnode_t **out) {
     (void)mode;
 
-    inode_t *dinode = (inode_t *)dir->fs_data;
-    inode_t *child = alloc_inode(FT_REGULAR);
+    ramfs_inode_t *dinode = (ramfs_inode_t *)dir->fs_data;
+    ramfs_inode_t *child = ramfs_alloc_inode(FT_REGULAR);
     if (!child) return -ENOMEM;
 
     child->parent = dinode;
@@ -92,7 +232,7 @@ static int ramfs_vnode_create(vnode_t *dir, const char *name, int mode, vnode_t 
         return -ENOMEM;
     }
 
-    add_dir_entry(dinode, name, child->inum);
+    ramfs_add_dir_entry(dinode, name, child->inum);
     *out = ramfs_make_vnode(dir->mnt, child);
     if (*out) {
         (*out)->parent = dir;
@@ -107,9 +247,9 @@ static void ramfs_vnode_release(vnode_t *vn) {
 }
 
 static int ramfs_vnode_unlink(vnode_t *dir, const char *name) {
-    inode_t *dinode = (inode_t *)dir->fs_data;
-    dir_entry_t *entries = (dir_entry_t *)dinode->data;
-    int n_entries = dinode->size / sizeof(dir_entry_t);
+    ramfs_inode_t *dinode = (ramfs_inode_t *)dir->fs_data;
+    ramfs_dir_entry_t *entries = (ramfs_dir_entry_t *)dinode->data;
+    int n_entries = dinode->size / sizeof(ramfs_dir_entry_t);
 
     for (int i = 0; i < n_entries; i++) {
         if (entries[i].name[0] != '\0' && strcmp(entries[i].name, name) == 0) {
@@ -121,7 +261,7 @@ static int ramfs_vnode_unlink(vnode_t *dir, const char *name) {
 }
 
 static int ramfs_vnode_readlink(vnode_t *vn, char *buf, size_t sz) {
-    inode_t *inode = (inode_t *)vn->fs_data;
+    ramfs_inode_t *inode = (ramfs_inode_t *)vn->fs_data;
     if (inode->type != FT_SYMLINK) return -EINVAL;
 
     size_t len = inode->size;
@@ -132,10 +272,10 @@ static int ramfs_vnode_readlink(vnode_t *vn, char *buf, size_t sz) {
 }
 
 static int ramfs_vnode_symlink(vnode_t *dir, const char *name, const char *target) {
-    inode_t *dinode = (inode_t *)dir->fs_data;
+    ramfs_inode_t *dinode = (ramfs_inode_t *)dir->fs_data;
     if (dinode->type != FT_DIRECTORY) return -ENOTDIR;
 
-    inode_t *child = alloc_inode(FT_SYMLINK);
+    ramfs_inode_t *child = ramfs_alloc_inode(FT_SYMLINK);
     if (!child) return -ENOMEM;
 
     child->parent = dinode;
@@ -149,19 +289,19 @@ static int ramfs_vnode_symlink(vnode_t *dir, const char *name, const char *targe
 
     memcpy(child->data, target, tlen + 1);
     child->size = tlen;
-    add_dir_entry(dinode, name, child->inum);
+    ramfs_add_dir_entry(dinode, name, child->inum);
     return 0;
 }
 
 static int ramfs_vnode_rename(vnode_t *old_dir, const char *old_name,
                               vnode_t *new_dir, const char *new_name) {
-    inode_t *old_dinode = (inode_t *)old_dir->fs_data;
-    inode_t *new_dinode = (inode_t *)new_dir->fs_data;
+    ramfs_inode_t *old_dinode = (ramfs_inode_t *)old_dir->fs_data;
+    ramfs_inode_t *new_dinode = (ramfs_inode_t *)new_dir->fs_data;
     if (old_dinode->type != FT_DIRECTORY || new_dinode->type != FT_DIRECTORY)
         return -ENOTDIR;
 
-    dir_entry_t *old_entries = (dir_entry_t *)old_dinode->data;
-    int n_old = old_dinode->size / sizeof(dir_entry_t);
+    ramfs_dir_entry_t *old_entries = (ramfs_dir_entry_t *)old_dinode->data;
+    int n_old = old_dinode->size / sizeof(ramfs_dir_entry_t);
     int old_idx = -1;
     int inum = 0;
     for (int i = 0; i < n_old; i++) {
@@ -173,8 +313,8 @@ static int ramfs_vnode_rename(vnode_t *old_dir, const char *old_name,
     }
     if (old_idx < 0) return -ENOENT;
 
-    dir_entry_t *new_entries = (dir_entry_t *)new_dinode->data;
-    int n_new = new_dinode->size / sizeof(dir_entry_t);
+    ramfs_dir_entry_t *new_entries = (ramfs_dir_entry_t *)new_dinode->data;
+    int n_new = new_dinode->size / sizeof(ramfs_dir_entry_t);
     int new_idx = -1;
     for (int i = 0; i < n_new; i++) {
         if (new_entries[i].name[0] != '\0' && strcmp(new_entries[i].name, new_name) == 0) {
@@ -187,28 +327,28 @@ static int ramfs_vnode_rename(vnode_t *old_dir, const char *old_name,
         new_entries[new_idx].inum = inum;
         memcpy(new_entries[new_idx].name, new_name, MAX_NAME_LEN);
     } else {
-        add_dir_entry(new_dinode, new_name, inum);
+        ramfs_add_dir_entry(new_dinode, new_name, inum);
     }
 
     old_entries[old_idx].name[0] = '\0';
 
-    inode_t *moved = fs_find_inode_by_inum(inum);
+    ramfs_inode_t *moved = ramfs_find_inode_by_inum(inum);
     if (moved) moved->parent = new_dinode;
     return 0;
 }
 
 static int ramfs_vnode_rmdir(vnode_t *dir, const char *name) {
-    inode_t *dinode = (inode_t *)dir->fs_data;
-    dir_entry_t *entries = (dir_entry_t *)dinode->data;
-    int n_entries = dinode->size / sizeof(dir_entry_t);
+    ramfs_inode_t *dinode = (ramfs_inode_t *)dir->fs_data;
+    ramfs_dir_entry_t *entries = (ramfs_dir_entry_t *)dinode->data;
+    int n_entries = dinode->size / sizeof(ramfs_dir_entry_t);
 
     for (int i = 0; i < n_entries; i++) {
         if (entries[i].name[0] != '\0' && strcmp(entries[i].name, name) == 0) {
-            inode_t *child = fs_find_inode_by_inum(entries[i].inum);
+            ramfs_inode_t *child = ramfs_find_inode_by_inum(entries[i].inum);
             if (!child || child->type != FT_DIRECTORY) return -ENOTDIR;
 
-            dir_entry_t *centries = (dir_entry_t *)child->data;
-            int cn = child->size / sizeof(dir_entry_t);
+            ramfs_dir_entry_t *centries = (ramfs_dir_entry_t *)child->data;
+            int cn = child->size / sizeof(ramfs_dir_entry_t);
             int active = 0;
             for (int j = 0; j < cn; j++) {
                 if (centries[j].name[0] != '\0') active++;
@@ -236,7 +376,7 @@ static vnode_ops_t g_ramfs_vnode_ops = {
 };
 
 static int ramfs_fread(vfile_t *vf, char *buf, size_t count) {
-    inode_t *inode = (inode_t *)vf->vnode->fs_data;
+    ramfs_inode_t *inode = (ramfs_inode_t *)vf->vnode->fs_data;
     if (vf->offset >= inode->size) return 0;
 
     size_t avail = inode->size - vf->offset;
@@ -249,7 +389,7 @@ static int ramfs_fread(vfile_t *vf, char *buf, size_t count) {
 }
 
 static int ramfs_fwrite(vfile_t *vf, const char *buf, size_t count) {
-    inode_t *inode = (inode_t *)vf->vnode->fs_data;
+    ramfs_inode_t *inode = (ramfs_inode_t *)vf->vnode->fs_data;
     if (inode->type == FT_DIRECTORY) return -EISDIR;
 
     size_t needed = vf->offset + count;
@@ -273,7 +413,7 @@ static int ramfs_fwrite(vfile_t *vf, const char *buf, size_t count) {
 }
 
 static long ramfs_flseek(vfile_t *vf, long offset, int whence) {
-    inode_t *inode = (inode_t *)vf->vnode->fs_data;
+    ramfs_inode_t *inode = (ramfs_inode_t *)vf->vnode->fs_data;
     long new_off;
 
     switch (whence) {
@@ -289,28 +429,28 @@ static long ramfs_flseek(vfile_t *vf, long offset, int whence) {
 }
 
 static int ramfs_freaddir(vfile_t *vf, void *dirp, size_t count) {
-    inode_t *inode = (inode_t *)vf->vnode->fs_data;
+    ramfs_inode_t *inode = (ramfs_inode_t *)vf->vnode->fs_data;
     if (inode->type != FT_DIRECTORY) return -ENOTDIR;
 
-    dir_entry_t *entries = (dir_entry_t *)inode->data;
-    int n_entries = inode->size / sizeof(dir_entry_t);
+    ramfs_dir_entry_t *entries = (ramfs_dir_entry_t *)inode->data;
+    int n_entries = inode->size / sizeof(ramfs_dir_entry_t);
     char *out = (char *)dirp;
     size_t total = 0;
 
-    int idx = (int)(vf->offset / sizeof(dir_entry_t));
+    int idx = (int)(vf->offset / sizeof(ramfs_dir_entry_t));
     while (idx < n_entries) {
-        dir_entry_t *de = &entries[idx];
+        ramfs_dir_entry_t *de = &entries[idx];
         if (de->name[0] != '\0') {
             size_t namelen = strlen(de->name);
-            size_t reclen = (offsetof(linux_dirent64_t, d_name) + namelen + 1 + 7) & ~7UL;
+            size_t reclen = (offsetof(a20_dirent64_t, d_name) + namelen + 1 + 7) & ~7UL;
             if (total + reclen > count) break;
 
-            linux_dirent64_t *d = (linux_dirent64_t *)(out + total);
+            a20_dirent64_t *d = (a20_dirent64_t *)(out + total);
             d->d_ino = (uint64_t)de->inum;
             d->d_off = (int64_t)(total + reclen);
             d->d_reclen = (uint16_t)reclen;
             d->d_type = DT_UNKNOWN;
-            inode_t *child = fs_find_inode_by_inum(de->inum);
+            ramfs_inode_t *child = ramfs_find_inode_by_inum(de->inum);
             if (child) {
                 if (child->type == FT_DIRECTORY) d->d_type = DT_DIR;
                 else if (child->type == FT_SYMLINK) d->d_type = DT_LNK;
@@ -320,7 +460,7 @@ static int ramfs_freaddir(vfile_t *vf, void *dirp, size_t count) {
             total += reclen;
         }
         idx++;
-        vf->offset += sizeof(dir_entry_t);
+        vf->offset += sizeof(ramfs_dir_entry_t);
     }
     return (int)total;
 }
@@ -339,7 +479,8 @@ static vfile_ops_t g_ramfs_fops = {
 };
 
 vnode_t *ramfs_mount(mount_t *mnt) {
-    return ramfs_make_vnode(mnt, fs_get_root());
+    g_ramfs_ready = 0;
+    return ramfs_make_vnode(mnt, ramfs_get_root());
 }
 
 vfile_t *ramfs_open_vnode(vnode_t *vn, int flags) {

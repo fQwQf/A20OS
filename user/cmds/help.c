@@ -12,6 +12,7 @@ int main(int argc, char *argv[]) {
     printf("\n\033[1mPrograms (in /bin):\033[0m\n");
     printf("  ls, cat, cp, rm, mkdir, touch, pwd\n");
     printf("  echo, env, clear, ps, aed\n");
+    printf("  netstat, ping, udpmon, udpsend, wget\n");
     printf("  poweroff, reboot\n");
     printf("\n\033[1mFilesystems:\033[0m\n");
     printf("  /mnt/                FAT32\n");

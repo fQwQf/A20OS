@@ -84,7 +84,11 @@ int handle_demand_fault(task_t *t, uint64_t stval) {
             stack_size_limit = USER_STACK_MAX_SIZE;
         stack_size_limit = ROUND_UP(stack_size_limit, PAGE_SIZE);
         uint64_t stack_limit = t->mm->stack_top - stack_size_limit;
-        if (page_va >= stack_limit && page_va < t->mm->stack_bottom) {
+        if (page_va >= stack_limit && page_va < t->mm->stack_top) {
+            uint64_t *pte = pt_walk(t->mm->pgdir, page_va, 0);
+            if (pte && (*pte & PTE_V))
+                return -1;
+
             pfn_t pfn = pfa_alloc_page();
             if (pfn == PFN_NONE) return -1;
             memset(pfn_to_virt(pfn), 0, PAGE_SIZE);
@@ -93,7 +97,8 @@ int handle_demand_fault(task_t *t, uint64_t stval) {
             int r = pt_map(t->mm->pgdir, page_va, pfn_to_phys(pfn), pte_flags);
             if (r < 0) { frame_put(pfn); return -1; }
 
-            t->mm->stack_bottom = page_va;
+            if (page_va < t->mm->stack_bottom)
+                t->mm->stack_bottom = page_va;
             t->mm->rss++;
             arch_tlb_flush_page(stval);
             return 0;

@@ -52,7 +52,7 @@ int signal_send(int pid, int signum) {
     }
 
     if (t->state == PROC_BLOCKED) {
-        t->state = PROC_READY;
+        proc_make_ready(t);
     }
 
     if (t == proc_current()) {
