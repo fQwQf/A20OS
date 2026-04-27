@@ -1,5 +1,6 @@
 ARCH ?= riscv64
 CONTEST ?= 0
+OPT ?= -O3
 
 .DEFAULT_GOAL := all
 
@@ -31,7 +32,7 @@ MUSL_TARGET := $(MUSL_TARGET_$(ARCH))
 
 ARCH_CFLAGS_riscv64 := -mabi=lp64 -march=rv64g -mcmodel=medany
 ARCH_CFLAGS_loongarch64 := -mabi=lp64d -march=loongarch64 -mcmodel=normal -fno-pic
-ARCH_CFLAGS_aarch64 := -march=armv8-a -fno-pic
+ARCH_CFLAGS_aarch64 := -march=armv8-a -fno-pic -fno-tree-vectorize
 ARCH_CFLAGS := $(ARCH_CFLAGS_$(ARCH))
 
 ARCH_LDFLAGS_riscv64 :=
@@ -39,9 +40,9 @@ ARCH_LDFLAGS_loongarch64 := -no-pie
 ARCH_LDFLAGS_aarch64 := -no-pie
 ARCH_LDFLAGS := $(ARCH_LDFLAGS_$(ARCH))
 
-MUSL_CONFIG_CFLAGS_riscv64 := -O2 -mcmodel=medany -march=rv64g -mabi=lp64
-MUSL_CONFIG_CFLAGS_loongarch64 := -O2 -march=loongarch64 -mabi=lp64d -mcmodel=normal -fno-pic -static
-MUSL_CONFIG_CFLAGS_aarch64 := -O2 -fno-pic -static
+MUSL_CONFIG_CFLAGS_riscv64 := $(OPT) -mcmodel=medany -march=rv64g -mabi=lp64
+MUSL_CONFIG_CFLAGS_loongarch64 := $(OPT) -march=loongarch64 -mabi=lp64d -mcmodel=normal -fno-pic -static
+MUSL_CONFIG_CFLAGS_aarch64 := $(OPT) -fno-pic -static -fno-tree-vectorize
 MUSL_CONFIG_CFLAGS := $(MUSL_CONFIG_CFLAGS_$(ARCH))
 
 CC := $(CROSS_COMPILE)gcc
@@ -55,7 +56,7 @@ MUSL_INC := -isystem $(MUSL_BUILD)/obj/include \
             -isystem $(MUSL_BASE)/arch/$(MUSL_ARCH) \
             -isystem $(MUSL_BASE)/arch/generic
 
-CFLAGS := -Wall -Wextra -O2 -ffreestanding -nostdinc $(MUSL_INC) \
+CFLAGS := -Wall -Wextra $(OPT) -ffreestanding -nostdinc $(MUSL_INC) \
           -Iinit_common $(ARCH_CFLAGS)
 LDFLAGS := -static -nostdlib -Ttext 0x10000 $(ARCH_LDFLAGS)
 
@@ -86,7 +87,10 @@ MUSL_CHECK_FILES := $(MUSL_CRT)/crt1.o \
                     $(MUSL_BUILD)/obj/include/bits/syscall.h
 
 SBASE_DIR := external/sbase
-LOCAL_CMD_SRCS := $(wildcard cmds/*.c)
+WGET_CMD_SRC := cmds/wget.c
+WGET_OBJ := $(OBJ_DIR)/cmds/wget.o
+WGET_CMD := $(BUILD_DIR)/wget
+LOCAL_CMD_SRCS := $(filter-out $(WGET_CMD_SRC),$(wildcard cmds/*.c))
 LOCAL_CMD_NAMES := $(basename $(notdir $(LOCAL_CMD_SRCS)))
 
 SBASE_ALL_BINS := basename cat chgrp chmod chown cksum cmp comm cp cut date dd \
@@ -113,6 +117,30 @@ SBASE_CPPFLAGS := -DPREFIX=\"/\" \
                   -D_FILE_OFFSET_BITS=64 \
                   -I$(SBASE_DIR)
 SBASE_CFLAGS := $(CFLAGS) $(SBASE_CPPFLAGS)
+
+TLSE_DIR := external/tlse
+TLSE_OBJ := $(OBJ_DIR)/tlse/tlse.o
+TLSE_ARCH_CFLAGS_aarch64 := -mgeneral-regs-only -DLTC_NO_TABLES -DNO_TLS_FORWARD_SECRECY \
+                             -DA20OS_TLS_NO_GCM -DA20OS_TLS_RSA_CBC_SHA1_ONLY
+TLSE_ARCH_CFLAGS := $(TLSE_ARCH_CFLAGS_$(ARCH))
+TLSE_BASE_CFLAGS := $(filter-out -O0 -O1 -O2 -O3 -Os -Oz,$(CFLAGS))
+TLSE_OPT_aarch64 := -O0
+TLSE_OPT := $(if $(TLSE_OPT_$(ARCH)),$(TLSE_OPT_$(ARCH)),-O1)
+TLSE_CFLAGS := $(TLSE_BASE_CFLAGS) $(TLSE_OPT) $(TLSE_ARCH_CFLAGS) -fno-strict-aliasing -fno-strict-overflow -fwrapv \
+                -I$(TLSE_DIR) -fsigned-char \
+                -DTLS_AMALGAMATION \
+                -DNO_SSL_COMPATIBLE_INTERFACE \
+                -DNO_TLS_WITH_CHACHA20_POLY1305 \
+                -DNO_TLS_LEGACY_SUPPORT \
+                -DNO_TLS_13 \
+                -DNO_TLS_CLIENT_ECDHE \
+                -DNO_TLS_ECDSA_SUPPORTED \
+                -DNO_TLS_CURVE25519 \
+                -DNO_TLS_ROBOT_MITIGATION \
+                -DA20OS_NO_FAST_MONTGOMERY \
+                -DA20OS_NO_FAST_MUL \
+                -DA20OS_NO_FAST_MUL_HIGH \
+                -DA20OS_NO_FAST_SQR
 
 LOCAL_CMD_OBJS := $(patsubst cmds/%.c,$(OBJ_DIR)/cmds/%.o,$(LOCAL_CMD_SRCS))
 LOCAL_CMDS := $(patsubst cmds/%.c,$(BUILD_DIR)/%,$(LOCAL_CMD_SRCS))
@@ -146,9 +174,10 @@ MKSH_CFLAGS := $(CFLAGS) -I$(MKSH_DIR) \
 
 USER_INTERMEDIATE_TARGETS := $(INIT_OBJ) $(INIT_EXTRA_OBJS) $(LIB_A20OS) $(MKSH_OBJS) \
                              $(LOCAL_CMD_OBJS) $(SBASE_OBJS) $(SBASE_LIBUTF_OBJS) \
-                             $(SBASE_LIBUTIL_OBJS) $(SBASE_LIBUTF) $(SBASE_LIBUTIL)
+                             $(SBASE_LIBUTIL_OBJS) $(SBASE_LIBUTF) $(SBASE_LIBUTIL) \
+                             $(WGET_OBJ) $(TLSE_OBJ)
 
-all: build_dir $(BUILD_DIR)/init $(BUILD_DIR)/mksh $(BUILD_DIR)/sh $(SBASE_CMDS) $(LOCAL_CMDS)
+all: build_dir $(BUILD_DIR)/init $(BUILD_DIR)/mksh $(BUILD_DIR)/sh $(SBASE_CMDS) $(LOCAL_CMDS) $(WGET_CMD)
 
 build_dir:
 	@mkdir -p $(BUILD_DIR) $(OBJ_DIR)
@@ -190,25 +219,36 @@ $(LOCAL_CMDS): $(BUILD_DIR)/%: $(OBJ_DIR)/cmds/%.o $(LIB_A20OS) | build_dir musl
 $(SBASE_CMDS): $(BUILD_DIR)/%: $(OBJ_DIR)/sbase/%.o $(SBASE_LIBUTIL) $(SBASE_LIBUTF) $(LIB_A20OS) | build_dir musl_prepare
 	$(CC) $(LDFLAGS) -o $@ $(CRT_START) $< $(CRT_END) $(SBASE_LIBUTIL) $(SBASE_LIBUTF) $(LIBC)
 
-$(INIT_OBJ): $(INIT_MAIN_SRC) | build_dir musl_prepare
+$(WGET_CMD): $(WGET_OBJ) $(TLSE_OBJ) $(LIB_A20OS) | build_dir musl_prepare
+	$(CC) $(LDFLAGS) -o $@ $(CRT_START) $(WGET_OBJ) $(TLSE_OBJ) $(CRT_END) $(LIBC)
+
+$(INIT_OBJ): $(INIT_MAIN_SRC) Makefile | build_dir musl_prepare
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(OBJ_DIR)/cmds/%.o: cmds/%.c | build_dir musl_prepare
+$(OBJ_DIR)/cmds/%.o: cmds/%.c Makefile | build_dir musl_prepare
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(OBJ_DIR)/sbase/%.o: $(SBASE_DIR)/%.c | build_dir musl_prepare
+$(OBJ_DIR)/sbase/%.o: $(SBASE_DIR)/%.c Makefile | build_dir musl_prepare
 	@mkdir -p $(dir $@)
 	$(CC) $(SBASE_CFLAGS) -c $< -o $@
 
-$(OBJ_DIR)/sbase/libutf/%.o: $(SBASE_DIR)/libutf/%.c | build_dir musl_prepare
+$(OBJ_DIR)/sbase/libutf/%.o: $(SBASE_DIR)/libutf/%.c Makefile | build_dir musl_prepare
 	@mkdir -p $(dir $@)
 	$(CC) $(SBASE_CFLAGS) -c $< -o $@
 
-$(OBJ_DIR)/sbase/libutil/%.o: $(SBASE_DIR)/libutil/%.c | build_dir musl_prepare
+$(OBJ_DIR)/sbase/libutil/%.o: $(SBASE_DIR)/libutil/%.c Makefile | build_dir musl_prepare
 	@mkdir -p $(dir $@)
 	$(CC) $(SBASE_CFLAGS) -c $< -o $@
+
+$(WGET_OBJ): $(WGET_CMD_SRC) Makefile | build_dir musl_prepare
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -I$(TLSE_DIR) -c $< -o $@
+
+$(OBJ_DIR)/tlse/%.o: $(TLSE_DIR)/%.c Makefile | build_dir musl_prepare
+	@mkdir -p $(dir $@)
+	$(CC) $(TLSE_CFLAGS) -c $< -o $@
 
 $(SBASE_LIBUTF): $(SBASE_LIBUTF_OBJS) | build_dir
 	@mkdir -p $(dir $@)
@@ -220,19 +260,19 @@ $(SBASE_LIBUTIL): $(SBASE_LIBUTIL_OBJS) | build_dir
 	$(AR) rcs $@ $^
 	$(RANLIB) $@
 
-$(OBJ_DIR)/contest_init/%.o: contest_init/%.c | build_dir musl_prepare
+$(OBJ_DIR)/contest_init/%.o: contest_init/%.c Makefile | build_dir musl_prepare
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(OBJ_DIR)/init_common/%.o: init_common/%.c | build_dir musl_prepare
+$(OBJ_DIR)/init_common/%.o: init_common/%.c Makefile | build_dir musl_prepare
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(OBJ_DIR)/lib/%.o: lib/%.c | build_dir musl_prepare
+$(OBJ_DIR)/lib/%.o: lib/%.c Makefile | build_dir musl_prepare
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(OBJ_DIR)/mksh/%.o: $(MKSH_DIR)/%.c | build_dir musl_prepare
+$(OBJ_DIR)/mksh/%.o: $(MKSH_DIR)/%.c Makefile | build_dir musl_prepare
 	@mkdir -p $(dir $@)
 	$(CC) $(MKSH_CFLAGS) -c $< -o $@
 

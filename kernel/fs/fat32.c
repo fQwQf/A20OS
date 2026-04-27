@@ -700,12 +700,12 @@ static int fat32_freaddir(vfile_t *vf, void *dirp, size_t count) {
         }
 
         size_t namelen = strlen(fname);
-        size_t reclen  = sizeof(linux_dirent64_t) + namelen + 1;
+        size_t reclen  = sizeof(a20_dirent64_t) + namelen + 1;
         reclen = (reclen + 7) & ~7UL; /* 8-byte align */
 
         if (total + reclen > count) break;
 
-        linux_dirent64_t *dent = (linux_dirent64_t *)(out + total);
+        a20_dirent64_t *dent = (a20_dirent64_t *)(out + total);
         uint32_t cluster = ((uint32_t)de.fst_clus_hi << 16) | de.fst_clus_lo;
         dent->d_ino    = cluster ? cluster : fc->sb->root_cluster;
         dent->d_off    = (int64_t)fc->dir_byte_off;
