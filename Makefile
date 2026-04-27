@@ -5,6 +5,7 @@ ARCH ?= riscv64
 MODE ?= release
 BRINGUP ?= 0
 CONTEST ?= 0
+OPT ?= -O3
 
 .DEFAULT_GOAL := all
 
@@ -23,9 +24,12 @@ BUILD_TIME_HDR = $(BUILD_DIR)/generated/build_time.h
 FAT32_IMAGE_MB ?= 32
 EXT4_IMAGE_MB ?= 32
 CONTEST_DISK_MB ?= $(FAT32_IMAGE_MB)
-USER_BUILD_ID = $(ARCH):$(CONTEST)
+USER_BUILD_ID = $(ARCH):$(CONTEST):$(OPT)
 USER_BUILD_CHECK_DIRS = user/cmds user/contest_init user/init_common user/lib user/shell \
-                        user/external/sbase user/external/mksh-cvs2git
+                        user/external/sbase user/external/mksh-cvs2git user/external/tlse
+comma := ,
+NET_HOSTFWD ?= hostfwd=tcp::5555-:5555,hostfwd=udp::5555-:5555
+NETDEV_USER = -netdev user,id=net$(if $(strip $(NET_HOSTFWD)),$(comma)$(NET_HOSTFWD),)
 
 # Compiler and tools
 ifeq ($(ARCH), riscv64)
@@ -53,6 +57,7 @@ ifneq ($(BRINGUP),1)
 ifeq ($(ARCH), riscv64)
 QEMU_FLAGS += -drive file=$(FAT32_IMG),if=none,format=raw,id=x0 -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0
 QEMU_FLAGS += -drive file=$(EXT4_IMG),if=none,format=raw,id=x1 -device virtio-blk-device,drive=x1,bus=virtio-mmio-bus.1
+QEMU_FLAGS += $(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4
 
 ifneq ($(wildcard sdcard-rv.img),)
 QEMU_FLAGS += -drive file=sdcard-rv.img,if=none,format=raw,id=x2 -device virtio-blk-device,drive=x2,bus=virtio-mmio-bus.2
@@ -65,6 +70,7 @@ endif
 else ifeq ($(ARCH), loongarch64)
 QEMU_FLAGS += -drive file=$(FAT32_IMG),if=none,format=raw,id=x0 -device virtio-blk-pci,drive=x0
 QEMU_FLAGS += -drive file=$(EXT4_IMG),if=none,format=raw,id=x1 -device virtio-blk-pci,drive=x1
+QEMU_FLAGS += $(NETDEV_USER) -device virtio-net-pci,netdev=net
 
 ifneq ($(wildcard sdcard-rv.img),)
 QEMU_FLAGS += -drive file=sdcard-rv.img,if=none,format=raw,id=x2 -device virtio-blk-pci,drive=x2
@@ -77,6 +83,7 @@ endif
 else ifeq ($(ARCH), aarch64)
 QEMU_FLAGS += -drive file=$(FAT32_IMG),if=none,format=raw,id=x0 -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0
 QEMU_FLAGS += -drive file=$(EXT4_IMG),if=none,format=raw,id=x1 -device virtio-blk-device,drive=x1,bus=virtio-mmio-bus.1
+QEMU_FLAGS += $(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4
 
 ifneq ($(wildcard sdcard-rv.img),)
 QEMU_FLAGS += -drive file=sdcard-rv.img,if=none,format=raw,id=x2 -device virtio-blk-device,drive=x2,bus=virtio-mmio-bus.2
@@ -90,10 +97,12 @@ endif
 endif
 
 # Compiler flags
-CFLAGS = -Wall -Wextra -O2 -ffreestanding -nostdlib \
+CFLAGS = -Wall -Wextra $(OPT) -ffreestanding -nostdlib \
          -nostartfiles -fno-builtin -fno-common -std=gnu99 \
          -MMD -MP \
-         -I$(INCLUDE_DIR) -I$(KERNEL_DIR) -I$(ARCH_INCLUDE_DIR) -I$(BUILD_DIR)/generated $(ARCH_CFLAGS) \
+         -I$(INCLUDE_DIR) -I$(KERNEL_DIR) -I$(KERNEL_DIR)/net/lwip_port \
+         -I$(KERNEL_DIR)/external/lwip/src/include \
+         -I$(ARCH_INCLUDE_DIR) -I$(BUILD_DIR)/generated $(ARCH_CFLAGS) \
          -D$(shell echo $(ARCH) | tr a-z A-Z) \
          -DCONFIG_$(shell echo $(ARCH) | tr a-z A-Z)
 
@@ -113,11 +122,55 @@ KERNEL_SRC = $(wildcard $(KERNEL_DIR)/*.c) \
              $(wildcard $(KERNEL_DIR)/mm/*.c) \
              $(wildcard $(KERNEL_DIR)/proc/*.c) \
              $(wildcard $(KERNEL_DIR)/fs/*.c) \
+             $(wildcard $(KERNEL_DIR)/net/*.c) \
              $(wildcard $(KERNEL_DIR)/drv/*.c) \
              $(wildcard $(KERNEL_DIR)/syscall/*.c) \
              $(wildcard $(KERNEL_DIR)/trap/*.c) \
              $(wildcard $(KERNEL_DIR)/shell/*.c) \
-             $(shell find $(KERNEL_DIR)/arch/$(ARCH) -type f -name '*.c' | sort)
+             $(shell find $(KERNEL_DIR)/arch/$(ARCH) -type f -name '*.c' | sort) \
+             $(LWIP_SRC)
+
+LWIPDIR := $(KERNEL_DIR)/external/lwip/src
+LWIP_SRC = \
+    $(LWIPDIR)/core/init.c \
+    $(LWIPDIR)/core/def.c \
+    $(LWIPDIR)/core/dns.c \
+    $(LWIPDIR)/core/inet_chksum.c \
+    $(LWIPDIR)/core/ip.c \
+    $(LWIPDIR)/core/mem.c \
+    $(LWIPDIR)/core/memp.c \
+    $(LWIPDIR)/core/netif.c \
+    $(LWIPDIR)/core/pbuf.c \
+    $(LWIPDIR)/core/raw.c \
+    $(LWIPDIR)/core/stats.c \
+    $(LWIPDIR)/core/sys.c \
+    $(LWIPDIR)/core/altcp.c \
+    $(LWIPDIR)/core/altcp_alloc.c \
+    $(LWIPDIR)/core/altcp_tcp.c \
+    $(LWIPDIR)/core/tcp.c \
+    $(LWIPDIR)/core/tcp_in.c \
+    $(LWIPDIR)/core/tcp_out.c \
+    $(LWIPDIR)/core/timeouts.c \
+    $(LWIPDIR)/core/udp.c \
+    $(LWIPDIR)/core/ipv4/acd.c \
+    $(LWIPDIR)/core/ipv4/autoip.c \
+    $(LWIPDIR)/core/ipv4/dhcp.c \
+    $(LWIPDIR)/core/ipv4/etharp.c \
+    $(LWIPDIR)/core/ipv4/icmp.c \
+    $(LWIPDIR)/core/ipv4/igmp.c \
+    $(LWIPDIR)/core/ipv4/ip4.c \
+    $(LWIPDIR)/core/ipv4/ip4_addr.c \
+    $(LWIPDIR)/core/ipv4/ip4_frag.c \
+    $(LWIPDIR)/core/ipv6/dhcp6.c \
+    $(LWIPDIR)/core/ipv6/ethip6.c \
+    $(LWIPDIR)/core/ipv6/icmp6.c \
+    $(LWIPDIR)/core/ipv6/inet6.c \
+    $(LWIPDIR)/core/ipv6/ip6.c \
+    $(LWIPDIR)/core/ipv6/ip6_addr.c \
+    $(LWIPDIR)/core/ipv6/ip6_frag.c \
+    $(LWIPDIR)/core/ipv6/mld6.c \
+    $(LWIPDIR)/core/ipv6/nd6.c \
+    $(LWIPDIR)/netif/ethernet.c
 
 # Object files
 KERNEL_OBJ = $(patsubst $(KERNEL_DIR)/%.c,$(BUILD_DIR)/%.o,$(KERNEL_SRC))
@@ -205,6 +258,10 @@ $(USER_BUILD_STAMP): FORCE
 		need_clean=1; \
 	elif [ ! -x user/build/init ] || [ ! -x user/build/mksh ]; then \
 		need_build=1; \
+	elif find user/build -maxdepth 1 -type f ! -name '.build-id' -newer "$@" \
+		-print -quit | grep -q .; then \
+		need_build=1; \
+		need_clean=1; \
 	elif find user/Makefile $(USER_BUILD_CHECK_DIRS) \
 		\( -path '*/.git' -o -path 'user/build' \) -prune -o \
 		-type f -newer "$@" -print -quit | grep -q .; then \
@@ -212,7 +269,7 @@ $(USER_BUILD_STAMP): FORCE
 	fi; \
 	if [ "$$need_build" -eq 1 ]; then \
 		if [ "$$need_clean" -eq 1 ]; then $(MAKE) -C user clean; fi; \
-		$(MAKE) -C user ARCH=$(ARCH) CONTEST=$(CONTEST); \
+		$(MAKE) -C user ARCH=$(ARCH) CONTEST=$(CONTEST) OPT="$(OPT)"; \
 		printf '%s\n' '$(USER_BUILD_ID)' > "$@"; \
 	else \
 		echo "[USER] $(USER_BUILD_ID) up to date"; \
@@ -309,7 +366,7 @@ endif
 
 # --- Debug Targets ---
 
-DEBUG_CFLAGS = $(filter-out -O2,$(CFLAGS)) -O0 -g -DDEBUG
+DEBUG_CFLAGS = $(filter-out -O0 -O1 -O2 -O3 -Os -Oz,$(CFLAGS)) -O0 -g -DDEBUG
 
 debug-riscv64:
 	$(MAKE) ARCH=riscv64 BRINGUP=$(BRINGUP) CONTEST=$(CONTEST) _debug_impl

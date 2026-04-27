@@ -8,6 +8,7 @@
 
 struct signal_state;
 struct mm_struct;
+struct vm_area;
 typedef struct mm_struct mm_struct_t;
 
 typedef struct task_t {
@@ -21,10 +22,15 @@ typedef struct task_t {
     trap_context_t *trap_ctx;
     int      exit_code;
     int      fd_table[MAX_FILES];
+    uint8_t  fd_cloexec[MAX_FILES];
     char     cwd[MAX_PATH_LEN];
     struct task_t *parent;
     uint64_t wake_time;
     int      priority;
+    int      sched_level;
+    int      on_rq;
+    struct task_t *rq_next;
+    struct task_t *rq_prev;
     uint64_t total_time;
 
     struct signal_state *signals;
@@ -60,6 +66,9 @@ task_t  *proc_current(void);
 task_t  *proc_find(int pid);
 int      proc_alloc(void (*entry)(void));
 int      proc_alloc_user(uint64_t entry, uint64_t sp, uint64_t *pgdir);
+int      proc_alloc_user_image(uint64_t entry, uint64_t sp, uint64_t *pgdir,
+                               struct vm_area *mmap, uint64_t brk,
+                               uint64_t stack_top, size_t total_vm);
 void     proc_free_pid(int pid);
 void     proc_exit(int exit_code) NORETURN;
 int      proc_wait4(int pid, int *status, int options);
@@ -70,6 +79,7 @@ void     proc_dump(void);
 int      proc_kill(int pid, int signum);
 int      proc_kill_pgid(int pgid, int signum, int skip_self);
 void     proc_set_name(task_t *t, const char *name);
+void     proc_make_ready(task_t *t);
 
 /* For execve: replace current process image */
 int      proc_exec(const char *path, char *const argv[], char *const envp[]);

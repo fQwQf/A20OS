@@ -6,12 +6,28 @@
 #include "core/panic.h"
 #include "core/defs.h"
 #include "core/consts.h"
+#include "core/lock.h"
+#include "core/timer.h"
+#include "proc/proc.h"
 
 #define VQ_SIZE  VIRTIO_QUEUE_SIZE
+#define VIRTIO_BLK_REQ_SLOTS (VIRTIO_QUEUE_SIZE / 3)
+#define VIRTIO_BLK_WAIT_TIMEOUT_TICKS (TICKS_PER_SEC * 10)
 
 static inline uint64_t va_to_pa(const void *va) {
     return (uint64_t)(uintptr_t)va - PAGE_OFFSET;
 }
+
+typedef struct {
+    int                in_use;
+    int                done;
+    int                result;
+    int                write;
+    uint16_t           head;
+    void              *buf;
+    size_t             bytes;
+    task_t            *waiter;
+} virtio_blk_req_t;
 
 typedef struct {
     virtio_blk_t       blk;
@@ -23,6 +39,8 @@ typedef struct {
     ALIGNED(4096) uint8_t legacy_vq[4096 * 3];
     uint8_t            status[VIRTIO_QUEUE_SIZE];
     virtio_blk_req_hdr_t req_hdr[VIRTIO_QUEUE_SIZE];
+    virtio_blk_req_t   req[VIRTIO_BLK_REQ_SLOTS];
+    spinlock_t         lock;
     int                slot;
 } virtio_blk_inst_t;
 
@@ -46,6 +64,8 @@ int virtio_blk_init(void) {
     virtio_transport_t *vt = &inst->vt;
     inst->blk.valid = 0;
     inst->slot      = idx;
+    spin_init(&inst->lock);
+    memset(inst->req, 0, sizeof(inst->req));
     inst->blk.legacy = vt->legacy;
 
     printf("[VIRTIO%d] Found block device (legacy=%d)\n", idx, vt->legacy);
@@ -163,17 +183,81 @@ int virtio_blk_init(void) {
     return 0;
 }
 
-static int virtio_blk_rw(int idx, uint64_t lba, void *buf, size_t sectors, int write) {
-    if (idx < 0 || idx >= g_ninst) return -1;
-    virtio_blk_inst_t *inst = &g_insts[idx];
-    if (!inst->blk.valid) return -1;
+static virtio_blk_req_t *virtio_blk_find_req_locked(virtio_blk_inst_t *inst, uint16_t head) {
+    for (int i = 0; i < VIRTIO_BLK_REQ_SLOTS; i++) {
+        virtio_blk_req_t *req = &inst->req[i];
+        if (req->in_use && req->head == head)
+            return req;
+    }
+    return NULL;
+}
 
+static void virtio_blk_complete_used_locked(virtio_blk_inst_t *inst) {
+    virtio_blk_t *blk = &inst->blk;
+    virtq_used_t *used = blk->used;
+
+    arch_dma_sync_for_cpu(&used->idx, sizeof(uint16_t));
+    uint16_t used_idx = ((volatile virtq_used_t *)used)->idx;
+    while (blk->last_used != used_idx) {
+        uint16_t ring_idx = blk->last_used % VIRTIO_QUEUE_SIZE;
+        arch_dma_sync_for_cpu(&used->ring[ring_idx], sizeof(virtq_used_elem_t));
+        uint16_t head = (uint16_t)used->ring[ring_idx].id;
+        virtio_blk_req_t *req = virtio_blk_find_req_locked(inst, head);
+
+        if (req) {
+            arch_dma_sync_for_cpu(&inst->status[head], 1);
+            if (!req->write)
+                arch_dma_sync_for_cpu(req->buf, req->bytes);
+            req->result = (inst->status[head] == VIRTIO_BLK_S_OK) ? 0 : -1;
+            req->done = 1;
+            if (req->waiter && req->waiter->state == PROC_BLOCKED)
+                proc_make_ready(req->waiter);
+        }
+
+        blk->last_used++;
+    }
+}
+
+static void virtio_blk_poll_inst(virtio_blk_inst_t *inst) {
+    if (!inst || !inst->blk.valid)
+        return;
+    uint64_t flags = spin_lock_irqsave(&inst->lock);
+    virtio_blk_complete_used_locked(inst);
+    spin_unlock_irqrestore(&inst->lock, flags);
+}
+
+void virtio_blk_poll_all(void) {
+    for (int i = 0; i < g_ninst; i++)
+        virtio_blk_poll_inst(&g_insts[i]);
+}
+
+static virtio_blk_req_t *virtio_blk_alloc_req_locked(virtio_blk_inst_t *inst) {
+    virtio_blk_complete_used_locked(inst);
+    for (int i = 0; i < VIRTIO_BLK_REQ_SLOTS; i++) {
+        if (!inst->req[i].in_use) {
+            virtio_blk_req_t *req = &inst->req[i];
+            memset(req, 0, sizeof(*req));
+            req->in_use = 1;
+            req->head = (uint16_t)(i * 3);
+            return req;
+        }
+    }
+    return NULL;
+}
+
+static int virtio_blk_submit_req(virtio_blk_inst_t *inst, virtio_blk_req_t *req,
+                                 uint64_t lba, void *buf, size_t sectors,
+                                 int write) {
     size_t bytes = sectors * VIRTIO_BLK_SECTOR_SIZE;
     virtio_transport_t *vt = &inst->vt;
+    uint16_t slot = req->head;
 
-    uint16_t slot = inst->blk.desc_idx % VIRTIO_QUEUE_SIZE;
-    if (slot + 2 >= VIRTIO_QUEUE_SIZE)
-        slot = 0;
+    req->done = 0;
+    req->result = -1;
+    req->write = write;
+    req->buf = buf;
+    req->bytes = bytes;
+    req->waiter = proc_current();
 
     inst->req_hdr[slot].type     = write ? VIRTIO_BLK_T_OUT : VIRTIO_BLK_T_IN;
     inst->req_hdr[slot].reserved = 0;
@@ -183,7 +267,6 @@ static int virtio_blk_rw(int idx, uint64_t lba, void *buf, size_t sectors, int w
 
     virtq_desc_t *desc  = inst->blk.desc;
     virtq_avail_t *avail = inst->blk.avail;
-    virtq_used_t  *used  = inst->blk.used;
 
     desc[slot].addr  = va_to_pa(&inst->req_hdr[slot]);
     desc[slot].len   = sizeof(virtio_blk_req_hdr_t);
@@ -213,59 +296,92 @@ static int virtio_blk_rw(int idx, uint64_t lba, void *buf, size_t sectors, int w
     arch_dma_sync_for_device(&avail->flags, sizeof(avail->flags));
     arch_dma_sync_for_device(&avail->ring[avail_slot], sizeof(uint16_t));
     arch_dma_sync_for_device(&avail->idx, sizeof(uint16_t));
-    arch_dma_sync_for_device(&used->idx, sizeof(uint16_t));
+    arch_dma_sync_for_device(&inst->blk.used->idx, sizeof(uint16_t));
     arch_dma_sync_for_device(&inst->status[slot], 1);
 
     vt->write32(vt, VIRTIO_MMIO_QUEUE_NOTIFY, 0);
     mb();
-
-    uint32_t timeout = 0x0FFFFFFF;
-    while (timeout > 0) {
-        arch_dma_sync_for_cpu(&used->idx, sizeof(uint16_t));
-        arch_dma_sync_for_cpu(&inst->status[slot], 1);
-        if (((volatile virtq_used_t *)used)->idx != inst->blk.last_used)
-            break;
-        timeout--;
-        __asm__ volatile("nop");
-    }
-
-    if (timeout == 0) {
-        uint32_t dev_status = vt->read32(vt, VIRTIO_MMIO_STATUS);
-        printf("[VIRTIO%d] I/O timeout! lba=%lu dev_status=0x%x\n",
-               idx, (unsigned long)lba, dev_status);
-        return -1;
-    }
-
-    rmb();
-    arch_dma_sync_for_cpu(&used->idx, sizeof(uint16_t));
-    arch_dma_sync_for_cpu(&inst->status[slot], 1);
-    if (!write)
-        arch_dma_sync_for_cpu(buf, bytes);
-    inst->blk.last_used = used->idx;
-
-    if (inst->status[slot] != VIRTIO_BLK_S_OK) {
-        printf("[VIRTIO%d] I/O error: status=%d lba=%lu\n",
-               idx, inst->status[slot], (unsigned long)lba);
-        return -1;
-    }
-
     return 0;
+}
+
+static int virtio_blk_wait_req(virtio_blk_inst_t *inst, virtio_blk_req_t *req,
+                               uint64_t lba) {
+    task_t *cur = proc_current();
+    uint64_t deadline = timer_get_ticks() + VIRTIO_BLK_WAIT_TIMEOUT_TICKS;
+
+    for (;;) {
+        uint64_t flags = spin_lock_irqsave(&inst->lock);
+        virtio_blk_complete_used_locked(inst);
+        if (req->done) {
+            int ret = req->result;
+            req->in_use = 0;
+            spin_unlock_irqrestore(&inst->lock, flags);
+            return ret;
+        }
+        spin_unlock_irqrestore(&inst->lock, flags);
+
+        if (timer_get_ticks() >= deadline) {
+            uint32_t dev_status = inst->vt.read32(&inst->vt, VIRTIO_MMIO_STATUS);
+            printf("[VIRTIO%d] I/O timeout! lba=%lu dev_status=0x%x\n",
+                   inst->slot, (unsigned long)lba, dev_status);
+            flags = spin_lock_irqsave(&inst->lock);
+            if (!req->done) {
+                req->done = 1;
+                req->result = -1;
+            }
+            req->in_use = 0;
+            spin_unlock_irqrestore(&inst->lock, flags);
+            return -1;
+        }
+
+        if (cur) {
+            cur->wake_time = deadline;
+            cur->state = PROC_BLOCKED;
+            virtio_blk_poll_inst(inst);
+            sched();
+            cur->wake_time = 0;
+        } else {
+            __asm__ volatile("nop");
+        }
+    }
+}
+
+static int virtio_blk_rw(int idx, uint64_t lba, void *buf, size_t sectors, int write) {
+    if (idx < 0 || idx >= g_ninst) return -1;
+    virtio_blk_inst_t *inst = &g_insts[idx];
+    if (!inst->blk.valid) return -1;
+
+    virtio_blk_req_t *req = NULL;
+    while (!req) {
+        uint64_t flags = spin_lock_irqsave(&inst->lock);
+        req = virtio_blk_alloc_req_locked(inst);
+        if (req) {
+            virtio_blk_submit_req(inst, req, lba, buf, sectors, write);
+            spin_unlock_irqrestore(&inst->lock, flags);
+            break;
+        }
+        spin_unlock_irqrestore(&inst->lock, flags);
+        if (proc_current())
+            proc_yield();
+        else
+            __asm__ volatile("nop");
+    }
+
+    int ret = virtio_blk_wait_req(inst, req, lba);
+    if (ret < 0) {
+        uint16_t head = req ? req->head : 0;
+        printf("[VIRTIO%d] I/O error: status=%d lba=%lu\n",
+               idx, inst->status[head], (unsigned long)lba);
+    }
+    return ret;
 }
 
 int virtio_blk_read(int idx, uint64_t lba, void *buf, size_t sectors) {
-    for (size_t i = 0; i < sectors; i++) {
-        int r = virtio_blk_rw(idx, lba + i, (char *)buf + i * VIRTIO_BLK_SECTOR_SIZE, 1, 0);
-        if (r < 0) return r;
-    }
-    return 0;
+    return virtio_blk_rw(idx, lba, buf, sectors, 0);
 }
 
 int virtio_blk_write(int idx, uint64_t lba, const void *buf, size_t sectors) {
-    for (size_t i = 0; i < sectors; i++) {
-        int r = virtio_blk_rw(idx, lba + i, (char *)buf + i * VIRTIO_BLK_SECTOR_SIZE, 1, 1);
-        if (r < 0) return r;
-    }
-    return 0;
+    return virtio_blk_rw(idx, lba, (void *)buf, sectors, 1);
 }
 
 uint64_t virtio_blk_capacity(int idx) {
