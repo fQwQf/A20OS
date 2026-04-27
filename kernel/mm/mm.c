@@ -116,11 +116,45 @@ int pt_map(uint64_t *pgdir, vaddr_t va, paddr_t pa, uint64_t flags) {
     return 0;
 }
 
-// 取消虚拟地址的映射
+static int pt_table_empty(uint64_t *table) {
+    for (int i = 0; i < ARCH_PT_ENTRIES; i++) {
+        if (table[i] & PTE_V)
+            return 0;
+    }
+    return 1;
+}
+
+// 取消虚拟地址的映射，并回收变空的中间页表页
 int pt_unmap(uint64_t *pgdir, vaddr_t va) {
-    uint64_t *pte = pt_walk(pgdir, va, 0);
-    if (!pte || !(*pte & PTE_V)) return -EINVAL;
+    uint64_t *path[ARCH_PT_ROOT_LEVEL + 1];
+    int idx_path[ARCH_PT_ROOT_LEVEL + 1];
+    uint64_t *table = pgdir;
+
+    path[ARCH_PT_ROOT_LEVEL] = pgdir;
+    for (int level = ARCH_PT_ROOT_LEVEL; level > 0; level--) {
+        int idx = arch_pt_vpn(va, level);
+        idx_path[level] = idx;
+        uint64_t pte = table[idx];
+        if (!(pte & PTE_V) || arch_pte_is_leaf(pte))
+            return -EINVAL;
+        table = arch_pte_to_ptr(pte);
+        path[level - 1] = table;
+    }
+
+    int leaf_idx = arch_pt_vpn(va, 0);
+    uint64_t *pte = &table[leaf_idx];
+    if (!(*pte & PTE_V) || !arch_pte_is_leaf(*pte))
+        return -EINVAL;
     *pte = 0;
+
+    for (int level = 0; level < ARCH_PT_ROOT_LEVEL; level++) {
+        uint64_t *child = path[level];
+        uint64_t *parent = path[level + 1];
+        if (!pt_table_empty(child))
+            break;
+        parent[idx_path[level + 1]] = 0;
+        frame_free(child);
+    }
     return 0;
 }
 
