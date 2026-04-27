@@ -6,56 +6,55 @@
 #include "core/panic.h"
 #include "core/klog.h"
 
-// 虚拟地址转换为物理地址
-// 这里专为线性映射区
-static inline paddr_t va_to_pa(const void *va) {
-    return (paddr_t)((uint64_t)(uintptr_t)va - PAGE_OFFSET);
+static uint64_t mm_cow_flags(uint64_t pte) {
+    uint64_t flags = pte & (PTE_R | PTE_W | PTE_X | PTE_U | PTE_A |
+                            PTE_D | PTE_G | PTE_MAT1 | PTE_LEAF |
+                            PTE_COW);
+    if (pte & (PTE_W | PTE_COW)) {
+        flags &= ~(uint64_t)(PTE_W | PTE_D);
+        flags |= PTE_COW;
+    }
+    return flags;
 }
 
-static int mm_fork_clone_tables(uint64_t *child_table, uint64_t *parent_table, int level) {
-    int limit = (level == ARCH_PT_ROOT_LEVEL) ? ARCH_PT_USER_END : ARCH_PT_ENTRIES;
+static int mm_fork_clone_page(mm_struct_t *child, mm_struct_t *parent, uint64_t va) {
+    uint64_t *src = pt_walk(parent->pgdir, va, 0);
+    if (!src || !(*src & PTE_V) || !arch_pte_is_leaf(*src) || !(*src & PTE_U))
+        return 0;
 
-    for (int idx = 0; idx < limit; idx++) {
-        uint64_t pte = parent_table[idx];
-        if (!(pte & PTE_V))
-            continue;
+    uint64_t *dst = pt_walk(child->pgdir, va, 0);
+    if (dst && (*dst & PTE_V))
+        return 0;
 
-        if (arch_pte_is_leaf(pte)) {
-            if (!(pte & PTE_U)) {
-                child_table[idx] = pte;
-                continue;
-            }
+    paddr_t pa = arch_pte_addr(*src);
+    pfn_t pfn = phys_to_pfn(pa);
+    if (!pfn_valid(pfn))
+        return -ENOMEM;
 
-            paddr_t pa = arch_pte_addr(pte);
-            pfn_t pfn = phys_to_pfn(pa);
-            if (!pfn_valid(pfn))
-                return -ENOMEM;
-            frame_get(pfn);
+    uint64_t flags = mm_cow_flags(*src);
+    frame_get(pfn);
 
-            uint64_t new_flags = pte & (PTE_R | PTE_X | PTE_U | PTE_A |
-                                        PTE_D | PTE_G | PTE_MAT1 |
-                                        PTE_LEAF | PTE_COW);
-            if (pte & (PTE_W | PTE_COW)) {
-                new_flags &= ~(uint64_t)(PTE_W | PTE_D);
-                new_flags |= PTE_COW;
-                parent_table[idx] = arch_pte_leaf(pa, new_flags);
-            }
-            child_table[idx] = arch_pte_leaf(pa, new_flags);
-            continue;
-        }
+    int r = pt_map(child->pgdir, va, pa, flags);
+    if (r < 0) {
+        frame_put(pfn);
+        return r;
+    }
 
-        uint64_t *next_parent = arch_pte_to_ptr(pte);
-        uint64_t *next_child = (uint64_t *)frame_alloc();
-        if (!next_child)
-            return -ENOMEM;
-        memset(next_child, 0, PAGE_SIZE);
-        child_table[idx] = arch_pte_from_pa(va_to_pa(next_child)) | PTE_V;
+    if (*src & (PTE_W | PTE_COW))
+        *src = arch_pte_leaf(pa, flags);
+    child->rss++;
+    return 0;
+}
 
-        int r = mm_fork_clone_tables(next_child, next_parent, level - 1);
+static int mm_fork_clone_range(mm_struct_t *child, mm_struct_t *parent,
+                               uint64_t start, uint64_t end) {
+    start = ROUND_DOWN(start, PAGE_SIZE);
+    end = ROUND_UP(end, PAGE_SIZE);
+    for (uint64_t va = start; va < end; va += PAGE_SIZE) {
+        int r = mm_fork_clone_page(child, parent, va);
         if (r < 0)
             return r;
     }
-
     return 0;
 }
 
@@ -349,7 +348,7 @@ uint64_t mm_brk(mm_struct_t *mm, uint64_t newbrk) {
                 paddr_t pa = arch_pte_addr(*pte);
                 frame_put(phys_to_pfn(pa));
                 mm->rss--;
-                *pte = 0;
+                pt_unmap(mm->pgdir, va);
             }
         }
         if (new_brk_page < old_brk_page)
@@ -449,8 +448,21 @@ mm_struct_t *mm_fork(mm_struct_t *parent) {
         prev = cv;
     }
 
-    if (mm_fork_clone_tables(child->pgdir, parent->pgdir, ARCH_PT_ROOT_LEVEL) < 0)
-        goto fail;
+    for (vm_area_t *pv = parent->mmap; pv; pv = pv->next) {
+        if (mm_fork_clone_range(child, parent, pv->start, pv->end) < 0)
+            goto fail;
+    }
+
+    if (parent->start_brk < parent->brk) {
+        if (mm_fork_clone_range(child, parent, parent->start_brk, parent->brk) < 0)
+            goto fail;
+    }
+
+    if (parent->stack_bottom && parent->stack_top) {
+        if (mm_fork_clone_range(child, parent, parent->stack_bottom,
+                                parent->stack_top) < 0)
+            goto fail;
+    }
 
     arch_tlb_flush();  // 刷新 TLB
     return child;
