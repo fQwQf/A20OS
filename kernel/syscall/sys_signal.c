@@ -1,12 +1,60 @@
 #include "syscall_internal.h"
 
+static int signal_send_permission(task_t *self, task_t *target) {
+    if (!self || self->euid == 0) return 0;
+    if (self->uid == target->uid || self->uid == target->suid ||
+        self->euid == target->uid || self->euid == target->suid)
+        return 0;
+    return -EPERM;
+}
+
 int64_t sys_kill(int pid, int sig) {
+    if (pid > 0) {
+        task_t *self = proc_current();
+        task_t *target = proc_find(pid);
+        if (!target) return -ESRCH;
+        int perm = signal_send_permission(self, target);
+        if (perm < 0) return perm;
+        if (sig == 0) return 0;
+    }
     return proc_kill(pid, sig);
 }
 
 int64_t sys_tgkill(int tgid, int tid, int sig) {
     (void)tgid;
+    task_t *self = proc_current();
+    task_t *target = proc_find(tid);
+    if (!target) return -ESRCH;
+    if (target->state == PROC_ZOMBIE) return -ESRCH;
+    int perm = signal_send_permission(self, target);
+    if (perm < 0) return perm;
+    if (sig == 0) return 0;
     return proc_kill(tid, sig);
+}
+
+int64_t sys_tkill(int tid, int sig) {
+    task_t *self = proc_current();
+    task_t *target = proc_find(tid);
+    if (!target) return -ESRCH;
+    if (target->state == PROC_ZOMBIE) return -ESRCH;
+    int perm = signal_send_permission(self, target);
+    if (perm < 0) return perm;
+    if (sig == 0) return 0;
+    return proc_kill(tid, sig);
+}
+
+int64_t sys_rt_sigqueueinfo(int tgid, int sig, void *uinfo) {
+    if (sig <= 0 || sig >= NSIG) return -EINVAL;
+    if (!uinfo) return -EFAULT;
+    task_t *self = proc_current();
+    task_t *target = proc_find(tgid);
+    if (!target) return -ESRCH;
+    int perm = signal_send_permission(self, target);
+    if (perm < 0) return perm;
+    uint8_t info[SIGNAL_INFO_SIZE];
+    if (copy_from_user(info, uinfo, sizeof(info)) < 0) return -EFAULT;
+    *(int *)info = sig;
+    return signal_send_info(tgid, sig, info, sizeof(info));
 }
 
 int64_t sys_sigaction(int signum, void *act, void *oldact) {
@@ -93,9 +141,13 @@ int64_t sys_sigtimedwait(const uint64_t *set, void *info, const void *timeout) {
             if (info) {
                 uint8_t infobuf[128];
                 memset(infobuf, 0, 128);
-                *(int *)infobuf = sig;
+                if (ss->pending_has_info[sig])
+                    memcpy(infobuf, ss->pending_info[sig], sizeof(infobuf));
+                else
+                    *(int *)infobuf = sig;
                 copy_to_user(info, infobuf, 128);
             }
+            ss->pending_has_info[sig] = 0;
             return sig;
         }
     }

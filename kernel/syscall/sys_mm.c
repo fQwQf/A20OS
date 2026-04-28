@@ -1,4 +1,5 @@
 #include "syscall_internal.h"
+#include "mm/frame.h"
 
 int64_t sys_brk(uint64_t addr) {
     return (int64_t)proc_brk(addr);
@@ -25,88 +26,112 @@ int64_t sys_mprotect(uint64_t addr, size_t len, int prot) {
 }
 
 int64_t sys_madvise(uint64_t addr, size_t len, int advice) {
-    (void)addr; (void)len; (void)advice;
-    return 0;
+    if (addr & (PAGE_SIZE - 1)) return -EINVAL;
+    if (len == 0) return 0;
+    task_t *t = proc_current();
+    if (!t || !t->mm) return -EINVAL;
+    uint64_t start = addr;
+    uint64_t end = ROUND_UP(addr + len, PAGE_SIZE);
+    if (end < start) return -EINVAL;
+
+    for (uint64_t va = start; va < end; va += PAGE_SIZE) {
+        vm_area_t *vma = mm_find_vma(t->mm, va);
+        if (!vma || va >= vma->end) return -ENOMEM;
+    }
+
+    switch (advice) {
+    case MADV_NORMAL:
+    case MADV_RANDOM:
+    case MADV_SEQUENTIAL:
+    case MADV_WILLNEED:
+        return 0;
+    case MADV_DONTNEED:
+    case MADV_FREE:
+    case MADV_REMOVE:
+    case MADV_COLD:
+    case MADV_PAGEOUT:
+        for (uint64_t va = start; va < end; ) {
+            int level = 0;
+            uint64_t base = 0;
+            size_t size = 0;
+            uint64_t *pte = pt_lookup_leaf(t->mm->pgdir, va, &level, &base, &size);
+            if (!pte || !(*pte & PTE_V)) {
+                va += PAGE_SIZE;
+                continue;
+            }
+            if (level > 0 && (base < start || base + size > end)) {
+                if (mm_demote_huge_page(t->mm, va) < 0)
+                    return -ENOMEM;
+                continue;
+            }
+            paddr_t pa = 0;
+            if (pt_unmap_leaf(t->mm->pgdir, va, &pa, &base, &size, NULL) == 0) {
+                if (pa) {
+                    frame_put(phys_to_pfn(pa));
+                    size_t pages = size / PAGE_SIZE;
+                    t->mm->rss = (t->mm->rss > pages) ? t->mm->rss - pages : 0;
+                }
+                va = base + size;
+            } else {
+                va += PAGE_SIZE;
+            }
+        }
+        arch_tlb_flush();
+        return 0;
+    case MADV_DONTFORK:
+    case MADV_DOFORK:
+    case MADV_WIPEONFORK:
+    case MADV_KEEPONFORK:
+        for (vm_area_t *vma = mm_find_vma(t->mm, start); vma && vma->start < end; vma = vma->next) {
+            if (advice == MADV_DONTFORK) vma->vm_flags |= VM_DONTFORK;
+            else if (advice == MADV_DOFORK) vma->vm_flags &= ~VM_DONTFORK;
+            else if (advice == MADV_WIPEONFORK) vma->vm_flags |= VM_WIPEONFORK;
+            else vma->vm_flags &= ~VM_WIPEONFORK;
+        }
+        return 0;
+    case MADV_MERGEABLE:
+    case MADV_UNMERGEABLE:
+    case MADV_DONTDUMP:
+    case MADV_DODUMP:
+        return 0;
+    case MADV_HUGEPAGE: {
+        if (t->thp_disabled) return 0;
+        for (vm_area_t *vma = mm_find_vma(t->mm, start); vma && vma->start < end; vma = vma->next) {
+            vma->vm_flags |= VM_HUGEPAGE;
+            vma->vm_flags &= ~VM_NOHUGEPAGE;
+        }
+        return 0;
+    }
+    case MADV_NOHUGEPAGE:
+        for (vm_area_t *vma = mm_find_vma(t->mm, start); vma && vma->start < end; vma = vma->next) {
+            vma->vm_flags |= VM_NOHUGEPAGE;
+            vma->vm_flags &= ~VM_HUGEPAGE;
+        }
+        return 0;
+    case MADV_POPULATE_READ:
+    case MADV_POPULATE_WRITE:
+        for (uint64_t va = start; va < end; va += PAGE_SIZE) {
+            if (handle_demand_fault(t, va) < 0) return -ENOMEM;
+            if (advice == MADV_POPULATE_WRITE) {
+                uint64_t *pte = pt_lookup_leaf(t->mm->pgdir, va, NULL, NULL, NULL);
+                if (!pte || !(*pte & PTE_V) || !(*pte & PTE_W)) return -EFAULT;
+            }
+        }
+        return 0;
+    default:
+        return -EINVAL;
+    }
 }
 
 int64_t sys_mremap(uint64_t old_addr, size_t old_size, size_t new_size, int flags, uint64_t new_addr) {
-#define MREMAP_MAYMOVE   1
-#define MREMAP_FIXED     2
     task_t *t = proc_current();
     if (!t || !t->mm) return -EINVAL;
-
-    if (new_size == 0) return -EINVAL;
-    if (old_addr & (PAGE_SIZE - 1)) return -EINVAL;
-
-    size_t old_len = ROUND_UP(old_size, PAGE_SIZE);
-    size_t new_len = ROUND_UP(new_size, PAGE_SIZE);
-
-    vm_area_t *vma = mm_find_vma(t->mm, old_addr);
-    if (!vma || vma->start != old_addr) return -EFAULT;
-    if (old_size == 0) old_len = vma->end - vma->start;
-    if (!old_len) return -EINVAL;
-
-    if (new_len <= old_len) {
-        if (new_len < old_len)
-            mm_munmap(t->mm, old_addr + new_len, old_len - new_len);
-        return (int64_t)old_addr;
-    }
-
-    uint64_t grow_by = new_len - old_len;
-    uint64_t new_end = old_addr + new_len;
-    int can_grow = 1;
-
-    if ((flags & MREMAP_FIXED) && new_addr != old_addr)
-        can_grow = 0;
-    for (vm_area_t *v = t->mm->mmap; v; v = v->next) {
-        if (v == vma) continue;
-        if (v->start < new_end && v->end > old_addr + old_len) {
-            can_grow = 0;
-            break;
-        }
-    }
-
-    if (can_grow) {
-        vma->end = new_end;
-        t->mm->total_vm += grow_by / PAGE_SIZE;
-        return (int64_t)old_addr;
-    }
-
-    if (!(flags & MREMAP_MAYMOVE)) return -ENOMEM;
-
-    int prot = ((vma->pte_flags & PTE_R) ? PROT_READ : 0) |
-               ((vma->pte_flags & PTE_W) ? PROT_WRITE : 0) |
-               ((vma->pte_flags & PTE_X) ? PROT_EXEC : 0);
-    uint64_t target = (flags & MREMAP_FIXED) ? new_addr : 0;
-    uint64_t dst = mm_mmap(t->mm, target, new_len, prot,
-                            (target ? MAP_FIXED : 0) | MAP_ANONYMOUS | MAP_PRIVATE);
-    if ((int64_t)dst < 0) return dst;
-
-    for (uint64_t off = 0; off < old_len; off += PAGE_SIZE) {
-        paddr_t pa = pt_translate(t->mm->pgdir, old_addr + off);
-        if (pa == 0) continue;
-        void *src = (void *)((uint64_t)pa + PAGE_OFFSET);
-
-        void *frame = frame_alloc();
-        if (!frame) {
-            mm_munmap(t->mm, dst, new_len);
-            return -ENOMEM;
-        }
-        memcpy(frame, src, PAGE_SIZE);
-        paddr_t frame_pa = (paddr_t)((uint64_t)(uintptr_t)frame - PAGE_OFFSET);
-        int r = pt_map(t->mm->pgdir, dst + off, frame_pa, vma->pte_flags);
-        if (r < 0) {
-            frame_free(frame);
-            mm_munmap(t->mm, dst, new_len);
-            return -ENOMEM;
-        }
-    }
-
-    mm_munmap(t->mm, old_addr, old_len);
-    return (int64_t)dst;
+    uint64_t out = 0;
+    int r = mm_mremap(t->mm, old_addr, old_size, new_size, flags, new_addr, &out);
+    return r < 0 ? r : (int64_t)out;
 }
 
 int64_t sys_shm_open(const char *name, int oflag, int mode) {
-    (void)name; (void)oflag; (void)mode;
-    return -ENOSYS;
+    (void)mode;
+    return sys_memfd_create(name, (unsigned)(oflag & O_CLOEXEC));
 }

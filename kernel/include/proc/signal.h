@@ -10,6 +10,7 @@
  * ============================================================ */
 
 #define NSIG    64
+#define SIGNAL_INFO_SIZE 128
 
 /* sigaction structure */
 typedef struct sigaction {
@@ -26,6 +27,8 @@ typedef struct signal_state {
     sigaction_t actions[NSIG];
     uint64_t    pending;     /* bitmask of pending signals */
     uint64_t    blocked;     /* signal mask */
+    uint8_t     pending_has_info[NSIG];
+    uint8_t     pending_info[NSIG][SIGNAL_INFO_SIZE];
 } signal_state_t;
 
 /*
@@ -55,6 +58,8 @@ void signal_copy(const signal_state_t *src, signal_state_t *dst);
 
 /* Queue a signal to a process */
 int  signal_send(int pid, int signum);
+int  signal_send_info(int pid, int signum, const void *info, size_t info_size);
+int  signal_task_has_unblocked(void *task);
 
 void signal_deliver(void);
 void signal_deliver_user(trap_context_t *ctx);

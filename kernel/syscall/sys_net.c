@@ -86,8 +86,12 @@ int64_t sys_listen(int fd, int backlog) {
 }
 
 int64_t sys_accept4(int fd, void *addr, void *addrlen, int flags) {
+    if (flags & ~(SOCK_CLOEXEC | SOCK_NONBLOCK)) return -EINVAL;
     int64_t gfd = syscall_get_global_fd(fd);
     if (gfd < 0) return gfd;
+    vfile_t *vf = vfs_get_file((int)gfd);
+    if (vf && (vf->flags & O_PATH))
+        return -EBADF;
     uint8_t kaddr[NET_SOCKADDR_MAX];
     size_t klen = NET_SOCKADDR_MAX;
     if (addr && addrlen) {
@@ -96,8 +100,13 @@ int64_t sys_accept4(int fd, void *addr, void *addrlen, int flags) {
     }
     int new_gfd = net_accept((int)gfd, kaddr, &klen, flags);
     if (new_gfd < 0) return new_gfd;
-    int lfd = syscall_alloc_local_fd(proc_current(), new_gfd);
-    if (lfd < 0) return lfd;
+    if (flags & SOCK_NONBLOCK)
+        net_set_nonblock(new_gfd, 1);
+    int lfd = syscall_alloc_local_fd_with_flags(proc_current(), new_gfd, flags);
+    if (lfd < 0) {
+        vfs_close(new_gfd);
+        return lfd;
+    }
     if (addr && addrlen) {
         if (copy_to_user(addr, kaddr, klen) < 0) {
             sys_close(lfd);
@@ -144,7 +153,7 @@ int64_t sys_getpeername(int fd, void *addr, void *addrlen) {
 
 int64_t sys_sendto(int fd, const void *buf, size_t len, int flags,
                    const void *addr, size_t addrlen) {
-    if (!buf) return -EFAULT;
+    if (!buf && len) return -EFAULT;
     int64_t gfd = syscall_get_global_fd(fd);
     if (gfd < 0) return gfd;
     if (len > 65535) return -EMSGSIZE;
@@ -165,7 +174,7 @@ int64_t sys_sendto(int fd, const void *buf, size_t len, int flags,
 
 int64_t sys_recvfrom(int fd, void *buf, size_t len, int flags,
                      void *addr, void *addrlen) {
-    if (!buf) return -EFAULT;
+    if (!buf && len) return -EFAULT;
     int64_t gfd = syscall_get_global_fd(fd);
     if (gfd < 0) return gfd;
     if (len > 65535) return -EMSGSIZE;
@@ -195,7 +204,7 @@ int64_t sys_recvfrom(int fd, void *buf, size_t len, int flags,
 int64_t sys_setsockopt(int fd, int level, int optname, const void *optval, size_t optlen) {
     int64_t gfd = syscall_get_global_fd(fd);
     if (gfd < 0) return gfd;
-    uint8_t kopt[64];
+    uint8_t kopt[256];
     if (optlen > sizeof(kopt)) return -EINVAL;
     if (optlen && copy_from_user(kopt, optval, optlen) < 0) return -EFAULT;
     return net_setsockopt((int)gfd, level, optname, kopt, optlen);
