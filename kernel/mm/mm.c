@@ -20,6 +20,10 @@ static inline int pte_user_writable(uint64_t pte) {
     return arch_pte_is_leaf(pte) && (pte & PTE_U) && (pte & PTE_W);
 }
 
+static inline size_t pt_level_size(int level) {
+    return PAGE_SIZE << (ARCH_PT_BITS * level);
+}
+
 // 内存管理初始化函数
 void mm_init(void) {
     extern char _bss_end[];
@@ -100,6 +104,29 @@ uint64_t *pt_walk(uint64_t *pgdir, vaddr_t va, int alloc) {
     return &table[arch_pt_vpn(va, 0)];
 }
 
+uint64_t *pt_lookup_leaf(uint64_t *pgdir, vaddr_t va, int *level_out,
+                         uint64_t *base_out, size_t *size_out) {
+    if (!pgdir) return NULL;
+    uint64_t *table = pgdir;
+    for (int level = ARCH_PT_ROOT_LEVEL; level >= 0; level--) {
+        int idx = arch_pt_vpn(va, level);
+        uint64_t *pte = &table[idx];
+        if (!(*pte & PTE_V))
+            return NULL;
+        if (arch_pte_is_leaf(*pte)) {
+            size_t sz = pt_level_size(level);
+            if (level_out) *level_out = level;
+            if (base_out) *base_out = va & ~(uint64_t)(sz - 1);
+            if (size_out) *size_out = sz;
+            return pte;
+        }
+        if (level == 0)
+            return NULL;
+        table = arch_pte_to_ptr(*pte);
+    }
+    return NULL;
+}
+
 // 建立虚拟地址到物理地址的映射
 int pt_map(uint64_t *pgdir, vaddr_t va, paddr_t pa, uint64_t flags) {
     uint64_t *pte = pt_walk(pgdir, va, 1);
@@ -112,6 +139,34 @@ int pt_map(uint64_t *pgdir, vaddr_t va, paddr_t pa, uint64_t flags) {
                 frame_put(phys_to_pfn(old_pa));
         }
     }
+    *pte = arch_pte_leaf(pa, flags);
+    return 0;
+}
+
+int pt_map_huge(uint64_t *pgdir, vaddr_t va, paddr_t pa, uint64_t flags) {
+    if (!pgdir) return -EINVAL;
+    if ((va & (PMD_SIZE - 1)) || (pa & (PMD_SIZE - 1)))
+        return -EINVAL;
+
+    uint64_t *table = pgdir;
+    for (int level = ARCH_PT_ROOT_LEVEL; level > 1; level--) {
+        int idx = arch_pt_vpn(va, level);
+        uint64_t pte = table[idx];
+        if (pte & PTE_V) {
+            if (arch_pte_is_leaf(pte))
+                return -EEXIST;
+            table = arch_pte_to_ptr(pte);
+        } else {
+            uint64_t *next = (uint64_t *)frame_alloc();
+            if (!next) return -ENOMEM;
+            table[idx] = arch_pte_from_pa(va_to_pa(next)) | PTE_V;
+            table = next;
+        }
+    }
+
+    uint64_t *pte = &table[arch_pt_vpn(va, 1)];
+    if (*pte & PTE_V)
+        return -EEXIST;
     *pte = arch_pte_leaf(pa, flags);
     return 0;
 }
@@ -158,11 +213,56 @@ int pt_unmap(uint64_t *pgdir, vaddr_t va) {
     return 0;
 }
 
+int pt_unmap_leaf(uint64_t *pgdir, vaddr_t va, paddr_t *pa_out,
+                  uint64_t *base_out, size_t *size_out, int *level_out) {
+    if (!pgdir) return -EINVAL;
+    uint64_t *path[ARCH_PT_ROOT_LEVEL + 1];
+    int idx_path[ARCH_PT_ROOT_LEVEL + 1];
+    uint64_t *table = pgdir;
+
+    path[ARCH_PT_ROOT_LEVEL] = pgdir;
+    for (int level = ARCH_PT_ROOT_LEVEL; level >= 0; level--) {
+        int idx = arch_pt_vpn(va, level);
+        idx_path[level] = idx;
+        uint64_t *pte = &table[idx];
+        if (!(*pte & PTE_V))
+            return -EINVAL;
+        if (arch_pte_is_leaf(*pte)) {
+            size_t sz = pt_level_size(level);
+            uint64_t base = va & ~(uint64_t)(sz - 1);
+            paddr_t pa = arch_pte_addr(*pte);
+            *pte = 0;
+
+            for (int l = level; l < ARCH_PT_ROOT_LEVEL; l++) {
+                uint64_t *child = path[l];
+                uint64_t *parent = path[l + 1];
+                if (!pt_table_empty(child))
+                    break;
+                parent[idx_path[l + 1]] = 0;
+                frame_free(child);
+            }
+
+            if (pa_out) *pa_out = pa;
+            if (base_out) *base_out = base;
+            if (size_out) *size_out = sz;
+            if (level_out) *level_out = level;
+            return 0;
+        }
+        if (level == 0)
+            return -EINVAL;
+        table = arch_pte_to_ptr(*pte);
+        path[level - 1] = table;
+    }
+    return -EINVAL;
+}
+
 // 将虚拟地址转换为物理地址
 paddr_t pt_translate(uint64_t *pgdir, vaddr_t va) {
-    uint64_t *pte = pt_walk(pgdir, va, 0);
+    uint64_t base = 0;
+    size_t size = 0;
+    uint64_t *pte = pt_lookup_leaf(pgdir, va, NULL, &base, &size);
     if (!pte || !(*pte & PTE_V) || !arch_pte_is_leaf(*pte)) return 0;
-    return arch_pte_addr(*pte) | (va & (PAGE_SIZE - 1));
+    return arch_pte_addr(*pte) + (va - base);
 }
 
 // 将内核空间映射复制到新页表（内核空间共享）
@@ -198,10 +298,16 @@ static uint64_t *pt_clone_level(uint64_t *src, int level) {
 
         if (is_leaf) {
             if (pte & PTE_U) {
-                void *nf = frame_alloc();
-                if (!nf) { pt_destroy(dst); return NULL; }
-                memcpy(nf, arch_pte_to_ptr(pte), PAGE_SIZE);
-                dst[i] = arch_pte_from_pa(va_to_pa(nf)) | arch_pte_flags(pte);
+                size_t leaf_size = pt_level_size(level);
+                int order = (leaf_size == PMD_SIZE) ? PMD_ORDER : 0;
+                if (leaf_size != PAGE_SIZE && leaf_size != PMD_SIZE) {
+                    pt_destroy(dst);
+                    return NULL;
+                }
+                pfn_t nf = pfa_alloc(order);
+                if (nf == PFN_NONE) { pt_destroy(dst); return NULL; }
+                memcpy(pfn_to_virt(nf), arch_pte_to_ptr(pte), leaf_size);
+                dst[i] = arch_pte_leaf(pfn_to_phys(nf), arch_pte_flags(pte));
             } else {
                 dst[i] = pte;
             }
@@ -273,17 +379,19 @@ long copy_from_user(void *dst, const void *src, size_t n) {
     while (n > 0) {
         uint64_t va = (uint64_t)src + copied;
         if (va >= USER_VA_LIMIT) return -EFAULT;
-        uint64_t *pte = pt_walk(t->pgdir, va, 0);
+        uint64_t leaf_base = 0;
+        size_t leaf_size = 0;
+        uint64_t *pte = pt_lookup_leaf(t->pgdir, va, NULL, &leaf_base, &leaf_size);
         if (!pte || !(*pte & PTE_V)) {
             // 处理缺页异常
             if (handle_demand_fault(t, va) < 0) return -EFAULT;
-            pte = pt_walk(t->pgdir, va, 0);
+            pte = pt_lookup_leaf(t->pgdir, va, NULL, &leaf_base, &leaf_size);
             if (!pte || !(*pte & PTE_V)) return -EFAULT;
         }
         if (!pte_user_readable(*pte)) return -EFAULT;
         paddr_t pa = arch_pte_addr(*pte);
-        size_t page_off = va & (PAGE_SIZE - 1);
-        size_t chunk = PAGE_SIZE - page_off;
+        size_t page_off = va - leaf_base;
+        size_t chunk = leaf_size - page_off;
         if (chunk > n) chunk = n;
         memcpy((char*)dst + copied, (void*)(pa + PAGE_OFFSET + page_off), chunk);
         copied += chunk;
@@ -300,22 +408,24 @@ long copy_to_user(void *dst, const void *src, size_t n) {
     while (n > 0) {
         uint64_t va = (uint64_t)dst + copied;
         if (va >= USER_VA_LIMIT) return -EFAULT;
-        uint64_t *pte = pt_walk(t->pgdir, va, 0);
+        uint64_t leaf_base = 0;
+        size_t leaf_size = 0;
+        uint64_t *pte = pt_lookup_leaf(t->pgdir, va, NULL, &leaf_base, &leaf_size);
         if (!pte || !(*pte & PTE_V)) {
             // 处理缺页异常
             if (handle_demand_fault(t, va) < 0) return -EFAULT;
-            pte = pt_walk(t->pgdir, va, 0);
+            pte = pt_lookup_leaf(t->pgdir, va, NULL, &leaf_base, &leaf_size);
             if (!pte || !(*pte & PTE_V)) return -EFAULT;
         }
         if (!arch_pte_is_leaf(*pte) || !(*pte & PTE_U)) return -EFAULT;
         if (!(*pte & PTE_W)) {
             if (handle_cow_fault(t, va) < 0) return -EFAULT;
-            pte = pt_walk(t->pgdir, va, 0);
+            pte = pt_lookup_leaf(t->pgdir, va, NULL, &leaf_base, &leaf_size);
             if (!pte || !(*pte & PTE_V) || !pte_user_writable(*pte)) return -EFAULT;
         }
         paddr_t pa = arch_pte_addr(*pte);
-        size_t page_off = va & (PAGE_SIZE - 1);
-        size_t chunk = PAGE_SIZE - page_off;
+        size_t page_off = va - leaf_base;
+        size_t chunk = leaf_size - page_off;
         if (chunk > n) chunk = n;
         memcpy((void*)(pa + PAGE_OFFSET + page_off), (const char*)src + copied, chunk);
         copied += chunk;
@@ -333,17 +443,19 @@ long user_strncpy(char *dst, const char *src, size_t max) {
     while (i < max - 1) {
         uint64_t va = (uint64_t)(src + i);
         if (va >= USER_VA_LIMIT) return -EFAULT;
-        uint64_t *pte = pt_walk(t->pgdir, va, 0);
+        uint64_t leaf_base = 0;
+        size_t leaf_size = 0;
+        uint64_t *pte = pt_lookup_leaf(t->pgdir, va, NULL, &leaf_base, &leaf_size);
         if (!pte || !(*pte & PTE_V)) {
             // 处理缺页异常
             if (handle_demand_fault(t, va) < 0) return -EFAULT;
-            pte = pt_walk(t->pgdir, va, 0);
+            pte = pt_lookup_leaf(t->pgdir, va, NULL, &leaf_base, &leaf_size);
             if (!pte || !(*pte & PTE_V)) return -EFAULT;
         }
         if (!pte_user_readable(*pte)) return -EFAULT;
         paddr_t pa = arch_pte_addr(*pte);
-        size_t page_off = va & (PAGE_SIZE - 1);
-        size_t chunk = PAGE_SIZE - page_off;
+        size_t page_off = va - leaf_base;
+        size_t chunk = leaf_size - page_off;
         if (chunk > max - 1 - i) chunk = max - 1 - i;
         const char *src_page = (const char *)(pa + PAGE_OFFSET + page_off);
         for (size_t j = 0; j < chunk; j++) {

@@ -389,6 +389,8 @@ static int devfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
 static void fill_char_kstat(kstat_t *st) {
     memset(st, 0, sizeof(*st));
     st->st_mode = S_IFCHR | 0666;
+    st->st_uid = 0;
+    st->st_gid = 0;
     st->st_nlink = 1;
     st->st_blksize = 4096;
 }
@@ -399,6 +401,8 @@ static int devfs_stat(vnode_t *vn, kstat_t *st) {
     memset(st, 0, sizeof(*st));
     if (node->kind == DEVFS_ROOT || node->kind == DEVFS_MISC) {
         st->st_mode = S_IFDIR | 0555;
+        st->st_uid = 0;
+        st->st_gid = 0;
         st->st_nlink = 2;
         st->st_blksize = 4096;
     } else {
