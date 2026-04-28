@@ -14,6 +14,37 @@
 
 static int sig_diag_count = 0;
 
+static int signal_core_dump_default(int sig) {
+    switch (sig) {
+        case SIGQUIT:
+        case SIGILL:
+        case SIGABRT:
+        case 7:  /* SIGBUS */
+        case 8:  /* SIGFPE */
+        case SIGSEGV:
+        case 31: /* SIGSYS */
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+static int signal_wait_status(int sig) {
+    int status = sig & 0x7f;
+    if (signal_core_dump_default(sig))
+        status |= 0x80;
+    return status;
+}
+
+static int signal_fatal_default(int sig) {
+    switch (sig) {
+        case SIGCHLD:
+            return 0;
+        default:
+            return 1;
+    }
+}
+
 typedef struct user_rt_sigaction {
     uintptr_t handler;
     uint64_t  flags;
@@ -34,16 +65,34 @@ void signal_init(signal_state_t *ss) {
 void signal_copy(const signal_state_t *src, signal_state_t *dst) {
     memcpy(dst, src, sizeof(*dst));
     dst->pending = 0;  // 子进程不继承未处理的信号
+    memset(dst->pending_has_info, 0, sizeof(dst->pending_has_info));
+    memset(dst->pending_info, 0, sizeof(dst->pending_info));
 }
 
-// 向指定进程发送信号
-int signal_send(int pid, int signum) {
+int signal_send_info(int pid, int signum, const void *info, size_t info_size) {
     if (signum <= 0 || signum >= NSIG) return -EINVAL;
     task_t *t = proc_find(pid);
     if (!t) return -ESRCH;
     if (!t->signals) return -EINVAL;
 
     signal_state_t *ss = (signal_state_t *)t->signals;
+    if (!(ss->blocked & signal_mask_bit(signum)) &&
+        ss->actions[signum].sa_handler == SIG_DFL &&
+        signal_fatal_default(signum)) {
+        proc_force_exit(t, -signal_wait_status(signum));
+        return 0;
+    }
+    if (info && info_size) {
+        size_t n = info_size > SIGNAL_INFO_SIZE ? SIGNAL_INFO_SIZE : info_size;
+        memcpy(ss->pending_info[signum], info, n);
+        if (n < SIGNAL_INFO_SIZE)
+            memset(ss->pending_info[signum] + n, 0, SIGNAL_INFO_SIZE - n);
+        ss->pending_has_info[signum] = 1;
+    } else {
+        ss->pending_has_info[signum] = 0;
+        memset(ss->pending_info[signum], 0, SIGNAL_INFO_SIZE);
+        *(int *)ss->pending_info[signum] = signum;
+    }
     ss->pending |= signal_mask_bit(signum);
     if (sig_diag_count < 64 && signum == SIGCHLD) {
         sig_diag_count++;
@@ -59,6 +108,19 @@ int signal_send(int pid, int signum) {
         signal_deliver();
     }
     return 0;
+}
+
+// 向指定进程发送信号
+int signal_send(int pid, int signum) {
+    return signal_send_info(pid, signum, NULL, 0);
+}
+
+int signal_task_has_unblocked(void *task) {
+    task_t *t = (task_t *)task;
+    if (!t || !t->signals)
+        return 0;
+    signal_state_t *ss = (signal_state_t *)t->signals;
+    return (ss->pending & ~ss->blocked) != 0;
 }
 
 // 传递信号（内核线程使用）
@@ -79,14 +141,15 @@ void signal_deliver(void) {
 
         if (sa->sa_handler == SIG_IGN) {
             ss->pending &= ~signal_mask_bit(sig);
+            ss->pending_has_info[sig] = 0;
             continue;
         }
 
         if (sa->sa_handler == SIG_DFL) {
             ss->pending &= ~signal_mask_bit(sig);
+            ss->pending_has_info[sig] = 0;
             switch (sig) {
                 case SIGCHLD:  continue;
-                case SIGPIPE:  proc_exit(128 + sig);
                 case SIGKILL:
                 case SIGTERM:
                 case SIGINT:
@@ -94,9 +157,10 @@ void signal_deliver(void) {
                 case SIGSEGV:
                 case SIGILL:
                 case SIGABRT:
-                    proc_exit(128 + sig);
+                case SIGPIPE:
+                    proc_exit(-signal_wait_status(sig));
                 default:
-                    proc_exit(128 + sig);
+                    proc_exit(-signal_wait_status(sig));
             }
         }
 
@@ -105,6 +169,7 @@ void signal_deliver(void) {
         }
 
         ss->pending &= ~signal_mask_bit(sig);
+        ss->pending_has_info[sig] = 0;
         void (*handler)(int) = (void (*)(int))(uintptr_t)sa->sa_handler;
         handler(sig);
     }
@@ -134,18 +199,21 @@ void signal_deliver_user(trap_context_t *ctx) {
 
         if (sa->sa_handler == SIG_IGN) {
             ss->pending &= ~signal_mask_bit(sig);
+            ss->pending_has_info[sig] = 0;
             continue;
         }
 
         if (sa->sa_handler == SIG_DFL) {
             ss->pending &= ~signal_mask_bit(sig);
+            ss->pending_has_info[sig] = 0;
             switch (sig) {
                 case SIGCHLD: continue;
-                default: proc_exit(128 + sig);
+                default: proc_exit(-signal_wait_status(sig));
             }
         }
 
         ss->pending &= ~signal_mask_bit(sig);
+        ss->pending_has_info[sig] = 0;
 
         t->sig_saved_ctx = *ctx;
         t->sig_handling = sig;
@@ -162,7 +230,7 @@ void signal_deliver_user(trap_context_t *ctx) {
         arch_signal_prepare_trampoline(tramp);
         /* Write signal trampoline to user stack via page table (not direct ptr) */
         if (copy_to_user((void *)sp, tramp, sizeof(tramp)) < 0)
-            proc_exit(128 + SIGSEGV);
+            proc_exit(-signal_wait_status(SIGSEGV));
         TRAP_CTX_SP(ctx) = sp;
 
         TRAP_CTX_EPC(ctx) = sa->sa_handler;
