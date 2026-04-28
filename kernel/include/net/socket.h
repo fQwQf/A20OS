@@ -6,17 +6,27 @@
 #define AF_UNIX    1
 #define AF_INET    2
 #define AF_INET6   10
+#define AF_ALG     38
 
 #define SOCK_STREAM 1
 #define SOCK_DGRAM  2
 #define SOCK_RAW    3
+#define SOCK_SEQPACKET 5
 
 #define SOCK_NONBLOCK 04000
 #define SOCK_CLOEXEC  02000000
 
 #define SOL_SOCKET   1
+#define SOL_ALG      279
+#define IPPROTO_IP   0
 #define SO_TYPE      3
 #define SO_ERROR     4
+#define SO_ATTACH_BPF 50
+
+#define MCAST_JOIN_GROUP  42
+#define MCAST_LEAVE_GROUP 45
+
+#define ALG_SET_KEY  1
 
 #define NET_SOCKADDR_MAX 128
 
@@ -51,5 +61,6 @@ int net_setsockopt(int gfd, int level, int optname, const void *optval, size_t o
 int net_getsockopt(int gfd, int level, int optname, void *optval, size_t *optlen);
 int net_shutdown(int gfd, int how);
 int net_set_nonblock(int gfd, int nonblock);
+int net_poll_events(int gfd, short events);
 
 #endif /* _NET_SOCKET_H */

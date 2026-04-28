@@ -144,11 +144,13 @@ int64_t sys_readv(int fd, const void *iov, int iovcnt) {
     return total;
 }
 int64_t sys_openat(int dirfd, const char *path, int flags, int mode) {
-    (void)dirfd;
     if (!path) return -EFAULT;
     char kpath[MAX_PATH_LEN];
     if (user_strncpy(kpath, path, MAX_PATH_LEN) < 0) return -EFAULT;
-    int gfd = vfs_open(kpath, flags, mode);
+    char full[MAX_PATH_LEN];
+    int pr = syscall_path_at(dirfd, kpath, full, sizeof(full));
+    if (pr < 0) return pr;
+    int gfd = vfs_open(full, flags, mode);
     if (gfd < 0) return gfd;
     task_t *t = proc_current();
     return syscall_alloc_local_fd_with_flags(t, gfd, flags);
@@ -196,9 +198,9 @@ int64_t sys_dup3(int oldfd, int newfd, int flags) {
     if (flags & ~O_CLOEXEC) return -EINVAL;
     task_t *t = proc_current();
     if (!t || oldfd < 0 || oldfd >= MAX_FILES || newfd < 0 || newfd >= MAX_FILES) return -EBADF;
+    if (oldfd == newfd) return -EINVAL;
     int old_gfd = t->fd_table[oldfd];
     if (old_gfd < 0) return -EBADF;
-    if (oldfd == newfd) return newfd;
     vfile_t *vf = vfs_get_file(old_gfd);
     if (!vf) return -EBADF;
     int cur_gfd = t->fd_table[newfd];
@@ -250,16 +252,28 @@ int64_t sys_fcntl(int fd, int cmd, long arg) {
     if (gfd < 0) return gfd;
     int64_t r = vfs_fcntl(gfd, cmd, arg);
     if (r >= 0 && cmd == F_SETFL)
-        net_set_nonblock((int)gfd, ((int)arg & SOCK_NONBLOCK) != 0);
+        net_set_nonblock((int)gfd, ((int)arg & O_NONBLOCK) != 0);
     return r;
 }
 
+int64_t sys_flock(int fd, int operation) {
+    int64_t gfd = syscall_get_global_fd(fd);
+    if (gfd < 0) return gfd;
+    return vfs_flock((int)gfd, operation);
+}
+
 int64_t sys_pipe2(int *pipefd, int flags) {
-    if (flags & ~O_CLOEXEC) return -EINVAL;
+    if (flags & ~(O_CLOEXEC | O_NONBLOCK)) return -EINVAL;
     if (!pipefd) return -EFAULT;
     int gfd[2];
     int r = vfs_pipe(gfd);
     if (r == 0) {
+        if (flags & O_NONBLOCK) {
+            vfile_t *rd = vfs_get_file(gfd[0]);
+            vfile_t *wr = vfs_get_file(gfd[1]);
+            if (rd) rd->flags |= O_NONBLOCK;
+            if (wr) wr->flags |= O_NONBLOCK;
+        }
         task_t *t = proc_current();
         int fd0 = syscall_alloc_local_fd_with_flags(t, gfd[0], flags);
         if (fd0 < 0) {
@@ -294,12 +308,26 @@ int64_t sys_ioctl(int fd, unsigned long req, void *arg) {
 }
 
 int64_t sys_sync(void) {
-    return 0;
+    return vfs_sync();
 }
 
 int64_t sys_fsync(int fd) {
-    (void)fd;
-    return 0;
+    int64_t gfd = syscall_get_global_fd(fd);
+    if (gfd < 0) return gfd;
+    return vfs_fsync((int)gfd);
+}
+
+int64_t sys_fdatasync(int fd) {
+    int64_t gfd = syscall_get_global_fd(fd);
+    if (gfd < 0) return gfd;
+    vfile_t *vf = vfs_get_file((int)gfd);
+    if (!vf) return -EBADF;
+    kstat_t st;
+    if (vfs_fstat((int)gfd, &st) < 0)
+        return -EINVAL;
+    if ((st.st_mode & S_IFMT) != S_IFREG)
+        return -EINVAL;
+    return vfs_fsync((int)gfd);
 }
 
 int64_t sys_ftruncate(int fd, size_t size) {
@@ -351,41 +379,129 @@ int64_t sys_sendfile(int out_fd, int in_fd, long *off, size_t count) {
 int64_t sys_ppoll(void *fds, int nfds, void *tmo, void *sigmask) {
     struct pollfd { int fd; short events; short revents; };
     struct pollfd *pfds = (struct pollfd *)fds;
-    (void)tmo; (void)sigmask;
-    if (!pfds || nfds <= 0) return 0;
-    int ready = 0;
-    for (int i = 0; i < nfds; i++) {
-        struct pollfd pfd;
-        if (copy_from_user(&pfd, &pfds[i], sizeof(pfd)) < 0) return -EFAULT;
-        pfd.revents = 0;
-        if (pfd.fd < 0) {
-            copy_to_user(&pfds[i].revents, &pfd.revents, sizeof(short));
-            continue;
+    (void)sigmask;
+    if (nfds < 0) return -EINVAL;
+    if (nfds == 0) {
+        task_t *t = proc_current();
+        if (tmo) {
+            uint64_t ts[2];
+            if (copy_from_user(ts, tmo, sizeof(ts)) < 0) return -EFAULT;
+            if (ts[1] >= 1000000000ULL) return -EINVAL;
+            uint64_t ticks = ts[0] * TICKS_PER_SEC + ts[1] * TICKS_PER_SEC / 1000000000ULL;
+            uint64_t until = timer_get_ticks() + (ticks ? ticks : 1);
+            while (timer_get_ticks() < until) {
+                if (signal_task_has_unblocked(t)) return -EINTR;
+                proc_yield();
+            }
+            if (signal_task_has_unblocked(t)) return -EINTR;
+            return 0;
         }
-        int64_t gfd = syscall_get_global_fd(pfd.fd);
-        vfile_t *vf = (gfd >= 0) ? vfs_get_file(gfd) : NULL;
-        if (vf) {
-            if (pfd.events & 0x001) pfd.revents |= 0x001;
-            if (pfd.events & 0x004) pfd.revents |= 0x004;
-            ready++;
-        } else {
-            pfd.revents = 0x008;
-            ready++;
+        for (;;) {
+            if (signal_task_has_unblocked(t)) return -EINTR;
+            if (t) t->state = PROC_BLOCKED;
+            sched();
         }
-        copy_to_user(&pfds[i].revents, &pfd.revents, sizeof(short));
     }
-    return ready;
+    if (!pfds) return -EFAULT;
+
+    uint64_t timeout_ticks = 0;
+    int has_timeout = tmo != NULL;
+    if (tmo) {
+        uint64_t ts[2];
+        if (copy_from_user(ts, tmo, sizeof(ts)) < 0) return -EFAULT;
+        if (ts[1] >= 1000000000ULL) return -EINVAL;
+        timeout_ticks = ts[0] * TICKS_PER_SEC + ts[1] * TICKS_PER_SEC / 1000000000ULL;
+    }
+    uint64_t deadline = timer_get_ticks() + (timeout_ticks ? timeout_ticks : 1);
+
+    signal_state_t *saved_ss = NULL;
+    uint64_t saved_blocked = 0;
+    if (sigmask) {
+        task_t *t = proc_current();
+        if (!t || !t->signals) return -EINVAL;
+        uint64_t user_mask;
+        if (copy_from_user(&user_mask, sigmask, sizeof(user_mask)) < 0) return -EFAULT;
+        saved_ss = (signal_state_t *)t->signals;
+        saved_blocked = saved_ss->blocked;
+        saved_ss->blocked = signal_mask_from_user(user_mask) &
+            ~(signal_mask_bit(SIGKILL) | signal_mask_bit(SIGSTOP));
+    }
+#define PPOLL_RETURN(v) do { if (saved_ss) saved_ss->blocked = saved_blocked; return (v); } while (0)
+    for (;;) {
+        int ready = 0;
+        for (int i = 0; i < nfds; i++) {
+            struct pollfd pfd;
+            if (copy_from_user(&pfd, &pfds[i], sizeof(pfd)) < 0) PPOLL_RETURN(-EFAULT);
+            pfd.revents = 0;
+            if (pfd.fd >= 0) {
+                int64_t gfd = syscall_get_global_fd(pfd.fd);
+                pfd.revents = gfd < 0 ? POLLNVAL : (short)vfs_poll_events((int)gfd, pfd.events);
+                if (pfd.revents) ready++;
+            }
+            if (copy_to_user(&pfds[i].revents, &pfd.revents, sizeof(short)) < 0)
+                PPOLL_RETURN(-EFAULT);
+        }
+        if (ready > 0) PPOLL_RETURN(ready);
+        if (has_timeout && timeout_ticks == 0) PPOLL_RETURN(0);
+        if (has_timeout && timer_get_ticks() >= deadline) PPOLL_RETURN(0);
+        task_t *t = proc_current();
+        if (signal_task_has_unblocked(t)) PPOLL_RETURN(-EINTR);
+        if (has_timeout) {
+            proc_yield();
+        } else {
+            if (t) t->state = PROC_BLOCKED;
+            sched();
+        }
+    }
+#undef PPOLL_RETURN
+}
+
+int64_t sys_poll(void *fds, int nfds, int timeout) {
+    struct pollfd { int fd; short events; short revents; };
+    struct pollfd *pfds = (struct pollfd *)fds;
+    if (nfds < 0) return -EINVAL;
+    if (nfds == 0) {
+        if (timeout > 0) {
+            uint64_t until = timer_get_ticks() + MS_TO_TICKS((uint64_t)timeout);
+            while (timer_get_ticks() < until) proc_yield();
+        }
+        return 0;
+    }
+    if (!pfds) return -EFAULT;
+
+    int has_timeout = timeout >= 0;
+    uint64_t deadline = timer_get_ticks() + (timeout > 0 ? MS_TO_TICKS((uint64_t)timeout) : 0);
+    for (;;) {
+        int ready = 0;
+        for (int i = 0; i < nfds; i++) {
+            struct pollfd pfd;
+            if (copy_from_user(&pfd, &pfds[i], sizeof(pfd)) < 0) return -EFAULT;
+            pfd.revents = 0;
+            if (pfd.fd >= 0) {
+                int64_t gfd = syscall_get_global_fd(pfd.fd);
+                pfd.revents = gfd < 0 ? POLLNVAL : (short)vfs_poll_events((int)gfd, pfd.events);
+                if (pfd.revents) ready++;
+            }
+            if (copy_to_user(&pfds[i].revents, &pfd.revents, sizeof(short)) < 0)
+                return -EFAULT;
+        }
+        if (ready > 0) return ready;
+        if (has_timeout && timeout == 0) return 0;
+        if (has_timeout && timer_get_ticks() >= deadline) return 0;
+        proc_yield();
+        if (!has_timeout) return 0;
+    }
 }
 
 int64_t sys_epoll_create1(int flags) {
-    (void)flags;
+    if (flags & ~O_CLOEXEC) return -EINVAL;
     vfile_t *vf = (vfile_t *)kmalloc(sizeof(vfile_t));
     if (!vf) return -ENOMEM;
     memset(vf, 0, sizeof(*vf));
     vf->ref_count = 1;
     int gfd = vfs_alloc_fd(vf);
     if (gfd < 0) { kfree(vf); return -EMFILE; }
-    return syscall_alloc_local_fd(proc_current(), gfd);
+    return syscall_alloc_local_fd_with_flags(proc_current(), gfd, flags);
 }
 
 /* ============================================================
@@ -397,48 +513,129 @@ static int fd_isset_user(int f, void *s) {
     return (mask & (1UL << (f % (8 * sizeof(long))))) != 0;
 }
 
+static int fd_clear_user(int f, void *s) {
+    long *slot = &((long *)s)[f / 8 / sizeof(long)];
+    long mask = 0;
+    if (copy_from_user(&mask, slot, sizeof(long)) < 0) return -EFAULT;
+    mask &= ~(1UL << (f % (8 * sizeof(long))));
+    return copy_to_user(slot, &mask, sizeof(long)) < 0 ? -EFAULT : 0;
+}
+
 int64_t sys_select(int nfds, void *readfds, void *writefds,
                    void *exceptfds, void *timeout) {
     task_t *t = proc_current();
     if (!t) return -ESRCH;
     (void)exceptfds;
 
-    int ready_count = 0;
-
-    if (readfds) {
-        for (int i = 0; i < nfds; i++) {
-            if (fd_isset_user(i, readfds)) {
-                if (i == 0) {
-                    extern int uart_has_input(void);
-                    if (uart_has_input()) ready_count++;
-                } else if (i >= 0 && i < MAX_FILES && t->fd_table[i] >= 0) {
-                    ready_count++;
-                }
-            }
-        }
-    }
-
-    if (writefds) {
-        for (int i = 0; i < nfds; i++) {
-            if (fd_isset_user(i, writefds)) {
-                if (i == 1 || i == 2) {
-                    ready_count++;
-                } else if (i >= 0 && i < MAX_FILES && t->fd_table[i] >= 0) {
-                    ready_count++;
-                }
-            }
-        }
-    }
-
-    if (ready_count > 0) return ready_count;
-
+    if (nfds < 0) return -EINVAL;
+    uint64_t timeout_ticks = 0;
+    int has_timeout = timeout != NULL;
     if (timeout) {
         uint64_t tv[2];
-        if (copy_from_user(tv, timeout, sizeof(tv)) == 0) {
-            if (tv[0] == 0 && tv[1] == 0) return 0;
+        if (copy_from_user(tv, timeout, sizeof(tv)) < 0) return -EFAULT;
+        if (tv[1] >= 1000000ULL) return -EINVAL;
+        timeout_ticks = tv[0] * TICKS_PER_SEC + tv[1] * TICKS_PER_SEC / 1000000ULL;
+    }
+    uint64_t deadline = timer_get_ticks() + (timeout_ticks ? timeout_ticks : 1);
+
+    for (;;) {
+        int ready_count = 0;
+
+        for (int i = 0; i < nfds; i++) {
+            int rg = -1;
+            if (i >= 0 && i < MAX_FILES && t->fd_table[i] >= 0)
+                rg = t->fd_table[i];
+
+            if (readfds && fd_isset_user(i, readfds)) {
+                if (rg < 0) return -EBADF;
+                int rev = vfs_poll_events(rg, POLLIN);
+                if (rev & (POLLIN | POLLHUP | POLLERR)) ready_count++;
+                else if (fd_clear_user(i, readfds) < 0) return -EFAULT;
+            }
+            if (writefds && fd_isset_user(i, writefds)) {
+                if (rg < 0) return -EBADF;
+                int rev = vfs_poll_events(rg, POLLOUT);
+                if (rev & (POLLOUT | POLLERR)) ready_count++;
+                else if (fd_clear_user(i, writefds) < 0) return -EFAULT;
+            }
+            if (exceptfds && fd_isset_user(i, exceptfds)) {
+                if (rg < 0) return -EBADF;
+                if (fd_clear_user(i, exceptfds) < 0) return -EFAULT;
+            }
+        }
+
+        if (ready_count > 0) return ready_count;
+        if (has_timeout && timeout_ticks == 0) return 0;
+        if (has_timeout && timer_get_ticks() >= deadline) return 0;
+        proc_yield();
+        if (!has_timeout) return 0;
+    }
+}
+
+int64_t sys_pselect6(int nfds, void *readfds, void *writefds,
+                     void *exceptfds, void *timeout, void *sigmask) {
+    task_t *t = proc_current();
+    if (!t) return -ESRCH;
+    if (nfds < 0) return -EINVAL;
+
+    uint64_t timeout_ticks = 0;
+    int has_timeout = timeout != NULL;
+    if (timeout) {
+        uint64_t ts[2];
+        if (copy_from_user(ts, timeout, sizeof(ts)) < 0) return -EFAULT;
+        if (ts[1] >= 1000000000ULL) return -EINVAL;
+        timeout_ticks = ts[0] * TICKS_PER_SEC + ts[1] * TICKS_PER_SEC / 1000000000ULL;
+    }
+    uint64_t deadline = timer_get_ticks() + (timeout_ticks ? timeout_ticks : 1);
+
+    signal_state_t *saved_ss = NULL;
+    uint64_t saved_blocked = 0;
+    if (sigmask) {
+        uint64_t data[2];
+        if (copy_from_user(data, sigmask, sizeof(data)) < 0) return -EFAULT;
+        if (data[0]) {
+            uint64_t user_mask = 0;
+            if (copy_from_user(&user_mask, (void *)data[0], sizeof(user_mask)) < 0)
+                return -EFAULT;
+            if (!t->signals) return -EINVAL;
+            saved_ss = (signal_state_t *)t->signals;
+            saved_blocked = saved_ss->blocked;
+            saved_ss->blocked = signal_mask_from_user(user_mask) &
+                ~(signal_mask_bit(SIGKILL) | signal_mask_bit(SIGSTOP));
         }
     }
+#define PSELECT_RETURN(v) do { if (saved_ss) saved_ss->blocked = saved_blocked; return (v); } while (0)
+    for (;;) {
+        int ready_count = 0;
 
-    proc_yield();
-    return 0;
+        for (int i = 0; i < nfds; i++) {
+            int rg = -1;
+            if (i >= 0 && i < MAX_FILES && t->fd_table[i] >= 0)
+                rg = t->fd_table[i];
+
+            if (readfds && fd_isset_user(i, readfds)) {
+                if (rg < 0) PSELECT_RETURN(-EBADF);
+                int rev = vfs_poll_events(rg, POLLIN);
+                if (rev & (POLLIN | POLLHUP | POLLERR)) ready_count++;
+                else if (fd_clear_user(i, readfds) < 0) PSELECT_RETURN(-EFAULT);
+            }
+            if (writefds && fd_isset_user(i, writefds)) {
+                if (rg < 0) PSELECT_RETURN(-EBADF);
+                int rev = vfs_poll_events(rg, POLLOUT);
+                if (rev & (POLLOUT | POLLERR)) ready_count++;
+                else if (fd_clear_user(i, writefds) < 0) PSELECT_RETURN(-EFAULT);
+            }
+            if (exceptfds && fd_isset_user(i, exceptfds)) {
+                if (rg < 0) PSELECT_RETURN(-EBADF);
+                if (fd_clear_user(i, exceptfds) < 0) PSELECT_RETURN(-EFAULT);
+            }
+        }
+
+        if (ready_count > 0) PSELECT_RETURN(ready_count);
+        if (has_timeout && timeout_ticks == 0) PSELECT_RETURN(0);
+        if (has_timeout && timer_get_ticks() >= deadline) PSELECT_RETURN(0);
+        proc_yield();
+        if (!has_timeout) PSELECT_RETURN(0);
+    }
+#undef PSELECT_RETURN
 }

@@ -69,6 +69,9 @@ typedef struct kstat {
 #define S_IROTH  0004
 #define S_IWOTH  0002
 #define S_IXOTH  0001
+#define S_ISUID  04000
+#define S_ISGID  02000
+#define S_ISVTX  01000
 
 /* ---- Vnode operations ---- */
 typedef struct vnode_ops {
@@ -84,6 +87,8 @@ typedef struct vnode_ops {
     int     (*readlink)(struct vnode *vn, char *buf, size_t sz);
     int     (*stat)(struct vnode *vn, kstat_t *st);
     int     (*truncate)(struct vnode *vn, size_t size);
+    int     (*chmod)(struct vnode *vn, int mode);
+    int     (*chown)(struct vnode *vn, int uid, int gid);
     void    (*release)(struct vnode *vn);
 } vnode_ops_t;
 
@@ -103,6 +108,8 @@ typedef struct vnode {
     uint64_t        ino;            /* inode number */
     int             type;           /* VFS_FT_* */
     uint32_t        mode;           /* permissions */
+    uint32_t        uid;
+    uint32_t        gid;
     size_t          size;
     int             ref_count;
     struct vnode   *parent;
@@ -117,6 +124,12 @@ typedef struct vfile {
     int             flags;
     size_t          offset;
     int             ref_count;
+    int             owner_type;
+    int             owner_pid;
+    int             owner_signal;
+    int             seals;
+    uint64_t        rw_hint;
+    char            path[MAX_PATH_LEN];
     vfile_ops_t    *ops;
     void           *priv;           /* fs/pipe private data */
 } vfile_t;
@@ -124,6 +137,7 @@ typedef struct vfile {
 /* ---- Mount point ---- */
 typedef struct mount {
     int             type;           /* FS_TYPE_* */
+    int             flags;
     char            path[MAX_PATH_LEN];
     vnode_t        *root;           /* root vnode of this mount */
     void           *fs_data;
@@ -160,6 +174,9 @@ int      vfs_write(int fd, const char *buf, size_t count);
 long     vfs_lseek(int fd, long offset, int whence);
 int      vfs_getdents64(int fd, void *dirp, size_t count);
 int      vfs_ioctl(int fd, unsigned long req, void *arg);
+int      vfs_sync(void);
+int      vfs_fsync(int fd);
+int      vfs_poll_events(int fd, short events);
 
 /* Directory operations */
 int      vfs_mkdir(const char *path, int mode);
@@ -170,6 +187,12 @@ int      vfs_stat(const char *path, kstat_t *st);
 int      vfs_fstat(int fd, kstat_t *st);
 int      vfs_fstatat(int dirfd, const char *path, kstat_t *st, int flags);
 int      vfs_faccessat(int dirfd, const char *path, int mode);
+int      vfs_faccessat2(int dirfd, const char *path, int mode, int flags);
+int      vfs_chmodat(int dirfd, const char *path, int mode, int flags);
+int      vfs_fchmod(int fd, int mode);
+int      vfs_chownat(int dirfd, const char *path, int uid, int gid, int flags);
+int      vfs_fchown(int fd, int uid, int gid);
+int      vfs_utimensat(int dirfd, const char *path, const uint64_t times[4], int flags);
 int      vfs_readlinkat(int dirfd, const char *path, char *buf, size_t sz);
 int      vfs_link(const char *oldpath, const char *newpath);
 int      vfs_symlink(const char *target, const char *linkpath);
@@ -192,6 +215,8 @@ int      vfs_alloc_fd(vfile_t *vf);
 int      vfs_dup(int fd);
 int      vfs_dup3(int oldfd, int newfd, int flags);
 int      vfs_fcntl(int fd, int cmd, long arg);
+int      vfs_flock(int fd, int operation);
+void     vfs_release_process_locks(int pid);
 
 /* Truncate */
 int      vfs_truncate(const char *path, size_t size);

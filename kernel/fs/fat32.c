@@ -20,6 +20,7 @@
 #include "core/panic.h"
 #include "core/consts.h"
 #include "core/defs.h"
+#include "proc/proc.h"
 
 /* ============================================================
  * Low-level cluster/FAT helpers
@@ -259,6 +260,37 @@ typedef struct fat32_vnode_priv {
     int         is_dir;
 } fat32_vnode_priv_t;
 
+#define FAT32_META_MAX 1024
+typedef struct fat32_meta {
+    fat32_sb_t *sb;
+    uint64_t ino;
+    uint32_t mode;
+    uint32_t uid;
+    uint32_t gid;
+    int used;
+} fat32_meta_t;
+
+static fat32_meta_t g_fat32_meta[FAT32_META_MAX];
+
+static fat32_meta_t *fat32_get_meta(fat32_sb_t *sb, uint64_t ino, int is_dir, int create) {
+    for (int i = 0; i < FAT32_META_MAX; i++) {
+        if (g_fat32_meta[i].used && g_fat32_meta[i].sb == sb && g_fat32_meta[i].ino == ino)
+            return &g_fat32_meta[i];
+    }
+    if (!create) return NULL;
+    for (int i = 0; i < FAT32_META_MAX; i++) {
+        if (!g_fat32_meta[i].used) {
+            memset(&g_fat32_meta[i], 0, sizeof(g_fat32_meta[i]));
+            g_fat32_meta[i].used = 1;
+            g_fat32_meta[i].sb = sb;
+            g_fat32_meta[i].ino = ino;
+            g_fat32_meta[i].mode = is_dir ? (S_IFDIR | 0755) : (S_IFREG | 0755);
+            return &g_fat32_meta[i];
+        }
+    }
+    return NULL;
+}
+
 static vnode_t *fat32_make_vnode(fat32_sb_t *sb, uint32_t cluster,
                                   size_t size, int is_dir, vnode_t *parent,
                                   uint64_t ino);
@@ -299,7 +331,9 @@ static int fat32_stat(vnode_t *vn, kstat_t *st) {
     st->st_size = p->file_size;
     st->st_blksize = 512;
     st->st_blocks  = (p->file_size + 511) / 512;
-    st->st_mode = p->is_dir ? (S_IFDIR | 0755) : (S_IFREG | 0755);
+    st->st_mode = vn->mode;
+    st->st_uid = vn->uid;
+    st->st_gid = vn->gid;
     st->st_nlink = 1;
     return 0;
 }
@@ -314,7 +348,6 @@ static void fat32_release_vn(vnode_t *vn) {
 /* vnode_ops: mkdir */
 static int fat32_vn_mkdir(vnode_t *dir, const char *name, int mode) {
     fat32_vnode_priv_t *p = (fat32_vnode_priv_t *)dir->fs_data;
-    (void)mode;
     if (!p->is_dir) return -ENOTDIR;
 
     /* Check existence */
@@ -372,6 +405,16 @@ static int fat32_vn_mkdir(vnode_t *dir, const char *name, int mode) {
             }
             uint64_t write_off = cluster_byte_offset(sb, cluster) + remaining;
             bcache_write_bytes(sb->bc, write_off, &nde, sizeof(nde));
+            fat32_meta_t *m = fat32_get_meta(sb, (uint64_t)new_cluster, 1, 1);
+            task_t *cur = proc_current();
+            if (m) {
+                m->mode = S_IFDIR | (mode & 07777);
+                if (dir->mode & S_ISGID)
+                    m->mode |= S_ISGID;
+                m->uid = cur ? (uint32_t)cur->fsuid : 0;
+                m->gid = ((dir->mode & S_ISGID) ? dir->gid :
+                          (cur ? (uint32_t)cur->fsgid : 0));
+            }
             return 0;
         }
         off += 32;
@@ -382,7 +425,6 @@ static int fat32_vn_mkdir(vnode_t *dir, const char *name, int mode) {
 /* vnode_ops: create (regular file) */
 static int fat32_vn_create(vnode_t *dir, const char *name, int mode, vnode_t **out) {
     fat32_vnode_priv_t *p = (fat32_vnode_priv_t *)dir->fs_data;
-    (void)mode;
     if (!p->is_dir) return -ENOTDIR;
 
     fat32_sb_t *sb = p->sb;
@@ -412,6 +454,14 @@ static int fat32_vn_create(vnode_t *dir, const char *name, int mode, vnode_t **o
             }
             uint64_t write_off = cluster_byte_offset(sb, cluster) + remaining;
             bcache_write_bytes(sb->bc, write_off, &nde, sizeof(nde));
+            fat32_meta_t *m = fat32_get_meta(sb, (uint64_t)new_cluster, 0, 1);
+            task_t *cur = proc_current();
+            if (m) {
+                m->mode = S_IFREG | (mode & 07777);
+                m->uid = cur ? (uint32_t)cur->fsuid : 0;
+                m->gid = ((dir->mode & S_ISGID) ? dir->gid :
+                          (cur ? (uint32_t)cur->fsgid : 0));
+            }
 
             if (out) {
                 *out = fat32_make_vnode(sb, new_cluster, 0, 0, dir, (uint64_t)new_cluster);
@@ -458,8 +508,10 @@ static int fat32_vn_unlink(vnode_t *dir, const char *name) {
 /* vnode_ops: truncate */
 static int fat32_vn_truncate(vnode_t *vn, size_t size) {
     fat32_vnode_priv_t *p = (fat32_vnode_priv_t *)vn->fs_data;
-    (void)size;
-    /* For simplicity: only support truncation to 0 */
+    if (!p) return -EINVAL;
+    if (p->is_dir) return -EISDIR;
+
+    uint32_t old_first_cluster = p->first_cluster;
     if (size == 0) {
         fat32_sb_t *sb = p->sb;
         uint32_t cluster = p->first_cluster;
@@ -469,8 +521,81 @@ static int fat32_vn_truncate(vnode_t *vn, size_t size) {
             cluster = next;
         }
         p->first_cluster = fat32_alloc_cluster(sb);
-        p->file_size = 0;
+    } else {
+        uint32_t cluster = p->first_cluster;
+        if (cluster < 2 || cluster >= FAT32_CLUSTER_END) {
+            cluster = fat32_alloc_cluster(p->sb);
+            if (!cluster) return -ENOSPC;
+            p->first_cluster = cluster;
+        }
+
+        size_t need_clusters = (size + p->sb->bytes_per_cluster - 1) / p->sb->bytes_per_cluster;
+        for (size_t i = 1; i < need_clusters; i++) {
+            uint32_t next = fat_read(p->sb, cluster);
+            if (next >= FAT32_CLUSTER_END) {
+                next = fat32_extend_chain(p->sb, cluster);
+                if (!next) return -ENOSPC;
+            }
+            cluster = next;
+        }
     }
+
+    p->file_size = size;
+    vn->size = size;
+
+    if (vn->parent && vn->parent->fs_data) {
+        fat32_vnode_priv_t *pp = (fat32_vnode_priv_t *)vn->parent->fs_data;
+        size_t off = 0;
+        while (1) {
+            fat32_dirent_t de;
+            int r = read_raw_dirent(p->sb, pp->first_cluster, off, &de);
+            if (r <= 0 || de.name[0] == 0x00) break;
+            if ((uint8_t)de.name[0] != 0xE5 && de.attr != FAT_ATTR_LFN) {
+                uint32_t clus = ((uint32_t)de.fst_clus_hi << 16) | de.fst_clus_lo;
+                if (clus == old_first_cluster) {
+                    de.fst_clus_hi = (uint16_t)(p->first_cluster >> 16);
+                    de.fst_clus_lo = (uint16_t)(p->first_cluster & 0xffff);
+                    de.file_size = (uint32_t)size;
+                    uint32_t dc = pp->first_cluster;
+                    size_t rem = off;
+                    while (rem >= p->sb->bytes_per_cluster) {
+                        rem -= p->sb->bytes_per_cluster;
+                        dc = fat_read(p->sb, dc);
+                    }
+                    bcache_write_bytes(p->sb->bc, cluster_byte_offset(p->sb, dc) + rem, &de, sizeof(de));
+                    break;
+                }
+            }
+            off += sizeof(fat32_dirent_t);
+        }
+    }
+
+    return 0;
+}
+
+static int fat32_vn_chmod(vnode_t *vn, int mode) {
+    fat32_vnode_priv_t *p = (fat32_vnode_priv_t *)vn->fs_data;
+    fat32_meta_t *m = fat32_get_meta(p->sb, vn->ino, p->is_dir, 1);
+    if (!m) return -ENOSPC;
+    m->mode = (m->mode & S_IFMT) | (mode & 07777);
+    vn->mode = m->mode;
+    return 0;
+}
+
+static int fat32_vn_chown(vnode_t *vn, int uid, int gid) {
+    fat32_vnode_priv_t *p = (fat32_vnode_priv_t *)vn->fs_data;
+    fat32_meta_t *m = fat32_get_meta(p->sb, vn->ino, p->is_dir, 1);
+    if (!m) return -ENOSPC;
+    if (uid != -1) m->uid = (uint32_t)uid;
+    if (gid != -1) m->gid = (uint32_t)gid;
+    if (uid != -1 || gid != -1) {
+        m->mode &= ~S_ISUID;
+        if (m->mode & S_IXGRP)
+            m->mode &= ~S_ISGID;
+    }
+    vn->uid = m->uid;
+    vn->gid = m->gid;
+    vn->mode = m->mode;
     return 0;
 }
 
@@ -531,6 +656,8 @@ static vnode_ops_t g_fat32_vnode_ops = {
     .rename   = NULL,
     .stat     = fat32_stat,
     .truncate = fat32_vn_truncate,
+    .chmod    = fat32_vn_chmod,
+    .chown    = fat32_vn_chown,
     .release  = fat32_release_vn,
 };
 
@@ -542,7 +669,10 @@ static vnode_t *fat32_make_vnode(fat32_sb_t *sb, uint32_t cluster,
     memset(vn, 0, sizeof(*vn));
     vn->ino       = ino;
     vn->type      = is_dir ? VFS_FT_DIR : VFS_FT_REGULAR;
-    vn->mode      = is_dir ? (S_IFDIR | 0755) : (S_IFREG | 0755);
+    fat32_meta_t *m = fat32_get_meta(sb, ino, is_dir, 1);
+    vn->mode      = m ? m->mode : (is_dir ? (S_IFDIR | 0755) : (S_IFREG | 0755));
+    vn->uid       = m ? m->uid : 0;
+    vn->gid       = m ? m->gid : 0;
     vn->size      = size;
     vn->ref_count = 1;
     vn->parent    = parent;
@@ -584,6 +714,7 @@ typedef struct fat32_fctx {
 static int fat32_fread(vfile_t *vf, char *buf, size_t count) {
     fat32_fctx_t *fc = (fat32_fctx_t *)vf->priv;
     if (fc->is_dir) return -EISDIR;
+    if (fc->file_off >= fc->file_size) return 0;
     size_t remaining = fc->file_size - fc->file_off;
     if (count > remaining) count = remaining;
     if (count == 0) return 0;

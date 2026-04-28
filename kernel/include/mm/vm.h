@@ -13,6 +13,10 @@
 #define VM_GUARD     (1UL << 6)
 #define VM_COW       (1UL << 7)
 #define VM_FIXED     (1UL << 8)
+#define VM_DONTFORK  (1UL << 9)
+#define VM_WIPEONFORK (1UL << 10)
+#define VM_HUGEPAGE  (1UL << 11)
+#define VM_NOHUGEPAGE (1UL << 12)
 
 typedef struct vm_area {
     uint64_t        start;
@@ -49,6 +53,10 @@ uint64_t mm_mmap(mm_struct_t *mm, uint64_t addr, size_t len,
 int      mm_munmap(mm_struct_t *mm, uint64_t addr, size_t len);
 uint64_t mm_brk(mm_struct_t *mm, uint64_t newbrk);
 int      mm_mprotect(mm_struct_t *mm, uint64_t addr, size_t len, int prot);
+int      mm_mremap(mm_struct_t *mm, uint64_t old_addr, size_t old_size,
+                   size_t new_size, int flags, uint64_t new_addr,
+                   uint64_t *out_addr);
+int      mm_demote_huge_page(mm_struct_t *mm, uint64_t addr);
 
 uint64_t prot_to_pte(int prot);
 

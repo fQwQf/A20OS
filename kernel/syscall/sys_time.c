@@ -29,6 +29,8 @@ static int clock_is_realtime(int clk) {
 static int clock_is_monotonic(int clk) {
     switch (clk) {
     case CLOCK_MONOTONIC_ID:
+    case CLOCK_PROCESS_CPUTIME_ID:
+    case CLOCK_THREAD_CPUTIME_ID:
     case CLOCK_MONOTONIC_RAW_ID:
     case CLOCK_MONOTONIC_COARSE_ID:
     case CLOCK_BOOTTIME_ID:
@@ -40,12 +42,12 @@ static int clock_is_monotonic(int clk) {
 }
 
 int64_t sys_clock_settime(int clk, void *tp) {
-    uint64_t ts[2];
+    int64_t ts[2];
     if (clk != CLOCK_REALTIME_ID) return -EINVAL;
     if (!tp) return -EFAULT;
     if (copy_from_user(ts, tp, sizeof(ts)) < 0) return -EFAULT;
-    if (ts[1] >= 1000000000ULL) return -EINVAL;
-    return timekeeping_set_realtime(ts[0], ts[1]);
+    if (ts[0] < 0 || ts[1] < 0 || ts[1] >= 1000000000LL) return -EINVAL;
+    return timekeeping_set_realtime((uint64_t)ts[0], (uint64_t)ts[1]);
 }
 
 int64_t sys_clock_gettime(int clk, void *tp) {

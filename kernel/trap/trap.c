@@ -16,7 +16,9 @@
 int handle_cow_fault(task_t *t, uint64_t stval) {
     if (!t->mm || !t->mm->pgdir) return -1;
 
-    uint64_t *pte = pt_walk(t->mm->pgdir, stval, 0);
+    uint64_t leaf_base = 0;
+    size_t leaf_size = 0;
+    uint64_t *pte = pt_lookup_leaf(t->mm->pgdir, stval, NULL, &leaf_base, &leaf_size);
     if (!pte || !(*pte & PTE_V) || !arch_pte_is_leaf(*pte) || !(*pte & PTE_U))
         return -1;
 
@@ -24,12 +26,13 @@ int handle_cow_fault(task_t *t, uint64_t stval) {
         paddr_t old_pa = arch_pte_addr(*pte);
         pfn_t old_pfn = phys_to_pfn(old_pa);
         if (!pfn_valid(old_pfn)) return -1;
+        int order = (leaf_size >= PMD_SIZE) ? PMD_ORDER : 0;
 
         uint16_t rc = pfa.meta[old_pfn].refcount;
         if (rc > 1) {
-            pfn_t new_pfn = pfa_alloc_page();
+            pfn_t new_pfn = pfa_alloc(order);
             if (new_pfn == PFN_NONE) return -1;
-            memcpy(pfn_to_virt(new_pfn), pfn_to_virt(old_pfn), PAGE_SIZE);
+            memcpy(pfn_to_virt(new_pfn), pfn_to_virt(old_pfn), leaf_size);
             frame_put(old_pfn);
             uint64_t flags = (*pte & (PTE_R | PTE_X | PTE_U | PTE_A |
                                       PTE_G | PTE_MAT1 | PTE_LEAF)) |
@@ -122,9 +125,29 @@ int handle_demand_fault(task_t *t, uint64_t stval) {
 
     vm_area_t *vma = mm_find_vma(t->mm, page_va);
     if (vma) {
-        uint64_t *pte = pt_walk(t->mm->pgdir, page_va, 0);
+        uint64_t *pte = pt_lookup_leaf(t->mm->pgdir, page_va, NULL, NULL, NULL);
         if (pte && (*pte & PTE_V)) return -1;
         if (!(vma->pte_flags & (PTE_R | PTE_W | PTE_X))) return -1;
+
+        if (!t->thp_disabled && (vma->vm_flags & VM_HUGEPAGE) &&
+            !(vma->vm_flags & VM_NOHUGEPAGE)) {
+            uint64_t hbase = page_va & ~(uint64_t)(PMD_SIZE - 1);
+            if (hbase >= vma->start && hbase + PMD_SIZE <= vma->end &&
+                !pt_lookup_leaf(t->mm->pgdir, hbase, NULL, NULL, NULL)) {
+                pfn_t hpfn = pfa_alloc(PMD_ORDER);
+                if (hpfn != PFN_NONE) {
+                    memset(pfn_to_virt(hpfn), 0, PMD_SIZE);
+                    int hr = pt_map_huge(t->mm->pgdir, hbase, pfn_to_phys(hpfn),
+                                         vma->pte_flags);
+                    if (hr == 0) {
+                        t->mm->rss += PMD_PAGE_COUNT;
+                        arch_tlb_flush_page(stval);
+                        return 0;
+                    }
+                    frame_put(hpfn);
+                }
+            }
+        }
 
         pfn_t pfn = pfa_alloc_page();
         if (pfn == PFN_NONE) return -1;
@@ -146,12 +169,13 @@ static int fetch_user_insn(task_t *task, uint64_t va, uint32_t *insn_out) {
     if (!task || !task->mm || !task->mm->pgdir || !insn_out)
         return 0;
 
-    uint64_t *pte = pt_walk(task->mm->pgdir, va, 0);
+    uint64_t leaf_base = 0;
+    uint64_t *pte = pt_lookup_leaf(task->mm->pgdir, va, NULL, &leaf_base, NULL);
     if (!pte || !(*pte & PTE_V))
         return 0;
 
     uint8_t *insn_kva = (uint8_t *)(arch_pte_addr(*pte) + PAGE_OFFSET +
-                                    (va & PAGE_OFFSET_MASK));
+                                    (va - leaf_base));
     *insn_out = *(uint32_t *)insn_kva;
     return 1;
 }
@@ -178,7 +202,7 @@ static void dump_fault_pte(task_t *task, uint64_t va) {
     if (!task || !task->mm || !task->mm->pgdir)
         return;
 
-    uint64_t *pte = pt_walk(task->mm->pgdir, va, 0);
+    uint64_t *pte = pt_lookup_leaf(task->mm->pgdir, va, NULL, NULL, NULL);
     kerr("  pte=%p value=0x%lx\n", (void *)pte, pte ? *pte : 0UL);
 }
 
@@ -232,7 +256,7 @@ void trap_handler(trap_context_t *ctx) {
             }
             /* Case 2: just set D=1 in the existing PTE if it's writable */
             if (cur && cur->mm && cur->mm->pgdir) {
-                uint64_t *pte = pt_walk(cur->mm->pgdir, stval, 0);
+                uint64_t *pte = pt_lookup_leaf(cur->mm->pgdir, stval, NULL, NULL, NULL);
                 if (pte && (*pte & PTE_V) && (*pte & PTE_W)) {
                     uint64_t flags = (*pte & (PTE_R | PTE_W | PTE_X | PTE_U |
                                               PTE_G | PTE_A | PTE_MAT1 |

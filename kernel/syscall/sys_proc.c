@@ -31,13 +31,13 @@ int64_t sys_exit(int code) {
 }
 
 int64_t sys_exit_group(int code) {
-    proc_exit(code);
+    proc_exit_group(code);
     return 0;
 }
 
 int64_t sys_getpid(void) {
     task_t *t = proc_current();
-    return t ? t->pid : 0;
+    return t ? (t->tgid ? t->tgid : t->pid) : 0;
 }
 
 int64_t sys_getppid(void) {
@@ -51,7 +51,8 @@ int64_t sys_gettid(void) {
 }
 
 int64_t sys_set_tid_address(int *tidptr) {
-    (void)tidptr;
+    task_t *t = proc_current();
+    if (t) t->clear_child_tid = tidptr;
     return sys_getpid();
 }
 
@@ -60,10 +61,157 @@ int64_t sys_set_robust_list(void *head, size_t len) {
     return 0;
 }
 
-int64_t sys_getuid(void) { return 0; }
-int64_t sys_geteuid(void) { return 0; }
-int64_t sys_getgid(void) { return 0; }
-int64_t sys_getegid(void) { return 0; }
+static int cred_is_root(task_t *t) {
+    return !t || t->euid == 0;
+}
+
+static int uid_is_current(task_t *t, int uid) {
+    return uid == t->uid || uid == t->euid || uid == t->suid;
+}
+
+static int gid_is_current(task_t *t, int gid) {
+    return gid == t->gid || gid == t->egid || gid == t->sgid;
+}
+
+int64_t sys_getuid(void) {
+    task_t *t = proc_current();
+    return t ? t->uid : 0;
+}
+
+int64_t sys_geteuid(void) {
+    task_t *t = proc_current();
+    return t ? t->euid : 0;
+}
+
+int64_t sys_getgid(void) {
+    task_t *t = proc_current();
+    return t ? t->gid : 0;
+}
+
+int64_t sys_getegid(void) {
+    task_t *t = proc_current();
+    return t ? t->egid : 0;
+}
+
+int64_t sys_setuid(int uid) {
+    if (uid < 0) return -EINVAL;
+    task_t *t = proc_current();
+    if (!t) return -EINVAL;
+    if (cred_is_root(t)) {
+        t->uid = t->euid = t->suid = t->fsuid = uid;
+        return 0;
+    }
+    if (!uid_is_current(t, uid)) return -EPERM;
+    t->euid = t->fsuid = uid;
+    return 0;
+}
+
+int64_t sys_setgid(int gid) {
+    if (gid < 0) return -EINVAL;
+    task_t *t = proc_current();
+    if (!t) return -EINVAL;
+    if (cred_is_root(t)) {
+        t->gid = t->egid = t->sgid = t->fsgid = gid;
+        return 0;
+    }
+    if (!gid_is_current(t, gid)) return -EPERM;
+    t->egid = t->fsgid = gid;
+    return 0;
+}
+
+int64_t sys_setreuid(int ruid, int euid) {
+    task_t *t = proc_current();
+    if (!t) return -EINVAL;
+    if (ruid < -1 || euid < -1) return -EINVAL;
+    if (!cred_is_root(t)) {
+        if (ruid != -1 && !uid_is_current(t, ruid)) return -EPERM;
+        if (euid != -1 && !uid_is_current(t, euid)) return -EPERM;
+    }
+    if (ruid != -1) t->uid = ruid;
+    if (euid != -1) t->euid = t->fsuid = euid;
+    if (ruid != -1 || euid != -1) t->suid = t->euid;
+    return 0;
+}
+
+int64_t sys_setregid(int rgid, int egid) {
+    task_t *t = proc_current();
+    if (!t) return -EINVAL;
+    if (rgid < -1 || egid < -1) return -EINVAL;
+    if (!cred_is_root(t)) {
+        if (rgid != -1 && !gid_is_current(t, rgid)) return -EPERM;
+        if (egid != -1 && !gid_is_current(t, egid)) return -EPERM;
+    }
+    if (rgid != -1) t->gid = rgid;
+    if (egid != -1) t->egid = t->fsgid = egid;
+    if (rgid != -1 || egid != -1) t->sgid = t->egid;
+    return 0;
+}
+
+int64_t sys_setresuid(int ruid, int euid, int suid) {
+    task_t *t = proc_current();
+    if (!t) return -EINVAL;
+    if (ruid < -1 || euid < -1 || suid < -1) return -EINVAL;
+    if (!cred_is_root(t)) {
+        if (ruid != -1 && !uid_is_current(t, ruid)) return -EPERM;
+        if (euid != -1 && !uid_is_current(t, euid)) return -EPERM;
+        if (suid != -1 && !uid_is_current(t, suid)) return -EPERM;
+    }
+    if (ruid != -1) t->uid = ruid;
+    if (euid != -1) t->euid = t->fsuid = euid;
+    if (suid != -1) t->suid = suid;
+    return 0;
+}
+
+int64_t sys_getresuid(int *ruid, int *euid, int *suid) {
+    task_t *t = proc_current();
+    int ids[3] = { t ? t->uid : 0, t ? t->euid : 0, t ? t->suid : 0 };
+    if (copy_to_user(ruid, &ids[0], sizeof(int)) < 0) return -EFAULT;
+    if (copy_to_user(euid, &ids[1], sizeof(int)) < 0) return -EFAULT;
+    if (copy_to_user(suid, &ids[2], sizeof(int)) < 0) return -EFAULT;
+    return 0;
+}
+
+int64_t sys_setresgid(int rgid, int egid, int sgid) {
+    task_t *t = proc_current();
+    if (!t) return -EINVAL;
+    if (rgid < -1 || egid < -1 || sgid < -1) return -EINVAL;
+    if (!cred_is_root(t)) {
+        if (rgid != -1 && !gid_is_current(t, rgid)) return -EPERM;
+        if (egid != -1 && !gid_is_current(t, egid)) return -EPERM;
+        if (sgid != -1 && !gid_is_current(t, sgid)) return -EPERM;
+    }
+    if (rgid != -1) t->gid = rgid;
+    if (egid != -1) t->egid = t->fsgid = egid;
+    if (sgid != -1) t->sgid = sgid;
+    return 0;
+}
+
+int64_t sys_getresgid(int *rgid, int *egid, int *sgid) {
+    task_t *t = proc_current();
+    int ids[3] = { t ? t->gid : 0, t ? t->egid : 0, t ? t->sgid : 0 };
+    if (copy_to_user(rgid, &ids[0], sizeof(int)) < 0) return -EFAULT;
+    if (copy_to_user(egid, &ids[1], sizeof(int)) < 0) return -EFAULT;
+    if (copy_to_user(sgid, &ids[2], sizeof(int)) < 0) return -EFAULT;
+    return 0;
+}
+
+int64_t sys_setfsuid(int uid) {
+    task_t *t = proc_current();
+    if (!t) return 0;
+    int old = t->fsuid;
+    if (uid >= 0 && (cred_is_root(t) || uid_is_current(t, uid)))
+        t->fsuid = uid;
+    return old;
+}
+
+int64_t sys_setfsgid(int gid) {
+    task_t *t = proc_current();
+    if (!t) return 0;
+    int old = t->fsgid;
+    if (gid >= 0 && (cred_is_root(t) || gid_is_current(t, gid)))
+        t->fsgid = gid;
+    return old;
+}
 
 int64_t sys_getpgid(int pid) {
     (void)pid;
@@ -79,8 +227,8 @@ int64_t sys_setsid(void) {
     return sys_getpid();
 }
 
-int64_t sys_clone(uint64_t flags, void *stack, int *ptid, int *ctid, uint64_t tls) {
-    return proc_clone(flags, (uint64_t)stack, ptid, ctid, tls);
+int64_t sys_clone(uint64_t flags, void *stack, int *ptid, uint64_t tls, int *ctid) {
+    return proc_clone(flags, (uint64_t)stack, ptid, tls, ctid);
 }
 
 int64_t sys_execve(const char *path, char **argv, char **envp) {
@@ -153,7 +301,7 @@ int64_t sys_waitid(int type, int id, void *info, int options, void *rusage) {
             ((int *)si)[1] = 0;          /* si_errno */
             ((int *)si)[2] = si_code;    /* si_code */
             ((int *)si)[3] = ret;        /* si_pid */
-            ((int *)si)[4] = 0;          /* si_uid */
+            ((int *)si)[4] = proc_current() ? proc_current()->uid : 0; /* si_uid */
             ((int *)si)[5] = si_status;  /* si_status */
         }
         if (copy_to_user(info, si, sizeof(si)) < 0) return -EFAULT;
@@ -195,16 +343,35 @@ int64_t sys_reboot(uint64_t magic1, uint64_t magic2, uint64_t cmd) {
 }
 
 int64_t sys_prctl(int op, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a1; (void)a2; (void)a3; (void)a4;
-    if (op == 15) {
+    task_t *t = proc_current();
+    if (op == PR_SET_NAME) {
         task_t *t = proc_current();
         if (t) {
             char name[64];
             if (user_strncpy(name, (const char *)a1, sizeof(name)) >= 0)
                 proc_set_name(t, name);
         }
+        return 0;
     }
-    return 0;
+    if (op == PR_CAPBSET_READ) {
+        if (!t || a1 >= 64) return -EINVAL;
+        return (t->cap_bounding & (1ULL << a1)) ? 1 : 0;
+    }
+    if (op == PR_CAPBSET_DROP) {
+        if (!t || a1 >= 64) return -EINVAL;
+        if (!(t->cap_effective & (1ULL << 8))) return -EPERM;
+        t->cap_bounding &= ~(1ULL << a1);
+        return 0;
+    }
+    if (op == PR_SET_THP_DISABLE) {
+        if (!t) return -ESRCH;
+        if (a1 > 1 || a2 || a3 || a4) return -EINVAL;
+        t->thp_disabled = (int)a1;
+        return 0;
+    }
+    if (op == PR_GET_THP_DISABLE)
+        return t ? t->thp_disabled : 0;
+    return -EINVAL;
 }
 
 int64_t sys_prlimit64(int pid, int resource, void *new_rlim, void *old_rlim) {

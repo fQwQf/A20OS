@@ -20,9 +20,14 @@ size_t frame_free_count(void);
 uint64_t *pt_create(void);
 void pt_destroy(uint64_t *pgdir);
 int pt_map(uint64_t *pgdir, vaddr_t va, paddr_t pa, uint64_t flags);
+int pt_map_huge(uint64_t *pgdir, vaddr_t va, paddr_t pa, uint64_t flags);
 int pt_unmap(uint64_t *pgdir, vaddr_t va);
+int pt_unmap_leaf(uint64_t *pgdir, vaddr_t va, paddr_t *pa_out,
+                  uint64_t *base_out, size_t *size_out, int *level_out);
 paddr_t pt_translate(uint64_t *pgdir, vaddr_t va);
 uint64_t *pt_walk(uint64_t *pgdir, vaddr_t va, int alloc);
+uint64_t *pt_lookup_leaf(uint64_t *pgdir, vaddr_t va, int *level_out,
+                         uint64_t *base_out, size_t *size_out);
 
 /* Per-process page table helpers */
 void pt_map_kernel(uint64_t *pgdir);
