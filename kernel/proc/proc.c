@@ -29,6 +29,7 @@
 #include "core/lock.h"
 #include "drv/virtio_blk.h"
 #include "net/lwip_stack.h"
+#include "sys/futex.h"
 
 static task_t proc_table[MAX_PROCS];  // 进程表
 static uint64_t *kernel_pgdir_shared;  // 共享的内核页表
@@ -38,20 +39,90 @@ static int sched_diag_count = 0;
 static int fork_diag_count = 0;
 
 #define SCHED_LEVELS 8
+#define PID_HASH_BITS 8
+#define PID_HASH_SIZE (1U << PID_HASH_BITS)
+
+#define CLONE_VM             0x00000100
+#define CLONE_VFORK          0x00004000
+#define CLONE_PARENT         0x00008000
+#define CLONE_THREAD         0x00010000
+#define CLONE_SETTLS         0x00080000
+#define CLONE_PARENT_SETTID  0x00100000
+#define CLONE_CHILD_CLEARTID 0x00200000
+#define CLONE_CHILD_SETTID   0x01000000
 
 static spinlock_t proc_lock = SPINLOCK_INIT;
 static task_t *runq_head[SCHED_LEVELS];
 static task_t *runq_tail[SCHED_LEVELS];
 static uint32_t runq_bitmap;
 static int next_pid = 1;  // 下一个可用的 PID
+static int pid_max = 32768;
+static task_t *pid_hash[PID_HASH_SIZE];
 
 /* Boot stack (for schedule back to idle) */
 static uint64_t g_idle_kstack;  // idle 进程的内核栈
+
+static void proc_destroy_task(task_t *t);
+static void proc_reparent_children(task_t *dead, task_t *reaper);
 
 static int sched_level_clamp(int level) {
     if (level < 0) return 0;
     if (level >= SCHED_LEVELS) return SCHED_LEVELS - 1;
     return level;
+}
+
+static unsigned pid_hash_index(int pid) {
+    return ((unsigned)pid) & (PID_HASH_SIZE - 1);
+}
+
+static void pid_hash_insert(task_t *t) {
+    if (!t) return;
+    unsigned h = pid_hash_index(t->pid);
+    t->pid_hash_next = pid_hash[h];
+    pid_hash[h] = t;
+}
+
+static void pid_hash_remove(task_t *t) {
+    if (!t) return;
+    unsigned h = pid_hash_index(t->pid);
+    task_t **pp = &pid_hash[h];
+    while (*pp) {
+        if (*pp == t) {
+            *pp = t->pid_hash_next;
+            t->pid_hash_next = NULL;
+            return;
+        }
+        pp = &(*pp)->pid_hash_next;
+    }
+}
+
+static int pid_in_use_locked(int pid) {
+    task_t *t = pid_hash[pid_hash_index(pid)];
+    while (t) {
+        if (t->pid == pid && t->state != PROC_UNUSED)
+            return 1;
+        t = t->pid_hash_next;
+    }
+    return 0;
+}
+
+static int proc_copy_to_task_user(task_t *task, void *dst, const void *src, size_t n)
+{
+    if (!task || !task->pgdir) return -EFAULT;
+    size_t done = 0;
+    while (done < n) {
+        vaddr_t va = (vaddr_t)(uintptr_t)dst + done;
+        paddr_t pa = pt_translate(task->pgdir, va);
+        if (!pa) return -EFAULT;
+        pfn_t pfn = phys_to_pfn(pa);
+        if (!pfn_valid(pfn)) return -EFAULT;
+        char *kv = (char *)pfn_to_virt(pfn) + (pa & (PAGE_SIZE - 1));
+        size_t chunk = PAGE_SIZE - (va & (PAGE_SIZE - 1));
+        if (chunk > n - done) chunk = n - done;
+        memcpy(kv, (const char *)src + done, chunk);
+        done += chunk;
+    }
+    return 0;
 }
 
 static void runq_enqueue_locked(task_t *t) {
@@ -93,24 +164,82 @@ static void runq_remove_locked(task_t *t) {
 }
 
 static task_t *runq_pick_locked(void) {
-    if (!runq_bitmap)
-        return NULL;
+    while (runq_bitmap) {
+        int q = 0;
+        while (q < SCHED_LEVELS && !(runq_bitmap & (1U << q)))
+            q++;
+        if (q >= SCHED_LEVELS)
+            return NULL;
 
-    int q = 0;
-    while (q < SCHED_LEVELS && !(runq_bitmap & (1U << q)))
-        q++;
-    if (q >= SCHED_LEVELS)
-        return NULL;
-    task_t *t = runq_head[q];
-    runq_remove_locked(t);
-    return t;
+        task_t *t = runq_head[q];
+        if (!t) {
+            runq_bitmap &= ~(1U << q);
+            continue;
+        }
+
+        runq_head[q] = t->rq_next;
+        if (t->rq_next)
+            t->rq_next->rq_prev = NULL;
+        else
+            runq_tail[q] = NULL;
+        if (!runq_head[q])
+            runq_bitmap &= ~(1U << q);
+
+        t->rq_next = NULL;
+        t->rq_prev = NULL;
+        t->on_rq = 0;
+
+        if (t->state == PROC_READY && t->kstack)
+            return t;
+    }
+    return NULL;
 }
 
 static int proc_alloc_pid(void) {
     uint64_t flags = spin_lock_irqsave(&proc_lock);
-    int pid = next_pid++;
+    int limit = pid_max > 0 ? pid_max : 1;
+    int pid = -EAGAIN;
+    for (int i = 0; i < limit; i++) {
+        if (next_pid < 1 || next_pid > limit)
+            next_pid = 1;
+        int candidate = next_pid++;
+        if (!pid_in_use_locked(candidate)) {
+            pid = candidate;
+            break;
+        }
+    }
     spin_unlock_irqrestore(&proc_lock, flags);
     return pid;
+}
+
+int proc_pid_max(void) {
+    return pid_max;
+}
+
+int proc_set_pid_max(int value) {
+    if (value < 1 || value > 4194304)
+        return -EINVAL;
+    uint64_t flags = spin_lock_irqsave(&proc_lock);
+    pid_max = value;
+    if (next_pid < 1 || next_pid > pid_max)
+        next_pid = 1;
+    spin_unlock_irqrestore(&proc_lock, flags);
+    return 0;
+}
+
+static void proc_register_pid(task_t *t) {
+    uint64_t flags = spin_lock_irqsave(&proc_lock);
+    pid_hash_insert(t);
+    spin_unlock_irqrestore(&proc_lock, flags);
+}
+
+static void proc_reap_detached_zombies(void) {
+    for (int i = 1; i < MAX_PROCS; i++) {
+        task_t *t = &proc_table[i];
+        if (t->state == PROC_ZOMBIE &&
+            (t->ppid == 0 || t->parent == &proc_table[0]))
+            proc_destroy_task(t);
+    }
 }
 
 void proc_make_ready(task_t *t) {
@@ -134,17 +263,6 @@ static int proc_ignores_sigchld(task_t *parent) {
     return ss->actions[SIGCHLD].sa_handler == SIG_IGN;
 }
 
-static void proc_reap_ignored_sigchld_children(void) {
-    for (int i = 1; i < MAX_PROCS; i++) {
-        task_t *child = &proc_table[i];
-        if (child == current_task || child->state != PROC_ZOMBIE)
-            continue;
-        task_t *parent = child->parent ? child->parent : proc_find(child->ppid);
-        if (proc_ignores_sigchld(parent))
-            proc_free_pid(child->pid);
-    }
-}
-
 // idle 进程的主循环，系统无任务时运行
 void idle_loop(void) {
     while (1) {
@@ -165,6 +283,7 @@ void proc_init(void) {
     memset(proc_table, 0, sizeof(proc_table));
     memset(runq_head, 0, sizeof(runq_head));
     memset(runq_tail, 0, sizeof(runq_tail));
+    memset(pid_hash, 0, sizeof(pid_hash));
     runq_bitmap = 0;
     spin_init(&proc_lock);
 
@@ -174,13 +293,31 @@ void proc_init(void) {
     idle->state  = PROC_RUNNING;
     idle->cwd[0] = '/';
     idle->cwd[1] = '\0';
+    idle->root_path[0] = '/';
+    idle->root_path[1] = '\0';
     idle->pgid   = 0;
     idle->sid    = 0;
     idle->umask  = 022;
+    idle->uid    = 0;
+    idle->euid   = 0;
+    idle->suid   = 0;
+    idle->fsuid  = 0;
+    idle->gid    = 0;
+    idle->egid   = 0;
+    idle->sgid   = 0;
+    idle->fsgid  = 0;
+    idle->ngroups = 0;
+    idle->cap_effective = ~(uint64_t)0;
+    idle->cap_permitted = ~(uint64_t)0;
+    idle->cap_inheritable = 0;
+    idle->cap_bounding = ~(uint64_t)0;
+    idle->oom_score_adj = 0;
+    idle->thp_disabled = 0;
     idle->rlim_stack = USER_STACK_MAX_SIZE;
     idle->rlim_nofile = MAX_FILES;
     idle->sched_level = SCHED_LEVELS - 1;
     proc_set_name(idle, "idle");
+    pid_hash_insert(idle);
 
     vfs_proc_init_fds(idle->fd_table);  // 初始化文件描述符
     idle->parent  = NULL;
@@ -224,9 +361,11 @@ task_t *proc_current(void) { return current_task; }
 
 // 根据 PID 查找进程
 task_t *proc_find(int pid) {
-    for (int i = 0; i < MAX_PROCS; i++) {
-        if (proc_table[i].state != PROC_UNUSED && proc_table[i].pid == pid)
-            return &proc_table[i];
+    task_t *t = pid_hash[pid_hash_index(pid)];
+    while (t) {
+        if (t->pid == pid && t->state != PROC_UNUSED)
+            return t;
+        t = t->pid_hash_next;
     }
     return NULL;
 }
@@ -235,6 +374,7 @@ task_t *proc_find(int pid) {
 
 // 分配一个空闲的任务槽
 static task_t *alloc_task_slot(void) {
+    proc_reap_detached_zombies();
     uint64_t flags = spin_lock_irqsave(&proc_lock);
     for (int i = 1; i < MAX_PROCS; i++) {
         if (proc_table[i].state == PROC_UNUSED) {
@@ -251,6 +391,7 @@ static task_t *alloc_task_slot(void) {
 // 初始化任务的公共字段
 static void init_task_common(task_t *t, task_t *parent) {
     t->ppid      = parent ? parent->pid : 0;
+    t->tgid      = parent ? parent->tgid : t->pid;
     t->state     = PROC_READY;
     t->parent    = parent;
     t->exit_code = 0;
@@ -260,10 +401,32 @@ static void init_task_common(task_t *t, task_t *parent) {
     t->rq_next   = NULL;
     t->rq_prev   = NULL;
     t->wake_time = 0;
+    t->alarm_expire = 0;
+    t->itimer_real_interval = 0;
+    memset(t->itimer_values, 0, sizeof(t->itimer_values));
     t->total_time = 0;
     t->pgid      = parent ? parent->pgid : t->pid;
     t->sid       = parent ? parent->sid  : t->pid;
     t->umask     = parent ? parent->umask : 022;
+    t->uid       = parent ? parent->uid : 0;
+    t->euid      = parent ? parent->euid : 0;
+    t->suid      = parent ? parent->suid : 0;
+    t->fsuid     = parent ? parent->fsuid : t->euid;
+    t->gid       = parent ? parent->gid : 0;
+    t->egid      = parent ? parent->egid : 0;
+    t->sgid      = parent ? parent->sgid : 0;
+    t->fsgid     = parent ? parent->fsgid : t->egid;
+    t->ngroups   = parent ? parent->ngroups : 0;
+    if (parent)
+        memcpy(t->groups, parent->groups, sizeof(t->groups));
+    t->cap_effective = parent ? parent->cap_effective : ~(uint64_t)0;
+    t->cap_permitted = parent ? parent->cap_permitted : ~(uint64_t)0;
+    t->cap_inheritable = parent ? parent->cap_inheritable : 0;
+    t->cap_bounding = parent ? parent->cap_bounding : ~(uint64_t)0;
+    t->oom_score_adj = parent ? parent->oom_score_adj : 0;
+    t->thp_disabled = parent ? parent->thp_disabled : 0;
+    t->clone_flags = 0;
+    t->clear_child_tid = NULL;
     t->rlim_stack = parent ? parent->rlim_stack : USER_STACK_MAX_SIZE;
     t->rlim_nofile = parent ? parent->rlim_nofile : MAX_FILES;
     t->mm        = NULL;
@@ -271,14 +434,20 @@ static void init_task_common(task_t *t, task_t *parent) {
     // 继承父进程的工作目录和执行路径
     if (parent) {
         memcpy(t->cwd, parent->cwd, MAX_PATH_LEN);
+        memcpy(t->root_path, parent->root_path, MAX_PATH_LEN);
         memcpy(t->exec_path, parent->exec_path, MAX_PATH_LEN);
     } else {
         t->cwd[0] = '/'; t->cwd[1] = '\0';
+        t->root_path[0] = '/'; t->root_path[1] = '\0';
         t->exec_path[0] = '\0';
     }
     if (t->cwd[0] == '\0') {
         t->cwd[0] = '/';
         t->cwd[1] = '\0';
+    }
+    if (t->root_path[0] == '\0') {
+        t->root_path[0] = '/';
+        t->root_path[1] = '\0';
     }
 
     // 处理文件描述符
@@ -310,19 +479,24 @@ int proc_alloc(void (*entry)(void)) {
     task_t *t = alloc_task_slot();
     if (!t) return -EAGAIN;
     t->pid = proc_alloc_pid();
+    if (t->pid < 0) {
+        proc_destroy_task(t);
+        return -EAGAIN;
+    }
     init_task_common(t, current_task);
+    proc_register_pid(t);
     vfs_proc_close_all_fds(t->fd_table);
     memset(t->fd_cloexec, 0, sizeof(t->fd_cloexec));
     vfs_proc_init_stdio_defaults(t->fd_table);
     t->cwd[0] = '/';
     t->cwd[1] = '\0';
+    t->root_path[0] = '/';
+    t->root_path[1] = '\0';
     proc_set_name(t, "kthread");
 
     void *stack = kmalloc(KERNEL_STACK_SIZE);
     if (!stack) {
-        vfs_proc_close_all_fds(t->fd_table);
-        if (t->signals) { kfree(t->signals); t->signals = NULL; }
-        t->state = PROC_UNUSED;
+        proc_destroy_task(t);
         return -ENOMEM;
     }
     memset(stack, 0, KERNEL_STACK_SIZE);
@@ -352,16 +526,19 @@ int proc_alloc_user_image(uint64_t entry, uint64_t sp, uint64_t *pgdir,
     task_t *t = alloc_task_slot();
     if (!t) return -EAGAIN;
     t->pid = proc_alloc_pid();
+    if (t->pid < 0) {
+        proc_destroy_task(t);
+        return -EAGAIN;
+    }
     init_task_common(t, current_task);
+    proc_register_pid(t);
     t->entry = entry;
     t->pgdir = pgdir;
     proc_set_name(t, "user");
 
     void *kstack = kmalloc(KERNEL_STACK_SIZE);
     if (!kstack) {
-        vfs_proc_close_all_fds(t->fd_table);
-        if (t->signals) { kfree(t->signals); t->signals = NULL; }
-        t->state = PROC_UNUSED;
+        proc_destroy_task(t);
         return -ENOMEM;
     }
     memset(kstack, 0, KERNEL_STACK_SIZE);
@@ -420,16 +597,27 @@ int proc_alloc_user(uint64_t entry, uint64_t sp, uint64_t *pgdir) {
  * Clone (fork)
  * ============================================================ */
 
-// 克隆当前进程（fork 系统调用的实现）
-int proc_clone(uint64_t flags, uint64_t stack, int *ptid, int *ctid, uint64_t tls) {
-    (void)flags;
-    (void)ptid; (void)ctid; (void)tls;
-
+// 克隆当前进程；支持 fork 路径和 pthread 常用的 CLONE_VM/TLS/TID 语义。
+int proc_clone(uint64_t flags, uint64_t stack, int *ptid, uint64_t tls, int *ctid) {
     task_t *parent = current_task;
     task_t *t = alloc_task_slot();
     if (!t) return -EAGAIN;
     t->pid = proc_alloc_pid();
+    if (t->pid < 0) {
+        proc_destroy_task(t);
+        return -EAGAIN;
+    }
     init_task_common(t, parent);
+    proc_register_pid(t);
+    if ((flags & CLONE_PARENT) && parent && parent->parent) {
+        t->parent = parent->parent;
+        t->ppid = parent->parent->pid;
+    }
+    if (flags & CLONE_THREAD)
+        t->tgid = parent ? parent->tgid : t->pid;
+    t->clone_flags = (int)flags;
+    if (flags & CLONE_CHILD_CLEARTID)
+        t->clear_child_tid = ctid;
     proc_set_name(t, parent->name);
     if (fork_diag_count < 128) {
         fork_diag_count++;
@@ -442,13 +630,14 @@ int proc_clone(uint64_t flags, uint64_t stack, int *ptid, int *ctid, uint64_t tl
     t->exec_load_size = parent->exec_load_size;
 
     if (parent->pgdir) {
-        if (parent->mm) {
+        if (parent->mm && (flags & CLONE_VM)) {
+            t->mm = parent->mm;
+            t->mm->refcount++;
+            t->pgdir = parent->pgdir;
+        } else if (parent->mm) {
             t->mm = mm_fork(parent->mm);
             if (!t->mm) {
-                vfs_proc_close_all_fds(t->fd_table);
-                memset(t->fd_cloexec, 0, sizeof(t->fd_cloexec));
-                if (t->signals) { kfree(t->signals); t->signals = NULL; }
-                t->state = PROC_UNUSED;
+                proc_destroy_task(t);
                 return -ENOMEM;
             }
             t->pgdir = t->mm->pgdir;
@@ -461,14 +650,8 @@ int proc_clone(uint64_t flags, uint64_t stack, int *ptid, int *ctid, uint64_t tl
 
     void *kstack = kmalloc(KERNEL_STACK_SIZE);
     if (!kstack) {
-        if (t->mm) { mm_destroy(t->mm); t->mm = NULL; t->pgdir = NULL; }
-        else if (t->pgdir && t->pgdir != kernel_pgdir_shared) { pt_destroy_user(t->pgdir); t->pgdir = NULL; }
-        for (int i = 0; i < MAX_FILES; i++) {
-            if (t->fd_table[i] >= 0) { vfs_close(t->fd_table[i]); t->fd_table[i] = -1; }
-            t->fd_cloexec[i] = 0;
-        }
-        if (t->signals) { kfree(t->signals); t->signals = NULL; }
-        t->state = PROC_UNUSED; return -ENOMEM;
+        proc_destroy_task(t);
+        return -ENOMEM;
     }
     memset(kstack, 0, KERNEL_STACK_SIZE);
     t->kstack_base = kstack;
@@ -485,6 +668,7 @@ int proc_clone(uint64_t flags, uint64_t stack, int *ptid, int *ctid, uint64_t tl
         t->trap_ctx = trap;
         t->ustack = stack ? stack : parent->ustack;
         if (stack) TRAP_CTX_SP(trap) = stack;
+        if (flags & CLONE_SETTLS) TRAP_CTX_TP(trap) = tls;
 
         task_context_t *ctx = (task_context_t *)((uint64_t)trap - sizeof(task_context_t));
         ctx->ra   = (uint64_t)user_trap_return;
@@ -500,7 +684,26 @@ int proc_clone(uint64_t flags, uint64_t stack, int *ptid, int *ctid, uint64_t tl
         t->kstack = (uint64_t)ctx;
     }
 
+    if ((flags & CLONE_PARENT_SETTID) && ptid) {
+        int child_tid = t->pid;
+        if (copy_to_user(ptid, &child_tid, sizeof(child_tid)) < 0) {
+            proc_free_pid(t->pid);
+            return -EFAULT;
+        }
+    }
+    if ((flags & CLONE_CHILD_SETTID) && ctid) {
+        int child_tid = t->pid;
+        if (proc_copy_to_task_user(t, ctid, &child_tid, sizeof(child_tid)) < 0) {
+            proc_free_pid(t->pid);
+            return -EFAULT;
+        }
+    }
+
     proc_make_ready(t);
+    if (flags & CLONE_VFORK) {
+        while (t->state != PROC_UNUSED && t->state != PROC_ZOMBIE)
+            proc_yield();
+    }
     return t->pid;
 }
 
@@ -513,6 +716,19 @@ int proc_exec(const char *path, char *const argv[], char *const envp[]) {
     task_t *t = current_task;
     int fd = vfs_open(path, O_RDONLY, 0);
     if (fd < 0) return fd;
+
+    kstat_t exec_st;
+    int exec_stat_ok = vfs_stat(path, &exec_st);
+    if (exec_stat_ok == 0 && (exec_st.st_mode & S_IFMT) == S_IFREG &&
+        !(exec_st.st_mode & 0111)) {
+        char magic[2];
+        int n = vfs_read(fd, magic, sizeof(magic));
+        vfs_lseek(fd, 0, SEEK_SET);
+        if (n < 2 || magic[0] != '#' || magic[1] != '!') {
+            vfs_close(fd);
+            return -EACCES;
+        }
+    }
 
     char abs_path[MAX_PATH_LEN];
     if (path[0] == '/') {
@@ -531,9 +747,11 @@ int proc_exec(const char *path, char *const argv[], char *const envp[]) {
     char *k_path = kmalloc(strlen(path) + 1);
     if (k_path) strcpy(k_path, path);
 
-    char *k_argv[32] = {0};
-    char *k_envp[32] = {0};
+    char *k_argv[MAX_ARG_STRINGS + 1] = {0};
+    char *k_envp[MAX_ARG_STRINGS + 1] = {0};
     int argc = 0, envc = 0;
+    size_t arg_bytes = 0;
+    int arg_error = 0;
 
     auto int is_kptr(const void *p) {
         return arch_is_kernel_address(p);
@@ -541,49 +759,92 @@ int proc_exec(const char *path, char *const argv[], char *const envp[]) {
 
     int argv_is_kernel = argv && is_kptr(argv);
     if (argv) {
-        while (argc < 31) {
+        while (argc < MAX_ARG_STRINGS) {
             char *arg;
             if (argv_is_kernel) {
                 arg = argv[argc];
             } else {
-                if (copy_from_user(&arg, &argv[argc], sizeof(char*)) < 0) break;
+                if (copy_from_user(&arg, &argv[argc], sizeof(char*)) < 0) { arg_error = -EFAULT; break; }
             }
             if (!arg) break;
-            k_argv[argc] = kmalloc(MAX_PATH_LEN);
-            if (!k_argv[argc]) break;
+            k_argv[argc] = kmalloc(MAX_ARG_STRLEN);
+            if (!k_argv[argc]) { arg_error = -ENOMEM; break; }
             if (argv_is_kernel) {
-                strncpy(k_argv[argc], arg, MAX_PATH_LEN - 1);
-                k_argv[argc][MAX_PATH_LEN - 1] = '\0';
-            } else {
-                if (user_strncpy(k_argv[argc], arg, MAX_PATH_LEN) < 0) {
-                    kfree(k_argv[argc]); k_argv[argc] = NULL; break;
+                size_t len = strlen(arg) + 1;
+                if (len > MAX_ARG_STRLEN) {
+                    kfree(k_argv[argc]); k_argv[argc] = NULL; arg_error = -E2BIG; break;
                 }
+                memcpy(k_argv[argc], arg, len);
+                arg_bytes += len;
+            } else {
+                long copied = user_strncpy(k_argv[argc], arg, MAX_ARG_STRLEN);
+                if (copied < 0) {
+                    kfree(k_argv[argc]); k_argv[argc] = NULL; arg_error = (int)copied; break;
+                }
+                if ((size_t)copied >= MAX_ARG_STRLEN - 1) {
+                    kfree(k_argv[argc]); k_argv[argc] = NULL; arg_error = -E2BIG; break;
+                }
+                arg_bytes += (size_t)copied + 1;
+            }
+            if (arg_bytes > MAX_ARG_BYTES || arg_bytes > (t ? t->rlim_stack / 4 : MAX_ARG_BYTES)) {
+                kfree(k_argv[argc]); k_argv[argc] = NULL; arg_error = -E2BIG; break;
             }
             argc++;
         }
+        if (!arg_error && argc == MAX_ARG_STRINGS) {
+            char *extra;
+            if (argv_is_kernel) extra = argv[argc];
+            else if (copy_from_user(&extra, &argv[argc], sizeof(char *)) < 0) extra = NULL;
+            if (extra) arg_error = -E2BIG;
+        }
     }
     int envp_is_kernel = envp && is_kptr(envp);
-    if (envp) {
-        while (envc < 31) {
+    if (!arg_error && envp) {
+        while (envc < MAX_ARG_STRINGS) {
             char *env;
             if (envp_is_kernel) {
                 env = envp[envc];
             } else {
-                if (copy_from_user(&env, &envp[envc], sizeof(char*)) < 0) break;
+                if (copy_from_user(&env, &envp[envc], sizeof(char*)) < 0) { arg_error = -EFAULT; break; }
             }
             if (!env) break;
-            k_envp[envc] = kmalloc(MAX_PATH_LEN);
-            if (!k_envp[envc]) break;
+            k_envp[envc] = kmalloc(MAX_ARG_STRLEN);
+            if (!k_envp[envc]) { arg_error = -ENOMEM; break; }
             if (envp_is_kernel) {
-                strncpy(k_envp[envc], env, MAX_PATH_LEN - 1);
-                k_envp[envc][MAX_PATH_LEN - 1] = '\0';
-            } else {
-                if (user_strncpy(k_envp[envc], env, MAX_PATH_LEN) < 0) {
-                    kfree(k_envp[envc]); k_envp[envc] = NULL; break;
+                size_t len = strlen(env) + 1;
+                if (len > MAX_ARG_STRLEN) {
+                    kfree(k_envp[envc]); k_envp[envc] = NULL; arg_error = -E2BIG; break;
                 }
+                memcpy(k_envp[envc], env, len);
+                arg_bytes += len;
+            } else {
+                long copied = user_strncpy(k_envp[envc], env, MAX_ARG_STRLEN);
+                if (copied < 0) {
+                    kfree(k_envp[envc]); k_envp[envc] = NULL; arg_error = (int)copied; break;
+                }
+                if ((size_t)copied >= MAX_ARG_STRLEN - 1) {
+                    kfree(k_envp[envc]); k_envp[envc] = NULL; arg_error = -E2BIG; break;
+                }
+                arg_bytes += (size_t)copied + 1;
+            }
+            if (arg_bytes > MAX_ARG_BYTES || arg_bytes > (t ? t->rlim_stack / 4 : MAX_ARG_BYTES)) {
+                kfree(k_envp[envc]); k_envp[envc] = NULL; arg_error = -E2BIG; break;
             }
             envc++;
         }
+        if (!arg_error && envc == MAX_ARG_STRINGS) {
+            char *extra;
+            if (envp_is_kernel) extra = envp[envc];
+            else if (copy_from_user(&extra, &envp[envc], sizeof(char *)) < 0) extra = NULL;
+            if (extra) arg_error = -E2BIG;
+        }
+    }
+    if (arg_error) {
+        vfs_close(fd);
+        for (int i = 0; i < argc; i++) kfree(k_argv[i]);
+        for (int i = 0; i < envc; i++) kfree(k_envp[i]);
+        kfree(k_path);
+        return arg_error;
     }
 
     elf_load_info_t info;
@@ -766,13 +1027,23 @@ int proc_exec(const char *path, char *const argv[], char *const envp[]) {
  * ============================================================ */
 
 // 释放指定 PID 的进程资源
-void proc_free_pid(int pid) {
-    task_t *t = proc_find(pid);
+static void proc_destroy_task(task_t *t) {
     if (!t) return;
+
+    vfs_release_process_locks(t->pid);
 
     uint64_t flags = spin_lock_irqsave(&proc_lock);
     runq_remove_locked(t);
+    pid_hash_remove(t);
     spin_unlock_irqrestore(&proc_lock, flags);
+
+    for (int i = 0; i < MAX_FILES; i++) {
+        if (t->fd_table[i] >= 0) {
+            vfs_close(t->fd_table[i]);
+            t->fd_table[i] = -1;
+        }
+        t->fd_cloexec[i] = 0;
+    }
 
     if (t->mm) {
         mm_destroy(t->mm);
@@ -791,6 +1062,33 @@ void proc_free_pid(int pid) {
     memset(t, 0, sizeof(*t));
 }
 
+void proc_free_pid(int pid) {
+    task_t *t = proc_find(pid);
+    if (!t) return;
+    proc_destroy_task(t);
+}
+
+static void proc_reparent_children(task_t *dead, task_t *reaper) {
+    if (!dead) return;
+    if (!reaper || reaper == dead) reaper = &proc_table[0];
+    int wake_reaper = 0;
+    for (int i = 1; i < MAX_PROCS; i++) {
+        task_t *child = &proc_table[i];
+        if (child->state == PROC_UNUSED || child->ppid != dead->pid)
+            continue;
+        if (reaper == &proc_table[0] && child->state == PROC_ZOMBIE) {
+            proc_destroy_task(child);
+            continue;
+        }
+        child->ppid = reaper->pid;
+        child->parent = reaper;
+        if (child->state == PROC_ZOMBIE)
+            wake_reaper = 1;
+    }
+    if (wake_reaper && reaper->state == PROC_BLOCKED)
+        proc_make_ready(reaper);
+}
+
 // 进程退出（exit 系统调用的实现）
 // SIGCHLD
 void proc_exit(int exit_code) {
@@ -801,6 +1099,13 @@ void proc_exit(int exit_code) {
         kdebug("[WAITDBG] exit pid=%d ppid=%d code=%d state=%d\n",
               t->pid, t->ppid, exit_code, t->state);
     }
+    if (t->clear_child_tid) {
+        int zero = 0;
+        if (copy_to_user(t->clear_child_tid, &zero, sizeof(zero)) == 0)
+            futex_wake_user(t->clear_child_tid, 1);
+        t->clear_child_tid = NULL;
+    }
+    vfs_release_process_locks(t->pid);
     /* Close all file descriptors */
     for (int i = 0; i < MAX_FILES; i++) {
         if (t->fd_table[i] >= 0) {
@@ -810,15 +1115,8 @@ void proc_exit(int exit_code) {
         t->fd_cloexec[i] = 0;
     }
 
-    /* Re-parent orphaned children to init (pid 1) or idle */
     task_t *reaper = proc_find(1);
-    if (!reaper || reaper == t) reaper = &proc_table[0];
-    for (int i = 0; i < MAX_PROCS; i++) {
-        if (proc_table[i].ppid == t->pid && proc_table[i].state != PROC_UNUSED) {
-            proc_table[i].ppid   = reaper->pid;
-            proc_table[i].parent = reaper;
-        }
-    }
+    proc_reparent_children(t, reaper);
 
     t->exit_code = exit_code;
     __atomic_thread_fence(__ATOMIC_RELEASE);
@@ -840,6 +1138,64 @@ void proc_exit(int exit_code) {
 
     sched();
     panic("proc_exit: sched returned");
+}
+
+void proc_force_exit(task_t *t, int exit_code) {
+    if (!t || t->state == PROC_UNUSED || t->state == PROC_ZOMBIE)
+        return;
+    if (t == current_task)
+        proc_exit(exit_code);
+
+    if (t->clear_child_tid) {
+        int zero = 0;
+        task_t *saved = current_task;
+        current_task = t;
+        if (copy_to_user(t->clear_child_tid, &zero, sizeof(zero)) == 0)
+            futex_wake_user(t->clear_child_tid, 1);
+        current_task = saved;
+        t->clear_child_tid = NULL;
+    }
+
+    vfs_release_process_locks(t->pid);
+
+    for (int i = 0; i < MAX_FILES; i++) {
+        if (t->fd_table[i] >= 0) {
+            vfs_close(t->fd_table[i]);
+            t->fd_table[i] = -1;
+        }
+        t->fd_cloexec[i] = 0;
+    }
+
+    task_t *reaper = proc_find(1);
+    proc_reparent_children(t, reaper);
+
+    t->exit_code = exit_code;
+    __atomic_thread_fence(__ATOMIC_RELEASE);
+    uint64_t flags = spin_lock_irqsave(&proc_lock);
+    runq_remove_locked(t);
+    spin_unlock_irqrestore(&proc_lock, flags);
+    t->state = PROC_ZOMBIE;
+
+    if (t->parent && t->parent->state == PROC_BLOCKED)
+        proc_make_ready(t->parent);
+    if (t->parent && !proc_ignores_sigchld(t->parent))
+        signal_send(t->parent->pid, SIGCHLD);
+}
+
+void proc_exit_group(int exit_code) {
+    task_t *self = current_task;
+    if (!self)
+        proc_exit(exit_code);
+
+    mm_struct_t *mm = self->mm;
+    for (int i = 1; i < MAX_PROCS; i++) {
+        task_t *t = &proc_table[i];
+        if (t == self || t->state == PROC_UNUSED || t->state == PROC_ZOMBIE)
+            continue;
+        if (mm && t->mm == mm)
+            proc_force_exit(t, exit_code);
+    }
+    proc_exit(exit_code);
 }
 
 /* ============================================================
@@ -876,7 +1232,7 @@ retry:;
                 if (code >= 0)
                     *status = (code & 0xFF) << 8;
                 else
-                    *status = (-code) & 0x7F;
+                    *status = (-code) & 0xFF;
             }
             int child_pid = child->pid;
             if (wait_diag_count < 128) {
@@ -937,7 +1293,7 @@ retry:;
                 if (code >= 0)
                     *status = (code & 0xFF) << 8;
                 else
-                    *status = (-code) & 0x7F;
+                    *status = (-code) & 0xFF;
             }
             int child_pid = child->pid;
             if (wait_diag_count < 128) {
@@ -996,14 +1352,19 @@ int proc_kill_pgid(int pgid, int signum, int skip_self) {
 
 // 上下文切换到指定任务
 void context_switch(task_t *next) {
+    if (!next || !next->kstack)
+        return;
     if (next == current_task) {
         next->state = PROC_RUNNING;
         next->on_rq = 0;
         return;
     }
+    task_t *prev = current_task;
     current_task = next;
     next->state  = PROC_RUNNING;
     next->on_rq  = 0;
+    if (prev)
+        arch_set_task_pointer(prev);
     __switch(next->kstack);
 }
 
@@ -1011,12 +1372,17 @@ void context_switch(task_t *next) {
 void sched(void) {
     uint64_t now = timer_get_ticks();
 
-    proc_reap_ignored_sigchld_children();
     virtio_blk_poll_all();
     a20_lwip_poll();
 
     /* Wake up sleeping processes */
     for (int i = 0; i < MAX_PROCS; i++) {
+        if (proc_table[i].state != PROC_UNUSED && proc_table[i].alarm_expire > 0
+            && now >= proc_table[i].alarm_expire) {
+            uint64_t interval = proc_table[i].itimer_real_interval;
+            proc_table[i].alarm_expire = interval ? now + interval : 0;
+            signal_send(proc_table[i].pid, SIGALRM);
+        }
         if (proc_table[i].state == PROC_BLOCKED && proc_table[i].wake_time > 0
             && now >= proc_table[i].wake_time) {
             if (sched_diag_count < 128) {
