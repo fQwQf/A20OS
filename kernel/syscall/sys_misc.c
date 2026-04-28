@@ -8,8 +8,8 @@ int64_t sys_uname(void *buf) {
     memset(&u, 0, sizeof(u));
     strcpy(u.s, "A20OS");
     strcpy(u.n, "AAAAAAAAAAAAAAAAAAAA");
-    strcpy(u.r, VERSION);
-    strcpy(u.v, "A20OS version " VERSION);
+    strcpy(u.r, "6.8.0");
+    strcpy(u.v, "A20OS version " VERSION " (Linux 6.8.0 compatible)");
     strcpy(u.m, ARCH_NAME);
     if (copy_to_user(buf, &u, sizeof(u)) < 0) return -EFAULT;
     return 0;
@@ -26,12 +26,32 @@ int64_t sys_sysinfo(void *info) {
 }
 
 int64_t sys_getgroups(int size, int *list) {
-    (void)size; (void)list;
-    return 0;
+    task_t *t = proc_current();
+    int n = t ? t->ngroups : 0;
+    if (size < 0) return -EINVAL;
+    if (size == 0) return n;
+    if (!list) return -EFAULT;
+    if (size < n) return -EINVAL;
+    if (n > 0 && copy_to_user(list, t->groups, (size_t)n * sizeof(int)) < 0)
+        return -EFAULT;
+    return n;
 }
 
 int64_t sys_setgroups(size_t size, const int *list) {
-    (void)size; (void)list;
+    task_t *t = proc_current();
+    if (!t) return -EINVAL;
+    if (t->euid != 0) return -EPERM;
+    if (size > MAX_GROUPS) return -EINVAL;
+    if (size && !list) return -EFAULT;
+    int tmp[MAX_GROUPS];
+    if (size && copy_from_user(tmp, list, size * sizeof(int)) < 0)
+        return -EFAULT;
+    for (size_t i = 0; i < size; i++) {
+        if (tmp[i] < 0) return -EINVAL;
+    }
+    for (size_t i = 0; i < size; i++)
+        t->groups[i] = tmp[i];
+    t->ngroups = (int)size;
     return 0;
 }
 
@@ -64,20 +84,4 @@ int64_t sys_getrandom(void *buf, size_t len, int flags) {
         done += chunk;
     }
     return (int64_t)len;
-}
-
-int64_t sys_futex(int *uaddr, int op, int val, void *timeout, int *uaddr2, int val3) {
-    (void)timeout; (void)uaddr2; (void)val3;
-    if (!uaddr) return -EFAULT;
-    int opc = op & 0x7F;
-    if (opc == 0 || opc == 9) {
-        int uval;
-        if (copy_from_user(&uval, uaddr, sizeof(int)) < 0) return -EFAULT;
-        if (uval != val) return -EAGAIN;
-        proc_yield();
-        return 0;
-    } else if (opc == 1 || opc == 10) {
-        return 1;
-    }
-    return -ENOSYS;
 }
