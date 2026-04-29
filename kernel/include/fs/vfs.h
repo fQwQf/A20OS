@@ -3,6 +3,7 @@
 
 #include "core/types.h"
 #include "core/consts.h"
+#include "core/refcount.h"
 
 /* ============================================================
  * VFS — Virtual Filesystem Switch
@@ -87,6 +88,8 @@ typedef struct vnode_ops {
     int     (*readlink)(struct vnode *vn, char *buf, size_t sz);
     int     (*stat)(struct vnode *vn, kstat_t *st);
     int     (*truncate)(struct vnode *vn, size_t size);
+    int     (*writepage)(struct vnode *vn, uint64_t index,
+                         const void *data, size_t len);
     int     (*chmod)(struct vnode *vn, int mode);
     int     (*chown)(struct vnode *vn, int uid, int gid);
     void    (*release)(struct vnode *vn);
@@ -102,8 +105,14 @@ typedef struct vfile_ops {
     int     (*close)(struct vfile *vf);
 } vfile_ops_t;
 
-/* ---- Vnode (in-memory inode) ---- */
-
+/*
+ * vnode lifetime:
+ * - A vnode reference keeps the in-memory inode alive.
+ * - Filesystems return referenced vnodes to VFS callers.
+ * - dcache entries hold references and must release them on invalidation.
+ * - Direct ref_count edits are legacy; new code should use vnode_put() and a
+ *   future vnode_get()/refcount_t wrapper.
+ */
 typedef struct vnode {
     uint64_t        ino;            /* inode number */
     int             type;           /* VFS_FT_* */
@@ -111,19 +120,26 @@ typedef struct vnode {
     uint32_t        uid;
     uint32_t        gid;
     size_t          size;
-    int             ref_count;
+    refcount_t      ref_count;
     struct vnode   *parent;
     struct mount   *mnt;            /* which mount owns this */
     void           *fs_data;        /* fs-private data */
     vnode_ops_t    *ops;
 } vnode_t;
 
-/* ---- Open file ---- */
+/*
+ * vfile lifetime:
+ * - vfile objects represent global open-file entries; process fds point to
+ *   them through fdtable mappings.
+ * - ref_count accounts for fdtable references and temporary kernel users.
+ * - Direct ref_count edits are legacy; new code should move toward
+ *   file_get()/file_put() style APIs.
+ */
 typedef struct vfile {
     vnode_t        *vnode;
     int             flags;
     size_t          offset;
-    int             ref_count;
+    refcount_t      ref_count;
     int             owner_type;
     int             owner_pid;
     int             owner_signal;
@@ -146,14 +162,14 @@ typedef struct mount {
 /* ---- Open file table (global) ---- */
 #define VFS_MAX_OPEN   8192
 
-/* ---- a20_dirent64 (for getdents64 syscall) ---- */
-typedef struct a20_dirent64 {
+/* ---- Kernel directory entry wire format used by VFS readdir callbacks. ---- */
+typedef struct vfs_dirent64 {
     uint64_t d_ino;
     int64_t  d_off;
     uint16_t d_reclen;
     uint8_t  d_type;
     char     d_name[1];           /* variable length */
-} __attribute__((packed)) a20_dirent64_t;
+} __attribute__((packed)) vfs_dirent64_t;
 
 /* ============================================================
  * VFS API
@@ -162,6 +178,9 @@ typedef struct a20_dirent64 {
 void     vfs_init(void);
 
 /* Path resolution */
+void     vnode_ref_init(vnode_t *vn, int refs);
+void     vnode_get(vnode_t *vn);
+int      vnode_ref_read(vnode_t *vn);
 void     vnode_put(vnode_t *vn);
 vnode_t *vfs_resolve(const char *path);
 vnode_t *vfs_resolve_at(const char *path, const char *cwd);
@@ -171,6 +190,9 @@ int      vfs_open(const char *path, int flags, int mode);
 int      vfs_close(int fd);
 int      vfs_read(int fd, char *buf, size_t count);
 int      vfs_write(int fd, const char *buf, size_t count);
+int      vfs_read_file(vfile_t *vf, char *buf, size_t count);
+int      vfs_write_file(vfile_t *vf, const char *buf, size_t count);
+int      vfs_pread(int fd, char *buf, size_t count, uint64_t offset);
 long     vfs_lseek(int fd, long offset, int whence);
 int      vfs_getdents64(int fd, void *dirp, size_t count);
 int      vfs_ioctl(int fd, unsigned long req, void *arg);
@@ -211,6 +233,9 @@ int      vfs_pipe(int pipefd[2]);
 
 /* file table access (for dup/dup3) */
 vfile_t *vfs_get_file(int fd);
+vfile_t *vfs_get_file_ref(int fd);
+void     vfs_put_file_ref(int fd, vfile_t *vf);
+int      vfs_ref_fd(int fd);
 int      vfs_alloc_fd(vfile_t *vf);
 int      vfs_dup(int fd);
 int      vfs_dup3(int oldfd, int newfd, int flags);
@@ -221,11 +246,5 @@ void     vfs_release_process_locks(int pid);
 /* Truncate */
 int      vfs_truncate(const char *path, size_t size);
 int      vfs_ftruncate(int fd, size_t size);
-
-/* Per-process fd table management */
-void     vfs_proc_init_fds(int *fd_table);
-void     vfs_proc_init_stdio_defaults(int *fd_table);
-void     vfs_proc_copy_fds(const int *src, int *dst);
-void     vfs_proc_close_all_fds(int *fd_table);
 
 #endif /* _VFS_H */
