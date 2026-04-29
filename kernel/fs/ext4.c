@@ -1,4 +1,5 @@
 #include "fs/ext4.h"
+#include "fs/file.h"
 #include "fs/vfs.h"
 #include "fs/block_cache.h"
 #include "mm/mm.h"
@@ -17,6 +18,8 @@ static int      ext4_block_grow(ext4_sb_info_t *sb, ext4_inode_t *inode, uint32_
 static void     ext4_block_truncate(ext4_sb_info_t *sb, ext4_inode_t *inode);
 static vnode_t *ext4_make_vnode(ext4_sb_info_t *sb, uint32_t ino, uint32_t sz, int type, vnode_t *par);
 static int      ext4_inode_remove(ext4_sb_info_t *sb, uint32_t dir_ino, ext4_inode_t *di, const char *name, uint32_t ino);
+static int      ext4_vn_writepage(vnode_t *vn, uint64_t index,
+                                  const void *data, size_t len);
 
 /* ================================================================
  * Vnode lifecycle
@@ -664,15 +667,15 @@ static int ext4_lookup(vnode_t *dir, const char *name, vnode_t **out) {
     ext4_vnode_priv_t *p = (ext4_vnode_priv_t *)dir->fs_data;
     if (p->type != VFS_FT_DIR) return -ENOTDIR;
 
-    if (strcmp(name, ".") == 0)  { *out = dir; dir->ref_count++; return 0; }
+    if (strcmp(name, ".") == 0)  { *out = dir; vnode_get(dir); return 0; }
     if (strcmp(name, "..") == 0) {
         if (dir->parent) {
             *out = dir->parent;
-            dir->parent->ref_count++;
-            dir->ref_count++;          /* vnode_lookup_path will vnode_put(dir) */
+            vnode_get(dir->parent);
+            vnode_get(dir);          /* vnode_lookup_path will vnode_put(dir) */
             return 0;
         }
-        *out = dir; dir->ref_count++; return 0;
+        *out = dir; vnode_get(dir); return 0;
     }
 
     ext4_inode_t di;
@@ -744,8 +747,8 @@ static int ext4_vn_create(vnode_t *dir, const char *name, int mode, vnode_t **ou
     memset(&ni, 0, sizeof(ni));
     task_t *cur = proc_current();
     ni.i_mode = S_IFREG | (mode & 07777);
-    ni.i_uid = cur ? (uint16_t)cur->fsuid : 0;
-    ni.i_gid = (di.i_mode & S_ISGID) ? di.i_gid : (cur ? (uint16_t)cur->fsgid : 0);
+    ni.i_uid = cur ? (uint16_t)cur->cred.fsuid : 0;
+    ni.i_gid = (di.i_mode & S_ISGID) ? di.i_gid : (cur ? (uint16_t)cur->cred.fsgid : 0);
     ni.i_links_count = 1;
     ext4_write_inode(p->sb, new_ino, &ni);
 
@@ -795,8 +798,8 @@ static int ext4_vn_mkdir(vnode_t *dir, const char *name, int mode) {
     ni.i_mode = S_IFDIR | (mode & 07777);
     if (di.i_mode & S_ISGID)
         ni.i_mode |= S_ISGID;
-    ni.i_uid = cur ? (uint16_t)cur->fsuid : 0;
-    ni.i_gid = (di.i_mode & S_ISGID) ? di.i_gid : (cur ? (uint16_t)cur->fsgid : 0);
+    ni.i_uid = cur ? (uint16_t)cur->cred.fsuid : 0;
+    ni.i_gid = (di.i_mode & S_ISGID) ? di.i_gid : (cur ? (uint16_t)cur->cred.fsgid : 0);
     ni.i_size_lo = p->sb->block_size;
     ni.i_links_count = 2; /* . and .. */
     ni.i_flags |= EXT4_EXTENTS_FL;
@@ -993,8 +996,8 @@ static int ext4_vn_symlink(vnode_t *dir, const char *name, const char *target) {
     memset(&ni, 0, sizeof(ni));
     ni.i_mode = S_IFLNK | 0777;
     task_t *cur = proc_current();
-    ni.i_uid = cur ? (uint16_t)cur->fsuid : 0;
-    ni.i_gid = (di.i_mode & S_ISGID) ? di.i_gid : (cur ? (uint16_t)cur->fsgid : 0);
+    ni.i_uid = cur ? (uint16_t)cur->cred.fsuid : 0;
+    ni.i_gid = (di.i_mode & S_ISGID) ? di.i_gid : (cur ? (uint16_t)cur->cred.fsgid : 0);
     ni.i_links_count = 1;
     ni.i_size_lo = (uint32_t)tlen;
     memcpy(ni.i_block.i_data.i_block, target, tlen);
@@ -1072,6 +1075,7 @@ static vnode_ops_t g_ext4_vnode_ops = {
     .readlink = ext4_readlink,
     .stat     = ext4_stat,
     .truncate = ext4_vn_truncate,
+    .writepage = ext4_vn_writepage,
     .chmod    = ext4_vn_chmod,
     .chown    = ext4_vn_chown,
     .release  = ext4_release_vn,
@@ -1094,19 +1098,30 @@ static void ext4_fctx_refresh_size(vfile_t *vf, ext4_fctx_t *fc) {
     }
 }
 
+static void ext4_fctx_set_size(vfile_t *vf, ext4_fctx_t *fc, uint32_t size) {
+    fc->file_size = size;
+    if (vf->vnode) {
+        vf->vnode->size = fc->file_size;
+        if (vf->vnode->fs_data) {
+            ext4_vnode_priv_t *fp = (ext4_vnode_priv_t *)vf->vnode->fs_data;
+            fp->file_size = fc->file_size;
+        }
+    }
+}
+
 static int ext4_fread(vfile_t *vf, char *buf, size_t count) {
     ext4_fctx_t *fc = (ext4_fctx_t *)vf->priv;
     if (fc->is_dir) return -EISDIR;
     if (count == 0) return 0;
-    ext4_fctx_refresh_size(vf, fc);
+
+    ext4_inode_t inode;
+    if (ext4_read_inode(fc->sb, fc->inode_num, &inode) < 0) return -EIO;
+    ext4_fctx_set_size(vf, fc, inode.i_size_lo);
     if (fc->file_off >= fc->file_size) return 0;
 
     size_t remaining = fc->file_size - fc->file_off;
     if (count > remaining) count = remaining;
     if (count == 0) return 0;
-
-    ext4_inode_t inode;
-    if (ext4_read_inode(fc->sb, fc->inode_num, &inode) < 0) return -EIO;
 
     uint32_t bs = fc->sb->block_size;
     size_t done = 0;
@@ -1137,10 +1152,10 @@ static int ext4_fwrite(vfile_t *vf, const char *buf, size_t count) {
     ext4_fctx_t *fc = (ext4_fctx_t *)vf->priv;
     if (fc->is_dir) return -EISDIR;
     if (count == 0) return 0;
-    ext4_fctx_refresh_size(vf, fc);
 
     ext4_inode_t inode;
     if (ext4_read_inode(fc->sb, fc->inode_num, &inode) < 0) return -EIO;
+    ext4_fctx_set_size(vf, fc, inode.i_size_lo);
 
     uint32_t bs = fc->sb->block_size;
     size_t done = 0;
@@ -1182,6 +1197,43 @@ static int ext4_fwrite(vfile_t *vf, const char *buf, size_t count) {
         vf->offset = fc->file_off;
     }
     return (int)done;
+}
+
+static int ext4_vn_writepage(vnode_t *vn, uint64_t index,
+                             const void *data, size_t len)
+{
+    if (!vn || !vn->fs_data || !data)
+        return -EINVAL;
+    ext4_vnode_priv_t *fp = (ext4_vnode_priv_t *)vn->fs_data;
+    if (fp->type == VFS_FT_DIR)
+        return -EISDIR;
+
+    uint64_t off = index * PAGE_SIZE;
+    if (off >= fp->file_size)
+        return 0;
+    size_t n = fp->file_size - (size_t)off;
+    if (n > len)
+        n = len;
+
+    ext4_fctx_t fc;
+    memset(&fc, 0, sizeof(fc));
+    fc.sb = fp->sb;
+    fc.inode_num = fp->inode_num;
+    fc.file_size = fp->file_size;
+    fc.is_dir = (fp->type == VFS_FT_DIR);
+    fc.file_off = (size_t)off;
+
+    vfile_t vf;
+    memset(&vf, 0, sizeof(vf));
+    vf.vnode = vn;
+    vf.flags = O_RDWR;
+    vf.offset = (size_t)off;
+    vf.priv = &fc;
+
+    int r = ext4_fwrite(&vf, (const char *)data, n);
+    if (r < 0)
+        return r;
+    return (size_t)r == n ? 0 : -EIO;
 }
 
 static long ext4_flseek(vfile_t *vf, long offset, int whence) {
@@ -1232,11 +1284,11 @@ static int ext4_freaddir(vfile_t *vf, void *dirp, size_t count) {
             memcpy(fname, de->name, nl);
             fname[nl] = '\0';
 
-            size_t reclen = offsetof(a20_dirent64_t, d_name) + nl + 1;
+            size_t reclen = offsetof(vfs_dirent64_t, d_name) + nl + 1;
             reclen = (reclen + 7) & ~7UL;
             if (total + reclen > count) { kfree(blk); goto out; }
 
-            a20_dirent64_t *dent = (a20_dirent64_t *)(out + total);
+            vfs_dirent64_t *dent = (vfs_dirent64_t *)(out + total);
             dent->d_ino    = de->inode;
             dent->d_off    = (int64_t)(b * bs + off);
             dent->d_reclen = (uint16_t)reclen;
@@ -1298,9 +1350,9 @@ static vnode_t *ext4_make_vnode(ext4_sb_info_t *sb, uint32_t ino, uint32_t sz,
         vn->mode = S_IFREG | 0755;
     }
     vn->size      = sz;
-    vn->ref_count = 1;            /* 1 for the caller */
+    vnode_ref_init(vn, 1);            /* 1 for the caller */
     vn->parent    = parent;
-    if (parent) parent->ref_count++;
+    if (parent) vnode_get(parent);
     vn->ops       = &g_ext4_vnode_ops;
 
     ext4_vnode_priv_t *fp = (ext4_vnode_priv_t *)kmalloc(sizeof(ext4_vnode_priv_t));
@@ -1441,14 +1493,13 @@ vfile_t *ext4_open_vnode(vnode_t *vn, int flags) {
     fc->file_off  = (flags & O_APPEND) ? current_size : 0;
     fc->dir_off   = 0;
 
-    vfile_t *vf = (vfile_t *)kmalloc(sizeof(vfile_t));
+    vfile_t *vf = vfile_alloc();
     if (!vf) { kfree(fc); return NULL; }
-    memset(vf, 0, sizeof(*vf));
     vf->vnode     = vn;
-    vn->ref_count++;
+    vnode_get(vn);
     vf->flags     = flags;
     vf->offset    = fc->file_off;
-    vf->ref_count = 1;
+    refcount_set(&vf->ref_count, 1);
     vf->ops       = &g_ext4_fops;
     vf->priv      = fc;
     return vf;

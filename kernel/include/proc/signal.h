@@ -22,6 +22,8 @@ typedef struct sigaction {
 #define SIG_DFL  ((uintptr_t)0)
 #define SIG_IGN  ((uintptr_t)1)
 
+#define SA_NOCLDWAIT 2
+
 /* Per-process signal state */
 typedef struct signal_state {
     sigaction_t actions[NSIG];
