@@ -2,6 +2,7 @@
 #include "mm/mm.h"
 #include "mm/frame.h"
 #include "mm/slab.h"
+#include "fs/vfs.h"
 #include "core/string.h"
 #include "core/panic.h"
 #include "core/klog.h"
@@ -19,6 +20,35 @@ static uint64_t mm_cow_flags(uint64_t pte) {
 
 static inline size_t vm_pt_level_size(int level) {
     return PAGE_SIZE << (ARCH_PT_BITS * level);
+}
+
+static void vma_release_file(vm_area_t *vma)
+{
+    if (vma && (vma->vm_flags & VM_FILE) && vma->file_fd >= 0) {
+        vfs_close(vma->file_fd);
+        vma->file_fd = -1;
+    }
+}
+
+static int vma_ref_file(vm_area_t *vma)
+{
+    if (!vma || !(vma->vm_flags & VM_FILE) || vma->file_fd < 0)
+        return 0;
+    return vfs_ref_fd(vma->file_fd);
+}
+
+static int vma_can_merge(vm_area_t *a, vm_area_t *b)
+{
+    if (!a || !b || a->end != b->start)
+        return 0;
+    if (a->vm_flags != b->vm_flags || a->pte_flags != b->pte_flags)
+        return 0;
+    if ((a->vm_flags | b->vm_flags) & VM_FILE) {
+        if (a->file_fd != b->file_fd)
+            return 0;
+        return a->file_offset + (a->end - a->start) == b->file_offset;
+    }
+    return 1;
 }
 
 int mm_demote_huge_page(mm_struct_t *mm, uint64_t addr) {
@@ -231,7 +261,7 @@ mm_struct_t *mm_create(void) {
     mm->stack_bottom = 0;
     mm->total_vm   = 0;
     mm->rss        = 0;
-    mm->refcount   = 1;
+    refcount_set(&mm->refcount, 1);
     return mm;
 }
 
@@ -254,13 +284,14 @@ static void free_vma_pages(mm_struct_t *mm, vm_area_t *vma) {
 // 销毁内存描述符及其所有资源
 void mm_destroy(mm_struct_t *mm) {
     if (!mm) return;
-    if (--mm->refcount > 0) return;  // 引用计数归零才真正销毁
+    if (!refcount_dec_and_test(&mm->refcount)) return;
 
     // 释放所有 VMA 及其物理页面
     vm_area_t *vma = mm->mmap;
     while (vma) {
         free_vma_pages(mm, vma);
         vm_area_t *next = vma->next;
+        vma_release_file(vma);
         kfree(vma);
         vma = next;
     }
@@ -315,23 +346,21 @@ void mm_insert_vma(mm_struct_t *mm, vm_area_t *newv) {
     *pp = newv;
 
     // 尝试与后一个 VMA 合并
-    if (newv->next && newv->end == newv->next->start &&
-        newv->vm_flags == newv->next->vm_flags &&
-        newv->pte_flags == newv->next->pte_flags) {
+    if (vma_can_merge(newv, newv->next)) {
         vm_area_t *nxt = newv->next;
         newv->end = nxt->end;
         newv->next = nxt->next;
         if (nxt->next) nxt->next->prev = newv;
+        vma_release_file(nxt);
         kfree(nxt);
     }
     // 尝试与前一个 VMA 合并
-    if (newv->prev && newv->prev->end == newv->start &&
-        newv->prev->vm_flags == newv->vm_flags &&
-        newv->prev->pte_flags == newv->pte_flags) {
+    if (vma_can_merge(newv->prev, newv)) {
         vm_area_t *prv = newv->prev;
         prv->end = newv->end;
         prv->next = newv->next;
         if (newv->next) newv->next->prev = prv;
+        vma_release_file(newv);
         kfree(newv);
     }
 }
@@ -347,6 +376,12 @@ static int mm_split_vma_at(mm_struct_t *mm, uint64_t addr) {
 
     *tail = *v;
     tail->start = addr;
+    tail->file_offset += addr - v->start;
+    int fr = vma_ref_file(tail);
+    if (fr < 0) {
+        kfree(tail);
+        return fr;
+    }
     tail->prev = v;
     tail->next = v->next;
     if (tail->next)
@@ -366,6 +401,11 @@ static vm_area_t *vma_split(vm_area_t *vma, uint64_t split) {
 
     *tail = *vma;
     tail->start = split;
+    tail->file_offset += split - vma->start;
+    if (vma_ref_file(tail) < 0) {
+        kfree(tail);
+        return NULL;
+    }
     tail->prev = vma;
     tail->next = vma->next;
     if (tail->next) tail->next->prev = tail;
@@ -378,26 +418,22 @@ static vm_area_t *vma_split(vm_area_t *vma, uint64_t split) {
 static void vma_try_merge(vm_area_t *vma) {
     if (!vma) return;
 
-    if (vma->prev &&
-        vma->prev->end == vma->start &&
-        vma->prev->vm_flags == vma->vm_flags &&
-        vma->prev->pte_flags == vma->pte_flags) {
+    if (vma_can_merge(vma->prev, vma)) {
         vm_area_t *prev = vma->prev;
         prev->end = vma->end;
         prev->next = vma->next;
         if (vma->next) vma->next->prev = prev;
+        vma_release_file(vma);
         kfree(vma);
         vma = prev;
     }
 
-    if (vma->next &&
-        vma->end == vma->next->start &&
-        vma->next->vm_flags == vma->vm_flags &&
-        vma->next->pte_flags == vma->pte_flags) {
+    if (vma_can_merge(vma, vma->next)) {
         vm_area_t *next = vma->next;
         vma->end = next->end;
         vma->next = next->next;
         if (next->next) next->next->prev = vma;
+        vma_release_file(next);
         kfree(next);
     }
 }
@@ -458,12 +494,77 @@ uint64_t mm_mmap(mm_struct_t *mm, uint64_t addr, size_t len, int prot, int flags
     vma->end       = addr + len;
     vma->vm_flags  = vmf;
     vma->pte_flags = ptef;
+    vma->file_fd   = -1;
 
     mm_insert_vma(mm, vma);
     mm->total_vm += len / PAGE_SIZE;
 
     kdebug("ret=0x%lx\n", addr);
 
+    return addr;
+}
+
+uint64_t mm_mmap_file(mm_struct_t *mm, uint64_t addr, size_t len,
+                      int prot, int flags, int file_fd, uint64_t file_offset)
+{
+    if (file_fd < 0 || (file_offset & (PAGE_SIZE - 1)))
+        return (uint64_t)-EINVAL;
+
+    len = ROUND_UP(len, PAGE_SIZE);
+    if (len == 0)
+        return (uint64_t)-EINVAL;
+    if (len > USER_VA_LIMIT)
+        return (uint64_t)-ENOMEM;
+
+    int rr = vfs_ref_fd(file_fd);
+    if (rr < 0)
+        return (uint64_t)rr;
+
+    if ((flags & MAP_FIXED_NOREPLACE) && addr != 0) {
+        if (mm_range_overlaps(mm, addr, len, NULL)) {
+            vfs_close(file_fd);
+            return (uint64_t)-EEXIST;
+        }
+        flags |= MAP_FIXED;
+    }
+
+    if ((flags & MAP_FIXED) && addr != 0) {
+        mm_munmap(mm, addr, len);
+    } else if (addr != 0) {
+        vm_area_t *existing = mm_find_vma(mm, addr);
+        if (existing && existing->start < addr + len && existing->end > addr)
+            addr = 0;
+    }
+
+    if (addr == 0)
+        addr = mm_find_gap(mm, MMAP_BASE_ADDR, len);
+
+    if (addr == 0 || addr + len < addr || addr + len > USER_VA_LIMIT) {
+        vfs_close(file_fd);
+        return (uint64_t)-ENOMEM;
+    }
+
+    uint64_t vmf = VM_FILE;
+    if (prot & 1) vmf |= VM_READ;
+    if (prot & 2) vmf |= VM_WRITE;
+    if (prot & 4) vmf |= VM_EXEC;
+    if (flags & MAP_SHARED) vmf |= VM_SHARED;
+    if (flags & MAP_HUGETLB) vmf |= VM_HUGEPAGE;
+
+    vm_area_t *vma = kcalloc(1, sizeof(vm_area_t));
+    if (!vma) {
+        vfs_close(file_fd);
+        return (uint64_t)-ENOMEM;
+    }
+    vma->start = addr;
+    vma->end = addr + len;
+    vma->vm_flags = vmf;
+    vma->pte_flags = prot_to_pte(prot);
+    vma->file_fd = file_fd;
+    vma->file_offset = file_offset;
+
+    mm_insert_vma(mm, vma);
+    mm->total_vm += len / PAGE_SIZE;
     return addr;
 }
 
@@ -490,6 +591,13 @@ static int mm_clone_shared_mapping(mm_struct_t *mm, vm_area_t *src_vma,
     if (dst_vma) {
         dst_vma->vm_flags = src_vma->vm_flags;
         dst_vma->pte_flags = src_vma->pte_flags;
+        dst_vma->file_fd = src_vma->file_fd;
+        dst_vma->file_offset = src_vma->file_offset + (src_addr - src_vma->start);
+        if (vma_ref_file(dst_vma) < 0) {
+            dst_vma->file_fd = -1;
+            mm_munmap(mm, dst, len);
+            return -EBADF;
+        }
     }
 
     for (uint64_t off = 0; off < len; ) {
@@ -671,6 +779,13 @@ int mm_mremap(mm_struct_t *mm, uint64_t old_addr, size_t old_size,
     if (dst_vma) {
         dst_vma->vm_flags = vma->vm_flags;
         dst_vma->pte_flags = vma->pte_flags;
+        dst_vma->file_fd = vma->file_fd;
+        dst_vma->file_offset = vma->file_offset + (old_addr - vma->start);
+        if (vma_ref_file(dst_vma) < 0) {
+            dst_vma->file_fd = -1;
+            mm_munmap(mm, dst, new_len);
+            return -EBADF;
+        }
     }
 
     size_t move_len = old_len < new_len ? old_len : new_len;
@@ -734,9 +849,11 @@ int mm_munmap(mm_struct_t *mm, uint64_t addr, size_t len) {
             if (vma->prev) vma->prev->next = vma->next;
             else mm->mmap = vma->next;
             if (vma->next) vma->next->prev = vma->prev;
+            vma_release_file(vma);
             kfree(vma);
         } else if (addr <= vma->start) {
             // 从开头部分删除
+            vma->file_offset += clip_end - vma->start;
             vma->start = clip_end;
         } else if (end >= vma->end) {
             // 从结尾部分删除
@@ -748,6 +865,12 @@ int mm_munmap(mm_struct_t *mm, uint64_t addr, size_t len) {
             *tail = *vma;
             tail->start = clip_end;
             tail->end = vma->end;
+            tail->file_offset += clip_end - vma->start;
+            int fr = vma_ref_file(tail);
+            if (fr < 0) {
+                kfree(tail);
+                return fr;
+            }
             tail->prev = vma;
             tail->next = vma->next;
             if (vma->next) vma->next->prev = tail;
@@ -879,7 +1002,7 @@ mm_struct_t *mm_fork(mm_struct_t *parent) {
     mm_struct_t *child = kcalloc(1, sizeof(mm_struct_t));
     if (!child) return NULL;
     *child = *parent;
-    child->refcount = 1;
+    refcount_set(&child->refcount, 1);
     child->rss = 0;
     child->total_vm = 0;
     child->mmap = NULL;
@@ -898,6 +1021,10 @@ mm_struct_t *mm_fork(mm_struct_t *parent) {
         vm_area_t *cv = kcalloc(1, sizeof(vm_area_t));
         if (!cv) goto fail;
         *cv = *pv;
+        if (vma_ref_file(cv) < 0) {
+            kfree(cv);
+            goto fail;
+        }
         cv->prev = prev;
         cv->next = NULL;
         *tail = cv;

@@ -61,6 +61,11 @@ typedef struct {
 
 extern pfa_t pfa;
 
+typedef struct pfa_huge_stats {
+    size_t total_huge_pages;
+    size_t free_huge_pages;
+} pfa_huge_stats_t;
+
 /* Core API */
 void   pfa_init(paddr_t kernel_end);
 pfn_t  pfa_alloc(int order);
@@ -70,6 +75,7 @@ void   pfa_free_page(pfn_t pfn);
 void   frame_get(pfn_t pfn);
 void   frame_put(pfn_t pfn);
 size_t pfa_free_count(void);
+void   pfa_get_huge_stats(pfa_huge_stats_t *stats);
 
 // 内核使用恒等映射
 // 虚拟地址 (VA)，物理地址 (PA)和页帧号 (PFN) 的辅助函数

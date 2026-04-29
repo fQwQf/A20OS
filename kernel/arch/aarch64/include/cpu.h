@@ -23,6 +23,12 @@ static inline void arch_fence_i(void) {
         ::: "memory");
 }
 
+static inline unsigned arch_current_cpu_id(void) {
+    uint64_t mpidr;
+    __asm__ __volatile__("mrs %0, mpidr_el1" : "=r"(mpidr));
+    return (unsigned)(mpidr & 0xff);
+}
+
 static inline void arch_local_irq_disable(void) {
     __asm__ __volatile__("msr daifset, #2" ::: "memory");
 }

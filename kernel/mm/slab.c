@@ -13,6 +13,10 @@
 #define SLAB_BITMAP_WORDS  2
 #define SLAB_BITMAP_BITS   (SLAB_BITMAP_WORDS * 64)
 
+#ifndef CONFIG_SLAB_DEBUG
+#define CONFIG_SLAB_DEBUG 0
+#endif
+
 // 不同大小的 Slab 缓存（32 字节到 2048 字节）
 static const size_t slab_sizes[SLAB_NR_CACHES] = {
     32, 64, 128, 256, 512, 1024, 2048
@@ -100,7 +104,7 @@ static int slab_page_valid(slab_page_t *sp) {
         return 0;
     if (sp->total != caches[sp->cache_idx].objs_per_slab) return 0;
     if (sp->total > SLAB_BITMAP_BITS) return 0;
-    if (slab_popcount(sp) != sp->in_use) return 0;
+    if (CONFIG_SLAB_DEBUG && slab_popcount(sp) != sp->in_use) return 0;
     return 1;
 }
 
@@ -263,13 +267,6 @@ void *kmalloc(size_t size) {
 
     slab_cache_t *c = &caches[idx];
     slab_page_t *sp = c->partial;
-
-    /* Self-heal stale partial list entries that are already full. */
-    while (sp && sp->free_list == NULL) {
-        slab_list_remove(&c->partial, sp);
-        slab_list_push(&c->full, sp);
-        sp = c->partial;
-    }
 
     /* Self-heal stale partial list entries that are already full. */
     while (sp && sp->free_list == NULL) {
@@ -451,4 +448,32 @@ void *kcalloc(size_t nmemb, size_t size) {
     void *p = kmalloc(total);
     if (p) memset(p, 0, total);
     return p;
+}
+
+void slab_get_stats(slab_stats_t *stats)
+{
+    if (!stats)
+        return;
+    memset(stats, 0, sizeof(*stats));
+    for (int i = 0; i < SLAB_NR_CACHES; i++) {
+        slab_cache_t *c = &caches[i];
+        for (slab_page_t *sp = c->partial; sp; sp = sp->next) {
+            stats->total_pages++;
+            stats->active_pages++;
+            stats->allocated_objects += sp->in_use;
+            stats->allocated_bytes += (size_t)sp->in_use * c->obj_size;
+        }
+        for (slab_page_t *sp = c->full; sp; sp = sp->next) {
+            stats->total_pages++;
+            stats->active_pages++;
+            stats->allocated_objects += sp->in_use;
+            stats->allocated_bytes += (size_t)sp->in_use * c->obj_size;
+        }
+        for (slab_page_t *sp = c->spare; sp; sp = sp->next) {
+            stats->total_pages++;
+            stats->spare_pages++;
+        }
+    }
+    stats->total_bytes = stats->total_pages * PAGE_SIZE;
+    stats->reclaimable_bytes = stats->spare_pages * PAGE_SIZE;
 }

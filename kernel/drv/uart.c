@@ -94,7 +94,7 @@ int uart_getc(void) {
             continue;
         }
         rx_waiter = cur;
-        cur->wake_time = timer_get_ticks() + (TICKS_PER_SEC / 20);
+        proc_set_wake_time(cur, timer_get_ticks() + (TICKS_PER_SEC / 20));
         cur->state = PROC_BLOCKED;
         spin_unlock_irqrestore(&rx_lock, flags);
 
@@ -105,7 +105,7 @@ int uart_getc(void) {
         flags = spin_lock_irqsave(&rx_lock);
         if (rx_waiter == cur)
             rx_waiter = NULL;
-        cur->wake_time = 0;
+        proc_set_wake_time(cur, 0);
         spin_unlock_irqrestore(&rx_lock, flags);
     }
 }

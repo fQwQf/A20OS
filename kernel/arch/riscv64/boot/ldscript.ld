@@ -18,6 +18,13 @@ PHYS_BASE  = 0x80200000;
 VIRT_BASE  = 0xFFFFFFC080200000;
 LOAD_DELTA = VIRT_BASE - PHYS_BASE;
 
+PHDRS
+{
+    text   PT_LOAD FLAGS(5); /* R-X */
+    rodata PT_LOAD FLAGS(4); /* R-- */
+    data   PT_LOAD FLAGS(6); /* RW- */
+}
+
 SECTIONS
 {
     . = VIRT_BASE;
@@ -25,16 +32,18 @@ SECTIONS
     .text : AT(ADDR(.text) - LOAD_DELTA) {
         *(.text.entry)
         *(.text .text.*)
-    }
+    } :text
 
+    . = ALIGN(4096);
     .rodata : AT(ADDR(.rodata) - LOAD_DELTA) {
         *(.rodata .rodata.*)
-    }
+    } :rodata
 
+    . = ALIGN(4096);
     .data : AT(ADDR(.data) - LOAD_DELTA) {
         *(.data .data.*)
         *(.sdata .sdata.*)
-    }
+    } :data
 
     .bss (NOLOAD) : AT(ADDR(.bss) - LOAD_DELTA) {
         _bss_start = .;
@@ -42,7 +51,7 @@ SECTIONS
         *(.sbss .sbss.*)
         *(COMMON)
         _bss_end = .;
-    }
+    } :data
 
     . = ALIGN(16);
 

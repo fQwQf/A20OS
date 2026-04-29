@@ -9,6 +9,7 @@
 #include "core/timer.h"
 #include "core/string.h"
 #include "core/consts.h"
+#include "abi/current.h"
 #include "core/defs.h"
 #include "core/panic.h"
 #include "core/timekeeping.h"

@@ -13,3 +13,4 @@ kernel-la
 .kernel-build/
 *.dtb
 *.txt
+docs/

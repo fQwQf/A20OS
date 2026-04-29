@@ -6,9 +6,11 @@
 #include "drv/virtio_blk.h"
 
 #define BCACHE_BLOCK_SIZE   512
-#define BCACHE_MAX_BLOCKS   64
+#define BCACHE_MAX_BLOCKS   512
+#define BCACHE_HASH_BUCKETS 1024
 #define PCACHE_PAGE_SIZE    4096
-#define PCACHE_MAX_PAGES    16
+#define PCACHE_MAX_PAGES    128
+#define PCACHE_HASH_BUCKETS 256
 
 typedef struct bcache_entry {
     uint64_t    lba;
@@ -17,6 +19,7 @@ typedef struct bcache_entry {
     int         valid;
     char        data[BCACHE_BLOCK_SIZE];
     struct bcache_entry *prev, *next;
+    struct bcache_entry *hnext;
 } bcache_entry_t;
 
 typedef struct pcache_entry {
@@ -26,6 +29,7 @@ typedef struct pcache_entry {
     int      valid;
     char     data[PCACHE_PAGE_SIZE];
     struct pcache_entry *prev, *next;
+    struct pcache_entry *hnext;
 } pcache_entry_t;
 
 typedef struct bcache {
@@ -39,7 +43,19 @@ typedef struct bcache {
     bcache_entry_t   lru_tail;
     pcache_entry_t   page_lru_head;
     pcache_entry_t   page_lru_tail;
+    bcache_entry_t  *hash[BCACHE_HASH_BUCKETS];
+    pcache_entry_t  *page_hash[PCACHE_HASH_BUCKETS];
 } bcache_t;
+
+typedef struct bcache_stats {
+    size_t caches;
+    size_t block_pool_bytes;
+    size_t page_pool_bytes;
+    size_t valid_blocks;
+    size_t dirty_blocks;
+    size_t valid_pages;
+    size_t dirty_pages;
+} bcache_stats_t;
 
 bcache_t *bcache_create(block_dev_t *dev);
 void      bcache_destroy(bcache_t *bc);
@@ -52,5 +68,6 @@ void      bcache_invalidate(bcache_t *bc, uint64_t lba);
 
 int bcache_read_bytes(bcache_t *bc, uint64_t byte_off, void *buf, size_t len);
 int bcache_write_bytes(bcache_t *bc, uint64_t byte_off, const void *buf, size_t len);
+void bcache_get_stats(bcache_stats_t *stats);
 
 #endif
