@@ -4,6 +4,7 @@
 #include "core/types.h"
 #include "core/consts.h"
 #include "mm/slab.h"
+#include "sys/usercopy.h"
 
 /* Physical frame allocator */
 void mm_init(void);
@@ -34,9 +35,5 @@ void pt_map_kernel(uint64_t *pgdir);
 int  pt_map_range(uint64_t *pgdir, vaddr_t va, paddr_t pa, size_t size, uint64_t flags);
 uint64_t *pt_clone(uint64_t *src_pgdir);
 void pt_destroy_user(uint64_t *pgdir);
-
-long copy_from_user(void *dst, const void *src, size_t n);
-long copy_to_user(void *dst, const void *src, size_t n);
-long user_strncpy(char *dst, const char *src, size_t max);
 
 #endif

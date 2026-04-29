@@ -1,4 +1,5 @@
 #include "fs/ramfs.h"
+#include "fs/file.h"
 #include "mm/mm.h"
 #include "core/string.h"
 #include "core/stdio.h"
@@ -52,8 +53,8 @@ static ramfs_inode_t *ramfs_alloc_inode(int type) {
             g_inode_table[i].ref_count = 1;
             g_inode_table[i].nlink = 1;
             task_t *cur = proc_current();
-            g_inode_table[i].uid = cur ? (uint32_t)cur->fsuid : 0;
-            g_inode_table[i].gid = cur ? (uint32_t)cur->fsgid : 0;
+            g_inode_table[i].uid = cur ? (uint32_t)cur->cred.fsuid : 0;
+            g_inode_table[i].gid = cur ? (uint32_t)cur->cred.fsgid : 0;
             if (type == FT_DIRECTORY) g_inode_table[i].mode = S_IFDIR | 0755;
             else if (type == FT_SYMLINK) g_inode_table[i].mode = S_IFLNK | 0777;
             else g_inode_table[i].mode = S_IFREG | 0644;
@@ -181,7 +182,7 @@ static vnode_t *ramfs_make_vnode(mount_t *mnt, ramfs_inode_t *inode) {
     vn->gid = inode->gid;
 
     vn->size = inode->size;
-    vn->ref_count = 1;
+    vnode_ref_init(vn, 1);
     vn->mnt = mnt;
     vn->fs_data = (void *)inode;
     vn->ops = &g_ramfs_vnode_ops;
@@ -197,7 +198,7 @@ static int ramfs_vnode_lookup(vnode_t *dir, const char *name, vnode_t **out) {
     *out = ramfs_make_vnode(dir->mnt, found);
     if (*out) {
         (*out)->parent = dir;
-        dir->ref_count++;
+        vnode_get(dir);
     }
     return (*out) ? 0 : -ENOMEM;
 }
@@ -259,7 +260,7 @@ static int ramfs_vnode_create(vnode_t *dir, const char *name, int mode, vnode_t 
     *out = ramfs_make_vnode(dir->mnt, child);
     if (*out) {
         (*out)->parent = dir;
-        dir->ref_count++;
+        vnode_get(dir);
     }
     return *out ? 0 : -ENOMEM;
 }
@@ -448,6 +449,28 @@ static int ramfs_vnode_truncate(vnode_t *vn, size_t size) {
     return 0;
 }
 
+static int ramfs_vnode_writepage(vnode_t *vn, uint64_t index,
+                                 const void *data, size_t len)
+{
+    if (!vn || !vn->fs_data || !data)
+        return -EINVAL;
+    ramfs_inode_t *inode = (ramfs_inode_t *)vn->fs_data;
+    if (inode->type == FT_DIRECTORY)
+        return -EISDIR;
+
+    uint64_t off = index * PAGE_SIZE;
+    if (off >= inode->size)
+        return 0;
+    size_t n = inode->size - (size_t)off;
+    if (n > len)
+        n = len;
+    if (off + n > inode->capacity)
+        return -EIO;
+
+    memcpy(inode->data + off, data, n);
+    return 0;
+}
+
 static vnode_ops_t g_ramfs_vnode_ops = {
     .lookup = ramfs_vnode_lookup,
     .stat = ramfs_vnode_stat,
@@ -461,6 +484,7 @@ static vnode_ops_t g_ramfs_vnode_ops = {
     .symlink = ramfs_vnode_symlink,
     .readlink = ramfs_vnode_readlink,
     .truncate = ramfs_vnode_truncate,
+    .writepage = ramfs_vnode_writepage,
     .chmod = ramfs_vnode_chmod,
     .chown = ramfs_vnode_chown,
 };
@@ -506,7 +530,10 @@ static int ramfs_fwrite(vfile_t *vf, const char *buf, size_t count) {
 
     memcpy(inode->data + vf->offset, buf, count);
     vf->offset += count;
-    if (vf->offset > inode->size) inode->size = vf->offset;
+    if (vf->offset > inode->size) {
+        inode->size = vf->offset;
+        vf->vnode->size = inode->size;
+    }
     return (int)count;
 }
 
@@ -540,10 +567,10 @@ static int ramfs_freaddir(vfile_t *vf, void *dirp, size_t count) {
         ramfs_dir_entry_t *de = &entries[idx];
         if (de->name[0] != '\0') {
             size_t namelen = strlen(de->name);
-            size_t reclen = (offsetof(a20_dirent64_t, d_name) + namelen + 1 + 7) & ~7UL;
+            size_t reclen = (offsetof(vfs_dirent64_t, d_name) + namelen + 1 + 7) & ~7UL;
             if (total + reclen > count) break;
 
-            a20_dirent64_t *d = (a20_dirent64_t *)(out + total);
+            vfs_dirent64_t *d = (vfs_dirent64_t *)(out + total);
             d->d_ino = (uint64_t)de->inum;
             d->d_off = (int64_t)(total + reclen);
             d->d_reclen = (uint16_t)reclen;
@@ -600,15 +627,13 @@ vnode_t *ramfs_mount_empty(mount_t *mnt) {
 }
 
 vfile_t *ramfs_open_vnode(vnode_t *vn, int flags) {
-    vfile_t *vf = (vfile_t *)kmalloc(sizeof(vfile_t));
+    vfile_t *vf = vfile_alloc();
     if (!vf) return NULL;
-
-    memset(vf, 0, sizeof(*vf));
     vf->vnode = vn;
-    vn->ref_count++;
+    vnode_get(vn);
     vf->flags = flags;
     vf->offset = (flags & O_APPEND) ? vn->size : 0;
-    vf->ref_count = 1;
+    refcount_set(&vf->ref_count, 1);
     vf->ops = &g_ramfs_fops;
     return vf;
 }

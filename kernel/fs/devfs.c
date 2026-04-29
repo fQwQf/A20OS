@@ -1,4 +1,5 @@
 #include "fs/devfs.h"
+#include "fs/file.h"
 #include "mm/mm.h"
 #include "core/timekeeping.h"
 #include "core/string.h"
@@ -177,11 +178,11 @@ static int devfs_dir_readdir(vfile_t *vf, void *dirp, size_t count) {
     char *out = (char *)dirp;
     while (idx < nentries) {
         size_t namelen = strlen(entries[idx].name);
-        size_t reclen = (offsetof(a20_dirent64_t, d_name) + namelen + 1 + 7) & ~7UL;
+        size_t reclen = (offsetof(vfs_dirent64_t, d_name) + namelen + 1 + 7) & ~7UL;
         if (total + reclen > count)
             break;
 
-        a20_dirent64_t *d = (a20_dirent64_t *)(out + total);
+        vfs_dirent64_t *d = (vfs_dirent64_t *)(out + total);
         d->d_ino = idx + 1;
         d->d_off = (int64_t)(idx + 1);
         d->d_reclen = (uint16_t)reclen;
@@ -358,12 +359,12 @@ static vfile_ops_t g_devfs_zero_ops   = { .read = devfs_zero_read,  .write = dev
 static vfile_ops_t g_devfs_random_ops = { .read = devfs_random_read,.write = devfs_null_write,   .ioctl = devfs_ioctl };
 static vfile_ops_t g_devfs_rtc_ops    = { .read = devfs_null_read,  .write = devfs_null_write,   .ioctl = devfs_ioctl };
 
-static vfile_t g_stdin_file  = { .ref_count = 999, .ops = &g_devfs_stdin_ops,  .flags = O_RDONLY, .priv = (void *)(intptr_t)DEVFS_TTY };
-static vfile_t g_stdout_file = { .ref_count = 999, .ops = &g_devfs_stdout_ops, .flags = O_WRONLY, .priv = (void *)(intptr_t)DEVFS_TTY };
-static vfile_t g_stderr_file = { .ref_count = 999, .ops = &g_devfs_stderr_ops, .flags = O_WRONLY, .priv = (void *)(intptr_t)DEVFS_TTY };
+static vfile_t g_stdin_file  = { .ref_count = REFCOUNT_INIT(999), .ops = &g_devfs_stdin_ops,  .flags = O_RDONLY, .priv = (void *)(intptr_t)DEVFS_TTY };
+static vfile_t g_stdout_file = { .ref_count = REFCOUNT_INIT(999), .ops = &g_devfs_stdout_ops, .flags = O_WRONLY, .priv = (void *)(intptr_t)DEVFS_TTY };
+static vfile_t g_stderr_file = { .ref_count = REFCOUNT_INIT(999), .ops = &g_devfs_stderr_ops, .flags = O_WRONLY, .priv = (void *)(intptr_t)DEVFS_TTY };
 
 static vnode_t *node_to_vnode(size_t idx) {
-    g_vnodes[idx].ref_count++;
+    vnode_get(&g_vnodes[idx]);
     return &g_vnodes[idx];
 }
 
@@ -420,13 +421,12 @@ vfile_t *devfs_open_vnode(vnode_t *vn, int flags) {
     if (!node)
         return NULL;
 
-    vfile_t *vf = (vfile_t *)kmalloc(sizeof(vfile_t));
+    vfile_t *vf = vfile_alloc();
     if (!vf) return NULL;
-    memset(vf, 0, sizeof(*vf));
     vf->vnode = vn;
-    vn->ref_count++;
+    vnode_get(vn);
     vf->flags = flags;
-    vf->ref_count = 1;
+    refcount_set(&vf->ref_count, 1);
     vf->priv = (void *)(intptr_t)node->kind;
 
     switch (node->kind) {
@@ -438,7 +438,7 @@ vfile_t *devfs_open_vnode(vnode_t *vn, int flags) {
     case DEVFS_TTY:  vf->ops = &g_devfs_tty_ops; break;
     case DEVFS_RTC:  vf->ops = &g_devfs_rtc_ops; break;
     default:
-        kfree(vf);
+        vfile_free(vf);
         return NULL;
     }
     return vf;
@@ -472,17 +472,17 @@ vfile_t *devfs_create_stdio(int fd) {
 vnode_t *devfs_mount(void) {
     init_default_tty_state(&g_dev_tty);
     memset(&g_stdin_file, 0, sizeof(g_stdin_file));
-    g_stdin_file.ref_count = 999;
+    refcount_set(&g_stdin_file.ref_count, 999);
     g_stdin_file.ops = &g_devfs_stdin_ops;
     g_stdin_file.flags = O_RDONLY;
     g_stdin_file.priv = (void *)(intptr_t)DEVFS_TTY;
     memset(&g_stdout_file, 0, sizeof(g_stdout_file));
-    g_stdout_file.ref_count = 999;
+    refcount_set(&g_stdout_file.ref_count, 999);
     g_stdout_file.ops = &g_devfs_stdout_ops;
     g_stdout_file.flags = O_WRONLY;
     g_stdout_file.priv = (void *)(intptr_t)DEVFS_TTY;
     memset(&g_stderr_file, 0, sizeof(g_stderr_file));
-    g_stderr_file.ref_count = 999;
+    refcount_set(&g_stderr_file.ref_count, 999);
     g_stderr_file.ops = &g_devfs_stderr_ops;
     g_stderr_file.flags = O_WRONLY;
     g_stderr_file.priv = (void *)(intptr_t)DEVFS_TTY;
@@ -492,7 +492,7 @@ vnode_t *devfs_mount(void) {
         g_vnodes[i].type = (g_nodes[i].kind == DEVFS_ROOT || g_nodes[i].kind == DEVFS_MISC)
                          ? VFS_FT_DIR : VFS_FT_REGULAR;
         g_vnodes[i].mode = (g_vnodes[i].type == VFS_FT_DIR) ? (S_IFDIR | 0555) : (S_IFCHR | 0666);
-        g_vnodes[i].ref_count = 1;
+        vnode_ref_init(&g_vnodes[i], 1);
         g_vnodes[i].parent = (i == 0) ? &g_vnodes[0] : &g_vnodes[0];
         if (g_nodes[i].kind == DEVFS_RTC && strcmp(g_nodes[i].name, "rtc") == 0)
             g_vnodes[i].parent = &g_vnodes[1];
