@@ -245,3 +245,17 @@ void frame_put(pfn_t pfn) {
 
 // 查询空闲页数量
 size_t pfa_free_count(void) { return pfa.free_frames; }
+
+void pfa_get_huge_stats(pfa_huge_stats_t *stats) {
+    if (!stats)
+        return;
+    memset(stats, 0, sizeof(*stats));
+    if (PMD_ORDER > MAX_ORDER)
+        return;
+
+    stats->total_huge_pages = pfa.total_frames / PMD_PAGE_COUNT;
+    for (int order = PMD_ORDER; order <= MAX_ORDER; order++) {
+        size_t huge_per_block = 1UL << (order - PMD_ORDER);
+        stats->free_huge_pages += pfa.free_lists[order].count * huge_per_block;
+    }
+}

@@ -9,6 +9,7 @@ static inline void arch_rmb(void) { __asm__ __volatile__("fence ir,ir" ::: "memo
 static inline void arch_wmb(void) { __asm__ __volatile__("fence ow,ow" ::: "memory"); }
 static inline void arch_wfi(void) { __asm__ __volatile__("wfi"); }
 static inline void arch_fence_i(void) { __asm__ __volatile__("fence.i" ::: "memory"); }
+static inline unsigned arch_current_cpu_id(void) { return 0; }
 
 static inline void arch_local_irq_disable(void) {
     __asm__ __volatile__("csrc sstatus, %0" :: "r"((uint64_t)(1UL << 1)));
