@@ -14,14 +14,9 @@
  *   - user_trap_return
  */
 
-struct task_t;
-
 /* C handlers called from assembly */
 void trap_handler(trap_context_t *ctx);
 void kernel_trap_handler(trap_context_t *ctx);
-
-int handle_cow_fault(struct task_t *t, uint64_t stval);
-int handle_demand_fault(struct task_t *t, uint64_t stval);
 
 /* Initialization */
 void trap_init(void);

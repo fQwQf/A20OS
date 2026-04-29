@@ -15,6 +15,11 @@ static inline void arch_fence_i(void) {
         ::: "memory"
     ); 
 }
+static inline unsigned arch_current_cpu_id(void) {
+    uint64_t id;
+    __asm__ __volatile__("csrrd %0, 0x20" : "=r"(id));
+    return (unsigned)id;
+}
 static inline void arch_local_irq_disable(void) {
     uint64_t val;
     __asm__ __volatile("csrrd %0, 0x0" : "=r"(val));
