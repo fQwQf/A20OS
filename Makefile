@@ -2,17 +2,22 @@
 
 # Architecture selection
 ARCH ?= riscv64
+ABI ?= linux
 MODE ?= release
 BRINGUP ?= 0
 CONTEST ?= 0
 OPT ?= -O3
+
+ifneq ($(ABI),linux)
+$(error Unsupported ABI '$(ABI)'; supported ABI: linux)
+endif
 
 .DEFAULT_GOAL := all
 
 # Directories
 KERNEL_DIR = kernel
 INCLUDE_DIR = $(KERNEL_DIR)/include
-BUILD_VARIANT = $(if $(filter 1,$(CONTEST)),contest,$(if $(filter 1,$(BRINGUP)),bringup,dev))
+BUILD_VARIANT = $(ABI)-$(if $(filter 1,$(CONTEST)),contest,$(if $(filter 1,$(BRINGUP)),bringup,dev))
 BUILD_DIR = .kernel-build/$(ARCH)-$(BUILD_VARIANT)
 FAT32_IMG = $(BUILD_DIR)/fat32.img
 EXT4_IMG = $(BUILD_DIR)/ext4.img
@@ -30,6 +35,9 @@ USER_BUILD_CHECK_DIRS = user/cmds user/contest_init user/init_common user/lib us
 comma := ,
 NET_HOSTFWD ?= hostfwd=tcp::5555-:5555,hostfwd=udp::5555-:5555
 NETDEV_USER = -netdev user,id=net$(if $(strip $(NET_HOSTFWD)),$(comma)$(NET_HOSTFWD),)
+SMOKE_TIMEOUT ?= 20s
+SMOKE_INPUT_DELAY ?= 2
+SMOKE_LOG_DIR ?= .kernel-build/smoke
 
 # Compiler and tools
 ifeq ($(ARCH), riscv64)
@@ -104,7 +112,8 @@ CFLAGS = -Wall -Wextra $(OPT) -ffreestanding -nostdlib \
          -I$(KERNEL_DIR)/external/lwip/src/include \
          -I$(ARCH_INCLUDE_DIR) -I$(BUILD_DIR)/generated $(ARCH_CFLAGS) \
          -D$(shell echo $(ARCH) | tr a-z A-Z) \
-         -DCONFIG_$(shell echo $(ARCH) | tr a-z A-Z)
+         -DCONFIG_$(shell echo $(ARCH) | tr a-z A-Z) \
+         -DCONFIG_ABI_$(shell echo $(ABI) | tr a-z A-Z)
 
 # Bringup / contest mode markers for conditional compilation.
 ifeq ($(BRINGUP),1)
@@ -114,18 +123,21 @@ ifeq ($(CONTEST),1)
 CFLAGS += -DCONTEST
 endif
 
-LDFLAGS = -nostdlib -nostartfiles -T $(KERNEL_DIR)/arch/$(ARCH)/boot/ldscript.ld $(ARCH_LDFLAGS)
+LDFLAGS = -nostdlib -nostartfiles -Wl,--build-id=none -T $(KERNEL_DIR)/arch/$(ARCH)/boot/ldscript.ld $(ARCH_LDFLAGS)
 
 # Source files
 KERNEL_SRC = $(wildcard $(KERNEL_DIR)/*.c) \
-             $(wildcard $(KERNEL_DIR)/lib/*.c) \
+             $(wildcard $(KERNEL_DIR)/core/*.c) \
              $(wildcard $(KERNEL_DIR)/mm/*.c) \
              $(wildcard $(KERNEL_DIR)/proc/*.c) \
              $(wildcard $(KERNEL_DIR)/fs/*.c) \
+             $(wildcard $(KERNEL_DIR)/fs/vfs/*.c) \
+             $(wildcard $(KERNEL_DIR)/ipc/*.c) \
              $(wildcard $(KERNEL_DIR)/net/*.c) \
+             $(wildcard $(KERNEL_DIR)/bpf/*.c) \
              $(wildcard $(KERNEL_DIR)/drv/*.c) \
+             $(wildcard $(KERNEL_DIR)/abi/$(ABI)/*.c) \
              $(wildcard $(KERNEL_DIR)/syscall/*.c) \
-             $(wildcard $(KERNEL_DIR)/trap/*.c) \
              $(wildcard $(KERNEL_DIR)/shell/*.c) \
              $(shell find $(KERNEL_DIR)/arch/$(ARCH) -type f -name '*.c' | sort) \
              $(LWIP_SRC)
@@ -189,6 +201,10 @@ KERNEL_BIN = $(BUILD_DIR)/kernel.bin
 # ================================================================
 
 .PHONY: all clean run-riscv64 run-loongarch64 run-arm64 debug-riscv64 debug-loongarch64 debug-arm64 \
+        check-kernel-build check-user-build check-dev-build check-contest-build \
+        check-riscv64-bringup check-loongarch64-bringup check-aarch64-bringup \
+        check-riscv64-user check-loongarch64-user check-aarch64-user \
+        smoke-riscv64 smoke-loongarch64 smoke-aarch64 smoke-abi-linux smoke-proc-a20 \
         FORCE \
         user_apps fs_img kernel-only dev-build contest-rv contest-la
 
@@ -207,6 +223,150 @@ all:
 	$(MAKE) contest-la
 	@echo "=== Competition build complete ==="
 	@echo "  kernel-rv  kernel-la  disk.img  disk-la.img"
+
+check-kernel-build: check-riscv64-bringup check-loongarch64-bringup check-aarch64-bringup
+
+check-riscv64-bringup:
+	$(MAKE) ARCH=riscv64 ABI=$(ABI) BRINGUP=1 kernel-only
+
+check-loongarch64-bringup:
+	$(MAKE) ARCH=loongarch64 ABI=$(ABI) BRINGUP=1 kernel-only
+
+check-aarch64-bringup:
+	$(MAKE) ARCH=aarch64 ABI=$(ABI) BRINGUP=1 kernel-only
+
+check-user-build: check-riscv64-user check-loongarch64-user check-aarch64-user
+
+check-riscv64-user:
+	$(MAKE) -C user ARCH=riscv64 CONTEST=$(CONTEST) OPT="$(OPT)"
+
+check-loongarch64-user:
+	$(MAKE) -C user ARCH=loongarch64 CONTEST=$(CONTEST) OPT="$(OPT)"
+
+check-aarch64-user:
+	$(MAKE) -C user ARCH=aarch64 CONTEST=$(CONTEST) OPT="$(OPT)"
+
+check-dev-build:
+	$(MAKE) ARCH=riscv64 ABI=$(ABI) BRINGUP=0 CONTEST=0 dev-build
+
+check-contest-build:
+	$(MAKE) all
+
+smoke-riscv64:
+	$(MAKE) ARCH=riscv64 ABI=$(ABI) BRINGUP=1 kernel-only
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/riscv64-bringup.log"; \
+	status=0; \
+	timeout $(SMOKE_TIMEOUT) qemu-system-riscv64 \
+		-machine virt -m 512M -nographic -smp 1 -bios default \
+		-global virtio-mmio.force-legacy=false \
+		-kernel .kernel-build/riscv64-linux-bringup/kernel.elf \
+		> "$$log" 2>&1 || status=$$?; \
+	if [ "$$status" -eq 124 ]; then \
+		echo "smoke-riscv64: timeout reached; log saved to $$log"; \
+	elif [ "$$status" -eq 0 ]; then \
+		echo "smoke-riscv64: QEMU exited normally; log saved to $$log"; \
+	else \
+		echo "smoke-riscv64: QEMU failed with status $$status; tail of $$log:"; \
+		tail -n 40 "$$log"; \
+		exit "$$status"; \
+	fi
+
+smoke-loongarch64:
+	$(MAKE) ARCH=loongarch64 ABI=$(ABI) BRINGUP=1 kernel-only
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/loongarch64-bringup.log"; \
+	status=0; \
+	timeout $(SMOKE_TIMEOUT) qemu-system-loongarch64 \
+		-machine virt -m 512M -nographic -smp 1 \
+		-kernel .kernel-build/loongarch64-linux-bringup/kernel.elf \
+		> "$$log" 2>&1 || status=$$?; \
+	if [ "$$status" -eq 124 ]; then \
+		echo "smoke-loongarch64: timeout reached; log saved to $$log"; \
+	elif [ "$$status" -eq 0 ]; then \
+		echo "smoke-loongarch64: QEMU exited normally; log saved to $$log"; \
+	else \
+		echo "smoke-loongarch64: QEMU failed with status $$status; tail of $$log:"; \
+		tail -n 40 "$$log"; \
+		exit "$$status"; \
+	fi
+
+smoke-aarch64:
+	$(MAKE) ARCH=aarch64 ABI=$(ABI) BRINGUP=1 kernel-only
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/aarch64-bringup.log"; \
+	status=0; \
+	timeout $(SMOKE_TIMEOUT) qemu-system-aarch64 \
+		-machine virt -cpu cortex-a57 -m 512M -nographic -smp 1 \
+		-global virtio-mmio.force-legacy=false \
+		-kernel .kernel-build/aarch64-linux-bringup/kernel.elf \
+		> "$$log" 2>&1 || status=$$?; \
+	if [ "$$status" -eq 124 ]; then \
+		echo "smoke-aarch64: timeout reached; log saved to $$log"; \
+	elif [ "$$status" -eq 0 ]; then \
+		echo "smoke-aarch64: QEMU exited normally; log saved to $$log"; \
+	else \
+		echo "smoke-aarch64: QEMU failed with status $$status; tail of $$log:"; \
+		tail -n 40 "$$log"; \
+		exit "$$status"; \
+	fi
+
+smoke-abi-linux:
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 CONTEST=0 dev-build
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/abi-linux-riscv64.log"; \
+	status=0; \
+	{ sleep $(SMOKE_INPUT_DELAY); printf 'syscall_smoke\npoweroff\n'; } | \
+	timeout $(SMOKE_TIMEOUT) qemu-system-riscv64 \
+		-machine virt -m 512M -nographic -smp 1 -bios default \
+		-global virtio-mmio.force-legacy=false \
+		-drive file=.kernel-build/riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
+		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+		-drive file=.kernel-build/riscv64-linux-dev/ext4.img,if=none,format=raw,id=x1 \
+		-device virtio-blk-device,drive=x1,bus=virtio-mmio-bus.1 \
+		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		-kernel .kernel-build/riscv64-linux-dev/kernel.elf \
+		> "$$log" 2>&1 || status=$$?; \
+	if grep -q 'SYSCALL_SMOKE: PASS' "$$log"; then \
+		echo "smoke-abi-linux: PASS; log saved to $$log"; \
+	elif [ "$$status" -eq 124 ]; then \
+		echo "smoke-abi-linux: timeout without PASS; tail of $$log:"; \
+		tail -n 80 "$$log"; \
+		exit 1; \
+	else \
+		echo "smoke-abi-linux: failed with status $$status; tail of $$log:"; \
+		tail -n 80 "$$log"; \
+		exit "$$status"; \
+	fi
+
+smoke-proc-a20:
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 CONTEST=0 dev-build
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/proc-a20-riscv64.log"; \
+	status=0; \
+	{ sleep $(SMOKE_INPUT_DELAY); printf 'cat /proc/a20/bcache\ncat /proc/a20/page_cache\npoweroff\n'; } | \
+	timeout $(SMOKE_TIMEOUT) qemu-system-riscv64 \
+		-machine virt -m 512M -nographic -smp 1 -bios default \
+		-global virtio-mmio.force-legacy=false \
+		-drive file=.kernel-build/riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
+		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+		-drive file=.kernel-build/riscv64-linux-dev/ext4.img,if=none,format=raw,id=x1 \
+		-device virtio-blk-device,drive=x1,bus=virtio-mmio-bus.1 \
+		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		-kernel .kernel-build/riscv64-linux-dev/kernel.elf \
+		> "$$log" 2>&1 || status=$$?; \
+	if grep -q '^valid_pages:' "$$log" && grep -q '^capacity:' "$$log"; then \
+		echo "smoke-proc-a20: PASS; log saved to $$log"; \
+	else \
+		echo "smoke-proc-a20: failed with status $$status; tail of $$log:"; \
+		tail -n 80 "$$log"; \
+		exit 1; \
+	fi
 
 contest-rv:
 	@echo "--- Building RISC-V 64 (contest) ---"
@@ -319,9 +479,9 @@ ext4_img: $(USER_BUILD_STAMP) ext4_img_only
 $(KERNEL_BIN): $(KERNEL_ELF)
 	$(CROSS_PREFIX)objcopy -O binary $< $@
 
-$(KERNEL_ELF): $(KERNEL_OBJ) $(ASM_OBJ)
+$(KERNEL_ELF): $(KERNEL_OBJ) $(ASM_OBJ) $(KERNEL_DIR)/arch/$(ARCH)/boot/ldscript.ld
 	@mkdir -p $(dir $@)
-	$(CROSS_PREFIX)gcc $(LDFLAGS) $^ -o $@
+	$(CROSS_PREFIX)gcc $(LDFLAGS) $(KERNEL_OBJ) $(ASM_OBJ) -o $@
 
 $(BUILD_DIR)/%.o: $(KERNEL_DIR)/%.c Makefile | $(BUILD_TIME_HDR)
 	@mkdir -p $(dir $@)

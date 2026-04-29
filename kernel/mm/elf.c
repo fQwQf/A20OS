@@ -49,6 +49,7 @@ static int elf_add_vma(mm_struct_t *mm, uint64_t start, uint64_t end,
     vma->end = end;
     vma->vm_flags = vm_flags;
     vma->pte_flags = pte_flags;
+    vma->file_fd = -1;
     mm_insert_vma(mm, vma);
     mm->total_vm += (end - start) / PAGE_SIZE;
     return 0;
@@ -117,6 +118,7 @@ static int map_segment(mm_struct_t *mm, uint64_t *pgdir, uint64_t va, uint64_t m
             vma->end = end;
             vma->pte_flags = flags;
             vma->vm_flags = VM_ANON;
+            vma->file_fd = -1;
             if (flags & PTE_R) vma->vm_flags |= VM_READ;
             if (flags & PTE_W) vma->vm_flags |= VM_WRITE;
             if (flags & PTE_X) vma->vm_flags |= VM_EXEC;
@@ -153,8 +155,8 @@ static int map_segment_from_fd(mm_struct_t *mm, uint64_t *pgdir, uint64_t va, ui
             if (to_copy > PAGE_SIZE - copy_off)
                 to_copy = PAGE_SIZE - copy_off;
             if (to_copy > 0) {
-                vfs_lseek(fd, file_offset + (long)src_off, SEEK_SET);
-                int nr = vfs_read(fd, tmp, (size_t)to_copy);
+                int nr = vfs_pread(fd, tmp, (size_t)to_copy,
+                                   (uint64_t)(file_offset + (long)src_off));
                 if (nr < 0) { frame_free(frame); kfree(tmp); return -EIO; }
                 memcpy((char *)frame + copy_off, tmp, (size_t)nr);
             }
@@ -174,6 +176,7 @@ static int map_segment_from_fd(mm_struct_t *mm, uint64_t *pgdir, uint64_t va, ui
             vma->end = end;
             vma->pte_flags = flags;
             vma->vm_flags = VM_ANON;
+            vma->file_fd = -1;
             if (flags & PTE_R) vma->vm_flags |= VM_READ;
             if (flags & PTE_W) vma->vm_flags |= VM_WRITE;
             if (flags & PTE_X) vma->vm_flags |= VM_EXEC;

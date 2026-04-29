@@ -42,6 +42,7 @@ typedef struct {
     virtio_blk_req_t   req[VIRTIO_BLK_REQ_SLOTS];
     spinlock_t         lock;
     int                slot;
+    int                in_flight;
 } virtio_blk_inst_t;
 
 static virtio_blk_inst_t g_insts[VIRTIO_MAX_DEVS];
@@ -222,7 +223,8 @@ static void virtio_blk_poll_inst(virtio_blk_inst_t *inst) {
     if (!inst || !inst->blk.valid)
         return;
     uint64_t flags = spin_lock_irqsave(&inst->lock);
-    virtio_blk_complete_used_locked(inst);
+    if (inst->in_flight > 0)
+        virtio_blk_complete_used_locked(inst);
     spin_unlock_irqrestore(&inst->lock, flags);
 }
 
@@ -258,6 +260,7 @@ static int virtio_blk_submit_req(virtio_blk_inst_t *inst, virtio_blk_req_t *req,
     req->buf = buf;
     req->bytes = bytes;
     req->waiter = proc_current();
+    inst->in_flight++;
 
     inst->req_hdr[slot].type     = write ? VIRTIO_BLK_T_OUT : VIRTIO_BLK_T_IN;
     inst->req_hdr[slot].reserved = 0;
@@ -315,6 +318,8 @@ static int virtio_blk_wait_req(virtio_blk_inst_t *inst, virtio_blk_req_t *req,
         if (req->done) {
             int ret = req->result;
             req->in_use = 0;
+            if (inst->in_flight > 0)
+                inst->in_flight--;
             spin_unlock_irqrestore(&inst->lock, flags);
             return ret;
         }
@@ -330,16 +335,18 @@ static int virtio_blk_wait_req(virtio_blk_inst_t *inst, virtio_blk_req_t *req,
                 req->result = -1;
             }
             req->in_use = 0;
+            if (inst->in_flight > 0)
+                inst->in_flight--;
             spin_unlock_irqrestore(&inst->lock, flags);
             return -1;
         }
 
         if (cur) {
-            cur->wake_time = deadline;
+            proc_set_wake_time(cur, deadline);
             cur->state = PROC_BLOCKED;
             virtio_blk_poll_inst(inst);
             sched();
-            cur->wake_time = 0;
+            proc_set_wake_time(cur, 0);
         } else {
             __asm__ volatile("nop");
         }

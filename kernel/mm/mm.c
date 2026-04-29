@@ -368,34 +368,88 @@ void pt_destroy_user(uint64_t *pgdir) {
 }
 
 #include "mm/vm.h"
+#include "mm/fault.h"
 #include "proc/proc.h"
-#include "core/trap.h"
+
+static inline int user_range_ok(uint64_t va, size_t n) {
+    if (n == 0)
+        return 1;
+    if (va >= USER_VA_LIMIT)
+        return 0;
+    return n <= USER_VA_LIMIT - va;
+}
+
+static int user_resolve_leaf(task_t *t, uint64_t va, int write,
+                             void **kaddr_out, size_t *avail_out) {
+    uint64_t leaf_base = 0;
+    size_t leaf_size = 0;
+    uint64_t *pte = pt_lookup_leaf(t->pgdir, va, NULL, &leaf_base, &leaf_size);
+    if (!pte || !(*pte & PTE_V)) {
+        if (handle_demand_fault(t, va) < 0)
+            return -EFAULT;
+        pte = pt_lookup_leaf(t->pgdir, va, NULL, &leaf_base, &leaf_size);
+        if (!pte || !(*pte & PTE_V))
+            return -EFAULT;
+    }
+
+    if (write) {
+        if (!arch_pte_is_leaf(*pte) || !(*pte & PTE_U))
+            return -EFAULT;
+        if (!(*pte & PTE_W)) {
+            if (handle_cow_fault(t, va) < 0)
+                return -EFAULT;
+            pte = pt_lookup_leaf(t->pgdir, va, NULL, &leaf_base, &leaf_size);
+            if (!pte || !(*pte & PTE_V))
+                return -EFAULT;
+        }
+        if (!pte_user_writable(*pte))
+            return -EFAULT;
+    } else if (!pte_user_readable(*pte)) {
+        return -EFAULT;
+    }
+
+    size_t page_off = va - leaf_base;
+    paddr_t pa = arch_pte_addr(*pte);
+    *kaddr_out = (void *)(pa + PAGE_OFFSET + page_off);
+    *avail_out = leaf_size - page_off;
+    return 0;
+}
+
+int user_buffer_segment(const void *user, size_t len, int write,
+                        void **kaddr, size_t *chunk) {
+    task_t *t = proc_current();
+    if (!t || !t->mm || !kaddr || !chunk)
+        return -EFAULT;
+    if (len == 0) {
+        *kaddr = NULL;
+        *chunk = 0;
+        return 0;
+    }
+    uint64_t va = (uint64_t)user;
+    if (!user_range_ok(va, len))
+        return -EFAULT;
+    if (user_resolve_leaf(t, va, write, kaddr, chunk) < 0)
+        return -EFAULT;
+    if (*chunk > len)
+        *chunk = len;
+    return 0;
+}
 
 // 从用户空间拷贝数据到内核空间
 long copy_from_user(void *dst, const void *src, size_t n) {
     task_t *t = proc_current();
     if (!t || !t->mm) return -EFAULT;
+    if (!user_range_ok((uint64_t)src, n)) return -EFAULT;
     size_t copied = 0;
-    while (n > 0) {
-        uint64_t va = (uint64_t)src + copied;
-        if (va >= USER_VA_LIMIT) return -EFAULT;
-        uint64_t leaf_base = 0;
-        size_t leaf_size = 0;
-        uint64_t *pte = pt_lookup_leaf(t->pgdir, va, NULL, &leaf_base, &leaf_size);
-        if (!pte || !(*pte & PTE_V)) {
-            // 处理缺页异常
-            if (handle_demand_fault(t, va) < 0) return -EFAULT;
-            pte = pt_lookup_leaf(t->pgdir, va, NULL, &leaf_base, &leaf_size);
-            if (!pte || !(*pte & PTE_V)) return -EFAULT;
-        }
-        if (!pte_user_readable(*pte)) return -EFAULT;
-        paddr_t pa = arch_pte_addr(*pte);
-        size_t page_off = va - leaf_base;
-        size_t chunk = leaf_size - page_off;
-        if (chunk > n) chunk = n;
-        memcpy((char*)dst + copied, (void*)(pa + PAGE_OFFSET + page_off), chunk);
+    while (copied < n) {
+        void *kaddr;
+        size_t chunk;
+        if (user_resolve_leaf(t, (uint64_t)src + copied, 0, &kaddr, &chunk) < 0)
+            return -EFAULT;
+        if (chunk > n - copied)
+            chunk = n - copied;
+        memcpy((char *)dst + copied, kaddr, chunk);
         copied += chunk;
-        n -= chunk;
     }
     return (long)copied;
 }
@@ -404,32 +458,17 @@ long copy_from_user(void *dst, const void *src, size_t n) {
 long copy_to_user(void *dst, const void *src, size_t n) {
     task_t *t = proc_current();
     if (!t || !t->mm) return -EFAULT;
+    if (!user_range_ok((uint64_t)dst, n)) return -EFAULT;
     size_t copied = 0;
-    while (n > 0) {
-        uint64_t va = (uint64_t)dst + copied;
-        if (va >= USER_VA_LIMIT) return -EFAULT;
-        uint64_t leaf_base = 0;
-        size_t leaf_size = 0;
-        uint64_t *pte = pt_lookup_leaf(t->pgdir, va, NULL, &leaf_base, &leaf_size);
-        if (!pte || !(*pte & PTE_V)) {
-            // 处理缺页异常
-            if (handle_demand_fault(t, va) < 0) return -EFAULT;
-            pte = pt_lookup_leaf(t->pgdir, va, NULL, &leaf_base, &leaf_size);
-            if (!pte || !(*pte & PTE_V)) return -EFAULT;
-        }
-        if (!arch_pte_is_leaf(*pte) || !(*pte & PTE_U)) return -EFAULT;
-        if (!(*pte & PTE_W)) {
-            if (handle_cow_fault(t, va) < 0) return -EFAULT;
-            pte = pt_lookup_leaf(t->pgdir, va, NULL, &leaf_base, &leaf_size);
-            if (!pte || !(*pte & PTE_V) || !pte_user_writable(*pte)) return -EFAULT;
-        }
-        paddr_t pa = arch_pte_addr(*pte);
-        size_t page_off = va - leaf_base;
-        size_t chunk = leaf_size - page_off;
-        if (chunk > n) chunk = n;
-        memcpy((void*)(pa + PAGE_OFFSET + page_off), (const char*)src + copied, chunk);
+    while (copied < n) {
+        void *kaddr;
+        size_t chunk;
+        if (user_resolve_leaf(t, (uint64_t)dst + copied, 1, &kaddr, &chunk) < 0)
+            return -EFAULT;
+        if (chunk > n - copied)
+            chunk = n - copied;
+        memcpy(kaddr, (const char *)src + copied, chunk);
         copied += chunk;
-        n -= chunk;
     }
     return (long)copied;
 }
@@ -442,22 +481,13 @@ long user_strncpy(char *dst, const char *src, size_t max) {
     size_t i = 0;
     while (i < max - 1) {
         uint64_t va = (uint64_t)(src + i);
-        if (va >= USER_VA_LIMIT) return -EFAULT;
-        uint64_t leaf_base = 0;
-        size_t leaf_size = 0;
-        uint64_t *pte = pt_lookup_leaf(t->pgdir, va, NULL, &leaf_base, &leaf_size);
-        if (!pte || !(*pte & PTE_V)) {
-            // 处理缺页异常
-            if (handle_demand_fault(t, va) < 0) return -EFAULT;
-            pte = pt_lookup_leaf(t->pgdir, va, NULL, &leaf_base, &leaf_size);
-            if (!pte || !(*pte & PTE_V)) return -EFAULT;
-        }
-        if (!pte_user_readable(*pte)) return -EFAULT;
-        paddr_t pa = arch_pte_addr(*pte);
-        size_t page_off = va - leaf_base;
-        size_t chunk = leaf_size - page_off;
+        if (!user_range_ok(va, 1)) return -EFAULT;
+        void *kaddr;
+        size_t chunk;
+        if (user_resolve_leaf(t, va, 0, &kaddr, &chunk) < 0)
+            return -EFAULT;
         if (chunk > max - 1 - i) chunk = max - 1 - i;
-        const char *src_page = (const char *)(pa + PAGE_OFFSET + page_off);
+        const char *src_page = (const char *)kaddr;
         for (size_t j = 0; j < chunk; j++) {
             dst[i + j] = src_page[j];
             if (src_page[j] == '\0') return (long)(i + j);

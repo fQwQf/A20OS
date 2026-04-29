@@ -6,9 +6,13 @@
  */
 
 #include "fs/procfs.h"
+#include "fs/file.h"
+#include "fs/block_cache.h"
+#include "fs/page_cache.h"
 #include "proc/proc.h"
 #include "mm/mm.h"
 #include "mm/frame.h"
+#include "mm/slab.h"
 #include "mm/vm.h"
 #include "core/timer.h"
 #include "core/string.h"
@@ -43,8 +47,11 @@ typedef enum {
     PF_SYS_FS_LEASE_BREAK_TIME,
     PF_SYS_KERNEL,
     PF_SYS_KERNEL_PID_MAX,
-    PF_SYS_KERNEL_SCHED_AUTOGROUP,
+    PF_SYS_KERNEL_PIDMAP,
     PF_SYS_KERNEL_TAINTED,
+    PF_A20,
+    PF_A20_BCACHE,
+    PF_A20_PAGE_CACHE,
     PF_SELF,         // /proc/self - 当前进程的 pid
     PF_FSTYPE,       // /proc/filesystems - 支持的文件系统
 } pf_type_t;
@@ -110,40 +117,58 @@ static void append_vma_flags(char *buf, size_t bufsz, size_t *off, vm_area_t *vm
     appendf(buf, bufsz, off, "\n");
 }
 
-static size_t vma_resident_pages(mm_struct_t *mm, vm_area_t *vma) {
-    size_t pages = 0;
-    if (!mm || !mm->pgdir || !vma) return 0;
-    for (uint64_t va = vma->start; va < vma->end; ) {
-        uint64_t base = 0;
-        size_t size = 0;
-        uint64_t *pte = pt_lookup_leaf(mm->pgdir, va, NULL, &base, &size);
-        if (pte && (*pte & PTE_V) && arch_pte_is_leaf(*pte)) {
-            pages += size / PAGE_SIZE;
-            va = base + size;
-        } else {
-            va += PAGE_SIZE;
-        }
-    }
-    return pages;
-}
+typedef struct vma_smaps_stats {
+    size_t rss_pages;
+    size_t shared_clean_pages;
+    size_t shared_dirty_pages;
+    size_t private_clean_pages;
+    size_t private_dirty_pages;
+    size_t anonymous_pages;
+    size_t anon_huge_pages;
+    size_t shmem_pmd_pages;
+    size_t file_pmd_pages;
+} vma_smaps_stats_t;
 
-static size_t vma_huge_pages(mm_struct_t *mm, vm_area_t *vma) {
-    size_t pages = 0;
-    if (!mm || !mm->pgdir || !vma) return 0;
+static void vma_collect_smaps_stats(mm_struct_t *mm, vm_area_t *vma,
+                                    vma_smaps_stats_t *stats) {
+    if (!stats) return;
+    memset(stats, 0, sizeof(*stats));
+    if (!mm || !mm->pgdir || !vma) return;
+
     for (uint64_t va = vma->start; va < vma->end; ) {
         int level = 0;
         uint64_t base = 0;
         size_t size = 0;
         uint64_t *pte = pt_lookup_leaf(mm->pgdir, va, &level, &base, &size);
         if (pte && (*pte & PTE_V) && arch_pte_is_leaf(*pte)) {
-            if (level > 0)
-                pages += size / PAGE_SIZE;
+            size_t pages = size / PAGE_SIZE;
+            int shared = (vma->vm_flags & VM_SHARED) != 0;
+            int dirty = (*pte & PTE_D) != 0;
+            int anon = (vma->vm_flags & VM_ANON) != 0;
+
+            stats->rss_pages += pages;
+            if (shared) {
+                if (dirty) stats->shared_dirty_pages += pages;
+                else stats->shared_clean_pages += pages;
+            } else {
+                if (dirty) stats->private_dirty_pages += pages;
+                else stats->private_clean_pages += pages;
+            }
+            if (anon)
+                stats->anonymous_pages += pages;
+            if (level > 0) {
+                if (anon && shared)
+                    stats->shmem_pmd_pages += pages;
+                else if (anon)
+                    stats->anon_huge_pages += pages;
+                else
+                    stats->file_pmd_pages += pages;
+            }
             va = base + size;
         } else {
             va += PAGE_SIZE;
         }
     }
-    return pages;
 }
 
 static void generate_pid_maps(task_t *t, char *buf, size_t bufsz, int smaps) {
@@ -155,9 +180,10 @@ static void generate_pid_maps(task_t *t, char *buf, size_t bufsz, int smaps) {
         char x = (v->vm_flags & VM_EXEC) ? 'x' : '-';
         char s = (v->vm_flags & VM_SHARED) ? 's' : 'p';
         size_t kb = (size_t)(v->end - v->start) / 1024;
-        size_t rss_kb = vma_resident_pages(t->mm, v) * PAGE_SIZE / 1024;
-        size_t huge_kb = vma_huge_pages(t->mm, v) * PAGE_SIZE / 1024;
-        int thp_eligible = !t->thp_disabled && !(v->vm_flags & VM_NOHUGEPAGE) &&
+        vma_smaps_stats_t st;
+        vma_collect_smaps_stats(t->mm, v, &st);
+        size_t rss_kb = st.rss_pages * PAGE_SIZE / 1024;
+        int thp_eligible = !t->policy.thp_disabled && !(v->vm_flags & VM_NOHUGEPAGE) &&
                            (v->vm_flags & (VM_HUGEPAGE | VM_ANON)) &&
                            (v->end - v->start) >= (2UL * 1024 * 1024);
 
@@ -171,25 +197,30 @@ static void generate_pid_maps(task_t *t, char *buf, size_t bufsz, int smaps) {
                 "MMUPageSize:    %8lu kB\n"
                 "Rss:            %8lu kB\n"
                 "Pss:            %8lu kB\n"
-                "Shared_Clean:          0 kB\n"
-                "Shared_Dirty:          0 kB\n"
-                "Private_Clean:         0 kB\n"
+                "Shared_Clean:   %8lu kB\n"
+                "Shared_Dirty:   %8lu kB\n"
+                "Private_Clean:  %8lu kB\n"
                 "Private_Dirty:  %8lu kB\n"
                 "Referenced:     %8lu kB\n"
                 "Anonymous:      %8lu kB\n"
                 "AnonHugePages:  %8lu kB\n"
-                "ShmemPmdMapped:        0 kB\n"
-                "FilePmdMapped:         0 kB\n"
+                "ShmemPmdMapped: %8lu kB\n"
+                "FilePmdMapped:  %8lu kB\n"
                 "THPeligible:    %8d\n",
                 (unsigned long)kb,
                 (unsigned long)(PAGE_SIZE / 1024),
                 (unsigned long)(PAGE_SIZE / 1024),
                 (unsigned long)rss_kb,
                 (unsigned long)rss_kb,
+                (unsigned long)(st.shared_clean_pages * PAGE_SIZE / 1024),
+                (unsigned long)(st.shared_dirty_pages * PAGE_SIZE / 1024),
+                (unsigned long)(st.private_clean_pages * PAGE_SIZE / 1024),
+                (unsigned long)(st.private_dirty_pages * PAGE_SIZE / 1024),
                 (unsigned long)rss_kb,
-                (unsigned long)rss_kb,
-                (unsigned long)((v->vm_flags & VM_ANON) ? rss_kb : 0),
-                (unsigned long)huge_kb,
+                (unsigned long)(st.anonymous_pages * PAGE_SIZE / 1024),
+                (unsigned long)(st.anon_huge_pages * PAGE_SIZE / 1024),
+                (unsigned long)(st.shmem_pmd_pages * PAGE_SIZE / 1024),
+                (unsigned long)(st.file_pmd_pages * PAGE_SIZE / 1024),
                 thp_eligible);
         append_vma_flags(buf, bufsz, &off, v);
     }
@@ -203,19 +234,54 @@ static int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
         size_t free_frames = frame_free_count();
         size_t total_kb = pfa.total_frames * PAGE_SIZE / 1024;
         size_t free_kb = free_frames * PAGE_SIZE / 1024;
+        slab_stats_t slab;
+        bcache_stats_t bc;
+        proc_vm_stats_t vmstats;
+        pfa_huge_stats_t huge;
+        slab_get_stats(&slab);
+        bcache_get_stats(&bc);
+        proc_get_vm_stats(&vmstats);
+        pfa_get_huge_stats(&huge);
+        size_t buffers_kb = bc.block_pool_bytes / 1024;
+        size_t cached_kb = bc.valid_pages * PCACHE_PAGE_SIZE / 1024;
+        size_t dirty_kb = (bc.dirty_blocks * BCACHE_BLOCK_SIZE +
+                           bc.dirty_pages * PCACHE_PAGE_SIZE) / 1024;
+        size_t slab_kb = slab.total_bytes / 1024;
+        size_t sreclaim_kb = slab.reclaimable_bytes / 1024;
+        size_t sunreclaim_kb = slab_kb > sreclaim_kb ? slab_kb - sreclaim_kb : 0;
+        size_t available_kb = free_kb + cached_kb + sreclaim_kb;
+        if (available_kb > total_kb)
+            available_kb = total_kb;
         snprintf(buf, bufsz,
             "MemTotal:       %lu kB\n"
             "MemFree:        %lu kB\n"
             "MemAvailable:   %lu kB\n"
-            "Buffers:           0 kB\n"
-            "Cached:            0 kB\n"
-            "AnonHugePages:     0 kB\n"
-            "ShmemHugePages:    0 kB\n"
-            "FileHugePages:     0 kB\n"
-            "HugePages_Total:   0\n"
-            "HugePages_Free:    0\n"
+            "Buffers:        %lu kB\n"
+            "Cached:         %lu kB\n"
+            "Dirty:          %lu kB\n"
+            "Slab:           %lu kB\n"
+            "SReclaimable:   %lu kB\n"
+            "SUnreclaim:     %lu kB\n"
+            "AnonHugePages:  %lu kB\n"
+            "ShmemHugePages: %lu kB\n"
+            "FileHugePages:  %lu kB\n"
+            "HugePages_Total: %lu\n"
+            "HugePages_Free:  %lu\n"
             "Hugepagesize:   2048 kB\n",
-            (unsigned long)total_kb, (unsigned long)free_kb, (unsigned long)free_kb);
+            (unsigned long)total_kb,
+            (unsigned long)free_kb,
+            (unsigned long)available_kb,
+            (unsigned long)buffers_kb,
+            (unsigned long)cached_kb,
+            (unsigned long)dirty_kb,
+            (unsigned long)slab_kb,
+            (unsigned long)sreclaim_kb,
+            (unsigned long)sunreclaim_kb,
+            (unsigned long)(vmstats.anon_huge_pages * PAGE_SIZE / 1024),
+            (unsigned long)(vmstats.shmem_huge_pages * PAGE_SIZE / 1024),
+            (unsigned long)(vmstats.file_huge_pages * PAGE_SIZE / 1024),
+            (unsigned long)huge.total_huge_pages,
+            (unsigned long)huge.free_huge_pages);
         break;
     }
     case PF_VERSION:
@@ -250,6 +316,42 @@ static int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
     case PF_NET:
         net_format_status(buf, bufsz);
         break;
+    case PF_A20_BCACHE: {
+        bcache_stats_t bc;
+        bcache_get_stats(&bc);
+        snprintf(buf, bufsz,
+            "caches: %lu\n"
+            "block_pool_bytes: %lu\n"
+            "page_pool_bytes: %lu\n"
+            "valid_blocks: %lu\n"
+            "dirty_blocks: %lu\n"
+            "valid_pages: %lu\n"
+            "dirty_pages: %lu\n",
+            (unsigned long)bc.caches,
+            (unsigned long)bc.block_pool_bytes,
+            (unsigned long)bc.page_pool_bytes,
+            (unsigned long)bc.valid_blocks,
+            (unsigned long)bc.dirty_blocks,
+            (unsigned long)bc.valid_pages,
+            (unsigned long)bc.dirty_pages);
+        break;
+    }
+    case PF_A20_PAGE_CACHE: {
+        page_cache_stats_t pc;
+        page_cache_get_stats(&pc);
+        snprintf(buf, bufsz,
+            "capacity: %lu\n"
+            "bytes: %lu\n"
+            "valid: %lu\n"
+            "dirty: %lu\n"
+            "pinned: %lu\n",
+            (unsigned long)pc.capacity,
+            (unsigned long)pc.bytes,
+            (unsigned long)pc.valid,
+            (unsigned long)pc.dirty,
+            (unsigned long)pc.pinned);
+        break;
+    }
     case PF_PID_STAT: {  // 生成进程 stat 信息
         task_t *t = proc_find(pid);
         if (!t) { snprintf(buf, bufsz, "%d (unknown) S 0 0\n", pid); break; }
@@ -266,6 +368,16 @@ static int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
         if (t->state == PROC_RUNNING) state = "R (running)";
         else if (t->state == PROC_BLOCKED) state = "S (sleeping)";
         else if (t->state == PROC_ZOMBIE) state = "Z (zombie)";
+        char groups[160];
+        size_t glen = 0;
+        groups[0] = '\0';
+        for (int i = 0; i < t->cred.ngroups && i < MAX_GROUPS; i++) {
+            int n = snprintf(groups + glen, sizeof(groups) - glen, "%s%d",
+                             i ? " " : "", t->cred.groups[i]);
+            if (n < 0 || (size_t)n >= sizeof(groups) - glen)
+                break;
+            glen += (size_t)n;
+        }
         snprintf(buf, bufsz,
             "Name:\t%s\n"
             "Pid:\t%d\n"
@@ -273,8 +385,22 @@ static int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
             "PGid:\t%d\n"
             "Sid:\t%d\n"
             "State:\t%s\n"
+            "Uid:\t%d\t%d\t%d\t%d\n"
+            "Gid:\t%d\t%d\t%d\t%d\n"
+            "Groups:\t%s\n"
+            "CapInh:\t%016lx\n"
+            "CapPrm:\t%016lx\n"
+            "CapEff:\t%016lx\n"
+            "CapBnd:\t%016lx\n"
             "Threads:\t1\n",
-            t->name, t->pid, t->ppid, t->pgid, t->sid, state);
+            t->name, t->pid, t->ppid, t->pgid, t->sid, state,
+            t->cred.uid, t->cred.euid, t->cred.suid, t->cred.fsuid,
+            t->cred.gid, t->cred.egid, t->cred.sgid, t->cred.fsgid,
+            groups,
+            (unsigned long)t->cred.cap_inheritable,
+            (unsigned long)t->cred.cap_permitted,
+            (unsigned long)t->cred.cap_effective,
+            (unsigned long)t->cred.cap_bounding);
         break;
     }
     case PF_PID_STATM: {
@@ -297,14 +423,14 @@ static int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
     }
     case PF_PID_OOM_SCORE_ADJ: {
         task_t *t = proc_find(pid);
-        snprintf(buf, bufsz, "%d\n", t ? t->oom_score_adj : 0);
+        snprintf(buf, bufsz, "%d\n", t ? t->policy.oom_score_adj : 0);
         break;
     }
     case PF_SYS_KERNEL_PID_MAX:
         snprintf(buf, bufsz, "%d\n", proc_pid_max());
         break;
-    case PF_SYS_KERNEL_SCHED_AUTOGROUP:
-        snprintf(buf, bufsz, "0\n");
+    case PF_SYS_KERNEL_PIDMAP:
+        proc_format_pidmap(buf, bufsz);
         break;
     case PF_SYS_KERNEL_TAINTED:
         snprintf(buf, bufsz, "0\n");
@@ -342,6 +468,10 @@ static pf_type_t name_to_type(const char *name, int *out_pid) {
     if (strcmp(name, "loadavg") == 0) return PF_LOADAVG;
     if (strcmp(name, "net") == 0) return PF_NET;
     if (strcmp(name, "filesystems") == 0) return PF_FSTYPE;
+    if (strcmp(name, "pidmap") == 0) return PF_SYS_KERNEL_PIDMAP;
+    if (strcmp(name, "a20") == 0) return PF_A20;
+    if (strcmp(name, "bcache") == 0) return PF_A20_BCACHE;
+    if (strcmp(name, "page_cache") == 0) return PF_A20_PAGE_CACHE;
     if (is_pid_str(name)) {
         *out_pid = atoi(name);
         return PF_ROOT;
@@ -401,12 +531,21 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
     } else if (dp && dp->type == PF_SYS_KERNEL && strcmp(name, "pid_max") == 0) {
         child = new_entry(name, PF_SYS_KERNEL_PID_MAX, 0);
         type = PF_SYS_KERNEL_PID_MAX;
-    } else if (dp && dp->type == PF_SYS_KERNEL && strcmp(name, "sched_autogroup_enabled") == 0) {
-        child = new_entry(name, PF_SYS_KERNEL_SCHED_AUTOGROUP, 0);
-        type = PF_SYS_KERNEL_SCHED_AUTOGROUP;
+    } else if (dp && dp->type == PF_SYS_KERNEL && strcmp(name, "pidmap") == 0) {
+        child = new_entry(name, PF_SYS_KERNEL_PIDMAP, 0);
+        type = PF_SYS_KERNEL_PIDMAP;
     } else if (dp && dp->type == PF_SYS_KERNEL && strcmp(name, "tainted") == 0) {
         child = new_entry(name, PF_SYS_KERNEL_TAINTED, 0);
         type = PF_SYS_KERNEL_TAINTED;
+    } else if (dp && dp->type == PF_ROOT && dp->pid == 0 && strcmp(name, "a20") == 0) {
+        child = new_entry(name, PF_A20, 0);
+        type = PF_A20;
+    } else if (dp && dp->type == PF_A20 && strcmp(name, "bcache") == 0) {
+        child = new_entry(name, PF_A20_BCACHE, 0);
+        type = PF_A20_BCACHE;
+    } else if (dp && dp->type == PF_A20 && strcmp(name, "page_cache") == 0) {
+        child = new_entry(name, PF_A20_PAGE_CACHE, 0);
+        type = PF_A20_PAGE_CACHE;
     } else if (type == PF_SELF) {
         task_t *cur = proc_current();
         child = new_entry(name, PF_ROOT, cur ? cur->pid : 0);
@@ -416,6 +555,8 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
                type == PF_PID_STATM || type == PF_PID_MAPS ||
                type == PF_PID_SMAPS || type == PF_PID_OOM_SCORE_ADJ) {
         child = new_entry(name, type, dp ? dp->pid : 0);
+    } else if (type == PF_ROOT) {
+        return -ENOENT;
     } else {
         child = new_entry(name, type, 0);
     }
@@ -426,15 +567,16 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
     memset(vn, 0, sizeof(*vn));
     vn->ino = (uint64_t)(uintptr_t)child;
     vn->type = ((type == PF_ROOT && is_pid_str(name)) || type == PF_SELF ||
-                type == PF_SYS || type == PF_SYS_FS || type == PF_SYS_KERNEL) ?
+                type == PF_SYS || type == PF_SYS_FS || type == PF_SYS_KERNEL ||
+                type == PF_A20) ?
                VFS_FT_DIR : VFS_FT_REGULAR;
     vn->mode = (vn->type == VFS_FT_DIR) ? (S_IFDIR | 0555) : (S_IFREG | 0444);
-    if (type == PF_PID_OOM_SCORE_ADJ || type == PF_SYS_KERNEL_SCHED_AUTOGROUP ||
+    if (type == PF_PID_OOM_SCORE_ADJ ||
         type == PF_SYS_FS_PIPE_MAX_SIZE || type == PF_SYS_FS_LEASE_BREAK_TIME)
         vn->mode = S_IFREG | 0644;
-    vn->ref_count = 1;
+    vnode_ref_init(vn, 1);
     vn->parent = dir;
-    dir->ref_count++;
+    vnode_get(dir);
     vn->ops = dir->ops;
 
     procfs_priv_t *priv = procfs_priv_create(child->type, child->pid);
@@ -497,11 +639,9 @@ static int procfs_fwrite(vfile_t *vf, const char *buf, size_t count) {
             return -EINVAL;
         task_t *t = proc_find(p->pid);
         if (!t) t = proc_current();
-        if (t) t->oom_score_adj = value;
+        if (t) t->policy.oom_score_adj = value;
         return (int)count;
     }
-    if (p->type == PF_SYS_KERNEL_SCHED_AUTOGROUP)
-        return (int)count;
     if (p->type == PF_SYS_KERNEL_PID_MAX) {
         char tmp[32];
         size_t n = count < sizeof(tmp) - 1 ? count : sizeof(tmp) - 1;
@@ -548,24 +688,46 @@ static long procfs_flseek(vfile_t *vf, long offset, int whence) {
 static int procfs_freaddir(vfile_t *vf, void *dirp, size_t count) {
     static const char *root_entries[] = {
         ".", "..", "meminfo", "version", "uptime", "cmdline",
-        "cpuinfo", "mounts", "self", "loadavg", "net", "filesystems", NULL
+        "cpuinfo", "mounts", "self", "loadavg", "net", "filesystems",
+        "pidmap", "sys", "a20", NULL
     };
     static const char *pid_entries[] = {
         ".", "..", "stat", "status", "statm", "maps", "smaps", NULL
     };
+    static const char *sys_entries[] = {
+        ".", "..", "fs", "kernel", NULL
+    };
+    static const char *sys_fs_entries[] = {
+        ".", "..", "pipe-max-size", "lease-break-time", NULL
+    };
+    static const char *sys_kernel_entries[] = {
+        ".", "..", "pid_max", "pidmap", "tainted", NULL
+    };
+    static const char *a20_entries[] = {
+        ".", "..", "bcache", "page_cache", NULL
+    };
     procfs_priv_t *p = (procfs_priv_t *)vf->priv;
-    const char **entries = (p && p->type == PF_ROOT && p->pid > 0) ?
-                           pid_entries : root_entries;
+    const char **entries = root_entries;
+    if (p && p->type == PF_ROOT && p->pid > 0)
+        entries = pid_entries;
+    else if (p && p->type == PF_SYS)
+        entries = sys_entries;
+    else if (p && p->type == PF_SYS_FS)
+        entries = sys_fs_entries;
+    else if (p && p->type == PF_SYS_KERNEL)
+        entries = sys_kernel_entries;
+    else if (p && p->type == PF_A20)
+        entries = a20_entries;
     int idx = (int)(vf->offset);
     size_t total = 0;
     char *out = (char *)dirp;
 
     while (entries[idx] && total < count) {
         size_t namelen = strlen(entries[idx]);
-        size_t reclen = (sizeof(a20_dirent64_t) + namelen + 1 + 7) & ~7UL;
+        size_t reclen = (sizeof(vfs_dirent64_t) + namelen + 1 + 7) & ~7UL;
         if (total + reclen > count) break;
 
-        a20_dirent64_t *d = (a20_dirent64_t *)(out + total);
+        vfs_dirent64_t *d = (vfs_dirent64_t *)(out + total);
         d->d_ino = (uint64_t)idx;
         d->d_off = (int64_t)(total + reclen);
         d->d_reclen = (uint16_t)reclen;
@@ -601,7 +763,7 @@ vnode_t *procfs_mount(void) {
     root->ino = 0;  /* 0 = no pf_entry_t to free in release */
     root->type = VFS_FT_DIR;
     root->mode = S_IFDIR | 0555;
-    root->ref_count = 1;
+    vnode_ref_init(root, 1);
     root->ops = &g_procfs_vnode_ops;
     root->size = 0;
 
@@ -612,18 +774,17 @@ vnode_t *procfs_mount(void) {
 
 // 打开 procfs vnode
 vfile_t *procfs_open_vnode(vnode_t *vn, int flags) {
-    vfile_t *vf = (vfile_t *)kmalloc(sizeof(vfile_t));
+    vfile_t *vf = vfile_alloc();
     if (!vf) return NULL;
-    memset(vf, 0, sizeof(*vf));
     vf->vnode = vn;
     vf->flags = flags;
-    vn->ref_count++;
+    vnode_get(vn);
     vf->ops = &g_procfs_fops;
-    vf->ref_count = 1;
+    refcount_set(&vf->ref_count, 1);
 
     procfs_priv_t *vn_priv = (procfs_priv_t *)vn->fs_data;
     procfs_priv_t *priv = procfs_priv_create(vn_priv ? vn_priv->type : PF_ROOT, vn_priv ? vn_priv->pid : 0);
-    if (!priv) { kfree(vf); return NULL; }
+    if (!priv) { vfile_free(vf); return NULL; }
     vf->priv = priv;
     return vf;
 }
