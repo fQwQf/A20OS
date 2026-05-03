@@ -450,8 +450,6 @@ uint64_t prot_to_pte(int prot) {
 
 // 创建内存映射（mmap 系统调用的实现）
 uint64_t mm_mmap(mm_struct_t *mm, uint64_t addr, size_t len, int prot, int flags) {
-    kdebug("[MMAP] req_addr=0x%lx len=%lu prot=%d -> ", addr, len, prot);
-
     len = ROUND_UP(len, PAGE_SIZE);
     if (len == 0) return (uint64_t)-EINVAL;
     if (len > USER_VA_LIMIT) return (uint64_t)-ENOMEM;
@@ -498,8 +496,6 @@ uint64_t mm_mmap(mm_struct_t *mm, uint64_t addr, size_t len, int prot, int flags
 
     mm_insert_vma(mm, vma);
     mm->total_vm += len / PAGE_SIZE;
-
-    kdebug("ret=0x%lx\n", addr);
 
     return addr;
 }
@@ -1017,7 +1013,6 @@ mm_struct_t *mm_fork(mm_struct_t *parent) {
     for (vm_area_t *pv = parent->mmap; pv; pv = pv->next) {
         if (pv->vm_flags & VM_DONTFORK)
             continue;
-        kdebug("VMA: pv=%p\n", pv);
         vm_area_t *cv = kcalloc(1, sizeof(vm_area_t));
         if (!cv) goto fail;
         *cv = *pv;

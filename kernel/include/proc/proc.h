@@ -64,7 +64,8 @@ typedef struct proc_vm_stats {
 
 /*
  * task_t lifetime:
- * - Storage currently comes from the static proc table.
+ * - The idle task is static; normal tasks are dynamically allocated and linked
+ *   into the global task list.
  * - proc_lock protects allocation, PID/run-queue membership, and most state
  *   transitions.
  * - proc_current()/proc_set_current() use CPU-local slots. SMP still needs
@@ -96,7 +97,10 @@ typedef struct task_t {
     int      on_rq;
     struct task_t *rq_next;
     struct task_t *rq_prev;
+    struct task_t *wait_next;
     uint64_t total_time;
+    uint64_t child_utime;
+    uint64_t child_stime;
 
     struct signal_state *signals;
 
@@ -118,6 +122,9 @@ typedef struct task_t {
     char      name[64];
     char      exec_path[MAX_PATH_LEN];
     struct task_t *pid_hash_next;
+    struct task_t *all_next;
+    struct task_t *all_prev;
+    int       dynamic_alloc;
     void     *scratch_buf;
     size_t    scratch_size;
 
