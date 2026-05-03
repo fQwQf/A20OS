@@ -5,6 +5,7 @@
 #include "fs/file.h"
 #include "mm/slab.h"
 #include "proc/proc.h"
+#include "proc/signal.h"
 
 #define PIPE_DEFAULT_SIZE (16 * PIPE_BUF_SIZE)
 
@@ -16,7 +17,66 @@ typedef struct pipe_buf {
     int      writer_closed;
     int      reader_closed;
     int      ref;
+    task_t  *read_waiters;
+    task_t  *write_waiters;
 } pipe_buf_t;
+
+static void pipe_wake_all(task_t **head)
+{
+    if (!head)
+        return;
+    task_t *t = *head;
+    *head = NULL;
+    while (t) {
+        task_t *next = t->wait_next;
+        t->wait_next = NULL;
+        proc_set_wake_time(t, 0);
+        if (t->state == PROC_BLOCKED)
+            proc_make_ready(t);
+        t = next;
+    }
+}
+
+static void pipe_unlink_waiter(task_t **head, task_t *target)
+{
+    if (!head || !target)
+        return;
+    task_t **pp = head;
+    while (*pp) {
+        if (*pp == target) {
+            *pp = target->wait_next;
+            target->wait_next = NULL;
+            return;
+        }
+        pp = &(*pp)->wait_next;
+    }
+}
+
+static int pipe_wait_interruptible(pipe_buf_t *pb, task_t **head, const char *op)
+{
+    task_t *t = proc_current();
+    if (!t) {
+        proc_yield();
+        return 0;
+    }
+    (void)pb;
+    (void)op;
+    if (signal_task_has_unblocked(t))
+        return -EINTR;
+    if (head) {
+        t->wait_next = *head;
+        *head = t;
+    }
+    proc_set_wake_time(t, 0);
+    t->state = PROC_BLOCKED;
+    sched();
+    if (head)
+        pipe_unlink_waiter(head, t);
+    if (t->state == PROC_BLOCKED)
+        t->state = PROC_RUNNING;
+    proc_set_wake_time(t, 0);
+    return signal_task_has_unblocked(t) ? -EINTR : 0;
+}
 
 static int pipe_read(vfile_t *vf, char *buf, size_t count)
 {
@@ -26,7 +86,8 @@ static int pipe_read(vfile_t *vf, char *buf, size_t count)
     while (pb->used == 0) {
         if (pb->writer_closed) return 0;
         if (vf->flags & O_NONBLOCK) return -EAGAIN;
-        proc_yield();
+        int wr = pipe_wait_interruptible(pb, &pb->read_waiters, "read");
+        if (wr < 0) return wr;
     }
     size_t n = pb->used < count ? pb->used : count;
     size_t first = pb->capacity - pb->tail;
@@ -38,6 +99,7 @@ static int pipe_read(vfile_t *vf, char *buf, size_t count)
         memcpy(buf + first, pb->data, second);
     pb->tail = (pb->tail + n) % pb->capacity;
     pb->used -= n;
+    pipe_wake_all(&pb->write_waiters);
     return (int)n;
 }
 
@@ -46,13 +108,24 @@ static int pipe_write(vfile_t *vf, const char *buf, size_t count)
     pipe_buf_t *pb = (pipe_buf_t *)vf->priv;
     if (!pb) return -EBADF;
     if (count == 0) return 0;
-    if (pb->reader_closed) return -EPIPE;
+    if (pb->reader_closed) {
+        task_t *t = proc_current();
+        if (t)
+            signal_send(t->pid, SIGPIPE);
+        return -EPIPE;
+    }
     size_t n = 0;
     while (n < count) {
         while (pb->used == pb->capacity) {
-            if (pb->reader_closed) return n ? (int)n : -EPIPE;
+            if (pb->reader_closed) {
+                task_t *t = proc_current();
+                if (t)
+                    signal_send(t->pid, SIGPIPE);
+                return n ? (int)n : -EPIPE;
+            }
             if (vf->flags & O_NONBLOCK) return n ? (int)n : -EAGAIN;
-            proc_yield();
+            int wr = pipe_wait_interruptible(pb, &pb->write_waiters, "write");
+            if (wr < 0) return n ? (int)n : wr;
         }
         size_t space = pb->capacity - pb->used;
         size_t chunk = count - n;
@@ -68,6 +141,7 @@ static int pipe_write(vfile_t *vf, const char *buf, size_t count)
         pb->head = (pb->head + chunk) % pb->capacity;
         pb->used += chunk;
         n += chunk;
+        pipe_wake_all(&pb->read_waiters);
     }
     return (int)n;
 }
@@ -114,7 +188,11 @@ static int pipe_read_close(vfile_t *vf)
 {
     pipe_buf_t *pb = (pipe_buf_t *)vf->priv;
     if (pb) {
-        pb->reader_closed = 1;
+        int last_reader = refcount_read(&vf->ref_count) == 0;
+        if (last_reader) {
+            pb->reader_closed = 1;
+            pipe_wake_all(&pb->write_waiters);
+        }
         pb->ref--;
         if (!pb->ref) {
             if (pb->data) kfree(pb->data);
@@ -128,7 +206,11 @@ static int pipe_write_close(vfile_t *vf)
 {
     pipe_buf_t *pb = (pipe_buf_t *)vf->priv;
     if (pb) {
-        pb->writer_closed = 1;
+        int last_writer = refcount_read(&vf->ref_count) == 0;
+        if (last_writer) {
+            pb->writer_closed = 1;
+            pipe_wake_all(&pb->read_waiters);
+        }
         pb->ref--;
         if (!pb->ref) {
             if (pb->data) kfree(pb->data);

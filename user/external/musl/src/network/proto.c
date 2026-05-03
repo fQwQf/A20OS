@@ -5,6 +5,7 @@
 
 static int idx;
 static const unsigned char protos[] = {
+	"\000hopopt\0"
 	"\000ip\0"
 	"\001icmp\0"
 	"\002igmp\0"

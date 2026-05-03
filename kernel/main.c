@@ -255,6 +255,8 @@ void init_kthread(void) {
     /* Become the init reaper: wait for any children (including the user init
      * process) so they don't become un-reaped zombies. */
     while (1) {
-        proc_wait4(-1, NULL, 0);
+        int ret = proc_wait4(-1, NULL, 0);
+        if (ret == -ECHILD)
+            proc_yield();
     }
 }
