@@ -42,9 +42,11 @@
 #define EADDRINUSE   98
 #define EADDRNOTAVAIL 99
 #define ENETUNREACH  101
+#define EINPROGRESS  115
 #define EISCONN      106
 #define ENOTCONN     107
 #define EDESTADDRREQ 89
+#define ENOPROTOOPT  92
 #define ECONNREFUSED 111
 #define ETIMEDOUT    110
 #define ENODATA      61

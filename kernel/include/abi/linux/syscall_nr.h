@@ -159,6 +159,7 @@
 #define SYS_mremap         216
 #define SYS_mmap           222
 #define SYS_mprotect       226
+#define SYS_msync          227
 #define SYS_madvise        233
 #define SYS_clone          220
 #define SYS_execve         221

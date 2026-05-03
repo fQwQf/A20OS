@@ -7,10 +7,12 @@
 #define SCHED_LEVELS 8
 #define SCHED_NO_DEADLINE (~0ULL)
 
-extern task_t proc_table[MAX_PROCS];
 extern spinlock_t proc_lock;
 
 task_t *proc_idle_task(void);
+task_t *proc_first_task_locked(void);
+task_t *proc_next_task_locked(task_t *t);
+void proc_unlink_task_locked(task_t *t);
 task_t *proc_set_current(task_t *next);
 uint64_t *proc_kernel_pgdir_shared(void);
 
@@ -31,5 +33,6 @@ void proc_sched_kick_cpu(unsigned cpu);
 void proc_runq_enqueue_locked(task_t *t);
 void proc_runq_remove_locked(task_t *t);
 task_t *proc_runq_pick_locked(void);
+int proc_has_runnable_locked(void);
 
 #endif

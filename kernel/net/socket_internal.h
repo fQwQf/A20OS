@@ -12,8 +12,9 @@ struct udp_pcb;
 struct raw_pcb;
 struct tcp_pcb;
 
-#define NET_MAX_SOCKETS 128
-#define NET_MAX_PAYLOAD 2048
+#define NET_MAX_SOCKETS 1024
+#define NET_MAX_STREAM_PAYLOAD 2048
+#define NET_MAX_PAYLOAD 65535
 #define NET_MAX_QUEUE   128
 #define NET_WAIT_TICKS  MS_TO_TICKS(50)
 #define NET_CONNECT_TIMEOUT_TICKS MS_TO_TICKS(10000)
@@ -50,8 +51,16 @@ typedef struct net_socket {
     int local_tcp;
     int tcp_connecting;
     int tcp_err;
+    int tcp_nodelay;
+    int reuseaddr;
+    int reuseport;
+    uint64_t recv_timeout_ticks;
+    uint64_t send_timeout_ticks;
+    int ipv6_checksum_offset;
+    uint32_t icmp6_filter[8];
+    int icmp6_filter_set;
     int bpf_prog_fd;
-    uint8_t alg_last[NET_MAX_PAYLOAD];
+    uint8_t alg_last[NET_MAX_STREAM_PAYLOAD];
     size_t alg_last_len;
     char alg_type[16];
     char alg_name[64];
@@ -104,6 +113,7 @@ void          net_socket_free(net_socket_t *s);
 void     net_block_on_socket_locked(net_socket_t *s, task_t *cur);
 void     net_clear_socket_waiter(net_socket_t *s, task_t *cur);
 int      net_task_has_unblocked_signal(task_t *t);
+int      net_socket_wait_expired(net_socket_t *s, uint64_t start, int for_write);
 
 void     net_alg_copy_string(char *dst, size_t dstsz,
                              const uint8_t *src, size_t srcsz);

@@ -1,5 +1,12 @@
 #include "syscall_impl.h"
 
+#define LINUX_USER_HZ 100ULL
+
+static uint64_t linux_ticks_to_clock_t(uint64_t ticks)
+{
+    return ticks * LINUX_USER_HZ / TICKS_PER_SEC;
+}
+
 enum {
     CLOCK_REALTIME_ID = 0,
     CLOCK_MONOTONIC_ID = 1,
@@ -85,21 +92,12 @@ int64_t sys_nanosleep(void *req, void *rem) {
 
     task_t *t = proc_current();
     if (t) {
-        if (syscall_sleep_diag_count < 128) {
-            syscall_sleep_diag_count++;
-            kdebug("[SLEEPDBG] enter pid=%d ticks=%lu until=%lu now=%lu\n",
-                  t->pid, (unsigned long)ticks, (unsigned long)until,
-                  (unsigned long)timer_get_ticks());
-        }
         proc_set_wake_time(t, until);
         t->state     = PROC_BLOCKED;
         sched();
-        if (syscall_sleep_diag_count < 128) {
-            syscall_sleep_diag_count++;
-            kdebug("[SLEEPDBG] ret pid=%d now=%lu wake=%lu state=%d\n",
-                  t->pid, (unsigned long)timer_get_ticks(),
-                  (unsigned long)t->wake_time, t->state);
-        }
+        proc_set_wake_time(t, 0);
+        if (signal_task_has_unblocked(t))
+            return -EINTR;
     } else {
         while (timer_get_ticks() < until) __asm__ volatile("nop");
     }
@@ -133,10 +131,12 @@ int64_t sys_times(void *buf) {
     if (t && buf) {
         uint64_t tm[4];
         memset(tm, 0, sizeof(tm));
-        tm[0] = t->total_time;
+        tm[0] = linux_ticks_to_clock_t(t->total_time);
+        tm[2] = linux_ticks_to_clock_t(t->child_utime);
+        tm[3] = linux_ticks_to_clock_t(t->child_stime);
         if (copy_to_user(buf, tm, sizeof(tm)) < 0) return -EFAULT;
     }
-    return (int64_t)(timer_get_ticks());
+    return (int64_t)linux_ticks_to_clock_t(timer_get_ticks());
 }
 
 int64_t sys_time(long *tloc) {
