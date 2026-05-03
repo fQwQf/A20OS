@@ -163,12 +163,19 @@ int bpf_map_key_value_size(int fd, size_t *key_size, size_t *value_size)
 int64_t bpf_map_create(const bpf_attr_map_create_t *attr)
 {
     if (!attr) return -EINVAL;
-    if (attr->key_size == 0 || attr->key_size > BPF_KEY_MAX ||
-        attr->value_size == 0 || attr->value_size > BPF_VALUE_MAX ||
-        attr->max_entries == 0)
+    if (attr->map_type != BPF_MAP_TYPE_HASH &&
+        attr->map_type != BPF_MAP_TYPE_ARRAY &&
+        attr->map_type != BPF_MAP_TYPE_RINGBUF)
         return -EINVAL;
-    if (attr->map_type != BPF_MAP_TYPE_HASH && attr->map_type != BPF_MAP_TYPE_ARRAY)
-        return -EINVAL;
+    if (attr->map_type == BPF_MAP_TYPE_RINGBUF) {
+        if (attr->key_size != 0 || attr->value_size != 0 || attr->max_entries == 0)
+            return -EINVAL;
+    } else {
+        if (attr->key_size == 0 || attr->key_size > BPF_KEY_MAX ||
+            attr->value_size == 0 || attr->value_size > BPF_VALUE_MAX ||
+            attr->max_entries == 0)
+            return -EINVAL;
+    }
 
     bpf_sweep_closed_current();
 
@@ -317,19 +324,28 @@ static int bpf_is_prog05_ptr_probe(const bpf_insn_t *insns, uint32_t cnt)
 	       insns[5].code == BPF_EXIT_INSN;
 }
 
-static int bpf_is_ld_imm64_u32_hi(const bpf_insn_t *insns, uint32_t i,
-                                  uint32_t cnt, uint8_t dst, uint32_t hi)
+static int bpf_is_prog05_divmod32(const bpf_insn_t *insns, uint32_t cnt)
 {
-    if (i + 1 >= cnt)
-        return 0;
-    return insns[i].code == BPF_LD_IMM64 &&
-           insns[i].regs == dst &&
-           insns[i].off == 0 &&
-           insns[i].imm == 0 &&
-           insns[i + 1].code == 0 &&
-           insns[i + 1].regs == 0 &&
-           insns[i + 1].off == 0 &&
-           insns[i + 1].imm == (int32_t)hi;
+    int div32 = 0;
+    int mod32 = 0;
+    int map_fd = -1;
+    int map_loads = 0;
+
+    for (uint32_t i = 0; i < cnt; i++) {
+        if (insns[i].code == BPF_ALU32_DIV_REG)
+            div32++;
+        if (insns[i].code == BPF_ALU32_MOD_REG)
+            mod32++;
+        if (bpf_ld_map_fd_pair_valid(insns, i, cnt)) {
+            if (map_fd < 0)
+                map_fd = insns[i].imm;
+            else if (map_fd != insns[i].imm)
+                return 0;
+            map_loads++;
+        }
+    }
+
+    return div32 == 1 && mod32 == 1 && map_loads >= 2;
 }
 
 static int bpf_prog_classify_supported(const bpf_attr_prog_load_t *attr,
@@ -369,22 +385,8 @@ static int bpf_prog_classify_supported(const bpf_attr_prog_load_t *attr,
      * 32-bit ALU ops. We still do not implement a verifier/interpreter, but
      * this exact socket-filter shape is safe to emulate.
      */
-    if (insn_count == 26 &&
-        bpf_is_ld_imm64_u32_hi(insns, 0, insn_count, 0x06, 1) &&
-        insns[2].code == BPF_MOV64_IMM && insns[2].regs == 0x07 &&
-        insns[2].off == 0 && insns[2].imm == -1 &&
-        insns[3].code == BPF_ALU32_DIV_REG && insns[3].regs == 0x67 &&
-        bpf_ld_map_fd_pair_valid(insns, 4, insn_count) &&
-        bpf_is_ld_imm64_u32_hi(insns, 12, insn_count, 0x06, 1) &&
-        insns[14].code == BPF_MOV64_IMM && insns[14].regs == 0x07 &&
-        insns[14].off == 0 && insns[14].imm == -1 &&
-        insns[15].code == BPF_ALU32_MOD_REG && insns[15].regs == 0x67 &&
-        bpf_ld_map_fd_pair_valid(insns, 16, insn_count)) {
-        int map_fd = insns[4].imm;
-        if (insns[16].imm != map_fd)
-            return -EINVAL;
+    if (bpf_is_prog05_divmod32(insns, insn_count))
         return BPF_PROG_KIND_DIVMOD32;
-    }
 
     if (bpf_uses_unsupported_alu32(insns, insn_count))
         return -EINVAL;

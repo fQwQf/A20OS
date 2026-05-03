@@ -140,7 +140,7 @@ int net_alg_socket_send(net_socket_t *s, const void *buf, size_t len)
 {
     if (!s)
         return -ENOTSOCK;
-    size_t room = NET_MAX_PAYLOAD - s->alg_last_len;
+    size_t room = NET_MAX_STREAM_PAYLOAD - s->alg_last_len;
     size_t n = len < room ? len : room;
     if (n)
         memcpy(s->alg_last + s->alg_last_len, buf, n);

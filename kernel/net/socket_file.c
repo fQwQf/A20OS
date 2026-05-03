@@ -15,10 +15,22 @@ static int net_vfile_read(vfile_t *vf, char *buf, size_t count) {
         return -ENOTSOCK;
     if (s->domain == AF_ALG)
         return net_alg_socket_recv(s, buf, count);
+    uint64_t start = timer_get_ticks();
     for (;;) {
         a20_lwip_poll();
         uint64_t irq = spin_lock_irqsave(&g_net_lock);
         int r = net_dequeue_msg_locked(s, buf, count, NULL, NULL);
+        if (r > 0 && s->type == SOCK_STREAM) {
+            size_t total = (size_t)r;
+            while (total < count && s->rx_head) {
+                int nr = net_dequeue_msg_locked(s, buf + total,
+                                                count - total, NULL, NULL);
+                if (nr <= 0)
+                    break;
+                total += (size_t)nr;
+            }
+            r = (int)total;
+        }
         if (r != -EAGAIN || s->nonblock) {
             spin_unlock_irqrestore(&g_net_lock, irq);
             return r;
@@ -31,6 +43,10 @@ static int net_vfile_read(vfile_t *vf, char *buf, size_t count) {
         if (net_task_has_unblocked_signal(cur)) {
             spin_unlock_irqrestore(&g_net_lock, irq);
             return -EINTR;
+        }
+        if (net_socket_wait_expired(s, start, 0)) {
+            spin_unlock_irqrestore(&g_net_lock, irq);
+            return -EAGAIN;
         }
         net_block_on_socket_locked(s, cur);
         spin_unlock_irqrestore(&g_net_lock, irq);
@@ -47,6 +63,9 @@ static int net_vfile_write(vfile_t *vf, const char *buf, size_t count) {
         return -EMSGSIZE;
     if (s->domain == AF_ALG)
         return net_alg_socket_send(s, buf, count);
+    if ((s->domain == AF_INET || s->domain == AF_INET6) &&
+        (s->udp || s->raw || s->tcp))
+        return net_inet_sendto(s, buf, count, NULL, 0);
     uint64_t irq = spin_lock_irqsave(&g_net_lock);
     if (!s->bound && (s->domain == AF_INET || s->domain == AF_INET6))
         net_sockaddr_loopback(s, net_alloc_ephemeral_port_locked());

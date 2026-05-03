@@ -85,6 +85,29 @@ static uint32_t user_visible_mode(uint32_t mode) {
     return mode;
 }
 
+static int path_is_shebang_script(const char *path)
+{
+    int fd = vfs_open(path, O_RDONLY, 0);
+    if (fd < 0)
+        return 0;
+    char magic[2];
+    int n = vfs_read(fd, magic, sizeof(magic));
+    vfs_close(fd);
+    return n >= 2 && magic[0] == '#' && magic[1] == '!';
+}
+
+static void kstat_apply_script_exec(const char *path, kstat_t *kst)
+{
+    if (!path || !kst)
+        return;
+    if ((kst->st_mode & S_IFMT) != S_IFREG)
+        return;
+    if (kst->st_mode & (S_IXUSR | S_IXGRP | S_IXOTH))
+        return;
+    if (path_is_shebang_script(path))
+        kst->st_mode |= S_IXUSR | S_IXGRP | S_IXOTH;
+}
+
 static void copy_kstat_to_user(void *st, const kstat_t *kst) {
     uint64_t buf64[128 / 8];
     memset(buf64, 0, sizeof(buf64));
@@ -140,6 +163,8 @@ int64_t sys_fstatat(int dirfd, const char *path, void *st, int flags) {
         int pr = syscall_path_at(dirfd, kpath, full, sizeof(full));
         if (pr < 0) return pr;
         r = vfs_fstatat(AT_FDCWD, full, &kst, flags);
+        if (r == 0)
+            kstat_apply_script_exec(full, &kst);
     }
     if (r < 0) return r;
     copy_kstat_to_user(st, &kst);
@@ -266,6 +291,8 @@ int64_t sys_statx(int dirfd, const char *path, int flags, unsigned mask, void *b
         int pr = syscall_path_at(dirfd, kpath, full, sizeof(full));
         if (pr < 0) return pr;
         r = vfs_fstatat(AT_FDCWD, full, &kst, flags);
+        if (r == 0)
+            kstat_apply_script_exec(full, &kst);
     }
     if (r < 0) return r;
 

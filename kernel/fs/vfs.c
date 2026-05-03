@@ -335,6 +335,8 @@ int vfs_mkdir(const char *path, int mode) {
     if (pr < 0)
         return pr;
     vfs_path_trim_trailing_slashes(resolved);
+    if (strcmp(resolved, "/") == 0)
+        return -EEXIST;
 
     mount_t *mnt = vfs_find_mount(resolved);
     if (!mnt || !mnt->root) return -ENOENT;
@@ -665,6 +667,18 @@ int vfs_faccessat2(int dirfd, const char *path, int mode, int flags) {
         uint32_t gid = (flags & AT_EACCESS) ? (cur ? (uint32_t)cur->cred.egid : 0)
                                             : (cur ? (uint32_t)cur->cred.gid : 0);
         r = vfs_mode_has_perm_ids(st.st_mode, st.st_uid, st.st_gid, uid, gid, mode);
+        if (r == -EACCES && mode == X_OK &&
+            (st.st_mode & S_IFMT) == S_IFREG &&
+            !(st.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH))) {
+            int fd = vfs_open(path, O_RDONLY, 0);
+            if (fd >= 0) {
+                char magic[2];
+                int n = vfs_read(fd, magic, sizeof(magic));
+                vfs_close(fd);
+                if (n >= 2 && magic[0] == '#' && magic[1] == '!')
+                    r = 0;
+            }
+        }
     }
     vnode_put(vn);
     return r;

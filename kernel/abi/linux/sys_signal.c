@@ -9,15 +9,44 @@ static int signal_send_permission(task_t *self, task_t *target) {
 }
 
 int64_t sys_kill(int pid, int sig) {
+    if (sig < 0 || sig >= NSIG) return -EINVAL;
+    if (sig == 0) {
+        if (pid > 0)
+            return proc_find(pid) ? 0 : -ESRCH;
+        return 0;
+    }
     if (pid > 0) {
         task_t *self = proc_current();
         task_t *target = proc_find(pid);
         if (!target) return -ESRCH;
         int perm = signal_send_permission(self, target);
         if (perm < 0) return perm;
-        if (sig == 0) return 0;
+        return proc_kill(pid, sig);
     }
-    return proc_kill(pid, sig);
+    if (pid == 0) {
+        task_t *self = proc_current();
+        if (!self) return -ESRCH;
+        int r = proc_kill_pgid(self->pgid, sig, 0);
+        return r < 0 ? r : 0;
+    }
+    if (pid < -1) {
+        int r = proc_kill_pgid(-pid, sig, 0);
+        return r < 0 ? r : 0;
+    }
+
+    int count = 0;
+    int max_pid = proc_pid_max();
+    for (int p = 1; p <= max_pid; p++) {
+        task_t *target = proc_find(p);
+        if (!target || target->pid <= 1 || !target->pgdir)
+            continue;
+        int perm = signal_send_permission(proc_current(), target);
+        if (perm < 0)
+            continue;
+        if (proc_kill(target->pid, sig) == 0)
+            count++;
+    }
+    return count ? 0 : -ESRCH;
 }
 
 int64_t sys_tgkill(int tgid, int tid, int sig) {
@@ -57,12 +86,12 @@ int64_t sys_rt_sigqueueinfo(int tgid, int sig, void *uinfo) {
     return signal_send_info(tgid, sig, info, sizeof(info));
 }
 
-int64_t sys_sigaction(int signum, void *act, void *oldact) {
-    return sys_sigaction_impl(signum, (const sigaction_t *)act, (sigaction_t *)oldact);
+int64_t sys_sigaction(int signum, void *act, void *oldact, size_t sigsetsize) {
+    return sys_sigaction_impl(signum, act, oldact, sigsetsize);
 }
 
-int64_t sys_sigprocmask(int how, void *set, void *oldset) {
-    return sys_sigprocmask_impl(how, (const uint64_t *)set, (uint64_t *)oldset);
+int64_t sys_sigprocmask(int how, void *set, void *oldset, size_t sigsetsize) {
+    return sys_sigprocmask_impl(how, set, oldset, sigsetsize);
 }
 
 int64_t sys_sigreturn(trap_context_t *ctx) {
@@ -79,9 +108,10 @@ int64_t sys_sigreturn(trap_context_t *ctx) {
     return 0;
 }
 
-int64_t sys_sigsuspend(void *mask) {
+int64_t sys_sigsuspend(void *mask, size_t sigsetsize) {
     task_t *t = proc_current();
     if (!t || !t->signals || !mask) return -EINVAL;
+    if (sigsetsize != sizeof(uint64_t)) return -EINVAL;
 
     signal_state_t *ss = (signal_state_t *)t->signals;
     uint64_t old_blocked = ss->blocked;
@@ -91,12 +121,6 @@ int64_t sys_sigsuspend(void *mask) {
     /* Can't block SIGKILL or SIGSTOP */
     new_mask = signal_mask_from_user(new_mask);
     new_mask &= ~(signal_mask_bit(SIGKILL) | signal_mask_bit(SIGSTOP));
-    if (syscall_sig_diag_count < 128) {
-        syscall_sig_diag_count++;
-        kdebug("[SIGSYS] sigsuspend pid=%d old=0x%lx new=0x%lx pending=0x%lx\n",
-              t->pid, (unsigned long)old_blocked, (unsigned long)new_mask,
-              (unsigned long)ss->pending);
-    }
     t->sigsuspend_old_blocked = old_blocked;
     t->sigsuspend_active = 1;
     ss->blocked = new_mask;
@@ -109,9 +133,10 @@ int64_t sys_sigsuspend(void *mask) {
     return -EINTR;
 }
 
-int64_t sys_sigtimedwait(const uint64_t *set, void *info, const void *timeout) {
+int64_t sys_sigtimedwait(const uint64_t *set, void *info, const void *timeout, size_t sigsetsize) {
     task_t *t = proc_current();
     if (!t || !t->signals || !set) return -EINVAL;
+    if (sigsetsize != sizeof(uint64_t)) return -EINVAL;
 
     signal_state_t *ss = (signal_state_t *)t->signals;
     uint64_t mask;

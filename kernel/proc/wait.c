@@ -1,26 +1,27 @@
 #include "proc/proc.h"
 #include "proc/proc_internal.h"
+#include "proc/signal.h"
 #include "core/consts.h"
 #include "core/klog.h"
 
-static int wait_diag_count;
-
 #define WNOHANG 1
+
+static void wait_accumulate_child_time(task_t *parent, task_t *child)
+{
+    if (!parent || !child)
+        return;
+    parent->child_utime += child->total_time;
+}
 
 int proc_wait4(int pid, int *status, int options)
 {
     task_t *t = proc_current();
 
-    if (wait_diag_count < 128) {
-        wait_diag_count++;
-        kdebug("[WAITDBG] enter cur=%d pid=%d opt=0x%x\n",
-               t ? t->pid : -1, pid, options);
-    }
-
 retry:;
     int found = 0;
-    for (int i = 0; i < MAX_PROCS; i++) {
-        task_t *child = &proc_table[i];
+    uint64_t lock_flags = spin_lock_irqsave(&proc_lock);
+    for (task_t *child = proc_first_task_locked(); child;
+         child = proc_next_task_locked(child)) {
         int cstate = __atomic_load_n(&child->state, __ATOMIC_ACQUIRE);
         if (cstate == PROC_UNUSED) continue;
         if (child->ppid != t->pid) continue;
@@ -38,49 +39,31 @@ retry:;
                     *status = (-code) & 0xFF;
             }
             int child_pid = child->pid;
-            if (wait_diag_count < 128) {
-                wait_diag_count++;
-                kdebug("[WAITDBG] reap cur=%d child=%d status=0x%x\n",
-                       t ? t->pid : -1, child_pid, status ? *status : code);
-            }
+            wait_accumulate_child_time(t, child);
+            spin_unlock_irqrestore(&proc_lock, lock_flags);
             proc_free_pid(child_pid);
             return child_pid;
         }
     }
+    spin_unlock_irqrestore(&proc_lock, lock_flags);
 
-    if (!found) {
-        if (wait_diag_count < 128) {
-            wait_diag_count++;
-            kdebug("[WAITDBG] no-child cur=%d pid=%d\n",
-                   t ? t->pid : -1, pid);
-        }
+    if (!found)
         return -ECHILD;
-    }
 
-    if (options & WNOHANG) {
-        if (wait_diag_count < 128) {
-            wait_diag_count++;
-            kdebug("[WAITDBG] nohang cur=%d pid=%d\n",
-                   t ? t->pid : -1, pid);
-        }
+    if (options & WNOHANG)
         return 0;
-    }
+
+    if (signal_task_has_unblocked(t))
+        return -EINTR;
 
     /*
-     * Avoid the classic lost-wakeup race:
-     * a child can exit after the scan above but before we actually block.
-     * Mark ourselves blocked first, then rescan once before scheduling.
+     * Avoid the classic lost-wakeup race: mark the parent blocked while
+     * holding proc_lock, then rescan zombies before dropping the lock.
      */
+    lock_flags = spin_lock_irqsave(&proc_lock);
     t->state = PROC_BLOCKED;
-    __atomic_thread_fence(__ATOMIC_SEQ_CST);
-    if (wait_diag_count < 128) {
-        wait_diag_count++;
-        kdebug("[WAITDBG] block cur=%d pid=%d\n",
-               t ? t->pid : -1, pid);
-    }
-
-    for (int i = 0; i < MAX_PROCS; i++) {
-        task_t *child = &proc_table[i];
+    for (task_t *child = proc_first_task_locked(); child;
+         child = proc_next_task_locked(child)) {
         int cstate = __atomic_load_n(&child->state, __ATOMIC_ACQUIRE);
         if (cstate == PROC_UNUSED) continue;
         if (child->ppid != t->pid) continue;
@@ -98,24 +81,19 @@ retry:;
                     *status = (-code) & 0xFF;
             }
             int child_pid = child->pid;
-            if (wait_diag_count < 128) {
-                wait_diag_count++;
-                kdebug("[WAITDBG] reap-race cur=%d child=%d status=0x%x\n",
-                       t ? t->pid : -1, child_pid, status ? *status : code);
-            }
+            wait_accumulate_child_time(t, child);
+            spin_unlock_irqrestore(&proc_lock, lock_flags);
             proc_free_pid(child_pid);
             return child_pid;
         }
     }
+    spin_unlock_irqrestore(&proc_lock, lock_flags);
 
     if (t->state == PROC_BLOCKED)
         sched();
     t->state = PROC_RUNNING;
-    if (wait_diag_count < 128) {
-        wait_diag_count++;
-        kdebug("[WAITDBG] wake cur=%d pid=%d\n",
-               t ? t->pid : -1, pid);
-    }
+    if (signal_task_has_unblocked(t))
+        return -EINTR;
     goto retry;
 }
 
