@@ -11,8 +11,6 @@
 #include "sys/futex.h"
 #include "sys/usercopy.h"
 
-static int exit_diag_count;
-
 static int proc_ignores_sigchld(task_t *parent)
 {
     if (!parent || !parent->signals)
@@ -49,22 +47,35 @@ static void proc_reparent_children(task_t *dead, task_t *reaper)
     if (!dead)
         return;
     if (!reaper || reaper == dead)
-        reaper = &proc_table[0];
+        reaper = proc_idle_task();
 
     int wake_reaper = 0;
-    for (int i = 1; i < MAX_PROCS; i++) {
-        task_t *child = &proc_table[i];
-        if (child->state == PROC_UNUSED || child->ppid != dead->pid)
+    uint64_t flags = spin_lock_irqsave(&proc_lock);
+    for (task_t *child = proc_first_task_locked(); child; ) {
+        task_t *next = proc_next_task_locked(child);
+        if (child == proc_idle_task()) {
+            child = next;
             continue;
-        if (reaper == &proc_table[0] && child->state == PROC_ZOMBIE) {
+        }
+        if (child->state == PROC_UNUSED || child->ppid != dead->pid)
+        {
+            child = next;
+            continue;
+        }
+        if (reaper == proc_idle_task() && child->state == PROC_ZOMBIE) {
+            spin_unlock_irqrestore(&proc_lock, flags);
             proc_destroy_task(child);
+            flags = spin_lock_irqsave(&proc_lock);
+            child = next;
             continue;
         }
         child->ppid = reaper->pid;
         child->parent = reaper;
         if (child->state == PROC_ZOMBIE)
             wake_reaper = 1;
+        child = next;
     }
+    spin_unlock_irqrestore(&proc_lock, flags);
     if (wake_reaper && reaper->state == PROC_BLOCKED)
         proc_make_ready(reaper);
 }
@@ -74,12 +85,6 @@ void proc_exit(int exit_code)
     task_t *t = proc_current();
     if (!t)
         panic("proc_exit: no current task");
-
-    if (exit_diag_count < 128) {
-        exit_diag_count++;
-        kdebug("[WAITDBG] exit pid=%d ppid=%d code=%d state=%d\n",
-               t->pid, t->ppid, exit_code, t->state);
-    }
 
     if (t->clear_child_tid) {
         int zero = 0;
@@ -99,21 +104,23 @@ void proc_exit(int exit_code)
     task_t *parent = t->parent;
     int auto_reap = proc_ignores_sigchld(parent);
 
+    uint64_t flags = spin_lock_irqsave(&proc_lock);
     t->exit_code = exit_code;
     __atomic_thread_fence(__ATOMIC_RELEASE);
-    {
-        uint64_t flags = spin_lock_irqsave(&proc_lock);
-        proc_runq_remove_locked(t);
-        spin_unlock_irqrestore(&proc_lock, flags);
-    }
+    proc_runq_remove_locked(t);
     t->state = PROC_ZOMBIE;
 
+    int wake_parent = 0;
     if (auto_reap) {
-        t->parent = &proc_table[0];
+        t->parent = proc_idle_task();
         t->ppid = 0;
     } else if (parent && parent->state == PROC_BLOCKED) {
-        proc_make_ready(parent);
+        wake_parent = 1;
     }
+    spin_unlock_irqrestore(&proc_lock, flags);
+
+    if (wake_parent)
+        proc_make_ready(parent);
 
     if (!auto_reap && parent)
         signal_send(parent->pid, SIGCHLD);
@@ -145,9 +152,9 @@ void proc_force_exit(task_t *t, int exit_code)
     task_t *parent = t->parent;
     int auto_reap = proc_ignores_sigchld(parent);
 
+    uint64_t flags = spin_lock_irqsave(&proc_lock);
     t->exit_code = exit_code;
     __atomic_thread_fence(__ATOMIC_RELEASE);
-    uint64_t flags = spin_lock_irqsave(&proc_lock);
     proc_runq_remove_locked(t);
     spin_unlock_irqrestore(&proc_lock, flags);
     proc_release_exiting_mm(t);
@@ -155,14 +162,19 @@ void proc_force_exit(task_t *t, int exit_code)
     task_t *reaper = proc_find(1);
     proc_reparent_children(t, reaper);
 
+    flags = spin_lock_irqsave(&proc_lock);
     t->state = PROC_ZOMBIE;
-
+    int wake_parent = 0;
     if (auto_reap) {
-        t->parent = &proc_table[0];
+        t->parent = proc_idle_task();
         t->ppid = 0;
     } else if (parent && parent->state == PROC_BLOCKED) {
-        proc_make_ready(parent);
+        wake_parent = 1;
     }
+    spin_unlock_irqrestore(&proc_lock, flags);
+
+    if (wake_parent)
+        proc_make_ready(parent);
     if (!auto_reap && parent)
         signal_send(parent->pid, SIGCHLD);
 }
@@ -174,12 +186,21 @@ void proc_exit_group(int exit_code)
         proc_exit(exit_code);
 
     mm_struct_t *mm = self->mm;
-    for (int i = 1; i < MAX_PROCS; i++) {
-        task_t *t = &proc_table[i];
+    uint64_t flags = spin_lock_irqsave(&proc_lock);
+    for (task_t *t = proc_first_task_locked(); t; ) {
+        task_t *next = proc_next_task_locked(t);
         if (t == self || t->state == PROC_UNUSED || t->state == PROC_ZOMBIE)
+        {
+            t = next;
             continue;
-        if (mm && t->mm == mm)
+        }
+        if (mm && t->mm == mm) {
+            spin_unlock_irqrestore(&proc_lock, flags);
             proc_force_exit(t, exit_code);
+            flags = spin_lock_irqsave(&proc_lock);
+        }
+        t = next;
     }
+    spin_unlock_irqrestore(&proc_lock, flags);
     proc_exit(exit_code);
 }

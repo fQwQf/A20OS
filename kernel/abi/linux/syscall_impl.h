@@ -202,17 +202,18 @@ int64_t sys_getrusage(int who, void *usage);
 int64_t sys_kill(int pid, int sig);
 int64_t sys_tkill(int tid, int sig);
 int64_t sys_tgkill(int tgid, int tid, int sig);
-int64_t sys_sigaction(int signum, void *act, void *oldact);
-int64_t sys_sigprocmask(int how, void *set, void *oldset);
+int64_t sys_sigaction(int signum, void *act, void *oldact, size_t sigsetsize);
+int64_t sys_sigprocmask(int how, void *set, void *oldset, size_t sigsetsize);
 int64_t sys_sigreturn(trap_context_t *ctx);
-int64_t sys_sigsuspend(void *mask);
-int64_t sys_sigtimedwait(const uint64_t *set, void *info, const void *timeout);
+int64_t sys_sigsuspend(void *mask, size_t sigsetsize);
+int64_t sys_sigtimedwait(const uint64_t *set, void *info, const void *timeout, size_t sigsetsize);
 int64_t sys_rt_sigqueueinfo(int tgid, int sig, void *uinfo);
 
 int64_t sys_brk(uint64_t addr);
 int64_t sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, long off);
 int64_t sys_munmap(uint64_t addr, size_t len);
 int64_t sys_mprotect(uint64_t addr, size_t len, int prot);
+int64_t sys_msync(uint64_t addr, size_t len, int flags);
 int64_t sys_madvise(uint64_t addr, size_t len, int advice);
 int64_t sys_mremap(uint64_t old_addr, size_t old_size, size_t new_size,
                     int flags, uint64_t new_addr);

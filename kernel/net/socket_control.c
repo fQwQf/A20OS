@@ -1,6 +1,28 @@
 #include "net/socket_internal.h"
 #include "sys/bpf.h"
 #include "core/string.h"
+#include "lwip/tcp.h"
+
+static uint64_t timeval_to_ticks(const void *optval, size_t optlen)
+{
+    if (!optval || optlen < sizeof(long) * 2)
+        return 0;
+    const long *tv = (const long *)optval;
+    if (tv[0] < 0 || tv[1] < 0)
+        return 0;
+    uint64_t ticks = (uint64_t)tv[0] * TICKS_PER_SEC +
+                     (uint64_t)tv[1] * TICKS_PER_SEC / 1000000ULL;
+    return ticks ? ticks : 1;
+}
+
+static int net_copyout_int(void *optval, size_t *optlen, int val)
+{
+    if (!optval || !optlen || *optlen < sizeof(int))
+        return -EINVAL;
+    memcpy(optval, &val, sizeof(val));
+    *optlen = sizeof(val);
+    return 0;
+}
 
 int net_listen(int gfd, int backlog)
 {
@@ -52,6 +74,7 @@ int net_accept(int gfd, void *addr, size_t *addrlen, int flags)
         return -EINVAL;
 
     net_socket_t *child = NULL;
+    uint64_t start = timer_get_ticks();
     for (;;) {
         uint64_t irq = spin_lock_irqsave(&g_net_lock);
         child = net_accept_queue_pop_locked(s);
@@ -71,6 +94,10 @@ int net_accept(int gfd, void *addr, size_t *addrlen, int flags)
         if (net_task_has_unblocked_signal(cur)) {
             spin_unlock_irqrestore(&g_net_lock, irq);
             return -EINTR;
+        }
+        if (net_socket_wait_expired(s, start, 0)) {
+            spin_unlock_irqrestore(&g_net_lock, irq);
+            return -EAGAIN;
         }
         net_block_on_socket_locked(s, cur);
         spin_unlock_irqrestore(&g_net_lock, irq);
@@ -152,6 +179,61 @@ int net_setsockopt(int gfd, int level, int optname, const void *optval, size_t o
             return -EADDRNOTAVAIL;
         return 0;
     }
+    if (s->domain == AF_INET6 && level == IPPROTO_IPV6 && optname == IPV6_CHECKSUM) {
+        if (!optval || optlen < sizeof(int))
+            return -EINVAL;
+        int offset;
+        memcpy(&offset, optval, sizeof(offset));
+        if (offset >= 0 && (offset & 1))
+            return -EINVAL;
+        s->ipv6_checksum_offset = offset;
+        return 0;
+    }
+    if (s->domain == AF_INET6 && level == IPPROTO_IPV6 && optname == IPV6_V6ONLY)
+        return optlen >= sizeof(int) ? 0 : -EINVAL;
+    if (s->domain == AF_INET6 && s->type == SOCK_RAW &&
+        level == IPPROTO_ICMPV6 && optname == ICMP6_FILTER) {
+        if (!optval || optlen < sizeof(s->icmp6_filter))
+            return -EINVAL;
+        memcpy(s->icmp6_filter, optval, sizeof(s->icmp6_filter));
+        s->icmp6_filter_set = 1;
+        return 0;
+    }
+    if (level == IPPROTO_TCP) {
+        if (s->type != SOCK_STREAM)
+            return -ENOPROTOOPT;
+        if (optname == TCP_CONGESTION)
+            return optval && optlen ? 0 : -EINVAL;
+        if (!optval || optlen < sizeof(int))
+            return -EINVAL;
+        int val;
+        memcpy(&val, optval, sizeof(val));
+        switch (optname) {
+        case TCP_NODELAY:
+            s->tcp_nodelay = val != 0;
+            if (s->tcp) {
+                if (s->tcp_nodelay)
+                    tcp_nagle_disable(s->tcp);
+                else
+                    tcp_nagle_enable(s->tcp);
+            }
+            return 0;
+        case TCP_CORK:
+        case TCP_KEEPIDLE:
+        case TCP_KEEPINTVL:
+        case TCP_KEEPCNT:
+        case TCP_MAXSEG:
+        case TCP_SYNCNT:
+        case TCP_LINGER2:
+        case TCP_DEFER_ACCEPT:
+        case TCP_WINDOW_CLAMP:
+        case TCP_QUICKACK:
+        case TCP_USER_TIMEOUT:
+            return 0;
+        default:
+            return -ENOPROTOOPT;
+        }
+    }
     if (level == SOL_SOCKET && optname == SO_ATTACH_BPF) {
         if (!optval || optlen < sizeof(int))
             return -EINVAL;
@@ -160,6 +242,34 @@ int net_setsockopt(int gfd, int level, int optname, const void *optval, size_t o
         if (!bpf_prog_is_loaded(prog_fd))
             return -EBADF;
         s->bpf_prog_fd = prog_fd;
+        return 0;
+    }
+    if (level == SOL_SOCKET && optname == SO_RCVTIMEO) {
+        if (!optval || optlen < sizeof(long) * 2)
+            return -EINVAL;
+        s->recv_timeout_ticks = timeval_to_ticks(optval, optlen);
+        return 0;
+    }
+    if (level == SOL_SOCKET && optname == SO_SNDTIMEO) {
+        if (!optval || optlen < sizeof(long) * 2)
+            return -EINVAL;
+        s->send_timeout_ticks = timeval_to_ticks(optval, optlen);
+        return 0;
+    }
+    if (level == SOL_SOCKET && optname == SO_REUSEADDR) {
+        if (!optval || optlen < sizeof(int))
+            return -EINVAL;
+        int val;
+        memcpy(&val, optval, sizeof(val));
+        s->reuseaddr = val != 0;
+        return 0;
+    }
+    if (level == SOL_SOCKET && optname == SO_REUSEPORT) {
+        if (!optval || optlen < sizeof(int))
+            return -EINVAL;
+        int val;
+        memcpy(&val, optval, sizeof(val));
+        s->reuseport = val != 0;
         return 0;
     }
     if (level == SOL_SOCKET)
@@ -172,20 +282,72 @@ int net_getsockopt(int gfd, int level, int optname, void *optval, size_t *optlen
     net_socket_t *s = net_socket_from_file(gfd);
     if (!s)
         return -ENOTSOCK;
-    if (!optval || !optlen || *optlen < sizeof(int))
+    if (!optval || !optlen)
         return -EINVAL;
     int val = 0;
     if (level == SOL_SOCKET && optname == SO_TYPE)
         val = s->type;
     else if (level == SOL_SOCKET && optname == SO_ERROR)
         val = 0;
+    else if (level == SOL_SOCKET && optname == SO_ACCEPTCONN)
+        val = s->listening;
+    else if (level == SOL_SOCKET && optname == SO_DOMAIN)
+        val = s->domain;
+    else if (level == SOL_SOCKET && optname == SO_PROTOCOL)
+        val = s->protocol;
+    else if (level == SOL_SOCKET &&
+             (optname == SO_SNDBUF || optname == SO_RCVBUF))
+        val = NET_MAX_QUEUE * NET_MAX_PAYLOAD;
+    else if (level == SOL_SOCKET && optname == SO_REUSEADDR)
+        val = s->reuseaddr;
+    else if (level == SOL_SOCKET && optname == SO_REUSEPORT)
+        val = s->reuseport;
     else if (level == SOL_SOCKET)
         val = 0;
+    else if (level == IPPROTO_TCP) {
+        if (s->type != SOCK_STREAM)
+            return -ENOPROTOOPT;
+        if (optname == TCP_CONGESTION) {
+            static const char congestion[] = "cubic";
+            size_t n = *optlen < sizeof(congestion) ? *optlen : sizeof(congestion);
+            if (n)
+                memcpy(optval, congestion, n);
+            *optlen = n;
+            return 0;
+        }
+        if (optname == TCP_INFO) {
+            size_t n = *optlen;
+            memset(optval, 0, n);
+            if (n)
+                ((uint8_t *)optval)[0] = s->listening ? 10 : (s->connected ? 1 : 7);
+            return 0;
+        }
+        switch (optname) {
+        case TCP_NODELAY:
+            val = s->tcp_nodelay;
+            break;
+        case TCP_MAXSEG:
+            val = 1460;
+            break;
+        case TCP_CORK:
+        case TCP_KEEPIDLE:
+        case TCP_KEEPINTVL:
+        case TCP_KEEPCNT:
+        case TCP_SYNCNT:
+        case TCP_LINGER2:
+        case TCP_DEFER_ACCEPT:
+        case TCP_WINDOW_CLAMP:
+        case TCP_QUICKACK:
+        case TCP_USER_TIMEOUT:
+            val = 0;
+            break;
+        default:
+            return -ENOPROTOOPT;
+        }
+    }
     else
         return -EOPNOTSUPP;
-    memcpy(optval, &val, sizeof(val));
-    *optlen = sizeof(val);
-    return 0;
+    return net_copyout_int(optval, optlen, val);
 }
 
 int net_shutdown(int gfd, int how)
@@ -223,7 +385,7 @@ int net_poll_events(int gfd, short events)
     if (s->closed)
         revents |= POLLHUP;
     if ((events & POLLIN) &&
-        (s->rx_head || s->closed ||
+        (s->rx_head || s->accept_head || s->closed ||
          (s->domain == AF_ALG && (strcmp(s->alg_type, "hash") == 0 || s->alg_last_len > 0))))
         revents |= POLLIN;
     if ((events & POLLOUT) && !s->closed)

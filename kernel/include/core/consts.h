@@ -18,8 +18,8 @@
 #define USER_STACK_MAX_SIZE      (8 * 1024 * 1024UL)
 
 /* ---------- Limits ---------- */
-#define MAX_PROCS          256
-#define MAX_FILES          256
+#define MAX_PROCS          4096
+#define MAX_FILES          1024
 #define MAX_PATH_LEN       512
 #define MAX_NAME_LEN       256
 #define MAX_ARGS           256

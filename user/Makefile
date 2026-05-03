@@ -185,11 +185,17 @@ build_dir:
 musl_prepare:
 	@set -e; \
 	missing=0; \
+	stale=0; \
 	for f in $(MUSL_CHECK_FILES); do \
 		if [ ! -f "$$f" ]; then missing=1; break; fi; \
 	done; \
-	if [ "$$missing" -ne 0 ]; then \
-		echo "[MUSL] build-$(ARCH) missing, rebuilding..."; \
+	if [ "$$missing" -eq 0 ] && find "$(MUSL_BASE)" \
+		\( -path "$(MUSL_BASE)/build-*" -o -path '*/.git' \) -prune -o \
+		-type f -newer "$(MUSL_CRT)/libc.a" -print -quit | grep -q .; then \
+		stale=1; \
+	fi; \
+	if [ "$$missing" -ne 0 ] || [ "$$stale" -ne 0 ]; then \
+		echo "[MUSL] build-$(ARCH) stale or missing, rebuilding..."; \
 		rm -rf "$(MUSL_BUILD)"; \
 		mkdir -p "$(MUSL_BUILD)"; \
 		cd "$(MUSL_BUILD)" && ../configure \

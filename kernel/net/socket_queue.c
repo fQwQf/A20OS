@@ -3,7 +3,7 @@
 #include "sys/bpf.h"
 #include "core/string.h"
 
-static obj_cache_t g_net_msg_cache = OBJ_CACHE_INIT("net_msg", net_msg_t, 256);
+static obj_cache_t g_net_msg_cache = OBJ_CACHE_INIT("net_msg", net_msg_t, 16);
 
 net_msg_t *net_msg_alloc(void)
 {

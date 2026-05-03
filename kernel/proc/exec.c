@@ -46,6 +46,14 @@ static void proc_apply_exec_creds(task_t *t, const kstat_t *st)
     }
 }
 
+static int exec_file_is_shebang(int fd)
+{
+    char magic[2];
+    int n = vfs_read(fd, magic, sizeof(magic));
+    vfs_lseek(fd, 0, SEEK_SET);
+    return n >= 2 && magic[0] == '#' && magic[1] == '!';
+}
+
 int proc_exec(const char *path, char *const argv[], char *const envp[])
 {
     task_t *t = proc_current();
@@ -56,20 +64,16 @@ int proc_exec(const char *path, char *const argv[], char *const envp[])
     kstat_t exec_st;
     int exec_stat_ok = vfs_stat(path, &exec_st);
     if (exec_stat_ok == 0 && (exec_st.st_mode & S_IFMT) == S_IFREG) {
+        int is_script = exec_file_is_shebang(fd);
         if (exec_st.st_mode & 0111) {
             int xr = vfs_faccessat2(AT_FDCWD, path, X_OK, AT_EACCESS);
             if (xr < 0) {
                 vfs_close(fd);
                 return xr;
             }
-        } else {
-            char magic[2];
-            int n = vfs_read(fd, magic, sizeof(magic));
-            vfs_lseek(fd, 0, SEEK_SET);
-            if (n < 2 || magic[0] != '#' || magic[1] != '!') {
-                vfs_close(fd);
-                return -EACCES;
-            }
+        } else if (!is_script) {
+            vfs_close(fd);
+            return -EACCES;
         }
     }
 
@@ -241,8 +245,6 @@ int proc_exec(const char *path, char *const argv[], char *const envp[])
     elf_load_info_t info;
     memset(&info, 0, sizeof(info));
     int r = elf_load(fd, k_path, &info);
-    kdebug("[EXEC] elf_load returned %d entry=0x%lx pgdir=0x%lx stack=0x%lx\n",
-           r, info.entry, (uint64_t)info.pgdir, info.stack_top);
     if (r < 0) {
         if (r == -ENOEXEC) {
             vfs_lseek(fd, 0, SEEK_SET);
@@ -315,12 +317,6 @@ int proc_exec(const char *path, char *const argv[], char *const envp[])
     uint64_t sp = elf_setup_stack(info.stack_top, argc,
                                   (char *const *)k_argv,
                                   (char *const *)k_envp, &info);
-    kdebug("[EXEC] setup_stack sp=0x%lx argc=%d\n", sp, argc);
-
-    for (int i = 0; i < argc; i++)
-        kfree(k_argv[i]);
-    for (int i = 0; i < envc; i++)
-        kfree(k_envp[i]);
 
     mm_struct_t *old_mm = t->mm;
     t->mm = NULL;
@@ -328,6 +324,10 @@ int proc_exec(const char *path, char *const argv[], char *const envp[])
     mm_struct_t *mm = kcalloc(1, sizeof(mm_struct_t));
     if (!mm) {
         mm_destroy(old_mm);
+        for (int i = 0; i < argc; i++)
+            kfree(k_argv[i]);
+        for (int i = 0; i < envc; i++)
+            kfree(k_envp[i]);
         kfree(k_path);
         return -ENOMEM;
     }
@@ -347,9 +347,15 @@ int proc_exec(const char *path, char *const argv[], char *const envp[])
     t->pgdir = info.pgdir;
     t->entry = info.entry;
     t->ustack = sp;
-    proc_set_name(t, path);
     strncpy(t->exec_path, abs_path, MAX_PATH_LEN - 1);
     t->exec_path[MAX_PATH_LEN - 1] = '\0';
+    const char *base = strrchr(t->exec_path, '/');
+    proc_set_name(t, base ? base + 1 : t->exec_path);
+
+    for (int i = 0; i < argc; i++)
+        kfree(k_argv[i]);
+    for (int i = 0; i < envc; i++)
+        kfree(k_envp[i]);
 
     if (t->signals)
         signal_init((signal_state_t *)t->signals);
@@ -390,26 +396,18 @@ int proc_exec(const char *path, char *const argv[], char *const envp[])
     if (exec_stat_ok == 0)
         proc_apply_exec_creds(t, &exec_st);
 
-    kdebug("[EXEC] about to switch satp pgdir=0x%lx old_mm=0x%lx\n",
-           (uint64_t)info.pgdir, (uint64_t)old_mm);
     arch_write_satp(arch_make_satp(info.pgdir));
     arch_tlb_flush();
-    kdebug("[EXEC] satp switched OK, old_mm=0x%lx\n", (uint64_t)old_mm);
 
     if (old_mm) {
-        kdebug("[EXEC] mm_destroy enter\n");
         mm_destroy(old_mm);
-        kdebug("[EXEC] mm_destroy done\n");
     } else if (old_pgdir && old_pgdir != proc_kernel_pgdir_shared()) {
         pt_destroy_user(old_pgdir);
     }
 
-    kdebug("[EXEC] kfree k_path=%p\n", k_path);
     kfree(k_path);
-    kdebug("[EXEC] fence_i\n");
     arch_fence_i();
 
-    kdebug("[EXEC] return entry=0x%lx sp=0x%lx\n", saved_entry, saved_sp);
     t->state = PROC_RUNNING;
     return 0;
 }

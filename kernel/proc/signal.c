@@ -12,8 +12,6 @@
 #include "core/stdio.h"
 #include "core/klog.h"
 
-static int sig_diag_count = 0;
-
 static int signal_core_dump_default(int sig) {
     switch (sig) {
         case SIGQUIT:
@@ -49,7 +47,7 @@ typedef struct user_rt_sigaction {
     uintptr_t handler;
     uint64_t  flags;
     uint32_t  mask[2];
-    uint64_t  restorer_or_unused;
+    uintptr_t unused;
 } user_rt_sigaction_t;
 
 typedef struct user_sigset {
@@ -94,12 +92,6 @@ int signal_send_info(int pid, int signum, const void *info, size_t info_size) {
         *(int *)ss->pending_info[signum] = signum;
     }
     ss->pending |= signal_mask_bit(signum);
-    if (sig_diag_count < 64 && signum == SIGCHLD) {
-        sig_diag_count++;
-        kdebug("[SIGDBG] send pid=%d sig=%d pending=0x%lx state=%d\n",
-              pid, signum, (unsigned long)ss->pending, t->state);
-    }
-
     if (t->state == PROC_BLOCKED) {
         proc_make_ready(t);
     }
@@ -120,7 +112,21 @@ int signal_task_has_unblocked(void *task) {
     if (!t || !t->signals)
         return 0;
     signal_state_t *ss = (signal_state_t *)t->signals;
-    return (ss->pending & ~ss->blocked) != 0;
+    uint64_t deliverable = ss->pending & ~ss->blocked;
+    if (!deliverable)
+        return 0;
+
+    for (int sig = 1; sig < NSIG; sig++) {
+        if (!(deliverable & signal_mask_bit(sig)))
+            continue;
+        sigaction_t *sa = &ss->actions[sig];
+        if (sa->sa_handler == SIG_IGN)
+            continue;
+        if (sa->sa_handler == SIG_DFL && !signal_fatal_default(sig))
+            continue;
+        return 1;
+    }
+    return 0;
 }
 
 // 传递信号（内核线程使用）
@@ -189,17 +195,13 @@ void signal_deliver_user(trap_context_t *ctx) {
 
         sigaction_t *sa = &ss->actions[sig];
 
-        if (sig_diag_count < 64 && (sig == SIGCHLD || sig == SIGINT || sig == SIGTERM)) {
-            sig_diag_count++;
-            kdebug("[SIGDBG] deliver pid=%d sig=%d handler=0x%lx flags=0x%x pending=0x%lx blocked=0x%lx epc=0x%lx\n",
-                  t->pid, sig, (unsigned long)sa->sa_handler, sa->sa_flags,
-                  (unsigned long)ss->pending, (unsigned long)ss->blocked,
-                  (unsigned long)TRAP_CTX_EPC(ctx));
-        }
-
         if (sa->sa_handler == SIG_IGN) {
             ss->pending &= ~signal_mask_bit(sig);
             ss->pending_has_info[sig] = 0;
+            if (t->sigsuspend_active) {
+                ss->blocked = t->sigsuspend_old_blocked;
+                t->sigsuspend_active = 0;
+            }
             continue;
         }
 
@@ -207,7 +209,12 @@ void signal_deliver_user(trap_context_t *ctx) {
             ss->pending &= ~signal_mask_bit(sig);
             ss->pending_has_info[sig] = 0;
             switch (sig) {
-                case SIGCHLD: continue;
+                case SIGCHLD:
+                    if (t->sigsuspend_active) {
+                        ss->blocked = t->sigsuspend_old_blocked;
+                        t->sigsuspend_active = 0;
+                    }
+                    continue;
                 default: proc_exit(-signal_wait_status(sig));
             }
         }
@@ -240,10 +247,11 @@ void signal_deliver_user(trap_context_t *ctx) {
     }
 }
 
-// 设置信号处理函数（sigaction 系统调用的实现）
-int sys_sigaction_impl(int signum, const sigaction_t *act, sigaction_t *oldact) {
+// 设置信号处理函数（rt_sigaction 系统调用的实现）
+int sys_sigaction_impl(int signum, const void *act, void *oldact, size_t sigsetsize) {
     if (signum <= 0 || signum >= NSIG) return -EINVAL;
     if (signum == SIGKILL || signum == SIGSTOP) return -EINVAL;
+    if (sigsetsize != sizeof(user_sigset_t)) return -EINVAL;
 
     task_t *t = proc_current();
     if (!t || !t->signals) return -EINVAL;
@@ -253,9 +261,9 @@ int sys_sigaction_impl(int signum, const sigaction_t *act, sigaction_t *oldact) 
         user_rt_sigaction_t oldk;
         memset(&oldk, 0, sizeof(oldk));
         oldk.handler = ss->actions[signum].sa_handler;
-        oldk.flags = (uint64_t)(unsigned)ss->actions[signum].sa_flags;
+        oldk.flags = (uint64_t)(uint32_t)ss->actions[signum].sa_flags;
         uint64_t old_user_mask = signal_mask_to_user(ss->actions[signum].sa_mask);
-        oldk.mask[0] = (uint32_t)(old_user_mask & 0xffffffffU);
+        oldk.mask[0] = (uint32_t)(old_user_mask & 0xffffffffULL);
         oldk.mask[1] = (uint32_t)(old_user_mask >> 32);
         if (copy_to_user(oldact, &oldk, sizeof(oldk)) < 0)
             return -EFAULT;
@@ -268,20 +276,14 @@ int sys_sigaction_impl(int signum, const sigaction_t *act, sigaction_t *oldact) 
         ss->actions[signum].sa_mask = signal_mask_from_user(
             ((uint64_t)ukact.mask[1] << 32) | (uint64_t)ukact.mask[0]);
         ss->actions[signum].sa_flags = (int)ukact.flags;
-        if (sig_diag_count < 64 && (signum == SIGCHLD || signum == SIGINT || signum == SIGTERM)) {
-            sig_diag_count++;
-            kdebug("[SIGDBG] install pid=%d sig=%d handler=0x%lx flags=0x%lx mask=0x%lx unused=0x%lx\n",
-                  t->pid, signum, (unsigned long)ukact.handler,
-                  (unsigned long)ukact.flags,
-                  (unsigned long)(((uint64_t)ukact.mask[1] << 32) | (uint64_t)ukact.mask[0]),
-                  (unsigned long)ukact.restorer_or_unused);
-        }
     }
     return 0;
 }
 
 // 修改信号掩码（sigprocmask 系统调用的实现）
-int sys_sigprocmask_impl(int how, const uint64_t *set, uint64_t *oldset) {
+int sys_sigprocmask_impl(int how, const void *set, void *oldset, size_t sigsetsize) {
+    if (sigsetsize != sizeof(user_sigset_t)) return -EINVAL;
+
     task_t *t = proc_current();
     if (!t || !t->signals) return -EINVAL;
     signal_state_t *ss = (signal_state_t *)t->signals;

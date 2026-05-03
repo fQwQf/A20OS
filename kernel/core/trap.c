@@ -52,6 +52,30 @@ static void dump_fault_pte(task_t *task, uint64_t va) {
 
     uint64_t *pte = pt_lookup_leaf(task->mm->pgdir, va, NULL, NULL, NULL);
     kerr("  pte=%p value=0x%lx\n", (void *)pte, pte ? *pte : 0UL);
+    vm_area_t *vma = mm_find_vma(task->mm, va & ~(PAGE_SIZE - 1));
+    if (vma) {
+        kerr("  vma=[0x%lx,0x%lx) flags=0x%lx pte_flags=0x%lx file_fd=%d off=0x%lx\n",
+             vma->start, vma->end, vma->vm_flags, vma->pte_flags,
+             vma->file_fd, vma->file_offset);
+    } else {
+        kerr("  vma=<none>\n");
+    }
+}
+
+static int deliver_user_sync_signal(trap_context_t *ctx, int sig, int fatal_code) {
+    task_t *cur = proc_current();
+    if (!cur || !cur->signals || !cur->pgdir)
+        proc_exit(fatal_code);
+
+    signal_state_t *ss = (signal_state_t *)cur->signals;
+    sigaction_t *sa = &ss->actions[sig];
+    if (sa->sa_handler == SIG_DFL || sa->sa_handler == SIG_IGN ||
+        (ss->blocked & signal_mask_bit(sig)))
+        proc_exit(fatal_code);
+
+    signal_send(cur->pid, sig);
+    signal_deliver_user(ctx);
+    return 1;
 }
 
 void trap_handler(trap_context_t *ctx) {
@@ -70,7 +94,15 @@ void trap_handler(trap_context_t *ctx) {
         int have_user_insn = fetch_user_insn(cur, sepc, &user_insn);
         if (code == CAUSE_ECALL_U) {
             arch_advance_syscall_epc(ctx);
+            /*
+             * RISC-V enters the trap handler with SIE cleared.  Keep the
+             * normal syscall body interruptible so UART input, block/network
+             * completions, and timer bookkeeping are not starved by long
+             * kernel-side loops such as fork-heavy benchmarks.
+             */
+            arch_local_irq_enable();
             syscall_dispatch(ctx);
+            arch_local_irq_disable();
         } else if (code == CAUSE_LOAD_PAGE_FAULT || code == CAUSE_STORE_PAGE_FAULT || code == CAUSE_INSN_PAGE_FAULT) {
             if (code == CAUSE_STORE_PAGE_FAULT) {
                 if (handle_cow_fault(cur, stval) == 0) {
@@ -82,6 +114,8 @@ void trap_handler(trap_context_t *ctx) {
                 signal_deliver_user(ctx);
                 return;
             }
+            if (deliver_user_sync_signal(ctx, SIGSEGV, -SIGSEGV))
+                return;
             kerr("User PF unresolved: pid=%d code=%lu sepc=0x%lx stval=0x%lx\n",
                  cur ? cur->pid : -1, code, sepc, stval);
             if (have_user_insn)
@@ -120,13 +154,19 @@ void trap_handler(trap_context_t *ctx) {
                 kerr("  insn@sepc=0x%08x\n", user_insn);
             dump_trap_context(ctx);
             dump_fault_pte(cur, stval);
+            if (deliver_user_sync_signal(ctx, SIGSEGV, -SIGSEGV))
+                return;
             proc_exit(-SIGSEGV);
         } else if (code == CAUSE_INSN_FAULT || code == CAUSE_LOAD_FAULT || code == CAUSE_STORE_FAULT) {
+            if (deliver_user_sync_signal(ctx, SIGSEGV, -SIGSEGV))
+                return;
             kerr("User Address Error (ADE/ALE): pid=%d sepc=0x%lx stval=0x%lx code=%lu\n", 
                  cur ? cur->pid : -1, sepc, stval, code);
             dump_trap_context(ctx);
             proc_exit(-SIGSEGV); 
         } else if (code == CAUSE_ILLEGAL_INSN) {
+            if (deliver_user_sync_signal(ctx, SIGILL, -SIGILL))
+                return;
             kerr("User Illegal Instruction: pid=%d sepc=0x%lx stval=0x%lx\n",
                  cur ? cur->pid : -1, sepc, stval);
             if (have_user_insn)
@@ -139,6 +179,7 @@ void trap_handler(trap_context_t *ctx) {
             proc_exit(-1);
         }
     }
+    signal_deliver_user(ctx);
 }
 
 void kernel_trap_handler(trap_context_t *ctx) {

@@ -75,8 +75,12 @@ int vfs_mode_has_perm_ids(uint32_t st_mode, uint32_t file_uid,
     if (mask == F_OK)
         return 0;
 
-    if (proc_has_cap(cur, CAP_DAC_OVERRIDE))
+    if (proc_has_cap(cur, CAP_DAC_OVERRIDE)) {
+        if ((mask & X_OK) && ((st_mode & S_IFMT) == S_IFREG) &&
+            !(st_mode & (S_IXUSR | S_IXGRP | S_IXOTH)))
+            return -EACCES;
         return 0;
+    }
 
     if (!(mask & W_OK) && proc_has_cap(cur, CAP_DAC_READ_SEARCH)) {
         if ((mask & X_OK) && ((st_mode & S_IFMT) == S_IFREG) &&

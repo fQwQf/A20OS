@@ -31,13 +31,52 @@
 #include "core/lock.h"
 #include "sys/futex.h"
 
-task_t proc_table[MAX_PROCS];  // 进程表
+static task_t idle_task;
+static task_t *task_list_head;
+static task_t *task_list_tail;
 static uint64_t *kernel_pgdir_shared;  // 共享的内核页表
 
 spinlock_t proc_lock = SPINLOCK_INIT;
 
 /* Boot stack (for schedule back to idle) */
 static uint64_t g_idle_kstack;  // idle 进程的内核栈
+
+static void proc_link_task_locked(task_t *t)
+{
+    t->all_prev = task_list_tail;
+    t->all_next = NULL;
+    if (task_list_tail)
+        task_list_tail->all_next = t;
+    else
+        task_list_head = t;
+    task_list_tail = t;
+}
+
+void proc_unlink_task_locked(task_t *t)
+{
+    if (!t)
+        return;
+    if (t->all_prev)
+        t->all_prev->all_next = t->all_next;
+    else if (task_list_head == t)
+        task_list_head = t->all_next;
+    if (t->all_next)
+        t->all_next->all_prev = t->all_prev;
+    else if (task_list_tail == t)
+        task_list_tail = t->all_prev;
+    t->all_next = NULL;
+    t->all_prev = NULL;
+}
+
+task_t *proc_first_task_locked(void)
+{
+    return task_list_head;
+}
+
+task_t *proc_next_task_locked(task_t *t)
+{
+    return t ? t->all_next : NULL;
+}
 
 static void proc_count_vma_huge_pages(mm_struct_t *mm, vm_area_t *vma,
                                       proc_vm_stats_t *stats)
@@ -74,25 +113,20 @@ void proc_get_vm_stats(proc_vm_stats_t *stats)
     memset(stats, 0, sizeof(*stats));
 
     uint64_t flags = spin_lock_irqsave(&proc_lock);
-    mm_struct_t *seen[MAX_PROCS];
-    int seen_count = 0;
-
-    for (int i = 0; i < MAX_PROCS; i++) {
-        task_t *t = &proc_table[i];
+    for (task_t *t = proc_first_task_locked(); t; t = proc_next_task_locked(t)) {
         if (t->state == PROC_UNUSED || !t->mm)
             continue;
 
         int duplicate = 0;
-        for (int j = 0; j < seen_count; j++) {
-            if (seen[j] == t->mm) {
+        for (task_t *prev = proc_first_task_locked(); prev && prev != t;
+             prev = proc_next_task_locked(prev)) {
+            if (prev->state != PROC_UNUSED && prev->mm == t->mm) {
                 duplicate = 1;
                 break;
             }
         }
         if (duplicate)
             continue;
-        if (seen_count < MAX_PROCS)
-            seen[seen_count++] = t->mm;
 
         for (vm_area_t *v = t->mm->mmap; v; v = v->next)
             proc_count_vma_huge_pages(t->mm, v, stats);
@@ -110,8 +144,8 @@ size_t proc_format_pidmap(char *buf, size_t bufsz)
     uint64_t flags = spin_lock_irqsave(&proc_lock);
     int used = 0;
 
-    for (int i = 0; i < MAX_PROCS; i++) {
-        if (proc_table[i].state != PROC_UNUSED)
+    for (task_t *t = proc_first_task_locked(); t; t = proc_next_task_locked(t)) {
+        if (t->state != PROC_UNUSED)
             used++;
     }
 
@@ -123,8 +157,8 @@ size_t proc_format_pidmap(char *buf, size_t bufsz)
         off = wrote >= bufsz - off ? bufsz - 1 : off + wrote;
     }
 
-    for (int i = 0; i < MAX_PROCS && off + 16 < bufsz; i++) {
-        task_t *t = &proc_table[i];
+    for (task_t *t = proc_first_task_locked(); t && off + 16 < bufsz;
+         t = proc_next_task_locked(t)) {
         if (t->state == PROC_UNUSED)
             continue;
         n = snprintf(buf + off, bufsz - off, " %d", t->pid);
@@ -152,13 +186,23 @@ static int proc_parent_auto_reaps_children(task_t *parent)
 }
 
 static void proc_reap_detached_zombies(void) {
-    for (int i = 1; i < MAX_PROCS; i++) {
-        task_t *t = &proc_table[i];
+    uint64_t flags = spin_lock_irqsave(&proc_lock);
+    for (task_t *t = proc_first_task_locked(); t; ) {
+        task_t *next = proc_next_task_locked(t);
+        if (t == proc_idle_task()) {
+            t = next;
+            continue;
+        }
         if (t->state == PROC_ZOMBIE &&
-            (t->ppid == 0 || t->parent == &proc_table[0] ||
-             proc_parent_auto_reaps_children(t->parent)))
+            (t->ppid == 0 || t->parent == proc_idle_task() ||
+             proc_parent_auto_reaps_children(t->parent))) {
+            spin_unlock_irqrestore(&proc_lock, flags);
             proc_destroy_task(t);
+            flags = spin_lock_irqsave(&proc_lock);
+        }
+        t = next;
     }
+    spin_unlock_irqrestore(&proc_lock, flags);
 }
 
 void proc_make_ready(task_t *t) {
@@ -189,19 +233,23 @@ void proc_make_ready(task_t *t) {
 // idle 进程的主循环，系统无任务时运行
 void idle_loop(void) {
     while (1) {
-        arch_wfi();  // 等待中断
-        proc_yield();              // 主动让出 CPU
+        arch_local_irq_enable();
+        sched();
+        __asm__ volatile("nop");
     }
 }
 
 // 初始化进程管理模块，创建 idle 进程
 void proc_init(void) {
-    memset(proc_table, 0, sizeof(proc_table));
+    memset(&idle_task, 0, sizeof(idle_task));
+    task_list_head = NULL;
+    task_list_tail = NULL;
     proc_pid_init();
     proc_sched_runq_init();
     spin_init(&proc_lock);
 
-    task_t *idle = &proc_table[0];
+    task_t *idle = &idle_task;
+    proc_link_task_locked(idle);
     idle->pid    = 0;
     idle->ppid   = 0;
     idle->state  = PROC_RUNNING;
@@ -271,7 +319,7 @@ void proc_init(void) {
     kdebug("[PROC] Initialized, idle task pid=0\n");
 }
 
-task_t *proc_idle_task(void) { return &proc_table[0]; }
+task_t *proc_idle_task(void) { return &idle_task; }
 
 uint64_t *proc_kernel_pgdir_shared(void) { return kernel_pgdir_shared; }
 
@@ -280,17 +328,17 @@ uint64_t *proc_kernel_pgdir_shared(void) { return kernel_pgdir_shared; }
 // 分配一个空闲的任务槽
 task_t *proc_alloc_task_slot(void) {
     proc_reap_detached_zombies();
+
+    task_t *t = kcalloc(1, sizeof(*t));
+    if (!t)
+        return NULL;
+    t->state = PROC_BLOCKED;
+    t->dynamic_alloc = 1;
+
     uint64_t flags = spin_lock_irqsave(&proc_lock);
-    for (int i = 1; i < MAX_PROCS; i++) {
-        if (proc_table[i].state == PROC_UNUSED) {
-            memset(&proc_table[i], 0, sizeof(proc_table[i]));
-            proc_table[i].state = PROC_BLOCKED;
-            spin_unlock_irqrestore(&proc_lock, flags);
-            return &proc_table[i];
-        }
-    }
+    proc_link_task_locked(t);
     spin_unlock_irqrestore(&proc_lock, flags);
-    return NULL;
+    return t;
 }
 
 // 分配一个内核线程
@@ -424,14 +472,29 @@ int proc_kill_pgid(int pgid, int signum, int skip_self) {
     if (signum <= 0 || signum >= NSIG) return -EINVAL;
     task_t *self = proc_current();
     int count = 0;
-    // 向进程组中的所有进程发送信号
-    for (int i = 1; i < MAX_PROCS; i++) {
-        task_t *t = &proc_table[i];
-        if (t->state == PROC_UNUSED) continue;
-        if (t->pgid != pgid) continue;
-        if (skip_self && t == self) continue;
-        signal_send(t->pid, signum);
-        count++;
+    int pids[64];
+
+    for (;;) {
+        int pid_count = 0;
+        int seen = 0;
+        uint64_t flags = spin_lock_irqsave(&proc_lock);
+        for (task_t *t = proc_first_task_locked(); t; t = proc_next_task_locked(t)) {
+            if (t == proc_idle_task()) continue;
+            if (t->state == PROC_UNUSED) continue;
+            if (t->pgid != pgid) continue;
+            if (skip_self && t == self) continue;
+            if (seen++ < count) continue;
+            pids[pid_count++] = t->pid;
+            if (pid_count == (int)(sizeof(pids) / sizeof(pids[0])))
+                break;
+        }
+        spin_unlock_irqrestore(&proc_lock, flags);
+
+        if (pid_count == 0)
+            break;
+        for (int i = 0; i < pid_count; i++)
+            signal_send(pids[i], signum);
+        count += pid_count;
     }
     return count > 0 ? count : -ESRCH;
 }
@@ -480,10 +543,11 @@ int proc_munmap(uint64_t addr, size_t len) {
 // 打印所有进程信息
 void proc_dump(void) {
     printf("  PID  PPID  STATE  PRI  NAME\n");
-    for (int i = 0; i < MAX_PROCS; i++) {
-        if (proc_table[i].state == PROC_UNUSED) continue;
+    uint64_t flags = spin_lock_irqsave(&proc_lock);
+    for (task_t *t = proc_first_task_locked(); t; t = proc_next_task_locked(t)) {
+        if (t->state == PROC_UNUSED) continue;
         const char *s = "?";
-        switch (proc_table[i].state) {
+        switch (t->state) {
             case PROC_READY:   s = "RDY"; break;
             case PROC_RUNNING: s = "RUN"; break;
             case PROC_BLOCKED: s = "BLK"; break;
@@ -491,7 +555,7 @@ void proc_dump(void) {
             default: break;
         }
         printf("  %3d   %3d   %s   %3d  %s\n",
-               proc_table[i].pid, proc_table[i].ppid, s,
-               proc_table[i].priority, proc_table[i].name);
+               t->pid, t->ppid, s, t->priority, t->name);
     }
+    spin_unlock_irqrestore(&proc_lock, flags);
 }
