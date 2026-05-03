@@ -31,7 +31,8 @@ EXT4_IMAGE_MB ?= 32
 CONTEST_DISK_MB ?= $(FAT32_IMAGE_MB)
 USER_BUILD_ID = $(ARCH):$(CONTEST):$(OPT)
 USER_BUILD_CHECK_DIRS = user/cmds user/contest_init user/init_common user/lib user/shell \
-                        user/external/sbase user/external/mksh-cvs2git user/external/tlse
+                        user/external/musl user/external/sbase user/external/mksh-cvs2git \
+                        user/external/tlse
 comma := ,
 NET_HOSTFWD ?= hostfwd=tcp::5555-:5555,hostfwd=udp::5555-:5555
 NETDEV_USER = -netdev user,id=net$(if $(strip $(NET_HOSTFWD)),$(comma)$(NET_HOSTFWD),)
@@ -396,6 +397,21 @@ _contest_disk: $(USER_BUILD_STAMP)
 	done
 	mcopy -o -i $(DISK_OUT) user/build/mksh ::/sh
 	mcopy -o -i $(DISK_OUT) user/build/mksh ::/bash
+	-mmd -i $(DISK_OUT) ::/etc >/dev/null 2>&1
+	@printf '%s\n' \
+		'hopopt 0 HOPOPT' \
+		'icmp 1 ICMP' \
+		'igmp 2 IGMP' \
+		'tcp 6 TCP' \
+		'udp 17 UDP' \
+		'ipv6 41 IPv6' \
+		'ipv6-route 43 IPv6-Route' \
+		'ipv6-frag 44 IPv6-Frag' \
+		'esp 50 ESP' \
+		'ah 51 AH' \
+		'ipv6-icmp 58 IPv6-ICMP' \
+		'ipv6-nonxt 59 IPv6-NoNxt' \
+		'ipv6-opts 60 IPv6-Opts' | mcopy -o -i $(DISK_OUT) - ::/etc/protocols
 
 # ----------------------------------------------------------------
 # Development build (for `make run-riscv64` / `make run-loongarch64`)
@@ -423,7 +439,7 @@ $(USER_BUILD_STAMP): FORCE
 		need_build=1; \
 		need_clean=1; \
 	elif find user/Makefile $(USER_BUILD_CHECK_DIRS) \
-		\( -path '*/.git' -o -path 'user/build' \) -prune -o \
+		\( -path '*/.git' -o -path 'user/build' -o -path 'user/external/musl/build-*' \) -prune -o \
 		-type f -newer "$@" -print -quit | grep -q .; then \
 		need_build=1; \
 	fi; \
@@ -450,6 +466,21 @@ $(FAT32_IMG): $(USER_BUILD_STAMP)
 	done
 	mcopy -o -i $(FAT32_IMG) user/build/mksh ::/sh
 	mcopy -o -i $(FAT32_IMG) user/build/mksh ::/bash
+	-mmd -i $(FAT32_IMG) ::/etc >/dev/null 2>&1
+	@printf '%s\n' \
+		'hopopt 0 HOPOPT' \
+		'icmp 1 ICMP' \
+		'igmp 2 IGMP' \
+		'tcp 6 TCP' \
+		'udp 17 UDP' \
+		'ipv6 41 IPv6' \
+		'ipv6-route 43 IPv6-Route' \
+		'ipv6-frag 44 IPv6-Frag' \
+		'esp 50 ESP' \
+		'ah 51 AH' \
+		'ipv6-icmp 58 IPv6-ICMP' \
+		'ipv6-nonxt 59 IPv6-NoNxt' \
+		'ipv6-opts 60 IPv6-Opts' | mcopy -o -i $(FAT32_IMG) - ::/etc/protocols
 	@printf 'Hello from A20OS FAT32!\n' | mcopy -i $(FAT32_IMG) - ::/test.txt
 
 $(FS_TEST_IMG): $(FAT32_IMG)

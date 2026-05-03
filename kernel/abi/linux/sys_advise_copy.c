@@ -138,14 +138,20 @@ int64_t sys_posix_fadvise(int fd, long off, long len, int advice)
 
 int64_t sys_close_range(unsigned first, unsigned last, unsigned flags)
 {
-    if (flags) return -EINVAL;
+    const unsigned CLOSE_RANGE_UNSHARE = 1U << 1;
+    const unsigned CLOSE_RANGE_CLOEXEC = 1U << 2;
+    if (flags & ~(CLOSE_RANGE_UNSHARE | CLOSE_RANGE_CLOEXEC)) return -EINVAL;
     if (first > last) return -EINVAL;
     task_t *t = proc_current();
     if (!t) return -ESRCH;
     if (first >= MAX_FILES) return 0;
     if (last >= MAX_FILES) last = MAX_FILES - 1;
     for (unsigned fd = first; fd <= last; fd++) {
-        if (fdtable_get(t, (int)fd) >= 0)
+        if (fdtable_get(t, (int)fd) < 0)
+            continue;
+        if (flags & CLOSE_RANGE_CLOEXEC)
+            fdtable_set_cloexec(t, (int)fd, 1);
+        else
             fdtable_close(t, (int)fd);
     }
     return 0;

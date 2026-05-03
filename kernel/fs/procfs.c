@@ -35,6 +35,7 @@ typedef enum {
     PF_MOUNTS,       // /proc/mounts - 挂载信息
     PF_LOADAVG,      // /proc/loadavg - 负载平均值
     PF_NET,          // /proc/net - 网络协议栈状态
+    PF_CONFIG_GZ,    // /proc/config.gz - compressed kernel config
     PF_PID_STAT,     // /proc/[pid]/stat - 进程状态
     PF_PID_STATUS,   // /proc/[pid]/status - 进程状态详情
     PF_PID_STATM,
@@ -66,6 +67,30 @@ typedef struct pf_entry {
 
 static int g_procfs_pipe_max_size = 1048576;
 static int g_procfs_lease_break_time = 45;
+
+static const uint8_t g_proc_config_gz[] = {
+    0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x03, 0x7d, 0x8f, 0x31, 0x0e, 0x02, 0x21,
+    0x10, 0x45, 0x7b, 0x4f, 0x41, 0xe2, 0x11, 0x4c,
+    0xec, 0x2c, 0x60, 0x58, 0x56, 0x02, 0x2c, 0x84,
+    0x19, 0xd6, 0x58, 0x4d, 0x65, 0x61, 0xa3, 0xc5,
+    0x6e, 0xe3, 0xed, 0x4d, 0x58, 0x13, 0x2d, 0xc0,
+    0x6e, 0xfe, 0x7f, 0xaf, 0xf8, 0x03, 0x71, 0x32,
+    0x76, 0xe4, 0x10, 0xca, 0xe9, 0xb5, 0x83, 0x2d,
+    0xa4, 0x1c, 0x81, 0x0d, 0x7e, 0x0b, 0x0a, 0xa9,
+    0xc6, 0xbd, 0xf8, 0x14, 0x0a, 0x75, 0xb5, 0x06,
+    0x44, 0x96, 0x00, 0x24, 0xee, 0x8b, 0x78, 0x3c,
+    0x57, 0xb1, 0xdc, 0xd6, 0xbe, 0xc4, 0xf3, 0xa1,
+    0xe9, 0x91, 0x44, 0x87, 0x24, 0x09, 0x9b, 0x14,
+    0xc6, 0x1c, 0x4b, 0xea, 0x30, 0x83, 0xac, 0xe4,
+    0xa4, 0x2f, 0x56, 0xd3, 0xb9, 0x69, 0x58, 0xb7,
+    0x1d, 0x7f, 0x61, 0x5d, 0xd9, 0x36, 0xd2, 0x7c,
+    0x64, 0x04, 0x4a, 0x4d, 0xda, 0x05, 0x21, 0xea,
+    0xe2, 0x87, 0xf6, 0x66, 0x27, 0xbd, 0xc7, 0x6b,
+    0xe8, 0x3c, 0x14, 0x43, 0x92, 0xc4, 0x2a, 0xbb,
+    0x5f, 0xfc, 0x06, 0x92, 0x96, 0xf1, 0x8c, 0xa4,
+    0x01, 0x00, 0x00,
+};
 
 // 创建一个新的目录项
 static pf_entry_t *new_entry(const char *name, pf_type_t type, int pid) {
@@ -316,6 +341,11 @@ static int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
     case PF_NET:
         net_format_status(buf, bufsz);
         break;
+    case PF_CONFIG_GZ: {
+        size_t n = sizeof(g_proc_config_gz) < bufsz ? sizeof(g_proc_config_gz) : bufsz;
+        memcpy(buf, g_proc_config_gz, n);
+        return (int)n;
+    }
     case PF_A20_BCACHE: {
         bcache_stats_t bc;
         bcache_get_stats(&bc);
@@ -467,6 +497,7 @@ static pf_type_t name_to_type(const char *name, int *out_pid) {
     if (strcmp(name, "self") == 0) return PF_SELF;
     if (strcmp(name, "loadavg") == 0) return PF_LOADAVG;
     if (strcmp(name, "net") == 0) return PF_NET;
+    if (strcmp(name, "config.gz") == 0) return PF_CONFIG_GZ;
     if (strcmp(name, "filesystems") == 0) return PF_FSTYPE;
     if (strcmp(name, "pidmap") == 0) return PF_SYS_KERNEL_PIDMAP;
     if (strcmp(name, "a20") == 0) return PF_A20;
@@ -688,8 +719,8 @@ static long procfs_flseek(vfile_t *vf, long offset, int whence) {
 static int procfs_freaddir(vfile_t *vf, void *dirp, size_t count) {
     static const char *root_entries[] = {
         ".", "..", "meminfo", "version", "uptime", "cmdline",
-        "cpuinfo", "mounts", "self", "loadavg", "net", "filesystems",
-        "pidmap", "sys", "a20", NULL
+        "cpuinfo", "mounts", "self", "loadavg", "net", "config.gz",
+        "filesystems", "pidmap", "sys", "a20", NULL
     };
     static const char *pid_entries[] = {
         ".", "..", "stat", "status", "statm", "maps", "smaps", NULL
