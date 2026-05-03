@@ -67,8 +67,8 @@ void signal_deliver(void);
 void signal_deliver_user(trap_context_t *ctx);
 
 /* System call handlers */
-int  sys_sigaction_impl(int signum, const sigaction_t *act, sigaction_t *oldact);
-int  sys_sigprocmask_impl(int how, const uint64_t *set, uint64_t *oldset);
+int  sys_sigaction_impl(int signum, const void *act, void *oldact, size_t sigsetsize);
+int  sys_sigprocmask_impl(int how, const void *set, void *oldset, size_t sigsetsize);
 
 #define SIG_BLOCK    0
 #define SIG_UNBLOCK  1

@@ -37,8 +37,11 @@ void *proc_scratch_buffer(size_t size)
 
 void proc_task_init_common(task_t *t, task_t *parent)
 {
+    int parent_pgid = parent ? parent->pgid : 0;
+    int parent_sid = parent ? parent->sid : 0;
+
     t->ppid      = parent ? parent->pid : 0;
-    t->tgid      = parent ? parent->tgid : t->pid;
+    t->tgid      = t->pid;
     t->state     = PROC_READY;
     t->parent    = parent;
     t->exit_code = 0;
@@ -48,13 +51,20 @@ void proc_task_init_common(task_t *t, task_t *parent)
     t->on_rq     = 0;
     t->rq_next   = NULL;
     t->rq_prev   = NULL;
+    t->wait_next = NULL;
     t->wake_time = 0;
     t->alarm_expire = 0;
     t->itimer_real_interval = 0;
     memset(t->itimer_values, 0, sizeof(t->itimer_values));
     t->total_time = 0;
-    t->pgid      = parent ? parent->pgid : t->pid;
-    t->sid       = parent ? parent->sid  : t->pid;
+    t->child_utime = 0;
+    t->child_stime = 0;
+    t->pgid      = parent ? (parent_pgid > 0 ? parent_pgid : parent->pid) : t->pid;
+    t->sid       = parent ? (parent_sid > 0 ? parent_sid : parent->pid) : t->pid;
+    if (t->pgid <= 0)
+        t->pgid = t->pid;
+    if (t->sid <= 0)
+        t->sid = t->pid;
     t->fs.umask     = parent ? parent->fs.umask : 022;
     t->cred.uid       = parent ? parent->cred.uid : 0;
     t->cred.euid      = parent ? parent->cred.euid : 0;
@@ -149,17 +159,21 @@ void proc_destroy_task(task_t *t)
 {
     if (!t)
         return;
+    int free_storage = t->dynamic_alloc;
 
     vfs_release_process_locks(t->pid);
 
     uint64_t flags = spin_lock_irqsave(&proc_lock);
     proc_runq_remove_locked(t);
+    proc_unlink_task_locked(t);
     spin_unlock_irqrestore(&proc_lock, flags);
     proc_pid_unregister(t);
 
     proc_task_release_resources(t);
 
     memset(t, 0, sizeof(*t));
+    if (free_storage)
+        kfree(t);
 }
 
 void proc_free_pid(int pid)

@@ -247,17 +247,30 @@ int64_t sys_setfsgid(int gid) {
 }
 
 int64_t sys_getpgid(int pid) {
-    (void)pid;
-    return sys_getpid();
+    task_t *self = proc_current();
+    task_t *t = pid == 0 ? self : proc_find(pid);
+    if (!t) return -ESRCH;
+    return t->pgid;
 }
 
 int64_t sys_setpgid(int pid, int pgid) {
-    (void)pid; (void)pgid;
+    task_t *self = proc_current();
+    task_t *t = pid == 0 ? self : proc_find(pid);
+    if (!self || !t) return -ESRCH;
+    if (pgid == 0) pgid = t->pid;
+    if (pgid <= 0) return -EINVAL;
+    if (t != self && t->ppid != self->pid) return -ESRCH;
+    if (t->sid != self->sid) return -EPERM;
+    t->pgid = pgid;
     return 0;
 }
 
 int64_t sys_setsid(void) {
-    return sys_getpid();
+    task_t *t = proc_current();
+    if (!t) return -ESRCH;
+    t->sid = t->pid;
+    t->pgid = t->pid;
+    return t->sid;
 }
 
 int64_t sys_clone(uint64_t flags, void *stack, int *ptid, uint64_t tls, int *ctid) {
@@ -274,10 +287,6 @@ int64_t sys_execve(const char *path, char **argv, char **envp) {
 
 int64_t sys_wait4(int pid, int *status, int options, void *rusage) {
     (void)rusage;
-    if (syscall_sig_diag_count < 128) {
-        syscall_sig_diag_count++;
-        kdebug("[SIGSYS] wait4 pid=%d opt=0x%x\n", pid, options);
-    }
     int kstatus = 0;
     int ret = proc_wait4(pid, status ? &kstatus : NULL, options);
     if (ret >= 0 && status) {
@@ -288,10 +297,6 @@ int64_t sys_wait4(int pid, int *status, int options, void *rusage) {
 
 int64_t sys_waitid(int type, int id, void *info, int options, void *rusage) {
     (void)rusage;
-    if (syscall_sig_diag_count < 128) {
-        syscall_sig_diag_count++;
-        kdebug("[SIGSYS] waitid type=%d id=%d opt=0x%x\n", type, id, options);
-    }
     int pid = -1;
     switch (type) {
     case 0: /* P_ALL */
@@ -461,14 +466,16 @@ int64_t sys_setrlimit(int resource, void *rlim) {
 }
 
 int64_t sys_getrusage(int who, void *usage) {
-    (void)who;
     if (!usage) return -EFAULT;
     uint64_t u[18]; /* 144 bytes / 8 */
     memset(u, 0, sizeof(u));
     task_t *t = proc_current();
     if (t) {
-        u[0] = t->total_time / TICKS_PER_SEC;
-        u[1] = (t->total_time % TICKS_PER_SEC) * 1000000000UL / TICKS_PER_SEC / 1000;
+        uint64_t ticks = t->total_time;
+        if (who == -1)
+            ticks = t->child_utime + t->child_stime;
+        u[0] = ticks / 100;
+        u[1] = (ticks % 100) * 10000;
     }
     if (copy_to_user(usage, u, 144) < 0) return -EFAULT;
     return 0;

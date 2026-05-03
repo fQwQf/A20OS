@@ -304,11 +304,15 @@ int fdtable_dup_to(task_t *task, int oldfd, int newfd, int flags)
     int gfd = files->fd[oldfd];
     if (gfd < 0)
         return -EBADF;
-    if (fdtable_ref_gfd(gfd) < 0)
-        return -EBADF;
 
     if (files->fd[newfd] >= 0)
         vfs_close(files->fd[newfd]);
+    if (fdtable_ref_gfd(gfd) < 0) {
+        files->fd[newfd] = -1;
+        files->cloexec[newfd] = 0;
+        fdtable_note_free(files, newfd);
+        return -EBADF;
+    }
     files->fd[newfd] = gfd;
     files->cloexec[newfd] = (flags & O_CLOEXEC) ? 1 : 0;
     fdtable_note_alloc(files, newfd);
