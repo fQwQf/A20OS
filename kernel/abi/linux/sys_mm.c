@@ -27,6 +27,25 @@ int64_t sys_mprotect(uint64_t addr, size_t len, int prot) {
     return mm_mprotect(t->mm, addr, len, prot);
 }
 
+int64_t sys_msync(uint64_t addr, size_t len, int flags) {
+    const int MS_ASYNC = 1;
+    const int MS_INVALIDATE = 2;
+    const int MS_SYNC = 4;
+    if (addr & (PAGE_SIZE - 1)) return -EINVAL;
+    if (flags & ~(MS_ASYNC | MS_INVALIDATE | MS_SYNC)) return -EINVAL;
+    if ((flags & MS_ASYNC) && (flags & MS_SYNC)) return -EINVAL;
+    if (len == 0) return 0;
+    task_t *t = proc_current();
+    if (!t || !t->mm) return -EINVAL;
+    uint64_t end = ROUND_UP(addr + len, PAGE_SIZE);
+    if (end < addr) return -EINVAL;
+    for (uint64_t va = addr; va < end; va += PAGE_SIZE) {
+        vm_area_t *vma = mm_find_vma(t->mm, va);
+        if (!vma || va >= vma->end) return -ENOMEM;
+    }
+    return 0;
+}
+
 int64_t sys_madvise(uint64_t addr, size_t len, int advice) {
     if (addr & (PAGE_SIZE - 1)) return -EINVAL;
     if (len == 0) return 0;

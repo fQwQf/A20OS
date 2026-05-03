@@ -18,7 +18,6 @@ typedef struct proc_runq {
 static proc_runq_t sched_runq[CONFIG_NR_CPUS];
 static uint64_t next_wake_scan = SCHED_NO_DEADLINE;
 static uint64_t next_alarm_scan = SCHED_NO_DEADLINE;
-static int sched_diag_count;
 
 static proc_runq_t *sched_current_runq(void) {
     return &sched_runq[cpu_current_id()];
@@ -27,6 +26,19 @@ static proc_runq_t *sched_current_runq(void) {
 static proc_runq_t *sched_task_runq(task_t *t) {
     unsigned cpu = t && t->cpu_id < CONFIG_NR_CPUS ? t->cpu_id : cpu_current_id();
     return &sched_runq[cpu];
+}
+
+static int proc_runq_contains_locked(proc_runq_t *rq, task_t *t)
+{
+    if (!rq || !t)
+        return 0;
+    for (int q = 0; q < SCHED_LEVELS; q++) {
+        for (task_t *p = rq->head[q]; p; p = p->rq_next) {
+            if (p == t)
+                return 1;
+        }
+    }
+    return 0;
 }
 
 static int sched_level_clamp(int level) {
@@ -39,7 +51,6 @@ void proc_sched_runq_init(void) {
     memset(sched_runq, 0, sizeof(sched_runq));
     next_wake_scan = SCHED_NO_DEADLINE;
     next_alarm_scan = SCHED_NO_DEADLINE;
-    sched_diag_count = 0;
 }
 
 unsigned proc_sched_select_cpu_locked(task_t *t)
@@ -101,7 +112,16 @@ void proc_set_alarm_expire(task_t *t, uint64_t alarm_expire)
 
 void proc_runq_enqueue_locked(task_t *t) {
     if (!t || t == proc_idle_task() || t->state != PROC_READY || t->on_rq)
-        return;
+    {
+        if (!t || t == proc_idle_task() || t->state != PROC_READY)
+            return;
+        proc_runq_t *rq = sched_task_runq(t);
+        if (t->on_rq && proc_runq_contains_locked(rq, t))
+            return;
+        t->on_rq = 0;
+        t->rq_next = NULL;
+        t->rq_prev = NULL;
+    }
 
     if (t->cpu_id >= CONFIG_NR_CPUS)
         t->cpu_id = proc_sched_select_cpu_locked(t);
@@ -147,6 +167,7 @@ void proc_runq_remove_locked(task_t *t) {
 
 task_t *proc_runq_pick_locked(void) {
     proc_runq_t *rq = sched_current_runq();
+retry:
     while (rq->bitmap) {
         int q = 0;
         while (q < SCHED_LEVELS && !(rq->bitmap & (1U << q)))
@@ -174,19 +195,45 @@ task_t *proc_runq_pick_locked(void) {
         if (rq->nr_running > 0)
             rq->nr_running--;
 
-        if (t->state == PROC_READY && t->kstack)
+        if (t != proc_idle_task() && t->state == PROC_READY && t->kstack)
             return t;
     }
+
+    int found = 0;
+    memset(rq, 0, sizeof(*rq));
+    for (task_t *t = proc_first_task_locked(); t; t = proc_next_task_locked(t)) {
+        if (t == proc_idle_task() || t->state != PROC_READY || !t->kstack)
+            continue;
+        t->on_rq = 0;
+        t->rq_next = NULL;
+        t->rq_prev = NULL;
+        t->cpu_id = cpu_current_id();
+        proc_runq_enqueue_locked(t);
+        found++;
+    }
+    if (found && rq->bitmap)
+        goto retry;
     return NULL;
+}
+
+int proc_has_runnable_locked(void)
+{
+    for (task_t *t = proc_first_task_locked(); t; t = proc_next_task_locked(t)) {
+        if (t != proc_idle_task() && t->state == PROC_READY && t->kstack)
+            return 1;
+    }
+    return 0;
 }
 
 static void sched_scan_timers(uint64_t now)
 {
     uint64_t next_wake = SCHED_NO_DEADLINE;
     uint64_t next_alarm = SCHED_NO_DEADLINE;
+    int sigalrm_pids[32];
+    int sigalrm_count = 0;
 
-    for (int i = 0; i < MAX_PROCS; i++) {
-        task_t *t = &proc_table[i];
+    uint64_t flags = spin_lock_irqsave(&proc_lock);
+    for (task_t *t = proc_first_task_locked(); t; t = proc_next_task_locked(t)) {
         if (t->state == PROC_UNUSED)
             continue;
 
@@ -195,8 +242,9 @@ static void sched_scan_timers(uint64_t now)
             if (now >= alarm) {
                 uint64_t interval = t->itimer_real_interval;
                 alarm = interval ? now + interval : 0;
-                proc_set_alarm_expire(t, alarm);
-                signal_send(t->pid, SIGALRM);
+                __atomic_store_n(&t->alarm_expire, alarm, __ATOMIC_RELAXED);
+                if (sigalrm_count < (int)(sizeof(sigalrm_pids) / sizeof(sigalrm_pids[0])))
+                    sigalrm_pids[sigalrm_count++] = t->pid;
             }
             if (alarm > 0 && alarm < next_alarm)
                 next_alarm = alarm;
@@ -205,21 +253,19 @@ static void sched_scan_timers(uint64_t now)
         uint64_t wake = __atomic_load_n(&t->wake_time, __ATOMIC_RELAXED);
         if (t->state == PROC_BLOCKED && wake > 0) {
             if (now >= wake) {
-                if (sched_diag_count < 128) {
-                    sched_diag_count++;
-                    kdebug("[SCHEDDBG] wake pid=%d now=%lu wake=%lu\n",
-                          t->pid,
-                          (unsigned long)now,
-                          (unsigned long)wake);
-                }
-                proc_set_wake_time(t, 0);
+                __atomic_store_n(&t->wake_time, 0, __ATOMIC_RELAXED);
                 t->sched_level = 0;
-                proc_make_ready(t);
+                t->state = PROC_READY;
+                proc_runq_enqueue_locked(t);
             } else if (wake < next_wake) {
                 next_wake = wake;
             }
         }
     }
+    spin_unlock_irqrestore(&proc_lock, flags);
+
+    for (int i = 0; i < sigalrm_count; i++)
+        signal_send(sigalrm_pids[i], SIGALRM);
 
     __atomic_store_n(&next_wake_scan, next_wake, __ATOMIC_RELAXED);
     __atomic_store_n(&next_alarm_scan, next_alarm, __ATOMIC_RELAXED);
@@ -256,12 +302,6 @@ void sched(void) {
     spin_unlock_irqrestore(&proc_lock, flags);
 
     if (next) {
-        if (sched_diag_count < 256) {
-            sched_diag_count++;
-            kdebug("[SCHEDDBG] pick cur=%d next=%d level=%d state=%d\n",
-                  proc_current() ? proc_current()->pid : -1, next->pid,
-                  next->sched_level, next->state);
-        }
         context_switch(next);
         return;
     }

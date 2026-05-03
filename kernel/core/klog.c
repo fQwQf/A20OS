@@ -5,7 +5,7 @@
 #include "core/types.h"
 #include "core/defs.h"
 
-int klog_level = KLOG_INFO;
+int klog_level = KLOG_DEBUG;
 
 static char   klog_buf[KLOG_BUF_SIZE];
 static size_t klog_head __attribute__((section(".data"))) = 0;

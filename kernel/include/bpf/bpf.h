@@ -12,6 +12,7 @@
 
 #define BPF_MAP_TYPE_HASH    1
 #define BPF_MAP_TYPE_ARRAY   2
+#define BPF_MAP_TYPE_RINGBUF 27
 
 #define BPF_KEY_MAX          16
 #define BPF_VALUE_MAX        1024

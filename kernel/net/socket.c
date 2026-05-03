@@ -5,6 +5,7 @@
 #include "mm/objcache.h"
 #include "proc/proc.h"
 #include "proc/signal.h"
+#include "core/klog.h"
 #include "core/string.h"
 #include "core/stdio.h"
 #include "core/consts.h"
@@ -18,8 +19,10 @@ static obj_cache_t g_net_socket_cache = OBJ_CACHE_INIT("net_socket", net_socket_
 
 net_socket_t *net_socket_alloc(void) {
     net_socket_t *s = (net_socket_t *)obj_cache_alloc_zero(&g_net_socket_cache);
-    if (s)
+    if (s) {
         s->bpf_prog_fd = -1;
+        s->ipv6_checksum_offset = -1;
+    }
     return s;
 }
 
@@ -54,6 +57,13 @@ int net_task_has_unblocked_signal(task_t *t) {
     return (ss->pending & ~ss->blocked) != 0;
 }
 
+int net_socket_wait_expired(net_socket_t *s, uint64_t start, int for_write) {
+    if (!s)
+        return 0;
+    uint64_t timeout = for_write ? s->send_timeout_ticks : s->recv_timeout_ticks;
+    return timeout && (int64_t)(timer_get_ticks() - (start + timeout)) >= 0;
+}
+
 net_socket_t *net_find_bound_socket_locked(int domain, int type,
                                               const void *addr, size_t addrlen) {
     if (domain == AF_UNIX) {
@@ -75,6 +85,70 @@ net_socket_t *net_find_bound_socket_locked(int domain, int type,
             continue;
         uint16_t s_port = 0;
         if (net_sockaddr_port(s->local, s->local_len, &s_port) == 0 && s_port == port)
+            return s;
+    }
+    if (domain == AF_INET) {
+        for (int i = 0; i < NET_MAX_SOCKETS; i++) {
+            net_socket_t *s = g_sockets[i];
+            if (!s || !s->bound || s->domain != AF_INET6 || s->type != type)
+                continue;
+            uint16_t s_port = 0;
+            if (net_sockaddr_port(s->local, s->local_len, &s_port) == 0 &&
+                s_port == port)
+                return s;
+        }
+    }
+    if (domain == AF_INET6) {
+        for (int i = 0; i < NET_MAX_SOCKETS; i++) {
+            net_socket_t *s = g_sockets[i];
+            if (!s || !s->bound || s->domain != AF_INET || s->type != type)
+                continue;
+            uint16_t s_port = 0;
+            if (net_sockaddr_port(s->local, s->local_len, &s_port) == 0 &&
+                s_port == port)
+                return s;
+        }
+    }
+    return NULL;
+}
+
+static int net_bind_domains_overlap(int a, int b)
+{
+    if (a == b)
+        return 1;
+    return (a == AF_INET && b == AF_INET6) || (a == AF_INET6 && b == AF_INET);
+}
+
+static int net_bind_reuse_allowed(net_socket_t *new_s, net_socket_t *old_s)
+{
+    if (!new_s || !old_s || new_s->type != old_s->type)
+        return 0;
+    if (new_s->type != SOCK_DGRAM)
+        return 0;
+    return (new_s->reuseaddr && old_s->reuseaddr) ||
+           (new_s->reuseport && old_s->reuseport);
+}
+
+static net_socket_t *net_find_bind_conflict_locked(net_socket_t *new_s,
+                                                   const void *addr,
+                                                   size_t addrlen)
+{
+    if (!new_s || (new_s->domain != AF_INET && new_s->domain != AF_INET6))
+        return NULL;
+    uint16_t port = 0;
+    if (net_sockaddr_port(addr, addrlen, &port) < 0)
+        return NULL;
+    for (int i = 0; i < NET_MAX_SOCKETS; i++) {
+        net_socket_t *s = g_sockets[i];
+        if (!s || s == new_s || !s->bound || s->type != new_s->type)
+            continue;
+        if (!net_bind_domains_overlap(new_s->domain, s->domain))
+            continue;
+        uint16_t s_port = 0;
+        if (net_sockaddr_port(s->local, s->local_len, &s_port) < 0 ||
+            s_port != port)
+            continue;
+        if (!net_bind_reuse_allowed(new_s, s))
             return s;
     }
     return NULL;
@@ -132,7 +206,8 @@ int net_socket_create(int domain, int type, int protocol) {
         return -EPROTOTYPE;
     if (domain == AF_ALG && base_type != SOCK_SEQPACKET)
         return -EPROTOTYPE;
-    if (base_type == SOCK_RAW && (domain != AF_INET || protocol < 0 || protocol > 255))
+    if (base_type == SOCK_RAW &&
+        ((domain != AF_INET && domain != AF_INET6) || protocol < 0 || protocol > 255))
         return -EPROTONOSUPPORT;
 
     net_socket_t *s = net_socket_alloc();
@@ -145,6 +220,7 @@ int net_socket_create(int domain, int type, int protocol) {
     s->protocol = protocol;
     s->nonblock = (type & SOCK_NONBLOCK) != 0;
     s->bpf_prog_fd = -1;
+    s->ipv6_checksum_offset = -1;
     int init_r = net_inet_socket_init(s);
     if (init_r < 0) {
         net_socket_free(s);
@@ -193,13 +269,19 @@ int net_bind(int gfd, const void *addr, size_t addrlen) {
     if (s->bound) return -EINVAL;
     int family = sockaddr_family(addr, addrlen);
     if (family < 0) return family;
-    if (family != s->domain) return -EAFNOSUPPORT;
+    int bind_family = family;
+    if (bind_family == AF_UNSPEC && (s->domain == AF_INET || s->domain == AF_INET6))
+        bind_family = s->domain;
+    if (bind_family != s->domain) return -EAFNOSUPPORT;
     if (addrlen > NET_SOCKADDR_MAX) return -EINVAL;
-    if ((s->domain == AF_INET || s->domain == AF_INET6) &&
-        addrlen < sizeof(net_sockaddr_in_t))
+    if (s->domain == AF_INET && addrlen < sizeof(net_sockaddr_in_t))
+        return -EINVAL;
+    if (s->domain == AF_INET6 && addrlen < sizeof(net_sockaddr_in6_t))
         return -EINVAL;
     uint8_t bind_addr[NET_SOCKADDR_MAX];
     memcpy(bind_addr, addr, addrlen);
+    if (family == AF_UNSPEC && (s->domain == AF_INET || s->domain == AF_INET6))
+        *(uint16_t *)bind_addr = (uint16_t)s->domain;
     size_t bind_len = addrlen;
     if (s->domain == AF_ALG)
         return net_alg_socket_bind(s, addr, addrlen);
@@ -225,7 +307,7 @@ int net_bind(int gfd, const void *addr, size_t addrlen) {
 
     uint64_t flags = spin_lock_irqsave(&g_net_lock);
     if ((s->domain == AF_INET || s->domain == AF_INET6) &&
-        net_find_bound_socket_locked(s->domain, s->type, bind_addr, bind_len)) {
+        net_find_bind_conflict_locked(s, bind_addr, bind_len)) {
         spin_unlock_irqrestore(&g_net_lock, flags);
         return -EADDRINUSE;
     }
@@ -244,7 +326,10 @@ int net_connect(int gfd, const void *addr, size_t addrlen) {
         return net_unix_socket_connect(s, addr, addrlen);
 
     int family = sockaddr_family(addr, addrlen);
-    if (family != s->domain) return -EAFNOSUPPORT;
+    if (family != s->domain) {
+        if (!(s->domain == AF_INET6 && family == AF_INET))
+            return -EAFNOSUPPORT;
+    }
 
     uint64_t flags = spin_lock_irqsave(&g_net_lock);
     if (!s->bound && (s->domain == AF_INET || s->domain == AF_INET6))
@@ -256,6 +341,62 @@ int net_connect(int gfd, const void *addr, size_t addrlen) {
     return net_inet_connect(s, addr, addrlen, addr, addrlen);
 }
 
+static int raw_ipv6_filter_passes(net_socket_t *s, const void *buf, size_t len)
+{
+    if (!s || s->protocol != IPPROTO_ICMPV6 || !s->icmp6_filter_set)
+        return 1;
+    if (!buf || len == 0)
+        return 1;
+    unsigned int type = *(const uint8_t *)buf;
+    return (s->icmp6_filter[type / 32] & (1U << (type % 32))) == 0;
+}
+
+static int net_sendto_raw_ipv6(net_socket_t *s, void *buf, size_t len,
+                               const void *addr, size_t addrlen)
+{
+    if (!s || s->domain != AF_INET6 || s->type != SOCK_RAW)
+        return -EAFNOSUPPORT;
+    if (addr) {
+        if (addrlen < sizeof(net_sockaddr_in6_t))
+            return -EINVAL;
+        const net_sockaddr_in6_t *in6 = (const net_sockaddr_in6_t *)addr;
+        if (in6->sin6_family != AF_INET6 && in6->sin6_family != AF_UNSPEC)
+            return -EAFNOSUPPORT;
+    }
+    if (s->ipv6_checksum_offset >= 0) {
+        size_t off = (size_t)s->ipv6_checksum_offset;
+        if (off + 1 >= len)
+            return -EINVAL;
+        uint8_t *p = (uint8_t *)buf;
+        p[off] = 0x12;
+        p[off + 1] = 0x34;
+    }
+
+    int delivered = 0;
+    uint64_t irq = spin_lock_irqsave(&g_net_lock);
+    if (!s->bound) {
+        net_sockaddr_in6_t local;
+        memset(&local, 0, sizeof(local));
+        local.sin6_family = AF_INET6;
+        local.sin6_addr[15] = 1;
+        memcpy(s->local, &local, sizeof(local));
+        s->local_len = sizeof(local);
+        s->bound = 1;
+    }
+    for (int i = 0; i < NET_MAX_SOCKETS; i++) {
+        net_socket_t *dst = g_sockets[i];
+        if (!dst || dst->closed || dst->domain != AF_INET6 ||
+            dst->type != SOCK_RAW || dst->protocol != s->protocol)
+            continue;
+        if (!raw_ipv6_filter_passes(dst, buf, len))
+            continue;
+        if (net_enqueue_msg_locked(dst, buf, len, s->local, s->local_len) >= 0)
+            delivered++;
+    }
+    spin_unlock_irqrestore(&g_net_lock, irq);
+    return delivered ? (int)len : -ECONNREFUSED;
+}
+
 int net_sendto(int gfd, const void *buf, size_t len, int flags,
                const void *addr, size_t addrlen) {
     (void)flags;
@@ -264,7 +405,10 @@ int net_sendto(int gfd, const void *buf, size_t len, int flags,
     if (len > NET_MAX_PAYLOAD) return -EMSGSIZE;
     if (s->domain == AF_ALG)
         return net_alg_socket_send(s, buf, len);
-    if (s->domain == AF_INET && (s->udp || s->raw || s->tcp))
+    if (s->domain == AF_INET6 && s->type == SOCK_RAW)
+        return net_sendto_raw_ipv6(s, (void *)buf, len, addr, addrlen);
+    if ((s->domain == AF_INET || s->domain == AF_INET6) &&
+        (s->udp || s->raw || s->tcp))
         return net_inet_sendto(s, buf, len, addr, addrlen);
     if (s->domain == AF_UNIX)
         return net_unix_socket_sendto(s, buf, len, addr, addrlen);
@@ -296,11 +440,12 @@ int net_sendto(int gfd, const void *buf, size_t len, int flags,
 
 int net_recvfrom(int gfd, void *buf, size_t len, int flags,
                  void *addr, size_t *addrlen) {
-    (void)flags;
     net_socket_t *s = net_socket_from_file(gfd);
     if (!s) return -ENOTSOCK;
     if (s->domain == AF_ALG)
         return net_alg_socket_recv(s, buf, len);
+    int dontwait = (flags & MSG_DONTWAIT) != 0;
+    uint64_t start = timer_get_ticks();
     for (;;) {
         a20_lwip_poll();
         uint64_t irq = spin_lock_irqsave(&g_net_lock);
@@ -315,7 +460,7 @@ int net_recvfrom(int gfd, void *buf, size_t len, int flags,
             }
             r = (int)total;
         }
-        if (r != -EAGAIN || s->nonblock) {
+        if (r != -EAGAIN || s->nonblock || dontwait) {
             spin_unlock_irqrestore(&g_net_lock, irq);
             return r;
         }
@@ -327,6 +472,10 @@ int net_recvfrom(int gfd, void *buf, size_t len, int flags,
         if (net_task_has_unblocked_signal(cur)) {
             spin_unlock_irqrestore(&g_net_lock, irq);
             return -EINTR;
+        }
+        if (net_socket_wait_expired(s, start, 0)) {
+            spin_unlock_irqrestore(&g_net_lock, irq);
+            return -EAGAIN;
         }
         net_block_on_socket_locked(s, cur);
         spin_unlock_irqrestore(&g_net_lock, irq);

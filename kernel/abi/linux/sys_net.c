@@ -26,9 +26,11 @@ static int copy_sockaddr_len_to_user(void *uaddrlen, size_t len) {
 
 int64_t sys_socket(int domain, int type, int protocol) {
     int gfd = net_socket_create(domain, type, protocol);
-    if (gfd < 0) return gfd;
+    if (gfd < 0)
+        return gfd;
     task_t *t = proc_current();
-    return fdtable_install(t, gfd, type);
+    int lfd = fdtable_install(t, gfd, type);
+    return lfd;
 }
 
 int64_t sys_socketpair(int domain, int type, int protocol, int *sv) {
@@ -96,7 +98,8 @@ int64_t sys_accept4(int fd, void *addr, void *addrlen, int flags) {
         if (r < 0) return r;
     }
     int new_gfd = net_accept((int)gfd, kaddr, &klen, flags);
-    if (new_gfd < 0) return new_gfd;
+    if (new_gfd < 0)
+        return new_gfd;
     if (flags & SOCK_NONBLOCK)
         net_set_nonblock(new_gfd, 1);
     int lfd = fdtable_install_current( new_gfd, flags);
@@ -130,7 +133,8 @@ int64_t sys_getsockname(int fd, void *addr, void *addrlen) {
     int r = copy_sockaddr_len_from_user(addrlen, &klen);
     if (r < 0) return r;
     r = net_getsockname((int)gfd, kaddr, &klen);
-    if (r < 0) return r;
+    if (r < 0)
+        return r;
     if (copy_to_user(addr, kaddr, klen) < 0) return -EFAULT;
     return copy_sockaddr_len_to_user(addrlen, klen);
 }
@@ -143,7 +147,8 @@ int64_t sys_getpeername(int fd, void *addr, void *addrlen) {
     int r = copy_sockaddr_len_from_user(addrlen, &klen);
     if (r < 0) return r;
     r = net_getpeername((int)gfd, kaddr, &klen);
-    if (r < 0) return r;
+    if (r < 0)
+        return r;
     if (copy_to_user(addr, kaddr, klen) < 0) return -EFAULT;
     return copy_sockaddr_len_to_user(addrlen, klen);
 }
@@ -164,8 +169,7 @@ int64_t sys_sendto(int fd, const void *buf, size_t len, int flags,
         if (r < 0) return r;
         ka = kaddr;
     }
-    int r = net_sendto((int)gfd, kbuf, len, flags, ka, addrlen);
-    return r;
+    return net_sendto((int)gfd, kbuf, len, flags, ka, addrlen);
 }
 
 int64_t sys_recvfrom(int fd, void *buf, size_t len, int flags,
@@ -213,7 +217,8 @@ int64_t sys_getsockopt(int fd, int level, int optname, void *optval, void *optle
     if (r < 0) return r;
     if (klen > sizeof(kopt)) klen = sizeof(kopt);
     r = net_getsockopt((int)gfd, level, optname, kopt, &klen);
-    if (r < 0) return r;
+    if (r < 0)
+        return r;
     if (copy_to_user(optval, kopt, klen) < 0) return -EFAULT;
     return copy_sockaddr_len_to_user(optlen, klen);
 }

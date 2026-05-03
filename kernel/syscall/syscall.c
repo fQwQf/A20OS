@@ -82,12 +82,6 @@ int64_t syscall_dispatch(trap_context_t *ctx)
             signal_state_t *ss = (signal_state_t *)cur->signals;
             ss->blocked = cur->sigsuspend_old_blocked;
             cur->sigsuspend_active = 0;
-            if (syscall_sig_diag_count < 128)
-            {
-                syscall_sig_diag_count++;
-                kdebug("[SIGSYS] sigsuspend-ret pid=%d pending=0x%lx blocked=0x%lx\n",
-                       cur->pid, (unsigned long)ss->pending, (unsigned long)ss->blocked);
-            }
         }
     }
     return ret;

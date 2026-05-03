@@ -18,8 +18,6 @@
 #define CLONE_CHILD_CLEARTID 0x00200000
 #define CLONE_CHILD_SETTID   0x01000000
 
-static int fork_diag_count;
-
 static int proc_copy_to_task_user(task_t *task, void *dst, const void *src, size_t n)
 {
     if (!task || !task->pgdir)
@@ -69,13 +67,6 @@ int proc_clone(uint64_t flags, uint64_t stack, int *ptid, uint64_t tls, int *cti
     if (flags & CLONE_CHILD_CLEARTID)
         t->clear_child_tid = ctid;
     proc_set_name(t, parent->name);
-
-    if (fork_diag_count < 128) {
-        fork_diag_count++;
-        kdebug("[FORKDBG] parent=%d child=%d flags=0x%lx stack=0x%lx\n",
-               parent ? parent->pid : -1, t->pid,
-               (unsigned long)flags, (unsigned long)stack);
-    }
 
     t->exec_load_addr = parent->exec_load_addr;
     t->exec_load_size = parent->exec_load_size;
@@ -152,7 +143,9 @@ int proc_clone(uint64_t flags, uint64_t stack, int *ptid, uint64_t tls, int *cti
 
     proc_make_ready(t);
     if (flags & CLONE_VFORK) {
-        while (t->state != PROC_UNUSED && t->state != PROC_ZOMBIE)
+        mm_struct_t *shared_mm = (flags & CLONE_VM) ? parent->mm : NULL;
+        while (t->state != PROC_UNUSED && t->state != PROC_ZOMBIE &&
+               (!shared_mm || t->mm == shared_mm))
             proc_yield();
     }
     return t->pid;
