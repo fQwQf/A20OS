@@ -70,6 +70,17 @@ void signal_deliver_user(trap_context_t *ctx);
 int  sys_sigaction_impl(int signum, const void *act, void *oldact, size_t sigsetsize);
 int  sys_sigprocmask_impl(int how, const void *set, void *oldset, size_t sigsetsize);
 
+#define SS_ONSTACK  1
+#define SS_DISABLE  2
+
+#define MINSIGSTKSZ 2048
+
+typedef struct sigaltstack {
+    void   *ss_sp;
+    int     ss_flags;
+    size_t  ss_size;
+} stack_t;
+
 #define SIG_BLOCK    0
 #define SIG_UNBLOCK  1
 #define SIG_SETMASK  2
