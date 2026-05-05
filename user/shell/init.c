@@ -41,6 +41,7 @@ static void build_glibc_shell_env(char *path_env, size_t path_env_size,
     char ld_value[512];
 
     snprintf(path_value, sizeof(path_value), "/bin");
+    append_existing_dir(path_value, sizeof(path_value), "/usr/bin");
     append_existing_dir(path_value, sizeof(path_value), "/test");
     append_existing_dir(path_value, sizeof(path_value), "/test/glibc");
     append_existing_dir(path_value, sizeof(path_value), "/testrv/glibc");
@@ -51,6 +52,7 @@ static void build_glibc_shell_env(char *path_env, size_t path_env_size,
     append_existing_dir(ld_value, sizeof(ld_value), "/testrv/glibc/lib");
     append_existing_dir(ld_value, sizeof(ld_value), "/testla/glibc/lib");
     append_existing_dir(ld_value, sizeof(ld_value), "/glibc/lib");
+    append_existing_dir(ld_value, sizeof(ld_value), "/usr/lib");
     if (ld_value[0] == '\0')
         snprintf(ld_value, sizeof(ld_value), "/lib");
 
@@ -144,6 +146,10 @@ int main(int argc, char *argv[])
 
     setup_runtime_links();
 
+    mkdir("/lib", 0755);
+    if (!access("/usr/lib/libc.so", F_OK))
+        symlink("/usr/lib/libc.so", "/lib/ld-musl-riscv64.so.1");
+
     int pid = fork();
     if (pid < 0)
     {
@@ -160,6 +166,8 @@ int main(int argc, char *argv[])
             path_env,
             ld_env,
             "HOME=/",
+            "TERM=vt100",
+            "VIMRUNTIME=/usr/share/vim/vim92",
             NULL,
         };
         execve("/bin/mksh", sh_argv, envp);
