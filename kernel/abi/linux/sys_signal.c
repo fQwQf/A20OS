@@ -133,6 +133,48 @@ int64_t sys_sigsuspend(void *mask, size_t sigsetsize) {
     return -EINTR;
 }
 
+int64_t sys_sigaltstack(void *ss, void *old_ss) {
+    task_t *t = proc_current();
+    if (!t) return -EINVAL;
+
+    /* Return current alt-stack info if requested */
+    if (old_ss) {
+        stack_t cur;
+        memset(&cur, 0, sizeof(cur));
+        cur.ss_sp    = t->sigaltstack.ss_sp;
+        cur.ss_size  = t->sigaltstack.ss_size;
+        cur.ss_flags = t->sigaltstack.ss_flags;
+        if (t->sigaltstack.ss_flags & SS_DISABLE)
+            cur.ss_flags = SS_DISABLE;
+        else
+            cur.ss_flags = 0;
+        if (copy_to_user(old_ss, &cur, sizeof(cur)) < 0)
+            return -EFAULT;
+    }
+
+    /* Set new alt-stack if requested */
+    if (ss) {
+        stack_t new_ss;
+        if (copy_from_user(&new_ss, ss, sizeof(new_ss)) < 0)
+            return -EFAULT;
+        if (new_ss.ss_flags & ~SS_DISABLE)
+            return -EINVAL;
+        if (new_ss.ss_flags & SS_DISABLE) {
+            t->sigaltstack.ss_sp    = NULL;
+            t->sigaltstack.ss_size  = 0;
+            t->sigaltstack.ss_flags = SS_DISABLE;
+        } else {
+            if (new_ss.ss_size < MINSIGSTKSZ)
+                return -ENOMEM;
+            t->sigaltstack.ss_sp    = new_ss.ss_sp;
+            t->sigaltstack.ss_size  = new_ss.ss_size;
+            t->sigaltstack.ss_flags = 0;
+        }
+    }
+
+    return 0;
+}
+
 int64_t sys_sigtimedwait(const uint64_t *set, void *info, const void *timeout, size_t sigsetsize) {
     task_t *t = proc_current();
     if (!t || !t->signals || !set) return -EINVAL;

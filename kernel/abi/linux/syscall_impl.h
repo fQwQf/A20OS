@@ -206,6 +206,7 @@ int64_t sys_sigaction(int signum, void *act, void *oldact, size_t sigsetsize);
 int64_t sys_sigprocmask(int how, void *set, void *oldset, size_t sigsetsize);
 int64_t sys_sigreturn(trap_context_t *ctx);
 int64_t sys_sigsuspend(void *mask, size_t sigsetsize);
+int64_t sys_sigaltstack(void *ss, void *old_ss);
 int64_t sys_sigtimedwait(const uint64_t *set, void *info, const void *timeout, size_t sigsetsize);
 int64_t sys_rt_sigqueueinfo(int tgid, int sig, void *uinfo);
 

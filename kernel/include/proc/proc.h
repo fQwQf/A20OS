@@ -12,6 +12,8 @@ struct vm_area;
 struct files_struct;
 typedef struct mm_struct mm_struct_t;
 
+typedef struct { void *ss_sp; int ss_flags; size_t ss_size; } sigaltstack_t;
+
 typedef struct proc_fs_context {
     char cwd[MAX_PATH_LEN];
     char root_path[MAX_PATH_LEN];
@@ -133,6 +135,7 @@ typedef struct task_t {
     int            sig_handling;
     uint64_t       sigsuspend_old_blocked;
     int            sigsuspend_active;
+    sigaltstack_t  sigaltstack;
 } task_t;
 
 static inline int proc_has_cap(const task_t *t, int cap)
