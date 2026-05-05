@@ -29,6 +29,10 @@ BUILD_TIME_HDR = $(BUILD_DIR)/generated/build_time.h
 FAT32_IMAGE_MB ?= 32
 EXT4_IMAGE_MB ?= 32
 CONTEST_DISK_MB ?= $(FAT32_IMAGE_MB)
+EXTRA_IMAGE_MB ?= 256
+EXTRA_IMG = $(BUILD_DIR)/extra.img
+EXTRA_STAGING_DIR = $(BUILD_DIR)/extra-staging
+EXTRA_PACKAGES = vim git gcc cc
 USER_BUILD_ID = $(ARCH):$(CONTEST):$(OPT)
 USER_BUILD_CHECK_DIRS = user/cmds user/contest_init user/init_common user/lib user/shell \
                         user/external/musl user/external/sbase user/external/mksh-cvs2git \
@@ -207,7 +211,8 @@ KERNEL_BIN = $(BUILD_DIR)/kernel.bin
         check-riscv64-user check-loongarch64-user check-aarch64-user \
         smoke-riscv64 smoke-loongarch64 smoke-aarch64 smoke-abi-linux smoke-proc-a20 \
         FORCE \
-        user_apps fs_img kernel-only dev-build contest-rv contest-la
+        user_apps fs_img kernel-only dev-build contest-rv contest-la \
+        extra-img extra-user-apps run-riscv64-extra run-loongarch64-extra run-arm64-extra
 
 FORCE:
 
@@ -528,6 +533,7 @@ clean:
 	rm -f kernel.elf kernel.bin fat32.img ext4.img
 	rm -f kernel-rv kernel-la disk.img disk-la.img
 	$(MAKE) -C user clean
+	$(MAKE) -f user/extra.mk clean 2>/dev/null || true
 
 -include $(DEP_FILES)
 
@@ -576,3 +582,96 @@ else
 endif
 	@echo "Waiting for GDB connection on port 1234..."
 	$(QEMU) $(QEMU_FLAGS) -kernel $(KERNEL_ELF) -S -s
+
+# ----------------------------------------------------------------
+# Extra packages (vim / git / gcc) on a separate ext4 disk
+# ----------------------------------------------------------------
+
+extra-user-apps:
+	$(MAKE) -f user/extra.mk ARCH=$(ARCH) OPT="$(OPT)"
+
+extra-img: extra-user-apps
+	@echo "Building extra packages image..."
+	@rm -rf $(EXTRA_STAGING_DIR) && mkdir -p $(EXTRA_STAGING_DIR)/bin
+	@set -e; \
+	for f in user/build/extra/*; do \
+		[ -f "$$f" ] || continue; \
+		name=$$(basename "$$f"); \
+		cp "$$f" "$(EXTRA_STAGING_DIR)/bin/$$name"; \
+	done
+	@set -e; \
+	if [ -d user/build/extra/obj/$(ARCH)/gcc-install ]; then \
+		cp -a user/build/extra/obj/$(ARCH)/gcc-install/libexec "$(EXTRA_STAGING_DIR)/libexec"; \
+		cp -a user/build/extra/obj/$(ARCH)/gcc-install/lib "$(EXTRA_STAGING_DIR)/lib"; \
+		for t in user/build/extra/obj/$(ARCH)/gcc-install/bin/*; do \
+			[ -f "$$t" ] && cp "$$t" "$(EXTRA_STAGING_DIR)/bin/$$(basename $$t)"; \
+		done; \
+		mv "$(EXTRA_STAGING_DIR)/bin/gcc" "$(EXTRA_STAGING_DIR)/bin/gcc-real"; \
+		printf '#!/bin/sh\nexec /usr/bin/gcc-real -fno-lto -fno-use-linker-plugin "$$@"\n' > "$(EXTRA_STAGING_DIR)/bin/gcc"; \
+		mv "$(EXTRA_STAGING_DIR)/bin/cc" "$(EXTRA_STAGING_DIR)/bin/cc-real"; \
+		printf '#!/bin/sh\nexec /usr/bin/cc-real -fno-lto -fno-use-linker-plugin "$$@"\n' > "$(EXTRA_STAGING_DIR)/bin/cc"; \
+	fi
+	@MCM_LIB=user/external/musl-cross-make/output/riscv64-linux-musl/lib; \
+	if [ -f "$$MCM_LIB/libc.so" ]; then \
+		mkdir -p "$(EXTRA_STAGING_DIR)/lib"; \
+		cp "$$MCM_LIB/libc.so" "$(EXTRA_STAGING_DIR)/lib/libc.so"; \
+		ln -sf libc.so "$(EXTRA_STAGING_DIR)/lib/ld-musl-riscv64.so.1"; \
+	fi
+	@MCM_INC=user/external/musl-cross-make/output/riscv64-linux-musl/include; \
+	if [ -d "$$MCM_INC" ]; then \
+		mkdir -p "$(EXTRA_STAGING_DIR)/include"; \
+		cp -a $$MCM_INC/* "$(EXTRA_STAGING_DIR)/include/"; \
+		rm -rf "$(EXTRA_STAGING_DIR)/include/c++"; \
+	fi
+	@MCM_GCC_INC=user/external/musl-cross-make/output/lib/gcc/riscv64-linux-musl/14.2.0/include; \
+	GCC_VER=17.0.0; \
+	if [ -d "$$MCM_GCC_INC" ]; then \
+		mkdir -p "$(EXTRA_STAGING_DIR)/lib/gcc/riscv64-linux-musl/$$GCC_VER/include"; \
+		cp -a $$MCM_GCC_INC/* "$(EXTRA_STAGING_DIR)/lib/gcc/riscv64-linux-musl/$$GCC_VER/include/"; \
+	fi
+	@MCM_GCC_LIB=user/external/musl-cross-make/output/lib/gcc/riscv64-linux-musl/14.2.0; \
+	GCC_VER=17.0.0; \
+	for f in crtbegin.o crtbeginS.o crtbeginT.o crtend.o crtendS.o; do \
+		[ -f "$$MCM_GCC_LIB/$$f" ] && cp "$$MCM_GCC_LIB/$$f" "$(EXTRA_STAGING_DIR)/lib/gcc/riscv64-linux-musl/$$GCC_VER/$$f"; \
+	done
+	@GCC_SPECS_DIR="$(EXTRA_STAGING_DIR)/lib/gcc/riscv64-linux-musl/17.0.0"; \
+	printf '*cc1_options:+ -fno-lto\n' > "$$GCC_SPECS_DIR/specs"
+	@VIM_RT="$(EXTRA_STAGING_DIR)/share/vim/vim92"; \
+	VIM_SRC=user/external/vim/runtime; \
+	mkdir -p "$$VIM_RT"; \
+	for f in defaults.vim filetype.vim ftoff.vim ftplugin.vim ftplugof.vim; do \
+		[ -f "$$VIM_SRC/$$f" ] && cp "$$VIM_SRC/$$f" "$$VIM_RT/$$f"; \
+	done; \
+	for d in syntax indent; do \
+		mkdir -p "$$VIM_RT/$$d"; \
+		cp -a "$$VIM_SRC/$$d/"*.vim "$$VIM_RT/$$d/" 2>/dev/null || true; \
+	done
+	@mkdir -p $(BUILD_DIR)
+	dd if=/dev/zero of=$(EXTRA_IMG) bs=1M count=$(EXTRA_IMAGE_MB) 2>/dev/null
+	mkfs.ext4 -F -O ^has_journal,extent,huge_file,flex_bg,uninit_bg,dir_index \
+		-d $(EXTRA_STAGING_DIR) $(EXTRA_IMG)
+	@rm -rf $(EXTRA_STAGING_DIR)
+	@echo "Extra image: $(EXTRA_IMG) ($(EXTRA_IMAGE_MB)MB)"
+
+# Helper: QEMU flags for the extra disk (appended conditionally)
+ifeq ($(ARCH), riscv64)
+EXTRA_QEMU_BLK = -drive file=$(EXTRA_IMG),if=none,format=raw,id=xextra -device virtio-blk-device,drive=xextra,bus=virtio-mmio-bus.5
+else ifeq ($(ARCH), loongarch64)
+EXTRA_QEMU_BLK = -drive file=$(EXTRA_IMG),if=none,format=raw,id=xextra -device virtio-blk-pci,drive=xextra
+else ifeq ($(ARCH), aarch64)
+EXTRA_QEMU_BLK = -drive file=$(EXTRA_IMG),if=none,format=raw,id=xextra -device virtio-blk-device,drive=xextra,bus=virtio-mmio-bus.5
+endif
+
+run-riscv64-extra:
+	$(MAKE) ARCH=riscv64 BRINGUP=0 CONTEST=0 _run_extra_impl
+
+run-loongarch64-extra:
+	$(MAKE) ARCH=loongarch64 BRINGUP=0 CONTEST=0 _run_extra_impl
+
+run-arm64-extra:
+	$(MAKE) ARCH=aarch64 BRINGUP=0 CONTEST=0 _run_extra_impl
+
+_run_extra_impl:
+	$(MAKE) ARCH=$(ARCH) BRINGUP=0 CONTEST=0 dev-build
+	$(MAKE) ARCH=$(ARCH) EXTRA_IMG=$(EXTRA_IMG) extra-img
+	$(QEMU) $(QEMU_FLAGS) $(EXTRA_QEMU_BLK) -kernel $(KERNEL_ELF)
