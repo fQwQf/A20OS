@@ -96,6 +96,7 @@
 #define SYS_reboot         142
 #define SYS_tkill          130
 #define SYS_tgkill         131
+#define SYS_sigaltstack    132
 #define SYS_sigaction      134
 #define SYS_sigprocmask    135
 #define SYS_sigtimedwait   137

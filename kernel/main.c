@@ -60,12 +60,15 @@ static const mount_entry_t mount_table[] = {
 #define MOUNT_COUNT  2
 #endif /* CONTEST */
 
-/* Optional extra devices (sdcard images) — mounted if present */
+/* Optional extra devices — mounted if present, best-effort */
 static const mount_entry_t extra_mount_table[] = {
-    { "/testrv", "ext4" },  /* Device 2 */
-    { "/testla", "ext4" },  /* Device 3 */
+    { "/testrv", "ext4" },  /* RISC-V test sdcard */
+    { "/testla", "ext4" },  /* LoongArch test sdcard */
 };
 #define EXTRA_MOUNT_COUNT  2
+
+/* Extra packages disk — always the last block device tried */
+static const mount_entry_t pkgs_mount = { "/usr", "ext4" };
 
 /* Try to initialise, create a block cache, mkdir and mount.
  * Returns 0 on success, <0 on any failure (already logged). */
@@ -157,6 +160,12 @@ void kernel_main(void) {
         try_mount(dev_idx,
                   extra_mount_table[j].mount_point,
                   extra_mount_table[j].fs_type);
+    }
+
+    /* Best-effort: extra packages disk (vim/git/gcc) */
+    if (virtio_blk_init() == 0) {
+        int pkgs_idx = MOUNT_COUNT + EXTRA_MOUNT_COUNT;
+        try_mount(pkgs_idx, pkgs_mount.mount_point, pkgs_mount.fs_type);
     }
 #endif
 
