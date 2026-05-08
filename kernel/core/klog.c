@@ -4,6 +4,7 @@
 #include "core/string.h"
 #include "core/types.h"
 #include "core/defs.h"
+#include "core/lock.h"
 
 int klog_level = KLOG_DEBUG;
 
@@ -11,16 +12,18 @@ static char   klog_buf[KLOG_BUF_SIZE];
 static size_t klog_head __attribute__((section(".data"))) = 0;
 static size_t klog_tail __attribute__((section(".data"))) = 0;
 static size_t klog_used __attribute__((section(".data"))) = 0;
+static spinlock_t klog_lock = SPINLOCK_INIT;
 
 void klog_init(void) {
     memset(klog_buf, 0, sizeof(klog_buf));
     klog_head = 0;
     klog_tail = 0;
     klog_used = 0;
+    spin_init(&klog_lock);
 }
 
-/* Append a string to the ring buffer */
 static void klog_append(const char *s, size_t len) {
+    uint64_t flags = spin_lock_irqsave(&klog_lock);
     for (size_t i = 0; i < len; i++) {
         klog_buf[klog_head] = s[i];
         klog_head = (klog_head + 1) % KLOG_BUF_SIZE;
@@ -30,6 +33,7 @@ static void klog_append(const char *s, size_t len) {
             klog_tail = (klog_tail + 1) % KLOG_BUF_SIZE;
         }
     }
+    spin_unlock_irqrestore(&klog_lock, flags);
 }
 
 void klog_write(const char *fmt, ...) {
@@ -44,7 +48,11 @@ void klog_write(const char *fmt, ...) {
 }
 
 int klog_read(char *buf, size_t size, size_t *pos) {
-    if (!pos || *pos >= klog_used) return 0;
+    uint64_t flags = spin_lock_irqsave(&klog_lock);
+    if (!pos || *pos >= klog_used) {
+        spin_unlock_irqrestore(&klog_lock, flags);
+        return 0;
+    }
     size_t avail = klog_used - *pos;
     size_t to_read = avail < size ? avail : size;
 
@@ -53,15 +61,21 @@ int klog_read(char *buf, size_t size, size_t *pos) {
         buf[i] = klog_buf[idx];
     }
     *pos += to_read;
+    spin_unlock_irqrestore(&klog_lock, flags);
     return (int)to_read;
 }
 
 void klog_clear(void) {
+    uint64_t flags = spin_lock_irqsave(&klog_lock);
     klog_head = 0;
     klog_tail = 0;
     klog_used = 0;
+    spin_unlock_irqrestore(&klog_lock, flags);
 }
 
 size_t klog_len(void) {
-    return klog_used;
+    uint64_t flags = spin_lock_irqsave(&klog_lock);
+    size_t used = klog_used;
+    spin_unlock_irqrestore(&klog_lock, flags);
+    return used;
 }

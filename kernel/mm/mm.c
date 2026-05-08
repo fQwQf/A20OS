@@ -2,15 +2,13 @@
 #include "mm/mm.h"
 #include "mm/frame.h"
 #include "mm/slab.h"
+#include "mm/vm.h"
+#include "mm/fault.h"
 #include "core/panic.h"
 #include "core/stdio.h"
 #include "core/string.h"
 #include "core/klog.h"
-
-// 虚拟地址转换为物理地址
-static inline paddr_t va_to_pa(const void *va) {
-    return (paddr_t)((uint64_t)(uintptr_t)va - PAGE_OFFSET);
-}
+#include "proc/proc.h"
 
 static inline int pte_user_readable(uint64_t pte) {
     return arch_pte_is_leaf(pte) && (pte & PTE_U) && (pte & PTE_R);
@@ -366,10 +364,6 @@ void pt_destroy_user(uint64_t *pgdir) {
     pt_destroy_user_recursive(pgdir, ARCH_PT_ROOT_LEVEL);
     frame_free(pgdir);
 }
-
-#include "mm/vm.h"
-#include "mm/fault.h"
-#include "proc/proc.h"
 
 static inline int user_range_ok(uint64_t va, size_t n) {
     if (n == 0)

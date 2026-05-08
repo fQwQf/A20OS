@@ -6,6 +6,7 @@
 
 typedef struct wait_queue_entry {
     struct wait_queue_entry *next;
+    struct wait_queue_entry *prev;
     void *task;
 } wait_queue_entry_t;
 

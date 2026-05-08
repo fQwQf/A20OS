@@ -9,6 +9,7 @@
 #include "proc/signal.h"
 
 typedef struct proc_runq {
+    spinlock_t lock;
     task_t *head[SCHED_LEVELS];
     task_t *tail[SCHED_LEVELS];
     uint32_t bitmap;
@@ -18,6 +19,17 @@ typedef struct proc_runq {
 static proc_runq_t sched_runq[CONFIG_NR_CPUS];
 static uint64_t next_wake_scan = SCHED_NO_DEADLINE;
 static uint64_t next_alarm_scan = SCHED_NO_DEADLINE;
+
+/* Per-CPU runqueue lock — separate from proc_lock.
+ * runq_lock protects enqueue/dequeue/pick and per-runqueue state.
+ * proc_lock protects task_list, task->state transitions, and zombie list.
+ *
+ * Ordering: proc_lock → runq_lock (never the reverse). */
+static spinlock_t sched_runq_lock[CONFIG_NR_CPUS];
+
+#define RUNQ_LOCK(cpu)     (&sched_runq_lock[(cpu)])
+#define RUNQ_LOCK_IRQ(cpu) spin_lock_irqsave(RUNQ_LOCK(cpu))
+#define RUNQ_UNLOCK_IRQ(cpu, f) spin_unlock_irqrestore(RUNQ_LOCK(cpu), (f))
 
 static proc_runq_t *sched_current_runq(void) {
     return &sched_runq[cpu_current_id()];
@@ -49,11 +61,13 @@ static int sched_level_clamp(int level) {
 
 void proc_sched_runq_init(void) {
     memset(sched_runq, 0, sizeof(sched_runq));
+    for (unsigned i = 0; i < CONFIG_NR_CPUS; i++)
+        spin_init(&sched_runq_lock[i]);
     next_wake_scan = SCHED_NO_DEADLINE;
     next_alarm_scan = SCHED_NO_DEADLINE;
 }
 
-unsigned proc_sched_select_cpu_locked(task_t *t)
+unsigned proc_sched_select_cpu(task_t *t)
 {
     unsigned current = cpu_current_id();
     if (CONFIG_NR_CPUS <= 1)
@@ -73,13 +87,15 @@ unsigned proc_sched_select_cpu_locked(task_t *t)
     return best;
 }
 
+/* Keep old name as compat wrapper for proc_internal.h callers */
+unsigned proc_sched_select_cpu_locked(task_t *t)
+{
+    return proc_sched_select_cpu(t);
+}
+
 void proc_sched_kick_cpu(unsigned cpu)
 {
     (void)cpu;
-    /*
-     * Future SMP bringup should send an IPI/reschedule interrupt here.
-     * Single-CPU builds keep the hook as a no-op.
-     */
 }
 
 static void sched_note_deadline(uint64_t *slot, uint64_t value)
@@ -110,25 +126,27 @@ void proc_set_alarm_expire(task_t *t, uint64_t alarm_expire)
     sched_note_deadline(&next_alarm_scan, alarm_expire);
 }
 
+/* Enqueue a task onto its CPU's runqueue. Caller must hold runq_lock. */
 void proc_runq_enqueue_locked(task_t *t) {
-    if (!t || t == proc_idle_task() || t->state != PROC_READY || t->on_rq)
-    {
-        if (!t || t == proc_idle_task() || t->state != PROC_READY)
+    if (!t || t == proc_idle_task() || t->state != PROC_READY)
+        return;
+
+    unsigned cpu = t->cpu_id < CONFIG_NR_CPUS ? t->cpu_id : cpu_current_id();
+
+    uint64_t rf = RUNQ_LOCK_IRQ(cpu);
+    proc_runq_t *rq = &sched_runq[cpu];
+
+    if (t->on_rq) {
+        if (proc_runq_contains_locked(rq, t)) {
+            RUNQ_UNLOCK_IRQ(cpu, rf);
             return;
-        proc_runq_t *rq = sched_task_runq(t);
-        if (t->on_rq && proc_runq_contains_locked(rq, t))
-            return;
-        t->on_rq = 0;
-        t->rq_next = NULL;
-        t->rq_prev = NULL;
+        }
+        /* Stale on_rq — will re-enqueue below */
     }
 
-    if (t->cpu_id >= CONFIG_NR_CPUS)
-        t->cpu_id = proc_sched_select_cpu_locked(t);
-
-    proc_runq_t *rq = sched_task_runq(t);
     int q = sched_level_clamp(t->sched_level);
     t->sched_level = q;
+    t->cpu_id = cpu;
     t->rq_next = NULL;
     t->rq_prev = rq->tail[q];
     if (rq->tail[q])
@@ -139,13 +157,17 @@ void proc_runq_enqueue_locked(task_t *t) {
     t->on_rq = 1;
     rq->nr_running++;
     rq->bitmap |= (1U << q);
+    RUNQ_UNLOCK_IRQ(cpu, rf);
 }
 
 void proc_runq_remove_locked(task_t *t) {
     if (!t || !t->on_rq)
         return;
 
-    proc_runq_t *rq = sched_task_runq(t);
+    unsigned cpu = t->cpu_id < CONFIG_NR_CPUS ? t->cpu_id : cpu_current_id();
+    uint64_t rf = RUNQ_LOCK_IRQ(cpu);
+    proc_runq_t *rq = &sched_runq[cpu];
+
     int q = sched_level_clamp(t->sched_level);
     if (t->rq_prev)
         t->rq_prev->rq_next = t->rq_next;
@@ -163,17 +185,21 @@ void proc_runq_remove_locked(task_t *t) {
     t->on_rq = 0;
     if (rq->nr_running > 0)
         rq->nr_running--;
+    RUNQ_UNLOCK_IRQ(cpu, rf);
 }
 
+/* Pick next task from current CPU's runqueue. No longer does O(n) task-list scan. */
 task_t *proc_runq_pick_locked(void) {
-    proc_runq_t *rq = sched_current_runq();
-retry:
+    unsigned cpu = cpu_current_id();
+    uint64_t rf = RUNQ_LOCK_IRQ(cpu);
+    proc_runq_t *rq = &sched_runq[cpu];
+
     while (rq->bitmap) {
         int q = 0;
         while (q < SCHED_LEVELS && !(rq->bitmap & (1U << q)))
             q++;
         if (q >= SCHED_LEVELS)
-            return NULL;
+            break;
 
         task_t *t = rq->head[q];
         if (!t) {
@@ -195,34 +221,14 @@ retry:
         if (rq->nr_running > 0)
             rq->nr_running--;
 
-        if (t != proc_idle_task() && t->state == PROC_READY && t->kstack)
+        if (t != proc_idle_task() && t->state == PROC_READY && t->kstack) {
+            RUNQ_UNLOCK_IRQ(cpu, rf);
             return t;
+        }
     }
 
-    int found = 0;
-    memset(rq, 0, sizeof(*rq));
-    for (task_t *t = proc_first_task_locked(); t; t = proc_next_task_locked(t)) {
-        if (t == proc_idle_task() || t->state != PROC_READY || !t->kstack)
-            continue;
-        t->on_rq = 0;
-        t->rq_next = NULL;
-        t->rq_prev = NULL;
-        t->cpu_id = cpu_current_id();
-        proc_runq_enqueue_locked(t);
-        found++;
-    }
-    if (found && rq->bitmap)
-        goto retry;
+    RUNQ_UNLOCK_IRQ(cpu, rf);
     return NULL;
-}
-
-int proc_has_runnable_locked(void)
-{
-    for (task_t *t = proc_first_task_locked(); t; t = proc_next_task_locked(t)) {
-        if (t != proc_idle_task() && t->state == PROC_READY && t->kstack)
-            return 1;
-    }
-    return 0;
 }
 
 static void sched_scan_timers(uint64_t now)
@@ -256,7 +262,10 @@ static void sched_scan_timers(uint64_t now)
                 __atomic_store_n(&t->wake_time, 0, __ATOMIC_RELAXED);
                 t->sched_level = 0;
                 t->state = PROC_READY;
+                t->exec_start = now;
+                spin_unlock_irqrestore(&proc_lock, flags);
                 proc_runq_enqueue_locked(t);
+                flags = spin_lock_irqsave(&proc_lock);
             } else if (wake < next_wake) {
                 next_wake = wake;
             }
@@ -270,6 +279,45 @@ static void sched_scan_timers(uint64_t now)
     __atomic_store_n(&next_wake_scan, next_wake, __ATOMIC_RELAXED);
     __atomic_store_n(&next_alarm_scan, next_alarm, __ATOMIC_RELAXED);
 }
+
+/* Scan for reapable zombies — called from idle loop, not hot path. */
+void sched_reap_zombies(void)
+{
+    for (;;) {
+        int target_pid = -1;
+        uint64_t flags = spin_lock_irqsave(&proc_lock);
+        for (task_t *t = proc_first_task_locked(); t; t = proc_next_task_locked(t)) {
+            if (t == proc_idle_task())
+                continue;
+            if (t->state == PROC_ZOMBIE) {
+                task_t *parent = t->parent;
+                if (!parent || parent == proc_idle_task() ||
+                    t->ppid == 0 ||
+                    (t->clone_flags & CLONE_THREAD)) {
+                    target_pid = t->pid;
+                    break;
+                }
+                if (parent->signals) {
+                    signal_state_t *ss = (signal_state_t *)parent->signals;
+                    sigaction_t *act = &ss->actions[SIGCHLD];
+                    if (act->sa_handler == SIG_IGN || (act->sa_flags & SA_NOCLDWAIT)) {
+                        target_pid = t->pid;
+                        break;
+                    }
+                }
+            }
+        }
+        spin_unlock_irqrestore(&proc_lock, flags);
+        if (target_pid < 0)
+            break;
+        task_t *t = proc_find(target_pid);
+        if (t)
+            proc_destroy_task(t);
+    }
+}
+
+/* Deferred I/O poll counter — poll every N idle iterations to reduce overhead. */
+static uint64_t sched_poll_counter;
 
 void context_switch(task_t *next) {
     if (!next || !next->kstack)
@@ -290,29 +338,28 @@ void context_switch(task_t *next) {
 void sched(void) {
     uint64_t now = timer_get_ticks();
 
-    virtio_blk_poll_all();
-    a20_lwip_poll();
-
+    /* Timer scanning: only scan when a deadline has actually been reached,
+     * avoiding O(n) traversal on every sched() call. */
     if (now >= __atomic_load_n(&next_wake_scan, __ATOMIC_RELAXED) ||
         now >= __atomic_load_n(&next_alarm_scan, __ATOMIC_RELAXED))
         sched_scan_timers(now);
 
-    uint64_t flags = spin_lock_irqsave(&proc_lock);
     task_t *next = proc_runq_pick_locked();
-    spin_unlock_irqrestore(&proc_lock, flags);
 
     if (next) {
+        next->exec_start = now;
         context_switch(next);
         return;
     }
 
-    if (proc_current() && proc_current()->state == PROC_READY) {
-        proc_current()->state = PROC_RUNNING;
+    task_t *cur = proc_current();
+    if (cur && cur->state == PROC_READY) {
+        cur->state = PROC_RUNNING;
         return;
     }
 
     task_t *idle = proc_idle_task();
-    if (proc_current() != idle)
+    if (cur != idle)
         context_switch(idle);
 }
 

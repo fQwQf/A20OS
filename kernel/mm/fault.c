@@ -8,6 +8,7 @@
 #include "mm/vm.h"
 #include "core/consts.h"
 #include "core/defs.h"
+#include "core/lock.h"
 #include "core/string.h"
 
 int handle_cow_fault(task_t *t, uint64_t stval) {
@@ -25,21 +26,30 @@ int handle_cow_fault(task_t *t, uint64_t stval) {
         if (!pfn_valid(old_pfn)) return -1;
         int order = (leaf_size >= PMD_SIZE) ? PMD_ORDER : 0;
 
+        pfn_t new_pfn = PFN_NONE;
+        int reuse = 0;
+
+        uint64_t pfa_flags = spin_lock_irqsave(&pfa.lock);
         uint16_t rc = pfa.meta[old_pfn].refcount;
         if (rc > 1) {
-            pfn_t new_pfn = pfa_alloc(order);
+            spin_unlock_irqrestore(&pfa.lock, pfa_flags);
+            new_pfn = pfa_alloc(order);
             if (new_pfn == PFN_NONE) return -1;
+        } else {
+            reuse = 1;
+            spin_unlock_irqrestore(&pfa.lock, pfa_flags);
+        }
+
+        uint64_t flags = (*pte & (PTE_R | PTE_X | PTE_U | PTE_A |
+                                  PTE_G | PTE_MAT1 | PTE_LEAF)) |
+                         PTE_W | PTE_D;
+
+        if (reuse) {
+            *pte = arch_pte_leaf(old_pa, flags);
+        } else {
             memcpy(pfn_to_virt(new_pfn), pfn_to_virt(old_pfn), leaf_size);
             frame_put(old_pfn);
-            uint64_t flags = (*pte & (PTE_R | PTE_X | PTE_U | PTE_A |
-                                      PTE_G | PTE_MAT1 | PTE_LEAF)) |
-                             PTE_W | PTE_D;
             *pte = arch_pte_leaf(pfn_to_phys(new_pfn), flags);
-        } else {
-            uint64_t flags = (*pte & (PTE_R | PTE_X | PTE_U | PTE_A |
-                                      PTE_G | PTE_MAT1 | PTE_LEAF)) |
-                             PTE_W | PTE_D;
-            *pte = arch_pte_leaf(old_pa, flags);
         }
         arch_tlb_flush_page(stval);
         return 0;

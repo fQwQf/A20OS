@@ -258,6 +258,29 @@ int64_t sys_getrandom(void *buf, size_t len, int flags);
 int64_t sys_futex(int *uaddr, int op, int val, void *timeout,
                    int *uaddr2, int val3);
 
+int64_t sys_getsid(int pid);
+int64_t sys_rt_sigpending(void *set, size_t sigsetsize);
+int64_t sys_sethostname(const char *name, size_t len);
+int64_t sys_setdomainname(const char *name, size_t len);
+int64_t sys_sync_file_range(int fd, long offset, long nbytes, unsigned flags);
+int64_t sys_mlock(uint64_t addr, size_t len);
+int64_t sys_munlock(uint64_t addr, size_t len);
+int64_t sys_mlockall(int flags);
+int64_t sys_munlockall(void);
+int64_t sys_mincore(uint64_t addr, size_t length, unsigned char *vec);
+int64_t sys_personality(unsigned int persona);
+int64_t sys_vhangup(void);
+int64_t sys_unshare(int flags);
+int64_t sys_pivot_root(const char *new_root, const char *put_old);
+int64_t sys_sched_setattr(int pid, const void *attr, unsigned flags);
+int64_t sys_sched_getattr(int pid, void *attr, unsigned size, unsigned flags);
+int64_t sys_clone3(void *cl_args, size_t size);
+int64_t sys_openat2(int dirfd, const char *pathname, const void *how, size_t size);
+int64_t sys_inotify_init(int flags);
+int64_t sys_inotify_add_watch(int fd, const char *pathname, uint32_t mask);
+int64_t sys_inotify_rm_watch(int fd, int wd);
+int64_t sys_get_robust_list(int pid, void *head_ptr, size_t *len_ptr);
+
 #endif /* LINUX_SYSCALL_DECLARE_PROTOTYPES */
 
 #endif /* _LINUX_SYSCALL_IMPL_H */
