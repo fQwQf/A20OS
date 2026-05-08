@@ -4,6 +4,7 @@
 #include "core/types.h"
 #include "core/consts.h"
 #include "core/arch.h"
+#include "core/lock.h"
 
 /*
  * A20OS Buddy Physical Frame Allocator
@@ -57,6 +58,7 @@ typedef struct {
     size_t  nr_ranges;
     pfa_range_t ranges[PFA_MAX_RANGES];
     free_list_t free_lists[MAX_ORDER + 1];
+    spinlock_t lock;             /* protects all mutable fields above */
 } pfa_t;
 
 extern pfa_t pfa;

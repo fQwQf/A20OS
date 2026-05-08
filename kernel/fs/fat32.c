@@ -519,13 +519,16 @@ static int fat32_vn_truncate(vnode_t *vn, size_t size) {
     uint32_t old_first_cluster = p->first_cluster;
     if (size == 0) {
         fat32_sb_t *sb = p->sb;
+        uint32_t new_cluster = fat32_alloc_cluster(sb);
+        if (!new_cluster) return -ENOSPC;
+
         uint32_t cluster = p->first_cluster;
         while (cluster < FAT32_CLUSTER_END) {
             uint32_t next = fat_read(sb, cluster);
             fat_write(sb, cluster, FAT32_CLUSTER_FREE);
             cluster = next;
         }
-        p->first_cluster = fat32_alloc_cluster(sb);
+        p->first_cluster = new_cluster;
     } else {
         uint32_t cluster = p->first_cluster;
         if (cluster < 2 || cluster >= FAT32_CLUSTER_END) {
@@ -962,12 +965,16 @@ static int fat32_fclose(vfile_t *vf) {
     fat32_fctx_t *fc = (fat32_fctx_t *)vf->priv;
     if (fc && fc->dirty && !fc->is_dir && fc->first_cluster >= 2) {
         fat32_sb_t *sb = fc->sb;
-        /* Search root directory for matching cluster and update file_size.
-         * TODO: recurse into subdirectories for nested files. */
+        vnode_t *vn = vf->vnode;
+        fat32_vnode_priv_t *parent_fp = (vn && vn->parent)
+                                         ? (fat32_vnode_priv_t *)vn->parent->fs_data
+                                         : NULL;
+        uint32_t search_cluster = parent_fp ? parent_fp->first_cluster : sb->root_cluster;
+
         size_t off = 0;
         while (1) {
             fat32_dirent_t de;
-            int r = fat32_chain_read(sb, sb->root_cluster, off, &de, sizeof(de));
+            int r = fat32_chain_read(sb, search_cluster, off, &de, sizeof(de));
             if (r <= 0) break;
             if (de.name[0] == 0x00) break;
             if ((uint8_t)de.name[0] == 0xE5 || de.attr == FAT_ATTR_LFN) {
@@ -977,7 +984,7 @@ static int fat32_fclose(vfile_t *vf) {
             uint32_t clus = ((uint32_t)de.fst_clus_hi << 16) | de.fst_clus_lo;
             if (clus == fc->first_cluster) {
                 de.file_size = (uint32_t)fc->file_size;
-                uint32_t dc = sb->root_cluster;
+                uint32_t dc = search_cluster;
                 size_t rem = off;
                 while (rem >= sb->bytes_per_cluster) {
                     rem -= sb->bytes_per_cluster;

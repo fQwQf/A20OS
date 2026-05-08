@@ -1,5 +1,6 @@
 #include "syscall_impl.h"
 #include "sys/futex.h"
+#include "abi/linux/futex.h"
 #include "core/lock.h"
 
 #define FUTEX_WAITERS_MAX 256
@@ -146,7 +147,7 @@ static int futex_wait_on(int *uaddr, int expected, void *timeout, uint32_t bitse
     }
     if (signal_task_has_unblocked(t)) {
         spin_unlock_irqrestore(&g_futex_lock, flags);
-        return -EINTR;
+        return -ERESTARTSYS;
     }
     int slot = futex_waiter_alloc(vkey, pkey, t->mm, bitset, t);
     if (slot < 0) {
@@ -178,7 +179,7 @@ static int futex_wait_on(int *uaddr, int expected, void *timeout, uint32_t bitse
     if (was_woken)
         return 0;
     if (signal_task_has_unblocked(t))
-        return -EINTR;
+        return -ERESTARTSYS;
     if (!was_woken && still_waiting && until && timer_get_ticks() >= until)
         return -ETIMEDOUT;
     return 0;
@@ -292,4 +293,39 @@ int64_t sys_futex(int *uaddr, int op, int val, void *timeout, int *uaddr2, int v
     default:
         return -ENOSYS;
     }
+}
+
+void exit_robust_list(task_t *t)
+{
+    if (!t || !t->robust_list_head) return;
+
+    struct robust_list_head head;
+    if (copy_from_user(&head, (void *)t->robust_list_head, sizeof(head)) < 0)
+        return;
+
+    int tid = t->pid;
+    int count = 0;
+    uintptr_t entry = (uintptr_t)head.list.next;
+    uintptr_t head_addr = t->robust_list_head;
+
+    while (entry && entry != head_addr && count < ROBUST_LIST_LIMIT) {
+        uintptr_t futex_addr = entry + (uintptr_t)head.futex_offset;
+        uint32_t futex_word = 0;
+        if (copy_from_user(&futex_word, (void *)futex_addr, sizeof(futex_word)) < 0)
+            goto next;
+        if ((futex_word & FUTEX_TID_MASK) == (uint32_t)tid) {
+            uint32_t new_val = (futex_word & FUTEX_TID_MASK) | FUTEX_OWNER_DIED;
+            copy_to_user((void *)futex_addr, &new_val, sizeof(new_val));
+            if (futex_word & FUTEX_WAITERS)
+                futex_wake_user((int *)futex_addr, 1);
+        }
+next:
+        struct robust_list node;
+        if (copy_from_user(&node, (void *)entry, sizeof(node)) < 0)
+            break;
+        entry = (uintptr_t)node.next;
+        count++;
+    }
+
+    t->robust_list_head = 0;
 }

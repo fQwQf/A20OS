@@ -2,6 +2,8 @@
 #include "syscall_impl.h"
 #include "mm/fault.h"
 #include "mm/frame.h"
+#include "mm/vm.h"
+#include "mm/mm.h"
 
 int64_t sys_brk(uint64_t addr) {
     return (int64_t)proc_brk(addr);
@@ -155,4 +157,52 @@ int64_t sys_mremap(uint64_t old_addr, size_t old_size, size_t new_size, int flag
 int64_t sys_shm_open(const char *name, int oflag, int mode) {
     (void)mode;
     return sys_memfd_create(name, (unsigned)(oflag & O_CLOEXEC));
+}
+
+int64_t sys_mlock(uint64_t addr, size_t len) {
+    if (len == 0) return 0;
+    uint64_t start = addr & ~(uint64_t)(PAGE_SIZE - 1);
+    uint64_t end = ROUND_UP(addr + len, PAGE_SIZE);
+    task_t *t = proc_current();
+    if (!t || !t->mm) return -EINVAL;
+    for (uint64_t va = start; va < end; va += PAGE_SIZE) {
+        vm_area_t *vma = mm_find_vma(t->mm, va);
+        if (!vma) return -ENOMEM;
+    }
+    return 0;
+}
+
+int64_t sys_munlock(uint64_t addr, size_t len) {
+    (void)addr; (void)len;
+    return 0;
+}
+
+int64_t sys_mlockall(int flags) {
+    if (flags & ~(1 | 2)) return -EINVAL;
+    return 0;
+}
+
+int64_t sys_munlockall(void) {
+    return 0;
+}
+
+int64_t sys_mincore(uint64_t addr, size_t length, unsigned char *vec) {
+    if (!vec) return -EFAULT;
+    if (addr & 0xfff) return -EINVAL;
+    task_t *t = proc_current();
+    if (!t || !t->mm) return -EINVAL;
+    size_t pages = (length + 4095) / 4096;
+    if (pages == 0) pages = 1;
+    for (size_t i = 0; i < pages; i++) {
+        uint64_t va = addr + i * PAGE_SIZE;
+        unsigned char val = 0;
+        vm_area_t *vma = mm_find_vma(t->mm, va);
+        if (vma) {
+            uint64_t *pte = pt_lookup_leaf(t->mm->pgdir, va, NULL, NULL, NULL);
+            if (pte && (*pte & PTE_V))
+                val = 1;
+        }
+        if (copy_to_user(vec + i, &val, 1) < 0) return -EFAULT;
+    }
+    return 0;
 }
