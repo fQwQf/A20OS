@@ -19,6 +19,7 @@ static files_struct_t *fdtable_alloc_files(void)
     for (int i = 0; i < FDTABLE_WORDS; i++)
         files->open_mask[i] = 0;
     files->next_fd = 0;
+    refcount_set(&files->refcount, 1);
     return files;
 }
 
@@ -162,11 +163,25 @@ void fdtable_copy(task_t *dst, const task_t *src)
     fdtable_init_stdio(dst);
 }
 
+void fdtable_share(task_t *dst, const task_t *src)
+{
+    if (!dst || !src)
+        return;
+    if (dst->files)
+        kfree(dst->files);
+    dst->files = (struct files_struct *)src->files;
+    if (dst->files)
+        refcount_inc(&((files_struct_t *)dst->files)->refcount);
+}
+
 void fdtable_close_all(task_t *task)
 {
     if (!task || !task->files)
         return;
     files_struct_t *files = (files_struct_t *)task->files;
+    task->files = NULL;
+    if (!refcount_dec_and_test(&files->refcount))
+        return;
     for (int i = 0; i < MAX_FILES; i++) {
         if (files->fd[i] >= 0)
             vfs_close(files->fd[i]);
@@ -176,7 +191,6 @@ void fdtable_close_all(task_t *task)
     for (int i = 0; i < FDTABLE_WORDS; i++)
         files->open_mask[i] = 0;
     kfree(files);
-    task->files = NULL;
 }
 
 void fdtable_close_on_exec(task_t *task)

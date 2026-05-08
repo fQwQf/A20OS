@@ -1,4 +1,5 @@
 #include <errno.h>
+#include <signal.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -7,6 +8,22 @@
 
 #include "common_runner.h"
 #include "runtime_setup.h"
+
+#define TEST_TIMEOUT_SEC 120
+
+static void alarm_handler(int sig)
+{
+    (void)sig;
+}
+
+static void setup_alarm_handler(void)
+{
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = alarm_handler;
+    sa.sa_flags = 0;
+    sigaction(SIGALRM, &sa, NULL);
+}
 
 static int is_musl_runtime(const char *runtime)
 {
@@ -149,10 +166,24 @@ int run_script_in_dir(const char *runtime, const char *script_name,
     }
 
     int status = 0;
-    if (waitpid(pid, &status, 0) < 0)
+    setup_alarm_handler();
+    alarm(TEST_TIMEOUT_SEC);
+    int wp = waitpid(pid, &status, 0);
+    alarm(0);
+
+    if (wp < 0 && errno == EINTR) {
+        kill(pid, SIGKILL);
+        waitpid(pid, &status, 0);
+        printf("[%s] TIMEOUT after %ds: dir=%s script=%s\n",
+               tag, TEST_TIMEOUT_SEC, script_dir, script_name);
+        return 124;
+    }
+    if (wp < 0)
         return 127;
 
     if (WIFEXITED(status))
         return WEXITSTATUS(status);
+    if (WIFSIGNALED(status))
+        return 128 + WTERMSIG(status);
     return 127;
 }
