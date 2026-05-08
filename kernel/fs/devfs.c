@@ -67,6 +67,7 @@ static devfs_node_t g_nodes[] = {
     { DEVFS_RANDOM, "random" },
     { DEVFS_RANDOM, "urandom" },
     { DEVFS_TTY,  "tty"  },
+    { DEVFS_TTY,  "console" },
     { DEVFS_RTC,  "rtc"  },
     { DEVFS_RTC,  "rtc0" },
 };

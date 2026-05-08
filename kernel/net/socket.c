@@ -471,7 +471,7 @@ int net_recvfrom(int gfd, void *buf, size_t len, int flags,
         }
         if (net_task_has_unblocked_signal(cur)) {
             spin_unlock_irqrestore(&g_net_lock, irq);
-            return -EINTR;
+            return -ERESTARTSYS;
         }
         if (net_socket_wait_expired(s, start, 0)) {
             spin_unlock_irqrestore(&g_net_lock, irq);

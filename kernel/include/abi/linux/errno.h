@@ -52,4 +52,11 @@
 #define ENODATA      61
 #define ENOLCK       37
 
+/*
+ * Internal kernel error codes — never returned to userspace.
+ * The syscall dispatcher translates these before writing the
+ * return value into the trap frame.
+ */
+#define ERESTARTSYS  512   /* restart syscall after signal delivery */
+
 #endif /* _ABI_LINUX_ERRNO_H */

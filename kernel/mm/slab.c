@@ -1,5 +1,7 @@
 #include "mm/slab.h"
 #include "mm/frame.h"
+#include "mm/oom.h"
+#include "core/lock.h"
 #include "core/string.h"
 #include "core/panic.h"
 #include "core/stdio.h"
@@ -51,12 +53,13 @@ typedef struct big_alloc_hdr {
 
 // Slab 缓存结构
 typedef struct {
-    size_t         obj_size;      // 对象大小
-    size_t         objs_per_slab; // 每页可容纳的对象数
-    slab_page_t   *partial;       // 部分使用的页面链表
-    slab_page_t   *full;          // 已满的页面链表
-    slab_page_t   *spare;         // 备用空闲页面
-    size_t         spare_count;   // 备用空闲页数量
+    size_t         obj_size;
+    size_t         objs_per_slab;
+    slab_page_t   *partial;
+    slab_page_t   *full;
+    slab_page_t   *spare;
+    size_t         spare_count;
+    spinlock_t     lock;
 } slab_cache_t;
 
 // 全局 Slab 缓存数组
@@ -121,6 +124,7 @@ void slab_init(void) {
         caches[i].full    = NULL;
         caches[i].spare   = NULL;
         caches[i].spare_count = 0;
+        spin_init(&caches[i].lock);
     }
 }
 
@@ -246,14 +250,17 @@ static __attribute__((unused)) void slab_validate_sp(slab_page_t *sp, const char
 void *kmalloc(size_t size) {
     if (size == 0) return NULL;
 
-    // 超过最大对象大小，直接使用 buddy 分配器
     if (size >= SLAB_MAX_OBJ) {
         int order = 0;
         size_t need = ROUND_UP(size + sizeof(big_alloc_hdr_t), PAGE_SIZE);
         while ((1u << order) * PAGE_SIZE < need) order++;
         if (order > MAX_ORDER) return NULL;
         pfn_t pfn = pfa_alloc(order);
-        if (pfn == PFN_NONE) return NULL;
+        if (pfn == PFN_NONE) {
+            if (oom_try_reclaim())
+                pfn = pfa_alloc(order);
+            if (pfn == PFN_NONE) return NULL;
+        }
         big_alloc_hdr_t *hdr = (big_alloc_hdr_t *)pfn_to_virt(pfn);
         hdr->magic = BIG_MAGIC;
         hdr->order = (uint16_t)order;
@@ -266,6 +273,7 @@ void *kmalloc(size_t size) {
     while (idx < SLAB_NR_CACHES - 1 && slab_sizes[idx] < size) idx++;
 
     slab_cache_t *c = &caches[idx];
+    uint64_t irq_flags = spin_lock_irqsave(&c->lock);
     slab_page_t *sp = c->partial;
 
     /* Self-heal stale partial list entries that are already full. */
@@ -280,7 +288,20 @@ void *kmalloc(size_t size) {
         sp = slab_spare_pop(c);
         if (!sp) {
             sp = slab_grow(idx);
-            if (!sp) return NULL;
+            if (!sp) {
+                spin_unlock_irqrestore(&c->lock, irq_flags);
+                if (oom_try_reclaim()) {
+                    irq_flags = spin_lock_irqsave(&c->lock);
+                    sp = slab_spare_pop(c);
+                    if (!sp) sp = slab_grow(idx);
+                    if (!sp) {
+                        spin_unlock_irqrestore(&c->lock, irq_flags);
+                        return NULL;
+                    }
+                } else {
+                    return NULL;
+                }
+            }
         }
         sp->state = SLAB_STATE_PARTIAL;
         slab_list_push(&c->partial, sp);
@@ -329,6 +350,7 @@ void *kmalloc(size_t size) {
         slab_list_push(&c->full, sp);
     }
 
+    spin_unlock_irqrestore(&c->lock, irq_flags);
     return obj;
 }
 
@@ -377,16 +399,17 @@ void kfree(void *ptr) {
 
     // slab_validate_sp(sp, "kfree-pre", obj_size);
 
-    // 将对象放回空闲链表
+    int idx = sp->cache_idx;
+    slab_cache_t *c = &caches[idx];
+    uint64_t irq_flags = spin_lock_irqsave(&c->lock);
+
+    // 将对象放回空闲链表（必须在锁内，防止并发 kfree 破坏链表）
     slab_bit_clear(sp, obj_idx);
     *(void **)ptr = sp->free_list;
     sp->free_list = ptr;
     sp->in_use--;
 
     // slab_validate_sp(sp, "kfree-post", obj_size);
-
-    int idx = sp->cache_idx;
-    slab_cache_t *c = &caches[idx];
 
     // 如果页面刚从满状态转变出来（只要减去 1 后等于 total - 1，那它之前一定在 full 链表中）
     if (sp->in_use == sp->total - 1) {
@@ -408,9 +431,9 @@ void kfree(void *ptr) {
             slab_page_release(sp);
         }
     }
+    spin_unlock_irqrestore(&c->lock, irq_flags);
 }
 
-// 重新分配内存（调整大小）
 void *krealloc(void *ptr, size_t new_size) {
     if (!ptr) return kmalloc(new_size);
     if (new_size == 0) { kfree(ptr); return NULL; }
@@ -436,7 +459,7 @@ void *krealloc(void *ptr, size_t new_size) {
     // 分配新内存并拷贝数据
     void *new_ptr = kmalloc(new_size);
     if (!new_ptr) return NULL;
-    memcpy(new_ptr, ptr, old_size < new_size ? old_size : new_size);
+    memcpy(new_ptr, ptr, old_size);
     kfree(ptr);
     return new_ptr;
 }
@@ -457,6 +480,7 @@ void slab_get_stats(slab_stats_t *stats)
     memset(stats, 0, sizeof(*stats));
     for (int i = 0; i < SLAB_NR_CACHES; i++) {
         slab_cache_t *c = &caches[i];
+        uint64_t flags = spin_lock_irqsave(&c->lock);
         for (slab_page_t *sp = c->partial; sp; sp = sp->next) {
             stats->total_pages++;
             stats->active_pages++;
@@ -473,6 +497,7 @@ void slab_get_stats(slab_stats_t *stats)
             stats->total_pages++;
             stats->spare_pages++;
         }
+        spin_unlock_irqrestore(&c->lock, flags);
     }
     stats->total_bytes = stats->total_pages * PAGE_SIZE;
     stats->reclaimable_bytes = stats->spare_pages * PAGE_SIZE;

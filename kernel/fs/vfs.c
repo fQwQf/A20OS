@@ -1360,6 +1360,39 @@ void vfs_init(void) {
             vfs_write(fd, group, sizeof(group) - 1);
             vfs_close(fd);
         }
+        static const char hostname[] = "AAAAAAAAAAAAAAAAAAAA";
+        fd = vfs_open("/etc/hostname", O_CREAT | O_WRONLY | O_TRUNC, 0644);
+        if (fd >= 0) {
+            vfs_write(fd, hostname, sizeof(hostname) - 1);
+            vfs_close(fd);
+        }
+        static const char hosts[] =
+            "127.0.0.1\tlocalhost\n"
+            "::1\t\tlocalhost\n";
+        fd = vfs_open("/etc/hosts", O_CREAT | O_WRONLY | O_TRUNC, 0644);
+        if (fd >= 0) {
+            vfs_write(fd, hosts, sizeof(hosts) - 1);
+            vfs_close(fd);
+        }
+        static const char protocols[] =
+            "hopopt 0 HOPOPT\n"
+            "icmp 1 ICMP\n"
+            "igmp 2 IGMP\n"
+            "tcp 6 TCP\n"
+            "udp 17 UDP\n"
+            "ipv6 41 IPv6\n"
+            "ipv6-route 43 IPv6-Route\n"
+            "ipv6-frag 44 IPv6-Frag\n"
+            "esp 50 ESP\n"
+            "ah 51 AH\n"
+            "ipv6-icmp 58 IPv6-ICMP\n"
+            "ipv6-nonxt 59 IPv6-NoNxt\n"
+            "ipv6-opts 60 IPv6-Opts\n";
+        fd = vfs_open("/etc/protocols", O_CREAT | O_WRONLY | O_TRUNC, 0644);
+        if (fd >= 0) {
+            vfs_write(fd, protocols, sizeof(protocols) - 1);
+            vfs_close(fd);
+        }
     }
 
     /* Mount procfs at /proc */

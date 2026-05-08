@@ -837,7 +837,8 @@ int mm_munmap(mm_struct_t *mm, uint64_t addr, size_t len) {
                 va += PAGE_SIZE;
             }
         }
-        mm->total_vm -= (clip_end - clip_start) / PAGE_SIZE;
+        size_t freed_pages = (clip_end - clip_start) / PAGE_SIZE;
+        mm->total_vm = (mm->total_vm > freed_pages) ? mm->total_vm - freed_pages : 0;
 
         // 根据取消映射的范围，对 VMA 进行删除或拆分
         if (addr <= vma->start && end >= vma->end) {
@@ -926,7 +927,6 @@ int mm_mprotect(mm_struct_t *mm, uint64_t addr, size_t len, int prot) {
     if (addr & (PAGE_SIZE - 1)) return -EINVAL;
     len = ROUND_UP(len, PAGE_SIZE);
     if (len == 0) return 0;
-    if (addr & (PAGE_SIZE - 1)) return -EINVAL;
 
     uint64_t ptef = prot_to_pte(prot);
     uint64_t vm_prot = 0;
@@ -972,6 +972,8 @@ int mm_mprotect(mm_struct_t *mm, uint64_t addr, size_t len, int prot) {
                                          PTE_LEAF | PTE_MAT1);
                 flags &= ~(uint64_t)(PTE_R | PTE_W | PTE_X | PTE_D);
                 flags |= ptef & (PTE_R | PTE_W | PTE_X | PTE_D);
+                if (!(ptef & PTE_W))
+                    flags &= ~(uint64_t)PTE_COW;
                 *pte = arch_pte_leaf(arch_pte_addr(*pte), flags);
                 va = base + size;
             } else {

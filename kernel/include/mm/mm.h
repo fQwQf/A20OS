@@ -3,6 +3,7 @@
 
 #include "core/types.h"
 #include "core/consts.h"
+#include "core/arch.h"
 #include "mm/slab.h"
 #include "sys/usercopy.h"
 
@@ -16,6 +17,10 @@ size_t frame_free_count(void);
 
 #define PA2PFN(pa) ((paddr_t)(pa) >> PAGE_SIZE_BITS)
 #define PFN2PA(pfn) ((paddr_t)(pfn) << PAGE_SIZE_BITS)
+
+static inline paddr_t va_to_pa(const void *va) {
+    return (paddr_t)((uint64_t)(uintptr_t)va - PAGE_OFFSET);
+}
 
 /* Page table operations */
 uint64_t *pt_create(void);

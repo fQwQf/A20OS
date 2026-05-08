@@ -99,10 +99,18 @@ typedef struct task_t {
     int      on_rq;
     struct task_t *rq_next;
     struct task_t *rq_prev;
+    struct task_t *cfs_next;
+    struct task_t *cfs_prev;
     struct task_t *wait_next;
     uint64_t total_time;
     uint64_t child_utime;
     uint64_t child_stime;
+    uint64_t vruntime;
+    uint64_t exec_start;
+    uint64_t cfs_slice;
+    uint32_t cfs_weight;
+    int      sched_policy;
+    int      waiting_for_child;
 
     struct signal_state *signals;
 
@@ -119,7 +127,9 @@ typedef struct task_t {
     proc_cred_t   cred;
     proc_policy_t policy;
     int       clone_flags;
+    int       exit_signal;
     int      *clear_child_tid;
+    uintptr_t robust_list_head;
 
     char      name[64];
     char      exec_path[MAX_PATH_LEN];
@@ -185,6 +195,6 @@ uint64_t proc_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, long 
 int      proc_munmap(uint64_t addr, size_t len);
 
 /* Clone (fork-like) */
-int      proc_clone(uint64_t flags, uint64_t stack, int *ptid, uint64_t tls, int *ctid);
+int      proc_clone(uint64_t flags, uint64_t stack, int *ptid, uint64_t tls, int *ctid, int exit_signal);
 
 #endif /* _PROC_H */

@@ -205,4 +205,27 @@
 #define SYS_faccessat2     439
 #define SYS_fchmodat2      452
 
+#define SYS_sync_file_range 84
+#define SYS_inotify_init    26
+#define SYS_inotify_add_watch 27
+#define SYS_inotify_rm_watch 28
+#define SYS_vhangup         58
+#define SYS_pivot_root      41
+#define SYS_getsid          156
+#define SYS_sethostname     161
+#define SYS_setdomainname   162
+#define SYS_personality     92
+#define SYS_unshare         97
+#define SYS_rt_sigpending   136
+#define SYS_mlock           228
+#define SYS_munlock         229
+#define SYS_mlockall        230
+#define SYS_munlockall      231
+#define SYS_mincore         232
+#define SYS_sched_setattr   274
+#define SYS_sched_getattr   275
+#define SYS_clone3          435
+#define SYS_openat2         437
+#define SYS_get_robust_list 100
+
 #endif /* _ABI_LINUX_SYSCALL_NR_H */
