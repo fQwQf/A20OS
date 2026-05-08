@@ -1,5 +1,6 @@
 #define LINUX_SYSCALL_DECLARE_PROTOTYPES
 #include "syscall_impl.h"
+#include "proc/proc_internal.h"
 
 int64_t sys_sched_get_priority_max(int policy)
 {
@@ -51,20 +52,32 @@ int64_t sys_sched_setparam(int pid, const void *param)
     int prio;
     if (copy_from_user(&prio, param, sizeof(prio)) < 0) return -EFAULT;
     t->priority = prio;
+    t->cfs_weight = sched_weight_for_nice(prio);
     return 0;
 }
 
 int64_t sys_sched_getscheduler(int pid)
 {
     task_t *t = sched_task_for_pid(pid);
-    return t ? 0 : -ESRCH;
+    if (!t) return -ESRCH;
+    return t->sched_policy;
 }
 
 int64_t sys_sched_setscheduler(int pid, int policy, const void *param)
 {
-    if (policy < 0 || policy > 2) return -EINVAL;
-    if (param) return sys_sched_setparam(pid, param);
-    return sched_task_for_pid(pid) ? 0 : -ESRCH;
+    if (policy < 0 || policy > 5 || policy == 4) return -EINVAL;
+    task_t *t = sched_task_for_pid(pid);
+    if (!t) return -ESRCH;
+    if (param) {
+        int prio;
+        if (copy_from_user(&prio, param, sizeof(prio)) < 0) return -EFAULT;
+        if (prio >= -20 && prio <= 19) {
+            t->priority = prio;
+            t->cfs_weight = sched_weight_for_nice(prio);
+        }
+    }
+    t->sched_policy = policy;
+    return 0;
 }
 
 int64_t sys_sched_rr_get_interval(int pid, void *tp)
@@ -90,6 +103,7 @@ int64_t sys_setpriority(int which, int who, int prio)
     if (prio < -20) prio = -20;
     if (prio > 19) prio = 19;
     t->priority = prio;
+    t->cfs_weight = sched_weight_for_nice(prio);
     return 0;
 }
 
@@ -108,5 +122,36 @@ int64_t sys_seteuid(int euid)
 int64_t sys_setegid(int egid)
 {
     return sys_setregid(-1, egid);
+}
+
+int64_t sys_sched_setattr(int pid, const void *attr, unsigned flags)
+{
+    (void)flags;
+    if (!attr) return -EFAULT;
+    task_t *t = sched_task_for_pid(pid);
+    if (!t) return -ESRCH;
+    uint8_t buf[64];
+    if (copy_from_user(buf, attr, sizeof(buf)) < 0) return -EFAULT;
+    int prio = *(int *)(buf + 16);
+    if (prio >= -20 && prio <= 19) {
+        t->priority = prio;
+        t->cfs_weight = sched_weight_for_nice(prio);
+    }
+    return 0;
+}
+
+int64_t sys_sched_getattr(int pid, void *attr, unsigned size, unsigned flags)
+{
+    (void)flags;
+    if (!attr || size < 48) return -EINVAL;
+    task_t *t = sched_task_for_pid(pid);
+    if (!t) return -ESRCH;
+    uint8_t buf[64];
+    memset(buf, 0, sizeof(buf));
+    *(unsigned int *)(buf + 0) = size;
+    *(unsigned int *)(buf + 4) = 0;
+    *(unsigned int *)(buf + 8) = 0;
+    *(int *)(buf + 16) = t->priority;
+    return copy_to_user(attr, buf, size < sizeof(buf) ? size : sizeof(buf)) < 0 ? -EFAULT : 0;
 }
 

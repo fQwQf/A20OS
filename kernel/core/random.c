@@ -1,12 +1,15 @@
 #include "core/random.h"
 #include "core/timer.h"
 #include "core/defs.h"
+#include "core/lock.h"
 #include "core/string.h"
 #include "proc/proc.h"
 #include "mm/mm.h"
 
 static uint64_t rng_s[4];
 static int rng_ready;
+static uint64_t rng_generation;
+static spinlock_t rng_lock = SPINLOCK_INIT;
 
 static uint64_t splitmix64(uint64_t *x) {
     uint64_t z = (*x += 0x9e3779b97f4a7c15ULL);
@@ -31,9 +34,12 @@ static uint64_t arch_entropy_sample(void) {
 
 void random_reseed(uint64_t seed) {
     uint64_t x = seed ^ arch_entropy_sample();
+    uint64_t flags = spin_lock_irqsave(&rng_lock);
     for (int i = 0; i < 4; i++)
         rng_s[i] ^= splitmix64(&x);
     rng_ready = 1;
+    rng_generation++;
+    spin_unlock_irqrestore(&rng_lock, flags);
 }
 
 void random_init(void) {
@@ -41,13 +47,21 @@ void random_init(void) {
     for (int i = 0; i < 4; i++)
         rng_s[i] = splitmix64(&seed);
     rng_ready = 1;
+    rng_generation = 0;
 }
 
 uint64_t random_u64(void) {
     if (!rng_ready)
         random_init();
 
-    random_reseed(arch_entropy_sample());
+    uint64_t flags = spin_lock_irqsave(&rng_lock);
+
+    if (++rng_generation % 64 == 0) {
+        /* Inline reseed to avoid recursive lock */
+        uint64_t x = arch_entropy_sample();
+        for (int i = 0; i < 4; i++)
+            rng_s[i] ^= splitmix64(&x);
+    }
 
     uint64_t result = rotl64(rng_s[1] * 5, 7) * 9;
     uint64_t t = rng_s[1] << 17;
@@ -59,6 +73,7 @@ uint64_t random_u64(void) {
     rng_s[2] ^= t;
     rng_s[3] = rotl64(rng_s[3], 45);
 
+    spin_unlock_irqrestore(&rng_lock, flags);
     return result;
 }
 

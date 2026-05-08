@@ -357,8 +357,19 @@ int proc_exec(const char *path, char *const argv[], char *const envp[])
     for (int i = 0; i < envc; i++)
         kfree(k_envp[i]);
 
-    if (t->signals)
-        signal_init((signal_state_t *)t->signals);
+    if (t->signals) {
+        signal_state_t *ss = (signal_state_t *)t->signals;
+        for (int sig = 1; sig < NSIG; sig++) {
+            if (ss->actions[sig].sa_handler != SIG_IGN &&
+                ss->actions[sig].sa_handler != SIG_DFL)
+                ss->actions[sig].sa_handler = SIG_DFL;
+            ss->actions[sig].sa_flags = 0;
+            ss->actions[sig].sa_mask = 0;
+        }
+        ss->pending = 0;
+        memset(ss->pending_has_info, 0, sizeof(ss->pending_has_info));
+        memset(ss->pending_info, 0, sizeof(ss->pending_info));
+    }
     t->sig_handling = 0;
 
     uint64_t saved_entry = info.entry;

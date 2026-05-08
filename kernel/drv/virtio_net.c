@@ -1,6 +1,7 @@
 #include "drv/virtio_net.h"
 #include "drv/virtio_transport.h"
 #include "drv/virtio_blk.h"
+#include "mm/mm.h"
 #include "core/stdio.h"
 #include "core/string.h"
 #include "core/defs.h"
@@ -18,10 +19,6 @@
 #define VIRTIO_NET_F_MAC           5
 #define VIRTIO_NET_F_STATUS        16
 #define VIRTIO_NET_TX_TIMEOUT_TICKS (TICKS_PER_SEC * 2)
-
-static inline uint64_t va_to_pa(const void *va) {
-    return (uint64_t)(uintptr_t)va - PAGE_OFFSET;
-}
 
 typedef struct {
     virtq_desc_t  desc[VIRTIO_QUEUE_SIZE] ALIGNED(16);

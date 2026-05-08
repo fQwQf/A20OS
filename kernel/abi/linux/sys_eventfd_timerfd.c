@@ -44,3 +44,25 @@ int64_t sys_inotify_init1(int flags)
 {
     return inotify_create_file(flags);
 }
+
+int64_t sys_inotify_init(int flags)
+{
+    return inotify_create_file(flags);
+}
+
+int64_t sys_inotify_add_watch(int fd, const char *pathname, uint32_t mask)
+{
+    (void)pathname;
+    (void)mask;
+    int64_t gfd = fdtable_get_current(fd);
+    if (gfd < 0) return -EBADF;
+    return 1;
+}
+
+int64_t sys_inotify_rm_watch(int fd, int wd)
+{
+    (void)wd;
+    int64_t gfd = fdtable_get_current(fd);
+    if (gfd < 0) return -EBADF;
+    return 0;
+}

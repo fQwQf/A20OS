@@ -54,6 +54,10 @@ typedef struct net_socket {
     int tcp_nodelay;
     int reuseaddr;
     int reuseport;
+    int keepalive;
+    int keep_idle;
+    int keep_intvl;
+    int keep_cnt;
     uint64_t recv_timeout_ticks;
     uint64_t send_timeout_ticks;
     int ipv6_checksum_offset;

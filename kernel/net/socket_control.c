@@ -93,7 +93,7 @@ int net_accept(int gfd, void *addr, size_t *addrlen, int flags)
         }
         if (net_task_has_unblocked_signal(cur)) {
             spin_unlock_irqrestore(&g_net_lock, irq);
-            return -EINTR;
+            return -ERESTARTSYS;
         }
         if (net_socket_wait_expired(s, start, 0)) {
             spin_unlock_irqrestore(&g_net_lock, irq);
@@ -104,7 +104,7 @@ int net_accept(int gfd, void *addr, size_t *addrlen, int flags)
         sched();
         net_clear_socket_waiter(s, cur);
         if (net_task_has_unblocked_signal(cur))
-            return -EINTR;
+            return -ERESTARTSYS;
     }
 
     uint64_t irq = spin_lock_irqsave(&g_net_lock);
@@ -219,9 +219,6 @@ int net_setsockopt(int gfd, int level, int optname, const void *optval, size_t o
             }
             return 0;
         case TCP_CORK:
-        case TCP_KEEPIDLE:
-        case TCP_KEEPINTVL:
-        case TCP_KEEPCNT:
         case TCP_MAXSEG:
         case TCP_SYNCNT:
         case TCP_LINGER2:
@@ -229,6 +226,27 @@ int net_setsockopt(int gfd, int level, int optname, const void *optval, size_t o
         case TCP_WINDOW_CLAMP:
         case TCP_QUICKACK:
         case TCP_USER_TIMEOUT:
+            return 0;
+        case TCP_KEEPIDLE:
+            if (val <= 0)
+                return -EINVAL;
+            s->keep_idle = val;
+            if (s->tcp)
+                s->tcp->keep_idle = (u32_t)val * 1000U;
+            return 0;
+        case TCP_KEEPINTVL:
+            if (val <= 0)
+                return -EINVAL;
+            s->keep_intvl = val;
+            if (s->tcp)
+                s->tcp->keep_intvl = (u32_t)val * 1000U;
+            return 0;
+        case TCP_KEEPCNT:
+            if (val <= 0)
+                return -EINVAL;
+            s->keep_cnt = val;
+            if (s->tcp)
+                s->tcp->keep_cnt = (u32_t)val;
             return 0;
         default:
             return -ENOPROTOOPT;
@@ -272,6 +290,20 @@ int net_setsockopt(int gfd, int level, int optname, const void *optval, size_t o
         s->reuseport = val != 0;
         return 0;
     }
+    if (level == SOL_SOCKET && optname == SO_KEEPALIVE) {
+        if (!optval || optlen < sizeof(int))
+            return -EINVAL;
+        int val;
+        memcpy(&val, optval, sizeof(val));
+        s->keepalive = val != 0;
+        if (s->tcp) {
+            if (s->keepalive)
+                s->tcp->so_options |= SOF_KEEPALIVE;
+            else
+                s->tcp->so_options &= ~SOF_KEEPALIVE;
+        }
+        return 0;
+    }
     if (level == SOL_SOCKET)
         return 0;
     return -EOPNOTSUPP;
@@ -302,6 +334,8 @@ int net_getsockopt(int gfd, int level, int optname, void *optval, size_t *optlen
         val = s->reuseaddr;
     else if (level == SOL_SOCKET && optname == SO_REUSEPORT)
         val = s->reuseport;
+    else if (level == SOL_SOCKET && optname == SO_KEEPALIVE)
+        val = s->keepalive;
     else if (level == SOL_SOCKET)
         val = 0;
     else if (level == IPPROTO_TCP) {
@@ -330,9 +364,6 @@ int net_getsockopt(int gfd, int level, int optname, void *optval, size_t *optlen
             val = 1460;
             break;
         case TCP_CORK:
-        case TCP_KEEPIDLE:
-        case TCP_KEEPINTVL:
-        case TCP_KEEPCNT:
         case TCP_SYNCNT:
         case TCP_LINGER2:
         case TCP_DEFER_ACCEPT:
@@ -340,6 +371,18 @@ int net_getsockopt(int gfd, int level, int optname, void *optval, size_t *optlen
         case TCP_QUICKACK:
         case TCP_USER_TIMEOUT:
             val = 0;
+            break;
+        case TCP_KEEPIDLE:
+            val = s->keep_idle > 0 ? s->keep_idle :
+                  (s->tcp ? (int)(s->tcp->keep_idle / 1000U) : 7200);
+            break;
+        case TCP_KEEPINTVL:
+            val = s->keep_intvl > 0 ? s->keep_intvl :
+                  (s->tcp ? (int)(s->tcp->keep_intvl / 1000U) : 75);
+            break;
+        case TCP_KEEPCNT:
+            val = s->keep_cnt > 0 ? s->keep_cnt :
+                  (s->tcp ? (int)s->tcp->keep_cnt : 9);
             break;
         default:
             return -ENOPROTOOPT;
