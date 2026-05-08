@@ -1,22 +1,15 @@
 #include "proc/proc.h"
 #include "proc/proc_internal.h"
+#include "proc/signal.h"
 #include "core/consts.h"
 #include "core/klog.h"
 #include "core/string.h"
 #include "core/trap.h"
+#include "fs/fdtable.h"
 #include "mm/frame.h"
 #include "mm/mm.h"
 #include "mm/vm.h"
 #include "sys/usercopy.h"
-
-#define CLONE_VM             0x00000100
-#define CLONE_VFORK          0x00004000
-#define CLONE_PARENT         0x00008000
-#define CLONE_THREAD         0x00010000
-#define CLONE_SETTLS         0x00080000
-#define CLONE_PARENT_SETTID  0x00100000
-#define CLONE_CHILD_CLEARTID 0x00200000
-#define CLONE_CHILD_SETTID   0x01000000
 
 static int proc_copy_to_task_user(task_t *task, void *dst, const void *src, size_t n)
 {
@@ -42,7 +35,8 @@ static int proc_copy_to_task_user(task_t *task, void *dst, const void *src, size
     return 0;
 }
 
-int proc_clone(uint64_t flags, uint64_t stack, int *ptid, uint64_t tls, int *ctid)
+int proc_clone(uint64_t flags, uint64_t stack, int *ptid, uint64_t tls, int *ctid,
+               int exit_signal)
 {
     task_t *parent = proc_current();
     task_t *t = proc_alloc_task_slot();
@@ -57,6 +51,12 @@ int proc_clone(uint64_t flags, uint64_t stack, int *ptid, uint64_t tls, int *cti
     proc_task_init_common(t, parent);
     proc_pid_register(t);
 
+    if (exit_signal < 0 || exit_signal >= NSIG) {
+        proc_destroy_task(t);
+        return -EINVAL;
+    }
+    t->exit_signal = (flags & CLONE_THREAD) ? 0 : exit_signal;
+
     if ((flags & CLONE_PARENT) && parent && parent->parent) {
         t->parent = parent->parent;
         t->ppid = parent->parent->pid;
@@ -70,6 +70,28 @@ int proc_clone(uint64_t flags, uint64_t stack, int *ptid, uint64_t tls, int *cti
 
     t->exec_load_addr = parent->exec_load_addr;
     t->exec_load_size = parent->exec_load_size;
+
+    /*
+     * Share fd table when CLONE_FILES or CLONE_THREAD is set.
+     * Linux pthreads always pass CLONE_FILES, but some callers
+     * only set CLONE_THREAD.  Both must share the same fd table.
+     */
+    if ((flags & (CLONE_FILES | CLONE_THREAD)) && parent && parent->files) {
+        fdtable_share(t, parent);
+    }
+
+    /*
+     * Share signal handlers when CLONE_SIGHAND or CLONE_THREAD is set.
+     * Per-thread pending signals remain separate (each task has its own
+     * pending mask inside the shared signal_state), but sigaction
+     * entries must be shared across all threads.
+     */
+    if ((flags & (CLONE_SIGHAND | CLONE_THREAD)) && parent && parent->signals) {
+        if (t->signals)
+            kfree(t->signals);
+        t->signals = parent->signals;
+        refcount_inc(&((signal_state_t *)t->signals)->refcount);
+    }
 
     if (parent->pgdir) {
         if (parent->mm && (flags & CLONE_VM)) {
@@ -145,8 +167,17 @@ int proc_clone(uint64_t flags, uint64_t stack, int *ptid, uint64_t tls, int *cti
     if (flags & CLONE_VFORK) {
         mm_struct_t *shared_mm = (flags & CLONE_VM) ? parent->mm : NULL;
         while (t->state != PROC_UNUSED && t->state != PROC_ZOMBIE &&
-               (!shared_mm || t->mm == shared_mm))
-            proc_yield();
+               (!shared_mm || t->mm == shared_mm)) {
+            uint64_t pf = spin_lock_irqsave(&proc_lock);
+            if (t->state == PROC_UNUSED || t->state == PROC_ZOMBIE ||
+                (shared_mm && t->mm != shared_mm)) {
+                spin_unlock_irqrestore(&proc_lock, pf);
+                break;
+            }
+            parent->state = PROC_BLOCKED;
+            spin_unlock_irqrestore(&proc_lock, pf);
+            sched();
+        }
     }
     return t->pid;
 }

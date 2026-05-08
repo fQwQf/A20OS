@@ -1,4 +1,5 @@
 #include "mm/frame.h"
+#include "core/lock.h"
 #include "core/panic.h"
 #include "core/string.h"
 #include "core/stdio.h"
@@ -93,6 +94,7 @@ void pfa_init(paddr_t kernel_end) {
     memset(meta, 0, meta_sz);
     pfa.meta = meta;
     pfa.free_frames = 0;
+    spin_init(&pfa.lock);
 
     for (int i = 0; i <= MAX_ORDER; i++) {
         pfa.free_lists[i].head = PFN_NONE;
@@ -155,12 +157,15 @@ void pfa_init(paddr_t kernel_end) {
 pfn_t pfa_alloc(int order) {
     if (order < 0 || order > MAX_ORDER) return PFN_NONE;
 
+    uint64_t flags = spin_lock_irqsave(&pfa.lock);
+
     // 从 order 开始，向上找非空链表
     int o;
     for (o = order; o <= MAX_ORDER; o++)
         if (pfa.free_lists[o].head != PFN_NONE)
             break;
     if (o > MAX_ORDER) {
+        spin_unlock_irqrestore(&pfa.lock, flags);
         printf("[PFA] alloc failed order=%d free_frames=%zu\n", order, pfa.free_frames);
         return PFN_NONE;
     }
@@ -188,43 +193,48 @@ pfn_t pfa_alloc(int order) {
     pfa.meta[blk].prev     = PFN_NONE;
     pfa.meta[blk].next     = PFN_NONE;
     pfa.free_frames -= (1u << order);
+    spin_unlock_irqrestore(&pfa.lock, flags);
     return blk;
 }
 
 void pfa_free(pfn_t pfn, int order) {
-    // 参数校验与准备
     if (pfn >= pfa.total_frames) return;
-    if (pfa.meta[pfn].flags == FRAME_F_FREE) return;
+
+    uint64_t flags = spin_lock_irqsave(&pfa.lock);
+    if (pfa.meta[pfn].flags == FRAME_F_FREE) {
+        spin_unlock_irqrestore(&pfa.lock, flags);
+        return;
+    }
+
     int actual_order = (int)pfa.meta[pfn].order;
     if (actual_order < 0 || actual_order > MAX_ORDER) actual_order = order;
     pfa.free_frames += (1u << actual_order);
     const pfa_range_t *range = pfa_range_for_pfn(pfn);
-    if (!range) return;
+    if (!range) {
+        spin_unlock_irqrestore(&pfa.lock, flags);
+        return;
+    }
 
     // 试图向上合并
-    // 三个合并条件：
-    // 1 buddy 不越界
-    // 2 buddy 必须是空闲状态
-    // 3 buddy 必须是相同阶数（保证是同一个块的 buddy）
     while (actual_order < MAX_ORDER) {
         pfn_t buddy = pfn ^ (1u << actual_order);
         if (buddy >= pfa.total_frames) break;
         if (buddy < range->start_pfn || buddy >= range->end_pfn) break;
         if (pfa.meta[buddy].flags != FRAME_F_FREE) break;
-        if (pfa.meta[buddy].order != (uint8_t)actual_order) break; // 实际上理论上 buddy 必然是同阶，但这里加个保险以防元数据被破坏
+        if (pfa.meta[buddy].order != (uint8_t)actual_order) break;
 
         fl_remove(buddy, actual_order);
         pfn = (pfn < buddy) ? pfn : buddy;
         actual_order++;
     }
 
-    // 标记释放并放回链表
     pfa.meta[pfn].flags = FRAME_F_FREE;
     pfa.meta[pfn].refcount = 0;
     pfa.meta[pfn].order = (uint8_t)actual_order;
     pfa.meta[pfn].prev = PFN_NONE;
     pfa.meta[pfn].next = PFN_NONE;
     fl_push(pfn, actual_order);
+    spin_unlock_irqrestore(&pfa.lock, flags);
 }
 
 // 简化接口
@@ -233,14 +243,22 @@ void  pfa_free_page(pfn_t pfn) { pfa_free(pfn, 0); }
 
 // 引用计数 +1
 void frame_get(pfn_t pfn) {
-    if (pfn_valid(pfn)) pfa.meta[pfn].refcount++;
+    if (!pfn_valid(pfn)) return;
+    uint64_t flags = spin_lock_irqsave(&pfa.lock);
+    pfa.meta[pfn].refcount++;
+    spin_unlock_irqrestore(&pfa.lock, flags);
 }
 
-// 引用计数 -1，计数为0时释放
 void frame_put(pfn_t pfn) {
     if (!pfn_valid(pfn)) return;
-    if (pfa.meta[pfn].refcount > 0 && --pfa.meta[pfn].refcount == 0)
-        pfa_free(pfn, pfa.meta[pfn].order);
+    uint64_t flags = spin_lock_irqsave(&pfa.lock);
+    if (pfa.meta[pfn].refcount > 0 && --pfa.meta[pfn].refcount == 0) {
+        int order = (int)pfa.meta[pfn].order;
+        spin_unlock_irqrestore(&pfa.lock, flags);
+        pfa_free(pfn, order);
+        return;
+    }
+    spin_unlock_irqrestore(&pfa.lock, flags);
 }
 
 // 查询空闲页数量
@@ -253,9 +271,11 @@ void pfa_get_huge_stats(pfa_huge_stats_t *stats) {
     if (PMD_ORDER > MAX_ORDER)
         return;
 
+    uint64_t flags = spin_lock_irqsave(&pfa.lock);
     stats->total_huge_pages = pfa.total_frames / PMD_PAGE_COUNT;
     for (int order = PMD_ORDER; order <= MAX_ORDER; order++) {
         size_t huge_per_block = 1UL << (order - PMD_ORDER);
         stats->free_huge_pages += pfa.free_lists[order].count * huge_per_block;
     }
+    spin_unlock_irqrestore(&pfa.lock, flags);
 }

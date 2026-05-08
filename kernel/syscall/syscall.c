@@ -68,7 +68,36 @@ int64_t syscall_dispatch(trap_context_t *ctx)
             kdebug("[SYSCALL] Unimplemented: %lu\n", (unsigned long)num);
     }
 
-    if (!context_restored)
+    int restart_syscall = 0;
+    if (ret == -ERESTARTSYS) {
+        task_t *cur = proc_current();
+        int restart = 0;
+        if (cur && cur->signals) {
+            signal_state_t *ss = (signal_state_t *)cur->signals;
+            uint64_t deliverable = ss->pending & ~ss->blocked;
+            if (deliverable) {
+                restart = 1;
+                for (int sig = 1; sig < NSIG && restart; sig++) {
+                    if (!(deliverable & signal_mask_bit(sig)))
+                        continue;
+                    sigaction_t *sa = &ss->actions[sig];
+                    if (sa->sa_handler == SIG_IGN ||
+                        sa->sa_handler == SIG_DFL)
+                        continue;
+                    if (!(sa->sa_flags & SA_RESTART))
+                        restart = 0;
+                }
+            }
+        }
+        if (restart) {
+            TRAP_CTX_EPC(ctx) -= 4;
+            restart_syscall = 1;
+        } else {
+            ret = -EINTR;
+        }
+    }
+
+    if (!context_restored && !restart_syscall)
         TRAP_CTX_SET_RET(ctx, ret);
     syscall_profile_record(num, start_time, syscall_profile_now());
     signal_deliver_user(ctx);

@@ -14,10 +14,6 @@
 #define VIRTIO_BLK_REQ_SLOTS (VIRTIO_QUEUE_SIZE / 3)
 #define VIRTIO_BLK_WAIT_TIMEOUT_TICKS (TICKS_PER_SEC * 10)
 
-static inline uint64_t va_to_pa(const void *va) {
-    return (uint64_t)(uintptr_t)va - PAGE_OFFSET;
-}
-
 typedef struct {
     int                in_use;
     int                done;

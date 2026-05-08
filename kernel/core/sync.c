@@ -26,6 +26,9 @@ void wait_queue_prepare(wait_queue_t *q, wait_queue_entry_t *entry) {
         }
     }
     entry->next = q->head;
+    entry->prev = NULL;
+    if (q->head)
+        q->head->prev = entry;
     q->head = entry;
     spin_unlock_irqrestore(&q->lock, flags);
 }
@@ -35,15 +38,14 @@ void wait_queue_finish(wait_queue_t *q, wait_queue_entry_t *entry) {
         return;
 
     uint64_t flags = spin_lock_irqsave(&q->lock);
-    wait_queue_entry_t **pp = &q->head;
-    while (*pp) {
-        if (*pp == entry) {
-            *pp = entry->next;
-            break;
-        }
-        pp = &(*pp)->next;
-    }
+    if (entry->prev)
+        entry->prev->next = entry->next;
+    else if (q->head == entry)
+        q->head = entry->next;
+    if (entry->next)
+        entry->next->prev = entry->prev;
     entry->next = NULL;
+    entry->prev = NULL;
     entry->task = NULL;
     spin_unlock_irqrestore(&q->lock, flags);
 }
@@ -54,8 +56,28 @@ void wait_queue_sleep(wait_queue_t *q) {
         return;
 
     wait_queue_entry_t entry = {0};
-    wait_queue_prepare(q, &entry);
+    entry.task = cur;
+
+    /* Enqueue entry and set BLOCKED atomically under q->lock.
+     * We inline the prepare logic to avoid recursive locking. */
+    uint64_t flags = spin_lock_irqsave(&q->lock);
+    for (wait_queue_entry_t *e = q->head; e; e = e->next) {
+        if (e->task == cur) {
+            /* Already enqueued — just mark blocked and go. */
+            cur->state = PROC_BLOCKED;
+            spin_unlock_irqrestore(&q->lock, flags);
+            sched();
+            return;
+        }
+    }
+    entry.next = q->head;
+    entry.prev = NULL;
+    if (q->head)
+        q->head->prev = &entry;
+    q->head = &entry;
     cur->state = PROC_BLOCKED;
+    spin_unlock_irqrestore(&q->lock, flags);
+
     sched();
     wait_queue_finish(q, &entry);
 }
@@ -66,16 +88,20 @@ void wait_queue_wake_one(wait_queue_t *q) {
 
     uint64_t flags = spin_lock_irqsave(&q->lock);
     wait_queue_entry_t *entry = q->head;
-    if (entry)
+    if (entry) {
         q->head = entry->next;
+        if (q->head)
+            q->head->prev = NULL;
+        entry->next = NULL;
+        entry->prev = NULL;
+    }
     spin_unlock_irqrestore(&q->lock, flags);
 
     if (entry && entry->task) {
         task_t *t = (task_t *)entry->task;
+        entry->task = NULL;
         if (t->state == PROC_BLOCKED)
             proc_make_ready(t);
-        entry->next = NULL;
-        entry->task = NULL;
     }
 }
 
@@ -96,6 +122,7 @@ void wait_queue_wake_all(wait_queue_t *q) {
                 proc_make_ready(t);
         }
         list->next = NULL;
+        list->prev = NULL;
         list->task = NULL;
         list = next;
     }

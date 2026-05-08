@@ -51,7 +51,15 @@ void proc_task_init_common(task_t *t, task_t *parent)
     t->on_rq     = 0;
     t->rq_next   = NULL;
     t->rq_prev   = NULL;
+    t->cfs_next  = NULL;
+    t->cfs_prev  = NULL;
     t->wait_next = NULL;
+    t->vruntime  = 0;
+    t->exec_start = 0;
+    t->cfs_slice = 0;
+    t->cfs_weight = sched_weight_for_nice(t->priority);
+    t->sched_policy = parent ? parent->sched_policy : SCHED_NORMAL;
+    t->waiting_for_child = 0;
     t->wake_time = 0;
     t->alarm_expire = 0;
     t->itimer_real_interval = 0;
@@ -84,7 +92,16 @@ void proc_task_init_common(task_t *t, task_t *parent)
     t->policy.oom_score_adj = parent ? parent->policy.oom_score_adj : 0;
     t->policy.thp_disabled = parent ? parent->policy.thp_disabled : 0;
     t->clone_flags = 0;
+    t->exit_signal = SIGCHLD;
     t->clear_child_tid = NULL;
+    t->robust_list_head = 0;
+    t->sigaltstack.ss_sp = NULL;
+    t->sigaltstack.ss_flags = SS_DISABLE;
+    t->sigaltstack.ss_size = 0;
+    t->sig_handling = 0;
+    t->sigsuspend_active = 0;
+    t->sig_saved_ctx = (trap_context_t){0};
+    t->sig_old_blocked = 0;
     t->limits.stack = parent ? parent->limits.stack : USER_STACK_MAX_SIZE;
     t->limits.nofile = parent ? parent->limits.nofile : MAX_FILES;
     t->mm        = NULL;
@@ -139,8 +156,10 @@ void proc_task_release_resources(task_t *t)
     t->pgdir = NULL;
 
     if (t->signals) {
-        kfree(t->signals);
+        signal_state_t *ss = (signal_state_t *)t->signals;
         t->signals = NULL;
+        if (refcount_dec_and_test(&ss->refcount))
+            kfree(ss);
     }
     if (t->scratch_buf) {
         kfree(t->scratch_buf);
