@@ -40,8 +40,16 @@
 
 ## 用户模块：拉完了
 
-用户模块在哪？
+~~ 用户模块在哪？~~
 
 ## 杂项：NPC
 
 只有自旋锁，没有睡眠锁  
+
+cyclictest
+iozone
+licbench 
+libctest
+跑不了
+
+loongarch运行文件寻找

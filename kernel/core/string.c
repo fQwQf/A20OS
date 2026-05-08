@@ -48,16 +48,16 @@ char *strstr(const char *haystack, const char *needle) {
     return NULL;
 }
 
-static char *strtok_save = NULL;
-char *strtok(char *str, const char *delim) {
-    if (!str) str = strtok_save;
+char *strtok_r(char *str, const char *delim, char **saveptr) {
+    if (!saveptr) return NULL;
+    if (!str) str = *saveptr;
     if (!str) return NULL;
     while (*str && strchr(delim, *str)) str++;
-    if (!*str) { strtok_save = NULL; return NULL; }
+    if (!*str) { *saveptr = NULL; return NULL; }
     char *tok = str;
     while (*str && !strchr(delim, *str)) str++;
-    if (*str) { *str = '\0'; strtok_save = str + 1; }
-    else strtok_save = NULL;
+    if (*str) { *str = '\0'; *saveptr = str + 1; }
+    else *saveptr = NULL;
     return tok;
 }
 
@@ -79,6 +79,11 @@ void *memset(void *s, int c, size_t n) {
         uint64_t w = v;
         w |= w << 8;  w |= w << 16; w |= w << 32;
         uint64_t *wp = (uint64_t *)p;
+        while (n >= 64) {
+            wp[0] = w; wp[1] = w; wp[2] = w; wp[3] = w;
+            wp[4] = w; wp[5] = w; wp[6] = w; wp[7] = w;
+            wp += 8; n -= 64;
+        }
         while (n >= 8) { *wp++ = w; n -= 8; }
         p = (unsigned char *)wp;
     }
@@ -88,9 +93,20 @@ void *memset(void *s, int c, size_t n) {
 
 void *memcpy(void *d, const void *s, size_t n) {
     unsigned char *dp = d; const unsigned char *sp = s;
-    while (n >= 8 && !((uintptr_t)dp & 7) && !((uintptr_t)sp & 7)) {
-        *(uint64_t *)dp = *(const uint64_t *)sp;
-        dp += 8; sp += 8; n -= 8;
+    if (n >= 64 && !((uintptr_t)dp & 7) && !((uintptr_t)sp & 7)) {
+        uint64_t *dw = (uint64_t *)dp; const uint64_t *sw = (const uint64_t *)sp;
+        while (n >= 64) {
+            dw[0] = sw[0]; dw[1] = sw[1]; dw[2] = sw[2]; dw[3] = sw[3];
+            dw[4] = sw[4]; dw[5] = sw[5]; dw[6] = sw[6]; dw[7] = sw[7];
+            dw += 8; sw += 8; n -= 64;
+        }
+        while (n >= 8) { *dw++ = *sw++; n -= 8; }
+        dp = (unsigned char *)dw; sp = (const unsigned char *)sw;
+    } else {
+        while (n >= 8 && !((uintptr_t)dp & 7) && !((uintptr_t)sp & 7)) {
+            *(uint64_t *)dp = *(const uint64_t *)sp;
+            dp += 8; sp += 8; n -= 8;
+        }
     }
     while (n--) *dp++ = *sp++;
     return d;

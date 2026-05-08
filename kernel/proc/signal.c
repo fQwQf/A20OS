@@ -17,8 +17,8 @@ static int signal_core_dump_default(int sig) {
         case SIGQUIT:
         case SIGILL:
         case SIGABRT:
-        case 7:  /* SIGBUS */
-        case 8:  /* SIGFPE */
+        case SIGBUS:
+        case SIGFPE:
         case SIGSEGV:
         case 31: /* SIGSYS */
             return 1;
@@ -34,12 +34,42 @@ static int signal_wait_status(int sig) {
     return status;
 }
 
-static int signal_fatal_default(int sig) {
+static int signal_default_terminate(int sig) {
     switch (sig) {
         case SIGCHLD:
+        case SIGURG:
+        case SIGWINCH:
+        case SIGSTOP:
+        case SIGTSTP:
+        case SIGTTIN:
+        case SIGTTOU:
+        case SIGCONT:
             return 0;
         default:
             return 1;
+    }
+}
+
+static int signal_default_stop(int sig) {
+    switch (sig) {
+        case SIGSTOP:
+        case SIGTSTP:
+        case SIGTTIN:
+        case SIGTTOU:
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+static int signal_default_ignore(int sig) {
+    switch (sig) {
+        case SIGCHLD:
+        case SIGURG:
+        case SIGWINCH:
+            return 1;
+        default:
+            return 0;
     }
 }
 
@@ -57,11 +87,13 @@ typedef struct user_sigset {
 // 初始化信号状态
 void signal_init(signal_state_t *ss) {
     memset(ss, 0, sizeof(*ss));
+    refcount_set(&ss->refcount, 1);
 }
 
 // 复制信号状态（用于 fork 时继承父进程的信号处理函数）
 void signal_copy(const signal_state_t *src, signal_state_t *dst) {
     memcpy(dst, src, sizeof(*dst));
+    refcount_set(&dst->refcount, 1);
     dst->pending = 0;  // 子进程不继承未处理的信号
     memset(dst->pending_has_info, 0, sizeof(dst->pending_has_info));
     memset(dst->pending_info, 0, sizeof(dst->pending_info));
@@ -74,12 +106,25 @@ int signal_send_info(int pid, int signum, const void *info, size_t info_size) {
     if (!t->signals) return -EINVAL;
 
     signal_state_t *ss = (signal_state_t *)t->signals;
-    if (!(ss->blocked & signal_mask_bit(signum)) &&
-        ss->actions[signum].sa_handler == SIG_DFL &&
-        signal_fatal_default(signum)) {
+    sigaction_t *sa = &ss->actions[signum];
+
+    if (sa->sa_handler == SIG_IGN)
+        return 0;
+
+    /* For kernel threads (no pgdir), immediately apply default action.
+     * For user processes, always queue the signal — it will be delivered
+     * at the next trap boundary via signal_deliver_user(), which sets up
+     * the proper signal frame on the user stack. */
+    int is_user = (t->pgdir != NULL);
+
+    if (!is_user &&
+        !(ss->blocked & signal_mask_bit(signum)) &&
+        sa->sa_handler == SIG_DFL &&
+        signal_default_terminate(signum)) {
         proc_force_exit(t, -signal_wait_status(signum));
         return 0;
     }
+
     if (info && info_size) {
         size_t n = info_size > SIGNAL_INFO_SIZE ? SIGNAL_INFO_SIZE : info_size;
         memcpy(ss->pending_info[signum], info, n);
@@ -122,7 +167,7 @@ int signal_task_has_unblocked(void *task) {
         sigaction_t *sa = &ss->actions[sig];
         if (sa->sa_handler == SIG_IGN)
             continue;
-        if (sa->sa_handler == SIG_DFL && !signal_fatal_default(sig))
+        if (sa->sa_handler == SIG_DFL && signal_default_ignore(sig))
             continue;
         return 1;
     }
@@ -154,20 +199,14 @@ void signal_deliver(void) {
         if (sa->sa_handler == SIG_DFL) {
             ss->pending &= ~signal_mask_bit(sig);
             ss->pending_has_info[sig] = 0;
-            switch (sig) {
-                case SIGCHLD:  continue;
-                case SIGKILL:
-                case SIGTERM:
-                case SIGINT:
-                case SIGQUIT:
-                case SIGSEGV:
-                case SIGILL:
-                case SIGABRT:
-                case SIGPIPE:
-                    proc_exit(-signal_wait_status(sig));
-                default:
-                    proc_exit(-signal_wait_status(sig));
+            if (signal_default_ignore(sig))
+                continue;
+            if (signal_default_stop(sig)) {
+                t->state = PROC_BLOCKED;
+                sched();
+                continue;
             }
+            proc_exit(-signal_wait_status(sig));
         }
 
         if (is_user) {
@@ -181,7 +220,36 @@ void signal_deliver(void) {
     }
 }
 
-// 传递信号到用户空间（用户进程使用）
+static void build_siginfo(siginfo_t *si, int sig, task_t *sender)
+{
+    memset(si, 0, sizeof(*si));
+    si->si_signo = sig;
+    si->si_code = SI_USER;
+    if (sender) {
+        si->_sifields[0] = 0;
+        si->_sifields[1] = sender->pid;
+        si->_sifields[2] = (int)sender->cred.uid;
+    }
+}
+
+static void build_ucontext(ucontext_t *uc, trap_context_t *ctx,
+                           uint64_t old_blocked, sigaltstack_t *altstack)
+{
+    memset(uc, 0, sizeof(*uc));
+    uc->uc_sigmask = signal_mask_to_user(old_blocked);
+    uc->uc_stack.ss_sp = altstack->ss_sp;
+    uc->uc_stack.ss_flags = altstack->ss_flags;
+    uc->uc_stack.ss_size = altstack->ss_size;
+    sigcontext_t *sc = &uc->uc_mcontext;
+#ifdef __riscv
+    for (int i = 0; i < 32; i++) sc->sc_regs[i] = ctx->x[i];
+    sc->sc_pc = ctx->sepc;
+#elif defined(__loongarch__)
+    for (int i = 0; i < 32; i++) sc->sc_regs[i] = ctx->regs[i];
+    sc->sc_pc = ctx->era;
+#endif
+}
+
 void signal_deliver_user(trap_context_t *ctx) {
     task_t *t = proc_current();
     if (!t || !t->signals || !t->pgdir) return;
@@ -208,43 +276,106 @@ void signal_deliver_user(trap_context_t *ctx) {
         if (sa->sa_handler == SIG_DFL) {
             ss->pending &= ~signal_mask_bit(sig);
             ss->pending_has_info[sig] = 0;
-            switch (sig) {
-                case SIGCHLD:
-                    if (t->sigsuspend_active) {
-                        ss->blocked = t->sigsuspend_old_blocked;
-                        t->sigsuspend_active = 0;
-                    }
-                    continue;
-                default: proc_exit(-signal_wait_status(sig));
+            if (signal_default_ignore(sig)) {
+                if (t->sigsuspend_active) {
+                    ss->blocked = t->sigsuspend_old_blocked;
+                    t->sigsuspend_active = 0;
+                }
+                continue;
             }
+            if (signal_default_stop(sig)) {
+                ss->blocked = t->sigsuspend_active ?
+                              t->sigsuspend_old_blocked : ss->blocked;
+                t->sigsuspend_active = 0;
+                t->state = PROC_BLOCKED;
+                sched();
+                t->state = PROC_RUNNING;
+                continue;
+            }
+            proc_exit(-signal_wait_status(sig));
         }
 
         ss->pending &= ~signal_mask_bit(sig);
         ss->pending_has_info[sig] = 0;
 
+        if (sa->sa_flags & SA_RESETHAND)
+            sa->sa_handler = SIG_DFL;
+
         t->sig_saved_ctx = *ctx;
         t->sig_handling = sig;
-        t->sig_old_blocked = t->sigsuspend_active ? t->sigsuspend_old_blocked : ss->blocked;
+        uint64_t old_blocked = t->sigsuspend_active ?
+                               t->sigsuspend_old_blocked : ss->blocked;
+        t->sig_old_blocked = old_blocked;
         t->sigsuspend_active = 0;
 
         ss->blocked |= sa->sa_mask;
-        ss->blocked |= signal_mask_bit(sig);
+        if (!(sa->sa_flags & SA_NODEFER))
+            ss->blocked |= signal_mask_bit(sig);
 
         uint64_t sp = TRAP_CTX_SP(ctx);
-        sp -= 16;
+
+        if ((sa->sa_flags & SA_ONSTACK) &&
+            t->sigaltstack.ss_flags == 0 &&
+            t->sigaltstack.ss_sp != NULL &&
+            t->sigaltstack.ss_size >= MINSIGSTKSZ) {
+            sp = (uintptr_t)t->sigaltstack.ss_sp + t->sigaltstack.ss_size;
+        }
+
+        sig_rt_frame_t frame;
+        memset(&frame, 0, sizeof(frame));
+        frame.flag = 0x77777777ULL;
+        build_siginfo(&frame.info, sig, t);
+        build_ucontext(&frame.uc, ctx, old_blocked, &t->sigaltstack);
+
+        sp -= sizeof(sig_rt_frame_t);
         sp &= ~15ULL;
+
+        if (copy_to_user((void *)sp, &frame, sizeof(frame)) < 0)
+            proc_exit(-signal_wait_status(SIGSEGV));
+
+        uint64_t tramp_addr = sp + offsetof(sig_rt_frame_t, uc) +
+                              sizeof(ucontext_t) + sizeof(siginfo_t);
         uint32_t tramp[2];
         arch_signal_prepare_trampoline(tramp);
-        /* Write signal trampoline to user stack via page table (not direct ptr) */
-        if (copy_to_user((void *)sp, tramp, sizeof(tramp)) < 0)
+        if (copy_to_user((void *)tramp_addr, tramp, sizeof(tramp)) < 0)
             proc_exit(-signal_wait_status(SIGSEGV));
-        TRAP_CTX_SP(ctx) = sp;
 
+        TRAP_CTX_SP(ctx) = sp;
         TRAP_CTX_EPC(ctx) = sa->sa_handler;
         TRAP_CTX_ARG0(ctx) = sig;
-        TRAP_CTX_RA(ctx) = sp;
+
+        if (sa->sa_flags & SA_SIGINFO) {
+            TRAP_CTX_ARG1(ctx) = sp + offsetof(sig_rt_frame_t, info);
+            TRAP_CTX_ARG2(ctx) = sp + offsetof(sig_rt_frame_t, uc);
+        }
+        TRAP_CTX_RA(ctx) = tramp_addr;
         return;
     }
+}
+
+int64_t sys_rt_sigreturn_impl(trap_context_t *ctx) {
+    task_t *t = proc_current();
+    if (!t || !t->signals) return -EFAULT;
+
+    uint64_t sp = TRAP_CTX_SP(ctx);
+    sig_rt_frame_t frame;
+    if (copy_from_user(&frame, (void *)sp, sizeof(frame)) < 0)
+        return -EFAULT;
+
+    signal_state_t *ss = (signal_state_t *)t->signals;
+    ss->blocked = signal_mask_from_user(frame.uc.uc_sigmask);
+
+    sigcontext_t *sc = &frame.uc.uc_mcontext;
+#ifdef __riscv
+    for (int i = 0; i < 32; i++) ctx->x[i] = sc->sc_regs[i];
+    ctx->sepc = sc->sc_pc;
+#elif defined(__loongarch__)
+    for (int i = 0; i < 32; i++) ctx->regs[i] = sc->sc_regs[i];
+    ctx->era = sc->sc_pc;
+#endif
+
+    t->sig_handling = 0;
+    return 0;
 }
 
 // 设置信号处理函数（rt_sigaction 系统调用的实现）

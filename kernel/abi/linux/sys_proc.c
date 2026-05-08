@@ -1,5 +1,6 @@
 #define LINUX_SYSCALL_DECLARE_PROTOTYPES
 #include "syscall_impl.h"
+#include "abi/linux/futex.h"
 
 #define CLD_EXITED     1
 #define CLD_KILLED     2
@@ -58,7 +59,33 @@ int64_t sys_set_tid_address(int *tidptr) {
 }
 
 int64_t sys_set_robust_list(void *head, size_t len) {
-    (void)head; (void)len;
+    if (len != sizeof(struct robust_list_head)) return -EINVAL;
+    task_t *t = proc_current();
+    if (!t) return -ESRCH;
+    t->robust_list_head = (uintptr_t)head;
+    return 0;
+}
+
+int64_t sys_get_robust_list(int pid, void *head_ptr, size_t *len_ptr) {
+    task_t *t;
+    if (pid == 0) {
+        t = proc_current();
+    } else {
+        t = proc_find(pid);
+        if (!t) return -ESRCH;
+        task_t *cur = proc_current();
+        if (cur && t->cred.uid != cur->cred.uid &&
+            t->cred.euid != cur->cred.euid &&
+            !proc_has_cap(cur, CAP_SETUID))
+            return -EPERM;
+    }
+    if (!t) return -ESRCH;
+    uintptr_t head = t->robust_list_head;
+    if (copy_to_user(head_ptr, &head, sizeof(head)) < 0) return -EFAULT;
+    if (len_ptr) {
+        size_t sz = sizeof(struct robust_list_head);
+        if (copy_to_user(len_ptr, &sz, sizeof(sz)) < 0) return -EFAULT;
+    }
     return 0;
 }
 
@@ -273,8 +300,101 @@ int64_t sys_setsid(void) {
     return t->sid;
 }
 
+int64_t sys_getsid(int pid) {
+    task_t *self = proc_current();
+    task_t *t = pid == 0 ? self : proc_find(pid);
+    if (!t) return -ESRCH;
+    return t->sid;
+}
+
+static char g_hostname[65] = "A20OS";
+static char g_domainname[65] = "";
+
+int64_t sys_sethostname(const char *name, size_t len) {
+    if (!name) return -EFAULT;
+    if (len >= sizeof(g_hostname)) return -EINVAL;
+    task_t *t = proc_current();
+    if (!t || (t->cred.uid != 0 && t->cred.euid != 0))
+        return -EPERM;
+    char buf[65];
+    if (user_strncpy(buf, name, sizeof(buf)) < 0) return -EFAULT;
+    buf[len] = '\0';
+    memcpy(g_hostname, buf, len + 1);
+    return 0;
+}
+
+int64_t sys_setdomainname(const char *name, size_t len) {
+    if (!name) return -EFAULT;
+    if (len >= sizeof(g_domainname)) return -EINVAL;
+    task_t *t = proc_current();
+    if (!t || (t->cred.uid != 0 && t->cred.euid != 0))
+        return -EPERM;
+    char buf[65];
+    if (user_strncpy(buf, name, sizeof(buf)) < 0) return -EFAULT;
+    buf[len] = '\0';
+    memcpy(g_domainname, buf, len + 1);
+    return 0;
+}
+
+static unsigned int g_personality;
+
+int64_t sys_personality(unsigned int persona) {
+    unsigned int old = g_personality;
+    if (persona != 0xffffffffU)
+        g_personality = persona;
+    return (int64_t)old;
+}
+
+int64_t sys_vhangup(void) {
+    return 0;
+}
+
+int64_t sys_unshare(int flags) {
+    if (flags & ~(0x00000100U | 0x00000200U | 0x00000400U | 0x00020000U |
+                  0x04000000U | 0x08000000U | 0x10000000U | 0x20000000U |
+                  0x40000000U | 0x80000000U))
+        return -EINVAL;
+    return 0;
+}
+
+int64_t sys_pivot_root(const char *new_root, const char *put_old) {
+    (void)new_root;
+    (void)put_old;
+    return -EPERM;
+}
+
+struct clone3_args {
+    uint64_t flags;
+    uint64_t pidfd;
+    uint64_t child_tid;
+    uint64_t parent_tid;
+    uint64_t exit_signal;
+    uint64_t stack;
+    uint64_t stack_size;
+    uint64_t tls;
+    uint64_t set_tid;
+    uint64_t set_tid_size;
+    uint64_t cgroup;
+};
+
+int64_t sys_clone3(void *cl_args, size_t size) {
+    if (!cl_args) return -EFAULT;
+    if (size < 64) return -EINVAL;
+    struct clone3_args args;
+    memset(&args, 0, sizeof(args));
+    size_t cpysz = size < sizeof(args) ? size : sizeof(args);
+    if (copy_from_user(&args, cl_args, cpysz) < 0) return -EFAULT;
+    return proc_clone(args.flags, args.stack, (int *)args.parent_tid, args.tls, (int *)args.child_tid, (int)args.exit_signal);
+}
+
+int64_t sys_openat2(int dirfd, const char *pathname, const void *how, size_t size) {
+    (void)how;
+    (void)size;
+    return sys_openat(dirfd, pathname, 0, 0);
+}
+
 int64_t sys_clone(uint64_t flags, void *stack, int *ptid, uint64_t tls, int *ctid) {
-    return proc_clone(flags, (uint64_t)stack, ptid, tls, ctid);
+    return proc_clone(flags, (uint64_t)stack, ptid, tls, ctid, (int)(flags & 0xFF));
 }
 
 int64_t sys_execve(const char *path, char **argv, char **envp) {
@@ -286,17 +406,30 @@ int64_t sys_execve(const char *path, char **argv, char **envp) {
 }
 
 int64_t sys_wait4(int pid, int *status, int options, void *rusage) {
-    (void)rusage;
     int kstatus = 0;
     int ret = proc_wait4(pid, status ? &kstatus : NULL, options);
     if (ret >= 0 && status) {
         if (copy_to_user(status, &kstatus, sizeof(int)) < 0) return -EFAULT;
     }
+    if (ret >= 0 && rusage) {
+        char zero_rusage[144];
+        memset(zero_rusage, 0, sizeof(zero_rusage));
+        if (copy_to_user(rusage, zero_rusage, sizeof(zero_rusage)) < 0) return -EFAULT;
+    }
     return ret;
 }
 
+#define WNOHANG   1
+#define WEXITED   4
+#define WSTOPPED  2
+#define WCONTINUED 8
+#define WNOWAIT   0x1000000
+
 int64_t sys_waitid(int type, int id, void *info, int options, void *rusage) {
     (void)rusage;
+    if (!(options & (WEXITED|WSTOPPED|WCONTINUED)))
+        options |= WEXITED;
+
     int pid = -1;
     switch (type) {
     case 0: /* P_ALL */
@@ -313,7 +446,7 @@ int64_t sys_waitid(int type, int id, void *info, int options, void *rusage) {
     }
 
     int status = 0;
-    int ret = proc_wait4(pid, &status, options & 1 /* WNOHANG */);
+    int ret = proc_wait4(pid, &status, options & WNOHANG);
     if (ret < 0) return ret;
 
     if (info) {

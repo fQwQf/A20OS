@@ -3,6 +3,7 @@
 
 typedef struct {
     int used;
+    int owner_pid;
     uint64_t interval[2];
     uint64_t value[2];
     uint64_t expire_tick;
@@ -81,7 +82,8 @@ static int fill_getitimer(task_t *t, int which, uint64_t out[4])
 
     ticks_to_timeval(t->itimer_real_interval, out);
     uint64_t now = timer_get_ticks();
-    uint64_t rem = (t->alarm_expire > now) ? (t->alarm_expire - now) : 0;
+    uint64_t expire = __atomic_load_n(&t->alarm_expire, __ATOMIC_RELAXED);
+    uint64_t rem = (expire > now) ? (expire - now) : 0;
     ticks_to_timeval(rem, out + 2);
     if (rem && out[2] == 0 && out[3] == 0)
         out[3] = 1;
@@ -135,8 +137,9 @@ int64_t sys_alarm(unsigned seconds)
     if (!cur) return 0;
     uint64_t now = timer_get_ticks();
     unsigned old = 0;
-    if (cur->alarm_expire > now) {
-        uint64_t rem = cur->alarm_expire - now;
+    uint64_t expire = __atomic_load_n(&cur->alarm_expire, __ATOMIC_RELAXED);
+    if (expire > now) {
+        uint64_t rem = expire - now;
         old = (unsigned)((rem + TICKS_PER_SEC - 1) / TICKS_PER_SEC);
     }
     cur->itimer_real_interval = 0;
@@ -151,10 +154,12 @@ int64_t sys_timer_create(int clockid, void *sevp, int *timerid)
     (void)sevp;
     if (clockid != 0 && clockid != 1 && clockid != 7) return -EINVAL;
     if (!timerid) return -EFAULT;
+    task_t *cur = proc_current();
     for (int i = 0; i < COMPAT_TIMER_MAX; i++) {
         if (!g_posix_timers[i].used) {
             memset(&g_posix_timers[i], 0, sizeof(g_posix_timers[i]));
             g_posix_timers[i].used = 1;
+            g_posix_timers[i].owner_pid = cur ? cur->pid : 0;
             if (copy_to_user(timerid, &i, sizeof(i)) < 0) return -EFAULT;
             return 0;
         }
@@ -166,6 +171,9 @@ int64_t sys_timer_delete(int timerid)
 {
     if (timerid < 0 || timerid >= COMPAT_TIMER_MAX || !g_posix_timers[timerid].used)
         return -EINVAL;
+    task_t *cur = proc_current();
+    if (cur && g_posix_timers[timerid].owner_pid != cur->pid)
+        return -EINVAL;
     memset(&g_posix_timers[timerid], 0, sizeof(g_posix_timers[timerid]));
     return 0;
 }
@@ -174,6 +182,9 @@ int64_t sys_timer_gettime(int timerid, void *curr_value)
 {
     if (!curr_value) return -EFAULT;
     if (timerid < 0 || timerid >= COMPAT_TIMER_MAX || !g_posix_timers[timerid].used)
+        return -EINVAL;
+    task_t *cur = proc_current();
+    if (cur && g_posix_timers[timerid].owner_pid != cur->pid)
         return -EINVAL;
     uint64_t out[4] = {
         g_posix_timers[timerid].interval[0],
@@ -188,6 +199,9 @@ int64_t sys_timer_getoverrun(int timerid)
 {
     if (timerid < 0 || timerid >= COMPAT_TIMER_MAX || !g_posix_timers[timerid].used)
         return -EINVAL;
+    task_t *cur = proc_current();
+    if (cur && g_posix_timers[timerid].owner_pid != cur->pid)
+        return -EINVAL;
     return 0;
 }
 
@@ -195,6 +209,9 @@ int64_t sys_timer_settime(int timerid, int flags, const void *new_value, void *o
 {
     (void)flags;
     if (timerid < 0 || timerid >= COMPAT_TIMER_MAX || !g_posix_timers[timerid].used)
+        return -EINVAL;
+    task_t *cur = proc_current();
+    if (cur && g_posix_timers[timerid].owner_pid != cur->pid)
         return -EINVAL;
     if (old_value) {
         int64_t r = sys_timer_gettime(timerid, old_value);

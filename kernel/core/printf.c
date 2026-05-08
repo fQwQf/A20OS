@@ -21,16 +21,14 @@ static int itoa(int64_t value, char *buf, int base) {
     return len + utoa((uint64_t)value, buf + len, base, 0);
 }
 
-void vprintf(const char *fmt, va_list args) {
-    char buf[1024];
+typedef void (*putc_fn)(char c, void *ctx);
+
+static void do_format(const char *fmt, va_list args, putc_fn putc, void *ctx) {
     char num_buf[32];
-    int pos = 0;
     int long_mode = 0;
 
-#define PUTC(c) do { if (pos < (int)sizeof(buf)-1) buf[pos++] = (c); } while(0)
-
     while (*fmt) {
-        if (*fmt != '%') { PUTC(*fmt); fmt++; continue; }
+        if (*fmt != '%') { putc(*fmt, ctx); fmt++; continue; }
         fmt++;
         long_mode = 0;
 
@@ -76,33 +74,45 @@ void vprintf(const char *fmt, va_list args) {
         case 's': {
             const char *s = va_arg(args, const char*);
             if (!s) s = "(null)";
-            while (*s) PUTC(*s++);
+            while (*s) putc(*s++, ctx);
             nlen = 0;
             break;
         }
         case 'c': {
             char c = (char)va_arg(args, int);
-            PUTC(c);
+            putc(c, ctx);
             nlen = 0;
             break;
         }
-        case '%': PUTC('%'); nlen = 0; break;
-        default: PUTC('%'); PUTC(*fmt); nlen = 0; break;
+        case '%': putc('%', ctx); nlen = 0; break;
+        default: putc('%', ctx); putc(*fmt, ctx); nlen = 0; break;
         }
 
         if (nlen > 0) {
             int neg = (num_buf[0] == '-') ? 1 : 0;
             int pad = (width > nlen) ? width - nlen : 0;
-            for (int i = 0; i < pad; i++) PUTC(pad_zero && !neg ? '0' : ' ');
-            for (int i = 0; i < nlen; i++) PUTC(num_buf[i]);
+            for (int i = 0; i < pad; i++) putc(pad_zero && !neg ? '0' : ' ', ctx);
+            for (int i = 0; i < nlen; i++) putc(num_buf[i], ctx);
         }
         fmt++;
     }
+}
 
-#undef PUTC
+/* vprintf: buffer-then-UART backend */
 
-    buf[pos] = '\0';
-    uart_puts(buf);
+typedef struct { char buf[1024]; int pos; } vprintf_ctx_t;
+
+static void vprintf_putc(char c, void *ctx) {
+    vprintf_ctx_t *vc = ctx;
+    if (vc->pos < (int)sizeof(vc->buf) - 1)
+        vc->buf[vc->pos++] = c;
+}
+
+void vprintf(const char *fmt, va_list args) {
+    vprintf_ctx_t vc = { .pos = 0 };
+    do_format(fmt, args, vprintf_putc, &vc);
+    vc.buf[vc.pos] = '\0';
+    uart_puts(vc.buf);
 }
 
 void printf(const char *fmt, ...) {
@@ -116,84 +126,21 @@ int puts(const char *s) { uart_puts(s); uart_putc('\n'); return 0; }
 int putchar(char c) { uart_putc(c); return (int)c; }
 int getchar(void) { return uart_getc(); }
 
-/* vsnprintf — same as snprintf but takes va_list */
+/* vsnprintf: caller-buffer backend */
+
+typedef struct { char *out; size_t size; size_t pos; } snprintf_ctx_t;
+
+static void snprintf_putc(char c, void *ctx) {
+    snprintf_ctx_t *sc = ctx;
+    if (sc->size > 0 && sc->pos < sc->size - 1)
+        sc->out[sc->pos++] = c;
+}
+
 int vsnprintf(char *out, size_t size, const char *fmt, va_list args) {
-    char num_buf[32];
-    size_t pos = 0;
-    int long_mode = 0;
-
-#define OUTC2(c) do { if (pos < size - 1) out[pos++] = (c); } while(0)
-
-    while (*fmt) {
-        if (*fmt != '%') { OUTC2(*fmt); fmt++; continue; }
-        fmt++;
-        long_mode = 0;
-
-        int width = 0;
-        int pad_zero = 0;
-        if (*fmt == '0') { pad_zero = 1; fmt++; }
-        while (*fmt >= '0' && *fmt <= '9') {
-            width = width * 10 + (*fmt - '0');
-            fmt++;
-        }
-
-        if (*fmt == 'l') { long_mode = 1; fmt++; }
-        if (*fmt == 'l') { long_mode = 1; fmt++; }
-
-        int nlen = 0;
-        switch (*fmt) {
-        case 'd': {
-            int64_t v = long_mode ? va_arg(args, int64_t) : va_arg(args, int);
-            nlen = itoa(v, num_buf, 10);
-            break;
-        }
-        case 'u': {
-            uint64_t v = long_mode ? va_arg(args, uint64_t) : va_arg(args, unsigned int);
-            nlen = utoa(v, num_buf, 10, 0);
-            break;
-        }
-        case 'x': {
-            uint64_t v = long_mode ? va_arg(args, uint64_t) : va_arg(args, unsigned int);
-            nlen = utoa(v, num_buf, 16, 0);
-            break;
-        }
-        case 'p': {
-            uintptr_t ptr = (uintptr_t)va_arg(args, void*);
-            OUTC2('0'); 
-            OUTC2('x'); // 手动加上 0x 前缀
-            nlen = utoa((uint64_t)ptr, num_buf, 16, 0);
-            break;
-        }
-        case 's': {
-            const char *s = va_arg(args, const char*);
-            if (!s) s = "(null)";
-            while (*s) OUTC2(*s++);
-            nlen = 0;
-            break;
-        }
-        case 'c': {
-            char c = (char)va_arg(args, int);
-            OUTC2(c);
-            nlen = 0;
-            break;
-        }
-        case '%': OUTC2('%'); nlen = 0; break;
-        default: OUTC2('%'); OUTC2(*fmt); nlen = 0; break;
-        }
-
-        if (nlen > 0) {
-            int neg = (num_buf[0] == '-') ? 1 : 0;
-            int pad = (width > nlen) ? width - nlen : 0;
-            for (int i = 0; i < pad; i++) OUTC2(pad_zero && !neg ? '0' : ' ');
-            for (int i = 0; i < nlen; i++) OUTC2(num_buf[i]);
-        }
-        fmt++;
-    }
-
-#undef OUTC2
-
-    if (size > 0) out[pos < size ? pos : size - 1] = '\0';
-    return (int)pos;
+    snprintf_ctx_t sc = { .out = out, .size = size, .pos = 0 };
+    do_format(fmt, args, snprintf_putc, &sc);
+    if (size > 0) out[sc.pos < size ? sc.pos : size - 1] = '\0';
+    return (int)sc.pos;
 }
 
 int snprintf(char *out, size_t size, const char *fmt, ...) {

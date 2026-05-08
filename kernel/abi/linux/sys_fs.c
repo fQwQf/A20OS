@@ -306,6 +306,15 @@ int64_t sys_fdatasync(int fd) {
     return vfs_fsync((int)gfd);
 }
 
+int64_t sys_sync_file_range(int fd, long offset, long nbytes, unsigned flags) {
+    (void)offset;
+    (void)nbytes;
+    (void)flags;
+    int64_t gfd = fdtable_get_current(fd);
+    if (gfd < 0) return -EBADF;
+    return vfs_fsync((int)gfd);
+}
+
 int64_t sys_ftruncate(int fd, size_t size) {
     int64_t gfd = fdtable_get_current(fd);
     if (gfd < 0) return gfd;
@@ -365,14 +374,14 @@ int64_t sys_ppoll(void *fds, int nfds, void *tmo, void *sigmask) {
             uint64_t ticks = ts[0] * TICKS_PER_SEC + ts[1] * TICKS_PER_SEC / 1000000000ULL;
             uint64_t until = timer_get_ticks() + (ticks ? ticks : 1);
             while (timer_get_ticks() < until) {
-                if (signal_task_has_unblocked(t)) return -EINTR;
+                if (signal_task_has_unblocked(t)) return -ERESTARTSYS;
                 linux_poll_sleep_until(until, 1);
             }
-            if (signal_task_has_unblocked(t)) return -EINTR;
+            if (signal_task_has_unblocked(t)) return -ERESTARTSYS;
             return 0;
         }
         for (;;) {
-            if (signal_task_has_unblocked(t)) return -EINTR;
+            if (signal_task_has_unblocked(t)) return -ERESTARTSYS;
             linux_poll_sleep_until(0, 0);
         }
     }
@@ -436,13 +445,13 @@ int64_t sys_poll(void *fds, int nfds, int timeout) {
         if (timeout > 0) {
             uint64_t until = timer_get_ticks() + MS_TO_TICKS((uint64_t)timeout);
             while (timer_get_ticks() < until) {
-                if (signal_task_has_unblocked(t)) return -EINTR;
+                if (signal_task_has_unblocked(t)) return -ERESTARTSYS;
                 linux_poll_sleep_until(until, 1);
             }
-            return signal_task_has_unblocked(t) ? -EINTR : 0;
+            return signal_task_has_unblocked(t) ? -ERESTARTSYS : 0;
         }
         for (;;) {
-            if (signal_task_has_unblocked(t)) return -EINTR;
+            if (signal_task_has_unblocked(t)) return -ERESTARTSYS;
             linux_poll_sleep_until(0, 0);
         }
     }
@@ -467,7 +476,7 @@ int64_t sys_poll(void *fds, int nfds, int timeout) {
         if (ready > 0) return ready;
         if (has_timeout && timeout == 0) return 0;
         if (has_timeout && timer_get_ticks() >= deadline) return 0;
-        if (signal_task_has_unblocked(t)) return -EINTR;
+        if (signal_task_has_unblocked(t)) return -ERESTARTSYS;
         linux_poll_sleep_until(deadline, has_timeout);
     }
 }
@@ -582,7 +591,7 @@ int64_t sys_select(int nfds, void *readfds, void *writefds,
             return fr < 0 ? fr : 0;
         }
         if (signal_task_has_unblocked(t))
-            return -EINTR;
+            return -ERESTARTSYS;
         linux_poll_sleep_until(deadline, has_timeout);
     }
 }

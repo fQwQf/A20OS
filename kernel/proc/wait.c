@@ -4,7 +4,8 @@
 #include "core/consts.h"
 #include "core/klog.h"
 
-#define WNOHANG 1
+#define WNOHANG     1
+#define __WNOTHREAD 0x20000000
 
 static void wait_accumulate_child_time(task_t *parent, task_t *child)
 {
@@ -13,88 +14,105 @@ static void wait_accumulate_child_time(task_t *parent, task_t *child)
     parent->child_utime += child->total_time;
 }
 
+static int wait_task_tgid(task_t *t)
+{
+    return t ? (t->tgid > 0 ? t->tgid : t->pid) : -1;
+}
+
+static int wait_is_direct_child(task_t *child, task_t *parent)
+{
+    return child && parent && (child->parent == parent || child->ppid == parent->pid);
+}
+
+static int wait_is_child_for_waiter_locked(task_t *child, task_t *waiter, int options)
+{
+    if (options & __WNOTHREAD)
+        return wait_is_direct_child(child, waiter);
+
+    int waiter_tgid = wait_task_tgid(waiter);
+    for (task_t *t = proc_first_task_locked(); t; t = proc_next_task_locked(t)) {
+        if (t->state == PROC_UNUSED)
+            continue;
+        if (wait_task_tgid(t) != waiter_tgid)
+            continue;
+        if (wait_is_direct_child(child, t))
+            return 1;
+    }
+    return 0;
+}
+
+static int wait_child_matches_locked(task_t *child, task_t *waiter,
+                                     int pid, int options)
+{
+    if (!wait_is_child_for_waiter_locked(child, waiter, options))
+        return 0;
+    if (pid > 0 && child->pid != pid)
+        return 0;
+    if (pid == 0 && child->pgid != waiter->pgid)
+        return 0;
+    if (pid < -1 && child->pgid != (-pid))
+        return 0;
+    return 1;
+}
+
 int proc_wait4(int pid, int *status, int options)
 {
     task_t *t = proc_current();
 
-retry:;
-    int found = 0;
-    uint64_t lock_flags = spin_lock_irqsave(&proc_lock);
-    for (task_t *child = proc_first_task_locked(); child;
-         child = proc_next_task_locked(child)) {
-        int cstate = __atomic_load_n(&child->state, __ATOMIC_ACQUIRE);
-        if (cstate == PROC_UNUSED) continue;
-        if (child->ppid != t->pid) continue;
-        if (pid > 0 && child->pid != pid) continue;
-        if (pid == 0 && child->pgid != t->pgid) continue;
-        if (pid < -1 && child->pgid != (-pid)) continue;
+    for (;;) {
+        int found = 0;
+        uint64_t lock_flags = spin_lock_irqsave(&proc_lock);
+        for (task_t *child = proc_first_task_locked(); child;
+             child = proc_next_task_locked(child)) {
+            int cstate = __atomic_load_n(&child->state, __ATOMIC_ACQUIRE);
+            if (cstate == PROC_UNUSED) continue;
+            if (!wait_child_matches_locked(child, t, pid, options)) continue;
 
-        found = 1;
-        if (cstate == PROC_ZOMBIE) {
-            int code = __atomic_load_n(&child->exit_code, __ATOMIC_ACQUIRE);
-            if (status) {
-                if (code >= 0)
-                    *status = (code & 0xFF) << 8;
-                else
-                    *status = (-code) & 0xFF;
+            found = 1;
+            if (cstate == PROC_ZOMBIE) {
+                int code = __atomic_load_n(&child->exit_code, __ATOMIC_ACQUIRE);
+                if (status) {
+                    if (code >= 0)
+                        *status = (code & 0xFF) << 8;
+                    else
+                        *status = (-code) & 0xFF;
+                }
+                int child_pid = child->pid;
+                wait_accumulate_child_time(t, child);
+                child->parent = proc_idle_task();
+                child->ppid = 0;
+                spin_unlock_irqrestore(&proc_lock, lock_flags);
+                proc_free_pid(child_pid);
+                return child_pid;
             }
-            int child_pid = child->pid;
-            wait_accumulate_child_time(t, child);
-            spin_unlock_irqrestore(&proc_lock, lock_flags);
-            proc_free_pid(child_pid);
-            return child_pid;
         }
-    }
-    spin_unlock_irqrestore(&proc_lock, lock_flags);
 
-    if (!found)
-        return -ECHILD;
+        if (!found) {
+            spin_unlock_irqrestore(&proc_lock, lock_flags);
+            return -ECHILD;
+        }
 
-    if (options & WNOHANG)
-        return 0;
+        if (options & WNOHANG) {
+            spin_unlock_irqrestore(&proc_lock, lock_flags);
+            return 0;
+        }
 
-    if (signal_task_has_unblocked(t))
-        return -EINTR;
+        t->waiting_for_child = 1;
+        t->state = PROC_BLOCKED;
+        int sig = signal_task_has_unblocked(t);
+        spin_unlock_irqrestore(&proc_lock, lock_flags);
 
-    /*
-     * Avoid the classic lost-wakeup race: mark the parent blocked while
-     * holding proc_lock, then rescan zombies before dropping the lock.
-     */
-    lock_flags = spin_lock_irqsave(&proc_lock);
-    t->state = PROC_BLOCKED;
-    for (task_t *child = proc_first_task_locked(); child;
-         child = proc_next_task_locked(child)) {
-        int cstate = __atomic_load_n(&child->state, __ATOMIC_ACQUIRE);
-        if (cstate == PROC_UNUSED) continue;
-        if (child->ppid != t->pid) continue;
-        if (pid > 0 && child->pid != pid) continue;
-        if (pid == 0 && child->pgid != t->pgid) continue;
-        if (pid < -1 && child->pgid != (-pid)) continue;
-
-        if (cstate == PROC_ZOMBIE) {
-            int code = __atomic_load_n(&child->exit_code, __ATOMIC_ACQUIRE);
+        if (sig) {
+            t->waiting_for_child = 0;
             t->state = PROC_RUNNING;
-            if (status) {
-                if (code >= 0)
-                    *status = (code & 0xFF) << 8;
-                else
-                    *status = (-code) & 0xFF;
-            }
-            int child_pid = child->pid;
-            wait_accumulate_child_time(t, child);
-            spin_unlock_irqrestore(&proc_lock, lock_flags);
-            proc_free_pid(child_pid);
-            return child_pid;
+            return -ERESTARTSYS;
         }
-    }
-    spin_unlock_irqrestore(&proc_lock, lock_flags);
 
-    if (t->state == PROC_BLOCKED)
-        sched();
-    t->state = PROC_RUNNING;
-    if (signal_task_has_unblocked(t))
-        return -EINTR;
-    goto retry;
+        if (t->state == PROC_BLOCKED)
+            sched();
+        t->waiting_for_child = 0;
+        t->state = PROC_RUNNING;
+    }
 }
 
 int proc_wait(int *status)

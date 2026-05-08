@@ -386,6 +386,14 @@ int net_inet_socket_init(net_socket_t *s)
             return -ENOMEM;
         if (s->tcp_nodelay)
             tcp_nagle_disable(s->tcp);
+        if (s->keepalive)
+            s->tcp->so_options |= SOF_KEEPALIVE;
+        if (s->keep_idle > 0)
+            s->tcp->keep_idle = (u32_t)s->keep_idle * 1000U;
+        if (s->keep_intvl > 0)
+            s->tcp->keep_intvl = (u32_t)s->keep_intvl * 1000U;
+        if (s->keep_cnt > 0)
+            s->tcp->keep_cnt = (u32_t)s->keep_cnt;
         tcp_arg(s->tcp, s);
         tcp_recv(s->tcp, lwip_tcp_recv_cb);
         tcp_err(s->tcp, lwip_tcp_err_cb);
@@ -572,7 +580,7 @@ static int net_inet_connect_stream(net_socket_t *s, const void *addr, size_t add
         if (net_task_has_unblocked_signal(cur)) {
             s->tcp_connecting = 0;
             s->connected = 0;
-            return -EINTR;
+            return -ERESTARTSYS;
         }
         uint64_t wait_irq = spin_lock_irqsave(&g_net_lock);
         net_block_on_socket_locked(s, cur);
@@ -582,7 +590,7 @@ static int net_inet_connect_stream(net_socket_t *s, const void *addr, size_t add
         if (net_task_has_unblocked_signal(cur)) {
             s->tcp_connecting = 0;
             s->connected = 0;
-            return -EINTR;
+            return -ERESTARTSYS;
         }
     }
     if (s->tcp_err != ERR_OK) {
@@ -732,7 +740,7 @@ static int net_inet_send_tcp(net_socket_t *s, const void *buf, size_t len)
             if (!cur)
                 return -EAGAIN;
             if (net_task_has_unblocked_signal(cur))
-                return -EINTR;
+                return -ERESTARTSYS;
             if (net_socket_wait_expired(s, start, 1))
                 return -EAGAIN;
             uint64_t irq = spin_lock_irqsave(&g_net_lock);

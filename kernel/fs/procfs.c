@@ -10,6 +10,7 @@
 #include "fs/block_cache.h"
 #include "fs/page_cache.h"
 #include "proc/proc.h"
+#include "proc/proc_internal.h"
 #include "mm/mm.h"
 #include "mm/frame.h"
 #include "mm/slab.h"
@@ -26,22 +27,35 @@ extern size_t  frame_free_count(void);
 
 // procfs 文件类型枚举
 typedef enum {
-    PF_ROOT,          // 根目录或进程目录
-    PF_MEMINFO,       // /proc/meminfo - 内存信息
-    PF_VERSION,       // /proc/version - 内核版本
-    PF_UPTIME,        // /proc/uptime - 运行时间
-    PF_CMDLINE,       // /proc/cmdline - 启动参数
-    PF_CPUINFO,       // /proc/cpuinfo - CPU 信息
-    PF_MOUNTS,       // /proc/mounts - 挂载信息
-    PF_LOADAVG,      // /proc/loadavg - 负载平均值
-    PF_NET,          // /proc/net - 网络协议栈状态
-    PF_CONFIG_GZ,    // /proc/config.gz - compressed kernel config
-    PF_PID_STAT,     // /proc/[pid]/stat - 进程状态
-    PF_PID_STATUS,   // /proc/[pid]/status - 进程状态详情
+    PF_ROOT,
+    PF_MEMINFO,
+    PF_VERSION,
+    PF_UPTIME,
+    PF_CMDLINE,
+    PF_CPUINFO,
+    PF_MOUNTS,
+    PF_LOADAVG,
+    PF_NET,
+    PF_CONFIG_GZ,
+    PF_PID_STAT,
+    PF_PID_STATUS,
     PF_PID_STATM,
     PF_PID_MAPS,
     PF_PID_SMAPS,
     PF_PID_OOM_SCORE_ADJ,
+    PF_PID_OOM_SCORE,
+    PF_PID_CGROUP,
+    PF_PID_CMDLINE,
+    PF_PID_EXE,
+    PF_PID_CWD,
+    PF_PID_FD,
+    PF_PID_ENVIRON,
+    PF_PID_IO,
+    PF_PID_LOGINUID,
+    PF_PID_SESSIONID,
+    PF_PID_NS,
+    PF_PID_FDINFO,
+    PF_PID_MOUNTINFO,
     PF_SYS,
     PF_SYS_FS,
     PF_SYS_FS_PIPE_MAX_SIZE,
@@ -53,8 +67,8 @@ typedef enum {
     PF_A20,
     PF_A20_BCACHE,
     PF_A20_PAGE_CACHE,
-    PF_SELF,         // /proc/self - 当前进程的 pid
-    PF_FSTYPE,       // /proc/filesystems - 支持的文件系统
+    PF_SELF,
+    PF_FSTYPE,
 } pf_type_t;
 
 // procfs 目录项结构
@@ -456,6 +470,66 @@ static int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
         snprintf(buf, bufsz, "%d\n", t ? t->policy.oom_score_adj : 0);
         break;
     }
+    case PF_PID_OOM_SCORE: {
+        task_t *t = proc_find(pid);
+        snprintf(buf, bufsz, "%d\n", t ? (t->policy.oom_score_adj >= 0 ? t->policy.oom_score_adj : 0) : 0);
+        break;
+    }
+    case PF_PID_CGROUP:
+        snprintf(buf, bufsz,
+            "0::/init.scope\n");
+        break;
+    case PF_PID_CMDLINE: {
+        task_t *t = proc_find(pid);
+        if (!t || !t->exec_path[0]) {
+            buf[0] = '\0';
+            return 1;
+        }
+        size_t len = strlen(t->exec_path);
+        if (len + 1 > bufsz) len = bufsz - 1;
+        memcpy(buf, t->exec_path, len);
+        buf[len] = '\0';
+        return (int)(len + 1);
+    }
+    case PF_PID_EXE: {
+        task_t *t = proc_find(pid);
+        snprintf(buf, bufsz, "%s\n", t && t->exec_path[0] ? t->exec_path : "/sbin/init");
+        break;
+    }
+    case PF_PID_CWD: {
+        task_t *t = proc_find(pid);
+        snprintf(buf, bufsz, "%s\n", t ? t->fs.cwd : "/");
+        break;
+    }
+    case PF_PID_ENVIRON:
+        buf[0] = '\0';
+        return 0;
+    case PF_PID_IO: {
+        task_t *t = proc_find(pid);
+        snprintf(buf, bufsz,
+            "rchar: %lu\n"
+            "wchar: %lu\n"
+            "syscr: 0\nsyscw: 0\n"
+            "read_bytes: 0\nwrite_bytes: 0\n"
+            "cancelled_write_bytes: 0\n",
+            (unsigned long)(t ? t->total_time : 0),
+            (unsigned long)(t ? t->child_stime : 0));
+        break;
+    }
+    case PF_PID_LOGINUID:
+        snprintf(buf, bufsz, "4294967295\n");
+        break;
+    case PF_PID_SESSIONID: {
+        task_t *t = proc_find(pid);
+        snprintf(buf, bufsz, "%d\n", t ? t->sid : 0);
+        break;
+    }
+    case PF_PID_MOUNTINFO:
+        snprintf(buf, bufsz,
+            "1 1 0:1 / / ramfs rw 0 0\n"
+            "2 2 0:2 / /mnt vfat rw 0 0\n"
+            "3 3 0:3 / /proc proc rw 0 0\n");
+        break;
     case PF_SYS_KERNEL_PID_MAX:
         snprintf(buf, bufsz, "%d\n", proc_pid_max());
         break;
@@ -491,7 +565,6 @@ static pf_type_t name_to_type(const char *name, int *out_pid) {
     if (strcmp(name, "meminfo") == 0) return PF_MEMINFO;
     if (strcmp(name, "version") == 0) return PF_VERSION;
     if (strcmp(name, "uptime") == 0) return PF_UPTIME;
-    if (strcmp(name, "cmdline") == 0) return PF_CMDLINE;
     if (strcmp(name, "cpuinfo") == 0) return PF_CPUINFO;
     if (strcmp(name, "mounts") == 0) return PF_MOUNTS;
     if (strcmp(name, "self") == 0) return PF_SELF;
@@ -503,6 +576,7 @@ static pf_type_t name_to_type(const char *name, int *out_pid) {
     if (strcmp(name, "a20") == 0) return PF_A20;
     if (strcmp(name, "bcache") == 0) return PF_A20_BCACHE;
     if (strcmp(name, "page_cache") == 0) return PF_A20_PAGE_CACHE;
+    if (strcmp(name, "cmdline") == 0) return PF_CMDLINE;
     if (is_pid_str(name)) {
         *out_pid = atoi(name);
         return PF_ROOT;
@@ -513,18 +587,47 @@ static pf_type_t name_to_type(const char *name, int *out_pid) {
     if (strcmp(name, "maps") == 0) return PF_PID_MAPS;
     if (strcmp(name, "smaps") == 0) return PF_PID_SMAPS;
     if (strcmp(name, "oom_score_adj") == 0) return PF_PID_OOM_SCORE_ADJ;
+    if (strcmp(name, "oom_score") == 0) return PF_PID_OOM_SCORE;
+    if (strcmp(name, "cgroup") == 0) return PF_PID_CGROUP;
+    if (strcmp(name, "exe") == 0) return PF_PID_EXE;
+    if (strcmp(name, "cwd") == 0) return PF_PID_CWD;
+    if (strcmp(name, "fd") == 0) return PF_PID_FD;
+    if (strcmp(name, "environ") == 0) return PF_PID_ENVIRON;
+    if (strcmp(name, "io") == 0) return PF_PID_IO;
+    if (strcmp(name, "loginuid") == 0) return PF_PID_LOGINUID;
+    if (strcmp(name, "sessionid") == 0) return PF_PID_SESSIONID;
+    if (strcmp(name, "ns") == 0) return PF_PID_NS;
+    if (strcmp(name, "fdinfo") == 0) return PF_PID_FDINFO;
+    if (strcmp(name, "mountinfo") == 0) return PF_PID_MOUNTINFO;
     return PF_ROOT;
 }
 
-// procfs 私有数据结构
+// Lightweight metadata stored in vnode->fs_data (no content buffer)
 typedef struct {
-    pf_type_t type;         // 文件类型
-    int pid;               // 进程 ID
-    char content[4096];    // 文件内容
-    size_t content_len;    // 内容长度
+    pf_type_t type;
+    int pid;
+    size_t content_len;
+} procfs_meta_t;
+
+// Full state for open files (includes content buffer)
+typedef struct {
+    pf_type_t type;
+    int pid;
+    size_t content_len;
+    char content[4096];
 } procfs_priv_t;
 
-// 创建 procfs 私有数据并生成内容
+static procfs_meta_t *procfs_meta_create(pf_type_t type, int pid) {
+    procfs_meta_t *m = (procfs_meta_t *)kmalloc(sizeof(*m));
+    if (!m) return NULL;
+    memset(m, 0, sizeof(*m));
+    m->type = type;
+    m->pid = pid;
+    char tmp[4096];
+    m->content_len = (size_t)generate_content(type, pid, tmp, sizeof(tmp));
+    return m;
+}
+
 static procfs_priv_t *procfs_priv_create(pf_type_t type, int pid) {
     procfs_priv_t *p = (procfs_priv_t *)kmalloc(sizeof(*p));
     if (!p) return NULL;
@@ -541,7 +644,7 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
 
     int pid = 0;
     pf_type_t type = name_to_type(name, &pid);
-    procfs_priv_t *dp = (procfs_priv_t *)dir->fs_data;
+    procfs_meta_t *dp = (procfs_meta_t *)dir->fs_data;
 
     pf_entry_t *child = NULL;
     if (dp && dp->type == PF_ROOT && dp->pid == 0 && strcmp(name, "sys") == 0) {
@@ -584,9 +687,25 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
         child = new_entry(name, PF_ROOT, pid);
     } else if (type == PF_PID_STAT || type == PF_PID_STATUS ||
                type == PF_PID_STATM || type == PF_PID_MAPS ||
-               type == PF_PID_SMAPS || type == PF_PID_OOM_SCORE_ADJ) {
+               type == PF_PID_SMAPS || type == PF_PID_OOM_SCORE_ADJ ||
+               type == PF_PID_OOM_SCORE || type == PF_PID_CGROUP ||
+               type == PF_PID_EXE || type == PF_PID_CWD ||
+               type == PF_PID_FD || type == PF_PID_ENVIRON ||
+               type == PF_PID_IO || type == PF_PID_LOGINUID ||
+               type == PF_PID_SESSIONID || type == PF_PID_NS ||
+               type == PF_PID_FDINFO || type == PF_PID_MOUNTINFO) {
         child = new_entry(name, type, dp ? dp->pid : 0);
-    } else if (type == PF_ROOT) {
+    } else if (dp && dp->type == PF_ROOT && dp->pid > 0 &&
+               strcmp(name, "cmdline") == 0) {
+        child = new_entry(name, PF_PID_CMDLINE, dp->pid);
+    } else if (dp && dp->type == PF_ROOT && dp->pid > 0 &&
+               strcmp(name, "mounts") == 0) {
+        /* /proc/<pid>/mounts — same as /proc/mounts */
+        child = new_entry(name, PF_MOUNTS, 0);
+    } else if (dp->type == PF_PID_NS || dp->type == PF_PID_FD ||
+               dp->type == PF_PID_FDINFO) {
+        return -ENOENT;
+    } else if (dp && dp->type == PF_ROOT && dp->pid > 0) {
         return -ENOENT;
     } else {
         child = new_entry(name, type, 0);
@@ -599,7 +718,8 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
     vn->ino = (uint64_t)(uintptr_t)child;
     vn->type = ((type == PF_ROOT && is_pid_str(name)) || type == PF_SELF ||
                 type == PF_SYS || type == PF_SYS_FS || type == PF_SYS_KERNEL ||
-                type == PF_A20) ?
+                type == PF_A20 || type == PF_PID_FD || type == PF_PID_NS ||
+                type == PF_PID_FDINFO) ?
                VFS_FT_DIR : VFS_FT_REGULAR;
     vn->mode = (vn->type == VFS_FT_DIR) ? (S_IFDIR | 0555) : (S_IFREG | 0444);
     if (type == PF_PID_OOM_SCORE_ADJ ||
@@ -610,9 +730,9 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
     vnode_get(dir);
     vn->ops = dir->ops;
 
-    procfs_priv_t *priv = procfs_priv_create(child->type, child->pid);
-    if (priv) vn->size = priv->content_len;
-    vn->fs_data = priv;
+    procfs_meta_t *meta = procfs_meta_create(child->type, child->pid);
+    if (meta) vn->size = meta->content_len;
+    vn->fs_data = meta;
 
     *out = vn;
     return 0;
@@ -701,8 +821,8 @@ static int procfs_fwrite(vfile_t *vf, const char *buf, size_t count) {
 
 // procfs 的 lseek 操作（设置文件偏移）
 static long procfs_flseek(vfile_t *vf, long offset, int whence) {
-    if (!vf || !vf->vnode || !vf->vnode->fs_data) return -EBADF;
-    procfs_priv_t *p = (procfs_priv_t *)vf->vnode->fs_data;
+    if (!vf || !vf->priv) return -EBADF;
+    procfs_priv_t *p = (procfs_priv_t *)vf->priv;
     long new_off;
     switch (whence) {
         case SEEK_SET: new_off = offset; break;
@@ -723,7 +843,10 @@ static int procfs_freaddir(vfile_t *vf, void *dirp, size_t count) {
         "filesystems", "pidmap", "sys", "a20", NULL
     };
     static const char *pid_entries[] = {
-        ".", "..", "stat", "status", "statm", "maps", "smaps", NULL
+        ".", "..", "stat", "status", "statm", "maps", "smaps",
+        "oom_score", "oom_score_adj", "cgroup", "cmdline", "exe", "cwd",
+        "fd", "environ", "io", "loginuid", "sessionid", "ns", "fdinfo",
+        "mountinfo", "mounts", NULL
     };
     static const char *sys_entries[] = {
         ".", "..", "fs", "kernel", NULL
@@ -739,6 +862,7 @@ static int procfs_freaddir(vfile_t *vf, void *dirp, size_t count) {
     };
     procfs_priv_t *p = (procfs_priv_t *)vf->priv;
     const char **entries = root_entries;
+    int is_root = (p && p->type == PF_ROOT && p->pid == 0);
     if (p && p->type == PF_ROOT && p->pid > 0)
         entries = pid_entries;
     else if (p && p->type == PF_SYS)
@@ -753,8 +877,39 @@ static int procfs_freaddir(vfile_t *vf, void *dirp, size_t count) {
     size_t total = 0;
     char *out = (char *)dirp;
 
-    while (entries[idx] && total < count) {
-        size_t namelen = strlen(entries[idx]);
+    while (total < count) {
+        const char *name = NULL;
+        char pidbuf[16];
+
+        if (is_root) {
+            int static_count = 0;
+            for (int i = 0; root_entries[i]; i++) static_count = i + 1;
+            if (idx < static_count) {
+                name = root_entries[idx];
+            } else {
+                int pid_idx = idx - static_count;
+                uint64_t flags = spin_lock_irqsave(&proc_lock);
+                int cur_idx = 0;
+                task_t *t;
+                for (t = proc_first_task_locked(); t; t = proc_next_task_locked(t)) {
+                    if (t->state == PROC_UNUSED || t->pid <= 1)
+                        continue;
+                    if (cur_idx == pid_idx)
+                        break;
+                    cur_idx++;
+                }
+                if (t) {
+                    snprintf(pidbuf, sizeof(pidbuf), "%d", t->pid);
+                    name = pidbuf;
+                }
+                spin_unlock_irqrestore(&proc_lock, flags);
+            }
+        } else {
+            name = entries[idx];
+        }
+
+        if (!name) break;
+        size_t namelen = strlen(name);
         size_t reclen = (sizeof(vfs_dirent64_t) + namelen + 1 + 7) & ~7UL;
         if (total + reclen > count) break;
 
@@ -762,8 +917,14 @@ static int procfs_freaddir(vfile_t *vf, void *dirp, size_t count) {
         d->d_ino = (uint64_t)idx;
         d->d_off = (int64_t)(total + reclen);
         d->d_reclen = (uint16_t)reclen;
-        d->d_type = (idx <= 1) ? VFS_FT_DIR : VFS_FT_REGULAR;
-        memcpy(d->d_name, entries[idx], namelen + 1);
+        int is_dir = (idx <= 1);
+        if (is_root && is_pid_str(name))
+            is_dir = 1;
+        if (!is_root && (strcmp(name, "fd") == 0 || strcmp(name, "ns") == 0 ||
+                         strcmp(name, "fdinfo") == 0))
+            is_dir = 1;
+        d->d_type = is_dir ? VFS_FT_DIR : VFS_FT_REGULAR;
+        memcpy(d->d_name, name, namelen + 1);
         total += reclen;
         idx++;
     }
@@ -798,8 +959,8 @@ vnode_t *procfs_mount(void) {
     root->ops = &g_procfs_vnode_ops;
     root->size = 0;
 
-    procfs_priv_t *priv = procfs_priv_create(PF_ROOT, 0);
-    root->fs_data = priv;
+    procfs_meta_t *meta = procfs_meta_create(PF_ROOT, 0);
+    root->fs_data = meta;
     return root;
 }
 
@@ -813,8 +974,8 @@ vfile_t *procfs_open_vnode(vnode_t *vn, int flags) {
     vf->ops = &g_procfs_fops;
     refcount_set(&vf->ref_count, 1);
 
-    procfs_priv_t *vn_priv = (procfs_priv_t *)vn->fs_data;
-    procfs_priv_t *priv = procfs_priv_create(vn_priv ? vn_priv->type : PF_ROOT, vn_priv ? vn_priv->pid : 0);
+    procfs_meta_t *meta = (procfs_meta_t *)vn->fs_data;
+    procfs_priv_t *priv = procfs_priv_create(meta ? meta->type : PF_ROOT, meta ? meta->pid : 0);
     if (!priv) { vfile_free(vf); return NULL; }
     vf->priv = priv;
     return vf;

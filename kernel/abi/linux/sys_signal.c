@@ -96,16 +96,20 @@ int64_t sys_sigprocmask(int how, void *set, void *oldset, size_t sigsetsize) {
 
 int64_t sys_sigreturn(trap_context_t *ctx) {
     task_t *t = proc_current();
-    if (t && t->signals) {
-        signal_state_t *ss = (signal_state_t *)t->signals;
-        if (t->sig_handling) {
-            ss->blocked = t->sig_old_blocked;
-            if (ctx)
-                *ctx = t->sig_saved_ctx;
-            t->sig_handling = 0;
-        }
+    if (!t || !t->signals) return 0;
+    signal_state_t *ss = (signal_state_t *)t->signals;
+
+    /* Legacy (non-RT) sigreturn: restore from saved kernel context */
+    if (t->sig_handling) {
+        ss->blocked = t->sig_old_blocked;
+        if (ctx)
+            *ctx = t->sig_saved_ctx;
+        t->sig_handling = 0;
+        return 0;
     }
-    return 0;
+
+    /* RT sigreturn: read full frame from user stack */
+    return sys_rt_sigreturn_impl(ctx);
 }
 
 int64_t sys_sigsuspend(void *mask, size_t sigsetsize) {
@@ -219,4 +223,16 @@ int64_t sys_sigtimedwait(const uint64_t *set, void *info, const void *timeout, s
         }
     }
     return -EAGAIN;
+}
+
+int64_t sys_rt_sigpending(void *set, size_t sigsetsize) {
+    if (!set) return -EFAULT;
+    if (sigsetsize != sizeof(uint64_t)) return -EINVAL;
+    task_t *t = proc_current();
+    if (!t || !t->signals) return -EINVAL;
+    signal_state_t *ss = (signal_state_t *)t->signals;
+    uint64_t pending = ss->pending & ~ss->blocked;
+    uint64_t user_pending = signal_mask_to_user(pending);
+    if (copy_to_user(set, &user_pending, sizeof(user_pending)) < 0) return -EFAULT;
+    return 0;
 }

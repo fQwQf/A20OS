@@ -62,7 +62,7 @@ static int pipe_wait_interruptible(pipe_buf_t *pb, task_t **head, const char *op
     (void)pb;
     (void)op;
     if (signal_task_has_unblocked(t))
-        return -EINTR;
+        return -ERESTARTSYS;
     if (head) {
         t->wait_next = *head;
         *head = t;
@@ -75,7 +75,7 @@ static int pipe_wait_interruptible(pipe_buf_t *pb, task_t **head, const char *op
     if (t->state == PROC_BLOCKED)
         t->state = PROC_RUNNING;
     proc_set_wake_time(t, 0);
-    return signal_task_has_unblocked(t) ? -EINTR : 0;
+    return signal_task_has_unblocked(t) ? -ERESTARTSYS : 0;
 }
 
 static int pipe_read(vfile_t *vf, char *buf, size_t count)

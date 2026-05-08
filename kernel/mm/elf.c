@@ -19,11 +19,6 @@
 #include "core/defs.h"
 #include "core/random.h"
 
-// 虚拟地址转换为物理地址
-static inline paddr_t va_to_pa(const void *va) {
-    return (paddr_t)((uint64_t)(uintptr_t)va - PAGE_OFFSET);
-}
-
 #define TLS_TCB_SIZE       128
 #define PTE_STACK          (PTE_V | PTE_R | PTE_W | PTE_X | PTE_U | PTE_A | PTE_D | PTE_MAT1 | PTE_LEAF)
 
