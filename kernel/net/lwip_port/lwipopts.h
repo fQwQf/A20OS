@@ -13,6 +13,7 @@
 #define LWIP_RAW                        1
 #define LWIP_UDP                        1
 #define LWIP_TCP                        1
+#define LWIP_TCP_KEEPALIVE              1
 #define LWIP_DNS                        1
 #define LWIP_DHCP                       1
 #define LWIP_AUTOIP                     1

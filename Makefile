@@ -504,6 +504,21 @@ $(EXT4_IMG): $(USER_BUILD_STAMP)
 	cp user/build/mksh $(EXT4_STAGING_DIR)/sh
 	cp user/build/mksh $(EXT4_STAGING_DIR)/bash
 	printf 'Hello from ext4!\nThis file is on the ext4 filesystem.\n' > $(EXT4_STAGING_DIR)/test.txt
+	@mkdir -p $(EXT4_STAGING_DIR)/etc
+	@printf '%s\n' \
+		'hopopt 0 HOPOPT' \
+		'icmp 1 ICMP' \
+		'igmp 2 IGMP' \
+		'tcp 6 TCP' \
+		'udp 17 UDP' \
+		'ipv6 41 IPv6' \
+		'ipv6-route 43 IPv6-Route' \
+		'ipv6-frag 44 IPv6-Frag' \
+		'esp 50 ESP' \
+		'ah 51 AH' \
+		'ipv6-icmp 58 IPv6-ICMP' \
+		'ipv6-nonxt 59 IPv6-NoNxt' \
+		'ipv6-opts 60 IPv6-Opts' > $(EXT4_STAGING_DIR)/etc/protocols
 	@mkdir -p $(BUILD_DIR)
 	dd if=/dev/zero of=$(EXT4_IMG) bs=1M count=$(EXT4_IMAGE_MB)
 	mkfs.ext4 -F -O ^has_journal,extent,huge_file,flex_bg,uninit_bg,dir_index -d $(EXT4_STAGING_DIR) $(EXT4_IMG)
@@ -578,7 +593,8 @@ _debug_impl:
 ifeq ($(BRINGUP),1)
 	$(MAKE) ARCH=$(ARCH) BRINGUP=1 CONTEST=$(CONTEST) CFLAGS="$(DEBUG_CFLAGS)" kernel-only
 else
-	$(MAKE) ARCH=$(ARCH) BRINGUP=$(BRINGUP) CONTEST=$(CONTEST) CFLAGS="$(DEBUG_CFLAGS)" dev-build
+	$(MAKE) ARCH=$(ARCH) BRINGUP=$(BRINGUP) CONTEST=$(CONTEST) CFLAGS="$(DEBUG_CFLAGS)" kernel-only
+	$(MAKE) -C user ARCH=$(ARCH) CONTEST=$(CONTEST) OPT="-O0 -g"
 endif
 	@echo "Waiting for GDB connection on port 1234..."
 	$(QEMU) $(QEMU_FLAGS) -kernel $(KERNEL_ELF) -S -s

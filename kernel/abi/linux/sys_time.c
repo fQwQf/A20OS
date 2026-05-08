@@ -97,7 +97,7 @@ int64_t sys_nanosleep(void *req, void *rem) {
         sched();
         proc_set_wake_time(t, 0);
         if (signal_task_has_unblocked(t))
-            return -EINTR;
+            return -ERESTARTSYS;
     } else {
         while (timer_get_ticks() < until) __asm__ volatile("nop");
     }
