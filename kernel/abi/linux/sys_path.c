@@ -263,6 +263,14 @@ int64_t sys_fchownat(int dirfd, const char *path, int uid, int gid, int flags) {
     if ((flags & AT_EMPTY_PATH) && kpath[0] == '\0') {
         int64_t gfd = fdtable_get_current(dirfd);
         if (gfd < 0) return gfd;
+        vfile_t *vf = vfs_get_file_ref((int)gfd);
+        if (!vf)
+            return -EBADF;
+        if (!vf->vnode) {
+            vfs_put_file_ref((int)gfd, vf);
+            return -ENOENT;
+        }
+        vfs_put_file_ref((int)gfd, vf);
         return vfs_fchown((int)gfd, uid, gid);
     }
     char full[MAX_PATH_LEN];
@@ -395,29 +403,45 @@ int64_t sys_symlinkat(const char *target, int newdirfd, const char *linkpath) {
     return vfs_symlink(ktarget, flink);
 }
 
-static void fill_statfs_buf(uint64_t sb[8], int fs_type)
+typedef struct linux_statfs64 {
+    uint64_t f_type;
+    uint64_t f_bsize;
+    uint64_t f_blocks;
+    uint64_t f_bfree;
+    uint64_t f_bavail;
+    uint64_t f_files;
+    uint64_t f_ffree;
+    int32_t f_fsid[2];
+    uint64_t f_namelen;
+    uint64_t f_frsize;
+    uint64_t f_flags;
+    uint64_t f_spare[4];
+} linux_statfs64_t;
+
+static void fill_statfs_buf(linux_statfs64_t *sb, int fs_type)
 {
-    memset(sb, 0, sizeof(uint64_t) * 8);
+    memset(sb, 0, sizeof(*sb));
     switch (fs_type) {
-    case FS_TYPE_EXT4: sb[0] = EXT4_SUPER_MAGIC; break;
-    case FS_TYPE_FAT32: sb[0] = 0x4d44; break;
-    case FS_TYPE_PROCFS: sb[0] = 0x9fa0; break;
-    case FS_TYPE_DEVFS: sb[0] = 0x01021994; break;
+    case FS_TYPE_EXT4: sb->f_type = EXT4_SUPER_MAGIC; break;
+    case FS_TYPE_FAT32: sb->f_type = 0x4d44; break;
+    case FS_TYPE_PROCFS: sb->f_type = 0x9fa0; break;
+    case FS_TYPE_DEVFS: sb->f_type = 0x01021994; break;
     case FS_TYPE_RAMFS:
-    default: sb[0] = 0x858458f6; break;
+    default: sb->f_type = 0x858458f6; break;
     }
-    sb[1] = PAGE_SIZE;
-    sb[2] = 1024 * 1024;
-    sb[3] = 512 * 1024;
-    sb[4] = 512 * 1024;
-    sb[5] = VFS_MAX_OPEN;
-    sb[6] = VFS_MAX_OPEN / 2;
-    sb[7] = MAX_NAME_LEN;
+    sb->f_bsize = PAGE_SIZE;
+    sb->f_frsize = PAGE_SIZE;
+    sb->f_blocks = 1024 * 1024;
+    sb->f_bfree = 512 * 1024;
+    sb->f_bavail = 512 * 1024;
+    sb->f_files = VFS_MAX_OPEN;
+    sb->f_ffree = VFS_MAX_OPEN / 2;
+    sb->f_namelen = MAX_NAME_LEN;
 }
 
 int64_t sys_statfs(const char *path, void *buf) {
     if (!buf) return -EFAULT;
-    uint64_t sb[8];
+    linux_statfs64_t sb;
     int fs_type = FS_TYPE_RAMFS;
     if (path) {
         char kpath[MAX_PATH_LEN];
@@ -427,8 +451,8 @@ int64_t sys_statfs(const char *path, void *buf) {
         if (vn->mnt) fs_type = vn->mnt->type;
         vnode_put(vn);
     }
-    fill_statfs_buf(sb, fs_type);
-    if (copy_to_user(buf, sb, 64) < 0) return -EFAULT;
+    fill_statfs_buf(&sb, fs_type);
+    if (copy_to_user(buf, &sb, sizeof(sb)) < 0) return -EFAULT;
     return 0;
 }
 
@@ -442,9 +466,9 @@ int64_t sys_fstatfs(int fd, void *buf) {
     if (vf->vnode && vf->vnode->mnt)
         fs_type = vf->vnode->mnt->type;
     vfs_put_file_ref((int)gfd, vf);
-    uint64_t sb[8];
-    fill_statfs_buf(sb, fs_type);
-    return copy_to_user(buf, sb, 64) < 0 ? -EFAULT : 0;
+    linux_statfs64_t sb;
+    fill_statfs_buf(&sb, fs_type);
+    return copy_to_user(buf, &sb, sizeof(sb)) < 0 ? -EFAULT : 0;
 }
 
 int64_t sys_mount(const char *src, const char *target,
@@ -493,17 +517,21 @@ int64_t sys_umount2(const char *target, int flags) {
 }
 
 int64_t sys_utimensat(int dirfd, const char *path, void *times, int flags) {
-    if (!path) return -EFAULT;
-    char kpath[MAX_PATH_LEN];
-    if (user_strncpy(kpath, path, MAX_PATH_LEN) < 0) return -EFAULT;
-    char full[MAX_PATH_LEN];
-    int pr = syscall_path_at(dirfd, kpath, full, sizeof(full));
-    if (pr < 0) return pr;
     uint64_t ktimes[4];
     uint64_t *ptimes = NULL;
     if (times) {
         if (copy_from_user(ktimes, times, sizeof(ktimes)) < 0) return -EFAULT;
         ptimes = ktimes;
     }
+    if (!path) {
+        if (flags) return -EINVAL;
+        int64_t gfd = fdtable_get_current(dirfd);
+        return gfd < 0 ? gfd : vfs_futimens((int)gfd, ptimes);
+    }
+    char kpath[MAX_PATH_LEN];
+    if (user_strncpy(kpath, path, MAX_PATH_LEN) < 0) return -EFAULT;
+    char full[MAX_PATH_LEN];
+    int pr = syscall_path_at(dirfd, kpath, full, sizeof(full));
+    if (pr < 0) return pr;
     return vfs_utimensat(AT_FDCWD, full, ptimes, flags);
 }

@@ -17,6 +17,7 @@ void fdtable_init(task_t *task);
 void fdtable_init_stdio(task_t *task);
 void fdtable_copy(task_t *dst, const task_t *src);
 void fdtable_share(task_t *dst, const task_t *src);
+int  fdtable_unshare(task_t *task);
 void fdtable_close_all(task_t *task);
 void fdtable_close_on_exec(task_t *task);
 
