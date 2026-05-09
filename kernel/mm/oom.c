@@ -19,12 +19,13 @@ static int oom_pick_victim_pid(void)
     for (task_t *t = proc_first_task_locked(); t; t = proc_next_task_locked(t)) {
         if (t == proc_idle_task() || t->state == PROC_UNUSED || t->state == PROC_ZOMBIE)
             continue;
-        if (t->pid <= 1)
+        if (t->pid <= 2)
             continue;
         int score = t->policy.oom_score_adj;
         if (!t->mm)
             score -= 100;
-        if (score > best_score) {
+        if (score > best_score ||
+            (score == best_score && t->pid > victim_pid)) {
             best_score = score;
             victim_pid = t->pid;
         }

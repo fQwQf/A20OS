@@ -314,7 +314,7 @@ void exit_robust_list(task_t *t)
         if (copy_from_user(&futex_word, (void *)futex_addr, sizeof(futex_word)) < 0)
             goto next;
         if ((futex_word & FUTEX_TID_MASK) == (uint32_t)tid) {
-            uint32_t new_val = (futex_word & FUTEX_TID_MASK) | FUTEX_OWNER_DIED;
+            uint32_t new_val = (futex_word & FUTEX_WAITERS) | FUTEX_OWNER_DIED;
             copy_to_user((void *)futex_addr, &new_val, sizeof(new_val));
             if (futex_word & FUTEX_WAITERS)
                 futex_wake_user((int *)futex_addr, 1);
