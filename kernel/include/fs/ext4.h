@@ -267,6 +267,13 @@ typedef struct ext4_fctx {
     int             is_dir;
     size_t          file_off;
     size_t          dir_off;
+    /* ---- I/O performance caches ---- */
+    ext4_inode_t    inode;          /* cached inode, avoids re-read per syscall */
+    int             inode_valid;    /* 1 when .inode is fresh */
+    uint32_t        ext_start;      /* block-map extent cache: logical start */
+    uint32_t        ext_len;        /* block-map extent cache: length in blocks */
+    uint64_t        ext_phys;       /* block-map extent cache: physical start */
+    int             ext_valid;      /* 1 when extent cache is usable */
 } ext4_fctx_t;
 
 vnode_t *ext4_mount(bcache_t *bc);

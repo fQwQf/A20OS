@@ -227,5 +227,6 @@
 #define SYS_clone3          435
 #define SYS_openat2         437
 #define SYS_get_robust_list 100
+#define SYS_get_mempolicy   236
 
 #endif /* _ABI_LINUX_SYSCALL_NR_H */
