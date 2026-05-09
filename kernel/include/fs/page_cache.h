@@ -6,8 +6,8 @@
 #include "fs/vfs.h"
 #include "mm/frame.h"
 
-#define PAGE_CACHE_MAX_PAGES   256
-#define PAGE_CACHE_HASH_BUCKETS 256
+#define PAGE_CACHE_MAX_PAGES   1024
+#define PAGE_CACHE_HASH_BUCKETS 1024
 
 typedef struct page_cache_page {
     vnode_t *vnode;

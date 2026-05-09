@@ -5,8 +5,9 @@
 #include "core/cpu.h"
 #include "fs/fdtable.h"
 #include "fs/vfs.h"
+#include "mm/frame.h"
+#include "mm/mm.h"
 #include "mm/vm.h"
-#include "core/klog.h"
 #include "core/panic.h"
 #include "sys/futex.h"
 #include "abi/linux/futex.h"
@@ -159,21 +160,31 @@ void proc_exit(int exit_code)
 
     if (t->clear_child_tid) {
         int zero = 0;
-        if (copy_to_user(t->clear_child_tid, &zero, sizeof(zero)) == 0)
-            futex_wake_user(t->clear_child_tid, 1);
+        int *ctid = t->clear_child_tid;
         t->clear_child_tid = NULL;
+        if (copy_to_user(ctid, &zero, sizeof(zero)) < 0 && t->pgdir) {
+            /* Fallback: write directly through page table to handle
+             * CoW-protected or demand-paged mappings that copy_to_user
+             * may reject.  This matches how Linux handles mm-less
+             * clear_child_tid via put_user. */
+            paddr_t pa = pt_translate(t->pgdir, (vaddr_t)(uintptr_t)ctid);
+            if (pa) {
+                pfn_t pfn = phys_to_pfn(pa);
+                if (pfn_valid(pfn)) {
+                    int *kv = (int *)((char *)pfn_to_virt(pfn) +
+                                      ((uintptr_t)ctid & (PAGE_SIZE - 1)));
+                    *kv = 0;
+                }
+            }
+        }
+        futex_wake_user(ctid, 1);
     }
 
     if (t->robust_list_head)
         exit_robust_list(t);
 
     vfs_release_process_locks(t->pid);
-    fdtable_close_all(t);
     bpf_release_process(t->pid);
-    proc_release_exiting_mm(t);
-
-    task_t *reaper = proc_find(1);
-    proc_reparent_children(t, reaper);
 
     uint64_t flags = spin_lock_irqsave(&proc_lock);
     task_t *parent = t->parent;
@@ -187,10 +198,33 @@ void proc_exit(int exit_code)
     if (auto_reap) {
         t->parent = proc_idle_task();
         t->ppid = 0;
+        spin_unlock_irqrestore(&proc_lock, flags);
     } else {
         proc_wake_child_waiters_locked(parent);
+        spin_unlock_irqrestore(&proc_lock, flags);
     }
-    spin_unlock_irqrestore(&proc_lock, flags);
+
+    fdtable_close_all(t);
+    proc_release_exiting_mm(t);
+
+    if (auto_reap) {
+        if (t->signals) {
+            signal_state_t *ss = (signal_state_t *)t->signals;
+            t->signals = NULL;
+            if (refcount_dec_and_test(&ss->refcount))
+                kfree(ss);
+        }
+        if (t->scratch_buf) {
+            kfree(t->scratch_buf);
+            t->scratch_buf = NULL;
+            t->scratch_size = 0;
+        }
+    }
+
+    if (!auto_reap) {
+        task_t *reaper = proc_find(1);
+        proc_reparent_children(t, reaper);
+    }
 
     if (!auto_reap && parent && t->exit_signal > 0)
         signal_send(parent->pid, t->exit_signal);
@@ -208,11 +242,22 @@ void proc_force_exit(task_t *t, int exit_code)
 
     if (t->clear_child_tid) {
         int zero = 0;
-        task_t *saved = proc_set_current(t);
-        if (copy_to_user(t->clear_child_tid, &zero, sizeof(zero)) == 0)
-            futex_wake_user(t->clear_child_tid, 1);
-        proc_set_current(saved);
+        int *ctid = t->clear_child_tid;
         t->clear_child_tid = NULL;
+        task_t *saved = proc_set_current(t);
+        if (copy_to_user(ctid, &zero, sizeof(zero)) < 0 && t->pgdir) {
+            paddr_t pa = pt_translate(t->pgdir, (vaddr_t)(uintptr_t)ctid);
+            if (pa) {
+                pfn_t pfn = phys_to_pfn(pa);
+                if (pfn_valid(pfn)) {
+                    int *kv = (int *)((char *)pfn_to_virt(pfn) +
+                                      ((uintptr_t)ctid & (PAGE_SIZE - 1)));
+                    *kv = 0;
+                }
+            }
+        }
+        futex_wake_user(ctid, 1);
+        proc_set_current(saved);
     }
 
     if (t->robust_list_head) {

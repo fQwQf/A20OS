@@ -7,6 +7,16 @@
 #include "mm/mm.h"
 #include "mm/vm.h"
 #include "proc/proc.h"
+#include "sys/usercopy.h"
+
+#define IPC_CREAT   01000
+#define IPC_EXCL    02000
+#define IPC_64_BIT  0x100
+#define IPC_RMID    0
+#define IPC_SET     1
+#define IPC_STAT    2
+#define SHM_STAT_ANY 15
+#define SHM_INFO      14
 
 #define SYSV_SHM_MAX 32
 #define SHM_MAX_PAGES 1024
@@ -26,16 +36,18 @@ int sysv_shm_get(int key, size_t size, int shmflg)
 {
     if (size == 0) return -EINVAL;
 
-    if (!(shmflg & 0x0800)) {
+    if (!(shmflg & IPC_CREAT)) {
         for (int i = 0; i < SYSV_SHM_MAX; i++)
             if (g_shm[i].used && g_shm[i].key == key) return i;
         return -ENOENT;
     }
 
-    for (int i = 0; i < SYSV_SHM_MAX; i++) {
-        if (g_shm[i].used && g_shm[i].key == key) {
-            if (shmflg & 0x0400) return -EEXIST;
-            return i;
+    if (key != 0) {
+        for (int i = 0; i < SYSV_SHM_MAX; i++) {
+            if (g_shm[i].used && g_shm[i].key == key) {
+                if (shmflg & IPC_EXCL) return -EEXIST;
+                return i;
+            }
         }
     }
 
@@ -123,10 +135,13 @@ int sysv_shm_detach(const void *shmaddr)
     return 0;
 }
 
-int sysv_shm_control(int shmid, int cmd)
+int sysv_shm_control(int shmid, int cmd, void *buf)
 {
     if (shmid < 0 || shmid >= SYSV_SHM_MAX || !g_shm[shmid].used) return -EINVAL;
-    if (cmd == 0) {
+
+    cmd &= ~IPC_64_BIT;
+
+    if (cmd == IPC_RMID) {
         if (g_shm[shmid].nattach > 0) return -EBUSY;
         for (size_t p = 0; p < g_shm[shmid].npages; p++)
             pfa_free_page(g_shm[shmid].pages[p]);
@@ -134,5 +149,38 @@ int sysv_shm_control(int shmid, int cmd)
         memset(&g_shm[shmid], 0, sizeof(sysv_shm_t));
         return 0;
     }
+
+    if ((cmd == IPC_STAT || cmd == SHM_STAT_ANY) && buf) {
+        task_t *cur = proc_current();
+        int pid = cur ? cur->pid : 0;
+        struct {
+            struct { int k; unsigned u,g,cu,cg; unsigned m; int s; long p1,p2; } perm;
+            size_t segsz;
+            long at, dt, ct;
+            int cpid, lpid;
+            unsigned long nattch, pad1, pad2;
+        } ds;
+        memset(&ds, 0, sizeof(ds));
+        ds.perm.k = g_shm[shmid].key;
+        ds.perm.u = 0;
+        ds.perm.g = 0;
+        ds.perm.cu = 0;
+        ds.perm.cg = 0;
+        ds.perm.m = 0666;
+        ds.perm.s = shmid;
+        ds.segsz = g_shm[shmid].size;
+        ds.cpid = pid;
+        ds.lpid = pid;
+        ds.nattch = (unsigned long)g_shm[shmid].nattach;
+        if (copy_to_user(buf, &ds, sizeof(ds)) < 0)
+            return -EFAULT;
+        return 0;
+    }
+
+    if (cmd == SHM_INFO && buf) {
+        memset(buf, 0, 64);
+        return 0;
+    }
+
     return 0;
 }

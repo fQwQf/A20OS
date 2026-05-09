@@ -146,6 +146,7 @@ typedef struct task_t {
     uint64_t       sigsuspend_old_blocked;
     int            sigsuspend_active;
     sigaltstack_t  sigaltstack;
+    uint64_t       thread_pending;
 } task_t;
 
 static inline int proc_has_cap(const task_t *t, int cap)

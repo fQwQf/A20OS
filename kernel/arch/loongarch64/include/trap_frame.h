@@ -65,7 +65,8 @@ extern void trap_handler_la64(trap_context_t *ctx);
 #define TASK_CTX_STATUS(ctx)       ((ctx)->prmd)
 
 static inline void arch_signal_prepare_trampoline(uint32_t tramp[2]) {
-    tramp[0] = 0x03822c0b;
+    /* li.w $a7, 139 (__NR_rt_sigreturn) ; syscall 0 */
+    tramp[0] = 0x02822c0b;
     tramp[1] = 0x002b0000;
 }
 
