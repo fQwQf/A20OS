@@ -36,6 +36,45 @@ static void linux_poll_sleep_until(uint64_t deadline, int has_deadline)
     proc_set_wake_time(t, 0);
 }
 
+static int linux_poll_apply_sigmask(task_t *t, void *sigmask,
+                                    signal_state_t **saved_ss,
+                                    uint64_t *saved_blocked)
+{
+    *saved_ss = NULL;
+    *saved_blocked = 0;
+    if (!sigmask)
+        return 0;
+    if (!t || !t->signals)
+        return -EINVAL;
+
+    uint64_t user_mask;
+    if (copy_from_user(&user_mask, sigmask, sizeof(user_mask)) < 0)
+        return -EFAULT;
+
+    *saved_ss = (signal_state_t *)t->signals;
+    *saved_blocked = t->sig_blocked;
+    t->sig_blocked = signal_mask_from_user(user_mask) &
+        ~(signal_mask_bit(SIGKILL) | signal_mask_bit(SIGSTOP));
+    return 0;
+}
+
+static void linux_poll_restore_sigmask(task_t *t, signal_state_t *saved_ss,
+                                       uint64_t saved_blocked)
+{
+    if (t && saved_ss)
+        t->sig_blocked = saved_blocked;
+}
+
+static void linux_poll_defer_sigmask_restore(task_t *t,
+                                             signal_state_t *saved_ss,
+                                             uint64_t saved_blocked)
+{
+    if (!t || !saved_ss)
+        return;
+    t->sigsuspend_old_blocked = saved_blocked;
+    t->sigsuspend_active = 1;
+}
+
 static int64_t read_into_user(vfile_t *vf, char *buf, size_t count)
 {
     if (!vf)
@@ -367,53 +406,46 @@ int64_t sys_sendfile(int out_fd, int in_fd, long *off, size_t count) {
 int64_t sys_ppoll(void *fds, int nfds, void *tmo, void *sigmask) {
     struct pollfd { int fd; short events; short revents; };
     struct pollfd *pfds = (struct pollfd *)fds;
-    (void)sigmask;
     if (nfds < 0) return -EINVAL;
+    task_t *t = proc_current();
+    signal_state_t *saved_ss = NULL;
+    uint64_t saved_blocked = 0;
+    int mask_ret = linux_poll_apply_sigmask(t, sigmask, &saved_ss, &saved_blocked);
+    if (mask_ret < 0)
+        return mask_ret;
+#define PPOLL_RETURN(v) do { linux_poll_restore_sigmask(t, saved_ss, saved_blocked); return (v); } while (0)
+#define PPOLL_SIGNAL_RETURN(v) do { linux_poll_defer_sigmask_restore(t, saved_ss, saved_blocked); return (v); } while (0)
     if (nfds == 0) {
-        task_t *t = proc_current();
         if (tmo) {
             uint64_t ts[2];
-            if (copy_from_user(ts, tmo, sizeof(ts)) < 0) return -EFAULT;
-            if (ts[1] >= 1000000000ULL) return -EINVAL;
+            if (copy_from_user(ts, tmo, sizeof(ts)) < 0) PPOLL_RETURN(-EFAULT);
+            if (ts[1] >= 1000000000ULL) PPOLL_RETURN(-EINVAL);
             uint64_t ticks = ts[0] * TICKS_PER_SEC + ts[1] * TICKS_PER_SEC / 1000000000ULL;
             uint64_t until = timer_get_ticks() + (ticks ? ticks : 1);
             while (timer_get_ticks() < until) {
-                if (signal_task_has_unblocked(t)) return -ERESTARTSYS;
+                if (signal_task_has_unblocked(t)) PPOLL_SIGNAL_RETURN(-ERESTARTSYS);
                 linux_poll_sleep_until(until, 1);
             }
-            if (signal_task_has_unblocked(t)) return -ERESTARTSYS;
-            return 0;
+            if (signal_task_has_unblocked(t)) PPOLL_SIGNAL_RETURN(-ERESTARTSYS);
+            PPOLL_RETURN(0);
         }
         for (;;) {
-            if (signal_task_has_unblocked(t)) return -ERESTARTSYS;
+            if (signal_task_has_unblocked(t)) PPOLL_SIGNAL_RETURN(-ERESTARTSYS);
             linux_poll_sleep_until(0, 0);
         }
     }
-    if (!pfds) return -EFAULT;
+    if (!pfds) PPOLL_RETURN(-EFAULT);
 
     uint64_t timeout_ticks = 0;
     int has_timeout = tmo != NULL;
     if (tmo) {
         uint64_t ts[2];
-        if (copy_from_user(ts, tmo, sizeof(ts)) < 0) return -EFAULT;
-        if (ts[1] >= 1000000000ULL) return -EINVAL;
+        if (copy_from_user(ts, tmo, sizeof(ts)) < 0) PPOLL_RETURN(-EFAULT);
+        if (ts[1] >= 1000000000ULL) PPOLL_RETURN(-EINVAL);
         timeout_ticks = ts[0] * TICKS_PER_SEC + ts[1] * TICKS_PER_SEC / 1000000000ULL;
     }
     uint64_t deadline = timer_get_ticks() + (timeout_ticks ? timeout_ticks : 1);
 
-    signal_state_t *saved_ss = NULL;
-    uint64_t saved_blocked = 0;
-    if (sigmask) {
-        task_t *t = proc_current();
-        if (!t || !t->signals) return -EINVAL;
-        uint64_t user_mask;
-        if (copy_from_user(&user_mask, sigmask, sizeof(user_mask)) < 0) return -EFAULT;
-        saved_ss = (signal_state_t *)t->signals;
-        saved_blocked = saved_ss->blocked;
-        saved_ss->blocked = signal_mask_from_user(user_mask) &
-            ~(signal_mask_bit(SIGKILL) | signal_mask_bit(SIGSTOP));
-    }
-#define PPOLL_RETURN(v) do { if (saved_ss) saved_ss->blocked = saved_blocked; return (v); } while (0)
     for (;;) {
         int ready = 0;
         for (int i = 0; i < nfds; i++) {
@@ -431,11 +463,11 @@ int64_t sys_ppoll(void *fds, int nfds, void *tmo, void *sigmask) {
         if (ready > 0) PPOLL_RETURN(ready);
         if (has_timeout && timeout_ticks == 0) PPOLL_RETURN(0);
         if (has_timeout && timer_get_ticks() >= deadline) PPOLL_RETURN(0);
-        task_t *t = proc_current();
-        if (signal_task_has_unblocked(t)) PPOLL_RETURN(-EINTR);
+        if (signal_task_has_unblocked(t)) PPOLL_SIGNAL_RETURN(-EINTR);
         linux_poll_sleep_until(deadline, has_timeout);
     }
 #undef PPOLL_RETURN
+#undef PPOLL_SIGNAL_RETURN
 }
 
 int64_t sys_poll(void *fds, int nfds, int timeout) {
@@ -627,12 +659,12 @@ int64_t sys_pselect6(int nfds, void *readfds, void *writefds,
                 return -EFAULT;
             if (!t->signals) return -EINVAL;
             saved_ss = (signal_state_t *)t->signals;
-            saved_blocked = saved_ss->blocked;
-            saved_ss->blocked = signal_mask_from_user(user_mask) &
+            saved_blocked = t->sig_blocked;
+            t->sig_blocked = signal_mask_from_user(user_mask) &
                 ~(signal_mask_bit(SIGKILL) | signal_mask_bit(SIGSTOP));
         }
     }
-#define PSELECT_RETURN(v) do { if (saved_ss) saved_ss->blocked = saved_blocked; return (v); } while (0)
+#define PSELECT_RETURN(v) do { if (saved_ss) t->sig_blocked = saved_blocked; return (v); } while (0)
     for (;;) {
         int ready_count = 0;
 

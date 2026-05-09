@@ -54,7 +54,7 @@ int net_task_has_unblocked_signal(task_t *t) {
     if (!t || !t->signals)
         return 0;
     signal_state_t *ss = (signal_state_t *)t->signals;
-    return (ss->pending & ~ss->blocked) != 0;
+    return ((ss->pending | t->thread_pending) & ~t->sig_blocked) != 0;
 }
 
 int net_socket_wait_expired(net_socket_t *s, uint64_t start, int for_write) {

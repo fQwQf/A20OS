@@ -74,7 +74,8 @@ int64_t syscall_dispatch(trap_context_t *ctx)
         int restart = 0;
         if (cur && cur->signals) {
             signal_state_t *ss = (signal_state_t *)cur->signals;
-            uint64_t deliverable = ss->pending & ~ss->blocked;
+            uint64_t deliverable = (ss->pending | cur->thread_pending) &
+                                   ~cur->sig_blocked;
             if (deliverable) {
                 restart = 1;
                 for (int sig = 1; sig < NSIG && restart; sig++) {
@@ -108,8 +109,7 @@ int64_t syscall_dispatch(trap_context_t *ctx)
         task_t *cur = proc_current();
         if (cur && cur->signals && cur->sigsuspend_active && !cur->sig_handling)
         {
-            signal_state_t *ss = (signal_state_t *)cur->signals;
-            ss->blocked = cur->sigsuspend_old_blocked;
+            cur->sig_blocked = cur->sigsuspend_old_blocked;
             cur->sigsuspend_active = 0;
         }
     }
