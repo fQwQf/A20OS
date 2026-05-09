@@ -244,8 +244,10 @@ int proc_exec(const char *path, char *const argv[], char *const envp[])
 
     elf_load_info_t info;
     memset(&info, 0, sizeof(info));
+    kinfo("[EXEC] path='%s' k_path='%s' loading ELF\n", path, k_path ? k_path : "(null)");
     int r = elf_load(fd, k_path, &info);
     if (r < 0) {
+        kinfo("[EXEC] elf_load failed: r=%d path='%s'\n", (int)r, path);
         if (r == -ENOEXEC) {
             vfs_lseek(fd, 0, SEEK_SET);
             char buf[128];
@@ -371,6 +373,8 @@ int proc_exec(const char *path, char *const argv[], char *const envp[])
         memset(ss->pending_info, 0, sizeof(ss->pending_info));
     }
     t->sig_handling = 0;
+    t->thread_pending = 0;
+    t->sigsuspend_active = 0;
 
     uint64_t saved_entry = info.entry;
     uint64_t saved_sp = sp;

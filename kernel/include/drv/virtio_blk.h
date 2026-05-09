@@ -74,7 +74,7 @@
 #define VIRTIO_F_VERSION_1_BIT   1
 
 /* Queue size (must be power of 2) */
-#define VIRTIO_QUEUE_SIZE        8
+#define VIRTIO_QUEUE_SIZE        32
 
 /* Sector size */
 #define VIRTIO_BLK_SECTOR_SIZE   512
