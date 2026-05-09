@@ -392,7 +392,10 @@ int64_t sys_clone3(void *cl_args, size_t size) {
     memset(&args, 0, sizeof(args));
     size_t cpysz = size < sizeof(args) ? size : sizeof(args);
     if (copy_from_user(&args, cl_args, cpysz) < 0) return -EFAULT;
-    return proc_clone(args.flags, args.stack, (int *)args.parent_tid, args.tls, (int *)args.child_tid, (int)args.exit_signal);
+    uint64_t stack = args.stack;
+    if (stack && args.stack_size)
+        stack += args.stack_size;
+    return proc_clone(args.flags, stack, (int *)args.parent_tid, args.tls, (int *)args.child_tid, (int)args.exit_signal);
 }
 
 int64_t sys_openat2(int dirfd, const char *pathname, const void *how, size_t size) {
