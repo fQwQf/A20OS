@@ -399,17 +399,17 @@ static int net_sendto_raw_ipv6(net_socket_t *s, void *buf, size_t len,
 
 int net_sendto(int gfd, const void *buf, size_t len, int flags,
                const void *addr, size_t addrlen) {
-    (void)flags;
     net_socket_t *s = (gfd >= 0) ? net_socket_from_file(gfd) : NULL;
     if (!s) return -ENOTSOCK;
     if (len > NET_MAX_PAYLOAD) return -EMSGSIZE;
+    int dontwait = s->nonblock || ((flags & MSG_DONTWAIT) != 0);
     if (s->domain == AF_ALG)
         return net_alg_socket_send(s, buf, len);
     if (s->domain == AF_INET6 && s->type == SOCK_RAW)
         return net_sendto_raw_ipv6(s, (void *)buf, len, addr, addrlen);
     if ((s->domain == AF_INET || s->domain == AF_INET6) &&
         (s->udp || s->raw || s->tcp))
-        return net_inet_sendto(s, buf, len, addr, addrlen);
+        return net_inet_sendto(s, buf, len, flags, addr, addrlen);
     if (s->domain == AF_UNIX)
         return net_unix_socket_sendto(s, buf, len, addr, addrlen);
 
@@ -432,6 +432,11 @@ int net_sendto(int gfd, const void *buf, size_t len, int flags,
     if (!dst) {
         spin_unlock_irqrestore(&g_net_lock, irq);
         return dst_addr ? -ECONNREFUSED : -EDESTADDRREQ;
+    }
+    if (dst->rx_count >= NET_MAX_QUEUE && !dontwait) {
+        spin_unlock_irqrestore(&g_net_lock, irq);
+        return net_enqueue_msg_blocking(dst, buf, len, s->local, s->local_len,
+                                        0, s->send_timeout_ticks);
     }
     int r = net_enqueue_msg_locked(dst, buf, len, s->local, s->local_len);
     spin_unlock_irqrestore(&g_net_lock, irq);
