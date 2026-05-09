@@ -6,11 +6,11 @@
 #include "drv/virtio_blk.h"
 
 #define BCACHE_BLOCK_SIZE   512
-#define BCACHE_MAX_BLOCKS   512
-#define BCACHE_HASH_BUCKETS 1024
+#define BCACHE_MAX_BLOCKS   4096
+#define BCACHE_HASH_BUCKETS 4096
 #define PCACHE_PAGE_SIZE    4096
-#define PCACHE_MAX_PAGES    128
-#define PCACHE_HASH_BUCKETS 256
+#define PCACHE_MAX_PAGES    512
+#define PCACHE_HASH_BUCKETS 512
 
 typedef struct bcache_entry {
     uint64_t    lba;

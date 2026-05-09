@@ -58,7 +58,7 @@ int64_t sys_tgkill(int tgid, int tid, int sig) {
     int perm = signal_send_permission(self, target);
     if (perm < 0) return perm;
     if (sig == 0) return 0;
-    return proc_kill(tid, sig);
+    return signal_send_thread(tid, sig);
 }
 
 int64_t sys_tkill(int tid, int sig) {
@@ -69,7 +69,7 @@ int64_t sys_tkill(int tid, int sig) {
     int perm = signal_send_permission(self, target);
     if (perm < 0) return perm;
     if (sig == 0) return 0;
-    return proc_kill(tid, sig);
+    return signal_send_thread(tid, sig);
 }
 
 int64_t sys_rt_sigqueueinfo(int tgid, int sig, void *uinfo) {
@@ -231,7 +231,7 @@ int64_t sys_rt_sigpending(void *set, size_t sigsetsize) {
     task_t *t = proc_current();
     if (!t || !t->signals) return -EINVAL;
     signal_state_t *ss = (signal_state_t *)t->signals;
-    uint64_t pending = ss->pending & ~ss->blocked;
+    uint64_t pending = (ss->pending | t->thread_pending) & ~ss->blocked;
     uint64_t user_pending = signal_mask_to_user(pending);
     if (copy_to_user(set, &user_pending, sizeof(user_pending)) < 0) return -EFAULT;
     return 0;

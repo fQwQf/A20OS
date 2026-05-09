@@ -102,6 +102,7 @@ void proc_task_init_common(task_t *t, task_t *parent)
     t->sigsuspend_active = 0;
     t->sig_saved_ctx = (trap_context_t){0};
     t->sig_old_blocked = 0;
+    t->thread_pending = 0;
     t->limits.stack = parent ? parent->limits.stack : USER_STACK_MAX_SIZE;
     t->limits.nofile = parent ? parent->limits.nofile : MAX_FILES;
     t->mm        = NULL;

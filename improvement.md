@@ -48,7 +48,7 @@
 
 cyclictest
 iozone
-licbench 
+libcbench 
 libctest
 跑不了
 

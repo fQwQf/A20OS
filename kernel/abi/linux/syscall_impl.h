@@ -272,6 +272,9 @@ int64_t sys_personality(unsigned int persona);
 int64_t sys_vhangup(void);
 int64_t sys_unshare(int flags);
 int64_t sys_pivot_root(const char *new_root, const char *put_old);
+int64_t sys_get_mempolicy(int *policy, unsigned long *nmask,
+                          unsigned long maxnode, unsigned long addr,
+                          unsigned long flags);
 int64_t sys_sched_setattr(int pid, const void *attr, unsigned flags);
 int64_t sys_sched_getattr(int pid, void *attr, unsigned size, unsigned flags);
 int64_t sys_clone3(void *cl_args, size_t size);

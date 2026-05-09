@@ -147,6 +147,35 @@ int signal_send_info(int pid, int signum, const void *info, size_t info_size) {
     return 0;
 }
 
+int signal_send_thread(int tid, int signum) {
+    if (signum <= 0 || signum >= NSIG) return -EINVAL;
+    task_t *t = proc_find(tid);
+    if (!t) return -ESRCH;
+    if (!t->signals) return -EINVAL;
+
+    signal_state_t *ss = (signal_state_t *)t->signals;
+    sigaction_t *sa = &ss->actions[signum];
+
+    if (sa->sa_handler == SIG_IGN)
+        return 0;
+
+    int is_user = (t->pgdir != NULL);
+
+    if (!is_user &&
+        !(ss->blocked & signal_mask_bit(signum)) &&
+        sa->sa_handler == SIG_DFL &&
+        signal_default_terminate(signum)) {
+        proc_force_exit(t, -signal_wait_status(signum));
+        return 0;
+    }
+
+    t->thread_pending |= signal_mask_bit(signum);
+    if (t->state == PROC_BLOCKED) {
+        proc_make_ready(t);
+    }
+    return 0;
+}
+
 // 向指定进程发送信号
 int signal_send(int pid, int signum) {
     return signal_send_info(pid, signum, NULL, 0);
@@ -157,7 +186,7 @@ int signal_task_has_unblocked(void *task) {
     if (!t || !t->signals)
         return 0;
     signal_state_t *ss = (signal_state_t *)t->signals;
-    uint64_t deliverable = ss->pending & ~ss->blocked;
+    uint64_t deliverable = (ss->pending | t->thread_pending) & ~ss->blocked;
     if (!deliverable)
         return 0;
 
@@ -180,7 +209,7 @@ void signal_deliver(void) {
     if (!t || !t->signals) return;
 
     signal_state_t *ss = (signal_state_t *)t->signals;
-    uint64_t deliverable = ss->pending & ~ss->blocked;
+    uint64_t deliverable = (ss->pending | t->thread_pending) & ~ss->blocked;
     if (!deliverable) return;
 
     int is_user = t->pgdir != NULL;
@@ -192,12 +221,14 @@ void signal_deliver(void) {
 
         if (sa->sa_handler == SIG_IGN) {
             ss->pending &= ~signal_mask_bit(sig);
+            t->thread_pending &= ~signal_mask_bit(sig);
             ss->pending_has_info[sig] = 0;
             continue;
         }
 
         if (sa->sa_handler == SIG_DFL) {
             ss->pending &= ~signal_mask_bit(sig);
+            t->thread_pending &= ~signal_mask_bit(sig);
             ss->pending_has_info[sig] = 0;
             if (signal_default_ignore(sig))
                 continue;
@@ -214,6 +245,7 @@ void signal_deliver(void) {
         }
 
         ss->pending &= ~signal_mask_bit(sig);
+        t->thread_pending &= ~signal_mask_bit(sig);
         ss->pending_has_info[sig] = 0;
         void (*handler)(int) = (void (*)(int))(uintptr_t)sa->sa_handler;
         handler(sig);
@@ -255,7 +287,7 @@ void signal_deliver_user(trap_context_t *ctx) {
     if (!t || !t->signals || !t->pgdir) return;
 
     signal_state_t *ss = (signal_state_t *)t->signals;
-    uint64_t deliverable = ss->pending & ~ss->blocked;
+    uint64_t deliverable = (ss->pending | t->thread_pending) & ~ss->blocked;
     if (!deliverable) return;
 
     for (int sig = 1; sig < NSIG; sig++) {
@@ -265,6 +297,7 @@ void signal_deliver_user(trap_context_t *ctx) {
 
         if (sa->sa_handler == SIG_IGN) {
             ss->pending &= ~signal_mask_bit(sig);
+            t->thread_pending &= ~signal_mask_bit(sig);
             ss->pending_has_info[sig] = 0;
             if (t->sigsuspend_active) {
                 ss->blocked = t->sigsuspend_old_blocked;
@@ -275,6 +308,7 @@ void signal_deliver_user(trap_context_t *ctx) {
 
         if (sa->sa_handler == SIG_DFL) {
             ss->pending &= ~signal_mask_bit(sig);
+            t->thread_pending &= ~signal_mask_bit(sig);
             ss->pending_has_info[sig] = 0;
             if (signal_default_ignore(sig)) {
                 if (t->sigsuspend_active) {
@@ -296,6 +330,7 @@ void signal_deliver_user(trap_context_t *ctx) {
         }
 
         ss->pending &= ~signal_mask_bit(sig);
+        t->thread_pending &= ~signal_mask_bit(sig);
         ss->pending_has_info[sig] = 0;
 
         if (sa->sa_flags & SA_RESETHAND)
