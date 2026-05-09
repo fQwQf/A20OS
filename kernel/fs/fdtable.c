@@ -79,6 +79,20 @@ static int fdtable_find_free(files_struct_t *files, int minfd)
     return -1;
 }
 
+static int fdtable_fd_limit(task_t *task)
+{
+    uint64_t limit = task ? task->limits.nofile : MAX_FILES;
+    if (limit > MAX_FILES)
+        limit = MAX_FILES;
+    return (int)limit;
+}
+
+static int fdtable_find_free_below(files_struct_t *files, int minfd, int limit)
+{
+    int fd = fdtable_find_free(files, minfd);
+    return (fd >= 0 && fd < limit) ? fd : -1;
+}
+
 static void fdtable_note_alloc(files_struct_t *files, int fd)
 {
     if (!files)
@@ -174,6 +188,39 @@ void fdtable_share(task_t *dst, const task_t *src)
         refcount_inc(&((files_struct_t *)dst->files)->refcount);
 }
 
+int fdtable_unshare(task_t *task)
+{
+    if (!task)
+        return -ESRCH;
+    files_struct_t *old = fdtable_files(task);
+    if (!old)
+        return -ENOMEM;
+    if (refcount_read(&old->refcount) == 1)
+        return 0;
+
+    files_struct_t *files = fdtable_alloc_files();
+    for (int i = 0; i < MAX_FILES; i++) {
+        int gfd = old->fd[i];
+        files->fd[i] = gfd;
+        files->cloexec[i] = old->cloexec[i];
+        if (gfd >= 0) {
+            int r = fdtable_ref_gfd(gfd);
+            if (r < 0) {
+                for (int j = 0; j < i; j++) {
+                    if (files->fd[j] >= 0)
+                        vfs_close(files->fd[j]);
+                }
+                kfree(files);
+                return r;
+            }
+        }
+    }
+    fdtable_recompute_next(files);
+    task->files = files;
+    refcount_dec_and_test(&old->refcount);
+    return 0;
+}
+
 void fdtable_close_all(task_t *task)
 {
     if (!task || !task->files)
@@ -233,9 +280,10 @@ int fdtable_install(task_t *task, int gfd, int flags)
     files_struct_t *files = fdtable_files(task);
     if (!files)
         return -ESRCH;
-    int fd = fdtable_find_free(files, files->next_fd);
+    int limit = fdtable_fd_limit(task);
+    int fd = fdtable_find_free_below(files, files->next_fd, limit);
     if (fd < 0)
-        fd = fdtable_find_free(files, 0);
+        fd = fdtable_find_free_below(files, 0, limit);
     if (fd >= 0) {
         files->fd[fd] = gfd;
         files->cloexec[fd] = (flags & O_CLOEXEC) ? 1 : 0;
@@ -281,7 +329,8 @@ int fdtable_dup(task_t *task, int oldfd, int minfd, int flags)
         return -EBADF;
     if (minfd < 0)
         minfd = 0;
-    if (minfd >= MAX_FILES)
+    int limit = fdtable_fd_limit(task);
+    if (minfd >= limit)
         return -EMFILE;
 
     int gfd = files->fd[oldfd];
@@ -290,7 +339,7 @@ int fdtable_dup(task_t *task, int oldfd, int minfd, int flags)
     if (fdtable_ref_gfd(gfd) < 0)
         return -EBADF;
 
-    int fd = fdtable_find_free(files, minfd);
+    int fd = fdtable_find_free_below(files, minfd, limit);
     if (fd >= 0) {
         files->fd[fd] = gfd;
         files->cloexec[fd] = (flags & O_CLOEXEC) ? 1 : 0;
@@ -311,6 +360,8 @@ int fdtable_dup_to(task_t *task, int oldfd, int newfd, int flags)
     if (flags & ~O_CLOEXEC)
         return -EINVAL;
     if (oldfd < 0 || oldfd >= MAX_FILES || newfd < 0 || newfd >= MAX_FILES)
+        return -EBADF;
+    if (newfd >= fdtable_fd_limit(task))
         return -EBADF;
     if (oldfd == newfd)
         return -EINVAL;

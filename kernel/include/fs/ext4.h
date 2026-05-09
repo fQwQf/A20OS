@@ -2,6 +2,7 @@
 #define _EXT4_H
 
 #include "core/types.h"
+#include "core/sync.h"
 #include "fs/vfs.h"
 #include "fs/block_cache.h"
 
@@ -251,6 +252,7 @@ typedef struct ext4_sb_info {
     uint64_t block_group_desc_table_byte;
     ext4_group_desc_t *group_descs;
     bcache_t *bc;
+    mutex_t alloc_lock;
 } ext4_sb_info_t;
 
 typedef struct ext4_vnode_priv {
