@@ -630,7 +630,7 @@ int net_inet_connect(net_socket_t *s, const void *addr, size_t addrlen,
 }
 
 static int net_inet_send_udp(net_socket_t *s, const void *buf, size_t len,
-                             const void *addr, size_t addrlen)
+                             int flags, const void *addr, size_t addrlen)
 {
     if (!s->bound) {
         uint16_t port = net_alloc_ephemeral_port_locked();
@@ -663,6 +663,13 @@ static int net_inet_send_udp(net_socket_t *s, const void *buf, size_t len,
     else if (dst_addr)
         local_dst = net_find_udp_dst_locked(s, dst_addr, dst_len);
     if (local_dst) {
+        int dontwait = s->nonblock || ((flags & MSG_DONTWAIT) != 0);
+        if (local_dst->rx_count >= NET_MAX_QUEUE && !dontwait) {
+            spin_unlock_irqrestore(&g_net_lock, irq);
+            return net_enqueue_msg_blocking(local_dst, buf, len,
+                                            s->local, s->local_len,
+                                            0, s->send_timeout_ticks);
+        }
         int rr = net_enqueue_msg_locked(local_dst, buf, len, s->local, s->local_len);
         spin_unlock_irqrestore(&g_net_lock, irq);
         return rr;
@@ -769,12 +776,12 @@ static int net_inet_send_tcp(net_socket_t *s, const void *buf, size_t len)
 }
 
 int net_inet_sendto(net_socket_t *s, const void *buf, size_t len,
-                    const void *addr, size_t addrlen)
+                    int flags, const void *addr, size_t addrlen)
 {
     if (!s || (s->domain != AF_INET && s->domain != AF_INET6))
         return -EAFNOSUPPORT;
     if (s->udp)
-        return net_inet_send_udp(s, buf, len, addr, addrlen);
+        return net_inet_send_udp(s, buf, len, flags, addr, addrlen);
     if (s->raw)
         return net_inet_send_raw(s, buf, len, addr, addrlen);
     if (s->tcp)

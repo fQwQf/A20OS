@@ -65,7 +65,7 @@ static int net_vfile_write(vfile_t *vf, const char *buf, size_t count) {
         return net_alg_socket_send(s, buf, count);
     if ((s->domain == AF_INET || s->domain == AF_INET6) &&
         (s->udp || s->raw || s->tcp))
-        return net_inet_sendto(s, buf, count, NULL, 0);
+        return net_inet_sendto(s, buf, count, 0, NULL, 0);
     uint64_t irq = spin_lock_irqsave(&g_net_lock);
     if (!s->bound && (s->domain == AF_INET || s->domain == AF_INET6))
         net_sockaddr_loopback(s, net_alloc_ephemeral_port_locked());
@@ -75,6 +75,11 @@ static int net_vfile_write(vfile_t *vf, const char *buf, size_t count) {
     if (!dst) {
         spin_unlock_irqrestore(&g_net_lock, irq);
         return s->connected ? -ECONNREFUSED : -EDESTADDRREQ;
+    }
+    if (dst->rx_count >= NET_MAX_QUEUE && !s->nonblock) {
+        spin_unlock_irqrestore(&g_net_lock, irq);
+        return net_enqueue_msg_blocking(dst, buf, count, s->local, s->local_len,
+                                        0, s->send_timeout_ticks);
     }
     int r = net_enqueue_msg_locked(dst, buf, count, s->local, s->local_len);
     spin_unlock_irqrestore(&g_net_lock, irq);
