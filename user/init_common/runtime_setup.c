@@ -15,7 +15,7 @@
 #define MUSL_LOADER_NAME "ld-musl-aarch64.so.1"
 #elif defined(__loongarch64)
 #define GLIBC_LOADER_NAME "ld-linux-loongarch-lp64d.so.1"
-#define MUSL_LOADER_NAME "ld-musl-loongarch64.so.1"
+#define MUSL_LOADER_NAME "ld-musl-loongarch-lp64d.so.1"
 #else
 #error Unsupported architecture
 #endif
@@ -112,17 +112,25 @@ static int install_runtime_loader(const char *src_dir, const char *src_name,
 
     snprintf(dst, sizeof(dst), "/lib/%s", dst_name);
     if (stat(dst, &st) == 0 && S_ISREG(st.st_mode))
-        return 0;
+        goto try_lib64;
     unlink(dst);
 
-    if (copy_file(src, dst, mode) == 0) {
-        printf("[LIBLINK] copied %s\n", dst);
-        return 0;
-    } else {
+    if (copy_file(src, dst, mode) != 0) {
         printf("[LIBLINK] copy %s -> %s failed errno=%d\n",
                src, dst, errno);
         return -1;
     }
+    printf("[LIBLINK] copied %s\n", dst);
+
+try_lib64:
+    snprintf(dst, sizeof(dst), "/lib64/%s", dst_name);
+    if (stat(dst, &st) == 0 && S_ISREG(st.st_mode))
+        return 0;
+    unlink(dst);
+    if (copy_file(src, dst, mode) == 0) {
+        printf("[LIBLINK] copied %s\n", dst);
+    }
+    return 0;
 }
 
 static int ensure_runtime_dirs(void)
@@ -130,6 +138,10 @@ static int ensure_runtime_dirs(void)
     if (ensure_dir("/lib") != 0) {
         printf("[LIBLINK] mkdir(/lib) failed errno=%d\n", errno);
         return -1;
+    }
+    if (ensure_dir("/lib64") != 0) {
+        printf("[LIBLINK] mkdir(/lib64) failed errno=%d\n", errno);
+        /* non-fatal: some systems don't need /lib64 */
     }
     return 0;
 }

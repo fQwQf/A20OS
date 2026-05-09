@@ -21,6 +21,45 @@ static int      ext4_inode_remove(ext4_sb_info_t *sb, uint32_t dir_ino, ext4_ino
 static int      ext4_vn_writepage(vnode_t *vn, uint64_t index,
                                   const void *data, size_t len);
 
+/* ---- inode & extent cache helpers ---- */
+
+static ext4_inode_t *ext4_fctx_inode(ext4_fctx_t *fc) {
+    if (!fc->inode_valid) {
+        if (ext4_read_inode(fc->sb, fc->inode_num, &fc->inode) < 0)
+            return NULL;
+        fc->inode_valid = 1;
+    }
+    return &fc->inode;
+}
+
+static void ext4_fctx_inode_dirty(ext4_fctx_t *fc) {
+    fc->inode_valid = 0;
+    fc->ext_valid = 0;
+}
+
+static uint64_t ext4_block_map_cached(ext4_fctx_t *fc, ext4_inode_t *inode,
+                                       uint32_t lblk) {
+    if (fc->ext_valid && lblk >= fc->ext_start &&
+        lblk < fc->ext_start + fc->ext_len)
+        return fc->ext_phys + (lblk - fc->ext_start);
+
+    uint64_t phys = ext4_block_map(fc->sb, inode, lblk);
+
+    if (phys && fc->ext_valid &&
+        lblk == fc->ext_start + fc->ext_len &&
+        phys == fc->ext_phys + fc->ext_len) {
+        fc->ext_len++;
+    } else if (phys) {
+        fc->ext_start = lblk;
+        fc->ext_len   = 1;
+        fc->ext_phys  = phys;
+        fc->ext_valid = 1;
+    } else {
+        fc->ext_valid = 0;
+    }
+    return phys;
+}
+
 /* ================================================================
  * Vnode lifecycle
  *
@@ -1114,9 +1153,9 @@ static int ext4_fread(vfile_t *vf, char *buf, size_t count) {
     if (fc->is_dir) return -EISDIR;
     if (count == 0) return 0;
 
-    ext4_inode_t inode;
-    if (ext4_read_inode(fc->sb, fc->inode_num, &inode) < 0) return -EIO;
-    ext4_fctx_set_size(vf, fc, inode.i_size_lo);
+    ext4_inode_t *inode = ext4_fctx_inode(fc);
+    if (!inode) return -EIO;
+    ext4_fctx_set_size(vf, fc, inode->i_size_lo);
     if (fc->file_off >= fc->file_size) return 0;
 
     size_t remaining = fc->file_size - fc->file_off;
@@ -1132,9 +1171,8 @@ static int ext4_fread(vfile_t *vf, char *buf, size_t count) {
         size_t chunk = bs - loff;
         if (chunk > count - done) chunk = count - done;
 
-        uint64_t phys = ext4_block_map(fc->sb, &inode, lblk);
+        uint64_t phys = ext4_block_map_cached(fc, inode, lblk);
         if (!phys) {
-            /* Sparse files read back as zero-filled holes, not EOF. */
             memset(buf + done, 0, chunk);
         } else {
             int r = bcache_read_bytes(fc->sb->bc, phys * bs + loff, buf + done, chunk);
@@ -1153,9 +1191,9 @@ static int ext4_fwrite(vfile_t *vf, const char *buf, size_t count) {
     if (fc->is_dir) return -EISDIR;
     if (count == 0) return 0;
 
-    ext4_inode_t inode;
-    if (ext4_read_inode(fc->sb, fc->inode_num, &inode) < 0) return -EIO;
-    ext4_fctx_set_size(vf, fc, inode.i_size_lo);
+    ext4_inode_t *inode = ext4_fctx_inode(fc);
+    if (!inode) return -EIO;
+    ext4_fctx_set_size(vf, fc, inode->i_size_lo);
 
     uint32_t bs = fc->sb->block_size;
     size_t done = 0;
@@ -1167,14 +1205,14 @@ static int ext4_fwrite(vfile_t *vf, const char *buf, size_t count) {
         size_t chunk = bs - loff;
         if (chunk > count - done) chunk = count - done;
 
-        uint64_t phys = ext4_block_map(fc->sb, &inode, lblk);
+        uint64_t phys = ext4_block_map_cached(fc, inode, lblk);
         if (!phys) {
-            /* Need to allocate a new block */
             uint64_t nb = ext4_alloc_block(fc->sb);
             if (!nb) break;
-            int gr = ext4_block_grow(fc->sb, &inode, lblk, nb);
+            int gr = ext4_block_grow(fc->sb, inode, lblk, nb);
             if (gr < 0) { ext4_free_block(fc->sb, nb); break; }
             phys = nb;
+            fc->ext_valid = 0;
         }
 
         int r = bcache_write_bytes(fc->sb->bc, phys * bs + loff, buf + done, chunk);
@@ -1186,8 +1224,8 @@ static int ext4_fwrite(vfile_t *vf, const char *buf, size_t count) {
         fc->file_off += done;
         if (fc->file_off > fc->file_size) {
             fc->file_size = fc->file_off;
-            inode.i_size_lo = (uint32_t)fc->file_size;
-            ext4_write_inode(fc->sb, fc->inode_num, &inode);
+            inode->i_size_lo = (uint32_t)fc->file_size;
+            ext4_write_inode(fc->sb, fc->inode_num, inode);
             if (vf->vnode && vf->vnode->fs_data) {
                 ext4_vnode_priv_t *fp = (ext4_vnode_priv_t *)vf->vnode->fs_data;
                 fp->file_size = fc->file_size;
@@ -1238,12 +1276,15 @@ static int ext4_vn_writepage(vnode_t *vn, uint64_t index,
 
 static long ext4_flseek(vfile_t *vf, long offset, int whence) {
     ext4_fctx_t *fc = (ext4_fctx_t *)vf->priv;
-    ext4_fctx_refresh_size(vf, fc);
     long new_off;
     switch (whence) {
         case SEEK_SET: new_off = offset; break;
         case SEEK_CUR: new_off = (long)vf->offset + offset; break;
-        case SEEK_END: new_off = (long)fc->file_size + offset; break;
+        case SEEK_END:
+            ext4_fctx_inode_dirty(fc);
+            ext4_fctx_inode(fc);
+            new_off = (long)fc->file_size + offset;
+            break;
         default: return -EINVAL;
     }
     if (new_off < 0) return -EINVAL;
@@ -1482,11 +1523,11 @@ vfile_t *ext4_open_vnode(vnode_t *vn, int flags) {
     fc->sb        = fp->sb;
     fc->inode_num = fp->inode_num;
     uint64_t current_size = fp->file_size;
-    ext4_inode_t dinode;
-    if (ext4_read_inode(fp->sb, fp->inode_num, &dinode) == 0) {
-        current_size = dinode.i_size_lo;
+    if (ext4_read_inode(fp->sb, fp->inode_num, &fc->inode) == 0) {
+        current_size = fc->inode.i_size_lo;
         fp->file_size = current_size;
         vn->size = current_size;
+        fc->inode_valid = 1;
     }
     fc->file_size = current_size;
     fc->is_dir    = (fp->type == VFS_FT_DIR);
