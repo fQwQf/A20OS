@@ -76,6 +76,7 @@ void signal_copy(const signal_state_t *src, signal_state_t *dst);
 /* Queue a signal to a process */
 int  signal_send(int pid, int signum);
 int  signal_send_info(int pid, int signum, const void *info, size_t info_size);
+int  signal_send_thread(int tid, int signum);
 int  signal_task_has_unblocked(void *task);
 
 void signal_deliver(void);

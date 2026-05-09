@@ -461,8 +461,22 @@ static void pcache_release(pcache_entry_t *e) {
 }
 
 // 读取字节数据（可能跨多个块）
+#define READAHEAD_PAGES 4
+
 int bcache_read_bytes(bcache_t *bc, uint64_t byte_off, void *buf, size_t len) {
     char *dst = (char *)buf;
+    uint64_t first_page = byte_off / PCACHE_PAGE_SIZE;
+    uint64_t last_page  = (byte_off + len - 1) / PCACHE_PAGE_SIZE;
+    int sequential = (last_page - first_page + 1) >= 2;
+
+    if (sequential) {
+        uint64_t ra_end = last_page + READAHEAD_PAGES;
+        for (uint64_t pn = last_page + 1; pn <= ra_end; pn++) {
+            pcache_entry_t *e = pcache_get(bc, pn, 0);
+            if (e) pcache_release(e);
+        }
+    }
+
     while (len > 0) {
         uint64_t page_no = byte_off / PCACHE_PAGE_SIZE;
         size_t   off    = byte_off % PCACHE_PAGE_SIZE;

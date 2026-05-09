@@ -2,7 +2,6 @@
 #include "proc/proc_internal.h"
 #include "proc/signal.h"
 #include "core/consts.h"
-#include "core/klog.h"
 #include "core/string.h"
 #include "core/trap.h"
 #include "fs/fdtable.h"

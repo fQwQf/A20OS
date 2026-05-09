@@ -27,6 +27,5 @@ int64_t sys_shmdt(const void *shmaddr)
 
 int64_t sys_shmctl(int shmid, int cmd, void *buf)
 {
-    (void)buf;
-    return sysv_shm_control(shmid, cmd);
+    return sysv_shm_control(shmid, cmd, buf);
 }

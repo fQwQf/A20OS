@@ -35,6 +35,8 @@
 #include "core/lock.h"
 #include "drv/virtio_blk.h"
 #include "fs/block_cache.h"
+#include "drv/virtio_blk.h"
+#include "fs/block_cache.h"
 #include "net/socket.h"
 
 
@@ -1170,8 +1172,22 @@ int vfs_fcntl(int fd, int cmd, long arg) {
  * VFS Mount
  * ============================================================ */
 
+static int parse_block_dev(const char *dev, int *out_idx, int *out_part) {
+    if (strncmp(dev, "/dev/vd", 7) != 0) return -1;
+    const char *p = dev + 7;
+    if (*p < 'a' || *p > 'z') return -1;
+    *out_idx = *p - 'a';
+    p++;
+    *out_part = 0;
+    if (*p >= '1' && *p <= '9') {
+        *out_part = *p - '0';
+        p++;
+    }
+    if (*p != '\0') return -1;
+    return 0;
+}
+
 int vfs_mount(const char *dev, const char *path, const char *fstype, int flags) {
-    (void)dev;
     if (!path || !fstype) return -EINVAL;
     if (strcmp(fstype, "cgroup") == 0 || strcmp(fstype, "cgroup2") == 0)
         return -ENODEV;
@@ -1205,7 +1221,30 @@ int vfs_mount(const char *dev, const char *path, const char *fstype, int flags) 
         vfs_dcache_invalidate_all();
         return 0;
     }
-    printf("[VFS] vfs_mount: use vfs_mount_bc() for block filesystems\n");
+    /* Try block device mount: /dev/vdX[N] */
+    {
+        int dev_idx = 0, part_num = 0;
+        if (parse_block_dev(dev, &dev_idx, &part_num) == 0) {
+            block_dev_t *bdev = virtio_blk_get_dev(dev_idx);
+            if (!bdev) return -ENODEV;
+            bcache_t *bc = bcache_create(bdev);
+            if (!bc) return -ENOMEM;
+            int r;
+            if (fstype && fstype[0]) {
+                r = vfs_mount_bc(path, fstype, bc);
+            } else {
+                r = vfs_mount_bc(path, "ext4", bc);
+                if (r < 0) {
+                    bcache_destroy(bc);
+                    bc = bcache_create(bdev);
+                    if (!bc) return -ENOMEM;
+                    r = vfs_mount_bc(path, "vfat", bc);
+                }
+            }
+            if (r < 0) bcache_destroy(bc);
+            return r;
+        }
+    }
     return -EINVAL;
 }
 
@@ -1228,6 +1267,7 @@ int vfs_mount_bc(const char *path, const char *fstype, bcache_t *bc) {
         mnt->fs_data = bc;
 
         root->mnt = mnt;
+        vnode_get(root);  /* mount holds a persistent reference */
 
         printf("[VFS] Mounted FAT32 at %s\n", path);
         vfs_dcache_invalidate_all();
@@ -1252,6 +1292,7 @@ int vfs_mount_bc(const char *path, const char *fstype, bcache_t *bc) {
         mnt->fs_data = bc;
 
         root->mnt = mnt;
+        vnode_get(root);  /* mount holds a persistent reference */
 
         printf("[VFS] Mounted ext4 at %s\n", path);
         vfs_dcache_invalidate_all();
@@ -1267,12 +1308,14 @@ int vfs_umount(const char *path) {
         mount_t *mnt = vfs_mount_at(i);
         if (mnt && strcmp(mnt->path, path) == 0) {
             vfs_dcache_invalidate_all();
+            vnode_t *root = mnt->root;
             if (mnt->type == FS_TYPE_FAT32) {
-                fat32_unmount(mnt->root);
+                fat32_unmount(root);
             } else if (mnt->type == FS_TYPE_EXT4) {
-                ext4_unmount(mnt->root);
+                ext4_unmount(root);
             }
             vfs_mount_remove(mnt);
+            vnode_put(root);
             return 0;
         }
     }
@@ -1335,6 +1378,17 @@ void vfs_init(void) {
     mnt->type = FS_TYPE_DEVFS;
     mnt->root = devfs_mount();
     if (mnt->root) mnt->root->mnt = mnt;
+
+    {
+        mount_t *shm_mnt = vfs_mount_alloc();
+        strcpy(shm_mnt->path, "/dev/shm");
+        shm_mnt->type = FS_TYPE_RAMFS;
+        shm_mnt->root = ramfs_mount_empty(shm_mnt);
+        if (shm_mnt->root) {
+            shm_mnt->root->mnt = shm_mnt;
+            printf("[VFS] Mounted ramfs at /dev/shm\n");
+        }
+    }
 
     /* Install std streams at global fds 0,1,2 */
     file_install_at(STDIN_FILENO, devfs_create_stdio(STDIN_FILENO));

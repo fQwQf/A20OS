@@ -1,5 +1,6 @@
 #define LINUX_SYSCALL_DECLARE_PROTOTYPES
 #include "syscall_impl.h"
+#include "fs/vfs/path.h"
 
 int64_t sys_mkdirat(int dirfd, const char *path, int mode) {
     if (!path) return -EFAULT;
@@ -468,6 +469,7 @@ int64_t sys_mount(const char *src, const char *target,
         strncpy(ktarget, abs, sizeof(ktarget) - 1);
         ktarget[sizeof(ktarget) - 1] = '\0';
     }
+    vfs_path_normalize_absolute(ktarget);
     return vfs_mount(ksrc, ktarget, kfstype, flags);
 }
 

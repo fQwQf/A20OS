@@ -363,6 +363,14 @@ int64_t sys_pivot_root(const char *new_root, const char *put_old) {
     return -EPERM;
 }
 
+int64_t sys_get_mempolicy(int *policy, unsigned long *nmask,
+                          unsigned long maxnode, unsigned long addr,
+                          unsigned long flags) {
+    (void)policy; (void)nmask; (void)maxnode;
+    (void)addr; (void)flags;
+    return -ENOSYS;
+}
+
 struct clone3_args {
     uint64_t flags;
     uint64_t pidfd;
