@@ -118,7 +118,7 @@ int signal_send_info(int pid, int signum, const void *info, size_t info_size) {
     int is_user = (t->pgdir != NULL);
 
     if (!is_user &&
-        !(ss->blocked & signal_mask_bit(signum)) &&
+        !(t->sig_blocked & signal_mask_bit(signum)) &&
         sa->sa_handler == SIG_DFL &&
         signal_default_terminate(signum)) {
         proc_force_exit(t, -signal_wait_status(signum));
@@ -162,7 +162,7 @@ int signal_send_thread(int tid, int signum) {
     int is_user = (t->pgdir != NULL);
 
     if (!is_user &&
-        !(ss->blocked & signal_mask_bit(signum)) &&
+        !(t->sig_blocked & signal_mask_bit(signum)) &&
         sa->sa_handler == SIG_DFL &&
         signal_default_terminate(signum)) {
         proc_force_exit(t, -signal_wait_status(signum));
@@ -186,7 +186,7 @@ int signal_task_has_unblocked(void *task) {
     if (!t || !t->signals)
         return 0;
     signal_state_t *ss = (signal_state_t *)t->signals;
-    uint64_t deliverable = (ss->pending | t->thread_pending) & ~ss->blocked;
+    uint64_t deliverable = (ss->pending | t->thread_pending) & ~t->sig_blocked;
     if (!deliverable)
         return 0;
 
@@ -209,7 +209,7 @@ void signal_deliver(void) {
     if (!t || !t->signals) return;
 
     signal_state_t *ss = (signal_state_t *)t->signals;
-    uint64_t deliverable = (ss->pending | t->thread_pending) & ~ss->blocked;
+    uint64_t deliverable = (ss->pending | t->thread_pending) & ~t->sig_blocked;
     if (!deliverable) return;
 
     int is_user = t->pgdir != NULL;
@@ -268,15 +268,16 @@ static void build_ucontext(ucontext_t *uc, trap_context_t *ctx,
                            uint64_t old_blocked, sigaltstack_t *altstack)
 {
     memset(uc, 0, sizeof(*uc));
-    uc->uc_sigmask = signal_mask_to_user(old_blocked);
+    uc->uc_sigmask[0] = signal_mask_to_user(old_blocked);
+    uc->uc_sigmask[1] = 0;
     uc->uc_stack.ss_sp = altstack->ss_sp;
     uc->uc_stack.ss_flags = altstack->ss_flags;
     uc->uc_stack.ss_size = altstack->ss_size;
     sigcontext_t *sc = &uc->uc_mcontext;
-#ifdef __riscv
-    for (int i = 0; i < 32; i++) sc->sc_regs[i] = ctx->x[i];
-    sc->sc_pc = ctx->sepc;
-#elif defined(__loongarch__)
+#if defined(CONFIG_RISCV64)
+    sc->sc_regs[0] = ctx->sepc;
+    for (int i = 1; i < 32; i++) sc->sc_regs[i] = ctx->x[i];
+#elif defined(CONFIG_LOONGARCH64)
     for (int i = 0; i < 32; i++) sc->sc_regs[i] = ctx->regs[i];
     sc->sc_pc = ctx->era;
 #endif
@@ -287,7 +288,7 @@ void signal_deliver_user(trap_context_t *ctx) {
     if (!t || !t->signals || !t->pgdir) return;
 
     signal_state_t *ss = (signal_state_t *)t->signals;
-    uint64_t deliverable = (ss->pending | t->thread_pending) & ~ss->blocked;
+    uint64_t deliverable = (ss->pending | t->thread_pending) & ~t->sig_blocked;
     if (!deliverable) return;
 
     for (int sig = 1; sig < NSIG; sig++) {
@@ -300,7 +301,7 @@ void signal_deliver_user(trap_context_t *ctx) {
             t->thread_pending &= ~signal_mask_bit(sig);
             ss->pending_has_info[sig] = 0;
             if (t->sigsuspend_active) {
-                ss->blocked = t->sigsuspend_old_blocked;
+                t->sig_blocked = t->sigsuspend_old_blocked;
                 t->sigsuspend_active = 0;
             }
             continue;
@@ -312,14 +313,14 @@ void signal_deliver_user(trap_context_t *ctx) {
             ss->pending_has_info[sig] = 0;
             if (signal_default_ignore(sig)) {
                 if (t->sigsuspend_active) {
-                    ss->blocked = t->sigsuspend_old_blocked;
+                    t->sig_blocked = t->sigsuspend_old_blocked;
                     t->sigsuspend_active = 0;
                 }
                 continue;
             }
             if (signal_default_stop(sig)) {
-                ss->blocked = t->sigsuspend_active ?
-                              t->sigsuspend_old_blocked : ss->blocked;
+                t->sig_blocked = t->sigsuspend_active ?
+                              t->sigsuspend_old_blocked : t->sig_blocked;
                 t->sigsuspend_active = 0;
                 t->state = PROC_BLOCKED;
                 sched();
@@ -339,13 +340,13 @@ void signal_deliver_user(trap_context_t *ctx) {
         t->sig_saved_ctx = *ctx;
         t->sig_handling = sig;
         uint64_t old_blocked = t->sigsuspend_active ?
-                               t->sigsuspend_old_blocked : ss->blocked;
+                               t->sigsuspend_old_blocked : t->sig_blocked;
         t->sig_old_blocked = old_blocked;
         t->sigsuspend_active = 0;
 
-        ss->blocked |= sa->sa_mask;
+        t->sig_blocked |= sa->sa_mask;
         if (!(sa->sa_flags & SA_NODEFER))
-            ss->blocked |= signal_mask_bit(sig);
+            t->sig_blocked |= signal_mask_bit(sig);
 
         uint64_t sp = TRAP_CTX_SP(ctx);
 
@@ -397,14 +398,13 @@ int64_t sys_rt_sigreturn_impl(trap_context_t *ctx) {
     if (copy_from_user(&frame, (void *)sp, sizeof(frame)) < 0)
         return -EFAULT;
 
-    signal_state_t *ss = (signal_state_t *)t->signals;
-    ss->blocked = signal_mask_from_user(frame.uc.uc_sigmask);
+    t->sig_blocked = signal_mask_from_user(frame.uc.uc_sigmask[0]);
 
     sigcontext_t *sc = &frame.uc.uc_mcontext;
-#ifdef __riscv
-    for (int i = 0; i < 32; i++) ctx->x[i] = sc->sc_regs[i];
-    ctx->sepc = sc->sc_pc;
-#elif defined(__loongarch__)
+#if defined(CONFIG_RISCV64)
+    for (int i = 1; i < 32; i++) ctx->x[i] = sc->sc_regs[i];
+    ctx->sepc = sc->sc_regs[0];
+#elif defined(CONFIG_LOONGARCH64)
     for (int i = 0; i < 32; i++) ctx->regs[i] = sc->sc_regs[i];
     ctx->era = sc->sc_pc;
 #endif
@@ -452,10 +452,8 @@ int sys_sigprocmask_impl(int how, const void *set, void *oldset, size_t sigsetsi
 
     task_t *t = proc_current();
     if (!t || !t->signals) return -EINVAL;
-    signal_state_t *ss = (signal_state_t *)t->signals;
-
     if (oldset) {
-        user_sigset_t oldmask = { .bits = { signal_mask_to_user(ss->blocked) } };
+        user_sigset_t oldmask = { .bits = { signal_mask_to_user(t->sig_blocked) } };
         if (copy_to_user(oldset, &oldmask, sizeof(oldmask)) < 0)
             return -EFAULT;
     }
@@ -468,9 +466,9 @@ int sys_sigprocmask_impl(int how, const void *set, void *oldset, size_t sigsetsi
     mask &= ~(signal_mask_bit(SIGKILL) | signal_mask_bit(SIGSTOP));
 
     switch (how) {
-        case SIG_BLOCK:   ss->blocked |=  mask; break;
-        case SIG_UNBLOCK: ss->blocked &= ~mask; break;
-        case SIG_SETMASK: ss->blocked  =  mask; break;
+        case SIG_BLOCK:   t->sig_blocked |=  mask; break;
+        case SIG_UNBLOCK: t->sig_blocked &= ~mask; break;
+        case SIG_SETMASK: t->sig_blocked  =  mask; break;
         default: return -EINVAL;
     }
     return 0;
