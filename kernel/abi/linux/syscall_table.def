@@ -154,6 +154,7 @@ LINUX_SYSCALL(sigaction, 0, sys_sigaction((int)A(0), (void *)A(1), (void *)A(2),
 LINUX_SYSCALL(sigprocmask, 0, sys_sigprocmask((int)A(0), (void *)A(1), (void *)A(2), (size_t)A(3)))
 LINUX_SYSCALL(sigtimedwait, 0, sys_sigtimedwait((const uint64_t *)A(0), (void *)A(1), (const void *)A(2), (size_t)A(3)))
 LINUX_SYSCALL(rt_sigqueueinfo, 0, sys_rt_sigqueueinfo((int)A(0), (int)A(1), (void *)A(2)))
+LINUX_SYSCALL(pidfd_send_signal, 0, sys_pidfd_send_signal((int)A(0), (int)A(1), (void *)A(2), (unsigned)A(3)))
 LINUX_SYSCALL(sigreturn, 1, sys_sigreturn(args->ctx))
 LINUX_SYSCALL(sigsuspend, 0, sys_sigsuspend((void *)A(0), (size_t)A(1)))
 LINUX_SYSCALL(sigaltstack, 0, sys_sigaltstack((void *)A(0), (void *)A(1)))
