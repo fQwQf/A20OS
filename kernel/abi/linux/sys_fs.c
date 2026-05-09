@@ -111,7 +111,9 @@ int64_t sys_pread64(int fd, char *buf, size_t count, long off) {
     int64_t gfd = fdtable_get_current(fd);
     if (gfd < 0) return gfd;
     long curoff = vfs_lseek(gfd, 0, SEEK_CUR);
-    vfs_lseek(gfd, off, SEEK_SET);
+    if (curoff < 0) return curoff;
+    long sr = vfs_lseek(gfd, off, SEEK_SET);
+    if (sr < 0) return sr;
     vfile_t *vf = vfs_get_file_ref((int)gfd);
     int64_t total = read_into_user(vf, buf, count);
     vfs_put_file_ref((int)gfd, vf);
@@ -125,7 +127,9 @@ int64_t sys_pwrite64(int fd, char *buf, size_t count, long off) {
     int64_t gfd = fdtable_get_current(fd);
     if (gfd < 0) return gfd;
     long curoff = vfs_lseek(gfd, 0, SEEK_CUR);
-    vfs_lseek(gfd, off, SEEK_SET);
+    if (curoff < 0) return curoff;
+    long sr = vfs_lseek(gfd, off, SEEK_SET);
+    if (sr < 0) return sr;
     vfile_t *vf = vfs_get_file_ref((int)gfd);
     int64_t total = write_from_user(vf, buf, count);
     vfs_put_file_ref((int)gfd, vf);
