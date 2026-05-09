@@ -784,6 +784,22 @@ int vfs_utimensat(int dirfd, const char *path, const uint64_t times[4], int flag
     return r;
 }
 
+int vfs_futimens(int fd, const uint64_t times[4]) {
+    vfile_t *vf = vfs_get_file_ref(fd);
+    if (!vf || !vf->vnode) {
+        vfs_put_file_ref(fd, vf);
+        return -EBADF;
+    }
+    vnode_t *vn = vf->vnode;
+    int r;
+    if (vfs_vnode_permission(vn, W_OK) < 0 && !vfs_current_owns(vn))
+        r = -EACCES;
+    else
+        r = vfs_set_times(vn, times);
+    vfs_put_file_ref(fd, vf);
+    return r;
+}
+
 int vfs_readlinkat(int dirfd, const char *path, char *buf, size_t sz) {
     (void)dirfd;
     if (!path || !buf || sz == 0) return -EINVAL;
