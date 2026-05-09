@@ -45,6 +45,7 @@ typedef struct net_socket {
     net_msg_t *rx_tail;
     int rx_count;
     task_t *waiter;
+    task_t *send_waiter;
     struct udp_pcb *udp;
     struct raw_pcb *raw;
     struct tcp_pcb *tcp;
@@ -104,6 +105,9 @@ void     net_unregister_socket_locked(net_socket_t *s);
 
 int      net_enqueue_msg_locked(net_socket_t *dst, const void *buf, size_t len,
                                 const void *addr, size_t addrlen);
+int      net_enqueue_msg_blocking(net_socket_t *dst, const void *buf, size_t len,
+                                  const void *addr, size_t addrlen,
+                                  int dontwait, uint64_t timeout_ticks);
 int      net_dequeue_msg_locked(net_socket_t *s, void *buf, size_t len,
                                 void *addr, size_t *addrlen);
 int      net_accept_queue_push_locked(net_socket_t *listener,
@@ -145,7 +149,7 @@ int      net_inet_bind_pcb(net_socket_t *s, const void *addr, size_t addrlen);
 int      net_inet_connect(net_socket_t *s, const void *addr, size_t addrlen,
                           const void *connect_addr, size_t peer_len);
 int      net_inet_sendto(net_socket_t *s, const void *buf, size_t len,
-                         const void *addr, size_t addrlen);
+                         int flags, const void *addr, size_t addrlen);
 void     net_inet_accept_child_ready(net_socket_t *s);
 
 net_socket_t *net_socket_from_file(int gfd);
