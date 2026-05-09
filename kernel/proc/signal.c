@@ -330,6 +330,11 @@ void signal_deliver_user(trap_context_t *ctx) {
             proc_exit(-signal_wait_status(sig));
         }
 
+        siginfo_t queued_info;
+        int has_queued_info = ss->pending_has_info[sig];
+        if (has_queued_info)
+            memcpy(&queued_info, ss->pending_info[sig], sizeof(queued_info));
+
         ss->pending &= ~signal_mask_bit(sig);
         t->thread_pending &= ~signal_mask_bit(sig);
         ss->pending_has_info[sig] = 0;
@@ -360,7 +365,10 @@ void signal_deliver_user(trap_context_t *ctx) {
         sig_rt_frame_t frame;
         memset(&frame, 0, sizeof(frame));
         frame.flag = 0x77777777ULL;
-        build_siginfo(&frame.info, sig, t);
+        if (has_queued_info)
+            frame.info = queued_info;
+        else
+            build_siginfo(&frame.info, sig, t);
         build_ucontext(&frame.uc, ctx, old_blocked, &t->sigaltstack);
 
         sp -= sizeof(sig_rt_frame_t);

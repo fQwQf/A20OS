@@ -54,6 +54,82 @@ static int exec_file_is_shebang(int fd)
     return n >= 2 && magic[0] == '#' && magic[1] == '!';
 }
 
+static int exec_read_shebang(int fd, char *interp_path, size_t interp_size,
+                             char *interp_arg, size_t arg_size)
+{
+    char buf[128];
+    int n;
+    char *cp;
+    char *start;
+    size_t len;
+
+    if (!interp_path || interp_size == 0)
+        return -EINVAL;
+
+    vfs_lseek(fd, 0, SEEK_SET);
+    n = vfs_read(fd, buf, sizeof(buf) - 1);
+    vfs_lseek(fd, 0, SEEK_SET);
+    if (n < 2 || buf[0] != '#' || buf[1] != '!')
+        return -ENOEXEC;
+
+    buf[n] = '\0';
+    cp = buf + 2;
+    while (*cp == ' ' || *cp == '\t')
+        ++cp;
+    if (*cp == '\0' || *cp == '\n' || *cp == '\r')
+        return -ENOEXEC;
+
+    start = cp;
+    while (*cp && *cp != '\n' && *cp != '\r' && *cp != ' ' && *cp != '\t')
+        ++cp;
+    len = (size_t)(cp - start);
+    if (len == 0 || len >= interp_size)
+        return -ENOEXEC;
+    memcpy(interp_path, start, len);
+    interp_path[len] = '\0';
+
+    if (interp_arg && arg_size > 0) {
+        interp_arg[0] = '\0';
+        while (*cp == ' ' || *cp == '\t')
+            ++cp;
+        if (*cp && *cp != '\n' && *cp != '\r') {
+            start = cp;
+            while (*cp && *cp != '\n' && *cp != '\r')
+                ++cp;
+            len = (size_t)(cp - start);
+            if (len >= arg_size)
+                return -ENOEXEC;
+            memcpy(interp_arg, start, len);
+            interp_arg[len] = '\0';
+        }
+    }
+
+    return 0;
+}
+
+static void exec_free_args(char *argv[], int argc, char *envp[], int envc,
+                           char *path)
+{
+    for (int i = 0; i < argc; i++)
+        kfree(argv[i]);
+    for (int i = 0; i < envc; i++)
+        kfree(envp[i]);
+    kfree(path);
+}
+
+static int exec_shebang_interpreter(const char *interp_path, char *argv[],
+                                    char *const envp[])
+{
+    int ret = proc_exec(interp_path, argv, envp);
+
+    if (ret == -ENOENT && strcmp(interp_path, "/bin/busybox") == 0) {
+        argv[0] = "./busybox";
+        ret = proc_exec("./busybox", argv, envp);
+    }
+
+    return ret;
+}
+
 int proc_exec(const char *path, char *const argv[], char *const envp[])
 {
     task_t *t = proc_current();
@@ -234,12 +310,31 @@ int proc_exec(const char *path, char *const argv[], char *const envp[])
 
     if (arg_error) {
         vfs_close(fd);
-        for (int i = 0; i < argc; i++)
-            kfree(k_argv[i]);
-        for (int i = 0; i < envc; i++)
-            kfree(k_envp[i]);
-        kfree(k_path);
+        exec_free_args(k_argv, argc, k_envp, envc, k_path);
         return arg_error;
+    }
+
+    if (exec_file_is_shebang(fd)) {
+        char interp_path[128];
+        char arg_buf[128];
+        int sr = exec_read_shebang(fd, interp_path, sizeof(interp_path),
+                                   arg_buf, sizeof(arg_buf));
+        if (sr == 0) {
+            char *new_argv[64];
+            int na = 0;
+            new_argv[na++] = interp_path;
+            if (arg_buf[0])
+                new_argv[na++] = arg_buf;
+            new_argv[na++] = k_path;
+            for (int i = 1; i < argc && na < 63; i++)
+                new_argv[na++] = k_argv[i];
+            new_argv[na] = NULL;
+
+            vfs_close(fd);
+            int ret = exec_shebang_interpreter(interp_path, new_argv, envp);
+            exec_free_args(k_argv, argc, k_envp, envc, k_path);
+            return ret;
+        }
     }
 
     elf_load_info_t info;
@@ -248,69 +343,8 @@ int proc_exec(const char *path, char *const argv[], char *const envp[])
     int r = elf_load(fd, k_path, &info);
     if (r < 0) {
         kinfo("[EXEC] elf_load failed: r=%d path='%s'\n", (int)r, path);
-        if (r == -ENOEXEC) {
-            vfs_lseek(fd, 0, SEEK_SET);
-            char buf[128];
-            int n = vfs_read(fd, buf, sizeof(buf) - 1);
-            if (n >= 2 && buf[0] == '#' && buf[1] == '!') {
-                buf[n] = '\0';
-                char *cp = buf + 2;
-                while (*cp == ' ' || *cp == '\t')
-                    ++cp;
-                if (*cp != '\0' && *cp != '\n') {
-                    char *interp_start = cp;
-                    while (*cp && *cp != '\n' && *cp != '\r' && *cp != ' ' && *cp != '\t')
-                        ++cp;
-                    char interp_path[128];
-                    size_t ilen = cp - interp_start;
-                    if (ilen > 0 && ilen < sizeof(interp_path)) {
-                        memcpy(interp_path, interp_start, ilen);
-                        interp_path[ilen] = '\0';
-
-                        char arg_buf[128] = {0};
-                        int has_arg = 0;
-                        while (*cp == ' ' || *cp == '\t')
-                            ++cp;
-                        if (*cp && *cp != '\n') {
-                            char *arg_start = cp;
-                            while (*cp && *cp != '\n' && *cp != '\r')
-                                ++cp;
-                            size_t alen = cp - arg_start;
-                            if (alen > 0 && alen < sizeof(arg_buf)) {
-                                memcpy(arg_buf, arg_start, alen);
-                                arg_buf[alen] = '\0';
-                                has_arg = 1;
-                            }
-                        }
-
-                        char *new_argv[64];
-                        int na = 0;
-                        new_argv[na++] = interp_path;
-                        if (has_arg)
-                            new_argv[na++] = arg_buf;
-                        new_argv[na++] = k_path;
-                        for (int i = 1; i < argc && na < 63; i++)
-                            new_argv[na++] = k_argv[i];
-                        new_argv[na] = NULL;
-
-                        vfs_close(fd);
-                        int ret = proc_exec(interp_path, new_argv, envp);
-                        for (int i = 0; i < argc; i++)
-                            kfree(k_argv[i]);
-                        for (int i = 0; i < envc; i++)
-                            kfree(k_envp[i]);
-                        kfree(k_path);
-                        return ret;
-                    }
-                }
-            }
-        }
         vfs_close(fd);
-        for (int i = 0; i < argc; i++)
-            kfree(k_argv[i]);
-        for (int i = 0; i < envc; i++)
-            kfree(k_envp[i]);
-        kfree(k_path);
+        exec_free_args(k_argv, argc, k_envp, envc, k_path);
         return r;
     }
     vfs_close(fd);
@@ -326,11 +360,7 @@ int proc_exec(const char *path, char *const argv[], char *const envp[])
     mm_struct_t *mm = kcalloc(1, sizeof(mm_struct_t));
     if (!mm) {
         mm_destroy(old_mm);
-        for (int i = 0; i < argc; i++)
-            kfree(k_argv[i]);
-        for (int i = 0; i < envc; i++)
-            kfree(k_envp[i]);
-        kfree(k_path);
+        exec_free_args(k_argv, argc, k_envp, envc, k_path);
         return -ENOMEM;
     }
     mm->pgdir = info.pgdir;
