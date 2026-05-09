@@ -55,6 +55,17 @@ typedef struct {
                                 ADJ_TAI | ADJ_SETOFFSET | ADJ_MICRO | \
                                 ADJ_NANO | ADJ_TICK)
 
+static int posix_clock_is_realtime(int clk)
+{
+    return clk == 0 || clk == 5 || clk == 8 || clk == 11;
+}
+
+static int posix_clock_is_monotonic(int clk)
+{
+    return clk == 1 || clk == 2 || clk == 3 || clk == 4 ||
+           clk == 6 || clk == 7 || clk == 9;
+}
+
 static uint64_t posix_timer_timespec_to_ticks(uint64_t sec, uint64_t nsec)
 {
     return sec * TICKS_PER_SEC + (nsec * TICKS_PER_SEC + 999999999ULL) / 1000000000ULL;
@@ -92,8 +103,52 @@ static int fill_getitimer(task_t *t, int which, uint64_t out[4])
 
 int64_t sys_clock_nanosleep(int clk, int flags, const void *req, void *rem)
 {
-    (void)clk; (void)flags;
-    return sys_nanosleep((void *)req, rem);
+    const int TIMER_ABSTIME = 1;
+    if (flags & ~TIMER_ABSTIME) return -EINVAL;
+    if (!req) return -EFAULT;
+
+    uint64_t ts[2];
+    if (copy_from_user(ts, req, sizeof(ts)) < 0) return -EFAULT;
+    if (ts[1] >= 1000000000ULL) return -EINVAL;
+
+    if (!(flags & TIMER_ABSTIME))
+        return sys_nanosleep((void *)req, rem);
+
+    uint64_t now_ts[2];
+    if (posix_clock_is_realtime(clk)) timekeeping_get_realtime(now_ts);
+    else if (posix_clock_is_monotonic(clk)) timekeeping_get_monotonic(now_ts);
+    else return -EINVAL;
+
+    if (ts[0] < now_ts[0] || (ts[0] == now_ts[0] && ts[1] <= now_ts[1]))
+        return 0;
+
+    uint64_t sec = ts[0] - now_ts[0];
+    uint64_t nsec;
+    if (ts[1] >= now_ts[1]) {
+        nsec = ts[1] - now_ts[1];
+    } else {
+        if (sec == 0) return 0;
+        sec--;
+        nsec = 1000000000ULL + ts[1] - now_ts[1];
+    }
+
+    (void)rem;
+    uint64_t ticks = sec * TICKS_PER_SEC +
+                     (nsec * TICKS_PER_SEC + 999999999ULL) / 1000000000ULL;
+    uint64_t until = timer_get_ticks() + ticks;
+
+    task_t *t = proc_current();
+    if (t) {
+        proc_set_wake_time(t, until);
+        t->state = PROC_BLOCKED;
+        sched();
+        proc_set_wake_time(t, 0);
+        if (signal_task_has_unblocked(t))
+            return -ERESTARTSYS;
+    } else {
+        while (timer_get_ticks() < until) __asm__ volatile("nop");
+    }
+    return 0;
 }
 
 int64_t sys_getitimer(int which, void *curr_value)
