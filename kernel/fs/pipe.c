@@ -270,7 +270,7 @@ int pipe_create(int pipefd[2])
     memset(pb, 0, sizeof(*pb));
     pb->ref = 2;
     task_t *cur = proc_current();
-    pb->logical_size = proc_has_cap(cur, CAP_SYS_ADMIN) ? PIPE_DEFAULT_SIZE : PIPE_BUF_SIZE;
+    pb->logical_size = PIPE_DEFAULT_SIZE;
     pb->capacity = pb->logical_size;
     pb->data = (char *)kmalloc(pb->capacity);
     if (!pb->data) { kfree(pb); return -ENOMEM; }
