@@ -46,6 +46,7 @@ typedef enum {
     PF_PID_OOM_SCORE,
     PF_PID_CGROUP,
     PF_PID_CMDLINE,
+    PF_PID_COMM,
     PF_PID_EXE,
     PF_PID_CWD,
     PF_PID_FD,
@@ -69,6 +70,7 @@ typedef enum {
     PF_A20_PAGE_CACHE,
     PF_SELF,
     PF_FSTYPE,
+    PF_SWAPS,
 } pf_type_t;
 
 // procfs 目录项结构
@@ -297,6 +299,9 @@ static int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
             "MemAvailable:   %lu kB\n"
             "Buffers:        %lu kB\n"
             "Cached:         %lu kB\n"
+            "SwapTotal:      0 kB\n"
+            "SwapFree:       0 kB\n"
+            "Shmem:          0 kB\n"
             "Dirty:          %lu kB\n"
             "Slab:           %lu kB\n"
             "SReclaimable:   %lu kB\n"
@@ -323,6 +328,10 @@ static int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
             (unsigned long)huge.free_huge_pages);
         break;
     }
+    case PF_SWAPS:
+        snprintf(buf, bufsz,
+            "Filename\t\t\t\tType\t\tSize\tUsed\tPriority\n");
+        break;
     case PF_VERSION:
         snprintf(buf, bufsz, "A20OS version " VERSION " (" ARCH_NAME ")\n"); 
         break;
@@ -491,6 +500,11 @@ static int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
         buf[len] = '\0';
         return (int)(len + 1);
     }
+    case PF_PID_COMM: {
+        task_t *t = proc_find(pid);
+        snprintf(buf, bufsz, "%s\n", t ? t->name : "unknown");
+        break;
+    }
     case PF_PID_EXE: {
         task_t *t = proc_find(pid);
         snprintf(buf, bufsz, "%s\n", t && t->exec_path[0] ? t->exec_path : "/sbin/init");
@@ -572,6 +586,7 @@ static pf_type_t name_to_type(const char *name, int *out_pid) {
     if (strcmp(name, "net") == 0) return PF_NET;
     if (strcmp(name, "config.gz") == 0) return PF_CONFIG_GZ;
     if (strcmp(name, "filesystems") == 0) return PF_FSTYPE;
+    if (strcmp(name, "swaps") == 0) return PF_SWAPS;
     if (strcmp(name, "pidmap") == 0) return PF_SYS_KERNEL_PIDMAP;
     if (strcmp(name, "a20") == 0) return PF_A20;
     if (strcmp(name, "bcache") == 0) return PF_A20_BCACHE;
@@ -589,6 +604,8 @@ static pf_type_t name_to_type(const char *name, int *out_pid) {
     if (strcmp(name, "oom_score_adj") == 0) return PF_PID_OOM_SCORE_ADJ;
     if (strcmp(name, "oom_score") == 0) return PF_PID_OOM_SCORE;
     if (strcmp(name, "cgroup") == 0) return PF_PID_CGROUP;
+    if (strcmp(name, "cmdline") == 0) return PF_PID_CMDLINE;
+    if (strcmp(name, "comm") == 0) return PF_PID_COMM;
     if (strcmp(name, "exe") == 0) return PF_PID_EXE;
     if (strcmp(name, "cwd") == 0) return PF_PID_CWD;
     if (strcmp(name, "fd") == 0) return PF_PID_FD;
@@ -689,6 +706,7 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
                type == PF_PID_STATM || type == PF_PID_MAPS ||
                type == PF_PID_SMAPS || type == PF_PID_OOM_SCORE_ADJ ||
                type == PF_PID_OOM_SCORE || type == PF_PID_CGROUP ||
+               type == PF_PID_CMDLINE || type == PF_PID_COMM ||
                type == PF_PID_EXE || type == PF_PID_CWD ||
                type == PF_PID_FD || type == PF_PID_ENVIRON ||
                type == PF_PID_IO || type == PF_PID_LOGINUID ||
@@ -840,11 +858,11 @@ static int procfs_freaddir(vfile_t *vf, void *dirp, size_t count) {
     static const char *root_entries[] = {
         ".", "..", "meminfo", "version", "uptime", "cmdline",
         "cpuinfo", "mounts", "self", "loadavg", "net", "config.gz",
-        "filesystems", "pidmap", "sys", "a20", NULL
+        "filesystems", "swaps", "pidmap", "sys", "a20", NULL
     };
     static const char *pid_entries[] = {
         ".", "..", "stat", "status", "statm", "maps", "smaps",
-        "oom_score", "oom_score_adj", "cgroup", "cmdline", "exe", "cwd",
+        "oom_score", "oom_score_adj", "cgroup", "cmdline", "comm", "exe", "cwd",
         "fd", "environ", "io", "loginuid", "sessionid", "ns", "fdinfo",
         "mountinfo", "mounts", NULL
     };
@@ -923,7 +941,7 @@ static int procfs_freaddir(vfile_t *vf, void *dirp, size_t count) {
         if (!is_root && (strcmp(name, "fd") == 0 || strcmp(name, "ns") == 0 ||
                          strcmp(name, "fdinfo") == 0))
             is_dir = 1;
-        d->d_type = is_dir ? VFS_FT_DIR : VFS_FT_REGULAR;
+        d->d_type = is_dir ? 4 : 8; /* DT_DIR=4, DT_REG=8 per Linux getdents64 */
         memcpy(d->d_name, name, namelen + 1);
         total += reclen;
         idx++;
