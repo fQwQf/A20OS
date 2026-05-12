@@ -1,5 +1,6 @@
 #include "syscall_impl.h"
 #include "core/version.h"
+#include "mm/frame.h"
 
 int64_t sys_uname(void *buf) {
     struct uname { char s[65],n[65],r[65],v[65],m[65],d[65]; };
@@ -8,7 +9,7 @@ int64_t sys_uname(void *buf) {
     memset(&u, 0, sizeof(u));
     strcpy(u.s, "A20OS");
     strcpy(u.n, "AAAAAAAAAAAAAAAAAAAA");
-    strcpy(u.r, "114.514.1919810");
+    strcpy(u.r, VERSION);
     strcpy(u.v, "A20OS version " VERSION " (Linux 6.8.0 compatible)");
     strcpy(u.m, ARCH_NAME);
     if (copy_to_user(buf, &u, sizeof(u)) < 0) return -EFAULT;
@@ -17,11 +18,37 @@ int64_t sys_uname(void *buf) {
 
 int64_t sys_sysinfo(void *info) {
     if (!info) return -EFAULT;
-    uint64_t si[14]; /* 112 bytes */
-    memset(si, 0, sizeof(si));
-    si[0] = timer_get_ticks() / TICKS_PER_SEC;
-    si[1] = 1;
-    if (copy_to_user(info, si, sizeof(si)) < 0) return -EFAULT;
+    /* Match musl struct sysinfo layout on 64-bit (total 112 bytes) */
+    struct sysinfo_layout {
+        uint64_t uptime;
+        uint64_t loads[3];
+        uint64_t totalram;
+        uint64_t freeram;
+        uint64_t sharedram;
+        uint64_t bufferram;
+        uint64_t totalswap;
+        uint64_t freeswap;
+        uint16_t procs;
+        uint16_t pad[3];
+        uint64_t totalhigh;
+        uint64_t freehigh;
+        uint32_t mem_unit;
+        uint32_t _pad;
+    } si;
+    memset(&si, 0, sizeof(si));
+
+    extern size_t frame_free_count(void);
+    si.uptime = timer_get_ticks() / TICKS_PER_SEC;
+    si.totalram = pfa.total_frames * PAGE_SIZE;
+    si.freeram = frame_free_count() * PAGE_SIZE;
+    si.bufferram = 0;
+    si.sharedram = 0;
+    si.totalswap = 0;
+    si.freeswap = 0;
+    si.procs = 1;
+    si.mem_unit = 1;
+
+    if (copy_to_user(info, &si, sizeof(si)) < 0) return -EFAULT;
     return 0;
 }
 

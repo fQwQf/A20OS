@@ -6,7 +6,7 @@
 #include "core/defs.h"
 #include "core/lock.h"
 
-int klog_level = KLOG_DEBUG;
+int klog_level = KLOG_INFO;
 
 static char   klog_buf[KLOG_BUF_SIZE];
 static size_t klog_head __attribute__((section(".data"))) = 0;

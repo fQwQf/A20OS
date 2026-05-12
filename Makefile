@@ -36,7 +36,7 @@ EXTRA_PACKAGES = vim git gcc cc
 USER_BUILD_ID = $(ARCH):$(CONTEST):$(OPT)
 USER_BUILD_CHECK_DIRS = user/cmds user/contest_init user/init_common user/lib user/shell \
                         user/external/musl user/external/sbase user/external/mksh-cvs2git \
-                        user/external/tlse
+                        user/external/tlse user/external/fastfetch
 comma := ,
 NET_HOSTFWD ?= hostfwd=tcp::5555-:5555,hostfwd=udp::5555-:5555
 NETDEV_USER = -netdev user,id=net$(if $(strip $(NET_HOSTFWD)),$(comma)$(NET_HOSTFWD),)
@@ -486,6 +486,7 @@ $(FAT32_IMG): $(USER_BUILD_STAMP)
 		'ipv6-icmp 58 IPv6-ICMP' \
 		'ipv6-nonxt 59 IPv6-NoNxt' \
 		'ipv6-opts 60 IPv6-Opts' | mcopy -o -i $(FAT32_IMG) - ::/etc/protocols
+	@printf 'ID=A20OS\nNAME="A20OS"\nPRETTY_NAME="A20OS"\nVERSION="0.2"\nVERSION_ID="0.2"\n' | mcopy -o -i $(FAT32_IMG) - ::/etc/os-release
 	@printf 'Hello from A20OS FAT32!\n' | mcopy -i $(FAT32_IMG) - ::/test.txt
 
 $(FS_TEST_IMG): $(FAT32_IMG)
@@ -519,6 +520,7 @@ $(EXT4_IMG): $(USER_BUILD_STAMP)
 		'ipv6-icmp 58 IPv6-ICMP' \
 		'ipv6-nonxt 59 IPv6-NoNxt' \
 		'ipv6-opts 60 IPv6-Opts' > $(EXT4_STAGING_DIR)/etc/protocols
+	@printf 'ID=A20OS\nNAME="A20OS"\nPRETTY_NAME="A20OS"\nVERSION="0.2"\nVERSION_ID="0.2"\n' > $(EXT4_STAGING_DIR)/etc/os-release
 	@mkdir -p $(BUILD_DIR)
 	dd if=/dev/zero of=$(EXT4_IMG) bs=1M count=$(EXT4_IMAGE_MB)
 	mkfs.ext4 -F -O ^has_journal,extent,huge_file,flex_bg,uninit_bg,dir_index -d $(EXT4_STAGING_DIR) $(EXT4_IMG)
