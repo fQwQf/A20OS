@@ -804,6 +804,38 @@ int vfs_readlinkat(int dirfd, const char *path, char *buf, size_t sz) {
         return (int)len;
     }
 
+    /* Handle /proc/<pid>/exe and /proc/<pid>/cwd symlinks */
+    if (strncmp(resolved, "/proc/", 6) == 0) {
+        const char *p = resolved + 6;
+        if (strncmp(p, "self/", 5) == 0) p += 5;
+        int pid = 0;
+        const char *q = p;
+        while (*q >= '0' && *q <= '9') {
+            pid = pid * 10 + (*q - '0');
+            q++;
+        }
+        if (pid > 0 && q != p) {
+            if (strcmp(q, "/exe") == 0) {
+                task_t *t = proc_find(pid);
+                const char *exe = t && t->exec_path[0] ? t->exec_path : "/bin/sh";
+                size_t len = strlen(exe);
+                if (len >= sz) len = sz - 1;
+                memcpy(buf, exe, len);
+                buf[len] = '\0';
+                return (int)len;
+            }
+            if (strcmp(q, "/cwd") == 0) {
+                task_t *t = proc_find(pid);
+                const char *cwd_res = t ? t->fs.cwd : "/";
+                size_t len = strlen(cwd_res);
+                if (len >= sz) len = sz - 1;
+                memcpy(buf, cwd_res, len);
+                buf[len] = '\0';
+                return (int)len;
+            }
+        }
+    }
+
     char parent_path[MAX_PATH_LEN];
     char name[MAX_NAME_LEN];
     int sr = vfs_path_split_parent_name(resolved, parent_path, sizeof(parent_path),
@@ -1445,6 +1477,19 @@ void vfs_init(void) {
         fd = vfs_open("/etc/protocols", O_CREAT | O_WRONLY | O_TRUNC, 0644);
         if (fd >= 0) {
             vfs_write(fd, protocols, sizeof(protocols) - 1);
+            vfs_close(fd);
+        }
+        static const char os_release[] =
+            "ID=A20OS\n"
+            "NAME=\"A20OS\"\n"
+            "PRETTY_NAME=\"A20OS\"\n"
+            "VERSION=\"0.2\"\n"
+            "VERSION_ID=\"0.2\"\n"
+            "HOME_URL=\"\"\n"
+            "BUG_REPORT_URL=\"\"\n";
+        fd = vfs_open("/etc/os-release", O_CREAT | O_WRONLY | O_TRUNC, 0644);
+        if (fd >= 0) {
+            vfs_write(fd, os_release, sizeof(os_release) - 1);
             vfs_close(fd);
         }
     }

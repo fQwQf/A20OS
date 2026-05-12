@@ -244,10 +244,10 @@ int proc_exec(const char *path, char *const argv[], char *const envp[])
 
     elf_load_info_t info;
     memset(&info, 0, sizeof(info));
-    kinfo("[EXEC] path='%s' k_path='%s' loading ELF\n", path, k_path ? k_path : "(null)");
+    kdebug("[EXEC] path='%s' k_path='%s' loading ELF\n", path, k_path ? k_path : "(null)");
     int r = elf_load(fd, k_path, &info);
     if (r < 0) {
-        kinfo("[EXEC] elf_load failed: r=%d path='%s'\n", (int)r, path);
+        kdebug("[EXEC] elf_load failed: r=%d path='%s'\n", (int)r, path);
         if (r == -ENOEXEC) {
             vfs_lseek(fd, 0, SEEK_SET);
             char buf[128];
