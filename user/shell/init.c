@@ -146,6 +146,18 @@ int main(int argc, char *argv[])
 
     setup_runtime_links();
 
+    /* Create /tmp/sysinfo/model for fastfetch Host detection */
+    mkdir("/tmp", 0755);
+    mkdir("/tmp/sysinfo", 0755);
+    {
+        int fd = open("/tmp/sysinfo/model", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (fd >= 0) {
+            const char *model = "A20OS Virtual Machine\n";
+            write(fd, model, strlen(model));
+            close(fd);
+        }
+    }
+
     mkdir("/lib", 0755);
     if (!access("/usr/lib/libc.so", F_OK))
         symlink("/usr/lib/libc.so", "/lib/ld-musl-riscv64.so.1");
@@ -166,6 +178,7 @@ int main(int argc, char *argv[])
             path_env,
             ld_env,
             "HOME=/",
+            "SHELL=/bin/mksh",
             "TERM=vt100",
             "VIMRUNTIME=/usr/share/vim/vim92",
             NULL,
