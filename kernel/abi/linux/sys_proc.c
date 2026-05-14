@@ -8,6 +8,13 @@
 #define CLD_STOPPED    5
 #define CLD_CONTINUED  6
 
+#define LINUX_CLONE_VM       0x00000100ULL
+#define LINUX_CLONE_FS       0x00000200ULL
+#define LINUX_CLONE_SIGHAND  0x00000800ULL
+#define LINUX_CLONE_PIDFD    0x00001000ULL
+#define LINUX_CLONE_THREAD   0x00010000ULL
+#define LINUX_CLONE_NEWNS    0x00020000ULL
+
 static uint64_t clamp_stack_rlimit(uint64_t cur, uint64_t max) {
     uint64_t limit = cur < max ? cur : max;
     if (limit > USER_STACK_MAX_SIZE)
@@ -55,7 +62,7 @@ int64_t sys_gettid(void) {
 int64_t sys_set_tid_address(int *tidptr) {
     task_t *t = proc_current();
     if (t) t->clear_child_tid = tidptr;
-    return sys_getpid();
+    return sys_gettid();
 }
 
 int64_t sys_set_robust_list(void *head, size_t len) {
@@ -295,6 +302,7 @@ int64_t sys_setpgid(int pid, int pgid) {
 int64_t sys_setsid(void) {
     task_t *t = proc_current();
     if (!t) return -ESRCH;
+    if (t->pgid == t->pid) return -EPERM;
     t->sid = t->pid;
     t->pgid = t->pid;
     return t->sid;
@@ -392,7 +400,50 @@ int64_t sys_clone3(void *cl_args, size_t size) {
     memset(&args, 0, sizeof(args));
     size_t cpysz = size < sizeof(args) ? size : sizeof(args);
     if (copy_from_user(&args, cl_args, cpysz) < 0) return -EFAULT;
-    return proc_clone(args.flags, args.stack, (int *)args.parent_tid, args.tls, (int *)args.child_tid, (int)args.exit_signal);
+    if (size > sizeof(args)) {
+        uint8_t extra[32];
+        size_t off = sizeof(args);
+        while (off < size) {
+            size_t n = size - off;
+            if (n > sizeof(extra)) n = sizeof(extra);
+            if (copy_from_user(extra, (const char *)cl_args + off, n) < 0)
+                return -EFAULT;
+            for (size_t i = 0; i < n; i++) {
+                if (extra[i] != 0)
+                    return -E2BIG;
+            }
+            off += n;
+        }
+    }
+    if ((args.flags & LINUX_CLONE_SIGHAND) && !(args.flags & LINUX_CLONE_VM))
+        return -EINVAL;
+    if ((args.flags & LINUX_CLONE_THREAD) && !(args.flags & LINUX_CLONE_SIGHAND))
+        return -EINVAL;
+    if ((args.flags & LINUX_CLONE_FS) && (args.flags & LINUX_CLONE_NEWNS))
+        return -EINVAL;
+    if (!!args.stack != !!args.stack_size)
+        return -EINVAL;
+    if (args.flags & LINUX_CLONE_PIDFD) {
+        int tmp;
+        if (copy_from_user(&tmp, (const void *)args.pidfd, sizeof(tmp)) < 0)
+            return -EFAULT;
+    }
+    uint64_t stack = args.stack;
+    if (stack && args.stack_size)
+        stack += args.stack_size;
+    int pid = proc_clone(args.flags, stack, (int *)args.parent_tid, args.tls,
+                         (int *)args.child_tid, (int)args.exit_signal);
+    if (pid < 0 || !(args.flags & LINUX_CLONE_PIDFD))
+        return pid;
+
+    int fd = linux_pidfd_create(pid, 0);
+    if (fd < 0)
+        return fd;
+    if (copy_to_user((void *)args.pidfd, &fd, sizeof(fd)) < 0) {
+        fdtable_close_current(fd);
+        return -EFAULT;
+    }
+    return pid;
 }
 
 int64_t sys_openat2(int dirfd, const char *pathname, const void *how, size_t size) {

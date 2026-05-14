@@ -215,6 +215,7 @@ int      vfs_fchmod(int fd, int mode);
 int      vfs_chownat(int dirfd, const char *path, int uid, int gid, int flags);
 int      vfs_fchown(int fd, int uid, int gid);
 int      vfs_utimensat(int dirfd, const char *path, const uint64_t times[4], int flags);
+int      vfs_futimens(int fd, const uint64_t times[4]);
 int      vfs_readlinkat(int dirfd, const char *path, char *buf, size_t sz);
 int      vfs_link(const char *oldpath, const char *newpath);
 int      vfs_symlink(const char *target, const char *linkpath);

@@ -146,6 +146,50 @@ static int ensure_runtime_dirs(void)
     return 0;
 }
 
+static void prepare_lmbench_helper_path(void)
+{
+    static int done;
+    static const char script[] = "#!/bin/sh\nexec ./lmbench_all \"$@\"\n";
+    const char *dirs[] = {
+        "/code",
+        "/code/lmbench_src",
+        "/code/lmbench_src/bin",
+        "/code/lmbench_src/bin/build",
+    };
+    const char *path = "/code/lmbench_src/bin/build/lmbench_all";
+    struct stat st;
+
+    if (done)
+        return;
+
+    for (size_t i = 0; i < sizeof(dirs) / sizeof(dirs[0]); i++) {
+        if (ensure_dir(dirs[i]) != 0)
+            return;
+    }
+
+    if (stat(path, &st) == 0 && S_ISREG(st.st_mode)) {
+        done = 1;
+        return;
+    }
+
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0755);
+    if (fd < 0)
+        return;
+
+    size_t off = 0;
+    size_t len = sizeof(script) - 1;
+    while (off < len) {
+        ssize_t n = write(fd, script + off, len - off);
+        if (n <= 0)
+            break;
+        off += (size_t)n;
+    }
+    close(fd);
+    chmod(path, 0755);
+    if (off == len)
+        done = 1;
+}
+
 static int prepare_glibc_lib_links(void)
 {
     static int done;
@@ -234,6 +278,8 @@ void setup_runtime_links(void)
 int prepare_runtime_links(const char *runtime)
 {
     int rc = 0;
+
+    prepare_lmbench_helper_path();
 
     if (!runtime || (!is_glibc_runtime(runtime) && !is_musl_runtime(runtime))) {
         if (prepare_glibc_lib_links() != 0)

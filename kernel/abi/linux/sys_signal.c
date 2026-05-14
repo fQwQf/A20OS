@@ -50,11 +50,12 @@ int64_t sys_kill(int pid, int sig) {
 }
 
 int64_t sys_tgkill(int tgid, int tid, int sig) {
-    (void)tgid;
     task_t *self = proc_current();
     task_t *target = proc_find(tid);
     if (!target) return -ESRCH;
     if (target->state == PROC_ZOMBIE) return -ESRCH;
+    int target_tgid = target->tgid > 0 ? target->tgid : target->pid;
+    if (target_tgid != tgid) return -ESRCH;
     int perm = signal_send_permission(self, target);
     if (perm < 0) return perm;
     if (sig == 0) return 0;
@@ -97,11 +98,9 @@ int64_t sys_sigprocmask(int how, void *set, void *oldset, size_t sigsetsize) {
 int64_t sys_sigreturn(trap_context_t *ctx) {
     task_t *t = proc_current();
     if (!t || !t->signals) return 0;
-    signal_state_t *ss = (signal_state_t *)t->signals;
-
     /* Legacy (non-RT) sigreturn: restore from saved kernel context */
     if (t->sig_handling) {
-        ss->blocked = t->sig_old_blocked;
+        t->sig_blocked = t->sig_old_blocked;
         if (ctx)
             *ctx = t->sig_saved_ctx;
         t->sig_handling = 0;
@@ -118,7 +117,7 @@ int64_t sys_sigsuspend(void *mask, size_t sigsetsize) {
     if (sigsetsize != sizeof(uint64_t)) return -EINVAL;
 
     signal_state_t *ss = (signal_state_t *)t->signals;
-    uint64_t old_blocked = ss->blocked;
+    uint64_t old_blocked = t->sig_blocked;
     uint64_t new_mask;
     if (copy_from_user(&new_mask, mask, sizeof(new_mask)) < 0) return -EFAULT;
 
@@ -127,9 +126,9 @@ int64_t sys_sigsuspend(void *mask, size_t sigsetsize) {
     new_mask &= ~(signal_mask_bit(SIGKILL) | signal_mask_bit(SIGSTOP));
     t->sigsuspend_old_blocked = old_blocked;
     t->sigsuspend_active = 1;
-    ss->blocked = new_mask;
+    t->sig_blocked = new_mask;
 
-    uint64_t deliverable = ss->pending & ~ss->blocked;
+    uint64_t deliverable = (ss->pending | t->thread_pending) & ~t->sig_blocked;
     if (!deliverable) {
         t->state = PROC_BLOCKED;
         sched();
@@ -188,27 +187,36 @@ int64_t sys_sigtimedwait(const uint64_t *set, void *info, const void *timeout, s
     uint64_t mask;
     if (copy_from_user(&mask, set, sizeof(mask)) < 0) return -EFAULT;
     mask = signal_mask_from_user(mask);
-    uint64_t deliverable = ss->pending & ~ss->blocked & mask;
+    uint64_t deliverable = (ss->pending | t->thread_pending) & mask;
 
     if (!deliverable) {
+        uint64_t until = 0;
         if (timeout) {
             uint64_t to[2];
             if (copy_from_user(to, timeout, sizeof(to)) < 0) return -EFAULT;
             uint64_t sec = to[0];
             uint64_t nsec = to[1];
+            if (nsec >= 1000000000ULL) return -EINVAL;
             if (sec == 0 && nsec == 0)
                 return -EAGAIN;
+            uint64_t ticks = sec * TICKS_PER_SEC +
+                             nsec * TICKS_PER_SEC / 1000000000ULL;
+            until = timer_get_ticks() + (ticks ? ticks : 1);
+            proc_set_wake_time(t, until);
         }
         t->state = PROC_BLOCKED;
         sched();
-        deliverable = ss->pending & ~ss->blocked & mask;
+        if (until)
+            proc_set_wake_time(t, 0);
+        deliverable = (ss->pending | t->thread_pending) & mask;
         if (!deliverable)
             return -EAGAIN;
     }
 
     for (int sig = 1; sig < NSIG; sig++) {
         if (deliverable & (1ULL << sig)) {
-            ss->pending &= ~(1ULL << sig);
+            ss->pending &= ~signal_mask_bit(sig);
+            t->thread_pending &= ~signal_mask_bit(sig);
             if (info) {
                 uint8_t infobuf[128];
                 memset(infobuf, 0, 128);
@@ -231,7 +239,7 @@ int64_t sys_rt_sigpending(void *set, size_t sigsetsize) {
     task_t *t = proc_current();
     if (!t || !t->signals) return -EINVAL;
     signal_state_t *ss = (signal_state_t *)t->signals;
-    uint64_t pending = (ss->pending | t->thread_pending) & ~ss->blocked;
+    uint64_t pending = (ss->pending | t->thread_pending) & t->sig_blocked;
     uint64_t user_pending = signal_mask_to_user(pending);
     if (copy_to_user(set, &user_pending, sizeof(user_pending)) < 0) return -EFAULT;
     return 0;
