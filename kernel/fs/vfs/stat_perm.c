@@ -3,6 +3,8 @@
 #include "core/timekeeping.h"
 
 #define VFS_TIME_META_MAX 8192
+#define LINUX_UTIME_NOW  0x3fffffffULL
+#define LINUX_UTIME_OMIT 0x3ffffffeULL
 
 typedef struct {
     int used;
@@ -246,10 +248,37 @@ int vfs_set_times(vnode_t *vn, const uint64_t times[4])
     uint64_t atime = now[0], atime_nsec = now[1];
     uint64_t mtime = now[0], mtime_nsec = now[1];
     if (times) {
-        atime = times[0];
-        atime_nsec = times[1];
-        mtime = times[2];
-        mtime_nsec = times[3];
+        kstat_t st;
+        int have_old = 0;
+        if (times[1] == LINUX_UTIME_OMIT || times[3] == LINUX_UTIME_OMIT) {
+            if (vfs_vnode_stat(vn, &st) < 0)
+                return -EINVAL;
+            have_old = 1;
+        }
+
+        if (times[1] == LINUX_UTIME_OMIT) {
+            atime = st.st_atime;
+            atime_nsec = st.st_atime_nsec;
+        } else if (times[1] == LINUX_UTIME_NOW) {
+            atime = now[0];
+            atime_nsec = now[1];
+        } else {
+            atime = times[0];
+            atime_nsec = times[1];
+        }
+
+        if (times[3] == LINUX_UTIME_OMIT) {
+            if (!have_old && vfs_vnode_stat(vn, &st) < 0)
+                return -EINVAL;
+            mtime = st.st_mtime;
+            mtime_nsec = st.st_mtime_nsec;
+        } else if (times[3] == LINUX_UTIME_NOW) {
+            mtime = now[0];
+            mtime_nsec = now[1];
+        } else {
+            mtime = times[2];
+            mtime_nsec = times[3];
+        }
     }
     if (atime_nsec >= 1000000000ULL || mtime_nsec >= 1000000000ULL)
         return -EINVAL;
