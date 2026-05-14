@@ -2,6 +2,8 @@
 #include "mm/objcache.h"
 #include "sys/bpf.h"
 #include "core/string.h"
+#include "core/timer.h"
+#include "proc/proc.h"
 
 static obj_cache_t g_net_msg_cache = OBJ_CACHE_INIT("net_msg", net_msg_t, 16);
 
@@ -19,6 +21,28 @@ static void net_wake_socket_waiter_locked(net_socket_t *s)
 {
     if (s->waiter && s->waiter->state == PROC_BLOCKED)
         proc_make_ready(s->waiter);
+}
+
+static void net_block_on_queue_space_locked(net_socket_t *s, task_t *cur)
+{
+    s->send_waiter = cur;
+    proc_set_wake_time(cur, timer_get_ticks() + NET_WAIT_TICKS);
+    cur->state = PROC_BLOCKED;
+}
+
+static void net_clear_queue_space_waiter(net_socket_t *s, task_t *cur)
+{
+    uint64_t irq = spin_lock_irqsave(&g_net_lock);
+    if (s->send_waiter == cur)
+        s->send_waiter = NULL;
+    proc_set_wake_time(cur, 0);
+    spin_unlock_irqrestore(&g_net_lock, irq);
+}
+
+static void net_wake_queue_space_waiter_locked(net_socket_t *s)
+{
+    if (s->send_waiter && s->send_waiter->state == PROC_BLOCKED)
+        proc_make_ready(s->send_waiter);
 }
 
 int net_enqueue_msg_locked(net_socket_t *dst, const void *buf, size_t len,
@@ -55,6 +79,39 @@ int net_enqueue_msg_locked(net_socket_t *dst, const void *buf, size_t len,
     return (int)len;
 }
 
+int net_enqueue_msg_blocking(net_socket_t *dst, const void *buf, size_t len,
+                             const void *addr, size_t addrlen,
+                             int dontwait, uint64_t timeout_ticks)
+{
+    uint64_t start = timer_get_ticks();
+    for (;;) {
+        uint64_t irq = spin_lock_irqsave(&g_net_lock);
+        int r = net_enqueue_msg_locked(dst, buf, len, addr, addrlen);
+        if (r != -EAGAIN || dontwait) {
+            spin_unlock_irqrestore(&g_net_lock, irq);
+            return r;
+        }
+        task_t *cur = proc_current();
+        if (!cur) {
+            spin_unlock_irqrestore(&g_net_lock, irq);
+            return -EAGAIN;
+        }
+        if (net_task_has_unblocked_signal(cur)) {
+            spin_unlock_irqrestore(&g_net_lock, irq);
+            return -ERESTARTSYS;
+        }
+        if (timeout_ticks &&
+            (int64_t)(timer_get_ticks() - (start + timeout_ticks)) >= 0) {
+            spin_unlock_irqrestore(&g_net_lock, irq);
+            return -EAGAIN;
+        }
+        net_block_on_queue_space_locked(dst, cur);
+        spin_unlock_irqrestore(&g_net_lock, irq);
+        sched();
+        net_clear_queue_space_waiter(dst, cur);
+    }
+}
+
 int net_dequeue_msg_locked(net_socket_t *s, void *buf, size_t len,
                            void *addr, size_t *addrlen)
 {
@@ -83,6 +140,8 @@ int net_dequeue_msg_locked(net_socket_t *s, void *buf, size_t len,
         s->rx_tail = NULL;
     s->rx_count--;
     net_msg_free(m);
+    net_wake_socket_waiter_locked(s);
+    net_wake_queue_space_waiter_locked(s);
     return (int)n;
 }
 

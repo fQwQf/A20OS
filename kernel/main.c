@@ -62,8 +62,13 @@ static const mount_entry_t mount_table[] = {
 
 /* Optional extra devices — mounted if present, best-effort */
 static const mount_entry_t extra_mount_table[] = {
+#ifdef CONFIG_LOONGARCH64
+    { "/testla", "ext4" },  /* LoongArch test sdcard */
+    { "/testrv", "ext4" },  /* RISC-V test sdcard */
+#else
     { "/testrv", "ext4" },  /* RISC-V test sdcard */
     { "/testla", "ext4" },  /* LoongArch test sdcard */
+#endif
 };
 #define EXTRA_MOUNT_COUNT  2
 

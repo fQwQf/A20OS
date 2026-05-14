@@ -4,11 +4,15 @@
 
 int64_t sys_sched_get_priority_max(int policy)
 {
+    if (policy < 0 || policy > 5 || policy == 4)
+        return -EINVAL;
     return (policy == 1 || policy == 2) ? 99 : 0;
 }
 
 int64_t sys_sched_get_priority_min(int policy)
 {
+    if (policy < 0 || policy > 5 || policy == 4)
+        return -EINVAL;
     return (policy == 1 || policy == 2) ? 1 : 0;
 }
 
@@ -154,4 +158,3 @@ int64_t sys_sched_getattr(int pid, void *attr, unsigned size, unsigned flags)
     *(int *)(buf + 16) = t->priority;
     return copy_to_user(attr, buf, size < sizeof(buf) ? size : sizeof(buf)) < 0 ? -EFAULT : 0;
 }
-
