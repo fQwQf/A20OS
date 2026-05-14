@@ -70,7 +70,7 @@ static int deliver_user_sync_signal(trap_context_t *ctx, int sig, int fatal_code
     signal_state_t *ss = (signal_state_t *)cur->signals;
     sigaction_t *sa = &ss->actions[sig];
     if (sa->sa_handler == SIG_DFL || sa->sa_handler == SIG_IGN ||
-        (ss->blocked & signal_mask_bit(sig)))
+        (cur->sig_blocked & signal_mask_bit(sig)))
         proc_exit(fatal_code);
 
     signal_send(cur->pid, sig);

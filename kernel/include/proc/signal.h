@@ -43,7 +43,6 @@ typedef struct signal_state {
     refcount_t refcount;
     sigaction_t actions[NSIG];
     uint64_t    pending;     /* bitmask of pending signals */
-    uint64_t    blocked;     /* signal mask */
     uint8_t     pending_has_info[NSIG];
     uint8_t     pending_info[NSIG][SIGNAL_INFO_SIZE];
 } signal_state_t;
@@ -108,19 +107,38 @@ typedef struct {
     int _sifields[29];
 } __attribute__((aligned(16))) siginfo_t;
 
+#define USER_SIGSET_WORDS (128 / (int)sizeof(uint64_t))
+
+#if defined(CONFIG_LOONGARCH64)
 typedef struct {
-    uint64_t sc_regs[32];
     uint64_t sc_pc;
+    uint64_t sc_regs[32];
+    uint32_t sc_flags;
+    uint64_t sc_extcontext[0] __attribute__((aligned(16)));
 } __attribute__((aligned(16))) sigcontext_t;
 
 typedef struct ucontext {
     uint64_t        uc_flags;
     uintptr_t       uc_link;
     stack_t         uc_stack;
-    uint64_t        uc_sigmask;
-    uint64_t        uc_sig[16];
+    uint64_t        uc_sigmask[USER_SIGSET_WORDS];
+    uint64_t        uc_pad;
     sigcontext_t    uc_mcontext;
 } __attribute__((aligned(16))) ucontext_t;
+#else
+typedef struct {
+    uint64_t sc_regs[32];
+    uint64_t sc_fpregs[66];
+} __attribute__((aligned(16))) sigcontext_t;
+
+typedef struct ucontext {
+    uint64_t        uc_flags;
+    uintptr_t       uc_link;
+    stack_t         uc_stack;
+    uint64_t        uc_sigmask[USER_SIGSET_WORDS];
+    sigcontext_t    uc_mcontext;
+} __attribute__((aligned(16))) ucontext_t;
+#endif
 
 typedef struct {
     uint64_t    flag;
