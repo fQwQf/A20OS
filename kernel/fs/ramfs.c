@@ -64,6 +64,21 @@ static ramfs_inode_t *ramfs_alloc_inode(int type) {
     return NULL;
 }
 
+static void ramfs_free_inode(ramfs_inode_t *inode) {
+    if (!inode || inode == &g_inode_table[0])
+        return;
+    if (inode->data)
+        kfree(inode->data);
+    memset(inode, 0, sizeof(*inode));
+}
+
+static void ramfs_maybe_free_unlinked_inode(ramfs_inode_t *inode) {
+    if (!inode || inode == &g_inode_table[0])
+        return;
+    if (inode->nlink == 0 && inode->ref_count <= 1)
+        ramfs_free_inode(inode);
+}
+
 static ramfs_dir_entry_t *ramfs_dir_entries(ramfs_inode_t *dir) {
     return (ramfs_dir_entry_t *)dir->data;
 }
@@ -74,6 +89,17 @@ static int ramfs_dir_entry_count(ramfs_inode_t *dir) {
 
 static int ramfs_add_dir_entry(ramfs_inode_t *dir, const char *name, int inum) {
     int count = ramfs_dir_entry_count(dir);
+    ramfs_dir_entry_t *entries = ramfs_dir_entries(dir);
+
+    for (int i = 0; i < count; i++) {
+        if (entries[i].name[0] == '\0') {
+            strncpy(entries[i].name, name, MAX_NAME_LEN - 1);
+            entries[i].name[MAX_NAME_LEN - 1] = '\0';
+            entries[i].inum = inum;
+            return 0;
+        }
+    }
+
     if (count >= RAMFS_MAX_DIR_ENTRIES) return -ENOSPC;
 
     size_t needed = (count + 1) * sizeof(ramfs_dir_entry_t);
@@ -90,7 +116,7 @@ static int ramfs_add_dir_entry(ramfs_inode_t *dir, const char *name, int inum) {
         dir->capacity = new_cap;
     }
 
-    ramfs_dir_entry_t *entries = ramfs_dir_entries(dir);
+    entries = ramfs_dir_entries(dir);
     strncpy(entries[count].name, name, MAX_NAME_LEN - 1);
     entries[count].name[MAX_NAME_LEN - 1] = '\0';
     entries[count].inum = inum;
@@ -170,6 +196,7 @@ static vnode_t *ramfs_make_vnode(mount_t *mnt, ramfs_inode_t *inode) {
 
     vnode_t *vn = (vnode_t *)kmalloc(sizeof(vnode_t));
     if (!vn) return NULL;
+    inode->ref_count++;
 
     memset(vn, 0, sizeof(*vn));
     vn->ino = (uint64_t)inode->inum;
@@ -236,7 +263,12 @@ static int ramfs_vnode_mkdir(vnode_t *dir, const char *name, int mode) {
     memset(child->data, 0, child->capacity);
     ramfs_add_dir_entry(child, ".", child->inum);
     ramfs_add_dir_entry(child, "..", dinode->inum);
-    ramfs_add_dir_entry(dinode, name, child->inum);
+    int r = ramfs_add_dir_entry(dinode, name, child->inum);
+    if (r < 0) {
+        ramfs_free_inode(child);
+        return r;
+    }
+    dinode->nlink++;
     return 0;
 }
 
@@ -256,17 +288,30 @@ static int ramfs_vnode_create(vnode_t *dir, const char *name, int mode, vnode_t 
         return -ENOMEM;
     }
 
-    ramfs_add_dir_entry(dinode, name, child->inum);
+    int r = ramfs_add_dir_entry(dinode, name, child->inum);
+    if (r < 0) {
+        ramfs_free_inode(child);
+        return r;
+    }
     *out = ramfs_make_vnode(dir->mnt, child);
+    if (!*out) {
+        ramfs_free_inode(child);
+        return -ENOMEM;
+    }
     if (*out) {
         (*out)->parent = dir;
         vnode_get(dir);
     }
-    return *out ? 0 : -ENOMEM;
+    return 0;
 }
 
 static void ramfs_vnode_release(vnode_t *vn) {
+    ramfs_inode_t *inode = vn ? (ramfs_inode_t *)vn->fs_data : NULL;
     vnode_put(vn->parent);
+    if (inode && inode->ref_count > 1) {
+        inode->ref_count--;
+        ramfs_maybe_free_unlinked_inode(inode);
+    }
     kfree(vn);
 }
 
@@ -279,7 +324,10 @@ static int ramfs_vnode_unlink(vnode_t *dir, const char *name) {
         if (entries[i].name[0] != '\0' && strcmp(entries[i].name, name) == 0) {
             entries[i].name[0] = '\0';
             ramfs_inode_t *victim = ramfs_find_inode_by_inum(entries[i].inum);
-            if (victim && victim->nlink > 0) victim->nlink--;
+            if (victim && victim->nlink > 0) {
+                victim->nlink--;
+                ramfs_maybe_free_unlinked_inode(victim);
+            }
             return 0;
         }
     }
@@ -316,7 +364,11 @@ static int ramfs_vnode_symlink(vnode_t *dir, const char *name, const char *targe
 
     memcpy(child->data, target, tlen + 1);
     child->size = tlen;
-    ramfs_add_dir_entry(dinode, name, child->inum);
+    int r = ramfs_add_dir_entry(dinode, name, child->inum);
+    if (r < 0) {
+        ramfs_free_inode(child);
+        return r;
+    }
     return 0;
 }
 
@@ -395,6 +447,10 @@ static int ramfs_vnode_rmdir(vnode_t *dir, const char *name) {
             if (active > 2) return -ENOTEMPTY;
 
             entries[i].name[0] = '\0';
+            if (dinode->nlink > 0)
+                dinode->nlink--;
+            child->nlink = 0;
+            ramfs_maybe_free_unlinked_inode(child);
             return 0;
         }
     }

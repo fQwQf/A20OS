@@ -141,6 +141,7 @@ typedef struct task_t {
     size_t    scratch_size;
 
     trap_context_t sig_saved_ctx;
+    uint64_t       sig_blocked;
     uint64_t       sig_old_blocked;
     int            sig_handling;
     uint64_t       sigsuspend_old_blocked;

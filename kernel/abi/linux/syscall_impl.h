@@ -209,6 +209,8 @@ int64_t sys_sigsuspend(void *mask, size_t sigsetsize);
 int64_t sys_sigaltstack(void *ss, void *old_ss);
 int64_t sys_sigtimedwait(const uint64_t *set, void *info, const void *timeout, size_t sigsetsize);
 int64_t sys_rt_sigqueueinfo(int tgid, int sig, void *uinfo);
+int linux_pidfd_create(int pid, int flags);
+int64_t sys_pidfd_send_signal(int pidfd, int sig, void *uinfo, unsigned flags);
 
 int64_t sys_brk(uint64_t addr);
 int64_t sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, long off);
