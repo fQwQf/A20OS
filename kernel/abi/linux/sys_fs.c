@@ -665,6 +665,13 @@ int64_t sys_pselect6(int nfds, void *readfds, void *writefds,
         }
     }
 #define PSELECT_RETURN(v) do { if (saved_ss) t->sig_blocked = saved_blocked; return (v); } while (0)
+#define PSELECT_SIGNAL_RETURN(v) do { \
+    if (saved_ss) { \
+        t->sigsuspend_old_blocked = saved_blocked; \
+        t->sigsuspend_active = 1; \
+    } \
+    return (v); \
+} while (0)
     for (;;) {
         int ready_count = 0;
 
@@ -699,8 +706,9 @@ int64_t sys_pselect6(int nfds, void *readfds, void *writefds,
             PSELECT_RETURN(fr < 0 ? fr : 0);
         }
         if (signal_task_has_unblocked(t))
-            PSELECT_RETURN(-EINTR);
+            PSELECT_SIGNAL_RETURN(-EINTR);
         linux_poll_sleep_until(deadline, has_timeout);
     }
 #undef PSELECT_RETURN
+#undef PSELECT_SIGNAL_RETURN
 }
