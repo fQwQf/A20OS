@@ -57,6 +57,57 @@ static void append_existing_dir(char *buf, size_t buf_size, const char *path)
         append_path_component(buf, buf_size, path);
 }
 
+static void append_arch_test_dirs(char *buf, size_t buf_size,
+                                  const char *runtime)
+{
+#if defined(__loongarch64)
+    char primary[32];
+    char secondary[32];
+    snprintf(primary, sizeof(primary), "/testla/%s", runtime);
+    snprintf(secondary, sizeof(secondary), "/testrv/%s", runtime);
+    append_existing_dir(buf, buf_size, primary);
+    append_existing_dir(buf, buf_size, secondary);
+#else
+    char primary[32];
+    char secondary[32];
+    snprintf(primary, sizeof(primary), "/testrv/%s", runtime);
+    snprintf(secondary, sizeof(secondary), "/testla/%s", runtime);
+    append_existing_dir(buf, buf_size, primary);
+    append_existing_dir(buf, buf_size, secondary);
+#endif
+}
+
+static void append_arch_test_lib_dirs(char *buf, size_t buf_size,
+                                      const char *runtime)
+{
+#if defined(__loongarch64)
+    char primary[40];
+    char secondary[40];
+    snprintf(primary, sizeof(primary), "/testla/%s/lib", runtime);
+    snprintf(secondary, sizeof(secondary), "/testrv/%s/lib", runtime);
+    append_existing_dir(buf, buf_size, primary);
+    append_existing_dir(buf, buf_size, secondary);
+#else
+    char primary[40];
+    char secondary[40];
+    snprintf(primary, sizeof(primary), "/testrv/%s/lib", runtime);
+    snprintf(secondary, sizeof(secondary), "/testla/%s/lib", runtime);
+    append_existing_dir(buf, buf_size, primary);
+    append_existing_dir(buf, buf_size, secondary);
+#endif
+}
+
+static void append_arch_test_roots(char *buf, size_t buf_size)
+{
+#if defined(__loongarch64)
+    append_existing_dir(buf, buf_size, "/testla");
+    append_existing_dir(buf, buf_size, "/testrv");
+#else
+    append_existing_dir(buf, buf_size, "/testrv");
+    append_existing_dir(buf, buf_size, "/testla");
+#endif
+}
+
 static int build_test_exec_path(const char *runtime, char *buf, size_t buf_size)
 {
     if (!buf || buf_size == 0)
@@ -71,22 +122,17 @@ static int build_test_exec_path(const char *runtime, char *buf, size_t buf_size)
 
     if (is_musl_runtime(runtime)) {
         append_existing_dir(buf, buf_size, "/test/musl");
-        append_existing_dir(buf, buf_size, "/testrv/musl");
-        append_existing_dir(buf, buf_size, "/testla/musl");
+        append_arch_test_dirs(buf, buf_size, "musl");
         append_existing_dir(buf, buf_size, "/test/glibc");
-        append_existing_dir(buf, buf_size, "/testrv/glibc");
-        append_existing_dir(buf, buf_size, "/testla/glibc");
+        append_arch_test_dirs(buf, buf_size, "glibc");
     } else {
         append_existing_dir(buf, buf_size, "/test/glibc");
-        append_existing_dir(buf, buf_size, "/testrv/glibc");
-        append_existing_dir(buf, buf_size, "/testla/glibc");
+        append_arch_test_dirs(buf, buf_size, "glibc");
         append_existing_dir(buf, buf_size, "/test/musl");
-        append_existing_dir(buf, buf_size, "/testrv/musl");
-        append_existing_dir(buf, buf_size, "/testla/musl");
+        append_arch_test_dirs(buf, buf_size, "musl");
     }
 
-    append_existing_dir(buf, buf_size, "/testrv");
-    append_existing_dir(buf, buf_size, "/testla");
+    append_arch_test_roots(buf, buf_size);
     return 0;
 }
 
@@ -98,20 +144,16 @@ static int build_test_ld_library_path(const char *runtime, char *buf, size_t buf
     buf[0] = '\0';
     if (is_musl_runtime(runtime)) {
         append_existing_dir(buf, buf_size, "/test/musl/lib");
-        append_existing_dir(buf, buf_size, "/testrv/musl/lib");
-        append_existing_dir(buf, buf_size, "/testla/musl/lib");
+        append_arch_test_lib_dirs(buf, buf_size, "musl");
         append_existing_dir(buf, buf_size, "/musl/lib");
         append_existing_dir(buf, buf_size, "/test/glibc/lib");
-        append_existing_dir(buf, buf_size, "/testrv/glibc/lib");
-        append_existing_dir(buf, buf_size, "/testla/glibc/lib");
+        append_arch_test_lib_dirs(buf, buf_size, "glibc");
     } else {
         append_existing_dir(buf, buf_size, "/test/glibc/lib");
-        append_existing_dir(buf, buf_size, "/testrv/glibc/lib");
-        append_existing_dir(buf, buf_size, "/testla/glibc/lib");
+        append_arch_test_lib_dirs(buf, buf_size, "glibc");
         append_existing_dir(buf, buf_size, "/glibc/lib");
         append_existing_dir(buf, buf_size, "/test/musl/lib");
-        append_existing_dir(buf, buf_size, "/testrv/musl/lib");
-        append_existing_dir(buf, buf_size, "/testla/musl/lib");
+        append_arch_test_lib_dirs(buf, buf_size, "musl");
     }
 
     return buf[0] ? 0 : -1;
