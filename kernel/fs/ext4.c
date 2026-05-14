@@ -154,6 +154,7 @@ static void ext4_bitmap_free(ext4_sb_info_t *sb, uint64_t bm_blk, uint32_t bit) 
 }
 
 static uint64_t ext4_alloc_block(ext4_sb_info_t *sb) {
+    mutex_lock(&sb->alloc_lock);
     for (uint32_t g = 0; g < sb->groups_count; g++) {
         if (sb->group_descs[g].bg_free_blocks_count_lo == 0) continue;
         uint64_t bm = (uint64_t)sb->group_descs[g].bg_block_bitmap_lo |
@@ -168,24 +169,32 @@ static uint64_t ext4_alloc_block(ext4_sb_info_t *sb) {
         if (z) { memset(z, 0, sb->block_size);
                   bcache_write_bytes(sb->bc, phys * sb->block_size, z, sb->block_size);
                   kfree(z); }
+        mutex_unlock(&sb->alloc_lock);
         return phys;
     }
+    mutex_unlock(&sb->alloc_lock);
     return 0;
 }
 
 static void ext4_free_block(ext4_sb_info_t *sb, uint64_t phys) {
+    mutex_lock(&sb->alloc_lock);
     uint32_t rel = (uint32_t)(phys - sb->first_data_block);
     uint32_t g = rel / sb->blocks_per_group;
     uint32_t bit = rel % sb->blocks_per_group;
-    if (g >= sb->groups_count) return;
+    if (g >= sb->groups_count) {
+        mutex_unlock(&sb->alloc_lock);
+        return;
+    }
     uint64_t bm = (uint64_t)sb->group_descs[g].bg_block_bitmap_lo |
                   ((uint64_t)sb->group_descs[g].bg_block_bitmap_hi << 32);
     ext4_bitmap_free(sb, bm, bit);
     sb->group_descs[g].bg_free_blocks_count_lo++;
     ext4_writeback_gd(sb, g);
+    mutex_unlock(&sb->alloc_lock);
 }
 
 static uint32_t ext4_alloc_inode(ext4_sb_info_t *sb) {
+    mutex_lock(&sb->alloc_lock);
     for (uint32_t g = 0; g < sb->groups_count; g++) {
         if (sb->group_descs[g].bg_free_inodes_count_lo == 0) continue;
         uint64_t bm = (uint64_t)sb->group_descs[g].bg_inode_bitmap_lo |
@@ -194,20 +203,28 @@ static uint32_t ext4_alloc_inode(ext4_sb_info_t *sb) {
         if (bit < 0) continue;
         sb->group_descs[g].bg_free_inodes_count_lo--;
         ext4_writeback_gd(sb, g);
-        return g * sb->inodes_per_group + bit + 1;
+        uint32_t ino = g * sb->inodes_per_group + bit + 1;
+        mutex_unlock(&sb->alloc_lock);
+        return ino;
     }
+    mutex_unlock(&sb->alloc_lock);
     return 0;
 }
 
 static void ext4_free_inode(ext4_sb_info_t *sb, uint32_t ino) {
+    mutex_lock(&sb->alloc_lock);
     uint32_t g = (ino - 1) / sb->inodes_per_group;
     uint32_t bit = (ino - 1) % sb->inodes_per_group;
-    if (g >= sb->groups_count) return;
+    if (g >= sb->groups_count) {
+        mutex_unlock(&sb->alloc_lock);
+        return;
+    }
     uint64_t bm = (uint64_t)sb->group_descs[g].bg_inode_bitmap_lo |
                   ((uint64_t)sb->group_descs[g].bg_inode_bitmap_hi << 32);
     ext4_bitmap_free(sb, bm, bit);
     sb->group_descs[g].bg_free_inodes_count_lo++;
     ext4_writeback_gd(sb, g);
+    mutex_unlock(&sb->alloc_lock);
 }
 
 /* ================================================================
@@ -752,6 +769,13 @@ static int ext4_stat(vnode_t *vn, kstat_t *st) {
     st->st_blksize = p->sb->block_size;
     st->st_blocks  = (sz + 511) / 512;
     st->st_mode = dinode.i_mode ? dinode.i_mode : vn->mode;
+    uint32_t vtype_mode = S_IFREG;
+    if (vn->type == VFS_FT_DIR)
+        vtype_mode = S_IFDIR;
+    else if (vn->type == VFS_FT_SYMLINK)
+        vtype_mode = S_IFLNK;
+    if ((st->st_mode & S_IFMT) != vtype_mode)
+        st->st_mode = (st->st_mode & ~S_IFMT) | vtype_mode;
     st->st_uid = dinode.i_uid;
     st->st_gid = dinode.i_gid;
     st->st_nlink = 1;
@@ -1316,7 +1340,9 @@ static int ext4_freaddir(vfile_t *vf, void *dirp, size_t count) {
         uint32_t off = start;
         while (off < bs) {
             ext4_dir_entry_t *de = (ext4_dir_entry_t *)(blk + off);
-            if (de->rec_len == 0) break;
+            if (de->rec_len < 8 || de->rec_len > bs - off ||
+                (de->rec_len & 3) || de->name_len > de->rec_len - 8)
+                break;
             if (de->inode == 0) { off += de->rec_len; continue; }
 
             char fname[256];
@@ -1435,6 +1461,7 @@ vnode_t *ext4_mount(bcache_t *bc) {
         return NULL;
     }
     memset(esi, 0, sizeof(*esi));
+    mutex_init(&esi->alloc_lock);
 
     esi->inodes_count = sb.s_inodes_count;
 

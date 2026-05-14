@@ -103,6 +103,7 @@
 #define SYS_sigreturn      139
 #define SYS_sigsuspend     133
 #define SYS_rt_sigqueueinfo 138
+#define SYS_pidfd_send_signal 424
 #define SYS_setpriority    140
 #define SYS_getpriority    141
 #define SYS_setregid       143

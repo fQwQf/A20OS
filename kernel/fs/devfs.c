@@ -47,6 +47,7 @@ typedef struct {
 typedef struct {
     int kind;
     const char *name;
+    uint64_t rdev;
 } devfs_node_t;
 
 static int devfs_lookup(vnode_t *dir, const char *name, vnode_t **out);
@@ -60,16 +61,17 @@ static vnode_ops_t g_devfs_ops = {
 };
 
 static devfs_node_t g_nodes[] = {
-    { DEVFS_ROOT, "" },
-    { DEVFS_MISC, "misc" },
-    { DEVFS_NULL, "null" },
-    { DEVFS_ZERO, "zero" },
-    { DEVFS_RANDOM, "random" },
-    { DEVFS_RANDOM, "urandom" },
-    { DEVFS_TTY,  "tty"  },
-    { DEVFS_TTY,  "console" },
-    { DEVFS_RTC,  "rtc"  },
-    { DEVFS_RTC,  "rtc0" },
+    { DEVFS_ROOT, "", 0 },
+    { DEVFS_MISC, "misc", 0 },
+    { DEVFS_NULL, "null", 0x103 },
+    { DEVFS_ZERO, "zero", 0x105 },
+    { DEVFS_RANDOM, "random", 0x108 },
+    { DEVFS_RANDOM, "urandom", 0x109 },
+    { DEVFS_NULL, "cpu_dma_latency", 0x10a },
+    { DEVFS_TTY,  "tty", 0x500 },
+    { DEVFS_TTY,  "console", 0x501 },
+    { DEVFS_RTC,  "rtc", 0xfe00 },
+    { DEVFS_RTC,  "rtc0", 0xfe00 },
 };
 
 static vnode_t g_vnodes[sizeof(g_nodes) / sizeof(g_nodes[0])];
@@ -151,6 +153,7 @@ static int devfs_dir_readdir(vfile_t *vf, void *dirp, size_t count) {
         { ".", DT_DIR }, { "..", DT_DIR }, { "misc", DT_DIR },
         { "null", DT_CHR }, { "zero", DT_CHR }, { "tty", DT_CHR },
         { "random", DT_CHR }, { "urandom", DT_CHR },
+        { "cpu_dma_latency", DT_CHR },
         { "rtc", DT_CHR }, { "rtc0", DT_CHR },
     };
     static const struct {
@@ -382,15 +385,20 @@ static int devfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
             }
         }
     } else if (node->kind == DEVFS_MISC && strcmp(name, "rtc") == 0) {
-        *out = node_to_vnode(7);
-        return 0;
+        for (size_t i = 1; i < sizeof(g_nodes) / sizeof(g_nodes[0]); i++) {
+            if (g_nodes[i].kind == DEVFS_RTC && strcmp(g_nodes[i].name, "rtc") == 0) {
+                *out = node_to_vnode(i);
+                return 0;
+            }
+        }
     }
     return -ENOENT;
 }
 
-static void fill_char_kstat(kstat_t *st) {
+static void fill_char_kstat(kstat_t *st, uint64_t rdev) {
     memset(st, 0, sizeof(*st));
     st->st_mode = S_IFCHR | 0666;
+    st->st_rdev = rdev;
     st->st_uid = 0;
     st->st_gid = 0;
     st->st_nlink = 1;
@@ -408,7 +416,7 @@ static int devfs_stat(vnode_t *vn, kstat_t *st) {
         st->st_nlink = 2;
         st->st_blksize = 4096;
     } else {
-        fill_char_kstat(st);
+        fill_char_kstat(st, node->rdev);
     }
     return 0;
 }

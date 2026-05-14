@@ -85,26 +85,14 @@ QEMU_FLAGS += -drive file=$(FAT32_IMG),if=none,format=raw,id=x0 -device virtio-b
 QEMU_FLAGS += -drive file=$(EXT4_IMG),if=none,format=raw,id=x1 -device virtio-blk-pci,drive=x1
 QEMU_FLAGS += $(NETDEV_USER) -device virtio-net-pci,netdev=net
 
-ifneq ($(wildcard sdcard-rv.img),)
-QEMU_FLAGS += -drive file=sdcard-rv.img,if=none,format=raw,id=x2 -device virtio-blk-pci,drive=x2
-endif
-
 ifneq ($(wildcard sdcard-la.img),)
-QEMU_FLAGS += -drive file=sdcard-la.img,if=none,format=raw,id=x3 -device virtio-blk-pci,drive=x3
+QEMU_FLAGS += -drive file=sdcard-la.img,if=none,format=raw,id=x2 -device virtio-blk-pci,drive=x2
 endif
 
 else ifeq ($(ARCH), aarch64)
 QEMU_FLAGS += -drive file=$(FAT32_IMG),if=none,format=raw,id=x0 -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0
 QEMU_FLAGS += -drive file=$(EXT4_IMG),if=none,format=raw,id=x1 -device virtio-blk-device,drive=x1,bus=virtio-mmio-bus.1
 QEMU_FLAGS += $(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4
-
-ifneq ($(wildcard sdcard-rv.img),)
-QEMU_FLAGS += -drive file=sdcard-rv.img,if=none,format=raw,id=x2 -device virtio-blk-device,drive=x2,bus=virtio-mmio-bus.2
-endif
-
-ifneq ($(wildcard sdcard-la.img),)
-QEMU_FLAGS += -drive file=sdcard-la.img,if=none,format=raw,id=x3 -device virtio-blk-device,drive=x3,bus=virtio-mmio-bus.3
-endif
 
 endif
 endif

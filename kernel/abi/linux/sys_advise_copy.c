@@ -144,6 +144,10 @@ int64_t sys_close_range(unsigned first, unsigned last, unsigned flags)
     if (first > last) return -EINVAL;
     task_t *t = proc_current();
     if (!t) return -ESRCH;
+    if (flags & CLOSE_RANGE_UNSHARE) {
+        int r = fdtable_unshare(t);
+        if (r < 0) return r;
+    }
     if (first >= MAX_FILES) return 0;
     if (last >= MAX_FILES) last = MAX_FILES - 1;
     for (unsigned fd = first; fd <= last; fd++) {
