@@ -8,6 +8,7 @@
 #include "mm/vm.h"
 #include "core/cpu.h"
 #include "core/string.h"
+#include "cg/cgroup.h"
 
 void proc_set_name(task_t *t, const char *name)
 {
@@ -108,6 +109,12 @@ void proc_task_init_common(task_t *t, task_t *parent)
     t->limits.nofile = parent ? parent->limits.nofile : MAX_FILES;
     t->mm        = NULL;
 
+    t->cgroup     = parent ? parent->cgroup : NULL;
+    t->cpus_allowed = parent ? parent->cpus_allowed
+                              : (1U << CONFIG_NR_CPUS) - 1;
+    t->cg_throttled = 0;
+    t->cg_cpu_start = 0;
+
     if (parent) {
         memcpy(t->fs.cwd, parent->fs.cwd, MAX_PATH_LEN);
         memcpy(t->fs.root_path, parent->fs.root_path, MAX_PATH_LEN);
@@ -147,6 +154,11 @@ void proc_task_release_resources(task_t *t)
 {
     if (!t)
         return;
+
+    if (t->cgroup) {
+        cg_detach_task(t->cgroup, t->pid);
+        t->cgroup = NULL;
+    }
 
     fdtable_close_all(t);
     bpf_release_process(t->pid);

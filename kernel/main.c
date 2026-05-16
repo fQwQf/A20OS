@@ -24,73 +24,25 @@
 void init_kthread(void);
 
 /* ============================================================
- * Block-device mount configuration
+ * Block-device mount — unified strategy
  *
- * virtio_blk_init() auto-assigns the next transport slot, so each
- * call probes the next virtio-blk device in sequence.
- * virtio_blk_get_dev(i) then returns the block_dev_t for slot i.
+ * Probe all virtio-blk devices.  Auto-detect by filesystem type:
+ *   fat32 → /bin   (our utilities: init, mksh, cmds, …)
+ *   ext4  → /test  (judge sdcard or local sdcard image)
  *
- * CONTEST mode  (competition QEMU):
- *   Device 0 (bus 0) = test EXT4 disk  (provided by judge)
- *   Device 1 (bus 1) = our utilities    (disk.img / disk-la.img)
- *
- * Development mode (run-riscv64 / run-loongarch64):
- *   Device 0 (bus 0) = FAT32 user apps
- *   Device 1 (bus 1) = EXT4 data
- *   Device 2..3      = optional sdcard images (best-effort)
+ * Works regardless of device ordering:
+ *   Contest QEMU:  dev0=ext4(sdcard) dev1=fat32(disk.img)
+ *   Dev QEMU:      dev0=fat32(disk.img) dev1=ext4(sdcard)
  * ============================================================ */
 
 #ifndef BRINGUP
-typedef struct {
-    const char *mount_point;
-    const char *fs_type;
-} mount_entry_t;
-
-#ifdef CONTEST
-static const mount_entry_t mount_table[] = {
-    { "/test", "ext4"  },   /* Device 0: competition test disk */
-    { "/bin",  "fat32" },   /* Device 1: our user-space utilities */
-};
-#define MOUNT_COUNT  2
-#else
-static const mount_entry_t mount_table[] = {
-    { "/bin", "fat32" },
-    { "/mnt",  "ext4"  },
-};
-#define MOUNT_COUNT  2
-#endif /* CONTEST */
-
-/* Optional extra devices — mounted if present, best-effort */
-static const mount_entry_t extra_mount_table[] = {
-#ifdef CONFIG_LOONGARCH64
-    { "/testla", "ext4" },  /* LoongArch test sdcard */
-    { "/testrv", "ext4" },  /* RISC-V test sdcard */
-#else
-    { "/testrv", "ext4" },  /* RISC-V test sdcard */
-    { "/testla", "ext4" },  /* LoongArch test sdcard */
-#endif
-};
-#define EXTRA_MOUNT_COUNT  2
-
-/* Extra packages disk — always the last block device tried */
-static const mount_entry_t pkgs_mount = { "/usr", "ext4" };
-
-/* Try to initialise, create a block cache, mkdir and mount.
- * Returns 0 on success, <0 on any failure (already logged). */
 static int try_mount(int dev_idx, const char *mnt, const char *fstype) {
     block_dev_t *dev = virtio_blk_get_dev(dev_idx);
-    if (!dev) {
-        printf("[INIT] Device %d: not available\n", dev_idx);
-        return -1;
-    }
+    if (!dev) return -1;
     bcache_t *bc = bcache_create(dev);
-    if (!bc) {
-        printf("[INIT] Device %d: block-cache creation failed\n", dev_idx);
-        return -1;
-    }
+    if (!bc) return -1;
     int mkret = vfs_mkdir(mnt, 0755);
     if (mkret < 0 && mkret != -EEXIST) {
-        printf("[INIT] Device %d: mkdir %s failed (%d)\n", dev_idx, mnt, mkret);
         bcache_destroy(bc);
         return mkret;
     }
@@ -98,10 +50,30 @@ static int try_mount(int dev_idx, const char *mnt, const char *fstype) {
     if (r == 0) {
         printf("[INIT] Device %d -> %s (%s)\n", dev_idx, mnt, fstype);
     } else {
-        printf("[INIT] Device %d: mount %s failed (%d)\n", dev_idx, mnt, r);
         bcache_destroy(bc);
     }
     return r;
+}
+
+static void mount_block_devices(void) {
+    int bin_ok = 0, test_ok = 0;
+
+    for (int i = 0; i < 8; i++) {
+        if (virtio_blk_init() != 0)
+            break;
+
+        if (!bin_ok && try_mount(i, "/bin", "fat32") == 0) {
+            bin_ok = 1;
+            continue;
+        }
+        if (!test_ok && try_mount(i, "/test", "ext4") == 0) {
+            test_ok = 1;
+            continue;
+        }
+    }
+
+    if (!bin_ok)  printf("[INIT] WARNING: no FAT32 device for /bin\n");
+    if (!test_ok) printf("[INIT] no ext4 device for /test (ok without sdcard)\n");
 }
 #endif /* BRINGUP */
 
@@ -110,89 +82,43 @@ void kernel_main(void) {
     printf("======================================\n");
     printf("    A20OS Kernel \n");
     printf("======================================\n");
-#ifdef CONTEST
-    printf("  (contest mode)\n");
-#endif
     printf("Initializing system...\n");
-    /* Initialize subsystems */
-    trap_init();
-    printf("[INIT] Trap subsystem initialized\n");
 
+    trap_init();
+    printf("[INIT] Trap initialized\n");
     uart_init();
     printf("[INIT] UART initialized\n");
-
     timer_init();
     printf("[INIT] Timer initialized\n");
-
     timekeeping_init();
     printf("[INIT] Timekeeping initialized\n");
-
     mm_init();
-    printf("[INIT] Memory manager initialized\n");
-
+    printf("[INIT] Memory initialized\n");
     random_init();
-    printf("[INIT] Random subsystem initialized\n");
-
+    printf("[INIT] Random initialized\n");
     vfs_init();
     printf("[INIT] VFS initialized\n");
-
     net_init();
     printf("[INIT] Network initialized\n");
 
-    /* ---- Mount block devices ---- */
 #ifdef BRINGUP
-    printf("[INIT] BRINGUP mode: skipping block device probe\n");
+    printf("[INIT] BRINGUP mode: no block devices\n");
 #else
-    for (int i = 0; i < MOUNT_COUNT; i++) {
-        if (virtio_blk_init() != 0) {
-            printf("[INIT] Device %d: probe failed, skipping\n", i);
-            continue;
-        }
-        const char *mnt = mount_table[i].mount_point;
-        const char *fstype = mount_table[i].fs_type;
-        if (try_mount(i, mnt, fstype) != 0) {
-            const char *alt = (strcmp(fstype, "ext4") == 0) ? "fat32" : "ext4";
-            printf("[INIT] Device %d: retrying as %s\n", i, alt);
-            try_mount(i, mnt, alt);
-        }
-    }
-
-    /* Best-effort: try optional extra sdcard images */
-    for (int j = 0; j < EXTRA_MOUNT_COUNT; j++) {
-        if (virtio_blk_init() != 0)
-            break;  /* no more devices */
-        int dev_idx = MOUNT_COUNT + j;
-        try_mount(dev_idx,
-                  extra_mount_table[j].mount_point,
-                  extra_mount_table[j].fs_type);
-    }
-
-    /* Best-effort: extra packages disk (vim/git/gcc) */
-    if (virtio_blk_init() == 0) {
-        int pkgs_idx = MOUNT_COUNT + EXTRA_MOUNT_COUNT;
-        try_mount(pkgs_idx, pkgs_mount.mount_point, pkgs_mount.fs_type);
-    }
+    mount_block_devices();
 #endif
 
-    /* Initialize process management */
     proc_init();
     printf("[INIT] Process manager initialized\n");
 
 #ifdef BRINGUP
-    printf("[INIT] BRINGUP mode: no userspace init; entering idle loop\n");
-    printf("[INIT] System ready\n\n");
+    printf("[INIT] System ready (bringup, no userspace)\n\n");
     idle_loop();
 #else
-    /* Create init kthread */
     int ret = proc_alloc(init_kthread);
-    if (ret < 0) {
+    if (ret < 0)
         panic("Failed to create init_kthread");
-    }
 
-    printf("[INIT] Starting scheduler...\n");
     printf("[INIT] System ready\n\n");
-
-#ifndef CONTEST
     printf("\033[1;36m");
     printf("    _    ____   ___   ___  ____  \n");
     printf("   / \\  |___ \\ / _ \\ / _ \\/ ___| \n");
@@ -200,12 +126,8 @@ void kernel_main(void) {
     printf(" / ___ \\ / __/| |_| | |_| |___) |\n");
     printf("/_/   \\_\\_____|\\___/ \\___/|____/ \n");
     printf("\033[0m");
-    printf("Welcome to AAAAAAAAAAAAAAAAAAAAOS!\n\n");
-#endif
+    printf("Welcome to A20OS!\n\n");
 
-    /* Start scheduler — switches to init_kthread. When idle is later
-     * restored via context_switch, execution returns here. Enter
-     * idle_loop so the scheduler keeps running (wfi + proc_yield). */
     sched();
     idle_loop();
 #endif
@@ -215,10 +137,8 @@ void init_kthread(void) {
     task_t *cur = proc_current();
     kdebug("[INIT] Init process started (pid=%d)\n", cur ? cur->pid : 0);
 
-
     kdebug("[INIT] Loading init program...\n");
 
-    /* Open init program from FAT32 filesystem */
     const char *init_path = "/bin/init";
     int fd = vfs_open(init_path, O_RDONLY, 0);
     if (fd < 0) {

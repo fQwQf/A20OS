@@ -38,6 +38,7 @@
 #define PT_TLS      7
 #define PT_PHDR     6
 #define PT_GNU_STACK 0x6474e551
+#define PT_A20_START_INFO 0x70000001
 
 /* ELF segment flags */
 #define PF_X  1   /* Execute */
@@ -104,6 +105,7 @@ typedef struct elf_load_info {
     uint64_t  tls_tp;
     uint64_t  interp_base;
     struct vm_area *mmap;
+    int       is_native_abi;
 } elf_load_info_t;
 
 /* ---- API ---- */
@@ -123,5 +125,12 @@ int elf_check_header(const Elf64_Ehdr *eh);
  * Returns new sp value. */
 uint64_t elf_setup_stack(uint64_t stack_top, int argc, char *const argv[],
                           char *const envp[], const elf_load_info_t *info);
+
+#ifdef CONFIG_ABI_NATIVE
+uint64_t elf_setup_stack_a20(uint64_t stack_top, int argc, char *const argv[],
+                              char *const envp[], const elf_load_info_t *info,
+                              uint32_t stdin_h, uint32_t stdout_h,
+                              uint32_t stderr_h, uint32_t self_task_h);
+#endif
 
 #endif /* _ELF_H */

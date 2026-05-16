@@ -219,9 +219,13 @@ int64_t sys_openat(int dirfd, const char *path, int flags, int mode) {
     if (user_strncpy(kpath, path, MAX_PATH_LEN) < 0) return -EFAULT;
     char full[MAX_PATH_LEN];
     int pr = syscall_path_at(dirfd, kpath, full, sizeof(full));
-    if (pr < 0) return pr;
+    if (pr < 0) {
+        return pr;
+    }
     int gfd = vfs_open(full, flags, mode);
-    if (gfd < 0) return gfd;
+    if (gfd < 0) {
+        return gfd;
+    }
     task_t *t = proc_current();
     return fdtable_install(t, gfd, flags);
 }

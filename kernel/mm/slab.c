@@ -223,8 +223,8 @@ static __attribute__((unused)) void slab_validate_sp(slab_page_t *sp, const char
     for (void *p = sp->free_list; p; p = *(void **)p) {
         uintptr_t offset = (uintptr_t)p - (uintptr_t)sp;
         if ((offset - SLAB_HDR_SIZE) % obj_size != 0 || offset >= PAGE_SIZE) {
-            printf("[SLAB BUG] %s: corrupted free_list node=%p sp=%p offset=%lu obj_size=%zu\n",
-                   where, p, (void *)sp, (unsigned long)offset, obj_size);
+            printf("[SLAB BUG] %s: corrupted free_list node=%p sp=%p offset=%lu obj_size=%lu\n",
+                   where, p, (void *)sp, (unsigned long)offset, (unsigned long)obj_size);
             uint64_t *page = (uint64_t *)sp;
             printf("[SLAB DBG] sp page hex dump:\n");
             for (int i = 0; i < 16; i++) {
@@ -257,9 +257,8 @@ void *kmalloc(size_t size) {
         if (order > MAX_ORDER) return NULL;
         pfn_t pfn = pfa_alloc(order);
         if (pfn == PFN_NONE) {
-            if (oom_try_reclaim())
-                pfn = pfa_alloc(order);
-            if (pfn == PFN_NONE) return NULL;
+            oom_try_reclaim();
+            return NULL;
         }
         big_alloc_hdr_t *hdr = (big_alloc_hdr_t *)pfn_to_virt(pfn);
         hdr->magic = BIG_MAGIC;
@@ -290,17 +289,8 @@ void *kmalloc(size_t size) {
             sp = slab_grow(idx);
             if (!sp) {
                 spin_unlock_irqrestore(&c->lock, irq_flags);
-                if (oom_try_reclaim()) {
-                    irq_flags = spin_lock_irqsave(&c->lock);
-                    sp = slab_spare_pop(c);
-                    if (!sp) sp = slab_grow(idx);
-                    if (!sp) {
-                        spin_unlock_irqrestore(&c->lock, irq_flags);
-                        return NULL;
-                    }
-                } else {
-                    return NULL;
-                }
+                oom_try_reclaim();
+                return NULL;
             }
         }
         sp->state = SLAB_STATE_PARTIAL;
@@ -361,19 +351,24 @@ void kfree(void *ptr) {
 
     slab_page_t *sp = (slab_page_t *)((uintptr_t)ptr & ~(PAGE_SIZE - 1));
     uintptr_t offset = (uintptr_t)ptr - (uintptr_t)sp;
+
+    /* Check big alloc first: header sits at ptr - sizeof(big_alloc_hdr_t).
+     * This must precede the slab check because a big-alloc page can have
+     * incidental bytes at the slab-magic offset that falsely pass slab_page_valid. */
+    big_alloc_hdr_t *bhdr = (big_alloc_hdr_t *)ptr - 1;
+    if (bhdr->magic == BIG_MAGIC && bhdr->order <= MAX_ORDER) {
+        int order = (int)bhdr->order;
+        pfn_t pfn = virt_to_pfn(bhdr);
+        if (pfn_valid(pfn)) pfa_free(pfn, order);
+        return;
+    }
+
     int is_slab = slab_page_valid(sp);
 
     if (!is_slab) {
-        big_alloc_hdr_t *hdr = (big_alloc_hdr_t *)ptr - 1;
-        if (hdr->magic != BIG_MAGIC || hdr->order > MAX_ORDER) {
-            printf("[SLAB BUG] kfree(%p): invalid non-slab pointer hdr=%p magic=0x%x order=%u ra=0x%lx\n",
-                   ptr, (void *)hdr, hdr->magic, hdr->order, (unsigned long)caller_ra);
-            panic("kfree: invalid pointer");
-        }
-        int order = (int)hdr->order;
-        pfn_t pfn = virt_to_pfn(hdr);
-        if (pfn_valid(pfn)) pfa_free(pfn, order);
-        return;
+        printf("[SLAB BUG] kfree(%p): invalid non-slab pointer hdr=%p magic=0x%x order=%u ra=0x%lx\n",
+               ptr, (void *)bhdr, bhdr->magic, bhdr->order, (unsigned long)caller_ra);
+        panic("kfree: invalid pointer");
     }
 
     if (offset < SLAB_HDR_SIZE) {
@@ -385,8 +380,8 @@ void kfree(void *ptr) {
     /* sanity check: ptr must be aligned to obj_size and within the page */
     size_t obj_size = slab_sizes[sp->cache_idx];
     if ((offset - SLAB_HDR_SIZE) % obj_size != 0 || offset >= PAGE_SIZE) {
-        printf("[SLAB BUG] kfree(%p) bad offset=%lu sp=%p cache_idx=%u obj_size=%zu\n",
-               ptr, (unsigned long)offset, (void *)sp, sp->cache_idx, obj_size);
+        printf("[SLAB BUG] kfree(%p) bad offset=%lu sp=%p cache_idx=%u obj_size=%lu\n",
+               ptr, (unsigned long)offset, (void *)sp, sp->cache_idx, (unsigned long)obj_size);
         panic("kfree: corrupted slab pointer");
     }
     uint16_t obj_idx = (uint16_t)((offset - SLAB_HDR_SIZE) / obj_size);

@@ -21,6 +21,9 @@
 #include "core/defs.h"
 #include "core/klog.h"
 #include "core/random.h"
+#ifdef CONFIG_ABI_NATIVE
+#include "abi/native/startup.h"
+#endif
 
 /* musl struct pthread is ~300-400 bytes; 512 gives headroom */
 #define TLS_TCB_SIZE       512
@@ -361,12 +364,17 @@ int elf_load_from_buf(const void *buf, size_t len, elf_load_info_t *info) {
     uint64_t base = 0, max_va = 0, brk_va = 0;
     const void *tls_data = NULL;
     uint64_t tls_filesz = 0, tls_memsz = 0, tls_align = 1;
+    int is_native = 0;
 
     for (int i = 0; i < eh->e_phnum; i++) {
         if (eh->e_phoff + (i + 1) * eh->e_phentsize > len) continue;
         const Elf64_Phdr *ph = (const Elf64_Phdr *)
             ((const char *)buf + eh->e_phoff + i * eh->e_phentsize);
 
+        if (ph->p_type == PT_A20_START_INFO) {
+            is_native = 1;
+            continue;
+        }
         if (ph->p_type == PT_TLS) {
             tls_data   = (const char *)buf + ph->p_offset;
             tls_filesz = ph->p_filesz;
@@ -416,6 +424,7 @@ int elf_load_from_buf(const void *buf, size_t len, elf_load_info_t *info) {
         .tls_tp      = tls_tp,
         .interp_base = 0,
         .mmap        = mm.mmap,
+        .is_native_abi = is_native,
     };
     return 0;
 }
@@ -452,9 +461,14 @@ int elf_load(int fd, const char *path, elf_load_info_t *info) {
     void *tls_data = NULL;
     uint64_t tls_filesz = 0, tls_memsz = 0, tls_align = 1;
     int has_interp = 0;
+    int is_native = 0;
     char interp_path[MAX_PATH_LEN] = {0};
 
     for (int i = 0; i < nph; i++) {
+        if (phdrs[i].p_type == PT_A20_START_INFO) {
+            is_native = 1;
+            continue;
+        }
         if (phdrs[i].p_type == PT_INTERP) {
             has_interp = 1;
             vfs_lseek(fd, (long)phdrs[i].p_offset, SEEK_SET);
@@ -540,6 +554,7 @@ int elf_load(int fd, const char *path, elf_load_info_t *info) {
         .tls_tp      = tls_tp,
         .interp_base = interp_base,
         .mmap        = mm.mmap,
+        .is_native_abi = is_native,
     };
 
     kfree(tls_data);
@@ -692,3 +707,81 @@ uint64_t elf_setup_stack(uint64_t stack_top, int argc, char *const argv[],
 
     return sp_va;
 }
+
+#ifdef CONFIG_ABI_NATIVE
+uint64_t elf_setup_stack_a20(uint64_t stack_top, int argc, char *const argv[],
+                              char *const envp[], const elf_load_info_t *info,
+                              uint32_t stdin_h, uint32_t stdout_h,
+                              uint32_t stderr_h, uint32_t self_task_h)
+{
+    uint64_t *pgdir = info->pgdir;
+    uint64_t sp_va = stack_top;
+
+    int envc = 0;
+    uint64_t env_ptrs[64];
+    if (envp) {
+        while (envp[envc] && envc < 63) {
+            int len = (int)strlen(envp[envc]) + 1;
+            sp_va -= len;
+            void *dst = phys_for_va(pgdir, sp_va);
+            if (!dst) return 0;
+            memcpy(dst, envp[envc], len);
+            env_ptrs[envc] = sp_va;
+            envc++;
+        }
+    }
+    env_ptrs[envc] = 0;
+
+    uint64_t arg_ptrs[64];
+    for (int i = argc - 1; i >= 0; i--) {
+        int len = (int)strlen(argv[i]) + 1;
+        sp_va -= len;
+        void *dst = phys_for_va(pgdir, sp_va);
+        if (!dst) return 0;
+        memcpy(dst, argv[i], len);
+        arg_ptrs[i] = sp_va;
+    }
+    arg_ptrs[argc] = 0;
+
+    sp_va &= ~15UL;
+
+    sp_va -= (envc + 1) * 8;
+    {
+        void *dst = phys_for_va(pgdir, sp_va);
+        if (!dst) return 0;
+        memcpy(dst, env_ptrs, (envc + 1) * 8);
+    }
+    uint64_t envp_va = sp_va;
+
+    sp_va -= (argc + 1) * 8;
+    {
+        void *dst = phys_for_va(pgdir, sp_va);
+        if (!dst) return 0;
+        memcpy(dst, arg_ptrs, (argc + 1) * 8);
+    }
+    uint64_t argv_va = sp_va;
+
+    sp_va -= sizeof(a20_start_info_t);
+    sp_va &= ~15UL;
+    {
+        a20_start_info_t si;
+        memset(&si, 0, sizeof(si));
+        si.size = sizeof(a20_start_info_t);
+        si.version = 1;
+        si.argc = (uint32_t)argc;
+        si.envc = (uint32_t)envc;
+        si.argv = argv_va;
+        si.envp = envp_va;
+        si.stdin_handle = stdin_h;
+        si.stdout_handle = stdout_h;
+        si.stderr_handle = stderr_h;
+        si.self_task = self_task_h;
+        si.page_size = PAGE_SIZE;
+        void *dst = phys_for_va(pgdir, sp_va);
+        if (!dst) return 0;
+        memcpy(dst, &si, sizeof(si));
+    }
+
+    return sp_va;
+}
+#endif

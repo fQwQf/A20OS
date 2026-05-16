@@ -55,7 +55,10 @@ extern void trap_handler_la64(trap_context_t *ctx);
 #define TRAP_CTX_TP(ctx)          ((ctx)->regs[2])
 
 #define TRAP_CTX_SET_RET(ctx, v)  do { (ctx)->regs[4] = (uint64_t)(v); } while(0)
+#define TRAP_CTX_SET_ARG0(ctx, v) do { (ctx)->regs[4] = (uint64_t)(v); } while(0)
 #define TRAP_CTX_SET_SP(ctx, v)   do { (ctx)->regs[3] = (uint64_t)(v); } while(0)
+#define TRAP_CTX_SET_REG(ctx, i, v) do { (ctx)->regs[i] = (uint64_t)(v); } while(0)
+#define TRAP_CTX_REG(ctx, i)      ((ctx)->regs[i])
 
 #define TRAP_CTX_EPC(ctx)          ((ctx)->era)
 #define TRAP_CTX_STATUS(ctx)         ((ctx)->prmd)
