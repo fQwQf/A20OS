@@ -20,8 +20,10 @@ int64_t sys_unlinkat(int dirfd, const char *path, int flags) {
     char full[MAX_PATH_LEN];
     int pr = syscall_path_at(dirfd, kpath, full, sizeof(full));
     if (pr < 0) return pr;
-    if (flags & AT_REMOVEDIR) return vfs_rmdir(full);
-    return vfs_unlink(full);
+    int64_t ret;
+    if (flags & AT_REMOVEDIR) ret = vfs_rmdir(full);
+    else ret = vfs_unlink(full);
+    return ret;
 }
 
 int64_t sys_renameat2(int olddir, const char *oldpath,
@@ -472,9 +474,10 @@ int64_t sys_fstatfs(int fd, void *buf) {
 }
 
 int64_t sys_mount(const char *src, const char *target,
-                   const char *fstype, int flags) {
+                   const char *fstype, int flags, const char *data) {
     if (!target || !fstype) return -EFAULT;
     char ksrc[MAX_PATH_LEN], ktarget[MAX_PATH_LEN], kfstype[32];
+    char kdata[256];
     if (src) {
         if (user_strncpy(ksrc, src, MAX_PATH_LEN) < 0) return -EFAULT;
     } else {
@@ -482,6 +485,11 @@ int64_t sys_mount(const char *src, const char *target,
     }
     if (user_strncpy(ktarget, target, MAX_PATH_LEN) < 0) return -EFAULT;
     if (user_strncpy(kfstype, fstype, 32) < 0) return -EFAULT;
+    if (data) {
+        if (user_strncpy(kdata, data, sizeof(kdata)) < 0) return -EFAULT;
+    } else {
+        kdata[0] = '\0';
+    }
     if (ktarget[0] != '/') {
         char abs[MAX_PATH_LEN];
         task_t *t = proc_current();
@@ -494,7 +502,7 @@ int64_t sys_mount(const char *src, const char *target,
         ktarget[sizeof(ktarget) - 1] = '\0';
     }
     vfs_path_normalize_absolute(ktarget);
-    return vfs_mount(ksrc, ktarget, kfstype, flags);
+    return vfs_mount(ksrc, ktarget, kfstype, flags, kdata);
 }
 
 int64_t sys_umount2(const char *target, int flags) {

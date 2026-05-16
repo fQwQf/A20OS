@@ -262,6 +262,22 @@ bcache_entry_t *bcache_get(bcache_t *bc, uint64_t lba) {
     }
 
     flags = spin_lock_irqsave(&bc->lock);
+    /*
+     * Race fix: another process may have fetched the same LBA while we
+     * were doing I/O without the lock.  If so, discard our entry and
+     * return the existing one to avoid duplicate hash entries.
+     */
+    bcache_entry_t *dup = bcache_find(bc, lba);
+    if (dup) {
+        e->ref = 0;
+        e->lba = (uint64_t)-1;
+        lru_insert_front(bc, e);
+        dup->ref++;
+        lru_remove(dup);
+        lru_insert_front(bc, dup);
+        spin_unlock_irqrestore(&bc->lock, flags);
+        return dup;
+    }
     e->lba = lba;
     e->dirty = 0;
     e->valid = 1;
@@ -275,8 +291,6 @@ bcache_entry_t *bcache_get(bcache_t *bc, uint64_t lba) {
 // 释放块引用（减少引用计数）
 void bcache_release(bcache_entry_t *e) {
     if (!e) return;
-    /* Entries are embedded in a single cache pool; refcount updates are atomic
-     * so callers can release without knowing the parent bcache pointer. */
     if (__atomic_load_n(&e->ref, __ATOMIC_RELAXED) > 0)
         __atomic_fetch_sub(&e->ref, 1, __ATOMIC_RELEASE);
 }
@@ -445,6 +459,26 @@ static pcache_entry_t *pcache_get(bcache_t *bc, uint64_t page_no, int skip_read)
     }
 
     flags = spin_lock_irqsave(&bc->lock);
+    /*
+     * Race fix: another process may have fetched the same page while we
+     * were doing I/O without the lock (sched() during virtio wait yields
+     * to other processes).  If so, discard our entry and return the
+     * existing one to avoid duplicate hash entries which corrupt the
+     * hash chain and LRU list under sustained load.
+     */
+    pcache_entry_t *dup = pcache_find(bc, page_no);
+    if (dup) {
+        e->ref = 0;
+        e->page_no = (uint64_t)-1;
+        e->valid = 0;
+        page_lru_insert_front(bc, e);
+        dup->ref++;
+        page_lru_remove(dup);
+        page_lru_insert_front(bc, dup);
+        spin_unlock_irqrestore(&bc->lock, flags);
+        return dup;
+    }
+
     e->page_no = page_no;
     e->dirty = 0;
     e->valid = 1;

@@ -47,7 +47,10 @@ extern void user_trap_return(void);
 #define TRAP_CTX_TP(ctx)          ((ctx)->x[4])
 
 #define TRAP_CTX_SET_RET(ctx, v)  do { (ctx)->x[10] = (uint64_t)(v); } while(0)
+#define TRAP_CTX_SET_ARG0(ctx, v) do { (ctx)->x[10] = (uint64_t)(v); } while(0)
 #define TRAP_CTX_SET_SP(ctx, v)   do { (ctx)->x[2] = (uint64_t)(v); } while(0)
+#define TRAP_CTX_SET_REG(ctx, i, v) do { (ctx)->x[i] = (uint64_t)(v); } while(0)
+#define TRAP_CTX_REG(ctx, i)      ((ctx)->x[i])
 
 #define TRAP_CTX_EPC(ctx)          ((ctx)->sepc)
 #define TRAP_CTX_STATUS(ctx)         ((ctx)->sstatus)
