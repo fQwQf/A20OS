@@ -10,6 +10,8 @@ struct signal_state;
 struct mm_struct;
 struct vm_area;
 struct files_struct;
+struct a20_vmo;
+struct cg_node;
 typedef struct mm_struct mm_struct_t;
 
 typedef struct { void *ss_sp; int ss_flags; size_t ss_size; } sigaltstack_t;
@@ -57,6 +59,14 @@ typedef struct proc_policy {
     int oom_score_adj;
     int thp_disabled;
 } proc_policy_t;
+
+typedef struct proc_ns_context {
+    char     fs_root[MAX_PATH_LEN];
+    uint32_t net_ifindex;
+    uint64_t pid_offset;
+    uint32_t dev_access_mask;
+    uint32_t active_ns;
+} proc_ns_context_t;
 
 typedef struct proc_vm_stats {
     size_t anon_huge_pages;
@@ -148,6 +158,18 @@ typedef struct task_t {
     int            sigsuspend_active;
     sigaltstack_t  sigaltstack;
     uint64_t       thread_pending;
+
+    /* Native ABI support */
+    uint32_t       abi_mode;        /* 0 = Linux ABI, 1 = Native ABI */
+    struct a20_vmo *stack_vmo;
+    struct a20_vmo *heap_vmo;
+    proc_ns_context_t ns_ctx;
+
+    /* Cgroup resource control */
+    struct cg_node *cgroup;
+    uint32_t        cpus_allowed;
+    int             cg_throttled;
+    uint64_t        cg_cpu_start;
 } task_t;
 
 static inline int proc_has_cap(const task_t *t, int cap)
@@ -198,5 +220,8 @@ int      proc_munmap(uint64_t addr, size_t len);
 
 /* Clone (fork-like) */
 int      proc_clone(uint64_t flags, uint64_t stack, int *ptid, uint64_t tls, int *ctid, int exit_signal);
+
+task_t *proc_first_task_locked(void);
+task_t *proc_next_task_locked(task_t *t);
 
 #endif /* _PROC_H */

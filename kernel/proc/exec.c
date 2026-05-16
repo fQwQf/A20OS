@@ -12,6 +12,16 @@
 #include "core/string.h"
 #include "core/trap.h"
 #include "sys/usercopy.h"
+#ifdef CONFIG_ABI_NATIVE
+#include "abi/native/startup.h"
+#include "abi/native/rights.h"
+#include "abi/native/types.h"
+
+struct a20_ht_internal;
+struct a20_ht_internal *a20_ht_create(void);
+int64_t a20_handle_install(struct a20_ht_internal *ht, void *object,
+                           uint16_t type, uint32_t rights);
+#endif
 
 static void proc_apply_exec_creds(task_t *t, const kstat_t *st)
 {
@@ -400,16 +410,72 @@ int proc_exec(const char *path, char *const argv[], char *const envp[])
                 }
             }
         }
+        /* Not ELF, no shebang — fall back to /bin/sh like Linux shells do. */
         vfs_close(fd);
+        char *sh_argv[64];
+        int na = 0;
+        sh_argv[na++] = "/bin/sh";
+        sh_argv[na++] = k_path;
+        for (int i = 1; i < argc && na < 63; i++)
+            sh_argv[na++] = k_argv[i];
+        sh_argv[na] = NULL;
+
+        int ret = proc_exec("/bin/sh", sh_argv, envp);
         exec_free_args(k_argv, argc, k_envp, envc, k_path);
-        return r;
+        return ret;
     }
     vfs_close(fd);
 
     fdtable_close_on_exec(t);
-    uint64_t sp = elf_setup_stack(info.stack_top, argc,
+    uint64_t sp;
+
+#ifdef CONFIG_ABI_NATIVE
+    if (info.is_native_abi) {
+        t->abi_mode = 1;
+        struct a20_ht_internal *ht = a20_ht_create();
+        if (ht) t->scratch_buf = ht;
+
+        uint32_t stdin_h = 0xFFFFFFFF, stdout_h = 0xFFFFFFFF, stderr_h = 0xFFFFFFFF;
+        if (ht) {
+            int console_rd = vfs_open("/dev/console", O_RDONLY, 0);
+            if (console_rd >= 0) {
+                int64_t h = a20_handle_install(ht, (void *)(uintptr_t)console_rd,
+                                               A20_OBJ_FILE, A20_RIGHT_READ | A20_RIGHT_DUP);
+                if (h >= 0) stdin_h = (uint32_t)h;
+            }
+            int console_wr = vfs_open("/dev/console", O_WRONLY, 0);
+            if (console_wr >= 0) {
+                int64_t h = a20_handle_install(ht, (void *)(uintptr_t)console_wr,
+                                               A20_OBJ_FILE, A20_RIGHT_WRITE | A20_RIGHT_DUP);
+                if (h >= 0) stdout_h = (uint32_t)h;
+            }
+            int console_wr2 = vfs_open("/dev/console", O_WRONLY, 0);
+            if (console_wr2 >= 0) {
+                int64_t h = a20_handle_install(ht, (void *)(uintptr_t)console_wr2,
+                                               A20_OBJ_FILE, A20_RIGHT_WRITE | A20_RIGHT_DUP);
+                if (h >= 0) stderr_h = (uint32_t)h;
+            }
+        }
+
+        a20_handle_t self_h = 0;
+        if (ht) {
+            int64_t h = a20_handle_install(ht, (void *)(uintptr_t)t->pid,
+                                           A20_OBJ_TASK,
+                                           A20_RIGHT_WAIT | A20_RIGHT_SIGNAL |
+                                           A20_RIGHT_STAT | A20_RIGHT_DUP);
+            if (h >= 0) self_h = (a20_handle_t)h;
+        }
+        sp = elf_setup_stack_a20(info.stack_top, argc,
                                   (char *const *)k_argv,
-                                  (char *const *)k_envp, &info);
+                                  (char *const *)k_envp, &info,
+                                  stdin_h, stdout_h, stderr_h, self_h);
+    } else
+#endif
+    {
+        sp = elf_setup_stack(info.stack_top, argc,
+                              (char *const *)k_argv,
+                              (char *const *)k_envp, &info);
+    }
 
     mm_struct_t *old_mm = t->mm;
     t->mm = NULL;
@@ -488,6 +554,9 @@ int proc_exec(const char *path, char *const argv[], char *const envp[])
         TRAP_CTX_EPC(trap) = saved_entry;
         TRAP_CTX_SP(trap) = saved_sp;
         TRAP_CTX_TP(trap) = info.tls_tp;
+        if (info.is_native_abi) {
+            TRAP_CTX_SET_ARG0(trap, saved_sp);
+        }
         trap->kernel_tp = (uint64_t)(uintptr_t)t;
         arch_trap_ctx_set_kernel_stack(trap, saved_kernel_sp);
         TRAP_CTX_STATUS(trap) = SSTATUS_SPIE | SSTATUS_FS_CLEAN;
