@@ -64,14 +64,23 @@ static void dump_fault_pte(task_t *task, uint64_t va) {
 
 static int deliver_user_sync_signal(trap_context_t *ctx, int sig, int fatal_code) {
     task_t *cur = proc_current();
-    if (!cur || !cur->signals || !cur->pgdir)
+    if (!cur || !cur->signals || !cur->pgdir) {
+        printf("FATAL: pid=%d signal=%d (no signal state) pc=0x%lx\n",
+               cur ? cur->pid : -1, sig,
+               (unsigned long)TRAP_CTX_EPC(ctx));
         proc_exit(fatal_code);
+    }
 
     signal_state_t *ss = (signal_state_t *)cur->signals;
     sigaction_t *sa = &ss->actions[sig];
     if (sa->sa_handler == SIG_DFL || sa->sa_handler == SIG_IGN ||
-        (cur->sig_blocked & signal_mask_bit(sig)))
+        (cur->sig_blocked & signal_mask_bit(sig))) {
+        printf("FATAL: pid=%d signal=%d abi=%d pc=0x%lx sp=0x%lx\n",
+               cur->pid, sig, cur->abi_mode,
+               (unsigned long)TRAP_CTX_EPC(ctx),
+               (unsigned long)TRAP_CTX_SP(ctx));
         proc_exit(fatal_code);
+    }
 
     signal_send(cur->pid, sig);
     signal_deliver_user(ctx);
@@ -114,14 +123,16 @@ void trap_handler(trap_context_t *ctx) {
                 signal_deliver_user(ctx);
                 return;
             }
-            if (deliver_user_sync_signal(ctx, SIGSEGV, -SIGSEGV))
-                return;
-            kerr("User PF unresolved: pid=%d code=%lu sepc=0x%lx stval=0x%lx\n",
-                 cur ? cur->pid : -1, code, sepc, stval);
+            printf("SIGSEGV: pid=%d code=%lu sepc=0x%lx stval=0x%lx abi=%d\n",
+                  cur ? cur->pid : -1, (unsigned long)code,
+                  (unsigned long)sepc, (unsigned long)stval,
+                  cur ? cur->abi_mode : -1);
             if (have_user_insn)
                 kerr("  insn@sepc=0x%08x\n", user_insn);
             dump_trap_context(ctx);
             dump_fault_pte(cur, stval);
+            if (deliver_user_sync_signal(ctx, SIGSEGV, -SIGSEGV))
+                return;
             proc_exit(-SIGSEGV);
         } else if (code == CAUSE_PAGE_MODIFICATION) {
             /*
@@ -158,13 +169,14 @@ void trap_handler(trap_context_t *ctx) {
                 return;
             proc_exit(-SIGSEGV);
         } else if (code == CAUSE_INSN_FAULT || code == CAUSE_LOAD_FAULT || code == CAUSE_STORE_FAULT) {
+            printf("ADE/ALE: pid=%d sepc=0x%lx stval=0x%lx code=%lu\n",
+                  cur ? cur->pid : -1, (unsigned long)sepc, (unsigned long)stval, (unsigned long)code);
             if (deliver_user_sync_signal(ctx, SIGSEGV, -SIGSEGV))
                 return;
-            kerr("User Address Error (ADE/ALE): pid=%d sepc=0x%lx stval=0x%lx code=%lu\n", 
-                 cur ? cur->pid : -1, sepc, stval, code);
-            dump_trap_context(ctx);
             proc_exit(-SIGSEGV); 
         } else if (code == CAUSE_ILLEGAL_INSN) {
+            printf("SIGILL: pid=%d sepc=0x%lx stval=0x%lx\n",
+                  cur ? cur->pid : -1, (unsigned long)sepc, (unsigned long)stval);
             if (deliver_user_sync_signal(ctx, SIGILL, -SIGILL))
                 return;
             kerr("User Illegal Instruction: pid=%d sepc=0x%lx stval=0x%lx\n",

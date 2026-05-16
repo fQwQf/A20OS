@@ -139,7 +139,7 @@ int64_t sys_statx(int dirfd, const char *path, int flags, unsigned mask, void *b
 int64_t sys_statfs(const char *path, void *buf);
 int64_t sys_fstatfs(int fd, void *buf);
 int64_t sys_mount(const char *src, const char *target,
-                   const char *fstype, int flags);
+                   const char *fstype, int flags, const char *data);
 int64_t sys_umount2(const char *target, int flags);
 int64_t sys_utimensat(int dirfd, const char *path, void *times, int flags);
 int64_t sys_execveat(int dirfd, const char *path, char **argv, char **envp, int flags);

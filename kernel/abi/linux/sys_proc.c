@@ -447,9 +447,17 @@ int64_t sys_clone3(void *cl_args, size_t size) {
 }
 
 int64_t sys_openat2(int dirfd, const char *pathname, const void *how, size_t size) {
-    (void)how;
-    (void)size;
-    return sys_openat(dirfd, pathname, 0, 0);
+    int flags = 0;
+    int mode = 0;
+    if (how && size >= 8) {
+        uint64_t buf[2];
+        size_t copy_sz = size < 16 ? size : 16;
+        if (copy_from_user(buf, how, copy_sz) == 0) {
+            flags = (int)buf[0];
+            mode = (int)(buf[1] & 07777);
+        }
+    }
+    return sys_openat(dirfd, pathname, flags, mode);
 }
 
 int64_t sys_clone(uint64_t flags, void *stack, int *ptid, uint64_t tls, int *ctid) {

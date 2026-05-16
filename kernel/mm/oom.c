@@ -7,8 +7,13 @@
 #include "core/lock.h"
 #include "core/string.h"
 #include "core/stdio.h"
+#include "core/timer.h"
+
+#define OOM_COOLDOWN_TICKS MS_TO_TICKS(2000)
+#define OOM_MIN_FREE_PAGES 256
 
 static volatile int oom_in_progress;
+static uint64_t oom_last_kill_tick;
 
 static int oom_pick_victim_pid(void)
 {
@@ -38,6 +43,15 @@ int oom_try_reclaim(void)
 {
     if (__atomic_load_n(&oom_in_progress, __ATOMIC_RELAXED))
         return 0;
+
+    size_t free = pfa_free_count();
+    if (free >= OOM_MIN_FREE_PAGES)
+        return 0;
+
+    uint64_t now = timer_get_ticks();
+    if (now - oom_last_kill_tick < OOM_COOLDOWN_TICKS)
+        return 0;
+
     __atomic_store_n(&oom_in_progress, 1, __ATOMIC_RELAXED);
 
     int victim_pid = oom_pick_victim_pid();
@@ -52,9 +66,10 @@ int oom_try_reclaim(void)
         return 0;
     }
 
-    kerr("[OOM] Killing pid=%d name=%s oom_score_adj=%d free_frames=%zu\n",
+    oom_last_kill_tick = now;
+    kerr("[OOM] Killing pid=%d name=%s oom_score_adj=%d free_frames=%lu\n",
          victim->pid, victim->name, victim->policy.oom_score_adj,
-         pfa_free_count());
+         (unsigned long)pfa_free_count());
 
     proc_force_exit(victim, -9);
 

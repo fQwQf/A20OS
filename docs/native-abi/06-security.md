@@ -200,8 +200,12 @@ $$\mathcal{L} = \{L, M, H\}, \quad L \sqsubseteq M \sqsubseteq H$$
 **简单安全性（No Read Up）**：
 $$read(p, o) \implies \ell(p) \geq \ell(o)$$
 
+> **内核执行**：`handle_read`、`channel_recv` 在 `a20_handle_lookup_internal` 之后检查 `ht->security_label >= entry.security_label`。违反时返回 `A20_ERR_ACCESS`。
+
 **星属性（No Write Down）**：
 $$write(p, o) \implies \ell(p) \leq \ell(o)$$
+
+> **内核执行**：`handle_write`、`channel_send`、`handle_transfer` 检查 `ht->security_label <= entry.security_label`。违反时返回 `A20_ERR_ACCESS`。`vm_share` 在共享 VMO 给目标 task 时检查目标标签不低于 VMO 标签。
 
 **Transfer 规则**：
 $$transfer(p_1 \to p_2, o) \implies \ell(p_1) \leq \ell(p_2) \text{ 或 } \ell(o) = L$$
@@ -266,6 +270,8 @@ $$\forall t_1, t_2.\ t_2 > t_1 \implies \rho_{eff}(h, t_2) \subseteq \rho_{eff}(
 **定理（不可刷新）** 持有 handle $h$（$\rho_{eff}(h, t) \neq \emptyset$）的进程 $p$ 无法创建一个有效权限严格包含 $\rho_{eff}(h, t)$ 或过期时间晚于 $h$ 的新 handle $h'$。
 
 证明要点：`handle_dup` 的时态约束要求 `expiry' ≤ expiry(h)` 和 `ops' ≤ remaining_ops(h)`。因此 $\rho_{eff}(h', t') \subseteq \rho_{eff}(h, t')$。
+
+> **内核执行**：`handle_dup` 和 `handle_replace` 通过 `a20_handle_install_temporal()` 继承源 handle 的 `expiry_tick`、`remaining_ops`、`temporal_flags` 和 `security_label`，确保降级单调性。`vm_share` 创建派生 handle 时同样继承源 VMO 的时态约束和标签。`a20_handle_lookup_internal()` 在每次查找时调用 `a20_effective_rights()` 并递减 `remaining_ops`。
 
 ### 6.5 过期行为
 

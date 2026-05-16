@@ -223,7 +223,8 @@ int vfs_open(const char *path, int flags, int mode) {
     vnode_t *vn = vnode_lookup_path(mnt->root, rel);
 
     if (!vn) {
-        if (g_lookup_errno && !(flags & O_CREAT)) return g_lookup_errno;
+        if (g_lookup_errno && !(flags & O_CREAT))
+            return g_lookup_errno;
         if (!(flags & O_CREAT)) { kdebug("[VFS] open '%s' (rel='%s'): not found, no O_CREAT\n", resolved, rel); return -ENOENT; }
         if (!mnt->root || !mnt->root->ops || !mnt->root->ops->create) { kdebug("[VFS] open '%s': root has no create ops\n", resolved); return -ENOSYS; }
 
@@ -294,6 +295,9 @@ int vfs_open(const char *path, int flags, int mode) {
         vf = procfs_open_vnode(vn, flags);
     } else if (mnt->type == FS_TYPE_DEVFS) {
         vf = devfs_open_vnode(vn, flags);
+    } else if (mnt->type == FS_TYPE_CGROUP) {
+        extern vfile_t *cgroupfs_open_vnode(vnode_t *vn, int flags);
+        vf = cgroupfs_open_vnode(vn, flags);
     }
 
     if (!vf) { vnode_put(vn); return -ENOMEM; }
@@ -344,6 +348,9 @@ int vfs_mkdir(const char *path, int mode) {
     if (!mnt || !mnt->root) return -ENOENT;
 
     const char *rel = vfs_strip_mount_prefix(resolved, mnt);
+    if (!rel[0])
+        return -EEXIST;
+
     char parent_path[MAX_PATH_LEN];
     char name[MAX_NAME_LEN];
     int sr = vfs_path_split_parent_name(rel, parent_path, sizeof(parent_path),
@@ -512,15 +519,13 @@ int vfs_rmdir(const char *path) {
 
     char resolved[MAX_PATH_LEN];
     int pr = vfs_path_join(cwd, path, resolved, sizeof(resolved));
-    if (pr < 0)
-        return pr;
+    if (pr < 0) return pr;
 
     char parent_path[MAX_PATH_LEN];
     char name[MAX_NAME_LEN];
     int sr = vfs_path_split_parent_name(resolved, parent_path, sizeof(parent_path),
                                         name, sizeof(name));
-    if (sr < 0)
-        return sr;
+    if (sr < 0) return sr;
 
     mount_t *mnt = vfs_find_mount(parent_path);
     if (!mnt || !mnt->root) return -ENOENT;
@@ -727,7 +732,8 @@ int vfs_fchmod(int fd, int mode) {
 
 static int vfs_chown_vnode(vnode_t *vn, int uid, int gid) {
     if (!vn) return -ENOENT;
-    if (uid < -1 || gid < -1) return -EINVAL;
+    if (uid < -1 || gid < -1)
+        return -EINVAL;
     task_t *cur = proc_current();
     kstat_t st;
     int r = vfs_vnode_stat(vn, &st);
@@ -1235,10 +1241,46 @@ static int parse_block_dev(const char *dev, int *out_idx, int *out_part) {
     return 0;
 }
 
-int vfs_mount(const char *dev, const char *path, const char *fstype, int flags) {
+int vfs_mount(const char *dev, const char *path, const char *fstype, int flags, const char *data) {
     if (!path || !fstype) return -EINVAL;
-    if (strcmp(fstype, "cgroup") == 0 || strcmp(fstype, "cgroup2") == 0)
-        return -ENODEV;
+    if (strcmp(fstype, "cgroup") == 0 || strcmp(fstype, "cgroup2") == 0) {
+        vnode_t *target = vfs_resolve(path);
+        if (!target) return -ENOENT;
+        int is_dir = target->type == VFS_FT_DIR;
+        vnode_put(target);
+        if (!is_dir) return -ENOTDIR;
+
+        extern vnode_t *cgroupfs_mount(int is_v2, const char *opts, void **out_sb);
+        extern void cgroupfs_unmount(vnode_t *root);
+        int is_v2 = (strcmp(fstype, "cgroup2") == 0);
+        const char *opts = (data && *data) ? data : (dev ? dev : "");
+        void *sb_ptr = NULL;
+        vnode_t *root = cgroupfs_mount(is_v2, opts, &sb_ptr);
+        if (!root) return -ENOMEM;
+
+        mount_t *mnt = vfs_mount_alloc();
+        if (!mnt) { cgroupfs_unmount(root); return -ENOMEM; }
+        strncpy(mnt->path, path, MAX_PATH_LEN - 1);
+        mnt->path[MAX_PATH_LEN - 1] = '\0';
+        mnt->type = FS_TYPE_CGROUP;
+        mnt->flags = flags;
+        mnt->root = root;
+        mnt->root->mnt = mnt;
+        mnt->fs_data = sb_ptr;
+        strncpy(mnt->dev, dev ? dev : "none", sizeof(mnt->dev) - 1);
+        mnt->dev[sizeof(mnt->dev) - 1] = '\0';
+        strncpy(mnt->fstype, fstype, sizeof(mnt->fstype) - 1);
+        mnt->fstype[sizeof(mnt->fstype) - 1] = '\0';
+        if (is_v2) {
+            strncpy(mnt->opts, "rw,memory_recursiveprot", sizeof(mnt->opts) - 1);
+        } else {
+            const char *cg_opts = (data && *data) ? data : "memory,cpuset,cpu,cpuacct";
+            strncpy(mnt->opts, cg_opts, sizeof(mnt->opts) - 1);
+        }
+        mnt->opts[sizeof(mnt->opts) - 1] = '\0';
+        vfs_dcache_invalidate_all();
+        return 0;
+    }
     for (int i = 0; i < vfs_mount_count(); i++) {
         mount_t *existing = vfs_mount_at(i);
         if (existing && strcmp(existing->path, path) == 0) {
@@ -1259,6 +1301,11 @@ int vfs_mount(const char *dev, const char *path, const char *fstype, int flags) 
         strncpy(mnt->path, path, MAX_PATH_LEN - 1);
         mnt->path[MAX_PATH_LEN - 1] = '\0';
         mnt->type = FS_TYPE_RAMFS;
+        strncpy(mnt->dev, dev ? dev : "none", sizeof(mnt->dev) - 1);
+        mnt->dev[sizeof(mnt->dev) - 1] = '\0';
+        strncpy(mnt->fstype, fstype, sizeof(mnt->fstype) - 1);
+        mnt->fstype[sizeof(mnt->fstype) - 1] = '\0';
+        strncpy(mnt->opts, "rw", sizeof(mnt->opts) - 1);
         mnt->flags = flags;
         mnt->root = ramfs_mount_empty(mnt);
         if (!mnt->root) {
@@ -1311,6 +1358,9 @@ int vfs_mount_bc(const char *path, const char *fstype, bcache_t *bc) {
         strncpy(mnt->path, path, MAX_PATH_LEN - 1);
         mnt->path[MAX_PATH_LEN - 1] = '\0';
         mnt->type  = FS_TYPE_FAT32;
+        strncpy(mnt->dev, "/dev/vda", sizeof(mnt->dev) - 1);
+        strncpy(mnt->fstype, "vfat", sizeof(mnt->fstype) - 1);
+        strncpy(mnt->opts, "rw,relatime,fmask=0022,dmask=0022,codepage=437,iocharset=ascii,shortname=mixed,errors=remount-ro", sizeof(mnt->opts) - 1);
         mnt->root  = root;
         mnt->fs_data = bc;
 
@@ -1336,6 +1386,9 @@ int vfs_mount_bc(const char *path, const char *fstype, bcache_t *bc) {
         strncpy(mnt->path, path, MAX_PATH_LEN - 1);
         mnt->path[MAX_PATH_LEN - 1] = '\0';
         mnt->type  = FS_TYPE_EXT4;
+        strncpy(mnt->dev, "/dev/vda", sizeof(mnt->dev) - 1);
+        strncpy(mnt->fstype, "ext4", sizeof(mnt->fstype) - 1);
+        strncpy(mnt->opts, "rw,relatime", sizeof(mnt->opts) - 1);
         mnt->root  = root;
         mnt->fs_data = bc;
 
@@ -1412,25 +1465,36 @@ void vfs_init(void) {
     if (page_cache_init() < 0)
         printf("[VFS] page cache init failed; continuing without it\n");
 
-    /* Register ramfs as root "/" mount */
-    mount_t *mnt = vfs_mount_alloc();
-    strcpy(mnt->path, "/");
-    mnt->type = FS_TYPE_RAMFS;
-    mnt->root = ramfs_mount(mnt);
-
-    printf("[VFS] Initialized (root=ramfs)\n");
+    {
+        mount_t *mnt = vfs_mount_alloc();
+        strcpy(mnt->path, "/");
+        mnt->type = FS_TYPE_RAMFS;
+        strcpy(mnt->dev, "none");
+        strcpy(mnt->fstype, "rootfs");
+        strcpy(mnt->opts, "rw");
+        mnt->root = ramfs_mount(mnt);
+        printf("[VFS] Initialized (root=ramfs)\n");
+    }
 
     vfs_mkdir("/dev", 0755);
-    mnt = vfs_mount_alloc();
-    strcpy(mnt->path, "/dev");
-    mnt->type = FS_TYPE_DEVFS;
-    mnt->root = devfs_mount();
-    if (mnt->root) mnt->root->mnt = mnt;
+    {
+        mount_t *mnt = vfs_mount_alloc();
+        strcpy(mnt->path, "/dev");
+        mnt->type = FS_TYPE_DEVFS;
+        strcpy(mnt->dev, "none");
+        strcpy(mnt->fstype, "devtmpfs");
+        strcpy(mnt->opts, "rw");
+        mnt->root = devfs_mount();
+        if (mnt->root) mnt->root->mnt = mnt;
+    }
 
     {
         mount_t *shm_mnt = vfs_mount_alloc();
         strcpy(shm_mnt->path, "/dev/shm");
         shm_mnt->type = FS_TYPE_RAMFS;
+        strcpy(shm_mnt->dev, "none");
+        strcpy(shm_mnt->fstype, "tmpfs");
+        strcpy(shm_mnt->opts, "rw,nosuid,nodev");
         shm_mnt->root = ramfs_mount_empty(shm_mnt);
         if (shm_mnt->root) {
             shm_mnt->root->mnt = shm_mnt;
@@ -1520,6 +1584,9 @@ void vfs_init(void) {
             mount_t *mnt = vfs_mount_alloc();
             strcpy(mnt->path, "/proc");
             mnt->type = FS_TYPE_PROCFS;
+            strcpy(mnt->dev, "proc");
+            strcpy(mnt->fstype, "proc");
+            strcpy(mnt->opts, "rw");
             mnt->root = procfs_root;
             procfs_root->mnt = mnt;
             printf("[VFS] Mounted procfs at /proc\n");

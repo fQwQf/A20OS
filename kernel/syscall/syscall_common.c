@@ -1,4 +1,5 @@
 #include "syscall_internal.h"
+#include "fs/vfs/mount.h"
 
 int syscall_sig_diag_count = 0;
 int syscall_sleep_diag_count = 0;
@@ -45,9 +46,10 @@ int syscall_path_at(int dirfd, const char *path, char *out, size_t outsz) {
         if (!vf->path[0]) {
             vfs_put_file_ref(gfd, vf);
             return -EINVAL;
+        } else {
+            strncpy(logical, vf->path, sizeof(logical) - 1);
+            logical[sizeof(logical) - 1] = '\0';
         }
-        strncpy(logical, vf->path, sizeof(logical) - 1);
-        logical[sizeof(logical) - 1] = '\0';
         vfs_put_file_ref(gfd, vf);
         base = logical;
         size_t len = strlen(base);

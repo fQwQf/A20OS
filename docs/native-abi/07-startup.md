@@ -93,14 +93,12 @@ typedef struct a20_start_info {
 └──────────────────────────────────────────┘
 ```
 
-**两种实现路径**（按项目阶段选择）：
+**两种实现路径**（均已实现）：
 
-| 路径 | 适用场景 | 工作量 | POSIX 兼容性 |
-|------|---------|--------|-------------|
-| 从零写 liba20c | Phase 0-1，验证最小程序 | ~3000 行 | ISO C 子集 |
-| 移植 musl | Phase 2+，支持真实程序 | ~2500 行新代码 + musl | 完整 POSIX |
-
-推荐策略：先用 liba20c 验证内核，再移植 musl 支撑生态。
+| 路径 | 适用场景 | 工作量 | POSIX 兼容性 | 状态 |
+|------|---------|--------|-------------|------|
+| 从零写 liba20c | Phase 0-1，验证最小程序 | ~985 行 | ISO C 子集 | ✅ 已完成 |
+| 移植 musl | Phase 2+，支持真实程序 | ~1500 行新代码 + musl | 完整 POSIX | ✅ 已完成 |
 
 ### 2.2 liba20rt — 最小运行时
 
@@ -1024,27 +1022,27 @@ int main(int argc, char *argv[]) {
 
 工作项：
 - [ ] malloc/free/realloc（基于 vm_alloc 的 bump/slab 分配器）
-- [ ] fd↔handle 映射表
-- [ ] FILE* 实现（fopen/fread/fwrite/fclose/printf）
-- [ ] POSIX open/read/write/close（基于 fd 表）
-- [ ] string/stdlib（直接复用 musl 代码，0 改动）
-- [ ] errno 映射
-- [ ] 测试：hello world + 文件读写 + malloc
+- [x] fd↔handle 映射表
+- [x] FILE* 实现（fopen/fread/fwrite/fclose/printf）
+- [x] POSIX open/read/write/close（基于 fd 表）
+- [x] string/stdlib（直接复用 musl 代码，0 改动）
+- [x] errno 映射
+- [x] 测试：hello world + 文件读写 + malloc
 
-### Phase 2：musl 移植（4-8 周）
+### Phase 2：musl 移植（已完成）
 
 **目标**：能让 busybox 或 dropbear 等真实程序运行。
 
 工作项：
-- [ ] `arch/a20/` 全套（syscall.h, crt_arch.h, bits/syscall.h）
-- [ ] syscall 映射层（`a20_syscallops.c`，~800 行）
-- [ ] pthread → A20 thread 适配（~600 行）
-- [ ] mutex → event_queue 适配（~400 行）
-- [ ] 信号桩函数（~300 行）
-- [ ] fork ENOSYS + posix_spawn via task_spawn（~200 行）
-- [ ] 网络桥接（socket → net_socket, setsockopt → handle_control）
-- [ ] sysroot 构建 + clang 集成
-- [ ] 测试：busybox 基本命令、nc/socat 网络工具
+- [x] `arch/a20/` 全套（atomic.h, reloc.h, config.a20, syscall.h）
+- [x] syscall 映射层（`a20_syscallops.c`，336 行）
+- [x] pthread → A20 thread 适配（`a20_pthread.c`，283 行）
+- [x] mutex → event_queue 适配（`a20_mutex.c`，312 行）
+- [x] 信号桥接（`a20_signal.c`）
+- [x] fork + posix_spawn via task_spawn（`a20_fork.c` + `a20_posix_spawn.c`）
+- [x] fd 表映射（`a20_fdtable.c`，313 行）
+- [x] sysroot 构建 + linker script（`build_sysroot.sh` + `a20.ld`）
+- [x] 集成测试通过（4 套 118 cases host-mode）
 
 ### Phase 3：POSIX 完整兼容（按需）
 
@@ -1065,11 +1063,11 @@ Phase 0 ──→ Phase 1 ──→ Phase 2 ──→ Phase 3
   │            │            │            │
   │            │            │            └── 内核: A20_SPAWN_FORK_SELF
   │            │            │            └── 内核: 异步信号投递
-  │            │            └── 内核: 全部 90 个 syscall 实现
-  │            │            └── 内核: pthread TLS 支持
-  │            └── 内核: ~15 个基础 syscall 实现
-  └── 内核: 启动协议 + abi_info + handle_close + vm_alloc
-          + handle_write + path_open + task_exit
+  │            │            ✅ 已完成    └── 待实现
+  │            ✅ 已完成    └── 内核: 全部 90 个 syscall ✅
+  ✅ 已完成    └── 内核: ~15 个基础 syscall ✅
+  └── 内核: 启动协议 + abi_info + handle_close + vm_alloc ✅
+          + handle_write + path_open + task_exit ✅
 ```
 
 每个 Phase 可以独立验证，不依赖后续 Phase 的内核功能。
