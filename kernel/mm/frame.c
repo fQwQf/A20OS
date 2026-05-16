@@ -154,27 +154,20 @@ void pfa_init(paddr_t kernel_end) {
     }
 }
 
-pfn_t pfa_alloc(int order) {
-    if (order < 0 || order > MAX_ORDER) return PFN_NONE;
-
-    uint64_t flags = spin_lock_irqsave(&pfa.lock);
-
-    // 从 order 开始，向上找非空链表
+// Try to satisfy a high-order allocation by splitting lower-order blocks.
+// Called with pfa.lock held. Returns PFN_NONE or a valid pfn.
+static pfn_t pfa_alloc_from_buddy(int order)
+{
     int o;
     for (o = order; o <= MAX_ORDER; o++)
         if (pfa.free_lists[o].head != PFN_NONE)
             break;
-    if (o > MAX_ORDER) {
-        spin_unlock_irqrestore(&pfa.lock, flags);
-        printf("[PFA] alloc failed order=%d free_frames=%zu\n", order, pfa.free_frames);
+    if (o > MAX_ORDER)
         return PFN_NONE;
-    }
 
-    // 从目标阶链表头取出一个块
     pfn_t blk = pfa.free_lists[o].head;
     fl_remove(blk, o);
 
-    // 若大于请求阶，则将剩余部分按二分法放回更低阶链表
     while (o > order) {
         o--;
         pfn_t buddy = blk ^ (1u << o);
@@ -186,15 +179,39 @@ pfn_t pfa_alloc(int order) {
         fl_push(buddy, o);
     }
 
-    // 标记为已分配
     pfa.meta[blk].flags    = FRAME_F_ALLOC;
     pfa.meta[blk].refcount = 1;
     pfa.meta[blk].order    = (uint8_t)order;
     pfa.meta[blk].prev     = PFN_NONE;
     pfa.meta[blk].next     = PFN_NONE;
     pfa.free_frames -= (1u << order);
-    spin_unlock_irqrestore(&pfa.lock, flags);
     return blk;
+}
+
+pfn_t pfa_alloc(int order) {
+    if (order < 0 || order > MAX_ORDER) return PFN_NONE;
+
+    uint64_t flags = spin_lock_irqsave(&pfa.lock);
+
+    // Fast path: find a block >= requested order
+    pfn_t result = pfa_alloc_from_buddy(order);
+    if (result != PFN_NONE) {
+        spin_unlock_irqrestore(&pfa.lock, flags);
+        return result;
+    }
+
+    spin_unlock_irqrestore(&pfa.lock, flags);
+
+    static size_t last_reported_free = (size_t)-1;
+    size_t cur_free = pfa.free_frames;
+    if (last_reported_free == (size_t)-1 ||
+        (last_reported_free > cur_free && last_reported_free - cur_free >= 32)) {
+        printf("[PFA] alloc failed order=%d free_frames=%lu\n",
+               order, (unsigned long)cur_free);
+        last_reported_free = cur_free;
+    }
+
+    return PFN_NONE;
 }
 
 void pfa_free(pfn_t pfn, int order) {
