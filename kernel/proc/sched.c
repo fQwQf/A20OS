@@ -7,6 +7,10 @@
 #include "drv/virtio_blk.h"
 #include "net/lwip_stack.h"
 #include "proc/signal.h"
+#include "cg/cgroup.h"
+#ifdef CONFIG_ABI_NATIVE
+#include "abi/native/ipc_internal.h"
+#endif
 
 typedef struct proc_runq {
     spinlock_t lock;
@@ -72,6 +76,9 @@ unsigned proc_sched_select_cpu(task_t *t)
     unsigned current = cpu_current_id();
     if (CONFIG_NR_CPUS <= 1)
         return current;
+
+    if (t && t->cgroup)
+        return cg_cpuset_select_cpu(t->cgroup);
 
     if (t && t == proc_current())
         return current;
@@ -221,7 +228,8 @@ task_t *proc_runq_pick_locked(void) {
         if (rq->nr_running > 0)
             rq->nr_running--;
 
-        if (t != proc_idle_task() && t->state == PROC_READY && t->kstack) {
+        if (t != proc_idle_task() && t->state == PROC_READY && t->kstack
+            && !t->cg_throttled) {
             RUNQ_UNLOCK_IRQ(cpu, rf);
             return t;
         }
@@ -276,6 +284,10 @@ static void sched_scan_timers(uint64_t now)
     for (int i = 0; i < sigalrm_count; i++)
         signal_send(sigalrm_pids[i], SIGALRM);
 
+#ifdef CONFIG_ABI_NATIVE
+    a20_timer_tick();
+#endif
+
     __atomic_store_n(&next_wake_scan, next_wake, __ATOMIC_RELAXED);
     __atomic_store_n(&next_alarm_scan, next_alarm, __ATOMIC_RELAXED);
 }
@@ -322,16 +334,32 @@ static uint64_t sched_poll_counter;
 void context_switch(task_t *next) {
     if (!next || !next->kstack)
         return;
+
+    uint64_t now = timer_get_ticks();
+
+    task_t *prev = proc_current();
+    if (prev && prev->cgroup && prev->cg_cpu_start > 0) {
+        uint64_t elapsed_ticks = now - prev->cg_cpu_start;
+        uint64_t elapsed_ns = elapsed_ticks * 1000000000ULL / TICKS_PER_SEC;
+        int throttled = cg_cpu_account(prev->cgroup, elapsed_ns, now);
+        if (throttled)
+            prev->cg_throttled = 1;
+        if (prev->cgroup)
+            cg_cpu_check_unthrottle(prev->cgroup, now);
+    }
+
+    next->cg_cpu_start = now;
+
     if (next == proc_current()) {
         next->state = PROC_RUNNING;
         next->on_rq = 0;
         return;
     }
-    task_t *prev = proc_set_current(next);
+    task_t *old = proc_set_current(next);
     next->state  = PROC_RUNNING;
     next->on_rq  = 0;
-    if (prev)
-        arch_set_task_pointer(prev);
+    if (old)
+        arch_set_task_pointer(old);
     __switch(next->kstack);
 }
 
@@ -353,7 +381,7 @@ void sched(void) {
     }
 
     task_t *cur = proc_current();
-    if (cur && cur->state == PROC_READY) {
+    if (cur && (cur->state == PROC_READY || cur->state == PROC_RUNNING)) {
         cur->state = PROC_RUNNING;
         return;
     }

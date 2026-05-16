@@ -44,6 +44,40 @@ int64_t syscall_dispatch(trap_context_t *ctx)
 {
     uint64_t num = TRAP_CTX_SYSCALL_NUM(ctx);
     uint64_t start_time = syscall_profile_now();
+
+#if defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)
+    task_t *cur_task = proc_current();
+    int is_native = cur_task && cur_task->abi_mode;
+
+    if (is_native) {
+        a20_syscall_args_t a20_args = {
+            .nr = num,
+            .arg = {
+                TRAP_CTX_ARG0(ctx),
+                TRAP_CTX_ARG1(ctx),
+                TRAP_CTX_ARG2(ctx),
+                TRAP_CTX_ARG3(ctx),
+                TRAP_CTX_ARG4(ctx),
+                TRAP_CTX_ARG5(ctx),
+            },
+            .ctx = ctx,
+        };
+
+        int64_t ret = -A20_ERR_NOT_SUPPORTED;
+        const a20_syscall_entry_t *entry = a20_syscall_lookup(num);
+        if (entry) {
+            ret = entry->handler(&a20_args);
+        } else {
+            printf("[A20] UNHANDLED syscall: 0x%lx\n", (unsigned long)num);
+        }
+
+        TRAP_CTX_SET_RET(ctx, ret);
+        syscall_profile_record(num, start_time, syscall_profile_now());
+        return ret;
+    }
+#endif
+
+#if defined(CONFIG_ABI_LINUX) || defined(CONFIG_ABI_BOTH)
     linux_syscall_args_t args = {
         .nr = num,
         .arg = {
@@ -114,4 +148,6 @@ int64_t syscall_dispatch(trap_context_t *ctx)
         }
     }
     return ret;
+#endif
+    return -ENOSYS;
 }

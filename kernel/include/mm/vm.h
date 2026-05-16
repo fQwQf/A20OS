@@ -5,6 +5,8 @@
 #include "core/consts.h"
 #include "core/refcount.h"
 
+struct a20_vmo;
+
 #define VM_READ      (1UL << 0)
 #define VM_WRITE     (1UL << 1)
 #define VM_EXEC      (1UL << 2)
@@ -19,6 +21,7 @@
 #define VM_HUGEPAGE  (1UL << 11)
 #define VM_NOHUGEPAGE (1UL << 12)
 #define VM_FILE      (1UL << 13)
+#define VM_VMO       (1UL << 14)
 
 typedef struct vm_area {
     uint64_t        start;
@@ -27,6 +30,8 @@ typedef struct vm_area {
     uint64_t        pte_flags;
     int             file_fd;
     uint64_t        file_offset;
+    struct a20_vmo *vmo;
+    uint64_t        vmo_offset;
     struct vm_area *prev;
     struct vm_area *next;
 } vm_area_t;

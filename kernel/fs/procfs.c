@@ -24,6 +24,8 @@
 extern task_t *proc_current(void);
 extern task_t *proc_find(int pid);
 extern size_t  frame_free_count(void);
+extern int     vfs_mount_count(void);
+extern struct mount *vfs_mount_at(int index);
 
 // procfs 文件类型枚举
 typedef enum {
@@ -68,6 +70,7 @@ typedef enum {
     PF_A20,
     PF_A20_BCACHE,
     PF_A20_PAGE_CACHE,
+    PF_CGROUPS,
     PF_SELF,
     PF_FSTYPE,
     PF_SWAPS,
@@ -352,12 +355,22 @@ static int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
             "isa\t\t: rv64gc\n"
             "mmu\t\t: sv39\n\n");
         break;
-    case PF_MOUNTS:  // 生成挂载信息
-        snprintf(buf, bufsz,
-            "none / ramfs rw 0 0\n"
-            "/dev/vda /mnt vfat rw 0 0\n"
-            "none /proc proc rw 0 0\n");
+    case PF_MOUNTS: {
+        buf[0] = '\0';
+        int pos = 0;
+        for (int i = 0; i < vfs_mount_count(); i++) {
+            struct mount *m = vfs_mount_at(i);
+            if (!m || !m->path[0]) continue;
+            const char *fstype = m->fstype[0] ? m->fstype : "unknown";
+            const char *dev = m->dev[0] ? m->dev : "none";
+            const char *opts = m->opts[0] ? m->opts : "rw";
+            int n = snprintf(buf + pos, bufsz - pos,
+                "%s %s %s %s 0 0\n", dev, m->path, fstype, opts);
+            if (n < 0 || (size_t)n >= bufsz - pos) break;
+            pos += n;
+        }
         break;
+    }
     case PF_LOADAVG:  // 生成负载平均值
         snprintf(buf, bufsz, "0.00 0.00 0.00 1/64 1\n");
         break;
@@ -538,12 +551,23 @@ static int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
         snprintf(buf, bufsz, "%d\n", t ? t->sid : 0);
         break;
     }
-    case PF_PID_MOUNTINFO:
-        snprintf(buf, bufsz,
-            "1 1 0:1 / / ramfs rw 0 0\n"
-            "2 2 0:2 / /mnt vfat rw 0 0\n"
-            "3 3 0:3 / /proc proc rw 0 0\n");
+    case PF_PID_MOUNTINFO: {
+        buf[0] = '\0';
+        int pos = 0;
+        for (int i = 0; i < vfs_mount_count(); i++) {
+            struct mount *m = vfs_mount_at(i);
+            if (!m || !m->path[0]) continue;
+            const char *fstype = m->fstype[0] ? m->fstype : "unknown";
+            const char *dev = m->dev[0] ? m->dev : "none";
+            const char *opts = m->opts[0] ? m->opts : "rw";
+            int n = snprintf(buf + pos, bufsz - pos,
+                "%d %d 0:%d / %s %s - %s %s %s\n",
+                i + 1, i + 1, i + 1, m->path, opts, fstype, dev, opts);
+            if (n < 0 || (size_t)n >= bufsz - pos) break;
+            pos += n;
+        }
         break;
+    }
     case PF_SYS_KERNEL_PID_MAX:
         snprintf(buf, bufsz, "%d\n", proc_pid_max());
         break;
@@ -564,8 +588,16 @@ static int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
         snprintf(buf, bufsz, "%d\n", t ? t->pid : 0);
         break;
     }
-    case PF_FSTYPE:  // 生成支持的文件系统列表
-        snprintf(buf, bufsz, "nodev\tproc\n\text4\n\tvfat\n\tramfs\n\ttmpfs\n");
+    case PF_FSTYPE:
+        snprintf(buf, bufsz, "nodev\tproc\nnodev\tcgroup\nnodev\tcgroup2\n\text4\n\tvfat\n\tramfs\n\ttmpfs\n");
+        break;
+    case PF_CGROUPS:
+        snprintf(buf, bufsz,
+            "#subsys_name\thierarchy\tnum_cgroups\tenabled\n"
+            "cpuset\t1\t1\t1\n"
+            "cpu\t1\t1\t1\n"
+            "cpuacct\t1\t1\t1\n"
+            "memory\t1\t1\t1\n");
         break;
     default:
         break;
@@ -586,6 +618,7 @@ static pf_type_t name_to_type(const char *name, int *out_pid) {
     if (strcmp(name, "net") == 0) return PF_NET;
     if (strcmp(name, "config.gz") == 0) return PF_CONFIG_GZ;
     if (strcmp(name, "filesystems") == 0) return PF_FSTYPE;
+    if (strcmp(name, "cgroups") == 0) return PF_CGROUPS;
     if (strcmp(name, "swaps") == 0) return PF_SWAPS;
     if (strcmp(name, "pidmap") == 0) return PF_SYS_KERNEL_PIDMAP;
     if (strcmp(name, "a20") == 0) return PF_A20;
@@ -858,7 +891,7 @@ static int procfs_freaddir(vfile_t *vf, void *dirp, size_t count) {
     static const char *root_entries[] = {
         ".", "..", "meminfo", "version", "uptime", "cmdline",
         "cpuinfo", "mounts", "self", "loadavg", "net", "config.gz",
-        "filesystems", "swaps", "pidmap", "sys", "a20", NULL
+        "filesystems", "cgroups", "swaps", "pidmap", "sys", "a20", NULL
     };
     static const char *pid_entries[] = {
         ".", "..", "stat", "status", "statm", "maps", "smaps",

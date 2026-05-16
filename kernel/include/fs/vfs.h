@@ -23,6 +23,7 @@
 #define FS_TYPE_EXT4     3
 #define FS_TYPE_PROCFS   4
 #define FS_TYPE_DEVFS    5
+#define FS_TYPE_CGROUP   6
 
 /* ---- Forward declarations ---- */
 struct vnode;
@@ -155,6 +156,9 @@ typedef struct mount {
     int             type;           /* FS_TYPE_* */
     int             flags;
     char            path[MAX_PATH_LEN];
+    char            dev[64];        /* device/source name */
+    char            fstype[32];     /* filesystem type string */
+    char            opts[256];      /* mount options */
     vnode_t        *root;           /* root vnode of this mount */
     void           *fs_data;
 } mount_t;
@@ -225,7 +229,7 @@ int      vfs_chdir(const char *path);
 int      vfs_getcwd(char *buf, size_t size);
 
 /* Mount */
-int      vfs_mount(const char *dev, const char *path, const char *fstype, int flags);
+int      vfs_mount(const char *dev, const char *path, const char *fstype, int flags, const char *data);
 int      vfs_mount_bc(const char *path, const char *fstype, struct bcache *bc);
 int      vfs_umount(const char *path);
 

@@ -21,6 +21,10 @@ typedef _Bool bool;
 #define false 0
 #define NULL  ((void *)0)
 
+#ifndef SIZE_MAX
+#define SIZE_MAX ((size_t)-1)
+#endif
+
 /* Process states */
 typedef enum {
     PROC_UNUSED = 0,

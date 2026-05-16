@@ -99,6 +99,8 @@ typedef struct a20_channel_type {
 - `recv_handle_types`：`channel_recv` 时，从消息中取出的 handle 的对象类型必须在此 bitmask 中
 - 类型检查失败返回 `A20_ERR_TYPE_MISMATCH`
 
+> **内核执行**：`a20_channel_send()` 调用 `ch_check_send_types()` 检查 `send_handle_types` bitmask；`a20_channel_recv()` 在取出消息后调用 `ch_check_recv_types()` 检查 `recv_handle_types` bitmask。两者均在 `kernel/ipc/a20_channel.c` 中实现。
+
 **设计意图**：类型化通道使得内核能够强制执行 IPC 通信的结构约束，而不是仅依赖用户态协议（如 FIDL）。这提供了：
 - 被攻破的进程无法向 channel 发送错误类型的 handle
 - 系统管理员可以静态分析哪些进程对之间可以传输哪些类型的资源
