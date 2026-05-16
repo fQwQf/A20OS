@@ -10,6 +10,8 @@
 #include "core/defs.h"
 #include "core/lock.h"
 #include "core/string.h"
+#include "abi/native/vmo.h"
+#include "cg/cgroup.h"
 
 int handle_cow_fault(task_t *t, uint64_t stval) {
     if (!t->mm || !t->mm->pgdir) return -1;
@@ -91,11 +93,16 @@ int handle_demand_fault(task_t *t, uint64_t stval) {
 
             pfn_t pfn = pfa_alloc_page();
             if (pfn == PFN_NONE) return -1;
+            if (cg_mem_charge(t->cgroup, 1) != 0) {
+                frame_put(pfn);
+                cg_mem_oom_kill(t->cgroup);
+                return -1;
+            }
             memset(pfn_to_virt(pfn), 0, PAGE_SIZE);
 
             uint64_t pte_flags = PTE_V | PTE_R | PTE_W | PTE_X | PTE_U | PTE_A | PTE_D | PTE_MAT1 | PTE_LEAF;
             int r = pt_map(t->mm->pgdir, page_va, pfn_to_phys(pfn), pte_flags);
-            if (r < 0) { frame_put(pfn); return -1; }
+            if (r < 0) { cg_mem_uncharge(t->cgroup, 1); frame_put(pfn); return -1; }
 
             if (page_va < t->mm->stack_bottom)
                 t->mm->stack_bottom = page_va;
@@ -107,13 +114,17 @@ int handle_demand_fault(task_t *t, uint64_t stval) {
 
     if (page_va >= t->mm->start_brk &&
         page_va < ROUND_UP(t->mm->brk, PAGE_SIZE)) {
+        if (cg_mem_charge(t->cgroup, 1) != 0) {
+            cg_mem_oom_kill(t->cgroup);
+            return -1;
+        }
         pfn_t pfn = pfa_alloc_page();
-        if (pfn == PFN_NONE) return -1;
+        if (pfn == PFN_NONE) { cg_mem_uncharge(t->cgroup, 1); return -1; }
         memset(pfn_to_virt(pfn), 0, PAGE_SIZE);
 
         uint64_t pte_flags = PTE_V | PTE_R | PTE_W | PTE_U | PTE_A | PTE_D | PTE_MAT1 | PTE_LEAF;
         int r = pt_map(t->mm->pgdir, page_va, pfn_to_phys(pfn), pte_flags);
-        if (r < 0) { frame_put(pfn); return -1; }
+        if (r < 0) { cg_mem_uncharge(t->cgroup, 1); frame_put(pfn); return -1; }
 
         t->mm->rss++;
         arch_tlb_flush_page(stval);
@@ -167,8 +178,14 @@ int handle_demand_fault(task_t *t, uint64_t stval) {
                     return -1;
                 }
             } else {
+                if (cg_mem_charge(t->cgroup, 1) != 0) {
+                    page_cache_put(pcp);
+                    cg_mem_oom_kill(t->cgroup);
+                    return -1;
+                }
                 pfn_t copy = pfa_alloc_page();
                 if (copy == PFN_NONE) {
+                    cg_mem_uncharge(t->cgroup, 1);
                     page_cache_put(pcp);
                     return -1;
                 }
@@ -177,10 +194,25 @@ int handle_demand_fault(task_t *t, uint64_t stval) {
                 int r = pt_map(t->mm->pgdir, page_va, pfn_to_phys(copy),
                                vma->pte_flags);
                 if (r < 0) {
+                    cg_mem_uncharge(t->cgroup, 1);
                     frame_put(copy);
                     return -1;
                 }
             }
+
+            t->mm->rss++;
+            arch_tlb_flush_page(stval);
+            return 0;
+        }
+
+        if ((vma->vm_flags & VM_VMO) && vma->vmo) {
+            uint32_t pg_idx = (uint32_t)((vma->vmo_offset + (page_va - vma->start)) / PAGE_SIZE);
+            pfn_t vpfn = a20_vmo_get_page(vma->vmo, pg_idx);
+            if (vpfn == PFN_NONE) return -1;
+
+            int r = pt_map(t->mm->pgdir, page_va, pfn_to_phys(vpfn),
+                            vma->pte_flags);
+            if (r < 0) return -1;
 
             t->mm->rss++;
             arch_tlb_flush_page(stval);
@@ -194,6 +226,11 @@ int handle_demand_fault(task_t *t, uint64_t stval) {
                 !pt_lookup_leaf(t->mm->pgdir, hbase, NULL, NULL, NULL)) {
                 pfn_t hpfn = pfa_alloc(PMD_ORDER);
                 if (hpfn != PFN_NONE) {
+                    if (cg_mem_charge(t->cgroup, PMD_PAGE_COUNT) != 0) {
+                        frame_put(hpfn);
+                        cg_mem_oom_kill(t->cgroup);
+                        return -1;
+                    }
                     memset(pfn_to_virt(hpfn), 0, PMD_SIZE);
                     int hr = pt_map_huge(t->mm->pgdir, hbase, pfn_to_phys(hpfn),
                                          vma->pte_flags);
@@ -202,6 +239,7 @@ int handle_demand_fault(task_t *t, uint64_t stval) {
                         arch_tlb_flush_page(stval);
                         return 0;
                     }
+                    cg_mem_uncharge(t->cgroup, PMD_PAGE_COUNT);
                     frame_put(hpfn);
                 }
             }
@@ -209,11 +247,16 @@ int handle_demand_fault(task_t *t, uint64_t stval) {
 
         pfn_t pfn = pfa_alloc_page();
         if (pfn == PFN_NONE) return -1;
+        if (cg_mem_charge(t->cgroup, 1) != 0) {
+            frame_put(pfn);
+            cg_mem_oom_kill(t->cgroup);
+            return -1;
+        }
         memset(pfn_to_virt(pfn), 0, PAGE_SIZE);
 
         int r = pt_map(t->mm->pgdir, page_va, pfn_to_phys(pfn),
                         vma->pte_flags);
-        if (r < 0) { frame_put(pfn); return -1; }
+        if (r < 0) { cg_mem_uncharge(t->cgroup, 1); frame_put(pfn); return -1; }
 
         t->mm->rss++;
         arch_tlb_flush_page(stval);

@@ -44,7 +44,7 @@
 
 ## 2. 与现有 DESIGN.md 的关系
 
-`kernel/abi/native/DESIGN.md` 已定义了良好的骨架：
+`docs/native-abi/00-overview.md` 已定义了良好的骨架：
 
 - Handle 作为统一资源引用 ✓
 - Handle rights (capability) 系统 ✓

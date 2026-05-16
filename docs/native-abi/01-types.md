@@ -1,6 +1,6 @@
 # A20OS Native ABI：类型与结构体定义
 
-> 本文档定义 A20OS Native ABI 的所有用户可见类型和结构体。权限语义见 [security.md](security.md)，Handle 生命周期见 [handle.md](handle.md)。
+> 本文档定义 A20OS Native ABI 的所有用户可见类型和结构体。权限语义见 [security.md](06-security.md)，Handle 生命周期见 [handle.md](03-handle.md)。
 
 ---
 
