@@ -11,7 +11,9 @@
 #include "core/panic.h"
 #include "sys/futex.h"
 #include "abi/linux/futex.h"
+#include "abi/native/ipc_internal.h"
 #include "sys/usercopy.h"
+#include "cg/cgroup.h"
 
 static int proc_ignores_sigchld(task_t *parent)
 {
@@ -73,6 +75,9 @@ static void proc_release_exiting_mm(task_t *t)
     t->pgdir = kernel_pgdir;
     if (t->trap_ctx)
         TRAP_CTX_KScratch0(t->trap_ctx) = kernel_satp;
+
+    if (t->cgroup && mm->rss > 0)
+        cg_mem_uncharge(t->cgroup, mm->rss);
 
     mm_destroy(mm);
 }
@@ -163,10 +168,6 @@ void proc_exit(int exit_code)
         int *ctid = t->clear_child_tid;
         t->clear_child_tid = NULL;
         if (copy_to_user(ctid, &zero, sizeof(zero)) < 0 && t->pgdir) {
-            /* Fallback: write directly through page table to handle
-             * CoW-protected or demand-paged mappings that copy_to_user
-             * may reject.  This matches how Linux handles mm-less
-             * clear_child_tid via put_user. */
             paddr_t pa = pt_translate(t->pgdir, (vaddr_t)(uintptr_t)ctid);
             if (pa) {
                 pfn_t pfn = phys_to_pfn(pa);
@@ -177,11 +178,15 @@ void proc_exit(int exit_code)
                 }
             }
         }
+#if defined(CONFIG_ABI_LINUX) || defined(CONFIG_ABI_BOTH)
         futex_wake_user(ctid, 1);
+#endif
     }
 
+#if defined(CONFIG_ABI_LINUX) || defined(CONFIG_ABI_BOTH)
     if (t->robust_list_head)
         exit_robust_list(t);
+#endif
 
     vfs_release_process_locks(t->pid);
     bpf_release_process(t->pid);
@@ -194,6 +199,8 @@ void proc_exit(int exit_code)
     __atomic_thread_fence(__ATOMIC_RELEASE);
     proc_runq_remove_locked(t);
     t->state = PROC_ZOMBIE;
+
+    a20_event_notify(t, A20_OBJ_TASK, 0, (uint64_t)exit_code, 0);
 
     if (auto_reap) {
         t->parent = proc_idle_task();
@@ -256,15 +263,19 @@ void proc_force_exit(task_t *t, int exit_code)
                 }
             }
         }
+#if defined(CONFIG_ABI_LINUX) || defined(CONFIG_ABI_BOTH)
         futex_wake_user(ctid, 1);
+#endif
         proc_set_current(saved);
     }
 
+#if defined(CONFIG_ABI_LINUX) || defined(CONFIG_ABI_BOTH)
     if (t->robust_list_head) {
         task_t *saved = proc_set_current(t);
         exit_robust_list(t);
         proc_set_current(saved);
     }
+#endif
 
     vfs_release_process_locks(t->pid);
     fdtable_close_all(t);
@@ -278,6 +289,8 @@ void proc_force_exit(task_t *t, int exit_code)
     __atomic_thread_fence(__ATOMIC_RELEASE);
     proc_runq_remove_locked(t);
     t->state = PROC_ZOMBIE;
+
+    a20_event_notify(t, A20_OBJ_TASK, 0, (uint64_t)exit_code, 0);
 
     if (auto_reap) {
         t->parent = proc_idle_task();

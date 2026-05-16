@@ -23,7 +23,7 @@ kernel/abi/linux/    Linux-compatible ABI subset
 kernel/abi/native/   A20OS native ABI
 ```
 
-Linux ABI 继续作为主用户态接口。Native ABI 先作为实验性接口，等内核内部 API 更稳定后再逐步实现。
+Linux ABI 继续作为主用户态接口。Native ABI 已完成全部 90 个 syscall 的内核侧实现和用户态 musl 移植。
 
 ## 核心原则
 
@@ -35,7 +35,12 @@ Native ABI 不区分 Linux 风格的 fd、pid、tid、timerid、shmid、epoll fd
 typedef uint32_t a20_handle_t;
 ```
 
-13 种对象类型（详见 [handle.md](handle.md)）：
+**为什么采用handle？**
+
+> 我看 Windows NT 搞得不错，内核对象极大丰富，各类资源的调用差异基本消灭，面向对象，安全权能机制也受重视，如果再加上开源，Windows NT 就是我们理想中的操作系统内核。  
+> —— fQwQf
+
+13 种对象类型（详见 [handle.md](03-handle.md)）：
 
 | 类型 | 说明 |
 |------|------|
@@ -65,11 +70,11 @@ handle 是进程本地编号，不是全局对象 ID。不同进程中的同一�
 new_rights must be subset of old_rights
 ```
 
-14 个权限位的完整定义和 rights 代数见 [security.md](security.md)。
+14 个权限位的完整定义和 rights 代数见 [security.md](06-security.md)。
 
 ### 3. syscall 使用稳定结构体
 
-复杂 syscall 不直接传一串裸参数，而是传结构体指针。所有结构体以 `size` 和 `version` 开头。详见 [types.md](types.md)。
+复杂 syscall 不直接传一串裸参数，而是传结构体指针。所有结构体以 `size` 和 `version` 开头。详见 [types.md](01-types.md)。
 
 规则：
 
@@ -93,7 +98,7 @@ int64_t a20_abi_info(a20_abi_info_t *out);
 - `abi_patch` 只表示 bugfix，不改变 ABI 表面。
 - feature bits 用于检测可选能力。
 
-结构体定义见 [types.md](types.md)，返回约定见 [errors.md](errors.md)。
+结构体定义见 [types.md](01-types.md)，返回约定见 [errors.md](02-errors.md)。
 
 ### 5. syscall 编号分区
 
@@ -115,19 +120,19 @@ Native ABI syscall 编号按子系统分区，便于扩展和阅读。
 0x1000 - 0x1fff  experimental, not stable
 ```
 
-稳定 syscall 不允许随意改号。实验 syscall 只能在 `0x1000+` 范围内。完整的 90 个 syscall 编号表见 [handle.md](handle.md) §6。
+稳定 syscall 不允许随意改号。实验 syscall 只能在 `0x1000+` 范围内。完整的 90 个 syscall 编号表见 [handle.md](03-handle.md) §6。
 
 ## 文档索引
 
 | 文档 | 内容 |
 |------|------|
-| [types.md](types.md) | 基础类型定义、ABI 头约定、所有 syscall 参数结构体 |
-| [errors.md](errors.md) | 错误码定义、返回值约定、错误处理策略 |
-| [startup.md](startup.md) | 用户态启动协议、start_info 结构、初始 handle、libc 分层设计 |
-| [handle.md](handle.md) | Handle 生命周期状态机、handle table 规范、13 种对象类型映射 |
-| [memory.md](memory.md) | VMO/VMAR 内存模型、内存操作语义、共享内存与映射 |
-| [ipc.md](ipc.md) | Channel IPC 协议、Event Queue 机制、partial delivery 状态机 |
-| [security.md](security.md) | Rights 代数、handle transfer 语义、安全标签格、capability 安全模型 |
+| [types.md](01-types.md) | 基础类型定义、ABI 头约定、所有 syscall 参数结构体 |
+| [errors.md](02-errors.md) | 错误码定义、返回值约定、错误处理策略 |
+| [startup.md](07-startup.md) | 用户态启动协议、start_info 结构、初始 handle、libc 分层设计 |
+| [handle.md](03-handle.md) | Handle 生命周期状态机、handle table 规范、13 种对象类型映射 |
+| [memory.md](04-memory.md) | VMO/VMAR 内存模型、内存操作语义、共享内存与映射 |
+| [ipc.md](05-ipc.md) | Channel IPC 协议、Event Queue 机制、partial delivery 状态机 |
+| [security.md](06-security.md) | Rights 代数、handle transfer 语义、安全标签格、capability 安全模型 |
 
 ## 与 Linux ABI 的关系
 
@@ -165,7 +170,7 @@ Native ABI 应配套一个很薄的 native runtime，而不是直接改 musl。
 2. `liba20c`：最小 C 库，支持 malloc、stdio、string、time。
 3. POSIX shim：可选，将部分 POSIX API 映射到 native handle 模型。
 
-不要一开始就承诺完整 POSIX。详见 [startup.md](startup.md)。
+不要一开始就承诺完整 POSIX。详见 [startup.md](07-startup.md)。
 
 ## 兼容策略
 
@@ -178,67 +183,77 @@ Native ABI 一旦稳定，需要遵守：
 5. 不兼容变更只能增加 `abi_major`。
 6. 实验 syscall 必须留在 experimental 编号区。
 
-## 最小可实现原型
+## 实现状态
 
-第一阶段 native ABI 不应追求完整。建议只实现这些 syscall，让一个极简 native init 可以启动、打印、退出。
+全部 90 个 syscall 已完成内核侧实现（`sys_core.c` + `sys_phase2.c`），无 stub 残留。
+
+已完成的工作：
+
+| 组件 | 文件 | 行数 | 状态 |
+|------|------|------|------|
+| 核心 syscall | `sys_core.c` | 771 | ✅ 完成 |
+| Phase 2 syscall | `sys_phase2.c` | ~1750 | ✅ 完成 |
+| Handle table | `handle_table.c` | 330 | ✅ 完成 |
+| 启动协议 | `startup.c` | 105 | ✅ 完成 |
+| Channel IPC | `a20_channel.c` | 189 | ✅ 完成 |
+| Event Queue | `a20_event.c` | 269 | ✅ 完成 |
+| 性能优化 | `fastpath.h` + `ring_spsc.h` | 210 | ✅ 完成 |
+| 资源限制 | `resource.h` | 88 | ✅ 完成 |
+| 安全模型 | security rights + Bell-LaPadula | — | ✅ 完成 |
+| 错误降级 | `a20_graceful.c` | 74 | ✅ 完成 |
+| liba20c | 12 源文件 + 9 头文件 | ~985 | ✅ 完成 |
+| musl 移植 | arch/headers + fdtable + pthread + mutex | ~1500 | ✅ 完成 |
+| sysroot | `build_sysroot.sh` + `a20.ld` | ~250 | ✅ 完成 |
+| 集成测试 | 4 套 118 cases host-mode | — | ✅ 全部通过 |
+
+代码总量约 9,800 行，75+ 文件。
+
+## 最小可实现原型（已完成）
+
+以下是最初建议的最小 syscall 集，现已全部实现并远超：
 
 ```text
-0x0000 abi_info
-0x0100 handle_close
-0x0101 handle_dup
-0x0102 handle_query
-0x0200 task_exit
-0x0300 vm_alloc
-0x0301 vm_unmap
-0x0400 path_open
-0x0401 handle_read
-0x0402 handle_write
-0x0403 handle_stat
-0x0500 event_queue_create
-0x0501 event_watch
-0x0502 event_wait
-0x0700 clock_get
+0x0000 abi_info            ✅
+0x0100 handle_close        ✅
+0x0101 handle_dup           ✅
+0x0102 handle_query         ✅
+0x0200 task_exit            ✅
+0x0300 vm_alloc             ✅
+0x0301 vm_unmap             ✅
+0x0400 path_open            ✅
+0x0401 handle_read          ✅
+0x0402 handle_write         ✅
+0x0403 handle_stat          ✅
+0x0500 event_queue_create   ✅
+0x0501 event_watch          ✅
+0x0502 event_wait           ✅
+0x0700 clock_get            ✅
 ```
 
-最小 native init 需要：
+第二阶段也已全部完成：
 
-1. 从 `a20_start_info` 拿到 stdout handle。
-2. 调用 `handle_write(stdout, ...)` 打印。
-3. 调用 `task_exit(0)` 退出。
+- ✅ `task_spawn`、`thread_create`
+- ✅ `timer_create/set/cancel`
+- ✅ message channel（`channel_create/send/recv`）
+- ✅ socket（`net_socket/bind/connect/accept/listen/sendmsg/recvmsg/socketpair/shutdown/getname`）
+- ✅ shared memory（VMO/VMAR 模型：`vm_create_object/vm_map/vm_share`）
 
-第二阶段再支持：
-
-- `task_spawn`、`thread_create`
-- `timer_create`
-- message channel
-- socket
-- shared memory（VMO/VMAR 模型）
-
-## 实现建议
-
-推荐代码结构：
+## 代码结构（已实现）
 
 ```text
 kernel/abi/native/
   DESIGN.md            本文档（顶层概述）
-  types.md             类型与结构体定义
-  errors.md            错误码
-  startup.md           启动协议
-  handle.md            Handle 子系统
-  memory.md            内存子系统
-  ipc.md               IPC 与事件子系统
-  security.md          安全模型
   syscall_table.c      syscall 分发表
-  syscall_table.def    syscall 编号宏定义
-  syscall_impl.h       内部实现接口
-  sys_core.c           0x00xx: abi_info
-  sys_handle.c         0x01xx: handle 操作
-  sys_task.c           0x02xx: task/thread 操作
-  sys_memory.c         0x03xx: 内存操作
-  sys_path.c           0x04xx: 文件系统操作
-  sys_event.c          0x05xx: IPC/事件操作
-  sys_net.c            0x06xx: 网络操作
-  sys_time.c           0x07xx: 时间操作
+  syscall_table.def    syscall 编号宏定义（90 条）
+  sys_core.c           Phase 1 syscall 实现（17 个核心 syscall）
+  sys_phase2.c         Phase 2 syscall 实现（73 个扩展 syscall，含 timer/thread/debug/namespace/net sendmsg 等）
+  handle_table.c       Handle table 实现（状态机 + 查找/安装/移除）
+  startup.c            用户态启动协议
+  a20_graceful.c       错误降级处理
+
+kernel/ipc/
+  a20_channel.c        Channel IPC 实现
+  a20_event.c          Event Queue 实现
 
 kernel/include/abi/native/
   types.h              用户可见类型定义
@@ -247,9 +262,21 @@ kernel/include/abi/native/
   syscall_nr.h         syscall 编号常量
   syscall_entry.h      syscall 入口约定
   startup.h            启动信息结构
-```
+  vmo.h / vmar.h       VMO/VMAR 内存模型
+  ipc_internal.h       Channel/Event 内部接口
+  fastpath.h           Syscall 快速路径（inline handle/rights/iov/bitmap）
+  ring_spsc.h          Lock-free SPSC ring buffer
+  resource.h           资源限制常量和检查函数
 
-不要急着接入 `Makefile`。先完成文档和最小 headers，再实现最小 syscall table。
+user/musl-port/        musl 移植层
+  src/internal/a20_fdtable.c    fd↔handle 映射
+  src/thread/a20_pthread.c      pthread 桥接
+  src/thread/a20_mutex.c        mutex 桥接
+  src/process/a20_fork.c        fork 桥接
+  src/signal/a20_signal.c       signal 桥接
+  build_sysroot.sh              sysroot 构建脚本
+  a20.ld                        RISC-V linker script
+```
 
 ## 明确不做的事
 
@@ -350,14 +377,15 @@ Linux 的 16 个 uid/gid/capability syscall 被压缩为 2 个。`a20_security_c
 
 ## 总结
 
-A20 native ABI 应该是一套基于 handle/capability 的现代系统接口。它的价值不是替代 Linux 兼容层，而是给 A20OS 一个清晰、自洽、长期可演进的原生用户态契约。
+A20 native ABI 是一套基于 handle/capability 的现代系统接口。它的价值不是替代 Linux 兼容层，而是给 A20OS 一个清晰、自洽、长期可演进的原生用户态契约。
 
-短期最合理的路线是：
+当前实现状态：
 
-1. 保持 `abi/linux` 作为主 ABI。
-2. 先文档化 native ABI（本文档体系）。
-3. 等核心模块 API 更稳定后，实现最小 native runtime。
-4. 用 native init 验证启动、输出、退出。
-5. 再逐步加入 spawn、event、IPC、network 和 sandbox。
+1. ✅ `abi/linux` 作为主 ABI 保持不变。
+2. ✅ Native ABI 全部 90 个 syscall 已文档化并实现。
+3. ✅ 内核侧完整实现（sys_core.c + sys_phase2.c + handle_table.c + startup.c + IPC）。
+4. ✅ 用户态完整实现（liba20rt + liba20c + musl 移植 + sysroot）。
+5. ✅ 集成测试通过（4 套 118 cases host-mode）。
+6. ✅ 编译零回归（ABI=linux 编译通过）。
 
 理论分析和形式化证明见 `docs/research/` 目录下的研究笔记体系（`00-index.md` 为入口）。
