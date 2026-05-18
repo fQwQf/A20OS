@@ -127,6 +127,7 @@ BIN =\
 	grep\
 	head\
 	hostname\
+	id\
 	join\
 	kill\
 	link\
