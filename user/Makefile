@@ -1,5 +1,4 @@
 ARCH ?= riscv64
-CONTEST ?= 0
 OPT ?= -O3
 
 .DEFAULT_GOAL := all
@@ -10,7 +9,7 @@ $(error Unsupported ARCH '$(ARCH)'; expected one of: $(SUPPORTED_ARCHES))
 endif
 
 BUILD_DIR := build
-OBJ_DIR := $(BUILD_DIR)/obj/$(ARCH)-$(CONTEST)
+OBJ_DIR := $(BUILD_DIR)/obj/$(ARCH)
 MUSL_BASE := $(CURDIR)/external/musl
 MUSL_BUILD := $(MUSL_BASE)/build-$(ARCH)
 MUSL_CRT := $(MUSL_BUILD)/lib
@@ -60,10 +59,6 @@ CFLAGS := -Wall -Wextra $(OPT) -ffreestanding -nostdinc $(MUSL_INC) \
           -Iinit_common $(ARCH_CFLAGS)
 LDFLAGS := -static -nostdlib -Ttext 0x10000 $(ARCH_LDFLAGS)
 
-ifeq ($(CONTEST),1)
-CFLAGS += -DCONTEST
-endif
-
 LIBGCC_DEFAULT := $(shell $(CC) $(CFLAGS) -print-libgcc-file-name 2>/dev/null)
 ifeq ($(ARCH),riscv64)
 LIBGCC_LP64 := $(dir $(LIBGCC_DEFAULT))rv64i/lp64/libgcc.a
@@ -95,7 +90,7 @@ LOCAL_CMD_NAMES := $(basename $(notdir $(LOCAL_CMD_SRCS)))
 
 SBASE_ALL_BINS := basename cat chgrp chmod chown cksum cmp comm cp cut date dd \
                   dirname du echo env expand expr false find fold grep head hostname \
-                  join kill link ln logger logname ls mkdir mkfifo mknod mktemp mv \
+                  id join kill link ln logger logname ls mkdir mkfifo mknod mktemp mv \
                   nice nl nohup od paste pathchk printenv printf pwd readlink rev rm \
                   rmdir sed seq setsid sleep sort split sponge strings sync tail tar \
                   tee test time touch tr true tty uname unexpand uniq unlink uudecode \
@@ -418,19 +413,11 @@ FF_CFLAGS := $(filter-out -Wconversion,$(CFLAGS)) \
 
 FF_CMD := $(BUILD_DIR)/fastfetch
 
-CONTEST_INIT_MAIN := contest_init/contest_init.c
-CONTEST_INIT_SRCS := $(filter-out $(CONTEST_INIT_MAIN),$(wildcard contest_init/*.c))
-CONTEST_INIT_OBJS := $(patsubst contest_init/%.c,$(OBJ_DIR)/contest_init/%.o,$(CONTEST_INIT_SRCS))
 INIT_COMMON_SRCS := $(wildcard init_common/*.c)
 INIT_COMMON_OBJS := $(patsubst init_common/%.c,$(OBJ_DIR)/init_common/%.o,$(INIT_COMMON_SRCS))
 
-ifeq ($(CONTEST),1)
-INIT_MAIN_SRC := $(CONTEST_INIT_MAIN)
-INIT_EXTRA_OBJS := $(INIT_COMMON_OBJS) $(CONTEST_INIT_OBJS)
-else
-INIT_MAIN_SRC := shell/init.c
+INIT_MAIN_SRC := init.c
 INIT_EXTRA_OBJS := $(INIT_COMMON_OBJS)
-endif
 INIT_OBJ := $(OBJ_DIR)/init.o
 
 MKSH_DIR := external/mksh-cvs2git
@@ -457,9 +444,8 @@ FF_AVAILABLE :=
 endif
 
 all: build_dir $(BUILD_DIR)/init $(BUILD_DIR)/mksh $(BUILD_DIR)/sh $(SBASE_CMDS) $(LOCAL_CMDS) $(WGET_CMD)
-ifeq ($(FF_AVAILABLE),1)
-	$(MAKE) -C . FASTFETCH_ONLY=1 $(FF_CMD)
-endif
+
+fastfetch: build_dir $(FF_CMD)
 
 build_dir:
 	@mkdir -p $(BUILD_DIR) $(OBJ_DIR)
@@ -547,10 +533,6 @@ $(SBASE_LIBUTIL): $(SBASE_LIBUTIL_OBJS) | build_dir
 	@mkdir -p $(dir $@)
 	$(AR) rcs $@ $^
 	$(RANLIB) $@
-
-$(OBJ_DIR)/contest_init/%.o: contest_init/%.c Makefile | build_dir musl_prepare
-	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -c $< -o $@
 
 $(OBJ_DIR)/init_common/%.o: init_common/%.c Makefile | build_dir musl_prepare
 	@mkdir -p $(dir $@)
