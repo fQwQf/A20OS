@@ -1,0 +1,35 @@
+#!/bin/sh
+# musl configure wrapper for A20 Native ABI target
+# Usage: ./config.a20 [PREFIX]
+
+ARCH=a20
+TARGET=riscv64-a20-elf
+prefix="${1:-/usr/local/a20}"
+
+CC="${CC:-riscv64-unknown-elf-gcc}"
+CFLAGS="-O2 -ffreestanding -nostdlib -fno-builtin -march=rv64gc -mabi=lp64d -mcmodel=medany"
+
+cat > config.mak <<EOF
+ARCH = $ARCH
+SUBARCH =
+ASMSUBARCH =
+CC = $CC
+CFLAGS = $CFLAGS
+CFLAGS_C99FSE = -std=c99
+CFLAGS_MEMOPS =
+CPPFLAGS = -D__A20__
+LDFLAGS = -nostdlib -static
+LIBS =
+prefix = $prefix
+exec_prefix = \$(prefix)
+bindir = \$(exec_prefix)/bin
+libdir = \$(exec_prefix)/lib
+includedir = \$(prefix)/include
+syslibdir = /lib
+OBJCOPY = riscv64-unknown-elf-objcopy
+AR = riscv64-unknown-elf-ar
+RANLIB = riscv64-unknown-elf-ranlib
+INSTALL = install
+EOF
+
+echo "Configured musl for A20 Native ABI (arch=$ARCH, CC=$CC, prefix=$prefix)"
