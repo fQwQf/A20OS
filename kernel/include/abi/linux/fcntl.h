@@ -10,6 +10,7 @@
 #define O_APPEND     0x400
 #define O_CLOEXEC    0x80000
 #define O_DIRECTORY  0x10000
+#define O_DIRECT     0x40000
 #define O_NONBLOCK   0x800
 #define O_EXCL       0x80
 #define O_PATH       0x200000

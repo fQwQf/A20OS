@@ -7,7 +7,7 @@
 #include "core/defs.h"
 #include "proc/proc.h"
 
-#define RAMFS_MAX_INODES       1024
+#define RAMFS_MAX_INODES       4096
 #define RAMFS_MAX_DIR_ENTRIES   256
 
 typedef struct ramfs_inode {
@@ -574,7 +574,11 @@ static int ramfs_fwrite(vfile_t *vf, const char *buf, size_t count) {
     if (needed > inode->capacity) {
         size_t new_cap = needed * 2;
         char *new_data = (char *)kmalloc(new_cap);
-        if (!new_data) return -ENOMEM;
+        if (!new_data) {
+            new_cap = needed;
+            new_data = (char *)kmalloc(new_cap);
+            if (!new_data) return -ENOMEM;
+        }
         if (inode->data) {
             memcpy(new_data, inode->data, inode->size);
             kfree(inode->data);
