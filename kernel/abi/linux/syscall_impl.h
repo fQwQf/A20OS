@@ -70,6 +70,7 @@ int64_t sys_pselect6(int nfds, void *readfds, void *writefds,
                      void *exceptfds, void *timeout, void *sigmask);
 int64_t sys_poll(void *fds, int nfds, int timeout);
 int64_t sys_ppoll(void *fds, int nfds, void *tmo, void *sigmask);
+int64_t sys_epoll_create(int size);
 int64_t sys_epoll_create1(int flags);
 int64_t sys_epoll_ctl(int epfd, int op, int fd, void *event);
 int64_t sys_epoll_wait(int epfd, void *events, int maxevents, int timeout);
@@ -273,6 +274,7 @@ int64_t sys_mincore(uint64_t addr, size_t length, unsigned char *vec);
 int64_t sys_personality(unsigned int persona);
 int64_t sys_vhangup(void);
 int64_t sys_unshare(int flags);
+int64_t sys_setns(int fd, int nstype);
 int64_t sys_pivot_root(const char *new_root, const char *put_old);
 int64_t sys_get_mempolicy(int *policy, unsigned long *nmask,
                           unsigned long maxnode, unsigned long addr,

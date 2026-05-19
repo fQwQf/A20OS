@@ -12,4 +12,4 @@ kernel-la
 .DS_Store
 .kernel-build/
 *.dtb
-*.txt
+.eval-state
