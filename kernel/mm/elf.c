@@ -21,6 +21,8 @@
 #include "core/defs.h"
 #include "core/klog.h"
 #include "core/random.h"
+#include "proc/signal.h"
+#include "mm/frame.h"
 #ifdef CONFIG_ABI_NATIVE
 #include "abi/native/startup.h"
 #endif
@@ -433,11 +435,15 @@ int elf_load(int fd, const char *path, elf_load_info_t *info) {
     Elf64_Ehdr eh;
     if (vfs_lseek(fd, 0, SEEK_SET) < 0) return -EIO;
     int r = vfs_read(fd, (char *)&eh, sizeof(eh));
-    if (r < (int)sizeof(eh)) return -ENOEXEC;
+    if (r < (int)sizeof(eh)) {
+        kinfo("[ELF] read header failed: r=%d need=%zu path='%s'\n",
+              r, sizeof(eh), path ? path : "(null)");
+        return -ENOEXEC;
+    }
 
     r = elf_check_header(&eh);
     if (r < 0) {
-        kinfo("[ELF] header check failed: r=%d magic=0x%x class=%d data=%d "
+        kdebug("[ELF] header check failed: r=%d magic=0x%x class=%d data=%d "
               "type=%d machine=%d\n",
               r, *(uint32_t *)eh.e_ident, eh.e_ident[4], eh.e_ident[5],
               eh.e_type, eh.e_machine);
@@ -513,10 +519,10 @@ int elf_load(int fd, const char *path, elf_load_info_t *info) {
         char resolved[MAX_PATH_LEN];
         int interp_fd = resolve_interp(path, interp_path,
                                        resolved, sizeof(resolved));
-        kinfo("[ELF] interp: exec='%s' pt_interp='%s' resolved='%s' fd=%d\n",
+        kdebug("[ELF] interp: exec='%s' pt_interp='%s' resolved='%s' fd=%d\n",
               path ? path : "(null)", interp_path, resolved, interp_fd);
         if (interp_fd < 0) {
-            kinfo("[ELF] INTERP NOT FOUND for '%s' wanted '%s'\n",
+            kdebug("[ELF] INTERP NOT FOUND for '%s' wanted '%s'\n",
                   path ? path : "(null)", interp_path);
             r = interp_fd;
             goto fail;
