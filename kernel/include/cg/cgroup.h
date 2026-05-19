@@ -23,6 +23,10 @@ typedef struct cg_mem_state {
     uint64_t failcnt;        /* how many times limit was hit */
     int oom_kill_disable;    /* 1 = disable OOM killer for this cgroup */
     int oom_kill_count;      /* number of tasks killed by OOM */
+    int hierarchy;           /* 1 = hierarchical accounting enabled */
+    unsigned swappiness;     /* swappiness value (0-100) */
+    size_t min_val;          /* memory.min in pages */
+    size_t low_val;          /* memory.low in pages */
 } cg_mem_state_t;
 
 /* ---- CPU bandwidth controller ---- */
@@ -38,6 +42,7 @@ typedef struct cg_cpu_state {
     uint32_t nr_throttled;   /* throttle event count */
     uint64_t throttled_time; /* cumulative ns spent throttled */
     uint64_t total_runtime;  /* cumulative ns consumed ever */
+    uint64_t shares;         /* CPU shares (default 1024) */
 } cg_cpu_state_t;
 
 /* ---- cpuset controller ---- */
@@ -46,6 +51,7 @@ typedef struct cg_cpuset_state {
     uint32_t cpus_allowed;   /* bitmask of allowed CPUs */
     uint32_t mems_allowed;   /* NUMA node mask */
     uint32_t effective_cpus; /* parent intersect requested */
+    int memory_migrate;
 } cg_cpuset_state_t;
 
 /* ---- Combined resource state per cgroup ---- */

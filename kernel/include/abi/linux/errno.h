@@ -51,6 +51,7 @@
 #define ETIMEDOUT    110
 #define ENODATA      61
 #define ENOLCK       37
+#define ENXIO        6
 
 /*
  * Internal kernel error codes — never returned to userspace.

@@ -62,6 +62,22 @@
 #define ICMP6_FILTER   1
 #define IPV6_CHECKSUM  7
 #define IPV6_V6ONLY    26
+#define IPV6_RECVPKTINFO    49
+#define IPV6_PKTINFO        50
+#define IPV6_ADDRFORM       1
+#define IPV6_UNICAST_IF     76
+#define IPV6_MULTICAST_IF   17
+#define IPV6_MULTICAST_HOPS 18
+#define IPV6_MULTICAST_LOOP 19
+#define IPV6_JOIN_GROUP     20
+#define IPV6_LEAVE_GROUP    21
+#define IPV6_TCLASS         67
+#define IPV6_RECVTCLASS     66
+#define IPV6_HOPLIMIT       52
+#define IPV6_RECVHOPLIMIT   51
+#define IPV6_FLOWINFO       11
+#define IPV6_RECVERR        25
+#define IPV6_ROUTER_ALERT   22
 
 #define MCAST_JOIN_GROUP  42
 #define MCAST_LEAVE_GROUP 45
