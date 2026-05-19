@@ -22,6 +22,10 @@ void cg_mem_init(cg_mem_state_t *mem)
     mem->failcnt = 0;
     mem->oom_kill_disable = 0;
     mem->oom_kill_count = 0;
+    mem->hierarchy = 1;
+    mem->swappiness = 60;
+    mem->min_val = 0;
+    mem->low_val = 0;
 }
 
 int cg_mem_charge(struct cg_node *cg, size_t nr_pages)
