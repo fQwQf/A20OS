@@ -67,6 +67,8 @@ typedef enum {
     PF_SYS_KERNEL_PID_MAX,
     PF_SYS_KERNEL_PIDMAP,
     PF_SYS_KERNEL_TAINTED,
+    PF_SYS_KERNEL_SCHED_AUTOGROUP,
+    PF_SYS_NET,
     PF_A20,
     PF_A20_BCACHE,
     PF_A20_PAGE_CACHE,
@@ -577,6 +579,9 @@ static int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
     case PF_SYS_KERNEL_TAINTED:
         snprintf(buf, bufsz, "0\n");
         break;
+    case PF_SYS_KERNEL_SCHED_AUTOGROUP:
+        snprintf(buf, bufsz, "0\n");
+        break;
     case PF_SYS_FS_PIPE_MAX_SIZE:
         snprintf(buf, bufsz, "%d\n", g_procfs_pipe_max_size);
         break;
@@ -721,6 +726,12 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
     } else if (dp && dp->type == PF_SYS_KERNEL && strcmp(name, "tainted") == 0) {
         child = new_entry(name, PF_SYS_KERNEL_TAINTED, 0);
         type = PF_SYS_KERNEL_TAINTED;
+    } else if (dp && dp->type == PF_SYS_KERNEL && strcmp(name, "sched_autogroup_enabled") == 0) {
+        child = new_entry(name, PF_SYS_KERNEL_SCHED_AUTOGROUP, 0);
+        type = PF_SYS_KERNEL_SCHED_AUTOGROUP;
+    } else if (dp && dp->type == PF_SYS && strcmp(name, "net") == 0) {
+        child = new_entry(name, PF_SYS_NET, 0);
+        type = PF_SYS_NET;
     } else if (dp && dp->type == PF_ROOT && dp->pid == 0 && strcmp(name, "a20") == 0) {
         child = new_entry(name, PF_A20, 0);
         type = PF_A20;
@@ -769,12 +780,13 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
     vn->ino = (uint64_t)(uintptr_t)child;
     vn->type = ((type == PF_ROOT && is_pid_str(name)) || type == PF_SELF ||
                 type == PF_SYS || type == PF_SYS_FS || type == PF_SYS_KERNEL ||
-                type == PF_A20 || type == PF_PID_FD || type == PF_PID_NS ||
-                type == PF_PID_FDINFO) ?
+                type == PF_SYS_NET || type == PF_A20 || type == PF_PID_FD ||
+                type == PF_PID_NS || type == PF_PID_FDINFO) ?
                VFS_FT_DIR : VFS_FT_REGULAR;
     vn->mode = (vn->type == VFS_FT_DIR) ? (S_IFDIR | 0555) : (S_IFREG | 0444);
     if (type == PF_PID_OOM_SCORE_ADJ ||
-        type == PF_SYS_FS_PIPE_MAX_SIZE || type == PF_SYS_FS_LEASE_BREAK_TIME)
+        type == PF_SYS_FS_PIPE_MAX_SIZE || type == PF_SYS_FS_LEASE_BREAK_TIME ||
+        type == PF_SYS_KERNEL_SCHED_AUTOGROUP)
         vn->mode = S_IFREG | 0644;
     vnode_ref_init(vn, 1);
     vn->parent = dir;
@@ -867,6 +879,16 @@ static int procfs_fwrite(vfile_t *vf, const char *buf, size_t count) {
             g_procfs_lease_break_time = value;
         return (int)count;
     }
+    if (p->type == PF_SYS_KERNEL_SCHED_AUTOGROUP) {
+        char tmp[32];
+        size_t n = count < sizeof(tmp) - 1 ? count : sizeof(tmp) - 1;
+        memcpy(tmp, buf, n);
+        tmp[n] = '\0';
+        int value = atoi(tmp);
+        if (value != 0 && value != 1)
+            return -EINVAL;
+        return (int)count;
+    }
     return -EINVAL;
 }
 
@@ -900,13 +922,16 @@ static int procfs_freaddir(vfile_t *vf, void *dirp, size_t count) {
         "mountinfo", "mounts", NULL
     };
     static const char *sys_entries[] = {
-        ".", "..", "fs", "kernel", NULL
+        ".", "..", "fs", "kernel", "net", NULL
     };
     static const char *sys_fs_entries[] = {
         ".", "..", "pipe-max-size", "lease-break-time", NULL
     };
     static const char *sys_kernel_entries[] = {
-        ".", "..", "pid_max", "pidmap", "tainted", NULL
+        ".", "..", "pid_max", "pidmap", "tainted", "sched_autogroup_enabled", NULL
+    };
+    static const char *sys_net_entries[] = {
+        ".", "..", NULL
     };
     static const char *a20_entries[] = {
         ".", "..", "bcache", "page_cache", NULL
@@ -922,6 +947,8 @@ static int procfs_freaddir(vfile_t *vf, void *dirp, size_t count) {
         entries = sys_fs_entries;
     else if (p && p->type == PF_SYS_KERNEL)
         entries = sys_kernel_entries;
+    else if (p && p->type == PF_SYS_NET)
+        entries = sys_net_entries;
     else if (p && p->type == PF_A20)
         entries = a20_entries;
     int idx = (int)(vf->offset);
@@ -973,6 +1000,12 @@ static int procfs_freaddir(vfile_t *vf, void *dirp, size_t count) {
             is_dir = 1;
         if (!is_root && (strcmp(name, "fd") == 0 || strcmp(name, "ns") == 0 ||
                          strcmp(name, "fdinfo") == 0))
+            is_dir = 1;
+        if (p && p->type == PF_SYS && strcmp(name, "fs") == 0)
+            is_dir = 1;
+        if (p && p->type == PF_SYS && strcmp(name, "kernel") == 0)
+            is_dir = 1;
+        if (p && p->type == PF_SYS && strcmp(name, "net") == 0)
             is_dir = 1;
         d->d_type = is_dir ? 4 : 8; /* DT_DIR=4, DT_REG=8 per Linux getdents64 */
         memcpy(d->d_name, name, namelen + 1);

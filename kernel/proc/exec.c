@@ -149,7 +149,15 @@ int proc_exec(const char *path, char *const argv[], char *const envp[])
 
     kstat_t exec_st;
     int exec_stat_ok = vfs_stat(path, &exec_st);
-    if (exec_stat_ok == 0 && (exec_st.st_mode & S_IFMT) == S_IFREG) {
+    if (exec_stat_ok == 0) {
+        if ((exec_st.st_mode & S_IFMT) == S_IFDIR) {
+            vfs_close(fd);
+            return -EACCES;
+        }
+        if ((exec_st.st_mode & S_IFMT) != S_IFREG) {
+            vfs_close(fd);
+            return -EACCES;
+        }
         int is_script = exec_file_is_shebang(fd);
         if (exec_st.st_mode & 0111) {
             int xr = vfs_faccessat2(AT_FDCWD, path, X_OK, AT_EACCESS);
@@ -410,19 +418,10 @@ int proc_exec(const char *path, char *const argv[], char *const envp[])
                 }
             }
         }
-        /* Not ELF, no shebang — fall back to /bin/sh like Linux shells do. */
+        /* Not ELF, no shebang — return ENOEXEC like Linux does. */
         vfs_close(fd);
-        char *sh_argv[64];
-        int na = 0;
-        sh_argv[na++] = "/bin/sh";
-        sh_argv[na++] = k_path;
-        for (int i = 1; i < argc && na < 63; i++)
-            sh_argv[na++] = k_argv[i];
-        sh_argv[na] = NULL;
-
-        int ret = proc_exec("/bin/sh", sh_argv, envp);
         exec_free_args(k_argv, argc, k_envp, envc, k_path);
-        return ret;
+        return -ENOEXEC;
     }
     vfs_close(fd);
 

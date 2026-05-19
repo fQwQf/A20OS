@@ -1053,7 +1053,7 @@ mm_struct_t *mm_fork(mm_struct_t *parent) {
             goto fail;
     }
 
-    arch_tlb_flush();  // 刷新 TLB
+    arch_tlb_flush();
     return child;
 fail:
     mm_destroy(child);

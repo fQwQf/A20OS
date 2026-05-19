@@ -2,6 +2,7 @@
 #define _ARCH_AARCH64_TRAP_H
 
 #include "core/types.h"
+#include "page_table.h"
 
 typedef struct {
     uint64_t x[31];
@@ -72,8 +73,18 @@ extern void aarch64_vector_table(void);
 #define TASK_CTX_STATUS(ctx)       ((ctx)->daif)
 
 static inline void arch_signal_prepare_trampoline(uint32_t tramp[2]) {
-    tramp[0] = 0xD2801168U; /* movz x8, #139 */
-    tramp[1] = 0xD4000001U; /* svc #0 */
+    tramp[0] = 0xD2801168U;
+    tramp[1] = 0xD4000001U;
+}
+
+static inline void arch_signal_write_trampoline(void *page) {
+    uint32_t *p = (uint32_t *)page;
+    p[0] = 0xD2801168U;
+    p[1] = 0xD4000001U;
+}
+
+static inline uint64_t arch_signal_tramp_pte_flags(void) {
+    return PTE_V | PTE_R | PTE_X | PTE_U | PTE_A | PTE_D | PTE_MAT1 | PTE_LEAF;
 }
 
 static inline void arch_trap_ctx_set_kernel_stack(trap_context_t *ctx, uint64_t ksp) {

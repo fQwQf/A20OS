@@ -10,10 +10,36 @@
 
 #define LINUX_CLONE_VM       0x00000100ULL
 #define LINUX_CLONE_FS       0x00000200ULL
+#define LINUX_CLONE_FILES    0x00000400ULL
 #define LINUX_CLONE_SIGHAND  0x00000800ULL
 #define LINUX_CLONE_PIDFD    0x00001000ULL
+#define LINUX_CLONE_PTRACE   0x00002000ULL
+#define LINUX_CLONE_VFORK    0x00004000ULL
+#define LINUX_CLONE_PARENT   0x00008000ULL
 #define LINUX_CLONE_THREAD   0x00010000ULL
 #define LINUX_CLONE_NEWNS    0x00020000ULL
+#define LINUX_CLONE_SYSVSEM  0x00040000ULL
+#define LINUX_CLONE_SETTLS   0x00080000ULL
+#define LINUX_CLONE_PARENT_SETTID  0x00100000ULL
+#define LINUX_CLONE_CHILD_CLEARTID 0x00200000ULL
+#define LINUX_CLONE_CHILD_SETTID   0x01000000ULL
+#define LINUX_CLONE_NEWCGROUP  0x02000000ULL
+#define LINUX_CLONE_NEWUTS     0x04000000ULL
+#define LINUX_CLONE_NEWIPC     0x08000000ULL
+#define LINUX_CLONE_NEWUSER    0x10000000ULL
+#define LINUX_CLONE_NEWPID     0x20000000ULL
+#define LINUX_CLONE_NEWNET     0x40000000ULL
+#define LINUX_CLONE_IO         0x80000000ULL
+#define LINUX_CLONE_CLEAR_SIGHAND  0x100000000ULL
+#define LINUX_CLONE_INTO_CGROUP    0x200000000ULL
+
+#define LINUX_CLONE_SUPPORTED_FLAGS \
+    (LINUX_CLONE_VM | LINUX_CLONE_FS | LINUX_CLONE_FILES | \
+     LINUX_CLONE_SIGHAND | LINUX_CLONE_PIDFD | LINUX_CLONE_PTRACE | \
+     LINUX_CLONE_VFORK | LINUX_CLONE_PARENT | LINUX_CLONE_THREAD | \
+     LINUX_CLONE_SYSVSEM | LINUX_CLONE_SETTLS | \
+     LINUX_CLONE_PARENT_SETTID | LINUX_CLONE_CHILD_CLEARTID | \
+     LINUX_CLONE_CHILD_SETTID | LINUX_CLONE_IO | 0xFFULL)
 
 static uint64_t clamp_stack_rlimit(uint64_t cur, uint64_t max) {
     uint64_t limit = cur < max ? cur : max;
@@ -365,6 +391,12 @@ int64_t sys_unshare(int flags) {
     return 0;
 }
 
+int64_t sys_setns(int fd, int nstype) {
+    (void)fd;
+    (void)nstype;
+    return 0;
+}
+
 int64_t sys_pivot_root(const char *new_root, const char *put_old) {
     (void)new_root;
     (void)put_old;
@@ -400,6 +432,8 @@ int64_t sys_clone3(void *cl_args, size_t size) {
     memset(&args, 0, sizeof(args));
     size_t cpysz = size < sizeof(args) ? size : sizeof(args);
     if (copy_from_user(&args, cl_args, cpysz) < 0) return -EFAULT;
+    if (args.flags & ~LINUX_CLONE_SUPPORTED_FLAGS)
+        return -EINVAL;
     if (size > sizeof(args)) {
         uint8_t extra[32];
         size_t off = sizeof(args);

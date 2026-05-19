@@ -20,6 +20,7 @@ void cg_cpu_init(cg_cpu_state_t *cpu)
     cpu->nr_throttled = 0;
     cpu->throttled_time = 0;
     cpu->total_runtime = 0;
+    cpu->shares = 1024;
 }
 
 int cg_cpu_account(struct cg_node *cg, uint64_t elapsed_ns, uint64_t now)

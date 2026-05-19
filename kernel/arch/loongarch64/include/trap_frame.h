@@ -2,6 +2,7 @@
 #define _ARCH_LOONGARCH64_TRAP_H
 
 #include "core/types.h"
+#include "page_table.h"
 
 typedef struct {
     uint64_t regs[32];
@@ -68,9 +69,18 @@ extern void trap_handler_la64(trap_context_t *ctx);
 #define TASK_CTX_STATUS(ctx)       ((ctx)->prmd)
 
 static inline void arch_signal_prepare_trampoline(uint32_t tramp[2]) {
-    /* li.w $a7, 139 (__NR_rt_sigreturn) ; syscall 0 */
     tramp[0] = 0x02822c0b;
     tramp[1] = 0x002b0000;
+}
+
+static inline void arch_signal_write_trampoline(void *page) {
+    uint32_t *p = (uint32_t *)page;
+    p[0] = 0x02822c0b;
+    p[1] = 0x002b0000;
+}
+
+static inline uint64_t arch_signal_tramp_pte_flags(void) {
+    return PTE_V | PTE_R | PTE_X | PTE_U | PTE_D | PTE_MAT1 | PTE_LEAF;
 }
 
 static inline void arch_trap_ctx_set_kernel_stack(trap_context_t *ctx, uint64_t ksp) {

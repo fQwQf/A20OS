@@ -377,6 +377,9 @@ void signal_deliver_user(trap_context_t *ctx) {
         if (copy_to_user((void *)sp, &frame, sizeof(frame)) < 0)
             proc_exit(-signal_wait_status(SIGSEGV));
 
+        /* Write the sigreturn trampoline onto the user stack, just after
+         * the signal frame.  Stack pages are mapped RWX so this is
+         * executable.  The trampoline is:  addi a7,x0,__NR_rt_sigreturn; ecall  */
         uint64_t tramp_addr = sp + offsetof(sig_rt_frame_t, uc) +
                               sizeof(ucontext_t) + sizeof(siginfo_t);
         uint32_t tramp[2];

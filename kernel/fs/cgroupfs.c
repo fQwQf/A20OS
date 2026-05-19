@@ -200,7 +200,7 @@ static int cg_generate_content(cg_file_t f, cg_sb_t *sb, cg_node_t *node, char *
         snprintf(buf, bufsz, "\n");
         break;
     case CF_CLONE_CHILDREN:
-        snprintf(buf, bufsz, "0\n");
+        snprintf(buf, bufsz, "%d\n", node->clone_children);
         break;
     case CF_CGROUP_CONTROLLERS:
         if (sb->ver == CG_V2) {
@@ -280,12 +280,20 @@ static int cg_generate_content(cg_file_t f, cg_sb_t *sb, cg_node_t *node, char *
         (void)off;
         break;
     }
-    case CF_MEMORY_SWAPPINESS:
-        snprintf(buf, bufsz, "60\n");
+    case CF_MEMORY_SWAPPINESS: {
+        uint64_t flags = spin_lock_irqsave(&node->lock);
+        unsigned sw = node->res.mem.swappiness;
+        spin_unlock_irqrestore(&node->lock, flags);
+        snprintf(buf, bufsz, "%u\n", sw ? sw : 60);
         break;
-    case CF_MEMORY_USE_HIERARCHY:
-        snprintf(buf, bufsz, "1\n");
+    }
+    case CF_MEMORY_USE_HIERARCHY: {
+        uint64_t flags = spin_lock_irqsave(&node->lock);
+        int hier = node->res.mem.hierarchy;
+        spin_unlock_irqrestore(&node->lock, flags);
+        snprintf(buf, bufsz, "%d\n", hier);
         break;
+    }
     case CF_MEMORY_MEMSW_USAGE: {
         uint64_t flags = spin_lock_irqsave(&node->lock);
         size_t total = node->res.mem.rss + node->res.mem.swap_usage;
@@ -313,10 +321,20 @@ static int cg_generate_content(cg_file_t f, cg_sb_t *sb, cg_node_t *node, char *
             snprintf(buf, bufsz, "%lu\n", (unsigned long)(lim * PAGE_SIZE));
         break;
     }
-    case CF_MEMORY_MIN:
-    case CF_MEMORY_LOW:
-        snprintf(buf, bufsz, "0\n");
+    case CF_MEMORY_MIN: {
+        uint64_t flags = spin_lock_irqsave(&node->lock);
+        size_t mv = node->res.mem.min_val;
+        spin_unlock_irqrestore(&node->lock, flags);
+        snprintf(buf, bufsz, "%lu\n", (unsigned long)(mv * PAGE_SIZE));
         break;
+    }
+    case CF_MEMORY_LOW: {
+        uint64_t flags = spin_lock_irqsave(&node->lock);
+        size_t lv = node->res.mem.low_val;
+        spin_unlock_irqrestore(&node->lock, flags);
+        snprintf(buf, bufsz, "%lu\n", (unsigned long)(lv * PAGE_SIZE));
+        break;
+    }
     case CF_MEMORY_EVENTS: {
         uint64_t flags = spin_lock_irqsave(&node->lock);
         int off = snprintf(buf, bufsz,
@@ -355,9 +373,13 @@ static int cg_generate_content(cg_file_t f, cg_sb_t *sb, cg_node_t *node, char *
     case CF_CPUSET_MEMS:
         snprintf(buf, bufsz, "0\n");
         break;
-    case CF_CPUSET_MEMORY_MIGRATE:
-        snprintf(buf, bufsz, "0\n");
+    case CF_CPUSET_MEMORY_MIGRATE: {
+        uint64_t flags = spin_lock_irqsave(&node->lock);
+        int mig = node->res.cpuset.memory_migrate;
+        spin_unlock_irqrestore(&node->lock, flags);
+        snprintf(buf, bufsz, "%d\n", mig);
         break;
+    }
     case CF_CPU_CFS_QUOTA: {
         uint64_t flags = spin_lock_irqsave(&node->lock);
         uint64_t quota = node->res.cpu.quota;
@@ -375,9 +397,13 @@ static int cg_generate_content(cg_file_t f, cg_sb_t *sb, cg_node_t *node, char *
         snprintf(buf, bufsz, "%lld\n", (long long)(period / 1000));
         break;
     }
-    case CF_CPU_SHARES:
-        snprintf(buf, bufsz, "1024\n");
+    case CF_CPU_SHARES: {
+        uint64_t flags = spin_lock_irqsave(&node->lock);
+        uint64_t sh = node->res.cpu.shares;
+        spin_unlock_irqrestore(&node->lock, flags);
+        snprintf(buf, bufsz, "%llu\n", sh ? (unsigned long long)sh : 1024ULL);
         break;
+    }
     case CF_CPU_STAT: {
         uint64_t flags = spin_lock_irqsave(&node->lock);
         cg_cpu_state_t *c = &node->res.cpu;
@@ -499,7 +525,9 @@ static int cg_lookup(vnode_t *dir, const char *name, vnode_t **out)
         vn->fs_data = node;
         vn->uid = node->uid;
         vn->gid = node->gid;
-        /* Store file type in the upper bits of ino */
+        /* Encode the file type enum directly so cgroupfs_open_vnode can
+         * recover it via (cg_file_t)(vn->ino - 1).  The enum value is
+         * guaranteed non-zero, so ino > 0 for all file vnodes. */
         vn->ino = (uint64_t)ft + 1;
         *out = vn;
         return 0;
@@ -808,6 +836,103 @@ static int cg_fwrite(vfile_t *vf, const char *buf, size_t count)
         }
     }
 
+    if (p->type == CF_MEMORY_USE_HIERARCHY) {
+        int val = cg_parse_int(buf, count);
+        uint64_t flags = spin_lock_irqsave(&p->node->lock);
+        p->node->res.mem.hierarchy = (val != 0) ? 1 : 0;
+        spin_unlock_irqrestore(&p->node->lock, flags);
+    }
+
+    if (p->type == CF_MEMORY_SWAPPINESS) {
+        long long val = cg_parse_ll(buf, count);
+        if (val >= 0 && val <= 100) {
+            uint64_t flags = spin_lock_irqsave(&p->node->lock);
+            p->node->res.mem.swappiness = (unsigned)val;
+            spin_unlock_irqrestore(&p->node->lock, flags);
+        }
+    }
+
+    if (p->type == CF_MEMORY_MIN) {
+        long long val = cg_parse_ll(buf, count);
+        uint64_t flags = spin_lock_irqsave(&p->node->lock);
+        if (val < 0 || strncmp(buf, "max", 3) == 0)
+            p->node->res.mem.min_val = 0;
+        else
+            p->node->res.mem.min_val = (size_t)val / PAGE_SIZE;
+        spin_unlock_irqrestore(&p->node->lock, flags);
+    }
+
+    if (p->type == CF_MEMORY_LOW) {
+        long long val = cg_parse_ll(buf, count);
+        uint64_t flags = spin_lock_irqsave(&p->node->lock);
+        if (val < 0 || strncmp(buf, "max", 3) == 0)
+            p->node->res.mem.low_val = 0;
+        else
+            p->node->res.mem.low_val = (size_t)val / PAGE_SIZE;
+        spin_unlock_irqrestore(&p->node->lock, flags);
+    }
+
+    if (p->type == CF_CPU_SHARES) {
+        long long val = cg_parse_ll(buf, count);
+        if (val >= 2 && val <= 262144) {
+            uint64_t flags = spin_lock_irqsave(&p->node->lock);
+            p->node->res.cpu.shares = (uint64_t)val;
+            spin_unlock_irqrestore(&p->node->lock, flags);
+        }
+    }
+
+    if (p->type == CF_CPUSET_MEMS) {
+        long long val = cg_parse_ll(buf, count);
+        if (val >= 0) {
+            uint64_t flags = spin_lock_irqsave(&p->node->lock);
+            p->node->res.cpuset.mems_allowed = (uint32_t)(1U << (unsigned)val);
+            spin_unlock_irqrestore(&p->node->lock, flags);
+        }
+    }
+
+    if (p->type == CF_CPUSET_MEMORY_MIGRATE) {
+        int val = cg_parse_int(buf, count);
+        uint64_t flags = spin_lock_irqsave(&p->node->lock);
+        p->node->res.cpuset.memory_migrate = val ? 1 : 0;
+        spin_unlock_irqrestore(&p->node->lock, flags);
+    }
+
+    if (p->type == CF_CLONE_CHILDREN) {
+        int val = cg_parse_int(buf, count);
+        uint64_t flags = spin_lock_irqsave(&p->node->lock);
+        p->node->clone_children = val ? 1 : 0;
+        spin_unlock_irqrestore(&p->node->lock, flags);
+    }
+
+    if (p->type == CF_CGROUP_SUBTREE_CONTROL) {
+        char kbuf[256];
+        size_t n = count < sizeof(kbuf) - 1 ? count : sizeof(kbuf) - 1;
+        memcpy(kbuf, buf, n);
+        kbuf[n] = '\0';
+        uint32_t ctrl = p->sb ? p->sb->controllers : 0;
+        char *tok = kbuf;
+        while (*tok) {
+            while (*tok == ' ' || *tok == '\t' || *tok == '\n') tok++;
+            if (*tok == '\0') break;
+            int enable = 1;
+            if (*tok == '+') { enable = 1; tok++; }
+            else if (*tok == '-') { enable = 0; tok++; }
+            char *start = tok;
+            while (*tok && *tok != ' ' && *tok != '\t' && *tok != '\n') tok++;
+            char saved = *tok;
+            *tok = '\0';
+            if (strcmp(start, "memory") == 0) {
+                if (enable) ctrl |= CTRL_MEMORY; else ctrl &= ~CTRL_MEMORY;
+            } else if (strcmp(start, "cpu") == 0) {
+                if (enable) ctrl |= CTRL_CPU; else ctrl &= ~CTRL_CPU;
+            } else if (strcmp(start, "cpuset") == 0) {
+                if (enable) ctrl |= CTRL_CPUSET; else ctrl &= ~CTRL_CPUSET;
+            }
+            *tok = saved;
+        }
+        if (p->sb) p->sb->controllers = ctrl;
+    }
+
     return (int)count;
 }
 
@@ -915,7 +1040,8 @@ vfile_t *cgroupfs_open_vnode(vnode_t *vn, int flags)
     priv->sb = sb ? sb : NULL;
     priv->node = node;
 
-    if (vn->type == VFS_FT_REGULAR && vn->ino > 0) {
+    if (vn->type == VFS_FT_REGULAR && vn->ino >= 1 &&
+        vn->ino < (uint64_t)CF_FILE_MAX + 1) {
         priv->type = (cg_file_t)(vn->ino - 1);
     } else {
         priv->type = CF_FILE_MAX;

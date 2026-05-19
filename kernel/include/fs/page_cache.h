@@ -50,6 +50,8 @@ int  page_cache_writeback_vnode(vnode_t *vn, page_cache_writepage_t writepage,
                                 void *ctx);
 int  page_cache_writeback_all(page_cache_writepage_t writepage, void *ctx);
 void page_cache_invalidate(vnode_t *vn);
+void page_cache_invalidate_range(vnode_t *vn, uint64_t start_byte, uint64_t end_byte);
+void page_cache_invalidate_uptodate_range(vnode_t *vn, uint64_t start_byte, uint64_t end_byte);
 void page_cache_truncate(vnode_t *vn, uint64_t new_size);
 void page_cache_get_stats(page_cache_stats_t *stats);
 

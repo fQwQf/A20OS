@@ -18,6 +18,8 @@
 #include "drv/virtio_blk.h"
 #include "fs/block_cache.h"
 #include "core/klog.h"
+#include "proc/signal.h"
+#include "drv/loop.h"
 #include "net/socket.h"
 
 /* Forward declarations */
@@ -109,6 +111,7 @@ void kernel_main(void) {
 
     proc_init();
     printf("[INIT] Process manager initialized\n");
+    loop_init();
 
 #ifdef BRINGUP
     printf("[INIT] System ready (bringup, no userspace)\n\n");

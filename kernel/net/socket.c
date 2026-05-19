@@ -322,6 +322,7 @@ int net_connect(int gfd, const void *addr, size_t addrlen) {
     net_socket_t *s = net_socket_from_file(gfd);
     if (!s) return -ENOTSOCK;
     if (!addr || addrlen > NET_SOCKADDR_MAX) return -EINVAL;
+    if (s->connected) return -EISCONN;
     if (s->domain == AF_UNIX)
         return net_unix_socket_connect(s, addr, addrlen);
 
