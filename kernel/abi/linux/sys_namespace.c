@@ -23,6 +23,8 @@ int64_t sys_chroot(const char *path)
     int sr = vfs_fstatat(AT_FDCWD, full, &st, 0);
     if (sr < 0) return sr;
     if ((st.st_mode & S_IFMT) != S_IFDIR) return -ENOTDIR;
+    /* Check search (execute) permission on the target directory */
+    if (vfs_faccessat2(AT_FDCWD, full, X_OK, 0) < 0) return -EACCES;
     if (!proc_has_cap(cur, CAP_SYS_CHROOT)) return -EPERM;
     strncpy(cur->fs.root_path, full, MAX_PATH_LEN - 1);
     cur->fs.root_path[MAX_PATH_LEN - 1] = '\0';

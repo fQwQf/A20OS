@@ -60,6 +60,22 @@ static int posix_clock_is_realtime(int clk)
     return clk == 0 || clk == 5 || clk == 8 || clk == 11;
 }
 
+/* Persistent adjtimex state so repeated reads reflect prior writes. */
+static kernel_timex_t g_adjtimex_state;
+static int g_adjtimex_inited;
+
+static void adjtimex_state_init(kernel_timex_t *tx)
+{
+    memset(tx, 0, sizeof(*tx));
+    tx->maxerror = 16000000L;
+    tx->esterror = 16000000L;
+    tx->status   = 64; /* STA_UNSYNC */
+    tx->constant = 4;
+    tx->tick     = 10000L;
+    tx->precision = 1L;
+    tx->tolerance = 500000L;
+}
+
 static int posix_clock_is_monotonic(int clk)
 {
     return clk == 1 || clk == 2 || clk == 3 || clk == 4 ||
@@ -286,9 +302,15 @@ int64_t sys_adjtimex(void *buf)
     if (!buf) return -EFAULT;
     kernel_timex_t tx;
     if (copy_from_user(&tx, buf, sizeof(tx)) < 0) return -EFAULT;
+
+    if (!g_adjtimex_inited) {
+        adjtimex_state_init(&g_adjtimex_state);
+        g_adjtimex_inited = 1;
+    }
+
     uint32_t modes = tx.modes;
     if (modes == 0x8000U) return -EINVAL;
-    if (modes != ADJ_OFFSET_SINGLESHOT && modes != ADJ_OFFSET_SS_READ &&
+    if (modes != 0 && modes != ADJ_OFFSET_SINGLESHOT && modes != ADJ_OFFSET_SS_READ &&
         (modes & ~ADJ_VALID_BASE_MODES))
         return -EINVAL;
     task_t *cur = proc_current();
@@ -296,11 +318,38 @@ int64_t sys_adjtimex(void *buf)
         return -EPERM;
     if (modes == ADJ_TICK && (tx.tick < 9000 || tx.tick > 11000))
         return -EINVAL;
+
+    if (modes && modes != ADJ_OFFSET_SS_READ && modes != ADJ_OFFSET_SINGLESHOT) {
+        if (modes & ADJ_MAXERROR)   g_adjtimex_state.maxerror  = tx.maxerror;
+        if (modes & ADJ_ESTERROR)   g_adjtimex_state.esterror  = tx.esterror;
+        if (modes & ADJ_STATUS)     g_adjtimex_state.status    = tx.status;
+        if (modes & ADJ_TIMECONST)  g_adjtimex_state.constant  = tx.constant;
+        if (modes & ADJ_TAI)        g_adjtimex_state.tai       = tx.tai;
+        if (modes & ADJ_TICK)       g_adjtimex_state.tick      = tx.tick;
+        if (modes & ADJ_FREQUENCY)  g_adjtimex_state.freq      = tx.freq;
+        if (modes & ADJ_OFFSET)     g_adjtimex_state.offset    = tx.offset;
+        g_adjtimex_state.modes = modes;
+    }
+
+    uint64_t now = timer_get_ticks();
+    g_adjtimex_state.time_sec  = (int64_t)(now / TICKS_PER_SEC);
+    g_adjtimex_state.time_usec = (int64_t)((now % TICKS_PER_SEC) * 1000000ULL / TICKS_PER_SEC);
+
+    if (modes == ADJ_OFFSET_SS_READ || modes == ADJ_OFFSET_SINGLESHOT)
+        g_adjtimex_state.offset = 0;
+
+    if (copy_to_user(buf, &g_adjtimex_state, sizeof(g_adjtimex_state)) < 0)
+        return -EFAULT;
     return 0;
 }
 
 int64_t sys_clock_adjtime(int clk, void *buf)
 {
-    (void)clk;
+    if (!buf) return -EFAULT;
+    kernel_timex_t tx;
+    if (copy_from_user(&tx, buf, sizeof(tx)) < 0) return -EFAULT;
+    uint32_t modes = tx.modes;
+    if (modes != 0 && !posix_clock_is_realtime(clk))
+        return -EOPNOTSUPP;
     return sys_adjtimex(buf);
 }

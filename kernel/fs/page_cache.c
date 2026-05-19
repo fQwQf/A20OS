@@ -382,6 +382,50 @@ void page_cache_invalidate(vnode_t *vn)
     spin_unlock_irqrestore(&g_page_cache_lock, flags);
 }
 
+void page_cache_invalidate_range(vnode_t *vn, uint64_t start_byte,
+                                 uint64_t end_byte)
+{
+    if (!g_initialized || !vn || end_byte <= start_byte)
+        return;
+    uint64_t first_idx = start_byte / PAGE_SIZE;
+    uint64_t last_idx  = (end_byte - 1) / PAGE_SIZE;
+    uint64_t flags = spin_lock_irqsave(&g_page_cache_lock);
+    for (int i = 0; i < PAGE_CACHE_MAX_PAGES; i++) {
+        page_cache_page_t *page = &g_pages[i];
+        if (!page->valid || page->vnode != vn)
+            continue;
+        if (page->index < first_idx || page->index > last_idx)
+            continue;
+        if (refcount_read(&page->ref_count) == 0)
+            detach_mapping_locked(page);
+    }
+    spin_unlock_irqrestore(&g_page_cache_lock, flags);
+}
+
+void page_cache_invalidate_uptodate_range(vnode_t *vn, uint64_t start_byte,
+                                           uint64_t end_byte)
+{
+    if (!g_initialized || !vn || end_byte <= start_byte)
+        return;
+    uint64_t first_idx = start_byte / PAGE_SIZE;
+    uint64_t last_idx  = (end_byte - 1) / PAGE_SIZE;
+    uint64_t flags = spin_lock_irqsave(&g_page_cache_lock);
+    for (int i = 0; i < PAGE_CACHE_MAX_PAGES; i++) {
+        page_cache_page_t *page = &g_pages[i];
+        if (!page->valid || page->vnode != vn)
+            continue;
+        if (page->index < first_idx || page->index > last_idx)
+            continue;
+        if (refcount_read(&page->ref_count) == 0) {
+            detach_mapping_locked(page);
+        } else {
+            __atomic_store_n(&page->uptodate, 0, __ATOMIC_RELEASE);
+            __atomic_store_n(&page->dirty, 0, __ATOMIC_RELEASE);
+        }
+    }
+    spin_unlock_irqrestore(&g_page_cache_lock, flags);
+}
+
 void page_cache_truncate(vnode_t *vn, uint64_t new_size)
 {
     if (!g_initialized || !vn)

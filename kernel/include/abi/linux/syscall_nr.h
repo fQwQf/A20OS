@@ -217,6 +217,7 @@
 #define SYS_setdomainname   162
 #define SYS_personality     92
 #define SYS_unshare         97
+#define SYS_setns           305
 #define SYS_rt_sigpending   136
 #define SYS_mlock           228
 #define SYS_munlock         229

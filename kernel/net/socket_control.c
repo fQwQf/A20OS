@@ -191,6 +191,40 @@ int net_setsockopt(int gfd, int level, int optname, const void *optval, size_t o
     }
     if (s->domain == AF_INET6 && level == IPPROTO_IPV6 && optname == IPV6_V6ONLY)
         return optlen >= sizeof(int) ? 0 : -EINVAL;
+    if (s->domain == AF_INET6 && level == IPPROTO_IPV6 &&
+        (optname == IPV6_RECVPKTINFO || optname == IPV6_RECVTCLASS ||
+         optname == IPV6_RECVHOPLIMIT || optname == IPV6_RECVERR)) {
+        if (!optval || optlen < sizeof(int))
+            return -EINVAL;
+        int val;
+        memcpy(&val, optval, sizeof(val));
+        if (optname == IPV6_RECVPKTINFO)  s->ipv6_recv_pktinfo = val != 0;
+        if (optname == IPV6_RECVTCLASS)   s->ipv6_recv_tclass  = val != 0;
+        if (optname == IPV6_RECVHOPLIMIT) s->ipv6_recv_hoplimit = val != 0;
+        if (optname == IPV6_RECVERR)      s->ipv6_recv_err     = val != 0;
+        return 0;
+    }
+    if (s->domain == AF_INET6 && level == IPPROTO_IPV6 &&
+        (optname == IPV6_UNICAST_IF || optname == IPV6_MULTICAST_IF ||
+         optname == IPV6_MULTICAST_HOPS || optname == IPV6_MULTICAST_LOOP ||
+         optname == IPV6_TCLASS || optname == IPV6_HOPLIMIT ||
+         optname == IPV6_FLOWINFO || optname == IPV6_ROUTER_ALERT))
+        return optlen >= sizeof(int) ? 0 : -EINVAL;
+    if (s->domain == AF_INET6 && level == IPPROTO_IPV6 &&
+        (optname == IPV6_JOIN_GROUP || optname == IPV6_LEAVE_GROUP))
+        return 0;
+    if (s->domain == AF_INET6 && level == IPPROTO_IPV6 && optname == IPV6_ADDRFORM) {
+        if (!optval || optlen < sizeof(int))
+            return -EINVAL;
+        int val;
+        memcpy(&val, optval, sizeof(val));
+        if (val != AF_INET)
+            return -EINVAL;
+        if (s->type != SOCK_STREAM || s->connected || s->bound)
+            return -EOPNOTSUPP;
+        s->domain = AF_INET;
+        return 0;
+    }
     if (s->domain == AF_INET6 && s->type == SOCK_RAW &&
         level == IPPROTO_ICMPV6 && optname == ICMP6_FILTER) {
         if (!optval || optlen < sizeof(s->icmp6_filter))
@@ -386,6 +420,23 @@ int net_getsockopt(int gfd, int level, int optname, void *optval, size_t *optlen
             break;
         default:
             return -ENOPROTOOPT;
+        }
+    }
+    else if (s->domain == AF_INET6 && level == IPPROTO_IPV6) {
+        switch (optname) {
+        case IPV6_V6ONLY:          val = 0; break;
+        case IPV6_RECVPKTINFO:     val = s->ipv6_recv_pktinfo; break;
+        case IPV6_RECVTCLASS:      val = s->ipv6_recv_tclass; break;
+        case IPV6_RECVHOPLIMIT:    val = s->ipv6_recv_hoplimit; break;
+        case IPV6_RECVERR:         val = s->ipv6_recv_err; break;
+        case IPV6_UNICAST_IF:      val = 0; break;
+        case IPV6_MULTICAST_IF:    val = 0; break;
+        case IPV6_MULTICAST_HOPS:  val = -1; break;
+        case IPV6_MULTICAST_LOOP:  val = 1; break;
+        case IPV6_TCLASS:          val = 0; break;
+        case IPV6_HOPLIMIT:        val = -1; break;
+        case IPV6_FLOWINFO:        val = 0; break;
+        default: return -ENOPROTOOPT;
         }
     }
     else

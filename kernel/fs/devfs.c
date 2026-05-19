@@ -19,6 +19,7 @@ enum {
     DEVFS_RANDOM,
     DEVFS_TTY,
     DEVFS_RTC,
+    DEVFS_LOOP,
 };
 
 #define KTTY_NCCS 19
@@ -72,6 +73,14 @@ static devfs_node_t g_nodes[] = {
     { DEVFS_TTY,  "console", 0x501 },
     { DEVFS_RTC,  "rtc", 0xfe00 },
     { DEVFS_RTC,  "rtc0", 0xfe00 },
+    { DEVFS_LOOP, "loop0", 0x700 },
+    { DEVFS_LOOP, "loop1", 0x701 },
+    { DEVFS_LOOP, "loop2", 0x702 },
+    { DEVFS_LOOP, "loop3", 0x703 },
+    { DEVFS_LOOP, "loop4", 0x704 },
+    { DEVFS_LOOP, "loop5", 0x705 },
+    { DEVFS_LOOP, "loop6", 0x706 },
+    { DEVFS_LOOP, "loop7", 0x707 },
 };
 
 static vnode_t g_vnodes[sizeof(g_nodes) / sizeof(g_nodes[0])];
@@ -353,6 +362,34 @@ static int devfs_ioctl(vfile_t *vf, unsigned long req, void *arg) {
     return -ENOTTY;
 }
 
+extern int  loop_dev_read(int idx, char *buf, size_t count, size_t offset);
+extern int  loop_dev_write(int idx, const char *buf, size_t count, size_t offset);
+extern int  loop_dev_ioctl(vfile_t *vf, unsigned long req, void *arg);
+
+static int devfs_loop_read(vfile_t *vf, char *buf, size_t count) {
+    int idx = (int)(intptr_t)vf->priv - 100;
+    size_t off = vf->offset;
+    int r = loop_dev_read(idx, buf, count, off);
+    if (r > 0) vf->offset += r;
+    return r;
+}
+
+static int devfs_loop_write(vfile_t *vf, const char *buf, size_t count) {
+    int idx = (int)(intptr_t)vf->priv - 100;
+    size_t off = vf->offset;
+    int r = loop_dev_write(idx, buf, count, off);
+    if (r > 0) vf->offset += r;
+    return r;
+}
+
+static long devfs_loop_lseek(vfile_t *vf, long offset, int whence) {
+    if (whence == SEEK_SET) vf->offset = (size_t)offset;
+    else if (whence == SEEK_CUR) vf->offset += (size_t)offset;
+    return (long)vf->offset;
+}
+
+static vfile_ops_t g_devfs_loop_ops  = { .read = devfs_loop_read, .write = devfs_loop_write, .lseek = devfs_loop_lseek, .ioctl = loop_dev_ioctl };
+
 static vfile_ops_t g_devfs_tty_ops    = { .read = devfs_stdin_read, .write = devfs_stdout_write, .ioctl = devfs_ioctl };
 static vfile_ops_t g_devfs_dir_ops    = { .read = devfs_null_read,  .readdir = devfs_dir_readdir, .ioctl = devfs_ioctl };
 static vfile_ops_t g_devfs_stdin_ops  = { .read = devfs_stdin_read, .write = devfs_stdout_write, .ioctl = devfs_ioctl };
@@ -415,6 +452,13 @@ static int devfs_stat(vnode_t *vn, kstat_t *st) {
         st->st_gid = 0;
         st->st_nlink = 2;
         st->st_blksize = 4096;
+    } else if (node->kind == DEVFS_LOOP) {
+        st->st_mode = S_IFBLK | 0660;
+        st->st_rdev = node->rdev;
+        st->st_uid = 0;
+        st->st_gid = 0;
+        st->st_nlink = 1;
+        st->st_blksize = 4096;
     } else {
         fill_char_kstat(st, node->rdev);
     }
@@ -446,6 +490,12 @@ vfile_t *devfs_open_vnode(vnode_t *vn, int flags) {
     case DEVFS_RANDOM: vf->ops = &g_devfs_random_ops; break;
     case DEVFS_TTY:  vf->ops = &g_devfs_tty_ops; break;
     case DEVFS_RTC:  vf->ops = &g_devfs_rtc_ops; break;
+    case DEVFS_LOOP: {
+        int loop_idx = (int)(node->rdev & 0xFF);
+        vf->ops = &g_devfs_loop_ops;
+        vf->priv = (void *)(intptr_t)(loop_idx + 100);
+        break;
+    }
     default:
         vfile_free(vf);
         return NULL;

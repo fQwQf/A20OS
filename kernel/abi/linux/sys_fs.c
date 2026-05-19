@@ -122,12 +122,29 @@ static int64_t write_from_user(vfile_t *vf, const char *buf, size_t count)
     return total;
 }
 
+static int o_direct_check(vfile_t *vf, const char *buf, size_t count)
+{
+    if (!vf || !(vf->flags & O_DIRECT))
+        return 0;
+    int align = 512;
+    if ((uintptr_t)buf & (align - 1) || (count & (align - 1)))
+        return -EINVAL;
+    if (vf->ops && vf->ops->lseek) {
+        long off = vf->ops->lseek(vf, 0, SEEK_CUR);
+        if (off >= 0 && (off & (align - 1)))
+            return -EINVAL;
+    }
+    return 0;
+}
+
 int64_t sys_read(int fd, char *buf, size_t count) {
     if (!buf) return -EFAULT;
     if (count == 0) return 0;
     int64_t gfd = fdtable_get_current(fd);
     if (gfd < 0) return gfd;
     vfile_t *vf = vfs_get_file_ref((int)gfd);
+    int ar = o_direct_check(vf, buf, count);
+    if (ar < 0) { vfs_put_file_ref((int)gfd, vf); return ar; }
     int64_t r = read_into_user(vf, buf, count);
     vfs_put_file_ref((int)gfd, vf);
     return r;
@@ -139,6 +156,8 @@ int64_t sys_write(int fd, const char *buf, size_t count) {
     int64_t gfd = fdtable_get_current(fd);
     if (gfd < 0) return gfd;
     vfile_t *vf = vfs_get_file_ref((int)gfd);
+    int ar = o_direct_check(vf, buf, count);
+    if (ar < 0) { vfs_put_file_ref((int)gfd, vf); return ar; }
     int64_t r = write_from_user(vf, buf, count);
     vfs_put_file_ref((int)gfd, vf);
     return r;
@@ -149,6 +168,16 @@ int64_t sys_pread64(int fd, char *buf, size_t count, long off) {
     if (count == 0) return 0;
     int64_t gfd = fdtable_get_current(fd);
     if (gfd < 0) return gfd;
+    vfile_t *vf_check = vfs_get_file_ref((int)gfd);
+    if (vf_check && (vf_check->flags & O_DIRECT)) {
+        int align = 512;
+        if ((uintptr_t)buf & (align - 1) || (count & (align - 1)) ||
+            (off < 0) || ((long)off & (align - 1))) {
+            vfs_put_file_ref((int)gfd, vf_check);
+            return -EINVAL;
+        }
+    }
+    vfs_put_file_ref((int)gfd, vf_check);
     long curoff = vfs_lseek(gfd, 0, SEEK_CUR);
     if (curoff < 0) return curoff;
     long sr = vfs_lseek(gfd, off, SEEK_SET);
@@ -165,6 +194,16 @@ int64_t sys_pwrite64(int fd, char *buf, size_t count, long off) {
     if (count == 0) return 0;
     int64_t gfd = fdtable_get_current(fd);
     if (gfd < 0) return gfd;
+    vfile_t *vf_check = vfs_get_file_ref((int)gfd);
+    if (vf_check && (vf_check->flags & O_DIRECT)) {
+        int align = 512;
+        if ((uintptr_t)buf & (align - 1) || (count & (align - 1)) ||
+            (off < 0) || ((long)off & (align - 1))) {
+            vfs_put_file_ref((int)gfd, vf_check);
+            return -EINVAL;
+        }
+    }
+    vfs_put_file_ref((int)gfd, vf_check);
     long curoff = vfs_lseek(gfd, 0, SEEK_CUR);
     if (curoff < 0) return curoff;
     long sr = vfs_lseek(gfd, off, SEEK_SET);
@@ -186,6 +225,8 @@ int64_t sys_writev(int fd, const void *iov, int iovcnt) {
         struct iovec v;
         if (copy_from_user(&v, (const char *)iov + (size_t)i * sizeof(struct iovec), sizeof(v)) < 0) { total = -EFAULT; break; }
         if (!v.base || v.len == 0) continue;
+        int ar = o_direct_check(vf, v.base, v.len);
+        if (ar < 0) { total = ar; break; }
         int64_t n = write_from_user(vf, v.base, v.len);
         if (n < 0) { total = n; break; }
         total += n;
@@ -205,6 +246,8 @@ int64_t sys_readv(int fd, const void *iov, int iovcnt) {
         struct iovec v;
         if (copy_from_user(&v, (const char *)iov + (size_t)i * sizeof(struct iovec), sizeof(v)) < 0) { total = -EFAULT; break; }
         if (!v.base || v.len == 0) continue;
+        int ar = o_direct_check(vf, v.base, v.len);
+        if (ar < 0) { total = ar; break; }
         int64_t n = read_into_user(vf, v.base, v.len);
         if (n <= 0) { total = total > 0 ? total : n; break; }
         total += n;
@@ -519,16 +562,6 @@ int64_t sys_poll(void *fds, int nfds, int timeout) {
         if (signal_task_has_unblocked(t)) return -ERESTARTSYS;
         linux_poll_sleep_until(deadline, has_timeout);
     }
-}
-
-int64_t sys_epoll_create1(int flags) {
-    if (flags & ~O_CLOEXEC) return -EINVAL;
-    vfile_t *vf = vfile_alloc();
-    if (!vf) return -ENOMEM;
-    refcount_set(&vf->ref_count, 1);
-    int gfd = vfs_alloc_fd(vf);
-    if (gfd < 0) { vfile_free(vf); return -EMFILE; }
-    return fdtable_install_current( gfd, flags);
 }
 
 /* ============================================================

@@ -64,6 +64,10 @@ typedef struct net_socket {
     int ipv6_checksum_offset;
     uint32_t icmp6_filter[8];
     int icmp6_filter_set;
+    int ipv6_recv_pktinfo;
+    int ipv6_recv_tclass;
+    int ipv6_recv_hoplimit;
+    int ipv6_recv_err;
     int bpf_prog_fd;
     uint8_t alg_last[NET_MAX_STREAM_PAYLOAD];
     size_t alg_last_len;
