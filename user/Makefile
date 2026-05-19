@@ -520,7 +520,7 @@ $(WGET_OBJ): $(WGET_CMD_SRC) Makefile | build_dir musl_prepare
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -I$(TLSE_DIR) -c $< -o $@
 
-$(OBJ_DIR)/tlse/%.o: $(TLSE_DIR)/%.c Makefile | build_dir musl_prepare
+$(TLSE_OBJ): $(TLSE_DIR)/tlse.c Makefile | build_dir musl_prepare
 	@mkdir -p $(dir $@)
 	$(CC) $(TLSE_CFLAGS) -c $< -o $@
 
