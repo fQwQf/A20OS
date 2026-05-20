@@ -107,7 +107,7 @@ vnode_t *vfs_dcache_lookup(vnode_t *dir, const char *name)
 
     uint32_t h = dcache_hash_key(dir->mnt, dir->ino, name);
 
-    spin_lock(&g_dcache_lock);
+    uint64_t flags = spin_lock_irqsave(&g_dcache_lock);
     for (int i = g_dcache_hash[h]; i >= 0; i = g_dcache[i].hash_next) {
         vfs_dcache_entry_t *e = &g_dcache[i];
         if (e->used && e->mnt == dir->mnt && e->parent_ino == dir->ino &&
@@ -115,11 +115,11 @@ vnode_t *vfs_dcache_lookup(vnode_t *dir, const char *name)
             e->age = ++g_dcache_age;
             vnode_get(e->vn);
             vnode_t *vn = e->vn;
-            spin_unlock(&g_dcache_lock);
+            spin_unlock_irqrestore(&g_dcache_lock, flags);
             return vn;
         }
     }
-    spin_unlock(&g_dcache_lock);
+    spin_unlock_irqrestore(&g_dcache_lock, flags);
     return NULL;
 }
 
@@ -130,20 +130,20 @@ void vfs_dcache_insert(vnode_t *dir, const char *name, vnode_t *vn)
 
     uint32_t h = dcache_hash_key(dir->mnt, dir->ino, name);
 
-    spin_lock(&g_dcache_lock);
+    uint64_t flags = spin_lock_irqsave(&g_dcache_lock);
     for (int i = g_dcache_hash[h]; i >= 0; i = g_dcache[i].hash_next) {
         vfs_dcache_entry_t *e = &g_dcache[i];
         if (e->used && e->mnt == dir->mnt && e->parent_ino == dir->ino &&
             strcmp(e->name, name) == 0) {
             e->age = ++g_dcache_age;
-            spin_unlock(&g_dcache_lock);
+            spin_unlock_irqrestore(&g_dcache_lock, flags);
             return;
         }
     }
 
     int slot = dcache_alloc_slot();
     if (slot < 0) {
-        spin_unlock(&g_dcache_lock);
+        spin_unlock_irqrestore(&g_dcache_lock, flags);
         return;
     }
 
@@ -165,7 +165,7 @@ void vfs_dcache_insert(vnode_t *dir, const char *name, vnode_t *vn)
     e->hash_prev = -1;
     dcache_link_hash(slot, h);
     vnode_get(vn);
-    spin_unlock(&g_dcache_lock);
+    spin_unlock_irqrestore(&g_dcache_lock, flags);
 
     if (old_vn)
         vnode_put(old_vn);
@@ -176,7 +176,7 @@ void vfs_dcache_invalidate(vnode_t *dir, const char *name)
     if (!dir || !name) return;
     uint32_t h = dcache_hash_key(dir->mnt, dir->ino, name);
 
-    spin_lock(&g_dcache_lock);
+    uint64_t flags = spin_lock_irqsave(&g_dcache_lock);
     for (int i = g_dcache_hash[h]; i >= 0; i = g_dcache[i].hash_next) {
         vfs_dcache_entry_t *e = &g_dcache[i];
         if (e->used && e->mnt == dir->mnt && e->parent_ino == dir->ino &&
@@ -186,17 +186,17 @@ void vfs_dcache_invalidate(vnode_t *dir, const char *name)
             memset(e, 0, sizeof(*e));
             e->hash_next = -1;
             e->hash_prev = -1;
-            spin_unlock(&g_dcache_lock);
+            spin_unlock_irqrestore(&g_dcache_lock, flags);
             if (vn) vnode_put(vn);
             return;
         }
     }
-    spin_unlock(&g_dcache_lock);
+    spin_unlock_irqrestore(&g_dcache_lock, flags);
 }
 
 void vfs_dcache_invalidate_all(void)
 {
-    spin_lock(&g_dcache_lock);
+    uint64_t flags = spin_lock_irqsave(&g_dcache_lock);
     vnode_t *to_put[VFS_DCACHE_MAX];
     int count = 0;
     for (int i = 0; i < VFS_DCACHE_MAX; i++) {
@@ -204,7 +204,7 @@ void vfs_dcache_invalidate_all(void)
             to_put[count++] = g_dcache[i].vn;
     }
     dcache_init_freelist();
-    spin_unlock(&g_dcache_lock);
+    spin_unlock_irqrestore(&g_dcache_lock, flags);
 
     for (int i = 0; i < count; i++)
         vnode_put(to_put[i]);
