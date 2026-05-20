@@ -82,13 +82,14 @@ __switch:
 
     /* Restore satp and sstatus (ensure SIE is enabled so timer ints fire) */
     ld      t0, 14*8(a0)
+    csrr    t1, satp
+    beq     t0, t1, .Lskip_switch_satp
     csrw    satp, t0
+    sfence.vma
+.Lskip_switch_satp:
     ld      t0, 15*8(a0)
     ori     t0, t0, 2
     csrw    sstatus, t0
-
-    /* Flush TLB */
-    sfence.vma
 
     /* Set sp past the TaskContext area on next task's stack */
     addi    a0, a0, 16*8
