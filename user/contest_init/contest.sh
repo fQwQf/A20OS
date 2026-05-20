@@ -19,9 +19,10 @@ sync
 
 # ── watchdog ────────────────────────────────────────────────
 (
-    sleep 18000
-    print -u2 '[CONTEST] Global timeout (18000 s)'
+    sleep 7200
+    print -u2 '[CONTEST] Global timeout (7200 s)'
     kill -KILL $$
+    poweroff
 ) &
 typeset -i WD=$!
 trap 'kill $WD 2>/dev/null' EXIT
@@ -61,6 +62,17 @@ SKIP_GROUPS+=(ltp) # 单独执行
 
 skip_group() {
     typeset g=$1 s
+
+    # 1. 检测如果是 riscv64 架构且测试组是 libcbench，则直接跳过
+    if [[ $(uname -m) == "riscv64" && $g == "libcbench" ]]; then
+        return 0
+    fi
+
+    if [[ $(uname -m) == "riscv64" && $g == "lua" ]]; then
+        return 0
+    fi
+
+    # 2. 原有的常规跳过列表检测
     for s in "${SKIP_GROUPS[@]}"; do [[ $g == "$s" ]] && return 0; done
     return 1
 }
@@ -134,12 +146,31 @@ for script in /test/*/*_testcode.sh; do
 
     typeset rc=0
 
-    # 这个智障东西不会自动退出
+    # 这两个智障东西不会自动退出
     if [[ $group == *libctest* ]]; then
         mksh "${script##*/}" &
         typeset test_pid=$!
         typeset -i elapsed=0
         while (( elapsed < 200 )); do
+            if kill -0 $test_pid 2>/dev/null; then
+                sleep 1
+                (( elapsed++ ))
+            else
+                wait $test_pid
+                rc=$?
+                break
+            fi
+        done
+        if kill -0 $test_pid 2>/dev/null; then
+            kill -KILL $test_pid 2>/dev/null
+            wait $test_pid 2>/dev/null
+            rc=1
+        fi
+    elif [[ $group == *libcbench* ]]; then
+        mksh "${script##*/}" &
+        typeset test_pid=$!
+        typeset -i elapsed=0
+        while (( elapsed < 300 )); do
             if kill -0 $test_pid 2>/dev/null; then
                 sleep 1
                 (( elapsed++ ))

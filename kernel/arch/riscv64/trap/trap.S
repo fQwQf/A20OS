@@ -99,8 +99,11 @@ __return_to_user:
     csrw    stvec, t0
 
     ld      t0, 0*8(sp)
+    csrr    t1, satp
+    beq     t0, t1, .Lskip_satp
     csrw    satp, t0
     sfence.vma
+.Lskip_satp:
 
     ld      t0, 32*8(sp)
     ld      t1, 33*8(sp)

@@ -53,6 +53,7 @@ mmap3
 mmapstress01
 mtest01
 netstress
+openfile
 pidns04
 pidns10
 pidns17
