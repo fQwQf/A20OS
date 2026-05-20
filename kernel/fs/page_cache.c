@@ -247,14 +247,12 @@ int page_cache_read_vfile(vfile_t *vf, char *buf, size_t count)
     if (count == 0)
         return 0;
 
+    /*
+     * Use the cached vnode->size directly.  File size is already updated by
+     * write/truncate paths, so the expensive stat() call on every read was
+     * a severe performance bottleneck for sequential I/O workloads.
+     */
     size_t file_size = vf->vnode->size;
-    if (vf->vnode->ops && vf->vnode->ops->stat) {
-        kstat_t st;
-        if (vf->vnode->ops->stat(vf->vnode, &st) == 0) {
-            file_size = (size_t)st.st_size;
-            vf->vnode->size = file_size;
-        }
-    }
     size_t start = vf->offset;
     if (start >= file_size)
         return 0;
@@ -329,6 +327,13 @@ static int page_cache_writeback_common(vnode_t *vn,
         vnode_t *page_vn = page->vnode;
         uint64_t index = page->index;
         void *data = page->data;
+        /*
+         * Snapshot the current dirty state before releasing the lock.
+         * If another thread re-dirties the page while we do I/O, the
+         * dirty flag will differ from this snapshot and we must NOT
+         * clear it — otherwise the concurrent write is silently lost.
+         */
+        int dirty_before = page->dirty;
         spin_unlock_irqrestore(&g_page_cache_lock, flags);
 
         page_cache_writepage_t cb = writepage;
@@ -344,8 +349,17 @@ static int page_cache_writeback_common(vnode_t *vn,
         }
 
         flags = spin_lock_irqsave(&g_page_cache_lock);
+        /*
+         * Only clear dirty if:
+         *   1. The write succeeded.
+         *   2. The page still maps to the same vnode/index.
+         *   3. The page was NOT re-dirtied while we were doing I/O
+         *      (dirty_before == page->dirty means nobody wrote new
+         *       data; if page->dirty was toggled to 1 again, we must
+         *       preserve it so the new data gets written back later).
+         */
         if (r >= 0 && page->valid && page->vnode == page_vn &&
-            page->index == index)
+            page->index == index && page->dirty == dirty_before)
             page->dirty = 0;
         spin_unlock_irqrestore(&g_page_cache_lock, flags);
 
@@ -434,9 +448,21 @@ void page_cache_truncate(vnode_t *vn, uint64_t new_size)
     uint64_t flags = spin_lock_irqsave(&g_page_cache_lock);
     for (int i = 0; i < PAGE_CACHE_MAX_PAGES; i++) {
         page_cache_page_t *page = &g_pages[i];
-        if (page->valid && page->vnode == vn && page->index >= first_drop &&
-            refcount_read(&page->ref_count) == 0)
+        if (!page->valid || page->vnode != vn || page->index < first_drop)
+            continue;
+        if (refcount_read(&page->ref_count) == 0) {
             detach_mapping_locked(page);
+        } else {
+            /*
+             * Page is pinned by a concurrent reader/writer.  We cannot
+             * detach it, but we MUST invalidate its content so that if
+             * the file is later extended, the stale old data is never
+             * returned.  Zero the data and mark non-uptodate/non-dirty.
+             */
+            memset(page->data, 0, PAGE_SIZE);
+            __atomic_store_n(&page->uptodate, 0, __ATOMIC_RELEASE);
+            __atomic_store_n(&page->dirty, 0, __ATOMIC_RELEASE);
+        }
     }
     spin_unlock_irqrestore(&g_page_cache_lock, flags);
 }

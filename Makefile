@@ -236,7 +236,7 @@ $(BUILD_TIME_HDR):
 # ----------------------------------------------------------------
 all:
 	$(MAKE) contest-rv
-#	$(MAKE) contest-la
+	$(MAKE) contest-la
 	@echo "=== Competition build complete ==="
 	@echo "  kernel-rv  kernel-la  disk.img  disk-la.img"
 
