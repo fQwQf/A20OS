@@ -1014,13 +1014,19 @@ static vfile_ops_t g_fat32_fops = {
  * Mount / Unmount
  * ============================================================ */
 
-static fat32_sb_t g_sb;
-
 vnode_t *fat32_mount(bcache_t *bc) {
-    g_sb.bc = bc;
+    fat32_sb_t *sb = (fat32_sb_t *)kmalloc(sizeof(fat32_sb_t));
+    if (!sb) {
+        printf("[FAT32] Failed to allocate superblock\n");
+        return NULL;
+    }
+    memset(sb, 0, sizeof(*sb));
+
+    sb->bc = bc;
     fat32_bpb_t bpb;
-    if (bcache_read_bytes(g_sb.bc, 0, &bpb, sizeof(bpb)) < 0) {
+    if (bcache_read_bytes(sb->bc, 0, &bpb, sizeof(bpb)) < 0) {
         printf("[FAT32] Failed to read boot sector\n");
+        kfree(sb);
         return NULL;
     }
 
@@ -1031,33 +1037,45 @@ vnode_t *fat32_mount(bcache_t *bc) {
     }
     if (bpb.num_fats == 0) {
         printf("[FAT32] Invalid FAT32 superblock\n");
+        kfree(sb);
         return NULL;
     }
 
-    g_sb.first_fat_sector   = bpb.reserved_sectors;
-    g_sb.sectors_per_fat    = bpb.fat_size_32;
-    g_sb.first_data_sector  = bpb.reserved_sectors + bpb.num_fats * bpb.fat_size_32;
-    g_sb.root_cluster       = bpb.root_cluster;
-    g_sb.sectors_per_cluster = bpb.sectors_per_cluster;
-    g_sb.bytes_per_cluster  = bpb.sectors_per_cluster * bpb.bytes_per_sector;
-    g_sb.total_clusters     = (bpb.total_sectors_32 - g_sb.first_data_sector)
+    sb->first_fat_sector   = bpb.reserved_sectors;
+    sb->sectors_per_fat    = bpb.fat_size_32;
+    sb->first_data_sector  = bpb.reserved_sectors + bpb.num_fats * bpb.fat_size_32;
+    sb->root_cluster       = bpb.root_cluster;
+    sb->sectors_per_cluster = bpb.sectors_per_cluster;
+    sb->bytes_per_cluster  = bpb.sectors_per_cluster * bpb.bytes_per_sector;
+    sb->total_clusters     = (bpb.total_sectors_32 - sb->first_data_sector)
                                / bpb.sectors_per_cluster;
 
 
     printf("[FAT32] Mounted: cluster=%d sectors, FAT starts @%d, data @%d, root_cluster=%d\n",
            bpb.sectors_per_cluster,
-           g_sb.first_fat_sector, g_sb.first_data_sector, g_sb.root_cluster);
+           sb->first_fat_sector, sb->first_data_sector, sb->root_cluster);
 
-    vnode_t *root = fat32_make_vnode(&g_sb, g_sb.root_cluster, 0, 1, NULL, (uint64_t)g_sb.root_cluster);
-    if (!root) return NULL;
+    vnode_t *root = fat32_make_vnode(sb, sb->root_cluster, 0, 1, NULL, (uint64_t)sb->root_cluster);
+    if (!root) { kfree(sb); return NULL; }
     root->parent = root; /* root's parent is itself */
 
     return root;
 }
 
 void fat32_unmount(vnode_t *root) {
-    bcache_sync(g_sb.bc);
-    if (root && root->ops && root->ops->release) root->ops->release(root);
+    if (!root || !root->fs_data) return;
+    fat32_vnode_priv_t *fp = (fat32_vnode_priv_t *)root->fs_data;
+    fat32_sb_t *sb = fp->sb;
+    bcache_sync(sb->bc);
+
+    /* Clear g_fat32_meta entries referencing this sb */
+    for (int i = 0; i < (int)(sizeof(g_fat32_meta) / sizeof(g_fat32_meta[0])); i++) {
+        if (g_fat32_meta[i].sb == sb)
+            memset(&g_fat32_meta[i], 0, sizeof(g_fat32_meta[i]));
+    }
+
+    if (root->ops && root->ops->release) root->ops->release(root);
+    kfree(sb);
 }
 
 /* ============================================================
