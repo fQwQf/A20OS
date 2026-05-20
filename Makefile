@@ -236,7 +236,7 @@ $(BUILD_TIME_HDR):
 # ----------------------------------------------------------------
 all:
 	$(MAKE) benchmark-rv
-	$(MAKE) benchmark-la
+#	$(MAKE) benchmark-la
 	@echo "=== reference build complete ==="
 	@echo "  kernel-rv  kernel-la  disk.img  disk-la.img"
 
