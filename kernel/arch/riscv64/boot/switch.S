@@ -88,7 +88,6 @@ __switch:
     sfence.vma
 .Lskip_switch_satp:
     ld      t0, 15*8(a0)
-    ori     t0, t0, 2
     csrw    sstatus, t0
 
     /* Set sp past the TaskContext area on next task's stack */
