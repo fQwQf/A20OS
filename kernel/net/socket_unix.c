@@ -222,10 +222,13 @@ int net_unix_socket_sendto(net_socket_t *s, const void *buf, size_t len,
         dst_addr = s->peer_addr;
         dst_len = s->peer_len;
     }
-    if (s->peer) {
+    if (s->peer && (s->type == SOCK_STREAM || s->type == SOCK_SEQPACKET || net_socket_is_valid_locked(s->peer))) {
         dst = s->peer;
-    } else if (dst_addr) {
-        dst = net_find_bound_socket_locked(AF_UNIX, s->type, dst_addr, dst_len);
+    } else {
+        if (s->peer) s->peer = NULL;
+        if (dst_addr) {
+            dst = net_find_bound_socket_locked(AF_UNIX, s->type, dst_addr, dst_len);
+        }
     }
     if (!dst) {
         spin_unlock_irqrestore(&g_net_lock, irq);

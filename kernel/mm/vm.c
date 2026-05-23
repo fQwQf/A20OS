@@ -3,6 +3,7 @@
 #include "mm/frame.h"
 #include "mm/slab.h"
 #include "fs/vfs.h"
+#include "proc/proc.h"
 #include "core/string.h"
 #include "core/panic.h"
 #include "core/klog.h"
@@ -261,6 +262,8 @@ mm_struct_t *mm_create(void) {
     mm->stack_bottom = 0;
     mm->total_vm   = 0;
     mm->rss        = 0;
+    mm->locked_vm  = 0;
+    mm->def_flags  = 0;
     refcount_set(&mm->refcount, 1);
     return mm;
 }
@@ -365,7 +368,7 @@ void mm_insert_vma(mm_struct_t *mm, vm_area_t *newv) {
     }
 }
 
-static int mm_split_vma_at(mm_struct_t *mm, uint64_t addr) {
+int mm_split_vma_at(mm_struct_t *mm, uint64_t addr) {
     vm_area_t *v = mm_find_vma(mm, addr);
     if (!v || addr <= v->start || addr >= v->end)
         return 0;
@@ -494,6 +497,16 @@ uint64_t mm_mmap(mm_struct_t *mm, uint64_t addr, size_t len, int prot, int flags
     vma->pte_flags = ptef;
     vma->file_fd   = -1;
 
+    if (mm->def_flags & VM_LOCKED) {
+        task_t *cur = proc_current();
+        if (mm->locked_vm + len > cur->limits.memlock && !proc_has_cap(cur, CAP_SYS_ADMIN)) {
+            kfree(vma);
+            return (uint64_t)-ENOMEM;
+        }
+        vma->vm_flags |= VM_LOCKED;
+        mm->locked_vm += len;
+    }
+
     mm_insert_vma(mm, vma);
     mm->total_vm += len / PAGE_SIZE;
 
@@ -552,12 +565,23 @@ uint64_t mm_mmap_file(mm_struct_t *mm, uint64_t addr, size_t len,
         vfs_close(file_fd);
         return (uint64_t)-ENOMEM;
     }
-    vma->start = addr;
-    vma->end = addr + len;
-    vma->vm_flags = vmf;
-    vma->pte_flags = prot_to_pte(prot);
-    vma->file_fd = file_fd;
+    vma->start       = addr;
+    vma->end         = addr + len;
+    vma->vm_flags    = vmf;
+    vma->pte_flags   = prot_to_pte(prot);
+    vma->file_fd     = file_fd;
     vma->file_offset = file_offset;
+
+    if (mm->def_flags & VM_LOCKED) {
+        task_t *cur = proc_current();
+        if (mm->locked_vm + len > cur->limits.memlock && !proc_has_cap(cur, CAP_SYS_ADMIN)) {
+            kfree(vma);
+            vfs_close(file_fd);
+            return (uint64_t)-ENOMEM;
+        }
+        vma->vm_flags |= VM_LOCKED;
+        mm->locked_vm += len;
+    }
 
     mm_insert_vma(mm, vma);
     mm->total_vm += len / PAGE_SIZE;
@@ -839,6 +863,10 @@ int mm_munmap(mm_struct_t *mm, uint64_t addr, size_t len) {
         }
         size_t freed_pages = (clip_end - clip_start) / PAGE_SIZE;
         mm->total_vm = (mm->total_vm > freed_pages) ? mm->total_vm - freed_pages : 0;
+        if (vma->vm_flags & VM_LOCKED) {
+            size_t locked_sz = clip_end - clip_start;
+            mm->locked_vm = (mm->locked_vm >= locked_sz) ? mm->locked_vm - locked_sz : 0;
+        }
 
         // 根据取消映射的范围，对 VMA 进行删除或拆分
         if (addr <= vma->start && end >= vma->end) {
@@ -1003,6 +1031,8 @@ mm_struct_t *mm_fork(mm_struct_t *parent) {
     refcount_set(&child->refcount, 1);
     child->rss = 0;
     child->total_vm = 0;
+    child->locked_vm = 0;
+    child->def_flags = 0;
     child->mmap = NULL;
 
     child->pgdir = pt_create();
@@ -1018,6 +1048,7 @@ mm_struct_t *mm_fork(mm_struct_t *parent) {
         vm_area_t *cv = kcalloc(1, sizeof(vm_area_t));
         if (!cv) goto fail;
         *cv = *pv;
+        cv->vm_flags &= ~VM_LOCKED;
         if (vma_ref_file(cv) < 0) {
             kfree(cv);
             goto fail;

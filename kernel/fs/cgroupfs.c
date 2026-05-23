@@ -525,10 +525,8 @@ static int cg_lookup(vnode_t *dir, const char *name, vnode_t **out)
         vn->fs_data = node;
         vn->uid = node->uid;
         vn->gid = node->gid;
-        /* Encode the file type enum directly so cgroupfs_open_vnode can
-         * recover it via (cg_file_t)(vn->ino - 1).  The enum value is
-         * guaranteed non-zero, so ino > 0 for all file vnodes. */
         vn->ino = (uint64_t)ft + 1;
+        vn->ino |= ((uint64_t)(uintptr_t)node & 0xFFFFFFFFFFFF0000ULL);
         *out = vn;
         return 0;
     }
@@ -1040,9 +1038,8 @@ vfile_t *cgroupfs_open_vnode(vnode_t *vn, int flags)
     priv->sb = sb ? sb : NULL;
     priv->node = node;
 
-    if (vn->type == VFS_FT_REGULAR && vn->ino >= 1 &&
-        vn->ino < (uint64_t)CF_FILE_MAX + 1) {
-        priv->type = (cg_file_t)(vn->ino - 1);
+    if (vn->type == VFS_FT_REGULAR) {
+        priv->type = (cg_file_t)((vn->ino & 0xFFFF) - 1);
     } else {
         priv->type = CF_FILE_MAX;
     }

@@ -1,6 +1,8 @@
 #include "mm/fault.h"
 
 #include "proc/proc.h"
+#include "proc/signal.h"
+#include "abi/linux/signal.h"
 #include "fs/page_cache.h"
 #include "fs/vfs.h"
 #include "mm/mm.h"
@@ -147,37 +149,65 @@ int handle_demand_fault(task_t *t, uint64_t stval) {
             }
 
             uint64_t file_pos = vma->file_offset + (page_va - vma->start);
-            page_cache_page_t *pcp = page_cache_get(vf->vnode,
-                                                     file_pos / PAGE_SIZE, 1);
-            if (!pcp) {
+            if (file_pos >= vf->vnode->size) {
+                signal_send(t->pid, SIGBUS);
                 vfs_put_file_ref(vma->file_fd, vf);
-                return -1;
-            }
-            if (!page_cache_is_uptodate(pcp)) {
-                if (page_cache_fill_vfile_page(vf, pcp) < 0) {
-                    page_cache_put(pcp);
-                    vfs_put_file_ref(vma->file_fd, vf);
-                    return -1;
-                }
-            }
-            vfs_put_file_ref(vma->file_fd, vf);
-
-            pfn_t pfn = page_cache_pfn(pcp);
-            if (!pfn_valid(pfn)) {
-                page_cache_put(pcp);
                 return -1;
             }
 
             if (vma->vm_flags & VM_SHARED) {
-                frame_get(pfn);
+                /*
+                 * MAP_SHARED: bypass page cache to avoid exhaustion.
+                 * The page cache has limited slots (1024) and eviction is
+                 * blocked once frames are shared with page tables, causing
+                 * SIGSEGV for large mappings.  Instead, allocate a fresh
+                 * page and fill it directly from the file.
+                 */
+                pfn_t pfn = pfa_alloc_page();
+                if (pfn == PFN_NONE) {
+                    vfs_put_file_ref(vma->file_fd, vf);
+                    return -1;
+                }
+                memset(pfn_to_virt(pfn), 0, PAGE_SIZE);
+
+                if (vf->ops && vf->ops->lseek && vf->ops->read) {
+                    size_t saved = vf->offset;
+                    vf->ops->lseek(vf, (long)file_pos, SEEK_SET);
+                    int nr = vf->ops->read(vf, (char *)pfn_to_virt(pfn),
+                                           PAGE_SIZE);
+                    vf->ops->lseek(vf, (long)saved, SEEK_SET);
+                    (void)nr;
+                }
+                vfs_put_file_ref(vma->file_fd, vf);
+
                 int r = pt_map(t->mm->pgdir, page_va, pfn_to_phys(pfn),
                                vma->pte_flags);
-                page_cache_put(pcp);
                 if (r < 0) {
                     frame_put(pfn);
                     return -1;
                 }
             } else {
+                page_cache_page_t *pcp = page_cache_get(vf->vnode,
+                                                         file_pos / PAGE_SIZE, 1);
+                if (!pcp) {
+                    vfs_put_file_ref(vma->file_fd, vf);
+                    return -1;
+                }
+                if (!page_cache_is_uptodate(pcp)) {
+                    if (page_cache_fill_vfile_page(vf, pcp) < 0) {
+                        page_cache_put(pcp);
+                        vfs_put_file_ref(vma->file_fd, vf);
+                        return -1;
+                    }
+                }
+                vfs_put_file_ref(vma->file_fd, vf);
+
+                pfn_t cache_pfn = page_cache_pfn(pcp);
+                if (!pfn_valid(cache_pfn)) {
+                    page_cache_put(pcp);
+                    return -1;
+                }
+
                 if (cg_mem_charge(t->cgroup, 1) != 0) {
                     page_cache_put(pcp);
                     cg_mem_oom_kill(t->cgroup);

@@ -24,6 +24,7 @@
 #define FS_TYPE_PROCFS   4
 #define FS_TYPE_DEVFS    5
 #define FS_TYPE_CGROUP   6
+#define FS_TYPE_SYSFS    7
 
 /* ---- Forward declarations ---- */
 struct vnode;
@@ -146,6 +147,7 @@ typedef struct vfile {
     int             owner_pid;
     int             owner_signal;
     int             seals;
+    int             lease;
     uint64_t        rw_hint;
     char            path[MAX_PATH_LEN];
     vfile_ops_t    *ops;
@@ -189,6 +191,7 @@ int      vnode_ref_read(vnode_t *vn);
 void     vnode_put(vnode_t *vn);
 vnode_t *vfs_resolve(const char *path);
 vnode_t *vfs_resolve_at(const char *path, const char *cwd);
+vnode_t *vfs_resolve_no_follow(const char *path);
 
 /* File operations */
 int      vfs_open(const char *path, int flags, int mode);
