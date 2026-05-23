@@ -8,9 +8,28 @@
 #include "proc/signal.h"
 #include "proc/proc.h"
 #include "mm/mm.h"
+#include "mm/vm.h"
 #include "core/string.h"
 #include "core/stdio.h"
 #include "core/klog.h"
+
+/*
+ * Make the page containing @addr executable so the signal trampoline
+ * can run.  This is needed because user-allocated stacks (e.g. via
+ * malloc in clone02) lack VM_EXEC, and the sigreturn trampoline is
+ * placed on the stack.  We upgrade PTE flags by unmapping and
+ * remapping with PTE_X added.
+ */
+static void signal_make_page_exec(uint64_t addr) {
+    task_t *t = proc_current();
+    if (!t || !t->pgdir) return;
+    vaddr_t page = addr & ~(vaddr_t)(PAGE_SIZE - 1);
+    paddr_t pa = pt_translate(t->pgdir, page);
+    if (!pa) return;
+    pt_unmap(t->pgdir, page);
+    pt_map(t->pgdir, page, pa, arch_signal_tramp_pte_flags() | PTE_W | PTE_D);
+    arch_tlb_flush();
+}
 
 static int signal_core_dump_default(int sig) {
     switch (sig) {
@@ -137,7 +156,7 @@ int signal_send_info(int pid, int signum, const void *info, size_t info_size) {
         *(int *)ss->pending_info[signum] = signum;
     }
     ss->pending |= signal_mask_bit(signum);
-    if (t->state == PROC_BLOCKED) {
+    if (t->state == PROC_BLOCKED || t->state == PROC_STOPPED) {
         proc_make_ready(t);
     }
 
@@ -170,7 +189,7 @@ int signal_send_thread(int tid, int signum) {
     }
 
     t->thread_pending |= signal_mask_bit(signum);
-    if (t->state == PROC_BLOCKED) {
+    if (t->state == PROC_BLOCKED || t->state == PROC_STOPPED) {
         proc_make_ready(t);
     }
     return 0;
@@ -233,7 +252,8 @@ void signal_deliver(void) {
             if (signal_default_ignore(sig))
                 continue;
             if (signal_default_stop(sig)) {
-                t->state = PROC_BLOCKED;
+                t->state = PROC_STOPPED;
+                t->exit_code = sig;
                 sched();
                 continue;
             }
@@ -322,7 +342,8 @@ void signal_deliver_user(trap_context_t *ctx) {
                 t->sig_blocked = t->sigsuspend_active ?
                               t->sigsuspend_old_blocked : t->sig_blocked;
                 t->sigsuspend_active = 0;
-                t->state = PROC_BLOCKED;
+                t->state = PROC_STOPPED;
+                t->exit_code = sig;
                 sched();
                 t->state = PROC_RUNNING;
                 continue;
@@ -377,15 +398,14 @@ void signal_deliver_user(trap_context_t *ctx) {
         if (copy_to_user((void *)sp, &frame, sizeof(frame)) < 0)
             proc_exit(-signal_wait_status(SIGSEGV));
 
-        /* Write the sigreturn trampoline onto the user stack, just after
-         * the signal frame.  Stack pages are mapped RWX so this is
-         * executable.  The trampoline is:  addi a7,x0,__NR_rt_sigreturn; ecall  */
         uint64_t tramp_addr = sp + offsetof(sig_rt_frame_t, uc) +
                               sizeof(ucontext_t) + sizeof(siginfo_t);
         uint32_t tramp[2];
         arch_signal_prepare_trampoline(tramp);
         if (copy_to_user((void *)tramp_addr, tramp, sizeof(tramp)) < 0)
             proc_exit(-signal_wait_status(SIGSEGV));
+
+        signal_make_page_exec(tramp_addr);
 
         TRAP_CTX_SP(ctx) = sp;
         TRAP_CTX_EPC(ctx) = sa->sa_handler;

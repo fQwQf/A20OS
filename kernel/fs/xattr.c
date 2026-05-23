@@ -3,7 +3,7 @@
 #include "core/consts.h"
 #include "core/string.h"
 
-#define XATTR_TABLE_MAX 128
+#define XATTR_TABLE_MAX 1024
 
 typedef struct {
     int used;
@@ -132,4 +132,16 @@ int64_t xattr_remove_vnode(vnode_t *vn, const char *name)
     if (idx < 0) return -ENODATA;
     memset(&g_xattrs[idx], 0, sizeof(g_xattrs[idx]));
     return 0;
+}
+
+void xattr_cleanup_vnode(vnode_t *vn)
+{
+    if (!vn) return;
+    void *mnt = vn->mnt;
+    uint64_t ino = vn->ino;
+    for (int i = 0; i < XATTR_TABLE_MAX; i++) {
+        if (g_xattrs[i].used && g_xattrs[i].mnt == mnt && g_xattrs[i].ino == ino) {
+            memset(&g_xattrs[i], 0, sizeof(g_xattrs[i]));
+        }
+    }
 }
