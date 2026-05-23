@@ -13,6 +13,7 @@
 #define VQ_SIZE  VIRTIO_QUEUE_SIZE
 #define VIRTIO_BLK_REQ_SLOTS (VIRTIO_QUEUE_SIZE / 3)
 #define VIRTIO_BLK_WAIT_TIMEOUT_TICKS (TICKS_PER_SEC * 10)
+#define VIRTIO_BLK_MAX_RETRIES        3
 
 typedef struct {
     int                in_use;
@@ -354,29 +355,40 @@ static int virtio_blk_rw(int idx, uint64_t lba, void *buf, size_t sectors, int w
     virtio_blk_inst_t *inst = &g_insts[idx];
     if (!inst->blk.valid) return -1;
 
-    virtio_blk_req_t *req = NULL;
-    while (!req) {
-        uint64_t flags = spin_lock_irqsave(&inst->lock);
-        req = virtio_blk_alloc_req_locked(inst);
-        if (req) {
-            virtio_blk_submit_req(inst, req, lba, buf, sectors, write);
+    int retries = 0;
+    for (retries = 0; retries <= VIRTIO_BLK_MAX_RETRIES; retries++) {
+        virtio_blk_req_t *req = NULL;
+        while (!req) {
+            uint64_t flags = spin_lock_irqsave(&inst->lock);
+            req = virtio_blk_alloc_req_locked(inst);
+            if (req) {
+                virtio_blk_submit_req(inst, req, lba, buf, sectors, write);
+                spin_unlock_irqrestore(&inst->lock, flags);
+                break;
+            }
             spin_unlock_irqrestore(&inst->lock, flags);
-            break;
+            if (proc_current())
+                proc_yield();
+            else
+                __asm__ volatile("nop");
         }
-        spin_unlock_irqrestore(&inst->lock, flags);
-        if (proc_current())
-            proc_yield();
-        else
-            __asm__ volatile("nop");
-    }
 
-    int ret = virtio_blk_wait_req(inst, req, lba);
-    if (ret < 0) {
+        int ret = virtio_blk_wait_req(inst, req, lba);
+        if (ret == 0)
+            return 0;
+        if (ret < 0 && retries < VIRTIO_BLK_MAX_RETRIES) {
+            printf("[VIRTIO%d] Retrying I/O (%d/%d) lba=%lu\n",
+                   idx, retries + 1, VIRTIO_BLK_MAX_RETRIES, (unsigned long)lba);
+            /* Brief pause before retry — let any pending completions drain */
+            virtio_blk_poll_inst(inst);
+            continue;
+        }
         uint16_t head = req ? req->head : 0;
-        printf("[VIRTIO%d] I/O error: status=%d lba=%lu\n",
-               idx, inst->status[head], (unsigned long)lba);
+        printf("[VIRTIO%d] I/O error: status=%d lba=%lu (after %d retries)\n",
+               idx, inst->status[head], (unsigned long)lba, retries);
+        return ret;
     }
-    return ret;
+    return -1;
 }
 
 int virtio_blk_read(int idx, uint64_t lba, void *buf, size_t sectors) {

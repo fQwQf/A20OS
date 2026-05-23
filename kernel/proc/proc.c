@@ -238,11 +238,22 @@ void proc_make_ready(task_t *t) {
             t->cpu_id = proc_sched_select_cpu_locked(t);
     }
     target_cpu = t->cpu_id;
-    proc_runq_enqueue_locked(t);
     spin_unlock_irqrestore(&proc_lock, flags);
+
+    proc_runq_enqueue_locked(t);
 
     if (target_cpu != cpu_current_id())
         proc_sched_kick_cpu(target_cpu);
+}
+
+void proc_block_until(task_t *t, uint64_t wake_time) {
+    if (!t)
+        return;
+    if (wake_time)
+        proc_set_wake_time(t, wake_time);
+    uint64_t flags = spin_lock_irqsave(&proc_lock);
+    t->state = PROC_BLOCKED;
+    spin_unlock_irqrestore(&proc_lock, flags);
 }
 
 // idle 进程的主循环，系统无任务时运行
@@ -295,6 +306,7 @@ void proc_init(void) {
     idle->policy.thp_disabled = 0;
     idle->limits.stack = USER_STACK_MAX_SIZE;
     idle->limits.nofile = MAX_FILES;
+    idle->limits.memlock = 64 * 1024;
     idle->sched_level = SCHED_LEVELS - 1;
     idle->cpu_id = 0;
     proc_set_name(idle, "idle");
@@ -345,8 +357,6 @@ uint64_t *proc_kernel_pgdir_shared(void) { return kernel_pgdir_shared; }
 
 // 分配一个空闲的任务槽
 task_t *proc_alloc_task_slot(void) {
-    proc_reap_detached_zombies();
-
     task_t *t = kcalloc(1, sizeof(*t));
     if (!t)
         return NULL;

@@ -33,6 +33,9 @@ typedef struct net_socket {
     int protocol;
     int nonblock;
     int closed;
+    int shut_rd;
+    int shut_wr;
+    int peer_closed;
     int bound;
     int connected;
     int listening;
@@ -106,10 +109,11 @@ net_socket_t *net_find_bound_socket_locked(int domain, int type,
                                            const void *addr, size_t addrlen);
 int      net_register_socket_locked(net_socket_t *s);
 void     net_unregister_socket_locked(net_socket_t *s);
+int      net_socket_is_valid_locked(net_socket_t *s);
 
 int      net_enqueue_msg_locked(net_socket_t *dst, const void *buf, size_t len,
                                 const void *addr, size_t addrlen);
-int      net_enqueue_msg_blocking(net_socket_t *dst, const void *buf, size_t len,
+int      net_enqueue_msg_blocking(net_socket_t *s, net_socket_t *dst, const void *buf, size_t len,
                                   const void *addr, size_t addrlen,
                                   int dontwait, uint64_t timeout_ticks);
 int      net_dequeue_msg_locked(net_socket_t *s, void *buf, size_t len,
