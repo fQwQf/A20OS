@@ -47,7 +47,7 @@ void proc_task_init_common(task_t *t, task_t *parent)
     t->parent    = parent;
     t->exit_code = 0;
     t->priority  = parent ? parent->priority : 0;
-    t->sched_level = parent ? parent->sched_level : 0;
+    t->sched_level = 0;
     t->cpu_id    = parent ? parent->cpu_id : cpu_current_id();
     t->on_rq     = 0;
     t->rq_next   = NULL;
@@ -107,6 +107,7 @@ void proc_task_init_common(task_t *t, task_t *parent)
     t->thread_pending = 0;
     t->limits.stack = parent ? parent->limits.stack : USER_STACK_MAX_SIZE;
     t->limits.nofile = parent ? parent->limits.nofile : MAX_FILES;
+    t->limits.memlock = parent ? parent->limits.memlock : (64 * 1024);
     t->mm        = NULL;
 
     t->cgroup     = parent ? parent->cgroup : NULL;

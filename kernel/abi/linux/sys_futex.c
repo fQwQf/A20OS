@@ -1,6 +1,7 @@
 #include "syscall_impl.h"
 #include "sys/futex.h"
 #include "abi/linux/futex.h"
+#include "proc/proc_internal.h"
 #include "core/lock.h"
 
 #define FUTEX_WAITERS_MAX 256
@@ -154,8 +155,7 @@ static int futex_wait_on(int *uaddr, int expected, void *timeout, uint32_t bitse
         spin_unlock_irqrestore(&g_futex_lock, flags);
         return slot;
     }
-    proc_set_wake_time(t, until);
-    t->state = PROC_BLOCKED;
+    proc_block_until(t, until);
     spin_unlock_irqrestore(&g_futex_lock, flags);
 
     sched();

@@ -1,5 +1,6 @@
 #include "fs/vfs.h"
 #include "core/stdio.h"
+#include "fs/xattr.h"
 
 void vnode_ref_init(vnode_t *vn, int refs)
 {
@@ -32,6 +33,7 @@ void vnode_put(vnode_t *vn)
         return;
     }
     if (refcount_dec_and_test(&vn->ref_count)) {
+        xattr_cleanup_vnode(vn);
         if (vn->ops && vn->ops->release)
             vn->ops->release(vn);
     }
