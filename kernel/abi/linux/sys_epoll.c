@@ -1,5 +1,6 @@
 #define LINUX_SYSCALL_DECLARE_PROTOTYPES
 #include "syscall_impl.h"
+#include "proc/proc_internal.h"
 #include "fs/vfs/file.h"
 #include "core/timer.h"
 #include "proc/proc.h"
@@ -11,8 +12,8 @@ typedef struct {
 } epoll_event_t;
 
 #define EPOLL_CTL_ADD 1
-#define EPOLL_CTL_MOD 2
-#define EPOLL_CTL_DEL 3
+#define EPOLL_CTL_DEL 2
+#define EPOLL_CTL_MOD 3
 
 #define EPOLL_MAX_FDS  1024
 #define EPOLL_MAX_NESTING 4
@@ -233,6 +234,11 @@ int64_t sys_epoll_ctl(int epfd, int op, int fd, void *event)
                     return -ELOOP;
                 }
             }
+            if (vf_check && vf_check->vnode &&
+                vf_check->vnode->type == VFS_FT_DIR) {
+                vfs_put_file_ref((int)target_gfd, vf_check);
+                return -EPERM;
+            }
             if (vf_check) vfs_put_file_ref((int)target_gfd, vf_check);
         }
 
@@ -382,8 +388,7 @@ static int epoll_do_wait(int epfd, void *events, int maxevents,
             uint64_t sleep_until = now + MS_TO_TICKS(20);
             if (has_timeout && deadline < sleep_until)
                 sleep_until = deadline;
-            proc_set_wake_time(t, sleep_until);
-            t->state = PROC_BLOCKED;
+            proc_block_until(t, sleep_until);
             sched();
             if (t->state == PROC_BLOCKED)
                 t->state = PROC_RUNNING;

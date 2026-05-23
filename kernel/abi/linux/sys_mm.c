@@ -10,13 +10,55 @@ int64_t sys_brk(uint64_t addr) {
 }
 
 int64_t sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, long off) {
-    int gfd = fd;
-    if (!(flags & MAP_ANONYMOUS) && fd >= 0) {
-        int64_t r = fdtable_get_current(fd);
-        if (r < 0) return r;
-        gfd = (int)r;
+    if ((flags & (MAP_SHARED | MAP_PRIVATE)) == 0 ||
+        (flags & (MAP_SHARED | MAP_PRIVATE)) == (MAP_SHARED | MAP_PRIVATE)) {
+        return -EINVAL;
     }
-    return (int64_t)proc_mmap(addr, len, prot, flags, gfd, off);
+    if (len == 0) return -EINVAL;
+
+    int gfd = fd;
+    if (!(flags & MAP_ANONYMOUS)) {
+        if (fd < 0) return -EBADF;
+        int64_t r = fdtable_get_current(fd);
+        if (r < 0) return -EBADF;
+        gfd = (int)r;
+
+        vfile_t *vf = vfs_get_file_ref(gfd);
+        if (!vf) return -EBADF;
+
+        int acc = vf->flags & 3;
+        if (acc == 1) { // O_WRONLY
+            vfs_put_file_ref(gfd, vf);
+            return -EBADF;
+        }
+
+        if ((flags & MAP_SHARED) && (prot & PROT_WRITE)) {
+            if (acc == 0) { // O_RDONLY
+                vfs_put_file_ref(gfd, vf);
+                return -EBADF;
+            }
+        }
+        vfs_put_file_ref(gfd, vf);
+    }
+
+    int64_t res = (int64_t)proc_mmap(addr, len, prot, flags, gfd, off);
+    if (res >= 0) {
+        task_t *t = proc_current();
+        if (t && t->mm) {
+            vm_area_t *vma = mm_find_vma(t->mm, res);
+            if (vma && (vma->vm_flags & VM_LOCKED)) {
+                uint64_t start = res;
+                uint64_t end = ROUND_UP(start + len, PAGE_SIZE);
+                for (uint64_t va = start; va < end; va += PAGE_SIZE) {
+                    uint64_t *pte = pt_lookup_leaf(t->mm->pgdir, va, NULL, NULL, NULL);
+                    if (!pte || !(*pte & PTE_V)) {
+                        handle_demand_fault(t, va);
+                    }
+                }
+            }
+        }
+    }
+    return res;
 }
 
 int64_t sys_munmap(uint64_t addr, size_t len) {
@@ -163,46 +205,166 @@ int64_t sys_mlock(uint64_t addr, size_t len) {
     if (len == 0) return 0;
     uint64_t start = addr & ~(uint64_t)(PAGE_SIZE - 1);
     uint64_t end = ROUND_UP(addr + len, PAGE_SIZE);
+    if (end < start) return -EINVAL;
+
     task_t *t = proc_current();
     if (!t || !t->mm) return -EINVAL;
-    for (uint64_t va = start; va < end; va += PAGE_SIZE) {
+
+    for (uint64_t va = start; va < end; ) {
         vm_area_t *vma = mm_find_vma(t->mm, va);
-        if (!vma) return -ENOMEM;
+        if (!vma || va >= vma->end) return -ENOMEM;
+        va = vma->end;
     }
+
+    int r = mm_split_vma_at(t->mm, start);
+    if (r < 0) return r;
+    r = mm_split_vma_at(t->mm, end);
+    if (r < 0) return r;
+
+    size_t new_locked = 0;
+    for (vm_area_t *vma = mm_find_vma(t->mm, start); vma && vma->start < end; vma = vma->next) {
+        if (!(vma->vm_flags & VM_LOCKED)) {
+            new_locked += (vma->end - vma->start);
+        }
+    }
+
+    if (t->mm->locked_vm + new_locked > t->limits.memlock && !proc_has_cap(t, CAP_SYS_ADMIN)) {
+        return -ENOMEM;
+    }
+
+    for (vm_area_t *vma = mm_find_vma(t->mm, start); vma && vma->start < end; vma = vma->next) {
+        if (!(vma->vm_flags & VM_LOCKED)) {
+            vma->vm_flags |= VM_LOCKED;
+            t->mm->locked_vm += (vma->end - vma->start);
+        }
+    }
+
+    for (uint64_t va = start; va < end; va += PAGE_SIZE) {
+        uint64_t *pte = pt_lookup_leaf(t->mm->pgdir, va, NULL, NULL, NULL);
+        if (!pte || !(*pte & PTE_V)) {
+            handle_demand_fault(t, va);
+        }
+    }
+
     return 0;
 }
 
 int64_t sys_munlock(uint64_t addr, size_t len) {
-    (void)addr; (void)len;
+    if (len == 0) return 0;
+    uint64_t start = addr & ~(uint64_t)(PAGE_SIZE - 1);
+    uint64_t end = ROUND_UP(addr + len, PAGE_SIZE);
+    if (end < start) return -EINVAL;
+
+    task_t *t = proc_current();
+    if (!t || !t->mm) return -EINVAL;
+
+    for (uint64_t va = start; va < end; ) {
+        vm_area_t *vma = mm_find_vma(t->mm, va);
+        if (!vma || va >= vma->end) return -ENOMEM;
+        va = vma->end;
+    }
+
+    int r = mm_split_vma_at(t->mm, start);
+    if (r < 0) return r;
+    r = mm_split_vma_at(t->mm, end);
+    if (r < 0) return r;
+
+    for (vm_area_t *vma = mm_find_vma(t->mm, start); vma && vma->start < end; vma = vma->next) {
+        if (vma->vm_flags & VM_LOCKED) {
+            vma->vm_flags &= ~VM_LOCKED;
+            size_t vma_sz = vma->end - vma->start;
+            t->mm->locked_vm = (t->mm->locked_vm >= vma_sz) ? t->mm->locked_vm - vma_sz : 0;
+        }
+    }
+
     return 0;
 }
 
 int64_t sys_mlockall(int flags) {
-    if (flags & ~(1 | 2)) return -EINVAL;
+    if (flags == 0 || (flags & ~(MCL_CURRENT | MCL_FUTURE | MCL_ONFAULT)) != 0) {
+        return -EINVAL;
+    }
+    if ((flags & MCL_ONFAULT) && !(flags & (MCL_CURRENT | MCL_FUTURE))) {
+        return -EINVAL;
+    }
+
+    task_t *t = proc_current();
+    if (!t || !t->mm) return -EINVAL;
+
+    if (flags & MCL_FUTURE) {
+        t->mm->def_flags |= VM_LOCKED;
+    }
+
+    if (flags & MCL_CURRENT) {
+        for (vm_area_t *vma = t->mm->mmap; vma; vma = vma->next) {
+            if (!(vma->vm_flags & VM_LOCKED)) {
+                size_t vma_sz = vma->end - vma->start;
+                if (t->mm->locked_vm + vma_sz > t->limits.memlock && !proc_has_cap(t, CAP_SYS_ADMIN)) {
+                    return -ENOMEM;
+                }
+                vma->vm_flags |= VM_LOCKED;
+                t->mm->locked_vm += vma_sz;
+            }
+            if (!(flags & MCL_ONFAULT)) {
+                for (uint64_t va = vma->start; va < vma->end; va += PAGE_SIZE) {
+                    uint64_t *pte = pt_lookup_leaf(t->mm->pgdir, va, NULL, NULL, NULL);
+                    if (!pte || !(*pte & PTE_V)) {
+                        handle_demand_fault(t, va);
+                    }
+                }
+            }
+        }
+    }
+
     return 0;
 }
 
 int64_t sys_munlockall(void) {
+    task_t *t = proc_current();
+    if (!t || !t->mm) return -EINVAL;
+
+    t->mm->def_flags &= ~VM_LOCKED;
+    for (vm_area_t *vma = t->mm->mmap; vma; vma = vma->next) {
+        vma->vm_flags &= ~VM_LOCKED;
+    }
+    t->mm->locked_vm = 0;
     return 0;
 }
 
 int64_t sys_mincore(uint64_t addr, size_t length, unsigned char *vec) {
+    if (addr & (PAGE_SIZE - 1)) return -EINVAL;
+    if (length == 0) return 0;
     if (!vec) return -EFAULT;
-    if (addr & 0xfff) return -EINVAL;
+
     task_t *t = proc_current();
     if (!t || !t->mm) return -EINVAL;
-    size_t pages = (length + 4095) / 4096;
-    if (pages == 0) pages = 1;
+
+    uint64_t start = addr;
+    uint64_t end = addr + length;
+    uint64_t end_aligned = ROUND_UP(end, PAGE_SIZE);
+    if (end_aligned < start) return -EINVAL;
+
+    size_t pages = (end_aligned - start) / PAGE_SIZE;
+
     for (size_t i = 0; i < pages; i++) {
-        uint64_t va = addr + i * PAGE_SIZE;
-        unsigned char val = 0;
+        uint64_t va = start + i * PAGE_SIZE;
         vm_area_t *vma = mm_find_vma(t->mm, va);
-        if (vma) {
-            uint64_t *pte = pt_lookup_leaf(t->mm->pgdir, va, NULL, NULL, NULL);
-            if (pte && (*pte & PTE_V))
-                val = 1;
+        if (!vma || va >= vma->end) {
+            return -ENOMEM;
         }
-        if (copy_to_user(vec + i, &val, 1) < 0) return -EFAULT;
     }
+
+    for (size_t i = 0; i < pages; i++) {
+        uint64_t va = start + i * PAGE_SIZE;
+        unsigned char val = 0;
+        uint64_t *pte = pt_lookup_leaf(t->mm->pgdir, va, NULL, NULL, NULL);
+        if (pte && (*pte & PTE_V)) {
+            val = 1;
+        }
+        if (copy_to_user(vec + i, &val, 1) < 0) {
+            return -EFAULT;
+        }
+    }
+
     return 0;
 }

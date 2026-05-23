@@ -97,17 +97,10 @@ static uint32_t fat32_alloc_cluster(fat32_sb_t *sb) {
     for (uint32_t c = 2; c < sb->total_clusters + 2; c++) {
         if (fat_read(sb, c) == FAT32_CLUSTER_FREE) {
             fat_write(sb, c, FAT32_CLUSTER_END_MARK);
-            /* Zero out the cluster */
-            uint64_t base = cluster_byte_offset(sb, c);
-            char zeros[FAT32_SECTOR_SIZE];
-            memset(zeros, 0, FAT32_SECTOR_SIZE);
-            for (uint32_t s = 0; s < sb->sectors_per_cluster; s++) {
-                bcache_write_bytes(sb->bc, base + s * FAT32_SECTOR_SIZE, zeros, FAT32_SECTOR_SIZE);
-            }
             return c;
         }
     }
-    return 0; /* no free cluster */
+    return 0;
 }
 
 /* Extend cluster chain by one cluster, return new cluster */
@@ -1032,11 +1025,17 @@ vnode_t *fat32_mount(bcache_t *bc) {
 
     /* Verify FAT32 signature */
     if (bpb.bytes_per_sector != 512 && bpb.bytes_per_sector != 4096) {
-        printf("[FAT32] Invalid bytes_per_sector: %d\n", bpb.bytes_per_sector);
-        /* Try anyway with 512 */
+        if (bpb.bytes_per_sector != 1024 && bpb.bytes_per_sector != 2048) {
+            printf("[FAT32] Invalid bytes_per_sector: %d\n", bpb.bytes_per_sector);
+            kfree(sb);
+            return NULL;
+        }
     }
-    if (bpb.num_fats == 0) {
-        printf("[FAT32] Invalid FAT32 superblock\n");
+    if (bpb.num_fats == 0 || bpb.sectors_per_cluster == 0 ||
+        bpb.reserved_sectors == 0 || bpb.fat_size_32 == 0) {
+        printf("[FAT32] Invalid FAT32 superblock (nft=%d spc=%d rs=%d fsz=%u)\n",
+               bpb.num_fats, bpb.sectors_per_cluster,
+               bpb.reserved_sectors, bpb.fat_size_32);
         kfree(sb);
         return NULL;
     }

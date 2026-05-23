@@ -3,6 +3,7 @@
 #include "proc/signal.h"
 #include "bpf/bpf.h"
 #include "core/cpu.h"
+#include "core/stdio.h"
 #include "fs/fdtable.h"
 #include "fs/vfs.h"
 #include "mm/frame.h"
@@ -191,6 +192,14 @@ void proc_exit(int exit_code)
     vfs_release_process_locks(t->pid);
     bpf_release_process(t->pid);
 
+    /* Close all file descriptors BEFORE transitioning to ZOMBIE.
+     * This ensures socket close notifications (peer_closed) reach the
+     * peer BEFORE wait4() can observe the zombie and report exit status.
+     * If we close FDs after ZOMBIE, the parent's wait4() could return
+     * before peer sockets are notified, causing the peer to hang. */
+    fdtable_close_all(t);
+    proc_release_exiting_mm(t);
+
     uint64_t flags = spin_lock_irqsave(&proc_lock);
     task_t *parent = t->parent;
     int auto_reap = proc_child_auto_reaps(t, parent);
@@ -210,9 +219,6 @@ void proc_exit(int exit_code)
         proc_wake_child_waiters_locked(parent);
         spin_unlock_irqrestore(&proc_lock, flags);
     }
-
-    fdtable_close_all(t);
-    proc_release_exiting_mm(t);
 
     if (auto_reap) {
         if (t->signals) {

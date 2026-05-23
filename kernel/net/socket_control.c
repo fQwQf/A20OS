@@ -3,6 +3,12 @@
 #include "core/string.h"
 #include "lwip/tcp.h"
 
+#ifndef SHUT_RD
+#define SHUT_RD   0
+#define SHUT_WR   1
+#define SHUT_RDWR 2
+#endif
+
 static uint64_t timeval_to_ticks(const void *optval, size_t optlen)
 {
     if (!optval || optlen < sizeof(long) * 2)
@@ -55,6 +61,11 @@ int net_listen(int gfd, int backlog)
         if (s->domain == AF_INET)
             net_tcp_drop_pcb(s);
     }
+    if (s->domain == AF_INET) {
+        uint16_t lport = 0;
+        net_sockaddr_port(s->local, s->local_len, &lport);
+        printf("[NET] listen port=%u\n", (unsigned)net_ntohs(lport));
+    }
     return 0;
 }
 
@@ -77,6 +88,10 @@ int net_accept(int gfd, void *addr, size_t *addrlen, int flags)
     uint64_t start = timer_get_ticks();
     for (;;) {
         uint64_t irq = spin_lock_irqsave(&g_net_lock);
+        if (s->closed) {
+            spin_unlock_irqrestore(&g_net_lock, irq);
+            return -EINVAL;
+        }
         child = net_accept_queue_pop_locked(s);
         if (child) {
             spin_unlock_irqrestore(&g_net_lock, irq);
@@ -115,6 +130,7 @@ int net_accept(int gfd, void *addr, size_t *addrlen, int flags)
         net_socket_free(child);
         return r;
     }
+
     net_inet_accept_child_ready(child);
 
     if (addr && addrlen && *addrlen > 0) {
@@ -446,14 +462,47 @@ int net_getsockopt(int gfd, int level, int optname, void *optval, size_t *optlen
 
 int net_shutdown(int gfd, int how)
 {
-    (void)how;
     net_socket_t *s = net_socket_from_file(gfd);
     if (!s)
         return -ENOTSOCK;
     uint64_t irq = spin_lock_irqsave(&g_net_lock);
-    s->closed = 1;
+
+    if (how == SHUT_RDWR) {
+        s->closed = 1;
+        s->shut_rd = 1;
+        s->shut_wr = 1;
+    }
+    if (how == SHUT_WR) {
+        s->shut_wr = 1;
+    }
+    if (how == SHUT_RD) {
+        s->shut_rd = 1;
+        net_msg_t *m = s->rx_head;
+        s->rx_head = s->rx_tail = NULL;
+        s->rx_count = 0;
+        spin_unlock_irqrestore(&g_net_lock, irq);
+        while (m) {
+            net_msg_t *next = m->next;
+            net_msg_free(m);
+            m = next;
+        }
+        irq = spin_lock_irqsave(&g_net_lock);
+    }
+
     if (s->waiter && s->waiter->state == PROC_BLOCKED)
         proc_make_ready(s->waiter);
+    if (s->send_waiter && s->send_waiter->state == PROC_BLOCKED)
+        proc_make_ready(s->send_waiter);
+
+    if (s->peer && (s->type == SOCK_STREAM || s->type == SOCK_SEQPACKET || net_socket_is_valid_locked(s->peer)) && s->peer->peer == s) {
+        if (how == SHUT_WR || how == SHUT_RDWR) {
+            s->peer->peer_closed = 1;
+            if (s->peer->waiter && s->peer->waiter->state == PROC_BLOCKED)
+                proc_make_ready(s->peer->waiter);
+        }
+        if (s->peer->send_waiter && s->peer->send_waiter->state == PROC_BLOCKED)
+            proc_make_ready(s->peer->send_waiter);
+    }
     spin_unlock_irqrestore(&g_net_lock, irq);
     return 0;
 }
@@ -476,14 +525,18 @@ int net_poll_events(int gfd, short events)
         return -ENOTSOCK;
     short revents = 0;
     uint64_t irq = spin_lock_irqsave(&g_net_lock);
-    if (s->closed)
+    if (s->closed || s->peer_closed || s->shut_rd)
         revents |= POLLHUP;
     if ((events & POLLIN) &&
-        (s->rx_head || s->accept_head || s->closed ||
+        (s->rx_head || s->accept_head || s->closed || s->peer_closed || s->shut_rd ||
          (s->domain == AF_ALG && (strcmp(s->alg_type, "hash") == 0 || s->alg_last_len > 0))))
         revents |= POLLIN;
-    if ((events & POLLOUT) && !s->closed)
-        revents |= POLLOUT;
+    if ((events & POLLOUT) && !s->closed && !s->shut_wr) {
+        if (s->peer && s->type == SOCK_STREAM && s->peer->rx_count >= NET_MAX_QUEUE)
+            revents |= 0;
+        else
+            revents |= POLLOUT;
+    }
     spin_unlock_irqrestore(&g_net_lock, irq);
     return revents;
 }

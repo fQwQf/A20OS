@@ -3,8 +3,10 @@
 #include "proc/signal.h"
 #include "core/consts.h"
 #include "core/klog.h"
+#include "mm/mm.h"
 
 #define WNOHANG     1
+#define WUNTRACED   2
 #define __WNOTHREAD 0x20000000
 
 static void wait_accumulate_child_time(task_t *parent, task_t *child)
@@ -79,11 +81,21 @@ int proc_wait4(int pid, int *status, int options)
                 }
                 int child_pid = child->pid;
                 wait_accumulate_child_time(t, child);
-                child->parent = proc_idle_task();
-                child->ppid = 0;
+                child->state = PROC_UNUSED;
+                proc_unlink_task_locked(child);
                 spin_unlock_irqrestore(&proc_lock, lock_flags);
-                proc_free_pid(child_pid);
+                proc_pid_unregister(child);
+                proc_task_release_resources(child);
+                kfree(child);
                 return child_pid;
+            }
+            if ((options & WUNTRACED) && cstate == PROC_STOPPED) {
+                int sig = __atomic_load_n(&child->exit_code, __ATOMIC_ACQUIRE);
+                if (status) {
+                    *status = (sig << 8) | 0x7F;
+                }
+                spin_unlock_irqrestore(&proc_lock, lock_flags);
+                return child->pid;
             }
         }
 

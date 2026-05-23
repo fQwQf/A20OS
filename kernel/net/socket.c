@@ -44,8 +44,10 @@ void net_block_on_socket_locked(net_socket_t *s, task_t *cur) {
 
 void net_clear_socket_waiter(net_socket_t *s, task_t *cur) {
     uint64_t irq = spin_lock_irqsave(&g_net_lock);
-    if (s->waiter == cur)
-        s->waiter = NULL;
+    if (net_socket_is_valid_locked(s)) {
+        if (s->waiter == cur)
+            s->waiter = NULL;
+    }
     proc_set_wake_time(cur, 0);
     spin_unlock_irqrestore(&g_net_lock, irq);
 }
@@ -210,6 +212,20 @@ int net_socket_create(int domain, int type, int protocol) {
         ((domain != AF_INET && domain != AF_INET6) || protocol < 0 || protocol > 255))
         return -EPROTONOSUPPORT;
 
+    if (domain == AF_INET || domain == AF_INET6) {
+        if (base_type == SOCK_STREAM && protocol != 0 && protocol != IPPROTO_TCP)
+            return -EPROTONOSUPPORT;
+        if (base_type == SOCK_DGRAM && protocol != 0 && protocol != IPPROTO_UDP)
+            return -EPROTONOSUPPORT;
+        if (base_type == SOCK_RAW && protocol == IPPROTO_TCP)
+            return -EPROTONOSUPPORT;
+        if (base_type == SOCK_RAW) {
+            task_t *cur = proc_current();
+            if (!cur || !(cur->cred.cap_effective & (1ULL << CAP_NET_RAW)))
+                return -EACCES;
+        }
+    }
+
     net_socket_t *s = net_socket_alloc();
     if (!s) {
         return -ENOMEM;
@@ -241,7 +257,7 @@ int net_socket_create(int domain, int type, int protocol) {
 
 int net_socketpair_create(int domain, int type, int protocol, int out_gfd[2]) {
     if (domain != AF_UNIX)
-        return -EAFNOSUPPORT;
+        return -EOPNOTSUPP;
     int a = net_socket_create(domain, type, protocol);
     if (a < 0)
         return a;
@@ -337,9 +353,14 @@ int net_connect(int gfd, const void *addr, size_t addrlen) {
         net_sockaddr_loopback(s, net_alloc_ephemeral_port_locked());
     memcpy(s->peer_addr, addr, addrlen);
     s->peer_len = addrlen;
-    s->connected = 1;
     spin_unlock_irqrestore(&g_net_lock, flags);
-    return net_inet_connect(s, addr, addrlen, addr, addrlen);
+    int r = net_inet_connect(s, addr, addrlen, addr, addrlen);
+    if (r < 0 && r != -EINPROGRESS) {
+        return r;
+    }
+    if (!s->connected)
+        s->connected = 1;
+    return r;
 }
 
 static int raw_ipv6_filter_passes(net_socket_t *s, const void *buf, size_t len)
@@ -402,7 +423,7 @@ int net_sendto(int gfd, const void *buf, size_t len, int flags,
                const void *addr, size_t addrlen) {
     net_socket_t *s = (gfd >= 0) ? net_socket_from_file(gfd) : NULL;
     if (!s) return -ENOTSOCK;
-    if (len > NET_MAX_PAYLOAD) return -EMSGSIZE;
+    if (len > NET_MAX_PAYLOAD && s->type != SOCK_STREAM) return -EMSGSIZE;
     int dontwait = s->nonblock || ((flags & MSG_DONTWAIT) != 0);
     if (s->domain == AF_ALG)
         return net_alg_socket_send(s, buf, len);
@@ -415,6 +436,10 @@ int net_sendto(int gfd, const void *buf, size_t len, int flags,
         return net_unix_socket_sendto(s, buf, len, addr, addrlen);
 
     uint64_t irq = spin_lock_irqsave(&g_net_lock);
+    if (s->closed || s->shut_wr) {
+        spin_unlock_irqrestore(&g_net_lock, irq);
+        return -EPIPE;
+    }
     if (!s->bound && (s->domain == AF_INET || s->domain == AF_INET6))
         net_sockaddr_loopback(s, net_alloc_ephemeral_port_locked());
 
@@ -425,23 +450,43 @@ int net_sendto(int gfd, const void *buf, size_t len, int flags,
         dst_addr = s->peer_addr;
         dst_len = s->peer_len;
     }
-    if (s->peer) {
+    if (s->peer && (s->type == SOCK_STREAM || s->type == SOCK_SEQPACKET || net_socket_is_valid_locked(s->peer))) {
         dst = s->peer;
-    } else if (dst_addr) {
-        dst = net_find_bound_socket_locked(s->domain, s->type, dst_addr, dst_len);
+    } else {
+        if (s->peer) s->peer = NULL;
+        if (dst_addr) {
+            dst = net_find_bound_socket_locked(s->domain, s->type, dst_addr, dst_len);
+        }
     }
     if (!dst) {
         spin_unlock_irqrestore(&g_net_lock, irq);
         return dst_addr ? -ECONNREFUSED : -EDESTADDRREQ;
     }
-    if (dst->rx_count >= NET_MAX_QUEUE && !dontwait) {
+    if (len <= NET_MAX_PAYLOAD) {
+        if (dst->rx_count >= NET_MAX_QUEUE && !dontwait) {
+            spin_unlock_irqrestore(&g_net_lock, irq);
+            return net_enqueue_msg_blocking(s, dst, buf, len, s->local, s->local_len,
+                                            0, s->send_timeout_ticks);
+        }
+        int r = net_enqueue_msg_locked(dst, buf, len, s->local, s->local_len);
         spin_unlock_irqrestore(&g_net_lock, irq);
-        return net_enqueue_msg_blocking(dst, buf, len, s->local, s->local_len,
-                                        0, s->send_timeout_ticks);
+        return r;
     }
-    int r = net_enqueue_msg_locked(dst, buf, len, s->local, s->local_len);
+
     spin_unlock_irqrestore(&g_net_lock, irq);
-    return r;
+    size_t total = 0;
+    while (total < len) {
+        size_t chunk = len - total;
+        if (chunk > NET_MAX_PAYLOAD)
+            chunk = NET_MAX_PAYLOAD;
+        int r = net_enqueue_msg_blocking(s, dst, (const uint8_t *)buf + total, chunk,
+                                          s->local, s->local_len,
+                                          dontwait, s->send_timeout_ticks);
+        if (r < 0)
+            return total ? (int)total : r;
+        total += (size_t)r;
+    }
+    return (int)total;
 }
 
 int net_recvfrom(int gfd, void *buf, size_t len, int flags,
@@ -466,7 +511,9 @@ int net_recvfrom(int gfd, void *buf, size_t len, int flags,
             }
             r = (int)total;
         }
-        if (r != -EAGAIN || s->nonblock || dontwait) {
+        if (r != -EAGAIN || s->nonblock || dontwait || s->closed || s->peer_closed || s->shut_rd) {
+            if (r == -EAGAIN && (s->closed || s->peer_closed || s->shut_rd))
+                r = 0;
             spin_unlock_irqrestore(&g_net_lock, irq);
             return r;
         }

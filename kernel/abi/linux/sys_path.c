@@ -6,6 +6,7 @@ int64_t sys_mkdirat(int dirfd, const char *path, int mode) {
     if (!path) return -EFAULT;
     char kpath[MAX_PATH_LEN];
     if (user_strncpy(kpath, path, MAX_PATH_LEN) < 0) return -EFAULT;
+    if (kpath[0] == '\0') return -ENOENT;
     char full[MAX_PATH_LEN];
     int pr = syscall_path_at(dirfd, kpath, full, sizeof(full));
     if (pr < 0) return pr;
@@ -16,6 +17,7 @@ int64_t sys_unlinkat(int dirfd, const char *path, int flags) {
     if (!path) return -EFAULT;
     char kpath[MAX_PATH_LEN];
     if (user_strncpy(kpath, path, MAX_PATH_LEN) < 0) return -EFAULT;
+    if (kpath[0] == '\0') return -ENOENT;
     if (flags & ~(AT_REMOVEDIR)) return -EINVAL;
     char full[MAX_PATH_LEN];
     int pr = syscall_path_at(dirfd, kpath, full, sizeof(full));
@@ -33,6 +35,7 @@ int64_t sys_renameat2(int olddir, const char *oldpath,
     char kold[MAX_PATH_LEN], knew[MAX_PATH_LEN];
     if (user_strncpy(kold, oldpath, MAX_PATH_LEN) < 0) return -EFAULT;
     if (user_strncpy(knew, newpath, MAX_PATH_LEN) < 0) return -EFAULT;
+    if (kold[0] == '\0' || knew[0] == '\0') return -ENOENT;
     char fold[MAX_PATH_LEN], fnew[MAX_PATH_LEN];
     int pr = syscall_path_at(olddir, kold, fold, sizeof(fold));
     if (pr < 0) return pr;
@@ -399,6 +402,7 @@ int64_t sys_symlinkat(const char *target, int newdirfd, const char *linkpath) {
     char ktarget[MAX_PATH_LEN], klink[MAX_PATH_LEN];
     if (user_strncpy(ktarget, target, MAX_PATH_LEN) < 0) return -EFAULT;
     if (user_strncpy(klink, linkpath, MAX_PATH_LEN) < 0) return -EFAULT;
+    if (klink[0] == '\0') return -ENOENT;
     char flink[MAX_PATH_LEN];
     int pr = syscall_path_at(newdirfd, klink, flink, sizeof(flink));
     if (pr < 0) return pr;

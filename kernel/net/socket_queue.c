@@ -33,8 +33,10 @@ static void net_block_on_queue_space_locked(net_socket_t *s, task_t *cur)
 static void net_clear_queue_space_waiter(net_socket_t *s, task_t *cur)
 {
     uint64_t irq = spin_lock_irqsave(&g_net_lock);
-    if (s->send_waiter == cur)
-        s->send_waiter = NULL;
+    if (net_socket_is_valid_locked(s)) {
+        if (s->send_waiter == cur)
+            s->send_waiter = NULL;
+    }
     proc_set_wake_time(cur, 0);
     spin_unlock_irqrestore(&g_net_lock, irq);
 }
@@ -59,7 +61,7 @@ int net_enqueue_msg_locked(net_socket_t *dst, const void *buf, size_t len,
 
     net_msg_t *m = net_msg_alloc();
     if (!m)
-        return -ENOMEM;
+        return -EAGAIN;
     memset(m, 0, sizeof(*m));
     memcpy(m->data, buf, len);
     m->len = len;
@@ -79,13 +81,25 @@ int net_enqueue_msg_locked(net_socket_t *dst, const void *buf, size_t len,
     return (int)len;
 }
 
-int net_enqueue_msg_blocking(net_socket_t *dst, const void *buf, size_t len,
+int net_enqueue_msg_blocking(net_socket_t *s, net_socket_t *dst, const void *buf, size_t len,
                              const void *addr, size_t addrlen,
                              int dontwait, uint64_t timeout_ticks)
 {
     uint64_t start = timer_get_ticks();
     for (;;) {
         uint64_t irq = spin_lock_irqsave(&g_net_lock);
+        if (!net_socket_is_valid_locked(s) || s->closed) {
+            spin_unlock_irqrestore(&g_net_lock, irq);
+            return -ENOTCONN;
+        }
+        if (!net_socket_is_valid_locked(dst) || dst->closed) {
+            spin_unlock_irqrestore(&g_net_lock, irq);
+            return -ENOTCONN;
+        }
+        if (s->connected && s->peer != dst) {
+            spin_unlock_irqrestore(&g_net_lock, irq);
+            return -ENOTCONN;
+        }
         int r = net_enqueue_msg_locked(dst, buf, len, addr, addrlen);
         if (r != -EAGAIN || dontwait) {
             spin_unlock_irqrestore(&g_net_lock, irq);
@@ -117,7 +131,7 @@ int net_dequeue_msg_locked(net_socket_t *s, void *buf, size_t len,
 {
     net_msg_t *m = s->rx_head;
     if (!m) {
-        if (s->closed)
+        if (s->closed || s->peer_closed || s->shut_rd)
             return 0;
         return -EAGAIN;
     }
