@@ -72,5 +72,6 @@ void proc_runq_enqueue_locked(task_t *t);
 void proc_runq_remove_locked(task_t *t);
 task_t *proc_runq_pick_locked(void);
 void sched_reap_zombies(void);
+void proc_block_until(task_t *t, uint64_t wake_time);
 
 #endif

@@ -164,6 +164,11 @@ static int devfs_dir_readdir(vfile_t *vf, void *dirp, size_t count) {
         { "random", DT_CHR }, { "urandom", DT_CHR },
         { "cpu_dma_latency", DT_CHR },
         { "rtc", DT_CHR }, { "rtc0", DT_CHR },
+        { "console", DT_CHR },
+        { "loop0", DT_BLK }, { "loop1", DT_BLK },
+        { "loop2", DT_BLK }, { "loop3", DT_BLK },
+        { "loop4", DT_BLK }, { "loop5", DT_BLK },
+        { "loop6", DT_BLK }, { "loop7", DT_BLK },
     };
     static const struct {
         const char *name;

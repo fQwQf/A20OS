@@ -31,6 +31,7 @@ typedef enum {
     PROC_READY,
     PROC_RUNNING,
     PROC_BLOCKED,
+    PROC_STOPPED,
     PROC_ZOMBIE
 } proc_state_t;
 

@@ -175,6 +175,10 @@ vnode_t *vfs_resolve(const char *path) {
     return vfs_resolve_at(path, cwd);
 }
 
+vnode_t *vfs_resolve_no_follow(const char *path) {
+    return vfs_resolve_no_follow_final(path);
+}
+
 vnode_t *vfs_resolve_at(const char *path, const char *cwd) {
     char resolved[MAX_PATH_LEN];
 
@@ -226,6 +230,7 @@ int vfs_open(const char *path, int flags, int mode) {
         if (g_lookup_errno && !(flags & O_CREAT))
             return g_lookup_errno;
         if (!(flags & O_CREAT)) { kdebug("[VFS] open '%s' (rel='%s'): not found, no O_CREAT\n", resolved, rel); return -ENOENT; }
+        if (mnt->flags & 1) return -EROFS;
         if (!mnt->root || !mnt->root->ops || !mnt->root->ops->create) { kdebug("[VFS] open '%s': root has no create ops\n", resolved); return -ENOSYS; }
 
         char parent_path[MAX_PATH_LEN];
@@ -236,10 +241,12 @@ int vfs_open(const char *path, int flags, int mode) {
             return sr;
 
         vnode_t *parent = vnode_lookup_path(mnt->root, parent_path);
-        if (!parent || parent->type != VFS_FT_DIR) {
-            kdebug("[VFS] open '%s': parent '%s' not found\n", resolved, parent_path);
-            vnode_put(parent);
+        if (!parent) {
             return g_lookup_errno ? g_lookup_errno : -ENOENT;
+        }
+        if (parent->type != VFS_FT_DIR) {
+            vnode_put(parent);
+            return -ENOTDIR;
         }
         if (vfs_vnode_permission(parent, W_OK | X_OK) < 0) {
             vnode_put(parent);
@@ -251,7 +258,7 @@ int vfs_open(const char *path, int flags, int mode) {
             return -ENOSYS;
         }
 
-        int cmode = (mode & 07777) & ~(cur ? cur->fs.umask : 022);
+        int cmode = (mode & S_IFMT) | ((mode & 07777) & ~(cur ? cur->fs.umask : 022));
         int r = parent->ops->create(parent, fname, cmode, &vn);
         vnode_put(parent);
         if (r < 0) { kdebug("[VFS] open '%s': create failed r=%d\n", resolved, r); return r; }
@@ -298,6 +305,9 @@ int vfs_open(const char *path, int flags, int mode) {
     } else if (mnt->type == FS_TYPE_CGROUP) {
         extern vfile_t *cgroupfs_open_vnode(vnode_t *vn, int flags);
         vf = cgroupfs_open_vnode(vn, flags);
+    } else if (mnt->type == FS_TYPE_SYSFS) {
+        extern vfile_t *sysfs_open_vnode(vnode_t *vn, int flags);
+        vf = sysfs_open_vnode(vn, flags);
     }
 
     if (!vf) { vnode_put(vn); return -ENOMEM; }
@@ -359,13 +369,23 @@ int vfs_mkdir(const char *path, int mode) {
         return sr;
 
     vnode_t *parent = vnode_lookup_path(mnt->root, parent_path);
-    if (!parent || parent->type != VFS_FT_DIR) {
+    if (!parent) return g_lookup_errno ? g_lookup_errno : -ENOENT;
+    if (parent->type != VFS_FT_DIR) {
         vnode_put(parent);
-        return g_lookup_errno ? g_lookup_errno : -ENOENT;
+        return -ENOTDIR;
     }
     if (!parent->ops || !parent->ops->mkdir) {
         vnode_put(parent);
         return -ENOTDIR;
+    }
+    vnode_t *existing = NULL;
+    if (parent->ops->lookup) {
+        int lookup_r = parent->ops->lookup(parent, name, &existing);
+        if (lookup_r == 0 && existing) {
+            vnode_put(existing);
+            vnode_put(parent);
+            return -EEXIST;
+        }
     }
     if (vfs_vnode_permission(parent, W_OK | X_OK) < 0) {
         vnode_put(parent);
@@ -400,6 +420,10 @@ int vfs_unlink(const char *path) {
 
     vnode_t *parent = vnode_lookup_path(mnt->root, parent_path);
     if (!parent) return g_lookup_errno ? g_lookup_errno : -ENOENT;
+    if (parent->type != VFS_FT_DIR) {
+        vnode_put(parent);
+        return -ENOTDIR;
+    }
     if (vfs_vnode_permission(parent, W_OK | X_OK) < 0) {
         vnode_put(parent);
         return -EACCES;
@@ -531,9 +555,10 @@ int vfs_rmdir(const char *path) {
     if (!mnt || !mnt->root) return -ENOENT;
 
     vnode_t *parent = vnode_lookup_path(mnt->root, vfs_strip_mount_prefix(parent_path, mnt));
-    if (!parent || parent->type != VFS_FT_DIR) {
+    if (!parent) return g_lookup_errno ? g_lookup_errno : -ENOENT;
+    if (parent->type != VFS_FT_DIR) {
         vnode_put(parent);
-        return g_lookup_errno ? g_lookup_errno : -ENOENT;
+        return -ENOTDIR;
     }
     if (vfs_vnode_permission(parent, W_OK | X_OK) < 0) {
         vnode_put(parent);
@@ -693,6 +718,8 @@ int vfs_faccessat2(int dirfd, const char *path, int mode, int flags) {
 
 static int vfs_chmod_vnode(vnode_t *vn, int mode) {
     if (!vn) return -ENOENT;
+    if (vn->mnt && (vn->mnt->flags & 1))
+        return -EROFS;
     if (!vfs_current_owns(vn)) return -EPERM;
     mode &= 07777;
     if (!proc_has_cap(proc_current(), CAP_FOWNER)) {
@@ -1189,6 +1216,11 @@ int vfs_fcntl(int fd, int cmd, long arg) {
     if (cmd == F_SETPIPE_SZ) {
         if (!vfs_is_pipe_vfile(vf)) VFS_FCNTL_RETURN(-EINVAL);
         if (arg <= 0) VFS_FCNTL_RETURN(-EINVAL);
+        /* Linux limits unprivileged pipe capacity to 1MB (pipe-max-size).
+         * With CAP_SYS_RESOURCE the limit is effectively unlimited. */
+        size_t pipe_max = 1048576;
+        if (!proc_has_cap(proc_current(), CAP_SYS_RESOURCE) && (size_t)arg > pipe_max)
+            VFS_FCNTL_RETURN(-EPERM);
         VFS_FCNTL_RETURN(pipe_set_size(vf, (size_t)arg));
     }
 
@@ -1213,10 +1245,22 @@ int vfs_fcntl(int fd, int cmd, long arg) {
         VFS_FCNTL_RETURN(0);
     }
 
-    if (cmd == F_SETLEASE || cmd == F_NOTIFY || cmd == F_CANCELLK)
+    if (cmd == F_SETLEASE) {
+        int ltype = (int)arg;
+        if (ltype != F_RDLCK && ltype != F_WRLCK)
+            VFS_FCNTL_RETURN(-EINVAL);
+        int acc = vf->flags & 3;
+        if (ltype == F_RDLCK && acc == O_WRONLY)
+            VFS_FCNTL_RETURN(-EAGAIN);
+        if (ltype == F_WRLCK && acc == O_RDONLY)
+            VFS_FCNTL_RETURN(-EAGAIN);
+        vf->lease = ltype;
         VFS_FCNTL_RETURN(0);
+    }
     if (cmd == F_GETLEASE)
-        VFS_FCNTL_RETURN(F_UNLCK);
+        VFS_FCNTL_RETURN(vf->lease);
+    if (cmd == F_NOTIFY || cmd == F_CANCELLK)
+        VFS_FCNTL_RETURN(0);
 
     VFS_FCNTL_RETURN(-EINVAL);
 #undef VFS_FCNTL_RETURN
@@ -1590,6 +1634,24 @@ void vfs_init(void) {
             mnt->root = procfs_root;
             procfs_root->mnt = mnt;
             printf("[VFS] Mounted procfs at /proc\n");
+        }
+    }
+
+    /* Mount sysfs at /sys */
+    {
+        extern vnode_t *sysfs_mount(void);
+        vfs_mkdir("/sys", 0755);
+        vnode_t *sysfs_root = sysfs_mount();
+        if (sysfs_root) {
+            mount_t *mnt = vfs_mount_alloc();
+            strcpy(mnt->path, "/sys");
+            mnt->type = FS_TYPE_SYSFS;
+            strcpy(mnt->dev, "sysfs");
+            strcpy(mnt->fstype, "sysfs");
+            strcpy(mnt->opts, "rw");
+            mnt->root = sysfs_root;
+            sysfs_root->mnt = mnt;
+            printf("[VFS] Mounted sysfs at /sys\n");
         }
     }
 }

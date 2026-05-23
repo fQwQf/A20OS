@@ -44,19 +44,6 @@ static proc_runq_t *sched_task_runq(task_t *t) {
     return &sched_runq[cpu];
 }
 
-static int proc_runq_contains_locked(proc_runq_t *rq, task_t *t)
-{
-    if (!rq || !t)
-        return 0;
-    for (int q = 0; q < SCHED_LEVELS; q++) {
-        for (task_t *p = rq->head[q]; p; p = p->rq_next) {
-            if (p == t)
-                return 1;
-        }
-    }
-    return 0;
-}
-
 static int sched_level_clamp(int level) {
     if (level < 0) return 0;
     if (level >= SCHED_LEVELS) return SCHED_LEVELS - 1;
@@ -144,11 +131,8 @@ void proc_runq_enqueue_locked(task_t *t) {
     proc_runq_t *rq = &sched_runq[cpu];
 
     if (t->on_rq) {
-        if (proc_runq_contains_locked(rq, t)) {
-            RUNQ_UNLOCK_IRQ(cpu, rf);
-            return;
-        }
-        /* Stale on_rq — will re-enqueue below */
+        RUNQ_UNLOCK_IRQ(cpu, rf);
+        return;
     }
 
     int q = sched_level_clamp(t->sched_level);
@@ -245,6 +229,8 @@ static void sched_scan_timers(uint64_t now)
     uint64_t next_alarm = SCHED_NO_DEADLINE;
     int sigalrm_pids[32];
     int sigalrm_count = 0;
+    task_t *wake_list[64];
+    int wake_count = 0;
 
     uint64_t flags = spin_lock_irqsave(&proc_lock);
     for (task_t *t = proc_first_task_locked(); t; t = proc_next_task_locked(t)) {
@@ -271,9 +257,8 @@ static void sched_scan_timers(uint64_t now)
                 t->sched_level = 0;
                 t->state = PROC_READY;
                 t->exec_start = now;
-                spin_unlock_irqrestore(&proc_lock, flags);
-                proc_runq_enqueue_locked(t);
-                flags = spin_lock_irqsave(&proc_lock);
+                if (wake_count < (int)(sizeof(wake_list) / sizeof(wake_list[0])))
+                    wake_list[wake_count++] = t;
             } else if (wake < next_wake) {
                 next_wake = wake;
             }
@@ -281,8 +266,16 @@ static void sched_scan_timers(uint64_t now)
     }
     spin_unlock_irqrestore(&proc_lock, flags);
 
+    for (int i = 0; i < wake_count; i++)
+        proc_runq_enqueue_locked(wake_list[i]);
+
     for (int i = 0; i < sigalrm_count; i++)
         signal_send(sigalrm_pids[i], SIGALRM);
+
+#ifdef CONFIG_ABI_LINUX
+    extern void posix_timer_tick(void);
+    posix_timer_tick();
+#endif
 
 #ifdef CONFIG_ABI_NATIVE
     a20_timer_tick();
@@ -292,40 +285,53 @@ static void sched_scan_timers(uint64_t now)
     __atomic_store_n(&next_alarm_scan, next_alarm, __ATOMIC_RELAXED);
 }
 
-/* Scan for reapable zombies — called from idle loop, not hot path. */
+/* Scan for reapable zombies — called from idle loop, not hot path.
+ *
+ * Safely reaps orphaned zombies (parent=idle, ppid=0, CLONE_THREAD,
+ * or SIGCHLD ignored).  All work is done under proc_lock to prevent
+ * races with proc_wait4() which may reap the same zombie.
+ */
 void sched_reap_zombies(void)
 {
-    for (;;) {
-        int target_pid = -1;
+    task_t *to_reap[32];
+    int count;
+
+    do {
+        count = 0;
         uint64_t flags = spin_lock_irqsave(&proc_lock);
         for (task_t *t = proc_first_task_locked(); t; t = proc_next_task_locked(t)) {
             if (t == proc_idle_task())
                 continue;
-            if (t->state == PROC_ZOMBIE) {
-                task_t *parent = t->parent;
-                if (!parent || parent == proc_idle_task() ||
-                    t->ppid == 0 ||
-                    (t->clone_flags & CLONE_THREAD)) {
-                    target_pid = t->pid;
-                    break;
-                }
-                if (parent->signals) {
-                    signal_state_t *ss = (signal_state_t *)parent->signals;
-                    sigaction_t *act = &ss->actions[SIGCHLD];
-                    if (act->sa_handler == SIG_IGN || (act->sa_flags & SA_NOCLDWAIT)) {
-                        target_pid = t->pid;
-                        break;
-                    }
-                }
+            if (t->state != PROC_ZOMBIE)
+                continue;
+            task_t *parent = t->parent;
+            int reap = 0;
+            if (!parent || parent == proc_idle_task() ||
+                t->ppid == 0 || (t->clone_flags & CLONE_THREAD))
+                reap = 1;
+            else if (parent->signals) {
+                signal_state_t *ss = (signal_state_t *)parent->signals;
+                sigaction_t *act = &ss->actions[SIGCHLD];
+                if (act->sa_handler == SIG_IGN || (act->sa_flags & SA_NOCLDWAIT))
+                    reap = 1;
             }
+            if (reap && count < (int)(sizeof(to_reap) / sizeof(to_reap[0])))
+                to_reap[count++] = t;
         }
+
+        /* Destroy zombies while still holding proc_lock.
+         * proc_destroy_task will try to acquire proc_lock again,
+         * so we must temporarily release it.  But first, mark each
+         * zombie as PROC_UNUSED to prevent double-reap by proc_wait4. */
+        for (int i = 0; i < count; i++)
+            to_reap[i]->state = PROC_UNUSED;
+
         spin_unlock_irqrestore(&proc_lock, flags);
-        if (target_pid < 0)
-            break;
-        task_t *t = proc_find(target_pid);
-        if (t)
-            proc_destroy_task(t);
-    }
+
+        for (int i = 0; i < count; i++) {
+            proc_destroy_task(to_reap[i]);
+        }
+    } while (count > 0);
 }
 
 /* Deferred I/O poll counter — poll every N idle iterations to reduce overhead. */
@@ -395,7 +401,14 @@ void proc_yield(void) {
     task_t *cur = proc_current();
     task_t *idle = proc_idle_task();
     if (cur && cur != idle && cur->state == PROC_RUNNING) {
-        if (cur->sched_level < SCHED_LEVELS - 1)
+        /* Only demote to a *lower* priority level (higher number) after the
+         * task has used a full time-slice worth of CPU time at its current
+         * level.  A single 10 ms preemption tick is not enough to justify
+         * demotion — the task may just be doing brief work between I/O. */
+        uint64_t now = timer_get_ticks();
+        uint64_t elapsed = now - cur->exec_start;
+        uint64_t slice = TICKS_PER_SEC / 10;
+        if (elapsed >= slice && cur->sched_level < SCHED_LEVELS - 1)
             cur->sched_level++;
         cur->state = PROC_READY;
         proc_make_ready(cur);

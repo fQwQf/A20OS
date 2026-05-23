@@ -333,6 +333,20 @@ static void lwip_tcp_err_cb(void *arg, err_t err)
     spin_unlock_irqrestore(&g_net_lock, irq);
 }
 
+static err_t lwip_tcp_sent_cb(void *arg, struct tcp_pcb *pcb, u16_t len)
+{
+    (void)pcb;
+    (void)len;
+    net_socket_t *s = (net_socket_t *)arg;
+    if (!s)
+        return ERR_OK;
+    uint64_t irq = spin_lock_irqsave(&g_net_lock);
+    if (s->waiter && s->waiter->state == PROC_BLOCKED)
+        proc_make_ready(s->waiter);
+    spin_unlock_irqrestore(&g_net_lock, irq);
+    return ERR_OK;
+}
+
 void net_tcp_close_pcb(net_socket_t *s)
 {
     if (!s || !s->tcp)
@@ -343,6 +357,7 @@ void net_tcp_close_pcb(net_socket_t *s)
     } else {
         tcp_recv(s->tcp, NULL);
         tcp_err(s->tcp, NULL);
+        tcp_sent(s->tcp, NULL);
     }
     if (tcp_close(s->tcp) != ERR_OK)
         tcp_abort(s->tcp);
@@ -356,6 +371,7 @@ void net_tcp_drop_pcb(net_socket_t *s)
     tcp_arg(s->tcp, NULL);
     tcp_recv(s->tcp, NULL);
     tcp_err(s->tcp, NULL);
+    tcp_sent(s->tcp, NULL);
     if (tcp_close(s->tcp) != ERR_OK)
         tcp_abort(s->tcp);
     s->tcp = NULL;
@@ -397,6 +413,7 @@ int net_inet_socket_init(net_socket_t *s)
         tcp_arg(s->tcp, s);
         tcp_recv(s->tcp, lwip_tcp_recv_cb);
         tcp_err(s->tcp, lwip_tcp_err_cb);
+        tcp_sent(s->tcp, lwip_tcp_sent_cb);
     }
     return 0;
 }
@@ -566,6 +583,7 @@ static int net_inet_connect_stream(net_socket_t *s, const void *addr, size_t add
             tcp_arg(s->tcp, NULL);
             tcp_recv(s->tcp, NULL);
             tcp_err(s->tcp, NULL);
+            tcp_sent(s->tcp, NULL);
             tcp_abort(s->tcp);
             s->tcp = NULL;
             s->tcp_connecting = 0;
@@ -578,6 +596,14 @@ static int net_inet_connect_stream(net_socket_t *s, const void *addr, size_t add
             continue;
         }
         if (net_task_has_unblocked_signal(cur)) {
+            if (s->tcp) {
+                tcp_arg(s->tcp, NULL);
+                tcp_recv(s->tcp, NULL);
+                tcp_err(s->tcp, NULL);
+                tcp_sent(s->tcp, NULL);
+                tcp_abort(s->tcp);
+                s->tcp = NULL;
+            }
             s->tcp_connecting = 0;
             s->connected = 0;
             return -ERESTARTSYS;
@@ -588,6 +614,14 @@ static int net_inet_connect_stream(net_socket_t *s, const void *addr, size_t add
         sched();
         net_clear_socket_waiter(s, cur);
         if (net_task_has_unblocked_signal(cur)) {
+            if (s->tcp) {
+                tcp_arg(s->tcp, NULL);
+                tcp_recv(s->tcp, NULL);
+                tcp_err(s->tcp, NULL);
+                tcp_sent(s->tcp, NULL);
+                tcp_abort(s->tcp);
+                s->tcp = NULL;
+            }
             s->tcp_connecting = 0;
             s->connected = 0;
             return -ERESTARTSYS;
@@ -658,15 +692,18 @@ static int net_inet_send_udp(net_socket_t *s, const void *buf, size_t len,
         dst_addr = s->peer_addr;
         dst_len = s->peer_len;
     }
-    if (s->peer)
+    if (s->peer && net_socket_is_valid_locked(s->peer)) {
         local_dst = s->peer;
-    else if (dst_addr)
-        local_dst = net_find_udp_dst_locked(s, dst_addr, dst_len);
+    } else {
+        if (s->peer) s->peer = NULL;
+        if (dst_addr)
+            local_dst = net_find_udp_dst_locked(s, dst_addr, dst_len);
+    }
     if (local_dst) {
         int dontwait = s->nonblock || ((flags & MSG_DONTWAIT) != 0);
         if (local_dst->rx_count >= NET_MAX_QUEUE && !dontwait) {
             spin_unlock_irqrestore(&g_net_lock, irq);
-            return net_enqueue_msg_blocking(local_dst, buf, len,
+            return net_enqueue_msg_blocking(s, local_dst, buf, len,
                                             s->local, s->local_len,
                                             0, s->send_timeout_ticks);
         }
@@ -733,12 +770,14 @@ static int net_inet_send_raw(net_socket_t *s, const void *buf, size_t len,
 
 static int net_inet_send_tcp(net_socket_t *s, const void *buf, size_t len)
 {
-    if (!s->connected || s->closed)
+    if (!s->connected || s->closed || s->shut_wr)
         return -ENOTCONN;
     size_t sent = 0;
     uint64_t start = timer_get_ticks();
     while (sent < len) {
         a20_lwip_poll();
+        if (!s->tcp || s->closed || !s->connected)
+            return sent ? (int)sent : -EPIPE;
         u16_t room = tcp_sndbuf(s->tcp);
         if (room == 0) {
             if (sent || s->nonblock)

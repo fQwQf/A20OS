@@ -2,6 +2,7 @@
 #include "abi/linux/ioctl.h"
 #include "drv/uart.h"
 #include "fs/vfs/file.h"
+#include "proc/proc_internal.h"
 
 #define LINUX_POLL_WAIT_TICKS MS_TO_TICKS(20)
 
@@ -28,8 +29,7 @@ static void linux_poll_sleep_until(uint64_t deadline, int has_deadline)
         return;
     }
 
-    proc_set_wake_time(t, wake);
-    t->state = PROC_BLOCKED;
+    proc_block_until(t, wake);
     sched();
     if (t->state == PROC_BLOCKED)
         t->state = PROC_RUNNING;
@@ -424,8 +424,17 @@ int64_t sys_sendfile(int out_fd, int in_fd, long *off, size_t count) {
     if (out_gfd < 0) return out_gfd;
     int64_t in_gfd = fdtable_get_current(in_fd);
     if (in_gfd < 0) return in_gfd;
+    {
+        vfile_t *ovf = vfs_get_file_ref(out_fd);
+        if (ovf && !vfs_should_write(ovf->flags)) {
+            vfs_put_file_ref(out_fd, ovf);
+            return -EBADF;
+        }
+        vfs_put_file_ref(out_fd, ovf);
+    }
     long user_off = 0;
     if (off && copy_from_user(&user_off, off, sizeof(long)) < 0) return -EFAULT;
+    if (off && user_off < 0) return -EINVAL;
     long cur_off = off ? user_off : vfs_lseek(in_gfd, 0, SEEK_CUR);
     long saved = off ? vfs_lseek(in_gfd, 0, SEEK_CUR) : 0;
     int64_t total = 0;

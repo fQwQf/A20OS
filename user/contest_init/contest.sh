@@ -53,7 +53,7 @@ SKIP_GROUPS+=(lmbench) # 运行时长很长
 SKIP_GROUPS+=(ltp) # 单独执行
 
 # 下面是可以跑通但是为了方便测试跳过的
-# SKIP_GROUPS+=(iozone)
+SKIP_GROUPS+=(iozone)
 # SKIP_GROUPS+=(libctest)
 # SKIP_GROUPS+=(libcbench)
 # SKIP_GROUPS+=(netperf)

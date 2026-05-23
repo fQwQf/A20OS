@@ -14,6 +14,10 @@
 #define MAP_HUGETLB    0x40000
 #define MAP_FIXED_NOREPLACE 0x100000
 
+#define MCL_CURRENT    1
+#define MCL_FUTURE     2
+#define MCL_ONFAULT    4
+
 #define MREMAP_MAYMOVE    1
 #define MREMAP_FIXED      2
 #define MREMAP_DONTUNMAP  4

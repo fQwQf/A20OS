@@ -1,4 +1,5 @@
 #include "syscall_impl.h"
+#include "proc/proc_internal.h"
 
 #define LINUX_USER_HZ 100ULL
 
@@ -96,8 +97,7 @@ int64_t sys_nanosleep(void *req, void *rem) {
 
     task_t *t = proc_current();
     if (t) {
-        proc_set_wake_time(t, until);
-        t->state     = PROC_BLOCKED;
+        proc_block_until(t, until);
         sched();
         proc_set_wake_time(t, 0);
         if (signal_task_has_unblocked(t))

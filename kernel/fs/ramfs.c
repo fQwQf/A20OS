@@ -276,7 +276,11 @@ static int ramfs_vnode_create(vnode_t *dir, const char *name, int mode, vnode_t 
     ramfs_inode_t *dinode = (ramfs_inode_t *)dir->fs_data;
     ramfs_inode_t *child = ramfs_alloc_inode(FT_REGULAR);
     if (!child) return -ENOMEM;
-    child->mode = S_IFREG | (mode & 07777);
+    if (mode & S_IFMT) {
+        child->mode = (mode & S_IFMT) | (mode & 07777);
+    } else {
+        child->mode = S_IFREG | (mode & 07777);
+    }
     if (dinode->mode & S_ISGID)
         child->gid = dinode->gid;
 
@@ -469,9 +473,11 @@ static int ramfs_vnode_chown(vnode_t *vn, int uid, int gid) {
     if (uid != -1) inode->uid = (uint32_t)uid;
     if (gid != -1) inode->gid = (uint32_t)gid;
     if (uid != -1 || gid != -1) {
-        inode->mode &= ~S_ISUID;
-        if (inode->mode & S_IXGRP)
-            inode->mode &= ~S_ISGID;
+        if (inode->type != FT_DIRECTORY) {
+            inode->mode &= ~S_ISUID;
+            if (inode->mode & S_IXGRP)
+                inode->mode &= ~S_ISGID;
+        }
     }
     vn->uid = inode->uid;
     vn->gid = inode->gid;

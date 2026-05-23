@@ -52,13 +52,21 @@ static void dump_fault_pte(task_t *task, uint64_t va) {
 
     uint64_t *pte = pt_lookup_leaf(task->mm->pgdir, va, NULL, NULL, NULL);
     kerr("  pte=%p value=0x%lx\n", (void *)pte, pte ? *pte : 0UL);
+    kerr("  mm: brk=0x%lx start_brk=0x%lx stack=[0x%lx,0x%lx)\n",
+         (unsigned long)task->mm->brk, (unsigned long)task->mm->start_brk,
+         (unsigned long)task->mm->stack_bottom, (unsigned long)task->mm->stack_top);
     vm_area_t *vma = mm_find_vma(task->mm, va & ~(PAGE_SIZE - 1));
     if (vma) {
         kerr("  vma=[0x%lx,0x%lx) flags=0x%lx pte_flags=0x%lx file_fd=%d off=0x%lx\n",
              vma->start, vma->end, vma->vm_flags, vma->pte_flags,
              vma->file_fd, vma->file_offset);
     } else {
-        kerr("  vma=<none>\n");
+        kerr("  vma=<none> (mmap=%p, total_vm=%lu)\n",
+             task->mm->mmap, (unsigned long)task->mm->total_vm);
+        int nvma = 0;
+        for (vm_area_t *v = task->mm->mmap; v && nvma < 10; v = v->next, nvma++)
+            kerr("    [%d] [0x%lx,0x%lx)\n", nvma,
+                 (unsigned long)v->start, (unsigned long)v->end);
     }
 }
 

@@ -31,7 +31,9 @@ static int net_vfile_read(vfile_t *vf, char *buf, size_t count) {
             }
             r = (int)total;
         }
-        if (r != -EAGAIN || s->nonblock) {
+        if (r != -EAGAIN || s->nonblock || s->closed || s->peer_closed || s->shut_rd) {
+            if (r == -EAGAIN && (s->closed || s->peer_closed || s->shut_rd))
+                r = 0;
             spin_unlock_irqrestore(&g_net_lock, irq);
             return r;
         }
@@ -59,31 +61,59 @@ static int net_vfile_write(vfile_t *vf, const char *buf, size_t count) {
     net_socket_t *s = vf ? (net_socket_t *)vf->priv : NULL;
     if (!s)
         return -ENOTSOCK;
-    if (count > NET_MAX_PAYLOAD)
+    if (count > NET_MAX_PAYLOAD && s->type != SOCK_STREAM)
         return -EMSGSIZE;
     if (s->domain == AF_ALG)
         return net_alg_socket_send(s, buf, count);
     if ((s->domain == AF_INET || s->domain == AF_INET6) &&
         (s->udp || s->raw || s->tcp))
         return net_inet_sendto(s, buf, count, 0, NULL, 0);
+
     uint64_t irq = spin_lock_irqsave(&g_net_lock);
+    if (s->closed || s->shut_wr) {
+        spin_unlock_irqrestore(&g_net_lock, irq);
+        return -EPIPE;
+    }
     if (!s->bound && (s->domain == AF_INET || s->domain == AF_INET6))
         net_sockaddr_loopback(s, net_alloc_ephemeral_port_locked());
     net_socket_t *dst = s->peer;
+    if (dst && s->type != SOCK_STREAM && s->type != SOCK_SEQPACKET && !net_socket_is_valid_locked(dst)) {
+        s->peer = NULL;
+        dst = NULL;
+    }
     if (!dst && s->connected)
         dst = net_find_bound_socket_locked(s->domain, s->type, s->peer_addr, s->peer_len);
     if (!dst) {
         spin_unlock_irqrestore(&g_net_lock, irq);
         return s->connected ? -ECONNREFUSED : -EDESTADDRREQ;
     }
-    if (dst->rx_count >= NET_MAX_QUEUE && !s->nonblock) {
+
+    if (count <= NET_MAX_PAYLOAD) {
+        if (dst->rx_count >= NET_MAX_QUEUE && !s->nonblock) {
+            spin_unlock_irqrestore(&g_net_lock, irq);
+            return net_enqueue_msg_blocking(s, dst, buf, count, s->local, s->local_len,
+                                            0, s->send_timeout_ticks);
+        }
+        int r = net_enqueue_msg_locked(dst, buf, count, s->local, s->local_len);
         spin_unlock_irqrestore(&g_net_lock, irq);
-        return net_enqueue_msg_blocking(dst, buf, count, s->local, s->local_len,
-                                        0, s->send_timeout_ticks);
+        return r;
     }
-    int r = net_enqueue_msg_locked(dst, buf, count, s->local, s->local_len);
+
     spin_unlock_irqrestore(&g_net_lock, irq);
-    return r;
+
+    size_t total = 0;
+    while (total < count) {
+        size_t chunk = count - total;
+        if (chunk > NET_MAX_PAYLOAD)
+            chunk = NET_MAX_PAYLOAD;
+        int r = net_enqueue_msg_blocking(s, dst, buf + total, chunk,
+                                          s->local, s->local_len,
+                                          s->nonblock, s->send_timeout_ticks);
+        if (r < 0)
+            return total ? (int)total : r;
+        total += (size_t)r;
+    }
+    return (int)total;
 }
 
 static long net_vfile_lseek(vfile_t *vf, long offset, int whence) {
@@ -106,11 +136,15 @@ int net_socket_close_file(vfile_t *vf) {
     net_tcp_close_pcb(s);
     uint64_t flags = spin_lock_irqsave(&g_net_lock);
     net_unregister_socket_locked(s);
-    if (s->peer && s->peer->peer == s) {
+    if (s->send_waiter && s->send_waiter->state == PROC_BLOCKED)
+        proc_make_ready(s->send_waiter);
+    if (s->peer && (s->type == SOCK_STREAM || s->type == SOCK_SEQPACKET || net_socket_is_valid_locked(s->peer)) && s->peer->peer == s) {
         s->peer->peer = NULL;
-        s->peer->closed = 1;
+        s->peer->peer_closed = 1;
         if (s->peer->waiter && s->peer->waiter->state == PROC_BLOCKED)
             proc_make_ready(s->peer->waiter);
+        if (s->peer->send_waiter && s->peer->send_waiter->state == PROC_BLOCKED)
+            proc_make_ready(s->peer->send_waiter);
     }
     s->closed = 1;
     if (s->waiter && s->waiter->state == PROC_BLOCKED)
@@ -129,6 +163,16 @@ int net_socket_close_file(vfile_t *vf) {
     }
     while (accepted) {
         net_socket_t *next = accepted->accept_next;
+        uint64_t accepted_flags = spin_lock_irqsave(&g_net_lock);
+        if (accepted->peer && accepted->peer->peer == accepted) {
+            accepted->peer->peer = NULL;
+            accepted->peer->peer_closed = 1;
+            if (accepted->peer->waiter && accepted->peer->waiter->state == PROC_BLOCKED)
+                proc_make_ready(accepted->peer->waiter);
+            if (accepted->peer->send_waiter && accepted->peer->send_waiter->state == PROC_BLOCKED)
+                proc_make_ready(accepted->peer->send_waiter);
+        }
+        spin_unlock_irqrestore(&g_net_lock, accepted_flags);
         net_tcp_close_pcb(accepted);
         net_socket_free(accepted);
         accepted = next;

@@ -7,6 +7,7 @@
 
 #include "fs/procfs.h"
 #include "fs/file.h"
+#include "fs/fdtable.h"
 #include "fs/block_cache.h"
 #include "fs/page_cache.h"
 #include "proc/proc.h"
@@ -57,8 +58,16 @@ typedef enum {
     PF_PID_LOGINUID,
     PF_PID_SESSIONID,
     PF_PID_NS,
+    PF_PID_NS_PID,
+    PF_PID_NS_UTS,
+    PF_PID_NS_USER,
+    PF_PID_NS_IPC,
+    PF_PID_NS_MNT,
+    PF_PID_NS_NET,
+    PF_PID_NS_CGROUP,
     PF_PID_FDINFO,
     PF_PID_MOUNTINFO,
+    PF_PID_PAGEMAP,
     PF_SYS,
     PF_SYS_FS,
     PF_SYS_FS_PIPE_MAX_SIZE,
@@ -68,7 +77,15 @@ typedef enum {
     PF_SYS_KERNEL_PIDMAP,
     PF_SYS_KERNEL_TAINTED,
     PF_SYS_KERNEL_SCHED_AUTOGROUP,
+    PF_SYS_KERNEL_CORE_PATTERN,
+    PF_SYS_KERNEL_IO_URING_DISABLED,
+    PF_SYS_VM,
+    PF_SYS_VM_DROP_CACHES,
+    PF_SYS_FS_INOTIFY,
+    PF_SYS_FS_INOTIFY_MAX_QUEUED_EVENTS,
+    PF_SYS_FS_INOTIFY_MAX_USER_INSTANCES,
     PF_SYS_NET,
+    PF_INTERRUPTS,
     PF_A20,
     PF_A20_BCACHE,
     PF_A20_PAGE_CACHE,
@@ -233,9 +250,40 @@ static void generate_pid_maps(task_t *t, char *buf, size_t bufsz, int smaps) {
                            (v->vm_flags & (VM_HUGEPAGE | VM_ANON)) &&
                            (v->end - v->start) >= (2UL * 1024 * 1024);
 
-        appendf(buf, bufsz, &off, "%012lx-%012lx %c%c%c%c 00000000 00:00 0 %s\n",
-                (unsigned long)v->start, (unsigned long)v->end,
-                r, w, x, s, vma_name(v));
+        const char *name = "";
+        char path_buf[MAX_PATH_LEN];
+        path_buf[0] = '\0';
+        unsigned long ino = 0;
+        if (v->vm_flags & VM_STACK) {
+            name = "[stack]";
+        } else if (t->mm && v->start >= t->mm->start_brk && v->start < t->mm->brk) {
+            name = "[heap]";
+        } else if (v->file_fd >= 0 && t->files) {
+            if (v->file_fd < MAX_FILES) {
+                int gfd = t->files->fd[v->file_fd];
+                vfile_t *vf = vfs_get_file(gfd);
+                if (vf) {
+                    if (vf->path[0]) {
+                        strncpy(path_buf, vf->path, sizeof(path_buf) - 1);
+                        path_buf[sizeof(path_buf) - 1] = '\0';
+                        name = path_buf;
+                    }
+                    if (vf->vnode) {
+                        ino = (unsigned long)vf->vnode->ino;
+                    }
+                }
+            }
+        }
+
+        if (name && name[0] != '\0') {
+            appendf(buf, bufsz, &off, "%08lx-%08lx %c%c%c%c %08lx 00:00 %lu %s\n",
+                    (unsigned long)v->start, (unsigned long)v->end,
+                    r, w, x, s, (unsigned long)v->file_offset, ino, name);
+        } else {
+            appendf(buf, bufsz, &off, "%08lx-%08lx %c%c%c%c %08lx 00:00 %lu\n",
+                    (unsigned long)v->start, (unsigned long)v->end,
+                    r, w, x, s, (unsigned long)v->file_offset, ino);
+        }
         if (!smaps) continue;
         appendf(buf, bufsz, &off,
                 "Size:           %8lu kB\n"
@@ -446,12 +494,30 @@ static int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
                 break;
             glen += (size_t)n;
         }
+
+        size_t rss_kb = 0;
+        size_t vmlck_kb = 0;
+        size_t vmdata_kb = 0;
+        if (t->mm) {
+            rss_kb = t->mm->rss * PAGE_SIZE / 1024;
+            vmlck_kb = t->mm->locked_vm / 1024;
+            vm_area_t *vma = t->mm->mmap;
+            while (vma) {
+                if ((vma->vm_flags & VM_WRITE) && !(vma->vm_flags & VM_STACK)) {
+                    vmdata_kb += (vma->end - vma->start) / 1024;
+                }
+                vma = vma->next;
+            }
+        }
+
         snprintf(buf, bufsz,
             "Name:\t%s\n"
             "Pid:\t%d\n"
             "PPid:\t%d\n"
             "PGid:\t%d\n"
             "Sid:\t%d\n"
+            "Tgid:\t%d\n"
+            "Ngid:\t0\n"
             "State:\t%s\n"
             "Uid:\t%d\t%d\t%d\t%d\n"
             "Gid:\t%d\t%d\t%d\t%d\n"
@@ -460,15 +526,21 @@ static int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
             "CapPrm:\t%016lx\n"
             "CapEff:\t%016lx\n"
             "CapBnd:\t%016lx\n"
-            "Threads:\t1\n",
-            t->name, t->pid, t->ppid, t->pgid, t->sid, state,
+            "Threads:\t1\n"
+            "Rss:\t%lu kB\n"
+            "VmLck:\t%lu kB\n"
+            "VmData:\t%lu kB\n",
+            t->name, t->pid, t->ppid, t->pgid, t->sid, t->pid, state,
             t->cred.uid, t->cred.euid, t->cred.suid, t->cred.fsuid,
             t->cred.gid, t->cred.egid, t->cred.sgid, t->cred.fsgid,
             groups,
             (unsigned long)t->cred.cap_inheritable,
             (unsigned long)t->cred.cap_permitted,
             (unsigned long)t->cred.cap_effective,
-            (unsigned long)t->cred.cap_bounding);
+            (unsigned long)t->cred.cap_bounding,
+            (unsigned long)rss_kb,
+            (unsigned long)vmlck_kb,
+            (unsigned long)vmdata_kb);
         break;
     }
     case PF_PID_STATM: {
@@ -553,6 +625,27 @@ static int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
         snprintf(buf, bufsz, "%d\n", t ? t->sid : 0);
         break;
     }
+    case PF_PID_NS_PID:
+        snprintf(buf, bufsz, "pid:[0]\n");
+        break;
+    case PF_PID_NS_UTS:
+        snprintf(buf, bufsz, "uts:[0]\n");
+        break;
+    case PF_PID_NS_USER:
+        snprintf(buf, bufsz, "user:[0]\n");
+        break;
+    case PF_PID_NS_IPC:
+        snprintf(buf, bufsz, "ipc:[0]\n");
+        break;
+    case PF_PID_NS_MNT:
+        snprintf(buf, bufsz, "mnt:[0]\n");
+        break;
+    case PF_PID_NS_NET:
+        snprintf(buf, bufsz, "net:[0]\n");
+        break;
+    case PF_PID_NS_CGROUP:
+        snprintf(buf, bufsz, "cgroup:[0]\n");
+        break;
     case PF_PID_MOUNTINFO: {
         buf[0] = '\0';
         int pos = 0;
@@ -582,11 +675,36 @@ static int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
     case PF_SYS_KERNEL_SCHED_AUTOGROUP:
         snprintf(buf, bufsz, "0\n");
         break;
+    case PF_SYS_KERNEL_CORE_PATTERN:
+        snprintf(buf, bufsz, "core\n");
+        break;
+    case PF_SYS_KERNEL_IO_URING_DISABLED:
+        snprintf(buf, bufsz, "0\n");
+        break;
     case PF_SYS_FS_PIPE_MAX_SIZE:
         snprintf(buf, bufsz, "%d\n", g_procfs_pipe_max_size);
         break;
     case PF_SYS_FS_LEASE_BREAK_TIME:
         snprintf(buf, bufsz, "%d\n", g_procfs_lease_break_time);
+        break;
+    case PF_SYS_FS_INOTIFY_MAX_QUEUED_EVENTS:
+        snprintf(buf, bufsz, "16384\n");
+        break;
+    case PF_SYS_FS_INOTIFY_MAX_USER_INSTANCES:
+        snprintf(buf, bufsz, "128\n");
+        break;
+    case PF_SYS_VM_DROP_CACHES:
+        snprintf(buf, bufsz, "0\n");
+        break;
+    case PF_INTERRUPTS:
+        snprintf(buf, bufsz,
+            "           CPU0\n"
+            "  0:         %lu   IO-APIC   2-edge   timer\n"
+            "  1:         %lu   IO-APIC   1-edge   i8042\n"
+            "RES:         %lu   Rescheduling interrupts\n"
+            "CAL:         %lu   Function call interrupts\n",
+            (unsigned long)0, (unsigned long)0,
+            (unsigned long)0, (unsigned long)0);
         break;
     case PF_SELF: {  // 生成当前进程的 pid
         task_t *t = proc_current();
@@ -604,6 +722,9 @@ static int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
             "cpuacct\t1\t1\t1\n"
             "memory\t1\t1\t1\n");
         break;
+    case PF_PID_PAGEMAP:
+        buf[0] = '\0';
+        return 0;
     default:
         break;
     }
@@ -625,6 +746,7 @@ static pf_type_t name_to_type(const char *name, int *out_pid) {
     if (strcmp(name, "filesystems") == 0) return PF_FSTYPE;
     if (strcmp(name, "cgroups") == 0) return PF_CGROUPS;
     if (strcmp(name, "swaps") == 0) return PF_SWAPS;
+    if (strcmp(name, "interrupts") == 0) return PF_INTERRUPTS;
     if (strcmp(name, "pidmap") == 0) return PF_SYS_KERNEL_PIDMAP;
     if (strcmp(name, "a20") == 0) return PF_A20;
     if (strcmp(name, "bcache") == 0) return PF_A20_BCACHE;
@@ -652,8 +774,16 @@ static pf_type_t name_to_type(const char *name, int *out_pid) {
     if (strcmp(name, "loginuid") == 0) return PF_PID_LOGINUID;
     if (strcmp(name, "sessionid") == 0) return PF_PID_SESSIONID;
     if (strcmp(name, "ns") == 0) return PF_PID_NS;
+    if (strcmp(name, "pid") == 0) return PF_PID_NS_PID;
+    if (strcmp(name, "uts") == 0) return PF_PID_NS_UTS;
+    if (strcmp(name, "user") == 0) return PF_PID_NS_USER;
+    if (strcmp(name, "ipc") == 0) return PF_PID_NS_IPC;
+    if (strcmp(name, "mnt") == 0) return PF_PID_NS_MNT;
+    if (strcmp(name, "net") == 0) return PF_PID_NS_NET;
+    if (strcmp(name, "cgroup") == 0) return PF_PID_NS_CGROUP;
     if (strcmp(name, "fdinfo") == 0) return PF_PID_FDINFO;
     if (strcmp(name, "mountinfo") == 0) return PF_PID_MOUNTINFO;
+    if (strcmp(name, "pagemap") == 0) return PF_PID_PAGEMAP;
     return PF_ROOT;
 }
 
@@ -678,8 +808,17 @@ static procfs_meta_t *procfs_meta_create(pf_type_t type, int pid) {
     memset(m, 0, sizeof(*m));
     m->type = type;
     m->pid = pid;
-    char tmp[4096];
-    m->content_len = (size_t)generate_content(type, pid, tmp, sizeof(tmp));
+    int real_pid = pid;
+    if (pid == -1) {
+        task_t *cur = proc_current();
+        real_pid = cur ? cur->pid : 0;
+    }
+    if (type == PF_PID_PAGEMAP) {
+        m->content_len = (256ULL * 1024 * 1024 * 1024 / PAGE_SIZE) * 8;
+    } else {
+        char tmp[4096];
+        m->content_len = (size_t)generate_content(type, real_pid, tmp, sizeof(tmp));
+    }
     return m;
 }
 
@@ -688,8 +827,17 @@ static procfs_priv_t *procfs_priv_create(pf_type_t type, int pid) {
     if (!p) return NULL;
     memset(p, 0, sizeof(*p));
     p->type = type;
-    p->pid = pid;
-    p->content_len = (size_t)generate_content(type, pid, p->content, sizeof(p->content));
+    int real_pid = pid;
+    if (pid == -1) {
+        task_t *cur = proc_current();
+        real_pid = cur ? cur->pid : 0;
+    }
+    p->pid = real_pid;
+    if (type == PF_PID_PAGEMAP) {
+        p->content_len = (256ULL * 1024 * 1024 * 1024 / PAGE_SIZE) * 8;
+    } else {
+        p->content_len = (size_t)generate_content(type, real_pid, p->content, sizeof(p->content));
+    }
     return p;
 }
 
@@ -729,6 +877,27 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
     } else if (dp && dp->type == PF_SYS_KERNEL && strcmp(name, "sched_autogroup_enabled") == 0) {
         child = new_entry(name, PF_SYS_KERNEL_SCHED_AUTOGROUP, 0);
         type = PF_SYS_KERNEL_SCHED_AUTOGROUP;
+    } else if (dp && dp->type == PF_SYS_KERNEL && strcmp(name, "core_pattern") == 0) {
+        child = new_entry(name, PF_SYS_KERNEL_CORE_PATTERN, 0);
+        type = PF_SYS_KERNEL_CORE_PATTERN;
+    } else if (dp && dp->type == PF_SYS_KERNEL && strcmp(name, "io_uring_disabled") == 0) {
+        child = new_entry(name, PF_SYS_KERNEL_IO_URING_DISABLED, 0);
+        type = PF_SYS_KERNEL_IO_URING_DISABLED;
+    } else if (dp && dp->type == PF_SYS && strcmp(name, "vm") == 0) {
+        child = new_entry(name, PF_SYS_VM, 0);
+        type = PF_SYS_VM;
+    } else if (dp && dp->type == PF_SYS_VM && strcmp(name, "drop_caches") == 0) {
+        child = new_entry(name, PF_SYS_VM_DROP_CACHES, 0);
+        type = PF_SYS_VM_DROP_CACHES;
+    } else if (dp && dp->type == PF_SYS_FS && strcmp(name, "inotify") == 0) {
+        child = new_entry(name, PF_SYS_FS_INOTIFY, 0);
+        type = PF_SYS_FS_INOTIFY;
+    } else if (dp && dp->type == PF_SYS_FS_INOTIFY && strcmp(name, "max_queued_events") == 0) {
+        child = new_entry(name, PF_SYS_FS_INOTIFY_MAX_QUEUED_EVENTS, 0);
+        type = PF_SYS_FS_INOTIFY_MAX_QUEUED_EVENTS;
+    } else if (dp && dp->type == PF_SYS_FS_INOTIFY && strcmp(name, "max_user_instances") == 0) {
+        child = new_entry(name, PF_SYS_FS_INOTIFY_MAX_USER_INSTANCES, 0);
+        type = PF_SYS_FS_INOTIFY_MAX_USER_INSTANCES;
     } else if (dp && dp->type == PF_SYS && strcmp(name, "net") == 0) {
         child = new_entry(name, PF_SYS_NET, 0);
         type = PF_SYS_NET;
@@ -741,9 +910,11 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
     } else if (dp && dp->type == PF_A20 && strcmp(name, "page_cache") == 0) {
         child = new_entry(name, PF_A20_PAGE_CACHE, 0);
         type = PF_A20_PAGE_CACHE;
+    } else if (dp && dp->type == PF_ROOT && dp->pid == 0 && strcmp(name, "interrupts") == 0) {
+        child = new_entry(name, PF_INTERRUPTS, 0);
+        type = PF_INTERRUPTS;
     } else if (type == PF_SELF) {
-        task_t *cur = proc_current();
-        child = new_entry(name, PF_ROOT, cur ? cur->pid : 0);
+        child = new_entry(name, PF_ROOT, -1);
     } else if (is_pid_str(name)) {
         child = new_entry(name, PF_ROOT, pid);
     } else if (type == PF_PID_STAT || type == PF_PID_STATUS ||
@@ -755,19 +926,29 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
                type == PF_PID_FD || type == PF_PID_ENVIRON ||
                type == PF_PID_IO || type == PF_PID_LOGINUID ||
                type == PF_PID_SESSIONID || type == PF_PID_NS ||
-               type == PF_PID_FDINFO || type == PF_PID_MOUNTINFO) {
+               type == PF_PID_FDINFO || type == PF_PID_MOUNTINFO ||
+               type == PF_PID_PAGEMAP) {
         child = new_entry(name, type, dp ? dp->pid : 0);
-    } else if (dp && dp->type == PF_ROOT && dp->pid > 0 &&
+    } else if (dp && dp->type == PF_ROOT && (dp->pid > 0 || dp->pid == -1) &&
                strcmp(name, "cmdline") == 0) {
         child = new_entry(name, PF_PID_CMDLINE, dp->pid);
-    } else if (dp && dp->type == PF_ROOT && dp->pid > 0 &&
+    } else if (dp && dp->type == PF_ROOT && (dp->pid > 0 || dp->pid == -1) &&
                strcmp(name, "mounts") == 0) {
         /* /proc/<pid>/mounts — same as /proc/mounts */
         child = new_entry(name, PF_MOUNTS, 0);
-    } else if (dp->type == PF_PID_NS || dp->type == PF_PID_FD ||
+    } else if (dp->type == PF_PID_NS) {
+        if (type == PF_PID_NS_PID || type == PF_PID_NS_UTS ||
+            type == PF_PID_NS_USER || type == PF_PID_NS_IPC ||
+            type == PF_PID_NS_MNT || type == PF_PID_NS_NET ||
+            type == PF_PID_NS_CGROUP) {
+            child = new_entry(name, type, dp->pid);
+        } else {
+            return -ENOENT;
+        }
+    } else if (dp->type == PF_PID_FD ||
                dp->type == PF_PID_FDINFO) {
         return -ENOENT;
-    } else if (dp && dp->type == PF_ROOT && dp->pid > 0) {
+    } else if (dp && dp->type == PF_ROOT && (dp->pid > 0 || dp->pid == -1)) {
         return -ENOENT;
     } else {
         child = new_entry(name, type, 0);
@@ -780,13 +961,19 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
     vn->ino = (uint64_t)(uintptr_t)child;
     vn->type = ((type == PF_ROOT && is_pid_str(name)) || type == PF_SELF ||
                 type == PF_SYS || type == PF_SYS_FS || type == PF_SYS_KERNEL ||
-                type == PF_SYS_NET || type == PF_A20 || type == PF_PID_FD ||
+                type == PF_SYS_NET || type == PF_SYS_VM ||
+                type == PF_SYS_FS_INOTIFY ||
+                type == PF_A20 || type == PF_PID_FD ||
                 type == PF_PID_NS || type == PF_PID_FDINFO) ?
                VFS_FT_DIR : VFS_FT_REGULAR;
     vn->mode = (vn->type == VFS_FT_DIR) ? (S_IFDIR | 0555) : (S_IFREG | 0444);
     if (type == PF_PID_OOM_SCORE_ADJ ||
         type == PF_SYS_FS_PIPE_MAX_SIZE || type == PF_SYS_FS_LEASE_BREAK_TIME ||
-        type == PF_SYS_KERNEL_SCHED_AUTOGROUP)
+        type == PF_SYS_KERNEL_SCHED_AUTOGROUP ||
+        type == PF_SYS_KERNEL_CORE_PATTERN ||
+        type == PF_SYS_VM_DROP_CACHES ||
+        type == PF_SYS_FS_INOTIFY_MAX_QUEUED_EVENTS ||
+        type == PF_SYS_FS_INOTIFY_MAX_USER_INSTANCES)
         vn->mode = S_IFREG | 0644;
     vnode_ref_init(vn, 1);
     vn->parent = dir;
@@ -832,6 +1019,47 @@ static vnode_ops_t g_procfs_vnode_ops = {
 static int procfs_fread(vfile_t *vf, char *buf, size_t count) {
     if (!vf || !vf->priv) return -EBADF;
     procfs_priv_t *p = (procfs_priv_t *)vf->priv;
+    if (p->type == PF_PID_PAGEMAP) {
+        task_t *t = proc_find(p->pid);
+        if (!t) return -ESRCH;
+        if (!t->mm || !t->mm->pgdir) return 0;
+
+        size_t read_bytes = 0;
+        while (read_bytes < count && vf->offset < p->content_len) {
+            uint64_t entry_idx = vf->offset / 8;
+            uint64_t entry_offset = vf->offset % 8;
+
+            uint64_t va = entry_idx * PAGE_SIZE;
+            uint64_t entry_val = 0;
+
+            int level = 0;
+            uint64_t base = 0;
+            size_t size = 0;
+            uint64_t *pte = pt_lookup_leaf(t->mm->pgdir, va, &level, &base, &size);
+            if (pte && (*pte & PTE_V) && arch_pte_is_leaf(*pte)) {
+                uint64_t pfn = arch_pte_addr(*pte) / PAGE_SIZE;
+                if (level > 0 && size > PAGE_SIZE) {
+                    pfn += (va - base) / PAGE_SIZE;
+                }
+                entry_val = (1ULL << 63) | (pfn & 0x7FFFFFFFFFFFFULL);
+            }
+
+            size_t chunk = 8 - entry_offset;
+            if (chunk > count - read_bytes) {
+                chunk = count - read_bytes;
+            }
+            if (chunk > p->content_len - vf->offset) {
+                chunk = p->content_len - vf->offset;
+            }
+
+            char *entry_bytes = (char *)&entry_val;
+            memcpy(buf + read_bytes, entry_bytes + entry_offset, chunk);
+
+            read_bytes += chunk;
+            vf->offset += chunk;
+        }
+        return (int)read_bytes;
+    }
     if (vf->offset >= p->content_len) return 0;
     size_t avail = p->content_len - vf->offset;
     size_t n = count < avail ? count : avail;
@@ -889,6 +1117,13 @@ static int procfs_fwrite(vfile_t *vf, const char *buf, size_t count) {
             return -EINVAL;
         return (int)count;
     }
+    if (p->type == PF_SYS_KERNEL_CORE_PATTERN ||
+        p->type == PF_SYS_KERNEL_IO_URING_DISABLED ||
+        p->type == PF_SYS_VM_DROP_CACHES ||
+        p->type == PF_SYS_FS_INOTIFY_MAX_QUEUED_EVENTS ||
+        p->type == PF_SYS_FS_INOTIFY_MAX_USER_INSTANCES) {
+        return (int)count;
+    }
     return -EINVAL;
 }
 
@@ -913,28 +1148,38 @@ static int procfs_freaddir(vfile_t *vf, void *dirp, size_t count) {
     static const char *root_entries[] = {
         ".", "..", "meminfo", "version", "uptime", "cmdline",
         "cpuinfo", "mounts", "self", "loadavg", "net", "config.gz",
-        "filesystems", "cgroups", "swaps", "pidmap", "sys", "a20", NULL
+        "filesystems", "cgroups", "swaps", "interrupts", "pidmap", "sys", "a20", NULL
     };
     static const char *pid_entries[] = {
         ".", "..", "stat", "status", "statm", "maps", "smaps",
         "oom_score", "oom_score_adj", "cgroup", "cmdline", "comm", "exe", "cwd",
         "fd", "environ", "io", "loginuid", "sessionid", "ns", "fdinfo",
-        "mountinfo", "mounts", NULL
+        "mountinfo", "mounts", "pagemap", NULL
     };
     static const char *sys_entries[] = {
-        ".", "..", "fs", "kernel", "net", NULL
+        ".", "..", "fs", "kernel", "vm", "net", NULL
     };
     static const char *sys_fs_entries[] = {
-        ".", "..", "pipe-max-size", "lease-break-time", NULL
+        ".", "..", "pipe-max-size", "lease-break-time", "inotify", NULL
     };
     static const char *sys_kernel_entries[] = {
-        ".", "..", "pid_max", "pidmap", "tainted", "sched_autogroup_enabled", NULL
+        ".", "..", "pid_max", "pidmap", "tainted", "sched_autogroup_enabled",
+        "core_pattern", "io_uring_disabled", NULL
     };
     static const char *sys_net_entries[] = {
         ".", "..", NULL
     };
+    static const char *sys_vm_entries[] = {
+        ".", "..", "drop_caches", NULL
+    };
+    static const char *sys_fs_inotify_entries[] = {
+        ".", "..", "max_queued_events", "max_user_instances", NULL
+    };
     static const char *a20_entries[] = {
         ".", "..", "bcache", "page_cache", NULL
+    };
+    static const char *ns_entries[] = {
+        ".", "..", "pid", "uts", "user", "ipc", "mnt", "net", "cgroup", NULL
     };
     procfs_priv_t *p = (procfs_priv_t *)vf->priv;
     const char **entries = root_entries;
@@ -949,8 +1194,14 @@ static int procfs_freaddir(vfile_t *vf, void *dirp, size_t count) {
         entries = sys_kernel_entries;
     else if (p && p->type == PF_SYS_NET)
         entries = sys_net_entries;
+    else if (p && p->type == PF_SYS_VM)
+        entries = sys_vm_entries;
+    else if (p && p->type == PF_SYS_FS_INOTIFY)
+        entries = sys_fs_inotify_entries;
     else if (p && p->type == PF_A20)
         entries = a20_entries;
+    else if (p && p->type == PF_PID_NS)
+        entries = ns_entries;
     int idx = (int)(vf->offset);
     size_t total = 0;
     char *out = (char *)dirp;
@@ -1005,7 +1256,11 @@ static int procfs_freaddir(vfile_t *vf, void *dirp, size_t count) {
             is_dir = 1;
         if (p && p->type == PF_SYS && strcmp(name, "kernel") == 0)
             is_dir = 1;
+        if (p && p->type == PF_SYS && strcmp(name, "vm") == 0)
+            is_dir = 1;
         if (p && p->type == PF_SYS && strcmp(name, "net") == 0)
+            is_dir = 1;
+        if (p && p->type == PF_SYS_FS && strcmp(name, "inotify") == 0)
             is_dir = 1;
         d->d_type = is_dir ? 4 : 8; /* DT_DIR=4, DT_REG=8 per Linux getdents64 */
         memcpy(d->d_name, name, namelen + 1);
