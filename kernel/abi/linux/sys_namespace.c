@@ -3,8 +3,21 @@
 
 int64_t sys_execveat(int dirfd, const char *path, char **argv, char **envp, int flags)
 {
-    (void)dirfd; (void)flags;
-    return sys_execve(path, argv, envp);
+    if (!path) return -EFAULT;
+    if (flags & ~1) return -EINVAL;
+
+    char kpath[MAX_PATH_LEN];
+    long r = user_strncpy(kpath, path, MAX_PATH_LEN);
+    if (r < 0) return -EFAULT;
+
+    if (dirfd != AT_FDCWD && kpath[0] != '/') {
+        char full[MAX_PATH_LEN];
+        int pr = syscall_path_at(dirfd, kpath, full, sizeof(full));
+        if (pr < 0) return pr;
+        return proc_exec(full, argv, envp);
+    }
+
+    return proc_exec(kpath, argv, envp);
 }
 
 int64_t sys_chroot(const char *path)
@@ -45,7 +58,7 @@ int64_t sys_mknodat(int dirfd, const char *path, int mode, unsigned dev)
 {
     (void)dev;
     if ((mode & S_IFMT) == S_IFDIR) return sys_mkdirat(dirfd, path, mode & 07777);
-    int64_t fd = sys_openat(dirfd, path, O_CREAT | O_EXCL | O_RDWR, mode & 07777);
+    int64_t fd = sys_openat(dirfd, path, O_CREAT | O_EXCL | O_RDWR, mode);
     if (fd < 0) return fd;
     sys_close((int)fd);
     return 0;

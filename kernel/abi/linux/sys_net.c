@@ -140,15 +140,16 @@ int64_t sys_getsockname(int fd, void *addr, void *addrlen) {
 }
 
 int64_t sys_getpeername(int fd, void *addr, void *addrlen) {
+    if (!addr || !addrlen) return -EFAULT;
     int64_t gfd = fdtable_get_current(fd);
-    if (gfd < 0) return gfd;
+    if (gfd < 0) return -EBADF;
     uint8_t kaddr[NET_SOCKADDR_MAX];
     size_t klen;
     int r = copy_sockaddr_len_from_user(addrlen, &klen);
     if (r < 0) return r;
     r = net_getpeername((int)gfd, kaddr, &klen);
-    if (r < 0)
-        return r;
+    if (r == -ENOTSOCK) return -ENOTSOCK;
+    if (r < 0) return r;
     if (copy_to_user(addr, kaddr, klen) < 0) return -EFAULT;
     return copy_sockaddr_len_to_user(addrlen, klen);
 }
@@ -158,7 +159,6 @@ int64_t sys_sendto(int fd, const void *buf, size_t len, int flags,
     if (!buf && len) return -EFAULT;
     int64_t gfd = fdtable_get_current(fd);
     if (gfd < 0) return gfd;
-    if (len > 65535) return -EMSGSIZE;
     uint8_t *kbuf = (uint8_t *)proc_scratch_buffer(len ? len : 1);
     if (!kbuf) return -ENOMEM;
     if (len && copy_from_user(kbuf, buf, len) < 0) return -EFAULT;
@@ -177,7 +177,6 @@ int64_t sys_recvfrom(int fd, void *buf, size_t len, int flags,
     if (!buf && len) return -EFAULT;
     int64_t gfd = fdtable_get_current(fd);
     if (gfd < 0) return gfd;
-    if (len > 65535) return -EMSGSIZE;
     uint8_t *kbuf = (uint8_t *)proc_scratch_buffer(len ? len : 1);
     if (!kbuf) return -ENOMEM;
     uint8_t kaddr[NET_SOCKADDR_MAX];

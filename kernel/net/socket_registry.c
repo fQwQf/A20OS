@@ -26,3 +26,12 @@ void net_unregister_socket_locked(net_socket_t *s) {
         }
     }
 }
+
+int net_socket_is_valid_locked(net_socket_t *s) {
+    if (!s) return 0;
+    for (int i = 0; i < NET_MAX_SOCKETS; i++) {
+        if (g_sockets[i] == s)
+            return 1;
+    }
+    return 0;
+}

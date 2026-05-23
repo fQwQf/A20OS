@@ -15,5 +15,6 @@ int64_t xattr_get_vnode(vnode_t *vn, const char *name,
                         void *value, size_t size);
 int64_t xattr_list_vnode(vnode_t *vn, char *list, size_t size);
 int64_t xattr_remove_vnode(vnode_t *vn, const char *name);
+void xattr_cleanup_vnode(vnode_t *vn);
 
 #endif /* _FS_XATTR_H */

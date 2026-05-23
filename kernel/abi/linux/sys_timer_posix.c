@@ -1,9 +1,11 @@
 #define LINUX_SYSCALL_DECLARE_PROTOTYPES
 #include "syscall_impl.h"
+#include "proc/proc_internal.h"
 
 typedef struct {
     int used;
     int owner_pid;
+    int signo;
     uint64_t interval[2];
     uint64_t value[2];
     uint64_t expire_tick;
@@ -155,8 +157,7 @@ int64_t sys_clock_nanosleep(int clk, int flags, const void *req, void *rem)
 
     task_t *t = proc_current();
     if (t) {
-        proc_set_wake_time(t, until);
-        t->state = PROC_BLOCKED;
+        proc_block_until(t, until);
         sched();
         proc_set_wake_time(t, 0);
         if (signal_task_has_unblocked(t))
@@ -222,15 +223,30 @@ int64_t sys_alarm(unsigned seconds)
 
 int64_t sys_timer_create(int clockid, void *sevp, int *timerid)
 {
-    (void)sevp;
     if (clockid != 0 && clockid != 1 && clockid != 7) return -EINVAL;
     if (!timerid) return -EFAULT;
+
+    int signo = SIGALRM;
+    if (sevp) {
+        int notify = 0;
+        if (copy_from_user(&notify, sevp, sizeof(int)) < 0) return -EFAULT;
+        if (notify == 0) {
+            /* SIGEV_NONE — no notification */
+            signo = 0;
+        } else if (notify == 1) {
+            /* SIGEV_SIGNAL — read sigev_signo */
+            if (copy_from_user(&signo, (char *)sevp + 4, sizeof(int)) < 0) return -EFAULT;
+        }
+        /* SIGEV_THREAD_ID (4) would need thread-targeted delivery — skip */
+    }
+
     task_t *cur = proc_current();
     for (int i = 0; i < COMPAT_TIMER_MAX; i++) {
         if (!g_posix_timers[i].used) {
             memset(&g_posix_timers[i], 0, sizeof(g_posix_timers[i]));
             g_posix_timers[i].used = 1;
             g_posix_timers[i].owner_pid = cur ? cur->pid : 0;
+            g_posix_timers[i].signo = signo;
             if (copy_to_user(timerid, &i, sizeof(i)) < 0) return -EFAULT;
             return 0;
         }
@@ -328,6 +344,36 @@ int64_t sys_adjtimex(void *buf)
         if (modes & ADJ_TICK)       g_adjtimex_state.tick      = tx.tick;
         if (modes & ADJ_FREQUENCY)  g_adjtimex_state.freq      = tx.freq;
         if (modes & ADJ_OFFSET)     g_adjtimex_state.offset    = tx.offset;
+        if (modes & ADJ_SETOFFSET) {
+            g_adjtimex_state.offset = tx.offset;
+            uint64_t ts[2];
+            timekeeping_get_realtime(ts);
+            int64_t delta_usec = tx.offset;
+            if (delta_usec > 0) {
+                ts[0] += (uint64_t)delta_usec / 1000000ULL;
+                ts[1] += (uint64_t)(delta_usec % 1000000ULL) * 1000ULL;
+            } else {
+                uint64_t abs_usec = (uint64_t)(-delta_usec);
+                uint64_t delta_sec = abs_usec / 1000000ULL;
+                uint64_t delta_nsec = (abs_usec % 1000000ULL) * 1000ULL;
+                if (ts[1] >= delta_nsec) {
+                    ts[1] -= delta_nsec;
+                } else if (ts[0] > 0) {
+                    ts[0]--;
+                    ts[1] = ts[1] + 1000000000ULL - delta_nsec;
+                }
+                if (ts[0] >= delta_sec)
+                    ts[0] -= delta_sec;
+                else
+                    ts[0] = 0;
+            }
+            if (ts[1] >= 1000000000ULL) {
+                ts[0] += ts[1] / 1000000000ULL;
+                ts[1] %= 1000000000ULL;
+            }
+            timekeeping_set_realtime(ts[0], ts[1]);
+            g_adjtimex_state.offset = 0;
+        }
         g_adjtimex_state.modes = modes;
     }
 
@@ -352,4 +398,25 @@ int64_t sys_clock_adjtime(int clk, void *buf)
     if (modes != 0 && !posix_clock_is_realtime(clk))
         return -EOPNOTSUPP;
     return sys_adjtimex(buf);
+}
+
+extern int signal_send(int pid, int signum);
+
+void posix_timer_tick(void)
+{
+    uint64_t now = timer_get_ticks();
+    for (int i = 0; i < COMPAT_TIMER_MAX; i++) {
+        if (!g_posix_timers[i].used || g_posix_timers[i].signo == 0)
+            continue;
+        if (g_posix_timers[i].expire_tick > 0 && now >= g_posix_timers[i].expire_tick) {
+            signal_send(g_posix_timers[i].owner_pid, g_posix_timers[i].signo);
+            if (g_posix_timers[i].interval[0] || g_posix_timers[i].interval[1]) {
+                uint64_t interval_ticks = posix_timer_timespec_to_ticks(
+                    g_posix_timers[i].interval[0], g_posix_timers[i].interval[1]);
+                g_posix_timers[i].expire_tick = now + interval_ticks;
+            } else {
+                g_posix_timers[i].expire_tick = 0;
+            }
+        }
+    }
 }

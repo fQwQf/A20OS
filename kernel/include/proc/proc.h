@@ -49,10 +49,13 @@ typedef struct proc_cred {
 #define CAP_SETPCAP          8
 #define CAP_SYS_CHROOT       18
 #define CAP_SYS_ADMIN        21
+#define CAP_SYS_RESOURCE     24
+#define CAP_NET_RAW          13
 
 typedef struct proc_limits {
     uint64_t stack;
     uint64_t nofile;
+    uint64_t memlock;
 } proc_limits_t;
 
 typedef struct proc_policy {

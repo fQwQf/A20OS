@@ -1,4 +1,5 @@
 #include "syscall_impl.h"
+#include "proc/proc_internal.h"
 
 static int signal_send_permission(task_t *self, task_t *target) {
     if (proc_has_cap(self, CAP_KILL)) return 0;
@@ -130,7 +131,7 @@ int64_t sys_sigsuspend(void *mask, size_t sigsetsize) {
 
     uint64_t deliverable = (ss->pending | t->thread_pending) & ~t->sig_blocked;
     if (!deliverable) {
-        t->state = PROC_BLOCKED;
+        proc_block_until(t, 0);
         sched();
     }
     return -EINTR;
@@ -202,9 +203,8 @@ int64_t sys_sigtimedwait(const uint64_t *set, void *info, const void *timeout, s
             uint64_t ticks = sec * TICKS_PER_SEC +
                              nsec * TICKS_PER_SEC / 1000000000ULL;
             until = timer_get_ticks() + (ticks ? ticks : 1);
-            proc_set_wake_time(t, until);
         }
-        t->state = PROC_BLOCKED;
+        proc_block_until(t, until);
         sched();
         if (until)
             proc_set_wake_time(t, 0);

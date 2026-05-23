@@ -132,8 +132,11 @@ int64_t syscall_dispatch(trap_context_t *ctx)
         }
     }
 
-    if (!context_restored && !restart_syscall)
-        TRAP_CTX_SET_RET(ctx, ret);
+    if (!context_restored || ret < 0) {
+        if (!restart_syscall)
+            TRAP_CTX_SET_RET(ctx, ret);
+        context_restored = 0;
+    }
     syscall_profile_record(num, start_time, syscall_profile_now());
     signal_deliver_user(ctx);
     if (!context_restored && proc_current() && (++syscall_resched_counter & 0x1f) == 0)

@@ -227,16 +227,19 @@ void fdtable_close_all(task_t *task)
         return;
     files_struct_t *files = (files_struct_t *)task->files;
     task->files = NULL;
-    if (!refcount_dec_and_test(&files->refcount))
+    if (!refcount_dec_and_test(&files->refcount)) {
+        files = NULL;
         return;
-    for (int i = 0; i < MAX_FILES; i++) {
-        if (files->fd[i] >= 0)
-            vfs_close(files->fd[i]);
-        files->fd[i] = -1;
-        files->cloexec[i] = 0;
     }
-    for (int i = 0; i < FDTABLE_WORDS; i++)
-        files->open_mask[i] = 0;
+    for (int i = 0; i < MAX_FILES; i++) {
+        if (files->fd[i] >= 0) {
+            int gfd = files->fd[i];
+            files->fd[i] = -1;
+            files->cloexec[i] = 0;
+            fdtable_mask_clear(files, i);
+            vfs_close(gfd);
+        }
+    }
     kfree(files);
 }
 

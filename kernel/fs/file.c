@@ -1,4 +1,5 @@
 #include "fs/file.h"
+#include "abi/linux/fcntl.h"
 
 #include "core/consts.h"
 #include "core/lock.h"
@@ -77,7 +78,10 @@ void file_table_init(void)
 
 vfile_t *vfile_alloc(void)
 {
-    return (vfile_t *)obj_cache_alloc_zero(&g_vfile_cache);
+    vfile_t *vf = (vfile_t *)obj_cache_alloc_zero(&g_vfile_cache);
+    if (vf)
+        vf->lease = F_UNLCK;
+    return vf;
 }
 
 void vfile_free(vfile_t *vf)

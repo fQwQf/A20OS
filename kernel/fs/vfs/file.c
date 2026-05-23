@@ -48,9 +48,20 @@ int vfs_read_file(vfile_t *vf, char *buf, size_t count)
     if (vf->vnode && vf->vnode->type == VFS_FT_REGULAR &&
         !(vf->flags & O_DIRECT) &&
         vf->ops && vf->ops->read && vf->ops->lseek) {
-        int r = page_cache_read_vfile(vf, buf, count);
-        if (r != -ENOSYS)
-            return r;
+        /* Skip page cache for virtual filesystems (procfs, cgroupfs, devfs,
+         * ramfs) — they have no block-backed storage and the page cache
+         * will dereference NULL pointers on their vnodes. */
+        mount_t *vmnt = vf->vnode->mnt;
+        int virtual_fs = (vmnt &&
+            (vmnt->type == FS_TYPE_PROCFS ||
+             vmnt->type == FS_TYPE_CGROUP ||
+             vmnt->type == FS_TYPE_DEVFS ||
+             vmnt->type == FS_TYPE_SYSFS));
+        if (!virtual_fs) {
+            int r = page_cache_read_vfile(vf, buf, count);
+            if (r != -ENOSYS)
+                return r;
+        }
     }
     if (vf->ops && vf->ops->read)
         return vf->ops->read(vf, buf, count);
@@ -144,6 +155,10 @@ long vfs_lseek(int fd, long offset, int whence)
     long r = -EBADF;
     if (vf) {
         if (devfs_is_tty_vfile(vf) || vfs_is_pipe_vfile(vf)) {
+            r = -ESPIPE;
+        } else if (vf->vnode && (((vf->vnode->mode) & S_IFMT) == S_IFIFO)) {
+            r = -ESPIPE;
+        } else if (vf->vnode && (((vf->vnode->mode) & S_IFMT) == 0140000)) { /* S_IFSOCK is 0140000 */
             r = -ESPIPE;
         } else if (vf->ops && vf->ops->lseek) {
             r = vf->ops->lseek(vf, offset, whence);
