@@ -22,6 +22,7 @@ struct a20_vmo;
 #define VM_NOHUGEPAGE (1UL << 12)
 #define VM_FILE      (1UL << 13)
 #define VM_VMO       (1UL << 14)
+#define VM_LOCKED    (1UL << 15)
 
 typedef struct vm_area {
     uint64_t        start;
@@ -53,6 +54,8 @@ typedef struct mm_struct {
     uint64_t   stack_bottom;
     size_t     total_vm;
     size_t     rss;
+    size_t     locked_vm;
+    uint32_t   def_flags;
     refcount_t refcount;
 } mm_struct_t;
 
@@ -63,6 +66,7 @@ mm_struct_t *mm_fork(mm_struct_t *parent_mm);
 vm_area_t *mm_find_vma(mm_struct_t *mm, uint64_t addr);
 uint64_t   mm_find_gap(mm_struct_t *mm, uint64_t hint, size_t len);
 void       mm_insert_vma(mm_struct_t *mm, vm_area_t *newv);
+int        mm_split_vma_at(mm_struct_t *mm, uint64_t addr);
 
 uint64_t mm_mmap(mm_struct_t *mm, uint64_t addr, size_t len,
                  int prot, int flags);
