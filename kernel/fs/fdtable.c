@@ -49,11 +49,14 @@ static inline void fdtable_mask_clear(files_struct_t *files, int fd)
 
 static int fdtable_ctz64(uint64_t bits)
 {
+    if (bits == 0) return 64;
     int n = 0;
-    while ((bits & 1ULL) == 0) {
-        bits >>= 1;
-        n++;
-    }
+    if ((bits & 0xFFFFFFFF) == 0) { n += 32; bits >>= 32; }
+    if ((bits & 0xFFFF) == 0)     { n += 16; bits >>= 16; }
+    if ((bits & 0xFF) == 0)       { n += 8;  bits >>= 8;  }
+    if ((bits & 0xF) == 0)        { n += 4;  bits >>= 4;  }
+    if ((bits & 0x3) == 0)        { n += 2;  bits >>= 2;  }
+    if ((bits & 0x1) == 0)        { n += 1; }
     return n;
 }
 
@@ -174,7 +177,6 @@ void fdtable_copy(task_t *dst, const task_t *src)
             fdtable_ref_gfd(gfd);
     }
     fdtable_recompute_next(dst_files);
-    fdtable_init_stdio(dst);
 }
 
 void fdtable_share(task_t *dst, const task_t *src)
