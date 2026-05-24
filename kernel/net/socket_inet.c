@@ -705,7 +705,7 @@ static int net_inet_send_udp(net_socket_t *s, const void *buf, size_t len,
             spin_unlock_irqrestore(&g_net_lock, irq);
             return net_enqueue_msg_blocking(s, local_dst, buf, len,
                                             s->local, s->local_len,
-                                            0, s->send_timeout_ticks);
+                                            dontwait, s->send_timeout_ticks);
         }
         int rr = net_enqueue_msg_locked(local_dst, buf, len, s->local, s->local_len);
         spin_unlock_irqrestore(&g_net_lock, irq);
