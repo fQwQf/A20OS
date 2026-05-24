@@ -69,11 +69,9 @@ static void uart_signal_all_user(int signum, int spare_shells)
         task_t *t = proc_find(pid);
         if (t && t->pid > 1 && t->pgdir &&
             (!spare_shells || !uart_task_should_spare(t))) {
-            int force = signum == SIGINT && t->state != PROC_ZOMBIE &&
-                        uart_task_is_interrupt_target(t);
+            kdebug("[UART-SIG] pid=%d state=%d name=%s\n",
+                   t->pid, t->state, t->name);
             proc_kill(t->pid, signum);
-            if (force)
-                proc_force_exit(t, -SIGINT);
         }
     }
 }
