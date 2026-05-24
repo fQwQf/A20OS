@@ -3,9 +3,9 @@
 #include "core/lock.h"
 #include "core/string.h"
 
-#define PID_HASH_BITS   8
+#define PID_HASH_BITS   10
 #define PID_HASH_SIZE   (1U << PID_HASH_BITS)
-#define PID_BITMAP_SIZE ((32768 + 63) / 64)
+#define PID_BITMAP_SIZE ((4194304 + 63) / 64)
 
 static spinlock_t pid_lock = SPINLOCK_INIT;
 static int next_pid = 1;
@@ -15,7 +15,7 @@ static uint64_t pid_bitmap[PID_BITMAP_SIZE];
 
 static unsigned pid_hash_index(int pid)
 {
-    return ((unsigned)pid) & (PID_HASH_SIZE - 1);
+    return (((unsigned)pid) * 2654435761U) >> (32 - PID_HASH_BITS);
 }
 
 static void pid_bitmap_set(int pid)

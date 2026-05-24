@@ -28,7 +28,7 @@ static void signal_make_page_exec(uint64_t addr) {
     if (!pa) return;
     pt_unmap(t->pgdir, page);
     pt_map(t->pgdir, page, pa, arch_signal_tramp_pte_flags() | PTE_W | PTE_D);
-    arch_tlb_flush();
+    arch_tlb_flush_page(page);
 }
 
 static int signal_core_dump_default(int sig) {
@@ -364,15 +364,21 @@ void signal_deliver_user(trap_context_t *ctx) {
             sa->sa_handler = SIG_DFL;
 
         t->sig_saved_ctx = *ctx;
-        t->sig_handling = sig;
         uint64_t old_blocked = t->sigsuspend_active ?
                                t->sigsuspend_old_blocked : t->sig_blocked;
         t->sig_old_blocked = old_blocked;
         t->sigsuspend_active = 0;
 
+        /* Block the signal mask BEFORE setting sig_handling so that a
+         * nested signal delivery from a timer interrupt between these
+         * two operations cannot re-enter the handler path and corrupt
+         * sig_saved_ctx.  Once sig_handling is set, the signal must
+         * already be blocked to prevent reentrant delivery. */
         t->sig_blocked |= sa->sa_mask;
         if (!(sa->sa_flags & SA_NODEFER))
             t->sig_blocked |= signal_mask_bit(sig);
+
+        t->sig_handling = sig;
 
         uint64_t sp = TRAP_CTX_SP(ctx);
 
