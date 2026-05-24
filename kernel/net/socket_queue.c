@@ -96,7 +96,10 @@ int net_enqueue_msg_blocking(net_socket_t *s, net_socket_t *dst, const void *buf
             spin_unlock_irqrestore(&g_net_lock, irq);
             return -ENOTCONN;
         }
-        if (s->connected && s->peer != dst) {
+        /* UDP connect sets peer_addr but NOT s->peer, so s->peer is
+           legitimately NULL — skip this check for DGRAM. */
+        if (s->connected && s->peer != dst &&
+            s->type != SOCK_DGRAM) {
             spin_unlock_irqrestore(&g_net_lock, irq);
             return -ENOTCONN;
         }
@@ -118,6 +121,13 @@ int net_enqueue_msg_blocking(net_socket_t *s, net_socket_t *dst, const void *buf
             (int64_t)(timer_get_ticks() - (start + timeout_ticks)) >= 0) {
             spin_unlock_irqrestore(&g_net_lock, irq);
             return -EAGAIN;
+        }
+        if (!timeout_ticks && s->type == SOCK_DGRAM) {
+            uint64_t udp_deadline = start + MS_TO_TICKS(200);
+            if ((int64_t)(timer_get_ticks() - udp_deadline) >= 0) {
+                spin_unlock_irqrestore(&g_net_lock, irq);
+                return -EAGAIN;
+            }
         }
         net_block_on_queue_space_locked(dst, cur);
         spin_unlock_irqrestore(&g_net_lock, irq);

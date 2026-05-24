@@ -24,11 +24,6 @@
 #define CLONE_CHILD_CLEARTID 0x00200000
 #define CLONE_CHILD_SETTID   0x01000000
 
-#define CFS_SCHED_LATENCY_NS    6000000ULL
-#define CFS_MIN_GRANULARITY_NS  750000ULL
-#define CFS_NR_LATENCY          8
-#define CFS_NICE_0_LOAD         1024
-
 static const uint32_t sched_prio_to_weight[40] = {
      88,   110,   132,   156,   183,   215,   251,   292,
     341,   399,   465,   543,   635,   742,   867,  1013,

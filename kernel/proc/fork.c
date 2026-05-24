@@ -150,14 +150,14 @@ int proc_clone(uint64_t flags, uint64_t stack, int *ptid, uint64_t tls, int *cti
     if ((flags & CLONE_PARENT_SETTID) && ptid) {
         int child_tid = t->pid;
         if (copy_to_user(ptid, &child_tid, sizeof(child_tid)) < 0) {
-            proc_free_pid(t->pid);
+            proc_destroy_task(t);
             return -EFAULT;
         }
     }
     if ((flags & CLONE_CHILD_SETTID) && ctid) {
         int child_tid = t->pid;
         if (proc_copy_to_task_user(t, ctid, &child_tid, sizeof(child_tid)) < 0) {
-            proc_free_pid(t->pid);
+            proc_destroy_task(t);
             return -EFAULT;
         }
     }

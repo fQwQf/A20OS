@@ -31,15 +31,13 @@ static int wait_is_child_for_waiter_locked(task_t *child, task_t *waiter, int op
     if (options & __WNOTHREAD)
         return wait_is_direct_child(child, waiter);
 
+    if (wait_is_direct_child(child, waiter))
+        return 1;
+
     int waiter_tgid = wait_task_tgid(waiter);
-    for (task_t *t = proc_first_task_locked(); t; t = proc_next_task_locked(t)) {
-        if (t->state == PROC_UNUSED)
-            continue;
-        if (wait_task_tgid(t) != waiter_tgid)
-            continue;
-        if (wait_is_direct_child(child, t))
-            return 1;
-    }
+    if (wait_task_tgid(child->parent) == waiter_tgid)
+        return 1;
+
     return 0;
 }
 
@@ -115,15 +113,19 @@ int proc_wait4(int pid, int *status, int options)
         spin_unlock_irqrestore(&proc_lock, lock_flags);
 
         if (sig) {
+            uint64_t pf2 = spin_lock_irqsave(&proc_lock);
             t->waiting_for_child = 0;
             t->state = PROC_RUNNING;
+            spin_unlock_irqrestore(&proc_lock, pf2);
             return -ERESTARTSYS;
         }
 
         if (t->state == PROC_BLOCKED)
             sched();
+        uint64_t pf2 = spin_lock_irqsave(&proc_lock);
         t->waiting_for_child = 0;
         t->state = PROC_RUNNING;
+        spin_unlock_irqrestore(&proc_lock, pf2);
     }
 }
 
