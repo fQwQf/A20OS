@@ -297,7 +297,8 @@ void bcache_release(bcache_entry_t *e) {
 
 // 标记块为脏（数据已修改，需要写回磁盘）
 void bcache_mark_dirty(bcache_entry_t *e) {
-    if (e) __atomic_store_n(&e->dirty, 1, __ATOMIC_RELEASE);
+    if (!e) return;
+    e->dirty = 1;
 }
 
 // 同步所有脏块到磁盘（fsync 系统调用时使用）

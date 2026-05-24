@@ -114,21 +114,26 @@ void proc_get_vm_stats(proc_vm_stats_t *stats)
         return;
     memset(stats, 0, sizeof(*stats));
 
+    mm_struct_t *seen_mm[256];
+    int seen_count = 0;
+
     uint64_t flags = spin_lock_irqsave(&proc_lock);
     for (task_t *t = proc_first_task_locked(); t; t = proc_next_task_locked(t)) {
         if (t->state == PROC_UNUSED || !t->mm)
             continue;
 
         int duplicate = 0;
-        for (task_t *prev = proc_first_task_locked(); prev && prev != t;
-             prev = proc_next_task_locked(prev)) {
-            if (prev->state != PROC_UNUSED && prev->mm == t->mm) {
+        for (int i = 0; i < seen_count; i++) {
+            if (seen_mm[i] == t->mm) {
                 duplicate = 1;
                 break;
             }
         }
         if (duplicate)
             continue;
+
+        if (seen_count < (int)(sizeof(seen_mm) / sizeof(seen_mm[0])))
+            seen_mm[seen_count++] = t->mm;
 
         for (vm_area_t *v = t->mm->mmap; v; v = v->next)
             proc_count_vma_huge_pages(t->mm, v, stats);
@@ -177,49 +182,6 @@ size_t proc_format_pidmap(char *buf, size_t bufsz)
     return off;
 }
 
-static int proc_parent_auto_reaps_children(task_t *parent)
-{
-    if (!parent || parent->state == PROC_UNUSED || !parent->signals)
-        return 0;
-
-    signal_state_t *ss = (signal_state_t *)parent->signals;
-    sigaction_t *act = &ss->actions[SIGCHLD];
-    return act->sa_handler == SIG_IGN || (act->sa_flags & SA_NOCLDWAIT);
-}
-
-static int proc_zombie_is_detached(task_t *t)
-{
-    if (!t)
-        return 0;
-    if (t->ppid == 0 || t->parent == proc_idle_task())
-        return 1;
-    if (t->clone_flags & CLONE_THREAD)
-        return 1;
-    return t->exit_signal == SIGCHLD &&
-           proc_parent_auto_reaps_children(t->parent);
-}
-
-static void proc_reap_detached_zombies(void) {
-    for (;;) {
-        int target_pid = -1;
-        uint64_t flags = spin_lock_irqsave(&proc_lock);
-        for (task_t *t = proc_first_task_locked(); t; t = proc_next_task_locked(t)) {
-            if (t == proc_idle_task())
-                continue;
-            if (t->state == PROC_ZOMBIE && proc_zombie_is_detached(t)) {
-                target_pid = t->pid;
-                break;
-            }
-        }
-        spin_unlock_irqrestore(&proc_lock, flags);
-        if (target_pid < 0)
-            break;
-        task_t *t = proc_find(target_pid);
-        if (t)
-            proc_destroy_task(t);
-    }
-}
-
 void proc_make_ready(task_t *t) {
     if (!t || t->state == PROC_UNUSED || t->state == PROC_ZOMBIE)
         return;
@@ -238,9 +200,8 @@ void proc_make_ready(task_t *t) {
             t->cpu_id = proc_sched_select_cpu_locked(t);
     }
     target_cpu = t->cpu_id;
-    spin_unlock_irqrestore(&proc_lock, flags);
-
     proc_runq_enqueue_locked(t);
+    spin_unlock_irqrestore(&proc_lock, flags);
 
     if (target_cpu != cpu_current_id())
         proc_sched_kick_cpu(target_cpu);

@@ -407,7 +407,7 @@ void proc_yield(void) {
          * demotion — the task may just be doing brief work between I/O. */
         uint64_t now = timer_get_ticks();
         uint64_t elapsed = now - cur->exec_start;
-        uint64_t slice = TICKS_PER_SEC / 10;
+        uint64_t slice = TICKS_PER_SEC / 100;
         if (elapsed >= slice && cur->sched_level < SCHED_LEVELS - 1)
             cur->sched_level++;
         cur->state = PROC_READY;

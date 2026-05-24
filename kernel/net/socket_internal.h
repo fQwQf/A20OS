@@ -80,6 +80,7 @@ typedef struct net_socket {
     struct net_socket *accept_head;
     struct net_socket *accept_tail;
     int accept_count;
+    int in_registry;
 } net_socket_t;
 
 typedef struct sockaddr_alg_kernel {
