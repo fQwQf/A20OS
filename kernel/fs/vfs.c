@@ -286,7 +286,6 @@ int vfs_open(const char *path, int flags, int mode) {
         int tr = vn->ops->truncate(vn, 0);
         if (tr == 0) {
             page_cache_truncate(vn, 0);
-            vfs_dcache_invalidate_all();
         }
     }
 
@@ -528,10 +527,12 @@ int vfs_rename(const char *old, const char *newpath) {
     }
 
     int r = old_dir->ops->rename(old_dir, old_name, new_dir, new_name);
+    if (r == 0) {
+        vfs_dcache_invalidate(old_dir, old_name);
+        vfs_dcache_invalidate(new_dir, new_name);
+    }
     vnode_put(old_dir);
     vnode_put(new_dir);
-    if (r == 0)
-        vfs_dcache_invalidate_all();
     return r;
 }
 
@@ -729,8 +730,6 @@ static int vfs_chmod_vnode(vnode_t *vn, int mode) {
     }
     if (vn->ops && vn->ops->chmod) {
         int r = vn->ops->chmod(vn, mode);
-        if (r == 0)
-            vfs_dcache_invalidate_all();
         return r;
     }
     return -EPERM;
@@ -776,8 +775,6 @@ static int vfs_chown_vnode(vnode_t *vn, int uid, int gid) {
     }
     if (vn->ops && vn->ops->chown) {
         int r = vn->ops->chown(vn, uid, gid);
-        if (r == 0)
-            vfs_dcache_invalidate_all();
         return r;
     }
     return -EPERM;
@@ -1476,8 +1473,6 @@ int vfs_truncate(const char *path, size_t size) {
     if (r == 0)
         page_cache_truncate(vn, size);
     vnode_put(vn);
-    if (r == 0)
-        vfs_dcache_invalidate_all();
     return r;
 }
 
@@ -1493,7 +1488,6 @@ int vfs_ftruncate(int fd, size_t size) {
     else r = vf->vnode->ops->truncate(vf->vnode, size);
     if (r == 0) {
         page_cache_truncate(vf->vnode, size);
-        vfs_dcache_invalidate_all();
     }
     vfs_put_file_ref(fd, vf);
     return r;

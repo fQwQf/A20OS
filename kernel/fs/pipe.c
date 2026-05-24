@@ -2,80 +2,52 @@
 
 #include "core/consts.h"
 #include "core/string.h"
+#include "core/sync.h"
 #include "fs/file.h"
 #include "mm/slab.h"
 #include "proc/proc.h"
 #include "proc/signal.h"
 
-#define PIPE_DEFAULT_SIZE (16 * PIPE_BUF_SIZE)
+#define PIPE_DEFAULT_SIZE (256 * PIPE_BUF_SIZE)
 
 typedef struct pipe_buf {
-    char    *data;
-    size_t   capacity;
-    size_t   head, tail, used;
-    size_t   logical_size;
-    int      writer_closed;
-    int      reader_closed;
-    int      ref;
-    task_t  *read_waiters;
-    task_t  *write_waiters;
+    spinlock_t      lock;
+    char           *data;
+    size_t          capacity;
+    size_t          head, tail, used;
+    size_t          logical_size;
+    int             writer_closed;
+    int             reader_closed;
+    int             ref;
+    wait_queue_t    read_waiters;
+    wait_queue_t    write_waiters;
 } pipe_buf_t;
 
-static void pipe_wake_all(task_t **head)
+static void pipe_wake_readers(pipe_buf_t *pb)
 {
-    if (!head)
-        return;
-    task_t *t = *head;
-    *head = NULL;
-    while (t) {
-        task_t *next = t->wait_next;
-        t->wait_next = NULL;
-        proc_set_wake_time(t, 0);
-        if (t->state == PROC_BLOCKED)
-            proc_make_ready(t);
-        t = next;
-    }
+    wait_queue_wake_all(&pb->read_waiters);
 }
 
-static void pipe_unlink_waiter(task_t **head, task_t *target)
+static void pipe_wake_writers(pipe_buf_t *pb)
 {
-    if (!head || !target)
-        return;
-    task_t **pp = head;
-    while (*pp) {
-        if (*pp == target) {
-            *pp = target->wait_next;
-            target->wait_next = NULL;
-            return;
-        }
-        pp = &(*pp)->wait_next;
-    }
+    wait_queue_wake_all(&pb->write_waiters);
 }
 
-static int pipe_wait_interruptible(pipe_buf_t *pb, task_t **head, const char *op)
+static int pipe_wait_interruptible(pipe_buf_t *pb, wait_queue_t *wq)
 {
     task_t *t = proc_current();
     if (!t) {
         proc_yield();
         return 0;
     }
-    (void)pb;
-    (void)op;
     if (signal_task_has_unblocked(t))
         return -ERESTARTSYS;
-    if (head) {
-        t->wait_next = *head;
-        *head = t;
-    }
-    proc_set_wake_time(t, 0);
-    t->state = PROC_BLOCKED;
-    sched();
-    if (head)
-        pipe_unlink_waiter(head, t);
-    if (t->state == PROC_BLOCKED)
-        t->state = PROC_RUNNING;
-    proc_set_wake_time(t, 0);
-    return signal_task_has_unblocked(t) ? -ERESTARTSYS : 0;
+
+    wait_queue_sleep(wq);
+
+    if (signal_task_has_unblocked(t))
+        return -ERESTARTSYS;
+    return 0;
 }
 
 static int pipe_read(vfile_t *vf, char *buf, size_t count)
@@ -83,11 +55,21 @@ static int pipe_read(vfile_t *vf, char *buf, size_t count)
     pipe_buf_t *pb = (pipe_buf_t *)vf->priv;
     if (!pb) return -EBADF;
     if (count == 0) return 0;
+
+    spin_lock(&pb->lock);
     while (pb->used == 0) {
-        if (pb->writer_closed) return 0;
-        if (vf->flags & O_NONBLOCK) return -EAGAIN;
-        int wr = pipe_wait_interruptible(pb, &pb->read_waiters, "read");
+        if (pb->writer_closed) {
+            spin_unlock(&pb->lock);
+            return 0;
+        }
+        if (vf->flags & O_NONBLOCK) {
+            spin_unlock(&pb->lock);
+            return -EAGAIN;
+        }
+        spin_unlock(&pb->lock);
+        int wr = pipe_wait_interruptible(pb, &pb->read_waiters);
         if (wr < 0) return wr;
+        spin_lock(&pb->lock);
     }
     size_t n = pb->used < count ? pb->used : count;
     size_t first = pb->capacity - pb->tail;
@@ -99,7 +81,11 @@ static int pipe_read(vfile_t *vf, char *buf, size_t count)
         memcpy(buf + first, pb->data, second);
     pb->tail = (pb->tail + n) % pb->capacity;
     pb->used -= n;
-    pipe_wake_all(&pb->write_waiters);
+    int was_full = (pb->used + n == pb->capacity);
+    spin_unlock(&pb->lock);
+
+    if (was_full)
+        pipe_wake_writers(pb);
     return (int)n;
 }
 
@@ -108,7 +94,10 @@ static int pipe_write(vfile_t *vf, const char *buf, size_t count)
     pipe_buf_t *pb = (pipe_buf_t *)vf->priv;
     if (!pb) return -EBADF;
     if (count == 0) return 0;
+
+    spin_lock(&pb->lock);
     if (pb->reader_closed) {
+        spin_unlock(&pb->lock);
         task_t *t = proc_current();
         if (t)
             signal_send(t->pid, SIGPIPE);
@@ -116,33 +105,79 @@ static int pipe_write(vfile_t *vf, const char *buf, size_t count)
     }
     size_t n = 0;
     while (n < count) {
-        while (pb->used == pb->capacity) {
-            if (pb->reader_closed) {
-                task_t *t = proc_current();
-                if (t)
-                    signal_send(t->pid, SIGPIPE);
-                return n ? (int)n : -EPIPE;
-            }
-            if (vf->flags & O_NONBLOCK) return n ? (int)n : -EAGAIN;
-            int wr = pipe_wait_interruptible(pb, &pb->write_waiters, "write");
-            if (wr < 0) return n ? (int)n : wr;
-        }
+        size_t remaining = count - n;
         size_t space = pb->capacity - pb->used;
-        size_t chunk = count - n;
-        if (chunk > space)
-            chunk = space;
-        size_t first = pb->capacity - pb->head;
-        if (first > chunk)
-            first = chunk;
-        memcpy(pb->data + pb->head, buf + n, first);
-        size_t second = chunk - first;
-        if (second)
-            memcpy(pb->data, buf + n + first, second);
-        pb->head = (pb->head + chunk) % pb->capacity;
-        pb->used += chunk;
-        n += chunk;
-        pipe_wake_all(&pb->read_waiters);
+        if (remaining <= PIPE_BUF_SIZE) {
+            while (space < remaining) {
+                if (pb->reader_closed) {
+                    spin_unlock(&pb->lock);
+                    if (n > 0) return (int)n;
+                    task_t *t = proc_current();
+                    if (t)
+                        signal_send(t->pid, SIGPIPE);
+                    return -EPIPE;
+                }
+                if (vf->flags & O_NONBLOCK) {
+                    spin_unlock(&pb->lock);
+                    return n ? (int)n : -EAGAIN;
+                }
+                spin_unlock(&pb->lock);
+                int wr = pipe_wait_interruptible(pb, &pb->write_waiters);
+                if (wr < 0) return n ? (int)n : wr;
+                spin_lock(&pb->lock);
+                space = pb->capacity - pb->used;
+            }
+            size_t chunk = remaining;
+            size_t first = pb->capacity - pb->head;
+            if (first > chunk)
+                first = chunk;
+            memcpy(pb->data + pb->head, buf + n, first);
+            size_t second = chunk - first;
+            if (second)
+                memcpy(pb->data, buf + n + first, second);
+            pb->head = (pb->head + chunk) % pb->capacity;
+            pb->used += chunk;
+            n += chunk;
+            spin_unlock(&pb->lock);
+            pipe_wake_readers(pb);
+            spin_lock(&pb->lock);
+        } else {
+            if (space == 0) {
+                if (pb->reader_closed) {
+                    spin_unlock(&pb->lock);
+                    if (n > 0) return (int)n;
+                    task_t *t = proc_current();
+                    if (t)
+                        signal_send(t->pid, SIGPIPE);
+                    return -EPIPE;
+                }
+                if (vf->flags & O_NONBLOCK) {
+                    spin_unlock(&pb->lock);
+                    return n ? (int)n : -EAGAIN;
+                }
+                spin_unlock(&pb->lock);
+                int wr = pipe_wait_interruptible(pb, &pb->write_waiters);
+                if (wr < 0) return n ? (int)n : wr;
+                spin_lock(&pb->lock);
+                continue;
+            }
+            size_t chunk = remaining < space ? remaining : space;
+            size_t first = pb->capacity - pb->head;
+            if (first > chunk)
+                first = chunk;
+            memcpy(pb->data + pb->head, buf + n, first);
+            size_t second = chunk - first;
+            if (second)
+                memcpy(pb->data, buf + n + first, second);
+            pb->head = (pb->head + chunk) % pb->capacity;
+            pb->used += chunk;
+            n += chunk;
+            spin_unlock(&pb->lock);
+            pipe_wake_readers(pb);
+            spin_lock(&pb->lock);
+        }
     }
+    spin_unlock(&pb->lock);
     return (int)n;
 }
 
@@ -163,16 +198,22 @@ static int pipe_resize(pipe_buf_t *pb, size_t new_capacity)
     if (!pb) return -EINVAL;
     if (new_capacity < PIPE_BUF_SIZE)
         new_capacity = PIPE_BUF_SIZE;
-    if (new_capacity < pb->used)
+    spin_lock(&pb->lock);
+    if (new_capacity < pb->used) {
+        spin_unlock(&pb->lock);
         return -EBUSY;
+    }
     if (new_capacity == pb->capacity) {
         pb->logical_size = new_capacity;
+        spin_unlock(&pb->lock);
         return (int)new_capacity;
     }
 
     char *new_data = (char *)kmalloc(new_capacity);
-    if (!new_data)
+    if (!new_data) {
+        spin_unlock(&pb->lock);
         return -ENOMEM;
+    }
     for (size_t i = 0; i < pb->used; i++)
         new_data[i] = pb->data[(pb->tail + i) % pb->capacity];
     kfree(pb->data);
@@ -181,6 +222,7 @@ static int pipe_resize(pipe_buf_t *pb, size_t new_capacity)
     pb->logical_size = new_capacity;
     pb->tail = 0;
     pb->head = pb->used % pb->capacity;
+    spin_unlock(&pb->lock);
     return (int)new_capacity;
 }
 
@@ -188,10 +230,14 @@ static int pipe_read_close(vfile_t *vf)
 {
     pipe_buf_t *pb = (pipe_buf_t *)vf->priv;
     if (pb) {
+        spin_lock(&pb->lock);
         int last_reader = refcount_read(&vf->ref_count) == 0;
         if (last_reader) {
             pb->reader_closed = 1;
-            pipe_wake_all(&pb->write_waiters);
+            spin_unlock(&pb->lock);
+            pipe_wake_writers(pb);
+        } else {
+            spin_unlock(&pb->lock);
         }
         pb->ref--;
         if (!pb->ref) {
@@ -206,10 +252,14 @@ static int pipe_write_close(vfile_t *vf)
 {
     pipe_buf_t *pb = (pipe_buf_t *)vf->priv;
     if (pb) {
+        spin_lock(&pb->lock);
         int last_writer = refcount_read(&vf->ref_count) == 0;
         if (last_writer) {
             pb->writer_closed = 1;
-            pipe_wake_all(&pb->read_waiters);
+            spin_unlock(&pb->lock);
+            pipe_wake_readers(pb);
+        } else {
+            spin_unlock(&pb->lock);
         }
         pb->ref--;
         if (!pb->ref) {
@@ -234,6 +284,7 @@ int pipe_poll_events(vfile_t *vf, short events)
     pipe_buf_t *pb = (pipe_buf_t *)vf->priv;
     if (!pb) return POLLNVAL;
     short revents = 0;
+    spin_lock(&pb->lock);
     if (vf->ops == &g_pipe_read_ops) {
         if ((events & POLLIN) && (pb->used > 0 || pb->writer_closed))
             revents |= POLLIN;
@@ -245,6 +296,7 @@ int pipe_poll_events(vfile_t *vf, short events)
         if (pb->reader_closed)
             revents |= POLLERR;
     }
+    spin_unlock(&pb->lock);
     return revents;
 }
 
@@ -252,7 +304,11 @@ int pipe_get_size(vfile_t *vf)
 {
     if (!pipe_vfile_is(vf)) return -EINVAL;
     pipe_buf_t *pb = (pipe_buf_t *)vf->priv;
-    return pb && pb->logical_size ? (int)pb->logical_size : PIPE_BUF_SIZE;
+    if (!pb) return -EINVAL;
+    spin_lock(&pb->lock);
+    int sz = pb->logical_size ? (int)pb->logical_size : PIPE_BUF_SIZE;
+    spin_unlock(&pb->lock);
+    return sz;
 }
 
 int pipe_set_size(vfile_t *vf, size_t size)
@@ -268,6 +324,9 @@ int pipe_create(int pipefd[2])
     pipe_buf_t *pb = (pipe_buf_t *)kmalloc(sizeof(pipe_buf_t));
     if (!pb) return -ENOMEM;
     memset(pb, 0, sizeof(*pb));
+    spin_init(&pb->lock);
+    wait_queue_init(&pb->read_waiters);
+    wait_queue_init(&pb->write_waiters);
     pb->ref = 2;
     task_t *cur = proc_current();
     pb->logical_size = PIPE_DEFAULT_SIZE;

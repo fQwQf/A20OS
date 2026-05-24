@@ -66,12 +66,7 @@ typedef struct {
 static slab_cache_t caches[SLAB_NR_CACHES];
 
 static int slab_popcount64(uint64_t bits) {
-    int n = 0;
-    while (bits) {
-        bits &= bits - 1;
-        n++;
-    }
-    return n;
+    return __builtin_popcountll(bits);
 }
 
 static int slab_popcount(const slab_page_t *sp) {

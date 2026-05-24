@@ -112,15 +112,11 @@ typedef struct task_t {
     int      on_rq;
     struct task_t *rq_next;
     struct task_t *rq_prev;
-    struct task_t *cfs_next;
-    struct task_t *cfs_prev;
     struct task_t *wait_next;
     uint64_t total_time;
     uint64_t child_utime;
     uint64_t child_stime;
-    uint64_t vruntime;
     uint64_t exec_start;
-    uint64_t cfs_slice;
     uint32_t cfs_weight;
     int      sched_policy;
     int      waiting_for_child;

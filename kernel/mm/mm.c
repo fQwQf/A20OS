@@ -41,6 +41,13 @@ void *frame_alloc(void) {
     return p;
 }
 
+// 分配一个物理帧，不清零（用于调用者会立即覆写的场景）
+void *frame_alloc_nz(void) {
+    pfn_t pfn = pfa_alloc_page();
+    if (pfn == PFN_NONE) return NULL;
+    return pfn_to_virt(pfn);
+}
+
 // 释放一个物理帧
 void frame_free(void *addr) {
     if (!addr) return;
