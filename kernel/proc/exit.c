@@ -105,6 +105,9 @@ static void proc_reparent_children(task_t *dead, task_t *reaper)
     if (!dead)
         return;
 
+    task_t *to_destroy[64];
+    int destroy_count = 0;
+
     uint64_t flags = spin_lock_irqsave(&proc_lock);
     task_t *thread_reaper = proc_find_live_thread_reaper_locked(dead);
     task_t *actual_reaper = thread_reaper;
@@ -133,9 +136,11 @@ static void proc_reparent_children(task_t *dead, task_t *reaper)
              child->exit_signal != SIGCHLD ||
              (child->clone_flags & CLONE_THREAD)) &&
             child->state == PROC_ZOMBIE) {
-            spin_unlock_irqrestore(&proc_lock, flags);
-            proc_destroy_task(child);
-            flags = spin_lock_irqsave(&proc_lock);
+            child->state = PROC_UNUSED;
+            proc_unlink_task_locked(child);
+            if (destroy_count < (int)(sizeof(to_destroy) / sizeof(to_destroy[0])))
+                to_destroy[destroy_count++] = child;
+
             thread_reaper = proc_find_live_thread_reaper_locked(dead);
             actual_reaper = thread_reaper;
             if (!thread_reaper) {
@@ -156,6 +161,33 @@ static void proc_reparent_children(task_t *dead, task_t *reaper)
         child = next;
     }
     spin_unlock_irqrestore(&proc_lock, flags);
+
+    for (int i = 0; i < destroy_count; i++) {
+        proc_pid_unregister(to_destroy[i]);
+        proc_task_release_resources(to_destroy[i]);
+        kfree(to_destroy[i]);
+    }
+}
+
+static void proc_clear_child_tid_direct(task_t *t)
+{
+    if (!t->clear_child_tid)
+        return;
+    int *ctid = t->clear_child_tid;
+    t->clear_child_tid = NULL;
+
+    if (!t->pgdir)
+        return;
+
+    paddr_t pa = pt_translate(t->pgdir, (vaddr_t)(uintptr_t)ctid);
+    if (!pa)
+        return;
+    pfn_t pfn = phys_to_pfn(pa);
+    if (!pfn_valid(pfn))
+        return;
+    int *kv = (int *)((char *)pfn_to_virt(pfn) +
+                      ((uintptr_t)ctid & (PAGE_SIZE - 1)));
+    *kv = 0;
 }
 
 void proc_exit(int exit_code)
@@ -164,25 +196,11 @@ void proc_exit(int exit_code)
     if (!t)
         panic("proc_exit: no current task");
 
-    if (t->clear_child_tid) {
-        int zero = 0;
-        int *ctid = t->clear_child_tid;
-        t->clear_child_tid = NULL;
-        if (copy_to_user(ctid, &zero, sizeof(zero)) < 0 && t->pgdir) {
-            paddr_t pa = pt_translate(t->pgdir, (vaddr_t)(uintptr_t)ctid);
-            if (pa) {
-                pfn_t pfn = phys_to_pfn(pa);
-                if (pfn_valid(pfn)) {
-                    int *kv = (int *)((char *)pfn_to_virt(pfn) +
-                                      ((uintptr_t)ctid & (PAGE_SIZE - 1)));
-                    *kv = 0;
-                }
-            }
-        }
+    proc_clear_child_tid_direct(t);
 #if defined(CONFIG_ABI_LINUX) || defined(CONFIG_ABI_BOTH)
-        futex_wake_user(ctid, 1);
+    if (t->clear_child_tid)
+        futex_wake_user(t->clear_child_tid, 1);
 #endif
-    }
 
 #if defined(CONFIG_ABI_LINUX) || defined(CONFIG_ABI_BOTH)
     if (t->robust_list_head)
@@ -192,13 +210,10 @@ void proc_exit(int exit_code)
     vfs_release_process_locks(t->pid);
     bpf_release_process(t->pid);
 
-    /* Close all file descriptors BEFORE transitioning to ZOMBIE.
-     * This ensures socket close notifications (peer_closed) reach the
-     * peer BEFORE wait4() can observe the zombie and report exit status.
-     * If we close FDs after ZOMBIE, the parent's wait4() could return
-     * before peer sockets are notified, causing the peer to hang. */
     fdtable_close_all(t);
     proc_release_exiting_mm(t);
+
+    proc_runq_remove_locked(t);
 
     uint64_t flags = spin_lock_irqsave(&proc_lock);
     task_t *parent = t->parent;
@@ -206,7 +221,6 @@ void proc_exit(int exit_code)
 
     t->exit_code = exit_code;
     __atomic_thread_fence(__ATOMIC_RELEASE);
-    proc_runq_remove_locked(t);
     t->state = PROC_ZOMBIE;
 
     a20_event_notify(t, A20_OBJ_TASK, 0, (uint64_t)exit_code, 0);
@@ -214,13 +228,6 @@ void proc_exit(int exit_code)
     if (auto_reap) {
         t->parent = proc_idle_task();
         t->ppid = 0;
-        spin_unlock_irqrestore(&proc_lock, flags);
-    } else {
-        proc_wake_child_waiters_locked(parent);
-        spin_unlock_irqrestore(&proc_lock, flags);
-    }
-
-    if (auto_reap) {
         if (t->signals) {
             signal_state_t *ss = (signal_state_t *)t->signals;
             t->signals = NULL;
@@ -232,12 +239,12 @@ void proc_exit(int exit_code)
             t->scratch_buf = NULL;
             t->scratch_size = 0;
         }
+    } else {
+        proc_wake_child_waiters_locked(parent);
     }
+    spin_unlock_irqrestore(&proc_lock, flags);
 
-    if (!auto_reap) {
-        task_t *reaper = proc_find(1);
-        proc_reparent_children(t, reaper);
-    }
+    proc_reparent_children(t, auto_reap ? NULL : proc_find(1));
 
     if (!auto_reap && parent && t->exit_signal > 0)
         signal_send(parent->pid, t->exit_signal);
@@ -253,47 +260,30 @@ void proc_force_exit(task_t *t, int exit_code)
     if (t == proc_current())
         proc_exit(exit_code);
 
-    if (t->clear_child_tid) {
-        int zero = 0;
-        int *ctid = t->clear_child_tid;
-        t->clear_child_tid = NULL;
-        task_t *saved = proc_set_current(t);
-        if (copy_to_user(ctid, &zero, sizeof(zero)) < 0 && t->pgdir) {
-            paddr_t pa = pt_translate(t->pgdir, (vaddr_t)(uintptr_t)ctid);
-            if (pa) {
-                pfn_t pfn = phys_to_pfn(pa);
-                if (pfn_valid(pfn)) {
-                    int *kv = (int *)((char *)pfn_to_virt(pfn) +
-                                      ((uintptr_t)ctid & (PAGE_SIZE - 1)));
-                    *kv = 0;
-                }
-            }
-        }
+    proc_clear_child_tid_direct(t);
 #if defined(CONFIG_ABI_LINUX) || defined(CONFIG_ABI_BOTH)
-        futex_wake_user(ctid, 1);
+    if (t->clear_child_tid)
+        futex_wake_user(t->clear_child_tid, 1);
 #endif
-        proc_set_current(saved);
-    }
 
 #if defined(CONFIG_ABI_LINUX) || defined(CONFIG_ABI_BOTH)
-    if (t->robust_list_head) {
-        task_t *saved = proc_set_current(t);
+    if (t->robust_list_head)
         exit_robust_list(t);
-        proc_set_current(saved);
-    }
 #endif
 
     vfs_release_process_locks(t->pid);
     fdtable_close_all(t);
     bpf_release_process(t->pid);
 
-    /* Read parent and auto_reap UNDER the lock for consistency */
+    proc_runq_remove_locked(t);
+
+    proc_release_exiting_mm(t);
+
     uint64_t flags = spin_lock_irqsave(&proc_lock);
     task_t *parent = t->parent;
     int auto_reap = proc_child_auto_reaps(t, parent);
     t->exit_code = exit_code;
     __atomic_thread_fence(__ATOMIC_RELEASE);
-    proc_runq_remove_locked(t);
     t->state = PROC_ZOMBIE;
 
     a20_event_notify(t, A20_OBJ_TASK, 0, (uint64_t)exit_code, 0);
@@ -306,18 +296,14 @@ void proc_force_exit(task_t *t, int exit_code)
     }
     spin_unlock_irqrestore(&proc_lock, flags);
 
-    proc_release_exiting_mm(t);
-
     task_t *reaper = proc_find(1);
     proc_reparent_children(t, reaper);
 
     if (!auto_reap && parent && t->exit_signal > 0)
         signal_send(parent->pid, t->exit_signal);
 
-    /* Auto-reaped: nobody will wait — destroy immediately */
-    if (auto_reap) {
+    if (auto_reap)
         proc_destroy_task(t);
-    }
 }
 
 void proc_exit_group(int exit_code)
@@ -328,24 +314,28 @@ void proc_exit_group(int exit_code)
         __builtin_unreachable();
     }
 
-    mm_struct_t *mm = self->mm;
+    int pids[128];
+    int pid_count;
+
     for (;;) {
-        int target_pid = -1;
+        pid_count = 0;
         uint64_t flags = spin_lock_irqsave(&proc_lock);
         for (task_t *t = proc_first_task_locked(); t; t = proc_next_task_locked(t)) {
             if (t == self || t->state == PROC_UNUSED || t->state == PROC_ZOMBIE)
                 continue;
-            if (mm && t->mm == mm) {
-                target_pid = t->pid;
-                break;
+            if (self->mm && t->mm == self->mm) {
+                if (pid_count < (int)(sizeof(pids) / sizeof(pids[0])))
+                    pids[pid_count++] = t->pid;
             }
         }
         spin_unlock_irqrestore(&proc_lock, flags);
-        if (target_pid < 0)
+        if (pid_count == 0)
             break;
-        task_t *t = proc_find(target_pid);
-        if (t)
-            proc_force_exit(t, exit_code);
+        for (int i = 0; i < pid_count; i++) {
+            task_t *t = proc_find(pids[i]);
+            if (t)
+                proc_force_exit(t, exit_code);
+        }
     }
     proc_exit(exit_code);
 }

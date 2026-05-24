@@ -92,7 +92,7 @@ static int net_vfile_write(vfile_t *vf, const char *buf, size_t count) {
         if (dst->rx_count >= NET_MAX_QUEUE && !s->nonblock) {
             spin_unlock_irqrestore(&g_net_lock, irq);
             return net_enqueue_msg_blocking(s, dst, buf, count, s->local, s->local_len,
-                                            0, s->send_timeout_ticks);
+                                            s->nonblock, s->send_timeout_ticks);
         }
         int r = net_enqueue_msg_locked(dst, buf, count, s->local, s->local_len);
         spin_unlock_irqrestore(&g_net_lock, irq);

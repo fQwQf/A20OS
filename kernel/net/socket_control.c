@@ -525,14 +525,20 @@ int net_poll_events(int gfd, short events)
         return -ENOTSOCK;
     short revents = 0;
     uint64_t irq = spin_lock_irqsave(&g_net_lock);
-    if (s->closed || s->peer_closed || s->shut_rd)
+    if (s->peer_closed)
+        revents |= POLLHUP;
+    else if (s->closed || (s->shut_rd && s->shut_wr))
         revents |= POLLHUP;
     if ((events & POLLIN) &&
         (s->rx_head || s->accept_head || s->closed || s->peer_closed || s->shut_rd ||
          (s->domain == AF_ALG && (strcmp(s->alg_type, "hash") == 0 || s->alg_last_len > 0))))
         revents |= POLLIN;
     if ((events & POLLOUT) && !s->closed && !s->shut_wr) {
-        if (s->peer && s->type == SOCK_STREAM && s->peer->rx_count >= NET_MAX_QUEUE)
+        if (s->peer_closed)
+            revents |= POLLERR;
+        else if (s->type == SOCK_STREAM && s->connected && !s->peer)
+            revents |= POLLERR;
+        else if (s->peer && s->type == SOCK_STREAM && s->peer->rx_count >= NET_MAX_QUEUE)
             revents |= 0;
         else
             revents |= POLLOUT;

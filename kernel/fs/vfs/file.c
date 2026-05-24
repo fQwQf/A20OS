@@ -87,6 +87,8 @@ int vfs_write_file(vfile_t *vf, const char *buf, size_t count)
                                               (uint64_t)(cur_off + count));
     }
     if (vf->ops && vf->ops->write) {
+        if ((vf->flags & O_APPEND) && vf->vnode)
+            vf->offset = vf->vnode->size;
         size_t write_start = vf->offset;
         int r = vf->ops->write(vf, buf, count);
         if (r > 0 && vf->vnode) {

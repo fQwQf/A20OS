@@ -1,6 +1,8 @@
 #include "ipc/timerfd.h"
 
 #include "core/consts.h"
+#include "core/lock.h"
+#include "core/sync.h"
 #include "core/string.h"
 #include "core/timer.h"
 #include "fs/anonfd.h"
@@ -10,6 +12,8 @@
 #include "proc/proc.h"
 
 typedef struct {
+    spinlock_t    lock;
+    wait_queue_t  waiters;
     uint64_t interval_sec, interval_nsec;
     uint64_t value_sec, value_nsec;
     uint64_t expire_tick;
@@ -22,7 +26,7 @@ static uint64_t timerfd_timespec_to_ticks(uint64_t sec, uint64_t nsec)
     return sec * TICKS_PER_SEC + (nsec * TICKS_PER_SEC + 999999999ULL) / 1000000000ULL;
 }
 
-static void timerfd_remaining(timerfd_t *tfd, uint64_t out[4])
+static void timerfd_remaining_locked(timerfd_t *tfd, uint64_t out[4])
 {
     memset(out, 0, sizeof(uint64_t) * 4);
     out[0] = tfd->interval_sec;
@@ -39,9 +43,21 @@ static int timerfd_read(vfile_t *vf, char *buf, size_t count)
     timerfd_t *tfd = vf ? vf->priv : NULL;
     if (!tfd) return -EBADF;
     if (count < sizeof(uint64_t)) return -EINVAL;
+
+    spin_lock(&tfd->lock);
     while (!tfd->armed || timer_get_ticks() < tfd->expire_tick) {
-        if (tfd->nonblock) return -EAGAIN;
-        proc_yield();
+        if (tfd->nonblock) {
+            spin_unlock(&tfd->lock);
+            return -EAGAIN;
+        }
+        if (tfd->armed) {
+            uint64_t remaining = tfd->expire_tick - timer_get_ticks();
+            if (remaining > 0)
+                proc_set_wake_time(proc_current(), tfd->expire_tick);
+        }
+        spin_unlock(&tfd->lock);
+        wait_queue_sleep(&tfd->waiters);
+        spin_lock(&tfd->lock);
     }
     uint64_t expirations = 1;
     uint64_t interval = timerfd_timespec_to_ticks(tfd->interval_sec, tfd->interval_nsec);
@@ -53,6 +69,7 @@ static int timerfd_read(vfile_t *vf, char *buf, size_t count)
     } else {
         tfd->armed = 0;
     }
+    spin_unlock(&tfd->lock);
     memcpy(buf, &expirations, sizeof(expirations));
     return sizeof(expirations);
 }
@@ -74,6 +91,8 @@ int timerfd_create_file(int clockid, int flags)
         return -ENOMEM;
     }
     memset(tfd, 0, sizeof(*tfd));
+    spin_init(&tfd->lock);
+    wait_queue_init(&tfd->waiters);
     tfd->nonblock = (flags & O_NONBLOCK) != 0;
     vf->flags = O_RDONLY | (flags & O_NONBLOCK);
     refcount_set(&vf->ref_count, 1);
@@ -91,9 +110,11 @@ int timerfd_settime_file(int gfd, int flags, const uint64_t new_value[4], uint64
         return -EINVAL;
     }
     timerfd_t *tfd = vf->priv;
+    spin_lock(&tfd->lock);
     if (old_value)
-        timerfd_remaining(tfd, old_value);
+        timerfd_remaining_locked(tfd, old_value);
     if (new_value[1] >= 1000000000ULL || new_value[3] >= 1000000000ULL) {
+        spin_unlock(&tfd->lock);
         vfs_put_file_ref(gfd, vf);
         return -EINVAL;
     }
@@ -109,6 +130,9 @@ int timerfd_settime_file(int gfd, int flags, const uint64_t new_value[4], uint64
         else
             tfd->expire_tick = timer_get_ticks() + ticks;
     }
+    spin_unlock(&tfd->lock);
+    if (tfd->armed)
+        wait_queue_wake_all(&tfd->waiters);
     vfs_put_file_ref(gfd, vf);
     return 0;
 }
@@ -121,7 +145,10 @@ int timerfd_gettime_file(int gfd, uint64_t curr_value[4])
         vfs_put_file_ref(gfd, vf);
         return -EINVAL;
     }
-    timerfd_remaining((timerfd_t *)vf->priv, curr_value);
+    timerfd_t *tfd = vf->priv;
+    spin_lock(&tfd->lock);
+    timerfd_remaining_locked(tfd, curr_value);
+    spin_unlock(&tfd->lock);
     vfs_put_file_ref(gfd, vf);
     return 0;
 }
