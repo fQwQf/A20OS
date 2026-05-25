@@ -2,7 +2,7 @@
 #define A20_LWIPOPTS_H
 
 #define NO_SYS                          1
-#define SYS_LIGHTWEIGHT_PROT            0
+#define SYS_LIGHTWEIGHT_PROT            1
 #define LWIP_TIMERS                     1
 #define LWIP_TIMERS_CUSTOM              0
 

@@ -23,6 +23,7 @@
 
 static int g_lwip_ready;
 static struct netif g_netifs[VIRTIO_NET_MAX_DEVS];
+static struct netif g_loopif;
 
 typedef struct {
     int idx;
@@ -70,6 +71,38 @@ static err_t a20_lwip_netif_init_cb(struct netif *netif) {
     netif->flags = NETIF_FLAG_BROADCAST | NETIF_FLAG_ETHARP |
                    NETIF_FLAG_LINK_UP | NETIF_FLAG_IGMP | NETIF_FLAG_MLD6;
     return ERR_OK;
+}
+
+static err_t a20_lwip_loopif_init_cb(struct netif *netif)
+{
+    netif->hostname = "a20os";
+    netif->mtu = 1500;
+    netif->flags = NETIF_FLAG_LINK_UP;
+#if LWIP_IPV6
+    static const s8_t sn[] = {0, 0, 0, 0, 0, 0, 0, 0};
+    ip6_addr_t lo6;
+    ip6_addr_set_loopback(&lo6);
+    netif_add_ip6_address(netif, &lo6, sn);
+    netif_ip6_addr_set_state(netif, 0, IP6_ADDR_VALID);
+#endif
+    return ERR_OK;
+}
+
+static void a20_lwip_register_loopif(void)
+{
+    ip4_addr_t lo_addr, lo_mask, lo_gw;
+    ip4_addr_set_loopback(&lo_addr);
+    IP4_ADDR(&lo_mask, 255, 0, 0, 0);
+    ip4_addr_set_zero(&lo_gw);
+
+    struct netif *n = netif_add(&g_loopif, &lo_addr, &lo_mask, &lo_gw,
+                                NULL, a20_lwip_loopif_init_cb, netif_input);
+    if (!n) {
+        printf("[LWIP] failed to add loopback netif\n");
+        return;
+    }
+    netif_set_up(n);
+    netif_set_link_up(n);
 }
 
 static void a20_lwip_register_virtio_netifs(void) {
@@ -123,6 +156,7 @@ void a20_lwip_init(void) {
         return;
 
     lwip_init();
+    a20_lwip_register_loopif();
     a20_lwip_register_virtio_netifs();
     g_lwip_ready = 1;
     printf("[LWIP] initialized: IPv4 IPv6 TCP UDP RAW ICMP DHCP DNS loopif\n");
@@ -131,6 +165,8 @@ void a20_lwip_init(void) {
 void a20_lwip_poll(void) {
     if (!g_lwip_ready)
         return;
+    uint64_t irq = arch_irqs_enabled() ? 1 : 0;
+    arch_local_irq_disable();
     sys_check_timeouts();
     virtio_net_poll_all();
     for (struct netif *n = netif_list; n; n = n->next) {
@@ -156,6 +192,7 @@ void a20_lwip_poll(void) {
         }
         netif_poll(n);
     }
+    if (irq) arch_local_irq_enable();
 }
 
 int a20_lwip_format_status(char *buf, size_t bufsz) {
