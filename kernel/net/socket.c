@@ -358,7 +358,7 @@ int net_connect(int gfd, const void *addr, size_t addrlen) {
     if (r < 0 && r != -EINPROGRESS) {
         return r;
     }
-    if (!s->connected)
+    if (r == 0 && !s->connected)
         s->connected = 1;
     return r;
 }
@@ -514,6 +514,8 @@ int net_recvfrom(int gfd, void *buf, size_t len, int flags,
         if (r != -EAGAIN || s->nonblock || dontwait || s->closed || s->peer_closed || s->shut_rd) {
             if (r == -EAGAIN && (s->closed || s->peer_closed || s->shut_rd))
                 r = 0;
+            if (r > 0 && s->type == SOCK_STREAM)
+                net_tcp_recved(s, (size_t)r);
             spin_unlock_irqrestore(&g_net_lock, irq);
             return r;
         }

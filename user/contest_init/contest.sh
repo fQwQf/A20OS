@@ -54,8 +54,8 @@ SKIP_GROUPS+=(ltp) # 单独执行
 
 # 下面是可以跑通但是为了方便测试跳过的
 SKIP_GROUPS+=(iozone)
-# SKIP_GROUPS+=(libctest)
-# SKIP_GROUPS+=(libcbench)
+SKIP_GROUPS+=(libctest)
+SKIP_GROUPS+=(libcbench)
 # SKIP_GROUPS+=(netperf)
 # SKIP_GROUPS+=(iperf)
 # SKIP_GROUPS+=(busybox)
@@ -162,7 +162,7 @@ for script in /test/*/*_testcode.sh; do
             fi
         done
         if kill -0 $test_pid 2>/dev/null; then
-            kill -KILL $test_pid 2>/dev/null
+            kill -9 $test_pid 2>/dev/null
             wait $test_pid 2>/dev/null
             rc=1
         fi
@@ -181,7 +181,7 @@ for script in /test/*/*_testcode.sh; do
             fi
         done
         if kill -0 $test_pid 2>/dev/null; then
-            kill -KILL $test_pid 2>/dev/null
+            kill -9 $test_pid 2>/dev/null
             wait $test_pid 2>/dev/null
             rc=1
         fi

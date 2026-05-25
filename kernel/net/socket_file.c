@@ -164,6 +164,7 @@ int net_socket_close_file(vfile_t *vf) {
     while (accepted) {
         net_socket_t *next = accepted->accept_next;
         uint64_t accepted_flags = spin_lock_irqsave(&g_net_lock);
+        accepted->closed = 1;
         if (accepted->peer && accepted->peer->peer == accepted) {
             accepted->peer->peer = NULL;
             accepted->peer->peer_closed = 1;

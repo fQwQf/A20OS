@@ -1,9 +1,10 @@
 #include <fcntl.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/reboot.h>
 #include <sys/stat.h>
-#include <sys/syscall.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -26,8 +27,63 @@ static void append_if_dir(char *buf, size_t cap, const char *path)
     }
 }
 
+static pid_t shell_pid;
+static volatile sig_atomic_t got_signal;
+
+static void sig_handler(int sig)
+{
+    (void)sig;
+    got_signal = 1;
+    if (shell_pid > 0)
+        kill(shell_pid, SIGTERM);
+}
+
+static void setup_console(void)
+{
+    int fd = open("/dev/console", O_RDWR);
+    if (fd < 0)
+        return;
+    dup2(fd, STDIN_FILENO);
+    dup2(fd, STDOUT_FILENO);
+    dup2(fd, STDERR_FILENO);
+    if (fd > 2)
+        close(fd);
+}
+
+static void setup_signals(void)
+{
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = sig_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    sigaction(SIGTERM, &sa, NULL);
+    sigaction(SIGINT, &sa, NULL);
+
+    sa.sa_handler = SIG_IGN;
+    sigaction(SIGHUP, &sa, NULL);
+}
+
+static void reap_children(void)
+{
+    while (waitpid(-1, NULL, WNOHANG) > 0)
+        ;
+}
+
+static void do_shutdown(void)
+{
+    sync();
+    printf("[init] shutting down\n");
+    reboot(RB_POWER_OFF);
+    for (;;) __asm__ volatile("");
+}
+
 int main(void)
 {
+    setsid();
+    setup_console();
+    setup_signals();
+
     setup_runtime_links();
 
     xmkdir("/tmp");
@@ -65,17 +121,36 @@ int main(void)
     snprintf(path_env, sizeof(path_env), "PATH=%s", path_val);
     snprintf(ld_env, sizeof(ld_env), "LD_LIBRARY_PATH=%s", ld_val);
 
-    char *script = (access("/bin/etc/contest-mode", F_OK) == 0) ? "/bin/contest.sh" : NULL;
+    int contest = (access("/bin/etc/contest-mode", F_OK) == 0);
+    char *script = contest ? "/bin/contest.sh" : NULL;
     char *argv[] = {"mksh", script, NULL};
     char *envp[] = {path_env, ld_env, "HOME=/", "SHELL=/bin/mksh", "TERM=vt100", NULL};
 
-    pid_t pid = fork();
-    if (pid == 0) {
+    shell_pid = fork();
+    if (shell_pid == 0) {
         execve("/bin/mksh", argv, envp);
+        perror("execve mksh");
         _exit(127);
     }
+    if (shell_pid < 0) {
+        perror("fork");
+        do_shutdown();
+    }
 
-    int status;
-    waitpid(pid, &status, 0);
-    for (;;) syscall(SYS_reboot, 0);
+    for (;;) {
+        int status;
+        pid_t w = waitpid(-1, &status, 0);
+        if (w < 0) {
+            if (got_signal)
+                break;
+            continue;
+        }
+        if (w == shell_pid) {
+            shell_pid = 0;
+            break;
+        }
+    }
+
+    reap_children();
+    do_shutdown();
 }

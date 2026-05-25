@@ -33,10 +33,8 @@ static void net_block_on_queue_space_locked(net_socket_t *s, task_t *cur)
 static void net_clear_queue_space_waiter(net_socket_t *s, task_t *cur)
 {
     uint64_t irq = spin_lock_irqsave(&g_net_lock);
-    if (net_socket_is_valid_locked(s)) {
-        if (s->send_waiter == cur)
-            s->send_waiter = NULL;
-    }
+    if (s && !s->closed && s->send_waiter == cur)
+        s->send_waiter = NULL;
     proc_set_wake_time(cur, 0);
     spin_unlock_irqrestore(&g_net_lock, irq);
 }
@@ -82,8 +80,8 @@ int net_enqueue_msg_locked(net_socket_t *dst, const void *buf, size_t len,
 }
 
 int net_enqueue_msg_blocking(net_socket_t *s, net_socket_t *dst, const void *buf, size_t len,
-                             const void *addr, size_t addrlen,
-                             int dontwait, uint64_t timeout_ticks)
+                              const void *addr, size_t addrlen,
+                              int dontwait, uint64_t timeout_ticks)
 {
     uint64_t start = timer_get_ticks();
     for (;;) {
@@ -92,7 +90,14 @@ int net_enqueue_msg_blocking(net_socket_t *s, net_socket_t *dst, const void *buf
             spin_unlock_irqrestore(&g_net_lock, irq);
             return -ENOTCONN;
         }
-        if (!net_socket_is_valid_locked(dst) || dst->closed) {
+        /*
+         * Child sockets created by net_inet_connect_stream() are pushed to
+         * the listener's accept queue with in_registry == 0; they are only
+         * registered later when net_accept() calls net_register_socket_locked().
+         * Skip the registry check for these local-TCP peers — dst->closed is
+         * sufficient to detect a destroyed socket.
+         */
+        if (net_socket_is_valid_locked(dst) ? dst->closed : (dst->closed || !dst->connected)) {
             spin_unlock_irqrestore(&g_net_lock, irq);
             return -ENOTCONN;
         }
@@ -125,6 +130,13 @@ int net_enqueue_msg_blocking(net_socket_t *s, net_socket_t *dst, const void *buf
         if (!timeout_ticks && s->type == SOCK_DGRAM) {
             uint64_t udp_deadline = start + MS_TO_TICKS(200);
             if ((int64_t)(timer_get_ticks() - udp_deadline) >= 0) {
+                spin_unlock_irqrestore(&g_net_lock, irq);
+                return -EAGAIN;
+            }
+        }
+        if (!timeout_ticks && s->type == SOCK_STREAM) {
+            uint64_t tcp_deadline = start + MS_TO_TICKS(5000);
+            if ((int64_t)(timer_get_ticks() - tcp_deadline) >= 0) {
                 spin_unlock_irqrestore(&g_net_lock, irq);
                 return -EAGAIN;
             }
