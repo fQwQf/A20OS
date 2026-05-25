@@ -45,3 +45,18 @@ long strtol(const char *nptr, char **endptr, int base) {
         *endptr = (char *)p;
     return value * sign;
 }
+
+
+#include "core/lock.h"
+#include "arch/cc.h"
+
+sys_prot_t sys_arch_protect(void) {
+    uint64_t flags = arch_irqs_enabled() ? 1 : 0;
+    arch_local_irq_disable();
+    return flags;
+}
+
+void sys_arch_unprotect(sys_prot_t pval) {
+    if (pval)
+        arch_local_irq_enable();
+}

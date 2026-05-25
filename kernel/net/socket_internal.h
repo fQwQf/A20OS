@@ -166,3 +166,5 @@ int      net_socket_install_file(net_socket_t *s, int flags);
 int      net_socket_close_file(vfile_t *vf);
 
 #endif /* _NET_SOCKET_INTERNAL_H */
+
+void net_tcp_recved(net_socket_t *s, size_t len);

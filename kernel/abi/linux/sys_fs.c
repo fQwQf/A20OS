@@ -609,13 +609,18 @@ static int select_filter_user(task_t *t, int nfds, void *readfds,
             int keep = 0;
             if (rg >= 0) {
                 int rev = vfs_poll_events(rg, POLLOUT);
-                keep = (rev & (POLLOUT | POLLERR)) != 0;
+                keep = (rev & (POLLOUT | POLLERR | POLLHUP)) != 0;
             }
             if (!keep && fd_clear_user(i, writefds) < 0)
                 return -EFAULT;
         }
         if (exceptfds && fd_isset_user(i, exceptfds)) {
-            if (fd_clear_user(i, exceptfds) < 0)
+            int keep = 0;
+            if (rg >= 0) {
+                int rev = vfs_poll_events(rg, POLLPRI);
+                keep = (rev & (POLLPRI | POLLERR | POLLHUP)) != 0;
+            }
+            if (!keep && fd_clear_user(i, exceptfds) < 0)
                 return -EFAULT;
         }
     }
@@ -653,10 +658,12 @@ int64_t sys_select(int nfds, void *readfds, void *writefds,
             if (writefds && fd_isset_user(i, writefds)) {
                 if (rg < 0) return -EBADF;
                 int rev = vfs_poll_events(rg, POLLOUT);
-                if (rev & (POLLOUT | POLLERR)) ready_count++;
+                if (rev & (POLLOUT | POLLERR | POLLHUP)) ready_count++;
             }
             if (exceptfds && fd_isset_user(i, exceptfds)) {
                 if (rg < 0) return -EBADF;
+                int rev = vfs_poll_events(rg, POLLPRI);
+                if (rev & (POLLPRI | POLLERR | POLLHUP)) ready_count++;
             }
         }
 
@@ -732,10 +739,12 @@ int64_t sys_pselect6(int nfds, void *readfds, void *writefds,
             if (writefds && fd_isset_user(i, writefds)) {
                 if (rg < 0) PSELECT_RETURN(-EBADF);
                 int rev = vfs_poll_events(rg, POLLOUT);
-                if (rev & (POLLOUT | POLLERR)) ready_count++;
+                if (rev & (POLLOUT | POLLERR | POLLHUP)) ready_count++;
             }
             if (exceptfds && fd_isset_user(i, exceptfds)) {
                 if (rg < 0) PSELECT_RETURN(-EBADF);
+                int rev = vfs_poll_events(rg, POLLPRI);
+                if (rev & (POLLPRI | POLLERR | POLLHUP)) ready_count++;
             }
         }
 

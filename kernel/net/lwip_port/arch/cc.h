@@ -53,3 +53,5 @@ typedef intptr_t  ptrdiff_t;
 #define LWIP_PROVIDE_ERRNO 1
 
 #endif /* A20_LWIP_ARCH_CC_H */
+
+typedef uint64_t sys_prot_t;
