@@ -396,6 +396,13 @@ int net_inet_socket_init(net_socket_t *s)
         raw_recv(s->raw, lwip_raw_recv_cb, s);
         return 0;
     }
+    if (s->domain == AF_INET6 && s->type == SOCK_RAW) {
+        s->raw = raw_new_ip_type(IPADDR_TYPE_V6, (u8_t)s->protocol);
+        if (!s->raw)
+            return -ENOMEM;
+        raw_recv(s->raw, lwip_raw_recv_cb, s);
+        return 0;
+    }
     if (s->domain == AF_INET && s->type == SOCK_STREAM) {
         s->tcp = tcp_new_ip_type(IPADDR_TYPE_V4);
         if (!s->tcp)
@@ -658,6 +665,14 @@ int net_inet_connect(net_socket_t *s, const void *addr, size_t addrlen,
         err_t e = raw_connect(s->raw, &ip);
         return e == ERR_OK ? 0 : -ENETUNREACH;
     }
+    if (s->raw && s->domain == AF_INET6) {
+        ip_addr_t ip;
+        int r = net_sockaddr_to_lwip_ip(addr, addrlen, &ip, NULL);
+        if (r < 0)
+            return r;
+        err_t e = raw_connect(s->raw, &ip);
+        return e == ERR_OK ? 0 : -ENETUNREACH;
+    }
     if (s->type == SOCK_STREAM)
         return net_inet_connect_stream(s, addr, addrlen, connect_addr, peer_len);
     return 0;
@@ -832,4 +847,14 @@ void net_inet_accept_child_ready(net_socket_t *s)
 {
     if (s && s->tcp)
         tcp_backlog_accepted(s->tcp);
+}
+
+void net_tcp_recved(net_socket_t *s, size_t len) {
+    if (s && s->tcp && len > 0) {
+        while (len > 0) {
+            uint16_t n = len > 0xFFFF ? 0xFFFF : (uint16_t)len;
+            tcp_recved(s->tcp, n);
+            len -= n;
+        }
+    }
 }

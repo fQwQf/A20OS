@@ -95,8 +95,10 @@ static int signal_default_ignore(int sig) {
 typedef struct user_rt_sigaction {
     uintptr_t handler;
     uint64_t  flags;
+    
     uint32_t  mask[2];
     uintptr_t unused;
+    
 } user_rt_sigaction_t;
 
 typedef struct user_sigset {
