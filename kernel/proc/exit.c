@@ -107,6 +107,8 @@ static void proc_reparent_children(task_t *dead, task_t *reaper)
 
     task_t *to_destroy[64];
     int destroy_count = 0;
+    int force_kill_children = (dead->exit_code < 0 &&
+        dead->exit_code != -SIGCHLD && dead->exit_code != -SIGSTOP);
 
     uint64_t flags = spin_lock_irqsave(&proc_lock);
     task_t *thread_reaper = proc_find_live_thread_reaper_locked(dead);
@@ -118,6 +120,9 @@ static void proc_reparent_children(task_t *dead, task_t *reaper)
             actual_reaper->state == PROC_ZOMBIE)
             actual_reaper = proc_idle_task();
     }
+
+    int child_pids[64];
+    int child_pid_count = 0;
 
     for (task_t *child = proc_first_task_locked(); child; ) {
         task_t *next = proc_next_task_locked(child);
@@ -154,6 +159,11 @@ static void proc_reparent_children(task_t *dead, task_t *reaper)
             continue;
         }
 
+        if (force_kill_children && child->state != PROC_ZOMBIE) {
+            if (child_pid_count < (int)(sizeof(child_pids) / sizeof(child_pids[0])))
+                child_pids[child_pid_count++] = child->pid;
+        }
+
         child->ppid = actual_reaper->pid;
         child->parent = actual_reaper;
         if (child->state == PROC_ZOMBIE)
@@ -166,6 +176,12 @@ static void proc_reparent_children(task_t *dead, task_t *reaper)
         proc_pid_unregister(to_destroy[i]);
         proc_task_release_resources(to_destroy[i]);
         kfree(to_destroy[i]);
+    }
+
+    for (int i = 0; i < child_pid_count; i++) {
+        task_t *child = proc_find(child_pids[i]);
+        if (child && child->state != PROC_UNUSED && child->state != PROC_ZOMBIE)
+            proc_force_exit(child, dead->exit_code);
     }
 }
 
@@ -196,10 +212,11 @@ void proc_exit(int exit_code)
     if (!t)
         panic("proc_exit: no current task");
 
+    int *ctid_to_wake = t->clear_child_tid;
     proc_clear_child_tid_direct(t);
 #if defined(CONFIG_ABI_LINUX) || defined(CONFIG_ABI_BOTH)
-    if (t->clear_child_tid)
-        futex_wake_user(t->clear_child_tid, 1);
+    if (ctid_to_wake)
+        futex_wake_user(ctid_to_wake, 1);
 #endif
 
 #if defined(CONFIG_ABI_LINUX) || defined(CONFIG_ABI_BOTH)
@@ -260,10 +277,11 @@ void proc_force_exit(task_t *t, int exit_code)
     if (t == proc_current())
         proc_exit(exit_code);
 
+    int *ctid_to_wake = t->clear_child_tid;
     proc_clear_child_tid_direct(t);
 #if defined(CONFIG_ABI_LINUX) || defined(CONFIG_ABI_BOTH)
-    if (t->clear_child_tid)
-        futex_wake_user(t->clear_child_tid, 1);
+    if (ctid_to_wake)
+        futex_wake_user(ctid_to_wake, 1);
 #endif
 
 #if defined(CONFIG_ABI_LINUX) || defined(CONFIG_ABI_BOTH)
