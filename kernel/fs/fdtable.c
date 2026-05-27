@@ -12,6 +12,7 @@ static files_struct_t *fdtable_alloc_files(void)
     files_struct_t *files = kmalloc(sizeof(*files));
     if (!files)
         panic("fdtable: no memory");
+    spin_init(&files->lock);
     for (int i = 0; i < MAX_FILES; i++) {
         files->fd[i] = -1;
         files->cloexec[i] = 0;
@@ -201,6 +202,7 @@ int fdtable_unshare(task_t *task)
         return 0;
 
     files_struct_t *files = fdtable_alloc_files();
+    uint64_t flags = spin_lock_irqsave(&old->lock);
     for (int i = 0; i < MAX_FILES; i++) {
         int gfd = old->fd[i];
         files->fd[i] = gfd;
@@ -208,6 +210,7 @@ int fdtable_unshare(task_t *task)
         if (gfd >= 0) {
             int r = fdtable_ref_gfd(gfd);
             if (r < 0) {
+                spin_unlock_irqrestore(&old->lock, flags);
                 for (int j = 0; j < i; j++) {
                     if (files->fd[j] >= 0)
                         vfs_close(files->fd[j]);
@@ -218,6 +221,7 @@ int fdtable_unshare(task_t *task)
         }
     }
     fdtable_recompute_next(files);
+    spin_unlock_irqrestore(&old->lock, flags);
     task->files = files;
     refcount_dec_and_test(&old->refcount);
     return 0;
@@ -233,15 +237,20 @@ void fdtable_close_all(task_t *task)
         files = NULL;
         return;
     }
+    uint64_t flags = spin_lock_irqsave(&files->lock);
+    int to_close[MAX_FILES];
+    int close_count = 0;
     for (int i = 0; i < MAX_FILES; i++) {
         if (files->fd[i] >= 0) {
-            int gfd = files->fd[i];
+            to_close[close_count++] = files->fd[i];
             files->fd[i] = -1;
             files->cloexec[i] = 0;
             fdtable_mask_clear(files, i);
-            vfs_close(gfd);
         }
     }
+    spin_unlock_irqrestore(&files->lock, flags);
+    for (int i = 0; i < close_count; i++)
+        vfs_close(to_close[i]);
     kfree(files);
 }
 
@@ -250,15 +259,21 @@ void fdtable_close_on_exec(task_t *task)
     files_struct_t *files = fdtable_files(task);
     if (!files)
         return;
+    uint64_t flags = spin_lock_irqsave(&files->lock);
+    int to_close[MAX_FILES];
+    int close_count = 0;
     for (int i = 0; i < MAX_FILES; i++) {
         if (files->cloexec[i] && files->fd[i] >= 0) {
-            vfs_close(files->fd[i]);
+            to_close[close_count++] = files->fd[i];
             files->fd[i] = -1;
             fdtable_note_free(files, i);
         }
         files->cloexec[i] = 0;
     }
     fdtable_recompute_next(files);
+    spin_unlock_irqrestore(&files->lock, flags);
+    for (int i = 0; i < close_count; i++)
+        vfs_close(to_close[i]);
     fdtable_init_stdio(task);
 }
 
@@ -267,9 +282,13 @@ int fdtable_get(task_t *task, int fd)
     if (!task || !task->files || fd < 0 || fd >= MAX_FILES)
         return -EBADF;
     files_struct_t *files = (files_struct_t *)task->files;
+    uint64_t flags = spin_lock_irqsave(&files->lock);
     int gfd = files->fd[fd];
-    if (gfd < 0)
+    if (gfd < 0) {
+        spin_unlock_irqrestore(&files->lock, flags);
         return -EBADF;
+    }
+    spin_unlock_irqrestore(&files->lock, flags);
     return gfd;
 }
 
@@ -285,6 +304,7 @@ int fdtable_install(task_t *task, int gfd, int flags)
     files_struct_t *files = fdtable_files(task);
     if (!files)
         return -ESRCH;
+    uint64_t lock_flags = spin_lock_irqsave(&files->lock);
     int limit = fdtable_fd_limit(task);
     int fd = fdtable_find_free_below(files, files->next_fd, limit);
     if (fd < 0)
@@ -293,8 +313,10 @@ int fdtable_install(task_t *task, int gfd, int flags)
         files->fd[fd] = gfd;
         files->cloexec[fd] = (flags & O_CLOEXEC) ? 1 : 0;
         fdtable_note_alloc(files, fd);
+        spin_unlock_irqrestore(&files->lock, lock_flags);
         return fd;
     }
+    spin_unlock_irqrestore(&files->lock, lock_flags);
     vfs_close(gfd);
     return -EMFILE;
 }
@@ -306,13 +328,19 @@ int fdtable_install_current(int gfd, int flags)
 
 int fdtable_close(task_t *task, int fd)
 {
-    int gfd = fdtable_get(task, fd);
-    if (gfd < 0)
-        return gfd;
+    if (!task || !task->files || fd < 0 || fd >= MAX_FILES)
+        return -EBADF;
     files_struct_t *files = (files_struct_t *)task->files;
+    uint64_t flags = spin_lock_irqsave(&files->lock);
+    int gfd = files->fd[fd];
+    if (gfd < 0) {
+        spin_unlock_irqrestore(&files->lock, flags);
+        return -EBADF;
+    }
     files->fd[fd] = -1;
     files->cloexec[fd] = 0;
     fdtable_note_free(files, fd);
+    spin_unlock_irqrestore(&files->lock, flags);
     return vfs_close(gfd);
 }
 
@@ -334,23 +362,32 @@ int fdtable_dup(task_t *task, int oldfd, int minfd, int flags)
         return -EBADF;
     if (minfd < 0)
         minfd = 0;
+    uint64_t lock_flags = spin_lock_irqsave(&files->lock);
     int limit = fdtable_fd_limit(task);
-    if (minfd >= limit)
+    if (minfd >= limit) {
+        spin_unlock_irqrestore(&files->lock, lock_flags);
         return -EMFILE;
+    }
 
     int gfd = files->fd[oldfd];
-    if (gfd < 0)
+    if (gfd < 0) {
+        spin_unlock_irqrestore(&files->lock, lock_flags);
         return -EBADF;
-    if (fdtable_ref_gfd(gfd) < 0)
+    }
+    if (fdtable_ref_gfd(gfd) < 0) {
+        spin_unlock_irqrestore(&files->lock, lock_flags);
         return -EBADF;
+    }
 
     int fd = fdtable_find_free_below(files, minfd, limit);
     if (fd >= 0) {
         files->fd[fd] = gfd;
         files->cloexec[fd] = (flags & O_CLOEXEC) ? 1 : 0;
         fdtable_note_alloc(files, fd);
+        spin_unlock_irqrestore(&files->lock, lock_flags);
         return fd;
     }
+    spin_unlock_irqrestore(&files->lock, lock_flags);
     vfs_close(gfd);
     return -EMFILE;
 }
@@ -371,37 +408,54 @@ int fdtable_dup_to(task_t *task, int oldfd, int newfd, int flags)
     if (oldfd == newfd)
         return -EINVAL;
 
+    uint64_t lock_flags = spin_lock_irqsave(&files->lock);
     int gfd = files->fd[oldfd];
-    if (gfd < 0)
+    if (gfd < 0) {
+        spin_unlock_irqrestore(&files->lock, lock_flags);
         return -EBADF;
+    }
 
-    if (files->fd[newfd] >= 0)
-        vfs_close(files->fd[newfd]);
+    int old_new_gfd = files->fd[newfd];
+    files->fd[newfd] = -1;
+    files->cloexec[newfd] = 0;
+    fdtable_note_free(files, newfd);
     if (fdtable_ref_gfd(gfd) < 0) {
-        files->fd[newfd] = -1;
-        files->cloexec[newfd] = 0;
-        fdtable_note_free(files, newfd);
+        spin_unlock_irqrestore(&files->lock, lock_flags);
+        if (old_new_gfd >= 0)
+            vfs_close(old_new_gfd);
         return -EBADF;
     }
     files->fd[newfd] = gfd;
     files->cloexec[newfd] = (flags & O_CLOEXEC) ? 1 : 0;
     fdtable_note_alloc(files, newfd);
+    spin_unlock_irqrestore(&files->lock, lock_flags);
+    if (old_new_gfd >= 0)
+        vfs_close(old_new_gfd);
     return newfd;
 }
 
 int fdtable_get_cloexec(task_t *task, int fd)
 {
-    if (fdtable_get(task, fd) < 0)
+    if (!task || !task->files || fd < 0 || fd >= MAX_FILES)
         return -EBADF;
     files_struct_t *files = (files_struct_t *)task->files;
-    return files->cloexec[fd] ? FD_CLOEXEC : 0;
+    uint64_t flags = spin_lock_irqsave(&files->lock);
+    int ret = files->fd[fd] >= 0 ? (files->cloexec[fd] ? FD_CLOEXEC : 0) : -EBADF;
+    spin_unlock_irqrestore(&files->lock, flags);
+    return ret;
 }
 
 int fdtable_set_cloexec(task_t *task, int fd, int cloexec)
 {
-    if (fdtable_get(task, fd) < 0)
+    if (!task || !task->files || fd < 0 || fd >= MAX_FILES)
         return -EBADF;
     files_struct_t *files = (files_struct_t *)task->files;
+    uint64_t flags = spin_lock_irqsave(&files->lock);
+    if (files->fd[fd] < 0) {
+        spin_unlock_irqrestore(&files->lock, flags);
+        return -EBADF;
+    }
     files->cloexec[fd] = cloexec ? 1 : 0;
+    spin_unlock_irqrestore(&files->lock, flags);
     return 0;
 }

@@ -46,6 +46,16 @@ static void dump_trap_context(trap_context_t *ctx) {
          (unsigned long)TRAP_CTX_SYSCALL_NUM(ctx));
 }
 
+static void dump_kernel_backtrace(trap_context_t *ctx, uint64_t pc, int max_frames) {
+    kerr("  backtrace:\n");
+    kerr("    [%d] pc=0x%lx\n", 0, (unsigned long)pc);
+    struct backtrace_frame frames[16];
+    int n = arch_unwind_frames(TRAP_CTX_FP(ctx), frames, max_frames > 16 ? 16 : max_frames);
+    for (int i = 0; i < n; i++) {
+        kerr("    [%d] pc=0x%lx\n", i + 1, (unsigned long)frames[i].pc);
+    }
+}
+
 static void dump_fault_pte(task_t *task, uint64_t va) {
     if (!task || !task->mm || !task->mm->pgdir)
         return;
@@ -76,7 +86,7 @@ static int deliver_user_sync_signal(trap_context_t *ctx, int sig, int fatal_code
         printf("FATAL: pid=%d signal=%d (no signal state) pc=0x%lx\n",
                cur ? cur->pid : -1, sig,
                (unsigned long)TRAP_CTX_EPC(ctx));
-        proc_exit(fatal_code);
+        proc_exit_group(fatal_code);
     }
 
     signal_state_t *ss = (signal_state_t *)cur->signals;
@@ -87,7 +97,7 @@ static int deliver_user_sync_signal(trap_context_t *ctx, int sig, int fatal_code
                cur->pid, sig, cur->abi_mode,
                (unsigned long)TRAP_CTX_EPC(ctx),
                (unsigned long)TRAP_CTX_SP(ctx));
-        proc_exit(fatal_code);
+        proc_exit_group(fatal_code);
     }
 
     signal_send(cur->pid, sig);
@@ -101,6 +111,9 @@ void trap_handler(trap_context_t *ctx) {
     uint64_t sepc = arch_read_epc();
 
     TRAP_CTX_KScratch0(ctx) = arch_read_satp();
+    task_t *current = proc_current();
+    if (current && current->pgdir)
+        current->trap_ctx = ctx;
 
     if (scause & CAUSE_INTR_MASK) {
         arch_handle_irq(scause & CAUSE_CODE_MASK, 1);
@@ -116,21 +129,34 @@ void trap_handler(trap_context_t *ctx) {
              * normal syscall body interruptible so UART input, block/network
              * completions, and timer bookkeeping are not starved by long
              * kernel-side loops such as fork-heavy benchmarks.
-             */
+            */
             arch_local_irq_enable();
             syscall_dispatch(ctx);
             arch_local_irq_disable();
+            return;
         } else if (code == CAUSE_LOAD_PAGE_FAULT || code == CAUSE_STORE_PAGE_FAULT || code == CAUSE_INSN_PAGE_FAULT) {
+            uint64_t mm_flags = 0;
+            int mm_locked = 0;
+            if (cur && cur->mm) {
+                mm_flags = spin_lock_irqsave(&cur->mm->lock);
+                mm_locked = 1;
+            }
             if (code == CAUSE_STORE_PAGE_FAULT) {
                 if (handle_cow_fault(cur, stval) == 0) {
+                    if (mm_locked)
+                        spin_unlock_irqrestore(&cur->mm->lock, mm_flags);
                     signal_deliver_user(ctx);
                     return;
                 }
             }
             if (handle_demand_fault(cur, stval) == 0) {
+                if (mm_locked)
+                    spin_unlock_irqrestore(&cur->mm->lock, mm_flags);
                 signal_deliver_user(ctx);
                 return;
             }
+            if (mm_locked)
+                spin_unlock_irqrestore(&cur->mm->lock, mm_flags);
             printf("SIGSEGV: pid=%d code=%lu sepc=0x%lx stval=0x%lx abi=%d\n",
                   cur ? cur->pid : -1, (unsigned long)code,
                   (unsigned long)sepc, (unsigned long)stval,
@@ -141,7 +167,7 @@ void trap_handler(trap_context_t *ctx) {
             dump_fault_pte(cur, stval);
             if (deliver_user_sync_signal(ctx, SIGSEGV, -SIGSEGV))
                 return;
-            proc_exit(-SIGSEGV);
+            proc_exit_group(-SIGSEGV);
         } else if (code == CAUSE_PAGE_MODIFICATION) {
             /*
              * LoongArch PME: hardware write to a V=1, D=0 page.
@@ -175,13 +201,13 @@ void trap_handler(trap_context_t *ctx) {
             dump_fault_pte(cur, stval);
             if (deliver_user_sync_signal(ctx, SIGSEGV, -SIGSEGV))
                 return;
-            proc_exit(-SIGSEGV);
+            proc_exit_group(-SIGSEGV);
         } else if (code == CAUSE_INSN_FAULT || code == CAUSE_LOAD_FAULT || code == CAUSE_STORE_FAULT) {
             printf("ADE/ALE: pid=%d sepc=0x%lx stval=0x%lx code=%lu\n",
                   cur ? cur->pid : -1, (unsigned long)sepc, (unsigned long)stval, (unsigned long)code);
             if (deliver_user_sync_signal(ctx, SIGSEGV, -SIGSEGV))
                 return;
-            proc_exit(-SIGSEGV); 
+            proc_exit_group(-SIGSEGV); 
         } else if (code == CAUSE_ILLEGAL_INSN) {
             printf("SIGILL: pid=%d sepc=0x%lx stval=0x%lx\n",
                   cur ? cur->pid : -1, (unsigned long)sepc, (unsigned long)stval);
@@ -192,11 +218,17 @@ void trap_handler(trap_context_t *ctx) {
             if (have_user_insn)
                 kerr("  insn@sepc=0x%08x\n", user_insn);
             dump_trap_context(ctx);
-            proc_exit(-SIGILL);
+            proc_exit_group(-SIGILL);
+        } else if (code == CAUSE_BREAKPOINT) {
+            printf("SIGTRAP: pid=%d sepc=0x%lx stval=0x%lx\n",
+                  cur ? cur->pid : -1, (unsigned long)sepc, (unsigned long)stval);
+            if (deliver_user_sync_signal(ctx, SIGTRAP, -SIGTRAP))
+                return;
+            proc_exit_group(-SIGTRAP);
         } else {
             kerr("TRAP EXCEPTION: scause=0x%lx code=%lu sepc=0x%lx stval=0x%lx\n",
                    scause, code, sepc, stval);
-            proc_exit(-1);
+            proc_exit_group(-1);
         }
     }
     signal_deliver_user(ctx);
@@ -232,9 +264,10 @@ void kernel_trap_handler(trap_context_t *ctx) {
             kerr("Kernel failed to access user address. code=%lu\n", code);
             kerr("pid=%d sepc(ERA)=0x%lx stval(BADV)=0x%lx\n", cur ? cur->pid : -1, sepc, stval);
             dump_trap_context(ctx);
+            dump_kernel_backtrace(ctx, sepc, 16);
             
             if (cur && cur->mm && stval < USER_VA_LIMIT) {
-                proc_exit(-SIGSEGV);
+                proc_exit_group(-SIGSEGV);
             }
             panic("Unhandled kernel page fault");
 
@@ -245,6 +278,7 @@ void kernel_trap_handler(trap_context_t *ctx) {
             kerr("Fault Address (BADV): 0x%lx\n", stval);
             kerr("Current Task: pid=%d name=%s\n", cur ? cur->pid : -1, cur ? cur->name : "?");
             dump_trap_context(ctx);
+            dump_kernel_backtrace(ctx, sepc, 16);
             kerr("=================================\n");
             panic("Kernel Address Error");
 

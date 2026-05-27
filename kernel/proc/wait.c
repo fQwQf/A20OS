@@ -82,9 +82,7 @@ int proc_wait4(int pid, int *status, int options)
                 child->state = PROC_UNUSED;
                 proc_unlink_task_locked(child);
                 spin_unlock_irqrestore(&proc_lock, lock_flags);
-                proc_pid_unregister(child);
-                proc_task_release_resources(child);
-                kfree(child);
+                proc_destroy_task(child);
                 return child_pid;
             }
             if ((options & WUNTRACED) && cstate == PROC_STOPPED) {

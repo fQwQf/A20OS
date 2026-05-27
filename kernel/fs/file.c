@@ -142,9 +142,10 @@ vfile_t *vfs_get_file_ref(int fd)
 
 void vfs_put_file_ref(int fd, vfile_t *vf)
 {
+    (void)fd;
     if (!vf)
         return;
-    (void)vfs_close(fd);
+    refcount_dec_and_test(&vf->ref_count);
 }
 
 int vfs_ref_fd(int fd)

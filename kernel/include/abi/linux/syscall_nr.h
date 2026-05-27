@@ -231,4 +231,25 @@
 #define SYS_get_robust_list 100
 #define SYS_get_mempolicy   236
 
+/* Missing syscall numbers (RISC-V 64-bit Linux) */
+#define SYS_syncfs          306
+#define SYS_fanotify_init   262
+#define SYS_fanotify_mark   263
+#define SYS_signalfd4       74
+#define SYS_acct            89
+#define SYS_add_key         217
+#define SYS_request_key     218
+#define SYS_keyctl          219
+#define SYS_io_setup        0
+#define SYS_io_destroy      1
+#define SYS_io_submit       2
+#define SYS_io_getevents    4
+#define SYS_io_cancel       3
+#define SYS_init_module     178
+#define SYS_delete_module   179
+#define SYS_finit_module    180
+#define SYS_userfaultfd     266
+#define SYS_perf_event_open 241
+#define SYS_arch_prctl      1000
+
 #endif /* _ABI_LINUX_SYSCALL_NR_H */

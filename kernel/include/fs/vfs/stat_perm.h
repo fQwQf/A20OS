@@ -8,6 +8,9 @@ void fill_char_kstat(kstat_t *st);
 void fill_pipe_kstat(kstat_t *st);
 
 int vfs_task_in_group(task_t *t, uint32_t gid);
+int vfs_mode_has_perm_ids_nocap(uint32_t st_mode, uint32_t file_uid,
+                                uint32_t file_gid, uint32_t uid,
+                                uint32_t gid, int mask);
 int vfs_mode_has_perm_ids(uint32_t st_mode, uint32_t file_uid,
                           uint32_t file_gid, uint32_t uid,
                           uint32_t gid, int mask);

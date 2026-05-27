@@ -110,4 +110,26 @@ static inline void arch_dma_sync_for_cpu(const void *addr, size_t size) {
     (void)size;
 }
 
+struct backtrace_frame {
+    uint64_t pc;
+};
+
+static inline int arch_unwind_frames(uint64_t fp,
+                                     struct backtrace_frame *frames,
+                                     int max_frames) {
+    int n = 0;
+    for (int i = 0; i < max_frames && fp; i++) {
+        uint64_t *frame = (uint64_t *)fp;
+        if (!arch_is_kernel_address(frame))
+            break;
+        uint64_t ra = frame[-1];
+        uint64_t next_fp = frame[-2];
+        if (!ra) break;
+        frames[n++].pc = ra;
+        if (!next_fp || next_fp <= fp) break;
+        fp = next_fp;
+    }
+    return n;
+}
+
 #endif

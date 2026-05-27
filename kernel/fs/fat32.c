@@ -758,8 +758,10 @@ static int fat32_fread(vfile_t *vf, char *buf, size_t count) {
     fat32_fctx_t *fc = (fat32_fctx_t *)vf->priv;
     fat32_sb_t *sb = fc->sb;
     if (fc->is_dir) return -EISDIR;
-    if (fc->file_off >= fc->file_size) return 0;
-    size_t remaining = fc->file_size - fc->file_off;
+    size_t fsize = vf->vnode->size;
+    fc->file_size = fsize;
+    if (fc->file_off >= fsize) return 0;
+    size_t remaining = fsize - fc->file_off;
     if (count > remaining) count = remaining;
     if (count == 0) return 0;
 
@@ -833,7 +835,10 @@ static int fat32_fwrite(vfile_t *vf, const char *buf, size_t count) {
     }
 
     fc->file_off += done;
-    if (fc->file_off > fc->file_size) {
+    if (fc->file_off > vf->vnode->size) {
+        vf->vnode->size = fc->file_off;
+        fat32_vnode_priv_t *fp = (fat32_vnode_priv_t *)vf->vnode->fs_data;
+        if (fp) fp->file_size = fc->file_off;
         fc->file_size = fc->file_off;
         fc->dirty = 1;
     }
@@ -882,6 +887,7 @@ static int fat32_vn_writepage(vnode_t *vn, uint64_t index,
 
 static long fat32_flseek(vfile_t *vf, long offset, int whence) {
     fat32_fctx_t *fc = (fat32_fctx_t *)vf->priv;
+    fc->file_size = vf->vnode->size;
     long new_off;
     switch (whence) {
         case SEEK_SET: new_off = offset; break;
@@ -1089,9 +1095,9 @@ vfile_t *fat32_open_vnode(vnode_t *vn, int flags) {
     memset(fc, 0, sizeof(*fc));
     fc->sb            = fp->sb;
     fc->first_cluster = fp->first_cluster;
-    fc->file_size     = fp->file_size;
+    fc->file_size     = vn->size;
     fc->is_dir        = fp->is_dir;
-    fc->file_off      = (flags & O_APPEND) ? fp->file_size : 0;
+    fc->file_off      = (flags & O_APPEND) ? vn->size : 0;
     fc->cur_cluster   = (fc->file_off == 0) ? fp->first_cluster : 0;
     fc->cluster_off   = 0;
     fc->dir_byte_off  = 0;

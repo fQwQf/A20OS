@@ -36,16 +36,14 @@ int vfs_read_file(vfile_t *vf, char *buf, size_t count)
     if ((vf->vnode || vfs_is_pipe_vfile(vf) || vfs_is_char_device_vfile(vf)) &&
         !vfs_should_read(vf->flags))
         return -EBADF;
-    if (vf->vnode && vf->vnode->type == VFS_FT_REGULAR &&
+    if (vf->vnode && ((vf->vnode->mode & S_IFMT) == S_IFREG) &&
         (vf->flags & O_DIRECT)) {
-        if (vf->vnode) {
-            page_cache_writeback_vnode(vf->vnode, NULL, NULL);
-            long cur_off = (long)vf->offset;
-            page_cache_invalidate_uptodate_range(vf->vnode, (uint64_t)cur_off,
-                                                  (uint64_t)(cur_off + count));
-        }
+        page_cache_writeback_vnode(vf->vnode, NULL, NULL);
+        long cur_off = (long)vf->offset;
+        page_cache_invalidate_uptodate_range(vf->vnode, (uint64_t)cur_off,
+                                              (uint64_t)(cur_off + count));
     }
-    if (vf->vnode && vf->vnode->type == VFS_FT_REGULAR &&
+    if (vf->vnode && ((vf->vnode->mode & S_IFMT) == S_IFREG) &&
         !(vf->flags & O_DIRECT) &&
         vf->ops && vf->ops->read && vf->ops->lseek) {
         /* Skip page cache for virtual filesystems (procfs, cgroupfs, devfs,
@@ -80,7 +78,7 @@ int vfs_write_file(vfile_t *vf, const char *buf, size_t count)
     if ((vf->seals & F_SEAL_GROW) && vf->vnode &&
         vf->offset + count > vf->vnode->size)
         return -EPERM;
-    if ((vf->flags & O_DIRECT) && vf->vnode) {
+    if ((vf->flags & O_DIRECT) && vf->vnode && ((vf->vnode->mode & S_IFMT) == S_IFREG)) {
         page_cache_writeback_vnode(vf->vnode, NULL, NULL);
         long cur_off = (long)vf->offset;
         page_cache_invalidate_uptodate_range(vf->vnode, (uint64_t)cur_off,

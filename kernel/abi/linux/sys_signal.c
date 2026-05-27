@@ -60,7 +60,7 @@ int64_t sys_tgkill(int tgid, int tid, int sig) {
     int perm = signal_send_permission(self, target);
     if (perm < 0) return perm;
     if (sig == 0) return 0;
-    return signal_send_thread(tid, sig);
+    return signal_send_thread_user(tid, sig);
 }
 
 int64_t sys_tkill(int tid, int sig) {
@@ -71,7 +71,7 @@ int64_t sys_tkill(int tid, int sig) {
     int perm = signal_send_permission(self, target);
     if (perm < 0) return perm;
     if (sig == 0) return 0;
-    return signal_send_thread(tid, sig);
+    return signal_send_thread_user(tid, sig);
 }
 
 int64_t sys_rt_sigqueueinfo(int tgid, int sig, void *uinfo) {
@@ -97,18 +97,13 @@ int64_t sys_sigprocmask(int how, void *set, void *oldset, size_t sigsetsize) {
 }
 
 int64_t sys_sigreturn(trap_context_t *ctx) {
-    task_t *t = proc_current();
-    if (!t || !t->signals) return 0;
-    /* Legacy (non-RT) sigreturn: restore from saved kernel context */
-    if (t->sig_handling) {
-        t->sig_blocked = t->sig_old_blocked;
-        if (ctx)
-            *ctx = t->sig_saved_ctx;
-        t->sig_handling = 0;
-        return 0;
-    }
-
-    /* RT sigreturn: read full frame from user stack */
+    /*
+     * Linux syscall 139 is rt_sigreturn on RISC-V, LoongArch and AArch64.
+     * Restoring from task->sig_saved_ctx is not sufficient: it is only one
+     * slot per task, so nested or adjacent signal delivery can corrupt the
+     * context that user space expects rt_sigreturn to restore from its stack
+     * frame.  The rt frame is the ABI source of truth.
+     */
     return sys_rt_sigreturn_impl(ctx);
 }
 

@@ -104,10 +104,21 @@ static void epoll_put_ref(int gfd, vfile_t *vf)
         vfs_put_file_ref(gfd, vf);
 }
 
+static int check_epfd(int epfd)
+{
+    int64_t gfd = fdtable_get_current(epfd);
+    if (gfd < 0) return -EBADF;
+    vfile_t *vf = vfs_get_file_ref((int)gfd);
+    if (!vf) return -EBADF;
+    int is_ep = vfile_is_epoll(vf);
+    vfs_put_file_ref((int)gfd, vf);
+    return is_ep ? 0 : -EINVAL;
+}
+
 static int epoll_check_cycle(int root_fd, int target_fd, int depth)
 {
     if (depth >= EPOLL_MAX_NESTING)
-        return -ELOOP;
+        return -EINVAL;
     if (root_fd == target_fd)
         return -ELOOP;
 
@@ -129,8 +140,9 @@ static int epoll_check_cycle(int root_fd, int target_fd, int depth)
         vfs_put_file_ref((int)gfd, vf);
         if (!is_ep) continue;
 
-        if (epoll_check_cycle(root_fd, watched_fd, depth + 1) < 0)
-            return -ELOOP;
+        int r = epoll_check_cycle(root_fd, watched_fd, depth + 1);
+        if (r < 0)
+            return r;
     }
     return 0;
 }
@@ -204,6 +216,9 @@ int64_t sys_epoll_create(int size)
 
 int64_t sys_epoll_ctl(int epfd, int op, int fd, void *event)
 {
+    int err = check_epfd(epfd);
+    if (err < 0) return err;
+
     epoll_t *ep = epoll_get(epfd);
     if (!ep) return -EBADF;
 
@@ -229,9 +244,10 @@ int64_t sys_epoll_ctl(int epfd, int op, int fd, void *event)
         {
             vfile_t *vf_check = vfs_get_file_ref((int)target_gfd);
             if (vf_check && vfile_is_epoll(vf_check)) {
-                if (epoll_check_cycle(epfd, fd, 0) < 0) {
+                int cyc_err = epoll_check_cycle(epfd, fd, 0);
+                if (cyc_err < 0) {
                     vfs_put_file_ref((int)target_gfd, vf_check);
-                    return -ELOOP;
+                    return cyc_err;
                 }
             }
             if (vf_check && vf_check->vnode &&
@@ -279,6 +295,9 @@ static int epoll_do_wait(int epfd, void *events, int maxevents,
                          size_t sigsetsize)
 {
     (void)sigsetsize;
+
+    int err = check_epfd(epfd);
+    if (err < 0) return err;
 
     int ep_gfd = -1;
     vfile_t *ep_vf = NULL;

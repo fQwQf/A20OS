@@ -218,6 +218,36 @@ int loop_dev_ioctl(vfile_t *vf, unsigned long req, void *arg) {
     return -ENOTTY;
 }
 
+#define LOOP_CTL_ADD      0x4C80
+#define LOOP_CTL_REMOVE   0x4C81
+#define LOOP_CTL_GET_FREE 0x4C82
+
+int loop_control_ioctl(unsigned long req, void *arg) {
+    if (req == LOOP_CTL_GET_FREE) {
+        for (int i = 0; i < MAX_LOOP_DEVS; i++) {
+            if (!g_loop[i].in_use)
+                return i;
+        }
+        return -ENOSPC;
+    }
+    if (req == LOOP_CTL_ADD) {
+        int idx;
+        for (idx = 0; idx < MAX_LOOP_DEVS; idx++) {
+            if (!g_loop[idx].in_use) break;
+        }
+        if (idx >= MAX_LOOP_DEVS) return -ENOSPC;
+        return idx;
+    }
+    if (req == LOOP_CTL_REMOVE) {
+        int idx;
+        if (copy_from_user(&idx, arg, sizeof(idx)) < 0) return -EFAULT;
+        if (idx < 0 || idx >= MAX_LOOP_DEVS) return -EINVAL;
+        if (g_loop[idx].in_use) return -EBUSY;
+        return 0;
+    }
+    return -ENOTTY;
+}
+
 int loop_dev_count(void) {
     return MAX_LOOP_DEVS;
 }
