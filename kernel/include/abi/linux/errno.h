@@ -32,6 +32,7 @@
 #define ELOOP        40
 #define ENAMETOOLONG 36
 #define ERANGE       34
+#define EDEADLK      35
 #define ENOTTY       25
 #define EOPNOTSUPP   95
 #define EAFNOSUPPORT 97
@@ -52,6 +53,7 @@
 #define ENODATA      61
 #define ENOLCK       37
 #define ENXIO        6
+#define EFBIG        27
 
 /*
  * Internal kernel error codes — never returned to userspace.
