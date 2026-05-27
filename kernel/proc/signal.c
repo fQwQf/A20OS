@@ -95,15 +95,29 @@ static int signal_default_ignore(int sig) {
 typedef struct user_rt_sigaction {
     uintptr_t handler;
     uint64_t  flags;
-    
-    uint32_t  mask[2];
-    uintptr_t unused;
-    
+    uint64_t  mask;
 } user_rt_sigaction_t;
 
 typedef struct user_sigset {
     uint64_t bits[1];
 } user_sigset_t;
+
+static void build_siginfo_code(siginfo_t *si, int sig, task_t *sender, int code)
+{
+    memset(si, 0, sizeof(*si));
+    si->si_signo = sig;
+    si->si_code = code;
+    if (sender) {
+        si->_sifields[0] = 0;
+        si->_sifields[1] = sender->pid;
+        si->_sifields[2] = (int)sender->cred.uid;
+    }
+}
+
+static void build_siginfo(siginfo_t *si, int sig, task_t *sender)
+{
+    build_siginfo_code(si, sig, sender, SI_USER);
+}
 
 // 初始化信号状态
 void signal_init(signal_state_t *ss) {
@@ -162,10 +176,16 @@ int signal_send_info(int pid, int signum, const void *info, size_t info_size) {
         proc_make_ready(t);
     }
 
-    if (t == proc_current()) {
+    if (!is_user && t == proc_current()) {
         signal_deliver();
     }
     return 0;
+}
+
+int signal_send_user(int pid, int signum) {
+    siginfo_t si;
+    build_siginfo(&si, signum, proc_current());
+    return signal_send_info(pid, signum, &si, sizeof(si));
 }
 
 int signal_send_thread(int tid, int signum) {
@@ -189,6 +209,41 @@ int signal_send_thread(int tid, int signum) {
         proc_force_exit(t, -signal_wait_status(signum));
         return 0;
     }
+
+    t->thread_pending |= signal_mask_bit(signum);
+    if (t->state == PROC_BLOCKED || t->state == PROC_STOPPED) {
+        proc_make_ready(t);
+    }
+    return 0;
+}
+
+int signal_send_thread_user(int tid, int signum) {
+    if (signum <= 0 || signum >= NSIG) return -EINVAL;
+    task_t *t = proc_find(tid);
+    if (!t) return -ESRCH;
+    if (!t->signals) return -EINVAL;
+
+    signal_state_t *ss = (signal_state_t *)t->signals;
+    sigaction_t *sa = &ss->actions[signum];
+
+    if (sa->sa_handler == SIG_IGN)
+        return 0;
+
+    int is_user = (t->pgdir != NULL);
+
+    if (!is_user &&
+        !(t->sig_blocked & signal_mask_bit(signum)) &&
+        sa->sa_handler == SIG_DFL &&
+        signal_default_terminate(signum)) {
+        proc_force_exit(t, -signal_wait_status(signum));
+        return 0;
+    }
+
+    siginfo_t si;
+    build_siginfo_code(&si, signum, proc_current(), SI_TKILL);
+    memset(ss->pending_info[signum], 0, SIGNAL_INFO_SIZE);
+    memcpy(ss->pending_info[signum], &si, sizeof(si));
+    ss->pending_has_info[signum] = 1;
 
     t->thread_pending |= signal_mask_bit(signum);
     if (t->state == PROC_BLOCKED || t->state == PROC_STOPPED) {
@@ -234,6 +289,8 @@ void signal_deliver(void) {
     if (!deliverable) return;
 
     int is_user = t->pgdir != NULL;
+    if (is_user)
+        return;
 
     for (int sig = 1; sig < NSIG; sig++) {
         if (!(deliverable & (1ULL << sig))) continue;
@@ -259,7 +316,7 @@ void signal_deliver(void) {
                 sched();
                 continue;
             }
-            proc_exit(-signal_wait_status(sig));
+            proc_exit_group(-signal_wait_status(sig));
         }
 
         if (is_user) {
@@ -274,18 +331,6 @@ void signal_deliver(void) {
     }
 }
 
-static void build_siginfo(siginfo_t *si, int sig, task_t *sender)
-{
-    memset(si, 0, sizeof(*si));
-    si->si_signo = sig;
-    si->si_code = SI_USER;
-    if (sender) {
-        si->_sifields[0] = 0;
-        si->_sifields[1] = sender->pid;
-        si->_sifields[2] = (int)sender->cred.uid;
-    }
-}
-
 static void build_ucontext(ucontext_t *uc, trap_context_t *ctx,
                            uint64_t old_blocked, sigaltstack_t *altstack)
 {
@@ -295,14 +340,7 @@ static void build_ucontext(ucontext_t *uc, trap_context_t *ctx,
     uc->uc_stack.ss_sp = altstack->ss_sp;
     uc->uc_stack.ss_flags = altstack->ss_flags;
     uc->uc_stack.ss_size = altstack->ss_size;
-    sigcontext_t *sc = &uc->uc_mcontext;
-#if defined(CONFIG_RISCV64)
-    sc->sc_regs[0] = ctx->sepc;
-    for (int i = 1; i < 32; i++) sc->sc_regs[i] = ctx->x[i];
-#elif defined(CONFIG_LOONGARCH64)
-    for (int i = 0; i < 32; i++) sc->sc_regs[i] = ctx->regs[i];
-    sc->sc_pc = ctx->era;
-#endif
+    arch_signal_build_mcontext(&uc->uc_mcontext, ctx);
 }
 
 void signal_deliver_user(trap_context_t *ctx) {
@@ -350,7 +388,7 @@ void signal_deliver_user(trap_context_t *ctx) {
                 t->state = PROC_RUNNING;
                 continue;
             }
-            proc_exit(-signal_wait_status(sig));
+            proc_exit_group(-signal_wait_status(sig));
         }
 
         siginfo_t queued_info;
@@ -397,21 +435,21 @@ void signal_deliver_user(trap_context_t *ctx) {
         if (has_queued_info)
             frame.info = queued_info;
         else
-            build_siginfo(&frame.info, sig, t);
+            build_siginfo_code(&frame.info, sig, NULL, SI_KERNEL);
         build_ucontext(&frame.uc, ctx, old_blocked, &t->sigaltstack);
+        arch_signal_build_frame_extra(&frame.arch_extra, ctx);
 
         sp -= sizeof(sig_rt_frame_t);
         sp &= ~15ULL;
 
         if (copy_to_user((void *)sp, &frame, sizeof(frame)) < 0)
-            proc_exit(-signal_wait_status(SIGSEGV));
+            proc_exit_group(-signal_wait_status(SIGSEGV));
 
-        uint64_t tramp_addr = sp + offsetof(sig_rt_frame_t, uc) +
-                              sizeof(ucontext_t) + sizeof(siginfo_t);
         uint32_t tramp[2];
         arch_signal_prepare_trampoline(tramp);
+        uint64_t tramp_addr = sp + offsetof(sig_rt_frame_t, tramp);
         if (copy_to_user((void *)tramp_addr, tramp, sizeof(tramp)) < 0)
-            proc_exit(-signal_wait_status(SIGSEGV));
+            proc_exit_group(-signal_wait_status(SIGSEGV));
 
         signal_make_page_exec(tramp_addr);
 
@@ -439,14 +477,8 @@ int64_t sys_rt_sigreturn_impl(trap_context_t *ctx) {
 
     t->sig_blocked = signal_mask_from_user(frame.uc.uc_sigmask[0]);
 
-    sigcontext_t *sc = &frame.uc.uc_mcontext;
-#if defined(CONFIG_RISCV64)
-    for (int i = 1; i < 32; i++) ctx->x[i] = sc->sc_regs[i];
-    ctx->sepc = sc->sc_regs[0];
-#elif defined(CONFIG_LOONGARCH64)
-    for (int i = 0; i < 32; i++) ctx->regs[i] = sc->sc_regs[i];
-    ctx->era = sc->sc_pc;
-#endif
+    arch_signal_restore_mcontext(ctx, &frame.uc.uc_mcontext);
+    arch_signal_restore_frame_extra(ctx, &frame.arch_extra);
 
     t->sig_handling = 0;
     return 0;
@@ -467,9 +499,7 @@ int sys_sigaction_impl(int signum, const void *act, void *oldact, size_t sigsets
         memset(&oldk, 0, sizeof(oldk));
         oldk.handler = ss->actions[signum].sa_handler;
         oldk.flags = (uint64_t)(uint32_t)ss->actions[signum].sa_flags;
-        uint64_t old_user_mask = signal_mask_to_user(ss->actions[signum].sa_mask);
-        oldk.mask[0] = (uint32_t)(old_user_mask & 0xffffffffULL);
-        oldk.mask[1] = (uint32_t)(old_user_mask >> 32);
+        oldk.mask = signal_mask_to_user(ss->actions[signum].sa_mask);
         if (copy_to_user(oldact, &oldk, sizeof(oldk)) < 0)
             return -EFAULT;
     }
@@ -478,8 +508,7 @@ int sys_sigaction_impl(int signum, const void *act, void *oldact, size_t sigsets
         if (copy_from_user(&ukact, act, sizeof(ukact)) < 0)
             return -EFAULT;
         ss->actions[signum].sa_handler = ukact.handler;
-        ss->actions[signum].sa_mask = signal_mask_from_user(
-            ((uint64_t)ukact.mask[1] << 32) | (uint64_t)ukact.mask[0]);
+        ss->actions[signum].sa_mask = signal_mask_from_user(ukact.mask);
         ss->actions[signum].sa_flags = (int)ukact.flags;
     }
     return 0;

@@ -10,7 +10,10 @@
 #define TTBR0_OFF       (35 * 8)
 #define KTP_OFF         (36 * 8)
 #define KSP_OFF         (37 * 8)
-#define CTX_SIZE        (38 * 8)
+#define V_OFF(n)        ((38 * 8) + ((n) * 16))
+#define FPCR_OFF        ((102) * 8)
+#define FPSR_OFF        ((103) * 8)
+#define CTX_SIZE        (104 * 8)
 
     .macro VECTOR_ENTRY target
         b       \target
@@ -117,6 +120,26 @@ __trap_from_user:
     str     x9, [sp, #KTP_OFF]
     add     x9, sp, #CTX_SIZE
     str     x9, [sp, #KSP_OFF]
+    stp     q0,  q1,  [sp, #V_OFF(0)]
+    stp     q2,  q3,  [sp, #V_OFF(2)]
+    stp     q4,  q5,  [sp, #V_OFF(4)]
+    stp     q6,  q7,  [sp, #V_OFF(6)]
+    stp     q8,  q9,  [sp, #V_OFF(8)]
+    stp     q10, q11, [sp, #V_OFF(10)]
+    stp     q12, q13, [sp, #V_OFF(12)]
+    stp     q14, q15, [sp, #V_OFF(14)]
+    stp     q16, q17, [sp, #V_OFF(16)]
+    stp     q18, q19, [sp, #V_OFF(18)]
+    stp     q20, q21, [sp, #V_OFF(20)]
+    stp     q22, q23, [sp, #V_OFF(22)]
+    stp     q24, q25, [sp, #V_OFF(24)]
+    stp     q26, q27, [sp, #V_OFF(26)]
+    stp     q28, q29, [sp, #V_OFF(28)]
+    stp     q30, q31, [sp, #V_OFF(30)]
+    mrs     x9, fpcr
+    str     x9, [sp, #FPCR_OFF]
+    mrs     x9, fpsr
+    str     x9, [sp, #FPSR_OFF]
 
     mov     x0, sp
     bl      trap_handler
@@ -170,6 +193,26 @@ __trap_from_kernel:
     str     x9, [sp, #KTP_OFF]
     add     x9, sp, #CTX_SIZE
     str     x9, [sp, #KSP_OFF]
+    stp     q0,  q1,  [sp, #V_OFF(0)]
+    stp     q2,  q3,  [sp, #V_OFF(2)]
+    stp     q4,  q5,  [sp, #V_OFF(4)]
+    stp     q6,  q7,  [sp, #V_OFF(6)]
+    stp     q8,  q9,  [sp, #V_OFF(8)]
+    stp     q10, q11, [sp, #V_OFF(10)]
+    stp     q12, q13, [sp, #V_OFF(12)]
+    stp     q14, q15, [sp, #V_OFF(14)]
+    stp     q16, q17, [sp, #V_OFF(16)]
+    stp     q18, q19, [sp, #V_OFF(18)]
+    stp     q20, q21, [sp, #V_OFF(20)]
+    stp     q22, q23, [sp, #V_OFF(22)]
+    stp     q24, q25, [sp, #V_OFF(24)]
+    stp     q26, q27, [sp, #V_OFF(26)]
+    stp     q28, q29, [sp, #V_OFF(28)]
+    stp     q30, q31, [sp, #V_OFF(30)]
+    mrs     x9, fpcr
+    str     x9, [sp, #FPCR_OFF]
+    mrs     x9, fpsr
+    str     x9, [sp, #FPSR_OFF]
 
     mov     x0, sp
     bl      kernel_trap_handler
@@ -186,6 +229,26 @@ __trap_from_kernel:
     msr     elr_el1, x9
     ldr     x9, [x2, #SPSR_OFF]
     msr     spsr_el1, x9
+    ldp     q0,  q1,  [x2, #V_OFF(0)]
+    ldp     q2,  q3,  [x2, #V_OFF(2)]
+    ldp     q4,  q5,  [x2, #V_OFF(4)]
+    ldp     q6,  q7,  [x2, #V_OFF(6)]
+    ldp     q8,  q9,  [x2, #V_OFF(8)]
+    ldp     q10, q11, [x2, #V_OFF(10)]
+    ldp     q12, q13, [x2, #V_OFF(12)]
+    ldp     q14, q15, [x2, #V_OFF(14)]
+    ldp     q16, q17, [x2, #V_OFF(16)]
+    ldp     q18, q19, [x2, #V_OFF(18)]
+    ldp     q20, q21, [x2, #V_OFF(20)]
+    ldp     q22, q23, [x2, #V_OFF(22)]
+    ldp     q24, q25, [x2, #V_OFF(24)]
+    ldp     q26, q27, [x2, #V_OFF(26)]
+    ldp     q28, q29, [x2, #V_OFF(28)]
+    ldp     q30, q31, [x2, #V_OFF(30)]
+    ldr     x9, [x2, #FPCR_OFF]
+    msr     fpcr, x9
+    ldr     x9, [x2, #FPSR_OFF]
+    msr     fpsr, x9
     ldr     x0,  [x2, #X_OFF(0)]
     ldr     x1,  [x2, #X_OFF(1)]
     ldr     x4,  [x2, #X_OFF(4)]
@@ -239,6 +302,26 @@ user_trap_return:
     msr     tpidr_el0, x9
     ldr     x9, [x2, #KTP_OFF]
     msr     tpidr_el1, x9
+    ldp     q0,  q1,  [x2, #V_OFF(0)]
+    ldp     q2,  q3,  [x2, #V_OFF(2)]
+    ldp     q4,  q5,  [x2, #V_OFF(4)]
+    ldp     q6,  q7,  [x2, #V_OFF(6)]
+    ldp     q8,  q9,  [x2, #V_OFF(8)]
+    ldp     q10, q11, [x2, #V_OFF(10)]
+    ldp     q12, q13, [x2, #V_OFF(12)]
+    ldp     q14, q15, [x2, #V_OFF(14)]
+    ldp     q16, q17, [x2, #V_OFF(16)]
+    ldp     q18, q19, [x2, #V_OFF(18)]
+    ldp     q20, q21, [x2, #V_OFF(20)]
+    ldp     q22, q23, [x2, #V_OFF(22)]
+    ldp     q24, q25, [x2, #V_OFF(24)]
+    ldp     q26, q27, [x2, #V_OFF(26)]
+    ldp     q28, q29, [x2, #V_OFF(28)]
+    ldp     q30, q31, [x2, #V_OFF(30)]
+    ldr     x9, [x2, #FPCR_OFF]
+    msr     fpcr, x9
+    ldr     x9, [x2, #FPSR_OFF]
+    msr     fpsr, x9
     ldr     x0,  [x2, #X_OFF(0)]
     ldr     x1,  [x2, #X_OFF(1)]
     ldr     x5,  [x2, #X_OFF(5)]
