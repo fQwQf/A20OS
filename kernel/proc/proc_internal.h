@@ -59,6 +59,7 @@ void proc_task_init_common(task_t *t, task_t *parent);
 void proc_task_release_resources(task_t *t);
 void proc_destroy_task(task_t *t);
 task_t *proc_alloc_task_slot(void);
+void proc_complete_vfork(task_t *child);
 
 void proc_sched_runq_init(void);
 unsigned proc_sched_select_cpu_locked(task_t *t);

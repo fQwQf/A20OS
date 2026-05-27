@@ -3,9 +3,11 @@
 
 #include "core/types.h"
 #include "core/refcount.h"
+#include "core/lock.h"
 #include "proc/proc.h"
 
 typedef struct files_struct {
+    spinlock_t lock;
     refcount_t refcount;
     int     fd[MAX_FILES];
     uint8_t cloexec[MAX_FILES];
