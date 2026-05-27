@@ -133,6 +133,32 @@ try_lib64:
     return 0;
 }
 
+static int install_runtime_library_from_dirs(const char *const dirs[],
+                                             const char *name)
+{
+    char src[256];
+    char dst[256];
+    struct stat st;
+
+    snprintf(dst, sizeof(dst), "/lib/%s", name);
+    if (stat(dst, &st) == 0 && S_ISREG(st.st_mode))
+        return 0;
+
+    for (int i = 0; dirs[i]; i++) {
+        snprintf(src, sizeof(src), "%s/%s", dirs[i], name);
+        if (stat(src, &st) != 0 || !S_ISREG(st.st_mode))
+            continue;
+
+        unlink(dst);
+        if (copy_file(src, dst, st.st_mode & 0777) == 0) {
+            printf("[LIBLINK] copied %s\n", dst);
+            return 0;
+        }
+    }
+
+    return -1;
+}
+
 static int ensure_runtime_dirs(void)
 {
     if (ensure_dir("/lib") != 0) {
@@ -210,6 +236,24 @@ static int prepare_glibc_lib_links(void)
         "/glibc/lib",
         NULL,
     };
+    static const char *const libgcc_candidates[] = {
+#if defined(__loongarch64)
+        "/testla/glibc/lib",
+        "/test/glibc/lib",
+        "/testrv/glibc/lib",
+#elif defined(__riscv)
+        "/testrv/glibc/lib",
+        "/test/glibc/lib",
+        "/testla/glibc/lib",
+#else
+        "/test/glibc/lib",
+        "/testrv/glibc/lib",
+        "/testla/glibc/lib",
+#endif
+        "/glibc/lib",
+        "/bin/lib",
+        NULL,
+    };
     const char *glibc_dir;
 
     if (done)
@@ -225,6 +269,7 @@ static int prepare_glibc_lib_links(void)
 
     if (install_runtime_loader(glibc_dir, GLIBC_LOADER_NAME, GLIBC_LOADER_NAME) != 0)
         return -1;
+    install_runtime_library_from_dirs(libgcc_candidates, "libgcc_s.so.1");
     done = 1;
     printf("[LIBLINK] glibc loader ready from %s\n", glibc_dir);
     return 0;

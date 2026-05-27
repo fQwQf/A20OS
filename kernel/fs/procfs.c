@@ -951,6 +951,7 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
     } else if (dp && dp->type == PF_ROOT && (dp->pid > 0 || dp->pid == -1)) {
         return -ENOENT;
     } else {
+        if (type == PF_ROOT) return -ENOENT;
         child = new_entry(name, type, 0);
     }
     if (!child) return -ENOMEM;

@@ -110,6 +110,7 @@ typedef struct task_t {
     int      sched_level;
     unsigned cpu_id;
     int      on_rq;
+    int      vfork_waiting;
     struct task_t *rq_next;
     struct task_t *rq_prev;
     struct task_t *wait_next;
