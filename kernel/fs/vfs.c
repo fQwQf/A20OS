@@ -699,7 +699,11 @@ int vfs_faccessat2(int dirfd, const char *path, int mode, int flags) {
                                             : (cur ? (uint32_t)cur->cred.uid : 0);
         uint32_t gid = (flags & AT_EACCESS) ? (cur ? (uint32_t)cur->cred.egid : 0)
                                             : (cur ? (uint32_t)cur->cred.gid : 0);
-        r = vfs_mode_has_perm_ids(st.st_mode, st.st_uid, st.st_gid, uid, gid, mode);
+        /* access() uses real uid/gid without capability bypass unless AT_EACCESS */
+        if (flags & AT_EACCESS)
+            r = vfs_mode_has_perm_ids(st.st_mode, st.st_uid, st.st_gid, uid, gid, mode);
+        else
+            r = vfs_mode_has_perm_ids_nocap(st.st_mode, st.st_uid, st.st_gid, uid, gid, mode);
         if (r == -EACCES && mode == X_OK &&
             (st.st_mode & S_IFMT) == S_IFREG &&
             !(st.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH))) {
@@ -1103,7 +1107,7 @@ typedef struct vfs_fowner {
     int pid;
 } vfs_fowner_t;
 
-static int vfs_fcntl_getlk(vfile_t *vf, long arg, int owner_kind, int owner) {
+static int vfs_fcntl_getlk(vfile_t *vf, long arg, int owner_kind, uintptr_t owner) {
     if (!arg) return -EFAULT;
     fs_flock_t lk;
     if (copy_from_user(&lk, (void *)arg, sizeof(lk)) < 0) return -EFAULT;
@@ -1112,7 +1116,7 @@ static int vfs_fcntl_getlk(vfile_t *vf, long arg, int owner_kind, int owner) {
     return copy_to_user((void *)arg, &lk, sizeof(lk)) < 0 ? -EFAULT : 0;
 }
 
-static int vfs_fcntl_setlk(vfile_t *vf, long arg, int owner_kind, int owner, int wait) {
+static int vfs_fcntl_setlk(vfile_t *vf, long arg, int owner_kind, uintptr_t owner, int wait) {
     if (!arg) return -EFAULT;
     fs_flock_t lk;
     if (copy_from_user(&lk, (void *)arg, sizeof(lk)) < 0) return -EFAULT;
@@ -1123,8 +1127,8 @@ void vfs_release_process_locks(int pid) {
     fs_locks_release_process(pid);
 }
 
-static void vfs_release_open_file_locks(vfile_t *vf, int gfd) {
-    fs_locks_release_file(vf, gfd);
+static void vfs_release_open_file_locks(vfile_t *vf, int gfd __attribute__((unused))) {
+    fs_locks_release_file(vf, (uintptr_t)vf);
 }
 
 int vfs_flock(int fd, int operation) {
@@ -1163,11 +1167,11 @@ int vfs_fcntl(int fd, int cmd, long arg) {
     if (cmd == F_SETLKW)
         VFS_FCNTL_RETURN(vfs_fcntl_setlk(vf, arg, FS_LOCK_OWNER_PID, owner, 1));
     if (cmd == F_OFD_GETLK)
-        VFS_FCNTL_RETURN(vfs_fcntl_getlk(vf, arg, FS_LOCK_OWNER_OFD, fd));
+        VFS_FCNTL_RETURN(vfs_fcntl_getlk(vf, arg, FS_LOCK_OWNER_OFD, (uintptr_t)vf));
     if (cmd == F_OFD_SETLK)
-        VFS_FCNTL_RETURN(vfs_fcntl_setlk(vf, arg, FS_LOCK_OWNER_OFD, fd, 0));
+        VFS_FCNTL_RETURN(vfs_fcntl_setlk(vf, arg, FS_LOCK_OWNER_OFD, (uintptr_t)vf, 0));
     if (cmd == F_OFD_SETLKW)
-        VFS_FCNTL_RETURN(vfs_fcntl_setlk(vf, arg, FS_LOCK_OWNER_OFD, fd, 1));
+        VFS_FCNTL_RETURN(vfs_fcntl_setlk(vf, arg, FS_LOCK_OWNER_OFD, (uintptr_t)vf, 1));
 
     if (cmd == F_SETOWN) {
         vf->owner_type = arg < 0 ? F_OWNER_PGRP : F_OWNER_PID;
@@ -1446,9 +1450,31 @@ int vfs_mount_bc(const char *path, const char *fstype, bcache_t *bc) {
 }
 
 int vfs_umount(const char *path) {
+    if (!path) return -EINVAL;
+    char norm_path[MAX_PATH_LEN];
+    strncpy(norm_path, path, MAX_PATH_LEN - 1);
+    norm_path[MAX_PATH_LEN - 1] = '\0';
+
+    size_t len = strlen(norm_path);
+    while (len > 1 && norm_path[len - 1] == '/') {
+        norm_path[len - 1] = '\0';
+        len--;
+    }
+
     for (int i = 0; i < vfs_mount_count(); i++) {
         mount_t *mnt = vfs_mount_at(i);
-        if (mnt && strcmp(mnt->path, path) == 0) {
+        if (!mnt) continue;
+
+        char mnt_norm[MAX_PATH_LEN];
+        strncpy(mnt_norm, mnt->path, MAX_PATH_LEN - 1);
+        mnt_norm[MAX_PATH_LEN - 1] = '\0';
+        size_t mnt_len = strlen(mnt_norm);
+        while (mnt_len > 1 && mnt_norm[mnt_len - 1] == '/') {
+            mnt_norm[mnt_len - 1] = '\0';
+            mnt_len--;
+        }
+
+        if (strcmp(mnt_norm, norm_path) == 0) {
             vfs_dcache_invalidate_all();
             vnode_t *root = mnt->root;
             if (mnt->type == FS_TYPE_FAT32) {
@@ -1550,9 +1576,11 @@ void vfs_init(void) {
     {
         static const char passwd[] =
             "root:x:0:0:root:/root:/bin/sh\n"
+            "daemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin\n"
             "nobody:x:65534:65534:nobody:/nonexistent:/bin/false\n";
         static const char group[] =
             "root:x:0:\n"
+            "daemon:x:1:\n"
             "nobody:x:65534:\n";
         int fd = vfs_open("/etc/passwd", O_CREAT | O_WRONLY | O_TRUNC, 0644);
         if (fd >= 0) {

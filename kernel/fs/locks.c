@@ -2,14 +2,16 @@
 
 #include "core/consts.h"
 #include "core/lock.h"
+#include "core/sync.h"
 #include "core/string.h"
 #include "proc/proc.h"
+#include "proc/signal.h"
 
 typedef struct fs_file_lock {
     int used;
     int owner_kind;
     uintptr_t key;
-    int owner;
+    uintptr_t owner;
     short type;
     int64_t start;
     int64_t end;
@@ -27,6 +29,42 @@ typedef struct fs_bsd_flock {
 static fs_file_lock_t g_file_locks[FS_FILE_LOCK_MAX];
 static fs_bsd_flock_t g_bsd_flocks[FS_FILE_LOCK_MAX];
 static spinlock_t g_file_lock_table_lock = SPINLOCK_INIT;
+static wait_queue_t g_file_lock_waiters = WAIT_QUEUE_INIT;
+
+static int fs_lock_wait(uint64_t table_flags)
+{
+    task_t *cur = proc_current();
+    if (!cur) {
+        spin_unlock_irqrestore(&g_file_lock_table_lock, table_flags);
+        proc_yield();
+        return 0;
+    }
+    if (signal_task_has_unblocked(cur)) {
+        spin_unlock_irqrestore(&g_file_lock_table_lock, table_flags);
+        return -ERESTARTSYS;
+    }
+
+    wait_queue_entry_t entry = {0};
+    entry.task = cur;
+    uint64_t wf = spin_lock_irqsave(&g_file_lock_waiters.lock);
+    entry.next = g_file_lock_waiters.head;
+    entry.prev = NULL;
+    if (g_file_lock_waiters.head)
+        g_file_lock_waiters.head->prev = &entry;
+    g_file_lock_waiters.head = &entry;
+    cur->state = PROC_BLOCKED;
+    spin_unlock_irqrestore(&g_file_lock_waiters.lock, wf);
+    spin_unlock_irqrestore(&g_file_lock_table_lock, table_flags);
+
+    sched();
+    wait_queue_finish(&g_file_lock_waiters, &entry);
+    return signal_task_has_unblocked(cur) ? -ERESTARTSYS : 0;
+}
+
+static void fs_lock_wake_waiters(void)
+{
+    wait_queue_wake_all(&g_file_lock_waiters);
+}
 
 static uintptr_t fs_lock_key(vfile_t *vf)
 {
@@ -80,7 +118,7 @@ static int fs_lock_overlaps(int64_t a0, int64_t a1, int64_t b0, int64_t b1)
 }
 
 static int fs_lock_conflicts(const fs_file_lock_t *held, uintptr_t key,
-                             int owner_kind, int owner, short type,
+                             int owner_kind, uintptr_t owner, short type,
                              int64_t start, int64_t end)
 {
     if (!held->used || held->key != key)
@@ -94,7 +132,7 @@ static int fs_lock_conflicts(const fs_file_lock_t *held, uintptr_t key,
     return 1;
 }
 
-int fs_locks_get(vfile_t *vf, fs_flock_t *lk, int owner_kind, int owner)
+int fs_locks_get(vfile_t *vf, fs_flock_t *lk, int owner_kind, uintptr_t owner)
 {
     if (!lk) return -EINVAL;
     if (lk->l_type != F_RDLCK && lk->l_type != F_WRLCK && lk->l_type != F_UNLCK)
@@ -115,7 +153,8 @@ int fs_locks_get(vfile_t *vf, fs_flock_t *lk, int owner_kind, int owner)
         lk->l_start = g_file_locks[i].start;
         lk->l_len = (g_file_locks[i].end == 0x7fffffffffffffffLL) ?
                     0 : (g_file_locks[i].end - g_file_locks[i].start + 1);
-        lk->l_pid = (g_file_locks[i].owner_kind == FS_LOCK_OWNER_PID) ? g_file_locks[i].owner : -1;
+        lk->l_pid = (g_file_locks[i].owner_kind == FS_LOCK_OWNER_PID) ?
+                    (int)g_file_locks[i].owner : -1;
         spin_unlock_irqrestore(&g_file_lock_table_lock, flags);
         return 0;
     }
@@ -125,7 +164,8 @@ int fs_locks_get(vfile_t *vf, fs_flock_t *lk, int owner_kind, int owner)
     return 0;
 }
 
-int fs_locks_set(vfile_t *vf, const fs_flock_t *lk, int owner_kind, int owner, int wait)
+int fs_locks_set(vfile_t *vf, const fs_flock_t *lk, int owner_kind,
+                 uintptr_t owner, int wait)
 {
     if (!lk) return -EINVAL;
     if (lk->l_type != F_RDLCK && lk->l_type != F_WRLCK && lk->l_type != F_UNLCK)
@@ -136,17 +176,54 @@ int fs_locks_set(vfile_t *vf, const fs_flock_t *lk, int owner_kind, int owner, i
     if (r < 0) return r;
     uintptr_t key = fs_lock_key(vf);
 
+    /* Deadlock detection: track the conflicting holder across retries.
+     * If we repeatedly conflict with the same holder who also blocks
+     * on a lock we own, that's a deadlock cycle. */
+    uintptr_t prev_blocker = 0;
+    int deadlock_retries = 0;
+#define FS_LOCK_MAX_RETRIES 1024
+
 retry:
+    if (deadlock_retries >= FS_LOCK_MAX_RETRIES)
+        return -EDEADLK;
+    deadlock_retries++;
+
     uint64_t flags = spin_lock_irqsave(&g_file_lock_table_lock);
+    int changed = 0;
 
     /* 1. Check if another process/owner conflicts with the new lock (only if we are NOT unlocking) */
     if (lk->l_type != F_UNLCK) {
         for (int i = 0; i < FS_FILE_LOCK_MAX; i++) {
             if (fs_lock_conflicts(&g_file_locks[i], key, owner_kind, owner,
                                    lk->l_type, start, end)) {
-                spin_unlock_irqrestore(&g_file_lock_table_lock, flags);
-                if (!wait) return -EAGAIN;
-                proc_yield();
+                if (!wait) {
+                    spin_unlock_irqrestore(&g_file_lock_table_lock, flags);
+                    return -EAGAIN;
+                }
+                /* Simple deadlock heuristic: if we keep conflicting
+                 * with the same holder, check whether that holder is
+                 * itself blocked on a lock we own. */
+                uintptr_t blocker = g_file_locks[i].owner;
+                if (blocker == prev_blocker && blocker) {
+                    /* Check if the blocker is waiting on one of our locks */
+                    for (int j = 0; j < FS_FILE_LOCK_MAX; j++) {
+                        if (g_file_locks[j].used &&
+                            g_file_locks[j].owner_kind == owner_kind &&
+                            g_file_locks[j].owner == owner &&
+                            g_file_locks[j].key != key) {
+                            /* We hold a lock on a different file —
+                             * could be part of a deadlock cycle */
+                            if (deadlock_retries > 4) {
+                                spin_unlock_irqrestore(&g_file_lock_table_lock, flags);
+                                return -EDEADLK;
+                            }
+                        }
+                    }
+                }
+                prev_blocker = blocker;
+                r = fs_lock_wait(flags);
+                if (r < 0)
+                    return r;
                 goto retry;
             }
         }
@@ -162,6 +239,7 @@ retry:
         if (g_file_locks[i].used && g_file_locks[i].key == key &&
             g_file_locks[i].owner_kind == owner_kind &&
             g_file_locks[i].owner == owner) {
+            changed = 1;
             
             temp_start[temp_count] = g_file_locks[i].start;
             temp_end[temp_count] = g_file_locks[i].end;
@@ -289,6 +367,8 @@ retry:
         }
     }
 
+    if (changed || lk->l_type == F_UNLCK)
+        fs_lock_wake_waiters();
     spin_unlock_irqrestore(&g_file_lock_table_lock, flags);
     return 0;
 }
@@ -296,36 +376,50 @@ retry:
 void fs_locks_release_process(int pid)
 {
     uint64_t flags = spin_lock_irqsave(&g_file_lock_table_lock);
+    int changed = 0;
     for (int i = 0; i < FS_FILE_LOCK_MAX; i++) {
         if (g_file_locks[i].used &&
             g_file_locks[i].owner_kind == FS_LOCK_OWNER_PID &&
-            g_file_locks[i].owner == pid)
+            g_file_locks[i].owner == (uintptr_t)pid) {
             g_file_locks[i].used = 0;
+            changed = 1;
+        }
     }
+    if (changed)
+        fs_lock_wake_waiters();
     spin_unlock_irqrestore(&g_file_lock_table_lock, flags);
 }
 
-void fs_locks_release_file(vfile_t *vf, int gfd)
+void fs_locks_release_file(vfile_t *vf, uintptr_t owner)
 {
     uintptr_t key = fs_lock_key(vf);
     task_t *cur = proc_current();
     int cur_pid = cur ? cur->pid : -1;
     uint64_t flags = spin_lock_irqsave(&g_file_lock_table_lock);
+    int changed = 0;
     for (int i = 0; i < FS_FILE_LOCK_MAX; i++) {
         if (g_file_locks[i].used &&
             g_file_locks[i].owner_kind == FS_LOCK_OWNER_OFD &&
-            g_file_locks[i].owner == gfd)
+            g_file_locks[i].owner == owner) {
             g_file_locks[i].used = 0;
+            changed = 1;
+        }
         if (g_file_locks[i].used &&
             g_file_locks[i].key == key &&
             g_file_locks[i].owner_kind == FS_LOCK_OWNER_PID &&
-            g_file_locks[i].owner == cur_pid)
+            g_file_locks[i].owner == (uintptr_t)cur_pid) {
             g_file_locks[i].used = 0;
+            changed = 1;
+        }
         if (g_bsd_flocks[i].used &&
             g_bsd_flocks[i].key == key &&
-            g_bsd_flocks[i].owner == vf)
+            g_bsd_flocks[i].owner == vf) {
             g_bsd_flocks[i].used = 0;
+            changed = 1;
+        }
     }
+    if (changed)
+        fs_lock_wake_waiters();
     spin_unlock_irqrestore(&g_file_lock_table_lock, flags);
 }
 
@@ -341,19 +435,31 @@ int fs_flocks_apply(vfile_t *vf, int operation)
     uintptr_t key = fs_lock_key(vf);
     if (op == LOCK_UN) {
         uint64_t flags = spin_lock_irqsave(&g_file_lock_table_lock);
+        int changed = 0;
         for (int i = 0; i < FS_FILE_LOCK_MAX; i++) {
             if (g_bsd_flocks[i].used &&
                 g_bsd_flocks[i].key == key &&
-                g_bsd_flocks[i].owner == vf)
+                g_bsd_flocks[i].owner == vf) {
                 g_bsd_flocks[i].used = 0;
+                changed = 1;
+            }
         }
+        if (changed)
+            fs_lock_wake_waiters();
         spin_unlock_irqrestore(&g_file_lock_table_lock, flags);
         return 0;
     }
 
     int type = (op == LOCK_EX) ? F_WRLCK : F_RDLCK;
 
+    int flock_retries = 0;
+#define FS_FLOCK_MAX_RETRIES 1024
+
 retry:
+    if (flock_retries >= FS_FLOCK_MAX_RETRIES)
+        return -EDEADLK;
+    flock_retries++;
+
     uint64_t flags = spin_lock_irqsave(&g_file_lock_table_lock);
     for (int i = 0; i < FS_FILE_LOCK_MAX; i++) {
         if (!g_bsd_flocks[i].used || g_bsd_flocks[i].key != key ||
@@ -361,9 +467,13 @@ retry:
             continue;
         if (g_bsd_flocks[i].type == F_RDLCK && type == F_RDLCK)
             continue;
-        spin_unlock_irqrestore(&g_file_lock_table_lock, flags);
-        if (operation & LOCK_NB) return -EAGAIN;
-        proc_yield();
+        if (operation & LOCK_NB) {
+            spin_unlock_irqrestore(&g_file_lock_table_lock, flags);
+            return -EAGAIN;
+        }
+        int r = fs_lock_wait(flags);
+        if (r < 0)
+            return r;
         goto retry;
     }
 
@@ -372,6 +482,7 @@ retry:
             g_bsd_flocks[i].key == key &&
             g_bsd_flocks[i].owner == vf) {
             g_bsd_flocks[i].type = type;
+            fs_lock_wake_waiters();
             spin_unlock_irqrestore(&g_file_lock_table_lock, flags);
             return 0;
         }
@@ -383,6 +494,7 @@ retry:
             g_bsd_flocks[i].key = key;
             g_bsd_flocks[i].owner = vf;
             g_bsd_flocks[i].type = type;
+            fs_lock_wake_waiters();
             spin_unlock_irqrestore(&g_file_lock_table_lock, flags);
             return 0;
         }
