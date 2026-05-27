@@ -10,9 +10,12 @@ typedef struct {
     uint64_t sepc;
     uint64_t last_a0;
     uint64_t kernel_tp;
+    uint64_t f[32];
+    uint64_t fcsr;
+    uint64_t reserved;
 } __attribute__((aligned(16))) trap_context_t;
 
-_Static_assert(sizeof(trap_context_t) == 36 * 8, "TrapContext must be 288 bytes");
+_Static_assert(sizeof(trap_context_t) == 70 * 8, "TrapContext must be 560 bytes");
 
 typedef struct {
     uint64_t ra;
@@ -24,9 +27,16 @@ typedef struct {
 
 _Static_assert(sizeof(task_context_t) == 16 * 8, "TaskContext must be 128 bytes");
 
-#define TRAP_CONTEXT_SIZE  (36 * 8)
+typedef struct {
+    uint64_t sc_regs[32];
+    uint64_t sc_fpregs[66];
+} __attribute__((aligned(16))) arch_sigcontext_t;
+
+#define ARCH_SIGFRAME_EXTRA_FIELDS uint64_t arch_extra;
+
+#define TRAP_CONTEXT_SIZE  (70 * 8)
 #define TASK_CONTEXT_SIZE  (16 * 8)
-#define KTRAP_CONTEXT_SIZE (34 * 8)
+#define KTRAP_CONTEXT_SIZE (70 * 8)
 #define ARCH_SYSCALL_TRACE_MIN_PID 5
 
 extern void __trap_from_user(void);
@@ -45,6 +55,7 @@ extern void user_trap_return(void);
 #define TRAP_CTX_RET(ctx)         ((ctx)->x[10])
 #define TRAP_CTX_SP(ctx)          ((ctx)->x[2])
 #define TRAP_CTX_RA(ctx)          ((ctx)->x[1])
+#define TRAP_CTX_FP(ctx)          ((ctx)->x[8])
 #define TRAP_CTX_TP(ctx)          ((ctx)->x[4])
 
 #define TRAP_CTX_SET_RET(ctx, v)  do { (ctx)->x[10] = (uint64_t)(v); } while(0)
@@ -88,6 +99,40 @@ static inline uint64_t arch_trap_ctx_get_kernel_stack(const trap_context_t *ctx,
 
 static inline void arch_advance_syscall_epc(trap_context_t *ctx) {
     TRAP_CTX_EPC(ctx) += 4;
+}
+
+static inline void arch_signal_build_mcontext(arch_sigcontext_t *sc,
+                                              const trap_context_t *ctx) {
+    sc->sc_regs[0] = ctx->sepc;
+    for (int i = 1; i < 32; i++)
+        sc->sc_regs[i] = ctx->x[i];
+    for (int i = 0; i < 32; i++)
+        sc->sc_fpregs[i] = ctx->f[i];
+    sc->sc_fpregs[32] = ctx->fcsr;
+    for (int i = 33; i < 66; i++)
+        sc->sc_fpregs[i] = 0;
+}
+
+static inline void arch_signal_build_frame_extra(void *extra,
+                                                 const trap_context_t *ctx) {
+    (void)extra;
+    (void)ctx;
+}
+
+static inline void arch_signal_restore_mcontext(trap_context_t *ctx,
+                                                const arch_sigcontext_t *sc) {
+    ctx->sepc = sc->sc_regs[0];
+    for (int i = 1; i < 32; i++)
+        ctx->x[i] = sc->sc_regs[i];
+    for (int i = 0; i < 32; i++)
+        ctx->f[i] = sc->sc_fpregs[i];
+    ctx->fcsr = sc->sc_fpregs[32];
+}
+
+static inline void arch_signal_restore_frame_extra(trap_context_t *ctx,
+                                                   const void *extra) {
+    (void)ctx;
+    (void)extra;
 }
 
 #endif

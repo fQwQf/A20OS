@@ -386,7 +386,13 @@ int64_t sys_adjtimex(void *buf)
 
     if (copy_to_user(buf, &g_adjtimex_state, sizeof(g_adjtimex_state)) < 0)
         return -EFAULT;
-    return 0;
+    /* Return NTP synchronization state (not an error code):
+     * TIME_OK(0), TIME_INS(1), TIME_DEL(2), TIME_OOP(3),
+     * TIME_WAIT(4), TIME_ERROR(5).
+     * STA_UNSYNC(0x40) means clock is not synchronized -> TIME_ERROR(5). */
+    if (g_adjtimex_state.status & 0x40U) /* STA_UNSYNC */
+        return 5; /* TIME_ERROR */
+    return 0; /* TIME_OK */
 }
 
 int64_t sys_clock_adjtime(int clk, void *buf)

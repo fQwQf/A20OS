@@ -7,6 +7,16 @@
 [[ -x /test/musl/busybox ]]  && cp /test/musl/busybox /busybox 2>/dev/null
 [[ -x /test/glibc/busybox ]] && cp /test/glibc/busybox /busybox 2>/dev/null
 
+# -- LTP environment setup -
+mkdir -p /dev/shm /tmp
+export LTP_IPC_PATH=/dev/shm
+export LTPROOT=/test/glibc/ltp
+export LTP_TMPDIR=/tmp
+export TMPDIR=/tmp
+export HOME=/root
+export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}/bin/lib:/lib"
+mkdir -p /root
+
 
 print '#!/bin/mksh' > /bin/zcat
 print 'exec /busybox zcat "$@"' >> /bin/zcat

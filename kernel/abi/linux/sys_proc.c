@@ -503,6 +503,9 @@ int64_t sys_execve(const char *path, char **argv, char **envp) {
     char kpath[MAX_PATH_LEN];
     long r = user_strncpy(kpath, path, MAX_PATH_LEN);
     if (r < 0) return -EFAULT;
+    /* Path filled the buffer without a NUL: too long */
+    if (r >= (long)(MAX_PATH_LEN - 1) && kpath[MAX_PATH_LEN - 2] != '\0')
+        return -ENAMETOOLONG;
     return proc_exec(kpath, argv, envp);
 }
 

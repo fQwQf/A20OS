@@ -1,0 +1,49 @@
+717:    fat32_sb_t *sb = fc->sb;
+721:    if (fc->cur_cluster && fc->cluster_off == target_off)
+722:        return fc->cur_cluster;
+724:    uint32_t cluster = fc->first_cluster;
+741:    fc->cur_cluster = cluster;
+742:    fc->cluster_off = target_off;
+749:        fc->cur_cluster = cluster;
+750:        fc->cluster_off = cluster_off;
+752:        fc->cur_cluster = 0;
+753:        fc->cluster_off = 0;
+759:    fat32_sb_t *sb = fc->sb;
+760:    if (fc->is_dir) return -EISDIR;
+761:    if (fc->file_off >= fc->file_size) return 0;
+762:    size_t remaining = fc->file_size - fc->file_off;
+766:    uint32_t cluster = fat32_fctx_cluster_at(fc, fc->file_off, 0);
+772:    size_t off = fc->cluster_off;
+791:    fc->file_off += done;
+792:    vf->offset = fc->file_off;
+799:    fat32_sb_t *sb = fc->sb;
+800:    if (fc->is_dir) return -EISDIR;
+804:    uint32_t cluster = fat32_fctx_cluster_at(fc, fc->file_off, 1);
+807:    size_t off = fc->cluster_off;
+835:    fc->file_off += done;
+836:    if (fc->file_off > fc->file_size) {
+837:        fc->file_size = fc->file_off;
+838:        fc->dirty = 1;
+889:        case SEEK_END: new_off = (long)fc->file_size + offset; break;
+894:    fc->file_off = (size_t)new_off;
+895:    fc->cur_cluster = (new_off == 0) ? fc->first_cluster : 0;
+896:    fc->cluster_off = 0;
+902:    if (!fc->is_dir) return -ENOTDIR;
+911:        int r = fat32_chain_read(fc->sb, fc->first_cluster,
+912:                                  fc->dir_byte_off, &de, sizeof(de));
+915:        fc->dir_byte_off += 32;
+945:        dent->d_ino    = cluster ? cluster : fc->sb->root_cluster;
+946:        dent->d_off    = (int64_t)fc->dir_byte_off;
+959:    if (fc && fc->dirty && !fc->is_dir && fc->first_cluster >= 2) {
+960:        fat32_sb_t *sb = fc->sb;
+978:            if (clus == fc->first_cluster) {
+979:                de.file_size = (uint32_t)fc->file_size;
+1090:    fc->sb            = fp->sb;
+1091:    fc->first_cluster = fp->first_cluster;
+1092:    fc->file_size     = fp->file_size;
+1093:    fc->is_dir        = fp->is_dir;
+1094:    fc->file_off      = (flags & O_APPEND) ? fp->file_size : 0;
+1095:    fc->cur_cluster   = (fc->file_off == 0) ? fp->first_cluster : 0;
+1096:    fc->cluster_off   = 0;
+1097:    fc->dir_byte_off  = 0;
+1104:    vf->offset    = fc->file_off;

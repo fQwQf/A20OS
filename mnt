@@ -1,0 +1,141 @@
+91:    tio->c_iflag = 0x500;
+92:    tio->c_oflag = 0x5;
+93:    tio->c_cflag = 0xBF;
+94:    tio->c_lflag = 0x8a3b;
+95:    tio->c_cc[0] = 3;
+96:    tio->c_cc[1] = 28;
+97:    tio->c_cc[2] = 127;
+98:    tio->c_cc[3] = 21;
+99:    tio->c_cc[4] = 4;
+100:    tio->c_cc[5] = 0;
+101:    tio->c_cc[6] = 1;
+102:    tio->c_cc[8] = 17;
+103:    tio->c_cc[9] = 19;
+104:    tio->c_cc[10] = 26;
+105:    tio->c_cc[12] = 18;
+106:    tio->c_cc[13] = 15;
+107:    tio->c_cc[14] = 23;
+108:    tio->c_cc[15] = 22;
+112:    fill_default_termios(&tty->termios);
+113:    tty->winsize.ws_row = 24;
+114:    tty->winsize.ws_col = 80;
+115:    tty->winsize.ws_xpixel = 0;
+116:    tty->winsize.ws_ypixel = 0;
+180:    int kind = (int)(intptr_t)vf->priv;
+190:        return -ENOTDIR;
+194:    size_t idx = vf->offset;
+204:        d->d_ino = idx + 1;
+205:        d->d_off = (int64_t)(idx + 1);
+206:        d->d_reclen = (uint16_t)reclen;
+207:        d->d_type = entries[idx].type;
+208:        memcpy(d->d_name, entries[idx].name, namelen + 1);
+212:    vf->offset = idx;
+244:    int year = rt->tm_year + 1900;
+245:    int month = rt->tm_mon + 1;
+246:    int hour = rt->tm_hour;
+247:    int min = rt->tm_min;
+248:    int sec = rt->tm_sec;
+249:    int mday = rt->tm_mday;
+259:        return -EINVAL;
+261:    mdays = month_days[month - 1];
+263:    if (mday > mdays) return -EINVAL;
+265:    year -= month <= 2;
+266:    era = (year >= 0 ? year : year - 399) / 400;
+267:    yoe = (unsigned)(year - era * 400);
+268:    doy = (153U * (unsigned)(month + (month > 2 ? -3 : 9)) + 2U) / 5U + (unsigned)mday - 1U;
+269:    doe = yoe * 365U + yoe / 4U - yoe / 100U + doy;
+270:    z = era * 146097 + (int64_t)doe - 719468;
+271:    if (z < 0) return -EINVAL;
+286:    int64_t era = (z >= 0 ? z : z - 146096) / 146097;
+287:    unsigned doe = (unsigned)(z - era * 146097);
+288:    unsigned yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+290:    unsigned doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+292:    unsigned mday = doy - (153 * mp + 2) / 5 + 1;
+293:    unsigned month = mp + (mp < 10 ? 3 : (unsigned)-9);
+297:    rt->tm_sec = (int32_t)(rem % 60ULL);
+299:    rt->tm_min = (int32_t)(rem % 60ULL);
+301:    rt->tm_hour = (int32_t)rem;
+302:    rt->tm_mday = (int32_t)mday;
+303:    rt->tm_mon = (int32_t)(month - 1);
+304:    rt->tm_year = (int32_t)(year - 1900);
+305:    rt->tm_wday = (int32_t)((days + 4ULL) % 7ULL);
+306:    rt->tm_yday = month_yday[is_leap_year(year)][month - 1] + (int)mday - 1;
+307:    rt->tm_isdst = 0;
+312:        return -EFAULT;
+320:        if (copy_to_user(arg, &tm, sizeof(tm)) < 0) return -EFAULT;
+325:        if (copy_to_user(arg, &irqp, sizeof(irqp)) < 0) return -EFAULT;
+330:        if (copy_to_user(arg, &epoch, sizeof(epoch)) < 0) return -EFAULT;
+336:        if (copy_from_user(&tm, arg, sizeof(tm)) < 0) return -EFAULT;
+337:        if (rtc_time_to_unix_seconds(&tm, &secs) < 0) return -EINVAL;
+341:        return -ENOTTY;
+346:    int kind = (int)(intptr_t)vf->priv;
+348:        if (!arg) return -EFAULT;
+350:            if (copy_to_user(arg, &g_dev_tty.termios, sizeof(g_dev_tty.termios)) < 0) return -EFAULT;
+355:            if (copy_from_user(&tio, arg, sizeof(tio)) < 0) return -EFAULT;
+360:            if (copy_to_user(arg, &g_dev_tty.winsize, sizeof(g_dev_tty.winsize)) < 0) return -EFAULT;
+363:        return -ENOTTY;
+367:    return -ENOTTY;
+375:    int idx = (int)(intptr_t)vf->priv - 100;
+376:    size_t off = vf->offset;
+378:    if (r > 0) vf->offset += r;
+383:    int idx = (int)(intptr_t)vf->priv - 100;
+384:    size_t off = vf->offset;
+386:    if (r > 0) vf->offset += r;
+391:    if (whence == SEEK_SET) vf->offset = (size_t)offset;
+392:    else if (whence == SEEK_CUR) vf->offset += (size_t)offset;
+393:    return (long)vf->offset;
+418:    devfs_node_t *node = (devfs_node_t *)dir->fs_data;
+419:    if (!node || !out) return -ENOENT;
+422:    if (node->kind == DEVFS_ROOT) {
+429:    } else if (node->kind == DEVFS_MISC && strcmp(name, "rtc") == 0) {
+437:    return -ENOENT;
+442:    st->st_mode = S_IFCHR | 0666;
+443:    st->st_rdev = rdev;
+444:    st->st_uid = 0;
+445:    st->st_gid = 0;
+446:    st->st_nlink = 1;
+447:    st->st_blksize = 4096;
+451:    devfs_node_t *node = (devfs_node_t *)vn->fs_data;
+452:    if (!node || !st) return -EINVAL;
+454:    if (node->kind == DEVFS_ROOT || node->kind == DEVFS_MISC) {
+455:        st->st_mode = S_IFDIR | 0555;
+456:        st->st_uid = 0;
+457:        st->st_gid = 0;
+458:        st->st_nlink = 2;
+459:        st->st_blksize = 4096;
+460:    } else if (node->kind == DEVFS_LOOP) {
+461:        st->st_mode = S_IFBLK | 0660;
+462:        st->st_rdev = node->rdev;
+463:        st->st_uid = 0;
+464:        st->st_gid = 0;
+465:        st->st_nlink = 1;
+466:        st->st_blksize = 4096;
+468:        fill_char_kstat(st, node->rdev);
+478:    devfs_node_t *node = vn ? (devfs_node_t *)vn->fs_data : NULL;
+484:    vf->vnode = vn;
+486:    vf->flags = flags;
+487:    refcount_set(&vf->ref_count, 1);
+488:    vf->priv = (void *)(intptr_t)node->kind;
+490:    switch (node->kind) {
+492:    case DEVFS_MISC: vf->ops = &g_devfs_dir_ops; break;
+493:    case DEVFS_NULL: vf->ops = &g_devfs_null_ops; break;
+494:    case DEVFS_ZERO: vf->ops = &g_devfs_zero_ops; break;
+495:    case DEVFS_RANDOM: vf->ops = &g_devfs_random_ops; break;
+496:    case DEVFS_TTY:  vf->ops = &g_devfs_tty_ops; break;
+497:    case DEVFS_RTC:  vf->ops = &g_devfs_rtc_ops; break;
+499:        int loop_idx = (int)(node->rdev & 0xFF);
+500:        vf->ops = &g_devfs_loop_ops;
+501:        vf->priv = (void *)(intptr_t)(loop_idx + 100);
+512:    return vf && (vf->ops == &g_devfs_null_ops ||
+513:                  vf->ops == &g_devfs_zero_ops ||
+514:                  vf->ops == &g_devfs_random_ops ||
+515:                  vf->ops == &g_devfs_tty_ops ||
+516:                  vf->ops == &g_devfs_stdin_ops ||
+517:                  vf->ops == &g_devfs_stdout_ops ||
+518:                  vf->ops == &g_devfs_stderr_ops ||
+519:                  vf->ops == &g_devfs_rtc_ops);
+523:    return vf && (vf->ops == &g_devfs_tty_ops ||
+524:                  vf->ops == &g_devfs_stdin_ops ||
+525:                  vf->ops == &g_devfs_stdout_ops ||
+526:                  vf->ops == &g_devfs_stderr_ops);
+530:    return vf && vf->ops == &g_devfs_zero_ops;

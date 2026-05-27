@@ -74,8 +74,10 @@ void signal_copy(const signal_state_t *src, signal_state_t *dst);
 
 /* Queue a signal to a process */
 int  signal_send(int pid, int signum);
+int  signal_send_user(int pid, int signum);
 int  signal_send_info(int pid, int signum, const void *info, size_t info_size);
 int  signal_send_thread(int tid, int signum);
+int  signal_send_thread_user(int tid, int signum);
 int  signal_task_has_unblocked(void *task);
 
 void signal_deliver(void);
@@ -109,41 +111,31 @@ typedef struct {
 
 #define USER_SIGSET_WORDS (128 / (int)sizeof(uint64_t))
 
-#if defined(CONFIG_LOONGARCH64)
-typedef struct {
-    uint64_t sc_pc;
-    uint64_t sc_regs[32];
-    uint32_t sc_flags;
-    uint64_t sc_extcontext[0] __attribute__((aligned(16)));
-} __attribute__((aligned(16))) sigcontext_t;
-
-typedef struct ucontext {
-    uint64_t        uc_flags;
-    uintptr_t       uc_link;
-    stack_t         uc_stack;
-    uint64_t        uc_sigmask[USER_SIGSET_WORDS];
-    uint64_t        uc_pad;
-    sigcontext_t    uc_mcontext;
-} __attribute__((aligned(16))) ucontext_t;
-#else
-typedef struct {
-    uint64_t sc_regs[32];
-    uint64_t sc_fpregs[66];
-} __attribute__((aligned(16))) sigcontext_t;
-
-typedef struct ucontext {
-    uint64_t        uc_flags;
-    uintptr_t       uc_link;
-    stack_t         uc_stack;
-    uint64_t        uc_sigmask[USER_SIGSET_WORDS];
-    sigcontext_t    uc_mcontext;
-} __attribute__((aligned(16))) ucontext_t;
+#ifndef ARCH_UCONTEXT_PAD_FIELDS
+#define ARCH_UCONTEXT_PAD_FIELDS
 #endif
+
+#ifndef ARCH_SIGFRAME_EXTRA_FIELDS
+#define ARCH_SIGFRAME_EXTRA_FIELDS
+#endif
+
+typedef arch_sigcontext_t sigcontext_t;
+
+typedef struct ucontext {
+    uint64_t        uc_flags;
+    uintptr_t       uc_link;
+    stack_t         uc_stack;
+    uint64_t        uc_sigmask[USER_SIGSET_WORDS];
+    ARCH_UCONTEXT_PAD_FIELDS
+    sigcontext_t    uc_mcontext;
+} __attribute__((aligned(16))) ucontext_t;
 
 typedef struct {
     uint64_t    flag;
     ucontext_t  uc;
     siginfo_t   info;
+    ARCH_SIGFRAME_EXTRA_FIELDS
+    uint32_t    tramp[2];
 } __attribute__((aligned(16))) sig_rt_frame_t;
 
 int64_t sys_rt_sigreturn_impl(trap_context_t *ctx);

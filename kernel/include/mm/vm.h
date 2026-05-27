@@ -4,6 +4,7 @@
 #include "core/types.h"
 #include "core/consts.h"
 #include "core/refcount.h"
+#include "core/lock.h"
 
 struct a20_vmo;
 
@@ -45,6 +46,7 @@ typedef struct vm_area {
  *   threaded user address spaces and SMP require that before broadening use.
  */
 typedef struct mm_struct {
+    spinlock_t lock;
     vm_area_t *mmap;
     uint64_t  *pgdir;
     uint64_t   brk;

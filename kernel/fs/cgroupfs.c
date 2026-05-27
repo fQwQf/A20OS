@@ -526,7 +526,7 @@ static int cg_lookup(vnode_t *dir, const char *name, vnode_t **out)
         vn->uid = node->uid;
         vn->gid = node->gid;
         vn->ino = (uint64_t)ft + 1;
-        vn->ino |= ((uint64_t)(uintptr_t)node & 0xFFFFFFFFFFFF0000ULL);
+        vn->ino |= (((uint64_t)(uintptr_t)node) << 16);
         *out = vn;
         return 0;
     }

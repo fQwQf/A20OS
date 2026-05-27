@@ -111,11 +111,11 @@ int main(void)
 #else
         "/testrv/glibc/lib", "/testla/glibc/lib",
 #endif
-        "/glibc/lib", "/usr/lib", NULL,
+        "/glibc/lib", "/usr/lib", "/lib", "/bin/lib", NULL,
     };
     for (const char **p = ld_dirs; *p; p++)
         append_if_dir(ld_val, sizeof(ld_val), *p);
-    if (!ld_val[0]) strcpy(ld_val, "/lib");
+    if (!ld_val[0]) strcpy(ld_val, "/lib:/bin/lib");
 
     char path_env[576], ld_env[320];
     snprintf(path_env, sizeof(path_env), "PATH=%s", path_val);

@@ -15,6 +15,7 @@ if [[ -z $bin_dir ]]; then
 fi
 
 print "[LTP-RESUME] bin_dir=$bin_dir"
+export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}/bin/lib:/lib"
 
 # ── resume point: last line in blacklist (non-comment, non-empty) ──
 typeset resume_after=

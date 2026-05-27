@@ -30,8 +30,8 @@ USER_BUILD_STAMP = user/build/.build-id
 ARCH_INCLUDE_DIR = $(KERNEL_DIR)/arch/$(ARCH)/include
 EXT4_STAGING_DIR = $(BUILD_DIR)/ext4-staging
 BUILD_TIME_HDR = $(BUILD_DIR)/generated/build_time.h
-FAT32_IMAGE_MB ?= 32
-EXT4_IMAGE_MB ?= 32
+FAT32_IMAGE_MB ?= 128
+EXT4_IMAGE_MB ?= 128
 EXTRA_IMAGE_MB ?= 256
 EXTRA_IMG = $(BUILD_DIR)/extra.img
 EXTRA_STAGING_DIR = $(BUILD_DIR)/extra-staging
@@ -62,10 +62,15 @@ PROTOCOLS_LINES = \
     'ipv6-nonxt 59 IPv6-NoNxt' \
     'ipv6-opts 60 IPv6-Opts'
 
+LIBGCC_S_riscv64 := /usr/riscv64-linux-gnu/lib/libgcc_s.so.1
+LIBGCC_S_loongarch64 := /usr/loongarch64-linux-gnu/lib/libgcc_s.so.1
+LIBGCC_S_aarch64 := /usr/lib/aarch64-linux-gnu/libgcc_s.so.1
+LIBGCC_S_ARCH := $(LIBGCC_S_$(ARCH))
+
 # Compiler and tools
 ifeq ($(ARCH), riscv64)
     CROSS_PREFIX = riscv64-unknown-elf-
-    ARCH_CFLAGS = -march=rv64gc -mabi=lp64d -mcmodel=medany
+    ARCH_CFLAGS = -march=rv64imafdc_zicsr_zifencei -mabi=lp64 -mcmodel=medany
     ARCH_LDFLAGS =
     QEMU = qemu-system-riscv64
     QEMU_FLAGS = -machine virt -m 1G -nographic -smp 1 -bios default -global virtio-mmio.force-legacy=false
@@ -415,6 +420,9 @@ _contest_disk: $(USER_BUILD_STAMP)
 	mcopy -o -i $(DISK_OUT) user/build/mksh ::/sh
 	mcopy -o -i $(DISK_OUT) user/build/mksh ::/bash
 	-mmd -i $(DISK_OUT) ::/etc >/dev/null 2>&1
+	-mmd -i $(DISK_OUT) ::/lib >/dev/null 2>&1
+	@[ -n "$(LIBGCC_S_ARCH)" ] && [ -f "$(LIBGCC_S_ARCH)" ] && \
+		mcopy -o -i $(DISK_OUT) "$(LIBGCC_S_ARCH)" ::/lib/libgcc_s.so.1 || true
 	@printf '%s\n' $(PROTOCOLS_LINES) | mcopy -o -i $(DISK_OUT) - ::/etc/protocols
 	mcopy -o -i $(DISK_OUT) user/contest_init/ltp_blacklist.txt ::/etc/ltp_blacklist.txt
 	mcopy -o -i $(DISK_OUT) user/contest_init/contest.sh ::/contest.sh
@@ -480,6 +488,9 @@ endif
 	mcopy -o -i $(FAT32_IMG) user/build/mksh ::/sh
 	mcopy -o -i $(FAT32_IMG) user/build/mksh ::/bash
 	-mmd -i $(FAT32_IMG) ::/etc >/dev/null 2>&1
+	-mmd -i $(FAT32_IMG) ::/lib >/dev/null 2>&1
+	@[ -n "$(LIBGCC_S_ARCH)" ] && [ -f "$(LIBGCC_S_ARCH)" ] && \
+		mcopy -o -i $(FAT32_IMG) "$(LIBGCC_S_ARCH)" ::/lib/libgcc_s.so.1 || true
 	@printf '%s\n' $(PROTOCOLS_LINES) | mcopy -o -i $(FAT32_IMG) - ::/etc/protocols
 	@printf 'ID=A20OS\nNAME="A20OS"\nPRETTY_NAME="A20OS"\nVERSION="0.2"\nVERSION_ID="0.2"\n' | mcopy -o -i $(FAT32_IMG) - ::/etc/os-release
 	@printf 'Hello from A20OS FAT32!\n' | mcopy -i $(FAT32_IMG) - ::/test.txt

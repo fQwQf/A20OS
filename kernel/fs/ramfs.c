@@ -490,12 +490,32 @@ static int ramfs_vnode_truncate(vnode_t *vn, size_t size) {
     if (!inode) return -EINVAL;
     if (inode->type == FT_DIRECTORY) return -EISDIR;
 
-    if (size < inode->capacity) {
+    if (size > inode->capacity) {
+        size_t new_cap = size * 2;
+        char *new_data = (char *)kmalloc(new_cap);
+        if (!new_data) {
+            new_cap = size;
+            new_data = (char *)kmalloc(new_cap);
+            if (!new_data) return -ENOMEM;
+        }
+        if (inode->data) {
+            size_t copy_len = inode->size < inode->capacity ? inode->size : inode->capacity;
+            if (copy_len > 0) memcpy(new_data, inode->data, copy_len);
+            kfree(inode->data);
+        }
+        size_t zero_start = inode->size < inode->capacity ? inode->size : inode->capacity;
+        if (new_cap > zero_start) {
+            memset(new_data + zero_start, 0, new_cap - zero_start);
+        }
+        inode->data = new_data;
+        inode->capacity = new_cap;
+    } else if (size < inode->capacity) {
         size_t new_cap = size ? size : 1;
         char *new_data = (char *)kmalloc(new_cap);
         if (!new_data) return -ENOMEM;
         size_t keep = inode->size < size ? inode->size : size;
-        if (inode->data && keep)
+        if (keep > inode->capacity) keep = inode->capacity;
+        if (inode->data && keep > 0)
             memcpy(new_data, inode->data, keep);
         if (inode->data)
             kfree(inode->data);
@@ -503,7 +523,9 @@ static int ramfs_vnode_truncate(vnode_t *vn, size_t size) {
         inode->capacity = new_cap;
     } else if (size > inode->size && inode->data && inode->size < inode->capacity) {
         size_t zero_end = size < inode->capacity ? size : inode->capacity;
-        memset(inode->data + inode->size, 0, zero_end - inode->size);
+        if (zero_end > inode->size) {
+            memset(inode->data + inode->size, 0, zero_end - inode->size);
+        }
     }
 
     inode->size = size;
@@ -586,10 +608,14 @@ static int ramfs_fwrite(vfile_t *vf, const char *buf, size_t count) {
             if (!new_data) return -ENOMEM;
         }
         if (inode->data) {
-            memcpy(new_data, inode->data, inode->size);
+            size_t copy_len = inode->size < inode->capacity ? inode->size : inode->capacity;
+            if (copy_len > 0) memcpy(new_data, inode->data, copy_len);
             kfree(inode->data);
         }
-        memset(new_data + inode->size, 0, new_cap - inode->size);
+        size_t zero_start = inode->size < inode->capacity ? inode->size : inode->capacity;
+        if (new_cap > zero_start) {
+            memset(new_data + zero_start, 0, new_cap - zero_start);
+        }
         inode->data = new_data;
         inode->capacity = new_cap;
     }

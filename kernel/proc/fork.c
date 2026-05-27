@@ -47,6 +47,7 @@ int proc_clone(uint64_t flags, uint64_t stack, int *ptid, uint64_t tls, int *cti
         proc_destroy_task(t);
         return -EAGAIN;
     }
+    int child_pid = t->pid;
     proc_task_init_common(t, parent);
     proc_pid_register(t);
 
@@ -162,21 +163,27 @@ int proc_clone(uint64_t flags, uint64_t stack, int *ptid, uint64_t tls, int *cti
         }
     }
 
+    if (flags & CLONE_VFORK) {
+        uint64_t pf = spin_lock_irqsave(&proc_lock);
+        parent->vfork_waiting = 1;
+        parent->state = PROC_BLOCKED;
+        spin_unlock_irqrestore(&proc_lock, pf);
+    }
+
     proc_make_ready(t);
     if (flags & CLONE_VFORK) {
-        mm_struct_t *shared_mm = (flags & CLONE_VM) ? parent->mm : NULL;
-        while (t->state != PROC_UNUSED && t->state != PROC_ZOMBIE &&
-               (!shared_mm || t->mm == shared_mm)) {
+        for (;;) {
             uint64_t pf = spin_lock_irqsave(&proc_lock);
-            if (t->state == PROC_UNUSED || t->state == PROC_ZOMBIE ||
-                (shared_mm && t->mm != shared_mm)) {
+            int done = (t->state == PROC_UNUSED || t->state == PROC_ZOMBIE ||
+                        !(t->clone_flags & CLONE_VFORK));
+            if (done) {
+                parent->vfork_waiting = 0;
                 spin_unlock_irqrestore(&proc_lock, pf);
                 break;
             }
-            parent->state = PROC_BLOCKED;
             spin_unlock_irqrestore(&proc_lock, pf);
             sched();
         }
     }
-    return t->pid;
+    return child_pid;
 }

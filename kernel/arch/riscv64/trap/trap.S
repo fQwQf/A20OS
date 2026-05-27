@@ -1,13 +1,15 @@
 /*
  * A20OS trap handling for RISC-V 64-bit
  *
- * TrapContext layout (288 bytes, aligned 16):
+ * TrapContext layout (560 bytes, aligned 16):
  *   offset 0-248:   x[0..31]   (32 general-purpose registers, 8 bytes each)
  *   offset 256:     sstatus    (CSR, at 32*8)
  *   offset 264:     sepc       (CSR, at 33*8)
  *   offset 272:     last_a0    (original a0 for SA_RESTART, at 34*8)
  *   offset 280:     kernel_tp  (kernel task pointer, at 35*8)
- *   Total: 36*8 = 288 bytes
+ *   offset 288-536: f[0..31]   (floating-point registers, at 36*8)
+ *   offset 544:     fcsr       (floating-point control/status, at 68*8)
+ *   Total: 70*8 = 560 bytes
  *
  * Ported from RocketOS trap.S with physical-address-only adjustments.
  */
@@ -18,6 +20,12 @@
 .endm
 .macro LOAD_GP n
     ld x\n, \n*8(sp)
+.endm
+.macro SAVE_FP n
+    fsd f\n, (36+\n)*8(sp)
+.endm
+.macro LOAD_FP n
+    fld f\n, (36+\n)*8(sp)
 .endm
 
     .section .text
@@ -39,7 +47,7 @@ __trap_from_user:
     csrrw   sp, sscratch, sp
 
     /* Allocate TrapContext on kernel stack */
-    addi    sp, sp, -36*8
+    addi    sp, sp, -70*8
 
     /* Save general-purpose registers */
     sd      x1, 1*8(sp)
@@ -61,6 +69,17 @@ __trap_from_user:
     sd      t0, 32*8(sp)
     sd      t1, 33*8(sp)
 
+    /* FP loads/stores require FS != Off. */
+    li      t1, (3 << 13)
+    csrs    sstatus, t1
+    .set n, 0
+    .rept 32
+        SAVE_FP %n
+        .set n, n+1
+    .endr
+    frcsr   t1
+    sd      t1, 68*8(sp)
+
     /* Read user stack from sscratch and save it as x[2] */
     csrr    t2, sscratch
     sd      t2, 2*8(sp)
@@ -78,7 +97,7 @@ __trap_from_user:
     la      t0, __trap_from_kernel
     csrw    stvec, t0
 
-    /* Set SPP=1 (entering supervisor mode) and SUM=1 (access user memory) */
+    /* Set SPP=1 (entering supervisor mode), SUM=1, and keep FP usable. */
     li      t0, (1 << 8) | (1 << 18)
     csrs    sstatus, t0
 
@@ -108,6 +127,18 @@ __return_to_user:
     ld      t0, 32*8(sp)
     ld      t1, 33*8(sp)
     ld      t2, 2*8(sp)
+
+    /* Keep FS enabled while restoring FP state, then restore user sstatus. */
+    li      t3, (3 << 13)
+    csrs    sstatus, t3
+    .set n, 0
+    .rept 32
+        LOAD_FP %n
+        .set n, n+1
+    .endr
+    ld      t3, 68*8(sp)
+    fscsr   t3
+
     csrw    sstatus, t0
     csrw    sepc, t1
     csrw    sscratch, t2
@@ -129,7 +160,7 @@ __return_to_user:
     ld      x4, 4*8(sp)
 
     /* Release TrapContext on kernel stack */
-    addi    sp, sp, 36*8
+    addi    sp, sp, 70*8
 
     /* Swap sp and sscratch: sp = user stack, sscratch = kernel stack */
     csrrw   sp, sscratch, sp
@@ -143,12 +174,12 @@ __return_to_user:
  * __trap_from_kernel
  * Called when a trap occurs while already in kernel mode.
  * No stack swap needed. We save context on current kernel stack.
- * Note: kernel traps use a smaller context (34*8 bytes, no last_a0/kernel_tp).
+ * Kernel traps use the full context too, so floating-point state is preserved
+ * if a kernel path or compiler-generated code uses FP registers.
  */
 __trap_from_kernel:
     /* No stack swap - already on kernel stack */
-    /* Allocate TrapContext (without last_a0 and kernel_tp = 34*8) */
-    addi    sp, sp, -34*8
+    addi    sp, sp, -70*8
 
     /* Save general-purpose registers */
     sd      x1, 1*8(sp)
@@ -167,6 +198,16 @@ __trap_from_kernel:
     sd      t0, 32*8(sp)
     sd      t1, 33*8(sp)
 
+    li      t1, (3 << 13)
+    csrs    sstatus, t1
+    .set n, 0
+    .rept 32
+        SAVE_FP %n
+        .set n, n+1
+    .endr
+    frcsr   t1
+    sd      t1, 68*8(sp)
+
     /* Save current sp */
     sd      sp, 2*8(sp)
 
@@ -179,6 +220,17 @@ __trap_from_kernel:
     /* Restore context after handler returns */
     ld      t0, 32*8(sp)
     ld      t1, 33*8(sp)
+
+    li      t2, (3 << 13)
+    csrs    sstatus, t2
+    .set n, 0
+    .rept 32
+        LOAD_FP %n
+        .set n, n+1
+    .endr
+    ld      t2, 68*8(sp)
+    fscsr   t2
+
     csrw    sstatus, t0
     csrw    sepc, t1
 
@@ -192,7 +244,7 @@ __trap_from_kernel:
     .endr
 
     /* Release TrapContext */
-    addi    sp, sp, 34*8
+    addi    sp, sp, 70*8
 
     sret
 
