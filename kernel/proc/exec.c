@@ -502,6 +502,7 @@ static int exec_install_process(task_t *t,
     new_mm->stack_bottom = info->stack_top - USER_STACK_INITIAL_PAGES * PAGE_SIZE;
     new_mm->total_vm   = 0;
     new_mm->rss        = 0;
+    spin_init(&new_mm->lock);
     refcount_set(&new_mm->refcount, 1);
     new_mm->mmap       = info->mmap;
 
@@ -584,6 +585,8 @@ static int exec_install_process(task_t *t,
     } else if (old_pgdir && old_pgdir != proc_kernel_pgdir_shared()) {
         pt_destroy_user(old_pgdir);
     }
+
+    proc_complete_vfork(t);
 
     arch_fence_i();
     t->state = PROC_RUNNING;

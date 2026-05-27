@@ -87,3 +87,4 @@
 #define F_SEAL_FUTURE_WRITE 0x0010
 
 #endif /* _ABI_LINUX_FCNTL_H */
+#define CAP_LEASE   28

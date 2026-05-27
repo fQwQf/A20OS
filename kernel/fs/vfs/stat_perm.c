@@ -107,6 +107,44 @@ int vfs_mode_has_perm_ids(uint32_t st_mode, uint32_t file_uid,
     return (((st_mode >> shift) & need) == need) ? 0 : -EACCES;
 }
 
+/* vfs_mode_has_perm_ids_nocap: like vfs_mode_has_perm_ids but
+ * does NOT check capabilities. Used by access() / faccessat()
+ * without AT_EACCESS flag, where real uid/gid are used without
+ * any capability bypass. */
+int vfs_mode_has_perm_ids_nocap(uint32_t st_mode, uint32_t file_uid,
+                                uint32_t file_gid, uint32_t uid,
+                                uint32_t gid, int mask)
+{
+    if (mask == F_OK)
+        return 0;
+
+    int shift = 0;
+    if (uid == file_uid)
+        shift = 6;
+    else if (uid == 0 || gid == file_gid)
+        shift = 3;
+
+    uint32_t need = 0;
+    if (mask & R_OK)
+        need |= 4;
+    if (mask & W_OK)
+        need |= 2;
+    if (mask & X_OK)
+        need |= 1;
+
+    /* root can read/write anything, but NOT execute files without x bit */
+    if (uid == 0 && !(mask & X_OK))
+        return 0;
+    if (uid == 0 && (mask & X_OK)) {
+        /* root can execute if ANY execute bit is set */
+        if (st_mode & (S_IXUSR | S_IXGRP | S_IXOTH))
+            return 0;
+        return -EACCES;
+    }
+
+    return (((st_mode >> shift) & need) == need) ? 0 : -EACCES;
+}
+
 static int vfs_mode_has_perm(uint32_t st_mode, uint32_t uid,
                              uint32_t gid, int mask)
 {

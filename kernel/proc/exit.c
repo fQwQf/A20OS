@@ -30,6 +30,32 @@ static int proc_task_tgid(task_t *t)
     return t ? (t->tgid > 0 ? t->tgid : t->pid) : -1;
 }
 
+static void proc_complete_vfork_locked(task_t *child)
+{
+    if (!child)
+        return;
+
+    if (!(child->clone_flags & CLONE_VFORK))
+        return;
+
+    child->clone_flags &= ~CLONE_VFORK;
+    task_t *parent = child->parent;
+    if (parent && parent->state == PROC_BLOCKED) {
+        parent->vfork_waiting = 0;
+        parent->state = PROC_READY;
+        proc_runq_enqueue_locked(parent);
+    } else if (parent) {
+        parent->vfork_waiting = 0;
+    }
+}
+
+void proc_complete_vfork(task_t *child)
+{
+    uint64_t flags = spin_lock_irqsave(&proc_lock);
+    proc_complete_vfork_locked(child);
+    spin_unlock_irqrestore(&proc_lock, flags);
+}
+
 static int proc_child_auto_reaps(task_t *child, task_t *parent)
 {
     if (!child)
@@ -212,6 +238,8 @@ void proc_exit(int exit_code)
     if (!t)
         panic("proc_exit: no current task");
 
+    int thread_exit = (t->clone_flags & CLONE_THREAD) != 0;
+
     int *ctid_to_wake = t->clear_child_tid;
     proc_clear_child_tid_direct(t);
 #if defined(CONFIG_ABI_LINUX) || defined(CONFIG_ABI_BOTH)
@@ -227,8 +255,10 @@ void proc_exit(int exit_code)
     vfs_release_process_locks(t->pid);
     bpf_release_process(t->pid);
 
-    fdtable_close_all(t);
-    proc_release_exiting_mm(t);
+    if (!thread_exit) {
+        fdtable_close_all(t);
+        proc_release_exiting_mm(t);
+    }
 
     proc_runq_remove_locked(t);
 
@@ -241,6 +271,8 @@ void proc_exit(int exit_code)
     t->state = PROC_ZOMBIE;
 
     a20_event_notify(t, A20_OBJ_TASK, 0, (uint64_t)exit_code, 0);
+
+    proc_complete_vfork_locked(t);
 
     if (auto_reap) {
         t->parent = proc_idle_task();
@@ -306,6 +338,8 @@ void proc_force_exit(task_t *t, int exit_code)
 
     a20_event_notify(t, A20_OBJ_TASK, 0, (uint64_t)exit_code, 0);
 
+    proc_complete_vfork_locked(t);
+
     if (auto_reap) {
         t->parent = proc_idle_task();
         t->ppid = 0;
@@ -320,8 +354,11 @@ void proc_force_exit(task_t *t, int exit_code)
     if (!auto_reap && parent && t->exit_signal > 0)
         signal_send(parent->pid, t->exit_signal);
 
-    if (auto_reap)
-        proc_destroy_task(t);
+    /*
+     * Do not destroy a remotely forced task inline. It may still be referenced
+     * by scheduler or wait queues; the zombie reaper will unlink and free it
+     * after the state transition is globally visible.
+     */
 }
 
 void proc_exit_group(int exit_code)

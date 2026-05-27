@@ -77,7 +77,14 @@ task_t *proc_first_task_locked(void)
 
 task_t *proc_next_task_locked(task_t *t)
 {
-    return t ? t->all_next : NULL;
+    task_t *next = t ? t->all_next : NULL;
+    if (next && (((uintptr_t)next & (sizeof(void *) - 1)) ||
+                 !arch_is_kernel_address(next))) {
+        kerr("proc_next_task_locked: corrupt all_next from pid=%d ptr=%p\n",
+             t ? t->pid : -1, (void *)next);
+        return NULL;
+    }
+    return next;
 }
 
 static void proc_count_vma_huge_pages(mm_struct_t *mm, vm_area_t *vma,
@@ -188,6 +195,10 @@ void proc_make_ready(task_t *t) {
 
     unsigned target_cpu = cpu_current_id();
     uint64_t flags = spin_lock_irqsave(&proc_lock);
+    if (t->vfork_waiting) {
+        spin_unlock_irqrestore(&proc_lock, flags);
+        return;
+    }
     if (t->state != PROC_READY) {
         t->state = PROC_READY;
         if (t->wake_time == 0 && t->sched_level > 0)
@@ -424,6 +435,7 @@ int proc_alloc_user_image(uint64_t entry, uint64_t sp, uint64_t *pgdir,
         mm->stack_bottom = mm->stack_top - USER_STACK_INITIAL_PAGES * PAGE_SIZE;
         mm->total_vm    = total_vm;
         mm->rss         = 0;
+        spin_init(&mm->lock);
         refcount_set(&mm->refcount, 1);
         mm->mmap        = mmap;
         t->mm = mm;
@@ -454,7 +466,7 @@ int proc_alloc_user(uint64_t entry, uint64_t sp, uint64_t *pgdir) {
 
 // 向指定进程发送信号（kill 系统调用的实现）
 int proc_kill(int pid, int signum) {
-    return signal_send(pid, signum);
+    return signal_send_user(pid, signum);
 }
 
 int proc_kill_pgid(int pgid, int signum, int skip_self) {
@@ -482,7 +494,7 @@ int proc_kill_pgid(int pgid, int signum, int skip_self) {
         if (pid_count == 0)
             break;
         for (int i = 0; i < pid_count; i++)
-            signal_send(pids[i], signum);
+            signal_send_user(pids[i], signum);
         count += pid_count;
     }
     return count > 0 ? count : -ESRCH;
@@ -497,12 +509,20 @@ uint64_t proc_brk(uint64_t newbrk) {
     task_t *t = proc_current();
     if (!t || !t->mm) return 0; // 理论上不应发生
 
+    uint64_t lock_flags = spin_lock_irqsave(&t->mm->lock);
+
     // 如果 newbrk 为 0，通常是 C 库在查询当前堆位置
-    if (newbrk == 0) return t->mm->brk;
+    if (newbrk == 0) {
+        uint64_t brk = t->mm->brk;
+        spin_unlock_irqrestore(&t->mm->lock, lock_flags);
+        return brk;
+    }
 
     // mm_brk 内部已经处理了 newbrk < start_brk 的情况（返回旧 brk）
     // 同时也处理了分配失败的情况
-    return mm_brk(t->mm, newbrk);
+    uint64_t brk = mm_brk(t->mm, newbrk);
+    spin_unlock_irqrestore(&t->mm->lock, lock_flags);
+    return brk;
 }
 
 // 创建内存映射（mmap 系统调用的实现）
@@ -513,20 +533,30 @@ uint64_t proc_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, long 
     size_t map_len = ROUND_UP(len, PAGE_SIZE);
     if (map_len == 0) return (uint64_t)-EINVAL;
 
+    uint64_t lock_flags = spin_lock_irqsave(&t->mm->lock);
+    uint64_t ret;
     if ((flags & MAP_ANONYMOUS) || fd < 0)
-        return mm_mmap(t->mm, addr, len, prot, flags);
+        ret = mm_mmap(t->mm, addr, len, prot, flags);
+    else {
+        if (off < 0 || ((uint64_t)off & (PAGE_SIZE - 1))) {
+            spin_unlock_irqrestore(&t->mm->lock, lock_flags);
+            return (uint64_t)-EINVAL;
+        }
 
-    if (off < 0 || ((uint64_t)off & (PAGE_SIZE - 1)))
-        return (uint64_t)-EINVAL;
-
-    return mm_mmap_file(t->mm, addr, len, prot, flags, fd, (uint64_t)off);
+        ret = mm_mmap_file(t->mm, addr, len, prot, flags, fd, (uint64_t)off);
+    }
+    spin_unlock_irqrestore(&t->mm->lock, lock_flags);
+    return ret;
 }
 
 // 取消内存映射（munmap 系统调用的实现）
 int proc_munmap(uint64_t addr, size_t len) {
     task_t *t = proc_current();
     if (!t || !t->mm) return -1;
-    return mm_munmap(t->mm, addr, len);
+    uint64_t lock_flags = spin_lock_irqsave(&t->mm->lock);
+    int ret = mm_munmap(t->mm, addr, len);
+    spin_unlock_irqrestore(&t->mm->lock, lock_flags);
+    return ret;
 }
 
 // 打印所有进程信息

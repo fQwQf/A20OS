@@ -126,14 +126,17 @@ static int o_direct_check(vfile_t *vf, const char *buf, size_t count)
 {
     if (!vf || !(vf->flags & O_DIRECT))
         return 0;
+    if (vf->vnode) {
+        uint32_t mode = vf->vnode->mode;
+        if (!((mode & S_IFMT) == S_IFREG || (mode & S_IFMT) == S_IFBLK)) {
+            return 0;
+        }
+    }
     int align = 512;
     if ((uintptr_t)buf & (align - 1) || (count & (align - 1)))
         return -EINVAL;
-    if (vf->ops && vf->ops->lseek) {
-        long off = vf->ops->lseek(vf, 0, SEEK_CUR);
-        if (off >= 0 && (off & (align - 1)))
-            return -EINVAL;
-    }
+    if (vf->offset & (align - 1))
+        return -EINVAL;
     return 0;
 }
 
@@ -170,11 +173,20 @@ int64_t sys_pread64(int fd, char *buf, size_t count, long off) {
     if (gfd < 0) return gfd;
     vfile_t *vf_check = vfs_get_file_ref((int)gfd);
     if (vf_check && (vf_check->flags & O_DIRECT)) {
-        int align = 512;
-        if ((uintptr_t)buf & (align - 1) || (count & (align - 1)) ||
-            (off < 0) || ((long)off & (align - 1))) {
-            vfs_put_file_ref((int)gfd, vf_check);
-            return -EINVAL;
+        int is_reg_or_blk = 1;
+        if (vf_check->vnode) {
+            uint32_t mode = vf_check->vnode->mode;
+            if (!((mode & S_IFMT) == S_IFREG || (mode & S_IFMT) == S_IFBLK)) {
+                is_reg_or_blk = 0;
+            }
+        }
+        if (is_reg_or_blk) {
+            int align = 512;
+            if ((uintptr_t)buf & (align - 1) || (count & (align - 1)) ||
+                (off < 0) || ((long)off & (align - 1))) {
+                vfs_put_file_ref((int)gfd, vf_check);
+                return -EINVAL;
+            }
         }
     }
     vfs_put_file_ref((int)gfd, vf_check);
@@ -196,11 +208,20 @@ int64_t sys_pwrite64(int fd, char *buf, size_t count, long off) {
     if (gfd < 0) return gfd;
     vfile_t *vf_check = vfs_get_file_ref((int)gfd);
     if (vf_check && (vf_check->flags & O_DIRECT)) {
-        int align = 512;
-        if ((uintptr_t)buf & (align - 1) || (count & (align - 1)) ||
-            (off < 0) || ((long)off & (align - 1))) {
-            vfs_put_file_ref((int)gfd, vf_check);
-            return -EINVAL;
+        int is_reg_or_blk = 1;
+        if (vf_check->vnode) {
+            uint32_t mode = vf_check->vnode->mode;
+            if (!((mode & S_IFMT) == S_IFREG || (mode & S_IFMT) == S_IFBLK)) {
+                is_reg_or_blk = 0;
+            }
+        }
+        if (is_reg_or_blk) {
+            int align = 512;
+            if ((uintptr_t)buf & (align - 1) || (count & (align - 1)) ||
+                (off < 0) || ((long)off & (align - 1))) {
+                vfs_put_file_ref((int)gfd, vf_check);
+                return -EINVAL;
+            }
         }
     }
     vfs_put_file_ref((int)gfd, vf_check);
@@ -405,17 +426,25 @@ int64_t sys_sync_file_range(int fd, long offset, long nbytes, unsigned flags) {
     return vfs_fsync((int)gfd);
 }
 
-int64_t sys_ftruncate(int fd, size_t size) {
+int64_t sys_syncfs(int fd) {
     int64_t gfd = fdtable_get_current(fd);
-    if (gfd < 0) return gfd;
-    return vfs_ftruncate(gfd, size);
+    if (gfd < 0) return -EBADF;
+    return vfs_fsync((int)gfd);
 }
 
-int64_t sys_truncate(const char *path, size_t size) {
+int64_t sys_ftruncate(int fd, long length) {
+    if (length < 0) return -EINVAL;
+    int64_t gfd = fdtable_get_current(fd);
+    if (gfd < 0) return gfd;
+    return vfs_ftruncate(gfd, (size_t)length);
+}
+
+int64_t sys_truncate(const char *path, long length) {
+    if (length < 0) return -EINVAL;
     if (!path) return -EFAULT;
     char kpath[MAX_PATH_LEN];
     if (user_strncpy(kpath, path, MAX_PATH_LEN) < 0) return -EFAULT;
-    return vfs_truncate(kpath, size);
+    return vfs_truncate(kpath, (size_t)length);
 }
 
 int64_t sys_sendfile(int out_fd, int in_fd, long *off, size_t count) {

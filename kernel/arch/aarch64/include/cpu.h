@@ -176,4 +176,26 @@ static inline void arch_dma_sync_for_cpu(const void *addr, size_t size) {
     __asm__ __volatile__("dsb sy" ::: "memory");
 }
 
+struct backtrace_frame {
+    uint64_t pc;
+};
+
+static inline int arch_unwind_frames(uint64_t fp,
+                                     struct backtrace_frame *frames,
+                                     int max_frames) {
+    int n = 0;
+    for (int i = 0; i < max_frames && fp; i++) {
+        uint64_t *frame = (uint64_t *)fp;
+        if (!arch_is_kernel_address(frame))
+            break;
+        uint64_t next_fp = frame[0];
+        uint64_t lr      = frame[1];
+        if (!lr) break;
+        frames[n++].pc = lr;
+        if (!next_fp || next_fp <= fp) break;
+        fp = next_fp;
+    }
+    return n;
+}
+
 #endif

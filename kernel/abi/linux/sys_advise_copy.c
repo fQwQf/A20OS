@@ -116,14 +116,26 @@ int64_t sys_tee(int fd_in, int fd_out, size_t len, unsigned flags)
 int64_t sys_fallocate(int fd, int mode, long off, long len)
 {
     if (off < 0 || len < 0) return -EINVAL;
+    uint64_t end = (uint64_t)off + (uint64_t)len;
+    if (end > 0x7fffffffffffffffULL) return -EFBIG;
+
     int64_t gfd = fdtable_get_current(fd);
     if (gfd < 0) return gfd;
+
+    vfile_t *vf = vfs_get_file_ref((int)gfd);
+    if (!vf) return -EBADF;
+    int acc = vf->flags & O_ACCMODE;
+    if (acc != O_WRONLY && acc != O_RDWR) {
+        vfs_put_file_ref((int)gfd, vf);
+        return -EBADF;
+    }
+    vfs_put_file_ref((int)gfd, vf);
+
     const int FALLOC_FL_KEEP_SIZE = 0x01;
     if (mode & ~FALLOC_FL_KEEP_SIZE) return -EOPNOTSUPP;
     kstat_t st;
     int r = vfs_fstat((int)gfd, &st);
     if (r < 0) return r;
-    uint64_t end = (uint64_t)off + (uint64_t)len;
     if (mode & FALLOC_FL_KEEP_SIZE) return 0;
     if (end > st.st_size) return vfs_ftruncate((int)gfd, end);
     return 0;

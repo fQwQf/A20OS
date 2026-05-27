@@ -71,8 +71,7 @@ endif
 
 CRT_START := $(MUSL_CRT)/crt1.o $(MUSL_CRT)/crti.o
 CRT_END := $(MUSL_CRT)/crtn.o
-LIB_A20OS := $(OBJ_DIR)/lib/brk.o
-LIBC := $(LIB_A20OS) $(MUSL_CRT)/libc.a $(LIBGCC)
+LIBC := $(MUSL_CRT)/libc.a $(LIBGCC)
 
 MUSL_CHECK_FILES := $(MUSL_CRT)/crt1.o \
                     $(MUSL_CRT)/crti.o \
@@ -432,7 +431,7 @@ MKSH_CFLAGS := $(CFLAGS) -I$(MKSH_DIR) \
                -DMKSH_UNEMPLOYED \
                -DMKSH_DONT_EMIT_IDSTRING -DMKSH_BUILDSH -DMKSH_BUILD_R=599
 
-USER_INTERMEDIATE_TARGETS := $(INIT_OBJ) $(INIT_EXTRA_OBJS) $(LIB_A20OS) $(MKSH_OBJS) \
+USER_INTERMEDIATE_TARGETS := $(INIT_OBJ) $(INIT_EXTRA_OBJS) $(MKSH_OBJS) \
                              $(LOCAL_CMD_OBJS) $(SBASE_OBJS) $(SBASE_LIBUTF_OBJS) \
                              $(SBASE_LIBUTIL_OBJS) $(SBASE_LIBUTF) $(SBASE_LIBUTIL) \
                              $(WGET_OBJ) $(TLSE_OBJ) $(FF_MAIN_OBJ) $(FF_LIB_OBJS) $(FF_LIB)
@@ -478,22 +477,22 @@ musl_prepare:
 		echo "[MUSL] build-$(ARCH) ready"; \
 	fi
 
-$(BUILD_DIR)/mksh: $(MKSH_OBJS) $(LIB_A20OS) | build_dir musl_prepare
+$(BUILD_DIR)/mksh: $(MKSH_OBJS) | build_dir musl_prepare
 	$(CC) $(LDFLAGS) -o $@ $(CRT_START) $(MKSH_OBJS) $(CRT_END) $(LIBC)
 
 $(BUILD_DIR)/sh: $(BUILD_DIR)/mksh | build_dir
 	cp $< $@
 
-$(BUILD_DIR)/init: $(INIT_OBJ) $(INIT_EXTRA_OBJS) $(LIB_A20OS) | build_dir musl_prepare
+$(BUILD_DIR)/init: $(INIT_OBJ) $(INIT_EXTRA_OBJS) | build_dir musl_prepare
 	$(CC) $(LDFLAGS) -o $@ $(CRT_START) $(INIT_OBJ) $(INIT_EXTRA_OBJS) $(CRT_END) $(LIBC)
 
-$(LOCAL_CMDS): $(BUILD_DIR)/%: $(OBJ_DIR)/cmds/%.o $(LIB_A20OS) | build_dir musl_prepare
+$(LOCAL_CMDS): $(BUILD_DIR)/%: $(OBJ_DIR)/cmds/%.o | build_dir musl_prepare
 	$(CC) $(LDFLAGS) -o $@ $(CRT_START) $< $(CRT_END) $(LIBC)
 
-$(SBASE_CMDS): $(BUILD_DIR)/%: $(OBJ_DIR)/sbase/%.o $(SBASE_LIBUTIL) $(SBASE_LIBUTF) $(LIB_A20OS) | build_dir musl_prepare
+$(SBASE_CMDS): $(BUILD_DIR)/%: $(OBJ_DIR)/sbase/%.o $(SBASE_LIBUTIL) $(SBASE_LIBUTF) | build_dir musl_prepare
 	$(CC) $(LDFLAGS) -o $@ $(CRT_START) $< $(CRT_END) $(SBASE_LIBUTIL) $(SBASE_LIBUTF) $(LIBC)
 
-$(WGET_CMD): $(WGET_OBJ) $(TLSE_OBJ) $(LIB_A20OS) | build_dir musl_prepare
+$(WGET_CMD): $(WGET_OBJ) $(TLSE_OBJ) | build_dir musl_prepare
 	$(CC) $(LDFLAGS) -o $@ $(CRT_START) $(WGET_OBJ) $(TLSE_OBJ) $(CRT_END) $(LIBC)
 
 $(INIT_OBJ): $(INIT_MAIN_SRC) Makefile | build_dir musl_prepare
@@ -570,7 +569,7 @@ $(FF_LIB): $(FF_LIB_OBJS) | build_dir
 	$(AR) rcs $@ $^
 	$(RANLIB) $@
 
-$(FF_CMD): $(FF_MAIN_OBJ) $(FF_LIB) $(LIB_A20OS) | build_dir musl_prepare
+$(FF_CMD): $(FF_MAIN_OBJ) $(FF_LIB) | build_dir musl_prepare
 	$(CC) $(LDFLAGS) -o $@ $(CRT_START) $(FF_MAIN_OBJ) $(CRT_END) $(FF_LIB) $(LIBC)
 
 clean:

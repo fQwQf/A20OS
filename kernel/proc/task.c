@@ -50,6 +50,7 @@ void proc_task_init_common(task_t *t, task_t *parent)
     t->sched_level = 0;
     t->cpu_id    = parent ? parent->cpu_id : cpu_current_id();
     t->on_rq     = 0;
+    t->vfork_waiting = 0;
     t->rq_next   = NULL;
     t->rq_prev   = NULL;
     t->wait_next = NULL;

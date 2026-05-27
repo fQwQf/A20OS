@@ -3,6 +3,8 @@
 #include "core/panic.h"
 #include "core/string.h"
 #include "core/stdio.h"
+#include "mm/oom.h"
+
 
 pfa_t pfa;
 
@@ -191,16 +193,24 @@ static pfn_t pfa_alloc_from_buddy(int order)
 pfn_t pfa_alloc(int order) {
     if (order < 0 || order > MAX_ORDER) return PFN_NONE;
 
-    uint64_t flags = spin_lock_irqsave(&pfa.lock);
-
-    // Fast path: find a block >= requested order
-    pfn_t result = pfa_alloc_from_buddy(order);
-    if (result != PFN_NONE) {
+    int retries = 0;
+    while (retries < 2) {
+        uint64_t flags = spin_lock_irqsave(&pfa.lock);
+        pfn_t result = pfa_alloc_from_buddy(order);
+        if (result != PFN_NONE) {
+            spin_unlock_irqrestore(&pfa.lock, flags);
+            return result;
+        }
         spin_unlock_irqrestore(&pfa.lock, flags);
-        return result;
-    }
 
-    spin_unlock_irqrestore(&pfa.lock, flags);
+        if (retries == 0) {
+            if (oom_try_reclaim()) {
+                retries++;
+                continue;
+            }
+        }
+        break;
+    }
 
     static size_t last_reported_free = (size_t)-1;
     size_t cur_free = pfa.free_frames;

@@ -264,6 +264,7 @@ mm_struct_t *mm_create(void) {
     mm->rss        = 0;
     mm->locked_vm  = 0;
     mm->def_flags  = 0;
+    spin_init(&mm->lock);
     refcount_set(&mm->refcount, 1);
     return mm;
 }
@@ -418,8 +419,8 @@ static vm_area_t *vma_split(vm_area_t *vma, uint64_t split) {
     return tail;
 }
 
-static void vma_try_merge(vm_area_t *vma) {
-    if (!vma) return;
+static vm_area_t *vma_try_merge(vm_area_t *vma) {
+    if (!vma) return NULL;
 
     if (vma_can_merge(vma->prev, vma)) {
         vm_area_t *prev = vma->prev;
@@ -439,6 +440,7 @@ static void vma_try_merge(vm_area_t *vma) {
         vma_release_file(next);
         kfree(next);
     }
+    return vma;
 }
 
 // 将保护标志转换为页表项标志
@@ -453,6 +455,8 @@ uint64_t prot_to_pte(int prot) {
 
 // 创建内存映射（mmap 系统调用的实现）
 uint64_t mm_mmap(mm_struct_t *mm, uint64_t addr, size_t len, int prot, int flags) {
+    if ((flags & (MAP_FIXED | MAP_FIXED_NOREPLACE)) && (addr & (PAGE_SIZE - 1)))
+        return (uint64_t)-EINVAL;
     len = ROUND_UP(len, PAGE_SIZE);
     if (len == 0) return (uint64_t)-EINVAL;
     if (len > USER_VA_LIMIT) return (uint64_t)-ENOMEM;
@@ -517,6 +521,8 @@ uint64_t mm_mmap_file(mm_struct_t *mm, uint64_t addr, size_t len,
                       int prot, int flags, int file_fd, uint64_t file_offset)
 {
     if (file_fd < 0 || (file_offset & (PAGE_SIZE - 1)))
+        return (uint64_t)-EINVAL;
+    if ((flags & (MAP_FIXED | MAP_FIXED_NOREPLACE)) && (addr & (PAGE_SIZE - 1)))
         return (uint64_t)-EINVAL;
 
     len = ROUND_UP(len, PAGE_SIZE);
@@ -823,8 +829,12 @@ int mm_mremap(mm_struct_t *mm, uint64_t old_addr, size_t old_size,
 
 // 取消内存映射（munmap 系统调用的实现）
 int mm_munmap(mm_struct_t *mm, uint64_t addr, size_t len) {
+    if (!mm || !mm->pgdir) return -EINVAL;
+    if (addr & (PAGE_SIZE - 1)) return -EINVAL;
     len = ROUND_UP(len, PAGE_SIZE);
+    if (len == 0) return 0;
     uint64_t end = addr + len;
+    if (end < addr || end > USER_VA_LIMIT) return -EINVAL;
 
     vm_area_t *vma = mm->mmap;
     while (vma) {
@@ -910,12 +920,24 @@ int mm_munmap(mm_struct_t *mm, uint64_t addr, size_t len) {
 
 // 调整堆大小（brk 系统调用的实现）
 uint64_t mm_brk(mm_struct_t *mm, uint64_t newbrk) {
+    if (!mm || !mm->pgdir) return 0;
     if (newbrk == 0) return mm->brk;
-    if (newbrk < mm->start_brk) return mm->brk;
+    if (newbrk < mm->start_brk || newbrk > USER_VA_LIMIT)
+        return mm->brk;
+
+    uint64_t old_brk_page = ROUND_UP(mm->brk, PAGE_SIZE);
+    uint64_t new_brk_page = ROUND_UP(newbrk, PAGE_SIZE);
+    if (new_brk_page < newbrk)
+        return mm->brk;
+
+    if (newbrk > mm->brk && new_brk_page > old_brk_page) {
+        if (mm_range_overlaps(mm, old_brk_page,
+                              new_brk_page - old_brk_page, NULL))
+            return mm->brk;
+    }
+
     if (newbrk < mm->brk) {
         // 缩小堆，释放多余的物理页面
-        uint64_t new_brk_page = ROUND_UP(newbrk, PAGE_SIZE);
-        uint64_t old_brk_page = ROUND_UP(mm->brk, PAGE_SIZE);
         for (uint64_t va = new_brk_page; va < old_brk_page; ) {
             int level = 0;
             uint64_t base = 0;
@@ -952,6 +974,7 @@ uint64_t mm_brk(mm_struct_t *mm, uint64_t newbrk) {
 // 修改内存区域的保护属性（mprotect 系统调用的实现）
 int mm_mprotect(mm_struct_t *mm, uint64_t addr, size_t len, int prot) {
     if (!mm || !mm->pgdir) return -EINVAL;
+    if (prot & ~(PROT_READ | PROT_WRITE | PROT_EXEC)) return -EINVAL;
     if (addr & (PAGE_SIZE - 1)) return -EINVAL;
     len = ROUND_UP(len, PAGE_SIZE);
     if (len == 0) return 0;
@@ -962,7 +985,18 @@ int mm_mprotect(mm_struct_t *mm, uint64_t addr, size_t len, int prot) {
     if (prot & 2) vm_prot |= VM_WRITE;
     if (prot & 4) vm_prot |= VM_EXEC;
     uint64_t end = addr + len;
+    if (end < addr || end > USER_VA_LIMIT) return -ENOMEM;
     int touched = 0;
+
+    uint64_t covered = addr;
+    for (vm_area_t *v = mm_find_vma(mm, addr); v && covered < end; v = v->next) {
+        if (v->start > covered)
+            break;
+        if (v->end > covered)
+            covered = v->end;
+    }
+    if (covered < end)
+        return -ENOMEM;
 
     int r = mm_split_vma_at(mm, addr);
     if (r < 0) return r;
@@ -1012,9 +1046,9 @@ int mm_mprotect(mm_struct_t *mm, uint64_t addr, size_t len, int prot) {
                        (ptef & (PTE_R | PTE_W | PTE_X | PTE_D));
         v->vm_flags  = (v->vm_flags & ~(uint64_t)(VM_READ | VM_WRITE | VM_EXEC)) |
                        vm_prot;
-        vma_try_merge(v);
+        v = vma_try_merge(v);
         touched = 1;
-        v = next;
+        v = v ? v->next : next;
     }
 
     if (touched)
@@ -1028,6 +1062,7 @@ mm_struct_t *mm_fork(mm_struct_t *parent) {
     mm_struct_t *child = kcalloc(1, sizeof(mm_struct_t));
     if (!child) return NULL;
     *child = *parent;
+    spin_init(&child->lock);
     refcount_set(&child->refcount, 1);
     child->rss = 0;
     child->total_vm = 0;
