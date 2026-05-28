@@ -436,8 +436,10 @@ int proc_alloc_user_image(uint64_t entry, uint64_t sp, uint64_t *pgdir,
         mm->total_vm    = total_vm;
         mm->rss         = 0;
         spin_init(&mm->lock);
+        spin_set_debug(&mm->lock, "mm", mm);
         refcount_set(&mm->refcount, 1);
         mm->mmap        = mmap;
+        ktrace_mm("[MMDBG] mm=%p lock=%p\n", (void *)mm, (void *)&mm->lock);
         t->mm = mm;
     }
 

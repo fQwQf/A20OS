@@ -589,12 +589,16 @@ debug-arm64:
 
 _debug_impl:
 ifeq ($(BRINGUP),1)
-	$(MAKE) ARCH=$(ARCH) BRINGUP=1 CFLAGS="$(DEBUG_CFLAGS)" kernel-only
+	$(MAKE) ARCH=$(ARCH) BRINGUP=1 OPT="-O0 -g -DDEBUG" kernel-only
 else
-	$(MAKE) ARCH=$(ARCH) BRINGUP=$(BRINGUP) CFLAGS="$(DEBUG_CFLAGS)" kernel-only
-	$(MAKE) -C user ARCH=$(ARCH) OPT="-O0 -g"
+	$(MAKE) ARCH=$(ARCH) BRINGUP=$(BRINGUP) OPT="-O0 -g -DDEBUG" dev-build
 endif
 	@echo "Waiting for GDB connection on port 1234..."
+	@echo "=========================================================="
+	@echo "Please run in another terminal:"
+	@echo "  gdb-multiarch $(KERNEL_ELF)"
+	@echo "  (gdb) target remote :1234"
+	@echo "=========================================================="
 	$(QEMU) $(QEMU_FLAGS) -kernel $(KERNEL_ELF) -S -s
 
 # ----------------------------------------------------------------
