@@ -40,7 +40,7 @@ int handle_cow_fault(task_t *t, uint64_t stval) {
             spin_unlock_irqrestore(&pfa.lock, pfa_flags);
             new_pfn = pfa_alloc(order);
             if (new_pfn == PFN_NONE) {
-                spin_lock_irqsave(&pfa.lock);
+                pfa_flags = spin_lock_irqsave(&pfa.lock);
                 pfa.meta[old_pfn].refcount = rc;
                 spin_unlock_irqrestore(&pfa.lock, pfa_flags);
                 return -1;

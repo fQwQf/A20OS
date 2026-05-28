@@ -100,6 +100,7 @@ int64_t sys_accept4(int fd, void *addr, void *addrlen, int flags) {
     int new_gfd = net_accept((int)gfd, kaddr, &klen, flags);
     if (new_gfd < 0)
         return new_gfd;
+    ktrace_syscall("[SYS] accept4: new_gfd=%d\n", new_gfd);
     if (flags & SOCK_NONBLOCK)
         net_set_nonblock(new_gfd, 1);
     int lfd = fdtable_install_current( new_gfd, flags);

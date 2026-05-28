@@ -4,6 +4,7 @@
 #include "core/klog.h"
 #include "core/timer.h"
 #include "core/string.h"
+#include "core/stdio.h"
 #include "drv/virtio_blk.h"
 #include "net/lwip_stack.h"
 #include "proc/signal.h"
@@ -364,6 +365,8 @@ void context_switch(task_t *next) {
     task_t *old = proc_set_current(next);
     next->state  = PROC_RUNNING;
     next->on_rq  = 0;
+    if (prev && prev->pid >= 4 && next->pid >= 4)
+        ktrace_sched("[SCHED] ctxsw: %d -> %d\n", prev->pid, next->pid);
     if (old)
         arch_set_task_pointer(old);
     __switch(next->kstack);
@@ -393,8 +396,11 @@ void sched(void) {
     }
 
     task_t *idle = proc_idle_task();
-    if (cur != idle)
+    if (cur != idle) {
+        if (cur && cur->pid >= 4)
+            ktrace_sched("[SCHED] fall-to-idle: cur=%d state=%d\n", cur->pid, cur->state);
         context_switch(idle);
+    }
 }
 
 void proc_yield(void) {
@@ -410,6 +416,8 @@ void proc_yield(void) {
         uint64_t slice = TICKS_PER_SEC / 100;
         if (elapsed >= slice && cur->sched_level < SCHED_LEVELS - 1)
             cur->sched_level++;
+        if (cur->pid >= 4)
+            ktrace_sched("[SCHED] yield: pid=%d\n", cur->pid);
         cur->state = PROC_READY;
         proc_make_ready(cur);
     }

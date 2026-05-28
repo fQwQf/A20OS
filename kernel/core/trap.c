@@ -117,6 +117,11 @@ void trap_handler(trap_context_t *ctx) {
 
     if (scause & CAUSE_INTR_MASK) {
         arch_handle_irq(scause & CAUSE_CODE_MASK, 1);
+        if (current && current->pid >= 4)
+            ktrace_trap("[TRAP] irq done: pid=%d sig_deliver...\n", current->pid);
+        if (proc_current() != current)
+            return;
+        proc_check_exit_pending();
     } else {
         uint64_t code = scause & CAUSE_CODE_MASK;
         uint32_t user_insn = 0;
@@ -133,6 +138,15 @@ void trap_handler(trap_context_t *ctx) {
             arch_local_irq_enable();
             syscall_dispatch(ctx);
             arch_local_irq_disable();
+            proc_check_exit_pending();
+            if (cur && cur->pid >= 5)
+                ktrace_trap("[TRAP] ret-to-user: pid=%d pgdl=0x%lx era=0x%lx prmd_csr=0x%lx prmd_ctx=0x%lx sp_ctx=0x%lx\n",
+                            cur->pid,
+                            (unsigned long)TRAP_CTX_KScratch0(ctx),
+                            (unsigned long)TRAP_CTX_EPC(ctx),
+                            (unsigned long)arch_read_sstatus(),
+                            (unsigned long)TRAP_CTX_STATUS(ctx),
+                            (unsigned long)TRAP_CTX_SP(ctx));
             return;
         } else if (code == CAUSE_LOAD_PAGE_FAULT || code == CAUSE_STORE_PAGE_FAULT || code == CAUSE_INSN_PAGE_FAULT) {
             uint64_t mm_flags = 0;
@@ -149,14 +163,14 @@ void trap_handler(trap_context_t *ctx) {
                     return;
                 }
             }
+            if (mm_locked) {
+                spin_unlock_irqrestore(&cur->mm->lock, mm_flags);
+                mm_locked = 0;
+            }
             if (handle_demand_fault(cur, stval) == 0) {
-                if (mm_locked)
-                    spin_unlock_irqrestore(&cur->mm->lock, mm_flags);
                 signal_deliver_user(ctx);
                 return;
             }
-            if (mm_locked)
-                spin_unlock_irqrestore(&cur->mm->lock, mm_flags);
             printf("SIGSEGV: pid=%d code=%lu sepc=0x%lx stval=0x%lx abi=%d\n",
                   cur ? cur->pid : -1, (unsigned long)code,
                   (unsigned long)sepc, (unsigned long)stval,
@@ -231,10 +245,13 @@ void trap_handler(trap_context_t *ctx) {
             proc_exit_group(-1);
         }
     }
+    proc_check_exit_pending();
     signal_deliver_user(ctx);
+    proc_check_exit_pending();
 }
 
 void kernel_trap_handler(trap_context_t *ctx) {
+    TRAP_CTX_KScratch0(ctx) = arch_read_satp();
     uint64_t scause = arch_read_cause();
     uint64_t sepc = arch_read_epc();
     uint64_t stval = arch_read_tval();

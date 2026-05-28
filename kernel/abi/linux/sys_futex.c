@@ -155,7 +155,9 @@ static int futex_wait_on(int *uaddr, int expected, void *timeout, uint32_t bitse
         spin_unlock_irqrestore(&g_futex_lock, flags);
         return slot;
     }
-    proc_block_until(t, until);
+    if (until)
+        proc_set_wake_time(t, until);
+    t->state = PROC_BLOCKED;
     spin_unlock_irqrestore(&g_futex_lock, flags);
 
     sched();

@@ -2,6 +2,7 @@
 #include "net/lwip_stack.h"
 #include "proc/proc.h"
 #include "proc/signal.h"
+#include "core/klog.h"
 #include "core/string.h"
 #include "core/timer.h"
 #include "mm/slab.h"
@@ -351,6 +352,7 @@ void net_tcp_close_pcb(net_socket_t *s)
 {
     if (!s || !s->tcp)
         return;
+    uint64_t flags = a20_lwip_lock();
     tcp_arg(s->tcp, NULL);
     if (s->listening) {
         tcp_accept(s->tcp, NULL);
@@ -362,12 +364,14 @@ void net_tcp_close_pcb(net_socket_t *s)
     if (tcp_close(s->tcp) != ERR_OK)
         tcp_abort(s->tcp);
     s->tcp = NULL;
+    a20_lwip_unlock(flags);
 }
 
 void net_tcp_drop_pcb(net_socket_t *s)
 {
     if (!s || !s->tcp)
         return;
+    uint64_t flags = a20_lwip_lock();
     tcp_arg(s->tcp, NULL);
     tcp_recv(s->tcp, NULL);
     tcp_err(s->tcp, NULL);
@@ -375,6 +379,7 @@ void net_tcp_drop_pcb(net_socket_t *s)
     if (tcp_close(s->tcp) != ERR_OK)
         tcp_abort(s->tcp);
     s->tcp = NULL;
+    a20_lwip_unlock(flags);
 }
 
 int net_inet_socket_init(net_socket_t *s)
@@ -382,31 +387,41 @@ int net_inet_socket_init(net_socket_t *s)
     if (!s || (s->domain != AF_INET && s->domain != AF_INET6))
         return 0;
 
+    uint64_t flags = a20_lwip_lock();
+    int ret = 0;
     if (s->type == SOCK_DGRAM) {
         s->udp = udp_new_ip_type(s->domain == AF_INET6 ? IPADDR_TYPE_V6 : IPADDR_TYPE_V4);
-        if (!s->udp)
-            return -ENOMEM;
+        if (!s->udp) {
+            ret = -ENOMEM;
+            goto out;
+        }
         udp_recv(s->udp, lwip_udp_recv_cb, s);
-        return 0;
+        goto out;
     }
     if (s->domain == AF_INET && s->type == SOCK_RAW) {
         s->raw = raw_new_ip_type(IPADDR_TYPE_V4, (u8_t)s->protocol);
-        if (!s->raw)
-            return -ENOMEM;
+        if (!s->raw) {
+            ret = -ENOMEM;
+            goto out;
+        }
         raw_recv(s->raw, lwip_raw_recv_cb, s);
-        return 0;
+        goto out;
     }
     if (s->domain == AF_INET6 && s->type == SOCK_RAW) {
         s->raw = raw_new_ip_type(IPADDR_TYPE_V6, (u8_t)s->protocol);
-        if (!s->raw)
-            return -ENOMEM;
+        if (!s->raw) {
+            ret = -ENOMEM;
+            goto out;
+        }
         raw_recv(s->raw, lwip_raw_recv_cb, s);
-        return 0;
+        goto out;
     }
     if (s->domain == AF_INET && s->type == SOCK_STREAM) {
         s->tcp = tcp_new_ip_type(IPADDR_TYPE_V4);
-        if (!s->tcp)
-            return -ENOMEM;
+        if (!s->tcp) {
+            ret = -ENOMEM;
+            goto out;
+        }
         if (s->tcp_nodelay)
             tcp_nagle_disable(s->tcp);
         if (s->keepalive)
@@ -422,13 +437,16 @@ int net_inet_socket_init(net_socket_t *s)
         tcp_err(s->tcp, lwip_tcp_err_cb);
         tcp_sent(s->tcp, lwip_tcp_sent_cb);
     }
-    return 0;
+out:
+    a20_lwip_unlock(flags);
+    return ret;
 }
 
 void net_inet_socket_destroy(net_socket_t *s)
 {
     if (!s)
         return;
+    uint64_t flags = a20_lwip_lock();
     if (s->udp) {
         udp_remove(s->udp);
         s->udp = NULL;
@@ -438,9 +456,14 @@ void net_inet_socket_destroy(net_socket_t *s)
         s->raw = NULL;
     }
     if (s->tcp) {
+        tcp_arg(s->tcp, NULL);
+        tcp_recv(s->tcp, NULL);
+        tcp_err(s->tcp, NULL);
+        tcp_sent(s->tcp, NULL);
         tcp_abort(s->tcp);
         s->tcp = NULL;
     }
+    a20_lwip_unlock(flags);
 }
 
 int net_inet_bind_pcb(net_socket_t *s, const void *addr, size_t addrlen)
@@ -455,7 +478,9 @@ int net_inet_bind_pcb(net_socket_t *s, const void *addr, size_t addrlen)
         int r = net_sockaddr_to_lwip_ip(addr, addrlen, &ip, &port);
         if (r < 0)
             return r;
+        uint64_t flags = a20_lwip_lock();
         err_t e = udp_bind(s->udp, &ip, port);
+        a20_lwip_unlock(flags);
         return e == ERR_OK ? 0 : -EADDRINUSE;
     }
     if (s->raw) {
@@ -463,7 +488,9 @@ int net_inet_bind_pcb(net_socket_t *s, const void *addr, size_t addrlen)
         int r = net_sockaddr_to_lwip_ip(addr, addrlen, &ip, NULL);
         if (r < 0)
             return r;
+        uint64_t flags = a20_lwip_lock();
         err_t e = raw_bind(s->raw, &ip);
+        a20_lwip_unlock(flags);
         return e == ERR_OK ? 0 : -EADDRINUSE;
     }
     if (s->tcp) {
@@ -472,7 +499,9 @@ int net_inet_bind_pcb(net_socket_t *s, const void *addr, size_t addrlen)
         int r = net_sockaddr_to_lwip_ip(addr, addrlen, &ip, &port);
         if (r < 0)
             return r;
+        uint64_t flags = a20_lwip_lock();
         err_t e = tcp_bind(s->tcp, &ip, port);
+        a20_lwip_unlock(flags);
         return e == ERR_OK ? 0 : -EADDRINUSE;
     }
     return 0;
@@ -543,16 +572,27 @@ static int net_inet_connect_stream(net_socket_t *s, const void *addr, size_t add
         s->connected = 1;
         s->local_tcp = 1;
         child->local_tcp = 1;
-        int qr = net_accept_queue_push_locked(listener, child);
-        if (qr < 0) {
+        int rr = net_register_socket_locked(child);
+        if (rr < 0) {
             s->connected = 0;
             s->peer = NULL;
             net_socket_free(child);
             spin_unlock_irqrestore(&g_net_lock, irq);
+            return rr;
+        }
+        int qr = net_accept_queue_push_locked(listener, child);
+        if (qr < 0) {
+            s->connected = 0;
+            s->peer = NULL;
+            net_unregister_socket_locked(child);
+            net_socket_free(child);
+            spin_unlock_irqrestore(&g_net_lock, irq);
             return qr;
         }
+        ktrace_net("[NET] connect: pushed child to listener accept queue\n");
         spin_unlock_irqrestore(&g_net_lock, irq);
         net_tcp_drop_pcb(s);
+        ktrace_net("[NET] connect: local TCP connect done\n");
         return 0;
     }
     spin_unlock_irqrestore(&g_net_lock, irq);
@@ -578,7 +618,9 @@ static int net_inet_connect_stream(net_socket_t *s, const void *addr, size_t add
     }
     s->tcp_connecting = 1;
     s->tcp_err = ERR_INPROGRESS;
+    uint64_t lwip_flags = a20_lwip_lock();
     err_t e = tcp_connect(s->tcp, &ip, port, lwip_tcp_connected_cb);
+    a20_lwip_unlock(lwip_flags);
     if (e != ERR_OK) {
         s->tcp_connecting = 0;
         return -ENETUNREACH;
@@ -587,12 +629,7 @@ static int net_inet_connect_stream(net_socket_t *s, const void *addr, size_t add
     uint64_t deadline = timer_get_ticks() + NET_CONNECT_TIMEOUT_TICKS;
     while (s->tcp_connecting) {
         if ((int64_t)(timer_get_ticks() - deadline) >= 0) {
-            tcp_arg(s->tcp, NULL);
-            tcp_recv(s->tcp, NULL);
-            tcp_err(s->tcp, NULL);
-            tcp_sent(s->tcp, NULL);
-            tcp_abort(s->tcp);
-            s->tcp = NULL;
+            net_tcp_drop_pcb(s);
             s->tcp_connecting = 0;
             s->closed = 1;
             return -ETIMEDOUT;
@@ -603,14 +640,7 @@ static int net_inet_connect_stream(net_socket_t *s, const void *addr, size_t add
             continue;
         }
         if (net_task_has_unblocked_signal(cur)) {
-            if (s->tcp) {
-                tcp_arg(s->tcp, NULL);
-                tcp_recv(s->tcp, NULL);
-                tcp_err(s->tcp, NULL);
-                tcp_sent(s->tcp, NULL);
-                tcp_abort(s->tcp);
-                s->tcp = NULL;
-            }
+            net_tcp_drop_pcb(s);
             s->tcp_connecting = 0;
             s->connected = 0;
             return -ERESTARTSYS;
@@ -621,14 +651,7 @@ static int net_inet_connect_stream(net_socket_t *s, const void *addr, size_t add
         sched();
         net_clear_socket_waiter(s, cur);
         if (net_task_has_unblocked_signal(cur)) {
-            if (s->tcp) {
-                tcp_arg(s->tcp, NULL);
-                tcp_recv(s->tcp, NULL);
-                tcp_err(s->tcp, NULL);
-                tcp_sent(s->tcp, NULL);
-                tcp_abort(s->tcp);
-                s->tcp = NULL;
-            }
+            net_tcp_drop_pcb(s);
             s->tcp_connecting = 0;
             s->connected = 0;
             return -ERESTARTSYS;
@@ -654,7 +677,9 @@ int net_inet_connect(net_socket_t *s, const void *addr, size_t addrlen,
         int r = net_sockaddr_to_lwip_ip(addr, addrlen, &ip, &port);
         if (r < 0)
             return r;
+        uint64_t flags = a20_lwip_lock();
         err_t e = udp_connect(s->udp, &ip, port);
+        a20_lwip_unlock(flags);
         return e == ERR_OK ? 0 : -ENETUNREACH;
     }
     if (s->raw && s->domain == AF_INET) {
@@ -662,7 +687,9 @@ int net_inet_connect(net_socket_t *s, const void *addr, size_t addrlen,
         int r = net_sockaddr_to_lwip_ip(addr, addrlen, &ip, NULL);
         if (r < 0)
             return r;
+        uint64_t flags = a20_lwip_lock();
         err_t e = raw_connect(s->raw, &ip);
+        a20_lwip_unlock(flags);
         return e == ERR_OK ? 0 : -ENETUNREACH;
     }
     if (s->raw && s->domain == AF_INET6) {
@@ -670,7 +697,9 @@ int net_inet_connect(net_socket_t *s, const void *addr, size_t addrlen,
         int r = net_sockaddr_to_lwip_ip(addr, addrlen, &ip, NULL);
         if (r < 0)
             return r;
+        uint64_t flags = a20_lwip_lock();
         err_t e = raw_connect(s->raw, &ip);
+        a20_lwip_unlock(flags);
         return e == ERR_OK ? 0 : -ENETUNREACH;
     }
     if (s->type == SOCK_STREAM)
@@ -696,7 +725,9 @@ static int net_inet_send_udp(net_socket_t *s, const void *buf, size_t len,
             net_sockaddr_loopback(s, port);
             ip_addr_t any;
             ip_addr_set_zero_ip4(&any);
+            uint64_t flags = a20_lwip_lock();
             udp_bind(s->udp, &any, net_ntohs(port));
+            a20_lwip_unlock(flags);
         }
     }
     uint64_t irq = spin_lock_irqsave(&g_net_lock);
@@ -731,9 +762,13 @@ static int net_inet_send_udp(net_socket_t *s, const void *buf, size_t len,
     if (s->domain == AF_INET6)
         return dst_addr ? -ECONNREFUSED : -EDESTADDRREQ;
 
+    uint64_t lwip_flags = a20_lwip_lock();
     struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, (u16_t)len, PBUF_RAM);
     if (!p)
+    {
+        a20_lwip_unlock(lwip_flags);
         return -ENOMEM;
+    }
     pbuf_take(p, buf, (u16_t)len);
     err_t e;
     if (addr) {
@@ -742,6 +777,7 @@ static int net_inet_send_udp(net_socket_t *s, const void *buf, size_t len,
         int r = net_sockaddr_to_lwip_ip(addr, addrlen, &ip, &port);
         if (r < 0) {
             pbuf_free(p);
+            a20_lwip_unlock(lwip_flags);
             return r;
         }
         e = udp_sendto(s->udp, p, &ip, port);
@@ -749,19 +785,25 @@ static int net_inet_send_udp(net_socket_t *s, const void *buf, size_t len,
         e = udp_send(s->udp, p);
     } else {
         pbuf_free(p);
+        a20_lwip_unlock(lwip_flags);
         return -EDESTADDRREQ;
     }
     pbuf_free(p);
-    a20_lwip_poll();
+    a20_lwip_poll_locked();
+    a20_lwip_unlock(lwip_flags);
     return e == ERR_OK ? (int)len : -EIO;
 }
 
 static int net_inet_send_raw(net_socket_t *s, const void *buf, size_t len,
                              const void *addr, size_t addrlen)
 {
+    uint64_t lwip_flags = a20_lwip_lock();
     struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, (u16_t)len, PBUF_RAM);
     if (!p)
+    {
+        a20_lwip_unlock(lwip_flags);
         return -ENOMEM;
+    }
     pbuf_take(p, buf, (u16_t)len);
     err_t e;
     if (addr) {
@@ -769,6 +811,7 @@ static int net_inet_send_raw(net_socket_t *s, const void *buf, size_t len,
         int r = net_sockaddr_to_lwip_ip(addr, addrlen, &ip, NULL);
         if (r < 0) {
             pbuf_free(p);
+            a20_lwip_unlock(lwip_flags);
             return r;
         }
         e = raw_sendto(s->raw, p, &ip);
@@ -776,10 +819,12 @@ static int net_inet_send_raw(net_socket_t *s, const void *buf, size_t len,
         e = raw_send(s->raw, p);
     } else {
         pbuf_free(p);
+        a20_lwip_unlock(lwip_flags);
         return -EDESTADDRREQ;
     }
     pbuf_free(p);
-    a20_lwip_poll();
+    a20_lwip_poll_locked();
+    a20_lwip_unlock(lwip_flags);
     return e == ERR_OK ? (int)len : -EIO;
 }
 
@@ -791,9 +836,12 @@ static int net_inet_send_tcp(net_socket_t *s, const void *buf, size_t len)
     uint64_t start = timer_get_ticks();
     while (sent < len) {
         a20_lwip_poll();
-        if (!s->tcp || s->closed || !s->connected)
+        uint64_t lwip_flags = a20_lwip_lock();
+        int tcp_alive = s->tcp && !s->closed && s->connected;
+        u16_t room = tcp_alive ? tcp_sndbuf(s->tcp) : 0;
+        a20_lwip_unlock(lwip_flags);
+        if (!tcp_alive)
             return sent ? (int)sent : -EPIPE;
-        u16_t room = tcp_sndbuf(s->tcp);
         if (room == 0) {
             if (sent || s->nonblock)
                 return sent ? (int)sent : -EAGAIN;
@@ -816,13 +864,23 @@ static int net_inet_send_tcp(net_socket_t *s, const void *buf, size_t len)
             n = room;
         if (n > 0xffff)
             n = 0xffff;
+        lwip_flags = a20_lwip_lock();
+        if (!s->tcp || s->closed || !s->connected) {
+            a20_lwip_unlock(lwip_flags);
+            return sent ? (int)sent : -EPIPE;
+        }
         err_t e = tcp_write(s->tcp, (const uint8_t *)buf + sent,
                             (u16_t)n, TCP_WRITE_FLAG_COPY);
-        if (e != ERR_OK)
+        if (e != ERR_OK) {
+            a20_lwip_unlock(lwip_flags);
             return sent ? (int)sent : -EIO;
+        }
         e = tcp_output(s->tcp);
-        if (e != ERR_OK)
+        if (e != ERR_OK) {
+            a20_lwip_unlock(lwip_flags);
             return sent ? (int)sent : -EIO;
+        }
+        a20_lwip_unlock(lwip_flags);
         sent += n;
     }
     a20_lwip_poll();
@@ -845,16 +903,21 @@ int net_inet_sendto(net_socket_t *s, const void *buf, size_t len,
 
 void net_inet_accept_child_ready(net_socket_t *s)
 {
-    if (s && s->tcp)
+    if (s && s->tcp) {
+        uint64_t flags = a20_lwip_lock();
         tcp_backlog_accepted(s->tcp);
+        a20_lwip_unlock(flags);
+    }
 }
 
 void net_tcp_recved(net_socket_t *s, size_t len) {
     if (s && s->tcp && len > 0) {
+        uint64_t flags = a20_lwip_lock();
         while (len > 0) {
             uint16_t n = len > 0xFFFF ? 0xFFFF : (uint16_t)len;
             tcp_recved(s->tcp, n);
             len -= n;
         }
+        a20_lwip_unlock(flags);
     }
 }
