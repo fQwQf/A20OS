@@ -265,7 +265,9 @@ mm_struct_t *mm_create(void) {
     mm->locked_vm  = 0;
     mm->def_flags  = 0;
     spin_init(&mm->lock);
+    spin_set_debug(&mm->lock, "mm", mm);
     refcount_set(&mm->refcount, 1);
+    ktrace_mm("[MMDBG] mm=%p lock=%p\n", (void *)mm, (void *)&mm->lock);
     return mm;
 }
 
@@ -1063,6 +1065,7 @@ mm_struct_t *mm_fork(mm_struct_t *parent) {
     if (!child) return NULL;
     *child = *parent;
     spin_init(&child->lock);
+    spin_set_debug(&child->lock, "mm", child);
     refcount_set(&child->refcount, 1);
     child->rss = 0;
     child->total_vm = 0;
