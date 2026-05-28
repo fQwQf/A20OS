@@ -1,6 +1,8 @@
 #include "net/socket_internal.h"
 #include "sys/bpf.h"
+#include "core/klog.h"
 #include "core/string.h"
+#include "net/lwip_stack.h"
 #include "lwip/tcp.h"
 
 #ifndef SHUT_RD
@@ -64,7 +66,7 @@ int net_listen(int gfd, int backlog)
     if (s->domain == AF_INET) {
         uint16_t lport = 0;
         net_sockaddr_port(s->local, s->local_len, &lport);
-        printf("[NET] listen port=%u\n", (unsigned)net_ntohs(lport));
+        ktrace_net("[NET] listen port=%u\n", (unsigned)net_ntohs(lport));
     }
     return 0;
 }
@@ -94,6 +96,7 @@ int net_accept(int gfd, void *addr, size_t *addrlen, int flags)
         }
         child = net_accept_queue_pop_locked(s);
         if (child) {
+            ktrace_net("[NET] accept: popped child from queue\n");
             spin_unlock_irqrestore(&g_net_lock, irq);
             break;
         }
@@ -122,15 +125,6 @@ int net_accept(int gfd, void *addr, size_t *addrlen, int flags)
             return -ERESTARTSYS;
     }
 
-    uint64_t irq = spin_lock_irqsave(&g_net_lock);
-    int r = net_register_socket_locked(child);
-    spin_unlock_irqrestore(&g_net_lock, irq);
-    if (r < 0) {
-        net_inet_socket_destroy(child);
-        net_socket_free(child);
-        return r;
-    }
-
     net_inet_accept_child_ready(child);
 
     if (addr && addrlen && *addrlen > 0) {
@@ -140,7 +134,26 @@ int net_accept(int gfd, void *addr, size_t *addrlen, int flags)
     }
 
     child->nonblock = (flags & SOCK_NONBLOCK) ? 1 : s->nonblock;
-    return net_socket_install_file(child, O_RDWR | (child->nonblock ? O_NONBLOCK : 0));
+    ktrace_net("[NET] accept: done, installing file\n");
+    int newfd = net_socket_install_file(child, O_RDWR | (child->nonblock ? O_NONBLOCK : 0));
+    if (newfd < 0) {
+        uint64_t irq = spin_lock_irqsave(&g_net_lock);
+        child->closed = 1;
+        if (child->peer && child->peer->peer == child) {
+            child->peer->peer = NULL;
+            child->peer->peer_closed = 1;
+            if (child->peer->waiter && child->peer->waiter->state == PROC_BLOCKED)
+                proc_make_ready(child->peer->waiter);
+            if (child->peer->send_waiter && child->peer->send_waiter->state == PROC_BLOCKED)
+                proc_make_ready(child->peer->send_waiter);
+        }
+        net_unregister_socket_locked(child);
+        spin_unlock_irqrestore(&g_net_lock, irq);
+        net_inet_socket_destroy(child);
+        net_socket_free(child);
+        return newfd;
+    }
+    return newfd;
 }
 
 int net_getsockname(int gfd, void *addr, size_t *addrlen)
@@ -262,10 +275,12 @@ int net_setsockopt(int gfd, int level, int optname, const void *optval, size_t o
         case TCP_NODELAY:
             s->tcp_nodelay = val != 0;
             if (s->tcp) {
+                uint64_t flags = a20_lwip_lock();
                 if (s->tcp_nodelay)
                     tcp_nagle_disable(s->tcp);
                 else
                     tcp_nagle_enable(s->tcp);
+                a20_lwip_unlock(flags);
             }
             return 0;
         case TCP_CORK:
@@ -281,22 +296,31 @@ int net_setsockopt(int gfd, int level, int optname, const void *optval, size_t o
             if (val <= 0)
                 return -EINVAL;
             s->keep_idle = val;
-            if (s->tcp)
+            if (s->tcp) {
+                uint64_t flags = a20_lwip_lock();
                 s->tcp->keep_idle = (u32_t)val * 1000U;
+                a20_lwip_unlock(flags);
+            }
             return 0;
         case TCP_KEEPINTVL:
             if (val <= 0)
                 return -EINVAL;
             s->keep_intvl = val;
-            if (s->tcp)
+            if (s->tcp) {
+                uint64_t flags = a20_lwip_lock();
                 s->tcp->keep_intvl = (u32_t)val * 1000U;
+                a20_lwip_unlock(flags);
+            }
             return 0;
         case TCP_KEEPCNT:
             if (val <= 0)
                 return -EINVAL;
             s->keep_cnt = val;
-            if (s->tcp)
+            if (s->tcp) {
+                uint64_t flags = a20_lwip_lock();
                 s->tcp->keep_cnt = (u32_t)val;
+                a20_lwip_unlock(flags);
+            }
             return 0;
         default:
             return -ENOPROTOOPT;

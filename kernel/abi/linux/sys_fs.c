@@ -295,7 +295,9 @@ int64_t sys_openat(int dirfd, const char *path, int flags, int mode) {
 }
 
 int64_t sys_close(int fd) {
-    return fdtable_close_current(fd);
+    int64_t r = fdtable_close_current(fd);
+    ktrace_syscall("[SYS] close: fd=%d ret=%ld\n", fd, (long)r);
+    return r;
 }
 
 int64_t sys_lseek(int fd, long offset, int whence) {

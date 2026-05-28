@@ -3,6 +3,7 @@
 #include "proc/signal.h"
 #include "bpf/bpf.h"
 #include "core/cpu.h"
+#include "core/klog.h"
 #include "core/stdio.h"
 #include "fs/fdtable.h"
 #include "fs/vfs.h"
@@ -237,8 +238,12 @@ void proc_exit(int exit_code)
     task_t *t = proc_current();
     if (!t)
         panic("proc_exit: no current task");
+    t->exit_pending = 0;
+    t->pending_exit_code = exit_code;
 
-    int thread_exit = (t->clone_flags & CLONE_THREAD) != 0;
+    ktrace_exit("[EXIT] proc_exit: pid=%d tgid=%d thread=%d exit_code=%d\n",
+                t->pid, t->tgid,
+                (t->clone_flags & CLONE_THREAD) != 0, exit_code);
 
     int *ctid_to_wake = t->clear_child_tid;
     proc_clear_child_tid_direct(t);
@@ -255,10 +260,9 @@ void proc_exit(int exit_code)
     vfs_release_process_locks(t->pid);
     bpf_release_process(t->pid);
 
-    if (!thread_exit) {
-        fdtable_close_all(t);
-        proc_release_exiting_mm(t);
-    }
+    ktrace_exit("[EXIT] pid=%d: closing fds and releasing mm ref\n", t->pid);
+    fdtable_close_all(t);
+    proc_release_exiting_mm(t);
 
     proc_runq_remove_locked(t);
 
@@ -270,7 +274,8 @@ void proc_exit(int exit_code)
     __atomic_thread_fence(__ATOMIC_RELEASE);
     t->state = PROC_ZOMBIE;
 
-    a20_event_notify(t, A20_OBJ_TASK, 0, (uint64_t)exit_code, 0);
+    ktrace_exit("[EXIT] pid=%d: zombie, auto_reap=%d ctid=%p\n",
+                t->pid, auto_reap, (void *)ctid_to_wake);
 
     proc_complete_vfork_locked(t);
 
@@ -293,6 +298,8 @@ void proc_exit(int exit_code)
     }
     spin_unlock_irqrestore(&proc_lock, flags);
 
+    a20_event_notify(t, A20_OBJ_TASK, 0, (uint64_t)exit_code, 0);
+
     proc_reparent_children(t, auto_reap ? NULL : proc_find(1));
 
     if (!auto_reap && parent && t->exit_signal > 0)
@@ -309,56 +316,18 @@ void proc_force_exit(task_t *t, int exit_code)
     if (t == proc_current())
         proc_exit(exit_code);
 
-    int *ctid_to_wake = t->clear_child_tid;
-    proc_clear_child_tid_direct(t);
-#if defined(CONFIG_ABI_LINUX) || defined(CONFIG_ABI_BOTH)
-    if (ctid_to_wake)
-        futex_wake_user(ctid_to_wake, 1);
-#endif
-
-#if defined(CONFIG_ABI_LINUX) || defined(CONFIG_ABI_BOTH)
-    if (t->robust_list_head)
-        exit_robust_list(t);
-#endif
-
-    vfs_release_process_locks(t->pid);
-    fdtable_close_all(t);
-    bpf_release_process(t->pid);
-
-    proc_runq_remove_locked(t);
-
-    proc_release_exiting_mm(t);
-
     uint64_t flags = spin_lock_irqsave(&proc_lock);
-    task_t *parent = t->parent;
-    int auto_reap = proc_child_auto_reaps(t, parent);
-    t->exit_code = exit_code;
-    __atomic_thread_fence(__ATOMIC_RELEASE);
-    t->state = PROC_ZOMBIE;
-
-    a20_event_notify(t, A20_OBJ_TASK, 0, (uint64_t)exit_code, 0);
-
-    proc_complete_vfork_locked(t);
-
-    if (auto_reap) {
-        t->parent = proc_idle_task();
-        t->ppid = 0;
-    } else {
-        proc_wake_child_waiters_locked(parent);
+    if (t->state != PROC_UNUSED && t->state != PROC_ZOMBIE) {
+        t->pending_exit_code = exit_code;
+        __atomic_store_n(&t->exit_pending, 1, __ATOMIC_RELEASE);
+        if (t->state == PROC_BLOCKED || t->state == PROC_STOPPED) {
+            t->waiting_for_child = 0;
+            t->wake_time = 0;
+            t->state = PROC_READY;
+            proc_runq_enqueue_locked(t);
+        }
     }
     spin_unlock_irqrestore(&proc_lock, flags);
-
-    task_t *reaper = proc_find(1);
-    proc_reparent_children(t, reaper);
-
-    if (!auto_reap && parent && t->exit_signal > 0)
-        signal_send(parent->pid, t->exit_signal);
-
-    /*
-     * Do not destroy a remotely forced task inline. It may still be referenced
-     * by scheduler or wait queues; the zombie reaper will unlink and free it
-     * after the state transition is globally visible.
-     */
 }
 
 void proc_exit_group(int exit_code)
@@ -369,28 +338,42 @@ void proc_exit_group(int exit_code)
         __builtin_unreachable();
     }
 
+    ktrace_exit("[EXIT] exit_group: pid=%d tgid=%d exit_code=%d\n",
+                self->pid, self->tgid, exit_code);
+
     int pids[128];
     int pid_count;
 
-    for (;;) {
+    do {
         pid_count = 0;
         uint64_t flags = spin_lock_irqsave(&proc_lock);
         for (task_t *t = proc_first_task_locked(); t; t = proc_next_task_locked(t)) {
             if (t == self || t->state == PROC_UNUSED || t->state == PROC_ZOMBIE)
                 continue;
+            if (__atomic_load_n(&t->exit_pending, __ATOMIC_ACQUIRE))
+                continue;
             if (self->mm && t->mm == self->mm) {
                 if (pid_count < (int)(sizeof(pids) / sizeof(pids[0])))
                     pids[pid_count++] = t->pid;
+                else
+                    break;
             }
         }
         spin_unlock_irqrestore(&proc_lock, flags);
-        if (pid_count == 0)
-            break;
         for (int i = 0; i < pid_count; i++) {
             task_t *t = proc_find(pids[i]);
             if (t)
                 proc_force_exit(t, exit_code);
         }
-    }
+    } while (pid_count == (int)(sizeof(pids) / sizeof(pids[0])));
     proc_exit(exit_code);
+}
+
+void proc_check_exit_pending(void)
+{
+    task_t *t = proc_current();
+    if (!t)
+        return;
+    if (__atomic_load_n(&t->exit_pending, __ATOMIC_ACQUIRE))
+        proc_exit(t->pending_exit_code);
 }
