@@ -196,6 +196,7 @@ struct a20_ht_internal *a20_ht_create(void)
     ht->free_hint = 0;
     ht->security_label = 0; /* default: L (docs/native-abi/06-security.md §5.1) */
     spin_init(&ht->lock);
+    spin_set_debug(&ht->lock, "a20_handle_table", ht);
     ht->bitmap_size = (ht->capacity + 63) / 64;
 
     ht->entries = kmalloc(ht->capacity * sizeof(a20_handle_entry_t));
@@ -231,13 +232,13 @@ int64_t a20_handle_install(struct a20_ht_internal *ht, void *object,
     if ((rights & ~valid) != 0)
         rights &= valid;
 
-    spin_lock(&ht->lock);
+    uint64_t flags = spin_lock_irqsave(&ht->lock);
     int slot = ht_alloc_slot(ht);
     if (slot < 0) {
         if (ht_grow(ht) == 0)
             slot = ht_alloc_slot(ht);
         if (slot < 0) {
-            spin_unlock(&ht->lock);
+            spin_unlock_irqrestore(&ht->lock, flags);
             return -A20_ERR_NO_SPACE;
         }
     }
@@ -250,7 +251,7 @@ int64_t a20_handle_install(struct a20_ht_internal *ht, void *object,
     ht->entries[slot].security_label = 0;
     ht->entries[slot].state = A20_HS_ACTIVE;
     ht->count++;
-    spin_unlock(&ht->lock);
+    spin_unlock_irqrestore(&ht->lock, flags);
     return (int64_t)slot;
 }
 
@@ -268,13 +269,13 @@ int64_t a20_handle_install_temporal(struct a20_ht_internal *ht, void *object,
     if ((rights & ~valid) != 0)
         rights &= valid;
 
-    spin_lock(&ht->lock);
+    uint64_t flags = spin_lock_irqsave(&ht->lock);
     int slot = ht_alloc_slot(ht);
     if (slot < 0) {
         if (ht_grow(ht) == 0)
             slot = ht_alloc_slot(ht);
         if (slot < 0) {
-            spin_unlock(&ht->lock);
+            spin_unlock_irqrestore(&ht->lock, flags);
             return -A20_ERR_NO_SPACE;
         }
     }
@@ -287,7 +288,7 @@ int64_t a20_handle_install_temporal(struct a20_ht_internal *ht, void *object,
     ht->entries[slot].security_label = security_label;
     ht->entries[slot].state = A20_HS_ACTIVE;
     ht->count++;
-    spin_unlock(&ht->lock);
+    spin_unlock_irqrestore(&ht->lock, flags);
     return (int64_t)slot;
 }
 
@@ -295,44 +296,44 @@ int64_t a20_handle_lookup_internal(struct a20_ht_internal *ht, a20_handle_t h,
                                     uint16_t expected_type, a20_rights_t required_rights,
                                     a20_handle_entry_t *out)
 {
-    spin_lock(&ht->lock);
+    uint64_t flags = spin_lock_irqsave(&ht->lock);
     if (h >= ht->capacity) {
-        spin_unlock(&ht->lock);
+        spin_unlock_irqrestore(&ht->lock, flags);
         return -A20_ERR_BAD_HANDLE;
     }
     a20_handle_entry_t *e = &ht->entries[h];
     if (e->object == NULL || e->state == A20_HS_FREE) {
-        spin_unlock(&ht->lock);
+        spin_unlock_irqrestore(&ht->lock, flags);
         return -A20_ERR_BAD_HANDLE;
     }
     if (e->state == A20_HS_CLOSING) {
-        spin_unlock(&ht->lock);
+        spin_unlock_irqrestore(&ht->lock, flags);
         return -A20_ERR_BAD_HANDLE;
     }
     if (e->state == A20_HS_EXPIRED) {
-        spin_unlock(&ht->lock);
+        spin_unlock_irqrestore(&ht->lock, flags);
         return -A20_ERR_EXPIRED;
     }
     if (expected_type != A20_OBJ_INVALID && e->type != expected_type) {
-        spin_unlock(&ht->lock);
+        spin_unlock_irqrestore(&ht->lock, flags);
         return -A20_ERR_BAD_HANDLE;
     }
     a20_rights_t effective = a20_effective_rights(e);
     if ((effective & required_rights) != required_rights) {
-        spin_unlock(&ht->lock);
+        spin_unlock_irqrestore(&ht->lock, flags);
         return -A20_ERR_ACCESS;
     }
     if ((e->temporal_flags & A20_TEMPORAL_OP_COUNT) && e->remaining_ops > 0)
         e->remaining_ops--;
     *out = *e;
     out->rights = effective;
-    spin_unlock(&ht->lock);
+    spin_unlock_irqrestore(&ht->lock, flags);
     return A20_OK;
 }
 
 void a20_handle_remove(struct a20_ht_internal *ht, a20_handle_t h)
 {
-    spin_lock(&ht->lock);
+    uint64_t flags = spin_lock_irqsave(&ht->lock);
     if (h < ht->capacity && ht->entries[h].object != NULL &&
         ht->entries[h].state != A20_HS_FREE && ht->entries[h].state != A20_HS_CLOSING) {
         ht->entries[h].state = A20_HS_CLOSING;
@@ -343,13 +344,13 @@ void a20_handle_remove(struct a20_ht_internal *ht, a20_handle_t h)
         ht->entries[h].state = A20_HS_FREE;
         ht_free_slot(ht, h);
         ht->count--;
-        spin_unlock(&ht->lock);
+        spin_unlock_irqrestore(&ht->lock, flags);
 
         /* Deferred object release outside lock docs/native-abi/03-handle.md §4.1 atomicity) */
         (void)obj; /* Caller responsible for refcount_dec if needed */
         return;
     }
-    spin_unlock(&ht->lock);
+    spin_unlock_irqrestore(&ht->lock, flags);
 }
 
 struct a20_ht_internal *task_get_a20_ht(task_t *t)
@@ -364,7 +365,7 @@ void a20_temporal_sweep(struct a20_ht_internal *ht)
     if (!ht) return;
     uint64_t now = timer_get_ticks();
 
-    spin_lock(&ht->lock);
+    uint64_t flags = spin_lock_irqsave(&ht->lock);
     for (uint32_t i = 0; i < ht->capacity; i++) {
         a20_handle_entry_t *e = &ht->entries[i];
         if (e->object == NULL || e->state != A20_HS_ACTIVE)
@@ -395,5 +396,5 @@ void a20_temporal_sweep(struct a20_ht_internal *ht)
             e->rights = 0;
         }
     }
-    spin_unlock(&ht->lock);
+    spin_unlock_irqrestore(&ht->lock, flags);
 }

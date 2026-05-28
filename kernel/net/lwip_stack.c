@@ -3,6 +3,7 @@
 #include "core/stdio.h"
 #include "core/string.h"
 #include "core/consts.h"
+#include "core/lock.h"
 #include "drv/virtio_net.h"
 
 #include "lwip/init.h"
@@ -22,6 +23,7 @@
 #include "netif/etharp.h"
 
 static int g_lwip_ready;
+static spinlock_t g_lwip_lock = SPINLOCK_INIT;
 static struct netif g_netifs[VIRTIO_NET_MAX_DEVS];
 static struct netif g_loopif;
 
@@ -155,6 +157,7 @@ void a20_lwip_init(void) {
     if (g_lwip_ready)
         return;
 
+    spin_init(&g_lwip_lock);
     lwip_init();
     a20_lwip_register_loopif();
     a20_lwip_register_virtio_netifs();
@@ -162,11 +165,19 @@ void a20_lwip_init(void) {
     printf("[LWIP] initialized: IPv4 IPv6 TCP UDP RAW ICMP DHCP DNS loopif\n");
 }
 
-void a20_lwip_poll(void) {
+uint64_t a20_lwip_lock(void)
+{
+    return spin_lock_irqsave(&g_lwip_lock);
+}
+
+void a20_lwip_unlock(uint64_t flags)
+{
+    spin_unlock_irqrestore(&g_lwip_lock, flags);
+}
+
+void a20_lwip_poll_locked(void) {
     if (!g_lwip_ready)
         return;
-    uint64_t irq = arch_irqs_enabled() ? 1 : 0;
-    arch_local_irq_disable();
     sys_check_timeouts();
     virtio_net_poll_all();
     for (struct netif *n = netif_list; n; n = n->next) {
@@ -192,13 +203,19 @@ void a20_lwip_poll(void) {
         }
         netif_poll(n);
     }
-    if (irq) arch_local_irq_enable();
+}
+
+void a20_lwip_poll(void) {
+    uint64_t flags = a20_lwip_lock();
+    a20_lwip_poll_locked();
+    a20_lwip_unlock(flags);
 }
 
 int a20_lwip_format_status(char *buf, size_t bufsz) {
     if (!buf || bufsz == 0)
         return 0;
 
+    uint64_t flags = a20_lwip_lock();
     const char *ifname = "none";
     const char *state = "down";
     char ipbuf[24] = "0.0.0.0";
@@ -242,6 +259,7 @@ int a20_lwip_format_status(char *buf, size_t bufsz) {
         (unsigned)lwip_stats.link.drop,
         (unsigned)lwip_stats.link.chkerr,
         (unsigned)lwip_stats.link.memerr);
+    a20_lwip_unlock(flags);
     if (n < 0)
         return 0;
     if ((size_t)n >= bufsz)

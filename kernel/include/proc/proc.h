@@ -121,6 +121,8 @@ typedef struct task_t {
     uint32_t cfs_weight;
     int      sched_policy;
     int      waiting_for_child;
+    int      exit_pending;
+    int      pending_exit_code;
 
     struct signal_state *signals;
 
@@ -197,6 +199,7 @@ void     proc_free_pid(int pid);
 void     proc_exit(int exit_code) NORETURN;
 void     proc_exit_group(int exit_code) NORETURN;
 void     proc_force_exit(task_t *t, int exit_code);
+void     proc_check_exit_pending(void);
 int      proc_wait4(int pid, int *status, int options);
 void     proc_yield(void);
 void     sched(void);
