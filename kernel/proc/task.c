@@ -58,6 +58,8 @@ void proc_task_init_common(task_t *t, task_t *parent)
     t->cfs_weight = sched_weight_for_nice(t->priority);
     t->sched_policy = parent ? parent->sched_policy : SCHED_NORMAL;
     t->waiting_for_child = 0;
+    t->exit_pending = 0;
+    t->pending_exit_code = 0;
     t->wake_time = 0;
     t->alarm_expire = 0;
     t->itimer_real_interval = 0;
