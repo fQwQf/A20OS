@@ -55,6 +55,8 @@ void net_clear_socket_waiter(net_socket_t *s, task_t *cur) {
 int net_task_has_unblocked_signal(task_t *t) {
     if (!t || !t->signals)
         return 0;
+    if (__atomic_load_n(&t->exit_pending, __ATOMIC_ACQUIRE))
+        return 1;
     signal_state_t *ss = (signal_state_t *)t->signals;
     return ((ss->pending | t->thread_pending) & ~t->sig_blocked) != 0;
 }
@@ -514,9 +516,10 @@ int net_recvfrom(int gfd, void *buf, size_t len, int flags,
         if (r != -EAGAIN || s->nonblock || dontwait || s->closed || s->peer_closed || s->shut_rd) {
             if (r == -EAGAIN && (s->closed || s->peer_closed || s->shut_rd))
                 r = 0;
-            if (r > 0 && s->type == SOCK_STREAM)
-                net_tcp_recved(s, (size_t)r);
+            int recved = (r > 0 && s->type == SOCK_STREAM) ? r : 0;
             spin_unlock_irqrestore(&g_net_lock, irq);
+            if (recved)
+                net_tcp_recved(s, (size_t)recved);
             return r;
         }
         task_t *cur = proc_current();

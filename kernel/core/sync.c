@@ -9,6 +9,7 @@ void wait_queue_init(wait_queue_t *q) {
     if (!q)
         return;
     spin_init(&q->lock);
+    spin_set_debug(&q->lock, "wait_queue", q);
     q->head = NULL;
 }
 

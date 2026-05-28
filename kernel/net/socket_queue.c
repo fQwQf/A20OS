@@ -90,13 +90,6 @@ int net_enqueue_msg_blocking(net_socket_t *s, net_socket_t *dst, const void *buf
             spin_unlock_irqrestore(&g_net_lock, irq);
             return -ENOTCONN;
         }
-        /*
-         * Child sockets created by net_inet_connect_stream() are pushed to
-         * the listener's accept queue with in_registry == 0; they are only
-         * registered later when net_accept() calls net_register_socket_locked().
-         * Skip the registry check for these local-TCP peers — dst->closed is
-         * sufficient to detect a destroyed socket.
-         */
         if (net_socket_is_valid_locked(dst) ? dst->closed : (dst->closed || !dst->connected)) {
             spin_unlock_irqrestore(&g_net_lock, irq);
             return -ENOTCONN;

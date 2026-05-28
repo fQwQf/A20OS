@@ -1,6 +1,7 @@
 #include "net/socket_internal.h"
 #include "net/lwip_stack.h"
 #include "core/consts.h"
+#include "core/klog.h"
 #include "core/string.h"
 #include "fs/file.h"
 #include "mm/slab.h"
@@ -125,15 +126,11 @@ int net_socket_close_file(vfile_t *vf) {
     net_socket_t *s = vf ? (net_socket_t *)vf->priv : NULL;
     if (!s)
         return 0;
-    if (s->udp) {
-        udp_remove(s->udp);
-        s->udp = NULL;
-    }
-    if (s->raw) {
-        raw_remove(s->raw);
-        s->raw = NULL;
-    }
-    net_tcp_close_pcb(s);
+    ktrace_net("[NET] close: dom=%d type=%d listen=%d tcp=%p peer=%p closed=%d\n",
+               s->domain, s->type, s->listening, (void *)s->tcp,
+               (void *)s->peer, s->closed);
+    net_inet_socket_destroy(s);
+    ktrace_net("[NET] close: pcb dropped, unregistering\n");
     uint64_t flags = spin_lock_irqsave(&g_net_lock);
     net_unregister_socket_locked(s);
     if (s->send_waiter && s->send_waiter->state == PROC_BLOCKED)
@@ -150,11 +147,18 @@ int net_socket_close_file(vfile_t *vf) {
     if (s->waiter && s->waiter->state == PROC_BLOCKED)
         proc_make_ready(s->waiter);
     net_msg_t *m = s->rx_head;
+#if CONFIG_DEBUG_NET_TRACE
+    int rx_count = s->rx_count;
+#endif
     s->rx_head = s->rx_tail = NULL;
     net_socket_t *accepted = s->accept_head;
+#if CONFIG_DEBUG_NET_TRACE
+    int acc_count = s->accept_count;
+#endif
     s->accept_head = s->accept_tail = NULL;
     s->accept_count = 0;
     spin_unlock_irqrestore(&g_net_lock, flags);
+    ktrace_net("[NET] close: unregistered, rx=%d accept_q=%d\n", rx_count, acc_count);
 
     while (m) {
         net_msg_t *next = m->next;
@@ -174,7 +178,10 @@ int net_socket_close_file(vfile_t *vf) {
                 proc_make_ready(accepted->peer->send_waiter);
         }
         spin_unlock_irqrestore(&g_net_lock, accepted_flags);
-        net_tcp_close_pcb(accepted);
+        net_inet_socket_destroy(accepted);
+        uint64_t unregister_flags = spin_lock_irqsave(&g_net_lock);
+        net_unregister_socket_locked(accepted);
+        spin_unlock_irqrestore(&g_net_lock, unregister_flags);
         net_socket_free(accepted);
         accepted = next;
     }

@@ -261,6 +261,8 @@ int signal_task_has_unblocked(void *task) {
     task_t *t = (task_t *)task;
     if (!t || !t->signals)
         return 0;
+    if (__atomic_load_n(&t->exit_pending, __ATOMIC_ACQUIRE))
+        return 1;
     signal_state_t *ss = (signal_state_t *)t->signals;
     uint64_t deliverable = (ss->pending | t->thread_pending) & ~t->sig_blocked;
     if (!deliverable)

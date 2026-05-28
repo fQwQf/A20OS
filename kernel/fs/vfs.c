@@ -334,6 +334,7 @@ int vfs_close(int fd) {
         if (vf->ops && vf->ops->close) vf->ops->close(vf);
         vfile_free(vf);
         vnode_put(vn);
+        ktrace_vfs("[VFS] close: gfd=%d done\n", fd);
     }
     return 0;
 }

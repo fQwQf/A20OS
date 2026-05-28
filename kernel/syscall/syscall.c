@@ -94,6 +94,21 @@ int64_t syscall_dispatch(trap_context_t *ctx)
     int64_t ret = -ENOSYS;
     int context_restored = 0;
     const linux_syscall_entry_t *entry = linux_syscall_lookup(num);
+    task_t *dbg_cur = proc_current();
+    if (dbg_cur && dbg_cur->pid >= 5 &&
+        (num == SYS_futex || num == SYS_exit || num == SYS_exit_group ||
+         num == SYS_clone || num == SYS_clone3 ||
+         num == SYS_close || num == SYS_close_range ||
+         num == SYS_brk || num == SYS_mmap || num == SYS_munmap ||
+         num == SYS_mremap || num == SYS_mprotect || num == SYS_madvise ||
+         num == SYS_accept4 || num == SYS_socket || num == SYS_connect ||
+         num == SYS_listen)) {
+        ktrace_syscall("[SYSDBG] enter: pid=%d nr=%lu a0=0x%lx a1=0x%lx a2=0x%lx\n",
+                       dbg_cur->pid, (unsigned long)num,
+                       (unsigned long)args.arg[0],
+                       (unsigned long)args.arg[1],
+                       (unsigned long)args.arg[2]);
+    }
     if (entry) {
         ret = entry->handler(&args);
         context_restored = entry->restores_context;
@@ -138,9 +153,12 @@ int64_t syscall_dispatch(trap_context_t *ctx)
         context_restored = 0;
     }
     syscall_profile_record(num, start_time, syscall_profile_now());
+    proc_check_exit_pending();
     signal_deliver_user(ctx);
+    proc_check_exit_pending();
     if (!context_restored && proc_current() && (++syscall_resched_counter & 0x1f) == 0)
         proc_yield();
+    proc_check_exit_pending();
     if (num == SYS_sigsuspend)
     {
         task_t *cur = proc_current();

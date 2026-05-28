@@ -2,7 +2,9 @@
 #include "fs/vfs.h"
 #include "core/consts.h"
 #include "core/panic.h"
+#include "core/stdio.h"
 #include "core/string.h"
+#include "core/klog.h"
 #include "mm/slab.h"
 
 #define FDTABLE_WORDS ((MAX_FILES + 63) / 64)
@@ -13,6 +15,7 @@ static files_struct_t *fdtable_alloc_files(void)
     if (!files)
         panic("fdtable: no memory");
     spin_init(&files->lock);
+    spin_set_debug(&files->lock, "files", files);
     for (int i = 0; i < MAX_FILES; i++) {
         files->fd[i] = -1;
         files->cloexec[i] = 0;
@@ -21,6 +24,7 @@ static files_struct_t *fdtable_alloc_files(void)
         files->open_mask[i] = 0;
     files->next_fd = 0;
     refcount_set(&files->refcount, 1);
+    ktrace_fd("[FDDBG] files=%p lock=%p\n", (void *)files, (void *)&files->lock);
     return files;
 }
 
@@ -185,7 +189,7 @@ void fdtable_share(task_t *dst, const task_t *src)
     if (!dst || !src)
         return;
     if (dst->files)
-        kfree(dst->files);
+        fdtable_close_all(dst);
     dst->files = (struct files_struct *)src->files;
     if (dst->files)
         refcount_inc(&((files_struct_t *)dst->files)->refcount);
@@ -235,6 +239,7 @@ void fdtable_close_all(task_t *task)
     task->files = NULL;
     if (!refcount_dec_and_test(&files->refcount)) {
         files = NULL;
+        ktrace_fd("[FD] close_all: pid=%d shared fdtable, skipping\n", task->pid);
         return;
     }
     uint64_t flags = spin_lock_irqsave(&files->lock);
@@ -249,6 +254,7 @@ void fdtable_close_all(task_t *task)
         }
     }
     spin_unlock_irqrestore(&files->lock, flags);
+    ktrace_fd("[FD] close_all: pid=%d closing %d fds\n", task->pid, close_count);
     for (int i = 0; i < close_count; i++)
         vfs_close(to_close[i]);
     kfree(files);
@@ -341,6 +347,7 @@ int fdtable_close(task_t *task, int fd)
     files->cloexec[fd] = 0;
     fdtable_note_free(files, fd);
     spin_unlock_irqrestore(&files->lock, flags);
+    ktrace_fd("[FD] close: pid=%d lfd=%d gfd=%d\n", task->pid, fd, gfd);
     return vfs_close(gfd);
 }
 

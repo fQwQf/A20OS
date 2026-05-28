@@ -62,9 +62,13 @@ int64_t sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, long of
     if (res >= 0) {
         task_t *t = proc_current();
         if (t && t->mm) {
+            int populate_locked = 0;
             uint64_t mm_flags = linux_mm_lock(t);
             vm_area_t *vma = mm_find_vma(t->mm, res);
-            if (vma && (vma->vm_flags & VM_LOCKED)) {
+            if (vma && (vma->vm_flags & VM_LOCKED))
+                populate_locked = 1;
+            linux_mm_unlock(t, mm_flags);
+            if (populate_locked) {
                 uint64_t start = res;
                 uint64_t end = ROUND_UP(start + len, PAGE_SIZE);
                 for (uint64_t va = start; va < end; va += PAGE_SIZE) {
@@ -74,7 +78,6 @@ int64_t sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, long of
                     }
                 }
             }
-            linux_mm_unlock(t, mm_flags);
         }
     }
     return res;
@@ -209,19 +212,6 @@ int64_t sys_madvise(uint64_t addr, size_t len, int advice) {
         break;
     case MADV_POPULATE_READ:
     case MADV_POPULATE_WRITE:
-        for (uint64_t va = start; va < end; va += PAGE_SIZE) {
-            if (handle_demand_fault(t, va) < 0) {
-                ret = -ENOMEM;
-                goto out;
-            }
-            if (advice == MADV_POPULATE_WRITE) {
-                uint64_t *pte = pt_lookup_leaf(t->mm->pgdir, va, NULL, NULL, NULL);
-                if (!pte || !(*pte & PTE_V) || !(*pte & PTE_W)) {
-                    ret = -EFAULT;
-                    goto out;
-                }
-            }
-        }
         break;
     default:
         ret = -EINVAL;
@@ -229,6 +219,20 @@ int64_t sys_madvise(uint64_t addr, size_t len, int advice) {
     }
 out:
     linux_mm_unlock(t, mm_flags);
+    if (ret == 0 && (advice == MADV_POPULATE_READ || advice == MADV_POPULATE_WRITE)) {
+        for (uint64_t va = start; va < end; va += PAGE_SIZE) {
+            if (handle_demand_fault(t, va) < 0)
+                return -ENOMEM;
+            if (advice == MADV_POPULATE_WRITE) {
+                uint64_t flags2 = linux_mm_lock(t);
+                uint64_t *pte = pt_lookup_leaf(t->mm->pgdir, va, NULL, NULL, NULL);
+                int writable = pte && (*pte & PTE_V) && (*pte & PTE_W);
+                linux_mm_unlock(t, flags2);
+                if (!writable)
+                    return -EFAULT;
+            }
+        }
+    }
     return ret;
 }
 
@@ -297,12 +301,14 @@ int64_t sys_mlock(uint64_t addr, size_t len) {
         }
     }
 
+    linux_mm_unlock(t, mm_flags);
     for (uint64_t va = start; va < end; va += PAGE_SIZE) {
         uint64_t *pte = pt_lookup_leaf(t->mm->pgdir, va, NULL, NULL, NULL);
         if (!pte || !(*pte & PTE_V)) {
             handle_demand_fault(t, va);
         }
     }
+    return ret;
 
 out:
     linux_mm_unlock(t, mm_flags);
@@ -383,10 +389,7 @@ int64_t sys_mlockall(int flags) {
             }
             if (!(flags & MCL_ONFAULT)) {
                 for (uint64_t va = vma->start; va < vma->end; va += PAGE_SIZE) {
-                    uint64_t *pte = pt_lookup_leaf(t->mm->pgdir, va, NULL, NULL, NULL);
-                    if (!pte || !(*pte & PTE_V)) {
-                        handle_demand_fault(t, va);
-                    }
+                    (void)va;
                 }
             }
         }
@@ -394,6 +397,15 @@ int64_t sys_mlockall(int flags) {
 
 out:
     linux_mm_unlock(t, mm_flags);
+    if (ret == 0 && (flags & MCL_CURRENT) && !(flags & MCL_ONFAULT)) {
+        for (vm_area_t *vma = t->mm->mmap; vma; vma = vma->next) {
+            for (uint64_t va = vma->start; va < vma->end; va += PAGE_SIZE) {
+                uint64_t *pte = pt_lookup_leaf(t->mm->pgdir, va, NULL, NULL, NULL);
+                if (!pte || !(*pte & PTE_V))
+                    handle_demand_fault(t, va);
+            }
+        }
+    }
     return ret;
 }
 
@@ -426,6 +438,10 @@ int64_t sys_mincore(uint64_t addr, size_t length, unsigned char *vec) {
 
     size_t pages = (end_aligned - start) / PAGE_SIZE;
 
+    unsigned char *snapshot = proc_scratch_buffer(pages ? pages : 1);
+    if (!snapshot)
+        return -ENOMEM;
+
     uint64_t mm_flags = linux_mm_lock(t);
     for (size_t i = 0; i < pages; i++) {
         uint64_t va = start + i * PAGE_SIZE;
@@ -443,12 +459,9 @@ int64_t sys_mincore(uint64_t addr, size_t length, unsigned char *vec) {
         if (pte && (*pte & PTE_V)) {
             val = 1;
         }
-        if (copy_to_user(vec + i, &val, 1) < 0) {
-            linux_mm_unlock(t, mm_flags);
-            return -EFAULT;
-        }
+        snapshot[i] = val;
     }
 
     linux_mm_unlock(t, mm_flags);
-    return 0;
+    return copy_to_user(vec, snapshot, pages) < 0 ? -EFAULT : 0;
 }
