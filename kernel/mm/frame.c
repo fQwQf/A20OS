@@ -8,6 +8,15 @@
 
 pfa_t pfa;
 
+int __popcountdi2(unsigned long long a) {
+    int count = 0;
+    while (a) {
+        a &= (a - 1); // 每次清除最低位的 1
+        count++;
+    }
+    return count;
+}
+
 static inline frame_meta_t *meta_of(pfn_t pfn) {
     return &pfa.meta[pfn];
 }
