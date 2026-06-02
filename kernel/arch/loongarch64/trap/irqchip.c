@@ -3,7 +3,7 @@
 #include "core/trap.h"
 #include "proc/proc.h"
 #include "core/timer.h"
-#include "drv/uart.h"
+#include "drivers/char/uart.h"
 #include "core/stdio.h"
 
 extern void trap_entry_la64(void);
