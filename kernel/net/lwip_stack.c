@@ -47,7 +47,7 @@ static err_t a20_lwip_linkoutput(struct netif *netif, struct pbuf *p) {
         return ERR_BUF;
 
     pbuf_copy_partial(p, frame, p->tot_len, 0);
-    int r = virtio_net_send(st->idx, frame, p->tot_len);
+    int r = virtio_net_send(st->idx, frame, p->tot_len, 1);
     return (r == (int)p->tot_len) ? ERR_OK : ERR_IF;
 }
 
