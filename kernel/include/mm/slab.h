@@ -20,5 +20,6 @@ typedef struct slab_stats {
 } slab_stats_t;
 
 void slab_get_stats(slab_stats_t *stats);
+size_t slab_reclaim_spare(void);
 
 #endif
