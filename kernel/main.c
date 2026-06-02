@@ -1,5 +1,5 @@
 #include "core/stdio.h"
-#include "drv/uart.h"
+#include "drivers/char/uart.h"
 #include "mm/mm.h"
 #include "mm/elf.h"
 #include "mm/vm.h"
@@ -15,12 +15,13 @@
 #include "core/timekeeping.h"
 #include "core/random.h"
 #include "fs/vfs.h"
-#include "drv/virtio_blk.h"
+#include "drivers/block/virtio_blk.h"
 #include "fs/block_cache.h"
 #include "core/klog.h"
 #include "proc/signal.h"
-#include "drv/loop.h"
+#include "drivers/block/loop.h"
 #include "net/socket.h"
+#include "drivers/core/driver_core.h"
 
 /* Forward declarations */
 void init_kthread(void);
@@ -98,6 +99,15 @@ void kernel_main(void) {
     printf("[INIT] Memory initialized\n");
     random_init();
     printf("[INIT] Random initialized\n");
+    driver_core_init();
+    printf("[INIT] Driver core initialized\n");
+    if (current_board && current_board->enumerate_devices) {
+        current_board->enumerate_devices();
+        printf("[INIT] Board devices enumerated (%s)\n",
+               current_board->name ? current_board->name : "unknown");
+    }
+    driver_probe_all();
+    printf("[INIT] Drivers probed\n");
     vfs_init();
     printf("[INIT] VFS initialized\n");
     net_init();

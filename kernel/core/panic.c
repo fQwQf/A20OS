@@ -1,5 +1,5 @@
 #include "core/panic.h"
-#include "drv/uart.h"
+#include "drivers/char/uart.h"
 #include "core/stdio.h"
 #include "core/defs.h"
 

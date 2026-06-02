@@ -3,7 +3,7 @@
 #include "proc/signal.h"
 #include "sys/syscall.h"
 #include "core/timer.h"
-#include "drv/uart.h"
+#include "drivers/char/uart.h"
 #include "mm/mm.h"
 #include "mm/fault.h"
 #include "mm/vm.h"

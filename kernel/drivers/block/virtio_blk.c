@@ -1,5 +1,9 @@
-#include "drv/virtio_blk.h"
-#include "drv/virtio_transport.h"
+#include "drivers/block/virtio_blk.h"
+#include "drivers/bus/virtio_transport.h"
+#include "drivers/core/driver_core.h"
+#include "drivers/core/driver_class.h"
+#include "drivers/core/driver_hwapi.h"
+#include "drivers/core/driver_register.h"
 #include "mm/mm.h"
 #include "core/string.h"
 #include "core/stdio.h"
@@ -45,28 +49,14 @@ typedef struct {
 static virtio_blk_inst_t g_insts[VIRTIO_MAX_DEVS];
 static int g_ninst = 0;
 
-int virtio_blk_init(void) {
-    if (g_ninst >= VIRTIO_MAX_DEVS) {
-        printf("[VIRTIO] Too many devices (max %d)\n", VIRTIO_MAX_DEVS);
-        return -1;
-    }
-
-    int idx = g_ninst;
-    virtio_blk_inst_t *inst = &g_insts[idx];
-
-    if (arch_virtio_blk_probe(idx, &inst->vt) != 0) {
-        printf("[VIRTIO%d] Probe failed\n", idx);
-        return -1;
-    }
-
+static int virtio_blk_init_instance(virtio_blk_inst_t *inst) {
     virtio_transport_t *vt = &inst->vt;
+    int idx = inst->slot;
+
     inst->blk.valid = 0;
-    inst->slot      = idx;
     spin_init(&inst->lock);
     memset(inst->req, 0, sizeof(inst->req));
     inst->blk.legacy = vt->legacy;
-
-    printf("[VIRTIO%d] Found block device (legacy=%d)\n", idx, vt->legacy);
 
     vt->write32(vt, VIRTIO_MMIO_STATUS, 0);
     mb();
@@ -176,6 +166,27 @@ int virtio_blk_init(void) {
     inst->blk_dev.priv        = inst;
     inst->blk_dev.read_sector = NULL;
     inst->blk_dev.write_sector = NULL;
+
+    return 0;
+}
+
+int virtio_blk_init(void) {
+    if (g_ninst >= VIRTIO_MAX_DEVS) {
+        printf("[VIRTIO] Too many devices (max %d)\n", VIRTIO_MAX_DEVS);
+        return -1;
+    }
+
+    int idx = g_ninst;
+    virtio_blk_inst_t *inst = &g_insts[idx];
+
+    if (arch_virtio_blk_probe(idx, &inst->vt) != 0) {
+        printf("[VIRTIO%d] Probe failed\n", idx);
+        return -1;
+    }
+
+    inst->slot = idx;
+    if (virtio_blk_init_instance(inst) != 0)
+        return -1;
 
     g_ninst++;
     return 0;
@@ -426,3 +437,106 @@ int virtio_blk_ready(int idx) {
     if (idx < 0 || idx >= g_ninst) return 0;
     return g_insts[idx].blk.valid;
 }
+
+static uint32_t virtio_blk_mmio_read32(virtio_transport_t *t, uint32_t off) {
+    return readl((const volatile void *)((uintptr_t)t->priv + off));
+}
+
+static void virtio_blk_mmio_write32(virtio_transport_t *t, uint32_t off, uint32_t val) {
+    writel(val, (volatile void *)((uintptr_t)t->priv + off));
+}
+
+static int virtio_blk_driver_probe(device_t *dev) {
+    if (g_ninst >= VIRTIO_MAX_DEVS) {
+        kinfo("[VIRTIO-BLK] Too many devices (max %d)\n", VIRTIO_MAX_DEVS);
+        return -1;
+    }
+
+    resource_t *mmio_res = device_get_resource(dev, RES_MMIO, 0);
+    if (!mmio_res) {
+        kinfo("[VIRTIO-BLK] No MMIO resource for device '%s'\n", dev->name);
+        return -1;
+    }
+
+    int idx = g_ninst;
+    virtio_blk_inst_t *inst = &g_insts[idx];
+    memset(inst, 0, sizeof(*inst));
+
+    inst->vt.read32  = virtio_blk_mmio_read32;
+    inst->vt.write32 = virtio_blk_mmio_write32;
+    inst->vt.priv    = (void *)(uintptr_t)mmio_res->start;
+
+    uint32_t magic   = inst->vt.read32(&inst->vt, VIRTIO_MMIO_MAGIC);
+    uint32_t version = inst->vt.read32(&inst->vt, VIRTIO_MMIO_VERSION);
+    uint32_t dev_id  = inst->vt.read32(&inst->vt, VIRTIO_MMIO_DEVICE_ID);
+
+    if (magic != 0x74726976 || (version != 1 && version != 2) || dev_id != 2) {
+        kinfo("[VIRTIO-BLK] Invalid device at 0x%lx (magic=0x%x version=%d dev_id=%d)\n",
+              (unsigned long)mmio_res->start, magic, version, dev_id);
+        return -1;
+    }
+
+    inst->vt.legacy = (version == 1);
+    inst->slot = idx;
+    dev->drv_priv = inst;
+
+    int ret = virtio_blk_init_instance(inst);
+    if (ret != 0) {
+        kinfo("[VIRTIO-BLK] Init failed for device '%s'\n", dev->name);
+        return ret;
+    }
+
+    g_ninst++;
+    kinfo("[VIRTIO-BLK] Probed device '%s' at 0x%lx (legacy=%d)\n",
+          dev->name, (unsigned long)mmio_res->start, inst->vt.legacy);
+    return 0;
+}
+
+static int virtio_blk_class_read(struct device *dev, uint64_t sector, void *buf, size_t count) {
+    virtio_blk_inst_t *inst = (virtio_blk_inst_t *)dev->drv_priv;
+    return virtio_blk_read(inst->slot, sector, buf, count);
+}
+
+static int virtio_blk_class_write(struct device *dev, uint64_t sector, const void *buf, size_t count) {
+    virtio_blk_inst_t *inst = (virtio_blk_inst_t *)dev->drv_priv;
+    return virtio_blk_write(inst->slot, sector, buf, count);
+}
+
+static uint64_t virtio_blk_class_capacity(struct device *dev) {
+    virtio_blk_inst_t *inst = (virtio_blk_inst_t *)dev->drv_priv;
+    return inst->blk.capacity;
+}
+
+static uint32_t virtio_blk_class_sector_size(struct device *dev) {
+    (void)dev;
+    return VIRTIO_BLK_SECTOR_SIZE;
+}
+
+static block_dev_ops_t virtio_blk_class_ops = {
+    .read        = virtio_blk_class_read,
+    .write       = virtio_blk_class_write,
+    .capacity    = virtio_blk_class_capacity,
+    .sector_size = virtio_blk_class_sector_size,
+};
+
+static const device_id_t virtio_blk_ids[] = {
+    { .vendor = 0x1AF4, .device = 0x1002 },
+    { 0 },
+};
+
+static int virtio_blk_driver_remove(device_t *dev) {
+    (void)dev;
+    return 0;
+}
+
+static driver_t virtio_blk_driver = {
+    .name       = "virtio-blk",
+    .id_table   = virtio_blk_ids,
+    .bus        = NULL,
+    .probe      = virtio_blk_driver_probe,
+    .remove     = virtio_blk_driver_remove,
+    .class_ops  = &virtio_blk_class_ops,
+    .class_type = DEV_CLASS_BLOCK,
+};
+
+DRIVER_REGISTER(virtio_blk_driver);

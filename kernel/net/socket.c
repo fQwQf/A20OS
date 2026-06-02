@@ -11,7 +11,7 @@
 #include "core/consts.h"
 #include "core/lock.h"
 #include "core/timer.h"
-#include "drv/virtio_net.h"
+#include "drivers/net/virtio_net.h"
 #include "net/lwip_stack.h"
 
 spinlock_t g_net_lock = SPINLOCK_INIT;

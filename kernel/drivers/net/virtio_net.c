@@ -1,6 +1,10 @@
-#include "drv/virtio_net.h"
-#include "drv/virtio_transport.h"
-#include "drv/virtio_blk.h"
+#include "drivers/net/virtio_net.h"
+#include "drivers/bus/virtio_transport.h"
+#include "drivers/block/virtio_blk.h"
+#include "drivers/core/driver_core.h"
+#include "drivers/core/driver_class.h"
+#include "drivers/core/driver_hwapi.h"
+#include "drivers/core/driver_register.h"
 #include "mm/mm.h"
 #include "core/stdio.h"
 #include "core/string.h"
@@ -174,21 +178,9 @@ static int virtio_net_tx_free_locked(virtio_net_inst_t *net) {
     return -1;
 }
 
-int virtio_net_init(void) {
-    if (g_nnet >= VIRTIO_NET_MAX_DEVS)
-        return -1;
-
-    int idx = g_nnet;
-    virtio_net_inst_t *net = &g_net[idx];
-    memset(net, 0, sizeof(*net));
-    net->slot = idx;
-    spin_init(&net->lock);
-
-    if (arch_virtio_net_probe(idx, &net->vt) != 0)
-        return -1;
-
+static int virtio_net_init_instance(virtio_net_inst_t *net) {
+    int idx = net->slot;
     virtio_transport_t *vt = &net->vt;
-    net->legacy = vt->legacy;
 
     vt->write32(vt, VIRTIO_MMIO_STATUS, 0);
     mb();
@@ -262,6 +254,27 @@ int virtio_net_init(void) {
     printf("[VIRTIO-NET%d] ready legacy=%d mac=%02x:%02x:%02x:%02x:%02x:%02x\n",
            idx, net->legacy, net->mac[0], net->mac[1], net->mac[2],
            net->mac[3], net->mac[4], net->mac[5]);
+    return 0;
+}
+
+int virtio_net_init(void) {
+    if (g_nnet >= VIRTIO_NET_MAX_DEVS)
+        return -1;
+
+    int idx = g_nnet;
+    virtio_net_inst_t *net = &g_net[idx];
+    memset(net, 0, sizeof(*net));
+    net->slot = idx;
+    spin_init(&net->lock);
+
+    if (arch_virtio_net_probe(idx, &net->vt) != 0)
+        return -1;
+
+    net->legacy = net->vt.legacy;
+
+    if (virtio_net_init_instance(net) != 0)
+        return -1;
+
     g_nnet++;
     return 0;
 }
@@ -423,3 +436,106 @@ void virtio_net_poll_all(void) {
         spin_unlock_irqrestore(&g_net[i].lock, flags);
     }
 }
+
+static uint32_t virtio_net_mmio_read32(virtio_transport_t *t, uint32_t off) {
+    return readl((const volatile void *)((uintptr_t)t->priv + off));
+}
+
+static void virtio_net_mmio_write32(virtio_transport_t *t, uint32_t off, uint32_t val) {
+    writel(val, (volatile void *)((uintptr_t)t->priv + off));
+}
+
+static int virtio_net_driver_probe(device_t *dev) {
+    if (g_nnet >= VIRTIO_NET_MAX_DEVS) {
+        kinfo("[VIRTIO-NET] Too many devices (max %d)\n", VIRTIO_NET_MAX_DEVS);
+        return -1;
+    }
+
+    resource_t *mmio_res = device_get_resource(dev, RES_MMIO, 0);
+    if (!mmio_res) {
+        kinfo("[VIRTIO-NET] No MMIO resource for device '%s'\n", dev->name);
+        return -1;
+    }
+
+    int idx = g_nnet;
+    virtio_net_inst_t *net = &g_net[idx];
+    memset(net, 0, sizeof(*net));
+
+    net->vt.read32  = virtio_net_mmio_read32;
+    net->vt.write32 = virtio_net_mmio_write32;
+    net->vt.priv    = (void *)(uintptr_t)mmio_res->start;
+    net->slot       = idx;
+    net->legacy     = (net->vt.read32(&net->vt, VIRTIO_MMIO_VERSION) == 1);
+    spin_init(&net->lock);
+
+    uint32_t magic = net->vt.read32(&net->vt, VIRTIO_MMIO_MAGIC);
+    uint32_t dev_id = net->vt.read32(&net->vt, VIRTIO_MMIO_DEVICE_ID);
+    if (magic != 0x74726976 || dev_id != 1) {
+        kinfo("[VIRTIO-NET] Invalid device at 0x%lx\n", (unsigned long)mmio_res->start);
+        return -1;
+    }
+
+    dev->drv_priv = net;
+
+    if (virtio_net_init_instance(net) != 0) {
+        kinfo("[VIRTIO-NET] Init failed for device '%s'\n", dev->name);
+        return -1;
+    }
+
+    g_nnet++;
+    kinfo("[VIRTIO-NET] Probed device '%s' at 0x%lx\n", dev->name, (unsigned long)mmio_res->start);
+    return 0;
+}
+
+static int virtio_net_class_send(struct device *dev, const void *pkt, size_t len) {
+    virtio_net_inst_t *net = (virtio_net_inst_t *)dev->drv_priv;
+    return virtio_net_send(net->slot, pkt, len, 1);
+}
+
+static int virtio_net_class_recv(struct device *dev, void *buf, size_t maxlen) {
+    virtio_net_inst_t *net = (virtio_net_inst_t *)dev->drv_priv;
+    return virtio_net_recv(net->slot, buf, maxlen);
+}
+
+static const uint8_t *virtio_net_class_mac(struct device *dev) {
+    virtio_net_inst_t *net = (virtio_net_inst_t *)dev->drv_priv;
+    if (!net->valid)
+        return NULL;
+    return net->mac;
+}
+
+static void virtio_net_class_poll(struct device *dev) {
+    virtio_net_inst_t *net = (virtio_net_inst_t *)dev->drv_priv;
+    uint64_t flags = spin_lock_irqsave(&net->lock);
+    virtio_net_complete_tx_locked(net);
+    spin_unlock_irqrestore(&net->lock, flags);
+}
+
+static net_dev_ops_t virtio_net_class_ops = {
+    .send = virtio_net_class_send,
+    .recv = virtio_net_class_recv,
+    .mac  = virtio_net_class_mac,
+    .poll = virtio_net_class_poll,
+};
+
+static const device_id_t virtio_net_ids[] = {
+    { .vendor = 0x1AF4, .device = 0x1001 },
+    { 0 },
+};
+
+static int virtio_net_driver_remove(device_t *dev) {
+    (void)dev;
+    return 0;
+}
+
+static driver_t virtio_net_driver = {
+    .name       = "virtio-net",
+    .id_table   = virtio_net_ids,
+    .bus        = NULL,
+    .probe      = virtio_net_driver_probe,
+    .remove     = virtio_net_driver_remove,
+    .class_ops  = &virtio_net_class_ops,
+    .class_type = DEV_CLASS_NET,
+};
+
+DRIVER_REGISTER(virtio_net_driver);

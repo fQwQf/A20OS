@@ -1,6 +1,6 @@
 #include "pci.h"
-#include "drv/virtio_transport.h"
-#include "drv/virtio_blk.h"
+#include "drivers/bus/virtio_transport.h"
+#include "drivers/block/virtio_blk.h"
 #include "platform.h"
 #include "core/stdio.h"
 #include "core/string.h"

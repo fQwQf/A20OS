@@ -6,7 +6,7 @@
 #include "core/string.h"
 #include "core/stdio.h"
 #include "core/smp.h"
-#include "drv/virtio_blk.h"
+#include "drivers/block/virtio_blk.h"
 #include "net/lwip_stack.h"
 #include "proc/signal.h"
 #include "cg/cgroup.h"

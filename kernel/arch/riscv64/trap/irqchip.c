@@ -4,7 +4,7 @@
 #include "core/cpu.h"
 #include "proc/proc.h"
 #include "core/timer.h"
-#include "drv/uart.h"
+#include "drivers/char/uart.h"
 
 static void plic_init_hart(void) {
     int hart = (int)cpu_current_id();
