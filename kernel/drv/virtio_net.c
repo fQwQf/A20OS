@@ -276,7 +276,12 @@ const uint8_t *virtio_net_mac(int idx) {
     return g_net[idx].mac;
 }
 
-int virtio_net_send(int idx, const void *packet, size_t len) {
+/* lwIP linkoutput 在持有 g_lwip_lock 时调用此函数发送网络帧。
+ * 如果此函数阻塞（等待 TX slot 或等待发送完成），会导致死锁：
+ *   g_lwip_lock → virtio_net_send（阻塞等待完成）→ IRQ → lwIP 回调 → 需要 g_lwip_lock
+ * 解决方案：nonblock=1 时不等待完成，提交描述符后立即返回。
+ * 非 nonblock 模式保持原有行为（busy-wait 直到完成），用于非锁内调用。 */
+int virtio_net_send(int idx, const void *packet, size_t len, int nonblock) {
     if (!packet || len == 0 || len > VIRTIO_NET_FRAME_MAX)
         return -1;
     if (!virtio_net_ready(idx))
@@ -295,6 +300,10 @@ int virtio_net_send(int idx, const void *packet, size_t len) {
             break;
         }
         spin_unlock_irqrestore(&net->lock, flags);
+        if (nonblock) {
+            net->tx_drops++;
+            return -1;
+        }
         if (timer_get_ticks() >= deadline) {
             net->tx_drops++;
             return -1;
@@ -327,6 +336,13 @@ int virtio_net_send(int idx, const void *packet, size_t len) {
     arch_dma_sync_for_device(&avail->idx, sizeof(uint16_t));
     virtio_net_kick(net, VIRTIO_NET_QUEUE_TX);
     spin_unlock_irqrestore(&net->lock, flags);
+
+    /* nonblock 模式：提交后立即返回，不等待完成。
+     * TX 完成中断会在 virtio_net_poll_all() 中清理 tx_busy。 */
+    if (nonblock) {
+        net->tx_packets++;
+        return (int)len;
+    }
 
     for (;;) {
         flags = spin_lock_irqsave(&net->lock);
