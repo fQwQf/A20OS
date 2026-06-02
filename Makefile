@@ -10,6 +10,7 @@ ABI ?= both
 MODE ?= release
 BRINGUP ?= 0
 OPT ?= -O3
+NR_CPUS ?= 1
 
 # ABI selection: linux, native, both (compile both ABI layers simultaneously)
 ifeq ($(filter $(ABI),linux native both),)
@@ -73,19 +74,19 @@ ifeq ($(ARCH), riscv64)
     ARCH_CFLAGS = -march=rv64imafdc_zicsr_zifencei -mabi=lp64 -mcmodel=medany
     ARCH_LDFLAGS =
     QEMU = qemu-system-riscv64
-    QEMU_FLAGS = -machine virt -m 1G -nographic -smp 1 -bios default -global virtio-mmio.force-legacy=false
+    QEMU_FLAGS = -machine virt -m 1G -nographic -smp $(NR_CPUS) -bios default -global virtio-mmio.force-legacy=false
 else ifeq ($(ARCH), loongarch64)
     CROSS_PREFIX = loongarch64-linux-gnu-
     ARCH_CFLAGS = -march=loongarch64 -mabi=lp64d -mcmodel=normal -fno-pic -static
     ARCH_LDFLAGS = -static -no-pie
     QEMU = qemu-system-loongarch64
-    QEMU_FLAGS = -machine virt -m 1G -nographic -smp 1
+    QEMU_FLAGS = -machine virt -m 1G -nographic -smp $(NR_CPUS)
 else ifeq ($(ARCH), aarch64)
     CROSS_PREFIX = aarch64-linux-gnu-
     ARCH_CFLAGS = -march=armv8-a -mgeneral-regs-only -fno-pic -mcmodel=large -mno-outline-atomics
     ARCH_LDFLAGS = -static -no-pie
     QEMU = qemu-system-aarch64
-    QEMU_FLAGS = -machine virt -cpu cortex-a57 -m 1G -nographic -smp 1 -global virtio-mmio.force-legacy=false
+    QEMU_FLAGS = -machine virt -cpu cortex-a57 -m 1G -nographic -smp $(NR_CPUS) -global virtio-mmio.force-legacy=false
 endif
 
 # In bringup mode, boot kernel only (no fs image dependency).
@@ -122,7 +123,8 @@ CFLAGS = -Wall -Wextra $(OPT) -ffreestanding -nostdlib \
          -I$(ARCH_INCLUDE_DIR) -I$(BUILD_DIR)/generated $(ARCH_CFLAGS) \
          -D$(shell echo $(ARCH) | tr a-z A-Z) \
          -DCONFIG_$(shell echo $(ARCH) | tr a-z A-Z) \
-         -DCONFIG_ABI_$(shell echo $(ABI) | tr a-z A-Z)
+         -DCONFIG_ABI_$(shell echo $(ABI) | tr a-z A-Z) \
+         -DCONFIG_NR_CPUS=$(NR_CPUS)
 ifeq ($(ABI),both)
 CFLAGS += -DCONFIG_ABI_NATIVE
 endif

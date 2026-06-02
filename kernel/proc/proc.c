@@ -33,15 +33,14 @@
 #include "drv/virtio_blk.h"
 #include "net/lwip_stack.h"
 
-static task_t idle_task;
+static task_t idle_tasks[CONFIG_NR_CPUS];
 static task_t *task_list_head;
 static task_t *task_list_tail;
-static uint64_t *kernel_pgdir_shared;  // 共享的内核页表
+static uint64_t *kernel_pgdir_shared;
 
 spinlock_t proc_lock = SPINLOCK_INIT;
 
-/* Boot stack (for schedule back to idle) */
-static uint64_t g_idle_kstack;  // idle 进程的内核栈
+static uint64_t g_idle_kstack[CONFIG_NR_CPUS];
 
 static void proc_link_task_locked(task_t *t)
 {
@@ -242,14 +241,14 @@ void idle_loop(void) {
 
 // 初始化进程管理模块，创建 idle 进程
 void proc_init(void) {
-    memset(&idle_task, 0, sizeof(idle_task));
+    memset(idle_tasks, 0, sizeof(idle_tasks));
     task_list_head = NULL;
     task_list_tail = NULL;
     proc_pid_init();
     proc_sched_runq_init();
     spin_init(&proc_lock);
 
-    task_t *idle = &idle_task;
+    task_t *idle = &idle_tasks[0];
     proc_link_task_locked(idle);
     idle->pid    = 0;
     idle->ppid   = 0;
@@ -313,7 +312,7 @@ void proc_init(void) {
     TASK_CTX_STATUS(ctx) = SSTATUS_SIE;  // 启用中断
     idle->kstack_base = idle_stack;
     idle->kstack = (uint64_t)ctx;
-    g_idle_kstack = idle->kstack;
+    g_idle_kstack[0] = idle->kstack;
 
     arch_set_task_pointer(idle);  // 设置 tp 寄存器
     proc_set_current(idle);
@@ -321,7 +320,7 @@ void proc_init(void) {
     kdebug("[PROC] Initialized, idle task pid=0\n");
 }
 
-task_t *proc_idle_task(void) { return &idle_task; }
+task_t *proc_idle_task(void) { return &idle_tasks[cpu_current_id()]; }
 
 uint64_t *proc_kernel_pgdir_shared(void) { return kernel_pgdir_shared; }
 

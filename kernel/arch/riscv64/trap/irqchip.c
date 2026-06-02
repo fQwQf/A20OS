@@ -1,23 +1,24 @@
 #ifdef CONFIG_RISCV64
 
 #include "core/trap.h"
+#include "core/cpu.h"
 #include "proc/proc.h"
 #include "core/timer.h"
 #include "drv/uart.h"
 
 static void plic_init_hart(void) {
-    int hart = 0;
+    int hart = (int)cpu_current_id();
     *(volatile uint32_t *)PLIC_SENABLE(hart) = (1U << UART0_IRQ);
     *(volatile uint32_t *)PLIC_SPRIORITY(hart) = 0;
 }
 
 static uint32_t plic_claim(void) {
-    int hart = 0;
+    int hart = (int)cpu_current_id();
     return *(volatile uint32_t *)PLIC_SCLAIM(hart);
 }
 
 static void plic_complete(uint32_t irq) {
-    int hart = 0;
+    int hart = (int)cpu_current_id();
     *(volatile uint32_t *)PLIC_SCLAIM(hart) = irq;
 }
 
@@ -36,7 +37,7 @@ void trap_init(void) {
     arch_write_sscratch(0);
     *(volatile uint32_t *)(PLIC_PRIORITY + UART0_IRQ * 4) = 1;
     plic_init_hart();
-    arch_write_sie(arch_read_sie() | SIE_SEIE);
+    arch_write_sie(arch_read_sie() | SIE_SEIE | SIE_SSIE);
 }
 
 void arch_handle_irq(uint64_t irq, int from_user) {
@@ -56,9 +57,15 @@ void arch_handle_irq(uint64_t irq, int from_user) {
 
     if (irq == IRQ_S_SOFT) {
         arch_write_sip(arch_read_sip() & ~SIE_SSIE);
+#ifdef CONFIG_SMP
+        /* 软中断作为核间调度 IPI：清除中断挂起位后触发重新调度 */
+        if (from_user)
+            proc_yield();
+#else
         timer_set_interval(TICKS_PER_SEC / 100);
         if (from_user)
             proc_yield();
+#endif
     }
 }
 
