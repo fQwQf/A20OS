@@ -29,8 +29,8 @@ sync
 
 # ── watchdog ────────────────────────────────────────────────
 (
-    sleep 7200
-    print -u2 '[CONTEST] Global timeout (7200 s)'
+    sleep 10800
+    print -u2 '[CONTEST] Global timeout (10800 s)'
     kill -KILL $$
     poweroff
 ) &

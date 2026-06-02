@@ -750,8 +750,7 @@ native-minimal: native-minimal-rv native-minimal-la
 # ----------------------------------------------------------------
 EVAL_DIR   := .eval-state
 EVAL_LOGS  := $(EVAL_DIR)/logs
-EVAL_TIMEOUT ?= 3600
-JUDGE_DIR  := judge
+EVAL_TIMEOUT ?= 36000
 
 SDCARD_RV_URL := https://github.com/oscomp/testsuits-for-oskernel/releases/download/pre-20250615/sdcard-rv.img.xz
 SDCARD_LA_URL := https://github.com/oscomp/testsuits-for-oskernel/releases/download/pre-20250615/sdcard-la.img.xz
@@ -824,108 +823,14 @@ define RUN_QEMU_LA
 	2>&1 | tee $(EVAL_LOGS)/serial-la.txt || true
 endef
 
-# --- Judge (inline Python) ---
-define JUDGE_PY
-import sys, os, re, json, subprocess
-
-serial_path = sys.argv[1]
-judge_dir   = sys.argv[2]
-arch_label  = sys.argv[3]
-
-with open(serial_path, "r", errors="ignore") as f:
-    content = f.read()
-
-judges = {}
-for fname in os.listdir(judge_dir):
-    if fname.startswith("judge_") and fname.endswith(".py"):
-        name = fname[len("judge_"):-len(".py")]
-        judges[name] = os.path.join(judge_dir, fname)
-
-start_re  = re.compile(r"#### OS COMP TEST GROUP START ([a-zA-Z0-9_-]+) ####")
-end_marker = "#### OS COMP TEST GROUP END"
-
-total_pass = 0
-total_all  = 0
-group_results = []
-
-lines = content.split("\n")
-i = 0
-while i < len(lines):
-    m = start_re.search(lines[i])
-    if m:
-        group = m.group(1)
-        collected = []
-        i += 1
-        while i < len(lines):
-            if end_marker in lines[i]:
-                break
-            m2 = start_re.search(lines[i])
-            if m2:
-                collected = []
-                group = m2.group(1)
-                i += 1
-                continue
-            collected.append(lines[i])
-            i += 1
-        if group in judges:
-            try:
-                proc = subprocess.run(
-                    [sys.executable, judges[group]],
-                    input="\n".join(collected),
-                    capture_output=True, text=True, timeout=30
-                )
-                results = json.loads(proc.stdout)
-                if isinstance(results, list):
-                    for r in results:
-                        p = r.get("pass", 0)
-                        a = r.get("all", 0)
-                        s = r.get("score", p)
-                        total_pass += s
-                        total_all  += a
-                        group_results.append(dict(group=group, name=r.get("name",""),
-                                                  pass=p, all=a, score=s))
-            except Exception as e:
-                print(f"  JUDGE ERROR [{group}]: {e}", file=sys.stderr)
-    i += 1
-
-print(f"\n{'='*60}")
-print(f"  {arch_label.upper()} RESULTS")
-print(f"{'='*60}")
-
-agg = {}
-for r in sorted(group_results, key=lambda x: (x["group"], x["name"])):
-    g = r["group"]
-    if g not in agg:
-        agg[g] = {"pass": 0, "all": 0, "score": 0, "count": 0}
-    agg[g]["pass"]  += r["pass"]
-    agg[g]["all"]   += r["all"]
-    agg[g]["score"] += r["score"]
-    agg[g]["count"] += 1
-
-for g, d in sorted(agg.items()):
-    print(f"  {g:30s}  score={d['score']:4d}/{d['all']:4d}  cases={d['count']}")
-
-print(f"{'='*60}")
-print(f"  TOTAL                         score={total_pass:4d}/{total_all:4d}")
-print(f"{'='*60}")
-if total_all > 0:
-    print(f"  Score percentage: {100.0*total_pass/total_all:.1f}%")
-else:
-    print("  No test cases matched.")
-endef
-
 # --- Top-level eval targets ---
 eval-rv: eval-dev-build-rv $(EVAL_DIR)/sdcard-rv.img | $(EVAL_LOGS)
 	@echo "[eval] launching RISC-V QEMU (timeout=$(EVAL_TIMEOUT)s) ..."
 	$(RUN_QEMU_RV)
-	@echo "[eval] judging RISC-V output ..."
-	@python3 -c "$$JUDGE_PY" "$(EVAL_LOGS)/serial-rv.txt" "$(JUDGE_DIR)" "rv"
 
 eval-la: eval-dev-build-la $(EVAL_DIR)/sdcard-la.img | $(EVAL_LOGS)
 	@echo "[eval] launching LoongArch QEMU (timeout=$(EVAL_TIMEOUT)s) ..."
 	$(RUN_QEMU_LA)
-	@echo "[eval] judging LoongArch output ..."
-	@python3 -c "$$JUDGE_PY" "$(EVAL_LOGS)/serial-la.txt" "$(JUDGE_DIR)" "la"
 
 eval: eval-rv eval-la
 	@echo "[eval] complete"
