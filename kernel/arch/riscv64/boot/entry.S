@@ -21,6 +21,12 @@
     .section .text.entry
     .globl _start
 _start:
+    /* a0 = hart ID (由 OpenSBI 传入)。
+     * 保存到 BSS 全局变量，供 arch_current_cpu_id() 使用。
+     * 仅主 hart (a0=0) 执行初始化，其他 hart 进入等待循环。 */
+    la      t0, __boot_hart_id
+    sd      a0, 0(t0)
+
     bnez    a0, .park
 
     la      sp, _stack_end
@@ -101,3 +107,8 @@ _stack_bottom:
     .space  4096 * 16
     .globl _stack_end
 _stack_end:
+
+    /* 启动时保存的 hart ID，由 entry.S _start 写入 */
+    .globl __boot_hart_id
+__boot_hart_id:
+    .dword 0

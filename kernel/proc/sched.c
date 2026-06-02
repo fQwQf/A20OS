@@ -5,6 +5,7 @@
 #include "core/timer.h"
 #include "core/string.h"
 #include "core/stdio.h"
+#include "core/smp.h"
 #include "drv/virtio_blk.h"
 #include "net/lwip_stack.h"
 #include "proc/signal.h"
@@ -90,7 +91,9 @@ unsigned proc_sched_select_cpu_locked(task_t *t)
 
 void proc_sched_kick_cpu(unsigned cpu)
 {
-    (void)cpu;
+    if (cpu >= CONFIG_NR_CPUS || cpu == cpu_current_id())
+        return;
+    smp_send_reschedule(cpu);
 }
 
 static void sched_note_deadline(uint64_t *slot, uint64_t value)
