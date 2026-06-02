@@ -27,6 +27,19 @@ SECTIONS {
         *(.sdata .sdata.*)
     } :data
 
+    . = ALIGN(8);
+    .driver_init : {
+        __driver_init_start = .;
+        KEEP(*(.driver_init))
+        __driver_init_end = .;
+    } :data
+
+    .board_init : {
+        __board_init_start = .;
+        KEEP(*(.board_init))
+        __board_init_end = .;
+    } :data
+
     . = ALIGN(4096);
     .bss (NOLOAD) : {
         _bss_start = .;

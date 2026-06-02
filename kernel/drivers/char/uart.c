@@ -1,4 +1,7 @@
-#include "drv/uart.h"
+#include "drivers/char/uart.h"
+#include "drivers/core/driver_core.h"
+#include "drivers/core/driver_class.h"
+#include "drivers/core/driver_register.h"
 #include "core/consts.h"
 #include "core/defs.h"
 #include "core/klog.h"
@@ -238,3 +241,52 @@ void uart_handle_irq(void) {
     }
     arch_uart_ack_irq();
 }
+
+static int uart_char_read(struct device *dev, void *buf, size_t count) {
+    (void)dev;
+    char *p = buf;
+    size_t n = 0;
+    while (n < count) {
+        int c = uart_getc();
+        if (c < 0)
+            break;
+        p[n++] = (char)c;
+    }
+    return (int)n;
+}
+
+static int uart_char_write(struct device *dev, const void *buf, size_t count) {
+    (void)dev;
+    const char *p = buf;
+    for (size_t i = 0; i < count; i++)
+        uart_putc(p[i]);
+    return (int)count;
+}
+
+static char_dev_ops_t uart_char_ops = {
+    .read  = uart_char_read,
+    .write = uart_char_write,
+};
+
+static int uart_driver_probe(device_t *dev) {
+    (void)dev;
+    kinfo("[UART] UART driver probed (early-init already done)\n");
+    return 0;
+}
+
+static int uart_driver_remove(device_t *dev) {
+    (void)dev;
+    return 0;
+}
+
+static driver_t uart_driver = {
+    .name       = "ns16550a-uart",
+    .id_table   = NULL,
+    .bus        = NULL,
+    .probe      = uart_driver_probe,
+    .remove     = uart_driver_remove,
+    .class_ops  = &uart_char_ops,
+    .class_type = DEV_CLASS_CHAR,
+};
+
+DRIVER_REGISTER(uart_driver);

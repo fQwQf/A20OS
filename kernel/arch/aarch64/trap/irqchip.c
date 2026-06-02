@@ -3,7 +3,7 @@
 #include "core/trap.h"
 #include "proc/proc.h"
 #include "core/timer.h"
-#include "drv/uart.h"
+#include "drivers/char/uart.h"
 
 volatile uint64_t aarch64_trap_flags;
 

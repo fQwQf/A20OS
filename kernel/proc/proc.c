@@ -30,7 +30,7 @@
 #include "core/klog.h"
 #include "core/lock.h"
 #include "sys/futex.h"
-#include "drv/virtio_blk.h"
+#include "drivers/block/virtio_blk.h"
 #include "net/lwip_stack.h"
 
 static task_t idle_tasks[CONFIG_NR_CPUS];
