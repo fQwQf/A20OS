@@ -155,6 +155,11 @@ void proc_task_release_resources(task_t *t)
     if (!t)
         return;
 
+    /* 防止重复释放：proc_reparent_children、proc_wait4、sched_reap_zombies
+     * 都可能对同一个 zombie 任务调用此函数。用 kstack==0 作为"已释放"标记。 */
+    if (t->kstack == 0 && t->mm == NULL && t->kstack_base == NULL)
+        return;
+
     if (t->cgroup) {
         cg_detach_task(t->cgroup, t->pid);
         t->cgroup = NULL;

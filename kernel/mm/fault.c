@@ -31,36 +31,54 @@ int handle_cow_fault(task_t *t, uint64_t stval) {
         int order = (leaf_size >= PMD_SIZE) ? PMD_ORDER : 0;
 
         pfn_t new_pfn = PFN_NONE;
-        int reuse = 0;
 
-        uint64_t pfa_flags = spin_lock_irqsave(&pfa.lock);
-        uint16_t rc = pfa.meta[old_pfn].refcount;
-        if (rc > 1) {
-            pfa.meta[old_pfn].refcount = rc - 1;
-            spin_unlock_irqrestore(&pfa.lock, pfa_flags);
-            new_pfn = pfa_alloc(order);
-            if (new_pfn == PFN_NONE) {
-                pfa_flags = spin_lock_irqsave(&pfa.lock);
-                pfa.meta[old_pfn].refcount = rc;
-                spin_unlock_irqrestore(&pfa.lock, pfa_flags);
-                return -1;
-            }
-        } else {
-            reuse = 1;
-            spin_unlock_irqrestore(&pfa.lock, pfa_flags);
-        }
-
+        /* 在 pfa.lock 内完成引用计数操作和 reuse 决策。
+         * 对于 reuse（独占页）的情况，在释放锁之前就更新 PTE，
+         * 防止定时器中断调度其他任务导致同一页面被 frame_put 释放后
+         * 被 buddy 回收并分配给用户数据（0x63636363 损坏的根因）。 */
         uint64_t flags = (*pte & (PTE_R | PTE_X | PTE_U | PTE_A |
                                   PTE_G | PTE_MAT1 | PTE_LEAF)) |
                          PTE_W | PTE_D;
 
-        if (reuse) {
-            *pte = arch_pte_leaf(old_pa, flags);
-        } else {
-            memcpy(pfn_to_virt(new_pfn), pfn_to_virt(old_pfn), leaf_size);
+        uint64_t pfa_flags = spin_lock_irqsave(&pfa.lock);
+        uint16_t rc = pfa.meta[old_pfn].refcount;
+        if (rc == 0) {
+            spin_unlock_irqrestore(&pfa.lock, pfa_flags);
+            new_pfn = pfa_alloc(order);
+            if (new_pfn == PFN_NONE)
+                return -1;
+            memset(pfn_to_virt(new_pfn), 0, leaf_size);
             *pte = arch_pte_leaf(pfn_to_phys(new_pfn), flags);
+            arch_tlb_flush_page(stval);
+            return 0;
         }
-        arch_tlb_flush_page(stval);
+        if (rc > 1) {
+            spin_unlock_irqrestore(&pfa.lock, pfa_flags);
+
+            new_pfn = pfa_alloc(order);
+            if (new_pfn == PFN_NONE)
+                return -1;
+
+            memcpy(pfn_to_virt(new_pfn), pfn_to_virt(old_pfn), leaf_size);
+
+            /* 在 frame_put 之前更新 PTE，防止以下竞争：
+             * 两个任务同时对同一物理页做 COW fault，都读到 rc>1 并释放锁。
+             * 如果先 frame_put 再更新 PTE，第二次 frame_put 可能使引用
+             * 计数归零并释放页面，而 PTE 仍指向已释放的物理页。
+             * 该页面被 buddy 回收后可能立刻分配给 slab 或用户数据（产生
+             * 0x63636363 损坏），TLB fill 走查过期 PTE 时读取到损坏内容。
+             * 先更新 PTE 再 frame_put，确保 PTE 不再引用旧页后才释放。 */
+            *pte = arch_pte_leaf(pfn_to_phys(new_pfn), flags);
+            arch_tlb_flush_page(stval);
+
+            frame_put(old_pfn);
+            return 0;
+        } else {
+            *pte = arch_pte_leaf(old_pa, flags);
+            spin_unlock_irqrestore(&pfa.lock, pfa_flags);
+            arch_tlb_flush_page(stval);
+            return 0;
+        }
         return 0;
     }
 
