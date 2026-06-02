@@ -275,9 +275,21 @@ mm_struct_t *mm_create(void) {
 static void free_vma_pages(mm_struct_t *mm, vm_area_t *vma) {
     if (!mm->pgdir) return;
     for (uint64_t va = vma->start; va < vma->end; ) {
-        paddr_t pa = 0;
+        /* 检查当前映射是否为跨越 VMA 边界的大页，
+         * 若是则先降级为普通页再逐个释放。 */
+        int level = 0;
         uint64_t base = 0;
         size_t size = 0;
+        uint64_t *pte = pt_lookup_leaf(mm->pgdir, va, &level, &base, &size);
+        if (pte && (*pte & PTE_V) && level > 0 &&
+            (base < vma->start || base + size > vma->end)) {
+            mm_demote_huge_page(mm, va);
+            continue;
+        }
+
+        paddr_t pa = 0;
+        base = 0;
+        size = 0;
         if (pt_unmap_leaf(mm->pgdir, va, &pa, &base, &size, NULL) == 0) {
             if (pa) frame_put(phys_to_pfn(pa));
             va = base + size;

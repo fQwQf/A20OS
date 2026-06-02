@@ -86,6 +86,33 @@ static void *phys_for_va(uint64_t *pgdir, uint64_t va) {
     return (void *)((uint64_t)pa + PAGE_OFFSET);
 }
 
+/*
+ * 确保 sp_va 所在的页面已映射到页表中。
+ * 如果 sp_va 低于当前栈底，则分配新的物理页并映射。
+ * 这是为了防止 execve 时参数/环境变量过大导致栈溢出，
+ * 写入未映射地址时页表脏数据被当作物理地址引发崩溃。
+ *
+ * @pgdir         页表根指针
+ * @sp_va         需要访问的虚拟地址
+ * @stack_bottom  当前栈底（传入指针，会被更新）
+ * @max_grow      最多向下扩展多少页
+ * @return        映射后的物理地址（内核直映射），或 NULL 失败
+ */
+static void *stack_ensure_mapped(uint64_t *pgdir, uint64_t sp_va,
+                                  uint64_t *stack_bottom, int max_grow) {
+    uint64_t page_va = sp_va & ~(uint64_t)(PAGE_SIZE - 1);
+    while (page_va < *stack_bottom && max_grow > 0) {
+        void *frame = frame_alloc();
+        if (!frame) return NULL;
+        uint64_t map_va = *stack_bottom - PAGE_SIZE;
+        int r = pt_map(pgdir, map_va, va_to_pa(frame), PTE_STACK);
+        if (r < 0) { frame_free(frame); return NULL; }
+        *stack_bottom -= PAGE_SIZE;
+        max_grow--;
+    }
+    return phys_for_va(pgdir, sp_va);
+}
+
 /* ------------------------------------------------------------------ */
 /*  Segment source abstraction                                        */
 /* ------------------------------------------------------------------ */
@@ -607,6 +634,7 @@ uint64_t elf_setup_stack(uint64_t stack_top, int argc, char *const argv[],
                           char *const envp[], const elf_load_info_t *info) {
     uint64_t *pgdir = info->pgdir;
     uint64_t sp_va  = stack_top;
+    uint64_t stack_bottom = stack_top - (uint64_t)USER_STACK_INITIAL_PAGES * PAGE_SIZE;
 
     int envc = 0;
     uint64_t env_ptrs[64];
@@ -614,7 +642,7 @@ uint64_t elf_setup_stack(uint64_t stack_top, int argc, char *const argv[],
         while (envp[envc] && envc < 63) {
             int len = (int)strlen(envp[envc]) + 1;
             sp_va -= len;
-            void *dst = phys_for_va(pgdir, sp_va);
+            void *dst = stack_ensure_mapped(pgdir, sp_va, &stack_bottom, 64);
             if (!dst) return 0;
             memcpy(dst, envp[envc], len);
             env_ptrs[envc] = sp_va;
@@ -627,7 +655,7 @@ uint64_t elf_setup_stack(uint64_t stack_top, int argc, char *const argv[],
     for (int i = argc - 1; i >= 0; i--) {
         int len = (int)strlen(argv[i]) + 1;
         sp_va -= len;
-        void *dst = phys_for_va(pgdir, sp_va);
+        void *dst = stack_ensure_mapped(pgdir, sp_va, &stack_bottom, 64);
         if (!dst) return 0;
         memcpy(dst, argv[i], len);
         arg_ptrs[i] = sp_va;
@@ -639,7 +667,6 @@ uint64_t elf_setup_stack(uint64_t stack_top, int argc, char *const argv[],
     const char *platform = ARCH_NAME;
     int plat_len = (int)strlen(platform) + 1;
 
-    /* Align total fixed-size data to 16 bytes */
     {
         size_t fixed = (size_t)plat_len + (size_t)(envc + argc + 3) * 8;
         sp_va -= (16 - (fixed & 15)) & 15;
@@ -648,7 +675,7 @@ uint64_t elf_setup_stack(uint64_t stack_top, int argc, char *const argv[],
     sp_va -= plat_len;
     uint64_t platform_va = sp_va;
     {
-        void *dst = phys_for_va(pgdir, sp_va);
+        void *dst = stack_ensure_mapped(pgdir, sp_va, &stack_bottom, 64);
         if (!dst) return 0;
         memcpy(dst, platform, plat_len);
     }
@@ -656,7 +683,7 @@ uint64_t elf_setup_stack(uint64_t stack_top, int argc, char *const argv[],
     sp_va -= 16;
     uint64_t random_va = sp_va;
     {
-        void *dst = phys_for_va(pgdir, sp_va);
+        void *dst = stack_ensure_mapped(pgdir, sp_va, &stack_bottom, 64);
         if (!dst) return 0;
         random_fill(dst, 16);
     }
@@ -685,28 +712,28 @@ uint64_t elf_setup_stack(uint64_t stack_top, int argc, char *const argv[],
 
     sp_va -= naux * 16;
     {
-        void *dst = phys_for_va(pgdir, sp_va);
+        void *dst = stack_ensure_mapped(pgdir, sp_va, &stack_bottom, 64);
         if (!dst) return 0;
         memcpy(dst, auxv, naux * 16);
     }
 
     sp_va -= (envc + 1) * 8;
     {
-        void *dst = phys_for_va(pgdir, sp_va);
+        void *dst = stack_ensure_mapped(pgdir, sp_va, &stack_bottom, 64);
         if (!dst) return 0;
         memcpy(dst, env_ptrs, (envc + 1) * 8);
     }
 
     sp_va -= (argc + 1) * 8;
     {
-        void *dst = phys_for_va(pgdir, sp_va);
+        void *dst = stack_ensure_mapped(pgdir, sp_va, &stack_bottom, 64);
         if (!dst) return 0;
         memcpy(dst, arg_ptrs, (argc + 1) * 8);
     }
 
     sp_va -= 8;
     {
-        void *dst = phys_for_va(pgdir, sp_va);
+        void *dst = stack_ensure_mapped(pgdir, sp_va, &stack_bottom, 64);
         if (!dst) return 0;
         *(uint64_t *)dst = (uint64_t)argc;
     }
@@ -722,6 +749,7 @@ uint64_t elf_setup_stack_a20(uint64_t stack_top, int argc, char *const argv[],
 {
     uint64_t *pgdir = info->pgdir;
     uint64_t sp_va = stack_top;
+    uint64_t stack_bottom = stack_top - (uint64_t)USER_STACK_INITIAL_PAGES * PAGE_SIZE;
 
     int envc = 0;
     uint64_t env_ptrs[64];
@@ -729,7 +757,7 @@ uint64_t elf_setup_stack_a20(uint64_t stack_top, int argc, char *const argv[],
         while (envp[envc] && envc < 63) {
             int len = (int)strlen(envp[envc]) + 1;
             sp_va -= len;
-            void *dst = phys_for_va(pgdir, sp_va);
+            void *dst = stack_ensure_mapped(pgdir, sp_va, &stack_bottom, 64);
             if (!dst) return 0;
             memcpy(dst, envp[envc], len);
             env_ptrs[envc] = sp_va;
@@ -742,7 +770,7 @@ uint64_t elf_setup_stack_a20(uint64_t stack_top, int argc, char *const argv[],
     for (int i = argc - 1; i >= 0; i--) {
         int len = (int)strlen(argv[i]) + 1;
         sp_va -= len;
-        void *dst = phys_for_va(pgdir, sp_va);
+        void *dst = stack_ensure_mapped(pgdir, sp_va, &stack_bottom, 64);
         if (!dst) return 0;
         memcpy(dst, argv[i], len);
         arg_ptrs[i] = sp_va;
@@ -753,7 +781,7 @@ uint64_t elf_setup_stack_a20(uint64_t stack_top, int argc, char *const argv[],
 
     sp_va -= (envc + 1) * 8;
     {
-        void *dst = phys_for_va(pgdir, sp_va);
+        void *dst = stack_ensure_mapped(pgdir, sp_va, &stack_bottom, 64);
         if (!dst) return 0;
         memcpy(dst, env_ptrs, (envc + 1) * 8);
     }
@@ -761,7 +789,7 @@ uint64_t elf_setup_stack_a20(uint64_t stack_top, int argc, char *const argv[],
 
     sp_va -= (argc + 1) * 8;
     {
-        void *dst = phys_for_va(pgdir, sp_va);
+        void *dst = stack_ensure_mapped(pgdir, sp_va, &stack_bottom, 64);
         if (!dst) return 0;
         memcpy(dst, arg_ptrs, (argc + 1) * 8);
     }
@@ -783,7 +811,7 @@ uint64_t elf_setup_stack_a20(uint64_t stack_top, int argc, char *const argv[],
         si.stderr_handle = stderr_h;
         si.self_task = self_task_h;
         si.page_size = PAGE_SIZE;
-        void *dst = phys_for_va(pgdir, sp_va);
+        void *dst = stack_ensure_mapped(pgdir, sp_va, &stack_bottom, 64);
         if (!dst) return 0;
         memcpy(dst, &si, sizeof(si));
     }

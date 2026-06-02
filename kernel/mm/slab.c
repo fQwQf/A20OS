@@ -11,7 +11,7 @@
 #define SLAB_HDR_SIZE   64  // Slab 页面头部大小
 #define SLAB_MAGIC   0x534C4142U  // "SLAB"
 #define BIG_MAGIC    0x42494741U  // "BIGA"
-#define SLAB_SPARE_CAP  8
+#define SLAB_SPARE_CAP  2
 #define SLAB_BITMAP_WORDS  2
 #define SLAB_BITMAP_BITS   (SLAB_BITMAP_WORDS * 64)
 
@@ -347,15 +347,17 @@ void kfree(void *ptr) {
     slab_page_t *sp = (slab_page_t *)((uintptr_t)ptr & ~(PAGE_SIZE - 1));
     uintptr_t offset = (uintptr_t)ptr - (uintptr_t)sp;
 
-    /* Check big alloc first: header sits at ptr - sizeof(big_alloc_hdr_t).
-     * This must precede the slab check because a big-alloc page can have
-     * incidental bytes at the slab-magic offset that falsely pass slab_page_valid. */
     big_alloc_hdr_t *bhdr = (big_alloc_hdr_t *)ptr - 1;
     if (bhdr->magic == BIG_MAGIC && bhdr->order <= MAX_ORDER) {
         int order = (int)bhdr->order;
         pfn_t pfn = virt_to_pfn(bhdr);
-        if (pfn_valid(pfn)) pfa_free(pfn, order);
-        return;
+        if (pfn_valid(pfn) &&
+            pfa.meta[pfn].flags == FRAME_F_ALLOC &&
+            pfa.meta[pfn].refcount > 0 &&
+            (uintptr_t)bhdr % PAGE_SIZE == 0) {
+            pfa_free(pfn, order);
+            return;
+        }
     }
 
     int is_slab = slab_page_valid(sp);
@@ -491,4 +493,23 @@ void slab_get_stats(slab_stats_t *stats)
     }
     stats->total_bytes = stats->total_pages * PAGE_SIZE;
     stats->reclaimable_bytes = stats->spare_pages * PAGE_SIZE;
+}
+
+size_t slab_reclaim_spare(void)
+{
+    size_t freed = 0;
+    for (int i = 0; i < SLAB_NR_CACHES; i++) {
+        slab_cache_t *c = &caches[i];
+        uint64_t flags = spin_lock_irqsave(&c->lock);
+        while (c->spare) {
+            slab_page_t *sp = c->spare;
+            c->spare = sp->next;
+            if (c->spare) c->spare->prev = NULL;
+            c->spare_count--;
+            slab_page_release(sp);
+            freed++;
+        }
+        spin_unlock_irqrestore(&c->lock, flags);
+    }
+    return freed * PAGE_SIZE;
 }

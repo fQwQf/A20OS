@@ -149,23 +149,11 @@ void trap_handler(trap_context_t *ctx) {
                             (unsigned long)TRAP_CTX_SP(ctx));
             return;
         } else if (code == CAUSE_LOAD_PAGE_FAULT || code == CAUSE_STORE_PAGE_FAULT || code == CAUSE_INSN_PAGE_FAULT) {
-            uint64_t mm_flags = 0;
-            int mm_locked = 0;
-            if (cur && cur->mm) {
-                mm_flags = spin_lock_irqsave(&cur->mm->lock);
-                mm_locked = 1;
-            }
             if (code == CAUSE_STORE_PAGE_FAULT) {
                 if (handle_cow_fault(cur, stval) == 0) {
-                    if (mm_locked)
-                        spin_unlock_irqrestore(&cur->mm->lock, mm_flags);
                     signal_deliver_user(ctx);
                     return;
                 }
-            }
-            if (mm_locked) {
-                spin_unlock_irqrestore(&cur->mm->lock, mm_flags);
-                mm_locked = 0;
             }
             if (handle_demand_fault(cur, stval) == 0) {
                 signal_deliver_user(ctx);
@@ -191,7 +179,6 @@ void trap_handler(trap_context_t *ctx) {
              *      fork/exec page-table copy). Set D=1 and retry.
              */
             task_t *cur = proc_current();
-            /* Case 1: try COW resolution first */
             if (handle_cow_fault(cur, stval) == 0) {
                 return;
             }
@@ -246,7 +233,11 @@ void trap_handler(trap_context_t *ctx) {
         }
     }
     proc_check_exit_pending();
-    signal_deliver_user(ctx);
+    {
+        task_t *t = proc_current();
+        if (t && t->mm)
+            signal_deliver_user(ctx);
+    }
     proc_check_exit_pending();
 }
 
@@ -270,11 +261,13 @@ void kernel_trap_handler(trap_context_t *ctx) {
                    code == CAUSE_PAGE_MODIFICATION) {
             if (cur && cur->mm && stval < USER_VA_LIMIT) {
                 if (code == CAUSE_STORE_PAGE_FAULT || code == CAUSE_PAGE_MODIFICATION) {
-                    if (handle_cow_fault(cur, stval) == 0)
+                    if (handle_cow_fault(cur, stval) == 0) {
                         return;
+                    }
                 }
-                if (handle_demand_fault(cur, stval) == 0)
+                if (handle_demand_fault(cur, stval) == 0) {
                     return;
+                }
             }
             
             kerr("\n========== KERNEL PAGE FAULT ==========\n");

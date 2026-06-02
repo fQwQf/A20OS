@@ -14,7 +14,10 @@
 
 /* ---------- Kernel / user stack sizes ---------- */
 #define KERNEL_STACK_SIZE        (64 * 1024)
-#define USER_STACK_INITIAL_PAGES 16
+/* 初始栈页数：从16增加到32（128KB），防止 execve 时参数/环境变量过大导致栈溢出。
+ * thp01 等LTP测试有较大的环境变量，16页(64KB)不够用，会导致 elf_setup_stack
+ * 写到未映射的地址，引发页表中的脏数据被当作物理地址使用而崩溃。 */
+#define USER_STACK_INITIAL_PAGES 32
 #define USER_STACK_MAX_SIZE      (8 * 1024 * 1024UL)
 
 /* ---------- Limits ---------- */

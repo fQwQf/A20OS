@@ -1,6 +1,5 @@
 #include "mm/oom.h"
 #include "mm/frame.h"
-#include "mm/slab.h"
 #include "proc/proc.h"
 #include "proc/proc_internal.h"
 #include "core/klog.h"
