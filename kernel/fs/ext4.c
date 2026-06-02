@@ -153,7 +153,16 @@ static void ext4_bitmap_free(ext4_sb_info_t *sb, uint64_t bm_blk, uint32_t bit) 
     kfree(buf);
 }
 
+/* 修复：将 kmalloc 移到 mutex 外部，避免在持有锁时可能睡眠。
+ * 原代码在 alloc_lock 内调用 kmalloc，而 kmalloc 可能触发调度器
+ * （例如需要扩展堆时），导致其他等待 alloc_lock 的进程被阻塞，
+ * 造成优先级反转甚至死锁。 */
 static uint64_t ext4_alloc_block(ext4_sb_info_t *sb) {
+    /* 预分配清零缓冲区（在获取锁之前，允许睡眠） */
+    char *zero_buf = (char *)kmalloc(sb->block_size);
+    if (zero_buf)
+        memset(zero_buf, 0, sb->block_size);
+
     mutex_lock(&sb->alloc_lock);
     for (uint32_t g = 0; g < sb->groups_count; g++) {
         if (sb->group_descs[g].bg_free_blocks_count_lo == 0) continue;
@@ -165,14 +174,14 @@ static uint64_t ext4_alloc_block(ext4_sb_info_t *sb) {
         ext4_writeback_gd(sb, g);
         uint64_t phys = (uint64_t)sb->first_data_block +
                         (uint64_t)g * sb->blocks_per_group + bit;
-        char *z = (char *)kmalloc(sb->block_size);
-        if (z) { memset(z, 0, sb->block_size);
-                  bcache_write_bytes(sb->bc, phys * sb->block_size, z, sb->block_size);
-                  kfree(z); }
+        if (zero_buf)
+            bcache_write_bytes(sb->bc, phys * sb->block_size, zero_buf, sb->block_size);
         mutex_unlock(&sb->alloc_lock);
+        if (zero_buf) kfree(zero_buf);
         return phys;
     }
     mutex_unlock(&sb->alloc_lock);
+    if (zero_buf) kfree(zero_buf);
     return 0;
 }
 

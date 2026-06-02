@@ -1059,6 +1059,11 @@ int mm_mprotect(mm_struct_t *mm, uint64_t addr, size_t len, int prot) {
 }
 
 // 创建子进程的内存空间（fork 时使用，实现写时复制）
+/* 关键修复：在修改父进程页表（设置 COW 标志）时持有 parent->lock，
+ * 防止与父进程的并发页错误处理产生竞争。
+ * 原代码未加锁直接修改父进程 PTE，在以下场景会导致数据损坏：
+ *   1. 多线程程序中，父进程的另一个线程同时触发页错误
+ *   2. SMP 模式下，另一个 CPU 在处理父进程的页错误 */
 mm_struct_t *mm_fork(mm_struct_t *parent) {
     if (!parent) return NULL;
     mm_struct_t *child = kcalloc(1, sizeof(mm_struct_t));
@@ -1099,28 +1104,40 @@ mm_struct_t *mm_fork(mm_struct_t *parent) {
         child->total_vm += (cv->end - cv->start) / PAGE_SIZE;
     }
 
+    /* 持有 parent->lock 遍历 VMA 并克隆页表，防止父进程并发修改 PTE */
+    uint64_t parent_flags = spin_lock_irqsave(&parent->lock);
     for (vm_area_t *pv = parent->mmap; pv; pv = pv->next) {
         if (pv->vm_flags & (VM_DONTFORK | VM_WIPEONFORK))
             continue;
         if (pv->vm_flags & VM_SHARED) {
-            if (mm_populate_shared_range(parent, pv) < 0)
+            if (mm_populate_shared_range(parent, pv) < 0) {
+                spin_unlock_irqrestore(&parent->lock, parent_flags);
                 goto fail;
+            }
         }
         if (mm_fork_clone_present_range(child, parent, pv->start, pv->end,
-                                        (pv->vm_flags & VM_SHARED) != 0) < 0)
+                                        (pv->vm_flags & VM_SHARED) != 0) < 0) {
+            spin_unlock_irqrestore(&parent->lock, parent_flags);
             goto fail;
+        }
     }
 
     if (parent->start_brk < parent->brk) {
-        if (mm_fork_clone_range(child, parent, parent->start_brk, parent->brk, 0) < 0)
+        if (mm_fork_clone_range(child, parent, parent->start_brk,
+                                parent->brk, 0) < 0) {
+            spin_unlock_irqrestore(&parent->lock, parent_flags);
             goto fail;
+        }
     }
 
     if (parent->stack_bottom && parent->stack_top) {
         if (mm_fork_clone_range(child, parent, parent->stack_bottom,
-                                parent->stack_top, 0) < 0)
+                                parent->stack_top, 0) < 0) {
+            spin_unlock_irqrestore(&parent->lock, parent_flags);
             goto fail;
+        }
     }
+    spin_unlock_irqrestore(&parent->lock, parent_flags);
 
     arch_tlb_flush();
     return child;
