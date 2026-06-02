@@ -195,6 +195,16 @@ static pfn_t pfa_alloc_from_buddy(int order)
     pfa.meta[blk].order    = (uint8_t)order;
     pfa.meta[blk].prev     = PFN_NONE;
     pfa.meta[blk].next     = PFN_NONE;
+
+    for (pfn_t i = blk + 1; i < blk + (1u << order); i++) {
+        if (pfa.meta[i].refcount > 0) continue;
+        pfa.meta[i].flags    = FRAME_F_ALLOC;
+        pfa.meta[i].refcount = 0;
+        pfa.meta[i].order    = 0;
+        pfa.meta[i].prev     = PFN_NONE;
+        pfa.meta[i].next     = PFN_NONE;
+    }
+
     pfa.free_frames -= (1u << order);
     return blk;
 }
@@ -258,6 +268,12 @@ void pfa_free(pfn_t pfn, int order) {
         if (buddy < range->start_pfn || buddy >= range->end_pfn) break;
         if (pfa.meta[buddy].flags != FRAME_F_FREE) break;
         if (pfa.meta[buddy].order != (uint8_t)actual_order) break;
+        int buddy_dirty = 0;
+        for (pfn_t i = buddy + 1; i < buddy + (1u << actual_order); i++) {
+            if (i >= pfa.total_frames) break;
+            if (pfa.meta[i].refcount > 0) { buddy_dirty = 1; break; }
+        }
+        if (buddy_dirty) break;
 
         fl_remove(buddy, actual_order);
         pfn = (pfn < buddy) ? pfn : buddy;
@@ -269,6 +285,20 @@ void pfa_free(pfn_t pfn, int order) {
     pfa.meta[pfn].order = (uint8_t)actual_order;
     pfa.meta[pfn].prev = PFN_NONE;
     pfa.meta[pfn].next = PFN_NONE;
+
+    /* 释放多页块时，清除子页的元数据，使 buddy merge 能正确合并。
+     * 保护性检查：跳过仍在使用的页面（如内核栈），防止 buddy merge
+     * 后的清除循环覆盖独立分配的页面元数据。 */
+    for (pfn_t i = pfn + 1; i < pfn + (1u << actual_order); i++) {
+        if (i >= pfa.total_frames) break;
+        if (pfa.meta[i].refcount > 0) continue;
+        pfa.meta[i].flags    = FRAME_F_FREE;
+        pfa.meta[i].refcount = 0;
+        pfa.meta[i].order    = 0;
+        pfa.meta[i].prev     = PFN_NONE;
+        pfa.meta[i].next     = PFN_NONE;
+    }
+
     fl_push(pfn, actual_order);
     spin_unlock_irqrestore(&pfa.lock, flags);
 }
@@ -289,9 +319,51 @@ void frame_put(pfn_t pfn) {
     if (!pfn_valid(pfn)) return;
     uint64_t flags = spin_lock_irqsave(&pfa.lock);
     if (pfa.meta[pfn].refcount > 0 && --pfa.meta[pfn].refcount == 0) {
-        int order = (int)pfa.meta[pfn].order;
+        /* refcount 归零，直接在此释放（内联 pfa_free 核心逻辑），
+         * 避免先解锁再调 pfa_free 的竞态窗口 */
+        int actual_order = (int)pfa.meta[pfn].order;
+        if (actual_order < 0 || actual_order > MAX_ORDER) {
+            spin_unlock_irqrestore(&pfa.lock, flags);
+            return;
+        }
+        pfa.free_frames += (1u << actual_order);
+        const pfa_range_t *range = pfa_range_for_pfn(pfn);
+        if (!range) {
+            spin_unlock_irqrestore(&pfa.lock, flags);
+            return;
+        }
+        while (actual_order < MAX_ORDER) {
+            pfn_t buddy = pfn ^ (1u << actual_order);
+            if (buddy >= pfa.total_frames) break;
+            if (buddy < range->start_pfn || buddy >= range->end_pfn) break;
+            if (pfa.meta[buddy].flags != FRAME_F_FREE) break;
+            if (pfa.meta[buddy].order != (uint8_t)actual_order) break;
+            int buddy_dirty = 0;
+            for (pfn_t i = buddy + 1; i < buddy + (1u << actual_order); i++) {
+                if (i >= pfa.total_frames) break;
+                if (pfa.meta[i].refcount > 0) { buddy_dirty = 1; break; }
+            }
+            if (buddy_dirty) break;
+            fl_remove(buddy, actual_order);
+            pfn = (pfn < buddy) ? pfn : buddy;
+            actual_order++;
+        }
+        pfa.meta[pfn].flags    = FRAME_F_FREE;
+        pfa.meta[pfn].refcount = 0;
+        pfa.meta[pfn].order    = (uint8_t)actual_order;
+        pfa.meta[pfn].prev     = PFN_NONE;
+        pfa.meta[pfn].next     = PFN_NONE;
+        for (pfn_t i = pfn + 1; i < pfn + (1u << actual_order); i++) {
+            if (i >= pfa.total_frames) break;
+            if (pfa.meta[i].refcount > 0) continue;
+            pfa.meta[i].flags    = FRAME_F_FREE;
+            pfa.meta[i].refcount = 0;
+            pfa.meta[i].order    = 0;
+            pfa.meta[i].prev     = PFN_NONE;
+            pfa.meta[i].next     = PFN_NONE;
+        }
+        fl_push(pfn, actual_order);
         spin_unlock_irqrestore(&pfa.lock, flags);
-        pfa_free(pfn, order);
         return;
     }
     spin_unlock_irqrestore(&pfa.lock, flags);

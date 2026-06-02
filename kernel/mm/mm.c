@@ -398,9 +398,7 @@ static int user_resolve_leaf(task_t *t, uint64_t va, int write,
         if (!arch_pte_is_leaf(*pte) || !(*pte & PTE_U))
             return -EFAULT;
         if (!(*pte & PTE_W)) {
-            uint64_t flags = spin_lock_irqsave(&t->mm->lock);
             int r = handle_cow_fault(t, va);
-            spin_unlock_irqrestore(&t->mm->lock, flags);
             if (r < 0)
                 return -EFAULT;
             pte = pt_lookup_leaf(t->pgdir, va, NULL, &leaf_base, &leaf_size);
