@@ -4,7 +4,7 @@
 #include "core/string.h"
 #include "core/consts.h"
 #include "core/lock.h"
-#include "drv/virtio_net.h"
+#include "drivers/net/virtio_net.h"
 
 #include "lwip/init.h"
 #include "lwip/netif.h"

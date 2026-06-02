@@ -1,5 +1,5 @@
 #include "core/klog.h"
-#include "drv/uart.h"
+#include "drivers/char/uart.h"
 #include "core/stdio.h"
 #include "core/string.h"
 #include "core/types.h"

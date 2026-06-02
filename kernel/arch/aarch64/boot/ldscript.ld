@@ -32,6 +32,19 @@ SECTIONS
         *(.sdata .sdata.*)
     } :data
 
+    . = ALIGN(8);
+    .driver_init : AT(ADDR(.driver_init) - LOAD_DELTA) {
+        __driver_init_start = .;
+        KEEP(*(.driver_init))
+        __driver_init_end = .;
+    } :data
+
+    .board_init : AT(ADDR(.board_init) - LOAD_DELTA) {
+        __board_init_start = .;
+        KEEP(*(.board_init))
+        __board_init_end = .;
+    } :data
+
     .bss (NOLOAD) : AT(ADDR(.bss) - LOAD_DELTA) {
         _bss_start = .;
         *(.bss .bss.*)

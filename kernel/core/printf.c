@@ -1,6 +1,6 @@
 #include "core/stdio.h"
 #include "core/string.h"
-#include "drv/uart.h"
+#include "drivers/char/uart.h"
 
 static int utoa(uint64_t value, char *buf, int base, int upper) {
     char tmp[32];

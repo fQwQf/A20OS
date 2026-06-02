@@ -11,6 +11,7 @@ MODE ?= release
 BRINGUP ?= 0
 OPT ?= -O3
 NR_CPUS ?= 1
+BOARD ?= qemu-virt-$(ARCH)
 
 # ABI selection: linux, native, both (compile both ABI layers simultaneously)
 ifeq ($(filter $(ABI),linux native both),)
@@ -29,6 +30,7 @@ EXT4_IMG = $(BUILD_DIR)/ext4.img
 FS_TEST_IMG = $(BUILD_DIR)/fs_test.img
 USER_BUILD_STAMP = user/build/.build-id
 ARCH_INCLUDE_DIR = $(KERNEL_DIR)/arch/$(ARCH)/include
+BOARD_INCLUDE_DIR = $(KERNEL_DIR)/platform/$(BOARD)
 EXT4_STAGING_DIR = $(BUILD_DIR)/ext4-staging
 BUILD_TIME_HDR = $(BUILD_DIR)/generated/build_time.h
 FAT32_IMAGE_MB ?= 128
@@ -120,11 +122,12 @@ CFLAGS = -Wall -Wextra $(OPT) -ffreestanding -nostdlib \
          -MMD -MP \
          -I$(INCLUDE_DIR) -I$(KERNEL_DIR) -I$(KERNEL_DIR)/net/lwip_port \
          -I$(KERNEL_DIR)/external/lwip/src/include \
-         -I$(ARCH_INCLUDE_DIR) -I$(BUILD_DIR)/generated $(ARCH_CFLAGS) \
+         -I$(ARCH_INCLUDE_DIR) -I$(BOARD_INCLUDE_DIR) -I$(BUILD_DIR)/generated $(ARCH_CFLAGS) \
          -D$(shell echo $(ARCH) | tr a-z A-Z) \
          -DCONFIG_$(shell echo $(ARCH) | tr a-z A-Z) \
          -DCONFIG_ABI_$(shell echo $(ABI) | tr a-z A-Z) \
-         -DCONFIG_NR_CPUS=$(NR_CPUS)
+         -DCONFIG_NR_CPUS=$(NR_CPUS) \
+         -DCONFIG_BOARD_$(shell echo $(BOARD) | tr a-z A-Z | tr - _)
 ifeq ($(ABI),both)
 CFLAGS += -DCONFIG_ABI_NATIVE
 endif
@@ -154,7 +157,12 @@ KERNEL_SRC = $(wildcard $(KERNEL_DIR)/*.c) \
              $(wildcard $(KERNEL_DIR)/ipc/*.c) \
              $(wildcard $(KERNEL_DIR)/net/*.c) \
              $(wildcard $(KERNEL_DIR)/bpf/*.c) \
-             $(wildcard $(KERNEL_DIR)/drv/*.c) \
+             $(wildcard $(KERNEL_DIR)/drivers/core/*.c) \
+             $(wildcard $(KERNEL_DIR)/drivers/bus/*.c) \
+             $(wildcard $(KERNEL_DIR)/drivers/block/*.c) \
+             $(wildcard $(KERNEL_DIR)/drivers/char/*.c) \
+             $(wildcard $(KERNEL_DIR)/drivers/net/*.c) \
+             $(wildcard $(KERNEL_DIR)/platform/$(BOARD)/*.c) \
              $(ABI_SRCS) \
              $(wildcard $(KERNEL_DIR)/syscall/*.c) \
              $(wildcard $(KERNEL_DIR)/shell/*.c) \

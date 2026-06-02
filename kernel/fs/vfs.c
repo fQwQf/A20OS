@@ -33,9 +33,9 @@
 #include "core/defs.h"
 #include "core/klog.h"
 #include "core/lock.h"
-#include "drv/virtio_blk.h"
+#include "drivers/block/virtio_blk.h"
 #include "fs/block_cache.h"
-#include "drv/virtio_blk.h"
+#include "drivers/block/virtio_blk.h"
 #include "fs/block_cache.h"
 #include "net/socket.h"
 
