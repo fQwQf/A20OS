@@ -1,6 +1,6 @@
 #include "syscall_impl.h"
 #include "abi/linux/ioctl.h"
-#include "drv/uart.h"
+#include "drivers/char/uart.h"
 #include "fs/vfs/file.h"
 #include "proc/proc_internal.h"
 
