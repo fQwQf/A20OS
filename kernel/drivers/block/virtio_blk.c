@@ -230,6 +230,8 @@ static void virtio_blk_complete_used_locked(virtio_blk_inst_t *inst) {
 static void virtio_blk_poll_inst(virtio_blk_inst_t *inst) {
     if (!inst || !inst->blk.valid)
         return;
+    if (__atomic_load_n(&inst->in_flight, __ATOMIC_ACQUIRE) <= 0)
+        return;
     uint64_t flags = spin_lock_irqsave(&inst->lock);
     if (inst->in_flight > 0)
         virtio_blk_complete_used_locked(inst);
@@ -346,13 +348,31 @@ static int virtio_blk_wait_req(virtio_blk_inst_t *inst, virtio_blk_req_t *req,
             if (inst->in_flight > 0)
                 inst->in_flight--;
             spin_unlock_irqrestore(&inst->lock, flags);
+            printf("[VIRTIO%d] wait_req timeout lba=%lu pid=%d\n",
+                   inst->slot, (unsigned long)lba, cur ? cur->pid : -1);
             return -1;
         }
 
         if (cur) {
             proc_set_wake_time(cur, deadline);
-            cur->state = PROC_BLOCKED;
-            virtio_blk_poll_inst(inst);
+
+            /* A request can complete after the loop's first req->done check
+             * but before we mark ourselves blocked.  In that case the
+             * completion path records req->done but intentionally does not
+             * wake a still-running waiter.  Poll and re-check under the
+             * virtio lock before entering PROC_BLOCKED so sched() can safely
+             * perform the next completion poll and wake this task. */
+            flags = spin_lock_irqsave(&inst->lock);
+            virtio_blk_complete_used_locked(inst);
+            int completed = req->done;
+            if (!completed)
+                cur->state = PROC_BLOCKED;
+            spin_unlock_irqrestore(&inst->lock, flags);
+            if (completed) {
+                proc_set_wake_time(cur, 0);
+                continue;
+            }
+
             sched();
             proc_set_wake_time(cur, 0);
         } else {

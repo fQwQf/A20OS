@@ -174,9 +174,9 @@ static uint64_t ext4_alloc_block(ext4_sb_info_t *sb) {
         ext4_writeback_gd(sb, g);
         uint64_t phys = (uint64_t)sb->first_data_block +
                         (uint64_t)g * sb->blocks_per_group + bit;
+        mutex_unlock(&sb->alloc_lock);
         if (zero_buf)
             bcache_write_bytes(sb->bc, phys * sb->block_size, zero_buf, sb->block_size);
-        mutex_unlock(&sb->alloc_lock);
         if (zero_buf) kfree(zero_buf);
         return phys;
     }
