@@ -78,6 +78,7 @@ static void detach_mapping_locked(page_cache_page_t *page)
     page->index = 0;
     page->valid = 0;
     page->dirty = 0;
+    page->dirty_gen = 0;
     page->uptodate = 0;
     if (vn)
         vnode_put(vn);
@@ -157,6 +158,7 @@ page_cache_page_t *page_cache_get(vnode_t *vn, uint64_t index, int create)
     page->index = index;
     page->valid = 1;
     page->dirty = 0;
+    page->dirty_gen = 0;
     page->uptodate = 0;
     memset(page->data, 0, PAGE_SIZE);
     vnode_get(vn);
@@ -186,8 +188,10 @@ void page_cache_mark_uptodate(page_cache_page_t *page)
 
 void page_cache_mark_dirty(page_cache_page_t *page)
 {
-    if (page)
+    if (page) {
+        __atomic_add_fetch(&page->dirty_gen, 1, __ATOMIC_RELEASE);
         __atomic_store_n(&page->dirty, 1, __ATOMIC_RELEASE);
+    }
 }
 
 void page_cache_mark_clean(page_cache_page_t *page)
@@ -327,13 +331,8 @@ static int page_cache_writeback_common(vnode_t *vn,
         vnode_t *page_vn = page->vnode;
         uint64_t index = page->index;
         void *data = page->data;
-        /*
-         * Snapshot the current dirty state before releasing the lock.
-         * If another thread re-dirties the page while we do I/O, the
-         * dirty flag will differ from this snapshot and we must NOT
-         * clear it — otherwise the concurrent write is silently lost.
-         */
-        int dirty_before = page->dirty;
+        uint64_t dirty_gen = __atomic_load_n(&page->dirty_gen,
+                                             __ATOMIC_ACQUIRE);
         spin_unlock_irqrestore(&g_page_cache_lock, flags);
 
         page_cache_writepage_t cb = writepage;
@@ -349,17 +348,10 @@ static int page_cache_writeback_common(vnode_t *vn,
         }
 
         flags = spin_lock_irqsave(&g_page_cache_lock);
-        /*
-         * Only clear dirty if:
-         *   1. The write succeeded.
-         *   2. The page still maps to the same vnode/index.
-         *   3. The page was NOT re-dirtied while we were doing I/O
-         *      (dirty_before == page->dirty means nobody wrote new
-         *       data; if page->dirty was toggled to 1 again, we must
-         *       preserve it so the new data gets written back later).
-         */
+        /* Only clear dirty if nobody re-dirtied this page during I/O. */
         if (r >= 0 && page->valid && page->vnode == page_vn &&
-            page->index == index && page->dirty == dirty_before)
+            page->index == index &&
+            __atomic_load_n(&page->dirty_gen, __ATOMIC_ACQUIRE) == dirty_gen)
             page->dirty = 0;
         spin_unlock_irqrestore(&g_page_cache_lock, flags);
 
@@ -434,7 +426,6 @@ void page_cache_invalidate_uptodate_range(vnode_t *vn, uint64_t start_byte,
             detach_mapping_locked(page);
         } else {
             __atomic_store_n(&page->uptodate, 0, __ATOMIC_RELEASE);
-            __atomic_store_n(&page->dirty, 0, __ATOMIC_RELEASE);
         }
     }
     spin_unlock_irqrestore(&g_page_cache_lock, flags);
