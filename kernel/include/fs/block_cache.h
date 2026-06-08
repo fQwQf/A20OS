@@ -15,6 +15,7 @@
 typedef struct bcache_entry {
     uint64_t    lba;
     int         dirty;
+    uint64_t    dirty_gen;
     int         ref;
     int         valid;
     char        data[BCACHE_BLOCK_SIZE];
@@ -25,6 +26,7 @@ typedef struct bcache_entry {
 typedef struct pcache_entry {
     uint64_t page_no;
     int      dirty;
+    uint64_t dirty_gen;
     int      ref;
     int      valid;
     char     data[PCACHE_PAGE_SIZE];
