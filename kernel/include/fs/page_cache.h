@@ -15,6 +15,7 @@ typedef struct page_cache_page {
     refcount_t ref_count;
     int valid;
     int dirty;
+    uint64_t dirty_gen;
     int uptodate;
     pfn_t pfn;
     void *data;

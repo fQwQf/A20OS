@@ -378,6 +378,12 @@ void context_switch(task_t *next) {
 void sched(void) {
     uint64_t now = timer_get_ticks();
 
+    /* Virtio block devices in this kernel are completion-polled.  Poll before
+     * selecting a task so I/O waiters can be made runnable even when the CPU
+     * never reaches the idle loop under sustained disk workloads such as
+     * iozone. */
+    virtio_blk_poll_all();
+
     /* Timer scanning: only scan when a deadline has actually been reached,
      * avoiding O(n) traversal on every sched() call. */
     if (now >= __atomic_load_n(&next_wake_scan, __ATOMIC_RELAXED) ||
