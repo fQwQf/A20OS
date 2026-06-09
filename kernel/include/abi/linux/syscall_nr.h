@@ -187,6 +187,10 @@
 #define SYS_chroot         51
 #define SYS_eventfd2       19
 #define SYS_fadvise64      223
+#define SYS_semget         190
+#define SYS_semctl         191
+#define SYS_semtimedop     192
+#define SYS_semop          193
 #define SYS_shmget         194
 #define SYS_shmctl         195
 #define SYS_shmat          196

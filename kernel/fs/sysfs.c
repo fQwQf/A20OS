@@ -20,7 +20,7 @@
 #include "fs/vfs.h"
 #include "fs/file.h"
 #include "mm/mm.h"
-#include "abi/linux/errno.h"
+#include "core/errno.h"
 
 /* ---- sysfs node types ---- */
 

@@ -16,7 +16,7 @@
 #define PTE_R    (1UL << 0)   /* Present implies readable */
 #define PTE_W    (1UL << 1)   /* Read/Write */
 #define PTE_U    (1UL << 2)   /* User/Supervisor */
-#define PTE_X    0            /* No explicit X bit; NX is separate */
+#define PTE_X    (1UL << 11)  /* Software: executable; arch_pte_leaf clears NX */
 #define PTE_G    (1UL << 8)   /* Global */
 #define PTE_A    (1UL << 5)   /* Accessed */
 #define PTE_D    (1UL << 6)   /* Dirty */
@@ -61,11 +61,22 @@ static inline uint64_t arch_make_satp(void *pgdir) {
     return (uint64_t)(uintptr_t)pgdir - PAGE_OFFSET;
 }
 
-#define ARCH_PTE_PPN_MASK  0xFFFUL
-#define arch_pte_flags(pte) ((pte) & ARCH_PTE_PPN_MASK)
+static inline uint64_t arch_make_addr_space_token(void *pgdir) {
+    return arch_make_satp(pgdir);
+}
+
+static inline uint64_t arch_pte_flags(uint64_t pte) {
+    uint64_t flags = pte & 0xFFFUL;
+    if (!(pte & PTE_NX))
+        flags |= PTE_X;
+    return flags;
+}
 
 static inline uint64_t arch_pte_leaf(paddr_t pa, uint64_t flags) {
-    return (pa & ~0xFFFUL) | flags | PTE_V | PTE_LEAF;
+    uint64_t pte = (pa & ~0xFFFUL) | (flags & 0xFFFUL) | PTE_V | PTE_LEAF;
+    if (!(flags & PTE_X))
+        pte |= PTE_NX;
+    return pte;
 }
 
 #endif
