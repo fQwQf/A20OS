@@ -93,13 +93,10 @@ static void proc_count_vma_huge_pages(mm_struct_t *mm, vm_area_t *vma,
         return;
 
     for (uint64_t va = vma->start; va < vma->end; ) {
-        int level = 0;
-        uint64_t base = 0;
-        size_t size = 0;
-        uint64_t *pte = pt_lookup_leaf(mm->pgdir, va, &level, &base, &size);
-        if (pte && (*pte & PTE_V) && arch_pte_is_leaf(*pte)) {
-            if (level > 0) {
-                size_t pages = size / PAGE_SIZE;
+        mm_leaf_info_t leaf;
+        if (mm_query_leaf(mm->pgdir, va, &leaf)) {
+            if (leaf.level > 0) {
+                size_t pages = leaf.size / PAGE_SIZE;
                 if ((vma->vm_flags & VM_ANON) && (vma->vm_flags & VM_SHARED))
                     stats->shmem_huge_pages += pages;
                 else if (vma->vm_flags & VM_ANON)
@@ -107,7 +104,7 @@ static void proc_count_vma_huge_pages(mm_struct_t *mm, vm_area_t *vma,
                 else
                     stats->file_huge_pages += pages;
             }
-            va = base + size;
+            va = leaf.base + leaf.size;
         } else {
             va += PAGE_SIZE;
         }
@@ -308,8 +305,8 @@ void proc_init(void) {
     pt_map_kernel(kpdir);
     kernel_pgdir_shared = kpdir;
     idle->pgdir = kpdir;
-    TASK_CTX_PAGE_TABLE(ctx) = kpdir ? arch_make_satp(kpdir) : 0;
-    TASK_CTX_STATUS(ctx) = SSTATUS_SIE;  // 启用中断
+    TASK_CTX_PAGE_TABLE(ctx) = kpdir ? arch_make_addr_space_token(kpdir) : 0;
+    TASK_CTX_STATUS(ctx) = arch_task_kernel_status();
     idle->kstack_base = idle_stack;
     idle->kstack = (uint64_t)ctx;
     g_idle_kstack[0] = idle->kstack;
@@ -373,8 +370,8 @@ int proc_alloc(void (*entry)(void)) {
     ctx->ra   = (uint64_t)entry;
     ctx->tp   = (uint64_t)t;
     t->pgdir  = kernel_pgdir_shared;
-    TASK_CTX_PAGE_TABLE(ctx) = kernel_pgdir_shared ? arch_make_satp(kernel_pgdir_shared) : 0;
-    TASK_CTX_STATUS(ctx) = SSTATUS_SIE;
+    TASK_CTX_PAGE_TABLE(ctx) = kernel_pgdir_shared ? arch_make_addr_space_token(kernel_pgdir_shared) : 0;
+    TASK_CTX_STATUS(ctx) = arch_task_kernel_status();
     t->kstack_base = stack;
     t->kstack = (uint64_t)ctx;
 
@@ -415,8 +412,8 @@ int proc_alloc_user_image(uint64_t entry, uint64_t sp, uint64_t *pgdir,
     memset(trap, 0, sizeof(*trap));
     TRAP_CTX_EPC(trap)   = entry;
     TRAP_CTX_SP(trap)   = sp;
-    TRAP_CTX_STATUS(trap) = SSTATUS_SPIE | SSTATUS_FS_CLEAN;
-    TRAP_CTX_KScratch0(trap) = pgdir ? arch_make_satp(pgdir) : 0;
+    TRAP_CTX_STATUS(trap) = arch_user_initial_status();
+    TRAP_CTX_KScratch0(trap) = pgdir ? arch_make_addr_space_token(pgdir) : 0;
     trap->kernel_tp = (uint64_t)(uintptr_t)t;
     arch_trap_ctx_set_kernel_stack(trap, ks_top);
 
@@ -446,8 +443,8 @@ int proc_alloc_user_image(uint64_t entry, uint64_t sp, uint64_t *pgdir,
     memset(ctx, 0, sizeof(*ctx));
     ctx->ra   = (uint64_t)user_trap_return;
     ctx->tp   = (uint64_t)t;
-    TASK_CTX_PAGE_TABLE(ctx) = pgdir ? arch_make_satp(pgdir) : 0;
-    TASK_CTX_STATUS(ctx) = SSTATUS_SPIE | SSTATUS_FS_CLEAN;
+    TASK_CTX_PAGE_TABLE(ctx) = pgdir ? arch_make_addr_space_token(pgdir) : 0;
+    TASK_CTX_STATUS(ctx) = arch_user_initial_status();
     t->kstack = (uint64_t)ctx;
 
     kinfo("[PROC] user task pid=%d entry=0x%lx sp=0x%lx\n", t->pid,

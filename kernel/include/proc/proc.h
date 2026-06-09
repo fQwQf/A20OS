@@ -204,6 +204,7 @@ int      proc_wait4(int pid, int *status, int options);
 void     proc_yield(void);
 void     sched(void);
 void     context_switch(task_t *next);
+uint64_t proc_next_timer_interval(uint64_t now);
 void     proc_set_wake_time(task_t *t, uint64_t wake_time);
 void     proc_set_alarm_expire(task_t *t, uint64_t alarm_expire);
 void     proc_dump(void);

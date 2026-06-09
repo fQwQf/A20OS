@@ -3,7 +3,7 @@ OPT ?= -O3
 
 .DEFAULT_GOAL := all
 
-SUPPORTED_ARCHES := riscv64 loongarch64 aarch64
+SUPPORTED_ARCHES := riscv64 loongarch64 aarch64 x86_64
 ifeq ($(filter $(ARCH),$(SUPPORTED_ARCHES)),)
 $(error Unsupported ARCH '$(ARCH)'; expected one of: $(SUPPORTED_ARCHES))
 endif
@@ -17,31 +17,37 @@ MUSL_CRT := $(MUSL_BUILD)/lib
 CROSS_COMPILE_riscv64 := riscv64-unknown-elf-
 CROSS_COMPILE_loongarch64 := loongarch64-linux-gnu-
 CROSS_COMPILE_aarch64 := aarch64-linux-gnu-
+CROSS_COMPILE_x86_64 := x86_64-linux-gnu-
 CROSS_COMPILE ?= $(CROSS_COMPILE_$(ARCH))
 
 MUSL_ARCH_riscv64 := riscv64
 MUSL_ARCH_loongarch64 := loongarch64
 MUSL_ARCH_aarch64 := aarch64
+MUSL_ARCH_x86_64 := x86_64
 MUSL_ARCH := $(MUSL_ARCH_$(ARCH))
 
 MUSL_TARGET_riscv64 := riscv64
 MUSL_TARGET_loongarch64 := loongarch64-linux-gnu
 MUSL_TARGET_aarch64 := aarch64-linux-gnu
+MUSL_TARGET_x86_64 := x86_64-linux-gnu
 MUSL_TARGET := $(MUSL_TARGET_$(ARCH))
 
 ARCH_CFLAGS_riscv64 := -mabi=lp64 -march=rv64g -mcmodel=medany
 ARCH_CFLAGS_loongarch64 := -mabi=lp64d -march=loongarch64 -mcmodel=normal -fno-pic
 ARCH_CFLAGS_aarch64 := -march=armv8-a -fno-pic -fno-tree-vectorize
+ARCH_CFLAGS_x86_64 := -m64 -fno-pic -fno-pie -mno-red-zone
 ARCH_CFLAGS := $(ARCH_CFLAGS_$(ARCH))
 
 ARCH_LDFLAGS_riscv64 :=
 ARCH_LDFLAGS_loongarch64 := -no-pie
 ARCH_LDFLAGS_aarch64 := -no-pie
+ARCH_LDFLAGS_x86_64 := -no-pie
 ARCH_LDFLAGS := $(ARCH_LDFLAGS_$(ARCH))
 
 MUSL_CONFIG_CFLAGS_riscv64 := $(OPT) -mcmodel=medany -march=rv64g -mabi=lp64
 MUSL_CONFIG_CFLAGS_loongarch64 := $(OPT) -march=loongarch64 -mabi=lp64d -mcmodel=normal -fno-pic -static
 MUSL_CONFIG_CFLAGS_aarch64 := $(OPT) -fno-pic -static -fno-tree-vectorize
+MUSL_CONFIG_CFLAGS_x86_64 := $(OPT) -m64 -fno-pic -fno-pie -mno-red-zone -static
 MUSL_CONFIG_CFLAGS := $(MUSL_CONFIG_CFLAGS_$(ARCH))
 
 CC := $(CROSS_COMPILE)gcc
@@ -393,6 +399,7 @@ FF_LIB := $(OBJ_DIR)/fastfetch/libfastfetch.a
 FF_LINUX_INC_riscv64 := -isystem /usr/include/riscv64-linux-gnu
 FF_LINUX_INC_loongarch64 := -isystem /usr/include/loongarch64-linux-gnu
 FF_LINUX_INC_aarch64 := -isystem /usr/include/aarch64-linux-gnu
+FF_LINUX_INC_x86_64 := -isystem /usr/include/x86_64-linux-gnu
 FF_LINUX_INC := $(FF_LINUX_INC_$(ARCH))
 
 FF_CFLAGS := $(filter-out -Wconversion,$(CFLAGS)) \
@@ -581,7 +588,7 @@ clean:
 	rm -f $(MKSH_DIR)/*.o lib/*.o
 
 distclean: clean
-	rm -rf $(MUSL_BASE)/build-riscv64 $(MUSL_BASE)/build-loongarch64 $(MUSL_BASE)/build-aarch64
+	rm -rf $(MUSL_BASE)/build-riscv64 $(MUSL_BASE)/build-loongarch64 $(MUSL_BASE)/build-aarch64 $(MUSL_BASE)/build-x86_64
 
 .PHONY: all clean distclean build_dir musl_prepare
 .PRECIOUS: $(USER_INTERMEDIATE_TARGETS)

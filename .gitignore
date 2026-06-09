@@ -13,3 +13,5 @@ kernel-la
 .kernel-build/
 *.dtb
 .eval-state
+*.orig
+*.rej
