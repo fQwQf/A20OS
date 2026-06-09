@@ -12,7 +12,6 @@
 #include "mm/vm.h"
 #include "core/panic.h"
 #include "sys/futex.h"
-#include "abi/linux/futex.h"
 #include "abi/native/ipc_internal.h"
 #include "sys/usercopy.h"
 #include "cg/cgroup.h"
@@ -92,17 +91,17 @@ static void proc_release_exiting_mm(task_t *t)
 
     mm_struct_t *mm = t->mm;
     uint64_t *kernel_pgdir = proc_kernel_pgdir_shared();
-    uint64_t kernel_satp = kernel_pgdir ? arch_make_satp(kernel_pgdir) : 0;
+    uint64_t kernel_as = kernel_pgdir ? arch_make_addr_space_token(kernel_pgdir) : 0;
 
-    if (t == proc_current() && kernel_satp) {
-        arch_write_satp(kernel_satp);
+    if (t == proc_current() && kernel_as) {
+        arch_write_addr_space_token(kernel_as);
         arch_tlb_flush();
     }
 
     t->mm = NULL;
     t->pgdir = kernel_pgdir;
     if (t->trap_ctx)
-        TRAP_CTX_KScratch0(t->trap_ctx) = kernel_satp;
+        TRAP_CTX_KScratch0(t->trap_ctx) = kernel_as;
 
     if (t->cgroup && mm->rss > 0)
         cg_mem_uncharge(t->cgroup, mm->rss);

@@ -13,7 +13,7 @@
 #include "mm/vm.h"
 #include "mm/frame.h"
 #include "core/arch.h"
-#include "abi/current.h"
+#include "core/mman.h"
 #include "abi/native/vmar.h"
 #include "abi/native/vmo.h"
 #include "abi/native/errno.h"
@@ -37,6 +37,8 @@ uint64_t a20_vmar_find_free(uint64_t hint, uint64_t length)
 int64_t a20_vmar_map(struct a20_vmo *vmo, uint64_t vmo_offset, uint64_t length,
                      uint32_t prot, uint32_t flags, uint64_t hint, uint64_t *out_addr)
 {
+    (void)flags;
+
     if (!out_addr || length == 0) return -A20_ERR_INVALID_ARGUMENT;
 
     int mmap_prot = 0;
@@ -58,10 +60,7 @@ int64_t a20_vmar_map(struct a20_vmo *vmo, uint64_t vmo_offset, uint64_t length,
             vma->vmo_offset = vmo_offset;
         }
 
-        uint64_t pte_flags = PTE_V | PTE_U;
-        if (prot & A20_PROT_READ)  pte_flags |= PTE_R;
-        if (prot & A20_PROT_WRITE) pte_flags |= PTE_W;
-        if (prot & A20_PROT_EXEC)  pte_flags |= PTE_X;
+        uint64_t pte_flags = mm_prot_to_pte_flags(mmap_prot);
 
         uint32_t start_idx = (uint32_t)(vmo_offset / PAGE_SIZE);
         uint64_t npages = (length + PAGE_SIZE - 1) / PAGE_SIZE;

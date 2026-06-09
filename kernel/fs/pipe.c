@@ -33,7 +33,7 @@ static void pipe_wake_writers(pipe_buf_t *pb)
     wait_queue_wake_all(&pb->write_waiters);
 }
 
-static int pipe_wait_interruptible(pipe_buf_t *pb, wait_queue_t *wq)
+static int pipe_wait_interruptible(wait_queue_t *wq)
 {
     task_t *t = proc_current();
     if (!t) {
@@ -67,7 +67,7 @@ static int pipe_read(vfile_t *vf, char *buf, size_t count)
             return -EAGAIN;
         }
         spin_unlock(&pb->lock);
-        int wr = pipe_wait_interruptible(pb, &pb->read_waiters);
+        int wr = pipe_wait_interruptible(&pb->read_waiters);
         if (wr < 0) return wr;
         spin_lock(&pb->lock);
     }
@@ -81,11 +81,9 @@ static int pipe_read(vfile_t *vf, char *buf, size_t count)
         memcpy(buf + first, pb->data, second);
     pb->tail = (pb->tail + n) % pb->capacity;
     pb->used -= n;
-    int was_full = (pb->used + n == pb->capacity);
     spin_unlock(&pb->lock);
 
-    if (was_full)
-        pipe_wake_writers(pb);
+    pipe_wake_writers(pb);
     return (int)n;
 }
 
@@ -122,7 +120,7 @@ static int pipe_write(vfile_t *vf, const char *buf, size_t count)
                     return n ? (int)n : -EAGAIN;
                 }
                 spin_unlock(&pb->lock);
-                int wr = pipe_wait_interruptible(pb, &pb->write_waiters);
+                int wr = pipe_wait_interruptible(&pb->write_waiters);
                 if (wr < 0) return n ? (int)n : wr;
                 spin_lock(&pb->lock);
                 space = pb->capacity - pb->used;
@@ -156,7 +154,7 @@ static int pipe_write(vfile_t *vf, const char *buf, size_t count)
                     return n ? (int)n : -EAGAIN;
                 }
                 spin_unlock(&pb->lock);
-                int wr = pipe_wait_interruptible(pb, &pb->write_waiters);
+                int wr = pipe_wait_interruptible(&pb->write_waiters);
                 if (wr < 0) return n ? (int)n : wr;
                 spin_lock(&pb->lock);
                 continue;
@@ -328,7 +326,6 @@ int pipe_create(int pipefd[2])
     wait_queue_init(&pb->read_waiters);
     wait_queue_init(&pb->write_waiters);
     pb->ref = 2;
-    task_t *cur = proc_current();
     pb->logical_size = PIPE_DEFAULT_SIZE;
     pb->capacity = pb->logical_size;
     pb->data = (char *)kmalloc(pb->capacity);

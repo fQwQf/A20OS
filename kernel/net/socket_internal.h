@@ -16,7 +16,7 @@ struct tcp_pcb;
 #define NET_MAX_STREAM_PAYLOAD 2048
 #define NET_MAX_PAYLOAD 65535
 #define NET_MAX_QUEUE   128
-#define NET_WAIT_TICKS  MS_TO_TICKS(50)
+#define NET_WAIT_TICKS  (MS_TO_TICKS(5) ? MS_TO_TICKS(5) : 1)
 #define NET_CONNECT_TIMEOUT_TICKS MS_TO_TICKS(10000)
 
 typedef struct net_msg {

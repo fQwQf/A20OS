@@ -121,6 +121,10 @@ static void uart_rx_push(char c) {
     spin_unlock_irqrestore(&rx_lock, flags);
 }
 
+void uart_receive_char(char c) {
+    uart_rx_push(c);
+}
+
 // 初始化 UART 设备
 void uart_init(void) {
     rx_head = 0;

@@ -2,7 +2,7 @@
 
 #include "proc/proc.h"
 #include "proc/signal.h"
-#include "abi/linux/signal.h"
+#include "core/signal_defs.h"
 #include "fs/page_cache.h"
 #include "fs/vfs.h"
 #include "mm/mm.h"
@@ -125,8 +125,8 @@ int handle_demand_fault(task_t *t, uint64_t stval) {
             }
             memset(pfn_to_virt(pfn), 0, PAGE_SIZE);
 
-            uint64_t pte_flags = PTE_V | PTE_R | PTE_W | PTE_X | PTE_U | PTE_A | PTE_D | PTE_MAT1 | PTE_LEAF;
-            int r = pt_map(t->mm->pgdir, page_va, pfn_to_phys(pfn), pte_flags);
+            int r = pt_map(t->mm->pgdir, page_va, pfn_to_phys(pfn),
+                           mm_user_stack_pte_flags());
             if (r < 0) { cg_mem_uncharge(t->cgroup, 1); frame_put(pfn); return -1; }
 
             if (page_va < t->mm->stack_bottom)
@@ -147,8 +147,8 @@ int handle_demand_fault(task_t *t, uint64_t stval) {
         if (pfn == PFN_NONE) { cg_mem_uncharge(t->cgroup, 1); return -1; }
         memset(pfn_to_virt(pfn), 0, PAGE_SIZE);
 
-        uint64_t pte_flags = PTE_V | PTE_R | PTE_W | PTE_U | PTE_A | PTE_D | PTE_MAT1 | PTE_LEAF;
-        int r = pt_map(t->mm->pgdir, page_va, pfn_to_phys(pfn), pte_flags);
+        int r = pt_map(t->mm->pgdir, page_va, pfn_to_phys(pfn),
+                       mm_user_brk_pte_flags());
         if (r < 0) { cg_mem_uncharge(t->cgroup, 1); frame_put(pfn); return -1; }
 
         t->mm->rss++;
@@ -160,7 +160,7 @@ int handle_demand_fault(task_t *t, uint64_t stval) {
     if (vma) {
         uint64_t *pte = pt_lookup_leaf(t->mm->pgdir, page_va, NULL, NULL, NULL);
         if (pte && (*pte & PTE_V)) return -1;
-        if (!(vma->pte_flags & (PTE_R | PTE_W | PTE_X))) return -1;
+        if (!mm_pte_flags_allow_access(vma->pte_flags)) return -1;
 
         if ((vma->vm_flags & VM_FILE) && vma->file_fd >= 0) {
             vfile_t *vf = vfs_get_file_ref(vma->file_fd);

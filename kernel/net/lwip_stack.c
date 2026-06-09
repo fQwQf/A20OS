@@ -81,7 +81,7 @@ static err_t a20_lwip_loopif_init_cb(struct netif *netif)
     netif->mtu = 1500;
     netif->flags = NETIF_FLAG_LINK_UP;
 #if LWIP_IPV6
-    static const s8_t sn[] = {0, 0, 0, 0, 0, 0, 0, 0};
+    static s8_t sn[] = {0, 0, 0, 0, 0, 0, 0, 0};
     ip6_addr_t lo6;
     ip6_addr_set_loopback(&lo6);
     netif_add_ip6_address(netif, &lo6, sn);
