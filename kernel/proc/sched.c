@@ -26,6 +26,9 @@ static proc_runq_t sched_runq[CONFIG_NR_CPUS];
 static uint64_t next_wake_scan = SCHED_NO_DEADLINE;
 static uint64_t next_alarm_scan = SCHED_NO_DEADLINE;
 
+#define SCHED_TICK_INTERVAL       (TICKS_PER_SEC / 100)
+#define SCHED_MIN_TIMER_INTERVAL  (TICKS_PER_SEC / 10000 ? TICKS_PER_SEC / 10000 : 1)
+
 /* Per-CPU runqueue lock — separate from proc_lock.
  * runq_lock protects enqueue/dequeue/pick and per-runqueue state.
  * proc_lock protects task_list, task->state transitions, and zombie list.
@@ -58,6 +61,25 @@ void proc_sched_runq_init(void) {
         spin_init(&sched_runq_lock[i]);
     next_wake_scan = SCHED_NO_DEADLINE;
     next_alarm_scan = SCHED_NO_DEADLINE;
+}
+
+uint64_t proc_next_timer_interval(uint64_t now)
+{
+    uint64_t next = now + SCHED_TICK_INTERVAL;
+    uint64_t wake = __atomic_load_n(&next_wake_scan, __ATOMIC_RELAXED);
+    uint64_t alarm = __atomic_load_n(&next_alarm_scan, __ATOMIC_RELAXED);
+
+    if (wake < next)
+        next = wake;
+    if (alarm < next)
+        next = alarm;
+    if (next <= now)
+        return SCHED_MIN_TIMER_INTERVAL;
+
+    uint64_t delta = next - now;
+    if (delta < SCHED_MIN_TIMER_INTERVAL)
+        delta = SCHED_MIN_TIMER_INTERVAL;
+    return delta;
 }
 
 unsigned proc_sched_select_cpu(task_t *t)
@@ -96,16 +118,23 @@ void proc_sched_kick_cpu(unsigned cpu)
     smp_send_reschedule(cpu);
 }
 
-static void sched_note_deadline(uint64_t *slot, uint64_t value)
+static int sched_note_deadline(uint64_t *slot, uint64_t value)
 {
     if (value == 0)
-        return;
+        return 0;
     uint64_t old = __atomic_load_n(slot, __ATOMIC_RELAXED);
     while (value < old &&
            !__atomic_compare_exchange_n(slot, &old, value, 1,
                                         __ATOMIC_RELAXED,
                                         __ATOMIC_RELAXED)) {
     }
+    return value < old;
+}
+
+static void sched_rearm_timer(void)
+{
+    uint64_t now = timer_get_ticks();
+    timer_set_interval(proc_next_timer_interval(now));
 }
 
 void proc_set_wake_time(task_t *t, uint64_t wake_time)
@@ -113,7 +142,8 @@ void proc_set_wake_time(task_t *t, uint64_t wake_time)
     if (!t)
         return;
     __atomic_store_n(&t->wake_time, wake_time, __ATOMIC_RELAXED);
-    sched_note_deadline(&next_wake_scan, wake_time);
+    if (sched_note_deadline(&next_wake_scan, wake_time))
+        sched_rearm_timer();
 }
 
 void proc_set_alarm_expire(task_t *t, uint64_t alarm_expire)
@@ -121,7 +151,8 @@ void proc_set_alarm_expire(task_t *t, uint64_t alarm_expire)
     if (!t)
         return;
     __atomic_store_n(&t->alarm_expire, alarm_expire, __ATOMIC_RELAXED);
-    sched_note_deadline(&next_alarm_scan, alarm_expire);
+    if (sched_note_deadline(&next_alarm_scan, alarm_expire))
+        sched_rearm_timer();
 }
 
 /* Enqueue a task onto its CPU's runqueue. Caller must hold runq_lock. */
@@ -338,9 +369,6 @@ void sched_reap_zombies(void)
     } while (count > 0);
 }
 
-/* Deferred I/O poll counter — poll every N idle iterations to reduce overhead. */
-static uint64_t sched_poll_counter;
-
 void context_switch(task_t *next) {
     if (!next || !next->kstack)
         return;
@@ -383,6 +411,10 @@ void sched(void) {
      * never reaches the idle loop under sustained disk workloads such as
      * iozone. */
     virtio_blk_poll_all();
+
+    static uint64_t sched_net_poll_counter;
+    if ((++sched_net_poll_counter & 0x3) == 0)
+        a20_lwip_poll();
 
     /* Timer scanning: only scan when a deadline has actually been reached,
      * avoiding O(n) traversal on every sched() call. */

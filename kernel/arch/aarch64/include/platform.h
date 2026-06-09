@@ -37,6 +37,7 @@ static inline int arch_ram_range(size_t idx, paddr_t *base, paddr_t *end) {
 
 #define CLINT_BASE         0x0UL
 #define CLINT_TIMER_FREQ   62500000UL
+#define ARCH_TIMER_FREQ    CLINT_TIMER_FREQ
 
 /*
  * Synthetic trap/interrupt codes returned by arch_read_cause().

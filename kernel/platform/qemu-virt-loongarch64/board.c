@@ -60,7 +60,7 @@ static uint64_t la64_timer_read_ticks(void) {
 }
 
 static uint64_t la64_timer_ticks_per_sec(void) {
-    return CLINT_TIMER_FREQ;
+    return ARCH_TIMER_FREQ;
 }
 
 static const timer_ops_t la64_timer_ops = {

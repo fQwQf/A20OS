@@ -6,21 +6,52 @@
 #include "core/stdio.h"
 #include "core/klog.h"
 #include "core/defs.h"
+#include "core/lock.h"
+#include "core/panic.h"
+#include "mm/slab.h"
 
-#define MAX_DRIVERS  32
-#define MAX_DEVICES  64
-#define MAX_BUSES    8
+/* DRIVER_CORE_DYNAMIC_LIMITS: initial capacity for bringup; registries grow
+ * dynamically via krealloc when capacity is exhausted. */
+#define DRIVER_INITIAL_CAP  32
+#define DEVICE_INITIAL_CAP  64
+#define BUS_INITIAL_CAP     8
 
-static driver_t   *g_drivers[MAX_DRIVERS];
+/* DRIVER_CORE_CONCURRENCY_MODEL: registry arrays and count fields are protected
+ * by driver_core_lock. Probe/remove callbacks run after binding decisions and
+ * must leave dev->drv/dev->state consistent on failure. */
+static spinlock_t g_driver_core_lock = SPINLOCK_INIT;
+
+static driver_t   **g_drivers;
 static int         g_driver_count;
-static device_t   *g_devices[MAX_DEVICES];
+static int         g_driver_cap;
+static device_t   **g_devices;
 static int         g_device_count;
-static bus_type_t *g_buses[MAX_BUSES];
+static int         g_device_cap;
+static bus_type_t **g_buses;
 static int         g_bus_count;
+static int         g_bus_cap;
 
 /* ---- Linker-generated section boundaries for built-in drivers ---- */
 extern const driver_t *__driver_init_start;
 extern const driver_t *__driver_init_end;
+
+static int driver_probe_bound_device(driver_t *drv, device_t *dev) {
+    dev->drv = drv;
+    if (!drv->probe) {
+        dev->state = DEV_STATE_PROBED;
+        return 0;
+    }
+    int ret = drv->probe(dev);
+    if (ret == 0) {
+        dev->state = DEV_STATE_PROBED;
+        return 0;
+    }
+    /* DRIVER_PROBE_FAILURE_CLEANUP: failed probes leave no half-bound device. */
+    dev->drv = NULL;
+    dev->drv_priv = NULL;
+    dev->state = DEV_STATE_UNINIT;
+    return ret;
+}
 
 /* ============================================================
  * driver_core_init — called early from kernel_main
@@ -30,9 +61,20 @@ extern const driver_t *__driver_init_end;
  * board_init().
  * ============================================================ */
 void driver_core_init(void) {
+    spin_init(&g_driver_core_lock);
     g_driver_count = 0;
+    g_driver_cap   = DRIVER_INITIAL_CAP;
     g_device_count = 0;
+    g_device_cap   = DEVICE_INITIAL_CAP;
     g_bus_count    = 0;
+    g_bus_cap      = BUS_INITIAL_CAP;
+
+    g_drivers = kmalloc(sizeof(driver_t *) * g_driver_cap);
+    g_devices = kmalloc(sizeof(device_t *) * g_device_cap);
+    g_buses   = kmalloc(sizeof(bus_type_t *) * g_bus_cap);
+    if (!g_drivers || !g_devices || !g_buses) {
+        panic("driver_core_init: kmalloc failed\n");
+    }
 
     for (const driver_t * const *p = (const driver_t * const *)&__driver_init_start;
          p < (const driver_t * const *)&__driver_init_end; p++) {
@@ -49,10 +91,24 @@ void driver_core_init(void) {
  * After registration, scans existing unbound devices for matches.
  * ============================================================ */
 int driver_register(driver_t *drv) {
-    if (!drv || g_driver_count >= MAX_DRIVERS)
+    if (!drv)
         return -1;
 
+    uint64_t flags = spin_lock_irqsave(&g_driver_core_lock);
+    if (g_driver_count >= g_driver_cap) {
+        int new_cap = g_driver_cap * 2;
+        driver_t **new_arr = krealloc(g_drivers, sizeof(driver_t *) * new_cap);
+        if (!new_arr) {
+            kerr("[DRIVER] driver_register: capacity exhausted (%d)\n", g_driver_cap);
+            spin_unlock_irqrestore(&g_driver_core_lock, flags);
+            return -ENOMEM;
+        }
+        g_drivers = new_arr;
+        g_driver_cap = new_cap;
+    }
+
     g_drivers[g_driver_count++] = drv;
+    spin_unlock_irqrestore(&g_driver_core_lock, flags);
 
     kinfo("[DRIVER] registered driver '%s' (class=%d)\n",
           drv->name, drv->class_type);
@@ -62,18 +118,13 @@ int driver_register(driver_t *drv) {
         if (dev->drv != NULL)
             continue;
         if (dev->bus && dev->bus->match && dev->bus->match(dev, drv)) {
-            dev->drv = drv;
-            if (drv->probe) {
-                int ret = drv->probe(dev);
-                if (ret == 0) {
-                    dev->state = DEV_STATE_PROBED;
-                    kinfo("[DRIVER] device '%s' bound to driver '%s'\n",
-                          dev->name, drv->name);
-                } else {
-                    dev->drv = NULL;
-                    kdebug("[DRIVER] probe '%s' -> '%s' failed: %d\n",
-                           dev->name, drv->name, ret);
-                }
+            int ret = driver_probe_bound_device(drv, dev);
+            if (ret == 0) {
+                kinfo("[DRIVER] device '%s' bound to driver '%s'\n",
+                      dev->name, drv->name);
+            } else {
+                kdebug("[DRIVER] probe '%s' -> '%s' failed: %d\n",
+                       dev->name, drv->name, ret);
             }
         }
     }
@@ -82,6 +133,7 @@ int driver_register(driver_t *drv) {
 
 int driver_unregister(driver_t *drv) {
     if (!drv) return -1;
+    uint64_t flags = spin_lock_irqsave(&g_driver_core_lock);
     for (int i = 0; i < g_driver_count; i++) {
         if (g_drivers[i] == drv) {
             for (int j = 0; j < g_device_count; j++) {
@@ -93,9 +145,11 @@ int driver_unregister(driver_t *drv) {
                 }
             }
             g_drivers[i] = g_drivers[--g_driver_count];
+            spin_unlock_irqrestore(&g_driver_core_lock, flags);
             return 0;
         }
     }
+    spin_unlock_irqrestore(&g_driver_core_lock, flags);
     return -1;
 }
 
@@ -105,11 +159,24 @@ int driver_unregister(driver_t *drv) {
  * After registration, scans all registered drivers for a match.
  * ============================================================ */
 int device_register(device_t *dev) {
-    if (!dev || g_device_count >= MAX_DEVICES)
+    if (!dev)
         return -1;
 
+    uint64_t flags = spin_lock_irqsave(&g_driver_core_lock);
+    if (g_device_count >= g_device_cap) {
+        int new_cap = g_device_cap * 2;
+        device_t **new_arr = krealloc(g_devices, sizeof(device_t *) * new_cap);
+        if (!new_arr) {
+            kerr("[DRIVER] device_register: capacity exhausted (%d)\n", g_device_cap);
+            spin_unlock_irqrestore(&g_driver_core_lock, flags);
+            return -ENOMEM;
+        }
+        g_devices = new_arr;
+        g_device_cap = new_cap;
+    }
     g_devices[g_device_count++] = dev;
     dev->state = DEV_STATE_UNINIT;
+    spin_unlock_irqrestore(&g_driver_core_lock, flags);
 
     kinfo("[DRIVER] registered device '%s' (bus=%s)\n",
           dev->name ? dev->name : "?",
@@ -118,17 +185,11 @@ int device_register(device_t *dev) {
     for (int i = 0; i < g_driver_count; i++) {
         driver_t *drv = g_drivers[i];
         if (dev->bus && dev->bus->match && dev->bus->match(dev, drv)) {
-            dev->drv = drv;
-            if (drv->probe) {
-                int ret = drv->probe(dev);
-                if (ret == 0) {
-                    dev->state = DEV_STATE_PROBED;
-                    kinfo("[DRIVER] device '%s' bound to driver '%s'\n",
-                          dev->name, drv->name);
-                    return 0;
-                } else {
-                    dev->drv = NULL;
-                }
+            int ret = driver_probe_bound_device(drv, dev);
+            if (ret == 0) {
+                kinfo("[DRIVER] device '%s' bound to driver '%s'\n",
+                      dev->name, drv->name);
+                return 0;
             }
         }
     }
@@ -137,6 +198,7 @@ int device_register(device_t *dev) {
 
 void device_unregister(device_t *dev) {
     if (!dev) return;
+    uint64_t flags = spin_lock_irqsave(&g_driver_core_lock);
     for (int i = 0; i < g_device_count; i++) {
         if (g_devices[i] == dev) {
             if (dev->drv && dev->drv->remove)
@@ -144,27 +206,45 @@ void device_unregister(device_t *dev) {
             dev->drv   = NULL;
             dev->state = DEV_STATE_REMOVED;
             g_devices[i] = g_devices[--g_device_count];
+            spin_unlock_irqrestore(&g_driver_core_lock, flags);
             return;
         }
     }
+    spin_unlock_irqrestore(&g_driver_core_lock, flags);
 }
 
 int bus_register(bus_type_t *bus) {
-    if (!bus || g_bus_count >= MAX_BUSES)
+    if (!bus)
         return -1;
+    uint64_t flags = spin_lock_irqsave(&g_driver_core_lock);
+    if (g_bus_count >= g_bus_cap) {
+        int new_cap = g_bus_cap * 2;
+        bus_type_t **new_arr = krealloc(g_buses, sizeof(bus_type_t *) * new_cap);
+        if (!new_arr) {
+            kerr("[DRIVER] bus_register: capacity exhausted (%d)\n", g_bus_cap);
+            spin_unlock_irqrestore(&g_driver_core_lock, flags);
+            return -ENOMEM;
+        }
+        g_buses = new_arr;
+        g_bus_cap = new_cap;
+    }
     g_buses[g_bus_count++] = bus;
+    spin_unlock_irqrestore(&g_driver_core_lock, flags);
     kinfo("[DRIVER] registered bus '%s'\n", bus->name);
     return 0;
 }
 
 void bus_unregister(bus_type_t *bus) {
     if (!bus) return;
+    uint64_t flags = spin_lock_irqsave(&g_driver_core_lock);
     for (int i = 0; i < g_bus_count; i++) {
         if (g_buses[i] == bus) {
             g_buses[i] = g_buses[--g_bus_count];
+            spin_unlock_irqrestore(&g_driver_core_lock, flags);
             return;
         }
     }
+    spin_unlock_irqrestore(&g_driver_core_lock, flags);
 }
 
 int bus_probe_device(device_t *dev) {
@@ -178,15 +258,8 @@ int bus_probe_device(device_t *dev) {
             match = 1;
         }
         if (match) {
-            dev->drv = drv;
-            if (drv->probe) {
-                int ret = drv->probe(dev);
-                if (ret == 0) {
-                    dev->state = DEV_STATE_PROBED;
-                    return 0;
-                }
-                dev->drv = NULL;
-            }
+            if (driver_probe_bound_device(drv, dev) == 0)
+                return 0;
         }
     }
     return -1;

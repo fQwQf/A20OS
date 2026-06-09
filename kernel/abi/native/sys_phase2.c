@@ -1757,7 +1757,8 @@ int64_t sys_a20_security_set_context(const a20_syscall_args_t *args)
     return A20_OK;
 }
 
-/* ===== Debug (0x0900) — stubs ===== */
+/* NATIVE_DEBUG_LIMITED_CONTRACT: Debug (0x0900) — limited compatibility
+ * implementations without full stop/resume/watchpoint behavior. */
 
 int64_t sys_a20_debug_attach(const a20_syscall_args_t *args)
 {

@@ -124,7 +124,7 @@ int proc_clone(uint64_t flags, uint64_t stack, int *ptid, uint64_t tls, int *cti
         trap_context_t *trap = (trap_context_t *)(ks_top - sizeof(trap_context_t));
         *trap = *parent->trap_ctx;
         TRAP_CTX_ARG0(trap) = 0;
-        TRAP_CTX_KScratch0(trap) = t->pgdir ? arch_make_satp(t->pgdir) : 0;
+        TRAP_CTX_KScratch0(trap) = t->pgdir ? arch_make_addr_space_token(t->pgdir) : 0;
         trap->kernel_tp = (uint64_t)(uintptr_t)t;
         arch_trap_ctx_set_kernel_stack(trap, ks_top);
         t->trap_ctx = trap;
@@ -137,7 +137,7 @@ int proc_clone(uint64_t flags, uint64_t stack, int *ptid, uint64_t tls, int *cti
         task_context_t *ctx = (task_context_t *)((uint64_t)trap - sizeof(task_context_t));
         ctx->ra = (uint64_t)user_trap_return;
         ctx->tp = (uint64_t)t;
-        TASK_CTX_PAGE_TABLE(ctx) = t->pgdir ? arch_make_satp(t->pgdir) : 0;
+        TASK_CTX_PAGE_TABLE(ctx) = t->pgdir ? arch_make_addr_space_token(t->pgdir) : 0;
         TASK_CTX_STATUS(ctx) = TRAP_CTX_STATUS(trap);
         t->kstack = (uint64_t)ctx;
     } else {

@@ -1391,7 +1391,7 @@ int vfs_mount(const char *dev, const char *path, const char *fstype, int flags, 
 
 int vfs_mount_bc(const char *path, const char *fstype, bcache_t *bc) {
     if (strcmp(fstype, "fat32") == 0 || strcmp(fstype, "vfat") == 0) {
-        if (!bc) { printf("[VFS] No bcache for FAT32 mount\n"); return -ENODEV; }
+        if (!bc) { kdebug("[VFS] No bcache for FAT32 mount\n"); return -ENODEV; }
 
         mount_t *mnt = vfs_mount_alloc();
         if (!mnt) return -ENOMEM;
@@ -1413,13 +1413,13 @@ int vfs_mount_bc(const char *path, const char *fstype, bcache_t *bc) {
         root->mnt = mnt;
         vnode_get(root);  /* mount holds a persistent reference */
 
-        printf("[VFS] Mounted FAT32 at %s\n", path);
+        kdebug("[VFS] Mounted FAT32 at %s\n", path);
         vfs_dcache_invalidate_all();
         return 0;
     }
 
     if (strcmp(fstype, "ext4") == 0) {
-        if (!bc) { printf("[VFS] No bcache for ext4 mount\n"); return -ENODEV; }
+        if (!bc) { kdebug("[VFS] No bcache for ext4 mount\n"); return -ENODEV; }
 
         mount_t *mnt = vfs_mount_alloc();
         if (!mnt) return -ENOMEM;
@@ -1441,12 +1441,12 @@ int vfs_mount_bc(const char *path, const char *fstype, bcache_t *bc) {
         root->mnt = mnt;
         vnode_get(root);  /* mount holds a persistent reference */
 
-        printf("[VFS] Mounted ext4 at %s\n", path);
+        kdebug("[VFS] Mounted ext4 at %s\n", path);
         vfs_dcache_invalidate_all();
         return 0;
     }
 
-    printf("[VFS] Unknown fstype: %s\n", fstype);
+    kdebug("[VFS] Unknown fstype: %s\n", fstype);
     return -EINVAL;
 }
 
@@ -1528,7 +1528,7 @@ void vfs_init(void) {
     file_table_init();
     vfs_mount_table_init();
     if (page_cache_init() < 0)
-        printf("[VFS] page cache init failed; continuing without it\n");
+        kdebug("[VFS] page cache init failed; continuing without it\n");
 
     {
         mount_t *mnt = vfs_mount_alloc();
@@ -1538,7 +1538,7 @@ void vfs_init(void) {
         strcpy(mnt->fstype, "rootfs");
         strcpy(mnt->opts, "rw");
         mnt->root = ramfs_mount(mnt);
-        printf("[VFS] Initialized (root=ramfs)\n");
+        kdebug("[VFS] Initialized (root=ramfs)\n");
     }
 
     vfs_mkdir("/dev", 0755);
@@ -1563,7 +1563,7 @@ void vfs_init(void) {
         shm_mnt->root = ramfs_mount_empty(shm_mnt);
         if (shm_mnt->root) {
             shm_mnt->root->mnt = shm_mnt;
-            printf("[VFS] Mounted ramfs at /dev/shm\n");
+            kdebug("[VFS] Mounted ramfs at /dev/shm\n");
         }
     }
 
@@ -1656,7 +1656,7 @@ void vfs_init(void) {
             strcpy(mnt->opts, "rw");
             mnt->root = procfs_root;
             procfs_root->mnt = mnt;
-            printf("[VFS] Mounted procfs at /proc\n");
+            kdebug("[VFS] Mounted procfs at /proc\n");
         }
     }
 
@@ -1674,7 +1674,7 @@ void vfs_init(void) {
             strcpy(mnt->opts, "rw");
             mnt->root = sysfs_root;
             sysfs_root->mnt = mnt;
-            printf("[VFS] Mounted sysfs at /sys\n");
+            kdebug("[VFS] Mounted sysfs at /sys\n");
         }
     }
 }

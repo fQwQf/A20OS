@@ -80,6 +80,40 @@ static void pcache_hash_remove(bcache_t *bc, pcache_entry_t *e) {
     e->hnext = NULL;
 }
 
+static void bcache_set_block_dirty_locked(bcache_t *bc, bcache_entry_t *e,
+                                          int dirty)
+{
+    if (!bc || !e)
+        return;
+    if (dirty) {
+        e->dirty_gen++;
+        if (!e->dirty)
+            bc->dirty_blocks++;
+        e->dirty = 1;
+    } else if (e->dirty) {
+        e->dirty = 0;
+        if (bc->dirty_blocks > 0)
+            bc->dirty_blocks--;
+    }
+}
+
+static void bcache_set_page_dirty_locked(bcache_t *bc, pcache_entry_t *e,
+                                         int dirty)
+{
+    if (!bc || !e)
+        return;
+    if (dirty) {
+        e->dirty_gen++;
+        if (!e->dirty)
+            bc->dirty_pages++;
+        e->dirty = 1;
+    } else if (e->dirty) {
+        e->dirty = 0;
+        if (bc->dirty_pages > 0)
+            bc->dirty_pages--;
+    }
+}
+
 // 创建块缓存（分配 8192 个 512 字节的块）
 bcache_t *bcache_create(block_dev_t *dev) {
     bcache_t *bc = (bcache_t *)kmalloc(sizeof(bcache_t));
@@ -237,8 +271,7 @@ bcache_entry_t *bcache_get(bcache_t *bc, uint64_t lba) {
             kdebug("[BCACHE] writeback error lba=%lu\n", (unsigned long)old_lba);
             flags = spin_lock_irqsave(&bc->lock);
             e->ref = 0;
-            e->dirty = 1;
-            e->dirty_gen++;
+            bcache_set_block_dirty_locked(bc, e, 1);
             e->valid = 1;
             bcache_hash_insert(bc, e);
             lru_insert_front(bc, e);
@@ -282,7 +315,7 @@ bcache_entry_t *bcache_get(bcache_t *bc, uint64_t lba) {
         return dup;
     }
     e->lba = lba;
-    e->dirty = 0;
+    bcache_set_block_dirty_locked(bc, e, 0);
     e->dirty_gen = 0;
     e->valid = 1;
 
@@ -310,14 +343,20 @@ void bcache_mark_dirty(bcache_entry_t *e) {
 void bcache_sync(bcache_t *bc) {
     if (!bc || !bc->dev) return;
     char tmp[BCACHE_BLOCK_SIZE];
-    char *page_tmp = (char *)kmalloc(PCACHE_PAGE_SIZE);
+    char *page_tmp = NULL;
 
     for (int i = 0; i < bc->page_pool_size; i++) {
         uint64_t flags = spin_lock_irqsave(&bc->lock);
+        if (bc->dirty_pages == 0) {
+            spin_unlock_irqrestore(&bc->lock, flags);
+            break;
+        }
         if (!bc->page_pool[i].valid || !bc->page_pool[i].dirty) {
             spin_unlock_irqrestore(&bc->lock, flags);
             continue;
         }
+        if (!page_tmp)
+            page_tmp = (char *)kmalloc(PCACHE_PAGE_SIZE);
         if (!page_tmp) {
             spin_unlock_irqrestore(&bc->lock, flags);
             break;
@@ -333,7 +372,7 @@ void bcache_sync(bcache_t *bc) {
             flags = spin_lock_irqsave(&bc->lock);
             if (bc->page_pool[i].valid && bc->page_pool[i].page_no == page_no &&
                 bc->page_pool[i].dirty_gen == dirty_gen)
-                bc->page_pool[i].dirty = 0;
+                bcache_set_page_dirty_locked(bc, &bc->page_pool[i], 0);
             spin_unlock_irqrestore(&bc->lock, flags);
         }
     }
@@ -342,6 +381,10 @@ void bcache_sync(bcache_t *bc) {
 
     for (int i = 0; i < bc->pool_size; i++) {
         uint64_t flags = spin_lock_irqsave(&bc->lock);
+        if (bc->dirty_blocks == 0) {
+            spin_unlock_irqrestore(&bc->lock, flags);
+            break;
+        }
         if (!bc->pool[i].valid || !bc->pool[i].dirty) {
             spin_unlock_irqrestore(&bc->lock, flags);
             continue;
@@ -355,7 +398,7 @@ void bcache_sync(bcache_t *bc) {
             flags = spin_lock_irqsave(&bc->lock);
             if (bc->pool[i].valid && bc->pool[i].lba == lba &&
                 bc->pool[i].dirty_gen == dirty_gen)
-                bc->pool[i].dirty = 0;  // 写回成功，清除脏标志
+                bcache_set_block_dirty_locked(bc, &bc->pool[i], 0);
             spin_unlock_irqrestore(&bc->lock, flags);
         }
     }
@@ -369,23 +412,7 @@ void bcache_invalidate(bcache_t *bc, uint64_t lba) {
     if (e) {
         bcache_hash_remove(bc, e);
         e->valid = 0;
-        e->dirty = 0;
-    }
-    spin_unlock_irqrestore(&bc->lock, flags);
-}
-
-static void bcache_invalidate_range(bcache_t *bc, uint64_t first_lba,
-                                    uint64_t lba_count) {
-    if (!bc || lba_count == 0)
-        return;
-    uint64_t flags = spin_lock_irqsave(&bc->lock);
-    for (uint64_t i = 0; i < lba_count; i++) {
-        bcache_entry_t *e = bcache_find(bc, first_lba + i);
-        if (e) {
-            bcache_hash_remove(bc, e);
-            e->valid = 0;
-            e->dirty = 0;
-        }
+        bcache_set_block_dirty_locked(bc, e, 0);
     }
     spin_unlock_irqrestore(&bc->lock, flags);
 }
@@ -404,8 +431,6 @@ static int pcache_flush_page(bcache_t *bc, pcache_entry_t *e) {
     uint64_t lba = (e->page_no * PCACHE_PAGE_SIZE) / BCACHE_BLOCK_SIZE;
     int r = bc->dev->write_sector(bc->dev, lba, e->data,
                                   PCACHE_PAGE_SIZE / BCACHE_BLOCK_SIZE);
-    if (r == 0)
-        e->dirty = 0;
     return r;
 }
 
@@ -450,8 +475,7 @@ static pcache_entry_t *pcache_get(bcache_t *bc, uint64_t page_no, int skip_read)
         flags = spin_lock_irqsave(&bc->lock);
         e->page_no = old_page;
         e->valid = 1;
-        e->dirty = 1;
-        e->dirty_gen++;
+        bcache_set_page_dirty_locked(bc, e, 1);
         e->ref = 0;
         pcache_hash_insert(bc, e);
         page_lru_insert_front(bc, e);
@@ -498,7 +522,7 @@ static pcache_entry_t *pcache_get(bcache_t *bc, uint64_t page_no, int skip_read)
     }
 
     e->page_no = page_no;
-    e->dirty = 0;
+    bcache_set_page_dirty_locked(bc, e, 0);
     e->dirty_gen = 0;
     e->valid = 1;
     pcache_hash_insert(bc, e);
@@ -565,11 +589,9 @@ int bcache_write_bytes(bcache_t *bc, uint64_t byte_off, const void *buf, size_t 
         pcache_entry_t *e = pcache_get(bc, page_no, full_page_overwrite);
         if (!e) return -1;
         memcpy(e->data + off, src, chunk);
-        __atomic_add_fetch(&e->dirty_gen, 1, __ATOMIC_RELEASE);
-        __atomic_store_n(&e->dirty, 1, __ATOMIC_RELEASE);
-        bcache_invalidate_range(bc,
-                                (page_no * PCACHE_PAGE_SIZE) / BCACHE_BLOCK_SIZE,
-                                PCACHE_PAGE_SIZE / BCACHE_BLOCK_SIZE);
+        uint64_t flags = spin_lock_irqsave(&bc->lock);
+        bcache_set_page_dirty_locked(bc, e, 1);
+        spin_unlock_irqrestore(&bc->lock, flags);
         pcache_release(e);
 
         src      += chunk;

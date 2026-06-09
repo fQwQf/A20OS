@@ -52,11 +52,12 @@
 #define PIPE_BUF_SIZE 4096
 #define FIRST_USER_FD 3
 
-/*
- * Compatibility aggregation for existing kernel code that still treats errno,
- * open flags, mmap flags and stat bits as shared constants. New ABI boundary
- * code should include abi/current.h or a specific ABI header directly.
- */
-#include "abi/current.h"
+/* Kernel-internal compatibility constants. */
+#include "core/errno.h"
+#include "core/fcntl.h"
+#include "core/mman.h"
+#include "core/poll.h"
+#include "core/signal_defs.h"
+#include "core/stat.h"
 
 #endif /* _CONSTS_H */

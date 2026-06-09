@@ -149,6 +149,8 @@ typedef struct bus_type {
 
 /* ============================================================
  * Core API — registration and discovery
+ * DRIVER_SMOKE_MATRIX: static gate covers virtio-blk, virtio-net, UART, PTY,
+ * loop, PCI, and virtio-mmio build/probe anchors before section 7 is complete.
  * ============================================================ */
 
 /* driver_core.c */

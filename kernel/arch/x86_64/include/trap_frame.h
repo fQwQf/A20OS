@@ -3,6 +3,7 @@
 
 #include "core/types.h"
 #include "page_table.h"
+#include "platform.h"
 
 /*
  * Trap context layout for x86_64.
@@ -137,6 +138,14 @@ static inline void arch_trap_ctx_set_reg(trap_context_t *ctx, int i, uint64_t v)
 #define TASK_CTX_PAGE_TABLE(ctx)   ((ctx)->cr3)
 #define TASK_CTX_STATUS(ctx)       ((ctx)->rflags)
 #define TASK_CTX_SET_SP(ctx, v)    do { (ctx)->rsp = (uint64_t)(v); } while (0)
+
+static inline uint64_t arch_task_kernel_status(void) {
+    return SSTATUS_SIE;
+}
+
+static inline uint64_t arch_user_initial_status(void) {
+    return SSTATUS_SPIE | SSTATUS_FS_CLEAN;
+}
 
 static inline void arch_trap_ctx_set_kernel_stack(trap_context_t *ctx, uint64_t ksp) {
     ctx->padding[0] = ksp;

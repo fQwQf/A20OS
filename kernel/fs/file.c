@@ -1,8 +1,9 @@
 #include "fs/file.h"
-#include "abi/linux/fcntl.h"
+#include "core/fcntl.h"
 
 #include "core/consts.h"
 #include "core/lock.h"
+#include "core/sync.h"
 #include "core/string.h"
 #include "mm/objcache.h"
 
@@ -79,8 +80,10 @@ void file_table_init(void)
 vfile_t *vfile_alloc(void)
 {
     vfile_t *vf = (vfile_t *)obj_cache_alloc_zero(&g_vfile_cache);
-    if (vf)
+    if (vf) {
+        mutex_init(&vf->offset_lock);
         vf->lease = F_UNLCK;
+    }
     return vf;
 }
 

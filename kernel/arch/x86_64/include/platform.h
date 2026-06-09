@@ -80,7 +80,7 @@ static inline int arch_ram_range(size_t idx, paddr_t *base, paddr_t *end) {
 #define LAPIC_LVT_MASKED (1 << 16)
 
 /* Timer frequency (TSC approx 1GHz on QEMU) */
-#define CLINT_TIMER_FREQ   1000000000UL
+#define ARCH_TIMER_FREQ    1000000000UL
 
 /* Page table constants (4-level) */
 #define ARCH_PT_LEVELS     4

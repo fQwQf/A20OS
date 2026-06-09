@@ -7,7 +7,7 @@
 #include "fs/devfs.h"
 #include "fs/fdtable.h"
 #include "fs/file.h"
-#include "abi/linux/errno.h"
+#include "core/errno.h"
 #include "mm/mm.h"
 #include "proc/proc.h"
 #include "proc/signal.h"

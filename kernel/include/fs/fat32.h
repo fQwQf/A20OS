@@ -2,6 +2,7 @@
 #define _FAT32_H
 
 #include "core/types.h"
+#include "core/sync.h"
 #include "fs/vfs.h"
 #include "fs/block_cache.h"
 
@@ -96,7 +97,9 @@ typedef struct fat32_sb {
     uint32_t sectors_per_cluster;
     uint32_t bytes_per_cluster;
     uint32_t total_clusters;
+    uint32_t next_free_cluster;
     bcache_t *bc;
+    mutex_t lock;
 } fat32_sb_t;
 
 /* ---- Per-file/dir handle ---- */

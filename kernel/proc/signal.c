@@ -18,7 +18,7 @@
  * can run.  This is needed because user-allocated stacks (e.g. via
  * malloc in clone02) lack VM_EXEC, and the sigreturn trampoline is
  * placed on the stack.  We upgrade PTE flags by unmapping and
- * remapping with PTE_X added.
+ * remapping with execute permissions added.
  */
 static void signal_make_page_exec(uint64_t addr) {
     task_t *t = proc_current();
@@ -27,7 +27,8 @@ static void signal_make_page_exec(uint64_t addr) {
     paddr_t pa = pt_translate(t->pgdir, page);
     if (!pa) return;
     pt_unmap(t->pgdir, page);
-    pt_map(t->pgdir, page, pa, arch_signal_tramp_pte_flags() | PTE_W | PTE_D);
+    pt_map(t->pgdir, page, pa,
+           mm_pte_flags_make_writable_dirty(arch_signal_tramp_pte_flags()));
     arch_tlb_flush_page(page);
 }
 

@@ -4,6 +4,7 @@
 #include "core/types.h"
 #include "core/consts.h"
 #include "core/refcount.h"
+#include "core/sync.h"
 
 /* ============================================================
  * VFS — Virtual Filesystem Switch
@@ -142,6 +143,7 @@ typedef struct vfile {
     vnode_t        *vnode;
     int             flags;
     size_t          offset;
+    mutex_t         offset_lock;
     refcount_t      ref_count;
     int             owner_type;
     int             owner_pid;

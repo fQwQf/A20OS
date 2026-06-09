@@ -16,16 +16,7 @@
 static int fetch_user_insn(task_t *task, uint64_t va, uint32_t *insn_out) {
     if (!task || !task->mm || !task->mm->pgdir || !insn_out)
         return 0;
-
-    uint64_t leaf_base = 0;
-    uint64_t *pte = pt_lookup_leaf(task->mm->pgdir, va, NULL, &leaf_base, NULL);
-    if (!pte || !(*pte & PTE_V))
-        return 0;
-
-    uint8_t *insn_kva = (uint8_t *)(arch_pte_addr(*pte) + PAGE_OFFSET +
-                                    (va - leaf_base));
-    *insn_out = *(uint32_t *)insn_kva;
-    return 1;
+    return mm_fetch_user_insn32(task->mm->pgdir, va, insn_out);
 }
 
 static int ktrap_diag_count = 0;
@@ -60,8 +51,10 @@ static void dump_fault_pte(task_t *task, uint64_t va) {
     if (!task || !task->mm || !task->mm->pgdir)
         return;
 
-    uint64_t *pte = pt_lookup_leaf(task->mm->pgdir, va, NULL, NULL, NULL);
-    kerr("  pte=%p value=0x%lx\n", (void *)pte, pte ? *pte : 0UL);
+    uintptr_t pte_slot = 0;
+    uint64_t pte_value = 0;
+    mm_debug_pte_value(task->mm->pgdir, va, &pte_slot, &pte_value);
+    kerr("  pte=%p value=0x%lx\n", (void *)pte_slot, pte_value);
     kerr("  mm: brk=0x%lx start_brk=0x%lx stack=[0x%lx,0x%lx)\n",
          (unsigned long)task->mm->brk, (unsigned long)task->mm->start_brk,
          (unsigned long)task->mm->stack_bottom, (unsigned long)task->mm->stack_top);
@@ -110,7 +103,7 @@ void trap_handler(trap_context_t *ctx) {
     uint64_t stval = arch_read_tval();
     uint64_t sepc = arch_read_epc();
 
-    TRAP_CTX_KScratch0(ctx) = arch_read_satp();
+    TRAP_CTX_KScratch0(ctx) = arch_read_addr_space_token();
     task_t *current = proc_current();
     if (current && current->pgdir)
         current->trap_ctx = ctx;
@@ -162,7 +155,7 @@ void trap_handler(trap_context_t *ctx) {
             printf("SIGSEGV: pid=%d code=%lu sepc=0x%lx stval=0x%lx abi=%d\n",
                   cur ? cur->pid : -1, (unsigned long)code,
                   (unsigned long)sepc, (unsigned long)stval,
-                  cur ? cur->abi_mode : -1);
+                  cur ? (int)cur->abi_mode : -1);
             if (have_user_insn)
                 kerr("  insn@sepc=0x%08x\n", user_insn);
             dump_trap_context(ctx);
@@ -183,17 +176,8 @@ void trap_handler(trap_context_t *ctx) {
                 return;
             }
             /* Case 2: just set D=1 in the existing PTE if it's writable */
-            if (cur && cur->mm && cur->mm->pgdir) {
-                uint64_t *pte = pt_lookup_leaf(cur->mm->pgdir, stval, NULL, NULL, NULL);
-                if (pte && (*pte & PTE_V) && (*pte & PTE_W)) {
-                    uint64_t flags = (*pte & (PTE_R | PTE_W | PTE_X | PTE_U |
-                                              PTE_G | PTE_A | PTE_MAT1 |
-                                              PTE_LEAF | PTE_COW)) | PTE_D;
-                    *pte = arch_pte_leaf(arch_pte_addr(*pte), flags);
-                    arch_tlb_flush_page(stval);
-                    return;
-                }
-            }
+            if (cur && cur->mm && mm_mark_leaf_dirty_if_writable(cur->mm->pgdir, stval) == 0)
+                return;
             kerr("User page modification fault: pid=%d sepc=0x%lx stval=0x%lx\n",
                  cur ? cur->pid : -1, sepc, stval);
             if (have_user_insn)
@@ -242,7 +226,7 @@ void trap_handler(trap_context_t *ctx) {
 }
 
 void kernel_trap_handler(trap_context_t *ctx) {
-    TRAP_CTX_KScratch0(ctx) = arch_read_satp();
+    TRAP_CTX_KScratch0(ctx) = arch_read_addr_space_token();
     uint64_t scause = arch_read_cause();
     uint64_t sepc = arch_read_epc();
     uint64_t stval = arch_read_tval();

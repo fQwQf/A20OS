@@ -53,6 +53,7 @@ static inline int arch_ram_range(size_t idx, paddr_t *base, paddr_t *end) {
 
 #define CLINT_BASE         0x00000000UL
 #define CLINT_TIMER_FREQ   100000000UL   /* 100 MHz — QEMU loongarch rdtime.d runs at 10ns period */
+#define ARCH_TIMER_FREQ    CLINT_TIMER_FREQ
 
 /* LoongArch ESTAT IS bit positions */
 #define IRQ_S_SOFT         0   /* SWI0 */
