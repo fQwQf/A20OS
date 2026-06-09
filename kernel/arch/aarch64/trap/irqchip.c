@@ -114,7 +114,7 @@ static void gic_init(void) {
 
 static void handle_timer_irq(int from_user) {
     timer_irq_tick();
-    timer_set_interval(TICKS_PER_SEC / 100);
+    timer_set_interval(proc_next_timer_interval(timer_get_ticks()));
     gic_eoi(IRQ_S_TIMER);
     if (!from_user)
         return;

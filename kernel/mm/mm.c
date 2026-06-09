@@ -132,6 +132,91 @@ uint64_t *pt_lookup_leaf(uint64_t *pgdir, vaddr_t va, int *level_out,
     return NULL;
 }
 
+int mm_query_leaf(uint64_t *pgdir, vaddr_t va, mm_leaf_info_t *out) {
+    if (!out)
+        return 0;
+    memset(out, 0, sizeof(*out));
+    if (!pgdir)
+        return 0;
+
+    int level = 0;
+    uint64_t base = 0;
+    size_t size = 0;
+    uint64_t *pte = pt_lookup_leaf(pgdir, va, &level, &base, &size);
+    if (!pte || !(*pte & PTE_V) || !arch_pte_is_leaf(*pte))
+        return 0;
+
+    out->level = level;
+    out->base = base;
+    out->size = size;
+    out->pa = arch_pte_addr(*pte) + (va - base);
+    out->flags = arch_pte_flags(*pte);
+    out->dirty = (*pte & PTE_D) != 0;
+    return 1;
+}
+
+uint64_t mm_pagemap_entry(uint64_t *pgdir, vaddr_t va) {
+    mm_leaf_info_t info;
+    if (!mm_query_leaf(pgdir, va, &info))
+        return 0;
+    uint64_t pfn = info.pa / PAGE_SIZE;
+    return (1ULL << 63) | (pfn & 0x7FFFFFFFFFFFFULL);
+}
+
+int mm_query_leaf_kaddr(uint64_t *pgdir, vaddr_t va, void **kaddr_out,
+                        size_t *avail_out) {
+    if (!kaddr_out || !avail_out)
+        return 0;
+    *kaddr_out = NULL;
+    *avail_out = 0;
+
+    mm_leaf_info_t info;
+    if (!mm_query_leaf(pgdir, va, &info))
+        return 0;
+    *kaddr_out = (void *)(info.pa + PAGE_OFFSET);
+    *avail_out = info.size - (va - info.base);
+    return 1;
+}
+
+int mm_fetch_user_insn32(uint64_t *pgdir, vaddr_t va, uint32_t *out) {
+    if (!out)
+        return 0;
+    void *kaddr = NULL;
+    size_t avail = 0;
+    if (!mm_query_leaf_kaddr(pgdir, va, &kaddr, &avail) || avail < sizeof(uint32_t))
+        return 0;
+    *out = *(uint32_t *)kaddr;
+    return 1;
+}
+
+int mm_mark_leaf_dirty_if_writable(uint64_t *pgdir, vaddr_t va) {
+    if (!pgdir)
+        return -1;
+    uint64_t *pte = pt_lookup_leaf(pgdir, va, NULL, NULL, NULL);
+    if (!pte || !(*pte & PTE_V) || !(*pte & PTE_W))
+        return -1;
+    uint64_t flags = arch_pte_flags(*pte) | PTE_D;
+    *pte = arch_pte_leaf(arch_pte_addr(*pte), flags);
+    arch_tlb_flush_page(va);
+    return 0;
+}
+
+int mm_debug_pte_value(uint64_t *pgdir, vaddr_t va, uintptr_t *slot_out,
+                       uint64_t *value_out) {
+    if (slot_out)
+        *slot_out = 0;
+    if (value_out)
+        *value_out = 0;
+    if (!pgdir)
+        return 0;
+    uint64_t *pte = pt_lookup_leaf(pgdir, va, NULL, NULL, NULL);
+    if (slot_out)
+        *slot_out = (uintptr_t)pte;
+    if (value_out)
+        *value_out = pte ? *pte : 0;
+    return pte != NULL;
+}
+
 // 建立虚拟地址到物理地址的映射
 int pt_map(uint64_t *pgdir, vaddr_t va, paddr_t pa, uint64_t flags) {
     uint64_t *pte = pt_walk(pgdir, va, 1);

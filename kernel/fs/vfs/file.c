@@ -94,7 +94,8 @@ int vfs_write_file(vfile_t *vf, const char *buf, size_t count)
                 page_cache_invalidate_uptodate_range(vf->vnode, write_start,
                                                       write_start + (size_t)r);
             else
-                page_cache_invalidate(vf->vnode);
+                page_cache_invalidate_uptodate_range(vf->vnode, write_start,
+                                                      write_start + (size_t)r);
             vfs_touch_mtime(vf->vnode);
         }
         return r;
@@ -130,19 +131,23 @@ int vfs_pread(int fd, char *buf, size_t count, uint64_t offset)
         return -ESPIPE;
     }
 
+    mutex_lock(&vf->offset_lock);
     long saved = vf->ops->lseek(vf, 0, SEEK_CUR);
     if (saved < 0) {
+        mutex_unlock(&vf->offset_lock);
         vfs_put_file_ref(fd, vf);
         return (int)saved;
     }
     long seek_r = vf->ops->lseek(vf, (long)offset, SEEK_SET);
     if (seek_r < 0) {
+        mutex_unlock(&vf->offset_lock);
         vfs_put_file_ref(fd, vf);
         return (int)seek_r;
     }
 
     int r = vfs_read_file(vf, buf, count);
     long restore_r = vf->ops->lseek(vf, saved, SEEK_SET);
+    mutex_unlock(&vf->offset_lock);
     vfs_put_file_ref(fd, vf);
     if (restore_r < 0 && r >= 0)
         return (int)restore_r;
@@ -154,6 +159,9 @@ long vfs_lseek(int fd, long offset, int whence)
     vfile_t *vf = vfs_get_file_ref(fd);
     long r = -EBADF;
     if (vf) {
+        int lock_offset = vf->vnode && vf->ops && vf->ops->lseek;
+        if (lock_offset)
+            mutex_lock(&vf->offset_lock);
         if (devfs_is_tty_vfile(vf) || vfs_is_pipe_vfile(vf)) {
             r = -ESPIPE;
         } else if (vf->vnode && (((vf->vnode->mode) & S_IFMT) == S_IFIFO)) {
@@ -163,6 +171,8 @@ long vfs_lseek(int fd, long offset, int whence)
         } else if (vf->ops && vf->ops->lseek) {
             r = vf->ops->lseek(vf, offset, whence);
         }
+        if (lock_offset)
+            mutex_unlock(&vf->offset_lock);
     }
     vfs_put_file_ref(fd, vf);
     return r;

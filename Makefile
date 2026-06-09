@@ -11,7 +11,17 @@ MODE ?= release
 BRINGUP ?= 0
 OPT ?= -O3
 NR_CPUS ?= 1
+ALLOW_UNVERIFIED_SMP ?= 0
 BOARD ?= qemu-virt-$(ARCH)
+
+ifneq ($(NR_CPUS),1)
+ifeq ($(ALLOW_UNVERIFIED_SMP),0)
+SMP_VALIDATION_GOALS := check-concurrency-foundation check-doc-test-gates check-final-definition
+ifeq ($(filter $(SMP_VALIDATION_GOALS),$(MAKECMDGOALS)),)
+$(error NR_CPUS=$(NR_CPUS) is blocked until scheduler/MM/VFS concurrency gates pass; set ALLOW_UNVERIFIED_SMP=1 only for explicit SMP bringup experiments)
+endif
+endif
+endif
 
 # ABI selection: linux, native, both (compile both ABI layers simultaneously)
 ifeq ($(filter $(ABI),linux native both),)
@@ -68,6 +78,7 @@ PROTOCOLS_LINES = \
 LIBGCC_S_riscv64 := /usr/riscv64-linux-gnu/lib/libgcc_s.so.1
 LIBGCC_S_loongarch64 := /usr/loongarch64-linux-gnu/lib/libgcc_s.so.1
 LIBGCC_S_aarch64 := /usr/lib/aarch64-linux-gnu/libgcc_s.so.1
+LIBGCC_S_x86_64 := /usr/lib/x86_64-linux-gnu/libgcc_s.so.1
 LIBGCC_S_ARCH := $(LIBGCC_S_$(ARCH))
 
 # Compiler and tools
@@ -75,8 +86,8 @@ ifeq ($(ARCH), riscv64)
     CROSS_PREFIX = riscv64-unknown-elf-
     ARCH_CFLAGS = -march=rv64imafdc_zicsr_zifencei -mabi=lp64 -mcmodel=medany
     ARCH_LDFLAGS =
-    QEMU = qemu-system-riscv64
-    QEMU_FLAGS = -machine virt -m 1G -nographic -smp $(NR_CPUS) -bios default -global virtio-mmio.force-legacy=false
+QEMU = qemu-system-riscv64
+QEMU_FLAGS = -machine virt -m 1G -nographic -smp $(NR_CPUS) -bios default -global virtio-mmio.force-legacy=false
 else ifeq ($(ARCH), loongarch64)
     CROSS_PREFIX = loongarch64-linux-gnu-
     ARCH_CFLAGS = -march=loongarch64 -mabi=lp64d -mcmodel=normal -fno-pic -static
@@ -89,7 +100,16 @@ else ifeq ($(ARCH), aarch64)
     ARCH_LDFLAGS = -static -no-pie
     QEMU = qemu-system-aarch64
     QEMU_FLAGS = -machine virt -cpu cortex-a57 -m 1G -nographic -smp $(NR_CPUS) -global virtio-mmio.force-legacy=false
+else ifeq ($(ARCH), x86_64)
+    CROSS_PREFIX = x86_64-linux-gnu-
+    ARCH_CFLAGS = -m64 -mcmodel=large -mno-red-zone -fno-pic -fno-pie -mgeneral-regs-only
+    ARCH_LDFLAGS = -static -no-pie
+    QEMU = qemu-system-x86_64
+    QEMU_FLAGS = -machine q35 -m 1G -nographic -smp $(NR_CPUS) -no-reboot
 endif
+
+MKFS_FAT ?= $(or $(shell command -v mkfs.fat 2>/dev/null),$(wildcard /usr/sbin/mkfs.fat),$(wildcard /sbin/mkfs.fat),mkfs.fat)
+MKFS_EXT4 ?= $(or $(shell command -v mkfs.ext4 2>/dev/null),$(wildcard /usr/sbin/mkfs.ext4),$(wildcard /sbin/mkfs.ext4),mkfs.ext4)
 
 # In bringup mode, boot kernel only (no fs image dependency).
 ifneq ($(BRINGUP),1)
@@ -112,6 +132,9 @@ endif
 else ifeq ($(ARCH), aarch64)
 QEMU_FLAGS += -drive file=$(FAT32_IMG),if=none,format=raw,id=x0 -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0
 QEMU_FLAGS += $(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4
+else ifeq ($(ARCH), x86_64)
+QEMU_FLAGS += -drive file=$(FAT32_IMG),if=none,format=raw,id=x0 -device virtio-blk-pci,drive=x0
+QEMU_FLAGS += $(NETDEV_USER) -device virtio-net-pci,netdev=net
 
 endif
 endif
@@ -169,47 +192,7 @@ KERNEL_SRC = $(wildcard $(KERNEL_DIR)/*.c) \
              $(shell find $(KERNEL_DIR)/arch/$(ARCH) -type f -name '*.c' | sort) \
              $(LWIP_SRC)
 
-LWIPDIR := $(KERNEL_DIR)/external/lwip/src
-LWIP_SRC = \
-    $(LWIPDIR)/core/init.c \
-    $(LWIPDIR)/core/def.c \
-    $(LWIPDIR)/core/dns.c \
-    $(LWIPDIR)/core/inet_chksum.c \
-    $(LWIPDIR)/core/ip.c \
-    $(LWIPDIR)/core/mem.c \
-    $(LWIPDIR)/core/memp.c \
-    $(LWIPDIR)/core/netif.c \
-    $(LWIPDIR)/core/pbuf.c \
-    $(LWIPDIR)/core/raw.c \
-    $(LWIPDIR)/core/stats.c \
-    $(LWIPDIR)/core/sys.c \
-    $(LWIPDIR)/core/altcp.c \
-    $(LWIPDIR)/core/altcp_alloc.c \
-    $(LWIPDIR)/core/altcp_tcp.c \
-    $(LWIPDIR)/core/tcp.c \
-    $(LWIPDIR)/core/tcp_in.c \
-    $(LWIPDIR)/core/tcp_out.c \
-    $(LWIPDIR)/core/timeouts.c \
-    $(LWIPDIR)/core/udp.c \
-    $(LWIPDIR)/core/ipv4/acd.c \
-    $(LWIPDIR)/core/ipv4/autoip.c \
-    $(LWIPDIR)/core/ipv4/dhcp.c \
-    $(LWIPDIR)/core/ipv4/etharp.c \
-    $(LWIPDIR)/core/ipv4/icmp.c \
-    $(LWIPDIR)/core/ipv4/igmp.c \
-    $(LWIPDIR)/core/ipv4/ip4.c \
-    $(LWIPDIR)/core/ipv4/ip4_addr.c \
-    $(LWIPDIR)/core/ipv4/ip4_frag.c \
-    $(LWIPDIR)/core/ipv6/dhcp6.c \
-    $(LWIPDIR)/core/ipv6/ethip6.c \
-    $(LWIPDIR)/core/ipv6/icmp6.c \
-    $(LWIPDIR)/core/ipv6/inet6.c \
-    $(LWIPDIR)/core/ipv6/ip6.c \
-    $(LWIPDIR)/core/ipv6/ip6_addr.c \
-    $(LWIPDIR)/core/ipv6/ip6_frag.c \
-    $(LWIPDIR)/core/ipv6/mld6.c \
-    $(LWIPDIR)/core/ipv6/nd6.c \
-    $(LWIPDIR)/netif/ethernet.c
+include $(KERNEL_DIR)/external/lwip/sources.mk
 
 # Object files
 KERNEL_OBJ = $(patsubst $(KERNEL_DIR)/%.c,$(BUILD_DIR)/%.o,$(KERNEL_SRC))
@@ -227,11 +210,11 @@ KERNEL_BIN = $(BUILD_DIR)/kernel.bin
 # Targets
 # ================================================================
 
-.PHONY: all clean run-riscv64 run-loongarch64 run-arm64 debug-riscv64 debug-loongarch64 debug-arm64 \
-        check-kernel-build check-user-build check-dev-build check-contest-build \
-        check-riscv64-bringup check-loongarch64-bringup check-aarch64-bringup \
-        check-riscv64-user check-loongarch64-user check-aarch64-user \
-        smoke-riscv64 smoke-loongarch64 smoke-aarch64 smoke-abi-linux smoke-proc-a20 \
+.PHONY: all clean run-riscv64 run-loongarch64 run-arm64 run-x86_64 debug-riscv64 debug-loongarch64 debug-arm64 debug-x86_64 \
+		check-kernel-build check-user-build check-dev-build check-contest-build check-build-matrix check-abi-smoke-gate check-doc-drift check-doc-test-gates check-final-definition check-concurrency-foundation check-mm-lock-model check-abi-boundary check-driver-core-model check-external-dependency-boundary \
+		check-riscv64-bringup check-loongarch64-bringup check-aarch64-bringup check-x86_64-bringup \
+		check-riscv64-user check-loongarch64-user check-aarch64-user check-x86_64-user \
+		smoke-riscv64 smoke-loongarch64 smoke-aarch64 smoke-x86_64 smoke-abi-linux smoke-proc-a20 smoke-proc-stress smoke-mm-stress smoke-vfs-stress smoke-sched-stress smoke-futex-stress \
         FORCE \
         user_apps fs_img kernel-only dev-build contest-rv contest-la \
         eval-dev-build-rv eval-dev-build-la \
@@ -255,7 +238,7 @@ all:
 	@echo "=== Competition build complete ==="
 	@echo "  kernel-rv  kernel-la  disk.img  disk-la.img"
 
-check-kernel-build: check-riscv64-bringup check-loongarch64-bringup check-aarch64-bringup
+check-kernel-build: check-riscv64-bringup check-loongarch64-bringup check-aarch64-bringup check-x86_64-bringup
 
 check-riscv64-bringup:
 	$(MAKE) ARCH=riscv64 ABI=$(ABI) BRINGUP=1 kernel-only
@@ -266,7 +249,51 @@ check-loongarch64-bringup:
 check-aarch64-bringup:
 	$(MAKE) ARCH=aarch64 ABI=$(ABI) BRINGUP=1 kernel-only
 
-check-user-build: check-riscv64-user check-loongarch64-user check-aarch64-user
+check-x86_64-bringup:
+	$(MAKE) ARCH=x86_64 ABI=$(ABI) BRINGUP=1 kernel-only
+
+check-user-build: check-riscv64-user check-loongarch64-user check-aarch64-user check-x86_64-user
+
+check-build-matrix: check-kernel-build check-user-build
+	@rg -q "BUILD_MATRIX_GATE_CONTRACT" docs/testing-gates.md
+	@echo "check-build-matrix: PASS"
+
+check-abi-smoke-gate:
+	@rg -q "ABI_SMOKE_GATE_CONTRACT" docs/testing-gates.md
+	@rg -q "syscall_smoke" Makefile
+	@rg -q "smoke-abi-linux" Makefile
+	@rg -q "native-minimal" Makefile
+	@rg -q "native-test" Makefile
+	@rg -q "test_liba20c" user/tests/test_liba20c.c Makefile
+	@echo "check-abi-smoke-gate: PASS"
+
+check-doc-drift:
+	@rg -q "DOC_DRIFT_KEYWORD_GATE" docs/testing-gates.md
+	@python3 scripts/gen_linux_syscall_coverage.py
+	@rg -q "stub" kernel/abi/linux/syscall_coverage.md kernel/abi/linux/compat_notes.md docs/testing-gates.md
+	@rg -q "partial" kernel/abi/linux/syscall_coverage.md kernel/abi/linux/compat_notes.md docs/testing-gates.md
+	@rg -q "Future" TODO.md docs/testing-gates.md kernel/abi/native/sys_core.c
+	@rg -q "not yet" docs/testing-gates.md kernel/abi/native/sys_phase2.c kernel/mm/fault.c
+	@! rg -q "for simplicity" docs kernel --glob '!docs/research/**' --glob '!docs/testing-gates.md' --glob '!kernel/external/**'
+	@echo "check-doc-drift: PASS"
+
+check-doc-test-gates: check-concurrency-foundation check-mm-lock-model check-io-progress-model check-vfs-abstraction check-abi-boundary check-driver-core-model check-external-dependency-boundary check-abi-smoke-gate check-doc-drift
+	@rg -q "DOCS_AS_FACT_CONTRACT" docs/testing-gates.md
+	@rg -q "TEST_FIRST_ARCHITECTURE_MATRIX" docs/testing-gates.md
+	@echo "check-doc-test-gates: PASS"
+
+check-final-definition: check-doc-test-gates
+	@rg -q "MM_LOCK_MODEL" kernel/include/mm/vm.h
+	@rg -q "TASK_STATE_MUTATION_CONTRACT" kernel/include/proc/proc.h
+	@rg -q "VFS_REFCOUNT_HELPER_CONTRACT" kernel/include/fs/vfs.h
+	@rg -q "NATIVE_HANDLE_CAPABILITY_CONSISTENCY_MATRIX" kernel/abi/native/handle_table.h
+	@rg -q "KERNEL_PROGRESS_SERVICE_CONTRACT" kernel/include/core/progress.h
+	@rg -q "VFS_OPEN_DISPATCH_CONTRACT" kernel/include/fs/vfs.h
+	@rg -q "LINUX_ABI_EXPLICIT_STUB_CONTRACT" kernel/abi/linux/syscall_table.def
+	@rg -q "NATIVE_DEBUG_LIMITED_CONTRACT" kernel/abi/native/sys_phase2.c
+	@rg -q "DRIVER_CORE_CONCURRENCY_MODEL" kernel/drivers/core/driver_core.c
+	@rg -q "EXTERNAL_USERLAND_UPGRADE_CHECKLIST" docs/external-dependencies.md
+	@echo "check-final-definition: PASS (SMP smoke tracked separately by TODO section 10)"
 
 check-riscv64-user:
 	$(MAKE) -C user ARCH=riscv64 OPT="$(OPT)"
@@ -277,11 +304,128 @@ check-loongarch64-user:
 check-aarch64-user:
 	$(MAKE) -C user ARCH=aarch64 OPT="$(OPT)"
 
+check-x86_64-user:
+	$(MAKE) -C user ARCH=x86_64 OPT="$(OPT)"
+
 check-dev-build:
 	$(MAKE) ARCH=riscv64 ABI=$(ABI) BRINGUP=0 dev-build
 
 check-contest-build:
 	$(MAKE) all
+
+check-concurrency-foundation:
+	@rg -q "SCHEDULER_CONCURRENCY_PREREQS" kernel/proc/sched.c
+	@rg -q "PER_CPU_CURRENT_VALIDATION" kernel/proc/current.c
+	@rg -q "TASK_STATE_MUTATION_CONTRACT" kernel/include/proc/proc.h
+	@rg -q "BLOCK_WAKE_PROTOCOL" kernel/include/core/sync.h
+	@$(MAKE) ARCH=$(ARCH) NR_CPUS=2 ALLOW_UNVERIFIED_SMP=1 BRINGUP=1 kernel-only >/dev/null
+	@echo "check-concurrency-foundation: PASS"
+
+check-mm-lock-model:
+	@rg -q "MM_LOCK_MODEL" kernel/include/mm/vm.h
+	@rg -q "MM_VMA_PTE_AUDIT" kernel/mm/vm.c
+	@rg -q "COW_FAULT_TLB_CONTRACT" kernel/mm/fault.c
+	@rg -q "DEMAND_FAULT_TLB_CONTRACT" kernel/mm/fault.c
+	@rg -q "MM_FORK_COW_REGRESSION_GUARD" kernel/mm/vm.c
+	@rg -q "FILE_MMAP_PAGE_CACHE_CONTRACT" kernel/include/fs/page_cache.h
+	@rg -q "OOM_RECLAIM_LIFETIME_CONTRACT" kernel/include/mm/oom.h
+	@rg -q "smoke-mm-stress" Makefile
+	@rg -q "MM_STRESS: PASS" user/cmds/mm_stress.c
+	@echo "check-mm-lock-model: PASS"
+
+check-io-progress-model:
+	@rg -q "KERNEL_PROGRESS_SERVICE_CONTRACT" kernel/include/core/progress.h
+	@rg -q "IO_PROGRESS_SERVICE" kernel/core/progress.c
+	@rg -q "kernel_progress_poll\(KERNEL_PROGRESS_SCHED\)" kernel/proc/sched.c
+	@rg -q "kernel_progress_poll\(KERNEL_PROGRESS_IDLE\)" kernel/proc/proc.c
+	@rg -q "VIRTIO_BLK_COMPLETION_MODEL" kernel/drivers/block/virtio_blk.c
+	@rg -q "LWIP_NO_THREAD_PROGRESS_CONTRACT" kernel/net/lwip_stack.c
+	@rg -q "g_lwip_lock -> virtio-net nonblocking" kernel/include/core/lock.h
+	@! rg -q "virtio_blk_poll_all|a20_lwip_poll" kernel/proc/sched.c kernel/proc/proc.c
+	@echo "check-io-progress-model: PASS"
+
+check-vfs-abstraction:
+	@rg -q "VFS_OPEN_DISPATCH_CONTRACT" kernel/include/fs/vfs.h
+	@rg -q "VFS_REFCOUNT_HELPER_CONTRACT" kernel/include/fs/vfs.h
+	@rg -q "VFS_DCACHE_MOUNT_VNODE_INVARIANT" kernel/include/fs/vfs.h
+	@rg -q "vfile_ref_init" kernel/fs/file.c kernel/include/fs/file.h kernel/include/fs/vfs.h
+	@rg -q "vfile_get" kernel/fs/file.c kernel/include/fs/file.h kernel/include/fs/vfs.h
+	@rg -q "vfile_put_ref_only" kernel/fs/file.c kernel/include/fs/file.h kernel/include/fs/vfs.h
+	@rg -q "\.open[[:space:]]*=" kernel/fs/ramfs.c kernel/fs/fat32.c kernel/fs/ext4.c kernel/fs/procfs.c kernel/fs/devfs.c kernel/fs/cgroupfs.c kernel/fs/sysfs.c
+	@rg -q "CGROUPFS_DOTDOT_PARENT_LOOKUP" kernel/fs/cgroupfs.c
+	@rg -q "VFS_CONCURRENCY_SMOKE_MATRIX" kernel/fs/vfs.c
+	@rg -q "smoke-vfs-stress" Makefile
+	@rg -q "VFS_STRESS: PASS" user/cmds/vfs_stress.c
+	@! rg -q "FS_TYPE_(FAT32|EXT4|RAMFS|PROCFS|DEVFS|CGROUP|SYSFS).*open|fat32_open_vnode|ext4_open_vnode|ramfs_open_vnode|procfs_open_vnode|devfs_open_vnode|cgroupfs_open_vnode|sysfs_open_vnode" kernel/fs/vfs.c
+	@! rg -q "refcount_(set|inc|dec_and_test)\(&[A-Za-z0-9_>\.-]*->ref_count" kernel/fs/ramfs.c kernel/fs/fat32.c kernel/fs/ext4.c kernel/fs/procfs.c kernel/fs/devfs.c kernel/fs/cgroupfs.c kernel/fs/sysfs.c kernel/fs/inotify.c kernel/fs/memfd.c kernel/fs/pipe.c
+	@! rg -q "for simplicity" kernel/fs/cgroupfs.c
+	@echo "check-vfs-abstraction: PASS"
+
+check-abi-boundary:
+	@python3 scripts/gen_linux_syscall_coverage.py
+	@rg -q "LINUX_ABI_BOUNDARY_CONTRACT" kernel/abi/linux/syscall_impl.h
+	@rg -q "LINUX_ABI_EXPLICIT_STUB_CONTRACT" kernel/abi/linux/syscall_table.def
+	@rg -q "LINUX_ABI_SCHED_STUB_BOUNDARY" kernel/abi/linux/sys_sched.c
+	@rg -q "smoke-sched-stress" Makefile
+	@rg -q "SCHED_STRESS: PASS" user/cmds/sched_stress.c
+	@rg -q "smoke-futex-stress" Makefile
+	@rg -q "FUTEX_STRESS: PASS" user/cmds/futex_stress.c
+	@rg -q "LINUX_ABI_BPF_STUB_BOUNDARY" kernel/abi/linux/sys_bpf.c
+	@rg -q "LINUX_ABI_NAMESPACE_STUB_BOUNDARY" kernel/abi/linux/sys_namespace.c
+	@rg -q "LINUX_ABI_CAPABILITY_STUB_BOUNDARY" kernel/abi/linux/sys_capability.c
+	@rg -q "ABI_CORE_API_CONTRACT" kernel/include/abi/core_api.h
+	@rg -q "abi_core_proc_exec" kernel/abi/linux/sys_namespace.c kernel/include/abi/core_api.h
+	@rg -q "abi_core_proc_mmap" kernel/abi/native/sys_phase2.c kernel/include/abi/core_api.h
+	@rg -q "NATIVE_DEBUG_LIMITED_CONTRACT" kernel/abi/native/sys_phase2.c
+	@rg -q "NATIVE_HANDLE_CAPABILITY_CONSISTENCY_MATRIX" kernel/abi/native/handle_table.h
+	@rg -q "NATIVE_HANDLE_CAPABILITY_TEST_CONTRACT" kernel/abi/native/handle_table.c
+	@rg -q "Debug 分区受限" docs/native-abi/00-overview.md
+	@! rg -q "无 stub 残留|all Phase 2\+ syscalls|Debug \(0x0900\) — stubs" docs/native-abi/00-overview.md kernel/abi/native/sys_core.c kernel/abi/native/sys_phase2.c
+	@echo "check-abi-boundary: PASS"
+
+check-driver-core-model:
+	@rg -q "DRIVER_CORE_CONCURRENCY_MODEL" kernel/drivers/core/driver_core.c
+	@rg -q "spin_lock_irqsave\(&g_driver_core_lock\)" kernel/drivers/core/driver_core.c
+	@rg -q "DRIVER_CORE_DYNAMIC_LIMITS" kernel/drivers/core/driver_core.c
+	@rg -q "DRIVER_IRQ_TABLE_FIXED_LIMIT" kernel/drivers/core/driver_hwapi.c
+	@rg -q "DRIVER_PROBE_FAILURE_CLEANUP" kernel/drivers/core/driver_core.c
+	@rg -q "dev->drv = NULL" kernel/drivers/core/driver_core.c
+	@rg -q "dev->state = DEV_STATE_UNINIT" kernel/drivers/core/driver_core.c
+	@rg -q "DRIVER_ENUMERATION_FAILURE_MODEL" kernel/drivers/bus/virtio_mmio_bus.c kernel/drivers/bus/pci_bus.c
+	@rg -q "DRIVER_IRQ_DMA_SEMANTICS" kernel/drivers/core/driver_hwapi.h
+	@rg -q "DRIVER_SMOKE_MATRIX" kernel/drivers/core/driver_core.h
+	@rg -q "virtio_blk_driver_probe" kernel/drivers/block/virtio_blk.c
+	@rg -q "virtio_net_driver_probe" kernel/drivers/net/virtio_net.c
+	@rg -q "uart_driver_probe" kernel/drivers/char/uart.c
+	@rg -q "pty_init" kernel/drivers/char/pty.c
+	@rg -q "loop_init" kernel/drivers/block/loop.c
+	@rg -q "pci_enumerate" kernel/drivers/bus/pci_bus.c
+	@rg -q "virtio_mmio_enumerate" kernel/drivers/bus/virtio_mmio_bus.c
+	@rg -q "kernel/drivers/" docs/driver-interface.md
+	@rg -q "kernel/platform/" docs/driver-interface.md
+	@! rg -q "kernel/driver/|kernel/drv/|kernel/board/|#include \"driver/" docs/driver-interface.md
+	@echo "check-driver-core-model: PASS"
+
+check-external-dependency-boundary:
+	@rg -q "include kernel/external/lwip/sources.mk" Makefile
+	@rg -q "EXTERNAL_LWIP_SOURCE_MANIFEST" docs/external-dependencies.md
+	@rg -q "LWIP_SRC" kernel/external/lwip/sources.mk
+	@rg -q "core/timeouts.c" kernel/external/lwip/sources.mk
+	@rg -q "EXTERNAL_LWIP_CONFIG_CONTRACT" docs/external-dependencies.md
+	@rg -q "NO_SYS=1" docs/external-dependencies.md
+	@rg -q "g_lwip_lock" docs/external-dependencies.md kernel/net/lwip_stack.c
+	@rg -q "a20_lwip_poll\(\)" docs/external-dependencies.md
+	@rg -q "kernel_progress_poll\(\)" docs/external-dependencies.md
+	@rg -q "EXTERNAL_QEMU_NET_DEFAULTS" docs/external-dependencies.md
+	@rg -q "10\.0\.2\.15" docs/external-dependencies.md kernel/net/lwip_stack.c
+	@rg -q "EXTERNAL_USERLAND_UPGRADE_CHECKLIST" docs/external-dependencies.md
+	@rg -q "syscall smoke, shell smoke, and coreutils smoke" docs/external-dependencies.md
+	@rg -q "EXTERNAL_STATIC_LINK_REBUILD_CONTRACT" docs/external-dependencies.md
+	@rg -q "user/build/\.build-id" docs/external-dependencies.md Makefile
+	@rg -q "EXTERNAL_TLSE_WGET_LIMITS" docs/external-dependencies.md
+	@rg -q "TLS 1\.3" docs/external-dependencies.md
+	@! rg -n "^LWIP_SRC[[:space:]]*=" Makefile
+	@echo "check-external-dependency-boundary: PASS"
 
 smoke-riscv64:
 	$(MAKE) ARCH=riscv64 ABI=$(ABI) BRINGUP=1 kernel-only
@@ -345,6 +489,26 @@ smoke-aarch64:
 		exit "$$status"; \
 	fi
 
+smoke-x86_64:
+	$(MAKE) ARCH=x86_64 ABI=$(ABI) BRINGUP=1 kernel-only
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/x86_64-bringup.log"; \
+	status=0; \
+	timeout $(SMOKE_TIMEOUT) qemu-system-x86_64 \
+		-machine q35 -m 1G -nographic -smp 1 -no-reboot \
+		-kernel .kernel-build/x86_64-linux-bringup/kernel.elf \
+		> "$$log" 2>&1 || status=$$?; \
+	if [ "$$status" -eq 124 ]; then \
+		echo "smoke-x86_64: timeout reached; log saved to $$log"; \
+	elif [ "$$status" -eq 0 ]; then \
+		echo "smoke-x86_64: QEMU exited normally; log saved to $$log"; \
+	else \
+		echo "smoke-x86_64: QEMU failed with status $$status; tail of $$log:"; \
+		tail -n 40 "$$log"; \
+		exit "$$status"; \
+	fi
+
 smoke-abi-linux:
 	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
@@ -395,6 +559,121 @@ smoke-proc-a20:
 		exit 1; \
 	fi
 
+smoke-proc-stress:
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/proc-stress-riscv64.log"; \
+	status=0; \
+	{ sleep $(SMOKE_INPUT_DELAY); printf 'proc_stress\npoweroff\n'; } | \
+	timeout $(SMOKE_TIMEOUT) qemu-system-riscv64 \
+		-machine virt -m 1G -nographic -smp 1 -bios default \
+		-global virtio-mmio.force-legacy=false \
+		-drive file=.kernel-build/riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
+		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		-kernel .kernel-build/riscv64-linux-dev/kernel.elf \
+		> "$$log" 2>&1 || status=$$?; \
+	if grep -q 'PROC_STRESS: PASS' "$$log"; then \
+		echo "smoke-proc-stress: PASS; log saved to $$log"; \
+	else \
+		echo "smoke-proc-stress: failed with status $$status; tail of $$log:"; \
+		tail -n 80 "$$log"; \
+		exit 1; \
+	fi
+
+smoke-mm-stress:
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/mm-stress-riscv64.log"; \
+	status=0; \
+	{ sleep $(SMOKE_INPUT_DELAY); printf 'mm_stress\npoweroff\n'; } | \
+	timeout $(SMOKE_TIMEOUT) qemu-system-riscv64 \
+		-machine virt -m 1G -nographic -smp 1 -bios default \
+		-global virtio-mmio.force-legacy=false \
+		-drive file=.kernel-build/riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
+		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		-kernel .kernel-build/riscv64-linux-dev/kernel.elf \
+		> "$$log" 2>&1 || status=$$?; \
+	if grep -q 'MM_STRESS: PASS' "$$log"; then \
+		echo "smoke-mm-stress: PASS; log saved to $$log"; \
+	else \
+		echo "smoke-mm-stress: failed with status $$status; tail of $$log:"; \
+		tail -n 80 "$$log"; \
+		exit 1; \
+	fi
+
+smoke-vfs-stress:
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/vfs-stress-riscv64.log"; \
+	status=0; \
+	{ sleep $(SMOKE_INPUT_DELAY); printf 'vfs_stress\npoweroff\n'; } | \
+	timeout $(SMOKE_TIMEOUT) qemu-system-riscv64 \
+		-machine virt -m 1G -nographic -smp 1 -bios default \
+		-global virtio-mmio.force-legacy=false \
+		-drive file=.kernel-build/riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
+		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		-kernel .kernel-build/riscv64-linux-dev/kernel.elf \
+		> "$$log" 2>&1 || status=$$?; \
+	if grep -q 'VFS_STRESS: PASS' "$$log"; then \
+		echo "smoke-vfs-stress: PASS; log saved to $$log"; \
+	else \
+		echo "smoke-vfs-stress: failed with status $$status; tail of $$log:"; \
+		tail -n 80 "$$log"; \
+		exit 1; \
+	fi
+
+smoke-sched-stress:
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/sched-stress-riscv64.log"; \
+	status=0; \
+	{ sleep $(SMOKE_INPUT_DELAY); printf 'sched_stress\npoweroff\n'; } | \
+	timeout $(SMOKE_TIMEOUT) qemu-system-riscv64 \
+		-machine virt -m 1G -nographic -smp 1 -bios default \
+		-global virtio-mmio.force-legacy=false \
+		-drive file=.kernel-build/riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
+		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		-kernel .kernel-build/riscv64-linux-dev/kernel.elf \
+		> "$$log" 2>&1 || status=$$?; \
+	if grep -q 'SCHED_STRESS: PASS' "$$log"; then \
+		echo "smoke-sched-stress: PASS; log saved to $$log"; \
+	else \
+		echo "smoke-sched-stress: failed with status $$status; tail of $$log:"; \
+		tail -n 80 "$$log"; \
+		exit 1; \
+	fi
+
+smoke-futex-stress:
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/futex-stress-riscv64.log"; \
+	status=0; \
+	{ sleep $(SMOKE_INPUT_DELAY); printf 'futex_stress\npoweroff\n'; } | \
+	timeout $(SMOKE_TIMEOUT) qemu-system-riscv64 \
+		-machine virt -m 1G -nographic -smp 1 -bios default \
+		-global virtio-mmio.force-legacy=false \
+		-drive file=.kernel-build/riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
+		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		-kernel .kernel-build/riscv64-linux-dev/kernel.elf \
+		> "$$log" 2>&1 || status=$$?; \
+	if grep -q 'FUTEX_STRESS: PASS' "$$log"; then \
+		echo "smoke-futex-stress: PASS; log saved to $$log"; \
+	else \
+		echo "smoke-futex-stress: failed with status $$status; tail of $$log:"; \
+		tail -n 80 "$$log"; \
+		exit 1; \
+	fi
+
 contest-rv:
 	@echo "--- Building RISC-V 64 (contest) ---"
 	$(MAKE) ARCH=riscv64 _contest_build KERNEL_OUT=kernel-rv DISK_OUT=disk.img
@@ -420,7 +699,7 @@ endif
 
 _contest_disk: $(USER_BUILD_STAMP)
 	rm -f $(DISK_OUT)
-	mkfs.fat -C -F 32 $(DISK_OUT) 131072
+	$(MKFS_FAT) -C -F 32 $(DISK_OUT) 131072
 	@set -e; \
 	for f in user/build/*; do \
 		[ -f "$$f" ] || continue; \
@@ -488,7 +767,7 @@ else ifeq ($(ARCH), loongarch64)
 	$(MAKE) native-test-la 2>/dev/null || true
 endif
 	dd if=/dev/zero of=$(FAT32_IMG) bs=1M count=$(FAT32_IMAGE_MB)
-	mkfs.fat -F 32 $(FAT32_IMG)
+	$(MKFS_FAT) -F 32 $(FAT32_IMG)
 	@set -e; \
 	for f in user/build/*; do \
 		[ -f "$$f" ] || continue; \
@@ -529,7 +808,7 @@ $(EXT4_IMG): $(USER_BUILD_STAMP)
 	@printf 'ID=A20OS\nNAME="A20OS"\nPRETTY_NAME="A20OS"\nVERSION="0.2"\nVERSION_ID="0.2"\n' > $(EXT4_STAGING_DIR)/etc/os-release
 	@mkdir -p $(BUILD_DIR)
 	dd if=/dev/zero of=$(EXT4_IMG) bs=1M count=$(EXT4_IMAGE_MB)
-	mkfs.ext4 -F -O ^has_journal,extent,huge_file,flex_bg,uninit_bg,dir_index -d $(EXT4_STAGING_DIR) $(EXT4_IMG)
+	$(MKFS_EXT4) -F -O ^has_journal,extent,huge_file,flex_bg,uninit_bg,dir_index -d $(EXT4_STAGING_DIR) $(EXT4_IMG)
 	@rm -rf $(EXT4_STAGING_DIR)
 
 ext4_img: $(USER_BUILD_STAMP) ext4_img_only
@@ -576,6 +855,9 @@ run-loongarch64:
 run-arm64:
 	$(MAKE) ARCH=aarch64 BRINGUP=$(BRINGUP) _run_impl
 
+run-x86_64:
+	$(MAKE) ARCH=x86_64 BRINGUP=$(BRINGUP) _run_impl
+
 _run_impl:
 ifeq ($(BRINGUP),1)
 	$(MAKE) ARCH=$(ARCH) BRINGUP=1 kernel-only
@@ -596,6 +878,9 @@ debug-loongarch64:
 
 debug-arm64:
 	$(MAKE) ARCH=aarch64 BRINGUP=$(BRINGUP) _debug_impl
+
+debug-x86_64:
+	$(MAKE) ARCH=x86_64 BRINGUP=$(BRINGUP) _debug_impl
 
 _debug_impl:
 ifeq ($(BRINGUP),1)
@@ -677,7 +962,7 @@ extra-img: extra-user-apps
 	done
 	@mkdir -p $(BUILD_DIR)
 	dd if=/dev/zero of=$(EXTRA_IMG) bs=1M count=$(EXTRA_IMAGE_MB) 2>/dev/null
-	mkfs.ext4 -F -O ^has_journal,extent,huge_file,flex_bg,uninit_bg,dir_index \
+	$(MKFS_EXT4) -F -O ^has_journal,extent,huge_file,flex_bg,uninit_bg,dir_index \
 		-d $(EXTRA_STAGING_DIR) $(EXTRA_IMG)
 	@rm -rf $(EXTRA_STAGING_DIR)
 	@echo "Extra image: $(EXTRA_IMG) ($(EXTRA_IMAGE_MB)MB)"
@@ -689,6 +974,8 @@ else ifeq ($(ARCH), loongarch64)
 EXTRA_QEMU_BLK = -drive file=$(EXTRA_IMG),if=none,format=raw,id=xextra -device virtio-blk-pci,drive=xextra
 else ifeq ($(ARCH), aarch64)
 EXTRA_QEMU_BLK = -drive file=$(EXTRA_IMG),if=none,format=raw,id=xextra -device virtio-blk-device,drive=xextra,bus=virtio-mmio-bus.5
+else ifeq ($(ARCH), x86_64)
+EXTRA_QEMU_BLK = -drive file=$(EXTRA_IMG),if=none,format=raw,id=xextra -device virtio-blk-pci,drive=xextra
 endif
 
 run-riscv64-extra:
@@ -699,6 +986,9 @@ run-loongarch64-extra:
 
 run-arm64-extra:
 	$(MAKE) ARCH=aarch64 BRINGUP=0 _run_extra_impl
+
+run-x86_64-extra:
+	$(MAKE) ARCH=x86_64 BRINGUP=0 _run_extra_impl
 
 _run_extra_impl:
 	$(MAKE) ARCH=$(ARCH) BRINGUP=0 dev-build

@@ -30,7 +30,7 @@ static int futex_timeout_ticks(void *timeout, int absolute, int realtime,
 
     if (!absolute) {
         uint64_t ticks = (uint64_t)ts[0] * TICKS_PER_SEC +
-                         (uint64_t)ts[1] * TICKS_PER_SEC / 1000000000ULL;
+                         ((uint64_t)ts[1] * TICKS_PER_SEC + 999999999ULL) / 1000000000ULL;
         *ticks_out = ticks ? ticks : 1;
         return 0;
     }
@@ -50,7 +50,8 @@ static int futex_timeout_ticks(void *timeout, int absolute, int realtime,
         sec--;
         nsec = 1000000000ULL + (uint64_t)ts[1] - now_ts[1];
     }
-    uint64_t ticks = sec * TICKS_PER_SEC + nsec * TICKS_PER_SEC / 1000000000ULL;
+    uint64_t ticks = sec * TICKS_PER_SEC +
+                     (nsec * TICKS_PER_SEC + 999999999ULL) / 1000000000ULL;
     *ticks_out = ticks ? ticks : 1;
     return 0;
 }
@@ -189,6 +190,7 @@ static int futex_wait_on(int *uaddr, int expected, void *timeout, uint32_t bitse
 
 static int futex_wake_on(int *uaddr, int nr, uint32_t bitset)
 {
+    task_t *cur = proc_current();
     if (!uaddr) return -EFAULT;
     if (bitset == 0) return -EINVAL;
     if (nr < 0) return -EINVAL;
@@ -196,7 +198,6 @@ static int futex_wake_on(int *uaddr, int nr, uint32_t bitset)
     int woke = 0;
     uintptr_t vkey = (uintptr_t)uaddr;
     uintptr_t pkey = futex_phys_key(uaddr);
-    task_t *cur = proc_current();
     mm_struct_t *mm = cur ? cur->mm : NULL;
     task_t *wake_list[FUTEX_WAITERS_MAX];
     int wake_count = 0;
