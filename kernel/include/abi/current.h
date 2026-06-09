@@ -2,17 +2,10 @@
 #define _ABI_CURRENT_H
 
 /*
- * Linux ABI constants are always included — they are used by kernel-internal
- * code (VFS flags, trap signals, errno) regardless of which userspace ABI is
- * active.  The native ABI headers below define the *userspace* syscall
- * interface, not the kernel's internal representation.
+ * This header selects userspace ABI definitions only. Kernel-internal
+ * compatibility constants live under core/ so common subsystems do not depend
+ * on the active userspace ABI bundle.
  */
-#include "abi/linux/errno.h"
-#include "abi/linux/fcntl.h"
-#include "abi/linux/mman.h"
-#include "abi/linux/poll.h"
-#include "abi/linux/signal.h"
-#include "abi/linux/stat.h"
 
 #if defined(CONFIG_ABI_LINUX) || defined(CONFIG_ABI_BOTH)
 # include "abi/linux/futex.h"

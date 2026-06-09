@@ -6,6 +6,10 @@
 
 #define SYSCALL_PROFILE_MAX 1024
 
+#ifndef CONFIG_SYSCALL_PROFILE
+#define CONFIG_SYSCALL_PROFILE 0
+#endif
+
 typedef struct syscall_prof {
     uint64_t count;
     uint64_t cycles;

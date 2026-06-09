@@ -24,6 +24,7 @@ struct a20_vmo;
 #define VM_FILE      (1UL << 13)
 #define VM_VMO       (1UL << 14)
 #define VM_LOCKED    (1UL << 15)
+#define VM_SYSV_SHM  (1UL << 16)
 
 typedef struct vm_area {
     uint64_t        start;
@@ -31,6 +32,7 @@ typedef struct vm_area {
     uint64_t        vm_flags;
     uint64_t        pte_flags;
     int             file_fd;
+    int             sysv_shmid;
     uint64_t        file_offset;
     struct a20_vmo *vmo;
     uint64_t        vmo_offset;
@@ -82,6 +84,14 @@ int      mm_mremap(mm_struct_t *mm, uint64_t old_addr, size_t old_size,
                    uint64_t *out_addr);
 int      mm_demote_huge_page(mm_struct_t *mm, uint64_t addr);
 
-uint64_t prot_to_pte(int prot);
+uint64_t mm_prot_to_pte_flags(int prot);
+int      mm_pte_flags_to_prot(uint64_t pte_flags);
+uint64_t mm_vm_flags_to_pte_flags(uint64_t vm_flags);
+uint64_t mm_pte_flags_to_vm_flags(uint64_t pte_flags);
+uint64_t mm_user_stack_pte_flags(void);
+uint64_t mm_user_brk_pte_flags(void);
+int      mm_pte_flags_allow_access(uint64_t pte_flags);
+uint64_t mm_pte_flags_apply_prot(uint64_t old_flags, uint64_t prot_flags);
+uint64_t mm_pte_flags_make_writable_dirty(uint64_t pte_flags);
 
 #endif

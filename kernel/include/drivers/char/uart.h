@@ -5,6 +5,7 @@
 
 void uart_init(void);
 void uart_putc(char c);
+void uart_receive_char(char c);
 int  uart_getc(void);
 int  uart_try_getc(void);
 int  uart_has_input(void);
