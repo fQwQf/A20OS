@@ -111,6 +111,8 @@ static inline uint64_t arch_read_satp(void) {
 static inline void arch_write_satp(uint64_t v) {
     __asm__ __volatile("csrwr %0, 0x19" :: "r"(v));
 }
+static inline uint64_t arch_read_addr_space_token(void) { return arch_read_satp(); }
+static inline void arch_write_addr_space_token(uint64_t v) { arch_write_satp(v); }
 
 /* PRMD for interrupt status */
 static inline uint64_t arch_read_sstatus(void) {

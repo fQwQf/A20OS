@@ -13,6 +13,10 @@
 
 static volatile int oom_in_progress;
 static uint64_t oom_last_kill_tick;
+static unsigned long oom_kill_count;
+static int oom_last_victim_pid;
+static int oom_last_victim_score;
+static unsigned long oom_free_pages_at_kill;
 
 static int oom_pick_victim_pid(void)
 {
@@ -66,6 +70,10 @@ int oom_try_reclaim(void)
     }
 
     oom_last_kill_tick = now;
+    oom_kill_count++;
+    oom_last_victim_pid = victim->pid;
+    oom_last_victim_score = victim->policy.oom_score_adj;
+    oom_free_pages_at_kill = pfa_free_count();
     kerr("[OOM] Killing pid=%d name=%s oom_score_adj=%d free_frames=%lu\n",
          victim->pid, victim->name, victim->policy.oom_score_adj,
          (unsigned long)pfa_free_count());
@@ -74,4 +82,17 @@ int oom_try_reclaim(void)
 
     __atomic_store_n(&oom_in_progress, 0, __ATOMIC_RELAXED);
     return 1;
+}
+
+void oom_get_stats(oom_stats_t *out)
+{
+    if (!out)
+        return;
+    out->kills = oom_kill_count;
+    out->last_kill_tick = oom_last_kill_tick;
+    out->last_victim_pid = oom_last_victim_pid;
+    out->last_victim_score = oom_last_victim_score;
+    out->free_pages_at_kill = oom_free_pages_at_kill;
+    out->free_pages_now = pfa_free_count();
+    out->in_progress = __atomic_load_n(&oom_in_progress, __ATOMIC_RELAXED);
 }

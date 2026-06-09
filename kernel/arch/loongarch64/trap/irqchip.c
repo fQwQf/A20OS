@@ -4,22 +4,13 @@
 #include "proc/proc.h"
 #include "core/timer.h"
 #include "drivers/char/uart.h"
-#include "core/stdio.h"
 
 extern void trap_entry_la64(void);
-
-static int timer_tick_count = 0;
 
 static void handle_timer_irq(int from_user) {
     __asm__ __volatile__("csrwr %0, 0x44" :: "r"(1UL) : "memory");
     timer_irq_tick();
-    timer_set_interval(TICKS_PER_SEC / 100);
-    timer_tick_count++;
-    if (timer_tick_count % 100 == 0) {
-        task_t *cur = proc_current();
-        printf("[TIMER] tick #%d from_user=%d pid=%d\n",
-               timer_tick_count, from_user, cur ? cur->pid : -1);
-    }
+    timer_set_interval(proc_next_timer_interval(timer_get_ticks()));
     if (!from_user) return;
 
     task_t *cur = proc_current();

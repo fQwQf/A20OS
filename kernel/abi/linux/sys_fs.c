@@ -1,10 +1,11 @@
 #include "syscall_impl.h"
 #include "abi/linux/ioctl.h"
+#include "core/sync.h"
 #include "drivers/char/uart.h"
 #include "fs/vfs/file.h"
 #include "proc/proc_internal.h"
 
-#define LINUX_POLL_WAIT_TICKS MS_TO_TICKS(20)
+#define LINUX_POLL_WAIT_TICKS (MS_TO_TICKS(1) ? MS_TO_TICKS(1) : 1)
 
 static uint64_t linux_poll_wait_quantum(void)
 {
@@ -122,6 +123,11 @@ static int64_t write_from_user(vfile_t *vf, const char *buf, size_t count)
     return total;
 }
 
+static int linux_vfile_uses_shared_offset(vfile_t *vf)
+{
+    return vf && vf->vnode && vf->ops && vf->ops->lseek;
+}
+
 static int o_direct_check(vfile_t *vf, const char *buf, size_t count)
 {
     if (!vf || !(vf->flags & O_DIRECT))
@@ -148,7 +154,12 @@ int64_t sys_read(int fd, char *buf, size_t count) {
     vfile_t *vf = vfs_get_file_ref((int)gfd);
     int ar = o_direct_check(vf, buf, count);
     if (ar < 0) { vfs_put_file_ref((int)gfd, vf); return ar; }
+    int lock_offset = linux_vfile_uses_shared_offset(vf);
+    if (lock_offset)
+        mutex_lock(&vf->offset_lock);
     int64_t r = read_into_user(vf, buf, count);
+    if (lock_offset)
+        mutex_unlock(&vf->offset_lock);
     vfs_put_file_ref((int)gfd, vf);
     return r;
 }
@@ -161,7 +172,12 @@ int64_t sys_write(int fd, const char *buf, size_t count) {
     vfile_t *vf = vfs_get_file_ref((int)gfd);
     int ar = o_direct_check(vf, buf, count);
     if (ar < 0) { vfs_put_file_ref((int)gfd, vf); return ar; }
+    int lock_offset = linux_vfile_uses_shared_offset(vf);
+    if (lock_offset)
+        mutex_lock(&vf->offset_lock);
     int64_t r = write_from_user(vf, buf, count);
+    if (lock_offset)
+        mutex_unlock(&vf->offset_lock);
     vfs_put_file_ref((int)gfd, vf);
     return r;
 }
@@ -169,13 +185,19 @@ int64_t sys_write(int fd, const char *buf, size_t count) {
 int64_t sys_pread64(int fd, char *buf, size_t count, long off) {
     if (!buf) return -EFAULT;
     if (count == 0) return 0;
+    if (off < 0) return -EINVAL;
     int64_t gfd = fdtable_get_current(fd);
     if (gfd < 0) return gfd;
-    vfile_t *vf_check = vfs_get_file_ref((int)gfd);
-    if (vf_check && (vf_check->flags & O_DIRECT)) {
+    vfile_t *vf = vfs_get_file_ref((int)gfd);
+    if (!vf) return -EBADF;
+    if (!vf->ops || !vf->ops->lseek) {
+        vfs_put_file_ref((int)gfd, vf);
+        return -ESPIPE;
+    }
+    if (vf && (vf->flags & O_DIRECT)) {
         int is_reg_or_blk = 1;
-        if (vf_check->vnode) {
-            uint32_t mode = vf_check->vnode->mode;
+        if (vf->vnode) {
+            uint32_t mode = vf->vnode->mode;
             if (!((mode & S_IFMT) == S_IFREG || (mode & S_IFMT) == S_IFBLK)) {
                 is_reg_or_blk = 0;
             }
@@ -184,33 +206,50 @@ int64_t sys_pread64(int fd, char *buf, size_t count, long off) {
             int align = 512;
             if ((uintptr_t)buf & (align - 1) || (count & (align - 1)) ||
                 (off < 0) || ((long)off & (align - 1))) {
-                vfs_put_file_ref((int)gfd, vf_check);
+                vfs_put_file_ref((int)gfd, vf);
                 return -EINVAL;
             }
         }
     }
-    vfs_put_file_ref((int)gfd, vf_check);
-    long curoff = vfs_lseek(gfd, 0, SEEK_CUR);
-    if (curoff < 0) return curoff;
-    long sr = vfs_lseek(gfd, off, SEEK_SET);
-    if (sr < 0) return sr;
-    vfile_t *vf = vfs_get_file_ref((int)gfd);
+
+    mutex_lock(&vf->offset_lock);
+    long saved = vf->ops->lseek(vf, 0, SEEK_CUR);
+    if (saved < 0) {
+        mutex_unlock(&vf->offset_lock);
+        vfs_put_file_ref((int)gfd, vf);
+        return saved;
+    }
+    long seek_r = vf->ops->lseek(vf, off, SEEK_SET);
+    if (seek_r < 0) {
+        mutex_unlock(&vf->offset_lock);
+        vfs_put_file_ref((int)gfd, vf);
+        return seek_r;
+    }
     int64_t total = read_into_user(vf, buf, count);
+    long restore_r = vf->ops->lseek(vf, saved, SEEK_SET);
+    mutex_unlock(&vf->offset_lock);
     vfs_put_file_ref((int)gfd, vf);
-    vfs_lseek(gfd, curoff, SEEK_SET);
+    if (restore_r < 0 && total >= 0)
+        return restore_r;
     return total;
 }
 
 int64_t sys_pwrite64(int fd, char *buf, size_t count, long off) {
     if (!buf) return -EFAULT;
     if (count == 0) return 0;
+    if (off < 0) return -EINVAL;
     int64_t gfd = fdtable_get_current(fd);
     if (gfd < 0) return gfd;
-    vfile_t *vf_check = vfs_get_file_ref((int)gfd);
-    if (vf_check && (vf_check->flags & O_DIRECT)) {
+    vfile_t *vf = vfs_get_file_ref((int)gfd);
+    if (!vf) return -EBADF;
+    if (!vf->ops || !vf->ops->lseek) {
+        vfs_put_file_ref((int)gfd, vf);
+        return -ESPIPE;
+    }
+    if (vf && (vf->flags & O_DIRECT)) {
         int is_reg_or_blk = 1;
-        if (vf_check->vnode) {
-            uint32_t mode = vf_check->vnode->mode;
+        if (vf->vnode) {
+            uint32_t mode = vf->vnode->mode;
             if (!((mode & S_IFMT) == S_IFREG || (mode & S_IFMT) == S_IFBLK)) {
                 is_reg_or_blk = 0;
             }
@@ -219,20 +258,34 @@ int64_t sys_pwrite64(int fd, char *buf, size_t count, long off) {
             int align = 512;
             if ((uintptr_t)buf & (align - 1) || (count & (align - 1)) ||
                 (off < 0) || ((long)off & (align - 1))) {
-                vfs_put_file_ref((int)gfd, vf_check);
+                vfs_put_file_ref((int)gfd, vf);
                 return -EINVAL;
             }
         }
     }
-    vfs_put_file_ref((int)gfd, vf_check);
-    long curoff = vfs_lseek(gfd, 0, SEEK_CUR);
-    if (curoff < 0) return curoff;
-    long sr = vfs_lseek(gfd, off, SEEK_SET);
-    if (sr < 0) return sr;
-    vfile_t *vf = vfs_get_file_ref((int)gfd);
+
+    mutex_lock(&vf->offset_lock);
+    long saved = vf->ops->lseek(vf, 0, SEEK_CUR);
+    if (saved < 0) {
+        mutex_unlock(&vf->offset_lock);
+        vfs_put_file_ref((int)gfd, vf);
+        return saved;
+    }
+    long seek_r = vf->ops->lseek(vf, off, SEEK_SET);
+    if (seek_r < 0) {
+        mutex_unlock(&vf->offset_lock);
+        vfs_put_file_ref((int)gfd, vf);
+        return seek_r;
+    }
+    int saved_flags = vf->flags;
+    vf->flags &= ~O_APPEND;
     int64_t total = write_from_user(vf, buf, count);
+    vf->flags = saved_flags;
+    long restore_r = vf->ops->lseek(vf, saved, SEEK_SET);
+    mutex_unlock(&vf->offset_lock);
     vfs_put_file_ref((int)gfd, vf);
-    vfs_lseek(gfd, curoff, SEEK_SET);
+    if (restore_r < 0 && total >= 0)
+        return restore_r;
     return total;
 }
 
@@ -242,6 +295,9 @@ int64_t sys_writev(int fd, const void *iov, int iovcnt) {
     vfile_t *vf = vfs_get_file_ref((int)gfd);
     struct iovec { char *base; size_t len; };
     int64_t total = 0;
+    int lock_offset = linux_vfile_uses_shared_offset(vf);
+    if (lock_offset)
+        mutex_lock(&vf->offset_lock);
     for (int i = 0; i < iovcnt; i++) {
         struct iovec v;
         if (copy_from_user(&v, (const char *)iov + (size_t)i * sizeof(struct iovec), sizeof(v)) < 0) { total = -EFAULT; break; }
@@ -253,6 +309,8 @@ int64_t sys_writev(int fd, const void *iov, int iovcnt) {
         total += n;
         if ((size_t)n < v.len) break;
     }
+    if (lock_offset)
+        mutex_unlock(&vf->offset_lock);
     vfs_put_file_ref((int)gfd, vf);
     return total;
 }
@@ -263,6 +321,9 @@ int64_t sys_readv(int fd, const void *iov, int iovcnt) {
     vfile_t *vf = vfs_get_file_ref((int)gfd);
     struct iovec { char *base; size_t len; };
     int64_t total = 0;
+    int lock_offset = linux_vfile_uses_shared_offset(vf);
+    if (lock_offset)
+        mutex_lock(&vf->offset_lock);
     for (int i = 0; i < iovcnt; i++) {
         struct iovec v;
         if (copy_from_user(&v, (const char *)iov + (size_t)i * sizeof(struct iovec), sizeof(v)) < 0) { total = -EFAULT; break; }
@@ -274,6 +335,8 @@ int64_t sys_readv(int fd, const void *iov, int iovcnt) {
         total += n;
         if ((size_t)n < v.len) break;
     }
+    if (lock_offset)
+        mutex_unlock(&vf->offset_lock);
     vfs_put_file_ref((int)gfd, vf);
     return total;
 }
@@ -456,12 +519,12 @@ int64_t sys_sendfile(int out_fd, int in_fd, long *off, size_t count) {
     int64_t in_gfd = fdtable_get_current(in_fd);
     if (in_gfd < 0) return in_gfd;
     {
-        vfile_t *ovf = vfs_get_file_ref(out_fd);
+        vfile_t *ovf = vfs_get_file_ref((int)out_gfd);
         if (ovf && !vfs_should_write(ovf->flags)) {
-            vfs_put_file_ref(out_fd, ovf);
+            vfs_put_file_ref((int)out_gfd, ovf);
             return -EBADF;
         }
-        vfs_put_file_ref(out_fd, ovf);
+        vfs_put_file_ref((int)out_gfd, ovf);
     }
     long user_off = 0;
     if (off && copy_from_user(&user_off, off, sizeof(long)) < 0) return -EFAULT;
@@ -508,6 +571,8 @@ int64_t sys_ppoll(void *fds, int nfds, void *tmo, void *sigmask) {
             if (copy_from_user(ts, tmo, sizeof(ts)) < 0) PPOLL_RETURN(-EFAULT);
             if (ts[1] >= 1000000000ULL) PPOLL_RETURN(-EINVAL);
             uint64_t ticks = ts[0] * TICKS_PER_SEC + ts[1] * TICKS_PER_SEC / 1000000000ULL;
+            if ((ts[0] || ts[1]) && ticks == 0)
+                ticks = 1;
             uint64_t until = timer_get_ticks() + (ticks ? ticks : 1);
             while (timer_get_ticks() < until) {
                 if (signal_task_has_unblocked(t)) PPOLL_SIGNAL_RETURN(-ERESTARTSYS);
@@ -530,6 +595,8 @@ int64_t sys_ppoll(void *fds, int nfds, void *tmo, void *sigmask) {
         if (copy_from_user(ts, tmo, sizeof(ts)) < 0) PPOLL_RETURN(-EFAULT);
         if (ts[1] >= 1000000000ULL) PPOLL_RETURN(-EINVAL);
         timeout_ticks = ts[0] * TICKS_PER_SEC + ts[1] * TICKS_PER_SEC / 1000000000ULL;
+        if ((ts[0] || ts[1]) && timeout_ticks == 0)
+            timeout_ticks = 1;
     }
     uint64_t deadline = timer_get_ticks() + (timeout_ticks ? timeout_ticks : 1);
 
@@ -566,7 +633,10 @@ int64_t sys_poll(void *fds, int nfds, int timeout) {
         if (timeout == 0)
             return 0;
         if (timeout > 0) {
-            uint64_t until = timer_get_ticks() + MS_TO_TICKS((uint64_t)timeout);
+            uint64_t ticks = MS_TO_TICKS((uint64_t)timeout);
+            if (ticks == 0)
+                ticks = 1;
+            uint64_t until = timer_get_ticks() + ticks;
             while (timer_get_ticks() < until) {
                 if (signal_task_has_unblocked(t)) return -ERESTARTSYS;
                 linux_poll_sleep_until(until, 1);
@@ -581,7 +651,13 @@ int64_t sys_poll(void *fds, int nfds, int timeout) {
     if (!pfds) return -EFAULT;
 
     int has_timeout = timeout >= 0;
-    uint64_t deadline = timer_get_ticks() + (timeout > 0 ? MS_TO_TICKS((uint64_t)timeout) : 0);
+    uint64_t timeout_ticks = 0;
+    if (timeout > 0) {
+        timeout_ticks = MS_TO_TICKS((uint64_t)timeout);
+        if (timeout_ticks == 0)
+            timeout_ticks = 1;
+    }
+    uint64_t deadline = timer_get_ticks() + timeout_ticks;
     for (;;) {
         int ready = 0;
         for (int i = 0; i < nfds; i++) {
@@ -672,6 +748,8 @@ int64_t sys_select(int nfds, void *readfds, void *writefds,
         if (copy_from_user(tv, timeout, sizeof(tv)) < 0) return -EFAULT;
         if (tv[1] >= 1000000ULL) return -EINVAL;
         timeout_ticks = tv[0] * TICKS_PER_SEC + tv[1] * TICKS_PER_SEC / 1000000ULL;
+        if ((tv[0] || tv[1]) && timeout_ticks == 0)
+            timeout_ticks = 1;
     }
     uint64_t deadline = timer_get_ticks() + (timeout_ticks ? timeout_ticks : 1);
 
@@ -729,6 +807,8 @@ int64_t sys_pselect6(int nfds, void *readfds, void *writefds,
         if (copy_from_user(ts, timeout, sizeof(ts)) < 0) return -EFAULT;
         if (ts[1] >= 1000000000ULL) return -EINVAL;
         timeout_ticks = ts[0] * TICKS_PER_SEC + ts[1] * TICKS_PER_SEC / 1000000000ULL;
+        if ((ts[0] || ts[1]) && timeout_ticks == 0)
+            timeout_ticks = 1;
     }
     uint64_t deadline = timer_get_ticks() + (timeout_ticks ? timeout_ticks : 1);
 

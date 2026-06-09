@@ -16,6 +16,7 @@
 #include "mm/frame.h"
 #include "mm/slab.h"
 #include "mm/vm.h"
+#include "mm/oom.h"
 #include "core/timer.h"
 #include "core/string.h"
 #include "core/stdio.h"
@@ -89,6 +90,7 @@ typedef enum {
     PF_A20,
     PF_A20_BCACHE,
     PF_A20_PAGE_CACHE,
+    PF_A20_OOM,
     PF_CGROUPS,
     PF_SELF,
     PF_FSTYPE,
@@ -199,14 +201,11 @@ static void vma_collect_smaps_stats(mm_struct_t *mm, vm_area_t *vma,
     if (!mm || !mm->pgdir || !vma) return;
 
     for (uint64_t va = vma->start; va < vma->end; ) {
-        int level = 0;
-        uint64_t base = 0;
-        size_t size = 0;
-        uint64_t *pte = pt_lookup_leaf(mm->pgdir, va, &level, &base, &size);
-        if (pte && (*pte & PTE_V) && arch_pte_is_leaf(*pte)) {
-            size_t pages = size / PAGE_SIZE;
+        mm_leaf_info_t leaf;
+        if (mm_query_leaf(mm->pgdir, va, &leaf)) {
+            size_t pages = leaf.size / PAGE_SIZE;
             int shared = (vma->vm_flags & VM_SHARED) != 0;
-            int dirty = (*pte & PTE_D) != 0;
+            int dirty = leaf.dirty;
             int anon = (vma->vm_flags & VM_ANON) != 0;
 
             stats->rss_pages += pages;
@@ -219,7 +218,7 @@ static void vma_collect_smaps_stats(mm_struct_t *mm, vm_area_t *vma,
             }
             if (anon)
                 stats->anonymous_pages += pages;
-            if (level > 0) {
+            if (leaf.level > 0) {
                 if (anon && shared)
                     stats->shmem_pmd_pages += pages;
                 else if (anon)
@@ -227,7 +226,7 @@ static void vma_collect_smaps_stats(mm_struct_t *mm, vm_area_t *vma,
                 else
                     stats->file_pmd_pages += pages;
             }
-            va = base + size;
+            va = leaf.base + leaf.size;
         } else {
             va += PAGE_SIZE;
         }
@@ -466,6 +465,26 @@ static int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
             (unsigned long)pc.valid,
             (unsigned long)pc.dirty,
             (unsigned long)pc.pinned);
+        break;
+    }
+    case PF_A20_OOM: {
+        oom_stats_t os;
+        oom_get_stats(&os);
+        snprintf(buf, bufsz,
+            "kills: %lu\n"
+            "last_kill_tick: %lu\n"
+            "last_victim_pid: %d\n"
+            "last_victim_score: %d\n"
+            "free_pages_at_kill: %lu\n"
+            "free_pages_now: %lu\n"
+            "in_progress: %d\n",
+            os.kills,
+            os.last_kill_tick,
+            os.last_victim_pid,
+            os.last_victim_score,
+            os.free_pages_at_kill,
+            os.free_pages_now,
+            os.in_progress);
         break;
     }
     case PF_PID_STAT: {  // 生成进程 stat 信息
@@ -751,6 +770,7 @@ static pf_type_t name_to_type(const char *name, int *out_pid) {
     if (strcmp(name, "a20") == 0) return PF_A20;
     if (strcmp(name, "bcache") == 0) return PF_A20_BCACHE;
     if (strcmp(name, "page_cache") == 0) return PF_A20_PAGE_CACHE;
+    if (strcmp(name, "oom") == 0) return PF_A20_OOM;
     if (strcmp(name, "cmdline") == 0) return PF_CMDLINE;
     if (is_pid_str(name)) {
         *out_pid = atoi(name);
@@ -910,6 +930,9 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
     } else if (dp && dp->type == PF_A20 && strcmp(name, "page_cache") == 0) {
         child = new_entry(name, PF_A20_PAGE_CACHE, 0);
         type = PF_A20_PAGE_CACHE;
+    } else if (dp && dp->type == PF_A20 && strcmp(name, "oom") == 0) {
+        child = new_entry(name, PF_A20_OOM, 0);
+        type = PF_A20_OOM;
     } else if (dp && dp->type == PF_ROOT && dp->pid == 0 && strcmp(name, "interrupts") == 0) {
         child = new_entry(name, PF_INTERRUPTS, 0);
         type = PF_INTERRUPTS;
@@ -1009,10 +1032,13 @@ static void procfs_release(vnode_t *vn) {
     kfree(vn);
 }
 
+static vfile_t *procfs_open_vnode(vnode_t *vn, int flags);
+
 // procfs vnode 操作表
 static vnode_ops_t g_procfs_vnode_ops = {
     .lookup  = procfs_lookup,
     .stat    = procfs_stat,
+    .open    = procfs_open_vnode,
     .release = procfs_release,
 };
 
@@ -1031,19 +1057,7 @@ static int procfs_fread(vfile_t *vf, char *buf, size_t count) {
             uint64_t entry_offset = vf->offset % 8;
 
             uint64_t va = entry_idx * PAGE_SIZE;
-            uint64_t entry_val = 0;
-
-            int level = 0;
-            uint64_t base = 0;
-            size_t size = 0;
-            uint64_t *pte = pt_lookup_leaf(t->mm->pgdir, va, &level, &base, &size);
-            if (pte && (*pte & PTE_V) && arch_pte_is_leaf(*pte)) {
-                uint64_t pfn = arch_pte_addr(*pte) / PAGE_SIZE;
-                if (level > 0 && size > PAGE_SIZE) {
-                    pfn += (va - base) / PAGE_SIZE;
-                }
-                entry_val = (1ULL << 63) | (pfn & 0x7FFFFFFFFFFFFULL);
-            }
+            uint64_t entry_val = mm_pagemap_entry(t->mm->pgdir, va);
 
             size_t chunk = 8 - entry_offset;
             if (chunk > count - read_bytes) {
@@ -1177,7 +1191,7 @@ static int procfs_freaddir(vfile_t *vf, void *dirp, size_t count) {
         ".", "..", "max_queued_events", "max_user_instances", NULL
     };
     static const char *a20_entries[] = {
-        ".", "..", "bcache", "page_cache", NULL
+        ".", "..", "bcache", "page_cache", "oom", NULL
     };
     static const char *ns_entries[] = {
         ".", "..", "pid", "uts", "user", "ipc", "mnt", "net", "cgroup", NULL
@@ -1305,14 +1319,14 @@ vnode_t *procfs_mount(void) {
 }
 
 // 打开 procfs vnode
-vfile_t *procfs_open_vnode(vnode_t *vn, int flags) {
+static vfile_t *procfs_open_vnode(vnode_t *vn, int flags) {
     vfile_t *vf = vfile_alloc();
     if (!vf) return NULL;
     vf->vnode = vn;
     vf->flags = flags;
     vnode_get(vn);
     vf->ops = &g_procfs_fops;
-    refcount_set(&vf->ref_count, 1);
+    vfile_ref_init(vf, 1);
 
     procfs_meta_t *meta = (procfs_meta_t *)vn->fs_data;
     procfs_priv_t *priv = procfs_priv_create(meta ? meta->type : PF_ROOT, meta ? meta->pid : 0);

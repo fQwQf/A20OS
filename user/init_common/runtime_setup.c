@@ -16,6 +16,9 @@
 #elif defined(__loongarch64)
 #define GLIBC_LOADER_NAME "ld-linux-loongarch-lp64d.so.1"
 #define MUSL_LOADER_NAME "ld-musl-loongarch-lp64d.so.1"
+#elif defined(__x86_64__)
+#define GLIBC_LOADER_NAME "ld-linux-x86-64.so.2"
+#define MUSL_LOADER_NAME "ld-musl-x86_64.so.1"
 #else
 #error Unsupported architecture
 #endif

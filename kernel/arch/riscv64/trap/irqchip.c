@@ -24,7 +24,9 @@ static void plic_complete(uint32_t irq) {
 
 static void handle_timer_irq(int from_user) {
     timer_irq_tick();
-    timer_set_interval(TICKS_PER_SEC / 100);
+    uint64_t now = timer_get_ticks();
+    timer_set_interval(proc_next_timer_interval(now));
+
     if (!from_user) return;
 
     task_t *cur = proc_current();
@@ -62,7 +64,7 @@ void arch_handle_irq(uint64_t irq, int from_user) {
         if (from_user)
             proc_yield();
 #else
-        timer_set_interval(TICKS_PER_SEC / 100);
+        timer_set_interval(proc_next_timer_interval(timer_get_ticks()));
         if (from_user)
             proc_yield();
 #endif

@@ -30,8 +30,6 @@
 /* musl struct pthread is ~300-400 bytes; 512 gives headroom */
 #define TLS_TCB_SIZE       512
 
-#define PTE_STACK          (PTE_V | PTE_R | PTE_W | PTE_X | PTE_U | PTE_A | PTE_D | PTE_MAT1 | PTE_LEAF)
-
 #define ASLR_BITS          16
 #define ASLR_MASK          (((1UL << ASLR_BITS) - 1) << 16)
 
@@ -49,20 +47,15 @@ static uint64_t elf_aslr_bias(void) {
 }
 
 static uint64_t seg_flags(uint32_t p_flags) {
-    uint64_t f = PTE_V | PTE_U | PTE_MAT1 | PTE_A | PTE_LEAF;
-    if (p_flags & PF_R) f |= PTE_R;
-    if (p_flags & PF_W) f |= (PTE_W | PTE_D);
-    if (p_flags & PF_X) f |= PTE_X;
-    if (f & PTE_W) f |= PTE_R;
-    return f;
+    int prot = 0;
+    if (p_flags & PF_R) prot |= 1;
+    if (p_flags & PF_W) prot |= 2;
+    if (p_flags & PF_X) prot |= 4;
+    return mm_prot_to_pte_flags(prot);
 }
 
 static uint64_t pte_to_vm_flags(uint64_t pte_flags) {
-    uint64_t vm = VM_ANON;
-    if (pte_flags & PTE_R) vm |= VM_READ;
-    if (pte_flags & PTE_W) vm |= VM_WRITE;
-    if (pte_flags & PTE_X) vm |= VM_EXEC;
-    return vm;
+    return VM_ANON | mm_pte_flags_to_vm_flags(pte_flags);
 }
 
 static int elf_add_vma(mm_struct_t *mm, uint64_t start, uint64_t end,
@@ -105,7 +98,8 @@ static void *stack_ensure_mapped(uint64_t *pgdir, uint64_t sp_va,
         void *frame = frame_alloc();
         if (!frame) return NULL;
         uint64_t map_va = *stack_bottom - PAGE_SIZE;
-        int r = pt_map(pgdir, map_va, va_to_pa(frame), PTE_STACK);
+        int r = pt_map(pgdir, map_va, va_to_pa(frame),
+                       mm_user_stack_pte_flags());
         if (r < 0) { frame_free(frame); return NULL; }
         *stack_bottom -= PAGE_SIZE;
         max_grow--;
@@ -202,13 +196,15 @@ static int map_stack(mm_struct_t *mm, uint64_t *pgdir, uint64_t *stack_top_out) 
                       (uint64_t)(USER_STACK_INITIAL_PAGES - 1 - i) * PAGE_SIZE;
         void *frame = frame_alloc();
         if (!frame) return -ENOMEM;
-        int r = pt_map(pgdir, va, va_to_pa(frame), PTE_STACK);
+        int r = pt_map(pgdir, va, va_to_pa(frame),
+                       mm_user_stack_pte_flags());
         if (r < 0) { frame_free(frame); return r; }
     }
     *stack_top_out = stack_top;
     arch_tlb_flush();
     return elf_add_vma(mm, stack_bottom, stack_top,
-                       VM_ANON | VM_READ | VM_WRITE | VM_STACK, PTE_STACK);
+                       VM_ANON | VM_READ | VM_WRITE | VM_STACK,
+                       mm_user_stack_pte_flags());
 }
 
 /* ------------------------------------------------------------------ */
@@ -222,8 +218,7 @@ static int setup_tls(mm_struct_t *mm, uint64_t *pgdir,
     uint64_t tcb_offset = ROUND_UP(tls_memsz, tls_align);
     uint64_t total_size = tcb_offset + TLS_TCB_SIZE;
     uint64_t total_pages = ROUND_UP(total_size, PAGE_SIZE) / PAGE_SIZE;
-    uint64_t pte_flags = PTE_V | PTE_R | PTE_W | PTE_U | PTE_A | PTE_D |
-                         PTE_MAT1 | PTE_LEAF;
+    uint64_t pte_flags = mm_user_brk_pte_flags();
 
     for (uint64_t page = 0; page < total_pages; page++) {
         void *frame = frame_alloc();

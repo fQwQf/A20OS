@@ -7,7 +7,7 @@
 static uint64_t timer_freq;
 
 void timer_init(void) {
-    timer_freq = CLINT_TIMER_FREQ;
+    timer_freq = ARCH_TIMER_FREQ;
     timer_set_interval(TICKS_PER_SEC / 100);
     timer_enable();
 }

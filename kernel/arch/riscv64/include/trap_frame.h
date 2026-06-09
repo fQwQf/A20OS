@@ -3,6 +3,7 @@
 
 #include "core/types.h"
 #include "page_table.h"
+#include "platform.h"
 
 typedef struct {
     uint64_t x[32];
@@ -71,6 +72,14 @@ extern void user_trap_return(void);
 
 #define TASK_CTX_PAGE_TABLE(ctx)   ((ctx)->satp)
 #define TASK_CTX_STATUS(ctx)       ((ctx)->sstatus)
+
+static inline uint64_t arch_task_kernel_status(void) {
+    return SSTATUS_SIE;
+}
+
+static inline uint64_t arch_user_initial_status(void) {
+    return SSTATUS_SPIE | SSTATUS_FS_CLEAN;
+}
 
 static inline void arch_signal_prepare_trampoline(uint32_t tramp[2]) {
     tramp[0] = 0x08b00893;

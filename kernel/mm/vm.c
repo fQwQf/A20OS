@@ -3,6 +3,7 @@
 #include "mm/frame.h"
 #include "mm/slab.h"
 #include "fs/vfs.h"
+#include "ipc/sysv_shm.h"
 #include "proc/proc.h"
 #include "core/string.h"
 #include "core/panic.h"
@@ -31,6 +32,18 @@ static void vma_release_file(vm_area_t *vma)
     }
 }
 
+static void vma_release_ipc(vm_area_t *vma)
+{
+    if (vma && (vma->vm_flags & VM_SYSV_SHM))
+        sysv_shm_unref_attach(vma->sysv_shmid);
+}
+
+static void vma_release(vm_area_t *vma)
+{
+    vma_release_file(vma);
+    vma_release_ipc(vma);
+}
+
 static int vma_ref_file(vm_area_t *vma)
 {
     if (!vma || !(vma->vm_flags & VM_FILE) || vma->file_fd < 0)
@@ -38,9 +51,26 @@ static int vma_ref_file(vm_area_t *vma)
     return vfs_ref_fd(vma->file_fd);
 }
 
+static int vma_ref_fork(vm_area_t *vma)
+{
+    int r = vma_ref_file(vma);
+    if (r < 0)
+        return r;
+    if (vma && (vma->vm_flags & VM_SYSV_SHM)) {
+        r = sysv_shm_ref_attach(vma->sysv_shmid);
+        if (r < 0) {
+            vma_release_file(vma);
+            return r;
+        }
+    }
+    return 0;
+}
+
 static int vma_can_merge(vm_area_t *a, vm_area_t *b)
 {
     if (!a || !b || a->end != b->start)
+        return 0;
+    if ((a->vm_flags | b->vm_flags) & VM_SYSV_SHM)
         return 0;
     if (a->vm_flags != b->vm_flags || a->pte_flags != b->pte_flags)
         return 0;
@@ -309,7 +339,7 @@ void mm_destroy(mm_struct_t *mm) {
     while (vma) {
         free_vma_pages(mm, vma);
         vm_area_t *next = vma->next;
-        vma_release_file(vma);
+        vma_release(vma);
         kfree(vma);
         vma = next;
     }
@@ -369,7 +399,7 @@ void mm_insert_vma(mm_struct_t *mm, vm_area_t *newv) {
         newv->end = nxt->end;
         newv->next = nxt->next;
         if (nxt->next) nxt->next->prev = newv;
-        vma_release_file(nxt);
+        vma_release(nxt);
         kfree(nxt);
     }
     // 尝试与前一个 VMA 合并
@@ -378,7 +408,7 @@ void mm_insert_vma(mm_struct_t *mm, vm_area_t *newv) {
         prv->end = newv->end;
         prv->next = newv->next;
         if (newv->next) newv->next->prev = prv;
-        vma_release_file(newv);
+        vma_release(newv);
         kfree(newv);
     }
 }
@@ -441,7 +471,7 @@ static vm_area_t *vma_try_merge(vm_area_t *vma) {
         prev->end = vma->end;
         prev->next = vma->next;
         if (vma->next) vma->next->prev = prev;
-        vma_release_file(vma);
+        vma_release(vma);
         kfree(vma);
         vma = prev;
     }
@@ -451,20 +481,70 @@ static vm_area_t *vma_try_merge(vm_area_t *vma) {
         vma->end = next->end;
         vma->next = next->next;
         if (next->next) next->next->prev = vma;
-        vma_release_file(next);
+        vma_release(next);
         kfree(next);
     }
     return vma;
 }
 
-// 将保护标志转换为页表项标志
-uint64_t prot_to_pte(int prot) {
+uint64_t mm_prot_to_pte_flags(int prot) {
     uint64_t f = PTE_V | PTE_U | PTE_A | PTE_MAT1 | PTE_LEAF;
     if (prot & 1) f |= PTE_R;
     if (prot & 2) f |= (PTE_W | PTE_D);
     if (prot & 4) f |= PTE_X;
     if (f & PTE_W) f |= PTE_R;
     return f;
+}
+
+int mm_pte_flags_to_prot(uint64_t pte_flags) {
+    int prot = 0;
+    if (pte_flags & PTE_R) prot |= PROT_READ;
+    if (pte_flags & PTE_W) prot |= PROT_WRITE;
+    if (pte_flags & PTE_X) prot |= PROT_EXEC;
+    return prot;
+}
+
+uint64_t mm_vm_flags_to_pte_flags(uint64_t vm_flags) {
+    int prot = 0;
+    if (vm_flags & VM_READ) prot |= 1;
+    if (vm_flags & VM_WRITE) prot |= 2;
+    if (vm_flags & VM_EXEC) prot |= 4;
+    return mm_prot_to_pte_flags(prot);
+}
+
+uint64_t mm_pte_flags_to_vm_flags(uint64_t pte_flags) {
+    uint64_t vm = 0;
+    if (pte_flags & PTE_R) vm |= VM_READ;
+    if (pte_flags & PTE_W) vm |= VM_WRITE;
+    if (pte_flags & PTE_X) vm |= VM_EXEC;
+    return vm;
+}
+
+uint64_t mm_user_stack_pte_flags(void) {
+    return mm_prot_to_pte_flags(1 | 2 | 4);
+}
+
+uint64_t mm_user_brk_pte_flags(void) {
+    return mm_prot_to_pte_flags(1 | 2);
+}
+
+int mm_pte_flags_allow_access(uint64_t pte_flags) {
+    return (pte_flags & (PTE_R | PTE_W | PTE_X)) != 0;
+}
+
+uint64_t mm_pte_flags_apply_prot(uint64_t old_flags, uint64_t prot_flags) {
+    uint64_t flags = old_flags & (PTE_R | PTE_W | PTE_X | PTE_U |
+                                  PTE_G | PTE_A | PTE_D | PTE_COW |
+                                  PTE_LEAF | PTE_MAT1);
+    flags &= ~(uint64_t)(PTE_R | PTE_W | PTE_X | PTE_D);
+    flags |= prot_flags & (PTE_R | PTE_W | PTE_X | PTE_D);
+    if (!(prot_flags & PTE_W))
+        flags &= ~(uint64_t)PTE_COW;
+    return flags;
+}
+
+uint64_t mm_pte_flags_make_writable_dirty(uint64_t pte_flags) {
+    return pte_flags | PTE_W | PTE_D;
 }
 
 // 创建内存映射（mmap 系统调用的实现）
@@ -475,7 +555,7 @@ uint64_t mm_mmap(mm_struct_t *mm, uint64_t addr, size_t len, int prot, int flags
     if (len == 0) return (uint64_t)-EINVAL;
     if (len > USER_VA_LIMIT) return (uint64_t)-ENOMEM;
 
-    uint64_t ptef = prot_to_pte(prot);
+    uint64_t ptef = mm_prot_to_pte_flags(prot);
     uint64_t vmf = VM_ANON;
     if (prot & 1) vmf |= VM_READ;
     if (prot & 2) vmf |= VM_WRITE;
@@ -588,7 +668,7 @@ uint64_t mm_mmap_file(mm_struct_t *mm, uint64_t addr, size_t len,
     vma->start       = addr;
     vma->end         = addr + len;
     vma->vm_flags    = vmf;
-    vma->pte_flags   = prot_to_pte(prot);
+    vma->pte_flags   = mm_prot_to_pte_flags(prot);
     vma->file_fd     = file_fd;
     vma->file_offset = file_offset;
 
@@ -617,9 +697,7 @@ static int mm_clone_shared_mapping(mm_struct_t *mm, vm_area_t *src_vma,
     if (src_addr + len < src_addr || src_addr + len > src_vma->end)
         return -EINVAL;
 
-    int prot = ((src_vma->pte_flags & PTE_R) ? PROT_READ : 0) |
-               ((src_vma->pte_flags & PTE_W) ? PROT_WRITE : 0) |
-               ((src_vma->pte_flags & PTE_X) ? PROT_EXEC : 0);
+    int prot = mm_pte_flags_to_prot(src_vma->pte_flags);
     uint64_t target = (flags & MREMAP_FIXED) ? new_addr : 0;
     uint64_t dst = mm_mmap(mm, target, len, prot,
                            (target ? MAP_FIXED : 0) | MAP_ANONYMOUS |
@@ -805,9 +883,7 @@ int mm_mremap(mm_struct_t *mm, uint64_t old_addr, size_t old_size,
         new_addr < old_addr + old_len && old_addr < new_addr + new_len)
         return -EINVAL;
 
-    int prot = ((vma->pte_flags & PTE_R) ? PROT_READ : 0) |
-               ((vma->pte_flags & PTE_W) ? PROT_WRITE : 0) |
-               ((vma->pte_flags & PTE_X) ? PROT_EXEC : 0);
+    int prot = mm_pte_flags_to_prot(vma->pte_flags);
     uint64_t target = (flags & MREMAP_FIXED) ? new_addr : 0;
     uint64_t dst = mm_mmap(mm, target, new_len, prot,
                            (target ? MAP_FIXED : 0) | MAP_ANONYMOUS |
@@ -849,6 +925,16 @@ int mm_munmap(mm_struct_t *mm, uint64_t addr, size_t len) {
     if (len == 0) return 0;
     uint64_t end = addr + len;
     if (end < addr || end > USER_VA_LIMIT) return -EINVAL;
+
+    for (vm_area_t *v = mm->mmap; v; v = v->next) {
+        if (v->start >= end)
+            break;
+        if (v->end <= addr)
+            continue;
+        if ((v->vm_flags & VM_SYSV_SHM) &&
+            (addr > v->start || end < v->end))
+            return -EINVAL;
+    }
 
     vm_area_t *vma = mm->mmap;
     while (vma) {
@@ -898,7 +984,7 @@ int mm_munmap(mm_struct_t *mm, uint64_t addr, size_t len) {
             if (vma->prev) vma->prev->next = vma->next;
             else mm->mmap = vma->next;
             if (vma->next) vma->next->prev = vma->prev;
-            vma_release_file(vma);
+            vma_release(vma);
             kfree(vma);
         } else if (addr <= vma->start) {
             // 从开头部分删除
@@ -993,7 +1079,7 @@ int mm_mprotect(mm_struct_t *mm, uint64_t addr, size_t len, int prot) {
     len = ROUND_UP(len, PAGE_SIZE);
     if (len == 0) return 0;
 
-    uint64_t ptef = prot_to_pte(prot);
+    uint64_t ptef = mm_prot_to_pte_flags(prot);
     uint64_t vm_prot = 0;
     if (prot & 1) vm_prot |= VM_READ;
     if (prot & 2) vm_prot |= VM_WRITE;
@@ -1043,21 +1129,14 @@ int mm_mprotect(mm_struct_t *mm, uint64_t addr, size_t len, int prot) {
                     if (dr < 0) return dr;
                     continue;
                 }
-                uint64_t flags = *pte & (PTE_R | PTE_W | PTE_X | PTE_U |
-                                         PTE_G | PTE_A | PTE_D | PTE_COW |
-                                         PTE_LEAF | PTE_MAT1);
-                flags &= ~(uint64_t)(PTE_R | PTE_W | PTE_X | PTE_D);
-                flags |= ptef & (PTE_R | PTE_W | PTE_X | PTE_D);
-                if (!(ptef & PTE_W))
-                    flags &= ~(uint64_t)PTE_COW;
+                uint64_t flags = mm_pte_flags_apply_prot(*pte, ptef);
                 *pte = arch_pte_leaf(arch_pte_addr(*pte), flags);
                 va = base + size;
             } else {
                 va += PAGE_SIZE;
             }
         }
-        v->pte_flags = (v->pte_flags & ~(uint64_t)(PTE_R | PTE_W | PTE_X | PTE_D)) |
-                       (ptef & (PTE_R | PTE_W | PTE_X | PTE_D));
+        v->pte_flags = mm_pte_flags_apply_prot(v->pte_flags, ptef);
         v->vm_flags  = (v->vm_flags & ~(uint64_t)(VM_READ | VM_WRITE | VM_EXEC)) |
                        vm_prot;
         v = vma_try_merge(v);
@@ -1104,7 +1183,7 @@ mm_struct_t *mm_fork(mm_struct_t *parent) {
         if (!cv) goto fail;
         *cv = *pv;
         cv->vm_flags &= ~VM_LOCKED;
-        if (vma_ref_file(cv) < 0) {
+        if (vma_ref_fork(cv) < 0) {
             kfree(cv);
             goto fail;
         }

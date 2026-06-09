@@ -547,7 +547,7 @@ static int exec_install_process(task_t *t,
         memset(ctx, 0, sizeof(*ctx));
         ctx->ra = (uint64_t)user_trap_return;
         ctx->tp = (uint64_t)(uintptr_t)t;
-        TASK_CTX_PAGE_TABLE(ctx) = arch_make_satp(info->pgdir);
+        TASK_CTX_PAGE_TABLE(ctx) = arch_make_addr_space_token(info->pgdir);
         t->trap_ctx = trap;
         t->kstack   = (uint64_t)ctx;
     }
@@ -556,7 +556,7 @@ static int exec_install_process(task_t *t,
         trap_context_t *trap = t->trap_ctx;
         saved_kernel_sp = arch_trap_ctx_get_kernel_stack(trap, saved_kernel_sp);
         memset(trap, 0, sizeof(*trap));
-        TRAP_CTX_KScratch0(trap) = arch_make_satp(info->pgdir);
+        TRAP_CTX_KScratch0(trap) = arch_make_addr_space_token(info->pgdir);
         TRAP_CTX_EPC(trap)       = info->entry;
         TRAP_CTX_SP(trap)        = sp;
         TRAP_CTX_TP(trap)        = info->tls_tp;
@@ -567,7 +567,7 @@ static int exec_install_process(task_t *t,
 #endif
         trap->kernel_tp = (uint64_t)(uintptr_t)t;
         arch_trap_ctx_set_kernel_stack(trap, saved_kernel_sp);
-        TRAP_CTX_STATUS(trap) = SSTATUS_SPIE | SSTATUS_FS_CLEAN;
+        TRAP_CTX_STATUS(trap) = arch_user_initial_status();
     }
 
     /* ---- 7. Apply SUID/SGID credentials ---- */
@@ -577,7 +577,7 @@ static int exec_install_process(task_t *t,
         proc_apply_exec_creds(t, st);
 
     /* ---- 8. Switch page tables, destroy old address space ---- */
-    arch_write_satp(arch_make_satp(info->pgdir));
+    arch_write_addr_space_token(arch_make_addr_space_token(info->pgdir));
     arch_tlb_flush();
 
     if (old_mm) {

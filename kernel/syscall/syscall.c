@@ -5,6 +5,7 @@
  */
 #include "syscall_internal.h"
 #include "abi/syscall_entry.h"
+#include "abi/current.h"
 #include "core/klog.h"
 #include "core/timer.h"
 #include "proc/signal.h"
@@ -15,11 +16,16 @@ static uint64_t syscall_resched_counter;
 
 static inline uint64_t syscall_profile_now(void)
 {
+#if CONFIG_SYSCALL_PROFILE
     return timer_get_ticks();
+#else
+    return 0;
+#endif
 }
 
 static inline void syscall_profile_record(uint64_t num, uint64_t start, uint64_t end)
 {
+#if CONFIG_SYSCALL_PROFILE
     if (num >= SYSCALL_PROFILE_MAX)
         return;
 
@@ -27,6 +33,11 @@ static inline void syscall_profile_record(uint64_t num, uint64_t start, uint64_t
     syscall_prof_t *prof = &sys_prof[num];
     __atomic_fetch_add(&prof->count, 1, __ATOMIC_RELAXED);
     __atomic_fetch_add(&prof->cycles, elapsed, __ATOMIC_RELAXED);
+#else
+    (void)num;
+    (void)start;
+    (void)end;
+#endif
 }
 
 void syscall_profile_reset(void)

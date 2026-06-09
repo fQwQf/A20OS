@@ -1,6 +1,6 @@
 #include "fs/vfs.h"
 #include "fs/file.h"
-#include "abi/linux/fcntl.h"
+#include "core/fcntl.h"
 #include "core/stdio.h"
 #include "core/string.h"
 #include "mm/slab.h"

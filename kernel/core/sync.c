@@ -157,8 +157,50 @@ int mutex_trylock(mutex_t *m) {
 void mutex_lock(mutex_t *m) {
     if (!m)
         return;
-    while (!mutex_trylock(m))
-        wait_queue_sleep(&m->waiters);
+
+    task_t *cur = proc_current();
+    if (!cur) {
+        while (!mutex_trylock(m))
+            proc_yield();
+        return;
+    }
+
+    for (;;) {
+        uint64_t flags = spin_lock_irqsave(&m->lock);
+        if (!m->locked) {
+            m->locked = 1;
+            m->owner = cur;
+            spin_unlock_irqrestore(&m->lock, flags);
+            return;
+        }
+
+        wait_queue_entry_t entry = {0};
+        entry.task = cur;
+
+        uint64_t wf = spin_lock_irqsave(&m->waiters.lock);
+        for (wait_queue_entry_t *e = m->waiters.head; e; e = e->next) {
+            if (e->task == cur) {
+                cur->state = PROC_BLOCKED;
+                spin_unlock_irqrestore(&m->waiters.lock, wf);
+                spin_unlock_irqrestore(&m->lock, flags);
+                sched();
+                goto retry;
+            }
+        }
+        entry.next = m->waiters.head;
+        entry.prev = NULL;
+        if (m->waiters.head)
+            m->waiters.head->prev = &entry;
+        m->waiters.head = &entry;
+        cur->state = PROC_BLOCKED;
+        spin_unlock_irqrestore(&m->waiters.lock, wf);
+        spin_unlock_irqrestore(&m->lock, flags);
+
+        sched();
+        wait_queue_finish(&m->waiters, &entry);
+retry:
+        ;
+    }
 }
 
 void mutex_unlock(mutex_t *m) {

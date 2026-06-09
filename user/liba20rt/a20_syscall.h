@@ -1,8 +1,9 @@
 /*
  * A20OS Native SDK — Syscall invocation.
  *
- * Convention: a7=syscall_nr, a0-a5=args, return in a0.
- * Both RV64 and LA64 use the same register names.
+ * Convention:
+ *   RV64/LA64: a7=syscall_nr, a0-a5=args, return in a0.
+ *   x86_64:    rax=syscall_nr, rdi/rsi/rdx/r10/r8/r9=args, return in rax.
  */
 #ifndef _A20_SYSCALL_H
 #define _A20_SYSCALL_H
@@ -14,6 +15,8 @@
 #define A20_SYSCALL_INSN  "syscall 0"
 #elif defined(__riscv)
 #define A20_SYSCALL_INSN  "ecall"
+#elif defined(__x86_64__)
+#define A20_SYSCALL_INSN  "int $0x80"
 #else
 #error "Unsupported architecture for A20 syscall"
 #endif
@@ -22,6 +25,20 @@ static inline int64_t a20_syscall6(uint64_t nr, uint64_t a0, uint64_t a1,
                                     uint64_t a2, uint64_t a3,
                                     uint64_t a4, uint64_t a5)
 {
+#if defined(__x86_64__)
+    register uint64_t rax __asm__("rax") = nr;
+    register uint64_t rdi __asm__("rdi") = a0;
+    register uint64_t rsi __asm__("rsi") = a1;
+    register uint64_t rdx __asm__("rdx") = a2;
+    register uint64_t r10 __asm__("r10") = a3;
+    register uint64_t r8  __asm__("r8")  = a4;
+    register uint64_t r9  __asm__("r9")  = a5;
+    __asm__ volatile(A20_SYSCALL_INSN
+        : "+a"(rax)
+        : "D"(rdi), "S"(rsi), "d"(rdx), "r"(r10), "r"(r8), "r"(r9)
+        : "memory");
+    return (int64_t)rax;
+#else
     register uint64_t a7 __asm__("a7") = nr;
     register uint64_t _a0 __asm__("a0") = a0;
     register uint64_t _a1 __asm__("a1") = a1;
@@ -34,6 +51,7 @@ static inline int64_t a20_syscall6(uint64_t nr, uint64_t a0, uint64_t a1,
         : "r"(a7), "r"(_a1), "r"(_a2), "r"(_a3), "r"(_a4), "r"(_a5)
         : "memory");
     return (int64_t)_a0;
+#endif
 }
 
 /* ===== Core (0x0000) ===== */

@@ -13,3 +13,5 @@ kernel-la
 .kernel-build/
 *.dtb
 .kernel-build/smoke
+*.orig
+*.rej

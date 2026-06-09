@@ -306,6 +306,7 @@ int virtio_net_send(int idx, const void *packet, size_t len, int nonblock) {
 
     for (;;) {
         uint64_t flags = spin_lock_irqsave(&net->lock);
+        virtio_net_complete_tx_locked(net);
         slot = virtio_net_tx_free_locked(net);
         if (slot >= 0) {
             net->tx_busy[slot] = 1;

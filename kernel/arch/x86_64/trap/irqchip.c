@@ -14,7 +14,7 @@ uint64_t __x86_64_trap_tval;
 
 static void handle_timer_irq(int from_user) {
     timer_irq_tick();
-    timer_set_interval(TICKS_PER_SEC / 1000);
+    timer_set_interval(proc_next_timer_interval(timer_get_ticks()));
     if (!from_user) return;
     task_t *cur = proc_current();
     if (cur) {

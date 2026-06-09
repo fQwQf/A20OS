@@ -66,6 +66,10 @@ static inline uint64_t arch_make_satp(void *pgdir) {
     return (0x8UL << 60) | (((uint64_t)(uintptr_t)pgdir - PAGE_OFFSET) >> 12);
 }
 
+static inline uint64_t arch_make_addr_space_token(void *pgdir) {
+    return arch_make_satp(pgdir);
+}
+
 #define ARCH_PTE_PPN_MASK  0x3FF
 #define arch_pte_flags(pte) ((pte) & ARCH_PTE_PPN_MASK)
 

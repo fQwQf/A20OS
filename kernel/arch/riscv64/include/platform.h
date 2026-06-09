@@ -39,6 +39,7 @@ static inline int arch_ram_range(size_t idx, paddr_t *base, paddr_t *end) {
 #define CLINT_MTIME        (CLINT_BASE + 0xBFF8UL)
 #define CLINT_MTIMECMP(h)  (CLINT_BASE + 0x4000UL + ((unsigned long)(h) * 8))
 #define CLINT_TIMER_FREQ   10000000UL
+#define ARCH_TIMER_FREQ    CLINT_TIMER_FREQ
 
 /* Exception codes (scause) */
 #define IRQ_S_SOFT         1

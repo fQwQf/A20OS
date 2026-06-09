@@ -227,6 +227,10 @@ int64_t sys_shmget(int key, size_t size, int shmflg);
 int64_t sys_shmat(int shmid, const void *shmaddr, int shmflg);
 int64_t sys_shmdt(const void *shmaddr);
 int64_t sys_shmctl(int shmid, int cmd, void *buf);
+int64_t sys_semget(int key, int nsems, int semflg);
+int64_t sys_semctl(int semid, int semnum, int cmd, uint64_t arg);
+int64_t sys_semtimedop(int semid, const void *sops, size_t nsops, const void *timeout);
+int64_t sys_semop(int semid, const void *sops, size_t nsops);
 int64_t sys_bpf(int cmd, void *attr, unsigned size);
 
 int64_t sys_clock_settime(int clk, void *tp);

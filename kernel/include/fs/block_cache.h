@@ -9,7 +9,7 @@
 #define BCACHE_MAX_BLOCKS   1024
 #define BCACHE_HASH_BUCKETS 1024
 #define PCACHE_PAGE_SIZE    4096
-#define PCACHE_MAX_PAGES    128
+#define PCACHE_MAX_PAGES    1024
 #define PCACHE_HASH_BUCKETS 128
 
 typedef struct bcache_entry {
@@ -40,6 +40,8 @@ typedef struct bcache {
     pcache_entry_t  *page_pool;
     int              pool_size;
     int              page_pool_size;
+    size_t           dirty_blocks;
+    size_t           dirty_pages;
     spinlock_t       lock;
     bcache_entry_t   lru_head;
     bcache_entry_t   lru_tail;
