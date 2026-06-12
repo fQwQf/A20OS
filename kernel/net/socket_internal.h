@@ -22,6 +22,7 @@ struct tcp_pcb;
 typedef struct net_msg {
     struct net_msg *next;
     size_t len;
+    size_t off;
     uint8_t addr[NET_SOCKADDR_MAX];
     size_t addrlen;
     uint8_t data[NET_MAX_PAYLOAD];

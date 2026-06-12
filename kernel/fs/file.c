@@ -92,6 +92,34 @@ void vfile_free(vfile_t *vf)
     obj_cache_free(&g_vfile_cache, vf);
 }
 
+void vfile_ref_init(vfile_t *vf, int refs)
+{
+    if (!vf)
+        return;
+    refcount_set(&vf->ref_count, refs);
+}
+
+void vfile_get(vfile_t *vf)
+{
+    if (!vf)
+        return;
+    refcount_inc(&vf->ref_count);
+}
+
+int vfile_ref_read(vfile_t *vf)
+{
+    if (!vf)
+        return 0;
+    return refcount_read(&vf->ref_count);
+}
+
+int vfile_put_ref_only(vfile_t *vf)
+{
+    if (!vf)
+        return 0;
+    return refcount_dec_and_test(&vf->ref_count);
+}
+
 int file_install_at(int fd, vfile_t *vf)
 {
     if (fd < 0 || fd >= GFILE_MAX || !vf)
@@ -138,7 +166,7 @@ vfile_t *vfs_get_file_ref(int fd)
     uint64_t flags = spin_lock_irqsave(&g_file_lock);
     vfile_t *vf = g_files[fd];
     if (vf)
-        refcount_inc(&vf->ref_count);
+        vfile_get(vf);
     spin_unlock_irqrestore(&g_file_lock, flags);
     return vf;
 }
@@ -148,7 +176,7 @@ void vfs_put_file_ref(int fd, vfile_t *vf)
     (void)fd;
     if (!vf)
         return;
-    refcount_dec_and_test(&vf->ref_count);
+    vfile_put_ref_only(vf);
 }
 
 int vfs_ref_fd(int fd)
@@ -161,7 +189,7 @@ int vfs_ref_fd(int fd)
         spin_unlock_irqrestore(&g_file_lock, flags);
         return -EBADF;
     }
-    refcount_inc(&vf->ref_count);
+    vfile_get(vf);
     spin_unlock_irqrestore(&g_file_lock, flags);
     return 0;
 }
@@ -178,7 +206,7 @@ int file_close_prepare(int fd, vfile_t **closed)
         return -EBADF;
     }
 
-    if (refcount_dec_and_test(&vf->ref_count)) {
+    if (vfile_put_ref_only(vf)) {
         g_files[fd] = NULL;
         file_note_free(fd);
         if (closed) *closed = vf;
@@ -196,7 +224,7 @@ int vfs_dupfd(int fd, int minfd)
         return -EBADF;
     }
     vfile_t *vf = g_files[fd];
-    refcount_inc(&vf->ref_count);
+    vfile_get(vf);
     int newfd = file_find_free_from(minfd);
     if (newfd >= 0) {
         g_files[newfd] = vf;
@@ -204,7 +232,7 @@ int vfs_dupfd(int fd, int minfd)
         spin_unlock_irqrestore(&g_file_lock, flags);
         return newfd;
     }
-    refcount_dec_and_test(&vf->ref_count);
+    vfile_put_ref_only(vf);
     spin_unlock_irqrestore(&g_file_lock, flags);
     return -EMFILE;
 }
@@ -230,7 +258,7 @@ int vfs_dup3(int oldfd, int newfd, int flags)
         return -EBUSY;
     }
     g_files[newfd] = g_files[oldfd];
-    refcount_inc(&g_files[newfd]->ref_count);
+    vfile_get(g_files[newfd]);
     file_note_alloc(newfd);
     spin_unlock_irqrestore(&g_file_lock, irqflags);
     return newfd;

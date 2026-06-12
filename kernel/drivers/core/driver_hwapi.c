@@ -7,6 +7,9 @@ static irq_handler_t irq_handlers[256];
 static void         *irq_priv[256];
 static unsigned long irq_flags[256];
 
+/* DRIVER_IRQ_TABLE_FIXED_LIMIT: platform IRQ lines are capped at 256 until the
+ * irq registry is replaced by a dynamically sized irqdomain-style structure. */
+
 int request_irq(uint32_t irq, irq_handler_t handler,
                 unsigned long flags, void *priv) {
     if (irq >= 256 || !handler)

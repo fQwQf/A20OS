@@ -15,6 +15,65 @@
 #include "abi/native/vmo.h"
 #include "cg/cgroup.h"
 
+/*
+ * COW_FAULT_TLB_CONTRACT:
+ * - handle_cow_fault() updates the PTE before dropping the old frame reference.
+ * - A page TLB flush follows every PTE replacement before returning to user.
+ * - The mm_fork() regression guard depends on this ordering when a parent thread
+ *   faults while another thread forks the same mm.
+ */
+/*
+ * MAP_SHARED_FILE_CACHE_CONTRACT:
+ * - Shared file mappings use the canonical page-cache page as the backing frame.
+ * - page_cache_get() pins the page; the pin is released by page_cache_put() when
+ *   the mapping is unmapped, moved, or torn down.
+ * - The page-cache page therefore owns writeback: user writes through the mapped
+ *   PTE update page-cache data directly; fsync/msync mark the page dirty via
+ *   PTE_D scanning and then write it back through vnode->ops->writepage.
+ * - Read() on the same file uses the same page cache, so shared mmap writes are
+ *   visible to read() without an explicit sync.
+ */
+int mm_shared_file_fault(mm_struct_t *mm, vm_area_t *vma, uint64_t page_va,
+                         vfile_t *vf)
+{
+    if (!mm || !vma || !vf || !vf->vnode)
+        return -1;
+
+    uint64_t file_pos = vma->file_offset + (page_va - vma->start);
+    if (file_pos >= vf->vnode->size) {
+        signal_send(proc_current()->pid, SIGBUS);
+        return -1;
+    }
+
+    uint64_t index = file_pos / PAGE_SIZE;
+    page_cache_page_t *pcp = page_cache_get(vf->vnode, index, 1);
+    if (!pcp)
+        return -1;
+
+    if (!page_cache_is_uptodate(pcp)) {
+        if (page_cache_fill_vfile_page(vf, pcp) < 0) {
+            page_cache_put(pcp);
+            return -1;
+        }
+    }
+
+    pfn_t cache_pfn = page_cache_pfn(pcp);
+    if (!pfn_valid(cache_pfn)) {
+        page_cache_put(pcp);
+        return -1;
+    }
+
+    int r = pt_map(mm->pgdir, page_va, pfn_to_phys(cache_pfn), vma->pte_flags);
+    if (r < 0) {
+        page_cache_put(pcp);
+        return -1;
+    }
+
+    mm->rss++;
+    arch_tlb_flush_page(page_va);
+    return 0;
+}
+
 int handle_cow_fault(task_t *t, uint64_t stval) {
     if (!t->mm || !t->mm->pgdir) return -1;
 
@@ -100,6 +159,14 @@ int handle_cow_fault(task_t *t, uint64_t stval) {
  * Called for page faults after COW has been ruled out or was not applicable.
  * Handles lazy stack growth, brk pages, and anonymous VMA pages.
  */
+/*
+ * DEMAND_FAULT_TLB_CONTRACT:
+ * - Stack/brk/anonymous/file/VMO/huge-page demand faults install a PTE, update
+ *   rss/accounting, then flush the faulting page before returning.
+ * - File-backed private faults copy from page cache; shared faults currently
+ *   read through the file into a private frame and therefore do not yet provide
+ *   full MAP_SHARED dirty/writeback coherence.
+ */
 int handle_demand_fault(task_t *t, uint64_t stval) {
     if (!t->mm || !t->mm->pgdir) return -1;
 
@@ -179,36 +246,9 @@ int handle_demand_fault(task_t *t, uint64_t stval) {
             }
 
             if (vma->vm_flags & VM_SHARED) {
-                /*
-                 * MAP_SHARED: bypass page cache to avoid exhaustion.
-                 * The page cache has limited slots (1024) and eviction is
-                 * blocked once frames are shared with page tables, causing
-                 * SIGSEGV for large mappings.  Instead, allocate a fresh
-                 * page and fill it directly from the file.
-                 */
-                pfn_t pfn = pfa_alloc_page();
-                if (pfn == PFN_NONE) {
-                    vfs_put_file_ref(vma->file_fd, vf);
-                    return -1;
-                }
-                memset(pfn_to_virt(pfn), 0, PAGE_SIZE);
-
-                if (vf->ops && vf->ops->lseek && vf->ops->read) {
-                    size_t saved = vf->offset;
-                    vf->ops->lseek(vf, (long)file_pos, SEEK_SET);
-                    int nr = vf->ops->read(vf, (char *)pfn_to_virt(pfn),
-                                           PAGE_SIZE);
-                    vf->ops->lseek(vf, (long)saved, SEEK_SET);
-                    (void)nr;
-                }
+                int r = mm_shared_file_fault(t->mm, vma, page_va, vf);
                 vfs_put_file_ref(vma->file_fd, vf);
-
-                int r = pt_map(t->mm->pgdir, page_va, pfn_to_phys(pfn),
-                               vma->pte_flags);
-                if (r < 0) {
-                    frame_put(pfn);
-                    return -1;
-                }
+                return r;
             } else {
                 page_cache_page_t *pcp = page_cache_get(vf->vnode,
                                                          file_pos / PAGE_SIZE, 1);

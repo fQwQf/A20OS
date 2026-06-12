@@ -747,6 +747,8 @@ static int fat32_vn_rmdir(vnode_t *dir, const char *name) {
     return 0;
 }
 
+static vfile_t *fat32_open_vnode(vnode_t *vn, int flags);
+
 static vnode_ops_t g_fat32_vnode_ops = {
     .lookup   = fat32_lookup,
     .create   = fat32_vn_create,
@@ -759,6 +761,7 @@ static vnode_ops_t g_fat32_vnode_ops = {
     .writepage = fat32_vn_writepage,
     .chmod    = fat32_vn_chmod,
     .chown    = fat32_vn_chown,
+    .open     = fat32_open_vnode,
     .release  = fat32_release_vn,
 };
 
@@ -1233,7 +1236,7 @@ void fat32_unmount(vnode_t *root) {
  * Called by vfs.c when opening files on a FAT32 mount
  * ============================================================ */
 
-vfile_t *fat32_open_vnode(vnode_t *vn, int flags) {
+static vfile_t *fat32_open_vnode(vnode_t *vn, int flags) {
     fat32_vnode_priv_t *fp = (fat32_vnode_priv_t *)vn->fs_data;
     fat32_fctx_t *fc = (fat32_fctx_t *)kmalloc(sizeof(fat32_fctx_t));
     if (!fc) return NULL;
@@ -1254,7 +1257,7 @@ vfile_t *fat32_open_vnode(vnode_t *vn, int flags) {
     vnode_get(vn);
     vf->flags     = flags;
     vf->offset    = fc->file_off;
-    refcount_set(&vf->ref_count, 1);
+    vfile_ref_init(vf, 1);
     vf->ops       = &g_fat32_fops;
     vf->priv      = fc;
     return vf;

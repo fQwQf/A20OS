@@ -201,6 +201,16 @@ static virtio_blk_req_t *virtio_blk_find_req_locked(virtio_blk_inst_t *inst, uin
     return NULL;
 }
 
+/*
+ * VIRTIO_BLK_COMPLETION_MODEL:
+ * - Request submission records the waiter and kicks the device under inst->lock.
+ * - Completion drains used-ring entries, records req->done/result, and wakes a
+ *   blocked waiter through proc_make_ready().
+ * - kernel_progress_poll() may call virtio_blk_poll_all() as a compatibility
+ *   bridge, but scheduler/idle code must not call this driver directly.
+ * - The target model is IRQ or bottom-half completion that invokes the same
+ *   wake path without requiring scheduler hot-path polling.
+ */
 static void virtio_blk_complete_used_locked(virtio_blk_inst_t *inst) {
     virtio_blk_t *blk = &inst->blk;
     virtq_used_t *used = blk->used;

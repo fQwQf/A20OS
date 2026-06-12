@@ -1,6 +1,9 @@
 #define LINUX_SYSCALL_DECLARE_PROTOTYPES
 #include "syscall_impl.h"
 
+/* LINUX_ABI_NAMESPACE_STUB_BOUNDARY: namespace syscalls are compatibility
+ * paths over current task/fs state; no full Linux namespace object model exists. */
+
 int64_t sys_execveat(int dirfd, const char *path, char **argv, char **envp, int flags)
 {
     if (!path) return -EFAULT;
@@ -14,10 +17,10 @@ int64_t sys_execveat(int dirfd, const char *path, char **argv, char **envp, int 
         char full[MAX_PATH_LEN];
         int pr = syscall_path_at(dirfd, kpath, full, sizeof(full));
         if (pr < 0) return pr;
-        return proc_exec(full, argv, envp);
+        return abi_core_proc_exec(full, argv, envp);
     }
 
-    return proc_exec(kpath, argv, envp);
+    return abi_core_proc_exec(kpath, argv, envp);
 }
 
 int64_t sys_chroot(const char *path)

@@ -35,6 +35,7 @@ static int g_ramfs_ready = 0;
 
 static vnode_ops_t g_ramfs_vnode_ops;
 static vfile_ops_t g_ramfs_fops;
+static vfile_t *ramfs_open_vnode(vnode_t *vn, int flags);
 
 static ramfs_inode_t *ramfs_find_inode_by_inum(int inum) {
     for (int i = 0; i < RAMFS_MAX_INODES; i++) {
@@ -571,6 +572,7 @@ static vnode_ops_t g_ramfs_vnode_ops = {
     .writepage = ramfs_vnode_writepage,
     .chmod = ramfs_vnode_chmod,
     .chown = ramfs_vnode_chown,
+    .open = ramfs_open_vnode,
 };
 
 static int ramfs_fread(vfile_t *vf, char *buf, size_t count) {
@@ -718,14 +720,14 @@ vnode_t *ramfs_mount_empty(mount_t *mnt) {
     return ramfs_make_vnode(mnt, root);
 }
 
-vfile_t *ramfs_open_vnode(vnode_t *vn, int flags) {
+static vfile_t *ramfs_open_vnode(vnode_t *vn, int flags) {
     vfile_t *vf = vfile_alloc();
     if (!vf) return NULL;
     vf->vnode = vn;
     vnode_get(vn);
     vf->flags = flags;
     vf->offset = (flags & O_APPEND) ? vn->size : 0;
-    refcount_set(&vf->ref_count, 1);
+    vfile_ref_init(vf, 1);
     vf->ops = &g_ramfs_fops;
     return vf;
 }

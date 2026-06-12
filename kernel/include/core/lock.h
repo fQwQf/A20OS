@@ -9,6 +9,25 @@
 #include "proc/proc.h"
 #endif
 
+/*
+ * Global lock order contract (outermost -> innermost):
+ *   cg_node.lock -> proc_lock -> runq_lock -> pfa.lock
+ *   proc_lock -> runq_lock
+ *   proc_lock -> files_struct.lock -> VFS global-file/vnode locks
+ *   proc_lock -> mm_struct.lock
+ *   proc_lock -> a20_handle_table.lock
+ *   driver registry/IRQ locks -> device-private locks
+ *   g_lwip_lock -> virtio-net nonblocking send/recv paths only
+ *
+ * Rules:
+ * - Never acquire proc_lock while holding a runqueue lock.
+ * - Never block while holding a spinlock or while interrupts are disabled.
+ * - Do not call into VFS, memory allocation, or scheduler paths while holding a
+ *   device or lwIP lock unless the callee is documented nonblocking.
+ * - New locks must either fit this order or document a narrower local order next
+ *   to the lock definition before use.
+ */
+
 typedef struct spinlock {
     volatile int locked;
 #if CONFIG_DEBUG_LOCKS

@@ -1136,6 +1136,8 @@ static int ext4_vn_chown(vnode_t *vn, int uid, int gid) {
     return 0;
 }
 
+static vfile_t *ext4_open_vnode(vnode_t *vn, int flags);
+
 static vnode_ops_t g_ext4_vnode_ops = {
     .lookup   = ext4_lookup,
     .create   = ext4_vn_create,
@@ -1150,6 +1152,7 @@ static vnode_ops_t g_ext4_vnode_ops = {
     .writepage = ext4_vn_writepage,
     .chmod    = ext4_vn_chmod,
     .chown    = ext4_vn_chown,
+    .open     = ext4_open_vnode,
     .release  = ext4_release_vn,
 };
 
@@ -1551,7 +1554,7 @@ void ext4_unmount(vnode_t *root) {
  * VFS open hook: create vfile for an ext4 vnode
  * ================================================================ */
 
-vfile_t *ext4_open_vnode(vnode_t *vn, int flags) {
+static vfile_t *ext4_open_vnode(vnode_t *vn, int flags) {
     ext4_vnode_priv_t *fp = (ext4_vnode_priv_t *)vn->fs_data;
     ext4_fctx_t *fc = (ext4_fctx_t *)kmalloc(sizeof(ext4_fctx_t));
     if (!fc) return NULL;
@@ -1576,7 +1579,7 @@ vfile_t *ext4_open_vnode(vnode_t *vn, int flags) {
     vnode_get(vn);
     vf->flags     = flags;
     vf->offset    = fc->file_off;
-    refcount_set(&vf->ref_count, 1);
+    vfile_ref_init(vf, 1);
     vf->ops       = &g_ext4_fops;
     vf->priv      = fc;
     return vf;

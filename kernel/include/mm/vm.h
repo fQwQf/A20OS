@@ -7,6 +7,7 @@
 #include "core/lock.h"
 
 struct a20_vmo;
+struct vnode;
 
 #define VM_READ      (1UL << 0)
 #define VM_WRITE     (1UL << 1)
@@ -36,16 +37,54 @@ typedef struct vm_area {
     uint64_t        file_offset;
     struct a20_vmo *vmo;
     uint64_t        vmo_offset;
+    struct vnode   *file_vnode;     /* referenced vnode for VM_FILE+VM_SHARED */
     struct vm_area *prev;
     struct vm_area *next;
 } vm_area_t;
 
 /*
- * mm_struct lifetime:
- * - refcount is shared by tasks/threads that use the same address space.
- * - mm_destroy() drops a reference and frees VMAs/page tables at zero.
- * - VMA list and page table updates are not yet protected by a formal mm lock;
- *   threaded user address spaces and SMP require that before broadening use.
+ * mm_struct lifetime and address-space invariants:
+ * - refcount is shared by every task/thread that uses the same address space.
+ *   A task_t may store mm == NULL only for kernel-only tasks or after teardown
+ *   has detached it from user memory.
+ * - mm_destroy() drops one reference. The final reference owns destruction of
+ *   all VMAs, VMA-backed resources, user page-table leaves, and the user page
+ *   table itself; callers must not keep VMA or pgdir pointers after dropping the
+ *   last reference.
+ * - mmap is an ordered VMA list owned by the mm. VMA insertion, removal, split,
+ *   merge, and resource release must preserve non-overlap and must account
+ *   total_vm/rss/locked_vm consistently with mapped pages.
+ * - pgdir belongs to the mm. Page-table writers must pair permission or mapping
+ *   changes with the TLB flush required for the affected address space before
+ *   user mode can observe stale translations.
+ * - mm->lock is the intended serialization point for VMA list and page-table
+ *   mutations. Some current paths still rely on single-threaded execution or
+ *   narrower local locking; threaded user address spaces and SMP require those
+ *   paths to be converted before broadening use.
+ *
+ * MM_LOCK_MODEL:
+ * - Writers must hold mm->lock for mmap list mutations and user page-table
+ *   mutations: mm_mmap/mm_mmap_file, mm_munmap, mm_mprotect, mm_mremap,
+ *   mm_brk shrink, mm_fork COW setup, demand fault installs, COW fault installs,
+ *   huge-page demotion, exec replacement, and exit teardown.
+ * - Read-only VMA walks may run without mm->lock only when the caller owns the
+ *   task/mm exclusively or when the walk cannot race with mmap writers. Shared
+ *   address-space readers need either mm->lock, a pinned VMA/page-cache object,
+ *   or a future RCU-style VMA lifetime scheme.
+ * - Page-table writers must publish the new PTE before dropping the object/page
+ *   reference it replaces and must flush the affected TLB range before returning
+ *   to user mode. Permission relax/tighten, unmap, demote, demand fault, file
+ *   mmap, COW, and dirty-bit updates are all page-table writes.
+ * - File VMAs own one fd reference and, for shared mappings, a referenced vnode
+ *   in file_vnode. Private file faults copy from page cache; shared file faults
+ *   map the canonical page-cache page directly and pin it for the lifetime of
+ *   the mapping. Dirty PTEs are synced to the page cache before fsync/msync
+ *   writeback so shared mmap writes are visible through read(), fsync(), and
+ *   fork-shared cloning.
+ * - OOM/reclaim must not free frames still reachable from task->mm, VMA lists,
+ *   page tables, page cache refs, VMO refs, or Native handles. Reclaim may only
+ *   choose unpinned cache/slab objects or kill a task and let normal exit/mm
+ *   teardown release memory.
  */
 typedef struct mm_struct {
     spinlock_t lock;
@@ -71,6 +110,8 @@ vm_area_t *mm_find_vma(mm_struct_t *mm, uint64_t addr);
 uint64_t   mm_find_gap(mm_struct_t *mm, uint64_t hint, size_t len);
 void       mm_insert_vma(mm_struct_t *mm, vm_area_t *newv);
 int        mm_split_vma_at(mm_struct_t *mm, uint64_t addr);
+
+void mm_sync_shared_dirty_for_vnode(struct vnode *vn);
 
 uint64_t mm_mmap(mm_struct_t *mm, uint64_t addr, size_t len,
                  int prot, int flags);

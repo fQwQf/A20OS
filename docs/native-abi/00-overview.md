@@ -23,7 +23,7 @@ kernel/abi/linux/    Linux-compatible ABI subset
 kernel/abi/native/   A20OS native ABI
 ```
 
-Linux ABI 继续作为主用户态接口。Native ABI 已完成全部 90 个 syscall 的内核侧实现和用户态 musl 移植。
+Linux ABI 继续作为主用户态接口。Native ABI 已完成全部 90 个 syscall 的内核侧入口和用户态 musl 移植；Debug 分区当前是受限兼容实现，不等价于完整 ptrace 语义。
 
 ## 核心原则
 
@@ -185,14 +185,14 @@ Native ABI 一旦稳定，需要遵守：
 
 ## 实现状态
 
-全部 90 个 syscall 已完成内核侧实现（`sys_core.c` + `sys_phase2.c`），无 stub 残留。
+全部 90 个 syscall 已完成内核侧入口（`sys_core.c` + `sys_phase2.c`）。其中 Debug 分区已能创建 debug handle、读写寄存器快照和映射目标内存，但仍是受限兼容实现；尚未声明完整 stop/resume/watchpoint 或 ptrace 级语义。
 
 已完成的工作：
 
 | 组件 | 文件 | 行数 | 状态 |
 |------|------|------|------|
 | 核心 syscall | `sys_core.c` | 771 | ✅ 完成 |
-| Phase 2 syscall | `sys_phase2.c` | ~1750 | ✅ 完成 |
+| Phase 2 syscall | `sys_phase2.c` | ~1750 | ✅ 完成，Debug 分区受限 |
 | Handle table | `handle_table.c` | 330 | ✅ 完成 |
 | 启动协议 | `startup.c` | 105 | ✅ 完成 |
 | Channel IPC | `a20_channel.c` | 189 | ✅ 完成 |

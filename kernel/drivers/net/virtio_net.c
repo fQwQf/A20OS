@@ -126,6 +126,15 @@ static void virtio_net_kick(virtio_net_inst_t *net, int qidx) {
     mb();
 }
 
+static void virtio_net_wait_for_tx_progress(void)
+{
+    task_t *cur = proc_current();
+    if (cur)
+        proc_yield();
+    else
+        __asm__ volatile("nop");
+}
+
 static void virtio_net_submit_rx_locked(virtio_net_inst_t *net, uint16_t slot) {
     virtio_net_queue_t *q = &net->rxq;
     virtq_desc_t *desc = queue_desc(net, q);
@@ -322,7 +331,7 @@ int virtio_net_send(int idx, const void *packet, size_t len, int nonblock) {
             net->tx_drops++;
             return -1;
         }
-        __asm__ volatile("nop");
+        virtio_net_wait_for_tx_progress();
     }
 
     uint8_t *buf = net->tx_buf[slot];
@@ -375,7 +384,7 @@ int virtio_net_send(int idx, const void *packet, size_t len, int nonblock) {
             net->tx_drops++;
             return -1;
         }
-        __asm__ volatile("nop");
+        virtio_net_wait_for_tx_progress();
     }
 }
 

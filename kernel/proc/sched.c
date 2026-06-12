@@ -6,10 +6,10 @@
 #include "core/string.h"
 #include "core/stdio.h"
 #include "core/smp.h"
-#include "drivers/block/virtio_blk.h"
-#include "net/lwip_stack.h"
+#include "core/progress.h"
 #include "proc/signal.h"
 #include "cg/cgroup.h"
+#include "cg/cgroup_impl.h"
 #ifdef CONFIG_ABI_NATIVE
 #include "abi/native/ipc_internal.h"
 #endif
@@ -21,6 +21,22 @@ typedef struct proc_runq {
     uint32_t bitmap;
     unsigned nr_running;
 } proc_runq_t;
+
+/*
+ * SCHEDULER_CONCURRENCY_PREREQS:
+ * - secondary CPU bootstrap must call smp_secondary_init(), set a unique
+ *   arch_current_cpu_id(), initialize that CPU's idle task/current slot, then
+ *   enter sched() with interrupts enabled.
+ * - IPI reschedule must be safe from any CPU after proc_make_ready() publishes a
+ *   remote READY task and before the target CPU picks it from its runqueue.
+ * - Cross-CPU wakeup must hold proc_lock before choosing target cpu_id, then
+ *   acquire only the target runqueue lock for enqueue. Reverse order is banned.
+ * - context_switch() must be the only path that publishes PROC_RUNNING for a
+ *   runnable task; proc_runq_pick_locked() must clear on_rq before that point.
+ * - Timer wake, signal wake, futex wake, wait queue wake, fork/exec/wait, and
+ *   exit/reap must all preserve TASK_STATE_MUTATION_CONTRACT before NR_CPUS>1
+ *   may be enabled without ALLOW_UNVERIFIED_SMP.
+ */
 
 static proc_runq_t sched_runq[CONFIG_NR_CPUS];
 static uint64_t next_wake_scan = SCHED_NO_DEADLINE;
@@ -82,21 +98,45 @@ uint64_t proc_next_timer_interval(uint64_t now)
     return delta;
 }
 
+#if CONFIG_NR_CPUS >= 32
+#define SCHED_CPU_MASK_ALL (~0U)
+#else
+#define SCHED_CPU_MASK_ALL ((1U << CONFIG_NR_CPUS) - 1U)
+#endif
+
+static uint32_t sched_task_cpu_mask(task_t *t)
+{
+    uint32_t mask = SCHED_CPU_MASK_ALL;
+
+    if (t)
+        mask &= t->cpus_allowed;
+
+    if (t && t->cgroup) {
+        cg_node_t *node = (cg_node_t *)t->cgroup;
+        mask &= node->res.cpuset.effective_cpus;
+    }
+
+    return mask & SCHED_CPU_MASK_ALL;
+}
+
 unsigned proc_sched_select_cpu(task_t *t)
 {
     unsigned current = cpu_current_id();
     if (CONFIG_NR_CPUS <= 1)
         return current;
 
-    if (t && t->cgroup)
-        return cg_cpuset_select_cpu(t->cgroup);
+    uint32_t mask = sched_task_cpu_mask(t);
+    if (!mask)
+        return current;
 
-    if (t && t == proc_current())
+    if (t && t == proc_current() && current < 32 && (mask & (1U << current)))
         return current;
 
     unsigned best = current;
-    unsigned best_load = sched_runq[current].nr_running;
-    for (unsigned cpu = 0; cpu < CONFIG_NR_CPUS; cpu++) {
+    unsigned best_load = ~0U;
+    for (unsigned cpu = 0; cpu < CONFIG_NR_CPUS && cpu < 32; cpu++) {
+        if (!(mask & (1U << cpu)))
+            continue;
         if (sched_runq[cpu].nr_running < best_load) {
             best = cpu;
             best_load = sched_runq[cpu].nr_running;
@@ -406,15 +446,9 @@ void context_switch(task_t *next) {
 void sched(void) {
     uint64_t now = timer_get_ticks();
 
-    /* Virtio block devices in this kernel are completion-polled.  Poll before
-     * selecting a task so I/O waiters can be made runnable even when the CPU
-     * never reaches the idle loop under sustained disk workloads such as
-     * iozone. */
-    virtio_blk_poll_all();
-
-    static uint64_t sched_net_poll_counter;
-    if ((++sched_net_poll_counter & 0x3) == 0)
-        a20_lwip_poll();
+    /* Scheduler-visible progress is abstracted behind core/progress so sched()
+     * does not own block or network device semantics. */
+    kernel_progress_poll(KERNEL_PROGRESS_SCHED);
 
     /* Timer scanning: only scan when a deadline has actually been reached,
      * avoiding O(n) traversal on every sched() call. */

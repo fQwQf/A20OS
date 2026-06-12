@@ -22,6 +22,18 @@
 #include "netif/ethernet.h"
 #include "netif/etharp.h"
 
+/*
+ * LWIP_NO_THREAD_PROGRESS_CONTRACT:
+ * - NO_SYS lwIP progress consists of sys_check_timeouts(), virtio-net TX
+ *   completion cleanup, RX frame delivery into netif input, and netif_poll().
+ * - a20_lwip_poll()/a20_lwip_poll_locked() are the only generic progress
+ *   entries. Scheduler/idle access them only via kernel_progress_poll().
+ * - g_lwip_lock serializes lwIP core state. While holding it, callers may use
+ *   only nonblocking virtio-net send/recv/progress paths; blocking driver calls
+ *   or reverse driver->lwIP lock acquisition are forbidden.
+ * - Network smoke must cover timeout advancement, RX/TX delivery, DNS, UDP, TCP,
+ *   and ICMP-facing paths before removing the compatibility poll bridge.
+ */
 static int g_lwip_ready;
 static spinlock_t g_lwip_lock = SPINLOCK_INIT;
 static struct netif g_netifs[VIRTIO_NET_MAX_DEVS];

@@ -63,6 +63,7 @@ int net_enqueue_msg_locked(net_socket_t *dst, const void *buf, size_t len,
     memset(m, 0, sizeof(*m));
     memcpy(m->data, buf, len);
     m->len = len;
+    m->off = 0;
     if (addr && addrlen) {
         if (addrlen > NET_SOCKADDR_MAX)
             addrlen = NET_SOCKADDR_MAX;
@@ -150,17 +151,17 @@ int net_dequeue_msg_locked(net_socket_t *s, void *buf, size_t len,
             return 0;
         return -EAGAIN;
     }
-    size_t n = m->len < len ? m->len : len;
-    memcpy(buf, m->data, n);
+    size_t avail = m->len - m->off;
+    size_t n = avail < len ? avail : len;
+    memcpy(buf, m->data + m->off, n);
     if (addr && addrlen && *addrlen > 0) {
         size_t alen = m->addrlen < *addrlen ? m->addrlen : *addrlen;
         memcpy(addr, m->addr, alen);
         *addrlen = alen;
     }
 
-    if (s->type == SOCK_STREAM && n < m->len) {
-        memmove(m->data, m->data + n, m->len - n);
-        m->len -= n;
+    if (s->type == SOCK_STREAM && n < avail) {
+        m->off += n;
         return (int)n;
     }
 

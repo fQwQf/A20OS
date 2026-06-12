@@ -145,7 +145,7 @@ int memfd_create_file(int flags)
     vn->fs_data = mf;
     vf->vnode = vn;
     vf->flags = O_RDWR;
-    refcount_set(&vf->ref_count, 1);
+    vfile_ref_init(vf, 1);
     vf->ops = &g_memfile_fops;
     vf->priv = mf;
     if (!(flags & 0x2U))
