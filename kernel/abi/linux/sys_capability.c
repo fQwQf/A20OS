@@ -1,5 +1,8 @@
 #include "syscall_impl.h"
 
+/* LINUX_ABI_CAPABILITY_STUB_BOUNDARY: capget/capset map to A20 task credentials
+ * and deliberately do not implement the complete Linux capability namespace. */
+
 #define LINUX_CAPABILITY_VERSION_1 0x19980330U
 #define LINUX_CAPABILITY_VERSION_2 0x20071026U
 #define LINUX_CAPABILITY_VERSION_3 0x20080522U

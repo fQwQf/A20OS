@@ -6,6 +6,7 @@
 #include "proc/proc_internal.h"
 
 #define LINUX_POLL_WAIT_TICKS (MS_TO_TICKS(1) ? MS_TO_TICKS(1) : 1)
+#define LINUX_POLL_ACTIVE_YIELDS 2
 
 static uint64_t linux_poll_wait_quantum(void)
 {
@@ -13,10 +14,16 @@ static uint64_t linux_poll_wait_quantum(void)
     return ticks ? ticks : 1;
 }
 
-static void linux_poll_sleep_until(uint64_t deadline, int has_deadline)
+static void linux_poll_sleep_until(uint64_t deadline, int has_deadline,
+                                   int yield_only)
 {
     task_t *t = proc_current();
     if (!t) {
+        proc_yield();
+        return;
+    }
+
+    if (yield_only) {
         proc_yield();
         return;
     }
@@ -576,14 +583,14 @@ int64_t sys_ppoll(void *fds, int nfds, void *tmo, void *sigmask) {
             uint64_t until = timer_get_ticks() + (ticks ? ticks : 1);
             while (timer_get_ticks() < until) {
                 if (signal_task_has_unblocked(t)) PPOLL_SIGNAL_RETURN(-ERESTARTSYS);
-                linux_poll_sleep_until(until, 1);
+                linux_poll_sleep_until(until, 1, 0);
             }
             if (signal_task_has_unblocked(t)) PPOLL_SIGNAL_RETURN(-ERESTARTSYS);
             PPOLL_RETURN(0);
         }
         for (;;) {
             if (signal_task_has_unblocked(t)) PPOLL_SIGNAL_RETURN(-ERESTARTSYS);
-            linux_poll_sleep_until(0, 0);
+            linux_poll_sleep_until(0, 0, 0);
         }
     }
     if (!pfds) PPOLL_RETURN(-EFAULT);
@@ -600,6 +607,7 @@ int64_t sys_ppoll(void *fds, int nfds, void *tmo, void *sigmask) {
     }
     uint64_t deadline = timer_get_ticks() + (timeout_ticks ? timeout_ticks : 1);
 
+    int yield_budget = LINUX_POLL_ACTIVE_YIELDS;
     for (;;) {
         int ready = 0;
         for (int i = 0; i < nfds; i++) {
@@ -618,7 +626,9 @@ int64_t sys_ppoll(void *fds, int nfds, void *tmo, void *sigmask) {
         if (has_timeout && timeout_ticks == 0) PPOLL_RETURN(0);
         if (has_timeout && timer_get_ticks() >= deadline) PPOLL_RETURN(0);
         if (signal_task_has_unblocked(t)) PPOLL_SIGNAL_RETURN(-EINTR);
-        linux_poll_sleep_until(deadline, has_timeout);
+        linux_poll_sleep_until(deadline, has_timeout, yield_budget > 0);
+        if (yield_budget > 0)
+            yield_budget--;
     }
 #undef PPOLL_RETURN
 #undef PPOLL_SIGNAL_RETURN
@@ -639,13 +649,13 @@ int64_t sys_poll(void *fds, int nfds, int timeout) {
             uint64_t until = timer_get_ticks() + ticks;
             while (timer_get_ticks() < until) {
                 if (signal_task_has_unblocked(t)) return -ERESTARTSYS;
-                linux_poll_sleep_until(until, 1);
+                linux_poll_sleep_until(until, 1, 0);
             }
             return signal_task_has_unblocked(t) ? -ERESTARTSYS : 0;
         }
         for (;;) {
             if (signal_task_has_unblocked(t)) return -ERESTARTSYS;
-            linux_poll_sleep_until(0, 0);
+            linux_poll_sleep_until(0, 0, 0);
         }
     }
     if (!pfds) return -EFAULT;
@@ -658,6 +668,7 @@ int64_t sys_poll(void *fds, int nfds, int timeout) {
             timeout_ticks = 1;
     }
     uint64_t deadline = timer_get_ticks() + timeout_ticks;
+    int yield_budget = LINUX_POLL_ACTIVE_YIELDS;
     for (;;) {
         int ready = 0;
         for (int i = 0; i < nfds; i++) {
@@ -676,7 +687,9 @@ int64_t sys_poll(void *fds, int nfds, int timeout) {
         if (has_timeout && timeout == 0) return 0;
         if (has_timeout && timer_get_ticks() >= deadline) return 0;
         if (signal_task_has_unblocked(t)) return -ERESTARTSYS;
-        linux_poll_sleep_until(deadline, has_timeout);
+        linux_poll_sleep_until(deadline, has_timeout, yield_budget > 0);
+        if (yield_budget > 0)
+            yield_budget--;
     }
 }
 
@@ -753,6 +766,7 @@ int64_t sys_select(int nfds, void *readfds, void *writefds,
     }
     uint64_t deadline = timer_get_ticks() + (timeout_ticks ? timeout_ticks : 1);
 
+    int yield_budget = LINUX_POLL_ACTIVE_YIELDS;
     for (;;) {
         int ready_count = 0;
 
@@ -790,7 +804,9 @@ int64_t sys_select(int nfds, void *readfds, void *writefds,
         }
         if (signal_task_has_unblocked(t))
             return -ERESTARTSYS;
-        linux_poll_sleep_until(deadline, has_timeout);
+        linux_poll_sleep_until(deadline, has_timeout, yield_budget > 0);
+        if (yield_budget > 0)
+            yield_budget--;
     }
 }
 
@@ -836,6 +852,7 @@ int64_t sys_pselect6(int nfds, void *readfds, void *writefds,
     } \
     return (v); \
 } while (0)
+    int yield_budget = LINUX_POLL_ACTIVE_YIELDS;
     for (;;) {
         int ready_count = 0;
 
@@ -873,7 +890,9 @@ int64_t sys_pselect6(int nfds, void *readfds, void *writefds,
         }
         if (signal_task_has_unblocked(t))
             PSELECT_SIGNAL_RETURN(-EINTR);
-        linux_poll_sleep_until(deadline, has_timeout);
+        linux_poll_sleep_until(deadline, has_timeout, yield_budget > 0);
+        if (yield_budget > 0)
+            yield_budget--;
     }
 #undef PSELECT_RETURN
 #undef PSELECT_SIGNAL_RETURN

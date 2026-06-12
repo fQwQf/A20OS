@@ -9,7 +9,9 @@
  *   path_open, handle_read, handle_write, handle_stat,
  *   clock_get.
  *
- * Still stub (returns NOT_SUPPORTED): task_spawn, and all Phase 2+ syscalls.
+ * Current limitations: feature_test can report unsupported optional features;
+ * Debug ABI calls in sys_phase2.c are intentionally limited compatibility
+ * implementations until ptrace-grade debug semantics are specified.
  *
  * Design references (see docs/native-abi/):
  *   03-handle.md §4 — syscall operation semantics
@@ -32,6 +34,7 @@
 #include "fs/fdtable.h"
 #include "sys/usercopy.h"
 
+#include "abi/core_api.h"
 #include "abi/native/types.h"
 #include "abi/native/errno.h"
 #include "abi/native/rights.h"

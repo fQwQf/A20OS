@@ -280,6 +280,5 @@ typedef struct ext4_fctx {
 
 vnode_t *ext4_mount(bcache_t *bc);
 void     ext4_unmount(vnode_t *root);
-vfile_t *ext4_open_vnode(vnode_t *vn, int flags);
 
 #endif

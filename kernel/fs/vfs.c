@@ -40,167 +40,28 @@
 #include "net/socket.h"
 
 
-static vnode_t *vfs_resolve_no_follow_final(const char *path);
+vnode_t *vfs_resolve_no_follow_final(const char *path);
+
+/*
+ * VFS_CONCURRENCY_SMOKE_MATRIX:
+ * - Static gate covers close/read/write reference helpers, fd dup/close paths,
+ *   rename/unlink/open dcache invalidation, symlink loop handling, and
+ *   mount/unmount root-reference release rules.
+ * - Runtime expansion should add parallel close/read/write, rename/unlink/open,
+ *   symlink loop, mount/unmount, and dup/close_range smoke once the harness can
+ *   drive filesystem workloads under QEMU deterministically.
+ */
 
 static void vfs_release_open_file_locks(vfile_t *vf, int gfd);
 
-static int g_lookup_errno;
+int g_lookup_errno;
 
-/* ============================================================
- * VFS path resolution → vnode
- * ============================================================ */
-
-
-
-/* Resolve an absolute path within a vnode tree */
-static vnode_t *vnode_lookup_path(vnode_t *root, const char *path) {
-    if (!root) return NULL;
-    g_lookup_errno = 0;
-
-    vnode_t *cur = root;
-    vnode_get(cur);
-
-    if (!path || !*path) return cur;
-
-    char buf[MAX_PATH_LEN];
-    strncpy(buf, path, MAX_PATH_LEN - 1);
-    buf[MAX_PATH_LEN - 1] = '\0';
-
-    char *p = buf;
-    while (*p == '/') p++;
-
-    int symlink_depth = 0;
-
-    while (*p) {
-        char *sep = strchr(p, '/');
-        if (sep) *sep = '\0';
-
-        if (*p == '\0') {
-        } else if (strcmp(p, ".") == 0) {
-            /* stay */
-        } else if (strcmp(p, "..") == 0) {
-            if (cur->parent && cur->parent != cur) {
-                vnode_t *parent = cur->parent;
-                vnode_get(parent);
-                vnode_put(cur);
-                cur = parent;
-            }
-        } else {
-            if (strlen(p) >= MAX_NAME_LEN) {
-                vnode_put(cur);
-                g_lookup_errno = -ENAMETOOLONG;
-                return NULL;
-            }
-            if (cur->type != VFS_FT_DIR || !cur->ops || !cur->ops->lookup) {
-                vnode_put(cur);
-                g_lookup_errno = -ENOTDIR;
-                return NULL;
-            }
-            if (vfs_vnode_permission(cur, X_OK) < 0) {
-                vnode_put(cur);
-                g_lookup_errno = -EACCES;
-                return NULL;
-            }
-            vnode_t *next = vfs_dcache_lookup(cur, p);
-            if (!next) {
-                int r = cur->ops->lookup(cur, p, &next);
-                if (r < 0 || !next) {
-                    vnode_put(cur);
-                    g_lookup_errno = r < 0 ? r : -ENOENT;
-                    return NULL;
-                }
-                vfs_dcache_insert(cur, p, next);
-            }
-            vnode_t *parent = cur;
-            cur = next;
-
-            if (cur->type == VFS_FT_SYMLINK) {
-                if (++symlink_depth > 8) {
-                    vnode_put(parent);
-                    vnode_put(cur);
-                    g_lookup_errno = -ELOOP;
-                    return NULL;
-                }
-                if (!cur->ops || !cur->ops->readlink) {
-                    vnode_put(parent);
-                    vnode_put(cur);
-                    return NULL;
-                }
-                char link_target[MAX_PATH_LEN];
-                int len = cur->ops->readlink(cur, link_target, sizeof(link_target));
-                if (len < 0) {
-                    vnode_put(parent);
-                    vnode_put(cur);
-                    return NULL;
-                }
-                link_target[len] = '\0';
-
-                char rest[MAX_PATH_LEN];
-                if (sep) {
-                    snprintf(rest, sizeof(rest), "%s/%s", link_target, sep + 1);
-                } else {
-                    strncpy(rest, link_target, sizeof(rest) - 1);
-                    rest[sizeof(rest) - 1] = '\0';
-                }
-
-                vnode_t *old = cur;
-                if (link_target[0] == '/') {
-                    cur = root;
-                    vnode_get(cur);
-                } else {
-                    cur = parent;
-                    vnode_get(cur);   /* compensate: we reuse parent, but it gets decremented below */
-                }
-                vnode_put(old);
-                vnode_put(parent);
-
-                strncpy(buf, rest, MAX_PATH_LEN - 1);
-                buf[MAX_PATH_LEN - 1] = '\0';
-                p = buf;
-                while (*p == '/') p++;
-                continue;
-            }
-            vnode_put(parent);
-        }
-
-        if (sep) p = sep + 1;
-        else break;
-    }
-    return cur;
-}
-
-vnode_t *vfs_resolve(const char *path) {
-    task_t *cur = proc_current();
-    const char *cwd = (cur && cur->fs.cwd[0]) ? cur->fs.cwd : "/";
-    return vfs_resolve_at(path, cwd);
-}
-
-vnode_t *vfs_resolve_no_follow(const char *path) {
-    return vfs_resolve_no_follow_final(path);
-}
-
-vnode_t *vfs_resolve_at(const char *path, const char *cwd) {
-    char resolved[MAX_PATH_LEN];
-
-    if (vfs_path_join(cwd, path, resolved, sizeof(resolved)) < 0)
-        return NULL;
-    if (vfs_path_normalize_absolute(resolved) < 0)
-        return NULL;
-
-    /* Find best matching mount */
-    mount_t *mnt = vfs_find_mount(resolved);
-    if (!mnt) return NULL;
-
-    const char *rel = vfs_strip_mount_prefix(resolved, mnt);
-    return vnode_lookup_path(mnt->root, rel);
-}
+/* Path resolution moved to fs/vfs/path_resolution.c */
+extern int g_lookup_errno;
 
 /* ============================================================
  * VFS open / close
  * ============================================================ */
-
-extern vfile_t *fat32_open_vnode(vnode_t *vn, int flags);
-extern vfile_t *ext4_open_vnode(vnode_t *vn, int flags);
 
 int vfs_open(const char *path, int flags, int mode) {
     /* Resolve cwd from current process */
@@ -289,26 +150,11 @@ int vfs_open(const char *path, int flags, int mode) {
         }
     }
 
-    vfile_t *vf = NULL;
-    if (mnt->type == FS_TYPE_FAT32) {
-        vf = fat32_open_vnode(vn, flags);
-    } else if (mnt->type == FS_TYPE_EXT4) {
-        vf = ext4_open_vnode(vn, flags);
-    } else if (mnt->type == FS_TYPE_RAMFS) {
-        vf = ramfs_open_vnode(vn, flags);
-    } else if (mnt->type == FS_TYPE_PROCFS) {
-        extern vfile_t *procfs_open_vnode(vnode_t *vn, int flags);
-        vf = procfs_open_vnode(vn, flags);
-    } else if (mnt->type == FS_TYPE_DEVFS) {
-        vf = devfs_open_vnode(vn, flags);
-    } else if (mnt->type == FS_TYPE_CGROUP) {
-        extern vfile_t *cgroupfs_open_vnode(vnode_t *vn, int flags);
-        vf = cgroupfs_open_vnode(vn, flags);
-    } else if (mnt->type == FS_TYPE_SYSFS) {
-        extern vfile_t *sysfs_open_vnode(vnode_t *vn, int flags);
-        vf = sysfs_open_vnode(vn, flags);
+    if (!vn->ops || !vn->ops->open) {
+        vnode_put(vn);
+        return -ENOSYS;
     }
-
+    vfile_t *vf = vn->ops->open(vn, flags);
     if (!vf) { vnode_put(vn); return -ENOMEM; }
     strncpy(vf->path, resolved, MAX_PATH_LEN - 1);
     vf->path[MAX_PATH_LEN - 1] = '\0';
@@ -588,7 +434,7 @@ int vfs_rmdir(const char *path) {
     return r;
 }
 
-static vnode_t *vfs_resolve_no_follow_final(const char *path) {
+vnode_t *vfs_resolve_no_follow_final(const char *path) {
     if (!path || !*path) return NULL;
 
     task_t *cur = proc_current();
@@ -1268,257 +1114,7 @@ int vfs_fcntl(int fd, int cmd, long arg) {
 #undef VFS_FCNTL_RETURN
 }
 
-/* ============================================================
- * VFS Mount
- * ============================================================ */
-
-static int parse_block_dev(const char *dev, int *out_idx, int *out_part) {
-    if (strncmp(dev, "/dev/vd", 7) != 0) return -1;
-    const char *p = dev + 7;
-    if (*p < 'a' || *p > 'z') return -1;
-    *out_idx = *p - 'a';
-    p++;
-    *out_part = 0;
-    if (*p >= '1' && *p <= '9') {
-        *out_part = *p - '0';
-        p++;
-    }
-    if (*p != '\0') return -1;
-    return 0;
-}
-
-int vfs_mount(const char *dev, const char *path, const char *fstype, int flags, const char *data) {
-    if (!path || !fstype) return -EINVAL;
-    if (strcmp(fstype, "cgroup") == 0 || strcmp(fstype, "cgroup2") == 0) {
-        vnode_t *target = vfs_resolve(path);
-        if (!target) return -ENOENT;
-        int is_dir = target->type == VFS_FT_DIR;
-        vnode_put(target);
-        if (!is_dir) return -ENOTDIR;
-
-        extern vnode_t *cgroupfs_mount(int is_v2, const char *opts, void **out_sb);
-        extern void cgroupfs_unmount(vnode_t *root);
-        int is_v2 = (strcmp(fstype, "cgroup2") == 0);
-        const char *opts = (data && *data) ? data : (dev ? dev : "");
-        void *sb_ptr = NULL;
-        vnode_t *root = cgroupfs_mount(is_v2, opts, &sb_ptr);
-        if (!root) return -ENOMEM;
-
-        mount_t *mnt = vfs_mount_alloc();
-        if (!mnt) { cgroupfs_unmount(root); return -ENOMEM; }
-        strncpy(mnt->path, path, MAX_PATH_LEN - 1);
-        mnt->path[MAX_PATH_LEN - 1] = '\0';
-        mnt->type = FS_TYPE_CGROUP;
-        mnt->flags = flags;
-        mnt->root = root;
-        mnt->root->mnt = mnt;
-        mnt->fs_data = sb_ptr;
-        strncpy(mnt->dev, dev ? dev : "none", sizeof(mnt->dev) - 1);
-        mnt->dev[sizeof(mnt->dev) - 1] = '\0';
-        strncpy(mnt->fstype, fstype, sizeof(mnt->fstype) - 1);
-        mnt->fstype[sizeof(mnt->fstype) - 1] = '\0';
-        if (is_v2) {
-            strncpy(mnt->opts, "rw,memory_recursiveprot", sizeof(mnt->opts) - 1);
-        } else {
-            const char *cg_opts = (data && *data) ? data : "memory,cpuset,cpu,cpuacct";
-            strncpy(mnt->opts, cg_opts, sizeof(mnt->opts) - 1);
-        }
-        mnt->opts[sizeof(mnt->opts) - 1] = '\0';
-        vfs_dcache_invalidate_all();
-        return 0;
-    }
-    for (int i = 0; i < vfs_mount_count(); i++) {
-        mount_t *existing = vfs_mount_at(i);
-        if (existing && strcmp(existing->path, path) == 0) {
-            existing->flags = flags;
-            vfs_dcache_invalidate_all();
-            return 0;
-        }
-    }
-    if (strcmp(fstype, "tmpfs") == 0 || strcmp(fstype, "ramfs") == 0) {
-        vnode_t *target = vfs_resolve(path);
-        if (!target) return -ENOENT;
-        int is_dir = target->type == VFS_FT_DIR;
-        vnode_put(target);
-        if (!is_dir) return -ENOTDIR;
-
-        mount_t *mnt = vfs_mount_alloc();
-        if (!mnt) return -ENOMEM;
-        strncpy(mnt->path, path, MAX_PATH_LEN - 1);
-        mnt->path[MAX_PATH_LEN - 1] = '\0';
-        mnt->type = FS_TYPE_RAMFS;
-        strncpy(mnt->dev, dev ? dev : "none", sizeof(mnt->dev) - 1);
-        mnt->dev[sizeof(mnt->dev) - 1] = '\0';
-        strncpy(mnt->fstype, fstype, sizeof(mnt->fstype) - 1);
-        mnt->fstype[sizeof(mnt->fstype) - 1] = '\0';
-        strncpy(mnt->opts, "rw", sizeof(mnt->opts) - 1);
-        mnt->flags = flags;
-        mnt->root = ramfs_mount_empty(mnt);
-        if (!mnt->root) {
-            vfs_mount_remove(mnt);
-            return -ENOMEM;
-        }
-        mnt->root->mnt = mnt;
-        vfs_dcache_invalidate_all();
-        return 0;
-    }
-    /* Try block device mount: /dev/vdX[N] */
-    {
-        int dev_idx = 0, part_num = 0;
-        if (parse_block_dev(dev, &dev_idx, &part_num) == 0) {
-            block_dev_t *bdev = virtio_blk_get_dev(dev_idx);
-            if (!bdev) return -ENODEV;
-            bcache_t *bc = bcache_create(bdev);
-            if (!bc) return -ENOMEM;
-            int r;
-            if (fstype && fstype[0]) {
-                r = vfs_mount_bc(path, fstype, bc);
-            } else {
-                r = vfs_mount_bc(path, "ext4", bc);
-                if (r < 0) {
-                    bcache_destroy(bc);
-                    bc = bcache_create(bdev);
-                    if (!bc) return -ENOMEM;
-                    r = vfs_mount_bc(path, "vfat", bc);
-                }
-            }
-            if (r < 0) bcache_destroy(bc);
-            return r;
-        }
-    }
-    return -EINVAL;
-}
-
-int vfs_mount_bc(const char *path, const char *fstype, bcache_t *bc) {
-    if (strcmp(fstype, "fat32") == 0 || strcmp(fstype, "vfat") == 0) {
-        if (!bc) { kdebug("[VFS] No bcache for FAT32 mount\n"); return -ENODEV; }
-
-        mount_t *mnt = vfs_mount_alloc();
-        if (!mnt) return -ENOMEM;
-        vnode_t *root = fat32_mount(bc);
-        if (!root) {
-            vfs_mount_remove(mnt);
-            return -EIO;
-        }
-
-        strncpy(mnt->path, path, MAX_PATH_LEN - 1);
-        mnt->path[MAX_PATH_LEN - 1] = '\0';
-        mnt->type  = FS_TYPE_FAT32;
-        strncpy(mnt->dev, "/dev/vda", sizeof(mnt->dev) - 1);
-        strncpy(mnt->fstype, "vfat", sizeof(mnt->fstype) - 1);
-        strncpy(mnt->opts, "rw,relatime,fmask=0022,dmask=0022,codepage=437,iocharset=ascii,shortname=mixed,errors=remount-ro", sizeof(mnt->opts) - 1);
-        mnt->root  = root;
-        mnt->fs_data = bc;
-
-        root->mnt = mnt;
-        vnode_get(root);  /* mount holds a persistent reference */
-
-        kdebug("[VFS] Mounted FAT32 at %s\n", path);
-        vfs_dcache_invalidate_all();
-        return 0;
-    }
-
-    if (strcmp(fstype, "ext4") == 0) {
-        if (!bc) { kdebug("[VFS] No bcache for ext4 mount\n"); return -ENODEV; }
-
-        mount_t *mnt = vfs_mount_alloc();
-        if (!mnt) return -ENOMEM;
-        vnode_t *root = ext4_mount(bc);
-        if (!root) {
-            vfs_mount_remove(mnt);
-            return -EIO;
-        }
-
-        strncpy(mnt->path, path, MAX_PATH_LEN - 1);
-        mnt->path[MAX_PATH_LEN - 1] = '\0';
-        mnt->type  = FS_TYPE_EXT4;
-        strncpy(mnt->dev, "/dev/vda", sizeof(mnt->dev) - 1);
-        strncpy(mnt->fstype, "ext4", sizeof(mnt->fstype) - 1);
-        strncpy(mnt->opts, "rw,relatime", sizeof(mnt->opts) - 1);
-        mnt->root  = root;
-        mnt->fs_data = bc;
-
-        root->mnt = mnt;
-        vnode_get(root);  /* mount holds a persistent reference */
-
-        kdebug("[VFS] Mounted ext4 at %s\n", path);
-        vfs_dcache_invalidate_all();
-        return 0;
-    }
-
-    kdebug("[VFS] Unknown fstype: %s\n", fstype);
-    return -EINVAL;
-}
-
-int vfs_umount(const char *path) {
-    if (!path) return -EINVAL;
-    char norm_path[MAX_PATH_LEN];
-    strncpy(norm_path, path, MAX_PATH_LEN - 1);
-    norm_path[MAX_PATH_LEN - 1] = '\0';
-
-    size_t len = strlen(norm_path);
-    while (len > 1 && norm_path[len - 1] == '/') {
-        norm_path[len - 1] = '\0';
-        len--;
-    }
-
-    for (int i = 0; i < vfs_mount_count(); i++) {
-        mount_t *mnt = vfs_mount_at(i);
-        if (!mnt) continue;
-
-        char mnt_norm[MAX_PATH_LEN];
-        strncpy(mnt_norm, mnt->path, MAX_PATH_LEN - 1);
-        mnt_norm[MAX_PATH_LEN - 1] = '\0';
-        size_t mnt_len = strlen(mnt_norm);
-        while (mnt_len > 1 && mnt_norm[mnt_len - 1] == '/') {
-            mnt_norm[mnt_len - 1] = '\0';
-            mnt_len--;
-        }
-
-        if (strcmp(mnt_norm, norm_path) == 0) {
-            vfs_dcache_invalidate_all();
-            vnode_t *root = mnt->root;
-            if (mnt->type == FS_TYPE_FAT32) {
-                fat32_unmount(root);
-            } else if (mnt->type == FS_TYPE_EXT4) {
-                ext4_unmount(root);
-            }
-            vfs_mount_remove(mnt);
-            vnode_put(root);
-            return 0;
-        }
-    }
-    return -EINVAL;
-}
-
-/* Truncate */
-int vfs_truncate(const char *path, size_t size) {
-    vnode_t *vn = vfs_resolve(path);
-    if (!vn) return -ENOENT;
-    int r = -ENOSYS;
-    if (vn->ops && vn->ops->truncate) r = vn->ops->truncate(vn, size);
-    if (r == 0)
-        page_cache_truncate(vn, size);
-    vnode_put(vn);
-    return r;
-}
-
-int vfs_ftruncate(int fd, size_t size) {
-    vfile_t *vf = vfs_get_file_ref(fd);
-    if (!vf) return -EBADF;
-    int r = 0;
-    if (!vfs_should_write(vf->flags)) r = -EINVAL;
-    else if (!vf->vnode || !vf->vnode->ops || !vf->vnode->ops->truncate) r = -EINVAL;
-    else if ((vf->seals & F_SEAL_SHRINK) && size < vf->vnode->size) r = -EPERM;
-    else if ((vf->seals & F_SEAL_GROW) && size > vf->vnode->size) r = -EPERM;
-    else if (vf->seals & F_SEAL_WRITE) r = -EPERM;
-    else r = vf->vnode->ops->truncate(vf->vnode, size);
-    if (r == 0) {
-        page_cache_truncate(vf->vnode, size);
-    }
-    vfs_put_file_ref(fd, vf);
-    return r;
-}
+/* Mount operations moved to fs/vfs/mount_ops.c */
 
 /* ============================================================
  * VFS init — set up std streams, root ramfs mount
@@ -1644,7 +1240,6 @@ void vfs_init(void) {
     /* Mount procfs at /proc */
     {
         extern vnode_t *procfs_mount(void);
-        extern vfile_t *procfs_open_vnode(vnode_t *vn, int flags);
         vfs_mkdir("/proc", 0755);
         vnode_t *procfs_root = procfs_mount();
         if (procfs_root) {

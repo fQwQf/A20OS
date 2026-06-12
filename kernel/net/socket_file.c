@@ -35,7 +35,10 @@ static int net_vfile_read(vfile_t *vf, char *buf, size_t count) {
         if (r != -EAGAIN || s->nonblock || s->closed || s->peer_closed || s->shut_rd) {
             if (r == -EAGAIN && (s->closed || s->peer_closed || s->shut_rd))
                 r = 0;
+            int recved = (r > 0 && s->type == SOCK_STREAM) ? r : 0;
             spin_unlock_irqrestore(&g_net_lock, irq);
+            if (recved)
+                net_tcp_recved(s, (size_t)recved);
             return r;
         }
         task_t *cur = proc_current();

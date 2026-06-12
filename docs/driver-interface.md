@@ -16,23 +16,19 @@ A20 内核驱动模型采用**混合架构**：板级地址使用宏常量（零
 
 ```
 kernel/
-├── driver/
-│   ├── driver_core.h       # 核心类型定义
-│   ├── driver_class.h      # 设备类接口
-│   ├── driver_hwapi.h      # 硬件访问 API
-│   ├── driver_register.h   # 驱动注册宏
-│   ├── driver_core.c       # 注册/匹配/探测实现
-│   └── driver_hwapi.c      # 中断分发/DMA/时钟实现
-├── bus/
-│   ├── virtio_mmio_bus.c   # VirtIO MMIO 总线
-│   └── pci_bus.c           # PCI 总线 (ECAM)
-├── board/
-│   ├── qemu-virt-rv64/     # QEMU RISC-V 64
-│   ├── qemu-virt-la64/     # QEMU LoongArch 64
-│   ├── qemu-virt-aa64/     # QEMU ARM64
-│   ├── visionfive2/        # StarFive VisionFive2
-│   └── ls2k1000/           # Loongson 2K1000
-└── drv/                    # 具体驱动实现
+├── drivers/
+│   ├── core/               # driver_core/driver_hwapi/driver_class
+│   ├── bus/                # virtio-mmio / PCI bus enumeration
+│   ├── block/              # block devices: virtio-blk, loop, SDIO
+│   ├── char/               # UART / PTY
+│   └── net/                # virtio-net and platform NICs
+└── platform/
+    ├── qemu-virt-riscv64/  # QEMU RISC-V 64
+    ├── qemu-virt-loongarch64/
+    ├── qemu-virt-aarch64/
+    ├── qemu-virt-x86_64/
+    ├── visionfive2/
+    └── ls2k1000/
 ```
 
 ---
@@ -291,7 +287,7 @@ DRIVER_REGISTER(my_driver);
 
 ### 步骤 4：更新 Makefile
 
-将驱动源文件加入 `kernel/drv/` 目录，Makefile 的 `$(wildcard)` 会自动包含。
+将驱动源文件加入 `kernel/drivers/{block,char,net,bus,core}/` 中对应目录，Makefile 的 `$(wildcard)` 会自动包含。
 
 ---
 
@@ -332,8 +328,8 @@ void my_irq_handler(unsigned int irq, void *data) {
 
 | 总线 | 文件 | 用途 |
 |------|------|------|
-| virtio-mmio | `bus/virtio_mmio_bus.c` | RISC-V/ARM64 QEMU |
-| pci | `bus/pci_bus.c` | LoongArch QEMU, PC 平台 |
+| virtio-mmio | `kernel/drivers/bus/virtio_mmio_bus.c` | RISC-V/ARM64 QEMU |
+| pci | `kernel/drivers/bus/pci_bus.c` | LoongArch QEMU, PC 平台 |
 
 ---
 
@@ -341,7 +337,7 @@ void my_irq_handler(unsigned int irq, void *data) {
 
 ### 适配新开发板的步骤
 
-1. 在 `kernel/board/` 下创建目录（如 `myboard/`）
+1. 在 `kernel/platform/` 下创建目录（如 `myboard/`）
 2. 创建 `platform.h`，定义所有 MMIO 基地址常量
 3. 创建 `board.c`，实现 `board_config_t`：
    - `irqchip_ops`：中断控制器操作
@@ -414,9 +410,9 @@ subsystem_init()           ← 文件系统、网络等子系统
 ## 11. 示例：最小块设备驱动
 
 ```c
-#include "driver/driver_core.h"
-#include "driver/driver_hwapi.h"
-#include "driver/driver_class.h"
+#include "drivers/core/driver_core.h"
+#include "drivers/core/driver_hwapi.h"
+#include "drivers/core/driver_class.h"
 
 static int my_blk_read(void *priv, uint64_t sector, void *buf, int count) {
     struct my_priv *p = priv;

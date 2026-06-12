@@ -30,8 +30,7 @@
 #include "core/klog.h"
 #include "core/lock.h"
 #include "sys/futex.h"
-#include "drivers/block/virtio_blk.h"
-#include "net/lwip_stack.h"
+#include "core/progress.h"
 
 static task_t idle_tasks[CONFIG_NR_CPUS];
 static task_t *task_list_head;
@@ -228,8 +227,7 @@ void proc_block_until(task_t *t, uint64_t wake_time) {
 void idle_loop(void) {
     while (1) {
         arch_local_irq_enable();
-        virtio_blk_poll_all();
-        a20_lwip_poll();
+        kernel_progress_poll(KERNEL_PROGRESS_IDLE);
         sched_reap_zombies();
         sched();
         __asm__ volatile("nop");

@@ -23,7 +23,7 @@ int inotify_create_file(int flags)
     vfile_t *vf = vfile_alloc();
     if (!vf) return -ENOMEM;
     vf->flags = O_RDONLY | (flags & O_NONBLOCK);
-    refcount_set(&vf->ref_count, 1);
+    vfile_ref_init(vf, 1);
     vf->ops = &g_inotify_ops;
     return anonfd_install_vfile(vf, flags);
 }

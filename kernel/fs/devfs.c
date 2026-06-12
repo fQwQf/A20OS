@@ -59,10 +59,12 @@ typedef struct {
 static int devfs_lookup(vnode_t *dir, const char *name, vnode_t **out);
 static int devfs_stat(vnode_t *vn, kstat_t *st);
 static void devfs_release(vnode_t *vn);
+static vfile_t *devfs_open_vnode(vnode_t *vn, int flags);
 
 static vnode_ops_t g_devfs_ops = {
     .lookup = devfs_lookup,
     .stat = devfs_stat,
+    .open = devfs_open_vnode,
     .release = devfs_release,
 };
 
@@ -580,7 +582,7 @@ static void devfs_release(vnode_t *vn) {
     (void)vn;
 }
 
-vfile_t *devfs_open_vnode(vnode_t *vn, int flags) {
+static vfile_t *devfs_open_vnode(vnode_t *vn, int flags) {
     devfs_node_t *node = vn ? (devfs_node_t *)vn->fs_data : NULL;
     if (!node)
         return NULL;
@@ -590,7 +592,7 @@ vfile_t *devfs_open_vnode(vnode_t *vn, int flags) {
     vf->vnode = vn;
     vnode_get(vn);
     vf->flags = flags;
-    refcount_set(&vf->ref_count, 1);
+    vfile_ref_init(vf, 1);
     vf->priv = (void *)(intptr_t)node->kind;
 
     switch (node->kind) {

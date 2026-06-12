@@ -16,6 +16,9 @@
 #define PCI_MAX_DEV   32
 #define PCI_MAX_FUNC  8
 
+/* DRIVER_ENUMERATION_FAILURE_MODEL: PCI enumeration publishes bounded static
+ * device records; driver_core rolls failed probes back to unbound devices. */
+
 typedef struct pci_bus_data {
     uintptr_t ecam_base;
     int       bus_start;

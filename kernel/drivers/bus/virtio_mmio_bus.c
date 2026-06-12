@@ -16,6 +16,10 @@
 #define VIRTIO_DEV_BLK           2
 #define VIRTIO_DEV_NET           1
 
+/* DRIVER_ENUMERATION_FAILURE_MODEL: virtio-mmio registers only discovered
+ * static slots; driver_core owns probe failure cleanup and leaves devices
+ * unbound when a matching driver rejects a slot. */
+
 typedef struct virtio_mmio_bus_data {
     uintptr_t base;
     int       max_slots;
