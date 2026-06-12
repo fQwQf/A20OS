@@ -5,6 +5,7 @@
 #include "mm/vm.h"
 #include "mm/mm.h"
 #include "fs/devfs.h"
+#include "fs/page_cache.h"
 
 static uint64_t linux_mm_lock(task_t *t)
 {
@@ -108,15 +109,35 @@ int64_t sys_msync(uint64_t addr, size_t len, int flags) {
     if (!t || !t->mm) return -EINVAL;
     uint64_t end = ROUND_UP(addr + len, PAGE_SIZE);
     if (end < addr) return -EINVAL;
-    uint64_t mm_flags = linux_mm_lock(t);
-    for (uint64_t va = addr; va < end; va += PAGE_SIZE) {
-        vm_area_t *vma = mm_find_vma(t->mm, va);
-        if (!vma || va >= vma->end) {
+
+    uint64_t mm_flags = spin_lock_irqsave(&t->mm->lock);
+    uint64_t cursor = addr;
+    while (cursor < end) {
+        vm_area_t *vma = mm_find_vma(t->mm, cursor);
+        if (!vma || cursor >= vma->end) {
             linux_mm_unlock(t, mm_flags);
             return -ENOMEM;
         }
+        vnode_t *vn = NULL;
+        if ((vma->vm_flags & (VM_FILE | VM_SHARED)) == (VM_FILE | VM_SHARED) &&
+            vma->file_vnode) {
+            vn = vma->file_vnode;
+            vnode_get(vn);
+        }
+        uint64_t vma_end = vma->end < end ? vma->end : end;
+        cursor = vma_end;
+        spin_unlock_irqrestore(&t->mm->lock, mm_flags);
+
+        if (vn) {
+            mm_sync_shared_dirty_for_vnode(vn);
+            if (flags & (MS_SYNC | MS_ASYNC))
+                page_cache_writeback_vnode(vn, NULL, NULL);
+            vnode_put(vn);
+        }
+
+        mm_flags = spin_lock_irqsave(&t->mm->lock);
     }
-    linux_mm_unlock(t, mm_flags);
+    spin_unlock_irqrestore(&t->mm->lock, mm_flags);
     return 0;
 }
 

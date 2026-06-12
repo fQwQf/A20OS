@@ -78,15 +78,41 @@ typedef struct proc_vm_stats {
 } proc_vm_stats_t;
 
 /*
- * task_t lifetime:
- * - The idle task is static; normal tasks are dynamically allocated and linked
- *   into the global task list.
- * - proc_lock protects allocation, PID/run-queue membership, and most state
- *   transitions.
- * - proc_current()/proc_set_current() use CPU-local slots. SMP still needs
- *   scheduler and locking work before tasks can run concurrently on CPUs.
+ * task_t lifetime and state invariants:
+ * - The idle task is static; normal tasks are dynamically allocated, linked
+ *   into the global task list, and released only after they are unreachable from
+ *   PID lookup, parent/wait lists, run queues, and current CPU slots.
+ * - Normal task state flows are:
+ *     PROC_UNUSED -> PROC_READY -> PROC_RUNNING
+ *     PROC_RUNNING -> PROC_READY     (yield/preemption)
+ *     PROC_RUNNING -> PROC_BLOCKED   (wait queue, sleep, child wait, futex)
+ *     PROC_BLOCKED -> PROC_READY     (wake, timeout, signal)
+ *     PROC_RUNNING/BLOCKED -> PROC_ZOMBIE -> PROC_UNUSED
+ *   A task must not be put on a run queue unless its state is PROC_READY, and a
+ *   zombie or unused task must never be requeued.
+ * - proc_lock protects allocation, PID membership, all-task list membership,
+ *   parent/wait relationships, zombie/reap transitions, and most task state
+ *   transitions. Per-CPU runqueue locks protect rq_next/rq_prev/on_rq and queue
+ *   membership; callers that need both follow proc_lock -> runq_lock.
+ * - cpu_id selects the owning run queue while on_rq is true. Code that changes
+ *   cpu_id for a queued task must first remove it from its current run queue or
+ *   hold the locks needed to move it atomically.
+ * - proc_current()/proc_set_current() use CPU-local slots. A running task is
+ *   owned by exactly one CPU slot until context_switch() replaces it. SMP still
+ *   needs scheduler and locking work before tasks can run concurrently on CPUs.
  * - External modules should prefer proc_* and signal_* helpers instead of
  *   directly changing state, credentials, fs context, or run-queue fields.
+ *
+ * TASK_STATE_MUTATION_CONTRACT:
+ * - READY transitions go through proc_make_ready() so state, CPU selection,
+ *   runqueue insertion, wake_time cleanup, and remote reschedule kicks stay
+ *   together.
+ * - Timed or indefinite sleeps go through proc_block_until() or a wait object
+ *   that follows BLOCK_WAKE_PROTOCOL. The caller sets object-specific waiter
+ *   state before publishing PROC_BLOCKED.
+ * - RUNNING is assigned only by context_switch()/sched() after the task has
+ *   been removed from any run queue. ZOMBIE/UNUSED are exit/reap states and
+ *   must not be written by synchronization primitives.
  */
 typedef struct task_t {
     uint64_t kstack;

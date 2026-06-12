@@ -6,6 +6,17 @@
 #include "core/lock.h"
 #include "proc/proc.h"
 
+/*
+ * files_struct lifetime invariants:
+ * - task_t.files points to one files_struct. fork-like sharing increments
+ *   refcount; fdtable_unshare() creates a private copy before mutation when a
+ *   task needs copy-on-write fd semantics.
+ * - lock protects fd[], cloexec[], open_mask, and next_fd. Code that installs,
+ *   duplicates, closes, or changes close-on-exec state must hold it.
+ * - fd slots store global VFS file numbers, not vfile pointers. Installing a
+ *   slot transfers one global-file reference into the table; close, exec, and
+ *   exit paths must drop exactly those references.
+ */
 typedef struct files_struct {
     spinlock_t lock;
     refcount_t refcount;

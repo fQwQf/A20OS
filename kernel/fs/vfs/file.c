@@ -6,6 +6,7 @@
 #include "fs/devfs.h"
 #include "fs/block_cache.h"
 #include "fs/page_cache.h"
+#include "mm/vm.h"
 
 int vfs_is_pipe_vfile(vfile_t *vf)
 {
@@ -221,6 +222,7 @@ int vfs_fsync(int fd)
     if (!vf)
         return -EBADF;
     if (vf->vnode) {
+        mm_sync_shared_dirty_for_vnode(vf->vnode);
         int pc_r = page_cache_writeback_vnode(vf->vnode, NULL, NULL);
         if (pc_r < 0) {
             vfs_put_file_ref(fd, vf);

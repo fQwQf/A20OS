@@ -1,6 +1,9 @@
 /*
  * A20OS Native ABI — Handle table implementation.
  * Design reference: docs/native-abi/03-handle.md §2
+ * NATIVE_HANDLE_CAPABILITY_TEST_CONTRACT: lookup/install/remove paths are the
+ * checked surface for rights downgrade, temporal limits, labels, close/dup/
+ * transfer, and partial-delivery consistency gates.
  */
 #include "core/types.h"
 #include "core/string.h"
