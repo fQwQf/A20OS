@@ -3,6 +3,10 @@
 
 #include "core/types.h"
 
+/* LWIP_PROGRESS_API: use a20_lwip_poll() only through core/progress from
+ * scheduler/idle code; socket paths may poll explicitly while waiting on network
+ * state. */
+
 void a20_lwip_init(void);
 void a20_lwip_poll(void);
 void a20_lwip_poll_locked(void);

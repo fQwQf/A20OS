@@ -2,12 +2,28 @@
 #include "mm/mm.h"
 #include "mm/frame.h"
 #include "mm/slab.h"
+#include "mm/fault.h"
 #include "fs/vfs.h"
+#include "fs/page_cache.h"
 #include "ipc/sysv_shm.h"
 #include "proc/proc.h"
+#include "proc/proc_internal.h"
 #include "core/string.h"
 #include "core/panic.h"
 #include "core/klog.h"
+
+/*
+ * MM_VMA_PTE_AUDIT:
+ * - VMA write paths live in mm_mmap(), mm_mmap_file(), mm_munmap(),
+ *   mm_mprotect(), mm_mremap(), mm_brk(), exec loaders, fork(), and exit
+ *   teardown. They must preserve sorted/non-overlapping mmap lists and account
+ *   total_vm/rss/locked_vm while holding the address-space write exclusion
+ *   defined by MM_LOCK_MODEL.
+ * - Page-table write paths live in COW/demand faults, file/VMO faults,
+ *   huge-page demotion, unmap, mprotect, brk shrink, fork COW setup, ELF exec,
+ *   and user-copy dirty marking. Each path must document whether it uses a page
+ *   TLB flush or full address-space flush.
+ */
 
 static uint64_t mm_cow_flags(uint64_t pte) {
     uint64_t flags = pte & (PTE_R | PTE_W | PTE_X | PTE_U | PTE_A |
@@ -27,6 +43,10 @@ static inline size_t vm_pt_level_size(int level) {
 static void vma_release_file(vm_area_t *vma)
 {
     if (vma && (vma->vm_flags & VM_FILE) && vma->file_fd >= 0) {
+        if (vma->file_vnode) {
+            vnode_put(vma->file_vnode);
+            vma->file_vnode = NULL;
+        }
         vfs_close(vma->file_fd);
         vma->file_fd = -1;
     }
@@ -48,6 +68,8 @@ static int vma_ref_file(vm_area_t *vma)
 {
     if (!vma || !(vma->vm_flags & VM_FILE) || vma->file_fd < 0)
         return 0;
+    if (vma->file_vnode)
+        vnode_get(vma->file_vnode);
     return vfs_ref_fd(vma->file_fd);
 }
 
@@ -179,8 +201,9 @@ static int mm_fork_clone_range(mm_struct_t *child, mm_struct_t *parent,
     return 0;
 }
 
-static int mm_fork_clone_leaf(mm_struct_t *child, uint64_t *src_pte,
-                              uint64_t va, int level, int shared) {
+static int mm_fork_clone_leaf(mm_struct_t *child, mm_struct_t *parent,
+                              uint64_t *src_pte, uint64_t va, int level,
+                              int shared) {
     if (!src_pte || !(*src_pte & PTE_V) ||
         !arch_pte_is_leaf(*src_pte) || !(*src_pte & PTE_U))
         return 0;
@@ -190,13 +213,36 @@ static int mm_fork_clone_leaf(mm_struct_t *child, uint64_t *src_pte,
     if (!pfn_valid(pfn))
         return -ENOMEM;
 
-    uint64_t flags = shared ? arch_pte_flags(*src_pte) : mm_cow_flags(*src_pte);
-    frame_get(pfn);
+    vm_area_t *vma = parent ? mm_find_vma(parent, va) : NULL;
+    int shared_file = vma &&
+        (vma->vm_flags & (VM_FILE | VM_SHARED)) == (VM_FILE | VM_SHARED);
 
+    if (shared_file && vma->file_vnode) {
+        uint64_t idx = vma->file_offset + (va - vma->start);
+        idx /= PAGE_SIZE;
+        page_cache_page_t *pcp = page_cache_get(vma->file_vnode, idx, 0);
+        if (!pcp)
+            return -ENOMEM;
+        /* pcp refcount already bumped; drop the temporary lookup ref so the
+         * mapping pin remains. */
+        page_cache_put(pcp);
+    } else if (!shared_file) {
+        frame_get(pfn);
+    }
+
+    uint64_t flags = shared ? arch_pte_flags(*src_pte) : mm_cow_flags(*src_pte);
     int r = (level > 0) ? pt_map_huge(child->pgdir, va, pa, flags)
                         : pt_map(child->pgdir, va, pa, flags);
     if (r < 0) {
-        frame_put(pfn);
+        if (shared_file && vma->file_vnode) {
+            uint64_t idx = vma->file_offset + (va - vma->start);
+            idx /= PAGE_SIZE;
+            page_cache_page_t *pcp = page_cache_get(vma->file_vnode, idx, 0);
+            if (pcp)
+                page_cache_put(pcp);
+        } else if (!shared_file) {
+            frame_put(pfn);
+        }
         return r;
     }
 
@@ -206,10 +252,9 @@ static int mm_fork_clone_leaf(mm_struct_t *child, uint64_t *src_pte,
     return 0;
 }
 
-static int mm_fork_clone_present_level(mm_struct_t *child, uint64_t *table,
-                                       int level, uint64_t base,
-                                       uint64_t start, uint64_t end,
-                                       int shared) {
+static int mm_fork_clone_present_level(mm_struct_t *child, mm_struct_t *parent,
+                                       uint64_t *table, int level, uint64_t base,
+                                       uint64_t start, uint64_t end, int shared) {
     if (!table || start >= end)
         return 0;
 
@@ -227,14 +272,14 @@ static int mm_fork_clone_present_level(mm_struct_t *child, uint64_t *table,
             continue;
 
         if (arch_pte_is_leaf(*pte)) {
-            int r = mm_fork_clone_leaf(child, pte, entry_base, level, shared);
+            int r = mm_fork_clone_leaf(child, parent, pte, entry_base, level, shared);
             if (r < 0)
                 return r;
             continue;
         }
 
         if (level > 0) {
-            int r = mm_fork_clone_present_level(child, arch_pte_to_ptr(*pte),
+            int r = mm_fork_clone_present_level(child, parent, arch_pte_to_ptr(*pte),
                                                 level - 1, entry_base,
                                                 start, end, shared);
             if (r < 0)
@@ -248,11 +293,34 @@ static int mm_fork_clone_present_range(mm_struct_t *child, mm_struct_t *parent,
                                        uint64_t start, uint64_t end, int shared) {
     start = ROUND_DOWN(start, PAGE_SIZE);
     end = ROUND_UP(end, PAGE_SIZE);
-    return mm_fork_clone_present_level(child, parent->pgdir, ARCH_PT_ROOT_LEVEL,
+    return mm_fork_clone_present_level(child, parent, parent->pgdir, ARCH_PT_ROOT_LEVEL,
                                        0, start, end, shared);
 }
 
 static int mm_populate_shared_range(mm_struct_t *mm, vm_area_t *vma) {
+    if ((vma->vm_flags & (VM_FILE | VM_SHARED)) == (VM_FILE | VM_SHARED)) {
+        vfile_t *vf = vfs_get_file_ref(vma->file_fd);
+        if (!vf)
+            return -EBADF;
+        if (!vf->vnode) {
+            vfs_put_file_ref(vma->file_fd, vf);
+            return -EBADF;
+        }
+        uint64_t start = ROUND_DOWN(vma->start, PAGE_SIZE);
+        uint64_t end = ROUND_UP(vma->end, PAGE_SIZE);
+        for (uint64_t va = start; va < end; va += PAGE_SIZE) {
+            uint64_t *pte = pt_lookup_leaf(mm->pgdir, va, NULL, NULL, NULL);
+            if (pte && (*pte & PTE_V))
+                continue;
+            if (mm_shared_file_fault(mm, vma, va, vf) < 0) {
+                vfs_put_file_ref(vma->file_fd, vf);
+                return -ENOMEM;
+            }
+        }
+        vfs_put_file_ref(vma->file_fd, vf);
+        return 0;
+    }
+
     uint64_t start = ROUND_DOWN(vma->start, PAGE_SIZE);
     uint64_t end = ROUND_UP(vma->end, PAGE_SIZE);
     for (uint64_t va = start; va < end; va += PAGE_SIZE) {
@@ -273,6 +341,59 @@ static int mm_populate_shared_range(mm_struct_t *mm, vm_area_t *vma) {
         mm->rss++;
     }
     return 0;
+}
+
+/*
+ * MAP_SHARED_DIRTY_SYNC_CONTRACT:
+ * - Before writing back a vnode that may be mapped shared-writable, scan every
+ *   task's page tables for VM_FILE+VM_SHARED VMAs backed by that vnode.
+ * - For each present leaf with the hardware dirty bit set, mark the canonical
+ *   page-cache page dirty so page_cache_writeback_* will flush it.
+ * - mm->lock is released before touching g_page_cache_lock to avoid creating a
+ *   new lock-order edge between the two locks.
+ */
+void mm_sync_shared_dirty_for_vnode(vnode_t *vn)
+{
+    if (!vn)
+        return;
+
+    uint64_t proc_flags = spin_lock_irqsave(&proc_lock);
+    for (task_t *t = proc_first_task_locked(); t; t = proc_next_task_locked(t)) {
+        if (t->state == PROC_UNUSED || !t->mm)
+            continue;
+        mm_struct_t *mm = t->mm;
+        uint64_t mm_flags = spin_lock_irqsave(&mm->lock);
+        for (vm_area_t *vma = mm->mmap; vma; vma = vma->next) {
+            if (!(vma->vm_flags & VM_SHARED) || !(vma->vm_flags & VM_FILE))
+                continue;
+            if (vma->file_vnode != vn)
+                continue;
+            for (uint64_t va = vma->start; va < vma->end; ) {
+                mm_leaf_info_t leaf;
+                if (!mm_query_leaf(mm->pgdir, va, &leaf)) {
+                    va += PAGE_SIZE;
+                    continue;
+                }
+                int dirty = leaf.dirty;
+                uint64_t idx = vma->file_offset + (va - vma->start);
+                idx /= PAGE_SIZE;
+                va = leaf.base + leaf.size;
+                if (!dirty)
+                    continue;
+                spin_unlock_irqrestore(&mm->lock, mm_flags);
+
+                page_cache_page_t *pcp = page_cache_get(vn, idx, 0);
+                if (pcp) {
+                    page_cache_mark_dirty(pcp);
+                    page_cache_put(pcp);
+                }
+
+                mm_flags = spin_lock_irqsave(&mm->lock);
+            }
+        }
+        spin_unlock_irqrestore(&mm->lock, mm_flags);
+    }
+    spin_unlock_irqrestore(&proc_lock, proc_flags);
 }
 
 // 创建一个新的内存描述符
@@ -300,10 +421,11 @@ mm_struct_t *mm_create(void) {
     ktrace_mm("[MMDBG] mm=%p lock=%p\n", (void *)mm, (void *)&mm->lock);
     return mm;
 }
-
 // 释放 VMA 对应的物理页面
-static void free_vma_pages(mm_struct_t *mm, vm_area_t *vma) {
+static void free_vma_pages(mm_struct_t *mm, vm_area_t *vma)
+{
     if (!mm->pgdir) return;
+    int shared_file = (vma->vm_flags & (VM_FILE | VM_SHARED)) == (VM_FILE | VM_SHARED);
     for (uint64_t va = vma->start; va < vma->end; ) {
         /* 检查当前映射是否为跨越 VMA 边界的大页，
          * 若是则先降级为普通页再逐个释放。 */
@@ -321,7 +443,20 @@ static void free_vma_pages(mm_struct_t *mm, vm_area_t *vma) {
         base = 0;
         size = 0;
         if (pt_unmap_leaf(mm->pgdir, va, &pa, &base, &size, NULL) == 0) {
-            if (pa) frame_put(phys_to_pfn(pa));
+            if (pa) {
+                pfn_t pfn = phys_to_pfn(pa);
+                if (shared_file && vma->file_vnode) {
+                    uint64_t idx = vma->file_offset + (va - vma->start);
+                    idx /= PAGE_SIZE;
+                    page_cache_page_t *pcp = page_cache_get(vma->file_vnode, idx, 0);
+                    if (pcp) {
+                        page_cache_put(pcp);
+                        page_cache_put(pcp);
+                    }
+                } else {
+                    frame_put(pfn);
+                }
+            }
             va = base + size;
         } else {
             va += PAGE_SIZE;
@@ -672,6 +807,16 @@ uint64_t mm_mmap_file(mm_struct_t *mm, uint64_t addr, size_t len,
     vma->file_fd     = file_fd;
     vma->file_offset = file_offset;
 
+    if ((vmf & (VM_FILE | VM_SHARED)) == (VM_FILE | VM_SHARED)) {
+        vfile_t *vf = vfs_get_file_ref(file_fd);
+        if (vf && vf->vnode) {
+            vnode_get(vf->vnode);
+            vma->file_vnode = vf->vnode;
+        }
+        if (vf)
+            vfs_put_file_ref(file_fd, vf);
+    }
+
     if (mm->def_flags & VM_LOCKED) {
         task_t *cur = proc_current();
         if (mm->locked_vm + len > cur->limits.memlock && !proc_has_cap(cur, CAP_SYS_ADMIN)) {
@@ -745,11 +890,15 @@ static int mm_clone_shared_mapping(mm_struct_t *mm, vm_area_t *src_vma,
             return -ENOMEM;
         }
 
-        frame_get(pfn);
+        int shared_file = src_vma &&
+                          (src_vma->vm_flags & (VM_FILE | VM_SHARED)) == (VM_FILE | VM_SHARED);
+        if (!shared_file)
+            frame_get(pfn);
         int r = (level > 0) ? pt_map_huge(mm->pgdir, dst + off, pa, arch_pte_flags(*src))
                             : pt_map(mm->pgdir, dst + off, pa, arch_pte_flags(*src));
         if (r < 0) {
-            frame_put(pfn);
+            if (!shared_file)
+                frame_put(pfn);
             mm_munmap(mm, dst, len);
             return r;
         }
@@ -788,16 +937,22 @@ static int mm_move_mapping_pages(mm_struct_t *mm, uint64_t old_addr,
             return -ENOMEM;
 
         uint64_t pte_flags = arch_pte_flags(*src);
-        frame_get(pfn);
+        vm_area_t *src_vma = mm_find_vma(mm, src_va);
+        int shared_file = src_vma &&
+                          (src_vma->vm_flags & (VM_FILE | VM_SHARED)) == (VM_FILE | VM_SHARED);
+        if (!shared_file)
+            frame_get(pfn);
         int r = (level > 0) ? pt_map_huge(mm->pgdir, dst + off, pa, pte_flags)
                             : pt_map(mm->pgdir, dst + off, pa, pte_flags);
         if (r < 0) {
-            frame_put(pfn);
+            if (!shared_file)
+                frame_put(pfn);
             return r;
         }
 
         pt_unmap_leaf(mm->pgdir, src_va, NULL, NULL, NULL, NULL);
-        frame_put(pfn);
+        if (!shared_file)
+            frame_put(pfn);
         (void)dontunmap;
         off += leaf_size;
     }
@@ -1150,8 +1305,11 @@ int mm_mprotect(mm_struct_t *mm, uint64_t addr, size_t len, int prot) {
 }
 
 // 创建子进程的内存空间（fork 时使用，实现写时复制）
-/* 关键修复：在修改父进程页表（设置 COW 标志）时持有 parent->lock，
- * 防止与父进程的并发页错误处理产生竞争。
+/* MM_FORK_COW_REGRESSION_GUARD:
+ * 在修改父进程页表（设置 COW 标志）时持有 parent->lock，防止与父进程
+ * 的并发页错误处理产生竞争。回归场景：父进程多线程或模拟并发 page
+ * fault 与 mm_fork() 同时触碰同一 writable PTE，父/子必须都看到 COW
+ * PTE，且旧页引用计数在最后一个 PTE 替换后才下降。
  * 原代码未加锁直接修改父进程 PTE，在以下场景会导致数据损坏：
  *   1. 多线程程序中，父进程的另一个线程同时触发页错误
  *   2. SMP 模式下，另一个 CPU 在处理父进程的页错误 */

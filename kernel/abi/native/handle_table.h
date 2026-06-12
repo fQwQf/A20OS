@@ -8,6 +8,28 @@
 
 struct a20_ht_internal;
 
+/*
+ * Native handle lifetime invariants:
+ * - A handle is a process-local index into a20_ht_internal. The entry owns a
+ *   typed object pointer plus the rights, temporal limits, security label, and
+ *   state that gate access to that object.
+ * - ACTIVE entries are usable only when type matches, required rights are a
+ *   subset of effective rights, temporal constraints have not expired, and the
+ *   Bell-LaPadula label check for the requested access succeeds.
+ * - CLOSING entries reject new lookups while close/transfer cleanup runs.
+ *   EXPIRED entries reject access until swept or explicitly removed. FREE
+ *   entries have object == NULL and do not own object references.
+ * - install/dup/transfer may only preserve or reduce rights and temporal limits;
+ *   no operation may refresh an expiry, operation count, or security label into
+ *   a more permissive state.
+ * - NATIVE_HANDLE_CAPABILITY_CONSISTENCY_MATRIX: static gates require evidence
+ *   for rights downgrade, temporal rights, security labels, close/dup/transfer,
+ *   and partial delivery before this model can be marked complete.
+ * - The handle table lock protects entry allocation, state transitions,
+ *   remaining_ops consumption, free_bitmap, and count/free_hint. Object-specific
+ *   lifetime rules are handled by the subsystem that owns the object pointer.
+ */
+
 struct a20_ht_internal *a20_ht_create(void);
 void a20_ht_destroy(struct a20_ht_internal *ht);
 

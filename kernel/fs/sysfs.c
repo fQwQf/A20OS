@@ -186,9 +186,12 @@ static void sysfs_release(vnode_t *vn)
     kfree(vn);
 }
 
+static vfile_t *sysfs_open_vnode(vnode_t *vn, int flags);
+
 static vnode_ops_t g_sysfs_vnode_ops = {
     .lookup  = sysfs_lookup,
     .stat    = sysfs_stat,
+    .open    = sysfs_open_vnode,
     .release = sysfs_release,
 };
 
@@ -317,7 +320,7 @@ vnode_t *sysfs_mount(void)
     return root;
 }
 
-vfile_t *sysfs_open_vnode(vnode_t *vn, int flags)
+static vfile_t *sysfs_open_vnode(vnode_t *vn, int flags)
 {
     vfile_t *vf = vfile_alloc();
     if (!vf) return NULL;
@@ -325,7 +328,7 @@ vfile_t *sysfs_open_vnode(vnode_t *vn, int flags)
     vf->flags = flags;
     vnode_get(vn);
     vf->ops = &g_sysfs_fops;
-    refcount_set(&vf->ref_count, 1);
+    vfile_ref_init(vf, 1);
 
     sysfs_meta_t *meta = (sysfs_meta_t *)vn->fs_data;
     sysfs_priv_t *priv = sysfs_priv_create(

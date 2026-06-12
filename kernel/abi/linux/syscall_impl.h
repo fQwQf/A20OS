@@ -3,6 +3,7 @@
 
 #include "abi/linux/syscall_entry.h"
 #include "abi/current.h"
+#include "abi/core_api.h"
 #include "fs/vfs.h"
 #include "fs/file.h"
 #include "fs/fdtable.h"
@@ -23,6 +24,10 @@
 
 extern int syscall_sig_diag_count;
 extern int syscall_sleep_diag_count;
+
+/* LINUX_ABI_BOUNDARY_CONTRACT: Linux syscall files translate user ABI shapes,
+ * flags, and errno values, then call core kernel APIs; they must not become
+ * owners of subsystem-global state or bypass shared lifetime rules. */
 
 int syscall_path_at(int dirfd, const char *path, char *out, size_t outsz);
 

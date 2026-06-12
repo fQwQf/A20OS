@@ -96,8 +96,17 @@ typedef struct vnode_ops {
                          const void *data, size_t len);
     int     (*chmod)(struct vnode *vn, int mode);
     int     (*chown)(struct vnode *vn, int uid, int gid);
+    struct vfile *(*open)(struct vnode *vn, int flags);
     void    (*release)(struct vnode *vn);
 } vnode_ops_t;
+
+/*
+ * VFS_OPEN_DISPATCH_CONTRACT:
+ * - vfs_open() resolves, creates, validates permissions, truncates if needed,
+ *   then calls vn->ops->open().
+ * - Filesystem-specific open helpers live in their vnode ops table. Adding a
+ *   filesystem must not require adding an FS_TYPE_* branch to vfs_open().
+ */
 
 /* ---- File operations ---- */
 typedef struct vfile_ops {
@@ -110,12 +119,16 @@ typedef struct vfile_ops {
 } vfile_ops_t;
 
 /*
- * vnode lifetime:
- * - A vnode reference keeps the in-memory inode alive.
- * - Filesystems return referenced vnodes to VFS callers.
- * - dcache entries hold references and must release them on invalidation.
- * - Direct ref_count edits are legacy; new code should use vnode_put() and a
- *   future vnode_get()/refcount_t wrapper.
+ * vnode lifetime invariants:
+ * - A vnode reference keeps the in-memory inode and fs_data alive. Filesystems
+ *   return referenced vnodes to VFS callers; every successful lookup/open helper
+ *   documents who consumes or releases that reference.
+ * - Parent, mount root, dcache, open vfile, and temporary path-walk users are
+ *   separate reference owners. Dcache invalidation, unmount, unlink, and rename
+ *   must release exactly the references they acquired.
+ * - Direct ref_count edits are legacy. New code uses vnode_get()/vnode_put(),
+ *   and existing direct edits must be treated as bugs to remove, not patterns to
+ *   copy.
  */
 typedef struct vnode {
     uint64_t        ino;            /* inode number */
@@ -132,12 +145,17 @@ typedef struct vnode {
 } vnode_t;
 
 /*
- * vfile lifetime:
- * - vfile objects represent global open-file entries; process fds point to
- *   them through fdtable mappings.
- * - ref_count accounts for fdtable references and temporary kernel users.
- * - Direct ref_count edits are legacy; new code should move toward
- *   file_get()/file_put() style APIs.
+ * vfile lifetime invariants:
+ * - vfile objects represent global open-file entries. Process-local fdtable
+ *   slots hold references to those global entries; dup/fork/share operations add
+ *   references, and close/exec/exit paths drop them.
+ * - Temporary kernel users must obtain a reference with vfs_get_file_ref() or an
+ *   equivalent helper and release it with vfs_put_file_ref() before returning.
+ * - The final vfile reference owns calling the file close op, releasing private
+ *   data, dropping the vnode reference, and freeing the vfile storage.
+ * - VFS_REFCOUNT_HELPER_CONTRACT: direct ref_count edits are legacy. New code
+ *   uses vfile_ref_init(), vfile_get(), and vfile_put_ref_only() instead of
+ *   open-coding reference changes.
  */
 typedef struct vfile {
     vnode_t        *vnode;
@@ -155,6 +173,19 @@ typedef struct vfile {
     vfile_ops_t    *ops;
     void           *priv;           /* fs/pipe private data */
 } vfile_t;
+
+/*
+ * VFS_DCACHE_MOUNT_VNODE_INVARIANT:
+ * - mount.root owns a persistent vnode reference until vfs_umount() releases it.
+ * - dcache entries own references inserted by vfs_dcache_insert() and must drop
+ *   them on explicit invalidation, global invalidation, eviction, rename, unlink,
+ *   symlink replacement, rmdir, and unmount.
+ * - vnode.parent owns a parent reference for non-root synthetic vnodes; release
+ *   paths must put exactly that reference. Root parent/self cycles are forbidden
+ *   unless the filesystem release path explicitly avoids putting self.
+ * - path walking owns temporary references only; symlink expansion must preserve
+ *   parent/current refs across restart and drop all abandoned refs on errors.
+ */
 
 /* ---- Mount point ---- */
 typedef struct mount {
@@ -191,9 +222,16 @@ void     vnode_ref_init(vnode_t *vn, int refs);
 void     vnode_get(vnode_t *vn);
 int      vnode_ref_read(vnode_t *vn);
 void     vnode_put(vnode_t *vn);
+void     vfile_ref_init(vfile_t *vf, int refs);
+void     vfile_get(vfile_t *vf);
+int      vfile_ref_read(vfile_t *vf);
+int      vfile_put_ref_only(vfile_t *vf);
 vnode_t *vfs_resolve(const char *path);
 vnode_t *vfs_resolve_at(const char *path, const char *cwd);
 vnode_t *vfs_resolve_no_follow(const char *path);
+vnode_t *vfs_resolve_no_follow_final(const char *path);
+vnode_t *vnode_lookup_path(vnode_t *root, const char *path);
+extern int g_lookup_errno;
 
 /* File operations */
 int      vfs_open(const char *path, int flags, int mode);
