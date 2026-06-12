@@ -9,6 +9,18 @@
 #define PAGE_CACHE_MAX_PAGES   8192
 #define PAGE_CACHE_HASH_BUCKETS 8192
 
+/*
+ * FILE_MMAP_PAGE_CACHE_CONTRACT:
+ * - page_cache_get() pins a vnode/index page until page_cache_put(). Pinned or
+ *   dirty pages are not reclaimable.
+ * - Private file mmap faults copy cache contents into an anonymous frame; after
+ *   the copy, the PTE no longer pins the page-cache page.
+ * - Shared file mmap faults map the canonical page-cache page directly into the
+ *   user page table. The mapping holds the pin until unmap, mremap move, or
+ *   process teardown. Dirty bits from writable PTEs are synced into the page
+ *   cache before fsync/msync/writeback so user writes reach the backing file.
+ */
+
 typedef struct page_cache_page {
     vnode_t *vnode;
     uint64_t index;
