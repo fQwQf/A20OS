@@ -72,6 +72,10 @@ static inline void writel_relaxed(uint32_t val, volatile void *addr) {
 
 /* ============================================================
  * DMA API — delegates to arch_dma_sync_for_*
+ * DRIVER_IRQ_DMA_SEMANTICS: coherent allocations return zeroed CPU addresses
+ * with stable dma_handle values; non-coherent arches must implement sync hooks
+ * before device ownership changes. IRQ handlers run with board irqchip ack/eoi
+ * ordering from driver_irq_dispatch(), and request/free must be paired.
  * ============================================================ */
 void  *dma_alloc_coherent(size_t size, uint64_t *dma_handle);
 void   dma_free_coherent(void *vaddr, size_t size, uint64_t dma_handle);

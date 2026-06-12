@@ -466,6 +466,8 @@ static cg_sb_t *cg_get_sb(vnode_t *vn)
     return (cg_sb_t *)vn->mnt->fs_data;
 }
 
+static vfile_t *cgroupfs_open_vnode(vnode_t *vn, int flags);
+
 /* ---- vnode ops ---- */
 
 static int cg_lookup(vnode_t *dir, const char *name, vnode_t **out)
@@ -478,9 +480,13 @@ static int cg_lookup(vnode_t *dir, const char *name, vnode_t **out)
 
     if (strcmp(name, ".") == 0) { *out = dir; vnode_get(dir); return 0; }
     if (strcmp(name, "..") == 0) {
-        if (node->parent) {
-            /* find parent vnode — we just return dir for simplicity */
-            *out = dir; vnode_get(dir); return 0;
+        /* CGROUPFS_DOTDOT_PARENT_LOOKUP: child directories keep a referenced
+         * vnode parent, so dotdot returns that real parent vnode. Root dotdot
+         * remains root, matching normal VFS path semantics. */
+        if (node->parent && dir->parent) {
+            *out = dir->parent;
+            vnode_get(*out);
+            return 0;
         }
         *out = dir; vnode_get(dir); return 0;
     }
@@ -650,6 +656,7 @@ static vnode_ops_t g_cg_vnode_ops = {
     .rename  = cg_rename,
     .stat    = cg_stat,
     .chown   = cg_chown,
+    .open    = cgroupfs_open_vnode,
     .release = cg_release,
 };
 
@@ -1019,7 +1026,7 @@ static vfile_ops_t g_cg_fops = {
     .close   = cg_fclose,
 };
 
-vfile_t *cgroupfs_open_vnode(vnode_t *vn, int flags)
+static vfile_t *cgroupfs_open_vnode(vnode_t *vn, int flags)
 {
     vfile_t *vf = vfile_alloc();
     if (!vf) return NULL;
@@ -1027,7 +1034,7 @@ vfile_t *cgroupfs_open_vnode(vnode_t *vn, int flags)
     vf->flags = flags;
     vnode_get(vn);
     vf->ops = &g_cg_fops;
-    refcount_set(&vf->ref_count, 1);
+    vfile_ref_init(vf, 1);
 
     cg_sb_t *sb = cg_get_sb(vn);
     cg_node_t *node = (cg_node_t *)vn->fs_data;

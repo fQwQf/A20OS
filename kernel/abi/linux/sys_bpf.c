@@ -2,6 +2,9 @@
 
 #include "bpf/bpf.h"
 
+/* LINUX_ABI_BPF_STUB_BOUNDARY: this file exposes a small map/prog shim and
+ * fixed verifier limits, not the full Linux eBPF verifier/runtime contract. */
+
 static int bpf_copy_attr(void *dst, size_t dst_size, void *uattr, unsigned size)
 {
     memset(dst, 0, dst_size);
