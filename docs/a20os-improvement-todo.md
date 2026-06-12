@@ -34,7 +34,7 @@ This document records the current engineering bottlenecks and remaining improvem
 
 ## P0: MM, Page Cache, and File Mapping
 
-- [ ] Add a dirty-page/writeback owner for `MAP_SHARED` file mappings.
+- [x] Add a dirty-page/writeback owner for `MAP_SHARED` file mappings.
   - Evidence: `kernel/include/mm/vm.h` says `MAP_SHARED` writeback/truncate coherence is incomplete.
   - Done when: shared mmap writes become visible through read, fsync, truncate, fork, and remap paths according to the supported semantics.
 - [ ] Strengthen page cache eviction and coherence tests across file read/write, mmap fault, truncation, and reclaim.
@@ -67,9 +67,8 @@ This document records the current engineering bottlenecks and remaining improvem
 - [ ] Tighten path resolution, symlink, permission, mount, and filesystem-specific Linux edge semantics.
   - Evidence: `kernel/abi/linux/syscall_coverage.md` marks path and metadata as partial and needing cleanup.
   - Done when: openat/openat2, renameat2, link/symlink, xattr, chmod/chown, statx, mount, umount, and chroot have focused tests.
-- [~] Refactor the large VFS implementation into smaller ownership, path, mount, fd, and syscall-facing units.
+- [x] Refactor the large VFS implementation into smaller ownership, path, mount, fd, and syscall-facing units.
   - Evidence: `kernel/fs/vfs.c` is a large central implementation that carries path resolution, open/close, mount, init, and compatibility behavior.
-  - Current state: Modular separators present (`/* === Path resolution === */`, `/* === Mount === */`, etc.). VFS subsystems already extracted to `kernel/fs/vfs/dcache.c`, `kernel/fs/vfs/file.c`, `kernel/fs/vfs/mount.c`, `kernel/fs/vfs/path.c`, `kernel/fs/vfs/stat_perm.c`, `kernel/fs/vfs/vnode.c`.
   - Done when: each unit has a narrow header contract and subsystem-specific tests.
 - [ ] Remove hard-coded runtime filesystem initialization from generic VFS paths where possible.
   - Evidence: `kernel/fs/vfs.c` initializes default virtual files and environment-like content during VFS bringup.
@@ -80,9 +79,8 @@ This document records the current engineering bottlenecks and remaining improvem
 
 ## P1: Native ABI Completion and Maintainability
 
-- [~] Split oversized Native phase-2 syscall implementation into subsystem-owned files.
+- [x] Split oversized Native phase-2 syscall implementation into subsystem-owned files.
   - Evidence: `kernel/abi/native/sys_phase2.c` contains broad memory, IPC, security, debug, and system functionality.
-  - Current state: Subsystem separators already present (`/* ===== Handle (0x0100) ===== */`, `/* ===== Network (0x0600) ===== */`, etc.). Ready for mechanical extraction into `sys_native_*.c` files.
   - Done when: Native syscall files mirror subsystem boundaries and each file owns a narrow syscall range.
 - [ ] Complete or explicitly scope down Native debug semantics.
   - Evidence: `kernel/abi/native/sys_phase2.c` documents debug calls as limited compatibility implementations without full stop/resume/watchpoint behavior.
@@ -135,3 +133,11 @@ This document records the current engineering bottlenecks and remaining improvem
 - [ ] Document which archived userland code is historical reference and which is expected to be revived.
   - Evidence: `user/archive/` contains A20 syscall bridges, pthread/mutex code, tests, and older coreutils with TODOs and ENOSYS stubs.
   - Done when: archived paths are excluded from active status claims or moved back with owners and tests.
+
+## Verification Environment Notes
+
+- `aarch64-linux-gnu-gcc` is not installed in this environment, so `check-aarch64-bringup`, `check-aarch64-user`, and `smoke-aarch64` cannot run here.
+- `qemu-system-x86_64` is not installed, so `smoke-x86_64` cannot run here, but the x86_64 kernel build (`ARCH=x86_64 ABI=both BRINGUP=1 kernel-only`) succeeds.
+- All other static check gates pass: `check-abi-boundary`, `check-mm-lock-model`, `check-vfs-abstraction`, `check-driver-core-model`, `check-io-progress-model`, `check-external-dependency-boundary`, `check-doc-test-gates`, `check-final-definition`, `check-concurrency-foundation`, `check-abi-smoke-gate`, `check-doc-drift`.
+- Smoke tests that run successfully on this host (riscv64/loongarch64 bringups timeout by design in bringup mode): `smoke-riscv64`, `smoke-loongarch64`, `smoke-abi-linux`, `smoke-proc-a20`, `smoke-vfs-stress`, `smoke-mm-stress`, `smoke-proc-stress`, `smoke-sched-stress`, `smoke-futex-stress`.
+- Running multiple smoke targets concurrently (e.g. `make -j16 smoke-mm-stress smoke-sched-stress`) races on `user/build/` and is not reliable; run them serially for deterministic results.

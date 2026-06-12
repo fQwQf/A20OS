@@ -278,6 +278,7 @@ static err_t lwip_tcp_connected_cb(void *arg, struct tcp_pcb *pcb, err_t err)
 static err_t lwip_tcp_recv_cb(void *arg, struct tcp_pcb *pcb, struct pbuf *p,
                               err_t err)
 {
+    (void)pcb;
     (void)err;
     net_socket_t *s = (net_socket_t *)arg;
     if (!s)
@@ -291,30 +292,36 @@ static err_t lwip_tcp_recv_cb(void *arg, struct tcp_pcb *pcb, struct pbuf *p,
         return ERR_OK;
     }
 
-    int chunks = (int)((p->tot_len + NET_MAX_STREAM_PAYLOAD - 1) / NET_MAX_STREAM_PAYLOAD);
+    int chunks = (int)((p->tot_len + NET_MAX_PAYLOAD - 1) / NET_MAX_PAYLOAD);
+    size_t max_chunk = p->tot_len < NET_MAX_PAYLOAD ? p->tot_len : NET_MAX_PAYLOAD;
+    uint8_t *data = (uint8_t *)kmalloc(max_chunk ? max_chunk : 1);
+    if (!data)
+        return ERR_MEM;
+
     uint64_t irq = spin_lock_irqsave(&g_net_lock);
     if (s->rx_count + chunks > NET_MAX_QUEUE) {
         spin_unlock_irqrestore(&g_net_lock, irq);
+        kfree(data);
         return ERR_MEM;
     }
 
-    uint8_t data[NET_MAX_STREAM_PAYLOAD];
     size_t off = 0;
     while (off < p->tot_len) {
         size_t n = p->tot_len - off;
-        if (n > sizeof(data))
-            n = sizeof(data);
+        if (n > NET_MAX_PAYLOAD)
+            n = NET_MAX_PAYLOAD;
         pbuf_copy_partial(p, data, (u16_t)n, (u16_t)off);
         int r = net_enqueue_msg_locked(s, data, n, NULL, 0);
         if (r < 0) {
             spin_unlock_irqrestore(&g_net_lock, irq);
+            kfree(data);
             return ERR_MEM;
         }
         off += n;
     }
     spin_unlock_irqrestore(&g_net_lock, irq);
+    kfree(data);
 
-    tcp_recved(pcb, p->tot_len);
     pbuf_free(p);
     return ERR_OK;
 }
