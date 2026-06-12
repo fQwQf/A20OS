@@ -187,10 +187,24 @@ int64_t sys_madvise(uint64_t addr, size_t len, int advice) {
                 }
                 continue;
             }
+            vm_area_t *vma = mm_find_vma(t->mm, va);
+            int shared_file = vma &&
+                (vma->vm_flags & (VM_FILE | VM_SHARED)) == (VM_FILE | VM_SHARED) &&
+                vma->file_vnode;
             paddr_t pa = 0;
             if (pt_unmap_leaf(t->mm->pgdir, va, &pa, &base, &size, NULL) == 0) {
                 if (pa) {
-                    frame_put(phys_to_pfn(pa));
+                    if (shared_file) {
+                        uint64_t idx = vma->file_offset + (va - vma->start);
+                        idx /= PAGE_SIZE;
+                        page_cache_page_t *pcp = page_cache_get(vma->file_vnode, idx, 0);
+                        if (pcp) {
+                            page_cache_put(pcp);
+                            page_cache_put(pcp);
+                        }
+                    } else {
+                        frame_put(phys_to_pfn(pa));
+                    }
                     size_t pages = size / PAGE_SIZE;
                     t->mm->rss = (t->mm->rss > pages) ? t->mm->rss - pages : 0;
                 }
