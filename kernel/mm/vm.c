@@ -216,16 +216,14 @@ static int mm_fork_clone_leaf(mm_struct_t *child, mm_struct_t *parent,
     vm_area_t *vma = parent ? mm_find_vma(parent, va) : NULL;
     int shared_file = vma &&
         (vma->vm_flags & (VM_FILE | VM_SHARED)) == (VM_FILE | VM_SHARED);
+    page_cache_page_t *pcp = NULL;
 
     if (shared_file && vma->file_vnode) {
         uint64_t idx = vma->file_offset + (va - vma->start);
         idx /= PAGE_SIZE;
-        page_cache_page_t *pcp = page_cache_get(vma->file_vnode, idx, 0);
+        pcp = page_cache_get(vma->file_vnode, idx, 0);
         if (!pcp)
             return -ENOMEM;
-        /* pcp refcount already bumped; drop the temporary lookup ref so the
-         * mapping pin remains. */
-        page_cache_put(pcp);
     } else if (!shared_file) {
         frame_get(pfn);
     }
@@ -234,12 +232,8 @@ static int mm_fork_clone_leaf(mm_struct_t *child, mm_struct_t *parent,
     int r = (level > 0) ? pt_map_huge(child->pgdir, va, pa, flags)
                         : pt_map(child->pgdir, va, pa, flags);
     if (r < 0) {
-        if (shared_file && vma->file_vnode) {
-            uint64_t idx = vma->file_offset + (va - vma->start);
-            idx /= PAGE_SIZE;
-            page_cache_page_t *pcp = page_cache_get(vma->file_vnode, idx, 0);
-            if (pcp)
-                page_cache_put(pcp);
+        if (shared_file && pcp) {
+            page_cache_put(pcp);
         } else if (!shared_file) {
             frame_put(pfn);
         }
@@ -349,8 +343,9 @@ static int mm_populate_shared_range(mm_struct_t *mm, vm_area_t *vma) {
  *   task's page tables for VM_FILE+VM_SHARED VMAs backed by that vnode.
  * - For each present leaf with the hardware dirty bit set, mark the canonical
  *   page-cache page dirty so page_cache_writeback_* will flush it.
- * - mm->lock is released before touching g_page_cache_lock to avoid creating a
- *   new lock-order edge between the two locks.
+ * - mm->lock is held while touching VMAs and g_page_cache_lock; the lock order
+ *   mm->lock -> g_page_cache_lock is already established and page_cache_get(0)
+ *   does not perform blocking I/O.
  */
 void mm_sync_shared_dirty_for_vnode(vnode_t *vn)
 {
@@ -380,15 +375,12 @@ void mm_sync_shared_dirty_for_vnode(vnode_t *vn)
                 va = leaf.base + leaf.size;
                 if (!dirty)
                     continue;
-                spin_unlock_irqrestore(&mm->lock, mm_flags);
 
                 page_cache_page_t *pcp = page_cache_get(vn, idx, 0);
                 if (pcp) {
                     page_cache_mark_dirty(pcp);
                     page_cache_put(pcp);
                 }
-
-                mm_flags = spin_lock_irqsave(&mm->lock);
             }
         }
         spin_unlock_irqrestore(&mm->lock, mm_flags);
@@ -820,6 +812,10 @@ uint64_t mm_mmap_file(mm_struct_t *mm, uint64_t addr, size_t len,
     if (mm->def_flags & VM_LOCKED) {
         task_t *cur = proc_current();
         if (mm->locked_vm + len > cur->limits.memlock && !proc_has_cap(cur, CAP_SYS_ADMIN)) {
+            if (vma->file_vnode) {
+                vnode_put(vma->file_vnode);
+                vma->file_vnode = NULL;
+            }
             kfree(vma);
             vfs_close(file_fd);
             return (uint64_t)-ENOMEM;
@@ -850,17 +846,38 @@ static int mm_clone_shared_mapping(mm_struct_t *mm, vm_area_t *src_vma,
     if ((int64_t)dst < 0)
         return (int)dst;
 
+    /* mm_mmap can merge the new anonymous VMA with neighbors; force exact
+     * boundaries before turning it into a file-backed mapping. */
+    int sr = mm_split_vma_at(mm, dst);
+    if (sr < 0) {
+        mm_munmap(mm, dst, len);
+        return sr;
+    }
+    sr = mm_split_vma_at(mm, dst + len);
+    if (sr < 0) {
+        mm_munmap(mm, dst, len);
+        return sr;
+    }
+
     vm_area_t *dst_vma = mm_find_vma(mm, dst);
-    if (dst_vma) {
-        dst_vma->vm_flags = src_vma->vm_flags;
-        dst_vma->pte_flags = src_vma->pte_flags;
-        dst_vma->file_fd = src_vma->file_fd;
-        dst_vma->file_offset = src_vma->file_offset + (src_addr - src_vma->start);
-        if (vma_ref_file(dst_vma) < 0) {
-            dst_vma->file_fd = -1;
-            mm_munmap(mm, dst, len);
-            return -EBADF;
+    if (!dst_vma || dst_vma->start != dst || dst_vma->end != dst + len) {
+        mm_munmap(mm, dst, len);
+        return -ENOMEM;
+    }
+
+    dst_vma->vm_flags = src_vma->vm_flags;
+    dst_vma->pte_flags = src_vma->pte_flags;
+    dst_vma->file_fd = src_vma->file_fd;
+    dst_vma->file_offset = src_vma->file_offset + (src_addr - src_vma->start);
+    dst_vma->file_vnode = src_vma->file_vnode;
+    if (vma_ref_file(dst_vma) < 0) {
+        dst_vma->file_fd = -1;
+        if (dst_vma->file_vnode) {
+            vnode_put(dst_vma->file_vnode);
+            dst_vma->file_vnode = NULL;
         }
+        mm_munmap(mm, dst, len);
+        return -EBADF;
     }
 
     for (uint64_t off = 0; off < len; ) {
@@ -891,14 +908,28 @@ static int mm_clone_shared_mapping(mm_struct_t *mm, vm_area_t *src_vma,
         }
 
         int shared_file = src_vma &&
-                          (src_vma->vm_flags & (VM_FILE | VM_SHARED)) == (VM_FILE | VM_SHARED);
-        if (!shared_file)
+                          (src_vma->vm_flags & (VM_FILE | VM_SHARED)) == (VM_FILE | VM_SHARED) &&
+                          src_vma->file_vnode;
+        page_cache_page_t *pcp = NULL;
+        if (shared_file) {
+            uint64_t idx = src_vma->file_offset + (src_va - src_vma->start);
+            idx /= PAGE_SIZE;
+            pcp = page_cache_get(src_vma->file_vnode, idx, 0);
+            if (!pcp) {
+                mm_munmap(mm, dst, len);
+                return -ENOMEM;
+            }
+        } else if (!shared_file) {
             frame_get(pfn);
+        }
         int r = (level > 0) ? pt_map_huge(mm->pgdir, dst + off, pa, arch_pte_flags(*src))
                             : pt_map(mm->pgdir, dst + off, pa, arch_pte_flags(*src));
         if (r < 0) {
-            if (!shared_file)
+            if (shared_file && pcp) {
+                page_cache_put(pcp);
+            } else if (!shared_file) {
                 frame_put(pfn);
+            }
             mm_munmap(mm, dst, len);
             return r;
         }
@@ -939,21 +970,38 @@ static int mm_move_mapping_pages(mm_struct_t *mm, uint64_t old_addr,
         uint64_t pte_flags = arch_pte_flags(*src);
         vm_area_t *src_vma = mm_find_vma(mm, src_va);
         int shared_file = src_vma &&
-                          (src_vma->vm_flags & (VM_FILE | VM_SHARED)) == (VM_FILE | VM_SHARED);
-        if (!shared_file)
+                          (src_vma->vm_flags & (VM_FILE | VM_SHARED)) == (VM_FILE | VM_SHARED) &&
+                          src_vma->file_vnode;
+        page_cache_page_t *pcp = NULL;
+        if (shared_file) {
+            uint64_t idx = src_vma->file_offset + (src_va - src_vma->start);
+            idx /= PAGE_SIZE;
+            pcp = page_cache_get(src_vma->file_vnode, idx, 0);
+            if (!pcp)
+                return -ENOMEM;
+        } else {
             frame_get(pfn);
+        }
         int r = (level > 0) ? pt_map_huge(mm->pgdir, dst + off, pa, pte_flags)
                             : pt_map(mm->pgdir, dst + off, pa, pte_flags);
         if (r < 0) {
-            if (!shared_file)
+            if (shared_file) {
+                page_cache_put(pcp);
+            } else {
                 frame_put(pfn);
+            }
             return r;
         }
 
-        pt_unmap_leaf(mm->pgdir, src_va, NULL, NULL, NULL, NULL);
-        if (!shared_file)
-            frame_put(pfn);
-        (void)dontunmap;
+        if (!dontunmap)
+            pt_unmap_leaf(mm->pgdir, src_va, NULL, NULL, NULL, NULL);
+        if (shared_file) {
+            if (!dontunmap)
+                page_cache_put(pcp);
+        } else {
+            if (!dontunmap)
+                frame_put(pfn);
+        }
         off += leaf_size;
     }
     arch_tlb_flush();
@@ -1046,24 +1094,47 @@ int mm_mremap(mm_struct_t *mm, uint64_t old_addr, size_t old_size,
     if ((int64_t)dst < 0)
         return (int)dst;
 
+    /* mm_mmap can merge the new anonymous VMA with neighbors; force exact
+     * boundaries before turning it into a file-backed mapping. */
+    int sr = mm_split_vma_at(mm, dst);
+    if (sr < 0) {
+        mm_munmap(mm, dst, new_len);
+        return sr;
+    }
+    sr = mm_split_vma_at(mm, dst + new_len);
+    if (sr < 0) {
+        mm_munmap(mm, dst, new_len);
+        return sr;
+    }
+
     vm_area_t *dst_vma = mm_find_vma(mm, dst);
-    if (dst_vma) {
-        dst_vma->vm_flags = vma->vm_flags;
-        dst_vma->pte_flags = vma->pte_flags;
-        dst_vma->file_fd = vma->file_fd;
-        dst_vma->file_offset = vma->file_offset + (old_addr - vma->start);
-        if (vma_ref_file(dst_vma) < 0) {
-            dst_vma->file_fd = -1;
-            mm_munmap(mm, dst, new_len);
-            return -EBADF;
+    if (!dst_vma || dst_vma->start != dst || dst_vma->end != dst + new_len) {
+        mm_munmap(mm, dst, new_len);
+        return -ENOMEM;
+    }
+
+    dst_vma->vm_flags = vma->vm_flags;
+    dst_vma->pte_flags = vma->pte_flags;
+    dst_vma->file_fd = vma->file_fd;
+    dst_vma->file_offset = vma->file_offset + (old_addr - vma->start);
+    dst_vma->file_vnode = vma->file_vnode;
+    if (vma_ref_file(dst_vma) < 0) {
+        dst_vma->file_fd = -1;
+        if (dst_vma->file_vnode) {
+            vnode_put(dst_vma->file_vnode);
+            dst_vma->file_vnode = NULL;
         }
+        mm_munmap(mm, dst, new_len);
+        return -EBADF;
     }
 
     size_t move_len = old_len < new_len ? old_len : new_len;
     r = mm_move_mapping_pages(mm, old_addr, dst, move_len,
                               (flags & MREMAP_DONTUNMAP) != 0);
-    if (r < 0)
+    if (r < 0) {
+        mm_munmap(mm, dst, new_len);
         return r;
+    }
 
     if (!(flags & MREMAP_DONTUNMAP))
         mm_munmap(mm, old_addr, old_len);
@@ -1100,6 +1171,7 @@ int mm_munmap(mm_struct_t *mm, uint64_t addr, size_t len) {
         uint64_t clip_end   = vma->end > end ? end : vma->end;
 
         // 释放该范围内的物理页面。遇到部分覆盖的 PMD leaf 时先降级。
+        int shared_file_vma = (vma->vm_flags & (VM_FILE | VM_SHARED)) == (VM_FILE | VM_SHARED);
         for (uint64_t va = clip_start; va < clip_end; ) {
             int level = 0;
             uint64_t base = 0;
@@ -1117,7 +1189,20 @@ int mm_munmap(mm_struct_t *mm, uint64_t addr, size_t len) {
             paddr_t pa = 0;
             if (pt_unmap_leaf(mm->pgdir, va, &pa, &base, &size, &level) == 0) {
                 if (pa) {
-                    frame_put(phys_to_pfn(pa));
+                    pfn_t pfn = phys_to_pfn(pa);
+                    if (shared_file_vma && vma->file_vnode) {
+                        for (uint64_t off = 0; off < size; off += PAGE_SIZE) {
+                            uint64_t idx = vma->file_offset + (va + off - vma->start);
+                            idx /= PAGE_SIZE;
+                            page_cache_page_t *pcp = page_cache_get(vma->file_vnode, idx, 0);
+                            if (pcp) {
+                                page_cache_put(pcp);
+                                page_cache_put(pcp);
+                            }
+                        }
+                    } else {
+                        frame_put(pfn);
+                    }
                     size_t pages = size / PAGE_SIZE;
                     mm->rss = (mm->rss > pages) ? mm->rss - pages : 0;
                 }
@@ -1342,6 +1427,7 @@ mm_struct_t *mm_fork(mm_struct_t *parent) {
         *cv = *pv;
         cv->vm_flags &= ~VM_LOCKED;
         if (vma_ref_fork(cv) < 0) {
+            vma_release_file(cv);
             kfree(cv);
             goto fail;
         }
@@ -1359,7 +1445,11 @@ mm_struct_t *mm_fork(mm_struct_t *parent) {
         if (pv->vm_flags & (VM_DONTFORK | VM_WIPEONFORK))
             continue;
         if (pv->vm_flags & VM_SHARED) {
-            if (mm_populate_shared_range(parent, pv) < 0) {
+            /* File-backed shared mappings are left populated on demand; fault
+             * under parent->lock would perform blocking file I/O. Anonymous
+             * shared mappings still need backing pages before COW logic runs. */
+            if (!(pv->vm_flags & VM_FILE) &&
+                mm_populate_shared_range(parent, pv) < 0) {
                 spin_unlock_irqrestore(&parent->lock, parent_flags);
                 goto fail;
             }
