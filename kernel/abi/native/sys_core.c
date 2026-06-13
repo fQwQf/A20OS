@@ -448,6 +448,7 @@ int64_t sys_a20_task_wait(const a20_syscall_args_t *args)
     a20_handle_t task_h = (a20_handle_t)A20_ARG(0);
     a20_flags_t flags = (a20_flags_t)A20_ARG(1);
     a20_task_status_t *out = (a20_task_status_t *)A20_ARG(2);
+    (void)flags; /* only blocking wait is implemented currently */
 
     task_t *cur = proc_current();
     struct a20_ht_internal *ht = task_get_a20_ht(cur);
@@ -514,23 +515,17 @@ int64_t sys_a20_vm_unmap(const a20_syscall_args_t *args)
 
 /* ===== Path / Filesystem (0x0400) ===== */
 
-int64_t sys_a20_path_open(const a20_syscall_args_t *args)
+int64_t a20_path_open_impl(const a20_path_open_args_t *kargs,
+                           a20_handle_t *out_handle)
 {
-    a20_path_open_args_t *uargs = (a20_path_open_args_t *)A20_ARG(0);
-    if (!uargs) return -A20_ERR_FAULT;
-
-    a20_path_open_args_t kargs;
-    if (copy_from_user(&kargs, uargs, sizeof(kargs)) < 0)
-        return -A20_ERR_FAULT;
-
     /* Get path string from user */
     char kpath[MAX_PATH_LEN];
-    const char *upath = (const char *)kargs.path;
+    const char *upath = (const char *)kargs->path;
     if (!upath) return -A20_ERR_FAULT;
-    if (kargs.path_len > 0 && kargs.path_len < MAX_PATH_LEN) {
-        if (copy_from_user(kpath, upath, kargs.path_len) < 0)
+    if (kargs->path_len > 0 && kargs->path_len < MAX_PATH_LEN) {
+        if (copy_from_user(kpath, upath, kargs->path_len) < 0)
             return -A20_ERR_FAULT;
-        kpath[kargs.path_len] = '\0';
+        kpath[kargs->path_len] = '\0';
     } else {
         /* nul-terminated — copy up to MAX_PATH_LEN */
         int i;
@@ -557,7 +552,7 @@ int64_t sys_a20_path_open(const a20_syscall_args_t *args)
     }
 
     /* Open via VFS */
-    int gfd = vfs_open(full, (int)kargs.flags, (int)kargs.mode);
+    int gfd = vfs_open(full, (int)kargs->flags, (int)kargs->mode);
     if (gfd < 0) return -A20_ERR_NOT_FOUND;
 
     /* Determine object type from vnode */
@@ -572,12 +567,12 @@ int64_t sys_a20_path_open(const a20_syscall_args_t *args)
     /* Derive default rights from open flags docs/native-abi/06-security.md §3.2) */
     a20_rights_t rights = A20_RIGHT_STAT | A20_RIGHT_SEEK | A20_RIGHT_DUP |
                           A20_RIGHT_TRANSFER;
-    if (!(kargs.flags & 0x1)) /* not O_WRONLY */
+    if (!(kargs->flags & 0x1)) /* not O_WRONLY */
         rights |= A20_RIGHT_READ;
-    if (kargs.flags & (0x1 | 0x2)) /* O_WRONLY or O_RDWR */
+    if (kargs->flags & (0x1 | 0x2)) /* O_WRONLY or O_RDWR */
         rights |= A20_RIGHT_WRITE;
-    if (kargs.rights != 0)
-        rights = kargs.rights & rights; /* user can only restrict */
+    if (kargs->rights != 0)
+        rights = kargs->rights & rights; /* user can only restrict */
 
     /* Install handle in task's handle table.
      * For vfile-backed objects, store the kernel gfd as the object pointer. */
@@ -593,7 +588,24 @@ int64_t sys_a20_path_open(const a20_syscall_args_t *args)
         return h;
     }
 
-    kargs.out_handle = (a20_handle_t)h;
+    if (out_handle) *out_handle = (a20_handle_t)h;
+    return A20_OK;
+}
+
+int64_t sys_a20_path_open(const a20_syscall_args_t *args)
+{
+    a20_path_open_args_t *uargs = (a20_path_open_args_t *)A20_ARG(0);
+    if (!uargs) return -A20_ERR_FAULT;
+
+    a20_path_open_args_t kargs;
+    if (copy_from_user(&kargs, uargs, sizeof(kargs)) < 0)
+        return -A20_ERR_FAULT;
+
+    a20_handle_t h;
+    int64_t r = a20_path_open_impl(&kargs, &h);
+    if (r < 0) return r;
+
+    kargs.out_handle = h;
     if (copy_to_user(uargs, &kargs, sizeof(kargs)) < 0)
         return -A20_ERR_FAULT;
     return A20_OK;

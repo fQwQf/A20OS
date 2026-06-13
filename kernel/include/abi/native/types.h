@@ -491,15 +491,6 @@ typedef struct a20_path_resolve_args {
     uint64_t       out_path_len;
 } a20_path_resolve_args_t;
 
-typedef struct a20_readdir_args {
-    uint32_t       size;
-    uint32_t       version;
-    uint64_t       buf;
-    uint64_t       buf_len;
-    uint64_t       cookie;
-    uint64_t       out_len;
-} a20_readdir_args_t;
-
 typedef struct a20_fs_stat {
     uint64_t       block_size;
     uint64_t       total_blocks;
@@ -510,12 +501,21 @@ typedef struct a20_fs_stat {
     uint64_t       fs_id;
 } a20_fs_stat_t;
 
+typedef struct a20_dirent {
+    uint32_t       type;
+    uint32_t       name_len;
+    char           name[256];
+} a20_dirent_t;
+
 typedef struct a20_fs_mount_args {
     uint32_t       size;
     uint32_t       version;
-    a20_handle_t   mount_point;
     uint64_t       source;
     uint32_t       source_len;
+    uint32_t       _pad;
+    uint64_t       target;
+    uint32_t       target_len;
+    uint32_t       _pad2;
     uint64_t       fs_type;
     uint32_t       fs_type_len;
     uint32_t       flags;

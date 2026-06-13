@@ -6,8 +6,12 @@
 #include <string.h>
 #include <time.h>
 
+extern void __liba20c_init(void);
+
 int main(int argc, char **argv)
 {
+    __liba20c_init();
+
     printf("=== liba20c integration test ===\n");
     printf("argc = %d\n", argc);
     for (int i = 0; i < argc; i++)
@@ -56,6 +60,6 @@ int main(int argc, char **argv)
     printf("%%c: %c\n", 'Z');
     printf("%%%%: %%\n");
 
-    printf("\n=== ALL TESTS PASSED ===\n");
+    printf("\nNATIVE_LIBC: PASS\n");
     return 0;
 }

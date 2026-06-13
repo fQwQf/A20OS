@@ -42,6 +42,9 @@ typedef struct {
     int         in_use;
     vfile_t    *backing_vf;
     uint64_t    backing_size;
+    /* LOCK_ORDER: g_loop[i].lock protects in_use, backing_vf, backing_size.
+     * Local order: none. Lock is always released before any backing-file VFS
+     * operation or memory allocation. */
     spinlock_t  lock;
 } loop_dev_t;
 
@@ -50,6 +53,7 @@ static loop_dev_t g_loop[MAX_LOOP_DEVS];
 void loop_init(void) {
     for (int i = 0; i < MAX_LOOP_DEVS; i++) {
         memset(&g_loop[i], 0, sizeof(g_loop[i]));
+        /* LOCK_ORDER: initialize each per-device loop lock at boot. */
         spin_init(&g_loop[i].lock);
         g_loop[i].backing_vf = NULL;
     }
@@ -76,6 +80,8 @@ static int loop_set_fd(int loop_idx, int user_fd) {
         return -EINVAL;
     }
 
+    /* LOCK_ORDER: acquire loop lock after VFS lookup; released before
+     * subsequent VFS operations on the backing file. */
     uint64_t flags = spin_lock_irqsave(&g_loop[loop_idx].lock);
     if (g_loop[loop_idx].in_use) {
         spin_unlock_irqrestore(&g_loop[loop_idx].lock, flags);
@@ -91,6 +97,8 @@ static int loop_set_fd(int loop_idx, int user_fd) {
 
 static int loop_clr_fd(int loop_idx) {
     if (loop_idx < 0 || loop_idx >= MAX_LOOP_DEVS) return -EINVAL;
+    /* LOCK_ORDER: acquire loop lock to clear backing state; vfile reference is
+     * dropped after the lock is released. */
     uint64_t flags = spin_lock_irqsave(&g_loop[loop_idx].lock);
     if (!g_loop[loop_idx].in_use) {
         spin_unlock_irqrestore(&g_loop[loop_idx].lock, flags);
@@ -114,6 +122,7 @@ static int loop_get_status64(int loop_idx, void *arg) {
     if (loop_idx < 0 || loop_idx >= MAX_LOOP_DEVS) return -EINVAL;
     loop_info64_t info;
     memset(&info, 0, sizeof(info));
+    /* LOCK_ORDER: acquire loop lock to copy status fields. */
     uint64_t flags = spin_lock_irqsave(&g_loop[loop_idx].lock);
     info.lo_number = (uint32_t)loop_idx;
     if (g_loop[loop_idx].in_use) {
@@ -147,6 +156,8 @@ static int loop_write_locked(vfile_t *vf, const char *buf, size_t count, size_t 
 
 int loop_dev_read(int loop_idx, char *buf, size_t count, size_t offset) {
     if (loop_idx < 0 || loop_idx >= MAX_LOOP_DEVS) return -EINVAL;
+    /* LOCK_ORDER: acquire loop lock to copy backing_vf/size; released before
+     * the backing-file read (no VFS under loop lock). */
     uint64_t flags = spin_lock_irqsave(&g_loop[loop_idx].lock);
     if (!g_loop[loop_idx].in_use || !g_loop[loop_idx].backing_vf) {
         spin_unlock_irqrestore(&g_loop[loop_idx].lock, flags);
@@ -163,6 +174,8 @@ int loop_dev_read(int loop_idx, char *buf, size_t count, size_t offset) {
 
 int loop_dev_write(int loop_idx, const char *buf, size_t count, size_t offset) {
     if (loop_idx < 0 || loop_idx >= MAX_LOOP_DEVS) return -EINVAL;
+    /* LOCK_ORDER: acquire loop lock to copy backing_vf/size; released before
+     * the backing-file write (no VFS under loop lock). */
     uint64_t flags = spin_lock_irqsave(&g_loop[loop_idx].lock);
     if (!g_loop[loop_idx].in_use || !g_loop[loop_idx].backing_vf) {
         spin_unlock_irqrestore(&g_loop[loop_idx].lock, flags);
@@ -196,6 +209,7 @@ int loop_dev_ioctl(vfile_t *vf, unsigned long req, void *arg) {
         return 0;
     }
     if (req == BLKGETSIZE64) {
+        /* LOCK_ORDER: acquire loop lock to copy backing size. */
         uint64_t flags = spin_lock_irqsave(&g_loop[idx].lock);
         uint64_t sz = g_loop[idx].in_use ? g_loop[idx].backing_size : 0;
         spin_unlock_irqrestore(&g_loop[idx].lock, flags);
@@ -203,6 +217,7 @@ int loop_dev_ioctl(vfile_t *vf, unsigned long req, void *arg) {
         return 0;
     }
     if (req == BLKGETSIZE) {
+        /* LOCK_ORDER: acquire loop lock to copy backing size in sectors. */
         uint64_t flags = spin_lock_irqsave(&g_loop[idx].lock);
         uint64_t sz = g_loop[idx].in_use ? (g_loop[idx].backing_size / LOOP_SECTOR_SIZE) : 0;
         spin_unlock_irqrestore(&g_loop[idx].lock, flags);

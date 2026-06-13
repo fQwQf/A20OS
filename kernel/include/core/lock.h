@@ -10,22 +10,36 @@
 #endif
 
 /*
- * Global lock order contract (outermost -> innermost):
+ * Global lock order contract (outermost -> innermost).
+ * For the full driver-private lock contracts see docs/driver-lock-order.md.
+ *
+ * Global order:
  *   cg_node.lock -> proc_lock -> runq_lock -> pfa.lock
  *   proc_lock -> runq_lock
  *   proc_lock -> files_struct.lock -> VFS global-file/vnode locks
  *   proc_lock -> mm_struct.lock
  *   proc_lock -> a20_handle_table.lock
  *   driver registry/IRQ locks -> device-private locks
+ *   g_lwip_lock -> g_net_lock
  *   g_lwip_lock -> virtio-net nonblocking send/recv paths only
  *
  * Rules:
+ *
+ * Lock-safe network entry points (see docs/network-lock-contract.md):
+ * - a20_lwip_lock()/a20_lwip_unlock(): outer lock around all lwIP core calls.
+ * - a20_lwip_poll_locked(): progress entry that runs with g_lwip_lock held;
+ *   must not allocate, block, or acquire g_net_lock.
+ * - a20_lwip_poll(): acquires g_lwip_lock, runs progress, releases it, then
+ *   runs the socket bottom-half under g_net_lock only.
+ * - lwIP callbacks run under g_lwip_lock and must only stage events into the
+ *   preallocated per-PCB ring; allocation, enqueue, and wakeup happen in the
+ *   bottom-half with g_net_lock held.
  * - Never acquire proc_lock while holding a runqueue lock.
  * - Never block while holding a spinlock or while interrupts are disabled.
  * - Do not call into VFS, memory allocation, or scheduler paths while holding a
  *   device or lwIP lock unless the callee is documented nonblocking.
- * - New locks must either fit this order or document a narrower local order next
- *   to the lock definition before use.
+ * - New locks must either fit this order or document a narrower local order in
+ *   docs/driver-lock-order.md before use.
  */
 
 typedef struct spinlock {

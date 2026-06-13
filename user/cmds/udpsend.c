@@ -5,6 +5,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 #include <netinet/in.h>
+#include <fcntl.h>
 
 static uint16_t bswap16(uint16_t x) {
     return (uint16_t)((x << 8) | (x >> 8));
@@ -21,8 +22,22 @@ static uint32_t parse_ipv4(const char *s) {
 }
 
 int main(int argc, char **argv) {
+    if (argc >= 2 && strcmp(argv[1], "-i") == 0) {
+        int fd = open("/proc/net/config", O_RDONLY);
+        if (fd < 0) {
+            perror("open /proc/net/config");
+            return 1;
+        }
+        char buf[512];
+        ssize_t n;
+        while ((n = read(fd, buf, sizeof(buf))) > 0)
+            write(STDOUT_FILENO, buf, (size_t)n);
+        close(fd);
+        return 0;
+    }
+
     if (argc < 4) {
-        fprintf(stderr, "usage: udpsend IPv4 port message\n");
+        fprintf(stderr, "usage: udpsend [-i] IPv4 port message\n");
         return 1;
     }
 

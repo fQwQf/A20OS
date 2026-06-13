@@ -7,12 +7,11 @@
 #include <sys/time.h>
 #include <unistd.h>
 #include <netinet/in.h>
+#include "net_config_user.h"
 
 #ifndef IPPROTO_ICMP
 #define IPPROTO_ICMP 1
 #endif
-
-#define DNS_SERVER_IP 0x0302000aU /* 10.0.2.3, QEMU user-net DNS */
 
 typedef struct {
     uint8_t type;
@@ -93,6 +92,12 @@ static int dns_encode_name(uint8_t *buf, size_t bufsz, size_t *off, const char *
 }
 
 static int resolve_a_record(const char *name, uint32_t *out_addr) {
+    uint32_t dns_server;
+    if (net_config_read_dns0(&dns_server) < 0) {
+        fprintf(stderr, "ping: no DNS server configured\n");
+        return -1;
+    }
+
     uint8_t query[512];
     memset(query, 0, sizeof(query));
     uint16_t txid = (uint16_t)(0x4200U ^ (uint16_t)getpid());
@@ -114,7 +119,7 @@ static int resolve_a_record(const char *name, uint32_t *out_addr) {
     struct sockaddr_in dns;
     memset(&dns, 0, sizeof(dns));
     dns.sin_family = AF_INET;
-    dns.sin_addr.s_addr = DNS_SERVER_IP;
+    dns.sin_addr.s_addr = dns_server;
     dns.sin_port = bswap16(53);
 
     long start = now_ms();

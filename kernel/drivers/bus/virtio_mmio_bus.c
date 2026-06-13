@@ -52,7 +52,13 @@ bus_type_t *get_virtio_mmio_bus(void) {
     return &virtio_mmio_bus;
 }
 
-void virtio_mmio_enumerate(uintptr_t base, int max_slots) {
+/* VIRTIO_MMIO_IRQ_MODEL:
+ * - Each MMIO slot is assigned a platform IRQ line relative to a base.
+ * - The base is passed by the board because it is platform-specific
+ *   (e.g. RISC-V QEMU virt starts at IRQ 1, AArch64 QEMU virt at IRQ 16).
+ * - Drivers retrieve the IRQ through device_get_resource(dev, RES_IRQ, 0).
+ */
+void virtio_mmio_enumerate(uintptr_t base, int max_slots, int irq_base) {
     g_virtio_mmio_data.base      = base;
     g_virtio_mmio_data.max_slots = max_slots;
 
@@ -73,6 +79,8 @@ void virtio_mmio_enumerate(uintptr_t base, int max_slots) {
             continue;
 
         static char dev_names[8][32];
+        static resource_t vdev_res[8][2];
+        static device_t vdevs[8];
         if (dev_idx >= 8) break;
 
         const char *type_name = "unknown";
@@ -82,25 +90,29 @@ void virtio_mmio_enumerate(uintptr_t base, int max_slots) {
         snprintf(dev_names[dev_idx], sizeof(dev_names[dev_idx]),
                  "virtio-%s%d", type_name, slot);
 
-        static resource_t vdev_res[8];
-        vdev_res[dev_idx].type  = RES_MMIO;
-        vdev_res[dev_idx].start = slot_base;
-        vdev_res[dev_idx].end   = slot_base + 0xFFF;
-        vdev_res[dev_idx].flags = IORESOURCE_MMIO_32BIT;
+        resource_t *res = vdev_res[dev_idx];
+        res[0].type  = RES_MMIO;
+        res[0].start = slot_base;
+        res[0].end   = slot_base + 0xFFF;
+        res[0].flags = IORESOURCE_MMIO_32BIT;
 
-        static device_t vdevs[8];
+        res[1].type  = RES_IRQ;
+        res[1].start = (uint64_t)(irq_base + slot);
+        res[1].end   = res[1].start;
+        res[1].flags = IORESOURCE_IRQ_LEVEL;
+
         device_t *dev       = &vdevs[dev_idx];
         dev->name            = dev_names[dev_idx];
         dev->bus             = &virtio_mmio_bus;
         dev->plat_data       = (void *)(uintptr_t)dev_id;
-        dev->res             = &vdev_res[dev_idx];
-        dev->res_count       = 1;
+        dev->res             = res;
+        dev->res_count       = 2;
         dev->state           = DEV_STATE_UNINIT;
 
         device_register(dev);
         dev_idx++;
     }
 
-    kinfo("[BUS] virtio-mmio: found %d devices (base=0x%lx)\n",
-          dev_idx, (unsigned long)base);
+    kinfo("[BUS] virtio-mmio: found %d devices (base=0x%lx irq_base=%d)\n",
+          dev_idx, (unsigned long)base, irq_base);
 }

@@ -2,6 +2,7 @@
 
 #include "core/consts.h"
 #include "core/string.h"
+#include "proc/proc.h"
 
 #define XATTR_TABLE_MAX 1024
 
@@ -48,13 +49,34 @@ static int xattr_check_name(const char *name)
     return 0;
 }
 
+int xattr_check_namespace(const char *name, int *needs_cap)
+{
+    int r = xattr_check_name(name);
+    if (r < 0) return r;
+    if (needs_cap) *needs_cap = 0;
+    if (strncmp(name, XATTR_USER_PREFIX, strlen(XATTR_USER_PREFIX)) == 0) return 0;
+    if (strncmp(name, XATTR_SYSTEM_PREFIX, strlen(XATTR_SYSTEM_PREFIX)) == 0) return 0;
+    if (strncmp(name, XATTR_TRUSTED_PREFIX, strlen(XATTR_TRUSTED_PREFIX)) == 0) {
+        if (needs_cap) *needs_cap = 1;
+        return 0;
+    }
+    if (strncmp(name, XATTR_SECURITY_PREFIX, strlen(XATTR_SECURITY_PREFIX)) == 0) {
+        if (needs_cap) *needs_cap = 1;
+        return 0;
+    }
+    return -EINVAL;
+}
+
 int64_t xattr_set_vnode(vnode_t *vn, const char *name,
                         const void *value, size_t size, int flags)
 {
     if (!vn) return -ENOENT;
     if (flags & ~(XATTR_CREATE | XATTR_REPLACE)) return -EINVAL;
-    int nr = xattr_check_name(name);
+    int needs_cap = 0;
+    int nr = xattr_check_namespace(name, &needs_cap);
     if (nr < 0) return nr;
+    if (needs_cap && (!proc_current() || !proc_has_cap(proc_current(), CAP_SYS_ADMIN)))
+        return -EPERM;
     if (size > XATTR_VALUE_MAX_LOCAL) return -ENOSPC;
     if (size && !value) return -EINVAL;
 
@@ -83,7 +105,7 @@ int64_t xattr_get_vnode(vnode_t *vn, const char *name,
                         void *value, size_t size)
 {
     if (!vn) return -ENOENT;
-    int nr = xattr_check_name(name);
+    int nr = xattr_check_namespace(name, NULL);
     if (nr < 0) return nr;
     void *mnt;
     uint64_t ino;
@@ -123,8 +145,11 @@ int64_t xattr_list_vnode(vnode_t *vn, char *list, size_t size)
 int64_t xattr_remove_vnode(vnode_t *vn, const char *name)
 {
     if (!vn) return -ENOENT;
-    int nr = xattr_check_name(name);
+    int needs_cap = 0;
+    int nr = xattr_check_namespace(name, &needs_cap);
     if (nr < 0) return nr;
+    if (needs_cap && (!proc_current() || !proc_has_cap(proc_current(), CAP_SYS_ADMIN)))
+        return -EPERM;
     void *mnt;
     uint64_t ino;
     xattr_vnode_key(vn, &mnt, &ino);

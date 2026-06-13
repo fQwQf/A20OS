@@ -11,8 +11,8 @@
 #include <netinet/in.h>
 
 #include "tlse.h"
+#include "net_config_user.h"
 
-#define DNS_SERVER_IP 0x0302000aU
 #define MAX_REDIRECTS 4
 #define READ_TIMEOUT_MS 10000
 #define CONNECT_TIMEOUT_MS 10000
@@ -98,6 +98,12 @@ static int resolve_a_record(const char *name, uint32_t *out_addr) {
         return 0;
     }
 
+    uint32_t dns_server;
+    if (net_config_read_dns0(&dns_server) < 0) {
+        fprintf(stderr, "wget: no DNS server configured\n");
+        return -1;
+    }
+
     uint8_t query[512];
     memset(query, 0, sizeof(query));
     uint16_t txid = (uint16_t)(0x5700U ^ (uint16_t)getpid());
@@ -121,7 +127,7 @@ static int resolve_a_record(const char *name, uint32_t *out_addr) {
     struct sockaddr_in dns;
     memset(&dns, 0, sizeof(dns));
     dns.sin_family = AF_INET;
-    dns.sin_addr.s_addr = DNS_SERVER_IP;
+    dns.sin_addr.s_addr = dns_server;
     dns.sin_port = bswap16(53);
 
     long start = now_ms();

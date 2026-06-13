@@ -1,3 +1,11 @@
+/*
+ * A20OS DW SDIO host driver.
+ *
+ * LOCK_ORDER: This driver uses no private spinlock. All command/data
+ * transfers are synchronous busy-polls against a single global sdio_priv_t
+ * instance (g_sdio). Future concurrent or IRQ-driven versions must add a
+ * private lock and document it in docs/driver-lock-order.md.
+ */
 #include "drivers/block/dw_sdio.h"
 #include "drivers/core/driver_core.h"
 #include "drivers/core/driver_class.h"

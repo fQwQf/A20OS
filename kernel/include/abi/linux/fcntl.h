@@ -27,6 +27,19 @@
 #define AT_EMPTY_PATH  0x1000
 #define AT_EACCESS     0x200
 
+/* openat2 resolve flags (Linux ABI) */
+#define RESOLVE_NO_XDEV            0x01
+#define RESOLVE_NO_MAGICLINKS      0x02
+#define RESOLVE_NO_SYMLINKS        0x04
+#define RESOLVE_BENEATH            0x08
+#define RESOLVE_IN_ROOT            0x10
+#define RESOLVE_NO_TRAILING_SYMLINKS 0x20
+#define RESOLVE_CACHED             0x40
+
+#define RENAME_NOREPLACE           0x01
+#define RENAME_EXCHANGE            0x02
+#define RENAME_WHITEOUT            0x04
+
 #define F_OK 0
 #define X_OK 1
 #define W_OK 2

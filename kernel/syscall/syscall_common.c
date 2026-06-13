@@ -1,5 +1,6 @@
 #include "syscall_internal.h"
 #include "fs/vfs/mount.h"
+#include "fs/vfs/path.h"
 
 int syscall_sig_diag_count = 0;
 int syscall_sleep_diag_count = 0;
@@ -77,5 +78,7 @@ int syscall_path_at(int dirfd, const char *path, char *out, size_t outsz) {
     if (n < 0 || (size_t)n >= outsz)
         return -ENAMETOOLONG;
     out[outsz - 1] = '\0';
+    if (strcmp(root, "/") != 0)
+        vfs_path_normalize_absolute_with_root(out, root);
     return 0;
 }

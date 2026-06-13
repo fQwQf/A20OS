@@ -19,5 +19,7 @@ typedef enum kernel_progress_reason {
 } kernel_progress_reason_t;
 
 void kernel_progress_poll(kernel_progress_reason_t reason);
+void kernel_progress_timer_tick(void);
+void kernel_progress_run_bottom_halves(void);
 
 #endif /* _CORE_PROGRESS_H */

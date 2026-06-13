@@ -23,7 +23,8 @@ gate before its TODO entry can be checked off.
 
 `ABI_SMOKE_GATE_CONTRACT`: Linux ABI smoke runs `syscall_smoke` and userland
 commands through `smoke-abi-linux`; Native ABI coverage includes
-`native-minimal`, `native-test`, and `user/tests/test_liba20c.c` build coverage.
+`native-minimal`, `native-test`, `user/tests/test_liba20c.c`, and
+`make smoke-native-handle` runtime coverage for handle dup/transfer.
 
 `DOC_DRIFT_KEYWORD_GATE`: drift keywords such as `stub`, `partial`, `TODO`,
 `Future`, `not yet`, and `for simplicity` are allowed only when they are tied to

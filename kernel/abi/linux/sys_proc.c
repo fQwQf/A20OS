@@ -1,6 +1,7 @@
 #define LINUX_SYSCALL_DECLARE_PROTOTYPES
 #include "syscall_impl.h"
 #include "abi/linux/futex.h"
+#include "abi/linux/fcntl.h"
 
 #define CLD_EXITED     1
 #define CLD_KILLED     2
@@ -481,17 +482,37 @@ int64_t sys_clone3(void *cl_args, size_t size) {
 }
 
 int64_t sys_openat2(int dirfd, const char *pathname, const void *how, size_t size) {
-    int flags = 0;
-    int mode = 0;
-    if (how && size >= 8) {
-        uint64_t buf[2];
-        size_t copy_sz = size < 16 ? size : 16;
-        if (copy_from_user(buf, how, copy_sz) == 0) {
-            flags = (int)buf[0];
-            mode = (int)(buf[1] & 07777);
+    struct open_how khow;
+    if (!how || !pathname) return -EFAULT;
+    if (size < 24 || size > sizeof(khow)) return -EINVAL;
+    if (copy_from_user(&khow, how, size < sizeof(khow) ? size : sizeof(khow)) < 0)
+        return -EFAULT;
+    if (size > sizeof(khow)) {
+        uint8_t extra[32];
+        size_t off = sizeof(khow);
+        while (off < size) {
+            size_t n = size - off;
+            if (n > sizeof(extra)) n = sizeof(extra);
+            if (copy_from_user(extra, (const char *)how + off, n) < 0)
+                return -EFAULT;
+            for (size_t i = 0; i < n; i++) {
+                if (extra[i] != 0)
+                    return -E2BIG;
+            }
+            off += n;
         }
     }
-    return sys_openat(dirfd, pathname, flags, mode);
+    if (khow.resolve & ~(RESOLVE_NO_SYMLINKS | RESOLVE_BENEATH | RESOLVE_IN_ROOT |
+                         RESOLVE_NO_MAGICLINKS | RESOLVE_NO_XDEV |
+                         RESOLVE_NO_TRAILING_SYMLINKS | RESOLVE_CACHED))
+        return -EINVAL;
+
+    int flags = (int)khow.flags;
+    int mode = (int)(khow.mode & 07777);
+    int gfd = vfs_openat2(dirfd, pathname, flags, mode, khow.resolve);
+    if (gfd < 0) return gfd;
+    task_t *t = proc_current();
+    return fdtable_install(t, gfd, flags);
 }
 
 int64_t sys_clone(uint64_t flags, void *stack, int *ptid, uint64_t tls, int *ctid) {

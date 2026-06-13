@@ -29,6 +29,9 @@
 #define FIONBIO        0x5421
 
 typedef struct {
+    /* LOCK_ORDER: per-pair lock protects ring buffers, master/slave refs,
+     * locked flag, nonblock flags, and window size. No nesting with
+     * g_pty_alloc_lock or other kernel locks. */
     spinlock_t  lock;
     char       *m2s_buf;
     char       *s2m_buf;
@@ -44,17 +47,23 @@ typedef struct {
 } pty_pair_t;
 
 static pty_pair_t g_ptys[MAX_PTYS];
+/* LOCK_ORDER: g_pty_alloc_lock protects in_use during allocation and initial
+ * buffer setup only. Never nested under or over the per-pair lock. */
 static spinlock_t g_pty_alloc_lock;
 
 void pty_init(void) {
+    /* LOCK_ORDER: initialize the allocation lock before any pty_alloc() call. */
     spin_init(&g_pty_alloc_lock);
     for (int i = 0; i < MAX_PTYS; i++) {
         memset(&g_ptys[i], 0, sizeof(g_ptys[i]));
+        /* LOCK_ORDER: initialize each per-pair lock at boot. */
         spin_init(&g_ptys[i].lock);
     }
 }
 
 static int pty_alloc(void) {
+    /* LOCK_ORDER: acquire g_pty_alloc_lock for allocation only;
+     * per-pair lock is not held. */
     uint64_t flags = spin_lock_irqsave(&g_pty_alloc_lock);
     for (int i = 0; i < MAX_PTYS; i++) {
         if (!g_ptys[i].in_use) {
@@ -89,6 +98,8 @@ static int pty_alloc(void) {
 
 static void pty_release(int idx) {
     if (idx < 0 || idx >= MAX_PTYS) return;
+    /* LOCK_ORDER: acquire per-pair lock to update reference counts and
+     * optionally clear in_use; backing vfile reference is dropped after release. */
     uint64_t flags = spin_lock_irqsave(&g_ptys[idx].lock);
     if (g_ptys[idx].master_refs > 0) g_ptys[idx].master_refs--;
     if (g_ptys[idx].slave_refs > 0) g_ptys[idx].slave_refs--;
@@ -125,6 +136,7 @@ static size_t ring_read(char *buf, size_t cap, size_t *tail, size_t *used,
 
 int pty_master_read(int idx, char *buf, size_t count) {
     if (idx < 0 || idx >= MAX_PTYS || !g_ptys[idx].in_use) return -EIO;
+    /* LOCK_ORDER: acquire per-pair lock to read from slave-to-master ring. */
     uint64_t flags = spin_lock_irqsave(&g_ptys[idx].lock);
     if (g_ptys[idx].s2m_used == 0) {
         spin_unlock_irqrestore(&g_ptys[idx].lock, flags);
@@ -140,6 +152,7 @@ int pty_master_read(int idx, char *buf, size_t count) {
 
 int pty_master_write(int idx, const char *buf, size_t count) {
     if (idx < 0 || idx >= MAX_PTYS || !g_ptys[idx].in_use) return -EIO;
+    /* LOCK_ORDER: acquire per-pair lock to write into master-to-slave ring. */
     uint64_t flags = spin_lock_irqsave(&g_ptys[idx].lock);
     if (g_ptys[idx].slave_refs == 0) {
         spin_unlock_irqrestore(&g_ptys[idx].lock, flags);
@@ -154,6 +167,7 @@ int pty_master_write(int idx, const char *buf, size_t count) {
 
 int pty_slave_read(int idx, char *buf, size_t count) {
     if (idx < 0 || idx >= MAX_PTYS || !g_ptys[idx].in_use) return -EIO;
+    /* LOCK_ORDER: acquire per-pair lock to read from master-to-slave ring. */
     uint64_t flags = spin_lock_irqsave(&g_ptys[idx].lock);
     if (g_ptys[idx].m2s_used == 0) {
         spin_unlock_irqrestore(&g_ptys[idx].lock, flags);
@@ -169,6 +183,7 @@ int pty_slave_read(int idx, char *buf, size_t count) {
 
 int pty_slave_write(int idx, const char *buf, size_t count) {
     if (idx < 0 || idx >= MAX_PTYS || !g_ptys[idx].in_use) return -EIO;
+    /* LOCK_ORDER: acquire per-pair lock to write into slave-to-master ring. */
     uint64_t flags = spin_lock_irqsave(&g_ptys[idx].lock);
     if (g_ptys[idx].master_refs == 0) {
         spin_unlock_irqrestore(&g_ptys[idx].lock, flags);
@@ -191,6 +206,7 @@ int pty_master_ioctl(int idx, unsigned long req, void *arg) {
     if (req == TIOCSPTLCK) {
         int lock;
         if (copy_from_user(&lock, arg, sizeof(lock)) < 0) return -EFAULT;
+        /* LOCK_ORDER: acquire per-pair lock to update locked flag. */
         uint64_t flags = spin_lock_irqsave(&g_ptys[idx].lock);
         g_ptys[idx].locked = lock;
         spin_unlock_irqrestore(&g_ptys[idx].lock, flags);
@@ -203,6 +219,7 @@ int pty_master_ioctl(int idx, unsigned long req, void *arg) {
     }
     if (req == TIOCGWINSZ) {
         uint16_t ws[4];
+        /* LOCK_ORDER: acquire per-pair lock to read window size (master side). */
         uint64_t flags = spin_lock_irqsave(&g_ptys[idx].lock);
         ws[0] = g_ptys[idx].ws_row;
         ws[1] = g_ptys[idx].ws_col;
@@ -215,6 +232,7 @@ int pty_master_ioctl(int idx, unsigned long req, void *arg) {
     if (req == TIOCSWINSZ) {
         uint16_t ws[4];
         if (copy_from_user(ws, arg, sizeof(ws)) < 0) return -EFAULT;
+        /* LOCK_ORDER: acquire per-pair lock to update window size (master side). */
         uint64_t flags = spin_lock_irqsave(&g_ptys[idx].lock);
         g_ptys[idx].ws_row = ws[0];
         g_ptys[idx].ws_col = ws[1];
@@ -224,6 +242,7 @@ int pty_master_ioctl(int idx, unsigned long req, void *arg) {
     if (req == FIONBIO) {
         int nb;
         if (copy_from_user(&nb, arg, sizeof(nb)) < 0) return -EFAULT;
+        /* LOCK_ORDER: acquire per-pair lock to update master nonblock flag. */
         uint64_t flags = spin_lock_irqsave(&g_ptys[idx].lock);
         g_ptys[idx].master_nonblock = nb;
         spin_unlock_irqrestore(&g_ptys[idx].lock, flags);
@@ -236,6 +255,7 @@ int pty_slave_ioctl(int idx, unsigned long req, void *arg) {
     if (idx < 0 || idx >= MAX_PTYS || !g_ptys[idx].in_use) return -EIO;
     if (req == TIOCGWINSZ) {
         uint16_t ws[4];
+        /* LOCK_ORDER: acquire per-pair lock to read window size (slave side). */
         uint64_t flags = spin_lock_irqsave(&g_ptys[idx].lock);
         ws[0] = g_ptys[idx].ws_row;
         ws[1] = g_ptys[idx].ws_col;
@@ -248,6 +268,7 @@ int pty_slave_ioctl(int idx, unsigned long req, void *arg) {
     if (req == TIOCSWINSZ) {
         uint16_t ws[4];
         if (copy_from_user(ws, arg, sizeof(ws)) < 0) return -EFAULT;
+        /* LOCK_ORDER: acquire per-pair lock to update window size (slave side). */
         uint64_t flags = spin_lock_irqsave(&g_ptys[idx].lock);
         g_ptys[idx].ws_row = ws[0];
         g_ptys[idx].ws_col = ws[1];
@@ -260,6 +281,7 @@ int pty_slave_ioctl(int idx, unsigned long req, void *arg) {
     if (req == FIONBIO) {
         int nb;
         if (copy_from_user(&nb, arg, sizeof(nb)) < 0) return -EFAULT;
+        /* LOCK_ORDER: acquire per-pair lock to update slave nonblock flag. */
         uint64_t flags = spin_lock_irqsave(&g_ptys[idx].lock);
         g_ptys[idx].slave_nonblock = nb;
         spin_unlock_irqrestore(&g_ptys[idx].lock, flags);
@@ -284,6 +306,7 @@ void pty_slave_close(int idx) {
 
 void pty_slave_ref(int idx) {
     if (idx < 0 || idx >= MAX_PTYS || !g_ptys[idx].in_use) return;
+    /* LOCK_ORDER: acquire per-pair lock to increment slave reference count. */
     uint64_t flags = spin_lock_irqsave(&g_ptys[idx].lock);
     g_ptys[idx].slave_refs++;
     spin_unlock_irqrestore(&g_ptys[idx].lock, flags);

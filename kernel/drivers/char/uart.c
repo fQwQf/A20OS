@@ -2,6 +2,8 @@
 #include "drivers/core/driver_core.h"
 #include "drivers/core/driver_class.h"
 #include "drivers/core/driver_register.h"
+#include "drivers/core/driver_hwapi.h"
+#include "platform.h"
 #include "core/consts.h"
 #include "core/defs.h"
 #include "core/klog.h"
@@ -18,6 +20,10 @@
 static volatile char rx_buffer[RX_BUF_SIZE];
 static volatile uint32_t rx_head;  // 缓冲区头指针
 static volatile uint32_t rx_tail;  // 缓冲区尾指针
+/* LOCK_ORDER: rx_lock protects the RX ring, rx_waiter, and tty_foreground_pgid.
+ * Local order (sole documented exception): rx_lock -> proc_lock.
+ * Ctrl-C path holds rx_lock while calling proc_find()/proc_kill() under proc_lock.
+ * All other paths must not acquire additional locks while holding rx_lock. */
 static spinlock_t rx_lock = SPINLOCK_INIT;
 static task_t *rx_waiter;
 static int tty_foreground_pgid;
@@ -81,6 +87,7 @@ static void uart_signal_all_user(int signum, int spare_shells)
 
 static void uart_dump_tasks(void)
 {
+    /* LOCK_ORDER: proc_lock acquired while not holding rx_lock (task dump helper). */
     uint64_t flags = spin_lock_irqsave(&proc_lock);
     kdebug("[TTYDBG] task dump begin\n");
     for (task_t *t = proc_first_task_locked(); t; t = proc_next_task_locked(t)) {
@@ -104,6 +111,8 @@ static void uart_dump_tasks(void)
 
 static void uart_rx_push(char c) {
     if (c == 0x03) {  // Ctrl-C
+        /* LOCK_ORDER: rx_lock is released before acquiring proc_lock in Ctrl-C path.
+         * dump/signal helpers acquire proc_lock independently. */
         uart_dump_tasks();
         int pgid = uart_get_foreground_pgid();
         int hit = uart_signal_user_pgid(pgid, SIGINT);
@@ -111,6 +120,7 @@ static void uart_rx_push(char c) {
         return;
     }
 
+    /* LOCK_ORDER: acquire rx_lock to push a character into the RX ring. */
     uint64_t flags = spin_lock_irqsave(&rx_lock);
     uint32_t next = (rx_head + 1) % RX_BUF_SIZE;
     if (next != rx_tail) {
@@ -125,15 +135,19 @@ void uart_receive_char(char c) {
     uart_rx_push(c);
 }
 
+static int uart_irq_wrapper(int irq, void *priv);
+
 // 初始化 UART 设备
 void uart_init(void) {
     rx_head = 0;
     rx_tail = 0;
     rx_waiter = NULL;
     tty_foreground_pgid = 1;
+    /* LOCK_ORDER: initialize rx_lock before any UART paths run. */
     spin_init(&rx_lock);
     arch_uart_init();
     uart_flush();  // 等待发送完成
+    request_irq(UART0_IRQ, uart_irq_wrapper, 0, NULL);
 }
 
 // 发送一个字符
@@ -144,6 +158,7 @@ void uart_putc(char c) {
 // 阻塞式读取一个字符（如果没有数据则让出 CPU）
 int uart_getc(void) {
     for (;;) {
+        /* LOCK_ORDER: acquire rx_lock to consume a buffered character. */
         uint64_t flags = spin_lock_irqsave(&rx_lock);
         if (rx_head != rx_tail) {
             char c = rx_buffer[rx_tail];
@@ -174,6 +189,7 @@ int uart_getc(void) {
             uart_rx_push((char)c);
             continue;
         }
+        /* LOCK_ORDER: rx_lock released before blocking the current task. */
         rx_waiter = cur;
         proc_set_wake_time(cur, timer_get_ticks() + (TICKS_PER_SEC / 20));
         cur->state = PROC_BLOCKED;
@@ -193,6 +209,7 @@ int uart_getc(void) {
 
 // 非阻塞式尝试读取一个字符
 int uart_try_getc(void) {
+    /* LOCK_ORDER: acquire rx_lock for non-blocking character read. */
     uint64_t flags = spin_lock_irqsave(&rx_lock);
     if (rx_head == rx_tail) {
         spin_unlock_irqrestore(&rx_lock, flags);
@@ -206,6 +223,7 @@ int uart_try_getc(void) {
 
 // 检查是否有输入数据
 int uart_has_input(void) {
+    /* LOCK_ORDER: acquire rx_lock to test RX ring non-empty. */
     uint64_t flags = spin_lock_irqsave(&rx_lock);
     int has = rx_head != rx_tail;
     spin_unlock_irqrestore(&rx_lock, flags);
@@ -223,6 +241,7 @@ void uart_flush(void) {
 }
 
 int uart_get_foreground_pgid(void) {
+    /* LOCK_ORDER: acquire rx_lock to read tty_foreground_pgid. */
     uint64_t flags = spin_lock_irqsave(&rx_lock);
     int pgid = tty_foreground_pgid;
     spin_unlock_irqrestore(&rx_lock, flags);
@@ -232,6 +251,7 @@ int uart_get_foreground_pgid(void) {
 void uart_set_foreground_pgid(int pgid) {
     if (pgid <= 0)
         return;
+    /* LOCK_ORDER: acquire rx_lock to update tty_foreground_pgid. */
     uint64_t flags = spin_lock_irqsave(&rx_lock);
     tty_foreground_pgid = pgid;
     spin_unlock_irqrestore(&rx_lock, flags);
@@ -240,10 +260,19 @@ void uart_set_foreground_pgid(int pgid) {
 // UART 中断处理函数
 void uart_handle_irq(void) {
     int c;
+    /* LOCK_ORDER: IRQ handler pushes characters under rx_lock;
+     * no other locks are acquired. */
     while ((c = arch_uart_poll_getc()) >= 0) {
         uart_rx_push(c);
     }
     arch_uart_ack_irq();
+}
+
+static int uart_irq_wrapper(int irq, void *priv) {
+    (void)irq;
+    (void)priv;
+    uart_handle_irq();
+    return 0;
 }
 
 static int uart_char_read(struct device *dev, void *buf, size_t count) {

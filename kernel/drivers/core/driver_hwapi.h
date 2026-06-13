@@ -92,6 +92,7 @@ int   request_irq(uint32_t irq, irq_handler_t handler,
 void  free_irq(uint32_t irq, void *priv);
 void  irq_enable(uint32_t irq);
 void  irq_disable(uint32_t irq);
+void  driver_irq_dispatch(uint32_t irq);
 
 #define IRQF_TRIGGER_RISING  0x01
 #define IRQF_TRIGGER_FALLING 0x02

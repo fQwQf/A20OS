@@ -31,6 +31,7 @@ static int arch_virtio_probe_type(int device_type, int index, virtio_transport_t
         vt->write32 = mmio_write;
         vt->priv = (void *)base;
         vt->legacy = (version == 1);
+        vt->irq = 1 + slot;
         return 0;
     }
     return -1;

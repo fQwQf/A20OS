@@ -8,6 +8,7 @@
 #include <stdint.h>
 #include "fdtable.h"
 #include "../liba20rt/a20_syscall.h"
+#include "../liba20rt/crt0_a20.h"
 
 #define BUFSZ 4096
 
@@ -49,11 +50,36 @@ void __stdio_init(uint32_t h_stdin, uint32_t h_stdout, uint32_t h_stderr)
     _file_init(&_stderr_file, h_stderr, 2, 1);
 }
 
+void __liba20c_init(void)
+{
+    __fd_table_init();
+    a20_start_info_t *si = a20_get_start_info();
+    if (si) {
+        __stdio_init(si->stdin_handle, si->stdout_handle, si->stderr_handle);
+    } else {
+        __stdio_init(A20_HANDLE_NULL, A20_HANDLE_NULL, A20_HANDLE_NULL);
+    }
+}
+
 static int _fflush_locked(FILE *f)
 {
     if (f->buf_pos > 0 && f->buf) {
-        uint64_t args[4] = {f->handle, (uint64_t)(uintptr_t)f->buf, f->buf_pos, 0};
-        a20_handle_write(args);
+        a20_iovec_t iov;
+        iov.base = (uint64_t)(uintptr_t)f->buf;
+        iov.len  = f->buf_pos;
+
+        a20_io_args_t args;
+        args.size       = sizeof(args);
+        args.version    = 1;
+        args.handle     = f->handle;
+        args._pad0      = 0;
+        args.iov        = (uint64_t)&iov;
+        args.iov_count  = 1;
+        args._pad1      = 0;
+        args.offset     = A20_OFFSET_CURRENT;
+        args.out_count  = 0;
+
+        a20_syscall6(A20_SYS_handle_write, (uint64_t)&args, 0, 0, 0, 0, 0);
         f->buf_pos = 0;
         f->buf_len = 0;
     }
@@ -75,18 +101,34 @@ FILE *fopen(const char *path, const char *mode)
     else if (mode[0] == 'w') rights = 2 | 1;
     else if (mode[0] == 'a') rights = 2 | 1;
 
-    uint64_t open_args[6] = {0, (uint64_t)(uintptr_t)path, (uint64_t)strlen(path),
-                             rights, 0, 0};
-    int64_t h = a20_path_open(open_args);
-    if ((int64_t)h < 0) return NULL;
+    a20_path_open_args_t args;
+    args.size       = sizeof(args);
+    args.version    = 1;
+    args.dir        = A20_HANDLE_NULL;
+    args.flags      = 0;
+    args.rights     = rights;
+    args.path       = (uint64_t)(uintptr_t)path;
+    args.path_len   = (uint32_t)strlen(path);
+    args.mode       = 0644;
+    args.out_handle = A20_HANDLE_NULL;
 
-    int fd = __fd_alloc((uint32_t)h);
-    if (fd < 0) { a20_handle_close((uint32_t)h); return NULL; }
+    int64_t h = a20_syscall6(A20_SYS_path_open, (uint64_t)&args, 0, 0, 0, 0, 0);
+    if (h < 0) return NULL;
+
+    int fd = __fd_alloc(args.out_handle);
+    if (fd < 0) {
+        a20_syscall6(A20_SYS_handle_close, args.out_handle, 0, 0, 0, 0, 0);
+        return NULL;
+    }
 
     FILE *f = (FILE *)malloc(sizeof(FILE));
-    if (!f) { __fd_free(fd); a20_handle_close((uint32_t)h); return NULL; }
+    if (!f) {
+        __fd_free(fd);
+        a20_syscall6(A20_SYS_handle_close, args.out_handle, 0, 0, 0, 0, 0);
+        return NULL;
+    }
 
-    _file_init(f, (uint32_t)h, fd, mode[0] == 'r' ? 0 : 1);
+    _file_init(f, args.out_handle, fd, mode[0] == 'r' ? 0 : 1);
     f->own_buf = 1;
     f->buf = (char *)malloc(BUFSZ);
     f->buf_cap = BUFSZ;
@@ -97,7 +139,7 @@ int fclose(FILE *f)
 {
     if (!f) return 0;
     _fflush_locked(f);
-    a20_handle_close(f->handle);
+    a20_syscall6(A20_SYS_handle_close, f->handle, 0, 0, 0, 0, 0);
     __fd_free(f->fd);
     if (f->own_buf && f->buf) free(f->buf);
     if (f != &_stdin_file && f != &_stdout_file && f != &_stderr_file)
@@ -109,20 +151,50 @@ size_t fread(void *ptr, size_t size, size_t nmemb, FILE *f)
 {
     if (!f || !ptr || size == 0) return 0;
     size_t total = size * nmemb;
-    uint64_t args[4] = {f->handle, (uint64_t)(uintptr_t)ptr, total, 0};
-    int64_t r = a20_handle_read(args);
+
+    a20_iovec_t iov;
+    iov.base = (uint64_t)(uintptr_t)ptr;
+    iov.len  = total;
+
+    a20_io_args_t args;
+    args.size       = sizeof(args);
+    args.version    = 1;
+    args.handle     = f->handle;
+    args._pad0      = 0;
+    args.iov        = (uint64_t)&iov;
+    args.iov_count  = 1;
+    args._pad1      = 0;
+    args.offset     = A20_OFFSET_CURRENT;
+    args.out_count  = 0;
+
+    int64_t r = a20_syscall6(A20_SYS_handle_read, (uint64_t)&args, 0, 0, 0, 0, 0);
     if (r < 0) return 0;
-    return (size_t)r / size;
+    return (size_t)args.out_count / size;
 }
 
 size_t fwrite(const void *ptr, size_t size, size_t nmemb, FILE *f)
 {
     if (!f || !ptr || size == 0) return 0;
     size_t total = size * nmemb;
-    uint64_t args[4] = {f->handle, (uint64_t)(uintptr_t)ptr, total, 0};
-    int64_t r = a20_handle_write(args);
+
+    a20_iovec_t iov;
+    iov.base = (uint64_t)(uintptr_t)ptr;
+    iov.len  = total;
+
+    a20_io_args_t args;
+    args.size       = sizeof(args);
+    args.version    = 1;
+    args.handle     = f->handle;
+    args._pad0      = 0;
+    args.iov        = (uint64_t)&iov;
+    args.iov_count  = 1;
+    args._pad1      = 0;
+    args.offset     = A20_OFFSET_CURRENT;
+    args.out_count  = 0;
+
+    int64_t r = a20_syscall6(A20_SYS_handle_write, (uint64_t)&args, 0, 0, 0, 0, 0);
     if (r < 0) return 0;
-    return (size_t)r / size;
+    return (size_t)args.out_count / size;
 }
 
 int fputc(int c, FILE *f)
@@ -168,6 +240,8 @@ char *fgets(char *s, int size, FILE *f)
 long fseek(FILE *f, long offset, int whence)
 {
     _fflush_locked(f);
-    int64_t r = a20_handle_seek(f->handle, (uint64_t)offset, (uint64_t)whence);
+    a20_off_t off = (a20_off_t)offset;
+    int64_t r = a20_syscall6(A20_SYS_handle_seek, f->handle,
+                             (uint64_t)&off, (uint64_t)whence, 0, 0, 0);
     return r < 0 ? -1 : 0;
 }

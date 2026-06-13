@@ -9,6 +9,7 @@ mount_t *vfs_mount_at(int index);
 mount_t *vfs_mount_alloc(void);
 void     vfs_mount_remove(mount_t *mnt);
 mount_t *vfs_find_mount(const char *path);
+mount_t *vfs_mount_parent(mount_t *mnt);
 const char *vfs_strip_mount_prefix(const char *path, const mount_t *mnt);
 
 #endif /* _FS_VFS_MOUNT_H */

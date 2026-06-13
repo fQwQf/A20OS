@@ -466,30 +466,25 @@ Timer 是 handle，可被 event queue watch，不需要复制 POSIX timer id + s
 
 ```c
 /* 传输标志 */
-#define A20_TRANSFER_CONSUME    0x0000u   /* 默认：消耗源偏移 */
 #define A20_TRANSFER_PEEK       0x0001u   /* 不推进源偏移（tee 语义） */
-#define A20_TRANSFER_KERNEL_BUF 0x0002u   /* 允许内核内部缓冲 */
-#define A20_TRANSFER_FORCE_SYNC 0x0004u   /* 强制同步完成，不做异步 */
 
 typedef struct a20_transfer_args {
     uint32_t size;
     uint32_t version;
-    a20_handle_t src;             /* 源 handle（文件/pipe/socket） */
-    a20_handle_t dst;             /* 目标 handle（文件/pipe/socket） */
-    uint64_t src_offset;          /* 源偏移（若 src 支持偏移），-1 表示当前位置 */
-    uint64_t dst_offset;          /* 目标偏移（若 dst 支持偏移），-1 表示当前位置 */
-    uint64_t length;              /* 传输字节数 */
+    a20_handle_t source;          /* 源 handle（仅文件/设备支持 seek） */
+    a20_handle_t dest;            /* 目标 handle（仅文件/设备支持 seek） */
     uint32_t flags;               /* A20_TRANSFER_* */
-    uint32_t reserved;
+    uint64_t source_offset;       /* 源偏移，A20_OFFSET_CURRENT 表示当前位置 */
+    uint64_t dest_offset;         /* 目标偏移，A20_OFFSET_CURRENT 表示当前位置 */
+    uint64_t length;              /* 传输字节数 */
     uint64_t out_transferred;     /* 输出：实际传输字节数 */
 } a20_transfer_args_t;
 ```
 
 设计说明：
-- Linux 的 `splice`、`sendfile`、`copy_file_range`、`tee` 是四个独立 syscall，但核心语义相同：在两个 handle 之间零拷贝传输数据。
-- A20 统一为一个 `handle_transfer`，通过 flags 区分模式。
-- `src_offset`/`dst_offset` 为 `-1`（`UINT64_MAX`）时使用当前位置（类似 `lseek` + `read`）。
-- 权限检查：`src` 需要 `READ`，`dst` 需要 `WRITE`。
+- `source_offset`/`dest_offset` 为 `A20_OFFSET_CURRENT`（`UINT64_MAX`）时使用当前位置。
+- 权限检查：`source` 需要 `READ | TRANSFER`，`dest` 需要 `WRITE | TRANSFER`。
+- 当前支持 `flags == 0`（consume，推进源偏移）和 `A20_TRANSFER_PEEK`（tee，不推进源偏移）；其余保留标志位必须为零。
 
 ---
 
@@ -501,14 +496,13 @@ typedef struct a20_transfer_args {
 
 ```c
 /* 元数据修改标志 */
-#define A20_SET_META_MODE       0x0001u   /* 修改 mode（chmod） */
-#define A20_SET_META_OWNER      0x0002u   /* 修改 uid/gid（chown） */
-#define A20_SET_META_ATIME      0x0004u   /* 修改访问时间 */
-#define A20_SET_META_MTIME      0x0008u   /* 修改修改时间 */
-#define A20_SET_META_ATIME_NOW  0x0010u   /* atime 设为当前时间 */
-#define A20_SET_META_MTIME_NOW  0x0020u   /* mtime 设为当前时间 */
-#define A20_SET_META_TRUNCATE   0x0040u   /* 截断文件到指定大小（ftruncate） */
-#define A20_SET_META_ALLOCATE   0x0080u   /* 预分配空间（fallocate） */
+#define A20_SET_META_MODE      (1u << 0)  /* 修改 mode（chmod） */
+#define A20_SET_META_OWNER     (1u << 1)  /* 修改 uid/gid（chown） */
+#define A20_SET_META_ATIME     (1u << 2)  /* 修改访问时间 */
+#define A20_SET_META_MTIME     (1u << 3)  /* 修改修改时间 */
+#define A20_SET_META_CTIME     (1u << 4)  /* 修改状态变更时间 */
+#define A20_SET_META_TRUNCATE  (1u << 5)  /* 截断文件到指定大小（ftruncate） */
+#define A20_SET_META_ALLOCATE  (1u << 6)  /* 预分配空间（fallocate） */
 
 typedef struct a20_set_meta_args {
     uint32_t size;
@@ -520,8 +514,9 @@ typedef struct a20_set_meta_args {
     uint32_t gid;                 /* 新 gid（flags 含 OWNER 时有效） */
     uint64_t atime_ns;            /* 新 atime（纳秒） */
     uint64_t mtime_ns;            /* 新 mtime（纳秒） */
-    uint64_t new_size;            /* 截断/预分配大小 */
-    int64_t  allocate_offset;     /* 预分配起始偏移，-1 表示文件末尾 */
+    uint64_t ctime_ns;            /* 新 ctime（纳秒） */
+    uint64_t truncate_size;       /* 截断大小（flags 含 TRUNCATE 时有效） */
+    uint64_t allocate_size;       /* 预分配大小（flags 含 ALLOCATE 时有效） */
 } a20_set_meta_args_t;
 ```
 
@@ -799,6 +794,18 @@ typedef struct a20_fs_stat {
 } a20_fs_stat_t;
 ```
 
+### a20_dirent_t — 目录项
+
+`path_readdir` 返回的目录项结构。内核将底层 `vfs_dirent64` 翻译为此格式。
+
+```c
+typedef struct a20_dirent {
+    uint32_t type;                /* 文件类型（VFS d_type） */
+    uint32_t name_len;            /* 文件名实际长度 */
+    char     name[256];           /* 以 NUL 结尾的文件名 */
+} a20_dirent_t;
+```
+
 ### a20_fs_mount_args_t — 挂载文件系统
 
 ```c
@@ -813,15 +820,15 @@ typedef struct a20_fs_stat {
 typedef struct a20_fs_mount_args {
     uint32_t size;
     uint32_t version;
-    a20_handle_t dir;             /* 挂载点目录 handle */
     uint64_t source;              /* const char*：设备/源路径 */
-    uint64_t source_len;
+    uint32_t source_len;
+    uint32_t reserved0;
+    uint64_t target;              /* const char*：挂载点路径 */
+    uint32_t target_len;
+    uint32_t reserved1;
     uint64_t fs_type;             /* const char*：文件系统类型名 */
-    uint64_t fs_type_len;
+    uint32_t fs_type_len;
     uint32_t flags;               /* A20_MOUNT_* */
-    uint32_t reserved;
-    uint64_t options;             /* const char*：挂载选项 */
-    uint64_t options_len;
 } a20_fs_mount_args_t;
 ```
 
