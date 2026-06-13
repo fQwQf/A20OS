@@ -20,6 +20,7 @@
 #include "proc/signal.h"
 #include "fs/fdtable.h"
 #include "fs/vfs.h"
+#include "fs/vfs/path.h"
 #include "mm/elf.h"
 #include "mm/mm.h"
 #include "mm/vm.h"
@@ -631,17 +632,29 @@ int proc_exec(const char *path, char *const argv[], char *const envp[])
 
     /* ---- 2. Resolve absolute path for exec_path ---- */
     char abs_path[MAX_PATH_LEN];
+    const char *cwd = t->fs.cwd[0] ? t->fs.cwd : "/";
+    const char *root = t->fs.root_path[0] ? t->fs.root_path : "/";
     if (path[0] == '/') {
-        strncpy(abs_path, path, MAX_PATH_LEN - 1);
-        abs_path[MAX_PATH_LEN - 1] = '\0';
+        if (strcmp(root, "/") == 0) {
+            strncpy(abs_path, path, MAX_PATH_LEN - 1);
+            abs_path[MAX_PATH_LEN - 1] = '\0';
+        } else {
+            snprintf(abs_path, MAX_PATH_LEN, "%s%s", root, path);
+        }
     } else {
-        const char *cwd = t->fs.cwd;
         size_t cwd_len = strlen(cwd);
         if (cwd_len > 0 && cwd[cwd_len - 1] == '/')
             snprintf(abs_path, MAX_PATH_LEN, "%s%s", cwd, path);
         else
             snprintf(abs_path, MAX_PATH_LEN, "%s/%s", cwd, path);
+        if (strcmp(root, "/") != 0) {
+            char rooted[MAX_PATH_LEN];
+            snprintf(rooted, MAX_PATH_LEN, "%s%s", root, abs_path);
+            strncpy(abs_path, rooted, MAX_PATH_LEN - 1);
+            abs_path[MAX_PATH_LEN - 1] = '\0';
+        }
     }
+    vfs_path_normalize_absolute_with_root(abs_path, root);
 
     /* ---- 3. Iterative format resolution loop ---- */
     kstat_t exec_st;

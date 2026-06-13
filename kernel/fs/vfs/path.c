@@ -128,3 +128,68 @@ int vfs_path_normalize_absolute(char *path) {
     path[MAX_PATH_LEN - 1] = '\0';
     return 0;
 }
+
+int vfs_path_normalize_absolute_with_root(char *path, const char *root) {
+    if (!path || path[0] != '/')
+        return -EINVAL;
+    if (!root || root[0] != '/')
+        return vfs_path_normalize_absolute(path);
+
+    char input[MAX_PATH_LEN];
+    char output[MAX_PATH_LEN];
+    char *parts[64];
+    int n = 0;
+
+    size_t root_len = strlen(root);
+    while (root_len > 1 && root[root_len - 1] == '/')
+        root_len--;
+
+    strncpy(input, path, sizeof(input) - 1);
+    input[sizeof(input) - 1] = '\0';
+
+    char *tok = input + 1;
+    while (tok && *tok) {
+        char *slash = strchr(tok, '/');
+        if (slash)
+            *slash = '\0';
+
+        if (strcmp(tok, ".") == 0 || tok[0] == '\0') {
+        } else if (strcmp(tok, "..") == 0) {
+            /* floor at root */
+            size_t cur_len = 0;
+            for (int i = 0; i < n; i++)
+                cur_len += strlen(parts[i]) + 1;
+            if (cur_len > root_len)
+                n--;
+        } else if (n < (int)(sizeof(parts) / sizeof(parts[0]))) {
+            parts[n++] = tok;
+        } else {
+            return -ENAMETOOLONG;
+        }
+
+        tok = slash ? slash + 1 : NULL;
+    }
+
+    if (n == 0) {
+        strcpy(path, "/");
+        return 0;
+    }
+
+    size_t used = 0;
+    output[used++] = '/';
+    output[used] = '\0';
+    for (int i = 0; i < n; i++) {
+        size_t len = strlen(parts[i]);
+        if (used + len + (i + 1 < n ? 1 : 0) >= sizeof(output))
+            return -ENAMETOOLONG;
+        memcpy(output + used, parts[i], len);
+        used += len;
+        if (i + 1 < n)
+            output[used++] = '/';
+        output[used] = '\0';
+    }
+
+    strncpy(path, output, MAX_PATH_LEN - 1);
+    path[MAX_PATH_LEN - 1] = '\0';
+    return 0;
+}

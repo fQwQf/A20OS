@@ -22,6 +22,7 @@ net_socket_t *net_socket_alloc(void) {
     if (s) {
         s->bpf_prog_fd = -1;
         s->ipv6_checksum_offset = -1;
+        s->reg_idx = -1;
     }
     return s;
 }

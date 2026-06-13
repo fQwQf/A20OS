@@ -338,6 +338,8 @@ int64_t debug_map_memory(a20_handle_t task, a20_handle_t *out);
 
 调试能力通过 handle rights 控制。只有持有 task 的 `ADMIN` 权限的进程才能附加调试器。
 
+> **当前实现范围（NATIVE_DEBUG_LIMITED_CONTRACT）**：`debug_attach`、`debug_read_regs`、`debug_write_regs` 和 `debug_map_memory` 仅提供有限的兼容性辅助，用于读取/修改目标线程的寄存器以及将目标 task 的内存映射到当前地址空间。它们**不**实现完整的 stop/resume、单步执行、断点/观察点、watchpoint 或 ptrace 风格的调试语义。完整的调试器控制（如断点、单步、信号注入）在当前 Native ABI 中属于明确 scope-out 的功能，未来如需支持需重新设计安全边界。
+
 ### 8.2 Handle 查询审计
 
 `handle_query` 允许进程查询自己持有的 handle 的类型和权限，但不能查询其他进程的 handle。这是最小权限审计：每个进程只能看到自己的权限。
