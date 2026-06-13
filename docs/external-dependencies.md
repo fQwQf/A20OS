@@ -12,8 +12,17 @@ built components. It describes present behavior, not future plans.
 
 ## QEMU Networking Defaults
 
-- `EXTERNAL_QEMU_NET_DEFAULTS`: `10.0.2.15`, `10.0.2.2`, and `10.0.2.3` are QEMU user-network development defaults only.
-- Real boards or non-QEMU network backends must provide address configuration through board/network setup rather than treating these addresses as architecture constants.
+- `EXTERNAL_QEMU_NET_DEFAULTS`: **Resolved.** `10.0.2.15`, `10.0.2.2`, and `10.0.2.3` are no longer compiled into the kernel or user commands.
+- Network configuration is command-line / runtime config only. The kernel command line accepts:
+  - `a20.ip=<IPv4>`
+  - `a20.netmask=<IPv4>`
+  - `a20.gateway=<IPv4>`
+  - `a20.dns=<IPv4>` (repeatable)
+  - `a20.dhcp=1` (overrides static IP/gateway/netmask)
+  - `a20.hostname=<name>`
+- If no keys are present and DHCP is not enabled, the interface is brought up without an IPv4 address; socket calls requiring a route return `-ENETUNREACH`.
+- The effective configuration is exposed read-only via `/proc/net/config` as `ip=`, `netmask=`, `gateway=`, `dns0=`, `dhcp=`, and `hostname=` lines.
+- QEMU boot scripts preserve existing behavior by appending `a20.ip=10.0.2.15 a20.netmask=255.255.255.0 a20.gateway=10.0.2.2 a20.dns=10.0.2.3 a20.hostname=a20os`.
 
 ## Userland Imports
 

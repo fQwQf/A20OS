@@ -5,6 +5,8 @@
 #include "proc/proc.h"
 #include "core/timer.h"
 #include "drivers/char/uart.h"
+#include "drivers/core/driver_hwapi.h"
+#include "core/progress.h"
 
 static void plic_init_hart(void) {
     int hart = (int)cpu_current_id();
@@ -24,6 +26,7 @@ static void plic_complete(uint32_t irq) {
 
 static void handle_timer_irq(int from_user) {
     timer_irq_tick();
+    kernel_progress_timer_tick();
     uint64_t now = timer_get_ticks();
     timer_set_interval(proc_next_timer_interval(now));
 
@@ -50,10 +53,9 @@ void arch_handle_irq(uint64_t irq, int from_user) {
 
     if (irq == IRQ_S_EXT) {
         uint32_t irq_id = plic_claim();
-        if (irq_id == UART0_IRQ)
-            uart_handle_irq();
         if (irq_id != 0)
-            plic_complete(irq_id);
+            driver_irq_dispatch(irq_id);
+        plic_complete(irq_id);
         return;
     }
 

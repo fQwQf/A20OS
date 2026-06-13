@@ -5,6 +5,8 @@
 #include "proc/proc.h"
 #include "core/timer.h"
 #include "drivers/char/uart.h"
+#include "drivers/core/driver_hwapi.h"
+#include "core/progress.h"
 #include "platform.h"
 #include "core/string.h"
 
@@ -14,6 +16,7 @@ uint64_t __x86_64_trap_tval;
 
 static void handle_timer_irq(int from_user) {
     timer_irq_tick();
+    kernel_progress_timer_tick();
     timer_set_interval(proc_next_timer_interval(timer_get_ticks()));
     if (!from_user) return;
     task_t *cur = proc_current();
@@ -272,6 +275,13 @@ static void lapic_enable(void) {
     lapic_write(LAPIC_LVT_LINT1, LAPIC_LVT_MASKED);
 }
 
+static int keyboard_irq_wrapper(int irq, void *priv) {
+    (void)irq;
+    (void)priv;
+    handle_keyboard_irq();
+    return 0;
+}
+
 void trap_init(void) {
     gdt_init();
     idt_init();
@@ -279,15 +289,15 @@ void trap_init(void) {
     pic_init();
     lapic_enable();
     keyboard_init();
+    request_irq(KEYBOARD_IRQ, keyboard_irq_wrapper, 0, NULL);
 }
 
 void arch_handle_irq(uint64_t irq, int from_user) {
+    (void)from_user;
     if (irq == IRQ_VECTOR_TIMER) {
         handle_timer_irq(from_user);
-    } else if (irq == IRQ_VECTOR_UART) {
-        uart_handle_irq();
-    } else if (irq == IRQ_VECTOR_KEYBOARD) {
-        handle_keyboard_irq();
+    } else if (irq == IRQ_VECTOR_UART || irq == IRQ_VECTOR_KEYBOARD || irq == IRQ_VECTOR_PCI) {
+        driver_irq_dispatch((uint32_t)irq);
     }
     if (irq == IRQ_VECTOR_KEYBOARD || irq == IRQ_VECTOR_UART)
         pic_eoi(irq);
