@@ -6,7 +6,7 @@
 #include "fs/vfs.h"
 #include "mm/frame.h"
 
-#define PAGE_CACHE_MAX_PAGES   8192
+#define PAGE_CACHE_MAX_PAGES   2048
 #define PAGE_CACHE_HASH_BUCKETS 8192
 
 /*

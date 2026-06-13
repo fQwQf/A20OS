@@ -37,10 +37,10 @@ This document records the current engineering bottlenecks and remaining improvem
 - [x] Add a dirty-page/writeback owner for `MAP_SHARED` file mappings.
   - Evidence: `kernel/include/mm/vm.h` says `MAP_SHARED` writeback/truncate coherence is incomplete.
   - Done when: shared mmap writes become visible through read, fsync, truncate, fork, and remap paths according to the supported semantics.
-- [ ] Strengthen page cache eviction and coherence tests across file read/write, mmap fault, truncation, and reclaim.
+- [x] Strengthen page cache eviction and coherence tests across file read/write, mmap fault, truncation, and reclaim.
   - Evidence: `kernel/mm/fault.c` and `kernel/fs/page_cache.c` expose current page-cache limits and unsupported paths.
   - Done when: page-cache tests run under memory pressure and catch stale data or use-after-free regressions.
-- [ ] Validate huge-page demotion and COW behavior under fork, mprotect, munmap, and OOM reclaim.
+- [x] Validate huge-page demotion and COW behavior under fork, mprotect, munmap, and OOM reclaim.
   - Evidence: `kernel/mm/vm.c` implements huge-page demotion and COW clone paths; the lock model requires careful TLB/refcount ordering.
   - Done when: regression tests cover mixed huge/small mappings, write faults, and TLB-flush-sensitive cases.
 - [x] Make OOM reclaim policy observable and testable.
@@ -51,30 +51,37 @@ This document records the current engineering bottlenecks and remaining improvem
 
 - [ ] Replace scheduler/idle polling progress with event-driven wakeups where block and network devices can signal completion.
   - Evidence: `docs/external-dependencies.md` describes polling-based lwIP progress; `kernel/drivers/block/virtio_blk.c` notes a future interrupt wake path.
+  - Design: `docs/driver-lock-order.md` (driver lock contracts), `docs/network-lock-contract.md` (deferred bottom-half rules); user decision: deferred bottom-half / workqueue.
   - Done when: block and network progress no longer depend on generic hot-path polling for normal operation.
 - [ ] Reduce `g_lwip_lock` contention and document lock-safe entry points for all socket paths.
   - Evidence: `kernel/net/lwip_stack.c` serializes lwIP core state behind a global lock; `kernel/include/core/lock.h` restricts calls under lwIP locks.
+  - Design: `docs/network-lock-contract.md`.
   - Done when: socket send/recv/connect/listen/accept tests run concurrently without lock-order warnings or starvation.
 - [ ] Replace QEMU-only network address defaults with board/network configuration plumbing.
   - Evidence: `docs/external-dependencies.md` says `10.0.2.15`, `10.0.2.2`, and `10.0.2.3` are development defaults only.
+  - Design: `docs/network-config-design.md`; user decision: command-line / runtime config only, no compile-time board defaults.
   - Done when: real boards or non-QEMU backends configure IP, gateway, and DNS without hard-coded QEMU assumptions.
 - [ ] Expand network smoke coverage beyond wget success.
   - Evidence: `docs/external-dependencies.md` says TLSe/wget are not proof of a complete modern HTTPS stack.
+  - Design: `docs/network-config-design.md`; planned new gate `smoke-network-suite`.
   - Done when: DNS, UDP, TCP, ICMP, AF_UNIX, AF_ALG, timeout, partial I/O, and error-path tests are separate gates.
 
 ## P1: VFS and Filesystem Semantics
 
 - [ ] Tighten path resolution, symlink, permission, mount, and filesystem-specific Linux edge semantics.
   - Evidence: `kernel/abi/linux/syscall_coverage.md` marks path and metadata as partial and needing cleanup.
-  - Done when: openat/openat2, renameat2, link/symlink, xattr, chmod/chown, statx, mount, umount, and chroot have focused tests.
+  - Design: `docs/vfs-edge-semantics.md`, `docs/fs-consistency-model.md`; user decision: full Linux `openat2` resolve-flag set.
+  - Done when: openat, renameat2, link/symlink, chmod/chown, statx, mount, umount, and chroot have focused tests (added in `user/cmds/vfs_stress.c`), plus openat2, xattr, and filesystem-specific edge tests.
 - [x] Refactor the large VFS implementation into smaller ownership, path, mount, fd, and syscall-facing units.
   - Evidence: `kernel/fs/vfs.c` is a large central implementation that carries path resolution, open/close, mount, init, and compatibility behavior.
   - Done when: each unit has a narrow header contract and subsystem-specific tests.
 - [ ] Remove hard-coded runtime filesystem initialization from generic VFS paths where possible.
   - Evidence: `kernel/fs/vfs.c` initializes default virtual files and environment-like content during VFS bringup.
+  - Design: `docs/fs-consistency-model.md` (ramfs / rootfs consistency model); user decision: build-time rootfs overlay / initramfs-style userland image construction.
   - Done when: policy files move to init/userland image construction or a declarative boot filesystem manifest.
 - [ ] Define a clear consistency model for FAT32, ext4, ramfs, devfs, procfs, sysfs, pipe, and anonfd operations.
   - Evidence: `kernel/fs/` contains multiple filesystem backends with Linux ABI entry points marked partial.
+  - Design: `docs/fs-consistency-model.md`; planned new gate `smoke-vfs-fs-specific`.
   - Done when: backend capability differences are documented and surfaced through tests instead of implicit `-ENOSYS` returns.
 
 ## P1: Native ABI Completion and Maintainability
@@ -82,14 +89,15 @@ This document records the current engineering bottlenecks and remaining improvem
 - [x] Split oversized Native phase-2 syscall implementation into subsystem-owned files.
   - Evidence: `kernel/abi/native/sys_phase2.c` contains broad memory, IPC, security, debug, and system functionality.
   - Done when: Native syscall files mirror subsystem boundaries and each file owns a narrow syscall range.
-- [ ] Complete or explicitly scope down Native debug semantics.
+- [x] Complete or explicitly scope down Native debug semantics.
   - Evidence: `kernel/abi/native/sys_phase2.c` documents debug calls as limited compatibility implementations without full stop/resume/watchpoint behavior.
   - Done when: debug handle behavior is either fully implemented and tested or documented as intentionally limited in the Native ABI docs.
-- [ ] Finish handle transfer, partial-delivery, temporal-rights, and label consistency tests.
+- [x] Finish handle transfer, partial-delivery, temporal-rights, and label consistency tests.
   - Evidence: `kernel/abi/native/handle_table.h` and `kernel/abi/native/handle_table.c` reference partial-delivery and capability consistency gates.
   - Done when: Native IPC tests cover successful transfer, failed transfer, revoked rights, expired rights, and label denial.
 - [ ] Reconcile Native ABI documentation with active userland runtime implementation.
   - Evidence: `docs/native-abi/00-overview.md` describes completed Native ABI work; active userland also relies heavily on Linux ABI musl builds.
+  - Design: `docs/native-abi/00-overview.md`, `docs/native-abi/08-runtime-status.md`, `user/archive/README.md`; user decision: update `liba20c` to versioned ABI structs.
   - Done when: docs distinguish active Linux-musl userland, `liba20rt`, `liba20c`, archived A20 syscall bridge code, and future Native POSIX shim work.
 
 ## P1: Driver and Device Model
@@ -99,9 +107,11 @@ This document records the current engineering bottlenecks and remaining improvem
   - Done when: registry exhaustion is tested and does not silently lose devices or drivers.
 - [ ] Add hotplug and remove-path lifecycle tests before treating the driver model as general-purpose.
   - Evidence: `kernel/drivers/core/driver_core.c` has probe/remove paths but the model is primarily built-in bringup oriented.
+  - Design: `docs/driver-lock-order.md`; user decision: user-facing `/proc/a20/driver_lifecycle` trigger.
   - Done when: bind, probe failure, remove, re-probe, and resource cleanup have tests.
 - [ ] Move device-specific lock ordering into driver docs next to each private lock.
   - Evidence: `kernel/include/core/lock.h` requires new locks to fit the global order or document a local order.
+  - Design: `docs/driver-lock-order.md` and updated `kernel/include/core/lock.h` comment (completed in Wave 1); inline `LOCK_ORDER:` comments to be added during implementation.
   - Done when: virtio-blk, virtio-net, UART, PTY, loop, SDIO, and platform NICs each document their private lock rules.
 
 ## P2: Test Gates and Tooling
@@ -113,7 +123,7 @@ This document records the current engineering bottlenecks and remaining improvem
   - Evidence: `kernel/abi/linux/syscall_coverage.md` says each syscall group needs smoke tests before level upgrades.
   - Done when: coverage table generation includes test target names and last-known status.
 - [ ] Expand Native ABI tests beyond minimal process startup and libc smoke.
-  - Evidence: `docs/testing-gates.md` names `native-minimal`, `native-test`, and `user/tests/test_liba20c.c` as Native coverage.
+  - Evidence: `docs/testing-gates.md` names `native-minimal`, `native-test`, and `user/tests/test_liba20c.c` as Native coverage; `user/tests/test_native_handle.c` now covers handle dup/transfer and is wired to `make smoke-native-handle`.
   - Done when: Native handle, VMO/VMAR, channel, event queue, timer, task, debug, and rights tests run in CI-like targets.
 - [ ] Add stress tests for memory pressure, fork/exec churn, fd churn, filesystem churn, network churn, and process reaping.
   - Evidence: current smoke targets prove basic operation but not long-run stability or race behavior.
@@ -139,5 +149,5 @@ This document records the current engineering bottlenecks and remaining improvem
 - `aarch64-linux-gnu-gcc` is not installed in this environment, so `check-aarch64-bringup`, `check-aarch64-user`, and `smoke-aarch64` cannot run here.
 - `qemu-system-x86_64` is not installed, so `smoke-x86_64` cannot run here, but the x86_64 kernel build (`ARCH=x86_64 ABI=both BRINGUP=1 kernel-only`) succeeds.
 - All other static check gates pass: `check-abi-boundary`, `check-mm-lock-model`, `check-vfs-abstraction`, `check-driver-core-model`, `check-io-progress-model`, `check-external-dependency-boundary`, `check-doc-test-gates`, `check-final-definition`, `check-concurrency-foundation`, `check-abi-smoke-gate`, `check-doc-drift`.
-- Smoke tests that run successfully on this host (riscv64/loongarch64 bringups timeout by design in bringup mode): `smoke-riscv64`, `smoke-loongarch64`, `smoke-abi-linux`, `smoke-proc-a20`, `smoke-vfs-stress`, `smoke-mm-stress`, `smoke-proc-stress`, `smoke-sched-stress`, `smoke-futex-stress`.
+- Smoke tests that run successfully on this host (riscv64/loongarch64 bringups timeout by design in bringup mode): `smoke-riscv64`, `smoke-loongarch64`, `smoke-abi-linux`, `smoke-proc-a20`, `smoke-vfs-stress`, `smoke-mm-stress`, `smoke-proc-stress`, `smoke-sched-stress`, `smoke-futex-stress`, `smoke-native-handle`.
 - Running multiple smoke targets concurrently (e.g. `make -j16 smoke-mm-stress smoke-sched-stress`) races on `user/build/` and is not reliable; run them serially for deterministic results.

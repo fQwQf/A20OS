@@ -1,6 +1,8 @@
 #define LINUX_SYSCALL_DECLARE_PROTOTYPES
 #include "syscall_impl.h"
 #include "fs/vfs/path.h"
+#include "abi/linux/fcntl.h"
+#include "abi/linux/stat.h"
 
 int64_t sys_mkdirat(int dirfd, const char *path, int mode) {
     if (!path) return -EFAULT;
@@ -30,7 +32,10 @@ int64_t sys_unlinkat(int dirfd, const char *path, int flags) {
 
 int64_t sys_renameat2(int olddir, const char *oldpath,
                        int newdir, const char *newpath, int flags) {
-    if (flags) return -EINVAL;
+    if (flags & ~(RENAME_NOREPLACE | RENAME_EXCHANGE))
+        return -EINVAL;
+    if ((flags & RENAME_NOREPLACE) && (flags & RENAME_EXCHANGE))
+        return -EINVAL;
     if (!oldpath || !newpath) return -EFAULT;
     char kold[MAX_PATH_LEN], knew[MAX_PATH_LEN];
     if (user_strncpy(kold, oldpath, MAX_PATH_LEN) < 0) return -EFAULT;
@@ -41,7 +46,7 @@ int64_t sys_renameat2(int olddir, const char *oldpath,
     if (pr < 0) return pr;
     pr = syscall_path_at(newdir, knew, fnew, sizeof(fnew));
     if (pr < 0) return pr;
-    return vfs_rename(fold, fnew);
+    return vfs_rename_flags(fold, fnew, (unsigned int)flags);
 }
 
 int64_t sys_chdir(const char *path) {
@@ -299,12 +304,12 @@ int64_t sys_statx(int dirfd, const char *path, int flags, unsigned mask, void *b
     if ((flags & AT_EMPTY_PATH) && kpath[0] == '\0') {
         int64_t gfd = fdtable_get_current(dirfd);
         if (gfd < 0) return gfd;
-        r = vfs_fstat(gfd, &kst);
+        r = vfs_fstat((int)gfd, &kst);
     } else {
         char full[MAX_PATH_LEN];
         int pr = syscall_path_at(dirfd, kpath, full, sizeof(full));
         if (pr < 0) return pr;
-        r = vfs_fstatat(AT_FDCWD, full, &kst, flags);
+        r = vfs_fstatx(AT_FDCWD, full, &kst, flags, mask);
         if (r == 0)
             kstat_apply_script_exec(full, &kst);
     }
@@ -339,8 +344,8 @@ int64_t sys_statx(int dirfd, const char *path, int flags, unsigned mask, void *b
     uint64_t *u64 = (uint64_t *)stx;
     uint16_t *u16 = (uint16_t *)stx;
 
-    uint32_t stx_mask = (mask & STATX_ALL) | STATX_BASIC_STATS;
-    u32[0]  = stx_mask;
+    uint32_t provided = (mask & STATX_ALL) | STATX_BASIC_STATS;
+    u32[0]  = provided;
     u32[1]  = (uint32_t)kst.st_blksize;
     u32[4]  = kst.st_nlink;
     u32[5]  = kst.st_uid;
@@ -351,14 +356,22 @@ int64_t sys_statx(int dirfd, const char *path, int flags, unsigned mask, void *b
     u64[5]  = kst.st_size;
     u64[6]  = kst.st_blocks;
 
-    *(int64_t *)(stx + 64)  = (int64_t)kst.st_atime;
-    *(uint32_t *)(stx + 72) = (uint32_t)kst.st_atime_nsec;
-    *(int64_t *)(stx + 80)  = (int64_t)kst.st_ctime;
-    *(uint32_t *)(stx + 88) = (uint32_t)kst.st_ctime_nsec;
-    *(int64_t *)(stx + 96)  = (int64_t)kst.st_ctime;
-    *(uint32_t *)(stx + 104) = (uint32_t)kst.st_ctime_nsec;
-    *(int64_t *)(stx + 112)  = (int64_t)kst.st_mtime;
-    *(uint32_t *)(stx + 120) = (uint32_t)kst.st_mtime_nsec;
+    if (mask & STATX_ATIME) {
+        *(int64_t *)(stx + 64)  = (int64_t)kst.st_atime;
+        *(uint32_t *)(stx + 72) = (uint32_t)kst.st_atime_nsec;
+    }
+    if (mask & STATX_CTIME) {
+        *(int64_t *)(stx + 80)  = (int64_t)kst.st_ctime;
+        *(uint32_t *)(stx + 88) = (uint32_t)kst.st_ctime_nsec;
+    }
+    if (mask & STATX_BTIME) {
+        *(int64_t *)(stx + 96)  = (int64_t)kst.st_ctime;
+        *(uint32_t *)(stx + 104) = (uint32_t)kst.st_ctime_nsec;
+    }
+    if (mask & STATX_MTIME) {
+        *(int64_t *)(stx + 112)  = (int64_t)kst.st_mtime;
+        *(uint32_t *)(stx + 120) = (uint32_t)kst.st_mtime_nsec;
+    }
 
     u32[32] = (uint32_t)(kst.st_rdev >> 8);
     u32[33] = (uint32_t)(kst.st_rdev & 0xff) | (uint32_t)((kst.st_rdev >> 12) & 0xffffff00);

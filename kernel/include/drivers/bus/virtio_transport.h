@@ -27,6 +27,9 @@ typedef struct virtio_transport {
 
     /* Set by arch probe: 1 = legacy virtio (PFN-based queue setup). */
     int      legacy;
+
+    /* Platform IRQ line for this device, or -1 if not IRQ-driven. */
+    int      irq;
 } virtio_transport_t;
 
 /* Probe for the next virtio-blk device.
