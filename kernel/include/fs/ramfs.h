@@ -5,5 +5,6 @@
 
 vnode_t *ramfs_mount(mount_t *mnt);
 vnode_t *ramfs_mount_empty(mount_t *mnt);
+void     ramfs_populate_overlay(void);
 
 #endif /* _RAMFS_H */

@@ -20,7 +20,7 @@ static inline a20_status_t a20_hdl_dup(const a20_handle_dup_args_t *args)
     return a20_syscall6(A20_SYS_handle_dup, (uint64_t)args, 0, 0, 0, 0, 0);
 }
 
-static inline a20_status_t a20_hdl_transfer(const a20_handle_transfer_args_t *args)
+static inline a20_status_t a20_hdl_transfer(const a20_transfer_args_t *args)
 {
     return a20_syscall6(A20_SYS_handle_transfer, (uint64_t)args, 0, 0, 0, 0, 0);
 }
@@ -36,10 +36,14 @@ static inline a20_status_t a20_hdl_replace(a20_handle_t h, a20_rights_t new_righ
     return a20_syscall6(A20_SYS_handle_replace, h, new_rights, (uint64_t)out, 0, 0, 0);
 }
 
-static inline a20_status_t a20_hdl_seek(a20_handle_t h, int64_t offset, uint32_t whence)
+static inline a20_status_t a20_hdl_seek(a20_handle_t h, int64_t offset, uint32_t whence,
+                                         a20_off_t *out_off)
 {
-    return a20_syscall6(A20_SYS_handle_seek, h,
-                        (uint64_t)offset, (uint64_t)whence, 0, 0, 0);
+    a20_off_t off = (a20_off_t)offset;
+    a20_status_t r = a20_syscall6(A20_SYS_handle_seek, h,
+                                  (uint64_t)&off, (uint64_t)whence, 0, 0, 0);
+    if (out_off) *out_off = off;
+    return r;
 }
 
 static inline a20_status_t a20_hdl_read(a20_handle_t h, a20_iovec_t *iov,

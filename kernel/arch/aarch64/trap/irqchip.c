@@ -4,6 +4,8 @@
 #include "proc/proc.h"
 #include "core/timer.h"
 #include "drivers/char/uart.h"
+#include "drivers/core/driver_hwapi.h"
+#include "core/progress.h"
 
 volatile uint64_t aarch64_trap_flags;
 
@@ -114,6 +116,7 @@ static void gic_init(void) {
 
 static void handle_timer_irq(int from_user) {
     timer_irq_tick();
+    kernel_progress_timer_tick();
     timer_set_interval(proc_next_timer_interval(timer_get_ticks()));
     gic_eoi(IRQ_S_TIMER);
     if (!from_user)
@@ -139,12 +142,7 @@ void arch_handle_irq(uint64_t irq, int from_user) {
         return;
     }
 
-    if (irq == UART0_IRQ) {
-        uart_handle_irq();
-        gic_eoi((uint32_t)irq);
-        return;
-    }
-
+    driver_irq_dispatch((uint32_t)irq);
     gic_eoi((uint32_t)irq);
 }
 

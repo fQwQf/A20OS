@@ -1,5 +1,6 @@
 #include <errno.h>
 #include <fcntl.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -29,6 +30,34 @@
 
 #ifndef SYS_readlinkat
 #define SYS_readlinkat 78
+#endif
+
+#ifndef SYS_openat
+#define SYS_openat 56
+#endif
+
+#ifndef SYS_linkat
+#define SYS_linkat 37
+#endif
+
+#ifndef SYS_fchmod
+#define SYS_fchmod 91
+#endif
+
+#ifndef SYS_fchown
+#define SYS_fchown 93
+#endif
+
+#ifndef SYS_statx
+#define SYS_statx 291
+#endif
+
+#ifndef SYS_chroot
+#define SYS_chroot 51
+#endif
+
+#ifndef SYS_faccessat
+#define SYS_faccessat 48
 #endif
 
 static int fail(const char *what)
@@ -235,6 +264,326 @@ static int concurrent_rename_unlink(void)
     return 0;
 }
 
+static int openat_relative(void)
+{
+    const char *dir = "/tmp/vfs_openat_dir";
+    const char *name = "relative.txt";
+    rmdir(dir);
+    mkdir(dir, 0755);
+
+    int dfd = syscall(SYS_openat, AT_FDCWD, dir, O_RDONLY | O_DIRECTORY);
+    if (dfd < 0) {
+        rmdir(dir);
+        return fail("openat-dir");
+    }
+
+    int fd = syscall(SYS_openat, dfd, name, O_CREAT | O_TRUNC | O_RDWR, 0644);
+    if (fd < 0) {
+        close(dfd);
+        rmdir(dir);
+        return fail("openat-relative");
+    }
+    if (write(fd, "relative", 8) != 8) {
+        close(fd);
+        close(dfd);
+        unlinkat(dfd, name, 0);
+        rmdir(dir);
+        return fail("openat-write");
+    }
+    close(fd);
+
+    fd = syscall(SYS_openat, dfd, name, O_RDONLY);
+    if (fd < 0) {
+        close(dfd);
+        unlinkat(dfd, name, 0);
+        rmdir(dir);
+        return fail("openat-reopen");
+    }
+    char buf[16] = {0};
+    if (read(fd, buf, 8) != 8 || strcmp(buf, "relative") != 0) {
+        close(fd);
+        close(dfd);
+        unlinkat(dfd, name, 0);
+        rmdir(dir);
+        return fail("openat-read");
+    }
+    close(fd);
+
+    unlinkat(dfd, name, 0);
+    close(dfd);
+    rmdir(dir);
+    return 0;
+}
+
+static int linkat_boundary(void)
+{
+    const char *path = "/tmp/vfs_link_src.txt";
+    const char *linkname = "/tmp/vfs_link_dst.txt";
+    unlink(path);
+    unlink(linkname);
+
+    int fd = open(path, O_CREAT | O_TRUNC | O_RDWR, 0644);
+    if (fd < 0)
+        return fail("linkat-open");
+    if (write(fd, "link", 4) != 4) {
+        close(fd);
+        return fail("linkat-write");
+    }
+    close(fd);
+
+    if (syscall(SYS_linkat, AT_FDCWD, path, AT_FDCWD, linkname, 0) < 0)
+        return fail("linkat");
+
+    fd = open(linkname, O_RDONLY);
+    if (fd < 0)
+        return fail("linkat-open-dst");
+    char buf[8] = {0};
+    if (read(fd, buf, 4) != 4 || strcmp(buf, "link") != 0) {
+        close(fd);
+        return fail("linkat-read");
+    }
+    close(fd);
+
+    unlink(path);
+    unlink(linkname);
+    return 0;
+}
+
+static int chmod_chown_boundary(void)
+{
+    const char *path = "/tmp/vfs_chmod.txt";
+    unlink(path);
+    int fd = open(path, O_CREAT | O_TRUNC | O_RDWR, 0644);
+    if (fd < 0)
+        return fail("chmod-open");
+
+    if (syscall(SYS_fchmod, fd, 0600) < 0) {
+        close(fd);
+        return fail("fchmod");
+    }
+
+    struct stat st;
+    if (fstat(fd, &st) < 0) {
+        close(fd);
+        return fail("chmod-stat");
+    }
+    if ((st.st_mode & 0777) != 0600) {
+        close(fd);
+        return fail("chmod-mode");
+    }
+
+    errno = 0;
+    if (syscall(SYS_fchown, fd, 0, 0) < 0) {
+        if (errno != EPERM && errno != ENOSYS) {
+            close(fd);
+            return fail("fchown-errno");
+        }
+    }
+
+    close(fd);
+    unlink(path);
+    return 0;
+}
+
+#ifndef STATX_TYPE
+#define STATX_TYPE 0x00000001U
+#define STATX_SIZE 0x00000002U
+#define STATX_MODE 0x00000004U
+#endif
+
+struct statx_timestamp {
+    int64_t tv_sec;
+    uint32_t tv_nsec;
+    int32_t __reserved;
+};
+
+struct statx {
+    uint32_t stx_mask;
+    uint32_t stx_blksize;
+    uint64_t stx_attributes;
+    uint32_t stx_nlink;
+    uint32_t stx_uid;
+    uint32_t stx_gid;
+    uint16_t stx_mode;
+    uint16_t __spare0[1];
+    uint64_t stx_ino;
+    uint64_t stx_size;
+    uint64_t stx_blocks;
+    uint64_t stx_attributes_mask;
+    struct statx_timestamp stx_atime;
+    struct statx_timestamp stx_btime;
+    struct statx_timestamp stx_ctime;
+    struct statx_timestamp stx_mtime;
+    uint32_t __spare1[14];
+    uint64_t __spare2[12];
+};
+
+static int statx_boundary(void)
+{
+    const char *path = "/tmp/vfs_statx.txt";
+    unlink(path);
+    int fd = open(path, O_CREAT | O_TRUNC | O_RDWR, 0644);
+    if (fd < 0)
+        return fail("statx-open");
+    if (write(fd, "statx", 5) != 5) {
+        close(fd);
+        return fail("statx-write");
+    }
+    close(fd);
+
+    struct statx sx;
+    memset(&sx, 0, sizeof(sx));
+    long r = syscall(SYS_statx, AT_FDCWD, path, 0,
+                     STATX_TYPE | STATX_SIZE | STATX_MODE, &sx);
+    if (r < 0) {
+        if (errno == ENOSYS) {
+            unlink(path);
+            return 0;
+        }
+        unlink(path);
+        return fail("statx");
+    }
+    if (!(sx.stx_mask & STATX_SIZE) || sx.stx_size != 5) {
+        unlink(path);
+        return fail("statx-size");
+    }
+    if (!(sx.stx_mask & STATX_MODE) || (sx.stx_mode & 0777) != 0644) {
+        unlink(path);
+        return fail("statx-mode");
+    }
+
+    unlink(path);
+    return 0;
+}
+
+static int chroot_boundary(void)
+{
+    const char *dir = "/tmp/vfs_chroot_dir";
+    const char *name = "inside.txt";
+    rmdir(dir);
+    mkdir(dir, 0755);
+
+    char path[128];
+    snprintf(path, sizeof(path), "%s/%s", dir, name);
+    int fd = open(path, O_CREAT | O_TRUNC | O_RDWR, 0644);
+    if (fd < 0) {
+        rmdir(dir);
+        return fail("chroot-create");
+    }
+    if (write(fd, "inside", 6) != 6) {
+        close(fd);
+        unlink(path);
+        rmdir(dir);
+        return fail("chroot-write");
+    }
+    close(fd);
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        unlink(path);
+        rmdir(dir);
+        return fail("chroot-fork");
+    }
+    if (pid == 0) {
+        errno = 0;
+        if (syscall(SYS_chroot, dir) < 0) {
+            if (errno == EPERM || errno == ENOSYS)
+                _exit(0);
+            _exit(1);
+        }
+        fd = open("/inside.txt", O_RDONLY);
+        if (fd < 0)
+            _exit(2);
+        char buf[8] = {0};
+        if (read(fd, buf, 6) != 6 || strcmp(buf, "inside") != 0) {
+            close(fd);
+            _exit(3);
+        }
+        close(fd);
+        _exit(0);
+    }
+
+    int status;
+    if (waitpid(pid, &status, 0) != pid) {
+        unlink(path);
+        rmdir(dir);
+        return fail("chroot-wait");
+    }
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        unlink(path);
+        rmdir(dir);
+        return fail("chroot-child");
+    }
+
+    unlink(path);
+    rmdir(dir);
+    return 0;
+}
+
+static int symlink_relative_target(void)
+{
+    const char *dir = "/tmp/vfs_symlink_dir";
+    const char *target = "target.txt";
+    const char *linkname = "link.txt";
+    rmdir(dir);
+    mkdir(dir, 0755);
+
+    int dfd = syscall(SYS_openat, AT_FDCWD, dir, O_RDONLY | O_DIRECTORY);
+    if (dfd < 0) {
+        rmdir(dir);
+        return fail("symlink-dir");
+    }
+
+    int fd = syscall(SYS_openat, dfd, target, O_CREAT | O_TRUNC | O_RDWR, 0644);
+    if (fd < 0) {
+        close(dfd);
+        rmdir(dir);
+        return fail("symlink-target-open");
+    }
+    if (write(fd, "target", 6) != 6) {
+        close(fd);
+        close(dfd);
+        rmdir(dir);
+        return fail("symlink-target-write");
+    }
+    close(fd);
+
+    if (syscall(SYS_symlinkat, target, dfd, linkname) < 0) {
+        close(dfd);
+        rmdir(dir);
+        return fail("symlinkat-relative");
+    }
+
+    char buf[64] = {0};
+    long n = syscall(SYS_readlinkat, dfd, linkname, buf, sizeof(buf) - 1);
+    if (n < 0 || (size_t)n != strlen(target) || strcmp(buf, target) != 0) {
+        close(dfd);
+        rmdir(dir);
+        return fail("readlinkat-relative");
+    }
+
+    fd = syscall(SYS_openat, dfd, linkname, O_RDONLY);
+    if (fd < 0) {
+        close(dfd);
+        rmdir(dir);
+        return fail("symlink-open");
+    }
+    memset(buf, 0, sizeof(buf));
+    if (read(fd, buf, 6) != 6 || strcmp(buf, "target") != 0) {
+        close(fd);
+        close(dfd);
+        rmdir(dir);
+        return fail("symlink-read-through");
+    }
+    close(fd);
+
+    unlinkat(dfd, linkname, 0);
+    unlinkat(dfd, target, 0);
+    close(dfd);
+    rmdir(dir);
+    return 0;
+}
+
 int main(void)
 {
     printf("VFS_STRESS: start\n");
@@ -250,6 +599,18 @@ int main(void)
     if (concurrent_open_close() != 0)
         return 1;
     if (concurrent_rename_unlink() != 0)
+        return 1;
+    if (openat_relative() != 0)
+        return 1;
+    if (linkat_boundary() != 0)
+        return 1;
+    if (chmod_chown_boundary() != 0)
+        return 1;
+    if (statx_boundary() != 0)
+        return 1;
+    if (chroot_boundary() != 0)
+        return 1;
+    if (symlink_relative_target() != 0)
         return 1;
     printf("VFS_STRESS: PASS\n");
     return 0;

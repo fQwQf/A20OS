@@ -19,12 +19,6 @@ static inline a20_status_t a20_event_queue_create(a20_handle_t *out)
 
 /* ---- Watch: register interest in handle events ---- */
 
-typedef struct {
-    a20_handle_t handle;
-    uint32_t     event_mask;
-    uint64_t     cookie;
-} a20_event_watch_args_t;
-
 static inline a20_status_t a20_event_watch(a20_handle_t queue, a20_handle_t handle,
                                             uint32_t event_mask, uint64_t cookie)
 {

@@ -3,6 +3,7 @@
  * Maps POSIX fd (0-1023) to A20 handle indices.
  */
 #include <stdint.h>
+#include <stddef.h>
 #include "../liba20rt/a20_syscall.h"
 
 #define FD_TABLE_INIT  32

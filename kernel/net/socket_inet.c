@@ -5,12 +5,13 @@
 #include "core/klog.h"
 #include "core/string.h"
 #include "core/timer.h"
-#include "mm/slab.h"
 
 #include "lwip/udp.h"
 #include "lwip/raw.h"
 #include "lwip/tcp.h"
 #include "lwip/pbuf.h"
+#include "lwip/ip.h"
+#include "lwip/prot/icmp.h"
 
 static uint16_t g_next_ephemeral = 49152;
 
@@ -198,6 +199,71 @@ int net_lwip_ip_to_sockaddr(const ip_addr_t *ip, uint16_t port,
     return 0;
 }
 
+/*
+ * Bottom-half ring helpers.
+ *
+ * The ring is single-producer (lwIP callback running under g_lwip_lock,
+ * interrupts disabled) and single-consumer (net_inet_bottom_half_process_socket
+ * running under g_net_lock only).  All index updates use __atomic intrinsics so
+ * the ring is safe on SMP without holding both locks at once.
+ */
+static uint32_t bh_ring_mask(uint32_t idx)
+{
+    return idx & (NET_BH_RING_SIZE - 1);
+}
+
+static net_bh_event_t *bh_ring_prepare(net_bh_ring_t *r)
+{
+    uint32_t head = __atomic_load_n(&r->head, __ATOMIC_RELAXED);
+    uint32_t tail = __atomic_load_n(&r->tail, __ATOMIC_ACQUIRE);
+    if ((head - tail) >= NET_BH_RING_SIZE)
+        return NULL;
+    net_bh_event_t *e = &r->events[bh_ring_mask(head)];
+    e->next = NULL;
+    e->type = NET_BH_RECV;
+    e->err = 0;
+    e->len = 0;
+    e->addrlen = 0;
+    return e;
+}
+
+static void bh_ring_commit(net_bh_ring_t *r)
+{
+    __atomic_thread_fence(__ATOMIC_RELEASE);
+    __atomic_fetch_add(&r->head, 1, __ATOMIC_RELAXED);
+}
+
+static net_bh_event_t *bh_ring_consume(net_bh_ring_t *r)
+{
+    uint32_t head = __atomic_load_n(&r->head, __ATOMIC_ACQUIRE);
+    uint32_t tail = __atomic_load_n(&r->tail, __ATOMIC_RELAXED);
+    if (head == tail)
+        return NULL;
+    return &r->events[bh_ring_mask(tail)];
+}
+
+static void bh_ring_consume_commit(net_bh_ring_t *r)
+{
+    __atomic_thread_fence(__ATOMIC_ACQUIRE);
+    __atomic_fetch_add(&r->tail, 1, __ATOMIC_RELEASE);
+}
+
+/*
+ * Schedule the per-socket bottom-half.  Called from lwIP callback context
+ * with g_lwip_lock held; the pending flag array is accessed atomically so no
+ * second lock is taken here.
+ */
+static void net_inet_bh_schedule(net_socket_t *s)
+{
+    if (!s)
+        return;
+    int idx = s->reg_idx;
+    if (idx < 0 || idx >= NET_MAX_SOCKETS)
+        return;
+    __atomic_store_n(&s->bh_pending, 1, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_net_bh_pending[idx], 1, __ATOMIC_RELEASE);
+}
+
 static void lwip_udp_recv_cb(void *arg, struct udp_pcb *pcb, struct pbuf *p,
                              const ip_addr_t *addr, u16_t port)
 {
@@ -206,24 +272,21 @@ static void lwip_udp_recv_cb(void *arg, struct udp_pcb *pcb, struct pbuf *p,
     if (!s || !p)
         return;
 
-    uint8_t from[NET_SOCKADDR_MAX];
-    size_t fromlen = 0;
-    net_lwip_ip_to_sockaddr(addr, port, from, &fromlen);
-
-    size_t len = p->tot_len;
-    if (len > NET_MAX_PAYLOAD)
-        len = NET_MAX_PAYLOAD;
-    uint8_t *data = (uint8_t *)kmalloc(len ? len : 1);
-    if (!data) {
+    net_bh_event_t *e = bh_ring_prepare(&s->bh_ring);
+    if (!e) {
         pbuf_free(p);
         return;
     }
-    pbuf_copy_partial(p, data, (u16_t)len, 0);
 
-    uint64_t irq = spin_lock_irqsave(&g_net_lock);
-    net_enqueue_msg_locked(s, data, len, fromlen ? from : NULL, fromlen);
-    spin_unlock_irqrestore(&g_net_lock, irq);
-    kfree(data);
+    net_lwip_ip_to_sockaddr(addr, port, e->addr, &e->addrlen);
+    size_t len = p->tot_len;
+    if (len > NET_MAX_PAYLOAD)
+        len = NET_MAX_PAYLOAD;
+    pbuf_copy_partial(p, e->data, (u16_t)len, 0);
+    e->len = len;
+
+    bh_ring_commit(&s->bh_ring);
+    net_inet_bh_schedule(s);
     pbuf_free(p);
 }
 
@@ -235,24 +298,34 @@ static u8_t lwip_raw_recv_cb(void *arg, struct raw_pcb *pcb, struct pbuf *p,
     if (!s || !p)
         return 0;
 
-    uint8_t from[NET_SOCKADDR_MAX];
-    size_t fromlen = 0;
-    net_lwip_ip_to_sockaddr(addr, 0, from, &fromlen);
+    /* Do not consume ICMP echo requests on raw ICMP sockets.  Let lwIP's
+     * icmp_input() generate the echo reply so the socket can receive it.
+     * The pbuf passed to the raw recv callback still contains the IP header. */
+    if (s->protocol == IPPROTO_ICMP && p->tot_len > 0) {
+        struct ip_hdr *iphdr = (struct ip_hdr *)p->payload;
+        u16_t iphdr_hlen = IPH_HL_BYTES(iphdr);
+        if (p->tot_len > iphdr_hlen) {
+            uint8_t *payload = (uint8_t *)p->payload;
+            if (payload[iphdr_hlen] == ICMP_ECHO)
+                return 0;
+        }
+    }
 
-    size_t len = p->tot_len;
-    if (len > NET_MAX_PAYLOAD)
-        len = NET_MAX_PAYLOAD;
-    uint8_t *data = (uint8_t *)kmalloc(len ? len : 1);
-    if (!data) {
+    net_bh_event_t *e = bh_ring_prepare(&s->bh_ring);
+    if (!e) {
         pbuf_free(p);
         return 0;
     }
-    pbuf_copy_partial(p, data, (u16_t)len, 0);
 
-    uint64_t irq = spin_lock_irqsave(&g_net_lock);
-    net_enqueue_msg_locked(s, data, len, fromlen ? from : NULL, fromlen);
-    spin_unlock_irqrestore(&g_net_lock, irq);
-    kfree(data);
+    net_lwip_ip_to_sockaddr(addr, 0, e->addr, &e->addrlen);
+    size_t len = p->tot_len;
+    if (len > NET_MAX_PAYLOAD)
+        len = NET_MAX_PAYLOAD;
+    pbuf_copy_partial(p, e->data, (u16_t)len, 0);
+    e->len = len;
+
+    bh_ring_commit(&s->bh_ring);
+    net_inet_bh_schedule(s);
     pbuf_free(p);
     return 1;
 }
@@ -264,14 +337,9 @@ static err_t lwip_tcp_connected_cb(void *arg, struct tcp_pcb *pcb, err_t err)
     if (!s)
         return ERR_OK;
 
-    uint64_t irq = spin_lock_irqsave(&g_net_lock);
-    s->tcp_connecting = 0;
-    s->tcp_err = err;
-    if (err == ERR_OK)
-        s->connected = 1;
-    if (s->waiter && s->waiter->state == PROC_BLOCKED)
-        proc_make_ready(s->waiter);
-    spin_unlock_irqrestore(&g_net_lock, irq);
+    __atomic_store_n(&s->bh_err_code, (int)err, __ATOMIC_RELEASE);
+    __atomic_store_n(&s->bh_connected, 1, __ATOMIC_RELEASE);
+    net_inet_bh_schedule(s);
     return ERR_OK;
 }
 
@@ -284,44 +352,27 @@ static err_t lwip_tcp_recv_cb(void *arg, struct tcp_pcb *pcb, struct pbuf *p,
     if (!s)
         return ERR_OK;
     if (!p) {
-        uint64_t irq = spin_lock_irqsave(&g_net_lock);
-        s->closed = 1;
-        if (s->waiter && s->waiter->state == PROC_BLOCKED)
-            proc_make_ready(s->waiter);
-        spin_unlock_irqrestore(&g_net_lock, irq);
+        __atomic_store_n(&s->bh_closed, 1, __ATOMIC_RELEASE);
+        net_inet_bh_schedule(s);
         return ERR_OK;
-    }
-
-    int chunks = (int)((p->tot_len + NET_MAX_PAYLOAD - 1) / NET_MAX_PAYLOAD);
-    size_t max_chunk = p->tot_len < NET_MAX_PAYLOAD ? p->tot_len : NET_MAX_PAYLOAD;
-    uint8_t *data = (uint8_t *)kmalloc(max_chunk ? max_chunk : 1);
-    if (!data)
-        return ERR_MEM;
-
-    uint64_t irq = spin_lock_irqsave(&g_net_lock);
-    if (s->rx_count + chunks > NET_MAX_QUEUE) {
-        spin_unlock_irqrestore(&g_net_lock, irq);
-        kfree(data);
-        return ERR_MEM;
     }
 
     size_t off = 0;
     while (off < p->tot_len) {
+        net_bh_event_t *e = bh_ring_prepare(&s->bh_ring);
+        if (!e) {
+            pbuf_free(p);
+            return ERR_MEM;
+        }
         size_t n = p->tot_len - off;
         if (n > NET_MAX_PAYLOAD)
             n = NET_MAX_PAYLOAD;
-        pbuf_copy_partial(p, data, (u16_t)n, (u16_t)off);
-        int r = net_enqueue_msg_locked(s, data, n, NULL, 0);
-        if (r < 0) {
-            spin_unlock_irqrestore(&g_net_lock, irq);
-            kfree(data);
-            return ERR_MEM;
-        }
+        pbuf_copy_partial(p, e->data, (u16_t)n, (u16_t)off);
+        e->len = n;
+        bh_ring_commit(&s->bh_ring);
         off += n;
     }
-    spin_unlock_irqrestore(&g_net_lock, irq);
-    kfree(data);
-
+    net_inet_bh_schedule(s);
     pbuf_free(p);
     return ERR_OK;
 }
@@ -331,14 +382,10 @@ static void lwip_tcp_err_cb(void *arg, err_t err)
     net_socket_t *s = (net_socket_t *)arg;
     if (!s)
         return;
-    uint64_t irq = spin_lock_irqsave(&g_net_lock);
     s->tcp = NULL;
-    s->tcp_connecting = 0;
-    s->tcp_err = err;
-    s->closed = 1;
-    if (s->waiter && s->waiter->state == PROC_BLOCKED)
-        proc_make_ready(s->waiter);
-    spin_unlock_irqrestore(&g_net_lock, irq);
+    __atomic_store_n(&s->bh_err_code, (int)err, __ATOMIC_RELEASE);
+    __atomic_store_n(&s->bh_error, 1, __ATOMIC_RELEASE);
+    net_inet_bh_schedule(s);
 }
 
 static err_t lwip_tcp_sent_cb(void *arg, struct tcp_pcb *pcb, u16_t len)
@@ -348,10 +395,8 @@ static err_t lwip_tcp_sent_cb(void *arg, struct tcp_pcb *pcb, u16_t len)
     net_socket_t *s = (net_socket_t *)arg;
     if (!s)
         return ERR_OK;
-    uint64_t irq = spin_lock_irqsave(&g_net_lock);
-    if (s->waiter && s->waiter->state == PROC_BLOCKED)
-        proc_make_ready(s->waiter);
-    spin_unlock_irqrestore(&g_net_lock, irq);
+    __atomic_store_n(&s->bh_tx_wake, 1, __ATOMIC_RELEASE);
+    net_inet_bh_schedule(s);
     return ERR_OK;
 }
 
@@ -387,6 +432,90 @@ void net_tcp_drop_pcb(net_socket_t *s)
         tcp_abort(s->tcp);
     s->tcp = NULL;
     a20_lwip_unlock(flags);
+}
+
+/*
+ * Process a single socket's deferred bottom-half work.
+ *
+ * Runs with g_net_lock held and WITHOUT g_lwip_lock.  Allocates net_msg_t
+ * entries, copies staged payload data, enqueues messages, and wakes waiters.
+ */
+static void net_inet_bottom_half_process_socket_locked(net_socket_t *s)
+{
+    if (__atomic_exchange_n(&s->bh_connected, 0, __ATOMIC_ACQUIRE)) {
+        int err = __atomic_load_n(&s->bh_err_code, __ATOMIC_RELAXED);
+        s->tcp_connecting = 0;
+        s->tcp_err = err;
+        if (err == ERR_OK)
+            s->connected = 1;
+        if (s->waiter && s->waiter->state == PROC_BLOCKED)
+            proc_make_ready(s->waiter);
+    }
+
+    if (__atomic_exchange_n(&s->bh_error, 0, __ATOMIC_ACQUIRE)) {
+        s->tcp_connecting = 0;
+        s->tcp_err = __atomic_load_n(&s->bh_err_code, __ATOMIC_RELAXED);
+        s->closed = 1;
+        if (s->waiter && s->waiter->state == PROC_BLOCKED)
+            proc_make_ready(s->waiter);
+    }
+
+    if (__atomic_exchange_n(&s->bh_closed, 0, __ATOMIC_ACQUIRE)) {
+        s->closed = 1;
+        if (s->waiter && s->waiter->state == PROC_BLOCKED)
+            proc_make_ready(s->waiter);
+    }
+
+    for (;;) {
+        net_bh_event_t *e = bh_ring_consume(&s->bh_ring);
+        if (!e)
+            break;
+        if (!s->closed) {
+            net_enqueue_msg_locked(s, e->data, e->len,
+                                   e->addrlen ? e->addr : NULL, e->addrlen);
+        }
+        bh_ring_consume_commit(&s->bh_ring);
+    }
+
+    if (__atomic_exchange_n(&s->bh_tx_wake, 0, __ATOMIC_ACQUIRE)) {
+        if (s->send_waiter && s->send_waiter->state == PROC_BLOCKED)
+            proc_make_ready(s->send_waiter);
+    }
+}
+
+void net_inet_bottom_half_process_socket(net_socket_t *s)
+{
+    if (!s)
+        return;
+    uint64_t irq = spin_lock_irqsave(&g_net_lock);
+    if (net_socket_is_valid_locked(s) && !s->closed)
+        net_inet_bottom_half_process_socket_locked(s);
+    __atomic_store_n(&s->bh_pending, 0, __ATOMIC_RELEASE);
+    int idx = s->reg_idx;
+    if (idx >= 0 && idx < NET_MAX_SOCKETS)
+        __atomic_store_n(&g_net_bh_pending[idx], 0, __ATOMIC_RELEASE);
+    spin_unlock_irqrestore(&g_net_lock, irq);
+}
+
+void net_inet_bottom_half_process_all(void)
+{
+    for (int i = 0; i < NET_MAX_SOCKETS; i++) {
+        if (!__atomic_load_n(&g_net_bh_pending[i], __ATOMIC_ACQUIRE))
+            continue;
+        uint64_t irq = spin_lock_irqsave(&g_net_lock);
+        net_socket_t *s = g_sockets[i];
+        if (!s || !net_socket_is_valid_locked(s) || s->closed) {
+            __atomic_store_n(&g_net_bh_pending[i], 0, __ATOMIC_RELEASE);
+            if (s)
+                __atomic_store_n(&s->bh_pending, 0, __ATOMIC_RELEASE);
+            spin_unlock_irqrestore(&g_net_lock, irq);
+            continue;
+        }
+        net_inet_bottom_half_process_socket_locked(s);
+        __atomic_store_n(&s->bh_pending, 0, __ATOMIC_RELEASE);
+        __atomic_store_n(&g_net_bh_pending[i], 0, __ATOMIC_RELEASE);
+        spin_unlock_irqrestore(&g_net_lock, irq);
+    }
 }
 
 int net_inet_socket_init(net_socket_t *s)
@@ -633,7 +762,8 @@ static int net_inet_connect_stream(net_socket_t *s, const void *addr, size_t add
         return -ENETUNREACH;
     }
 
-    uint64_t deadline = timer_get_ticks() + NET_CONNECT_TIMEOUT_TICKS;
+    uint64_t timeout = s->send_timeout_ticks ? s->send_timeout_ticks : NET_CONNECT_TIMEOUT_TICKS;
+    uint64_t deadline = timer_get_ticks() + timeout;
     while (s->tcp_connecting) {
         if ((int64_t)(timer_get_ticks() - deadline) >= 0) {
             net_tcp_drop_pcb(s);
@@ -839,6 +969,20 @@ static int net_inet_send_tcp(net_socket_t *s, const void *buf, size_t len)
 {
     if (!s->connected || s->closed || s->shut_wr)
         return -ENOTCONN;
+    if (s->local_tcp) {
+        uint64_t irq = spin_lock_irqsave(&g_net_lock);
+        net_socket_t *dst = s->peer;
+        int rv;
+        if (!dst || !net_socket_is_valid_locked(dst) || dst->closed) {
+            spin_unlock_irqrestore(&g_net_lock, irq);
+            return -ENOTCONN;
+        }
+        spin_unlock_irqrestore(&g_net_lock, irq);
+        rv = net_enqueue_msg_blocking(s, dst, buf, len,
+                                      s->local, s->local_len,
+                                      s->nonblock, s->send_timeout_ticks);
+        return rv;
+    }
     size_t sent = 0;
     uint64_t start = timer_get_ticks();
     while (sent < len) {

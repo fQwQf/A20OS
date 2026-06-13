@@ -1,0 +1,244 @@
+/*
+ * A20OS synthetic driver lifecycle test.
+ *
+ * Implements the Wave 2 P1 exercise: register a driver, register matching and
+ * non-matching devices, force a probe failure, then success, remove, re-probe,
+ * and unregister. The test is compile-time disabled by default under
+ * CONFIG_DRIVER_LIFECYCLE_TEST.
+ */
+#include "drivers/core/driver_lifecycle_test.h"
+#include "drivers/core/driver_core.h"
+#include "core/klog.h"
+#include "core/stdio.h"
+#include "core/string.h"
+
+#ifdef CONFIG_DRIVER_LIFECYCLE_TEST
+
+#define LIFECYCLE_DRV_NAME "lifecycle-test"
+
+typedef struct {
+    int should_match;
+    int fail_probe;
+    int probe_count;
+    int remove_count;
+} lifecycle_plat_t;
+
+static int lifecycle_match(device_t *dev, const driver_t *drv)
+{
+    if (!dev || !drv)
+        return 0;
+    if (strcmp(drv->name, LIFECYCLE_DRV_NAME) != 0)
+        return 0;
+    lifecycle_plat_t *plat = (lifecycle_plat_t *)dev->plat_data;
+    return plat && plat->should_match;
+}
+
+static int lifecycle_probe(device_t *dev)
+{
+    lifecycle_plat_t *plat = (lifecycle_plat_t *)dev->plat_data;
+    if (!plat)
+        return -1;
+
+    plat->probe_count++;
+    if (plat->fail_probe) {
+        plat->fail_probe = 0;
+        kinfo("[DRIVER-LIFECYCLE] probe failure forced for '%s'\n",
+              dev->name ? dev->name : "?");
+        return -EIO;
+    }
+
+    dev->drv_priv = plat;
+    kinfo("[DRIVER-LIFECYCLE] probe succeeded for '%s'\n",
+          dev->name ? dev->name : "?");
+    return 0;
+}
+
+static int lifecycle_remove(device_t *dev)
+{
+    lifecycle_plat_t *plat = (lifecycle_plat_t *)dev->drv_priv;
+    if (plat)
+        plat->remove_count++;
+    dev->drv_priv = NULL;
+    kinfo("[DRIVER-LIFECYCLE] remove called for '%s'\n",
+          dev->name ? dev->name : "?");
+    return 0;
+}
+
+static bus_type_t g_lifecycle_bus = {
+    .name  = "lifecycle",
+    .match = lifecycle_match,
+    .probe = NULL,
+    .remove = NULL,
+};
+
+static const device_id_t g_lifecycle_ids[] = {
+    { .vendor = 0xA20A, .device = 0x0001 },
+    { 0 },
+};
+
+static driver_t g_lifecycle_driver = {
+    .name       = LIFECYCLE_DRV_NAME,
+    .id_table   = g_lifecycle_ids,
+    .bus        = &g_lifecycle_bus,
+    .probe      = lifecycle_probe,
+    .remove     = lifecycle_remove,
+    .class_ops  = NULL,
+    .class_type = DEV_CLASS_NONE,
+};
+
+int driver_lifecycle_test_run(void)
+{
+    int pass = 1;
+
+    lifecycle_plat_t plat_nomatch = { .should_match = 0, .fail_probe = 0 };
+    lifecycle_plat_t plat_fail    = { .should_match = 1, .fail_probe = 1 };
+    lifecycle_plat_t plat_ok      = { .should_match = 1, .fail_probe = 0 };
+
+    device_t dev_nomatch = {
+        .name      = "lifecycle-nomatch",
+        .bus       = &g_lifecycle_bus,
+        .plat_data = &plat_nomatch,
+    };
+
+    device_t dev_fail = {
+        .name      = "lifecycle-fail",
+        .bus       = &g_lifecycle_bus,
+        .plat_data = &plat_fail,
+    };
+
+    device_t dev_ok = {
+        .name      = "lifecycle-ok",
+        .bus       = &g_lifecycle_bus,
+        .plat_data = &plat_ok,
+    };
+
+    kinfo("[DRIVER-LIFECYCLE] starting synthetic lifecycle exercise\n");
+
+    /* 1. Register the synthetic bus. */
+    if (bus_register(&g_lifecycle_bus) != 0) {
+        kerr("[DRIVER-LIFECYCLE] bus_register failed\n");
+        pass = 0;
+        goto out;
+    }
+
+    /* 2. Register the synthetic driver. */
+    if (driver_register(&g_lifecycle_driver) != 0) {
+        kerr("[DRIVER-LIFECYCLE] driver_register failed\n");
+        pass = 0;
+        goto out;
+    }
+
+    /* 3. Register a non-matching device; it must stay unbound. */
+    if (device_register(&dev_nomatch) != 0) {
+        kerr("[DRIVER-LIFECYCLE] device_register(nomatch) failed\n");
+        pass = 0;
+        goto out;
+    }
+    if (dev_nomatch.drv != NULL || dev_nomatch.state != DEV_STATE_UNINIT) {
+        kerr("[DRIVER-LIFECYCLE] non-matching device became bound unexpectedly\n");
+        pass = 0;
+        goto out;
+    }
+
+    /* 4. Register a matching device whose probe is forced to fail. */
+    if (device_register(&dev_fail) != 0) {
+        kerr("[DRIVER-LIFECYCLE] device_register(fail) failed\n");
+        pass = 0;
+        goto out;
+    }
+    if (dev_fail.drv != NULL || dev_fail.state != DEV_STATE_UNINIT) {
+        kerr("[DRIVER-LIFECYCLE] failing probe left a half-bound device\n");
+        pass = 0;
+        goto out;
+    }
+    if (plat_fail.probe_count != 1) {
+        kerr("[DRIVER-LIFECYCLE] forced probe was not attempted\n");
+        pass = 0;
+        goto out;
+    }
+    device_unregister(&dev_fail);
+
+    /* 5. Register a matching device whose probe succeeds. */
+    if (device_register(&dev_ok) != 0) {
+        kerr("[DRIVER-LIFECYCLE] device_register(ok) failed\n");
+        pass = 0;
+        goto out;
+    }
+    if (dev_ok.drv != &g_lifecycle_driver || dev_ok.state != DEV_STATE_PROBED) {
+        kerr("[DRIVER-LIFECYCLE] successful probe did not bind device\n");
+        pass = 0;
+        goto out;
+    }
+    if (plat_ok.probe_count != 1) {
+        kerr("[DRIVER-LIFECYCLE] successful probe was not attempted\n");
+        pass = 0;
+        goto out;
+    }
+
+    /* 6. Unregister the driver; remove must be called on bound devices. */
+    if (driver_unregister(&g_lifecycle_driver) != 0) {
+        kerr("[DRIVER-LIFECYCLE] driver_unregister failed\n");
+        pass = 0;
+        goto out;
+    }
+    if (dev_ok.drv != NULL || dev_ok.state != DEV_STATE_REMOVED) {
+        kerr("[DRIVER-LIFECYCLE] driver_unregister did not unbind device\n");
+        pass = 0;
+        goto out;
+    }
+    if (plat_ok.remove_count != 1) {
+        kerr("[DRIVER-LIFECYCLE] remove callback not invoked during unregister\n");
+        pass = 0;
+        goto out;
+    }
+
+    /* 7. Re-register the same driver and re-probe the device. */
+    if (driver_register(&g_lifecycle_driver) != 0) {
+        kerr("[DRIVER-LIFECYCLE] driver re-register failed\n");
+        pass = 0;
+        goto out;
+    }
+    if (bus_probe_device(&dev_ok) != 0) {
+        kerr("[DRIVER-LIFECYCLE] re-probe failed\n");
+        pass = 0;
+        goto out;
+    }
+    if (dev_ok.drv != &g_lifecycle_driver || dev_ok.state != DEV_STATE_PROBED) {
+        kerr("[DRIVER-LIFECYCLE] re-probe did not bind device\n");
+        pass = 0;
+        goto out;
+    }
+    if (plat_ok.probe_count < 2) {
+        kerr("[DRIVER-LIFECYCLE] re-probe was not attempted\n");
+        pass = 0;
+        goto out;
+    }
+
+    /* 8. Remove the device explicitly. */
+    device_unregister(&dev_ok);
+    if (dev_ok.drv != NULL || dev_ok.state != DEV_STATE_REMOVED) {
+        kerr("[DRIVER-LIFECYCLE] device_unregister did not unbind device\n");
+        pass = 0;
+        goto out;
+    }
+    if (plat_ok.remove_count != 2) {
+        kerr("[DRIVER-LIFECYCLE] remove callback not invoked during device_unregister\n");
+        pass = 0;
+        goto out;
+    }
+
+    /* 9. Clean up the remaining devices and bus. */
+    device_unregister(&dev_nomatch);
+    driver_unregister(&g_lifecycle_driver);
+    bus_unregister(&g_lifecycle_bus);
+
+out:
+    if (pass) {
+        kinfo("DRIVER_LIFECYCLE: PASS\n");
+        return 0;
+    }
+    kerr("DRIVER_LIFECYCLE: FAIL\n");
+    return -1;
+}
+
+#endif /* CONFIG_DRIVER_LIFECYCLE_TEST */

@@ -8,5 +8,6 @@ void vfs_path_trim_trailing_slashes(char *path);
 int vfs_path_split_parent_name(const char *path, char *parent, size_t parent_sz,
                                char *name, size_t name_sz);
 int vfs_path_normalize_absolute(char *path);
+int vfs_path_normalize_absolute_with_root(char *path, const char *root);
 
 #endif

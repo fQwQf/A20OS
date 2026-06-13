@@ -96,10 +96,10 @@ static void aa64_reboot(void) {
     sbi_reboot();
 }
 
-extern void virtio_mmio_enumerate(uintptr_t base, int max_slots);
+extern void virtio_mmio_enumerate(uintptr_t base, int max_slots, int irq_base);
 
 static void aa64_enumerate_devices(void) {
-    virtio_mmio_enumerate(VIRTIO_BASE, 8);
+    virtio_mmio_enumerate(VIRTIO_BASE, 8, 16);
 }
 
 static const board_config_t qemu_virt_aa64 = {

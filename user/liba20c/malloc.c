@@ -24,12 +24,18 @@ static void *arena_alloc(uint64_t size)
     if (arena_pos + size > arena_size) {
         uint64_t chunk = size > (256 * 1024) ? size : (256 * 1024);
         uint64_t req_size = arena_size + chunk;
-        /* A20 vm_alloc: args = {size, flags, out_addr} */
-        uint64_t args[3] = {req_size, 0, 0};
-        int64_t r = a20_vm_alloc(args);
+        a20_vm_alloc_args_t args;
+        args.size      = sizeof(args);
+        args.version   = 1;
+        args.addr_hint = 0;
+        args.length    = req_size;
+        args.prot      = A20_PROT_READ | A20_PROT_WRITE;
+        args.flags     = 0;
+        args.out_addr  = 0;
+        int64_t r = a20_syscall6(A20_SYS_vm_alloc, (uint64_t)&args, 0, 0, 0, 0, 0);
         if (r < 0) return NULL;
         if (arena_base == NULL) {
-            arena_base = (void *)args[2];
+            arena_base = (void *)args.out_addr;
             arena_size = req_size;
         } else {
             arena_size = req_size;

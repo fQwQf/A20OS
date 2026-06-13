@@ -121,8 +121,10 @@ int64_t sys_a20_task_info(const a20_syscall_args_t *args)
 
 int64_t sys_a20_thread_sleep(const a20_syscall_args_t *args)
 {
-    uint64_t deadline_ns = A20_ARG(0);
-    while (timer_get_ticks() * 10000000ULL < deadline_ns) {
+    uint64_t duration_ns = A20_ARG(0);
+    uint64_t now_ns = timer_get_ticks() * (1000000000ULL / TICKS_PER_SEC);
+    uint64_t deadline_ns = now_ns + duration_ns;
+    while (timer_get_ticks() * (1000000000ULL / TICKS_PER_SEC) < deadline_ns) {
         proc_yield();
     }
     return A20_OK;

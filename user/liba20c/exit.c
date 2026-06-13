@@ -2,6 +2,7 @@
  * A20OS liba20c — exit wrapper.
  */
 #include "../liba20rt/a20_syscall.h"
+#include "../liba20rt/a20_task.h"
 
 void exit(int code)
 {

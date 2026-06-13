@@ -22,13 +22,15 @@ static void rv64_plic_disable(uint32_t irq) {
 }
 
 static uint32_t rv64_plic_ack(void) {
-    int hart = (int)cpu_current_id();
-    return *(volatile uint32_t *)PLIC_SCLAIM(hart);
+    /* PLIC claim is handled by arch_handle_irq(); this callback exists only
+     * so driver_irq_dispatch() can optional-call ack without side effects. */
+    return 0;
 }
 
 static void rv64_plic_eoi(uint32_t irq) {
-    int hart = (int)cpu_current_id();
-    *(volatile uint32_t *)PLIC_SCLAIM(hart) = irq;
+    /* PLIC completion is handled by arch_handle_irq(); this callback exists
+     * only so driver_irq_dispatch() can optional-call eoi without side effects. */
+    (void)irq;
 }
 
 static void rv64_plic_send_ipi(uint64_t target_mask) {
@@ -81,10 +83,10 @@ static void rv64_reboot(void) {
     sbi_reboot();
 }
 
-extern void virtio_mmio_enumerate(uintptr_t base, int max_slots);
+extern void virtio_mmio_enumerate(uintptr_t base, int max_slots, int irq_base);
 
 static void rv64_enumerate_devices(void) {
-    virtio_mmio_enumerate(VIRTIO_BASE, 8);
+    virtio_mmio_enumerate(VIRTIO_BASE, 8, 1);
 }
 
 static const board_config_t qemu_virt_rv64 = {

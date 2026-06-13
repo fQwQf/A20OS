@@ -17,6 +17,7 @@
 #include "fs/vfs/path.h"
 #include "fs/vfs/stat_perm.h"
 #include "fs/file.h"
+#include "fs/fdtable.h"
 #include "fs/locks.h"
 #include "fs/page_cache.h"
 #include "fs/pipe.h"
@@ -63,6 +64,39 @@ extern int g_lookup_errno;
  * VFS open / close
  * ============================================================ */
 
+static int path_is_beneath(const char *start, const char *resolved) {
+    size_t len = strlen(start);
+    while (len > 1 && start[len - 1] == '/') len--;
+    if (strcmp(resolved, start) == 0) return 1;
+    if (strncmp(resolved, start, len) == 0 && (resolved[len] == '/' || resolved[len] == '\0'))
+        return 1;
+    return 0;
+}
+
+/* Returns 1 if a relative path never uses `..` to walk above the implicit start
+ * directory.  This catches e.g. "../dir" resolving back onto itself, which a
+ * plain final-path check would incorrectly allow under RESOLVE_BENEATH. */
+static int relative_path_stays_beneath(const char *relpath) {
+    int depth = 0;
+    const char *p = relpath;
+    while (*p) {
+        while (*p == '/') p++;
+        if (!*p) break;
+        const char *end = p;
+        while (*end && *end != '/') end++;
+        size_t clen = (size_t)(end - p);
+        if (clen == 1 && p[0] == '.') {
+        } else if (clen == 2 && p[0] == '.' && p[1] == '.') {
+            depth--;
+            if (depth < 0) return 0;
+        } else {
+            depth++;
+        }
+        p = end;
+    }
+    return 1;
+}
+
 int vfs_open(const char *path, int flags, int mode) {
     /* Resolve cwd from current process */
     task_t *cur = proc_current();
@@ -73,6 +107,19 @@ int vfs_open(const char *path, int flags, int mode) {
     int pr = vfs_path_join(cwd, path, resolved, sizeof(resolved));
     if (pr < 0)
         return pr;
+
+    const char *root = cur && cur->fs.root_path[0] ? cur->fs.root_path : "/";
+    if (strcmp(root, "/") != 0 && !path_is_beneath(root, resolved)) {
+        char rooted[MAX_PATH_LEN];
+        if (strcmp(resolved, "/") == 0)
+            snprintf(rooted, sizeof(rooted), "%s", root);
+        else
+            snprintf(rooted, sizeof(rooted), "%s%s", root, resolved);
+        strncpy(resolved, rooted, sizeof(resolved) - 1);
+        resolved[sizeof(resolved) - 1] = '\0';
+    }
+    if (vfs_path_normalize_absolute_with_root(resolved, root) < 0)
+        return -ENAMETOOLONG;
 
     if (strcmp(resolved, "/proc/self/exe") == 0) {
         task_t *cur = proc_current();
@@ -157,6 +204,159 @@ int vfs_open(const char *path, int flags, int mode) {
     vfile_t *vf = vn->ops->open(vn, flags);
     if (!vf) { vnode_put(vn); return -ENOMEM; }
     strncpy(vf->path, resolved, MAX_PATH_LEN - 1);
+    vf->path[MAX_PATH_LEN - 1] = '\0';
+
+    int gfd = vfs_alloc_fd(vf);
+    if (gfd < 0) {
+        vnode_put(vn);
+        if (vf->ops && vf->ops->close) vf->ops->close(vf);
+        vfile_free(vf);
+        return -EMFILE;
+    }
+    vnode_put(vn);
+    return gfd;
+}
+
+static int vfs_dirfd_path(int dirfd, char *out, size_t outsz) {
+    task_t *cur = proc_current();
+    if (dirfd == AT_FDCWD) {
+        const char *cwd = cur && cur->fs.cwd[0] ? cur->fs.cwd : "/";
+        if (strlen(cwd) >= outsz) return -ENAMETOOLONG;
+        strncpy(out, cwd, outsz - 1);
+        out[outsz - 1] = '\0';
+        return 0;
+    }
+    int64_t gfd = fdtable_get_current(dirfd);
+    if (gfd < 0) return (int)gfd;
+    vfile_t *vf = vfs_get_file_ref((int)gfd);
+    if (!vf) return -EBADF;
+    if (!vf->vnode || vf->vnode->type != VFS_FT_DIR) {
+        vfs_put_file_ref((int)gfd, vf);
+        return -ENOTDIR;
+    }
+    if (!vf->path[0]) {
+        vfs_put_file_ref((int)gfd, vf);
+        return -EINVAL;
+    }
+    if (strlen(vf->path) >= outsz) {
+        vfs_put_file_ref((int)gfd, vf);
+        return -ENAMETOOLONG;
+    }
+    strncpy(out, vf->path, outsz - 1);
+    out[outsz - 1] = '\0';
+    vfs_put_file_ref((int)gfd, vf);
+    return 0;
+}
+
+int vfs_openat2(int dirfd, const char *path, int flags, int mode, uint64_t resolve) {
+    if (!path) return -EFAULT;
+    task_t *cur = proc_current();
+    const char *root = cur && cur->fs.root_path[0] ? cur->fs.root_path : "/";
+
+    char start[MAX_PATH_LEN];
+    int r = vfs_dirfd_path(dirfd, start, sizeof(start));
+    if (r < 0) return r;
+
+    char logical[MAX_PATH_LEN];
+    if (path[0] == '/') {
+        if (resolve & RESOLVE_IN_ROOT) {
+            if (strcmp(start, "/") == 0)
+                snprintf(logical, sizeof(logical), "%s", path);
+            else
+                snprintf(logical, sizeof(logical), "%s%s", start, path);
+        } else {
+            snprintf(logical, sizeof(logical), "%s", path);
+        }
+    } else {
+        size_t slen = strlen(start);
+        if (slen > 0 && start[slen - 1] == '/')
+            snprintf(logical, sizeof(logical), "%s%s", start, path);
+        else
+            snprintf(logical, sizeof(logical), "%s/%s", start, path);
+    }
+
+    if (resolve & RESOLVE_IN_ROOT) {
+        if (vfs_path_normalize_absolute_with_root(logical, start) < 0)
+            return -ENAMETOOLONG;
+    } else {
+        if (vfs_path_normalize_absolute(logical) < 0)
+            return -ENAMETOOLONG;
+    }
+
+    if (strcmp(root, "/") != 0) {
+        char rooted[MAX_PATH_LEN];
+        if (strcmp(logical, "/") == 0)
+            snprintf(rooted, sizeof(rooted), "%s", root);
+        else
+            snprintf(rooted, sizeof(rooted), "%s%s", root, logical);
+        if (vfs_path_normalize_absolute_with_root(rooted, root) < 0)
+            return -ENAMETOOLONG;
+        strncpy(logical, rooted, sizeof(logical) - 1);
+        logical[sizeof(logical) - 1] = '\0';
+    }
+
+    if (resolve & RESOLVE_BENEATH) {
+        if (path[0] != '/' && !relative_path_stays_beneath(path))
+            return -EXDEV;
+        if (!path_is_beneath(start, logical))
+            return -EXDEV;
+    }
+
+    if (resolve & RESOLVE_NO_XDEV) {
+        mount_t *start_mnt = vfs_find_mount(start);
+        mount_t *tgt_mnt = vfs_find_mount(logical);
+        if (!start_mnt || !tgt_mnt || start_mnt != tgt_mnt)
+            return -EXDEV;
+    }
+
+    vnode_t *vn = NULL;
+    if ((resolve & RESOLVE_NO_SYMLINKS) || (resolve & RESOLVE_NO_TRAILING_SYMLINKS)) {
+        vn = vfs_resolve_no_follow_final(logical);
+        if (!vn && g_lookup_errno) {
+            if (!(flags & O_CREAT)) return g_lookup_errno;
+        }
+        if (vn && vn->type == VFS_FT_SYMLINK) {
+            vnode_put(vn);
+            return -ELOOP;
+        }
+    }
+
+    if (!vn) {
+        if (flags & O_CREAT) {
+            return vfs_open(logical, flags, mode);
+        }
+        vn = vfs_resolve(logical);
+        if (!vn) return g_lookup_errno ? g_lookup_errno : -ENOENT;
+    }
+
+    if ((flags & O_DIRECTORY) && vn->type != VFS_FT_DIR) {
+        vnode_put(vn);
+        return -ENOTDIR;
+    }
+    int mask = 0;
+    if (vfs_should_read(flags)) mask |= R_OK;
+    if (vfs_should_write(flags) || (flags & O_TRUNC)) mask |= W_OK;
+    if (mask && vfs_vnode_permission(vn, mask) < 0) {
+        vnode_put(vn);
+        return -EACCES;
+    }
+    if (vn->type == VFS_FT_DIR && vfs_should_write(flags)) {
+        vnode_put(vn);
+        return -EISDIR;
+    }
+
+    if ((flags & O_TRUNC) && vn->type == VFS_FT_REGULAR && vn->ops && vn->ops->truncate) {
+        int tr = vn->ops->truncate(vn, 0);
+        if (tr == 0) page_cache_truncate(vn, 0);
+    }
+
+    if (!vn->ops || !vn->ops->open) {
+        vnode_put(vn);
+        return -ENOSYS;
+    }
+    vfile_t *vf = vn->ops->open(vn, flags);
+    if (!vf) { vnode_put(vn); return -ENOMEM; }
+    strncpy(vf->path, logical, MAX_PATH_LEN - 1);
     vf->path[MAX_PATH_LEN - 1] = '\0';
 
     int gfd = vfs_alloc_fd(vf);
@@ -296,11 +496,16 @@ int vfs_unlink(const char *path) {
     return r;
 }
 
-int vfs_rename(const char *old, const char *newpath) {
+int vfs_rename_flags(const char *old, const char *newpath, unsigned int flags) {
     if (!old || !newpath) return -EINVAL;
+    if (flags & ~(RENAME_NOREPLACE | RENAME_EXCHANGE))
+        return -EINVAL;
+    if ((flags & RENAME_NOREPLACE) && (flags & RENAME_EXCHANGE))
+        return -EINVAL;
 
     task_t *cur = proc_current();
     const char *cwd = cur ? cur->fs.cwd : "/";
+    const char *root = cur && cur->fs.root_path[0] ? cur->fs.root_path : "/";
 
     char old_resolved[MAX_PATH_LEN];
     char new_resolved[MAX_PATH_LEN];
@@ -310,6 +515,30 @@ int vfs_rename(const char *old, const char *newpath) {
     pr = vfs_path_join(cwd, newpath, new_resolved, sizeof(new_resolved));
     if (pr < 0)
         return pr;
+
+    if (strcmp(root, "/") != 0) {
+        char rooted[MAX_PATH_LEN];
+        if (strcmp(old_resolved, "/") == 0)
+            snprintf(rooted, sizeof(rooted), "%s", root);
+        else
+            snprintf(rooted, sizeof(rooted), "%s%s", root, old_resolved);
+        vfs_path_normalize_absolute_with_root(rooted, root);
+        strncpy(old_resolved, rooted, sizeof(old_resolved) - 1);
+        old_resolved[sizeof(old_resolved) - 1] = '\0';
+
+        if (strcmp(new_resolved, "/") == 0)
+            snprintf(rooted, sizeof(rooted), "%s", root);
+        else
+            snprintf(rooted, sizeof(rooted), "%s%s", root, new_resolved);
+        vfs_path_normalize_absolute_with_root(rooted, root);
+        strncpy(new_resolved, rooted, sizeof(new_resolved) - 1);
+        new_resolved[sizeof(new_resolved) - 1] = '\0';
+    } else {
+        if (vfs_path_normalize_absolute(old_resolved) < 0)
+            return -ENAMETOOLONG;
+        if (vfs_path_normalize_absolute(new_resolved) < 0)
+            return -ENAMETOOLONG;
+    }
 
     char old_parent[MAX_PATH_LEN], old_name[MAX_NAME_LEN];
     char new_parent[MAX_PATH_LEN], new_name[MAX_NAME_LEN];
@@ -364,6 +593,12 @@ int vfs_rename(const char *old, const char *newpath) {
 
     vnode_t *new_victim = NULL;
     if (new_dir->ops->lookup && new_dir->ops->lookup(new_dir, new_name, &new_victim) == 0 && new_victim) {
+        if (flags & RENAME_NOREPLACE) {
+            vnode_put(new_victim);
+            vnode_put(old_dir);
+            vnode_put(new_dir);
+            return -EEXIST;
+        }
         int sr = vfs_sticky_may_remove(new_dir, new_victim);
         vnode_put(new_victim);
         if (sr < 0) {
@@ -373,7 +608,7 @@ int vfs_rename(const char *old, const char *newpath) {
         }
     }
 
-    int r = old_dir->ops->rename(old_dir, old_name, new_dir, new_name);
+    int r = old_dir->ops->rename(old_dir, old_name, new_dir, new_name, flags);
     if (r == 0) {
         vfs_dcache_invalidate(old_dir, old_name);
         vfs_dcache_invalidate(new_dir, new_name);
@@ -381,6 +616,10 @@ int vfs_rename(const char *old, const char *newpath) {
     vnode_put(old_dir);
     vnode_put(new_dir);
     return r;
+}
+
+int vfs_rename(const char *old, const char *newpath) {
+    return vfs_rename_flags(old, newpath, 0);
 }
 
 int vfs_rmdir(const char *path) {
@@ -439,9 +678,21 @@ vnode_t *vfs_resolve_no_follow_final(const char *path) {
 
     task_t *cur = proc_current();
     const char *cwd = cur ? cur->fs.cwd : "/";
+    const char *root = cur && cur->fs.root_path[0] ? cur->fs.root_path : "/";
 
     char resolved[MAX_PATH_LEN];
     if (vfs_path_join(cwd, path, resolved, sizeof(resolved)) < 0)
+        return NULL;
+    if (strcmp(root, "/") != 0) {
+        char rooted[MAX_PATH_LEN];
+        if (strcmp(resolved, "/") == 0)
+            snprintf(rooted, sizeof(rooted), "%s", root);
+        else
+            snprintf(rooted, sizeof(rooted), "%s%s", root, resolved);
+        strncpy(resolved, rooted, sizeof(resolved) - 1);
+        resolved[sizeof(resolved) - 1] = '\0';
+    }
+    if (vfs_path_normalize_absolute_with_root(resolved, root) < 0)
         return NULL;
     vfs_path_trim_trailing_slashes(resolved);
 
@@ -454,10 +705,7 @@ vnode_t *vfs_resolve_no_follow_final(const char *path) {
                                    name, sizeof(name)) < 0)
         return NULL;
 
-    mount_t *mnt = vfs_find_mount(parent_path);
-    if (!mnt) return NULL;
-    const char *rel = vfs_strip_mount_prefix(parent_path, mnt);
-    vnode_t *parent = vnode_lookup_path(mnt->root, rel);
+    vnode_t *parent = vfs_resolve_at(parent_path, "/");
     if (!parent || parent->type != VFS_FT_DIR) {
         vnode_put(parent);
         return NULL;
@@ -479,6 +727,35 @@ vnode_t *vfs_resolve_no_follow_final(const char *path) {
     if (r < 0 || !vn)
         return NULL;
     return vn;
+}
+
+int vfs_statx(const char *path, kstat_t *st, unsigned int mask, int sync_hint) {
+    vnode_t *vn = vfs_resolve(path);
+    if (!vn) return g_lookup_errno ? g_lookup_errno : -ENOENT;
+    if (sync_hint == AT_STATX_FORCE_SYNC) {
+        page_cache_writeback_vnode(vn, NULL, NULL);
+    }
+    int r = vfs_vnode_stat(vn, st);
+    vnode_put(vn);
+    (void)mask;
+    return r;
+}
+
+int vfs_fstatx(int dirfd, const char *path, kstat_t *st, int flags, unsigned int mask) {
+    (void)dirfd;
+    int sync_hint = flags & AT_STATX_SYNC_TYPE;
+    if (flags & AT_SYMLINK_NOFOLLOW) {
+        vnode_t *vn = vfs_resolve_no_follow_final(path);
+        if (vn) {
+            if (sync_hint == AT_STATX_FORCE_SYNC)
+                page_cache_writeback_vnode(vn, NULL, NULL);
+            int r = vfs_vnode_stat(vn, st);
+            vnode_put(vn);
+            (void)mask;
+            return r;
+        }
+    }
+    return vfs_statx(path, st, mask, sync_hint);
 }
 
 int vfs_stat(const char *path, kstat_t *st) {
@@ -1169,73 +1446,7 @@ void vfs_init(void) {
     file_install_at(STDERR_FILENO, devfs_create_stdio(STDERR_FILENO));
 
     vfs_mkdir("/tmp", 0755);
-    vfs_mkdir("/etc", 0755);
-    {
-        static const char passwd[] =
-            "root:x:0:0:root:/root:/bin/sh\n"
-            "daemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin\n"
-            "nobody:x:65534:65534:nobody:/nonexistent:/bin/false\n";
-        static const char group[] =
-            "root:x:0:\n"
-            "daemon:x:1:\n"
-            "nobody:x:65534:\n";
-        int fd = vfs_open("/etc/passwd", O_CREAT | O_WRONLY | O_TRUNC, 0644);
-        if (fd >= 0) {
-            vfs_write(fd, passwd, sizeof(passwd) - 1);
-            vfs_close(fd);
-        }
-        fd = vfs_open("/etc/group", O_CREAT | O_WRONLY | O_TRUNC, 0644);
-        if (fd >= 0) {
-            vfs_write(fd, group, sizeof(group) - 1);
-            vfs_close(fd);
-        }
-        static const char hostname[] = "AAAAAAAAAAAAAAAAAAAA";
-        fd = vfs_open("/etc/hostname", O_CREAT | O_WRONLY | O_TRUNC, 0644);
-        if (fd >= 0) {
-            vfs_write(fd, hostname, sizeof(hostname) - 1);
-            vfs_close(fd);
-        }
-        static const char hosts[] =
-            "127.0.0.1\tlocalhost\n"
-            "::1\t\tlocalhost\n";
-        fd = vfs_open("/etc/hosts", O_CREAT | O_WRONLY | O_TRUNC, 0644);
-        if (fd >= 0) {
-            vfs_write(fd, hosts, sizeof(hosts) - 1);
-            vfs_close(fd);
-        }
-        static const char protocols[] =
-            "hopopt 0 HOPOPT\n"
-            "icmp 1 ICMP\n"
-            "igmp 2 IGMP\n"
-            "tcp 6 TCP\n"
-            "udp 17 UDP\n"
-            "ipv6 41 IPv6\n"
-            "ipv6-route 43 IPv6-Route\n"
-            "ipv6-frag 44 IPv6-Frag\n"
-            "esp 50 ESP\n"
-            "ah 51 AH\n"
-            "ipv6-icmp 58 IPv6-ICMP\n"
-            "ipv6-nonxt 59 IPv6-NoNxt\n"
-            "ipv6-opts 60 IPv6-Opts\n";
-        fd = vfs_open("/etc/protocols", O_CREAT | O_WRONLY | O_TRUNC, 0644);
-        if (fd >= 0) {
-            vfs_write(fd, protocols, sizeof(protocols) - 1);
-            vfs_close(fd);
-        }
-        static const char os_release[] =
-            "ID=A20OS\n"
-            "NAME=\"A20OS\"\n"
-            "PRETTY_NAME=\"A20OS\"\n"
-            "VERSION=\"0.2\"\n"
-            "VERSION_ID=\"0.2\"\n"
-            "HOME_URL=\"\"\n"
-            "BUG_REPORT_URL=\"\"\n";
-        fd = vfs_open("/etc/os-release", O_CREAT | O_WRONLY | O_TRUNC, 0644);
-        if (fd >= 0) {
-            vfs_write(fd, os_release, sizeof(os_release) - 1);
-            vfs_close(fd);
-        }
-    }
+    ramfs_populate_overlay();
 
     /* Mount procfs at /proc */
     {

@@ -1,5 +1,6 @@
 #include "fs/ramfs.h"
 #include "fs/file.h"
+#include "fs/rootfs_overlay.h"
 #include "mm/mm.h"
 #include "core/string.h"
 #include "core/stdio.h"
@@ -390,11 +391,14 @@ static int ramfs_vnode_link(vnode_t *dir, const char *name, vnode_t *target) {
 }
 
 static int ramfs_vnode_rename(vnode_t *old_dir, const char *old_name,
-                              vnode_t *new_dir, const char *new_name) {
+                              vnode_t *new_dir, const char *new_name,
+                              unsigned int flags) {
     ramfs_inode_t *old_dinode = (ramfs_inode_t *)old_dir->fs_data;
     ramfs_inode_t *new_dinode = (ramfs_inode_t *)new_dir->fs_data;
     if (old_dinode->type != FT_DIRECTORY || new_dinode->type != FT_DIRECTORY)
         return -ENOTDIR;
+    if (flags & ~(RENAME_NOREPLACE | RENAME_EXCHANGE))
+        return -EINVAL;
 
     ramfs_dir_entry_t *old_entries = (ramfs_dir_entry_t *)old_dinode->data;
     int n_old = old_dinode->size / sizeof(ramfs_dir_entry_t);
@@ -412,11 +416,28 @@ static int ramfs_vnode_rename(vnode_t *old_dir, const char *old_name,
     ramfs_dir_entry_t *new_entries = (ramfs_dir_entry_t *)new_dinode->data;
     int n_new = new_dinode->size / sizeof(ramfs_dir_entry_t);
     int new_idx = -1;
+    int new_inum = 0;
     for (int i = 0; i < n_new; i++) {
         if (new_entries[i].name[0] != '\0' && strcmp(new_entries[i].name, new_name) == 0) {
             new_idx = i;
+            new_inum = new_entries[i].inum;
             break;
         }
+    }
+
+    if (flags & RENAME_NOREPLACE) {
+        if (new_idx >= 0) return -EEXIST;
+    }
+
+    if (flags & RENAME_EXCHANGE) {
+        if (new_idx < 0) return -ENOENT;
+        new_entries[new_idx].inum = inum;
+        old_entries[old_idx].inum = new_inum;
+        ramfs_inode_t *moved = ramfs_find_inode_by_inum(inum);
+        ramfs_inode_t *other = ramfs_find_inode_by_inum(new_inum);
+        if (moved) moved->parent = new_dinode;
+        if (other) other->parent = old_dinode;
+        return 0;
     }
 
     if (new_idx >= 0) {
@@ -730,4 +751,29 @@ static vfile_t *ramfs_open_vnode(vnode_t *vn, int flags) {
     vfile_ref_init(vf, 1);
     vf->ops = &g_ramfs_fops;
     return vf;
+}
+
+/* Populate the root ramfs from the build-time overlay records. */
+void ramfs_populate_overlay(void) {
+    for (size_t i = 0; i < g_rootfs_overlay_count; i++) {
+        const rootfs_overlay_entry_t *e = &g_rootfs_overlay[i];
+        char path[MAX_PATH_LEN];
+
+        strncpy(path, e->path, MAX_PATH_LEN - 1);
+        path[MAX_PATH_LEN - 1] = '\0';
+
+        /* Create every parent directory along the absolute path. */
+        char *p = path;
+        while ((p = strchr(p + 1, '/')) != NULL) {
+            *p = '\0';
+            vfs_mkdir(path, 0755);
+            *p = '/';
+        }
+
+        int fd = vfs_open(e->path, O_CREAT | O_WRONLY | O_TRUNC, e->mode);
+        if (fd >= 0) {
+            vfs_write(fd, e->content, e->size);
+            vfs_close(fd);
+        }
+    }
 }

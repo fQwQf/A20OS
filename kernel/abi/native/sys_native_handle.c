@@ -59,10 +59,15 @@ extern int64_t sys_a20_path_open(const a20_syscall_args_t *args);
 
 int64_t sys_a20_handle_transfer(const a20_syscall_args_t *args)
 {
-    a20_handle_t src_h = (a20_handle_t)A20_ARG(0);
-    a20_handle_t dst_h = (a20_handle_t)A20_ARG(1);
-    uint64_t len = A20_ARG(2);
-    uint32_t flags = (uint32_t)A20_ARG(3);
+    a20_transfer_args_t *uargs = (a20_transfer_args_t *)A20_ARG(0);
+    if (!uargs) return -A20_ERR_FAULT;
+
+    a20_transfer_args_t kargs;
+    if (copy_from_user(&kargs, uargs, sizeof(kargs)) < 0)
+        return -A20_ERR_FAULT;
+
+    if (kargs.flags & ~A20_TRANSFER_PEEK)
+        return -A20_ERR_INVALID_ARGUMENT;
 
     task_t *cur = proc_current();
     struct a20_ht_internal *ht = task_get_a20_ht(cur);
@@ -70,9 +75,11 @@ int64_t sys_a20_handle_transfer(const a20_syscall_args_t *args)
 
     a20_handle_entry_t src, dst;
     int64_t r;
-    r = a20_handle_lookup_internal(ht, src_h, A20_OBJ_INVALID, A20_RIGHT_READ, &src);
+    r = a20_handle_lookup_internal(ht, kargs.source, A20_OBJ_INVALID,
+                                   A20_RIGHT_READ | A20_RIGHT_TRANSFER, &src);
     if (r < 0) return r;
-    r = a20_handle_lookup_internal(ht, dst_h, A20_OBJ_INVALID, A20_RIGHT_WRITE, &dst);
+    r = a20_handle_lookup_internal(ht, kargs.dest, A20_OBJ_INVALID,
+                                   A20_RIGHT_WRITE | A20_RIGHT_TRANSFER, &dst);
     if (r < 0) return r;
 
     /* Bell-LaPadula: read from src (No Read Up) + write to dst (No Write Down) */
@@ -80,17 +87,41 @@ int64_t sys_a20_handle_transfer(const a20_syscall_args_t *args)
     if (plabel < src.security_label) return -A20_ERR_ACCESS;
     if (plabel > dst.security_label) return -A20_ERR_ACCESS;
 
-    if (src.type != A20_OBJ_FILE && src.type != A20_OBJ_PIPE_ENDPOINT)
+    if (src.type != A20_OBJ_FILE && src.type != A20_OBJ_DEVICE)
         return -A20_ERR_INVALID_ARGUMENT;
-    if (dst.type != A20_OBJ_FILE && dst.type != A20_OBJ_PIPE_ENDPOINT)
+    if (dst.type != A20_OBJ_FILE && dst.type != A20_OBJ_DEVICE)
         return -A20_ERR_INVALID_ARGUMENT;
 
     int src_gfd = (int)(uintptr_t)src.object;
     int dst_gfd = (int)(uintptr_t)dst.object;
-    (void)flags;
+
+    if (src_gfd == dst_gfd)
+        return -A20_ERR_INVALID_ARGUMENT;
+
+    long src_orig = -1;
+    if (kargs.flags & A20_TRANSFER_PEEK) {
+        src_orig = vfs_lseek(src_gfd, 0, SEEK_CUR);
+        if (src_orig < 0) return -A20_ERR_INVALID_ARGUMENT;
+    }
+
+    if (kargs.source_offset != A20_OFFSET_CURRENT) {
+        long off = vfs_lseek(src_gfd, (long)kargs.source_offset, SEEK_SET);
+        if (off < 0) return -A20_ERR_INVALID_ARGUMENT;
+    }
+
+    long dst_orig = -1;
+    if (kargs.dest_offset != A20_OFFSET_CURRENT) {
+        dst_orig = vfs_lseek(dst_gfd, 0, SEEK_CUR);
+        if (dst_orig < 0) return -A20_ERR_INVALID_ARGUMENT;
+        if (vfs_lseek(dst_gfd, (long)kargs.dest_offset, SEEK_SET) < 0) {
+            vfs_lseek(dst_gfd, dst_orig, SEEK_SET);
+            return -A20_ERR_INVALID_ARGUMENT;
+        }
+    }
 
     char buf[4096];
     uint64_t total = 0;
+    uint64_t len = kargs.length;
     while (total < len) {
         uint64_t chunk = len - total;
         if (chunk > sizeof(buf)) chunk = sizeof(buf);
@@ -107,6 +138,14 @@ int64_t sys_a20_handle_transfer(const a20_syscall_args_t *args)
         total += (uint64_t)wn;
         if (wn < n) break;
     }
+
+    if ((kargs.flags & A20_TRANSFER_PEEK) && src_orig >= 0)
+        vfs_lseek(src_gfd, src_orig, SEEK_SET);
+
+    kargs.out_transferred = total;
+    if (copy_to_user(&uargs->out_transferred, &kargs.out_transferred,
+                     sizeof(kargs.out_transferred)) < 0)
+        return -A20_ERR_FAULT;
     return (int64_t)total;
 }
 
@@ -131,13 +170,13 @@ int64_t sys_a20_handle_set_meta(const a20_syscall_args_t *args)
 
     int gfd = (int)(uintptr_t)entry.object;
 
-    if (flags & 0x01) {
+    if (flags & A20_SET_META_MODE) {
         vfile_t *vf = vfs_get_file_ref(gfd);
         if (vf && vf->vnode)
             vf->vnode->mode = (vf->vnode->mode & ~07777u) | ((uint32_t)val0 & 07777u);
         if (vf) vfs_put_file_ref(gfd, vf);
     }
-    if (flags & 0x02) {
+    if (flags & A20_SET_META_OWNER) {
         vfile_t *vf = vfs_get_file_ref(gfd);
         if (vf && vf->vnode) {
             vf->vnode->uid = (uint32_t)val0;
@@ -145,11 +184,9 @@ int64_t sys_a20_handle_set_meta(const a20_syscall_args_t *args)
         }
         if (vf) vfs_put_file_ref(gfd, vf);
     }
-    if (flags & 0x04) {
+    if (flags & (A20_SET_META_ATIME | A20_SET_META_MTIME | A20_SET_META_CTIME |
+                 A20_SET_META_TRUNCATE | A20_SET_META_ALLOCATE)) {
         (void)val0; (void)val1;
-    }
-    if (flags & 0x08) {
-        (void)val0;
     }
     return A20_OK;
 }

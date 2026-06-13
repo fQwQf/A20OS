@@ -53,7 +53,8 @@ extern void a20_ht_set_label(struct a20_ht_internal *ht, uint8_t label);
 
 extern int copy_path_from_user(char *dst, const char *uptr, uint32_t len);
 extern void resolve_path(const char *in, char *out);
-extern int64_t sys_a20_path_open(const a20_syscall_args_t *args);
+extern int64_t a20_path_open_impl(const a20_path_open_args_t *kargs,
+                                  a20_handle_t *out_handle);
 
 /* ===== Path/Filesystem (0x0400) continued ===== */
 
@@ -85,7 +86,25 @@ int64_t sys_a20_path_create(const a20_syscall_args_t *args)
         vfs_close(gfd);
     }
 
-    return sys_a20_path_open(args);
+    a20_path_open_args_t open_args;
+    memset(&open_args, 0, sizeof(open_args));
+    open_args.size = sizeof(open_args);
+    open_args.version = 1;
+    open_args.dir = kargs.dir;
+    open_args.path = kargs.path;
+    open_args.path_len = kargs.path_len;
+    open_args.flags = 0x2; /* O_RDWR */
+    open_args.mode = kargs.mode;
+    open_args.rights = A20_RIGHTS_ALL;
+
+    a20_handle_t h;
+    int64_t rc = a20_path_open_impl(&open_args, &h);
+    if (rc < 0) return rc;
+
+    kargs.out_handle = h;
+    if (copy_to_user(uargs, &kargs, sizeof(kargs)) < 0)
+        return -A20_ERR_FAULT;
+    return A20_OK;
 }
 
 int64_t sys_a20_path_unlink(const a20_syscall_args_t *args)
@@ -145,8 +164,30 @@ int64_t sys_a20_path_readdir(const a20_syscall_args_t *args)
     if (len > sizeof(kbuf)) len = sizeof(kbuf);
     int64_t n = vfs_getdents64(gfd, kbuf, len);
     if (n < 0) return -A20_ERR_IO;
-    if (copy_to_user(buf, kbuf, (size_t)n) < 0) return -A20_ERR_FAULT;
-    return n;
+
+    uint64_t out_off = 0;
+    uint64_t in_off = 0;
+    while (in_off < (uint64_t)n) {
+        vfs_dirent64_t *vd = (vfs_dirent64_t *)(kbuf + in_off);
+        if (vd->d_reclen == 0) break;
+
+        a20_dirent_t out;
+        out.type = vd->d_type;
+        size_t name_len = strlen(vd->d_name);
+        if (name_len > sizeof(out.name) - 1)
+            name_len = sizeof(out.name) - 1;
+        out.name_len = (uint32_t)name_len;
+        memcpy(out.name, vd->d_name, name_len);
+        out.name[name_len] = '\0';
+
+        if (out_off + sizeof(out) > len) break;
+        if (copy_to_user((char *)buf + out_off, &out, sizeof(out)) < 0)
+            return -A20_ERR_FAULT;
+        out_off += sizeof(out);
+        in_off += vd->d_reclen;
+    }
+
+    return (int64_t)out_off;
 }
 
 int64_t sys_a20_path_link(const a20_syscall_args_t *args)
@@ -289,24 +330,26 @@ int64_t sys_a20_handle_control(const a20_syscall_args_t *args)
 
 int64_t sys_a20_fs_mount(const a20_syscall_args_t *args)
 {
-    const char *usrc = (const char *)A20_ARG(0);
-    uint32_t src_len = (uint32_t)A20_ARG(1);
-    const char *utarget = (const char *)A20_ARG(2);
-    uint32_t tgt_len = (uint32_t)A20_ARG(3);
-    const char *ufstype = (const char *)A20_ARG(4);
-    uint32_t fstype_len = (uint32_t)A20_ARG(5);
-    uint64_t flags = A20_ARG(6);
+    a20_fs_mount_args_t *uargs = (a20_fs_mount_args_t *)A20_ARG(0);
+    if (!uargs) return -A20_ERR_FAULT;
+
+    a20_fs_mount_args_t kargs;
+    if (copy_from_user(&kargs, uargs, sizeof(kargs)) < 0)
+        return -A20_ERR_FAULT;
 
     char ksrc[MAX_PATH_LEN], ktgt[MAX_PATH_LEN], kfs[64];
-    if (copy_path_from_user(ksrc, usrc, src_len) < 0) return -A20_ERR_FAULT;
-    if (copy_path_from_user(ktgt, utarget, tgt_len) < 0) return -A20_ERR_FAULT;
-    if (copy_path_from_user(kfs, ufstype, fstype_len) < 0) return -A20_ERR_FAULT;
+    if (copy_path_from_user(ksrc, (const char *)kargs.source, kargs.source_len) < 0)
+        return -A20_ERR_FAULT;
+    if (copy_path_from_user(ktgt, (const char *)kargs.target, kargs.target_len) < 0)
+        return -A20_ERR_FAULT;
+    if (copy_path_from_user(kfs, (const char *)kargs.fs_type, kargs.fs_type_len) < 0)
+        return -A20_ERR_FAULT;
 
     char full_tgt[MAX_PATH_LEN];
     resolve_path(ktgt, full_tgt);
 
     int r = vfs_mount(ksrc[0] ? ksrc : NULL, full_tgt,
-                       kfs[0] ? kfs : "ext2", (int)flags, NULL);
+                       kfs[0] ? kfs : "ext2", (int)kargs.flags, NULL);
     if (r < 0) return -A20_ERR_IO;
     return A20_OK;
 }

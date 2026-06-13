@@ -4,14 +4,15 @@
 #include <time.h>
 #include <stdint.h>
 #include "../liba20rt/a20_syscall.h"
+#include "../liba20rt/a20_clock.h"
 
 int clock_gettime(clockid_t clk, struct timespec *ts)
 {
-    uint64_t ns = 0;
-    int64_t r = a20_clock_get((uint32_t)clk, &ns);
+    a20_time_t t;
+    int64_t r = a20_clock_get((uint32_t)clk, &t);
     if (r < 0) return -1;
-    ts->tv_sec  = (time_t)(ns / 1000000000ULL);
-    ts->tv_nsec = (long)(ns % 1000000000ULL);
+    ts->tv_sec  = (time_t)(t.secs);
+    ts->tv_nsec = (long)(t.nsecs);
     return 0;
 }
 

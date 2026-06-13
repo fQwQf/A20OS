@@ -601,8 +601,10 @@ static int cg_rmdir(vnode_t *dir, const char *name)
     return -ENOENT;
 }
 
-static int cg_rename(vnode_t *od, const char *on, vnode_t *nd, const char *nn)
+static int cg_rename(vnode_t *od, const char *on, vnode_t *nd, const char *nn,
+                     unsigned int flags)
 {
+    (void)flags;
     (void)od; (void)on; (void)nd; (void)nn;
     return -EROFS;
 }

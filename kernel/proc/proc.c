@@ -227,7 +227,7 @@ void proc_block_until(task_t *t, uint64_t wake_time) {
 void idle_loop(void) {
     while (1) {
         arch_local_irq_enable();
-        kernel_progress_poll(KERNEL_PROGRESS_IDLE);
+        kernel_progress_run_bottom_halves();
         sched_reap_zombies();
         sched();
         __asm__ volatile("nop");

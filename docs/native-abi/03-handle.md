@@ -383,9 +383,9 @@ L0 (IRQ) < L1 (handle table) < L2 (内核对象) < L3 (调度器) < L4 (mm)
 | 0x0103 | `handle_replace` | `int64_t handle_replace(a20_handle_t h, a20_rights_t rights, a20_handle_t *out)` | 原子替换 handle |
 | 0x0104 | `handle_close_many` | `int64_t handle_close_many(const a20_handle_t *hs, uint32_t count)` | 批量关闭 |
 | 0x0105 | `handle_seek` | `int64_t handle_seek(a20_handle_t h, a20_off_t *offset, uint32_t whence)` | 设置/查询流偏移 |
-| 0x0106 | `handle_transfer` | `int64_t handle_transfer(a20_transfer_args_t *args)` | 零拷贝传输（splice/sendfile/copy_file_range 统一） |
-| 0x0107 | `handle_set_meta` | `int64_t handle_set_meta(a20_set_meta_args_t *args)` | 修改文件元数据（chmod/chown/utimes 统一） |
-| 0x0108 | `handle_xattr_set` | `int64_t handle_xattr_set(a20_xattr_args_t *args)` | 设置扩展属性 |
+| 0x0106 | `handle_transfer` | `int64_t handle_transfer(a20_transfer_args_t *args)` | 内核缓冲拷贝传输（splice/sendfile/copy_file_range 语义统一；当前为 4 KiB 栈缓冲拷贝，非零拷贝） |
+| 0x0107 | `handle_set_meta` | `int64_t handle_set_meta(a20_handle_t h, uint32_t flags, uint64_t val0, uint64_t val1)` | 修改文件元数据（chmod/chown，当前仅支持 mode/owner） |
+| 0x0108 | `handle_xattr_set` | `int64_t handle_xattr_set(a20_handle_t h, const char *name, const void *value, uint64_t size)` | 设置扩展属性 |
 | 0x0109 | `handle_xattr_get` | `int64_t handle_xattr_get(a20_xattr_args_t *args)` | 获取扩展属性 |
 | 0x010A | `handle_xattr_list` | `int64_t handle_xattr_list(a20_xattr_list_args_t *args)` | 列出扩展属性名 |
 | 0x010B | `handle_xattr_remove` | `int64_t handle_xattr_remove(a20_xattr_args_t *args)` | 删除扩展属性 |
@@ -401,7 +401,7 @@ L0 (IRQ) < L1 (handle table) < L2 (内核对象) < L3 (调度器) < L4 (mm)
 | 0x0204 | `task_info` | `int64_t task_info(a20_handle_t task, a20_task_info_t *out)` | 查询 task 信息 |
 | 0x0205 | `thread_create` | `int64_t thread_create(a20_thread_create_args_t *args)` | 创建线程 |
 | 0x0206 | `thread_exit` | `void thread_exit(int32_t code)` | 退出当前线程 |
-| 0x0207 | `thread_sleep` | `int64_t thread_sleep(a20_time_ns_t deadline)` | 线程睡眠 |
+| 0x0207 | `thread_sleep` | `int64_t thread_sleep(a20_time_ns_t duration_ns)` | 线程睡眠指定纳秒数（相对当前时间） |
 | 0x0208 | `thread_yield` | `int64_t thread_yield(void)` | 主动让出 CPU |
 | 0x0209 | `task_set_sched` | `int64_t task_set_sched(a20_sched_args_t *args)` | 设置调度参数（优先级/策略/亲和性） |
 | 0x020A | `task_get_sched` | `int64_t task_get_sched(a20_sched_args_t *args)` | 查询调度参数 |
@@ -433,18 +433,18 @@ L0 (IRQ) < L1 (handle table) < L2 (内核对象) < L3 (调度器) < L4 (mm)
 | 0x0402 | `handle_write` | `int64_t handle_write(a20_io_args_t *args)` | 写入 |
 | 0x0403 | `handle_stat` | `int64_t handle_stat(a20_handle_t h, a20_stat_t *out)` | 查询属性 |
 | 0x0404 | `path_create` | `int64_t path_create(a20_path_create_args_t *args)` | 创建节点 |
-| 0x0405 | `path_unlink` | `int64_t path_unlink(a20_handle_t dir, const char *path, uint32_t flags)` | 删除节点 |
-| 0x0406 | `path_rename` | `int64_t path_rename(...)` | 重命名 |
+| 0x0405 | `path_unlink` | `int64_t path_unlink(const char *path, uint32_t path_len)` | 删除节点（当前按 cwd 解析相对路径） |
+| 0x0406 | `path_rename` | `int64_t path_rename(const char *old_path, uint32_t old_len, const char *new_path, uint32_t new_len)` | 重命名 |
 | 0x0407 | `handle_control` | `int64_t handle_control(a20_control_args_t *args)` | 对象控制 |
-| 0x0408 | `path_readdir` | `int64_t path_readdir(a20_handle_t dir, a20_readdir_args_t *args)` | 目录列举 |
-| 0x0409 | `path_link` | `int64_t path_link(a20_path_link_args_t *args)` | 创建硬链接 |
-| 0x040A | `path_symlink` | `int64_t path_symlink(a20_path_symlink_args_t *args)` | 创建符号链接 |
-| 0x040B | `path_readlink` | `int64_t path_readlink(a20_path_readlink_args_t *args)` | 读取符号链接目标 |
+| 0x0408 | `path_readdir` | `int64_t path_readdir(a20_handle_t dir, a20_dirent_t *entries, uint32_t buf_len)` | 目录列举（`buf_len` 为字节数） |
+| 0x0409 | `path_link` | `int64_t path_link(const char *old_path, uint32_t old_len, const char *new_path, uint32_t new_len)` | 创建硬链接 |
+| 0x040A | `path_symlink` | `int64_t path_symlink(const char *target, uint32_t target_len, const char *linkpath, uint32_t linkpath_len)` | 创建符号链接 |
+| 0x040B | `path_readlink` | `int64_t path_readlink(const char *path, uint32_t path_len, char *buf, uint64_t buf_len)` | 读取符号链接目标 |
 | 0x040C | `path_resolve` | `int64_t path_resolve(a20_path_resolve_args_t *args)` | 解析路径（access/test/readlink 统一） |
-| 0x040D | `fs_stat` | `int64_t fs_stat(a20_handle_t dir, const char *path, a20_fs_stat_t *out)` | 文件系统统计（statfs） |
+| 0x040D | `fs_stat` | `int64_t fs_stat(a20_handle_t h, a20_fs_stat_t *out)` | 文件系统统计（statfs） |
 | 0x040E | `fs_mount` | `int64_t fs_mount(a20_fs_mount_args_t *args)` | 挂载文件系统 |
-| 0x040F | `fs_umount` | `int64_t fs_umount(a20_handle_t mount_point, uint32_t flags)` | 卸载文件系统 |
-| 0x0410 | `fs_sync` | `int64_t fs_sync(a20_handle_t handle, uint32_t flags)` | 同步文件系统到磁盘 |
+| 0x040F | `fs_umount` | `int64_t fs_umount(const char *target, uint32_t target_len, uint32_t flags)` | 卸载文件系统 |
+| 0x0410 | `fs_sync` | `int64_t fs_sync(void)` | 同步文件系统到磁盘 |
 
 ### Event / IPC (0x0500)
 

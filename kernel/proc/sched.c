@@ -446,9 +446,9 @@ void context_switch(task_t *next) {
 void sched(void) {
     uint64_t now = timer_get_ticks();
 
-    /* Scheduler-visible progress is abstracted behind core/progress so sched()
-     * does not own block or network device semantics. */
-    kernel_progress_poll(KERNEL_PROGRESS_SCHED);
+    /* Run event-driven network bottom-halves before picking the next task.
+     * This replaces the old generic block/network polling hot path. */
+    kernel_progress_run_bottom_halves();
 
     /* Timer scanning: only scan when a deadline has actually been reached,
      * avoiding O(n) traversal on every sched() call. */

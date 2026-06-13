@@ -702,6 +702,35 @@ static int ext4_dir_remove(ext4_sb_info_t *sb, ext4_inode_t *di, uint32_t dsz,
     return -ENOENT;
 }
 
+static int ext4_dir_update_entry(ext4_sb_info_t *sb, ext4_inode_t *di, uint32_t *dsz,
+                                  const char *name, uint32_t ino, uint8_t ft) {
+    uint32_t bs = sb->block_size;
+    size_t nl = strlen(name);
+    uint32_t nb = (*dsz + bs - 1) / bs;
+    for (uint32_t b = 0; b < nb; b++) {
+        uint64_t p = ext4_block_map(sb, di, b);
+        if (!p) continue;
+        char *blk = (char *)kmalloc(bs);
+        if (!blk) return -ENOMEM;
+        if (bcache_read_bytes(sb->bc, p * bs, blk, bs) < 0) { kfree(blk); return -EIO; }
+        uint32_t off = 0;
+        while (off < bs) {
+            ext4_dir_entry_t *de = (ext4_dir_entry_t *)(blk + off);
+            if (de->rec_len == 0) break;
+            if (de->inode && de->name_len == nl && memcmp(de->name, name, nl) == 0) {
+                de->inode = ino;
+                de->file_type = ft;
+                bcache_write_bytes(sb->bc, p * bs, blk, bs);
+                kfree(blk);
+                return 0;
+            }
+            off += de->rec_len;
+        }
+        kfree(blk);
+    }
+    return -ENOENT;
+}
+
 /* ================================================================
  * Shared inode removal helper (used by unlink and rename)
  * ================================================================ */
@@ -989,10 +1018,13 @@ static int ext4_vn_rmdir(vnode_t *dir, const char *name) {
 }
 
 static int ext4_vn_rename(vnode_t *old_dir, const char *old_name,
-                            vnode_t *new_dir, const char *new_name) {
+                            vnode_t *new_dir, const char *new_name,
+                            unsigned int flags) {
     ext4_vnode_priv_t *op = (ext4_vnode_priv_t *)old_dir->fs_data;
     ext4_vnode_priv_t *np = (ext4_vnode_priv_t *)new_dir->fs_data;
     if (op->type != VFS_FT_DIR || np->type != VFS_FT_DIR) return -ENOTDIR;
+    if (flags & ~(RENAME_NOREPLACE | RENAME_EXCHANGE))
+        return -EINVAL;
 
     ext4_inode_t odi, ndi;
     if (ext4_read_inode(op->sb, op->inode_num, &odi) < 0) return -EIO;
@@ -1003,9 +1035,43 @@ static int ext4_vn_rename(vnode_t *old_dir, const char *old_name,
     int r = ext4_dir_find(op->sb, &odi, op->file_size, old_name, &src_ino, &src_ft);
     if (r < 0) return r;
 
+    /* Find target */
+    uint32_t tgt_ino = 0; uint8_t tgt_ft = 0;
+    int tgt_exists = (ext4_dir_find(np->sb, &ndi, np->file_size, new_name, &tgt_ino, &tgt_ft) == 0);
+
+    if (flags & RENAME_NOREPLACE) {
+        if (tgt_exists) return -EEXIST;
+    }
+
+    if (flags & RENAME_EXCHANGE) {
+        if (!tgt_exists) return -ENOENT;
+        if (old_dir == new_dir && strcmp(old_name, new_name) == 0) return 0;
+
+        uint32_t odsz = odi.i_size_lo;
+        uint32_t ndsz = ndi.i_size_lo;
+
+        r = ext4_dir_update_entry(op->sb, &odi, &odsz, old_name, tgt_ino, tgt_ft);
+        if (r < 0) return r;
+        r = ext4_dir_update_entry(np->sb, &ndi, &ndsz, new_name, src_ino, src_ft);
+        if (r < 0) {
+            ext4_dir_update_entry(op->sb, &odi, &odsz, old_name, src_ino, src_ft);
+            return r;
+        }
+        if (odsz != odi.i_size_lo) {
+            odi.i_size_lo = odsz;
+            ext4_write_inode(op->sb, op->inode_num, &odi);
+            op->file_size = odsz;
+        }
+        if (ndsz != ndi.i_size_lo) {
+            ndi.i_size_lo = ndsz;
+            ext4_write_inode(np->sb, np->inode_num, &ndi);
+            np->file_size = ndsz;
+        }
+        return 0;
+    }
+
     /* Check if target exists — if so, remove it */
-    uint32_t tgt_ino;
-    if (ext4_dir_find(np->sb, &ndi, np->file_size, new_name, &tgt_ino, NULL) == 0) {
+    if (tgt_exists) {
         r = ext4_inode_remove(np->sb, np->inode_num, &ndi, new_name, tgt_ino);
         if (r < 0) return r;
         /* Re-read ndi after modification */

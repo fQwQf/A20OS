@@ -18,6 +18,31 @@
 #define VFS_FT_DIR       2
 #define VFS_FT_SYMLINK   3
 
+/* Symlink loop limit (Linux MAX_SYMLINKS) */
+#define MAX_SYMLINKS 40
+
+/* openat2 resolve flags (Linux ABI) */
+#define RESOLVE_NO_XDEV            0x01
+#define RESOLVE_NO_MAGICLINKS      0x02
+#define RESOLVE_NO_SYMLINKS        0x04
+#define RESOLVE_BENEATH            0x08
+#define RESOLVE_IN_ROOT            0x10
+#define RESOLVE_NO_TRAILING_SYMLINKS 0x20
+#define RESOLVE_CACHED             0x40
+
+/* renameat2 flags */
+#define RENAME_NOREPLACE           0x01
+#define RENAME_EXCHANGE            0x02
+#define RENAME_WHITEOUT            0x04
+
+/* Linux struct open_how layout */
+struct open_how {
+    uint64_t flags;
+    uint64_t mode;
+    uint64_t resolve;
+    uint64_t __padding[8];
+};
+
 /* Filesystem type IDs */
 #define FS_TYPE_RAMFS    1
 #define FS_TYPE_FAT32    2
@@ -86,7 +111,8 @@ typedef struct vnode_ops {
     int     (*unlink)(struct vnode *dir, const char *name);
     int     (*rmdir)(struct vnode *dir, const char *name);
     int     (*rename)(struct vnode *old_dir, const char *old_name,
-                      struct vnode *new_dir, const char *new_name);
+                      struct vnode *new_dir, const char *new_name,
+                      unsigned int flags);
     int     (*link)(struct vnode *dir, const char *name, struct vnode *target);
     int     (*symlink)(struct vnode *dir, const char *name, const char *target);
     int     (*readlink)(struct vnode *vn, char *buf, size_t sz);
@@ -253,13 +279,17 @@ int      vfs_mkdir(const char *path, int mode);
 int      vfs_unlink(const char *path);
 int      vfs_rmdir(const char *path);
 int      vfs_rename(const char *old, const char *newpath);
+int      vfs_rename_flags(const char *old, const char *newpath, unsigned int flags);
 int      vfs_stat(const char *path, kstat_t *st);
+int      vfs_statx(const char *path, kstat_t *st, unsigned int mask, int sync_hint);
+int      vfs_fstatx(int dirfd, const char *path, kstat_t *st, int flags, unsigned int mask);
 int      vfs_fstat(int fd, kstat_t *st);
 int      vfs_fstatat(int dirfd, const char *path, kstat_t *st, int flags);
 int      vfs_faccessat(int dirfd, const char *path, int mode);
 int      vfs_faccessat2(int dirfd, const char *path, int mode, int flags);
 int      vfs_chmodat(int dirfd, const char *path, int mode, int flags);
 int      vfs_fchmod(int fd, int mode);
+int      vfs_openat2(int dirfd, const char *path, int flags, int mode, uint64_t resolve);
 int      vfs_chownat(int dirfd, const char *path, int uid, int gid, int flags);
 int      vfs_fchown(int fd, int uid, int gid);
 int      vfs_utimensat(int dirfd, const char *path, const uint64_t times[4], int flags);

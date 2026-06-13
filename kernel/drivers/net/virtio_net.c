@@ -5,6 +5,7 @@
 #include "drivers/core/driver_class.h"
 #include "drivers/core/driver_hwapi.h"
 #include "drivers/core/driver_register.h"
+#include "net/lwip_stack.h"
 #include "mm/mm.h"
 #include "core/stdio.h"
 #include "core/string.h"
@@ -40,6 +41,10 @@ typedef struct {
     uint8_t tx_buf[VIRTIO_QUEUE_SIZE][VIRTIO_NET_BUF_SIZE] ALIGNED(64);
     uint8_t tx_busy[VIRTIO_QUEUE_SIZE];
     uint8_t mac[6];
+    /* LOCK_ORDER: net->lock is innermost under g_lwip_lock.
+     * Local order: g_lwip_lock -> net->lock.
+     * Protects TX/RX descriptor rings, tx_busy[], rx_buf[], tx_buf[],
+     * last_used, avail->idx, rx_packets, tx_packets, rx_drops, tx_drops. */
     spinlock_t lock;
     int valid;
     int legacy;
@@ -251,6 +256,7 @@ static int virtio_net_init_instance(virtio_net_inst_t *net) {
         return -1;
 
     uint64_t flags = spin_lock_irqsave(&net->lock);
+    /* LOCK_ORDER: net->lock held while seeding RX descriptors. */
     virtio_net_seed_rx_locked(net);
     spin_unlock_irqrestore(&net->lock, flags);
 
@@ -265,6 +271,8 @@ static int virtio_net_init_instance(virtio_net_inst_t *net) {
            net->mac[3], net->mac[4], net->mac[5]);
     return 0;
 }
+
+static int virtio_net_irq_handler(int irq, void *priv);
 
 int virtio_net_init(void) {
     if (g_nnet >= VIRTIO_NET_MAX_DEVS)
@@ -283,6 +291,11 @@ int virtio_net_init(void) {
 
     if (virtio_net_init_instance(net) != 0)
         return -1;
+
+    if (net->vt.irq >= 0) {
+        if (request_irq((uint32_t)net->vt.irq, virtio_net_irq_handler, 0, net) != 0)
+            printf("[VIRTIO-NET%d] Failed to register IRQ %d\n", idx, net->vt.irq);
+    }
 
     g_nnet++;
     return 0;
@@ -314,6 +327,7 @@ int virtio_net_send(int idx, const void *packet, size_t len, int nonblock) {
     uint64_t deadline = timer_get_ticks() + VIRTIO_NET_TX_TIMEOUT_TICKS;
 
     for (;;) {
+        /* LOCK_ORDER: net->lock held to reserve a TX slot. */
         uint64_t flags = spin_lock_irqsave(&net->lock);
         virtio_net_complete_tx_locked(net);
         slot = virtio_net_tx_free_locked(net);
@@ -338,6 +352,7 @@ int virtio_net_send(int idx, const void *packet, size_t len, int nonblock) {
     memset(buf, 0, VIRTIO_NET_HDR_SIZE);
     memcpy(buf + VIRTIO_NET_HDR_SIZE, packet, len);
 
+    /* LOCK_ORDER: net->lock held to submit a TX descriptor. */
     uint64_t flags = spin_lock_irqsave(&net->lock);
     virtio_net_queue_t *q = &net->txq;
     virtq_desc_t *desc = queue_desc(net, q);
@@ -368,6 +383,7 @@ int virtio_net_send(int idx, const void *packet, size_t len, int nonblock) {
     }
 
     for (;;) {
+        /* LOCK_ORDER: net->lock held to poll TX completion. */
         flags = spin_lock_irqsave(&net->lock);
         virtio_net_complete_tx_locked(net);
         int done = !net->tx_busy[slot];
@@ -395,6 +411,7 @@ int virtio_net_recv(int idx, void *packet, size_t maxlen) {
         return -1;
 
     virtio_net_inst_t *net = &g_net[idx];
+    /* LOCK_ORDER: net->lock held to drain RX used ring. */
     uint64_t flags = spin_lock_irqsave(&net->lock);
     virtio_net_queue_t *q = &net->rxq;
     virtq_used_t *used = queue_used(net, q);
@@ -441,10 +458,35 @@ void virtio_net_poll_all(void) {
     for (int i = 0; i < g_nnet; i++) {
         if (!g_net[i].valid)
             continue;
+        /* LOCK_ORDER: net->lock held to poll instance TX completions. */
         uint64_t flags = spin_lock_irqsave(&g_net[i].lock);
         virtio_net_complete_tx_locked(&g_net[i]);
         spin_unlock_irqrestore(&g_net[i].lock, flags);
     }
+}
+
+/*
+ * VIRTIO_NET_IRQ_MODEL:
+ * - The device raises an IRQ on RX packet arrival and TX completion.
+ * - The handler is a minimal top-half: it runs under g_lwip_lock, acks the
+ *   device, drains the RX used ring into lwIP input (which copies pbuf data
+ *   into the preallocated per-PCB bottom-half ring), schedules the bottom-half,
+ *   and returns.  It never calls kmalloc or acquires g_net_lock.
+ */
+static int virtio_net_irq_handler(int irq, void *priv) {
+    (void)irq;
+    virtio_net_inst_t *net = (virtio_net_inst_t *)priv;
+    if (!net || !net->valid)
+        return 0;
+
+    uint32_t isr = net->vt.read32(&net->vt, VIRTIO_MMIO_INTERRUPT_STATUS);
+    if (!net->legacy)
+        net->vt.write32(&net->vt, VIRTIO_MMIO_INTERRUPT_ACK, isr);
+
+    uint64_t flags = a20_lwip_lock();
+    a20_lwip_process_netif_irq_locked(net->slot);
+    a20_lwip_unlock(flags);
+    return 0;
 }
 
 static uint32_t virtio_net_mmio_read32(virtio_transport_t *t, uint32_t off) {
@@ -492,8 +534,19 @@ static int virtio_net_driver_probe(device_t *dev) {
         return -1;
     }
 
+    resource_t *irq_res = device_get_resource(dev, RES_IRQ, 0);
+    if (irq_res) {
+        if (request_irq((uint32_t)irq_res->start, virtio_net_irq_handler, 0, net) != 0)
+            kinfo("[VIRTIO-NET] Failed to register IRQ %lu for '%s'\n",
+                  (unsigned long)irq_res->start, dev->name);
+    } else {
+        kinfo("[VIRTIO-NET] No IRQ resource for device '%s'\n", dev->name);
+    }
+
     g_nnet++;
-    kinfo("[VIRTIO-NET] Probed device '%s' at 0x%lx\n", dev->name, (unsigned long)mmio_res->start);
+    kinfo("[VIRTIO-NET] Probed device '%s' at 0x%lx (irq=%lu)\n",
+          dev->name, (unsigned long)mmio_res->start,
+          irq_res ? (unsigned long)irq_res->start : 0);
     return 0;
 }
 
@@ -516,6 +569,7 @@ static const uint8_t *virtio_net_class_mac(struct device *dev) {
 
 static void virtio_net_class_poll(struct device *dev) {
     virtio_net_inst_t *net = (virtio_net_inst_t *)dev->drv_priv;
+    /* LOCK_ORDER: net->lock held for class-level TX poll. */
     uint64_t flags = spin_lock_irqsave(&net->lock);
     virtio_net_complete_tx_locked(net);
     spin_unlock_irqrestore(&net->lock, flags);

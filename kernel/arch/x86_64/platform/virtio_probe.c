@@ -367,6 +367,7 @@ static int arch_virtio_probe_type(int type, int index, virtio_transport_t *vt) {
     vt->write32 = pci_vt_write32;
     vt->priv = priv;
     vt->legacy = 0;
+    vt->irq = -1;
     return 0;
 }
 

@@ -1,3 +1,11 @@
+/*
+ * A20OS Loongson-2K GMAC driver.
+ *
+ * LOCK_ORDER: This driver uses no private spinlock. send/recv are register-
+ * polling paths against a single global ls2k_gmac_priv_t instance
+ * (g_ls2k_gmac). Future IRQ-driven or SMP-safe versions must add a private
+ * lock and document it in docs/driver-lock-order.md.
+ */
 #include "drivers/net/ls2k_gmac.h"
 #include "drivers/core/driver_core.h"
 #include "drivers/core/driver_class.h"

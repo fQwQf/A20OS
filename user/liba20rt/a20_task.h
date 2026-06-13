@@ -23,10 +23,10 @@ typedef struct {
     uint64_t     usage_sys_time;
 } a20_task_wait_result_t;
 
-static inline a20_status_t a20_task_wait(a20_handle_t task,
-                                          a20_task_wait_result_t *out)
+static inline a20_status_t a20_task_wait(a20_handle_t task, a20_flags_t flags,
+                                          a20_task_status_t *out)
 {
-    return a20_syscall6(A20_SYS_task_wait, task, (uint64_t)out, 0, 0, 0, 0);
+    return a20_syscall6(A20_SYS_task_wait, task, flags, (uint64_t)out, 0, 0, 0);
 }
 
 static inline a20_status_t a20_task_kill(a20_handle_t task, uint32_t reason)
@@ -54,8 +54,8 @@ static inline void a20_thread_exit(void)
 
 static inline a20_status_t a20_thread_sleep(a20_time_t duration)
 {
-    return a20_syscall6(A20_SYS_thread_sleep, duration.secs, duration.nsecs,
-                        0, 0, 0, 0);
+    uint64_t deadline_ns = duration.secs * 1000000000ULL + duration.nsecs;
+    return a20_syscall6(A20_SYS_thread_sleep, deadline_ns, 0, 0, 0, 0, 0);
 }
 
 static inline a20_status_t a20_thread_yield(void)

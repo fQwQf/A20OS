@@ -22,6 +22,11 @@
 #include "core/stdio.h"
 #include "core/version.h"
 #include "net/socket.h"
+#include "net/net_config.h"
+
+#ifdef CONFIG_DRIVER_LIFECYCLE_TEST
+#include "drivers/core/driver_lifecycle_test.h"
+#endif
 
 extern task_t *proc_current(void);
 extern task_t *proc_find(int pid);
@@ -40,6 +45,8 @@ typedef enum {
     PF_MOUNTS,
     PF_LOADAVG,
     PF_NET,
+    PF_NET_STATUS,
+    PF_NET_CONFIG,
     PF_CONFIG_GZ,
     PF_PID_STAT,
     PF_PID_STATUS,
@@ -91,6 +98,7 @@ typedef enum {
     PF_A20_BCACHE,
     PF_A20_PAGE_CACHE,
     PF_A20_OOM,
+    PF_A20_DRIVER_LIFECYCLE,
     PF_CGROUPS,
     PF_SELF,
     PF_FSTYPE,
@@ -426,6 +434,12 @@ static int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
     case PF_NET:
         net_format_status(buf, bufsz);
         break;
+    case PF_NET_STATUS:
+        net_format_status(buf, bufsz);
+        break;
+    case PF_NET_CONFIG:
+        a20_net_config_format(buf, bufsz);
+        break;
     case PF_CONFIG_GZ: {
         size_t n = sizeof(g_proc_config_gz) < bufsz ? sizeof(g_proc_config_gz) : bufsz;
         memcpy(buf, g_proc_config_gz, n);
@@ -487,6 +501,9 @@ static int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
             os.in_progress);
         break;
     }
+    case PF_A20_DRIVER_LIFECYCLE:
+        buf[0] = '\0';
+        return 0;
     case PF_PID_STAT: {  // 生成进程 stat 信息
         task_t *t = proc_find(pid);
         if (!t) { snprintf(buf, bufsz, "%d (unknown) S 0 0\n", pid); break; }
@@ -771,6 +788,7 @@ static pf_type_t name_to_type(const char *name, int *out_pid) {
     if (strcmp(name, "bcache") == 0) return PF_A20_BCACHE;
     if (strcmp(name, "page_cache") == 0) return PF_A20_PAGE_CACHE;
     if (strcmp(name, "oom") == 0) return PF_A20_OOM;
+    if (strcmp(name, "driver_lifecycle") == 0) return PF_A20_DRIVER_LIFECYCLE;
     if (strcmp(name, "cmdline") == 0) return PF_CMDLINE;
     if (is_pid_str(name)) {
         *out_pid = atoi(name);
@@ -921,6 +939,12 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
     } else if (dp && dp->type == PF_SYS && strcmp(name, "net") == 0) {
         child = new_entry(name, PF_SYS_NET, 0);
         type = PF_SYS_NET;
+    } else if (dp && dp->type == PF_NET && strcmp(name, "status") == 0) {
+        child = new_entry(name, PF_NET_STATUS, 0);
+        type = PF_NET_STATUS;
+    } else if (dp && dp->type == PF_NET && strcmp(name, "config") == 0) {
+        child = new_entry(name, PF_NET_CONFIG, 0);
+        type = PF_NET_CONFIG;
     } else if (dp && dp->type == PF_ROOT && dp->pid == 0 && strcmp(name, "a20") == 0) {
         child = new_entry(name, PF_A20, 0);
         type = PF_A20;
@@ -933,6 +957,9 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
     } else if (dp && dp->type == PF_A20 && strcmp(name, "oom") == 0) {
         child = new_entry(name, PF_A20_OOM, 0);
         type = PF_A20_OOM;
+    } else if (dp && dp->type == PF_A20 && strcmp(name, "driver_lifecycle") == 0) {
+        child = new_entry(name, PF_A20_DRIVER_LIFECYCLE, 0);
+        type = PF_A20_DRIVER_LIFECYCLE;
     } else if (dp && dp->type == PF_ROOT && dp->pid == 0 && strcmp(name, "interrupts") == 0) {
         child = new_entry(name, PF_INTERRUPTS, 0);
         type = PF_INTERRUPTS;
@@ -986,12 +1013,14 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
     vn->type = ((type == PF_ROOT && is_pid_str(name)) || type == PF_SELF ||
                 type == PF_SYS || type == PF_SYS_FS || type == PF_SYS_KERNEL ||
                 type == PF_SYS_NET || type == PF_SYS_VM ||
-                type == PF_SYS_FS_INOTIFY ||
+                type == PF_SYS_FS_INOTIFY || type == PF_NET ||
                 type == PF_A20 || type == PF_PID_FD ||
                 type == PF_PID_NS || type == PF_PID_FDINFO) ?
                VFS_FT_DIR : VFS_FT_REGULAR;
     vn->mode = (vn->type == VFS_FT_DIR) ? (S_IFDIR | 0555) : (S_IFREG | 0444);
-    if (type == PF_PID_OOM_SCORE_ADJ ||
+    if (type == PF_A20_DRIVER_LIFECYCLE)
+        vn->mode = S_IFREG | 0200;
+    else if (type == PF_PID_OOM_SCORE_ADJ ||
         type == PF_SYS_FS_PIPE_MAX_SIZE || type == PF_SYS_FS_LEASE_BREAK_TIME ||
         type == PF_SYS_KERNEL_SCHED_AUTOGROUP ||
         type == PF_SYS_KERNEL_CORE_PATTERN ||
@@ -1139,6 +1168,16 @@ static int procfs_fwrite(vfile_t *vf, const char *buf, size_t count) {
         p->type == PF_SYS_FS_INOTIFY_MAX_USER_INSTANCES) {
         return (int)count;
     }
+#ifdef CONFIG_DRIVER_LIFECYCLE_TEST
+    if (p->type == PF_A20_DRIVER_LIFECYCLE) {
+        /* Permission check: require CAP_SYS_ADMIN (root has all caps). */
+        task_t *cur = proc_current();
+        if (!proc_has_cap(cur, CAP_SYS_ADMIN))
+            return -EPERM;
+        driver_lifecycle_test_run();
+        return (int)count;
+    }
+#endif
     return -EINVAL;
 }
 
@@ -1184,6 +1223,9 @@ static int procfs_freaddir(vfile_t *vf, void *dirp, size_t count) {
     static const char *sys_net_entries[] = {
         ".", "..", NULL
     };
+    static const char *net_entries[] = {
+        ".", "..", "status", "config", NULL
+    };
     static const char *sys_vm_entries[] = {
         ".", "..", "drop_caches", NULL
     };
@@ -1191,7 +1233,7 @@ static int procfs_freaddir(vfile_t *vf, void *dirp, size_t count) {
         ".", "..", "max_queued_events", "max_user_instances", NULL
     };
     static const char *a20_entries[] = {
-        ".", "..", "bcache", "page_cache", "oom", NULL
+        ".", "..", "bcache", "page_cache", "oom", "driver_lifecycle", NULL
     };
     static const char *ns_entries[] = {
         ".", "..", "pid", "uts", "user", "ipc", "mnt", "net", "cgroup", NULL
@@ -1209,6 +1251,8 @@ static int procfs_freaddir(vfile_t *vf, void *dirp, size_t count) {
         entries = sys_kernel_entries;
     else if (p && p->type == PF_SYS_NET)
         entries = sys_net_entries;
+    else if (p && p->type == PF_NET)
+        entries = net_entries;
     else if (p && p->type == PF_SYS_VM)
         entries = sys_vm_entries;
     else if (p && p->type == PF_SYS_FS_INOTIFY)

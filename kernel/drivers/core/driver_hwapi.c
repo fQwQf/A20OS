@@ -25,6 +25,7 @@ int request_irq(uint32_t irq, irq_handler_t handler,
 }
 
 void free_irq(uint32_t irq, void *priv) {
+    (void)priv;
     if (irq >= 256)
         return;
     irq_disable(irq);
