@@ -19,11 +19,11 @@
 长期布局：
 
 ```text
-kernel/abi/linux/    Linux-compatible ABI subset
-kernel/abi/native/   A20OS native ABI
+kernel/abi/linux/    Linux-compatible ABI subset（当前主用户态运行时）
+kernel/abi/native/   A20OS native ABI（内核入口已实现，用户态 SDK 为 liba20rt + liba20c）
 ```
 
-Linux ABI 继续作为主用户态接口。Native ABI 已完成全部 90 个 syscall 的内核侧入口和用户态 musl 移植；Debug 分区当前是受限兼容实现，不等价于完整 ptrace 语义。
+当前激活的用户态运行时是 Linux ABI 之上的 musl 兼容层。Native ABI 在内核侧已完成 90 个 syscall 入口；用户态活跃组件是 `liba20rt`（Native SDK）和 `liba20c`（最小原生 C 库）。`user/musl-port/` 目录在当前仓库中不存在，历史上与 musl 移植相关的参考材料已移至 `user/archive/`，仅作历史参考，不参与当前构建。Debug 分区当前是受限兼容实现，只支持基础寄存器快照和目标内存读写，不等价于完整 ptrace 语义。
 
 ## 核心原则
 
@@ -38,7 +38,7 @@ typedef uint32_t a20_handle_t;
 **为什么采用handle？**
 
 > 我看 Windows NT 搞得不错，内核对象极大丰富，各类资源的调用差异基本消灭，面向对象，安全权能机制也受重视，如果再加上开源，Windows NT 就是我们理想中的操作系统内核。  
-> —— fQwQf
+> 作者：fQwQf
 
 13 种对象类型（详见 [handle.md](03-handle.md)）：
 
@@ -108,7 +108,7 @@ Native ABI syscall 编号按子系统分区，便于扩展和阅读。
 0x0000 - 0x00ff  core / abi / system
 0x0100 - 0x01ff  handle
 0x0200 - 0x02ff  task / thread
-0x0300 - 0x02ff  memory
+0x0300 - 0x03ff  memory
 0x0400 - 0x04ff  path / filesystem
 0x0500 - 0x05ff  ipc / event
 0x0600 - 0x06ff  net
@@ -133,6 +133,7 @@ Native ABI syscall 编号按子系统分区，便于扩展和阅读。
 | [memory.md](04-memory.md) | VMO/VMAR 内存模型、内存操作语义、共享内存与映射 |
 | [ipc.md](05-ipc.md) | Channel IPC 协议、Event Queue 机制、partial delivery 状态机 |
 | [security.md](06-security.md) | Rights 代数、handle transfer 语义、安全标签格、capability 安全模型 |
+| [08-runtime-status.md](08-runtime-status.md) | 当前用户态运行时状态、已知偏差与路线图 |
 
 ## 与 Linux ABI 的关系
 
@@ -162,13 +163,25 @@ Linux userland          Native userland
 
 ## libc / runtime 设计
 
-Native ABI 应配套一个很薄的 native runtime，而不是直接改 musl。
+Native ABI 配套一个很薄的 native runtime，不直接改 musl。
 
-建议阶段：
+当前结构：
 
-1. `liba20rt`：只提供 syscall wrapper、启动代码、handle I/O。
-2. `liba20c`：最小 C 库，支持 malloc、stdio、string、time。
-3. POSIX shim：可选，将部分 POSIX API 映射到 native handle 模型。
+```text
+┌──────────────────────────────────────────┐
+│         Linux musl 用户态（当前主运行时）      │
+├──────────────────────────────────────────┤
+│           liba20c（最小原生 C 库）            │  malloc, stdio, string, time
+├──────────────────────────────────────────┤
+│           liba20rt（Native SDK）             │  syscall wrapper, 启动代码, handle I/O
+├──────────────────────────────────────────┤
+│          kernel（Native ABI syscall 接口）    │
+└──────────────────────────────────────────┘
+```
+
+- `liba20rt`：当前活跃的 Native SDK，提供 syscall wrapper、启动汇编、handle I/O 和 ABI 类型头。
+- `liba20c`：最小 C 库，覆盖 malloc、stdio、string、time、errno 等 ISO C 子集。
+- `user/archive/`：保存历史上的 musl 移植参考代码和旧版 coreutils，不参与当前构建。
 
 不要一开始就承诺完整 POSIX。详见 [startup.md](07-startup.md)。
 
@@ -185,32 +198,31 @@ Native ABI 一旦稳定，需要遵守：
 
 ## 实现状态
 
-全部 90 个 syscall 已完成内核侧入口（`sys_core.c` + `sys_phase2.c`）。其中 Debug 分区已能创建 debug handle、读写寄存器快照和映射目标内存，但仍是受限兼容实现；尚未声明完整 stop/resume/watchpoint 或 ptrace 级语义。
+当前状态以 `abi/linux` 为主用户态接口。`abi/native` 内核侧入口完整，用户态 SDK 由 `liba20rt` 和 `liba20c` 组成。
 
-已完成的工作：
-
-| 组件 | 文件 | 行数 | 状态 |
+| 组件 | 文件 | 状态 | 说明 |
 |------|------|------|------|
-| 核心 syscall | `sys_core.c` | 771 | ✅ 完成 |
-| Phase 2 syscall | `sys_phase2.c` | ~1750 | ✅ 完成，Debug 分区受限 |
-| Handle table | `handle_table.c` | 330 | ✅ 完成 |
-| 启动协议 | `startup.c` | 105 | ✅ 完成 |
-| Channel IPC | `a20_channel.c` | 189 | ✅ 完成 |
-| Event Queue | `a20_event.c` | 269 | ✅ 完成 |
-| 性能优化 | `fastpath.h` + `ring_spsc.h` | 210 | ✅ 完成 |
-| 资源限制 | `resource.h` | 88 | ✅ 完成 |
-| 安全模型 | security rights + Bell-LaPadula | — | ✅ 完成 |
-| 错误降级 | `a20_graceful.c` | 74 | ✅ 完成 |
-| liba20c | 12 源文件 + 9 头文件 | ~985 | ✅ 完成 |
-| musl 移植 | arch/headers + fdtable + pthread + mutex | ~1500 | ✅ 完成 |
-| sysroot | `build_sysroot.sh` + `a20.ld` | ~250 | ✅ 完成 |
-| 集成测试 | 4 套 118 cases host-mode | — | ✅ 全部通过 |
+| Linux ABI | `kernel/abi/linux/` | 活跃 | 当前主用户态运行时接口 |
+| Native 核心 syscall | `kernel/abi/native/sys_core.c` | 已实现 | 17 个 Phase 1 syscall |
+| Native 扩展 syscall | `kernel/abi/native/sys_phase2.c` | 已实现 | 73 个扩展 syscall，Debug 分区受限 |
+| Handle table | `kernel/abi/native/handle_table.c` | 已实现 | handle 状态机 + 查找/安装/移除 |
+| 启动协议 | `kernel/abi/native/startup.c` | 已实现 | 用户态 Native 启动 |
+| Channel IPC | `kernel/ipc/a20_channel.c` | 已实现 | Channel 消息传递 |
+| Event Queue | `kernel/ipc/a20_event.c` | 已实现 | 事件等待与通知 |
+| Native SDK | `user/liba20rt/` | 活跃 | syscall wrapper、启动代码、handle I/O |
+| 最小原生 C 库 | `user/liba20c/` | 活跃，存在技术债 | malloc/stdio/unistd 等仍使用裸参数数组调用 syscall，未统一使用版本化结构体 |
+| 历史参考 | `user/archive/` | 不参与构建 | 旧版 musl 移植、coreutils、build_sysroot.sh 等 |
+| musl 移植目录 | `user/musl-port/` | 不存在 | 该目录未在当前仓库中创建 |
 
-代码总量约 9,800 行，75+ 文件。
+已知偏差：
 
-## 最小可实现原型（已完成）
+- `liba20c` 当前使用裸 `uint64_t args[N]` 数组调用 `a20_vm_alloc`、`a20_path_open`、`a20_handle_read` 等 wrapper，没有按 ABI 约定填充 `size` 和 `version` 字段。这与内核期望的版本化结构体存在语义缺口，需要在后续迭代中统一修复。
+- 当前原生测试只有少量示例（如 `user/tests/test_native_handle.c` 和 `user/liba20c` 内部测试），历史上宣称的 4 套 118 cases host-mode 测试套件目前不存在。
+- `user/archive/build_sysroot.sh` 引用了 `user/musl-port/` 等不存在的路径，已不可直接使用。
 
-以下是最初建议的最小 syscall 集，现已全部实现并远超：
+## 最小可实现原型
+
+以下是最初建议的最小 syscall 集，内核侧已实现并远超：
 
 ```text
 0x0000 abi_info            ✅
@@ -230,7 +242,7 @@ Native ABI 一旦稳定，需要遵守：
 0x0700 clock_get            ✅
 ```
 
-第二阶段也已全部完成：
+第二阶段也已在内核侧实现：
 
 - ✅ `task_spawn`、`thread_create`
 - ✅ `timer_create/set/cancel`
@@ -238,11 +250,11 @@ Native ABI 一旦稳定，需要遵守：
 - ✅ socket（`net_socket/bind/connect/accept/listen/sendmsg/recvmsg/socketpair/shutdown/getname`）
 - ✅ shared memory（VMO/VMAR 模型：`vm_create_object/vm_map/vm_share`）
 
-## 代码结构（已实现）
+## 代码结构
 
 ```text
 kernel/abi/native/
-  DESIGN.md            本文档（顶层概述）
+  DESIGN.md            顶层设计参考
   syscall_table.c      syscall 分发表
   syscall_table.def    syscall 编号宏定义（90 条）
   sys_core.c           Phase 1 syscall 实现（17 个核心 syscall）
@@ -268,14 +280,24 @@ kernel/include/abi/native/
   ring_spsc.h          Lock-free SPSC ring buffer
   resource.h           资源限制常量和检查函数
 
-user/musl-port/        musl 移植层
-  src/internal/a20_fdtable.c    fd↔handle 映射
-  src/thread/a20_pthread.c      pthread 桥接
-  src/thread/a20_mutex.c        mutex 桥接
-  src/process/a20_fork.c        fork 桥接
-  src/signal/a20_signal.c       signal 桥接
-  build_sysroot.sh              sysroot 构建脚本
-  a20.ld                        RISC-V linker script
+user/liba20rt/         当前活跃的 Native SDK
+  a20_types.h          ABI 类型定义（与 kernel/include/abi/native/types.h 对应）
+  a20_syscall.h        syscall wrapper 和编号常量
+  a20_handle.h / a20_fs.h / a20_task.h / ...  高层封装头
+  a20_simple_io.c      简化 I/O 实现
+  crt0_*.S             多架构启动汇编
+
+user/liba20c/          最小原生 C 库
+  malloc.c / stdio.c / unistd.c / string.c / ...
+  include/             ISO C 头文件子集
+  fdtable.c            fd↔handle 映射
+
+user/archive/          历史参考代码，不参与构建
+  a20coreutils/        旧版原生 coreutils 示例
+  src/                 旧版 musl 桥接实现
+  build_sysroot.sh     旧版 sysroot 脚本（引用路径已过期）
+  arch/a20/            旧版 musl arch 适配头
+  tests/               旧版测试程序
 ```
 
 ## 明确不做的事
@@ -353,7 +375,7 @@ Linux 的 10 个 `sched_*`/`*priority` syscall 被压缩为 2 个。flags 位图
 
 **4. 事件驱动替代信号**
 
-Linux 的 9 个信号 syscall 在 Native ABI 中没有对应——这是**有意的范式差异**。信号模型存在根本性的设计缺陷（异步中断、可重入约束、与多线程冲突）。A20 用事件队列模型替代：进程间通知通过 channel 消息，定时器通过 timer → event_queue，异常通过 task_wait。兼容层负责在事件模型之上模拟 POSIX 信号语义。
+Linux 的 9 个信号 syscall 在 Native ABI 中没有对应。这是**有意的范式差异**。信号模型存在根本性的设计缺陷（异步中断、可重入约束、与多线程冲突）。A20 用事件队列模型替代：进程间通知通过 channel 消息，定时器通过 timer → event_queue，异常通过 task_wait。兼容层负责在事件模型之上模拟 POSIX 信号语义。
 
 **5. 安全上下文统一（security_get/set_context）**
 
@@ -375,17 +397,84 @@ Linux 的 16 个 uid/gid/capability syscall 被压缩为 2 个。`a20_security_c
 | `bpf` | 内核扩展，非基本功能 | 不提供 Native 等价（未来可通过 handle_control 扩展） |
 | `personality` | ABI 兼容层职责 | 不提供 |
 
+## 实施路线图
+
+### Phase 0：liba20rt 最小运行时（已完成）
+
+目标：让极简 Native 程序能打印并退出。
+
+工作项：
+
+- [x] syscall 发射宏（`a20_syscall6`）
+- [x] 全部 90 个 syscall 编号定义
+- [x] 多架构 crt0 启动汇编
+- [x] 简单测试：write stdout + exit
+
+### Phase 1：liba20c 最小 C 库（活跃，持续维护）
+
+目标：能用标准 C 子集写 Native 程序。
+
+工作项：
+
+- [x] malloc/free/realloc（基于 vm_alloc 的 bump allocator + 空闲链表）
+- [x] fd↔handle 映射表
+- [x] FILE* 实现（fopen/fread/fwrite/fclose/printf）
+- [x] POSIX open/read/write/close（基于 fd 表）
+- [x] string/stdlib（直接复用或独立实现）
+- [x] errno 映射
+- [ ] 统一使用版本化 ABI 结构体（已知技术债，待修复）
+- [x] 测试：hello world + 文件读写 + malloc
+
+### Phase 2：完整 musl 移植（历史参考，不在当前构建中）
+
+目标：让 busybox 或 dropbear 等真实程序运行。
+
+历史尝试的代码保存在 `user/archive/`，包括 `arch/a20/` 适配头、`src/internal/a20_syscallops.c`、pthread 桥接、信号桩、`build_sysroot.sh` 等。这些代码不参与当前构建，也不保证路径正确。若未来重新启动完整 POSIX 兼容层，应基于该目录作为参考，而不是直接复用。
+
+### Phase 3：POSIX 完整兼容（按需）
+
+目标：能运行 Python/Ruby 等需要完整 POSIX 的程序。
+
+工作项：
+
+- [ ] fork 模拟（COW + state transfer，需要内核 A20_SPAWN_FORK_SELF）
+- [ ] 信号完整模拟（异步投递通过 event + channel）
+- [ ] select/poll → event_wait 映射
+- [ ] timerfd → A20 timer + event_queue
+- [ ] inotify → event_watch_fs
+- [ ] dlopen 动态加载（需要 A20 的动态链接器设计）
+
+### 关键依赖关系
+
+```text
+Phase 0 ──→ Phase 1 ──→ Phase 2（历史参考）──→ Phase 3（按需）
+  │            │            │                      │
+  │            │            │                      └── 内核: A20_SPAWN_FORK_SELF
+  │            │            │                      └── 内核: 异步信号投递
+  │            │            └── 参考实现已归档        └── 待实现
+  │            ✅ 活跃维护    └── 内核: 全部 90 个 syscall ✅
+  ✅ 已完成    └── 内核: ~15 个基础 syscall ✅
+  └── 内核: 启动协议 + abi_info + handle_close + vm_alloc ✅
+          + handle_write + path_open + task_exit ✅
+```
+
+每个 Phase 可以独立验证，不依赖后续 Phase 的内核功能。
+
 ## 总结
 
 A20 native ABI 是一套基于 handle/capability 的现代系统接口。它的价值不是替代 Linux 兼容层，而是给 A20OS 一个清晰、自洽、长期可演进的原生用户态契约。
 
 当前实现状态：
 
-1. ✅ `abi/linux` 作为主 ABI 保持不变。
-2. ✅ Native ABI 全部 90 个 syscall 已文档化并实现。
+1. ✅ `abi/linux` 作为主 ABI 保持不变，是当前活跃的用户态运行时接口。
+2. ✅ Native ABI 内核侧 90 个 syscall 入口已实现并文档化。
 3. ✅ 内核侧完整实现（sys_core.c + sys_phase2.c + handle_table.c + startup.c + IPC）。
-4. ✅ 用户态完整实现（liba20rt + liba20c + musl 移植 + sysroot）。
-5. ✅ 集成测试通过（4 套 118 cases host-mode）。
-6. ✅ 编译零回归（ABI=linux 编译通过）。
+4. ✅ 用户态活跃 SDK 为 `liba20rt`，最小 C 库为 `liba20c`。
+5. ❌ `user/musl-port/` 目录不存在；历史上的 musl 移植材料已归档到 `user/archive/`，不参与构建。
+6. ⚠️ `liba20c` 仍使用裸参数数组调用 syscall，需要迁移到版本化 ABI 结构体。
+7. ⚠️ 原生测试覆盖有限，当前仅有少量示例测试。
+8. ⚠️ Debug handle 是有意受限的实现，不等价于完整 ptrace。
+
+详细运行时状态与后续路线图见 [08-runtime-status.md](08-runtime-status.md)。
 
 理论分析和形式化证明见 `docs/research/` 目录下的研究笔记体系（`00-index.md` 为入口）。

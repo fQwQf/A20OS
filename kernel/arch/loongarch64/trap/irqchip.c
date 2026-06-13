@@ -4,12 +4,15 @@
 #include "proc/proc.h"
 #include "core/timer.h"
 #include "drivers/char/uart.h"
+#include "drivers/core/driver_hwapi.h"
+#include "core/progress.h"
 
 extern void trap_entry_la64(void);
 
 static void handle_timer_irq(int from_user) {
     __asm__ __volatile__("csrwr %0, 0x44" :: "r"(1UL) : "memory");
     timer_irq_tick();
+    kernel_progress_timer_tick();
     timer_set_interval(proc_next_timer_interval(timer_get_ticks()));
     if (!from_user) return;
 
@@ -39,7 +42,7 @@ void arch_handle_irq(uint64_t irq, int from_user) {
     }
 
     if (irq == IRQ_S_EXT)
-        uart_handle_irq();
+        driver_irq_dispatch((uint32_t)irq);
 }
 
 #endif

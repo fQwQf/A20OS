@@ -10,6 +10,7 @@
 void a20_lwip_init(void);
 void a20_lwip_poll(void);
 void a20_lwip_poll_locked(void);
+void a20_lwip_process_netif_irq_locked(int net_idx);
 uint64_t a20_lwip_lock(void);
 void a20_lwip_unlock(uint64_t flags);
 int  a20_lwip_format_status(char *buf, size_t bufsz);

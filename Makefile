@@ -160,6 +160,11 @@ ifeq ($(BRINGUP),1)
 CFLAGS += -DBRINGUP
 endif
 
+# Synthetic driver lifecycle test (disabled by default).
+ifeq ($(CONFIG_DRIVER_LIFECYCLE_TEST),y)
+CFLAGS += -DCONFIG_DRIVER_LIFECYCLE_TEST
+endif
+
 LDFLAGS = -nostdlib -nostartfiles -Wl,--build-id=none -T $(KERNEL_DIR)/arch/$(ARCH)/boot/ldscript.ld $(ARCH_LDFLAGS)
 
 # Source files
@@ -175,7 +180,7 @@ KERNEL_SRC = $(wildcard $(KERNEL_DIR)/*.c) \
              $(wildcard $(KERNEL_DIR)/core/*.c) \
              $(wildcard $(KERNEL_DIR)/mm/*.c) \
              $(wildcard $(KERNEL_DIR)/proc/*.c) \
-             $(wildcard $(KERNEL_DIR)/fs/*.c) \
+             $(filter-out $(KERNEL_DIR)/fs/rootfs_overlay.c,$(wildcard $(KERNEL_DIR)/fs/*.c)) \
              $(wildcard $(KERNEL_DIR)/fs/vfs/*.c) \
              $(wildcard $(KERNEL_DIR)/ipc/*.c) \
              $(wildcard $(KERNEL_DIR)/net/*.c) \
@@ -191,6 +196,13 @@ KERNEL_SRC = $(wildcard $(KERNEL_DIR)/*.c) \
              $(wildcard $(KERNEL_DIR)/shell/*.c) \
              $(shell find $(KERNEL_DIR)/arch/$(ARCH) -type f -name '*.c' | sort) \
              $(LWIP_SRC)
+
+# Build-time rootfs overlay (generated from user/rootfs_overlay/)
+ROOTFS_OVERLAY_DIR   = user/rootfs_overlay
+ROOTFS_OVERLAY_SRC   = kernel/fs/rootfs_overlay.c
+ROOTFS_OVERLAY_HDR   = kernel/include/fs/rootfs_overlay.h
+ROOTFS_OVERLAY_FILES := $(shell find $(ROOTFS_OVERLAY_DIR) -type f 2>/dev/null)
+KERNEL_SRC += $(ROOTFS_OVERLAY_SRC)
 
 include $(KERNEL_DIR)/external/lwip/sources.mk
 
@@ -214,19 +226,23 @@ KERNEL_BIN = $(BUILD_DIR)/kernel.bin
 		check-kernel-build check-user-build check-dev-build check-contest-build check-build-matrix check-abi-smoke-gate check-doc-drift check-doc-test-gates check-final-definition check-concurrency-foundation check-mm-lock-model check-abi-boundary check-driver-core-model check-external-dependency-boundary \
 		check-riscv64-bringup check-loongarch64-bringup check-aarch64-bringup check-x86_64-bringup \
 		check-riscv64-user check-loongarch64-user check-aarch64-user check-x86_64-user \
-		smoke-riscv64 smoke-loongarch64 smoke-aarch64 smoke-x86_64 smoke-abi-linux smoke-proc-a20 smoke-proc-stress smoke-mm-stress smoke-vfs-stress smoke-sched-stress smoke-futex-stress \
-        FORCE \
-        user_apps fs_img kernel-only dev-build contest-rv contest-la \
-        eval-dev-build-rv eval-dev-build-la \
-        extra-img extra-user-apps run-riscv64-extra run-loongarch64-extra run-arm64-extra \
-        native-test-rv native-test-la native-test native-minimal-rv native-minimal-la native-minimal \
-        eval eval-rv eval-la
+		smoke-riscv64 smoke-loongarch64 smoke-aarch64 smoke-x86_64 smoke-abi-linux smoke-network-suite smoke-proc-a20 smoke-proc-stress smoke-mm-stress smoke-vfs-stress smoke-vfs-edge smoke-sched-stress smoke-futex-stress smoke-socket-stress smoke-driver-lifecycle smoke-native-handle smoke-native-libc smoke-io-event \\
+		FORCE \
+		user_apps fs_img kernel-only dev-build contest-rv contest-la \
+		eval-dev-build-rv eval-dev-build-la \
+		extra-img extra-user-apps run-riscv64-extra run-loongarch64-extra run-arm64-extra \
+		native-test-rv native-test-la native-test native-minimal-rv native-minimal-la native-minimal native-handle-test-rv native-handle-test-la native-handle-test native-libc-rv native-libc-la native-libc \
+		eval eval-rv eval-la
 
 FORCE:
 
 $(BUILD_TIME_HDR):
 	@mkdir -p $(dir $@)
 	@printf '#ifndef A20_BUILD_UNIX_TIME\n#define A20_BUILD_UNIX_TIME %sULL\n#endif\n' "$$(date -u +%s)" > $@
+
+$(ROOTFS_OVERLAY_SRC) $(ROOTFS_OVERLAY_HDR) &: scripts/gen_rootfs_overlay.py $(ROOTFS_OVERLAY_FILES)
+	@mkdir -p $(dir $@) $(dir $(ROOTFS_OVERLAY_HDR))
+	python3 $< --out-c $(ROOTFS_OVERLAY_SRC) --out-h $(ROOTFS_OVERLAY_HDR) --root $(ROOTFS_OVERLAY_DIR)
 
 # ----------------------------------------------------------------
 # Competition build: produces kernel-rv, kernel-la, disk.img,
@@ -336,12 +352,13 @@ check-mm-lock-model:
 check-io-progress-model:
 	@rg -q "KERNEL_PROGRESS_SERVICE_CONTRACT" kernel/include/core/progress.h
 	@rg -q "IO_PROGRESS_SERVICE" kernel/core/progress.c
-	@rg -q "kernel_progress_poll\(KERNEL_PROGRESS_SCHED\)" kernel/proc/sched.c
-	@rg -q "kernel_progress_poll\(KERNEL_PROGRESS_IDLE\)" kernel/proc/proc.c
+	@rg -q "kernel_progress_run_bottom_halves\(\)" kernel/proc/sched.c kernel/proc/proc.c
+	@rg -q "kernel_progress_timer_tick\(\)" kernel/arch/riscv64/trap/irqchip.c kernel/arch/loongarch64/trap/irqchip.c kernel/arch/aarch64/trap/irqchip.c kernel/arch/x86_64/trap/irqchip.c
 	@rg -q "VIRTIO_BLK_COMPLETION_MODEL" kernel/drivers/block/virtio_blk.c
 	@rg -q "LWIP_NO_THREAD_PROGRESS_CONTRACT" kernel/net/lwip_stack.c
 	@rg -q "g_lwip_lock -> virtio-net nonblocking" kernel/include/core/lock.h
-	@! rg -q "virtio_blk_poll_all|a20_lwip_poll" kernel/proc/sched.c kernel/proc/proc.c
+	@! rg -q "virtio_blk_poll_all" kernel/proc/sched.c kernel/proc/proc.c
+	@! rg -q "a20_lwip_poll" kernel/proc/sched.c kernel/proc/proc.c
 	@echo "check-io-progress-model: PASS"
 
 check-vfs-abstraction:
@@ -380,6 +397,7 @@ check-abi-boundary:
 	@rg -q "NATIVE_HANDLE_CAPABILITY_CONSISTENCY_MATRIX" kernel/abi/native/handle_table.h
 	@rg -q "NATIVE_HANDLE_CAPABILITY_TEST_CONTRACT" kernel/abi/native/handle_table.c
 	@rg -q "Debug 分区受限" docs/native-abi/00-overview.md
+	@! rg -q "uint64_t args\[[0-9]+\]" user/liba20c/*.c
 	@! rg -q "无 stub 残留|all Phase 2\+ syscalls|Debug \(0x0900\) — stubs" docs/native-abi/00-overview.md kernel/abi/native/sys_core.c kernel/abi/native/sys_phase2.c
 	@echo "check-abi-boundary: PASS"
 
@@ -403,6 +421,8 @@ check-driver-core-model:
 	@rg -q "virtio_mmio_enumerate" kernel/drivers/bus/virtio_mmio_bus.c
 	@rg -q "kernel/drivers/" docs/driver-interface.md
 	@rg -q "kernel/platform/" docs/driver-interface.md
+	@rg -q "DRIVER_LIFECYCLE_TEST" kernel/drivers/core/driver_lifecycle_test.c kernel/drivers/core/driver_lifecycle_test.h kernel/main.c
+	@rg -q "driver_lifecycle_test_run" kernel/main.c kernel/fs/procfs.c kernel/drivers/core/driver_lifecycle_test.c
 	@! rg -q "kernel/driver/|kernel/drv/|kernel/board/|#include \"driver/" docs/driver-interface.md
 	@echo "check-driver-core-model: PASS"
 
@@ -524,14 +544,42 @@ smoke-abi-linux:
 		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
 		-kernel .kernel-build/riscv64-linux-dev/kernel.elf \
 		> "$$log" 2>&1 || status=$$?; \
-	if grep -q 'SYSCALL_SMOKE: PASS' "$$log"; then \
-		echo "smoke-abi-linux: PASS; log saved to $$log"; \
+		if grep -q 'SYSCALL_SMOKE: PASS' "$$log"; then \
+			echo "smoke-abi-linux: PASS; log saved to $$log"; \
+		elif [ "$$status" -eq 124 ]; then \
+			echo "smoke-abi-linux: timeout without PASS; tail of $$log:"; \
+			tail -n 80 "$$log"; \
+			exit 1; \
+		else \
+			echo "smoke-abi-linux: failed with status $$status; tail of $$log:"; \
+			tail -n 80 "$$log"; \
+			exit "$$status"; \
+		fi
+
+smoke-network-suite:
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/network-suite-riscv64.log"; \
+	status=0; \
+	{ sleep $(SMOKE_INPUT_DELAY); printf 'network_suite\npoweroff\n'; } | \
+	timeout $(SMOKE_TIMEOUT) qemu-system-riscv64 \
+		-machine virt -m 1G -nographic -smp 1 -bios default \
+		-global virtio-mmio.force-legacy=false \
+		-drive file=.kernel-build/riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
+		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		-kernel .kernel-build/riscv64-linux-dev/kernel.elf \
+		-append 'a20.ip=10.0.2.15 a20.netmask=255.255.255.0 a20.gateway=10.0.2.2 a20.dns=10.0.2.3 a20.hostname=a20os' \
+		> "$$log" 2>&1 || status=$$?; \
+	if grep -q 'NETWORK_SUITE: PASS' "$$log"; then \
+		echo "smoke-network-suite: PASS; log saved to $$log"; \
 	elif [ "$$status" -eq 124 ]; then \
-		echo "smoke-abi-linux: timeout without PASS; tail of $$log:"; \
+		echo "smoke-network-suite: timeout without PASS; tail of $$log:"; \
 		tail -n 80 "$$log"; \
 		exit 1; \
 	else \
-		echo "smoke-abi-linux: failed with status $$status; tail of $$log:"; \
+		echo "smoke-network-suite: failed with status $$status; tail of $$log:"; \
 		tail -n 80 "$$log"; \
 		exit "$$status"; \
 	fi
@@ -618,18 +666,70 @@ smoke-vfs-stress:
 		-drive file=.kernel-build/riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
 		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
 		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+			-kernel .kernel-build/riscv64-linux-dev/kernel.elf \
+			> "$$log" 2>&1 || status=$$?; \
+		if grep -q 'VFS_STRESS: PASS' "$$log"; then \
+			echo "smoke-vfs-stress: PASS; log saved to $$log"; \
+		else \
+			echo "smoke-vfs-stress: failed with status $$status; tail of $$log:"; \
+			tail -n 80 "$$log"; \
+			exit 1; \
+		fi
+
+smoke-vfs-edge:
+		$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
+		@mkdir -p $(SMOKE_LOG_DIR)
+		@set -e; \
+		log="$(SMOKE_LOG_DIR)/vfs-edge-riscv64.log"; \
+		status=0; \
+		{ sleep $(SMOKE_INPUT_DELAY); printf 'vfs_edge\npoweroff\n'; } | \
+		timeout $(SMOKE_TIMEOUT) qemu-system-riscv64 \
+			-machine virt -m 1G -nographic -smp 1 -bios default \
+			-global virtio-mmio.force-legacy=false \
+			-drive file=.kernel-build/riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
+			-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
 		-kernel .kernel-build/riscv64-linux-dev/kernel.elf \
+		-append 'a20.ip=10.0.2.15 a20.netmask=255.255.255.0 a20.gateway=10.0.2.2 a20.dns=10.0.2.3 a20.hostname=a20os' \
 		> "$$log" 2>&1 || status=$$?; \
-	if grep -q 'VFS_STRESS: PASS' "$$log"; then \
-		echo "smoke-vfs-stress: PASS; log saved to $$log"; \
-	else \
-		echo "smoke-vfs-stress: failed with status $$status; tail of $$log:"; \
+		if grep -q 'VFS_EDGE: PASS' "$$log"; then \
+			echo "smoke-vfs-edge: PASS; log saved to $$log"; \
+		else \
+			echo "smoke-vfs-edge: failed with status $$status; tail of $$log:"; \
+			tail -n 80 "$$log"; \
+			exit 1; \
+		fi
+
+smoke-io-event:
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/io-event-riscv64.log"; \
+	status=0; \
+	{ sleep $(SMOKE_INPUT_DELAY); printf 'io_event_test\npoweroff\n'; } | \
+	timeout $(SMOKE_TIMEOUT) qemu-system-riscv64 \
+		-machine virt -m 1G -nographic -smp 1 -bios default \
+		-global virtio-mmio.force-legacy=false \
+		-drive file=.kernel-build/riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
+		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		-kernel .kernel-build/riscv64-linux-dev/kernel.elf \
+		-append 'a20.ip=10.0.2.15 a20.netmask=255.255.255.0 a20.gateway=10.0.2.2 a20.dns=10.0.2.3 a20.hostname=a20os' \
+		> "$$log" 2>&1 || status=$$?; \
+	if grep -q 'IO_EVENT_TEST: PASS' "$$log"; then \
+		echo "smoke-io-event: PASS; log saved to $$log"; \
+	elif [ "$$status" -eq 124 ]; then \
+		echo "smoke-io-event: timeout without PASS; tail of $$log:"; \
 		tail -n 80 "$$log"; \
 		exit 1; \
+	else \
+		echo "smoke-io-event: failed with status $$status; tail of $$log:"; \
+		tail -n 80 "$$log"; \
+		exit "$$status"; \
 	fi
 
 smoke-sched-stress:
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
+		$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/sched-stress-riscv64.log"; \
@@ -674,6 +774,83 @@ smoke-futex-stress:
 		exit 1; \
 	fi
 
+smoke-socket-stress:
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/socket-stress-riscv64.log"; \
+	status=0; \
+	{ sleep $(SMOKE_INPUT_DELAY); printf 'socket_stress\npoweroff\n'; } | \
+	timeout $(SMOKE_TIMEOUT) qemu-system-riscv64 \
+		-machine virt -m 1G -nographic -smp 1 -bios default \
+		-global virtio-mmio.force-legacy=false \
+		-drive file=.kernel-build/riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
+		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		-kernel .kernel-build/riscv64-linux-dev/kernel.elf \
+		> "$$log" 2>&1 || status=$$?; \
+	if grep -q 'SOCKET_STRESS: PASS' "$$log" && ! grep -q '\[LOCK\]' "$$log"; then \
+		echo "smoke-socket-stress: PASS; log saved to $$log"; \
+	elif grep -q '\[LOCK\]' "$$log"; then \
+		echo "smoke-socket-stress: FAIL [LOCK] warning detected; log saved to $$log"; \
+		grep '\[LOCK\]' "$$log" | head -n 5; \
+		exit 1; \
+	elif [ "$$status" -eq 124 ]; then \
+		echo "smoke-socket-stress: timeout without PASS; tail of $$log:"; \
+		tail -n 80 "$$log"; \
+		exit 1; \
+	else \
+		echo "smoke-socket-stress: failed with status $$status; tail of $$log:"; \
+		tail -n 80 "$$log"; \
+		exit "$$status"; \
+	fi
+
+smoke-driver-lifecycle:
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=1 CONFIG_DRIVER_LIFECYCLE_TEST=y kernel-only
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/driver-lifecycle-riscv64.log"; \
+	status=0; \
+	timeout $(SMOKE_TIMEOUT) qemu-system-riscv64 \
+		-machine virt -m 1G -nographic -smp 1 -bios default \
+		-global virtio-mmio.force-legacy=false \
+		-kernel .kernel-build/riscv64-linux-bringup/kernel.elf \
+		> "$$log" 2>&1 || status=$$?; \
+	if grep -q 'DRIVER_LIFECYCLE: PASS' "$$log"; then \
+		echo "smoke-driver-lifecycle: PASS; log saved to $$log"; \
+	elif [ "$$status" -eq 124 ]; then \
+		echo "smoke-driver-lifecycle: timeout without PASS; tail of $$log:"; \
+		tail -n 80 "$$log"; \
+		exit 1; \
+	else \
+		echo "smoke-driver-lifecycle: failed with status $$status; tail of $$log:"; \
+		tail -n 80 "$$log"; \
+		exit 1; \
+	fi
+
+smoke-native-handle:
+	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/native-handle-riscv64.log"; \
+	status=0; \
+	{ sleep $(SMOKE_INPUT_DELAY); printf '/bin/native-handle-rv\npoweroff\n'; } | \
+	timeout $(SMOKE_TIMEOUT) qemu-system-riscv64 \
+		-machine virt -m 1G -nographic -smp 1 -bios default \
+		-global virtio-mmio.force-legacy=false \
+		-drive file=.kernel-build/riscv64-both-dev/fat32.img,if=none,format=raw,id=x0 \
+		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		-kernel .kernel-build/riscv64-both-dev/kernel.elf \
+		> "$$log" 2>&1 || status=$$?; \
+	if grep -q 'part ok' "$$log" && grep -q 'System is going down for power-off NOW' "$$log"; then \
+		echo "smoke-native-handle: PASS; log saved to $$log"; \
+	else \
+		echo "smoke-native-handle: failed with status $$status; tail of $$log:"; \
+		tail -n 80 "$$log"; \
+		exit 1; \
+	fi
+
 contest-rv:
 	@echo "--- Building RISC-V 64 (contest) ---"
 	$(MAKE) ARCH=riscv64 _contest_build KERNEL_OUT=kernel-rv DISK_OUT=disk.img
@@ -689,9 +866,11 @@ _reset_obj:
 
 _contest_build: $(KERNEL_ELF) $(USER_BUILD_STAMP)
 ifeq ($(ARCH), riscv64)
-	$(MAKE) native-test-rv 2>/dev/null || true
+	$(MAKE) native-test-rv
+	$(MAKE) native-handle-test-rv
 else ifeq ($(ARCH), loongarch64)
-	$(MAKE) native-test-la 2>/dev/null || true
+	$(MAKE) native-test-la
+	$(MAKE) native-handle-test-la
 endif
 	$(MAKE) ARCH=$(ARCH) ABI=$(ABI) _contest_disk
 	cp $(KERNEL_ELF) $(KERNEL_OUT)
@@ -762,9 +941,13 @@ $(FAT32_IMG): $(USER_BUILD_STAMP)
 	@echo "Building FAT32 image..."
 	@mkdir -p $(BUILD_DIR)
 ifeq ($(ARCH), riscv64)
-	$(MAKE) native-test-rv 2>/dev/null || true
+	$(MAKE) native-test-rv
+	$(MAKE) native-handle-test-rv
+	$(MAKE) native-libc-rv
 else ifeq ($(ARCH), loongarch64)
-	$(MAKE) native-test-la 2>/dev/null || true
+	$(MAKE) native-test-la
+	$(MAKE) native-handle-test-la
+	$(MAKE) native-libc-la
 endif
 	dd if=/dev/zero of=$(FAT32_IMG) bs=1M count=$(FAT32_IMAGE_MB)
 	$(MKFS_FAT) -F 32 $(FAT32_IMG)
@@ -1002,6 +1185,20 @@ NATIVE_CRT0_RV   := user/liba20rt/crt0_rv64.S
 NATIVE_CRT0_LA   := user/liba20rt/crt0_la64.S
 NATIVE_SDK_SRC   := user/liba20rt/a20_malloc.c
 
+NATIVE_LIBC_SRC  := \
+    user/liba20c/malloc.c \
+    user/liba20c/bare_alloc.c \
+    user/liba20c/unistd.c \
+    user/liba20c/stdio.c \
+    user/liba20c/printf.c \
+    user/liba20c/string.c \
+    user/liba20c/time.c \
+    user/liba20c/fdtable.c \
+    user/liba20c/exit.c \
+    user/liba20c/errno.c \
+    user/liba20c/environ.c \
+    user/liba20c/a20_errno.c
+
 define NATIVE_TEST_RECIPE
 @mkdir -p user/build
 $(1) -ffreestanding -nostdlib -static \
@@ -1042,6 +1239,70 @@ native-minimal-la:
 	@file user/build/native-minimal-la
 
 native-minimal: native-minimal-rv native-minimal-la
+
+define NATIVE_HANDLE_TEST_RECIPE
+@mkdir -p user/build
+$(1) -ffreestanding -nostdlib -static \
+    $(2) \
+    -Iuser -Iuser/liba20rt \
+    -T$(NATIVE_LD) \
+    $(3) \
+    $(NATIVE_SDK_SRC) \
+    user/tests/test_native_handle.c \
+    -o $(4)
+endef
+
+native-handle-test-rv:
+	$(call NATIVE_HANDLE_TEST_RECIPE,riscv64-unknown-elf-gcc,-march=rv64gc -mabi=lp64d -mcmodel=medany,$(NATIVE_CRT0_RV),user/build/native-handle-rv)
+
+native-handle-test-la:
+	$(call NATIVE_HANDLE_TEST_RECIPE,loongarch64-linux-gnu-gcc,-march=loongarch64 -mabi=lp64d -mcmodel=normal -fno-pic,$(NATIVE_CRT0_LA),user/build/native-handle-la)
+
+native-handle-test: native-handle-test-rv native-handle-test-la
+
+define NATIVE_LIBC_RECIPE
+@mkdir -p user/build
+$(1) -ffreestanding -nostdlib -static \
+    $(2) \
+    -Iuser -Iuser/liba20rt -Iuser/liba20c/include \
+    -T$(NATIVE_LD) \
+    $(3) \
+    $(NATIVE_SDK_SRC) \
+    $(NATIVE_LIBC_SRC) \
+    user/tests/test_liba20c.c \
+    -o $(4)
+endef
+
+native-libc-rv:
+	$(call NATIVE_LIBC_RECIPE,riscv64-unknown-elf-gcc,-march=rv64gc -mabi=lp64d -mcmodel=medany,$(NATIVE_CRT0_RV),user/build/native-libc-rv)
+
+native-libc-la:
+	$(call NATIVE_LIBC_RECIPE,loongarch64-linux-gnu-gcc,-march=loongarch64 -mabi=lp64d -mcmodel=normal -fno-pic,$(NATIVE_CRT0_LA),user/build/native-libc-la)
+
+native-libc: native-libc-rv native-libc-la
+
+smoke-native-libc:
+	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/native-libc-riscv64.log"; \
+	status=0; \
+	{ sleep $(SMOKE_INPUT_DELAY); printf '/bin/native-libc-rv\npoweroff\n'; } | \
+	timeout $(SMOKE_TIMEOUT) qemu-system-riscv64 \
+		-machine virt -m 1G -nographic -smp 1 -bios default \
+		-global virtio-mmio.force-legacy=false \
+		-drive file=.kernel-build/riscv64-both-dev/fat32.img,if=none,format=raw,id=x0 \
+		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		-kernel .kernel-build/riscv64-both-dev/kernel.elf \
+		> "$$log" 2>&1 || status=$$?; \
+	if grep -q 'NATIVE_LIBC: PASS' "$$log" && grep -q 'System is going down for power-off NOW' "$$log"; then \
+		echo "smoke-native-libc: PASS; log saved to $$log"; \
+	else \
+		echo "smoke-native-libc: failed with status $$status; tail of $$log:"; \
+		tail -n 80 "$$log"; \
+		exit 1; \
+	fi
 
 # ----------------------------------------------------------------
 # Local evaluation: make eval-rv / make eval-la / make eval

@@ -3,9 +3,11 @@
 #include <unistd.h>
 
 int main(void) {
-    int fd = open("/proc/net", O_RDONLY);
+    int fd = open("/proc/net/status", O_RDONLY);
+    if (fd < 0)
+        fd = open("/proc/net", O_RDONLY);
     if (fd < 0) {
-        perror("open /proc/net");
+        perror("open /proc/net/status");
         return 1;
     }
 

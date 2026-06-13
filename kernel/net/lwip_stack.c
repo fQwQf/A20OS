@@ -1,4 +1,6 @@
 #include "net/lwip_stack.h"
+#include "net/socket_internal.h"
+#include "net/net_config.h"
 #include "core/timer.h"
 #include "core/stdio.h"
 #include "core/string.h"
@@ -33,6 +35,15 @@
  *   or reverse driver->lwIP lock acquisition are forbidden.
  * - Network smoke must cover timeout advancement, RX/TX delivery, DNS, UDP, TCP,
  *   and ICMP-facing paths before removing the compatibility poll bridge.
+ *
+ * Lock-safe entry points:
+ * - a20_lwip_lock()/a20_lwip_unlock(): outer lock for all lwIP API calls.
+ * - a20_lwip_poll_locked(): run with g_lwip_lock held; does not allocate or
+ *   acquire g_net_lock.
+ * - a20_lwip_poll(): acquires g_lwip_lock, runs progress, releases it, then
+ *   runs the socket deferred bottom-half (net_inet_bottom_half_process_all)
+ *   under g_net_lock only.  This is the only generic path that may transition
+ *   from g_lwip_lock to g_net_lock, and the two locks are never held together.
  */
 static int g_lwip_ready;
 static spinlock_t g_lwip_lock = SPINLOCK_INIT;
@@ -89,7 +100,9 @@ static err_t a20_lwip_netif_init_cb(struct netif *netif) {
 
 static err_t a20_lwip_loopif_init_cb(struct netif *netif)
 {
-    netif->hostname = "a20os";
+    const char *hostname = g_a20_net_config.hostname[0] ?
+                           g_a20_net_config.hostname : "a20os";
+    netif->hostname = hostname;
     netif->mtu = 1500;
     netif->flags = NETIF_FLAG_LINK_UP;
 #if LWIP_IPV6
@@ -101,6 +114,15 @@ static err_t a20_lwip_loopif_init_cb(struct netif *netif)
 #endif
     return ERR_OK;
 }
+
+#if ENABLE_LOOPBACK
+static err_t a20_lwip_loopif_output(struct netif *netif, struct pbuf *p,
+                                    const ip4_addr_t *ipaddr)
+{
+    (void)ipaddr;
+    return netif_loop_output(netif, p);
+}
+#endif
 
 static void a20_lwip_register_loopif(void)
 {
@@ -117,24 +139,29 @@ static void a20_lwip_register_loopif(void)
     }
     netif_set_up(n);
     netif_set_link_up(n);
+    n->output = a20_lwip_loopif_output;
 }
 
 static void a20_lwip_register_virtio_netifs(void) {
     ip4_addr_t ipaddr;
     ip4_addr_t netmask;
     ip4_addr_t gw;
-    ip4_addr_t dns;
 
-    /*
-     * QEMU user-mode networking does provide DHCP, but our no-thread lwIP
-     * bring-up cannot rely on the DHCP exchange completing before userland
-     * starts issuing socket calls. Use QEMU's documented default addresses as
-     * a deterministic fallback so the netif has a usable route immediately.
-     */
-    IP4_ADDR(&ipaddr, 10, 0, 2, 15);
-    IP4_ADDR(&netmask, 255, 255, 255, 0);
-    IP4_ADDR(&gw, 10, 0, 2, 2);
-    IP4_ADDR(&dns, 10, 0, 2, 3);
+    ip4_addr_set_zero(&ipaddr);
+    ip4_addr_set_zero(&netmask);
+    ip4_addr_set_zero(&gw);
+
+    int configured = 0;
+    if (g_a20_net_config.dhcp_enable) {
+        configured = 1;
+    } else if (!ip4_addr_isany_val(g_a20_net_config.ip) ||
+               !ip4_addr_isany_val(g_a20_net_config.netmask) ||
+               !ip4_addr_isany_val(g_a20_net_config.gateway)) {
+        configured = 1;
+        ip4_addr_copy(ipaddr, g_a20_net_config.ip);
+        ip4_addr_copy(netmask, g_a20_net_config.netmask);
+        ip4_addr_copy(gw, g_a20_net_config.gateway);
+    }
 
     for (int i = 0; i < VIRTIO_NET_MAX_DEVS; i++) {
         if (!virtio_net_ready(i))
@@ -156,12 +183,30 @@ static void a20_lwip_register_virtio_netifs(void) {
         netif_create_ip6_linklocal_address(n, 1);
 #endif
 #if LWIP_DNS
-        ip_addr_t dns_addr;
-        ip_addr_set_ip4_u32_val(dns_addr, dns.addr);
-        dns_setserver(0, &dns_addr);
+        for (int d = 0; d < g_a20_net_config.dns_count && d < DNS_MAX_SERVERS; d++) {
+            ip_addr_t dns_addr;
+            ip_addr_set_ip4_u32_val(dns_addr, g_a20_net_config.dns[d].addr);
+            dns_setserver(d, &dns_addr);
+        }
 #endif
-        printf("[LWIP] netif %c%c%d attached to virtio-net%d ip=10.0.2.15 gw=10.0.2.2 dns=10.0.2.3\n",
-               n->name[0], n->name[1], n->num, i);
+        if (configured) {
+            printf("[LWIP] netif %c%c%d attached to virtio-net%d ip=%u.%u.%u.%u gw=%u.%u.%u.%u dns_count=%d\n",
+                   n->name[0], n->name[1], n->num, i,
+                   ip4_addr1(&ipaddr), ip4_addr2(&ipaddr),
+                   ip4_addr3(&ipaddr), ip4_addr4(&ipaddr),
+                   ip4_addr1(&gw), ip4_addr2(&gw),
+                   ip4_addr3(&gw), ip4_addr4(&gw),
+                   g_a20_net_config.dns_count);
+        } else {
+            printf("[LWIP] netif %c%c%d attached to virtio-net%d (unconfigured)\n",
+                   n->name[0], n->name[1], n->num, i);
+        }
+
+#if LWIP_DHCP
+        if (g_a20_net_config.dhcp_enable) {
+            dhcp_start(n);
+        }
+#endif
     }
 }
 
@@ -169,6 +214,7 @@ void a20_lwip_init(void) {
     if (g_lwip_ready)
         return;
 
+    a20_net_config_init();
     spin_init(&g_lwip_lock);
     lwip_init();
     a20_lwip_register_loopif();
@@ -187,33 +233,68 @@ void a20_lwip_unlock(uint64_t flags)
     spin_unlock_irqrestore(&g_lwip_lock, flags);
 }
 
+static void a20_lwip_process_netif_rx_tx_locked(struct netif *n)
+{
+    if (!n || !n->state)
+        return;
+
+    a20_lwip_netif_state_t *st = (a20_lwip_netif_state_t *)n->state;
+    uint8_t frame[1536];
+
+    for (;;) {
+        int len = virtio_net_recv(st->idx, frame, sizeof(frame));
+        if (len <= 0)
+            break;
+        struct pbuf *p = pbuf_alloc(PBUF_RAW, (u16_t)len, PBUF_POOL);
+        if (!p) {
+            LINK_STATS_INC(link.memerr);
+            LINK_STATS_INC(link.drop);
+            continue;
+        }
+        pbuf_take(p, frame, (u16_t)len);
+        if (n->input(p, n) != ERR_OK) {
+            pbuf_free(p);
+            LINK_STATS_INC(link.drop);
+        }
+    }
+    netif_poll(n);
+}
+
+/*
+ * IRQ top-half entry for a single virtio-net instance.
+ * Runs with g_lwip_lock held; performs bounded work only (descriptor ring
+ * drainer, lwIP input, no kmalloc, no g_net_lock).
+ */
+void a20_lwip_process_netif_irq_locked(int net_idx)
+{
+    if (!g_lwip_ready)
+        return;
+
+    virtio_net_poll_all();
+
+    for (struct netif *n = netif_list; n; n = n->next) {
+        if (!n->state)
+            continue;
+        a20_lwip_netif_state_t *st = (a20_lwip_netif_state_t *)n->state;
+        if (st->idx == net_idx) {
+            a20_lwip_process_netif_rx_tx_locked(n);
+            break;
+        }
+    }
+}
+
 void a20_lwip_poll_locked(void) {
     if (!g_lwip_ready)
         return;
     sys_check_timeouts();
+    a20_net_config_sync_from_lwip();
     virtio_net_poll_all();
     for (struct netif *n = netif_list; n; n = n->next) {
         if (n->state) {
-            a20_lwip_netif_state_t *st = (a20_lwip_netif_state_t *)n->state;
-            uint8_t frame[1536];
-            for (;;) {
-                int len = virtio_net_recv(st->idx, frame, sizeof(frame));
-                if (len <= 0)
-                    break;
-                struct pbuf *p = pbuf_alloc(PBUF_RAW, (u16_t)len, PBUF_POOL);
-                if (!p) {
-                    LINK_STATS_INC(link.memerr);
-                    LINK_STATS_INC(link.drop);
-                    continue;
-                }
-                pbuf_take(p, frame, (u16_t)len);
-                if (n->input(p, n) != ERR_OK) {
-                    pbuf_free(p);
-                    LINK_STATS_INC(link.drop);
-                }
-            }
+            a20_lwip_process_netif_rx_tx_locked(n);
+        } else {
+            netif_poll(n);
         }
-        netif_poll(n);
     }
 }
 
@@ -221,6 +302,7 @@ void a20_lwip_poll(void) {
     uint64_t flags = a20_lwip_lock();
     a20_lwip_poll_locked();
     a20_lwip_unlock(flags);
+    net_inet_bottom_half_process_all();
 }
 
 int a20_lwip_format_status(char *buf, size_t bufsz) {

@@ -1,4 +1,5 @@
 #include "core/stdio.h"
+#include "core/bootargs.h"
 #include "drivers/char/uart.h"
 #include "mm/mm.h"
 #include "mm/elf.h"
@@ -21,6 +22,9 @@
 #include "drivers/block/loop.h"
 #include "net/socket.h"
 #include "drivers/core/driver_core.h"
+#ifdef CONFIG_DRIVER_LIFECYCLE_TEST
+#include "drivers/core/driver_lifecycle_test.h"
+#endif
 
 /* Forward declarations */
 void init_kthread(void);
@@ -98,6 +102,8 @@ void kernel_main(void) {
     printf("[INIT] Memory initialized\n");
     random_init();
     printf("[INIT] Random initialized\n");
+    bootargs_init();
+    printf("[INIT] Boot arguments parsed\n");
     driver_core_init();
     printf("[INIT] Driver core initialized\n");
     if (current_board && current_board->enumerate_devices) {
@@ -107,6 +113,9 @@ void kernel_main(void) {
     }
     driver_probe_all();
     printf("[INIT] Drivers probed\n");
+#ifdef CONFIG_DRIVER_LIFECYCLE_TEST
+    driver_lifecycle_test_run();
+#endif
     vfs_init();
     printf("[INIT] VFS initialized\n");
     net_init();

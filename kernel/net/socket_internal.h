@@ -18,6 +18,30 @@ struct tcp_pcb;
 #define NET_MAX_QUEUE   128
 #define NET_WAIT_TICKS  (MS_TO_TICKS(5) ? MS_TO_TICKS(5) : 1)
 #define NET_CONNECT_TIMEOUT_TICKS MS_TO_TICKS(10000)
+#define NET_BH_RING_SIZE 2
+
+typedef enum {
+    NET_BH_RECV = 0,
+    NET_BH_CONNECTED,
+    NET_BH_CLOSED,
+    NET_BH_ERROR,
+} net_bh_event_type_t;
+
+typedef struct net_bh_event {
+    struct net_bh_event *next;
+    net_bh_event_type_t type;
+    int err;
+    size_t len;
+    uint8_t addr[NET_SOCKADDR_MAX];
+    size_t addrlen;
+    uint8_t data[NET_MAX_PAYLOAD];
+} net_bh_event_t;
+
+typedef struct net_bh_ring {
+    net_bh_event_t events[NET_BH_RING_SIZE];
+    uint32_t head;
+    uint32_t tail;
+} net_bh_ring_t;
 
 typedef struct net_msg {
     struct net_msg *next;
@@ -82,6 +106,14 @@ typedef struct net_socket {
     struct net_socket *accept_tail;
     int accept_count;
     int in_registry;
+    int reg_idx;
+    net_bh_ring_t bh_ring;
+    volatile int bh_connected;
+    volatile int bh_closed;
+    volatile int bh_error;
+    volatile int bh_err_code;
+    volatile int bh_tx_wake;
+    volatile int bh_pending;
 } net_socket_t;
 
 typedef struct sockaddr_alg_kernel {
@@ -94,6 +126,7 @@ typedef struct sockaddr_alg_kernel {
 
 extern spinlock_t g_net_lock;
 extern net_socket_t *g_sockets[NET_MAX_SOCKETS];
+extern volatile int g_net_bh_pending[NET_MAX_SOCKETS];
 
 void     net_socket_registry_init(void);
 uint16_t net_alloc_ephemeral_port_locked(void);
@@ -155,6 +188,8 @@ void     net_tcp_close_pcb(net_socket_t *s);
 void     net_tcp_drop_pcb(net_socket_t *s);
 int      net_inet_socket_init(net_socket_t *s);
 void     net_inet_socket_destroy(net_socket_t *s);
+void     net_inet_bottom_half_process_socket(net_socket_t *s);
+void     net_inet_bottom_half_process_all(void);
 int      net_inet_bind_pcb(net_socket_t *s, const void *addr, size_t addrlen);
 int      net_inet_connect(net_socket_t *s, const void *addr, size_t addrlen,
                           const void *connect_addr, size_t peer_len);

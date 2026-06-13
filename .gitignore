@@ -15,3 +15,5 @@ kernel-la
 .eval-state
 *.orig
 *.rej
+kernel/fs/rootfs_overlay.c
+kernel/include/fs/rootfs_overlay.h
