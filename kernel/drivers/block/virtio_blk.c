@@ -41,6 +41,9 @@ typedef struct {
     uint8_t            status[VIRTIO_QUEUE_SIZE];
     virtio_blk_req_hdr_t req_hdr[VIRTIO_QUEUE_SIZE];
     virtio_blk_req_t   req[VIRTIO_BLK_REQ_SLOTS];
+    /* LOCK_ORDER: inst->lock is innermost; no nesting under or over other locks.
+     * Protects req[], descriptor/avail/used rings, in_flight, status[],
+     * req_hdr[], last_used, desc_idx. */
     spinlock_t         lock;
     int                slot;
     int                in_flight;
@@ -48,6 +51,8 @@ typedef struct {
 
 static virtio_blk_inst_t g_insts[VIRTIO_MAX_DEVS];
 static int g_ninst = 0;
+
+static int virtio_blk_irq_handler(int irq, void *priv);
 
 static int virtio_blk_init_instance(virtio_blk_inst_t *inst) {
     virtio_transport_t *vt = &inst->vt;
@@ -167,6 +172,11 @@ static int virtio_blk_init_instance(virtio_blk_inst_t *inst) {
     inst->blk_dev.read_sector = NULL;
     inst->blk_dev.write_sector = NULL;
 
+    if (vt->irq >= 0) {
+        if (request_irq((uint32_t)vt->irq, virtio_blk_irq_handler, 0, inst) != 0)
+            printf("[VIRTIO%d] Failed to register IRQ %d\n", idx, vt->irq);
+    }
+
     return 0;
 }
 
@@ -242,6 +252,7 @@ static void virtio_blk_poll_inst(virtio_blk_inst_t *inst) {
         return;
     if (__atomic_load_n(&inst->in_flight, __ATOMIC_ACQUIRE) <= 0)
         return;
+    /* LOCK_ORDER: acquire inst->lock (innermost) for completion polling. */
     uint64_t flags = spin_lock_irqsave(&inst->lock);
     if (inst->in_flight > 0)
         virtio_blk_complete_used_locked(inst);
@@ -334,6 +345,7 @@ static int virtio_blk_wait_req(virtio_blk_inst_t *inst, virtio_blk_req_t *req,
 
     for (;;) {
         uint64_t flags = spin_lock_irqsave(&inst->lock);
+        /* LOCK_ORDER: inst->lock held while checking request completion. */
         virtio_blk_complete_used_locked(inst);
         if (req->done) {
             int ret = req->result;
@@ -349,6 +361,7 @@ static int virtio_blk_wait_req(virtio_blk_inst_t *inst, virtio_blk_req_t *req,
             uint32_t dev_status = inst->vt.read32(&inst->vt, VIRTIO_MMIO_STATUS);
             printf("[VIRTIO%d] I/O timeout! lba=%lu dev_status=0x%x\n",
                    inst->slot, (unsigned long)lba, dev_status);
+            /* LOCK_ORDER: acquire inst->lock (innermost) to abort a timed-out request. */
             flags = spin_lock_irqsave(&inst->lock);
             if (!req->done) {
                 req->done = 1;
@@ -372,6 +385,8 @@ static int virtio_blk_wait_req(virtio_blk_inst_t *inst, virtio_blk_req_t *req,
              * wake a still-running waiter.  Poll and re-check under the
              * virtio lock before entering PROC_BLOCKED so sched() can safely
              * perform the next completion poll and wake this task. */
+            /* LOCK_ORDER: inst->lock held across scheduler state change;
+             * lock released before sched() is invoked. */
             flags = spin_lock_irqsave(&inst->lock);
             virtio_blk_complete_used_locked(inst);
             int completed = req->done;
@@ -400,6 +415,7 @@ static int virtio_blk_rw(int idx, uint64_t lba, void *buf, size_t sectors, int w
     for (retries = 0; retries <= VIRTIO_BLK_MAX_RETRIES; retries++) {
         virtio_blk_req_t *req = NULL;
         while (!req) {
+            /* LOCK_ORDER: acquire inst->lock (innermost) to allocate/submit a request. */
             uint64_t flags = spin_lock_irqsave(&inst->lock);
             req = virtio_blk_alloc_req_locked(inst);
             if (req) {
@@ -468,6 +484,34 @@ int virtio_blk_ready(int idx) {
     return g_insts[idx].blk.valid;
 }
 
+/*
+ * VIRTIO_BLK_IRQ_MODEL:
+ * - The device raises an IRQ when a request completes.
+ * - The handler runs under inst->lock, drains the used ring, records
+ *   req->done/result, and wakes blocked waiters through proc_make_ready().
+ * - This is the same completion path used by the old polling routine, now
+ *   driven by the device IRQ instead of scheduler hot-path polling.
+ */
+static int virtio_blk_irq_handler(int irq, void *priv) {
+    (void)irq;
+    virtio_blk_inst_t *inst = (virtio_blk_inst_t *)priv;
+    if (!inst || !inst->blk.valid)
+        return 0;
+
+    /* Acknowledge the device interrupt.  For legacy MMIO a read of the ISR
+     * register is sufficient; for modern MMIO and PCI we also write the ack. */
+    uint32_t isr = inst->vt.read32(&inst->vt, VIRTIO_MMIO_INTERRUPT_STATUS);
+    if (!inst->blk.legacy)
+        inst->vt.write32(&inst->vt, VIRTIO_MMIO_INTERRUPT_ACK, isr);
+
+    /* LOCK_ORDER: inst->lock is innermost; completion path only touches
+     * scheduler wake state through proc_make_ready(). */
+    uint64_t flags = spin_lock_irqsave(&inst->lock);
+    virtio_blk_complete_used_locked(inst);
+    spin_unlock_irqrestore(&inst->lock, flags);
+    return 0;
+}
+
 static uint32_t virtio_blk_mmio_read32(virtio_transport_t *t, uint32_t off) {
     return readl((const volatile void *)((uintptr_t)t->priv + off));
 }
@@ -516,9 +560,19 @@ static int virtio_blk_driver_probe(device_t *dev) {
         return ret;
     }
 
+    resource_t *irq_res = device_get_resource(dev, RES_IRQ, 0);
+    if (irq_res) {
+        if (request_irq((uint32_t)irq_res->start, virtio_blk_irq_handler, 0, inst) != 0)
+            kinfo("[VIRTIO-BLK] Failed to register IRQ %lu for '%s'\n",
+                  (unsigned long)irq_res->start, dev->name);
+    } else {
+        kinfo("[VIRTIO-BLK] No IRQ resource for device '%s'\n", dev->name);
+    }
+
     g_ninst++;
-    kinfo("[VIRTIO-BLK] Probed device '%s' at 0x%lx (legacy=%d)\n",
-          dev->name, (unsigned long)mmio_res->start, inst->vt.legacy);
+    kinfo("[VIRTIO-BLK] Probed device '%s' at 0x%lx (legacy=%d irq=%lu)\n",
+          dev->name, (unsigned long)mmio_res->start, inst->vt.legacy,
+          irq_res ? (unsigned long)irq_res->start : 0);
     return 0;
 }
 

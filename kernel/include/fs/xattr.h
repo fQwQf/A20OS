@@ -9,6 +9,12 @@
 #define XATTR_CREATE 1
 #define XATTR_REPLACE 2
 
+#define XATTR_USER_PREFIX     "user."
+#define XATTR_TRUSTED_PREFIX  "trusted."
+#define XATTR_SECURITY_PREFIX "security."
+#define XATTR_SYSTEM_PREFIX   "system."
+
+int xattr_check_namespace(const char *name, int *needs_cap);
 int64_t xattr_set_vnode(vnode_t *vn, const char *name,
                         const void *value, size_t size, int flags);
 int64_t xattr_get_vnode(vnode_t *vn, const char *name,

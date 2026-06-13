@@ -79,3 +79,24 @@ const char *vfs_strip_mount_prefix(const char *path, const mount_t *mnt)
     }
     return path;
 }
+
+mount_t *vfs_mount_parent(mount_t *mnt)
+{
+    if (!mnt || strcmp(mnt->path, "/") == 0)
+        return NULL;
+
+    char parent[MAX_PATH_LEN];
+    strncpy(parent, mnt->path, sizeof(parent) - 1);
+    parent[sizeof(parent) - 1] = '\0';
+    size_t len = strlen(parent);
+    while (len > 1 && parent[len - 1] == '/')
+        parent[--len] = '\0';
+    char *slash = strrchr(parent, '/');
+    if (!slash) return NULL;
+    if (slash == parent) {
+        parent[1] = '\0';
+    } else {
+        *slash = '\0';
+    }
+    return vfs_find_mount(parent);
+}

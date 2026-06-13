@@ -21,11 +21,9 @@
     .section .text.entry
     .globl _start
 _start:
-    /* a0 = hart ID (由 OpenSBI 传入)。
-     * 保存到 BSS 全局变量，供 arch_current_cpu_id() 使用。
-     * 仅主 hart (a0=0) 执行初始化，其他 hart 进入等待循环。 */
-    la      t0, __boot_hart_id
-    sd      a0, 0(t0)
+    /* a0 = hart ID, a1 = DTB pointer (passed by OpenSBI).
+     * Only the boot hart runs initialization; others park.
+     * BSS is cleared below, so boot arguments are saved after that. */
 
     bnez    a0, .park
 
@@ -39,6 +37,12 @@ _start:
     addi    t0, t0, 8
     j       .clear_bss
 .done_bss:
+
+    /* Save boot arguments now that BSS is clean. */
+    la      t0, __boot_hart_id
+    sd      a0, 0(t0)
+    la      t0, __boot_dtb_ptr
+    sd      a1, 0(t0)
 
     /*
      * Fill boot page directory with 3 Sv39 1GB megapages:
@@ -108,7 +112,10 @@ _stack_bottom:
     .globl _stack_end
 _stack_end:
 
-    /* 启动时保存的 hart ID，由 entry.S _start 写入 */
+    /* 启动时保存的 hart ID 与 DTB 指针，由 entry.S _start 写入 */
     .globl __boot_hart_id
 __boot_hart_id:
+    .dword 0
+    .globl __boot_dtb_ptr
+__boot_dtb_ptr:
     .dword 0
