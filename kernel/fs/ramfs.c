@@ -753,8 +753,9 @@ static vfile_t *ramfs_open_vnode(vnode_t *vn, int flags) {
     return vf;
 }
 
-/* Populate the root ramfs from the build-time overlay records. */
-void ramfs_populate_overlay(void) {
+/* Populate the root ramfs from the build-time overlay records.
+ * Returns 0 on success or the first encountered negative errno. */
+int ramfs_populate_overlay(void) {
     for (size_t i = 0; i < g_rootfs_overlay_count; i++) {
         const rootfs_overlay_entry_t *e = &g_rootfs_overlay[i];
         char path[MAX_PATH_LEN];
@@ -766,14 +767,22 @@ void ramfs_populate_overlay(void) {
         char *p = path;
         while ((p = strchr(p + 1, '/')) != NULL) {
             *p = '\0';
-            vfs_mkdir(path, 0755);
+            int r = vfs_mkdir(path, 0755);
+            if (r < 0 && r != -EEXIST)
+                return r;
             *p = '/';
         }
 
         int fd = vfs_open(e->path, O_CREAT | O_WRONLY | O_TRUNC, e->mode);
-        if (fd >= 0) {
-            vfs_write(fd, e->content, e->size);
-            vfs_close(fd);
-        }
+        if (fd < 0)
+            return fd;
+
+        int wn = vfs_write(fd, e->content, e->size);
+        vfs_close(fd);
+        if (wn < 0)
+            return wn;
+        if ((size_t)wn != e->size)
+            return -EIO;
     }
+    return 0;
 }
