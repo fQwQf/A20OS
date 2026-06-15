@@ -60,28 +60,26 @@ blacklisted() {
 # ── test group skip list ───────────────────────────────────
 typeset -a SKIP_GROUPS
 SKIP_GROUPS+=(unixbench) # 不计分
-SKIP_GROUPS+=(cyclictest) # OOM跑不通
 #SKIP_GROUPS+=(lmbench) # 运行时长很长
 SKIP_GROUPS+=(ltp) # 单独执行
 
 # 下面是可以跑通但是为了方便测试跳过的
 #SKIP_GROUPS+=(iozone)
-SKIP_GROUPS+=(libctest)
-SKIP_GROUPS+=(libcbench)
 # SKIP_GROUPS+=(netperf)
 # SKIP_GROUPS+=(iperf)
 # SKIP_GROUPS+=(busybox)
 
 skip_group() {
-    typeset g=$1 s
+    typeset g=$1 runtime=$2 s
 
-    # 1. 检测如果是 riscv64 架构且测试组是 libcbench，则直接跳过
-    if [[ $(uname -m) == "riscv64" && $g == "libcbench" ]]; then
+    # Keep non-RISC-V musl libcbench disabled until that combination is revalidated.
+    if [[ $(uname -m) != "riscv64" && $g == "libcbench" && $runtime != "glibc" ]]; then
         return 0
     fi
-
-    if [[ $(uname -m) == "riscv64" && $g == "lua" ]]; then
-        return 0
+    if [[ $g == "cyclictest" ]]; then
+        if [[ $(uname -m) != "riscv64" || $runtime != "glibc" ]]; then
+            return 0
+        fi
     fi
 
     # 2. 原有的常规跳过列表检测
@@ -147,7 +145,7 @@ for script in /test/*/*_testcode.sh; do
     group=${group%_testcode.sh}
     typeset dir=${script%/*}
 
-    if skip_group "$group"; then
+    if skip_group "$group" "$runtime"; then
         print "[CONTEST][SKIP] $group"
         continue
     fi
