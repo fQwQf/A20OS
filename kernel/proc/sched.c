@@ -71,6 +71,11 @@ static int sched_level_clamp(int level) {
     return level;
 }
 
+static int sched_task_rt(task_t *t)
+{
+    return t && (t->sched_policy == SCHED_FIFO || t->sched_policy == SCHED_RR);
+}
+
 void proc_sched_runq_init(void) {
     memset(sched_runq, 0, sizeof(sched_runq));
     for (unsigned i = 0; i < CONFIG_NR_CPUS; i++)
@@ -210,7 +215,7 @@ void proc_runq_enqueue_locked(task_t *t) {
         return;
     }
 
-    int q = sched_level_clamp(t->sched_level);
+    int q = sched_task_rt(t) ? 0 : sched_level_clamp(t->sched_level);
     t->sched_level = q;
     t->cpu_id = cpu;
     t->rq_next = NULL;
@@ -273,11 +278,26 @@ task_t *proc_runq_pick_locked(void) {
             continue;
         }
 
-        rq->head[q] = t->rq_next;
-        if (t->rq_next)
-            t->rq_next->rq_prev = NULL;
+        if (q == 0) {
+            task_t *best = NULL;
+            for (task_t *it = rq->head[q]; it; it = it->rq_next) {
+                if (!sched_task_rt(it))
+                    continue;
+                if (!best || it->priority > best->priority)
+                    best = it;
+            }
+            if (best)
+                t = best;
+        }
+
+        if (t->rq_prev)
+            t->rq_prev->rq_next = t->rq_next;
         else
-            rq->tail[q] = NULL;
+            rq->head[q] = t->rq_next;
+        if (t->rq_next)
+            t->rq_next->rq_prev = t->rq_prev;
+        else
+            rq->tail[q] = t->rq_prev;
         if (!rq->head[q])
             rq->bitmap &= ~(1U << q);
 
@@ -302,9 +322,9 @@ static void sched_scan_timers(uint64_t now)
 {
     uint64_t next_wake = SCHED_NO_DEADLINE;
     uint64_t next_alarm = SCHED_NO_DEADLINE;
-    int sigalrm_pids[32];
+    int sigalrm_pids[128];
     int sigalrm_count = 0;
-    task_t *wake_list[64];
+    task_t *wake_list[512];
     int wake_count = 0;
 
     uint64_t flags = spin_lock_irqsave(&proc_lock);
@@ -334,6 +354,8 @@ static void sched_scan_timers(uint64_t now)
                 t->exec_start = now;
                 if (wake_count < (int)(sizeof(wake_list) / sizeof(wake_list[0])))
                     wake_list[wake_count++] = t;
+                else if (now + SCHED_MIN_TIMER_INTERVAL < next_wake)
+                    next_wake = now + SCHED_MIN_TIMER_INTERVAL;
             } else if (wake < next_wake) {
                 next_wake = wake;
             }
@@ -497,7 +519,8 @@ void proc_yield(void) {
         uint64_t now = timer_get_ticks();
         uint64_t elapsed = now - cur->exec_start;
         uint64_t slice = TICKS_PER_SEC / 100;
-        if (elapsed >= slice && cur->sched_level < SCHED_LEVELS - 1)
+        if (!sched_task_rt(cur) && elapsed >= slice &&
+            cur->sched_level < SCHED_LEVELS - 1)
             cur->sched_level++;
         if (cur->pid >= 4)
             ktrace_sched("[SCHED] yield: pid=%d\n", cur->pid);
