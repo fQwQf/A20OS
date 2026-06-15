@@ -61,6 +61,20 @@ static int sched_param_for_task(task_t *t)
     return (t->priority >= 1 && t->priority <= 99) ? t->priority : 1;
 }
 
+static int sched_dequeue_if_ready(task_t *t)
+{
+    if (!t || !t->on_rq)
+        return 0;
+    proc_runq_remove_locked(t);
+    return t->state == PROC_READY;
+}
+
+static void sched_requeue_if_ready(task_t *t, int requeue)
+{
+    if (requeue && t && t->state == PROC_READY)
+        proc_runq_enqueue_locked(t);
+}
+
 static uint32_t sched_effective_cpu_mask(task_t *t)
 {
 #if CONFIG_NR_CPUS >= 32
@@ -159,8 +173,10 @@ int64_t sys_sched_setparam(int pid, const void *param)
     int prio;
     if (copy_from_user(&prio, param, sizeof(prio)) < 0) return -EFAULT;
     if (!sched_param_valid(t->sched_policy, prio)) return -EINVAL;
+    int requeue = sched_dequeue_if_ready(t);
     if (sched_policy_rt(t->sched_policy))
         t->priority = prio;
+    sched_requeue_if_ready(t, requeue);
     return 0;
 }
 
@@ -182,12 +198,15 @@ int64_t sys_sched_setscheduler(int pid, int policy, const void *param)
     int prio;
     if (copy_from_user(&prio, param, sizeof(prio)) < 0) return -EFAULT;
     if (!sched_param_valid(policy, prio)) return -EINVAL;
+    int requeue = sched_dequeue_if_ready(t);
     if (sched_policy_rt(policy)) {
         t->priority = prio;
+        t->sched_level = 0;
     } else if (sched_policy_rt(t->sched_policy)) {
         t->priority = sched_nice_for_weight(t->cfs_weight);
     }
     t->sched_policy = policy;
+    sched_requeue_if_ready(t, requeue);
     return 0;
 }
 
