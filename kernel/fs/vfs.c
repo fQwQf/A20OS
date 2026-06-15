@@ -64,18 +64,6 @@ extern int g_lookup_errno;
  * VFS open / close
  * ============================================================ */
 
-static int path_is_beneath(const char *start, const char *resolved) {
-    size_t len = strlen(start);
-    while (len > 1 && start[len - 1] == '/') len--;
-    if (strcmp(resolved, start) == 0) return 1;
-    if (strncmp(resolved, start, len) == 0 && (resolved[len] == '/' || resolved[len] == '\0'))
-        return 1;
-    return 0;
-}
-
-/* Returns 1 if a relative path never uses `..` to walk above the implicit start
- * directory.  This catches e.g. "../dir" resolving back onto itself, which a
- * plain final-path check would incorrectly allow under RESOLVE_BENEATH. */
 static int relative_path_stays_beneath(const char *relpath) {
     int depth = 0;
     const char *p = relpath;
@@ -217,7 +205,7 @@ int vfs_open(const char *path, int flags, int mode) {
     return gfd;
 }
 
-static int vfs_dirfd_path(int dirfd, char *out, size_t outsz) {
+int vfs_dirfd_path(int dirfd, char *out, size_t outsz) {
     task_t *cur = proc_current();
     if (dirfd == AT_FDCWD) {
         const char *cwd = cur && cur->fs.cwd[0] ? cur->fs.cwd : "/";
@@ -298,35 +286,49 @@ int vfs_openat2(int dirfd, const char *path, int flags, int mode, uint64_t resol
     if (resolve & RESOLVE_BENEATH) {
         if (path[0] != '/' && !relative_path_stays_beneath(path))
             return -EXDEV;
-        if (!path_is_beneath(start, logical))
-            return -EXDEV;
     }
 
-    if (resolve & RESOLVE_NO_XDEV) {
-        mount_t *start_mnt = vfs_find_mount(start);
-        mount_t *tgt_mnt = vfs_find_mount(logical);
-        if (!start_mnt || !tgt_mnt || start_mnt != tgt_mnt)
-            return -EXDEV;
-    }
-
-    vnode_t *vn = NULL;
-    if ((resolve & RESOLVE_NO_SYMLINKS) || (resolve & RESOLVE_NO_TRAILING_SYMLINKS)) {
-        vn = vfs_resolve_no_follow_final(logical);
-        if (!vn && g_lookup_errno) {
-            if (!(flags & O_CREAT)) return g_lookup_errno;
-        }
-        if (vn && vn->type == VFS_FT_SYMLINK) {
-            vnode_put(vn);
-            return -ELOOP;
-        }
-    }
+    char resolved[MAX_PATH_LEN];
+    int lookup_err = 0;
+    vnode_t *vn = vnode_lookup_path_openat2(logical, start, root, resolve,
+                                            resolved, sizeof(resolved), &lookup_err);
 
     if (!vn) {
-        if (flags & O_CREAT) {
-            return vfs_open(logical, flags, mode);
+        if (lookup_err == -ENOENT && (flags & O_CREAT)) {
+            mount_t *mnt = vfs_find_mount(resolved);
+            if (!mnt) return -ENOENT;
+            if (mnt->flags & 1) return -EROFS;
+
+            char parent_path[MAX_PATH_LEN];
+            char fname[MAX_NAME_LEN];
+            if (vfs_path_split_parent_name(resolved, parent_path, sizeof(parent_path),
+                                            fname, sizeof(fname)) < 0)
+                return -ENAMETOOLONG;
+
+            vnode_t *parent = vnode_lookup_path(mnt->root,
+                                                vfs_strip_mount_prefix(parent_path, mnt));
+            if (!parent || parent->type != VFS_FT_DIR) {
+                vnode_put(parent);
+                return g_lookup_errno ? g_lookup_errno : -ENOENT;
+            }
+            if (vfs_vnode_permission(parent, W_OK | X_OK) < 0) {
+                vnode_put(parent);
+                return -EACCES;
+            }
+            if (!parent->ops || !parent->ops->create) {
+                vnode_put(parent);
+                return -ENOSYS;
+            }
+
+            int cmode = (mode & S_IFMT) | ((mode & 07777) & ~(cur ? cur->fs.umask : 022));
+            int cr = parent->ops->create(parent, fname, cmode, &vn);
+            vnode_put(parent);
+            if (cr < 0) return cr;
+            vfs_dcache_invalidate_all();
+            vfs_touch_mtime(vn);
+        } else {
+            return lookup_err ? lookup_err : -ENOENT;
         }
-        vn = vfs_resolve(logical);
-        if (!vn) return g_lookup_errno ? g_lookup_errno : -ENOENT;
     }
 
     if ((flags & O_DIRECTORY) && vn->type != VFS_FT_DIR) {
@@ -356,7 +358,7 @@ int vfs_openat2(int dirfd, const char *path, int flags, int mode, uint64_t resol
     }
     vfile_t *vf = vn->ops->open(vn, flags);
     if (!vf) { vnode_put(vn); return -ENOMEM; }
-    strncpy(vf->path, logical, MAX_PATH_LEN - 1);
+    strncpy(vf->path, resolved, MAX_PATH_LEN - 1);
     vf->path[MAX_PATH_LEN - 1] = '\0';
 
     int gfd = vfs_alloc_fd(vf);
@@ -1446,7 +1448,9 @@ void vfs_init(void) {
     file_install_at(STDERR_FILENO, devfs_create_stdio(STDERR_FILENO));
 
     vfs_mkdir("/tmp", 0755);
-    ramfs_populate_overlay();
+    int overlay_err = ramfs_populate_overlay();
+    if (overlay_err < 0)
+        kerr("[VFS] rootfs overlay population failed: %d\n", overlay_err);
 
     /* Mount procfs at /proc */
     {
