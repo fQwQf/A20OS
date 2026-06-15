@@ -3,6 +3,7 @@
 #include "net/lwip_stack.h"
 #include "net/net_config.h"
 #include "net/socket_internal.h"
+#include "drivers/net/virtio_net.h"
 #include "lwip/timeouts.h"
 
 /*
@@ -13,12 +14,14 @@
  * - kernel_progress_run_bottom_halves() drains the socket deferred bottom-half
  *   ring; it is event-driven (atomic pending flags) and may be called from the
  *   scheduler / idle loop without touching devices.
- * - kernel_progress_poll() is retained as a compatibility hook but performs
- *   no hot-path device polling.
+ * - kernel_progress_poll() is retained as a compatibility hook for platforms
+ *   where PCI virtio does not deliver RX IRQs (x86_64/loongarch64).  It polls
+ *   network RX rings under g_lwip_lock without sleeping.
  */
 void kernel_progress_poll(kernel_progress_reason_t reason)
 {
     (void)reason;
+    virtio_net_poll_rx_all();
 }
 
 void kernel_progress_timer_tick(void)
@@ -31,5 +34,6 @@ void kernel_progress_timer_tick(void)
 
 void kernel_progress_run_bottom_halves(void)
 {
+    kernel_progress_poll(KERNEL_PROGRESS_SCHED);
     net_inet_bottom_half_process_all();
 }

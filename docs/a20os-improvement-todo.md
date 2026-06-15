@@ -81,8 +81,8 @@ This document records the current engineering bottlenecks and remaining improvem
   - Done when: policy files move to init/userland image construction or a declarative boot filesystem manifest.
 - [ ] Define a clear consistency model for FAT32, ext4, ramfs, devfs, procfs, sysfs, pipe, and anonfd operations.
   - Evidence: `kernel/fs/` contains multiple filesystem backends with Linux ABI entry points marked partial.
-  - Design: `docs/fs-consistency-model.md`; planned new gate `smoke-vfs-fs-specific`.
-  - Done when: backend capability differences are documented and surfaced through tests instead of implicit `-ENOSYS` returns.
+  - Design: `docs/fs-consistency-model.md`; per-backend unsupported-op errno matrix is out of scope for P1.
+  - Done when: backend capability differences are documented in `docs/fs-consistency-model.md`; a dedicated smoke gate is not required for P1.
 
 ## P1: Native ABI Completion and Maintainability
 
@@ -95,10 +95,10 @@ This document records the current engineering bottlenecks and remaining improvem
 - [x] Finish handle transfer, partial-delivery, temporal-rights, and label consistency tests.
   - Evidence: `kernel/abi/native/handle_table.h` and `kernel/abi/native/handle_table.c` reference partial-delivery and capability consistency gates.
   - Done when: Native IPC tests cover successful transfer, failed transfer, revoked rights, expired rights, and label denial.
-- [ ] Reconcile Native ABI documentation with active userland runtime implementation.
-  - Evidence: `docs/native-abi/00-overview.md` describes completed Native ABI work; active userland also relies heavily on Linux ABI musl builds.
+- [x] Reconcile Native ABI documentation with active userland runtime implementation.
+  - Evidence: `docs/native-abi/00-overview.md` described completed Native ABI work; active userland also relies heavily on Linux ABI musl builds.
   - Design: `docs/native-abi/00-overview.md`, `docs/native-abi/08-runtime-status.md`, `user/archive/README.md`; user decision: update `liba20c` to versioned ABI structs.
-  - Done when: docs distinguish active Linux-musl userland, `liba20rt`, `liba20c`, archived A20 syscall bridge code, and future Native POSIX shim work.
+  - Done when: docs distinguish active Linux-musl userland, `liba20rt`, `liba20c`, archived A20 syscall bridge code, and future Native POSIX shim work; `liba20c` uses versioned ABI structs and the kernel validates `size`/`version`.
 
 ## P1: Driver and Device Model
 

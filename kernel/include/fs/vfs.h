@@ -257,6 +257,13 @@ vnode_t *vfs_resolve_at(const char *path, const char *cwd);
 vnode_t *vfs_resolve_no_follow(const char *path);
 vnode_t *vfs_resolve_no_follow_final(const char *path);
 vnode_t *vnode_lookup_path(vnode_t *root, const char *path);
+vnode_t *vnode_lookup_path_openat2(const char *path,
+                                   const char *start,
+                                   const char *root_path,
+                                   uint64_t resolve,
+                                   char *resolved_out,
+                                   size_t resolved_out_sz,
+                                   int *lookup_err);
 extern int g_lookup_errno;
 
 /* File operations */
@@ -276,6 +283,7 @@ int      vfs_poll_events(int fd, short events);
 
 /* Directory operations */
 int      vfs_mkdir(const char *path, int mode);
+int      vfs_dirfd_path(int dirfd, char *out, size_t outsz);
 int      vfs_unlink(const char *path);
 int      vfs_rmdir(const char *path);
 int      vfs_rename(const char *old, const char *newpath);

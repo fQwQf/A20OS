@@ -466,6 +466,19 @@ void virtio_net_poll_all(void) {
 }
 
 /*
+ * virtio_net_poll_rx_all:
+ * Fallback RX progress path for PCI virtio on platforms where the device IRQ
+ * line is not wired or not configured (e.g. x86_64/loongarch64 QEMU without
+ * MSI-X).  Runs under g_lwip_lock and drains RX descriptors into lwIP input.
+ * This is the compatibility bridge called from kernel_progress_poll().
+ */
+void virtio_net_poll_rx_all(void) {
+    uint64_t flags = a20_lwip_lock();
+    a20_lwip_poll_locked();
+    a20_lwip_unlock(flags);
+}
+
+/*
  * VIRTIO_NET_IRQ_MODEL:
  * - The device raises an IRQ on RX packet arrival and TX completion.
  * - The handler is a minimal top-half: it runs under g_lwip_lock, acks the

@@ -25,10 +25,10 @@
 #include "sys/usercopy.h"
 
 #include "abi/native/types.h"
-#include "abi/native/objects.h"
 #include "abi/native/errno.h"
 #include "abi/native/rights.h"
 #include "abi/native/syscall_entry.h"
+#include "sys_validate.h"
 #include "abi/native/startup.h"
 #include "abi/native/vmo.h"
 #include "abi/native/vmar.h"

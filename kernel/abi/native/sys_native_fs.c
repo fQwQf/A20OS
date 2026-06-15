@@ -6,6 +6,7 @@
  */
 #include "core/types.h"
 #include "core/defs.h"
+#include "core/stdio.h"
 #include "core/string.h"
 #include "core/consts.h"
 #include "core/version.h"
@@ -25,10 +26,10 @@
 #include "sys/usercopy.h"
 
 #include "abi/native/types.h"
-#include "abi/native/objects.h"
 #include "abi/native/errno.h"
 #include "abi/native/rights.h"
 #include "abi/native/syscall_entry.h"
+#include "sys_validate.h"
 #include "abi/native/startup.h"
 #include "abi/native/vmo.h"
 #include "abi/native/vmar.h"
@@ -54,7 +55,12 @@ extern void a20_ht_set_label(struct a20_ht_internal *ht, uint8_t label);
 extern int copy_path_from_user(char *dst, const char *uptr, uint32_t len);
 extern void resolve_path(const char *in, char *out);
 extern int64_t a20_path_open_impl(const a20_path_open_args_t *kargs,
-                                  a20_handle_t *out_handle);
+                                   a20_handle_t *out_handle);
+extern int64_t a20_dir_handle_to_dirfd(a20_handle_t dir_h, a20_rights_t required_rights,
+                                        int *out_dirfd);
+extern int64_t a20_install_gfd_handle(int gfd, uint16_t obj_type_hint,
+                                       a20_rights_t requested_rights,
+                                       a20_handle_t *out_handle);
 
 /* ===== Path/Filesystem (0x0400) continued ===== */
 
@@ -64,41 +70,67 @@ int64_t sys_a20_path_create(const a20_syscall_args_t *args)
     if (!uargs) return -A20_ERR_FAULT;
 
     a20_path_create_args_t kargs;
-    if (copy_from_user(&kargs, uargs, sizeof(kargs)) < 0)
-        return -A20_ERR_FAULT;
+    A20_VALIDATE_AND_COPY(uargs, kargs);
 
     char kpath[MAX_PATH_LEN];
     if (copy_path_from_user(kpath, (const char *)kargs.path, (uint32_t)kargs.path_len) < 0)
         return -A20_ERR_FAULT;
 
-    char full[MAX_PATH_LEN];
-    resolve_path(kpath, full);
+    int dirfd;
+    int64_t r = a20_dir_handle_to_dirfd(kargs.dir,
+                                        A20_RIGHT_READ | A20_RIGHT_WRITE,
+                                        &dirfd);
+    if (r < 0) return r;
 
-    int r;
-    if (kargs.type == 1)
-        r = vfs_mkdir(full, (int)kargs.mode);
-    else
-        r = -1;
-
-    if (r < 0) {
-        int gfd = vfs_open(full, O_WRONLY | O_CREAT, (int)kargs.mode);
-        if (gfd < 0) return -A20_ERR_NO_ENTRY;
-        vfs_close(gfd);
+    int gfd = -1;
+    if (kargs.type == 1) {
+        char full[MAX_PATH_LEN];
+        if (kpath[0] == '/') {
+            strncpy(full, kpath, MAX_PATH_LEN);
+            full[MAX_PATH_LEN - 1] = '\0';
+        } else {
+            char start[MAX_PATH_LEN];
+            r = vfs_dirfd_path(dirfd, start, sizeof(start));
+            if (r < 0) {
+                if (dirfd != AT_FDCWD) fdtable_close_current(dirfd);
+                return -A20_ERR_NO_ENTRY;
+            }
+            size_t slen = strlen(start);
+            if (slen > 0 && start[slen - 1] == '/')
+                snprintf(full, sizeof(full), "%s%s", start, kpath);
+            else
+                snprintf(full, sizeof(full), "%s/%s", start, kpath);
+        }
+        int mkdir_r = vfs_mkdir(full, (int)kargs.mode);
+        if (mkdir_r < 0) {
+            if (dirfd != AT_FDCWD) fdtable_close_current(dirfd);
+            return -A20_ERR_NO_ENTRY;
+        }
+        gfd = vfs_openat2(dirfd, kpath, O_RDONLY | O_DIRECTORY, 0, 0);
+        if (gfd < 0) {
+            if (dirfd != AT_FDCWD) fdtable_close_current(dirfd);
+            return -A20_ERR_NO_ENTRY;
+        }
+    } else {
+        gfd = vfs_openat2(dirfd, kpath, O_RDWR | O_CREAT, (int)kargs.mode, 0);
+        if (gfd < 0) {
+            if (dirfd != AT_FDCWD) fdtable_close_current(dirfd);
+            return -A20_ERR_NO_ENTRY;
+        }
     }
 
-    a20_path_open_args_t open_args;
-    memset(&open_args, 0, sizeof(open_args));
-    open_args.size = sizeof(open_args);
-    open_args.version = 1;
-    open_args.dir = kargs.dir;
-    open_args.path = kargs.path;
-    open_args.path_len = kargs.path_len;
-    open_args.flags = 0x2; /* O_RDWR */
-    open_args.mode = kargs.mode;
-    open_args.rights = A20_RIGHTS_ALL;
+    if (dirfd != AT_FDCWD) fdtable_close_current(dirfd);
+
+    a20_rights_t rights = A20_RIGHT_STAT | A20_RIGHT_SEEK | A20_RIGHT_DUP |
+                          A20_RIGHT_TRANSFER | A20_RIGHT_READ;
+    if (kargs.type != 1)
+        rights |= A20_RIGHT_WRITE;
 
     a20_handle_t h;
-    int64_t rc = a20_path_open_impl(&open_args, &h);
+    int64_t rc = a20_install_gfd_handle(gfd,
+                                        (kargs.type == 1) ? A20_OBJ_DIRECTORY
+                                                          : A20_OBJ_FILE,
+                                        rights, &h);
     if (rc < 0) return rc;
 
     kargs.out_handle = h;
@@ -334,8 +366,7 @@ int64_t sys_a20_fs_mount(const a20_syscall_args_t *args)
     if (!uargs) return -A20_ERR_FAULT;
 
     a20_fs_mount_args_t kargs;
-    if (copy_from_user(&kargs, uargs, sizeof(kargs)) < 0)
-        return -A20_ERR_FAULT;
+    A20_VALIDATE_AND_COPY(uargs, kargs);
 
     char ksrc[MAX_PATH_LEN], ktgt[MAX_PATH_LEN], kfs[64];
     if (copy_path_from_user(ksrc, (const char *)kargs.source, kargs.source_len) < 0)

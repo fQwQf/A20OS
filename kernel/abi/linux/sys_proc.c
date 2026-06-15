@@ -504,7 +504,7 @@ int64_t sys_openat2(int dirfd, const char *pathname, const void *how, size_t siz
     }
     if (khow.resolve & ~(RESOLVE_NO_SYMLINKS | RESOLVE_BENEATH | RESOLVE_IN_ROOT |
                          RESOLVE_NO_MAGICLINKS | RESOLVE_NO_XDEV |
-                         RESOLVE_NO_TRAILING_SYMLINKS | RESOLVE_CACHED))
+                         RESOLVE_NO_TRAILING_SYMLINKS))
         return -EINVAL;
 
     int flags = (int)khow.flags;

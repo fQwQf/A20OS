@@ -216,7 +216,7 @@ Native ABI 一旦稳定，需要遵守：
 
 已知偏差：
 
-- `liba20c` 当前使用裸 `uint64_t args[N]` 数组调用 `a20_vm_alloc`、`a20_path_open`、`a20_handle_read` 等 wrapper，没有按 ABI 约定填充 `size` 和 `version` 字段。这与内核期望的版本化结构体存在语义缺口，需要在后续迭代中统一修复。
+- `liba20c` 已按 ABI 约定填充 `size` 和 `version` 字段；内核在 `kernel/abi/native/sys_validate.h` 中统一校验这些字段，任何大小或版本不匹配都会返回 `A20_ERR_INVALID_ARGUMENT`。
 - 当前原生测试只有少量示例（如 `user/tests/test_native_handle.c` 和 `user/liba20c` 内部测试），历史上宣称的 4 套 118 cases host-mode 测试套件目前不存在。
 - `user/archive/build_sysroot.sh` 引用了 `user/musl-port/` 等不存在的路径，已不可直接使用。
 

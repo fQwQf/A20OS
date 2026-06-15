@@ -18,7 +18,7 @@ struct tcp_pcb;
 #define NET_MAX_QUEUE   128
 #define NET_WAIT_TICKS  (MS_TO_TICKS(5) ? MS_TO_TICKS(5) : 1)
 #define NET_CONNECT_TIMEOUT_TICKS MS_TO_TICKS(10000)
-#define NET_BH_RING_SIZE 2
+#define NET_BH_RING_SIZE 16
 
 typedef enum {
     NET_BH_RECV = 0,

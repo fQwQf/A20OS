@@ -4,6 +4,15 @@
 #include "core/stdio.h"
 #include "core/string.h"
 
+int path_is_beneath(const char *start, const char *resolved) {
+    size_t len = strlen(start);
+    while (len > 1 && start[len - 1] == '/') len--;
+    if (strcmp(resolved, start) == 0) return 1;
+    if (strncmp(resolved, start, len) == 0 && (resolved[len] == '/' || resolved[len] == '\0'))
+        return 1;
+    return 0;
+}
+
 int vfs_path_join(const char *cwd, const char *path, char *out, size_t outsz) {
     if (!path || !out || outsz == 0)
         return -EINVAL;
