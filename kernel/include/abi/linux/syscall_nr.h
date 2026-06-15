@@ -252,7 +252,7 @@
 #define SYS_init_module     105
 #define SYS_delete_module   106
 #define SYS_finit_module    273
-#define SYS_userfaultfd     266
+#define SYS_userfaultfd     282
 #define SYS_perf_event_open 241
 #define SYS_arch_prctl      1000
 
