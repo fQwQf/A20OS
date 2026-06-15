@@ -30,6 +30,17 @@ static int proc_task_tgid(task_t *t)
     return t ? (t->tgid > 0 ? t->tgid : t->pid) : -1;
 }
 
+static int proc_task_is_live_locked(task_t *needle)
+{
+    if (!needle)
+        return 0;
+    for (task_t *t = proc_first_task_locked(); t; t = proc_next_task_locked(t)) {
+        if (t == needle && t->state != PROC_UNUSED)
+            return 1;
+    }
+    return 0;
+}
+
 static void proc_complete_vfork_locked(task_t *child)
 {
     if (!child)
@@ -156,8 +167,8 @@ static void proc_reparent_children(task_t *dead, task_t *reaper)
             child = next;
             continue;
         }
-        if (child->state == PROC_UNUSED || child->ppid != dead->pid)
-        {
+        if (child->state == PROC_UNUSED ||
+            (child->ppid != dead->pid && child->parent != dead)) {
             child = next;
             continue;
         }
@@ -267,6 +278,8 @@ void proc_exit(int exit_code)
 
     uint64_t flags = spin_lock_irqsave(&proc_lock);
     task_t *parent = t->parent;
+    if (!proc_task_is_live_locked(parent))
+        parent = NULL;
     int auto_reap = proc_child_auto_reaps(t, parent);
 
     t->exit_code = exit_code;

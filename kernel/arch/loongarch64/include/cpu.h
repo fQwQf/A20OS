@@ -163,7 +163,15 @@ static inline void arch_dcache_flush(uintptr_t addr, size_t size) {
 
 static inline int arch_is_kernel_address(const void *ptr) {
     uintptr_t v = (uintptr_t)ptr;
-    return v >= PHYS_MEMORY_BASE && v < PHYS_MEMORY_END;
+    if (!v)
+        return 0;
+    for (size_t i = 0; i < arch_ram_range_count(); i++) {
+        paddr_t base, end;
+        if (arch_ram_range(i, &base, &end) == 0 &&
+            v >= PAGE_OFFSET + base && v < PAGE_OFFSET + end)
+            return 1;
+    }
+    return 0;
 }
 
 static inline void arch_dma_sync_for_device(const void *addr, size_t size) {

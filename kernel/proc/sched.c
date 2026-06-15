@@ -394,12 +394,14 @@ void sched_reap_zombies(void)
                 to_reap[count++] = t;
         }
 
-        /* Destroy zombies while still holding proc_lock.
-         * proc_destroy_task will try to acquire proc_lock again,
-         * so we must temporarily release it.  But first, mark each
-         * zombie as PROC_UNUSED to prevent double-reap by proc_wait4. */
-        for (int i = 0; i < count; i++)
+        /* Reserve and detach the zombies while still holding proc_lock.
+         * proc_destroy_task() reacquires proc_lock, so destruction itself must
+         * happen after unlock, but the nodes must no longer be reachable from
+         * the global task list during that window. */
+        for (int i = 0; i < count; i++) {
             to_reap[i]->state = PROC_UNUSED;
+            proc_unlink_task_locked(to_reap[i]);
+        }
 
         spin_unlock_irqrestore(&proc_lock, flags);
 

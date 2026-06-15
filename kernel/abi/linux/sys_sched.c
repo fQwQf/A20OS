@@ -14,7 +14,9 @@ static task_t *sched_task_for_pid(int pid)
 
 static size_t sched_cpu_mask_bytes(void)
 {
-    return (CONFIG_NR_CPUS + 7) / 8;
+    size_t word_bits = sizeof(unsigned long) * 8;
+    return ((CONFIG_NR_CPUS + word_bits - 1) / word_bits) *
+           sizeof(unsigned long);
 }
 
 static int sched_policy_valid(int policy)
@@ -99,7 +101,7 @@ int64_t sys_sched_getaffinity(int pid, size_t cpusetsize, void *mask)
     size_t mask_bytes = sched_cpu_mask_bytes();
     if (cpusetsize < mask_bytes) return -EINVAL;
     uint32_t allowed = sched_effective_cpu_mask(t);
-    uint8_t out[(CONFIG_NR_CPUS + 7) / 8];
+    uint8_t out[mask_bytes];
     memset(out, 0, sizeof(out));
     for (unsigned cpu = 0; cpu < CONFIG_NR_CPUS && cpu < 32; cpu++) {
         if (allowed & (1U << cpu))
@@ -119,7 +121,7 @@ int64_t sys_sched_setaffinity(int pid, size_t cpusetsize, const void *mask)
 
     size_t mask_bytes = sched_cpu_mask_bytes();
     if (cpusetsize < mask_bytes) return -EINVAL;
-    uint8_t in[(CONFIG_NR_CPUS + 7) / 8];
+    uint8_t in[mask_bytes];
     memset(in, 0, sizeof(in));
     if (copy_from_user(in, mask, mask_bytes) < 0) return -EFAULT;
 
