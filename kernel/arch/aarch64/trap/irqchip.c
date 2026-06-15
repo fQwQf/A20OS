@@ -143,7 +143,6 @@ void arch_handle_irq(uint64_t irq, int from_user) {
     }
 
     driver_irq_dispatch((uint32_t)irq);
-    gic_eoi((uint32_t)irq);
 }
 
 #endif /* CONFIG_AARCH64 */
