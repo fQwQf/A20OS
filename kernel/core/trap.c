@@ -132,6 +132,7 @@ void trap_handler(trap_context_t *ctx) {
             syscall_dispatch(ctx);
             arch_local_irq_disable();
             proc_check_exit_pending();
+            proc_yield();
             if (cur && cur->pid >= 5)
                 ktrace_trap("[TRAP] ret-to-user: pid=%d pgdl=0x%lx era=0x%lx prmd_csr=0x%lx prmd_ctx=0x%lx sp_ctx=0x%lx\n",
                             cur->pid,
