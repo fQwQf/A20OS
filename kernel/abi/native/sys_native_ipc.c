@@ -25,10 +25,10 @@
 #include "sys/usercopy.h"
 
 #include "abi/native/types.h"
-#include "abi/native/objects.h"
 #include "abi/native/errno.h"
 #include "abi/native/rights.h"
 #include "abi/native/syscall_entry.h"
+#include "sys_validate.h"
 #include "abi/native/startup.h"
 #include "abi/native/vmo.h"
 #include "abi/native/vmar.h"
@@ -63,8 +63,7 @@ int64_t sys_a20_event_queue_create(const a20_syscall_args_t *args)
     if (!uargs) return -A20_ERR_FAULT;
 
     a20_event_queue_create_args_t kargs;
-    if (copy_from_user(&kargs, uargs, sizeof(kargs)) < 0)
-        return -A20_ERR_FAULT;
+    A20_VALIDATE_AND_COPY(uargs, kargs);
 
     a20_eventq_t *eq = a20_eventq_create(kargs.capacity_hint);
     if (!eq) return -A20_ERR_NO_MEMORY;
@@ -87,8 +86,7 @@ int64_t sys_a20_event_watch(const a20_syscall_args_t *args)
     if (!uargs) return -A20_ERR_FAULT;
 
     a20_event_watch_args_t kargs;
-    if (copy_from_user(&kargs, uargs, sizeof(kargs)) < 0)
-        return -A20_ERR_FAULT;
+    A20_VALIDATE_AND_COPY(uargs, kargs);
 
     task_t *cur = proc_current();
     struct a20_ht_internal *ht = task_get_a20_ht(cur);
@@ -157,8 +155,7 @@ int64_t sys_a20_channel_create(const a20_syscall_args_t *args)
     if (!uargs) return -A20_ERR_FAULT;
 
     a20_channel_create_args_t kargs;
-    if (copy_from_user(&kargs, uargs, sizeof(kargs)) < 0)
-        return -A20_ERR_FAULT;
+    A20_VALIDATE_AND_COPY(uargs, kargs);
 
     a20_channel_ep_t *ep0 = a20_channel_create(kargs.msg_capacity, NULL);
     if (!ep0) return -A20_ERR_NO_MEMORY;
@@ -192,8 +189,7 @@ int64_t sys_a20_channel_send(const a20_syscall_args_t *args)
     if (!uargs) return -A20_ERR_FAULT;
 
     a20_msg_send_args_t kargs;
-    if (copy_from_user(&kargs, uargs, sizeof(kargs)) < 0)
-        return -A20_ERR_FAULT;
+    A20_VALIDATE_AND_COPY(uargs, kargs);
 
     task_t *cur = proc_current();
     struct a20_ht_internal *ht = task_get_a20_ht(cur);
@@ -259,8 +255,7 @@ int64_t sys_a20_channel_recv(const a20_syscall_args_t *args)
     if (!uargs) return -A20_ERR_FAULT;
 
     a20_msg_recv_args_t kargs;
-    if (copy_from_user(&kargs, uargs, sizeof(kargs)) < 0)
-        return -A20_ERR_FAULT;
+    A20_VALIDATE_AND_COPY(uargs, kargs);
 
     task_t *cur = proc_current();
     struct a20_ht_internal *ht = task_get_a20_ht(cur);

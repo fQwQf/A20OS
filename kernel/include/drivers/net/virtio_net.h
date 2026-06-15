@@ -11,5 +11,6 @@ const uint8_t *virtio_net_mac(int idx);
 int  virtio_net_send(int idx, const void *packet, size_t len, int nonblock);
 int  virtio_net_recv(int idx, void *packet, size_t maxlen);
 void virtio_net_poll_all(void);
+void virtio_net_poll_rx_all(void);
 
 #endif /* _VIRTIO_NET_H */

@@ -106,8 +106,8 @@ void a20_net_config_init(void)
         }
 
         if (extract_key_value(p, tok_end, "a20.dns", val, sizeof(val))) {
-            if (g_a20_net_config.dns_count < DNS_MAX_SERVERS) {
-                parse_ipv4(val, &g_a20_net_config.dns[g_a20_net_config.dns_count]);
+            if (g_a20_net_config.dns_count < DNS_MAX_SERVERS &&
+                parse_ipv4(val, &g_a20_net_config.dns[g_a20_net_config.dns_count]) == 0) {
                 g_a20_net_config.dns_count++;
             }
         }

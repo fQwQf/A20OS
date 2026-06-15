@@ -138,8 +138,11 @@ static int resolve_a_record(const char *name, uint32_t *out_addr) {
 
     uint8_t reply[512];
     ssize_t n = -1;
+    struct sockaddr_in src;
+    socklen_t srclen = sizeof(src);
     while (now_ms() - start < 3000) {
-        n = recvfrom(fd, reply, sizeof(reply), 0, NULL, NULL);
+        srclen = sizeof(src);
+        n = recvfrom(fd, reply, sizeof(reply), 0, (struct sockaddr *)&src, &srclen);
         if (n >= 0)
             break;
         if (errno != EAGAIN && errno != EWOULDBLOCK) {
@@ -152,17 +155,28 @@ static int resolve_a_record(const char *name, uint32_t *out_addr) {
 
     if (n < 12 || reply[0] != query[0] || reply[1] != query[1])
         return -1;
+    if (srclen < sizeof(struct sockaddr_in) || src.sin_family != AF_INET ||
+        src.sin_addr.s_addr != dns.sin_addr.s_addr || src.sin_port != dns.sin_port)
+        return -1;
     if ((reply[3] & 0x0f) != 0)
         return -1;
 
     uint16_t qd = (uint16_t)((reply[4] << 8) | reply[5]);
     uint16_t an = (uint16_t)((reply[6] << 8) | reply[7]);
-    size_t off = 12;
-    for (uint16_t i = 0; i < qd; i++) {
-        if (dns_skip_name(reply, (size_t)n, &off) < 0 || off + 4 > (size_t)n)
-            return -1;
-        off += 4;
-    }
+    if (qd != 1)
+        return -1;
+    size_t qend = 12;
+    if (dns_skip_name(reply, (size_t)n, &qend) < 0 || qend + 4 > (size_t)n)
+        return -1;
+    if (qend - 12 != qlen - 12 - 4)
+        return -1;
+    if (memcmp(reply + 12, query + 12, qend - 12) != 0)
+        return -1;
+    if (reply[qend] != 0x00 || reply[qend + 1] != 0x01 ||
+        reply[qend + 2] != 0x00 || reply[qend + 3] != 0x01)
+        return -1;
+
+    size_t off = qend + 4;
     for (uint16_t i = 0; i < an; i++) {
         if (dns_skip_name(reply, (size_t)n, &off) < 0 || off + 10 > (size_t)n)
             return -1;

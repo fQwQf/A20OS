@@ -3,6 +3,7 @@
 
 #include "core/types.h"
 
+int path_is_beneath(const char *start, const char *resolved);
 int vfs_path_join(const char *cwd, const char *path, char *out, size_t outsz);
 void vfs_path_trim_trailing_slashes(char *path);
 int vfs_path_split_parent_name(const char *path, char *parent, size_t parent_sz,
