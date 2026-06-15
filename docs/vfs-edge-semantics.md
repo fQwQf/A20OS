@@ -42,7 +42,7 @@ Implement the full Linux `openat2` resolve-flag set:
 | `RESOLVE_IN_ROOT` | Resolve absolute paths and `..` relative to the starting directory | `kernel/fs/vfs/path_resolution.c` |
 | `RESOLVE_NO_MAGICLINKS` | Refuse procfs/sysfs-style magic links | `kernel/fs/vfs/path_resolution.c` |
 | `RESOLVE_NO_XDEV` | Refuse to cross mount points | `kernel/fs/vfs/path_resolution.c` |
-| `RESOLVE_CACHED` | Only use cached lookups; fail if a dentry is not cached | `kernel/fs/vfs/dcache.c` |
+| `RESOLVE_CACHED` | Only use cached lookups; fail if a dentry is not cached | **Out of scope** — rejected with `-EINVAL` |
 | `RESOLVE_NO_TRAILING_SYMLINKS` | Do not follow a symlink at the final component | handled in `vfs_open` / `vfs_fstatat` |
 
 ### 2.3 Implementation mapping
@@ -50,7 +50,7 @@ Implement the full Linux `openat2` resolve-flag set:
 - `kernel/abi/linux/sys_proc.c`: validate `how->size` against `sizeof(struct open_how)`; reject unknown `resolve` bits with `-EINVAL`; pass resolve flags through to `vfs_openat2`.
 - `kernel/fs/vfs.c` / new `kernel/fs/vfs/open.c`: add `vfs_openat2(dirfd, path, flags, mode, resolve)` that builds a resolution context and calls the resolver.
 - `kernel/fs/vfs/path_resolution.c`: extend `vnode_lookup_path` to accept a `resolve_flags` bitmask and starting directory. Add helper `vfs_path_walk_beneath`.
-- `kernel/fs/vfs/dcache.c`: add `vfs_dcache_lookup_cached` that fails with `-EAGAIN` (or `-ELOOP` for `RESOLVE_CACHED` semantics) on cache miss.
+- `kernel/fs/vfs/dcache.c`: ~~add `vfs_dcache_lookup_cached`~~ — `RESOLVE_CACHED` is rejected with `-EINVAL` because the current dentry cache is an optimization layer, not an authoritative lookup source.
 - `kernel/include/fs/vfs.h`: add `RESOLVE_*` constants and an `open_how` struct layout.
 - `kernel/include/abi/linux/fcntl.h`: mirror Linux `RESOLVE_*` values for the ABI boundary.
 - `user/cmds/vfs_stress.c`: add `openat2` resolve-flag tests.
@@ -296,6 +296,8 @@ The following smoke / stress gates must be added or extended:
 - `smoke-vfs-edge`: openat2 resolve flags, renameat2 flags, statx mask/sync,
   faccessat2/fchmodat2 flags, xattr namespace, symlink loop limit, mount `..`
   crossing, chroot.
-- `smoke-vfs-fs-specific`: per-backend unsupported-op errno matrix from
-  `docs/fs-consistency-model.md`.
 - Existing gates (`smoke-abi-linux`, `check-vfs-abstraction`) must remain green.
+
+`smoke-vfs-fs-specific` (per-backend unsupported-op errno matrix) is out of scope
+for P1; backend capability differences remain documented in
+`docs/fs-consistency-model.md`.

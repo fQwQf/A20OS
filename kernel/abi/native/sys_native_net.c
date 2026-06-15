@@ -25,10 +25,10 @@
 #include "sys/usercopy.h"
 
 #include "abi/native/types.h"
-#include "abi/native/objects.h"
 #include "abi/native/errno.h"
 #include "abi/native/rights.h"
 #include "abi/native/syscall_entry.h"
+#include "sys_validate.h"
 #include "abi/native/startup.h"
 #include "abi/native/vmo.h"
 #include "abi/native/vmar.h"
@@ -162,8 +162,7 @@ int64_t sys_a20_net_sendmsg(const a20_syscall_args_t *args)
     if (!uargs) return -A20_ERR_FAULT;
 
     a20_net_sendmsg_args_t kargs;
-    if (copy_from_user(&kargs, uargs, sizeof(kargs)) < 0)
-        return -A20_ERR_FAULT;
+    A20_VALIDATE_AND_COPY(uargs, kargs);
 
     task_t *cur = proc_current();
     struct a20_ht_internal *ht = task_get_a20_ht(cur);
@@ -201,8 +200,7 @@ int64_t sys_a20_net_recvmsg(const a20_syscall_args_t *args)
     if (!uargs) return -A20_ERR_FAULT;
 
     a20_net_recvmsg_args_t kargs;
-    if (copy_from_user(&kargs, uargs, sizeof(kargs)) < 0)
-        return -A20_ERR_FAULT;
+    A20_VALIDATE_AND_COPY(uargs, kargs);
 
     task_t *cur = proc_current();
     struct a20_ht_internal *ht = task_get_a20_ht(cur);
