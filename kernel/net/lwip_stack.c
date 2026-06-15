@@ -52,6 +52,8 @@ static struct netif g_loopif;
 
 typedef struct {
     int idx;
+    uint8_t rx_frame[1536];
+    uint8_t tx_frame[1536];
 } a20_lwip_netif_state_t;
 
 static a20_lwip_netif_state_t g_netif_state[VIRTIO_NET_MAX_DEVS];
@@ -65,12 +67,11 @@ static err_t a20_lwip_linkoutput(struct netif *netif, struct pbuf *p) {
         return ERR_ARG;
 
     a20_lwip_netif_state_t *st = (a20_lwip_netif_state_t *)netif->state;
-    uint8_t frame[1536];
-    if (p->tot_len > sizeof(frame))
+    if (p->tot_len > sizeof(st->tx_frame))
         return ERR_BUF;
 
-    pbuf_copy_partial(p, frame, p->tot_len, 0);
-    int r = virtio_net_send(st->idx, frame, p->tot_len, 1);
+    pbuf_copy_partial(p, st->tx_frame, p->tot_len, 0);
+    int r = virtio_net_send(st->idx, st->tx_frame, p->tot_len, 1);
     return (r == (int)p->tot_len) ? ERR_OK : ERR_IF;
 }
 
@@ -239,10 +240,9 @@ static void a20_lwip_process_netif_rx_tx_locked(struct netif *n)
         return;
 
     a20_lwip_netif_state_t *st = (a20_lwip_netif_state_t *)n->state;
-    uint8_t frame[1536];
 
     for (;;) {
-        int len = virtio_net_recv(st->idx, frame, sizeof(frame));
+        int len = virtio_net_recv(st->idx, st->rx_frame, sizeof(st->rx_frame));
         if (len <= 0)
             break;
         struct pbuf *p = pbuf_alloc(PBUF_RAW, (u16_t)len, PBUF_POOL);
@@ -251,7 +251,7 @@ static void a20_lwip_process_netif_rx_tx_locked(struct netif *n)
             LINK_STATS_INC(link.drop);
             continue;
         }
-        pbuf_take(p, frame, (u16_t)len);
+        pbuf_take(p, st->rx_frame, (u16_t)len);
         if (n->input(p, n) != ERR_OK) {
             pbuf_free(p);
             LINK_STATS_INC(link.drop);

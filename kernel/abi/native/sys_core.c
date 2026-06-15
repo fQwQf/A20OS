@@ -40,6 +40,8 @@
 #include "abi/native/rights.h"
 #include "abi/native/syscall_entry.h"
 #include "abi/native/startup.h"
+#include "abi/linux/fcntl.h"
+#include "sys_validate.h"
 
 #define A20_ARG(n) (args->arg[(n)])
 
@@ -135,8 +137,7 @@ int64_t sys_a20_handle_dup(const a20_syscall_args_t *args)
     if (!uargs) return -A20_ERR_FAULT;
 
     a20_handle_dup_args_t kargs;
-    if (copy_from_user(&kargs, uargs, sizeof(kargs)) < 0)
-        return -A20_ERR_FAULT;
+    A20_VALIDATE_AND_COPY(uargs, kargs);
 
     task_t *cur = proc_current();
     struct a20_ht_internal *ht = task_get_a20_ht(cur);
@@ -306,8 +307,7 @@ int64_t sys_a20_task_spawn(const a20_syscall_args_t *args)
     if (!uargs) return -A20_ERR_FAULT;
 
     a20_task_spawn_args_t kargs;
-    if (copy_from_user(&kargs, uargs, sizeof(kargs)) < 0)
-        return -A20_ERR_FAULT;
+    A20_VALIDATE_AND_COPY(uargs, kargs);
 
     task_t *cur = proc_current();
     struct a20_ht_internal *ht = task_get_a20_ht(cur);
@@ -489,8 +489,7 @@ int64_t sys_a20_vm_alloc(const a20_syscall_args_t *args)
     if (!uargs) return -A20_ERR_FAULT;
 
     a20_vm_alloc_args_t kargs;
-    if (copy_from_user(&kargs, uargs, sizeof(kargs)) < 0)
-        return -A20_ERR_FAULT;
+    A20_VALIDATE_AND_COPY(uargs, kargs);
 
     if (kargs.length == 0) return -A20_ERR_INVALID_ARGUMENT;
 
@@ -515,6 +514,75 @@ int64_t sys_a20_vm_unmap(const a20_syscall_args_t *args)
 
 /* ===== Path / Filesystem (0x0400) ===== */
 
+int64_t a20_dir_handle_to_dirfd(a20_handle_t dir_h, a20_rights_t required_rights, int *out_dirfd)
+{
+    if (dir_h == A20_HANDLE_NULL) {
+        *out_dirfd = AT_FDCWD;
+        return 0;
+    }
+
+    task_t *cur = proc_current();
+    struct a20_ht_internal *ht = task_get_a20_ht(cur);
+    if (!ht)
+        return -A20_ERR_BAD_HANDLE;
+
+    a20_handle_entry_t entry;
+    int64_t r = a20_handle_lookup_internal(ht, dir_h, A20_OBJ_DIRECTORY,
+                                           required_rights, &entry);
+    if (r < 0)
+        return r;
+
+    int gfd = (int)(uintptr_t)entry.object;
+    int ref_r = vfs_ref_fd(gfd);
+    if (ref_r < 0)
+        return -A20_ERR_BAD_HANDLE;
+
+    int lfd = fdtable_install_current(gfd, 0);
+    if (lfd < 0) {
+        vfs_close(gfd);
+        return -A20_ERR_BAD_HANDLE;
+    }
+
+    *out_dirfd = lfd;
+    return 0;
+}
+
+int64_t a20_install_gfd_handle(int gfd, uint16_t obj_type_hint,
+                                a20_rights_t requested_rights,
+                                a20_handle_t *out_handle)
+{
+    if (gfd < 0) return -A20_ERR_NOT_FOUND;
+
+    uint16_t obj_type = obj_type_hint;
+    if (obj_type == A20_OBJ_INVALID) {
+        obj_type = A20_OBJ_FILE;
+        vfile_t *vf = vfs_get_file_ref(gfd);
+        if (vf && vf->vnode && vf->vnode->type == VFS_FT_DIR)
+            obj_type = A20_OBJ_DIRECTORY;
+        if (vf) vfs_put_file_ref(gfd, vf);
+    }
+
+    a20_rights_t rights = A20_RIGHT_STAT | A20_RIGHT_SEEK | A20_RIGHT_DUP |
+                          A20_RIGHT_TRANSFER;
+    rights |= (requested_rights & (A20_RIGHT_READ | A20_RIGHT_WRITE));
+
+    task_t *cur = proc_current();
+    struct a20_ht_internal *ht = task_get_a20_ht(cur);
+    if (!ht) {
+        vfs_close(gfd);
+        return -A20_ERR_BAD_HANDLE;
+    }
+
+    int64_t h = a20_handle_install(ht, (void *)(uintptr_t)gfd, obj_type, rights);
+    if (h < 0) {
+        vfs_close(gfd);
+        return h;
+    }
+
+    if (out_handle) *out_handle = (a20_handle_t)h;
+    return A20_OK;
+}
+
 int64_t a20_path_open_impl(const a20_path_open_args_t *kargs,
                            a20_handle_t *out_handle)
 {
@@ -537,59 +605,30 @@ int64_t a20_path_open_impl(const a20_path_open_args_t *kargs,
         kpath[MAX_PATH_LEN - 1] = '\0';
     }
 
-    /* Resolve path relative to current task's cwd */
-    char full[MAX_PATH_LEN];
-    task_t *cur = proc_current();
-    if (kpath[0] == '/') {
-        strncpy(full, kpath, MAX_PATH_LEN);
-    } else {
-        size_t cwd_len = strlen(cur->fs.cwd);
-        if (cwd_len + 1 + strlen(kpath) >= MAX_PATH_LEN)
-            return -A20_ERR_INVALID_ARGUMENT;
-        memcpy(full, cur->fs.cwd, cwd_len);
-        full[cwd_len] = '/';
-        strncpy(full + cwd_len + 1, kpath, MAX_PATH_LEN - cwd_len - 1);
-    }
+    int dirfd;
+    int64_t r = a20_dir_handle_to_dirfd(kargs->dir, A20_RIGHT_READ, &dirfd);
+    if (r < 0) return r;
 
-    /* Open via VFS */
-    int gfd = vfs_open(full, (int)kargs->flags, (int)kargs->mode);
+    int gfd = vfs_openat2(dirfd, kpath, (int)kargs->flags, (int)kargs->mode, 0);
+    if (dirfd != AT_FDCWD) fdtable_close_current(dirfd);
     if (gfd < 0) return -A20_ERR_NOT_FOUND;
 
-    /* Determine object type from vnode */
-    uint16_t obj_type = A20_OBJ_FILE;
+    uint16_t obj_type = A20_OBJ_INVALID;
     vfile_t *vf = vfs_get_file_ref(gfd);
-    if (vf && vf->vnode) {
-        if (vf->vnode->type == VFS_FT_DIR)
-            obj_type = A20_OBJ_DIRECTORY;
-    }
+    if (vf && vf->vnode && vf->vnode->type == VFS_FT_DIR)
+        obj_type = A20_OBJ_DIRECTORY;
     if (vf) vfs_put_file_ref(gfd, vf);
 
-    /* Derive default rights from open flags docs/native-abi/06-security.md §3.2) */
     a20_rights_t rights = A20_RIGHT_STAT | A20_RIGHT_SEEK | A20_RIGHT_DUP |
                           A20_RIGHT_TRANSFER;
-    if (!(kargs->flags & 0x1)) /* not O_WRONLY */
+    if (!(kargs->flags & O_WRONLY))
         rights |= A20_RIGHT_READ;
-    if (kargs->flags & (0x1 | 0x2)) /* O_WRONLY or O_RDWR */
+    if (kargs->flags & (O_WRONLY | O_RDWR))
         rights |= A20_RIGHT_WRITE;
     if (kargs->rights != 0)
         rights = kargs->rights & rights; /* user can only restrict */
 
-    /* Install handle in task's handle table.
-     * For vfile-backed objects, store the kernel gfd as the object pointer. */
-    struct a20_ht_internal *ht = task_get_a20_ht(cur);
-    if (!ht) {
-        vfs_close(gfd);
-        return -A20_ERR_BAD_HANDLE;
-    }
-
-    int64_t h = a20_handle_install(ht, (void *)(uintptr_t)gfd, obj_type, rights);
-    if (h < 0) {
-        vfs_close(gfd);
-        return h;
-    }
-
-    if (out_handle) *out_handle = (a20_handle_t)h;
-    return A20_OK;
+    return a20_install_gfd_handle(gfd, obj_type, rights, out_handle);
 }
 
 int64_t sys_a20_path_open(const a20_syscall_args_t *args)
@@ -598,8 +637,7 @@ int64_t sys_a20_path_open(const a20_syscall_args_t *args)
     if (!uargs) return -A20_ERR_FAULT;
 
     a20_path_open_args_t kargs;
-    if (copy_from_user(&kargs, uargs, sizeof(kargs)) < 0)
-        return -A20_ERR_FAULT;
+    A20_VALIDATE_AND_COPY(uargs, kargs);
 
     a20_handle_t h;
     int64_t r = a20_path_open_impl(&kargs, &h);
@@ -617,8 +655,7 @@ int64_t sys_a20_handle_read(const a20_syscall_args_t *args)
     if (!uargs) return -A20_ERR_FAULT;
 
     a20_io_args_t kargs;
-    if (copy_from_user(&kargs, uargs, sizeof(kargs)) < 0)
-        return -A20_ERR_FAULT;
+    A20_VALIDATE_AND_COPY(uargs, kargs);
 
     task_t *cur = proc_current();
     struct a20_ht_internal *ht = task_get_a20_ht(cur);
@@ -687,8 +724,7 @@ int64_t sys_a20_handle_write(const a20_syscall_args_t *args)
     if (!uargs) return -A20_ERR_FAULT;
 
     a20_io_args_t kargs;
-    if (copy_from_user(&kargs, uargs, sizeof(kargs)) < 0)
-        return -A20_ERR_FAULT;
+    A20_VALIDATE_AND_COPY(uargs, kargs);
 
     task_t *cur = proc_current();
     struct a20_ht_internal *ht = task_get_a20_ht(cur);

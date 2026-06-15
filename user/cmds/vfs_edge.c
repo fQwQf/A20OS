@@ -148,6 +148,83 @@ static int openat2_beneath(void)
     return 0;
 }
 
+static int openat2_beneath_symlink_escape(void)
+{
+    const char *base = "/tmp/vfs_edge_beneath2";
+    const char *dir = "/tmp/vfs_edge_beneath2/dir";
+    const char *outside = "/tmp/vfs_edge_beneath2/outside";
+    const char *file = "/tmp/vfs_edge_beneath2/outside/file.txt";
+
+    unlink(file);
+    rmdir(outside);
+    rmdir(dir);
+    rmdir(base);
+
+    if (mkdir(base, 0755) < 0 && errno != EEXIST) return fail("beneath-sym-base");
+    if (mkdir(dir, 0755) < 0) return fail("beneath-sym-dir");
+    if (mkdir(outside, 0755) < 0) return fail("beneath-sym-outside");
+
+    int fd = open(file, O_CREAT | O_RDWR, 0644);
+    if (fd < 0) {
+        rmdir(outside);
+        rmdir(dir);
+        rmdir(base);
+        return fail("beneath-sym-create");
+    }
+    close(fd);
+
+    char lpath[128];
+    snprintf(lpath, sizeof(lpath), "%s/escape", dir);
+    if (symlink("/tmp/vfs_edge_beneath2/outside", lpath) < 0) {
+        unlink(file);
+        rmdir(outside);
+        rmdir(dir);
+        rmdir(base);
+        return fail("beneath-sym-link");
+    }
+
+    int dfd = open(dir, O_RDONLY | O_DIRECTORY);
+    if (dfd < 0) {
+        unlink(lpath);
+        unlink(file);
+        rmdir(outside);
+        rmdir(dir);
+        rmdir(base);
+        return fail("beneath-sym-opendir");
+    }
+
+    struct open_how how = { .flags = O_RDONLY, .mode = 0, .resolve = RESOLVE_BENEATH };
+    errno = 0;
+    long r = syscall(SYS_openat2, dfd, "escape/file.txt", &how, sizeof(how));
+    if (r >= 0) {
+        close((int)r);
+        close(dfd);
+        unlink(lpath);
+        unlink(file);
+        rmdir(outside);
+        rmdir(dir);
+        rmdir(base);
+        return fail("openat2-beneath-symlink-escape-should-fail");
+    }
+    if (errno != EXDEV && errno != EACCES && errno != EPERM && errno != ENOENT) {
+        close(dfd);
+        unlink(lpath);
+        unlink(file);
+        rmdir(outside);
+        rmdir(dir);
+        rmdir(base);
+        return fail("openat2-beneath-symlink-escape-errno");
+    }
+
+    close(dfd);
+    unlink(lpath);
+    unlink(file);
+    rmdir(outside);
+    rmdir(dir);
+    rmdir(base);
+    return 0;
+}
+
 static int openat2_no_symlinks(void)
 {
     const char *dir = "/tmp/vfs_edge_nosym";
@@ -582,6 +659,8 @@ int main(void)
     printf("VFS_EDGE: start\n");
     mkdir("/tmp", 0755);
     if (openat2_beneath() != 0)
+        return 1;
+    if (openat2_beneath_symlink_escape() != 0)
         return 1;
     if (openat2_no_symlinks() != 0)
         return 1;

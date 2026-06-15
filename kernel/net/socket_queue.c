@@ -91,7 +91,7 @@ int net_enqueue_msg_blocking(net_socket_t *s, net_socket_t *dst, const void *buf
             spin_unlock_irqrestore(&g_net_lock, irq);
             return -ENOTCONN;
         }
-        if (net_socket_is_valid_locked(dst) ? dst->closed : (dst->closed || !dst->connected)) {
+        if (!net_socket_is_valid_locked(dst) || dst->closed) {
             spin_unlock_irqrestore(&g_net_lock, irq);
             return -ENOTCONN;
         }

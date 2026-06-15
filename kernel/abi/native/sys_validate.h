@@ -17,12 +17,21 @@ static inline int a20_validate_user_ptr(const void *ptr, uint64_t size)
     return A20_OK;
 }
 
-static inline int a20_validate_struct_header(const void *ptr, uint32_t expected_min_size)
+static inline int a20_validate_struct_header(const void *ptr, uint32_t expected_size, uint32_t expected_version)
 {
     if (!ptr) return -A20_ERR_FAULT;
-    uint32_t sz;
-    if (copy_from_user(&sz, ptr, sizeof(uint32_t)) < 0)
+    uint32_t hdr[2];
+    if (copy_from_user(hdr, ptr, sizeof(hdr)) < 0)
         return -A20_ERR_FAULT;
-    if (sz < expected_min_size) return -A20_ERR_INVALID_ARGUMENT;
+    if (hdr[0] != expected_size) return -A20_ERR_INVALID_ARGUMENT;
+    if (hdr[1] != expected_version) return -A20_ERR_INVALID_ARGUMENT;
     return A20_OK;
 }
+
+#define A20_VALIDATE_AND_COPY(args_ptr, local_var) \
+    do { \
+        int _vr = a20_validate_struct_header((args_ptr), sizeof(local_var), 1); \
+        if (_vr < 0) return _vr; \
+        if (copy_from_user(&(local_var), (args_ptr), sizeof(local_var)) < 0) \
+            return -A20_ERR_FAULT; \
+    } while (0)

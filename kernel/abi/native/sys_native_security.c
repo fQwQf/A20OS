@@ -29,6 +29,7 @@
 #include "abi/native/errno.h"
 #include "abi/native/rights.h"
 #include "abi/native/syscall_entry.h"
+#include "sys_validate.h"
 #include "abi/native/startup.h"
 #include "abi/native/vmo.h"
 #include "abi/native/vmar.h"
@@ -187,8 +188,7 @@ int64_t sys_a20_security_set_context(const a20_syscall_args_t *args)
     if (!uargs) return -A20_ERR_FAULT;
 
     a20_security_context_t ctx;
-    if (copy_from_user(&ctx, uargs, sizeof(ctx)) < 0)
-        return -A20_ERR_FAULT;
+    A20_VALIDATE_AND_COPY(uargs, ctx);
 
     task_t *cur = proc_current();
     struct a20_ht_internal *ht = task_get_a20_ht(cur);
