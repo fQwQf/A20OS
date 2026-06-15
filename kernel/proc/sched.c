@@ -374,8 +374,9 @@ void sched_reap_zombies(void)
     do {
         count = 0;
         uint64_t flags = spin_lock_irqsave(&proc_lock);
+        task_t *current = proc_current();
         for (task_t *t = proc_first_task_locked(); t; t = proc_next_task_locked(t)) {
-            if (t == proc_idle_task())
+            if (t == proc_idle_task() || t == current)
                 continue;
             if (t->state != PROC_ZOMBIE)
                 continue;
@@ -451,6 +452,11 @@ void sched(void) {
     /* Run event-driven network bottom-halves before picking the next task.
      * This replaces the old generic block/network polling hot path. */
     kernel_progress_run_bottom_halves();
+
+    /* Thread-heavy workloads can keep waking a parent before idle runs.  Reap
+     * older auto-reap zombies here, but never the current task: an exiting
+     * current task is still running on its own kernel stack until switch-out. */
+    sched_reap_zombies();
 
     /* Timer scanning: only scan when a deadline has actually been reached,
      * avoiding O(n) traversal on every sched() call. */
