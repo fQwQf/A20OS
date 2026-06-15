@@ -13,6 +13,7 @@
  * CSR usage for user↔kernel transitions:
  *   SAVE0 (0x30) = kernel stack pointer
  *   SAVE1 (0x31) = task pointer (tp)
+ *   SAVE2 (0x32) = temporary save for original $t0 on general traps
  *
  * General exception entry = trap_entry_la64 (CSR EENTRY = 0xC)
  * TLB refill entry        = tlb_refill_entry_la64 (CSR TLBRENTRY = 0x88)
@@ -49,10 +50,10 @@
  * If PPLV==0 (kernel mode): sp = kernel sp.
  */
 trap_entry_la64:
-    /* Save original $t0 before we clobber it (TLBRSAVE is free here;
-     * TLB refill handler only uses it during TLB miss, which has
-     * returned by the time we reach the general exception path). */
-    csrwr   $t0, 0x8B             /* TLBRSAVE = original $t0 */
+    /* Save original $t0 before we clobber it.  TLBRSAVE belongs to the TLB
+     * refill path; general traps use SAVE2 so interrupts cannot corrupt user
+     * temporaries between adjacent user instructions. */
+    csrwr   $t0, 0x32             /* SAVE2 = original $t0 */
 
     /* Read PRMD.PPLV to decide user vs kernel trap path */
     csrrd   $t0, 0x1              /* PRMD */
@@ -68,7 +69,13 @@ trap_entry_la64:
 __trap_from_kernel:
     addi.d  $sp, $sp, -CTX_SIZE
 
-    st.d    $zero, $sp, REG_OFF(0)
+    /*
+     * regs[0] is repurposed by the generic trap-return path as the address
+     * space token.  Preserve PGDL here; zeroing it would make the next return
+     * path install PGDL=0 and strand user mode after the first kernel trap.
+     */
+    csrrd   $t0, 0x19
+    st.d    $t0, $sp, REG_OFF(0)
     st.d    $ra,   $sp, REG_OFF(1)
     st.d    $tp,   $sp, REG_OFF(2)
     /* REG_OFF(3) = sp: save after context is set up */
@@ -80,8 +87,8 @@ __trap_from_kernel:
     st.d    $a5,   $sp, REG_OFF(9)
     st.d    $a6,   $sp, REG_OFF(10)
     st.d    $a7,   $sp, REG_OFF(11)
-    /* Retrieve original $t0 from TLBRSAVE (saved in trap_entry_la64) */
-    csrrd   $t0, 0x8B
+    /* Retrieve original $t0 from SAVE2 (saved in trap_entry_la64) */
+    csrrd   $t0, 0x32
     st.d    $t0,   $sp, REG_OFF(12)
     st.d    $t1,   $sp, REG_OFF(13)
     st.d    $t2,   $sp, REG_OFF(14)
@@ -169,9 +176,9 @@ __trap_from_user:
     /* Now we are on the kernel stack! Allocate trap frame. */
     addi.d  $sp, $sp, -CTX_SIZE
 
-    /* Retrieve original $t0 from TLBRSAVE (saved in trap_entry_la64),
+    /* Retrieve original $t0 from SAVE2 (saved in trap_entry_la64),
      * then save both $t0 and $t1 so we can use them as temporaries */
-    csrrd   $t0, 0x8B
+    csrrd   $t0, 0x32
     st.d    $t0, $sp, REG_OFF(12)
     st.d    $t1, $sp, REG_OFF(13)
 
@@ -184,7 +191,13 @@ __trap_from_user:
     st.d    $t1, $sp, KTP_OFF
 
     /* Now save all other GPRs */
-    st.d    $zero, $sp, REG_OFF(0)
+    /*
+     * regs[0] carries the active PGDL through trap handling.  Unlike a real
+     * GPR zero register, this slot must survive every user trap so syscalls
+     * and interrupts can return to the same user page table.
+     */
+    csrrd   $t0, 0x19
+    st.d    $t0, $sp, REG_OFF(0)
     st.d    $ra,   $sp, REG_OFF(1)
     st.d    $tp,   $sp, REG_OFF(2)
     /* REG_OFF(3) already saved */
@@ -304,39 +317,7 @@ user_trap_return:
     ld.d    $t3, $sp, KTP_OFF
     csrwr   $t3, 0x31              /* SAVE1 = task tp */
 
-    /* Restore GPRs (except $sp — that's done last) */
-    ld.d    $ra,  $sp, REG_OFF(1)
-    ld.d    $tp,  $sp, REG_OFF(2)
-    /* Skip REG_OFF(3) = sp; restore it after deallocating */
-    ld.d    $a0,  $sp, REG_OFF(4)
-    ld.d    $a1,  $sp, REG_OFF(5)
-    ld.d    $a2,  $sp, REG_OFF(6)
-    ld.d    $a3,  $sp, REG_OFF(7)
-    ld.d    $a4,  $sp, REG_OFF(8)
-    ld.d    $a5,  $sp, REG_OFF(9)
-    ld.d    $a6,  $sp, REG_OFF(10)
-    ld.d    $a7,  $sp, REG_OFF(11)
-    ld.d    $t0,  $sp, REG_OFF(12)
-    ld.d    $t1,  $sp, REG_OFF(13)
-    ld.d    $t2,  $sp, REG_OFF(14)
-    ld.d    $t3,  $sp, REG_OFF(15)
-    ld.d    $t4,  $sp, REG_OFF(16)
-    ld.d    $t5,  $sp, REG_OFF(17)
-    ld.d    $t6,  $sp, REG_OFF(18)
-    ld.d    $t7,  $sp, REG_OFF(19)
-    ld.d    $t8,  $sp, REG_OFF(20)
-    ld.d    $r21, $sp, REG_OFF(21)
-    ld.d    $fp,  $sp, REG_OFF(22)
-    ld.d    $s0,  $sp, REG_OFF(23)
-    ld.d    $s1,  $sp, REG_OFF(24)
-    ld.d    $s2,  $sp, REG_OFF(25)
-    ld.d    $s3,  $sp, REG_OFF(26)
-    ld.d    $s4,  $sp, REG_OFF(27)
-    ld.d    $s5,  $sp, REG_OFF(28)
-    ld.d    $s6,  $sp, REG_OFF(29)
-    ld.d    $s7,  $sp, REG_OFF(30)
-    ld.d    $s8,  $sp, REG_OFF(31)
-
+    /* Restore FP state before GPRs; movgr2fcsr needs a temporary GPR. */
     fld.d   $f0,  $sp, FP_OFF(0)
     fld.d   $f1,  $sp, FP_OFF(1)
     fld.d   $f2,  $sp, FP_OFF(2)
@@ -371,6 +352,39 @@ user_trap_return:
     fld.d   $f31, $sp, FP_OFF(31)
     ld.d    $t0, $sp, FCSR_OFF
     movgr2fcsr $fcsr0, $t0
+
+    /* Restore GPRs (except $sp — that's done last) */
+    ld.d    $ra,  $sp, REG_OFF(1)
+    ld.d    $tp,  $sp, REG_OFF(2)
+    /* Skip REG_OFF(3) = sp; restore it after deallocating */
+    ld.d    $a0,  $sp, REG_OFF(4)
+    ld.d    $a1,  $sp, REG_OFF(5)
+    ld.d    $a2,  $sp, REG_OFF(6)
+    ld.d    $a3,  $sp, REG_OFF(7)
+    ld.d    $a4,  $sp, REG_OFF(8)
+    ld.d    $a5,  $sp, REG_OFF(9)
+    ld.d    $a6,  $sp, REG_OFF(10)
+    ld.d    $a7,  $sp, REG_OFF(11)
+    ld.d    $t0,  $sp, REG_OFF(12)
+    ld.d    $t1,  $sp, REG_OFF(13)
+    ld.d    $t2,  $sp, REG_OFF(14)
+    ld.d    $t3,  $sp, REG_OFF(15)
+    ld.d    $t4,  $sp, REG_OFF(16)
+    ld.d    $t5,  $sp, REG_OFF(17)
+    ld.d    $t6,  $sp, REG_OFF(18)
+    ld.d    $t7,  $sp, REG_OFF(19)
+    ld.d    $t8,  $sp, REG_OFF(20)
+    ld.d    $r21, $sp, REG_OFF(21)
+    ld.d    $fp,  $sp, REG_OFF(22)
+    ld.d    $s0,  $sp, REG_OFF(23)
+    ld.d    $s1,  $sp, REG_OFF(24)
+    ld.d    $s2,  $sp, REG_OFF(25)
+    ld.d    $s3,  $sp, REG_OFF(26)
+    ld.d    $s4,  $sp, REG_OFF(27)
+    ld.d    $s5,  $sp, REG_OFF(28)
+    ld.d    $s6,  $sp, REG_OFF(29)
+    ld.d    $s7,  $sp, REG_OFF(30)
+    ld.d    $s8,  $sp, REG_OFF(31)
 
     /* Now restore user/kernel sp.
      * For user return: regs[3] = user sp.
