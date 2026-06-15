@@ -25,12 +25,12 @@ typedef void (*putc_fn)(char c, void *ctx);
 
 static void do_format(const char *fmt, va_list args, putc_fn putc, void *ctx) {
     char num_buf[32];
-    int long_mode = 0;
+    int length_mode = 0;
 
     while (*fmt) {
         if (*fmt != '%') { putc(*fmt, ctx); fmt++; continue; }
         fmt++;
-        long_mode = 0;
+        length_mode = 0;
 
         int width = 0;
         int pad_zero = 0;
@@ -40,28 +40,57 @@ static void do_format(const char *fmt, va_list args, putc_fn putc, void *ctx) {
             fmt++;
         }
 
-        if (*fmt == 'l') { long_mode = 1; fmt++; }
-        if (*fmt == 'l') { long_mode = 1; fmt++; }
+        if (*fmt == 'z') {
+            length_mode = 2;
+            fmt++;
+        } else {
+            if (*fmt == 'l') { length_mode = 1; fmt++; }
+            if (*fmt == 'l') { length_mode = 1; fmt++; }
+        }
 
         int nlen = 0;
         switch (*fmt) {
         case 'd': {
-            int64_t v = long_mode ? va_arg(args, int64_t) : va_arg(args, int);
+            int64_t v;
+            if (length_mode == 2)
+                v = (int64_t)va_arg(args, ssize_t);
+            else if (length_mode == 1)
+                v = va_arg(args, int64_t);
+            else
+                v = va_arg(args, int);
             nlen = itoa(v, num_buf, 10);
             break;
         }
         case 'u': {
-            uint64_t v = long_mode ? va_arg(args, uint64_t) : va_arg(args, unsigned int);
+            uint64_t v;
+            if (length_mode == 2)
+                v = (uint64_t)va_arg(args, size_t);
+            else if (length_mode == 1)
+                v = va_arg(args, uint64_t);
+            else
+                v = va_arg(args, unsigned int);
             nlen = utoa(v, num_buf, 10, 0);
             break;
         }
         case 'x': {
-            uint64_t v = long_mode ? va_arg(args, uint64_t) : va_arg(args, unsigned int);
+            uint64_t v;
+            if (length_mode == 2)
+                v = (uint64_t)va_arg(args, size_t);
+            else if (length_mode == 1)
+                v = va_arg(args, uint64_t);
+            else
+                v = va_arg(args, unsigned int);
             nlen = utoa(v, num_buf, 16, 0);
             break;
         }
         case 'X': {
-            uint64_t v = long_mode ? va_arg(args, uint64_t) : va_arg(args, unsigned int);
+            uint64_t v;
+            if (length_mode == 2)
+                v = (uint64_t)va_arg(args, size_t);
+            else if (length_mode == 1)
+                v = va_arg(args, uint64_t);
+            else
+                v = va_arg(args, unsigned int);
             nlen = utoa(v, num_buf, 16, 1);
             break;
         }

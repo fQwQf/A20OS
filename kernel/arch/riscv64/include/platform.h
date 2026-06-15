@@ -5,7 +5,7 @@
 
 /* Physical memory layout (QEMU virt) */
 #define PHYS_MEMORY_BASE   0x80000000UL
-#define PHYS_MEMORY_END    0xA0000000UL
+#define PHYS_MEMORY_END    0xC0000000UL
 #define KERNEL_ENTRY       0x80200000UL
 #define PAGE_OFFSET        0xFFFFFFC000000000UL
 #define USER_VA_LIMIT      0x4000000000UL
