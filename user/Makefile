@@ -83,6 +83,7 @@ MUSL_CHECK_FILES := $(MUSL_CRT)/crt1.o \
                     $(MUSL_CRT)/crti.o \
                     $(MUSL_CRT)/crtn.o \
                     $(MUSL_CRT)/libc.a \
+                    $(MUSL_CRT)/libc.so \
                     $(MUSL_BUILD)/obj/include/bits/alltypes.h \
                     $(MUSL_BUILD)/obj/include/bits/syscall.h
 
@@ -475,7 +476,7 @@ musl_prepare:
 		cd "$(MUSL_BUILD)" && ../configure \
 			--target=$(MUSL_TARGET) \
 			--prefix=/opt/musl-$(ARCH) \
-			--disable-shared --disable-wrapper \
+			--disable-wrapper \
 			CC=$(CC) CROSS_COMPILE=$(CROSS_COMPILE) \
 			CFLAGS='$(MUSL_CONFIG_CFLAGS)' \
 			LDFLAGS='$(MUSL_CONFIG_LDFLAGS)'; \

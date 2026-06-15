@@ -282,6 +282,7 @@ static int prepare_musl_lib_links(void)
 {
     static int done;
     static const char *const musl_candidates[] = {
+        "/bin/musl/lib",
 #if defined(__loongarch64)
         "/testla/musl/lib",
         "/test/musl/lib",
@@ -295,7 +296,6 @@ static int prepare_musl_lib_links(void)
         "/testrv/musl/lib",
         "/testla/musl/lib",
 #endif
-        "/musl/lib",
         NULL,
     };
     const char *musl_dir;
