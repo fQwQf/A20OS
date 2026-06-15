@@ -5,7 +5,9 @@
 
 # ── early setup ─────────────────────────────────────────────
 [[ -x /test/musl/busybox ]]  && cp /test/musl/busybox /busybox 2>/dev/null
+[[ -x /test/musl/busybox ]]  && cp /test/musl/busybox /bin/busybox 2>/dev/null
 [[ -x /test/glibc/busybox ]] && cp /test/glibc/busybox /busybox 2>/dev/null
+[[ -x /test/glibc/busybox ]] && cp /test/glibc/busybox /bin/busybox 2>/dev/null
 
 # -- LTP environment setup -
 mkdir -p /dev/shm /tmp
