@@ -197,7 +197,11 @@ KERNEL_SRC = $(wildcard $(KERNEL_DIR)/*.c) \
              $(shell find $(KERNEL_DIR)/arch/$(ARCH) -type f -name '*.c' | sort) \
              $(LWIP_SRC)
 
-# Build-time rootfs overlay (generated from user/rootfs_overlay/)
+# Built-in rootfs overlay.
+#
+# The generated source/header are checked in intentionally so contest builds do
+# not depend on python3 being present on the judge. After editing
+# user/rootfs_overlay/, regenerate them manually with `make regen-rootfs-overlay`.
 ROOTFS_OVERLAY_DIR   = user/rootfs_overlay
 ROOTFS_OVERLAY_SRC   = kernel/fs/rootfs_overlay.c
 ROOTFS_OVERLAY_HDR   = kernel/include/fs/rootfs_overlay.h
@@ -227,7 +231,7 @@ KERNEL_BIN = $(BUILD_DIR)/kernel.bin
 		check-riscv64-bringup check-loongarch64-bringup check-aarch64-bringup check-x86_64-bringup \
 		check-riscv64-user check-loongarch64-user check-aarch64-user check-x86_64-user \
 		smoke-riscv64 smoke-loongarch64 smoke-aarch64 smoke-x86_64 smoke-abi-linux smoke-network-suite smoke-proc-a20 smoke-proc-stress smoke-mm-stress smoke-vfs-stress smoke-vfs-edge smoke-sched-stress smoke-futex-stress smoke-socket-stress smoke-driver-lifecycle smoke-native-handle smoke-native-libc smoke-io-event \\
-		FORCE \
+		FORCE regen-rootfs-overlay \
 		user_apps fs_img kernel-only dev-build contest-rv contest-la \
 		eval-dev-build-rv eval-dev-build-la \
 		extra-img extra-user-apps run-riscv64-extra run-loongarch64-extra run-arm64-extra \
@@ -240,8 +244,8 @@ $(BUILD_TIME_HDR):
 	@mkdir -p $(dir $@)
 	@printf '#ifndef A20_BUILD_UNIX_TIME\n#define A20_BUILD_UNIX_TIME %sULL\n#endif\n' "$$(date -u +%s)" > $@
 
-$(ROOTFS_OVERLAY_SRC) $(ROOTFS_OVERLAY_HDR) &: scripts/gen_rootfs_overlay.py $(ROOTFS_OVERLAY_FILES)
-	@mkdir -p $(dir $@) $(dir $(ROOTFS_OVERLAY_HDR))
+regen-rootfs-overlay: scripts/gen_rootfs_overlay.py $(ROOTFS_OVERLAY_FILES)
+	@mkdir -p $(dir $(ROOTFS_OVERLAY_SRC)) $(dir $(ROOTFS_OVERLAY_HDR))
 	python3 $< --out-c $(ROOTFS_OVERLAY_SRC) --out-h $(ROOTFS_OVERLAY_HDR) --root $(ROOTFS_OVERLAY_DIR)
 
 # ----------------------------------------------------------------
