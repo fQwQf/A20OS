@@ -588,6 +588,7 @@ clean:
 	done
 	@test ! -e $(BUILD_DIR)
 	rm -f $(MKSH_DIR)/*.o lib/*.o
+	find $(MUSL_BASE) \( -path '$(MUSL_BASE)/build-*/*.lo' -o -path '$(MUSL_BASE)/build-*/lib/libc.so' \) -delete
 
 distclean: clean
 	rm -rf $(MUSL_BASE)/build-riscv64 $(MUSL_BASE)/build-loongarch64 $(MUSL_BASE)/build-aarch64 $(MUSL_BASE)/build-x86_64

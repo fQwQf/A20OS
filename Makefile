@@ -967,7 +967,8 @@ endif
 	-mmd -i $(FAT32_IMG) ::/lib >/dev/null 2>&1
 	-mmd -i $(FAT32_IMG) ::/musl >/dev/null 2>&1
 	-mmd -i $(FAT32_IMG) ::/musl/lib >/dev/null 2>&1
-	mcopy -o -i $(FAT32_IMG) user/external/musl/build-$(ARCH)/lib/libc.so ::/musl/lib/libc.so
+	@[ -f user/external/musl/build-$(ARCH)/lib/libc.so ] && \
+		mcopy -o -i $(FAT32_IMG) user/external/musl/build-$(ARCH)/lib/libc.so ::/musl/lib/libc.so || true
 	@[ -n "$(LIBGCC_S_ARCH)" ] && [ -f "$(LIBGCC_S_ARCH)" ] && \
 		mcopy -o -i $(FAT32_IMG) "$(LIBGCC_S_ARCH)" ::/lib/libgcc_s.so.1 || true
 	@printf '%s\n' $(PROTOCOLS_LINES) | mcopy -o -i $(FAT32_IMG) - ::/etc/protocols
