@@ -55,6 +55,7 @@ void proc_task_init_common(task_t *t, task_t *parent)
     t->rq_prev   = NULL;
     t->wait_next = NULL;
     t->exec_start = 0;
+    t->ready_since = 0;
     t->cfs_weight = sched_weight_for_nice(t->priority);
     t->sched_policy = parent ? parent->sched_policy : SCHED_NORMAL;
     t->waiting_for_child = 0;

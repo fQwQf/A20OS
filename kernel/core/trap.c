@@ -98,6 +98,19 @@ static int deliver_user_sync_signal(trap_context_t *ctx, int sig, int fatal_code
     return 1;
 }
 
+static int user_sync_signal_is_handled(task_t *task, int sig) {
+    if (!task || !task->signals || !task->pgdir)
+        return 0;
+
+    signal_state_t *ss = (signal_state_t *)task->signals;
+    sigaction_t *sa = &ss->actions[sig];
+    if (sa->sa_handler == SIG_DFL || sa->sa_handler == SIG_IGN ||
+        (task->sig_blocked & signal_mask_bit(sig)))
+        return 0;
+
+    return 1;
+}
+
 void trap_handler(trap_context_t *ctx) {
     uint64_t scause = arch_read_cause();
     uint64_t stval = arch_read_tval();
@@ -153,6 +166,9 @@ void trap_handler(trap_context_t *ctx) {
                 signal_deliver_user(ctx);
                 return;
             }
+            if (user_sync_signal_is_handled(cur, SIGSEGV) &&
+                deliver_user_sync_signal(ctx, SIGSEGV, -SIGSEGV))
+                return;
             printf("SIGSEGV: pid=%d code=%lu sepc=0x%lx stval=0x%lx abi=%d\n",
                   cur ? cur->pid : -1, (unsigned long)code,
                   (unsigned long)sepc, (unsigned long)stval,
@@ -179,12 +195,13 @@ void trap_handler(trap_context_t *ctx) {
             /* Case 2: just set D=1 in the existing PTE if it's writable */
             if (cur && cur->mm && mm_mark_leaf_dirty_if_writable(cur->mm->pgdir, stval) == 0)
                 return;
-            kerr("User page modification fault: pid=%d sepc=0x%lx stval=0x%lx\n",
-                 cur ? cur->pid : -1, sepc, stval);
-            if (have_user_insn)
-                kerr("  insn@sepc=0x%08x\n", user_insn);
-            dump_trap_context(ctx);
-            dump_fault_pte(cur, stval);
+            /*
+             * User programs may deliberately probe write protection and handle
+             * SIGSEGV, e.g. lmbench's protection-fault benchmark.  Do not dump
+             * every expected user fault to the serial console; default/unhandled
+             * signals are still reported by deliver_user_sync_signal().
+             */
+            (void)have_user_insn;
             if (deliver_user_sync_signal(ctx, SIGSEGV, -SIGSEGV))
                 return;
             proc_exit_group(-SIGSEGV);
