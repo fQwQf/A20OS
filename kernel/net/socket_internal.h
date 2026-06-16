@@ -34,6 +34,15 @@ typedef struct net_bh_event {
     size_t len;
     uint8_t addr[NET_SOCKADDR_MAX];
     size_t addrlen;
+    uint8_t has_pktinfo;
+    uint8_t has_hoplimit;
+    uint8_t has_tclass;
+    uint8_t pad;
+    uint32_t pktinfo_ifindex;
+    uint8_t pktinfo_addr[16];
+    uint8_t hoplimit;
+    uint8_t tclass;
+    uint16_t __pad_meta;
     uint8_t data[NET_MAX_PAYLOAD];
 } net_bh_event_t;
 
@@ -49,8 +58,29 @@ typedef struct net_msg {
     size_t off;
     uint8_t addr[NET_SOCKADDR_MAX];
     size_t addrlen;
+    uint8_t has_pktinfo;
+    uint8_t has_hoplimit;
+    uint8_t has_tclass;
+    uint8_t pad;
+    uint32_t pktinfo_ifindex;
+    uint8_t pktinfo_addr[16];
+    uint8_t hoplimit;
+    uint8_t tclass;
+    uint16_t __pad_meta;
     uint8_t data[NET_MAX_PAYLOAD];
 } net_msg_t;
+
+typedef struct net_recv_meta {
+    uint8_t has_pktinfo;
+    uint8_t has_hoplimit;
+    uint8_t has_tclass;
+    uint8_t pad;
+    uint32_t pktinfo_ifindex;
+    uint8_t pktinfo_addr[16];
+    uint8_t hoplimit;
+    uint8_t tclass;
+    uint16_t __pad_meta;
+} net_recv_meta_t;
 
 typedef struct net_socket {
     int domain;
@@ -95,7 +125,15 @@ typedef struct net_socket {
     int ipv6_recv_pktinfo;
     int ipv6_recv_tclass;
     int ipv6_recv_hoplimit;
+    int ipv6_recv_rthdr;
+    int ipv6_recv_hopopts;
+    int ipv6_recv_dstopts;
     int ipv6_recv_err;
+    int ipv6_recv_2292_pktinfo;
+    int ipv6_recv_2292_hoplimit;
+    int ipv6_recv_2292_rthdr;
+    int ipv6_recv_2292_hopopts;
+    int ipv6_recv_2292_dstopts;
     int bpf_prog_fd;
     uint8_t alg_last[NET_MAX_STREAM_PAYLOAD];
     size_t alg_last_len;
@@ -148,11 +186,19 @@ int      net_socket_is_valid_locked(net_socket_t *s);
 
 int      net_enqueue_msg_locked(net_socket_t *dst, const void *buf, size_t len,
                                 const void *addr, size_t addrlen);
+int      net_enqueue_msg_locked_meta(net_socket_t *dst, const void *buf, size_t len,
+                                     const void *addr, size_t addrlen,
+                                     const net_bh_event_t *meta);
 int      net_enqueue_msg_blocking(net_socket_t *s, net_socket_t *dst, const void *buf, size_t len,
                                   const void *addr, size_t addrlen,
                                   int dontwait, uint64_t timeout_ticks);
 int      net_dequeue_msg_locked(net_socket_t *s, void *buf, size_t len,
                                 void *addr, size_t *addrlen);
+int      net_dequeue_msg_locked_meta(net_socket_t *s, void *buf, size_t len,
+                                     void *addr, size_t *addrlen,
+                                     net_recv_meta_t *meta);
+int      net_recvfrom_meta(int gfd, void *buf, size_t len, int flags,
+                           void *addr, size_t *addrlen, net_recv_meta_t *meta);
 int      net_accept_queue_push_locked(net_socket_t *listener,
                                       net_socket_t *child);
 net_socket_t *net_accept_queue_pop_locked(net_socket_t *listener);
