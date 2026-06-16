@@ -44,6 +44,7 @@ static uint64_t next_alarm_scan = SCHED_NO_DEADLINE;
 
 #define SCHED_TICK_INTERVAL       (TICKS_PER_SEC / 100)
 #define SCHED_MIN_TIMER_INTERVAL  (TICKS_PER_SEC / 10000 ? TICKS_PER_SEC / 10000 : 1)
+#define SCHED_AGING_THRESHOLD     (TICKS_PER_SEC / 20 ? TICKS_PER_SEC / 20 : 1)
 
 /* Per-CPU runqueue lock — separate from proc_lock.
  * runq_lock protects enqueue/dequeue/pick and per-runqueue state.
@@ -74,6 +75,53 @@ static int sched_level_clamp(int level) {
 static int sched_task_rt(task_t *t)
 {
     return t && (t->sched_policy == SCHED_FIFO || t->sched_policy == SCHED_RR);
+}
+
+static void sched_runq_unlink_at(proc_runq_t *rq, task_t *t, int q)
+{
+    if (t->rq_prev)
+        t->rq_prev->rq_next = t->rq_next;
+    else
+        rq->head[q] = t->rq_next;
+    if (t->rq_next)
+        t->rq_next->rq_prev = t->rq_prev;
+    else
+        rq->tail[q] = t->rq_prev;
+    if (!rq->head[q])
+        rq->bitmap &= ~(1U << q);
+    t->rq_next = NULL;
+    t->rq_prev = NULL;
+}
+
+static void sched_runq_append_at(proc_runq_t *rq, task_t *t, int q)
+{
+    t->rq_next = NULL;
+    t->rq_prev = rq->tail[q];
+    if (rq->tail[q])
+        rq->tail[q]->rq_next = t;
+    else
+        rq->head[q] = t;
+    rq->tail[q] = t;
+    rq->bitmap |= (1U << q);
+}
+
+static void sched_promote_aged_locked(proc_runq_t *rq, uint64_t now)
+{
+    for (int q = 1; q < SCHED_LEVELS; q++) {
+        task_t *it = rq->head[q];
+        while (it) {
+            task_t *next = it->rq_next;
+            if (!sched_task_rt(it) && it->state == PROC_READY &&
+                it->ready_since > 0 &&
+                now - it->ready_since >= SCHED_AGING_THRESHOLD) {
+                sched_runq_unlink_at(rq, it, q);
+                it->sched_level = 0;
+                it->ready_since = now;
+                sched_runq_append_at(rq, it, 0);
+            }
+            it = next;
+        }
+    }
 }
 
 void proc_sched_runq_init(void) {
@@ -218,16 +266,10 @@ void proc_runq_enqueue_locked(task_t *t) {
     int q = sched_task_rt(t) ? 0 : sched_level_clamp(t->sched_level);
     t->sched_level = q;
     t->cpu_id = cpu;
-    t->rq_next = NULL;
-    t->rq_prev = rq->tail[q];
-    if (rq->tail[q])
-        rq->tail[q]->rq_next = t;
-    else
-        rq->head[q] = t;
-    rq->tail[q] = t;
+    t->ready_since = timer_get_ticks();
+    sched_runq_append_at(rq, t, q);
     t->on_rq = 1;
     rq->nr_running++;
-    rq->bitmap |= (1U << q);
     RUNQ_UNLOCK_IRQ(cpu, rf);
 }
 
@@ -240,20 +282,9 @@ void proc_runq_remove_locked(task_t *t) {
     proc_runq_t *rq = &sched_runq[cpu];
 
     int q = sched_level_clamp(t->sched_level);
-    if (t->rq_prev)
-        t->rq_prev->rq_next = t->rq_next;
-    else
-        rq->head[q] = t->rq_next;
-    if (t->rq_next)
-        t->rq_next->rq_prev = t->rq_prev;
-    else
-        rq->tail[q] = t->rq_prev;
-    if (!rq->head[q])
-        rq->bitmap &= ~(1U << q);
-
-    t->rq_next = NULL;
-    t->rq_prev = NULL;
+    sched_runq_unlink_at(rq, t, q);
     t->on_rq = 0;
+    t->ready_since = 0;
     if (rq->nr_running > 0)
         rq->nr_running--;
     RUNQ_UNLOCK_IRQ(cpu, rf);
@@ -264,6 +295,7 @@ task_t *proc_runq_pick_locked(void) {
     unsigned cpu = cpu_current_id();
     uint64_t rf = RUNQ_LOCK_IRQ(cpu);
     proc_runq_t *rq = &sched_runq[cpu];
+    sched_promote_aged_locked(rq, timer_get_ticks());
 
     while (rq->bitmap) {
         int q = 0;
@@ -304,6 +336,7 @@ task_t *proc_runq_pick_locked(void) {
         t->rq_next = NULL;
         t->rq_prev = NULL;
         t->on_rq = 0;
+        t->ready_since = 0;
         if (rq->nr_running > 0)
             rq->nr_running--;
 

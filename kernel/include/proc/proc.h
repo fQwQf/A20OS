@@ -144,6 +144,7 @@ typedef struct task_t {
     uint64_t child_utime;
     uint64_t child_stime;
     uint64_t exec_start;
+    uint64_t ready_since;
     uint32_t cfs_weight;
     int      sched_policy;
     int      waiting_for_child;

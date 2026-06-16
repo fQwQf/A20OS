@@ -1,7 +1,5 @@
 #include "core/trap.h"
 #include "core/defs.h"
-#include "proc/proc.h"
-#include "core/stdio.h"
 
 extern void trap_handler(trap_context_t *ctx);
 extern void kernel_trap_handler(trap_context_t *ctx);
@@ -23,19 +21,6 @@ void trap_handler_la64(trap_context_t *ctx) {
     uint64_t pplv = ctx->prmd & 0x3;
 
     if (pplv != 0) {
-        task_t *cur = proc_current();
-        if (cur && cur->pid >= 5) {
-            uint64_t raw_csr;
-            __asm__ __volatile__("csrrd %0, 0x1" : "=r"(raw_csr));
-            printf("[BRIDGE] pid=%d ctx=%p prmd_ctx=0x%lx prmd_csr=0x%lx era=0x%lx pplv=%lu off_era=%d off_prmd=%d\n",
-                   cur->pid, (void *)ctx,
-                   (unsigned long)ctx->prmd,
-                   (unsigned long)raw_csr,
-                   (unsigned long)ctx->era,
-                   (unsigned long)pplv,
-                   (int)offsetof(trap_context_t, era),
-                   (int)offsetof(trap_context_t, prmd));
-        }
         trap_handler(ctx);
     } else {
         kernel_trap_handler(ctx);
