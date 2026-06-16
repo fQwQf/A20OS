@@ -219,11 +219,8 @@ static net_bh_event_t *bh_ring_prepare(net_bh_ring_t *r)
     if ((head - tail) >= NET_BH_RING_SIZE)
         return NULL;
     net_bh_event_t *e = &r->events[bh_ring_mask(head)];
-    e->next = NULL;
+    memset(e, 0, sizeof(*e));
     e->type = NET_BH_RECV;
-    e->err = 0;
-    e->len = 0;
-    e->addrlen = 0;
     return e;
 }
 
@@ -279,6 +276,16 @@ static void lwip_udp_recv_cb(void *arg, struct udp_pcb *pcb, struct pbuf *p,
     }
 
     net_lwip_ip_to_sockaddr(addr, port, e->addr, &e->addrlen);
+    if (ip_current_is_v6()) {
+        e->has_pktinfo = 1;
+        e->pktinfo_ifindex = ip_current_input_netif() ?
+            (uint32_t)netif_get_index(ip_current_input_netif()) : 0;
+        memcpy(e->pktinfo_addr, ip6_current_dest_addr(), sizeof(e->pktinfo_addr));
+        e->has_hoplimit = 1;
+        e->hoplimit = IP6H_HOPLIM(ip6_current_header());
+        e->has_tclass = 1;
+        e->tclass = IP6H_TC(ip6_current_header());
+    }
     size_t len = p->tot_len;
     if (len > NET_MAX_PAYLOAD)
         len = NET_MAX_PAYLOAD;
@@ -318,6 +325,16 @@ static u8_t lwip_raw_recv_cb(void *arg, struct raw_pcb *pcb, struct pbuf *p,
     }
 
     net_lwip_ip_to_sockaddr(addr, 0, e->addr, &e->addrlen);
+    if (ip_current_is_v6()) {
+        e->has_pktinfo = 1;
+        e->pktinfo_ifindex = ip_current_input_netif() ?
+            (uint32_t)netif_get_index(ip_current_input_netif()) : 0;
+        memcpy(e->pktinfo_addr, ip6_current_dest_addr(), sizeof(e->pktinfo_addr));
+        e->has_hoplimit = 1;
+        e->hoplimit = IP6H_HOPLIM(ip6_current_header());
+        e->has_tclass = 1;
+        e->tclass = IP6H_TC(ip6_current_header());
+    }
     size_t len = p->tot_len;
     if (len > NET_MAX_PAYLOAD)
         len = NET_MAX_PAYLOAD;
@@ -471,8 +488,9 @@ static void net_inet_bottom_half_process_socket_locked(net_socket_t *s)
         if (!e)
             break;
         if (!s->closed) {
-            net_enqueue_msg_locked(s, e->data, e->len,
-                                   e->addrlen ? e->addr : NULL, e->addrlen);
+            net_enqueue_msg_locked_meta(s, e->data, e->len,
+                                        e->addrlen ? e->addr : NULL, e->addrlen,
+                                        e);
         }
         bh_ring_consume_commit(&s->bh_ring);
     }

@@ -68,7 +68,12 @@ LDFLAGS := -static -nostdlib -Ttext 0x10000 $(ARCH_LDFLAGS)
 LIBGCC_DEFAULT := $(shell $(CC) $(CFLAGS) -print-libgcc-file-name 2>/dev/null)
 ifeq ($(ARCH),riscv64)
 LIBGCC_LP64 := $(dir $(LIBGCC_DEFAULT))rv64i/lp64/libgcc.a
-LIBGCC := $(if $(wildcard $(LIBGCC_LP64)),$(LIBGCC_LP64),$(LIBGCC_DEFAULT))
+LIBGCC_LP64_ALT := $(dir $(LIBGCC_DEFAULT))lib64/lp64/libgcc.a
+LIBGCC_LP64_LINUX := $(shell if command -v riscv64-linux-gnu-gcc >/dev/null 2>&1; then \
+	f=$$(riscv64-linux-gnu-gcc -march=rv64g -mabi=lp64 -print-libgcc-file-name 2>/dev/null); \
+	printf '%s\n' "$$f" | grep '/lp64/libgcc\.a$$' || true; \
+fi)
+LIBGCC := $(if $(wildcard $(LIBGCC_LP64)),$(LIBGCC_LP64),$(if $(wildcard $(LIBGCC_LP64_ALT)),$(LIBGCC_LP64_ALT),$(if $(wildcard $(LIBGCC_LP64_LINUX)),$(LIBGCC_LP64_LINUX),$(LIBGCC_DEFAULT))))
 MUSL_CONFIG_LDFLAGS := -L$(dir $(LIBGCC))
 else
 LIBGCC := $(LIBGCC_DEFAULT)
@@ -83,7 +88,6 @@ MUSL_CHECK_FILES := $(MUSL_CRT)/crt1.o \
                     $(MUSL_CRT)/crti.o \
                     $(MUSL_CRT)/crtn.o \
                     $(MUSL_CRT)/libc.a \
-                    $(MUSL_CRT)/libc.so \
                     $(MUSL_BUILD)/obj/include/bits/alltypes.h \
                     $(MUSL_BUILD)/obj/include/bits/syscall.h
 
@@ -476,6 +480,7 @@ musl_prepare:
 		cd "$(MUSL_BUILD)" && ../configure \
 			--target=$(MUSL_TARGET) \
 			--prefix=/opt/musl-$(ARCH) \
+			--disable-shared \
 			--disable-wrapper \
 			CC=$(CC) CROSS_COMPILE=$(CROSS_COMPILE) \
 			CFLAGS='$(MUSL_CONFIG_CFLAGS)' \
@@ -587,6 +592,7 @@ clean:
 	done
 	@test ! -e $(BUILD_DIR)
 	rm -f $(MKSH_DIR)/*.o lib/*.o
+	find $(MUSL_BASE) \( -path '$(MUSL_BASE)/build-*/*.lo' -o -path '$(MUSL_BASE)/build-*/lib/libc.so' \) -delete
 
 distclean: clean
 	rm -rf $(MUSL_BASE)/build-riscv64 $(MUSL_BASE)/build-loongarch64 $(MUSL_BASE)/build-aarch64 $(MUSL_BASE)/build-x86_64
