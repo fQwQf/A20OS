@@ -1,6 +1,7 @@
 #define LINUX_SYSCALL_DECLARE_PROTOTYPES
 #include "syscall_impl.h"
 #include "net/socket_internal.h"
+#include "lwip/raw.h"
 
 typedef struct {
     void *msg_name;
@@ -25,6 +26,187 @@ typedef struct {
     void *base;
     size_t len;
 } socket_iovec_t;
+
+typedef struct {
+    uint32_t cmsg_len;
+    int __pad_cmsg_len;
+    int cmsg_level;
+    int cmsg_type;
+} socket_cmsghdr_t;
+
+typedef struct {
+    uint8_t ipi6_addr[16];
+    unsigned ipi6_ifindex;
+} socket_in6_pktinfo_t;
+
+typedef struct {
+    int has_pktinfo;
+    int has_hoplimit;
+    int has_tclass;
+    int has_2292_pktinfo;
+    int has_2292_hoplimit;
+    uint32_t pktinfo_ifindex;
+    uint8_t pktinfo_addr[16];
+    int hoplimit;
+    int tclass;
+} socket_recv_meta_t;
+
+static size_t cmsg_align(size_t len)
+{
+    return (len + sizeof(size_t) - 1) & ~(sizeof(size_t) - 1);
+}
+
+static size_t cmsg_space(size_t len)
+{
+    return cmsg_align(sizeof(socket_cmsghdr_t)) + cmsg_align(len);
+}
+
+static size_t cmsg_len(size_t len)
+{
+    return cmsg_align(sizeof(socket_cmsghdr_t)) + len;
+}
+
+static void *cmsg_data(socket_cmsghdr_t *cmsg)
+{
+    return (void *)(cmsg + 1);
+}
+
+static const void *cmsg_data_const(const socket_cmsghdr_t *cmsg)
+{
+    return (const void *)(cmsg + 1);
+}
+
+static socket_cmsghdr_t *cmsg_firsthdr(const socket_msghdr_t *mh)
+{
+    return mh->msg_controllen >= sizeof(socket_cmsghdr_t) ?
+           (socket_cmsghdr_t *)mh->msg_control : NULL;
+}
+
+static socket_cmsghdr_t *cmsg_nxthdr(const socket_msghdr_t *mh,
+                                     const socket_cmsghdr_t *cmsg)
+{
+    size_t next = (size_t)((const uint8_t *)cmsg - (const uint8_t *)mh->msg_control) +
+                  cmsg_align(cmsg->cmsg_len);
+    if (cmsg->cmsg_len < sizeof(socket_cmsghdr_t) ||
+        next + sizeof(socket_cmsghdr_t) > mh->msg_controllen)
+        return NULL;
+    return (socket_cmsghdr_t *)((uint8_t *)mh->msg_control + next);
+}
+
+static int parse_send_control(const socket_msghdr_t *mh, int *ttl, int *tclass)
+{
+    if (!mh->msg_control || mh->msg_controllen < sizeof(socket_cmsghdr_t))
+        return 0;
+    socket_cmsghdr_t *cmsg = cmsg_firsthdr(mh);
+    while (cmsg) {
+        size_t need = cmsg_len(0);
+        if (cmsg->cmsg_len < need || cmsg->cmsg_len > mh->msg_controllen)
+            return -EINVAL;
+        if (cmsg->cmsg_level == IPPROTO_IPV6 && cmsg->cmsg_type == IPV6_HOPLIMIT) {
+            if (cmsg->cmsg_len < cmsg_len(sizeof(int)))
+                return -EINVAL;
+            memcpy(ttl, cmsg_data_const(cmsg), sizeof(int));
+        } else if (cmsg->cmsg_level == IPPROTO_IPV6 && cmsg->cmsg_type == IPV6_TCLASS) {
+            if (cmsg->cmsg_len < cmsg_len(sizeof(int)))
+                return -EINVAL;
+            memcpy(tclass, cmsg_data_const(cmsg), sizeof(int));
+        }
+        cmsg = cmsg_nxthdr(mh, cmsg);
+    }
+    return 0;
+}
+
+static size_t build_recv_control(const socket_msghdr_t *mh,
+                                 const net_recv_meta_t *meta,
+                                 socket_recv_meta_t *out)
+{
+    size_t used = 0;
+    uint8_t *dst = (uint8_t *)mh->msg_control;
+    socket_cmsghdr_t *cmsg;
+
+    if (!dst || mh->msg_controllen < sizeof(socket_cmsghdr_t))
+        return 0;
+
+    if (out->has_pktinfo) {
+        size_t need = cmsg_space(sizeof(socket_in6_pktinfo_t));
+        if (used + need > mh->msg_controllen)
+            return used;
+        cmsg = (socket_cmsghdr_t *)(dst + used);
+        cmsg->cmsg_level = IPPROTO_IPV6;
+        cmsg->cmsg_type = IPV6_PKTINFO;
+        cmsg->cmsg_len = (uint32_t)cmsg_len(sizeof(socket_in6_pktinfo_t));
+        socket_in6_pktinfo_t pktinfo = {0};
+        if (meta->has_pktinfo) {
+            memcpy(pktinfo.ipi6_addr, meta->pktinfo_addr, sizeof(pktinfo.ipi6_addr));
+            pktinfo.ipi6_ifindex = meta->pktinfo_ifindex;
+        }
+        memcpy(cmsg_data(cmsg), &pktinfo, sizeof(pktinfo));
+        used += need;
+        out->has_pktinfo = 1;
+    }
+
+    if (out->has_hoplimit) {
+        size_t need = cmsg_space(sizeof(int));
+        if (used + need > mh->msg_controllen)
+            return used;
+        cmsg = (socket_cmsghdr_t *)(dst + used);
+        cmsg->cmsg_level = IPPROTO_IPV6;
+        cmsg->cmsg_type = IPV6_HOPLIMIT;
+        cmsg->cmsg_len = (uint32_t)cmsg_len(sizeof(int));
+        int hoplimit = meta->has_hoplimit ? meta->hoplimit : 0;
+        memcpy(cmsg_data(cmsg), &hoplimit, sizeof(hoplimit));
+        used += need;
+        out->has_hoplimit = 1;
+    }
+
+    if (out->has_tclass) {
+        size_t need = cmsg_space(sizeof(int));
+        if (used + need > mh->msg_controllen)
+            return used;
+        cmsg = (socket_cmsghdr_t *)(dst + used);
+        cmsg->cmsg_level = IPPROTO_IPV6;
+        cmsg->cmsg_type = IPV6_TCLASS;
+        cmsg->cmsg_len = (uint32_t)cmsg_len(sizeof(int));
+        int tclass = meta->has_tclass ? meta->tclass : 0;
+        memcpy(cmsg_data(cmsg), &tclass, sizeof(tclass));
+        used += need;
+        out->has_tclass = 1;
+    }
+
+    if (out->has_2292_pktinfo) {
+        size_t need = cmsg_space(sizeof(socket_in6_pktinfo_t));
+        if (used + need > mh->msg_controllen)
+            return used;
+        cmsg = (socket_cmsghdr_t *)(dst + used);
+        cmsg->cmsg_level = IPPROTO_IPV6;
+        cmsg->cmsg_type = IPV6_2292PKTINFO;
+        cmsg->cmsg_len = (uint32_t)cmsg_len(sizeof(socket_in6_pktinfo_t));
+        socket_in6_pktinfo_t pktinfo = {0};
+        if (meta->has_pktinfo) {
+            memcpy(pktinfo.ipi6_addr, meta->pktinfo_addr, sizeof(pktinfo.ipi6_addr));
+            pktinfo.ipi6_ifindex = meta->pktinfo_ifindex;
+        }
+        memcpy(cmsg_data(cmsg), &pktinfo, sizeof(pktinfo));
+        used += need;
+        out->has_2292_pktinfo = 1;
+    }
+
+    if (out->has_2292_hoplimit) {
+        size_t need = cmsg_space(sizeof(int));
+        if (used + need > mh->msg_controllen)
+            return used;
+        cmsg = (socket_cmsghdr_t *)(dst + used);
+        cmsg->cmsg_level = IPPROTO_IPV6;
+        cmsg->cmsg_type = IPV6_2292HOPLIMIT;
+        cmsg->cmsg_len = (uint32_t)cmsg_len(sizeof(int));
+        int hoplimit = meta->has_hoplimit ? meta->hoplimit : 0;
+        memcpy(cmsg_data(cmsg), &hoplimit, sizeof(hoplimit));
+        used += need;
+        out->has_2292_hoplimit = 1;
+    }
+
+    return used;
+}
 
 static uint64_t socket_timespec_to_ticks(const void *timeout)
 {
@@ -89,16 +271,64 @@ static int64_t sys_sendmsg_from_msghdr(int fd, const socket_msghdr_t *mh,
     int64_t gfd = fdtable_get_current(fd);
     if (gfd < 0) return gfd;
 
+    net_socket_t *sock = net_socket_from_file((int)gfd);
+    int old_ttl = 0;
+    int old_tclass = 0;
+    int have_override = 0;
+    socket_msghdr_t cmh = *mh;
+    void *cbuf = NULL;
+    if (mh->msg_control && mh->msg_controllen) {
+        cbuf = kmalloc(mh->msg_controllen);
+        if (!cbuf) {
+            return -ENOMEM;
+        }
+        if (copy_from_user(cbuf, mh->msg_control, mh->msg_controllen) < 0) {
+            kfree(cbuf);
+            return -EFAULT;
+        }
+        cmh.msg_control = cbuf;
+        int ttl = 0;
+        int tclass = 0;
+        int pr = parse_send_control(&cmh, &ttl, &tclass);
+        if (pr < 0) {
+            kfree(cbuf);
+            return pr;
+        }
+        if (sock && sock->domain == AF_INET6 && sock->raw) {
+            old_ttl = sock->raw->ttl;
+            old_tclass = sock->raw->tos;
+            sock->raw->ttl = ttl ? ttl : sock->raw->ttl;
+            sock->raw->tos = tclass ? tclass : sock->raw->tos;
+            have_override = 1;
+        }
+    }
+
     uint8_t kaddr[NET_SOCKADDR_MAX];
     const void *ka = NULL;
     if (mh->msg_name) {
         if (mh->msg_namelen == 0 || mh->msg_namelen > NET_SOCKADDR_MAX)
-            return -EINVAL;
+            goto out_send;
         if (copy_from_user(kaddr, mh->msg_name, mh->msg_namelen) < 0)
-            return -EFAULT;
+            goto out_send;
         ka = kaddr;
     }
-    return net_sendto((int)gfd, buf, total, flags, ka, mh->msg_namelen);
+    {
+        int64_t r = net_sendto((int)gfd, buf, total, flags, ka, mh->msg_namelen);
+        if (have_override && sock && sock->raw) {
+            sock->raw->ttl = old_ttl;
+            sock->raw->tos = old_tclass;
+        }
+        kfree(cbuf);
+        return r;
+    }
+
+out_send:
+    if (have_override && sock && sock->raw) {
+        sock->raw->ttl = old_ttl;
+        sock->raw->tos = old_tclass;
+    }
+    kfree(cbuf);
+    return -EINVAL;
 }
 
 int64_t sys_sendmsg(int fd, const void *msg, int flags)
@@ -136,8 +366,36 @@ int64_t sys_recvmsg(int fd, void *msg, int flags)
         return -ENOMEM;
     }
 
-    int64_t r = sys_recvfrom(fd, buf, total, flags, mh.msg_name,
-                             &((socket_msghdr_t *)msg)->msg_namelen);
+    int64_t gfd = fdtable_get_current(fd);
+    if (gfd < 0) {
+        kfree(iov);
+        return gfd;
+    }
+    net_socket_t *sock = net_socket_from_file((int)gfd);
+
+    uint8_t kaddr[NET_SOCKADDR_MAX];
+    size_t klen = 0;
+    uint32_t namelen = 0;
+    void *addr = NULL;
+    size_t *addrlen = NULL;
+    if (mh.msg_name) {
+        if (copy_from_user(&namelen, &((socket_msghdr_t *)msg)->msg_namelen,
+                           sizeof(namelen)) < 0) {
+            kfree(iov);
+            return -EFAULT;
+        }
+        klen = namelen;
+        if (klen > NET_SOCKADDR_MAX) {
+            kfree(iov);
+            return -EINVAL;
+        }
+        addr = kaddr;
+        addrlen = &klen;
+    }
+
+    net_recv_meta_t meta;
+    memset(&meta, 0, sizeof(meta));
+    int64_t r = net_recvfrom_meta((int)gfd, buf, total, flags, addr, addrlen, &meta);
     if (r >= 0) {
         size_t copied = 0;
         for (int i = 0; i < mh.msg_iovlen && copied < (size_t)r; i++) {
@@ -150,6 +408,74 @@ int64_t sys_recvmsg(int fd, void *msg, int flags)
                 return -EFAULT;
             }
             copied += n;
+        }
+        if (mh.msg_name) {
+            if (copy_to_user(mh.msg_name, kaddr, klen) < 0) {
+                kfree(iov);
+                return -EFAULT;
+            }
+            namelen = (uint32_t)klen;
+            if (copy_to_user(&((socket_msghdr_t *)msg)->msg_namelen,
+                             &namelen, sizeof(namelen)) < 0) {
+                kfree(iov);
+                return -EFAULT;
+            }
+        }
+        if (mh.msg_control && mh.msg_controllen > 0) {
+            socket_recv_meta_t recv_meta = {0};
+            size_t used = 0;
+            if (sock && sock->domain == AF_INET6 &&
+                (sock->ipv6_recv_pktinfo || sock->ipv6_recv_hoplimit ||
+                 sock->ipv6_recv_tclass || sock->ipv6_recv_2292_pktinfo ||
+                 sock->ipv6_recv_2292_hoplimit)) {
+                if (sock->ipv6_recv_pktinfo) {
+                    recv_meta.has_pktinfo = 1;
+                    if (meta.has_pktinfo) {
+                        recv_meta.pktinfo_ifindex = meta.pktinfo_ifindex;
+                        memcpy(recv_meta.pktinfo_addr, meta.pktinfo_addr, sizeof(recv_meta.pktinfo_addr));
+                    }
+                }
+                if (sock->ipv6_recv_hoplimit) {
+                    recv_meta.has_hoplimit = 1;
+                    recv_meta.hoplimit = meta.has_hoplimit ? meta.hoplimit : 0;
+                }
+                if (sock->ipv6_recv_tclass) {
+                    recv_meta.has_tclass = 1;
+                    recv_meta.tclass = meta.has_tclass ? meta.tclass : 0;
+                }
+                if (sock->ipv6_recv_2292_pktinfo) {
+                    recv_meta.has_2292_pktinfo = 1;
+                    if (meta.has_pktinfo) {
+                        recv_meta.pktinfo_ifindex = meta.pktinfo_ifindex;
+                        memcpy(recv_meta.pktinfo_addr, meta.pktinfo_addr, sizeof(recv_meta.pktinfo_addr));
+                    }
+                }
+                if (sock->ipv6_recv_2292_hoplimit) {
+                    recv_meta.has_2292_hoplimit = 1;
+                    recv_meta.hoplimit = meta.has_hoplimit ? meta.hoplimit : 0;
+                }
+                uint8_t *cbuf = (uint8_t *)kmalloc(mh.msg_controllen);
+                if (!cbuf) {
+                    kfree(iov);
+                    return -ENOMEM;
+                }
+                socket_msghdr_t cmh = mh;
+                cmh.msg_control = cbuf;
+                cmh.msg_controllen = mh.msg_controllen;
+                used = build_recv_control(&cmh, &meta, &recv_meta);
+                if (copy_to_user(mh.msg_control, cbuf, used) < 0) {
+                    kfree(cbuf);
+                    kfree(iov);
+                    return -EFAULT;
+                }
+                kfree(cbuf);
+            }
+            mh.msg_controllen = (uint32_t)used;
+            if (copy_to_user(&((socket_msghdr_t *)msg)->msg_controllen,
+                             &mh.msg_controllen, sizeof(mh.msg_controllen)) < 0) {
+                kfree(iov);
+                return -EFAULT;
+            }
         }
         mh.msg_flags = 0;
         copy_to_user(&((socket_msghdr_t *)msg)->msg_flags, &mh.msg_flags, sizeof(mh.msg_flags));

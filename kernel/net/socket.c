@@ -128,6 +128,8 @@ static int net_bind_reuse_allowed(net_socket_t *new_s, net_socket_t *old_s)
 {
     if (!new_s || !old_s || new_s->type != old_s->type)
         return 0;
+    if (new_s->type == SOCK_RAW)
+        return new_s->protocol == old_s->protocol;
     if (new_s->type != SOCK_DGRAM)
         return 0;
     return (new_s->reuseaddr && old_s->reuseaddr) ||
@@ -285,14 +287,14 @@ int net_socketpair_create(int domain, int type, int protocol, int out_gfd[2]) {
 int net_bind(int gfd, const void *addr, size_t addrlen) {
     net_socket_t *s = net_socket_from_file(gfd);
     if (!s) return -ENOTSOCK;
-    if (s->bound) return -EINVAL;
     int family = sockaddr_family(addr, addrlen);
     if (family < 0) return family;
     int bind_family = family;
     if (bind_family == AF_UNSPEC && (s->domain == AF_INET || s->domain == AF_INET6))
         bind_family = s->domain;
     if (bind_family != s->domain) return -EAFNOSUPPORT;
-    if (addrlen > NET_SOCKADDR_MAX) return -EINVAL;
+    if (addrlen > NET_SOCKADDR_MAX)
+        return -EINVAL;
     if (s->domain == AF_INET && addrlen < sizeof(net_sockaddr_in_t))
         return -EINVAL;
     if (s->domain == AF_INET6 && addrlen < sizeof(net_sockaddr_in6_t))
@@ -302,6 +304,13 @@ int net_bind(int gfd, const void *addr, size_t addrlen) {
     if (family == AF_UNSPEC && (s->domain == AF_INET || s->domain == AF_INET6))
         *(uint16_t *)bind_addr = (uint16_t)s->domain;
     size_t bind_len = addrlen;
+    if (s->bound) {
+        if (s->type != SOCK_RAW)
+            return -EINVAL;
+        memcpy(s->local, bind_addr, bind_len);
+        s->local_len = bind_len;
+        return 0;
+    }
     if (s->domain == AF_ALG)
         return net_alg_socket_bind(s, addr, addrlen);
     if (s->domain == AF_UNIX)
@@ -492,8 +501,8 @@ int net_sendto(int gfd, const void *buf, size_t len, int flags,
     return (int)total;
 }
 
-int net_recvfrom(int gfd, void *buf, size_t len, int flags,
-                 void *addr, size_t *addrlen) {
+int net_recvfrom_meta(int gfd, void *buf, size_t len, int flags,
+                      void *addr, size_t *addrlen, net_recv_meta_t *meta) {
     net_socket_t *s = net_socket_from_file(gfd);
     if (!s) return -ENOTSOCK;
     if (s->domain == AF_ALG)
@@ -503,11 +512,11 @@ int net_recvfrom(int gfd, void *buf, size_t len, int flags,
     for (;;) {
         a20_lwip_poll();
         uint64_t irq = spin_lock_irqsave(&g_net_lock);
-        int r = net_dequeue_msg_locked(s, buf, len, addr, addrlen);
+        int r = net_dequeue_msg_locked_meta(s, buf, len, addr, addrlen, meta);
         if (r > 0 && s->type == SOCK_STREAM) {
             size_t total = (size_t)r;
             while (total < len && s->rx_head) {
-                int nr = net_dequeue_msg_locked(s, (char *)buf + total, len - total, NULL, NULL);
+                int nr = net_dequeue_msg_locked_meta(s, (char *)buf + total, len - total, NULL, NULL, NULL);
                 if (nr <= 0)
                     break;
                 total += (size_t)nr;
@@ -541,4 +550,9 @@ int net_recvfrom(int gfd, void *buf, size_t len, int flags,
         sched();
         net_clear_socket_waiter(s, cur);
     }
+}
+
+int net_recvfrom(int gfd, void *buf, size_t len, int flags,
+                 void *addr, size_t *addrlen) {
+    return net_recvfrom_meta(gfd, buf, len, flags, addr, addrlen, NULL);
 }

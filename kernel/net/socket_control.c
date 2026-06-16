@@ -222,7 +222,11 @@ int net_setsockopt(int gfd, int level, int optname, const void *optval, size_t o
         return optlen >= sizeof(int) ? 0 : -EINVAL;
     if (s->domain == AF_INET6 && level == IPPROTO_IPV6 &&
         (optname == IPV6_RECVPKTINFO || optname == IPV6_RECVTCLASS ||
-         optname == IPV6_RECVHOPLIMIT || optname == IPV6_RECVERR)) {
+         optname == IPV6_RECVHOPLIMIT || optname == IPV6_RECVRTHDR ||
+         optname == IPV6_RECVHOPOPTS || optname == IPV6_RECVDSTOPTS ||
+         optname == IPV6_RECVERR || optname == IPV6_2292PKTINFO ||
+         optname == IPV6_2292HOPLIMIT || optname == IPV6_2292RTHDR ||
+         optname == IPV6_2292HOPOPTS || optname == IPV6_2292DSTOPTS)) {
         if (!optval || optlen < sizeof(int))
             return -EINVAL;
         int val;
@@ -230,7 +234,15 @@ int net_setsockopt(int gfd, int level, int optname, const void *optval, size_t o
         if (optname == IPV6_RECVPKTINFO)  s->ipv6_recv_pktinfo = val != 0;
         if (optname == IPV6_RECVTCLASS)   s->ipv6_recv_tclass  = val != 0;
         if (optname == IPV6_RECVHOPLIMIT) s->ipv6_recv_hoplimit = val != 0;
+        if (optname == IPV6_RECVRTHDR)    s->ipv6_recv_rthdr   = val != 0;
+        if (optname == IPV6_RECVHOPOPTS)  s->ipv6_recv_hopopts = val != 0;
+        if (optname == IPV6_RECVDSTOPTS)  s->ipv6_recv_dstopts = val != 0;
         if (optname == IPV6_RECVERR)      s->ipv6_recv_err     = val != 0;
+        if (optname == IPV6_2292PKTINFO)  s->ipv6_recv_2292_pktinfo = val != 0;
+        if (optname == IPV6_2292HOPLIMIT) s->ipv6_recv_2292_hoplimit = val != 0;
+        if (optname == IPV6_2292RTHDR)    s->ipv6_recv_2292_rthdr = val != 0;
+        if (optname == IPV6_2292HOPOPTS)  s->ipv6_recv_2292_hopopts = val != 0;
+        if (optname == IPV6_2292DSTOPTS)  s->ipv6_recv_2292_dstopts = val != 0;
         return 0;
     }
     if (s->domain == AF_INET6 && level == IPPROTO_IPV6 &&
@@ -468,7 +480,15 @@ int net_getsockopt(int gfd, int level, int optname, void *optval, size_t *optlen
         case IPV6_RECVPKTINFO:     val = s->ipv6_recv_pktinfo; break;
         case IPV6_RECVTCLASS:      val = s->ipv6_recv_tclass; break;
         case IPV6_RECVHOPLIMIT:    val = s->ipv6_recv_hoplimit; break;
+        case IPV6_RECVRTHDR:       val = s->ipv6_recv_rthdr; break;
+        case IPV6_RECVHOPOPTS:     val = s->ipv6_recv_hopopts; break;
+        case IPV6_RECVDSTOPTS:     val = s->ipv6_recv_dstopts; break;
         case IPV6_RECVERR:         val = s->ipv6_recv_err; break;
+        case IPV6_2292PKTINFO:     val = s->ipv6_recv_2292_pktinfo; break;
+        case IPV6_2292HOPLIMIT:    val = s->ipv6_recv_2292_hoplimit; break;
+        case IPV6_2292RTHDR:       val = s->ipv6_recv_2292_rthdr; break;
+        case IPV6_2292HOPOPTS:     val = s->ipv6_recv_2292_hopopts; break;
+        case IPV6_2292DSTOPTS:     val = s->ipv6_recv_2292_dstopts; break;
         case IPV6_UNICAST_IF:      val = 0; break;
         case IPV6_MULTICAST_IF:    val = 0; break;
         case IPV6_MULTICAST_HOPS:  val = -1; break;
