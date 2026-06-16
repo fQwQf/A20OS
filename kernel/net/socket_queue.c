@@ -45,8 +45,9 @@ static void net_wake_queue_space_waiter_locked(net_socket_t *s)
         proc_make_ready(s->send_waiter);
 }
 
-int net_enqueue_msg_locked(net_socket_t *dst, const void *buf, size_t len,
-                           const void *addr, size_t addrlen)
+int net_enqueue_msg_locked_meta(net_socket_t *dst, const void *buf, size_t len,
+                                const void *addr, size_t addrlen,
+                                const net_bh_event_t *meta)
 {
     if (!dst || dst->closed)
         return -ENOTCONN;
@@ -70,6 +71,15 @@ int net_enqueue_msg_locked(net_socket_t *dst, const void *buf, size_t len,
         memcpy(m->addr, addr, addrlen);
         m->addrlen = addrlen;
     }
+    if (meta) {
+        m->has_pktinfo = meta->has_pktinfo;
+        m->has_hoplimit = meta->has_hoplimit;
+        m->has_tclass = meta->has_tclass;
+        m->pktinfo_ifindex = meta->pktinfo_ifindex;
+        memcpy(m->pktinfo_addr, meta->pktinfo_addr, sizeof(m->pktinfo_addr));
+        m->hoplimit = meta->hoplimit;
+        m->tclass = meta->tclass;
+    }
     if (dst->rx_tail)
         dst->rx_tail->next = m;
     else
@@ -78,6 +88,12 @@ int net_enqueue_msg_locked(net_socket_t *dst, const void *buf, size_t len,
     dst->rx_count++;
     net_wake_socket_waiter_locked(dst);
     return (int)len;
+}
+
+int net_enqueue_msg_locked(net_socket_t *dst, const void *buf, size_t len,
+                           const void *addr, size_t addrlen)
+{
+    return net_enqueue_msg_locked_meta(dst, buf, len, addr, addrlen, NULL);
 }
 
 int net_enqueue_msg_blocking(net_socket_t *s, net_socket_t *dst, const void *buf, size_t len,
@@ -142,8 +158,9 @@ int net_enqueue_msg_blocking(net_socket_t *s, net_socket_t *dst, const void *buf
     }
 }
 
-int net_dequeue_msg_locked(net_socket_t *s, void *buf, size_t len,
-                           void *addr, size_t *addrlen)
+int net_dequeue_msg_locked_meta(net_socket_t *s, void *buf, size_t len,
+                                void *addr, size_t *addrlen,
+                                net_recv_meta_t *meta)
 {
     net_msg_t *m = s->rx_head;
     if (!m) {
@@ -159,6 +176,15 @@ int net_dequeue_msg_locked(net_socket_t *s, void *buf, size_t len,
         memcpy(addr, m->addr, alen);
         *addrlen = alen;
     }
+    if (meta) {
+        meta->has_pktinfo = m->has_pktinfo;
+        meta->has_hoplimit = m->has_hoplimit;
+        meta->has_tclass = m->has_tclass;
+        meta->pktinfo_ifindex = m->pktinfo_ifindex;
+        memcpy(meta->pktinfo_addr, m->pktinfo_addr, sizeof(meta->pktinfo_addr));
+        meta->hoplimit = m->hoplimit;
+        meta->tclass = m->tclass;
+    }
 
     if (s->type == SOCK_STREAM && n < avail) {
         m->off += n;
@@ -173,6 +199,12 @@ int net_dequeue_msg_locked(net_socket_t *s, void *buf, size_t len,
     net_wake_socket_waiter_locked(s);
     net_wake_queue_space_waiter_locked(s);
     return (int)n;
+}
+
+int net_dequeue_msg_locked(net_socket_t *s, void *buf, size_t len,
+                           void *addr, size_t *addrlen)
+{
+    return net_dequeue_msg_locked_meta(s, buf, len, addr, addrlen, NULL);
 }
 
 int net_accept_queue_push_locked(net_socket_t *listener, net_socket_t *child)
