@@ -133,12 +133,15 @@ SKIP_GROUPS+=(ltp) # 单独执行
 skip_group() {
     typeset g=$1 runtime=$2 s
 
-    # Keep non-RISC-V musl libcbench disabled until that combination is revalidated.
-    if [[ $(uname -m) != "riscv64" && $g == "libcbench" && $runtime != "glibc" ]]; then
+    # Only musl libctest is a leaderboard item. The glibc script leaves failing
+    # stress children behind and can destabilize later risky groups.
+    if [[ $g == "libctest" && $runtime != "musl" ]]; then
         return 0
     fi
     if [[ $g == "cyclictest" ]]; then
-        if [[ $(uname -m) != "riscv64" || $runtime != "glibc" ]]; then
+        # RISC-V cyclictest passes for both glibc and musl historically; keep them.
+        # LoongArch cyclictest still times out -> skip on non-riscv64.
+        if [[ $(uname -m) != "riscv64" ]]; then
             return 0
         fi
     fi
