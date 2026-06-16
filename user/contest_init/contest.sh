@@ -57,6 +57,67 @@ blacklisted() {
     return 1
 }
 
+cleanup_group() {
+    typeset group=$1 p
+
+    case "$group" in
+    cyclictest)
+        for p in hackbench cyclictest; do
+            /busybox killall "$p" 2>/dev/null || killall "$p" 2>/dev/null
+        done
+        ;;
+    iozone)
+        /busybox killall iozone 2>/dev/null || killall iozone 2>/dev/null
+        ;;
+    lmbench)
+        for p in lmbench_all lat_ctx lat_proc lat_syscall lat_pipe lat_pagefault lat_mmap lat_select lat_mem_rd bw_mem bw_pipe mhz; do
+            /busybox killall "$p" 2>/dev/null || killall "$p" 2>/dev/null
+        done
+        ;;
+    ltp)
+        /busybox killall runtest 2>/dev/null || killall runtest 2>/dev/null
+        ;;
+    esac
+}
+
+group_timeout() {
+    typeset group=$1
+
+    case "$group" in
+    basic|lua) print 180 ;;
+    busybox|iperf|netperf|libctest|libcbench) print 300 ;;
+    cyclictest|iozone|lmbench) print 360 ;;
+    ltp) print 600 ;;
+    *) print 300 ;;
+    esac
+}
+
+run_with_timeout() {
+    typeset runtime=$1 group=$2 cmd=$3
+    typeset -i timeout=${4:-300}
+    typeset -i elapsed=0 rc=0
+
+    mksh "$cmd" &
+    typeset test_pid=$!
+
+    while (( elapsed < timeout )); do
+        if kill -0 $test_pid 2>/dev/null; then
+            sleep 1
+            (( elapsed++ ))
+        else
+            wait $test_pid
+            return $?
+        fi
+    done
+
+    print "[CONTEST][TIMEOUT] runtime=$runtime group=$group after ${timeout}s"
+    print "#### OS COMP TEST GROUP END $group-$runtime ####"
+    print "[CONTEST][FAIL] $group (exit 124)"
+    print "[CONTEST] Stop after timeout to preserve completed scores"
+    poweroff
+    return 124
+}
+
 # ── test group skip list ───────────────────────────────────
 typeset -a SKIP_GROUPS
 SKIP_GROUPS+=(unixbench) # 不计分
@@ -136,69 +197,31 @@ run_ltp() {
 # ── main ────────────────────────────────────────────────────
 typeset -i executed=0 failed=0
 
-for script in /test/*/*_testcode.sh; do
-    [[ -f $script ]] || continue
+run_group() {
+    typeset runtime=$1 group=$2
+    typeset script="/test/$runtime/${group}_testcode.sh"
+    typeset dir="/test/$runtime"
 
-    typeset runtime=${script#/test/}
-    runtime=${runtime%%/*}
-    typeset group=${script##*/}
-    group=${group%_testcode.sh}
-    typeset dir=${script%/*}
+    [[ -f $script ]] || return 0
 
     if skip_group "$group" "$runtime"; then
-        print "[CONTEST][SKIP] $group"
-        continue
+        print "[CONTEST][SKIP] runtime=$runtime group=$group"
+        return 0
     fi
 
     print "[CONTEST][RUN] runtime=$runtime group=$group script=$script"
 
-    cd "$dir" || { print "[CONTEST][ERROR] cd $dir failed"; (( failed++ )); continue; }
+    cd "$dir" || {
+        print "[CONTEST][ERROR] cd $dir failed"
+        (( failed++ ))
+        return 1
+    }
 
     typeset rc=0
+    typeset -i timeout=$(group_timeout "$group")
 
-    # 这两个智障东西不会自动退出
-    if [[ $group == *libctest* ]]; then
-        mksh "${script##*/}" &
-        typeset test_pid=$!
-        typeset -i elapsed=0
-        while (( elapsed < 200 )); do
-            if kill -0 $test_pid 2>/dev/null; then
-                sleep 1
-                (( elapsed++ ))
-            else
-                wait $test_pid
-                rc=$?
-                break
-            fi
-        done
-        if kill -0 $test_pid 2>/dev/null; then
-            kill -9 $test_pid 2>/dev/null
-            wait $test_pid 2>/dev/null
-            rc=1
-        fi
-    elif [[ $group == *libcbench* ]]; then
-        mksh "${script##*/}" &
-        typeset test_pid=$!
-        typeset -i elapsed=0
-        while (( elapsed < 300 )); do
-            if kill -0 $test_pid 2>/dev/null; then
-                sleep 1
-                (( elapsed++ ))
-            else
-                wait $test_pid
-                rc=$?
-                break
-            fi
-        done
-        if kill -0 $test_pid 2>/dev/null; then
-            kill -9 $test_pid 2>/dev/null
-            wait $test_pid 2>/dev/null
-            rc=1
-        fi
-    else
-        mksh "${script##*/}"
-        rc=$?
-    fi
+    run_with_timeout "$runtime" "$group" "${script##*/}" "$timeout"
+    rc=$?
     cd /
     if (( rc == 0 )); then
         print "[CONTEST][PASS] $group"
@@ -207,6 +230,19 @@ for script in /test/*/*_testcode.sh; do
         (( failed++ ))
     fi
     (( executed++ ))
+}
+
+typeset runtime group
+for group in basic busybox lua libctest iperf netperf libcbench; do
+    for runtime in glibc musl; do
+        run_group "$runtime" "$group"
+    done
+done
+
+for group in cyclictest iozone lmbench; do
+    for runtime in glibc musl; do
+        run_group "$runtime" "$group"
+    done
 done
 
 # ── LTP (standalone) ───────────────────────────────────────
@@ -215,7 +251,25 @@ for rt_dir in /test/*/ltp/testcases/bin; do
     typeset runtime=${rt_dir#/test/}
     runtime=${runtime%%/*}
 
-    run_ltp "$runtime" "ltp-$runtime"
+    run_ltp "$runtime" "ltp-$runtime" &
+    typeset ltp_pid=$!
+    typeset -i ltp_elapsed=0 ltp_timeout=$(group_timeout ltp)
+    while (( ltp_elapsed < ltp_timeout )); do
+        if kill -0 $ltp_pid 2>/dev/null; then
+            sleep 1
+            (( ltp_elapsed++ ))
+        else
+            wait $ltp_pid
+            break
+        fi
+    done
+    if kill -0 $ltp_pid 2>/dev/null; then
+        print "[CONTEST][TIMEOUT] runtime=$runtime group=ltp after ${ltp_timeout}s"
+        print "#### OS COMP TEST GROUP END ltp-$runtime ####"
+        print "[CONTEST][FAIL] ltp (exit 124)"
+        print "[CONTEST] Stop after timeout to preserve completed scores"
+        poweroff
+    fi
     (( executed++ ))
 done
 
