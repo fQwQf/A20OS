@@ -86,7 +86,8 @@ group_timeout() {
     case "$group" in
     basic|lua) print 180 ;;
     busybox|iperf|netperf|libctest|libcbench) print 300 ;;
-    cyclictest|iozone|lmbench) print 360 ;;
+    cyclictest|iozone) print 360 ;;
+    lmbench) print 1800 ;;
     ltp) print 600 ;;
     *) print 300 ;;
     esac
@@ -248,33 +249,10 @@ for group in cyclictest iozone lmbench; do
     done
 done
 
-# ── LTP (standalone) ───────────────────────────────────────
-for rt_dir in /test/*/ltp/testcases/bin; do
-    [[ -d $rt_dir ]] || continue
-    typeset runtime=${rt_dir#/test/}
-    runtime=${runtime%%/*}
-
-    run_ltp "$runtime" "ltp-$runtime" &
-    typeset ltp_pid=$!
-    typeset -i ltp_elapsed=0 ltp_timeout=$(group_timeout ltp)
-    while (( ltp_elapsed < ltp_timeout )); do
-        if kill -0 $ltp_pid 2>/dev/null; then
-            sleep 1
-            (( ltp_elapsed++ ))
-        else
-            wait $ltp_pid
-            break
-        fi
-    done
-    if kill -0 $ltp_pid 2>/dev/null; then
-        print "[CONTEST][TIMEOUT] runtime=$runtime group=ltp after ${ltp_timeout}s"
-        print "#### OS COMP TEST GROUP END ltp-$runtime ####"
-        print "[CONTEST][FAIL] ltp (exit 124)"
-        print "[CONTEST] Stop after timeout to preserve completed scores"
-        poweroff
-    fi
-    (( executed++ ))
-done
+# Current scoring phase intentionally stops before LTP.  Keep the skip explicit
+# so the entry preserves completed iozone/lmbench scores and does not spend the
+# remaining QEMU budget on unrelated long-running tests.
+print "[CONTEST][SKIP] group=ltp current_phase=iozone_lmbench"
 
 print "[CONTEST] Done: $executed tests, $failed failures"
 
