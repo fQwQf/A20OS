@@ -47,7 +47,7 @@ void proc_task_init_common(task_t *t, task_t *parent)
     t->parent    = parent;
     t->exit_code = 0;
     t->priority  = parent ? parent->priority : 0;
-    t->sched_level = parent ? parent->sched_level : 0;
+    t->sched_level = 0;
     t->cpu_id    = parent ? parent->cpu_id : cpu_current_id();
     t->on_rq     = 0;
     t->vfork_waiting = 0;
@@ -55,6 +55,7 @@ void proc_task_init_common(task_t *t, task_t *parent)
     t->rq_prev   = NULL;
     t->wait_next = NULL;
     t->exec_start = 0;
+    t->ready_since = 0;
     t->cfs_weight = sched_weight_for_nice(t->priority);
     t->sched_policy = parent ? parent->sched_policy : SCHED_NORMAL;
     t->waiting_for_child = 0;
