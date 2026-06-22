@@ -449,6 +449,8 @@ int64_t sys_pipe2(int *pipefd, int flags) {
 }
 
 int64_t sys_ioctl(int fd, unsigned long req, void *arg) {
+    req &= 0xffffffffUL;
+
     int64_t gfd = fdtable_get_current(fd);
     if (gfd < 0) return gfd;
     if (req == TIOCGPGRP) {
