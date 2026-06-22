@@ -44,6 +44,28 @@ static int parse_block_dev(const char *dev, int *out_idx, int *out_part) {
     return 0;
 }
 
+static int mount_block_dev_idx(int dev_idx, const char *path, const char *fstype) {
+    block_dev_t *bdev = virtio_blk_get_dev(dev_idx);
+    if (!bdev) return -ENODEV;
+    bcache_t *bc = bcache_create(bdev);
+    if (!bc) return -ENOMEM;
+
+    int r;
+    if (fstype && fstype[0]) {
+        r = vfs_mount_bc(path, fstype, bc);
+    } else {
+        r = vfs_mount_bc(path, "ext4", bc);
+        if (r < 0) {
+            bcache_destroy(bc);
+            bc = bcache_create(bdev);
+            if (!bc) return -ENOMEM;
+            r = vfs_mount_bc(path, "vfat", bc);
+        }
+    }
+    if (r < 0) bcache_destroy(bc);
+    return r;
+}
+
 int vfs_mount(const char *dev, const char *path, const char *fstype, int flags, const char *data) {
     if (!path || !fstype) return -EINVAL;
     if (strcmp(fstype, "cgroup") == 0 || strcmp(fstype, "cgroup2") == 0) {
@@ -123,23 +145,12 @@ int vfs_mount(const char *dev, const char *path, const char *fstype, int flags, 
     {
         int dev_idx = 0, part_num = 0;
         if (parse_block_dev(dev, &dev_idx, &part_num) == 0) {
-            block_dev_t *bdev = virtio_blk_get_dev(dev_idx);
-            if (!bdev) return -ENODEV;
-            bcache_t *bc = bcache_create(bdev);
-            if (!bc) return -ENOMEM;
-            int r;
-            if (fstype && fstype[0]) {
-                r = vfs_mount_bc(path, fstype, bc);
-            } else {
-                r = vfs_mount_bc(path, "ext4", bc);
-                if (r < 0) {
-                    bcache_destroy(bc);
-                    bc = bcache_create(bdev);
-                    if (!bc) return -ENOMEM;
-                    r = vfs_mount_bc(path, "vfat", bc);
-                }
+            int r = mount_block_dev_idx(dev_idx, path, fstype);
+            if (r < 0 && part_num > 1) {
+                int compat_idx = dev_idx + part_num - 1;
+                if (compat_idx != dev_idx)
+                    r = mount_block_dev_idx(compat_idx, path, fstype);
             }
-            if (r < 0) bcache_destroy(bc);
             return r;
         }
     }
@@ -241,7 +252,6 @@ int vfs_umount(const char *path) {
                 ext4_unmount(root);
             }
             vfs_mount_remove(mnt);
-            vnode_put(root);
             return 0;
         }
     }
@@ -276,4 +286,3 @@ int vfs_ftruncate(int fd, size_t size) {
     vfs_put_file_ref(fd, vf);
     return r;
 }
-
