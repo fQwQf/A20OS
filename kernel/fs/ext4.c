@@ -824,7 +824,7 @@ static void ext4_release_vn(vnode_t *vn) {
     ext4_vnode_priv_t *p = (ext4_vnode_priv_t *)vn->fs_data;
     if (p) ext4_vnode_cache_remove(p->sb, p->inode_num);
     if (vn->fs_data) { kfree(vn->fs_data); vn->fs_data = NULL; }
-    vnode_put(vn->parent);
+    if (vn->parent && vn->parent != vn) vnode_put(vn->parent);
     kfree(vn);
 }
 

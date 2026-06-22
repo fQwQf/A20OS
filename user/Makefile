@@ -477,7 +477,7 @@ musl_prepare:
 		echo "[MUSL] build-$(ARCH) stale or missing, rebuilding..."; \
 		rm -rf "$(MUSL_BUILD)"; \
 		mkdir -p "$(MUSL_BUILD)"; \
-		cd "$(MUSL_BUILD)" && ../configure \
+		cd "$(MUSL_BUILD)" && sh ../configure \
 			--target=$(MUSL_TARGET) \
 			--prefix=/opt/musl-$(ARCH) \
 			--disable-shared \

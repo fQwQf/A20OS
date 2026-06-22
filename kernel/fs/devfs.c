@@ -7,9 +7,24 @@
 #include "core/consts.h"
 #include "core/defs.h"
 #include "core/random.h"
+#include "core/sync.h"
+#include "proc/proc.h"
 
 extern void uart_putc(char c);
 extern int  uart_getc(void);
+
+#define TTY_LINE_SLOTS 16
+#define TTY_LINE_BUF_SIZE 256
+
+typedef struct tty_line_buffer {
+    int pid;
+    size_t len;
+    char data[TTY_LINE_BUF_SIZE];
+} tty_line_buffer_t;
+
+static mutex_t g_tty_write_lock = MUTEX_INIT;
+static int g_tty_line_owner = -1;
+static tty_line_buffer_t g_tty_line_buffers[TTY_LINE_SLOTS];
 
 enum {
     DEVFS_ROOT,
@@ -145,9 +160,97 @@ static int devfs_stdin_read(vfile_t *vf, char *buf, size_t count) {
     return 1;
 }
 
+static tty_line_buffer_t *tty_line_buffer_for(int pid) {
+    tty_line_buffer_t *free_slot = NULL;
+    for (int i = 0; i < TTY_LINE_SLOTS; i++) {
+        if (g_tty_line_buffers[i].len > 0 && g_tty_line_buffers[i].pid == pid)
+            return &g_tty_line_buffers[i];
+        if (!free_slot && g_tty_line_buffers[i].len == 0)
+            free_slot = &g_tty_line_buffers[i];
+    }
+    if (free_slot) {
+        free_slot->pid = pid;
+        free_slot->len = 0;
+    }
+    return free_slot;
+}
+
+static void tty_write_owned_char(int pid, char c) {
+    if (g_tty_line_owner < 0)
+        g_tty_line_owner = pid;
+    uart_putc(c);
+    if (c == '\n')
+        g_tty_line_owner = -1;
+}
+
+static int tty_line_owner_live_locked(void) {
+    if (g_tty_line_owner < 0)
+        return 0;
+    task_t *owner = proc_find(g_tty_line_owner);
+    return owner && owner->state != PROC_ZOMBIE && owner->state != PROC_UNUSED;
+}
+
+static void tty_drain_pending_locked(void) {
+    int progress = 1;
+    while (g_tty_line_owner < 0 && progress) {
+        progress = 0;
+        for (int i = 0; i < TTY_LINE_SLOTS; i++) {
+            tty_line_buffer_t *b = &g_tty_line_buffers[i];
+            if (b->len == 0) continue;
+            int pid = b->pid;
+            size_t n = b->len;
+            char tmp[TTY_LINE_BUF_SIZE];
+            memcpy(tmp, b->data, n);
+            b->len = 0;
+            progress = 1;
+            for (size_t j = 0; j < n; j++)
+                tty_write_owned_char(pid, tmp[j]);
+            if (g_tty_line_owner >= 0)
+                return;
+        }
+    }
+}
+
+static void tty_release_dead_owner_locked(void) {
+    if (g_tty_line_owner >= 0 && !tty_line_owner_live_locked()) {
+        g_tty_line_owner = -1;
+        tty_drain_pending_locked();
+    }
+}
+
+static void tty_buffer_pending_char(int pid, char c) {
+    tty_line_buffer_t *b = tty_line_buffer_for(pid);
+    if (!b) {
+        uart_putc(c);
+        if (c == '\n')
+            g_tty_line_owner = -1;
+        return;
+    }
+    if (b->len >= TTY_LINE_BUF_SIZE) {
+        for (size_t i = 0; i < b->len; i++)
+            uart_putc(b->data[i]);
+        b->len = 0;
+    }
+    b->data[b->len++] = c;
+}
+
 static int devfs_stdout_write(vfile_t *vf, const char *buf, size_t count) {
     (void)vf;
-    for (size_t i = 0; i < count; i++) uart_putc(buf[i]);
+    task_t *t = proc_current();
+    int pid = t ? t->pid : -1;
+    mutex_lock(&g_tty_write_lock);
+    tty_release_dead_owner_locked();
+    for (size_t i = 0; i < count; i++) {
+        char c = buf[i];
+        if (pid < 0 || g_tty_line_owner < 0 || g_tty_line_owner == pid) {
+            tty_write_owned_char(pid, c);
+            if (g_tty_line_owner < 0)
+                tty_drain_pending_locked();
+        } else {
+            tty_buffer_pending_char(pid, c);
+        }
+    }
+    mutex_unlock(&g_tty_write_lock);
     return (int)count;
 }
 

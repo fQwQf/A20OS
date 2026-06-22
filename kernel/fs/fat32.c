@@ -373,7 +373,7 @@ static int fat32_stat(vnode_t *vn, kstat_t *st) {
 /* vnode_ops: release */
 static void fat32_release_vn(vnode_t *vn) {
     if (vn->fs_data) { kfree(vn->fs_data); vn->fs_data = NULL; }
-    vnode_put(vn->parent);
+    if (vn->parent && vn->parent != vn) vnode_put(vn->parent);
     kfree(vn);
 }
 

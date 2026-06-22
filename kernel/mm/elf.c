@@ -30,7 +30,7 @@
 /* musl struct pthread is ~300-400 bytes; 512 gives headroom */
 #define TLS_TCB_SIZE       512
 
-#define ASLR_BITS          16
+#define ASLR_BITS          11
 #define ASLR_MASK          (((1UL << ASLR_BITS) - 1) << 16)
 
 /* Max program headers we read in one shot (3584 bytes on stack) */
