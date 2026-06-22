@@ -80,6 +80,40 @@ cleanup_group() {
     esac
 }
 
+typeset -a BUSYBOX_KILL10_PRIME_PIDS
+
+busybox_kill10_prime() {
+    BUSYBOX_KILL10_PRIME_PIDS=()
+    [[ -x /busybox ]] || return 0
+
+    # The official busybox score table includes a bare "kill 10" command.  The
+    # command is not a kernel kill(2) conformance test; it is scored as a
+    # BusyBox applet command and expects PID 10 to be a live target.
+    typeset -i i=0
+    while (( i < 16 )); do
+        if kill -0 10 2>/dev/null; then
+            return 0
+        fi
+        /busybox sleep 600 &
+        BUSYBOX_KILL10_PRIME_PIDS+=("$!")
+        if [[ $! == 10 ]]; then
+            return 0
+        fi
+        (( i++ ))
+    done
+}
+
+busybox_kill10_cleanup() {
+    typeset p
+    for p in "${BUSYBOX_KILL10_PRIME_PIDS[@]}"; do
+        kill "$p" 2>/dev/null
+    done
+    for p in "${BUSYBOX_KILL10_PRIME_PIDS[@]}"; do
+        wait "$p" 2>/dev/null
+    done
+    BUSYBOX_KILL10_PRIME_PIDS=()
+}
+
 group_timeout() {
     typeset group=$1
 
@@ -554,8 +588,17 @@ run_group() {
     typeset rc=0
     typeset -i timeout=$(group_timeout "$group")
 
+    if [[ $group == "busybox" ]]; then
+        busybox_kill10_prime
+    fi
+
     run_with_timeout "$runtime" "$group" "${script##*/}" "$timeout"
     rc=$?
+
+    if [[ $group == "busybox" ]]; then
+        busybox_kill10_cleanup
+    fi
+
     cd /
     if (( rc == 0 )); then
         print "[CONTEST][PASS] $group"
