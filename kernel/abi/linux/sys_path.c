@@ -538,6 +538,7 @@ int64_t sys_umount2(const char *target, int flags) {
         strncpy(ktarget, abs, sizeof(ktarget) - 1);
         ktarget[sizeof(ktarget) - 1] = '\0';
     }
+    vfs_path_normalize_absolute(ktarget);
     return vfs_umount(ktarget);
 }
 
