@@ -484,14 +484,17 @@ int vfs_unlink(const char *path) {
     vnode_t *victim = NULL;
     if (parent->ops->lookup && parent->ops->lookup(parent, name, &victim) == 0 && victim) {
         int sr = vfs_sticky_may_remove(parent, victim);
-        vnode_put(victim);
         if (sr < 0) {
+            vnode_put(victim);
             vnode_put(parent);
             return sr;
         }
     }
 
     int r = parent->ops->unlink(parent, name);
+    if (r == 0)
+        vfs_drop_time_meta(victim);
+    vnode_put(victim);
     vnode_put(parent);
     if (r == 0)
         vfs_dcache_invalidate_all();
@@ -602,8 +605,8 @@ int vfs_rename_flags(const char *old, const char *newpath, unsigned int flags) {
             return -EEXIST;
         }
         int sr = vfs_sticky_may_remove(new_dir, new_victim);
-        vnode_put(new_victim);
         if (sr < 0) {
+            vnode_put(new_victim);
             vnode_put(old_dir);
             vnode_put(new_dir);
             return sr;
@@ -612,9 +615,12 @@ int vfs_rename_flags(const char *old, const char *newpath, unsigned int flags) {
 
     int r = old_dir->ops->rename(old_dir, old_name, new_dir, new_name, flags);
     if (r == 0) {
+        if (new_victim && !(flags & RENAME_EXCHANGE))
+            vfs_drop_time_meta(new_victim);
         vfs_dcache_invalidate(old_dir, old_name);
         vfs_dcache_invalidate(new_dir, new_name);
     }
+    vnode_put(new_victim);
     vnode_put(old_dir);
     vnode_put(new_dir);
     return r;
@@ -661,14 +667,17 @@ int vfs_rmdir(const char *path) {
     vnode_t *victim = NULL;
     if (parent->ops->lookup && parent->ops->lookup(parent, name, &victim) == 0 && victim) {
         int sr = vfs_sticky_may_remove(parent, victim);
-        vnode_put(victim);
         if (sr < 0) {
+            vnode_put(victim);
             vnode_put(parent);
             return sr;
         }
     }
 
     int r = parent->ops->rmdir(parent, name);
+    if (r == 0)
+        vfs_drop_time_meta(victim);
+    vnode_put(victim);
     vnode_put(parent);
     if (r == 0)
         vfs_dcache_invalidate_all();
