@@ -258,6 +258,19 @@ static vfs_time_meta_t *vfs_time_meta_for(vnode_t *vn)
     return NULL;
 }
 
+void vfs_drop_time_meta(vnode_t *vn)
+{
+    if (!vn)
+        return;
+    for (int i = 0; i < VFS_TIME_META_MAX; i++) {
+        if (g_time_meta[i].used && g_time_meta[i].mnt == vn->mnt &&
+            g_time_meta[i].ino == vn->ino) {
+            memset(&g_time_meta[i], 0, sizeof(g_time_meta[i]));
+            return;
+        }
+    }
+}
+
 void vfs_touch_mtime(vnode_t *vn)
 {
     vfs_time_meta_t *tm = vfs_time_meta_for(vn);
