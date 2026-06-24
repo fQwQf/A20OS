@@ -81,6 +81,36 @@ LIBGCC_S_aarch64 := /usr/lib/aarch64-linux-gnu/libgcc_s.so.1
 LIBGCC_S_x86_64 := /usr/lib/x86_64-linux-gnu/libgcc_s.so.1
 LIBGCC_S_ARCH := $(LIBGCC_S_$(ARCH))
 
+# ----------------------------------------------------------------
+# Rust support (post-competition incremental RIIR)
+# ----------------------------------------------------------------
+RUST_ENABLED ?= 0
+RUST_MODULE_XATTR ?= 0
+
+RUSTC = rustc
+RUST_TARGET_riscv64 = riscv64gc-unknown-none-elf
+RUST_TARGET_loongarch64 = loongarch64-unknown-none
+RUST_TARGET_aarch64 = aarch64-unknown-none
+RUST_TARGET_x86_64 = x86_64-unknown-none
+RUST_TARGET = $(RUST_TARGET_$(ARCH))
+
+RUSTFLAGS = --edition 2021 \
+            --crate-type rlib \
+            -C opt-level=$(if $(filter -O3,$(OPT)),3,2) \
+            -C panic=abort \
+            --target $(RUST_TARGET)
+
+RUST_SUPPORT_LIB = $(BUILD_DIR)/rust/liba20rust_support.rlib
+RUST_LIBS =
+
+ifeq ($(RUST_ENABLED),1)
+  ifeq ($(RUST_MODULE_XATTR),1)
+    CFLAGS += -DCONFIG_RUST_XATTR
+    KERNEL_SRC := $(filter-out $(KERNEL_DIR)/fs/xattr.c,$(KERNEL_SRC))
+    RUST_LIBS += $(BUILD_DIR)/rust/libxattr.rlib
+  endif
+endif
+
 # Compiler and tools
 ifeq ($(ARCH), riscv64)
     CROSS_PREFIX = riscv64-unknown-elf-
@@ -1008,9 +1038,17 @@ ext4_img: $(USER_BUILD_STAMP) ext4_img_only
 $(KERNEL_BIN): $(KERNEL_ELF)
 	$(CROSS_PREFIX)objcopy -O binary $< $@
 
-$(KERNEL_ELF): $(KERNEL_OBJ) $(ASM_OBJ) $(KERNEL_DIR)/arch/$(ARCH)/boot/ldscript.ld
+$(KERNEL_ELF): $(KERNEL_OBJ) $(ASM_OBJ) $(RUST_LIBS) $(KERNEL_DIR)/arch/$(ARCH)/boot/ldscript.ld
 	@mkdir -p $(dir $@)
-	$(CROSS_PREFIX)gcc $(LDFLAGS) $(KERNEL_OBJ) $(ASM_OBJ) -o $@
+	$(CROSS_PREFIX)gcc $(LDFLAGS) $(KERNEL_OBJ) $(ASM_OBJ) $(RUST_LIBS) -o $@
+
+$(BUILD_DIR)/rust/liba20rust_support.rlib: kernel/rust/support/panic_handler.rs Makefile
+	@mkdir -p $(dir $@)
+	$(RUSTC) $(RUSTFLAGS) $< -o $@
+
+$(BUILD_DIR)/rust/libxattr.rlib: kernel/rust/xattr/lib.rs kernel/rust/xattr/ffi.rs $(RUST_SUPPORT_LIB) Makefile
+	@mkdir -p $(dir $@)
+	$(RUSTC) $(RUSTFLAGS) --extern a20rust_support=$(RUST_SUPPORT_LIB) $< -o $@
 
 $(BUILD_DIR)/%.o: $(KERNEL_DIR)/%.c Makefile | $(BUILD_TIME_HDR)
 	@mkdir -p $(dir $@)
