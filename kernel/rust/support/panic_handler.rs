@@ -7,6 +7,8 @@
 #![no_std]
 #![feature(lang_items)]
 
+pub mod lock;
+
 use core::panic::PanicInfo;
 
 extern "C" {

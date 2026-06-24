@@ -23,7 +23,8 @@ use core::ptr;
 use core::slice;
 
 use ffi::{
-    proc_current, proc_has_cap, spin_lock, spin_unlock, strlen, strncpy, CAP_SYS_ADMIN,
+    a20_proc_has_cap, a20_spin_lock, a20_spin_unlock, proc_current, strlen, strncpy,
+    CAP_SYS_ADMIN,
 };
 
 pub const XATTR_NAME_MAX_LOCAL: usize = 64;
@@ -95,12 +96,12 @@ static mut G_XATTR_LOCK: ffi::spinlock_t = ffi::spinlock_t::new();
 
 fn table_lock() {
     // Safety: lock address is valid and never moved.
-    unsafe { spin_lock(ptr::addr_of_mut!(G_XATTR_LOCK)) };
+    unsafe { a20_spin_lock(ptr::addr_of_mut!(G_XATTR_LOCK)) };
 }
 
 fn table_unlock() {
     // Safety: lock address is valid and never moved.
-    unsafe { spin_unlock(ptr::addr_of_mut!(G_XATTR_LOCK)) };
+    unsafe { a20_spin_unlock(ptr::addr_of_mut!(G_XATTR_LOCK)) };
 }
 
 fn c_str_len(ptr: *const c_char) -> Option<usize> {
@@ -164,7 +165,7 @@ fn check_cap_if_needed(needs_cap: c_int) -> c_int {
     }
     // Safety: FFI calls with valid constants.
     let cur = unsafe { proc_current() };
-    if cur.is_null() || unsafe { proc_has_cap(cur, CAP_SYS_ADMIN) } == 0 {
+    if cur.is_null() || unsafe { a20_proc_has_cap(cur, CAP_SYS_ADMIN) } == 0 {
         return -ffi::EPERM;
     }
     0

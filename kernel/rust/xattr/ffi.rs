@@ -40,8 +40,8 @@ extern "C" {
     pub fn strncpy(dst: *mut c_char, src: *const c_char, n: usize) -> *mut c_char;
 
     pub fn proc_current() -> *mut task_t;
-    pub fn proc_has_cap(task: *mut task_t, cap: c_int) -> c_int;
+    pub fn a20_proc_has_cap(task: *mut task_t, cap: c_int) -> c_int;
 
-    pub fn spin_lock(lock: *mut spinlock_t);
-    pub fn spin_unlock(lock: *mut spinlock_t);
+    pub fn a20_spin_lock(lock: *mut spinlock_t);
+    pub fn a20_spin_unlock(lock: *mut spinlock_t);
 }

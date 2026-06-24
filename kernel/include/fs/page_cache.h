@@ -21,6 +21,9 @@
  *   cache before fsync/msync/writeback so user writes reach the backing file.
  */
 
+#ifdef CONFIG_RUST_PAGECACHE
+typedef struct page_cache_page page_cache_page_t;
+#else
 typedef struct page_cache_page {
     vnode_t *vnode;
     uint64_t index;
@@ -35,6 +38,7 @@ typedef struct page_cache_page {
     struct page_cache_page *next;
     struct page_cache_page *hnext;
 } page_cache_page_t;
+#endif
 
 typedef struct page_cache_stats {
     size_t capacity;
