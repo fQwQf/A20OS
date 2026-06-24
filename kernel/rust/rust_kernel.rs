@@ -28,3 +28,6 @@ extern crate sync;
 
 #[cfg(rust_module_slab)]
 extern crate slab;
+
+#[cfg(rust_module_stat_perm)]
+extern crate stat_perm;

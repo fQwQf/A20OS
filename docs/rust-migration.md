@@ -44,13 +44,14 @@ The RISC-V target uses `imac` (soft-float `lp64` ABI) to match the C kernel's
 | `RUST_MODULE_BLOCKCACHE` | `0` | Use Rust block cache implementation |
 | `RUST_MODULE_SYNC` | `0` | Use Rust waitqueue/mutex/completion implementation |
 | `RUST_MODULE_SLAB` | `0` | Use Rust slab allocator implementation |
+| `RUST_MODULE_STATPERM` | `0` | Use Rust stat/permission/time metadata implementation |
 
 To build with all current Rust modules:
 
 ```bash
 make RUST_ENABLED=1 RUST_MODULE_XATTR=1 RUST_MODULE_TIMEKEEPING=1 \
      RUST_MODULE_PAGECACHE=1 RUST_MODULE_BLOCKCACHE=1 RUST_MODULE_SYNC=1 \
-     RUST_MODULE_SLAB=1 \
+     RUST_MODULE_SLAB=1 RUST_MODULE_STATPERM=1 \
      ARCH=riscv64 kernel-only
 ```
 
@@ -128,6 +129,9 @@ Rewrote `kernel/core/sync.c` in Rust.
   architectures and `smoke-vfs-stress`/`smoke-futex-stress`/
   `smoke-sched-stress` on riscv64, both alone and with all other Rust
   modules enabled.
+- `RUST_MODULE_STATPERM=1` passes `make check-kernel-build` on all four
+  architectures and `smoke-vfs-stress`/`smoke-futex-stress`/
+  `smoke-sched-stress`/`smoke-vfs-edge` on riscv64.
 
 ## Phase 6
 
@@ -145,11 +149,29 @@ Rewrote `kernel/mm/slab.c` in Rust.
   `smoke-futex-stress`, and `smoke-sched-stress` pass on riscv64, both with
   slab alone and with all current Rust modules enabled.
 
-## Phase 7 candidates
+## Phase 7
 
-- `kernel/fs/vfs/stat_perm.c` — permission/time metadata (needs stable access
-  to `proc_cred_t`; consider adding a C helper or using bindgen).
+Rewrote `kernel/fs/vfs/stat_perm.c` in Rust.
+
+- New module: `kernel/rust/stat_perm/`.
+- Fixes the unprotected global `g_time_meta` array race: a single
+  `IrqSaveSpinLock<[Option<TimeMeta>; VFS_TIME_META_MAX]>` now protects all
+  lookup/insert/update/drop operations.
+- Avoids deadlock in `vfs_set_times` by reading old times via `vfs_vnode_stat`
+  *before* acquiring the time-metadata lock.
+- Adds shared C helpers in `kernel/rust/support/stat_perm_helpers.c` for
+  vnode `(mnt, ino)` key extraction, `vn->ops->stat` fallback, and credential
+  copying, plus `a20_timekeeping_get_realtime` in
+  `kernel/rust/support/time_helpers.c`.
+- Toggle: `RUST_MODULE_STATPERM=1`.
+- Builds for all four architectures; `smoke-vfs-stress`, `smoke-futex-stress`,
+  `smoke-sched-stress`, and `smoke-vfs-edge` pass on riscv64.
+
+## Phase 8 candidates
+
 - `kernel/core/random.c` — self-contained RNG, but depends on entropy helpers
   and irqsave locks.
 - `kernel/fs/vfs/vnode.c` — vnode reference counting and lifecycle; moderate
   blast radius but clear concurrency boundaries.
+- `kernel/fs/vfs/path_resolution.c` / `path.c` — dcache/path walk; complex
+  lock ordering, defer until simpler targets are done.
