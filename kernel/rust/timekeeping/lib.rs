@@ -12,12 +12,9 @@ mod ffi;
 use core::ptr;
 
 use ffi::{
-    a20_arch_timer_freq, a20_irqsave_lock, a20_irqsave_unlock, timer_get_ticks, SPINLOCK_INIT,
+    a20_arch_timer_freq, a20_build_unix_time, a20_irqsave_lock, a20_irqsave_unlock,
+    timer_get_ticks, SPINLOCK_INIT,
 };
-
-extern "C" {
-    static A20_BUILD_UNIX_TIME: u64;
-}
 
 #[repr(C)]
 struct TimekeepingState {
@@ -56,7 +53,7 @@ fn ticks_to_timespec(ticks: u64) -> [u64; 2] {
 #[no_mangle]
 pub unsafe extern "C" fn timekeeping_init() {
     let boot_ticks = unsafe { timer_get_ticks() };
-    let build_time = unsafe { ptr::read_volatile(ptr::addr_of!(A20_BUILD_UNIX_TIME)) };
+    let build_time = unsafe { a20_build_unix_time() };
 
     unsafe {
         G_STATE.boot_ticks = boot_ticks;

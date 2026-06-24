@@ -88,9 +88,12 @@ RUST_ENABLED ?= 0
 RUST_MODULE_XATTR ?= 0
 
 RUST_MODULE_TIMEKEEPING ?= 0
+RUST_MODULE_PAGECACHE ?= 0
+RUST_MODULE_BLOCKCACHE ?= 0
+RUST_MODULE_SYNC ?= 0
 
 RUSTC = rustc
-RUST_TARGET_riscv64 = riscv64gc-unknown-none-elf
+RUST_TARGET_riscv64 = riscv64imac-unknown-none-elf
 RUST_TARGET_loongarch64 = loongarch64-unknown-none
 RUST_TARGET_aarch64 = aarch64-unknown-none
 RUST_TARGET_x86_64 = x86_64-unknown-none
@@ -102,22 +105,59 @@ RUSTFLAGS = --edition 2021 \
             -C panic=abort \
             --target $(RUST_TARGET)
 
-RUST_SUPPORT_SRC = kernel/rust/support/panic_handler.rs kernel/rust/support/irqsave_lock.c kernel/rust/support/arch_info.c
-RUST_SUPPORT_COBJ = $(BUILD_DIR)/rust/irqsave_lock.o $(BUILD_DIR)/rust/arch_info.o
+RUST_SUPPORT_SRC = kernel/rust/support/panic_handler.rs kernel/rust/support/irqsave_lock.c kernel/rust/support/arch_info.c kernel/rust/support/page_cache_helpers.c kernel/rust/support/sync_helpers.c
+RUST_SUPPORT_COBJ = $(BUILD_DIR)/rust/irqsave_lock.o $(BUILD_DIR)/rust/arch_info.o $(BUILD_DIR)/rust/page_cache_helpers.o $(BUILD_DIR)/rust/block_cache_helpers.o $(BUILD_DIR)/rust/xattr_helpers.o $(BUILD_DIR)/rust/time_helpers.o $(BUILD_DIR)/rust/sync_helpers.o
 
 RUST_SUPPORT_LIB = $(BUILD_DIR)/rust/liba20rust_support.rlib
+RUST_KERNEL_SRC = kernel/rust/rust_kernel.rs
+RUST_KERNEL_LIB = $(BUILD_DIR)/rust/librust_kernel.a
 RUST_LIBS =
 
 ifeq ($(RUST_ENABLED),1)
   ifeq ($(RUST_MODULE_XATTR),1)
     CFLAGS += -DCONFIG_RUST_XATTR
-    KERNEL_SRC := $(filter-out $(KERNEL_DIR)/fs/xattr.c,$(KERNEL_SRC))
     RUST_LIBS += $(BUILD_DIR)/rust/libxattr.rlib
   endif
   ifeq ($(RUST_MODULE_TIMEKEEPING),1)
     CFLAGS += -DCONFIG_RUST_TIMEKEEPING
-    KERNEL_SRC := $(filter-out $(KERNEL_DIR)/core/timekeeping.c,$(KERNEL_SRC))
     RUST_LIBS += $(BUILD_DIR)/rust/libtimekeeping.rlib
+  endif
+  ifeq ($(RUST_MODULE_PAGECACHE),1)
+    CFLAGS += -DCONFIG_RUST_PAGECACHE
+    RUST_LIBS += $(BUILD_DIR)/rust/libpage_cache.rlib
+  endif
+  ifeq ($(RUST_MODULE_BLOCKCACHE),1)
+    CFLAGS += -DCONFIG_RUST_BLOCKCACHE
+    RUST_LIBS += $(BUILD_DIR)/rust/libblock_cache.rlib
+  endif
+  ifeq ($(RUST_MODULE_SYNC),1)
+    CFLAGS += -DCONFIG_RUST_SYNC
+    RUST_LIBS += $(BUILD_DIR)/rust/libsync.rlib
+  endif
+endif
+
+RUST_KERNEL_CFG =
+RUST_LINK_DEPS =
+RUST_LD_LIBS =
+ifeq ($(RUST_ENABLED),1)
+  ifneq ($(RUST_LIBS),)
+    RUST_LINK_DEPS = $(RUST_KERNEL_LIB) $(RUST_SUPPORT_COBJ)
+    RUST_LD_LIBS = $(RUST_SUPPORT_COBJ) $(RUST_KERNEL_LIB)
+  endif
+  ifeq ($(RUST_MODULE_PAGECACHE),1)
+    RUST_KERNEL_CFG += --cfg rust_module_page_cache
+  endif
+  ifeq ($(RUST_MODULE_BLOCKCACHE),1)
+    RUST_KERNEL_CFG += --cfg rust_module_block_cache
+  endif
+  ifeq ($(RUST_MODULE_SYNC),1)
+    RUST_KERNEL_CFG += --cfg rust_module_sync
+  endif
+  ifeq ($(RUST_MODULE_XATTR),1)
+    RUST_KERNEL_CFG += --cfg rust_module_xattr
+  endif
+  ifeq ($(RUST_MODULE_TIMEKEEPING),1)
+    RUST_KERNEL_CFG += --cfg rust_module_timekeeping
   endif
 endif
 
@@ -125,28 +165,34 @@ endif
 ifeq ($(ARCH), riscv64)
     CROSS_PREFIX = riscv64-unknown-elf-
     ARCH_CFLAGS = -march=rv64imafdc_zicsr_zifencei -mabi=lp64 -mcmodel=medany
+    ARCH_RUSTFLAGS =
     ARCH_LDFLAGS =
 QEMU = qemu-system-riscv64
 QEMU_FLAGS = -machine virt -m 1G -nographic -smp $(NR_CPUS) -bios default -global virtio-mmio.force-legacy=false
 else ifeq ($(ARCH), loongarch64)
     CROSS_PREFIX = loongarch64-linux-gnu-
     ARCH_CFLAGS = -march=loongarch64 -mabi=lp64d -mcmodel=normal -fno-pic -static
+    ARCH_RUSTFLAGS =
     ARCH_LDFLAGS = -static -no-pie
     QEMU = qemu-system-loongarch64
     QEMU_FLAGS = -machine virt -m 1G -nographic -smp $(NR_CPUS)
 else ifeq ($(ARCH), aarch64)
     CROSS_PREFIX = aarch64-linux-gnu-
     ARCH_CFLAGS = -march=armv8-a -mgeneral-regs-only -fno-pic -mcmodel=large -mno-outline-atomics
+    ARCH_RUSTFLAGS =
     ARCH_LDFLAGS = -static -no-pie
     QEMU = qemu-system-aarch64
     QEMU_FLAGS = -machine virt -cpu cortex-a57 -m 1G -nographic -smp $(NR_CPUS) -global virtio-mmio.force-legacy=false
 else ifeq ($(ARCH), x86_64)
     CROSS_PREFIX = x86_64-linux-gnu-
     ARCH_CFLAGS = -m64 -mcmodel=large -mno-red-zone -fno-pic -fno-pie -mgeneral-regs-only
+    ARCH_RUSTFLAGS =
     ARCH_LDFLAGS = -static -no-pie
     QEMU = qemu-system-x86_64
     QEMU_FLAGS = -machine q35 -m 1G -nographic -smp $(NR_CPUS) -no-reboot
 endif
+
+RUSTFLAGS += $(ARCH_RUSTFLAGS)
 
 MKFS_FAT ?= $(or $(shell command -v mkfs.fat 2>/dev/null),$(wildcard /usr/sbin/mkfs.fat),$(wildcard /sbin/mkfs.fat),mkfs.fat)
 MKFS_EXT4 ?= $(or $(shell command -v mkfs.ext4 2>/dev/null),$(wildcard /usr/sbin/mkfs.ext4),$(wildcard /sbin/mkfs.ext4),mkfs.ext4)
@@ -249,6 +295,26 @@ ROOTFS_OVERLAY_FILES := $(shell find $(ROOTFS_OVERLAY_DIR) -type f 2>/dev/null)
 KERNEL_SRC += $(ROOTFS_OVERLAY_SRC)
 
 include $(KERNEL_DIR)/external/lwip/sources.mk
+
+# Filter out C sources that are replaced by Rust modules.
+ifeq ($(RUST_ENABLED),1)
+  ifeq ($(RUST_MODULE_XATTR),1)
+    KERNEL_SRC := $(filter-out $(KERNEL_DIR)/fs/xattr.c,$(KERNEL_SRC))
+  endif
+  ifeq ($(RUST_MODULE_TIMEKEEPING),1)
+    KERNEL_SRC := $(filter-out $(KERNEL_DIR)/core/timekeeping.c,$(KERNEL_SRC))
+  endif
+  ifeq ($(RUST_MODULE_PAGECACHE),1)
+    KERNEL_SRC := $(filter-out $(KERNEL_DIR)/fs/page_cache.c,$(KERNEL_SRC))
+  endif
+ifeq ($(RUST_MODULE_BLOCKCACHE),1)
+KERNEL_SRC := $(filter-out $(KERNEL_DIR)/fs/block_cache.c,$(KERNEL_SRC))
+endif
+ifeq ($(RUST_MODULE_SYNC),1)
+KERNEL_SRC := $(filter-out $(KERNEL_DIR)/core/sync.c,$(KERNEL_SRC))
+endif
+
+endif
 
 # Object files
 KERNEL_OBJ = $(patsubst $(KERNEL_DIR)/%.c,$(BUILD_DIR)/%.o,$(KERNEL_SRC))
@@ -1048,13 +1114,13 @@ ext4_img: $(USER_BUILD_STAMP) ext4_img_only
 $(KERNEL_BIN): $(KERNEL_ELF)
 	$(CROSS_PREFIX)objcopy -O binary $< $@
 
-$(KERNEL_ELF): $(KERNEL_OBJ) $(ASM_OBJ) $(RUST_LIBS) $(RUST_SUPPORT_COBJ) $(KERNEL_DIR)/arch/$(ARCH)/boot/ldscript.ld
+$(KERNEL_ELF): $(KERNEL_OBJ) $(ASM_OBJ) $(RUST_LINK_DEPS) $(KERNEL_DIR)/arch/$(ARCH)/boot/ldscript.ld
 	@mkdir -p $(dir $@)
-	$(CROSS_PREFIX)gcc $(LDFLAGS) $(KERNEL_OBJ) $(ASM_OBJ) $(RUST_LIBS) $(RUST_SUPPORT_COBJ) -o $@
+	$(CROSS_PREFIX)gcc $(LDFLAGS) $(KERNEL_OBJ) $(ASM_OBJ) $(RUST_LD_LIBS) -o $@
 
-$(BUILD_DIR)/rust/liba20rust_support.rlib: kernel/rust/support/panic_handler.rs Makefile
+$(BUILD_DIR)/rust/liba20rust_support.rlib: kernel/rust/support/panic_handler.rs kernel/rust/support/lock.rs Makefile
 	@mkdir -p $(dir $@)
-	$(RUSTC) $(RUSTFLAGS) $< -o $@
+	$(RUSTC) $(RUSTFLAGS) --crate-name a20rust_support $< -o $@
 
 $(BUILD_DIR)/rust/irqsave_lock.o: kernel/rust/support/irqsave_lock.c Makefile
 	@mkdir -p $(dir $@)
@@ -1064,13 +1130,52 @@ $(BUILD_DIR)/rust/arch_info.o: kernel/rust/support/arch_info.c Makefile
 	@mkdir -p $(dir $@)
 	$(CROSS_PREFIX)gcc $(CFLAGS) -c $< -o $@
 
+$(BUILD_DIR)/rust/page_cache_helpers.o: kernel/rust/support/page_cache_helpers.c Makefile
+	@mkdir -p $(dir $@)
+	$(CROSS_PREFIX)gcc $(CFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/rust/block_cache_helpers.o: kernel/rust/support/block_cache_helpers.c Makefile
+	@mkdir -p $(dir $@)
+	$(CROSS_PREFIX)gcc $(CFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/rust/xattr_helpers.o: kernel/rust/support/xattr_helpers.c Makefile
+	@mkdir -p $(dir $@)
+	$(CROSS_PREFIX)gcc $(CFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/rust/time_helpers.o: kernel/rust/support/time_helpers.c Makefile
+	@mkdir -p $(dir $@)
+	$(CROSS_PREFIX)gcc $(CFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/rust/sync_helpers.o: kernel/rust/support/sync_helpers.c Makefile
+	@mkdir -p $(dir $@)
+	$(CROSS_PREFIX)gcc $(CFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/rust/libsync.rlib: kernel/rust/sync/lib.rs kernel/rust/sync/ffi.rs $(RUST_SUPPORT_LIB) Makefile
+	@mkdir -p $(dir $@)
+	$(RUSTC) $(RUSTFLAGS) --crate-name sync --extern a20rust_support=$(RUST_SUPPORT_LIB) $< -o $@
+
 $(BUILD_DIR)/rust/libxattr.rlib: kernel/rust/xattr/lib.rs kernel/rust/xattr/ffi.rs $(RUST_SUPPORT_LIB) Makefile
 	@mkdir -p $(dir $@)
-	$(RUSTC) $(RUSTFLAGS) --extern a20rust_support=$(RUST_SUPPORT_LIB) $< -o $@
+	$(RUSTC) $(RUSTFLAGS) --crate-name xattr --extern a20rust_support=$(RUST_SUPPORT_LIB) $< -o $@
 
 $(BUILD_DIR)/rust/libtimekeeping.rlib: kernel/rust/timekeeping/lib.rs kernel/rust/timekeeping/ffi.rs $(RUST_SUPPORT_LIB) Makefile
 	@mkdir -p $(dir $@)
-	$(RUSTC) $(RUSTFLAGS) --extern a20rust_support=$(RUST_SUPPORT_LIB) $< -o $@
+	$(RUSTC) $(RUSTFLAGS) --crate-name timekeeping --extern a20rust_support=$(RUST_SUPPORT_LIB) $< -o $@
+
+$(BUILD_DIR)/rust/libpage_cache.rlib: kernel/rust/page_cache/lib.rs kernel/rust/page_cache/ffi.rs $(RUST_SUPPORT_LIB) Makefile
+	@mkdir -p $(dir $@)
+	$(RUSTC) $(RUSTFLAGS) --crate-name page_cache --extern a20rust_support=$(RUST_SUPPORT_LIB) $< -o $@
+
+$(BUILD_DIR)/rust/libblock_cache.rlib: kernel/rust/block_cache/lib.rs kernel/rust/block_cache/ffi.rs $(RUST_SUPPORT_LIB) Makefile
+	@mkdir -p $(dir $@)
+	$(RUSTC) $(RUSTFLAGS) --crate-name block_cache --extern a20rust_support=$(RUST_SUPPORT_LIB) $< -o $@
+
+$(RUST_KERNEL_LIB): $(RUST_KERNEL_SRC) $(RUST_LIBS) $(RUST_SUPPORT_LIB) Makefile
+	@mkdir -p $(dir $@)
+	$(RUSTC) $(RUSTFLAGS) --crate-type staticlib $(RUST_KERNEL_CFG) \
+		--extern a20rust_support=$(RUST_SUPPORT_LIB) \
+		$(foreach lib,$(RUST_LIBS),--extern $(patsubst lib%.rlib,%,$(notdir $(lib)))=$(lib)) \
+		$< -o $@
 
 $(BUILD_DIR)/%.o: $(KERNEL_DIR)/%.c Makefile | $(BUILD_TIME_HDR)
 	@mkdir -p $(dir $@)

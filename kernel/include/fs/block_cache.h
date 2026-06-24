@@ -12,6 +12,14 @@
 #define PCACHE_MAX_PAGES    1024
 #define PCACHE_HASH_BUCKETS 128
 
+#ifdef CONFIG_RUST_BLOCKCACHE
+struct bcache;
+typedef struct bcache bcache_t;
+struct bcache_entry;
+typedef struct bcache_entry bcache_entry_t;
+struct pcache_entry;
+typedef struct pcache_entry pcache_entry_t;
+#else
 typedef struct bcache_entry {
     uint64_t    lba;
     int         dirty;
@@ -50,6 +58,7 @@ typedef struct bcache {
     bcache_entry_t  *hash[BCACHE_HASH_BUCKETS];
     pcache_entry_t  *page_hash[PCACHE_HASH_BUCKETS];
 } bcache_t;
+#endif
 
 typedef struct bcache_stats {
     size_t caches;
