@@ -2,6 +2,7 @@
 
 Shared support code for all Rust kernel modules.
 
-- `panic_handler.rs`: provides the kernel-wide `#[panic_handler]`.
-  Each individual module crate is built as an `rlib` and linked together with
-  this crate so only one panic handler exists in the final kernel image.
+- `panic_handler.rs`: kernel-wide `#[panic_handler]`.
+- `irqsave_lock.c`: C wrappers for `spin_lock_irqsave` / `spin_unlock_irqrestore`
+  so Rust modules can use irqsave locks without needing inline arch functions.
+- `arch_info.c`: architecture-neutral helper exposing `ARCH_TIMER_FREQ` to Rust.

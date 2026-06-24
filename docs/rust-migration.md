@@ -63,3 +63,21 @@ and has a small public API, making it ideal for proving the build/FFI pipeline.
 - Full kernel rewrite in the near term.
 - Replacing the slab allocator, scheduler, or VFS core as an early module.
 - Introducing `std` or `alloc` in phase 1.
+
+## Phase 2
+
+Rewrote `kernel/core/timekeeping.c` in Rust.
+
+- New module: `kernel/rust/timekeeping/`.
+- Adds shared C helpers in `kernel/rust/support/irqsave_lock.c` and
+  `kernel/rust/support/arch_info.c` for irqsave locks and timer frequency.
+- Toggle: `RUST_MODULE_TIMEKEEPING=1`.
+- Builds for all four architectures.
+
+## Phase 3 candidates
+
+- `kernel/fs/vfs/stat_perm.c` — permission/time metadata (needs stable access
+  to `proc_cred_t`; consider adding a C helper or using bindgen).
+- `kernel/core/random.c` — self-contained RNG, but depends on entropy helpers
+  and irqsave locks.
+- `kernel/fs/xattr.c` is already in Rust.

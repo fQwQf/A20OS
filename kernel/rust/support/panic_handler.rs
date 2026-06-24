@@ -15,8 +15,6 @@ extern "C" {
 
 #[panic_handler]
 fn panic_handler(_info: &PanicInfo) -> ! {
-    // In phase 1 we do not format the panic message; we just call C panic().
-    // A future improvement can pass a static "Rust panic" string.
     const MSG: *const core::ffi::c_char = b"Rust panic\0".as_ptr() as _;
     unsafe { panic(MSG) }
 }
