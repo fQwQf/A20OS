@@ -87,6 +87,8 @@ LIBGCC_S_ARCH := $(LIBGCC_S_$(ARCH))
 RUST_ENABLED ?= 0
 RUST_MODULE_XATTR ?= 0
 
+RUST_MODULE_TIMEKEEPING ?= 0
+
 RUSTC = rustc
 RUST_TARGET_riscv64 = riscv64gc-unknown-none-elf
 RUST_TARGET_loongarch64 = loongarch64-unknown-none
@@ -100,6 +102,9 @@ RUSTFLAGS = --edition 2021 \
             -C panic=abort \
             --target $(RUST_TARGET)
 
+RUST_SUPPORT_SRC = kernel/rust/support/panic_handler.rs kernel/rust/support/irqsave_lock.c kernel/rust/support/arch_info.c
+RUST_SUPPORT_COBJ = $(BUILD_DIR)/rust/irqsave_lock.o $(BUILD_DIR)/rust/arch_info.o
+
 RUST_SUPPORT_LIB = $(BUILD_DIR)/rust/liba20rust_support.rlib
 RUST_LIBS =
 
@@ -108,6 +113,11 @@ ifeq ($(RUST_ENABLED),1)
     CFLAGS += -DCONFIG_RUST_XATTR
     KERNEL_SRC := $(filter-out $(KERNEL_DIR)/fs/xattr.c,$(KERNEL_SRC))
     RUST_LIBS += $(BUILD_DIR)/rust/libxattr.rlib
+  endif
+  ifeq ($(RUST_MODULE_TIMEKEEPING),1)
+    CFLAGS += -DCONFIG_RUST_TIMEKEEPING
+    KERNEL_SRC := $(filter-out $(KERNEL_DIR)/core/timekeeping.c,$(KERNEL_SRC))
+    RUST_LIBS += $(BUILD_DIR)/rust/libtimekeeping.rlib
   endif
 endif
 
@@ -1038,15 +1048,27 @@ ext4_img: $(USER_BUILD_STAMP) ext4_img_only
 $(KERNEL_BIN): $(KERNEL_ELF)
 	$(CROSS_PREFIX)objcopy -O binary $< $@
 
-$(KERNEL_ELF): $(KERNEL_OBJ) $(ASM_OBJ) $(RUST_LIBS) $(KERNEL_DIR)/arch/$(ARCH)/boot/ldscript.ld
+$(KERNEL_ELF): $(KERNEL_OBJ) $(ASM_OBJ) $(RUST_LIBS) $(RUST_SUPPORT_COBJ) $(KERNEL_DIR)/arch/$(ARCH)/boot/ldscript.ld
 	@mkdir -p $(dir $@)
-	$(CROSS_PREFIX)gcc $(LDFLAGS) $(KERNEL_OBJ) $(ASM_OBJ) $(RUST_LIBS) -o $@
+	$(CROSS_PREFIX)gcc $(LDFLAGS) $(KERNEL_OBJ) $(ASM_OBJ) $(RUST_LIBS) $(RUST_SUPPORT_COBJ) -o $@
 
 $(BUILD_DIR)/rust/liba20rust_support.rlib: kernel/rust/support/panic_handler.rs Makefile
 	@mkdir -p $(dir $@)
 	$(RUSTC) $(RUSTFLAGS) $< -o $@
 
+$(BUILD_DIR)/rust/irqsave_lock.o: kernel/rust/support/irqsave_lock.c Makefile
+	@mkdir -p $(dir $@)
+	$(CROSS_PREFIX)gcc $(CFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/rust/arch_info.o: kernel/rust/support/arch_info.c Makefile
+	@mkdir -p $(dir $@)
+	$(CROSS_PREFIX)gcc $(CFLAGS) -c $< -o $@
+
 $(BUILD_DIR)/rust/libxattr.rlib: kernel/rust/xattr/lib.rs kernel/rust/xattr/ffi.rs $(RUST_SUPPORT_LIB) Makefile
+	@mkdir -p $(dir $@)
+	$(RUSTC) $(RUSTFLAGS) --extern a20rust_support=$(RUST_SUPPORT_LIB) $< -o $@
+
+$(BUILD_DIR)/rust/libtimekeeping.rlib: kernel/rust/timekeeping/lib.rs kernel/rust/timekeeping/ffi.rs $(RUST_SUPPORT_LIB) Makefile
 	@mkdir -p $(dir $@)
 	$(RUSTC) $(RUSTFLAGS) --extern a20rust_support=$(RUST_SUPPORT_LIB) $< -o $@
 
