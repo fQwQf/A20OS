@@ -12,3 +12,5 @@ Shared support code for all Rust kernel modules.
 - `time_helpers.c`: C wrapper for `build_unix_time` used by timekeeping.
 - `sync_helpers.c`: C wrappers for `proc_current`, `proc_make_ready`, `sched`,
   and task-state helpers used by the Rust sync module.
+- `slab_helpers.c`: C wrappers for buddy allocator access, PFN/virtual-address
+  conversion, and frame metadata used by the Rust slab module.

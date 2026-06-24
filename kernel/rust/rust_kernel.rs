@@ -25,3 +25,6 @@ extern crate timekeeping;
 
 #[cfg(rust_module_sync)]
 extern crate sync;
+
+#[cfg(rust_module_slab)]
+extern crate slab;
