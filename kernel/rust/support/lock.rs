@@ -20,6 +20,7 @@ use core::ops::{Deref, DerefMut};
 /// C-compatible spinlock state.  Must match `struct spinlock` in
 /// `kernel/include/core/lock.h` for non-debug builds.
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub struct spinlock_t {
     pub locked: i32,
 }

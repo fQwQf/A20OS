@@ -43,12 +43,14 @@ The RISC-V target uses `imac` (soft-float `lp64` ABI) to match the C kernel's
 | `RUST_MODULE_PAGECACHE` | `0` | Use Rust page cache implementation |
 | `RUST_MODULE_BLOCKCACHE` | `0` | Use Rust block cache implementation |
 | `RUST_MODULE_SYNC` | `0` | Use Rust waitqueue/mutex/completion implementation |
+| `RUST_MODULE_SLAB` | `0` | Use Rust slab allocator implementation |
 
 To build with all current Rust modules:
 
 ```bash
 make RUST_ENABLED=1 RUST_MODULE_XATTR=1 RUST_MODULE_TIMEKEEPING=1 \
      RUST_MODULE_PAGECACHE=1 RUST_MODULE_BLOCKCACHE=1 RUST_MODULE_SYNC=1 \
+     RUST_MODULE_SLAB=1 \
      ARCH=riscv64 kernel-only
 ```
 
@@ -122,14 +124,32 @@ Rewrote `kernel/core/sync.c` in Rust.
 - `RUST_MODULE_SYNC=1` passes `make check-kernel-build` on all four
   architectures and `smoke-vfs-stress`/`smoke-futex-stress`/
   `smoke-sched-stress` on riscv64.
+- `RUST_MODULE_SLAB=1` passes `make check-kernel-build` on all four
+  architectures and `smoke-vfs-stress`/`smoke-futex-stress`/
+  `smoke-sched-stress` on riscv64, both alone and with all other Rust
+  modules enabled.
 
-## Phase 6 candidates
+## Phase 6
 
-- `kernel/mm/slab.c` — global allocator with per-cache spinlocks, manual
-  partial/full/spare linked lists, and bitmap/free-list invariants.  High
-  concurrency risk and high blast radius; tackle only after solidifying the
-  build/test pipeline.
+Rewrote `kernel/mm/slab.c` in Rust.
+
+- New module: `kernel/rust/slab/`.
+- Replaces the global allocator's per-cache spinlocks, manual
+  partial/full/spare intrusive lists, bitmap tracking, and free-list
+  manipulation with RAII irqsave locks and index-based free lists inside
+  each slab page.
+- Adds shared C helpers in `kernel/rust/support/slab_helpers.c` for buddy
+  allocator access, PFN/virtual-address conversion, and frame metadata.
+- Toggle: `RUST_MODULE_SLAB=1`.
+- Builds for all four architectures; `smoke-vfs-stress`,
+  `smoke-futex-stress`, and `smoke-sched-stress` pass on riscv64, both with
+  slab alone and with all current Rust modules enabled.
+
+## Phase 7 candidates
+
 - `kernel/fs/vfs/stat_perm.c` — permission/time metadata (needs stable access
   to `proc_cred_t`; consider adding a C helper or using bindgen).
 - `kernel/core/random.c` — self-contained RNG, but depends on entropy helpers
   and irqsave locks.
+- `kernel/fs/vfs/vnode.c` — vnode reference counting and lifecycle; moderate
+  blast radius but clear concurrency boundaries.
