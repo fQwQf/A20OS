@@ -43,3 +43,6 @@ extern crate eventfd;
 
 #[cfg(rust_module_timerfd)]
 extern crate timerfd;
+
+#[cfg(rust_module_locks)]
+extern crate locks;

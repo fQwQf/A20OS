@@ -49,6 +49,7 @@ The RISC-V target uses `imac` (soft-float `lp64` ABI) to match the C kernel's
 | `RUST_MODULE_RANDOM` | `0` | Use Rust kernel RNG implementation |
 | `RUST_MODULE_EVENTFD` | `0` | Use Rust eventfd implementation |
 | `RUST_MODULE_TIMERFD` | `0` | Use Rust timerfd implementation |
+| `RUST_MODULE_LOCKS` | `0` | Use Rust POSIX/BSD file locking implementation |
 
 To build with all current Rust modules:
 
@@ -57,6 +58,7 @@ make RUST_ENABLED=1 RUST_MODULE_XATTR=1 RUST_MODULE_TIMEKEEPING=1 \
      RUST_MODULE_PAGECACHE=1 RUST_MODULE_BLOCKCACHE=1 RUST_MODULE_SYNC=1 \
      RUST_MODULE_SLAB=1 RUST_MODULE_STATPERM=1 RUST_MODULE_PROC_LIST=1 \
      RUST_MODULE_RANDOM=1 RUST_MODULE_EVENTFD=1 RUST_MODULE_TIMERFD=1 \
+     RUST_MODULE_LOCKS=1 \
      ARCH=riscv64 kernel-only
 ```
 
@@ -152,6 +154,8 @@ Rewrote `kernel/core/sync.c` in Rust.
   architectures and `smoke-sched-stress` on riscv64 (`smoke-proc-a20` and
   `smoke-futex-stress` are blocked by the same unrelated user-space build
   race).
+- `RUST_MODULE_LOCKS=1` passes `make check-kernel-build` on all four
+  architectures and `smoke-vfs-stress`/`smoke-futex-stress` on riscv64.
 
 ## Phase 6
 
@@ -263,6 +267,30 @@ Rewrote `kernel/ipc/timerfd.c` in Rust.
 - Builds for all four architectures; `smoke-sched-stress` passes on riscv64.
 
 ## Phase 12 candidates
+
+## Phase 12
+
+Rewrote `kernel/fs/locks.c` in Rust.
+
+- New module: `kernel/rust/locks/`.
+- Preserves the public `kernel/include/fs/locks.h` ABI and the original C
+  semantics for POSIX byte-range locks and BSD `flock()` entries, including the
+  256-entry global tables, range splitting/merging, blocking retry loops, and
+  release paths.
+- Replaces manual global lock management with a single
+  `IrqSaveSpinLock<LockState>` protecting both lock tables plus the global
+  waiter queue.
+- Uses `wait_queue_prepare` + `sched` + `wait_queue_finish` for blocking
+  waiters instead of `wait_queue_sleep`, eliminating the lost-wakeup window
+  between dropping the table lock and enqueueing on the wait queue.
+- Adds shared C helpers in `kernel/rust/support/locks_helpers.c` for `vfile_t`
+  key/size/offset extraction and current-pid access, keeping Rust independent of
+  full VFS structure layouts.
+- Toggle: `RUST_MODULE_LOCKS=1`.
+- Builds for all four architectures; `smoke-vfs-stress` and
+  `smoke-futex-stress` pass on riscv64.
+
+## Phase 13 candidates
 
 - `kernel/fs/vfs/vnode.c` — vnode reference counting and lifecycle; moderate
   blast radius but clear concurrency boundaries.
