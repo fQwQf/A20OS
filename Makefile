@@ -106,6 +106,7 @@ RUST_MODULE_SIGNAL ?= 1
 RUST_MODULE_FUTEX ?= 1
 RUST_MODULE_SCHED ?= 1
 RUST_MODULE_WAIT ?= 1
+RUST_MODULE_PROC_CORE ?= 0
 
 RUSTC = rustc
 RUST_TARGET_riscv64 = riscv64imac-unknown-none-elf
@@ -121,7 +122,7 @@ RUSTFLAGS = --edition 2021 \
             --target $(RUST_TARGET)
 
 RUST_SUPPORT_SRC = kernel/rust/support/panic_handler.rs kernel/rust/support/irqsave_lock.c kernel/rust/support/arch_info.c kernel/rust/support/page_cache_helpers.c kernel/rust/support/sync_helpers.c kernel/rust/support/slab_helpers.c kernel/rust/support/stat_perm_helpers.c kernel/rust/support/proc_list_helpers.c kernel/rust/support/futex_helpers.c kernel/rust/support/wait_helpers.c
-RUST_SUPPORT_COBJ = $(BUILD_DIR)/rust/irqsave_lock.o $(BUILD_DIR)/rust/arch_info.o $(BUILD_DIR)/rust/page_cache_helpers.o $(BUILD_DIR)/rust/block_cache_helpers.o $(BUILD_DIR)/rust/xattr_helpers.o $(BUILD_DIR)/rust/time_helpers.o $(BUILD_DIR)/rust/sync_helpers.o $(BUILD_DIR)/rust/slab_helpers.o $(BUILD_DIR)/rust/stat_perm_helpers.o $(BUILD_DIR)/rust/proc_list_helpers.o $(BUILD_DIR)/rust/random_helpers.o $(BUILD_DIR)/rust/eventfd_helpers.o $(BUILD_DIR)/rust/timerfd_helpers.o $(BUILD_DIR)/rust/locks_helpers.o $(BUILD_DIR)/rust/fdtable_helpers.o $(BUILD_DIR)/rust/file_helpers.o $(BUILD_DIR)/rust/pipe_helpers.o $(BUILD_DIR)/rust/signal_helpers.o $(BUILD_DIR)/rust/futex_helpers.o $(BUILD_DIR)/rust/sched_helpers.o $(BUILD_DIR)/rust/wait_helpers.o
+RUST_SUPPORT_COBJ = $(BUILD_DIR)/rust/irqsave_lock.o $(BUILD_DIR)/rust/arch_info.o $(BUILD_DIR)/rust/page_cache_helpers.o $(BUILD_DIR)/rust/block_cache_helpers.o $(BUILD_DIR)/rust/xattr_helpers.o $(BUILD_DIR)/rust/time_helpers.o $(BUILD_DIR)/rust/sync_helpers.o $(BUILD_DIR)/rust/slab_helpers.o $(BUILD_DIR)/rust/stat_perm_helpers.o $(BUILD_DIR)/rust/proc_list_helpers.o $(BUILD_DIR)/rust/random_helpers.o $(BUILD_DIR)/rust/eventfd_helpers.o $(BUILD_DIR)/rust/timerfd_helpers.o $(BUILD_DIR)/rust/locks_helpers.o $(BUILD_DIR)/rust/fdtable_helpers.o $(BUILD_DIR)/rust/file_helpers.o $(BUILD_DIR)/rust/pipe_helpers.o $(BUILD_DIR)/rust/signal_helpers.o $(BUILD_DIR)/rust/futex_helpers.o $(BUILD_DIR)/rust/sched_helpers.o $(BUILD_DIR)/rust/wait_helpers.o $(BUILD_DIR)/rust/proc_core_helpers.o
 
 RUST_SUPPORT_LIB = $(BUILD_DIR)/rust/liba20rust_support.rlib
 RUST_KERNEL_SRC = kernel/rust/rust_kernel.rs
@@ -205,6 +206,10 @@ ifeq ($(RUST_ENABLED),1)
     CFLAGS += -DCONFIG_RUST_WAIT
     RUST_LIBS += $(BUILD_DIR)/rust/libwait.rlib
   endif
+  ifeq ($(RUST_MODULE_PROC_CORE),1)
+    CFLAGS += -DCONFIG_RUST_PROC_CORE
+    RUST_LIBS += $(BUILD_DIR)/rust/libproc_core.rlib
+  endif
 endif
 
 RUST_KERNEL_CFG =
@@ -265,6 +270,9 @@ ifeq ($(RUST_ENABLED),1)
   endif
   ifeq ($(RUST_MODULE_WAIT),1)
     RUST_KERNEL_CFG += --cfg rust_module_wait
+  endif
+  ifeq ($(RUST_MODULE_PROC_CORE),1)
+    RUST_KERNEL_CFG += --cfg rust_module_proc_core
   endif
   ifeq ($(RUST_MODULE_XATTR),1)
     RUST_KERNEL_CFG += --cfg rust_module_xattr
@@ -464,6 +472,9 @@ KERNEL_SRC := $(filter-out $(KERNEL_DIR)/proc/sched.c,$(KERNEL_SRC))
 endif
 ifeq ($(RUST_MODULE_WAIT),1)
 KERNEL_SRC := $(filter-out $(KERNEL_DIR)/proc/wait.c,$(KERNEL_SRC))
+endif
+ifeq ($(RUST_MODULE_PROC_CORE),1)
+KERNEL_SRC := $(filter-out $(KERNEL_DIR)/proc/proc.c,$(KERNEL_SRC))
 endif
 
 endif
@@ -1378,6 +1389,10 @@ $(BUILD_DIR)/rust/wait_helpers.o: kernel/rust/support/wait_helpers.c Makefile
 	@mkdir -p $(dir $@)
 	$(CROSS_PREFIX)gcc $(CFLAGS) -c $< -o $@
 
+$(BUILD_DIR)/rust/proc_core_helpers.o: kernel/rust/support/proc_core_helpers.c Makefile
+	@mkdir -p $(dir $@)
+	$(CROSS_PREFIX)gcc $(CFLAGS) -c $< -o $@
+
 $(BUILD_DIR)/rust/libfile.rlib: kernel/rust/file/lib.rs kernel/rust/file/ffi.rs $(RUST_SUPPORT_LIB) Makefile
 	@mkdir -p $(dir $@)
 	$(RUSTC) $(RUSTFLAGS) --crate-name file --extern a20rust_support=$(RUST_SUPPORT_LIB) $< -o $@
@@ -1401,6 +1416,10 @@ $(BUILD_DIR)/rust/libsched.rlib: kernel/rust/sched/lib.rs kernel/rust/sched/ffi.
 $(BUILD_DIR)/rust/libwait.rlib: kernel/rust/wait/lib.rs kernel/rust/wait/ffi.rs $(RUST_SUPPORT_LIB) Makefile
 	@mkdir -p $(dir $@)
 	$(RUSTC) $(RUSTFLAGS) --crate-name wait --extern a20rust_support=$(RUST_SUPPORT_LIB) $< -o $@
+
+$(BUILD_DIR)/rust/libproc_core.rlib: kernel/rust/proc_core/lib.rs kernel/rust/proc_core/ffi.rs $(RUST_SUPPORT_LIB) Makefile
+	@mkdir -p $(dir $@)
+	$(RUSTC) $(RUSTFLAGS) --crate-name proc_core --extern a20rust_support=$(RUST_SUPPORT_LIB) $< -o $@
 
 $(BUILD_DIR)/rust/libslab.rlib: kernel/rust/slab/lib.rs kernel/rust/slab/ffi.rs $(RUST_SUPPORT_LIB) Makefile
 	@mkdir -p $(dir $@)
