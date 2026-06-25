@@ -97,6 +97,7 @@ RUST_MODULE_PROC_LIST ?= 0
 RUST_MODULE_RANDOM ?= 0
 RUST_MODULE_EVENTFD ?= 0
 RUST_MODULE_TIMERFD ?= 0
+RUST_MODULE_LOCKS ?= 0
 
 RUSTC = rustc
 RUST_TARGET_riscv64 = riscv64imac-unknown-none-elf
@@ -112,7 +113,7 @@ RUSTFLAGS = --edition 2021 \
             --target $(RUST_TARGET)
 
 RUST_SUPPORT_SRC = kernel/rust/support/panic_handler.rs kernel/rust/support/irqsave_lock.c kernel/rust/support/arch_info.c kernel/rust/support/page_cache_helpers.c kernel/rust/support/sync_helpers.c kernel/rust/support/slab_helpers.c kernel/rust/support/stat_perm_helpers.c kernel/rust/support/proc_list_helpers.c
-RUST_SUPPORT_COBJ = $(BUILD_DIR)/rust/irqsave_lock.o $(BUILD_DIR)/rust/arch_info.o $(BUILD_DIR)/rust/page_cache_helpers.o $(BUILD_DIR)/rust/block_cache_helpers.o $(BUILD_DIR)/rust/xattr_helpers.o $(BUILD_DIR)/rust/time_helpers.o $(BUILD_DIR)/rust/sync_helpers.o $(BUILD_DIR)/rust/slab_helpers.o $(BUILD_DIR)/rust/stat_perm_helpers.o $(BUILD_DIR)/rust/proc_list_helpers.o $(BUILD_DIR)/rust/random_helpers.o $(BUILD_DIR)/rust/eventfd_helpers.o $(BUILD_DIR)/rust/timerfd_helpers.o
+RUST_SUPPORT_COBJ = $(BUILD_DIR)/rust/irqsave_lock.o $(BUILD_DIR)/rust/arch_info.o $(BUILD_DIR)/rust/page_cache_helpers.o $(BUILD_DIR)/rust/block_cache_helpers.o $(BUILD_DIR)/rust/xattr_helpers.o $(BUILD_DIR)/rust/time_helpers.o $(BUILD_DIR)/rust/sync_helpers.o $(BUILD_DIR)/rust/slab_helpers.o $(BUILD_DIR)/rust/stat_perm_helpers.o $(BUILD_DIR)/rust/proc_list_helpers.o $(BUILD_DIR)/rust/random_helpers.o $(BUILD_DIR)/rust/eventfd_helpers.o $(BUILD_DIR)/rust/timerfd_helpers.o $(BUILD_DIR)/rust/locks_helpers.o
 
 RUST_SUPPORT_LIB = $(BUILD_DIR)/rust/liba20rust_support.rlib
 RUST_KERNEL_SRC = kernel/rust/rust_kernel.rs
@@ -164,6 +165,10 @@ ifeq ($(RUST_ENABLED),1)
     CFLAGS += -DCONFIG_RUST_TIMERFD
     RUST_LIBS += $(BUILD_DIR)/rust/libtimerfd.rlib
   endif
+  ifeq ($(RUST_MODULE_LOCKS),1)
+    CFLAGS += -DCONFIG_RUST_LOCKS
+    RUST_LIBS += $(BUILD_DIR)/rust/liblocks.rlib
+  endif
 endif
 
 RUST_KERNEL_CFG =
@@ -200,6 +205,9 @@ ifeq ($(RUST_ENABLED),1)
   endif
   ifeq ($(RUST_MODULE_TIMERFD),1)
     RUST_KERNEL_CFG += --cfg rust_module_timerfd
+  endif
+  ifeq ($(RUST_MODULE_LOCKS),1)
+    RUST_KERNEL_CFG += --cfg rust_module_locks
   endif
   ifeq ($(RUST_MODULE_XATTR),1)
     RUST_KERNEL_CFG += --cfg rust_module_xattr
@@ -375,6 +383,9 @@ KERNEL_SRC := $(filter-out $(KERNEL_DIR)/ipc/eventfd.c,$(KERNEL_SRC))
 endif
 ifeq ($(RUST_MODULE_TIMERFD),1)
 KERNEL_SRC := $(filter-out $(KERNEL_DIR)/ipc/timerfd.c,$(KERNEL_SRC))
+endif
+ifeq ($(RUST_MODULE_LOCKS),1)
+KERNEL_SRC := $(filter-out $(KERNEL_DIR)/fs/locks.c,$(KERNEL_SRC))
 endif
 
 endif
@@ -1245,9 +1256,17 @@ $(BUILD_DIR)/rust/timerfd_helpers.o: kernel/rust/support/timerfd_helpers.c Makef
 	@mkdir -p $(dir $@)
 	$(CROSS_PREFIX)gcc $(CFLAGS) -c $< -o $@
 
+$(BUILD_DIR)/rust/locks_helpers.o: kernel/rust/support/locks_helpers.c Makefile
+	@mkdir -p $(dir $@)
+	$(CROSS_PREFIX)gcc $(CFLAGS) -c $< -o $@
+
 $(BUILD_DIR)/rust/libtimerfd.rlib: kernel/rust/timerfd/lib.rs kernel/rust/timerfd/ffi.rs $(RUST_SUPPORT_LIB) Makefile
 	@mkdir -p $(dir $@)
 	$(RUSTC) $(RUSTFLAGS) --crate-name timerfd --extern a20rust_support=$(RUST_SUPPORT_LIB) $< -o $@
+
+$(BUILD_DIR)/rust/liblocks.rlib: kernel/rust/locks/lib.rs kernel/rust/locks/ffi.rs $(RUST_SUPPORT_LIB) Makefile
+	@mkdir -p $(dir $@)
+	$(RUSTC) $(RUSTFLAGS) --crate-name locks --extern a20rust_support=$(RUST_SUPPORT_LIB) $< -o $@
 
 $(BUILD_DIR)/rust/libslab.rlib: kernel/rust/slab/lib.rs kernel/rust/slab/ffi.rs $(RUST_SUPPORT_LIB) Makefile
 	@mkdir -p $(dir $@)
