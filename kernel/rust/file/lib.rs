@@ -123,22 +123,32 @@ pub extern "C" fn vfile_free(vf: *mut vfile_t) {
 
 #[no_mangle]
 pub extern "C" fn vfile_ref_init(vf: *mut vfile_t, refs: c_int) {
-    unsafe { ffi::a20_file_vfile_ref_init(vf, refs) }
+    if !vf.is_null() {
+        unsafe { (*vf).ref_init(refs) };
+    }
 }
 
 #[no_mangle]
 pub extern "C" fn vfile_get(vf: *mut vfile_t) {
-    unsafe { ffi::a20_file_vfile_get(vf) }
+    if !vf.is_null() {
+        unsafe { (*vf).get() };
+    }
 }
 
 #[no_mangle]
 pub extern "C" fn vfile_ref_read(vf: *mut vfile_t) -> c_int {
-    unsafe { ffi::a20_file_vfile_ref_read(vf) }
+    if vf.is_null() {
+        return 0;
+    }
+    unsafe { (*vf).ref_read() }
 }
 
 #[no_mangle]
 pub extern "C" fn vfile_put_ref_only(vf: *mut vfile_t) -> c_int {
-    unsafe { ffi::a20_file_vfile_put_ref_only(vf) }
+    if vf.is_null() {
+        return 0;
+    }
+    unsafe { (*vf).put_ref_only() as c_int }
 }
 
 #[no_mangle]
@@ -189,7 +199,7 @@ pub extern "C" fn vfs_get_file_ref(fd: c_int) -> *mut vfile_t {
     let guard = FILE_TABLE.lock();
     let vf = guard.files[fd as usize];
     if !vf.is_null() {
-        unsafe { ffi::a20_file_vfile_get(vf) };
+        unsafe { (*vf).get() };
     }
     vf
 }
@@ -197,7 +207,7 @@ pub extern "C" fn vfs_get_file_ref(fd: c_int) -> *mut vfile_t {
 #[no_mangle]
 pub extern "C" fn vfs_put_file_ref(_fd: c_int, vf: *mut vfile_t) {
     if !vf.is_null() {
-        unsafe { ffi::a20_file_vfile_put_ref_only(vf) };
+        unsafe { (*vf).put_ref_only() };
     }
 }
 
@@ -211,7 +221,7 @@ pub extern "C" fn vfs_ref_fd(fd: c_int) -> c_int {
     if vf.is_null() {
         return -EBADF;
     }
-    unsafe { ffi::a20_file_vfile_get(vf) };
+    unsafe { (*vf).get() };
     0
 }
 
@@ -228,7 +238,7 @@ pub extern "C" fn file_close_prepare(fd: c_int, closed: *mut *mut vfile_t) -> c_
     if vf.is_null() {
         return -EBADF;
     }
-    if unsafe { ffi::a20_file_vfile_put_ref_only(vf) } != 0 {
+    if unsafe { (*vf).put_ref_only() } {
         guard.files[fd as usize] = ptr::null_mut();
         note_free(&mut guard, fd);
         if !closed.is_null() {
@@ -246,14 +256,14 @@ pub extern "C" fn vfs_dupfd(fd: c_int, minfd: c_int) -> c_int {
         return -EBADF;
     }
     let vf = guard.files[fd as usize];
-    unsafe { ffi::a20_file_vfile_get(vf) };
+    unsafe { (*vf).get() };
     let newfd = find_free_from(&guard, minfd);
     if newfd >= 0 {
         guard.files[newfd as usize] = vf;
         note_alloc(&mut guard, newfd);
         newfd
     } else {
-        unsafe { ffi::a20_file_vfile_put_ref_only(vf) };
+        unsafe { (*vf).put_ref_only() };
         -EMFILE
     }
 }
@@ -279,7 +289,7 @@ pub extern "C" fn vfs_dup3(oldfd: c_int, newfd: c_int, _flags: c_int) -> c_int {
         return -EBUSY;
     }
     let vf = guard.files[oldfd as usize];
-    unsafe { ffi::a20_file_vfile_get(vf) };
+    unsafe { (*vf).get() };
     guard.files[newfd as usize] = vf;
     note_alloc(&mut guard, newfd);
     newfd

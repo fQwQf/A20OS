@@ -22,6 +22,8 @@ Shared support code for all Rust kernel modules.
   module.
 - `eventfd_helpers.c`: C wrappers for vfile allocation/free/installation used by the
   Rust eventfd module.
+- `sysv_sem_helpers.c`: C wrappers for SysV semaphore wait-queue, user-copy,
+  current-task, wake-time, and scheduler hooks used by the Rust sysv_sem module.
 - `timerfd_helpers.c`: C wrappers for vfile allocation/free/installation and
   ops-pointer matching used by the Rust timerfd module.
 - `locks_helpers.c`: C wrappers for `vfile_t` key/size/offset and current-pid
