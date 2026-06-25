@@ -89,6 +89,17 @@ static int ramfs_dir_entry_count(ramfs_inode_t *dir) {
     return (int)(dir->size / sizeof(ramfs_dir_entry_t));
 }
 
+static void ramfs_dir_set_entry(ramfs_inode_t *dir, const char *name, int inum) {
+    ramfs_dir_entry_t *entries = ramfs_dir_entries(dir);
+    int count = ramfs_dir_entry_count(dir);
+    for (int i = 0; i < count; i++) {
+        if (entries[i].name[0] != '\0' && strcmp(entries[i].name, name) == 0) {
+            entries[i].inum = inum;
+            return;
+        }
+    }
+}
+
 static int ramfs_add_dir_entry(ramfs_inode_t *dir, const char *name, int inum) {
     int count = ramfs_dir_entry_count(dir);
     ramfs_dir_entry_t *entries = ramfs_dir_entries(dir);
@@ -435,22 +446,76 @@ static int ramfs_vnode_rename(vnode_t *old_dir, const char *old_name,
         old_entries[old_idx].inum = new_inum;
         ramfs_inode_t *moved = ramfs_find_inode_by_inum(inum);
         ramfs_inode_t *other = ramfs_find_inode_by_inum(new_inum);
-        if (moved) moved->parent = new_dinode;
-        if (other) other->parent = old_dinode;
+        if (moved && moved->type == FT_DIRECTORY) {
+            moved->parent = new_dinode;
+            ramfs_dir_set_entry(moved, "..", new_dinode->inum);
+        } else if (moved) {
+            moved->parent = new_dinode;
+        }
+        if (other && other->type == FT_DIRECTORY) {
+            other->parent = old_dinode;
+            ramfs_dir_set_entry(other, "..", old_dinode->inum);
+        } else if (other) {
+            other->parent = old_dinode;
+        }
         return 0;
+    }
+
+    ramfs_inode_t *moved = ramfs_find_inode_by_inum(inum);
+    ramfs_inode_t *victim = new_idx >= 0 ? ramfs_find_inode_by_inum(new_inum) : NULL;
+
+    if (new_idx >= 0 && new_inum == inum)
+        return 0;
+    if (!moved)
+        return -ENOENT;
+    if (victim) {
+        if (moved->type == FT_DIRECTORY && victim->type != FT_DIRECTORY)
+            return -ENOTDIR;
+        if (moved->type != FT_DIRECTORY && victim->type == FT_DIRECTORY)
+            return -EISDIR;
+        if (victim->type == FT_DIRECTORY) {
+            ramfs_dir_entry_t *ventries = ramfs_dir_entries(victim);
+            int vn = ramfs_dir_entry_count(victim);
+            int active = 0;
+            for (int i = 0; i < vn; i++) {
+                if (ventries[i].name[0] != '\0')
+                    active++;
+            }
+            if (active > 2)
+                return -ENOTEMPTY;
+        }
     }
 
     if (new_idx >= 0) {
         new_entries[new_idx].inum = inum;
         memcpy(new_entries[new_idx].name, new_name, MAX_NAME_LEN);
     } else {
-        ramfs_add_dir_entry(new_dinode, new_name, inum);
+        int r = ramfs_add_dir_entry(new_dinode, new_name, inum);
+        if (r < 0)
+            return r;
     }
 
     old_entries[old_idx].name[0] = '\0';
 
-    ramfs_inode_t *moved = ramfs_find_inode_by_inum(inum);
-    if (moved) moved->parent = new_dinode;
+    if (victim) {
+        if (victim->type == FT_DIRECTORY && new_dinode->nlink > 0)
+            new_dinode->nlink--;
+        if (victim->nlink > 0)
+            victim->nlink--;
+        ramfs_maybe_free_unlinked_inode(victim);
+    }
+
+    if (moved->type == FT_DIRECTORY) {
+        if (old_dinode != new_dinode) {
+            if (old_dinode->nlink > 0)
+                old_dinode->nlink--;
+            new_dinode->nlink++;
+        }
+        moved->parent = new_dinode;
+        ramfs_dir_set_entry(moved, "..", new_dinode->inum);
+    } else {
+        moved->parent = new_dinode;
+    }
     return 0;
 }
 
