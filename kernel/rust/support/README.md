@@ -32,3 +32,5 @@ Shared support code for all Rust kernel modules.
   refcount operations used by the Rust file (global VFS file table) module.
 - `pipe_helpers.c`: C wrappers for `vfile_t` field access, endpoint init, and
   task pid/state access used by the Rust pipe module.
+- `signal_helpers.c`: C wrappers for opaque `task_t` access plus arch-specific
+  rt-sigframe setup/restore used by the Rust signal module.

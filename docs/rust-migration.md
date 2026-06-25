@@ -53,6 +53,7 @@ The RISC-V target uses `imac` (soft-float `lp64` ABI) to match the C kernel's
 | `RUST_MODULE_FDTABLE` | `0` | Use Rust fdtable implementation |
 | `RUST_MODULE_FILE` | `0` | Use Rust global VFS file table implementation |
 | `RUST_MODULE_PIPE` | `0` | Use Rust pipe implementation |
+| `RUST_MODULE_SIGNAL` | `1` | Use Rust signal implementation |
 
 To build with all current Rust modules:
 
@@ -62,7 +63,7 @@ make RUST_ENABLED=1 RUST_MODULE_XATTR=1 RUST_MODULE_TIMEKEEPING=1 \
      RUST_MODULE_SLAB=1 RUST_MODULE_STATPERM=1 RUST_MODULE_PROC_LIST=1 \
      RUST_MODULE_RANDOM=1 RUST_MODULE_EVENTFD=1 RUST_MODULE_TIMERFD=1 \
      RUST_MODULE_LOCKS=1 RUST_MODULE_FDTABLE=1 RUST_MODULE_FILE=1 \
-     RUST_MODULE_PIPE=1 \
+     RUST_MODULE_PIPE=1 RUST_MODULE_SIGNAL=1 \
      ARCH=riscv64 kernel-only
 ```
 
@@ -166,6 +167,20 @@ Rewrote `kernel/core/sync.c` in Rust.
 - `RUST_MODULE_FILE=1` passes `make check-kernel-build` on all four
   architectures and `smoke-vfs-stress`/`smoke-futex-stress`/
   `smoke-sched-stress` on riscv64.
+
+## Phase 16
+
+Rewrote `kernel/proc/signal.c` in Rust.
+
+- New module: `kernel/rust/signal/`.
+- Preserves the public `kernel/include/proc/signal.h` ABI and keeps the shared
+  `signal_state_t` layout byte-identical with C.
+- Uses `kernel/rust/support/signal_helpers.c` for opaque `task_t` access and
+  architecture-specific rt-sigframe construction/restoration while keeping the
+  signal policy, pending-mask semantics, and syscall ABI in Rust.
+- Toggle: `RUST_MODULE_SIGNAL=1`.
+- Verification target: four-arch `make kernel-only` plus riscv64
+  `smoke-vfs-stress` / `smoke-futex-stress` / `smoke-sched-stress`.
 
 ## Phase 15
 

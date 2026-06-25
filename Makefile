@@ -102,8 +102,7 @@ RUST_MODULE_FDTABLE ?= 1
 RUST_MODULE_FILE ?= 1
 RUST_MODULE_PIPE ?= 1
 
-# Signal module is under active Rust rewrite; keep disabled until wired.
-RUST_MODULE_SIGNAL ?= 0
+RUST_MODULE_SIGNAL ?= 1
 
 RUSTC = rustc
 RUST_TARGET_riscv64 = riscv64imac-unknown-none-elf
@@ -119,7 +118,7 @@ RUSTFLAGS = --edition 2021 \
             --target $(RUST_TARGET)
 
 RUST_SUPPORT_SRC = kernel/rust/support/panic_handler.rs kernel/rust/support/irqsave_lock.c kernel/rust/support/arch_info.c kernel/rust/support/page_cache_helpers.c kernel/rust/support/sync_helpers.c kernel/rust/support/slab_helpers.c kernel/rust/support/stat_perm_helpers.c kernel/rust/support/proc_list_helpers.c
-RUST_SUPPORT_COBJ = $(BUILD_DIR)/rust/irqsave_lock.o $(BUILD_DIR)/rust/arch_info.o $(BUILD_DIR)/rust/page_cache_helpers.o $(BUILD_DIR)/rust/block_cache_helpers.o $(BUILD_DIR)/rust/xattr_helpers.o $(BUILD_DIR)/rust/time_helpers.o $(BUILD_DIR)/rust/sync_helpers.o $(BUILD_DIR)/rust/slab_helpers.o $(BUILD_DIR)/rust/stat_perm_helpers.o $(BUILD_DIR)/rust/proc_list_helpers.o $(BUILD_DIR)/rust/random_helpers.o $(BUILD_DIR)/rust/eventfd_helpers.o $(BUILD_DIR)/rust/timerfd_helpers.o $(BUILD_DIR)/rust/locks_helpers.o $(BUILD_DIR)/rust/fdtable_helpers.o $(BUILD_DIR)/rust/file_helpers.o $(BUILD_DIR)/rust/pipe_helpers.o
+RUST_SUPPORT_COBJ = $(BUILD_DIR)/rust/irqsave_lock.o $(BUILD_DIR)/rust/arch_info.o $(BUILD_DIR)/rust/page_cache_helpers.o $(BUILD_DIR)/rust/block_cache_helpers.o $(BUILD_DIR)/rust/xattr_helpers.o $(BUILD_DIR)/rust/time_helpers.o $(BUILD_DIR)/rust/sync_helpers.o $(BUILD_DIR)/rust/slab_helpers.o $(BUILD_DIR)/rust/stat_perm_helpers.o $(BUILD_DIR)/rust/proc_list_helpers.o $(BUILD_DIR)/rust/random_helpers.o $(BUILD_DIR)/rust/eventfd_helpers.o $(BUILD_DIR)/rust/timerfd_helpers.o $(BUILD_DIR)/rust/locks_helpers.o $(BUILD_DIR)/rust/fdtable_helpers.o $(BUILD_DIR)/rust/file_helpers.o $(BUILD_DIR)/rust/pipe_helpers.o $(BUILD_DIR)/rust/signal_helpers.o
 
 RUST_SUPPORT_LIB = $(BUILD_DIR)/rust/liba20rust_support.rlib
 RUST_KERNEL_SRC = kernel/rust/rust_kernel.rs
@@ -187,6 +186,10 @@ ifeq ($(RUST_ENABLED),1)
     CFLAGS += -DCONFIG_RUST_PIPE
     RUST_LIBS += $(BUILD_DIR)/rust/libpipe.rlib
   endif
+  ifeq ($(RUST_MODULE_SIGNAL),1)
+    CFLAGS += -DCONFIG_RUST_SIGNAL
+    RUST_LIBS += $(BUILD_DIR)/rust/libsignal.rlib
+  endif
 endif
 
 RUST_KERNEL_CFG =
@@ -235,6 +238,9 @@ ifeq ($(RUST_ENABLED),1)
   endif
   ifeq ($(RUST_MODULE_PIPE),1)
     RUST_KERNEL_CFG += --cfg rust_module_pipe
+  endif
+  ifeq ($(RUST_MODULE_SIGNAL),1)
+    RUST_KERNEL_CFG += --cfg rust_module_signal
   endif
   ifeq ($(RUST_MODULE_XATTR),1)
     RUST_KERNEL_CFG += --cfg rust_module_xattr
@@ -422,6 +428,9 @@ KERNEL_SRC := $(filter-out $(KERNEL_DIR)/fs/file.c,$(KERNEL_SRC))
 endif
 ifeq ($(RUST_MODULE_PIPE),1)
 KERNEL_SRC := $(filter-out $(KERNEL_DIR)/fs/pipe.c,$(KERNEL_SRC))
+endif
+ifeq ($(RUST_MODULE_SIGNAL),1)
+KERNEL_SRC := $(filter-out $(KERNEL_DIR)/proc/signal.c,$(KERNEL_SRC))
 endif
 
 endif
@@ -1320,6 +1329,10 @@ $(BUILD_DIR)/rust/pipe_helpers.o: kernel/rust/support/pipe_helpers.c Makefile
 	@mkdir -p $(dir $@)
 	$(CROSS_PREFIX)gcc $(CFLAGS) -c $< -o $@
 
+$(BUILD_DIR)/rust/signal_helpers.o: kernel/rust/support/signal_helpers.c Makefile
+	@mkdir -p $(dir $@)
+	$(CROSS_PREFIX)gcc $(CFLAGS) -c $< -o $@
+
 $(BUILD_DIR)/rust/libfile.rlib: kernel/rust/file/lib.rs kernel/rust/file/ffi.rs $(RUST_SUPPORT_LIB) Makefile
 	@mkdir -p $(dir $@)
 	$(RUSTC) $(RUSTFLAGS) --crate-name file --extern a20rust_support=$(RUST_SUPPORT_LIB) $< -o $@
@@ -1327,6 +1340,10 @@ $(BUILD_DIR)/rust/libfile.rlib: kernel/rust/file/lib.rs kernel/rust/file/ffi.rs 
 $(BUILD_DIR)/rust/libpipe.rlib: kernel/rust/pipe/lib.rs kernel/rust/pipe/ffi.rs $(RUST_SUPPORT_LIB) Makefile
 	@mkdir -p $(dir $@)
 	$(RUSTC) $(RUSTFLAGS) --crate-name pipe --extern a20rust_support=$(RUST_SUPPORT_LIB) $< -o $@
+
+$(BUILD_DIR)/rust/libsignal.rlib: kernel/rust/signal/lib.rs kernel/rust/signal/ffi.rs $(RUST_SUPPORT_LIB) Makefile
+	@mkdir -p $(dir $@)
+	$(RUSTC) $(RUSTFLAGS) --crate-name signal --extern a20rust_support=$(RUST_SUPPORT_LIB) $< -o $@
 
 $(BUILD_DIR)/rust/libslab.rlib: kernel/rust/slab/lib.rs kernel/rust/slab/ffi.rs $(RUST_SUPPORT_LIB) Makefile
 	@mkdir -p $(dir $@)
