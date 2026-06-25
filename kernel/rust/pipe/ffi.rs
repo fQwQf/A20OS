@@ -1,9 +1,6 @@
-use core::ffi::{c_char, c_int, c_long, c_ulong, c_void};
+use core::ffi::{c_int, c_void};
 
-#[repr(C)]
-pub struct vfile_t {
-    _opaque: [u8; 0],
-}
+pub use a20rust_support::vfs::{vfile_ops_t, vfile_t};
 
 #[repr(C)]
 pub struct task_t {
@@ -29,16 +26,6 @@ pub struct wait_queue_t {
     pub head: *mut wait_queue_entry_t,
 }
 
-#[repr(C)]
-pub struct vfile_ops_t {
-    pub read: Option<extern "C" fn(*mut vfile_t, *mut c_char, usize) -> c_int>,
-    pub write: Option<extern "C" fn(*mut vfile_t, *const c_char, usize) -> c_int>,
-    pub lseek: Option<extern "C" fn(*mut vfile_t, c_long, c_int) -> c_long>,
-    pub readdir: Option<extern "C" fn(*mut vfile_t, *mut c_void, usize) -> c_int>,
-    pub ioctl: Option<extern "C" fn(*mut vfile_t, c_ulong, *mut c_void) -> c_int>,
-    pub close: Option<extern "C" fn(*mut vfile_t) -> c_int>,
-}
-
 unsafe extern "C" {
     pub fn kmalloc(size: usize) -> *mut c_void;
     pub fn kfree(ptr: *mut c_void);
@@ -56,19 +43,15 @@ unsafe extern "C" {
 
     pub fn vfile_alloc() -> *mut vfile_t;
     pub fn vfile_free(vf: *mut vfile_t);
-    pub fn vfile_ref_read(vf: *mut vfile_t) -> c_int;
     pub fn vfs_alloc_fd(vf: *mut vfile_t) -> c_int;
     pub fn vfs_close(fd: c_int) -> c_int;
 
-    pub fn a20_pipe_vfile_priv(vf: *mut vfile_t) -> *mut c_void;
-    pub fn a20_pipe_vfile_flags(vf: *mut vfile_t) -> c_int;
     pub fn a20_pipe_vfile_init(
         vf: *mut vfile_t,
         ops: *mut vfile_ops_t,
         priv_data: *mut c_void,
         flags: c_int,
     );
-    pub fn a20_pipe_vfile_ops_eq(vf: *mut vfile_t, ops: *mut vfile_ops_t) -> c_int;
     pub fn a20_pipe_task_pid(task: *mut task_t) -> c_int;
     pub fn a20_pipe_task_set_blocked(task: *mut task_t);
 }

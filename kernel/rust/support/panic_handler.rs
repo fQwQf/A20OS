@@ -8,6 +8,7 @@
 #![feature(lang_items)]
 
 pub mod lock;
+pub mod vfs;
 
 use core::panic::PanicInfo;
 

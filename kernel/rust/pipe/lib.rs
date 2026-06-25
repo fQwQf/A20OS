@@ -49,7 +49,10 @@ static PIPE_WRITE_OPS: vfile_ops_t = vfile_ops_t {
 };
 
 unsafe fn pipe_from_vfile(vf: *mut vfile_t) -> *mut PipeBuf {
-    unsafe { ffi::a20_pipe_vfile_priv(vf) as *mut PipeBuf }
+    if vf.is_null() {
+        return ptr::null_mut();
+    }
+    unsafe { (*vf).priv_data as *mut PipeBuf }
 }
 
 unsafe fn current_task() -> *mut task_t {
@@ -120,7 +123,7 @@ pub extern "C" fn pipe_read(vf: *mut vfile_t, buf: *mut c_char, count: usize) ->
         return 0;
     }
 
-    let nonblock = unsafe { ffi::a20_pipe_vfile_flags(vf) & ffi::O_NONBLOCK } != 0;
+    let nonblock = unsafe { (*vf).flags & ffi::O_NONBLOCK } != 0;
     let mut guard = unsafe { (*pb).lock.lock() };
     while guard.used == 0 {
         if guard.writer_closed {
@@ -160,7 +163,7 @@ pub extern "C" fn pipe_write(vf: *mut vfile_t, buf: *const c_char, count: usize)
         return 0;
     }
 
-    let nonblock = unsafe { ffi::a20_pipe_vfile_flags(vf) & ffi::O_NONBLOCK } != 0;
+    let nonblock = unsafe { (*vf).flags & ffi::O_NONBLOCK } != 0;
     let mut guard = unsafe { (*pb).lock.lock() };
     if guard.reader_closed {
         drop(guard);
@@ -316,7 +319,7 @@ pub extern "C" fn pipe_read_close(vf: *mut vfile_t) -> c_int {
     }
     let (last_reader, refs, writers, data_ptr) = {
         let mut guard = unsafe { (*pb).lock.lock() };
-        let last_reader = unsafe { ffi::vfile_ref_read(vf) } == 0;
+        let last_reader = unsafe { (*vf).ref_read() } == 0;
         if last_reader {
             guard.reader_closed = true;
         }
@@ -346,7 +349,7 @@ pub extern "C" fn pipe_write_close(vf: *mut vfile_t) -> c_int {
     }
     let (last_writer, refs, readers, data_ptr) = {
         let mut guard = unsafe { (*pb).lock.lock() };
-        let last_writer = unsafe { ffi::vfile_ref_read(vf) } == 0;
+        let last_writer = unsafe { (*vf).ref_read() } == 0;
         if last_writer {
             guard.writer_closed = true;
         }
@@ -374,8 +377,8 @@ pub extern "C" fn pipe_vfile_is(vf: *mut vfile_t) -> c_int {
         return 0;
     }
     unsafe {
-        if ffi::a20_pipe_vfile_ops_eq(vf, ptr::addr_of!(PIPE_READ_OPS) as *mut vfile_ops_t) != 0
-            || ffi::a20_pipe_vfile_ops_eq(vf, ptr::addr_of!(PIPE_WRITE_OPS) as *mut vfile_ops_t) != 0
+        if (*vf).ops == ptr::addr_of!(PIPE_READ_OPS) as *mut vfile_ops_t
+            || (*vf).ops == ptr::addr_of!(PIPE_WRITE_OPS) as *mut vfile_ops_t
         {
             1
         } else {
@@ -395,7 +398,7 @@ pub extern "C" fn pipe_poll_events(vf: *mut vfile_t, events: i16) -> c_int {
     }
     let guard = unsafe { (*pb).lock.lock() };
     let mut revents: i16 = 0;
-    let is_reader = unsafe { ffi::a20_pipe_vfile_ops_eq(vf, ptr::addr_of!(PIPE_READ_OPS) as *mut vfile_ops_t) } != 0;
+    let is_reader = unsafe { (*vf).ops == ptr::addr_of!(PIPE_READ_OPS) as *mut vfile_ops_t };
     if is_reader {
         if (events & ffi::POLLIN) != 0 && (guard.used > 0 || guard.writer_closed) {
             revents |= ffi::POLLIN;
