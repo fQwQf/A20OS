@@ -56,6 +56,7 @@ The RISC-V target uses `imac` (soft-float `lp64` ABI) to match the C kernel's
 | `RUST_MODULE_SIGNAL` | `1` | Use Rust signal implementation |
 | `RUST_MODULE_FUTEX` | `1` | Use Rust futex implementation |
 | `RUST_MODULE_SCHED` | `1` | Use Rust scheduler implementation |
+| `RUST_MODULE_WAIT` | `1` | Use Rust wait/reap implementation |
 
 To build with all current Rust modules:
 
@@ -66,9 +67,20 @@ make RUST_ENABLED=1 RUST_MODULE_XATTR=1 RUST_MODULE_TIMEKEEPING=1 \
      RUST_MODULE_RANDOM=1 RUST_MODULE_EVENTFD=1 RUST_MODULE_TIMERFD=1 \
      RUST_MODULE_LOCKS=1 RUST_MODULE_FDTABLE=1 RUST_MODULE_FILE=1 \
      RUST_MODULE_PIPE=1 RUST_MODULE_SIGNAL=1 RUST_MODULE_FUTEX=1 \
-     RUST_MODULE_SCHED=1 \
+     RUST_MODULE_SCHED=1 RUST_MODULE_WAIT=1 \
      ARCH=riscv64 kernel-only
 ```
+
+## Phase 19
+
+Rewrote `kernel/proc/wait.c` in Rust.
+
+- New module: `kernel/rust/wait/`.
+- Preserves the exported `proc_wait4` ABI and keeps `kernel/proc/wait.c` as the
+  fallback implementation when `RUST_MODULE_WAIT=0`.
+- Uses `kernel/rust/support/wait_helpers.c` for opaque `task_t` wait/reap field
+  access while keeping the `proc_lock`-protected child scan/reap loop in Rust.
+- Toggle: `RUST_MODULE_WAIT=1` (default on).
 
 ## Phase 18
 

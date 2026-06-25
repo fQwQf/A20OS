@@ -64,3 +64,6 @@ extern crate futex;
 
 #[cfg(rust_module_sched)]
 extern crate sched;
+
+#[cfg(rust_module_wait)]
+extern crate wait;
