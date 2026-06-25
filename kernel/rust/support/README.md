@@ -26,3 +26,5 @@ Shared support code for all Rust kernel modules.
   ops-pointer matching used by the Rust timerfd module.
 - `locks_helpers.c`: C wrappers for `vfile_t` key/size/offset and current-pid
   access used by the Rust file-locking module.
+- `fdtable_helpers.c`: C wrappers for `task_t` files-pointer, fd limit, pid,
+  and out-of-memory panic used by the Rust fdtable module.

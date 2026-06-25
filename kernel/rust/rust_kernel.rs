@@ -46,3 +46,6 @@ extern crate timerfd;
 
 #[cfg(rust_module_locks)]
 extern crate locks;
+
+#[cfg(rust_module_fdtable)]
+extern crate fdtable;
