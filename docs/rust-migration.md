@@ -51,6 +51,7 @@ The RISC-V target uses `imac` (soft-float `lp64` ABI) to match the C kernel's
 | `RUST_MODULE_TIMERFD` | `0` | Use Rust timerfd implementation |
 | `RUST_MODULE_LOCKS` | `0` | Use Rust POSIX/BSD file locking implementation |
 | `RUST_MODULE_FDTABLE` | `0` | Use Rust fdtable implementation |
+| `RUST_MODULE_FILE` | `0` | Use Rust global VFS file table implementation |
 
 To build with all current Rust modules:
 
@@ -59,7 +60,7 @@ make RUST_ENABLED=1 RUST_MODULE_XATTR=1 RUST_MODULE_TIMEKEEPING=1 \
      RUST_MODULE_PAGECACHE=1 RUST_MODULE_BLOCKCACHE=1 RUST_MODULE_SYNC=1 \
      RUST_MODULE_SLAB=1 RUST_MODULE_STATPERM=1 RUST_MODULE_PROC_LIST=1 \
      RUST_MODULE_RANDOM=1 RUST_MODULE_EVENTFD=1 RUST_MODULE_TIMERFD=1 \
-     RUST_MODULE_LOCKS=1 RUST_MODULE_FDTABLE=1 \
+     RUST_MODULE_LOCKS=1 RUST_MODULE_FDTABLE=1 RUST_MODULE_FILE=1 \
      ARCH=riscv64 kernel-only
 ```
 
@@ -158,6 +159,9 @@ Rewrote `kernel/core/sync.c` in Rust.
 - `RUST_MODULE_LOCKS=1` passes `make check-kernel-build` on all four
   architectures and `smoke-vfs-stress`/`smoke-futex-stress` on riscv64.
 - `RUST_MODULE_FDTABLE=1` passes `make check-kernel-build` on all four
+  architectures and `smoke-vfs-stress`/`smoke-futex-stress`/
+  `smoke-sched-stress` on riscv64.
+- `RUST_MODULE_FILE=1` passes `make check-kernel-build` on all four
   architectures and `smoke-vfs-stress`/`smoke-futex-stress`/
   `smoke-sched-stress` on riscv64.
 
@@ -313,9 +317,33 @@ Rewrote `kernel/fs/fdtable.c` in Rust.
 - Builds for all four architectures; `smoke-vfs-stress`,
   `smoke-futex-stress`, and `smoke-sched-stress` pass on riscv64.
 
-## Phase 14 candidates
+## Phase 14
 
-- `kernel/fs/vfs/vnode.c` — vnode reference counting and lifecycle; moderate
-  blast radius but clear concurrency boundaries.
-- `kernel/fs/vfs/path_resolution.c` / `path.c` — dcache/path walk; complex
-  lock ordering, defer until simpler targets are done.
+Rewrote `kernel/fs/file.c` in Rust.
+
+- New module: `kernel/rust/file/`.
+- Preserves the public `kernel/include/fs/file.h` and `kernel/include/fs/vfs.h`
+  ABI for the global VFS file table (`vfs_get_file`, `vfs_get_file_ref`,
+  `vfs_alloc_fd`, `vfs_dup`, `vfs_dup3`, `file_close_prepare`, etc.).
+- Replaces the global `g_file_lock` manual `spin_lock_irqsave`/
+  `spin_unlock_irqrestore` pairs with a single `IrqSaveSpinLock<FileTableState>`,
+  eliminating stale-lock-state and mask-update races.
+- Keeps `vfile_t` as an opaque C type; refcount and object-cache operations
+  stay in C helpers in `kernel/rust/support/file_helpers.c` so Rust does not
+  need to replicate the full `vfile_t` layout.
+- Toggle: `RUST_MODULE_FILE=1`.
+- Builds for all four architectures; `smoke-vfs-stress`,
+  `smoke-futex-stress`, and `smoke-sched-stress` pass on riscv64.
+
+## Phase 15 candidates
+
+- `kernel/fs/pipe.c` — producer-consumer wait queues, close races, ~397 lines;
+  clear concurrency boundaries and strong LTP/busybox coverage.
+- `kernel/proc/signal.c` — signal pending/delivery races, ~546 lines; high
+  theoretical ROI but touches arch-specific signal frames.
+
+Modules intentionally left as C unless a concrete bug cluster is proven:
+`kernel/fs/ext4.c`, `kernel/fs/fat32.c`, `kernel/fs/vfs.c` core, pseudo
+filesystems (`procfs/devfs/ramfs/sysfs/cgroupfs`), `arch/`, `drivers/`,
+`external/lwip`, and simple sequential core code (`printf.c`, `klog.c`,
+`panic.c`).

@@ -49,3 +49,6 @@ extern crate locks;
 
 #[cfg(rust_module_fdtable)]
 extern crate fdtable;
+
+#[cfg(rust_module_file)]
+extern crate file;
