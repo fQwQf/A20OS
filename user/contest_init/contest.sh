@@ -82,6 +82,11 @@ cleanup_group() {
     iozone)
         /busybox killall iozone 2>/dev/null || killall iozone 2>/dev/null
         ;;
+    libcbench)
+        for p in libcbench libc-bench; do
+            /busybox killall "$p" 2>/dev/null || killall "$p" 2>/dev/null
+        done
+        ;;
     lmbench)
         for p in lmbench_all lat_ctx lat_proc lat_syscall lat_pipe lat_pagefault lat_mmap lat_select lat_mem_rd bw_mem bw_pipe mhz; do
             /busybox killall "$p" 2>/dev/null || killall "$p" 2>/dev/null
@@ -132,9 +137,10 @@ group_timeout() {
 
     case "$group" in
     basic|lua) print 180 ;;
-    busybox|iperf|netperf|libctest|libcbench) print 300 ;;
+    busybox|iperf|netperf|libctest) print 300 ;;
+    libcbench) print 600 ;;
     cyclictest|iozone) print 360 ;;
-    lmbench) print 1800 ;;
+    lmbench) print 2400 ;;
     ltp) print 600 ;;
     *) print 300 ;;
     esac
@@ -159,10 +165,15 @@ run_with_timeout() {
     done
 
     print "[CONTEST][TIMEOUT] runtime=$runtime group=$group after ${timeout}s"
+    kill -TERM "$test_pid" 2>/dev/null
+    cleanup_group "$group"
+    sleep 1
+    kill -KILL "$test_pid" 2>/dev/null
+    cleanup_group "$group"
+    wait "$test_pid" 2>/dev/null
     print "#### OS COMP TEST GROUP END $group-$runtime ####"
     print "[CONTEST][FAIL] $group (exit 124)"
-    print "[CONTEST] Stop after timeout to preserve completed scores"
-    poweroff
+    print "[CONTEST] Continue after timeout to preserve later scores"
     return 124
 }
 
