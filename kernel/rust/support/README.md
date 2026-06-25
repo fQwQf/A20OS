@@ -14,3 +14,11 @@ Shared support code for all Rust kernel modules.
   and task-state helpers used by the Rust sync module.
 - `slab_helpers.c`: C wrappers for buddy allocator access, PFN/virtual-address
   conversion, and frame metadata used by the Rust slab module.
+- `stat_perm_helpers.c`: C wrappers for vnode key/stat/credential access used by
+  the Rust stat_perm module.
+- `proc_list_helpers.c`: C wrappers for task field access used by the Rust
+  proc_list module.
+- `random_helpers.c`: C trampoline for entropy sampling used by the Rust random
+  module.
+- `eventfd_helpers.c`: C wrappers for vfile allocation/free/installation used by the
+  Rust eventfd module.

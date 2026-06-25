@@ -46,6 +46,8 @@ The RISC-V target uses `imac` (soft-float `lp64` ABI) to match the C kernel's
 | `RUST_MODULE_SLAB` | `0` | Use Rust slab allocator implementation |
 | `RUST_MODULE_STATPERM` | `0` | Use Rust stat/permission/time metadata implementation |
 | `RUST_MODULE_PROC_LIST` | `0` | Use Rust all-task list implementation |
+| `RUST_MODULE_RANDOM` | `0` | Use Rust kernel RNG implementation |
+| `RUST_MODULE_EVENTFD` | `0` | Use Rust eventfd implementation |
 
 To build with all current Rust modules:
 
@@ -53,6 +55,7 @@ To build with all current Rust modules:
 make RUST_ENABLED=1 RUST_MODULE_XATTR=1 RUST_MODULE_TIMEKEEPING=1 \
      RUST_MODULE_PAGECACHE=1 RUST_MODULE_BLOCKCACHE=1 RUST_MODULE_SYNC=1 \
      RUST_MODULE_SLAB=1 RUST_MODULE_STATPERM=1 RUST_MODULE_PROC_LIST=1 \
+     RUST_MODULE_RANDOM=1 RUST_MODULE_EVENTFD=1 \
      ARCH=riscv64 kernel-only
 ```
 
@@ -140,6 +143,10 @@ Rewrote `kernel/core/sync.c` in Rust.
   architectures and `smoke-proc-a20`/`smoke-futex-stress`/`smoke-sched-stress`
   on riscv64 (`smoke-vfs-stress` is blocked by an unrelated user-space build
   race, not by the RNG module).
+- `RUST_MODULE_EVENTFD=1` passes `make check-kernel-build` on all four
+  architectures and `smoke-futex-stress` on riscv64 (`smoke-proc-a20` and
+  `smoke-sched-stress` are blocked by the same unrelated user-space build
+  race).
 
 ## Phase 6
 
@@ -213,7 +220,26 @@ Rewrote `kernel/core/random.c` in Rust.
 - Builds for all four architectures; `smoke-proc-a20`, `smoke-futex-stress`,
   and `smoke-sched-stress` pass on riscv64.
 
-## Phase 10 candidates
+## Phase 10
+
+Rewrote `kernel/ipc/eventfd.c` in Rust.
+
+- New module: `kernel/rust/eventfd/`.
+- Replaces the manual `spin_lock`/`spin_unlock` pairs around the eventfd
+  counter and waitqueues with a single `IrqSaveSpinLock<EventFdState>`,
+  eliminating a class of lock-release-forget or interrupt-unsafe races.
+- Keeps the C waitqueue ABI (`wait_queue_sleep`/`wait_queue_wake_all`) but
+  captures the waitqueue pointer while the lock guard is alive, then drops the
+  guard before sleeping to preserve the original "release lock, sleep,
+  reacquire" semantics.
+- Adds shared C helpers in `kernel/rust/support/eventfd_helpers.c` for
+  `vfile_alloc`, `vfile_free`, vfile priv access, and anonymous-fd
+  installation, since these helpers need the full `vfile_t` / `vfile_ops_t`
+  definitions from the C headers.
+- Toggle: `RUST_MODULE_EVENTFD=1`.
+- Builds for all four architectures; `smoke-futex-stress` passes on riscv64.
+
+## Phase 11 candidates
 
 - `kernel/fs/vfs/vnode.c` — vnode reference counting and lifecycle; moderate
   blast radius but clear concurrency boundaries.
