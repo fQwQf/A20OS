@@ -37,22 +37,22 @@ The RISC-V target uses `imac` (soft-float `lp64` ABI) to match the C kernel's
 
 | Variable | Default | Meaning |
 |----------|---------|---------|
-| `RUST_ENABLED` | `0` | Master switch for Rust modules |
-| `RUST_MODULE_XATTR` | `0` | Use Rust xattr implementation |
-| `RUST_MODULE_TIMEKEEPING` | `0` | Use Rust timekeeping implementation |
-| `RUST_MODULE_PAGECACHE` | `0` | Use Rust page cache implementation |
-| `RUST_MODULE_BLOCKCACHE` | `0` | Use Rust block cache implementation |
-| `RUST_MODULE_SYNC` | `0` | Use Rust waitqueue/mutex/completion implementation |
-| `RUST_MODULE_SLAB` | `0` | Use Rust slab allocator implementation |
-| `RUST_MODULE_STATPERM` | `0` | Use Rust stat/permission/time metadata implementation |
-| `RUST_MODULE_PROC_LIST` | `0` | Use Rust all-task list implementation |
-| `RUST_MODULE_RANDOM` | `0` | Use Rust kernel RNG implementation |
-| `RUST_MODULE_EVENTFD` | `0` | Use Rust eventfd implementation |
-| `RUST_MODULE_TIMERFD` | `0` | Use Rust timerfd implementation |
-| `RUST_MODULE_LOCKS` | `0` | Use Rust POSIX/BSD file locking implementation |
-| `RUST_MODULE_FDTABLE` | `0` | Use Rust fdtable implementation |
-| `RUST_MODULE_FILE` | `0` | Use Rust global VFS file table implementation |
-| `RUST_MODULE_PIPE` | `0` | Use Rust pipe implementation |
+| `RUST_ENABLED` | `1` | Master switch for Rust modules |
+| `RUST_MODULE_XATTR` | `1` | Use Rust xattr implementation |
+| `RUST_MODULE_TIMEKEEPING` | `1` | Use Rust timekeeping implementation |
+| `RUST_MODULE_PAGECACHE` | `1` | Use Rust page cache implementation |
+| `RUST_MODULE_BLOCKCACHE` | `1` | Use Rust block cache implementation |
+| `RUST_MODULE_SYNC` | `1` | Use Rust waitqueue/mutex/completion implementation |
+| `RUST_MODULE_SLAB` | `1` | Use Rust slab allocator implementation |
+| `RUST_MODULE_STATPERM` | `1` | Use Rust stat/permission/time metadata implementation |
+| `RUST_MODULE_PROC_LIST` | `1` | Use Rust all-task list implementation |
+| `RUST_MODULE_RANDOM` | `1` | Use Rust kernel RNG implementation |
+| `RUST_MODULE_EVENTFD` | `1` | Use Rust eventfd implementation |
+| `RUST_MODULE_TIMERFD` | `1` | Use Rust timerfd implementation |
+| `RUST_MODULE_LOCKS` | `1` | Use Rust POSIX/BSD file locking implementation |
+| `RUST_MODULE_FDTABLE` | `1` | Use Rust fdtable implementation |
+| `RUST_MODULE_FILE` | `1` | Use Rust global VFS file table implementation |
+| `RUST_MODULE_PIPE` | `1` | Use Rust pipe implementation |
 | `RUST_MODULE_SIGNAL` | `1` | Use Rust signal implementation |
 | `RUST_MODULE_FUTEX` | `1` | Use Rust futex implementation |
 | `RUST_MODULE_SCHED` | `1` | Use Rust scheduler implementation |
@@ -192,7 +192,7 @@ Rewrote `kernel/core/sync.c` in Rust.
 - `RUST_MODULE_STATPERM=1` passes `make check-kernel-build` on all four
   architectures and `smoke-vfs-stress`/`smoke-futex-stress`/
   `smoke-sched-stress`/`smoke-vfs-edge` on riscv64.
-- Default-on Rust build with `RUST_MODULE_PROC_CORE=1` passes four-arch
+- Default-on Rust build with all current modules enabled passes four-arch
   `make kernel-only` and riscv64 `smoke-vfs-stress`/`smoke-futex-stress`/
   `smoke-sched-stress`/`smoke-proc-stress`.
 - `RUST_MODULE_RANDOM=1` passes `make check-kernel-build` on all four
@@ -370,8 +370,6 @@ Rewrote `kernel/ipc/timerfd.c` in Rust.
 - Toggle: `RUST_MODULE_TIMERFD=1`.
 - Builds for all four architectures; `smoke-sched-stress` passes on riscv64.
 
-## Phase 12 candidates
-
 ## Phase 12
 
 Rewrote `kernel/fs/locks.c` in Rust.
@@ -431,11 +429,10 @@ Rewrote `kernel/fs/file.c` in Rust.
 - Builds for all four architectures; `smoke-vfs-stress`,
   `smoke-futex-stress`, and `smoke-sched-stress` pass on riscv64.
 
-- `kernel/proc/signal.c` — signal pending/delivery races, ~546 lines; high
-  theoretical ROI but touches arch-specific signal frames.
-
 Modules intentionally left as C unless a concrete bug cluster is proven:
-`kernel/fs/ext4.c`, `kernel/fs/fat32.c`, `kernel/fs/vfs.c` core, pseudo
-filesystems (`procfs/devfs/ramfs/sysfs/cgroupfs`), `arch/`, `drivers/`,
-`external/lwip`, and simple sequential core code (`printf.c`, `klog.c`,
-`panic.c`).
+`kernel/proc/fork.c`, `kernel/proc/exec.c`, `kernel/proc/exit.c`,
+`kernel/proc/pid.c`, and `kernel/proc/task.c` (process lifecycle helpers that
+are stable in C and not currently targeted), `kernel/fs/ext4.c`, `kernel/fs/fat32.c`,
+`kernel/fs/vfs.c` core, pseudo filesystems (`procfs/devfs/ramfs/sysfs/cgroupfs`),
+`arch/`, `drivers/`, `external/lwip`, and simple sequential core code (`printf.c`,
+`klog.c`, `panic.c`).

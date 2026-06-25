@@ -348,6 +348,9 @@ pub extern "C" fn proc_brk(newbrk: u64) -> u64 {
 
 #[no_mangle]
 pub extern "C" fn proc_mmap(addr: u64, len: usize, prot: c_int, flags: c_int, fd: c_int, off: core::ffi::c_long) -> u64 {
+    if off < 0 {
+        return -(ffi::EINVAL as i64) as u64;
+    }
     unsafe { ffi::a20_proc_core_proc_mmap(ffi::proc_current(), addr, len, prot, flags, fd, off as u64) }
 }
 
