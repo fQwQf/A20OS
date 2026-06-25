@@ -54,6 +54,7 @@ The RISC-V target uses `imac` (soft-float `lp64` ABI) to match the C kernel's
 | `RUST_MODULE_FILE` | `0` | Use Rust global VFS file table implementation |
 | `RUST_MODULE_PIPE` | `0` | Use Rust pipe implementation |
 | `RUST_MODULE_SIGNAL` | `1` | Use Rust signal implementation |
+| `RUST_MODULE_FUTEX` | `1` | Use Rust futex implementation |
 
 To build with all current Rust modules:
 
@@ -63,7 +64,7 @@ make RUST_ENABLED=1 RUST_MODULE_XATTR=1 RUST_MODULE_TIMEKEEPING=1 \
      RUST_MODULE_SLAB=1 RUST_MODULE_STATPERM=1 RUST_MODULE_PROC_LIST=1 \
      RUST_MODULE_RANDOM=1 RUST_MODULE_EVENTFD=1 RUST_MODULE_TIMERFD=1 \
      RUST_MODULE_LOCKS=1 RUST_MODULE_FDTABLE=1 RUST_MODULE_FILE=1 \
-     RUST_MODULE_PIPE=1 RUST_MODULE_SIGNAL=1 \
+     RUST_MODULE_PIPE=1 RUST_MODULE_SIGNAL=1 RUST_MODULE_FUTEX=1 \
      ARCH=riscv64 kernel-only
 ```
 
@@ -181,6 +182,36 @@ Rewrote `kernel/proc/signal.c` in Rust.
 - Toggle: `RUST_MODULE_SIGNAL=1`.
 - Verification target: four-arch `make kernel-only` plus riscv64
   `smoke-vfs-stress` / `smoke-futex-stress` / `smoke-sched-stress`.
+
+## Phase 17
+
+Rewrote `kernel/abi/linux/sys_futex.c` in Rust.
+
+- New module: `kernel/rust/futex/`.
+- Preserves the public `sys_futex`, `futex_wake_user`, and
+  `exit_robust_list` C ABI while keeping the original fixed-size waiter table,
+  wake-generation protocol, and wake-after-unlock behavior.
+- Adds `kernel/rust/support/futex_helpers.c` so Rust can translate futex
+  physical keys, read opaque task/mm state, and query kernel time sources
+  without exposing `task_t` / `mm_struct_t` internals.
+- Toggle: `RUST_MODULE_FUTEX=1`.
+- Verification target: four-arch `make kernel-only` plus riscv64
+  `smoke-futex-stress` / `smoke-sched-stress`.
+
+## Phase 17
+
+Rewrote `kernel/abi/linux/sys_futex.c` in Rust.
+
+- New module: `kernel/rust/futex/`.
+- Preserves the public `sys_futex`, `futex_wake_user`, and
+  `exit_robust_list` C ABI while keeping the original fixed-size waiter table,
+  wake-generation protocol, and wake-after-unlock behavior.
+- Adds `kernel/rust/support/futex_helpers.c` so Rust can translate futex
+  physical keys, read opaque task/mm state, and query kernel time sources
+  without exposing `task_t` / `mm_struct_t` internals.
+- Toggle: `RUST_MODULE_FUTEX=1`.
+- Verification target: four-arch `make kernel-only` plus riscv64
+  `smoke-futex-stress` / `smoke-sched-stress`.
 
 ## Phase 15
 

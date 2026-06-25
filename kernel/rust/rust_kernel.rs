@@ -58,3 +58,6 @@ extern crate pipe;
 
 #[cfg(rust_module_signal)]
 extern crate signal;
+
+#[cfg(rust_module_futex)]
+extern crate futex;
