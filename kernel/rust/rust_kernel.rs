@@ -37,3 +37,6 @@ extern crate proc_list;
 
 #[cfg(rust_module_random)]
 extern crate random;
+
+#[cfg(rust_module_eventfd)]
+extern crate eventfd;
