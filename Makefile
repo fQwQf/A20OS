@@ -103,6 +103,7 @@ RUST_MODULE_FDTABLE ?= 1
 RUST_MODULE_FILE ?= 1
 RUST_MODULE_PIPE ?= 1
 RUST_MODULE_A20_EVENT ?= 1
+RUST_MODULE_SYSV_SEM ?= 1
 
 RUST_MODULE_SIGNAL ?= 1
 RUST_MODULE_FUTEX ?= 1
@@ -123,8 +124,8 @@ RUSTFLAGS = --edition 2021 \
             -C panic=abort \
             --target $(RUST_TARGET)
 
-RUST_SUPPORT_SRC = kernel/rust/support/panic_handler.rs kernel/rust/support/irqsave_lock.c kernel/rust/support/arch_info.c kernel/rust/support/page_cache_helpers.c kernel/rust/support/block_cache_helpers.c kernel/rust/support/dcache_helpers.c kernel/rust/support/xattr_helpers.c kernel/rust/support/time_helpers.c kernel/rust/support/sync_helpers.c kernel/rust/support/slab_helpers.c kernel/rust/support/stat_perm_helpers.c kernel/rust/support/proc_list_helpers.c kernel/rust/support/random_helpers.c kernel/rust/support/eventfd_helpers.c kernel/rust/support/timerfd_helpers.c kernel/rust/support/locks_helpers.c kernel/rust/support/fdtable_helpers.c kernel/rust/support/file_helpers.c kernel/rust/support/pipe_helpers.c kernel/rust/support/event_helpers.c kernel/rust/support/signal_helpers.c kernel/rust/support/futex_helpers.c kernel/rust/support/sched_helpers.c kernel/rust/support/wait_helpers.c kernel/rust/support/proc_core_helpers.c kernel/rust/support/vfs_types_check.c
-RUST_SUPPORT_COBJ = $(BUILD_DIR)/rust/irqsave_lock.o $(BUILD_DIR)/rust/arch_info.o $(BUILD_DIR)/rust/page_cache_helpers.o $(BUILD_DIR)/rust/block_cache_helpers.o $(BUILD_DIR)/rust/dcache_helpers.o $(BUILD_DIR)/rust/xattr_helpers.o $(BUILD_DIR)/rust/time_helpers.o $(BUILD_DIR)/rust/sync_helpers.o $(BUILD_DIR)/rust/slab_helpers.o $(BUILD_DIR)/rust/stat_perm_helpers.o $(BUILD_DIR)/rust/proc_list_helpers.o $(BUILD_DIR)/rust/random_helpers.o $(BUILD_DIR)/rust/eventfd_helpers.o $(BUILD_DIR)/rust/timerfd_helpers.o $(BUILD_DIR)/rust/locks_helpers.o $(BUILD_DIR)/rust/fdtable_helpers.o $(BUILD_DIR)/rust/file_helpers.o $(BUILD_DIR)/rust/pipe_helpers.o $(BUILD_DIR)/rust/event_helpers.o $(BUILD_DIR)/rust/signal_helpers.o $(BUILD_DIR)/rust/futex_helpers.o $(BUILD_DIR)/rust/sched_helpers.o $(BUILD_DIR)/rust/wait_helpers.o $(BUILD_DIR)/rust/proc_core_helpers.o $(BUILD_DIR)/rust/vfs_types_check.o
+RUST_SUPPORT_SRC = kernel/rust/support/panic_handler.rs kernel/rust/support/irqsave_lock.c kernel/rust/support/arch_info.c kernel/rust/support/page_cache_helpers.c kernel/rust/support/block_cache_helpers.c kernel/rust/support/dcache_helpers.c kernel/rust/support/xattr_helpers.c kernel/rust/support/time_helpers.c kernel/rust/support/sync_helpers.c kernel/rust/support/slab_helpers.c kernel/rust/support/stat_perm_helpers.c kernel/rust/support/proc_list_helpers.c kernel/rust/support/random_helpers.c kernel/rust/support/eventfd_helpers.c kernel/rust/support/timerfd_helpers.c kernel/rust/support/locks_helpers.c kernel/rust/support/fdtable_helpers.c kernel/rust/support/file_helpers.c kernel/rust/support/pipe_helpers.c kernel/rust/support/event_helpers.c kernel/rust/support/sysv_sem_helpers.c kernel/rust/support/signal_helpers.c kernel/rust/support/futex_helpers.c kernel/rust/support/sched_helpers.c kernel/rust/support/wait_helpers.c kernel/rust/support/proc_core_helpers.c kernel/rust/support/vfs_types_check.c
+RUST_SUPPORT_COBJ = $(BUILD_DIR)/rust/irqsave_lock.o $(BUILD_DIR)/rust/arch_info.o $(BUILD_DIR)/rust/page_cache_helpers.o $(BUILD_DIR)/rust/block_cache_helpers.o $(BUILD_DIR)/rust/dcache_helpers.o $(BUILD_DIR)/rust/xattr_helpers.o $(BUILD_DIR)/rust/time_helpers.o $(BUILD_DIR)/rust/sync_helpers.o $(BUILD_DIR)/rust/slab_helpers.o $(BUILD_DIR)/rust/stat_perm_helpers.o $(BUILD_DIR)/rust/proc_list_helpers.o $(BUILD_DIR)/rust/random_helpers.o $(BUILD_DIR)/rust/eventfd_helpers.o $(BUILD_DIR)/rust/timerfd_helpers.o $(BUILD_DIR)/rust/locks_helpers.o $(BUILD_DIR)/rust/fdtable_helpers.o $(BUILD_DIR)/rust/file_helpers.o $(BUILD_DIR)/rust/pipe_helpers.o $(BUILD_DIR)/rust/event_helpers.o $(BUILD_DIR)/rust/sysv_sem_helpers.o $(BUILD_DIR)/rust/signal_helpers.o $(BUILD_DIR)/rust/futex_helpers.o $(BUILD_DIR)/rust/sched_helpers.o $(BUILD_DIR)/rust/wait_helpers.o $(BUILD_DIR)/rust/proc_core_helpers.o $(BUILD_DIR)/rust/vfs_types_check.o
 
 RUST_SUPPORT_LIB = $(BUILD_DIR)/rust/liba20rust_support.rlib
 RUST_KERNEL_SRC = kernel/rust/rust_kernel.rs
@@ -200,6 +201,10 @@ ifeq ($(RUST_ENABLED),1)
     CFLAGS += -DCONFIG_RUST_A20_EVENT
     RUST_LIBS += $(BUILD_DIR)/rust/liba20_event.rlib
   endif
+  ifeq ($(RUST_MODULE_SYSV_SEM),1)
+    CFLAGS += -DCONFIG_RUST_SYSV_SEM
+    RUST_LIBS += $(BUILD_DIR)/rust/libsysv_sem.rlib
+  endif
   ifeq ($(RUST_MODULE_SIGNAL),1)
     CFLAGS += -DCONFIG_RUST_SIGNAL
     RUST_LIBS += $(BUILD_DIR)/rust/libsignal.rlib
@@ -274,6 +279,9 @@ ifeq ($(RUST_ENABLED),1)
   endif
   ifeq ($(RUST_MODULE_A20_EVENT),1)
     RUST_KERNEL_CFG += --cfg rust_module_a20_event
+  endif
+  ifeq ($(RUST_MODULE_SYSV_SEM),1)
+    RUST_KERNEL_CFG += --cfg rust_module_sysv_sem
   endif
   ifeq ($(RUST_MODULE_SIGNAL),1)
     RUST_KERNEL_CFG += --cfg rust_module_signal
@@ -483,6 +491,9 @@ endif
 ifeq ($(RUST_MODULE_A20_EVENT),1)
 KERNEL_SRC := $(filter-out $(KERNEL_DIR)/ipc/a20_event.c,$(KERNEL_SRC))
 endif
+ifeq ($(RUST_MODULE_SYSV_SEM),1)
+KERNEL_SRC := $(filter-out $(KERNEL_DIR)/ipc/sysv_sem.c,$(KERNEL_SRC))
+endif
 ifeq ($(RUST_MODULE_SIGNAL),1)
 KERNEL_SRC := $(filter-out $(KERNEL_DIR)/proc/signal.c,$(KERNEL_SRC))
 endif
@@ -521,7 +532,7 @@ KERNEL_BIN = $(BUILD_DIR)/kernel.bin
 		check-kernel-build check-user-build check-dev-build check-contest-build check-build-matrix check-abi-smoke-gate check-doc-drift check-doc-test-gates check-final-definition check-concurrency-foundation check-mm-lock-model check-abi-boundary check-driver-core-model check-external-dependency-boundary \
 		check-riscv64-bringup check-loongarch64-bringup check-aarch64-bringup check-x86_64-bringup \
 		check-riscv64-user check-loongarch64-user check-aarch64-user check-x86_64-user \
-		smoke-riscv64 smoke-loongarch64 smoke-aarch64 smoke-x86_64 smoke-abi-linux smoke-network-suite smoke-proc-a20 smoke-proc-stress smoke-mm-stress smoke-vfs-stress smoke-vfs-edge smoke-sched-stress smoke-futex-stress smoke-socket-stress smoke-driver-lifecycle smoke-native-handle smoke-native-libc smoke-io-event \\
+		smoke-riscv64 smoke-loongarch64 smoke-aarch64 smoke-x86_64 smoke-abi-linux smoke-network-suite smoke-proc-a20 smoke-proc-stress smoke-mm-stress smoke-vfs-stress smoke-vfs-edge smoke-sched-stress smoke-futex-stress smoke-socket-stress smoke-driver-lifecycle smoke-native-handle smoke-native-libc smoke-io-event smoke-sysv-sem \\
 		FORCE regen-rootfs-overlay \
 		user_apps fs_img kernel-only dev-build contest-rv contest-la \
 		eval-dev-build-rv eval-dev-build-la \
@@ -1023,6 +1034,34 @@ smoke-io-event:
 		exit "$$status"; \
 	fi
 
+smoke-sysv-sem:
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/sysv-sem-riscv64.log"; \
+	status=0; \
+	{ sleep $(SMOKE_INPUT_DELAY); printf 'sysv_sem_smoke\npoweroff\n'; } | \
+	timeout $(SMOKE_TIMEOUT) qemu-system-riscv64 \
+		-machine virt -m 1G -nographic -smp 1 -bios default \
+		-global virtio-mmio.force-legacy=false \
+		-drive file=.kernel-build/riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
+		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		-kernel .kernel-build/riscv64-linux-dev/kernel.elf \
+		-append 'a20.ip=10.0.2.15 a20.netmask=255.255.255.0 a20.gateway=10.0.2.2 a20.dns=10.0.2.3 a20.hostname=a20os' \
+		> "$$log" 2>&1 || status=$$?; \
+	if grep -q 'SYSV_SEM_SMOKE: PASS' "$$log"; then \
+		echo "smoke-sysv-sem: PASS; log saved to $$log"; \
+	elif [ "$$status" -eq 124 ]; then \
+		echo "smoke-sysv-sem: timeout without PASS; tail of $$log:"; \
+		tail -n 80 "$$log"; \
+		exit 1; \
+	else \
+		echo "smoke-sysv-sem: failed with status $$status; tail of $$log:"; \
+		tail -n 80 "$$log"; \
+		exit "$$status"; \
+	fi
+
 smoke-sched-stress:
 		$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
@@ -1407,6 +1446,10 @@ $(BUILD_DIR)/rust/event_helpers.o: kernel/rust/support/event_helpers.c Makefile
 	@mkdir -p $(dir $@)
 	$(CROSS_PREFIX)gcc $(CFLAGS) -c $< -o $@
 
+$(BUILD_DIR)/rust/sysv_sem_helpers.o: kernel/rust/support/sysv_sem_helpers.c Makefile
+	@mkdir -p $(dir $@)
+	$(CROSS_PREFIX)gcc $(CFLAGS) -c $< -o $@
+
 $(BUILD_DIR)/rust/signal_helpers.o: kernel/rust/support/signal_helpers.c Makefile
 	@mkdir -p $(dir $@)
 	$(CROSS_PREFIX)gcc $(CFLAGS) -c $< -o $@
@@ -1454,6 +1497,10 @@ $(BUILD_DIR)/rust/libsched.rlib: kernel/rust/sched/lib.rs kernel/rust/sched/ffi.
 $(BUILD_DIR)/rust/libwait.rlib: kernel/rust/wait/lib.rs kernel/rust/wait/ffi.rs $(RUST_SUPPORT_LIB) Makefile
 	@mkdir -p $(dir $@)
 	$(RUSTC) $(RUSTFLAGS) --crate-name wait --extern a20rust_support=$(RUST_SUPPORT_LIB) $< -o $@
+
+$(BUILD_DIR)/rust/libsysv_sem.rlib: kernel/rust/sysv_sem/lib.rs kernel/rust/sysv_sem/ffi.rs $(RUST_SUPPORT_LIB) Makefile
+	@mkdir -p $(dir $@)
+	$(RUSTC) $(RUSTFLAGS) --crate-name sysv_sem --extern a20rust_support=$(RUST_SUPPORT_LIB) $< -o $@
 
 $(BUILD_DIR)/rust/libproc_core.rlib: kernel/rust/proc_core/lib.rs kernel/rust/proc_core/ffi.rs $(RUST_SUPPORT_LIB) Makefile
 	@mkdir -p $(dir $@)
