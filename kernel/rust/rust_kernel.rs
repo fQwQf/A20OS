@@ -52,3 +52,6 @@ extern crate fdtable;
 
 #[cfg(rust_module_file)]
 extern crate file;
+
+#[cfg(rust_module_pipe)]
+extern crate pipe;

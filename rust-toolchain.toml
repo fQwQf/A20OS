@@ -3,6 +3,7 @@ channel = "nightly-2025-01-18"
 components = ["rust-src", "rustfmt", "clippy"]
 targets = [
     "riscv64gc-unknown-none-elf",
+    "riscv64imac-unknown-none-elf",
     "loongarch64-unknown-none",
     "aarch64-unknown-none",
     "x86_64-unknown-none",
