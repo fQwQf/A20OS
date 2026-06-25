@@ -30,6 +30,21 @@ int vfs_should_write(int flags)
     return acc == O_WRONLY || acc == O_RDWR;
 }
 
+static int vfs_file_uses_page_cache(vnode_t *vn)
+{
+    if (!vn || ((vn->mode & S_IFMT) != S_IFREG))
+        return 0;
+    mount_t *mnt = vn->mnt;
+    if (mnt &&
+        (mnt->type == FS_TYPE_RAMFS ||
+         mnt->type == FS_TYPE_PROCFS ||
+         mnt->type == FS_TYPE_CGROUP ||
+         mnt->type == FS_TYPE_DEVFS ||
+         mnt->type == FS_TYPE_SYSFS))
+        return 0;
+    return 1;
+}
+
 int vfs_read_file(vfile_t *vf, char *buf, size_t count)
 {
     if (!vf)
@@ -37,30 +52,18 @@ int vfs_read_file(vfile_t *vf, char *buf, size_t count)
     if ((vf->vnode || vfs_is_pipe_vfile(vf) || vfs_is_char_device_vfile(vf)) &&
         !vfs_should_read(vf->flags))
         return -EBADF;
-    if (vf->vnode && ((vf->vnode->mode & S_IFMT) == S_IFREG) &&
-        (vf->flags & O_DIRECT)) {
+    if (vfs_file_uses_page_cache(vf->vnode) && (vf->flags & O_DIRECT)) {
         page_cache_writeback_vnode(vf->vnode, NULL, NULL);
         long cur_off = (long)vf->offset;
         page_cache_invalidate_uptodate_range(vf->vnode, (uint64_t)cur_off,
                                               (uint64_t)(cur_off + count));
     }
-    if (vf->vnode && ((vf->vnode->mode & S_IFMT) == S_IFREG) &&
+    if (vfs_file_uses_page_cache(vf->vnode) &&
         !(vf->flags & O_DIRECT) &&
         vf->ops && vf->ops->read && vf->ops->lseek) {
-        /* Skip page cache for virtual filesystems (procfs, cgroupfs, devfs,
-         * ramfs) — they have no block-backed storage and the page cache
-         * will dereference NULL pointers on their vnodes. */
-        mount_t *vmnt = vf->vnode->mnt;
-        int virtual_fs = (vmnt &&
-            (vmnt->type == FS_TYPE_PROCFS ||
-             vmnt->type == FS_TYPE_CGROUP ||
-             vmnt->type == FS_TYPE_DEVFS ||
-             vmnt->type == FS_TYPE_SYSFS));
-        if (!virtual_fs) {
-            int r = page_cache_read_vfile(vf, buf, count);
-            if (r != -ENOSYS)
-                return r;
-        }
+        int r = page_cache_read_vfile(vf, buf, count);
+        if (r != -ENOSYS)
+            return r;
     }
     if (vf->ops && vf->ops->read)
         return vf->ops->read(vf, buf, count);
@@ -79,7 +82,8 @@ int vfs_write_file(vfile_t *vf, const char *buf, size_t count)
     if ((vf->seals & F_SEAL_GROW) && vf->vnode &&
         vf->offset + count > vf->vnode->size)
         return -EPERM;
-    if ((vf->flags & O_DIRECT) && vf->vnode && ((vf->vnode->mode & S_IFMT) == S_IFREG)) {
+    int use_page_cache = vfs_file_uses_page_cache(vf->vnode);
+    if ((vf->flags & O_DIRECT) && use_page_cache) {
         page_cache_writeback_vnode(vf->vnode, NULL, NULL);
         long cur_off = (long)vf->offset;
         page_cache_invalidate_uptodate_range(vf->vnode, (uint64_t)cur_off,
@@ -91,10 +95,10 @@ int vfs_write_file(vfile_t *vf, const char *buf, size_t count)
         size_t write_start = vf->offset;
         int r = vf->ops->write(vf, buf, count);
         if (r > 0 && vf->vnode) {
-            if (vf->flags & O_DIRECT)
+            if ((vf->flags & O_DIRECT) && use_page_cache)
                 page_cache_invalidate_uptodate_range(vf->vnode, write_start,
                                                       write_start + (size_t)r);
-            else
+            else if (use_page_cache)
                 page_cache_invalidate_uptodate_range(vf->vnode, write_start,
                                                       write_start + (size_t)r);
             vfs_touch_mtime(vf->vnode);
