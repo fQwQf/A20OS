@@ -55,6 +55,7 @@ The RISC-V target uses `imac` (soft-float `lp64` ABI) to match the C kernel's
 | `RUST_MODULE_PIPE` | `0` | Use Rust pipe implementation |
 | `RUST_MODULE_SIGNAL` | `1` | Use Rust signal implementation |
 | `RUST_MODULE_FUTEX` | `1` | Use Rust futex implementation |
+| `RUST_MODULE_SCHED` | `1` | Use Rust scheduler implementation |
 
 To build with all current Rust modules:
 
@@ -65,8 +66,24 @@ make RUST_ENABLED=1 RUST_MODULE_XATTR=1 RUST_MODULE_TIMEKEEPING=1 \
      RUST_MODULE_RANDOM=1 RUST_MODULE_EVENTFD=1 RUST_MODULE_TIMERFD=1 \
      RUST_MODULE_LOCKS=1 RUST_MODULE_FDTABLE=1 RUST_MODULE_FILE=1 \
      RUST_MODULE_PIPE=1 RUST_MODULE_SIGNAL=1 RUST_MODULE_FUTEX=1 \
+     RUST_MODULE_SCHED=1 \
      ARCH=riscv64 kernel-only
 ```
+
+## Phase 18
+
+Rewrote `kernel/proc/sched.c` in Rust.
+
+- New module: `kernel/rust/sched/`.
+- Preserves the exported scheduler ABI (`proc_sched_runq_init`,
+  `proc_sched_select_cpu{,_locked}`, `proc_runq_*`, `proc_set_{wake_time,alarm_expire}`,
+  `proc_next_timer_interval`, `sched_reap_zombies`, `context_switch`, `sched`,
+  `proc_yield`) while keeping `kernel/proc/sched.c` in-tree as the fallback
+  implementation.
+- Uses `IrqSaveSpinLock<RunQueue>` per CPU for runqueue state and thin C helpers
+  in `kernel/rust/support/sched_helpers.c` for opaque `task_t` field access,
+  ABI-conditional timer tick callbacks, and low-level switch glue.
+- Toggle: `RUST_MODULE_SCHED=1` (default on).
 
 ## Adding a new Rust module
 
