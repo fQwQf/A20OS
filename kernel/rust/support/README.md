@@ -40,3 +40,5 @@ Shared support code for all Rust kernel modules.
 - `sched_helpers.c`: C wrappers for opaque scheduler-visible `task_t` fields,
   ABI-conditional timer ticks, trace hooks, CPU-count/tick constants, and the
   low-level `__switch` trampoline used by the Rust scheduler module.
+- `wait_helpers.c`: C wrappers for opaque `task_t` wait/reap-visible fields used
+  by the Rust wait module.
