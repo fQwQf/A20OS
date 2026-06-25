@@ -90,6 +90,7 @@ RUST_MODULE_XATTR ?= 1
 RUST_MODULE_TIMEKEEPING ?= 1
 RUST_MODULE_PAGECACHE ?= 1
 RUST_MODULE_BLOCKCACHE ?= 1
+RUST_MODULE_DCACHE ?= 1
 RUST_MODULE_SYNC ?= 1
 RUST_MODULE_SLAB ?= 1
 RUST_MODULE_STATPERM ?= 1
@@ -121,8 +122,8 @@ RUSTFLAGS = --edition 2021 \
             -C panic=abort \
             --target $(RUST_TARGET)
 
-RUST_SUPPORT_SRC = kernel/rust/support/panic_handler.rs kernel/rust/support/irqsave_lock.c kernel/rust/support/arch_info.c kernel/rust/support/page_cache_helpers.c kernel/rust/support/sync_helpers.c kernel/rust/support/slab_helpers.c kernel/rust/support/stat_perm_helpers.c kernel/rust/support/proc_list_helpers.c kernel/rust/support/futex_helpers.c kernel/rust/support/wait_helpers.c
-RUST_SUPPORT_COBJ = $(BUILD_DIR)/rust/irqsave_lock.o $(BUILD_DIR)/rust/arch_info.o $(BUILD_DIR)/rust/page_cache_helpers.o $(BUILD_DIR)/rust/block_cache_helpers.o $(BUILD_DIR)/rust/xattr_helpers.o $(BUILD_DIR)/rust/time_helpers.o $(BUILD_DIR)/rust/sync_helpers.o $(BUILD_DIR)/rust/slab_helpers.o $(BUILD_DIR)/rust/stat_perm_helpers.o $(BUILD_DIR)/rust/proc_list_helpers.o $(BUILD_DIR)/rust/random_helpers.o $(BUILD_DIR)/rust/eventfd_helpers.o $(BUILD_DIR)/rust/timerfd_helpers.o $(BUILD_DIR)/rust/locks_helpers.o $(BUILD_DIR)/rust/fdtable_helpers.o $(BUILD_DIR)/rust/file_helpers.o $(BUILD_DIR)/rust/pipe_helpers.o $(BUILD_DIR)/rust/signal_helpers.o $(BUILD_DIR)/rust/futex_helpers.o $(BUILD_DIR)/rust/sched_helpers.o $(BUILD_DIR)/rust/wait_helpers.o $(BUILD_DIR)/rust/proc_core_helpers.o
+RUST_SUPPORT_SRC = kernel/rust/support/panic_handler.rs kernel/rust/support/irqsave_lock.c kernel/rust/support/arch_info.c kernel/rust/support/page_cache_helpers.c kernel/rust/support/block_cache_helpers.c kernel/rust/support/dcache_helpers.c kernel/rust/support/xattr_helpers.c kernel/rust/support/time_helpers.c kernel/rust/support/sync_helpers.c kernel/rust/support/slab_helpers.c kernel/rust/support/stat_perm_helpers.c kernel/rust/support/proc_list_helpers.c kernel/rust/support/random_helpers.c kernel/rust/support/eventfd_helpers.c kernel/rust/support/timerfd_helpers.c kernel/rust/support/locks_helpers.c kernel/rust/support/fdtable_helpers.c kernel/rust/support/file_helpers.c kernel/rust/support/pipe_helpers.c kernel/rust/support/signal_helpers.c kernel/rust/support/futex_helpers.c kernel/rust/support/sched_helpers.c kernel/rust/support/wait_helpers.c kernel/rust/support/proc_core_helpers.c kernel/rust/support/vfs_types_check.c
+RUST_SUPPORT_COBJ = $(BUILD_DIR)/rust/irqsave_lock.o $(BUILD_DIR)/rust/arch_info.o $(BUILD_DIR)/rust/page_cache_helpers.o $(BUILD_DIR)/rust/block_cache_helpers.o $(BUILD_DIR)/rust/dcache_helpers.o $(BUILD_DIR)/rust/xattr_helpers.o $(BUILD_DIR)/rust/time_helpers.o $(BUILD_DIR)/rust/sync_helpers.o $(BUILD_DIR)/rust/slab_helpers.o $(BUILD_DIR)/rust/stat_perm_helpers.o $(BUILD_DIR)/rust/proc_list_helpers.o $(BUILD_DIR)/rust/random_helpers.o $(BUILD_DIR)/rust/eventfd_helpers.o $(BUILD_DIR)/rust/timerfd_helpers.o $(BUILD_DIR)/rust/locks_helpers.o $(BUILD_DIR)/rust/fdtable_helpers.o $(BUILD_DIR)/rust/file_helpers.o $(BUILD_DIR)/rust/pipe_helpers.o $(BUILD_DIR)/rust/signal_helpers.o $(BUILD_DIR)/rust/futex_helpers.o $(BUILD_DIR)/rust/sched_helpers.o $(BUILD_DIR)/rust/wait_helpers.o $(BUILD_DIR)/rust/proc_core_helpers.o $(BUILD_DIR)/rust/vfs_types_check.o
 
 RUST_SUPPORT_LIB = $(BUILD_DIR)/rust/liba20rust_support.rlib
 RUST_KERNEL_SRC = kernel/rust/rust_kernel.rs
@@ -145,6 +146,10 @@ ifeq ($(RUST_ENABLED),1)
   ifeq ($(RUST_MODULE_BLOCKCACHE),1)
     CFLAGS += -DCONFIG_RUST_BLOCKCACHE
     RUST_LIBS += $(BUILD_DIR)/rust/libblock_cache.rlib
+  endif
+  ifeq ($(RUST_MODULE_DCACHE),1)
+    CFLAGS += -DCONFIG_RUST_DCACHE
+    RUST_LIBS += $(BUILD_DIR)/rust/libdcache.rlib
   endif
   ifeq ($(RUST_MODULE_SYNC),1)
     CFLAGS += -DCONFIG_RUST_SYNC
@@ -225,6 +230,9 @@ ifeq ($(RUST_ENABLED),1)
   endif
   ifeq ($(RUST_MODULE_BLOCKCACHE),1)
     RUST_KERNEL_CFG += --cfg rust_module_block_cache
+  endif
+  ifeq ($(RUST_MODULE_DCACHE),1)
+    RUST_KERNEL_CFG += --cfg rust_module_dcache
   endif
   ifeq ($(RUST_MODULE_SYNC),1)
     RUST_KERNEL_CFG += --cfg rust_module_sync
@@ -430,6 +438,9 @@ ifeq ($(RUST_ENABLED),1)
   endif
 ifeq ($(RUST_MODULE_BLOCKCACHE),1)
 KERNEL_SRC := $(filter-out $(KERNEL_DIR)/fs/block_cache.c,$(KERNEL_SRC))
+endif
+ifeq ($(RUST_MODULE_DCACHE),1)
+KERNEL_SRC := $(filter-out $(KERNEL_DIR)/fs/vfs/dcache.c,$(KERNEL_SRC))
 endif
 ifeq ($(RUST_MODULE_SYNC),1)
 KERNEL_SRC := $(filter-out $(KERNEL_DIR)/core/sync.c,$(KERNEL_SRC))
@@ -1281,7 +1292,7 @@ $(KERNEL_ELF): $(KERNEL_OBJ) $(ASM_OBJ) $(RUST_LINK_DEPS) $(KERNEL_DIR)/arch/$(A
 	@mkdir -p $(dir $@)
 	$(CROSS_PREFIX)gcc $(LDFLAGS) $(KERNEL_OBJ) $(ASM_OBJ) $(RUST_LD_LIBS) -o $@
 
-$(BUILD_DIR)/rust/liba20rust_support.rlib: kernel/rust/support/panic_handler.rs kernel/rust/support/lock.rs Makefile
+$(BUILD_DIR)/rust/liba20rust_support.rlib: kernel/rust/support/panic_handler.rs kernel/rust/support/lock.rs kernel/rust/support/vfs.rs Makefile
 	@mkdir -p $(dir $@)
 	$(RUSTC) $(RUSTFLAGS) --crate-name a20rust_support $< -o $@
 
@@ -1293,11 +1304,19 @@ $(BUILD_DIR)/rust/arch_info.o: kernel/rust/support/arch_info.c Makefile
 	@mkdir -p $(dir $@)
 	$(CROSS_PREFIX)gcc $(CFLAGS) -c $< -o $@
 
+$(BUILD_DIR)/rust/vfs_types_check.o: kernel/rust/support/vfs_types_check.c Makefile
+	@mkdir -p $(dir $@)
+	$(CROSS_PREFIX)gcc $(CFLAGS) -c $< -o $@
+
 $(BUILD_DIR)/rust/page_cache_helpers.o: kernel/rust/support/page_cache_helpers.c Makefile
 	@mkdir -p $(dir $@)
 	$(CROSS_PREFIX)gcc $(CFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/rust/block_cache_helpers.o: kernel/rust/support/block_cache_helpers.c Makefile
+	@mkdir -p $(dir $@)
+	$(CROSS_PREFIX)gcc $(CFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/rust/dcache_helpers.o: kernel/rust/support/dcache_helpers.c Makefile
 	@mkdir -p $(dir $@)
 	$(CROSS_PREFIX)gcc $(CFLAGS) -c $< -o $@
 
@@ -1452,6 +1471,10 @@ $(BUILD_DIR)/rust/libpage_cache.rlib: kernel/rust/page_cache/lib.rs kernel/rust/
 $(BUILD_DIR)/rust/libblock_cache.rlib: kernel/rust/block_cache/lib.rs kernel/rust/block_cache/ffi.rs $(RUST_SUPPORT_LIB) Makefile
 	@mkdir -p $(dir $@)
 	$(RUSTC) $(RUSTFLAGS) --crate-name block_cache --extern a20rust_support=$(RUST_SUPPORT_LIB) $< -o $@
+
+$(BUILD_DIR)/rust/libdcache.rlib: kernel/rust/dcache/lib.rs kernel/rust/dcache/ffi.rs $(RUST_SUPPORT_LIB) Makefile
+	@mkdir -p $(dir $@)
+	$(RUSTC) $(RUSTFLAGS) --crate-name dcache --extern a20rust_support=$(RUST_SUPPORT_LIB) $< -o $@
 
 $(RUST_KERNEL_LIB): $(RUST_KERNEL_SRC) $(RUST_LIBS) $(RUST_SUPPORT_LIB) Makefile
 	@mkdir -p $(dir $@)

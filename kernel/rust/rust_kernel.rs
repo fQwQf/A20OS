@@ -17,6 +17,9 @@ extern crate page_cache;
 #[cfg(rust_module_block_cache)]
 extern crate block_cache;
 
+#[cfg(rust_module_dcache)]
+extern crate dcache;
+
 #[cfg(rust_module_xattr)]
 extern crate xattr;
 
