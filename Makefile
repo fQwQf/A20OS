@@ -94,6 +94,7 @@ RUST_MODULE_SYNC ?= 0
 RUST_MODULE_SLAB ?= 0
 RUST_MODULE_STATPERM ?= 0
 RUST_MODULE_PROC_LIST ?= 0
+RUST_MODULE_RANDOM ?= 0
 
 RUSTC = rustc
 RUST_TARGET_riscv64 = riscv64imac-unknown-none-elf
@@ -109,7 +110,7 @@ RUSTFLAGS = --edition 2021 \
             --target $(RUST_TARGET)
 
 RUST_SUPPORT_SRC = kernel/rust/support/panic_handler.rs kernel/rust/support/irqsave_lock.c kernel/rust/support/arch_info.c kernel/rust/support/page_cache_helpers.c kernel/rust/support/sync_helpers.c kernel/rust/support/slab_helpers.c kernel/rust/support/stat_perm_helpers.c kernel/rust/support/proc_list_helpers.c
-RUST_SUPPORT_COBJ = $(BUILD_DIR)/rust/irqsave_lock.o $(BUILD_DIR)/rust/arch_info.o $(BUILD_DIR)/rust/page_cache_helpers.o $(BUILD_DIR)/rust/block_cache_helpers.o $(BUILD_DIR)/rust/xattr_helpers.o $(BUILD_DIR)/rust/time_helpers.o $(BUILD_DIR)/rust/sync_helpers.o $(BUILD_DIR)/rust/slab_helpers.o $(BUILD_DIR)/rust/stat_perm_helpers.o $(BUILD_DIR)/rust/proc_list_helpers.o
+RUST_SUPPORT_COBJ = $(BUILD_DIR)/rust/irqsave_lock.o $(BUILD_DIR)/rust/arch_info.o $(BUILD_DIR)/rust/page_cache_helpers.o $(BUILD_DIR)/rust/block_cache_helpers.o $(BUILD_DIR)/rust/xattr_helpers.o $(BUILD_DIR)/rust/time_helpers.o $(BUILD_DIR)/rust/sync_helpers.o $(BUILD_DIR)/rust/slab_helpers.o $(BUILD_DIR)/rust/stat_perm_helpers.o $(BUILD_DIR)/rust/proc_list_helpers.o $(BUILD_DIR)/rust/random_helpers.o
 
 RUST_SUPPORT_LIB = $(BUILD_DIR)/rust/liba20rust_support.rlib
 RUST_KERNEL_SRC = kernel/rust/rust_kernel.rs
@@ -149,6 +150,10 @@ ifeq ($(RUST_ENABLED),1)
     CFLAGS += -DCONFIG_RUST_PROC_LIST
     RUST_LIBS += $(BUILD_DIR)/rust/libproc_list.rlib
   endif
+  ifeq ($(RUST_MODULE_RANDOM),1)
+    CFLAGS += -DCONFIG_RUST_RANDOM
+    RUST_LIBS += $(BUILD_DIR)/rust/librandom.rlib
+  endif
 endif
 
 RUST_KERNEL_CFG =
@@ -176,6 +181,9 @@ ifeq ($(RUST_ENABLED),1)
   endif
   ifeq ($(RUST_MODULE_PROC_LIST),1)
     RUST_KERNEL_CFG += --cfg rust_module_proc_list
+  endif
+  ifeq ($(RUST_MODULE_RANDOM),1)
+    RUST_KERNEL_CFG += --cfg rust_module_random
   endif
   ifeq ($(RUST_MODULE_XATTR),1)
     RUST_KERNEL_CFG += --cfg rust_module_xattr
@@ -342,6 +350,9 @@ KERNEL_SRC := $(filter-out $(KERNEL_DIR)/mm/slab.c,$(KERNEL_SRC))
 endif
 ifeq ($(RUST_MODULE_STATPERM),1)
 KERNEL_SRC := $(filter-out $(KERNEL_DIR)/fs/vfs/stat_perm.c,$(KERNEL_SRC))
+endif
+ifeq ($(RUST_MODULE_RANDOM),1)
+KERNEL_SRC := $(filter-out $(KERNEL_DIR)/core/random.c,$(KERNEL_SRC))
 endif
 
 endif
@@ -1191,6 +1202,14 @@ $(BUILD_DIR)/rust/stat_perm_helpers.o: kernel/rust/support/stat_perm_helpers.c M
 $(BUILD_DIR)/rust/proc_list_helpers.o: kernel/rust/support/proc_list_helpers.c Makefile
 	@mkdir -p $(dir $@)
 	$(CROSS_PREFIX)gcc $(CFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/rust/random_helpers.o: kernel/rust/support/random_helpers.c Makefile
+	@mkdir -p $(dir $@)
+	$(CROSS_PREFIX)gcc $(CFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/rust/librandom.rlib: kernel/rust/random/lib.rs kernel/rust/random/ffi.rs $(RUST_SUPPORT_LIB) Makefile
+	@mkdir -p $(dir $@)
+	$(RUSTC) $(RUSTFLAGS) --crate-name random --extern a20rust_support=$(RUST_SUPPORT_LIB) $< -o $@
 
 $(BUILD_DIR)/rust/libslab.rlib: kernel/rust/slab/lib.rs kernel/rust/slab/ffi.rs $(RUST_SUPPORT_LIB) Makefile
 	@mkdir -p $(dir $@)
