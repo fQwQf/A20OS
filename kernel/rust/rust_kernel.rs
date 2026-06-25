@@ -34,3 +34,6 @@ extern crate stat_perm;
 
 #[cfg(rust_module_proc_list)]
 extern crate proc_list;
+
+#[cfg(rust_module_random)]
+extern crate random;

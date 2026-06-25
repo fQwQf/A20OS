@@ -136,6 +136,10 @@ Rewrote `kernel/core/sync.c` in Rust.
 - `RUST_MODULE_PROC_LIST=1` passes `make check-kernel-build` on all four
   architectures and `smoke-proc-a20`/`smoke-proc-stress`/
   `smoke-sched-stress`/`smoke-futex-stress`/`smoke-vfs-stress` on riscv64.
+- `RUST_MODULE_RANDOM=1` passes `make check-kernel-build` on all four
+  architectures and `smoke-proc-a20`/`smoke-futex-stress`/`smoke-sched-stress`
+  on riscv64 (`smoke-vfs-stress` is blocked by an unrelated user-space build
+  race, not by the RNG module).
 
 ## Phase 6
 
@@ -190,10 +194,27 @@ Rewrote the all-task list primitives in `kernel/proc/proc.c` in Rust.
   `smoke-proc-stress`, `smoke-sched-stress`, `smoke-futex-stress`, and
   `smoke-vfs-stress` pass on riscv64.
 
-## Phase 9 candidates
+## Phase 9
 
-- `kernel/core/random.c` — self-contained RNG, but depends on entropy helpers
-  and irqsave locks.
+Rewrote `kernel/core/random.c` in Rust.
+
+- New module: `kernel/rust/random/`.
+- Replaces the unprotected global `rng_s`/`rng_ready`/`rng_generation` state
+  and manual `spin_lock_irqsave`/`spin_unlock_irqrestore` pairs with a single
+  `IrqSaveSpinLock<RngState>` so the state can only be accessed while holding
+  the lock.
+- Preserves the xoshiro256** algorithm, splitmix64 seeding, and the
+  inline-reseed-every-64-generations behavior of the C implementation.
+- Adds a shared C helper in `kernel/rust/support/random_helpers.c` for entropy
+  sampling (`timer_get_ticks`, `arch_read_addr_space_token`, `frame_free_count`,
+  `proc_current`, `__builtin_return_address`, and stack-address leakage), since
+  these constructs cannot be expressed directly in Rust.
+- Toggle: `RUST_MODULE_RANDOM=1`.
+- Builds for all four architectures; `smoke-proc-a20`, `smoke-futex-stress`,
+  and `smoke-sched-stress` pass on riscv64.
+
+## Phase 10 candidates
+
 - `kernel/fs/vfs/vnode.c` — vnode reference counting and lifecycle; moderate
   blast radius but clear concurrency boundaries.
 - `kernel/fs/vfs/path_resolution.c` / `path.c` — dcache/path walk; complex
