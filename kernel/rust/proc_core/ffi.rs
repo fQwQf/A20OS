@@ -73,6 +73,7 @@ unsafe extern "C" {
     pub fn a20_proc_core_task_state(task: *mut Task) -> c_int;
     pub fn a20_proc_core_task_set_state(task: *mut Task, state: c_int);
     pub fn a20_proc_core_task_pid(task: *mut Task) -> c_int;
+    pub fn a20_proc_core_task_set_pid(task: *mut Task, pid: c_int);
     pub fn a20_proc_core_task_ppid(task: *mut Task) -> c_int;
     pub fn a20_proc_core_task_pgid(task: *mut Task) -> c_int;
     pub fn a20_proc_core_task_cpu_id(task: *mut Task) -> c_uint;
@@ -80,12 +81,14 @@ unsafe extern "C" {
     pub fn a20_proc_core_task_on_rq(task: *mut Task) -> c_int;
     pub fn a20_proc_core_task_vfork_waiting(task: *mut Task) -> c_int;
     pub fn a20_proc_core_task_set_wake_time(task: *mut Task, wake_time: u64);
+    pub fn proc_set_wake_time(task: *mut Task, wake_time: u64);
     pub fn a20_proc_core_task_wake_time(task: *mut Task) -> u64;
     pub fn a20_proc_core_task_sched_level(task: *mut Task) -> c_int;
     pub fn a20_proc_core_task_set_sched_level(task: *mut Task, level: c_int);
     pub fn a20_proc_core_task_priority(task: *mut Task) -> c_int;
     pub fn a20_proc_core_task_name(task: *mut Task) -> *const c_char;
     pub fn a20_proc_core_task_mm(task: *mut Task) -> *mut Mm;
+    pub fn a20_proc_core_task_set_mm(task: *mut Task, mm: *mut Mm);
 
     pub fn a20_proc_core_task_alloc_signals(task: *mut Task);
     pub fn a20_proc_core_alloc_zero_kstack() -> *mut c_void;

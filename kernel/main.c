@@ -163,9 +163,7 @@ void init_kthread(void) {
     const char *init_path = "/bin/init";
     int fd = vfs_open(init_path, O_RDONLY, 0);
     if (fd < 0) {
-        printf("[INIT] Cannot open /bin/init: %d\n", fd);
         kdebug("[INIT] Falling back to ramfs /init...\n");
-
         init_path = "/init";
         fd = vfs_open(init_path, O_RDONLY, 0);
         if (fd < 0) {

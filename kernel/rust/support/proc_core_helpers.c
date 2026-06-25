@@ -98,6 +98,7 @@ void a20_proc_core_task_set_state(task_t *task, int state) { if (task) task->sta
 int a20_proc_core_task_pid(task_t *task) { return task ? task->pid : -1; }
 int a20_proc_core_task_ppid(task_t *task) { return task ? task->ppid : -1; }
 int a20_proc_core_task_pgid(task_t *task) { return task ? task->pgid : -1; }
+void a20_proc_core_task_set_pid(task_t *task, int pid) { if (task) task->pid = pid; }
 unsigned a20_proc_core_task_cpu_id(task_t *task) { return task ? task->cpu_id : 0; }
 void a20_proc_core_task_set_cpu_id(task_t *task, unsigned cpu) { if (task) task->cpu_id = cpu; }
 int a20_proc_core_task_on_rq(task_t *task) { return task ? task->on_rq : 0; }
@@ -109,6 +110,7 @@ void a20_proc_core_task_set_sched_level(task_t *task, int level) { if (task) tas
 int a20_proc_core_task_priority(task_t *task) { return task ? task->priority : 0; }
 const char *a20_proc_core_task_name(task_t *task) { return task ? task->name : ""; }
 mm_struct_t *a20_proc_core_task_mm(task_t *task) { return task ? task->mm : NULL; }
+void a20_proc_core_task_set_mm(task_t *task, mm_struct_t *mm) { if (task) task->mm = mm; }
 
 void a20_proc_core_task_alloc_signals(task_t *task)
 {
