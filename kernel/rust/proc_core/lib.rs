@@ -135,7 +135,7 @@ pub extern "C" fn proc_block_until(task: *mut ffi::Task, wake_time: u64) {
             return;
         }
         if wake_time != 0 {
-            ffi::a20_proc_core_task_set_wake_time(task, wake_time);
+            ffi::proc_set_wake_time(task, wake_time);
         }
         let _guard = raw_irqsave_lock(core::ptr::addr_of_mut!(proc_lock));
         ffi::a20_proc_core_task_set_state(task, ffi::PROC_BLOCKED);
@@ -154,6 +154,7 @@ pub extern "C" fn proc_alloc(entry: extern "C" fn()) -> c_int {
             ffi::proc_destroy_task(task);
             return -11;
         }
+        ffi::a20_proc_core_task_set_pid(task, pid);
         ffi::a20_proc_core_task_set_entry_pgdir(task, 0, ptr::null_mut());
         ffi::proc_task_init_common(task, ffi::proc_current());
         ffi::proc_pid_register(task);
@@ -195,6 +196,7 @@ pub extern "C" fn proc_alloc_user_image(
             ffi::proc_destroy_task(task);
             return -11;
         }
+        ffi::a20_proc_core_task_set_pid(task, pid);
         ffi::a20_proc_core_task_set_entry_pgdir(task, entry, pgdir);
         ffi::proc_task_init_common(task, ffi::proc_current());
         ffi::proc_pid_register(task);
@@ -211,6 +213,7 @@ pub extern "C" fn proc_alloc_user_image(
         }
         let mm = ffi::a20_proc_core_create_user_mm(pgdir, mmap, brk, stack_top, sp, total_vm);
         if !mm.is_null() {
+            ffi::a20_proc_core_task_set_mm(task, mm);
             ffi::a20_proc_core_task_set_entry_pgdir(task, entry, pgdir);
         }
         proc_make_ready(task);

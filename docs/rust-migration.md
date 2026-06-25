@@ -57,7 +57,7 @@ The RISC-V target uses `imac` (soft-float `lp64` ABI) to match the C kernel's
 | `RUST_MODULE_FUTEX` | `1` | Use Rust futex implementation |
 | `RUST_MODULE_SCHED` | `1` | Use Rust scheduler implementation |
 | `RUST_MODULE_WAIT` | `1` | Use Rust wait/reap implementation |
-| `RUST_MODULE_PROC_CORE` | `0` | Use Rust `kernel/proc/proc.c` core implementation (experimental, default off due to init hang)
+| `RUST_MODULE_PROC_CORE` | `1` | Use Rust `kernel/proc/proc.c` core implementation |
 
 To build with all current Rust modules:
 
@@ -85,8 +85,9 @@ Rewrote `kernel/proc/proc.c` in Rust.
 - Uses `kernel/rust/support/proc_core_helpers.c` for opaque idle-task storage,
   task/mm/context access, and helper routines that depend on C-only structure
   layouts or macros.
-- Toggle: `RUST_MODULE_PROC_CORE=0` (default off; enabling it currently causes the
-  riscv64 smoke tests to hang during early userspace launch).
+- Toggle: `RUST_MODULE_PROC_CORE=1` (default on; `smoke-vfs-stress`,
+  `smoke-futex-stress`, `smoke-sched-stress`, and `smoke-proc-stress` pass on
+  riscv64 with all current Rust modules enabled).
 
 ## Phase 19
 
@@ -191,9 +192,9 @@ Rewrote `kernel/core/sync.c` in Rust.
 - `RUST_MODULE_STATPERM=1` passes `make check-kernel-build` on all four
   architectures and `smoke-vfs-stress`/`smoke-futex-stress`/
   `smoke-sched-stress`/`smoke-vfs-edge` on riscv64.
-- `RUST_MODULE_PROC_LIST=1` passes `make check-kernel-build` on all four
-  architectures and `smoke-proc-a20`/`smoke-proc-stress`/
-  `smoke-sched-stress`/`smoke-futex-stress`/`smoke-vfs-stress` on riscv64.
+- Default-on Rust build with `RUST_MODULE_PROC_CORE=1` passes four-arch
+  `make kernel-only` and riscv64 `smoke-vfs-stress`/`smoke-futex-stress`/
+  `smoke-sched-stress`/`smoke-proc-stress`.
 - `RUST_MODULE_RANDOM=1` passes `make check-kernel-build` on all four
   architectures and `smoke-proc-a20`/`smoke-futex-stress`/`smoke-sched-stress`
   on riscv64 (`smoke-vfs-stress` is blocked by an unrelated user-space build
