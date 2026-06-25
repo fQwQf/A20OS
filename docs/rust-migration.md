@@ -50,6 +50,7 @@ The RISC-V target uses `imac` (soft-float `lp64` ABI) to match the C kernel's
 | `RUST_MODULE_EVENTFD` | `0` | Use Rust eventfd implementation |
 | `RUST_MODULE_TIMERFD` | `0` | Use Rust timerfd implementation |
 | `RUST_MODULE_LOCKS` | `0` | Use Rust POSIX/BSD file locking implementation |
+| `RUST_MODULE_FDTABLE` | `0` | Use Rust fdtable implementation |
 
 To build with all current Rust modules:
 
@@ -58,7 +59,7 @@ make RUST_ENABLED=1 RUST_MODULE_XATTR=1 RUST_MODULE_TIMEKEEPING=1 \
      RUST_MODULE_PAGECACHE=1 RUST_MODULE_BLOCKCACHE=1 RUST_MODULE_SYNC=1 \
      RUST_MODULE_SLAB=1 RUST_MODULE_STATPERM=1 RUST_MODULE_PROC_LIST=1 \
      RUST_MODULE_RANDOM=1 RUST_MODULE_EVENTFD=1 RUST_MODULE_TIMERFD=1 \
-     RUST_MODULE_LOCKS=1 \
+     RUST_MODULE_LOCKS=1 RUST_MODULE_FDTABLE=1 \
      ARCH=riscv64 kernel-only
 ```
 
@@ -156,6 +157,9 @@ Rewrote `kernel/core/sync.c` in Rust.
   race).
 - `RUST_MODULE_LOCKS=1` passes `make check-kernel-build` on all four
   architectures and `smoke-vfs-stress`/`smoke-futex-stress` on riscv64.
+- `RUST_MODULE_FDTABLE=1` passes `make check-kernel-build` on all four
+  architectures and `smoke-vfs-stress`/`smoke-futex-stress`/
+  `smoke-sched-stress` on riscv64.
 
 ## Phase 6
 
@@ -290,7 +294,26 @@ Rewrote `kernel/fs/locks.c` in Rust.
 - Builds for all four architectures; `smoke-vfs-stress` and
   `smoke-futex-stress` pass on riscv64.
 
-## Phase 13 candidates
+## Phase 13
+
+Rewrote `kernel/fs/fdtable.c` in Rust.
+
+- New module: `kernel/rust/fdtable/`.
+- Preserves the public `kernel/include/fs/fdtable.h` ABI and the original C
+  semantics for fd install/duplicate/close, copy-on-write (`fdtable_unshare`),
+  sharing (`fdtable_share`), close-on-exec, and process exit paths.
+- Replaces the per-`files_struct_t` manual `spin_lock_irqsave`/
+  `spin_unlock_irqrestore` pairs with a single `IrqSaveSpinLock<FdTableInner>`,
+  and uses `AtomicI32` for the reference count, removing stale-lock-state and
+  refcount races.
+- Keeps `task->files` as an opaque pointer managed via C helpers in
+  `kernel/rust/support/fdtable_helpers.c`, so Rust does not need to replicate
+  the full `task_t` layout.
+- Toggle: `RUST_MODULE_FDTABLE=1`.
+- Builds for all four architectures; `smoke-vfs-stress`,
+  `smoke-futex-stress`, and `smoke-sched-stress` pass on riscv64.
+
+## Phase 14 candidates
 
 - `kernel/fs/vfs/vnode.c` — vnode reference counting and lifecycle; moderate
   blast radius but clear concurrency boundaries.
