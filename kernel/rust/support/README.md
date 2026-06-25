@@ -22,3 +22,5 @@ Shared support code for all Rust kernel modules.
   module.
 - `eventfd_helpers.c`: C wrappers for vfile allocation/free/installation used by the
   Rust eventfd module.
+- `timerfd_helpers.c`: C wrappers for vfile allocation/free/installation and
+  ops-pointer matching used by the Rust timerfd module.

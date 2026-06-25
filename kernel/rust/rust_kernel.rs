@@ -40,3 +40,6 @@ extern crate random;
 
 #[cfg(rust_module_eventfd)]
 extern crate eventfd;
+
+#[cfg(rust_module_timerfd)]
+extern crate timerfd;
