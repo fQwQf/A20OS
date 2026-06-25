@@ -67,3 +67,6 @@ extern crate sched;
 
 #[cfg(rust_module_wait)]
 extern crate wait;
+
+#[cfg(rust_module_proc_core)]
+extern crate proc_core;

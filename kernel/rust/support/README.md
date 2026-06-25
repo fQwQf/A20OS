@@ -42,3 +42,6 @@ Shared support code for all Rust kernel modules.
   low-level `__switch` trampoline used by the Rust scheduler module.
 - `wait_helpers.c`: C wrappers for opaque `task_t` wait/reap-visible fields used
   by the Rust wait module.
+- `proc_core_helpers.c`: C wrappers and opaque-storage helpers for idle-task
+  bootstrap, task/mm/context field access, pidmap formatting, and mm-lock-backed
+  brk/mmap/munmap used by the Rust proc_core module.

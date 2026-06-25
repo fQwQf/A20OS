@@ -57,6 +57,7 @@ The RISC-V target uses `imac` (soft-float `lp64` ABI) to match the C kernel's
 | `RUST_MODULE_FUTEX` | `1` | Use Rust futex implementation |
 | `RUST_MODULE_SCHED` | `1` | Use Rust scheduler implementation |
 | `RUST_MODULE_WAIT` | `1` | Use Rust wait/reap implementation |
+| `RUST_MODULE_PROC_CORE` | `0` | Use Rust `kernel/proc/proc.c` core implementation (experimental, default off due to init hang)
 
 To build with all current Rust modules:
 
@@ -67,9 +68,25 @@ make RUST_ENABLED=1 RUST_MODULE_XATTR=1 RUST_MODULE_TIMEKEEPING=1 \
      RUST_MODULE_RANDOM=1 RUST_MODULE_EVENTFD=1 RUST_MODULE_TIMERFD=1 \
      RUST_MODULE_LOCKS=1 RUST_MODULE_FDTABLE=1 RUST_MODULE_FILE=1 \
      RUST_MODULE_PIPE=1 RUST_MODULE_SIGNAL=1 RUST_MODULE_FUTEX=1 \
-     RUST_MODULE_SCHED=1 RUST_MODULE_WAIT=1 \
+     RUST_MODULE_SCHED=1 RUST_MODULE_WAIT=1 RUST_MODULE_PROC_CORE=1 \
      ARCH=riscv64 kernel-only
 ```
+
+## Phase 20
+
+Rewrote `kernel/proc/proc.c` in Rust.
+
+- New module: `kernel/rust/proc_core/`.
+- Preserves the `kernel/include/proc/proc.h` ABI implemented by
+  `kernel/proc/proc.c` (`proc_init`, idle/bootstrap helpers, task allocation,
+  ready/block transitions, pidmap/vm stats, kill-pgid, and brk/mmap wrappers)
+  while keeping `kernel/proc/proc.c` as the fallback implementation when
+  `RUST_MODULE_PROC_CORE=0`.
+- Uses `kernel/rust/support/proc_core_helpers.c` for opaque idle-task storage,
+  task/mm/context access, and helper routines that depend on C-only structure
+  layouts or macros.
+- Toggle: `RUST_MODULE_PROC_CORE=0` (default off; enabling it currently causes the
+  riscv64 smoke tests to hang during early userspace launch).
 
 ## Phase 19
 
