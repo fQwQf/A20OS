@@ -34,3 +34,6 @@ Shared support code for all Rust kernel modules.
   task pid/state access used by the Rust pipe module.
 - `signal_helpers.c`: C wrappers for opaque `task_t` access plus arch-specific
   rt-sigframe setup/restore used by the Rust signal module.
+- `futex_helpers.c`: C wrappers for opaque `task_t`/`mm_struct_t` access,
+  physical futex key translation, timeout conversion, tick access, wake-time
+  helpers, and robust-list fields used by the Rust futex module.
