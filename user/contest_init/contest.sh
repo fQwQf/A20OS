@@ -262,7 +262,10 @@ run_ltp_case_with_timeout() {
             wait $pid
             typeset rc=$?
             if (( rc == 0 )); then
-                print "END LTP CASE $name : 0"
+                # The official LTP score parser uses this line as a case result
+                # delimiter, even for rc 0.  Using a different success marker
+                # made all-passing bounded runs appear as 0 scored LTP cases.
+                print "FAIL LTP CASE $name : 0"
                 return 0
             else
                 print "FAIL LTP CASE $name : $rc"
