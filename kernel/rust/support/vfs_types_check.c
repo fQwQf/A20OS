@@ -6,6 +6,8 @@
  */
 
 #include "core/consts.h"
+#include "abi/native/ipc_internal.h"
+#include "abi/native/types.h"
 #include "core/sync.h"
 #include "fs/vfs.h"
 
@@ -40,3 +42,33 @@ _Static_assert(offsetof(vfile_ops_t, readdir) == 24, "Rust vfile_ops_t.readdir o
 _Static_assert(offsetof(vfile_ops_t, ioctl) == 32, "Rust vfile_ops_t.ioctl offset mismatch");
 _Static_assert(offsetof(vfile_ops_t, close) == 40, "Rust vfile_ops_t.close offset mismatch");
 _Static_assert(sizeof(vfile_ops_t) == 48, "Rust vfile_ops_t size mismatch");
+
+_Static_assert(offsetof(a20_watch_entry_t, target_handle) == 0, "Rust a20_watch_entry_t.target_handle offset mismatch");
+_Static_assert(offsetof(a20_watch_entry_t, target_object) == 8, "Rust a20_watch_entry_t.target_object offset mismatch");
+_Static_assert(offsetof(a20_watch_entry_t, target_type) == 16, "Rust a20_watch_entry_t.target_type offset mismatch");
+_Static_assert(offsetof(a20_watch_entry_t, event_mask) == 24, "Rust a20_watch_entry_t.event_mask offset mismatch");
+_Static_assert(offsetof(a20_watch_entry_t, user_data) == 32, "Rust a20_watch_entry_t.user_data offset mismatch");
+_Static_assert(offsetof(a20_watch_entry_t, owner_queue) == 40, "Rust a20_watch_entry_t.owner_queue offset mismatch");
+_Static_assert(offsetof(a20_watch_entry_t, next) == 48, "Rust a20_watch_entry_t.next offset mismatch");
+_Static_assert(sizeof(a20_watch_entry_t) == 56, "Rust a20_watch_entry_t size mismatch");
+
+_Static_assert(offsetof(a20_eventq_t, refcount) == 0, "Rust a20_eventq_t.refcount offset mismatch");
+_Static_assert(offsetof(a20_eventq_t, lock) == 4, "Rust a20_eventq_t.lock offset mismatch");
+_Static_assert(offsetof(a20_eventq_t, waiters) == 8, "Rust a20_eventq_t.waiters offset mismatch");
+_Static_assert(offsetof(a20_eventq_t, watches) == 24, "Rust a20_eventq_t.watches offset mismatch");
+_Static_assert(offsetof(a20_eventq_t, watch_count) == 32, "Rust a20_eventq_t.watch_count offset mismatch");
+_Static_assert(offsetof(a20_eventq_t, ring) == 40, "Rust a20_eventq_t.ring offset mismatch");
+_Static_assert(offsetof(a20_eventq_t, ring_cap) == 48, "Rust a20_eventq_t.ring_cap offset mismatch");
+_Static_assert(offsetof(a20_eventq_t, ring_head) == 52, "Rust a20_eventq_t.ring_head offset mismatch");
+_Static_assert(offsetof(a20_eventq_t, ring_tail) == 56, "Rust a20_eventq_t.ring_tail offset mismatch");
+_Static_assert(offsetof(a20_eventq_t, ring_count) == 60, "Rust a20_eventq_t.ring_count offset mismatch");
+_Static_assert(sizeof(a20_eventq_t) == 64, "Rust a20_eventq_t size mismatch");
+
+_Static_assert(offsetof(a20_pending_event_t, source) == 0, "Rust a20_pending_event_t.source offset mismatch");
+_Static_assert(offsetof(a20_pending_event_t, type) == 4, "Rust a20_pending_event_t.type offset mismatch");
+_Static_assert(offsetof(a20_pending_event_t, events) == 8, "Rust a20_pending_event_t.events offset mismatch");
+_Static_assert(offsetof(a20_pending_event_t, user_data) == 16, "Rust a20_pending_event_t.user_data offset mismatch");
+_Static_assert(offsetof(a20_pending_event_t, data0) == 24, "Rust a20_pending_event_t.data0 offset mismatch");
+_Static_assert(offsetof(a20_pending_event_t, data1) == 32, "Rust a20_pending_event_t.data1 offset mismatch");
+_Static_assert(offsetof(a20_pending_event_t, data2) == 40, "Rust a20_pending_event_t.data2 offset mismatch");
+_Static_assert(sizeof(a20_pending_event_t) == 48, "Rust a20_pending_event_t size mismatch");

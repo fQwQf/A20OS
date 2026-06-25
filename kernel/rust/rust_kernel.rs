@@ -73,3 +73,6 @@ extern crate wait;
 
 #[cfg(rust_module_proc_core)]
 extern crate proc_core;
+
+#[cfg(rust_module_a20_event)]
+extern crate a20_event;
