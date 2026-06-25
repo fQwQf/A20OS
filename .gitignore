@@ -15,3 +15,5 @@ kernel-la
 .eval-state
 *.orig
 *.rej
+kernel/rust/*/Cargo.lock
+kernel/rust/*/target/
