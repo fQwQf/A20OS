@@ -52,6 +52,7 @@ The RISC-V target uses `imac` (soft-float `lp64` ABI) to match the C kernel's
 | `RUST_MODULE_LOCKS` | `0` | Use Rust POSIX/BSD file locking implementation |
 | `RUST_MODULE_FDTABLE` | `0` | Use Rust fdtable implementation |
 | `RUST_MODULE_FILE` | `0` | Use Rust global VFS file table implementation |
+| `RUST_MODULE_PIPE` | `0` | Use Rust pipe implementation |
 
 To build with all current Rust modules:
 
@@ -61,6 +62,7 @@ make RUST_ENABLED=1 RUST_MODULE_XATTR=1 RUST_MODULE_TIMEKEEPING=1 \
      RUST_MODULE_SLAB=1 RUST_MODULE_STATPERM=1 RUST_MODULE_PROC_LIST=1 \
      RUST_MODULE_RANDOM=1 RUST_MODULE_EVENTFD=1 RUST_MODULE_TIMERFD=1 \
      RUST_MODULE_LOCKS=1 RUST_MODULE_FDTABLE=1 RUST_MODULE_FILE=1 \
+     RUST_MODULE_PIPE=1 \
      ARCH=riscv64 kernel-only
 ```
 
@@ -164,6 +166,22 @@ Rewrote `kernel/core/sync.c` in Rust.
 - `RUST_MODULE_FILE=1` passes `make check-kernel-build` on all four
   architectures and `smoke-vfs-stress`/`smoke-futex-stress`/
   `smoke-sched-stress` on riscv64.
+
+## Phase 15
+
+Rewrote `kernel/fs/pipe.c` in Rust.
+
+- New module: `kernel/rust/pipe/`.
+- Preserves the public `kernel/include/fs/pipe.h` ABI and the original
+  pipe-specific exported symbols/callbacks.
+- Replaces manual pipe-buffer locking with `IrqSaveSpinLock<PipeState>` and uses
+  `wait_queue_prepare` / `sched` / `wait_queue_finish` to preserve the
+  lost-wakeup-free blocking protocol around readers/writers.
+- Adds `kernel/rust/support/pipe_helpers.c` so Rust can access `vfile_t`
+  fields and task pid/state without duplicating full C structure layouts.
+- Toggle: `RUST_MODULE_PIPE=1`.
+- Builds for all four architectures; `smoke-vfs-stress`,
+  `smoke-futex-stress`, and `smoke-sched-stress` pass on riscv64.
 
 ## Phase 6
 
@@ -335,10 +353,6 @@ Rewrote `kernel/fs/file.c` in Rust.
 - Builds for all four architectures; `smoke-vfs-stress`,
   `smoke-futex-stress`, and `smoke-sched-stress` pass on riscv64.
 
-## Phase 15 candidates
-
-- `kernel/fs/pipe.c` — producer-consumer wait queues, close races, ~397 lines;
-  clear concurrency boundaries and strong LTP/busybox coverage.
 - `kernel/proc/signal.c` — signal pending/delivery races, ~546 lines; high
   theoretical ROI but touches arch-specific signal frames.
 

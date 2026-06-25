@@ -30,3 +30,5 @@ Shared support code for all Rust kernel modules.
   out-of-memory panic used by the Rust fdtable module.
 - `file_helpers.c`: C wrappers for vfile object-cache allocation/free and
   refcount operations used by the Rust file (global VFS file table) module.
+- `pipe_helpers.c`: C wrappers for `vfile_t` field access, endpoint init, and
+  task pid/state access used by the Rust pipe module.
