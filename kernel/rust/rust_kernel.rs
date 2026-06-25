@@ -61,3 +61,6 @@ extern crate signal;
 
 #[cfg(rust_module_futex)]
 extern crate futex;
+
+#[cfg(rust_module_sched)]
+extern crate sched;

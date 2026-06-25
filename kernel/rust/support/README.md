@@ -37,3 +37,6 @@ Shared support code for all Rust kernel modules.
 - `futex_helpers.c`: C wrappers for opaque `task_t`/`mm_struct_t` access,
   physical futex key translation, timeout conversion, tick access, wake-time
   helpers, and robust-list fields used by the Rust futex module.
+- `sched_helpers.c`: C wrappers for opaque scheduler-visible `task_t` fields,
+  ABI-conditional timer ticks, trace hooks, CPU-count/tick constants, and the
+  low-level `__switch` trampoline used by the Rust scheduler module.
