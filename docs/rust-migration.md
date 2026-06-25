@@ -48,6 +48,7 @@ The RISC-V target uses `imac` (soft-float `lp64` ABI) to match the C kernel's
 | `RUST_MODULE_PROC_LIST` | `0` | Use Rust all-task list implementation |
 | `RUST_MODULE_RANDOM` | `0` | Use Rust kernel RNG implementation |
 | `RUST_MODULE_EVENTFD` | `0` | Use Rust eventfd implementation |
+| `RUST_MODULE_TIMERFD` | `0` | Use Rust timerfd implementation |
 
 To build with all current Rust modules:
 
@@ -55,7 +56,7 @@ To build with all current Rust modules:
 make RUST_ENABLED=1 RUST_MODULE_XATTR=1 RUST_MODULE_TIMEKEEPING=1 \
      RUST_MODULE_PAGECACHE=1 RUST_MODULE_BLOCKCACHE=1 RUST_MODULE_SYNC=1 \
      RUST_MODULE_SLAB=1 RUST_MODULE_STATPERM=1 RUST_MODULE_PROC_LIST=1 \
-     RUST_MODULE_RANDOM=1 RUST_MODULE_EVENTFD=1 \
+     RUST_MODULE_RANDOM=1 RUST_MODULE_EVENTFD=1 RUST_MODULE_TIMERFD=1 \
      ARCH=riscv64 kernel-only
 ```
 
@@ -146,6 +147,10 @@ Rewrote `kernel/core/sync.c` in Rust.
 - `RUST_MODULE_EVENTFD=1` passes `make check-kernel-build` on all four
   architectures and `smoke-futex-stress` on riscv64 (`smoke-proc-a20` and
   `smoke-sched-stress` are blocked by the same unrelated user-space build
+  race).
+- `RUST_MODULE_TIMERFD=1` passes `make check-kernel-build` on all four
+  architectures and `smoke-sched-stress` on riscv64 (`smoke-proc-a20` and
+  `smoke-futex-stress` are blocked by the same unrelated user-space build
   race).
 
 ## Phase 6
@@ -239,7 +244,25 @@ Rewrote `kernel/ipc/eventfd.c` in Rust.
 - Toggle: `RUST_MODULE_EVENTFD=1`.
 - Builds for all four architectures; `smoke-futex-stress` passes on riscv64.
 
-## Phase 11 candidates
+## Phase 11
+
+Rewrote `kernel/ipc/timerfd.c` in Rust.
+
+- New module: `kernel/rust/timerfd/`.
+- Replaces the manual `spin_lock`/`spin_unlock` pairs around the timerfd
+  state and waitqueue with a single `IrqSaveSpinLock<TimerFdState>`,
+  eliminating lock-leak / stale-lock-state races.
+- Preserves the original "release lock, sleep, reacquire" pattern around
+  `wait_queue_sleep` by capturing the waitqueue pointer from the guard before
+  dropping it.
+- Adds shared C helpers in `kernel/rust/support/timerfd_helpers.c` for
+  `vfile_alloc`, `vfile_free`, vfile priv access, anonymous-fd installation,
+  and ops-pointer matching (needed by `timerfd_settime_file` and
+  `timerfd_gettime_file` to validate that a global fd is a timerfd).
+- Toggle: `RUST_MODULE_TIMERFD=1`.
+- Builds for all four architectures; `smoke-sched-stress` passes on riscv64.
+
+## Phase 12 candidates
 
 - `kernel/fs/vfs/vnode.c` — vnode reference counting and lifecycle; moderate
   blast radius but clear concurrency boundaries.
