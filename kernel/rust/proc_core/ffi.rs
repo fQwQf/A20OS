@@ -120,3 +120,4 @@ pub const PROC_BLOCKED: c_int = 3;
 pub const PROC_ZOMBIE: c_int = 5;
 
 pub const NSIG: c_int = 64;
+pub const EINVAL: c_int = 22;
