@@ -198,21 +198,6 @@ Rewrote `kernel/abi/linux/sys_futex.c` in Rust.
 - Verification target: four-arch `make kernel-only` plus riscv64
   `smoke-futex-stress` / `smoke-sched-stress`.
 
-## Phase 17
-
-Rewrote `kernel/abi/linux/sys_futex.c` in Rust.
-
-- New module: `kernel/rust/futex/`.
-- Preserves the public `sys_futex`, `futex_wake_user`, and
-  `exit_robust_list` C ABI while keeping the original fixed-size waiter table,
-  wake-generation protocol, and wake-after-unlock behavior.
-- Adds `kernel/rust/support/futex_helpers.c` so Rust can translate futex
-  physical keys, read opaque task/mm state, and query kernel time sources
-  without exposing `task_t` / `mm_struct_t` internals.
-- Toggle: `RUST_MODULE_FUTEX=1`.
-- Verification target: four-arch `make kernel-only` plus riscv64
-  `smoke-futex-stress` / `smoke-sched-stress`.
-
 ## Phase 15
 
 Rewrote `kernel/fs/pipe.c` in Rust.
