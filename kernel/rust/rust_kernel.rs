@@ -55,3 +55,6 @@ extern crate file;
 
 #[cfg(rust_module_pipe)]
 extern crate pipe;
+
+#[cfg(rust_module_signal)]
+extern crate signal;
