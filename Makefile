@@ -93,6 +93,7 @@ RUST_MODULE_BLOCKCACHE ?= 0
 RUST_MODULE_SYNC ?= 0
 RUST_MODULE_SLAB ?= 0
 RUST_MODULE_STATPERM ?= 0
+RUST_MODULE_PROC_LIST ?= 0
 
 RUSTC = rustc
 RUST_TARGET_riscv64 = riscv64imac-unknown-none-elf
@@ -107,8 +108,8 @@ RUSTFLAGS = --edition 2021 \
             -C panic=abort \
             --target $(RUST_TARGET)
 
-RUST_SUPPORT_SRC = kernel/rust/support/panic_handler.rs kernel/rust/support/irqsave_lock.c kernel/rust/support/arch_info.c kernel/rust/support/page_cache_helpers.c kernel/rust/support/sync_helpers.c kernel/rust/support/slab_helpers.c kernel/rust/support/stat_perm_helpers.c
-RUST_SUPPORT_COBJ = $(BUILD_DIR)/rust/irqsave_lock.o $(BUILD_DIR)/rust/arch_info.o $(BUILD_DIR)/rust/page_cache_helpers.o $(BUILD_DIR)/rust/block_cache_helpers.o $(BUILD_DIR)/rust/xattr_helpers.o $(BUILD_DIR)/rust/time_helpers.o $(BUILD_DIR)/rust/sync_helpers.o $(BUILD_DIR)/rust/slab_helpers.o $(BUILD_DIR)/rust/stat_perm_helpers.o
+RUST_SUPPORT_SRC = kernel/rust/support/panic_handler.rs kernel/rust/support/irqsave_lock.c kernel/rust/support/arch_info.c kernel/rust/support/page_cache_helpers.c kernel/rust/support/sync_helpers.c kernel/rust/support/slab_helpers.c kernel/rust/support/stat_perm_helpers.c kernel/rust/support/proc_list_helpers.c
+RUST_SUPPORT_COBJ = $(BUILD_DIR)/rust/irqsave_lock.o $(BUILD_DIR)/rust/arch_info.o $(BUILD_DIR)/rust/page_cache_helpers.o $(BUILD_DIR)/rust/block_cache_helpers.o $(BUILD_DIR)/rust/xattr_helpers.o $(BUILD_DIR)/rust/time_helpers.o $(BUILD_DIR)/rust/sync_helpers.o $(BUILD_DIR)/rust/slab_helpers.o $(BUILD_DIR)/rust/stat_perm_helpers.o $(BUILD_DIR)/rust/proc_list_helpers.o
 
 RUST_SUPPORT_LIB = $(BUILD_DIR)/rust/liba20rust_support.rlib
 RUST_KERNEL_SRC = kernel/rust/rust_kernel.rs
@@ -144,6 +145,10 @@ ifeq ($(RUST_ENABLED),1)
     CFLAGS += -DCONFIG_RUST_STATPERM
     RUST_LIBS += $(BUILD_DIR)/rust/libstat_perm.rlib
   endif
+  ifeq ($(RUST_MODULE_PROC_LIST),1)
+    CFLAGS += -DCONFIG_RUST_PROC_LIST
+    RUST_LIBS += $(BUILD_DIR)/rust/libproc_list.rlib
+  endif
 endif
 
 RUST_KERNEL_CFG =
@@ -168,6 +173,9 @@ ifeq ($(RUST_ENABLED),1)
   endif
   ifeq ($(RUST_MODULE_STATPERM),1)
     RUST_KERNEL_CFG += --cfg rust_module_stat_perm
+  endif
+  ifeq ($(RUST_MODULE_PROC_LIST),1)
+    RUST_KERNEL_CFG += --cfg rust_module_proc_list
   endif
   ifeq ($(RUST_MODULE_XATTR),1)
     RUST_KERNEL_CFG += --cfg rust_module_xattr
@@ -1180,6 +1188,10 @@ $(BUILD_DIR)/rust/stat_perm_helpers.o: kernel/rust/support/stat_perm_helpers.c M
 	@mkdir -p $(dir $@)
 	$(CROSS_PREFIX)gcc $(CFLAGS) -c $< -o $@
 
+$(BUILD_DIR)/rust/proc_list_helpers.o: kernel/rust/support/proc_list_helpers.c Makefile
+	@mkdir -p $(dir $@)
+	$(CROSS_PREFIX)gcc $(CFLAGS) -c $< -o $@
+
 $(BUILD_DIR)/rust/libslab.rlib: kernel/rust/slab/lib.rs kernel/rust/slab/ffi.rs $(RUST_SUPPORT_LIB) Makefile
 	@mkdir -p $(dir $@)
 	$(RUSTC) $(RUSTFLAGS) --crate-name slab --extern a20rust_support=$(RUST_SUPPORT_LIB) $< -o $@
@@ -1191,6 +1203,10 @@ $(BUILD_DIR)/rust/libsync.rlib: kernel/rust/sync/lib.rs kernel/rust/sync/ffi.rs 
 $(BUILD_DIR)/rust/libstat_perm.rlib: kernel/rust/stat_perm/lib.rs kernel/rust/stat_perm/ffi.rs $(RUST_SUPPORT_LIB) Makefile
 	@mkdir -p $(dir $@)
 	$(RUSTC) $(RUSTFLAGS) --crate-name stat_perm --extern a20rust_support=$(RUST_SUPPORT_LIB) $< -o $@
+
+$(BUILD_DIR)/rust/libproc_list.rlib: kernel/rust/proc_list/lib.rs kernel/rust/proc_list/ffi.rs $(RUST_SUPPORT_LIB) Makefile
+	@mkdir -p $(dir $@)
+	$(RUSTC) $(RUSTFLAGS) --crate-name proc_list --extern a20rust_support=$(RUST_SUPPORT_LIB) $< -o $@
 
 $(BUILD_DIR)/rust/libxattr.rlib: kernel/rust/xattr/lib.rs kernel/rust/xattr/ffi.rs $(RUST_SUPPORT_LIB) Makefile
 	@mkdir -p $(dir $@)

@@ -42,6 +42,9 @@ static inline uint32_t sched_weight_for_nice(int nice)
 
 extern spinlock_t proc_lock;
 
+#ifdef CONFIG_RUST_PROC_LIST
+void proc_link_task_locked(task_t *t);
+#endif
 task_t *proc_idle_task(void);
 task_t *proc_first_task_locked(void);
 task_t *proc_next_task_locked(task_t *t);

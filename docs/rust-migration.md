@@ -45,13 +45,14 @@ The RISC-V target uses `imac` (soft-float `lp64` ABI) to match the C kernel's
 | `RUST_MODULE_SYNC` | `0` | Use Rust waitqueue/mutex/completion implementation |
 | `RUST_MODULE_SLAB` | `0` | Use Rust slab allocator implementation |
 | `RUST_MODULE_STATPERM` | `0` | Use Rust stat/permission/time metadata implementation |
+| `RUST_MODULE_PROC_LIST` | `0` | Use Rust all-task list implementation |
 
 To build with all current Rust modules:
 
 ```bash
 make RUST_ENABLED=1 RUST_MODULE_XATTR=1 RUST_MODULE_TIMEKEEPING=1 \
      RUST_MODULE_PAGECACHE=1 RUST_MODULE_BLOCKCACHE=1 RUST_MODULE_SYNC=1 \
-     RUST_MODULE_SLAB=1 RUST_MODULE_STATPERM=1 \
+     RUST_MODULE_SLAB=1 RUST_MODULE_STATPERM=1 RUST_MODULE_PROC_LIST=1 \
      ARCH=riscv64 kernel-only
 ```
 
@@ -132,6 +133,9 @@ Rewrote `kernel/core/sync.c` in Rust.
 - `RUST_MODULE_STATPERM=1` passes `make check-kernel-build` on all four
   architectures and `smoke-vfs-stress`/`smoke-futex-stress`/
   `smoke-sched-stress`/`smoke-vfs-edge` on riscv64.
+- `RUST_MODULE_PROC_LIST=1` passes `make check-kernel-build` on all four
+  architectures and `smoke-proc-a20`/`smoke-proc-stress`/
+  `smoke-sched-stress`/`smoke-futex-stress`/`smoke-vfs-stress` on riscv64.
 
 ## Phase 6
 
@@ -167,7 +171,26 @@ Rewrote `kernel/fs/vfs/stat_perm.c` in Rust.
 - Builds for all four architectures; `smoke-vfs-stress`, `smoke-futex-stress`,
   `smoke-sched-stress`, and `smoke-vfs-edge` pass on riscv64.
 
-## Phase 8 candidates
+## Phase 8
+
+Rewrote the all-task list primitives in `kernel/proc/proc.c` in Rust.
+
+- New module: `kernel/rust/proc_list/`.
+- Replaces `proc_link_task_locked`, `proc_unlink_task_locked`,
+  `proc_first_task_locked`, and `proc_next_task_locked` to address
+  `proc_next_task_locked` list-corruption panics observed in stress runs.
+- Keeps `all_next`/`all_prev` embedded in `task_t`; Rust owns the list
+  head/tail and all link mutations.  Callers continue to hold `proc_lock`;
+  Rust primitives do not reacquire it.
+- Adds shared C helpers in `kernel/rust/support/proc_list_helpers.c` for
+  task field access, PID reading, kernel-address validation, and corrupt
+  list logging.
+- Toggle: `RUST_MODULE_PROC_LIST=1`.
+- Builds for all four architectures; `smoke-proc-a20`,
+  `smoke-proc-stress`, `smoke-sched-stress`, `smoke-futex-stress`, and
+  `smoke-vfs-stress` pass on riscv64.
+
+## Phase 9 candidates
 
 - `kernel/core/random.c` — self-contained RNG, but depends on entropy helpers
   and irqsave locks.

@@ -33,14 +33,17 @@
 #include "core/progress.h"
 
 static task_t idle_tasks[CONFIG_NR_CPUS];
+#ifndef CONFIG_RUST_PROC_LIST
 static task_t *task_list_head;
 static task_t *task_list_tail;
+#endif
 static uint64_t *kernel_pgdir_shared;
 
 spinlock_t proc_lock = SPINLOCK_INIT;
 
 static uint64_t g_idle_kstack[CONFIG_NR_CPUS];
 
+#ifndef CONFIG_RUST_PROC_LIST
 static void proc_link_task_locked(task_t *t)
 {
     t->all_prev = task_list_tail;
@@ -84,6 +87,7 @@ task_t *proc_next_task_locked(task_t *t)
     }
     return next;
 }
+#endif
 
 static void proc_count_vma_huge_pages(mm_struct_t *mm, vm_area_t *vma,
                                       proc_vm_stats_t *stats)
