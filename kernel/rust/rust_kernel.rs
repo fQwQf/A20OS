@@ -92,6 +92,9 @@ extern crate socket_inet_addr;
 #[cfg(rust_module_socket_inet_bh)]
 extern crate socket_inet_bh;
 
+#[cfg(rust_module_socket_inet_pcb)]
+extern crate socket_inet_pcb;
+
 #[cfg(rust_module_a20_event)]
 extern crate a20_event;
 
