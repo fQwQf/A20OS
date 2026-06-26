@@ -12,14 +12,15 @@
 
 mod ffi;
 
-use core::ffi::{c_int, c_void};
+use core::ffi::{c_char, c_int, c_void};
 use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering};
 
 use a20rust_support::lock::IrqSaveSpinLock;
 
 use ffi::{
-    page_cache_stats_t, vfile_t, vnode_t, EINVAL, ENOMEM, ENOSYS,
+    page_cache_stats_t, vfile_t, vnode_t, a20_vnode_type, a20_vnode_size,
+    EINVAL, ENOMEM, ENOSYS,
     PFN_NONE, SEEK_SET, VFS_FT_REGULAR, PAGE_SIZE,
 };
 
@@ -391,13 +392,10 @@ pub unsafe extern "C" fn page_cache_fill_vfile_page(
     vf: *mut vfile_t,
     page: *mut page_cache_page,
 ) -> c_int {
-    if vf.is_null() {
+    if vf.is_null() || page.is_null() {
         return -EINVAL;
     }
     let vf = unsafe { &mut *vf };
-    if vf.vnode.is_null() || vf.vnode != unsafe { &*page_to_slot(page) }.vnode.load(Ordering::Relaxed) {
-        return -EINVAL;
-    }
     let ops = if vf.ops.is_null() {
         return -EINVAL;
     } else {
@@ -416,13 +414,13 @@ pub unsafe extern "C" fn page_cache_fill_vfile_page(
     let saved = vf.offset;
     let page_base = (page.index.load(Ordering::Relaxed) as usize) * PAGE_SIZE;
 
-    let seek_r = unsafe { ops.lseek.unwrap()(vf as *mut _, page_base as i64, SEEK_SET) };
+    let seek_r = ops.lseek.unwrap()(vf as *mut _, page_base as i64, SEEK_SET);
     if seek_r < 0 {
         return seek_r as c_int;
     }
 
-    let r = unsafe { ops.read.unwrap()(vf as *mut _, data as *mut u8, PAGE_SIZE) };
-    let restore_r = unsafe { ops.lseek.unwrap()(vf as *mut _, saved as i64, SEEK_SET) };
+    let r = ops.read.unwrap()(vf as *mut _, data as *mut c_char, PAGE_SIZE);
+    let restore_r = ops.lseek.unwrap()(vf as *mut _, saved as i64, SEEK_SET);
     if restore_r < 0 && r >= 0 {
         return restore_r as c_int;
     }
@@ -459,14 +457,14 @@ pub unsafe extern "C" fn page_cache_read_vfile(
     if ops.read.is_none() || ops.lseek.is_none() {
         return -ENOSYS;
     }
-    if unsafe { (*vf.vnode).type_ } != VFS_FT_REGULAR {
+    if unsafe { a20_vnode_type(vf.vnode) } != VFS_FT_REGULAR {
         return -EINVAL;
     }
     if count == 0 {
         return 0;
     }
 
-    let file_size = unsafe { (*vf.vnode).size };
+    let file_size = unsafe { a20_vnode_size(vf.vnode) };
     let start = vf.offset;
     if start >= file_size {
         return 0;
@@ -506,7 +504,7 @@ pub unsafe extern "C" fn page_cache_read_vfile(
 
     if done > 0 {
         let new_offset = start + done;
-        let seek_r = unsafe { ops.lseek.unwrap()(vf as *mut _, new_offset as i64, SEEK_SET) };
+        let seek_r = ops.lseek.unwrap()(vf as *mut _, new_offset as i64, SEEK_SET);
         if seek_r < 0 {
             vf.offset = new_offset;
         }
