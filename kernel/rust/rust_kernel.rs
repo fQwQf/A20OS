@@ -109,3 +109,6 @@ extern crate sysv_sem;
 
 #[cfg(rust_module_sysv_shm)]
 extern crate sysv_shm;
+
+#[cfg(rust_module_cgroupfs_tree)]
+extern crate cgroupfs_tree;

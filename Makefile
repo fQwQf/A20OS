@@ -105,6 +105,7 @@ RUST_MODULE_PIPE ?= 1
 RUST_MODULE_A20_EVENT ?= 1
 RUST_MODULE_SYSV_SEM ?= 1
 RUST_MODULE_SYSV_SHM ?= 0
+RUST_MODULE_CGROUPFS_TREE ?= 0
 
 RUST_MODULE_SIGNAL ?= 1
 RUST_MODULE_FUTEX ?= 1
@@ -120,6 +121,7 @@ RUST_MODULE_SOCKET_INET_BH ?= 0
 RUST_MODULE_SOCKET_INET_PCB ?= 0
 RUST_MODULE_SOCKET_CONTROL ?= 0
 RUST_MODULE_SOCKET_CORE ?= 0
+RUST_MODULE_CGROUPFS_TREE ?= 0
 
 RUSTC = rustc
 RUST_TARGET_riscv64 = riscv64imac-unknown-none-elf
@@ -295,6 +297,12 @@ ifeq ($(RUST_ENABLED),1)
     RUST_SUPPORT_SRC += kernel/rust/support/socket_core_helpers.c
     RUST_SUPPORT_COBJ += $(BUILD_DIR)/rust/socket_core_helpers.o
   endif
+  ifeq ($(RUST_MODULE_CGROUPFS_TREE),1)
+    CFLAGS += -DCONFIG_RUST_CGROUPFS_TREE
+    RUST_LIBS += $(BUILD_DIR)/rust/libcgroupfs_tree.rlib
+    RUST_SUPPORT_SRC += kernel/rust/support/cgroupfs_tree_helpers.c
+    RUST_SUPPORT_COBJ += $(BUILD_DIR)/rust/cgroupfs_tree_helpers.o
+  endif
   endif
 
 RUST_KERNEL_CFG =
@@ -355,6 +363,9 @@ ifeq ($(RUST_ENABLED),1)
   endif
   ifeq ($(RUST_MODULE_SYSV_SHM),1)
     RUST_KERNEL_CFG += --cfg rust_module_sysv_shm
+  endif
+  ifeq ($(RUST_MODULE_CGROUPFS_TREE),1)
+    RUST_KERNEL_CFG += --cfg rust_module_cgroupfs_tree
   endif
   ifeq ($(RUST_MODULE_SIGNAL),1)
     RUST_KERNEL_CFG += --cfg rust_module_signal
@@ -628,11 +639,18 @@ ifeq ($(RUST_MODULE_SOCKET_CORE),1)
 KERNEL_SRC := $(filter-out $(KERNEL_DIR)/net/socket.c,$(KERNEL_SRC))
 endif
 
+ifeq ($(RUST_MODULE_CGROUPFS_TREE),1)
+$(BUILD_DIR)/fs/cgroupfs.o: CFLAGS += -Dcgroupfs_mount=cgroupfs_mount_c -Dcgroupfs_unmount=cgroupfs_unmount_c -Dcg_root_node=cg_root_node_c
+endif
+
 endif
 
 ifeq ($(RUST_ENABLED),1)
 ifeq ($(RUST_MODULE_SOCKET_QUEUE),1)
 $(BUILD_DIR)/net/socket.o: CFLAGS += -Dnet_recvfrom_meta=net_recvfrom_meta_c -Dnet_recvfrom=net_recvfrom_c
+endif
+ifeq ($(RUST_MODULE_CGROUPFS_TREE),1)
+$(BUILD_DIR)/fs/cgroupfs.o: CFLAGS += -Dstatic= -Dcgroupfs_mount=cgroupfs_mount_c -Dcgroupfs_unmount=cgroupfs_unmount_c -Dcg_root_node=cg_root_node_c -Dcg_lookup=cg_lookup_c -Dcg_create=cg_create_c -Dcg_mkdir=cg_mkdir_c -Dcg_unlink=cg_unlink_c -Dcg_rmdir=cg_rmdir_c -Dcg_rename=cg_rename_c -Dcg_stat=cg_stat_c -Dcg_chown=cg_chown_c -Dcgroupfs_open_vnode=cgroupfs_open_vnode_c -Dcg_release=cg_release_c
 endif
 ifeq ($(RUST_MODULE_SOCKET_INET_ADDR),1)
 $(BUILD_DIR)/net/socket_inet.o: CFLAGS += -Dnet_ntohs=net_ntohs_c -Dnet_alloc_ephemeral_port_locked=net_alloc_ephemeral_port_locked_c -Dnet_sockaddr_loopback=net_sockaddr_loopback_c -Dnet_sockaddr_port=net_sockaddr_port_c -Dnet_sockaddr_set_port=net_sockaddr_set_port_c -Dnet_sockaddr_in_local=net_sockaddr_in_local_c -Dnet_sockaddr_to_lwip_ip=net_sockaddr_to_lwip_ip_c -Dnet_lwip_ip_to_sockaddr=net_lwip_ip_to_sockaddr_c
@@ -1638,6 +1656,10 @@ $(BUILD_DIR)/rust/proc_core_helpers.o: kernel/rust/support/proc_core_helpers.c M
 	@mkdir -p $(dir $@)
 	$(CROSS_PREFIX)gcc $(CFLAGS) -c $< -o $@
 
+$(BUILD_DIR)/rust/cgroupfs_tree_helpers.o: kernel/rust/support/cgroupfs_tree_helpers.c Makefile
+	@mkdir -p $(dir $@)
+	$(CROSS_PREFIX)gcc $(CFLAGS) -c $< -o $@
+
 $(BUILD_DIR)/rust/socket_registry_helpers.o: kernel/rust/support/socket_registry_helpers.c Makefile
 	@mkdir -p $(dir $@)
 	$(CROSS_PREFIX)gcc $(CFLAGS) -c $< -o $@
@@ -1709,6 +1731,10 @@ $(BUILD_DIR)/rust/libsysv_sem.rlib: kernel/rust/sysv_sem/lib.rs kernel/rust/sysv
 $(BUILD_DIR)/rust/libsysv_shm.rlib: kernel/rust/sysv_shm/lib.rs kernel/rust/sysv_shm/ffi.rs $(RUST_SUPPORT_LIB) Makefile
 	@mkdir -p $(dir $@)
 	$(RUSTC) $(RUSTFLAGS) --crate-name sysv_shm --extern a20rust_support=$(RUST_SUPPORT_LIB) $< -o $@
+
+$(BUILD_DIR)/rust/libcgroupfs_tree.rlib: kernel/rust/cgroupfs_tree/lib.rs kernel/rust/cgroupfs_tree/ffi.rs $(RUST_SUPPORT_LIB) Makefile
+	@mkdir -p $(dir $@)
+	$(RUSTC) $(RUSTFLAGS) --crate-name cgroupfs_tree --extern a20rust_support=$(RUST_SUPPORT_LIB) $< -o $@
 
 $(BUILD_DIR)/rust/libproc_core.rlib: kernel/rust/proc_core/lib.rs kernel/rust/proc_core/ffi.rs $(RUST_SUPPORT_LIB) Makefile
 	@mkdir -p $(dir $@)
