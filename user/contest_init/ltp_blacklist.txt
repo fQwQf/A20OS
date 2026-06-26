@@ -51,7 +51,6 @@ memctl_test01
 mmap1
 mmap3
 mmapstress01
-mmstress
 mtest01
 netstress
 openfile
@@ -67,7 +66,5 @@ rename14
 renameat01
 shm_test
 sigaltstack01
-thp01
 timed_forkbomb
 tst_hexdump
-
