@@ -80,6 +80,9 @@ extern crate socket_registry;
 #[cfg(rust_module_socket_queue)]
 extern crate socket_queue;
 
+#[cfg(rust_module_socket_unix)]
+extern crate socket_unix;
+
 #[cfg(rust_module_a20_event)]
 extern crate a20_event;
 
