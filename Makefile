@@ -112,6 +112,7 @@ RUST_MODULE_SCHED ?= 1
 RUST_MODULE_WAIT ?= 1
 RUST_MODULE_PROC_CORE ?= 1
 RUST_MODULE_SOCKET_REGISTRY ?= 0
+RUST_MODULE_SOCKET_QUEUE ?= 0
 
 RUSTC = rustc
 RUST_TARGET_riscv64 = riscv64imac-unknown-none-elf
@@ -239,6 +240,12 @@ ifeq ($(RUST_ENABLED),1)
     RUST_SUPPORT_SRC += kernel/rust/support/socket_registry_helpers.c
     RUST_SUPPORT_COBJ += $(BUILD_DIR)/rust/socket_registry_helpers.o
   endif
+  ifeq ($(RUST_MODULE_SOCKET_QUEUE),1)
+    CFLAGS += -DCONFIG_RUST_SOCKET_QUEUE
+    RUST_LIBS += $(BUILD_DIR)/rust/libsocket_queue.rlib
+    RUST_SUPPORT_SRC += kernel/rust/support/socket_queue_helpers.c
+    RUST_SUPPORT_COBJ += $(BUILD_DIR)/rust/socket_queue_helpers.o
+  endif
  endif
 
 RUST_KERNEL_CFG =
@@ -317,6 +324,9 @@ ifeq ($(RUST_ENABLED),1)
   endif
   ifeq ($(RUST_MODULE_SOCKET_REGISTRY),1)
     RUST_KERNEL_CFG += --cfg rust_module_socket_registry
+  endif
+  ifeq ($(RUST_MODULE_SOCKET_QUEUE),1)
+    RUST_KERNEL_CFG += --cfg rust_module_socket_queue
   endif
   ifeq ($(RUST_MODULE_XATTR),1)
     RUST_KERNEL_CFG += --cfg rust_module_xattr
@@ -535,7 +545,16 @@ endif
 ifneq ($(RUST_MODULE_SOCKET_REGISTRY),0)
 KERNEL_SRC := $(filter-out $(KERNEL_DIR)/net/socket_registry.c,$(KERNEL_SRC))
 endif
+ifeq ($(RUST_MODULE_SOCKET_QUEUE),1)
+KERNEL_SRC := $(filter-out $(KERNEL_DIR)/net/socket_queue.c,$(KERNEL_SRC))
+endif
 
+endif
+
+ifeq ($(RUST_ENABLED),1)
+ifeq ($(RUST_MODULE_SOCKET_QUEUE),1)
+$(BUILD_DIR)/net/socket.o: CFLAGS += -Dnet_recvfrom_meta=net_recvfrom_meta_c -Dnet_recvfrom=net_recvfrom_c
+endif
 endif
 
 # Object files
@@ -1532,6 +1551,10 @@ $(BUILD_DIR)/rust/socket_registry_helpers.o: kernel/rust/support/socket_registry
 	@mkdir -p $(dir $@)
 	$(CROSS_PREFIX)gcc $(CFLAGS) -c $< -o $@
 
+$(BUILD_DIR)/rust/socket_queue_helpers.o: kernel/rust/support/socket_queue_helpers.c Makefile
+	@mkdir -p $(dir $@)
+	$(CROSS_PREFIX)gcc $(CFLAGS) -c $< -o $@
+
 $(BUILD_DIR)/rust/libfile.rlib: kernel/rust/file/lib.rs kernel/rust/file/ffi.rs $(RUST_SUPPORT_LIB) Makefile
 	@mkdir -p $(dir $@)
 	$(RUSTC) $(RUSTFLAGS) --crate-name file --extern a20rust_support=$(RUST_SUPPORT_LIB) $< -o $@
@@ -1575,6 +1598,10 @@ $(BUILD_DIR)/rust/libproc_core.rlib: kernel/rust/proc_core/lib.rs kernel/rust/pr
 $(BUILD_DIR)/rust/libsocket_registry.rlib: kernel/rust/socket_registry/lib.rs kernel/rust/socket_registry/ffi.rs $(RUST_SUPPORT_LIB) Makefile
 	@mkdir -p $(dir $@)
 	$(RUSTC) $(RUSTFLAGS) --crate-name socket_registry --extern a20rust_support=$(RUST_SUPPORT_LIB) $< -o $@
+
+$(BUILD_DIR)/rust/libsocket_queue.rlib: kernel/rust/socket_queue/lib.rs kernel/rust/socket_queue/ffi.rs $(RUST_SUPPORT_LIB) Makefile
+	@mkdir -p $(dir $@)
+	$(RUSTC) $(RUSTFLAGS) --crate-name socket_queue --extern a20rust_support=$(RUST_SUPPORT_LIB) $< -o $@
 
 $(BUILD_DIR)/rust/libslab.rlib: kernel/rust/slab/lib.rs kernel/rust/slab/ffi.rs $(RUST_SUPPORT_LIB) Makefile
 	@mkdir -p $(dir $@)
