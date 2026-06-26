@@ -98,6 +98,9 @@ extern crate socket_inet_pcb;
 #[cfg(rust_module_socket_control)]
 extern crate socket_control;
 
+#[cfg(rust_module_socket_core)]
+extern crate socket_core;
+
 #[cfg(rust_module_a20_event)]
 extern crate a20_event;
 

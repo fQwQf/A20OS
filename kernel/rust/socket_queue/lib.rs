@@ -331,6 +331,7 @@ pub unsafe extern "C" fn net_dequeue_msg_locked(
     unsafe { net_dequeue_msg_locked_meta(s, buf, len, addr, addrlen, ptr::null_mut()) }
 }
 
+#[cfg(not(rust_module_socket_core))]
 #[no_mangle]
 pub unsafe extern "C" fn net_recvfrom_meta(
     gfd: c_int,
@@ -475,6 +476,7 @@ pub unsafe extern "C" fn net_accept_queue_pop_locked(
     child
 }
 
+#[cfg(not(rust_module_socket_core))]
 #[no_mangle]
 pub unsafe extern "C" fn net_recvfrom(
     gfd: c_int,
