@@ -77,6 +77,9 @@ extern crate proc_core;
 #[cfg(rust_module_socket_registry)]
 extern crate socket_registry;
 
+#[cfg(rust_module_socket_queue)]
+extern crate socket_queue;
+
 #[cfg(rust_module_a20_event)]
 extern crate a20_event;
 
