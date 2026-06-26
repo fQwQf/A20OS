@@ -79,3 +79,6 @@ extern crate a20_event;
 
 #[cfg(rust_module_sysv_sem)]
 extern crate sysv_sem;
+
+#[cfg(rust_module_sysv_shm)]
+extern crate sysv_shm;
