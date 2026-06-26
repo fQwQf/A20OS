@@ -118,6 +118,7 @@ RUST_MODULE_SOCKET_FILE ?= 0
 RUST_MODULE_SOCKET_INET_ADDR ?= 0
 RUST_MODULE_SOCKET_INET_BH ?= 0
 RUST_MODULE_SOCKET_INET_PCB ?= 0
+RUST_MODULE_SOCKET_CONTROL ?= 0
 
 RUSTC = rustc
 RUST_TARGET_riscv64 = riscv64imac-unknown-none-elf
@@ -281,6 +282,12 @@ ifeq ($(RUST_ENABLED),1)
     RUST_SUPPORT_SRC += kernel/rust/support/socket_inet_pcb_helpers.c
     RUST_SUPPORT_COBJ += $(BUILD_DIR)/rust/socket_inet_pcb_helpers.o
   endif
+  ifeq ($(RUST_MODULE_SOCKET_CONTROL),1)
+    CFLAGS += -DCONFIG_RUST_SOCKET_CONTROL
+    RUST_LIBS += $(BUILD_DIR)/rust/libsocket_control.rlib
+    RUST_SUPPORT_SRC += kernel/rust/support/socket_control_helpers.c
+    RUST_SUPPORT_COBJ += $(BUILD_DIR)/rust/socket_control_helpers.o
+  endif
   endif
 
 RUST_KERNEL_CFG =
@@ -377,6 +384,9 @@ ifeq ($(RUST_ENABLED),1)
   endif
   ifeq ($(RUST_MODULE_SOCKET_INET_PCB),1)
     RUST_KERNEL_CFG += --cfg rust_module_socket_inet_pcb
+  endif
+  ifeq ($(RUST_MODULE_SOCKET_CONTROL),1)
+    RUST_KERNEL_CFG += --cfg rust_module_socket_control
   endif
   ifeq ($(RUST_MODULE_XATTR),1)
     RUST_KERNEL_CFG += --cfg rust_module_xattr
@@ -619,6 +629,9 @@ $(BUILD_DIR)/net/socket_inet.o: CFLAGS += -Dnet_inet_bottom_half_process_socket=
 endif
 ifeq ($(RUST_MODULE_SOCKET_INET_PCB),1)
 $(BUILD_DIR)/net/socket_inet.o: CFLAGS += -Dnet_tcp_close_pcb=net_tcp_close_pcb_c -Dnet_tcp_drop_pcb=net_tcp_drop_pcb_c -Dnet_inet_socket_init=net_inet_socket_init_c -Dnet_inet_socket_destroy=net_inet_socket_destroy_c -Dnet_inet_bind_pcb=net_inet_bind_pcb_c -Dnet_inet_connect=net_inet_connect_c -Dnet_inet_sendto=net_inet_sendto_c -Dnet_inet_accept_child_ready=net_inet_accept_child_ready_c -Dnet_tcp_recved=net_tcp_recved_c
+endif
+ifeq ($(RUST_MODULE_SOCKET_CONTROL),1)
+$(BUILD_DIR)/net/socket_control.o: CFLAGS += -Dnet_listen=net_listen_c -Dnet_accept=net_accept_c -Dnet_getsockname=net_getsockname_c -Dnet_getpeername=net_getpeername_c -Dnet_setsockopt=net_setsockopt_c -Dnet_getsockopt=net_getsockopt_c -Dnet_shutdown=net_shutdown_c -Dnet_set_nonblock=net_set_nonblock_c -Dnet_poll_events=net_poll_events_c
 endif
 endif
 
@@ -1640,6 +1653,10 @@ $(BUILD_DIR)/rust/socket_inet_pcb_helpers.o: kernel/rust/support/socket_inet_pcb
 	@mkdir -p $(dir $@)
 	$(CROSS_PREFIX)gcc $(CFLAGS) -c $< -o $@
 
+$(BUILD_DIR)/rust/socket_control_helpers.o: kernel/rust/support/socket_control_helpers.c Makefile
+	@mkdir -p $(dir $@)
+	$(CROSS_PREFIX)gcc $(CFLAGS) -c $< -o $@
+
 $(BUILD_DIR)/rust/libfile.rlib: kernel/rust/file/lib.rs kernel/rust/file/ffi.rs $(RUST_SUPPORT_LIB) Makefile
 	@mkdir -p $(dir $@)
 	$(RUSTC) $(RUSTFLAGS) --crate-name file --extern a20rust_support=$(RUST_SUPPORT_LIB) $< -o $@
@@ -1707,6 +1724,10 @@ $(BUILD_DIR)/rust/libsocket_inet_bh.rlib: kernel/rust/socket_inet_bh/lib.rs kern
 $(BUILD_DIR)/rust/libsocket_inet_pcb.rlib: kernel/rust/socket_inet_pcb/lib.rs kernel/rust/socket_inet_pcb/ffi.rs $(RUST_SUPPORT_LIB) Makefile
 	@mkdir -p $(dir $@)
 	$(RUSTC) $(RUSTFLAGS) --crate-name socket_inet_pcb --extern a20rust_support=$(RUST_SUPPORT_LIB) $< -o $@
+
+$(BUILD_DIR)/rust/libsocket_control.rlib: kernel/rust/socket_control/lib.rs kernel/rust/socket_control/ffi.rs $(RUST_SUPPORT_LIB) Makefile
+	@mkdir -p $(dir $@)
+	$(RUSTC) $(RUSTFLAGS) --crate-name socket_control --extern a20rust_support=$(RUST_SUPPORT_LIB) $< -o $@
 
 $(BUILD_DIR)/rust/libslab.rlib: kernel/rust/slab/lib.rs kernel/rust/slab/ffi.rs $(RUST_SUPPORT_LIB) Makefile
 	@mkdir -p $(dir $@)
