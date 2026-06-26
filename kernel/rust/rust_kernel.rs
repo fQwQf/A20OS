@@ -86,6 +86,9 @@ extern crate socket_unix;
 #[cfg(rust_module_socket_file)]
 extern crate socket_file;
 
+#[cfg(rust_module_socket_inet_addr)]
+extern crate socket_inet_addr;
+
 #[cfg(rust_module_a20_event)]
 extern crate a20_event;
 
