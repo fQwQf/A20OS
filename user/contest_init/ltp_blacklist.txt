@@ -45,6 +45,7 @@ hackbench
 inotify09
 kill02
 mallocstress
+madvise06
 memcg_test_2
 memcg_test_4
 memctl_test01

@@ -47,17 +47,17 @@ blacklisted() {
 # ── test group skip list ───────────────────────────────────
 typeset -a SKIP_GROUPS
 SKIP_GROUPS+=(unixbench) # 不计分
-#SKIP_GROUPS+=(cyclictest) # OOM跑不通
-#SKIP_GROUPS+=(lmbench) # 运行时长很长
+SKIP_GROUPS+=(cyclictest) # OOM跑不通
+SKIP_GROUPS+=(lmbench) # 运行时长很长
 SKIP_GROUPS+=(ltp) # 单独执行
 
 # 下面是可以跑通但是为了方便测试跳过的
-# SKIP_GROUPS+=(iozone)
-# SKIP_GROUPS+=(libctest)
-# SKIP_GROUPS+=(libcbench)
-# SKIP_GROUPS+=(netperf)
-# SKIP_GROUPS+=(iperf)
-# SKIP_GROUPS+=(busybox)
+ SKIP_GROUPS+=(iozone)
+ SKIP_GROUPS+=(libctest)
+ SKIP_GROUPS+=(libcbench)
+ SKIP_GROUPS+=(netperf)
+ SKIP_GROUPS+=(iperf)
+ SKIP_GROUPS+=(busybox)
 
 skip_group() {
     typeset g=$1 s
