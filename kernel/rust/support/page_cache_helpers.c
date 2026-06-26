@@ -19,6 +19,20 @@ uint32_t a20_frame_refcount(pfn_t pfn)
     return pfa.meta[pfn].refcount;
 }
 
+int a20_vnode_type(vnode_t *vn)
+{
+    if (!vn)
+        return -1;
+    return vn->type;
+}
+
+size_t a20_vnode_size(vnode_t *vn)
+{
+    if (!vn)
+        return 0;
+    return vn->size;
+}
+
 int a20_vnode_writepage(vnode_t *vn, uint64_t index, const void *data, size_t len)
 {
     if (!vn || !vn->ops || !vn->ops->writepage)

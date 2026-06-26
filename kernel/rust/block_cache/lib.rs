@@ -616,6 +616,7 @@ pub unsafe extern "C" fn bcache_get(bc: *mut bcache, lba: u64) -> *mut bcache_en
         unsafe {
             (*e).ref_count.store(0, Ordering::Relaxed);
             (*e).lba.store(u64::MAX, Ordering::Relaxed);
+            set_block_valid(e, false);
             block_lru_insert_front(&mut state, bc, idx);
             (*dup).ref_count.fetch_add(1, Ordering::Relaxed);
             block_lru_remove(&mut state, bc, dup_idx);
@@ -626,7 +627,7 @@ pub unsafe extern "C" fn bcache_get(bc: *mut bcache, lba: u64) -> *mut bcache_en
 
     unsafe {
         (*e).lba.store(lba, Ordering::Relaxed);
-        set_block_dirty_flag(e, false);
+        bcache_set_block_dirty_locked(&mut state, e, false);
         (*e).dirty_gen.store(0, Ordering::Relaxed);
         set_block_valid(e, true);
         block_hash_insert(&mut state, bc, idx);
@@ -852,7 +853,7 @@ unsafe fn pcache_get(bc: *mut Bcache, page_no: u64, skip_read: bool) -> *mut Pag
 
     unsafe {
         (*e).page_no.store(page_no, Ordering::Relaxed);
-        set_page_dirty_flag(e, false);
+        bcache_set_page_dirty_locked(&mut state, e, false);
         (*e).dirty_gen.store(0, Ordering::Relaxed);
         set_page_valid(e, true);
         page_hash_insert(&mut state, bc, idx);
