@@ -104,6 +104,7 @@ RUST_MODULE_FILE ?= 1
 RUST_MODULE_PIPE ?= 1
 RUST_MODULE_A20_EVENT ?= 1
 RUST_MODULE_SYSV_SEM ?= 1
+RUST_MODULE_SYSV_SHM ?= 0
 
 RUST_MODULE_SIGNAL ?= 1
 RUST_MODULE_FUTEX ?= 1
@@ -205,6 +206,12 @@ ifeq ($(RUST_ENABLED),1)
     CFLAGS += -DCONFIG_RUST_SYSV_SEM
     RUST_LIBS += $(BUILD_DIR)/rust/libsysv_sem.rlib
   endif
+  ifeq ($(RUST_MODULE_SYSV_SHM),1)
+    CFLAGS += -DCONFIG_RUST_SYSV_SHM
+    RUST_LIBS += $(BUILD_DIR)/rust/libsysv_shm.rlib
+    RUST_SUPPORT_SRC += kernel/rust/support/sysv_shm_helpers.c
+    RUST_SUPPORT_COBJ += $(BUILD_DIR)/rust/sysv_shm_helpers.o
+  endif
   ifeq ($(RUST_MODULE_SIGNAL),1)
     CFLAGS += -DCONFIG_RUST_SIGNAL
     RUST_LIBS += $(BUILD_DIR)/rust/libsignal.rlib
@@ -282,6 +289,9 @@ ifeq ($(RUST_ENABLED),1)
   endif
   ifeq ($(RUST_MODULE_SYSV_SEM),1)
     RUST_KERNEL_CFG += --cfg rust_module_sysv_sem
+  endif
+  ifeq ($(RUST_MODULE_SYSV_SHM),1)
+    RUST_KERNEL_CFG += --cfg rust_module_sysv_shm
   endif
   ifeq ($(RUST_MODULE_SIGNAL),1)
     RUST_KERNEL_CFG += --cfg rust_module_signal
@@ -494,6 +504,9 @@ endif
 ifeq ($(RUST_MODULE_SYSV_SEM),1)
 KERNEL_SRC := $(filter-out $(KERNEL_DIR)/ipc/sysv_sem.c,$(KERNEL_SRC))
 endif
+ifeq ($(RUST_MODULE_SYSV_SHM),1)
+KERNEL_SRC := $(filter-out $(KERNEL_DIR)/ipc/sysv_shm.c,$(KERNEL_SRC))
+endif
 ifeq ($(RUST_MODULE_SIGNAL),1)
 KERNEL_SRC := $(filter-out $(KERNEL_DIR)/proc/signal.c,$(KERNEL_SRC))
 endif
@@ -532,7 +545,7 @@ KERNEL_BIN = $(BUILD_DIR)/kernel.bin
 		check-kernel-build check-user-build check-dev-build check-contest-build check-build-matrix check-abi-smoke-gate check-doc-drift check-doc-test-gates check-final-definition check-concurrency-foundation check-mm-lock-model check-abi-boundary check-driver-core-model check-external-dependency-boundary \
 		check-riscv64-bringup check-loongarch64-bringup check-aarch64-bringup check-x86_64-bringup \
 		check-riscv64-user check-loongarch64-user check-aarch64-user check-x86_64-user \
-		smoke-riscv64 smoke-loongarch64 smoke-aarch64 smoke-x86_64 smoke-abi-linux smoke-network-suite smoke-proc-a20 smoke-proc-stress smoke-mm-stress smoke-vfs-stress smoke-vfs-edge smoke-sched-stress smoke-futex-stress smoke-socket-stress smoke-driver-lifecycle smoke-native-handle smoke-native-libc smoke-io-event smoke-sysv-sem \\
+		smoke-riscv64 smoke-loongarch64 smoke-aarch64 smoke-x86_64 smoke-abi-linux smoke-network-suite smoke-proc-a20 smoke-proc-stress smoke-mm-stress smoke-vfs-stress smoke-vfs-edge smoke-sched-stress smoke-futex-stress smoke-socket-stress smoke-driver-lifecycle smoke-native-handle smoke-native-libc smoke-io-event smoke-sysv-sem smoke-sysv-shm \\
 		FORCE regen-rootfs-overlay \
 		user_apps fs_img kernel-only dev-build contest-rv contest-la \
 		eval-dev-build-rv eval-dev-build-la \
@@ -1062,6 +1075,34 @@ smoke-sysv-sem:
 		exit "$$status"; \
 	fi
 
+smoke-sysv-shm:
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/sysv-shm-riscv64.log"; \
+	status=0; \
+	{ sleep $(SMOKE_INPUT_DELAY); printf 'sysv_shm_smoke\npoweroff\n'; } | \
+		timeout $(SMOKE_TIMEOUT) qemu-system-riscv64 \
+		-machine virt -m 1G -nographic -smp 1 -bios default \
+		-global virtio-mmio.force-legacy=false \
+		-drive file=.kernel-build/riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
+		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		-kernel .kernel-build/riscv64-linux-dev/kernel.elf \
+		-append 'a20.ip=10.0.2.15 a20.netmask=255.255.255.0 a20.gateway=10.0.2.2 a20.dns=10.0.2.3 a20.hostname=a20os' \
+		> "$$log" 2>&1 || status=$$?; \
+	if grep -q 'SYSV_SHM_SMOKE: PASS' "$$log"; then \
+		echo "smoke-sysv-shm: PASS; log saved to $$log"; \
+	elif [ "$$status" -eq 124 ]; then \
+		echo "smoke-sysv-shm: timeout without PASS; tail of $$log:"; \
+		tail -n 80 "$$log"; \
+		exit 1; \
+	else \
+		echo "smoke-sysv-shm: failed with status $$status; tail of $$log:"; \
+		tail -n 80 "$$log"; \
+		exit "$$status"; \
+	fi
+
 smoke-sched-stress:
 		$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
@@ -1450,6 +1491,10 @@ $(BUILD_DIR)/rust/sysv_sem_helpers.o: kernel/rust/support/sysv_sem_helpers.c Mak
 	@mkdir -p $(dir $@)
 	$(CROSS_PREFIX)gcc $(CFLAGS) -c $< -o $@
 
+$(BUILD_DIR)/rust/sysv_shm_helpers.o: kernel/rust/support/sysv_shm_helpers.c Makefile
+	@mkdir -p $(dir $@)
+	$(CROSS_PREFIX)gcc $(CFLAGS) -c $< -o $@
+
 $(BUILD_DIR)/rust/signal_helpers.o: kernel/rust/support/signal_helpers.c Makefile
 	@mkdir -p $(dir $@)
 	$(CROSS_PREFIX)gcc $(CFLAGS) -c $< -o $@
@@ -1501,6 +1546,10 @@ $(BUILD_DIR)/rust/libwait.rlib: kernel/rust/wait/lib.rs kernel/rust/wait/ffi.rs 
 $(BUILD_DIR)/rust/libsysv_sem.rlib: kernel/rust/sysv_sem/lib.rs kernel/rust/sysv_sem/ffi.rs $(RUST_SUPPORT_LIB) Makefile
 	@mkdir -p $(dir $@)
 	$(RUSTC) $(RUSTFLAGS) --crate-name sysv_sem --extern a20rust_support=$(RUST_SUPPORT_LIB) $< -o $@
+
+$(BUILD_DIR)/rust/libsysv_shm.rlib: kernel/rust/sysv_shm/lib.rs kernel/rust/sysv_shm/ffi.rs $(RUST_SUPPORT_LIB) Makefile
+	@mkdir -p $(dir $@)
+	$(RUSTC) $(RUSTFLAGS) --crate-name sysv_shm --extern a20rust_support=$(RUST_SUPPORT_LIB) $< -o $@
 
 $(BUILD_DIR)/rust/libproc_core.rlib: kernel/rust/proc_core/lib.rs kernel/rust/proc_core/ffi.rs $(RUST_SUPPORT_LIB) Makefile
 	@mkdir -p $(dir $@)
