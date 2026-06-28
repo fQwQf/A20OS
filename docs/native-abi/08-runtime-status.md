@@ -1,4 +1,4 @@
-# Native ABI 运行时状态
+# A20OS Native ABI 运行时状态
 
 本文档记录 A20OS Native ABI 当前用户态运行时的真实状态、已知偏差和后续路线图。它是对 [00-overview.md](00-overview.md) 中实现状态的补充。
 
