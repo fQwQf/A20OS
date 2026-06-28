@@ -1315,6 +1315,8 @@ smoke-native-libc:
 # ----------------------------------------------------------------
 # Local evaluation: make eval-rv / make eval-la / make eval
 # ----------------------------------------------------------------
+.PHONY: eval-check eval-check-rv eval-check-la
+
 EVAL_DIR   := .eval-state
 EVAL_LOGS  := $(EVAL_DIR)/logs
 EVAL_TIMEOUT ?= 36000
@@ -1394,10 +1396,76 @@ endef
 eval-rv: eval-dev-build-rv $(EVAL_DIR)/sdcard-rv.img | $(EVAL_LOGS)
 	@echo "[eval] launching RISC-V QEMU (timeout=$(EVAL_TIMEOUT)s) ..."
 	$(RUN_QEMU_RV)
+	$(MAKE) eval-check-rv
 
 eval-la: eval-dev-build-la $(EVAL_DIR)/sdcard-la.img | $(EVAL_LOGS)
 	@echo "[eval] launching LoongArch QEMU (timeout=$(EVAL_TIMEOUT)s) ..."
 	$(RUN_QEMU_LA)
+	$(MAKE) eval-check-la
 
 eval: eval-rv eval-la
 	@echo "[eval] complete"
+
+eval-check-rv:
+	@log="$(EVAL_LOGS)/serial-rv.txt"; \
+	test -s "$$log" || { echo "[eval][rv] missing log: $$log"; exit 1; }; \
+	grep -q '\[CONTEST\] Done:' "$$log" || { echo "[eval][rv] incomplete: missing [CONTEST] Done"; exit 1; }; \
+	awk ' \
+		/#### OS COMP TEST GROUP START [A-Za-z0-9-]+ ####/ { start[$$7]++; next } \
+		/#### OS COMP TEST GROUP END/ { end[$$7]++; next } \
+		END { \
+			ok = 1; \
+			groups = 0; \
+			for (g in start) { \
+				groups++; \
+				if (start[g] != end[g]) { \
+					printf("[eval][rv] unmatched group %s: start=%d end=%d\n", g, start[g], end[g]); \
+					ok = 0; \
+				} \
+			} \
+			for (g in end) { \
+				if (!(g in start)) { \
+					printf("[eval][rv] group ended without start %s: end=%d\n", g, end[g]); \
+					ok = 0; \
+				} \
+			} \
+			if (groups == 0) { \
+				print "[eval][rv] no score groups found"; \
+				ok = 0; \
+			} \
+			exit ok ? 0 : 1; \
+		}' "$$log"; \
+	echo "[eval][rv] log is complete enough for scorer parsing"
+
+eval-check-la:
+	@log="$(EVAL_LOGS)/serial-la.txt"; \
+	test -s "$$log" || { echo "[eval][la] missing log: $$log"; exit 1; }; \
+	grep -q '\[CONTEST\] Done:' "$$log" || { echo "[eval][la] incomplete: missing [CONTEST] Done"; exit 1; }; \
+	awk ' \
+		/#### OS COMP TEST GROUP START [A-Za-z0-9-]+ ####/ { start[$$7]++; next } \
+		/#### OS COMP TEST GROUP END/ { end[$$7]++; next } \
+		END { \
+			ok = 1; \
+			groups = 0; \
+			for (g in start) { \
+				groups++; \
+				if (start[g] != end[g]) { \
+					printf("[eval][la] unmatched group %s: start=%d end=%d\n", g, start[g], end[g]); \
+					ok = 0; \
+				} \
+			} \
+			for (g in end) { \
+				if (!(g in start)) { \
+					printf("[eval][la] group ended without start %s: end=%d\n", g, end[g]); \
+					ok = 0; \
+				} \
+			} \
+			if (groups == 0) { \
+				print "[eval][la] no score groups found"; \
+				ok = 0; \
+			} \
+			exit ok ? 0 : 1; \
+		}' "$$log"; \
+	echo "[eval][la] log is complete enough for scorer parsing"
+
+eval-check: eval-check-rv eval-check-la
