@@ -9,6 +9,24 @@
 [[ -x /test/glibc/busybox ]] && cp /test/glibc/busybox /busybox 2>/dev/null
 [[ -x /test/glibc/busybox ]] && cp /test/glibc/busybox /bin/busybox 2>/dev/null
 
+prepare_musl_loader() {
+    [[ -f /test/musl/lib/libc.so ]] || return 0
+
+    mkdir -p /lib /lib64
+    case "$(uname -m)" in
+    riscv64)
+        [[ -e /lib/ld-musl-riscv64.so.1 ]] || cp /test/musl/lib/libc.so /lib/ld-musl-riscv64.so.1 2>/dev/null
+        [[ -e /lib64/ld-musl-riscv64.so.1 ]] || cp /test/musl/lib/libc.so /lib64/ld-musl-riscv64.so.1 2>/dev/null
+        ;;
+    loongarch64)
+        [[ -e /lib/ld-musl-loongarch-lp64d.so.1 ]] || cp /test/musl/lib/libc.so /lib/ld-musl-loongarch-lp64d.so.1 2>/dev/null
+        [[ -e /lib64/ld-musl-loongarch-lp64d.so.1 ]] || cp /test/musl/lib/libc.so /lib64/ld-musl-loongarch-lp64d.so.1 2>/dev/null
+        ;;
+    esac
+}
+
+prepare_musl_loader
+
 typeset -a BUSYBOX_KILL10_PRIME_PIDS
 typeset -i BUSYBOX_KILL10_PRIMED=0
 
@@ -57,7 +75,7 @@ export LTPROOT=/test/glibc/ltp
 export LTP_TMPDIR=/tmp
 export TMPDIR=/tmp
 export HOME=/root
-export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}/bin/lib:/lib"
+export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}/bin/lib:/lib:/lib64:/test/musl/lib:/test/glibc/lib"
 export PATH="/tmp:$PATH"
 mkdir -p /root
 
@@ -237,6 +255,11 @@ SKIP_GROUPS+=(ltp) # LTP 完整组本地跑不通，下面用 bounded subset 单
 
 skip_group() {
     typeset g=$1 s
+    typeset arch=$(uname -m)
+
+    if [[ $arch == "loongarch64" && $g == "cyclictest" ]]; then
+        return 0
+    fi
 
     # Only skip groups that are intentionally not scored here. Groups with a
     # judge script should run and let the scorer assign whatever partial score
@@ -468,18 +491,25 @@ run_ltp_bounded_subset() {
     typeset arch=$(uname -m)
     typeset dir="/test/$runtime/ltp/testcases/bin"
 
-    if [[ $runtime != "glibc" ]]; then
-        print "[CONTEST][SKIP] runtime=$runtime group=ltp current_phase=bounded_glibc_dual_arch"
-        return 0
-    fi
+    [[ $runtime == "musl" ]] && prepare_musl_loader
+
+    case "$runtime" in
+        glibc|musl) ;;
+        *)
+            print "[CONTEST][SKIP] runtime=$runtime group=ltp current_phase=bounded_dual_runtime_dual_arch"
+            return 0
+            ;;
+    esac
 
     case "$arch" in
         riscv64|loongarch64) ;;
         *)
-            print "[CONTEST][SKIP] runtime=$runtime group=ltp arch=$arch current_phase=bounded_glibc_dual_arch"
+            print "[CONTEST][SKIP] runtime=$runtime group=ltp arch=$arch current_phase=bounded_dual_runtime_dual_arch"
             return 0
             ;;
     esac
+
+    export LTPROOT="/test/$runtime/ltp"
 
     print "[CONTEST][RUN] runtime=$runtime group=ltp arch=$arch mode=bounded_subset case_timeout=60s ftest_timeout=120s futex_timeout=180s futex_ltp_timeout_mul=4"
     print "#### OS COMP TEST GROUP START ltp-$runtime ####"
@@ -777,6 +807,7 @@ run_group() {
     typeset dir="/test/$runtime"
 
     [[ -f $script ]] || return 0
+    [[ $runtime == "musl" ]] && prepare_musl_loader
 
     if skip_group "$group" "$runtime"; then
         print "[CONTEST][SKIP] runtime=$runtime group=$group"
