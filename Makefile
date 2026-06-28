@@ -1355,6 +1355,10 @@ EVAL_KERNEL_RV  = .kernel-build/riscv64-both-dev/kernel.elf
 EVAL_FAT32_RV   = .kernel-build/riscv64-both-dev/fat32.img
 EVAL_KERNEL_LA  = .kernel-build/loongarch64-both-dev/kernel.elf
 EVAL_FAT32_LA   = .kernel-build/loongarch64-both-dev/fat32.img
+EVAL_NET_HOSTFWD_RV ?= hostfwd=tcp::5555-:5555,hostfwd=udp::5555-:5555
+EVAL_NET_HOSTFWD_LA ?= hostfwd=tcp::5556-:5555,hostfwd=udp::5556-:5555
+EVAL_NETDEV_RV = -netdev user,id=net$(if $(strip $(EVAL_NET_HOSTFWD_RV)),$(comma)$(EVAL_NET_HOSTFWD_RV),)
+EVAL_NETDEV_LA = -netdev user,id=net$(if $(strip $(EVAL_NET_HOSTFWD_LA)),$(comma)$(EVAL_NET_HOSTFWD_LA),)
 
 eval-dev-build-rv:
 	$(MAKE) ARCH=riscv64 FAT32_IMAGE_MB=128 dev-build
@@ -1372,7 +1376,7 @@ define RUN_QEMU_RV
 		-kernel $(EVAL_KERNEL_RV) \
 		-drive 'file=$(EVAL_FAT32_RV),if=none,format=raw,id=x0' \
 		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		$(EVAL_NETDEV_RV) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
 		-drive 'file=$(EVAL_DIR)/sdcard-rv.img,if=none,format=raw,id=x1' \
 		-device virtio-blk-device,drive=x1,bus=virtio-mmio-bus.1 \
 		-no-reboot \
@@ -1385,7 +1389,7 @@ define RUN_QEMU_LA
 		-kernel $(EVAL_KERNEL_LA) \
 		-drive 'file=$(EVAL_FAT32_LA),if=none,format=raw,id=x0' \
 		-device virtio-blk-pci,drive=x0 \
-		$(NETDEV_USER) -device virtio-net-pci,netdev=net \
+		$(EVAL_NETDEV_LA) -device virtio-net-pci,netdev=net \
 		-drive 'file=$(EVAL_DIR)/sdcard-la.img,if=none,format=raw,id=x1' \
 		-device virtio-blk-pci,drive=x1 \
 		-no-reboot \
@@ -1403,7 +1407,9 @@ eval-la: eval-dev-build-la $(EVAL_DIR)/sdcard-la.img | $(EVAL_LOGS)
 	$(RUN_QEMU_LA)
 	$(MAKE) eval-check-la
 
-eval: eval-rv eval-la
+eval:
+	$(MAKE) eval-rv
+	$(MAKE) eval-la
 	@echo "[eval] complete"
 
 eval-check-rv:
