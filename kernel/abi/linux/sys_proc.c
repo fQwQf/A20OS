@@ -487,6 +487,9 @@ int64_t sys_openat2(int dirfd, const char *pathname, const void *how, size_t siz
     if (size < 24 || size > sizeof(khow)) return -EINVAL;
     if (copy_from_user(&khow, how, size < sizeof(khow) ? size : sizeof(khow)) < 0)
         return -EFAULT;
+    char kpath[MAX_PATH_LEN];
+    if (user_strncpy(kpath, pathname, MAX_PATH_LEN) < 0)
+        return -EFAULT;
     if (size > sizeof(khow)) {
         uint8_t extra[32];
         size_t off = sizeof(khow);
@@ -509,7 +512,7 @@ int64_t sys_openat2(int dirfd, const char *pathname, const void *how, size_t siz
 
     int flags = (int)khow.flags;
     int mode = (int)(khow.mode & 07777);
-    int gfd = vfs_openat2(dirfd, pathname, flags, mode, khow.resolve);
+    int gfd = vfs_openat2(dirfd, kpath, flags, mode, khow.resolve);
     if (gfd < 0) return gfd;
     task_t *t = proc_current();
     return fdtable_install(t, gfd, flags);
