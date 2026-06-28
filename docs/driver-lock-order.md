@@ -1,25 +1,25 @@
-# Driver Lock-Order Contract
+# 驱动锁顺序契约
 
-This document is the authoritative lock-order contract for private locks in A20 kernel drivers. It supplements the global contract in `kernel/include/core/lock.h` and is the place where per-driver exceptions and local orders are recorded.
+本文档是 A20 内核驱动私有锁的权威锁顺序契约。它补充 `kernel/include/core/lock.h` 中的全局契约，并记录每个驱动的例外情况和局部顺序。
 
-## Scope
+## 范围
 
-Covered drivers:
+覆盖的驱动：
 
-| Driver | File | Private lock |
+| 驱动 | 文件 | 私有锁 |
 |--------|------|--------------|
 | virtio-blk | `kernel/drivers/block/virtio_blk.c` | `inst->lock` |
 | virtio-net | `kernel/drivers/net/virtio_net.c` | `net->lock` |
 | UART | `kernel/drivers/char/uart.c` | `rx_lock` |
-| PTY | `kernel/drivers/char/pty.c` | `g_pty_alloc_lock`, per-pair `lock` |
+| PTY | `kernel/drivers/char/pty.c` | `g_pty_alloc_lock`、每个 pair 的 `lock` |
 | loop | `kernel/drivers/block/loop.c` | `g_loop[i].lock` |
-| DW SDIO | `kernel/drivers/block/dw_sdio.c` | none |
-| StarFive GMAC | `kernel/drivers/net/starfive_gmac.c` | none |
-| Loongson-2K GMAC | `kernel/drivers/net/ls2k_gmac.c` | none |
+| DW SDIO | `kernel/drivers/block/dw_sdio.c` | 无 |
+| StarFive GMAC | `kernel/drivers/net/starfive_gmac.c` | 无 |
+| Loongson-2K GMAC | `kernel/drivers/net/ls2k_gmac.c` | 无 |
 
-## Global order summary
+## 全局顺序摘要
 
-The global order from `kernel/include/core/lock.h` is:
+`kernel/include/core/lock.h` 中的全局顺序为：
 
 ```text
 cg_node.lock -> proc_lock -> runq_lock -> pfa.lock
@@ -31,190 +31,190 @@ driver registry/IRQ locks -> device-private locks
 g_lwip_lock -> virtio-net nonblocking send/recv paths only
 ```
 
-For drivers this means:
+对驱动而言，这意味着：
 
-- Device-private locks are always the innermost locks.
-- Never acquire `proc_lock`, `files_struct.lock`, VFS locks, `mm_struct.lock`, `a20_handle_table.lock`, or `runq_lock` while holding a device-private lock, unless a specific local order below documents the exception.
-- Never block, sleep, or call into the scheduler while holding a spinlock.
-- Never call memory allocation, VFS, or scheduler paths while holding a device or lwIP lock unless the callee is documented nonblocking.
+- 设备私有锁永远是最内层锁。
+- 持有设备私有锁时，绝不能获取 `proc_lock`、`files_struct.lock`、VFS 锁、`mm_struct.lock`、`a20_handle_table.lock` 或 `runq_lock`，除非下文的具体局部顺序记录了该例外。
+- 持有 spinlock 时绝不能阻塞、睡眠或调入调度器。
+- 持有设备锁或 lwIP 锁时，绝不能调用内存分配、VFS 或 scheduler 路径，除非 callee 明确记录为非阻塞。
 
-## Per-driver contracts
+## 各驱动契约
 
 ### virtio-blk
 
-**Lock:** `virtio_blk_inst_t.lock` (`inst->lock`), one per instance.
+**锁：** `virtio_blk_inst_t.lock`（`inst->lock`），每个实例一个。
 
-**What it protects:**
+**保护内容：**
 
-- Request slots (`inst->req[]`)
-- Descriptor/available/used ring state
+- 请求 slot（`inst->req[]`）
+- descriptor/available/used ring 状态
 - `inst->in_flight`
-- `inst->status[]`, `inst->req_hdr[]`
-- `blk->last_used`, `blk->desc_idx`
+- `inst->status[]`、`inst->req_hdr[]`
+- `blk->last_used`、`blk->desc_idx`
 
-**Local order:** None. `inst->lock` is never nested under or over another kernel lock.
+**局部顺序：** 无。`inst->lock` 从不与其他内核锁嵌套。
 
-**Rules:**
+**规则：**
 
-- Submission, completion polling, and request allocation all run under `inst->lock`.
-- The completion path calls `proc_make_ready(req->waiter)` while holding `inst->lock`. This is safe because the device lock is innermost and `proc_make_ready` only touches the runqueue side with its own locking.
-- `virtio_blk_rw()` drops the lock before yielding the CPU when no slot is available.
-- Do not call VFS, `kmalloc`, or blocking scheduler functions under `inst->lock`.
+- 提交、完成轮询和请求分配都在 `inst->lock` 下运行。
+- 完成路径在持有 `inst->lock` 时调用 `proc_make_ready(req->waiter)`。这是安全的，因为设备锁是最内层锁，而 `proc_make_ready` 只通过自身加锁触碰 runqueue 侧。
+- 当没有可用 slot 时，`virtio_blk_rw()` 在 yield CPU 前释放锁。
+- 不要在 `inst->lock` 下调用 VFS、`kmalloc` 或阻塞式 scheduler 函数。
 
 ### virtio-net
 
-**Lock:** `virtio_net_inst_t.lock` (`net->lock`), one per instance.
+**锁：** `virtio_net_inst_t.lock`（`net->lock`），每个实例一个。
 
-**What it protects:**
+**保护内容：**
 
-- TX/RX descriptor rings
-- `tx_busy[]`, `rx_buf[]`, `tx_buf[]`
-- Queue indices (`last_used`, `avail->idx`)
-- Statistics (`rx_packets`, `tx_packets`, `rx_drops`, `tx_drops`)
+- TX/RX descriptor ring
+- `tx_busy[]`、`rx_buf[]`、`tx_buf[]`
+- 队列索引（`last_used`、`avail->idx`）
+- 统计信息（`rx_packets`、`tx_packets`、`rx_drops`、`tx_drops`）
 
-**Local order:** `g_lwip_lock -> net->lock`.
+**局部顺序：** `g_lwip_lock -> net->lock`。
 
-- The lwIP raw-API send path is invoked while holding `g_lwip_lock`.
-- `virtio_net_send()` with `nonblock == 1` is the only virtio-net entry point that may run under `g_lwip_lock`.
-- The nonblock path never sleeps waiting for TX completion. It submits the descriptor and returns immediately.
-- The blocking send/recv paths (`nonblock == 0`, or `virtio_net_recv()`) must NOT be called under `g_lwip_lock` because they can sleep.
+- lwIP raw-API send 路径在持有 `g_lwip_lock` 时调用。
+- `virtio_net_send()` 且 `nonblock == 1` 是唯一可以在 `g_lwip_lock` 下运行的 virtio-net 入口点。
+- nonblock 路径绝不睡眠等待 TX 完成。它提交 descriptor 后立即返回。
+- 阻塞 send/recv 路径（`nonblock == 0`，或 `virtio_net_recv()`）不得在 `g_lwip_lock` 下调用，因为它们可能睡眠。
 
-**Rules:**
+**规则：**
 
-- Never hold `net->lock` across a scheduler wait.
-- Never call lwIP functions while holding `net->lock` (the order is lwIP outer, net inner).
-- `virtio_net_poll_all()` and `virtio_net_class_poll()` only acquire `net->lock`.
+- 绝不跨 scheduler wait 持有 `net->lock`。
+- 持有 `net->lock` 时绝不调用 lwIP 函数（顺序是 lwIP 外层、net 内层）。
+- `virtio_net_poll_all()` 和 `virtio_net_class_poll()` 只获取 `net->lock`。
 
 ### UART
 
-**Lock:** `rx_lock`, single global spinlock.
+**锁：** `rx_lock`，单个全局 spinlock。
 
-**What it protects:**
+**保护内容：**
 
-- Receive ring buffer (`rx_buffer`, `rx_head`, `rx_tail`)
+- 接收环形缓冲区（`rx_buffer`、`rx_head`、`rx_tail`）
 - `rx_waiter`
 - `tty_foreground_pgid`
 
-**Local order:** `rx_lock -> proc_lock`.
+**局部顺序：** `rx_lock -> proc_lock`。
 
-- Normal RX handling only touches the ring buffer and `rx_waiter` under `rx_lock`.
-- The Ctrl-C path (`uart_rx_push()` for `0x03`) holds `rx_lock` and then calls `proc_find()` / `proc_kill()` through `uart_signal_user_pgid()` / `uart_signal_all_user()`. These functions acquire `proc_lock`.
-- `uart_dump_tasks()` also acquires `proc_lock` and is called under `rx_lock` in the Ctrl-C path.
-- This is the only documented exception where a driver-private lock nests `proc_lock`.
+- 普通 RX 处理只在 `rx_lock` 下触碰环形缓冲区和 `rx_waiter`。
+- Ctrl-C 路径（`uart_rx_push()` 处理 `0x03`）持有 `rx_lock`，随后通过 `uart_signal_user_pgid()` / `uart_signal_all_user()` 调用 `proc_find()` / `proc_kill()`。这些函数会获取 `proc_lock`。
+- `uart_dump_tasks()` 也会获取 `proc_lock`，并在 Ctrl-C 路径中于 `rx_lock` 下调用。
+- 这是唯一记录在案的驱动私有锁嵌套 `proc_lock` 例外。
 
-**Rules:**
+**规则：**
 
-- All other UART paths must not acquire additional locks while holding `rx_lock`.
-- `uart_getc()` drops `rx_lock` before blocking the current task.
+- 其他所有 UART 路径在持有 `rx_lock` 时不得获取额外锁。
+- `uart_getc()` 在阻塞当前任务前释放 `rx_lock`。
 
 ### PTY
 
-**Locks:**
+**锁：**
 
-- `g_pty_alloc_lock`: global spinlock for pair allocation and initial setup.
-- `g_ptys[idx].lock`: per-pair spinlock for all runtime operations on a pair.
+- `g_pty_alloc_lock`：用于 pair 分配和初始设置的全局 spinlock。
+- `g_ptys[idx].lock`：用于某个 pair 所有运行时操作的 per-pair spinlock。
 
-**What `g_pty_alloc_lock` protects:**
+**`g_pty_alloc_lock` 保护内容：**
 
-- `in_use` flag during allocation
-- `m2s_buf` / `s2m_buf` allocation and initial field setup
+- 分配期间的 `in_use` 标志
+- `m2s_buf` / `s2m_buf` 分配和初始字段设置
 
-**What per-pair `lock` protects:**
+**per-pair `lock` 保护内容：**
 
-- Ring buffers (`m2s_*`, `s2m_*`)
-- `master_refs`, `slave_refs`
-- `locked`, `master_nonblock`, `slave_nonblock`
-- Window size (`ws_row`, `ws_col`)
+- 环形缓冲区（`m2s_*`、`s2m_*`）
+- `master_refs`、`slave_refs`
+- `locked`、`master_nonblock`、`slave_nonblock`
+- 窗口大小（`ws_row`、`ws_col`）
 
-**Local order:** None. The two locks are never nested.
+**局部顺序：** 无。这两个锁从不嵌套。
 
-- `pty_alloc()` acquires `g_pty_alloc_lock`, allocates buffers with `kmalloc`, initializes the pair, and releases `g_pty_alloc_lock`. The per-pair lock is not held during allocation.
-- All read/write/ioctl paths acquire only the per-pair lock.
-- `pty_release()` acquires the per-pair lock to update reference counts and clear `in_use`, then releases the lock before dropping the backing `vfile_t` reference.
+- `pty_alloc()` 获取 `g_pty_alloc_lock`，用 `kmalloc` 分配缓冲区，初始化 pair，然后释放 `g_pty_alloc_lock`。分配期间不持有 per-pair lock。
+- 所有 read/write/ioctl 路径只获取 per-pair lock。
+- `pty_release()` 获取 per-pair lock 来更新引用计数并清除 `in_use`，随后在释放 backing `vfile_t` 引用前释放该锁。
 
-**Rules:**
+**规则：**
 
-- Do not hold the per-pair lock across VFS operations. Buffer I/O and reference dropping happen after the lock is released.
-- `g_pty_alloc_lock` is held during `kmalloc`. This is a known exception; new allocations under this lock should be avoided if possible.
+- 不要跨 VFS 操作持有 per-pair lock。缓冲区 I/O 和引用释放都在锁释放后发生。
+- `g_pty_alloc_lock` 在 `kmalloc` 期间保持持有。这是已知例外；新的代码应尽量避免在该锁下分配。
 
 ### loop
 
-**Lock:** `g_loop[i].lock`, one per loop device.
+**锁：** `g_loop[i].lock`，每个 loop device 一个。
 
-**What it protects:**
+**保护内容：**
 
 - `in_use`
 - `backing_vf`
 - `backing_size`
 
-**Local order:** None.
+**局部顺序：** 无。
 
-- `loop_set_fd()` obtains a `vfile_t` reference and size from VFS before taking the loop lock.
-- `loop_clr_fd()` clears state under the loop lock, then releases the lock before dropping the `vfile_t` reference.
-- `loop_dev_read()` and `loop_dev_write()` copy `backing_vf` and `backing_size` under the loop lock, release the lock, and then call the backing file's `lseek`/`read`/`write` operations locklessly.
+- `loop_set_fd()` 在获取 loop lock 之前先从 VFS 获得 `vfile_t` 引用和大小。
+- `loop_clr_fd()` 在 loop lock 下清除状态，然后释放锁，再释放 `vfile_t` 引用。
+- `loop_dev_read()` 和 `loop_dev_write()` 在 loop lock 下复制 `backing_vf` 和 `backing_size`，释放锁后再无锁调用 backing file 的 `lseek`/`read`/`write` 操作。
 
-**Rules:**
+**规则：**
 
-- The loop lock is never held across a backing-file VFS operation.
-- No memory allocation happens under the loop lock.
+- loop lock 从不跨 backing-file VFS 操作持有。
+- loop lock 下不发生内存分配。
 
 ### DW SDIO
 
-**Lock:** None.
+**锁：** 无。
 
-- The driver uses a single global `sdio_priv_t` instance (`g_sdio`).
-- All command and data transfers are synchronous busy-polls.
-- No private spinlock is required because only one request is in flight at a time and the current implementation does not support concurrent callers.
+- 该驱动使用单个全局 `sdio_priv_t` 实例（`g_sdio`）。
+- 所有命令和数据传输都是同步 busy-poll。
+- 当前实现一次只允许一个 in-flight 请求，且不支持并发调用者，因此不需要私有 spinlock。
 
-**Rules:**
+**规则：**
 
-- Future concurrent or IRQ-driven versions must add a private lock and document it here.
-- Until then, callers serialize through the single instance.
+- 未来的并发版本或 IRQ 驱动版本必须增加私有锁，并在本文档中记录。
+- 在此之前，调用者通过单实例进行串行化。
 
 ### StarFive GMAC
 
-**Lock:** None.
+**锁：** 无。
 
-- The driver uses a single global `gmac_priv_t` instance (`g_gmac`).
-- `starfive_gmac_send()` and `starfive_gmac_recv()` are register-polling paths that check descriptor ownership bits.
-- No private spinlock protects descriptor rings in the current implementation.
+- 该驱动使用单个全局 `gmac_priv_t` 实例（`g_gmac`）。
+- `starfive_gmac_send()` 和 `starfive_gmac_recv()` 是寄存器轮询路径，会检查 descriptor ownership bit。
+- 当前实现没有用私有 spinlock 保护 descriptor ring。
 
-**Rules:**
+**规则：**
 
-- Future IRQ-driven or SMP-safe versions must add a private lock and document it here.
-- Concurrent send/recv calls race today; callers must serialize externally.
+- 未来的 IRQ 驱动版本或 SMP-safe 版本必须增加私有锁，并在本文档中记录。
+- 今天的并发 send/recv 调用存在竞争；调用者必须在外部串行化。
 
 ### Loongson-2K GMAC
 
-**Lock:** None.
+**锁：** 无。
 
-- The driver uses a single global `ls2k_gmac_priv_t` instance (`g_ls2k_gmac`).
-- `ls2k_gmac_send()` and `ls2k_gmac_recv()` are register-polling paths that check descriptor ownership bits.
-- No private spinlock protects descriptor rings in the current implementation.
+- 该驱动使用单个全局 `ls2k_gmac_priv_t` 实例（`g_ls2k_gmac`）。
+- `ls2k_gmac_send()` 和 `ls2k_gmac_recv()` 是寄存器轮询路径，会检查 descriptor ownership bit。
+- 当前实现没有用私有 spinlock 保护 descriptor ring。
 
-**Rules:**
+**规则：**
 
-- Future IRQ-driven or SMP-safe versions must add a private lock and document it here.
-- Concurrent send/recv calls race today; callers must serialize externally.
+- 未来的 IRQ 驱动版本或 SMP-safe 版本必须增加私有锁，并在本文档中记录。
+- 今天的并发 send/recv 调用存在竞争；调用者必须在外部串行化。
 
-## Cross-driver rules
+## 跨驱动规则
 
-1. **No reverse ordering.** If a global lock must be acquired while a driver lock is held, document it as a local order in this file. Undocumented nesting is a bug.
-2. **Blocking under spinlocks is forbidden.** Any path that may block must drop all spinlocks first.
-3. **VFS and allocation under driver locks are forbidden unless documented.** The only documented exceptions are:
-   - `virtio-blk` completion calling `proc_make_ready` (scheduler notification, not VFS).
-   - `UART` Ctrl-C path nesting `proc_lock` under `rx_lock`.
-   - `PTY` allocation performing `kmalloc` under `g_pty_alloc_lock`.
-4. **New device locks** must either fit the global order (`driver registry/IRQ locks -> device-private locks`) or add a local order entry to this document before use.
+1. **禁止反向顺序。** 如果必须在持有驱动锁时获取全局锁，需要在本文档中把它记录为局部顺序。未记录的嵌套就是 bug。
+2. **禁止在 spinlock 下阻塞。** 任何可能阻塞的路径都必须先释放所有 spinlock。
+3. **除非已记录，否则禁止在驱动锁下执行 VFS 和分配。** 唯一已记录的例外是：
+   - `virtio-blk` 完成路径调用 `proc_make_ready`（调度通知，不是 VFS）。
+   - `UART` Ctrl-C 路径在 `rx_lock` 下嵌套 `proc_lock`。
+   - `PTY` 分配在 `g_pty_alloc_lock` 下执行 `kmalloc`。
+4. **新的设备锁** 必须符合全局顺序（`driver registry/IRQ locks -> device-private locks`），或在使用前向本文档增加局部顺序条目。
 
-## References
+## 参考
 
-- `kernel/include/core/lock.h` — global lock order and spinlock primitives.
-- `kernel/drivers/block/virtio_blk.c` — `inst->lock` implementation.
-- `kernel/drivers/net/virtio_net.c` — `net->lock` and `g_lwip_lock` interaction.
-- `kernel/drivers/char/uart.c` — `rx_lock` and Ctrl-C signal path.
-- `kernel/drivers/char/pty.c` — `g_pty_alloc_lock` and per-pair `lock`.
-- `kernel/drivers/block/loop.c` — per-device loop lock.
-- `kernel/drivers/block/dw_sdio.c` — lockless SDIO implementation.
-- `kernel/drivers/net/starfive_gmac.c` — lockless StarFive GMAC implementation.
-- `kernel/drivers/net/ls2k_gmac.c` — lockless Loongson-2K GMAC implementation.
+- `kernel/include/core/lock.h`：全局锁顺序和 spinlock 原语。
+- `kernel/drivers/block/virtio_blk.c`：`inst->lock` 实现。
+- `kernel/drivers/net/virtio_net.c`：`net->lock` 与 `g_lwip_lock` 交互。
+- `kernel/drivers/char/uart.c`：`rx_lock` 和 Ctrl-C signal 路径。
+- `kernel/drivers/char/pty.c`：`g_pty_alloc_lock` 和 per-pair `lock`。
+- `kernel/drivers/block/loop.c`：per-device loop lock。
+- `kernel/drivers/block/dw_sdio.c`：无锁 SDIO 实现。
+- `kernel/drivers/net/starfive_gmac.c`：无锁 StarFive GMAC 实现。
+- `kernel/drivers/net/ls2k_gmac.c`：无锁 Loongson-2K GMAC 实现。
