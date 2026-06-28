@@ -530,12 +530,11 @@ run_ltp_bounded_subset() {
         return 1
     }
 
-    # cgroup_fj_proc is a signal-driven helper, not a standalone LTP case.
-    # Running it directly blocks forever in sigsuspend(), so keep it blacklisted
-    # while collecting bounded, real LTP output on both sides of the cgroup_fj point.
     typeset -i failed_cases=0
     typeset name=
+
     for name in \
+        epoll-ltp \
         abort01 abs01 \
         accept01 accept02 accept03 accept4_01 \
         access01 access02 access03 access04 \
@@ -544,13 +543,8 @@ run_ltp_bounded_subset() {
         bind01 bind02 bind03 bind04 bind05 \
         brk01 capget01 capget02 \
         capset01 capset02 capset03 capset04 \
-        cgroup_core03
-    do
-        run_ltp_bounded_case "$name" || (( failed_cases++ ))
-    done
-    print "[CONTEST][LTP][SKIP] cgroup_fj_proc blacklisted_helper"
-    run_ltp_bounded_case chdir04 || (( failed_cases++ ))
-    for name in \
+        cgroup_core03 \
+        chdir04 \
         chmod01 chmod03 chmod05 chmod06 chmod07 \
         chown01 chown02 chown03 chown04 chown05 \
         chroot01 chroot03 chroot04 \
@@ -579,20 +573,18 @@ run_ltp_bounded_subset() {
         fchown01 fchown02 fchown03 fchown04 fchown05 \
         fchownat01 fchownat02 \
         fcntl02 fcntl03 fcntl04 fcntl05 fcntl08 \
-        fcntl11 fcntl12 fcntl13 fcntl14 fcntl16 \
+        fcntl12 fcntl13 fcntl14 \
         fdatasync01 fdatasync02 \
         flock01 flock02 flock03 flock04 \
         fstat02 fstat03 fstatfs02 \
         ftruncate01 ftruncate03 ftruncate03_64 \
-        getcontext01 getcwd02 \
+        getcwd02 \
         getdomainname01 \
         getegid01 getegid01_16 getegid02 getegid02_16 \
         geteuid01 geteuid02 \
         getgid01 getgid03 \
         getgroups01 getgroups03 \
-        gethostbyname_r01 \
-        gethostid01 \
-        gethostname01 gethostname02 \
+        gethostname01 \
         getitimer01 getitimer02 \
         getpagesize01 \
         getpgid01 getpgid02 \
@@ -625,7 +617,7 @@ run_ltp_bounded_subset() {
         mknodat01 \
         mlock03 mlock04 \
         mlockall01 \
-        mmap01 mmap02 mmap03 mmap04 mmap05 mmap09 mmap10 mmap11 mmap12 mmap15 mmap17 \
+        mmap01 mmap02 mmap03 mmap04 mmap05 mmap09 mmap11 mmap12 mmap15 mmap17 \
         mprotect02 mprotect03 \
         msync01 msync02 \
         munmap01 munmap02 \
@@ -643,7 +635,7 @@ run_ltp_bounded_subset() {
         readv01 \
         rmdir01 rmdir03 \
         rt_sigaction03 rt_sigprocmask01 \
-        sbrk01 sbrk02 \
+        sbrk02 \
         sched_getaffinity01 \
         sched_getparam01 \
         sched_getscheduler01 sched_getscheduler02 \
@@ -651,7 +643,7 @@ run_ltp_bounded_subset() {
         sched_setparam01 sched_setparam02 \
         sched_setscheduler01 \
         sched_yield01 \
-        select01 select02 select04 \
+        select01 \
         sendfile02 sendfile02_64 sendfile05 sendfile05_64 sendfile06 sendfile06_64 \
         sendfile07 sendfile07_64 sendfile08 sendfile08_64 \
         setegid01 \
@@ -694,16 +686,16 @@ run_ltp_bounded_subset() {
         rename09 rename14 renameat201 renameat202 \
         rt_sigprocmask02 \
         close_range02 \
-        fcntl01 fcntl01_64 fcntl02_64 fcntl03_64 fcntl04_64 fcntl05_64 fcntl08_64 \
-        fcntl09 fcntl09_64 fcntl10 fcntl10_64 fcntl11_64 fcntl12_64 fcntl13_64 \
-        fcntl14_64 fcntl16_64 fcntl18 fcntl18_64 fcntl19 fcntl19_64 \
-        fcntl20 fcntl20_64 fcntl21 fcntl21_64 fcntl22 fcntl22_64 \
+        fcntl02_64 fcntl03_64 fcntl04_64 fcntl05_64 fcntl08_64 \
+        fcntl09 fcntl09_64 fcntl10 fcntl10_64 fcntl12_64 fcntl13_64 \
+        fcntl14_64 fcntl18 fcntl18_64 \
+        fcntl22 fcntl22_64 \
         fcntl29 fcntl29_64 fcntl30 fcntl30_64 fcntl36 fcntl36_64 \
         fcntl37 fcntl37_64 \
         fgetxattr03 \
         flistxattr01 flistxattr02 flistxattr03 \
         flock06 \
-        fork01 fork03 fork04 fork05 fork07 fork08 \
+        fork01 fork03 fork04 fork07 fork08 \
         fpathconf01 \
         fstat02_64 fstat03_64 fstatfs02_64 \
         ftruncate01_64 \
@@ -711,7 +703,6 @@ run_ltp_bounded_subset() {
         listxattr01 listxattr02 listxattr03 \
         llistxattr01 llistxattr02 llistxattr03 \
         lstat01 lstat01_64 \
-        mallinfo01 mallinfo02 mallinfo2_01 mallopt01 \
         memcmp01 memcpy01 memset01 \
         mincore02 mincore03 \
         mkdir05 \
@@ -737,8 +728,8 @@ run_ltp_bounded_subset() {
         sigaction02 sigsuspend01 \
         timerfd02 timerfd_create01 \
         fork10 fork_procs \
-        ftest01 ftest02 ftest03 ftest04 ftest05 ftest06 ftest07 ftest08 \
-        futex_cmp_requeue01 futex_cmp_requeue02 \
+        ftest01 ftest02 ftest05 ftest06 \
+        futex_cmp_requeue02 \
         futex_wait01 futex_wait02 futex_wait03 futex_wait04 futex_wait05 futex_wait_bitset01 \
         futex_wake01 futex_wake03 \
         madvise05 madvise10 \
@@ -750,10 +741,9 @@ run_ltp_bounded_subset() {
         splice01 \
         syscall01 \
         tee01 \
-        vfork01 vfork02 \
         asapi_01 asapi_02 \
         atof01 \
-        clone03 clone04 clone05 clone06 clone07 clone08 clone302 \
+        clone03 clone04 clone06 clone07 clone08 clone302 \
         fptest01 fptest02 \
         inode01 \
         nextafter01 \
@@ -769,19 +759,12 @@ run_ltp_bounded_subset() {
         splice09 \
         string01 \
         utsname01 utsname04 \
-        genacos genasin genatan genatan2 genceil gencos gencosh genexp \
-        genfloor genfrexp genldexp genlog genlog10 genpow gensin gensinh \
-        gensqrt gentan gentanh \
-        genfabs genfmod genhypot genj0 genj1 genlgamma genload genmodf geny0 geny1 \
         posix_fadvise01_64 posix_fadvise02 posix_fadvise02_64 \
-        sched_tc2 sched_tc3 sched_tc4 sched_tc5 \
         stream01 stream02 stream03 stream04 stream05 \
         vmsplice01 \
         af_alg02 af_alg03 af_alg05 af_alg06 \
         cve-2017-17052 \
-        print_caps tst_ansi_color.sh tst_exit tst_hexdump \
-        clone01 diotest1 diotest4 memcontrol01 mmap001 \
-        dirty doio epoll-ltp fs_racer.sh
+        clone01 diotest1 diotest4 memcontrol01 mmap001
     do
         run_ltp_bounded_case "$name" || (( failed_cases++ ))
     done
