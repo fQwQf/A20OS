@@ -1,4 +1,4 @@
-# A20 Native ABI Design
+# A20 Native ABI 设计
 
 本文档是 A20OS Native ABI 设计的顶层概述。详细规范见各子文档。
 
@@ -38,7 +38,7 @@ typedef uint32_t a20_handle_t;
 **为什么采用handle？**
 
 > 我看 Windows NT 搞得不错，内核对象极大丰富，各类资源的调用差异基本消灭，面向对象，安全权能机制也受重视，如果再加上开源，Windows NT 就是我们理想中的操作系统内核。  
-> 作者：fQwQf
+> ——fQwQf
 
 13 种对象类型（详见 [handle.md](03-handle.md)）：
 
@@ -67,7 +67,7 @@ handle 是进程本地编号，不是全局对象 ID。不同进程中的同一�
 权限只能降级，不能通过 `dup` 或 `transfer` 升级：
 
 ```text
-new_rights must be subset of old_rights
+new_rights 必须是 old_rights 的子集
 ```
 
 14 个权限位的完整定义和 rights 代数见 [security.md](06-security.md)。

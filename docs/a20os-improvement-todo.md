@@ -1,153 +1,153 @@
-# A20OS Improvement TODO
+# A20OS 改进 TODO
 
-This document records the current engineering bottlenecks and remaining improvement work for A20OS. It is based on the present code and documentation, not future design intent.
+本文档记录 A20OS 当前的工程瓶颈和剩余改进工作。它基于当前代码和文档，而不是未来设计意图。
 
-## P0: Concurrency and SMP Readiness
+## P0：并发与 SMP 就绪
 
-- [x] Replace the current `NR_CPUS != 1` build-time block with a passing SMP validation gate before enabling multi-core builds by default.
-  - Evidence: `Makefile` blocks SMP unless `ALLOW_UNVERIFIED_SMP=1`; `kernel/proc/sched.c` lists scheduler/MM/VFS concurrency prerequisites.
-  - Done when: `make NR_CPUS=2 check-concurrency-foundation` passes without the override flag.
-- [x] Audit every task state transition for the `proc_lock -> runq_lock` ordering contract.
-  - Evidence: `kernel/include/core/lock.h` defines global lock order; `kernel/proc/sched.c` depends on per-CPU runqueue state.
-  - Done when: fork, exec, exit, wait, signal wake, timer wake, futex wake, and wait-queue wake are covered by runtime stress tests.
-- [x] Convert remaining MM paths that rely on single-threaded execution to hold `mm->lock` for VMA and page-table mutations.
-  - Evidence: `kernel/include/mm/vm.h` states some paths still rely on single-threaded execution or narrower local locking.
-  - Done when: `make check-mm-lock-model` includes behavioral tests for concurrent mmap, munmap, fault, fork COW, and exit teardown.
-- [x] Add runtime VFS concurrency stress for close/read/write, dup/close_range, rename/unlink/open, symlink loops, and mount/unmount.
-  - Evidence: `kernel/fs/vfs.c` describes runtime expansion as future work in the VFS concurrency smoke matrix.
-  - Done when: `make check-vfs-abstraction` fails on regressions in those races, not just on missing documentation markers.
+- [x] 在默认启用多核构建前，用可通过的 SMP 验证门禁替换当前 `NR_CPUS != 1` 的构建期阻断。
+  - 证据：`Makefile` 会在未设置 `ALLOW_UNVERIFIED_SMP=1` 时阻断 SMP；`kernel/proc/sched.c` 列出了 scheduler/MM/VFS 并发前置条件。
+  - 完成条件：`make NR_CPUS=2 check-concurrency-foundation` 无需 override flag 即可通过。
+- [x] 审计每个 task 状态转换是否符合 `proc_lock -> runq_lock` 顺序契约。
+  - 证据：`kernel/include/core/lock.h` 定义全局锁顺序；`kernel/proc/sched.c` 依赖 per-CPU runqueue 状态。
+  - 完成条件：fork、exec、exit、wait、signal wake、timer wake、futex wake 和 wait-queue wake 都被运行时压力测试覆盖。
+- [x] 将仍依赖单线程执行的 MM 路径改为在 VMA 和页表修改期间持有 `mm->lock`。
+  - 证据：`kernel/include/mm/vm.h` 说明部分路径仍依赖单线程执行或更窄的局部锁。
+  - 完成条件：`make check-mm-lock-model` 包含 concurrent mmap、munmap、fault、fork COW 和 exit teardown 的行为测试。
+- [x] 为 close/read/write、dup/close_range、rename/unlink/open、symlink loop 和 mount/unmount 增加运行时 VFS 并发压力测试。
+  - 证据：`kernel/fs/vfs.c` 在 VFS 并发 smoke 矩阵中将运行时扩展描述为未来工作。
+  - 完成条件：`make check-vfs-abstraction` 能在这些竞争回归时失败，而不仅仅检查文档标记是否存在。
 
-## P0: Linux ABI Correctness
+## P0：Linux ABI 正确性
 
-- [x] Promote Linux syscall areas from `partial` to `full` only after syscall-group smoke tests and edge-case tests exist.
-  - Evidence: `kernel/abi/linux/syscall_coverage.md` marks fd I/O, paths, process lifecycle, signals, MM, futex, poll, sockets, and timers as partial.
-  - Done when: each upgraded area has tests listed next to the coverage table entry.
-- [x] Replace scheduler policy and affinity approximations with behavior matching supported Linux semantics.
-  - Evidence: `kernel/abi/linux/syscall_coverage.md` marks scheduler APIs as compatibility approximations.
-  - Done when: sched policy, priority, affinity, and cgroup cpuset behavior are covered by LTP-style tests.
-- [x] Complete advanced futex operations and memory-ordering edge semantics.
-  - Evidence: `kernel/abi/linux/syscall_coverage.md` marks futex as partial; `kernel/abi/linux/sys_futex.c` still has unsupported paths.
-  - Done when: basic, requeue, private/shared, timeout, and robust-list cases are covered.
-- [x] Decide which explicit `-ENOSYS` Linux syscall placeholders remain out of scope and which should be implemented.
-  - Evidence: `kernel/abi/linux/syscall_table.def` contains fanotify, signalfd, AIO, module, userfaultfd, perf, and arch-prctl placeholders.
-  - Done when: every placeholder has a documented owner decision: implement, keep stub, or remove from claimed compatibility scope.
+- [x] 只有在 syscall 组 smoke 测试和边界测试存在后，才将 Linux syscall 区域从 `partial` 提升到 `full`。
+  - 证据：`kernel/abi/linux/syscall_coverage.md` 将 fd I/O、path、process lifecycle、signal、MM、futex、poll、socket 和 timer 标记为 partial。
+  - 完成条件：每个升级区域都在覆盖表条目旁列出对应测试。
+- [x] 用符合受支持 Linux 语义的行为替换 scheduler policy 和 affinity 近似实现。
+  - 证据：`kernel/abi/linux/syscall_coverage.md` 将 scheduler API 标记为兼容性近似。
+  - 完成条件：sched policy、priority、affinity 和 cgroup cpuset 行为被 LTP 风格测试覆盖。
+- [x] 完成高级 futex 操作和内存顺序边界语义。
+  - 证据：`kernel/abi/linux/syscall_coverage.md` 将 futex 标记为 partial；`kernel/abi/linux/sys_futex.c` 仍有不支持路径。
+  - 完成条件：basic、requeue、private/shared、timeout 和 robust-list 场景都有覆盖。
+- [x] 决定哪些显式 `-ENOSYS` Linux syscall 占位符仍在范围外，哪些应该实现。
+  - 证据：`kernel/abi/linux/syscall_table.def` 包含 fanotify、signalfd、AIO、module、userfaultfd、perf 和 arch-prctl 占位符。
+  - 完成条件：每个占位符都有记录在案的 owner 决策：实现、保留 stub，或从声明的兼容范围中移除。
 
-## P0: MM, Page Cache, and File Mapping
+## P0：MM、Page Cache 与文件映射
 
-- [x] Add a dirty-page/writeback owner for `MAP_SHARED` file mappings.
-  - Evidence: `kernel/include/mm/vm.h` says `MAP_SHARED` writeback/truncate coherence is incomplete.
-  - Done when: shared mmap writes become visible through read, fsync, truncate, fork, and remap paths according to the supported semantics.
-- [x] Strengthen page cache eviction and coherence tests across file read/write, mmap fault, truncation, and reclaim.
-  - Evidence: `kernel/mm/fault.c` and `kernel/fs/page_cache.c` expose current page-cache limits and unsupported paths.
-  - Done when: page-cache tests run under memory pressure and catch stale data or use-after-free regressions.
-- [x] Validate huge-page demotion and COW behavior under fork, mprotect, munmap, and OOM reclaim.
-  - Evidence: `kernel/mm/vm.c` implements huge-page demotion and COW clone paths; the lock model requires careful TLB/refcount ordering.
-  - Done when: regression tests cover mixed huge/small mappings, write faults, and TLB-flush-sensitive cases.
-- [x] Make OOM reclaim policy observable and testable.
-  - Evidence: `kernel/include/mm/vm.h` states reclaim must not free frames reachable from task MM, page cache, VMO, or Native handles.
-  - Done when: OOM tests prove safe kill/reclaim behavior instead of only logging allocation failures.
+- [x] 为 `MAP_SHARED` 文件映射增加 dirty-page/writeback owner。
+  - 证据：`kernel/include/mm/vm.h` 说明 `MAP_SHARED` writeback/truncate coherence 不完整。
+  - 完成条件：shared mmap 写入按受支持语义在 read、fsync、truncate、fork 和 remap 路径中可见。
+- [x] 加强跨 file read/write、mmap fault、truncation 和 reclaim 的 page cache eviction 与 coherence 测试。
+  - 证据：`kernel/mm/fault.c` 和 `kernel/fs/page_cache.c` 暴露了当前 page-cache 限制和不支持路径。
+  - 完成条件：page-cache 测试在内存压力下运行，并能捕获 stale data 或 use-after-free 回归。
+- [x] 验证 fork、mprotect、munmap 和 OOM reclaim 下的 huge-page demotion 与 COW 行为。
+  - 证据：`kernel/mm/vm.c` 实现 huge-page demotion 和 COW clone 路径；锁模型要求谨慎处理 TLB/refcount 顺序。
+  - 完成条件：回归测试覆盖混合 huge/small 映射、write fault 和对 TLB flush 敏感的场景。
+- [x] 让 OOM reclaim 策略可观察、可测试。
+  - 证据：`kernel/include/mm/vm.h` 说明 reclaim 不得释放仍可从 task MM、page cache、VMO 或 Native handle 访问的 frame。
+  - 完成条件：OOM 测试证明 safe kill/reclaim 行为，而不是只记录分配失败日志。
 
-## P1: I/O Progress and Networking
+## P1：I/O 进展与网络
 
-- [ ] Replace scheduler/idle polling progress with event-driven wakeups where block and network devices can signal completion.
-  - Evidence: `docs/external-dependencies.md` describes polling-based lwIP progress; `kernel/drivers/block/virtio_blk.c` notes a future interrupt wake path.
-  - Design: `docs/driver-lock-order.md` (driver lock contracts), `docs/network-lock-contract.md` (deferred bottom-half rules); user decision: deferred bottom-half / workqueue.
-  - Done when: block and network progress no longer depend on generic hot-path polling for normal operation.
-- [ ] Reduce `g_lwip_lock` contention and document lock-safe entry points for all socket paths.
-  - Evidence: `kernel/net/lwip_stack.c` serializes lwIP core state behind a global lock; `kernel/include/core/lock.h` restricts calls under lwIP locks.
-  - Design: `docs/network-lock-contract.md`.
-  - Done when: socket send/recv/connect/listen/accept tests run concurrently without lock-order warnings or starvation.
-- [ ] Replace QEMU-only network address defaults with board/network configuration plumbing.
-  - Evidence: `docs/external-dependencies.md` says `10.0.2.15`, `10.0.2.2`, and `10.0.2.3` are development defaults only.
-  - Design: `docs/network-config-design.md`; user decision: command-line / runtime config only, no compile-time board defaults.
-  - Done when: real boards or non-QEMU backends configure IP, gateway, and DNS without hard-coded QEMU assumptions.
-- [ ] Expand network smoke coverage beyond wget success.
-  - Evidence: `docs/external-dependencies.md` says TLSe/wget are not proof of a complete modern HTTPS stack.
-  - Design: `docs/network-config-design.md`; planned new gate `smoke-network-suite`.
-  - Done when: DNS, UDP, TCP, ICMP, AF_UNIX, AF_ALG, timeout, partial I/O, and error-path tests are separate gates.
+- [ ] 在块设备和网络设备能够发出完成信号的位置，用事件驱动 wakeup 替换 scheduler/idle 轮询进展。
+  - 证据：`docs/external-dependencies.md` 描述了基于轮询的 lwIP 进展；`kernel/drivers/block/virtio_blk.c` 记录了未来 interrupt wake 路径。
+  - 设计：`docs/driver-lock-order.md`（驱动锁契约）、`docs/network-lock-contract.md`（deferred bottom-half 规则）；用户决策：deferred bottom-half / workqueue。
+  - 完成条件：块设备和网络进展在正常运行中不再依赖通用 hot-path 轮询。
+- [ ] 降低 `g_lwip_lock` 竞争，并为所有 socket 路径记录锁安全入口点。
+  - 证据：`kernel/net/lwip_stack.c` 用全局锁串行化 lwIP 核心状态；`kernel/include/core/lock.h` 限制 lwIP 锁下的调用。
+  - 设计：`docs/network-lock-contract.md`。
+  - 完成条件：socket send/recv/connect/listen/accept 测试可并发运行，且没有锁顺序告警或饥饿。
+- [ ] 用 board/network 配置管线替换仅适用于 QEMU 的网络地址默认值。
+  - 证据：`docs/external-dependencies.md` 说明 `10.0.2.15`、`10.0.2.2` 和 `10.0.2.3` 只是开发默认值。
+  - 设计：`docs/network-config-design.md`；用户决策：只使用命令行 / 运行时配置，不使用编译期板级默认值。
+  - 完成条件：真实开发板或非 QEMU 后端无需硬编码 QEMU 假设即可配置 IP、gateway 和 DNS。
+- [ ] 将网络 smoke 覆盖扩展到 wget 成功以外。
+  - 证据：`docs/external-dependencies.md` 说明 TLSe/wget 不能证明存在完整现代 HTTPS 栈。
+  - 设计：`docs/network-config-design.md`；计划新增门禁 `smoke-network-suite`。
+  - 完成条件：DNS、UDP、TCP、ICMP、AF_UNIX、AF_ALG、timeout、partial I/O 和 error-path 测试都有独立门禁。
 
-## P1: VFS and Filesystem Semantics
+## P1：VFS 与文件系统语义
 
-- [ ] Tighten path resolution, symlink, permission, mount, and filesystem-specific Linux edge semantics.
-  - Evidence: `kernel/abi/linux/syscall_coverage.md` marks path and metadata as partial and needing cleanup.
-  - Design: `docs/vfs-edge-semantics.md`, `docs/fs-consistency-model.md`; user decision: full Linux `openat2` resolve-flag set.
-  - Done when: openat, renameat2, link/symlink, chmod/chown, statx, mount, umount, and chroot have focused tests (added in `user/cmds/vfs_stress.c`), plus openat2, xattr, and filesystem-specific edge tests.
-- [x] Refactor the large VFS implementation into smaller ownership, path, mount, fd, and syscall-facing units.
-  - Evidence: `kernel/fs/vfs.c` is a large central implementation that carries path resolution, open/close, mount, init, and compatibility behavior.
-  - Done when: each unit has a narrow header contract and subsystem-specific tests.
-- [ ] Remove hard-coded runtime filesystem initialization from generic VFS paths where possible.
-  - Evidence: `kernel/fs/vfs.c` initializes default virtual files and environment-like content during VFS bringup.
-  - Design: `docs/fs-consistency-model.md` (ramfs / rootfs consistency model); user decision: build-time rootfs overlay / initramfs-style userland image construction.
-  - Done when: policy files move to init/userland image construction or a declarative boot filesystem manifest.
-- [ ] Define a clear consistency model for FAT32, ext4, ramfs, devfs, procfs, sysfs, pipe, and anonfd operations.
-  - Evidence: `kernel/fs/` contains multiple filesystem backends with Linux ABI entry points marked partial.
-  - Design: `docs/fs-consistency-model.md`; per-backend unsupported-op errno matrix is out of scope for P1.
-  - Done when: backend capability differences are documented in `docs/fs-consistency-model.md`; a dedicated smoke gate is not required for P1.
+- [ ] 收紧 path resolution、symlink、permission、mount 和文件系统特定的 Linux 边界语义。
+  - 证据：`kernel/abi/linux/syscall_coverage.md` 将 path 和 metadata 标记为 partial，并要求清理。
+  - 设计：`docs/vfs-edge-semantics.md`、`docs/fs-consistency-model.md`；用户决策：完整 Linux `openat2` resolve flag 集合。
+  - 完成条件：openat、renameat2、link/symlink、chmod/chown、statx、mount、umount 和 chroot 都有聚焦测试（新增到 `user/cmds/vfs_stress.c`），同时覆盖 openat2、xattr 和文件系统特定边界测试。
+- [x] 将大型 VFS 实现重构为更小的 ownership、path、mount、fd 和 syscall-facing 单元。
+  - 证据：`kernel/fs/vfs.c` 是承载 path resolution、open/close、mount、init 和兼容行为的大型中心实现。
+  - 完成条件：每个单元都有窄 header 契约和子系统特定测试。
+- [ ] 尽可能从通用 VFS 路径中移除硬编码运行时文件系统初始化。
+  - 证据：`kernel/fs/vfs.c` 在 VFS bringup 期间初始化默认虚拟文件和类似环境的内容。
+  - 设计：`docs/fs-consistency-model.md`（ramfs / rootfs 一致性模型）；用户决策：构建期 rootfs overlay / initramfs 风格用户态镜像构造。
+  - 完成条件：策略文件迁移到 init/userland image 构造，或迁移到声明式启动文件系统 manifest。
+- [ ] 为 FAT32、ext4、ramfs、devfs、procfs、sysfs、pipe 和 anonfd 操作定义清晰的一致性模型。
+  - 证据：`kernel/fs/` 包含多个文件系统后端，且 Linux ABI 入口点标记为 partial。
+  - 设计：`docs/fs-consistency-model.md`；每后端 unsupported-op errno 矩阵不属于 P1 范围。
+  - 完成条件：后端能力差异记录在 `docs/fs-consistency-model.md`；P1 不要求专用 smoke 门禁。
 
-## P1: Native ABI Completion and Maintainability
+## P1：Native ABI 完成度与可维护性
 
-- [x] Split oversized Native phase-2 syscall implementation into subsystem-owned files.
-  - Evidence: `kernel/abi/native/sys_phase2.c` contains broad memory, IPC, security, debug, and system functionality.
-  - Done when: Native syscall files mirror subsystem boundaries and each file owns a narrow syscall range.
-- [x] Complete or explicitly scope down Native debug semantics.
-  - Evidence: `kernel/abi/native/sys_phase2.c` documents debug calls as limited compatibility implementations without full stop/resume/watchpoint behavior.
-  - Done when: debug handle behavior is either fully implemented and tested or documented as intentionally limited in the Native ABI docs.
-- [x] Finish handle transfer, partial-delivery, temporal-rights, and label consistency tests.
-  - Evidence: `kernel/abi/native/handle_table.h` and `kernel/abi/native/handle_table.c` reference partial-delivery and capability consistency gates.
-  - Done when: Native IPC tests cover successful transfer, failed transfer, revoked rights, expired rights, and label denial.
-- [x] Reconcile Native ABI documentation with active userland runtime implementation.
-  - Evidence: `docs/native-abi/00-overview.md` described completed Native ABI work; active userland also relies heavily on Linux ABI musl builds.
-  - Design: `docs/native-abi/00-overview.md`, `docs/native-abi/08-runtime-status.md`, `user/archive/README.md`; user decision: update `liba20c` to versioned ABI structs.
-  - Done when: docs distinguish active Linux-musl userland, `liba20rt`, `liba20c`, archived A20 syscall bridge code, and future Native POSIX shim work; `liba20c` uses versioned ABI structs and the kernel validates `size`/`version`.
+- [x] 将过大的 Native phase-2 syscall 实现拆分为子系统所有的文件。
+  - 证据：`kernel/abi/native/sys_phase2.c` 包含广泛的 memory、IPC、security、debug 和 system 功能。
+  - 完成条件：Native syscall 文件映射子系统边界，每个文件只拥有窄 syscall 范围。
+- [x] 完成 Native debug 语义，或明确缩小其范围。
+  - 证据：`kernel/abi/native/sys_phase2.c` 将 debug 调用记录为有限兼容实现，不具备完整 stop/resume/watchpoint 行为。
+  - 完成条件：debug handle 行为要么完整实现并测试，要么在 Native ABI 文档中记录为有意受限。
+- [x] 完成 handle transfer、partial-delivery、temporal-rights 和 label consistency 测试。
+  - 证据：`kernel/abi/native/handle_table.h` 和 `kernel/abi/native/handle_table.c` 引用了 partial-delivery 与 capability consistency 门禁。
+  - 完成条件：Native IPC 测试覆盖成功 transfer、失败 transfer、被撤销权限、过期权限和 label denial。
+- [x] 让 Native ABI 文档与活跃用户态运行时实现重新对齐。
+  - 证据：`docs/native-abi/00-overview.md` 描述了已完成的 Native ABI 工作；活跃用户态也大量依赖 Linux ABI musl 构建。
+  - 设计：`docs/native-abi/00-overview.md`、`docs/native-abi/08-runtime-status.md`、`user/archive/README.md`；用户决策：将 `liba20c` 更新为使用版本化 ABI 结构体。
+  - 完成条件：文档区分活跃 Linux-musl 用户态、`liba20rt`、`liba20c`、已归档 A20 syscall bridge 代码和未来 Native POSIX shim 工作；`liba20c` 使用版本化 ABI 结构体，内核校验 `size`/`version`。
 
-## P1: Driver and Device Model
+## P1：驱动与设备模型
 
-- [x] Replace fixed-size driver/device/bus registries with dynamically sized or capacity-checked registries that report structured errors.
-  - Evidence: `kernel/drivers/core/driver_core.c` uses bounded static registries for bringup.
-  - Done when: registry exhaustion is tested and does not silently lose devices or drivers.
-- [ ] Add hotplug and remove-path lifecycle tests before treating the driver model as general-purpose.
-  - Evidence: `kernel/drivers/core/driver_core.c` has probe/remove paths but the model is primarily built-in bringup oriented.
-  - Design: `docs/driver-lock-order.md`; user decision: user-facing `/proc/a20/driver_lifecycle` trigger.
-  - Done when: bind, probe failure, remove, re-probe, and resource cleanup have tests.
-- [ ] Move device-specific lock ordering into driver docs next to each private lock.
-  - Evidence: `kernel/include/core/lock.h` requires new locks to fit the global order or document a local order.
-  - Design: `docs/driver-lock-order.md` and updated `kernel/include/core/lock.h` comment (completed in Wave 1); inline `LOCK_ORDER:` comments to be added during implementation.
-  - Done when: virtio-blk, virtio-net, UART, PTY, loop, SDIO, and platform NICs each document their private lock rules.
+- [x] 用动态大小或具备容量检查且能报告结构化错误的 registry 替换固定大小 driver/device/bus registry。
+  - 证据：`kernel/drivers/core/driver_core.c` 为 bringup 使用有界静态 registry。
+  - 完成条件：registry exhaustion 被测试，且不会静默丢失 device 或 driver。
+- [ ] 在把驱动模型视为通用模型前，增加 hotplug 和 remove-path 生命周期测试。
+  - 证据：`kernel/drivers/core/driver_core.c` 有 probe/remove 路径，但模型主要面向内建 bringup。
+  - 设计：`docs/driver-lock-order.md`；用户决策：面向用户的 `/proc/a20/driver_lifecycle` 触发器。
+  - 完成条件：bind、probe failure、remove、re-probe 和资源清理都有测试。
+- [ ] 将设备特定锁顺序移动到驱动文档中，放在每个私有锁旁边。
+  - 证据：`kernel/include/core/lock.h` 要求新锁符合全局顺序，或记录局部顺序。
+  - 设计：`docs/driver-lock-order.md` 和已更新的 `kernel/include/core/lock.h` 注释（Wave 1 已完成）；inline `LOCK_ORDER:` 注释将在实现期间加入。
+  - 完成条件：virtio-blk、virtio-net、UART、PTY、loop、SDIO 和平台 NIC 都记录各自私有锁规则。
 
-## P2: Test Gates and Tooling
+## P2：测试门禁与工具
 
-- [ ] Convert static `rg`-style architecture gates into behavior tests where a behavior can be executed under QEMU.
-  - Evidence: `docs/testing-gates.md` defines repeatable gates, but several current checks validate documentation markers rather than runtime behavior.
-  - Done when: every architecture-debt TODO has either a runtime test, a build matrix test, or a justified static-only check.
-- [ ] Add LTP-style grouped smoke tests for every Linux ABI coverage area before claiming broader compatibility.
-  - Evidence: `kernel/abi/linux/syscall_coverage.md` says each syscall group needs smoke tests before level upgrades.
-  - Done when: coverage table generation includes test target names and last-known status.
-- [ ] Expand Native ABI tests beyond minimal process startup and libc smoke.
-  - Evidence: `docs/testing-gates.md` names `native-minimal`, `native-test`, and `user/tests/test_liba20c.c` as Native coverage; `user/tests/test_native_handle.c` now covers handle dup/transfer and is wired to `make smoke-native-handle`.
-  - Done when: Native handle, VMO/VMAR, channel, event queue, timer, task, debug, and rights tests run in CI-like targets.
-- [ ] Add stress tests for memory pressure, fork/exec churn, fd churn, filesystem churn, network churn, and process reaping.
-  - Evidence: current smoke targets prove basic operation but not long-run stability or race behavior.
-  - Done when: stress targets run with bounded timeouts and capture kernel logs on failure.
+- [ ] 将静态 `rg` 风格架构门禁转换为行为测试，只要该行为能在 QEMU 下执行。
+  - 证据：`docs/testing-gates.md` 定义了可重复门禁，但当前若干检查验证的是文档标记而非运行时行为。
+  - 完成条件：每个架构债务 TODO 都有运行时测试、构建矩阵测试，或有正当理由的静态-only 检查。
+- [ ] 在声明更广兼容性前，为每个 Linux ABI 覆盖区域增加 LTP 风格分组 smoke 测试。
+  - 证据：`kernel/abi/linux/syscall_coverage.md` 说明每个 syscall 组在升级级别前都需要 smoke 测试。
+  - 完成条件：覆盖表生成包含测试目标名称和 last-known status。
+- [ ] 将 Native ABI 测试扩展到最小进程启动和 libc smoke 以外。
+  - 证据：`docs/testing-gates.md` 将 `native-minimal`、`native-test` 和 `user/tests/test_liba20c.c` 列为 Native 覆盖；`user/tests/test_native_handle.c` 现在覆盖 handle dup/transfer，并接入 `make smoke-native-handle`。
+  - 完成条件：Native handle、VMO/VMAR、channel、event queue、timer、task、debug 和 rights 测试在类似 CI 的目标中运行。
+- [ ] 增加 memory pressure、fork/exec churn、fd churn、filesystem churn、network churn 和 process reaping 压力测试。
+  - 证据：当前 smoke 目标证明基本操作，但不能证明长时间稳定性或竞争行为。
+  - 完成条件：stress 目标带有有界 timeout，并在失败时捕获内核日志。
 
-## P2: Repository Hygiene and Dependency Boundaries
+## P2：仓库卫生与依赖边界
 
-- [x] Remove or quarantine patch-artifact files from active source directories.
-  - Evidence: files such as `kernel/proc/fork.c.orig`, `kernel/proc/fork.c.rej`, and `kernel/abi/linux/sys_futex.c.orig` appear in active trees.
-  - Done when: active source directories contain only build inputs, documentation, or intentionally tracked fixtures.
-- [ ] Keep vendored code out of first-party quality claims and tests unless the test is explicitly an integration test.
-  - Evidence: `docs/external-dependencies.md` separates lwIP, musl, sbase, mksh, TLSe, and wget roles from A20 integration work.
-  - Done when: TODOs and status docs consistently credit A20 for integration, not upstream TCP/IP, libc, shell, or coreutils implementations.
-- [ ] Add an external dependency upgrade checklist target that runs the relevant smoke groups automatically.
-  - Evidence: `docs/external-dependencies.md` requires Linux syscall smoke, shell smoke, and coreutils smoke after changing imported userland.
-  - Done when: changing musl, sbase, mksh, lwIP, TLSe, or wget has a documented command sequence and expected artifacts.
-- [ ] Document which archived userland code is historical reference and which is expected to be revived.
-  - Evidence: `user/archive/` contains A20 syscall bridges, pthread/mutex code, tests, and older coreutils with TODOs and ENOSYS stubs.
-  - Done when: archived paths are excluded from active status claims or moved back with owners and tests.
+- [x] 从活跃源码目录中移除或隔离 patch artifact 文件。
+  - 证据：`kernel/proc/fork.c.orig`、`kernel/proc/fork.c.rej` 和 `kernel/abi/linux/sys_futex.c.orig` 等文件出现在活跃树中。
+  - 完成条件：活跃源码目录只包含构建输入、文档或有意跟踪的 fixture。
+- [ ] 除非测试明确是集成测试，否则不要把 vendored code 纳入第一方质量声明和测试。
+  - 证据：`docs/external-dependencies.md` 将 lwIP、musl、sbase、mksh、TLSe 和 wget 的角色与 A20 集成工作区分开。
+  - 完成条件：TODO 和状态文档一致地把 A20 的工作归功于集成，而不是上游 TCP/IP、libc、shell 或 coreutils 实现。
+- [ ] 增加外部依赖升级 checklist 目标，自动运行相关 smoke 组。
+  - 证据：`docs/external-dependencies.md` 要求修改导入用户态后运行 Linux syscall smoke、shell smoke 和 coreutils smoke。
+  - 完成条件：修改 musl、sbase、mksh、lwIP、TLSe 或 wget 时，有记录在案的命令序列和预期 artifact。
+- [ ] 记录哪些归档用户态代码只是历史参考，哪些预计会恢复。
+  - 证据：`user/archive/` 包含 A20 syscall bridge、pthread/mutex 代码、测试，以及带 TODO 和 ENOSYS stub 的旧 coreutils。
+  - 完成条件：归档路径从活跃状态声明中排除，或带 owner 和测试移回活跃树。
 
-## Verification Environment Notes
+## 验证环境说明
 
-- `aarch64-linux-gnu-gcc` is not installed in this environment, so `check-aarch64-bringup`, `check-aarch64-user`, and `smoke-aarch64` cannot run here.
-- `qemu-system-x86_64` is not installed, so `smoke-x86_64` cannot run here, but the x86_64 kernel build (`ARCH=x86_64 ABI=both BRINGUP=1 kernel-only`) succeeds.
-- All other static check gates pass: `check-abi-boundary`, `check-mm-lock-model`, `check-vfs-abstraction`, `check-driver-core-model`, `check-io-progress-model`, `check-external-dependency-boundary`, `check-doc-test-gates`, `check-final-definition`, `check-concurrency-foundation`, `check-abi-smoke-gate`, `check-doc-drift`.
-- Smoke tests that run successfully on this host (riscv64/loongarch64 bringups timeout by design in bringup mode): `smoke-riscv64`, `smoke-loongarch64`, `smoke-abi-linux`, `smoke-proc-a20`, `smoke-vfs-stress`, `smoke-mm-stress`, `smoke-proc-stress`, `smoke-sched-stress`, `smoke-futex-stress`, `smoke-native-handle`.
-- Running multiple smoke targets concurrently (e.g. `make -j16 smoke-mm-stress smoke-sched-stress`) races on `user/build/` and is not reliable; run them serially for deterministic results.
+- 本环境未安装 `aarch64-linux-gnu-gcc`，因此无法在这里运行 `check-aarch64-bringup`、`check-aarch64-user` 和 `smoke-aarch64`。
+- 本环境未安装 `qemu-system-x86_64`，因此无法运行 `smoke-x86_64`，但 x86_64 内核构建（`ARCH=x86_64 ABI=both BRINGUP=1 kernel-only`）可以成功。
+- 所有其他静态检查门禁均通过：`check-abi-boundary`、`check-mm-lock-model`、`check-vfs-abstraction`、`check-driver-core-model`、`check-io-progress-model`、`check-external-dependency-boundary`、`check-doc-test-gates`、`check-final-definition`、`check-concurrency-foundation`、`check-abi-smoke-gate`、`check-doc-drift`。
+- 在本 host 上成功运行的 smoke 测试（riscv64/loongarch64 bringup 在 bringup 模式下按设计 timeout）：`smoke-riscv64`、`smoke-loongarch64`、`smoke-abi-linux`、`smoke-proc-a20`、`smoke-vfs-stress`、`smoke-mm-stress`、`smoke-proc-stress`、`smoke-sched-stress`、`smoke-futex-stress`、`smoke-native-handle`。
+- 并发运行多个 smoke 目标（例如 `make -j16 smoke-mm-stress smoke-sched-stress`）会竞争 `user/build/`，结果不可靠；为获得确定性结果，应串行运行。

@@ -1,243 +1,177 @@
-# Network Lock Contract
+# 网络锁契约
 
-This document defines the locking rules for A20OS kernel network paths. It
-applies to the socket layer in `kernel/net/`, the lwIP integration in
-`kernel/net/lwip_stack.c`, and any deferred bottom-half or workqueue that
-touches network state.
+本文档定义 A20OS 内核网络路径的锁规则。它适用于 `kernel/net/` 中的 socket 层、`kernel/net/lwip_stack.c` 中的 lwIP 集成，以及任何会触碰网络状态的 deferred bottom-half 或 workqueue。
 
-## Scope and Goals
+## 范围与目标
 
-A20OS runs lwIP in `NO_SYS=1` mode. A single global spinlock, `g_lwip_lock`,
-serializes all lwIP core state. The socket layer adds a second spinlock,
-`g_net_lock`, to protect the per-socket message queues, waiters, and registry.
+A20OS 以 `NO_SYS=1` 模式运行 lwIP。一个全局 spinlock `g_lwip_lock` 串行化所有 lwIP 核心状态。socket 层额外使用 `g_net_lock` 保护每个 socket 的消息队列、waiter 和 registry。
 
-The goals of this contract are:
+本契约目标：
 
-- Prevent deadlocks between socket system calls, lwIP callbacks, and driver paths.
-- Keep interrupt and scheduler latency low by forbidding blocking operations
-  under `g_lwip_lock`.
-- Make it safe to run socket send/recv/connect/listen/accept tests concurrently.
-- Document how deferred bottom-halves interact with both locks.
+- 防止 socket 系统调用、lwIP callback 和驱动路径之间发生死锁。
+- 禁止在 `g_lwip_lock` 下执行阻塞操作，保持中断和调度延迟较低。
+- 让 socket send/recv/connect/listen/accept 测试可以安全并发运行。
+- 记录 deferred bottom-half 如何与两个锁交互。
 
-## Locks
+## 锁
 
 ### `g_lwip_lock`
 
-- Defined in `kernel/net/lwip_stack.c` as a `spinlock_t`.
-- Protects all lwIP core state: PCB lists, pbufs, timeout lists, netif state,
-  ARP/DNS/DHCP state, and lwIP statistics.
-- Acquired through `a20_lwip_lock()` and released through `a20_lwip_unlock()`.
-- `a20_lwip_lock()` disables local interrupts and acquires the spinlock;
-  `a20_lwip_unlock()` restores the previous interrupt state.
-- Every raw lwIP API call must run while this lock is held.
+- 在 `kernel/net/lwip_stack.c` 中定义为 `spinlock_t`。
+- 保护全部 lwIP 核心状态：PCB 列表、pbuf、timeout 列表、netif 状态、ARP/DNS/DHCP 状态和 lwIP 统计。
+- 通过 `a20_lwip_lock()` 获取，通过 `a20_lwip_unlock()` 释放。
+- `a20_lwip_lock()` 禁用本地中断并获取 spinlock；`a20_lwip_unlock()` 恢复之前的中断状态。
+- 每个 raw lwIP API 调用都必须在持有该锁时运行。
 
 ### `g_net_lock`
 
-- Declared in `kernel/net/socket_internal.h`.
-- Protects `g_sockets[]`, per-socket fields, message queues, accept queues,
-  ephemeral port allocation, and socket waiters.
-- Must be acquired with `spin_lock_irqsave(&g_net_lock)`.
+- 声明于 `kernel/net/socket_internal.h`。
+- 保护 `g_sockets[]`、每个 socket 的字段、消息队列、accept 队列、临时端口分配和 socket waiter。
+- 必须用 `spin_lock_irqsave(&g_net_lock)` 获取。
 
-### Global Order
+### 全局顺序
 
-The lock order for network paths is:
+网络路径的锁顺序是：
 
 ```text
 g_lwip_lock -> g_net_lock
 ```
 
-`g_lwip_lock` is always the outer lock. A lwIP callback runs under the implicit
-`g_lwip_lock` context and may then acquire `g_net_lock`. No path may hold
-`g_net_lock` and then acquire `g_lwip_lock`.
+`g_lwip_lock` 永远是外层锁。lwIP callback 在隐式持有 `g_lwip_lock` 的上下文中运行，然后可以获取 `g_net_lock`。任何路径都不能先持有 `g_net_lock` 再获取 `g_lwip_lock`。
 
-This order is consistent with `kernel/include/core/lock.h`, which documents
-`g_lwip_lock -> virtio-net nonblocking send/recv paths only`.
+该顺序与 `kernel/include/core/lock.h` 一致；该文件记录了 `g_lwip_lock -> virtio-net nonblocking send/recv paths only`。
 
-## Lock-Safe Socket Entry Points
+## 锁安全的 Socket 入口点
 
-The following sections describe the required locking discipline for each socket
-operation family. Implementation must match these rules.
+以下小节描述每类 socket 操作要求的锁纪律。实现必须匹配这些规则。
 
-### Socket creation and destruction
+### Socket 创建与销毁
 
-`net_inet_socket_init()` and `net_inet_socket_destroy()` must hold
-`g_lwip_lock` for the entire duration. They create or remove lwIP PCBs, set
-callbacks, and configure TCP options. No `g_net_lock` access is needed unless
-the socket is being registered, which happens after the PCB is set up.
+`net_inet_socket_init()` 和 `net_inet_socket_destroy()` 必须在整个执行期间持有 `g_lwip_lock`。它们创建或移除 lwIP PCB、设置 callback 并配置 TCP 选项。除非正在注册 socket，否则不需要访问 `g_net_lock`；socket 注册发生在 PCB 设置完成之后。
 
 ### Bind
 
-`net_inet_bind_pcb()` parses the user address without holding any lock, then
-acquires `g_lwip_lock` only for the `udp_bind()`, `raw_bind()`, or
-`tcp_bind()` call. The socket registry does not change during bind.
+`net_inet_bind_pcb()` 在不持有任何锁的情况下解析用户地址，然后只在调用 `udp_bind()`、`raw_bind()` 或 `tcp_bind()` 时获取 `g_lwip_lock`。bind 期间 socket registry 不发生变化。
 
 ### Connect
 
-Stream connect has three phases:
+Stream connect 分为三个阶段：
 
-1. Local target resolution. If the destination is a local address, the path
-   holds `g_net_lock` while searching the listener table and building the
-   paired socket. No `g_lwip_lock` is held.
-2. Remote TCP connect. After resolving the address, the path acquires
-   `g_lwip_lock`, calls `tcp_connect()` with the connected callback, and
-   releases `g_lwip_lock`.
-3. Blocking wait. The caller drops all locks and blocks on `g_net_lock` using
-   `net_block_on_socket_locked()`. The connected callback wakes the waiter
-   through `g_net_lock`.
+1. 本地目标解析。如果目的地址是本地地址，该路径在搜索 listener 表并构造配对 socket 时持有 `g_net_lock`。此时不持有 `g_lwip_lock`。
+2. 远端 TCP connect。地址解析后，路径获取 `g_lwip_lock`，带 connected callback 调用 `tcp_connect()`，然后释放 `g_lwip_lock`。
+3. 阻塞等待。调用者释放所有锁，并通过 `net_block_on_socket_locked()` 在 `g_net_lock` 上阻塞。connected callback 通过 `g_net_lock` 唤醒 waiter。
 
-UDP and RAW connect follow the same pattern as bind: parse outside the lock,
-then acquire `g_lwip_lock` only for `udp_connect()` or `raw_connect()`.
+UDP 和 RAW connect 遵循与 bind 相同的模式：在锁外解析，然后只在调用 `udp_connect()` 或 `raw_connect()` 时获取 `g_lwip_lock`。
 
-### Listen and accept
+### Listen 与 accept
 
-Listen sets up a TCP PCB for listening. The listen call must hold
-`g_lwip_lock` for the `tcp_listen()` transition and for installing the accept
-callback.
+Listen 将 TCP PCB 设置为监听状态。listen 调用必须在 `tcp_listen()` 状态转换和安装 accept callback 时持有 `g_lwip_lock`。
 
-Accept is a `g_net_lock` only operation. It pops a pre-created child socket
-from the listener accept queue. If a child is returned, the caller later calls
-`net_inet_accept_child_ready()`, which acquires `g_lwip_lock` to call
-`tcp_backlog_accepted()`.
+Accept 只使用 `g_net_lock`。它从 listener accept 队列中弹出预创建的 child socket。如果返回了 child，调用者随后调用 `net_inet_accept_child_ready()`，该函数获取 `g_lwip_lock` 并调用 `tcp_backlog_accepted()`。
 
 ### Send
 
-The send path has different behavior for local sockets and remote sockets.
+send 路径对本地 socket 和远端 socket 行为不同。
 
-For local UDP loopback or connected local sockets, the path holds `g_net_lock`
-while enqueueing data into the destination socket. If the destination queue is
-full and the call is blocking, it drops `g_net_lock`, blocks, and retries.
+对本地 UDP loopback 或已连接本地 socket，路径在将数据入队到目标 socket 时持有 `g_net_lock`。如果目标队列已满且调用是阻塞的，它会释放 `g_net_lock`、阻塞并重试。
 
-For remote UDP, RAW, or TCP sends, the path must:
+对远端 UDP、RAW 或 TCP send，路径必须：
 
-1. Ensure the socket is bound while holding `g_net_lock` if an ephemeral bind
-   is needed.
-2. Acquire `g_lwip_lock`.
-3. Allocate a pbuf, copy data, call `udp_sendto()`/`udp_send()`/`tcp_write()`
-   plus `tcp_output()`, and release `g_lwip_lock`.
+1. 如果需要临时 bind，在持有 `g_net_lock` 时确保 socket 已绑定。
+2. 获取 `g_lwip_lock`。
+3. 分配 pbuf、复制数据、调用 `udp_sendto()`/`udp_send()`/`tcp_write()` 加 `tcp_output()`，然后释放 `g_lwip_lock`。
 
-`net_inet_send_tcp()` polls lwIP progress without holding any lock between
-iterations, then acquires `g_lwip_lock` only for `tcp_sndbuf()`,
-`tcp_write()`, and `tcp_output()`.
+`net_inet_send_tcp()` 在每轮之间不持有任何锁地轮询 lwIP 进展，然后只在调用 `tcp_sndbuf()`、`tcp_write()` 和 `tcp_output()` 时获取 `g_lwip_lock`。
 
 ### Recv
 
-Recv is a `g_net_lock` only operation. It dequeues messages from the socket
-receive queue. If the queue is empty and the call is blocking, it drops the
-lock, blocks on `net_block_on_socket_locked()`, and retries.
+Recv 只使用 `g_net_lock`。它从 socket 接收队列中出队消息。如果队列为空且调用是阻塞的，它释放锁，通过 `net_block_on_socket_locked()` 阻塞，然后重试。
 
-When recv drains TCP data, the caller later calls `net_tcp_recved()`, which
-acquires `g_lwip_lock` to update the TCP window.
+当 recv 消耗 TCP 数据后，调用者随后调用 `net_tcp_recved()`，该函数获取 `g_lwip_lock` 来更新 TCP window。
 
-## lwIP Callback Rules
+## lwIP Callback 规则
 
-lwIP callbacks run with `g_lwip_lock` already held by lwIP. The callback must
-not:
+lwIP callback 运行时，lwIP 已经持有 `g_lwip_lock`。callback 不得：
 
-- Block or sleep.
-- Call `kmalloc()` or `kfree()`.
-- Call into VFS, scheduler, or any path that may acquire another spinlock
-  unless that path is explicitly documented as nonblocking and lock-order safe.
-- Acquire `g_lwip_lock` recursively.
+- 阻塞或睡眠。
+- 调用 `kmalloc()` 或 `kfree()`。
+- 调入 VFS、scheduler，或任何可能获取其他 spinlock 的路径，除非该路径明确记录为非阻塞且锁顺序安全。
+- 递归获取 `g_lwip_lock`。
 
-The current callbacks in `kernel/net/socket_inet.c` violate the `kmalloc`
-rule. They allocate receive buffers while holding `g_lwip_lock`. The cleanup
-plan is described in the Deferred Bottom-Half section.
+`kernel/net/socket_inet.c` 中当前 callback 违反了 `kmalloc` 规则：它们在持有 `g_lwip_lock` 时分配接收缓冲区。清理计划见 Deferred Bottom-Half 小节。
 
-### Allowed callback work
+### 允许的 callback 工作
 
-Callbacks may perform only lightweight, bounded work:
+callback 只能执行轻量、有界工作：
 
-- Copy a small amount of data out of a pbuf into a preallocated per-PCB buffer.
-- Update a small number of socket state flags.
-- Wake a waiter through `g_net_lock` and `proc_make_ready()`.
-- Free the incoming pbuf.
+- 从 pbuf 复制少量数据到预分配的 per-PCB staging buffer。
+- 更新少量 socket 状态标志。
+- 通过 `g_net_lock` 和 `proc_make_ready()` 唤醒 waiter。
+- 释放传入 pbuf。
 
-All heavy work, including memory allocation, queue insertion, and large data
-copies, must be deferred to a bottom-half.
+所有重工作，包括内存分配、队列插入和大块数据复制，都必须推迟到底半部。
 
-## Deferred Bottom-Half Design
+## Deferred Bottom-Half 设计
 
-The P1 I/O wakeup decision is to use a deferred bottom-half / workqueue for
-network completion handling. This section defines how that bottom-half must
-interact with `g_lwip_lock` and `g_net_lock`.
+P1 I/O wakeup 决策是为网络完成处理使用 deferred bottom-half / workqueue。本节定义 bottom-half 必须如何与 `g_lwip_lock` 和 `g_net_lock` 交互。
 
-### Bottom-half responsibilities
+### Bottom-half 职责
 
-The network bottom-half performs the work that is currently done directly
-inside lwIP callbacks:
+网络 bottom-half 执行目前直接在 lwIP callback 中完成的工作：
 
-- Allocating `net_msg_t` entries and copying payload data.
-- Enqueuing received messages into the socket receive queue.
-- Updating socket flags such as `closed`, `connected`, and `tcp_connecting`.
-- Waking blocked waiters through `g_net_lock`.
+- 分配 `net_msg_t` 项并复制 payload 数据。
+- 将接收消息入队到 socket 接收队列。
+- 更新 `closed`、`connected`、`tcp_connecting` 等 socket 标志。
+- 通过 `g_net_lock` 唤醒被阻塞的 waiter。
 
-### Top-half / bottom-half split
+### Top-half / bottom-half 拆分
 
-The lwIP callback becomes a minimal top-half:
+lwIP callback 变成最小 top-half：
 
-1. Inspect the pbuf and determine the target socket.
-2. If a preallocated per-PCB staging buffer is available, copy the pbuf into it.
-3. Record the event type and any small metadata in a lockless per-PCB ring or
-   atomic flag.
-4. Schedule the bottom-half.
-5. Free the pbuf and return.
+1. 检查 pbuf 并确定目标 socket。
+2. 如果有可用的预分配 per-PCB staging buffer，将 pbuf 复制进去。
+3. 在无锁 per-PCB ring 或 atomic flag 中记录事件类型和少量元数据。
+4. 调度 bottom-half。
+5. 释放 pbuf 并返回。
 
-The bottom-half runs later from a workqueue context:
+bottom-half 稍后在 workqueue 上下文中运行：
 
-1. Acquire `g_net_lock`.
-2. Process all pending events for the socket.
-3. Allocate `net_msg_t` entries and copy payload data.
-4. Wake waiters.
-5. Release `g_net_lock`.
+1. 获取 `g_net_lock`。
+2. 处理该 socket 的所有 pending event。
+3. 分配 `net_msg_t` 项并复制 payload 数据。
+4. 唤醒 waiter。
+5. 释放 `g_net_lock`。
 
-### Lock interaction
+### 锁交互
 
-The bottom-half must never hold `g_lwip_lock`. It runs with only `g_net_lock`
-held. This preserves the global order because the top-half runs under
-`g_lwip_lock` and does not acquire `g_net_lock`, while the bottom-half runs
-under `g_net_lock` and does not acquire `g_lwip_lock`.
+bottom-half 绝不能持有 `g_lwip_lock`。它只在持有 `g_net_lock` 时运行。这样保持了全局顺序：top-half 在 `g_lwip_lock` 下运行且不获取 `g_net_lock`，bottom-half 在 `g_net_lock` 下运行且不获取 `g_lwip_lock`。
 
-If a bottom-half needs to call lwIP, for example to update a TCP window or
-to close a PCB, it must drop `g_net_lock`, acquire `g_lwip_lock`, perform the
-lwIP call, release `g_lwip_lock`, and reacquire `g_net_lock`. It must not hold
-both locks at the same time.
+如果 bottom-half 需要调用 lwIP，例如更新 TCP window 或关闭 PCB，它必须释放 `g_net_lock`，获取 `g_lwip_lock`，执行 lwIP 调用，释放 `g_lwip_lock`，再重新获取 `g_net_lock`。它不能同时持有两个锁。
 
-### Ordering between top-half and bottom-half
+### top-half 与 bottom-half 之间的顺序
 
-A per-PCB sequence counter or ring buffer guarantees that bottom-half
-processing sees events in the order the top-half enqueued them. The top-half
-may run in interrupt context, so the ring must be interrupt-safe on the
-producer side. The consumer side runs only in workqueue context.
+per-PCB sequence counter 或 ring buffer 保证 bottom-half 按 top-half 入队顺序看到事件。top-half 可能在中断上下文中运行，因此 ring 的生产者侧必须是中断安全的。消费者侧只在 workqueue 上下文中运行。
 
-## kmalloc Rules Under lwIP Locks
+## lwIP 锁下的 kmalloc 规则
 
-`kernel/include/core/lock.h` forbids memory allocation while holding a device
-or lwIP lock unless the callee is documented nonblocking. The current network
-code allocates memory inside lwIP callbacks, which breaks this rule.
+`kernel/include/core/lock.h` 禁止在持有 device 或 lwIP 锁时执行内存分配，除非 callee 被记录为非阻塞。当前网络代码在 lwIP callback 内部分配内存，违反该规则。
 
-The corrected rules are:
+修正后的规则：
 
-- Do not call `kmalloc()`, `kfree()`, `net_msg_alloc()`, or any slab allocator
-  function while holding `g_lwip_lock`.
-- Preallocate per-PCB staging buffers at socket creation time so the top-half
-  can copy pbuf data without allocating.
-- Move all `net_msg_t` allocation and payload copying to the bottom-half,
-  which runs without `g_lwip_lock`.
-- If a code path must allocate while conceptually inside a lwIP critical
-  section, drop `g_lwip_lock`, allocate, and reacquire it. This is only safe
-  when the local PCB state does not need to stay stable across the drop.
+- 持有 `g_lwip_lock` 时不得调用 `kmalloc()`、`kfree()`、`net_msg_alloc()` 或任何 slab allocator 函数。
+- 在 socket 创建时预分配 per-PCB staging buffer，使 top-half 无需分配即可复制 pbuf 数据。
+- 将所有 `net_msg_t` 分配和 payload 复制移动到底半部；bottom-half 运行时不持有 `g_lwip_lock`。
+- 如果某条代码路径在概念上处于 lwIP 临界区内但必须分配，先释放 `g_lwip_lock`，分配后重新获取。只有当本地 PCB 状态不需要在释放期间保持稳定时，这样做才安全。
 
-## Migration Checklist
+## 迁移检查清单
 
-When updating the network implementation to follow this contract, verify each
-item:
+更新网络实现以符合本契约时，逐项确认：
 
-- [ ] lwIP callbacks no longer call `kmalloc()` or `kfree()`.
-- [ ] lwIP callbacks no longer acquire `g_net_lock`.
-- [ ] lwIP callbacks only perform bounded work and schedule a bottom-half.
-- [ ] Bottom-half runs with `g_net_lock` only and does not hold `g_lwip_lock`.
-- [ ] Socket send/recv/connect/listen/accept paths follow the lock order in
-      this document.
-- [ ] `a20_lwip_poll_locked()` is still safe to call with `g_lwip_lock` held.
-- [ ] Driver paths under `g_lwip_lock` remain nonblocking.
-- [ ] Concurrent socket stress tests pass without lock-order warnings.
+- [ ] lwIP callback 不再调用 `kmalloc()` 或 `kfree()`。
+- [ ] lwIP callback 不再获取 `g_net_lock`。
+- [ ] lwIP callback 只执行有界工作并调度 bottom-half。
+- [ ] bottom-half 只持有 `g_net_lock` 运行，且不持有 `g_lwip_lock`。
+- [ ] socket send/recv/connect/listen/accept 路径遵循本文档的锁顺序。
+- [ ] `a20_lwip_poll_locked()` 在持有 `g_lwip_lock` 时调用仍然安全。
+- [ ] `g_lwip_lock` 下的驱动路径保持非阻塞。
+- [ ] 并发 socket stress 测试通过，且没有锁顺序告警。
