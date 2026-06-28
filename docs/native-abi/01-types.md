@@ -852,7 +852,7 @@ typedef struct a20_net_socketpair_args {
 } a20_net_socketpair_args_t;
 ```
 
-### net_getname flags
+### net_getname 标志
 
 ```c
 #define A20_NET_NAME_LOCAL     0x0000u   /* 获取本地地址（getsockname） */
