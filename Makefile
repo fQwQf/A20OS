@@ -1410,6 +1410,7 @@ eval-check-rv:
 	@log="$(EVAL_LOGS)/serial-rv.txt"; \
 	test -s "$$log" || { echo "[eval][rv] missing log: $$log"; exit 1; }; \
 	grep -q '\[CONTEST\] Done:' "$$log" || { echo "[eval][rv] incomplete: missing [CONTEST] Done"; exit 1; }; \
+	grep -q '#### OS COMP TEST GROUP START ltp-glibc ####' "$$log" || { echo "[eval][rv] missing ltp-glibc group"; exit 1; }; \
 	awk ' \
 		/#### OS COMP TEST GROUP START [A-Za-z0-9-]+ ####/ { start[$$7]++; next } \
 		/#### OS COMP TEST GROUP END/ { end[$$7]++; next } \
@@ -1441,6 +1442,7 @@ eval-check-la:
 	@log="$(EVAL_LOGS)/serial-la.txt"; \
 	test -s "$$log" || { echo "[eval][la] missing log: $$log"; exit 1; }; \
 	grep -q '\[CONTEST\] Done:' "$$log" || { echo "[eval][la] incomplete: missing [CONTEST] Done"; exit 1; }; \
+	grep -q '#### OS COMP TEST GROUP START ltp-glibc ####' "$$log" || { echo "[eval][la] missing ltp-glibc group"; exit 1; }; \
 	awk ' \
 		/#### OS COMP TEST GROUP START [A-Za-z0-9-]+ ####/ { start[$$7]++; next } \
 		/#### OS COMP TEST GROUP END/ { end[$$7]++; next } \

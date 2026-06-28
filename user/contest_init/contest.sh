@@ -224,14 +224,16 @@ run_with_timeout() {
 # ── test group skip list ───────────────────────────────────
 typeset -a SKIP_GROUPS
 SKIP_GROUPS+=(unixbench) # 不计分
-#SKIP_GROUPS+=(lmbench) # 运行时长很长
 SKIP_GROUPS+=(ltp) # LTP 完整组本地跑不通，下面用 bounded subset 单独执行
 
 # 下面是可以跑通但是为了方便测试跳过的
-#SKIP_GROUPS+=(iozone)
+# SKIP_GROUPS+=(iozone)
 # SKIP_GROUPS+=(netperf)
 # SKIP_GROUPS+=(iperf)
 # SKIP_GROUPS+=(busybox)
+# SKIP_GROUPS+=(cyclictest)
+# SKIP_GROUPS+=(lmbench) # 运行时长很长
+
 
 skip_group() {
     typeset g=$1 s
@@ -466,12 +468,20 @@ run_ltp_bounded_subset() {
     typeset arch=$(uname -m)
     typeset dir="/test/$runtime/ltp/testcases/bin"
 
-    if [[ $arch != "riscv64" || $runtime != "glibc" ]]; then
-        print "[CONTEST][SKIP] runtime=$runtime group=ltp current_phase=bounded_rv_glibc_only"
+    if [[ $runtime != "glibc" ]]; then
+        print "[CONTEST][SKIP] runtime=$runtime group=ltp current_phase=bounded_glibc_dual_arch"
         return 0
     fi
 
-    print "[CONTEST][RUN] runtime=$runtime group=ltp mode=bounded_subset case_timeout=60s ftest_timeout=120s futex_timeout=180s futex_ltp_timeout_mul=4"
+    case "$arch" in
+        riscv64|loongarch64) ;;
+        *)
+            print "[CONTEST][SKIP] runtime=$runtime group=ltp arch=$arch current_phase=bounded_glibc_dual_arch"
+            return 0
+            ;;
+    esac
+
+    print "[CONTEST][RUN] runtime=$runtime group=ltp arch=$arch mode=bounded_subset case_timeout=60s ftest_timeout=120s futex_timeout=180s futex_ltp_timeout_mul=4"
     print "#### OS COMP TEST GROUP START ltp-$runtime ####"
 
     if [[ ! -d $dir ]]; then
