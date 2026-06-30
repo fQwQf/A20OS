@@ -317,6 +317,7 @@ static int virtio_blk_submit_req(virtio_blk_inst_t *inst, virtio_blk_req_t *req,
     desc[slot + 2].flags = VIRTQ_DESC_F_WRITE;
     desc[slot + 2].next  = 0;
 
+    avail->flags = 1; // VIRTQ_AVAIL_F_NO_INTERRUPT
     uint16_t avail_slot = avail->idx % VIRTIO_QUEUE_SIZE;
     avail->ring[avail_slot] = slot;
     wmb();

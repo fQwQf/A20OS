@@ -56,7 +56,7 @@ typedef struct {
 extern void __trap_from_user(void);
 extern void __return_to_user(void);
 extern void __trap_from_kernel(void);
-extern void __switch(uint64_t next_kstack);
+extern void __switch(uint64_t next_kstack, void *old_task);
 extern void user_trap_return(void);
 extern void idt_flush(uint64_t idtr_ptr);
 
@@ -140,17 +140,17 @@ static inline void arch_trap_ctx_set_reg(trap_context_t *ctx, int i, uint64_t v)
 #define TASK_CTX_SET_SP(ctx, v)    do { (ctx)->rsp = (uint64_t)(v); } while (0)
 
 static inline uint64_t arch_task_kernel_status(void) {
-    return SSTATUS_SIE;
+    return 0x2; /* IF=0, reserved bit 1=1 */
 }
 
 static inline uint64_t arch_user_initial_status(void) {
-    return SSTATUS_SPIE | SSTATUS_FS_CLEAN;
+    return 0x202; /* IF=1, reserved bit 1=1 */
 }
 
 static inline void arch_trap_ctx_set_kernel_stack(trap_context_t *ctx, uint64_t ksp) {
     ctx->padding[0] = ksp;
     if (ctx->cs == 0)
-        ctx->cs = 0x1B;
+        ctx->cs = 0x2B;
     if (ctx->ss == 0)
         ctx->ss = 0x23;
 }

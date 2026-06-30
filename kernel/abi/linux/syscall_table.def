@@ -250,4 +250,8 @@ LINUX_SYSCALL(delete_module, 0, -ENOSYS)
 LINUX_SYSCALL(finit_module, 0, -ENOSYS)
 LINUX_SYSCALL(userfaultfd, 0, -ENOSYS)
 LINUX_SYSCALL(perf_event_open, 0, -ENOSYS)
+#ifdef CONFIG_X86_64
+LINUX_SYSCALL(arch_prctl, 0, sys_arch_prctl((int)A(0), (unsigned long)A(1)))
+#else
 LINUX_SYSCALL(arch_prctl, 0, -ENOSYS)
+#endif
