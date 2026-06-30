@@ -156,18 +156,29 @@ static int map_segment(mm_struct_t *mm, uint64_t *pgdir,
         }
 
         if (page < va + filesz) {
-            uint64_t copy_off = (page < va) ? (va - page) : 0;
-            uint64_t src_off  = (page < va) ? 0 : (page - va);
-            uint64_t to_copy  = filesz - src_off;
-            if (to_copy > PAGE_SIZE - copy_off)
-                to_copy = PAGE_SIZE - copy_off;
-            if (to_copy > 0) {
+            uint64_t src_off = (page > va) ? (page - va) : 0;
+            if (src_off < filesz) {
+                uint64_t copy_off = 0;
+                uint64_t copy_len = PAGE_SIZE;
+
+                if (page < va) {
+                    copy_off = va - page;
+                    copy_len -= copy_off;
+                }
+
+                if (src_off + copy_len > filesz) {
+                    copy_len = filesz - src_off;
+                }
+
                 if (src->kind == SEG_BUF) {
                     memcpy((char *)frame + copy_off,
-                           (const char *)src->buf.data + src_off, to_copy);
+                           (const char *)src->buf.data + src_off, (size_t)copy_len);
                 } else {
-                    int nr = vfs_pread(src->fd.fd, tmp, (size_t)to_copy,
-                                       (uint64_t)(src->fd.offset + (long)src_off));
+                    char tmp[PAGE_SIZE];
+                    klog(KLOG_ERR, "map_segment: reading fd=%d off=%ld len=%ld\n", src->fd.fd, (long)(src->fd.offset + src_off), (long)copy_len);
+                    vfs_lseek(src->fd.fd, (long)(src->fd.offset + src_off), SEEK_SET);
+                    int nr = vfs_read(src->fd.fd, tmp, (size_t)copy_len);
+                    klog(KLOG_ERR, "map_segment: read nr=%d\n", nr);
                     if (nr < 0) { frame_free(frame); return nr; }
                     memcpy((char *)frame + copy_off, tmp, (size_t)nr);
                 }
@@ -336,8 +347,11 @@ static int elf_load_interp_from_fd(mm_struct_t *mm, uint64_t *pgdir,
     uint64_t load_bias = INTERP_BASE_ADDR + elf_aslr_bias();
     uint64_t base = 0, max_va = 0;
 
+    klog(KLOG_ERR, "elf_load: parsing PT_LOADs\n");
+
     for (int i = 0; i < nph; i++) {
         if (phdrs[i].p_type != PT_LOAD) continue;
+        klog(KLOG_ERR, "elf_load: processing PT_LOAD %d\n", i);
 
         uint64_t seg_va = phdrs[i].p_vaddr + load_bias;
         seg_src_t src = seg_from_fd(fd, (long)phdrs[i].p_offset);
@@ -456,6 +470,7 @@ int elf_load_from_buf(const void *buf, size_t len, elf_load_info_t *info) {
 int elf_load(int fd, const char *path, elf_load_info_t *info) {
     Elf64_Ehdr eh;
     if (vfs_lseek(fd, 0, SEEK_SET) < 0) return -EIO;
+    klog(KLOG_ERR, "elf_load: reading header\n");
     int r = vfs_read(fd, (char *)&eh, sizeof(eh));
     if (r < (int)sizeof(eh)) {
         kinfo("[ELF] read header failed: r=%d need=%zu path='%s'\n",
@@ -475,12 +490,17 @@ int elf_load(int fd, const char *path, elf_load_info_t *info) {
     Elf64_Phdr phdrs[MAX_PHDRS];
     int nph = eh.e_phnum < MAX_PHDRS ? eh.e_phnum : MAX_PHDRS;
     vfs_lseek(fd, (long)eh.e_phoff, SEEK_SET);
+    klog(KLOG_ERR, "elf_load: reading phdrs\n");
     r = vfs_read(fd, (char *)phdrs, nph * sizeof(Elf64_Phdr));
+    klog(KLOG_ERR, "elf_load: read phdrs ret %d\n", r);
     if (r < nph * (int)sizeof(Elf64_Phdr)) return -ENOEXEC;
 
+    klog(KLOG_ERR, "elf_load: calling pt_create\n");
     uint64_t *pgdir = pt_create();
     if (!pgdir) return -ENOMEM;
+    klog(KLOG_ERR, "elf_load: calling pt_map_kernel\n");
     pt_map_kernel(pgdir);
+    klog(KLOG_ERR, "elf_load: pt_map_kernel done\n");
 
     mm_struct_t mm = { .pgdir = pgdir, .mmap_base = MMAP_BASE_ADDR };
 
@@ -491,6 +511,8 @@ int elf_load(int fd, const char *path, elf_load_info_t *info) {
     int has_interp = 0;
     int is_native = 0;
     char interp_path[MAX_PATH_LEN] = {0};
+
+    klog(KLOG_ERR, "elf_load: parsing phdrs\n");
 
     for (int i = 0; i < nph; i++) {
         if (phdrs[i].p_type == PT_A20_START_INFO) {
@@ -523,9 +545,11 @@ int elf_load(int fd, const char *path, elf_load_info_t *info) {
 
         uint64_t seg_va = phdrs[i].p_vaddr + load_bias;
         seg_src_t src = seg_from_fd(fd, (long)phdrs[i].p_offset);
+        klog(KLOG_ERR, "elf_load: calling map_segment %d\n", i);
         r = map_segment(&mm, pgdir, seg_va, phdrs[i].p_memsz,
                         &src, phdrs[i].p_filesz,
                         seg_flags(phdrs[i].p_flags));
+        klog(KLOG_ERR, "elf_load: map_segment %d ret %d\n", i, r);
         if (r < 0) goto fail;
 
         uint64_t seg_start = seg_va & ~(PAGE_SIZE - 1);
