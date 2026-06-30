@@ -498,7 +498,7 @@ void context_switch(task_t *next) {
         ktrace_sched("[SCHED] ctxsw: %d -> %d\n", prev->pid, next->pid);
     if (old)
         arch_set_task_pointer(old);
-    __switch(next->kstack);
+    __switch(next->kstack, old);
 }
 
 void sched(void) {

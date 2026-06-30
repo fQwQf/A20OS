@@ -90,6 +90,9 @@ void kernel_main(void) {
     printf("======================================\n");
     printf("Initializing system...\n");
 
+    if (current_board && current_board->early_init) {
+        current_board->early_init();
+    }
     trap_init();
     printf("[INIT] Trap initialized\n");
     uart_init();
@@ -218,6 +221,15 @@ void init_kthread(void) {
     size_t init_total_vm = 0;
     for (vm_area_t *v = info.mmap; v; v = v->next)
         init_total_vm += (v->end - v->start) / PAGE_SIZE;
+
+    /* Verify entry point is mapped */
+    {
+        extern uint64_t *pt_walk(uint64_t *pgdir, uint64_t va, int alloc);
+        uint64_t *pte = pt_walk(info.pgdir, info.entry, 0);
+        printf("[INIT] entry pte: %s (val=0x%lx)\n",
+               pte ? "found" : "NULL",
+               pte ? (unsigned long)*pte : 0UL);
+    }
 
     ret = proc_alloc_user_image(info.entry, user_sp, info.pgdir, info.mmap,
                                 info.brk, info.stack_top, init_total_vm);

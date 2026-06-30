@@ -33,6 +33,7 @@ static inline int arch_ram_range(size_t idx, paddr_t *base, paddr_t *end) {
 #define GICD_BASE          (0x08000000UL + PAGE_OFFSET)
 #define GICC_BASE          (0x08010000UL + PAGE_OFFSET)
 #define VIRTIO_BASE        (0x0A000000UL + PAGE_OFFSET)
+#define VIRTIO_MMIO_STRIDE 0x200UL
 #define UART0_IRQ          33U
 
 #define CLINT_BASE         0x0UL

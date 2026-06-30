@@ -121,6 +121,36 @@ void trap_handler(trap_context_t *ctx) {
     if (current && current->pgdir)
         current->trap_ctx = ctx;
 
+#if 1
+    task_t *dbg_t = proc_current();
+    if (dbg_t && dbg_t->pid >= 2 && !(scause & CAUSE_INTR_MASK)) {
+        printf("[DEBUG] trap_handler pid=%d scause=0x%lx sepc=0x%lx stval=0x%lx\n", dbg_t->pid, scause, sepc, stval);
+        if (dbg_t->pgdir && (scause == 0xe || scause == 0xd || scause == 0xf || scause == 12 || scause == 13 || scause == 14)) {
+            uint64_t vpn3 = (stval >> 39) & 0x1ff;
+            uint64_t vpn2 = (stval >> 30) & 0x1ff;
+            uint64_t vpn1 = (stval >> 21) & 0x1ff;
+            uint64_t vpn0 = (stval >> 12) & 0x1ff;
+            uint64_t pte3 = dbg_t->pgdir[vpn3];
+            printf("  PML4[%lu] = 0x%lx\n", vpn3, pte3);
+            if (pte3 & PTE_V) {
+                uint64_t *pdpt = (uint64_t *)(arch_pte_addr(pte3) + PAGE_OFFSET);
+                uint64_t pte2 = pdpt[vpn2];
+                printf("  PDPT[%lu] = 0x%lx\n", vpn2, pte2);
+                if (pte2 & PTE_V) {
+                    uint64_t *pd = (uint64_t *)(arch_pte_addr(pte2) + PAGE_OFFSET);
+                    uint64_t pte1 = pd[vpn1];
+                    printf("  PD[%lu] = 0x%lx\n", vpn1, pte1);
+                    if (pte1 & PTE_V) {
+                        uint64_t *pt = (uint64_t *)(arch_pte_addr(pte1) + PAGE_OFFSET);
+                        uint64_t pte0 = pt[vpn0];
+                        printf("  PT[%lu] = 0x%lx\n", vpn0, pte0);
+                    }
+                }
+            }
+        }
+    }
+#endif
+
     if (scause & CAUSE_INTR_MASK) {
         arch_handle_irq(scause & CAUSE_CODE_MASK, 1);
         if (current && current->pid >= 4)
@@ -302,9 +332,9 @@ void kernel_trap_handler(trap_context_t *ctx) {
         } else {
             if (ktrap_diag_count < 5) {
                 ktrap_diag_count++;
-                kdebug("KERNEL TRAP: scause=0x%lx sepc=0x%lx stval=0x%lx code=%lu\n",
+                printf("KERNEL TRAP: scause=0x%lx sepc=0x%lx stval=0x%lx code=%lu\n",
                        scause, sepc, stval, code);
-                kdebug("[KTRAP] pid=%d name=%s ra=0x%lx a0=0x%lx\n",
+                printf("[KTRAP] pid=%d name=%s ra=0x%lx a0=0x%lx\n",
                         cur ? cur->pid : -1, cur ? cur->name : "?",
                         TRAP_CTX_RA(ctx), TRAP_CTX_ARG0(ctx));
             }
