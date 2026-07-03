@@ -1098,12 +1098,20 @@ extra-img: extra-user-apps
 	@echo "Building extra packages image..."
 	@rm -rf $(EXTRA_STAGING_DIR) && mkdir -p $(EXTRA_STAGING_DIR)/bin
 	@set -e; \
+	for f in user/build/*; do \
+		[ -f "$$f" ] || continue; \
+		name=$$(basename "$$f"); \
+		case "$$name" in \
+			.build-id) continue ;; \
+			*.o|*.a|*.so|*.d) continue ;; \
+		esac; \
+		cp "$$f" "$(EXTRA_STAGING_DIR)/bin/$$name"; \
+	done; \
 	for f in user/build/extra/*; do \
 		[ -f "$$f" ] || continue; \
 		name=$$(basename "$$f"); \
 		cp "$$f" "$(EXTRA_STAGING_DIR)/bin/$$name"; \
-	done; \
-	[ -f user/build/fastfetch ] && cp user/build/fastfetch "$(EXTRA_STAGING_DIR)/bin/fastfetch" || true
+	done
 	@set -e; \
 	if [ -d user/build/extra/obj/$(ARCH)/gcc-install ]; then \
 		cp -a user/build/extra/obj/$(ARCH)/gcc-install/libexec "$(EXTRA_STAGING_DIR)/libexec"; \
@@ -1112,9 +1120,9 @@ extra-img: extra-user-apps
 			[ -f "$$t" ] && cp "$$t" "$(EXTRA_STAGING_DIR)/bin/$$(basename $$t)"; \
 		done; \
 		mv "$(EXTRA_STAGING_DIR)/bin/gcc" "$(EXTRA_STAGING_DIR)/bin/gcc-real"; \
-		printf '#!/bin/sh\nexec /usr/bin/gcc-real -fno-lto -fno-use-linker-plugin "$$@"\n' > "$(EXTRA_STAGING_DIR)/bin/gcc"; \
+		printf '#!/bin/sh\nexec /test/bin/gcc-real -fno-lto -fno-use-linker-plugin "$$@"\n' > "$(EXTRA_STAGING_DIR)/bin/gcc"; \
 		mv "$(EXTRA_STAGING_DIR)/bin/cc" "$(EXTRA_STAGING_DIR)/bin/cc-real"; \
-		printf '#!/bin/sh\nexec /usr/bin/cc-real -fno-lto -fno-use-linker-plugin "$$@"\n' > "$(EXTRA_STAGING_DIR)/bin/cc"; \
+		printf '#!/bin/sh\nexec /test/bin/cc-real -fno-lto -fno-use-linker-plugin "$$@"\n' > "$(EXTRA_STAGING_DIR)/bin/cc"; \
 	fi
 	@MCM_LIB=user/external/musl-cross-make/output/riscv64-linux-musl/lib; \
 	if [ -f "$$MCM_LIB/libc.so" ]; then \
