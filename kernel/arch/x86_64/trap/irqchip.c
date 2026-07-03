@@ -9,7 +9,6 @@
 #include "core/progress.h"
 #include "platform.h"
 #include "core/string.h"
-#include "core/stdio.h"
 
 uint64_t __x86_64_trap_cause;
 uint64_t __x86_64_trap_epc;
@@ -89,7 +88,6 @@ static void gdt_init(void) {
     gdt[2] = make_gdt_entry(0, 0xFFFFF, 0x92, 0xC);
     gdt[3] = make_gdt_entry(0, 0xFFFFF, 0xFA, 0xA);
     gdt[4] = make_gdt_entry(0, 0xFFFFF, 0xF2, 0xC);
-    gdt[5] = make_gdt_entry(0, 0xFFFFF, 0xFA, 0xA); // 0x28: User Code 64-bit
 
     gdtr.limit = sizeof(gdt) - 1;
     gdtr.base = (uint64_t)&gdt;
@@ -110,23 +108,15 @@ static void tss_init(void) {
     tss.iomap_base = sizeof(tss);
 
     uint64_t tss_base = (uint64_t)&tss;
-    gdt[6] = make_gdt_entry(tss_base & 0xFFFFFFFF, sizeof(tss) - 1, 0x89, 0);
+    gdt[5] = make_gdt_entry(tss_base & 0xFFFFFFFF, sizeof(tss) - 1, 0x89, 0);
     /* High 32 bits of TSS base (for x86_64) */
-    gdt[7] = (tss_base >> 32) & 0xFFFFFFFF;
+    gdt[6] = (tss_base >> 32) & 0xFFFFFFFF;
 
-    __asm__ __volatile__("ltr %%ax" :: "a"((uint16_t)0x30));
+    __asm__ __volatile__("ltr %%ax" :: "a"((uint16_t)0x28));
 }
 
 void x86_64_set_tss_rsp0(uint64_t rsp0) {
     tss.rsp0 = rsp0;
-}
-
-/* Debug: print trap context fields before iretq (called from C or asm) */
-void x86_64_debug_iret_frame(uint64_t rip, uint64_t cs, uint64_t rflags,
-                               uint64_t rsp_user, uint64_t ss) {
-    printf("[DBG] iretq: rip=0x%lx cs=0x%lx rflags=0x%lx rsp=0x%lx ss=0x%lx\n",
-           (unsigned long)rip, (unsigned long)cs, (unsigned long)rflags,
-           (unsigned long)rsp_user, (unsigned long)ss);
 }
 
 static void idt_init(void) {
