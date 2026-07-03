@@ -112,6 +112,11 @@ $(ZLIB_LIB): musl_check
 	cp $(ZLIB_SRC)/zlib.h $(ZLIB_SRC)/zconf.h $(ZLIB_BUILD)/include/
 	@echo "[EXTRA] zlib -> $@"
 
+# Source-availability guards: skip building a package if its upstream source tree is missing.
+VIM_AVAILABLE := $(if $(wildcard $(VIM_SRC)/main.c),1)
+GIT_AVAILABLE := $(if $(wildcard $(GIT_SRC)/Makefile),1)
+GCC_AVAILABLE := $(if $(wildcard $(GCC_SRC)/configure),1)
+
 # ================================================================
 # vim
 # ================================================================
@@ -124,8 +129,14 @@ $(VIM_BIN): $(STAMP_DIR)/.vim-built
 	@echo "[EXTRA] vim -> $@"
 
 $(STAMP_DIR)/.vim-built: musl_check $(TERMCAP_LIB)
+ifeq ($(VIM_AVAILABLE),)
+	@echo "[EXTRA] vim source not found in $(VIM_SRC); skipping vim"
+	@mkdir -p $(STAMP_DIR)
+	@touch $@
+else
 	@mkdir -p $(VIM_BUILD) $(STAMP_DIR)
 	@echo "[EXTRA] Configuring vim for $(ARCH)..."
+	@rm -f $(VIM_SRC)/auto/config.cache $(VIM_SRC)/auto/config.h
 	cd $(VIM_SRC) && \
 	  vim_cv_tgetent=ok \
 	  ./configure \
@@ -185,6 +196,7 @@ $(STAMP_DIR)/.vim-built: musl_check $(TERMCAP_LIB)
 	  LDFLAGS="$(LDFLAGS) -L$(dir $(TERMCAP_LIB)) $(CRT_START)" \
 	  LIBS="-ltermcap $(LIBC) $(CRT_END)"
 	@touch $@
+endif
 
 # ================================================================
 # git
@@ -198,6 +210,11 @@ $(GIT_BIN): $(STAMP_DIR)/.git-built
 	@echo "[EXTRA] git -> $@"
 
 $(STAMP_DIR)/.git-built: musl_check $(ZLIB_LIB)
+ifeq ($(GIT_AVAILABLE),)
+	@echo "[EXTRA] git source not found in $(GIT_SRC); skipping git"
+	@mkdir -p $(STAMP_DIR)
+	@touch $@
+else
 	@mkdir -p $(GIT_BUILD) $(STAMP_DIR)
 	@echo "[EXTRA] Building git for $(ARCH)..."
 	$(MAKE) -C $(GIT_SRC) \
@@ -224,6 +241,7 @@ $(STAMP_DIR)/.git-built: musl_check $(ZLIB_LIB)
 	  STATIC=YesPlease \
 	  DESTDIR=$(GIT_BUILD)/install
 	@touch $@
+endif
 
 # ================================================================
 # gcc (binutils + GCC canadian-cross)
@@ -245,19 +263,26 @@ $(CC_BIN): $(STAMP_DIR)/.gcc-built
 	@echo "[EXTRA] cc -> $@"
 
 $(STAMP_DIR)/.gcc-built: musl_check
+ifeq ($(GCC_AVAILABLE),)
+	@echo "[EXTRA] GCC source not found in $(GCC_SRC); skipping gcc/cc"
+	@mkdir -p $(STAMP_DIR)
+	@touch $@
+else
 	@mkdir -p $(GCC_BUILD_DIR) $(GCC_INSTALL) $(STAMP_DIR)
 	@echo "[EXTRA] Building GCC toolchain for $(ARCH)..."
 	$(EXTRA_DIR)/build-gcc.sh $(ARCH) $(MUSL_BUILD) $(GCC_BUILD_DIR) $(GCC_INSTALL)
-	@touch $@
+endif
 
 # ================================================================
 # Top-level targets
 # ================================================================
-all: $(BUILD_DIR)/vim $(BUILD_DIR)/git $(BUILD_DIR)/gcc $(BUILD_DIR)/cc
+all: $(if $(VIM_AVAILABLE),$(BUILD_DIR)/vim) \
+     $(if $(GIT_AVAILABLE),$(BUILD_DIR)/git) \
+     $(if $(GCC_AVAILABLE),$(BUILD_DIR)/gcc $(BUILD_DIR)/cc)
 
-vim: $(VIM_BIN)
-git: $(GIT_BIN)
-gcc: $(GCC_BIN) $(CC_BIN)
+vim: $(if $(VIM_AVAILABLE),$(VIM_BIN))
+git: $(if $(GIT_AVAILABLE),$(GIT_BIN))
+gcc: $(if $(GCC_AVAILABLE),$(GCC_BIN) $(CC_BIN))
 
 clean:
 	rm -rf $(USER_DIR)/build/extra

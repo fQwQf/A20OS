@@ -18,10 +18,11 @@ static inline void arch_wfi(void) {
 }
 
 static inline unsigned arch_current_cpu_id(void) {
-    uint32_t eax = 1, ebx, ecx, edx;
-    __asm__ __volatile__("cpuid"
-                         : "+a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx));
-    return (unsigned)(ebx >> 24);
+    /* Read LAPIC ID from MSR 0x802 (x2APIC) or 0x1B (legacy APIC).
+     * On UP this still returns 0 because BSP is ID 0. */
+    uint32_t lapic_id;
+    __asm__ __volatile__("rdmsr" : "=a"(lapic_id) : "c"((uint32_t)0x802) : "rdx");
+    return (unsigned)(lapic_id >> 24);
 }
 
 static inline void arch_local_irq_disable(void) {
@@ -61,12 +62,30 @@ static inline void arch_tlb_flush_page(uint64_t addr) {
     __asm__ __volatile__("invlpg (%0)" :: "r"(addr) : "memory");
 }
 
-
 static inline void arch_set_task_pointer(void *task) {
-    (void)task;
+    /* Use %gs base for task pointer on x86_64 */
+    uint64_t val = (uint64_t)task;
+    uint32_t low = (uint32_t)val;
+    uint32_t high = (uint32_t)(val >> 32);
+    __asm__ __volatile__(
+        "movl %[msr], %%ecx\n\t"
+        "movl %[low], %%eax\n\t"
+        "movl %[high], %%edx\n\t"
+        "wrmsr"
+        :
+        : [msr] "i" (0xC0000101), [low] "r" (low), [high] "r" (high)
+        : "eax", "ecx", "edx"
+    );
 }
 static inline void *arch_get_task_pointer(void) {
-    return NULL;
+    uint32_t low, high;
+    __asm__ __volatile__(
+        "movl %[msr], %%ecx\n\t"
+        "rdmsr"
+        : "=a"(low), "=d"(high)
+        : [msr] "i" (0xC0000101)
+    );
+    return (void *)((uint64_t)high << 32 | low);
 }
 
 static inline uint64_t arch_read_ra(void) {

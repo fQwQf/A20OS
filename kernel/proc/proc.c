@@ -370,9 +370,6 @@ int proc_alloc(void (*entry)(void)) {
     t->pgdir  = kernel_pgdir_shared;
     TASK_CTX_PAGE_TABLE(ctx) = kernel_pgdir_shared ? arch_make_addr_space_token(kernel_pgdir_shared) : 0;
     TASK_CTX_STATUS(ctx) = arch_task_kernel_status();
-#ifdef TASK_CTX_SET_SP
-    TASK_CTX_SET_SP(ctx, stack_top);
-#endif
     t->kstack_base = stack;
     t->kstack = (uint64_t)ctx;
 
@@ -446,20 +443,10 @@ int proc_alloc_user_image(uint64_t entry, uint64_t sp, uint64_t *pgdir,
     ctx->tp   = (uint64_t)t;
     TASK_CTX_PAGE_TABLE(ctx) = pgdir ? arch_make_addr_space_token(pgdir) : 0;
     TASK_CTX_STATUS(ctx) = arch_user_initial_status();
-#ifdef TASK_CTX_SET_SP
-    TASK_CTX_SET_SP(ctx, (uint64_t)trap);
-#endif
     t->kstack = (uint64_t)ctx;
 
     kinfo("[PROC] user task pid=%d entry=0x%lx sp=0x%lx\n", t->pid,
           (unsigned long)entry, (unsigned long)sp);
-    kinfo("[PROC] trap ctx: rip=0x%lx rsp=0x%lx rflags=0x%lx cs=0x%lx ss=0x%lx\n",
-          (unsigned long)trap->rip, (unsigned long)trap->rsp,
-          (unsigned long)trap->rflags, (unsigned long)trap->cs,
-          (unsigned long)trap->ss);
-    kinfo("[PROC] task ctx: ra=0x%lx rsp=0x%lx cr3=0x%lx\n",
-          (unsigned long)ctx->ra, (unsigned long)ctx->rsp,
-          (unsigned long)ctx->cr3);
 
     proc_make_ready(t);
     return t->pid;

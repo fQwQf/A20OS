@@ -65,11 +65,8 @@ void virtio_mmio_enumerate(uintptr_t base, int max_slots, int irq_base) {
     bus_register(&virtio_mmio_bus);
 
     int dev_idx = 0;
-#ifndef VIRTIO_MMIO_STRIDE
-#define VIRTIO_MMIO_STRIDE 0x1000
-#endif
     for (int slot = 0; slot < max_slots; slot++) {
-        uintptr_t slot_base = base + (unsigned long)slot * VIRTIO_MMIO_STRIDE;
+        uintptr_t slot_base = base + (unsigned long)slot * 0x1000;
         uint32_t magic   = readl((const volatile void *)slot_base);
         uint32_t version = readl((const volatile void *)(slot_base + 0x004));
         uint32_t dev_id  = readl((const volatile void *)(slot_base + 0x008));

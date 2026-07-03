@@ -616,7 +616,6 @@ int proc_exec(const char *path, char *const argv[], char *const envp[])
         return -ESRCH;
 
     /* ---- 1. Initialise bprm and copy args from user ONCE ---- */
-    klog(KLOG_ERR, "proc_exec starting for %s\n", path);
     exec_bprm_t bprm;
     memset(&bprm, 0, sizeof(bprm));
 
@@ -629,7 +628,6 @@ int proc_exec(const char *path, char *const argv[], char *const envp[])
     int is_kptr = argv && arch_is_kernel_address(argv);
     int r = exec_copy_args(argv, is_kptr, bprm.args, &bprm.argc,
                            &arg_bytes, MAX_ARG_BYTES);
-    klog(KLOG_ERR, "proc_exec copy_args ret: %d\n", r);
     if (r < 0) {
         kfree(bprm.path);
         return r;
@@ -682,9 +680,7 @@ int proc_exec(const char *path, char *const argv[], char *const envp[])
 
     for (bprm.depth = 0; bprm.depth < EXEC_MAX_DEPTH; bprm.depth++) {
         /* Open and validate the file */
-        klog(KLOG_ERR, "exec_open_and_check calling for %s\n", bprm.path);
         int fd = exec_open_and_check(bprm.path, &exec_st);
-        klog(KLOG_ERR, "exec_open_and_check ret: %d\n", fd);
         if (fd < 0) {
             bprm_free(&bprm);
             return fd;
@@ -693,9 +689,7 @@ int proc_exec(const char *path, char *const argv[], char *const envp[])
         /* Try ELF first */
         elf_load_info_t info;
         memset(&info, 0, sizeof(info));
-        klog(KLOG_ERR, "elf_load calling\n");
         r = elf_load(fd, bprm.path, &info);
-        klog(KLOG_ERR, "elf_load ret: %d\n", r);
 
         if (r == 0) {
             /* ELF loaded successfully — install the new process image */
@@ -709,10 +703,8 @@ int proc_exec(const char *path, char *const argv[], char *const envp[])
                 memset(&exec_st, 0, sizeof(exec_st));
             }
 
-            klog(KLOG_ERR, "exec_install_process calling\n");
             r = exec_install_process(t, &info, &bprm, abs_path,
                                       exec_stat_ok ? &exec_st : NULL);
-            klog(KLOG_ERR, "exec_install_process ret: %d\n", r);
             bprm_free_strings(&bprm);
             kfree(bprm.path);
             return r;

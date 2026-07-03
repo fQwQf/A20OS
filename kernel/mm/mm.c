@@ -88,10 +88,6 @@ void pt_destroy(uint64_t *pgdir) {
     frame_free(pgdir);
 }
 
-#ifndef PTE_DIR
-#define PTE_DIR PTE_V
-#endif
-
 // 遍历页表结构，查找或创建指定虚拟地址对应的 PTE
 uint64_t *pt_walk(uint64_t *pgdir, vaddr_t va, int alloc) {
     uint64_t *table = pgdir;
@@ -106,7 +102,7 @@ uint64_t *pt_walk(uint64_t *pgdir, vaddr_t va, int alloc) {
             if (!alloc) return NULL;
             uint64_t *next = (uint64_t *)frame_alloc();
             if (!next) return NULL;
-            table[vpn] = arch_pte_from_pa(va_to_pa(next)) | PTE_DIR;
+            table[vpn] = arch_pte_from_pa(va_to_pa(next)) | PTE_V;
             table = next;
         }
     }
@@ -253,7 +249,7 @@ int pt_map_huge(uint64_t *pgdir, vaddr_t va, paddr_t pa, uint64_t flags) {
         } else {
             uint64_t *next = (uint64_t *)frame_alloc();
             if (!next) return -ENOMEM;
-            table[idx] = arch_pte_from_pa(va_to_pa(next)) | PTE_DIR;
+            table[idx] = arch_pte_from_pa(va_to_pa(next)) | PTE_V;
             table = next;
         }
     }
