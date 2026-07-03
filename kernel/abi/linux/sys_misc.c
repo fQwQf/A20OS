@@ -112,25 +112,3 @@ int64_t sys_getrandom(void *buf, size_t len, int flags) {
     }
     return (int64_t)len;
 }
-
-#ifdef CONFIG_X86_64
-int64_t sys_arch_prctl(int code, unsigned long addr) {
-    task_t *t = proc_current();
-    if (!t || !t->trap_ctx) return -EPERM;
-
-    switch (code) {
-    case 0x1002: /* ARCH_SET_FS */
-        t->trap_ctx->padding[1] = addr;
-        return 0;
-    case 0x1003: /* ARCH_GET_FS */
-        if (copy_to_user((void*)addr, &t->trap_ctx->padding[1], sizeof(uint64_t)) < 0)
-            return -EFAULT;
-        return 0;
-    case 0x1001: /* ARCH_SET_GS */
-    case 0x1004: /* ARCH_GET_GS */
-        return -EINVAL; /* Not currently supported */
-    default:
-        return -EINVAL;
-    }
-}
-#endif

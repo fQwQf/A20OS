@@ -78,7 +78,7 @@ typedef struct {
 extern void __trap_from_user(void);
 extern void __return_to_user(void);
 extern void __trap_from_kernel(void);
-extern void __switch(uint64_t next_kstack, void *old_task);
+extern void __switch(uint64_t next_kstack);
 extern void user_trap_return(void);
 extern void aarch64_vector_table(void);
 

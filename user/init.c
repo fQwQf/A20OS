@@ -92,7 +92,7 @@ int main(void)
 
     char path_val[512] = "/bin";
     static const char *path_dirs[] = {
-        "/usr/bin", "/test", "/test/glibc", "/test/musl",
+        "/usr/bin", "/test", "/test/bin", "/test/glibc", "/test/musl",
 #if defined(__loongarch64)
         "/testla/glibc", "/testla/musl", "/testrv/glibc", "/testrv/musl",
 #else
@@ -105,7 +105,7 @@ int main(void)
 
     char ld_val[256] = "";
     static const char *ld_dirs[] = {
-        "/test/glibc/lib",
+        "/test/glibc/lib", "/test/lib",
 #if defined(__loongarch64)
         "/testla/glibc/lib", "/testrv/glibc/lib",
 #else

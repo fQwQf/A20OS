@@ -4,7 +4,6 @@
 
 __switch:
     /* %rdi = pointer to next task's saved task_context_t */
-    /* %rsi = pointer to old task (task_t *), or NULL */
 
     subq  $128, %rsp
 
@@ -19,6 +18,13 @@ __switch:
     /* Save return address (rip) from stack */
     movq  128(%rsp), %rax
     movq  %rax, 0(%rsp)
+
+    /* Save task pointer (tp) via gsbase */
+    movl  $0xC0000101, %ecx
+    rdmsr
+    shlq  $32, %rdx
+    orq   %rdx, %rax
+    movq  %rax, 8(%rsp)
 
     /* Save caller rsp as it would be after a normal ret. */
     movq  %rsp, %rax
@@ -35,10 +41,8 @@ __switch:
     movq  %rax, 80(%rsp)
 
     /* Save current context pointer into current task's kstack field */
-    testq %rsi, %rsi
-    jz    1f
-    movq  %rsp, (%rsi)
-1:
+    movq  8(%rsp), %rax       /* tp */
+    movq  %rsp, (%rax)
 
     /* Restore next task's context */
     movq  0(%rdi), %r11       /* ra  -> preserve in callee-saved r11 */
@@ -53,12 +57,21 @@ __switch:
     movq  72(%rdi), %rdx      /* rflags */
     movq  80(%rdi), %rsi      /* cr3 */
 
+    /* Set tp via gsbase */
+    movq  %rcx, %rax
+    movl  %eax, %edi
+    shrq  $32, %rax
+    movl  %eax, %edx
+    movl  %edi, %eax
+    movl  $0xC0000101, %ecx
+    wrmsr
+
     /* Check if cr3 changed */
     movq  %cr3, %r9
     cmpq  %r9, %rsi
-    je    2f
+    je    1f
     movq  %rsi, %cr3
-2:
+1:
 
     /* Restore rflags */
     pushq %rdx

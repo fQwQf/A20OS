@@ -84,10 +84,10 @@ _start:
     movl  $(boot_pgdir - PAGE_OFFSET), %eax
     movl  %eax, %cr3
 
-    /* Enable long mode, NX, and SCE */
+    /* Enable long mode */
     movl  $0xC0000080, %ecx
     rdmsr
-    orl   $0x901, %eax
+    orl   $0x100, %eax
     wrmsr
 
     /* Load GDT */

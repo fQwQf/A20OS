@@ -554,13 +554,8 @@ int bcache_read_bytes(bcache_t *bc, uint64_t byte_off, void *buf, size_t len) {
         size_t   chunk  = PCACHE_PAGE_SIZE - off;
         if (chunk > len) chunk = len;
 
-        klog(KLOG_ERR, "bcache_read_bytes: pcache_get page_no=%lu\n", (unsigned long)page_no);
         pcache_entry_t *e = pcache_get(bc, page_no, 0);
-        if (!e) {
-            klog(KLOG_ERR, "bcache_read_bytes: pcache_get failed\n");
-            return -1;
-        }
-        klog(KLOG_ERR, "bcache_read_bytes: memcpy chunk=%ld\n", (long)chunk);
+        if (!e) return -1;
         memcpy(dst, e->data + off, chunk);
         pcache_release(e);
 

@@ -901,23 +901,16 @@ static int fat32_fread(vfile_t *vf, char *buf, size_t count) {
         if (chunk > avail) chunk = avail;
 
         uint64_t base = cluster_byte_offset(sb, cluster) + off;
-        klog(KLOG_ERR, "fat32_fread: reading chunk=%ld base=%lx done=%ld count=%ld\n", (long)chunk, (unsigned long)base, (long)done, (long)count);
-        if (bcache_read_bytes(sb->bc, base, dst + done, chunk) < 0) {
-            klog(KLOG_ERR, "fat32_fread: bcache_read_bytes failed\n");
+        if (bcache_read_bytes(sb->bc, base, dst + done, chunk) < 0)
             break;
-        }
-        klog(KLOG_ERR, "fat32_fread: bcache_read_bytes ok\n");
 
         done += chunk;
         off += chunk;
         if (off == sb->bytes_per_cluster) {
             off = 0;
             cluster_index++;
-            if (done < count) {
-                klog(KLOG_ERR, "fat32_fread: fat_read for next cluster %u\n", cluster);
+            if (done < count)
                 cluster = fat_read(sb, cluster);
-                klog(KLOG_ERR, "fat32_fread: fat_read returned %u\n", cluster);
-            }
         }
     }
 

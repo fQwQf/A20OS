@@ -66,11 +66,6 @@ isr_common:
     movq  216(%rsp), %rax
     movq  %rax, 144(%rsp)       /* ctx->cs */
 
-    testq $3, %rax
-    jz    1f
-    swapgs
-1:
-
     movq  240(%rsp), %rax
     movq  %rax, 152(%rsp)       /* ctx->ss */
 
@@ -110,23 +105,6 @@ isr_common:
 
     /* Save global trap variables */
     movq  192(%rsp), %rax       /* vec */
-    cmpq  $14, %rax             /* Is it #PF? */
-    jne   3f
-    /* It's a #PF. Check error code at 200(%rsp) */
-    movq  200(%rsp), %rcx       /* error_code */
-    testq $16, %rcx             /* bit 4: I/D (instruction fetch) */
-    jnz   4f                    /* if set, CAUSE_INSN_PAGE_FAULT (12) */
-    testq $2, %rcx              /* bit 1: W/R (write) */
-    jnz   5f                    /* if set, CAUSE_STORE_PAGE_FAULT (14) */
-    movq  $13, %rax             /* else, CAUSE_LOAD_PAGE_FAULT (13) */
-    jmp   2f
-4:
-    movq  $12, %rax
-    jmp   2f
-5:
-    movq  $14, %rax
-    jmp   2f
-3:
     cmpq  $0x80, %rax
     je    2f                    /* int $0x80 syscall */
     cmpq  $32, %rax
@@ -154,7 +132,6 @@ isr_common:
     /* User-mode interrupt */
     movq  %rsp, %rdi
     call  trap_handler
-    movq  %rsp, %rdi
     jmp   __return_to_user
 
 kernel_trap:
@@ -241,20 +218,14 @@ __return_to_user:
     movq  152(%rsp), %rax
     movq  %rax, 48(%r11)
 
-    /* 
-     * Reset data segment selectors to user data selector (0x23).
-     * This prevents #GP if they contained kernel selectors (DPL=0).
-     * Loading into FS/GS clears MSR_FS_BASE and MSR_GS_BASE,
-     * but we immediately restore them below.
-     */
-    movl  $0x23, %eax
-    movw  %ax, %ds
-    movw  %ax, %es
-
-    /* 
-     * Swap GS base to put tss in MSR_KERNEL_GS_BASE and user GS base in MSR_GS_BASE.
-     */
-    swapgs
+    /* Restore kernel_tp (GS base) */
+    movq  160(%rsp), %rax
+    movl  %eax, %edi
+    shrq  $32, %rax
+    movl  %eax, %edx
+    movl  %edi, %eax
+    movl  $0xC0000101, %ecx
+    wrmsr
 
     /* Restore user FS base for TLS before iretq. */
     movq  184(%rsp), %rax
@@ -296,85 +267,6 @@ __trap_from_user:
     .globl __trap_from_kernel
 __trap_from_kernel:
     jmp   isr_common
-
-    .globl syscall_entry
-    .align 16
-syscall_entry:
-    swapgs
-    movq  %rsp, %gs:12
-    movq  %gs:4, %rsp
-    
-    subq  $192, %rsp
-    
-    /* Save ctx->rip (syscall RIP in RCX) and ctx->rflags (syscall RFLAGS in R11) immediately */
-    movq  %rcx, 128(%rsp)
-    movq  %r11, 136(%rsp)
-    
-    /* Update global epc */
-    movabsq $__x86_64_trap_epc, %r11
-    movq  %rcx, (%r11)
-    
-    /* Now we can use r11 as a scratch register */
-    movq  %gs:12, %r11
-    
-    /* Save ctx->rsp */
-    movq  %r11, 56(%rsp)
-    
-    /* Save general-purpose registers */
-    movq  %rax, 0(%rsp)
-    movq  %rbx, 8(%rsp)
-    movq  %rcx, 16(%rsp)
-    movq  %rdx, 24(%rsp)
-    movq  %rsi, 32(%rsp)
-    movq  %rdi, 40(%rsp)
-    movq  %rbp, 48(%rsp)
-    
-    movq  %r8,  64(%rsp)
-    movq  %r9,  72(%rsp)
-    movq  %r10, 80(%rsp)
-    movq  %r11, 88(%rsp) /* r11 originally had RFLAGS, but user r11 is lost in syscall. */
-    movq  %r12, 96(%rsp)
-    movq  %r13, 104(%rsp)
-    movq  %r14, 112(%rsp)
-    movq  %r15, 120(%rsp)
-    
-    /* Save ctx->cs = 0x2B (User Code 64-bit) */
-    movq  $0x2B, 144(%rsp)
-    /* Save ctx->ss = 0x23 (User Data) */
-    movq  $0x23, 152(%rsp)
-    
-    /* Save kernel_tp into ctx */
-    movl  $0xC0000101, %ecx
-    rdmsr
-    shlq  $32, %rdx
-    orq   %rdx, %rax
-    movq  %rax, 160(%rsp)
-    
-    /* Save user FS base */
-    movl  $0xC0000100, %ecx
-    rdmsr
-    shlq  $32, %rdx
-    orq   %rdx, %rax
-    movq  %rax, 184(%rsp)
-    
-    /* CR2 for kscratch0 */
-    movq  %cr2, %rax
-    movq  %rax, 168(%rsp)
-    
-    /* Set ctx->padding[0] (TSS.rsp0 pointer) */
-    leaq  192(%rsp), %rax
-    movq  %rax, 176(%rsp)
-
-    /* Set global trap cause to 0x80 (CAUSE_ECALL_U) */
-    movabsq $__x86_64_trap_cause, %rcx
-    movq  $0x80, (%rcx)
-
-    /* Call trap_handler */
-    movq  %rsp, %rdi
-    call  trap_handler
-    
-    movq  %rsp, %rdi
-    jmp   __return_to_user
 
     .align 16
     isr_no_err 0
