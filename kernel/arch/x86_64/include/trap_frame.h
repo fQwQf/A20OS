@@ -17,10 +17,12 @@ typedef struct {
     uint64_t rip, rflags, cs, ss;
     uint64_t kernel_tp;
     uint64_t kscratch0;
-    uint64_t padding[2];          /* align to 16 bytes, total 24*8 = 192 bytes */
+    uint64_t padding[2];          /* 176: kernel top, 184: tp */
+    uint64_t saved_kstack;        /* 192: original task->kstack (saved ctx ptr) */
+    uint64_t reserved;            /* 200: pad to 16 bytes */
 } __attribute__((aligned(16))) trap_context_t;
 
-_Static_assert(sizeof(trap_context_t) == 24 * 8, "TrapContext must be 192 bytes");
+_Static_assert(sizeof(trap_context_t) == 26 * 8, "TrapContext must be 208 bytes");
 
 /*
  * Task context layout for x86_64.
@@ -48,9 +50,9 @@ typedef struct {
 
 #define ARCH_SIGFRAME_EXTRA_FIELDS uint64_t arch_extra;
 
-#define TRAP_CONTEXT_SIZE   (24 * 8)
+#define TRAP_CONTEXT_SIZE   (26 * 8)
 #define TASK_CONTEXT_SIZE   (16 * 8)
-#define KTRAP_CONTEXT_SIZE  (24 * 8)
+#define KTRAP_CONTEXT_SIZE  (26 * 8)
 #define ARCH_SYSCALL_TRACE_MIN_PID 3
 
 extern void __trap_from_user(void);
@@ -139,6 +141,31 @@ static inline void arch_trap_ctx_set_reg(trap_context_t *ctx, int i, uint64_t v)
 #define TASK_CTX_STATUS(ctx)       ((ctx)->rflags)
 #define TASK_CTX_SET_SP(ctx, v)    do { (ctx)->rsp = (uint64_t)(v); } while (0)
 
+static inline void arch_task_context_set_initial_sp(task_context_t *ctx,
+                                                      trap_context_t *trap,
+                                                      uint64_t stack_top) {
+    /* __switch loads rsp directly from the saved context.  For user tasks the
+     * resume path must land on the trap_context_t; for kernel threads it must
+     * land at the top of the kernel stack. */
+    ctx->rsp = trap ? (uint64_t)trap : stack_top;
+    /* syscall_entry needs the real kernel stack top independent of whether
+     * the resume target is the pre-allocated trap frame (user) or ks_top
+     * (kernel thread).  Keep it in an unused padding slot; use a volatile
+     * store so the compiler cannot dead-store-eliminate the write. */
+    *(volatile uint64_t *)&ctx->padding[0] = stack_top;
+}
+
+static inline task_context_t *arch_task_context_base(void *kstack_base,
+                                                      uint64_t stack_top,
+                                                      trap_context_t *trap) {
+    (void)stack_top;
+    (void)trap;
+    /* On x86_64 the task_context_t lives at the bottom of the kernel stack so
+     * the trap frame at the top and the C call stack in between do not
+     * overwrite it.  __switch resumes using ctx->rsp, not the context base. */
+    return (task_context_t *)kstack_base;
+}
+
 static inline uint64_t arch_task_kernel_status(void) {
     return SSTATUS_SIE;
 }
@@ -170,7 +197,7 @@ static inline void arch_advance_syscall_epc(trap_context_t *ctx) {
 
 #define ARCH_SYSCALL_INSN_SIZE 2
 
-/* Signal trampoline: mov $15,%eax; int $0x80 */
+/* Signal trampoline: mov $15,%eax; syscall */
 static inline void arch_signal_prepare_trampoline(uint32_t tramp[2]) {
     uint8_t *p = (uint8_t *)tramp;
     p[0] = 0xB8;         /* mov imm32,%eax */
@@ -178,8 +205,8 @@ static inline void arch_signal_prepare_trampoline(uint32_t tramp[2]) {
     p[2] = 0;
     p[3] = 0;
     p[4] = 0;
-    p[5] = 0xCD;         /* int $0x80 */
-    p[6] = 0x80;
+    p[5] = 0x0F;         /* syscall */
+    p[6] = 0x05;
     p[7] = 0;
 }
 
@@ -190,8 +217,8 @@ static inline void arch_signal_write_trampoline(void *page) {
     p[2] = 0;
     p[3] = 0;
     p[4] = 0;
-    p[5] = 0xCD;         /* int $0x80 */
-    p[6] = 0x80;
+    p[5] = 0x0F;         /* syscall */
+    p[6] = 0x05;
     p[7] = 0;
 }
 

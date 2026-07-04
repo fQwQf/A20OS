@@ -18,11 +18,14 @@ static inline void arch_wfi(void) {
 }
 
 static inline unsigned arch_current_cpu_id(void) {
-    /* Read LAPIC ID from MSR 0x802 (x2APIC) or 0x1B (legacy APIC).
-     * On UP this still returns 0 because BSP is ID 0. */
-    uint32_t lapic_id;
-    __asm__ __volatile__("rdmsr" : "=a"(lapic_id) : "c"((uint32_t)0x802) : "rdx");
-    return (unsigned)(lapic_id >> 24);
+    /* Use CPUID leaf 1 initial APIC ID.  Reading x2APIC MSR 0x802 only works
+     * when the CPU is in x2APIC mode, which the kernel does not enable. */
+    uint32_t eax, ebx, ecx, edx;
+    __asm__ __volatile__("cpuid"
+                         : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx)
+                         : "a"(1)
+                         :);
+    return (unsigned)(ebx >> 24);
 }
 
 static inline void arch_local_irq_disable(void) {
