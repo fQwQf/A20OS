@@ -6,6 +6,7 @@
 #include "syscall_internal.h"
 #include "abi/syscall_entry.h"
 #include "abi/current.h"
+#include "arch/syscall_hook.h"
 #include "core/klog.h"
 #include "core/timer.h"
 #include "proc/signal.h"
@@ -102,30 +103,18 @@ int64_t syscall_dispatch(trap_context_t *ctx)
         .ctx = ctx,
     };
 
+    arch_syscall_adjust_args(&args);
+    num = args.nr;
+
     int64_t ret = -ENOSYS;
     int context_restored = 0;
-    const linux_syscall_entry_t *entry = linux_syscall_lookup(num);
-    task_t *dbg_cur = proc_current();
-    if (dbg_cur && dbg_cur->pid >= 5 &&
-        (num == SYS_futex || num == SYS_exit || num == SYS_exit_group ||
-         num == SYS_clone || num == SYS_clone3 ||
-         num == SYS_close || num == SYS_close_range ||
-         num == SYS_brk || num == SYS_mmap || num == SYS_munmap ||
-         num == SYS_mremap || num == SYS_mprotect || num == SYS_madvise ||
-         num == SYS_accept4 || num == SYS_socket || num == SYS_connect ||
-         num == SYS_listen)) {
-        ktrace_syscall("[SYSDBG] enter: pid=%d nr=%lu a0=0x%lx a1=0x%lx a2=0x%lx\n",
-                       dbg_cur->pid, (unsigned long)num,
-                       (unsigned long)args.arg[0],
-                       (unsigned long)args.arg[1],
-                       (unsigned long)args.arg[2]);
-    }
+    const linux_syscall_entry_t *entry = linux_syscall_lookup(args.nr);
     if (entry) {
         ret = entry->handler(&args);
         context_restored = entry->restores_context;
     } else {
-        if (num < 300)
-            kdebug("[SYSCALL] Unimplemented: %lu\n", (unsigned long)num);
+        if (args.nr < 300)
+            kdebug("[SYSCALL] Unimplemented: %lu\n", (unsigned long)args.nr);
     }
 
     int restart_syscall = 0;
@@ -170,7 +159,7 @@ int64_t syscall_dispatch(trap_context_t *ctx)
     if (!context_restored && proc_current() && (++syscall_resched_counter & 0x1f) == 0)
         proc_yield();
     proc_check_exit_pending();
-    if (num == SYS_sigsuspend)
+    if (args.nr == SYS_sigsuspend)
     {
         task_t *cur = proc_current();
         if (cur && cur->signals && cur->sigsuspend_active && !cur->sig_handling)

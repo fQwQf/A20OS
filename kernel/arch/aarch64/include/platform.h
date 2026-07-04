@@ -85,4 +85,6 @@ static inline int arch_ram_range(size_t idx, paddr_t *base, paddr_t *end) {
 
 extern uint64_t boot_pgdir[512];
 
+static inline void arch_unmap_boot_identity(void) { }
+
 #endif

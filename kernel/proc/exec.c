@@ -518,6 +518,9 @@ static int exec_install_process(task_t *t,
     refcount_set(&new_mm->refcount, 1);
     new_mm->mmap       = info->mmap;
 
+    /* Map architecture-specific signal return trampoline page. */
+    arch_setup_signal_trampoline(new_mm);
+
     /* ---- 4. Atomically swap mm ---- */
     mm_struct_t *old_mm    = t->mm;
     uint64_t    *old_pgdir = t->pgdir;
@@ -555,14 +558,24 @@ static int exec_install_process(task_t *t,
     if (!t->trap_ctx) {
         uint64_t ks_top = saved_kernel_sp;
         trap_context_t *trap = (trap_context_t *)(ks_top - sizeof(trap_context_t));
-        task_context_t *ctx  = (task_context_t *)((uint64_t)trap - sizeof(task_context_t));
-        memset(ctx, 0, sizeof(*ctx));
-        ctx->ra = (uint64_t)user_trap_return;
-        ctx->tp = (uint64_t)(uintptr_t)t;
-        TASK_CTX_PAGE_TABLE(ctx) = arch_make_addr_space_token(info->pgdir);
+        /*
+         * Ask the architecture where the initial task_context_t belongs.
+         * x86_64 keeps it at the bottom of the kernel stack; the other arches
+         * keep it just below the trap frame.
+         */
+        task_context_t *new_ctx  = arch_task_context_base(t->kstack_base, ks_top, trap);
+        memset(new_ctx, 0, sizeof(*new_ctx));
+        new_ctx->ra = (uint64_t)user_trap_return;
+        new_ctx->tp = (uint64_t)(uintptr_t)t;
+        TASK_CTX_PAGE_TABLE(new_ctx) = arch_make_addr_space_token(info->pgdir);
         t->trap_ctx = trap;
-        t->kstack   = (uint64_t)ctx;
+        t->kstack   = (uint64_t)new_ctx;
     }
+
+    task_context_t *ctx = arch_task_context_base(t->kstack_base, saved_kernel_sp, t->trap_ctx);
+    TASK_CTX_PAGE_TABLE(ctx) = arch_make_addr_space_token(info->pgdir);
+    arch_task_context_set_initial_sp(ctx, t->trap_ctx, saved_kernel_sp);
+    t->kstack = (uint64_t)ctx;
 
     {
         trap_context_t *trap = t->trap_ctx;
