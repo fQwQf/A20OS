@@ -122,6 +122,29 @@ static inline void arch_trap_ctx_set_reg(trap_context_t *ctx, int i, uint64_t v)
 #define TASK_CTX_PAGE_TABLE(ctx)   ((ctx)->ttbr0)
 #define TASK_CTX_STATUS(ctx)       ((ctx)->daif)
 
+static inline void arch_task_context_set_initial_sp(task_context_t *ctx,
+                                                     trap_context_t *trap,
+                                                     uint64_t stack_top) {
+    (void)trap;
+    (void)stack_top;
+    /* __switch restores sp from the saved context and then adds 128 bytes
+     * (TASK_CONTEXT_SIZE), so the saved value must be the context base. */
+    ctx->sp = (uint64_t)ctx;
+}
+
+static inline task_context_t *arch_task_context_base(void *kstack_base,
+                                                      uint64_t stack_top,
+                                                      trap_context_t *trap) {
+    (void)kstack_base;
+    /* AArch64 __switch restores sp = ctx->sp + 128.  For user tasks the
+     * context must sit immediately below the pre-allocated trap frame so the
+     * resume lands on that trap frame; for kernel threads it sits just below
+     * the top of the kernel stack. */
+    if (trap)
+        return (task_context_t *)((uintptr_t)trap - sizeof(task_context_t));
+    return (task_context_t *)(stack_top - sizeof(task_context_t));
+}
+
 static inline uint64_t arch_task_kernel_status(void) {
     return SSTATUS_SIE;
 }

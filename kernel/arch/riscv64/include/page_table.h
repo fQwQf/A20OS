@@ -28,6 +28,7 @@
 
 #define PTE_KERN (PTE_V | PTE_R | PTE_W | PTE_X)
 #define PTE_USER (PTE_V | PTE_R | PTE_W | PTE_X | PTE_U)
+#define PTE_DIR  (PTE_V)
 
 static inline int arch_pte_is_leaf(uint64_t pte) {
     /*

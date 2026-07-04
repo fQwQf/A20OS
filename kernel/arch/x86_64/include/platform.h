@@ -102,4 +102,18 @@ static inline int arch_ram_range(size_t idx, paddr_t *base, paddr_t *end) {
 
 extern uint64_t boot_pgdir[512];
 
+/*
+ * Remove the temporary identity mapping in PML4[0].  The boot code needs it to
+ * enter long mode, but if it is left in boot_pgdir it will be copied into every
+ * user page table by pt_map_kernel() and shadow the user lower half with
+ * supervisor-only entries.  Call after the idle page table has been created.
+ */
+static inline void arch_unmap_boot_identity(void) {
+    boot_pgdir[0] = 0;
+    __asm__ __volatile__(
+        "movq %%cr3, %%rax\n\t"
+        "movq %%rax, %%cr3\n\t"
+        ::: "rax", "memory");
+}
+
 #endif

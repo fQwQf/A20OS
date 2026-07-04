@@ -3,6 +3,62 @@
 #include "fs/vfs/path.h"
 #include "abi/linux/fcntl.h"
 #include "abi/linux/stat.h"
+#include "abi/linux/stat_abi.h"
+
+static uint32_t user_visible_mode(uint32_t mode) {
+    return mode;
+}
+
+/*
+ * Generic Linux struct stat layout (riscv64/aarch64/loongarch64):
+ *   0:  st_dev     u64
+ *   8:  st_ino     u64
+ *  16:  st_mode    u32
+ *  20:  st_nlink   u32
+ *  24:  st_uid     u32
+ *  28:  st_gid     u32
+ *  32:  __pad1     u64
+ *  40:  st_rdev    u64
+ *  48:  st_size    i64
+ *  56:  st_blksize i64
+ *  64:  st_blocks  i64
+ *  72:  st_atime   u64
+ *  80:  st_atime_nsec u64
+ *  88:  st_mtime   u64
+ *  96:  st_mtime_nsec u64
+ * 104:  st_ctime   u64
+ * 112:  st_ctime_nsec u64
+ * 120:  __unused   u32[2]
+ */
+__attribute__((weak)) void arch_copy_kstat_to_user(void *st, const kstat_t *kst)
+{
+    uint64_t buf64[128 / 8];
+    memset(buf64, 0, sizeof(buf64));
+    uint8_t *buf = (uint8_t *)buf64;
+    uint64_t *u64 = (uint64_t *)buf;
+    uint32_t *u32 = (uint32_t *)buf;
+    u64[0]  = kst->st_dev;
+    u64[1]  = kst->st_ino;
+    u32[4]  = user_visible_mode(kst->st_mode);
+    u32[5]  = kst->st_nlink;
+    u32[6]  = kst->st_uid;
+    u32[7]  = kst->st_gid;
+    u64[4]  = kst->st_rdev;
+    u64[5]  = 0;            /* __pad1 */
+    u64[6]  = kst->st_size;
+    u32[14] = kst->st_blksize;
+    u32[15] = 0;            /* __pad2 */
+    u64[8]  = kst->st_blocks;
+    u64[9]  = kst->st_atime;
+    u64[10] = kst->st_atime_nsec;
+    u64[11] = kst->st_mtime;
+    u64[12] = kst->st_mtime_nsec;
+    u64[13] = kst->st_ctime;
+    u64[14] = kst->st_ctime_nsec;
+    u32[30] = 0;            /* __unused4 */
+    u32[31] = 0;            /* __unused5 */
+    copy_to_user(st, buf, sizeof(buf64));
+}
 
 int64_t sys_mkdirat(int dirfd, const char *path, int mode) {
     if (!path) return -EFAULT;
@@ -92,10 +148,6 @@ int64_t sys_getcwd(char *buf, size_t size) {
     return (int64_t)len;
 }
 
-static uint32_t user_visible_mode(uint32_t mode) {
-    return mode;
-}
-
 static int path_is_shebang_script(const char *path)
 {
     int fd = vfs_open(path, O_RDONLY, 0);
@@ -119,35 +171,6 @@ static void kstat_apply_script_exec(const char *path, kstat_t *kst)
         kst->st_mode |= S_IXUSR | S_IXGRP | S_IXOTH;
 }
 
-static void copy_kstat_to_user(void *st, const kstat_t *kst) {
-    uint64_t buf64[128 / 8];
-    memset(buf64, 0, sizeof(buf64));
-    uint8_t *buf = (uint8_t *)buf64;
-    uint64_t *u64 = (uint64_t *)buf;
-    uint32_t *u32 = (uint32_t *)buf;
-    u64[0]  = kst->st_dev;
-    u64[1]  = kst->st_ino;
-    u32[4]  = user_visible_mode(kst->st_mode);
-    u32[5]  = kst->st_nlink;
-    u32[6]  = kst->st_uid;
-    u32[7]  = kst->st_gid;
-    u64[4]  = kst->st_rdev;
-    u64[5]  = 0;            /* __pad1 */
-    u64[6]  = kst->st_size;
-    u32[14] = kst->st_blksize;
-    u32[15] = 0;            /* __pad2 */
-    u64[8]  = kst->st_blocks;
-    u64[9]  = kst->st_atime;
-    u64[10] = kst->st_atime_nsec;
-    u64[11] = kst->st_mtime;
-    u64[12] = kst->st_mtime_nsec;
-    u64[13] = kst->st_ctime;
-    u64[14] = kst->st_ctime_nsec;
-    u32[30] = 0;            /* __unused4 */
-    u32[31] = 0;            /* __unused5 */
-    copy_to_user(st, buf, sizeof(buf64));
-}
-
 int64_t sys_fstat(int fd, void *st) {
     int64_t gfd = fdtable_get_current(fd);
     if (gfd < 0) return gfd;
@@ -155,7 +178,7 @@ int64_t sys_fstat(int fd, void *st) {
     int r = vfs_fstat(gfd, &kst);
     if (r < 0) return r;
     if (!st) return -EFAULT;
-    copy_kstat_to_user(st, &kst);
+    arch_copy_kstat_to_user(st, &kst);
     return 0;
 }
 
@@ -178,7 +201,7 @@ int64_t sys_fstatat(int dirfd, const char *path, void *st, int flags) {
             kstat_apply_script_exec(full, &kst);
     }
     if (r < 0) return r;
-    copy_kstat_to_user(st, &kst);
+    arch_copy_kstat_to_user(st, &kst);
     return 0;
 }
 

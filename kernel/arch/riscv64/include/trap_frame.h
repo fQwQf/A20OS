@@ -73,6 +73,27 @@ extern void user_trap_return(void);
 #define TASK_CTX_PAGE_TABLE(ctx)   ((ctx)->satp)
 #define TASK_CTX_STATUS(ctx)       ((ctx)->sstatus)
 
+static inline void arch_task_context_set_initial_sp(task_context_t *ctx,
+                                                     trap_context_t *trap,
+                                                     uint64_t stack_top) {
+    (void)ctx;
+    (void)trap;
+    (void)stack_top;
+    /* RISC-V __switch computes the resume stack pointer from the context
+     * base, so no saved sp field exists to initialize. */
+}
+
+static inline task_context_t *arch_task_context_base(void *kstack_base,
+                                                      uint64_t stack_top,
+                                                      trap_context_t *trap) {
+    (void)kstack_base;
+    /* RISC-V __switch resumes at ctx + 128.  User tasks resume on the
+     * pre-allocated trap frame, kernel threads at the top of the kernel stack. */
+    if (trap)
+        return (task_context_t *)((uintptr_t)trap - sizeof(task_context_t));
+    return (task_context_t *)(stack_top - sizeof(task_context_t));
+}
+
 static inline uint64_t arch_task_kernel_status(void) {
     return SSTATUS_SIE;
 }

@@ -18,8 +18,8 @@ isr_stub_\vec:
     .endm
 
 isr_common:
-    /* Allocate trap_context_t (192 bytes) on stack */
-    subq  $192, %rsp
+    /* Allocate trap_context_t (208 bytes) on stack */
+    subq  $208, %rsp
 
     /* Save general-purpose registers into trap_context_t */
     movq  %rax, 0(%rsp)
@@ -40,36 +40,36 @@ isr_common:
     movq  %r15, 120(%rsp)
 
     /*
-     * With IST=1 for all IDT entries, the CPU always pushes:
+     * With IST=2 for all IDT entries (except #DF), the CPU always pushes:
      *   old SS, old RSP, RFLAGS, CS, RIP
      * Plus error code (for isr_err) or nothing (for isr_no_err).
      * The ISR stub pushes vec (and dummy 0 for isr_no_err).
      * Total CPU+ISR stub = 56 bytes for both cases.
      *
      * Layout above trap_context_t (relative to current RSP):
-     *   [RSP+192] = vec
-     *   [RSP+200] = error_code (or 0)
-     *   [RSP+208] = RIP
-     *   [RSP+216] = CS
-     *   [RSP+224] = RFLAGS
-     *   [RSP+232] = old RSP
-     *   [RSP+240] = old SS
+     *   [RSP+208] = vec
+     *   [RSP+216] = error_code (or 0)
+     *   [RSP+224] = RIP
+     *   [RSP+232] = CS
+     *   [RSP+240] = RFLAGS
+     *   [RSP+248] = old RSP
+     *   [RSP+256] = old SS
      */
 
     /* Copy CPU-pushed values into trap_context_t */
-    movq  208(%rsp), %rax
+    movq  224(%rsp), %rax
     movq  %rax, 128(%rsp)       /* ctx->rip */
 
-    movq  224(%rsp), %rax
+    movq  240(%rsp), %rax
     movq  %rax, 136(%rsp)       /* ctx->rflags */
 
-    movq  216(%rsp), %rax
+    movq  232(%rsp), %rax
     movq  %rax, 144(%rsp)       /* ctx->cs */
 
-    movq  240(%rsp), %rax
+    movq  256(%rsp), %rax
     movq  %rax, 152(%rsp)       /* ctx->ss */
 
-    movq  232(%rsp), %rax
+    movq  248(%rsp), %rax
     movq  %rax, 56(%rsp)        /* ctx->rsp */
 
     /* Save kernel_tp (GS base) */
@@ -93,18 +93,18 @@ isr_common:
     /*
      * Save kernel stack top for future CPL3 -> CPL0 transitions.  When
      * this trap came from user mode, TSS.rsp0 is the top above the CPU
-     * frame (ctx + 192 + 56).
+     * frame (ctx + 208 + 56).
      */
     movq  $0, 176(%rsp)
     movq  144(%rsp), %rax       /* ctx->cs */
     testq $3, %rax
     jz    1f
-    leaq  248(%rsp), %rax
+    leaq  264(%rsp), %rax
     movq  %rax, 176(%rsp)       /* ctx->padding[0] */
 1:
 
     /* Save global trap variables */
-    movq  192(%rsp), %rax       /* vec */
+    movq  208(%rsp), %rax       /* vec */
     cmpq  $0x80, %rax
     je    2f                    /* int $0x80 syscall */
     cmpq  $32, %rax
@@ -140,19 +140,19 @@ kernel_trap:
 
     /* Restore CPU-pushed frame from trap_context_t (in case C modified it) */
     movq  128(%rsp), %rax
-    movq  %rax, 208(%rsp)       /* RIP */
+    movq  %rax, 224(%rsp)       /* RIP */
 
     movq  136(%rsp), %rax
-    movq  %rax, 224(%rsp)       /* RFLAGS */
+    movq  %rax, 240(%rsp)       /* RFLAGS */
 
     movq  144(%rsp), %rax
-    movq  %rax, 216(%rsp)       /* CS */
+    movq  %rax, 232(%rsp)       /* CS */
 
     movq  152(%rsp), %rax
-    movq  %rax, 240(%rsp)       /* SS */
+    movq  %rax, 256(%rsp)       /* SS */
 
     movq  56(%rsp), %rax
-    movq  %rax, 232(%rsp)       /* old RSP */
+    movq  %rax, 248(%rsp)       /* old RSP */
 
     /* Restore general-purpose registers */
     movq  0(%rsp), %rax
@@ -172,51 +172,187 @@ kernel_trap:
     movq  120(%rsp), %r15
 
     /* Free trap_context_t */
-    addq  $192, %rsp
+    addq  $208, %rsp
 
     /* Skip vec and error_code (or 0 and vec) from ISR stub */
     addq  $16, %rsp
 
     iretq
 
+    /*
+     * syscall/sysret fast system call entry.
+     *
+     * The user library (musl x86_64 Linux ABI) issues the "syscall"
+     * instruction, but the kernel only had an IDT entry for "int $0x80".
+     * MSR_STAR/LSTAR/SFMASK and EFER.SCE are enabled in trap_init.
+     *
+     * On entry:
+     *   rax = syscall number
+     *   rdi/rsi/rdx/r10/r8/r9 = arguments
+     *   rcx = user RIP
+     *   r11 = user RFLAGS
+     *   rsp = user RSP
+     *
+     * We construct a trap_context_t in the pre-allocated slot at the top of
+     * the kernel stack and call trap_handler, then return via
+     * __return_to_user (which uses iretq) so we do not need sysret.
+     */
+    .globl __x86_64_syscall_scratch
+    .globl syscall_entry
+    .align 16
+syscall_entry:
+    /*
+     * SYSCALL preserves the GS base MSR (current task pointer) but may leave
+     * the GS segment selector in a state where %gs: memory operands fault.
+     * Avoid %gs: entirely: read the GS base MSR directly to obtain the task
+     * pointer, then use normal kernel addresses.
+     *
+     * On entry:
+     *   rax = syscall number
+     *   rdi/rsi/rdx/r10/r8/r9 = arguments 0-5
+     *   rcx = user RIP, r11 = user RFLAGS, rsp = user RSP
+     *
+     * We must not write below the user RSP because the user code owns that
+     * memory (red zone / stack frames).  Instead, stash the register state in
+     * a small kernel scratch array while we compute the kernel stack top and
+     * switch stacks.
+     */
+    cli
+
+    /* Save everything we need into the kernel scratch array. */
+    movq  %rax,  __x86_64_syscall_scratch+0(%rip)    /* syscall number */
+    movq  %rcx,  __x86_64_syscall_scratch+8(%rip)    /* user RIP */
+    movq  %rdx,  __x86_64_syscall_scratch+16(%rip)   /* arg2 */
+    movq  %r10,  __x86_64_syscall_scratch+24(%rip)   /* arg3 */
+    movq  %r11,  __x86_64_syscall_scratch+32(%rip)   /* user RFLAGS */
+    movq  %rsp,  __x86_64_syscall_scratch+40(%rip)   /* user RSP */
+    movq  %r9,   __x86_64_syscall_scratch+48(%rip)   /* arg6 */
+    movq  %r8,   __x86_64_syscall_scratch+56(%rip)   /* arg4 */
+    movq  %rdi,  __x86_64_syscall_scratch+64(%rip)   /* arg0 */
+    movq  %rsi,  __x86_64_syscall_scratch+72(%rip)   /* arg1 */
+    movq  %rbx,  __x86_64_syscall_scratch+80(%rip)
+    movq  %rbp,  __x86_64_syscall_scratch+88(%rip)
+    movq  %r12,  __x86_64_syscall_scratch+96(%rip)
+    movq  %r13,  __x86_64_syscall_scratch+104(%rip)
+    movq  %r14,  __x86_64_syscall_scratch+112(%rip)
+    movq  %r15,  __x86_64_syscall_scratch+120(%rip)
+
+    leaq  __x86_64_syscall_scratch(%rip), %r11       /* r11 = scratch base */
+
+    /* Read GS base (task pointer) into r9. */
+    movl  $0xC0000101, %ecx
+    rdmsr
+    shlq  $32, %rdx
+    orq   %rdx, %rax
+    movq  %rax, %r9             /* r9 = task pointer */
+
+    /* r14 = saved task_context_t (task->kstack). */
+    movq  0(%r9), %r14
+
+    /*
+     * Compute the real kernel stack top from the task structure.  The saved
+     * context's tp field (offset 8) is the task pointer; task->kstack_base
+     * is at offset 8 in task_t.
+     */
+    movq  8(%r14), %rax         /* rax = task pointer */
+    movq  8(%rax), %rax         /* rax = task->kstack_base */
+    addq  $0x10000, %rax        /* rax = kernel stack top */
+
+    /* Switch to the kernel stack and allocate the trap_context_t. */
+    movq  %rax, %rsp
+    subq  $208, %rsp
+    movq  %rax, %r15            /* r15 = kernel stack top (for later fields) */
+    sti
+
+    /* Copy the saved registers from the scratch array into the trap_context_t. */
+    movq  0(%r11), %rax         /* syscall number */
+    movq  %rax, 0(%rsp)
+    movq  80(%r11), %rax        /* rbx */
+    movq  %rax, 8(%rsp)
+    movq  8(%r11), %rax         /* user RIP */
+    movq  %rax, 16(%rsp)
+    movq  16(%r11), %rax        /* rdx / arg2 */
+    movq  %rax, 24(%rsp)
+    movq  72(%r11), %rax        /* rsi / arg1 */
+    movq  %rax, 32(%rsp)
+    movq  64(%r11), %rax        /* rdi / arg0 */
+    movq  %rax, 40(%rsp)
+    movq  88(%r11), %rax        /* rbp */
+    movq  %rax, 48(%rsp)
+    movq  40(%r11), %rax        /* user RSP */
+    movq  %rax, 56(%rsp)
+    movq  56(%r11), %rax        /* r8 / arg4 */
+    movq  %rax, 64(%rsp)
+    movq  48(%r11), %rax        /* r9 / arg6 */
+    movq  %rax, 72(%rsp)
+    movq  24(%r11), %rax        /* r10 / arg3 */
+    movq  %rax, 80(%rsp)
+    movq  32(%r11), %rax        /* r11 / RFLAGS */
+    movq  %rax, 88(%rsp)
+    movq  96(%r11), %rax        /* r12 */
+    movq  %rax, 96(%rsp)
+    movq  104(%r11), %rax       /* r13 */
+    movq  %rax, 104(%rsp)
+    movq  112(%r11), %rax       /* r14 */
+    movq  %rax, 112(%rsp)
+    movq  120(%r11), %rax       /* r15 */
+    movq  %rax, 120(%rsp)
+
+    /* Return address, flags, and segments. */
+    movq  8(%r11), %rax         /* user RIP */
+    movq  %rax, 128(%rsp)
+    movq  32(%r11), %rax        /* user RFLAGS */
+    movq  %rax, 136(%rsp)
+    movq  $0x1B, 144(%rsp)      /* user CS */
+    movq  $0x23, 152(%rsp)      /* user SS */
+
+    /* kernel_tp = current task pointer */
+    movq  %r9, 160(%rsp)
+
+    movq  $0, 168(%rsp)         /* kscratch0 */
+
+    /* Kernel stack top for future CPL3->CPL0 transitions. */
+    movq  %r15, 176(%rsp)
+
+    /* User FS base for TLS. */
+    movl  $0xC0000100, %ecx
+    rdmsr
+    shlq  $32, %rdx
+    orq   %rdx, %rax
+    movq  %rax, 184(%rsp)
+
+    /* Original task->kstack so __return_to_user / __switch can restore it. */
+    movq  %r14, 192(%rsp)
+
+    /* Publish the trap cause as 0x80 so the generic syscall path runs. */
+    movq  $0x80, %rax
+    movabsq $__x86_64_trap_cause, %rcx
+    movq  %rax, (%rcx)
+    movq  128(%rsp), %rax
+    movabsq $__x86_64_trap_epc, %rcx
+    movq  %rax, (%rcx)
+    movq  $0, %rax
+    movabsq $__x86_64_trap_tval, %rcx
+    movq  %rax, (%rcx)
+
+    movq  %rsp, %rdi
+    call  trap_handler
+    jmp   __return_to_user
+
     .globl __return_to_user
 __return_to_user:
+    /*
+     * task->kstack is maintained by __switch and syscall_entry, so we do not
+     * need to read or write %gs:0 here.  Avoiding %gs: prevents faults when
+     * the GS segment selector is not usable.
+     */
+
     /* Keep TSS.rsp0 pointed at this task's kernel stack top. */
     movq  176(%rsp), %rdi       /* ctx->padding[0] */
     testq %rdi, %rdi
     jz    1f
     call  x86_64_set_tss_rsp0
 1:
-
-    /*
-     * Build a fresh iret frame below trap_context_t.  This works both for
-     * real traps and for first entry into a newly-created user task, where
-     * no CPU-pushed frame exists above the saved context.
-     *
-     * temp layout at ctx - 56:
-     *   +0  saved rax
-     *   +8  saved r11
-     *   +16 RIP
-     *   +24 CS
-     *   +32 RFLAGS
-     *   +40 user RSP
-     *   +48 SS
-     */
-    leaq  -56(%rsp), %r11
-    movq  0(%rsp), %rax
-    movq  %rax, 0(%r11)
-    movq  88(%rsp), %rax
-    movq  %rax, 8(%r11)
-    movq  128(%rsp), %rax
-    movq  %rax, 16(%r11)
-    movq  144(%rsp), %rax
-    movq  %rax, 24(%r11)
-    movq  136(%rsp), %rax
-    movq  %rax, 32(%r11)
-    movq  56(%rsp), %rax
-    movq  %rax, 40(%r11)
-    movq  152(%rsp), %rax
-    movq  %rax, 48(%r11)
 
     /* Restore kernel_tp (GS base) */
     movq  160(%rsp), %rax
@@ -251,9 +387,30 @@ __return_to_user:
     movq  112(%rsp), %r14
     movq  120(%rsp), %r15
 
-    leaq  16(%r11), %rsp
-    movq  -16(%rsp), %rax
-    movq  -8(%rsp), %r11
+    /*
+     * Build the iret frame in-place at the bottom of trap_context_t.
+     * This avoids writing below the trap frame and clobbering the
+     * saved task_context_t that lives just underneath it.
+     */
+    movq  0(%rsp), %rax          /* original rax */
+    movq  %rax, 0(%rsp)
+    movq  88(%rsp), %rax         /* original r11 */
+    movq  %rax, 8(%rsp)
+    movq  128(%rsp), %rax
+    movq  %rax, 16(%rsp)         /* RIP */
+    movq  144(%rsp), %rax
+    movq  %rax, 24(%rsp)         /* CS */
+    movq  136(%rsp), %rax
+    movq  %rax, 32(%rsp)         /* RFLAGS */
+    movq  56(%rsp), %rax
+    movq  %rax, 40(%rsp)         /* user RSP */
+    movq  152(%rsp), %rax
+    movq  %rax, 48(%rsp)         /* SS */
+
+    /* Restore rax/r11, point the stack at the iret frame, and return. */
+    movq  0(%rsp), %rax
+    movq  8(%rsp), %r11
+    leaq  16(%rsp), %rsp
     iretq
 
     .globl user_trap_return

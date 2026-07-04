@@ -302,9 +302,9 @@ void kernel_trap_handler(trap_context_t *ctx) {
         } else {
             if (ktrap_diag_count < 5) {
                 ktrap_diag_count++;
-                kdebug("KERNEL TRAP: scause=0x%lx sepc=0x%lx stval=0x%lx code=%lu\n",
+                kerr("KERNEL TRAP: scause=0x%lx sepc=0x%lx stval=0x%lx code=%lu\n",
                        scause, sepc, stval, code);
-                kdebug("[KTRAP] pid=%d name=%s ra=0x%lx a0=0x%lx\n",
+                kerr("[KTRAP] pid=%d name=%s ra=0x%lx a0=0x%lx\n",
                         cur ? cur->pid : -1, cur ? cur->name : "?",
                         TRAP_CTX_RA(ctx), TRAP_CTX_ARG0(ctx));
             }

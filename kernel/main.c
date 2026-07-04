@@ -92,6 +92,10 @@ void kernel_main(void) {
 
     trap_init();
     printf("[INIT] Trap initialized\n");
+    if (current_board && current_board->early_init) {
+        current_board->early_init();
+        printf("[INIT] Board early init done\n");
+    }
     uart_init();
     printf("[INIT] UART initialized\n");
     timer_init();
@@ -129,6 +133,7 @@ void kernel_main(void) {
 
     proc_init();
     printf("[INIT] Process manager initialized\n");
+    arch_unmap_boot_identity();
     loop_init();
 
 #ifdef BRINGUP

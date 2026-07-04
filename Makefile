@@ -143,9 +143,9 @@ endif
 CFLAGS = -Wall -Wextra $(OPT) -ffreestanding -nostdlib \
          -nostartfiles -fno-builtin -fno-common -std=gnu99 \
          -MMD -MP \
-         -I$(INCLUDE_DIR) -I$(KERNEL_DIR) -I$(KERNEL_DIR)/net/lwip_port \
+         -I$(ARCH_INCLUDE_DIR) -I$(INCLUDE_DIR) -I$(KERNEL_DIR) -I$(KERNEL_DIR)/net/lwip_port \
          -I$(KERNEL_DIR)/external/lwip/src/include \
-         -I$(ARCH_INCLUDE_DIR) -I$(BOARD_INCLUDE_DIR) -I$(BUILD_DIR)/generated $(ARCH_CFLAGS) \
+         -I$(BOARD_INCLUDE_DIR) -I$(BUILD_DIR)/generated $(ARCH_CFLAGS) \
          -D$(shell echo $(ARCH) | tr a-z A-Z) \
          -DCONFIG_$(shell echo $(ARCH) | tr a-z A-Z) \
          -DCONFIG_ABI_$(shell echo $(ABI) | tr a-z A-Z) \

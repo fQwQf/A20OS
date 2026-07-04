@@ -140,4 +140,22 @@ typedef struct {
 
 int64_t sys_rt_sigreturn_impl(trap_context_t *ctx);
 
+/*
+ * Architecture-specific hook called just before a signal frame is copied to
+ * user memory.  The generic code has already filled @frame and computed the
+ * trampoline address.  Architectures that need to adjust the frame (for
+ * example x86_64, where the top-of-stack word is the signal handler's return
+ * address) can modify it here.  The default weak implementation is a no-op.
+ */
+void arch_signal_prepare_frame(sig_rt_frame_t *frame, uint64_t tramp_addr,
+                               trap_context_t *ctx);
+
+/*
+ * Architecture-specific hook called once when a new user address space is
+ * created (exec).  It can map a per-process signal-trampoline page.  The
+ * default weak implementation is a no-op.
+ */
+struct mm_struct;
+void arch_setup_signal_trampoline(struct mm_struct *mm);
+
 #endif /* _SIGNAL_H */

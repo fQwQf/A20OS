@@ -10,10 +10,15 @@
 #include "platform.h"
 #include "core/string.h"
 
+#include "trap_frame.h"
+
 uint64_t __x86_64_trap_cause;
 uint64_t __x86_64_trap_epc;
 uint64_t __x86_64_trap_tval;
 
+/* Per-CPU scratch used by syscall_entry before it can switch to the kernel
+ * stack.  Only valid with interrupts disabled during the syscall window. */
+__attribute__((aligned(16))) uint64_t __x86_64_syscall_scratch[16];
 static void handle_timer_irq(int from_user) {
     timer_irq_tick();
     kernel_progress_timer_tick();
@@ -70,7 +75,25 @@ static struct {
 
 static uint8_t df_stack[4096 * 4] __attribute__((aligned(16)));
 
+/*
+ * Per-CPU interrupt stack.  x86_64 exceptions and interrupts taken from user
+ * (or kernel) mode use TSS.IST[2] so they cannot overwrite the task's kernel
+ * stack where task_context_t / trap_context_t live near the top.
+ */
+#define X86_64_IST_STACK_SIZE   (16 * 1024)
+static uint8_t x86_64_ist_stacks[CONFIG_NR_CPUS][X86_64_IST_STACK_SIZE]
+    __attribute__((aligned(16)));
+
 extern uint64_t isr_stub_table[256];
+extern void syscall_entry(void);
+
+#define MSR_EFER        0xC0000080
+#define MSR_STAR        0xC0000081
+#define MSR_LSTAR       0xC0000082
+#define MSR_SFMASK      0xC0000084
+#define EFER_SCE        (1ULL << 0)
+#define EFER_NXE        (1ULL << 11)
+#define RFLAGS_IF       (1ULL << 9)
 
 static uint64_t make_gdt_entry(uint32_t base, uint32_t limit, uint8_t access, uint8_t flags) {
     return ((uint64_t)(limit & 0xFFFF)) |
@@ -105,6 +128,7 @@ static void gdt_init(void) {
 static void tss_init(void) {
     memset(&tss, 0, sizeof(tss));
     tss.ist1 = (uint64_t)df_stack + sizeof(df_stack);
+    tss.ist2 = (uint64_t)x86_64_ist_stacks[0] + X86_64_IST_STACK_SIZE;
     tss.iomap_base = sizeof(tss);
 
     uint64_t tss_base = (uint64_t)&tss;
@@ -126,7 +150,8 @@ static void idt_init(void) {
         idt[i].offset_mid  = (addr >> 16) & 0xFFFF;
         idt[i].offset_high = (addr >> 32) & 0xFFFFFFFF;
         idt[i].selector    = 0x08;
-        idt[i].ist         = (i == 8) ? 1 : 0;
+        /* ist: 1=double-fault stack, 2=shared per-CPU interrupt stack. */
+        idt[i].ist         = (i == 8) ? 1 : 2;
         idt[i].type_attr   = 0x8E;
         idt[i].reserved    = 0;
     }
@@ -286,6 +311,28 @@ void trap_init(void) {
     gdt_init();
     idt_init();
     tss_init();
+
+    /* Enable fast system calls via syscall/sysret. */
+    uint64_t efer;
+    __asm__ __volatile__("rdmsr" : "=a"(efer) : "c"((uint32_t)MSR_EFER) : "rdx");
+    efer |= EFER_SCE | EFER_NXE;
+    __asm__ __volatile__("wrmsr" :: "c"((uint32_t)MSR_EFER), "a"((uint32_t)efer), "d"((uint32_t)(efer >> 32)));
+
+    /* STAR: bits 47:32 = syscall CS=0x08 (SS=0x10); bits 63:48 = sysret
+     * user CS=0x1b (SS=0x23).  We still return through iretq, but the MSR
+     * must be programmed correctly so the syscall instruction loads CS=0x08. */
+    uint64_t star = ((uint64_t)0x1bULL << 48) | ((uint64_t)0x08ULL << 32);
+    __asm__ __volatile__("wrmsr" :: "c"((uint32_t)MSR_STAR), "a"((uint32_t)star), "d"((uint32_t)(star >> 32)));
+
+    uint64_t lstar = (uint64_t)(uintptr_t)syscall_entry;
+    __asm__ __volatile__("wrmsr" :: "c"((uint32_t)MSR_LSTAR), "a"((uint32_t)lstar), "d"((uint32_t)(lstar >> 32)));
+
+    /* SFMASK: clear IF on syscall entry so the assembly entry can use the
+     * kernel stack scratch area without interruption.  iretq restores the
+     * original RFLAGS (including IF) on return. */
+    uint64_t sfmask = RFLAGS_IF;
+    __asm__ __volatile__("wrmsr" :: "c"((uint32_t)MSR_SFMASK), "a"((uint32_t)sfmask), "d"((uint32_t)(sfmask >> 32)));
+
     pic_init();
     lapic_enable();
     keyboard_init();

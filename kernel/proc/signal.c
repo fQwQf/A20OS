@@ -32,6 +32,18 @@ static void signal_make_page_exec(uint64_t addr) {
     arch_tlb_flush_page(page);
 }
 
+__attribute__((weak)) void arch_signal_prepare_frame(sig_rt_frame_t *frame,
+                                                      uint64_t tramp_addr,
+                                                      trap_context_t *ctx) {
+    (void)frame;
+    (void)tramp_addr;
+    (void)ctx;
+}
+
+__attribute__((weak)) void arch_setup_signal_trampoline(struct mm_struct *mm) {
+    (void)mm;
+}
+
 static int signal_core_dump_default(int sig) {
     switch (sig) {
         case SIGQUIT:
@@ -445,12 +457,14 @@ void signal_deliver_user(trap_context_t *ctx) {
         sp -= sizeof(sig_rt_frame_t);
         sp &= ~15ULL;
 
-        if (copy_to_user((void *)sp, &frame, sizeof(frame)) < 0)
-            proc_exit_group(-signal_wait_status(SIGSEGV));
-
         uint32_t tramp[2];
         arch_signal_prepare_trampoline(tramp);
         uint64_t tramp_addr = sp + offsetof(sig_rt_frame_t, tramp);
+        arch_signal_prepare_frame(&frame, tramp_addr, ctx);
+
+        if (copy_to_user((void *)sp, &frame, sizeof(frame)) < 0)
+            proc_exit_group(-signal_wait_status(SIGSEGV));
+
         if (copy_to_user((void *)tramp_addr, tramp, sizeof(tramp)) < 0)
             proc_exit_group(-signal_wait_status(SIGSEGV));
 
