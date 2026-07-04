@@ -200,6 +200,7 @@ int64_t sys_setpriority(int which, int who, int prio);
 int64_t sys_nice(int inc);
 int64_t sys_reboot(uint64_t magic1, uint64_t magic2, uint64_t cmd);
 int64_t sys_prctl(int op, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4);
+int64_t sys_arch_prctl(int op, uint64_t addr);
 int64_t sys_prlimit64(int pid, int resource, void *new_rlim, void *old_rlim);
 int64_t sys_getrlimit(int resource, void *rlim);
 int64_t sys_setrlimit(int resource, void *rlim);

@@ -2,6 +2,7 @@
 #include "syscall_impl.h"
 #include "abi/linux/futex.h"
 #include "abi/linux/fcntl.h"
+#include "sys/usercopy.h"
 
 #define CLD_EXITED     1
 #define CLD_KILLED     2
@@ -98,6 +99,13 @@ int64_t sys_set_robust_list(void *head, size_t len) {
     if (!t) return -ESRCH;
     t->robust_list_head = (uintptr_t)head;
     return 0;
+}
+
+int64_t sys_arch_prctl(int op, uint64_t addr) __attribute__((weak));
+int64_t sys_arch_prctl(int op, uint64_t addr) {
+    (void)op;
+    (void)addr;
+    return -ENOSYS;
 }
 
 int64_t sys_get_robust_list(int pid, void *head_ptr, size_t *len_ptr) {

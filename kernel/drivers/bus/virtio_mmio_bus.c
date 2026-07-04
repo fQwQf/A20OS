@@ -6,6 +6,7 @@
  */
 #include "drivers/core/driver_core.h"
 #include "drivers/core/driver_hwapi.h"
+#include "drivers/bus/virtio_mmio_hal.h"
 #include "core/defs.h"
 #include "core/stdio.h"
 #include "core/klog.h"
@@ -65,8 +66,9 @@ void virtio_mmio_enumerate(uintptr_t base, int max_slots, int irq_base) {
     bus_register(&virtio_mmio_bus);
 
     int dev_idx = 0;
+    uintptr_t slot_size = arch_virtio_mmio_slot_size();
     for (int slot = 0; slot < max_slots; slot++) {
-        uintptr_t slot_base = base + (unsigned long)slot * 0x1000;
+        uintptr_t slot_base = base + (unsigned long)slot * slot_size;
         uint32_t magic   = readl((const volatile void *)slot_base);
         uint32_t version = readl((const volatile void *)(slot_base + 0x004));
         uint32_t dev_id  = readl((const volatile void *)(slot_base + 0x008));
@@ -93,7 +95,7 @@ void virtio_mmio_enumerate(uintptr_t base, int max_slots, int irq_base) {
         resource_t *res = vdev_res[dev_idx];
         res[0].type  = RES_MMIO;
         res[0].start = slot_base;
-        res[0].end   = slot_base + 0xFFF;
+        res[0].end   = slot_base + slot_size - 1;
         res[0].flags = IORESOURCE_MMIO_32BIT;
 
         res[1].type  = RES_IRQ;

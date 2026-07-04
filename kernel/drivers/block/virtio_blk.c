@@ -397,7 +397,6 @@ static int virtio_blk_wait_req(virtio_blk_inst_t *inst, virtio_blk_req_t *req,
                 proc_set_wake_time(cur, 0);
                 continue;
             }
-
             sched();
             proc_set_wake_time(cur, 0);
         } else {

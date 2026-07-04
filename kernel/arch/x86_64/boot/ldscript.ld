@@ -44,10 +44,13 @@ SECTIONS
         *(.bss .bss.*)
         *(.sbss .sbss.*)
         *(COMMON)
+        *(.lbss .lbss.*)
         _bss_end = .;
     }
 
     . = ALIGN(16);
+
+    _stack_end = .;
 
     /DISCARD/ : {
         *(.eh_frame .eh_frame_hdr)
