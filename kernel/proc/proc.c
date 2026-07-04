@@ -363,13 +363,14 @@ int proc_alloc(void (*entry)(void)) {
 
     uint64_t stack_top = (uint64_t)stack + KERNEL_STACK_SIZE;
 
-    task_context_t *ctx = (task_context_t *)(stack_top - sizeof(task_context_t));
+    task_context_t *ctx = arch_task_context_base(stack, stack_top, NULL);
     memset(ctx, 0, sizeof(*ctx));
     ctx->ra   = (uint64_t)entry;
     ctx->tp   = (uint64_t)t;
     t->pgdir  = kernel_pgdir_shared;
     TASK_CTX_PAGE_TABLE(ctx) = kernel_pgdir_shared ? arch_make_addr_space_token(kernel_pgdir_shared) : 0;
     TASK_CTX_STATUS(ctx) = arch_task_kernel_status();
+    arch_task_context_set_initial_sp(ctx, NULL, stack_top);
     t->kstack_base = stack;
     t->kstack = (uint64_t)ctx;
 
@@ -437,12 +438,19 @@ int proc_alloc_user_image(uint64_t entry, uint64_t sp, uint64_t *pgdir,
         t->mm = mm;
     }
 
-    task_context_t *ctx = (task_context_t *)((uint64_t)trap - sizeof(task_context_t));
+    /*
+     * Ask the architecture where the initial task_context_t belongs.  Most
+     * arches place it just below the pre-allocated trap frame; x86_64 places
+     * it at the bottom of the kernel stack so the C call stack cannot
+     * overwrite it.
+     */
+    task_context_t *ctx = arch_task_context_base(kstack, ks_top, trap);
     memset(ctx, 0, sizeof(*ctx));
     ctx->ra   = (uint64_t)user_trap_return;
     ctx->tp   = (uint64_t)t;
     TASK_CTX_PAGE_TABLE(ctx) = pgdir ? arch_make_addr_space_token(pgdir) : 0;
     TASK_CTX_STATUS(ctx) = arch_user_initial_status();
+    arch_task_context_set_initial_sp(ctx, trap, ks_top);
     t->kstack = (uint64_t)ctx;
 
     kinfo("[PROC] user task pid=%d entry=0x%lx sp=0x%lx\n", t->pid,
