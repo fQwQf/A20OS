@@ -1,20 +1,37 @@
 #ifndef _TYPES_H
 #define _TYPES_H
 
-typedef unsigned char      uint8_t;
-typedef unsigned short     uint16_t;
-typedef unsigned int       uint32_t;
-typedef unsigned long      uint64_t;
-typedef signed char        int8_t;
-typedef signed short       int16_t;
-typedef signed int         int32_t;
-typedef signed long        int64_t;
-typedef unsigned long      size_t;
-typedef long               ssize_t;
-typedef unsigned long      uintptr_t;
-typedef long               intptr_t;
-typedef unsigned long      paddr_t;
-typedef unsigned long      vaddr_t;
+typedef __UINT8_TYPE__     uint8_t;
+typedef __UINT16_TYPE__    uint16_t;
+typedef __UINT32_TYPE__    uint32_t;
+typedef __UINT64_TYPE__    uint64_t;
+typedef __INT8_TYPE__      int8_t;
+typedef __INT16_TYPE__     int16_t;
+typedef __INT32_TYPE__     int32_t;
+typedef __INT64_TYPE__     int64_t;
+typedef __SIZE_TYPE__      size_t;
+typedef __PTRDIFF_TYPE__   ssize_t;
+typedef __UINTPTR_TYPE__   uintptr_t;
+typedef __INTPTR_TYPE__    intptr_t;
+
+#if defined(CONFIG_32BIT)
+typedef uint32_t           reg_t;
+typedef uint32_t           pte_t;
+typedef uint32_t           paddr_t;
+typedef uint32_t           vaddr_t;
+#elif defined(CONFIG_64BIT)
+typedef uint64_t           reg_t;
+typedef uint64_t           pte_t;
+typedef uint64_t           paddr_t;
+typedef uint64_t           vaddr_t;
+#else
+typedef __UINTPTR_TYPE__   reg_t;
+typedef __UINTPTR_TYPE__   pte_t;
+typedef __UINTPTR_TYPE__   paddr_t;
+typedef __UINTPTR_TYPE__   vaddr_t;
+#endif
+
+typedef pte_t pt_root_t;
 
 typedef _Bool bool;
 #define true  1

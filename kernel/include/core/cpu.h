@@ -21,4 +21,9 @@ static inline unsigned cpu_current_id(void)
     return id < CONFIG_NR_CPUS ? id : 0;
 }
 
+static inline void cpu_relax(void)
+{
+    arch_cpu_relax();
+}
+
 #endif /* _CORE_CPU_H */

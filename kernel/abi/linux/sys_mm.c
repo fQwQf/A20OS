@@ -62,6 +62,18 @@ int64_t sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, long of
     int64_t res = (int64_t)proc_mmap(addr, len, prot, flags, gfd, off);
     if (res >= 0) {
         task_t *t = proc_current();
+#ifdef CONFIG_NOMMU
+        if (!(flags & MAP_ANONYMOUS) && gfd >= 0) {
+            int r = vfs_pread(gfd, (char *)res, len, off);
+            if (r >= 0 && (size_t)r < len) {
+                memset((void *)(res + r), 0, len - r);
+            } else if (r < 0) {
+                memset((void *)res, 0, len); // Fallback
+            }
+        } else {
+            memset((void *)res, 0, len);
+        }
+#else
         if (t && t->mm) {
             int populate_locked = 0;
             uint64_t mm_flags = linux_mm_lock(t);
@@ -73,13 +85,14 @@ int64_t sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, long of
                 uint64_t start = res;
                 uint64_t end = ROUND_UP(start + len, PAGE_SIZE);
                 for (uint64_t va = start; va < end; va += PAGE_SIZE) {
-                    uint64_t *pte = pt_lookup_leaf(t->mm->pgdir, va, NULL, NULL, NULL);
+                    pte_t *pte = pt_lookup_leaf(t->mm->pgdir, va, NULL, NULL, NULL);
                     if (!pte || !(*pte & PTE_V)) {
                         handle_demand_fault(t, va);
                     }
                 }
             }
         }
+#endif
     }
     return res;
 }
@@ -173,9 +186,9 @@ int64_t sys_madvise(uint64_t addr, size_t len, int advice) {
     case MADV_PAGEOUT:
         for (uint64_t va = start; va < end; ) {
             int level = 0;
-            uint64_t base = 0;
+            vaddr_t base = 0;
             size_t size = 0;
-            uint64_t *pte = pt_lookup_leaf(t->mm->pgdir, va, &level, &base, &size);
+            pte_t *pte = pt_lookup_leaf(t->mm->pgdir, va, &level, &base, &size);
             if (!pte || !(*pte & PTE_V)) {
                 va += PAGE_SIZE;
                 continue;
@@ -260,7 +273,7 @@ out:
                 return -ENOMEM;
             if (advice == MADV_POPULATE_WRITE) {
                 uint64_t flags2 = linux_mm_lock(t);
-                uint64_t *pte = pt_lookup_leaf(t->mm->pgdir, va, NULL, NULL, NULL);
+                pte_t *pte = pt_lookup_leaf(t->mm->pgdir, va, NULL, NULL, NULL);
                 int writable = pte && (*pte & PTE_V) && (*pte & PTE_W);
                 linux_mm_unlock(t, flags2);
                 if (!writable)
@@ -274,7 +287,7 @@ out:
 int64_t sys_mremap(uint64_t old_addr, size_t old_size, size_t new_size, int flags, uint64_t new_addr) {
     task_t *t = proc_current();
     if (!t || !t->mm) return -EINVAL;
-    uint64_t out = 0;
+    vaddr_t out = 0;
     uint64_t mm_flags = linux_mm_lock(t);
     int r = mm_mremap(t->mm, old_addr, old_size, new_size, flags, new_addr, &out);
     linux_mm_unlock(t, mm_flags);
@@ -338,7 +351,7 @@ int64_t sys_mlock(uint64_t addr, size_t len) {
 
     linux_mm_unlock(t, mm_flags);
     for (uint64_t va = start; va < end; va += PAGE_SIZE) {
-        uint64_t *pte = pt_lookup_leaf(t->mm->pgdir, va, NULL, NULL, NULL);
+        pte_t *pte = pt_lookup_leaf(t->mm->pgdir, va, NULL, NULL, NULL);
         if (!pte || !(*pte & PTE_V)) {
             handle_demand_fault(t, va);
         }
@@ -435,7 +448,7 @@ out:
     if (ret == 0 && (flags & MCL_CURRENT) && !(flags & MCL_ONFAULT)) {
         for (vm_area_t *vma = t->mm->mmap; vma; vma = vma->next) {
             for (uint64_t va = vma->start; va < vma->end; va += PAGE_SIZE) {
-                uint64_t *pte = pt_lookup_leaf(t->mm->pgdir, va, NULL, NULL, NULL);
+                pte_t *pte = pt_lookup_leaf(t->mm->pgdir, va, NULL, NULL, NULL);
                 if (!pte || !(*pte & PTE_V))
                     handle_demand_fault(t, va);
             }
@@ -490,7 +503,7 @@ int64_t sys_mincore(uint64_t addr, size_t length, unsigned char *vec) {
     for (size_t i = 0; i < pages; i++) {
         uint64_t va = start + i * PAGE_SIZE;
         unsigned char val = 0;
-        uint64_t *pte = pt_lookup_leaf(t->mm->pgdir, va, NULL, NULL, NULL);
+        pte_t *pte = pt_lookup_leaf(t->mm->pgdir, va, NULL, NULL, NULL);
         if (pte && (*pte & PTE_V)) {
             val = 1;
         }

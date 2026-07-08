@@ -6,6 +6,7 @@
 #include "mm/vm.h"
 #include "core/trap.h"
 #include "proc/proc.h"
+#include "proc/proc_internal.h"
 #include "sys/syscall.h"
 #include "core/timer.h"
 #include "core/string.h"
@@ -83,6 +84,20 @@ static void mount_block_devices(void) {
 }
 #endif /* BRINGUP */
 
+#ifdef BRINGUP
+static void bringup_smoke_test(void) {
+    int ok = 1;
+    void *p = kmalloc(64);
+    if (!p)
+        ok = 0;
+    kfree(p);
+    if (ok)
+        printf("part ok\n");
+    printf("System is going down for power-off NOW\n");
+    firmware_shutdown();
+}
+#endif
+
 void kernel_main(void) {
     printf("\n");
     printf("======================================\n");
@@ -138,7 +153,7 @@ void kernel_main(void) {
 
 #ifdef BRINGUP
     printf("[INIT] System ready (bringup, no userspace)\n\n");
-    idle_loop();
+    bringup_smoke_test();
 #else
     int ret = proc_alloc(init_kthread);
     if (ret < 0)
@@ -181,15 +196,13 @@ void kernel_main(void) {
 
 void init_kthread(void) {
     task_t *cur = proc_current();
-    kdebug("[INIT] Init process started (pid=%d)\n", cur ? cur->pid : 0);
-
-    kdebug("[INIT] Loading init program...\n");
+    printf("[INIT] init_kthread started (pid=%d)\n", cur ? cur->pid : 0);
 
     const char *init_path = "/bin/init";
+    printf("[INIT] opening %s...\n", init_path);
     int fd = vfs_open(init_path, O_RDONLY, 0);
     if (fd < 0) {
         printf("[INIT] Cannot open /bin/init: %d\n", fd);
-        kdebug("[INIT] Falling back to ramfs /init...\n");
 
         init_path = "/init";
         fd = vfs_open(init_path, O_RDONLY, 0);
@@ -198,7 +211,7 @@ void init_kthread(void) {
         }
     }
 
-    /* Load ELF program */
+    printf("[INIT] loading ELF...\n");
     elf_load_info_t info;
     int ret = elf_load(fd, init_path, &info);
     vfs_close(fd);
@@ -207,30 +220,38 @@ void init_kthread(void) {
         panic("init: ELF load failed: %d\n", ret);
     }
 
-    kdebug("[INIT] ELF loaded: entry=0x%lx stack=0x%lx\n",
+    printf("[INIT] ELF loaded: entry=0x%lx stack=0x%lx\n",
            (unsigned long)info.entry, (unsigned long)info.stack_top);
 
     /* Set up the initial user stack with argc/argv/envp/auxv so the
      * C runtime (crt1.o / musl) finds a valid stack layout.  Without
      * this, __libc_start_main dereferences garbage and the init
-     * process crashes silently before ever reaching main(). */
+     * process crashes silently before ever reaching main().
+     */
     char *init_argv[] = { (char *)init_path, NULL };
     uint64_t user_sp = elf_setup_stack(info.stack_top, 1, init_argv, NULL, &info);
     if (user_sp == 0) {
         panic("init: elf_setup_stack failed");
     }
+    printf("[INIT] user_sp=0x%lx\n", (unsigned long)user_sp);
 
     size_t init_total_vm = 0;
     for (vm_area_t *v = info.mmap; v; v = v->next)
         init_total_vm += (v->end - v->start) / PAGE_SIZE;
 
     ret = proc_alloc_user_image(info.entry, user_sp, info.pgdir, info.mmap,
-                                info.brk, info.stack_top, init_total_vm);
+                                info.brk, info.stack_top, init_total_vm,
+                                info.tls_tp
+#ifdef CONFIG_NOMMU
+                                , info.nommu_allocs, info.num_nommu_allocs
+#endif
+                                );
     if (ret < 0) {
         panic("init: proc_alloc_user failed: %d\n", ret);
     }
 
-    kdebug("[INIT] Init process created: pid=%d\n", ret);
+    printf("[INIT] user init created: pid=%d entry=0x%lx sp=0x%lx\n",
+           ret, (unsigned long)info.entry, (unsigned long)user_sp);
 
     /* Become the init reaper: wait for any children (including the user init
      * process) so they don't become un-reaped zombies. */

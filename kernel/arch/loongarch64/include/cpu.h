@@ -8,6 +8,7 @@ static inline void arch_mb(void)  { __asm__ __volatile__("dbar 0" ::: "memory");
 static inline void arch_rmb(void) { __asm__ __volatile__("dbar 0" ::: "memory"); }
 static inline void arch_wmb(void) { __asm__ __volatile__("dbar 0" ::: "memory"); }
 static inline void arch_wfi(void) { __asm__ __volatile__("idle 0"); }
+static inline void arch_cpu_relax(void) { __asm__ __volatile__("nop"); }
 static inline void arch_fence_i(void) { 
     __asm__ __volatile__(
         "dbar 0\n\t"
@@ -31,6 +32,18 @@ static inline void arch_local_irq_enable(void) {
     __asm__ __volatile("csrrd %0, 0x0" : "=r"(val));
     val |= (1UL << 2);
     __asm__ __volatile("csrwr %0, 0x0" :: "r"(val));
+}
+static inline void arch_irqchip_init(void) {
+    uint64_t ecfg;
+    __asm__ __volatile("csrrd %0, 0x4" : "=r"(ecfg));
+    ecfg |= (1UL << 11) | (1UL << 2);
+    __asm__ __volatile("csrwr %0, 0x4" :: "r"(ecfg));
+}
+static inline void arch_irqchip_enable(void) {
+    uint64_t ecfg;
+    __asm__ __volatile("csrrd %0, 0x4" : "=r"(ecfg));
+    ecfg |= (1UL << 2);
+    __asm__ __volatile("csrwr %0, 0x4" :: "r"(ecfg));
 }
 static inline int arch_irqs_enabled(void) {
     uint64_t val;
