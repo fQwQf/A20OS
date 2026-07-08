@@ -1,15 +1,15 @@
 OUTPUT_ARCH(aarch64)
 ENTRY(_start)
 
-PHYS_BASE  = 0x40080000;
-VIRT_BASE  = 0x0000008040080000;
+PROVIDE(PHYS_BASE = 0x40080000);
+PROVIDE(VIRT_BASE = 0x0000008040080000);
 LOAD_DELTA = VIRT_BASE - PHYS_BASE;
 
 PHDRS
 {
-    text   PT_LOAD FLAGS(5); /* R-X */
-    rodata PT_LOAD FLAGS(4); /* R-- */
-    data   PT_LOAD FLAGS(6); /* RW- */
+    text   PT_LOAD FLAGS(5 /* R-X */);
+    rodata PT_LOAD FLAGS(4 /* R-- */);
+    data   PT_LOAD FLAGS(6 /* RW- */);
 }
 
 SECTIONS

@@ -4,6 +4,7 @@
 #include "abi/linux/syscall_entry.h"
 #include "abi/current.h"
 #include "abi/core_api.h"
+#include "arch/syscall_hook.h"
 #include "fs/vfs.h"
 #include "fs/file.h"
 #include "fs/fdtable.h"
@@ -153,6 +154,7 @@ int64_t sys_chroot(const char *path);
 int64_t sys_mknod(const char *path, int mode, unsigned dev);
 int64_t sys_mknodat(int dirfd, const char *path, int mode, unsigned dev);
 
+int64_t sys_set_thread_area(void *ptr);
 int64_t sys_exit(int code);
 int64_t sys_exit_group(int code);
 int64_t sys_getpid(void);
@@ -241,6 +243,7 @@ int64_t sys_bpf(int cmd, void *attr, unsigned size);
 
 int64_t sys_clock_settime(int clk, void *tp);
 int64_t sys_clock_gettime(int clk, void *tp);
+int64_t sys_clock_gettime32(int clk, void *tp);
 int64_t sys_clock_getres(int clk, void *tp);
 int64_t sys_nanosleep(void *req, void *rem);
 int64_t sys_gettimeofday(void *tv, void *tz);

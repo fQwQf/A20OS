@@ -47,7 +47,7 @@ task_t *proc_first_task_locked(void);
 task_t *proc_next_task_locked(task_t *t);
 void proc_unlink_task_locked(task_t *t);
 task_t *proc_set_current(task_t *next);
-uint64_t *proc_kernel_pgdir_shared(void);
+pt_root_t *proc_kernel_pgdir_shared(void);
 
 void proc_pid_init(void);
 int proc_pid_alloc(void);

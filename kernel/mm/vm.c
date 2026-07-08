@@ -104,18 +104,18 @@ static int vma_can_merge(vm_area_t *a, vm_area_t *b)
     return 1;
 }
 
-int mm_demote_huge_page(mm_struct_t *mm, uint64_t addr) {
+int mm_demote_huge_page(mm_struct_t *mm, vaddr_t addr) {
     int level = 0;
-    uint64_t base = 0;
+    vaddr_t base = 0;
     size_t size = 0;
-    uint64_t *pte = pt_lookup_leaf(mm->pgdir, addr, &level, &base, &size);
+    pte_t *pte = pt_lookup_leaf(mm->pgdir, addr, &level, &base, &size);
     if (!pte || !(*pte & PTE_V) || level == 0)
         return 0;
     if (size != PMD_SIZE)
         return -EOPNOTSUPP;
 
     paddr_t old_pa = arch_pte_addr(*pte);
-    uint64_t flags = arch_pte_flags(*pte);
+    pte_t flags = arch_pte_flags(*pte);
     pfn_t old_pfn = phys_to_pfn(old_pa);
     if (!pfn_valid(old_pfn))
         return -ENOMEM;
@@ -153,18 +153,18 @@ int mm_demote_huge_page(mm_struct_t *mm, uint64_t addr) {
     return 0;
 }
 
-static int mm_fork_clone_page(mm_struct_t *child, mm_struct_t *parent, uint64_t va,
+static int mm_fork_clone_page(mm_struct_t *child, mm_struct_t *parent, vaddr_t va,
                               int shared) {
     int level = 0;
-    uint64_t base = 0;
+    vaddr_t base = 0;
     size_t size = 0;
-    uint64_t *src = pt_lookup_leaf(parent->pgdir, va, &level, &base, &size);
+    pte_t *src = pt_lookup_leaf(parent->pgdir, va, &level, &base, &size);
     if (!src || !(*src & PTE_V) || !arch_pte_is_leaf(*src) || !(*src & PTE_U))
         return 0;
     if (va != base)
         return 0;
 
-    uint64_t *dst = pt_lookup_leaf(child->pgdir, va, NULL, NULL, NULL);
+    pte_t *dst = pt_lookup_leaf(child->pgdir, va, NULL, NULL, NULL);
     if (dst && (*dst & PTE_V))
         return 0;
 
@@ -173,7 +173,7 @@ static int mm_fork_clone_page(mm_struct_t *child, mm_struct_t *parent, uint64_t 
     if (!pfn_valid(pfn))
         return -ENOMEM;
 
-    uint64_t flags = shared ? arch_pte_flags(*src) : mm_cow_flags(*src);
+    pte_t flags = shared ? arch_pte_flags(*src) : mm_cow_flags(*src);
     frame_get(pfn);
 
     int r = (level > 0) ? pt_map_huge(child->pgdir, base, pa, flags)
@@ -190,7 +190,7 @@ static int mm_fork_clone_page(mm_struct_t *child, mm_struct_t *parent, uint64_t 
 }
 
 static int mm_fork_clone_range(mm_struct_t *child, mm_struct_t *parent,
-                               uint64_t start, uint64_t end, int shared) {
+                               vaddr_t start, vaddr_t end, int shared) {
     start = ROUND_DOWN(start, PAGE_SIZE);
     end = ROUND_UP(end, PAGE_SIZE);
     for (uint64_t va = start; va < end; va += PAGE_SIZE) {
@@ -202,7 +202,7 @@ static int mm_fork_clone_range(mm_struct_t *child, mm_struct_t *parent,
 }
 
 static int mm_fork_clone_leaf(mm_struct_t *child, mm_struct_t *parent,
-                              uint64_t *src_pte, uint64_t va, int level,
+                              pte_t *src_pte, vaddr_t va, int level,
                               int shared) {
     if (!src_pte || !(*src_pte & PTE_V) ||
         !arch_pte_is_leaf(*src_pte) || !(*src_pte & PTE_U))
@@ -228,7 +228,7 @@ static int mm_fork_clone_leaf(mm_struct_t *child, mm_struct_t *parent,
         frame_get(pfn);
     }
 
-    uint64_t flags = shared ? arch_pte_flags(*src_pte) : mm_cow_flags(*src_pte);
+    pte_t flags = shared ? arch_pte_flags(*src_pte) : mm_cow_flags(*src_pte);
     int r = (level > 0) ? pt_map_huge(child->pgdir, va, pa, flags)
                         : pt_map(child->pgdir, va, pa, flags);
     if (r < 0) {
@@ -247,21 +247,21 @@ static int mm_fork_clone_leaf(mm_struct_t *child, mm_struct_t *parent,
 }
 
 static int mm_fork_clone_present_level(mm_struct_t *child, mm_struct_t *parent,
-                                       uint64_t *table, int level, uint64_t base,
-                                       uint64_t start, uint64_t end, int shared) {
+                                       pte_t *table, int level, vaddr_t base,
+                                       vaddr_t start, vaddr_t end, int shared) {
     if (!table || start >= end)
         return 0;
 
     size_t span = vm_pt_level_size(level);
     for (int i = 0; i < ARCH_PT_ENTRIES; i++) {
-        uint64_t entry_base = base + (uint64_t)i * span;
-        uint64_t entry_end = entry_base + span;
+        vaddr_t entry_base = base + (vaddr_t)i * span;
+        vaddr_t entry_end = entry_base + span;
         if (entry_end <= start)
             continue;
         if (entry_base >= end)
             break;
 
-        uint64_t *pte = &table[i];
+        pte_t *pte = &table[i];
         if (!(*pte & PTE_V))
             continue;
 
@@ -284,7 +284,7 @@ static int mm_fork_clone_present_level(mm_struct_t *child, mm_struct_t *parent,
 }
 
 static int mm_fork_clone_present_range(mm_struct_t *child, mm_struct_t *parent,
-                                       uint64_t start, uint64_t end, int shared) {
+                                       vaddr_t start, vaddr_t end, int shared) {
     start = ROUND_DOWN(start, PAGE_SIZE);
     end = ROUND_UP(end, PAGE_SIZE);
     return mm_fork_clone_present_level(child, parent, parent->pgdir, ARCH_PT_ROOT_LEVEL,
@@ -303,7 +303,7 @@ static int mm_populate_shared_range(mm_struct_t *mm, vm_area_t *vma) {
         uint64_t start = ROUND_DOWN(vma->start, PAGE_SIZE);
         uint64_t end = ROUND_UP(vma->end, PAGE_SIZE);
         for (uint64_t va = start; va < end; va += PAGE_SIZE) {
-            uint64_t *pte = pt_lookup_leaf(mm->pgdir, va, NULL, NULL, NULL);
+            pte_t *pte = pt_lookup_leaf(mm->pgdir, va, NULL, NULL, NULL);
             if (pte && (*pte & PTE_V))
                 continue;
             if (mm_shared_file_fault(mm, vma, va, vf) < 0) {
@@ -318,7 +318,7 @@ static int mm_populate_shared_range(mm_struct_t *mm, vm_area_t *vma) {
     uint64_t start = ROUND_DOWN(vma->start, PAGE_SIZE);
     uint64_t end = ROUND_UP(vma->end, PAGE_SIZE);
     for (uint64_t va = start; va < end; va += PAGE_SIZE) {
-        uint64_t *pte = pt_lookup_leaf(mm->pgdir, va, NULL, NULL, NULL);
+        pte_t *pte = pt_lookup_leaf(mm->pgdir, va, NULL, NULL, NULL);
         if (pte && (*pte & PTE_V))
             continue;
 
@@ -416,15 +416,20 @@ mm_struct_t *mm_create(void) {
 // 释放 VMA 对应的物理页面
 static void free_vma_pages(mm_struct_t *mm, vm_area_t *vma)
 {
+#ifdef CONFIG_NOMMU
+    /* In NOMMU, we now track kmalloc allocations in mm->nommu_allocs.
+     * We don't free vma->start directly here to avoid double-frees and freeing
+     * invalid pointers if the VMA was split or modified by mprotect/munmap. */
+#else
     if (!mm->pgdir) return;
     int shared_file = (vma->vm_flags & (VM_FILE | VM_SHARED)) == (VM_FILE | VM_SHARED);
     for (uint64_t va = vma->start; va < vma->end; ) {
         /* 检查当前映射是否为跨越 VMA 边界的大页，
          * 若是则先降级为普通页再逐个释放。 */
         int level = 0;
-        uint64_t base = 0;
+        vaddr_t base = 0;
         size_t size = 0;
-        uint64_t *pte = pt_lookup_leaf(mm->pgdir, va, &level, &base, &size);
+        pte_t *pte = pt_lookup_leaf(mm->pgdir, va, &level, &base, &size);
         if (pte && (*pte & PTE_V) && level > 0 &&
             (base < vma->start || base + size > vma->end)) {
             mm_demote_huge_page(mm, va);
@@ -454,6 +459,7 @@ static void free_vma_pages(mm_struct_t *mm, vm_area_t *vma)
             va += PAGE_SIZE;
         }
     }
+#endif
 }
 
 // 销毁内存描述符及其所有资源
@@ -471,12 +477,22 @@ void mm_destroy(mm_struct_t *mm) {
         vma = next;
     }
 
+#ifdef CONFIG_NOMMU
+    for (int i = 0; i < mm->num_nommu_allocs; i++) {
+        if (mm->nommu_allocs[i]) {
+            kfree(mm->nommu_allocs[i]);
+            mm->nommu_allocs[i] = NULL;
+        }
+    }
+    mm->num_nommu_allocs = 0;
+#endif
+
     if (mm->pgdir) pt_destroy_user(mm->pgdir);
     kfree(mm);
 }
 
 // 查找包含指定地址的 VMA
-vm_area_t *mm_find_vma(mm_struct_t *mm, uint64_t addr) {
+vm_area_t *mm_find_vma(mm_struct_t *mm, vaddr_t addr) {
     for (vm_area_t *v = mm->mmap; v; v = v->next) {
         if (addr < v->end && addr >= v->start) return v;
         if (v->start > addr) break;
@@ -485,8 +501,8 @@ vm_area_t *mm_find_vma(mm_struct_t *mm, uint64_t addr) {
 }
 
 // 在虚拟地址空间中查找一个足够大的空隙
-uint64_t mm_find_gap(mm_struct_t *mm, uint64_t hint, size_t len) {
-    uint64_t prev_end = hint;
+vaddr_t mm_find_gap(mm_struct_t *mm, vaddr_t hint, size_t len) {
+    vaddr_t prev_end = hint;
     for (vm_area_t *v = mm->mmap; v; v = v->next) {
         if (v->start >= prev_end && v->start - prev_end >= len) return prev_end;
         if (v->end > prev_end) prev_end = v->end;
@@ -494,9 +510,9 @@ uint64_t mm_find_gap(mm_struct_t *mm, uint64_t hint, size_t len) {
     return prev_end;
 }
 
-static int mm_range_overlaps(mm_struct_t *mm, uint64_t start, uint64_t len,
+static int mm_range_overlaps(mm_struct_t *mm, vaddr_t start, vaddr_t len,
                              vm_area_t *ignore) {
-    uint64_t end = start + len;
+    vaddr_t end = start + len;
     if (end < start) return 1;
     for (vm_area_t *v = mm->mmap; v; v = v->next) {
         if (v == ignore) continue;
@@ -540,7 +556,7 @@ void mm_insert_vma(mm_struct_t *mm, vm_area_t *newv) {
     }
 }
 
-int mm_split_vma_at(mm_struct_t *mm, uint64_t addr) {
+int mm_split_vma_at(mm_struct_t *mm, vaddr_t addr) {
     vm_area_t *v = mm_find_vma(mm, addr);
     if (!v || addr <= v->start || addr >= v->end)
         return 0;
@@ -567,7 +583,7 @@ int mm_split_vma_at(mm_struct_t *mm, uint64_t addr) {
     return 0;
 }
 
-static vm_area_t *vma_split(vm_area_t *vma, uint64_t split) {
+static vm_area_t *vma_split(vm_area_t *vma, vaddr_t split) {
     if (!vma) return NULL;
     if (split <= vma->start || split >= vma->end) return vma;
 
@@ -614,8 +630,8 @@ static vm_area_t *vma_try_merge(vm_area_t *vma) {
     return vma;
 }
 
-uint64_t mm_prot_to_pte_flags(int prot) {
-    uint64_t f = PTE_V | PTE_U | PTE_A | PTE_MAT1 | PTE_LEAF;
+pte_t mm_prot_to_pte_flags(int prot) {
+    pte_t f = PTE_V | PTE_U | PTE_A | PTE_MAT1 | PTE_LEAF;
     if (prot & 1) f |= PTE_R;
     if (prot & 2) f |= (PTE_W | PTE_D);
     if (prot & 4) f |= PTE_X;
@@ -623,7 +639,7 @@ uint64_t mm_prot_to_pte_flags(int prot) {
     return f;
 }
 
-int mm_pte_flags_to_prot(uint64_t pte_flags) {
+int mm_pte_flags_to_prot(pte_t pte_flags) {
     int prot = 0;
     if (pte_flags & PTE_R) prot |= PROT_READ;
     if (pte_flags & PTE_W) prot |= PROT_WRITE;
@@ -631,7 +647,7 @@ int mm_pte_flags_to_prot(uint64_t pte_flags) {
     return prot;
 }
 
-uint64_t mm_vm_flags_to_pte_flags(uint64_t vm_flags) {
+pte_t mm_vm_flags_to_pte_flags(uint64_t vm_flags) {
     int prot = 0;
     if (vm_flags & VM_READ) prot |= 1;
     if (vm_flags & VM_WRITE) prot |= 2;
@@ -639,7 +655,7 @@ uint64_t mm_vm_flags_to_pte_flags(uint64_t vm_flags) {
     return mm_prot_to_pte_flags(prot);
 }
 
-uint64_t mm_pte_flags_to_vm_flags(uint64_t pte_flags) {
+uint64_t mm_pte_flags_to_vm_flags(pte_t pte_flags) {
     uint64_t vm = 0;
     if (pte_flags & PTE_R) vm |= VM_READ;
     if (pte_flags & PTE_W) vm |= VM_WRITE;
@@ -647,20 +663,20 @@ uint64_t mm_pte_flags_to_vm_flags(uint64_t pte_flags) {
     return vm;
 }
 
-uint64_t mm_user_stack_pte_flags(void) {
+pte_t mm_user_stack_pte_flags(void) {
     return mm_prot_to_pte_flags(1 | 2 | 4);
 }
 
-uint64_t mm_user_brk_pte_flags(void) {
+pte_t mm_user_brk_pte_flags(void) {
     return mm_prot_to_pte_flags(1 | 2);
 }
 
-int mm_pte_flags_allow_access(uint64_t pte_flags) {
+int mm_pte_flags_allow_access(pte_t pte_flags) {
     return (pte_flags & (PTE_R | PTE_W | PTE_X)) != 0;
 }
 
-uint64_t mm_pte_flags_apply_prot(uint64_t old_flags, uint64_t prot_flags) {
-    uint64_t flags = old_flags & (PTE_R | PTE_W | PTE_X | PTE_U |
+pte_t mm_pte_flags_apply_prot(pte_t old_flags, pte_t prot_flags) {
+    pte_t flags = old_flags & (PTE_R | PTE_W | PTE_X | PTE_U |
                                   PTE_G | PTE_A | PTE_D | PTE_COW |
                                   PTE_LEAF | PTE_MAT1);
     flags &= ~(uint64_t)(PTE_R | PTE_W | PTE_X | PTE_D);
@@ -670,19 +686,19 @@ uint64_t mm_pte_flags_apply_prot(uint64_t old_flags, uint64_t prot_flags) {
     return flags;
 }
 
-uint64_t mm_pte_flags_make_writable_dirty(uint64_t pte_flags) {
+pte_t mm_pte_flags_make_writable_dirty(pte_t pte_flags) {
     return pte_flags | PTE_W | PTE_D;
 }
 
 // 创建内存映射（mmap 系统调用的实现）
-uint64_t mm_mmap(mm_struct_t *mm, uint64_t addr, size_t len, int prot, int flags) {
+vaddr_t mm_mmap(mm_struct_t *mm, vaddr_t addr, size_t len, int prot, int flags) {
     if ((flags & (MAP_FIXED | MAP_FIXED_NOREPLACE)) && (addr & (PAGE_SIZE - 1)))
         return (uint64_t)-EINVAL;
     len = ROUND_UP(len, PAGE_SIZE);
     if (len == 0) return (uint64_t)-EINVAL;
     if (len > USER_VA_LIMIT) return (uint64_t)-ENOMEM;
 
-    uint64_t ptef = mm_prot_to_pte_flags(prot);
+    pte_t ptef = mm_prot_to_pte_flags(prot);
     uint64_t vmf = VM_ANON;
     if (prot & 1) vmf |= VM_READ;
     if (prot & 2) vmf |= VM_WRITE;
@@ -705,6 +721,14 @@ uint64_t mm_mmap(mm_struct_t *mm, uint64_t addr, size_t len, int prot, int flags
             addr = 0;
     }
 
+#ifdef CONFIG_NOMMU
+    if (addr == 0) {
+        void *p = kmalloc(len);
+        if (!p) return (uint64_t)-ENOMEM;
+        addr = (vaddr_t)p;
+        mm_track_nommu_alloc(mm, p);
+    }
+#else
     // 查找合适的虚拟地址
     if (addr == 0)
         addr = mm_find_gap(mm, MMAP_BASE_ADDR, len);
@@ -712,6 +736,7 @@ uint64_t mm_mmap(mm_struct_t *mm, uint64_t addr, size_t len, int prot, int flags
     if (addr == 0) return (uint64_t)-ENOMEM;
     if (addr + len < addr || addr + len > USER_VA_LIMIT)
         return (uint64_t)-ENOMEM;
+#endif
 
     // 创建新的 VMA
     vm_area_t *vma = kcalloc(1, sizeof(vm_area_t));
@@ -738,7 +763,7 @@ uint64_t mm_mmap(mm_struct_t *mm, uint64_t addr, size_t len, int prot, int flags
     return addr;
 }
 
-uint64_t mm_mmap_file(mm_struct_t *mm, uint64_t addr, size_t len,
+vaddr_t mm_mmap_file(mm_struct_t *mm, vaddr_t addr, size_t len,
                       int prot, int flags, int file_fd, uint64_t file_offset)
 {
     if (file_fd < 0 || (file_offset & (PAGE_SIZE - 1)))
@@ -772,6 +797,17 @@ uint64_t mm_mmap_file(mm_struct_t *mm, uint64_t addr, size_t len,
             addr = 0;
     }
 
+#ifdef CONFIG_NOMMU
+    if (addr == 0) {
+        void *p = kmalloc(len);
+        if (!p) {
+            vfs_close(file_fd);
+            return (uint64_t)-ENOMEM;
+        }
+        addr = (vaddr_t)p;
+        mm_track_nommu_alloc(mm, p);
+    }
+#else
     if (addr == 0)
         addr = mm_find_gap(mm, MMAP_BASE_ADDR, len);
 
@@ -779,6 +815,7 @@ uint64_t mm_mmap_file(mm_struct_t *mm, uint64_t addr, size_t len,
         vfs_close(file_fd);
         return (uint64_t)-ENOMEM;
     }
+#endif
 
     uint64_t vmf = VM_FILE;
     if (prot & 1) vmf |= VM_READ;
@@ -830,17 +867,17 @@ uint64_t mm_mmap_file(mm_struct_t *mm, uint64_t addr, size_t len,
 }
 
 static int mm_clone_shared_mapping(mm_struct_t *mm, vm_area_t *src_vma,
-                                   uint64_t src_addr, size_t len,
-                                   int flags, uint64_t new_addr,
-                                   uint64_t *out_addr) {
+                                   vaddr_t src_addr, size_t len,
+                                   int flags, vaddr_t new_addr,
+                                   vaddr_t *out_addr) {
     if (!(src_vma->vm_flags & VM_SHARED))
         return -EINVAL;
     if (src_addr + len < src_addr || src_addr + len > src_vma->end)
         return -EINVAL;
 
     int prot = mm_pte_flags_to_prot(src_vma->pte_flags);
-    uint64_t target = (flags & MREMAP_FIXED) ? new_addr : 0;
-    uint64_t dst = mm_mmap(mm, target, len, prot,
+    vaddr_t target = (flags & MREMAP_FIXED) ? new_addr : 0;
+    vaddr_t dst = mm_mmap(mm, target, len, prot,
                            (target ? MAP_FIXED : 0) | MAP_ANONYMOUS |
                            ((src_vma->vm_flags & VM_SHARED) ? MAP_SHARED : MAP_PRIVATE));
     if ((int64_t)dst < 0)
@@ -880,12 +917,12 @@ static int mm_clone_shared_mapping(mm_struct_t *mm, vm_area_t *src_vma,
         return -EBADF;
     }
 
-    for (uint64_t off = 0; off < len; ) {
+    for (vaddr_t off = 0; off < len; ) {
         int level = 0;
-        uint64_t base = 0;
+        vaddr_t base = 0;
         size_t leaf_size = 0;
         uint64_t src_va = src_addr + off;
-        uint64_t *src = pt_lookup_leaf(mm->pgdir, src_va, &level, &base, &leaf_size);
+        pte_t *src = pt_lookup_leaf(mm->pgdir, src_va, &level, &base, &leaf_size);
         if (!src || !(*src & PTE_V) || !arch_pte_is_leaf(*src))
         {
             off += PAGE_SIZE;
@@ -941,14 +978,14 @@ static int mm_clone_shared_mapping(mm_struct_t *mm, vm_area_t *src_vma,
     return 0;
 }
 
-static int mm_move_mapping_pages(mm_struct_t *mm, uint64_t old_addr,
-                                 uint64_t dst, size_t len, int dontunmap) {
-    for (uint64_t off = 0; off < len; ) {
+static int mm_move_mapping_pages(mm_struct_t *mm, vaddr_t old_addr,
+                                 vaddr_t dst, size_t len, int dontunmap) {
+    for (vaddr_t off = 0; off < len; ) {
         int level = 0;
-        uint64_t base = 0;
+        vaddr_t base = 0;
         size_t leaf_size = 0;
         uint64_t src_va = old_addr + off;
-        uint64_t *src = pt_lookup_leaf(mm->pgdir, src_va, &level, &base, &leaf_size);
+        pte_t *src = pt_lookup_leaf(mm->pgdir, src_va, &level, &base, &leaf_size);
         if (!src || !(*src & PTE_V) || !arch_pte_is_leaf(*src))
         {
             off += PAGE_SIZE;
@@ -1008,9 +1045,9 @@ static int mm_move_mapping_pages(mm_struct_t *mm, uint64_t old_addr,
     return 0;
 }
 
-int mm_mremap(mm_struct_t *mm, uint64_t old_addr, size_t old_size,
-              size_t new_size, int flags, uint64_t new_addr,
-              uint64_t *out_addr) {
+int mm_mremap(mm_struct_t *mm, vaddr_t old_addr, size_t old_size,
+              size_t new_size, int flags, vaddr_t new_addr,
+              vaddr_t *out_addr) {
     if (!mm || !out_addr) return -EINVAL;
     if (new_size == 0) return -EINVAL;
     if (old_addr & (PAGE_SIZE - 1)) return -EINVAL;
@@ -1065,7 +1102,7 @@ int mm_mremap(mm_struct_t *mm, uint64_t old_addr, size_t old_size,
     }
 
     if (new_len > old_len && !(flags & MREMAP_DONTUNMAP)) {
-        uint64_t new_end = old_addr + new_len;
+        vaddr_t new_end = old_addr + new_len;
         int can_grow = !(flags & MREMAP_FIXED);
         if (old_addr + old_len != vma->end)
             can_grow = 0;
@@ -1087,8 +1124,8 @@ int mm_mremap(mm_struct_t *mm, uint64_t old_addr, size_t old_size,
         return -EINVAL;
 
     int prot = mm_pte_flags_to_prot(vma->pte_flags);
-    uint64_t target = (flags & MREMAP_FIXED) ? new_addr : 0;
-    uint64_t dst = mm_mmap(mm, target, new_len, prot,
+    vaddr_t target = (flags & MREMAP_FIXED) ? new_addr : 0;
+    vaddr_t dst = mm_mmap(mm, target, new_len, prot,
                            (target ? MAP_FIXED : 0) | MAP_ANONYMOUS |
                            ((vma->vm_flags & VM_SHARED) ? MAP_SHARED : MAP_PRIVATE));
     if ((int64_t)dst < 0)
@@ -1144,12 +1181,12 @@ int mm_mremap(mm_struct_t *mm, uint64_t old_addr, size_t old_size,
 }
 
 // 取消内存映射（munmap 系统调用的实现）
-int mm_munmap(mm_struct_t *mm, uint64_t addr, size_t len) {
+int mm_munmap(mm_struct_t *mm, vaddr_t addr, size_t len) {
     if (!mm || !mm->pgdir) return -EINVAL;
     if (addr & (PAGE_SIZE - 1)) return -EINVAL;
     len = ROUND_UP(len, PAGE_SIZE);
     if (len == 0) return 0;
-    uint64_t end = addr + len;
+    vaddr_t end = addr + len;
     if (end < addr || end > USER_VA_LIMIT) return -EINVAL;
 
     for (vm_area_t *v = mm->mmap; v; v = v->next) {
@@ -1167,16 +1204,22 @@ int mm_munmap(mm_struct_t *mm, uint64_t addr, size_t len) {
         vm_area_t *next = vma->next;
         if (vma->start >= end || vma->end <= addr) { vma = next; continue; }
 
-        uint64_t clip_start = vma->start < addr ? addr : vma->start;
-        uint64_t clip_end   = vma->end > end ? end : vma->end;
+        vaddr_t clip_start = vma->start < addr ? addr : vma->start;
+        vaddr_t clip_end   = vma->end > end ? end : vma->end;
 
         // 释放该范围内的物理页面。遇到部分覆盖的 PMD leaf 时先降级。
         int shared_file_vma = (vma->vm_flags & (VM_FILE | VM_SHARED)) == (VM_FILE | VM_SHARED);
+#ifdef CONFIG_NOMMU
+        (void)shared_file_vma;
+        if (vma->start == clip_start && vma->end == clip_end) {
+            mm_untrack_nommu_alloc(mm, (void *)vma->start);
+        }
+#else
         for (uint64_t va = clip_start; va < clip_end; ) {
             int level = 0;
-            uint64_t base = 0;
+            vaddr_t base = 0;
             size_t size = 0;
-            uint64_t *pte = pt_lookup_leaf(mm->pgdir, va, &level, &base, &size);
+            pte_t *pte = pt_lookup_leaf(mm->pgdir, va, &level, &base, &size);
             if (!pte || !(*pte & PTE_V)) {
                 va += PAGE_SIZE;
                 continue;
@@ -1191,7 +1234,7 @@ int mm_munmap(mm_struct_t *mm, uint64_t addr, size_t len) {
                 if (pa) {
                     pfn_t pfn = phys_to_pfn(pa);
                     if (shared_file_vma && vma->file_vnode) {
-                        for (uint64_t off = 0; off < size; off += PAGE_SIZE) {
+                        for (vaddr_t off = 0; off < size; off += PAGE_SIZE) {
                             uint64_t idx = vma->file_offset + (va + off - vma->start);
                             idx /= PAGE_SIZE;
                             page_cache_page_t *pcp = page_cache_get(vma->file_vnode, idx, 0);
@@ -1211,6 +1254,7 @@ int mm_munmap(mm_struct_t *mm, uint64_t addr, size_t len) {
                 va += PAGE_SIZE;
             }
         }
+#endif
         size_t freed_pages = (clip_end - clip_start) / PAGE_SIZE;
         mm->total_vm = (mm->total_vm > freed_pages) ? mm->total_vm - freed_pages : 0;
         if (vma->vm_flags & VM_LOCKED) {
@@ -1259,30 +1303,47 @@ int mm_munmap(mm_struct_t *mm, uint64_t addr, size_t len) {
 }
 
 // 调整堆大小（brk 系统调用的实现）
-uint64_t mm_brk(mm_struct_t *mm, uint64_t newbrk) {
+vaddr_t mm_brk(mm_struct_t *mm, vaddr_t newbrk) {
     if (!mm || !mm->pgdir) return 0;
     if (newbrk == 0) return mm->brk;
     if (newbrk < mm->start_brk || newbrk > USER_VA_LIMIT)
         return mm->brk;
 
-    uint64_t old_brk_page = ROUND_UP(mm->brk, PAGE_SIZE);
-    uint64_t new_brk_page = ROUND_UP(newbrk, PAGE_SIZE);
+    vaddr_t old_brk_page = ROUND_UP(mm->brk, PAGE_SIZE);
+    vaddr_t new_brk_page = ROUND_UP(newbrk, PAGE_SIZE);
     if (new_brk_page < newbrk)
         return mm->brk;
 
-    if (newbrk > mm->brk && new_brk_page > old_brk_page) {
-        if (mm_range_overlaps(mm, old_brk_page,
-                              new_brk_page - old_brk_page, NULL))
-            return mm->brk;
+    if (newbrk > mm->brk) {
+        vaddr_t old_brk = ROUND_UP(mm->brk, PAGE_SIZE);
+        vaddr_t new_brk = ROUND_UP(newbrk, PAGE_SIZE);
+        if (new_brk > old_brk) {
+#ifdef CONFIG_NOMMU
+            size_t sz = (size_t)(new_brk - old_brk);
+            void *p = kmalloc(sz);
+            if (!p) return mm->brk;
+            memset(p, 0, sz);
+            mm_track_nommu_alloc(mm, p);
+#else
+            if (mm_range_overlaps(mm, old_brk, new_brk - old_brk, NULL))
+                return mm->brk;
+#endif
+        }
     }
 
     if (newbrk < mm->brk) {
+#ifdef CONFIG_NOMMU
+        /* NOMMU has no leaf PTEs to walk. Updating brk is sufficient; precise
+         * physical freeing would require tracking the original brk allocation. */
+        (void)new_brk_page;
+        (void)old_brk_page;
+#else
         // 缩小堆，释放多余的物理页面
         for (uint64_t va = new_brk_page; va < old_brk_page; ) {
             int level = 0;
-            uint64_t base = 0;
+            vaddr_t base = 0;
             size_t size = 0;
-            uint64_t *pte = pt_lookup_leaf(mm->pgdir, va, &level, &base, &size);
+            pte_t *pte = pt_lookup_leaf(mm->pgdir, va, &level, &base, &size);
             if (!pte || !(*pte & PTE_V)) {
                 va += PAGE_SIZE;
                 continue;
@@ -1306,29 +1367,30 @@ uint64_t mm_brk(mm_struct_t *mm, uint64_t newbrk) {
         }
         if (new_brk_page < old_brk_page)
             arch_tlb_flush();  // 刷新 TLB
+#endif
     }
     mm->brk = newbrk;
     return mm->brk;
 }
 
 // 修改内存区域的保护属性（mprotect 系统调用的实现）
-int mm_mprotect(mm_struct_t *mm, uint64_t addr, size_t len, int prot) {
+int mm_mprotect(mm_struct_t *mm, vaddr_t addr, size_t len, int prot) {
     if (!mm || !mm->pgdir) return -EINVAL;
     if (prot & ~(PROT_READ | PROT_WRITE | PROT_EXEC)) return -EINVAL;
     if (addr & (PAGE_SIZE - 1)) return -EINVAL;
     len = ROUND_UP(len, PAGE_SIZE);
     if (len == 0) return 0;
 
-    uint64_t ptef = mm_prot_to_pte_flags(prot);
+    pte_t ptef = mm_prot_to_pte_flags(prot);
     uint64_t vm_prot = 0;
     if (prot & 1) vm_prot |= VM_READ;
     if (prot & 2) vm_prot |= VM_WRITE;
     if (prot & 4) vm_prot |= VM_EXEC;
-    uint64_t end = addr + len;
+    vaddr_t end = addr + len;
     if (end < addr || end > USER_VA_LIMIT) return -ENOMEM;
     int touched = 0;
 
-    uint64_t covered = addr;
+    vaddr_t covered = addr;
     for (vm_area_t *v = mm_find_vma(mm, addr); v && covered < end; v = v->next) {
         if (v->start > covered)
             break;
@@ -1338,10 +1400,22 @@ int mm_mprotect(mm_struct_t *mm, uint64_t addr, size_t len, int prot) {
     if (covered < end)
         return -ENOMEM;
 
-    int r = mm_split_vma_at(mm, addr);
+    int     r = mm_split_vma_at(mm, addr);
     if (r < 0) return r;
     r = mm_split_vma_at(mm, end);
     if (r < 0) return r;
+
+#ifdef CONFIG_NOMMU
+    /* NOMMU has no page tables. We only update the VMA permission bits. */
+    for (vm_area_t *v = mm_find_vma(mm, addr); v && v->start < end; ) {
+        vm_area_t *next = v->next;
+        v->pte_flags = mm_pte_flags_apply_prot(v->pte_flags, ptef);
+        v->vm_flags  = (v->vm_flags & ~(uint64_t)(VM_READ | VM_WRITE | VM_EXEC)) |
+                       vm_prot;
+        v = next;
+    }
+    return 0;
+#endif
 
     for (vm_area_t *v = mm_find_vma(mm, addr); v && v->start < end; ) {
         vm_area_t *next = v->next;
@@ -1360,9 +1434,9 @@ int mm_mprotect(mm_struct_t *mm, uint64_t addr, size_t len, int prot) {
 
         for (uint64_t va = v->start; va < v->end; ) {
             int level = 0;
-            uint64_t base = 0;
+            vaddr_t base = 0;
             size_t size = 0;
-            uint64_t *pte = pt_lookup_leaf(mm->pgdir, va, &level, &base, &size);
+            pte_t *pte = pt_lookup_leaf(mm->pgdir, va, &level, &base, &size);
             if (pte && (*pte & PTE_V)) {
                 if (level > 0 && (base < v->start || base + size > v->end)) {
                     int dr = mm_demote_huge_page(mm, va);
@@ -1484,3 +1558,24 @@ fail:
     mm_destroy(child);
     return NULL;
 }
+
+#ifdef CONFIG_NOMMU
+void mm_track_nommu_alloc(mm_struct_t *mm, void *ptr) {
+    if (!mm || !ptr) return;
+    if (mm->num_nommu_allocs < 32) {
+        mm->nommu_allocs[mm->num_nommu_allocs++] = ptr;
+    } else {
+        printf("[NOMMU] WARNING: mm->nommu_allocs is full, leaking memory!\n");
+    }
+}
+void mm_untrack_nommu_alloc(mm_struct_t *mm, void *ptr) {
+    if (!mm || !ptr) return;
+    for (int i = 0; i < mm->num_nommu_allocs; i++) {
+        if (mm->nommu_allocs[i] == ptr) {
+            mm->nommu_allocs[i] = mm->nommu_allocs[--mm->num_nommu_allocs];
+            kfree(ptr);
+            return;
+        }
+    }
+}
+#endif

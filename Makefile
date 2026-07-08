@@ -2,7 +2,6 @@
 
 # Parallel build
 NPROC ?= $(shell nproc 2>/dev/null || echo 4)
-MAKEFLAGS += -j$(NPROC)
 
 # Architecture selection
 ARCH ?= riscv64
@@ -13,6 +12,7 @@ OPT ?= -O3
 NR_CPUS ?= 1
 ALLOW_UNVERIFIED_SMP ?= 0
 BOARD ?= qemu-virt-$(ARCH)
+NOMMU ?= 0
 
 ifneq ($(NR_CPUS),1)
 ifeq ($(ALLOW_UNVERIFIED_SMP),0)
@@ -75,67 +75,119 @@ PROTOCOLS_LINES = \
     'ipv6-nonxt 59 IPv6-NoNxt' \
     'ipv6-opts 60 IPv6-Opts'
 
-LIBGCC_S_riscv64 := /usr/riscv64-linux-gnu/lib/libgcc_s.so.1
-LIBGCC_S_loongarch64 := /usr/loongarch64-linux-gnu/lib/libgcc_s.so.1
-LIBGCC_S_aarch64 := /usr/lib/aarch64-linux-gnu/libgcc_s.so.1
-LIBGCC_S_x86_64 := /usr/lib/x86_64-linux-gnu/libgcc_s.so.1
-LIBGCC_S_ARCH := $(LIBGCC_S_$(ARCH))
+CROSS_PREFIX_riscv64     := riscv64-unknown-elf-
+CROSS_PREFIX_loongarch64 := loongarch64-linux-gnu-
+CROSS_PREFIX_aarch64     := aarch64-linux-gnu-
+CROSS_PREFIX_x86_64      := x86_64-linux-gnu-
+CROSS_PREFIX_arm32       := arm-linux-gnueabihf-
+CROSS_PREFIX_riscv32     := $(if $(shell command -v riscv32-linux-gnu-gcc 2>/dev/null),riscv32-linux-gnu-,riscv64-linux-gnu-)
+CROSS_PREFIX_ppc64le     := powerpc64le-linux-gnu-
+
+ARCH_CFLAGS_riscv64     := -march=rv64imafdc_zicsr_zifencei -mabi=lp64 -mcmodel=medany
+ARCH_CFLAGS_loongarch64 := -march=loongarch64 -mabi=lp64d -mcmodel=normal -fno-pic -static
+ARCH_CFLAGS_aarch64     := -march=armv8-a -mgeneral-regs-only -fno-pic -mcmodel=large -mno-outline-atomics
+ARCH_CFLAGS_x86_64      := -m64 -mcmodel=large -mno-red-zone -fno-pic -fno-pie -mgeneral-regs-only
+ARCH_CFLAGS_arm32       := -march=armv7-a -marm -mfpu=vfpv3-d16 -mfloat-abi=hard -fno-pic -static -mno-unaligned-access
+ARCH_CFLAGS_riscv32     := -march=rv32imafdc -mabi=ilp32d -mcmodel=medany -fno-pic -static
+ARCH_CFLAGS_ppc64le     := -m64 -mcpu=power8 -mtune=power8 -mlong-double-64 -fno-pic -static -mno-vsx -mno-altivec -fno-tree-vectorize
+
+PHYS_BASE_aarch64     := 0x40080000
+PHYS_BASE_arm32       := 0x40080000
+PHYS_BASE_ppc64le     := 0x00400000
+PHYS_BASE_riscv32     := 0x80200000
+PHYS_BASE_riscv64     := 0x80200000
+PHYS_BASE_x86_64      := 0x00200000
+PHYS_BASE_loongarch64 := 0x9000000000000000
+
+ifeq ($(NOMMU),1)
+CFLAGS += -DCONFIG_NOMMU
+LDFLAGS_NOMMU := -Wl,--defsym=VIRT_BASE=$(PHYS_BASE_$(ARCH))
+endif
+
+ARCH_LDFLAGS_riscv64     :=
+ARCH_LDFLAGS_loongarch64 := -static -no-pie
+ARCH_LDFLAGS_aarch64     := -static -no-pie
+ARCH_LDFLAGS_x86_64      := -static -no-pie
+ARCH_LDFLAGS_arm32       := -static -no-pie
+ARCH_LDFLAGS_riscv32     := -static -no-pie -Wl,-m,elf32lriscv
+ARCH_LDFLAGS_ppc64le     := -static -no-pie
+
+ARCH_LIBS_riscv64     :=
+ARCH_LIBS_loongarch64 :=
+ARCH_LIBS_aarch64     :=
+ARCH_LIBS_x86_64      :=
+ARCH_LIBS_arm32       := -lgcc
+ARCH_LIBS_riscv32     := -lgcc
+ARCH_LIBS_ppc64le     :=
+
+QEMU_riscv64     := qemu-system-riscv64
+QEMU_loongarch64 := qemu-system-loongarch64
+QEMU_aarch64     := qemu-system-aarch64
+QEMU_x86_64      := qemu-system-x86_64
+QEMU_arm32       := qemu-system-arm
+QEMU_riscv32     := qemu-system-riscv32
+QEMU_ppc64le     := qemu-system-ppc64
+
+QEMU_FLAGS_BASE_riscv64     := -machine virt -bios default -global virtio-mmio.force-legacy=false
+QEMU_FLAGS_BASE_loongarch64 := -machine virt
+QEMU_FLAGS_BASE_aarch64     := -machine virt -cpu cortex-a57 -global virtio-mmio.force-legacy=false
+QEMU_FLAGS_BASE_x86_64      := -machine q35 -no-reboot
+QEMU_FLAGS_BASE_arm32       := -machine virt -cpu cortex-a15
+QEMU_FLAGS_BASE_riscv32     := -machine virt -bios default -global virtio-mmio.force-legacy=false
+QEMU_FLAGS_BASE_ppc64le     := -machine pseries
+
+QEMU_BLK_riscv64     := virtio-blk-device,bus=virtio-mmio-bus.0
+QEMU_BLK_loongarch64 := virtio-blk-pci
+QEMU_BLK_aarch64     := virtio-blk-device,bus=virtio-mmio-bus.0
+QEMU_BLK_x86_64      := virtio-blk-pci
+QEMU_BLK_arm32       := virtio-blk-device,bus=virtio-mmio-bus.0
+QEMU_BLK_riscv32     := virtio-blk-device,bus=virtio-mmio-bus.0
+QEMU_BLK_ppc64le     := virtio-blk-pci
+
+QEMU_NET_riscv64     := virtio-net-device,bus=virtio-mmio-bus.4
+QEMU_NET_loongarch64 := virtio-net-pci
+QEMU_NET_aarch64     := virtio-net-device,bus=virtio-mmio-bus.4
+QEMU_NET_x86_64      := virtio-net-pci
+QEMU_NET_arm32       := virtio-net-device,bus=virtio-mmio-bus.4
+QEMU_NET_riscv32     := virtio-net-device,bus=virtio-mmio-bus.4
+QEMU_NET_ppc64le     := virtio-net-pci
 
 # Compiler and tools
-ifeq ($(ARCH), riscv64)
-    CROSS_PREFIX = riscv64-unknown-elf-
-    ARCH_CFLAGS = -march=rv64imafdc_zicsr_zifencei -mabi=lp64 -mcmodel=medany
-    ARCH_LDFLAGS =
-QEMU = qemu-system-riscv64
-QEMU_FLAGS = -machine virt -m 1G -nographic -smp $(NR_CPUS) -bios default -global virtio-mmio.force-legacy=false
-else ifeq ($(ARCH), loongarch64)
-    CROSS_PREFIX = loongarch64-linux-gnu-
-    ARCH_CFLAGS = -march=loongarch64 -mabi=lp64d -mcmodel=normal -fno-pic -static
-    ARCH_LDFLAGS = -static -no-pie
-    QEMU = qemu-system-loongarch64
-    QEMU_FLAGS = -machine virt -m 1G -nographic -smp $(NR_CPUS)
-else ifeq ($(ARCH), aarch64)
-    CROSS_PREFIX = aarch64-linux-gnu-
-    ARCH_CFLAGS = -march=armv8-a -mgeneral-regs-only -fno-pic -mcmodel=large -mno-outline-atomics
-    ARCH_LDFLAGS = -static -no-pie
-    QEMU = qemu-system-aarch64
-    QEMU_FLAGS = -machine virt -cpu cortex-a57 -m 1G -nographic -smp $(NR_CPUS) -global virtio-mmio.force-legacy=false
-else ifeq ($(ARCH), x86_64)
-    CROSS_PREFIX = x86_64-linux-gnu-
-    ARCH_CFLAGS = -m64 -mcmodel=large -mno-red-zone -fno-pic -fno-pie -mgeneral-regs-only
-    ARCH_LDFLAGS = -static -no-pie
-    QEMU = qemu-system-x86_64
-    QEMU_FLAGS = -machine q35 -m 1G -nographic -smp $(NR_CPUS) -no-reboot
+CROSS_PREFIX := $(CROSS_PREFIX_$(ARCH))
+ARCH_CFLAGS  := $(ARCH_CFLAGS_$(ARCH))
+ARCH_LDFLAGS := $(ARCH_LDFLAGS_$(ARCH))
+ARCH_LIBS    := $(ARCH_LIBS_$(ARCH))
+QEMU         := $(QEMU_$(ARCH))
+QEMU_FLAGS   := $(QEMU_FLAGS_BASE_$(ARCH)) -m 1G -nographic -smp $(NR_CPUS)
+QEMU_BLK     := $(QEMU_BLK_$(ARCH))
+QEMU_NET     := $(QEMU_NET_$(ARCH))
+
+ifeq ($(CROSS_PREFIX),)
+$(error Unsupported ARCH '$(ARCH)')
 endif
 
 MKFS_FAT ?= $(or $(shell command -v mkfs.fat 2>/dev/null),$(wildcard /usr/sbin/mkfs.fat),$(wildcard /sbin/mkfs.fat),mkfs.fat)
 MKFS_EXT4 ?= $(or $(shell command -v mkfs.ext4 2>/dev/null),$(wildcard /usr/sbin/mkfs.ext4),$(wildcard /sbin/mkfs.ext4),mkfs.ext4)
+CC := $(CROSS_PREFIX)gcc
+
+LIBGCC_S_ARCH := $(shell $(CC) $(ARCH_CFLAGS) -print-file-name=libgcc_s.so.1 2>/dev/null)
+ifeq ($(LIBGCC_S_ARCH),libgcc_s.so.1)
+LIBGCC_S_ARCH :=
+endif
 
 # In bringup mode, boot kernel only (no fs image dependency).
 ifneq ($(BRINGUP),1)
-ifeq ($(ARCH), riscv64)
-QEMU_FLAGS += -drive file=$(FAT32_IMG),if=none,format=raw,id=x0 -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0
-QEMU_FLAGS += $(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4
-
+QEMU_FLAGS += -drive file=$(FAT32_IMG),if=none,format=raw,id=x0 -device $(QEMU_BLK),drive=x0
+QEMU_FLAGS += $(NETDEV_USER) -device $(QEMU_NET),netdev=net
+ifeq ($(ARCH),riscv64)
 ifneq ($(wildcard sdcard-rv.img),)
-QEMU_FLAGS += -drive file=sdcard-rv.img,if=none,format=raw,id=x1 -device virtio-blk-device,drive=x1,bus=virtio-mmio-bus.1
+QEMU_FLAGS += -drive file=sdcard-rv.img,if=none,format=raw,id=x1 -device $(QEMU_BLK),drive=x1
 endif
-
-else ifeq ($(ARCH), loongarch64)
-QEMU_FLAGS += -drive file=$(FAT32_IMG),if=none,format=raw,id=x0 -device virtio-blk-pci,drive=x0
-QEMU_FLAGS += $(NETDEV_USER) -device virtio-net-pci,netdev=net
-
+endif
+ifeq ($(ARCH),loongarch64)
 ifneq ($(wildcard sdcard-la.img),)
-QEMU_FLAGS += -drive file=sdcard-la.img,if=none,format=raw,id=x1 -device virtio-blk-pci,drive=x1
+QEMU_FLAGS += -drive file=sdcard-la.img,if=none,format=raw,id=x1 -device $(QEMU_BLK),drive=x1
 endif
-
-else ifeq ($(ARCH), aarch64)
-QEMU_FLAGS += -drive file=$(FAT32_IMG),if=none,format=raw,id=x0 -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0
-QEMU_FLAGS += $(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4
-else ifeq ($(ARCH), x86_64)
-QEMU_FLAGS += -drive file=$(FAT32_IMG),if=none,format=raw,id=x0 -device virtio-blk-pci,drive=x0
-QEMU_FLAGS += $(NETDEV_USER) -device virtio-net-pci,netdev=net
-
 endif
 endif
 
@@ -151,6 +203,16 @@ CFLAGS = -Wall -Wextra $(OPT) -ffreestanding -nostdlib \
          -DCONFIG_ABI_$(shell echo $(ABI) | tr a-z A-Z) \
          -DCONFIG_NR_CPUS=$(NR_CPUS) \
          -DCONFIG_BOARD_$(shell echo $(BOARD) | tr a-z A-Z | tr - _)
+ifeq ($(filter $(ARCH),arm32 riscv32),)
+CFLAGS += -DCONFIG_64BIT
+else
+CFLAGS += -DCONFIG_32BIT
+endif
+ifeq ($(ARCH),arm32)
+# ARM32 supplies its own short-descriptor page-table backend.
+else
+CFLAGS += -DARCH_HAS_PGTABLE_OPS
+endif
 ifeq ($(ABI),both)
 CFLAGS += -DCONFIG_ABI_NATIVE
 endif
@@ -160,12 +222,16 @@ ifeq ($(BRINGUP),1)
 CFLAGS += -DBRINGUP
 endif
 
+ifeq ($(NOMMU),1)
+CFLAGS += -DCONFIG_NOMMU
+endif
+
 # Synthetic driver lifecycle test (disabled by default).
 ifeq ($(CONFIG_DRIVER_LIFECYCLE_TEST),y)
 CFLAGS += -DCONFIG_DRIVER_LIFECYCLE_TEST
 endif
 
-LDFLAGS = -nostdlib -nostartfiles -Wl,--build-id=none -T $(KERNEL_DIR)/arch/$(ARCH)/boot/ldscript.ld $(ARCH_LDFLAGS)
+LDFLAGS = -nostdlib -nostartfiles -Wl,--build-id=none -T $(KERNEL_DIR)/arch/$(ARCH)/boot/ldscript.ld $(ARCH_LDFLAGS) $(LDFLAGS_NOMMU)
 
 # Source files
 # ABI-specific source directories
@@ -226,15 +292,16 @@ KERNEL_BIN = $(BUILD_DIR)/kernel.bin
 # Targets
 # ================================================================
 
-.PHONY: all clean run-riscv64 run-loongarch64 run-arm64 run-x86_64 debug-riscv64 debug-loongarch64 debug-arm64 debug-x86_64 \
+.PHONY: all clean run-riscv64 run-loongarch64 run-arm64 run-x86_64 run-arm32 run-riscv32 run-ppc64le debug-riscv64 debug-loongarch64 debug-arm64 debug-x86_64 debug-arm32 debug-riscv32 debug-ppc64le \
 		check-kernel-build check-user-build check-dev-build check-contest-build check-build-matrix check-abi-smoke-gate check-doc-drift check-doc-test-gates check-final-definition check-concurrency-foundation check-mm-lock-model check-abi-boundary check-driver-core-model check-external-dependency-boundary \
-		check-riscv64-bringup check-loongarch64-bringup check-aarch64-bringup check-x86_64-bringup \
-		check-riscv64-user check-loongarch64-user check-aarch64-user check-x86_64-user \
-		smoke-riscv64 smoke-loongarch64 smoke-aarch64 smoke-x86_64 smoke-abi-linux smoke-network-suite smoke-proc-a20 smoke-proc-stress smoke-mm-stress smoke-vfs-stress smoke-vfs-edge smoke-sched-stress smoke-futex-stress smoke-socket-stress smoke-driver-lifecycle smoke-native-handle smoke-native-libc smoke-io-event \\
+		check-riscv64-bringup check-loongarch64-bringup check-aarch64-bringup check-x86_64-bringup check-arm32-bringup check-riscv32-bringup check-ppc64le-bringup \
+		check-riscv64-user check-loongarch64-user check-aarch64-user check-x86_64-user check-arm32-user check-riscv32-user check-ppc64le-user \
+		smoke-riscv64 smoke-loongarch64 smoke-aarch64 smoke-x86_64 smoke-arm32 smoke-riscv32 smoke-ppc64le smoke-abi-linux smoke-network-suite smoke-proc-a20 smoke-proc-stress smoke-mm-stress smoke-vfs-stress smoke-vfs-edge smoke-sched-stress smoke-futex-stress smoke-socket-stress smoke-driver-lifecycle smoke-native-handle smoke-native-libc smoke-io-event \
 		FORCE regen-rootfs-overlay \
 		user_apps fs_img kernel-only dev-build contest-rv contest-la \
 		eval-dev-build-rv eval-dev-build-la \
-		extra-img extra-user-apps run-riscv64-extra run-loongarch64-extra run-arm64-extra \
+		qemu-disk-rv qemu-disk-la \
+		extra-img extra-user-apps run-riscv64-extra run-loongarch64-extra run-arm64-extra run-x86_64-extra run-arm32-extra run-riscv32-extra run-ppc64le-extra \
 		native-test-rv native-test-la native-test native-minimal-rv native-minimal-la native-minimal native-handle-test-rv native-handle-test-la native-handle-test native-libc-rv native-libc-la native-libc \
 		eval eval-rv eval-la
 
@@ -248,6 +315,9 @@ regen-rootfs-overlay: scripts/gen_rootfs_overlay.py $(ROOTFS_OVERLAY_FILES)
 	@mkdir -p $(dir $(ROOTFS_OVERLAY_SRC)) $(dir $(ROOTFS_OVERLAY_HDR))
 	python3 $< --out-c $(ROOTFS_OVERLAY_SRC) --out-h $(ROOTFS_OVERLAY_HDR) --root $(ROOTFS_OVERLAY_DIR)
 
+$(ROOTFS_OVERLAY_SRC) $(ROOTFS_OVERLAY_HDR): scripts/gen_rootfs_overlay.py $(ROOTFS_OVERLAY_FILES)
+	python3 $< --out-c $(ROOTFS_OVERLAY_SRC) --out-h $(ROOTFS_OVERLAY_HDR) --root $(ROOTFS_OVERLAY_DIR)
+
 # ----------------------------------------------------------------
 # Competition build: produces kernel-rv, kernel-la, disk.img,
 # disk-la.img (what the judge expects from `make all`).
@@ -258,7 +328,7 @@ all:
 	@echo "=== Competition build complete ==="
 	@echo "  kernel-rv  kernel-la  disk.img  disk-la.img"
 
-check-kernel-build: check-riscv64-bringup check-loongarch64-bringup check-aarch64-bringup check-x86_64-bringup
+check-kernel-build: check-riscv64-bringup check-loongarch64-bringup check-aarch64-bringup check-x86_64-bringup check-arm32-bringup check-riscv32-bringup check-ppc64le-bringup
 
 check-riscv64-bringup:
 	$(MAKE) ARCH=riscv64 ABI=$(ABI) BRINGUP=1 kernel-only
@@ -272,7 +342,16 @@ check-aarch64-bringup:
 check-x86_64-bringup:
 	$(MAKE) ARCH=x86_64 ABI=$(ABI) BRINGUP=1 kernel-only
 
-check-user-build: check-riscv64-user check-loongarch64-user check-aarch64-user check-x86_64-user
+check-arm32-bringup:
+	$(MAKE) ARCH=arm32 ABI=$(ABI) BRINGUP=1 kernel-only
+
+check-riscv32-bringup:
+	$(MAKE) ARCH=riscv32 ABI=$(ABI) BRINGUP=1 kernel-only
+
+check-ppc64le-bringup:
+	$(MAKE) ARCH=ppc64le ABI=$(ABI) BRINGUP=1 kernel-only
+
+check-user-build: check-riscv64-user check-loongarch64-user check-aarch64-user check-x86_64-user check-arm32-user check-riscv32-user check-ppc64le-user
 
 check-build-matrix: check-kernel-build check-user-build
 	@rg -q "BUILD_MATRIX_GATE_CONTRACT" docs/testing-gates.md
@@ -326,6 +405,15 @@ check-aarch64-user:
 
 check-x86_64-user:
 	$(MAKE) -C user ARCH=x86_64 OPT="$(OPT)"
+
+check-arm32-user:
+	$(MAKE) -C user ARCH=arm32 OPT="$(OPT)"
+
+check-riscv32-user:
+	$(MAKE) -C user ARCH=riscv32 OPT="$(OPT)"
+
+check-ppc64le-user:
+	$(MAKE) -C user ARCH=ppc64le OPT="$(OPT)"
 
 check-dev-build:
 	$(MAKE) ARCH=riscv64 ABI=$(ABI) BRINGUP=0 dev-build
@@ -452,7 +540,7 @@ check-external-dependency-boundary:
 	@echo "check-external-dependency-boundary: PASS"
 
 smoke-riscv64:
-	$(MAKE) ARCH=riscv64 ABI=$(ABI) BRINGUP=1 kernel-only
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=1 kernel-only
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/riscv64-bringup.log"; \
@@ -473,7 +561,7 @@ smoke-riscv64:
 	fi
 
 smoke-loongarch64:
-	$(MAKE) ARCH=loongarch64 ABI=$(ABI) BRINGUP=1 kernel-only
+	$(MAKE) ARCH=loongarch64 ABI=linux BRINGUP=1 kernel-only
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/loongarch64-bringup.log"; \
@@ -493,7 +581,7 @@ smoke-loongarch64:
 	fi
 
 smoke-aarch64:
-	$(MAKE) ARCH=aarch64 ABI=$(ABI) BRINGUP=1 kernel-only
+	$(MAKE) ARCH=aarch64 ABI=linux BRINGUP=1 kernel-only
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/aarch64-bringup.log"; \
@@ -514,7 +602,7 @@ smoke-aarch64:
 	fi
 
 smoke-x86_64:
-	$(MAKE) ARCH=x86_64 ABI=$(ABI) BRINGUP=1 kernel-only
+	$(MAKE) ARCH=x86_64 ABI=linux BRINGUP=1 kernel-only
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/x86_64-bringup.log"; \
@@ -530,6 +618,73 @@ smoke-x86_64:
 	else \
 		echo "smoke-x86_64: QEMU failed with status $$status; tail of $$log:"; \
 		tail -n 40 "$$log"; \
+		exit "$$status"; \
+	fi
+
+smoke-arm32:
+	$(MAKE) ARCH=arm32 ABI=linux BRINGUP=1 kernel-only
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/arm32-bringup.log"; \
+	status=0; \
+	timeout $(SMOKE_TIMEOUT) qemu-system-arm \
+		-machine virt -cpu cortex-a15 -m 1G -nographic -smp 1 \
+		-kernel .kernel-build/arm32-linux-bringup/kernel.elf \
+		> "$$log" 2>&1 || status=$$?; \
+	if grep -q 'part ok' "$$log" && grep -q 'System is going down for power-off NOW' "$$log"; then \
+		echo "smoke-arm32: PASS; log saved to $$log"; \
+	elif [ "$$status" -eq 124 ]; then \
+		echo "smoke-arm32: timeout without PASS; tail of $$log:"; \
+		tail -n 80 "$$log"; \
+		exit 1; \
+	else \
+		echo "smoke-arm32: failed with status $$status; tail of $$log:"; \
+		tail -n 80 "$$log"; \
+		exit "$$status"; \
+	fi
+
+smoke-riscv32:
+	$(MAKE) ARCH=riscv32 ABI=linux BRINGUP=1 kernel-only
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/riscv32-bringup.log"; \
+	status=0; \
+	timeout $(SMOKE_TIMEOUT) qemu-system-riscv32 \
+		-machine virt -m 1G -nographic -smp 1 -bios default \
+		-global virtio-mmio.force-legacy=false \
+		-kernel .kernel-build/riscv32-linux-bringup/kernel.elf \
+		> "$$log" 2>&1 || status=$$?; \
+	if grep -q 'part ok' "$$log" && grep -q 'System is going down for power-off NOW' "$$log"; then \
+		echo "smoke-riscv32: PASS; log saved to $$log"; \
+	elif [ "$$status" -eq 124 ]; then \
+		echo "smoke-riscv32: timeout without PASS; tail of $$log:"; \
+		tail -n 80 "$$log"; \
+		exit 1; \
+	else \
+		echo "smoke-riscv32: failed with status $$status; tail of $$log:"; \
+		tail -n 80 "$$log"; \
+		exit "$$status"; \
+	fi
+
+smoke-ppc64le:
+	$(MAKE) ARCH=ppc64le ABI=linux BRINGUP=1 kernel-only
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/ppc64le-bringup.log"; \
+	status=0; \
+	timeout $(SMOKE_TIMEOUT) qemu-system-ppc64 \
+		-machine pseries -m 1G -nographic -smp 1 \
+		-kernel .kernel-build/ppc64le-linux-bringup/kernel.elf \
+		> "$$log" 2>&1 || status=$$?; \
+	if grep -q 'part ok' "$$log" && grep -q 'System is going down for power-off NOW' "$$log"; then \
+		echo "smoke-ppc64le: PASS; log saved to $$log"; \
+	elif [ "$$status" -eq 124 ]; then \
+		echo "smoke-ppc64le: timeout without PASS; tail of $$log:"; \
+		tail -n 80 "$$log"; \
+		exit 1; \
+	else \
+		echo "smoke-ppc64le: failed with status $$status; tail of $$log:"; \
+		tail -n 80 "$$log"; \
 		exit "$$status"; \
 	fi
 
@@ -910,7 +1065,10 @@ dev-build: $(KERNEL_BIN) $(USER_BUILD_STAMP) $(FS_TEST_IMG) $(EXT4_IMG)
 
 user_apps: $(USER_BUILD_STAMP)
 
-$(USER_BUILD_STAMP): FORCE
+.PHONY: $(USER_BUILD_STAMP) user_apps
+
+USER_BUILD_FILES := $(wildcard user/build/*)
+$(USER_BUILD_STAMP): user/Makefile $(USER_BUILD_FILES) | $(USER_BUILD_CHECK_DIRS)
 	@set -e; \
 	mkdir -p $(dir $@); \
 	current=""; \
@@ -1010,13 +1168,13 @@ $(KERNEL_BIN): $(KERNEL_ELF)
 
 $(KERNEL_ELF): $(KERNEL_OBJ) $(ASM_OBJ) $(KERNEL_DIR)/arch/$(ARCH)/boot/ldscript.ld
 	@mkdir -p $(dir $@)
-	$(CROSS_PREFIX)gcc $(LDFLAGS) $(KERNEL_OBJ) $(ASM_OBJ) -o $@
+	$(CROSS_PREFIX)gcc $(LDFLAGS) $(KERNEL_OBJ) $(ASM_OBJ) $(ARCH_LIBS) -o $@
 
-$(BUILD_DIR)/%.o: $(KERNEL_DIR)/%.c Makefile | $(BUILD_TIME_HDR)
+$(BUILD_DIR)/%.o: $(KERNEL_DIR)/%.c | Makefile $(BUILD_TIME_HDR)
 	@mkdir -p $(dir $@)
 	$(CROSS_PREFIX)gcc $(CFLAGS) -c $< -o $@
 
-$(BUILD_DIR)/%.o: $(KERNEL_DIR)/%.S Makefile
+$(BUILD_DIR)/%.o: $(KERNEL_DIR)/%.S Makefile | $(BUILD_TIME_HDR)
 	@mkdir -p $(dir $@)
 	$(CROSS_PREFIX)gcc $(CFLAGS) -c $< -o $@
 
@@ -1037,6 +1195,9 @@ kernel-only: $(KERNEL_BIN)
 # Run targets (development mode)
 # ----------------------------------------------------------------
 
+run:
+	$(MAKE) ARCH=$(ARCH) BRINGUP=$(BRINGUP) _run_impl
+
 run-riscv64:
 	$(MAKE) ARCH=riscv64 BRINGUP=$(BRINGUP) _run_impl
 
@@ -1049,6 +1210,36 @@ run-arm64:
 run-x86_64:
 	$(MAKE) ARCH=x86_64 BRINGUP=$(BRINGUP) _run_impl
 
+run-arm32:
+	$(MAKE) ARCH=arm32 BRINGUP=$(BRINGUP) _run_impl
+
+run-riscv32:
+	$(MAKE) ARCH=riscv32 BRINGUP=$(BRINGUP) _run_impl
+
+run-ppc64le:
+	$(MAKE) ARCH=ppc64le BRINGUP=$(BRINGUP) _run_impl
+
+run-nommu-riscv64:
+	$(MAKE) ARCH=riscv64 BRINGUP=$(BRINGUP) NOMMU=1 _run_impl
+
+run-nommu-loongarch64:
+	$(MAKE) ARCH=loongarch64 BRINGUP=$(BRINGUP) NOMMU=1 _run_impl
+
+run-nommu-arm64:
+	$(MAKE) ARCH=aarch64 BRINGUP=$(BRINGUP) NOMMU=1 _run_impl
+
+run-nommu-x86_64:
+	$(MAKE) ARCH=x86_64 BRINGUP=$(BRINGUP) NOMMU=1 _run_impl
+
+run-nommu-arm32:
+	$(MAKE) ARCH=arm32 BRINGUP=$(BRINGUP) NOMMU=1 _run_impl
+
+run-nommu-riscv32:
+	$(MAKE) ARCH=riscv32 BRINGUP=$(BRINGUP) NOMMU=1 _run_impl
+
+run-nommu-ppc64le:
+	$(MAKE) ARCH=ppc64le BRINGUP=$(BRINGUP) NOMMU=1 _run_impl
+
 _run_impl:
 ifeq ($(BRINGUP),1)
 	$(MAKE) ARCH=$(ARCH) BRINGUP=1 kernel-only
@@ -1058,8 +1249,6 @@ endif
 	$(QEMU) $(QEMU_FLAGS) -kernel $(KERNEL_ELF)
 
 # --- Debug Targets ---
-
-DEBUG_CFLAGS = $(filter-out -O0 -O1 -O2 -O3 -Os -Oz,$(CFLAGS)) -O0 -g -DDEBUG
 
 debug-riscv64:
 	$(MAKE) ARCH=riscv64 BRINGUP=$(BRINGUP) _debug_impl
@@ -1072,6 +1261,15 @@ debug-arm64:
 
 debug-x86_64:
 	$(MAKE) ARCH=x86_64 BRINGUP=$(BRINGUP) _debug_impl
+
+debug-arm32:
+	$(MAKE) ARCH=arm32 BRINGUP=$(BRINGUP) _debug_impl
+
+debug-riscv32:
+	$(MAKE) ARCH=riscv32 BRINGUP=$(BRINGUP) _debug_impl
+
+debug-ppc64le:
+	$(MAKE) ARCH=ppc64le BRINGUP=$(BRINGUP) _debug_impl
 
 _debug_impl:
 ifeq ($(BRINGUP),1)
@@ -1175,6 +1373,12 @@ else ifeq ($(ARCH), aarch64)
 EXTRA_QEMU_BLK = -drive file=$(EXTRA_IMG),if=none,format=raw,id=xextra -device virtio-blk-device,drive=xextra,bus=virtio-mmio-bus.5
 else ifeq ($(ARCH), x86_64)
 EXTRA_QEMU_BLK = -drive file=$(EXTRA_IMG),if=none,format=raw,id=xextra -device virtio-blk-pci,drive=xextra
+else ifeq ($(ARCH), arm32)
+EXTRA_QEMU_BLK = -drive file=$(EXTRA_IMG),if=none,format=raw,id=xextra -device virtio-blk-device,drive=xextra,bus=virtio-mmio-bus.5
+else ifeq ($(ARCH), riscv32)
+EXTRA_QEMU_BLK = -drive file=$(EXTRA_IMG),if=none,format=raw,id=xextra -device virtio-blk-device,drive=xextra,bus=virtio-mmio-bus.5
+else ifeq ($(ARCH), ppc64le)
+EXTRA_QEMU_BLK = -drive file=$(EXTRA_IMG),if=none,format=raw,id=xextra -device virtio-blk-pci,drive=xextra
 endif
 
 run-riscv64-extra:
@@ -1188,6 +1392,15 @@ run-arm64-extra:
 
 run-x86_64-extra:
 	$(MAKE) ARCH=x86_64 BRINGUP=0 _run_extra_impl
+
+run-arm32-extra:
+	$(MAKE) ARCH=arm32 BRINGUP=0 _run_extra_impl
+
+run-riscv32-extra:
+	$(MAKE) ARCH=riscv32 BRINGUP=0 _run_extra_impl
+
+run-ppc64le-extra:
+	$(MAKE) ARCH=ppc64le BRINGUP=0 _run_extra_impl
 
 _run_extra_impl:
 	$(MAKE) ARCH=$(ARCH) BRINGUP=0 dev-build

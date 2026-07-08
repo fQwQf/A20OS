@@ -13,13 +13,14 @@
 #include "core/consts.h"
 #include "core/klog.h"
 
-static int fetch_user_insn(task_t *task, uint64_t va, uint32_t *insn_out) {
+static int fetch_user_insn(task_t *task, vaddr_t va, uint32_t *insn_out) {
     if (!task || !task->mm || !task->mm->pgdir || !insn_out)
         return 0;
     return mm_fetch_user_insn32(task->mm->pgdir, va, insn_out);
 }
 
 static int ktrap_diag_count = 0;
+static int pid3_irq_diag_count = 0;
 
 static void dump_trap_context(trap_context_t *ctx) {
     kerr("  regs: ra=0x%lx sp=0x%lx tp=0x%lx\n",
@@ -37,7 +38,7 @@ static void dump_trap_context(trap_context_t *ctx) {
          (unsigned long)TRAP_CTX_SYSCALL_NUM(ctx));
 }
 
-static void dump_kernel_backtrace(trap_context_t *ctx, uint64_t pc, int max_frames) {
+static void dump_kernel_backtrace(trap_context_t *ctx, vaddr_t pc, int max_frames) {
     kerr("  backtrace:\n");
     kerr("    [%d] pc=0x%lx\n", 0, (unsigned long)pc);
     struct backtrace_frame frames[16];
@@ -47,12 +48,12 @@ static void dump_kernel_backtrace(trap_context_t *ctx, uint64_t pc, int max_fram
     }
 }
 
-static void dump_fault_pte(task_t *task, uint64_t va) {
+static void dump_fault_pte(task_t *task, vaddr_t va) {
     if (!task || !task->mm || !task->mm->pgdir)
         return;
 
     uintptr_t pte_slot = 0;
-    uint64_t pte_value = 0;
+    pte_t pte_value = 0;
     mm_debug_pte_value(task->mm->pgdir, va, &pte_slot, &pte_value);
     kerr("  pte=%p value=0x%lx\n", (void *)pte_slot, pte_value);
     kerr("  mm: brk=0x%lx start_brk=0x%lx stack=[0x%lx,0x%lx)\n",
@@ -112,9 +113,9 @@ static int user_sync_signal_is_handled(task_t *task, int sig) {
 }
 
 void trap_handler(trap_context_t *ctx) {
-    uint64_t scause = arch_read_cause();
-    uint64_t stval = arch_read_tval();
-    uint64_t sepc = arch_read_epc();
+    reg_t scause = arch_read_cause();
+    vaddr_t stval = arch_read_tval();
+    vaddr_t sepc = arch_read_epc();
 
     TRAP_CTX_KScratch0(ctx) = arch_read_addr_space_token();
     task_t *current = proc_current();
@@ -122,14 +123,25 @@ void trap_handler(trap_context_t *ctx) {
         current->trap_ctx = ctx;
 
     if (scause & CAUSE_INTR_MASK) {
+        if (current && current->pid == 3 && pid3_irq_diag_count < 256) {
+            pid3_irq_diag_count++;
+            printf("[PID3IRQ] pc=0x%lx sp=0x%lx lr=0x%lx\n",
+                   (unsigned long)TRAP_CTX_EPC(ctx),
+                   (unsigned long)TRAP_CTX_SP(ctx),
+                   (unsigned long)TRAP_CTX_RA(ctx));
+        }
         arch_handle_irq(scause & CAUSE_CODE_MASK, 1);
+        if (current && current->pid == 3 && pid3_irq_diag_count < 256)
+            printf("[PID3IRQD] cur=%d state=%d\n",
+                   proc_current() ? proc_current()->pid : -1,
+                   proc_current() ? proc_current()->state : -1);
         if (current && current->pid >= 4)
             ktrace_trap("[TRAP] irq done: pid=%d sig_deliver...\n", current->pid);
         if (proc_current() != current)
             return;
         proc_check_exit_pending();
     } else {
-        uint64_t code = scause & CAUSE_CODE_MASK;
+        reg_t code = scause & CAUSE_CODE_MASK;
         uint32_t user_insn = 0;
         task_t *cur = proc_current();
         int have_user_insn = fetch_user_insn(cur, sepc, &user_insn);
@@ -141,21 +153,25 @@ void trap_handler(trap_context_t *ctx) {
              * completions, and timer bookkeeping are not starved by long
              * kernel-side loops such as fork-heavy benchmarks.
             */
+#ifndef CONFIG_ARM32
             arch_local_irq_enable();
+#endif
             syscall_dispatch(ctx);
+            if (cur && cur->pid == 3)
+                printf("[PID3TH] after syscall pc=0x%lx ret=0x%lx sp=0x%lx\n",
+                       (unsigned long)TRAP_CTX_EPC(ctx),
+                       (unsigned long)TRAP_CTX_RET(ctx),
+                       (unsigned long)TRAP_CTX_SP(ctx));
+#ifndef CONFIG_ARM32
             arch_local_irq_disable();
+#endif
             proc_check_exit_pending();
+#ifndef CONFIG_ARM32
             proc_yield();
-            if (cur && cur->pid >= 5)
-                ktrace_trap("[TRAP] ret-to-user: pid=%d pgdl=0x%lx era=0x%lx prmd_csr=0x%lx prmd_ctx=0x%lx sp_ctx=0x%lx\n",
-                            cur->pid,
-                            (unsigned long)TRAP_CTX_KScratch0(ctx),
-                            (unsigned long)TRAP_CTX_EPC(ctx),
-                            (unsigned long)arch_read_sstatus(),
-                            (unsigned long)TRAP_CTX_STATUS(ctx),
-                            (unsigned long)TRAP_CTX_SP(ctx));
+#endif
             return;
-        } else if (code == CAUSE_LOAD_PAGE_FAULT || code == CAUSE_STORE_PAGE_FAULT || code == CAUSE_INSN_PAGE_FAULT) {
+        }
+        if (code == CAUSE_LOAD_PAGE_FAULT || code == CAUSE_STORE_PAGE_FAULT || code == CAUSE_INSN_PAGE_FAULT) {
             if (code == CAUSE_STORE_PAGE_FAULT) {
                 if (handle_cow_fault(cur, stval) == 0) {
                     signal_deliver_user(ctx);
@@ -245,14 +261,14 @@ void trap_handler(trap_context_t *ctx) {
 
 void kernel_trap_handler(trap_context_t *ctx) {
     TRAP_CTX_KScratch0(ctx) = arch_read_addr_space_token();
-    uint64_t scause = arch_read_cause();
-    uint64_t sepc = arch_read_epc();
-    uint64_t stval = arch_read_tval();
+    reg_t scause = arch_read_cause();
+    vaddr_t sepc = arch_read_epc();
+    vaddr_t stval = arch_read_tval();
 
     if (scause & CAUSE_INTR_MASK) {
         arch_handle_irq(scause & CAUSE_CODE_MASK, 0);
     } else {
-        uint64_t code = scause & CAUSE_CODE_MASK;
+        reg_t code = scause & CAUSE_CODE_MASK;
         task_t *cur = proc_current();
 
         if (code == CAUSE_ECALL_U) {

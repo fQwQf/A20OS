@@ -20,6 +20,6 @@ void kernel_trap_handler(trap_context_t *ctx);
 
 /* Initialization */
 void trap_init(void);
-void arch_handle_irq(uint64_t irq, int from_user);
+void arch_handle_irq(reg_t irq, int from_user);
 
 #endif /* _TRAP_H */

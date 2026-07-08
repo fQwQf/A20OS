@@ -46,11 +46,6 @@ static void fl_remove(pfn_t pfn, int order) {
     if (m->prev != PFN_NONE) {
         if (!pfn_valid(m->prev) || pfa.meta[m->prev].order != (uint8_t)order ||
             pfa.meta[m->prev].flags != FRAME_F_FREE) {
-            printf("[PFA BUG] fl_remove(%u,o=%d): bad prev=%u flags=%u order=%u ref=%u\n",
-                   (unsigned)pfn, order, (unsigned)m->prev,
-                   pfn_valid(m->prev) ? pfa.meta[m->prev].flags : 0U,
-                   pfn_valid(m->prev) ? pfa.meta[m->prev].order : 0U,
-                   pfn_valid(m->prev) ? pfa.meta[m->prev].refcount : 0U);
             panic("pfa: corrupted prev link");
         }
         meta_of(m->prev)->next = m->next;
@@ -60,11 +55,6 @@ static void fl_remove(pfn_t pfn, int order) {
     if (m->next != PFN_NONE) {
         if (!pfn_valid(m->next) || pfa.meta[m->next].order != (uint8_t)order ||
             pfa.meta[m->next].flags != FRAME_F_FREE) {
-            printf("[PFA BUG] fl_remove(%u,o=%d): bad next=%u flags=%u order=%u ref=%u\n",
-                   (unsigned)pfn, order, (unsigned)m->next,
-                   pfn_valid(m->next) ? pfa.meta[m->next].flags : 0U,
-                   pfn_valid(m->next) ? pfa.meta[m->next].order : 0U,
-                   pfn_valid(m->next) ? pfa.meta[m->next].refcount : 0U);
             panic("pfa: corrupted next link");
         }
         meta_of(m->next)->prev = m->prev;
@@ -229,15 +219,6 @@ pfn_t pfa_alloc(int order) {
             }
         }
         break;
-    }
-
-    static size_t last_reported_free = (size_t)-1;
-    size_t cur_free = pfa.free_frames;
-    if (last_reported_free == (size_t)-1 ||
-        (last_reported_free > cur_free && last_reported_free - cur_free >= 32)) {
-        printf("[PFA] alloc failed order=%d free_frames=%lu\n",
-               order, (unsigned long)cur_free);
-        last_reported_free = cur_free;
     }
 
     return PFN_NONE;
