@@ -4,6 +4,11 @@
 #include "abi/linux/fcntl.h"
 #include "sys/usercopy.h"
 
+#ifndef CONFIG_ARM32
+int64_t sys_set_thread_area(void *ptr) {
+    return -1; // ENOSYS or implement proper thread area logic
+}
+#endif
 #define CLD_EXITED     1
 #define CLD_KILLED     2
 #define CLD_DUMPED     3
@@ -527,6 +532,11 @@ int64_t sys_openat2(int dirfd, const char *pathname, const void *how, size_t siz
 }
 
 int64_t sys_clone(uint64_t flags, void *stack, int *ptid, uint64_t tls, int *ctid) {
+#ifdef CONFIG_NOMMU
+    if (!(flags & LINUX_CLONE_VM)) {
+        return -EINVAL; /* NOMMU does not support fork without CLONE_VM */
+    }
+#endif
     return proc_clone(flags, (uint64_t)stack, ptid, tls, ctid, (int)(flags & 0xFF));
 }
 

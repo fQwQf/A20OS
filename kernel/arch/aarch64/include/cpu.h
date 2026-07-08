@@ -15,6 +15,7 @@ static inline void arch_mb(void)  { __asm__ __volatile__("dmb ish" ::: "memory")
 static inline void arch_rmb(void) { __asm__ __volatile__("dmb ishld" ::: "memory"); }
 static inline void arch_wmb(void) { __asm__ __volatile__("dmb ishst" ::: "memory"); }
 static inline void arch_wfi(void) { __asm__ __volatile__("wfi"); }
+static inline void arch_cpu_relax(void) { __asm__ __volatile__("yield"); }
 static inline void arch_fence_i(void) {
     __asm__ __volatile__(
         "ic iallu\n\t"

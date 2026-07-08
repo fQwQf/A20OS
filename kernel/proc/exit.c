@@ -101,7 +101,7 @@ static void proc_release_exiting_mm(task_t *t)
         return;
 
     mm_struct_t *mm = t->mm;
-    uint64_t *kernel_pgdir = proc_kernel_pgdir_shared();
+    pt_root_t *kernel_pgdir = proc_kernel_pgdir_shared();
     uint64_t kernel_as = kernel_pgdir ? arch_make_addr_space_token(kernel_pgdir) : 0;
 
     if (t == proc_current() && kernel_as) {

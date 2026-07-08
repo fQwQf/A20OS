@@ -1,6 +1,8 @@
 #ifdef CONFIG_BOARD_LS2K1000
 
 #include "drivers/core/driver_core.h"
+#include "core/arch.h"
+#include "core/timer.h"
 
 /* Loongson 2K1000 addresses */
 #define LS2K_MEMORY_BASE    0x00000000UL
@@ -12,18 +14,12 @@
 #define LS2K_TIMER_FREQ     100000000UL
 
 static void ls2k_irqchip_init(void) {
-    uint64_t ecfg;
-    __asm__ __volatile__("csrrd %0, 0x4" : "=r"(ecfg));
-    ecfg |= (1UL << 11) | (1UL << 2);
-    __asm__ __volatile__("csrwr %0, 0x4" :: "r"(ecfg));
+    arch_irqchip_init();
 }
 
 static void ls2k_irqchip_enable(uint32_t irq) {
     (void)irq;
-    uint64_t ecfg;
-    __asm__ __volatile__("csrrd %0, 0x4" : "=r"(ecfg));
-    ecfg |= (1UL << 2);
-    __asm__ __volatile__("csrwr %0, 0x4" :: "r"(ecfg));
+    arch_irqchip_enable();
 }
 
 static void ls2k_irqchip_disable(uint32_t irq) {
@@ -51,20 +47,8 @@ static const irqchip_ops_t ls2k_irqchip_ops = {
     .send_ipi   = ls2k_irqchip_send_ipi,
 };
 
-static void ls2k_timer_init(void) {
-}
-
-static void ls2k_timer_set_interval(uint64_t ticks) {
-    uint64_t clr = 1;
-    __asm__ __volatile__("csrwr %0, 0x44" :: "r"(clr));
-    uint64_t cfg = (ticks << 2) | 0x1;
-    __asm__ __volatile__("csrwr %0, 0x41" :: "r"(cfg));
-}
-
 static uint64_t ls2k_timer_read_ticks(void) {
-    uint64_t val;
-    __asm__ __volatile__("rdtime.d %0, $zero" : "=r"(val));
-    return val;
+    return timer_get_ticks();
 }
 
 static uint64_t ls2k_timer_ticks_per_sec(void) {
@@ -72,8 +56,6 @@ static uint64_t ls2k_timer_ticks_per_sec(void) {
 }
 
 static const timer_ops_t ls2k_timer_ops = {
-    .init          = ls2k_timer_init,
-    .set_interval  = ls2k_timer_set_interval,
     .read_ticks    = ls2k_timer_read_ticks,
     .ticks_per_sec = ls2k_timer_ticks_per_sec,
 };
@@ -82,13 +64,11 @@ static void ls2k_early_init(void) {
 }
 
 static void ls2k_poweroff(void) {
-    while (1)
-        __asm__ __volatile__("idle 0");
+    arch_halt();
 }
 
 static void ls2k_reboot(void) {
-    while (1)
-        __asm__ __volatile__("idle 0");
+    arch_halt();
 }
 
 extern void pci_enumerate(uintptr_t ecam_base, int bus_start, int bus_end);

@@ -2,6 +2,7 @@
 
 #include "drivers/core/driver_core.h"
 #include "core/arch.h"
+#include "core/timer.h"
 
 static inline volatile uint32_t *aa64_gicd_reg32(uint32_t off) {
     return (volatile uint32_t *)(uintptr_t)(GICD_BASE + off);
@@ -55,23 +56,8 @@ static const irqchip_ops_t aa64_gic_ops = {
     .send_ipi   = aa64_gic_send_ipi,
 };
 
-static void aa64_timer_init(void) {
-}
-
-static void aa64_timer_set_interval(uint64_t ticks) {
-    __asm__ __volatile__(
-        "msr cntp_tval_el0, %0\n\t"
-        "mov x1, #1\n\t"
-        "msr cntp_ctl_el0, x1"
-        ::
-        "r"(ticks)
-        : "x1", "memory");
-}
-
 static uint64_t aa64_timer_read_ticks(void) {
-    uint64_t val;
-    __asm__ __volatile__("mrs %0, cntpct_el0" : "=r"(val));
-    return val;
+    return timer_get_ticks();
 }
 
 static uint64_t aa64_timer_ticks_per_sec(void) {
@@ -79,8 +65,6 @@ static uint64_t aa64_timer_ticks_per_sec(void) {
 }
 
 static const timer_ops_t aa64_generic_timer_ops = {
-    .init          = aa64_timer_init,
-    .set_interval  = aa64_timer_set_interval,
     .read_ticks    = aa64_timer_read_ticks,
     .ticks_per_sec = aa64_timer_ticks_per_sec,
 };

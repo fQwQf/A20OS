@@ -53,6 +53,7 @@ _start:
      * PTE = (PPN << 10) | flags
      * flags = V|R|W|X|A|D = 0xAF
      */
+#ifndef CONFIG_NOMMU
     la      t0, boot_pgdir
 
     li      t1, 0x200000AF
@@ -86,9 +87,13 @@ _start:
     li      t1, 0xFFFFFFC000000000
     add     t0, t0, t1
     jr      t0
+#else
+    la      t0, .Lhh_entry
+    jr      t0
+#endif
 
 .Lhh_entry:
-    /* Now at HH VA. la gives VA. Fix SP to VA. */
+    /* Now at HH VA (or PA if NOMMU). la gives VA. Fix SP to VA. */
     la      sp, _stack_end
 
     la      t0, __trap_from_kernel

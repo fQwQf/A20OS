@@ -7,18 +7,27 @@
 
 #include "runtime_setup.h"
 
-#if defined(__riscv)
+#if defined(__riscv) && __riscv_xlen == 64
 #define GLIBC_LOADER_NAME "ld-linux-riscv64-lp64d.so.1"
 #define MUSL_LOADER_NAME "ld-musl-riscv64.so.1"
+#elif defined(__riscv) && __riscv_xlen == 32
+#define GLIBC_LOADER_NAME "ld-linux-riscv32-ilp32d.so.1"
+#define MUSL_LOADER_NAME "ld-musl-riscv32.so.1"
 #elif defined(__aarch64__)
 #define GLIBC_LOADER_NAME "ld-linux-aarch64.so.1"
 #define MUSL_LOADER_NAME "ld-musl-aarch64.so.1"
+#elif defined(__arm__)
+#define GLIBC_LOADER_NAME "ld-linux-armhf.so.3"
+#define MUSL_LOADER_NAME "ld-musl-armhf.so.1"
 #elif defined(__loongarch64)
 #define GLIBC_LOADER_NAME "ld-linux-loongarch-lp64d.so.1"
 #define MUSL_LOADER_NAME "ld-musl-loongarch-lp64d.so.1"
 #elif defined(__x86_64__)
 #define GLIBC_LOADER_NAME "ld-linux-x86-64.so.2"
 #define MUSL_LOADER_NAME "ld-musl-x86_64.so.1"
+#elif defined(__powerpc64__)
+#define GLIBC_LOADER_NAME "ld64.so.2"
+#define MUSL_LOADER_NAME "ld-musl-powerpc64le.so.1"
 #else
 #error Unsupported architecture
 #endif

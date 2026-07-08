@@ -110,15 +110,15 @@ int64_t sys_sigreturn(trap_context_t *ctx) {
 int64_t sys_sigsuspend(void *mask, size_t sigsetsize) {
     task_t *t = proc_current();
     if (!t || !t->signals || !mask) return -EINVAL;
-    if (sigsetsize != sizeof(uint64_t)) return -EINVAL;
+    if (sigsetsize != ARCH_SIGSET_SIZE) return -EINVAL;
 
     signal_state_t *ss = (signal_state_t *)t->signals;
     uint64_t old_blocked = t->sig_blocked;
-    uint64_t new_mask;
-    if (copy_from_user(&new_mask, mask, sizeof(new_mask)) < 0) return -EFAULT;
+    arch_sigset_t user_mask;
+    if (copy_from_user(&user_mask, mask, sizeof(user_mask)) < 0) return -EFAULT;
 
     /* Can't block SIGKILL or SIGSTOP */
-    new_mask = signal_mask_from_user(new_mask);
+    uint64_t new_mask = arch_user_sigset_to_kernel(&user_mask);
     new_mask &= ~(signal_mask_bit(SIGKILL) | signal_mask_bit(SIGSTOP));
     t->sigsuspend_old_blocked = old_blocked;
     t->sigsuspend_active = 1;
@@ -138,7 +138,7 @@ int64_t sys_sigaltstack(void *ss, void *old_ss) {
 
     /* Return current alt-stack info if requested */
     if (old_ss) {
-        stack_t cur;
+        arch_sigaltstack_t cur;
         memset(&cur, 0, sizeof(cur));
         cur.ss_sp    = t->sigaltstack.ss_sp;
         cur.ss_size  = t->sigaltstack.ss_size;
@@ -153,13 +153,13 @@ int64_t sys_sigaltstack(void *ss, void *old_ss) {
 
     /* Set new alt-stack if requested */
     if (ss) {
-        stack_t new_ss;
+        arch_sigaltstack_t new_ss;
         if (copy_from_user(&new_ss, ss, sizeof(new_ss)) < 0)
             return -EFAULT;
         if (new_ss.ss_flags & ~SS_DISABLE)
             return -EINVAL;
         if (new_ss.ss_flags & SS_DISABLE) {
-            t->sigaltstack.ss_sp    = NULL;
+            t->sigaltstack.ss_sp    = 0;
             t->sigaltstack.ss_size  = 0;
             t->sigaltstack.ss_flags = SS_DISABLE;
         } else {
@@ -177,12 +177,12 @@ int64_t sys_sigaltstack(void *ss, void *old_ss) {
 int64_t sys_sigtimedwait(const uint64_t *set, void *info, const void *timeout, size_t sigsetsize) {
     task_t *t = proc_current();
     if (!t || !t->signals || !set) return -EINVAL;
-    if (sigsetsize != sizeof(uint64_t)) return -EINVAL;
+    if (sigsetsize != ARCH_SIGSET_SIZE) return -EINVAL;
 
     signal_state_t *ss = (signal_state_t *)t->signals;
-    uint64_t mask;
-    if (copy_from_user(&mask, set, sizeof(mask)) < 0) return -EFAULT;
-    mask = signal_mask_from_user(mask);
+    arch_sigset_t user_mask;
+    if (copy_from_user(&user_mask, set, sizeof(user_mask)) < 0) return -EFAULT;
+    uint64_t mask = arch_user_sigset_to_kernel(&user_mask);
     uint64_t deliverable = (ss->pending | t->thread_pending) & mask;
 
     if (!deliverable) {
@@ -230,12 +230,12 @@ int64_t sys_sigtimedwait(const uint64_t *set, void *info, const void *timeout, s
 
 int64_t sys_rt_sigpending(void *set, size_t sigsetsize) {
     if (!set) return -EFAULT;
-    if (sigsetsize != sizeof(uint64_t)) return -EINVAL;
+    if (sigsetsize != ARCH_SIGSET_SIZE) return -EINVAL;
     task_t *t = proc_current();
     if (!t || !t->signals) return -EINVAL;
     signal_state_t *ss = (signal_state_t *)t->signals;
     uint64_t pending = (ss->pending | t->thread_pending) & t->sig_blocked;
-    uint64_t user_pending = signal_mask_to_user(pending);
+    arch_sigset_t user_pending = arch_user_sigset_from_kernel(pending);
     if (copy_to_user(set, &user_pending, sizeof(user_pending)) < 0) return -EFAULT;
     return 0;
 }

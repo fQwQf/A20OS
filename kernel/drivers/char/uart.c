@@ -177,7 +177,7 @@ int uart_getc(void) {
         task_t *cur = proc_current();
         if (!cur) {
             arch_local_irq_enable();
-            __asm__ volatile("nop");
+            cpu_relax();
             arch_local_irq_disable();
             continue;
         }

@@ -77,9 +77,9 @@ int mm_shared_file_fault(mm_struct_t *mm, vm_area_t *vma, uint64_t page_va,
 int handle_cow_fault(task_t *t, uint64_t stval) {
     if (!t->mm || !t->mm->pgdir) return -1;
 
-    uint64_t leaf_base = 0;
+    vaddr_t leaf_base = 0;
     size_t leaf_size = 0;
-    uint64_t *pte = pt_lookup_leaf(t->mm->pgdir, stval, NULL, &leaf_base, &leaf_size);
+    pte_t *pte = pt_lookup_leaf(t->mm->pgdir, stval, NULL, &leaf_base, &leaf_size);
     if (!pte || !(*pte & PTE_V) || !arch_pte_is_leaf(*pte) || !(*pte & PTE_U))
         return -1;
 
@@ -179,7 +179,7 @@ int handle_demand_fault(task_t *t, uint64_t stval) {
         stack_size_limit = ROUND_UP(stack_size_limit, PAGE_SIZE);
         uint64_t stack_limit = t->mm->stack_top - stack_size_limit;
         if (page_va >= stack_limit && page_va < t->mm->stack_top) {
-            uint64_t *pte = pt_walk(t->mm->pgdir, page_va, 0);
+            pte_t *pte = pt_walk(t->mm->pgdir, page_va, 0);
             if (pte && (*pte & PTE_V))
                 return -1;
 
@@ -225,7 +225,7 @@ int handle_demand_fault(task_t *t, uint64_t stval) {
 
     vm_area_t *vma = mm_find_vma(t->mm, page_va);
     if (vma) {
-        uint64_t *pte = pt_lookup_leaf(t->mm->pgdir, page_va, NULL, NULL, NULL);
+        pte_t *pte = pt_lookup_leaf(t->mm->pgdir, page_va, NULL, NULL, NULL);
         if (pte && (*pte & PTE_V)) return -1;
         if (!mm_pte_flags_allow_access(vma->pte_flags)) return -1;
 
@@ -303,16 +303,17 @@ int handle_demand_fault(task_t *t, uint64_t stval) {
             pfn_t vpfn = a20_vmo_get_page(vma->vmo, pg_idx);
             if (vpfn == PFN_NONE) return -1;
 
-            int r = pt_map(t->mm->pgdir, page_va, pfn_to_phys(vpfn),
-                            vma->pte_flags);
-            if (r < 0) return -1;
+                int r = pt_map(t->mm->pgdir, page_va, pfn_to_phys(vpfn),
+                               vma->pte_flags);
+                if (r < 0) return -1;
 
             t->mm->rss++;
             arch_tlb_flush_page(stval);
             return 0;
         }
 
-        if (!t->policy.thp_disabled && (vma->vm_flags & VM_HUGEPAGE) &&
+        if (!t->policy.thp_disabled && !vma->file_vnode &&
+            (vma->vm_flags & VM_HUGEPAGE) &&
             !(vma->vm_flags & VM_NOHUGEPAGE)) {
             uint64_t hbase = page_va & ~(uint64_t)(PMD_SIZE - 1);
             if (hbase >= vma->start && hbase + PMD_SIZE <= vma->end &&

@@ -7,7 +7,11 @@
 #define PHYS_MEMORY_BASE   0x80000000UL
 #define PHYS_MEMORY_END    0xC0000000UL
 #define KERNEL_ENTRY       0x80200000UL
+#ifdef CONFIG_NOMMU
+#define PAGE_OFFSET        0x0UL
+#else
 #define PAGE_OFFSET        0xFFFFFFC000000000UL
+#endif
 #define USER_VA_LIMIT      0x4000000000UL
 
 static inline size_t arch_ram_range_count(void) {

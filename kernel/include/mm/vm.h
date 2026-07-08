@@ -28,10 +28,10 @@ struct vnode;
 #define VM_SYSV_SHM  (1UL << 16)
 
 typedef struct vm_area {
-    uint64_t        start;
-    uint64_t        end;
+    vaddr_t         start;
+    vaddr_t         end;
     uint64_t        vm_flags;
-    uint64_t        pte_flags;
+    pte_t           pte_flags;
     int             file_fd;
     int             sysv_shmid;
     uint64_t        file_offset;
@@ -89,50 +89,59 @@ typedef struct vm_area {
 typedef struct mm_struct {
     spinlock_t lock;
     vm_area_t *mmap;
-    uint64_t  *pgdir;
-    uint64_t   brk;
-    uint64_t   start_brk;
-    uint64_t   mmap_base;
-    uint64_t   stack_top;
-    uint64_t   stack_bottom;
+    pt_root_t *pgdir;
+    vaddr_t    brk;
+    vaddr_t    start_brk;
+    vaddr_t    mmap_base;
+    vaddr_t    stack_top;
+    vaddr_t    stack_bottom;
     size_t     total_vm;
     size_t     rss;
     size_t     locked_vm;
     uint32_t   def_flags;
     refcount_t refcount;
+#ifdef CONFIG_NOMMU
+    void      *nommu_allocs[32];
+    int        num_nommu_allocs;
+#endif
 } mm_struct_t;
 
 mm_struct_t *mm_create(void);
 void         mm_destroy(mm_struct_t *mm);
 mm_struct_t *mm_fork(mm_struct_t *parent_mm);
 
-vm_area_t *mm_find_vma(mm_struct_t *mm, uint64_t addr);
-uint64_t   mm_find_gap(mm_struct_t *mm, uint64_t hint, size_t len);
+vm_area_t *mm_find_vma(mm_struct_t *mm, vaddr_t addr);
+vaddr_t    mm_find_gap(mm_struct_t *mm, vaddr_t hint, size_t len);
 void       mm_insert_vma(mm_struct_t *mm, vm_area_t *newv);
-int        mm_split_vma_at(mm_struct_t *mm, uint64_t addr);
+int        mm_split_vma_at(mm_struct_t *mm, vaddr_t addr);
 
 void mm_sync_shared_dirty_for_vnode(struct vnode *vn);
 
-uint64_t mm_mmap(mm_struct_t *mm, uint64_t addr, size_t len,
-                 int prot, int flags);
-uint64_t mm_mmap_file(mm_struct_t *mm, uint64_t addr, size_t len,
-                      int prot, int flags, int file_fd, uint64_t file_offset);
-int      mm_munmap(mm_struct_t *mm, uint64_t addr, size_t len);
-uint64_t mm_brk(mm_struct_t *mm, uint64_t newbrk);
-int      mm_mprotect(mm_struct_t *mm, uint64_t addr, size_t len, int prot);
-int      mm_mremap(mm_struct_t *mm, uint64_t old_addr, size_t old_size,
-                   size_t new_size, int flags, uint64_t new_addr,
-                   uint64_t *out_addr);
-int      mm_demote_huge_page(mm_struct_t *mm, uint64_t addr);
+#ifdef CONFIG_NOMMU
+void mm_track_nommu_alloc(mm_struct_t *mm, void *ptr);
+void mm_untrack_nommu_alloc(mm_struct_t *mm, void *ptr);
+#endif
 
-uint64_t mm_prot_to_pte_flags(int prot);
-int      mm_pte_flags_to_prot(uint64_t pte_flags);
-uint64_t mm_vm_flags_to_pte_flags(uint64_t vm_flags);
-uint64_t mm_pte_flags_to_vm_flags(uint64_t pte_flags);
-uint64_t mm_user_stack_pte_flags(void);
-uint64_t mm_user_brk_pte_flags(void);
-int      mm_pte_flags_allow_access(uint64_t pte_flags);
-uint64_t mm_pte_flags_apply_prot(uint64_t old_flags, uint64_t prot_flags);
-uint64_t mm_pte_flags_make_writable_dirty(uint64_t pte_flags);
+vaddr_t mm_mmap(mm_struct_t *mm, vaddr_t addr, size_t len,
+                int prot, int flags);
+vaddr_t mm_mmap_file(mm_struct_t *mm, vaddr_t addr, size_t len,
+                     int prot, int flags, int file_fd, uint64_t file_offset);
+int     mm_munmap(mm_struct_t *mm, vaddr_t addr, size_t len);
+vaddr_t mm_brk(mm_struct_t *mm, vaddr_t newbrk);
+int     mm_mprotect(mm_struct_t *mm, vaddr_t addr, size_t len, int prot);
+int     mm_mremap(mm_struct_t *mm, vaddr_t old_addr, size_t old_size,
+                  size_t new_size, int flags, vaddr_t new_addr,
+                  vaddr_t *out_addr);
+int     mm_demote_huge_page(mm_struct_t *mm, vaddr_t addr);
+
+pte_t mm_prot_to_pte_flags(int prot);
+int   mm_pte_flags_to_prot(pte_t pte_flags);
+pte_t mm_vm_flags_to_pte_flags(uint64_t vm_flags);
+uint64_t mm_pte_flags_to_vm_flags(pte_t pte_flags);
+pte_t mm_user_stack_pte_flags(void);
+pte_t mm_user_brk_pte_flags(void);
+int   mm_pte_flags_allow_access(pte_t pte_flags);
+pte_t mm_pte_flags_apply_prot(pte_t old_flags, pte_t prot_flags);
+pte_t mm_pte_flags_make_writable_dirty(pte_t pte_flags);
 
 #endif

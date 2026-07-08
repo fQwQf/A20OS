@@ -137,7 +137,7 @@ static void virtio_net_wait_for_tx_progress(void)
     if (cur)
         proc_yield();
     else
-        __asm__ volatile("nop");
+        cpu_relax();
 }
 
 static void virtio_net_submit_rx_locked(virtio_net_inst_t *net, uint16_t slot) {

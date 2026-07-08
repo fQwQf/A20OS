@@ -25,9 +25,11 @@
 #define ET_DYN      3
 
 /* ELF machine type */
+#define EM_ARM      40
 #define EM_RISCV    243
 #define EM_LOONGARCH 258
 #define EM_AARCH64  183
+#define EM_PPC64    21
 
 /* ELF program header type */
 #define PT_NULL     0
@@ -53,6 +55,40 @@ typedef uint32_t Elf64_Word;
 typedef int32_t  Elf64_Sword;
 typedef uint64_t Elf64_Xword;
 typedef int64_t  Elf64_Sxword;
+
+typedef uint32_t Elf32_Addr;
+typedef uint32_t Elf32_Off;
+typedef uint16_t Elf32_Half;
+typedef uint32_t Elf32_Word;
+typedef int32_t  Elf32_Sword;
+
+typedef struct {
+    uint8_t     e_ident[16];
+    Elf32_Half  e_type;
+    Elf32_Half  e_machine;
+    Elf32_Word  e_version;
+    Elf32_Addr  e_entry;
+    Elf32_Off   e_phoff;
+    Elf32_Off   e_shoff;
+    Elf32_Word  e_flags;
+    Elf32_Half  e_ehsize;
+    Elf32_Half  e_phentsize;
+    Elf32_Half  e_phnum;
+    Elf32_Half  e_shentsize;
+    Elf32_Half  e_shnum;
+    Elf32_Half  e_shstrndx;
+} Elf32_Ehdr;
+
+typedef struct {
+    Elf32_Word  p_type;
+    Elf32_Off   p_offset;
+    Elf32_Addr  p_vaddr;
+    Elf32_Addr  p_paddr;
+    Elf32_Word  p_filesz;
+    Elf32_Word  p_memsz;
+    Elf32_Word  p_flags;
+    Elf32_Word  p_align;
+} Elf32_Phdr;
 
 /* ELF64 header (64 bytes) */
 typedef struct {
@@ -88,24 +124,28 @@ struct vm_area;
 
 /* ---- Load result ---- */
 typedef struct elf_load_info {
-    uint64_t  entry;
-    uint64_t  exec_entry;
-    uint64_t  base;
-    uint64_t  end_va;
-    uint64_t  stack_top;
-    uint64_t  brk;
-    uint64_t  phdr_va;
+    uintptr_t entry;
+    uintptr_t exec_entry;
+    vaddr_t   base;
+    vaddr_t   end_va;
+    vaddr_t   stack_top;
+    vaddr_t   brk;
+    vaddr_t   phdr_va;
     uint32_t  phnum;
     uint32_t  phentsize;
-    uint64_t  load_addr;
+    vaddr_t   load_addr;
     size_t    load_size;
-    uint64_t *pgdir;
-    uint64_t  tls_va;
+    pt_root_t *pgdir;
+    vaddr_t   tls_va;
     uint64_t  tls_size;
-    uint64_t  tls_tp;
-    uint64_t  interp_base;
+    vaddr_t   tls_tp;
+    vaddr_t   interp_base;
     struct vm_area *mmap;
     int       is_native_abi;
+#ifdef CONFIG_NOMMU
+    void     *nommu_allocs[32];
+    int       num_nommu_allocs;
+#endif
 } elf_load_info_t;
 
 /* ---- API ---- */
@@ -123,14 +163,14 @@ int elf_check_header(const Elf64_Ehdr *eh);
 
 /* Build initial user stack with argc/argv/envp/auxv.
  * Returns new sp value. */
-uint64_t elf_setup_stack(uint64_t stack_top, int argc, char *const argv[],
-                          char *const envp[], const elf_load_info_t *info);
+vaddr_t elf_setup_stack(vaddr_t stack_top, int argc, char *const argv[],
+                        char *const envp[], const elf_load_info_t *info);
 
 #ifdef CONFIG_ABI_NATIVE
-uint64_t elf_setup_stack_a20(uint64_t stack_top, int argc, char *const argv[],
-                              char *const envp[], const elf_load_info_t *info,
-                              uint32_t stdin_h, uint32_t stdout_h,
-                              uint32_t stderr_h, uint32_t self_task_h);
+vaddr_t elf_setup_stack_a20(vaddr_t stack_top, int argc, char *const argv[],
+                            char *const envp[], const elf_load_info_t *info,
+                            uint32_t stdin_h, uint32_t stdout_h,
+                            uint32_t stderr_h, uint32_t self_task_h);
 #endif
 
 #endif /* _ELF_H */

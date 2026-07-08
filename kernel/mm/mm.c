@@ -10,11 +10,11 @@
 #include "core/klog.h"
 #include "proc/proc.h"
 
-static inline int pte_user_readable(uint64_t pte) {
+static inline int pte_user_readable(pte_t pte) {
     return arch_pte_is_leaf(pte) && (pte & PTE_U) && (pte & PTE_R);
 }
 
-static inline int pte_user_writable(uint64_t pte) {
+static inline int pte_user_writable(pte_t pte) {
     return arch_pte_is_leaf(pte) && (pte & PTE_U) && (pte & PTE_W);
 }
 
@@ -25,8 +25,11 @@ static inline size_t pt_level_size(int level) {
 // 内存管理初始化函数
 void mm_init(void) {
     extern char _bss_end[];
+    printf("[MM] mm_init begin\n");
     pfa_init(va_to_pa(_bss_end)); // Buddy 物理页分配器
+    printf("[MM] pfa_init done\n");
     slab_init(); // Slab 对象分配器
+    printf("[MM] slab_init done\n");
     printf("[MM] Buddy+Slab: %d frames, %d free (%d MB)\n",
            (int)pfa.total_frames, (int)pfa.free_frames,
            (int)(pfa.free_frames * PAGE_SIZE / 1024 / 1024));
@@ -61,13 +64,15 @@ size_t frame_free_count(void) {
     return pfa_free_count();
 }
 
+#if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
+
 // 创建一个新的页表
-uint64_t *pt_create(void) {
-    return (uint64_t *)frame_alloc();
+pte_t *pt_create(void) {
+    return (pte_t *)frame_alloc();
 }
 
 // 递归销毁页表及其子页表
-void pt_destroy(uint64_t *pgdir) {
+void pt_destroy(pt_root_t *pgdir) {
     if (!pgdir) return;
     for (int i = 0; i < ARCH_PT_ENTRIES; i++) {
         uint64_t pte = pgdir[i];
@@ -80,7 +85,7 @@ void pt_destroy(uint64_t *pgdir) {
                 pgdir[i] = 0;
                 continue;
             }
-            uint64_t *next = arch_pte_to_ptr(pte);
+            pte_t *next = arch_pte_to_ptr(pte);
             pt_destroy(next);
             pgdir[i] = 0;
         }
@@ -89,18 +94,18 @@ void pt_destroy(uint64_t *pgdir) {
 }
 
 // 遍历页表结构，查找或创建指定虚拟地址对应的 PTE
-uint64_t *pt_walk(uint64_t *pgdir, vaddr_t va, int alloc) {
-    uint64_t *table = pgdir;
+pte_t *pt_walk(pt_root_t *pgdir, vaddr_t va, int alloc) {
+    pte_t *table = pgdir;
     for (int level = ARCH_PT_ROOT_LEVEL; level > 0; level--) {
         int vpn = arch_pt_vpn(va, level);
-        uint64_t pte = table[vpn];
+        pte_t pte = table[vpn];
         if (pte & PTE_V) {
             if (arch_pte_is_leaf(pte))
                 return NULL;
             table = arch_pte_to_ptr(pte);
         } else {
             if (!alloc) return NULL;
-            uint64_t *next = (uint64_t *)frame_alloc();
+            pte_t *next = (pte_t *)frame_alloc();
             if (!next) return NULL;
             table[vpn] = arch_pte_from_pa(va_to_pa(next)) | PTE_DIR;
             table = next;
@@ -109,19 +114,19 @@ uint64_t *pt_walk(uint64_t *pgdir, vaddr_t va, int alloc) {
     return &table[arch_pt_vpn(va, 0)];
 }
 
-uint64_t *pt_lookup_leaf(uint64_t *pgdir, vaddr_t va, int *level_out,
-                         uint64_t *base_out, size_t *size_out) {
+pte_t *pt_lookup_leaf(pt_root_t *pgdir, vaddr_t va, int *level_out,
+                      vaddr_t *base_out, size_t *size_out) {
     if (!pgdir) return NULL;
-    uint64_t *table = pgdir;
+    pte_t *table = pgdir;
     for (int level = ARCH_PT_ROOT_LEVEL; level >= 0; level--) {
         int idx = arch_pt_vpn(va, level);
-        uint64_t *pte = &table[idx];
+        pte_t *pte = &table[idx];
         if (!(*pte & PTE_V))
             return NULL;
         if (arch_pte_is_leaf(*pte)) {
             size_t sz = pt_level_size(level);
             if (level_out) *level_out = level;
-            if (base_out) *base_out = va & ~(uint64_t)(sz - 1);
+            if (base_out) *base_out = va & ~(vaddr_t)(sz - 1);
             if (size_out) *size_out = sz;
             return pte;
         }
@@ -132,7 +137,7 @@ uint64_t *pt_lookup_leaf(uint64_t *pgdir, vaddr_t va, int *level_out,
     return NULL;
 }
 
-int mm_query_leaf(uint64_t *pgdir, vaddr_t va, mm_leaf_info_t *out) {
+int mm_query_leaf(pt_root_t *pgdir, vaddr_t va, mm_leaf_info_t *out) {
     if (!out)
         return 0;
     memset(out, 0, sizeof(*out));
@@ -140,9 +145,9 @@ int mm_query_leaf(uint64_t *pgdir, vaddr_t va, mm_leaf_info_t *out) {
         return 0;
 
     int level = 0;
-    uint64_t base = 0;
+    vaddr_t base = 0;
     size_t size = 0;
-    uint64_t *pte = pt_lookup_leaf(pgdir, va, &level, &base, &size);
+    pte_t *pte = pt_lookup_leaf(pgdir, va, &level, &base, &size);
     if (!pte || !(*pte & PTE_V) || !arch_pte_is_leaf(*pte))
         return 0;
 
@@ -155,7 +160,7 @@ int mm_query_leaf(uint64_t *pgdir, vaddr_t va, mm_leaf_info_t *out) {
     return 1;
 }
 
-uint64_t mm_pagemap_entry(uint64_t *pgdir, vaddr_t va) {
+uint64_t mm_pagemap_entry(pt_root_t *pgdir, vaddr_t va) {
     mm_leaf_info_t info;
     if (!mm_query_leaf(pgdir, va, &info))
         return 0;
@@ -163,7 +168,7 @@ uint64_t mm_pagemap_entry(uint64_t *pgdir, vaddr_t va) {
     return (1ULL << 63) | (pfn & 0x7FFFFFFFFFFFFULL);
 }
 
-int mm_query_leaf_kaddr(uint64_t *pgdir, vaddr_t va, void **kaddr_out,
+int mm_query_leaf_kaddr(pt_root_t *pgdir, vaddr_t va, void **kaddr_out,
                         size_t *avail_out) {
     if (!kaddr_out || !avail_out)
         return 0;
@@ -178,7 +183,7 @@ int mm_query_leaf_kaddr(uint64_t *pgdir, vaddr_t va, void **kaddr_out,
     return 1;
 }
 
-int mm_fetch_user_insn32(uint64_t *pgdir, vaddr_t va, uint32_t *out) {
+int mm_fetch_user_insn32(pt_root_t *pgdir, vaddr_t va, uint32_t *out) {
     if (!out)
         return 0;
     void *kaddr = NULL;
@@ -189,27 +194,27 @@ int mm_fetch_user_insn32(uint64_t *pgdir, vaddr_t va, uint32_t *out) {
     return 1;
 }
 
-int mm_mark_leaf_dirty_if_writable(uint64_t *pgdir, vaddr_t va) {
+int mm_mark_leaf_dirty_if_writable(pt_root_t *pgdir, vaddr_t va) {
     if (!pgdir)
         return -1;
-    uint64_t *pte = pt_lookup_leaf(pgdir, va, NULL, NULL, NULL);
+    pte_t *pte = pt_lookup_leaf(pgdir, va, NULL, NULL, NULL);
     if (!pte || !(*pte & PTE_V) || !(*pte & PTE_W))
         return -1;
-    uint64_t flags = arch_pte_flags(*pte) | PTE_D;
+    pte_t flags = arch_pte_flags(*pte) | PTE_D;
     *pte = arch_pte_leaf(arch_pte_addr(*pte), flags);
     arch_tlb_flush_page(va);
     return 0;
 }
 
-int mm_debug_pte_value(uint64_t *pgdir, vaddr_t va, uintptr_t *slot_out,
-                       uint64_t *value_out) {
+int mm_debug_pte_value(pt_root_t *pgdir, vaddr_t va, uintptr_t *slot_out,
+                       pte_t *value_out) {
     if (slot_out)
         *slot_out = 0;
     if (value_out)
         *value_out = 0;
     if (!pgdir)
         return 0;
-    uint64_t *pte = pt_lookup_leaf(pgdir, va, NULL, NULL, NULL);
+    pte_t *pte = pt_lookup_leaf(pgdir, va, NULL, NULL, NULL);
     if (slot_out)
         *slot_out = (uintptr_t)pte;
     if (value_out)
@@ -218,8 +223,8 @@ int mm_debug_pte_value(uint64_t *pgdir, vaddr_t va, uintptr_t *slot_out,
 }
 
 // 建立虚拟地址到物理地址的映射
-int pt_map(uint64_t *pgdir, vaddr_t va, paddr_t pa, uint64_t flags) {
-    uint64_t *pte = pt_walk(pgdir, va, 1);
+int pt_map(pt_root_t *pgdir, vaddr_t va, paddr_t pa, pte_t flags) {
+    pte_t *pte = pt_walk(pgdir, va, 1);
     if (!pte) return -ENOMEM;
     if (*pte & PTE_V) {
         paddr_t old_pa = arch_pte_addr(*pte);
@@ -233,35 +238,39 @@ int pt_map(uint64_t *pgdir, vaddr_t va, paddr_t pa, uint64_t flags) {
     return 0;
 }
 
-int pt_map_huge(uint64_t *pgdir, vaddr_t va, paddr_t pa, uint64_t flags) {
+int pt_map_huge(pt_root_t *pgdir, vaddr_t va, paddr_t pa, pte_t flags) {
     if (!pgdir) return -EINVAL;
     if ((va & (PMD_SIZE - 1)) || (pa & (PMD_SIZE - 1)))
         return -EINVAL;
 
-    uint64_t *table = pgdir;
+    pte_t *table = pgdir;
     for (int level = ARCH_PT_ROOT_LEVEL; level > 1; level--) {
         int idx = arch_pt_vpn(va, level);
-        uint64_t pte = table[idx];
+        pte_t pte = table[idx];
         if (pte & PTE_V) {
             if (arch_pte_is_leaf(pte))
                 return -EEXIST;
             table = arch_pte_to_ptr(pte);
         } else {
-            uint64_t *next = (uint64_t *)frame_alloc();
+            pte_t *next = (pte_t *)frame_alloc();
             if (!next) return -ENOMEM;
             table[idx] = arch_pte_from_pa(va_to_pa(next)) | PTE_DIR;
             table = next;
         }
     }
 
-    uint64_t *pte = &table[arch_pt_vpn(va, 1)];
+    pte_t *pte = &table[arch_pt_vpn(va, 1)];
     if (*pte & PTE_V)
         return -EEXIST;
+#ifdef ARCH_HAS_PTE_BLOCK
+    *pte = arch_pte_block(pa, flags);
+#else
     *pte = arch_pte_leaf(pa, flags);
+#endif
     return 0;
 }
 
-static int pt_table_empty(uint64_t *table) {
+static int pt_table_empty(pte_t *table) {
     for (int i = 0; i < ARCH_PT_ENTRIES; i++) {
         if (table[i] & PTE_V)
             return 0;
@@ -270,16 +279,16 @@ static int pt_table_empty(uint64_t *table) {
 }
 
 // 取消虚拟地址的映射，并回收变空的中间页表页
-int pt_unmap(uint64_t *pgdir, vaddr_t va) {
-    uint64_t *path[ARCH_PT_ROOT_LEVEL + 1];
+int pt_unmap(pt_root_t *pgdir, vaddr_t va) {
+    pte_t *path[ARCH_PT_ROOT_LEVEL + 1];
     int idx_path[ARCH_PT_ROOT_LEVEL + 1];
-    uint64_t *table = pgdir;
+    pte_t *table = pgdir;
 
     path[ARCH_PT_ROOT_LEVEL] = pgdir;
     for (int level = ARCH_PT_ROOT_LEVEL; level > 0; level--) {
         int idx = arch_pt_vpn(va, level);
         idx_path[level] = idx;
-        uint64_t pte = table[idx];
+        pte_t pte = table[idx];
         if (!(pte & PTE_V) || arch_pte_is_leaf(pte))
             return -EINVAL;
         table = arch_pte_to_ptr(pte);
@@ -287,14 +296,14 @@ int pt_unmap(uint64_t *pgdir, vaddr_t va) {
     }
 
     int leaf_idx = arch_pt_vpn(va, 0);
-    uint64_t *pte = &table[leaf_idx];
+    pte_t *pte = &table[leaf_idx];
     if (!(*pte & PTE_V) || !arch_pte_is_leaf(*pte))
         return -EINVAL;
     *pte = 0;
 
     for (int level = 0; level < ARCH_PT_ROOT_LEVEL; level++) {
-        uint64_t *child = path[level];
-        uint64_t *parent = path[level + 1];
+        pte_t *child = path[level];
+        pte_t *parent = path[level + 1];
         if (!pt_table_empty(child))
             break;
         parent[idx_path[level + 1]] = 0;
@@ -303,29 +312,29 @@ int pt_unmap(uint64_t *pgdir, vaddr_t va) {
     return 0;
 }
 
-int pt_unmap_leaf(uint64_t *pgdir, vaddr_t va, paddr_t *pa_out,
-                  uint64_t *base_out, size_t *size_out, int *level_out) {
+int pt_unmap_leaf(pt_root_t *pgdir, vaddr_t va, paddr_t *pa_out,
+                  vaddr_t *base_out, size_t *size_out, int *level_out) {
     if (!pgdir) return -EINVAL;
-    uint64_t *path[ARCH_PT_ROOT_LEVEL + 1];
+    pte_t *path[ARCH_PT_ROOT_LEVEL + 1];
     int idx_path[ARCH_PT_ROOT_LEVEL + 1];
-    uint64_t *table = pgdir;
+    pte_t *table = pgdir;
 
     path[ARCH_PT_ROOT_LEVEL] = pgdir;
     for (int level = ARCH_PT_ROOT_LEVEL; level >= 0; level--) {
         int idx = arch_pt_vpn(va, level);
         idx_path[level] = idx;
-        uint64_t *pte = &table[idx];
+        pte_t *pte = &table[idx];
         if (!(*pte & PTE_V))
             return -EINVAL;
         if (arch_pte_is_leaf(*pte)) {
             size_t sz = pt_level_size(level);
-            uint64_t base = va & ~(uint64_t)(sz - 1);
+            vaddr_t base = va & ~(vaddr_t)(sz - 1);
             paddr_t pa = arch_pte_addr(*pte);
             *pte = 0;
 
             for (int l = level; l < ARCH_PT_ROOT_LEVEL; l++) {
-                uint64_t *child = path[l];
-                uint64_t *parent = path[l + 1];
+                pte_t *child = path[l];
+                pte_t *parent = path[l + 1];
                 if (!pt_table_empty(child))
                     break;
                 parent[idx_path[l + 1]] = 0;
@@ -347,10 +356,10 @@ int pt_unmap_leaf(uint64_t *pgdir, vaddr_t va, paddr_t *pa_out,
 }
 
 // 将虚拟地址转换为物理地址
-paddr_t pt_translate(uint64_t *pgdir, vaddr_t va) {
-    uint64_t base = 0;
+paddr_t pt_translate(pt_root_t *pgdir, vaddr_t va) {
+    vaddr_t base = 0;
     size_t size = 0;
-    uint64_t *pte = pt_lookup_leaf(pgdir, va, NULL, &base, &size);
+    pte_t *pte = pt_lookup_leaf(pgdir, va, NULL, &base, &size);
     if (!pte || !(*pte & PTE_V) || !arch_pte_is_leaf(*pte)) return 0;
     return arch_pte_addr(*pte) + (va - base);
 }
@@ -358,7 +367,7 @@ paddr_t pt_translate(uint64_t *pgdir, vaddr_t va) {
 // 将内核空间映射复制到新页表（内核空间共享）
 // LoongArch 的内核空间是通过 DMW 直接翻译的，完全绕过了 TLB 和多级页表机制
 // 可以置空来节省开销
-void pt_map_kernel(uint64_t *pgdir) {
+void pt_map_kernel(pt_root_t *pgdir) {
     for (int i = ARCH_PT_USER_END; i < ARCH_PT_ENTRIES; i++) {
         if (boot_pgdir[i] & PTE_V)
             pgdir[i] = boot_pgdir[i];
@@ -366,7 +375,7 @@ void pt_map_kernel(uint64_t *pgdir) {
 }
 
 // 批量映射一段连续的虚拟地址范围
-int pt_map_range(uint64_t *pgdir, vaddr_t va, paddr_t pa, size_t size, uint64_t flags) {
+int pt_map_range(pt_root_t *pgdir, vaddr_t va, paddr_t pa, size_t size, pte_t flags) {
     size = ROUND_UP(size, PAGE_SIZE);
     for (size_t off = 0; off < size; off += PAGE_SIZE) {
         int r = pt_map(pgdir, va + off, pa + off, flags);
@@ -376,12 +385,12 @@ int pt_map_range(uint64_t *pgdir, vaddr_t va, paddr_t pa, size_t size, uint64_t 
 }
 
 // 递归克隆指定层级的页表项
-static uint64_t *pt_clone_level(uint64_t *src, int level) {
-    uint64_t *dst = (uint64_t *)frame_alloc();
+static pte_t *pt_clone_level(pte_t *src, int level) {
+    pte_t *dst = (pte_t *)frame_alloc();
     if (!dst) return NULL;
 
     for (int i = 0; i < ARCH_PT_ENTRIES; i++) {
-        uint64_t pte = src[i];
+        pte_t pte = src[i];
         if (!(pte & PTE_V)) continue;
 
         int is_leaf = arch_pte_is_leaf(pte);
@@ -402,29 +411,29 @@ static uint64_t *pt_clone_level(uint64_t *src, int level) {
                 dst[i] = pte;
             }
         } else {
-            uint64_t *next_src = arch_pte_to_ptr(pte);
-            uint64_t *next_dst = pt_clone_level(next_src, level - 1);
+            pte_t *next_src = arch_pte_to_ptr(pte);
+            pte_t *next_dst = pt_clone_level(next_src, level - 1);
             if (!next_dst) { pt_destroy(dst); return NULL; }
-            dst[i] = arch_pte_from_pa(va_to_pa(next_dst)) | PTE_V;
+            dst[i] = arch_pte_from_pa(va_to_pa(next_dst)) | PTE_DIR;
         }
     }
     return dst;
 }
 
 // 克隆整个页表（从根节点开始）
-uint64_t *pt_clone(uint64_t *src_pgdir) {
+pte_t *pt_clone(pt_root_t *src_pgdir) {
     if (!src_pgdir) return NULL;
     return pt_clone_level(src_pgdir, ARCH_PT_ROOT_LEVEL);
 }
 
 // 递归销毁用户空间的页表项（不释放内核共享部分）
-static void pt_destroy_user_recursive(uint64_t *table, int level) {
+static void pt_destroy_user_recursive(pte_t *table, int level) {
     if (!table) return;
     /* Only user half (0..255) lives at root; kernel half is shared
      * and must not be freed.  Lower levels may span all 512 entries. */
     int limit = (level == ARCH_PT_ROOT_LEVEL) ? ARCH_PT_USER_END : ARCH_PT_ENTRIES;
     for (int i = 0; i < limit; i++) {
-        uint64_t pte = table[i];
+        pte_t pte = table[i];
         if (!(pte & PTE_V)) continue;
 
         int is_leaf = arch_pte_is_leaf(pte);
@@ -442,7 +451,7 @@ static void pt_destroy_user_recursive(uint64_t *table, int level) {
                 table[i] = 0;
                 continue;
             }
-            uint64_t *next = arch_pte_to_ptr(pte);
+            pte_t *next = arch_pte_to_ptr(pte);
             pt_destroy_user_recursive(next, level - 1);
             frame_free(next);
             table[i] = 0;
@@ -451,11 +460,71 @@ static void pt_destroy_user_recursive(uint64_t *table, int level) {
 }
 
 // 销毁用户空间页表
-void pt_destroy_user(uint64_t *pgdir) {
+void pt_destroy_user(pt_root_t *pgdir) {
     if (!pgdir) return;
     pt_destroy_user_recursive(pgdir, ARCH_PT_ROOT_LEVEL);
     frame_free(pgdir);
 }
+
+#endif /* defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU) */
+
+#ifdef CONFIG_NOMMU
+#if defined(ARCH_HAS_PGTABLE_OPS)
+pte_t *pt_create(void) { return (pte_t *)1; }
+void pt_destroy(pt_root_t *pgdir) { (void)pgdir; }
+int pt_map(pt_root_t *pgdir, vaddr_t va, paddr_t pa, pte_t flags) { (void)pgdir; (void)va; (void)pa; (void)flags; return 0; }
+int pt_map_huge(pt_root_t *pgdir, vaddr_t va, paddr_t pa, pte_t flags) { (void)pgdir; (void)va; (void)pa; (void)flags; return 0; }
+int pt_unmap(pt_root_t *pgdir, vaddr_t va) { (void)pgdir; (void)va; return 0; }
+int pt_unmap_leaf(pt_root_t *pgdir, vaddr_t va, paddr_t *pa_out, vaddr_t *base_out, size_t *size_out, int *level_out) {
+    if (pa_out) *pa_out = va;
+    if (base_out) *base_out = va;
+    if (size_out) *size_out = PAGE_SIZE;
+    if (level_out) *level_out = 0;
+    return 1;
+}
+paddr_t pt_translate(pt_root_t *pgdir, vaddr_t va) { (void)pgdir; return va; }
+pte_t *pt_walk(pt_root_t *pgdir, vaddr_t va, int alloc) { (void)pgdir; (void)va; (void)alloc; return (pte_t *)1; }
+pte_t *pt_lookup_leaf(pt_root_t *pgdir, vaddr_t va, int *level_out, vaddr_t *base_out, size_t *size_out) {
+    if (level_out) *level_out = 0;
+    if (base_out) *base_out = va;
+    if (size_out) *size_out = PAGE_SIZE;
+    return (pte_t *)1;
+}
+int mm_query_leaf(pt_root_t *pgdir, vaddr_t va, mm_leaf_info_t *out) {
+    if (out) {
+        out->level = 0;
+        out->base = va;
+        out->size = PAGE_SIZE;
+        out->pa = va;
+        out->flags = PTE_V | PTE_R | PTE_W | PTE_X | PTE_U;
+        out->dirty = 1;
+    }
+    return 1;
+}
+uint64_t mm_pagemap_entry(pt_root_t *pgdir, vaddr_t va) { (void)pgdir; return (1ULL << 63) | (va / PAGE_SIZE); }
+int mm_query_leaf_kaddr(pt_root_t *pgdir, vaddr_t va, void **kaddr_out, size_t *avail_out) {
+    if (kaddr_out) *kaddr_out = (void *)va;
+    if (avail_out) *avail_out = PAGE_SIZE;
+    return 1;
+}
+int mm_fetch_user_insn32(pt_root_t *pgdir, vaddr_t va, uint32_t *out) {
+    if (out) *out = *(uint32_t *)va;
+    return 1;
+}
+int mm_mark_leaf_dirty_if_writable(pt_root_t *pgdir, vaddr_t va) { (void)pgdir; (void)va; return 0; }
+int mm_debug_pte_value(pt_root_t *pgdir, vaddr_t va, uintptr_t *slot_out, pte_t *value_out) {
+    if (slot_out) *slot_out = 1;
+    if (value_out) *value_out = 1;
+    return 1;
+}
+void pt_map_kernel(pt_root_t *pgdir) { (void)pgdir; }
+int pt_map_range(pt_root_t *pgdir, vaddr_t va, paddr_t pa, size_t size, pte_t flags) {
+    (void)pgdir; (void)va; (void)pa; (void)size; (void)flags; return 0;
+}
+pte_t *pt_clone(pt_root_t *src_pgdir) { (void)src_pgdir; return (pte_t *)1; }
+void pt_destroy_user(pt_root_t *pgdir) { (void)pgdir; }
+#endif
+#endif
 
 static inline int user_range_ok(uint64_t va, size_t n) {
     if (n == 0)
@@ -467,9 +536,15 @@ static inline int user_range_ok(uint64_t va, size_t n) {
 
 static int user_resolve_leaf(task_t *t, uint64_t va, int write,
                              void **kaddr_out, size_t *avail_out) {
-    uint64_t leaf_base = 0;
+#ifdef CONFIG_NOMMU
+    (void)t; (void)write;
+    *kaddr_out = (void *)va;
+    *avail_out = USER_VA_LIMIT > va ? USER_VA_LIMIT - va : 0;
+    return 0;
+#else
+    vaddr_t leaf_base = 0;
     size_t leaf_size = 0;
-    uint64_t *pte = pt_lookup_leaf(t->pgdir, va, NULL, &leaf_base, &leaf_size);
+    pte_t *pte = pt_lookup_leaf(t->pgdir, va, NULL, &leaf_base, &leaf_size);
     if (!pte || !(*pte & PTE_V)) {
         int r = handle_demand_fault(t, va);
         if (r < 0)
@@ -501,6 +576,7 @@ static int user_resolve_leaf(task_t *t, uint64_t va, int write,
     *kaddr_out = (void *)(pa + PAGE_OFFSET + page_off);
     *avail_out = leaf_size - page_off;
     return 0;
+#endif
 }
 
 int user_buffer_segment(const void *user, size_t len, int write,

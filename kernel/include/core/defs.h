@@ -4,6 +4,7 @@
 #include "core/types.h"
 #include "core/consts.h"
 #include "core/arch.h"
+#include "core/cpu.h"
 
 #define ALWAYS_INLINE __attribute__((always_inline)) inline static
 #define NORETURN __attribute__((noreturn))

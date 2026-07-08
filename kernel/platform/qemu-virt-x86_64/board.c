@@ -2,6 +2,7 @@
 
 #include "drivers/core/driver_core.h"
 #include "core/arch.h"
+#include "core/timer.h"
 
 static void x86_64_irqchip_init(void) {}
 
@@ -35,27 +36,15 @@ static const irqchip_ops_t x86_64_irqchip_ops = {
     .send_ipi   = x86_64_irqchip_send_ipi,
 };
 
-static void x86_64_timer_init(void) {}
-
-static void x86_64_timer_set_interval(uint64_t ticks) {
-    uint32_t count = (uint32_t)(ticks / 100);
-    if (count < 100) count = 100;
-    lapic_write(LAPIC_TIMER_INIT, count);
-}
-
 static uint64_t x86_64_timer_read_ticks(void) {
-    uint32_t lo, hi;
-    __asm__ __volatile__("rdtsc" : "=a"(lo), "=d"(hi));
-    return ((uint64_t)hi << 32) | lo;
+    return timer_get_ticks();
 }
 
 static uint64_t x86_64_timer_ticks_per_sec(void) {
-    return 1000000000ULL;
+    return ARCH_TIMER_FREQ;
 }
 
 static const timer_ops_t x86_64_timer_ops = {
-    .init          = x86_64_timer_init,
-    .set_interval  = x86_64_timer_set_interval,
     .read_ticks    = x86_64_timer_read_ticks,
     .ticks_per_sec = x86_64_timer_ticks_per_sec,
 };

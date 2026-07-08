@@ -69,6 +69,23 @@ int64_t sys_clock_gettime(int clk, void *tp) {
     return 0;
 }
 
+int64_t sys_clock_gettime32(int clk, void *tp) {
+    uint64_t ts[2];
+    if (!tp) return -EFAULT;
+    if (clk != CLOCK_REALTIME_ID && !clock_is_monotonic(clk))
+        return -EINVAL;
+    if (clock_is_realtime(clk)) timekeeping_get_realtime(ts);
+    else timekeeping_get_monotonic(ts);
+    struct {
+        uint32_t tv_sec;
+        uint32_t tv_nsec;
+    } out32;
+    out32.tv_sec = (uint32_t)ts[0];
+    out32.tv_nsec = (uint32_t)ts[1];
+    if (copy_to_user(tp, &out32, sizeof(out32)) < 0) return -EFAULT;
+    return 0;
+}
+
 int64_t sys_clock_getres(int clk, void *tp) {
     if (!clock_is_realtime(clk) && !clock_is_monotonic(clk))
         return -EINVAL;
@@ -103,7 +120,7 @@ int64_t sys_nanosleep(void *req, void *rem) {
         if (signal_task_has_unblocked(t))
             return -ERESTARTSYS;
     } else {
-        while (timer_get_ticks() < until) __asm__ volatile("nop");
+        while (timer_get_ticks() < until) cpu_relax();
     }
     return 0;
 }
