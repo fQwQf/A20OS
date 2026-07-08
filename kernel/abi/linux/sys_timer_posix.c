@@ -163,7 +163,7 @@ int64_t sys_clock_nanosleep(int clk, int flags, const void *req, void *rem)
         if (signal_task_has_unblocked(t))
             return -ERESTARTSYS;
     } else {
-        while (timer_get_ticks() < until) __asm__ volatile("nop");
+        while (timer_get_ticks() < until) cpu_relax();
     }
     return 0;
 }

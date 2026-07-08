@@ -9,57 +9,6 @@ static uint32_t user_visible_mode(uint32_t mode) {
     return mode;
 }
 
-/*
- * Generic Linux struct stat layout (riscv64/aarch64/loongarch64):
- *   0:  st_dev     u64
- *   8:  st_ino     u64
- *  16:  st_mode    u32
- *  20:  st_nlink   u32
- *  24:  st_uid     u32
- *  28:  st_gid     u32
- *  32:  __pad1     u64
- *  40:  st_rdev    u64
- *  48:  st_size    i64
- *  56:  st_blksize i64
- *  64:  st_blocks  i64
- *  72:  st_atime   u64
- *  80:  st_atime_nsec u64
- *  88:  st_mtime   u64
- *  96:  st_mtime_nsec u64
- * 104:  st_ctime   u64
- * 112:  st_ctime_nsec u64
- * 120:  __unused   u32[2]
- */
-__attribute__((weak)) void arch_copy_kstat_to_user(void *st, const kstat_t *kst)
-{
-    uint64_t buf64[128 / 8];
-    memset(buf64, 0, sizeof(buf64));
-    uint8_t *buf = (uint8_t *)buf64;
-    uint64_t *u64 = (uint64_t *)buf;
-    uint32_t *u32 = (uint32_t *)buf;
-    u64[0]  = kst->st_dev;
-    u64[1]  = kst->st_ino;
-    u32[4]  = user_visible_mode(kst->st_mode);
-    u32[5]  = kst->st_nlink;
-    u32[6]  = kst->st_uid;
-    u32[7]  = kst->st_gid;
-    u64[4]  = kst->st_rdev;
-    u64[5]  = 0;            /* __pad1 */
-    u64[6]  = kst->st_size;
-    u32[14] = kst->st_blksize;
-    u32[15] = 0;            /* __pad2 */
-    u64[8]  = kst->st_blocks;
-    u64[9]  = kst->st_atime;
-    u64[10] = kst->st_atime_nsec;
-    u64[11] = kst->st_mtime;
-    u64[12] = kst->st_mtime_nsec;
-    u64[13] = kst->st_ctime;
-    u64[14] = kst->st_ctime_nsec;
-    u32[30] = 0;            /* __unused4 */
-    u32[31] = 0;            /* __unused5 */
-    copy_to_user(st, buf, sizeof(buf64));
-}
-
 int64_t sys_mkdirat(int dirfd, const char *path, int mode) {
     if (!path) return -EFAULT;
     char kpath[MAX_PATH_LEN];
@@ -445,45 +394,8 @@ int64_t sys_symlinkat(const char *target, int newdirfd, const char *linkpath) {
     return vfs_symlink(ktarget, flink);
 }
 
-typedef struct linux_statfs64 {
-    uint64_t f_type;
-    uint64_t f_bsize;
-    uint64_t f_blocks;
-    uint64_t f_bfree;
-    uint64_t f_bavail;
-    uint64_t f_files;
-    uint64_t f_ffree;
-    int32_t f_fsid[2];
-    uint64_t f_namelen;
-    uint64_t f_frsize;
-    uint64_t f_flags;
-    uint64_t f_spare[4];
-} linux_statfs64_t;
-
-static void fill_statfs_buf(linux_statfs64_t *sb, int fs_type)
-{
-    memset(sb, 0, sizeof(*sb));
-    switch (fs_type) {
-    case FS_TYPE_EXT4: sb->f_type = EXT4_SUPER_MAGIC; break;
-    case FS_TYPE_FAT32: sb->f_type = 0x4d44; break;
-    case FS_TYPE_PROCFS: sb->f_type = 0x9fa0; break;
-    case FS_TYPE_DEVFS: sb->f_type = 0x01021994; break;
-    case FS_TYPE_RAMFS:
-    default: sb->f_type = 0x858458f6; break;
-    }
-    sb->f_bsize = PAGE_SIZE;
-    sb->f_frsize = PAGE_SIZE;
-    sb->f_blocks = 1024 * 1024;
-    sb->f_bfree = 512 * 1024;
-    sb->f_bavail = 512 * 1024;
-    sb->f_files = VFS_MAX_OPEN;
-    sb->f_ffree = VFS_MAX_OPEN / 2;
-    sb->f_namelen = MAX_NAME_LEN;
-}
-
 int64_t sys_statfs(const char *path, void *buf) {
     if (!buf) return -EFAULT;
-    linux_statfs64_t sb;
     int fs_type = FS_TYPE_RAMFS;
     if (path) {
         char kpath[MAX_PATH_LEN];
@@ -493,9 +405,7 @@ int64_t sys_statfs(const char *path, void *buf) {
         if (vn->mnt) fs_type = vn->mnt->type;
         vnode_put(vn);
     }
-    fill_statfs_buf(&sb, fs_type);
-    if (copy_to_user(buf, &sb, sizeof(sb)) < 0) return -EFAULT;
-    return 0;
+    return arch_copy_statfs64_to_user(buf, fs_type) < 0 ? -EFAULT : 0;
 }
 
 int64_t sys_fstatfs(int fd, void *buf) {
@@ -508,9 +418,7 @@ int64_t sys_fstatfs(int fd, void *buf) {
     if (vf->vnode && vf->vnode->mnt)
         fs_type = vf->vnode->mnt->type;
     vfs_put_file_ref((int)gfd, vf);
-    linux_statfs64_t sb;
-    fill_statfs_buf(&sb, fs_type);
-    return copy_to_user(buf, &sb, sizeof(sb)) < 0 ? -EFAULT : 0;
+    return arch_copy_statfs64_to_user(buf, fs_type) < 0 ? -EFAULT : 0;
 }
 
 int64_t sys_mount(const char *src, const char *target,

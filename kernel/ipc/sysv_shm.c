@@ -75,7 +75,7 @@ static void sysv_shm_unmap_attached_pages(mm_struct_t *mm, uint64_t addr, size_t
 {
     for (size_t p = 0; p < npages; p++) {
         paddr_t pa = 0;
-        uint64_t base = 0;
+        vaddr_t base = 0;
         size_t size = 0;
         if (pt_unmap_leaf(mm->pgdir, addr + p * PAGE_SIZE, &pa, &base, &size, NULL) == 0 && pa)
             frame_put(phys_to_pfn(pa));

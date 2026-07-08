@@ -35,7 +35,7 @@
 static task_t idle_tasks[CONFIG_NR_CPUS];
 static task_t *task_list_head;
 static task_t *task_list_tail;
-static uint64_t *kernel_pgdir_shared;
+static pt_root_t *kernel_pgdir_shared;
 
 spinlock_t proc_lock = SPINLOCK_INIT;
 
@@ -230,7 +230,7 @@ void idle_loop(void) {
         kernel_progress_run_bottom_halves();
         sched_reap_zombies();
         sched();
-        __asm__ volatile("nop");
+        cpu_relax();
     }
 }
 
@@ -291,14 +291,15 @@ void proc_init(void) {
     memset(idle_stack, 0, KERNEL_STACK_SIZE);
 
     // 设置任务上下文
-    uint64_t stack_top = (uint64_t)idle_stack + KERNEL_STACK_SIZE;
+    uintptr_t stack_top = (uintptr_t)idle_stack + KERNEL_STACK_SIZE;
     task_context_t *ctx = (task_context_t *)(stack_top - sizeof(task_context_t));
     memset(ctx, 0, sizeof(*ctx));
-    ctx->ra   = (uint64_t)idle_loop;  // 返回地址为 idle_loop
-    ctx->tp   = (uint64_t)idle;       // tp 寄存器指向任务结构
+    ctx->ra   = (uintptr_t)idle_loop;
+    ctx->tp   = (uintptr_t)idle;
+    arch_task_context_set_initial_sp(ctx, NULL, stack_top);
 
     // 创建并映射内核页表
-    uint64_t *kpdir = pt_create();
+    pt_root_t *kpdir = pt_create();
     if (!kpdir) panic("proc_init: pt_create failed");
     pt_map_kernel(kpdir);
     kernel_pgdir_shared = kpdir;
@@ -306,7 +307,7 @@ void proc_init(void) {
     TASK_CTX_PAGE_TABLE(ctx) = kpdir ? arch_make_addr_space_token(kpdir) : 0;
     TASK_CTX_STATUS(ctx) = arch_task_kernel_status();
     idle->kstack_base = idle_stack;
-    idle->kstack = (uint64_t)ctx;
+    idle->kstack = (uintptr_t)ctx;
     g_idle_kstack[0] = idle->kstack;
 
     arch_set_task_pointer(idle);  // 设置 tp 寄存器
@@ -317,7 +318,7 @@ void proc_init(void) {
 
 task_t *proc_idle_task(void) { return &idle_tasks[cpu_current_id()]; }
 
-uint64_t *proc_kernel_pgdir_shared(void) { return kernel_pgdir_shared; }
+pt_root_t *proc_kernel_pgdir_shared(void) { return kernel_pgdir_shared; }
 
 /* ---- Base task allocation ---- */
 
@@ -361,18 +362,18 @@ int proc_alloc(void (*entry)(void)) {
     }
     memset(stack, 0, KERNEL_STACK_SIZE);
 
-    uint64_t stack_top = (uint64_t)stack + KERNEL_STACK_SIZE;
+    uintptr_t stack_top = (uintptr_t)stack + KERNEL_STACK_SIZE;
 
     task_context_t *ctx = arch_task_context_base(stack, stack_top, NULL);
     memset(ctx, 0, sizeof(*ctx));
-    ctx->ra   = (uint64_t)entry;
-    ctx->tp   = (uint64_t)t;
+    ctx->ra   = (uintptr_t)entry;
+    ctx->tp   = (uintptr_t)t;
     t->pgdir  = kernel_pgdir_shared;
     TASK_CTX_PAGE_TABLE(ctx) = kernel_pgdir_shared ? arch_make_addr_space_token(kernel_pgdir_shared) : 0;
     TASK_CTX_STATUS(ctx) = arch_task_kernel_status();
     arch_task_context_set_initial_sp(ctx, NULL, stack_top);
     t->kstack_base = stack;
-    t->kstack = (uint64_t)ctx;
+    t->kstack = (uintptr_t)ctx;
 
     kdebug("[PROC] kthread pid=%d\n", t->pid);
     proc_make_ready(t);
@@ -381,9 +382,14 @@ int proc_alloc(void (*entry)(void)) {
 
 /* Allocate a user-mode task with given entry point and stack */
 // 分配一个用户态任务
-int proc_alloc_user_image(uint64_t entry, uint64_t sp, uint64_t *pgdir,
-                          vm_area_t *mmap, uint64_t brk,
-                          uint64_t stack_top, size_t total_vm) {
+int proc_alloc_user_image(uintptr_t entry, vaddr_t sp, pt_root_t *pgdir,
+                          vm_area_t *mmap, vaddr_t brk,
+                          vaddr_t stack_top, size_t total_vm,
+                          vaddr_t tls_tp
+#ifdef CONFIG_NOMMU
+                          , void **nommu_allocs, int num_nommu_allocs
+#endif
+                          ) {
     task_t *t = proc_alloc_task_slot();
     if (!t) return -EAGAIN;
     t->pid = proc_pid_alloc();
@@ -405,16 +411,17 @@ int proc_alloc_user_image(uint64_t entry, uint64_t sp, uint64_t *pgdir,
     memset(kstack, 0, KERNEL_STACK_SIZE);
     t->kstack_base = kstack;
 
-    uint64_t ks_top = (uint64_t)kstack + KERNEL_STACK_SIZE;
+    uintptr_t ks_top = (uintptr_t)kstack + KERNEL_STACK_SIZE;
 
     trap_context_t *trap = (trap_context_t *)(ks_top - sizeof(trap_context_t));
     memset(trap, 0, sizeof(*trap));
     TRAP_CTX_EPC(trap)   = entry;
     TRAP_CTX_SP(trap)   = sp;
+    TRAP_CTX_TP(trap)    = tls_tp;
     TRAP_CTX_STATUS(trap) = arch_user_initial_status();
     TRAP_CTX_KScratch0(trap) = pgdir ? arch_make_addr_space_token(pgdir) : 0;
-    trap->kernel_tp = (uint64_t)(uintptr_t)t;
-    arch_trap_ctx_set_kernel_stack(trap, ks_top);
+    trap->kernel_tp = (uintptr_t)t;
+    arch_trap_ctx_set_kernel_stack(trap, (uint64_t)ks_top);
 
     t->trap_ctx = trap;
     t->ustack   = sp;
@@ -434,6 +441,13 @@ int proc_alloc_user_image(uint64_t entry, uint64_t sp, uint64_t *pgdir,
         spin_set_debug(&mm->lock, "mm", mm);
         refcount_set(&mm->refcount, 1);
         mm->mmap        = mmap;
+#ifdef CONFIG_NOMMU
+        if (nommu_allocs && num_nommu_allocs > 0) {
+            mm->num_nommu_allocs = num_nommu_allocs < 32 ? num_nommu_allocs : 32;
+            for (int i = 0; i < mm->num_nommu_allocs; i++)
+                mm->nommu_allocs[i] = nommu_allocs[i];
+        }
+#endif
         ktrace_mm("[MMDBG] mm=%p lock=%p\n", (void *)mm, (void *)&mm->lock);
         t->mm = mm;
     }
@@ -446,22 +460,29 @@ int proc_alloc_user_image(uint64_t entry, uint64_t sp, uint64_t *pgdir,
      */
     task_context_t *ctx = arch_task_context_base(kstack, ks_top, trap);
     memset(ctx, 0, sizeof(*ctx));
-    ctx->ra   = (uint64_t)user_trap_return;
-    ctx->tp   = (uint64_t)t;
+    ctx->ra   = (uintptr_t)user_trap_return;
+    ctx->tp   = (uintptr_t)t;
+#ifdef CONFIG_ARM32
+    ctx->user_tp = (uint32_t)tls_tp;
+#endif
     TASK_CTX_PAGE_TABLE(ctx) = pgdir ? arch_make_addr_space_token(pgdir) : 0;
     TASK_CTX_STATUS(ctx) = arch_user_initial_status();
     arch_task_context_set_initial_sp(ctx, trap, ks_top);
-    t->kstack = (uint64_t)ctx;
+    t->kstack = (uintptr_t)ctx;
 
-    kinfo("[PROC] user task pid=%d entry=0x%lx sp=0x%lx\n", t->pid,
-          (unsigned long)entry, (unsigned long)sp);
+    kinfo("[PROC] user task pid=%d entry=0x%lx sp=0x%lx trap_sp=0x%lx\n", t->pid,
+          (unsigned long)entry, (unsigned long)sp, (unsigned long)TRAP_CTX_SP(trap));
 
     proc_make_ready(t);
     return t->pid;
 }
 
-int proc_alloc_user(uint64_t entry, uint64_t sp, uint64_t *pgdir) {
-    return proc_alloc_user_image(entry, sp, pgdir, NULL, 0, sp, 0);
+int proc_alloc_user(uintptr_t entry, vaddr_t sp, pt_root_t *pgdir) {
+    return proc_alloc_user_image(entry, sp, pgdir, NULL, 0, sp, 0, 0
+#ifdef CONFIG_NOMMU
+                               , NULL, 0
+#endif
+                               );
 }
 
 /* ============================================================
@@ -509,7 +530,7 @@ int proc_kill_pgid(int pgid, int signum, int skip_self) {
  * ============================================================ */
 
 // 调整堆大小（brk 系统调用的实现）
-uint64_t proc_brk(uint64_t newbrk) {
+vaddr_t proc_brk(vaddr_t newbrk) {
     task_t *t = proc_current();
     if (!t || !t->mm) return 0; // 理论上不应发生
 
@@ -517,20 +538,20 @@ uint64_t proc_brk(uint64_t newbrk) {
 
     // 如果 newbrk 为 0，通常是 C 库在查询当前堆位置
     if (newbrk == 0) {
-        uint64_t brk = t->mm->brk;
+        vaddr_t brk = t->mm->brk;
         spin_unlock_irqrestore(&t->mm->lock, lock_flags);
         return brk;
     }
 
     // mm_brk 内部已经处理了 newbrk < start_brk 的情况（返回旧 brk）
     // 同时也处理了分配失败的情况
-    uint64_t brk = mm_brk(t->mm, newbrk);
+    vaddr_t brk = mm_brk(t->mm, newbrk);
     spin_unlock_irqrestore(&t->mm->lock, lock_flags);
     return brk;
 }
 
 // 创建内存映射（mmap 系统调用的实现）
-uint64_t proc_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, long off) {
+vaddr_t proc_mmap(vaddr_t addr, size_t len, int prot, int flags, int fd, long off) {
     task_t *t = proc_current();
     if (!t || !t->mm) return (uint64_t)-1;
 
@@ -538,7 +559,7 @@ uint64_t proc_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, long 
     if (map_len == 0) return (uint64_t)-EINVAL;
 
     uint64_t lock_flags = spin_lock_irqsave(&t->mm->lock);
-    uint64_t ret;
+    vaddr_t ret;
     if ((flags & MAP_ANONYMOUS) || fd < 0)
         ret = mm_mmap(t->mm, addr, len, prot, flags);
     else {
@@ -554,7 +575,7 @@ uint64_t proc_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, long 
 }
 
 // 取消内存映射（munmap 系统调用的实现）
-int proc_munmap(uint64_t addr, size_t len) {
+int proc_munmap(vaddr_t addr, size_t len) {
     task_t *t = proc_current();
     if (!t || !t->mm) return -1;
     uint64_t lock_flags = spin_lock_irqsave(&t->mm->lock);

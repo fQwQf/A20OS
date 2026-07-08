@@ -96,7 +96,7 @@ void proc_task_init_common(task_t *t, task_t *parent)
     t->exit_signal = SIGCHLD;
     t->clear_child_tid = NULL;
     t->robust_list_head = 0;
-    t->sigaltstack.ss_sp = NULL;
+    t->sigaltstack.ss_sp = 0;
     t->sigaltstack.ss_flags = SS_DISABLE;
     t->sigaltstack.ss_size = 0;
     t->sig_handling = 0;

@@ -294,8 +294,6 @@ static int epoll_do_wait(int epfd, void *events, int maxevents,
                          int timeout_ms, const void *sigmask,
                          size_t sigsetsize)
 {
-    (void)sigsetsize;
-
     int err = check_epfd(epfd);
     if (err < 0) return err;
 
@@ -313,18 +311,22 @@ static int epoll_do_wait(int epfd, void *events, int maxevents,
     signal_state_t *saved_ss = NULL;
     uint64_t saved_blocked = 0;
     if (sigmask) {
+        if (sigsetsize != ARCH_SIGSET_SIZE) {
+            epoll_put_ref(ep_gfd, ep_vf);
+            return -EINVAL;
+        }
         if (!t || !t->signals) {
             epoll_put_ref(ep_gfd, ep_vf);
             return -EINVAL;
         }
-        uint64_t user_mask;
+        arch_sigset_t user_mask;
         if (copy_from_user(&user_mask, sigmask, sizeof(user_mask)) < 0) {
             epoll_put_ref(ep_gfd, ep_vf);
             return -EFAULT;
         }
         saved_ss = (signal_state_t *)t->signals;
         saved_blocked = t->sig_blocked;
-        t->sig_blocked = signal_mask_from_user(user_mask) &
+        t->sig_blocked = arch_user_sigset_to_kernel(&user_mask) &
             ~(signal_mask_bit(SIGKILL) | signal_mask_bit(SIGSTOP));
     }
 

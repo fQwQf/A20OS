@@ -349,8 +349,13 @@ int64_t sys_a20_task_spawn(const a20_syscall_args_t *args)
 
     size_t total_vm = (size_t)(info.end_va - info.base);
     int new_pid = proc_alloc_user_image(info.entry, info.stack_top, info.pgdir,
-                                         info.mmap, info.brk,
-                                         info.stack_top, total_vm);
+                                          info.mmap, info.brk,
+                                          info.stack_top, total_vm,
+                                          info.tls_tp
+#ifdef CONFIG_NOMMU
+                                          , info.nommu_allocs, info.num_nommu_allocs
+#endif
+                                          );
     if (new_pid < 0) return -A20_ERR_NO_MEMORY;
 
     task_t *new_task = proc_find(new_pid);

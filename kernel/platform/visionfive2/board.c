@@ -1,6 +1,7 @@
 #ifdef CONFIG_BOARD_VISIONFIVE2
 
 #include "drivers/core/driver_core.h"
+#include "core/timer.h"
 
 /* VisionFive2 addresses */
 #define VF2_MEMORY_BASE   0x40000000UL
@@ -69,20 +70,8 @@ static const irqchip_ops_t vf2_plic_ops = {
     .send_ipi   = vf2_plic_send_ipi,
 };
 
-static void vf2_timer_init(void) {
-}
-
-static void vf2_timer_set_interval(uint64_t ticks) {
-    uint64_t now;
-    __asm__ volatile("csrr %0, time" : "=r"(now));
-    extern void sbi_set_timer(uint64_t);
-    sbi_set_timer(now + ticks);
-}
-
 static uint64_t vf2_timer_read_ticks(void) {
-    uint64_t val;
-    __asm__ volatile("csrr %0, time" : "=r"(val));
-    return val;
+    return timer_get_ticks();
 }
 
 static uint64_t vf2_timer_ticks_per_sec(void) {
@@ -90,8 +79,6 @@ static uint64_t vf2_timer_ticks_per_sec(void) {
 }
 
 static const timer_ops_t vf2_timer_ops = {
-    .init          = vf2_timer_init,
-    .set_interval  = vf2_timer_set_interval,
     .read_ticks    = vf2_timer_read_ticks,
     .ticks_per_sec = vf2_timer_ticks_per_sec,
 };

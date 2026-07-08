@@ -523,7 +523,7 @@ static int exec_install_process(task_t *t,
 
     /* ---- 4. Atomically swap mm ---- */
     mm_struct_t *old_mm    = t->mm;
-    uint64_t    *old_pgdir = t->pgdir;
+    pt_root_t   *old_pgdir = t->pgdir;
 
     t->mm   = new_mm;
     t->pgdir = info->pgdir;
@@ -567,19 +567,19 @@ static int exec_install_process(task_t *t,
         memset(new_ctx, 0, sizeof(*new_ctx));
         new_ctx->ra = (uint64_t)user_trap_return;
         new_ctx->tp = (uint64_t)(uintptr_t)t;
+#ifdef CONFIG_ARM32
+        new_ctx->user_tp = (uint32_t)info->tls_tp;
+#endif
+        TASK_CTX_STATUS(new_ctx) = arch_user_initial_status();
         TASK_CTX_PAGE_TABLE(new_ctx) = arch_make_addr_space_token(info->pgdir);
+        arch_task_context_set_initial_sp(new_ctx, trap, ks_top);
         t->trap_ctx = trap;
         t->kstack   = (uint64_t)new_ctx;
     }
 
-    task_context_t *ctx = arch_task_context_base(t->kstack_base, saved_kernel_sp, t->trap_ctx);
-    TASK_CTX_PAGE_TABLE(ctx) = arch_make_addr_space_token(info->pgdir);
-    arch_task_context_set_initial_sp(ctx, t->trap_ctx, saved_kernel_sp);
-    t->kstack = (uint64_t)ctx;
-
     {
         trap_context_t *trap = t->trap_ctx;
-        saved_kernel_sp = arch_trap_ctx_get_kernel_stack(trap, saved_kernel_sp);
+        saved_kernel_sp = arch_trap_ctx_get_kernel_stack(trap, (uint64_t)(uintptr_t)trap);
         memset(trap, 0, sizeof(*trap));
         TRAP_CTX_KScratch0(trap) = arch_make_addr_space_token(info->pgdir);
         TRAP_CTX_EPC(trap)       = info->entry;
@@ -638,7 +638,13 @@ int proc_exec(const char *path, char *const argv[], char *const envp[])
     strcpy(bprm.path, path);
 
     size_t arg_bytes = 0;
+#ifdef CONFIG_NOMMU
+    /* In NOMMU, proc_exec is only called from syscall handlers, so argv/envp
+     * are always user pointers even though they live in physical memory. */
+    int is_kptr = 0;
+#else
     int is_kptr = argv && arch_is_kernel_address(argv);
+#endif
     int r = exec_copy_args(argv, is_kptr, bprm.args, &bprm.argc,
                            &arg_bytes, MAX_ARG_BYTES);
     if (r < 0) {
@@ -646,7 +652,11 @@ int proc_exec(const char *path, char *const argv[], char *const envp[])
         return r;
     }
 
+#ifdef CONFIG_NOMMU
+    int env_is_kptr = 0;
+#else
     int env_is_kptr = envp && arch_is_kernel_address(envp);
+#endif
     r = exec_copy_args(envp, env_is_kptr, bprm.envs, &bprm.envc,
                        &arg_bytes, MAX_ARG_BYTES);
     if (r < 0) {

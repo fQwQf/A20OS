@@ -3,7 +3,7 @@ OPT ?= -O3
 
 .DEFAULT_GOAL := all
 
-SUPPORTED_ARCHES := riscv64 loongarch64 aarch64 x86_64
+SUPPORTED_ARCHES := riscv64 loongarch64 aarch64 x86_64 arm32 riscv32 ppc64le
 ifeq ($(filter $(ARCH),$(SUPPORTED_ARCHES)),)
 $(error Unsupported ARCH '$(ARCH)'; expected one of: $(SUPPORTED_ARCHES))
 endif
@@ -14,40 +14,75 @@ MUSL_BASE := $(CURDIR)/external/musl
 MUSL_BUILD := $(MUSL_BASE)/build-$(ARCH)
 MUSL_CRT := $(MUSL_BUILD)/lib
 
+ARCH_STAMP := $(BUILD_DIR)/.arch-stamp
+
+.PHONY: arch-stamp-refresh
+arch-stamp-refresh:
+	@:
+
+$(ARCH_STAMP): arch-stamp-refresh Makefile
+	@mkdir -p $(BUILD_DIR)
+	@printf '%s\n' '$(ARCH)' > $@.tmp
+	@if [ -f $@ ] && diff -q $@ $@.tmp >/dev/null 2>&1; then \
+		rm -f $@.tmp; \
+	else \
+		mv $@.tmp $@; \
+		echo "[USER] arch changed to $(ARCH), cleaning $(BUILD_DIR)"; \
+		rm -rf $(BUILD_DIR)/*; \
+	fi
+
 CROSS_COMPILE_riscv64 := riscv64-unknown-elf-
 CROSS_COMPILE_loongarch64 := loongarch64-linux-gnu-
 CROSS_COMPILE_aarch64 := aarch64-linux-gnu-
 CROSS_COMPILE_x86_64 := x86_64-linux-gnu-
+CROSS_COMPILE_arm32 := arm-linux-gnueabihf-
+CROSS_COMPILE_riscv32 := riscv64-unknown-elf-
+CROSS_COMPILE_ppc64le := powerpc64le-linux-gnu-
 CROSS_COMPILE ?= $(CROSS_COMPILE_$(ARCH))
 
 MUSL_ARCH_riscv64 := riscv64
 MUSL_ARCH_loongarch64 := loongarch64
 MUSL_ARCH_aarch64 := aarch64
 MUSL_ARCH_x86_64 := x86_64
+MUSL_ARCH_arm32 := arm
+MUSL_ARCH_riscv32 := riscv32
+MUSL_ARCH_ppc64le := powerpc64
 MUSL_ARCH := $(MUSL_ARCH_$(ARCH))
 
 MUSL_TARGET_riscv64 := riscv64
 MUSL_TARGET_loongarch64 := loongarch64-linux-gnu
 MUSL_TARGET_aarch64 := aarch64-linux-gnu
 MUSL_TARGET_x86_64 := x86_64-linux-gnu
+MUSL_TARGET_arm32 := arm-linux-gnueabihf
+MUSL_TARGET_riscv32 := riscv32-linux-gnu
+MUSL_TARGET_ppc64le := powerpc64le-linux-gnu
 MUSL_TARGET := $(MUSL_TARGET_$(ARCH))
 
-ARCH_CFLAGS_riscv64 := -mabi=lp64 -march=rv64g -mcmodel=medany
+ARCH_CFLAGS_riscv64 := -mabi=lp64d -march=rv64g -mcmodel=medany
 ARCH_CFLAGS_loongarch64 := -mabi=lp64d -march=loongarch64 -mcmodel=normal -fno-pic
 ARCH_CFLAGS_aarch64 := -march=armv8-a -fno-pic -fno-tree-vectorize
 ARCH_CFLAGS_x86_64 := -m64 -fno-pic -fno-pie -mno-red-zone
+ARCH_CFLAGS_arm32 := -march=armv7-a -marm -mfpu=vfpv3-d16 -mfloat-abi=hard -fno-pic
+ARCH_CFLAGS_riscv32 := -march=rv32imafdc -mabi=ilp32d -mcmodel=medany
+ARCH_CFLAGS_ppc64le := -m64 -mcpu=power8 -mtune=power8 -mlong-double-64 -fno-pic -mno-vsx -mno-altivec -fno-tree-vectorize
 ARCH_CFLAGS := $(ARCH_CFLAGS_$(ARCH))
 
 ARCH_LDFLAGS_riscv64 :=
 ARCH_LDFLAGS_loongarch64 := -no-pie
 ARCH_LDFLAGS_aarch64 := -no-pie
 ARCH_LDFLAGS_x86_64 := -no-pie
+ARCH_LDFLAGS_arm32 := -no-pie
+ARCH_LDFLAGS_riscv32 := -no-pie -Wl,-m,elf32lriscv
+ARCH_LDFLAGS_ppc64le := -no-pie
 ARCH_LDFLAGS := $(ARCH_LDFLAGS_$(ARCH))
 
-MUSL_CONFIG_CFLAGS_riscv64 := $(OPT) -mcmodel=medany -march=rv64g -mabi=lp64
+MUSL_CONFIG_CFLAGS_riscv64 := $(OPT) -mcmodel=medany -march=rv64g -mabi=lp64d
 MUSL_CONFIG_CFLAGS_loongarch64 := $(OPT) -march=loongarch64 -mabi=lp64d -mcmodel=normal -fno-pic -static
 MUSL_CONFIG_CFLAGS_aarch64 := $(OPT) -fno-pic -static -fno-tree-vectorize
 MUSL_CONFIG_CFLAGS_x86_64 := $(OPT) -m64 -fno-pic -fno-pie -mno-red-zone -static
+MUSL_CONFIG_CFLAGS_arm32 := $(OPT) -march=armv7-a -marm -mfpu=vfpv3-d16 -mfloat-abi=hard -fno-pic -static
+MUSL_CONFIG_CFLAGS_riscv32 := $(OPT) -march=rv32imafdc -mabi=ilp32d -mcmodel=medany -static
+MUSL_CONFIG_CFLAGS_ppc64le := $(OPT) -m64 -mcpu=power8 -mtune=power8 -mlong-double-64 -fno-pic -static -mno-vsx -mno-altivec -fno-tree-vectorize
 MUSL_CONFIG_CFLAGS := $(MUSL_CONFIG_CFLAGS_$(ARCH))
 
 CC := $(CROSS_COMPILE)gcc
@@ -63,7 +98,22 @@ MUSL_INC := -isystem $(MUSL_BUILD)/obj/include \
 
 CFLAGS := -Wall -Wextra $(OPT) -ffreestanding -nostdinc $(MUSL_INC) \
           -Iinit_common $(ARCH_CFLAGS)
-LDFLAGS := -static -nostdlib -Ttext 0x10000 $(ARCH_LDFLAGS)
+LDFLAGS := -static -nostdlib -Wl,--build-id=none -Wl,-Ttext-segment=0x10000 $(ARCH_LDFLAGS)
+
+ifeq ($(NOMMU),1)
+ifeq ($(ARCH),riscv64)
+CROSS_COMPILE := riscv64-linux-gnu-
+CC := $(CROSS_COMPILE)gcc
+endif
+# Strip conflicting flags for NOMMU
+ARCH_LDFLAGS := $(filter-out -no-pie,$(ARCH_LDFLAGS))
+ARCH_CFLAGS := $(filter-out -fno-pic -fno-pie,$(ARCH_CFLAGS))
+MUSL_CONFIG_CFLAGS := $(filter-out -fno-pic -fno-pie,$(MUSL_CONFIG_CFLAGS))
+
+LDFLAGS := -static-pie -nostdlib -Wl,--build-id=none $(ARCH_LDFLAGS) $(ARCH_CFLAGS)
+CFLAGS += -fPIE -Dfork=vfork
+MUSL_CONFIG_CFLAGS += -fPIE
+endif
 
 LIBGCC_DEFAULT := $(shell $(CC) $(CFLAGS) -print-libgcc-file-name 2>/dev/null)
 ifeq ($(ARCH),riscv64)
@@ -75,14 +125,29 @@ LIBGCC_LP64_LINUX := $(shell if command -v riscv64-linux-gnu-gcc >/dev/null 2>&1
 fi)
 LIBGCC := $(if $(wildcard $(LIBGCC_LP64)),$(LIBGCC_LP64),$(if $(wildcard $(LIBGCC_LP64_ALT)),$(LIBGCC_LP64_ALT),$(if $(wildcard $(LIBGCC_LP64_LINUX)),$(LIBGCC_LP64_LINUX),$(LIBGCC_DEFAULT))))
 MUSL_CONFIG_LDFLAGS := -L$(dir $(LIBGCC))
+else ifeq ($(ARCH),riscv32)
+LIBGCC_DEFAULT := $(shell $(CC) $(CFLAGS) -print-libgcc-file-name 2>/dev/null)
+LIBGCC_ILP32 := $(dir $(LIBGCC_DEFAULT))rv32imafdc/ilp32d/libgcc.a
+LIBGCC_ILP32_ALT := $(dir $(LIBGCC_DEFAULT))lib32/ilp32d/libgcc.a
+LIBGCC := $(if $(wildcard $(LIBGCC_ILP32)),$(LIBGCC_ILP32),$(if $(wildcard $(LIBGCC_ILP32_ALT)),$(LIBGCC_ILP32_ALT),$(LIBGCC_DEFAULT)))
+MUSL_CONFIG_LDFLAGS := -L$(dir $(LIBGCC))
 else
 LIBGCC := $(LIBGCC_DEFAULT)
 MUSL_CONFIG_LDFLAGS :=
 endif
 
+ifeq ($(NOMMU),1)
+CRT_START := $(MUSL_CRT)/rcrt1.o $(MUSL_CRT)/crti.o
+else
 CRT_START := $(MUSL_CRT)/crt1.o $(MUSL_CRT)/crti.o
+endif
 CRT_END := $(MUSL_CRT)/crtn.o
 LIBC := $(MUSL_CRT)/libc.a $(LIBGCC)
+
+# ARM libgcc references libc symbols (e.g. raise), so allow circular resolution.
+ifeq ($(ARCH),arm32)
+LIBC := -Wl,--start-group $(MUSL_CRT)/libc.a $(LIBGCC) -Wl,--end-group
+endif
 
 MUSL_CHECK_FILES := $(MUSL_CRT)/crt1.o \
                     $(MUSL_CRT)/crti.o \
@@ -458,7 +523,7 @@ all: build_dir $(BUILD_DIR)/init $(BUILD_DIR)/mksh $(BUILD_DIR)/sh $(SBASE_CMDS)
 
 fastfetch: build_dir $(FF_CMD)
 
-build_dir:
+build_dir: $(ARCH_STAMP)
 	@mkdir -p $(BUILD_DIR) $(OBJ_DIR)
 
 musl_prepare:
@@ -477,7 +542,7 @@ musl_prepare:
 		echo "[MUSL] build-$(ARCH) stale or missing, rebuilding..."; \
 		rm -rf "$(MUSL_BUILD)"; \
 		mkdir -p "$(MUSL_BUILD)"; \
-		cd "$(MUSL_BUILD)" && sh ../configure \
+		cd "$(MUSL_BUILD)" && env -u ARCH -u MAKEFLAGS sh ../configure \
 			--target=$(MUSL_TARGET) \
 			--prefix=/opt/musl-$(ARCH) \
 			--disable-shared \
@@ -485,7 +550,7 @@ musl_prepare:
 			CC=$(CC) CROSS_COMPILE=$(CROSS_COMPILE) \
 			CFLAGS='$(MUSL_CONFIG_CFLAGS)' \
 			LDFLAGS='$(MUSL_CONFIG_LDFLAGS)'; \
-		$(MAKE) -C "$(MUSL_BUILD)" -j$$(nproc); \
+		env -u ARCH -u MAKEFLAGS $(MAKE) -C "$(MUSL_BUILD)" -j$$(nproc); \
 	else \
 		echo "[MUSL] build-$(ARCH) ready"; \
 	fi

@@ -7,10 +7,12 @@
 #define PAGE_SIZE          4096UL
 #define PAGE_SIZE_BITS     12
 #define PAGE_OFFSET_MASK   ((1UL << PAGE_SIZE_BITS) - 1)
+#ifndef PMD_SHIFT
 #define PMD_SHIFT          21
 #define PMD_SIZE           (1UL << PMD_SHIFT)
 #define PMD_ORDER          (PMD_SHIFT - PAGE_SIZE_BITS)
 #define PMD_PAGE_COUNT     (PMD_SIZE / PAGE_SIZE)
+#endif
 
 /* ---------- Kernel / user stack sizes ---------- */
 #define KERNEL_STACK_SIZE        (64 * 1024)

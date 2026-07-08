@@ -32,9 +32,9 @@ static void signal_make_page_exec(uint64_t addr) {
     arch_tlb_flush_page(page);
 }
 
-__attribute__((weak)) void arch_signal_prepare_frame(sig_rt_frame_t *frame,
-                                                      uint64_t tramp_addr,
-                                                      trap_context_t *ctx) {
+__attribute__((weak)) void arch_signal_prepare_frame(arch_sig_rt_frame_t *frame,
+                                                     vaddr_t tramp_addr,
+                                                     trap_context_t *ctx) {
     (void)frame;
     (void)tramp_addr;
     (void)ctx;
@@ -105,17 +105,7 @@ static int signal_default_ignore(int sig) {
     }
 }
 
-typedef struct user_rt_sigaction {
-    uintptr_t handler;
-    uint64_t  flags;
-    uint64_t  mask;
-} user_rt_sigaction_t;
-
-typedef struct user_sigset {
-    uint64_t bits[1];
-} user_sigset_t;
-
-static void build_siginfo_code(siginfo_t *si, int sig, task_t *sender, int code)
+static void build_siginfo_code(arch_siginfo_t *si, int sig, task_t *sender, int code)
 {
     memset(si, 0, sizeof(*si));
     si->si_signo = sig;
@@ -127,7 +117,7 @@ static void build_siginfo_code(siginfo_t *si, int sig, task_t *sender, int code)
     }
 }
 
-static void build_siginfo(siginfo_t *si, int sig, task_t *sender)
+static void build_siginfo(arch_siginfo_t *si, int sig, task_t *sender)
 {
     build_siginfo_code(si, sig, sender, SI_USER);
 }
@@ -196,7 +186,7 @@ int signal_send_info(int pid, int signum, const void *info, size_t info_size) {
 }
 
 int signal_send_user(int pid, int signum) {
-    siginfo_t si;
+    arch_siginfo_t si;
     build_siginfo(&si, signum, proc_current());
     return signal_send_info(pid, signum, &si, sizeof(si));
 }
@@ -252,7 +242,7 @@ int signal_send_thread_user(int tid, int signum) {
         return 0;
     }
 
-    siginfo_t si;
+    arch_siginfo_t si;
     build_siginfo_code(&si, signum, proc_current(), SI_TKILL);
     memset(ss->pending_info[signum], 0, SIGNAL_INFO_SIZE);
     memcpy(ss->pending_info[signum], &si, sizeof(si));
@@ -346,12 +336,11 @@ void signal_deliver(void) {
     }
 }
 
-static void build_ucontext(ucontext_t *uc, trap_context_t *ctx,
-                           uint64_t old_blocked, sigaltstack_t *altstack)
+static void build_ucontext(arch_ucontext_t *uc, trap_context_t *ctx,
+                           uint64_t old_blocked, arch_sigaltstack_t *altstack)
 {
     memset(uc, 0, sizeof(*uc));
-    uc->uc_sigmask[0] = signal_mask_to_user(old_blocked);
-    uc->uc_sigmask[1] = 0;
+    arch_ucontext_sigmask_set(uc, old_blocked);
     uc->uc_stack.ss_sp = altstack->ss_sp;
     uc->uc_stack.ss_flags = altstack->ss_flags;
     uc->uc_stack.ss_size = altstack->ss_size;
@@ -406,7 +395,7 @@ void signal_deliver_user(trap_context_t *ctx) {
             proc_exit_group(-signal_wait_status(sig));
         }
 
-        siginfo_t queued_info;
+        arch_siginfo_t queued_info;
         int has_queued_info = ss->pending_has_info[sig];
         if (has_queued_info)
             memcpy(&queued_info, ss->pending_info[sig], sizeof(queued_info));
@@ -444,22 +433,22 @@ void signal_deliver_user(trap_context_t *ctx) {
             sp = (uintptr_t)t->sigaltstack.ss_sp + t->sigaltstack.ss_size;
         }
 
-        sig_rt_frame_t frame;
+        arch_sig_rt_frame_t frame;
         memset(&frame, 0, sizeof(frame));
-        frame.flag = 0x77777777ULL;
+        arch_sigframe_flag_set(&frame, 0x77777777ULL);
         if (has_queued_info)
-            frame.info = queued_info;
+            *arch_sigframe_info_ptr(&frame) = queued_info;
         else
-            build_siginfo_code(&frame.info, sig, NULL, SI_KERNEL);
-        build_ucontext(&frame.uc, ctx, old_blocked, &t->sigaltstack);
-        arch_signal_build_frame_extra(&frame.arch_extra, ctx);
+            build_siginfo_code(arch_sigframe_info_ptr(&frame), sig, NULL, SI_KERNEL);
+        build_ucontext(arch_sigframe_ucontext_ptr(&frame), ctx, old_blocked, &t->sigaltstack);
+        arch_signal_build_frame_extra(arch_sigframe_extra_ptr(&frame), ctx);
 
-        sp -= sizeof(sig_rt_frame_t);
+        sp -= arch_sigframe_size();
         sp &= ~15ULL;
 
         uint32_t tramp[2];
         arch_signal_prepare_trampoline(tramp);
-        uint64_t tramp_addr = sp + offsetof(sig_rt_frame_t, tramp);
+        uint64_t tramp_addr = sp + arch_sigframe_tramp_offset();
         arch_signal_prepare_frame(&frame, tramp_addr, ctx);
 
         if (copy_to_user((void *)sp, &frame, sizeof(frame)) < 0)
@@ -475,8 +464,8 @@ void signal_deliver_user(trap_context_t *ctx) {
         TRAP_CTX_ARG0(ctx) = sig;
 
         if (sa->sa_flags & SA_SIGINFO) {
-            TRAP_CTX_ARG1(ctx) = sp + offsetof(sig_rt_frame_t, info);
-            TRAP_CTX_ARG2(ctx) = sp + offsetof(sig_rt_frame_t, uc);
+            TRAP_CTX_ARG1(ctx) = sp + arch_sigframe_info_offset();
+            TRAP_CTX_ARG2(ctx) = sp + arch_sigframe_uc_offset();
         }
         TRAP_CTX_RA(ctx) = tramp_addr;
         return;
@@ -488,14 +477,14 @@ int64_t sys_rt_sigreturn_impl(trap_context_t *ctx) {
     if (!t || !t->signals) return -EFAULT;
 
     uint64_t sp = TRAP_CTX_SP(ctx);
-    sig_rt_frame_t frame;
+    arch_sig_rt_frame_t frame;
     if (copy_from_user(&frame, (void *)sp, sizeof(frame)) < 0)
         return -EFAULT;
 
-    t->sig_blocked = signal_mask_from_user(frame.uc.uc_sigmask[0]);
+    t->sig_blocked = arch_user_sigset_to_kernel(arch_ucontext_sigmask_const_ptr(arch_sigframe_ucontext_ptr(&frame)));
 
-    arch_signal_restore_mcontext(ctx, &frame.uc.uc_mcontext);
-    arch_signal_restore_frame_extra(ctx, &frame.arch_extra);
+    arch_signal_restore_mcontext(ctx, &arch_sigframe_ucontext_ptr(&frame)->uc_mcontext);
+    arch_signal_restore_frame_extra(ctx, arch_sigframe_extra_ptr(&frame));
 
     t->sig_handling = 0;
     return 0;
@@ -505,49 +494,49 @@ int64_t sys_rt_sigreturn_impl(trap_context_t *ctx) {
 int sys_sigaction_impl(int signum, const void *act, void *oldact, size_t sigsetsize) {
     if (signum <= 0 || signum >= NSIG) return -EINVAL;
     if (signum == SIGKILL || signum == SIGSTOP) return -EINVAL;
-    if (sigsetsize != sizeof(user_sigset_t)) return -EINVAL;
+    if (sigsetsize != ARCH_SIGSET_SIZE) return -EINVAL;
 
     task_t *t = proc_current();
     if (!t || !t->signals) return -EINVAL;
     signal_state_t *ss = (signal_state_t *)t->signals;
 
     if (oldact) {
-        user_rt_sigaction_t oldk;
+        arch_user_sigaction_t oldk;
         memset(&oldk, 0, sizeof(oldk));
-        oldk.handler = ss->actions[signum].sa_handler;
-        oldk.flags = (uint64_t)(uint32_t)ss->actions[signum].sa_flags;
-        oldk.mask = signal_mask_to_user(ss->actions[signum].sa_mask);
+        arch_sigaction_set_handler(&oldk, ss->actions[signum].sa_handler);
+        arch_sigaction_set_flags(&oldk, (uint64_t)(uint32_t)ss->actions[signum].sa_flags);
+        arch_sigaction_set_mask(&oldk, ss->actions[signum].sa_mask);
         if (copy_to_user(oldact, &oldk, sizeof(oldk)) < 0)
             return -EFAULT;
     }
     if (act) {
-        user_rt_sigaction_t ukact;
+        arch_user_sigaction_t ukact;
         if (copy_from_user(&ukact, act, sizeof(ukact)) < 0)
             return -EFAULT;
-        ss->actions[signum].sa_handler = ukact.handler;
-        ss->actions[signum].sa_mask = signal_mask_from_user(ukact.mask);
-        ss->actions[signum].sa_flags = (int)ukact.flags;
+        ss->actions[signum].sa_handler = arch_sigaction_get_handler(&ukact);
+        ss->actions[signum].sa_mask = arch_sigaction_get_mask(&ukact);
+        ss->actions[signum].sa_flags = (int)arch_sigaction_get_flags(&ukact);
     }
     return 0;
 }
 
 // 修改信号掩码（sigprocmask 系统调用的实现）
 int sys_sigprocmask_impl(int how, const void *set, void *oldset, size_t sigsetsize) {
-    if (sigsetsize != sizeof(user_sigset_t)) return -EINVAL;
+    if (sigsetsize != ARCH_SIGSET_SIZE) return -EINVAL;
 
     task_t *t = proc_current();
     if (!t || !t->signals) return -EINVAL;
     if (oldset) {
-        user_sigset_t oldmask = { .bits = { signal_mask_to_user(t->sig_blocked) } };
+        arch_sigset_t oldmask = arch_user_sigset_from_kernel(t->sig_blocked);
         if (copy_to_user(oldset, &oldmask, sizeof(oldmask)) < 0)
             return -EFAULT;
     }
     if (!set) return 0;
 
-    user_sigset_t usermask;
+    arch_sigset_t usermask;
     if (copy_from_user(&usermask, set, sizeof(usermask)) < 0)
         return -EFAULT;
-    uint64_t mask = signal_mask_from_user(usermask.bits[0]);
+    uint64_t mask = arch_user_sigset_to_kernel(&usermask);
     mask &= ~(signal_mask_bit(SIGKILL) | signal_mask_bit(SIGSTOP));
 
     switch (how) {

@@ -33,7 +33,7 @@
 #define A64_UXN            (1UL << 54)
 
 /* Software semantic bits. */
-#define PTE_V              (A64_DESC_VALID | A64_DESC_TABLE)
+#define PTE_V              (A64_DESC_VALID)
 #define PTE_R              (1UL << 55)
 #define PTE_W              (1UL << 56)
 #define PTE_X              (1UL << 57)
@@ -48,7 +48,8 @@
 
 #define PTE_KERN           (PTE_V | PTE_R | PTE_W | PTE_X | PTE_A | PTE_D | PTE_G | PTE_MAT1 | PTE_LEAF)
 #define PTE_USER           (PTE_V | PTE_R | PTE_W | PTE_X | PTE_U | PTE_A | PTE_D | PTE_MAT1 | PTE_LEAF)
-#define PTE_DIR            (PTE_V)
+#define PTE_DIR            (PTE_V | A64_DESC_TABLE)
+#define ARCH_HAS_PTE_BLOCK 1
 
 static inline int arch_pte_is_leaf(uint64_t pte) {
     return (pte & PTE_V) && (pte & PTE_LEAF);
@@ -98,6 +99,7 @@ static inline uint64_t arch_pte_leaf(paddr_t pa, uint64_t flags) {
         ap = (flags & PTE_W) ? 0x0UL : 0x2UL;
 
     pte |= A64_AF;
+    pte |= A64_DESC_TABLE;
     pte |= (ap << A64_AP_SHIFT);
     pte |= ((flags & PTE_MAT1) ? 0x1UL : 0x0UL) << A64_ATTRINDX_SHIFT;
     if (flags & PTE_U)
@@ -111,6 +113,11 @@ static inline uint64_t arch_pte_leaf(paddr_t pa, uint64_t flags) {
     else
         pte |= A64_UXN;
     return pte;
+}
+
+static inline uint64_t arch_pte_block(paddr_t pa, uint64_t flags) {
+    uint64_t pte = arch_pte_leaf(pa, flags);
+    return pte & ~A64_DESC_TABLE;
 }
 
 #endif

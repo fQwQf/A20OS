@@ -5,6 +5,7 @@
 #include "core/consts.h"
 #include "core/refcount.h"
 #include "core/trap.h"
+#include <signal_abi.h>
 
 /* ============================================================
  * POSIX Signal Handling
@@ -92,51 +93,9 @@ int  sys_sigprocmask_impl(int how, const void *set, void *oldset, size_t sigsets
 
 #define MINSIGSTKSZ 2048
 
-typedef struct sigaltstack {
-    void   *ss_sp;
-    int     ss_flags;
-    size_t  ss_size;
-} stack_t;
-
 #define SIG_BLOCK    0
 #define SIG_UNBLOCK  1
 #define SIG_SETMASK  2
-
-typedef struct {
-    int si_signo;
-    int si_errno;
-    int si_code;
-    int _sifields[29];
-} __attribute__((aligned(16))) siginfo_t;
-
-#define USER_SIGSET_WORDS (128 / (int)sizeof(uint64_t))
-
-#ifndef ARCH_UCONTEXT_PAD_FIELDS
-#define ARCH_UCONTEXT_PAD_FIELDS
-#endif
-
-#ifndef ARCH_SIGFRAME_EXTRA_FIELDS
-#define ARCH_SIGFRAME_EXTRA_FIELDS
-#endif
-
-typedef arch_sigcontext_t sigcontext_t;
-
-typedef struct ucontext {
-    uint64_t        uc_flags;
-    uintptr_t       uc_link;
-    stack_t         uc_stack;
-    uint64_t        uc_sigmask[USER_SIGSET_WORDS];
-    ARCH_UCONTEXT_PAD_FIELDS
-    sigcontext_t    uc_mcontext;
-} __attribute__((aligned(16))) ucontext_t;
-
-typedef struct {
-    uint64_t    flag;
-    ucontext_t  uc;
-    siginfo_t   info;
-    ARCH_SIGFRAME_EXTRA_FIELDS
-    uint32_t    tramp[2];
-} __attribute__((aligned(16))) sig_rt_frame_t;
 
 int64_t sys_rt_sigreturn_impl(trap_context_t *ctx);
 
@@ -147,8 +106,8 @@ int64_t sys_rt_sigreturn_impl(trap_context_t *ctx);
  * example x86_64, where the top-of-stack word is the signal handler's return
  * address) can modify it here.  The default weak implementation is a no-op.
  */
-void arch_signal_prepare_frame(sig_rt_frame_t *frame, uint64_t tramp_addr,
-                               trap_context_t *ctx);
+void arch_signal_prepare_frame(arch_sig_rt_frame_t *frame, vaddr_t tramp_addr,
+                                trap_context_t *ctx);
 
 /*
  * Architecture-specific hook called once when a new user address space is

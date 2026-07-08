@@ -3,6 +3,7 @@
 #include "drivers/core/driver_core.h"
 #include "core/arch.h"
 #include "core/cpu.h"
+#include "core/timer.h"
 
 static void rv64_plic_init(void) {
     int hart = (int)cpu_current_id();
@@ -46,19 +47,8 @@ static const irqchip_ops_t rv64_plic_ops = {
     .send_ipi   = rv64_plic_send_ipi,
 };
 
-static void rv64_timer_init(void) {
-}
-
-static void rv64_timer_set_interval(uint64_t ticks) {
-    uint64_t now;
-    __asm__ volatile("csrr %0, time" : "=r"(now));
-    firmware_set_timer(now + ticks);
-}
-
 static uint64_t rv64_timer_read_ticks(void) {
-    uint64_t val;
-    __asm__ volatile("csrr %0, time" : "=r"(val));
-    return val;
+    return timer_get_ticks();
 }
 
 static uint64_t rv64_timer_ticks_per_sec(void) {
@@ -66,8 +56,6 @@ static uint64_t rv64_timer_ticks_per_sec(void) {
 }
 
 static const timer_ops_t rv64_sbi_timer_ops = {
-    .init          = rv64_timer_init,
-    .set_interval  = rv64_timer_set_interval,
     .read_ticks    = rv64_timer_read_ticks,
     .ticks_per_sec = rv64_timer_ticks_per_sec,
 };

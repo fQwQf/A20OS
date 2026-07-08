@@ -400,7 +400,7 @@ static int virtio_blk_wait_req(virtio_blk_inst_t *inst, virtio_blk_req_t *req,
             sched();
             proc_set_wake_time(cur, 0);
         } else {
-            __asm__ volatile("nop");
+            cpu_relax();
         }
     }
 }
@@ -426,7 +426,7 @@ static int virtio_blk_rw(int idx, uint64_t lba, void *buf, size_t sectors, int w
             if (proc_current())
                 proc_yield();
             else
-                __asm__ volatile("nop");
+                cpu_relax();
         }
 
         int ret = virtio_blk_wait_req(inst, req, lba);

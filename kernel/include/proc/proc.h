@@ -5,6 +5,7 @@
 #include "core/consts.h"
 #include "core/trap.h"
 #include "core/defs.h"
+#include <signal_abi.h>
 
 struct signal_state;
 struct mm_struct;
@@ -13,8 +14,6 @@ struct files_struct;
 struct a20_vmo;
 struct cg_node;
 typedef struct mm_struct mm_struct_t;
-
-typedef struct { void *ss_sp; int ss_flags; size_t ss_size; } sigaltstack_t;
 
 typedef struct proc_fs_context {
     char cwd[MAX_PATH_LEN];
@@ -115,14 +114,14 @@ typedef struct proc_vm_stats {
  *   must not be written by synchronization primitives.
  */
 typedef struct task_t {
-    uint64_t kstack;
+    uintptr_t kstack;
     void    *kstack_base;
     int      pid;
     int      tgid;
     int      ppid;
     proc_state_t state;
     vaddr_t  ustack;
-    uint64_t *pgdir;
+    pt_root_t *pgdir;
     trap_context_t *trap_ctx;
     int      exit_code;
     struct files_struct *files;
@@ -155,8 +154,8 @@ typedef struct task_t {
 
     mm_struct_t *mm;
 
-    uint64_t  entry;
-    uint64_t  exec_load_addr;
+    uintptr_t entry;
+    vaddr_t   exec_load_addr;
     size_t    exec_load_size;
 
     int       pgid;
@@ -185,7 +184,7 @@ typedef struct task_t {
     int            sig_handling;
     uint64_t       sigsuspend_old_blocked;
     int            sigsuspend_active;
-    sigaltstack_t  sigaltstack;
+    arch_sigaltstack_t sigaltstack;
     uint64_t       thread_pending;
 
     /* Native ABI support */
@@ -218,10 +217,15 @@ int      proc_set_pid_max(int value);
 void     proc_get_vm_stats(proc_vm_stats_t *stats);
 size_t   proc_format_pidmap(char *buf, size_t bufsz);
 int      proc_alloc(void (*entry)(void));
-int      proc_alloc_user(uint64_t entry, uint64_t sp, uint64_t *pgdir);
-int      proc_alloc_user_image(uint64_t entry, uint64_t sp, uint64_t *pgdir,
-                               struct vm_area *mmap, uint64_t brk,
-                               uint64_t stack_top, size_t total_vm);
+int      proc_alloc_user(uintptr_t entry, vaddr_t sp, pt_root_t *pgdir);
+int      proc_alloc_user_image(uintptr_t entry, vaddr_t sp, pt_root_t *pgdir,
+                               struct vm_area *mmap, vaddr_t brk,
+                               vaddr_t stack_top, size_t total_vm,
+                               vaddr_t tls_tp
+#ifdef CONFIG_NOMMU
+                               , void **nommu_allocs, int num_nommu_allocs
+#endif
+                               );
 void     proc_free_pid(int pid);
 void     proc_exit(int exit_code) NORETURN;
 void     proc_exit_group(int exit_code) NORETURN;
@@ -245,12 +249,12 @@ void    *proc_scratch_buffer(size_t size);
 int      proc_exec(const char *path, char *const argv[], char *const envp[]);
 
 /* mmap/brk helpers */
-uint64_t proc_brk(uint64_t newbrk);
-uint64_t proc_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, long off);
-int      proc_munmap(uint64_t addr, size_t len);
+vaddr_t  proc_brk(vaddr_t newbrk);
+vaddr_t  proc_mmap(vaddr_t addr, size_t len, int prot, int flags, int fd, long off);
+int      proc_munmap(vaddr_t addr, size_t len);
 
 /* Clone (fork-like) */
-int      proc_clone(uint64_t flags, uint64_t stack, int *ptid, uint64_t tls, int *ctid, int exit_signal);
+int      proc_clone(uint64_t flags, vaddr_t stack, int *ptid, vaddr_t tls, int *ctid, int exit_signal);
 
 task_t *proc_first_task_locked(void);
 task_t *proc_next_task_locked(task_t *t);

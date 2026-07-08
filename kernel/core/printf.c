@@ -41,21 +41,29 @@ static void do_format(const char *fmt, va_list args, putc_fn putc, void *ctx) {
         }
 
         if (*fmt == 'z') {
-            length_mode = 2;
+            length_mode = 3;
             fmt++;
         } else {
-            if (*fmt == 'l') { length_mode = 1; fmt++; }
-            if (*fmt == 'l') { length_mode = 1; fmt++; }
+            if (*fmt == 'l') {
+                length_mode = 1;
+                fmt++;
+                if (*fmt == 'l') {
+                    length_mode = 2;
+                    fmt++;
+                }
+            }
         }
 
         int nlen = 0;
         switch (*fmt) {
         case 'd': {
             int64_t v;
-            if (length_mode == 2)
+            if (length_mode == 3)
                 v = (int64_t)va_arg(args, ssize_t);
+            else if (length_mode == 2)
+                v = va_arg(args, long long);
             else if (length_mode == 1)
-                v = va_arg(args, int64_t);
+                v = va_arg(args, long);
             else
                 v = va_arg(args, int);
             nlen = itoa(v, num_buf, 10);
@@ -63,10 +71,12 @@ static void do_format(const char *fmt, va_list args, putc_fn putc, void *ctx) {
         }
         case 'u': {
             uint64_t v;
-            if (length_mode == 2)
+            if (length_mode == 3)
                 v = (uint64_t)va_arg(args, size_t);
+            else if (length_mode == 2)
+                v = va_arg(args, unsigned long long);
             else if (length_mode == 1)
-                v = va_arg(args, uint64_t);
+                v = va_arg(args, unsigned long);
             else
                 v = va_arg(args, unsigned int);
             nlen = utoa(v, num_buf, 10, 0);
@@ -74,10 +84,12 @@ static void do_format(const char *fmt, va_list args, putc_fn putc, void *ctx) {
         }
         case 'x': {
             uint64_t v;
-            if (length_mode == 2)
+            if (length_mode == 3)
                 v = (uint64_t)va_arg(args, size_t);
+            else if (length_mode == 2)
+                v = va_arg(args, unsigned long long);
             else if (length_mode == 1)
-                v = va_arg(args, uint64_t);
+                v = va_arg(args, unsigned long);
             else
                 v = va_arg(args, unsigned int);
             nlen = utoa(v, num_buf, 16, 0);
@@ -85,10 +97,12 @@ static void do_format(const char *fmt, va_list args, putc_fn putc, void *ctx) {
         }
         case 'X': {
             uint64_t v;
-            if (length_mode == 2)
+            if (length_mode == 3)
                 v = (uint64_t)va_arg(args, size_t);
+            else if (length_mode == 2)
+                v = va_arg(args, unsigned long long);
             else if (length_mode == 1)
-                v = va_arg(args, uint64_t);
+                v = va_arg(args, unsigned long);
             else
                 v = va_arg(args, unsigned int);
             nlen = utoa(v, num_buf, 16, 1);

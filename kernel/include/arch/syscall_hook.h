@@ -15,4 +15,9 @@ static inline void arch_syscall_adjust_args(linux_syscall_args_t *args)
     (void)args;
 }
 
+static inline void arch_adjust_clone_args(linux_syscall_args_t *args)
+{
+    (void)args;
+}
+
 #endif /* _ARCH_SYSCALL_HOOK_H */

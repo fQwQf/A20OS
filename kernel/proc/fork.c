@@ -34,8 +34,8 @@ static int proc_copy_to_task_user(task_t *task, void *dst, const void *src, size
     return 0;
 }
 
-int proc_clone(uint64_t flags, uint64_t stack, int *ptid, uint64_t tls, int *ctid,
-               int exit_signal)
+int proc_clone(uint64_t flags, vaddr_t stack, int *ptid, vaddr_t tls, int *ctid,
+                int exit_signal)
 {
     task_t *parent = proc_current();
     task_t *t = proc_alloc_task_slot();
@@ -141,7 +141,10 @@ int proc_clone(uint64_t flags, uint64_t stack, int *ptid, uint64_t tls, int *cti
          */
         task_context_t *ctx = arch_task_context_base(kstack, ks_top, trap);
         ctx->ra = (uint64_t)user_trap_return;
-        ctx->tp = (uint64_t)t;
+        ctx->tp = (uint64_t)(uintptr_t)t;
+#ifdef CONFIG_ARM32
+        ctx->user_tp = (uint32_t)TRAP_CTX_TP(trap);
+#endif
         TASK_CTX_PAGE_TABLE(ctx) = t->pgdir ? arch_make_addr_space_token(t->pgdir) : 0;
         TASK_CTX_STATUS(ctx) = TRAP_CTX_STATUS(trap);
         arch_task_context_set_initial_sp(ctx, trap, ks_top);

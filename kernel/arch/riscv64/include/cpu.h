@@ -8,6 +8,7 @@ static inline void arch_mb(void)  { __asm__ __volatile__("fence iorw,iorw" ::: "
 static inline void arch_rmb(void) { __asm__ __volatile__("fence ir,ir" ::: "memory"); }
 static inline void arch_wmb(void) { __asm__ __volatile__("fence ow,ow" ::: "memory"); }
 static inline void arch_wfi(void) { __asm__ __volatile__("wfi"); }
+static inline void arch_cpu_relax(void) { __asm__ __volatile__("nop"); }
 static inline void arch_fence_i(void) { __asm__ __volatile__("fence.i" ::: "memory"); }
 /*
  * RISC-V S 模式无法直接读取 mhartid CSR。

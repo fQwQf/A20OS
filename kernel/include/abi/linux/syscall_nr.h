@@ -255,5 +255,7 @@
 #define SYS_userfaultfd     282
 #define SYS_perf_event_open 241
 #define SYS_arch_prctl      1000
+#define SYS_set_thread_area 1001
 
+#define SYS_clock_gettime32 1023
 #endif /* _ABI_LINUX_SYSCALL_NR_H */

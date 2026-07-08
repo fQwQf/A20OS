@@ -69,13 +69,7 @@ int64_t sys_a20_system_info(const a20_syscall_args_t *args)
     strncpy(info.nodename, "a20", sizeof(info.nodename));
     strncpy(info.release, VERSION, sizeof(info.release));
     strncpy(info.version, "Native ABI", sizeof(info.version));
-#if defined(RISCV64)
-    strncpy(info.machine, "riscv64", sizeof(info.machine));
-#elif defined(LOONGARCH64)
-    strncpy(info.machine, "loongarch64", sizeof(info.machine));
-#else
-    strncpy(info.machine, "unknown", sizeof(info.machine));
-#endif
+    strncpy(info.machine, ARCH_NAME, sizeof(info.machine));
     info.total_ram = (uint64_t)pfa.total_frames * 4096;
     info.free_ram = (uint64_t)pfa.free_frames * 4096;
     info.total_swap = 0;

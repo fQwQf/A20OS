@@ -182,9 +182,9 @@ int64_t sys_a20_vm_advise(const a20_syscall_args_t *args)
     if (advice == 4 /* MADV_DONTNEED */ || advice == 8 /* MADV_FREE */) {
         for (uint64_t va = addr; va < end; ) {
             int level = 0;
-            uint64_t base = 0;
+            vaddr_t base = 0;
             size_t leaf_size = 0;
-            uint64_t *pte = pt_lookup_leaf(cur->mm->pgdir, va, &level, &base, &leaf_size);
+            pte_t *pte = pt_lookup_leaf(cur->mm->pgdir, va, &level, &base, &leaf_size);
             if (!pte || !(*pte & PTE_V)) { va += 4096; continue; }
             paddr_t pa = 0;
             if (pt_unmap_leaf(cur->mm->pgdir, va, &pa, &base, &leaf_size, NULL) == 0) {
@@ -277,4 +277,3 @@ int64_t sys_a20_vm_create_object(const a20_syscall_args_t *args)
     if (h < 0) a20_vmo_release(vmo);
     return h;
 }
-
