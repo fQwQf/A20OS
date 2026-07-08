@@ -16,8 +16,8 @@
  * dedicated, executable trampoline page.  The trampoline first pushes %rax to
  * restore the stack pointer to the frame base, then invokes rt_sigreturn.
  */
-void arch_signal_prepare_frame(sig_rt_frame_t *frame, uint64_t tramp_addr,
-                               trap_context_t *ctx)
+void arch_signal_prepare_frame(arch_sig_rt_frame_t *frame, uint64_t tramp_addr,
+                                trap_context_t *ctx)
 {
     (void)tramp_addr;
     (void)ctx;
@@ -61,4 +61,3 @@ void arch_setup_signal_trampoline(struct mm_struct *mm)
     pt_map(m->pgdir, addr, pa,
            PTE_V | PTE_R | PTE_X | PTE_U | PTE_A | PTE_D);
 }
-

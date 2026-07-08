@@ -5,13 +5,10 @@
 
 static int64_t linux_sys_clone_call(const linux_syscall_args_t *args)
 {
-#if defined(CONFIG_RISCV64)
-    return sys_clone(A(0), (void *)A(1), (int *)A(2), A(3), (int *)A(4));
-#elif defined(CONFIG_LOONGARCH64)
-    return sys_clone(A(0), (void *)A(1), (int *)A(2), A(4), (int *)A(3));
-#else
-    return sys_clone(A(0), (void *)A(1), (int *)A(2), A(4), (int *)A(3));
-#endif
+    linux_syscall_args_t a = *args;
+    arch_adjust_clone_args(&a);
+    return sys_clone(a.arg[0], (void *)a.arg[1], (int *)a.arg[2],
+                     a.arg[3], (int *)a.arg[4]);
 }
 
 #define LINUX_SYSCALL(name, restores, ...) \

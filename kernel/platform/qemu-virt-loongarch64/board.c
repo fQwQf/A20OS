@@ -2,20 +2,15 @@
 
 #include "drivers/core/driver_core.h"
 #include "core/arch.h"
+#include "core/timer.h"
 
 static void la64_irqchip_init(void) {
-    uint64_t ecfg;
-    __asm__ __volatile__("csrrd %0, 0x4" : "=r"(ecfg));
-    ecfg |= (1UL << 11) | (1UL << 2);
-    __asm__ __volatile__("csrwr %0, 0x4" :: "r"(ecfg));
+    arch_irqchip_init();
 }
 
 static void la64_irqchip_enable(uint32_t irq) {
     (void)irq;
-    uint64_t ecfg;
-    __asm__ __volatile__("csrrd %0, 0x4" : "=r"(ecfg));
-    ecfg |= (1UL << 2);
-    __asm__ __volatile__("csrwr %0, 0x4" :: "r"(ecfg));
+    arch_irqchip_enable();
 }
 
 static void la64_irqchip_disable(uint32_t irq) {
@@ -43,20 +38,8 @@ static const irqchip_ops_t la64_irqchip_ops = {
     .send_ipi   = la64_irqchip_send_ipi,
 };
 
-static void la64_timer_init(void) {
-}
-
-static void la64_timer_set_interval(uint64_t ticks) {
-    uint64_t clr = 1;
-    __asm__ __volatile__("csrwr %0, 0x44" :: "r"(clr));
-    uint64_t cfg = (ticks << 2) | 0x1;
-    __asm__ __volatile__("csrwr %0, 0x41" :: "r"(cfg));
-}
-
 static uint64_t la64_timer_read_ticks(void) {
-    uint64_t val;
-    __asm__ __volatile__("rdtime.d %0, $zero" : "=r"(val));
-    return val;
+    return timer_get_ticks();
 }
 
 static uint64_t la64_timer_ticks_per_sec(void) {
@@ -64,8 +47,6 @@ static uint64_t la64_timer_ticks_per_sec(void) {
 }
 
 static const timer_ops_t la64_timer_ops = {
-    .init          = la64_timer_init,
-    .set_interval  = la64_timer_set_interval,
     .read_ticks    = la64_timer_read_ticks,
     .ticks_per_sec = la64_timer_ticks_per_sec,
 };
@@ -76,14 +57,12 @@ static void la64_early_init(void) {
 static void la64_poweroff(void) {
     *(volatile uint16_t *)(uintptr_t)VIRT_GED_SLEEP_CTL =
         (uint16_t)((VIRT_GED_SLP_TYP_S5 << VIRT_GED_SLP_TYP_POS) | VIRT_GED_SLP_EN);
-    while (1)
-        __asm__ __volatile__("idle 0");
+    arch_halt();
 }
 
 static void la64_reboot(void) {
     *(volatile uint16_t *)(uintptr_t)VIRT_GED_RESET_REG = VIRT_GED_RESET_VAL;
-    while (1)
-        __asm__ __volatile__("idle 0");
+    arch_halt();
 }
 
 extern void pci_enumerate(uintptr_t ecam_base, int bus_start, int bus_end);

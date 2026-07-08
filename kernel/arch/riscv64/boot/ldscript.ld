@@ -14,15 +14,15 @@
 OUTPUT_ARCH(riscv)
 ENTRY(_start)
 
-PHYS_BASE  = 0x80200000;
-VIRT_BASE  = 0xFFFFFFC080200000;
+PROVIDE(PHYS_BASE = 0x80200000);
+PROVIDE(VIRT_BASE = 0xFFFFFFC080200000);
 LOAD_DELTA = VIRT_BASE - PHYS_BASE;
 
 PHDRS
 {
-    text   PT_LOAD FLAGS(5); /* R-X */
-    rodata PT_LOAD FLAGS(4); /* R-- */
-    data   PT_LOAD FLAGS(6); /* RW- */
+    text   PT_LOAD FLAGS(5 /* R-X */);
+    rodata PT_LOAD FLAGS(4 /* R-- */);
+    data   PT_LOAD FLAGS(6 /* RW- */);
 }
 
 SECTIONS
@@ -67,7 +67,6 @@ SECTIONS
     } :data
 
     . = ALIGN(16);
-
     /DISCARD/ : {
         *(.eh_frame .eh_frame_hdr)
         *(.note .note.*)
