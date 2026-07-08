@@ -1,0 +1,114 @@
+\documentclass[UTF8,zihao=-4]{ctexart}
+
+\usepackage[a4paper,margin=2.4cm]{geometry}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\usepackage{xcolor}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=black,
+  urlcolor=blue
+}
+
+\setlist[itemize]{leftmargin=2em,itemsep=0.25em,topsep=0.35em}
+\setlist[enumerate]{leftmargin=2.2em,itemsep=0.25em,topsep=0.35em}
+\sloppy
+
+\title{AOSCC 讲题草案：A20OS}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\section*{讲者信息}
+
+\begin{description}[leftmargin=6em,style=nextline]
+  \item[姓名] 童济舟
+  \item[单位/院校] 武汉大学
+  \item[宣发名称] fQwQf
+  \item[宣发名义] A20OS 开发者 / 武汉大学学生开发者（按学校报备需要，第一个最好）
+  \item[项目链接] \url{https://github.com/fQwQf/A20OS}
+\end{description}
+
+\section*{题目}
+
+\textbf{A20OS：Free Linux-like Kernel Sources for RISC-V/LoongArch/ARM/x86} \footnote{\url{https://www.cs.cmu.edu/~awb/linux.history.html}}
+
+or
+
+\textbf{What would you like to see most in Linux? \& Small Poll for My New Operating System} \footnotemark[1]
+
+or
+
+\textbf{A20OS：一个多架构操作系统的开发手记}
+
+
+\section*{摘要}
+
+A20OS 是我这段时间一直在折腾的一个自研操作系统。它最开始是为了参加一个比赛开发的，更像一个单纯的比赛特供内核，后来越写越大，慢慢变成了一个多架构 OS 项目。目前代码里已经有 RISC-V、LoongArch、ARM、x86\_64 和 ppc64le 相关的启动、trap、页表、板级配置和 QEMU 运行脚本。Just a hobby, won't be big and professional like Linux :-) \footnotemark[1]。
+
+这次分享主要想讲一些比较真实的开发过程，比如，把内核从一个架构搬到另一个架构时，麻烦往往不只是写一段新的 entry.S，ELF 装载、TLS/线程指针、signal frame、系统调用约定、页表格式、virtio-mmio/virtio-pci之类的都会影响，当然这些通过抽象设计一一解决了。
+
+A20OS 现在有两条 ABI 路线：一条是 Linux ABI，用来跑 musl 和一些常见用户态程序；另一条是我自己设计的 A20 Native ABI，里面有 handle/capability、VMO/VMAR、Channel/Event Queue 这些东西。实际上这套ABI设计主要是为了克服posix的一些历史包袱设计的，例如不够完善的权限，并非完全统一的数据类型等。
+
+内核里还有 VFS、FAT32/ext4、lwIP 网络栈、virtio 块设备和网卡等驱动，但是还远远称不上完善。所以实际上更像开发报告（或者组会汇报），我会讲 A20OS 现在到底做到哪了，做得怎么样，希望能感兴趣的朋友交流，同时如果能拉人入伙就更好了（
+
+\section*{短摘要}
+
+A20OS 是我正在开发的一个多架构自研操作系统，目标是在同一套内核核心上支持 RISC-V、LoongArch、ARM、x86\_64 和 ppc64le。本次分享会谈一下项目当前的开发状态，以及内核开发中遇到的问题，最后希望更多人能够参与进来。
+
+\section*{我打算怎么讲}
+
+\begin{enumerate}
+  \item \textbf{这个项目现在长什么样}
+
+  这一部分会先把 A20OS 现在的样子讲清楚。它一开始确实就是为了比赛能跑测试写的，后来越补越多，已经不太像一个单纯的裸机 demo 了。现在内核里有进程、调度、内存管理、VFS、socket、驱动框架这些东西，用户态主要靠 musl 静态链接跑起来，同时也有我自己写的 A20 Native ABI runtime 和一个很小的 libc。
+
+  这部分主要是给大家一个overview，不然直接开始讲页表和 ABI 可能会比较抽象（
+
+  \item \textbf{多架构支持}
+
+  仓库里现在有 \texttt{riscv64}、\texttt{riscv32}、\texttt{loongarch64}、\texttt{aarch64}、\texttt{arm32}、\texttt{x86\_64} 这些目标。表面上看就是多写几份 \texttt{entry.S}，但实际不是这样。每个架构都有自己的启动约定、寄存器保存、trap 返回、页表格式、timer、firmware、用户态切换方式。实际上A20为了支持多架构特别设计了一套HAL层。最初版本的A20只支持riscv，但是比赛方要求支持loongarch，于是重新抽象了一层HAL。  
+
+  这里会挑几个具体例子讲，同时介绍一下A20 HAL。
+
+  \item \textbf{Linux ABI 和自己的 Native ABI}
+
+  A20OS 现在实际跑用户态主要靠 Linux ABI，这样musl、mksh、sbase 这些东西可以比较快接起来，也方便跑比赛测试（实际上这个所谓的操作系统大赛就是Linux模仿赛）和一些常见程序。但 Linux ABI 的历史包袱也很多，比如 fd、pid、timerfd、eventfd、signal、epoll、fcntl 这些接口不够统一，相比之下NT的handle反而是更好的设计。所以我又做了一套 A20 Native ABI，想试试如果从一开始就用 handle/capability、VMO/VMAR、Channel/Event Queue 这些抽象，接口会不会更统一一点。
+  
+  我看 Windows NT 搞得不错，内核对象极大丰富，各类资源的调用差异基本消灭，面向对象，安全权能机制也受重视，如果再加上开源，Windows NT 就是我们理想中的操作系统内核。
+
+  \item \textbf{用户态、工具链和镜像}
+
+  这部分会讲一些很琐碎但是很关键的东西，例如交叉 GCC 前缀怎么配、musl 怎么编、静态链接怎么处理、FAT32/ext4 镜像怎么塞用户程序、QEMU 在不同架构上怎么挂 virtio 设备。
+  
+  这里也会顺便讲一下现在用户态里塞了什么，目前有mksh、sbase、fastfetch、git、vim、zlib、TLSe/wget之类的。
+
+  \item \textbf{驱动和网络}
+
+  A20OS 里现在有 virtio-blk、virtio-net、UART、PTY、loop、SDIO、平台网卡等驱动。网络栈用的是 lwIP，但不是直接把 lwIP 的 socket API 暴露出去，而是在内核 socket 层自己包了一层，再把 TCP/UDP/RAW 这些东西接到 VFS fd 上。
+
+  这一块能跑一些东西，但也有很多不漂亮的地方。比如 I/O progress 里还有不少轮询，驱动模型也还主要服务于内建设备 bring-up，离真正通用的 hotplug/remove 还差得远。
+
+\end{enumerate}
+
+\section*{目前代码状态}
+
+\begin{itemize}
+  \item 第一方内核代码不算 \texttt{kernel/external/}，大约 451 个 C/H/S/LD 文件，约 70k 行。
+  \item \texttt{kernel/arch/} 下面有 \texttt{aarch64}、\texttt{arm32}、\texttt{loongarch64}、\texttt{ppc64le}、\texttt{riscv32}、\texttt{riscv64}、\texttt{x86\_64}。这些架构的完成度不一样，有些比较能跑，有些还在开发中。
+  \item \texttt{kernel/platform/} 下面有 QEMU virt 系列，也有 VisionFive 2 和 Loongson LS2K1000。实际上这两种板子是为了比赛准备的，实际开发还是依靠QEMU调试。
+  \item Linux ABI 的 syscall 表当前有 249 个 entry；Native ABI 有 90 个 entry。
+  \item 用户态构建里有 musl、mksh、sbase、fastfetch、git、vim、zlib、TLSe/wget，以及一些自带测试程序。
+  \item \texttt{Makefile} 里有多架构 \texttt{run}/\texttt{debug}、contest build、本地 eval 。
+\end{itemize}
+
+\section*{为什么我觉得适合 AOSCC}
+
+AOSCC 2026 的讲者招募也提到希望讲者分享自己的工作和心得，而且 AOSCC 的听众应该会真的关心这些细节，就算是听个热闹也应该比较有噱头。相对于另一个选题……这个至少比较和平？
+
+另外我也确实希望能借这个机会找点感兴趣的人。A20OS 现在能做的方向很多，而且如果可以，我甚至想发OSDI。只要有人愿意来一起折腾，我会非常高兴（
+
+\end{document}

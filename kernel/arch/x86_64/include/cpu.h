@@ -16,6 +16,7 @@ static inline void arch_wmb(void) {
 static inline void arch_wfi(void) {
     __asm__ __volatile__("sti; hlt");
 }
+static inline void arch_cpu_relax(void) { __asm__ __volatile__("pause" ::: "memory"); }
 
 static inline unsigned arch_current_cpu_id(void) {
     /* Use CPUID leaf 1 initial APIC ID.  Reading x2APIC MSR 0x802 only works
