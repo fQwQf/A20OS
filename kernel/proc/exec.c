@@ -613,7 +613,9 @@ static int exec_install_process(task_t *t,
 
     proc_complete_vfork(t);
 
-    arch_fence_i();
+#ifdef CONFIG_NOMMU
+    arch_flush_icache_range((const void *)info->load_addr, info->load_size);
+#endif
     t->state = PROC_RUNNING;
     return 0;
 }

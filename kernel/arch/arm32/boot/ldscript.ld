@@ -55,10 +55,11 @@ SECTIONS
 
     .bss (NOLOAD) : AT(ADDR(.bss) - LOAD_DELTA) {
         _bss_start = .;
+        *(.bss.stack)
+        . = ALIGN(4096);
         *(.bss .bss.*)
         *(.sbss .sbss.*)
         *(COMMON)
-        *(.bss.stack)
         . = ALIGN(4096);
         _bss_end = .;
     } :data

@@ -8,6 +8,8 @@
     .section .text
     .global __switch
 __switch:
+    mrs     x11, daif
+    msr     daifset, #2
     sub     sp, sp, #128
 
     str     x30, [sp, #(0 * 8)]
@@ -24,9 +26,13 @@ __switch:
     str     x27, [sp, #(10 * 8)]
     str     x28, [sp, #(11 * 8)]
     str     x29, [sp, #(12 * 8)]
+#ifndef CONFIG_NOMMU
     mrs     x10, ttbr0_el1
+#else
+    mov     x10, xzr
+#endif
     str     x10, [sp, #(14 * 8)]
-    mrs     x10, daif
+    mov     x10, x11
     str     x10, [sp, #(15 * 8)]
     mov     x10, sp
     str     x10, [sp, #(13 * 8)]
@@ -50,6 +56,7 @@ __switch:
     ldr     x28, [sp, #(11 * 8)]
     ldr     x29, [sp, #(12 * 8)]
     ldr     x10, [sp, #(14 * 8)]
+#ifndef CONFIG_NOMMU
     msr     ttbr0_el1, x10
     ldr     x10, [sp, #(15 * 8)]
     msr     daif, x10
@@ -57,6 +64,7 @@ __switch:
     tlbi    vmalle1
     dsb     ish
     isb
+#endif
 
     add     sp, sp, #128
     ret

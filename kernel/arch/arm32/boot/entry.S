@@ -165,6 +165,9 @@ _high_start:
     /* Now that we run from high virtual addresses, enable caches and
      * branch prediction. */
     mrc     p15, 0, r0, c1, c0, 0
+#ifdef CONFIG_NOMMU
+    bic     r0, r0, #(1 << 1)        /* A: allow userland unaligned accesses */
+#endif
     orr     r0, r0, #(1 << 2)        /* C  */
     orr     r0, r0, #(1 << 12)       /* I  */
     orr     r0, r0, #(1 << 11)       /* Z  */

@@ -80,7 +80,12 @@ static inline uint64_t arch_make_satp(void *pgdir) {
 }
 
 static inline uint64_t arch_make_addr_space_token(void *pgdir) {
+#ifdef CONFIG_NOMMU
+    (void)pgdir;
+    return 0;
+#else
     return arch_make_satp(pgdir);
+#endif
 }
 
 #define ARCH_PTE_PPN_MASK  0x0000FFFFFFFFF000UL

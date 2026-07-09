@@ -522,6 +522,8 @@ void sched(void) {
     task_t *next = proc_runq_pick_locked();
 
     if (next) {
+        if (next->pid <= 2)
+            printf("[SCHED] picked pid=%d state=%d\n", next->pid, next->state);
         next->exec_start = now;
         context_switch(next);
         return;
