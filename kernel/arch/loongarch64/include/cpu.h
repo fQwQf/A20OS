@@ -16,6 +16,7 @@ static inline void arch_fence_i(void) {
         ::: "memory"
     ); 
 }
+static inline void arch_flush_icache_range(const void *addr, size_t size) { (void)addr; (void)size; arch_fence_i(); }
 static inline unsigned arch_current_cpu_id(void) {
     uint64_t id;
     __asm__ __volatile__("csrrd %0, 0x20" : "=r"(id));

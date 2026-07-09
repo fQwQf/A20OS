@@ -179,6 +179,7 @@ int64_t sys_madvise(uint64_t addr, size_t len, int advice) {
     case MADV_SEQUENTIAL:
     case MADV_WILLNEED:
         break;
+#ifndef CONFIG_NOMMU
     case MADV_DONTNEED:
     case MADV_FREE:
     case MADV_REMOVE:
@@ -228,6 +229,7 @@ int64_t sys_madvise(uint64_t addr, size_t len, int advice) {
         }
         arch_tlb_flush();
         break;
+#endif
     case MADV_DONTFORK:
     case MADV_DOFORK:
     case MADV_WIPEONFORK:
@@ -272,12 +274,14 @@ out:
             if (handle_demand_fault(t, va) < 0)
                 return -ENOMEM;
             if (advice == MADV_POPULATE_WRITE) {
+#ifndef CONFIG_NOMMU
                 uint64_t flags2 = linux_mm_lock(t);
                 pte_t *pte = pt_lookup_leaf(t->mm->pgdir, va, NULL, NULL, NULL);
                 int writable = pte && (*pte & PTE_V) && (*pte & PTE_W);
                 linux_mm_unlock(t, flags2);
                 if (!writable)
                     return -EFAULT;
+#endif
             }
         }
     }
@@ -350,12 +354,14 @@ int64_t sys_mlock(uint64_t addr, size_t len) {
     }
 
     linux_mm_unlock(t, mm_flags);
+#ifndef CONFIG_NOMMU
     for (uint64_t va = start; va < end; va += PAGE_SIZE) {
         pte_t *pte = pt_lookup_leaf(t->mm->pgdir, va, NULL, NULL, NULL);
         if (!pte || !(*pte & PTE_V)) {
             handle_demand_fault(t, va);
         }
     }
+#endif
     return ret;
 
 out:
@@ -445,6 +451,7 @@ int64_t sys_mlockall(int flags) {
 
 out:
     linux_mm_unlock(t, mm_flags);
+#ifndef CONFIG_NOMMU
     if (ret == 0 && (flags & MCL_CURRENT) && !(flags & MCL_ONFAULT)) {
         for (vm_area_t *vma = t->mm->mmap; vma; vma = vma->next) {
             for (uint64_t va = vma->start; va < vma->end; va += PAGE_SIZE) {
@@ -454,6 +461,7 @@ out:
             }
         }
     }
+#endif
     return ret;
 }
 
@@ -503,10 +511,15 @@ int64_t sys_mincore(uint64_t addr, size_t length, unsigned char *vec) {
     for (size_t i = 0; i < pages; i++) {
         uint64_t va = start + i * PAGE_SIZE;
         unsigned char val = 0;
+#ifdef CONFIG_NOMMU
+        (void)va;
+        val = 1; // On NOMMU, everything mapped is in core
+#else
         pte_t *pte = pt_lookup_leaf(t->mm->pgdir, va, NULL, NULL, NULL);
         if (pte && (*pte & PTE_V)) {
             val = 1;
         }
+#endif
         snapshot[i] = val;
     }
 

@@ -112,17 +112,20 @@ __trap_from_user:
  * Restore user context from kernel stack and return to user mode.
  * Expects sp to point to TrapContext on kernel stack.
  */
+	.align 2
 __return_to_user:
     /* Set stvec back to user trap handler (before restoring context) */
     la      t0, __trap_from_user
     csrw    stvec, t0
 
+#ifndef CONFIG_NOMMU
     ld      t0, 0*8(sp)
     csrr    t1, satp
     beq     t0, t1, .Lskip_satp
     csrw    satp, t0
     sfence.vma
 .Lskip_satp:
+#endif
 
     ld      t0, 32*8(sp)
     ld      t1, 33*8(sp)
@@ -177,6 +180,7 @@ __return_to_user:
  * Kernel traps use the full context too, so floating-point state is preserved
  * if a kernel path or compiler-generated code uses FP registers.
  */
+	.align 2
 __trap_from_kernel:
     /* No stack swap - already on kernel stack */
     addi    sp, sp, -70*8

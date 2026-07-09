@@ -13,6 +13,7 @@ static inline void arch_wmb(void) { __asm__ __volatile__("dmb ishst" ::: "memory
 static inline void arch_wfi(void) { __asm__ __volatile__("wfi"); }
 static inline void arch_cpu_relax(void) { __asm__ __volatile__("yield"); }
 static inline void arch_fence_i(void) { __asm__ __volatile__("dsb ish\n\tisb" ::: "memory"); }
+static inline void arch_flush_icache_range(const void *addr, size_t size) { (void)addr; (void)size; arch_fence_i(); }
 
 static inline unsigned arch_current_cpu_id(void) {
     uint32_t mpidr;
@@ -57,6 +58,9 @@ static inline void arch_irq_enable(void) { arch_local_irq_enable(); }
 static inline int arch_local_irq_enabled(void) { return arch_irqs_enabled(); }
 
 static inline void arch_tlb_flush(void) {
+#ifdef CONFIG_NOMMU
+    arch_mb();
+#else
     uint32_t zero = 0;
     __asm__ __volatile__(
         "dsb ishst\n\t"
@@ -65,6 +69,7 @@ static inline void arch_tlb_flush(void) {
         "isb"
         :: "r"(zero)
         : "memory");
+#endif
 }
 
 static inline void arch_tlb_flush_page(uint64_t addr) {
@@ -107,14 +112,23 @@ static inline void arch_write_tvec(uint64_t v) {
 }
 
 static inline uint64_t arch_read_satp(void) {
+#ifdef CONFIG_NOMMU
+    return 0;
+#else
     uint32_t v;
     __asm__ __volatile__("mrc p15, 0, %0, c2, c0, 0" : "=r"(v));
     return v;
+#endif
 }
 
 static inline void arch_write_satp(uint64_t v) {
+#ifdef CONFIG_NOMMU
+    (void)v;
+    arch_mb();
+#else
     uint32_t vv = (uint32_t)v;
     __asm__ __volatile__("mcr p15, 0, %0, c2, c0, 0\n\tdsb ish\n\tisb" :: "r"(vv) : "memory");
+#endif
 }
 
 static inline uint64_t arch_read_addr_space_token(void) { return arch_read_satp(); }
@@ -135,7 +149,11 @@ static inline void __attribute__((noreturn)) arch_halt(void) {
 }
 
 static inline int arch_is_kernel_address(const void *ptr) {
+#ifdef CONFIG_NOMMU
+    return (uintptr_t)ptr >= PHYS_MEMORY_BASE;
+#else
     return (uintptr_t)ptr >= PAGE_OFFSET;
+#endif
 }
 
 static inline void arch_dma_sync_for_device(const void *addr, size_t size) {

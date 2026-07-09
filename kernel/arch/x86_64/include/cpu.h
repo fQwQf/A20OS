@@ -133,6 +133,7 @@ static inline void arch_write_sstatus(uint64_t v) {
 static inline void arch_fence_i(void) {
     __asm__ __volatile__("mfence" ::: "memory");
 }
+static inline void arch_flush_icache_range(const void *addr, size_t size) { (void)addr; (void)size; }
 
 /* SIE / SIP have no direct x86 equivalent; we keep interrupts enabled
  * globally via IF and use the LAPIC mask bits per vector.  Stubs. */

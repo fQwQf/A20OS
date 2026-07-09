@@ -51,9 +51,13 @@ __switch:
         .set n, n+1
     .endr
 
+#ifndef CONFIG_NOMMU
     /* Save satp and sstatus CSRs */
     csrr    t0, satp
     sd      t0, 14*8(sp)
+#else
+    sd      zero, 14*8(sp)
+#endif
     csrr    t0, sstatus
     sd      t0, 15*8(sp)
 
@@ -80,6 +84,7 @@ __switch:
         .set n, n+1
     .endr
 
+#ifndef CONFIG_NOMMU
     /* Restore satp and sstatus (ensure SIE is enabled so timer ints fire) */
     ld      t0, 14*8(a0)
     csrr    t1, satp
@@ -87,6 +92,7 @@ __switch:
     csrw    satp, t0
     sfence.vma
 .Lskip_switch_satp:
+#endif
     ld      t0, 15*8(a0)
     csrw    sstatus, t0
 

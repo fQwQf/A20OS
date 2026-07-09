@@ -329,7 +329,7 @@ static inline int arm32_syscall_rewrite_args(uint32_t arm_nr,
                     }
         case 190:
             {
-                        args->arg[0] = 0x11 | 0x4000;
+                        args->arg[0] = 0x11 | 0x100 | 0x4000;
                         args->arg[1] = 0;
                         args->arg[2] = 0;
                         args->arg[3] = 0;

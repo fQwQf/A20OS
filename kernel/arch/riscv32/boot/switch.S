@@ -19,8 +19,12 @@ __switch:
         SAVE_CALLEE %n
         .set n, n+1
     .endr
+#ifndef CONFIG_NOMMU
     csrr    t0, satp
     sw      t0, 14*4(sp)
+#else
+    sw      zero, 14*4(sp)
+#endif
     csrr    t0, sstatus
     sw      t0, 15*4(sp)
     sw      sp, 0(tp)
@@ -31,12 +35,14 @@ __switch:
         LOAD_CALLEE %n
         .set n, n+1
     .endr
+#ifndef CONFIG_NOMMU
     lw      t0, 14*4(a0)
     csrr    t1, satp
     beq     t0, t1, 1f
     csrw    satp, t0
     sfence.vma
 1:
+#endif
     lw      t0, 15*4(a0)
     csrw    sstatus, t0
     addi    a0, a0, 16*4

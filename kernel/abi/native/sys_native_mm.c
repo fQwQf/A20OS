@@ -179,6 +179,7 @@ int64_t sys_a20_vm_advise(const a20_syscall_args_t *args)
         if (!vma || va >= vma->end) return -A20_ERR_NO_MEMORY;
     }
 
+#ifndef CONFIG_NOMMU
     if (advice == 4 /* MADV_DONTNEED */ || advice == 8 /* MADV_FREE */) {
         for (uint64_t va = addr; va < end; ) {
             int level = 0;
@@ -200,6 +201,7 @@ int64_t sys_a20_vm_advise(const a20_syscall_args_t *args)
         }
         arch_tlb_flush();
     }
+#endif
     return A20_OK;
 }
 

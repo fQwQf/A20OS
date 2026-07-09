@@ -99,6 +99,11 @@ _start:
     la      t0, __trap_from_kernel
     csrw    stvec, t0
 
+    /* Ensure the boot thread enters kernel_main with SPP=1 so that a
+     * supervisor-mode trap/interrupt returns to supervisor mode. */
+    li      t0, 0x100
+    csrs    sstatus, t0
+
     call    kernel_main
 
 .park:
