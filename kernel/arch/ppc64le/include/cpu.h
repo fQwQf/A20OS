@@ -12,6 +12,7 @@ static inline void arch_cpu_relax(void) { __asm__ __volatile__("or 27,27,27"); }
 static inline void arch_fence_i(void) {
     __asm__ __volatile__("sync\n\tisync" ::: "memory");
 }
+static inline void arch_flush_icache_range(const void *addr, size_t size) { (void)addr; (void)size; arch_fence_i(); }
 
 static inline unsigned arch_current_cpu_id(void) {
     return 0;

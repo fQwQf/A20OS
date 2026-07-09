@@ -38,7 +38,11 @@ __switch:
     add     r2, sp, #56
     str     r2, [sp, #40]
     /* task_context_t.ttbr0 */
+#ifndef CONFIG_NOMMU
     mrc     p15, 0, r2, c2, c0, 0
+#else
+    mov     r2, #0
+#endif
     str     r2, [sp, #44]
     /* task_context_t.cpsr (keep IRQs disabled for the resumed path) */
     mrs     r2, cpsr
@@ -68,11 +72,13 @@ __switch:
     ldr     r11, [sp, #36]
     ldr     r2, [sp, #40]
     ldr     r3, [sp, #44]
+#ifndef CONFIG_NOMMU
     mcr     p15, 0, r3, c2, c0, 0
     mov     r1, #0
     mcr     p15, 0, r1, c8, c7, 0
     dsb     ish
     isb
+#endif
     ldr     r3, [sp, #48]
     ldr     r0, [sp, #52]            /* user_tp; r0 is free after stack switch */
 
