@@ -123,18 +123,7 @@ void trap_handler(trap_context_t *ctx) {
         current->trap_ctx = ctx;
 
     if (scause & CAUSE_INTR_MASK) {
-        if (current && current->pid == 3 && pid3_irq_diag_count < 256) {
-            pid3_irq_diag_count++;
-            printf("[PID3IRQ] pc=0x%lx sp=0x%lx lr=0x%lx\n",
-                   (unsigned long)TRAP_CTX_EPC(ctx),
-                   (unsigned long)TRAP_CTX_SP(ctx),
-                   (unsigned long)TRAP_CTX_RA(ctx));
-        }
         arch_handle_irq(scause & CAUSE_CODE_MASK, 1);
-        if (current && current->pid == 3 && pid3_irq_diag_count < 256)
-            printf("[PID3IRQD] cur=%d state=%d\n",
-                   proc_current() ? proc_current()->pid : -1,
-                   proc_current() ? proc_current()->state : -1);
         if (current && current->pid >= 4)
             ktrace_trap("[TRAP] irq done: pid=%d sig_deliver...\n", current->pid);
         if (proc_current() != current)
@@ -142,8 +131,8 @@ void trap_handler(trap_context_t *ctx) {
         proc_check_exit_pending();
     } else {
         reg_t code = scause & CAUSE_CODE_MASK;
-        uint32_t user_insn = 0;
         task_t *cur = proc_current();
+        uint32_t user_insn = 0;
         int have_user_insn = fetch_user_insn(cur, sepc, &user_insn);
         if (code == CAUSE_ECALL_U) {
             arch_advance_syscall_epc(ctx);
@@ -224,6 +213,9 @@ void trap_handler(trap_context_t *ctx) {
         } else if (code == CAUSE_INSN_FAULT || code == CAUSE_LOAD_FAULT || code == CAUSE_STORE_FAULT) {
             printf("ADE/ALE: pid=%d sepc=0x%lx stval=0x%lx code=%lu\n",
                   cur ? cur->pid : -1, (unsigned long)sepc, (unsigned long)stval, (unsigned long)code);
+            if (have_user_insn)
+                kerr("  insn@sepc=0x%08x\n", user_insn);
+            dump_trap_context(ctx);
             if (deliver_user_sync_signal(ctx, SIGSEGV, -SIGSEGV))
                 return;
             proc_exit_group(-SIGSEGV); 

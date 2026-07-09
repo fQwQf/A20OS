@@ -49,7 +49,7 @@ EXTRA_IMAGE_MB ?= 256
 EXTRA_IMG = $(BUILD_DIR)/extra.img
 EXTRA_STAGING_DIR = $(BUILD_DIR)/extra-staging
 EXTRA_PACKAGES = vim git gcc cc
-USER_BUILD_ID = $(ARCH):$(OPT)
+USER_BUILD_ID = $(ARCH):$(OPT):$(NOMMU)
 USER_BUILD_CHECK_DIRS = user/cmds user/init_common user/lib user/shell \
                         user/external/musl user/external/sbase user/external/mksh-cvs2git \
                         user/external/tlse user/external/fastfetch
@@ -102,6 +102,7 @@ PHYS_BASE_loongarch64 := 0x9000000000000000
 ifeq ($(NOMMU),1)
 CFLAGS += -DCONFIG_NOMMU
 LDFLAGS_NOMMU := -Wl,--defsym=VIRT_BASE=$(PHYS_BASE_$(ARCH))
+ARCH_CFLAGS_aarch64 += -mstrict-align
 endif
 
 ARCH_LDFLAGS_riscv64     :=
@@ -244,7 +245,7 @@ endif
 
 KERNEL_SRC = $(wildcard $(KERNEL_DIR)/*.c) \
              $(wildcard $(KERNEL_DIR)/core/*.c) \
-             $(wildcard $(KERNEL_DIR)/mm/*.c) \
+             $(filter-out $(KERNEL_DIR)/mm/nommu.c,$(wildcard $(KERNEL_DIR)/mm/*.c)) \
              $(wildcard $(KERNEL_DIR)/proc/*.c) \
              $(filter-out $(KERNEL_DIR)/fs/rootfs_overlay.c,$(wildcard $(KERNEL_DIR)/fs/*.c)) \
              $(wildcard $(KERNEL_DIR)/fs/vfs/*.c) \
@@ -262,6 +263,10 @@ KERNEL_SRC = $(wildcard $(KERNEL_DIR)/*.c) \
              $(wildcard $(KERNEL_DIR)/shell/*.c) \
              $(shell find $(KERNEL_DIR)/arch/$(ARCH) -type f -name '*.c' | sort) \
              $(LWIP_SRC)
+
+ifeq ($(NOMMU),1)
+KERNEL_SRC += $(KERNEL_DIR)/mm/nommu.c
+endif
 
 # Built-in rootfs overlay.
 #
@@ -1065,10 +1070,14 @@ dev-build: $(KERNEL_BIN) $(USER_BUILD_STAMP) $(FS_TEST_IMG) $(EXT4_IMG)
 
 user_apps: $(USER_BUILD_STAMP)
 
-.PHONY: $(USER_BUILD_STAMP) user_apps
-
+.PHONY: user_apps
 USER_BUILD_FILES := $(wildcard user/build/*)
-$(USER_BUILD_STAMP): user/Makefile $(USER_BUILD_FILES) | $(USER_BUILD_CHECK_DIRS)
+
+.PHONY: force_user_build
+force_user_build:
+	@:
+
+$(USER_BUILD_STAMP): user/Makefile $(USER_BUILD_FILES) force_user_build | $(USER_BUILD_CHECK_DIRS)
 	@set -e; \
 	mkdir -p $(dir $@); \
 	current=""; \
@@ -1091,7 +1100,7 @@ $(USER_BUILD_STAMP): user/Makefile $(USER_BUILD_FILES) | $(USER_BUILD_CHECK_DIRS
 	fi; \
 	if [ "$$need_build" -eq 1 ]; then \
 		if [ "$$need_clean" -eq 1 ]; then $(MAKE) -C user clean; fi; \
-		$(MAKE) -C user ARCH=$(ARCH) OPT="$(OPT)"; \
+		$(MAKE) -C user ARCH=$(ARCH) NOMMU=$(NOMMU) OPT="$(OPT)"; \
 		printf '%s\n' '$(USER_BUILD_ID)' > "$@"; \
 	else \
 		echo "[USER] $(USER_BUILD_ID) up to date"; \
@@ -1224,6 +1233,9 @@ run-nommu-riscv64:
 
 run-nommu-loongarch64:
 	$(MAKE) ARCH=loongarch64 BRINGUP=$(BRINGUP) NOMMU=1 _run_impl
+
+run-nommu-aarch64:
+	$(MAKE) ARCH=aarch64 BRINGUP=$(BRINGUP) NOMMU=1 _run_impl
 
 run-nommu-arm64:
 	$(MAKE) ARCH=aarch64 BRINGUP=$(BRINGUP) NOMMU=1 _run_impl

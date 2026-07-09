@@ -114,7 +114,11 @@ __trap_from_user:
     str     x9, [sp, #SPSR_OFF]
     mrs     x9, tpidr_el0
     str     x9, [sp, #TPIDR_OFF]
+#ifndef CONFIG_NOMMU
     mrs     x9, ttbr0_el1
+#else
+    mov     x9, xzr
+#endif
     str     x9, [sp, #TTBR0_OFF]
     mrs     x9, tpidr_el1
     str     x9, [sp, #KTP_OFF]
@@ -141,6 +145,9 @@ __trap_from_user:
     mrs     x9, fpsr
     str     x9, [sp, #FPSR_OFF]
 
+    mrs     x1, esr_el1
+    mov     x0, sp
+    bl      debug_trap_entry
     mov     x0, sp
     bl      trap_handler
     b       __return_to_user
@@ -187,7 +194,11 @@ __trap_from_kernel:
     str     x9, [sp, #SPSR_OFF]
     mrs     x9, tpidr_el0
     str     x9, [sp, #TPIDR_OFF]
+#ifndef CONFIG_NOMMU
     mrs     x9, ttbr0_el1
+#else
+    mov     x9, xzr
+#endif
     str     x9, [sp, #TTBR0_OFF]
     mrs     x9, tpidr_el1
     str     x9, [sp, #KTP_OFF]
@@ -220,11 +231,13 @@ __trap_from_kernel:
     mov     x2, sp
     ldr     x3, [x2, #SP_OFF]
     ldr     x9, [x2, #TTBR0_OFF]
+#ifndef CONFIG_NOMMU
     msr     ttbr0_el1, x9
     dsb     ishst
     tlbi    vmalle1
     dsb     ish
     isb
+#endif
     ldr     x9, [x2, #ELR_OFF]
     msr     elr_el1, x9
     ldr     x9, [x2, #SPSR_OFF]
@@ -283,17 +296,24 @@ __trap_from_kernel:
     ldr     x2,  [x2, #X_OFF(2)]
     eret
 
+    .extern debug_trap_return
+    .extern debug_trap_entry
+
 __return_to_user:
 user_trap_return:
+    mov     x0, sp
+    bl      debug_trap_return
     mov     x2, sp
     ldr     x3, [x2, #SP_OFF]
     ldr     x4, [x2, #KSP_OFF]
     ldr     x9, [x2, #TTBR0_OFF]
+#ifndef CONFIG_NOMMU
     msr     ttbr0_el1, x9
     dsb     ishst
     tlbi    vmalle1
     dsb     ish
     isb
+#endif
     ldr     x9, [x2, #ELR_OFF]
     msr     elr_el1, x9
     ldr     x9, [x2, #SPSR_OFF]

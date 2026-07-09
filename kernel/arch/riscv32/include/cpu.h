@@ -10,6 +10,7 @@ static inline void arch_wmb(void) { __asm__ __volatile__("fence ow,ow" ::: "memo
 static inline void arch_wfi(void) { __asm__ __volatile__("wfi"); }
 static inline void arch_cpu_relax(void) { __asm__ __volatile__("nop"); }
 static inline void arch_fence_i(void) { __asm__ __volatile__(".word 0x0000100f" ::: "memory"); }
+static inline void arch_flush_icache_range(const void *addr, size_t size) { (void)addr; (void)size; arch_fence_i(); }
 
 static inline unsigned arch_current_cpu_id(void) {
     extern uint32_t __boot_hart_id;
@@ -123,8 +124,20 @@ static inline void arch_write_satp(uint64_t v) {
     __asm__ __volatile__("csrw satp, %0" :: "r"((uint32_t)v));
 }
 
-static inline uint64_t arch_read_addr_space_token(void) { return arch_read_satp(); }
-static inline void arch_write_addr_space_token(uint64_t v) { arch_write_satp(v); }
+static inline uint64_t arch_read_addr_space_token(void) {
+#ifdef CONFIG_NOMMU
+    return 0;
+#else
+    return arch_read_satp();
+#endif
+}
+static inline void arch_write_addr_space_token(uint64_t v) {
+#ifdef CONFIG_NOMMU
+    (void)v;
+#else
+    arch_write_satp(v);
+#endif
+}
 static inline uint64_t arch_read_sstatus(void) { uint32_t v; __asm__ __volatile__("csrr %0, sstatus" : "=r"(v)); return v; }
 static inline void arch_write_sstatus(uint64_t v) { __asm__ __volatile__("csrw sstatus, %0" :: "r"((uint32_t)v)); }
 static inline uint64_t arch_read_sie(void) { uint32_t v; __asm__ __volatile__("csrr %0, sie" : "=r"(v)); return v; }

@@ -40,15 +40,18 @@ __trap_from_user:
     call    trap_handler
     j       __return_to_user
 
+	.align 2
 __return_to_user:
     la      t0, __trap_from_user
     csrw    stvec, t0
+#ifndef CONFIG_NOMMU
     lw      t0, 0*4(sp)
     csrr    t1, satp
     beq     t0, t1, 1f
     csrw    satp, t0
     sfence.vma
 1:
+#endif
     lw      t0, 32*4(sp)
     lw      t1, 33*4(sp)
     lw      t2, 2*4(sp)
@@ -69,6 +72,7 @@ __return_to_user:
     csrc    sstatus, 8
     sret
 
+	.align 2
 __trap_from_kernel:
     addi    sp, sp, -36*4
     sw      x1, 1*4(sp)

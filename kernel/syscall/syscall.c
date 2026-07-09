@@ -104,13 +104,14 @@ int64_t syscall_dispatch(trap_context_t *ctx)
         .ctx = ctx,
     };
 
+    task_t *dbg_cur = proc_current();
     arch_syscall_adjust_args(&args);
     num = args.nr;
 
     int64_t ret = -ENOSYS;
     int context_restored = 0;
     const linux_syscall_entry_t *entry = linux_syscall_lookup(args.nr);
-    task_t *dbg_cur = proc_current();
+    dbg_cur = proc_current();
     if (dbg_cur && dbg_cur->pid == 3)
         printf("[PID3] nr=%lu pc=0x%lx lr=0x%lx sp=0x%lx a0=0x%lx a1=0x%lx\n",
                (unsigned long)args.nr, (unsigned long)TRAP_CTX_EPC(ctx),
