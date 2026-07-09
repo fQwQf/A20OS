@@ -795,6 +795,9 @@ main(int argc, const char *argv[])
 	int rv;
 	Source *s;
 
+	extern ssize_t write(int, const void *, size_t);
+	write(1, "mksh main starting!\n", 20);
+
 	main_init(argc, argv, &s);
 	if (as_builtin) {
 		rv = c_builtin(e->loc->argv) & 0xFF;

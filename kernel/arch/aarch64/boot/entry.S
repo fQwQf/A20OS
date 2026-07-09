@@ -23,6 +23,13 @@ _start:
     str     xzr, [x0], #8
     b       1b
 2:
+    /* Enable FP/SIMD access at EL1/EL0. */
+    mrs     x2, cpacr_el1
+    orr     x2, x2, #(3 << 20)
+    msr     cpacr_el1, x2
+    isb
+
+#ifndef CONFIG_NOMMU
     adrp    x0, boot_pgdir
     add     x0, x0, :lo12:boot_pgdir
     adrp    x1, boot_l1
@@ -35,12 +42,6 @@ _start:
     str     x2, [x1, #(0 * 8)]
     ldr     x2, =0x0040000040000705  /* L1 block: PA 0x40000000, normal, UXN */
     str     x2, [x1, #(1 * 8)]
-
-    /* Enable FP/SIMD access at EL1/EL0. */
-    mrs     x2, cpacr_el1
-    orr     x2, x2, #(3 << 20)
-    msr     cpacr_el1, x2
-    isb
 
     /* MAIR: Attr0 = device nGnRnE, Attr1 = normal WBWA cacheable. */
     ldr     x2, =0x000000000000FF00
@@ -66,6 +67,17 @@ _start:
     movz    x1, #0x0080, lsl #32
     add     x0, x0, x1
     br      x0
+#else
+    /* NOMMU: ensure MMU is disabled, caches are off, and alignment checks are off. */
+    mrs     x0, sctlr_el1
+    bic     x0, x0, #1          /* M = 0 */
+    bic     x0, x0, #(1 << 1)   /* A = 0 */
+    bic     x0, x0, #(1 << 2)   /* C = 0 */
+    bic     x0, x0, #(1 << 12)  /* I = 0 */
+    msr     sctlr_el1, x0
+    isb
+    b       .Lhh_entry
+#endif
 
 .Lhh_entry:
     adrp    x0, _stack_end
