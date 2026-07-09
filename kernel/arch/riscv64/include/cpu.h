@@ -10,6 +10,7 @@ static inline void arch_wmb(void) { __asm__ __volatile__("fence ow,ow" ::: "memo
 static inline void arch_wfi(void) { __asm__ __volatile__("wfi"); }
 static inline void arch_cpu_relax(void) { __asm__ __volatile__("nop"); }
 static inline void arch_fence_i(void) { __asm__ __volatile__("fence.i" ::: "memory"); }
+static inline void arch_flush_icache_range(const void *addr, size_t size) { (void)addr; (void)size; arch_fence_i(); }
 /*
  * RISC-V S 模式无法直接读取 mhartid CSR。
  * 使用 BSS 中的 __boot_hart_id 全局变量，由 entry.S 在启动时保存。
@@ -75,8 +76,20 @@ static inline uint64_t arch_read_satp(void) {
 static inline void arch_write_satp(uint64_t v) {
     __asm__ __volatile__("csrw satp, %0" :: "r"(v));
 }
-static inline uint64_t arch_read_addr_space_token(void) { return arch_read_satp(); }
-static inline void arch_write_addr_space_token(uint64_t v) { arch_write_satp(v); }
+static inline uint64_t arch_read_addr_space_token(void) {
+#ifdef CONFIG_NOMMU
+    return 0;
+#else
+    return arch_read_satp();
+#endif
+}
+static inline void arch_write_addr_space_token(uint64_t v) {
+#ifdef CONFIG_NOMMU
+    (void)v;
+#else
+    arch_write_satp(v);
+#endif
+}
 static inline uint64_t arch_read_sstatus(void) {
     uint64_t v; __asm__ __volatile__("csrr %0, sstatus" : "=r"(v)); return v;
 }
@@ -108,7 +121,11 @@ static inline void __attribute__((noreturn)) arch_halt(void) {
 }
 
 static inline int arch_is_kernel_address(const void *ptr) {
+#ifdef CONFIG_NOMMU
+    return (uintptr_t)ptr >= PHYS_MEMORY_BASE;
+#else
     return (uintptr_t)ptr >= PAGE_OFFSET;
+#endif
 }
 
 static inline void arch_dma_sync_for_device(const void *addr, size_t size) {

@@ -14,8 +14,13 @@
 #define PHYS_MEMORY_BASE   0x40000000UL
 #define PHYS_MEMORY_END    0x60000000UL
 #define KERNEL_ENTRY       0x40080000UL
+#ifdef CONFIG_NOMMU
+#define PAGE_OFFSET        0x0UL
+#define USER_VA_LIMIT      PHYS_MEMORY_END
+#else
 #define PAGE_OFFSET        0x0000008000000000UL
 #define USER_VA_LIMIT      0x0000004000000000UL
+#endif
 
 static inline size_t arch_ram_range_count(void) {
     return 1;

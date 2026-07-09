@@ -1,11 +1,30 @@
 #ifdef CONFIG_AARCH64
 
 #include "core/trap.h"
+#include "platform.h"
 #include "proc/proc.h"
 #include "core/timer.h"
 #include "drivers/char/uart.h"
 #include "drivers/core/driver_hwapi.h"
 #include "core/progress.h"
+#include "core/stdio.h"
+
+void debug_trap_return(trap_context_t *trap) {
+    printf("[TRAPRET] trap=%p elr=0x%lx sp=0x%lx spsr=0x%lx ksp=0x%lx\n",
+           (void *)trap, (unsigned long)trap->elr, (unsigned long)trap->sp,
+           (unsigned long)trap->spsr, (unsigned long)trap->kernel_sp);
+}
+
+void debug_trap_entry(trap_context_t *trap, uint64_t esr) {
+    uint32_t insn = 0;
+    if (trap->elr >= PHYS_MEMORY_BASE && trap->elr < PHYS_MEMORY_END) {
+        insn = *(volatile uint32_t *)(uintptr_t)trap->elr;
+    }
+    printf("[TRAPENTRY] pc=0x%lx sp=0x%lx esr=0x%lx (EC=0x%lx ISS=0x%lx) insn@pc=0x%08x\n",
+           (unsigned long)trap->elr, (unsigned long)trap->sp, (unsigned long)esr,
+           (unsigned long)((esr >> 26) & 0x3fUL), (unsigned long)(esr & 0x1ffffffUL),
+           (unsigned)insn);
+}
 
 volatile uint64_t aarch64_trap_flags;
 

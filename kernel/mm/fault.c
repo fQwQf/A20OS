@@ -75,6 +75,11 @@ int mm_shared_file_fault(mm_struct_t *mm, vm_area_t *vma, uint64_t page_va,
 }
 
 int handle_cow_fault(task_t *t, uint64_t stval) {
+#ifdef CONFIG_NOMMU
+    (void)t;
+    (void)stval;
+    return -1;
+#else
     if (!t->mm || !t->mm->pgdir) return -1;
 
     vaddr_t leaf_base = 0;
@@ -151,6 +156,7 @@ int handle_cow_fault(task_t *t, uint64_t stval) {
     }
 
     return -1;
+#endif
 }
 
 /*
@@ -168,6 +174,11 @@ int handle_cow_fault(task_t *t, uint64_t stval) {
  *   full MAP_SHARED dirty/writeback coherence.
  */
 int handle_demand_fault(task_t *t, uint64_t stval) {
+#ifdef CONFIG_NOMMU
+    (void)t;
+    (void)stval;
+    return -1;
+#else
     if (!t->mm || !t->mm->pgdir) return -1;
 
     uint64_t page_va = stval & ~(PAGE_SIZE - 1);
@@ -358,4 +369,5 @@ int handle_demand_fault(task_t *t, uint64_t stval) {
     }
 
     return -1;
+#endif
 }

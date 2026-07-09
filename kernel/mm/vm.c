@@ -12,6 +12,21 @@
 #include "core/panic.h"
 #include "core/klog.h"
 
+#ifdef CONFIG_NOMMU
+static void *nommu_alloc_aligned(size_t len, vaddr_t *addr_out)
+{
+    size_t alloc_len = len + PAGE_SIZE - 1;
+    void *raw = kmalloc(alloc_len);
+    if (!raw)
+        return NULL;
+    vaddr_t addr = ROUND_UP((vaddr_t)raw, PAGE_SIZE);
+    memset((void *)addr, 0, len);
+    if (addr_out)
+        *addr_out = addr;
+    return raw;
+}
+#endif
+
 /*
  * MM_VMA_PTE_AUDIT:
  * - VMA write paths live in mm_mmap(), mm_mmap_file(), mm_munmap(),
@@ -73,7 +88,7 @@ static int vma_ref_file(vm_area_t *vma)
     return vfs_ref_fd(vma->file_fd);
 }
 
-static int vma_ref_fork(vm_area_t *vma)
+static __attribute__((unused)) int vma_ref_fork(vm_area_t *vma)
 {
     int r = vma_ref_file(vma);
     if (r < 0)
@@ -189,7 +204,7 @@ static int mm_fork_clone_page(mm_struct_t *child, mm_struct_t *parent, vaddr_t v
     return 0;
 }
 
-static int mm_fork_clone_range(mm_struct_t *child, mm_struct_t *parent,
+static __attribute__((unused)) int mm_fork_clone_range(mm_struct_t *child, mm_struct_t *parent,
                                vaddr_t start, vaddr_t end, int shared) {
     start = ROUND_DOWN(start, PAGE_SIZE);
     end = ROUND_UP(end, PAGE_SIZE);
@@ -283,7 +298,7 @@ static int mm_fork_clone_present_level(mm_struct_t *child, mm_struct_t *parent,
     return 0;
 }
 
-static int mm_fork_clone_present_range(mm_struct_t *child, mm_struct_t *parent,
+static __attribute__((unused)) int mm_fork_clone_present_range(mm_struct_t *child, mm_struct_t *parent,
                                        vaddr_t start, vaddr_t end, int shared) {
     start = ROUND_DOWN(start, PAGE_SIZE);
     end = ROUND_UP(end, PAGE_SIZE);
@@ -291,7 +306,7 @@ static int mm_fork_clone_present_range(mm_struct_t *child, mm_struct_t *parent,
                                        0, start, end, shared);
 }
 
-static int mm_populate_shared_range(mm_struct_t *mm, vm_area_t *vma) {
+static __attribute__((unused)) int mm_populate_shared_range(mm_struct_t *mm, vm_area_t *vma) {
     if ((vma->vm_flags & (VM_FILE | VM_SHARED)) == (VM_FILE | VM_SHARED)) {
         vfile_t *vf = vfs_get_file_ref(vma->file_fd);
         if (!vf)
@@ -417,6 +432,11 @@ mm_struct_t *mm_create(void) {
 static void free_vma_pages(mm_struct_t *mm, vm_area_t *vma)
 {
 #ifdef CONFIG_NOMMU
+    (void)mm;
+    if (vma->nommu_alloc) {
+        kfree(vma->nommu_alloc);
+        vma->nommu_alloc = NULL;
+    }
     /* In NOMMU, we now track kmalloc allocations in mm->nommu_allocs.
      * We don't free vma->start directly here to avoid double-frees and freeing
      * invalid pointers if the VMA was split or modified by mprotect/munmap. */
@@ -583,7 +603,7 @@ int mm_split_vma_at(mm_struct_t *mm, vaddr_t addr) {
     return 0;
 }
 
-static vm_area_t *vma_split(vm_area_t *vma, vaddr_t split) {
+static __attribute__((unused)) vm_area_t *vma_split(vm_area_t *vma, vaddr_t split) {
     if (!vma) return NULL;
     if (split <= vma->start || split >= vma->end) return vma;
 
@@ -722,11 +742,10 @@ vaddr_t mm_mmap(mm_struct_t *mm, vaddr_t addr, size_t len, int prot, int flags) 
     }
 
 #ifdef CONFIG_NOMMU
+    void *nommu_raw = NULL;
     if (addr == 0) {
-        void *p = kmalloc(len);
-        if (!p) return (uint64_t)-ENOMEM;
-        addr = (vaddr_t)p;
-        mm_track_nommu_alloc(mm, p);
+        nommu_raw = nommu_alloc_aligned(len, &addr);
+        if (!nommu_raw) return (uint64_t)-ENOMEM;
     }
 #else
     // 查找合适的虚拟地址
@@ -740,12 +759,20 @@ vaddr_t mm_mmap(mm_struct_t *mm, vaddr_t addr, size_t len, int prot, int flags) 
 
     // 创建新的 VMA
     vm_area_t *vma = kcalloc(1, sizeof(vm_area_t));
-    if (!vma) return (uint64_t)-ENOMEM;
+    if (!vma) {
+#ifdef CONFIG_NOMMU
+        kfree(nommu_raw);
+#endif
+        return (uint64_t)-ENOMEM;
+    }
     vma->start     = addr;
     vma->end       = addr + len;
     vma->vm_flags  = vmf;
     vma->pte_flags = ptef;
     vma->file_fd   = -1;
+#ifdef CONFIG_NOMMU
+    vma->nommu_alloc = nommu_raw;
+#endif
 
     if (mm->def_flags & VM_LOCKED) {
         task_t *cur = proc_current();
@@ -798,14 +825,13 @@ vaddr_t mm_mmap_file(mm_struct_t *mm, vaddr_t addr, size_t len,
     }
 
 #ifdef CONFIG_NOMMU
+    void *nommu_raw = NULL;
     if (addr == 0) {
-        void *p = kmalloc(len);
-        if (!p) {
+        nommu_raw = nommu_alloc_aligned(len, &addr);
+        if (!nommu_raw) {
             vfs_close(file_fd);
             return (uint64_t)-ENOMEM;
         }
-        addr = (vaddr_t)p;
-        mm_track_nommu_alloc(mm, p);
     }
 #else
     if (addr == 0)
@@ -826,6 +852,9 @@ vaddr_t mm_mmap_file(mm_struct_t *mm, vaddr_t addr, size_t len,
 
     vm_area_t *vma = kcalloc(1, sizeof(vm_area_t));
     if (!vma) {
+#ifdef CONFIG_NOMMU
+        kfree(nommu_raw);
+#endif
         vfs_close(file_fd);
         return (uint64_t)-ENOMEM;
     }
@@ -835,6 +864,9 @@ vaddr_t mm_mmap_file(mm_struct_t *mm, vaddr_t addr, size_t len,
     vma->pte_flags   = mm_prot_to_pte_flags(prot);
     vma->file_fd     = file_fd;
     vma->file_offset = file_offset;
+#ifdef CONFIG_NOMMU
+    vma->nommu_alloc = nommu_raw;
+#endif
 
     if ((vmf & (VM_FILE | VM_SHARED)) == (VM_FILE | VM_SHARED)) {
         vfile_t *vf = vfs_get_file_ref(file_fd);
@@ -885,6 +917,9 @@ static int mm_clone_shared_mapping(mm_struct_t *mm, vm_area_t *src_vma,
 
     /* mm_mmap can merge the new anonymous VMA with neighbors; force exact
      * boundaries before turning it into a file-backed mapping. */
+#ifdef CONFIG_NOMMU
+    return -EINVAL; // Not supported on NOMMU
+#else
     int sr = mm_split_vma_at(mm, dst);
     if (sr < 0) {
         mm_munmap(mm, dst, len);
@@ -895,6 +930,7 @@ static int mm_clone_shared_mapping(mm_struct_t *mm, vm_area_t *src_vma,
         mm_munmap(mm, dst, len);
         return sr;
     }
+#endif
 
     vm_area_t *dst_vma = mm_find_vma(mm, dst);
     if (!dst_vma || dst_vma->start != dst || dst_vma->end != dst + len) {
@@ -978,7 +1014,7 @@ static int mm_clone_shared_mapping(mm_struct_t *mm, vm_area_t *src_vma,
     return 0;
 }
 
-static int mm_move_mapping_pages(mm_struct_t *mm, vaddr_t old_addr,
+static __attribute__((unused)) int mm_move_mapping_pages(mm_struct_t *mm, vaddr_t old_addr,
                                  vaddr_t dst, size_t len, int dontunmap) {
     for (vaddr_t off = 0; off < len; ) {
         int level = 0;
@@ -1166,8 +1202,13 @@ int mm_mremap(mm_struct_t *mm, vaddr_t old_addr, size_t old_size,
     }
 
     size_t move_len = old_len < new_len ? old_len : new_len;
+#ifdef CONFIG_NOMMU
+    memcpy((void *)dst, (void *)old_addr, move_len);
+    r = 0;
+#else
     r = mm_move_mapping_pages(mm, old_addr, dst, move_len,
                               (flags & MREMAP_DONTUNMAP) != 0);
+#endif
     if (r < 0) {
         mm_munmap(mm, dst, new_len);
         return r;
@@ -1212,7 +1253,12 @@ int mm_munmap(mm_struct_t *mm, vaddr_t addr, size_t len) {
 #ifdef CONFIG_NOMMU
         (void)shared_file_vma;
         if (vma->start == clip_start && vma->end == clip_end) {
-            mm_untrack_nommu_alloc(mm, (void *)vma->start);
+            if (vma->nommu_alloc) {
+                kfree(vma->nommu_alloc);
+                vma->nommu_alloc = NULL;
+            } else {
+                mm_untrack_nommu_alloc(mm, (void *)vma->start);
+            }
         }
 #else
         for (uint64_t va = clip_start; va < clip_end; ) {
@@ -1309,6 +1355,11 @@ vaddr_t mm_brk(mm_struct_t *mm, vaddr_t newbrk) {
     if (newbrk < mm->start_brk || newbrk > USER_VA_LIMIT)
         return mm->brk;
 
+#ifdef CONFIG_NOMMU
+    /* Without page tables, brk cannot grow a contiguous virtual heap. Returning
+     * the unchanged break makes libc fall back to mmap-backed allocations. */
+    return mm->brk;
+#else
     vaddr_t old_brk_page = ROUND_UP(mm->brk, PAGE_SIZE);
     vaddr_t new_brk_page = ROUND_UP(newbrk, PAGE_SIZE);
     if (new_brk_page < newbrk)
@@ -1318,26 +1369,12 @@ vaddr_t mm_brk(mm_struct_t *mm, vaddr_t newbrk) {
         vaddr_t old_brk = ROUND_UP(mm->brk, PAGE_SIZE);
         vaddr_t new_brk = ROUND_UP(newbrk, PAGE_SIZE);
         if (new_brk > old_brk) {
-#ifdef CONFIG_NOMMU
-            size_t sz = (size_t)(new_brk - old_brk);
-            void *p = kmalloc(sz);
-            if (!p) return mm->brk;
-            memset(p, 0, sz);
-            mm_track_nommu_alloc(mm, p);
-#else
             if (mm_range_overlaps(mm, old_brk, new_brk - old_brk, NULL))
                 return mm->brk;
-#endif
         }
     }
 
     if (newbrk < mm->brk) {
-#ifdef CONFIG_NOMMU
-        /* NOMMU has no leaf PTEs to walk. Updating brk is sufficient; precise
-         * physical freeing would require tracking the original brk allocation. */
-        (void)new_brk_page;
-        (void)old_brk_page;
-#else
         // 缩小堆，释放多余的物理页面
         for (uint64_t va = new_brk_page; va < old_brk_page; ) {
             int level = 0;
@@ -1367,10 +1404,10 @@ vaddr_t mm_brk(mm_struct_t *mm, vaddr_t newbrk) {
         }
         if (new_brk_page < old_brk_page)
             arch_tlb_flush();  // 刷新 TLB
-#endif
     }
     mm->brk = newbrk;
     return mm->brk;
+#endif
 }
 
 // 修改内存区域的保护属性（mprotect 系统调用的实现）
@@ -1388,7 +1425,9 @@ int mm_mprotect(mm_struct_t *mm, vaddr_t addr, size_t len, int prot) {
     if (prot & 4) vm_prot |= VM_EXEC;
     vaddr_t end = addr + len;
     if (end < addr || end > USER_VA_LIMIT) return -ENOMEM;
+#ifndef CONFIG_NOMMU
     int touched = 0;
+#endif
 
     vaddr_t covered = addr;
     for (vm_area_t *v = mm_find_vma(mm, addr); v && covered < end; v = v->next) {
@@ -1400,13 +1439,8 @@ int mm_mprotect(mm_struct_t *mm, vaddr_t addr, size_t len, int prot) {
     if (covered < end)
         return -ENOMEM;
 
-    int     r = mm_split_vma_at(mm, addr);
-    if (r < 0) return r;
-    r = mm_split_vma_at(mm, end);
-    if (r < 0) return r;
-
 #ifdef CONFIG_NOMMU
-    /* NOMMU has no page tables. We only update the VMA permission bits. */
+    /* NOMMU has no page tables. We only update the VMA permission bits without splitting. */
     for (vm_area_t *v = mm_find_vma(mm, addr); v && v->start < end; ) {
         vm_area_t *next = v->next;
         v->pte_flags = mm_pte_flags_apply_prot(v->pte_flags, ptef);
@@ -1415,7 +1449,12 @@ int mm_mprotect(mm_struct_t *mm, vaddr_t addr, size_t len, int prot) {
         v = next;
     }
     return 0;
-#endif
+#else
+    int     r = mm_split_vma_at(mm, addr);
+    if (r < 0) return r;
+    r = mm_split_vma_at(mm, end);
+    if (r < 0) return r;
+
 
     for (vm_area_t *v = mm_find_vma(mm, addr); v && v->start < end; ) {
         vm_area_t *next = v->next;
@@ -1460,6 +1499,7 @@ int mm_mprotect(mm_struct_t *mm, vaddr_t addr, size_t len, int prot) {
 
     if (touched)
         arch_tlb_flush();  // 刷新 TLB
+#endif
     return 0;
 }
 

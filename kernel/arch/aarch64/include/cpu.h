@@ -24,6 +24,18 @@ static inline void arch_fence_i(void) {
         ::: "memory");
 }
 
+static inline void arch_flush_icache_range(const void *addr, size_t size) {
+    uintptr_t start = (uintptr_t)addr & ~(uintptr_t)63;
+    uintptr_t end = ((uintptr_t)addr + size + 63) & ~(uintptr_t)63;
+    for (uintptr_t p = start; p < end; p += 64)
+        __asm__ __volatile__("dc cvau, %0" :: "r"(p) : "memory");
+    __asm__ __volatile__("dsb ish" ::: "memory");
+    for (uintptr_t p = start; p < end; p += 64)
+        __asm__ __volatile__("ic ivau, %0" :: "r"(p) : "memory");
+    __asm__ __volatile__("dsb ish" ::: "memory");
+    __asm__ __volatile__("isb" ::: "memory");
+}
+
 static inline unsigned arch_current_cpu_id(void) {
     uint64_t mpidr;
     __asm__ __volatile__("mrs %0, mpidr_el1" : "=r"(mpidr));
@@ -33,11 +45,9 @@ static inline unsigned arch_current_cpu_id(void) {
 static inline void arch_local_irq_disable(void) {
     __asm__ __volatile__("msr daifset, #2" ::: "memory");
 }
-
 static inline void arch_local_irq_enable(void) {
     __asm__ __volatile__("msr daifclr, #2" ::: "memory");
 }
-
 static inline int arch_irqs_enabled(void) {
     uint64_t daif;
     __asm__ __volatile__("mrs %0, daif" : "=r"(daif));
@@ -45,12 +55,14 @@ static inline int arch_irqs_enabled(void) {
 }
 
 static inline void arch_tlb_flush(void) {
+#ifndef CONFIG_NOMMU
     __asm__ __volatile__(
         "dsb ishst\n\t"
         "tlbi vmalle1\n\t"
         "dsb ish\n\t"
         "isb"
         ::: "memory");
+#endif
 }
 
 static inline void arch_tlb_flush_page(uint64_t addr) {
@@ -111,17 +123,25 @@ static inline void arch_write_tvec(uint64_t v) {
 }
 
 static inline uint64_t arch_read_satp(void) {
+#ifdef CONFIG_NOMMU
+    return 0;
+#else
     uint64_t v;
     __asm__ __volatile__("mrs %0, ttbr0_el1" : "=r"(v));
     return v;
+#endif
 }
 
 static inline void arch_write_satp(uint64_t v) {
+#ifdef CONFIG_NOMMU
+    (void)v;
+#else
     __asm__ __volatile__(
         "msr ttbr0_el1, %0\n\t"
         "isb"
         :: "r"(v)
         : "memory");
+#endif
 }
 static inline uint64_t arch_read_addr_space_token(void) { return arch_read_satp(); }
 static inline void arch_write_addr_space_token(uint64_t v) { arch_write_satp(v); }
@@ -139,14 +159,12 @@ static inline void arch_write_sstatus(uint64_t v) {
 static inline uint64_t arch_read_sie(void) {
     return arch_irqs_enabled() ? 1 : 0;
 }
-
 static inline void arch_write_sie(uint64_t v) {
     if (v)
         arch_local_irq_enable();
     else
         arch_local_irq_disable();
 }
-
 static inline uint64_t arch_read_sip(void) { return 0; }
 static inline void arch_write_sip(uint64_t v) { (void)v; }
 static inline uint64_t arch_read_sscratch(void) { return 0; }
@@ -159,7 +177,11 @@ static inline void __attribute__((noreturn)) arch_halt(void) {
 }
 
 static inline int arch_is_kernel_address(const void *ptr) {
+#ifdef CONFIG_NOMMU
+    return (uintptr_t)ptr >= PHYS_MEMORY_BASE && (uintptr_t)ptr < PHYS_MEMORY_END;
+#else
     return (uintptr_t)ptr >= PAGE_OFFSET;
+#endif
 }
 
 static inline void arch_dma_sync_for_device(const void *addr, size_t size) {

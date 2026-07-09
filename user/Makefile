@@ -2,6 +2,7 @@ ARCH ?= riscv64
 OPT ?= -O3
 
 .DEFAULT_GOAL := all
+.NOTPARALLEL:
 
 SUPPORTED_ARCHES := riscv64 loongarch64 aarch64 x86_64 arm32 riscv32 ppc64le
 ifeq ($(filter $(ARCH),$(SUPPORTED_ARCHES)),)
@@ -28,7 +29,8 @@ $(ARCH_STAMP): arch-stamp-refresh Makefile
 	else \
 		mv $@.tmp $@; \
 		echo "[USER] arch changed to $(ARCH), cleaning $(BUILD_DIR)"; \
-		rm -rf $(BUILD_DIR)/*; \
+		if [ "$(NOMMU)" = "1" ] && [ "$(ARCH)" = "riscv32" ]; then :; \
+		else find $(BUILD_DIR) -mindepth 1 ! -name '.arch-stamp' -exec rm -rf {} +; fi; \
 	fi
 
 CROSS_COMPILE_riscv64 := riscv64-unknown-elf-
@@ -62,7 +64,7 @@ ARCH_CFLAGS_riscv64 := -mabi=lp64d -march=rv64g -mcmodel=medany
 ARCH_CFLAGS_loongarch64 := -mabi=lp64d -march=loongarch64 -mcmodel=normal -fno-pic
 ARCH_CFLAGS_aarch64 := -march=armv8-a -fno-pic -fno-tree-vectorize
 ARCH_CFLAGS_x86_64 := -m64 -fno-pic -fno-pie -mno-red-zone
-ARCH_CFLAGS_arm32 := -march=armv7-a -marm -mfpu=vfpv3-d16 -mfloat-abi=hard -fno-pic
+ARCH_CFLAGS_arm32 := -march=armv7-a -marm -mfpu=vfpv3-d16 -mfloat-abi=hard -fno-pic -mno-unaligned-access
 ARCH_CFLAGS_riscv32 := -march=rv32imafdc -mabi=ilp32d -mcmodel=medany
 ARCH_CFLAGS_ppc64le := -m64 -mcpu=power8 -mtune=power8 -mlong-double-64 -fno-pic -mno-vsx -mno-altivec -fno-tree-vectorize
 ARCH_CFLAGS := $(ARCH_CFLAGS_$(ARCH))
@@ -80,7 +82,7 @@ MUSL_CONFIG_CFLAGS_riscv64 := $(OPT) -mcmodel=medany -march=rv64g -mabi=lp64d
 MUSL_CONFIG_CFLAGS_loongarch64 := $(OPT) -march=loongarch64 -mabi=lp64d -mcmodel=normal -fno-pic -static
 MUSL_CONFIG_CFLAGS_aarch64 := $(OPT) -fno-pic -static -fno-tree-vectorize
 MUSL_CONFIG_CFLAGS_x86_64 := $(OPT) -m64 -fno-pic -fno-pie -mno-red-zone -static
-MUSL_CONFIG_CFLAGS_arm32 := $(OPT) -march=armv7-a -marm -mfpu=vfpv3-d16 -mfloat-abi=hard -fno-pic -static
+MUSL_CONFIG_CFLAGS_arm32 := $(OPT) -march=armv7-a -marm -mfpu=vfpv3-d16 -mfloat-abi=hard -fno-pic -mno-unaligned-access -static
 MUSL_CONFIG_CFLAGS_riscv32 := $(OPT) -march=rv32imafdc -mabi=ilp32d -mcmodel=medany -static
 MUSL_CONFIG_CFLAGS_ppc64le := $(OPT) -m64 -mcpu=power8 -mtune=power8 -mlong-double-64 -fno-pic -static -mno-vsx -mno-altivec -fno-tree-vectorize
 MUSL_CONFIG_CFLAGS := $(MUSL_CONFIG_CFLAGS_$(ARCH))
@@ -105,12 +107,20 @@ ifeq ($(ARCH),riscv64)
 CROSS_COMPILE := riscv64-linux-gnu-
 CC := $(CROSS_COMPILE)gcc
 endif
+ifeq ($(ARCH),riscv32)
+CROSS_COMPILE := riscv64-linux-gnu-
+CC := $(CROSS_COMPILE)gcc
+LD := $(CROSS_COMPILE)ld
+OBJCOPY := $(CROSS_COMPILE)objcopy
+AR := $(CROSS_COMPILE)ar
+RANLIB := $(CROSS_COMPILE)ranlib
+endif
 # Strip conflicting flags for NOMMU
 ARCH_LDFLAGS := $(filter-out -no-pie,$(ARCH_LDFLAGS))
 ARCH_CFLAGS := $(filter-out -fno-pic -fno-pie,$(ARCH_CFLAGS))
 MUSL_CONFIG_CFLAGS := $(filter-out -fno-pic -fno-pie,$(MUSL_CONFIG_CFLAGS))
 
-LDFLAGS := -static-pie -nostdlib -Wl,--build-id=none $(ARCH_LDFLAGS) $(ARCH_CFLAGS)
+LDFLAGS := -static-pie -nostdlib -Wl,--build-id=none -Wl,-z,notext -Wl,--no-dynamic-linker $(ARCH_LDFLAGS) $(ARCH_CFLAGS)
 CFLAGS += -fPIE -Dfork=vfork
 MUSL_CONFIG_CFLAGS += -fPIE
 endif
@@ -129,7 +139,10 @@ else ifeq ($(ARCH),riscv32)
 LIBGCC_DEFAULT := $(shell $(CC) $(CFLAGS) -print-libgcc-file-name 2>/dev/null)
 LIBGCC_ILP32 := $(dir $(LIBGCC_DEFAULT))rv32imafdc/ilp32d/libgcc.a
 LIBGCC_ILP32_ALT := $(dir $(LIBGCC_DEFAULT))lib32/ilp32d/libgcc.a
-LIBGCC := $(if $(wildcard $(LIBGCC_ILP32)),$(LIBGCC_ILP32),$(if $(wildcard $(LIBGCC_ILP32_ALT)),$(LIBGCC_ILP32_ALT),$(LIBGCC_DEFAULT)))
+LIBGCC_ILP32_UNKNOWN_ELF := $(shell if command -v riscv64-unknown-elf-gcc >/dev/null 2>&1; then \
+	riscv64-unknown-elf-gcc -march=rv32imafdc -mabi=ilp32d -print-libgcc-file-name 2>/dev/null; \
+fi)
+LIBGCC := $(if $(wildcard $(LIBGCC_ILP32)),$(LIBGCC_ILP32),$(if $(wildcard $(LIBGCC_ILP32_ALT)),$(LIBGCC_ILP32_ALT),$(if $(wildcard $(LIBGCC_ILP32_UNKNOWN_ELF)),$(LIBGCC_ILP32_UNKNOWN_ELF),$(LIBGCC_DEFAULT))))
 MUSL_CONFIG_LDFLAGS := -L$(dir $(LIBGCC))
 else
 LIBGCC := $(LIBGCC_DEFAULT)
@@ -556,21 +569,27 @@ musl_prepare:
 	fi
 
 $(BUILD_DIR)/mksh: $(MKSH_OBJS) | build_dir musl_prepare
+	@mkdir -p $(dir $@)
 	$(CC) $(LDFLAGS) -o $@ $(CRT_START) $(MKSH_OBJS) $(CRT_END) $(LIBC)
 
 $(BUILD_DIR)/sh: $(BUILD_DIR)/mksh | build_dir
+	@mkdir -p $(dir $@)
 	cp $< $@
 
 $(BUILD_DIR)/init: $(INIT_OBJ) $(INIT_EXTRA_OBJS) | build_dir musl_prepare
+	@mkdir -p $(dir $@)
 	$(CC) $(LDFLAGS) -o $@ $(CRT_START) $(INIT_OBJ) $(INIT_EXTRA_OBJS) $(CRT_END) $(LIBC)
 
 $(LOCAL_CMDS): $(BUILD_DIR)/%: $(OBJ_DIR)/cmds/%.o | build_dir musl_prepare
+	@mkdir -p $(dir $@)
 	$(CC) $(LDFLAGS) -o $@ $(CRT_START) $< $(CRT_END) $(LIBC)
 
 $(SBASE_CMDS): $(BUILD_DIR)/%: $(OBJ_DIR)/sbase/%.o $(SBASE_LIBUTIL) $(SBASE_LIBUTF) | build_dir musl_prepare
-	$(CC) $(LDFLAGS) -o $@ $(CRT_START) $< $(CRT_END) $(SBASE_LIBUTIL) $(SBASE_LIBUTF) $(LIBC)
+	@mkdir -p $(dir $@)
+	$(CC) $(LDFLAGS) -o $@ $(CRT_START) $< $(CRT_END) -Wl,--start-group $(SBASE_LIBUTIL) $(SBASE_LIBUTF) $(LIBC) -Wl,--end-group
 
 $(WGET_CMD): $(WGET_OBJ) $(TLSE_OBJ) | build_dir musl_prepare
+	@mkdir -p $(dir $@)
 	$(CC) $(LDFLAGS) -o $@ $(CRT_START) $(WGET_OBJ) $(TLSE_OBJ) $(CRT_END) $(LIBC)
 
 $(INIT_OBJ): $(INIT_MAIN_SRC) Makefile | build_dir musl_prepare
@@ -662,6 +681,6 @@ clean:
 distclean: clean
 	rm -rf $(MUSL_BASE)/build-riscv64 $(MUSL_BASE)/build-loongarch64 $(MUSL_BASE)/build-aarch64 $(MUSL_BASE)/build-x86_64
 
-.PHONY: all clean distclean build_dir musl_prepare
+.PHONY: all clean distclean musl_prepare
 .PRECIOUS: $(USER_INTERMEDIATE_TARGETS)
 .SECONDARY: $(USER_INTERMEDIATE_TARGETS)

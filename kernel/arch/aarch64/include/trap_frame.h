@@ -177,6 +177,9 @@ static inline uint64_t arch_trap_ctx_get_kernel_stack(const trap_context_t *ctx,
     return ctx->kernel_sp;
 }
 
+/* AArch64 SVC sets ELR_EL1 to the instruction after the SVC, so no software
+ * advance is required.  (RISC-V ecall, by contrast, sets EPC to the ecall
+ * instruction itself and needs +4.) */
 static inline void arch_advance_syscall_epc(trap_context_t *ctx) {
     (void)ctx;
 }

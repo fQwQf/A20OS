@@ -43,6 +43,24 @@ static void elf_transfer_nommu_allocs(mm_struct_t *mm, elf_load_info_t *info) {
         info->nommu_allocs[i] = mm->nommu_allocs[i];
     mm->num_nommu_allocs = 0;
 }
+
+static int elf_alloc_nommu_image(mm_struct_t *mm, vaddr_t min_vaddr,
+                                 vaddr_t max_vaddr, vaddr_t *load_bias_out) {
+    *load_bias_out = 0;
+    if (max_vaddr <= min_vaddr)
+        return 0;
+
+    size_t image_size = (size_t)(max_vaddr - min_vaddr);
+    void *mem = kmalloc(image_size + PAGE_SIZE);
+    if (!mem)
+        return -ENOMEM;
+
+    mm_track_nommu_alloc(mm, mem);
+    vaddr_t base = ROUND_UP((vaddr_t)mem, PAGE_SIZE);
+    memset((void *)base, 0, image_size);
+    *load_bias_out = base - min_vaddr;
+    return 0;
+}
 #endif
 
 /* ------------------------------------------------------------------ */
@@ -159,7 +177,8 @@ static int map_segment(mm_struct_t *mm, pt_root_t *pgdir,
     if (src->kind == SEG_BUF) {
         memcpy((void *)va, src->buf.data, filesz);
     } else {
-        int nr = vfs_pread(src->fd.fd, (void *)va, filesz, src->fd.offset);
+        int nr = vfs_pread(src->fd.fd, (void *)va, filesz, src->fd.offset); if (nr != filesz) printf("ELF PREAD SHORT: %d != %d\n", nr, (int)filesz);
+        printf("ELF PREAD: nr=%d filesz=%d\n", nr, (int)filesz);
         if (nr < 0) return nr;
     }
     if (memsz > filesz) {
@@ -401,12 +420,8 @@ static int elf_load_interp_from_fd(mm_struct_t *mm, pt_root_t *pgdir,
         if (e > max_vaddr) max_vaddr = e;
     }
     vaddr_t load_bias = 0;
-    if (max_vaddr > min_vaddr) {
-        void *mem = kmalloc(max_vaddr - min_vaddr);
-        if (!mem) return -ENOMEM;
-        memset(mem, 0, max_vaddr - min_vaddr);
-        load_bias = (vaddr_t)mem - min_vaddr;
-    }
+    r = elf_alloc_nommu_image(mm, min_vaddr, max_vaddr, &load_bias);
+    if (r < 0) return r;
 #else
     vaddr_t load_bias = INTERP_BASE_ADDR + elf_aslr_bias();
 #endif
@@ -483,12 +498,8 @@ int elf_load_from_buf(const void *buf, size_t len, elf_load_info_t *info) {
         if (e > max_vaddr) max_vaddr = e;
     }
     vaddr_t load_bias = 0;
-    if (max_vaddr > min_vaddr) {
-        void *mem = kmalloc(max_vaddr - min_vaddr);
-        if (!mem) return -ENOMEM; // FIXME: leaks pgdir
-        memset(mem, 0, max_vaddr - min_vaddr);
-        load_bias = (vaddr_t)mem - min_vaddr;
-    }
+    r = elf_alloc_nommu_image(&mm, min_vaddr, max_vaddr, &load_bias);
+    if (r < 0) return r; // FIXME: leaks pgdir
 #else
     vaddr_t load_bias = (eh->e_type == ET_DYN) ? (USER_DYN_BASE + elf_aslr_bias()) : 0;
 #endif
@@ -598,13 +609,8 @@ static int elf_load64(int fd, const Elf64_Ehdr *eh, const char *path,
         if (e > max_vaddr) max_vaddr = e;
     }
     vaddr_t load_bias = 0;
-    if (max_vaddr > min_vaddr) {
-        void *mem = kmalloc(max_vaddr - min_vaddr);
-        if (!mem) return -ENOMEM; // FIXME: leaks pgdir
-        mm_track_nommu_alloc(&mm, mem);
-        memset(mem, 0, max_vaddr - min_vaddr);
-        load_bias = (vaddr_t)mem - min_vaddr;
-    }
+    r = elf_alloc_nommu_image(&mm, min_vaddr, max_vaddr, &load_bias);
+    if (r < 0) return r; // FIXME: leaks pgdir
 #else
     vaddr_t load_bias = (eh->e_type == ET_DYN) ? (USER_DYN_BASE + elf_aslr_bias()) : 0;
 #endif
@@ -653,7 +659,7 @@ static int elf_load64(int fd, const Elf64_Ehdr *eh, const char *path,
 
         vaddr_t seg_start = seg_va & ~(vaddr_t)(PAGE_SIZE - 1);
         vaddr_t seg_end   = ROUND_UP(seg_va + phdrs[i].p_memsz, PAGE_SIZE);
-    kdebug("[ELF_LOAD64] load_bias=%lx max_va=%lx\n", load_bias, max_va);
+    printf("[ELF_LOAD64] load_bias=%lx max_va=%lx\n", load_bias, max_va);
 
         if (phdrs[i].p_offset == 0) head_va = seg_va;
 #ifdef CONFIG_NOMMU
@@ -676,10 +682,10 @@ static int elf_load64(int fd, const Elf64_Ehdr *eh, const char *path,
         char resolved[MAX_PATH_LEN];
         int interp_fd = resolve_interp(path, interp_path,
                                        resolved, sizeof(resolved));
-        kdebug("[ELF] interp: exec='%s' pt_interp='%s' resolved='%s' fd=%d\n",
+        printf("[ELF] interp: exec='%s' pt_interp='%s' resolved='%s' fd=%d\n",
               path ? path : "(null)", interp_path, resolved, interp_fd);
         if (interp_fd < 0) {
-            kdebug("[ELF] INTERP NOT FOUND for '%s' wanted '%s'\n",
+            printf("[ELF] INTERP NOT FOUND for '%s' wanted '%s'\n",
                   path ? path : "(null)", interp_path);
             r = interp_fd;
             goto fail64;
@@ -767,13 +773,8 @@ static int elf_load32(int fd, const Elf32_Ehdr *eh, const char *path,
         if (e > max_vaddr) max_vaddr = e;
     }
     vaddr_t load_bias = 0;
-    if (max_vaddr > min_vaddr) {
-        void *mem = kmalloc(max_vaddr - min_vaddr);
-        if (!mem) { pt_destroy_user(pgdir); return -ENOMEM; }
-        mm_track_nommu_alloc(&mm, mem);
-        memset(mem, 0, max_vaddr - min_vaddr);
-        load_bias = (vaddr_t)mem - min_vaddr;
-    }
+    r = elf_alloc_nommu_image(&mm, min_vaddr, max_vaddr, &load_bias);
+    if (r < 0) { pt_destroy_user(pgdir); return r; }
 #else
     vaddr_t load_bias = (eh->e_type == ET_DYN) ? (USER_DYN_BASE + elf_aslr_bias()) : 0;
 #endif
@@ -821,7 +822,11 @@ static int elf_load32(int fd, const Elf32_Ehdr *eh, const char *path,
         vaddr_t seg_start = seg_va & ~(vaddr_t)(PAGE_SIZE - 1);
         vaddr_t seg_end   = ROUND_UP(seg_va + (uint64_t)phdrs[i].p_memsz, PAGE_SIZE);
         if (phdrs[i].p_offset == 0) head_va = seg_va;
+#ifdef CONFIG_NOMMU
+        if (base == 0) base = load_bias + min_vaddr;
+#else
         if (base == 0) base = seg_start;
+#endif
         if (seg_end > max_va) max_va = seg_end;
         if ((phdrs[i].p_flags & PF_W) && seg_end > brk_va) brk_va = seg_end;
     }
@@ -901,7 +906,7 @@ int elf_load(int fd, const char *path, elf_load_info_t *info) {
     int is32 = buf[4] == ELFCLASS32;
     int is64 = buf[4] == ELFCLASS64;
     if (!is32 && !is64) {
-        kdebug("[ELF] unsupported ELF class=%d path='%s'\n", buf[4],
+        printf("[ELF] unsupported ELF class=%d path='%s'\n", buf[4],
                path ? path : "(null)");
         return -ENOEXEC;
     }
@@ -910,7 +915,7 @@ int elf_load(int fd, const char *path, elf_load_info_t *info) {
         const Elf64_Ehdr *eh = (const Elf64_Ehdr *)buf;
         r = elf_check_header(eh);
         if (r < 0) {
-            kdebug("[ELF] header check failed: r=%d class=%d data=%d type=%d\n",
+            printf("[ELF] header check failed: r=%d class=%d data=%d type=%d\n",
                    r, eh->e_ident[4], eh->e_ident[5], eh->e_type);
             return r;
         }

@@ -412,6 +412,7 @@ int proc_alloc_user_image(uintptr_t entry, vaddr_t sp, pt_root_t *pgdir,
     t->kstack_base = kstack;
 
     uintptr_t ks_top = (uintptr_t)kstack + KERNEL_STACK_SIZE;
+    ks_top &= ~0xF;
 
     trap_context_t *trap = (trap_context_t *)(ks_top - sizeof(trap_context_t));
     memset(trap, 0, sizeof(*trap));
@@ -469,6 +470,13 @@ int proc_alloc_user_image(uintptr_t entry, vaddr_t sp, pt_root_t *pgdir,
     TASK_CTX_STATUS(ctx) = arch_user_initial_status();
     arch_task_context_set_initial_sp(ctx, trap, ks_top);
     t->kstack = (uintptr_t)ctx;
+
+#ifdef __aarch64__
+    kinfo("[PROCDBG] trap=%p elr=0x%lx sp=0x%lx spsr=0x%lx ksp=0x%lx kstack=%p ctx=%p ks_top=0x%lx\n",
+          (void *)trap, (unsigned long)trap->elr, (unsigned long)trap->sp,
+          (unsigned long)trap->spsr, (unsigned long)trap->kernel_sp,
+          (void *)t->kstack, (void *)ctx, (unsigned long)ks_top);
+#endif
 
     kinfo("[PROC] user task pid=%d entry=0x%lx sp=0x%lx trap_sp=0x%lx\n", t->pid,
           (unsigned long)entry, (unsigned long)sp, (unsigned long)TRAP_CTX_SP(trap));

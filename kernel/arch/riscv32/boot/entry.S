@@ -69,6 +69,9 @@ _start:
     or      t0, t0, t1
     csrw    satp, t0
     sfence.vma
+#else
+    csrwi   satp, 0
+    sfence.vma
 #endif
 
     la      t0, __trap_from_kernel

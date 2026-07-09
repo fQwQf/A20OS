@@ -40,7 +40,7 @@
 #define PT_TLS      7
 #define PT_PHDR     6
 #define PT_GNU_STACK 0x6474e551
-#define PT_A20_START_INFO 0x70000001
+#define PT_A20_START_INFO 0x6a20a200
 
 /* ELF segment flags */
 #define PF_X  1   /* Execute */

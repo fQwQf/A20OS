@@ -167,7 +167,12 @@ trap_common:
     str     r2, [r1, #12]              /* trap.cpsr */
     mrc     p15, 0, r2, c13, c0, 4
     str     r2, [r1, #16]              /* trap.kernel_tp */
+/* NOMMU keeps trap.ttbr0 as zero and never touches TTBR0/TLB state. */
+#ifndef CONFIG_NOMMU
     mrc     p15, 0, r2, c2, c0, 0
+#else
+    mov     r2, #0
+#endif
     str     r2, [r1, #24]              /* trap.ttbr0 */
     mrc     p15, 0, r2, c13, c0, 3
     str     r2, [r1, #28]              /* user-visible TLS pointer */
@@ -255,12 +260,14 @@ __return_to_user:
     msr     spsr_cxsf, r1
     ldr     r1, [sp, #TF_KERNEL_TP]
     mcr     p15, 0, r1, c13, c0, 4
+#ifndef CONFIG_NOMMU
     ldr     r1, [sp, #TF_TTBR0]
     mcr     p15, 0, r1, c2, c0, 0
     mov     r1, #0
     mcr     p15, 0, r1, c8, c7, 0
     dsb     ish
     isb
+#endif
     ldmia   sp, {r0-r12}
     add     sp, sp, #88                /* tear down the dynamic kernel trap frame */
     movs    pc, lr
@@ -279,14 +286,16 @@ user_trap_return:
     msr     spsr_cxsf, r12
     ldr     r12, [r0, #TF_KERNEL_TP]
     mcr     p15, 0, r12, c13, c0, 4
-    ldr     r12, [r0, #TF_TTBR0]
-    mcr     p15, 0, r12, c2, c0, 0
     ldr     r12, [r0, #TF_FAULT_ADDR]
     mcr     p15, 0, r12, c13, c0, 3
+#ifndef CONFIG_NOMMU
+    ldr     r12, [r0, #TF_TTBR0]
+    mcr     p15, 0, r12, c2, c0, 0
     mov     r12, #0
     mcr     p15, 0, r12, c8, c7, 0
     dsb     ish
     isb
+#endif
     ldr     r12, [r0, #TF_KERNEL_SP]
     mrs     r3, cpsr
     cps     #0x1f                      /* System mode (USR register bank) */

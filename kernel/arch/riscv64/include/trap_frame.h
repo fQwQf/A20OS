@@ -95,7 +95,7 @@ static inline task_context_t *arch_task_context_base(void *kstack_base,
 }
 
 static inline uint64_t arch_task_kernel_status(void) {
-    return SSTATUS_SIE;
+    return SSTATUS_SIE | SSTATUS_SPP;
 }
 
 static inline uint64_t arch_user_initial_status(void) {

@@ -38,6 +38,9 @@ typedef struct vm_area {
     struct a20_vmo *vmo;
     uint64_t        vmo_offset;
     struct vnode   *file_vnode;     /* referenced vnode for VM_FILE+VM_SHARED */
+#ifdef CONFIG_NOMMU
+    void           *nommu_alloc;     /* raw allocation backing this VMA */
+#endif
     struct vm_area *prev;
     struct vm_area *next;
 } vm_area_t;

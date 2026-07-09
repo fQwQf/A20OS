@@ -159,6 +159,12 @@ void kernel_main(void) {
     if (ret < 0)
         panic("Failed to create init_kthread");
 
+#ifdef __aarch64__
+    uint64_t current_el;
+    __asm__ __volatile__("mrs %0, CurrentEL" : "=r"(current_el));
+    printf("[INIT] CurrentEL=0x%lx\n", current_el);
+#endif
+
     printf("[INIT] System ready\n\n");
     printf("\033[1;36m");
     printf("%s\n", "                    :%%%%%%%.                                 ");
@@ -188,6 +194,7 @@ void kernel_main(void) {
     printf("%s\n", "       :======= .===============. -------- ---------:    ");
     printf("\033[0m");
     printf("Welcome to A20OS!\n\n");
+    printf("[INIT] entering scheduler...\n");
 
     sched();
     idle_loop();
@@ -248,6 +255,17 @@ void init_kthread(void) {
                                 );
     if (ret < 0) {
         panic("init: proc_alloc_user failed: %d\n", ret);
+    }
+
+#ifdef CONFIG_NOMMU
+    arch_flush_icache_range((const void *)info.load_addr, info.load_size);
+#endif
+
+    {
+        uint32_t *p = (uint32_t *)(info.load_addr + 0x7138);
+        kerr("[INITDBG] load_addr=0x%lx load_size=0x%lx bytes@0x%lx=0x%08x\n",
+             (unsigned long)info.load_addr, (unsigned long)info.load_size,
+             (unsigned long)(info.load_addr + 0x7138), (unsigned)*p);
     }
 
     printf("[INIT] user init created: pid=%d entry=0x%lx sp=0x%lx\n",

@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
 #include <sys/reboot.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -126,14 +127,26 @@ int main(void)
     char *argv[] = {"mksh", script, NULL};
     char *envp[] = {path_env, ld_env, "HOME=/", "SHELL=/bin/mksh", "TERM=vt100", NULL};
 
+    printf("[init] forking...\n");
     shell_pid = fork();
     if (shell_pid == 0) {
+        printf("[init] fork=0, calling execve mksh\n");
         execve("/bin/mksh", argv, envp);
         perror("execve mksh");
         _exit(127);
     }
     if (shell_pid < 0) {
-        perror("fork");
+        printf("[init] fork failed with %d, errno %d\n", shell_pid, errno);
+        if (errno == EINVAL) {
+            /* NOMMU kernels do not implement fork().  Replace this
+             * process with the shell so the system still reaches an
+             * interactive prompt. */
+            printf("[init] errno=EINVAL, calling execve mksh\n");
+            execve("/bin/mksh", argv, envp);
+            perror("execve mksh");
+        } else {
+            perror("fork");
+        }
         do_shutdown();
     }
 
