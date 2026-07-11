@@ -12,6 +12,7 @@
 #define SCHED_RR       2
 #define SCHED_BATCH    3
 #define SCHED_IDLE     5
+#define SCHED_RESET_ON_FORK 0x40000000
 
 #define CLONE_VM             0x00000100
 #define CLONE_FILES          0x00000400

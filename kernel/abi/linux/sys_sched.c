@@ -185,11 +185,14 @@ int64_t sys_sched_getscheduler(int pid)
     if (pid < 0) return -EINVAL;
     task_t *t = sched_task_for_pid(pid);
     if (!t) return -ESRCH;
-    return t->sched_policy;
+    return t->sched_policy |
+           (t->sched_reset_on_fork ? SCHED_RESET_ON_FORK : 0);
 }
 
 int64_t sys_sched_setscheduler(int pid, int policy, const void *param)
 {
+    int reset_on_fork = !!(policy & SCHED_RESET_ON_FORK);
+    policy &= ~SCHED_RESET_ON_FORK;
     if (!sched_policy_valid(policy)) return -EINVAL;
     if (!param) return -EFAULT;
     if (pid < 0) return -EINVAL;
@@ -206,6 +209,7 @@ int64_t sys_sched_setscheduler(int pid, int policy, const void *param)
         t->priority = sched_nice_for_weight(t->cfs_weight);
     }
     t->sched_policy = policy;
+    t->sched_reset_on_fork = reset_on_fork;
     sched_requeue_if_ready(t, requeue);
     return 0;
 }
