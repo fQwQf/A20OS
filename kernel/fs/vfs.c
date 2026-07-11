@@ -969,6 +969,36 @@ int vfs_futimens(int fd, const uint64_t times[4]) {
     return r;
 }
 
+static int vfs_readlink_copy_target(const char *target, char *buf, size_t sz) {
+    size_t len = strlen(target);
+    if (len > sz) len = sz;
+    memcpy(buf, target, len);
+    return (int)len;
+}
+
+static int vfs_proc_fd_number(const char *path, int *fd) {
+    const char *prefix = "/proc/self/fd/";
+    size_t prefix_len = strlen(prefix);
+    if (strncmp(path, prefix, prefix_len) != 0)
+        return 0;
+
+    const char *p = path + prefix_len;
+    if (*p < '0' || *p > '9')
+        return -ENOENT;
+    int value = 0;
+    while (*p >= '0' && *p <= '9') {
+        if (value > (MAX_FILES - 1) / 10)
+            return -ENOENT;
+        value = value * 10 + (*p++ - '0');
+        if (value >= MAX_FILES)
+            return -ENOENT;
+    }
+    if (*p != '\0')
+        return -ENOENT;
+    *fd = value;
+    return 1;
+}
+
 int vfs_readlinkat(int dirfd, const char *path, char *buf, size_t sz) {
     (void)dirfd;
     if (!path || !buf || sz == 0) return -EINVAL;
@@ -982,11 +1012,29 @@ int vfs_readlinkat(int dirfd, const char *path, char *buf, size_t sz) {
     if (strcmp(resolved, "/proc/self/exe") == 0) {
         task_t *cur = proc_current();
         const char *exe = cur && cur->exec_path[0] ? cur->exec_path : "/bin/sh";
-        size_t len = strlen(exe);
-        if (len >= sz) len = sz - 1;
-        memcpy(buf, exe, len);
-        buf[len] = '\0';
-        return (int)len;
+        return vfs_readlink_copy_target(exe, buf, sz);
+    }
+
+    if (strcmp(resolved, "/proc/self/cwd") == 0) {
+        task_t *cur = proc_current();
+        const char *cwd_res = cur ? cur->fs.cwd : "/";
+        return vfs_readlink_copy_target(cwd_res, buf, sz);
+    }
+
+    int proc_fd = -1;
+    int proc_fd_match = vfs_proc_fd_number(resolved, &proc_fd);
+    if (proc_fd_match < 0)
+        return proc_fd_match;
+    if (proc_fd_match > 0) {
+        int gfd = fdtable_get_current(proc_fd);
+        if (gfd < 0)
+            return gfd;
+        vfile_t *vf = vfs_get_file_ref(gfd);
+        if (!vf)
+            return -EBADF;
+        int r = vf->path[0] ? vfs_readlink_copy_target(vf->path, buf, sz) : -ENOENT;
+        vfs_put_file_ref(gfd, vf);
+        return r;
     }
 
     /* Handle /proc/<pid>/exe and /proc/<pid>/cwd symlinks */
@@ -1003,20 +1051,12 @@ int vfs_readlinkat(int dirfd, const char *path, char *buf, size_t sz) {
             if (strcmp(q, "/exe") == 0) {
                 task_t *t = proc_find(pid);
                 const char *exe = t && t->exec_path[0] ? t->exec_path : "/bin/sh";
-                size_t len = strlen(exe);
-                if (len >= sz) len = sz - 1;
-                memcpy(buf, exe, len);
-                buf[len] = '\0';
-                return (int)len;
+                return vfs_readlink_copy_target(exe, buf, sz);
             }
             if (strcmp(q, "/cwd") == 0) {
                 task_t *t = proc_find(pid);
                 const char *cwd_res = t ? t->fs.cwd : "/";
-                size_t len = strlen(cwd_res);
-                if (len >= sz) len = sz - 1;
-                memcpy(buf, cwd_res, len);
-                buf[len] = '\0';
-                return (int)len;
+                return vfs_readlink_copy_target(cwd_res, buf, sz);
             }
         }
     }
