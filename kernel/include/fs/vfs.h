@@ -329,6 +329,7 @@ int      vfs_dup3(int oldfd, int newfd, int flags);
 int      vfs_fcntl(int fd, int cmd, long arg);
 int      vfs_flock(int fd, int operation);
 void     vfs_release_process_locks(int pid);
+void     vfs_release_process_file_locks(int fd, int pid);
 
 /* Truncate */
 int      vfs_truncate(const char *path, size_t size);
