@@ -159,8 +159,23 @@ int64_t sys_readlinkat(int dirfd, const char *path, char *buf, size_t sz) {
     char kpath[MAX_PATH_LEN];
     if (user_strncpy(kpath, path, MAX_PATH_LEN) < 0) return -EFAULT;
     char full[MAX_PATH_LEN];
-    int pr = syscall_path_at(dirfd, kpath, full, sizeof(full));
-    if (pr < 0) return pr;
+    if (kpath[0] == '\0') {
+        if (dirfd == AT_FDCWD) return -ENOENT;
+        int gfd = fdtable_get_current(dirfd);
+        if (gfd < 0) return gfd;
+        vfile_t *vf = vfs_get_file_ref(gfd);
+        if (!vf) return -EBADF;
+        if (!vf->path[0]) {
+            vfs_put_file_ref(gfd, vf);
+            return -ENOENT;
+        }
+        strncpy(full, vf->path, sizeof(full) - 1);
+        full[sizeof(full) - 1] = '\0';
+        vfs_put_file_ref(gfd, vf);
+    } else {
+        int pr = syscall_path_at(dirfd, kpath, full, sizeof(full));
+        if (pr < 0) return pr;
+    }
     if (sz > LINUX_IO_CHUNK_SIZE) sz = LINUX_IO_CHUNK_SIZE;
     char *kbuf = proc_scratch_buffer(LINUX_IO_CHUNK_SIZE);
     if (!kbuf) return -ENOMEM;
