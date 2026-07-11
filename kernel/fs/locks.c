@@ -390,6 +390,25 @@ void fs_locks_release_process(int pid)
     spin_unlock_irqrestore(&g_file_lock_table_lock, flags);
 }
 
+void fs_locks_release_process_file(vfile_t *vf, int pid)
+{
+    uintptr_t key = fs_lock_key(vf);
+    uint64_t flags = spin_lock_irqsave(&g_file_lock_table_lock);
+    int changed = 0;
+    for (int i = 0; i < FS_FILE_LOCK_MAX; i++) {
+        if (g_file_locks[i].used &&
+            g_file_locks[i].key == key &&
+            g_file_locks[i].owner_kind == FS_LOCK_OWNER_PID &&
+            g_file_locks[i].owner == (uintptr_t)pid) {
+            g_file_locks[i].used = 0;
+            changed = 1;
+        }
+    }
+    if (changed)
+        fs_lock_wake_waiters();
+    spin_unlock_irqrestore(&g_file_lock_table_lock, flags);
+}
+
 void fs_locks_release_file(vfile_t *vf, uintptr_t owner)
 {
     uintptr_t key = fs_lock_key(vf);
