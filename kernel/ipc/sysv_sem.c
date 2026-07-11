@@ -37,10 +37,37 @@ typedef struct {
     short sem_flg;
 } sysv_sembuf_t;
 
+/* 64-bit Linux UAPI layout shared by riscv64 and loongarch64. */
+typedef struct {
+    int key;
+    unsigned int uid;
+    unsigned int gid;
+    unsigned int cuid;
+    unsigned int cgid;
+    unsigned int mode;
+    int seq;
+    unsigned long unused1;
+    unsigned long unused2;
+} sysv_ipc_perm64_t;
+
+typedef struct {
+    sysv_ipc_perm64_t sem_perm;
+    long sem_otime;
+    long sem_ctime;
+    unsigned long sem_nsems;
+    unsigned long unused3;
+    unsigned long unused4;
+} sysv_semid64_ds_t;
+
 typedef struct {
     int used;
     int key;
     int nsems;
+    unsigned int uid;
+    unsigned int gid;
+    unsigned int cuid;
+    unsigned int cgid;
+    unsigned int mode;
     unsigned short val[SYSV_SEM_PER_SET];
     int last_pid;
     wait_queue_t waiters;
@@ -59,6 +86,9 @@ int sysv_sem_get(int key, int nsems, int semflg)
     if (nsems < 0 || nsems > SYSV_SEM_PER_SET)
         return -EINVAL;
 
+    task_t *cur = proc_current();
+    unsigned int uid = cur ? (unsigned int)cur->cred.euid : 0;
+    unsigned int gid = cur ? (unsigned int)cur->cred.egid : 0;
     uint64_t flags = spin_lock_irqsave(&g_sem_lock);
     for (int i = 0; i < SYSV_SEM_MAX; i++) {
         if (g_sem[i].used && g_sem[i].key == key && key != 0) {
@@ -90,6 +120,11 @@ int sysv_sem_get(int key, int nsems, int semflg)
             g_sem[i].used = 1;
             g_sem[i].key = key;
             g_sem[i].nsems = nsems;
+            g_sem[i].uid = uid;
+            g_sem[i].gid = gid;
+            g_sem[i].cuid = uid;
+            g_sem[i].cgid = gid;
+            g_sem[i].mode = (unsigned int)semflg & 0777;
             wait_queue_init(&g_sem[i].waiters);
             spin_unlock_irqrestore(&g_sem_lock, flags);
             return i;
@@ -178,17 +213,23 @@ int sysv_sem_control(int semid, int semnum, int cmd, void *arg)
     }
     case IPC_STAT:
     case SEM_STAT:
-    case SEM_STAT_ANY:
-        if (arg) {
-            char zero[64];
-            memset(zero, 0, sizeof(zero));
-            if (copy_to_user(arg, zero, sizeof(zero)) < 0) {
-                spin_unlock_irqrestore(&g_sem_lock, flags);
-                return -EFAULT;
-            }
-        }
+    case SEM_STAT_ANY: {
+        sysv_semid64_ds_t ds;
+        memset(&ds, 0, sizeof(ds));
+        ds.sem_perm.key = set->key;
+        ds.sem_perm.uid = set->uid;
+        ds.sem_perm.gid = set->gid;
+        ds.sem_perm.cuid = set->cuid;
+        ds.sem_perm.cgid = set->cgid;
+        ds.sem_perm.mode = set->mode;
+        ds.sem_perm.seq = semid;
+        ds.sem_nsems = (unsigned long)set->nsems;
         spin_unlock_irqrestore(&g_sem_lock, flags);
+
+        if (!arg || copy_to_user(arg, &ds, sizeof(ds)) < 0)
+            return -EFAULT;
         return cmd == IPC_STAT ? 0 : semid;
+    }
     case SEM_INFO:
         if (arg) {
             char zero[64];
