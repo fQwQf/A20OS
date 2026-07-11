@@ -133,6 +133,16 @@ int proc_clone(uint64_t flags, vaddr_t stack, int *ptid, vaddr_t tls, int *ctid,
     }
     int child_pid = t->pid;
     proc_task_init_common(t, parent);
+    if (parent && parent->sched_reset_on_fork) {
+        if (parent->sched_policy == SCHED_FIFO || parent->sched_policy == SCHED_RR) {
+            t->sched_policy = SCHED_NORMAL;
+            t->priority = 0;
+            t->cfs_weight = sched_weight_for_nice(0);
+        } else if (t->priority < 0) {
+            t->priority = 0;
+            t->cfs_weight = sched_weight_for_nice(0);
+        }
+    }
     proc_pid_register(t);
 
     if (exit_signal < 0 || exit_signal >= NSIG) {
