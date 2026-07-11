@@ -158,6 +158,34 @@ static int is_pid_str(const char *s) {
     return 1;
 }
 
+static char procfs_task_state_char(const task_t *task) {
+    if (!task) return 'X';
+    switch (task->state) {
+    case PROC_READY:
+    case PROC_RUNNING:
+        return 'R';
+    case PROC_BLOCKED:
+        return 'S';
+    case PROC_STOPPED:
+        return 'T';
+    case PROC_ZOMBIE:
+        return 'Z';
+    case PROC_UNUSED:
+    default:
+        return 'X';
+    }
+}
+
+static const char *procfs_task_state_text(const task_t *task) {
+    switch (procfs_task_state_char(task)) {
+    case 'R': return "R (running)";
+    case 'S': return "S (sleeping)";
+    case 'T': return "T (stopped)";
+    case 'Z': return "Z (zombie)";
+    default:  return "X (dead)";
+    }
+}
+
 static void appendf(char *buf, size_t bufsz, size_t *off, const char *fmt, ...) {
     if (*off >= bufsz) return;
     va_list args;
@@ -508,18 +536,16 @@ static int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
         task_t *t = proc_find(pid);
         if (!t) { snprintf(buf, bufsz, "%d (unknown) S 0 0\n", pid); break; }
         snprintf(buf, bufsz,
-            "%d (%s) S %d %d %d 0 0 0 0 0 0 0 0 %lu 0\n",
-            t->pid, t->name, t->ppid, t->pgid, t->sid,
+            "%d (%s) %c %d %d %d 0 0 0 0 0 0 0 0 %lu 0\n",
+            t->pid, t->name, procfs_task_state_char(t),
+            t->ppid, t->pgid, t->sid,
             (unsigned long)t->total_time);
         break;
     }
     case PF_PID_STATUS: {  // 生成进程 status 信息
         task_t *t = proc_find(pid);
         if (!t) { snprintf(buf, bufsz, "Name:\tunknown\nPid:\t%d\n", pid); break; }
-        const char *state = "S (sleeping)";
-        if (t->state == PROC_RUNNING) state = "R (running)";
-        else if (t->state == PROC_BLOCKED) state = "S (sleeping)";
-        else if (t->state == PROC_ZOMBIE) state = "Z (zombie)";
+        const char *state = procfs_task_state_text(t);
         char groups[160];
         size_t glen = 0;
         groups[0] = '\0';
