@@ -159,6 +159,7 @@ typedef struct task_t {
     uint64_t ready_since;
     uint32_t cfs_weight;
     int      sched_policy;
+    int      sched_reset_on_fork;
     int      waiting_for_child;
     int      exit_pending;
     int      pending_exit_code;
