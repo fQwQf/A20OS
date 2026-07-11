@@ -255,8 +255,10 @@ void fdtable_close_all(task_t *task)
     }
     spin_unlock_irqrestore(&files->lock, flags);
     ktrace_fd("[FD] close_all: pid=%d closing %d fds\n", task->pid, close_count);
-    for (int i = 0; i < close_count; i++)
+    for (int i = 0; i < close_count; i++) {
+        vfs_release_process_file_locks(to_close[i], task->pid);
         vfs_close(to_close[i]);
+    }
     kfree(files);
 }
 
@@ -278,8 +280,10 @@ void fdtable_close_on_exec(task_t *task)
     }
     fdtable_recompute_next(files);
     spin_unlock_irqrestore(&files->lock, flags);
-    for (int i = 0; i < close_count; i++)
+    for (int i = 0; i < close_count; i++) {
+        vfs_release_process_file_locks(to_close[i], task->pid);
         vfs_close(to_close[i]);
+    }
     fdtable_init_stdio(task);
 }
 
@@ -348,6 +352,7 @@ int fdtable_close(task_t *task, int fd)
     fdtable_note_free(files, fd);
     spin_unlock_irqrestore(&files->lock, flags);
     ktrace_fd("[FD] close: pid=%d lfd=%d gfd=%d\n", task->pid, fd, gfd);
+    vfs_release_process_file_locks(gfd, task->pid);
     return vfs_close(gfd);
 }
 
@@ -436,8 +441,10 @@ int fdtable_dup_to(task_t *task, int oldfd, int newfd, int flags)
     files->cloexec[newfd] = (flags & O_CLOEXEC) ? 1 : 0;
     fdtable_note_alloc(files, newfd);
     spin_unlock_irqrestore(&files->lock, lock_flags);
-    if (old_new_gfd >= 0)
+    if (old_new_gfd >= 0) {
+        vfs_release_process_file_locks(old_new_gfd, task->pid);
         vfs_close(old_new_gfd);
+    }
     return newfd;
 }
 

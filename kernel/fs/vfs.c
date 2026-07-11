@@ -1308,6 +1308,13 @@ void vfs_release_process_locks(int pid) {
     fs_locks_release_process(pid);
 }
 
+void vfs_release_process_file_locks(int fd, int pid) {
+    vfile_t *vf = vfs_get_file_ref(fd);
+    if (!vf) return;
+    fs_locks_release_process_file(vf, pid);
+    vfs_put_file_ref(fd, vf);
+}
+
 static void vfs_release_open_file_locks(vfile_t *vf, int gfd __attribute__((unused))) {
     fs_locks_release_file(vf, (uintptr_t)vf);
 }
