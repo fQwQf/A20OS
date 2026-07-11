@@ -78,6 +78,9 @@ static inline int arch_ram_range(size_t idx, paddr_t *base, paddr_t *end) {
 #define CAUSE_LOAD_PAGE_FAULT   0x01 /* PIL (1)  — page invalid for load */
 #define CAUSE_STORE_PAGE_FAULT  0x02 /* PIS (2)  — page invalid for store */
 #define CAUSE_PAGE_MODIFICATION 0x04 /* PME (4)  — Page Modification Exception (用于 COW) */
+#define CAUSE_PAGE_NOT_READABLE 0x05 /* PNR (5)  — page read permission denied */
+#define CAUSE_PAGE_NOT_EXEC     0x06 /* PNX (6)  — page execute permission denied */
+#define CAUSE_PAGE_PRIVILEGE    0x07 /* PPI (7)  — page privilege denied */
 
 #define CAUSE_INSN_FAULT        0x08 /* ADEF (8) — address error for fetch */
 #define CAUSE_LOAD_FAULT        0x09 /* ALE (9)  — address error for load/store */
