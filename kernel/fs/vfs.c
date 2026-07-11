@@ -1072,9 +1072,15 @@ int vfs_readlinkat(int dirfd, const char *path, char *buf, size_t sz) {
     if (!mnt) return -ENOENT;
     const char *rel = vfs_strip_mount_prefix(parent_path, mnt);
     vnode_t *parent = vnode_lookup_path(mnt->root, rel);
-    if (!parent || parent->type != VFS_FT_DIR) {
+    if (!parent)
+        return g_lookup_errno ? g_lookup_errno : -ENOENT;
+    if (parent->type != VFS_FT_DIR) {
         vnode_put(parent);
-        return -ENOENT;
+        return -ENOTDIR;
+    }
+    if (vfs_vnode_permission(parent, X_OK) < 0) {
+        vnode_put(parent);
+        return -EACCES;
     }
 
     vnode_t *vn = NULL;
