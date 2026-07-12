@@ -332,6 +332,17 @@ int pipe_poll_events(vfile_t *vf, short events)
     return revents;
 }
 
+int pipe_get_available(vfile_t *vf)
+{
+    if (!pipe_vfile_is(vf)) return -EINVAL;
+    pipe_buf_t *pb = (pipe_buf_t *)vf->priv;
+    if (!pb) return -EINVAL;
+    spin_lock(&pb->lock);
+    int available = (int)pb->used;
+    spin_unlock(&pb->lock);
+    return available;
+}
+
 int pipe_get_size(vfile_t *vf)
 {
     if (!pipe_vfile_is(vf)) return -EINVAL;
