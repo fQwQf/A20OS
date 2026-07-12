@@ -23,6 +23,9 @@ typedef struct ramfs_inode {
     uint32_t mode;
     uint32_t uid;
     uint32_t gid;
+    spinlock_t fifo_lock;
+    int fifo_readers;
+    int fifo_writers;
 } ramfs_inode_t;
 
 typedef struct {
@@ -50,6 +53,7 @@ static ramfs_inode_t *ramfs_alloc_inode(int type) {
     for (int i = 0; i < RAMFS_MAX_INODES; i++) {
         if (g_inode_table[i].ref_count == 0) {
             memset(&g_inode_table[i], 0, sizeof(g_inode_table[i]));
+            spin_init(&g_inode_table[i].fifo_lock);
             g_inode_table[i].inum = g_next_inum++;
             g_inode_table[i].type = type;
             g_inode_table[i].ref_count = 1;
@@ -663,7 +667,16 @@ static vnode_ops_t g_ramfs_vnode_ops = {
 
 static int ramfs_fread(vfile_t *vf, char *buf, size_t count) {
     ramfs_inode_t *inode = (ramfs_inode_t *)vf->vnode->fs_data;
-    if (vf->offset >= inode->size) return 0;
+    if (vf->offset >= inode->size) {
+        if ((inode->mode & S_IFMT) == S_IFIFO) {
+            spin_lock(&inode->fifo_lock);
+            int writers = inode->fifo_writers;
+            spin_unlock(&inode->fifo_lock);
+            if (writers > 0 && (vf->flags & O_NONBLOCK))
+                return -EAGAIN;
+        }
+        return 0;
+    }
 
     size_t avail = inode->size - vf->offset;
     size_t n = count < avail ? count : avail;
@@ -771,7 +784,17 @@ static int ramfs_freaddir(vfile_t *vf, void *dirp, size_t count) {
 }
 
 static int ramfs_fclose(vfile_t *vf) {
-    (void)vf;
+    ramfs_inode_t *inode = vf && vf->vnode ?
+                           (ramfs_inode_t *)vf->vnode->fs_data : NULL;
+    if (inode && (inode->mode & S_IFMT) == S_IFIFO) {
+        int access = vf->flags & O_ACCMODE;
+        spin_lock(&inode->fifo_lock);
+        if ((access == O_RDONLY || access == O_RDWR) && inode->fifo_readers > 0)
+            inode->fifo_readers--;
+        if ((access == O_WRONLY || access == O_RDWR) && inode->fifo_writers > 0)
+            inode->fifo_writers--;
+        spin_unlock(&inode->fifo_lock);
+    }
     return 0;
 }
 
@@ -815,6 +838,16 @@ static vfile_t *ramfs_open_vnode(vnode_t *vn, int flags) {
     vf->offset = (flags & O_APPEND) ? vn->size : 0;
     vfile_ref_init(vf, 1);
     vf->ops = &g_ramfs_fops;
+    ramfs_inode_t *inode = (ramfs_inode_t *)vn->fs_data;
+    if (inode && (inode->mode & S_IFMT) == S_IFIFO) {
+        int access = flags & O_ACCMODE;
+        spin_lock(&inode->fifo_lock);
+        if (access == O_RDONLY || access == O_RDWR)
+            inode->fifo_readers++;
+        if (access == O_WRONLY || access == O_RDWR)
+            inode->fifo_writers++;
+        spin_unlock(&inode->fifo_lock);
+    }
     return vf;
 }
 
