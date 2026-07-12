@@ -34,10 +34,94 @@ static int proc_copy_to_task_user(task_t *task, void *dst, const void *src, size
     return 0;
 }
 
+#ifdef CONFIG_NOMMU
+static void nommu_vfork_snapshot_discard(task_t *parent)
+{
+    if (!parent || !parent->nommu_vfork_snaps)
+        return;
+
+    for (int i = 0; i < parent->nommu_num_vfork_snapshots; i++)
+        kfree(parent->nommu_vfork_snaps[i].data);
+    kfree(parent->nommu_vfork_snaps);
+    parent->nommu_vfork_snaps = NULL;
+    parent->nommu_num_vfork_snapshots = 0;
+}
+
+static int nommu_vfork_snapshot_create(task_t *parent)
+{
+    if (!parent || !parent->mm)
+        return 0;
+    if (parent->nommu_vfork_snaps)
+        return -EBUSY;
+
+    int count = 0;
+    for (int i = 0; i < parent->mm->num_nommu_allocs; i++) {
+        if (parent->mm->nommu_allocs[i] &&
+            parent->mm->nommu_alloc_sizes[i])
+            count++;
+    }
+    for (vm_area_t *v = parent->mm->mmap; v; v = v->next) {
+        if (v->nommu_alloc && (v->vm_flags & VM_WRITE))
+            count++;
+    }
+    if (count == 0)
+        return 0;
+
+    nommu_vfork_snap_entry_t *snaps =
+        kcalloc((size_t)count, sizeof(*snaps));
+    if (!snaps)
+        return -ENOMEM;
+
+    parent->nommu_vfork_snaps = snaps;
+    for (int i = 0; i < parent->mm->num_nommu_allocs; i++) {
+        void *src = parent->mm->nommu_allocs[i];
+        size_t size = parent->mm->nommu_alloc_sizes[i];
+        if (!src || !size)
+            continue;
+
+        void *copy = kmalloc(size);
+        if (!copy)
+            goto fail;
+        memcpy(copy, src, size);
+        snaps[parent->nommu_num_vfork_snapshots++] =
+            (nommu_vfork_snap_entry_t){ .dst = src, .data = copy, .size = size };
+    }
+    for (vm_area_t *v = parent->mm->mmap; v; v = v->next) {
+        if (!v->nommu_alloc || !(v->vm_flags & VM_WRITE))
+            continue;
+
+        size_t size = (size_t)(v->end - v->start);
+        void *src = (void *)(uintptr_t)v->start;
+        void *copy = kmalloc(size);
+        if (!copy)
+            goto fail;
+        memcpy(copy, src, size);
+        snaps[parent->nommu_num_vfork_snapshots++] =
+            (nommu_vfork_snap_entry_t){ .dst = src, .data = copy, .size = size };
+    }
+    return 0;
+
+fail:
+    nommu_vfork_snapshot_discard(parent);
+    return -ENOMEM;
+}
+#endif
+
 int proc_clone(uint64_t flags, vaddr_t stack, int *ptid, vaddr_t tls, int *ctid,
                 int exit_signal)
 {
     task_t *parent = proc_current();
+
+#ifdef CONFIG_NOMMU
+    /*
+     * A NOMMU child cannot own a private copy of an address space.  Enforce
+     * that invariant in the process core so every ABI gets the same behavior
+     * and mm_fork() can never duplicate allocation ownership.
+     */
+    if (!(flags & CLONE_VM))
+        return -EINVAL;
+#endif
+
     task_t *t = proc_alloc_task_slot();
     if (!t)
         return -EAGAIN;
@@ -109,7 +193,6 @@ int proc_clone(uint64_t flags, vaddr_t stack, int *ptid, vaddr_t tls, int *ctid,
             t->pgdir = parent->pgdir;
         }
     }
-
     void *kstack = kmalloc(KERNEL_STACK_SIZE);
     if (!kstack) {
         proc_destroy_task(t);
@@ -142,9 +225,7 @@ int proc_clone(uint64_t flags, vaddr_t stack, int *ptid, vaddr_t tls, int *ctid,
         task_context_t *ctx = arch_task_context_base(kstack, ks_top, trap);
         ctx->ra = (uint64_t)user_trap_return;
         ctx->tp = (uint64_t)(uintptr_t)t;
-#ifdef CONFIG_ARM32
-        ctx->user_tp = (uint32_t)TRAP_CTX_TP(trap);
-#endif
+        arch_task_context_set_user_tp(ctx, TRAP_CTX_TP(trap));
         TASK_CTX_PAGE_TABLE(ctx) = t->pgdir ? arch_make_addr_space_token(t->pgdir) : 0;
         TASK_CTX_STATUS(ctx) = TRAP_CTX_STATUS(trap);
         arch_task_context_set_initial_sp(ctx, trap, ks_top);
@@ -172,6 +253,16 @@ int proc_clone(uint64_t flags, vaddr_t stack, int *ptid, vaddr_t tls, int *ctid,
             return -EFAULT;
         }
     }
+
+#ifdef CONFIG_NOMMU
+    if (flags & CLONE_VFORK) {
+        int snapshot_ret = nommu_vfork_snapshot_create(parent);
+        if (snapshot_ret < 0) {
+            proc_destroy_task(t);
+            return snapshot_ret;
+        }
+    }
+#endif
 
     if (flags & CLONE_VFORK) {
         uint64_t pf = spin_lock_irqsave(&proc_lock);

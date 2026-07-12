@@ -188,6 +188,21 @@ static int mm_fork_clone_page(mm_struct_t *child, mm_struct_t *parent, vaddr_t v
     if (!pfn_valid(pfn))
         return -ENOMEM;
 
+    if (!shared && arch_fork_requires_private_copy()) {
+        pfn_t copy = pfa_alloc_page();
+        if (copy == PFN_NONE)
+            return -ENOMEM;
+        memcpy(pfn_to_virt(copy), pfn_to_virt(pfn), PAGE_SIZE);
+        int r = pt_map(child->pgdir, base, pfn_to_phys(copy),
+                       arch_pte_flags(*src));
+        if (r < 0) {
+            frame_put(copy);
+            return r;
+        }
+        child->rss++;
+        return 0;
+    }
+
     pte_t flags = shared ? arch_pte_flags(*src) : mm_cow_flags(*src);
     frame_get(pfn);
 
@@ -227,6 +242,28 @@ static int mm_fork_clone_leaf(mm_struct_t *child, mm_struct_t *parent,
     pfn_t pfn = phys_to_pfn(pa);
     if (!pfn_valid(pfn))
         return -ENOMEM;
+
+    size_t leaf_size = vm_pt_level_size(level);
+    if (!shared && arch_fork_requires_private_copy()) {
+        int order = (leaf_size == PMD_SIZE) ? PMD_ORDER : 0;
+        if (leaf_size != PAGE_SIZE && leaf_size != PMD_SIZE)
+            return -ENOMEM;
+        pfn_t copy = pfa_alloc(order);
+        if (copy == PFN_NONE)
+            return -ENOMEM;
+        memcpy(pfn_to_virt(copy), pfn_to_virt(pfn), leaf_size);
+        int r = (level > 0) ?
+            pt_map_huge(child->pgdir, va, pfn_to_phys(copy),
+                        arch_pte_flags(*src_pte)) :
+            pt_map(child->pgdir, va, pfn_to_phys(copy),
+                   arch_pte_flags(*src_pte));
+        if (r < 0) {
+            pfa_free(copy, order);
+            return r;
+        }
+        child->rss += leaf_size / PAGE_SIZE;
+        return 0;
+    }
 
     vm_area_t *vma = parent ? mm_find_vma(parent, va) : NULL;
     int shared_file = vma &&
@@ -268,7 +305,8 @@ static int mm_fork_clone_present_level(mm_struct_t *child, mm_struct_t *parent,
         return 0;
 
     size_t span = vm_pt_level_size(level);
-    for (int i = 0; i < ARCH_PT_ENTRIES; i++) {
+    int entries = arch_pt_level_entries(level);
+    for (int i = 0; i < entries; i++) {
         vaddr_t entry_base = base + (vaddr_t)i * span;
         vaddr_t entry_end = entry_base + span;
         if (entry_end <= start)
@@ -1600,10 +1638,13 @@ fail:
 }
 
 #ifdef CONFIG_NOMMU
-void mm_track_nommu_alloc(mm_struct_t *mm, void *ptr) {
+void mm_track_nommu_alloc(mm_struct_t *mm, void *ptr, size_t size, uint8_t type) {
     if (!mm || !ptr) return;
-    if (mm->num_nommu_allocs < 32) {
-        mm->nommu_allocs[mm->num_nommu_allocs++] = ptr;
+    if (mm->num_nommu_allocs < NOMMU_ALLOC_MAX) {
+        mm->nommu_allocs[mm->num_nommu_allocs] = ptr;
+        mm->nommu_alloc_sizes[mm->num_nommu_allocs] = size;
+        mm->nommu_alloc_types[mm->num_nommu_allocs] = type;
+        mm->num_nommu_allocs++;
     } else {
         printf("[NOMMU] WARNING: mm->nommu_allocs is full, leaking memory!\n");
     }
@@ -1613,6 +1654,8 @@ void mm_untrack_nommu_alloc(mm_struct_t *mm, void *ptr) {
     for (int i = 0; i < mm->num_nommu_allocs; i++) {
         if (mm->nommu_allocs[i] == ptr) {
             mm->nommu_allocs[i] = mm->nommu_allocs[--mm->num_nommu_allocs];
+            mm->nommu_alloc_sizes[i] = mm->nommu_alloc_sizes[mm->num_nommu_allocs];
+            mm->nommu_alloc_types[i] = mm->nommu_alloc_types[mm->num_nommu_allocs];
             kfree(ptr);
             return;
         }

@@ -9,23 +9,6 @@
 #include "core/progress.h"
 #include "core/stdio.h"
 
-void debug_trap_return(trap_context_t *trap) {
-    printf("[TRAPRET] trap=%p elr=0x%lx sp=0x%lx spsr=0x%lx ksp=0x%lx\n",
-           (void *)trap, (unsigned long)trap->elr, (unsigned long)trap->sp,
-           (unsigned long)trap->spsr, (unsigned long)trap->kernel_sp);
-}
-
-void debug_trap_entry(trap_context_t *trap, uint64_t esr) {
-    uint32_t insn = 0;
-    if (trap->elr >= PHYS_MEMORY_BASE && trap->elr < PHYS_MEMORY_END) {
-        insn = *(volatile uint32_t *)(uintptr_t)trap->elr;
-    }
-    printf("[TRAPENTRY] pc=0x%lx sp=0x%lx esr=0x%lx (EC=0x%lx ISS=0x%lx) insn@pc=0x%08x\n",
-           (unsigned long)trap->elr, (unsigned long)trap->sp, (unsigned long)esr,
-           (unsigned long)((esr >> 26) & 0x3fUL), (unsigned long)(esr & 0x1ffffffUL),
-           (unsigned)insn);
-}
-
 volatile uint64_t aarch64_trap_flags;
 
 static inline volatile uint32_t *gicd_reg32(uint32_t off) {
@@ -60,6 +43,7 @@ static inline volatile uint8_t *gicd_reg8(uint32_t off) {
 #define ESR_EC_SP_ALIGN     0x26U
 #define ESR_EC_BRK_LOW      0x3CU
 #define ESR_ISS_WNR         (1U << 6)
+#define ESR_FSC_ALIGN       0x21U
 
 static inline int aarch64_abort_is_page_fault(uint64_t esr) {
     uint64_t fsc = esr & 0x3FUL;
@@ -83,6 +67,8 @@ uint64_t aarch64_decode_sync_cause(uint64_t esr) {
         return aarch64_abort_is_page_fault(esr) ? CAUSE_INSN_PAGE_FAULT : CAUSE_INSN_FAULT;
     case ESR_EC_DABT_LOW:
     case ESR_EC_DABT_CUR:
+        if ((esr & 0x3FUL) == ESR_FSC_ALIGN)
+            return CAUSE_LOAD_MISALIGNED;
         if (aarch64_abort_is_page_fault(esr))
             return (esr & ESR_ISS_WNR) ? CAUSE_STORE_PAGE_FAULT : CAUSE_LOAD_PAGE_FAULT;
         return (esr & ESR_ISS_WNR) ? CAUSE_STORE_FAULT : CAUSE_LOAD_FAULT;
