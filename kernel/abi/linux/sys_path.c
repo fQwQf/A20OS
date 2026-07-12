@@ -410,16 +410,17 @@ int64_t sys_symlinkat(const char *target, int newdirfd, const char *linkpath) {
 }
 
 int64_t sys_statfs(const char *path, void *buf) {
-    if (!buf) return -EFAULT;
+    if (!path || !buf) return -EFAULT;
     int fs_type = FS_TYPE_RAMFS;
-    if (path) {
-        char kpath[MAX_PATH_LEN];
-        if (user_strncpy(kpath, path, MAX_PATH_LEN) < 0) return -EFAULT;
-        vnode_t *vn = vfs_resolve(kpath);
-        if (!vn) return -ENOENT;
-        if (vn->mnt) fs_type = vn->mnt->type;
-        vnode_put(vn);
-    }
+    char kpath[MAX_PATH_LEN];
+    long copied = user_strncpy(kpath, path, MAX_PATH_LEN);
+    if (copied < 0) return -EFAULT;
+    if (copied >= MAX_PATH_LEN - 1) return -ENAMETOOLONG;
+    if (kpath[0] == '\0') return -ENOENT;
+    vnode_t *vn = vfs_resolve(kpath);
+    if (!vn) return g_lookup_errno ? g_lookup_errno : -ENOENT;
+    if (vn->mnt) fs_type = vn->mnt->type;
+    vnode_put(vn);
     return arch_copy_statfs64_to_user(buf, fs_type) < 0 ? -EFAULT : 0;
 }
 
