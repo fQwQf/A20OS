@@ -13,6 +13,13 @@ NR_CPUS ?= 1
 ALLOW_UNVERIFIED_SMP ?= 0
 BOARD ?= qemu-virt-$(ARCH)
 NOMMU ?= 0
+NOMMU_SUPPORTED_ARCHES := riscv64 riscv32 aarch64 arm32
+
+ifeq ($(NOMMU),1)
+ifeq ($(filter $(ARCH),$(NOMMU_SUPPORTED_ARCHES)),)
+$(error NOMMU is unsupported for ARCH=$(ARCH); supported architectures: $(NOMMU_SUPPORTED_ARCHES))
+endif
+endif
 
 ifneq ($(NR_CPUS),1)
 ifeq ($(ALLOW_UNVERIFIED_SMP),0)
@@ -33,12 +40,14 @@ endif
 # Directories
 KERNEL_DIR = kernel
 INCLUDE_DIR = $(KERNEL_DIR)/include
-BUILD_VARIANT = $(ABI)-$(if $(filter 1,$(BRINGUP)),bringup,dev)
+BUILD_VARIANT = $(ABI)-$(if $(filter 1,$(BRINGUP)),bringup,dev)$(if $(filter 1,$(NOMMU)),-nommu,)
 BUILD_DIR = .kernel-build/$(ARCH)-$(BUILD_VARIANT)
 FAT32_IMG = $(BUILD_DIR)/fat32.img
 EXT4_IMG = $(BUILD_DIR)/ext4.img
 FS_TEST_IMG = $(BUILD_DIR)/fs_test.img
-USER_BUILD_STAMP = user/build/.build-id
+USER_VARIANT = $(ARCH)$(if $(filter 1,$(NOMMU)),-nommu,)
+USER_BUILD_DIR = user/build/$(USER_VARIANT)
+USER_BUILD_STAMP = $(USER_BUILD_DIR)/.build-id
 ARCH_INCLUDE_DIR = $(KERNEL_DIR)/arch/$(ARCH)/include
 BOARD_INCLUDE_DIR = $(KERNEL_DIR)/platform/$(BOARD)
 EXT4_STAGING_DIR = $(BUILD_DIR)/ext4-staging
@@ -53,6 +62,20 @@ USER_BUILD_ID = $(ARCH):$(OPT):$(NOMMU)
 USER_BUILD_CHECK_DIRS = user/cmds user/init_common user/lib user/shell \
                         user/external/musl user/external/sbase user/external/mksh-cvs2git \
                         user/external/tlse user/external/fastfetch
+NATIVE_TAG_riscv64     := rv
+NATIVE_TAG_loongarch64 := la
+NATIVE_TAG_aarch64     := aarch64
+NATIVE_TAG_x86_64      := x86_64
+NATIVE_TAG_arm32       := arm32
+NATIVE_TAG_riscv32     := rv32
+NATIVE_TAG_ppc64le     := ppc64le
+NATIVE_TAG             := $(NATIVE_TAG_$(ARCH))
+NATIVE_BUILD_DIR       := $(USER_BUILD_DIR)
+NATIVE_HELLO_BIN       := $(NATIVE_BUILD_DIR)/native-hello-$(NATIVE_TAG)
+NATIVE_HANDLE_BIN      := $(NATIVE_BUILD_DIR)/native-handle-$(NATIVE_TAG)
+NATIVE_LIBC_BIN        := $(NATIVE_BUILD_DIR)/native-libc-$(NATIVE_TAG)
+NATIVE_OUTPUTS         := $(NATIVE_HELLO_BIN) $(NATIVE_HANDLE_BIN) $(NATIVE_LIBC_BIN)
+NATIVE_BUILD_STAMP     := $(NATIVE_BUILD_DIR)/.native-build-id
 comma := ,
 NET_HOSTFWD ?= hostfwd=tcp::5555-:5555,hostfwd=udp::5555-:5555
 NETDEV_USER = -netdev user,id=net$(if $(strip $(NET_HOSTFWD)),$(comma)$(NET_HOSTFWD),)
@@ -299,15 +322,21 @@ KERNEL_BIN = $(BUILD_DIR)/kernel.bin
 
 .PHONY: all clean run-riscv64 run-loongarch64 run-arm64 run-x86_64 run-arm32 run-riscv32 run-ppc64le debug-riscv64 debug-loongarch64 debug-arm64 debug-x86_64 debug-arm32 debug-riscv32 debug-ppc64le \
 		check-kernel-build check-user-build check-dev-build check-contest-build check-build-matrix check-abi-smoke-gate check-doc-drift check-doc-test-gates check-final-definition check-concurrency-foundation check-mm-lock-model check-abi-boundary check-driver-core-model check-external-dependency-boundary \
+		check-arch-boundary \
 		check-riscv64-bringup check-loongarch64-bringup check-aarch64-bringup check-x86_64-bringup check-arm32-bringup check-riscv32-bringup check-ppc64le-bringup \
 		check-riscv64-user check-loongarch64-user check-aarch64-user check-x86_64-user check-arm32-user check-riscv32-user check-ppc64le-user \
 		smoke-riscv64 smoke-loongarch64 smoke-aarch64 smoke-x86_64 smoke-arm32 smoke-riscv32 smoke-ppc64le smoke-abi-linux smoke-network-suite smoke-proc-a20 smoke-proc-stress smoke-mm-stress smoke-vfs-stress smoke-vfs-edge smoke-sched-stress smoke-futex-stress smoke-socket-stress smoke-driver-lifecycle smoke-native-handle smoke-native-libc smoke-io-event \
+		smoke-arch-mmu-matrix \
 		FORCE regen-rootfs-overlay \
 		user_apps fs_img kernel-only dev-build contest-rv contest-la \
 		eval-dev-build-rv eval-dev-build-la \
 		qemu-disk-rv qemu-disk-la \
 		extra-img extra-user-apps run-riscv64-extra run-loongarch64-extra run-arm64-extra run-x86_64-extra run-arm32-extra run-riscv32-extra run-ppc64le-extra \
-		native-test-rv native-test-la native-test native-minimal-rv native-minimal-la native-minimal native-handle-test-rv native-handle-test-la native-handle-test native-libc-rv native-libc-la native-libc \
+		native-test-arch native-handle-test-arch native-libc-arch native-programs \
+		native-test-rv native-test-la native-test-aarch64 native-test-x86_64 native-test-arm32 native-test-rv32 native-test-ppc64le native-test \
+		native-minimal-rv native-minimal-la native-minimal \
+		native-handle-test-rv native-handle-test-la native-handle-test-aarch64 native-handle-test-x86_64 native-handle-test-arm32 native-handle-test-rv32 native-handle-test-ppc64le native-handle-test \
+		native-libc-rv native-libc-la native-libc-aarch64 native-libc-x86_64 native-libc-arm32 native-libc-rv32 native-libc-ppc64le native-libc \
 		eval eval-rv eval-la
 
 FORCE:
@@ -361,6 +390,20 @@ check-user-build: check-riscv64-user check-loongarch64-user check-aarch64-user c
 check-build-matrix: check-kernel-build check-user-build
 	@rg -q "BUILD_MATRIX_GATE_CONTRACT" docs/testing-gates.md
 	@echo "check-build-matrix: PASS"
+
+check-arch-boundary:
+	@! rg -n '#if(n?def)?[[:space:]]+(CONFIG_|__)(AARCH64|ARM|RISCV|LOONG|X86|PPC)|CONFIG_ARM32|CONFIG_AARCH64|__aarch64__|__arm__' \
+		kernel --glob '!kernel/arch/**' --glob '!kernel/platform/**' \
+		--glob '!kernel/external/**' --glob '!kernel/include/core/arch.h'
+	@rg -q "ARCH_MMU_RUNTIME_MATRIX_CONTRACT" docs/testing-gates.md
+	@rg -q "smoke-arch-mmu-matrix" Makefile docs/OS-Design.md
+	@for arch in loongarch64 x86_64 ppc64le; do \
+		if $(MAKE) -s ARCH=$$arch NOMMU=1 kernel-only >/dev/null 2>&1; then \
+			echo "check-arch-boundary: unsupported NOMMU build accepted for $$arch"; \
+			exit 1; \
+		fi; \
+	done
+	@echo "check-arch-boundary: PASS"
 
 check-abi-smoke-gate:
 	@rg -q "ABI_SMOKE_GATE_CONTRACT" docs/testing-gates.md
@@ -538,7 +581,7 @@ check-external-dependency-boundary:
 	@rg -q "EXTERNAL_USERLAND_UPGRADE_CHECKLIST" docs/external-dependencies.md
 	@rg -q "syscall smoke, shell smoke, and coreutils smoke" docs/external-dependencies.md
 	@rg -q "EXTERNAL_STATIC_LINK_REBUILD_CONTRACT" docs/external-dependencies.md
-	@rg -q "user/build/\.build-id" docs/external-dependencies.md Makefile
+	@rg -q "user/build/<arch>\\[-nommu\\]/\\.build-id" docs/external-dependencies.md
 	@rg -q "EXTERNAL_TLSE_WGET_LIMITS" docs/external-dependencies.md
 	@rg -q "TLS 1\.3" docs/external-dependencies.md
 	@! rg -n "^LWIP_SRC[[:space:]]*=" Makefile
@@ -670,6 +713,41 @@ smoke-riscv32:
 		tail -n 80 "$$log"; \
 		exit "$$status"; \
 	fi
+
+smoke-arch-mmu-matrix:
+	@set -e; \
+	for spec in arm32:0 aarch64:0 riscv64:0 riscv32:0 \
+		    arm32:1 aarch64:1 riscv64:1 riscv32:1; do \
+		status=0; \
+		arch=$${spec%%:*}; nommu=$${spec##*:}; \
+		variant="$$arch"; [ "$$nommu" = 1 ] && variant="$$variant-nommu"; \
+		build=".kernel-build/$$arch-both-dev"; \
+		[ "$$nommu" = 1 ] && build="$$build-nommu"; \
+		log=".kernel-build/smoke/$$variant-shell.log"; \
+		mkdir -p .kernel-build/smoke; \
+		echo "=== smoke-arch-mmu-matrix: $$variant ==="; \
+		$(MAKE) ARCH=$$arch ABI=both BRINGUP=0 NOMMU=$$nommu dev-build >/dev/null; \
+		case "$$arch" in \
+		arm32) qemu=qemu-system-arm; base="-machine virt -cpu cortex-a15" ;; \
+		aarch64) qemu=qemu-system-aarch64; base="-machine virt -cpu cortex-a57 -global virtio-mmio.force-legacy=false" ;; \
+		riscv64) qemu=qemu-system-riscv64; base="-machine virt -bios default -global virtio-mmio.force-legacy=false" ;; \
+		riscv32) qemu=qemu-system-riscv32; base="-machine virt -bios default -global virtio-mmio.force-legacy=false" ;; \
+		esac; \
+		{ sleep $(SMOKE_INPUT_DELAY); printf 'echo A20_MATRIX_%s_OK\n/bin/echo A20_EXTERNAL_OK\npoweroff\n' "$$variant"; } | \
+		timeout $(SMOKE_TIMEOUT) $$qemu $$base -m 1G -nographic -smp 1 \
+			-drive file="$$build/fat32.img",if=none,format=raw,id=x0 \
+			-device virtio-blk-device,bus=virtio-mmio-bus.0,drive=x0 \
+			-netdev user,id=net \
+			-device virtio-net-device,bus=virtio-mmio-bus.4,netdev=net \
+			-kernel "$$build/kernel.elf" >"$$log" 2>&1 || status=$$?; \
+		if ! grep -q "A20_MATRIX_$${variant}_OK" "$$log" || \
+		   ! grep -q "A20_EXTERNAL_OK" "$$log" || \
+		   ! grep -q "System is going down for power-off NOW" "$$log"; then \
+			echo "smoke-arch-mmu-matrix: $$variant FAIL (status=$${status:-0})"; \
+			tail -n 100 "$$log"; exit 1; \
+		fi; \
+		echo "smoke-arch-mmu-matrix: $$variant PASS"; \
+	done
 
 smoke-ppc64le:
 	$(MAKE) ARCH=ppc64le ABI=linux BRINGUP=1 kernel-only
@@ -1028,14 +1106,7 @@ _reset_obj:
 	rm -rf .kernel-build
 	$(MAKE) -C user clean
 
-_contest_build: $(KERNEL_ELF) $(USER_BUILD_STAMP)
-ifeq ($(ARCH), riscv64)
-	$(MAKE) native-test-rv
-	$(MAKE) native-handle-test-rv
-else ifeq ($(ARCH), loongarch64)
-	$(MAKE) native-test-la
-	$(MAKE) native-handle-test-la
-endif
+_contest_build: $(KERNEL_ELF) $(USER_BUILD_STAMP) $(NATIVE_BUILD_STAMP)
 	$(MAKE) ARCH=$(ARCH) ABI=$(ABI) _contest_disk
 	cp $(KERNEL_ELF) $(KERNEL_OUT)
 	@echo "  -> $(KERNEL_OUT) + $(DISK_OUT)"
@@ -1044,13 +1115,13 @@ _contest_disk: $(USER_BUILD_STAMP)
 	rm -f $(DISK_OUT)
 	$(MKFS_FAT) -C -F 32 $(DISK_OUT) 131072
 	@set -e; \
-	for f in user/build/*; do \
+	for f in $(USER_BUILD_DIR)/*; do \
 		[ -f "$$f" ] || continue; \
 		name=$$(basename "$$f"); \
 		mcopy -i $(DISK_OUT) "$$f" "::/$$name"; \
 	done
-	mcopy -o -i $(DISK_OUT) user/build/mksh ::/sh
-	mcopy -o -i $(DISK_OUT) user/build/mksh ::/bash
+	mcopy -o -i $(DISK_OUT) $(USER_BUILD_DIR)/mksh ::/sh
+	mcopy -o -i $(DISK_OUT) $(USER_BUILD_DIR)/mksh ::/bash
 	-mmd -i $(DISK_OUT) ::/etc >/dev/null 2>&1
 	-mmd -i $(DISK_OUT) ::/lib >/dev/null 2>&1
 	@[ -n "$(LIBGCC_S_ARCH)" ] && [ -f "$(LIBGCC_S_ARCH)" ] && \
@@ -1071,13 +1142,16 @@ dev-build: $(KERNEL_BIN) $(USER_BUILD_STAMP) $(FS_TEST_IMG) $(EXT4_IMG)
 user_apps: $(USER_BUILD_STAMP)
 
 .PHONY: user_apps
-USER_BUILD_FILES := $(wildcard user/build/*)
 
 .PHONY: force_user_build
 force_user_build:
 	@:
 
-$(USER_BUILD_STAMP): user/Makefile $(USER_BUILD_FILES) force_user_build | $(USER_BUILD_CHECK_DIRS)
+.PHONY: force_native_build
+force_native_build:
+	@:
+
+$(USER_BUILD_STAMP): user/Makefile force_user_build | $(USER_BUILD_CHECK_DIRS)
 	@set -e; \
 	mkdir -p $(dir $@); \
 	current=""; \
@@ -1087,55 +1161,67 @@ $(USER_BUILD_STAMP): user/Makefile $(USER_BUILD_FILES) force_user_build | $(USER
 	if [ "$$current" != "$(USER_BUILD_ID)" ]; then \
 		need_build=1; \
 		need_clean=1; \
-	elif [ ! -x user/build/init ] || [ ! -x user/build/mksh ]; then \
+	elif [ ! -x "$(USER_BUILD_DIR)/init" ] || [ ! -x "$(USER_BUILD_DIR)/mksh" ]; then \
 		need_build=1; \
-	elif find user/build -maxdepth 1 -type f ! -name '.build-id' -newer "$@" \
-		-print -quit | grep -q .; then \
-		need_build=1; \
-		need_clean=1; \
 	elif find user/Makefile $(USER_BUILD_CHECK_DIRS) \
 		\( -path '*/.git' -o -path 'user/build' -o -path 'user/external/musl/build-*' \) -prune -o \
 		-type f -newer "$@" -print -quit | grep -q .; then \
 		need_build=1; \
 	fi; \
 	if [ "$$need_build" -eq 1 ]; then \
-		if [ "$$need_clean" -eq 1 ]; then $(MAKE) -C user clean; fi; \
-		$(MAKE) -C user ARCH=$(ARCH) NOMMU=$(NOMMU) OPT="$(OPT)"; \
+		if [ "$$need_clean" -eq 1 ]; then \
+			$(MAKE) -C user ARCH=$(ARCH) NOMMU=$(NOMMU) OPT="$(OPT)" \
+				BUILD_DIR=build/$(USER_VARIANT) clean; \
+		fi; \
+		$(MAKE) -C user ARCH=$(ARCH) NOMMU=$(NOMMU) OPT="$(OPT)" \
+			BUILD_DIR=build/$(USER_VARIANT); \
 		printf '%s\n' '$(USER_BUILD_ID)' > "$@"; \
 	else \
 		echo "[USER] $(USER_BUILD_ID) up to date"; \
 	fi
 
+$(NATIVE_BUILD_STAMP): $(USER_BUILD_STAMP) force_native_build
+	@set -e; \
+	need_build=0; \
+	current=""; \
+	if [ -f "$@" ]; then current=$$(cat "$@"); fi; \
+	if [ "$$current" != "$(USER_BUILD_ID)" ]; then \
+		need_build=1; \
+	elif [ ! -x "$(NATIVE_HELLO_BIN)" ] || [ ! -x "$(NATIVE_HANDLE_BIN)" ] || \
+	     [ ! -x "$(NATIVE_LIBC_BIN)" ]; then \
+		need_build=1; \
+	elif find user/liba20rt user/liba20c user/tests -type f -newer "$@" \
+		-print -quit | grep -q .; then \
+		need_build=1; \
+	fi; \
+	if [ "$$need_build" -eq 1 ]; then \
+		$(MAKE) ARCH=$(ARCH) NOMMU=$(NOMMU) OPT="$(OPT)" native-programs; \
+		printf '%s\n' '$(USER_BUILD_ID)' > "$@"; \
+	else \
+		echo "[NATIVE] $(USER_BUILD_ID) up to date"; \
+	fi
+
 fs_img: $(FS_TEST_IMG)
 
-$(FAT32_IMG): $(USER_BUILD_STAMP)
+$(FAT32_IMG): $(USER_BUILD_STAMP) $(NATIVE_BUILD_STAMP)
 	@echo "Building FAT32 image..."
 	@mkdir -p $(BUILD_DIR)
-ifeq ($(ARCH), riscv64)
-	$(MAKE) native-test-rv
-	$(MAKE) native-handle-test-rv
-	$(MAKE) native-libc-rv
-else ifeq ($(ARCH), loongarch64)
-	$(MAKE) native-test-la
-	$(MAKE) native-handle-test-la
-	$(MAKE) native-libc-la
-endif
 	dd if=/dev/zero of=$(FAT32_IMG) bs=1M count=$(FAT32_IMAGE_MB)
 	$(MKFS_FAT) -F 32 $(FAT32_IMG)
 	@set -e; \
-	for f in user/build/*; do \
+	for f in $(USER_BUILD_DIR)/*; do \
 		[ -f "$$f" ] || continue; \
 		name=$$(basename "$$f"); \
 		mcopy -i $(FAT32_IMG) "$$f" "::/$$name"; \
 	done
-	mcopy -o -i $(FAT32_IMG) user/build/mksh ::/sh
-	mcopy -o -i $(FAT32_IMG) user/build/mksh ::/bash
+	mcopy -o -i $(FAT32_IMG) $(USER_BUILD_DIR)/mksh ::/sh
+	mcopy -o -i $(FAT32_IMG) $(USER_BUILD_DIR)/mksh ::/bash
 	-mmd -i $(FAT32_IMG) ::/etc >/dev/null 2>&1
 	-mmd -i $(FAT32_IMG) ::/lib >/dev/null 2>&1
 	-mmd -i $(FAT32_IMG) ::/musl >/dev/null 2>&1
 	-mmd -i $(FAT32_IMG) ::/musl/lib >/dev/null 2>&1
-	@[ -f user/external/musl/build-$(ARCH)/lib/libc.so ] && \
-		mcopy -o -i $(FAT32_IMG) user/external/musl/build-$(ARCH)/lib/libc.so ::/musl/lib/libc.so || true
+	@[ -f user/external/musl/build-$(USER_VARIANT)/lib/libc.so ] && \
+		mcopy -o -i $(FAT32_IMG) user/external/musl/build-$(USER_VARIANT)/lib/libc.so ::/musl/lib/libc.so || true
 	@[ -n "$(LIBGCC_S_ARCH)" ] && [ -f "$(LIBGCC_S_ARCH)" ] && \
 		mcopy -o -i $(FAT32_IMG) "$(LIBGCC_S_ARCH)" ::/lib/libgcc_s.so.1 || true
 	@printf '%s\n' $(PROTOCOLS_LINES) | mcopy -o -i $(FAT32_IMG) - ::/etc/protocols
@@ -1150,16 +1236,16 @@ $(FS_TEST_IMG): $(FAT32_IMG)
 
 ext4_img_only: $(EXT4_IMG)
 
-$(EXT4_IMG): $(USER_BUILD_STAMP)
+$(EXT4_IMG): $(USER_BUILD_STAMP) $(NATIVE_BUILD_STAMP)
 	@echo "Building ext4 image..."
 	@rm -rf $(EXT4_STAGING_DIR) && mkdir -p $(EXT4_STAGING_DIR)
 	@set -e; \
-	for f in user/build/*; do \
+	for f in $(USER_BUILD_DIR)/*; do \
 		[ -f "$$f" ] || continue; \
 		cp "$$f" "$(EXT4_STAGING_DIR)/$$(basename "$$f")"; \
 	done
-	cp user/build/mksh $(EXT4_STAGING_DIR)/sh
-	cp user/build/mksh $(EXT4_STAGING_DIR)/bash
+	cp $(USER_BUILD_DIR)/mksh $(EXT4_STAGING_DIR)/sh
+	cp $(USER_BUILD_DIR)/mksh $(EXT4_STAGING_DIR)/bash
 	printf 'Hello from ext4!\nThis file is on the ext4 filesystem.\n' > $(EXT4_STAGING_DIR)/test.txt
 	@mkdir -p $(EXT4_STAGING_DIR)/etc
 	@printf '%s\n' $(PROTOCOLS_LINES) > $(EXT4_STAGING_DIR)/etc/protocols
@@ -1424,7 +1510,41 @@ NATIVE_TEST_DIR  := user/tests
 NATIVE_LD        := user/liba20rt/a20-generic.ld
 NATIVE_CRT0_RV   := user/liba20rt/crt0_rv64.S
 NATIVE_CRT0_LA   := user/liba20rt/crt0_la64.S
+NATIVE_CRT0_AARCH64 := user/liba20rt/crt0_aarch64.S
+NATIVE_CRT0_X86_64  := user/liba20rt/crt0_x86_64.S
+NATIVE_CRT0_ARM32   := user/liba20rt/crt0_arm32.S
+NATIVE_CRT0_RV32    := user/liba20rt/crt0_rv64.S
+NATIVE_CRT0_PPC64LE := user/liba20rt/crt0_ppc64le.S
+NATIVE_CC_riscv64     := riscv64-unknown-elf-gcc
+NATIVE_CC_loongarch64 := loongarch64-linux-gnu-gcc
+NATIVE_CC_aarch64     := aarch64-linux-gnu-gcc
+NATIVE_CC_x86_64      := x86_64-linux-gnu-gcc
+NATIVE_CC_arm32       := arm-linux-gnueabihf-gcc
+NATIVE_CC_riscv32     := riscv64-unknown-elf-gcc
+NATIVE_CC_ppc64le     := powerpc64le-linux-gnu-gcc
+NATIVE_CC := $(NATIVE_CC_$(ARCH))
+NATIVE_CFLAGS_riscv64     := -march=rv64gc -mabi=lp64d -mcmodel=medany
+NATIVE_CFLAGS_loongarch64 := -march=loongarch64 -mabi=lp64d -mcmodel=normal -fno-pic
+NATIVE_CFLAGS_aarch64     := -march=armv8-a -fno-pic
+NATIVE_CFLAGS_x86_64      := -m64 -mno-red-zone -fno-pic -fno-pie
+NATIVE_CFLAGS_arm32       := -march=armv7-a -marm -mfpu=vfpv3-d16 -mfloat-abi=hard -fno-pic -fno-builtin
+NATIVE_CFLAGS_riscv32     := -march=rv32imafdc -mabi=ilp32d -mcmodel=medany -fno-builtin
+NATIVE_CFLAGS_ppc64le     := -m64 -mcpu=power8 -mabi=elfv2 -fno-pic -mno-vsx -mno-altivec
+NATIVE_CFLAGS := $(NATIVE_CFLAGS_$(ARCH))
+NATIVE_LIBS_arm32 := -Wl,--start-group -lgcc -Wl,--end-group
+NATIVE_LIBS := $(if $(NATIVE_LIBS_$(ARCH)),$(NATIVE_LIBS_$(ARCH)),-lgcc)
+NATIVE_ARCH_SRC_arm32 := user/liba20rt/a20_arm_rt.c
+NATIVE_ARCH_SRC := $(NATIVE_ARCH_SRC_$(ARCH))
+NATIVE_CRT0_riscv64     := $(NATIVE_CRT0_RV)
+NATIVE_CRT0_loongarch64 := $(NATIVE_CRT0_LA)
+NATIVE_CRT0_aarch64     := $(NATIVE_CRT0_AARCH64)
+NATIVE_CRT0_x86_64      := $(NATIVE_CRT0_X86_64)
+NATIVE_CRT0_arm32       := $(NATIVE_CRT0_ARM32)
+NATIVE_CRT0_riscv32     := $(NATIVE_CRT0_RV32)
+NATIVE_CRT0_ppc64le     := $(NATIVE_CRT0_PPC64LE)
+NATIVE_CRT0 := $(NATIVE_CRT0_$(ARCH))
 NATIVE_SDK_SRC   := user/liba20rt/a20_malloc.c
+NATIVE_COMPILER_RT_SRC := user/liba20rt/a20_compiler_rt.c
 
 NATIVE_LIBC_SRC  := \
     user/liba20c/malloc.c \
@@ -1441,19 +1561,22 @@ NATIVE_LIBC_SRC  := \
     user/liba20c/a20_errno.c
 
 define NATIVE_TEST_RECIPE
-@mkdir -p user/build
+@mkdir -p $(dir $(4))
 $(1) -ffreestanding -nostdlib -static \
     $(2) \
     -Iuser -Iuser/liba20rt \
     -T$(NATIVE_LD) \
-    $(3) \
-    $(NATIVE_SDK_SRC) \
-    user/tests/test_native_hello.c \
-    -o $(4)
+	    $(3) \
+	    $(NATIVE_SDK_SRC) \
+	    $(NATIVE_COMPILER_RT_SRC) \
+	    $(NATIVE_ARCH_SRC) \
+	    user/tests/test_native_hello.c \
+	    $(NATIVE_LIBS) \
+	    -o $(4)
 endef
 
 define NATIVE_MINIMAL_RECIPE
-@mkdir -p user/build
+@mkdir -p $(dir $(4))
 $(1) -ffreestanding -nostdlib -static \
     $(2) \
     -Iuser -Iuser/liba20rt \
@@ -1463,64 +1586,117 @@ $(1) -ffreestanding -nostdlib -static \
     -o $(4)
 endef
 
+$(NATIVE_HELLO_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) user/tests/test_native_hello.c \
+		user/liba20rt/a20-generic.ld user/liba20rt/crt0_a20.h user/liba20rt/a20_syscall.h
+	$(call NATIVE_TEST_RECIPE,$(NATIVE_CC),$(NATIVE_CFLAGS),$(NATIVE_CRT0),$@)
+
+native-test-arch: $(NATIVE_HELLO_BIN)
+
 native-test-rv:
-	$(call NATIVE_TEST_RECIPE,riscv64-unknown-elf-gcc,-march=rv64gc -mabi=lp64d -mcmodel=medany,$(NATIVE_CRT0_RV),user/build/native-hello-rv)
-
+	$(MAKE) ARCH=riscv64 NOMMU=$(NOMMU) native-test-arch
 native-test-la:
-	$(call NATIVE_TEST_RECIPE,loongarch64-linux-gnu-gcc,-march=loongarch64 -mabi=lp64d -mcmodel=normal -fno-pic,$(NATIVE_CRT0_LA),user/build/native-hello-la)
+	$(MAKE) ARCH=loongarch64 NOMMU=$(NOMMU) native-test-arch
+native-test-aarch64:
+	$(MAKE) ARCH=aarch64 NOMMU=$(NOMMU) native-test-arch
+native-test-x86_64:
+	$(MAKE) ARCH=x86_64 NOMMU=$(NOMMU) native-test-arch
+native-test-arm32:
+	$(MAKE) ARCH=arm32 NOMMU=$(NOMMU) native-test-arch
+native-test-rv32:
+	$(MAKE) ARCH=riscv32 NOMMU=$(NOMMU) native-test-arch
+native-test-ppc64le:
+	$(MAKE) ARCH=ppc64le NOMMU=$(NOMMU) native-test-arch
 
-native-test: native-test-rv native-test-la
+native-test: native-test-rv native-test-la native-test-aarch64 native-test-x86_64 native-test-arm32 native-test-rv32 native-test-ppc64le
 
 native-minimal-rv:
-	$(call NATIVE_MINIMAL_RECIPE,riscv64-unknown-elf-gcc,-march=rv64gc -mabi=lp64d -mcmodel=medany,$(NATIVE_CRT0_RV),user/build/native-minimal-rv)
-	@file user/build/native-minimal-rv
+	$(call NATIVE_MINIMAL_RECIPE,riscv64-unknown-elf-gcc,-march=rv64gc -mabi=lp64d -mcmodel=medany,$(NATIVE_CRT0_RV),user/build/riscv64/native-minimal-rv)
+	@file user/build/riscv64/native-minimal-rv
 
 native-minimal-la:
-	$(call NATIVE_MINIMAL_RECIPE,loongarch64-linux-gnu-gcc,-march=loongarch64 -mabi=lp64d -mcmodel=normal -fno-pic,$(NATIVE_CRT0_LA),user/build/native-minimal-la)
-	@file user/build/native-minimal-la
+	$(call NATIVE_MINIMAL_RECIPE,loongarch64-linux-gnu-gcc,-march=loongarch64 -mabi=lp64d -mcmodel=normal -fno-pic,$(NATIVE_CRT0_LA),user/build/loongarch64/native-minimal-la)
+	@file user/build/loongarch64/native-minimal-la
 
 native-minimal: native-minimal-rv native-minimal-la
 
 define NATIVE_HANDLE_TEST_RECIPE
-@mkdir -p user/build
+@mkdir -p $(dir $(4))
 $(1) -ffreestanding -nostdlib -static \
     $(2) \
     -Iuser -Iuser/liba20rt \
     -T$(NATIVE_LD) \
-    $(3) \
-    $(NATIVE_SDK_SRC) \
-    user/tests/test_native_handle.c \
-    -o $(4)
+	    $(3) \
+	    $(NATIVE_SDK_SRC) \
+	    $(NATIVE_COMPILER_RT_SRC) \
+	    $(NATIVE_ARCH_SRC) \
+	    user/tests/test_native_handle.c \
+	    $(NATIVE_LIBS) \
+	    -o $(4)
 endef
 
+$(NATIVE_HANDLE_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) user/tests/test_native_handle.c \
+		user/liba20rt/a20-generic.ld user/liba20rt/crt0_a20.h user/liba20rt/a20_syscall.h
+	$(call NATIVE_HANDLE_TEST_RECIPE,$(NATIVE_CC),$(NATIVE_CFLAGS),$(NATIVE_CRT0),$@)
+
+native-handle-test-arch: $(NATIVE_HANDLE_BIN)
+
 native-handle-test-rv:
-	$(call NATIVE_HANDLE_TEST_RECIPE,riscv64-unknown-elf-gcc,-march=rv64gc -mabi=lp64d -mcmodel=medany,$(NATIVE_CRT0_RV),user/build/native-handle-rv)
-
+	$(MAKE) ARCH=riscv64 NOMMU=$(NOMMU) native-handle-test-arch
 native-handle-test-la:
-	$(call NATIVE_HANDLE_TEST_RECIPE,loongarch64-linux-gnu-gcc,-march=loongarch64 -mabi=lp64d -mcmodel=normal -fno-pic,$(NATIVE_CRT0_LA),user/build/native-handle-la)
+	$(MAKE) ARCH=loongarch64 NOMMU=$(NOMMU) native-handle-test-arch
+native-handle-test-aarch64:
+	$(MAKE) ARCH=aarch64 NOMMU=$(NOMMU) native-handle-test-arch
+native-handle-test-x86_64:
+	$(MAKE) ARCH=x86_64 NOMMU=$(NOMMU) native-handle-test-arch
+native-handle-test-arm32:
+	$(MAKE) ARCH=arm32 NOMMU=$(NOMMU) native-handle-test-arch
+native-handle-test-rv32:
+	$(MAKE) ARCH=riscv32 NOMMU=$(NOMMU) native-handle-test-arch
+native-handle-test-ppc64le:
+	$(MAKE) ARCH=ppc64le NOMMU=$(NOMMU) native-handle-test-arch
 
-native-handle-test: native-handle-test-rv native-handle-test-la
+native-handle-test: native-handle-test-rv native-handle-test-la native-handle-test-aarch64 native-handle-test-x86_64 native-handle-test-arm32 native-handle-test-rv32 native-handle-test-ppc64le
 
 define NATIVE_LIBC_RECIPE
-@mkdir -p user/build
+@mkdir -p $(dir $(4))
 $(1) -ffreestanding -nostdlib -static \
     $(2) \
     -Iuser -Iuser/liba20rt -Iuser/liba20c/include \
     -T$(NATIVE_LD) \
     $(3) \
-    $(NATIVE_SDK_SRC) \
-    $(NATIVE_LIBC_SRC) \
-    user/tests/test_liba20c.c \
-    -o $(4)
+	    $(NATIVE_SDK_SRC) \
+	    $(NATIVE_LIBC_SRC) \
+	    $(NATIVE_ARCH_SRC) \
+	    user/tests/test_liba20c.c \
+	    $(NATIVE_LIBS) \
+	    -o $(4)
 endef
 
+$(NATIVE_LIBC_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_LIBC_SRC) $(NATIVE_ARCH_SRC) \
+		user/tests/test_liba20c.c user/liba20rt/a20-generic.ld \
+		user/liba20rt/crt0_a20.h user/liba20rt/a20_syscall.h
+	$(call NATIVE_LIBC_RECIPE,$(NATIVE_CC),$(NATIVE_CFLAGS),$(NATIVE_CRT0),$@)
+
+native-libc-arch: $(NATIVE_LIBC_BIN)
+
 native-libc-rv:
-	$(call NATIVE_LIBC_RECIPE,riscv64-unknown-elf-gcc,-march=rv64gc -mabi=lp64d -mcmodel=medany,$(NATIVE_CRT0_RV),user/build/native-libc-rv)
-
+	$(MAKE) ARCH=riscv64 NOMMU=$(NOMMU) native-libc-arch
 native-libc-la:
-	$(call NATIVE_LIBC_RECIPE,loongarch64-linux-gnu-gcc,-march=loongarch64 -mabi=lp64d -mcmodel=normal -fno-pic,$(NATIVE_CRT0_LA),user/build/native-libc-la)
+	$(MAKE) ARCH=loongarch64 NOMMU=$(NOMMU) native-libc-arch
+native-libc-aarch64:
+	$(MAKE) ARCH=aarch64 NOMMU=$(NOMMU) native-libc-arch
+native-libc-x86_64:
+	$(MAKE) ARCH=x86_64 NOMMU=$(NOMMU) native-libc-arch
+native-libc-arm32:
+	$(MAKE) ARCH=arm32 NOMMU=$(NOMMU) native-libc-arch
+native-libc-rv32:
+	$(MAKE) ARCH=riscv32 NOMMU=$(NOMMU) native-libc-arch
+native-libc-ppc64le:
+	$(MAKE) ARCH=ppc64le NOMMU=$(NOMMU) native-libc-arch
 
-native-libc: native-libc-rv native-libc-la
+native-libc: native-libc-rv native-libc-la native-libc-aarch64 native-libc-x86_64 native-libc-arm32 native-libc-rv32 native-libc-ppc64le
+
+native-programs: $(NATIVE_OUTPUTS)
 
 smoke-native-libc:
 	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build

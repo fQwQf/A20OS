@@ -71,26 +71,31 @@ pte_t *pt_create(void) {
     return (pte_t *)frame_alloc();
 }
 
-// 递归销毁页表及其子页表
-void pt_destroy(pt_root_t *pgdir) {
-    if (!pgdir) return;
-    for (int i = 0; i < ARCH_PT_ENTRIES; i++) {
-        uint64_t pte = pgdir[i];
+static void pt_destroy_level(pte_t *table, int level) {
+    if (!table) return;
+    int entries = arch_pt_level_entries(level);
+    for (int i = 0; i < entries; i++) {
+        uint64_t pte = table[i];
         if ((pte & PTE_V) && !arch_pte_is_leaf(pte)) {
             paddr_t next_pa = arch_pte_addr(pte);
             pfn_t next_pfn = phys_to_pfn(next_pa);
             if ((next_pa & (PAGE_SIZE - 1)) || !pfn_valid(next_pfn)) {
                 kerr("pt_destroy: skip invalid non-leaf pte[%d]=0x%lx pa=0x%lx\n",
                      i, (unsigned long)pte, (unsigned long)next_pa);
-                pgdir[i] = 0;
+                table[i] = 0;
                 continue;
             }
             pte_t *next = arch_pte_to_ptr(pte);
-            pt_destroy(next);
-            pgdir[i] = 0;
+            pt_destroy_level(next, level - 1);
+            table[i] = 0;
         }
     }
-    frame_free(pgdir);
+    frame_free(table);
+}
+
+// 递归销毁页表及其子页表
+void pt_destroy(pt_root_t *pgdir) {
+    pt_destroy_level(pgdir, ARCH_PT_ROOT_LEVEL);
 }
 
 // 遍历页表结构，查找或创建指定虚拟地址对应的 PTE
@@ -270,8 +275,9 @@ int pt_map_huge(pt_root_t *pgdir, vaddr_t va, paddr_t pa, pte_t flags) {
     return 0;
 }
 
-static int pt_table_empty(pte_t *table) {
-    for (int i = 0; i < ARCH_PT_ENTRIES; i++) {
+static int pt_table_empty(pte_t *table, int level) {
+    int entries = arch_pt_level_entries(level);
+    for (int i = 0; i < entries; i++) {
         if (table[i] & PTE_V)
             return 0;
     }
@@ -304,7 +310,7 @@ int pt_unmap(pt_root_t *pgdir, vaddr_t va) {
     for (int level = 0; level < ARCH_PT_ROOT_LEVEL; level++) {
         pte_t *child = path[level];
         pte_t *parent = path[level + 1];
-        if (!pt_table_empty(child))
+        if (!pt_table_empty(child, level))
             break;
         parent[idx_path[level + 1]] = 0;
         frame_free(child);
@@ -335,7 +341,7 @@ int pt_unmap_leaf(pt_root_t *pgdir, vaddr_t va, paddr_t *pa_out,
             for (int l = level; l < ARCH_PT_ROOT_LEVEL; l++) {
                 pte_t *child = path[l];
                 pte_t *parent = path[l + 1];
-                if (!pt_table_empty(child))
+                if (!pt_table_empty(child, l))
                     break;
                 parent[idx_path[l + 1]] = 0;
                 frame_free(child);
@@ -389,7 +395,8 @@ static pte_t *pt_clone_level(pte_t *src, int level) {
     pte_t *dst = (pte_t *)frame_alloc();
     if (!dst) return NULL;
 
-    for (int i = 0; i < ARCH_PT_ENTRIES; i++) {
+    int entries = arch_pt_level_entries(level);
+    for (int i = 0; i < entries; i++) {
         pte_t pte = src[i];
         if (!(pte & PTE_V)) continue;
 
@@ -431,7 +438,8 @@ static void pt_destroy_user_recursive(pte_t *table, int level) {
     if (!table) return;
     /* Only user half (0..255) lives at root; kernel half is shared
      * and must not be freed.  Lower levels may span all 512 entries. */
-    int limit = (level == ARCH_PT_ROOT_LEVEL) ? ARCH_PT_USER_END : ARCH_PT_ENTRIES;
+    int limit = (level == ARCH_PT_ROOT_LEVEL) ?
+        ARCH_PT_USER_END : arch_pt_level_entries(level);
     for (int i = 0; i < limit; i++) {
         pte_t pte = table[i];
         if (!(pte & PTE_V)) continue;

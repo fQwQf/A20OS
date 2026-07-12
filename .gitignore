@@ -5,6 +5,7 @@
 *.bin
 *.elf
 user/build/
+user/external/musl/build-*-nommu/
 .clangd
 .vscode/
 kernel-rv

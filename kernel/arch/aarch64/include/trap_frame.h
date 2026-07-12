@@ -146,7 +146,10 @@ static inline task_context_t *arch_task_context_base(void *kstack_base,
 }
 
 static inline uint64_t arch_task_kernel_status(void) {
-    return SSTATUS_SIE;
+    /* New kernel threads start with IRQ masked until their entry function is
+     * running on the real stack.  User return restores its own interrupt
+     * state before entering EL0. */
+    return 1UL << 7;
 }
 
 static inline uint64_t arch_user_initial_status(void) {

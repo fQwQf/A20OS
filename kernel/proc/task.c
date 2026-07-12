@@ -187,6 +187,20 @@ void proc_task_release_resources(task_t *t)
         t->scratch_size = 0;
     }
 
+#ifdef CONFIG_NOMMU
+    /* Free any pending vfork snapshots (in case process is killed before
+     * proc_complete_vfork_locked restores and frees them). */
+    if (t->nommu_vfork_snaps) {
+        for (int i = 0; i < t->nommu_num_vfork_snapshots; i++) {
+            if (t->nommu_vfork_snaps[i].data)
+                kfree(t->nommu_vfork_snaps[i].data);
+        }
+        kfree(t->nommu_vfork_snaps);
+        t->nommu_vfork_snaps = NULL;
+    }
+    t->nommu_num_vfork_snapshots = 0;
+#endif
+
     if (t->kstack) {
         kfree(t->kstack_base);
         t->kstack = 0;
