@@ -104,35 +104,17 @@ int64_t syscall_dispatch(trap_context_t *ctx)
         .ctx = ctx,
     };
 
-    task_t *dbg_cur = proc_current();
     arch_syscall_adjust_args(&args);
     num = args.nr;
 
     int64_t ret = -ENOSYS;
     int context_restored = 0;
     const linux_syscall_entry_t *entry = linux_syscall_lookup(args.nr);
-    dbg_cur = proc_current();
-    if (dbg_cur && dbg_cur->pid == 3)
-        printf("[PID3] nr=%lu pc=0x%lx lr=0x%lx sp=0x%lx a0=0x%lx a1=0x%lx\n",
-               (unsigned long)args.nr, (unsigned long)TRAP_CTX_EPC(ctx),
-               (unsigned long)TRAP_CTX_RA(ctx), (unsigned long)TRAP_CTX_SP(ctx),
-               (unsigned long)TRAP_CTX_ARG0(ctx), (unsigned long)TRAP_CTX_ARG1(ctx));
+
     if (entry) {
         ret = entry->handler(&args);
         context_restored = entry->restores_context;
-        if (dbg_cur && dbg_cur->pid == 3)
-            printf("[PID3R] nr=%lu ret=%ld ctxret=0x%lx pc=0x%lx\n",
-                   (unsigned long)args.nr, (long)ret,
-                   (unsigned long)TRAP_CTX_RET(ctx),
-                   (unsigned long)TRAP_CTX_EPC(ctx));
-        if (dbg_cur && dbg_cur->pid == 3 && args.nr == 135) {
-            uint32_t words[40];
-            if (copy_from_user(words, (void *)(uintptr_t)(TRAP_CTX_SP(ctx) - 4), sizeof(words)) >= 0) {
-                printf("[PID3STK] base=0x%lx w0=0x%x w1=0x%x w2=0x%x w35=0x%x w36=0x%x w37=0x%x w38=0x%x w39=0x%x\n",
-                       (unsigned long)(TRAP_CTX_SP(ctx) - 4), words[0], words[1], words[2],
-                       words[35], words[36], words[37], words[38], words[39]);
-            }
-        }
+
     } else {
         if (args.nr < 300)
             kdebug("[SYSCALL] Unimplemented: %lu\n", (unsigned long)args.nr);
@@ -177,12 +159,10 @@ int64_t syscall_dispatch(trap_context_t *ctx)
     proc_check_exit_pending();
     signal_deliver_user(ctx);
     proc_check_exit_pending();
-    if (!context_restored && proc_current() && (++syscall_resched_counter & 0x1f) == 0)
-#ifndef CONFIG_ARM32
+    if (!context_restored && proc_current() &&
+        arch_syscall_resched_allowed() &&
+        (++syscall_resched_counter & 0x1f) == 0)
         proc_yield();
-#else
-        ;
-#endif
     proc_check_exit_pending();
     if (args.nr == SYS_sigsuspend)
     {

@@ -148,6 +148,8 @@
 
 - 本环境未安装 `aarch64-linux-gnu-gcc`，因此无法在这里运行 `check-aarch64-bringup`、`check-aarch64-user` 和 `smoke-aarch64`。
 - 本环境未安装 `qemu-system-x86_64`，因此无法运行 `smoke-x86_64`，但 x86_64 内核构建（`ARCH=x86_64 ABI=both BRINGUP=1 kernel-only`）可以成功。
-- 所有其他静态检查门禁均通过：`check-abi-boundary`、`check-mm-lock-model`、`check-vfs-abstraction`、`check-driver-core-model`、`check-io-progress-model`、`check-external-dependency-boundary`、`check-doc-test-gates`、`check-final-definition`、`check-concurrency-foundation`、`check-abi-smoke-gate`、`check-doc-drift`。
+- 架构边界与本次相关静态门禁通过：`check-arch-boundary`、`check-mm-lock-model`。`check-abi-boundary` 当前因仓库未包含 Makefile 引用的 `scripts/gen_linux_syscall_coverage.py` 而无法执行，这一缺失与本次架构修复无关。
 - 在本 host 上成功运行的 smoke 测试（riscv64/loongarch64 bringup 在 bringup 模式下按设计 timeout）：`smoke-riscv64`、`smoke-loongarch64`、`smoke-abi-linux`、`smoke-proc-a20`、`smoke-vfs-stress`、`smoke-mm-stress`、`smoke-proc-stress`、`smoke-sched-stress`、`smoke-futex-stress`、`smoke-native-handle`。
-- 并发运行多个 smoke 目标（例如 `make -j16 smoke-mm-stress smoke-sched-stress`）会竞争 `user/build/`，结果不可靠；为获得确定性结果，应串行运行。
+- `smoke-arch-mmu-matrix` 已在 QEMU 中验证 `arm32`、`aarch64`、`riscv64`、`riscv32` 的 MMU/NOMMU 八种组合均可进入 shell、执行 shell builtin 和外部程序并正常关机。
+- NOMMU 支持集合已显式限制为上述四个架构；LoongArch64、x86_64、PPC64LE 等未实现组合会在构建入口报错，不再暴露伪支持配置。
+- 用户态构建产物已按 `user/build/<arch>[-nommu]/` 隔离；不同架构/MMU 组合可并行构建。仍应避免并发 smoke 复用相同 QEMU 端口等外部资源。
