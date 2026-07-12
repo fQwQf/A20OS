@@ -8,7 +8,7 @@
 #include "proc/proc.h"
 #include "proc/signal.h"
 
-#define PIPE_DEFAULT_SIZE (256 * PIPE_BUF_SIZE)
+#define PIPE_DEFAULT_SIZE (16 * PIPE_BUF_SIZE)
 
 typedef struct pipe_buf {
     spinlock_t      lock;
