@@ -97,6 +97,8 @@ make ARCH=loongarch64 BOARD=qemu-virt-loongarch64 run
 
 `make check-kernel-build` 与 `make check-user-build` 负责验证四架构 bringup 构建是否通过。
 
+NOMMU 是按架构声明的能力，而不是任意 `ARCH` 都可搭配的全局开关。当前有效集合为 `arm32`、`aarch64`、`riscv32`、`riscv64`；顶层构建会拒绝 LoongArch64、x86_64、PPC64LE 等尚未实现 NOMMU 启动与用户态契约的组合。
+
 ---
 
 ## 4. Native ABI 设计
@@ -390,6 +392,7 @@ A20OS 建立了一套可重复执行的测试门禁体系，覆盖并发、内�
 | ABI 边界 | `make check-abi-boundary` |
 | 驱动核心 | `make check-driver-core-model` |
 | 外部依赖边界 | `make check-external-dependency-boundary` |
+| 架构边界 | `make check-arch-boundary` |
 
 ### 11.2 运行时压力测试
 
@@ -397,6 +400,7 @@ A20OS 建立了一套可重复执行的测试门禁体系，覆盖并发、内�
 |----------|----------|
 | 多架构内核构建 | `make check-kernel-build` |
 | 用户态构建 | `make check-user-build` |
+| 架构 / MMU 运行矩阵 | `make smoke-arch-mmu-matrix` |
 | Linux ABI smoke | `make smoke-riscv64`、`make smoke-abi-linux` |
 | 调度并发压力 | `make smoke-sched-stress` |
 | Futex 并发压力 | `make smoke-futex-stress` |

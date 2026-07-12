@@ -13,8 +13,11 @@
 | ABI 边界 | `make check-abi-boundary` |
 | 驱动核心 | `make check-driver-core-model` |
 | 外部依赖 | `make check-external-dependency-boundary` |
+| 架构边界 | `make check-arch-boundary` |
 
 `BUILD_MATRIX_GATE_CONTRACT`：bringup 构建覆盖 `riscv64`、`loongarch64`、`aarch64` 和 `x86_64`；用户态构建通过 `make check-user-build` 覆盖同一组架构。
+
+`ARCH_MMU_RUNTIME_MATRIX_CONTRACT`：当前 NOMMU 支持集合明确限定为 `arm32`、`aarch64`、`riscv64`、`riscv32`；其他架构在构建入口即被拒绝，不再形成可链接但不可运行的伪配置。`make smoke-arch-mmu-matrix` 在 QEMU 中覆盖这四个架构的 MMU 与 NOMMU 八种有效组合。每个组合必须进入交互式 shell，分别执行 shell builtin 与外部程序，并通过用户态 `poweroff` 正常关机。架构差异通过 `kernel/arch/<arch>/` 提供的 hook/capability 表达；`make check-arch-boundary` 禁止通用内核代码直接按具体架构条件编译。
 
 `ABI_SMOKE_GATE_CONTRACT`：Linux ABI smoke 通过 `smoke-abi-linux` 运行 `syscall_smoke` 和用户态命令；Native ABI 覆盖包括 `native-minimal`、`native-test`、`user/tests/test_liba20c.c`，以及用于 handle dup/transfer 的 `make smoke-native-handle` 运行时覆盖。
 

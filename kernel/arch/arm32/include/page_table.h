@@ -19,6 +19,15 @@
 #define ARCH_PT_ENTRIES    4096
 #define ARCH_PT_USER_START 0
 #define ARCH_PT_USER_END   0x700 /* VA 0x00000000 .. 0x70000000 */
+#define ARCH_PT_LEVEL_ENTRIES(level) \
+    ((level) == ARCH_PT_ROOT_LEVEL ? ARCH_PT_ENTRIES : 256)
+
+/*
+ * The short-descriptor setup currently keeps domains in manager mode, so AP
+ * write protection cannot provide reliable copy-on-write faults.  Fork must
+ * therefore give private mappings distinct physical pages.
+ */
+#define ARCH_FORK_REQUIRES_PRIVATE_COPY 1
 
 /* Match the ARM32 section size (1 MiB) to the generic huge-page helpers. */
 #undef  PMD_SHIFT

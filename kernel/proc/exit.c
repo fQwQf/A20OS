@@ -11,6 +11,7 @@
 #include "mm/mm.h"
 #include "mm/vm.h"
 #include "core/panic.h"
+#include "core/string.h"
 #include "sys/futex.h"
 #include "abi/native/ipc_internal.h"
 #include "sys/usercopy.h"
@@ -51,6 +52,25 @@ static void proc_complete_vfork_locked(task_t *child)
 
     child->clone_flags &= ~CLONE_VFORK;
     task_t *parent = child->parent;
+
+#ifdef CONFIG_NOMMU
+    if (parent && parent->nommu_vfork_snaps && parent->nommu_num_vfork_snapshots > 0) {
+        int n = parent->nommu_num_vfork_snapshots;
+        for (int i = 0; i < n; i++) {
+            void *dst  = parent->nommu_vfork_snaps[i].dst;
+            void *src  = parent->nommu_vfork_snaps[i].data;
+            size_t sz  = parent->nommu_vfork_snaps[i].size;
+            if (dst && src && sz > 0)
+                memcpy(dst, src, sz);
+            kfree(src);
+            parent->nommu_vfork_snaps[i].data = NULL;
+        }
+        kfree(parent->nommu_vfork_snaps);
+        parent->nommu_vfork_snaps = NULL;
+        parent->nommu_num_vfork_snapshots = 0;
+    }
+#endif
+
     if (parent && parent->state == PROC_BLOCKED) {
         parent->vfork_waiting = 0;
         parent->state = PROC_READY;

@@ -9,13 +9,15 @@ ifeq ($(filter $(ARCH),$(SUPPORTED_ARCHES)),)
 $(error Unsupported ARCH '$(ARCH)'; expected one of: $(SUPPORTED_ARCHES))
 endif
 
-BUILD_DIR := build
-OBJ_DIR := $(BUILD_DIR)/obj/$(ARCH)
+MUSL_VARIANT := $(ARCH)$(if $(filter 1,$(NOMMU)),-nommu,)
+BUILD_DIR ?= build/$(MUSL_VARIANT)
+OBJ_DIR := $(BUILD_DIR)/obj
 MUSL_BASE := $(CURDIR)/external/musl
-MUSL_BUILD := $(MUSL_BASE)/build-$(ARCH)
+MUSL_BUILD := $(MUSL_BASE)/build-$(MUSL_VARIANT)
 MUSL_CRT := $(MUSL_BUILD)/lib
 
-ARCH_STAMP := $(BUILD_DIR)/.arch-stamp
+ARCH_STAMP := $(BUILD_DIR)/.build-id
+ARCH_BUILD_ID := $(ARCH):$(NOMMU)
 
 .PHONY: arch-stamp-refresh
 arch-stamp-refresh:
@@ -23,14 +25,12 @@ arch-stamp-refresh:
 
 $(ARCH_STAMP): arch-stamp-refresh Makefile
 	@mkdir -p $(BUILD_DIR)
-	@printf '%s\n' '$(ARCH)' > $@.tmp
+	@printf '%s\n' '$(ARCH_BUILD_ID)' > $@.tmp
 	@if [ -f $@ ] && diff -q $@ $@.tmp >/dev/null 2>&1; then \
 		rm -f $@.tmp; \
 	else \
 		mv $@.tmp $@; \
-		echo "[USER] arch changed to $(ARCH), cleaning $(BUILD_DIR)"; \
-		if [ "$(NOMMU)" = "1" ] && [ "$(ARCH)" = "riscv32" ]; then :; \
-		else find $(BUILD_DIR) -mindepth 1 ! -name '.arch-stamp' -exec rm -rf {} +; fi; \
+		echo "[USER] initialized build variant $(ARCH_BUILD_ID) in $(BUILD_DIR)"; \
 	fi
 
 CROSS_COMPILE_riscv64 := riscv64-unknown-elf-
@@ -86,6 +86,12 @@ MUSL_CONFIG_CFLAGS_arm32 := $(OPT) -march=armv7-a -marm -mfpu=vfpv3-d16 -mfloat-
 MUSL_CONFIG_CFLAGS_riscv32 := $(OPT) -march=rv32imafdc -mabi=ilp32d -mcmodel=medany -static
 MUSL_CONFIG_CFLAGS_ppc64le := $(OPT) -m64 -mcpu=power8 -mtune=power8 -mlong-double-64 -fno-pic -static -mno-vsx -mno-altivec -fno-tree-vectorize
 MUSL_CONFIG_CFLAGS := $(MUSL_CONFIG_CFLAGS_$(ARCH))
+
+ifeq ($(NOMMU),1)
+ifeq ($(ARCH),aarch64)
+TLSE_NOMMU_CFLAGS := -mgeneral-regs-only
+endif
+endif
 
 CC := $(CROSS_COMPILE)gcc
 LD := $(CROSS_COMPILE)ld
@@ -209,7 +215,7 @@ TLSE_ARCH_CFLAGS := $(TLSE_ARCH_CFLAGS_$(ARCH))
 TLSE_BASE_CFLAGS := $(filter-out -O0 -O1 -O2 -O3 -Os -Oz,$(CFLAGS))
 TLSE_OPT_aarch64 := -O0
 TLSE_OPT := $(if $(TLSE_OPT_$(ARCH)),$(TLSE_OPT_$(ARCH)),-O1)
-TLSE_CFLAGS := $(TLSE_BASE_CFLAGS) $(TLSE_OPT) $(TLSE_ARCH_CFLAGS) -fno-strict-aliasing -fno-strict-overflow -fwrapv \
+TLSE_CFLAGS := $(TLSE_BASE_CFLAGS) $(TLSE_OPT) $(TLSE_ARCH_CFLAGS) $(TLSE_NOMMU_CFLAGS) -fno-strict-aliasing -fno-strict-overflow -fwrapv \
                 -I$(TLSE_DIR) -fsigned-char \
                 -DTLS_AMALGAMATION \
                 -DNO_SSL_COMPATIBLE_INTERFACE \
@@ -552,7 +558,7 @@ musl_prepare:
 		stale=1; \
 	fi; \
 	if [ "$$missing" -ne 0 ] || [ "$$stale" -ne 0 ]; then \
-		echo "[MUSL] build-$(ARCH) stale or missing, rebuilding..."; \
+		echo "[MUSL] build-$(MUSL_VARIANT) stale or missing, rebuilding..."; \
 		rm -rf "$(MUSL_BUILD)"; \
 		mkdir -p "$(MUSL_BUILD)"; \
 		cd "$(MUSL_BUILD)" && env -u ARCH -u MAKEFLAGS sh ../configure \
@@ -565,7 +571,7 @@ musl_prepare:
 			LDFLAGS='$(MUSL_CONFIG_LDFLAGS)'; \
 		env -u ARCH -u MAKEFLAGS $(MAKE) -C "$(MUSL_BUILD)" -j$$(nproc); \
 	else \
-		echo "[MUSL] build-$(ARCH) ready"; \
+		echo "[MUSL] build-$(MUSL_VARIANT) ready"; \
 	fi
 
 $(BUILD_DIR)/mksh: $(MKSH_OBJS) | build_dir musl_prepare
@@ -675,11 +681,9 @@ clean:
 		sleep 0.1; \
 	done
 	@test ! -e $(BUILD_DIR)
-	rm -f $(MKSH_DIR)/*.o lib/*.o
-	find $(MUSL_BASE) \( -path '$(MUSL_BASE)/build-*/*.lo' -o -path '$(MUSL_BASE)/build-*/lib/libc.so' \) -delete
 
 distclean: clean
-	rm -rf $(MUSL_BASE)/build-riscv64 $(MUSL_BASE)/build-loongarch64 $(MUSL_BASE)/build-aarch64 $(MUSL_BASE)/build-x86_64
+	rm -rf $(MUSL_BASE)/build-*
 
 .PHONY: all clean distclean musl_prepare
 .PRECIOUS: $(USER_INTERMEDIATE_TARGETS)

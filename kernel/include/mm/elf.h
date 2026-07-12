@@ -2,6 +2,7 @@
 #define _ELF_H
 
 #include "core/types.h"
+#include "mm/vm.h"
 
 /* ============================================================
  * ELF64 Loader
@@ -143,7 +144,9 @@ typedef struct elf_load_info {
     struct vm_area *mmap;
     int       is_native_abi;
 #ifdef CONFIG_NOMMU
-    void     *nommu_allocs[32];
+    void     *nommu_allocs[NOMMU_ALLOC_MAX];
+    size_t    nommu_alloc_sizes[NOMMU_ALLOC_MAX];
+    uint8_t   nommu_alloc_types[NOMMU_ALLOC_MAX];
     int       num_nommu_allocs;
 #endif
 } elf_load_info_t;

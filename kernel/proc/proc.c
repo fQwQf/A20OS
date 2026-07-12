@@ -387,7 +387,8 @@ int proc_alloc_user_image(uintptr_t entry, vaddr_t sp, pt_root_t *pgdir,
                           vaddr_t stack_top, size_t total_vm,
                           vaddr_t tls_tp
 #ifdef CONFIG_NOMMU
-                          , void **nommu_allocs, int num_nommu_allocs
+                          , void **nommu_allocs, const size_t *nommu_alloc_sizes,
+                          const uint8_t *nommu_alloc_types, int num_nommu_allocs
 #endif
                           ) {
     task_t *t = proc_alloc_task_slot();
@@ -444,9 +445,15 @@ int proc_alloc_user_image(uintptr_t entry, vaddr_t sp, pt_root_t *pgdir,
         mm->mmap        = mmap;
 #ifdef CONFIG_NOMMU
         if (nommu_allocs && num_nommu_allocs > 0) {
-            mm->num_nommu_allocs = num_nommu_allocs < 32 ? num_nommu_allocs : 32;
-            for (int i = 0; i < mm->num_nommu_allocs; i++)
+            mm->num_nommu_allocs = num_nommu_allocs < NOMMU_ALLOC_MAX ?
+                num_nommu_allocs : NOMMU_ALLOC_MAX;
+            for (int i = 0; i < mm->num_nommu_allocs; i++) {
                 mm->nommu_allocs[i] = nommu_allocs[i];
+                mm->nommu_alloc_sizes[i] = nommu_alloc_sizes ?
+                    nommu_alloc_sizes[i] : 0;
+                mm->nommu_alloc_types[i] = nommu_alloc_types ?
+                    nommu_alloc_types[i] : NOMMU_ALLOC_IMAGE;
+            }
         }
 #endif
         ktrace_mm("[MMDBG] mm=%p lock=%p\n", (void *)mm, (void *)&mm->lock);
@@ -463,20 +470,11 @@ int proc_alloc_user_image(uintptr_t entry, vaddr_t sp, pt_root_t *pgdir,
     memset(ctx, 0, sizeof(*ctx));
     ctx->ra   = (uintptr_t)user_trap_return;
     ctx->tp   = (uintptr_t)t;
-#ifdef CONFIG_ARM32
-    ctx->user_tp = (uint32_t)tls_tp;
-#endif
+    arch_task_context_set_user_tp(ctx, tls_tp);
     TASK_CTX_PAGE_TABLE(ctx) = pgdir ? arch_make_addr_space_token(pgdir) : 0;
     TASK_CTX_STATUS(ctx) = arch_user_initial_status();
     arch_task_context_set_initial_sp(ctx, trap, ks_top);
     t->kstack = (uintptr_t)ctx;
-
-#ifdef __aarch64__
-    kinfo("[PROCDBG] trap=%p elr=0x%lx sp=0x%lx spsr=0x%lx ksp=0x%lx kstack=%p ctx=%p ks_top=0x%lx\n",
-          (void *)trap, (unsigned long)trap->elr, (unsigned long)trap->sp,
-          (unsigned long)trap->spsr, (unsigned long)trap->kernel_sp,
-          (void *)t->kstack, (void *)ctx, (unsigned long)ks_top);
-#endif
 
     kinfo("[PROC] user task pid=%d entry=0x%lx sp=0x%lx trap_sp=0x%lx\n", t->pid,
           (unsigned long)entry, (unsigned long)sp, (unsigned long)TRAP_CTX_SP(trap));
@@ -488,7 +486,7 @@ int proc_alloc_user_image(uintptr_t entry, vaddr_t sp, pt_root_t *pgdir,
 int proc_alloc_user(uintptr_t entry, vaddr_t sp, pt_root_t *pgdir) {
     return proc_alloc_user_image(entry, sp, pgdir, NULL, 0, sp, 0, 0
 #ifdef CONFIG_NOMMU
-                               , NULL, 0
+                               , NULL, NULL, NULL, 0
 #endif
                                );
 }
