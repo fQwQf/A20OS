@@ -2,6 +2,12 @@
 #include "core/version.h"
 #include "mm/frame.h"
 
+#define LINUX_GRND_NONBLOCK 0x0001U
+#define LINUX_GRND_RANDOM   0x0002U
+#define LINUX_GRND_INSECURE 0x0004U
+#define LINUX_GRND_SUPPORTED \
+    (LINUX_GRND_NONBLOCK | LINUX_GRND_RANDOM | LINUX_GRND_INSECURE)
+
 int64_t sys_uname(void *buf) {
     struct uname { char s[65],n[65],r[65],v[65],m[65],d[65]; };
     if (!buf) return -EFAULT;
@@ -99,8 +105,12 @@ int64_t sys_syslog(int type, char *buf, int len) {
  * Random / Misc
  * ============================================================ */
 
-int64_t sys_getrandom(void *buf, size_t len, int flags) {
-    (void)flags;
+int64_t sys_getrandom(void *buf, size_t len, unsigned int flags) {
+    if (flags & ~LINUX_GRND_SUPPORTED)
+        return -EINVAL;
+    if ((flags & (LINUX_GRND_RANDOM | LINUX_GRND_INSECURE)) ==
+        (LINUX_GRND_RANDOM | LINUX_GRND_INSECURE))
+        return -EINVAL;
     if (!buf) return -EFAULT;
     uint8_t tmp[128];
     size_t done = 0;
