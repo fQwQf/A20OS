@@ -85,6 +85,76 @@ static int relative_path_stays_beneath(const char *relpath) {
     return 1;
 }
 
+static int vfs_proc_fd_target(const char *path, task_t **task_out, int *fd_out)
+{
+    const char *prefix = "/proc/";
+    size_t prefix_len = strlen(prefix);
+    if (strncmp(path, prefix, prefix_len) != 0)
+        return 0;
+
+    const char *p = path + prefix_len;
+    task_t *task;
+    if (strncmp(p, "self/fd/", 8) == 0) {
+        task = proc_current();
+        p += 8;
+    } else {
+        if (*p < '0' || *p > '9')
+            return 0;
+        int pid = 0;
+        while (*p >= '0' && *p <= '9') {
+            if (pid > 4194304 / 10)
+                return -ENOENT;
+            pid = pid * 10 + (*p - '0');
+            if (pid > 4194304)
+                return -ENOENT;
+            p++;
+        }
+        if (strncmp(p, "/fd/", 4) != 0)
+            return 0;
+        task = proc_find(pid);
+        p += 4;
+    }
+    if (!task || *p < '0' || *p > '9')
+        return -ENOENT;
+
+    int fd = 0;
+    while (*p >= '0' && *p <= '9') {
+        if (fd > (MAX_FILES - 1) / 10)
+            return -ENOENT;
+        fd = fd * 10 + (*p++ - '0');
+        if (fd >= MAX_FILES)
+            return -ENOENT;
+    }
+    if (*p != '\0')
+        return -ENOENT;
+    *task_out = task;
+    *fd_out = fd;
+    return 1;
+}
+
+static int vfs_proc_fd_path(const char *path, char *out, size_t outsz)
+{
+    task_t *task = NULL;
+    int fd = -1;
+    int match = vfs_proc_fd_target(path, &task, &fd);
+    if (match <= 0)
+        return match;
+    int gfd = fdtable_get(task, fd);
+    if (gfd < 0)
+        return -ENOENT;
+    vfile_t *vf = vfs_get_file_ref(gfd);
+    if (!vf)
+        return -ENOENT;
+    size_t len = strlen(vf->path);
+    if (len == 0 || len >= outsz) {
+        vfs_put_file_ref(gfd, vf);
+        return len == 0 ? -ENOENT : -ENAMETOOLONG;
+    }
+    memcpy(out, vf->path, len + 1);
+    vfs_put_file_ref(gfd, vf);
+    return 1;
+}
+
 int vfs_open(const char *path, int flags, int mode) {
     /* Resolve cwd from current process */
     task_t *cur = proc_current();
@@ -114,6 +184,14 @@ int vfs_open(const char *path, int flags, int mode) {
         const char *exe = cur && cur->exec_path[0] ? cur->exec_path : "/bin/sh";
         return vfs_open(exe, flags, mode);
     }
+
+    char proc_fd_path[MAX_PATH_LEN];
+    int proc_fd_match = vfs_proc_fd_path(resolved, proc_fd_path,
+                                         sizeof(proc_fd_path));
+    if (proc_fd_match < 0)
+        return proc_fd_match;
+    if (proc_fd_match > 0)
+        return vfs_open(proc_fd_path, flags, mode);
 
     /* Find mount point */
     mount_t *mnt = vfs_find_mount(resolved);
@@ -741,6 +819,15 @@ vnode_t *vfs_resolve_no_follow_final(const char *path) {
 }
 
 int vfs_statx(const char *path, kstat_t *st, unsigned int mask, int sync_hint) {
+    task_t *task = NULL;
+    int fd = -1;
+    int proc_fd_match = vfs_proc_fd_target(path, &task, &fd);
+    if (proc_fd_match < 0)
+        return proc_fd_match;
+    if (proc_fd_match > 0) {
+        int gfd = fdtable_get(task, fd);
+        return gfd < 0 ? -ENOENT : vfs_fstat(gfd, st);
+    }
     vnode_t *vn = vfs_resolve(path);
     if (!vn) return g_lookup_errno ? g_lookup_errno : -ENOENT;
     if (sync_hint == AT_STATX_FORCE_SYNC) {
@@ -770,6 +857,15 @@ int vfs_fstatx(int dirfd, const char *path, kstat_t *st, int flags, unsigned int
 }
 
 int vfs_stat(const char *path, kstat_t *st) {
+    task_t *task = NULL;
+    int fd = -1;
+    int proc_fd_match = vfs_proc_fd_target(path, &task, &fd);
+    if (proc_fd_match < 0)
+        return proc_fd_match;
+    if (proc_fd_match > 0) {
+        int gfd = fdtable_get(task, fd);
+        return gfd < 0 ? -ENOENT : vfs_fstat(gfd, st);
+    }
     vnode_t *vn = vfs_resolve(path);
     if (!vn) return g_lookup_errno ? g_lookup_errno : -ENOENT;
     int r = vfs_vnode_stat(vn, st);
@@ -976,29 +1072,6 @@ static int vfs_readlink_copy_target(const char *target, char *buf, size_t sz) {
     return (int)len;
 }
 
-static int vfs_proc_fd_number(const char *path, int *fd) {
-    const char *prefix = "/proc/self/fd/";
-    size_t prefix_len = strlen(prefix);
-    if (strncmp(path, prefix, prefix_len) != 0)
-        return 0;
-
-    const char *p = path + prefix_len;
-    if (*p < '0' || *p > '9')
-        return -ENOENT;
-    int value = 0;
-    while (*p >= '0' && *p <= '9') {
-        if (value > (MAX_FILES - 1) / 10)
-            return -ENOENT;
-        value = value * 10 + (*p++ - '0');
-        if (value >= MAX_FILES)
-            return -ENOENT;
-    }
-    if (*p != '\0')
-        return -ENOENT;
-    *fd = value;
-    return 1;
-}
-
 int vfs_readlinkat(int dirfd, const char *path, char *buf, size_t sz) {
     (void)dirfd;
     if (!path || !buf || sz == 0) return -EINVAL;
@@ -1021,14 +1094,15 @@ int vfs_readlinkat(int dirfd, const char *path, char *buf, size_t sz) {
         return vfs_readlink_copy_target(cwd_res, buf, sz);
     }
 
+    task_t *proc_fd_task = NULL;
     int proc_fd = -1;
-    int proc_fd_match = vfs_proc_fd_number(resolved, &proc_fd);
+    int proc_fd_match = vfs_proc_fd_target(resolved, &proc_fd_task, &proc_fd);
     if (proc_fd_match < 0)
         return proc_fd_match;
     if (proc_fd_match > 0) {
-        int gfd = fdtable_get_current(proc_fd);
+        int gfd = fdtable_get(proc_fd_task, proc_fd);
         if (gfd < 0)
-            return gfd;
+            return -ENOENT;
         vfile_t *vf = vfs_get_file_ref(gfd);
         if (!vf)
             return -EBADF;
