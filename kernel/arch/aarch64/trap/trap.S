@@ -145,9 +145,6 @@ __trap_from_user:
     mrs     x9, fpsr
     str     x9, [sp, #FPSR_OFF]
 
-    mrs     x1, esr_el1
-    mov     x0, sp
-    bl      debug_trap_entry
     mov     x0, sp
     bl      trap_handler
     b       __return_to_user
@@ -296,13 +293,8 @@ __trap_from_kernel:
     ldr     x2,  [x2, #X_OFF(2)]
     eret
 
-    .extern debug_trap_return
-    .extern debug_trap_entry
-
 __return_to_user:
 user_trap_return:
-    mov     x0, sp
-    bl      debug_trap_return
     mov     x2, sp
     ldr     x3, [x2, #SP_OFF]
     ldr     x4, [x2, #KSP_OFF]

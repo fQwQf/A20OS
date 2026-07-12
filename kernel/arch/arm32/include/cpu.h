@@ -7,6 +7,12 @@
 extern volatile uint32_t arm32_trap_flags;
 uint32_t arm32_gic_ack(void);
 
+/*
+ * ARMv7 exception modes use banked stacks.  Until nested IRQ entry switches
+ * to a dedicated re-entrant frame, keep syscall dispatch non-preemptible.
+ */
+#define ARCH_SYSCALL_DISPATCH_NONPREEMPTIBLE 1
+
 static inline void arch_mb(void) { __asm__ __volatile__("dmb ish" ::: "memory"); }
 static inline void arch_rmb(void) { __asm__ __volatile__("dmb ish" ::: "memory"); }
 static inline void arch_wmb(void) { __asm__ __volatile__("dmb ishst" ::: "memory"); }

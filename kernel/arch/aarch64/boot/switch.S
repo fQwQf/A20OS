@@ -58,13 +58,19 @@ __switch:
     ldr     x10, [sp, #(14 * 8)]
 #ifndef CONFIG_NOMMU
     msr     ttbr0_el1, x10
-    ldr     x10, [sp, #(15 * 8)]
-    msr     daif, x10
     dsb     ishst
     tlbi    vmalle1
     dsb     ish
     isb
 #endif
-
+    /*
+     * Make the incoming kernel stack live before unmasking interrupts.  A
+     * pending timer may be taken immediately by the DAIF write; taking it
+     * while SP still points at task_context_t corrupts the saved context.
+     */
+    ldr     x10, [sp, #(15 * 8)]
     add     sp, sp, #128
+    msr     daif, x10
+    isb
+
     ret

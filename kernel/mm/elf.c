@@ -39,8 +39,11 @@
 #ifdef CONFIG_NOMMU
 static void elf_transfer_nommu_allocs(mm_struct_t *mm, elf_load_info_t *info) {
     info->num_nommu_allocs = mm->num_nommu_allocs;
-    for (int i = 0; i < mm->num_nommu_allocs && i < 32; i++)
+    for (int i = 0; i < mm->num_nommu_allocs && i < NOMMU_ALLOC_MAX; i++) {
         info->nommu_allocs[i] = mm->nommu_allocs[i];
+        info->nommu_alloc_sizes[i] = mm->nommu_alloc_sizes[i];
+        info->nommu_alloc_types[i] = mm->nommu_alloc_types[i];
+    }
     mm->num_nommu_allocs = 0;
 }
 
@@ -51,11 +54,12 @@ static int elf_alloc_nommu_image(mm_struct_t *mm, vaddr_t min_vaddr,
         return 0;
 
     size_t image_size = (size_t)(max_vaddr - min_vaddr);
-    void *mem = kmalloc(image_size + PAGE_SIZE);
+    size_t alloc_size = image_size + PAGE_SIZE;
+    void *mem = kmalloc(alloc_size);
     if (!mem)
         return -ENOMEM;
 
-    mm_track_nommu_alloc(mm, mem);
+    mm_track_nommu_alloc(mm, mem, alloc_size, NOMMU_ALLOC_IMAGE);
     vaddr_t base = ROUND_UP((vaddr_t)mem, PAGE_SIZE);
     memset((void *)base, 0, image_size);
     *load_bias_out = base - min_vaddr;
@@ -177,8 +181,9 @@ static int map_segment(mm_struct_t *mm, pt_root_t *pgdir,
     if (src->kind == SEG_BUF) {
         memcpy((void *)va, src->buf.data, filesz);
     } else {
-        int nr = vfs_pread(src->fd.fd, (void *)va, filesz, src->fd.offset); if (nr != filesz) printf("ELF PREAD SHORT: %d != %d\n", nr, (int)filesz);
-        printf("ELF PREAD: nr=%d filesz=%d\n", nr, (int)filesz);
+        int nr = vfs_pread(src->fd.fd, (void *)va, filesz, src->fd.offset);
+        if (nr != (int)filesz)
+            kerr("[ELF] short read: %d/%lu\n", nr, (unsigned long)filesz);
         if (nr < 0) return nr;
     }
     if (memsz > filesz) {
@@ -231,10 +236,16 @@ static int map_segment(mm_struct_t *mm, pt_root_t *pgdir,
 static int map_stack(mm_struct_t *mm, pt_root_t *pgdir, vaddr_t *stack_top_out) {
 #ifdef CONFIG_NOMMU
     size_t stack_size = (uint64_t)USER_STACK_INITIAL_PAGES * PAGE_SIZE;
-    void *stack = kmalloc(stack_size);
-    if (!stack) return -ENOMEM;
-    mm_track_nommu_alloc(mm, stack);
-    vaddr_t stack_bottom = (vaddr_t)stack;
+    size_t stack_alloc_size = stack_size + PAGE_SIZE;
+    void *stack_alloc = kmalloc(stack_alloc_size);
+    if (!stack_alloc) return -ENOMEM;
+    mm_track_nommu_alloc(mm, stack_alloc, stack_alloc_size, NOMMU_ALLOC_STACK);
+    /*
+     * Big kmalloc allocations carry an allocator header before the returned
+     * pointer, so the pointer itself is not page aligned.  Keep user SP and
+     * all ABI stack objects naturally aligned by reserving one extra page.
+     */
+    vaddr_t stack_bottom = ROUND_UP((vaddr_t)stack_alloc, PAGE_SIZE);
     vaddr_t stack_top = stack_bottom + stack_size;
     *stack_top_out = stack_top;
     return elf_add_vma(mm, stack_bottom, stack_top,
@@ -278,7 +289,7 @@ static int setup_tls(mm_struct_t *mm, pt_root_t *pgdir,
 #ifdef CONFIG_NOMMU
     void *tls_mem = kmalloc(total_pages * PAGE_SIZE);
     if (!tls_mem) return -ENOMEM;
-    mm_track_nommu_alloc(mm, tls_mem);
+    mm_track_nommu_alloc(mm, tls_mem, total_pages * PAGE_SIZE, NOMMU_ALLOC_TLS);
     vaddr_t tls_va = (vaddr_t)tls_mem;
     *tls_va_out = tls_va;
     memset(tls_mem, 0, total_pages * PAGE_SIZE);
@@ -659,8 +670,6 @@ static int elf_load64(int fd, const Elf64_Ehdr *eh, const char *path,
 
         vaddr_t seg_start = seg_va & ~(vaddr_t)(PAGE_SIZE - 1);
         vaddr_t seg_end   = ROUND_UP(seg_va + phdrs[i].p_memsz, PAGE_SIZE);
-    printf("[ELF_LOAD64] load_bias=%lx max_va=%lx\n", load_bias, max_va);
-
         if (phdrs[i].p_offset == 0) head_va = seg_va;
 #ifdef CONFIG_NOMMU
         if (base == 0) base = load_bias + min_vaddr;
@@ -1056,7 +1065,13 @@ vaddr_t elf_setup_stack(vaddr_t stack_top, int argc, char *const argv[],
         memcpy(dst, arg_ptrs, (argc + 1) * sizeof(uintptr_t));
     }
 
-    sp_va -= sizeof(uintptr_t);
+    /*
+     * Linux process entry requires SP to satisfy the architecture ABI
+     * alignment (16 bytes on all currently supported targets).  The pointer
+     * vectors above are naturally word aligned but their total word count can
+     * be odd, so align the final argc slot explicitly.
+     */
+    sp_va = (sp_va - sizeof(uintptr_t)) & ~15UL;
     {
         void *dst = stack_ensure_mapped(pgdir, sp_va, &stack_bottom, 64);
         if (!dst) return 0;

@@ -353,7 +353,10 @@ int64_t sys_a20_task_spawn(const a20_syscall_args_t *args)
                                           info.stack_top, total_vm,
                                           info.tls_tp
 #ifdef CONFIG_NOMMU
-                                          , info.nommu_allocs, info.num_nommu_allocs
+                                          , info.nommu_allocs,
+                                          info.nommu_alloc_sizes,
+                                          info.nommu_alloc_types,
+                                          info.num_nommu_allocs
 #endif
                                           );
     if (new_pid < 0) return -A20_ERR_NO_MEMORY;

@@ -20,7 +20,6 @@ static int fetch_user_insn(task_t *task, vaddr_t va, uint32_t *insn_out) {
 }
 
 static int ktrap_diag_count = 0;
-static int pid3_irq_diag_count = 0;
 
 static void dump_trap_context(trap_context_t *ctx) {
     kerr("  regs: ra=0x%lx sp=0x%lx tp=0x%lx\n",
@@ -136,28 +135,12 @@ void trap_handler(trap_context_t *ctx) {
         int have_user_insn = fetch_user_insn(cur, sepc, &user_insn);
         if (code == CAUSE_ECALL_U) {
             arch_advance_syscall_epc(ctx);
-            /*
-             * RISC-V enters the trap handler with SIE cleared.  Keep the
-             * normal syscall body interruptible so UART input, block/network
-             * completions, and timer bookkeeping are not starved by long
-             * kernel-side loops such as fork-heavy benchmarks.
-            */
-#ifndef CONFIG_ARM32
-            arch_local_irq_enable();
-#endif
+            arch_syscall_dispatch_enter();
             syscall_dispatch(ctx);
-            if (cur && cur->pid == 3)
-                printf("[PID3TH] after syscall pc=0x%lx ret=0x%lx sp=0x%lx\n",
-                       (unsigned long)TRAP_CTX_EPC(ctx),
-                       (unsigned long)TRAP_CTX_RET(ctx),
-                       (unsigned long)TRAP_CTX_SP(ctx));
-#ifndef CONFIG_ARM32
-            arch_local_irq_disable();
-#endif
+            arch_syscall_dispatch_leave();
             proc_check_exit_pending();
-#ifndef CONFIG_ARM32
-            proc_yield();
-#endif
+            if (arch_syscall_resched_allowed())
+                proc_yield();
             return;
         }
         if (code == CAUSE_LOAD_PAGE_FAULT || code == CAUSE_STORE_PAGE_FAULT || code == CAUSE_INSN_PAGE_FAULT) {

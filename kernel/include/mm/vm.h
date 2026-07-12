@@ -27,6 +27,13 @@ struct vnode;
 #define VM_LOCKED    (1UL << 15)
 #define VM_SYSV_SHM  (1UL << 16)
 
+#ifdef CONFIG_NOMMU
+#define NOMMU_ALLOC_MAX    32
+#define NOMMU_ALLOC_IMAGE  0
+#define NOMMU_ALLOC_STACK  1
+#define NOMMU_ALLOC_TLS    2
+#endif
+
 typedef struct vm_area {
     vaddr_t         start;
     vaddr_t         end;
@@ -104,7 +111,9 @@ typedef struct mm_struct {
     uint32_t   def_flags;
     refcount_t refcount;
 #ifdef CONFIG_NOMMU
-    void      *nommu_allocs[32];
+    void      *nommu_allocs[NOMMU_ALLOC_MAX];
+    size_t     nommu_alloc_sizes[NOMMU_ALLOC_MAX];
+    uint8_t    nommu_alloc_types[NOMMU_ALLOC_MAX];
     int        num_nommu_allocs;
 #endif
 } mm_struct_t;
@@ -121,7 +130,7 @@ int        mm_split_vma_at(mm_struct_t *mm, vaddr_t addr);
 void mm_sync_shared_dirty_for_vnode(struct vnode *vn);
 
 #ifdef CONFIG_NOMMU
-void mm_track_nommu_alloc(mm_struct_t *mm, void *ptr);
+void mm_track_nommu_alloc(mm_struct_t *mm, void *ptr, size_t size, uint8_t type);
 void mm_untrack_nommu_alloc(mm_struct_t *mm, void *ptr);
 #endif
 

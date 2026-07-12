@@ -118,10 +118,17 @@ static inline void arch_trap_ctx_set_reg(trap_context_t *ctx, int i, uint64_t v)
 #define TRAP_CTX_KScratch0(ctx)    ((ctx)->ttbr0)
 #define TASK_CTX_PAGE_TABLE(ctx)   ((ctx)->ttbr0)
 #define TASK_CTX_STATUS(ctx)       ((ctx)->cpsr)
+#define ARCH_TASK_CONTEXT_SET_USER_TP(ctx, value) \
+    do { (ctx)->user_tp = (uint32_t)(value); } while (0)
 
 static inline void arch_task_context_set_initial_sp(task_context_t *ctx, trap_context_t *trap, uint64_t stack_top) {
-    (void)trap;
-    ctx->sp = (uint32_t)stack_top;
+    /*
+     * Keep the live SVC stack below the persistent trap frame at the top of
+     * each user task's kernel stack.  Starting at stack_top makes the first
+     * 88-byte exception frame overlap trap_context_t and corrupts saved user
+     * registers during fork/exec-heavy startup.
+     */
+    ctx->sp = trap ? trap->kernel_sp : (uint32_t)stack_top;
 }
 
 static inline task_context_t *arch_task_context_base(void *kstack_base, uint64_t stack_top, trap_context_t *trap) {

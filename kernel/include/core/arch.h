@@ -45,6 +45,64 @@
 # error "No architecture defined. Set ARCH=riscv64, ARCH=riscv32, ARCH=loongarch64, ARCH=aarch64, ARCH=arm32, ARCH=ppc64le or ARCH=x86_64."
 #endif
 
+/*
+ * Optional architecture capabilities.  Architecture headers opt in by
+ * defining the corresponding ARCH_* macro; shared scheduler/process code
+ * consumes only these hooks and does not branch on CONFIG_<architecture>.
+ */
+#ifndef ARCH_TASK_CONTEXT_SET_USER_TP
+# define ARCH_TASK_CONTEXT_SET_USER_TP(ctx, user_tp) \
+    do { (void)(ctx); (void)(user_tp); } while (0)
+#endif
+
+#ifndef ARCH_PT_LEVEL_ENTRIES
+# define ARCH_PT_LEVEL_ENTRIES(level) ARCH_PT_ENTRIES
+#endif
+
+static inline int arch_pt_level_entries(int level)
+{
+    (void)level;
+    return ARCH_PT_LEVEL_ENTRIES(level);
+}
+
+#ifndef ARCH_FORK_REQUIRES_PRIVATE_COPY
+# define ARCH_FORK_REQUIRES_PRIVATE_COPY 0
+#endif
+
+static inline int arch_fork_requires_private_copy(void)
+{
+    return ARCH_FORK_REQUIRES_PRIVATE_COPY;
+}
+
+static inline void arch_task_context_set_user_tp(task_context_t *ctx,
+                                                  uintptr_t user_tp)
+{
+    ARCH_TASK_CONTEXT_SET_USER_TP(ctx, user_tp);
+}
+
+static inline void arch_syscall_dispatch_enter(void)
+{
+#ifndef ARCH_SYSCALL_DISPATCH_NONPREEMPTIBLE
+    arch_local_irq_enable();
+#endif
+}
+
+static inline void arch_syscall_dispatch_leave(void)
+{
+#ifndef ARCH_SYSCALL_DISPATCH_NONPREEMPTIBLE
+    arch_local_irq_disable();
+#endif
+}
+
+static inline int arch_syscall_resched_allowed(void)
+{
+#ifdef ARCH_SYSCALL_DISPATCH_NONPREEMPTIBLE
+    return 0;
+#else
+    return 1;
+#endif
+}
+
 /* Arch name string (for uname, procfs, etc.) */
 #if defined(CONFIG_RISCV64)
 # define ARCH_NAME "riscv64"

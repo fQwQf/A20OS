@@ -113,6 +113,14 @@ typedef struct proc_vm_stats {
  *   been removed from any run queue. ZOMBIE/UNUSED are exit/reap states and
  *   must not be written by synchronization primitives.
  */
+#ifdef CONFIG_NOMMU
+typedef struct nommu_vfork_snap_entry {
+    void   *dst;
+    void   *data;
+    size_t  size;
+} nommu_vfork_snap_entry_t;
+#endif
+
 typedef struct task_t {
     uintptr_t kstack;
     void    *kstack_base;
@@ -136,6 +144,11 @@ typedef struct task_t {
     unsigned cpu_id;
     int      on_rq;
     int      vfork_waiting;
+#ifdef CONFIG_NOMMU
+    /* A NOMMU vfork child shares writable memory until exec/exit. */
+    nommu_vfork_snap_entry_t *nommu_vfork_snaps;
+    int nommu_num_vfork_snapshots;
+#endif
     struct task_t *rq_next;
     struct task_t *rq_prev;
     struct task_t *wait_next;
@@ -223,9 +236,10 @@ int      proc_alloc_user_image(uintptr_t entry, vaddr_t sp, pt_root_t *pgdir,
                                vaddr_t stack_top, size_t total_vm,
                                vaddr_t tls_tp
 #ifdef CONFIG_NOMMU
-                               , void **nommu_allocs, int num_nommu_allocs
+                          , void **nommu_allocs, const size_t *nommu_alloc_sizes,
+                          const uint8_t *nommu_alloc_types, int num_nommu_allocs
 #endif
-                               );
+                          );
 void     proc_free_pid(int pid);
 void     proc_exit(int exit_code) NORETURN;
 void     proc_exit_group(int exit_code) NORETURN;

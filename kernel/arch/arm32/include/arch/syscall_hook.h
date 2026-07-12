@@ -14,6 +14,11 @@ static inline void arch_syscall_adjust_args(linux_syscall_args_t *args) {
 }
 
 static inline void arch_adjust_clone_args(linux_syscall_args_t *args) {
+    /*
+     * ARM EABI clone(flags, stack, parent_tid, tls, child_tid) already
+     * matches the kernel's internal order.  The legacy fork syscall is
+     * normalized by syscall_nr_arm32.h to clone(SIGCHLD, 0, ...).
+     */
     (void)args;
 }
 

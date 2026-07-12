@@ -159,12 +159,6 @@ void kernel_main(void) {
     if (ret < 0)
         panic("Failed to create init_kthread");
 
-#ifdef __aarch64__
-    uint64_t current_el;
-    __asm__ __volatile__("mrs %0, CurrentEL" : "=r"(current_el));
-    printf("[INIT] CurrentEL=0x%lx\n", current_el);
-#endif
-
     printf("[INIT] System ready\n\n");
     printf("\033[1;36m");
     printf("%s\n", "                    :%%%%%%%.                                 ");
@@ -250,7 +244,8 @@ void init_kthread(void) {
                                 info.brk, info.stack_top, init_total_vm,
                                 info.tls_tp
 #ifdef CONFIG_NOMMU
-                                , info.nommu_allocs, info.num_nommu_allocs
+                                , info.nommu_allocs, info.nommu_alloc_sizes,
+                                info.nommu_alloc_types, info.num_nommu_allocs
 #endif
                                 );
     if (ret < 0) {
@@ -260,13 +255,6 @@ void init_kthread(void) {
 #ifdef CONFIG_NOMMU
     arch_flush_icache_range((const void *)info.load_addr, info.load_size);
 #endif
-
-    {
-        uint32_t *p = (uint32_t *)(info.load_addr + 0x7138);
-        kerr("[INITDBG] load_addr=0x%lx load_size=0x%lx bytes@0x%lx=0x%08x\n",
-             (unsigned long)info.load_addr, (unsigned long)info.load_size,
-             (unsigned long)(info.load_addr + 0x7138), (unsigned)*p);
-    }
 
     printf("[INIT] user init created: pid=%d entry=0x%lx sp=0x%lx\n",
            ret, (unsigned long)info.entry, (unsigned long)user_sp);

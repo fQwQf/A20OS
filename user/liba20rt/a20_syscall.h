@@ -2,8 +2,7 @@
  * A20OS Native SDK — Syscall invocation.
  *
  * Convention:
- *   RV64/LA64: a7=syscall_nr, a0-a5=args, return in a0.
- *   x86_64:    rax=syscall_nr, rdi/rsi/rdx/r10/r8/r9=args, return in rax.
+ * Register placement follows each architecture's trap-frame syscall ABI.
  */
 #ifndef _A20_SYSCALL_H
 #define _A20_SYSCALL_H
@@ -15,8 +14,14 @@
 #define A20_SYSCALL_INSN  "syscall 0"
 #elif defined(__riscv)
 #define A20_SYSCALL_INSN  "ecall"
+#elif defined(__aarch64__)
+#define A20_SYSCALL_INSN  "svc #0"
+#elif defined(__arm__)
+#define A20_SYSCALL_INSN  "svc #0"
 #elif defined(__x86_64__)
 #define A20_SYSCALL_INSN  "int $0x80"
+#elif defined(__powerpc64__)
+#define A20_SYSCALL_INSN  "sc"
 #else
 #error "Unsupported architecture for A20 syscall"
 #endif
@@ -38,6 +43,58 @@ static inline int64_t a20_syscall6(uint64_t nr, uint64_t a0, uint64_t a1,
         : "D"(rdi), "S"(rsi), "d"(rdx), "r"(r10), "r"(r8), "r"(r9)
         : "memory");
     return (int64_t)rax;
+#elif defined(__aarch64__)
+    register uint64_t x8 __asm__("x8") = nr;
+    register uint64_t x0 __asm__("x0") = a0;
+    register uint64_t x1 __asm__("x1") = a1;
+    register uint64_t x2 __asm__("x2") = a2;
+    register uint64_t x3 __asm__("x3") = a3;
+    register uint64_t x4 __asm__("x4") = a4;
+    register uint64_t x5 __asm__("x5") = a5;
+    __asm__ volatile(A20_SYSCALL_INSN
+        : "+r"(x0)
+        : "r"(x8), "r"(x1), "r"(x2), "r"(x3), "r"(x4), "r"(x5)
+        : "memory");
+    return (int64_t)x0;
+#elif defined(__arm__)
+    register uint32_t r7 __asm__("r7") = (uint32_t)nr;
+    register uint32_t r0 __asm__("r0") = (uint32_t)a0;
+    register uint32_t r1 __asm__("r1") = (uint32_t)a1;
+    register uint32_t r2 __asm__("r2") = (uint32_t)a2;
+    register uint32_t r3 __asm__("r3") = (uint32_t)a3;
+    register uint32_t r4 __asm__("r4") = (uint32_t)a4;
+    register uint32_t r5 __asm__("r5") = (uint32_t)a5;
+    __asm__ volatile(A20_SYSCALL_INSN
+        : "+r"(r0)
+        : "r"(r7), "r"(r1), "r"(r2), "r"(r3), "r"(r4), "r"(r5)
+        : "memory");
+    return (int64_t)(int32_t)r0;
+#elif defined(__powerpc64__)
+    register uint64_t r0 __asm__("r0") = nr;
+    register uint64_t r3 __asm__("r3") = a0;
+    register uint64_t r4 __asm__("r4") = a1;
+    register uint64_t r5 __asm__("r5") = a2;
+    register uint64_t r6 __asm__("r6") = a3;
+    register uint64_t r7 __asm__("r7") = a4;
+    register uint64_t r8 __asm__("r8") = a5;
+    __asm__ volatile(A20_SYSCALL_INSN
+        : "+r"(r3)
+        : "r"(r0), "r"(r4), "r"(r5), "r"(r6), "r"(r7), "r"(r8)
+        : "memory", "cr0");
+    return (int64_t)r3;
+#elif __riscv_xlen == 32
+    register uint32_t a7 __asm__("a7") = (uint32_t)nr;
+    register uint32_t _a0 __asm__("a0") = (uint32_t)a0;
+    register uint32_t _a1 __asm__("a1") = (uint32_t)a1;
+    register uint32_t _a2 __asm__("a2") = (uint32_t)a2;
+    register uint32_t _a3 __asm__("a3") = (uint32_t)a3;
+    register uint32_t _a4 __asm__("a4") = (uint32_t)a4;
+    register uint32_t _a5 __asm__("a5") = (uint32_t)a5;
+    __asm__ volatile(A20_SYSCALL_INSN
+        : "+r"(_a0)
+        : "r"(a7), "r"(_a1), "r"(_a2), "r"(_a3), "r"(_a4), "r"(_a5)
+        : "memory");
+    return (int64_t)(int32_t)_a0;
 #else
     register uint64_t a7 __asm__("a7") = nr;
     register uint64_t _a0 __asm__("a0") = a0;
