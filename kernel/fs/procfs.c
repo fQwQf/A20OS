@@ -1223,6 +1223,60 @@ static long procfs_flseek(vfile_t *vf, long offset, int whence) {
     return new_off;
 }
 
+static int procfs_fd_readdir(vfile_t *vf, procfs_priv_t *p,
+                             void *dirp, size_t count)
+{
+    task_t *task = proc_find(p->pid);
+    if (!task)
+        return -ENOENT;
+
+    int cursor = (int)vf->offset;
+    size_t total = 0;
+    char *out = (char *)dirp;
+
+    while (total < count) {
+        const char *name;
+        char fd_name[16];
+        int fd = -1;
+        int next_cursor;
+
+        if (cursor == 0) {
+            name = ".";
+            next_cursor = 1;
+        } else if (cursor == 1) {
+            name = "..";
+            next_cursor = 2;
+        } else {
+            fd = cursor - 2;
+            while (fd < MAX_FILES && fdtable_get(task, fd) < 0)
+                fd++;
+            if (fd >= MAX_FILES)
+                break;
+            snprintf(fd_name, sizeof(fd_name), "%d", fd);
+            name = fd_name;
+            next_cursor = fd + 3;
+        }
+
+        size_t namelen = strlen(name);
+        size_t reclen = (offsetof(vfs_dirent64_t, d_name) + namelen + 1 + 7) & ~7UL;
+        if (total + reclen > count)
+            break;
+
+        vfs_dirent64_t *d = (vfs_dirent64_t *)(out + total);
+        d->d_ino = fd >= 0 ? (uint64_t)fd + 1 : (uint64_t)cursor + 1;
+        d->d_off = next_cursor;
+        d->d_reclen = (uint16_t)reclen;
+        d->d_type = fd < 0 ? 4 : (p->type == PF_PID_FD ? 10 : 8);
+        memcpy(d->d_name, name, namelen + 1);
+
+        total += reclen;
+        cursor = next_cursor;
+    }
+
+    vf->offset = (size_t)cursor;
+    return (int)total;
+}
+
 // procfs 的 readdir 操作（读取目录项）
 static int procfs_freaddir(vfile_t *vf, void *dirp, size_t count) {
     static const char *root_entries[] = {
@@ -1265,6 +1319,9 @@ static int procfs_freaddir(vfile_t *vf, void *dirp, size_t count) {
         ".", "..", "pid", "uts", "user", "ipc", "mnt", "net", "cgroup", NULL
     };
     procfs_priv_t *p = (procfs_priv_t *)vf->priv;
+    if (p && (p->type == PF_PID_FD || p->type == PF_PID_FDINFO))
+        return procfs_fd_readdir(vf, p, dirp, count);
+
     const char **entries = root_entries;
     int is_root = (p && p->type == PF_ROOT && p->pid == 0);
     if (p && p->type == PF_ROOT && p->pid > 0)
