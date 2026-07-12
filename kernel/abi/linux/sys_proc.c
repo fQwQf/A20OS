@@ -4,11 +4,9 @@
 #include "abi/linux/fcntl.h"
 #include "sys/usercopy.h"
 
-#ifndef CONFIG_ARM32
-int64_t sys_set_thread_area(void *ptr) {
+__attribute__((weak)) int64_t sys_set_thread_area(void *ptr) {
     return -1; // ENOSYS or implement proper thread area logic
 }
-#endif
 #define CLD_EXITED     1
 #define CLD_KILLED     2
 #define CLD_DUMPED     3
@@ -533,6 +531,15 @@ int64_t sys_openat2(int dirfd, const char *pathname, const void *how, size_t siz
 
 int64_t sys_clone(uint64_t flags, void *stack, int *ptid, uint64_t tls, int *ctid) {
 #ifdef CONFIG_NOMMU
+    /*
+     * Architectures without a dedicated vfork syscall implement libc vfork()
+     * as clone(SIGCHLD, 0).  Old Linux ABIs such as ARM's fork syscall are
+     * normalized to the same argument tuple by the architecture syscall hook.
+     * In a shared physical address space this request must have vfork
+     * semantics: share the mm and suspend the parent until exec/exit.
+     */
+    if (flags == SIGCHLD)
+        flags |= LINUX_CLONE_VM | LINUX_CLONE_VFORK;
     if (!(flags & LINUX_CLONE_VM)) {
         return -EINVAL; /* NOMMU does not support fork without CLONE_VM */
     }

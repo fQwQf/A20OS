@@ -518,6 +518,20 @@ static int exec_install_process(task_t *t,
     refcount_set(&new_mm->refcount, 1);
     new_mm->mmap       = info->mmap;
 
+#ifdef CONFIG_NOMMU
+    /* Transfer NOMMU segment allocation tracking into the new mm.
+     * elf_load64/32 tracks allocations in a local mm, then moves them into
+     * info->nommu_allocs[] via elf_transfer_nommu_allocs. We must copy them
+     * into new_mm so vfork snapshot/restore knows what memory to save. */
+    new_mm->num_nommu_allocs = info->num_nommu_allocs;
+    for (int i = 0;
+         i < info->num_nommu_allocs && i < NOMMU_ALLOC_MAX; i++) {
+        new_mm->nommu_allocs[i] = info->nommu_allocs[i];
+        new_mm->nommu_alloc_sizes[i] = info->nommu_alloc_sizes[i];
+        new_mm->nommu_alloc_types[i] = info->nommu_alloc_types[i];
+    }
+#endif
+
     /* Map architecture-specific signal return trampoline page. */
     arch_setup_signal_trampoline(new_mm);
 
@@ -567,9 +581,7 @@ static int exec_install_process(task_t *t,
         memset(new_ctx, 0, sizeof(*new_ctx));
         new_ctx->ra = (uint64_t)user_trap_return;
         new_ctx->tp = (uint64_t)(uintptr_t)t;
-#ifdef CONFIG_ARM32
-        new_ctx->user_tp = (uint32_t)info->tls_tp;
-#endif
+        arch_task_context_set_user_tp(new_ctx, info->tls_tp);
         TASK_CTX_STATUS(new_ctx) = arch_user_initial_status();
         TASK_CTX_PAGE_TABLE(new_ctx) = arch_make_addr_space_token(info->pgdir);
         arch_task_context_set_initial_sp(new_ctx, trap, ks_top);
@@ -615,6 +627,8 @@ static int exec_install_process(task_t *t,
 
 #ifdef CONFIG_NOMMU
     arch_flush_icache_range((const void *)info->load_addr, info->load_size);
+#else
+    arch_fence_i();
 #endif
     t->state = PROC_RUNNING;
     return 0;
