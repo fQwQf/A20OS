@@ -702,12 +702,14 @@ int64_t sys_prctl(int op, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
 
 int64_t sys_prlimit64(int pid, int resource, void *new_rlim, void *old_rlim) {
     (void)pid;
+    if (resource < 0 || resource >= RLIM_NLIMITS)
+        return -EINVAL;
     if (old_rlim) {
         uint64_t r[2] = {0};
         task_t *t = proc_current();
         switch (resource) {
-            case 3: set_uniform_rlimit(r, t ? t->limits.stack : USER_STACK_MAX_SIZE); break;
-            case 7: set_uniform_rlimit(r, t ? t->limits.nofile : MAX_FILES); break;
+            case RLIMIT_STACK: set_uniform_rlimit(r, t ? t->limits.stack : USER_STACK_MAX_SIZE); break;
+            case RLIMIT_NOFILE: set_uniform_rlimit(r, t ? t->limits.nofile : MAX_FILES); break;
             default: r[0] = 0; r[1] = (uint64_t)-1; break;
         }
         if (copy_to_user(old_rlim, r, sizeof(r)) < 0) return -EFAULT;
@@ -718,8 +720,8 @@ int64_t sys_prlimit64(int pid, int resource, void *new_rlim, void *old_rlim) {
         task_t *t = proc_current();
         if (!t) return -ESRCH;
         switch (resource) {
-            case 3: t->limits.stack = clamp_stack_rlimit(r[0], r[1]); break;
-            case 7: t->limits.nofile = clamp_nofile_rlimit(r[0], r[1]); break;
+            case RLIMIT_STACK: t->limits.stack = clamp_stack_rlimit(r[0], r[1]); break;
+            case RLIMIT_NOFILE: t->limits.nofile = clamp_nofile_rlimit(r[0], r[1]); break;
             default: break;
         }
     }
@@ -727,12 +729,14 @@ int64_t sys_prlimit64(int pid, int resource, void *new_rlim, void *old_rlim) {
 }
 
 int64_t sys_getrlimit(int resource, void *rlim) {
+    if (resource < 0 || resource >= RLIM_NLIMITS)
+        return -EINVAL;
     if (!rlim) return -EFAULT;
     uint64_t r[2] = {0};
     task_t *t = proc_current();
     switch (resource) {
-        case 3: set_uniform_rlimit(r, t ? t->limits.stack : USER_STACK_MAX_SIZE); break;
-        case 7: set_uniform_rlimit(r, t ? t->limits.nofile : MAX_FILES); break;
+        case RLIMIT_STACK: set_uniform_rlimit(r, t ? t->limits.stack : USER_STACK_MAX_SIZE); break;
+        case RLIMIT_NOFILE: set_uniform_rlimit(r, t ? t->limits.nofile : MAX_FILES); break;
         default: r[0] = 0; r[1] = (uint64_t)-1; break;
     }
     if (copy_to_user(rlim, r, sizeof(r)) < 0) return -EFAULT;
@@ -740,27 +744,32 @@ int64_t sys_getrlimit(int resource, void *rlim) {
 }
 
 int64_t sys_setrlimit(int resource, void *rlim) {
+    if (resource < 0 || resource >= RLIM_NLIMITS)
+        return -EINVAL;
     if (!rlim) return -EFAULT;
     uint64_t r[2];
     if (copy_from_user(r, rlim, sizeof(r)) < 0) return -EFAULT;
     task_t *t = proc_current();
     if (!t) return -ESRCH;
     switch (resource) {
-        case 3: t->limits.stack = clamp_stack_rlimit(r[0], r[1]); break;
-        case 7: t->limits.nofile = clamp_nofile_rlimit(r[0], r[1]); break;
+        case RLIMIT_STACK: t->limits.stack = clamp_stack_rlimit(r[0], r[1]); break;
+        case RLIMIT_NOFILE: t->limits.nofile = clamp_nofile_rlimit(r[0], r[1]); break;
         default: break;
     }
     return 0;
 }
 
 int64_t sys_getrusage(int who, void *usage) {
+    if (who != RUSAGE_SELF && who != RUSAGE_CHILDREN &&
+        who != RUSAGE_THREAD)
+        return -EINVAL;
     if (!usage) return -EFAULT;
     uint64_t u[18]; /* 144 bytes / 8 */
     memset(u, 0, sizeof(u));
     task_t *t = proc_current();
     if (t) {
         uint64_t ticks = t->total_time;
-        if (who == -1)
+        if (who == RUSAGE_CHILDREN)
             ticks = t->child_utime + t->child_stime;
         u[0] = ticks / 100;
         u[1] = (ticks % 100) * 10000;
