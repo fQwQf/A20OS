@@ -16,7 +16,11 @@ static inline size_t arch_ram_range_count(void) {
 static inline int arch_ram_range(size_t idx, paddr_t *base, paddr_t *end) {
     if (idx != 0 || !base || !end)
         return -1;
-    *base = PHYS_MEMORY_BASE;
+    /*
+     * Book3S exception vectors occupy real addresses 0x100..0xcff and the
+     * following page is reserved for real-mode trap scratch storage.
+     */
+    *base = 0x40000UL;
     *end = PHYS_MEMORY_END;
     return 0;
 }
@@ -36,12 +40,13 @@ static inline int arch_ram_range(size_t idx, paddr_t *base, paddr_t *end) {
 #define CAUSE_ECALL_U           0xC00UL
 #define CAUSE_INSN_PAGE_FAULT   0x301UL
 #define CAUSE_LOAD_PAGE_FAULT   0x300UL
+#define CAUSE_DATA_SEGMENT      0x380UL
 #define CAUSE_STORE_PAGE_FAULT  0x380UL
 #define CAUSE_PAGE_MODIFICATION 0x381UL
 #define CAUSE_INSN_FAULT        0x700UL
 #define CAUSE_LOAD_FAULT        0x701UL
 #define CAUSE_STORE_FAULT       0x702UL
-#define CAUSE_BREAKPOINT        0x200UL
+#define CAUSE_BREAKPOINT        0x700UL
 #define CAUSE_ILLEGAL_INSN      0x7000UL
 #define CAUSE_INSN_MISALIGNED   CAUSE_INSN_FAULT
 #define CAUSE_LOAD_MISALIGNED   CAUSE_LOAD_FAULT
@@ -65,7 +70,7 @@ static inline int arch_ram_range(size_t idx, paddr_t *base, paddr_t *end) {
 #define SSTATUS_FS_DIRTY        0UL
 #define SSTATUS_FS_MASK         0UL
 
-extern uint64_t boot_pgdir[512];
+extern uint64_t boot_pgdir[];
 
 static inline void arch_unmap_boot_identity(void) { }
 
