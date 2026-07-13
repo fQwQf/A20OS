@@ -75,15 +75,6 @@ static struct {
 
 static uint8_t df_stack[4096 * 4] __attribute__((aligned(16)));
 
-/*
- * Per-CPU interrupt stack.  x86_64 exceptions and interrupts taken from user
- * (or kernel) mode use TSS.IST[2] so they cannot overwrite the task's kernel
- * stack where task_context_t / trap_context_t live near the top.
- */
-#define X86_64_IST_STACK_SIZE   (16 * 1024)
-static uint8_t x86_64_ist_stacks[CONFIG_NR_CPUS][X86_64_IST_STACK_SIZE]
-    __attribute__((aligned(16)));
-
 extern uint64_t isr_stub_table[256];
 extern void syscall_entry(void);
 
@@ -128,7 +119,6 @@ static void gdt_init(void) {
 static void tss_init(void) {
     memset(&tss, 0, sizeof(tss));
     tss.ist1 = (uint64_t)df_stack + sizeof(df_stack);
-    tss.ist2 = (uint64_t)x86_64_ist_stacks[0] + X86_64_IST_STACK_SIZE;
     tss.iomap_base = sizeof(tss);
 
     uint64_t tss_base = (uint64_t)&tss;
@@ -150,8 +140,12 @@ static void idt_init(void) {
         idt[i].offset_mid  = (addr >> 16) & 0xFFFF;
         idt[i].offset_high = (addr >> 32) & 0xFFFFFFFF;
         idt[i].selector    = 0x08;
-        /* ist: 1=double-fault stack, 2=shared per-CPU interrupt stack. */
-        idt[i].ist         = (i == 8) ? 1 : 2;
+        /*
+         * Normal traps must use the current task's kernel stack.  A shared
+         * IST stack cannot hold a schedulable context: another task's trap
+         * would overwrite the suspended call stack before it is resumed.
+         */
+        idt[i].ist         = (i == 8) ? 1 : 0;
         idt[i].type_attr   = 0x8E;
         idt[i].reserved    = 0;
     }

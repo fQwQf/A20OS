@@ -40,20 +40,11 @@ isr_common:
     movq  %r15, 120(%rsp)
 
     /*
-     * With IST=2 for all IDT entries (except #DF), the CPU always pushes:
-     *   old SS, old RSP, RFLAGS, CS, RIP
-     * Plus error code (for isr_err) or nothing (for isr_no_err).
-     * The ISR stub pushes vec (and dummy 0 for isr_no_err).
-     * Total CPU+ISR stub = 56 bytes for both cases.
-     *
-     * Layout above trap_context_t (relative to current RSP):
-     *   [RSP+208] = vec
-     *   [RSP+216] = error_code (or 0)
-     *   [RSP+224] = RIP
-     *   [RSP+232] = CS
-     *   [RSP+240] = RFLAGS
-     *   [RSP+248] = old RSP
-     *   [RSP+256] = old SS
+     * Normal IDT entries do not use IST.  Traps from user mode switch to
+     * TSS.rsp0 and push SS/RSP/RFLAGS/CS/RIP; traps from kernel mode remain
+     * on the current task's stack and push only RFLAGS/CS/RIP.  Error-code
+     * vectors plus the ISR stubs leave vec/error/RIP/CS/RFLAGS at the same
+     * offsets in both cases.
      */
 
     /* Copy CPU-pushed values into trap_context_t */
@@ -66,11 +57,21 @@ isr_common:
     movq  232(%rsp), %rax
     movq  %rax, 144(%rsp)       /* ctx->cs */
 
+    movq  232(%rsp), %rax       /* CPU-pushed CS */
+    testq $3, %rax
+    jz    1f
+
     movq  256(%rsp), %rax
     movq  %rax, 152(%rsp)       /* ctx->ss */
-
     movq  248(%rsp), %rax
     movq  %rax, 56(%rsp)        /* ctx->rsp */
+    jmp   2f
+
+1:
+    movq  $0x10, 152(%rsp)      /* current kernel SS */
+    leaq  248(%rsp), %rax       /* interrupted kernel RSP */
+    movq  %rax, 56(%rsp)
+2:
 
     /* Save kernel_tp (GS base) */
     movl  $0xC0000101, %ecx
@@ -90,18 +91,14 @@ isr_common:
     movq  %cr2, %rax
     movq  %rax, 168(%rsp)       /* ctx->kscratch0 */
 
-    /*
-     * Save kernel stack top for future CPL3 -> CPL0 transitions.  When
-     * this trap came from user mode, TSS.rsp0 is the top above the CPU
-     * frame (ctx + 208 + 56).
-     */
+    /* Save the per-task kernel stack top for future CPL3 -> CPL0 traps. */
     movq  $0, 176(%rsp)
     movq  144(%rsp), %rax       /* ctx->cs */
     testq $3, %rax
-    jz    1f
+    jz    3f
     leaq  264(%rsp), %rax
     movq  %rax, 176(%rsp)       /* ctx->padding[0] */
-1:
+3:
 
     /* Save global trap variables */
     movq  208(%rsp), %rax       /* vec */
@@ -138,7 +135,7 @@ kernel_trap:
     movq  %rsp, %rdi
     call  kernel_trap_handler
 
-    /* Restore CPU-pushed frame from trap_context_t (in case C modified it) */
+    /* Restore the common CPU-pushed frame in case C modified it. */
     movq  128(%rsp), %rax
     movq  %rax, 224(%rsp)       /* RIP */
 
@@ -148,11 +145,18 @@ kernel_trap:
     movq  144(%rsp), %rax
     movq  %rax, 232(%rsp)       /* CS */
 
+    /*
+     * Only privilege-changing traps have CPU-pushed RSP/SS slots.  Writing
+     * them for a kernel-mode trap would corrupt the interrupted kernel stack.
+     */
+    movq  144(%rsp), %rax
+    testq $3, %rax
+    jz    4f
     movq  152(%rsp), %rax
     movq  %rax, 256(%rsp)       /* SS */
-
     movq  56(%rsp), %rax
     movq  %rax, 248(%rsp)       /* old RSP */
+4:
 
     /* Restore general-purpose registers */
     movq  0(%rsp), %rax
