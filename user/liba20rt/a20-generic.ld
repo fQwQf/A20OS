@@ -6,7 +6,7 @@ PHDRS {
     rodata PT_LOAD FLAGS(4);   /* R   */
     data   PT_LOAD FLAGS(6);   /* R+W */
     bss    PT_LOAD FLAGS(6);   /* R+W */
-    a20_native 0x70000001 FLAGS(0);
+    a20_native 0x6a20a200 FLAGS(0);
 }
 
 SECTIONS {

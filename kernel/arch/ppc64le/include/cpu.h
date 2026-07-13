@@ -3,7 +3,15 @@
 
 #include "core/types.h"
 #include "platform.h"
+#include "asm/ppc64-regs.h"
 
+#define PPC64_TLBIEL_INSN(rb, rs, ric, prs, radix) \
+    (0x7c000224U | (((rs) & 0x1fU) << 21) | \
+     (((ric) & 0x3U) << 18) | (((prs) & 0x1U) << 17) | \
+     (((radix) & 0x1U) << 16) | (((rb) & 0x1fU) << 11))
+
+extern volatile uint64_t ppc64_current_addr_space;
+void ppc64_radix_set_process_root(uint64_t token);
 static inline void arch_mb(void)  { __asm__ __volatile__("sync" ::: "memory"); }
 static inline void arch_rmb(void) { __asm__ __volatile__("lwsync" ::: "memory"); }
 static inline void arch_wmb(void) { __asm__ __volatile__("lwsync" ::: "memory"); }
@@ -63,12 +71,41 @@ static inline int arch_local_irq_enabled(void) {
 }
 
 static inline void arch_tlb_flush(void) {
-    __asm__ __volatile__("ptesync\n\ttlbsync\n\tptesync" ::: "memory");
+    const uint64_t rs = 1UL << 32; /* PID 1 */
+    __asm__ __volatile__("ptesync" ::: "memory");
+    for (uint64_t set = 0; set < 128; set++) {
+        uint64_t rb = (1UL << 10) | (set << 12); /* IS=process */
+        if (set == 0) {
+            register uint64_t rb_reg __asm__("r4") = rb;
+            register uint64_t rs_reg __asm__("r5") = rs;
+            __asm__ __volatile__(".long %2"
+                                 :: "r"(rb_reg), "r"(rs_reg),
+                                    "i"(PPC64_TLBIEL_INSN(4, 5, 2, 1, 1))
+                                 : "memory");
+        } else {
+            register uint64_t rb_reg __asm__("r4") = rb;
+            register uint64_t rs_reg __asm__("r5") = rs;
+            __asm__ __volatile__(".long %2"
+                                 :: "r"(rb_reg), "r"(rs_reg),
+                                    "i"(PPC64_TLBIEL_INSN(4, 5, 0, 1, 1))
+                                 : "memory");
+        }
+    }
+    __asm__ __volatile__("ptesync\n\tisync" ::: "memory");
 }
 
 static inline void arch_tlb_flush_page(uint64_t addr) {
-    (void)addr;
-    arch_tlb_flush();
+    const uint64_t rs = 1UL << 32; /* PID 1 */
+    uint64_t rb = addr & ~0xfffUL;
+    register uint64_t rb_reg __asm__("r4") = rb;
+    register uint64_t rs_reg __asm__("r5") = rs;
+    __asm__ __volatile__(
+        "ptesync\n\t"
+        ".long %2\n\t"
+        "ptesync"
+        :: "r"(rb_reg), "r"(rs_reg),
+           "i"(PPC64_TLBIEL_INSN(4, 5, 0, 1, 1))
+        : "memory");
 }
 
 static inline void arch_set_task_pointer(void *task) {
@@ -98,21 +135,19 @@ static inline uint64_t arch_read_cycle(void) {
 }
 
 static inline uint64_t arch_read_cause(void) {
-    return 0;
+    return *(volatile uint64_t *)(PAGE_OFFSET + PPC64_TRAP_SCRATCH_PA + 48);
 }
 
 static inline uint64_t arch_read_epc(void) {
-    uint64_t v;
-    __asm__ __volatile__("mfspr %0,26" : "=r"(v));
-    return v;
+    return *(volatile uint64_t *)(PAGE_OFFSET + PPC64_TRAP_SCRATCH_PA + 32);
 }
 
 static inline uint64_t arch_read_tval(void) {
-    return 0;
+    return *(volatile uint64_t *)(PAGE_OFFSET + PPC64_TRAP_SCRATCH_PA + 88);
 }
 
 static inline void arch_write_epc(uint64_t v) {
-    __asm__ __volatile__("mtspr 26,%0" :: "r"(v));
+    *(volatile uint64_t *)(PAGE_OFFSET + PPC64_TRAP_SCRATCH_PA + 32) = v;
 }
 
 static inline void arch_write_tvec(uint64_t v) {
@@ -120,11 +155,13 @@ static inline void arch_write_tvec(uint64_t v) {
 }
 
 static inline uint64_t arch_read_satp(void) {
-    return 0;
+    return ppc64_current_addr_space;
 }
 
 static inline void arch_write_satp(uint64_t v) {
-    (void)v;
+    ppc64_current_addr_space = v;
+    if (v)
+        ppc64_radix_set_process_root(v);
 }
 
 static inline uint64_t arch_read_addr_space_token(void) { return arch_read_satp(); }

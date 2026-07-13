@@ -376,6 +376,17 @@ static int virtio_blk_wait_req(virtio_blk_inst_t *inst, virtio_blk_req_t *req,
             return -1;
         }
 
+        /*
+         * Poll-only transports cannot wake a blocked task through an IRQ.
+         * Keep draining the used ring here instead of depending on a later
+         * scheduler pass to notice the completion.
+         */
+        if (inst->vt.irq < 0) {
+            virtio_blk_poll_inst(inst);
+            cpu_relax();
+            continue;
+        }
+
         if (cur) {
             proc_set_wake_time(cur, deadline);
 

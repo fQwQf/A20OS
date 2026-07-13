@@ -1335,9 +1335,6 @@ run-nommu-arm32:
 run-nommu-riscv32:
 	$(MAKE) ARCH=riscv32 BRINGUP=$(BRINGUP) NOMMU=1 _run_impl
 
-run-nommu-ppc64le:
-	$(MAKE) ARCH=ppc64le BRINGUP=$(BRINGUP) NOMMU=1 _run_impl
-
 _run_impl:
 ifeq ($(BRINGUP),1)
 	$(MAKE) ARCH=$(ARCH) BRINGUP=1 kernel-only

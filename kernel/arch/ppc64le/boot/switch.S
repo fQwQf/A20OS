@@ -26,17 +26,18 @@ __switch:
     std     30,152(1)
     std     31,160(1)
     std     1,168(1)
-    li      9,0
-    std     9,176(1)
-    mfmsr   9
-    std     9,184(1)
     cmpdi   13,0
     beq     1f
     std     1,0(13)
 1:
     mr      1,3
     ld      9,0(1)
-    mtlr    9
+    /*
+     * ELFv2 global entries derive their TOC pointer from r12.  A fresh task
+     * resumes by branching to a function entry rather than through a normal
+     * bl instruction, so provide the entry address explicitly.
+     */
+    mr      12,9
     ld      2,8(1)
     ld      13,16(1)
     ld      14,24(1)
@@ -57,7 +58,23 @@ __switch:
     ld      29,144(1)
     ld      30,152(1)
     ld      31,160(1)
+    ld      11,176(1)
+    cmpdi   11,0
+    beq     2f
+    mr      3,11
+    bl      ppc64_radix_set_process_root
+2:
+    /*
+     * The address-space helper is a normal call and therefore clobbers LR.
+     * Restore the switched task's return address only after that call.
+     */
+    ld      9,0(1)
+    mtlr    9
+    mr      12,9
     ld      1,168(1)
-    ld      9,184(1)
-    mtmsrd  9
+    /*
+     * Stay in the scheduler's privileged MMU context.  The trap frame's MSR
+     * is installed later by user_trap_return with rfid; changing MSR here
+     * would also apply the stale context-switch value before the trampoline.
+     */
     blr

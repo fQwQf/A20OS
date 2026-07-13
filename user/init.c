@@ -85,6 +85,14 @@ int main(void)
     setup_console();
     setup_signals();
 
+#if defined(__powerpc64__)
+    char *argv[] = {"mksh", NULL};
+    char *envp[] = {"PATH=/bin", "HOME=/", "SHELL=/bin/mksh",
+                    "TERM=vt100", NULL};
+    execve("/bin/mksh", argv, envp);
+    perror("execve mksh");
+    do_shutdown();
+#else
     setup_runtime_links();
 
     xmkdir("/tmp");
@@ -166,4 +174,5 @@ int main(void)
 
     reap_children();
     do_shutdown();
+#endif
 }

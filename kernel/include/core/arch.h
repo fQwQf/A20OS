@@ -59,6 +59,10 @@
 # define ARCH_PT_LEVEL_ENTRIES(level) ARCH_PT_ENTRIES
 #endif
 
+#ifndef ARCH_PT_ROOT_ORDER
+# define ARCH_PT_ROOT_ORDER 0
+#endif
+
 static inline int arch_pt_level_entries(int level)
 {
     (void)level;

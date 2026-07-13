@@ -38,7 +38,7 @@
 struct a20_ht_internal;
 struct a20_ht_internal *a20_ht_create(void);
 int64_t a20_handle_install(struct a20_ht_internal *ht, void *object,
-                           uint16_t type, uint32_t rights);
+                           uint16_t type, a20_rights_t rights);
 #endif
 
 /* ================================================================== */
@@ -487,7 +487,6 @@ static int exec_install_process(task_t *t,
     uint64_t sp;
 #ifdef CONFIG_ABI_NATIVE
     if (info->is_native_abi) {
-        t->abi_mode = 1;
         sp = exec_setup_native_abi(t, info, bprm->argc,
                                     (char *const *)bprm->args,
                                     (char *const *)bprm->envs);
@@ -500,6 +499,12 @@ static int exec_install_process(task_t *t,
     }
     if (sp == 0)
         return -ENOMEM;
+
+#ifdef CONFIG_ABI_NATIVE
+    t->abi_mode = info->is_native_abi ? 1 : 0;
+#else
+    t->abi_mode = 0;
+#endif
 
     /* ---- 3. Create new mm BEFORE detaching old ---- */
     mm_struct_t *new_mm = kcalloc(1, sizeof(mm_struct_t));
@@ -594,7 +599,7 @@ static int exec_install_process(task_t *t,
         saved_kernel_sp = arch_trap_ctx_get_kernel_stack(trap, (uint64_t)(uintptr_t)trap);
         memset(trap, 0, sizeof(*trap));
         TRAP_CTX_KScratch0(trap) = arch_make_addr_space_token(info->pgdir);
-        TRAP_CTX_EPC(trap)       = info->entry;
+        arch_trap_ctx_set_user_entry(trap, info->entry);
         TRAP_CTX_SP(trap)        = sp;
         TRAP_CTX_TP(trap)        = info->tls_tp;
 #ifdef CONFIG_ABI_NATIVE
