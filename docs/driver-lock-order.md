@@ -124,17 +124,19 @@ g_lwip_lock -> virtio-net nonblocking send/recv paths only
 - 环形缓冲区（`m2s_*`、`s2m_*`）
 - `master_refs`、`slave_refs`
 - `locked`、`master_nonblock`、`slave_nonblock`
+- `master_waiting`、`slave_waiting` 和 termios 状态
 - 窗口大小（`ws_row`、`ws_col`）
 
-**局部顺序：** 无。这两个锁从不嵌套。
+**局部顺序：** `g_pty_alloc_lock` 与 per-pair lock 从不嵌套；阻塞 read 入队时使用 `per-pair lock -> wait-queue lock`。
 
 - `pty_alloc()` 获取 `g_pty_alloc_lock`，用 `kmalloc` 分配缓冲区，初始化 pair，然后释放 `g_pty_alloc_lock`。分配期间不持有 per-pair lock。
 - 所有 read/write/ioctl 路径只获取 per-pair lock。
-- `pty_release()` 获取 per-pair lock 来更新引用计数并清除 `in_use`，随后在释放 backing `vfile_t` 引用前释放该锁。
+- master/slave close 路径获取 per-pair lock 来更新各自的引用计数；只有两端引用和等待者都清零后才释放缓冲区并清除 `in_use`。
+- 阻塞 read 在持有 per-pair lock 时把任务加入对应 wait queue，再释放 pair lock 并调度；write 和对端 close 会唤醒该队列。
 
 **规则：**
 
-- 不要跨 VFS 操作持有 per-pair lock。缓冲区 I/O 和引用释放都在锁释放后发生。
+- 不要跨 VFS 操作持有 per-pair lock。等待队列操作只按 `per-pair lock -> wait-queue lock` 的局部顺序短暂嵌套。
 - `g_pty_alloc_lock` 在 `kmalloc` 期间保持持有。这是已知例外；新的代码应尽量避免在该锁下分配。
 
 ### loop

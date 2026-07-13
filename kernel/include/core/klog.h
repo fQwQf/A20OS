@@ -5,7 +5,10 @@
 
 /* Kernel ring buffer log — readable by dmesg syscall */
 
-#define KLOG_BUF_SIZE   (64 * 1024)     /* 64KB ring buffer */
+#ifndef CONFIG_KLOG_BUF_SIZE
+#define CONFIG_KLOG_BUF_SIZE (64 * 1024)
+#endif
+#define KLOG_BUF_SIZE CONFIG_KLOG_BUF_SIZE
 
 void klog_init(void);
 void klog_write(const char *fmt, ...);
