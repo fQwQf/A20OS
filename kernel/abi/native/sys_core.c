@@ -330,6 +330,8 @@ int64_t sys_a20_task_spawn(const a20_syscall_args_t *args)
     memset(&info, 0, sizeof(info));
     r = elf_load(img_fd, path_buf, &info);
     if (r < 0) return -A20_ERR_IO;
+    if (!info.is_native_abi)
+        return -A20_ERR_NOT_SUPPORTED;
 
     char *argv_buf[16] = {0};
     char *envp_buf[16] = {0};

@@ -16,7 +16,6 @@ static void handle_timer_irq(int from_user)
     task_t *cur = proc_current();
     if (cur)
         cur->total_time++;
-    proc_yield();
 }
 
 void trap_init(void)
