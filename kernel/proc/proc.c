@@ -417,7 +417,7 @@ int proc_alloc_user_image(uintptr_t entry, vaddr_t sp, pt_root_t *pgdir,
 
     trap_context_t *trap = (trap_context_t *)(ks_top - sizeof(trap_context_t));
     memset(trap, 0, sizeof(*trap));
-    TRAP_CTX_EPC(trap)   = entry;
+    arch_trap_ctx_set_user_entry(trap, entry);
     TRAP_CTX_SP(trap)   = sp;
     TRAP_CTX_TP(trap)    = tls_tp;
     TRAP_CTX_STATUS(trap) = arch_user_initial_status();

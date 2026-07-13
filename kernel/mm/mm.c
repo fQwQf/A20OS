@@ -68,7 +68,21 @@ size_t frame_free_count(void) {
 
 // 创建一个新的页表
 pte_t *pt_create(void) {
-    return (pte_t *)frame_alloc();
+    pfn_t pfn = pfa_alloc(ARCH_PT_ROOT_ORDER);
+    if (pfn == PFN_NONE)
+        return NULL;
+    pte_t *root = (pte_t *)pfn_to_virt(pfn);
+    memset(root, 0, PAGE_SIZE << ARCH_PT_ROOT_ORDER);
+    return root;
+}
+
+static void pt_free_table(pte_t *table, int level) {
+    if (!table)
+        return;
+    pfn_t pfn = virt_to_pfn(table);
+    if (!pfn_valid(pfn))
+        return;
+    pfa_free(pfn, level == ARCH_PT_ROOT_LEVEL ? ARCH_PT_ROOT_ORDER : 0);
 }
 
 static void pt_destroy_level(pte_t *table, int level) {
@@ -90,7 +104,7 @@ static void pt_destroy_level(pte_t *table, int level) {
             table[i] = 0;
         }
     }
-    frame_free(table);
+    pt_free_table(table, level);
 }
 
 // 递归销毁页表及其子页表
@@ -392,7 +406,8 @@ int pt_map_range(pt_root_t *pgdir, vaddr_t va, paddr_t pa, size_t size, pte_t fl
 
 // 递归克隆指定层级的页表项
 static pte_t *pt_clone_level(pte_t *src, int level) {
-    pte_t *dst = (pte_t *)frame_alloc();
+    pte_t *dst = level == ARCH_PT_ROOT_LEVEL ?
+        pt_create() : (pte_t *)frame_alloc();
     if (!dst) return NULL;
 
     int entries = arch_pt_level_entries(level);
@@ -461,7 +476,7 @@ static void pt_destroy_user_recursive(pte_t *table, int level) {
             }
             pte_t *next = arch_pte_to_ptr(pte);
             pt_destroy_user_recursive(next, level - 1);
-            frame_free(next);
+            pt_free_table(next, level - 1);
             table[i] = 0;
         }
     }
@@ -471,7 +486,7 @@ static void pt_destroy_user_recursive(pte_t *table, int level) {
 void pt_destroy_user(pt_root_t *pgdir) {
     if (!pgdir) return;
     pt_destroy_user_recursive(pgdir, ARCH_PT_ROOT_LEVEL);
-    frame_free(pgdir);
+    pt_free_table(pgdir, ARCH_PT_ROOT_LEVEL);
 }
 
 #endif /* defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU) */
