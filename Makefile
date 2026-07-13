@@ -11,9 +11,23 @@ BRINGUP ?= 0
 OPT ?= -O3
 NR_CPUS ?= 1
 ALLOW_UNVERIFIED_SMP ?= 0
+PROFILE ?= full
+STM32_OPENOCD_INTERFACE ?= interface/cmsis-dap.cfg
+STM32_OPENOCD_TRANSPORT ?= swd
+STM32_OPENOCD_ADAPTER_KHZ ?= 1000
+STM32_CMSIS_DAP_SERIAL ?=
+ifeq ($(ARCH),armv7m)
+BOARD ?= stm32f103
+PROFILE := mcu
+NOMMU := 1
+BRINGUP := 1
+STM32_FLASH_KB ?= 64
+STM32_RAM_KB ?= 20
+else
 BOARD ?= qemu-virt-$(ARCH)
+endif
 NOMMU ?= 0
-NOMMU_SUPPORTED_ARCHES := riscv64 riscv32 aarch64 arm32
+NOMMU_SUPPORTED_ARCHES := riscv64 riscv32 aarch64 arm32 armv7m
 
 ifeq ($(NOMMU),1)
 ifeq ($(filter $(ARCH),$(NOMMU_SUPPORTED_ARCHES)),)
@@ -41,6 +55,9 @@ endif
 KERNEL_DIR = kernel
 INCLUDE_DIR = $(KERNEL_DIR)/include
 BUILD_VARIANT = $(ABI)-$(if $(filter 1,$(BRINGUP)),bringup,dev)$(if $(filter 1,$(NOMMU)),-nommu,)
+ifeq ($(ARCH),armv7m)
+BUILD_VARIANT := $(BUILD_VARIANT)-$(BOARD)-f$(STM32_FLASH_KB)k-r$(STM32_RAM_KB)k
+endif
 BUILD_DIR = .kernel-build/$(ARCH)-$(BUILD_VARIANT)
 FAT32_IMG = $(BUILD_DIR)/fat32.img
 EXT4_IMG = $(BUILD_DIR)/ext4.img
@@ -59,7 +76,7 @@ EXTRA_IMG = $(BUILD_DIR)/extra.img
 EXTRA_STAGING_DIR = $(BUILD_DIR)/extra-staging
 EXTRA_PACKAGES = vim git gcc cc
 USER_BUILD_ID = $(ARCH):$(OPT):$(NOMMU)
-USER_BUILD_CHECK_DIRS = user/cmds user/init_common user/lib user/shell \
+USER_BUILD_CHECK_DIRS = user/cmds user/init_common user/desktop user/external/lvgl \
                         user/external/musl user/external/sbase user/external/mksh-cvs2git \
                         user/external/tlse user/external/fastfetch
 NATIVE_TAG_riscv64     := rv
@@ -67,6 +84,7 @@ NATIVE_TAG_loongarch64 := la
 NATIVE_TAG_aarch64     := aarch64
 NATIVE_TAG_x86_64      := x86_64
 NATIVE_TAG_arm32       := arm32
+NATIVE_TAG_armv7m      := armv7m
 NATIVE_TAG_riscv32     := rv32
 NATIVE_TAG_ppc64le     := ppc64le
 NATIVE_TAG             := $(NATIVE_TAG_$(ARCH))
@@ -103,6 +121,7 @@ CROSS_PREFIX_loongarch64 := loongarch64-linux-gnu-
 CROSS_PREFIX_aarch64     := aarch64-linux-gnu-
 CROSS_PREFIX_x86_64      := x86_64-linux-gnu-
 CROSS_PREFIX_arm32       := arm-linux-gnueabihf-
+CROSS_PREFIX_armv7m      := $(if $(shell command -v arm-none-eabi-gcc 2>/dev/null),arm-none-eabi-,)
 CROSS_PREFIX_riscv32     := $(if $(shell command -v riscv32-linux-gnu-gcc 2>/dev/null),riscv32-linux-gnu-,riscv64-linux-gnu-)
 CROSS_PREFIX_ppc64le     := powerpc64le-linux-gnu-
 
@@ -111,11 +130,15 @@ ARCH_CFLAGS_loongarch64 := -march=loongarch64 -mabi=lp64d -mcmodel=normal -fno-p
 ARCH_CFLAGS_aarch64     := -march=armv8-a -mgeneral-regs-only -fno-pic -mcmodel=large -mno-outline-atomics
 ARCH_CFLAGS_x86_64      := -m64 -mcmodel=large -mno-red-zone -fno-pic -fno-pie -mgeneral-regs-only
 ARCH_CFLAGS_arm32       := -march=armv7-a -marm -mfpu=vfpv3-d16 -mfloat-abi=hard -fno-pic -static -mno-unaligned-access
+ARCH_CFLAGS_armv7m      := -mcpu=cortex-m3 -mthumb -mfloat-abi=soft -fno-pic -static \
+                           -ffunction-sections -fdata-sections -fno-unwind-tables \
+                           -fno-asynchronous-unwind-tables
 ARCH_CFLAGS_riscv32     := -march=rv32imafdc -mabi=ilp32d -mcmodel=medany -fno-pic -static
 ARCH_CFLAGS_ppc64le     := -m64 -mcpu=power8 -mtune=power8 -mlong-double-64 -fno-pic -static -mno-vsx -mno-altivec -fno-tree-vectorize
 
 PHYS_BASE_aarch64     := 0x40080000
 PHYS_BASE_arm32       := 0x40080000
+PHYS_BASE_armv7m      := 0x20000000
 PHYS_BASE_ppc64le     := 0x00400000
 PHYS_BASE_riscv32     := 0x80200000
 PHYS_BASE_riscv64     := 0x80200000
@@ -133,6 +156,7 @@ ARCH_LDFLAGS_loongarch64 := -static -no-pie
 ARCH_LDFLAGS_aarch64     := -static -no-pie
 ARCH_LDFLAGS_x86_64      := -static -no-pie
 ARCH_LDFLAGS_arm32       := -static -no-pie
+ARCH_LDFLAGS_armv7m      := -static -Wl,--gc-sections
 ARCH_LDFLAGS_riscv32     := -static -no-pie -Wl,-m,elf32lriscv
 ARCH_LDFLAGS_ppc64le     := -static -no-pie
 
@@ -141,6 +165,7 @@ ARCH_LIBS_loongarch64 :=
 ARCH_LIBS_aarch64     :=
 ARCH_LIBS_x86_64      :=
 ARCH_LIBS_arm32       := -lgcc
+ARCH_LIBS_armv7m      :=
 ARCH_LIBS_riscv32     := -lgcc
 ARCH_LIBS_ppc64le     :=
 
@@ -149,6 +174,7 @@ QEMU_loongarch64 := qemu-system-loongarch64
 QEMU_aarch64     := qemu-system-aarch64
 QEMU_x86_64      := qemu-system-x86_64
 QEMU_arm32       := qemu-system-arm
+QEMU_armv7m      := qemu-system-arm
 QEMU_riscv32     := qemu-system-riscv32
 QEMU_ppc64le     := qemu-system-ppc64
 
@@ -156,7 +182,8 @@ QEMU_FLAGS_BASE_riscv64     := -machine virt -bios default -global virtio-mmio.f
 QEMU_FLAGS_BASE_loongarch64 := -machine virt
 QEMU_FLAGS_BASE_aarch64     := -machine virt -cpu cortex-a57 -global virtio-mmio.force-legacy=false
 QEMU_FLAGS_BASE_x86_64      := -machine q35 -no-reboot
-QEMU_FLAGS_BASE_arm32       := -machine virt -cpu cortex-a15
+QEMU_FLAGS_BASE_arm32       := -machine virt -cpu cortex-a15 -global virtio-mmio.force-legacy=false
+QEMU_FLAGS_BASE_armv7m      := -machine stm32vldiscovery
 QEMU_FLAGS_BASE_riscv32     := -machine virt -bios default -global virtio-mmio.force-legacy=false
 QEMU_FLAGS_BASE_ppc64le     := -machine pseries
 
@@ -176,6 +203,13 @@ QEMU_NET_arm32       := virtio-net-device,bus=virtio-mmio-bus.4
 QEMU_NET_riscv32     := virtio-net-device,bus=virtio-mmio-bus.4
 QEMU_NET_ppc64le     := virtio-net-pci
 
+QEMU_GUI_DEVICES_arm32 := -device virtio-keyboard-device,bus=virtio-mmio-bus.5 \
+                          -device virtio-mouse-device,bus=virtio-mmio-bus.6 \
+                          -device virtio-gpu-device,bus=virtio-mmio-bus.7
+QEMU_GUI_DEVICES_DEFAULT := -device virtio-gpu-device \
+                            -device virtio-keyboard-device \
+                            -device virtio-mouse-device
+
 # Compiler and tools
 CROSS_PREFIX := $(CROSS_PREFIX_$(ARCH))
 ARCH_CFLAGS  := $(ARCH_CFLAGS_$(ARCH))
@@ -186,15 +220,36 @@ QEMU_FLAGS   := $(QEMU_FLAGS_BASE_$(ARCH)) -m 1G -nographic -smp $(NR_CPUS)
 
 QEMU_BLK     := $(QEMU_BLK_$(ARCH))
 QEMU_NET     := $(QEMU_NET_$(ARCH))
+QEMU_GUI_DEVICES := $(if $(QEMU_GUI_DEVICES_$(ARCH)),$(QEMU_GUI_DEVICES_$(ARCH)),$(QEMU_GUI_DEVICES_DEFAULT))
 
+ifeq ($(ARCH),armv7m)
 ifeq ($(CROSS_PREFIX),)
+CLANG_ARMV7M := $(or $(shell command -v clang-19 2>/dev/null),$(shell command -v clang 2>/dev/null))
+LLVM_OBJCOPY_ARMV7M := $(or $(shell command -v llvm-objcopy-19 2>/dev/null),$(shell command -v llvm-objcopy 2>/dev/null))
+ifeq ($(CLANG_ARMV7M),)
+$(error ARCH=armv7m requires arm-none-eabi-gcc or clang with the arm-none-eabi target)
+endif
+ifeq ($(LLVM_OBJCOPY_ARMV7M),)
+$(error ARCH=armv7m with clang requires llvm-objcopy)
+endif
+CC := $(CLANG_ARMV7M) --target=arm-none-eabi
+OBJCOPY := $(LLVM_OBJCOPY_ARMV7M)
+ARCH_LDFLAGS += -fuse-ld=lld
+else
+CC := $(CROSS_PREFIX)gcc
+OBJCOPY := $(CROSS_PREFIX)objcopy
+endif
+else
+CC := $(CROSS_PREFIX)gcc
+OBJCOPY := $(CROSS_PREFIX)objcopy
+endif
+
+ifeq ($(CC),)
 $(error Unsupported ARCH '$(ARCH)')
 endif
 
 MKFS_FAT ?= $(or $(shell command -v mkfs.fat 2>/dev/null),$(wildcard /usr/sbin/mkfs.fat),$(wildcard /sbin/mkfs.fat),mkfs.fat)
 MKFS_EXT4 ?= $(or $(shell command -v mkfs.ext4 2>/dev/null),$(wildcard /usr/sbin/mkfs.ext4),$(wildcard /sbin/mkfs.ext4),mkfs.ext4)
-CC := $(CROSS_PREFIX)gcc
-
 LIBGCC_S_ARCH := $(shell $(CC) $(ARCH_CFLAGS) -print-file-name=libgcc_s.so.1 2>/dev/null)
 ifeq ($(LIBGCC_S_ARCH),libgcc_s.so.1)
 LIBGCC_S_ARCH :=
@@ -218,7 +273,7 @@ endif
 
 # Compiler flags
 CFLAGS = -Wall -Wextra $(OPT) -ffreestanding -nostdlib \
-         -nostartfiles -fno-builtin -fno-common -std=gnu99 \
+         -fno-builtin -fno-common -std=gnu99 \
          -MMD -MP \
          -I$(ARCH_INCLUDE_DIR) -I$(INCLUDE_DIR) -I$(KERNEL_DIR) -I$(KERNEL_DIR)/net/lwip_port \
          -I$(KERNEL_DIR)/external/lwip/src/include \
@@ -228,7 +283,10 @@ CFLAGS = -Wall -Wextra $(OPT) -ffreestanding -nostdlib \
          -DCONFIG_ABI_$(shell echo $(ABI) | tr a-z A-Z) \
          -DCONFIG_NR_CPUS=$(NR_CPUS) \
          -DCONFIG_BOARD_$(shell echo $(BOARD) | tr a-z A-Z | tr - _)
-ifeq ($(filter $(ARCH),arm32 riscv32),)
+ifeq ($(ARCH),armv7m)
+CFLAGS += -DSTM32_FLASH_KB=$(STM32_FLASH_KB) -DSTM32_RAM_KB=$(STM32_RAM_KB)
+endif
+ifeq ($(filter $(ARCH),arm32 armv7m riscv32),)
 CFLAGS += -DCONFIG_64BIT
 else
 CFLAGS += -DCONFIG_32BIT
@@ -257,6 +315,10 @@ CFLAGS += -DCONFIG_DRIVER_LIFECYCLE_TEST
 endif
 
 LDFLAGS = -nostdlib -nostartfiles -Wl,--build-id=none -T $(KERNEL_DIR)/arch/$(ARCH)/boot/ldscript.ld $(ARCH_LDFLAGS) $(LDFLAGS_NOMMU)
+ifeq ($(ARCH),armv7m)
+LDFLAGS += -Wl,--defsym=FLASH_LENGTH=$(STM32_FLASH_KB)K \
+           -Wl,--defsym=RAM_LENGTH=$(STM32_RAM_KB)K
+endif
 
 # Source files
 # ABI-specific source directories
@@ -267,6 +329,16 @@ else
 ABI_SRCS = $(wildcard $(KERNEL_DIR)/abi/$(ABI)/*.c)
 endif
 
+ifeq ($(PROFILE),mcu)
+KERNEL_SRC = $(KERNEL_DIR)/mcu/main.c \
+             $(KERNEL_DIR)/mcu/uart.c \
+             $(KERNEL_DIR)/mcu/heap.c \
+             $(KERNEL_DIR)/core/printf.c \
+             $(KERNEL_DIR)/core/string.c \
+             $(KERNEL_DIR)/core/panic.c \
+             $(wildcard $(KERNEL_DIR)/platform/$(BOARD)/*.c) \
+             $(shell find $(KERNEL_DIR)/arch/$(ARCH) -type f -name '*.c' | sort)
+else
 KERNEL_SRC = $(wildcard $(KERNEL_DIR)/*.c) \
              $(wildcard $(KERNEL_DIR)/core/*.c) \
              $(filter-out $(KERNEL_DIR)/mm/nommu.c,$(wildcard $(KERNEL_DIR)/mm/*.c)) \
@@ -306,6 +378,7 @@ ROOTFS_OVERLAY_FILES := $(shell find $(ROOTFS_OVERLAY_DIR) -type f 2>/dev/null)
 KERNEL_SRC += $(ROOTFS_OVERLAY_SRC)
 
 include $(KERNEL_DIR)/external/lwip/sources.mk
+endif
 
 # Object files
 KERNEL_OBJ = $(patsubst $(KERNEL_DIR)/%.c,$(BUILD_DIR)/%.o,$(KERNEL_SRC))
@@ -323,7 +396,9 @@ KERNEL_BIN = $(BUILD_DIR)/kernel.bin
 # Targets
 # ================================================================
 
-.PHONY: all clean run-riscv64 run-loongarch64 run-arm64 run-x86_64 run-arm32 run-riscv32 run-ppc64le debug-riscv64 debug-loongarch64 debug-arm64 debug-x86_64 debug-arm32 debug-riscv32 debug-ppc64le \
+.PHONY: all clean run-riscv64 run-gui-riscv64 run-gui-rv run-loongarch64 run-gui-loongarch64 run-gui-la run-arm64 run-x86_64 run-arm32 run-gui-arm32 run-riscv32 run-ppc64le debug-riscv64 debug-loongarch64 debug-arm64 debug-x86_64 debug-arm32 debug-riscv32 debug-ppc64le \
+		run-gui-nommu-arm32 run-nommu-gui-arm32 \
+		stm32f103-bringup stm32f103-xuanwu flash-stm32f103-xuanwu run-stm32f103-qemu \
 		check-kernel-build check-user-build check-dev-build check-contest-build check-build-matrix check-abi-smoke-gate check-doc-drift check-doc-test-gates check-final-definition check-concurrency-foundation check-mm-lock-model check-abi-boundary check-driver-core-model check-external-dependency-boundary \
 		check-arch-boundary \
 		check-riscv64-bringup check-loongarch64-bringup check-aarch64-bringup check-x86_64-bringup check-arm32-bringup check-riscv32-bringup check-ppc64le-bringup \
@@ -1262,19 +1337,19 @@ ext4_img: $(USER_BUILD_STAMP) ext4_img_only
 	cp $(EXT4_IMG) $(FS_TEST_IMG)
 
 $(KERNEL_BIN): $(KERNEL_ELF)
-	$(CROSS_PREFIX)objcopy -O binary $< $@
+	$(OBJCOPY) -O binary $< $@
 
 $(KERNEL_ELF): $(KERNEL_OBJ) $(ASM_OBJ) $(KERNEL_DIR)/arch/$(ARCH)/boot/ldscript.ld
 	@mkdir -p $(dir $@)
-	$(CROSS_PREFIX)gcc $(LDFLAGS) $(KERNEL_OBJ) $(ASM_OBJ) $(ARCH_LIBS) -o $@
+	$(CC) $(LDFLAGS) $(KERNEL_OBJ) $(ASM_OBJ) $(ARCH_LIBS) -o $@
 
 $(BUILD_DIR)/%.o: $(KERNEL_DIR)/%.c | Makefile $(BUILD_TIME_HDR)
 	@mkdir -p $(dir $@)
-	$(CROSS_PREFIX)gcc $(CFLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/%.o: $(KERNEL_DIR)/%.S Makefile | $(BUILD_TIME_HDR)
 	@mkdir -p $(dir $@)
-	$(CROSS_PREFIX)gcc $(CFLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) -c $< -o $@
 
 clean:
 	find $(KERNEL_DIR) -name '*.o' -delete
@@ -1288,6 +1363,45 @@ clean:
 
 kernel-only: $(KERNEL_BIN)
 	@echo "Kernel-only build complete: $(KERNEL_BIN)"
+
+stm32f103-bringup:
+	$(MAKE) ARCH=armv7m BOARD=stm32f103 PROFILE=mcu STM32_FLASH_KB=64 STM32_RAM_KB=20 kernel-only
+
+stm32f103-xuanwu:
+	$(MAKE) ARCH=armv7m BOARD=stm32f103 PROFILE=mcu STM32_FLASH_KB=512 STM32_RAM_KB=64 kernel-only
+
+flash-stm32f103-xuanwu: stm32f103-xuanwu
+	@command -v openocd >/dev/null 2>&1 || { \
+		echo "openocd not found; install OpenOCD or use STM32CubeProgrammer"; \
+		exit 1; \
+	}
+	openocd -f $(STM32_OPENOCD_INTERFACE) \
+		$(if $(STM32_CMSIS_DAP_SERIAL),-c "adapter serial $(STM32_CMSIS_DAP_SERIAL)") \
+		-c "transport select $(STM32_OPENOCD_TRANSPORT)" \
+		-c "adapter speed $(STM32_OPENOCD_ADAPTER_KHZ)" \
+		-f target/stm32f1x.cfg \
+		-c "init" \
+		-c "mww 0xE000EDF0 0xA05F0003" \
+		-c "sleep 50" \
+		-c "flash probe 0" \
+		-c "flash write_image erase .kernel-build/armv7m-both-bringup-nommu-stm32f103-f512k-r64k/kernel.elf" \
+		-c "verify_image .kernel-build/armv7m-both-bringup-nommu-stm32f103-f512k-r64k/kernel.elf" \
+		-c "set boot_sp [mrw 0x08000000]" \
+		-c "set boot_pc [mrw 0x08000004]" \
+		-c "reg msp \$$boot_sp" \
+		-c "reg psp 0" \
+		-c "reg control 0" \
+		-c "reg primask 0" \
+		-c "reg basepri 0" \
+		-c "reg faultmask 0" \
+		-c "reg pc \$$boot_pc" \
+		-c "resume" \
+		-c "shutdown"
+
+run-stm32f103-qemu:
+	$(MAKE) ARCH=armv7m BOARD=stm32f103 PROFILE=mcu STM32_FLASH_KB=128 STM32_RAM_KB=8 kernel-only
+	qemu-system-arm -machine stm32vldiscovery -nographic \
+		-kernel .kernel-build/armv7m-both-bringup-nommu-stm32f103-f128k-r8k/kernel.bin
 
 # ----------------------------------------------------------------
 # Run targets (development mode)
@@ -1317,6 +1431,9 @@ run-x86_64:
 run-arm32:
 	$(MAKE) ARCH=arm32 BRINGUP=$(BRINGUP) _run_impl
 
+run-gui-arm32:
+	$(MAKE) ARCH=arm32 BRINGUP=$(BRINGUP) _run_gui_impl
+
 run-riscv32:
 	$(MAKE) ARCH=riscv32 BRINGUP=$(BRINGUP) _run_impl
 
@@ -1341,6 +1458,9 @@ run-nommu-x86_64:
 run-nommu-arm32:
 	$(MAKE) ARCH=arm32 BRINGUP=$(BRINGUP) NOMMU=1 _run_impl
 
+run-gui-nommu-arm32 run-nommu-gui-arm32:
+	$(MAKE) ARCH=arm32 BRINGUP=$(BRINGUP) NOMMU=1 _run_gui_impl
+
 run-nommu-riscv32:
 	$(MAKE) ARCH=riscv32 BRINGUP=$(BRINGUP) NOMMU=1 _run_impl
 
@@ -1358,7 +1478,7 @@ ifeq ($(BRINGUP),1)
 else
 	$(MAKE) ARCH=$(ARCH) BRINGUP=$(BRINGUP) dev-build
 endif
-	$(QEMU) $(patsubst -nographic,-display gtk -device virtio-gpu-device -device virtio-keyboard-device -device virtio-mouse-device -serial stdio,$(QEMU_FLAGS)) -kernel $(KERNEL_ELF)
+	$(QEMU) $(patsubst -nographic,-display gtk $(QEMU_GUI_DEVICES) -serial stdio,$(QEMU_FLAGS)) -kernel $(KERNEL_ELF)
 
 # --- Debug Targets ---
 

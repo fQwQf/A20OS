@@ -603,11 +603,14 @@ LVGL_DIR := external/lvgl
 LVGL_SRCS := $(shell find $(LVGL_DIR)/src -type f -name '*.c')
 LVGL_OBJS := $(patsubst $(LVGL_DIR)/%.c,$(OBJ_DIR)/lvgl/%.o,$(LVGL_SRCS))
 LVGL_CFLAGS := $(CFLAGS) -I$(LVGL_DIR) -Iexternal -Idesktop -DLV_CONF_INCLUDE_SIMPLE
+ifeq ($(NOMMU),1)
+LVGL_CFLAGS += -DA20OS_NOMMU
+endif
 
-DESKTOP_SRCS := desktop/desktop.c desktop/lv_port_disp.c desktop/lv_port_indev.c
+DESKTOP_SRCS := desktop/desktop.c desktop/desktop_terminal.c desktop/lv_port_disp.c desktop/lv_port_indev.c
 DESKTOP_OBJS := $(patsubst desktop/%.c,$(OBJ_DIR)/desktop/%.o,$(DESKTOP_SRCS))
 
-$(OBJ_DIR)/lvgl/%.o: $(LVGL_DIR)/%.c | build_dir musl_prepare
+$(OBJ_DIR)/lvgl/%.o: $(LVGL_DIR)/%.c desktop/lv_conf.h | build_dir musl_prepare
 	@mkdir -p $(dir $@)
 	$(CC) $(LVGL_CFLAGS) -c -o $@ $<
 
