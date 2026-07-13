@@ -4,7 +4,7 @@
  * This header dispatches to the correct arch-specific headers based on
  * the CONFIG_* define set by the Makefile (-DCONFIG_RISCV64,
  * -DCONFIG_RISCV32, -DCONFIG_LOONGARCH64, -DCONFIG_AARCH64,
- * -DCONFIG_ARM32, -DCONFIG_PPC64LE or -DCONFIG_X86_64).
+ * -DCONFIG_ARM32, -DCONFIG_ARMV7M, -DCONFIG_PPC64LE or -DCONFIG_X86_64).
  *
  * All arch-specific code (inline asm, register access, page table format,
  * trap context layout, hardware addresses) lives under kernel/arch/$(ARCH)/.
@@ -37,12 +37,14 @@
 # include "arch/aarch64/include/arch.h"
 #elif defined(CONFIG_ARM32)
 # include "arch/arm32/include/arch.h"
+#elif defined(CONFIG_ARMV7M)
+# include "arch/armv7m/include/arch.h"
 #elif defined(CONFIG_PPC64LE)
 # include "arch/ppc64le/include/arch.h"
 #elif defined(CONFIG_X86_64)
 # include "arch/x86_64/include/arch.h"
 #else
-# error "No architecture defined. Set ARCH=riscv64, ARCH=riscv32, ARCH=loongarch64, ARCH=aarch64, ARCH=arm32, ARCH=ppc64le or ARCH=x86_64."
+# error "No architecture defined. Set ARCH=riscv64, ARCH=riscv32, ARCH=loongarch64, ARCH=aarch64, ARCH=arm32, ARCH=armv7m, ARCH=ppc64le or ARCH=x86_64."
 #endif
 
 /*
@@ -118,6 +120,8 @@ static inline int arch_syscall_resched_allowed(void)
 # define ARCH_NAME "aarch64"
 #elif defined(CONFIG_ARM32)
 # define ARCH_NAME "arm32"
+#elif defined(CONFIG_ARMV7M)
+# define ARCH_NAME "armv7m"
 #elif defined(CONFIG_PPC64LE)
 # define ARCH_NAME "ppc64le"
 #elif defined(CONFIG_X86_64)
