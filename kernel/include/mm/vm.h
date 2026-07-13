@@ -26,6 +26,7 @@ struct vnode;
 #define VM_VMO       (1UL << 14)
 #define VM_LOCKED    (1UL << 15)
 #define VM_SYSV_SHM  (1UL << 16)
+#define VM_PFNMAP    (1UL << 17)
 
 #ifdef CONFIG_NOMMU
 #define NOMMU_ALLOC_MAX    32
