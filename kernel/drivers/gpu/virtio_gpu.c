@@ -17,11 +17,11 @@
 
 typedef struct {
     virtio_transport_t vt;
-    virtq_desc_t       desc[VIRTIO_GPU_QUEUE_SIZE]  ALIGNED(16);
-    virtq_avail_t      avail                    ALIGNED(2);
-    virtq_used_t       used                     ALIGNED(4);
+    virtq_desc_t       desc[VIRTIO_GPU_QUEUE_SIZE] ALIGNED(64);
+    virtq_avail_t      avail ALIGNED(64);
+    virtq_used_t       used ALIGNED(64);
     
-    spinlock_t         lock;
+    spinlock_t         lock ALIGNED(64);
     int                slot;
     
     uint32_t           width;
@@ -48,6 +48,7 @@ static uint32_t virtio_gpu_mmio_read32(virtio_transport_t *t, uint32_t off) {
 
 static int virtio_gpu_send_cmd(virtio_gpu_inst_t *inst, void *req, size_t req_len, void *resp, size_t resp_len) {
     uint64_t flags = spin_lock_irqsave(&inst->lock);
+    int completed = 0;
     
     uint16_t head = inst->desc_idx % VIRTIO_GPU_QUEUE_SIZE;
     uint16_t slot = head;
@@ -79,13 +80,12 @@ static int virtio_gpu_send_cmd(virtio_gpu_inst_t *inst, void *req, size_t req_le
     wmb();
     
     // Sync avail ring updates to device
-    arch_dma_sync_for_device(&inst->avail.ring[avail_slot], sizeof(uint16_t));
-    arch_dma_sync_for_device(&inst->avail.idx, sizeof(uint16_t));
+    arch_dma_sync_for_device(&inst->avail, sizeof(inst->avail));
     
     inst->desc_idx += 2;
     
     // Snapshot current used->idx BEFORE notifying device
-    arch_dma_sync_for_cpu((void*)&inst->used.idx, sizeof(uint16_t));
+    arch_dma_sync_for_cpu(&inst->used, sizeof(inst->used));
     uint16_t used_before = ((volatile virtq_used_t *)&inst->used)->idx;
     
     // Notify device (queue 0 = controlq)
@@ -96,12 +96,14 @@ static int virtio_gpu_send_cmd(virtio_gpu_inst_t *inst, void *req, size_t req_le
     volatile virtq_used_t *used = &inst->used;
     uint32_t timeout = 5000000; // ~5M iterations, enough for slow emulation
     while (timeout--) {
-        arch_dma_sync_for_cpu((void*)&used->idx, sizeof(uint16_t));
-        if (used->idx != used_before)
+        arch_dma_sync_for_cpu((void *)used, sizeof(*used));
+        if (used->idx != used_before) {
+            completed = 1;
             break;
+        }
     }
     
-    if (timeout == 0) {
+    if (!completed) {
         kinfo("[GPU] send_cmd TIMEOUT! cmd=%x\n", ((struct virtio_gpu_ctrl_hdr *)req)->type);
         spin_unlock_irqrestore(&inst->lock, flags);
         return -1;
@@ -109,8 +111,11 @@ static int virtio_gpu_send_cmd(virtio_gpu_inst_t *inst, void *req, size_t req_le
     
     // Consume the used entry
     uint16_t ring_idx = (uint16_t)(used_before % VIRTIO_GPU_QUEUE_SIZE);
-    arch_dma_sync_for_cpu((void*)&used->ring[ring_idx], sizeof(virtq_used_elem_t));
     arch_dma_sync_for_cpu(resp, resp_len);
+    if (used->ring[ring_idx].id != slot) {
+        spin_unlock_irqrestore(&inst->lock, flags);
+        return -1;
+    }
     
     inst->last_used = used->idx;
     
@@ -140,23 +145,40 @@ static int gpu_flush(struct device *dev, uint32_t x, uint32_t y, uint32_t w, uin
         x = 0; y = 0;
         w = inst->width; h = inst->height;
     }
+
+    if (x >= inst->width || y >= inst->height)
+        return -1;
+    if (w > inst->width - x)
+        w = inst->width - x;
+    if (h > inst->height - y)
+        h = inst->height - y;
+
+    size_t offset = ((size_t)y * inst->width + x) * (inst->bpp / 8);
+    size_t bytes = ((size_t)(h - 1) * inst->width + w) * (inst->bpp / 8);
+    pfn_t fb_pfn = phys_to_pfn(inst->fb_phys);
+    void *fb_virt = pfn_to_virt(fb_pfn);
+    if (!fb_virt)
+        return -1;
+    arch_dma_sync_for_device((uint8_t *)fb_virt + offset, bytes);
     
-    struct virtio_gpu_transfer_to_host_2d t2h;
+    struct virtio_gpu_transfer_to_host_2d t2h ALIGNED(64);
     memset(&t2h, 0, sizeof(t2h));
     t2h.hdr.type = VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D;
     t2h.r.x = x;
     t2h.r.y = y;
     t2h.r.width = w;
     t2h.r.height = h;
-    t2h.offset = (y * inst->width + x) * (inst->bpp / 8);
+    t2h.offset = offset;
     t2h.resource_id = 1;
     
-    struct virtio_gpu_ctrl_hdr resp;
+    struct virtio_gpu_ctrl_hdr resp ALIGNED(64);
     memset(&resp, 0, sizeof(resp));
     
-    virtio_gpu_send_cmd(inst, &t2h, sizeof(t2h), &resp, sizeof(resp));
+    if (virtio_gpu_send_cmd(inst, &t2h, sizeof(t2h), &resp, sizeof(resp)) < 0 ||
+        resp.type != VIRTIO_GPU_RESP_OK_NODATA)
+        return -1;
     
-    struct virtio_gpu_resource_flush flush;
+    struct virtio_gpu_resource_flush flush ALIGNED(64);
     memset(&flush, 0, sizeof(flush));
     flush.hdr.type = VIRTIO_GPU_CMD_RESOURCE_FLUSH;
     flush.r.x = x;
@@ -166,7 +188,9 @@ static int gpu_flush(struct device *dev, uint32_t x, uint32_t y, uint32_t w, uin
     flush.resource_id = 1;
     
     memset(&resp, 0, sizeof(resp));
-    virtio_gpu_send_cmd(inst, &flush, sizeof(flush), &resp, sizeof(resp));
+    if (virtio_gpu_send_cmd(inst, &flush, sizeof(flush), &resp, sizeof(resp)) < 0 ||
+        resp.type != VIRTIO_GPU_RESP_OK_NODATA)
+        return -1;
     
     return 0;
 }
@@ -188,6 +212,8 @@ static int virtio_gpu_probe(device_t *dev) {
     if (!mmio_res) return -1;
     
     virtio_gpu_inst_t *inst = &g_gpu_inst;
+    int order = 0;
+    pfn_t fb_pfn = PFN_NONE;
     memset(inst, 0, sizeof(*inst));
     spin_init(&inst->lock);
     
@@ -197,6 +223,12 @@ static int virtio_gpu_probe(device_t *dev) {
     inst->vt.legacy  = 0;
     
     virtio_transport_t *vt = &inst->vt;
+
+    uint32_t magic = vt->read32(vt, VIRTIO_MMIO_MAGIC);
+    uint32_t version = vt->read32(vt, VIRTIO_MMIO_VERSION);
+    uint32_t device_id = vt->read32(vt, VIRTIO_MMIO_DEVICE_ID);
+    if (magic != 0x74726976U || version != 2U || device_id != 16U)
+        return -1;
     
     vt->write32(vt, VIRTIO_MMIO_STATUS, 0);
     mb();
@@ -211,6 +243,8 @@ static int virtio_gpu_probe(device_t *dev) {
     
     vt->write32(vt, VIRTIO_MMIO_DEVICE_FEATURES_SEL, 1);
     uint32_t features_hi = vt->read32(vt, VIRTIO_MMIO_DEVICE_FEATURES);
+    if (!(features_hi & VIRTIO_F_VERSION_1_BIT))
+        goto fail;
     uint32_t driver_hi = features_hi & VIRTIO_F_VERSION_1_BIT;
     vt->write32(vt, VIRTIO_MMIO_DRIVER_FEATURES_SEL, 1);
     vt->write32(vt, VIRTIO_MMIO_DRIVER_FEATURES, driver_hi);
@@ -219,10 +253,24 @@ static int virtio_gpu_probe(device_t *dev) {
     status |= VIRTIO_STATUS_FEATURES_OK;
     vt->write32(vt, VIRTIO_MMIO_STATUS, status);
     mb();
+    if (!(vt->read32(vt, VIRTIO_MMIO_STATUS) & VIRTIO_STATUS_FEATURES_OK))
+        goto fail;
     
     // Setup controlq (queue 0)
     vt->write32(vt, VIRTIO_MMIO_QUEUE_SEL, 0);
+    uint32_t qmax = vt->read32(vt, VIRTIO_MMIO_QUEUE_NUM_MAX);
+    if (qmax < VIRTIO_GPU_QUEUE_SIZE)
+        goto fail;
+    if (vt->read32(vt, VIRTIO_MMIO_QUEUE_READY) != 0)
+        goto fail;
     vt->write32(vt, VIRTIO_MMIO_QUEUE_NUM, VIRTIO_GPU_QUEUE_SIZE);
+
+    memset(inst->desc, 0, sizeof(inst->desc));
+    memset(&inst->avail, 0, sizeof(inst->avail));
+    memset(&inst->used, 0, sizeof(inst->used));
+    arch_dma_sync_for_device(inst->desc, sizeof(inst->desc));
+    arch_dma_sync_for_device(&inst->avail, sizeof(inst->avail));
+    arch_dma_sync_for_device(&inst->used, sizeof(inst->used));
     
     uint64_t desc_pa  = va_to_pa(inst->desc);
     uint64_t avail_pa = va_to_pa(&inst->avail);
@@ -247,19 +295,20 @@ static int virtio_gpu_probe(device_t *dev) {
     inst->fb_size = inst->width * inst->height * (inst->bpp / 8);
     
     // Allocate framebuffer as continuous physical memory
-    int order = 0;
     size_t req_pages = inst->fb_size / PAGE_SIZE + ((inst->fb_size % PAGE_SIZE) ? 1 : 0);
     while ((1UL << order) < req_pages) {
         order++;
     }
-    pfn_t fb_pfn = pfa_alloc(order);
-    if (fb_pfn == (uint32_t)-1) {
-        return -1;
+    fb_pfn = pfa_alloc(order);
+    if (fb_pfn == PFN_NONE) {
+        goto fail;
     }
     inst->fb_phys = pfn_to_phys(fb_pfn);
+    memset(pfn_to_virt(fb_pfn), 0, (size_t)PAGE_SIZE << order);
+    arch_dma_sync_for_device(pfn_to_virt(fb_pfn), inst->fb_size);
     
     // CREATE_2D
-    struct virtio_gpu_resource_create_2d create;
+    struct virtio_gpu_resource_create_2d create ALIGNED(64);
     memset(&create, 0, sizeof(create));
     create.hdr.type = VIRTIO_GPU_CMD_RESOURCE_CREATE_2D;
     create.resource_id = 1;
@@ -267,15 +316,17 @@ static int virtio_gpu_probe(device_t *dev) {
     create.width = inst->width;
     create.height = inst->height;
     
-    struct virtio_gpu_ctrl_hdr resp;
+    struct virtio_gpu_ctrl_hdr resp ALIGNED(64);
     memset(&resp, 0, sizeof(resp));
-    virtio_gpu_send_cmd(inst, &create, sizeof(create), &resp, sizeof(resp));
+    if (virtio_gpu_send_cmd(inst, &create, sizeof(create), &resp, sizeof(resp)) < 0 ||
+        resp.type != VIRTIO_GPU_RESP_OK_NODATA)
+        goto fail;
     
     // ATTACH_BACKING
     struct {
         struct virtio_gpu_resource_attach_backing req;
         struct virtio_gpu_mem_entry entry;
-    } attach;
+    } attach ALIGNED(64);
     memset(&attach, 0, sizeof(attach));
     attach.req.hdr.type = VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING;
     attach.req.resource_id = 1;
@@ -284,10 +335,12 @@ static int virtio_gpu_probe(device_t *dev) {
     attach.entry.length = inst->fb_size;
     
     memset(&resp, 0, sizeof(resp));
-    virtio_gpu_send_cmd(inst, &attach, sizeof(attach), &resp, sizeof(resp));
+    if (virtio_gpu_send_cmd(inst, &attach, sizeof(attach), &resp, sizeof(resp)) < 0 ||
+        resp.type != VIRTIO_GPU_RESP_OK_NODATA)
+        goto fail;
     
     // SET_SCANOUT
-    struct virtio_gpu_set_scanout scanout;
+    struct virtio_gpu_set_scanout scanout ALIGNED(64);
     memset(&scanout, 0, sizeof(scanout));
     scanout.hdr.type = VIRTIO_GPU_CMD_SET_SCANOUT;
     scanout.r.x = 0;
@@ -298,18 +351,31 @@ static int virtio_gpu_probe(device_t *dev) {
     scanout.resource_id = 1;
     
     memset(&resp, 0, sizeof(resp));
-    virtio_gpu_send_cmd(inst, &scanout, sizeof(scanout), &resp, sizeof(resp));
+    if (virtio_gpu_send_cmd(inst, &scanout, sizeof(scanout), &resp, sizeof(resp)) < 0 ||
+        resp.type != VIRTIO_GPU_RESP_OK_NODATA)
+        goto fail;
     
     dev->drv_priv = inst;
-    inst->valid = 1;
-    g_gpu_device = dev;
-    
+
     // Initial FLUSH to transfer data and trigger QEMU window resize
-    gpu_flush(dev, 0, 0, inst->width, inst->height);
+    if (gpu_flush(dev, 0, 0, inst->width, inst->height) < 0) {
+        dev->drv_priv = NULL;
+        goto fail;
+    }
+
+    inst->valid = 1;
     g_gpu_device = dev;
     kinfo("[GPU] virtio-gpu ready: %dx%d (FB: %lu MB at 0x%lx)\n", 
           inst->width, inst->height, inst->fb_size/1024/1024, inst->fb_phys);
     return 0;
+
+fail:
+    vt->write32(vt, VIRTIO_MMIO_STATUS,
+                vt->read32(vt, VIRTIO_MMIO_STATUS) | VIRTIO_STATUS_FAILED);
+    if (fb_pfn != PFN_NONE)
+        pfa_free(fb_pfn, order);
+    memset(inst, 0, sizeof(*inst));
+    return -1;
 }
 
 static const device_id_t virtio_gpu_ids[] = {

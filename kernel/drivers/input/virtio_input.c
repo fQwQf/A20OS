@@ -12,22 +12,25 @@
 #include "core/klog.h"
 #include "core/lock.h"
 #include "abi/linux/errno.h"
-
-#include "abi/linux/errno.h"
 #include "drivers/block/virtio_blk.h"
-#include "fs/devfs.h"
 
 #define VIRTIO_INPUT_QUEUE_SIZE VIRTIO_QUEUE_SIZE
+#define VIRTIO_INPUT_DMA_LINE   64
+
+typedef struct {
+    struct virtio_input_event event;
+    uint8_t padding[VIRTIO_INPUT_DMA_LINE - sizeof(struct virtio_input_event)];
+} virtio_input_event_slot_t;
 
 typedef struct {
     virtio_transport_t vt;
-    virtq_desc_t       desc[VIRTIO_INPUT_QUEUE_SIZE]  ALIGNED(16);
-    virtq_avail_t      avail;
-    virtq_used_t       used;
+    virtq_desc_t       desc[VIRTIO_INPUT_QUEUE_SIZE] ALIGNED(64);
+    virtq_avail_t      avail ALIGNED(64);
+    virtq_used_t       used ALIGNED(64);
     
-    struct virtio_input_event events[VIRTIO_INPUT_QUEUE_SIZE];
+    virtio_input_event_slot_t events[VIRTIO_INPUT_QUEUE_SIZE] ALIGNED(64);
     
-    spinlock_t         lock;
+    spinlock_t         lock ALIGNED(64);
     int                valid;
     uint16_t           desc_idx;
     uint16_t           last_used;
@@ -43,10 +46,6 @@ typedef struct {
 static virtio_input_inst_t g_input_insts[MAX_VIRTIO_INPUT_DEVS];
 static int g_ninputs = 0;
 
-static virtio_input_inst_t *virtio_input_get_inst(device_t *dev) {
-    return (virtio_input_inst_t *)dev->drv_priv;
-}
-
 static void virtio_input_mmio_write32(virtio_transport_t *t, uint32_t off, uint32_t val) {
     writel(val, (volatile void *)((uintptr_t)t->priv + off));
 }
@@ -58,7 +57,7 @@ static uint32_t virtio_input_mmio_read32(virtio_transport_t *t, uint32_t off) {
 static void virtio_input_submit_all(virtio_input_inst_t *inst) {
     // Fill eventq with all available slots
     for (int i = 0; i < VIRTIO_INPUT_QUEUE_SIZE; i++) {
-        inst->desc[i].addr = va_to_pa(&inst->events[i]);
+        inst->desc[i].addr = va_to_pa(&inst->events[i].event);
         inst->desc[i].len = sizeof(struct virtio_input_event);
         inst->desc[i].flags = VIRTQ_DESC_F_WRITE;
         inst->desc[i].next = 0;
@@ -67,6 +66,10 @@ static void virtio_input_submit_all(virtio_input_inst_t *inst) {
         inst->avail.idx++;
     }
     wmb();
+    arch_dma_sync_for_device(inst->desc, sizeof(inst->desc));
+    arch_dma_sync_for_device(inst->events, sizeof(inst->events));
+    arch_dma_sync_for_device(&inst->avail, sizeof(inst->avail));
+    arch_dma_sync_for_device(&inst->used, sizeof(inst->used));
     inst->vt.write32(&inst->vt, VIRTIO_MMIO_QUEUE_NOTIFY, 0);
     mb();
 }
@@ -83,15 +86,18 @@ static int virtio_input_irq(int irq, void *priv) {
     uint64_t flags = spin_lock_irqsave(&inst->lock);
     
     volatile virtq_used_t *used = &inst->used;
-    arch_dma_sync_for_cpu((void *)&used->idx, sizeof(uint16_t));
+    arch_dma_sync_for_cpu((void *)used, sizeof(*used));
+    uint16_t used_idx = used->idx;
     
     int waked = 0;
-    while (inst->last_used != used->idx) {
+    int resubmitted = 0;
+    while (inst->last_used != used_idx) {
         uint16_t ring_idx = inst->last_used % VIRTIO_INPUT_QUEUE_SIZE;
-        arch_dma_sync_for_cpu((void *)&used->ring[ring_idx], sizeof(virtq_used_elem_t));
         uint16_t id = (uint16_t)used->ring[ring_idx].id;
+        if (id >= VIRTIO_INPUT_QUEUE_SIZE)
+            break;
         
-        struct virtio_input_event *evt = &inst->events[id];
+        struct virtio_input_event *evt = &inst->events[id].event;
         arch_dma_sync_for_cpu(evt, sizeof(*evt));
         
         // Add to user ring
@@ -108,15 +114,20 @@ static int virtio_input_irq(int irq, void *priv) {
         
         // Re-submit
         inst->avail.ring[inst->avail.idx % VIRTIO_INPUT_QUEUE_SIZE] = id;
+        arch_dma_sync_for_device(evt, sizeof(*evt));
         inst->avail.idx++;
         
         inst->last_used++;
+        resubmitted = 1;
     }
     
-    if (waked) {
+    if (resubmitted) {
         wmb();
+        arch_dma_sync_for_device(&inst->avail, sizeof(inst->avail));
         inst->vt.write32(&inst->vt, VIRTIO_MMIO_QUEUE_NOTIFY, 0);
         mb();
+    }
+    if (waked) {
         if (inst->waiter && inst->waiter->state == PROC_BLOCKED) {
             proc_make_ready(inst->waiter);
         }
@@ -127,7 +138,6 @@ static int virtio_input_irq(int irq, void *priv) {
 }
 
 static int input_read(vfile_t *vf, char *buf, size_t count) {
-    (void)vf;
     if (count < sizeof(struct input_event)) return -EINVAL;
     
     while (1) {
@@ -149,6 +159,9 @@ static int input_read(vfile_t *vf, char *buf, size_t count) {
             }
             spin_unlock_irqrestore(&inst->lock, flags);
         }
+
+        if (vf->flags & O_NONBLOCK)
+            return -EAGAIN;
         
         // No data, block on the first device's waiter
         if (g_ninputs > 0) {
@@ -182,9 +195,10 @@ vfile_ops_t g_devfs_input_ops = {
 
 static int virtio_input_probe(device_t *dev) {
     if (g_ninputs >= MAX_VIRTIO_INPUT_DEVS) return -1;
-    virtio_input_inst_t *inst = &g_input_insts[g_ninputs++];
+    virtio_input_inst_t *inst = &g_input_insts[g_ninputs];
 
     resource_t *mmio_res = device_get_resource(dev, RES_MMIO, 0);
+    resource_t *irq_res = NULL;
     if (!mmio_res) return -1;
     
     
@@ -197,15 +211,28 @@ static int virtio_input_probe(device_t *dev) {
     inst->vt.legacy  = 0;
     
     virtio_transport_t *vt = &inst->vt;
+
+    uint32_t magic = vt->read32(vt, VIRTIO_MMIO_MAGIC);
+    uint32_t version = vt->read32(vt, VIRTIO_MMIO_VERSION);
+    uint32_t device_id = vt->read32(vt, VIRTIO_MMIO_DEVICE_ID);
+    if (magic != 0x74726976U || version != 2U || device_id != 18U)
+        return -1;
     
     vt->write32(vt, VIRTIO_MMIO_STATUS, 0);
     mb();
     uint32_t status = VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER;
     vt->write32(vt, VIRTIO_MMIO_STATUS, status);
     mb();
+
+    vt->write32(vt, VIRTIO_MMIO_DEVICE_FEATURES_SEL, 0);
+    vt->read32(vt, VIRTIO_MMIO_DEVICE_FEATURES);
+    vt->write32(vt, VIRTIO_MMIO_DRIVER_FEATURES_SEL, 0);
+    vt->write32(vt, VIRTIO_MMIO_DRIVER_FEATURES, 0);
     
     vt->write32(vt, VIRTIO_MMIO_DEVICE_FEATURES_SEL, 1);
     uint32_t features_hi = vt->read32(vt, VIRTIO_MMIO_DEVICE_FEATURES);
+    if (!(features_hi & VIRTIO_F_VERSION_1_BIT))
+        goto fail;
     uint32_t driver_hi = features_hi & VIRTIO_F_VERSION_1_BIT;
     vt->write32(vt, VIRTIO_MMIO_DRIVER_FEATURES_SEL, 1);
     vt->write32(vt, VIRTIO_MMIO_DRIVER_FEATURES, driver_hi);
@@ -214,10 +241,26 @@ static int virtio_input_probe(device_t *dev) {
     status |= VIRTIO_STATUS_FEATURES_OK;
     vt->write32(vt, VIRTIO_MMIO_STATUS, status);
     mb();
+    if (!(vt->read32(vt, VIRTIO_MMIO_STATUS) & VIRTIO_STATUS_FEATURES_OK))
+        goto fail;
     
     // Setup eventq (queue 0)
     vt->write32(vt, VIRTIO_MMIO_QUEUE_SEL, 0);
+    uint32_t qmax = vt->read32(vt, VIRTIO_MMIO_QUEUE_NUM_MAX);
+    if (qmax < VIRTIO_INPUT_QUEUE_SIZE)
+        goto fail;
+    if (vt->read32(vt, VIRTIO_MMIO_QUEUE_READY) != 0)
+        goto fail;
     vt->write32(vt, VIRTIO_MMIO_QUEUE_NUM, VIRTIO_INPUT_QUEUE_SIZE);
+
+    memset(inst->desc, 0, sizeof(inst->desc));
+    memset(&inst->avail, 0, sizeof(inst->avail));
+    memset(&inst->used, 0, sizeof(inst->used));
+    memset(inst->events, 0, sizeof(inst->events));
+    arch_dma_sync_for_device(inst->desc, sizeof(inst->desc));
+    arch_dma_sync_for_device(&inst->avail, sizeof(inst->avail));
+    arch_dma_sync_for_device(&inst->used, sizeof(inst->used));
+    arch_dma_sync_for_device(inst->events, sizeof(inst->events));
     
     uint64_t desc_pa  = va_to_pa(inst->desc);
     uint64_t avail_pa = va_to_pa(&inst->avail);
@@ -232,14 +275,12 @@ static int virtio_input_probe(device_t *dev) {
     vt->write32(vt, VIRTIO_MMIO_QUEUE_READY, 1);
     mb();
     
-    resource_t *irq_res = device_get_resource(dev, RES_IRQ, 0);
-    if (irq_res) {
-        if (request_irq((uint32_t)irq_res->start, virtio_input_irq, 0, inst) != 0) {
-            kinfo("[INPUT] Failed to register IRQ %d\n", irq_res->start);
-        }
+    irq_res = device_get_resource(dev, RES_IRQ, 0);
+    if (!irq_res ||
+        request_irq((uint32_t)irq_res->start, virtio_input_irq, 0, inst) != 0) {
+        kinfo("[INPUT] Failed to register IRQ\n");
+        goto fail;
     }
-    
-    virtio_input_submit_all(inst);
     
     status |= VIRTIO_STATUS_DRIVER_OK;
     vt->write32(vt, VIRTIO_MMIO_STATUS, status);
@@ -247,9 +288,20 @@ static int virtio_input_probe(device_t *dev) {
     
     inst->valid = 1;
     dev->drv_priv = inst;
+    virtio_input_submit_all(inst);
+    g_ninputs++;
 
-    kinfo("[INPUT] virtio-input ready at 0x%lx\n", mmio_res->start);
+    kinfo("[INPUT] virtio-input ready at 0x%lx\n",
+          (unsigned long)mmio_res->start);
     return 0;
+
+fail:
+    if (irq_res)
+        free_irq((uint32_t)irq_res->start, inst);
+    vt->write32(vt, VIRTIO_MMIO_STATUS,
+                vt->read32(vt, VIRTIO_MMIO_STATUS) | VIRTIO_STATUS_FAILED);
+    memset(inst, 0, sizeof(*inst));
+    return -1;
 }
 
 static const device_id_t virtio_input_ids[] = {

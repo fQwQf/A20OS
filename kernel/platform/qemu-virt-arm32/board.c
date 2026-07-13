@@ -5,22 +5,50 @@
 #include "core/cpu.h"
 #include "core/timer.h"
 
+static inline volatile uint32_t *arm32_gicd_reg32(uint32_t off) {
+    return (volatile uint32_t *)(uintptr_t)(GICD_BASE + off);
+}
+
+static inline volatile uint8_t *arm32_gicd_reg8(uint32_t off) {
+    return (volatile uint8_t *)(uintptr_t)(GICD_BASE + off);
+}
+
+static void arm32_gicd_set_target(uint32_t irq, uint8_t target) {
+    uint32_t off = 0x800 + (irq & ~3U);
+    uint32_t shift = (irq & 3U) * 8U;
+    volatile uint32_t *reg = arm32_gicd_reg32(off);
+    uint32_t value = *reg;
+    value = (value & ~(0xFFU << shift)) | ((uint32_t)target << shift);
+    *reg = value;
+}
+
 static void arm32_irqchip_init(void) {
 }
 
 static void arm32_irqchip_enable(uint32_t irq) {
-    (void)irq;
+    *arm32_gicd_reg32(0x100 + (irq / 32U) * 4U) = 1U << (irq % 32U);
+    *arm32_gicd_reg8(0x400 + irq) = 0x40;
+    /*
+     * QEMU's ARM virt GIC accepts ITARGETSR updates as word accesses.  A byte
+     * store leaves the SPI pending but unroutable, so input events never reach
+     * the CPU even though the VirtIO device and queue are otherwise healthy.
+     */
+    arm32_gicd_set_target(irq, 0x01);
+    arch_mb();
 }
 
 static void arm32_irqchip_disable(uint32_t irq) {
-    (void)irq;
+    *arm32_gicd_reg32(0x180 + (irq / 32U) * 4U) = 1U << (irq % 32U);
+    arch_mb();
 }
 
 static uint32_t arm32_irqchip_ack(void) {
-    return arm32_gic_ack();
+    /* The ARM exception entry already claims the interrupt from the GIC. */
+    return 0;
 }
 
 static void arm32_irqchip_eoi(uint32_t irq) {
+    /* arch_handle_irq() completes the claimed interrupt after dispatch. */
     (void)irq;
 }
 
