@@ -183,6 +183,7 @@ ARCH_LDFLAGS := $(ARCH_LDFLAGS_$(ARCH))
 ARCH_LIBS    := $(ARCH_LIBS_$(ARCH))
 QEMU         := $(QEMU_$(ARCH))
 QEMU_FLAGS   := $(QEMU_FLAGS_BASE_$(ARCH)) -m 1G -nographic -smp $(NR_CPUS)
+
 QEMU_BLK     := $(QEMU_BLK_$(ARCH))
 QEMU_NET     := $(QEMU_NET_$(ARCH))
 
@@ -280,6 +281,8 @@ KERNEL_SRC = $(wildcard $(KERNEL_DIR)/*.c) \
              $(wildcard $(KERNEL_DIR)/drivers/block/*.c) \
              $(wildcard $(KERNEL_DIR)/drivers/char/*.c) \
              $(wildcard $(KERNEL_DIR)/drivers/net/*.c) \
+             $(wildcard $(KERNEL_DIR)/drivers/gpu/*.c) \
+             $(wildcard $(KERNEL_DIR)/drivers/input/*.c) \
              $(wildcard $(KERNEL_DIR)/platform/$(BOARD)/*.c) \
              $(ABI_SRCS) \
              $(wildcard $(KERNEL_DIR)/syscall/*.c) \
@@ -1296,8 +1299,14 @@ run:
 run-riscv64:
 	$(MAKE) ARCH=riscv64 BRINGUP=$(BRINGUP) _run_impl
 
+run-gui-riscv64 run-gui-rv:
+	$(MAKE) ARCH=riscv64 BRINGUP=$(BRINGUP) _run_gui_impl
+
 run-loongarch64:
 	$(MAKE) ARCH=loongarch64 BRINGUP=$(BRINGUP) _run_impl
+
+run-gui-loongarch64 run-gui-la:
+	$(MAKE) ARCH=loongarch64 BRINGUP=$(BRINGUP) _run_gui_impl
 
 run-arm64:
 	$(MAKE) ARCH=aarch64 BRINGUP=$(BRINGUP) _run_impl
@@ -1342,6 +1351,14 @@ else
 	$(MAKE) ARCH=$(ARCH) BRINGUP=$(BRINGUP) dev-build
 endif
 	$(QEMU) $(QEMU_FLAGS) -kernel $(KERNEL_ELF)
+
+_run_gui_impl:
+ifeq ($(BRINGUP),1)
+	$(MAKE) ARCH=$(ARCH) BRINGUP=1 kernel-only
+else
+	$(MAKE) ARCH=$(ARCH) BRINGUP=$(BRINGUP) dev-build
+endif
+	$(QEMU) $(patsubst -nographic,-display gtk -device virtio-gpu-device -device virtio-keyboard-device -device virtio-mouse-device -serial stdio,$(QEMU_FLAGS)) -kernel $(KERNEL_ELF)
 
 # --- Debug Targets ---
 

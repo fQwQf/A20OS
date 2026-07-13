@@ -16,6 +16,8 @@
 
 #define VIRTIO_DEV_BLK           2
 #define VIRTIO_DEV_NET           1
+#define VIRTIO_DEV_GPU           16
+#define VIRTIO_DEV_INPUT         18
 
 /* DRIVER_ENUMERATION_FAILURE_MODEL: virtio-mmio registers only discovered
  * static slots; driver_core owns probe failure cleanup and leaves devices
@@ -29,7 +31,7 @@ typedef struct virtio_mmio_bus_data {
 static virtio_mmio_bus_data_t g_virtio_mmio_data;
 
 static int virtio_mmio_match(device_t *dev, const driver_t *drv) {
-    if (drv->bus != dev->bus)
+    if (drv->bus != NULL && drv->bus != dev->bus)
         return 0;
     if (!drv->id_table)
         return 0;
@@ -88,6 +90,8 @@ void virtio_mmio_enumerate(uintptr_t base, int max_slots, int irq_base) {
         const char *type_name = "unknown";
         if (dev_id == VIRTIO_DEV_BLK) type_name = "blk";
         if (dev_id == VIRTIO_DEV_NET) type_name = "net";
+        if (dev_id == VIRTIO_DEV_GPU) type_name = "gpu";
+        if (dev_id == VIRTIO_DEV_INPUT) type_name = "input";
 
         snprintf(dev_names[dev_idx], sizeof(dev_names[dev_idx]),
                  "virtio-%s%d", type_name, slot);

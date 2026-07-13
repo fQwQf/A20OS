@@ -530,7 +530,8 @@ MKSH_CFLAGS := $(CFLAGS) -I$(MKSH_DIR) \
 USER_INTERMEDIATE_TARGETS := $(INIT_OBJ) $(INIT_EXTRA_OBJS) $(MKSH_OBJS) \
                              $(LOCAL_CMD_OBJS) $(SBASE_OBJS) $(SBASE_LIBUTF_OBJS) \
                              $(SBASE_LIBUTIL_OBJS) $(SBASE_LIBUTF) $(SBASE_LIBUTIL) \
-                             $(WGET_OBJ) $(TLSE_OBJ) $(FF_MAIN_OBJ) $(FF_LIB_OBJS) $(FF_LIB)
+                             $(WGET_OBJ) $(TLSE_OBJ) $(FF_MAIN_OBJ) $(FF_LIB_OBJS) $(FF_LIB) \
+                             $(DESKTOP_OBJS) $(LVGL_OBJS)
 
 ifneq ($(wildcard $(FF_DIR)/src/fastfetch.c),)
 FF_AVAILABLE := 1
@@ -538,7 +539,7 @@ else
 FF_AVAILABLE :=
 endif
 
-all: build_dir $(BUILD_DIR)/init $(BUILD_DIR)/mksh $(BUILD_DIR)/sh $(SBASE_CMDS) $(LOCAL_CMDS) $(WGET_CMD)
+all: build_dir $(BUILD_DIR)/init $(BUILD_DIR)/mksh $(BUILD_DIR)/sh $(SBASE_CMDS) $(LOCAL_CMDS) $(WGET_CMD) $(BUILD_DIR)/desktop
 
 fastfetch: build_dir $(FF_CMD)
 
@@ -597,6 +598,26 @@ $(SBASE_CMDS): $(BUILD_DIR)/%: $(OBJ_DIR)/sbase/%.o $(SBASE_LIBUTIL) $(SBASE_LIB
 $(WGET_CMD): $(WGET_OBJ) $(TLSE_OBJ) | build_dir musl_prepare
 	@mkdir -p $(dir $@)
 	$(CC) $(LDFLAGS) -o $@ $(CRT_START) $(WGET_OBJ) $(TLSE_OBJ) $(CRT_END) $(LIBC)
+
+LVGL_DIR := external/lvgl
+LVGL_SRCS := $(shell find $(LVGL_DIR)/src -type f -name '*.c')
+LVGL_OBJS := $(patsubst $(LVGL_DIR)/%.c,$(OBJ_DIR)/lvgl/%.o,$(LVGL_SRCS))
+LVGL_CFLAGS := $(CFLAGS) -I$(LVGL_DIR) -Iexternal -Idesktop -DLV_CONF_INCLUDE_SIMPLE
+
+DESKTOP_SRCS := desktop/desktop.c desktop/lv_port_disp.c desktop/lv_port_indev.c
+DESKTOP_OBJS := $(patsubst desktop/%.c,$(OBJ_DIR)/desktop/%.o,$(DESKTOP_SRCS))
+
+$(OBJ_DIR)/lvgl/%.o: $(LVGL_DIR)/%.c | build_dir musl_prepare
+	@mkdir -p $(dir $@)
+	$(CC) $(LVGL_CFLAGS) -c -o $@ $<
+
+$(OBJ_DIR)/desktop/%.o: desktop/%.c | build_dir musl_prepare
+	@mkdir -p $(dir $@)
+	$(CC) $(LVGL_CFLAGS) -c -o $@ $<
+
+$(BUILD_DIR)/desktop: $(DESKTOP_OBJS) $(LVGL_OBJS) | build_dir musl_prepare
+	@mkdir -p $(dir $@)
+	$(CC) $(LDFLAGS) -o $@ $(CRT_START) $^ $(CRT_END) $(LIBC)
 
 $(INIT_OBJ): $(INIT_MAIN_SRC) Makefile | build_dir musl_prepare
 	@mkdir -p $(dir $@)
