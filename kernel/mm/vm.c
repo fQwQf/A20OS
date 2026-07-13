@@ -508,7 +508,7 @@ static void free_vma_pages(mm_struct_t *mm, vm_area_t *vma)
                         page_cache_put(pcp);
                         page_cache_put(pcp);
                     }
-                } else {
+                } else if (!(vma->vm_flags & VM_PFNMAP)) {
                     frame_put(pfn);
                 }
             }
@@ -1327,7 +1327,7 @@ int mm_munmap(mm_struct_t *mm, vaddr_t addr, size_t len) {
                                 page_cache_put(pcp);
                             }
                         }
-                    } else {
+                    } else if (!(vma->vm_flags & VM_PFNMAP)) {
                         frame_put(pfn);
                     }
                     size_t pages = size / PAGE_SIZE;

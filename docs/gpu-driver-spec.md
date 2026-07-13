@@ -24,6 +24,8 @@ GPU 驱动的主要职责包括：
 - `FBIOGET_FSCREENINFO` (0x4602): 获取显存物理基址、显存大小等固定信息。
   - 数据结构：`struct fb_fix_screeninfo`
 - `FBIO_MAP_FB` (0x4603): 【A20OS 专有】将显存映射到当前进程的指定虚拟地址 (通过 arg 传递)。
+  - 在 NOMMU 构建中不创建页表映射；用户态先通过 `FBIOGET_FSCREENINFO`
+    获取 `smem_start`，并直接把该物理地址作为帧缓冲地址使用。
 - `FBIO_FLUSH` (0x4604): 【A20OS 专有】通知 GPU 驱动需要刷新 Framebuffer 的部分或全部区域到屏幕。
 
 ### 数据结构定义 (`framebuffer.h`)
@@ -64,3 +66,16 @@ LVGL 在其 `disp_flush_cb` 函数中应当通过以下顺序与内核交互：
 3. 使用 `ioctl(FBIO_MAP_FB)` 请求内核映射 Framebuffer 至用户态地址空间。
 4. 将绘制结果（或部分无效区域）拷贝至映射的地址空间。
 5. 使用 `ioctl(FBIO_FLUSH)` 通知内核提交渲染。
+
+QEMU ARM32 的 GUI 启动目标为：
+
+```sh
+make run-gui-arm32
+make run-gui-nommu-arm32
+```
+
+两个目标均使用 modern VirtIO MMIO，并挂载 virtio-gpu、virtio-keyboard
+和 virtio-mouse。ARM32 MMU 构建将用户帧缓冲映射为与内核线性映射
+一致的普通可缓存内存，并在设备读取前执行数据缓存同步；NOMMU 构建
+直接使用帧缓冲物理地址。输入设备中断通过 GIC SPI 48 起始的 VirtIO
+MMIO 中断范围分发。

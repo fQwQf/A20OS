@@ -521,7 +521,7 @@ extern int  pty_slave_read(int idx, char *buf, size_t count);
 extern int  pty_slave_write(int idx, const char *buf, size_t count);
 extern int  pty_slave_ioctl(int idx, unsigned long req, void *arg);
 extern void pty_slave_close(int idx);
-extern void pty_slave_ref(int idx);
+extern int  pty_slave_open(int idx);
 extern void pty_init(void);
 
 static int devfs_loop_read(vfile_t *vf, char *buf, size_t count) {
@@ -736,9 +736,14 @@ static vfile_t *devfs_open_vnode(vnode_t *vn, int flags) {
         break;
     case DEVFS_PTS: {
         int pts_idx = (int)(node->rdev & 0xFF);
+        int result = pty_slave_open(pts_idx);
+        if (result < 0) {
+            vnode_put(vf->vnode);
+            vfile_free(vf);
+            return NULL;
+        }
         vf->ops = &g_devfs_pts_ops;
         vf->priv = (void *)(intptr_t)pts_idx;
-        pty_slave_ref(pts_idx);
         break;
     }
     default:

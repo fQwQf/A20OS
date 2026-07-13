@@ -4,6 +4,8 @@
 #include "core/types.h"
 #include "platform.h"
 
+#define ARM32_CACHE_LINE 64U
+
 extern volatile uint32_t arm32_trap_flags;
 uint32_t arm32_gic_ack(void);
 
@@ -163,15 +165,30 @@ static inline int arch_is_kernel_address(const void *ptr) {
 }
 
 static inline void arch_dma_sync_for_device(const void *addr, size_t size) {
-    (void)addr;
-    (void)size;
-    arch_mb();
+    if (size == 0)
+        return;
+
+    uintptr_t start = (uintptr_t)addr & ~(uintptr_t)(ARM32_CACHE_LINE - 1U);
+    uintptr_t end = ((uintptr_t)addr + size + ARM32_CACHE_LINE - 1U) &
+                    ~(uintptr_t)(ARM32_CACHE_LINE - 1U);
+
+    for (uintptr_t p = start; p < end; p += ARM32_CACHE_LINE)
+        __asm__ __volatile__("mcr p15, 0, %0, c7, c10, 1" :: "r"(p) : "memory");
+    __asm__ __volatile__("dsb sy" ::: "memory");
 }
 
 static inline void arch_dma_sync_for_cpu(const void *addr, size_t size) {
-    (void)addr;
-    (void)size;
-    arch_mb();
+    if (size == 0)
+        return;
+
+    uintptr_t start = (uintptr_t)addr & ~(uintptr_t)(ARM32_CACHE_LINE - 1U);
+    uintptr_t end = ((uintptr_t)addr + size + ARM32_CACHE_LINE - 1U) &
+                    ~(uintptr_t)(ARM32_CACHE_LINE - 1U);
+
+    __asm__ __volatile__("dsb sy" ::: "memory");
+    for (uintptr_t p = start; p < end; p += ARM32_CACHE_LINE)
+        __asm__ __volatile__("mcr p15, 0, %0, c7, c6, 1" :: "r"(p) : "memory");
+    __asm__ __volatile__("dsb sy" ::: "memory");
 }
 
 struct backtrace_frame {
