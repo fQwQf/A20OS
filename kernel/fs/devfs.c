@@ -40,6 +40,8 @@ enum {
     DEVFS_PTS_DIR,
     DEVFS_PTS,
     DEVFS_SHM_DIR,
+    DEVFS_FB,
+    DEVFS_INPUT,
 };
 
 #define KTTY_NCCS 19
@@ -98,6 +100,8 @@ static devfs_node_t g_nodes[] = {
     { DEVFS_LOOP, "loop0", 0x700 },
     { DEVFS_LOOP, "loop1", 0x701 },
     { DEVFS_LOOP, "loop2", 0x702 },
+    { DEVFS_FB, "fb0", 0x1d00 },
+    { DEVFS_INPUT, "event0", 0x1d01 },
     { DEVFS_LOOP, "loop3", 0x703 },
     { DEVFS_LOOP, "loop4", 0x704 },
     { DEVFS_LOOP, "loop5", 0x705 },
@@ -706,6 +710,8 @@ static vfile_t *devfs_open_vnode(vnode_t *vn, int flags) {
     case DEVFS_RANDOM: vf->ops = &g_devfs_random_ops; break;
     case DEVFS_TTY:  vf->ops = &g_devfs_tty_ops; break;
     case DEVFS_RTC:  vf->ops = &g_devfs_rtc_ops; break;
+    case DEVFS_FB:   vf->ops = &g_devfs_fb_ops; break;
+    case DEVFS_INPUT: vf->ops = &g_devfs_input_ops; break;
     case DEVFS_LOOP: {
         int loop_idx = (int)(node->rdev & 0xFF);
         vf->ops = &g_devfs_loop_ops;

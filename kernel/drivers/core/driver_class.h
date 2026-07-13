@@ -64,4 +64,28 @@ typedef struct char_dev_ops {
     int     (*poll)(struct device *dev, short events);
 } char_dev_ops_t;
 
+
+/* ============================================================
+ * Input device operations
+ *
+ * Used by: input subsystem / evdev
+ * ============================================================ */
+typedef struct input_dev_ops {
+    int     (*read)(struct device *dev, void *buf, size_t count);
+    int     (*ioctl)(struct device *dev, unsigned long req, void *arg);
+    int     (*poll)(struct device *dev, short events);
+} input_dev_ops_t;
+
+/* ============================================================
+ * Display/GPU device operations
+ *
+ * Used by: framebuffer / graphics subsystem
+ * ============================================================ */
+typedef struct gpu_dev_ops {
+    int     (*get_info)(struct device *dev, uint32_t *width, uint32_t *height, uint32_t *bpp);
+    int     (*get_fb)(struct device *dev, uintptr_t *fb_paddr, size_t *fb_size);
+    int     (*flush)(struct device *dev, uint32_t x, uint32_t y, uint32_t w, uint32_t h);
+    int     (*ioctl)(struct device *dev, unsigned long req, void *arg);
+} gpu_dev_ops_t;
+
 #endif /* _DRIVER_CLASS_H */
