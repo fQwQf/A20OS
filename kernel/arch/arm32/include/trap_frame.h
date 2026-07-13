@@ -146,6 +146,11 @@ static inline uint64_t arch_user_initial_status(void) {
     return 0x10U;
 }
 
+static inline void arch_trap_ctx_set_user_entry(trap_context_t *ctx,
+                                                uint64_t entry) {
+    TRAP_CTX_EPC(ctx) = entry;
+}
+
 static inline void arch_signal_prepare_trampoline(uint32_t tramp[2]) {
     tramp[0] = 0xe3a070adU; /* mov r7, #173 (rt_sigreturn) */
     tramp[1] = 0xef000000U; /* svc 0 */
