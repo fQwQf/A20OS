@@ -39,8 +39,11 @@ CROSS_COMPILE_riscv64 := $(RISCV_ELF_PREFIX)
 CROSS_COMPILE_loongarch64 := loongarch64-linux-gnu-
 CROSS_COMPILE_aarch64 := aarch64-linux-gnu-
 CROSS_COMPILE_x86_64 := x86_64-linux-gnu-
-CROSS_COMPILE_arm32 := arm-linux-gnueabihf-
-CROSS_COMPILE_riscv32 := $(RISCV_ELF_PREFIX)
+CROSS_COMPILE_arm32 := $(if $(shell command -v arm-linux-gnueabihf-gcc 2>/dev/null),arm-linux-gnueabihf-,$(if $(shell command -v arm-none-eabi-gcc 2>/dev/null),arm-none-eabi-,arm-linux-gnueabihf-))
+RISCV_ELF_RV32_MULTIDIR := $(shell if command -v $(RISCV_ELF_PREFIX)gcc >/dev/null 2>&1; then \
+	$(RISCV_ELF_PREFIX)gcc -march=rv32imafdc -mabi=ilp32d -print-multi-directory 2>/dev/null; \
+fi)
+CROSS_COMPILE_riscv32 := $(if $(filter-out .,$(RISCV_ELF_RV32_MULTIDIR)),$(RISCV_ELF_PREFIX),$(if $(shell command -v riscv32-linux-gnu-gcc 2>/dev/null),riscv32-linux-gnu-,$(RISCV_ELF_PREFIX)))
 CROSS_COMPILE_ppc64le := powerpc64le-linux-gnu-
 CROSS_COMPILE ?= $(CROSS_COMPILE_$(ARCH))
 
@@ -141,13 +144,8 @@ ifeq ($(ARCH),riscv64)
 LIBGCC := $(LIBGCC_DEFAULT)
 MUSL_CONFIG_LDFLAGS := -L$(dir $(LIBGCC))
 else ifeq ($(ARCH),riscv32)
-LIBGCC_DEFAULT := $(shell $(CC) $(CFLAGS) -print-libgcc-file-name 2>/dev/null)
-LIBGCC_ILP32 := $(dir $(LIBGCC_DEFAULT))rv32imafdc/ilp32d/libgcc.a
-LIBGCC_ILP32_ALT := $(dir $(LIBGCC_DEFAULT))lib32/ilp32d/libgcc.a
-LIBGCC_ILP32_UNKNOWN_ELF := $(shell if command -v $(RISCV_ELF_PREFIX)gcc >/dev/null 2>&1; then \
-	$(RISCV_ELF_PREFIX)gcc -march=rv32imafdc -mabi=ilp32d -print-libgcc-file-name 2>/dev/null; \
-fi)
-LIBGCC := $(if $(wildcard $(LIBGCC_ILP32)),$(LIBGCC_ILP32),$(if $(wildcard $(LIBGCC_ILP32_ALT)),$(LIBGCC_ILP32_ALT),$(if $(wildcard $(LIBGCC_ILP32_UNKNOWN_ELF)),$(LIBGCC_ILP32_UNKNOWN_ELF),$(LIBGCC_DEFAULT))))
+# The selected compiler already encodes the compatible RV32 multilib choice.
+LIBGCC := $(LIBGCC_DEFAULT)
 MUSL_CONFIG_LDFLAGS := -L$(dir $(LIBGCC))
 else
 LIBGCC := $(LIBGCC_DEFAULT)
