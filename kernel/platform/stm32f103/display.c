@@ -25,6 +25,12 @@
 #define LCD_WIDTH  320U
 #define LCD_HEIGHT 480U
 #define LCD_BACKLIGHT_PIN 0U
+#define UI_HEADER_HEIGHT 84U
+#define UI_NAV_TOP       416U
+#define UI_TOUCH_X       14U
+#define UI_TOUCH_Y       148U
+#define UI_TOUCH_W       292U
+#define UI_TOUCH_H       196U
 
 #define LCD_ID_HX8357D 0x0057U
 #define LCD_ID_ILI9325 0x9325U
@@ -44,10 +50,33 @@
 #define COLOR_WHITE  RGB565(245, 248, 252)
 #define COLOR_MUTED  RGB565(164, 184, 205)
 #define COLOR_DARK   RGB565(6, 17, 30)
+#define COLOR_PANEL  RGB565(16, 32, 50)
 
 static uint64_t display_last_second = (uint64_t)-1;
 static uint16_t display_controller_id;
 static int display_ready;
+static int display_sram_ready;
+static int display_sd_ready;
+static int display_sd_fat32;
+static int display_sd_bus_width;
+static int display_touch_ready;
+static size_t display_sram_bytes;
+static uint64_t display_sd_sectors;
+static char display_sd_label[12];
+static int display_touch_pressed;
+static uint16_t display_touch_x;
+static uint16_t display_touch_y;
+static uint16_t display_draw_x;
+static uint16_t display_draw_y;
+static int display_draw_valid;
+static unsigned display_page;
+
+enum {
+    DISPLAY_PAGE_STATUS,
+    DISPLAY_PAGE_STORAGE,
+    DISPLAY_PAGE_TOUCH,
+    DISPLAY_PAGE_COUNT,
+};
 
 static void delay_cycles(uint32_t cycles) {
     while (cycles--)
@@ -236,6 +265,307 @@ static void lcd_draw_decimal(uint16_t x, uint16_t y, uint64_t value,
         value /= 10U;
     } while (value && pos);
     lcd_draw_text(x, y, &buf[pos], color, bg, scale);
+}
+
+static uint16_t lcd_text_width(const char *text, unsigned scale) {
+    uint16_t width = 0;
+    while (*text++) {
+        if (width > LCD_WIDTH - 6U * scale)
+            return LCD_WIDTH;
+        width += 6U * scale;
+    }
+    return width;
+}
+
+static void lcd_draw_border(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
+                            uint16_t color, uint16_t inside) {
+    if (w < 4U || h < 4U)
+        return;
+    lcd_fill_rect(x, y, w, h, color);
+    lcd_fill_rect(x + 2U, y + 2U, w - 4U, h - 4U, inside);
+}
+
+static void lcd_draw_button(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
+                            const char *label, int active) {
+    uint16_t border = active ? COLOR_CYAN : COLOR_MUTED;
+    uint16_t fill = active ? COLOR_BLUE : COLOR_PANEL;
+    uint16_t text_width = lcd_text_width(label, 2);
+    lcd_draw_border(x, y, w, h, border, fill);
+    lcd_draw_text(x + (w - text_width) / 2U, y + (h - 14U) / 2U,
+                  label, COLOR_WHITE, fill, 2);
+}
+
+static void lcd_draw_status_row(uint16_t y, const char *label, int ready) {
+    uint16_t color = ready ? COLOR_GREEN : COLOR_YELLOW;
+    lcd_fill_rect(14, y, 292, 34, COLOR_PANEL);
+    lcd_fill_rect(14, y, 5, 34, color);
+    lcd_draw_text(28, y + 10U, label, COLOR_WHITE, COLOR_PANEL, 2);
+    lcd_draw_text(206, y + 10U, ready ? "READY" : "OPTIONAL",
+                  color, COLOR_PANEL, 2);
+}
+
+static void lcd_draw_header(void) {
+    lcd_fill_rect(0, 0, LCD_WIDTH, UI_HEADER_HEIGHT, COLOR_NAVY);
+    lcd_fill_rect(0, UI_HEADER_HEIGHT - 4U, LCD_WIDTH, 4, COLOR_CYAN);
+    lcd_draw_text(16, 14, "A20OS", COLOR_WHITE, COLOR_NAVY, 5);
+    lcd_draw_text(196, 16, "STM32F103", COLOR_MUTED, COLOR_NAVY, 2);
+    lcd_draw_text(196, 48, "UP", COLOR_CYAN, COLOR_NAVY, 2);
+}
+
+static void lcd_draw_navigation(void) {
+    static const char *const labels[DISPLAY_PAGE_COUNT] = {
+        "STATUS", "TF CARD", "TOUCH",
+    };
+
+    lcd_fill_rect(0, UI_NAV_TOP, LCD_WIDTH,
+                  LCD_HEIGHT - UI_NAV_TOP, COLOR_DARK);
+    for (unsigned i = 0; i < DISPLAY_PAGE_COUNT; i++)
+        lcd_draw_button(4U + i * 105U, UI_NAV_TOP + 7U, 101U, 50U,
+                        labels[i], display_page == i);
+}
+
+static void lcd_draw_status_page(void) {
+    lcd_fill_rect(0, UI_HEADER_HEIGHT, LCD_WIDTH,
+                  UI_NAV_TOP - UI_HEADER_HEIGHT, COLOR_DARK);
+    lcd_draw_text(16, 98, "SYSTEM STATUS", COLOR_CYAN, COLOR_DARK, 3);
+    lcd_draw_status_row(138, "EXT SRAM", display_sram_ready);
+    lcd_draw_status_row(180, "TF CARD", display_sd_ready);
+    lcd_draw_status_row(222, "FAT32", display_sd_fat32);
+    lcd_draw_status_row(264, "TOUCH", display_touch_ready);
+    if (display_sram_ready) {
+        lcd_draw_decimal(132, 148, display_sram_bytes / 1024U,
+                         COLOR_MUTED, COLOR_PANEL, 2);
+        lcd_draw_text(180, 148, "K", COLOR_MUTED, COLOR_PANEL, 2);
+    }
+    if (display_sd_ready) {
+        lcd_draw_decimal(132, 190, display_sd_sectors / 2048U,
+                         COLOR_MUTED, COLOR_PANEL, 2);
+        lcd_draw_text(180, 190, "M", COLOR_MUTED, COLOR_PANEL, 2);
+    }
+
+    lcd_draw_border(14, 316, 292, 80, COLOR_BLUE, COLOR_PANEL);
+    lcd_draw_text(28, 328, "LAST TOUCH", COLOR_MUTED, COLOR_PANEL, 2);
+    if (!display_touch_pressed) {
+        lcd_draw_text(28, 360, "SYSTEM ONLINE", COLOR_GREEN,
+                      COLOR_PANEL, 2);
+    } else {
+        lcd_draw_text(28, 360, "X", COLOR_CYAN, COLOR_PANEL, 2);
+        lcd_draw_decimal(52, 360, display_touch_x,
+                         COLOR_WHITE, COLOR_PANEL, 2);
+        lcd_draw_text(148, 360, "Y", COLOR_CYAN, COLOR_PANEL, 2);
+        lcd_draw_decimal(172, 360, display_touch_y,
+                         COLOR_WHITE, COLOR_PANEL, 2);
+    }
+}
+
+static void lcd_draw_storage_page(void) {
+    lcd_fill_rect(0, UI_HEADER_HEIGHT, LCD_WIDTH,
+                  UI_NAV_TOP - UI_HEADER_HEIGHT, COLOR_DARK);
+    lcd_draw_text(16, 98, "TF STORAGE", COLOR_CYAN, COLOR_DARK, 3);
+    if (!display_sd_ready) {
+        lcd_draw_border(14, 148, 292, 190, COLOR_YELLOW, COLOR_PANEL);
+        lcd_draw_text(82, 196, "NO TF CARD", COLOR_YELLOW,
+                      COLOR_PANEL, 3);
+        lcd_draw_text(70, 248, "SDIO WAITING", COLOR_MUTED,
+                      COLOR_PANEL, 2);
+        return;
+    }
+
+    lcd_draw_border(14, 138, 292, 252, COLOR_GREEN, COLOR_PANEL);
+    lcd_draw_text(28, 154, "CARD ONLINE", COLOR_GREEN, COLOR_PANEL, 3);
+    lcd_draw_text(28, 208, "SIZE", COLOR_MUTED, COLOR_PANEL, 2);
+    lcd_draw_decimal(148, 208, display_sd_sectors / 2048U,
+                     COLOR_WHITE, COLOR_PANEL, 2);
+    lcd_draw_text(244, 208, "MB", COLOR_WHITE, COLOR_PANEL, 2);
+    lcd_draw_text(28, 246, "FILESYS", COLOR_MUTED, COLOR_PANEL, 2);
+    lcd_draw_text(148, 246, display_sd_fat32 ? "FAT32" : "RAW",
+                  display_sd_fat32 ? COLOR_GREEN : COLOR_YELLOW,
+                  COLOR_PANEL, 2);
+    lcd_draw_text(28, 284, "SDIO BUS", COLOR_MUTED, COLOR_PANEL, 2);
+    lcd_draw_decimal(148, 284, display_sd_bus_width,
+                     COLOR_WHITE, COLOR_PANEL, 2);
+    lcd_draw_text(172, 284, "BIT", COLOR_WHITE, COLOR_PANEL, 2);
+    lcd_draw_text(28, 322, "LABEL", COLOR_MUTED, COLOR_PANEL, 2);
+    lcd_draw_text(148, 322,
+                  display_sd_label[0] ? display_sd_label : "NONE",
+                  COLOR_WHITE, COLOR_PANEL, 2);
+}
+
+static void lcd_clear_touch_canvas(void) {
+    lcd_draw_border(UI_TOUCH_X, UI_TOUCH_Y, UI_TOUCH_W, UI_TOUCH_H,
+                    COLOR_BLUE, COLOR_PANEL);
+    display_draw_valid = 0;
+}
+
+static void lcd_draw_touch_coordinates(void) {
+    lcd_fill_rect(184, 120, 122, 26, COLOR_DARK);
+    lcd_draw_text(184, 126, "X", COLOR_CYAN, COLOR_DARK, 2);
+    lcd_draw_decimal(202, 126, display_touch_x,
+                     COLOR_WHITE, COLOR_DARK, 2);
+    lcd_draw_text(256, 126, "Y", COLOR_CYAN, COLOR_DARK, 2);
+    lcd_draw_decimal(274, 126, display_touch_y,
+                     COLOR_WHITE, COLOR_DARK, 2);
+}
+
+static void lcd_draw_touch_page(void) {
+    lcd_fill_rect(0, UI_HEADER_HEIGHT, LCD_WIDTH,
+                  UI_NAV_TOP - UI_HEADER_HEIGHT, COLOR_DARK);
+    lcd_draw_text(16, 98, "TOUCH PAD", COLOR_CYAN, COLOR_DARK, 3);
+    lcd_draw_touch_coordinates();
+    lcd_clear_touch_canvas();
+    lcd_draw_button(92, 358, 136, 44, "CLEAR", 0);
+}
+
+static void lcd_render_page(void) {
+    if (!display_ready)
+        return;
+    if (display_page == DISPLAY_PAGE_STORAGE)
+        lcd_draw_storage_page();
+    else if (display_page == DISPLAY_PAGE_TOUCH)
+        lcd_draw_touch_page();
+    else
+        lcd_draw_status_page();
+    lcd_draw_navigation();
+}
+
+static void lcd_draw_brush(uint16_t x, uint16_t y) {
+    if (x < UI_TOUCH_X + 3U || x >= UI_TOUCH_X + UI_TOUCH_W - 3U ||
+        y < UI_TOUCH_Y + 3U || y >= UI_TOUCH_Y + UI_TOUCH_H - 3U)
+        return;
+    lcd_fill_rect(x - 2U, y - 2U, 5, 5, COLOR_CYAN);
+}
+
+static void lcd_draw_touch_line(uint16_t x0, uint16_t y0,
+                                uint16_t x1, uint16_t y1) {
+    int x = x0;
+    int y = y0;
+    int target_x = x1;
+    int target_y = y1;
+    int dx = target_x > x ? target_x - x : x - target_x;
+    int sx = x < target_x ? 1 : -1;
+    int dy_abs = target_y > y ? target_y - y : y - target_y;
+    int dy = -dy_abs;
+    int sy = y < target_y ? 1 : -1;
+    int error = dx + dy;
+
+    for (;;) {
+        lcd_draw_brush((uint16_t)x, (uint16_t)y);
+        if (x == target_x && y == target_y)
+            break;
+        int twice = error * 2;
+        if (twice >= dy) {
+            error += dy;
+            x += sx;
+        }
+        if (twice <= dx) {
+            error += dx;
+            y += sy;
+        }
+    }
+}
+
+static void lcd_copy_label(const char *label) {
+    unsigned i = 0;
+    if (label) {
+        while (i + 1U < sizeof(display_sd_label) && label[i]) {
+            display_sd_label[i] = label[i];
+            i++;
+        }
+    }
+    display_sd_label[i] = '\0';
+    while (++i < sizeof(display_sd_label))
+        display_sd_label[i] = '\0';
+}
+
+static void lcd_select_page(unsigned page) {
+    if (page >= DISPLAY_PAGE_COUNT || page == display_page)
+        return;
+    display_page = page;
+    display_draw_valid = 0;
+    lcd_render_page();
+}
+
+static void lcd_handle_touch_down(uint16_t x, uint16_t y, int new_press) {
+    if (y >= UI_NAV_TOP) {
+        if (!new_press)
+            return;
+        unsigned page = x / 106U;
+        if (page >= DISPLAY_PAGE_COUNT)
+            page = DISPLAY_PAGE_COUNT - 1U;
+        lcd_select_page(page);
+        return;
+    }
+
+    if (display_page == DISPLAY_PAGE_STATUS) {
+        if (!new_press)
+            return;
+        if (y >= 176U && y < 260U) {
+            lcd_select_page(DISPLAY_PAGE_STORAGE);
+            return;
+        }
+        if (y >= 260U && y < 306U) {
+            lcd_select_page(DISPLAY_PAGE_TOUCH);
+            return;
+        }
+    }
+
+    if (display_page != DISPLAY_PAGE_TOUCH)
+        return;
+    if (y >= 352U && y < 408U) {
+        if (!new_press)
+            return;
+        lcd_clear_touch_canvas();
+        lcd_draw_button(92, 358, 136, 44, "CLEAR", 1);
+        return;
+    }
+    if (x <= UI_TOUCH_X + 2U || x >= UI_TOUCH_X + UI_TOUCH_W - 2U ||
+        y <= UI_TOUCH_Y + 2U || y >= UI_TOUCH_Y + UI_TOUCH_H - 2U)
+        return;
+
+    if (display_draw_valid && x == display_draw_x && y == display_draw_y)
+        return;
+    if (display_draw_valid)
+        lcd_draw_touch_line(display_draw_x, display_draw_y, x, y);
+    else
+        lcd_draw_brush(x, y);
+    display_draw_x = x;
+    display_draw_y = y;
+    display_draw_valid = 1;
+}
+
+static void lcd_redraw_peripheral_status(void) {
+    if (!display_ready)
+        return;
+    if (display_page == DISPLAY_PAGE_STATUS ||
+        display_page == DISPLAY_PAGE_STORAGE)
+        lcd_render_page();
+}
+
+static void lcd_redraw_touch_status(void) {
+    if (display_page == DISPLAY_PAGE_STATUS) {
+        lcd_fill_rect(24, 354, 270, 28, COLOR_PANEL);
+        lcd_draw_text(28, 360, "X", COLOR_CYAN, COLOR_PANEL, 2);
+        lcd_draw_decimal(52, 360, display_touch_x,
+                         COLOR_WHITE, COLOR_PANEL, 2);
+        lcd_draw_text(148, 360, "Y", COLOR_CYAN, COLOR_PANEL, 2);
+        lcd_draw_decimal(172, 360, display_touch_y,
+                         COLOR_WHITE, COLOR_PANEL, 2);
+    } else if (display_page == DISPLAY_PAGE_TOUCH) {
+        lcd_draw_touch_coordinates();
+    }
+}
+
+static void lcd_redraw_touch_released(void) {
+    if (display_page != DISPLAY_PAGE_STATUS)
+        return;
+    lcd_fill_rect(24, 354, 270, 28, COLOR_PANEL);
+    lcd_draw_text(28, 360, "SYSTEM ONLINE", COLOR_GREEN,
+                  COLOR_PANEL, 2);
+}
+
+static void lcd_restore_touch_button(void) {
+    if (display_page == DISPLAY_PAGE_TOUCH)
+        lcd_draw_button(92, 358, 136, 44, "CLEAR", 0);
 }
 
 static void lcd_init_ili9481(void) {
@@ -460,6 +790,9 @@ static void lcd_gpio_fsmc_init(void) {
 }
 
 int stm32_display_init(void) {
+#ifndef CONFIG_STM32_XUANWU
+    return -1;
+#else
     lcd_gpio_fsmc_init();
     /*
      * The Xuanwu kit's supplied 3.5-inch panel is configured as HX8357DN in
@@ -472,6 +805,11 @@ int stm32_display_init(void) {
 
     display_ready = 1;
     return display_controller_id;
+#endif
+}
+
+int stm32_display_ready(void) {
+    return display_ready;
 }
 
 void stm32_display_show_boot(void) {
@@ -485,30 +823,11 @@ void stm32_display_show_boot(void) {
     lcd_fill_rect(0, 0, LCD_WIDTH, LCD_HEIGHT, COLOR_BLUE);
     delay_ms(180);
 
+    display_page = DISPLAY_PAGE_STATUS;
+    display_last_second = (uint64_t)-1;
     lcd_fill_rect(0, 0, LCD_WIDTH, LCD_HEIGHT, COLOR_DARK);
-    lcd_fill_rect(0, 0, LCD_WIDTH, 86, COLOR_NAVY);
-    lcd_fill_rect(0, 82, LCD_WIDTH, 4, COLOR_CYAN);
-    lcd_draw_text(24, 18, "A20OS", COLOR_WHITE, COLOR_NAVY, 7);
-    lcd_draw_text(26, 66, "ARMV7-M / STM32F103", COLOR_MUTED,
-                  COLOR_NAVY, 2);
-
-    lcd_draw_text(24, 122, "KERNEL BRINGUP", COLOR_CYAN, COLOR_DARK, 3);
-    lcd_draw_text(24, 174, "CPU", COLOR_MUTED, COLOR_DARK, 2);
-    lcd_draw_text(132, 174, "CORTEX-M3", COLOR_WHITE, COLOR_DARK, 2);
-    lcd_draw_text(24, 208, "MEMORY", COLOR_MUTED, COLOR_DARK, 2);
-    lcd_draw_text(132, 208, "64K SRAM", COLOR_WHITE, COLOR_DARK, 2);
-    lcd_draw_text(24, 242, "TIMER", COLOR_MUTED, COLOR_DARK, 2);
-    lcd_draw_text(132, 242, "SYSTICK 1KHZ", COLOR_WHITE, COLOR_DARK, 2);
-    lcd_draw_text(24, 276, "LCD ID", COLOR_MUTED, COLOR_DARK, 2);
-    lcd_draw_decimal(132, 276, display_controller_id,
-                     COLOR_YELLOW, COLOR_DARK, 2);
-
-    lcd_fill_rect(24, 326, 272, 64, COLOR_NAVY);
-    lcd_fill_rect(24, 326, 8, 64, COLOR_GREEN);
-    lcd_draw_text(48, 340, "SYSTEM ONLINE", COLOR_GREEN, COLOR_NAVY, 3);
-
-    lcd_draw_text(24, 416, "UPTIME", COLOR_MUTED, COLOR_DARK, 2);
-    lcd_draw_text(24, 452, "A20OS MCU PORT", COLOR_MUTED, COLOR_DARK, 2);
+    lcd_draw_header();
+    lcd_render_page();
 }
 
 void stm32_display_update_ticks(uint64_t ticks) {
@@ -518,9 +837,46 @@ void stm32_display_update_ticks(uint64_t ticks) {
     if (seconds == display_last_second)
         return;
     display_last_second = seconds;
-    lcd_fill_rect(126, 406, 170, 32, COLOR_DARK);
-    lcd_draw_decimal(126, 416, seconds, COLOR_WHITE, COLOR_DARK, 2);
-    lcd_draw_text(260, 416, "S", COLOR_WHITE, COLOR_DARK, 2);
+    lcd_fill_rect(220, 44, 84, 24, COLOR_NAVY);
+    lcd_draw_decimal(220, 48, seconds, COLOR_WHITE, COLOR_NAVY, 2);
+    lcd_draw_text(292, 48, "S", COLOR_MUTED, COLOR_NAVY, 2);
+}
+
+void stm32_display_set_peripherals(int sram_ready, size_t sram_bytes,
+                                   int sd_ready, uint64_t sd_sectors,
+                                   int sd_fat32, int sd_bus_width,
+                                   const char *sd_volume_label,
+                                   int touch_ready) {
+    display_sram_ready = sram_ready;
+    display_sram_bytes = sram_bytes;
+    display_sd_ready = sd_ready;
+    display_sd_sectors = sd_sectors;
+    display_sd_fat32 = sd_fat32;
+    display_sd_bus_width = sd_bus_width;
+    lcd_copy_label(sd_volume_label);
+    display_touch_ready = touch_ready;
+    lcd_redraw_peripheral_status();
+}
+
+void stm32_display_show_touch(uint16_t x, uint16_t y, int pressed) {
+    if (!display_ready)
+        return;
+    if (!pressed && !display_touch_pressed)
+        return;
+
+    int was_pressed = display_touch_pressed;
+    display_touch_pressed = pressed;
+    if (!pressed) {
+        display_draw_valid = 0;
+        lcd_redraw_touch_released();
+        lcd_restore_touch_button();
+        return;
+    }
+
+    display_touch_x = x;
+    display_touch_y = y;
+    lcd_redraw_touch_status();
+    lcd_handle_touch_down(x, y, !was_pressed);
 }
 
 #endif

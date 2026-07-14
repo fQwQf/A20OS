@@ -23,6 +23,7 @@ NOMMU := 1
 BRINGUP := 1
 STM32_FLASH_KB ?= 64
 STM32_RAM_KB ?= 20
+STM32_XUANWU ?= 0
 else
 BOARD ?= qemu-virt-$(ARCH)
 endif
@@ -291,6 +292,9 @@ CFLAGS = -Wall -Wextra $(OPT) -ffreestanding -nostdlib \
          -DCONFIG_BOARD_$(shell echo $(BOARD) | tr a-z A-Z | tr - _)
 ifeq ($(ARCH),armv7m)
 CFLAGS += -DSTM32_FLASH_KB=$(STM32_FLASH_KB) -DSTM32_RAM_KB=$(STM32_RAM_KB)
+ifeq ($(STM32_XUANWU),1)
+CFLAGS += -DCONFIG_STM32_XUANWU
+endif
 endif
 ifeq ($(filter $(ARCH),arm32 armv7m riscv32),)
 CFLAGS += -DCONFIG_64BIT
@@ -405,6 +409,7 @@ KERNEL_BIN = $(BUILD_DIR)/kernel.bin
 .PHONY: all clean run-riscv64 run-gui-riscv64 run-gui-rv run-loongarch64 run-gui-loongarch64 run-gui-la run-arm64 run-x86_64 run-arm32 run-gui-arm32 run-riscv32 run-ppc64le debug-riscv64 debug-loongarch64 debug-arm64 debug-x86_64 debug-arm32 debug-riscv32 debug-ppc64le \
 		run-gui-nommu-arm32 run-nommu-gui-arm32 \
 		stm32f103-bringup stm32f103-xuanwu flash-stm32f103-xuanwu run-stm32f103-qemu \
+		check-stm32f103 \
 		check-kernel-build check-user-build check-dev-build check-contest-build check-build-matrix check-abi-smoke-gate check-doc-drift check-doc-test-gates check-final-definition check-concurrency-foundation check-mm-lock-model check-abi-boundary check-driver-core-model check-external-dependency-boundary \
 		check-arch-boundary \
 		check-riscv64-bringup check-loongarch64-bringup check-aarch64-bringup check-x86_64-bringup check-arm32-bringup check-riscv32-bringup check-ppc64le-bringup \
@@ -1374,7 +1379,12 @@ stm32f103-bringup:
 	$(MAKE) ARCH=armv7m BOARD=stm32f103 PROFILE=mcu STM32_FLASH_KB=64 STM32_RAM_KB=20 kernel-only
 
 stm32f103-xuanwu:
-	$(MAKE) ARCH=armv7m BOARD=stm32f103 PROFILE=mcu STM32_FLASH_KB=512 STM32_RAM_KB=64 kernel-only
+	$(MAKE) ARCH=armv7m BOARD=stm32f103 PROFILE=mcu STM32_FLASH_KB=512 STM32_RAM_KB=64 STM32_XUANWU=1 kernel-only
+
+check-stm32f103:
+	$(MAKE) stm32f103-bringup
+	$(MAKE) stm32f103-xuanwu
+	@echo "check-stm32f103: PASS"
 
 flash-stm32f103-xuanwu: stm32f103-xuanwu
 	@command -v openocd >/dev/null 2>&1 || { \
