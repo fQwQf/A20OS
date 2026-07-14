@@ -82,6 +82,11 @@ static inline int arch_ram_range(size_t idx, paddr_t *base, paddr_t *end) {
 #define CAUSE_PAGE_NOT_EXEC     0x06 /* PNX (6)  — page execute permission denied */
 #define CAUSE_PAGE_PRIVILEGE    0x07 /* PPI (7)  — page privilege denied */
 
+#define ARCH_IS_USER_PAGE_PERMISSION_FAULT(code) \
+    ((code) == CAUSE_PAGE_NOT_READABLE || \
+     (code) == CAUSE_PAGE_NOT_EXEC || \
+     (code) == CAUSE_PAGE_PRIVILEGE)
+
 #define CAUSE_INSN_FAULT        0x08 /* ADEF (8) — address error for fetch */
 #define CAUSE_LOAD_FAULT        0x09 /* ALE (9)  — address error for load/store */
 #define CAUSE_STORE_FAULT       0x09 /* ALE (9)  — address error for load/store */
