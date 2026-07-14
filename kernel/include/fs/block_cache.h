@@ -3,7 +3,7 @@
 
 #include "core/types.h"
 #include "core/lock.h"
-#include "drivers/block/virtio_blk.h"
+#include "drivers/block/block_dev.h"
 
 #define BCACHE_BLOCK_SIZE   512
 #define BCACHE_MAX_BLOCKS   1024
