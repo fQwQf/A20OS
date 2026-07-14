@@ -133,13 +133,10 @@ endif
 
 LIBGCC_DEFAULT := $(shell $(CC) $(CFLAGS) -print-libgcc-file-name 2>/dev/null)
 ifeq ($(ARCH),riscv64)
-LIBGCC_LP64 := $(dir $(LIBGCC_DEFAULT))rv64i/lp64/libgcc.a
-LIBGCC_LP64_ALT := $(dir $(LIBGCC_DEFAULT))lib64/lp64/libgcc.a
-LIBGCC_LP64_LINUX := $(shell if command -v riscv64-linux-gnu-gcc >/dev/null 2>&1; then \
-	f=$$(riscv64-linux-gnu-gcc -march=rv64g -mabi=lp64 -print-libgcc-file-name 2>/dev/null); \
-	printf '%s\n' "$$f" | grep '/lp64/libgcc\.a$$' || true; \
-fi)
-LIBGCC := $(if $(wildcard $(LIBGCC_LP64)),$(LIBGCC_LP64),$(if $(wildcard $(LIBGCC_LP64_ALT)),$(LIBGCC_LP64_ALT),$(if $(wildcard $(LIBGCC_LP64_LINUX)),$(LIBGCC_LP64_LINUX),$(LIBGCC_DEFAULT))))
+# Keep libgcc on the same ABI as ARCH_CFLAGS.  In particular, the current
+# riscv64 userspace is lp64d; forcing an lp64 archive makes the final link mix
+# double-float objects with a soft-float runtime.
+LIBGCC := $(LIBGCC_DEFAULT)
 MUSL_CONFIG_LDFLAGS := -L$(dir $(LIBGCC))
 else ifeq ($(ARCH),riscv32)
 LIBGCC_DEFAULT := $(shell $(CC) $(CFLAGS) -print-libgcc-file-name 2>/dev/null)
@@ -154,6 +151,15 @@ else
 LIBGCC := $(LIBGCC_DEFAULT)
 MUSL_CONFIG_LDFLAGS :=
 endif
+
+# musl's makefiles do not treat config.mak as an input to every object.  Keep
+# our own configuration signature so ABI, compiler, or flag changes cannot
+# silently reuse incompatible CRT and libc objects after a rebase/toolchain
+# upgrade.
+MUSL_BUILD_STAMP := $(BUILD_DIR)/.musl-build-id
+MUSL_CC_TARGET := $(shell $(CC) -dumpmachine 2>/dev/null)
+MUSL_CC_VERSION := $(shell $(CC) -dumpfullversion -dumpversion 2>/dev/null)
+MUSL_BUILD_ID := target=$(MUSL_TARGET);cc=$(CC);cc-target=$(MUSL_CC_TARGET);cc-version=$(MUSL_CC_VERSION);cflags=$(MUSL_CONFIG_CFLAGS);ldflags=$(MUSL_CONFIG_LDFLAGS)
 
 ifeq ($(NOMMU),1)
 CRT_START := $(MUSL_CRT)/rcrt1.o $(MUSL_CRT)/crti.o
@@ -173,7 +179,8 @@ MUSL_CHECK_FILES := $(MUSL_CRT)/crt1.o \
                     $(MUSL_CRT)/crtn.o \
                     $(MUSL_CRT)/libc.a \
                     $(MUSL_BUILD)/obj/include/bits/alltypes.h \
-                    $(MUSL_BUILD)/obj/include/bits/syscall.h
+                    $(MUSL_BUILD)/obj/include/bits/syscall.h \
+                    $(MUSL_BUILD_STAMP)
 
 SBASE_DIR := external/sbase
 WGET_CMD_SRC := cmds/wget.c
@@ -553,6 +560,10 @@ musl_prepare:
 	for f in $(MUSL_CHECK_FILES); do \
 		if [ ! -f "$$f" ]; then missing=1; break; fi; \
 	done; \
+	if [ "$$missing" -eq 0 ] && \
+	   [ "$$(cat "$(MUSL_BUILD_STAMP)")" != '$(MUSL_BUILD_ID)' ]; then \
+		stale=1; \
+	fi; \
 	if [ "$$missing" -eq 0 ] && find "$(MUSL_BASE)" \
 		\( -path "$(MUSL_BASE)/build-*" -o -path '*/.git' \) -prune -o \
 		-type f -newer "$(MUSL_CRT)/libc.a" -print -quit | grep -q .; then \
@@ -571,6 +582,9 @@ musl_prepare:
 			CFLAGS='$(MUSL_CONFIG_CFLAGS)' \
 			LDFLAGS='$(MUSL_CONFIG_LDFLAGS)'; \
 		env -u ARCH -u MAKEFLAGS $(MAKE) -C "$(MUSL_BUILD)" -j$$(nproc); \
+		mkdir -p "$(BUILD_DIR)"; \
+		printf '%s\n' '$(MUSL_BUILD_ID)' > "$(MUSL_BUILD_STAMP).tmp"; \
+		mv "$(MUSL_BUILD_STAMP).tmp" "$(MUSL_BUILD_STAMP)"; \
 	else \
 		echo "[MUSL] build-$(MUSL_VARIANT) ready"; \
 	fi

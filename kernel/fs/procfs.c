@@ -158,6 +158,50 @@ static int is_pid_str(const char *s) {
     return 1;
 }
 
+static int parse_fd_name(const char *name, int *fd)
+{
+    if (!name || !fd || *name < '0' || *name > '9')
+        return -ENOENT;
+    int value = 0;
+    for (const char *p = name; *p; p++) {
+        if (*p < '0' || *p > '9' || value > (MAX_FILES - 1) / 10)
+            return -ENOENT;
+        value = value * 10 + (*p - '0');
+        if (value >= MAX_FILES)
+            return -ENOENT;
+    }
+    *fd = value;
+    return 0;
+}
+
+static char procfs_task_state_char(const task_t *task) {
+    if (!task) return 'X';
+    switch (task->state) {
+    case PROC_READY:
+    case PROC_RUNNING:
+        return 'R';
+    case PROC_BLOCKED:
+        return 'S';
+    case PROC_STOPPED:
+        return 'T';
+    case PROC_ZOMBIE:
+        return 'Z';
+    case PROC_UNUSED:
+    default:
+        return 'X';
+    }
+}
+
+static const char *procfs_task_state_text(const task_t *task) {
+    switch (procfs_task_state_char(task)) {
+    case 'R': return "R (running)";
+    case 'S': return "S (sleeping)";
+    case 'T': return "T (stopped)";
+    case 'Z': return "Z (zombie)";
+    default:  return "X (dead)";
+    }
+}
+
 static void appendf(char *buf, size_t bufsz, size_t *off, const char *fmt, ...) {
     if (*off >= bufsz) return;
     va_list args;
@@ -508,18 +552,16 @@ static int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
         task_t *t = proc_find(pid);
         if (!t) { snprintf(buf, bufsz, "%d (unknown) S 0 0\n", pid); break; }
         snprintf(buf, bufsz,
-            "%d (%s) S %d %d %d 0 0 0 0 0 0 0 0 %lu 0\n",
-            t->pid, t->name, t->ppid, t->pgid, t->sid,
+            "%d (%s) %c %d %d %d 0 0 0 0 0 0 0 0 %lu 0\n",
+            t->pid, t->name, procfs_task_state_char(t),
+            t->ppid, t->pgid, t->sid,
             (unsigned long)t->total_time);
         break;
     }
     case PF_PID_STATUS: {  // 生成进程 status 信息
         task_t *t = proc_find(pid);
         if (!t) { snprintf(buf, bufsz, "Name:\tunknown\nPid:\t%d\n", pid); break; }
-        const char *state = "S (sleeping)";
-        if (t->state == PROC_RUNNING) state = "R (running)";
-        else if (t->state == PROC_BLOCKED) state = "S (sleeping)";
-        else if (t->state == PROC_ZOMBIE) state = "Z (zombie)";
+        const char *state = procfs_task_state_text(t);
         char groups[160];
         size_t glen = 0;
         groups[0] = '\0';
@@ -888,6 +930,7 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
     procfs_meta_t *dp = (procfs_meta_t *)dir->fs_data;
 
     pf_entry_t *child = NULL;
+    int fd_entry = -1;
     if (dp && dp->type == PF_ROOT && dp->pid == 0 && strcmp(name, "sys") == 0) {
         child = new_entry(name, PF_SYS, 0);
         type = PF_SYS;
@@ -963,6 +1006,19 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
     } else if (dp && dp->type == PF_ROOT && dp->pid == 0 && strcmp(name, "interrupts") == 0) {
         child = new_entry(name, PF_INTERRUPTS, 0);
         type = PF_INTERRUPTS;
+    } else if (dp && dp->type == PF_PID_FD) {
+        if (parse_fd_name(name, &fd_entry) < 0)
+            return -ENOENT;
+        int real_pid = dp->pid;
+        if (real_pid == -1) {
+            task_t *cur = proc_current();
+            real_pid = cur ? cur->pid : 0;
+        }
+        task_t *task = proc_find(real_pid);
+        if (!task || fdtable_get(task, fd_entry) < 0)
+            return -ENOENT;
+        child = new_entry(name, PF_PID_FD, dp->pid);
+        type = PF_PID_FD;
     } else if (type == PF_SELF) {
         child = new_entry(name, PF_ROOT, -1);
     } else if (is_pid_str(name)) {
@@ -1010,14 +1066,16 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
     if (!vn) { kfree(child); return -ENOMEM; }
     memset(vn, 0, sizeof(*vn));
     vn->ino = (uint64_t)(uintptr_t)child;
-    vn->type = ((type == PF_ROOT && is_pid_str(name)) || type == PF_SELF ||
+    vn->type = fd_entry >= 0 ? VFS_FT_SYMLINK :
+               ((type == PF_ROOT && is_pid_str(name)) || type == PF_SELF ||
                 type == PF_SYS || type == PF_SYS_FS || type == PF_SYS_KERNEL ||
                 type == PF_SYS_NET || type == PF_SYS_VM ||
                 type == PF_SYS_FS_INOTIFY || type == PF_NET ||
                 type == PF_A20 || type == PF_PID_FD ||
                 type == PF_PID_NS || type == PF_PID_FDINFO) ?
                VFS_FT_DIR : VFS_FT_REGULAR;
-    vn->mode = (vn->type == VFS_FT_DIR) ? (S_IFDIR | 0555) : (S_IFREG | 0444);
+    vn->mode = vn->type == VFS_FT_SYMLINK ? (S_IFLNK | 0777) :
+               (vn->type == VFS_FT_DIR ? (S_IFDIR | 0555) : (S_IFREG | 0444));
     if (type == PF_A20_DRIVER_LIFECYCLE)
         vn->mode = S_IFREG | 0200;
     else if (type == PF_PID_OOM_SCORE_ADJ ||
@@ -1053,6 +1111,42 @@ static int procfs_stat(vnode_t *vn, kstat_t *st) {
     return 0;
 }
 
+static int procfs_readlink(vnode_t *vn, char *buf, size_t sz)
+{
+    if (!vn || !buf || sz == 0)
+        return -EINVAL;
+    procfs_meta_t *meta = (procfs_meta_t *)vn->fs_data;
+    pf_entry_t *entry = (pf_entry_t *)(uintptr_t)vn->ino;
+    if (!meta || !entry || meta->type != PF_PID_FD)
+        return -EINVAL;
+
+    int fd;
+    if (parse_fd_name(entry->name, &fd) < 0)
+        return -ENOENT;
+    int pid = meta->pid;
+    if (pid == -1) {
+        task_t *cur = proc_current();
+        pid = cur ? cur->pid : 0;
+    }
+    task_t *task = proc_find(pid);
+    int gfd = task ? fdtable_get(task, fd) : -EBADF;
+    if (gfd < 0)
+        return -ENOENT;
+    vfile_t *target = vfs_get_file_ref(gfd);
+    if (!target)
+        return -ENOENT;
+    if (!target->path[0]) {
+        vfs_put_file_ref(gfd, target);
+        return -ENOENT;
+    }
+    size_t len = strlen(target->path);
+    if (len > sz)
+        len = sz;
+    memcpy(buf, target->path, len);
+    vfs_put_file_ref(gfd, target);
+    return (int)len;
+}
+
 // procfs 的 release 操作（释放 vnode）
 static void procfs_release(vnode_t *vn) {
     if (vn->fs_data) kfree(vn->fs_data);
@@ -1066,6 +1160,7 @@ static vfile_t *procfs_open_vnode(vnode_t *vn, int flags);
 // procfs vnode 操作表
 static vnode_ops_t g_procfs_vnode_ops = {
     .lookup  = procfs_lookup,
+    .readlink = procfs_readlink,
     .stat    = procfs_stat,
     .open    = procfs_open_vnode,
     .release = procfs_release,
@@ -1197,6 +1292,60 @@ static long procfs_flseek(vfile_t *vf, long offset, int whence) {
     return new_off;
 }
 
+static int procfs_fd_readdir(vfile_t *vf, procfs_priv_t *p,
+                             void *dirp, size_t count)
+{
+    task_t *task = proc_find(p->pid);
+    if (!task)
+        return -ENOENT;
+
+    int cursor = (int)vf->offset;
+    size_t total = 0;
+    char *out = (char *)dirp;
+
+    while (total < count) {
+        const char *name;
+        char fd_name[16];
+        int fd = -1;
+        int next_cursor;
+
+        if (cursor == 0) {
+            name = ".";
+            next_cursor = 1;
+        } else if (cursor == 1) {
+            name = "..";
+            next_cursor = 2;
+        } else {
+            fd = cursor - 2;
+            while (fd < MAX_FILES && fdtable_get(task, fd) < 0)
+                fd++;
+            if (fd >= MAX_FILES)
+                break;
+            snprintf(fd_name, sizeof(fd_name), "%d", fd);
+            name = fd_name;
+            next_cursor = fd + 3;
+        }
+
+        size_t namelen = strlen(name);
+        size_t reclen = (offsetof(vfs_dirent64_t, d_name) + namelen + 1 + 7) & ~7UL;
+        if (total + reclen > count)
+            break;
+
+        vfs_dirent64_t *d = (vfs_dirent64_t *)(out + total);
+        d->d_ino = fd >= 0 ? (uint64_t)fd + 1 : (uint64_t)cursor + 1;
+        d->d_off = next_cursor;
+        d->d_reclen = (uint16_t)reclen;
+        d->d_type = fd < 0 ? 4 : (p->type == PF_PID_FD ? 10 : 8);
+        memcpy(d->d_name, name, namelen + 1);
+
+        total += reclen;
+        cursor = next_cursor;
+    }
+
+    vf->offset = (size_t)cursor;
+    return (int)total;
+}
+
 // procfs 的 readdir 操作（读取目录项）
 static int procfs_freaddir(vfile_t *vf, void *dirp, size_t count) {
     static const char *root_entries[] = {
@@ -1239,6 +1388,9 @@ static int procfs_freaddir(vfile_t *vf, void *dirp, size_t count) {
         ".", "..", "pid", "uts", "user", "ipc", "mnt", "net", "cgroup", NULL
     };
     procfs_priv_t *p = (procfs_priv_t *)vf->priv;
+    if (p && (p->type == PF_PID_FD || p->type == PF_PID_FDINFO))
+        return procfs_fd_readdir(vf, p, dirp, count);
+
     const char **entries = root_entries;
     int is_root = (p && p->type == PF_ROOT && p->pid == 0);
     if (p && p->type == PF_ROOT && p->pid > 0)
