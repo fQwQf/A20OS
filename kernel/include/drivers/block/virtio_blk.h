@@ -2,6 +2,7 @@
 #define _VIRTIO_BLK_H
 
 #include "core/types.h"
+#include "drivers/block/block_dev.h"
 
 /* ============================================================
  * VirtIO Block Device Driver — transport-neutral core
@@ -129,18 +130,6 @@ typedef struct virtio_blk {
     int                valid;       /* initialized? */
     int                legacy;      /* virtio legacy (version 1)? */
 } virtio_blk_t;
-
-/* ============================================================
- * Block device abstract interface
- * Allows FAT32/VFS layer to use any block device
- * ============================================================ */
-typedef struct block_dev {
-    int    (*read_sector)(struct block_dev *dev, uint64_t lba, void *buf, size_t count);
-    int    (*write_sector)(struct block_dev *dev, uint64_t lba, const void *buf, size_t count);
-    uint64_t capacity;      /* total sectors */
-    uint32_t sector_size;
-    void    *priv;          /* driver-specific data */
-} block_dev_t;
 
 /* ============================================================
  * Public API
