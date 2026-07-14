@@ -159,8 +159,23 @@ int64_t sys_readlinkat(int dirfd, const char *path, char *buf, size_t sz) {
     char kpath[MAX_PATH_LEN];
     if (user_strncpy(kpath, path, MAX_PATH_LEN) < 0) return -EFAULT;
     char full[MAX_PATH_LEN];
-    int pr = syscall_path_at(dirfd, kpath, full, sizeof(full));
-    if (pr < 0) return pr;
+    if (kpath[0] == '\0') {
+        if (dirfd == AT_FDCWD) return -ENOENT;
+        int gfd = fdtable_get_current(dirfd);
+        if (gfd < 0) return gfd;
+        vfile_t *vf = vfs_get_file_ref(gfd);
+        if (!vf) return -EBADF;
+        if (!vf->path[0]) {
+            vfs_put_file_ref(gfd, vf);
+            return -ENOENT;
+        }
+        strncpy(full, vf->path, sizeof(full) - 1);
+        full[sizeof(full) - 1] = '\0';
+        vfs_put_file_ref(gfd, vf);
+    } else {
+        int pr = syscall_path_at(dirfd, kpath, full, sizeof(full));
+        if (pr < 0) return pr;
+    }
     if (sz > LINUX_IO_CHUNK_SIZE) sz = LINUX_IO_CHUNK_SIZE;
     char *kbuf = proc_scratch_buffer(LINUX_IO_CHUNK_SIZE);
     if (!kbuf) return -ENOMEM;
@@ -395,16 +410,17 @@ int64_t sys_symlinkat(const char *target, int newdirfd, const char *linkpath) {
 }
 
 int64_t sys_statfs(const char *path, void *buf) {
-    if (!buf) return -EFAULT;
+    if (!path || !buf) return -EFAULT;
     int fs_type = FS_TYPE_RAMFS;
-    if (path) {
-        char kpath[MAX_PATH_LEN];
-        if (user_strncpy(kpath, path, MAX_PATH_LEN) < 0) return -EFAULT;
-        vnode_t *vn = vfs_resolve(kpath);
-        if (!vn) return -ENOENT;
-        if (vn->mnt) fs_type = vn->mnt->type;
-        vnode_put(vn);
-    }
+    char kpath[MAX_PATH_LEN];
+    long copied = user_strncpy(kpath, path, MAX_PATH_LEN);
+    if (copied < 0) return -EFAULT;
+    if (copied >= MAX_PATH_LEN - 1) return -ENAMETOOLONG;
+    if (kpath[0] == '\0') return -ENOENT;
+    vnode_t *vn = vfs_resolve(kpath);
+    if (!vn) return g_lookup_errno ? g_lookup_errno : -ENOENT;
+    if (vn->mnt) fs_type = vn->mnt->type;
+    vnode_put(vn);
     return arch_copy_statfs64_to_user(buf, fs_type) < 0 ? -EFAULT : 0;
 }
 

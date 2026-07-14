@@ -2,6 +2,7 @@
 #include "abi/linux/ioctl.h"
 #include "core/sync.h"
 #include "drivers/char/uart.h"
+#include "fs/pipe.h"
 #include "fs/vfs/file.h"
 #include "proc/proc_internal.h"
 
@@ -87,8 +88,22 @@ static int64_t read_into_user(vfile_t *vf, char *buf, size_t count)
 {
     if (!vf)
         return -EBADF;
-    int64_t total = 0;
     int short_read_ok = vfs_is_pipe_vfile(vf) || vfs_is_char_device_vfile(vf);
+    if (short_read_ok && count > 0) {
+        /* User-page boundaries must not split a single stream read. */
+        size_t chunk = count;
+        if (chunk > LINUX_IO_CHUNK_SIZE)
+            chunk = LINUX_IO_CHUNK_SIZE;
+        char *kbuf = proc_scratch_buffer(chunk);
+        if (!kbuf)
+            return -ENOMEM;
+        int64_t n = vfs_read_file(vf, kbuf, chunk);
+        if (n > 0 && copy_to_user(buf, kbuf, (size_t)n) < 0)
+            return -EFAULT;
+        return n;
+    }
+
+    int64_t total = 0;
     while ((size_t)total < count) {
         void *kaddr;
         size_t chunk;
@@ -100,8 +115,6 @@ static int64_t read_into_user(vfile_t *vf, char *buf, size_t count)
         if (n <= 0)
             return total > 0 ? total : n;
         total += n;
-        if (short_read_ok)
-            break;
         if ((size_t)n < chunk)
             break;
     }
@@ -112,6 +125,35 @@ static int64_t write_from_user(vfile_t *vf, const char *buf, size_t count)
 {
     if (!vf)
         return -EBADF;
+    if (vfs_is_pipe_vfile(vf) && count > 0) {
+        size_t scratch_size = count;
+        if (scratch_size > LINUX_IO_CHUNK_SIZE + PIPE_BUF_SIZE)
+            scratch_size = LINUX_IO_CHUNK_SIZE + PIPE_BUF_SIZE;
+        char *kbuf = proc_scratch_buffer(scratch_size);
+        if (!kbuf)
+            return -ENOMEM;
+
+        int64_t total = 0;
+        while ((size_t)total < count) {
+            size_t remaining = count - (size_t)total;
+            size_t chunk = remaining;
+            if (chunk > LINUX_IO_CHUNK_SIZE)
+                chunk = LINUX_IO_CHUNK_SIZE;
+            /* Keep a small tail in the same non-atomic pipe write. */
+            if (remaining > chunk && remaining - chunk <= PIPE_BUF_SIZE)
+                chunk = remaining;
+            if (copy_from_user(kbuf, buf + total, chunk) < 0)
+                return -EFAULT;
+            int64_t n = vfs_write_file(vf, kbuf, chunk);
+            if (n <= 0)
+                return total > 0 ? total : n;
+            total += n;
+            if ((size_t)n < chunk)
+                break;
+        }
+        return total;
+    }
+
     int64_t total = 0;
     while ((size_t)total < count) {
         void *kaddr;
@@ -463,6 +505,20 @@ int64_t sys_ioctl(int fd, unsigned long req, void *arg) {
         if (pgid <= 0) return -EINVAL;
         uart_set_foreground_pgid(pgid);
         return 0;
+    }
+    if (req == FIONREAD) {
+        vfile_t *vf = vfs_get_file_ref((int)gfd);
+        if (!vf)
+            return -EBADF;
+        if (pipe_vfile_is(vf)) {
+            int available = pipe_get_available(vf);
+            vfs_put_file_ref((int)gfd, vf);
+            if (available < 0)
+                return available;
+            return copy_to_user(arg, &available, sizeof(available)) < 0 ?
+                -EFAULT : 0;
+        }
+        vfs_put_file_ref((int)gfd, vf);
     }
     return vfs_ioctl(gfd, req, arg);
 }
