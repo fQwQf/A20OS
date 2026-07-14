@@ -4,7 +4,7 @@
 #include "drivers/char/uart.h"
 #include "drivers/core/driver_core.h"
 #include "mm/slab.h"
-#include "display.h"
+#include "peripherals.h"
 
 void mcu_heap_init(void);
 size_t mcu_heap_available(void);
@@ -27,9 +27,7 @@ void kernel_main(void) {
     printf("[BOOT] allocator=%s ptr=%p\n", probe ? "ok" : "failed", probe);
     kfree(probe);
 
-    int display_id = stm32_display_init();
-    printf("[BOOT] display initialized id=0x%x\n", (unsigned)display_id);
-    stm32_display_show_boot();
+    stm32_peripherals_init();
 
     timer_init();
     arch_local_irq_enable();
@@ -38,7 +36,7 @@ void kernel_main(void) {
     uint64_t last = 0;
     for (;;) {
         uint64_t now = timer_get_ticks();
-        stm32_display_update_ticks(now);
+        stm32_peripherals_service(now);
         if (now - last >= 1000) {
             last = now;
             printf("[TICK] %lu ms\n", (unsigned long)now);

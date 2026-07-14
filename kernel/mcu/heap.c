@@ -1,6 +1,7 @@
 #include "mm/slab.h"
 #include "core/arch.h"
 #include "core/string.h"
+#include "extsram.h"
 
 typedef struct mcu_heap_block {
     size_t size;
@@ -12,6 +13,8 @@ extern char _heap_start[];
 extern char _heap_end[];
 
 static mcu_heap_block_t *heap_head;
+static uintptr_t heap_start_addr;
+static uintptr_t heap_end_addr;
 
 static size_t align8(size_t value) {
     return (value + 7U) & ~(size_t)7U;
@@ -20,6 +23,8 @@ static size_t align8(size_t value) {
 void mcu_heap_init(void) {
     uintptr_t start = align8((uintptr_t)_heap_start);
     uintptr_t end = (uintptr_t)_heap_end & ~(uintptr_t)7U;
+    heap_start_addr = start;
+    heap_end_addr = end;
     heap_head = NULL;
     if (end <= start + sizeof(mcu_heap_block_t))
         return;
@@ -36,6 +41,8 @@ size_t mcu_heap_available(void) {
         if (b->free)
             total += b->size;
     arch_irq_restore(flags);
+    if (stm32_extsram_ready())
+        total += stm32_extsram_available();
     return total;
 }
 
@@ -61,11 +68,19 @@ void *kmalloc(size_t size) {
         return b + 1;
     }
     arch_irq_restore(flags);
-    return NULL;
+    return stm32_extsram_alloc(size);
 }
 
 void kfree(void *ptr) {
     if (!ptr)
+        return;
+    if (stm32_extsram_owns(ptr)) {
+        stm32_extsram_free(ptr);
+        return;
+    }
+    uintptr_t value = (uintptr_t)ptr;
+    if (value < heap_start_addr + sizeof(mcu_heap_block_t) ||
+        value >= heap_end_addr)
         return;
     uint32_t flags = arch_irq_save();
     mcu_heap_block_t *block = (mcu_heap_block_t *)ptr - 1;
@@ -98,13 +113,22 @@ void *krealloc(void *ptr, size_t size) {
         kfree(ptr);
         return NULL;
     }
-    mcu_heap_block_t *block = (mcu_heap_block_t *)ptr - 1;
-    if (block->size >= size)
+    size_t old_size;
+    if (stm32_extsram_owns(ptr)) {
+        old_size = stm32_extsram_allocation_size(ptr);
+    } else {
+        uintptr_t value = (uintptr_t)ptr;
+        if (value < heap_start_addr + sizeof(mcu_heap_block_t) ||
+            value >= heap_end_addr)
+            return NULL;
+        old_size = ((mcu_heap_block_t *)ptr - 1)->size;
+    }
+    if (old_size >= size)
         return ptr;
     void *new_ptr = kmalloc(size);
     if (!new_ptr)
         return NULL;
-    memcpy(new_ptr, ptr, block->size);
+    memcpy(new_ptr, ptr, old_size);
     kfree(ptr);
     return new_ptr;
 }
