@@ -18,6 +18,7 @@ int fs_locks_get(vfile_t *vf, fs_flock_t *lk, int owner_kind, uintptr_t owner);
 int fs_locks_set(vfile_t *vf, const fs_flock_t *lk, int owner_kind, uintptr_t owner, int wait);
 int fs_flocks_apply(vfile_t *vf, int operation);
 void fs_locks_release_process(int pid);
+void fs_locks_release_process_file(vfile_t *vf, int pid);
 void fs_locks_release_file(vfile_t *vf, uintptr_t owner);
 
 #endif /* _FS_LOCKS_H */

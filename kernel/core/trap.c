@@ -193,6 +193,14 @@ void trap_handler(trap_context_t *ctx) {
             if (deliver_user_sync_signal(ctx, SIGSEGV, -SIGSEGV))
                 return;
             proc_exit_group(-SIGSEGV);
+        } else if (arch_is_user_page_permission_fault(code)) {
+            /* LoongArch reports access-permission failures separately from
+             * invalid-page faults.  They are user protection violations and
+             * must be delivered as SIGSEGV rather than treated as an unknown
+             * kernel exception. */
+            if (deliver_user_sync_signal(ctx, SIGSEGV, -SIGSEGV))
+                return;
+            proc_exit_group(-SIGSEGV);
         } else if (code == CAUSE_INSN_FAULT || code == CAUSE_LOAD_FAULT || code == CAUSE_STORE_FAULT) {
             printf("ADE/ALE: pid=%d sepc=0x%lx stval=0x%lx code=%lu\n",
                   cur ? cur->pid : -1, (unsigned long)sepc, (unsigned long)stval, (unsigned long)code);
