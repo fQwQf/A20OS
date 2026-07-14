@@ -126,7 +126,6 @@ int64_t sys_nanosleep(void *req, void *rem) {
 }
 
 int64_t sys_gettimeofday(void *tv, void *tz) {
-    (void)tz;
     if (tv) {
         uint64_t t[2];
         uint64_t ts[2];
@@ -134,6 +133,11 @@ int64_t sys_gettimeofday(void *tv, void *tz) {
         t[0] = ts[0];
         t[1] = ts[1] / 1000ULL;
         if (copy_to_user(tv, t, sizeof(t)) < 0) return -EFAULT;
+    }
+    if (tz) {
+        int timezone[2] = {0, 0};
+        if (copy_to_user(tz, timezone, sizeof(timezone)) < 0)
+            return -EFAULT;
     }
     return 0;
 }

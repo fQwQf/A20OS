@@ -80,6 +80,15 @@ static inline int arch_fork_requires_private_copy(void)
     return ARCH_FORK_REQUIRES_PRIVATE_COPY;
 }
 
+#ifndef ARCH_IS_USER_PAGE_PERMISSION_FAULT
+# define ARCH_IS_USER_PAGE_PERMISSION_FAULT(code) ((void)(code), 0)
+#endif
+
+static inline int arch_is_user_page_permission_fault(uint64_t code)
+{
+    return ARCH_IS_USER_PAGE_PERMISSION_FAULT(code);
+}
+
 static inline void arch_task_context_set_user_tp(task_context_t *ctx,
                                                   uintptr_t user_tp)
 {

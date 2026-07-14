@@ -270,7 +270,7 @@ int64_t sys_setgroups(size_t size, const int *list);
 int64_t sys_umask(int mask);
 int64_t sys_syslog(int type, char *buf, int len);
 
-int64_t sys_getrandom(void *buf, size_t len, int flags);
+int64_t sys_getrandom(void *buf, size_t len, unsigned int flags);
 int64_t sys_futex(int *uaddr, int op, int val, void *timeout,
                    int *uaddr2, int val3);
 

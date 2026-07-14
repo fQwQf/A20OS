@@ -8,7 +8,7 @@
 #include "proc/proc.h"
 #include "proc/signal.h"
 
-#define PIPE_DEFAULT_SIZE (256 * PIPE_BUF_SIZE)
+#define PIPE_DEFAULT_SIZE (16 * PIPE_BUF_SIZE)
 
 typedef struct pipe_buf {
     spinlock_t      lock;
@@ -330,6 +330,17 @@ int pipe_poll_events(vfile_t *vf, short events)
     }
     spin_unlock(&pb->lock);
     return revents;
+}
+
+int pipe_get_available(vfile_t *vf)
+{
+    if (!pipe_vfile_is(vf)) return -EINVAL;
+    pipe_buf_t *pb = (pipe_buf_t *)vf->priv;
+    if (!pb) return -EINVAL;
+    spin_lock(&pb->lock);
+    int available = (int)pb->used;
+    spin_unlock(&pb->lock);
+    return available;
 }
 
 int pipe_get_size(vfile_t *vf)

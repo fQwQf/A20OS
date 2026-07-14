@@ -58,6 +58,7 @@ void proc_task_init_common(task_t *t, task_t *parent)
     t->ready_since = 0;
     t->cfs_weight = sched_weight_for_nice(t->priority);
     t->sched_policy = parent ? parent->sched_policy : SCHED_NORMAL;
+    t->sched_reset_on_fork = 0;
     t->waiting_for_child = 0;
     t->exit_pending = 0;
     t->pending_exit_code = 0;
