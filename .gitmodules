@@ -1,3 +1,6 @@
+[submodule "user/external/lvgl"]
+	path = user/external/lvgl
+	url = https://github.com/lvgl/lvgl.git
 
 [submodule "user/external/mksh-cvs2git"]
 	path = user/external/mksh-cvs2git

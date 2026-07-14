@@ -195,6 +195,11 @@ QEMU_BLK_arm32       := virtio-blk-device,bus=virtio-mmio-bus.0
 QEMU_BLK_riscv32     := virtio-blk-device,bus=virtio-mmio-bus.0
 QEMU_BLK_ppc64le     := virtio-blk-pci
 
+# A virtio-mmio bus accepts only one device.  Keep an optional second disk off
+# the primary disk's bus; PCI transports can continue to use automatic slots.
+QEMU_BLK_SECOND_riscv64     := virtio-blk-device,bus=virtio-mmio-bus.1
+QEMU_BLK_SECOND_loongarch64 := virtio-blk-pci
+
 QEMU_NET_riscv64     := virtio-net-device,bus=virtio-mmio-bus.4
 QEMU_NET_loongarch64 := virtio-net-pci
 QEMU_NET_aarch64     := virtio-net-device,bus=virtio-mmio-bus.4
@@ -219,6 +224,7 @@ QEMU         := $(QEMU_$(ARCH))
 QEMU_FLAGS   := $(QEMU_FLAGS_BASE_$(ARCH)) -m 1G -nographic -smp $(NR_CPUS)
 
 QEMU_BLK     := $(QEMU_BLK_$(ARCH))
+QEMU_BLK_SECOND := $(QEMU_BLK_SECOND_$(ARCH))
 QEMU_NET     := $(QEMU_NET_$(ARCH))
 QEMU_GUI_DEVICES := $(if $(QEMU_GUI_DEVICES_$(ARCH)),$(QEMU_GUI_DEVICES_$(ARCH)),$(QEMU_GUI_DEVICES_DEFAULT))
 
@@ -261,12 +267,12 @@ QEMU_FLAGS += -drive file=$(FAT32_IMG),if=none,format=raw,id=x0 -device $(QEMU_B
 QEMU_FLAGS += $(NETDEV_USER) -device $(QEMU_NET),netdev=net
 ifeq ($(ARCH),riscv64)
 ifneq ($(wildcard sdcard-rv.img),)
-QEMU_FLAGS += -drive file=sdcard-rv.img,if=none,format=raw,id=x1 -device $(QEMU_BLK),drive=x1
+QEMU_FLAGS += -drive file=sdcard-rv.img,if=none,format=raw,id=x1 -device $(QEMU_BLK_SECOND),drive=x1
 endif
 endif
 ifeq ($(ARCH),loongarch64)
 ifneq ($(wildcard sdcard-la.img),)
-QEMU_FLAGS += -drive file=sdcard-la.img,if=none,format=raw,id=x1 -device $(QEMU_BLK),drive=x1
+QEMU_FLAGS += -drive file=sdcard-la.img,if=none,format=raw,id=x1 -device $(QEMU_BLK_SECOND),drive=x1
 endif
 endif
 endif
