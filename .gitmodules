@@ -1,3 +1,18 @@
+[submodule "user/external/fastfetch"]
+	path = user/external/fastfetch
+	url = https://github.com/fastfetch-cli/fastfetch.git
+[submodule "user/external/git"]
+	path = user/external/git
+	url = https://github.com/git/git.git
 [submodule "user/external/lvgl"]
 	path = user/external/lvgl
 	url = https://github.com/lvgl/lvgl.git
+[submodule "user/external/musl-cross-make"]
+	path = user/external/musl-cross-make
+	url = https://github.com/richfelker/musl-cross-make.git
+[submodule "user/external/vim"]
+	path = user/external/vim
+	url = https://github.com/vim/vim.git
+[submodule "user/external/zlib"]
+	path = user/external/zlib
+	url = https://github.com/madler/zlib.git
