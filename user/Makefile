@@ -33,12 +33,13 @@ $(ARCH_STAMP): arch-stamp-refresh Makefile
 		echo "[USER] initialized build variant $(ARCH_BUILD_ID) in $(BUILD_DIR)"; \
 	fi
 
-CROSS_COMPILE_riscv64 := riscv64-unknown-elf-
+RISCV_ELF_PREFIX ?= $(if $(shell command -v riscv64-unknown-elf-gcc 2>/dev/null),riscv64-unknown-elf-,$(if $(shell command -v riscv64-elf-gcc 2>/dev/null),riscv64-elf-,riscv64-unknown-elf-))
+CROSS_COMPILE_riscv64 := $(RISCV_ELF_PREFIX)
 CROSS_COMPILE_loongarch64 := loongarch64-linux-gnu-
 CROSS_COMPILE_aarch64 := aarch64-linux-gnu-
 CROSS_COMPILE_x86_64 := x86_64-linux-gnu-
 CROSS_COMPILE_arm32 := arm-linux-gnueabihf-
-CROSS_COMPILE_riscv32 := riscv64-unknown-elf-
+CROSS_COMPILE_riscv32 := $(RISCV_ELF_PREFIX)
 CROSS_COMPILE_ppc64le := powerpc64le-linux-gnu-
 CROSS_COMPILE ?= $(CROSS_COMPILE_$(ARCH))
 
@@ -142,8 +143,8 @@ else ifeq ($(ARCH),riscv32)
 LIBGCC_DEFAULT := $(shell $(CC) $(CFLAGS) -print-libgcc-file-name 2>/dev/null)
 LIBGCC_ILP32 := $(dir $(LIBGCC_DEFAULT))rv32imafdc/ilp32d/libgcc.a
 LIBGCC_ILP32_ALT := $(dir $(LIBGCC_DEFAULT))lib32/ilp32d/libgcc.a
-LIBGCC_ILP32_UNKNOWN_ELF := $(shell if command -v riscv64-unknown-elf-gcc >/dev/null 2>&1; then \
-	riscv64-unknown-elf-gcc -march=rv32imafdc -mabi=ilp32d -print-libgcc-file-name 2>/dev/null; \
+LIBGCC_ILP32_UNKNOWN_ELF := $(shell if command -v $(RISCV_ELF_PREFIX)gcc >/dev/null 2>&1; then \
+	$(RISCV_ELF_PREFIX)gcc -march=rv32imafdc -mabi=ilp32d -print-libgcc-file-name 2>/dev/null; \
 fi)
 LIBGCC := $(if $(wildcard $(LIBGCC_ILP32)),$(LIBGCC_ILP32),$(if $(wildcard $(LIBGCC_ILP32_ALT)),$(LIBGCC_ILP32_ALT),$(if $(wildcard $(LIBGCC_ILP32_UNKNOWN_ELF)),$(LIBGCC_ILP32_UNKNOWN_ELF),$(LIBGCC_DEFAULT))))
 MUSL_CONFIG_LDFLAGS := -L$(dir $(LIBGCC))
