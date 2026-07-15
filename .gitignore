@@ -17,3 +17,4 @@ kernel-la
 .eval-state
 *.orig
 *.rej
+__pycache__/

@@ -170,8 +170,10 @@ else
 	    tail -20 $(VIM_SRC)/auto/config.log 2>/dev/null; \
 	    exit $$rc
 	@echo "[EXTRA] Fixing cross-compile config for musl..."
-	sed -i '/^#define rlim_t /d' $(VIM_SRC)/auto/config.h
-	sed -i '/^#define stack_t /d' $(VIM_SRC)/auto/config.h
+	sed '/^#define rlim_t /d' $(VIM_SRC)/auto/config.h > $(VIM_SRC)/auto/config.h.tmp
+	mv $(VIM_SRC)/auto/config.h.tmp $(VIM_SRC)/auto/config.h
+	sed '/^#define stack_t /d' $(VIM_SRC)/auto/config.h > $(VIM_SRC)/auto/config.h.tmp
+	mv $(VIM_SRC)/auto/config.h.tmp $(VIM_SRC)/auto/config.h
 	for fn in FCHDIR FCHMOD FCHOWN FSYNC FTRUNCATE GETCWD GETPGID GETPWENT \
 	          GETPWNAM GETPWUID GETRLIMIT GETTIMEOFDAY GETWD INET_NTOP \
 	          LOCALTIME_R LSTAT MEMSET MKDTEMP NANOSLEEP PUTENV QSORT \
@@ -180,11 +182,13 @@ else
 	          STRCOLL STRERROR STRFTIME STRNCASECMP STRPBRK STRPTIME STRTOL \
 	          SYNC TOWLOWER TOWUPPER TZSET UNSETENV USLEEP UTIME UTIMES \
 	          WAITPID; do \
-	  sed -i "s,/\* #undef HAVE_$${fn} \*/,#define HAVE_$${fn} 1," \
-	    $(VIM_SRC)/auto/config.h; \
+	  sed "s,/\* #undef HAVE_$${fn} \*/,#define HAVE_$${fn} 1," \
+	    $(VIM_SRC)/auto/config.h > $(VIM_SRC)/auto/config.h.tmp; \
+	  mv $(VIM_SRC)/auto/config.h.tmp $(VIM_SRC)/auto/config.h; \
 	done
-	sed -i 's,/\* #undef HAVE_TERMCAP_H \*/,#define HAVE_TERMCAP_H 1,' \
-	  $(VIM_SRC)/auto/config.h
+	sed 's,/\* #undef HAVE_TERMCAP_H \*/,#define HAVE_TERMCAP_H 1,' \
+	  $(VIM_SRC)/auto/config.h > $(VIM_SRC)/auto/config.h.tmp
+	mv $(VIM_SRC)/auto/config.h.tmp $(VIM_SRC)/auto/config.h
 	: > $(VIM_SRC)/auto/osdef.h
 	@echo "[EXTRA] Building vim..."
 	$(MAKE) -C $(VIM_SRC) \
