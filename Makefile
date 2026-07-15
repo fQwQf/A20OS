@@ -21,6 +21,7 @@ STM32_BT_NAME ?= KasaneTeto
 STM32_BT_PIN ?= 2233
 STM32_BT_UUID ?= 1101
 STM32_BT_BAUD ?= 9600
+STM32_QEMU ?= 0
 ifeq ($(ARCH),armv7m)
 BOARD ?= stm32f103
 PROFILE := mcu
@@ -59,6 +60,7 @@ $(error Unsupported ABI '$(ABI)'; supported: linux, native, both)
 endif
 
 .DEFAULT_GOAL := all
+.DELETE_ON_ERROR:
 
 # Directories
 KERNEL_DIR = kernel
@@ -66,6 +68,7 @@ INCLUDE_DIR = $(KERNEL_DIR)/include
 BUILD_VARIANT = $(ABI)-$(if $(filter 1,$(BRINGUP)),bringup,dev)$(if $(filter 1,$(NOMMU)),-nommu,)
 ifeq ($(ARCH),armv7m)
 BUILD_VARIANT := $(BUILD_VARIANT)-$(BOARD)-f$(STM32_FLASH_KB)k-r$(STM32_RAM_KB)k
+BUILD_VARIANT := $(BUILD_VARIANT)$(if $(filter 1,$(STM32_QEMU)),-qemu,)
 endif
 BUILD_DIR = .kernel-build/$(ARCH)-$(BUILD_VARIANT)
 FAT32_IMG = $(BUILD_DIR)/fat32.img
@@ -126,7 +129,8 @@ PROTOCOLS_LINES = \
     'ipv6-nonxt 59 IPv6-NoNxt' \
     'ipv6-opts 60 IPv6-Opts'
 
-CROSS_PREFIX_riscv64     := riscv64-unknown-elf-
+RISCV_ELF_PREFIX ?= $(if $(shell command -v riscv64-unknown-elf-gcc 2>/dev/null),riscv64-unknown-elf-,$(if $(shell command -v riscv64-elf-gcc 2>/dev/null),riscv64-elf-,riscv64-unknown-elf-))
+CROSS_PREFIX_riscv64     := $(RISCV_ELF_PREFIX)
 CROSS_PREFIX_loongarch64 := loongarch64-linux-gnu-
 CROSS_PREFIX_aarch64     := aarch64-linux-gnu-
 CROSS_PREFIX_x86_64      := x86_64-linux-gnu-
@@ -187,6 +191,7 @@ QEMU_arm32       := qemu-system-arm
 QEMU_armv7m      := qemu-system-arm
 QEMU_riscv32     := qemu-system-riscv32
 QEMU_ppc64le     := qemu-system-ppc64
+QEMU_GUI_DISPLAY ?= $(if $(filter Darwin,$(shell uname -s 2>/dev/null)),cocoa,gtk)
 
 QEMU_FLAGS_BASE_riscv64     := -machine virt -bios default -global virtio-mmio.force-legacy=false
 QEMU_FLAGS_BASE_loongarch64 := -machine virt
@@ -265,7 +270,7 @@ $(error Unsupported ARCH '$(ARCH)')
 endif
 
 MKFS_FAT ?= $(or $(shell command -v mkfs.fat 2>/dev/null),$(wildcard /usr/sbin/mkfs.fat),$(wildcard /sbin/mkfs.fat),mkfs.fat)
-MKFS_EXT4 ?= $(or $(shell command -v mkfs.ext4 2>/dev/null),$(wildcard /usr/sbin/mkfs.ext4),$(wildcard /sbin/mkfs.ext4),mkfs.ext4)
+MKFS_EXT4 ?= $(or $(shell command -v mkfs.ext4 2>/dev/null),$(wildcard /opt/homebrew/opt/e2fsprogs/sbin/mkfs.ext4),$(wildcard /usr/local/opt/e2fsprogs/sbin/mkfs.ext4),$(wildcard /usr/sbin/mkfs.ext4),$(wildcard /sbin/mkfs.ext4),mkfs.ext4)
 LIBGCC_S_ARCH := $(shell $(CC) $(ARCH_CFLAGS) -print-file-name=libgcc_s.so.1 2>/dev/null)
 ifeq ($(LIBGCC_S_ARCH),libgcc_s.so.1)
 LIBGCC_S_ARCH :=
@@ -315,6 +320,9 @@ $(error STM32_BT_BAUD must be one of 4800, 9600, 19200, 38400, 57600, 115200)
 endif
 ifeq ($(STM32_XUANWU),1)
 CFLAGS += -DCONFIG_STM32_XUANWU
+endif
+ifeq ($(STM32_QEMU),1)
+CFLAGS += -DCONFIG_STM32_QEMU
 endif
 endif
 ifeq ($(filter $(ARCH),arm32 armv7m riscv32),)
@@ -1457,9 +1465,9 @@ flash-stm32f103-xuanwu: stm32f103-xuanwu
 		-c "shutdown"
 
 run-stm32f103-qemu:
-	$(MAKE) ARCH=armv7m BOARD=stm32f103 PROFILE=mcu STM32_FLASH_KB=128 STM32_RAM_KB=8 kernel-only
+	$(MAKE) ARCH=armv7m BOARD=stm32f103 PROFILE=mcu STM32_FLASH_KB=128 STM32_RAM_KB=8 STM32_QEMU=1 kernel-only
 	qemu-system-arm -machine stm32vldiscovery -nographic \
-		-kernel .kernel-build/armv7m-both-bringup-nommu-stm32f103-f128k-r8k/kernel.bin
+		-kernel .kernel-build/armv7m-both-bringup-nommu-stm32f103-f128k-r8k-qemu/kernel.bin
 
 # ----------------------------------------------------------------
 # Run targets (development mode)
@@ -1536,7 +1544,7 @@ ifeq ($(BRINGUP),1)
 else
 	$(MAKE) ARCH=$(ARCH) BRINGUP=$(BRINGUP) dev-build
 endif
-	$(QEMU) $(patsubst -nographic,-display gtk $(QEMU_GUI_DEVICES) -serial stdio,$(QEMU_FLAGS)) -kernel $(KERNEL_ELF)
+	$(QEMU) $(patsubst -nographic,-display $(QEMU_GUI_DISPLAY) $(QEMU_GUI_DEVICES) -serial stdio,$(QEMU_FLAGS)) -kernel $(KERNEL_ELF)
 
 # --- Debug Targets ---
 
@@ -1707,12 +1715,12 @@ NATIVE_CRT0_X86_64  := user/liba20rt/crt0_x86_64.S
 NATIVE_CRT0_ARM32   := user/liba20rt/crt0_arm32.S
 NATIVE_CRT0_RV32    := user/liba20rt/crt0_rv64.S
 NATIVE_CRT0_PPC64LE := user/liba20rt/crt0_ppc64le.S
-NATIVE_CC_riscv64     := riscv64-unknown-elf-gcc
+NATIVE_CC_riscv64     := $(RISCV_ELF_PREFIX)gcc
 NATIVE_CC_loongarch64 := loongarch64-linux-gnu-gcc
 NATIVE_CC_aarch64     := aarch64-linux-gnu-gcc
 NATIVE_CC_x86_64      := x86_64-linux-gnu-gcc
 NATIVE_CC_arm32       := arm-linux-gnueabihf-gcc
-NATIVE_CC_riscv32     := riscv64-unknown-elf-gcc
+NATIVE_CC_riscv32     := $(RISCV_ELF_PREFIX)gcc
 NATIVE_CC_ppc64le     := powerpc64le-linux-gnu-gcc
 NATIVE_CC := $(NATIVE_CC_$(ARCH))
 NATIVE_CFLAGS_riscv64     := -march=rv64gc -mabi=lp64d -mcmodel=medany
@@ -1802,7 +1810,7 @@ native-test-ppc64le:
 native-test: native-test-rv native-test-la native-test-aarch64 native-test-x86_64 native-test-arm32 native-test-rv32 native-test-ppc64le
 
 native-minimal-rv:
-	$(call NATIVE_MINIMAL_RECIPE,riscv64-unknown-elf-gcc,-march=rv64gc -mabi=lp64d -mcmodel=medany,$(NATIVE_CRT0_RV),user/build/riscv64/native-minimal-rv)
+	$(call NATIVE_MINIMAL_RECIPE,$(RISCV_ELF_PREFIX)gcc,-march=rv64gc -mabi=lp64d -mcmodel=medany,$(NATIVE_CRT0_RV),user/build/riscv64/native-minimal-rv)
 	@file user/build/riscv64/native-minimal-rv
 
 native-minimal-la:
