@@ -138,9 +138,13 @@ because it has an entry in `syscall_table.def`.
 | `fstatfs` | path/fs | `partial` | `smoke-vfs-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `mount` | path/fs | `partial` | `smoke-vfs-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `umount2` | path/fs | `partial` | `smoke-vfs-stress` | implemented subset; Linux edge semantics remain documented gaps |
+| `swapon` | memory | `partial` | `smoke-mm-stress` | implemented subset; Linux edge semantics remain documented gaps |
+| `swapoff` | memory | `partial` | `smoke-mm-stress` | implemented subset; Linux edge semantics remain documented gaps |
+| `mkswap` | memory | `partial` | `smoke-mm-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `utimensat` | path/fs | `partial` | `smoke-vfs-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `chroot` | path/fs | `partial` | `smoke-vfs-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `mknodat` | path/fs | `partial` | `smoke-vfs-stress` | implemented subset; Linux edge semantics remain documented gaps |
+| `set_thread_area` | arch | `partial` | `smoke-abi-linux` | implemented subset; architecture-specific semantics remain bounded |
 | `exit` | process | `partial` | `smoke-proc-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `exit_group` | process | `partial` | `smoke-proc-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `waitid` | process | `partial` | `smoke-proc-stress` | implemented subset; Linux edge semantics remain documented gaps |
@@ -222,6 +226,7 @@ because it has an entry in `syscall_table.def`.
 | `bpf` | bpf | `partial` | `smoke-abi-linux` | map/prog shim only; no full verifier or eBPF runtime |
 | `clock_settime` | time | `partial` | `smoke-proc-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `clock_gettime` | time | `partial` | `smoke-proc-stress` | implemented subset; Linux edge semantics remain documented gaps |
+| `clock_gettime32` | time | `partial` | `smoke-proc-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `clock_getres` | time | `partial` | `smoke-proc-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `nanosleep` | time | `partial` | `smoke-proc-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `clock_nanosleep` | time | `partial` | `smoke-proc-stress` | implemented subset; Linux edge semantics remain documented gaps |
@@ -289,7 +294,7 @@ because it has an entry in `syscall_table.def`.
 | `finit_module` | modules | `stub` | `stub-review` | explicit -ENOSYS compatibility placeholder |
 | `userfaultfd` | memory | `stub` | `smoke-mm-stress` | explicit -ENOSYS compatibility placeholder |
 | `perf_event_open` | perf | `stub` | `stub-review` | explicit -ENOSYS compatibility placeholder |
-| `arch_prctl` | arch | `stub` | `stub-review` | explicit -ENOSYS compatibility placeholder |
+| `arch_prctl` | arch | `stub` | `stub-review` | architecture-specific implementation; unsupported architectures return -ENOSYS |
 <!-- LINUX_SYSCALL_COVERAGE_END -->
 
 ## Stub Decision Record

@@ -1,7 +1,8 @@
 # A20OS Makefile
 
 # Parallel build
-NPROC ?= $(shell nproc 2>/dev/null || echo 4)
+NPROC ?= $(or $(shell getconf _NPROCESSORS_ONLN 2>/dev/null),$(shell sysctl -n hw.logicalcpu 2>/dev/null),4)
+TIMEOUT ?= python3 scripts/run_with_timeout.py
 
 # Architecture selection
 ARCH ?= riscv64
@@ -556,7 +557,7 @@ check-doc-drift:
 	@python3 scripts/gen_linux_syscall_coverage.py
 	@rg -q "stub" kernel/abi/linux/syscall_coverage.md kernel/abi/linux/compat_notes.md docs/testing-gates.md
 	@rg -q "partial" kernel/abi/linux/syscall_coverage.md kernel/abi/linux/compat_notes.md docs/testing-gates.md
-	@rg -q "Future" TODO.md docs/testing-gates.md kernel/abi/native/sys_core.c
+	@rg -q "Future" docs/testing-gates.md kernel/abi/native/sys_core.c
 	@rg -q "not yet" docs/testing-gates.md kernel/abi/native/sys_phase2.c kernel/mm/fault.c
 	@! rg -q "for simplicity" docs kernel --glob '!docs/research/**' --glob '!docs/testing-gates.md' --glob '!kernel/external/**'
 	@echo "check-doc-drift: PASS"
@@ -730,7 +731,7 @@ smoke-riscv64:
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/riscv64-bringup.log"; \
 	status=0; \
-	timeout $(SMOKE_TIMEOUT) qemu-system-riscv64 \
+	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
 		-machine virt -m 1G -nographic -smp 1 -bios default \
 		-global virtio-mmio.force-legacy=false \
 		-kernel .kernel-build/riscv64-linux-bringup/kernel.elf \
@@ -751,7 +752,7 @@ smoke-loongarch64:
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/loongarch64-bringup.log"; \
 	status=0; \
-	timeout $(SMOKE_TIMEOUT) qemu-system-loongarch64 \
+	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-loongarch64 \
 		-machine virt -m 1G -nographic -smp 1 \
 		-kernel .kernel-build/loongarch64-linux-bringup/kernel.elf \
 		> "$$log" 2>&1 || status=$$?; \
@@ -771,7 +772,7 @@ smoke-aarch64:
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/aarch64-bringup.log"; \
 	status=0; \
-	timeout $(SMOKE_TIMEOUT) qemu-system-aarch64 \
+	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-aarch64 \
 		-machine virt -cpu cortex-a57 -m 1G -nographic -smp 1 \
 		-global virtio-mmio.force-legacy=false \
 		-kernel .kernel-build/aarch64-linux-bringup/kernel.elf \
@@ -792,7 +793,7 @@ smoke-x86_64:
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/x86_64-bringup.log"; \
 	status=0; \
-	timeout $(SMOKE_TIMEOUT) qemu-system-x86_64 \
+	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-x86_64 \
 		-machine q35 -m 1G -nographic -smp 1 -no-reboot \
 		-kernel .kernel-build/x86_64-linux-bringup/kernel.elf \
 		> "$$log" 2>&1 || status=$$?; \
@@ -812,7 +813,7 @@ smoke-arm32:
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/arm32-bringup.log"; \
 	status=0; \
-	timeout $(SMOKE_TIMEOUT) qemu-system-arm \
+	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-arm \
 		-machine virt -cpu cortex-a15 -m 1G -nographic -smp 1 \
 		-kernel .kernel-build/arm32-linux-bringup/kernel.elf \
 		> "$$log" 2>&1 || status=$$?; \
@@ -834,7 +835,7 @@ smoke-riscv32:
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/riscv32-bringup.log"; \
 	status=0; \
-	timeout $(SMOKE_TIMEOUT) qemu-system-riscv32 \
+	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv32 \
 		-machine virt -m 1G -nographic -smp 1 -bios default \
 		-global virtio-mmio.force-legacy=false \
 		-kernel .kernel-build/riscv32-linux-bringup/kernel.elf \
@@ -871,7 +872,7 @@ smoke-arch-mmu-matrix:
 		riscv32) qemu=qemu-system-riscv32; base="-machine virt -bios default -global virtio-mmio.force-legacy=false" ;; \
 		esac; \
 		{ sleep $(SMOKE_INPUT_DELAY); printf 'echo A20_MATRIX_%s_OK\n/bin/echo A20_EXTERNAL_OK\npoweroff\n' "$$variant"; } | \
-		timeout $(SMOKE_TIMEOUT) $$qemu $$base -m 1G -nographic -smp 1 \
+		$(TIMEOUT) $(SMOKE_TIMEOUT) $$qemu $$base -m 1G -nographic -smp 1 \
 			-drive file="$$build/fat32.img",if=none,format=raw,id=x0 \
 			-device virtio-blk-device,bus=virtio-mmio-bus.0,drive=x0 \
 			-netdev user,id=net \
@@ -892,7 +893,7 @@ smoke-ppc64le:
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/ppc64le-bringup.log"; \
 	status=0; \
-	timeout $(SMOKE_TIMEOUT) qemu-system-ppc64 \
+	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-ppc64 \
 		-machine pseries -m 1G -nographic -smp 1 \
 		-kernel .kernel-build/ppc64le-linux-bringup/kernel.elf \
 		> "$$log" 2>&1 || status=$$?; \
@@ -915,7 +916,7 @@ smoke-abi-linux:
 	log="$(SMOKE_LOG_DIR)/abi-linux-riscv64.log"; \
 	status=0; \
 	{ sleep $(SMOKE_INPUT_DELAY); printf 'syscall_smoke\npoweroff\n'; } | \
-	timeout $(SMOKE_TIMEOUT) qemu-system-riscv64 \
+	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
 		-machine virt -m 1G -nographic -smp 1 -bios default \
 		-global virtio-mmio.force-legacy=false \
 		-drive file=.kernel-build/riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
@@ -942,7 +943,7 @@ smoke-network-suite:
 	log="$(SMOKE_LOG_DIR)/network-suite-riscv64.log"; \
 	status=0; \
 	{ sleep $(SMOKE_INPUT_DELAY); printf 'network_suite\npoweroff\n'; } | \
-	timeout $(SMOKE_TIMEOUT) qemu-system-riscv64 \
+	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
 		-machine virt -m 1G -nographic -smp 1 -bios default \
 		-global virtio-mmio.force-legacy=false \
 		-drive file=.kernel-build/riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
@@ -970,7 +971,7 @@ smoke-proc-a20:
 	log="$(SMOKE_LOG_DIR)/proc-a20-riscv64.log"; \
 	status=0; \
 	{ sleep $(SMOKE_INPUT_DELAY); printf 'cat /proc/a20/bcache\ncat /proc/a20/page_cache\npoweroff\n'; } | \
-	timeout $(SMOKE_TIMEOUT) qemu-system-riscv64 \
+	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
 		-machine virt -m 1G -nographic -smp 1 -bios default \
 		-global virtio-mmio.force-legacy=false \
 		-drive file=.kernel-build/riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
@@ -993,7 +994,7 @@ smoke-proc-stress:
 	log="$(SMOKE_LOG_DIR)/proc-stress-riscv64.log"; \
 	status=0; \
 	{ sleep $(SMOKE_INPUT_DELAY); printf 'proc_stress\npoweroff\n'; } | \
-	timeout $(SMOKE_TIMEOUT) qemu-system-riscv64 \
+	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
 		-machine virt -m 1G -nographic -smp 1 -bios default \
 		-global virtio-mmio.force-legacy=false \
 		-drive file=.kernel-build/riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
@@ -1016,7 +1017,7 @@ smoke-mm-stress:
 	log="$(SMOKE_LOG_DIR)/mm-stress-riscv64.log"; \
 	status=0; \
 	{ sleep $(SMOKE_INPUT_DELAY); printf 'mm_stress\npoweroff\n'; } | \
-	timeout $(SMOKE_TIMEOUT) qemu-system-riscv64 \
+	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
 		-machine virt -m 1G -nographic -smp 1 -bios default \
 		-global virtio-mmio.force-legacy=false \
 		-drive file=.kernel-build/riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
@@ -1039,7 +1040,7 @@ smoke-vfs-stress:
 	log="$(SMOKE_LOG_DIR)/vfs-stress-riscv64.log"; \
 	status=0; \
 	{ sleep $(SMOKE_INPUT_DELAY); printf 'vfs_stress\npoweroff\n'; } | \
-	timeout $(SMOKE_TIMEOUT) qemu-system-riscv64 \
+	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
 		-machine virt -m 1G -nographic -smp 1 -bios default \
 		-global virtio-mmio.force-legacy=false \
 		-drive file=.kernel-build/riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
@@ -1062,7 +1063,7 @@ smoke-vfs-edge:
 		log="$(SMOKE_LOG_DIR)/vfs-edge-riscv64.log"; \
 		status=0; \
 		{ sleep $(SMOKE_INPUT_DELAY); printf 'vfs_edge\npoweroff\n'; } | \
-		timeout $(SMOKE_TIMEOUT) qemu-system-riscv64 \
+		$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
 			-machine virt -m 1G -nographic -smp 1 -bios default \
 			-global virtio-mmio.force-legacy=false \
 			-drive file=.kernel-build/riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
@@ -1086,7 +1087,7 @@ smoke-io-event:
 	log="$(SMOKE_LOG_DIR)/io-event-riscv64.log"; \
 	status=0; \
 	{ sleep $(SMOKE_INPUT_DELAY); printf 'io_event_test\npoweroff\n'; } | \
-	timeout $(SMOKE_TIMEOUT) qemu-system-riscv64 \
+	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
 		-machine virt -m 1G -nographic -smp 1 -bios default \
 		-global virtio-mmio.force-legacy=false \
 		-drive file=.kernel-build/riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
@@ -1114,7 +1115,7 @@ smoke-sched-stress:
 	log="$(SMOKE_LOG_DIR)/sched-stress-riscv64.log"; \
 	status=0; \
 	{ sleep $(SMOKE_INPUT_DELAY); printf 'sched_stress\npoweroff\n'; } | \
-	timeout $(SMOKE_TIMEOUT) qemu-system-riscv64 \
+	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
 		-machine virt -m 1G -nographic -smp 1 -bios default \
 		-global virtio-mmio.force-legacy=false \
 		-drive file=.kernel-build/riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
@@ -1137,7 +1138,7 @@ smoke-futex-stress:
 	log="$(SMOKE_LOG_DIR)/futex-stress-riscv64.log"; \
 	status=0; \
 	{ sleep $(SMOKE_INPUT_DELAY); printf 'futex_stress\npoweroff\n'; } | \
-	timeout $(SMOKE_TIMEOUT) qemu-system-riscv64 \
+	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
 		-machine virt -m 1G -nographic -smp 1 -bios default \
 		-global virtio-mmio.force-legacy=false \
 		-drive file=.kernel-build/riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
@@ -1160,7 +1161,7 @@ smoke-socket-stress:
 	log="$(SMOKE_LOG_DIR)/socket-stress-riscv64.log"; \
 	status=0; \
 	{ sleep $(SMOKE_INPUT_DELAY); printf 'socket_stress\npoweroff\n'; } | \
-	timeout $(SMOKE_TIMEOUT) qemu-system-riscv64 \
+	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
 		-machine virt -m 1G -nographic -smp 1 -bios default \
 		-global virtio-mmio.force-legacy=false \
 		-drive file=.kernel-build/riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
@@ -1190,7 +1191,7 @@ smoke-driver-lifecycle:
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/driver-lifecycle-riscv64.log"; \
 	status=0; \
-	timeout $(SMOKE_TIMEOUT) qemu-system-riscv64 \
+	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
 		-machine virt -m 1G -nographic -smp 1 -bios default \
 		-global virtio-mmio.force-legacy=false \
 		-kernel .kernel-build/riscv64-linux-bringup/kernel.elf \
@@ -1214,7 +1215,7 @@ smoke-native-handle:
 	log="$(SMOKE_LOG_DIR)/native-handle-riscv64.log"; \
 	status=0; \
 	{ sleep $(SMOKE_INPUT_DELAY); printf '/bin/native-handle-rv\npoweroff\n'; } | \
-	timeout $(SMOKE_TIMEOUT) qemu-system-riscv64 \
+	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
 		-machine virt -m 1G -nographic -smp 1 -bios default \
 		-global virtio-mmio.force-legacy=false \
 		-drive file=.kernel-build/riscv64-both-dev/fat32.img,if=none,format=raw,id=x0 \
@@ -1343,7 +1344,7 @@ fs_img: $(FS_TEST_IMG)
 $(FAT32_IMG): $(USER_BUILD_STAMP) $(NATIVE_BUILD_STAMP)
 	@echo "Building FAT32 image..."
 	@mkdir -p $(BUILD_DIR)
-	dd if=/dev/zero of=$(FAT32_IMG) bs=1M count=$(FAT32_IMAGE_MB)
+	dd if=/dev/zero of=$(FAT32_IMG) bs=1048576 count=$(FAT32_IMAGE_MB)
 	$(MKFS_FAT) -F 32 $(FAT32_IMG)
 	@set -e; \
 	for f in $(USER_BUILD_DIR)/*; do \
@@ -1388,7 +1389,7 @@ $(EXT4_IMG): $(USER_BUILD_STAMP) $(NATIVE_BUILD_STAMP)
 	@printf '%s\n' $(PROTOCOLS_LINES) > $(EXT4_STAGING_DIR)/etc/protocols
 	@printf 'ID=A20OS\nNAME="A20OS"\nPRETTY_NAME="A20OS"\nVERSION="0.2"\nVERSION_ID="0.2"\n' > $(EXT4_STAGING_DIR)/etc/os-release
 	@mkdir -p $(BUILD_DIR)
-	dd if=/dev/zero of=$(EXT4_IMG) bs=1M count=$(EXT4_IMAGE_MB)
+	dd if=/dev/zero of=$(EXT4_IMG) bs=1048576 count=$(EXT4_IMAGE_MB)
 	$(MKFS_EXT4) -F -O ^has_journal,extent,huge_file,flex_bg,uninit_bg,dir_index -d $(EXT4_STAGING_DIR) $(EXT4_IMG)
 	@rm -rf $(EXT4_STAGING_DIR)
 
@@ -1656,7 +1657,7 @@ extra-img: extra-user-apps
 		cp -a "$$VIM_SRC/$$d/"*.vim "$$VIM_RT/$$d/" 2>/dev/null || true; \
 	done
 	@mkdir -p $(BUILD_DIR)
-	dd if=/dev/zero of=$(EXTRA_IMG) bs=1M count=$(EXTRA_IMAGE_MB) 2>/dev/null
+	dd if=/dev/zero of=$(EXTRA_IMG) bs=1048576 count=$(EXTRA_IMAGE_MB) 2>/dev/null
 	$(MKFS_EXT4) -F -O ^has_journal,extent,huge_file,flex_bg,uninit_bg,dir_index \
 		-d $(EXTRA_STAGING_DIR) $(EXTRA_IMG)
 	@rm -rf $(EXTRA_STAGING_DIR)
@@ -1905,7 +1906,7 @@ smoke-native-libc:
 	log="$(SMOKE_LOG_DIR)/native-libc-riscv64.log"; \
 	status=0; \
 	{ sleep $(SMOKE_INPUT_DELAY); printf '/bin/native-libc-rv\npoweroff\n'; } | \
-	timeout $(SMOKE_TIMEOUT) qemu-system-riscv64 \
+	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
 		-machine virt -m 1G -nographic -smp 1 -bios default \
 		-global virtio-mmio.force-legacy=false \
 		-drive file=.kernel-build/riscv64-both-dev/fat32.img,if=none,format=raw,id=x0 \
@@ -1979,7 +1980,7 @@ eval-dev-build-la:
 
 # --- QEMU launch ---
 define RUN_QEMU_RV
-	timeout --foreground $(EVAL_TIMEOUT) \
+	$(TIMEOUT) --foreground $(EVAL_TIMEOUT) \
 	qemu-system-riscv64 -machine virt -m 1G -nographic -smp 1 -bios default \
 		-global virtio-mmio.force-legacy=false \
 		-kernel $(EVAL_KERNEL_RV) \
@@ -1993,7 +1994,7 @@ define RUN_QEMU_RV
 endef
 
 define RUN_QEMU_LA
-	timeout --foreground $(EVAL_TIMEOUT) \
+	$(TIMEOUT) --foreground $(EVAL_TIMEOUT) \
 	qemu-system-loongarch64 -machine virt -m 1G -nographic -smp 1 \
 		-kernel $(EVAL_KERNEL_LA) \
 		-drive 'file=$(EVAL_FAT32_LA),if=none,format=raw,id=x0' \
