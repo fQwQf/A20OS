@@ -5,15 +5,18 @@
 #include "mm/slab.h"
 #include "display.h"
 #include "extsram.h"
+#include "keys.h"
 #include "sdcard.h"
 #include "touch.h"
 
 #define TOUCH_POLL_INTERVAL_MS 20U
+#define KEY_POLL_INTERVAL_MS 20U
 #define SDCARD_CHECK_INTERVAL_MS 2000U
 #define SDCARD_REPROBE_INTERVAL_MS 5000U
 
 static stm32_peripheral_state_t peripherals;
 static uint64_t last_touch_poll;
+static uint64_t last_key_poll;
 static uint64_t last_sdcard_check;
 static int touch_pressed;
 
@@ -23,7 +26,7 @@ static void update_display_status(void) {
         peripherals.external_sram_ready, peripherals.external_sram_bytes,
         peripherals.sdcard_ready, sd->sectors, sd->fat32,
         sd->bus_width, sd->volume_label,
-        peripherals.touch_armed);
+        peripherals.touch_armed, peripherals.keys_ready);
 }
 
 static void ext_sram_smoke_test(void) {
@@ -109,11 +112,28 @@ void stm32_peripherals_init(void) {
     printf("[BOOT] touch interface=%s (optional)\n",
            peripherals.touch_armed ? "armed" : "disabled");
 
+    peripherals.keys_ready = stm32_keys_init() == 0;
+    printf("[BOOT] direction keys=%s\n",
+           peripherals.keys_ready ? "ready" : "disabled");
+
     update_display_status();
 }
 
 void stm32_peripherals_service(uint64_t now) {
     stm32_display_update_ticks(now);
+
+    if (peripherals.keys_ready &&
+        now - last_key_poll >= KEY_POLL_INTERVAL_MS) {
+        last_key_poll = now;
+        stm32_key_t key = stm32_keys_poll();
+        if (key != STM32_KEY_NONE) {
+            static const char *const names[] = {
+                "none", "up", "down", "left", "right",
+            };
+            printf("[KEY] %s\n", names[key]);
+            stm32_display_handle_key(key);
+        }
+    }
 
     if (peripherals.touch_armed &&
         now - last_touch_poll >= TOUCH_POLL_INTERVAL_MS) {

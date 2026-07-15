@@ -9,6 +9,7 @@
 #include "core/string.h"
 #include "core/klog.h"
 #include "proc/proc.h"
+#include "mm/swap.h"
 
 static inline int pte_user_readable(pte_t pte) {
     return arch_pte_is_leaf(pte) && (pte & PTE_U) && (pte & PTE_R);
@@ -118,6 +119,10 @@ pte_t *pt_walk(pt_root_t *pgdir, vaddr_t va, int alloc) {
     for (int level = ARCH_PT_ROOT_LEVEL; level > 0; level--) {
         int vpn = arch_pt_vpn(va, level);
         pte_t pte = table[vpn];
+#ifdef CONFIG_SWAP
+        if (pte_is_swap(pte))
+            return &table[vpn];
+#endif
         if (pte & PTE_V) {
             if (arch_pte_is_leaf(pte))
                 return NULL;
@@ -140,6 +145,14 @@ pte_t *pt_lookup_leaf(pt_root_t *pgdir, vaddr_t va, int *level_out,
     for (int level = ARCH_PT_ROOT_LEVEL; level >= 0; level--) {
         int idx = arch_pt_vpn(va, level);
         pte_t *pte = &table[idx];
+#ifdef CONFIG_SWAP
+        if (pte_is_swap(*pte)) {
+            if (level_out) *level_out = 0;
+            if (base_out) *base_out = va & ~(vaddr_t)(PAGE_SIZE - 1);
+            if (size_out) *size_out = PAGE_SIZE;
+            return pte;
+        }
+#endif
         if (!(*pte & PTE_V))
             return NULL;
         if (arch_pte_is_leaf(*pte)) {
@@ -292,7 +305,11 @@ int pt_map_huge(pt_root_t *pgdir, vaddr_t va, paddr_t pa, pte_t flags) {
 static int pt_table_empty(pte_t *table, int level) {
     int entries = arch_pt_level_entries(level);
     for (int i = 0; i < entries; i++) {
-        if (table[i] & PTE_V)
+        if ((table[i] & PTE_V)
+#ifdef CONFIG_SWAP
+            || pte_is_swap(table[i])
+#endif
+        )
             return 0;
     }
     return 1;
@@ -344,6 +361,19 @@ int pt_unmap_leaf(pt_root_t *pgdir, vaddr_t va, paddr_t *pa_out,
         int idx = arch_pt_vpn(va, level);
         idx_path[level] = idx;
         pte_t *pte = &table[idx];
+#ifdef CONFIG_SWAP
+        if (pte_is_swap(*pte)) {
+            if (level != 0)
+                return -EINVAL;
+            swap_free(pte_to_swp_entry(*pte));
+            *pte = 0;
+            if (pa_out) *pa_out = 0;
+            if (base_out) *base_out = va & ~(vaddr_t)(PAGE_SIZE - 1);
+            if (size_out) *size_out = PAGE_SIZE;
+            if (level_out) *level_out = 0;
+            return 0;
+        }
+#endif
         if (!(*pte & PTE_V))
             return -EINVAL;
         if (arch_pte_is_leaf(*pte)) {
@@ -457,6 +487,13 @@ static void pt_destroy_user_recursive(pte_t *table, int level) {
         ARCH_PT_USER_END : arch_pt_level_entries(level);
     for (int i = 0; i < limit; i++) {
         pte_t pte = table[i];
+#ifdef CONFIG_SWAP
+        if (pte_is_swap(pte)) {
+            swap_free(pte_to_swp_entry(pte));
+            table[i] = 0;
+            continue;
+        }
+#endif
         if (!(pte & PTE_V)) continue;
 
         int is_leaf = arch_pte_is_leaf(pte);

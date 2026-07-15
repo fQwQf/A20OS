@@ -2,6 +2,9 @@
 #define _ARCH_X86_64_MM_H
 
 #include "core/types.h"
+#ifdef CONFIG_SWAP
+#include "mm/swap.h"
+#endif
 
 /* x86_64 4-level page table constants */
 #define ARCH_PT_LEVELS    4
@@ -24,6 +27,26 @@
 #define PTE_LEAF (1UL << 10)  /* Software: 4K page leaf marker */
 #define PTE_NX   (1UL << 63)  /* No-execute */
 #define PTE_PS   (1UL << 7)   /* Page Size (huge page) */
+
+#ifdef CONFIG_SWAP
+#define PTE_SWAP PTE_LEAF
+
+static inline int pte_present(uint64_t pte) {
+    return (pte & PTE_V) != 0;
+}
+
+static inline int pte_is_swap(uint64_t pte) {
+    return !pte_present(pte) && (pte & PTE_SWAP) != 0;
+}
+
+static inline swap_entry_t pte_to_swp_entry(uint64_t pte) {
+    return (pte >> 12) & ((1ULL << (SWP_TYPE_BITS + SWP_OFFSET_BITS)) - 1);
+}
+
+static inline uint64_t swp_entry_to_pte(swap_entry_t entry) {
+    return PTE_SWAP | (entry << 12);
+}
+#endif
 
 /* Compat aliases for arch-agnostic code */
 #define PTE_MAT1  0UL

@@ -96,13 +96,21 @@ link the full A20OS VFS, so this milestone exposes a real block device rather
 than mounting it into a process-visible namespace.
 
 The 3.5-inch panel carries an XPT2046-compatible resistive touch controller:
-`PB1=T_CLK`, `PB2=T_DOUT`, `PB10=T_DIN`, `PF10=T_PEN`, and `PF11=T_CS`.
+`PB1=T_CLK`, `PB2=T_DOUT`, `PF9=T_DIN`, `PF10=T_PEN`, and `PF11=T_CS`.
 Touch is polled every 20 ms with trimmed sampling, noise rejection, smoothing,
 and configurable axis calibration. Since XPT2046 has no readable device ID,
 an idle panel and a missing panel are both harmlessly represented as an armed
 interface until `T_PEN` is asserted.
 
-The LCD UI has touch-selectable `STATUS`, `TF CARD`, and `TOUCH` pages. The
+The four yellow keys are also available when touch is absent. The vendor
+mapping is `PA0` active-high plus `PE4`, `PE3`, and `PE2` active-low. They are
+polled every 20 ms with debounce and exposed as up, left, down, and right
+events (`PA0`, `PE2`, `PE3`, `PE4`, respectively). Left/right cycle through
+the `STATUS`, `TF CARD`, and `INPUT TEST` pages. Up/down select status rows;
+right opens the selected storage or input row. On the input page up moves a
+visible test cursor and down clears the canvas.
+
+The LCD UI remains touch-selectable when a working panel is fitted. The
 storage page shows capacity, FAT32 state, SDIO bus width, and volume label.
 The touch page is a small drawing pad with continuous strokes and a `CLEAR`
 button, so panel orientation and calibration can be checked without a serial
@@ -137,12 +145,14 @@ After flashing, the expected behavior is:
 1. LED0 starts lit and then toggles every 500 ms.
 2. USART1 prints the status of each optional peripheral and one tick per
    second.
-3. The LCD shows external SRAM, TF/FAT32, touch, and uptime status.
-4. The bottom `STATUS`, `TF CARD`, and `TOUCH` buttons switch pages; drawing
-   on the touch pad leaves a cyan stroke and `CLEAR` erases it.
-5. Touching the panel shows coordinates and emits `[TOUCH] down`/`[TOUCH] up`
+3. The LCD shows external SRAM, TF/FAT32, direction-key, and uptime status.
+4. The yellow direction keys emit `[KEY]` messages. Left/right switch pages,
+   while up/down control the current page.
+5. If touch is available, the bottom `STATUS`, `TF CARD`, and `INPUT` buttons
+   switch pages; drawing leaves a cyan stroke and `CLEAR` erases it.
+6. Touching the panel shows coordinates and emits `[TOUCH] down`/`[TOUCH] up`
    messages.
-6. Inserting or removing a TF card is detected within five or two seconds,
+7. Inserting or removing a TF card is detected within five or two seconds,
    respectively, without rebooting.
 
 Use a FAT32-formatted TF card for the filesystem metadata check. Raw and

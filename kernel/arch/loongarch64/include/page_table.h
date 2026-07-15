@@ -2,6 +2,9 @@
 #define _ARCH_LOONGARCH64_MM_H
 
 #include "core/types.h"
+#ifdef CONFIG_SWAP
+#include "mm/swap.h"
+#endif
 
 /* LoongArch 3-level page table (4K pages, software walk matches PWCL/STLBPS) */
 #define ARCH_PT_LEVELS    3
@@ -49,6 +52,26 @@
 #define PTE_G           LA_PTE_GLOBAL
 #define PTE_A           (0UL)          /* Accessed is implicit on LoongArch */
 #define PTE_MAT1        LA_PTE_MAT1
+
+#ifdef CONFIG_SWAP
+#define PTE_SWAP        PTE_LEAF
+
+static inline int pte_present(uint64_t pte) {
+    return (pte & PTE_V) != 0;
+}
+
+static inline int pte_is_swap(uint64_t pte) {
+    return !pte_present(pte) && (pte & PTE_SWAP) != 0;
+}
+
+static inline swap_entry_t pte_to_swp_entry(uint64_t pte) {
+    return (pte >> 12) & ((1ULL << (SWP_TYPE_BITS + SWP_OFFSET_BITS)) - 1);
+}
+
+static inline uint64_t swp_entry_to_pte(swap_entry_t entry) {
+    return PTE_SWAP | (entry << 12);
+}
+#endif
 
 #define PTE_PLV0        LA_PTE_PLV0
 #define PTE_PLV3        LA_PTE_PLV3
