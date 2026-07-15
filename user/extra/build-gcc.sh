@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set -euo pipefail
 
 # Build a minimal GCC toolchain (riscv64 native) using musl-cross-make
@@ -19,9 +19,10 @@ MCM="$USER_DIR/external/musl-cross-make/output"
 BINUTILS_SRC="$USER_DIR/external/binutils"
 GCC_SRC="$USER_DIR/external/gcc"
 
-BUILD_TRIPLET="aarch64-pc-linux-gnu"
+BUILD_TRIPLET="${BUILD_TRIPLET:-$(gcc -dumpmachine)}"
 HOST_TRIPLET="riscv64-linux-musl"
 TARGET_TRIPLET="riscv64-linux-musl"
+NPROC="${NPROC:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.logicalcpu 2>/dev/null || echo 4)}"
 
 MCM_CC="$MCM/bin/${HOST_TRIPLET}-gcc"
 MCM_CXX="$MCM/bin/${HOST_TRIPLET}-g++"
@@ -75,7 +76,7 @@ if [ ! -f "$BINUTILS_INSTALL/usr/bin/as" ]; then
         2>&1 | tail -10
 
     echo "[GCC] Compiling binutils..."
-    make -j$(nproc) 2>&1 | tail -10
+    make -j"$NPROC" 2>&1 | tail -10
 
     echo "[GCC] Installing binutils..."
     make DESTDIR="$BINUTILS_INSTALL" install 2>&1 | tail -5
@@ -145,8 +146,8 @@ if [ ! -f "$GCC_INSTALL/usr/bin/gcc" ]; then
         echo 'all install clean mostlyclean distclean maintainer-clean check install-strip:' > "$GCC_BUILD/libcody/Makefile"
     fi
 
-    echo "[GCC] Compiling GCC (all-gcc only, -j$(nproc))..."
-    make -j$(nproc) all-gcc 2>&1 | tail -10
+    echo "[GCC] Compiling GCC (all-gcc only, -j$NPROC)..."
+    make -j"$NPROC" all-gcc 2>&1 | tail -10
 
     echo "[GCC] Installing GCC (all-gcc only)..."
     make DESTDIR="$GCC_INSTALL" install-gcc 2>&1 | tail -10
