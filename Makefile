@@ -21,6 +21,8 @@ STM32_BT_NAME ?= KasaneTeto
 STM32_BT_PIN ?= 2233
 STM32_BT_UUID ?= 1101
 STM32_BT_BAUD ?= 9600
+STM32_WIFI_SSID ?=
+STM32_WIFI_PASSWORD ?=
 ifeq ($(ARCH),armv7m)
 BOARD ?= stm32f103
 PROFILE := mcu
@@ -79,6 +81,7 @@ BOARD_INCLUDE_DIR = $(KERNEL_DIR)/platform/$(BOARD)
 EXT4_STAGING_DIR = $(BUILD_DIR)/ext4-staging
 BUILD_TIME_HDR = $(BUILD_DIR)/generated/build_time.h
 STM32_BT_CONFIG_HDR = $(BUILD_DIR)/generated/stm32_bluetooth_config.h
+STM32_WIFI_CONFIG_HDR = $(BUILD_DIR)/generated/stm32_wifi_config.h
 FAT32_IMAGE_MB ?= 128
 EXT4_IMAGE_MB ?= 128
 EXTRA_IMAGE_MB ?= 256
@@ -313,6 +316,17 @@ endif
 ifeq ($(filter $(STM32_BT_BAUD),4800 9600 19200 38400 57600 115200),)
 $(error STM32_BT_BAUD must be one of 4800, 9600, 19200, 38400, 57600, 115200)
 endif
+CFLAGS += -DCONFIG_STM32_RADIO_WIFI -DCONFIG_STM32_RADIO_BLUETOOTH
+ifneq ($(strip $(STM32_WIFI_SSID)),)
+ifneq ($(shell printf '%s' '$(STM32_WIFI_SSID)' | LC_ALL=C grep -Eq '^[A-Za-z0-9_.@-]{1,32}$$' && echo yes),yes)
+$(error STM32_WIFI_SSID must be empty or contain 1-32 ASCII letters, digits, '.', '_', '@' or '-')
+endif
+endif
+ifneq ($(strip $(STM32_WIFI_PASSWORD)),)
+ifneq ($(shell printf '%s' '$(STM32_WIFI_PASSWORD)' | LC_ALL=C grep -Eq '^[A-Za-z0-9_.@-]{8,63}$$' && echo yes),yes)
+$(error STM32_WIFI_PASSWORD must be empty or contain 8-63 ASCII letters, digits, '.', '_', '@' or '-')
+endif
+endif
 ifeq ($(STM32_XUANWU),1)
 CFLAGS += -DCONFIG_STM32_XUANWU
 endif
@@ -470,6 +484,17 @@ $(STM32_BT_CONFIG_HDR): FORCE
 		printf '#define STM32_BLUETOOTH_SERVICE_UUID_TEXT "%s"\n' '$(STM32_BT_UUID)'; \
 		printf '#define STM32_BLUETOOTH_BAUD_RATE %sU\n' '$(STM32_BT_BAUD)'; \
 		printf '#define STM32_BLUETOOTH_BAUD_RATE_TEXT "%s"\n' '$(STM32_BT_BAUD)'; \
+		printf '%s\n' '#endif'; \
+	} > $@.tmp
+	@if cmp -s $@.tmp $@; then rm -f $@.tmp; else mv $@.tmp $@; fi
+
+$(STM32_WIFI_CONFIG_HDR): FORCE
+	@mkdir -p $(dir $@)
+	@{ \
+		printf '%s\n' '#ifndef GENERATED_STM32_WIFI_CONFIG_H'; \
+		printf '%s\n' '#define GENERATED_STM32_WIFI_CONFIG_H'; \
+		printf '#define STM32_WIFI_SSID "%s"\n' '$(STM32_WIFI_SSID)'; \
+		printf '#define STM32_WIFI_PASSWORD "%s"\n' '$(STM32_WIFI_PASSWORD)'; \
 		printf '%s\n' '#endif'; \
 	} > $@.tmp
 	@if cmp -s $@.tmp $@; then rm -f $@.tmp; else mv $@.tmp $@; fi
@@ -1399,6 +1424,7 @@ $(BUILD_DIR)/%.o: $(KERNEL_DIR)/%.c | Makefile $(BUILD_TIME_HDR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/platform/stm32f103/bluetooth.o: $(STM32_BT_CONFIG_HDR)
+$(BUILD_DIR)/platform/stm32f103/wifi.o: $(STM32_WIFI_CONFIG_HDR)
 
 $(BUILD_DIR)/%.o: $(KERNEL_DIR)/%.S Makefile | $(BUILD_TIME_HDR)
 	@mkdir -p $(dir $@)
