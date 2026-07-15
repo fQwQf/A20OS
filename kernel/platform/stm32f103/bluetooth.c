@@ -20,6 +20,10 @@
 #define GPIOB_BSRR (*(volatile uint32_t *)0x40010C10UL)
 #define GPIOB_BRR  (*(volatile uint32_t *)0x40010C14UL)
 
+#define CORE_DEMCR (*(volatile uint32_t *)0xE000EDFCUL)
+#define DWT_CTRL   (*(volatile uint32_t *)0xE0001000UL)
+#define DWT_CYCCNT (*(volatile uint32_t *)0xE0001004UL)
+
 #define RCC_APB2ENR_AFIOEN  (1U << 0)
 #define RCC_APB2ENR_IOPAEN  (1U << 2)
 #define RCC_APB2ENR_IOPBEN  (1U << 3)
@@ -29,6 +33,7 @@
 
 #define BLUETOOTH_KEY_PIN   4U
 #define BLUETOOTH_STATE_PIN 15U
+#define BLUETOOTH_UART STM32_UART_USART3
 #ifndef STM32_BLUETOOTH_BAUD_RATE
 #define STM32_BLUETOOTH_BAUD_RATE 9600U
 #endif
@@ -39,18 +44,19 @@
 #define BLUETOOTH_RX_SIZE   256U
 #define BLUETOOTH_FRAME_IDLE_MS 20U
 #define BLUETOOTH_TX_TIMEOUT 100000U
-#define BLUETOOTH_AT_TIMEOUT_MS 500U
-#define BLUETOOTH_AT_PROBE_TIMEOUT_MS 350U
-#define BLUETOOTH_AT_RETRIES 3U
-#define BLUETOOTH_BOOT_DELAY_MS 1500U
-#define BLUETOOTH_RESET_DELAY_MS 1000U
+#define BLUETOOTH_AT_TIMEOUT_MS 150U
+#define BLUETOOTH_AT_PROBE_TIMEOUT_MS 150U
+#define BLUETOOTH_AT_RETRIES 1U
+#define BLUETOOTH_BOOT_DELAY_MS 100U
+#define BLUETOOTH_RESET_DELAY_MS 200U
 #define BLUETOOTH_KEY_SETUP_MS 10U
 #define BLUETOOTH_CONNECT_ASSERT_MS 500U
 #define BLUETOOTH_DISCONNECT_ASSERT_MS 200U
 #define BLUETOOTH_AT_RESPONSE_MAX 96U
-#define BLUETOOTH_INIT_RETRIES 3U
-#define BLUETOOTH_INIT_RETRY_DELAY_MS 1000U
-#define BLUETOOTH_RESET_ENTER_AT_TIMEOUT_MS 2000U
+
+#define CORE_DEMCR_TRCENA  (1U << 24)
+#define DWT_CTRL_NOCYCCNT  (1U << 25)
+#define DWT_CTRL_CYCCNTENA (1U << 0)
 
 static volatile uint8_t bluetooth_rx[BLUETOOTH_RX_SIZE];
 static volatile unsigned bluetooth_rx_head;
@@ -70,7 +76,7 @@ static void gpio_config_pin(volatile uint32_t *crl, volatile uint32_t *crh,
 
 static int bluetooth_uart_send_byte(uint8_t value) {
     return stm32_uart_send_byte(
-        STM32_UART_USART3, value, BLUETOOTH_TX_TIMEOUT);
+        BLUETOOTH_UART, value, BLUETOOTH_TX_TIMEOUT);
 }
 
 static void bluetooth_copy_text(char *dest, size_t capacity,
@@ -138,19 +144,39 @@ static void bluetooth_key_set(int high) {
 }
 
 static void bluetooth_delay_ms(unsigned ms) {
-    while (ms--) {
-        for (volatile unsigned i = 0; i < 1600U; i++)
+    if (ms == 0U)
+        return;
+
+    CORE_DEMCR |= CORE_DEMCR_TRCENA;
+    if (!(DWT_CTRL & DWT_CTRL_NOCYCCNT)) {
+        DWT_CTRL |= DWT_CTRL_CYCCNTENA;
+        uint32_t probe = DWT_CYCCNT;
+        for (volatile unsigned i = 0; i < 16U; i++)
             __asm__ __volatile__("nop");
+        if (DWT_CYCCNT != probe) {
+            uint32_t cycles_per_ms = stm32_hclk_hz() / 1000U;
+            while (ms--) {
+                uint32_t start = DWT_CYCCNT;
+                while ((uint32_t)(DWT_CYCCNT - start) < cycles_per_ms)
+                    ;
+            }
+            return;
+        }
     }
+
+    uint32_t fallback_loops = stm32_hclk_hz() / 4000U;
+    while (ms--)
+        for (volatile uint32_t i = 0; i < fallback_loops; i++)
+            __asm__ __volatile__("nop");
 }
 
 static void bluetooth_uart_set_baud(uint32_t baud_rate) {
-    if (stm32_uart_set_baud(STM32_UART_USART3, baud_rate) == 0)
+    if (stm32_uart_set_baud(BLUETOOTH_UART, baud_rate) == 0)
         bluetooth_uart_baud = baud_rate;
 }
 
 static void bluetooth_uart_flush(void) {
-    stm32_uart_drain_rx(STM32_UART_USART3);
+    stm32_uart_drain_rx(BLUETOOTH_UART);
 }
 
 static int bluetooth_rx_line_is_present(int state) {
@@ -282,16 +308,12 @@ static int bluetooth_at_exchange(const char *command, char *response,
         }
     }
     if (stm32_uart_wait_tx_complete(
-            STM32_UART_USART3, BLUETOOTH_TX_TIMEOUT) != 0) {
+            BLUETOOTH_UART, BLUETOOTH_TX_TIMEOUT) != 0) {
         if (key_mode == STM32_BLUETOOTH_AT_KEY_PULSE)
             bluetooth_key_set(0);
         return -1;
     }
-    /*
-     * Match the PZ-HC05 vendor example exactly: KEY is only asserted while
-     * issuing the command. Some PZ firmware does not answer while KEY remains
-     * high for the whole response window.
-     */
+    /* The supplied PZ-HC05 driver drops KEY immediately after transmission. */
     if (key_mode == STM32_BLUETOOTH_AT_KEY_PULSE)
         bluetooth_key_set(0);
 
@@ -303,7 +325,7 @@ static int bluetooth_at_exchange(const char *command, char *response,
         for (;;) {
             uint8_t value;
             int result = stm32_uart_poll_byte(
-                STM32_UART_USART3, &value);
+                BLUETOOTH_UART, &value);
             if (result == 0)
                 break;
             if (result < 0) {
@@ -366,7 +388,7 @@ static int bluetooth_reset_to_data_mode(char *response, size_t capacity) {
      * mode, where phones cannot discover it.
      */
     if (stm32_uart_wait_tx_complete(
-            STM32_UART_USART3, BLUETOOTH_TX_TIMEOUT) != 0) {
+            BLUETOOTH_UART, BLUETOOTH_TX_TIMEOUT) != 0) {
         bluetooth_key_set(0);
         return -1;
     }
@@ -379,7 +401,7 @@ static int bluetooth_reset_to_data_mode(char *response, size_t capacity) {
         for (;;) {
             uint8_t value;
             int result = stm32_uart_poll_byte(
-                STM32_UART_USART3, &value);
+                BLUETOOTH_UART, &value);
             if (result == 0)
                 break;
             if (result < 0)
@@ -413,11 +435,19 @@ static int bluetooth_find_at_baud(char *response, size_t capacity) {
          i++) {
         bluetooth_uart_set_baud(baud_rates[i]);
         bluetooth_delay_ms(20U);
+        if (bluetooth_at_exchange("AT\r\n", response, capacity,
+                                  BLUETOOTH_AT_PROBE_TIMEOUT_MS,
+                                  STM32_BLUETOOTH_AT_KEY_HIGH) == 0) {
+            bluetooth_at_key_mode = STM32_BLUETOOTH_AT_KEY_HIGH;
+            return (int)baud_rates[i];
+        }
         for (unsigned attempt = 0; attempt < BLUETOOTH_AT_RETRIES; attempt++) {
             if (bluetooth_at_exchange("AT\r\n", response, capacity,
                                       BLUETOOTH_AT_PROBE_TIMEOUT_MS,
-                                      STM32_BLUETOOTH_AT_KEY_PULSE) == 0)
+                                      STM32_BLUETOOTH_AT_KEY_PULSE) == 0) {
+                bluetooth_at_key_mode = STM32_BLUETOOTH_AT_KEY_PULSE;
                 return (int)baud_rates[i];
+            }
             bluetooth_delay_ms(20U);
         }
     }
@@ -428,105 +458,35 @@ static int bluetooth_enter_at_mode(char *response, size_t capacity,
                                    uint32_t *at_baud) {
     /*
      * The supplied PZ-HC05 example enters command mode at the transparent-data
-     * baud by pulsing PA4 around each command. Try that path first. It works
+     * baud by pulsing KEY around each command. Try that path first. It works
      * after both a power cycle and a debugger-only MCU reset.
      */
-    bluetooth_key_set(0);
+    bluetooth_key_set(1);
     bluetooth_uart_set_baud(BLUETOOTH_BAUD_RATE);
     bluetooth_delay_ms(20U);
     if (bluetooth_at_exchange("AT\r\n", response, capacity,
-                              BLUETOOTH_AT_TIMEOUT_MS,
-                              STM32_BLUETOOTH_AT_KEY_PULSE) == 0) {
-        bluetooth_delay_ms(20U);
-        if (bluetooth_at_exchange("AT\r\n", response, capacity,
-                                  BLUETOOTH_AT_TIMEOUT_MS,
-                                  STM32_BLUETOOTH_AT_KEY_LOW) == 0)
-            bluetooth_at_key_mode = STM32_BLUETOOTH_AT_KEY_LOW;
-        else {
-            bluetooth_key_set(1);
-            bluetooth_delay_ms(20U);
-            if (bluetooth_at_exchange("AT\r\n", response, capacity,
-                                      BLUETOOTH_AT_TIMEOUT_MS,
-                                      STM32_BLUETOOTH_AT_KEY_HIGH) == 0)
-                bluetooth_at_key_mode = STM32_BLUETOOTH_AT_KEY_HIGH;
-            else
-                bluetooth_at_key_mode =
-                    STM32_BLUETOOTH_AT_KEY_PULSE;
-        }
+                              BLUETOOTH_AT_PROBE_TIMEOUT_MS,
+                              STM32_BLUETOOTH_AT_KEY_HIGH) == 0) {
+        bluetooth_at_key_mode = STM32_BLUETOOTH_AT_KEY_HIGH;
         bluetooth.at_key_mode = bluetooth_at_key_mode;
-        bluetooth.at_pulse_mode =
-            bluetooth_at_key_mode == STM32_BLUETOOTH_AT_KEY_PULSE;
+        bluetooth.at_pulse_mode = 0;
         bluetooth.at_power_on_mode = 0;
         *at_baud = BLUETOOTH_BAUD_RATE;
         return 0;
     }
-
     bluetooth_key_set(0);
-    bluetooth_delay_ms(20U);
+
     int baud = bluetooth_find_at_baud(response, capacity);
     if (baud >= 0) {
-        bluetooth_at_key_mode = STM32_BLUETOOTH_AT_KEY_PULSE;
         bluetooth.at_key_mode = bluetooth_at_key_mode;
-        bluetooth.at_pulse_mode = 1;
-        bluetooth.at_power_on_mode = 0;
+        bluetooth.at_pulse_mode =
+            bluetooth_at_key_mode == STM32_BLUETOOTH_AT_KEY_PULSE;
+        bluetooth.at_power_on_mode =
+            bluetooth_at_key_mode == STM32_BLUETOOTH_AT_KEY_HIGH &&
+            baud == 38400;
         *at_baud = (uint32_t)baud;
         return 0;
     }
-
-    /*
-     * Standard HC-05 firmware samples KEY during module power-on and exposes
-     * full AT mode at 38400. If the module is already running in transparent
-     * data mode, we can force it to re-enter AT mode by issuing AT+RESET
-     * while KEY is held high; after the reset the module boots with KEY=1 and
-     * stays in AT mode at 38400.
-     */
-    bluetooth_uart_set_baud(38400U);
-    bluetooth_key_set(1);
-    bluetooth_delay_ms(100U);
-    if (bluetooth_at_exchange("AT\r\n", response, capacity,
-                               BLUETOOTH_AT_TIMEOUT_MS,
-                               STM32_BLUETOOTH_AT_KEY_HIGH) == 0) {
-        bluetooth_at_key_mode = STM32_BLUETOOTH_AT_KEY_HIGH;
-        bluetooth.at_key_mode = bluetooth_at_key_mode;
-        bluetooth.at_pulse_mode = 0;
-        bluetooth.at_power_on_mode = 1;
-        *at_baud = 38400U;
-        return 0;
-    }
-
-    printf("[BT-AT] key-high AT not responding; trying reset-into-AT mode\n");
-    bluetooth_uart_flush();
-    static const char reset_cmd[] = "AT+RESET\r\n";
-    for (size_t i = 0; reset_cmd[i]; i++) {
-        if (bluetooth_uart_send_byte((uint8_t)reset_cmd[i]) != 0) {
-            bluetooth_key_set(0);
-            return -1;
-        }
-    }
-    if (stm32_uart_wait_tx_complete(
-            STM32_UART_USART3, BLUETOOTH_TX_TIMEOUT) != 0) {
-        bluetooth_key_set(0);
-        return -1;
-    }
-    bluetooth_delay_ms(200U);
-
-    for (unsigned waited = 0;
-         waited < BLUETOOTH_RESET_ENTER_AT_TIMEOUT_MS;
-         waited += 100U) {
-        if (bluetooth_at_exchange("AT\r\n", response, capacity,
-                                  BLUETOOTH_AT_TIMEOUT_MS,
-                                  STM32_BLUETOOTH_AT_KEY_HIGH) == 0) {
-            bluetooth_at_key_mode = STM32_BLUETOOTH_AT_KEY_HIGH;
-            bluetooth.at_key_mode = bluetooth_at_key_mode;
-            bluetooth.at_pulse_mode = 0;
-            bluetooth.at_power_on_mode = 1;
-            *at_baud = 38400U;
-            return 0;
-        }
-        bluetooth_delay_ms(100U);
-    }
-
-    bluetooth_key_set(0);
     return -1;
 }
 
@@ -662,13 +622,26 @@ static int bluetooth_configure(void) {
     bluetooth_at_key_mode = STM32_BLUETOOTH_AT_KEY_PULSE;
     if (bluetooth_enter_at_mode(response, sizeof(response),
                                 &at_baud) != 0) {
+        bluetooth.detected = 0;
         bluetooth_uart_set_baud(BLUETOOTH_BAUD_RATE);
         bluetooth_key_set(0);
         return -1;
     }
     bluetooth.at_responsive = 1;
-    bluetooth.detected = 1;
     bluetooth.at_baud_rate = at_baud;
+
+    char role[8];
+    if (bluetooth_at_command("AT+ROLE?\r\n", response,
+                             sizeof(response)) != 0 ||
+        !bluetooth_response_value(response, "ROLE", role, sizeof(role))) {
+        /* ESP8266 also answers plain AT; ROLE is the HC-05 discriminator. */
+        bluetooth.at_responsive = 0;
+        bluetooth.detected = 0;
+        bluetooth_key_set(0);
+        bluetooth_uart_set_baud(BLUETOOTH_BAUD_RATE);
+        return -1;
+    }
+    bluetooth.detected = 1;
 
     bluetooth.slave_mode = bluetooth_set_and_verify(
         "AT+ROLE=0\r\n", "AT+ROLE?\r\n", "ROLE", "0",
@@ -802,7 +775,7 @@ int stm32_bluetooth_init(void) {
     gpio_config_pin(&GPIOA_CRL, &GPIOA_CRH, BLUETOOTH_KEY_PIN, 0x3U);
     gpio_config_pin(&GPIOA_CRL, &GPIOA_CRH, BLUETOOTH_STATE_PIN, 0x8U);
     /*
-     * Probe the module TX path while PA4 is low. The PZ-HC05 board drives
+     * Probe the module TX path while KEY is low. The PZ-HC05 board drives
      * TX through a Schottky level-shift network with pull-ups on both sides;
      * leaving ATSET high while probing can make an otherwise connected path
      * look floating.
@@ -812,10 +785,9 @@ int stm32_bluetooth_init(void) {
     bluetooth.detected =
         bluetooth_rx_line_is_present(bluetooth.rx_line_state);
 
-    /* Match the vendor driver: PA15 is an input with its pull-up selected. */
     GPIOA_BSRR = 1U << BLUETOOTH_STATE_PIN;
 
-    if (stm32_uart_init(STM32_UART_USART3, BLUETOOTH_BAUD_RATE, 0) != 0)
+    if (stm32_uart_init(BLUETOOTH_UART, BLUETOOTH_BAUD_RATE, 0) != 0)
         return -1;
     bluetooth_uart_baud = BLUETOOTH_BAUD_RATE;
     bluetooth_delay_ms(BLUETOOTH_BOOT_DELAY_MS);
@@ -830,36 +802,17 @@ int stm32_bluetooth_init(void) {
         bluetooth_rx_line_is_present(bluetooth.rx_line_state) ||
         bluetooth.detected;
 
-    int configured = 0;
-    for (unsigned attempt = 0; attempt <= BLUETOOTH_INIT_RETRIES; attempt++) {
-        configured = bluetooth_configure() == 0;
-        if (configured)
-            break;
-        if (attempt < BLUETOOTH_INIT_RETRIES) {
-            printf("[BT] configuration attempt %u failed, retrying in %u ms\n",
-                   attempt + 1U,
-                   (unsigned)BLUETOOTH_INIT_RETRY_DELAY_MS);
-            bluetooth_key_set(0);
-            stm32_uart_set_rx_irq(STM32_UART_USART3, 0);
-            bluetooth_uart_set_baud(BLUETOOTH_BAUD_RATE);
-            bluetooth_uart_flush();
-            bluetooth_delay_ms(BLUETOOTH_INIT_RETRY_DELAY_MS);
-        }
-    }
+    int configured = bluetooth_configure() == 0;
 
     bluetooth.connected = 0;
     bluetooth_state_high =
+        (bluetooth.detected || bluetooth.at_responsive) &&
         !!(GPIOA_IDR & (1U << BLUETOOTH_STATE_PIN));
-    /*
-     * A driven-high module TX pin is a real electrical detection even when
-     * its firmware does not answer the supported AT dialect. Keep USART3
-     * armed in that case, but never claim that slave configuration was
-     * verified.
-     */
-    bluetooth.ready = bluetooth.detected || bluetooth.at_responsive;
+    /* Keep the interface armed even when the optional module does not reply. */
+    bluetooth.ready = 1;
     bluetooth.waiting = configured;
-    stm32_uart_set_rx_irq(STM32_UART_USART3, bluetooth.ready);
-    return bluetooth.ready ? 0 : -1;
+    stm32_uart_set_rx_irq(BLUETOOTH_UART, 1);
+    return configured ? 0 : -1;
 #endif
 }
 
@@ -875,19 +828,20 @@ int stm32_bluetooth_reprobe(void) {
     bluetooth.rx_line_state = bluetooth_probe_rx_line();
     bluetooth.detected =
         bluetooth_rx_line_is_present(bluetooth.rx_line_state);
-    stm32_uart_set_rx_irq(STM32_UART_USART3, 0);
+    stm32_uart_set_rx_irq(BLUETOOTH_UART, 0);
     bluetooth_uart_set_baud(BLUETOOTH_BAUD_RATE);
     bluetooth_key_set(0);
     bluetooth_delay_ms(20U);
     int configured = bluetooth_configure() == 0;
-    bluetooth.ready = bluetooth.detected || bluetooth.at_responsive;
+    bluetooth.ready = 1;
     bluetooth.waiting = configured;
     bluetooth.connected = 0;
     bluetooth_state_high =
+        (bluetooth.detected || bluetooth.at_responsive) &&
         !!(GPIOA_IDR & (1U << BLUETOOTH_STATE_PIN));
     bluetooth_state_changed_time = 0;
-    stm32_uart_set_rx_irq(STM32_UART_USART3, bluetooth.ready);
-    return bluetooth.ready ? 0 : -1;
+    stm32_uart_set_rx_irq(BLUETOOTH_UART, bluetooth.ready);
+    return configured ? 0 : -1;
 #endif
 }
 
@@ -897,7 +851,7 @@ void stm32_bluetooth_irq(void) {
 
     for (;;) {
         uint8_t value;
-        int result = stm32_uart_poll_byte(STM32_UART_USART3, &value);
+        int result = stm32_uart_poll_byte(BLUETOOTH_UART, &value);
         if (result == 0)
             break;
         if (result < 0) {
@@ -922,7 +876,13 @@ void stm32_bluetooth_service(uint64_t now) {
     if (!bluetooth.ready)
         return;
 
-    int state_high = !!(GPIOA_IDR & (1U << BLUETOOTH_STATE_PIN));
+    uint32_t irq_flags = arch_irq_save();
+    stm32_bluetooth_irq();
+    arch_irq_restore(irq_flags);
+
+    int module_present = bluetooth.detected || bluetooth.at_responsive;
+    int state_high = module_present &&
+        !!(GPIOA_IDR & (1U << BLUETOOTH_STATE_PIN));
     if (state_high != bluetooth_state_high) {
         bluetooth_state_high = state_high;
         bluetooth_state_changed_time = now;
@@ -968,7 +928,7 @@ int stm32_bluetooth_send(const void *data, size_t length) {
             return -1;
     }
     if (stm32_uart_wait_tx_complete(
-            STM32_UART_USART3, BLUETOOTH_TX_TIMEOUT) != 0)
+            BLUETOOTH_UART, BLUETOOTH_TX_TIMEOUT) != 0)
         return -1;
     bluetooth.transmitted_bytes += (uint32_t)length;
     return 0;
@@ -1024,6 +984,7 @@ void stm32_bluetooth_debug_status(void) {
     if (rx_state >= sizeof(rx_states) / sizeof(rx_states[0]))
         rx_state = 0;
 
+    const stm32_uart_info_t *uart = stm32_uart_info(BLUETOOTH_UART);
     printf("[BT-DIAG] ready=%d detected=%d rx-line=%s"
            " at=%d at-mode=%s boot-at=%d at-baud=%u data-baud=%u"
            " attempts=%u at-rx=%u at-errors=%u"
@@ -1047,6 +1008,14 @@ void stm32_bluetooth_debug_status(void) {
            bluetooth.device_name[0] ? bluetooth.device_name : "<empty>",
            bluetooth.pin[0] ? bluetooth.pin : "<empty>",
            (unsigned)bluetooth.service_uuid);
+    printf("[BT-UART] requested=%u actual=%u brr=0x%x irq=%d"
+           " pin=%d rx=%u tx=%u edges=%u last=0x%x errors=%u\n",
+           (unsigned)uart->requested_baud, (unsigned)uart->actual_baud,
+           (unsigned)uart->divider, uart->rx_irq_enabled,
+           stm32_uart_rx_pin_level(BLUETOOTH_UART),
+           (unsigned)uart->rx_bytes, (unsigned)uart->tx_bytes,
+           (unsigned)uart->rx_transitions, (unsigned)uart->last_rx_byte,
+           (unsigned)uart->error_count);
 }
 
 int stm32_bluetooth_debug_probe(void) {
@@ -1055,17 +1024,17 @@ int stm32_bluetooth_debug_probe(void) {
 #else
     char response[BLUETOOTH_AT_RESPONSE_MAX];
     int rx_irq_enabled =
-        stm32_uart_rx_irq_enabled(STM32_UART_USART3);
+        stm32_uart_rx_irq_enabled(BLUETOOTH_UART);
 
     printf("[BT-DIAG] probing runtime KEY-pulse AT modes\n");
-    stm32_uart_set_rx_irq(STM32_UART_USART3, 0);
+    stm32_uart_set_rx_irq(BLUETOOTH_UART, 0);
     bluetooth_key_set(0);
     bluetooth_delay_ms(20U);
     int at_baud = bluetooth_find_at_baud(response, sizeof(response));
     bluetooth_key_set(0);
     bluetooth_uart_set_baud(BLUETOOTH_BAUD_RATE);
     bluetooth_uart_flush();
-    stm32_uart_set_rx_irq(STM32_UART_USART3, rx_irq_enabled);
+    stm32_uart_set_rx_irq(BLUETOOTH_UART, rx_irq_enabled);
 
     if (at_baud < 0) {
         printf("[BT-DIAG] probe failed: no valid OK response\n");
@@ -1096,15 +1065,15 @@ int stm32_bluetooth_debug_at(const char *command) {
 
     char response[BLUETOOTH_AT_RESPONSE_MAX];
     int rx_irq_enabled =
-        stm32_uart_rx_irq_enabled(STM32_UART_USART3);
-    stm32_uart_set_rx_irq(STM32_UART_USART3, 0);
+        stm32_uart_rx_irq_enabled(BLUETOOTH_UART);
+    stm32_uart_set_rx_irq(BLUETOOTH_UART, 0);
     bluetooth_key_set(0);
     bluetooth_delay_ms(20U);
     int at_baud = bluetooth_find_at_baud(response, sizeof(response));
     if (at_baud < 0) {
         bluetooth_key_set(0);
         bluetooth_uart_set_baud(BLUETOOTH_BAUD_RATE);
-        stm32_uart_set_rx_irq(STM32_UART_USART3, rx_irq_enabled);
+        stm32_uart_set_rx_irq(BLUETOOTH_UART, rx_irq_enabled);
         printf("[BT-DIAG] cannot send command: AT mode not found\n");
         return -1;
     }
@@ -1116,7 +1085,7 @@ int stm32_bluetooth_debug_at(const char *command) {
     bluetooth_key_set(0);
     bluetooth_uart_set_baud(BLUETOOTH_BAUD_RATE);
     bluetooth_uart_flush();
-    stm32_uart_set_rx_irq(STM32_UART_USART3, rx_irq_enabled);
+    stm32_uart_set_rx_irq(BLUETOOTH_UART, rx_irq_enabled);
     return result;
 #endif
 }
