@@ -1,0 +1,1 @@
+target=loongarch64-linux-gnu;cc=loongarch64-linux-gnu-gcc;cc-target=loongarch64-linux-gnu;cc-version=14.2.0;cflags=-O3 -march=loongarch64 -mabi=lp64d -mcmodel=normal -fno-pic -static;ldflags=

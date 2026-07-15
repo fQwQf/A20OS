@@ -4,6 +4,7 @@
 #include "core/arch.h"
 #include "core/timer.h"
 #include "board.h"
+#include "bluetooth.h"
 
 #define NVIC_ISER_BASE 0xE000E100UL
 #define NVIC_ICER_BASE 0xE000E180UL
@@ -81,6 +82,7 @@ static const timer_ops_t stm32_timer_ops = {
 
 static void stm32_early_init(void) {
     stm32_status_led_init();
+    stm32_bluetooth_early_key_init();
 }
 
 static void stm32_poweroff(void) { firmware_shutdown(); }
