@@ -10,25 +10,26 @@
 #define GPIOB_BSRR (*(volatile uint32_t *)0x40010C10UL)
 #define GPIOB_BRR  (*(volatile uint32_t *)0x40010C14UL)
 
+#define GPIOF_CRL  (*(volatile uint32_t *)0x40011C00UL)
 #define GPIOF_CRH  (*(volatile uint32_t *)0x40011C04UL)
 #define GPIOF_IDR  (*(volatile uint32_t *)0x40011C08UL)
 #define GPIOF_BSRR (*(volatile uint32_t *)0x40011C10UL)
 #define GPIOF_BRR  (*(volatile uint32_t *)0x40011C14UL)
 
 /*
- * Xuanwu TFT connector, from the vendor schematic:
- * PB1=T_SCK, PB2=T_MISO, PB10=T_MOSI, PF10=T_PEN, PF11=T_CS.
+ * Xuanwu 3.5-inch TFT connector, matching the vendor touch example:
+ * PB1=T_SCK, PB2=T_MISO, PF9=T_MOSI, PF10=T_PEN, PF11=T_CS.
  */
 #define TOUCH_SCK_PIN  1U
 #define TOUCH_MISO_PIN 2U
-#define TOUCH_MOSI_PIN 10U
+#define TOUCH_MOSI_PIN 9U
 #define TOUCH_PEN_PIN  10U
 #define TOUCH_CS_PIN   11U
 
 #define TOUCH_WIDTH 320U
 #define TOUCH_HEIGHT 480U
-#define TOUCH_SAMPLE_COUNT 7U
-#define TOUCH_MAX_SPREAD 180U
+#define TOUCH_SAMPLE_COUNT 5U
+#define TOUCH_MAX_PAIR_DELTA 50U
 
 static int touch_initialized;
 static int touch_was_pressed;
@@ -39,11 +40,12 @@ static stm32_touch_calibration_t touch_calibration = {
     .x_max = 3900U,
     .y_min = 220U,
     .y_max = 3900U,
-    .swap_xy = 0,
+    .swap_xy = 1,
     .invert_x = 1,
-    .invert_y = 0,
+    .invert_y = 1,
 };
 
+#ifdef CONFIG_STM32_XUANWU
 static void gpio_config_pin(volatile uint32_t *crl, volatile uint32_t *crh,
                             unsigned pin, uint32_t mode) {
     volatile uint32_t *reg = pin < 8U ? crl : crh;
@@ -53,6 +55,7 @@ static void gpio_config_pin(volatile uint32_t *crl, volatile uint32_t *crh,
     value |= mode << shift;
     *reg = value;
 }
+#endif
 
 static void gpio_set(volatile uint32_t *bsrr, volatile uint32_t *brr,
                      unsigned pin, int high) {
@@ -71,7 +74,7 @@ static void touch_sck(int high) {
 }
 
 static void touch_mosi(int high) {
-    gpio_set(&GPIOB_BSRR, &GPIOB_BRR, TOUCH_MOSI_PIN, high);
+    gpio_set(&GPIOF_BSRR, &GPIOF_BRR, TOUCH_MOSI_PIN, high);
 }
 
 static void touch_cs(int high) {
@@ -87,47 +90,86 @@ static void touch_delay(void) {
         __asm__ __volatile__("nop");
 }
 
-static uint8_t touch_spi_transfer(uint8_t value) {
-    uint8_t result = 0;
+static void touch_write_byte(uint8_t value) {
     for (unsigned i = 0; i < 8; i++) {
         touch_mosi(!!(value & 0x80U));
         value <<= 1;
-        touch_sck(1);
-        touch_delay();
-        result = (uint8_t)((result << 1) |
-                          gpio_get(&GPIOB_IDR, TOUCH_MISO_PIN));
         touch_sck(0);
         touch_delay();
+        touch_sck(1);
+        touch_delay();
     }
-    return result;
 }
 
 static uint16_t touch_read_adc(uint8_t command) {
+    uint16_t value = 0;
+
+    touch_sck(0);
+    touch_mosi(0);
     touch_cs(0);
-    touch_spi_transfer(command);
-    uint16_t value = (uint16_t)touch_spi_transfer(0) << 8;
-    value |= touch_spi_transfer(0);
+    touch_write_byte(command);
+
+    /*
+     * The controller needs up to 6 us for conversion. At the 8 MHz HSI
+     * clock, this delay also keeps the bit-banged bus comfortably below the
+     * XPT2046 clock limit.
+     */
+    for (unsigned i = 0; i < 8U; i++)
+        touch_delay();
+
+    touch_sck(0);
+    touch_delay();
+    touch_sck(1);
+    touch_delay();
+    touch_sck(0);
+
+    for (unsigned i = 0; i < 12U; i++) {
+        value <<= 1;
+        touch_delay();
+        touch_sck(1);
+        if (gpio_get(&GPIOB_IDR, TOUCH_MISO_PIN))
+            value |= 1U;
+        touch_delay();
+        touch_sck(0);
+    }
+
     touch_cs(1);
-    return (value >> 3) & 0x0FFFU;
+    touch_mosi(0);
+    return value;
 }
 
-static int touch_filtered_sample(uint8_t command, uint16_t *sample) {
-    uint32_t total = 0;
-    uint16_t min = 0xFFFFU;
-    uint16_t max = 0;
+static uint16_t touch_trimmed_sample(uint8_t command) {
+    uint16_t samples[TOUCH_SAMPLE_COUNT];
 
-    for (unsigned i = 0; i < TOUCH_SAMPLE_COUNT; i++) {
-        uint16_t value = touch_read_adc(command);
-        total += value;
-        if (value < min)
-            min = value;
-        if (value > max)
-            max = value;
+    for (unsigned i = 0; i < TOUCH_SAMPLE_COUNT; i++)
+        samples[i] = touch_read_adc(command);
+
+    for (unsigned i = 0; i + 1U < TOUCH_SAMPLE_COUNT; i++) {
+        for (unsigned j = i + 1U; j < TOUCH_SAMPLE_COUNT; j++) {
+            if (samples[i] <= samples[j])
+                continue;
+            uint16_t tmp = samples[i];
+            samples[i] = samples[j];
+            samples[j] = tmp;
+        }
     }
-    if (max - min > TOUCH_MAX_SPREAD)
+
+    return (uint16_t)(((uint32_t)samples[1] + samples[2] + samples[3]) /
+                      3U);
+}
+
+static int touch_read_xy(uint16_t *x, uint16_t *y) {
+    uint16_t x1 = touch_trimmed_sample(0xD0U);
+    uint16_t y1 = touch_trimmed_sample(0x90U);
+    uint16_t x2 = touch_trimmed_sample(0xD0U);
+    uint16_t y2 = touch_trimmed_sample(0x90U);
+    uint16_t dx = x1 > x2 ? x1 - x2 : x2 - x1;
+    uint16_t dy = y1 > y2 ? y1 - y2 : y2 - y1;
+
+    if (dx >= TOUCH_MAX_PAIR_DELTA || dy >= TOUCH_MAX_PAIR_DELTA)
         return -1;
-    *sample = (uint16_t)((total - min - max) /
-                         (TOUCH_SAMPLE_COUNT - 2U));
+    *x = (uint16_t)(((uint32_t)x1 + x2) / 2U);
+    *y = (uint16_t)(((uint32_t)y1 + y2) / 2U);
     return 0;
 }
 
@@ -151,15 +193,15 @@ int stm32_touch_init(void) {
 
     gpio_config_pin(&GPIOB_CRL, &GPIOB_CRH, TOUCH_SCK_PIN, 0x3U);
     gpio_config_pin(&GPIOB_CRL, &GPIOB_CRH, TOUCH_MISO_PIN, 0x8U);
-    gpio_config_pin(&GPIOB_CRL, &GPIOB_CRH, TOUCH_MOSI_PIN, 0x3U);
-    gpio_config_pin(&GPIOF_CRH, &GPIOF_CRH, TOUCH_PEN_PIN, 0x8U);
-    gpio_config_pin(&GPIOF_CRH, &GPIOF_CRH, TOUCH_CS_PIN, 0x3U);
+    gpio_config_pin(&GPIOF_CRL, &GPIOF_CRH, TOUCH_MOSI_PIN, 0x3U);
+    gpio_config_pin(&GPIOF_CRL, &GPIOF_CRH, TOUCH_PEN_PIN, 0x8U);
+    gpio_config_pin(&GPIOF_CRL, &GPIOF_CRH, TOUCH_CS_PIN, 0x3U);
 
     GPIOB_BSRR = 1U << TOUCH_MISO_PIN;
     GPIOF_BSRR = 1U << TOUCH_PEN_PIN;
     touch_cs(1);
-    touch_sck(0);
-    touch_mosi(0);
+    touch_sck(1);
+    touch_mosi(1);
     touch_initialized = 1;
 
     /*
@@ -183,9 +225,7 @@ int stm32_touch_poll(uint16_t *x, uint16_t *y) {
 
     uint16_t raw_x;
     uint16_t raw_y;
-    if (touch_filtered_sample(0xD0U, &raw_x) != 0 ||
-        touch_filtered_sample(0x90U, &raw_y) != 0 ||
-        touch_pen_released())
+    if (touch_read_xy(&raw_x, &raw_y) != 0)
         return 0;
     if (raw_x < 50U || raw_y < 50U)
         return 0;

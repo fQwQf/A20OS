@@ -2,6 +2,9 @@
 #define _ARCH_ARM32_PAGE_TABLE_H
 
 #include "core/types.h"
+#ifdef CONFIG_SWAP
+#include "mm/swap.h"
+#endif
 
 /*
  * ARMv7-A short-descriptor translation tables.
@@ -80,6 +83,30 @@
 #define PTE_D                0UL
 #define PTE_COW              (1U << 6)
 #define PTE_MAT1             ARM32_PTE_C
+
+#ifdef CONFIG_SWAP
+/* TEX[1] is unused by every descriptor emitted by this kernel. */
+#define PTE_SWAP             (1U << 7)
+
+static inline int pte_present(uint32_t pte) {
+    return (pte & PTE_V) != 0;
+}
+
+static inline int pte_is_swap(uint32_t pte) {
+    return !pte_present(pte) && (pte & PTE_SWAP) != 0;
+}
+
+static inline swap_entry_t pte_to_swp_entry(uint32_t pte) {
+    return ((pte >> 2) & ((1ULL << SWP_TYPE_BITS) - 1)) |
+           (((swap_entry_t)pte >> 12) << SWP_TYPE_BITS);
+}
+
+static inline uint32_t swp_entry_to_pte(swap_entry_t entry) {
+    return PTE_SWAP |
+           ((uint32_t)(entry & ((1ULL << SWP_TYPE_BITS) - 1)) << 2) |
+           ((uint32_t)(entry >> SWP_TYPE_BITS) << 12);
+}
+#endif
 
 #define PTE_KERN             (PTE_V | PTE_R | PTE_W | PTE_LEAF | PTE_MAT1)
 #define PTE_USER             (PTE_V | PTE_R | PTE_W | PTE_U | PTE_LEAF | PTE_MAT1)
