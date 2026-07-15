@@ -1,5 +1,9 @@
 #include "mm/oom.h"
 #include "mm/frame.h"
+#include "mm/mm.h"
+#include "mm/vm.h"
+#include "mm/swap.h"
+#include "cg/cgroup.h"
 #include "proc/proc.h"
 #include "proc/proc_internal.h"
 #include "core/klog.h"
@@ -10,6 +14,7 @@
 
 #define OOM_COOLDOWN_TICKS MS_TO_TICKS(2000)
 #define OOM_MIN_FREE_PAGES 256
+#define MAX_SWAP_RECLAIM 8
 
 static volatile int oom_in_progress;
 static uint64_t oom_last_kill_tick;
@@ -42,6 +47,91 @@ static int oom_pick_victim_pid(void)
     return victim_pid;
 }
 
+#ifdef CONFIG_SWAP
+static int vma_is_swappable(const vm_area_t *vma)
+{
+    return vma && (vma->vm_flags & VM_ANON) &&
+           !(vma->vm_flags & (VM_SHARED | VM_LOCKED | VM_PFNMAP |
+                              VM_VMO | VM_FILE));
+}
+
+static int swap_out_victim_pages(int target_pages)
+{
+    int victim_pid = oom_pick_victim_pid();
+    if (victim_pid <= 0)
+        return 0;
+
+    task_t *victim = proc_find(victim_pid);
+    if (!victim || !victim->mm || !victim->mm->pgdir)
+        return 0;
+
+    mm_struct_t *mm = victim->mm;
+    int reclaimed = 0;
+    uint64_t flags = spin_lock_irqsave(&mm->lock);
+
+    /* TODO: install a busy swap PTE and drop mm->lock before block I/O. */
+    for (vm_area_t *vma = mm->mmap;
+         vma && reclaimed < target_pages && reclaimed < MAX_SWAP_RECLAIM;
+         vma = vma->next) {
+        if (!vma_is_swappable(vma))
+            continue;
+
+        for (vaddr_t va = vma->start;
+             va < vma->end && reclaimed < target_pages && reclaimed < MAX_SWAP_RECLAIM;
+             va += PAGE_SIZE) {
+            int level = 0;
+            vaddr_t base = 0;
+            size_t size = 0;
+            pte_t *pte = pt_lookup_leaf(mm->pgdir, va, &level, &base, &size);
+            if (!pte || !pte_present(*pte) || !arch_pte_is_leaf(*pte) ||
+                !(*pte & PTE_U) || level != 0 || base != va || size != PAGE_SIZE)
+                continue;
+
+            pfn_t pfn = phys_to_pfn(arch_pte_addr(*pte));
+            if (!pfn_valid(pfn))
+                continue;
+
+            uint64_t pfa_flags = spin_lock_irqsave(&pfa.lock);
+            uint16_t refs = pfa.meta[pfn].refcount;
+            spin_unlock_irqrestore(&pfa.lock, pfa_flags);
+            if (refs > 1)
+                continue;
+
+            swap_entry_t entry = get_swap_page();
+            if (!entry)
+                continue;
+            if (swap_write_page(entry, pfn_to_virt(pfn)) < 0) {
+                swap_free(entry);
+                continue;
+            }
+            if (cg_mem_swap_charge(victim, 1) < 0) {
+                swap_free(entry);
+                continue;
+            }
+
+            *pte = swp_entry_to_pte(entry);
+            arch_tlb_flush_page(va);
+            frame_put(pfn);
+            cg_mem_uncharge(victim->cgroup, 1);
+            mm->rss = mm->rss ? mm->rss - 1 : 0;
+            reclaimed++;
+
+            if (pfa_free_count() >= OOM_MIN_FREE_PAGES)
+                break;
+        }
+    }
+
+    spin_unlock_irqrestore(&mm->lock, flags);
+    return reclaimed;
+}
+#else
+static int swap_out_victim_pages(int target_pages)
+{
+    (void)target_pages;
+    return 0;
+}
+#endif
+
 int oom_try_reclaim(void)
 {
     if (__atomic_load_n(&oom_in_progress, __ATOMIC_RELAXED))
@@ -56,6 +146,12 @@ int oom_try_reclaim(void)
         return 0;
 
     __atomic_store_n(&oom_in_progress, 1, __ATOMIC_RELAXED);
+
+    if (swap_out_victim_pages(MAX_SWAP_RECLAIM) > 0 &&
+        pfa_free_count() >= OOM_MIN_FREE_PAGES) {
+        __atomic_store_n(&oom_in_progress, 0, __ATOMIC_RELAXED);
+        return 1;
+    }
 
     int victim_pid = oom_pick_victim_pid();
     if (victim_pid <= 0) {

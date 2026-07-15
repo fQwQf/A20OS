@@ -14,6 +14,7 @@
 #include "core/string.h"
 #include "abi/native/vmo.h"
 #include "cg/cgroup.h"
+#include "mm/swap.h"
 
 /*
  * COW_FAULT_TLB_CONTRACT:
@@ -182,6 +183,46 @@ int handle_demand_fault(task_t *t, uint64_t stval) {
     if (!t->mm || !t->mm->pgdir) return -1;
 
     uint64_t page_va = stval & ~(PAGE_SIZE - 1);
+    pte_t *pte = pt_lookup_leaf(t->mm->pgdir, page_va, NULL, NULL, NULL);
+
+#ifdef CONFIG_SWAP
+    if (pte && pte_is_swap(*pte)) {
+        vm_area_t *vma = mm_find_vma(t->mm, page_va);
+        if (!vma) {
+            signal_send(t->pid, SIGBUS);
+            return -1;
+        }
+
+        swap_entry_t entry = pte_to_swp_entry(*pte);
+        pfn_t pfn = pfa_alloc_page();
+        if (pfn == PFN_NONE)
+            return -1;
+        if (cg_mem_charge(t->cgroup, 1) != 0) {
+            frame_put(pfn);
+            cg_mem_oom_kill(t->cgroup);
+            return -1;
+        }
+        if (swap_read_page(entry, pfn_to_virt(pfn)) < 0) {
+            cg_mem_uncharge(t->cgroup, 1);
+            frame_put(pfn);
+            return -1;
+        }
+
+        int r = pt_map(t->mm->pgdir, page_va, pfn_to_phys(pfn),
+                       vma->pte_flags);
+        if (r < 0) {
+            cg_mem_uncharge(t->cgroup, 1);
+            frame_put(pfn);
+            return -1;
+        }
+
+        swap_free(entry);
+        cg_mem_swap_uncharge(t, 1);
+        t->mm->rss++;
+        arch_tlb_flush_page(stval);
+        return 0;
+    }
+#endif
 
     if (t->mm->stack_top != 0) {
         uint64_t stack_size_limit = t->limits.stack ? t->limits.stack : USER_STACK_MAX_SIZE;
@@ -236,7 +277,6 @@ int handle_demand_fault(task_t *t, uint64_t stval) {
 
     vm_area_t *vma = mm_find_vma(t->mm, page_va);
     if (vma) {
-        pte_t *pte = pt_lookup_leaf(t->mm->pgdir, page_va, NULL, NULL, NULL);
         if (pte && (*pte & PTE_V)) return -1;
         if (!mm_pte_flags_allow_access(vma->pte_flags)) return -1;
 
