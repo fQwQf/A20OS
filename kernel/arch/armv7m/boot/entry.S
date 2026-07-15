@@ -26,7 +26,9 @@ armv7m_vector_table:
     .word Default_Handler
     .endr
     .word USART1_IRQHandler
-    .rept 31
+    .word Default_Handler
+    .word USART3_IRQHandler
+    .rept 29
     .word Default_Handler
     .endr
 
@@ -58,6 +60,19 @@ Reset_Handler:
     str r2, [r0], #4
     b 3b
 4:
+    /*
+     * Fill the reserved stack before its first C use. The memory monitor
+     * scans this pattern to report the real high-water mark.
+     */
+    ldr r0, =_stack_limit
+    ldr r1, =_stack_top
+    ldr r2, =0xA55AA55A
+6:
+    cmp r0, r1
+    bcs 7f
+    str r2, [r0], #4
+    b 6b
+7:
     ldr r0, =armv7m_vector_table
     ldr r1, =0xE000ED08
     str r0, [r1]
@@ -133,6 +148,12 @@ SysTick_Handler:
 USART1_IRQHandler:
     push {lr}
     bl armv7m_usart1_irq_handler
+    pop {pc}
+
+    .thumb_func
+USART3_IRQHandler:
+    push {lr}
+    bl armv7m_usart3_irq_handler
     pop {pc}
 
     .global __switch

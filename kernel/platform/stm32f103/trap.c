@@ -4,6 +4,7 @@
 #include "core/stdio.h"
 #include "drivers/char/uart.h"
 #include "board.h"
+#include "bluetooth.h"
 
 void armv7m_default_handler(void) {
     uint32_t ipsr;
@@ -34,10 +35,14 @@ void armv7m_svc_handler(uint32_t *stack) {
 }
 
 void armv7m_usart1_irq_handler(void) {
-    int c = arch_uart_poll_getc();
-    if (c >= 0)
+    int c;
+    while ((c = arch_uart_poll_getc()) >= 0)
         uart_receive_char((char)c);
     arch_uart_ack_irq();
+}
+
+void armv7m_usart3_irq_handler(void) {
+    stm32_bluetooth_irq();
 }
 
 #endif
