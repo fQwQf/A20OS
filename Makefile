@@ -3,6 +3,25 @@
 # Parallel build
 NPROC ?= $(or $(shell getconf _NPROCESSORS_ONLN 2>/dev/null),$(shell sysctl -n hw.logicalcpu 2>/dev/null),4)
 TIMEOUT ?= python3 scripts/run_with_timeout.py
+HOST_OS ?= $(shell uname -s 2>/dev/null)
+
+ifeq ($(HOST_OS),Darwin)
+DEFAULT_CONTEST_TARGETS := contest-rv
+DEFAULT_KERNEL_CHECK_TARGETS := check-riscv64-bringup check-stm32f103
+DEFAULT_USER_CHECK_TARGETS := check-riscv64-user
+DEFAULT_NATIVE_TEST_TARGETS := native-test-rv
+DEFAULT_NATIVE_HANDLE_TARGETS := native-handle-test-rv
+DEFAULT_NATIVE_LIBC_TARGETS := native-libc-rv
+DEFAULT_EVAL_TARGETS := eval-rv
+else
+DEFAULT_CONTEST_TARGETS := contest-rv contest-la
+DEFAULT_KERNEL_CHECK_TARGETS := check-riscv64-bringup check-loongarch64-bringup check-aarch64-bringup check-x86_64-bringup check-arm32-bringup check-riscv32-bringup check-ppc64le-bringup
+DEFAULT_USER_CHECK_TARGETS := check-riscv64-user check-loongarch64-user check-aarch64-user check-x86_64-user check-arm32-user check-riscv32-user check-ppc64le-user
+DEFAULT_NATIVE_TEST_TARGETS := native-test-rv native-test-la native-test-aarch64 native-test-x86_64 native-test-arm32 native-test-rv32 native-test-ppc64le
+DEFAULT_NATIVE_HANDLE_TARGETS := native-handle-test-rv native-handle-test-la native-handle-test-aarch64 native-handle-test-x86_64 native-handle-test-arm32 native-handle-test-rv32 native-handle-test-ppc64le
+DEFAULT_NATIVE_LIBC_TARGETS := native-libc-rv native-libc-la native-libc-aarch64 native-libc-x86_64 native-libc-arm32 native-libc-rv32 native-libc-ppc64le
+DEFAULT_EVAL_TARGETS := eval-rv eval-la
+endif
 
 # Architecture selection
 ARCH ?= riscv64
@@ -440,11 +459,11 @@ KERNEL_BIN = $(BUILD_DIR)/kernel.bin
 # Targets
 # ================================================================
 
-.PHONY: all clean run-riscv64 run-gui-riscv64 run-gui-rv run-loongarch64 run-gui-loongarch64 run-gui-la run-arm64 run-x86_64 run-arm32 run-gui-arm32 run-riscv32 run-ppc64le debug-riscv64 debug-loongarch64 debug-arm64 debug-x86_64 debug-arm32 debug-riscv32 debug-ppc64le \
+.PHONY: all all-architectures clean run-riscv64 run-gui-riscv64 run-gui-rv run-loongarch64 run-gui-loongarch64 run-gui-la run-arm64 run-x86_64 run-arm32 run-gui-arm32 run-riscv32 run-ppc64le debug-riscv64 debug-loongarch64 debug-arm64 debug-x86_64 debug-arm32 debug-riscv32 debug-ppc64le \
 		run-gui-nommu-arm32 run-nommu-gui-arm32 \
 		stm32f103-bringup stm32f103-xuanwu flash-stm32f103-xuanwu run-stm32f103-qemu \
 		check-stm32f103 \
-		check-kernel-build check-user-build check-dev-build check-contest-build check-build-matrix check-abi-smoke-gate check-doc-drift check-doc-test-gates check-final-definition check-concurrency-foundation check-mm-lock-model check-abi-boundary check-driver-core-model check-external-dependency-boundary \
+		check-kernel-build check-kernel-build-all check-user-build check-user-build-all check-dev-build check-contest-build check-contest-build-all check-build-matrix check-build-matrix-all check-abi-smoke-gate check-doc-drift check-doc-test-gates check-final-definition check-concurrency-foundation check-mm-lock-model check-abi-boundary check-driver-core-model check-external-dependency-boundary \
 		check-arch-boundary \
 		check-riscv64-bringup check-loongarch64-bringup check-aarch64-bringup check-x86_64-bringup check-arm32-bringup check-riscv32-bringup check-ppc64le-bringup \
 		check-riscv64-user check-loongarch64-user check-aarch64-user check-x86_64-user check-arm32-user check-riscv32-user check-ppc64le-user \
@@ -456,11 +475,11 @@ KERNEL_BIN = $(BUILD_DIR)/kernel.bin
 		qemu-disk-rv qemu-disk-la \
 		extra-img extra-user-apps run-riscv64-extra run-loongarch64-extra run-arm64-extra run-x86_64-extra run-arm32-extra run-riscv32-extra run-ppc64le-extra \
 		native-test-arch native-handle-test-arch native-libc-arch native-programs \
-		native-test-rv native-test-la native-test-aarch64 native-test-x86_64 native-test-arm32 native-test-rv32 native-test-ppc64le native-test \
+		native-test-rv native-test-la native-test-aarch64 native-test-x86_64 native-test-arm32 native-test-rv32 native-test-ppc64le native-test native-test-all \
 		native-minimal-rv native-minimal-la native-minimal \
-		native-handle-test-rv native-handle-test-la native-handle-test-aarch64 native-handle-test-x86_64 native-handle-test-arm32 native-handle-test-rv32 native-handle-test-ppc64le native-handle-test \
-		native-libc-rv native-libc-la native-libc-aarch64 native-libc-x86_64 native-libc-arm32 native-libc-rv32 native-libc-ppc64le native-libc \
-		eval eval-rv eval-la
+		native-handle-test-rv native-handle-test-la native-handle-test-aarch64 native-handle-test-x86_64 native-handle-test-arm32 native-handle-test-rv32 native-handle-test-ppc64le native-handle-test native-handle-test-all \
+		native-libc-rv native-libc-la native-libc-aarch64 native-libc-x86_64 native-libc-arm32 native-libc-rv32 native-libc-ppc64le native-libc native-libc-all \
+		eval eval-all eval-rv eval-la
 
 FORCE:
 
@@ -491,16 +510,23 @@ $(ROOTFS_OVERLAY_SRC) $(ROOTFS_OVERLAY_HDR): scripts/gen_rootfs_overlay.py $(ROO
 	python3 $< --out-c $(ROOTFS_OVERLAY_SRC) --out-h $(ROOTFS_OVERLAY_HDR) --root $(ROOTFS_OVERLAY_DIR)
 
 # ----------------------------------------------------------------
-# Competition build: produces kernel-rv, kernel-la, disk.img,
-# disk-la.img (what the judge expects from `make all`).
+# Competition build. Linux produces both contest architectures; macOS builds
+# the supported RISC-V artifacts. Use all-architectures for the judge matrix.
 # ----------------------------------------------------------------
 all:
+	@set -e; for target in $(DEFAULT_CONTEST_TARGETS); do $(MAKE) $$target; done
+	@echo "=== Competition build complete ==="
+	@echo "  built: $(DEFAULT_CONTEST_TARGETS)"
+
+all-architectures:
 	$(MAKE) contest-rv
 	$(MAKE) contest-la
-	@echo "=== Competition build complete ==="
+	@echo "=== Full competition build complete ==="
 	@echo "  kernel-rv  kernel-la  disk.img  disk-la.img"
 
-check-kernel-build: check-riscv64-bringup check-loongarch64-bringup check-aarch64-bringup check-x86_64-bringup check-arm32-bringup check-riscv32-bringup check-ppc64le-bringup
+check-kernel-build: $(DEFAULT_KERNEL_CHECK_TARGETS)
+
+check-kernel-build-all: check-riscv64-bringup check-loongarch64-bringup check-aarch64-bringup check-x86_64-bringup check-arm32-bringup check-riscv32-bringup check-ppc64le-bringup
 
 check-riscv64-bringup:
 	$(MAKE) ARCH=riscv64 ABI=$(ABI) BRINGUP=1 kernel-only
@@ -523,11 +549,17 @@ check-riscv32-bringup:
 check-ppc64le-bringup:
 	$(MAKE) ARCH=ppc64le ABI=$(ABI) BRINGUP=1 kernel-only
 
-check-user-build: check-riscv64-user check-loongarch64-user check-aarch64-user check-x86_64-user check-arm32-user check-riscv32-user check-ppc64le-user
+check-user-build: $(DEFAULT_USER_CHECK_TARGETS)
+
+check-user-build-all: check-riscv64-user check-loongarch64-user check-aarch64-user check-x86_64-user check-arm32-user check-riscv32-user check-ppc64le-user
 
 check-build-matrix: check-kernel-build check-user-build
 	@rg -q "BUILD_MATRIX_GATE_CONTRACT" docs/testing-gates.md
 	@echo "check-build-matrix: PASS"
+
+check-build-matrix-all: check-kernel-build-all check-user-build-all
+	@rg -q "BUILD_MATRIX_GATE_CONTRACT" docs/testing-gates.md
+	@echo "check-build-matrix-all: PASS"
 
 check-arch-boundary:
 	@! rg -n '#if(n?def)?[[:space:]]+(CONFIG_|__)(AARCH64|ARM|RISCV|LOONG|X86|PPC)|CONFIG_ARM32|CONFIG_AARCH64|__aarch64__|__arm__' \
@@ -606,6 +638,9 @@ check-dev-build:
 
 check-contest-build:
 	$(MAKE) all
+
+check-contest-build-all:
+	$(MAKE) all-architectures
 
 check-concurrency-foundation:
 	@rg -q "SCHEDULER_CONCURRENCY_PREREQS" kernel/proc/sched.c
@@ -1808,7 +1843,9 @@ native-test-rv32:
 native-test-ppc64le:
 	$(MAKE) ARCH=ppc64le NOMMU=$(NOMMU) native-test-arch
 
-native-test: native-test-rv native-test-la native-test-aarch64 native-test-x86_64 native-test-arm32 native-test-rv32 native-test-ppc64le
+native-test: $(DEFAULT_NATIVE_TEST_TARGETS)
+
+native-test-all: native-test-rv native-test-la native-test-aarch64 native-test-x86_64 native-test-arm32 native-test-rv32 native-test-ppc64le
 
 native-minimal-rv:
 	$(call NATIVE_MINIMAL_RECIPE,$(RISCV_ELF_PREFIX)gcc,-march=rv64gc -mabi=lp64d -mcmodel=medany,$(NATIVE_CRT0_RV),user/build/riscv64/native-minimal-rv)
@@ -1856,7 +1893,9 @@ native-handle-test-rv32:
 native-handle-test-ppc64le:
 	$(MAKE) ARCH=ppc64le NOMMU=$(NOMMU) native-handle-test-arch
 
-native-handle-test: native-handle-test-rv native-handle-test-la native-handle-test-aarch64 native-handle-test-x86_64 native-handle-test-arm32 native-handle-test-rv32 native-handle-test-ppc64le
+native-handle-test: $(DEFAULT_NATIVE_HANDLE_TARGETS)
+
+native-handle-test-all: native-handle-test-rv native-handle-test-la native-handle-test-aarch64 native-handle-test-x86_64 native-handle-test-arm32 native-handle-test-rv32 native-handle-test-ppc64le
 
 define NATIVE_LIBC_RECIPE
 @mkdir -p $(dir $(4))
@@ -1895,7 +1934,9 @@ native-libc-rv32:
 native-libc-ppc64le:
 	$(MAKE) ARCH=ppc64le NOMMU=$(NOMMU) native-libc-arch
 
-native-libc: native-libc-rv native-libc-la native-libc-aarch64 native-libc-x86_64 native-libc-arm32 native-libc-rv32 native-libc-ppc64le
+native-libc: $(DEFAULT_NATIVE_LIBC_TARGETS)
+
+native-libc-all: native-libc-rv native-libc-la native-libc-aarch64 native-libc-x86_64 native-libc-arm32 native-libc-rv32 native-libc-ppc64le
 
 native-programs: $(NATIVE_OUTPUTS)
 
@@ -1945,7 +1986,13 @@ $(EVAL_DIR)/sdcard-rv.img: | $(EVAL_DIR)
 		echo "[eval] reusing cached sdcard-rv.img"; \
 	else \
 		echo "[eval] downloading sdcard-rv.img ..."; \
-		wget -q -O $(EVAL_DIR)/sdcard-rv.img.xz $(SDCARD_RV_URL); \
+		if command -v curl >/dev/null 2>&1; then \
+			curl -fL --retry 3 -o $(EVAL_DIR)/sdcard-rv.img.xz $(SDCARD_RV_URL); \
+		elif command -v wget >/dev/null 2>&1; then \
+			wget -q -O $(EVAL_DIR)/sdcard-rv.img.xz $(SDCARD_RV_URL); \
+		else \
+			echo "[eval] curl or wget is required"; exit 1; \
+		fi; \
 		xz -dc $(EVAL_DIR)/sdcard-rv.img.xz > $@; \
 	fi
 
@@ -1956,7 +2003,13 @@ $(EVAL_DIR)/sdcard-la.img: | $(EVAL_DIR)
 		echo "[eval] reusing cached sdcard-la.img"; \
 	else \
 		echo "[eval] downloading sdcard-la.img ..."; \
-		wget -q -O $(EVAL_DIR)/sdcard-la.img.xz $(SDCARD_LA_URL); \
+		if command -v curl >/dev/null 2>&1; then \
+			curl -fL --retry 3 -o $(EVAL_DIR)/sdcard-la.img.xz $(SDCARD_LA_URL); \
+		elif command -v wget >/dev/null 2>&1; then \
+			wget -q -O $(EVAL_DIR)/sdcard-la.img.xz $(SDCARD_LA_URL); \
+		else \
+			echo "[eval] curl or wget is required"; exit 1; \
+		fi; \
 		xz -dc $(EVAL_DIR)/sdcard-la.img.xz > $@; \
 	fi
 
@@ -2018,9 +2071,13 @@ eval-la: eval-dev-build-la $(EVAL_DIR)/sdcard-la.img | $(EVAL_LOGS)
 	$(MAKE) eval-check-la
 
 eval:
+	@set -e; for target in $(DEFAULT_EVAL_TARGETS); do $(MAKE) $$target; done
+	@echo "[eval] complete"
+
+eval-all:
 	$(MAKE) eval-rv
 	$(MAKE) eval-la
-	@echo "[eval] complete"
+	@echo "[eval] full architecture evaluation complete"
 
 eval-check-rv:
 	@log="$(EVAL_LOGS)/serial-rv.txt"; \
