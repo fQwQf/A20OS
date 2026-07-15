@@ -9,6 +9,7 @@
 #define RCC_APB2ENR (*(volatile uint32_t *)0x40021018UL)
 #define AFIO_MAPR   (*(volatile uint32_t *)0x40010004UL)
 
+#define GPIOA_CRL (*(volatile uint32_t *)0x40010800UL)
 #define GPIOA_CRH (*(volatile uint32_t *)0x40010804UL)
 #define GPIOA_IDR (*(volatile uint32_t *)0x40010808UL)
 #define GPIOB_CRH (*(volatile uint32_t *)0x40010C04UL)
@@ -19,12 +20,14 @@
 #define NVIC_IPR       ((volatile uint8_t *)0xE000E400UL)
 
 #define USART1_BASE 0x40013800UL
+#define USART2_BASE 0x40004400UL
 #define USART3_BASE 0x40004800UL
 
 #define RCC_APB2ENR_AFIOEN  (1U << 0)
 #define RCC_APB2ENR_IOPAEN  (1U << 2)
 #define RCC_APB2ENR_IOPBEN  (1U << 3)
 #define RCC_APB2ENR_USART1EN (1U << 14)
+#define RCC_APB1ENR_USART2EN (1U << 17)
 #define RCC_APB1ENR_USART3EN (1U << 18)
 
 #define USART_SR_PE   (1U << 0)
@@ -68,6 +71,11 @@ static const stm32_uart_desc_t uart_desc[STM32_UART_PORT_COUNT] = {
         .irq = 37U,
         .apb2 = 1,
     },
+    [STM32_UART_USART2] = {
+        .regs = (stm32_usart_regs_t *)USART2_BASE,
+        .irq = 38U,
+        .apb2 = 0,
+    },
     [STM32_UART_USART3] = {
         .regs = (stm32_usart_regs_t *)USART3_BASE,
         .irq = 39U,
@@ -76,7 +84,7 @@ static const stm32_uart_desc_t uart_desc[STM32_UART_PORT_COUNT] = {
 };
 
 static stm32_uart_info_t uart_info[STM32_UART_PORT_COUNT];
-static int uart_rx_level[STM32_UART_PORT_COUNT] = {-1, -1};
+static int uart_rx_level[STM32_UART_PORT_COUNT] = {-1, -1, -1};
 
 static int uart_port_valid(stm32_uart_port_t port) {
     return (unsigned)port < STM32_UART_PORT_COUNT;
@@ -145,6 +153,15 @@ static void uart_configure_pins(stm32_uart_port_t port) {
         return;
     }
 
+    if (port == STM32_UART_USART2) {
+        RCC_APB2ENR |= RCC_APB2ENR_IOPAEN;
+        uint32_t crl = GPIOA_CRL;
+        crl &= ~((0xFU << 8) | (0xFU << 12));
+        crl |= (0xBU << 8) | (0x4U << 12);
+        GPIOA_CRL = crl;
+        return;
+    }
+
     RCC_APB2ENR |= RCC_APB2ENR_AFIOEN | RCC_APB2ENR_IOPBEN;
     AFIO_MAPR &= ~AFIO_MAPR_USART3_REMAP_MASK;
     uint32_t crh = GPIOB_CRH;
@@ -158,6 +175,10 @@ static void uart_enable_and_reset(stm32_uart_port_t port) {
         RCC_APB2ENR |= RCC_APB2ENR_USART1EN;
         RCC_APB2RSTR |= RCC_APB2ENR_USART1EN;
         RCC_APB2RSTR &= ~RCC_APB2ENR_USART1EN;
+    } else if (port == STM32_UART_USART2) {
+        RCC_APB1ENR |= RCC_APB1ENR_USART2EN;
+        RCC_APB1RSTR |= RCC_APB1ENR_USART2EN;
+        RCC_APB1RSTR &= ~RCC_APB1ENR_USART2EN;
     } else {
         RCC_APB1ENR |= RCC_APB1ENR_USART3EN;
         RCC_APB1RSTR |= RCC_APB1ENR_USART3EN;
@@ -300,6 +321,8 @@ void stm32_uart_drain_rx(stm32_uart_port_t port) {
 int stm32_uart_rx_pin_level(stm32_uart_port_t port) {
     if (port == STM32_UART_USART1)
         return !!(GPIOA_IDR & (1U << 10));
+    if (port == STM32_UART_USART2)
+        return !!(GPIOA_IDR & (1U << 3));
     if (port == STM32_UART_USART3)
         return !!(GPIOB_IDR & (1U << 11));
     return -1;

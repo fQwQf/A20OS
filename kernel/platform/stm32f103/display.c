@@ -2,6 +2,7 @@
 
 #include "display.h"
 #include "backlight.h"
+#include "core/string.h"
 
 #define RCC_AHBENR  (*(volatile uint32_t *)0x40021014UL)
 #define RCC_APB2ENR (*(volatile uint32_t *)0x40021018UL)
@@ -73,12 +74,25 @@ static int display_bluetooth_configured;
 static int display_bluetooth_slave;
 static int display_bluetooth_uuid_supported;
 static int display_bluetooth_uuid_configured;
+static int display_wifi_active;
+static int display_wifi_detected;
+static int display_wifi_at_responsive;
+static int display_wifi_configured;
+static int display_wifi_connecting;
+static int display_wifi_joined;
+static int display_wifi_got_ip;
+static int display_wifi_socket_connected;
 static uint64_t display_sd_sectors;
 static uint16_t display_bluetooth_uuid;
 static uint32_t display_bluetooth_baud;
 static uint32_t display_bluetooth_rx_bytes;
 static uint32_t display_bluetooth_tx_bytes;
 static uint32_t display_bluetooth_dropped;
+static uint32_t display_wifi_access_points;
+static uint32_t display_wifi_baud;
+static uint32_t display_wifi_rx_bytes;
+static uint32_t display_wifi_tx_bytes;
+static uint32_t display_wifi_dropped;
 static uint16_t display_light_raw;
 static uint8_t display_light_percent;
 static uint8_t display_backlight_percent = 100U;
@@ -87,6 +101,11 @@ static char display_sd_label[12];
 static char display_bluetooth_name[15];
 static char display_bluetooth_pin[5];
 static char display_bluetooth_line[15];
+static char display_wifi_ssid[18];
+static char display_wifi_ip[16];
+static char display_wifi_mac[18];
+static char display_wifi_scan_ssid[21];
+static char display_wifi_event[25];
 static int display_touch_pressed;
 static uint16_t display_touch_x;
 static uint16_t display_touch_y;
@@ -104,6 +123,7 @@ enum {
     DISPLAY_PAGE_MEMORY,
     DISPLAY_PAGE_STORAGE,
     DISPLAY_PAGE_BLUETOOTH,
+    DISPLAY_PAGE_WIFI,
     DISPLAY_PAGE_TOUCH,
     DISPLAY_PAGE_COUNT,
 };
@@ -387,13 +407,14 @@ static void lcd_draw_header(void) {
 
 static void lcd_draw_navigation(void) {
     static const char *const labels[DISPLAY_PAGE_COUNT] = {
-        "SYS", "MEM", "TF", "BT", "INPUT",
+        "SYS", "MEM", "TF", "BT", "WIFI", "IN",
     };
 
     lcd_fill_rect(0, UI_NAV_TOP, LCD_WIDTH,
                   LCD_HEIGHT - UI_NAV_TOP, COLOR_DARK);
     for (unsigned i = 0; i < DISPLAY_PAGE_COUNT; i++)
-        lcd_draw_button(i * 64U, UI_NAV_TOP + 7U, 64U, 50U,
+        lcd_draw_button(i * 53U, UI_NAV_TOP + 7U,
+                        i + 1U == DISPLAY_PAGE_COUNT ? 55U : 53U, 50U,
                         labels[i], display_page == i);
 }
 
@@ -557,6 +578,67 @@ static void lcd_draw_bluetooth_page(void) {
     lcd_draw_button(72, 364, 176, 32, "SEND TEST", 0);
 }
 
+static void lcd_draw_wifi_page(void) {
+    lcd_fill_rect(0, UI_HEADER_HEIGHT, LCD_WIDTH,
+                  UI_NAV_TOP - UI_HEADER_HEIGHT, COLOR_DARK);
+    lcd_draw_text(16, 98, "WIFI ESP8266", COLOR_CYAN, COLOR_DARK, 3);
+
+    lcd_draw_border(14, 132, 292, 270,
+                    display_wifi_got_ip ? COLOR_GREEN :
+                    display_wifi_detected ? COLOR_CYAN : COLOR_YELLOW,
+                    COLOR_PANEL);
+    lcd_draw_text(28, 146,
+                  display_wifi_got_ip ? "STA ONLINE" :
+                  display_wifi_connecting ? "JOINING AP" :
+                  display_wifi_at_responsive ? "AT READY" :
+                  display_wifi_detected ? "MODULE DETECTED" :
+                  display_wifi_active &&
+                      strcmp(display_wifi_event, "MODULE NOT FOUND") != 0 ?
+                                      "PROBING MODULE" :
+                  display_wifi_active ? "MODULE NOT FOUND" :
+                                        "SHARED SOCKET BUSY",
+                  display_wifi_got_ip ? COLOR_GREEN :
+                  display_wifi_detected ? COLOR_CYAN : COLOR_YELLOW,
+                  COLOR_PANEL, 2);
+
+    lcd_draw_text(28, 176, "SSID", COLOR_MUTED, COLOR_PANEL, 2);
+    lcd_draw_text(100, 176,
+                  display_wifi_ssid[0] ? display_wifi_ssid : "NOT SET",
+                  COLOR_WHITE, COLOR_PANEL, 2);
+    lcd_draw_text(28, 204, "IP", COLOR_MUTED, COLOR_PANEL, 2);
+    lcd_draw_text(100, 204,
+                  display_wifi_ip[0] ? display_wifi_ip : "0.0.0.0",
+                  COLOR_WHITE, COLOR_PANEL, 2);
+    lcd_draw_text(28, 232, "MAC", COLOR_MUTED, COLOR_PANEL, 2);
+    lcd_draw_text(100, 232,
+                  display_wifi_mac[0] ? display_wifi_mac : "UNKNOWN",
+                  COLOR_WHITE, COLOR_PANEL, 1);
+    lcd_draw_text(28, 260, "SOCKET", COLOR_MUTED, COLOR_PANEL, 2);
+    lcd_draw_text(124, 260,
+                  display_wifi_socket_connected ? "CONNECTED" : "IDLE",
+                  display_wifi_socket_connected ? COLOR_GREEN : COLOR_MUTED,
+                  COLOR_PANEL, 2);
+    lcd_draw_text(28, 288, "APS", COLOR_MUTED, COLOR_PANEL, 2);
+    lcd_draw_decimal(76, 288, display_wifi_access_points,
+                     COLOR_WHITE, COLOR_PANEL, 2);
+    lcd_draw_text(124, 288,
+                  display_wifi_scan_ssid[0] ? display_wifi_scan_ssid : "NONE",
+                  COLOR_WHITE, COLOR_PANEL, 1);
+    lcd_draw_text(28, 314, display_wifi_event,
+                  COLOR_CYAN, COLOR_PANEL, 1);
+    lcd_draw_text(28, 338, "RX", COLOR_MUTED, COLOR_PANEL, 1);
+    lcd_draw_decimal(52, 338, display_wifi_rx_bytes,
+                     COLOR_WHITE, COLOR_PANEL, 1);
+    lcd_draw_text(112, 338, "TX", COLOR_MUTED, COLOR_PANEL, 1);
+    lcd_draw_decimal(136, 338, display_wifi_tx_bytes,
+                     COLOR_WHITE, COLOR_PANEL, 1);
+    lcd_draw_text(196, 338, "DROP", COLOR_MUTED, COLOR_PANEL, 1);
+    lcd_draw_decimal(232, 338, display_wifi_dropped,
+                     display_wifi_dropped ? COLOR_YELLOW : COLOR_WHITE,
+                     COLOR_PANEL, 1);
+    lcd_draw_button(72, 364, 176, 32, "SCAN AP", 0);
+}
+
 static void lcd_draw_storage_page(void) {
     lcd_fill_rect(0, UI_HEADER_HEIGHT, LCD_WIDTH,
                   UI_NAV_TOP - UI_HEADER_HEIGHT, COLOR_DARK);
@@ -636,6 +718,8 @@ static void lcd_render_page(void) {
         lcd_draw_memory_page();
     else if (display_page == DISPLAY_PAGE_BLUETOOTH)
         lcd_draw_bluetooth_page();
+    else if (display_page == DISPLAY_PAGE_WIFI)
+        lcd_draw_wifi_page();
     else if (display_page == DISPLAY_PAGE_TOUCH)
         lcd_draw_touch_page();
     else
@@ -733,7 +817,7 @@ static void lcd_handle_touch_down(uint16_t x, uint16_t y, int new_press) {
     if (y >= UI_NAV_TOP) {
         if (!new_press)
             return;
-        unsigned page = x / 64U;
+        unsigned page = x / 53U;
         if (page >= DISPLAY_PAGE_COUNT)
             page = DISPLAY_PAGE_COUNT - 1U;
         lcd_select_page(page);
@@ -770,6 +854,14 @@ static void lcd_handle_touch_down(uint16_t x, uint16_t y, int new_press) {
         return;
     }
 
+    if (display_page == DISPLAY_PAGE_WIFI) {
+        if (new_press && y >= 358U && y < 406U) {
+            display_pending_action = STM32_DISPLAY_ACTION_WIFI_SCAN;
+            lcd_draw_button(72, 364, 176, 32, "SCAN AP", 1);
+        }
+        return;
+    }
+
     if (display_page != DISPLAY_PAGE_TOUCH)
         return;
     if (y >= 352U && y < 408U) {
@@ -800,7 +892,8 @@ static void lcd_redraw_peripheral_status(void) {
     if (display_page == DISPLAY_PAGE_STATUS ||
         display_page == DISPLAY_PAGE_MEMORY ||
         display_page == DISPLAY_PAGE_STORAGE ||
-        display_page == DISPLAY_PAGE_BLUETOOTH)
+        display_page == DISPLAY_PAGE_BLUETOOTH ||
+        display_page == DISPLAY_PAGE_WIFI)
         lcd_render_page();
 }
 
@@ -819,6 +912,8 @@ static void lcd_restore_touch_button(void) {
         lcd_draw_button(92, 358, 136, 44, "CLEAR", 0);
     else if (display_page == DISPLAY_PAGE_BLUETOOTH)
         lcd_draw_button(72, 364, 176, 32, "SEND TEST", 0);
+    else if (display_page == DISPLAY_PAGE_WIFI)
+        lcd_draw_button(72, 364, 176, 32, "SCAN AP", 0);
 }
 
 static void lcd_init_ili9481(void) {
@@ -1171,6 +1266,71 @@ void stm32_display_set_bluetooth(int ready, int detected, int at_responsive,
         lcd_redraw_peripheral_status();
 }
 
+void stm32_display_set_wifi(int active, int detected, int at_responsive,
+                            int configured, int connecting, int joined,
+                            int got_ip, int socket_connected,
+                            const char *ssid, const char *ip_address,
+                            const char *mac_address, const char *scan_ssid,
+                            uint32_t access_points, uint32_t baud_rate,
+                            uint32_t received_bytes,
+                            uint32_t transmitted_bytes,
+                            uint32_t dropped_bytes, const char *last_event) {
+    int changed = display_wifi_active != active ||
+                  display_wifi_detected != detected ||
+                  display_wifi_at_responsive != at_responsive ||
+                  display_wifi_configured != configured ||
+                  display_wifi_connecting != connecting ||
+                  display_wifi_joined != joined ||
+                  display_wifi_got_ip != got_ip ||
+                  display_wifi_socket_connected != socket_connected ||
+                  display_wifi_access_points != access_points ||
+                  display_wifi_baud != baud_rate ||
+                  display_wifi_rx_bytes != received_bytes ||
+                  display_wifi_tx_bytes != transmitted_bytes ||
+                  display_wifi_dropped != dropped_bytes;
+    char old_ssid[sizeof(display_wifi_ssid)];
+    char old_ip[sizeof(display_wifi_ip)];
+    char old_mac[sizeof(display_wifi_mac)];
+    char old_scan[sizeof(display_wifi_scan_ssid)];
+    char old_event[sizeof(display_wifi_event)];
+    memcpy(old_ssid, display_wifi_ssid, sizeof(old_ssid));
+    memcpy(old_ip, display_wifi_ip, sizeof(old_ip));
+    memcpy(old_mac, display_wifi_mac, sizeof(old_mac));
+    memcpy(old_scan, display_wifi_scan_ssid, sizeof(old_scan));
+    memcpy(old_event, display_wifi_event, sizeof(old_event));
+
+    display_wifi_active = active;
+    display_wifi_detected = detected;
+    display_wifi_at_responsive = at_responsive;
+    display_wifi_configured = configured;
+    display_wifi_connecting = connecting;
+    display_wifi_joined = joined;
+    display_wifi_got_ip = got_ip;
+    display_wifi_socket_connected = socket_connected;
+    display_wifi_access_points = access_points;
+    display_wifi_baud = baud_rate;
+    display_wifi_rx_bytes = received_bytes;
+    display_wifi_tx_bytes = transmitted_bytes;
+    display_wifi_dropped = dropped_bytes;
+    lcd_copy_short_text(display_wifi_ssid, sizeof(display_wifi_ssid), ssid);
+    lcd_copy_short_text(display_wifi_ip, sizeof(display_wifi_ip), ip_address);
+    lcd_copy_short_text(display_wifi_mac, sizeof(display_wifi_mac), mac_address);
+    lcd_copy_short_text(display_wifi_scan_ssid,
+                        sizeof(display_wifi_scan_ssid), scan_ssid);
+    lcd_copy_short_text(display_wifi_event,
+                        sizeof(display_wifi_event), last_event);
+    if (memcmp(old_ssid, display_wifi_ssid, sizeof(old_ssid)) != 0 ||
+        memcmp(old_ip, display_wifi_ip, sizeof(old_ip)) != 0 ||
+        memcmp(old_mac, display_wifi_mac, sizeof(old_mac)) != 0 ||
+        memcmp(old_scan, display_wifi_scan_ssid, sizeof(old_scan)) != 0 ||
+        memcmp(old_event, display_wifi_event, sizeof(old_event)) != 0)
+        changed = 1;
+    if (changed && display_ready &&
+        (display_page == DISPLAY_PAGE_WIFI ||
+         display_page == DISPLAY_PAGE_STATUS))
+        lcd_render_page();
+}
+
 void stm32_display_set_memory(const stm32_memory_info_t *info) {
     if (!info)
         return;
@@ -1321,6 +1481,16 @@ void stm32_display_handle_key(stm32_key_t key) {
         return;
     }
 
+    if (display_page == DISPLAY_PAGE_WIFI) {
+        if (key == STM32_KEY_UP) {
+            display_pending_action = STM32_DISPLAY_ACTION_WIFI_SCAN;
+            lcd_draw_button(72, 364, 176, 32, "SCAN AP", 1);
+        } else if (key == STM32_KEY_DOWN) {
+            lcd_render_page();
+        }
+        return;
+    }
+
     if (display_page != DISPLAY_PAGE_TOUCH)
         return;
     if (key == STM32_KEY_DOWN) {
@@ -1348,6 +1518,9 @@ stm32_display_action_t stm32_display_take_action(void) {
     if (action == STM32_DISPLAY_ACTION_BLUETOOTH_TEST &&
         display_ready && display_page == DISPLAY_PAGE_BLUETOOTH)
         lcd_draw_button(72, 364, 176, 32, "SEND TEST", 0);
+    else if (action == STM32_DISPLAY_ACTION_WIFI_SCAN &&
+             display_ready && display_page == DISPLAY_PAGE_WIFI)
+        lcd_draw_button(72, 364, 176, 32, "SCAN AP", 0);
     return action;
 }
 
