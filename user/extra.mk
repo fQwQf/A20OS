@@ -41,7 +41,8 @@ ZLIB_LIB     := $(ZLIB_BUILD)/libz.a
 # ----------------------------------------------------------------
 # Toolchain (mirrors user/Makefile)
 # ----------------------------------------------------------------
-CROSS_COMPILE_riscv64      := riscv64-unknown-elf-
+RISCV_ELF_PREFIX ?= $(if $(shell command -v riscv64-unknown-elf-gcc 2>/dev/null),riscv64-unknown-elf-,$(if $(shell command -v riscv64-elf-gcc 2>/dev/null),riscv64-elf-,riscv64-unknown-elf-))
+CROSS_COMPILE_riscv64      := $(RISCV_ELF_PREFIX)
 CROSS_COMPILE_loongarch64  := loongarch64-linux-gnu-
 CROSS_COMPILE_aarch64      := aarch64-linux-gnu-
 CROSS_COMPILE ?= $(CROSS_COMPILE_$(ARCH))

@@ -202,7 +202,9 @@ void kernel_main(void) {
     kfree(probe);
 
     timer_init();
+#ifndef CONFIG_STM32_QEMU
     stm32_peripherals_init();
+#endif
 
     arch_local_irq_enable();
     printf("[BOOT] SysTick=1000Hz source=HCLK=%u, entering WFI loop\n",
@@ -210,9 +212,16 @@ void kernel_main(void) {
     diagnostic_help();
     diagnostic_prompt();
 
+    uint64_t last_tick_report = 0;
     for (;;) {
         uint64_t now = timer_get_ticks();
+#ifndef CONFIG_STM32_QEMU
         stm32_peripherals_service(now);
+#endif
+        if (now - last_tick_report >= 1000U) {
+            last_tick_report = now;
+            printf("[TICK] %lu ms\n", (unsigned long)now);
+        }
         diagnostic_service();
         arch_wfi();
     }
