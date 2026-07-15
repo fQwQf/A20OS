@@ -63,6 +63,7 @@ typedef struct cg_resource {
 
 /* Forward declaration — defined in fs/cgroupfs.c */
 struct cg_node;
+struct task_t;
 
 /* ---- Init functions (called from cgroupfs_mount) ---- */
 void cg_mem_init(cg_mem_state_t *mem);
@@ -72,6 +73,8 @@ void cg_cpuset_init(cg_cpuset_state_t *cs, unsigned nr_cpus);
 /* ---- Memory controller API ---- */
 int  cg_mem_charge(struct cg_node *cg, size_t nr_pages);
 void cg_mem_uncharge(struct cg_node *cg, size_t nr_pages);
+int  cg_mem_swap_charge(struct task_t *t, size_t pages);
+void cg_mem_swap_uncharge(struct task_t *t, size_t pages);
 void cg_mem_oom_kill(struct cg_node *cg);
 
 /* ---- CPU controller API ---- */

@@ -10,6 +10,7 @@ typedef struct stm32_peripheral_state {
     size_t external_sram_bytes;
     int sdcard_ready;
     int touch_armed;
+    int keys_ready;
 } stm32_peripheral_state_t;
 
 void stm32_peripherals_init(void);

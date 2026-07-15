@@ -31,6 +31,7 @@
 #define UI_TOUCH_Y       148U
 #define UI_TOUCH_W       292U
 #define UI_TOUCH_H       196U
+#define UI_CURSOR_STEP   12U
 
 #define LCD_ID_HX8357D 0x0057U
 #define LCD_ID_ILI9325 0x9325U
@@ -60,6 +61,7 @@ static int display_sd_ready;
 static int display_sd_fat32;
 static int display_sd_bus_width;
 static int display_touch_ready;
+static int display_keys_ready;
 static size_t display_sram_bytes;
 static uint64_t display_sd_sectors;
 static char display_sd_label[12];
@@ -70,6 +72,9 @@ static uint16_t display_draw_x;
 static uint16_t display_draw_y;
 static int display_draw_valid;
 static unsigned display_page;
+static unsigned display_status_selection;
+static uint16_t display_key_cursor_x = LCD_WIDTH / 2U;
+static uint16_t display_key_cursor_y = UI_TOUCH_Y + UI_TOUCH_H / 2U;
 
 enum {
     DISPLAY_PAGE_STATUS,
@@ -295,10 +300,12 @@ static void lcd_draw_button(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
                   label, COLOR_WHITE, fill, 2);
 }
 
-static void lcd_draw_status_row(uint16_t y, const char *label, int ready) {
+static void lcd_draw_status_row(uint16_t y, const char *label, int ready,
+                                int selected) {
     uint16_t color = ready ? COLOR_GREEN : COLOR_YELLOW;
-    lcd_fill_rect(14, y, 292, 34, COLOR_PANEL);
-    lcd_fill_rect(14, y, 5, 34, color);
+    uint16_t border = selected ? COLOR_CYAN : COLOR_PANEL;
+    lcd_draw_border(14, y, 292, 34, border, COLOR_PANEL);
+    lcd_fill_rect(16, y + 2U, 5, 30, color);
     lcd_draw_text(28, y + 10U, label, COLOR_WHITE, COLOR_PANEL, 2);
     lcd_draw_text(206, y + 10U, ready ? "READY" : "OPTIONAL",
                   color, COLOR_PANEL, 2);
@@ -314,7 +321,7 @@ static void lcd_draw_header(void) {
 
 static void lcd_draw_navigation(void) {
     static const char *const labels[DISPLAY_PAGE_COUNT] = {
-        "STATUS", "TF CARD", "TOUCH",
+        "STATUS", "TF CARD", "INPUT",
     };
 
     lcd_fill_rect(0, UI_NAV_TOP, LCD_WIDTH,
@@ -328,10 +335,14 @@ static void lcd_draw_status_page(void) {
     lcd_fill_rect(0, UI_HEADER_HEIGHT, LCD_WIDTH,
                   UI_NAV_TOP - UI_HEADER_HEIGHT, COLOR_DARK);
     lcd_draw_text(16, 98, "SYSTEM STATUS", COLOR_CYAN, COLOR_DARK, 3);
-    lcd_draw_status_row(138, "EXT SRAM", display_sram_ready);
-    lcd_draw_status_row(180, "TF CARD", display_sd_ready);
-    lcd_draw_status_row(222, "FAT32", display_sd_fat32);
-    lcd_draw_status_row(264, "TOUCH", display_touch_ready);
+    lcd_draw_status_row(138, "EXT SRAM", display_sram_ready,
+                        display_status_selection == 0U);
+    lcd_draw_status_row(180, "TF CARD", display_sd_ready,
+                        display_status_selection == 1U);
+    lcd_draw_status_row(222, "FAT32", display_sd_fat32,
+                        display_status_selection == 2U);
+    lcd_draw_status_row(264, "DIR KEYS", display_keys_ready,
+                        display_status_selection == 3U);
     if (display_sram_ready) {
         lcd_draw_decimal(132, 148, display_sram_bytes / 1024U,
                          COLOR_MUTED, COLOR_PANEL, 2);
@@ -344,9 +355,11 @@ static void lcd_draw_status_page(void) {
     }
 
     lcd_draw_border(14, 316, 292, 80, COLOR_BLUE, COLOR_PANEL);
-    lcd_draw_text(28, 328, "LAST TOUCH", COLOR_MUTED, COLOR_PANEL, 2);
+    lcd_draw_text(28, 328, "INPUT STATUS", COLOR_MUTED, COLOR_PANEL, 2);
     if (!display_touch_pressed) {
-        lcd_draw_text(28, 360, "SYSTEM ONLINE", COLOR_GREEN,
+        lcd_draw_text(28, 360,
+                      display_keys_ready ? "ARROWS ONLINE" : "SYSTEM ONLINE",
+                      COLOR_GREEN,
                       COLOR_PANEL, 2);
     } else {
         lcd_draw_text(28, 360, "X", COLOR_CYAN, COLOR_PANEL, 2);
@@ -407,12 +420,24 @@ static void lcd_draw_touch_coordinates(void) {
                      COLOR_WHITE, COLOR_DARK, 2);
 }
 
+static void lcd_draw_key_cursor(void) {
+    lcd_draw_border(display_key_cursor_x - 4U, display_key_cursor_y - 4U,
+                    9, 9, COLOR_YELLOW, COLOR_DARK);
+    lcd_fill_rect(display_key_cursor_x - 1U, display_key_cursor_y - 1U,
+                  3, 3, COLOR_YELLOW);
+}
+
 static void lcd_draw_touch_page(void) {
     lcd_fill_rect(0, UI_HEADER_HEIGHT, LCD_WIDTH,
                   UI_NAV_TOP - UI_HEADER_HEIGHT, COLOR_DARK);
-    lcd_draw_text(16, 98, "TOUCH PAD", COLOR_CYAN, COLOR_DARK, 3);
+    lcd_draw_text(16, 98, "INPUT TEST", COLOR_CYAN, COLOR_DARK, 3);
+    if (!display_touch_pressed) {
+        display_touch_x = display_key_cursor_x;
+        display_touch_y = display_key_cursor_y;
+    }
     lcd_draw_touch_coordinates();
     lcd_clear_touch_canvas();
+    lcd_draw_key_cursor();
     lcd_draw_button(92, 358, 136, 44, "CLEAR", 0);
 }
 
@@ -483,6 +508,17 @@ static void lcd_select_page(unsigned page) {
     display_page = page;
     display_draw_valid = 0;
     lcd_render_page();
+}
+
+static void lcd_select_relative_page(int direction) {
+    unsigned page;
+
+    if (direction < 0)
+        page = display_page == 0U ? DISPLAY_PAGE_COUNT - 1U
+                                 : display_page - 1U;
+    else
+        page = (display_page + 1U) % DISPLAY_PAGE_COUNT;
+    lcd_select_page(page);
 }
 
 static void lcd_handle_touch_down(uint16_t x, uint16_t y, int new_press) {
@@ -846,7 +882,7 @@ void stm32_display_set_peripherals(int sram_ready, size_t sram_bytes,
                                    int sd_ready, uint64_t sd_sectors,
                                    int sd_fat32, int sd_bus_width,
                                    const char *sd_volume_label,
-                                   int touch_ready) {
+                                   int touch_ready, int keys_ready) {
     display_sram_ready = sram_ready;
     display_sram_bytes = sram_bytes;
     display_sd_ready = sd_ready;
@@ -855,6 +891,7 @@ void stm32_display_set_peripherals(int sram_ready, size_t sram_bytes,
     display_sd_bus_width = sd_bus_width;
     lcd_copy_label(sd_volume_label);
     display_touch_ready = touch_ready;
+    display_keys_ready = keys_ready;
     lcd_redraw_peripheral_status();
 }
 
@@ -877,6 +914,72 @@ void stm32_display_show_touch(uint16_t x, uint16_t y, int pressed) {
     display_touch_y = y;
     lcd_redraw_touch_status();
     lcd_handle_touch_down(x, y, !was_pressed);
+}
+
+void stm32_display_handle_key(stm32_key_t key) {
+    if (!display_ready)
+        return;
+
+    if (key == STM32_KEY_LEFT) {
+        lcd_select_relative_page(-1);
+        return;
+    }
+    if (key == STM32_KEY_RIGHT) {
+        if (display_page == DISPLAY_PAGE_STATUS) {
+            if (display_status_selection == 1U ||
+                display_status_selection == 2U)
+                lcd_select_page(DISPLAY_PAGE_STORAGE);
+            else if (display_status_selection == 3U)
+                lcd_select_page(DISPLAY_PAGE_TOUCH);
+            else
+                lcd_select_relative_page(1);
+            return;
+        }
+        lcd_select_relative_page(1);
+        return;
+    }
+
+    if (display_page == DISPLAY_PAGE_STATUS) {
+        if (key == STM32_KEY_UP) {
+            display_status_selection =
+                display_status_selection == 0U ? 3U
+                                               : display_status_selection - 1U;
+        } else if (key == STM32_KEY_DOWN) {
+            display_status_selection = (display_status_selection + 1U) % 4U;
+        } else {
+            return;
+        }
+        lcd_draw_status_page();
+        return;
+    }
+
+    if (display_page == DISPLAY_PAGE_STORAGE) {
+        if (key == STM32_KEY_UP)
+            lcd_select_page(DISPLAY_PAGE_STATUS);
+        else if (key == STM32_KEY_DOWN)
+            lcd_render_page();
+        return;
+    }
+
+    if (display_page != DISPLAY_PAGE_TOUCH)
+        return;
+    if (key == STM32_KEY_DOWN) {
+        lcd_clear_touch_canvas();
+        lcd_draw_key_cursor();
+        lcd_draw_button(92, 358, 136, 44, "CLEAR", 1);
+        return;
+    }
+    if (key != STM32_KEY_UP)
+        return;
+
+    display_key_cursor_y -= UI_CURSOR_STEP;
+    if (display_key_cursor_y <= UI_TOUCH_Y + 6U)
+        display_key_cursor_y = UI_TOUCH_Y + UI_TOUCH_H - 7U;
+    display_touch_x = display_key_cursor_x;
+    display_touch_y = display_key_cursor_y;
+    lcd_draw_touch_coordinates();
+    lcd_clear_touch_canvas();
+    lcd_draw_key_cursor();
 }
 
 #endif

@@ -3,6 +3,7 @@
 #include "mm/frame.h"
 #include "mm/slab.h"
 #include "mm/fault.h"
+#include "mm/swap.h"
 #include "fs/vfs.h"
 #include "fs/page_cache.h"
 #include "ipc/sysv_shm.h"
@@ -1304,7 +1305,12 @@ int mm_munmap(mm_struct_t *mm, vaddr_t addr, size_t len) {
             vaddr_t base = 0;
             size_t size = 0;
             pte_t *pte = pt_lookup_leaf(mm->pgdir, va, &level, &base, &size);
-            if (!pte || !(*pte & PTE_V)) {
+            if (!pte ||
+                (!(*pte & PTE_V)
+#ifdef CONFIG_SWAP
+                 && !pte_is_swap(*pte)
+#endif
+                )) {
                 va += PAGE_SIZE;
                 continue;
             }
@@ -1419,7 +1425,12 @@ vaddr_t mm_brk(mm_struct_t *mm, vaddr_t newbrk) {
             vaddr_t base = 0;
             size_t size = 0;
             pte_t *pte = pt_lookup_leaf(mm->pgdir, va, &level, &base, &size);
-            if (!pte || !(*pte & PTE_V)) {
+            if (!pte ||
+                (!(*pte & PTE_V)
+#ifdef CONFIG_SWAP
+                 && !pte_is_swap(*pte)
+#endif
+                )) {
                 va += PAGE_SIZE;
                 continue;
             }

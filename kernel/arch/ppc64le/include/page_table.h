@@ -2,6 +2,9 @@
 #define _ARCH_PPC64LE_MM_H
 
 #include "core/types.h"
+#ifdef CONFIG_SWAP
+#include "mm/swap.h"
+#endif
 
 #ifndef PAGE_SHIFT
 #define PAGE_SHIFT         12
@@ -30,6 +33,28 @@
 #define PTE_W              0x0200000000000000UL
 #define PTE_X              0x0100000000000000UL
 #define PTE_MAT1           0UL
+
+#ifdef CONFIG_SWAP
+/* Bit 1 is not used by the kernel's PPN or flag layout and is outside the
+ * payload range when the swap entry is shifted left by 12. */
+#define PTE_SWAP           0x0000000000000002UL
+
+static inline int pte_present(uint64_t pte) {
+    return (pte & PTE_V) != 0;
+}
+
+static inline int pte_is_swap(uint64_t pte) {
+    return !pte_present(pte) && (pte & PTE_SWAP) != 0;
+}
+
+static inline swap_entry_t pte_to_swp_entry(uint64_t pte) {
+    return (pte >> 12) & ((1ULL << (SWP_TYPE_BITS + SWP_OFFSET_BITS)) - 1);
+}
+
+static inline uint64_t swp_entry_to_pte(swap_entry_t entry) {
+    return PTE_SWAP | (entry << 12);
+}
+#endif
 
 #define PTE_PRIV           0x0800000000000000UL
 #define PTE_KERN           (PTE_V | PTE_R | PTE_W | PTE_X | PTE_A | PTE_D | PTE_G | PTE_MAT1 | PTE_LEAF | PTE_PRIV)

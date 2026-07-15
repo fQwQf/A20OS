@@ -10,6 +10,7 @@
 #include "mm/frame.h"
 #include "mm/mm.h"
 #include "mm/vm.h"
+#include "mm/swap.h"
 #include "core/panic.h"
 #include "core/string.h"
 #include "sys/futex.h"
@@ -136,6 +137,23 @@ static void proc_release_exiting_mm(task_t *t)
 
     if (t->cgroup && mm->rss > 0)
         cg_mem_uncharge(t->cgroup, mm->rss);
+
+    if (t->cgroup && mm->pgdir) {
+        size_t swapped = 0;
+        for (vm_area_t *vma = mm->mmap; vma; vma = vma->next) {
+            for (vaddr_t va = vma->start; va < vma->end; va += PAGE_SIZE) {
+                pte_t *pte = pt_lookup_leaf(mm->pgdir, va, NULL, NULL, NULL);
+#ifdef CONFIG_SWAP
+                if (pte && pte_is_swap(*pte))
+                    swapped++;
+#else
+                (void)pte;
+#endif
+            }
+        }
+        if (swapped)
+            cg_mem_swap_uncharge(t, swapped);
+    }
 
     mm_destroy(mm);
 }

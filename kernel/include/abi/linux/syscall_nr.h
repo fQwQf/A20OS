@@ -160,9 +160,12 @@
 #define SYS_munmap         215
 #define SYS_mremap         216
 #define SYS_mmap           222
+#define SYS_swapon         224
+#define SYS_swapoff        225
 #define SYS_mprotect       226
 #define SYS_msync          227
 #define SYS_madvise        233
+#define SYS_mkswap         1020
 #define SYS_clone          220
 #define SYS_execve         221
 #define SYS_wait4          260
@@ -256,6 +259,5 @@
 #define SYS_perf_event_open 241
 #define SYS_arch_prctl      1000
 #define SYS_set_thread_area 1001
-
 #define SYS_clock_gettime32 1023
 #endif /* _ABI_LINUX_SYSCALL_NR_H */

@@ -306,6 +306,7 @@
 #define X86_SYS_sched_getattr   315
 #define X86_SYS_memfd_secret    447
 #define X86_SYS_fchmodat2       452
+#define X86_SYS_mkswap          1020
 
 #define X86_SYSCALL_TABLE_SIZE  453
 
@@ -481,8 +482,8 @@ static inline uint32_t x86_syscall_to_kernel_nr(uint32_t x86_nr)
         /* 164 */ SYS_settimeofday,
         /* 165 */ SYS_mount,
         /* 166 */ SYS_umount2,
-        /* 167 */ (uint16_t)-1,     /* swapon */
-        /* 168 */ (uint16_t)-1,     /* swapoff */
+        /* 167 */ SYS_swapon,
+        /* 168 */ SYS_swapoff,
         /* 169 */ SYS_reboot,
         /* 170 */ SYS_sethostname,
         /* 171 */ SYS_setdomainname,
@@ -769,6 +770,8 @@ static inline uint32_t x86_syscall_to_kernel_nr(uint32_t x86_nr)
         /* 452 */ SYS_fchmodat,     /* fchmodat2 -> fchmodat (approx) */
     };
 
+    if (x86_nr == X86_SYS_mkswap)
+        return SYS_mkswap;
     if (x86_nr >= X86_SYSCALL_TABLE_SIZE)
         return (uint32_t)-1;
     return x86_to_kernel[x86_nr];
