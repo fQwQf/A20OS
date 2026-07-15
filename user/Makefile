@@ -1,5 +1,6 @@
 ARCH ?= riscv64
 OPT ?= -O3
+NPROC ?= $(or $(shell getconf _NPROCESSORS_ONLN 2>/dev/null),$(shell sysctl -n hw.logicalcpu 2>/dev/null),4)
 
 .DEFAULT_GOAL := all
 .NOTPARALLEL:
@@ -582,7 +583,7 @@ musl_prepare:
 			CC=$(CC) CROSS_COMPILE=$(CROSS_COMPILE) \
 			CFLAGS='$(MUSL_CONFIG_CFLAGS)' \
 			LDFLAGS='$(MUSL_CONFIG_LDFLAGS)'; \
-		env -u ARCH -u MAKEFLAGS $(MAKE) -C "$(MUSL_BUILD)" -j$$(nproc); \
+		env -u ARCH -u MAKEFLAGS $(MAKE) -C "$(MUSL_BUILD)" -j$(NPROC); \
 		mkdir -p "$(BUILD_DIR)"; \
 		printf '%s\n' '$(MUSL_BUILD_ID)' > "$(MUSL_BUILD_STAMP).tmp"; \
 		mv "$(MUSL_BUILD_STAMP).tmp" "$(MUSL_BUILD_STAMP)"; \
