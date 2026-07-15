@@ -1,0 +1,1 @@
+target=riscv64;cc=riscv64-unknown-elf-gcc;cc-target=riscv64-unknown-elf;cc-version=14.2.0;cflags=-O3 -mcmodel=medany -march=rv64g -mabi=lp64d;ldflags=-L/usr/lib/gcc/riscv64-unknown-elf/14.2.0/rv64iafd/lp64d/
