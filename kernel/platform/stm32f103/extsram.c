@@ -28,6 +28,7 @@ typedef struct ext_block {
 
 static ext_block_t *ext_head;
 static int ext_ready;
+static size_t ext_capacity;
 
 static size_t align8(size_t value) {
     return (value + 7U) & ~(size_t)7U;
@@ -43,12 +44,51 @@ static void gpio_config_pin(volatile uint32_t *crl, volatile uint32_t *crh,
     *reg = value;
 }
 
-static int extsram_probe(void) {
+static int extsram_aliases_at(size_t offset) {
     volatile uint32_t *const base =
         (volatile uint32_t *)(uintptr_t)STM32_EXTSRAM_BASE;
-    static const uint32_t offsets[] = {
-        0U, 4U, 0x100U, 0x1000U, STM32_EXTSRAM_SIZE / 2U,
-        STM32_EXTSRAM_SIZE - 4U,
+    volatile uint32_t *const probe =
+        (volatile uint32_t *)(uintptr_t)(STM32_EXTSRAM_BASE + offset);
+    uint32_t saved_base = *base;
+    uint32_t saved_probe = *probe;
+
+    *base = 0x13579BDFU;
+    __asm__ __volatile__("dsb" ::: "memory");
+    *probe = 0x2468ACE0U;
+    __asm__ __volatile__("dsb" ::: "memory");
+    int aliases = *base == 0x2468ACE0U;
+
+    if (aliases) {
+        *base = saved_base;
+    } else {
+        *base = saved_base;
+        *probe = saved_probe;
+    }
+    __asm__ __volatile__("dsb" ::: "memory");
+    return aliases;
+}
+
+static size_t extsram_detect_capacity(void) {
+    static const size_t candidates[] = {
+        64U * 1024U, 128U * 1024U, 256U * 1024U, 512U * 1024U,
+        1024U * 1024U, 2U * 1024U * 1024U, 4U * 1024U * 1024U,
+        8U * 1024U * 1024U, 16U * 1024U * 1024U,
+    };
+
+    for (unsigned i = 0; i < sizeof(candidates) / sizeof(candidates[0]);
+         i++) {
+        if (extsram_aliases_at(candidates[i]))
+            return candidates[i];
+    }
+    return 0;
+}
+
+static int extsram_probe(size_t capacity) {
+    volatile uint32_t *const base =
+        (volatile uint32_t *)(uintptr_t)STM32_EXTSRAM_BASE;
+    const uint32_t offsets[] = {
+        0U, 4U, 0x100U, 0x1000U, (uint32_t)(capacity / 2U),
+        (uint32_t)(capacity - 4U),
     };
     static const uint32_t patterns[] = {
         0x55AA33CCU, 0xAA55CC33U, 0x01234567U, 0x89ABCDEFU,
@@ -83,6 +123,7 @@ static int extsram_probe(void) {
 int stm32_extsram_init(void) {
     ext_ready = 0;
     ext_head = NULL;
+    ext_capacity = 0;
 
 #ifndef CONFIG_STM32_XUANWU
     return -1;
@@ -109,13 +150,15 @@ int stm32_extsram_init(void) {
     FSMC_BTR3 = 1U | (5U << 8);
     FSMC_BWTR3 = 1U | (3U << 8);
 
-    if (!extsram_probe()) {
+    ext_capacity = extsram_detect_capacity();
+    if (ext_capacity == 0 || !extsram_probe(ext_capacity)) {
+        ext_capacity = 0;
         FSMC_BCR3 &= ~1U;
         return -1;
     }
 
     ext_head = (ext_block_t *)(uintptr_t)STM32_EXTSRAM_BASE;
-    ext_head->size = STM32_EXTSRAM_SIZE - sizeof(*ext_head);
+    ext_head->size = ext_capacity - sizeof(*ext_head);
     ext_head->next = NULL;
     ext_head->free = 1;
     ext_ready = 1;
@@ -126,6 +169,7 @@ int stm32_extsram_init(void) {
 void stm32_extsram_shutdown(void) {
     ext_ready = 0;
     ext_head = NULL;
+    ext_capacity = 0;
 #ifdef CONFIG_STM32_XUANWU
     FSMC_BCR3 &= ~1U;
 #endif
@@ -133,6 +177,10 @@ void stm32_extsram_shutdown(void) {
 
 int stm32_extsram_ready(void) {
     return ext_ready;
+}
+
+size_t stm32_extsram_capacity(void) {
+    return ext_ready ? ext_capacity : 0;
 }
 
 size_t stm32_extsram_available(void) {
@@ -192,7 +240,7 @@ int stm32_extsram_owns(const void *ptr) {
     uintptr_t value = (uintptr_t)ptr;
     return ext_ready &&
            value >= STM32_EXTSRAM_BASE + sizeof(ext_block_t) &&
-           value < STM32_EXTSRAM_BASE + STM32_EXTSRAM_SIZE;
+           value < STM32_EXTSRAM_BASE + ext_capacity;
 }
 
 size_t stm32_extsram_allocation_size(const void *ptr) {

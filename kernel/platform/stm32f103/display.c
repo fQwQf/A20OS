@@ -1,6 +1,7 @@
 #ifdef CONFIG_BOARD_STM32F103
 
 #include "display.h"
+#include "backlight.h"
 
 #define RCC_AHBENR  (*(volatile uint32_t *)0x40021014UL)
 #define RCC_APB2ENR (*(volatile uint32_t *)0x40021018UL)
@@ -56,15 +57,36 @@
 static uint64_t display_last_second = (uint64_t)-1;
 static uint16_t display_controller_id;
 static int display_ready;
-static int display_sram_ready;
 static int display_sd_ready;
 static int display_sd_fat32;
 static int display_sd_bus_width;
 static int display_touch_ready;
 static int display_keys_ready;
-static size_t display_sram_bytes;
+static int display_light_ready;
+static int display_auto_brightness;
+static int display_bluetooth_ready;
+static int display_bluetooth_detected;
+static int display_bluetooth_at_responsive;
+static int display_bluetooth_connected;
+static int display_bluetooth_waiting;
+static int display_bluetooth_configured;
+static int display_bluetooth_slave;
+static int display_bluetooth_uuid_supported;
+static int display_bluetooth_uuid_configured;
 static uint64_t display_sd_sectors;
+static uint16_t display_bluetooth_uuid;
+static uint32_t display_bluetooth_baud;
+static uint32_t display_bluetooth_rx_bytes;
+static uint32_t display_bluetooth_tx_bytes;
+static uint32_t display_bluetooth_dropped;
+static uint16_t display_light_raw;
+static uint8_t display_light_percent;
+static uint8_t display_backlight_percent = 100U;
+static stm32_memory_info_t display_memory;
 static char display_sd_label[12];
+static char display_bluetooth_name[15];
+static char display_bluetooth_pin[5];
+static char display_bluetooth_line[15];
 static int display_touch_pressed;
 static uint16_t display_touch_x;
 static uint16_t display_touch_y;
@@ -73,12 +95,15 @@ static uint16_t display_draw_y;
 static int display_draw_valid;
 static unsigned display_page;
 static unsigned display_status_selection;
+static stm32_display_action_t display_pending_action;
 static uint16_t display_key_cursor_x = LCD_WIDTH / 2U;
 static uint16_t display_key_cursor_y = UI_TOUCH_Y + UI_TOUCH_H / 2U;
 
 enum {
     DISPLAY_PAGE_STATUS,
+    DISPLAY_PAGE_MEMORY,
     DISPLAY_PAGE_STORAGE,
+    DISPLAY_PAGE_BLUETOOTH,
     DISPLAY_PAGE_TOUCH,
     DISPLAY_PAGE_COUNT,
 };
@@ -272,6 +297,20 @@ static void lcd_draw_decimal(uint16_t x, uint16_t y, uint64_t value,
     lcd_draw_text(x, y, &buf[pos], color, bg, scale);
 }
 
+static void lcd_draw_hex4(uint16_t x, uint16_t y, uint16_t value,
+                          uint16_t color, uint16_t bg, unsigned scale) {
+    char text[5];
+
+    for (unsigned i = 0; i < 4U; i++) {
+        unsigned shift = (3U - i) * 4U;
+        unsigned digit = (value >> shift) & 0xFU;
+        text[i] = digit < 10U ? (char)('0' + digit)
+                              : (char)('A' + digit - 10U);
+    }
+    text[4] = '\0';
+    lcd_draw_text(x, y, text, color, bg, scale);
+}
+
 static uint16_t lcd_text_width(const char *text, unsigned scale) {
     uint16_t width = 0;
     while (*text++) {
@@ -300,15 +339,42 @@ static void lcd_draw_button(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
                   label, COLOR_WHITE, fill, 2);
 }
 
-static void lcd_draw_status_row(uint16_t y, const char *label, int ready,
+static void lcd_draw_status_row(uint16_t y, const char *label,
+                                const char *state, uint16_t color,
                                 int selected) {
-    uint16_t color = ready ? COLOR_GREEN : COLOR_YELLOW;
     uint16_t border = selected ? COLOR_CYAN : COLOR_PANEL;
-    lcd_draw_border(14, y, 292, 34, border, COLOR_PANEL);
-    lcd_fill_rect(16, y + 2U, 5, 30, color);
-    lcd_draw_text(28, y + 10U, label, COLOR_WHITE, COLOR_PANEL, 2);
-    lcd_draw_text(206, y + 10U, ready ? "READY" : "OPTIONAL",
-                  color, COLOR_PANEL, 2);
+    lcd_draw_border(14, y, 292, 30, border, COLOR_PANEL);
+    lcd_fill_rect(16, y + 2U, 5, 26, color);
+    lcd_draw_text(28, y + 8U, label, COLOR_WHITE, COLOR_PANEL, 2);
+    lcd_draw_text(206, y + 8U, state, color, COLOR_PANEL, 2);
+}
+
+static void lcd_draw_light_values(int clear) {
+    if (clear) {
+        lcd_fill_rect(106, 350, 94, 24, COLOR_PANEL);
+        lcd_fill_rect(246, 350, 56, 14, COLOR_PANEL);
+    }
+    lcd_draw_decimal(112, 356, display_light_percent,
+                     COLOR_WHITE, COLOR_PANEL, 2);
+    lcd_draw_text(160, 356, "PCT", COLOR_WHITE, COLOR_PANEL, 2);
+    lcd_draw_decimal(250, 354, display_light_raw,
+                     COLOR_WHITE, COLOR_PANEL, 1);
+}
+
+static void lcd_draw_light_panel(void) {
+    lcd_draw_border(14, 316, 292, 84, COLOR_BLUE, COLOR_PANEL);
+    lcd_draw_text(28, 328, "AMBIENT LIGHT", COLOR_MUTED, COLOR_PANEL, 2);
+    lcd_draw_text(28, 356, "LEVEL", COLOR_CYAN, COLOR_PANEL, 2);
+    if (!display_light_ready) {
+        lcd_draw_text(112, 356, "SENSOR ABSENT",
+                      COLOR_YELLOW, COLOR_PANEL, 2);
+        return;
+    }
+
+    lcd_draw_text(226, 354, "ADC", COLOR_MUTED, COLOR_PANEL, 1);
+    lcd_draw_text(28, 382, "BACKLIGHT FIXED ON",
+                  COLOR_MUTED, COLOR_PANEL, 1);
+    lcd_draw_light_values(0);
 }
 
 static void lcd_draw_header(void) {
@@ -321,13 +387,13 @@ static void lcd_draw_header(void) {
 
 static void lcd_draw_navigation(void) {
     static const char *const labels[DISPLAY_PAGE_COUNT] = {
-        "STATUS", "TF CARD", "INPUT",
+        "SYS", "MEM", "TF", "BT", "INPUT",
     };
 
     lcd_fill_rect(0, UI_NAV_TOP, LCD_WIDTH,
                   LCD_HEIGHT - UI_NAV_TOP, COLOR_DARK);
     for (unsigned i = 0; i < DISPLAY_PAGE_COUNT; i++)
-        lcd_draw_button(4U + i * 105U, UI_NAV_TOP + 7U, 101U, 50U,
+        lcd_draw_button(i * 64U, UI_NAV_TOP + 7U, 64U, 50U,
                         labels[i], display_page == i);
 }
 
@@ -335,40 +401,160 @@ static void lcd_draw_status_page(void) {
     lcd_fill_rect(0, UI_HEADER_HEIGHT, LCD_WIDTH,
                   UI_NAV_TOP - UI_HEADER_HEIGHT, COLOR_DARK);
     lcd_draw_text(16, 98, "SYSTEM STATUS", COLOR_CYAN, COLOR_DARK, 3);
-    lcd_draw_status_row(138, "EXT SRAM", display_sram_ready,
+    lcd_draw_status_row(128, "MEMORY", "LIVE",
+                        COLOR_GREEN,
                         display_status_selection == 0U);
-    lcd_draw_status_row(180, "TF CARD", display_sd_ready,
+    lcd_draw_status_row(158, "TF CARD",
+                        display_sd_ready ? "READY" : "OPTIONAL",
+                        display_sd_ready ? COLOR_GREEN : COLOR_YELLOW,
                         display_status_selection == 1U);
-    lcd_draw_status_row(222, "FAT32", display_sd_fat32,
+    lcd_draw_status_row(188, "BLUETOOTH",
+                        display_bluetooth_connected ? "LINKED" :
+                        display_bluetooth_waiting ? "WAITING" :
+                        display_bluetooth_ready ? "CONFIG" : "OPTIONAL",
+                        display_bluetooth_connected ? COLOR_GREEN :
+                        display_bluetooth_waiting ? COLOR_CYAN :
+                                                   COLOR_YELLOW,
                         display_status_selection == 2U);
-    lcd_draw_status_row(264, "DIR KEYS", display_keys_ready,
+    lcd_draw_status_row(218, "TOUCH",
+                        display_touch_ready ? "ARMED" : "OPTIONAL",
+                        display_touch_ready ? COLOR_CYAN : COLOR_YELLOW,
                         display_status_selection == 3U);
-    if (display_sram_ready) {
-        lcd_draw_decimal(132, 148, display_sram_bytes / 1024U,
-                         COLOR_MUTED, COLOR_PANEL, 2);
-        lcd_draw_text(180, 148, "K", COLOR_MUTED, COLOR_PANEL, 2);
-    }
-    if (display_sd_ready) {
-        lcd_draw_decimal(132, 190, display_sd_sectors / 2048U,
-                         COLOR_MUTED, COLOR_PANEL, 2);
-        lcd_draw_text(180, 190, "M", COLOR_MUTED, COLOR_PANEL, 2);
+    lcd_draw_status_row(248, "LIGHT",
+                        display_light_ready ?
+                            (display_auto_brightness ? "AUTO" : "READY") :
+                            "OPTIONAL",
+                        display_light_ready ? COLOR_CYAN : COLOR_YELLOW,
+                        display_status_selection == 4U);
+    lcd_draw_status_row(278, "DIR KEYS",
+                        display_keys_ready ? "READY" : "OPTIONAL",
+                        display_keys_ready ? COLOR_GREEN : COLOR_YELLOW,
+                        display_status_selection == 5U);
+
+    lcd_draw_light_panel();
+}
+
+static void lcd_draw_usage_line(uint16_t y, const char *label,
+                                size_t used, size_t total,
+                                uint16_t color) {
+    lcd_draw_text(28, y, label, COLOR_MUTED, COLOR_PANEL, 2);
+    lcd_draw_decimal(116, y + 4U, used, color, COLOR_PANEL, 1);
+    lcd_draw_text(164, y + 4U, "/", COLOR_MUTED, COLOR_PANEL, 1);
+    lcd_draw_decimal(176, y + 4U, total, COLOR_WHITE, COLOR_PANEL, 1);
+    lcd_draw_text(226, y + 4U, "BYTES", COLOR_MUTED, COLOR_PANEL, 1);
+}
+
+static void lcd_draw_memory_page(void) {
+    lcd_fill_rect(0, UI_HEADER_HEIGHT, LCD_WIDTH,
+                  UI_NAV_TOP - UI_HEADER_HEIGHT, COLOR_DARK);
+    lcd_draw_text(16, 98, "MEMORY", COLOR_CYAN, COLOR_DARK, 3);
+
+    lcd_draw_border(14, 132, 292, 112, COLOR_GREEN, COLOR_PANEL);
+    lcd_draw_text(28, 146,
+                  display_memory.ram_capacity_from_silicon ?
+                      "MCU SRAM HW" : "MCU SRAM LINK",
+                  COLOR_GREEN, COLOR_PANEL, 2);
+    lcd_draw_usage_line(176, "USED", display_memory.internal_ram_used,
+                        display_memory.internal_ram_total, COLOR_WHITE);
+    lcd_draw_usage_line(204, "HEAP",
+                        display_memory.internal_heap_used,
+                        display_memory.internal_heap_total, COLOR_WHITE);
+    lcd_draw_text(28, 228, "STACK PEAK", COLOR_MUTED, COLOR_PANEL, 2);
+    lcd_draw_decimal(172, 232, display_memory.stack_peak_bytes,
+                     COLOR_WHITE, COLOR_PANEL, 1);
+    lcd_draw_text(220, 232, "BYTES", COLOR_MUTED, COLOR_PANEL, 1);
+
+    lcd_draw_border(14, 254, 292, 66,
+                    display_memory.external_ram_total ?
+                        COLOR_CYAN : COLOR_YELLOW,
+                    COLOR_PANEL);
+    lcd_draw_text(28, 266, "EXT SRAM",
+                  display_memory.external_ram_total ?
+                      COLOR_CYAN : COLOR_YELLOW,
+                  COLOR_PANEL, 2);
+    if (display_memory.external_ram_total) {
+        lcd_draw_usage_line(294, "USED",
+                            display_memory.external_ram_used,
+                            display_memory.external_ram_total, COLOR_WHITE);
+    } else {
+        lcd_draw_text(184, 294, "ABSENT", COLOR_YELLOW, COLOR_PANEL, 2);
     }
 
-    lcd_draw_border(14, 316, 292, 80, COLOR_BLUE, COLOR_PANEL);
-    lcd_draw_text(28, 328, "INPUT STATUS", COLOR_MUTED, COLOR_PANEL, 2);
-    if (!display_touch_pressed) {
-        lcd_draw_text(28, 360,
-                      display_keys_ready ? "ARROWS ONLINE" : "SYSTEM ONLINE",
-                      COLOR_GREEN,
-                      COLOR_PANEL, 2);
-    } else {
-        lcd_draw_text(28, 360, "X", COLOR_CYAN, COLOR_PANEL, 2);
-        lcd_draw_decimal(52, 360, display_touch_x,
-                         COLOR_WHITE, COLOR_PANEL, 2);
-        lcd_draw_text(148, 360, "Y", COLOR_CYAN, COLOR_PANEL, 2);
-        lcd_draw_decimal(172, 360, display_touch_y,
-                         COLOR_WHITE, COLOR_PANEL, 2);
+    lcd_draw_border(14, 330, 292, 70, COLOR_BLUE, COLOR_PANEL);
+    lcd_draw_text(28, 342,
+                  display_memory.flash_capacity_from_silicon ?
+                      "FLASH HW" : "FLASH LINK",
+                  COLOR_CYAN, COLOR_PANEL, 2);
+    lcd_draw_usage_line(372, "USED", display_memory.flash_used,
+                        display_memory.flash_total, COLOR_WHITE);
+}
+
+static void lcd_draw_bluetooth_page(void) {
+    lcd_fill_rect(0, UI_HEADER_HEIGHT, LCD_WIDTH,
+                  UI_NAV_TOP - UI_HEADER_HEIGHT, COLOR_DARK);
+    lcd_draw_text(16, 98, "BLUETOOTH", COLOR_CYAN, COLOR_DARK, 3);
+
+    if (!display_bluetooth_ready) {
+        lcd_draw_border(14, 148, 292, 190, COLOR_YELLOW, COLOR_PANEL);
+        lcd_draw_text(52, 196, "HC-05 DISABLED", COLOR_YELLOW,
+                      COLOR_PANEL, 3);
+        return;
     }
+
+    lcd_draw_border(14, 138, 292, 264,
+                    display_bluetooth_connected ? COLOR_GREEN : COLOR_CYAN,
+                    COLOR_PANEL);
+    lcd_draw_text(28, 154,
+                  display_bluetooth_connected ? "LINK CONNECTED" :
+                  display_bluetooth_waiting ? "SLAVE WAITING" :
+                  display_bluetooth_at_responsive ? "CONFIG UNVERIFIED" :
+                  display_bluetooth_detected ? "MODULE DETECTED" :
+                                               "MODULE UNKNOWN",
+                  display_bluetooth_connected ? COLOR_GREEN :
+                  display_bluetooth_waiting ? COLOR_CYAN : COLOR_YELLOW,
+                  COLOR_PANEL, 2);
+
+    lcd_draw_text(28, 188, "NAME", COLOR_MUTED, COLOR_PANEL, 2);
+    lcd_draw_text(112, 188, display_bluetooth_name,
+                  COLOR_WHITE, COLOR_PANEL, 2);
+    lcd_draw_text(28, 218, "PIN", COLOR_MUTED, COLOR_PANEL, 2);
+    lcd_draw_text(112, 218, display_bluetooth_pin,
+                  COLOR_WHITE, COLOR_PANEL, 2);
+
+    lcd_draw_text(28, 248, "UUID", COLOR_MUTED, COLOR_PANEL, 2);
+    lcd_draw_text(112, 248, "0X", COLOR_WHITE, COLOR_PANEL, 2);
+    lcd_draw_hex4(136, 248, display_bluetooth_uuid,
+                  COLOR_WHITE, COLOR_PANEL, 2);
+    lcd_draw_text(208, 248,
+                  display_bluetooth_uuid_configured ? "SET" :
+                  display_bluetooth_uuid_supported ? "FAIL" : "SPP",
+                  display_bluetooth_uuid_configured ?
+                      COLOR_GREEN :
+                  display_bluetooth_uuid_supported ?
+                      COLOR_YELLOW : COLOR_CYAN,
+                  COLOR_PANEL, 2);
+
+    lcd_draw_text(28, 278, "ROLE", COLOR_MUTED, COLOR_PANEL, 2);
+    lcd_draw_text(112, 278,
+                  display_bluetooth_slave ? "SLAVE" : "UNKNOWN",
+                  display_bluetooth_slave ? COLOR_GREEN : COLOR_YELLOW,
+                  COLOR_PANEL, 2);
+    lcd_draw_text(28, 308, "UART", COLOR_MUTED, COLOR_PANEL, 2);
+    lcd_draw_decimal(112, 308, display_bluetooth_baud,
+                     COLOR_WHITE, COLOR_PANEL, 2);
+    lcd_draw_text(208, 308, "8N1", COLOR_WHITE, COLOR_PANEL, 2);
+
+    lcd_draw_text(28, 338, "RX", COLOR_MUTED, COLOR_PANEL, 1);
+    lcd_draw_decimal(52, 338, display_bluetooth_rx_bytes,
+                     COLOR_WHITE, COLOR_PANEL, 1);
+    lcd_draw_text(112, 338, "TX", COLOR_MUTED, COLOR_PANEL, 1);
+    lcd_draw_decimal(136, 338, display_bluetooth_tx_bytes,
+                     COLOR_WHITE, COLOR_PANEL, 1);
+    lcd_draw_text(196, 338, "DROP", COLOR_MUTED, COLOR_PANEL, 1);
+    lcd_draw_decimal(232, 338, display_bluetooth_dropped,
+                     display_bluetooth_dropped ? COLOR_YELLOW : COLOR_WHITE,
+                     COLOR_PANEL, 1);
+    lcd_draw_button(72, 364, 176, 32, "SEND TEST", 0);
 }
 
 static void lcd_draw_storage_page(void) {
@@ -446,6 +632,10 @@ static void lcd_render_page(void) {
         return;
     if (display_page == DISPLAY_PAGE_STORAGE)
         lcd_draw_storage_page();
+    else if (display_page == DISPLAY_PAGE_MEMORY)
+        lcd_draw_memory_page();
+    else if (display_page == DISPLAY_PAGE_BLUETOOTH)
+        lcd_draw_bluetooth_page();
     else if (display_page == DISPLAY_PAGE_TOUCH)
         lcd_draw_touch_page();
     else
@@ -502,6 +692,24 @@ static void lcd_copy_label(const char *label) {
         display_sd_label[i] = '\0';
 }
 
+static void lcd_copy_short_text(char *dest, size_t capacity,
+                                const char *source) {
+    unsigned i = 0;
+
+    if (capacity == 0)
+        return;
+    if (source) {
+        while (i + 1U < capacity && source[i]) {
+            char c = source[i];
+            dest[i] = c >= 32 && c <= 126 ? c : '.';
+            i++;
+        }
+    }
+    dest[i] = '\0';
+    while (++i < capacity)
+        dest[i] = '\0';
+}
+
 static void lcd_select_page(unsigned page) {
     if (page >= DISPLAY_PAGE_COUNT || page == display_page)
         return;
@@ -525,7 +733,7 @@ static void lcd_handle_touch_down(uint16_t x, uint16_t y, int new_press) {
     if (y >= UI_NAV_TOP) {
         if (!new_press)
             return;
-        unsigned page = x / 106U;
+        unsigned page = x / 64U;
         if (page >= DISPLAY_PAGE_COUNT)
             page = DISPLAY_PAGE_COUNT - 1U;
         lcd_select_page(page);
@@ -535,14 +743,31 @@ static void lcd_handle_touch_down(uint16_t x, uint16_t y, int new_press) {
     if (display_page == DISPLAY_PAGE_STATUS) {
         if (!new_press)
             return;
-        if (y >= 176U && y < 260U) {
+        if (y >= 124U && y < 154U) {
+            lcd_select_page(DISPLAY_PAGE_MEMORY);
+            return;
+        }
+        if (y >= 154U && y < 184U) {
             lcd_select_page(DISPLAY_PAGE_STORAGE);
             return;
         }
-        if (y >= 260U && y < 306U) {
+        if (y >= 184U && y < 214U) {
+            lcd_select_page(DISPLAY_PAGE_BLUETOOTH);
+            return;
+        }
+        if (y >= 214U && y < 244U) {
             lcd_select_page(DISPLAY_PAGE_TOUCH);
             return;
         }
+    }
+
+    if (display_page == DISPLAY_PAGE_BLUETOOTH) {
+        if (new_press && y >= 358U && y < 406U) {
+            display_pending_action =
+                STM32_DISPLAY_ACTION_BLUETOOTH_TEST;
+            lcd_draw_button(72, 364, 176, 32, "SEND TEST", 1);
+        }
+        return;
     }
 
     if (display_page != DISPLAY_PAGE_TOUCH)
@@ -573,35 +798,27 @@ static void lcd_redraw_peripheral_status(void) {
     if (!display_ready)
         return;
     if (display_page == DISPLAY_PAGE_STATUS ||
-        display_page == DISPLAY_PAGE_STORAGE)
+        display_page == DISPLAY_PAGE_MEMORY ||
+        display_page == DISPLAY_PAGE_STORAGE ||
+        display_page == DISPLAY_PAGE_BLUETOOTH)
         lcd_render_page();
 }
 
 static void lcd_redraw_touch_status(void) {
-    if (display_page == DISPLAY_PAGE_STATUS) {
-        lcd_fill_rect(24, 354, 270, 28, COLOR_PANEL);
-        lcd_draw_text(28, 360, "X", COLOR_CYAN, COLOR_PANEL, 2);
-        lcd_draw_decimal(52, 360, display_touch_x,
-                         COLOR_WHITE, COLOR_PANEL, 2);
-        lcd_draw_text(148, 360, "Y", COLOR_CYAN, COLOR_PANEL, 2);
-        lcd_draw_decimal(172, 360, display_touch_y,
-                         COLOR_WHITE, COLOR_PANEL, 2);
-    } else if (display_page == DISPLAY_PAGE_TOUCH) {
+    if (display_page == DISPLAY_PAGE_TOUCH) {
         lcd_draw_touch_coordinates();
     }
 }
 
 static void lcd_redraw_touch_released(void) {
-    if (display_page != DISPLAY_PAGE_STATUS)
-        return;
-    lcd_fill_rect(24, 354, 270, 28, COLOR_PANEL);
-    lcd_draw_text(28, 360, "SYSTEM ONLINE", COLOR_GREEN,
-                  COLOR_PANEL, 2);
+    (void)0;
 }
 
 static void lcd_restore_touch_button(void) {
     if (display_page == DISPLAY_PAGE_TOUCH)
         lcd_draw_button(92, 358, 136, 44, "CLEAR", 0);
+    else if (display_page == DISPLAY_PAGE_BLUETOOTH)
+        lcd_draw_button(72, 364, 176, 32, "SEND TEST", 0);
 }
 
 static void lcd_init_ili9481(void) {
@@ -838,6 +1055,7 @@ int stm32_display_init(void) {
     (void)lcd_read_id_hx8357d();
     display_controller_id = LCD_ID_HX8357D;
     lcd_init_hx8357d();
+    (void)stm32_backlight_init();
 
     display_ready = 1;
     return display_controller_id;
@@ -883,8 +1101,8 @@ void stm32_display_set_peripherals(int sram_ready, size_t sram_bytes,
                                    int sd_fat32, int sd_bus_width,
                                    const char *sd_volume_label,
                                    int touch_ready, int keys_ready) {
-    display_sram_ready = sram_ready;
-    display_sram_bytes = sram_bytes;
+    (void)sram_ready;
+    (void)sram_bytes;
     display_sd_ready = sd_ready;
     display_sd_sectors = sd_sectors;
     display_sd_fat32 = sd_fat32;
@@ -893,6 +1111,134 @@ void stm32_display_set_peripherals(int sram_ready, size_t sram_bytes,
     display_touch_ready = touch_ready;
     display_keys_ready = keys_ready;
     lcd_redraw_peripheral_status();
+}
+
+void stm32_display_set_bluetooth(int ready, int detected, int at_responsive,
+                                 int connected, int waiting, int configured,
+                                 int slave_mode,
+                                 int uuid_supported, int uuid_configured,
+                                 const char *device_name,
+                                 const char *pin, uint16_t service_uuid,
+                                 uint32_t baud_rate, uint32_t received_bytes,
+                                 uint32_t transmitted_bytes,
+                                 uint32_t dropped_bytes) {
+    int changed = display_bluetooth_ready != ready ||
+                  display_bluetooth_detected != detected ||
+                  display_bluetooth_at_responsive != at_responsive ||
+                  display_bluetooth_connected != connected ||
+                  display_bluetooth_waiting != waiting ||
+                  display_bluetooth_configured != configured ||
+                  display_bluetooth_slave != slave_mode ||
+                  display_bluetooth_uuid_supported != uuid_supported ||
+                  display_bluetooth_uuid_configured != uuid_configured ||
+                  display_bluetooth_uuid != service_uuid ||
+                  display_bluetooth_baud != baud_rate ||
+                  display_bluetooth_rx_bytes != received_bytes ||
+                  display_bluetooth_tx_bytes != transmitted_bytes ||
+                  display_bluetooth_dropped != dropped_bytes;
+    char previous_name[sizeof(display_bluetooth_name)];
+    char previous_pin[sizeof(display_bluetooth_pin)];
+    for (unsigned i = 0; i < sizeof(previous_name); i++)
+        previous_name[i] = display_bluetooth_name[i];
+    for (unsigned i = 0; i < sizeof(previous_pin); i++)
+        previous_pin[i] = display_bluetooth_pin[i];
+
+    display_bluetooth_ready = ready;
+    display_bluetooth_detected = detected;
+    display_bluetooth_at_responsive = at_responsive;
+    display_bluetooth_connected = connected;
+    display_bluetooth_waiting = waiting;
+    display_bluetooth_configured = configured;
+    display_bluetooth_slave = slave_mode;
+    display_bluetooth_uuid_supported = uuid_supported;
+    display_bluetooth_uuid_configured = uuid_configured;
+    display_bluetooth_uuid = service_uuid;
+    display_bluetooth_baud = baud_rate;
+    display_bluetooth_rx_bytes = received_bytes;
+    display_bluetooth_tx_bytes = transmitted_bytes;
+    display_bluetooth_dropped = dropped_bytes;
+    lcd_copy_short_text(display_bluetooth_name,
+                        sizeof(display_bluetooth_name), device_name);
+    lcd_copy_short_text(display_bluetooth_pin,
+                        sizeof(display_bluetooth_pin), pin);
+    for (unsigned i = 0; i < sizeof(previous_name); i++)
+        if (previous_name[i] != display_bluetooth_name[i])
+            changed = 1;
+    for (unsigned i = 0; i < sizeof(previous_pin); i++)
+        if (previous_pin[i] != display_bluetooth_pin[i])
+            changed = 1;
+    if (changed)
+        lcd_redraw_peripheral_status();
+}
+
+void stm32_display_set_memory(const stm32_memory_info_t *info) {
+    if (!info)
+        return;
+
+    int changed =
+        display_memory.internal_ram_total != info->internal_ram_total ||
+        display_memory.internal_ram_used != info->internal_ram_used ||
+        display_memory.internal_heap_total != info->internal_heap_total ||
+        display_memory.internal_heap_used != info->internal_heap_used ||
+        display_memory.stack_peak_bytes != info->stack_peak_bytes ||
+        display_memory.external_ram_total != info->external_ram_total ||
+        display_memory.external_ram_used != info->external_ram_used ||
+        display_memory.flash_total != info->flash_total ||
+        display_memory.flash_used != info->flash_used ||
+        display_memory.flash_capacity_from_silicon !=
+            info->flash_capacity_from_silicon ||
+        display_memory.ram_capacity_from_silicon !=
+            info->ram_capacity_from_silicon ||
+        display_memory.silicon_capacity_valid !=
+            info->silicon_capacity_valid;
+    display_memory = *info;
+    if (changed)
+        lcd_redraw_peripheral_status();
+}
+
+void stm32_display_set_light(int ready, uint16_t raw_adc,
+                             uint8_t intensity_percent,
+                             uint8_t backlight_percent,
+                             int auto_brightness) {
+    int status_changed =
+        display_light_ready != ready ||
+        display_auto_brightness != auto_brightness;
+    int changed =
+        status_changed ||
+        display_light_raw != raw_adc ||
+        display_light_percent != intensity_percent ||
+        display_backlight_percent != backlight_percent;
+
+    display_light_ready = ready;
+    display_light_raw = raw_adc;
+    display_light_percent = intensity_percent;
+    display_backlight_percent = backlight_percent;
+    display_auto_brightness = auto_brightness;
+    if (!changed || !display_ready || display_page != DISPLAY_PAGE_STATUS)
+        return;
+    if (status_changed)
+        lcd_draw_status_page();
+    else
+        lcd_draw_light_values(1);
+}
+
+void stm32_display_show_bluetooth_line(const char *line) {
+    unsigned i = 0;
+
+    if (line) {
+        while (i + 1U < sizeof(display_bluetooth_line) && line[i] &&
+               line[i] != '\r' && line[i] != '\n') {
+            char c = line[i];
+            display_bluetooth_line[i] =
+                c >= 32 && c <= 126 ? c : '.';
+            i++;
+        }
+    }
+    display_bluetooth_line[i] = '\0';
+    while (++i < sizeof(display_bluetooth_line))
+        display_bluetooth_line[i] = '\0';
+    if (display_ready && display_page == DISPLAY_PAGE_BLUETOOTH)
+        lcd_draw_bluetooth_page();
 }
 
 void stm32_display_show_touch(uint16_t x, uint16_t y, int pressed) {
@@ -926,12 +1272,15 @@ void stm32_display_handle_key(stm32_key_t key) {
     }
     if (key == STM32_KEY_RIGHT) {
         if (display_page == DISPLAY_PAGE_STATUS) {
-            if (display_status_selection == 1U ||
-                display_status_selection == 2U)
+            if (display_status_selection == 0U)
+                lcd_select_page(DISPLAY_PAGE_MEMORY);
+            else if (display_status_selection == 1U)
                 lcd_select_page(DISPLAY_PAGE_STORAGE);
+            else if (display_status_selection == 2U)
+                lcd_select_page(DISPLAY_PAGE_BLUETOOTH);
             else if (display_status_selection == 3U)
                 lcd_select_page(DISPLAY_PAGE_TOUCH);
-            else
+            else if (display_status_selection == 5U)
                 lcd_select_relative_page(1);
             return;
         }
@@ -942,10 +1291,10 @@ void stm32_display_handle_key(stm32_key_t key) {
     if (display_page == DISPLAY_PAGE_STATUS) {
         if (key == STM32_KEY_UP) {
             display_status_selection =
-                display_status_selection == 0U ? 3U
+                display_status_selection == 0U ? 5U
                                                : display_status_selection - 1U;
         } else if (key == STM32_KEY_DOWN) {
-            display_status_selection = (display_status_selection + 1U) % 4U;
+            display_status_selection = (display_status_selection + 1U) % 6U;
         } else {
             return;
         }
@@ -958,6 +1307,17 @@ void stm32_display_handle_key(stm32_key_t key) {
             lcd_select_page(DISPLAY_PAGE_STATUS);
         else if (key == STM32_KEY_DOWN)
             lcd_render_page();
+        return;
+    }
+
+    if (display_page == DISPLAY_PAGE_BLUETOOTH) {
+        if (key == STM32_KEY_UP) {
+            display_pending_action =
+                STM32_DISPLAY_ACTION_BLUETOOTH_TEST;
+            lcd_draw_button(72, 364, 176, 32, "SEND TEST", 1);
+        } else if (key == STM32_KEY_DOWN) {
+            stm32_display_show_bluetooth_line(NULL);
+        }
         return;
     }
 
@@ -980,6 +1340,15 @@ void stm32_display_handle_key(stm32_key_t key) {
     lcd_draw_touch_coordinates();
     lcd_clear_touch_canvas();
     lcd_draw_key_cursor();
+}
+
+stm32_display_action_t stm32_display_take_action(void) {
+    stm32_display_action_t action = display_pending_action;
+    display_pending_action = STM32_DISPLAY_ACTION_NONE;
+    if (action == STM32_DISPLAY_ACTION_BLUETOOTH_TEST &&
+        display_ready && display_page == DISPLAY_PAGE_BLUETOOTH)
+        lcd_draw_button(72, 364, 176, 32, "SEND TEST", 0);
+    return action;
 }
 
 #endif

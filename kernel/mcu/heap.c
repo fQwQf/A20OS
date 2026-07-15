@@ -2,6 +2,7 @@
 #include "core/arch.h"
 #include "core/string.h"
 #include "extsram.h"
+#include "heap.h"
 
 typedef struct mcu_heap_block {
     size_t size;
@@ -35,15 +36,33 @@ void mcu_heap_init(void) {
 }
 
 size_t mcu_heap_available(void) {
-    size_t total = 0;
-    uint32_t flags = arch_irq_save();
-    for (mcu_heap_block_t *b = heap_head; b; b = b->next)
-        if (b->free)
-            total += b->size;
-    arch_irq_restore(flags);
+    mcu_heap_stats_t stats;
+    mcu_heap_get_stats(&stats);
+    size_t total = stats.free_bytes;
     if (stm32_extsram_ready())
         total += stm32_extsram_available();
     return total;
+}
+
+void mcu_heap_get_stats(mcu_heap_stats_t *stats) {
+    if (!stats)
+        return;
+
+    stats->arena_bytes =
+        heap_end_addr > heap_start_addr ? heap_end_addr - heap_start_addr : 0;
+    stats->free_bytes = 0;
+    stats->largest_free_bytes = 0;
+
+    uint32_t flags = arch_irq_save();
+    for (mcu_heap_block_t *b = heap_head; b; b = b->next) {
+        if (!b->free)
+            continue;
+        stats->free_bytes += b->size;
+        if (b->size > stats->largest_free_bytes)
+            stats->largest_free_bytes = b->size;
+    }
+    arch_irq_restore(flags);
+    stats->used_bytes = stats->arena_bytes - stats->free_bytes;
 }
 
 void *kmalloc(size_t size) {
