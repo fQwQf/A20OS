@@ -29,6 +29,7 @@ SECTIONS
         _data_end = .;
     } > RAM
     _data_load = LOADADDR(.data);
+    _flash_image_end = LOADADDR(.data) + SIZEOF(.data);
 
     .bss (NOLOAD) : {
         . = ALIGN(8);
@@ -40,6 +41,10 @@ SECTIONS
     } > RAM
 
     _heap_start = _bss_end;
+    _ram_origin = ORIGIN(RAM);
+    _ram_linked_end = ORIGIN(RAM) + LENGTH(RAM);
+    _flash_origin = ORIGIN(FLASH);
+    _flash_linked_end = ORIGIN(FLASH) + LENGTH(FLASH);
     _stack_top = ORIGIN(RAM) + LENGTH(RAM);
     _stack_limit = _stack_top - 2048;
     _heap_end = _stack_limit;

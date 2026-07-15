@@ -31,6 +31,10 @@ Outputs:
 The binary is linked for flash address `0x08000000`. Flash it with OpenOCD,
 ST-Link, or another STM32 programmer. USART1 uses PA9/PA10 at 115200 8N1.
 The reset-clock implementation intentionally uses the 8 MHz HSI clock.
+The USART1 driver derives its APB2 clock from the live RCC registers and
+computes BRR instead of assuming the vendor example's 72 MHz clock. Its
+RXNE interrupt feeds a 128-byte receive ring and clears parity, framing,
+noise, and overrun conditions using the required SR/DR read sequence.
 
 For the Prechin Xuanwu board with STM32F103ZET6, build the 512 KiB Flash /
 64 KiB SRAM layout:
@@ -106,9 +110,132 @@ The four yellow keys are also available when touch is absent. The vendor
 mapping is `PA0` active-high plus `PE4`, `PE3`, and `PE2` active-low. They are
 polled every 20 ms with debounce and exposed as up, left, down, and right
 events (`PA0`, `PE2`, `PE3`, `PE4`, respectively). Left/right cycle through
-the `STATUS`, `TF CARD`, and `INPUT TEST` pages. Up/down select status rows;
-right opens the selected storage or input row. On the input page up moves a
-visible test cursor and down clears the canvas.
+the `STATUS`, `MEM`, `TF`, `BT`, and `INPUT TEST` pages. Up/down select
+status rows; right opens the selected memory, storage, Bluetooth, or input
+row. On the input page up moves a visible test cursor and down clears the
+canvas.
+
+The onboard photoresistor is sampled on `PF8` through `ADC3 channel 6`,
+matching the vendor light-sensor experiment. Ten real 12-bit conversions are
+taken for each reading; the highest and lowest samples are discarded, and the
+remaining values are averaged and low-pass filtered. The LCD system page
+shows both the measured ADC value and the vendor-compatible relative light
+level from 0 to 100. This is deliberately not labelled as lux because the
+resistor network has no factory photometric calibration.
+
+LCD backlight control drives the board's documented active-high `LCD_BL`
+signal on `PB0`. Brightness modulation and automatic brightness are disabled;
+PB0 remains high so the panel stays at its normal hardware brightness. The
+photoresistor continues to be sampled and displayed independently.
+
+The memory page uses runtime measurements rather than treating the Makefile
+capacity settings as hardware facts. On Xuanwu, Flash capacity comes from
+the STM32 factory size register. Internal SRAM capacity is derived from the
+live DBGMCU device identifier and factory Flash density; an unknown device
+is explicitly shown using the linked-layout fallback instead of claiming a
+silicon measurement. Firmware Flash use comes from the final linked
+load-image boundary. Internal RAM use combines the static data/BSS extent,
+live allocator metadata and allocations, and a stack high-water mark
+measured from a reset-time fill pattern. External SRAM capacity is found by
+probing successive address-line boundaries until the first mirrored address,
+then checked with saved-and-restored patterns across the detected span. Its
+live allocator use is shown separately only after those probes succeed.
+
+The PZ-HC05 Bluetooth module is connected to `USART3` on `PB10/PB11` at
+9600 8N1. `PA4` drives the module's KEY input and remains low for transparent
+data mode; `PA15` receives the dedicated PIO9 connection-state output after
+JTAG-only pins are released while SWD remains enabled. PA15 uses a pull-up,
+and a link is accepted only after the signal remains high for 500 ms; this
+prevents an absent module or an LED-style pulse from being reported as a
+connection.
+
+USART1 and USART3 share the STM32 UART register driver. It derives their
+peripheral clocks from the live RCC clock tree, computes and reports the actual
+BRR value, resets each USART before use, configures 8N1 TX/RX pins, drains
+hardware error conditions, and controls the corresponding NVIC line. USART3
+explicitly clears its remap bits so the module always uses the Xuanwu
+`PB10/PB11` routing even if a debugger or previously flashed application left
+AFIO in a different state.
+
+Board early-init keeps PA4 low so the module boots into discoverable data
+mode. Configuration follows the supplied PZ sample's runtime AT sequence
+exactly: it tries 9600 repeatedly, raises KEY only while transmitting the
+command, then lowers KEY before waiting for the response. After the first
+valid reply it tests whether this firmware expects subsequent commands with
+KEY low, pulsed per command, or held high. It then checks the other supported
+data rates. It writes and
+reads back slave role (`ROLE=0`),
+arbitrary-peer pairing (`CMODE=1`), device name, PIN, and transparent UART
+settings, then issues `AT+RESET`, lowers KEY, and enters transparent slave
+waiting mode. KEY is lowered immediately after the reset command leaves
+USART3 so the module samples data mode during reboot; reset is also issued
+when a vendor-specific command cannot be read back, preventing a detected
+module from being stranded in undiscoverable AT mode. An interface is shown
+as ready only after the real module has
+electrically driven PB11 or answered AT commands; `WAITING` still requires
+the verified slave configuration and successful reset. This distinguishes
+"module present but AT dialect unknown" from "module absent" without
+claiming an unverified configuration. Defaults are `KasaneTeto`, PIN `2233`,
+UUID `0x1101`, and 9600 baud. They can be changed while building:
+
+```sh
+make stm32f103-xuanwu \
+    STM32_BT_NAME=MY-BOARD STM32_BT_PIN=6789 \
+    STM32_BT_UUID=1101 STM32_BT_BAUD=9600
+```
+
+The service is classic Bluetooth SPP. Standard HC-05 firmware fixes the UUID
+to `0x1101` (`00001101-0000-1000-8000-00805F9B34FB`) and does not expose
+`AT+UUID`; compatible firmware that implements the command is written and
+read back. A non-`1101` requested UUID is therefore reported as unverified
+on a standard HC-05 instead of being presented as real module state. USART3
+receives into an interrupt-driven ring buffer and frames input on either a
+newline or a 20 ms idle gap. The Bluetooth page displays the verified role,
+name, PIN, UUID source, link state and byte counters. The test transmit
+button succeeds only while PA15 reports a real connection.
+
+Before enabling USART3, the driver also tests whether PB11 follows an
+internal pull-up and pull-down. If it does, the module TX path is floating
+and boot reports `rx=floating`. On Xuanwu this normally means the P10
+`USART3_TX`/`W_TX` and `USART3_RX`/`W_RX` jumper caps are missing or placed
+incorrectly, the module is inserted backwards, or it is not powered. A
+powered idle module normally reports `rx=driven-high`. Full AT probing is not
+repeated automatically because an absent module can otherwise block the
+single-threaded MCU service loop for several seconds. Use `bt retry` after
+changing module wiring or power.
+
+USART1 also provides an interactive bring-up prompt at 115200 8N1:
+
+```text
+uart
+perf
+sd retry
+bt
+bt probe
+bt at AT
+bt at AT+ROLE?
+bt at AT+NAME?
+bt at AT+PSWD?
+bt at AT+UART?
+```
+
+Every automatic and manual AT exchange prints its USART3 baud, KEY mode,
+escaped command, escaped raw reply, byte count, and hardware error count.
+`reply=<none>` means PB11 delivered no UART byte; repeated `\xNN` data with
+errors indicates a baud, wiring, or signal-quality problem; a readable
+`ERROR` indicates that the module is present but does not implement that AT
+command dialect. The `uart` command prints both ports' measured peripheral
+clock, requested and actual baud, BRR, receive-interrupt state, and accumulated
+hardware errors. After Bluetooth initialization, USART3 should report
+`initialized=1`, `requested=9600`, `rx-irq=1`; a nonzero error count is direct
+evidence that PB11 is toggling but the received framing is invalid.
+
+SysTick derives its 1 kHz reload from the live RCC HCLK rather than assuming
+the reset-default 8 MHz clock. The `perf` command reports HCLK/PCLK values and
+the measured maximum duration of the peripheral service loop, light sampling,
+manual Bluetooth retries, and SD-card checks. Optional HC-05 and absent TF-card
+initialization are only retried by explicit UART commands so command timeouts
+cannot periodically freeze input and display updates.
 
 The LCD UI remains touch-selectable when a working panel is fitted. The
 storage page shows capacity, FAT32 state, SDIO bus width, and volume label.
@@ -148,11 +275,17 @@ After flashing, the expected behavior is:
 3. The LCD shows external SRAM, TF/FAT32, direction-key, and uptime status.
 4. The yellow direction keys emit `[KEY]` messages. Left/right switch pages,
    while up/down control the current page.
-5. If touch is available, the bottom `STATUS`, `TF CARD`, and `INPUT` buttons
-   switch pages; drawing leaves a cyan stroke and `CLEAR` erases it.
+5. If touch is available, the bottom `STATUS`, `MEM`, `TF`, `BT`, and
+   `INPUT` buttons switch pages; drawing leaves a cyan stroke and `CLEAR`
+   erases it.
 6. Touching the panel shows coordinates and emits `[TOUCH] down`/`[TOUCH] up`
    messages.
-7. Inserting or removing a TF card is detected within five or two seconds,
+7. The `BT` page reports the HC-05 link state. Pair a phone at 9600 8N1,
+   send text from a Bluetooth serial app, and press up to transmit the
+   `A20OS HC05 TEST` response.
+8. Cover and uncover the onboard photoresistor. The `LIGHT` ADC/level values
+   change while the panel backlight remains fixed on.
+9. Inserting or removing a TF card is detected within five or two seconds,
    respectively, without rebooting.
 
 Use a FAT32-formatted TF card for the filesystem metadata check. Raw and
