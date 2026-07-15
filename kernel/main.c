@@ -23,6 +23,9 @@
 #include "drivers/block/loop.h"
 #include "net/socket.h"
 #include "drivers/core/driver_core.h"
+#ifdef CONFIG_SWAP
+#include "mm/swap.h"
+#endif
 #ifdef CONFIG_DRIVER_LIFECYCLE_TEST
 #include "drivers/core/driver_lifecycle_test.h"
 #endif
@@ -119,6 +122,9 @@ void kernel_main(void) {
     printf("[INIT] Timekeeping initialized\n");
     mm_init();
     printf("[INIT] Memory initialized\n");
+#ifdef CONFIG_SWAP
+    swap_init();
+#endif
     random_init();
     printf("[INIT] Random initialized\n");
     bootargs_init();

@@ -12,6 +12,7 @@
 #include "proc/signal.h"
 #include "mm/mm.h"
 #include "mm/vm.h"
+#include "mm/swap.h"
 #include "core/timer.h"
 #include "core/stdio.h"
 #include "core/string.h"

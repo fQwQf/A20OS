@@ -2,6 +2,9 @@
 #define _ARCH_AARCH64_MM_H
 
 #include "core/types.h"
+#ifdef CONFIG_SWAP
+#include "mm/swap.h"
+#endif
 
 /*
  * AArch64 stage-1 translation, 4KB granule, 48-bit VA, 4 levels.
@@ -43,6 +46,30 @@
 #define PTE_D              (1UL << 61)
 #define PTE_COW            (1UL << 62)
 #define PTE_LEAF           (1UL << 63)
+
+#ifdef CONFIG_SWAP
+#define PTE_SWAP            PTE_LEAF
+
+static inline int pte_present(uint64_t pte) {
+    return (pte & PTE_V) != 0;
+}
+
+static inline int pte_is_swap(uint64_t pte) {
+    return !pte_present(pte) && (pte & PTE_SWAP) != 0;
+}
+
+static inline int pte_none(uint64_t pte) {
+    return pte == 0;
+}
+
+static inline uint64_t swp_entry_to_pte(swap_entry_t entry) {
+    return PTE_SWAP | (entry << 12);
+}
+
+static inline swap_entry_t pte_to_swp_entry(uint64_t pte) {
+    return (pte >> 12) & ((1ULL << (SWP_TYPE_BITS + SWP_OFFSET_BITS)) - 1);
+}
+#endif
 
 #define PTE_MAT1           (1UL << 52)
 

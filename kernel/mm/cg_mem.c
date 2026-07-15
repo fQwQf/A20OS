@@ -61,6 +61,41 @@ void cg_mem_uncharge(struct cg_node *cg, size_t nr_pages)
     spin_unlock_irqrestore(&node->lock, flags);
 }
 
+int cg_mem_swap_charge(task_t *t, size_t pages)
+{
+    if (!t || !t->cgroup)
+        return 0;
+
+    cg_node_t *node = (cg_node_t *)t->cgroup;
+    uint64_t flags = spin_lock_irqsave(&node->lock);
+    cg_mem_state_t *m = &node->res.mem;
+
+    if (m->swap_limit != 0 && m->swap_usage + pages > m->swap_limit) {
+        m->failcnt++;
+        spin_unlock_irqrestore(&node->lock, flags);
+        return -ENOMEM;
+    }
+
+    m->swap_usage += pages;
+    spin_unlock_irqrestore(&node->lock, flags);
+    return 0;
+}
+
+void cg_mem_swap_uncharge(task_t *t, size_t pages)
+{
+    if (!t || !t->cgroup)
+        return;
+
+    cg_node_t *node = (cg_node_t *)t->cgroup;
+    uint64_t flags = spin_lock_irqsave(&node->lock);
+    cg_mem_state_t *m = &node->res.mem;
+    if (m->swap_usage >= pages)
+        m->swap_usage -= pages;
+    else
+        m->swap_usage = 0;
+    spin_unlock_irqrestore(&node->lock, flags);
+}
+
 void cg_mem_oom_kill(struct cg_node *cg)
 {
     if (!cg) return;

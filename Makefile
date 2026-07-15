@@ -12,6 +12,7 @@ OPT ?= -O3
 NR_CPUS ?= 1
 ALLOW_UNVERIFIED_SMP ?= 0
 PROFILE ?= full
+CONFIG_SWAP ?= n
 STM32_OPENOCD_INTERFACE ?= interface/cmsis-dap.cfg
 STM32_OPENOCD_TRANSPORT ?= swd
 STM32_OPENOCD_ADAPTER_KHZ ?= 1000
@@ -28,6 +29,9 @@ else
 BOARD ?= qemu-virt-$(ARCH)
 endif
 NOMMU ?= 0
+ifeq ($(NOMMU),1)
+CONFIG_SWAP := n
+endif
 NOMMU_SUPPORTED_ARCHES := riscv64 riscv32 aarch64 arm32 armv7m
 
 ifeq ($(NOMMU),1)
@@ -322,6 +326,10 @@ endif
 # Synthetic driver lifecycle test (disabled by default).
 ifeq ($(CONFIG_DRIVER_LIFECYCLE_TEST),y)
 CFLAGS += -DCONFIG_DRIVER_LIFECYCLE_TEST
+endif
+
+ifeq ($(CONFIG_SWAP),y)
+CFLAGS += -DCONFIG_SWAP
 endif
 
 LDFLAGS = -nostdlib -nostartfiles -Wl,--build-id=none -T $(KERNEL_DIR)/arch/$(ARCH)/boot/ldscript.ld $(ARCH_LDFLAGS) $(LDFLAGS_NOMMU)

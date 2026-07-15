@@ -49,8 +49,13 @@ int64_t sys_sysinfo(void *info) {
     si.freeram = frame_free_count() * PAGE_SIZE;
     si.bufferram = 0;
     si.sharedram = 0;
+#ifdef CONFIG_SWAP
+    si.totalswap = total_swap_pages * PAGE_SIZE;
+    si.freeswap = nr_swap_pages * PAGE_SIZE;
+#else
     si.totalswap = 0;
     si.freeswap = 0;
+#endif
     si.procs = 1;
     si.mem_unit = 1;
 
