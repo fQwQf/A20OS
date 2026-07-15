@@ -17,6 +17,7 @@
 #include "mm/slab.h"
 #include "mm/vm.h"
 #include "mm/oom.h"
+#include "mm/swap.h"
 #include "core/timer.h"
 #include "core/string.h"
 #include "core/stdio.h"
@@ -395,6 +396,13 @@ static int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
         size_t sreclaim_kb = slab.reclaimable_bytes / 1024;
         size_t sunreclaim_kb = slab_kb > sreclaim_kb ? slab_kb - sreclaim_kb : 0;
         size_t available_kb = free_kb + cached_kb + sreclaim_kb;
+#ifdef CONFIG_SWAP
+        size_t swap_total_kb = total_swap_pages * PAGE_SIZE / 1024;
+        size_t swap_free_kb = nr_swap_pages * PAGE_SIZE / 1024;
+#else
+        size_t swap_total_kb = 0;
+        size_t swap_free_kb = 0;
+#endif
         if (available_kb > total_kb)
             available_kb = total_kb;
         snprintf(buf, bufsz,
@@ -403,8 +411,8 @@ static int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
             "MemAvailable:   %lu kB\n"
             "Buffers:        %lu kB\n"
             "Cached:         %lu kB\n"
-            "SwapTotal:      0 kB\n"
-            "SwapFree:       0 kB\n"
+            "SwapTotal:      %lu kB\n"
+            "SwapFree:       %lu kB\n"
             "Shmem:          0 kB\n"
             "Dirty:          %lu kB\n"
             "Slab:           %lu kB\n"
@@ -421,6 +429,8 @@ static int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
             (unsigned long)available_kb,
             (unsigned long)buffers_kb,
             (unsigned long)cached_kb,
+            (unsigned long)swap_total_kb,
+            (unsigned long)swap_free_kb,
             (unsigned long)dirty_kb,
             (unsigned long)slab_kb,
             (unsigned long)sreclaim_kb,
@@ -432,10 +442,23 @@ static int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
             (unsigned long)huge.free_huge_pages);
         break;
     }
-    case PF_SWAPS:
-        snprintf(buf, bufsz,
-            "Filename\t\t\t\tType\t\tSize\tUsed\tPriority\n");
+    case PF_SWAPS: {
+        size_t off = 0;
+        appendf(buf, bufsz, &off,
+                "Filename\t\t\t\tType\t\tSize\tUsed\tPriority\n");
+#ifdef CONFIG_SWAP
+        for (int type = 0; type < MAX_SWAPFILES; type++) {
+            swap_info_struct *si = &swap_info[type];
+            if (!si->active)
+                continue;
+            appendf(buf, bufsz, &off, "%-40s\tpartition\t%llu\t%lu\t-2\n",
+                    si->name ? si->name : "",
+                    (unsigned long long)si->pages,
+                    (unsigned long)si->inuse_pages);
+        }
+#endif
         break;
+    }
     case PF_VERSION:
         snprintf(buf, bufsz, "A20OS version " VERSION " (" ARCH_NAME ")\n"); 
         break;

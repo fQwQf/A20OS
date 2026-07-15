@@ -2,6 +2,9 @@
 #define _ARCH_RISCV64_MM_H
 
 #include "core/types.h"
+#ifdef CONFIG_SWAP
+#include "mm/swap.h"
+#endif
 
 /* SV39 page table constants */
 #define ARCH_PT_LEVELS    3
@@ -21,6 +24,30 @@
 #define PTE_A    (1UL << 6)
 #define PTE_D    (1UL << 7)
 #define PTE_COW  (1UL << 8)
+
+#ifdef CONFIG_SWAP
+#define PTE_SWAP  (1UL << 9)
+
+static inline int pte_present(uint64_t pte) {
+    return (pte & PTE_V) != 0;
+}
+
+static inline int pte_is_swap(uint64_t pte) {
+    return !pte_present(pte) && (pte & PTE_SWAP) != 0;
+}
+
+static inline int pte_none(uint64_t pte) {
+    return pte == 0;
+}
+
+static inline uint64_t swp_entry_to_pte(swap_entry_t entry) {
+    return PTE_SWAP | (entry << 10);
+}
+
+static inline swap_entry_t pte_to_swp_entry(uint64_t pte) {
+    return (pte >> 10) & ((1ULL << (SWP_TYPE_BITS + SWP_OFFSET_BITS)) - 1);
+}
+#endif
 
 /* LoongArch compat aliases — no hardware equivalent on RISC-V */
 #define PTE_MAT1  0UL
