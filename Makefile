@@ -17,6 +17,10 @@ STM32_OPENOCD_INTERFACE ?= interface/cmsis-dap.cfg
 STM32_OPENOCD_TRANSPORT ?= swd
 STM32_OPENOCD_ADAPTER_KHZ ?= 1000
 STM32_CMSIS_DAP_SERIAL ?=
+STM32_BT_NAME ?= KasaneTeto
+STM32_BT_PIN ?= 2233
+STM32_BT_UUID ?= 1101
+STM32_BT_BAUD ?= 9600
 ifeq ($(ARCH),armv7m)
 BOARD ?= stm32f103
 PROFILE := mcu
@@ -74,6 +78,7 @@ ARCH_INCLUDE_DIR = $(KERNEL_DIR)/arch/$(ARCH)/include
 BOARD_INCLUDE_DIR = $(KERNEL_DIR)/platform/$(BOARD)
 EXT4_STAGING_DIR = $(BUILD_DIR)/ext4-staging
 BUILD_TIME_HDR = $(BUILD_DIR)/generated/build_time.h
+STM32_BT_CONFIG_HDR = $(BUILD_DIR)/generated/stm32_bluetooth_config.h
 FAT32_IMAGE_MB ?= 128
 EXT4_IMAGE_MB ?= 128
 EXTRA_IMAGE_MB ?= 256
@@ -296,6 +301,18 @@ CFLAGS = -Wall -Wextra $(OPT) -ffreestanding -nostdlib \
          -DCONFIG_BOARD_$(shell echo $(BOARD) | tr a-z A-Z | tr - _)
 ifeq ($(ARCH),armv7m)
 CFLAGS += -DSTM32_FLASH_KB=$(STM32_FLASH_KB) -DSTM32_RAM_KB=$(STM32_RAM_KB)
+ifneq ($(shell printf '%s' '$(STM32_BT_NAME)' | LC_ALL=C grep -Eq '^[A-Za-z0-9_-]{1,32}$$' && echo yes),yes)
+$(error STM32_BT_NAME must contain 1-32 ASCII letters, digits, '_' or '-')
+endif
+ifneq ($(shell printf '%s' '$(STM32_BT_PIN)' | LC_ALL=C grep -Eq '^[0-9]{4}$$' && echo yes),yes)
+$(error STM32_BT_PIN must contain exactly four digits)
+endif
+ifneq ($(shell printf '%s' '$(STM32_BT_UUID)' | LC_ALL=C grep -Eq '^[0-9A-Fa-f]{4}$$' && echo yes),yes)
+$(error STM32_BT_UUID must contain exactly four hexadecimal digits)
+endif
+ifeq ($(filter $(STM32_BT_BAUD),4800 9600 19200 38400 57600 115200),)
+$(error STM32_BT_BAUD must be one of 4800, 9600, 19200, 38400, 57600, 115200)
+endif
 ifeq ($(STM32_XUANWU),1)
 CFLAGS += -DCONFIG_STM32_XUANWU
 endif
@@ -441,6 +458,21 @@ FORCE:
 $(BUILD_TIME_HDR):
 	@mkdir -p $(dir $@)
 	@printf '#ifndef A20_BUILD_UNIX_TIME\n#define A20_BUILD_UNIX_TIME %sULL\n#endif\n' "$$(date -u +%s)" > $@
+
+$(STM32_BT_CONFIG_HDR): FORCE
+	@mkdir -p $(dir $@)
+	@{ \
+		printf '%s\n' '#ifndef GENERATED_STM32_BLUETOOTH_CONFIG_H'; \
+		printf '%s\n' '#define GENERATED_STM32_BLUETOOTH_CONFIG_H'; \
+		printf '#define STM32_BLUETOOTH_DEVICE_NAME "%s"\n' '$(STM32_BT_NAME)'; \
+		printf '#define STM32_BLUETOOTH_PIN "%s"\n' '$(STM32_BT_PIN)'; \
+		printf '#define STM32_BLUETOOTH_SERVICE_UUID 0x%sU\n' '$(STM32_BT_UUID)'; \
+		printf '#define STM32_BLUETOOTH_SERVICE_UUID_TEXT "%s"\n' '$(STM32_BT_UUID)'; \
+		printf '#define STM32_BLUETOOTH_BAUD_RATE %sU\n' '$(STM32_BT_BAUD)'; \
+		printf '#define STM32_BLUETOOTH_BAUD_RATE_TEXT "%s"\n' '$(STM32_BT_BAUD)'; \
+		printf '%s\n' '#endif'; \
+	} > $@.tmp
+	@if cmp -s $@.tmp $@; then rm -f $@.tmp; else mv $@.tmp $@; fi
 
 regen-rootfs-overlay: scripts/gen_rootfs_overlay.py $(ROOTFS_OVERLAY_FILES)
 	@mkdir -p $(dir $(ROOTFS_OVERLAY_SRC)) $(dir $(ROOTFS_OVERLAY_HDR))
@@ -1365,6 +1397,8 @@ $(KERNEL_ELF): $(KERNEL_OBJ) $(ASM_OBJ) $(KERNEL_DIR)/arch/$(ARCH)/boot/ldscript
 $(BUILD_DIR)/%.o: $(KERNEL_DIR)/%.c | Makefile $(BUILD_TIME_HDR)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/platform/stm32f103/bluetooth.o: $(STM32_BT_CONFIG_HDR)
 
 $(BUILD_DIR)/%.o: $(KERNEL_DIR)/%.S Makefile | $(BUILD_TIME_HDR)
 	@mkdir -p $(dir $@)
