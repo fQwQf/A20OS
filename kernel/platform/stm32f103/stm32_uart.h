@@ -5,6 +5,7 @@
 
 typedef enum stm32_uart_port {
     STM32_UART_USART1 = 0,
+    STM32_UART_USART2,
     STM32_UART_USART3,
     STM32_UART_PORT_COUNT,
 } stm32_uart_port_t;

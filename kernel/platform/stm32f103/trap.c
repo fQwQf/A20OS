@@ -5,6 +5,7 @@
 #include "drivers/char/uart.h"
 #include "board.h"
 #include "bluetooth.h"
+#include "wifi.h"
 
 void armv7m_default_handler(void) {
     uint32_t ipsr;
@@ -39,6 +40,10 @@ void armv7m_usart1_irq_handler(void) {
     while ((c = arch_uart_poll_getc()) >= 0)
         uart_receive_char((char)c);
     arch_uart_ack_irq();
+}
+
+void armv7m_usart2_irq_handler(void) {
+    stm32_wifi_irq();
 }
 
 void armv7m_usart3_irq_handler(void) {
