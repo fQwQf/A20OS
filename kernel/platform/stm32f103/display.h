@@ -8,6 +8,7 @@
 typedef enum stm32_display_action {
     STM32_DISPLAY_ACTION_NONE = 0,
     STM32_DISPLAY_ACTION_BLUETOOTH_TEST,
+    STM32_DISPLAY_ACTION_WIFI_SCAN,
 } stm32_display_action_t;
 
 int stm32_display_init(void);
@@ -28,6 +29,15 @@ void stm32_display_set_bluetooth(int ready, int detected, int at_responsive,
                                  uint32_t baud_rate, uint32_t received_bytes,
                                  uint32_t transmitted_bytes,
                                  uint32_t dropped_bytes);
+void stm32_display_set_wifi(int active, int detected, int at_responsive,
+                            int configured, int connecting, int joined,
+                            int got_ip, int socket_connected,
+                            const char *ssid, const char *ip_address,
+                            const char *mac_address, const char *scan_ssid,
+                            uint32_t access_points, uint32_t baud_rate,
+                            uint32_t received_bytes,
+                            uint32_t transmitted_bytes,
+                            uint32_t dropped_bytes, const char *last_event);
 void stm32_display_set_memory(const stm32_memory_info_t *info);
 void stm32_display_set_light(int ready, uint16_t raw_adc,
                              uint8_t intensity_percent,
