@@ -137,6 +137,7 @@ void proc_task_init_common(task_t *t, task_t *parent)
         t->fs.root_path[1] = '\0';
     }
 
+#ifndef CONFIG_MCU
     if (parent)
         fdtable_copy(t, parent);
     else
@@ -150,6 +151,10 @@ void proc_task_init_common(task_t *t, task_t *parent)
         else
             signal_init((signal_state_t *)t->signals);
     }
+#else
+    t->files = NULL;
+    t->signals = NULL;
+#endif
 }
 
 void proc_task_release_resources(task_t *t)

@@ -46,6 +46,16 @@ static uint64_t next_alarm_scan = SCHED_NO_DEADLINE;
 #define SCHED_MIN_TIMER_INTERVAL  (TICKS_PER_SEC / 10000 ? TICKS_PER_SEC / 10000 : 1)
 #define SCHED_AGING_THRESHOLD     (TICKS_PER_SEC / 20 ? TICKS_PER_SEC / 20 : 1)
 
+#ifdef CONFIG_MCU
+#define SCHED_SIGNAL_BATCH 8
+#define SCHED_WAKE_BATCH   8
+#define SCHED_REAP_BATCH   8
+#else
+#define SCHED_SIGNAL_BATCH 128
+#define SCHED_WAKE_BATCH   512
+#define SCHED_REAP_BATCH   32
+#endif
+
 /* Per-CPU runqueue lock — separate from proc_lock.
  * runq_lock protects enqueue/dequeue/pick and per-runqueue state.
  * proc_lock protects task_list, task->state transitions, and zombie list.
@@ -355,9 +365,9 @@ static void sched_scan_timers(uint64_t now)
 {
     uint64_t next_wake = SCHED_NO_DEADLINE;
     uint64_t next_alarm = SCHED_NO_DEADLINE;
-    int sigalrm_pids[128];
+    int sigalrm_pids[SCHED_SIGNAL_BATCH];
     int sigalrm_count = 0;
-    task_t *wake_list[512];
+    task_t *wake_list[SCHED_WAKE_BATCH];
     int wake_count = 0;
 
     uint64_t flags = spin_lock_irqsave(&proc_lock);
@@ -423,7 +433,7 @@ static void sched_scan_timers(uint64_t now)
  */
 void sched_reap_zombies(void)
 {
-    task_t *to_reap[32];
+    task_t *to_reap[SCHED_REAP_BATCH];
     int count;
 
     do {
