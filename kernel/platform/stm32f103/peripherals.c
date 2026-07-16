@@ -4,9 +4,16 @@
 #include "core/stdio.h"
 #include "core/timer.h"
 #include "mm/slab.h"
+#include "actuators.h"
 #include "bluetooth.h"
+#include "dht11.h"
 #include "display.h"
+#include "esp8266.h"
 #include "extsram.h"
+#include "hub_config.h"
+#include "hub_controller.h"
+#include "hub_proto.h"
+#include "ir.h"
 #include "keys.h"
 #include "light_sensor.h"
 #include "memory.h"
@@ -20,6 +27,8 @@
 #define LIGHT_POLL_INTERVAL_MS 250U
 #define SDCARD_CHECK_INTERVAL_MS 2000U
 #define SERVICE_SLOW_THRESHOLD_MS 25U
+#define CONTROL_TICK_INTERVAL_MS 2000U
+#define BOOT_HOUR 12U /* assumed wall-clock hour at boot until an RTC exists */
 
 static stm32_peripheral_state_t peripherals;
 static uint64_t last_touch_poll;
@@ -28,8 +37,38 @@ static uint64_t last_bluetooth_poll;
 static uint64_t last_memory_poll;
 static uint64_t last_light_poll;
 static uint64_t last_sdcard_check;
+static uint64_t last_control_tick;
 static int touch_pressed;
 static char bluetooth_line[STM32_BLUETOOTH_LINE_MAX];
+
+/* Smart-hub control state. */
+static hub_controller_t hub_ctl;
+static int dht_present;
+static int16_t last_temp_c;
+static uint8_t last_humidity;
+static int have_env;
+static uint64_t buzzer_off_at;
+static int buzzer_active;
+static int net_ready;   /* ESP8266 joined + proxy TCP connected */
+static uint8_t net_seq; /* SNAPSHOT frame sequence number       */
+static int ir_present;
+
+/* Buzzer feedback durations (ms). */
+#define BUZZ_BOOT_MS 120U  /* "hub is alive" chime at startup       */
+#define BUZZ_INPUT_MS 30U  /* short chirp on key/touch/IR input     */
+
+/*
+ * Non-blocking buzzer: drive PB8 high now and schedule the off in the service
+ * loop. Only ever extends an in-progress beep (so a short input chirp can't
+ * cut an alert beep short). Buzzer = active buzzer on PB8 (docs/pz §8).
+ */
+static void hub_buzz(uint64_t now, uint32_t ms) {
+    stm32_buzzer_set(1);
+    uint64_t until = now + ms;
+    if (!buzzer_active || until > buzzer_off_at)
+        buzzer_off_at = until;
+    buzzer_active = 1;
+}
 
 static void update_memory_display(void) {
     stm32_memory_refresh();
@@ -251,15 +290,136 @@ void stm32_peripherals_init(void) {
            (unsigned)memory->external_ram_used,
            (unsigned)memory->external_ram_total);
 
+    /* Smart-hub sense/decide/act pipeline. */
+    dht_present = stm32_dht11_init() == 0;
+    stm32_actuators_init();
+    hub_controller_init(&hub_ctl);
+    have_env = 0;
+    buzzer_active = 0;
+    printf("[BOOT] smart-hub controller ready dht11=%s (PG11)"
+           " actuators=fan(TIM3_CH1/PA6),pump(PA7),buzzer(PB8)\n",
+           dht_present ? "armed" : "absent");
+    hub_buzz(timer_get_ticks(), BUZZ_BOOT_MS); /* startup chime */
+
+    ir_present = stm32_ir_init() == 0;
+    printf("[BOOT] IR receiver=%s (PB9/EXTI9, NEC)\n",
+           ir_present ? "armed" : "absent");
+
+    /* Wi-Fi -> cloud proxy (best-effort; local rule engine is the fallback). */
+    net_ready = 0;
+    if (stm32_esp8266_init() == 0) {
+        printf("[BOOT] esp8266 armed USART2/PA2/PA3\n");
+        if (stm32_esp8266_join(HUB_WIFI_SSID, HUB_WIFI_PASS) == 0 &&
+            stm32_esp8266_connect(HUB_PROXY_IP, HUB_PROXY_PORT) == 0) {
+            net_ready = 1;
+            printf("[BOOT] proxy connected %s:%d\n", HUB_PROXY_IP,
+                   HUB_PROXY_PORT);
+        } else {
+            printf("[BOOT] wifi/proxy not connected — using local rules"
+                   " (check hub_config.h)\n");
+        }
+    } else {
+        printf("[BOOT] esp8266 absent — using local rules\n");
+    }
+
     update_display_status();
     update_bluetooth_display();
     update_memory_display();
     update_light_display();
 }
 
+/* Build an environment snapshot and drive the actuators from the decision. */
+static void run_control_tick(uint64_t now) {
+    env_snapshot_t s;
+    int16_t t = last_temp_c;
+    uint8_t h = last_humidity;
+
+    if (dht_present && stm32_dht11_read(&t, &h) == 0) {
+        last_temp_c = t;
+        last_humidity = h;
+        have_env = 1;
+        s.valid = 1;
+    } else {
+        /* No fresh reading: fail-safe path (rule engine holds + SENSOR). */
+        s.valid = have_env ? 0 : 0;
+    }
+    s.temp_c = t;
+    s.humidity = h;
+    s.light = stm32_light_sensor_info()->intensity_percent;
+    s.hour = (uint8_t)((BOOT_HOUR + now / 3600000ULL) % 24U);
+
+    hub_action_t a;
+    hub_controller_step(&hub_ctl, (uint32_t)now, &s, &a);
+
+    /*
+     * Cloud-preferred: send the snapshot to the proxy and apply its CONTROL if
+     * it answers in time; otherwise keep the local rule-engine decision. The
+     * controller's own hysteresis state stays based on the local decision, so
+     * the fallback remains coherent when the network drops.
+     */
+    int cloud = 0;
+    if (net_ready) {
+        uint8_t txf[HUB_OVERHEAD + 8];
+        int tn = hub_proto_encode_snapshot(net_seq++, &s, txf, sizeof(txf));
+        if (tn > 0 && stm32_esp8266_send(txf, tn) == 0) {
+            uint8_t rxf[HUB_OVERHEAD + HUB_MAX_PAYLOAD];
+            int rn = stm32_esp8266_recv(rxf, sizeof(rxf), 600);
+            hub_frame_t f;
+            hub_control_t cc;
+            if (rn > 0 && hub_proto_parse(rxf, (size_t)rn, &f) == rn &&
+                hub_proto_decode_control(&f, &cc) == 0) {
+                a.decision.fan_level = cc.fan_level;
+                a.decision.pump_on = cc.pump_on;
+                a.decision.theme = (env_theme_t)cc.theme_id;
+                cloud = 1;
+                printf("[NET] cloud fan=%u pump=%u mood=%u speech=%s\n",
+                       cc.fan_level, cc.pump_on, cc.mood, cc.speech);
+            }
+        }
+    }
+
+    stm32_fan_set_level(a.decision.fan_level);
+    stm32_pump_set(a.decision.pump_on);
+    if (a.alert_started)
+        hub_buzz(now, HUB_BUZZER_MS); /* alert tone (longer than input chirp) */
+
+    if (a.fan_changed || a.pump_changed || a.alert_started || a.alert_cleared ||
+        cloud) {
+        printf("[CTRL] src=%s T=%dC H=%u%% L=%u h=%02u v=%u -> fan=%u pump=%u"
+               " bl=%u%% theme=%s alert=%s%s\n",
+               cloud ? "cloud" : "local", (int)s.temp_c, s.humidity, s.light,
+               s.hour, s.valid, a.decision.fan_level, a.decision.pump_on,
+               a.decision.backlight, env_theme_name(a.decision.theme),
+               env_alert_name(a.decision.alert),
+               a.alert_started ? " (NEW)" : a.alert_cleared ? " (clr)" : "");
+    }
+}
+
 void stm32_peripherals_service(uint64_t now) {
     uint64_t service_start = timer_get_ticks();
     stm32_display_update_ticks(now);
+
+    /* Non-blocking buzzer off-timer (finer than the control tick). */
+    if (buzzer_active && now >= buzzer_off_at) {
+        stm32_buzzer_set(0);
+        buzzer_active = 0;
+    }
+
+    if (now - last_control_tick >= CONTROL_TICK_INTERVAL_MS) {
+        last_control_tick = now;
+        run_control_tick(now);
+    }
+
+    if (ir_present) {
+        uint32_t code;
+        if (stm32_ir_poll(&code)) {
+            printf("[IR] code=0x%x\n", (unsigned)code);
+            hub_buzz(now, BUZZ_INPUT_MS); /* feedback chirp */
+            /* TODO: map remote keys to actions once the codes are known —
+             * press keys, read the printed codes, then dispatch here
+             * (e.g. manual fan level / theme toggle / mute buzzer). */
+        }
+    }
 
     if (peripherals.keys_ready &&
         now - last_key_poll >= KEY_POLL_INTERVAL_MS) {
@@ -270,6 +430,7 @@ void stm32_peripherals_service(uint64_t now) {
                 "none", "up", "down", "left", "right",
             };
             printf("[KEY] %s\n", names[key]);
+            hub_buzz(now, BUZZ_INPUT_MS); /* feedback chirp */
             stm32_display_handle_key(key);
             handle_display_actions();
         }
@@ -283,8 +444,10 @@ void stm32_peripherals_service(uint64_t now) {
         int pressed = stm32_touch_poll(&x, &y);
         stm32_display_show_touch(x, y, pressed);
         handle_display_actions();
-        if (pressed && !touch_pressed)
+        if (pressed && !touch_pressed) {
             printf("[TOUCH] down x=%u y=%u\n", (unsigned)x, (unsigned)y);
+            hub_buzz(now, BUZZ_INPUT_MS); /* feedback chirp */
+        }
         else if (!pressed && touch_pressed)
             printf("[TOUCH] up\n");
         touch_pressed = pressed;

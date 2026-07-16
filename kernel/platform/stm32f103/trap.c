@@ -5,6 +5,7 @@
 #include "drivers/char/uart.h"
 #include "board.h"
 #include "bluetooth.h"
+#include "ir.h"
 
 void armv7m_default_handler(void) {
     uint32_t ipsr;
@@ -43,6 +44,10 @@ void armv7m_usart1_irq_handler(void) {
 
 void armv7m_usart3_irq_handler(void) {
     stm32_bluetooth_irq();
+}
+
+void armv7m_exti9_5_irq_handler(void) {
+    stm32_ir_isr();
 }
 
 #endif
