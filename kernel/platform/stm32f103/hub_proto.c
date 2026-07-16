@@ -84,6 +84,30 @@ int hub_proto_encode_control(uint8_t seq, const hub_control_t *c, uint8_t *out,
     return hub_proto_frame(HUB_MSG_CONTROL, seq, p, 5 + slen, out, outsize);
 }
 
+int hub_proto_encode_image_req(uint8_t seq, uint8_t theme_id, uint16_t w,
+                               uint16_t h, uint8_t *out, size_t outsize) {
+    uint8_t p[5];
+    p[0] = theme_id;
+    p[1] = (uint8_t)(w & 0xFFu);
+    p[2] = (uint8_t)((w >> 8) & 0xFFu);
+    p[3] = (uint8_t)(h & 0xFFu);
+    p[4] = (uint8_t)((h >> 8) & 0xFFu);
+    return hub_proto_frame(HUB_MSG_IMAGE_REQ, seq, p, sizeof(p), out, outsize);
+}
+
+int hub_proto_decode_image_chunk(const hub_frame_t *f, hub_image_chunk_t *out) {
+    if (f->type != HUB_MSG_IMAGE_CHUNK || f->len < HUB_IMAGE_CHUNK_HEADER ||
+        !f->payload)
+        return -1;
+    const uint8_t *p = f->payload;
+    out->offset = (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+                  ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+    out->last = (p[4] & HUB_IMAGE_FLAG_LAST) ? 1u : 0u;
+    out->data_len = (uint16_t)(f->len - HUB_IMAGE_CHUNK_HEADER);
+    out->data = out->data_len ? (p + HUB_IMAGE_CHUNK_HEADER) : (const uint8_t *)0;
+    return 0;
+}
+
 int hub_proto_parse(const uint8_t *buf, size_t len, hub_frame_t *out) {
     if (len < 2)
         return 0;
