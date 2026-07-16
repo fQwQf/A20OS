@@ -11,13 +11,15 @@ typedef struct {
     uint32_t pc;
     uint32_t xpsr;
     uint32_t kernel_sp;
+    uint32_t kernel_tp;
     uint32_t control;
 } trap_context_t;
 
 typedef struct {
     uint32_t r4_r11[8];
     uint32_t sp;
-    uint32_t lr;
+    uint32_t ra;
+    uint32_t tp;
     uint32_t control;
     uint32_t page_table;
     uint32_t status;
@@ -30,16 +32,23 @@ typedef struct {
 
 #define ARCH_UCONTEXT_PAD_FIELDS uint32_t uc_pad;
 #define ARCH_SIGFRAME_EXTRA_FIELDS uint32_t arch_extra;
-#define TRAP_CONTEXT_SIZE ((13 + 6) * 4)
-#define TASK_CONTEXT_SIZE ((8 + 5) * 4)
+#define TRAP_CONTEXT_SIZE ((13 + 7) * 4)
+#define TASK_CONTEXT_SIZE ((8 + 6) * 4)
 #define KTRAP_CONTEXT_SIZE TRAP_CONTEXT_SIZE
 #define ARCH_SYSCALL_TRACE_MIN_PID 1
+
+#define ARCH_TASK_CONTEXT_SET_USER_TP(ctx, value) do { (void)(ctx); (void)(value); } while (0)
 
 extern void __switch(uint32_t next_kstack);
 extern void user_trap_return(void);
 extern void __trap_from_user(void);
 extern void __return_to_user(void);
 extern void __trap_from_kernel(void);
+
+_Static_assert(sizeof(trap_context_t) == TRAP_CONTEXT_SIZE,
+               "ARMv7-M trap context layout mismatch");
+_Static_assert(sizeof(task_context_t) == TASK_CONTEXT_SIZE,
+               "ARMv7-M task context layout mismatch");
 
 #define TRAP_CTX_SYSCALL_NUM(ctx) ((ctx)->r[7])
 #define TRAP_CTX_ARG0(ctx) ((ctx)->r[0])
@@ -73,10 +82,13 @@ static inline void arch_task_context_set_initial_sp(task_context_t *ctx,
 }
 
 static inline task_context_t *arch_task_context_base(void *base, uint64_t top,
-                                                     trap_context_t *trap) {
-    (void)base;
-    uintptr_t end = trap ? (uintptr_t)trap : (uintptr_t)top;
-    return (task_context_t *)(end - sizeof(task_context_t));
+                                                      trap_context_t *trap) {
+    (void)top;
+    (void)trap;
+    /* On ARMv7-M the task_context_t lives at the bottom of the kernel stack
+     * so the C call stack growing downward from the top does not overwrite it.
+     * __switch resumes using ctx->sp, not the context base. */
+    return (task_context_t *)base;
 }
 
 static inline uint64_t arch_task_kernel_status(void) { return 0; }
@@ -94,5 +106,48 @@ static inline uint64_t arch_trap_ctx_get_kernel_stack(const trap_context_t *ctx,
     return ctx->kernel_sp ? ctx->kernel_sp : fallback;
 }
 static inline void arch_advance_syscall_epc(trap_context_t *ctx) { (void)ctx; }
+
+static inline void arch_signal_build_mcontext(arch_sigcontext_t *sc,
+                                              const trap_context_t *ctx) {
+    for (int i = 0; i < 13; i++)
+        sc->r[i] = ctx->r[i];
+    sc->r[13] = ctx->sp;
+    sc->r[14] = ctx->lr;
+    sc->r[15] = ctx->pc;
+    sc->xpsr = ctx->xpsr;
+}
+
+static inline void arch_signal_build_frame_extra(void *extra,
+                                                  const trap_context_t *ctx) {
+    (void)extra;
+    (void)ctx;
+}
+
+static inline void arch_signal_prepare_trampoline(uint32_t tramp[2]) {
+    tramp[0] = 0x0000df01U;
+    tramp[1] = 0x0000df00U;
+}
+
+static inline void arch_signal_write_trampoline(void *page) {
+    uint32_t *p = (uint32_t *)page;
+    p[0] = 0x0000df01U;
+    p[1] = 0x0000df00U;
+}
+
+static inline void arch_signal_restore_mcontext(trap_context_t *ctx,
+                                                 const arch_sigcontext_t *sc) {
+    for (int i = 0; i < 13; i++)
+        ctx->r[i] = sc->r[i];
+    ctx->sp = sc->r[13];
+    ctx->lr = sc->r[14];
+    ctx->pc = sc->r[15];
+    ctx->xpsr = sc->xpsr;
+}
+
+static inline void arch_signal_restore_frame_extra(trap_context_t *ctx,
+                                                    const void *extra) {
+    (void)ctx;
+    (void)extra;
+}
 
 #endif

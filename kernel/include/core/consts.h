@@ -15,7 +15,17 @@
 #endif
 
 /* ---------- Kernel / user stack sizes ---------- */
+#ifdef CONFIG_ARMV7M
+/* STM32VL QEMU exposes only 8 KiB; it runs one diagnostic task. */
+#ifdef CONFIG_STM32_QEMU
+#define KERNEL_STACK_SIZE        512
+#else
+/* The 64 KiB Xuanwu target keeps 2 KiB per MCU kernel thread. */
+#define KERNEL_STACK_SIZE        2048
+#endif
+#else
 #define KERNEL_STACK_SIZE        (64 * 1024)
+#endif
 /* 初始栈页数：从16增加到32（128KB），防止 execve 时参数/环境变量过大导致栈溢出。
  * thp01 等LTP测试有较大的环境变量，16页(64KB)不够用，会导致 elf_setup_stack
  * 写到未映射的地址，引发页表中的脏数据被当作物理地址使用而崩溃。 */
@@ -23,17 +33,29 @@
 #define USER_STACK_MAX_SIZE      (8 * 1024 * 1024UL)
 
 /* ---------- Limits ---------- */
+#ifdef CONFIG_ARMV7M
+#define MAX_PROCS          32
+#define MAX_FILES          16
+#ifdef CONFIG_STM32_QEMU
+#define MAX_PATH_LEN       32
+#else
+#define MAX_PATH_LEN       64
+#endif
+#define MAX_NAME_LEN       32
+#define MAX_GROUPS         8
+#else
 #define MAX_PROCS          4096
 #define MAX_FILES          1024
 #define MAX_PATH_LEN       512
 #define MAX_NAME_LEN       256
+#define MAX_GROUPS         32
+#endif
 #define MAX_ARGS           256
 #define MAX_ARG_STRLEN     (128 * 1024)
 #define MAX_ARG_STRINGS    256
 #define MAX_ARG_BYTES      (USER_STACK_MAX_SIZE / 4)
 #define MAX_CMD_LEN        4096
 #define MAX_HISTORY        256
-#define MAX_GROUPS         32
 
 /* ---------- Internal file and memory layout constants ---------- */
 #define FT_REGULAR    1
