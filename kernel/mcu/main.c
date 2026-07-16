@@ -1,4 +1,6 @@
+#include "proc/proc.h"
 #include "core/arch.h"
+#include "core/panic.h"
 #include "core/stdio.h"
 #include "core/string.h"
 #include "core/timer.h"
@@ -15,7 +17,11 @@
 #include "stm32_uart.h"
 #include "wifi.h"
 
+#ifdef CONFIG_STM32_QEMU
+static volatile char diagnostic_line[64];
+#else
 static volatile char diagnostic_line[160];
+#endif
 static unsigned diagnostic_length;
 
 static int text_equal(const char *left, const char *right) {
@@ -226,37 +232,58 @@ static void diagnostic_execute(char *line) {
     }
 }
 
-static void diagnostic_service(void) {
+#ifndef CONFIG_STM32_QEMU
+static void stm32_peripheral_thread(void) {
+    for (;;) {
+        uint64_t now = timer_get_ticks();
+        stm32_peripherals_service(now);
+        proc_yield();
+    }
+}
+#endif
+
+#ifdef CONFIG_STM32_QEMU
+static void scheduler_probe_thread(void) {
+    printf("[SCHED] probe task online, round-trip switching active\n");
+    for (;;)
+        proc_yield();
+}
+#endif
+
+static void diagnostic_thread(void) {
     int c;
-    while ((c = uart_try_getc()) >= 0) {
-        if (c == '\r' || c == '\n') {
-            if (diagnostic_length == 0)
+    for (;;) {
+        while ((c = uart_try_getc()) >= 0) {
+            if (c == '\r' || c == '\n') {
+                if (diagnostic_length == 0)
+                    continue;
+                uart_putc('\n');
+                diagnostic_line[diagnostic_length] = '\0';
+                diagnostic_execute((char *)diagnostic_line);
+                diagnostic_length = 0;
+                diagnostic_prompt();
                 continue;
-            uart_putc('\n');
-            diagnostic_line[diagnostic_length] = '\0';
-            diagnostic_execute((char *)diagnostic_line);
-            diagnostic_length = 0;
-            diagnostic_prompt();
-            continue;
-        }
-        if (c == 8 || c == 127) {
-            if (diagnostic_length != 0) {
-                diagnostic_length--;
-                uart_puts("\b \b");
             }
-            continue;
+            if (c == 8 || c == 127) {
+                if (diagnostic_length != 0) {
+                    diagnostic_length--;
+                    uart_puts("\b \b");
+                }
+                continue;
+            }
+            if (c < 32 || c > 126)
+                continue;
+            if (diagnostic_length + 1U >= sizeof(diagnostic_line)) {
+                uart_putc('\a');
+                continue;
+            }
+            diagnostic_line[diagnostic_length++] = (char)c;
+            diagnostic_line[diagnostic_length] = '\0';
+            if (!text_starts_with((char *)diagnostic_line, "wifi join ") ||
+                !strchr((char *)diagnostic_line + 10, ' '))
+                uart_putc((char)c);
         }
-        if (c < 32 || c > 126)
-            continue;
-        if (diagnostic_length + 1U >= sizeof(diagnostic_line)) {
-            uart_putc('\a');
-            continue;
-        }
-        diagnostic_line[diagnostic_length++] = (char)c;
-        diagnostic_line[diagnostic_length] = '\0';
-        if (!text_starts_with((char *)diagnostic_line, "wifi join ") ||
-            !strchr((char *)diagnostic_line + 10, ' '))
-            uart_putc((char)c);
+        proc_yield();
     }
 }
 
@@ -290,8 +317,23 @@ void kernel_main(void) {
     stm32_peripherals_init();
 #endif
 
+    proc_init();
+#ifdef CONFIG_STM32_QEMU
+    int probe_pid = proc_alloc(scheduler_probe_thread);
+    if (probe_pid < 0)
+        panic("cannot create scheduler probe task");
+#else
+    int peripheral_pid = proc_alloc(stm32_peripheral_thread);
+    if (peripheral_pid < 0)
+        panic("cannot create peripheral task");
+#endif
+    int diagnostic_pid = proc_alloc(diagnostic_thread);
+    if (diagnostic_pid < 0)
+        panic("cannot create diagnostic task");
+    printf("[BOOT] scheduler initialized, tasks created\n");
+
     arch_local_irq_enable();
-    printf("[BOOT] SysTick=1000Hz source=HCLK=%u, entering WFI loop\n",
+    printf("[BOOT] SysTick=1000Hz source=HCLK=%u, entering scheduler\n",
            (unsigned)stm32_hclk_hz());
     diagnostic_help();
 #ifdef CONFIG_STM32_QEMU
@@ -302,12 +344,6 @@ void kernel_main(void) {
 #endif
     diagnostic_prompt();
 
-    for (;;) {
-        uint64_t now = timer_get_ticks();
-#ifndef CONFIG_STM32_QEMU
-        stm32_peripherals_service(now);
-#endif
-        diagnostic_service();
-        arch_wfi();
-    }
+    sched();
+    idle_loop();
 }
