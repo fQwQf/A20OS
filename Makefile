@@ -94,8 +94,9 @@ ifeq ($(ARCH),armv7m)
 BUILD_VARIANT := $(BUILD_VARIANT)-$(BOARD)-f$(STM32_FLASH_KB)k-r$(STM32_RAM_KB)k
 BUILD_VARIANT := $(BUILD_VARIANT)$(if $(filter 1,$(STM32_QEMU)),-qemu,)
 endif
-BUILD_DIR = .kernel-build/$(ARCH)-$(BUILD_VARIANT)
+BUILD_DIR = .kernel-build/$(ARCH)-$(BOARD)-$(BUILD_VARIANT)
 FAT32_IMG = $(BUILD_DIR)/fat32.img
+GUI_FAT32_IMG = $(BUILD_DIR)/gui-fat32.img
 EXT4_IMG = $(BUILD_DIR)/ext4.img
 FS_TEST_IMG = $(BUILD_DIR)/fs_test.img
 USER_VARIANT = $(ARCH)$(if $(filter 1,$(NOMMU)),-nommu,)
@@ -115,7 +116,7 @@ EXTRA_IMG = $(BUILD_DIR)/extra.img
 EXTRA_STAGING_DIR = $(BUILD_DIR)/extra-staging
 EXTRA_PACKAGES = vim git gcc cc
 USER_BUILD_ID = $(ARCH):$(OPT):$(NOMMU)
-USER_BUILD_CHECK_DIRS = user/cmds user/init_common user/desktop user/external/lvgl \
+USER_BUILD_CHECK_DIRS = user/init.c user/cmds user/init_common user/desktop user/external/lvgl \
                         user/external/musl user/external/sbase user/external/mksh-cvs2git \
                         user/external/tlse user/external/fastfetch
 NATIVE_TAG_riscv64     := rv
@@ -252,9 +253,16 @@ QEMU_NET_arm32       := virtio-net-device,bus=virtio-mmio-bus.4
 QEMU_NET_riscv32     := virtio-net-device,bus=virtio-mmio-bus.4
 QEMU_NET_ppc64le     := virtio-net-pci
 
+QEMU_GUI_DEVICES_aarch64 := -device virtio-keyboard-device,bus=virtio-mmio-bus.5 \
+                            -device virtio-mouse-device,bus=virtio-mmio-bus.6 \
+                            -device virtio-gpu-device,bus=virtio-mmio-bus.7
 QEMU_GUI_DEVICES_arm32 := -device virtio-keyboard-device,bus=virtio-mmio-bus.5 \
                           -device virtio-mouse-device,bus=virtio-mmio-bus.6 \
                           -device virtio-gpu-device,bus=virtio-mmio-bus.7
+QEMU_GUI_DEVICES_x86_64 := -vga none \
+                           -device virtio-gpu-pci \
+                           -device virtio-keyboard-pci \
+                           -device virtio-mouse-pci
 QEMU_GUI_DEVICES_DEFAULT := -device virtio-gpu-device \
                             -device virtio-keyboard-device \
                             -device virtio-mouse-device
@@ -397,7 +405,14 @@ ifeq ($(CONFIG_SWAP),y)
 CFLAGS += -DCONFIG_SWAP
 endif
 
-LDFLAGS = -nostdlib -nostartfiles -Wl,--build-id=none -T $(KERNEL_DIR)/arch/$(ARCH)/boot/ldscript.ld $(ARCH_LDFLAGS) $(LDFLAGS_NOMMU)
+BOARD_LDSCRIPT = $(KERNEL_DIR)/platform/$(BOARD)/ldscript.ld
+ifeq ($(wildcard $(BOARD_LDSCRIPT)),)
+LDSCRIPT = $(KERNEL_DIR)/arch/$(ARCH)/boot/ldscript.ld
+else
+LDSCRIPT = $(BOARD_LDSCRIPT)
+endif
+
+LDFLAGS = -nostdlib -nostartfiles -Wl,--build-id=none -T $(LDSCRIPT) $(ARCH_LDFLAGS) $(LDFLAGS_NOMMU)
 ifeq ($(ARCH),armv7m)
 LDFLAGS += -Wl,--defsym=FLASH_LENGTH=$(STM32_FLASH_KB)K \
            -Wl,--defsym=RAM_LENGTH=$(STM32_RAM_KB)K
@@ -498,7 +513,7 @@ KERNEL_BIN = $(BUILD_DIR)/kernel.bin
 # Targets
 # ================================================================
 
-.PHONY: all all-architectures clean run-riscv64 run-gui-riscv64 run-gui-rv run-loongarch64 run-gui-loongarch64 run-gui-la run-arm64 run-x86_64 run-arm32 run-gui-arm32 run-riscv32 run-ppc64le debug-riscv64 debug-loongarch64 debug-arm64 debug-x86_64 debug-arm32 debug-riscv32 debug-ppc64le \
+.PHONY: all all-architectures clean run-riscv64 run-gui-riscv64 run-gui-rv run-loongarch64 run-gui-loongarch64 run-gui-la run-arm64 run-gui-arm64 run-gui-aarch64 run-x86_64 run-gui-x86_64 vbox-iso-x86_64 _vbox_iso_x86_64_impl run-arm32 run-gui-arm32 run-riscv32 run-ppc64le debug-riscv64 debug-loongarch64 debug-arm64 debug-x86_64 debug-arm32 debug-riscv32 debug-ppc64le \
 		run-gui-nommu-arm32 run-nommu-gui-arm32 \
 		stm32f103-bringup stm32f103-xuanwu flash-stm32f103-xuanwu run-stm32f103-qemu \
 		check-stm32f103 \
@@ -819,7 +834,7 @@ smoke-riscv64:
 	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
 		-machine virt -m 1G -nographic -smp 1 -bios default \
 		-global virtio-mmio.force-legacy=false \
-		-kernel .kernel-build/riscv64-linux-bringup/kernel.elf \
+		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-bringup/kernel.elf \
 		> "$$log" 2>&1 || status=$$?; \
 	if [ "$$status" -eq 124 ]; then \
 		echo "smoke-riscv64: timeout reached; log saved to $$log"; \
@@ -839,7 +854,7 @@ smoke-loongarch64:
 	status=0; \
 	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-loongarch64 \
 		-machine virt -m 1G -nographic -smp 1 \
-		-kernel .kernel-build/loongarch64-linux-bringup/kernel.elf \
+		-kernel .kernel-build/loongarch64-qemu-virt-loongarch64-linux-bringup/kernel.elf \
 		> "$$log" 2>&1 || status=$$?; \
 	if [ "$$status" -eq 124 ]; then \
 		echo "smoke-loongarch64: timeout reached; log saved to $$log"; \
@@ -860,7 +875,7 @@ smoke-aarch64:
 	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-aarch64 \
 		-machine virt -cpu cortex-a57 -m 1G -nographic -smp 1 \
 		-global virtio-mmio.force-legacy=false \
-		-kernel .kernel-build/aarch64-linux-bringup/kernel.elf \
+		-kernel .kernel-build/aarch64-qemu-virt-aarch64-linux-bringup/kernel.elf \
 		> "$$log" 2>&1 || status=$$?; \
 	if [ "$$status" -eq 124 ]; then \
 		echo "smoke-aarch64: timeout reached; log saved to $$log"; \
@@ -880,7 +895,7 @@ smoke-x86_64:
 	status=0; \
 	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-x86_64 \
 		-machine q35 -m 1G -nographic -smp 1 -no-reboot \
-		-kernel .kernel-build/x86_64-linux-bringup/kernel.elf \
+		-kernel .kernel-build/x86_64-qemu-virt-x86_64-linux-bringup/kernel.elf \
 		> "$$log" 2>&1 || status=$$?; \
 	if [ "$$status" -eq 124 ]; then \
 		echo "smoke-x86_64: timeout reached; log saved to $$log"; \
@@ -900,7 +915,7 @@ smoke-arm32:
 	status=0; \
 	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-arm \
 		-machine virt -cpu cortex-a15 -m 1G -nographic -smp 1 \
-		-kernel .kernel-build/arm32-linux-bringup/kernel.elf \
+		-kernel .kernel-build/arm32-qemu-virt-arm32-linux-bringup/kernel.elf \
 		> "$$log" 2>&1 || status=$$?; \
 	if grep -q 'part ok' "$$log" && grep -q 'System is going down for power-off NOW' "$$log"; then \
 		echo "smoke-arm32: PASS; log saved to $$log"; \
@@ -923,7 +938,7 @@ smoke-riscv32:
 	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv32 \
 		-machine virt -m 1G -nographic -smp 1 -bios default \
 		-global virtio-mmio.force-legacy=false \
-		-kernel .kernel-build/riscv32-linux-bringup/kernel.elf \
+		-kernel .kernel-build/riscv32-qemu-virt-riscv32-linux-bringup/kernel.elf \
 		> "$$log" 2>&1 || status=$$?; \
 	if grep -q 'part ok' "$$log" && grep -q 'System is going down for power-off NOW' "$$log"; then \
 		echo "smoke-riscv32: PASS; log saved to $$log"; \
@@ -980,7 +995,7 @@ smoke-ppc64le:
 	status=0; \
 	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-ppc64 \
 		-machine pseries -m 1G -nographic -smp 1 \
-		-kernel .kernel-build/ppc64le-linux-bringup/kernel.elf \
+		-kernel .kernel-build/ppc64le-qemu-virt-ppc64le-linux-bringup/kernel.elf \
 		> "$$log" 2>&1 || status=$$?; \
 	if grep -q 'part ok' "$$log" && grep -q 'System is going down for power-off NOW' "$$log"; then \
 		echo "smoke-ppc64le: PASS; log saved to $$log"; \
@@ -1004,10 +1019,10 @@ smoke-abi-linux:
 	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
 		-machine virt -m 1G -nographic -smp 1 -bios default \
 		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
+		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
 		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
 		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
-		-kernel .kernel-build/riscv64-linux-dev/kernel.elf \
+		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
 		> "$$log" 2>&1 || status=$$?; \
 		if grep -q 'SYSCALL_SMOKE: PASS' "$$log"; then \
 			echo "smoke-abi-linux: PASS; log saved to $$log"; \
@@ -1031,10 +1046,10 @@ smoke-network-suite:
 	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
 		-machine virt -m 1G -nographic -smp 1 -bios default \
 		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
+		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
 		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
 		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
-		-kernel .kernel-build/riscv64-linux-dev/kernel.elf \
+		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
 		-append 'a20.ip=10.0.2.15 a20.netmask=255.255.255.0 a20.gateway=10.0.2.2 a20.dns=10.0.2.3 a20.hostname=a20os' \
 		> "$$log" 2>&1 || status=$$?; \
 	if grep -q 'NETWORK_SUITE: PASS' "$$log"; then \
@@ -1059,10 +1074,10 @@ smoke-proc-a20:
 	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
 		-machine virt -m 1G -nographic -smp 1 -bios default \
 		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
+		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
 		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
 		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
-		-kernel .kernel-build/riscv64-linux-dev/kernel.elf \
+		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
 		> "$$log" 2>&1 || status=$$?; \
 	if grep -q '^valid_pages:' "$$log" && grep -q '^capacity:' "$$log"; then \
 		echo "smoke-proc-a20: PASS; log saved to $$log"; \
@@ -1082,10 +1097,10 @@ smoke-proc-stress:
 	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
 		-machine virt -m 1G -nographic -smp 1 -bios default \
 		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
+		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
 		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
 		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
-		-kernel .kernel-build/riscv64-linux-dev/kernel.elf \
+		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
 		> "$$log" 2>&1 || status=$$?; \
 	if grep -q 'PROC_STRESS: PASS' "$$log"; then \
 		echo "smoke-proc-stress: PASS; log saved to $$log"; \
@@ -1105,10 +1120,10 @@ smoke-mm-stress:
 	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
 		-machine virt -m 1G -nographic -smp 1 -bios default \
 		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
+		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
 		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
 		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
-		-kernel .kernel-build/riscv64-linux-dev/kernel.elf \
+		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
 		> "$$log" 2>&1 || status=$$?; \
 	if grep -q 'MM_STRESS: PASS' "$$log"; then \
 		echo "smoke-mm-stress: PASS; log saved to $$log"; \
@@ -1128,10 +1143,10 @@ smoke-vfs-stress:
 	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
 		-machine virt -m 1G -nographic -smp 1 -bios default \
 		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
+		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
 		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
 		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
-			-kernel .kernel-build/riscv64-linux-dev/kernel.elf \
+			-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
 			> "$$log" 2>&1 || status=$$?; \
 		if grep -q 'VFS_STRESS: PASS' "$$log"; then \
 			echo "smoke-vfs-stress: PASS; log saved to $$log"; \
@@ -1151,10 +1166,10 @@ smoke-vfs-edge:
 		$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
 			-machine virt -m 1G -nographic -smp 1 -bios default \
 			-global virtio-mmio.force-legacy=false \
-			-drive file=.kernel-build/riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
+			-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
 			-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
 		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
-		-kernel .kernel-build/riscv64-linux-dev/kernel.elf \
+		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
 		-append 'a20.ip=10.0.2.15 a20.netmask=255.255.255.0 a20.gateway=10.0.2.2 a20.dns=10.0.2.3 a20.hostname=a20os' \
 		> "$$log" 2>&1 || status=$$?; \
 		if grep -q 'VFS_EDGE: PASS' "$$log"; then \
@@ -1175,10 +1190,10 @@ smoke-io-event:
 	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
 		-machine virt -m 1G -nographic -smp 1 -bios default \
 		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
+		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
 		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
 		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
-		-kernel .kernel-build/riscv64-linux-dev/kernel.elf \
+		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
 		-append 'a20.ip=10.0.2.15 a20.netmask=255.255.255.0 a20.gateway=10.0.2.2 a20.dns=10.0.2.3 a20.hostname=a20os' \
 		> "$$log" 2>&1 || status=$$?; \
 	if grep -q 'IO_EVENT_TEST: PASS' "$$log"; then \
@@ -1203,10 +1218,10 @@ smoke-sched-stress:
 	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
 		-machine virt -m 1G -nographic -smp 1 -bios default \
 		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
+		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
 		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
 		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
-		-kernel .kernel-build/riscv64-linux-dev/kernel.elf \
+		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
 		> "$$log" 2>&1 || status=$$?; \
 	if grep -q 'SCHED_STRESS: PASS' "$$log"; then \
 		echo "smoke-sched-stress: PASS; log saved to $$log"; \
@@ -1226,10 +1241,10 @@ smoke-futex-stress:
 	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
 		-machine virt -m 1G -nographic -smp 1 -bios default \
 		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
+		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
 		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
 		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
-		-kernel .kernel-build/riscv64-linux-dev/kernel.elf \
+		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
 		> "$$log" 2>&1 || status=$$?; \
 	if grep -q 'FUTEX_STRESS: PASS' "$$log"; then \
 		echo "smoke-futex-stress: PASS; log saved to $$log"; \
@@ -1249,10 +1264,10 @@ smoke-socket-stress:
 	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
 		-machine virt -m 1G -nographic -smp 1 -bios default \
 		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
+		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
 		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
 		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
-		-kernel .kernel-build/riscv64-linux-dev/kernel.elf \
+		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
 		> "$$log" 2>&1 || status=$$?; \
 	if grep -q 'SOCKET_STRESS: PASS' "$$log" && ! grep -q '\[LOCK\]' "$$log"; then \
 		echo "smoke-socket-stress: PASS; log saved to $$log"; \
@@ -1279,7 +1294,7 @@ smoke-driver-lifecycle:
 	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
 		-machine virt -m 1G -nographic -smp 1 -bios default \
 		-global virtio-mmio.force-legacy=false \
-		-kernel .kernel-build/riscv64-linux-bringup/kernel.elf \
+		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-bringup/kernel.elf \
 		> "$$log" 2>&1 || status=$$?; \
 	if grep -q 'DRIVER_LIFECYCLE: PASS' "$$log"; then \
 		echo "smoke-driver-lifecycle: PASS; log saved to $$log"; \
@@ -1303,10 +1318,10 @@ smoke-native-handle:
 	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
 		-machine virt -m 1G -nographic -smp 1 -bios default \
 		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/riscv64-both-dev/fat32.img,if=none,format=raw,id=x0 \
+		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-both-dev/fat32.img,if=none,format=raw,id=x0 \
 		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
 		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
-		-kernel .kernel-build/riscv64-both-dev/kernel.elf \
+		-kernel .kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf \
 		> "$$log" 2>&1 || status=$$?; \
 	if grep -q 'part ok' "$$log" && grep -q 'System is going down for power-off NOW' "$$log"; then \
 		echo "smoke-native-handle: PASS; log saved to $$log"; \
@@ -1454,6 +1469,12 @@ $(FAT32_IMG): $(USER_BUILD_STAMP) $(NATIVE_BUILD_STAMP)
 	mcopy -o -i $(FAT32_IMG) user/contest_init/run_ltp_resume.sh ::/run_ltp_resume.sh
 	mcopy -o -i $(FAT32_IMG) user/contest_init/ltp_blacklist.txt ::/etc/ltp_blacklist.txt
 
+# Keep GUI state out of fat32.img so a later text-mode run does not inherit it.
+# init uses this marker to replace the serial shell with the LVGL desktop.
+$(GUI_FAT32_IMG): $(FAT32_IMG)
+	cp $(FAT32_IMG) $(GUI_FAT32_IMG)
+	@printf '1\n' | mcopy -o -i $(GUI_FAT32_IMG) - ::/etc/a20-gui
+
 $(FS_TEST_IMG): $(FAT32_IMG)
 	cp $(FAT32_IMG) $(FS_TEST_IMG)
 
@@ -1484,7 +1505,7 @@ ext4_img: $(USER_BUILD_STAMP) ext4_img_only
 $(KERNEL_BIN): $(KERNEL_ELF)
 	$(OBJCOPY) -O binary $< $@
 
-$(KERNEL_ELF): $(KERNEL_OBJ) $(ASM_OBJ) $(KERNEL_DIR)/arch/$(ARCH)/boot/ldscript.ld
+$(KERNEL_ELF): $(KERNEL_OBJ) $(ASM_OBJ) $(LDSCRIPT)
 	@mkdir -p $(dir $@)
 	$(CC) $(LDFLAGS) $(KERNEL_OBJ) $(ASM_OBJ) $(ARCH_LIBS) -o $@
 
@@ -1583,8 +1604,20 @@ run-gui-loongarch64 run-gui-la:
 run-arm64:
 	$(MAKE) ARCH=aarch64 BRINGUP=$(BRINGUP) _run_impl
 
+run-gui-arm64 run-gui-aarch64:
+	$(MAKE) ARCH=aarch64 BRINGUP=$(BRINGUP) _run_gui_impl
+
 run-x86_64:
 	$(MAKE) ARCH=x86_64 BRINGUP=$(BRINGUP) _run_impl
+
+run-gui-x86_64:
+	$(MAKE) ARCH=x86_64 BRINGUP=$(BRINGUP) _run_gui_impl
+
+vbox-iso-x86_64:
+	$(MAKE) ARCH=x86_64 ABI=both BRINGUP=0 _vbox_iso_x86_64_impl
+
+_vbox_iso_x86_64_impl: dev-build
+	scripts/mk_grub_iso.sh $(KERNEL_ELF) $(BUILD_DIR)/a20os-x86_64.iso
 
 run-arm32:
 	$(MAKE) ARCH=arm32 BRINGUP=$(BRINGUP) _run_impl
@@ -1628,6 +1661,7 @@ ifeq ($(BRINGUP),1)
 else
 	$(MAKE) ARCH=$(ARCH) BRINGUP=$(BRINGUP) dev-build
 endif
+	@test -s $(KERNEL_ELF) || (echo "ERROR: kernel ELF missing or empty: $(KERNEL_ELF)" ; exit 1)
 	$(QEMU) $(QEMU_FLAGS) -kernel $(KERNEL_ELF)
 
 _run_gui_impl:
@@ -1636,7 +1670,9 @@ ifeq ($(BRINGUP),1)
 else
 	$(MAKE) ARCH=$(ARCH) BRINGUP=$(BRINGUP) dev-build
 endif
-	$(QEMU) $(patsubst -nographic,-display $(QEMU_GUI_DISPLAY) $(QEMU_GUI_DEVICES) -serial stdio,$(QEMU_FLAGS)) -kernel $(KERNEL_ELF)
+	$(MAKE) ARCH=$(ARCH) BRINGUP=$(BRINGUP) $(GUI_FAT32_IMG)
+	@test -s $(KERNEL_ELF) || (echo "ERROR: kernel ELF missing or empty: $(KERNEL_ELF)" ; exit 1)
+	$(QEMU) $(subst $(FAT32_IMG),$(GUI_FAT32_IMG),$(patsubst -nographic,-display $(QEMU_GUI_DISPLAY) $(QEMU_GUI_DEVICES) -serial stdio,$(QEMU_FLAGS))) -kernel $(KERNEL_ELF)
 
 # --- Debug Targets ---
 
@@ -2006,10 +2042,10 @@ smoke-native-libc:
 	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
 		-machine virt -m 1G -nographic -smp 1 -bios default \
 		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/riscv64-both-dev/fat32.img,if=none,format=raw,id=x0 \
+		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-both-dev/fat32.img,if=none,format=raw,id=x0 \
 		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
 		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
-		-kernel .kernel-build/riscv64-both-dev/kernel.elf \
+		-kernel .kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf \
 		> "$$log" 2>&1 || status=$$?; \
 	if grep -q 'NATIVE_LIBC: PASS' "$$log" && grep -q 'System is going down for power-off NOW' "$$log"; then \
 		echo "smoke-native-libc: PASS; log saved to $$log"; \
@@ -2070,10 +2106,10 @@ $(EVAL_DIR)/sdcard-la.img: | $(EVAL_DIR)
 	fi
 
 # --- eval dev-build targets (match run-*, add contest-mode + 128 MB) ---
-EVAL_KERNEL_RV  = .kernel-build/riscv64-both-dev/kernel.elf
-EVAL_FAT32_RV   = .kernel-build/riscv64-both-dev/fat32.img
-EVAL_KERNEL_LA  = .kernel-build/loongarch64-both-dev/kernel.elf
-EVAL_FAT32_LA   = .kernel-build/loongarch64-both-dev/fat32.img
+EVAL_KERNEL_RV  = .kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf
+EVAL_FAT32_RV   = .kernel-build/riscv64-qemu-virt-riscv64-both-dev/fat32.img
+EVAL_KERNEL_LA  = .kernel-build/loongarch64-qemu-virt-loongarch64-both-dev/kernel.elf
+EVAL_FAT32_LA   = .kernel-build/loongarch64-qemu-virt-loongarch64-both-dev/fat32.img
 EVAL_NET_HOSTFWD_RV ?= hostfwd=tcp::5555-:5555,hostfwd=udp::5555-:5555
 EVAL_NET_HOSTFWD_LA ?= hostfwd=tcp::5556-:5555,hostfwd=udp::5556-:5555
 EVAL_NETDEV_RV = -netdev user,id=net$(if $(strip $(EVAL_NET_HOSTFWD_RV)),$(comma)$(EVAL_NET_HOSTFWD_RV),)

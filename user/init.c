@@ -130,10 +130,18 @@ int main(void)
     snprintf(path_env, sizeof(path_env), "PATH=%s", path_val);
     snprintf(ld_env, sizeof(ld_env), "LD_LIBRARY_PATH=%s", ld_val);
 
+    char *envp[] = {path_env, ld_env, "HOME=/", "SHELL=/bin/mksh", "TERM=vt100", NULL};
+
+    if (access("/bin/etc/a20-gui", F_OK) == 0) {
+        char *desktop_argv[] = {"desktop", NULL};
+        printf("[init] starting desktop\n");
+        execve("/bin/desktop", desktop_argv, envp);
+        perror("execve desktop");
+    }
+
     int contest = (access("/bin/etc/contest-mode", F_OK) == 0);
     char *script = contest ? "/bin/contest.sh" : NULL;
     char *argv[] = {"mksh", script, NULL};
-    char *envp[] = {path_env, ld_env, "HOME=/", "SHELL=/bin/mksh", "TERM=vt100", NULL};
 
     printf("[init] forking...\n");
     shell_pid = fork();
