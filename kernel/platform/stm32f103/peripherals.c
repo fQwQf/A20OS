@@ -19,10 +19,12 @@
 #include "memory.h"
 #include "sdcard.h"
 #include "touch.h"
+#include "wifi.h"
 
 #define TOUCH_POLL_INTERVAL_MS 20U
 #define KEY_POLL_INTERVAL_MS 20U
 #define BLUETOOTH_POLL_INTERVAL_MS 20U
+#define WIFI_POLL_INTERVAL_MS 20U
 #define MEMORY_POLL_INTERVAL_MS 1000U
 #define LIGHT_POLL_INTERVAL_MS 250U
 #define SDCARD_CHECK_INTERVAL_MS 2000U
@@ -34,6 +36,7 @@ static stm32_peripheral_state_t peripherals;
 static uint64_t last_touch_poll;
 static uint64_t last_key_poll;
 static uint64_t last_bluetooth_poll;
+static uint64_t last_wifi_poll;
 static uint64_t last_memory_poll;
 static uint64_t last_light_poll;
 static uint64_t last_sdcard_check;
@@ -68,6 +71,18 @@ static void hub_buzz(uint64_t now, uint32_t ms) {
     if (!buzzer_active || until > buzzer_off_at)
         buzzer_off_at = until;
     buzzer_active = 1;
+}
+
+static void update_wifi_display(void) {
+    const stm32_wifi_info_t *wifi = stm32_wifi_info();
+    stm32_display_set_wifi(
+        wifi->active, wifi->detected, wifi->at_responsive,
+        wifi->configured, wifi->connecting, wifi->joined,
+        wifi->got_ip, wifi->socket_connected, wifi->ssid,
+        wifi->ip_address, wifi->mac_address, wifi->scan_ssid,
+        wifi->access_points, wifi->baud_rate, wifi->received_bytes,
+        wifi->transmitted_bytes, wifi->dropped_bytes,
+        wifi->last_event);
 }
 
 static void update_memory_display(void) {
@@ -117,6 +132,12 @@ static void update_light_display(void) {
 
 static void handle_display_actions(void) {
     stm32_display_action_t action = stm32_display_take_action();
+    if (action == STM32_DISPLAY_ACTION_WIFI_SCAN) {
+        if (stm32_wifi_scan() == 0)
+            printf("[WIFI] AP scan started\n");
+        update_wifi_display();
+        return;
+    }
     if (action != STM32_DISPLAY_ACTION_BLUETOOTH_TEST ||
         !peripherals.bluetooth_ready)
         return;
@@ -241,7 +262,8 @@ void stm32_peripherals_init(void) {
            (unsigned)light->raw_adc,
            (unsigned)light->intensity_percent);
 
-    peripherals.bluetooth_ready = stm32_bluetooth_init() == 0;
+    (void)stm32_bluetooth_init();
+    peripherals.bluetooth_ready = stm32_bluetooth_info()->ready;
     peripherals.bluetooth_connected = stm32_bluetooth_connected();
     const stm32_bluetooth_info_t *bt = stm32_bluetooth_info();
     static const char *const rx_states[] = {
@@ -251,7 +273,8 @@ void stm32_peripherals_init(void) {
     if (rx_state >= sizeof(rx_states) / sizeof(rx_states[0]))
         rx_state = 0;
     printf("[BOOT] HC-05 interface=%s detected=%s"
-           " uart=USART3/PB10/PB11 data-baud=%u at-baud=%u at-mode=%s"
+           " uart=USART3/PB10/PB11 key=PA4 state=PA15"
+           " data-baud=%u at-baud=%u at-mode=%s"
            " rx=%s at=%s config=%s state=%s role=%s name=%s pin=%s"
            " uuid=0x%x requested=0x%x source=%s reset=%s\n",
            peripherals.bluetooth_ready ? "armed" : "disabled",
@@ -274,6 +297,12 @@ void stm32_peripherals_init(void) {
            bt->uuid_configured ? "module-configured" :
            bt->uuid_supported ? "module-mismatch" : "fixed-spp",
            bt->reset_performed ? "yes" : "no");
+
+    peripherals.wifi_ready = stm32_wifi_init() == 0;
+    printf("[BOOT] ESP8266 interface=%s uart=USART2/PA2/PA3"
+           " enable=PC6 reset=PC7 baud=115200"
+           " probe=deferred nonblocking\n",
+           peripherals.wifi_ready ? "armed" : "disabled");
 
     const stm32_memory_info_t *memory = stm32_memory_info();
     peripherals.memory_capacity_from_silicon =
@@ -324,6 +353,7 @@ void stm32_peripherals_init(void) {
 
     update_display_status();
     update_bluetooth_display();
+    update_wifi_display();
     update_memory_display();
     update_light_display();
 }
@@ -476,6 +506,23 @@ void stm32_peripherals_service(uint64_t now) {
         }
     }
 
+    if (peripherals.wifi_ready &&
+        now - last_wifi_poll >= WIFI_POLL_INTERVAL_MS) {
+        last_wifi_poll = now;
+        const stm32_wifi_info_t before = *stm32_wifi_info();
+        stm32_wifi_service(now);
+        const stm32_wifi_info_t *after = stm32_wifi_info();
+        if (before.phase != after->phase ||
+            before.joined != after->joined ||
+            before.got_ip != after->got_ip ||
+            before.socket_connected != after->socket_connected ||
+            before.access_points != after->access_points ||
+            before.received_bytes != after->received_bytes ||
+            before.transmitted_bytes != after->transmitted_bytes ||
+            before.dropped_bytes != after->dropped_bytes)
+            update_wifi_display();
+    }
+
     if (now - last_memory_poll >= MEMORY_POLL_INTERVAL_MS) {
         last_memory_poll = now;
         update_memory_display();
@@ -542,6 +589,17 @@ int stm32_peripherals_retry_bluetooth(void) {
     peripherals.bluetooth_connected = stm32_bluetooth_connected();
     report_bluetooth();
     update_bluetooth_display();
+    update_wifi_display();
+    return result;
+}
+
+int stm32_peripherals_retry_wifi(void) {
+    uint64_t start = timer_get_ticks();
+    int result = stm32_wifi_reprobe();
+    record_max(&peripherals.wifi_retry_max_ms, elapsed_ms(start));
+    peripherals.wifi_ready = result == 0;
+    update_bluetooth_display();
+    update_wifi_display();
     return result;
 }
 
