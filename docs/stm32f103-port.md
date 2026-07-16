@@ -149,13 +149,21 @@ and a link is accepted only after the signal remains high for 500 ms; this
 prevents an absent module or an LED-style pulse from being reported as a
 connection.
 
-USART1 and USART3 share the STM32 UART register driver. It derives their
+USART1, USART2, and USART3 share the STM32 UART register driver. It derives their
 peripheral clocks from the live RCC clock tree, computes and reports the actual
 BRR value, resets each USART before use, configures 8N1 TX/RX pins, drains
 hardware error conditions, and controls the corresponding NVIC line. USART3
 explicitly clears its remap bits so the module always uses the Xuanwu
 `PB10/PB11` routing even if a debugger or previously flashed application left
 AFIO in a different state.
+
+The two radios operate concurrently. The directly inserted HC-05 keeps the
+board socket described above. The ESP8266 connected with Dupont wires uses
+`USART2` (`PA2` TX to ESP RX, `PA3` RX from ESP TX), with `PC6` driving
+CH_PD/EN and `PC7` driving RESET. Both modules and the MCU must share ground;
+the ESP8266 supply must provide adequate 3.3 V current. USART2 and USART3 have
+independent receive interrupts and ring buffers, so WiFi probing cannot take
+ownership of or reconfigure the Bluetooth UART.
 
 Board early-init keeps PA4 low so the module boots into discoverable data
 mode. Configuration follows the supplied PZ sample's runtime AT sequence

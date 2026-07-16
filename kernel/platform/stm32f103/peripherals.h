@@ -13,6 +13,7 @@ typedef struct stm32_peripheral_state {
     int keys_ready;
     int bluetooth_ready;
     int bluetooth_connected;
+    int wifi_ready;
     int light_sensor_ready;
     int memory_capacity_from_silicon;
     uint32_t service_calls;
@@ -22,12 +23,14 @@ typedef struct stm32_peripheral_state {
     uint32_t light_max_ms;
     uint32_t sdcard_max_ms;
     uint32_t bluetooth_retry_max_ms;
+    uint32_t wifi_retry_max_ms;
 } stm32_peripheral_state_t;
 
 void stm32_peripherals_init(void);
 void stm32_peripherals_service(uint64_t now);
 int stm32_peripherals_retry_sdcard(void);
 int stm32_peripherals_retry_bluetooth(void);
+int stm32_peripherals_retry_wifi(void);
 const stm32_peripheral_state_t *stm32_peripherals_state(void);
 
 #endif
