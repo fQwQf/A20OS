@@ -1,5 +1,6 @@
 #include "core/arch.h"
 #include "core/stdio.h"
+#include "core/string.h"
 #include "core/timer.h"
 #include "drivers/char/uart.h"
 #include "drivers/core/driver_core.h"
@@ -12,8 +13,9 @@
 #include "light_sensor.h"
 #include "smarthub.h"
 #include "stm32_uart.h"
+#include "wifi.h"
 
-static volatile char diagnostic_line[64];
+static volatile char diagnostic_line[160];
 static unsigned diagnostic_length;
 
 static int text_equal(const char *left, const char *right) {
@@ -64,7 +66,8 @@ static void diagnostic_performance(void) {
     const stm32_peripheral_state_t *state = stm32_peripherals_state();
     printf("[PERF] uptime=%lu ms hclk=%u pclk1=%u pclk2=%u"
            " service-calls=%u last=%u ms max=%u ms slow=%u"
-           " light-max=%u ms sd-max=%u ms bt-retry-max=%u ms\n",
+           " light-max=%u ms sd-max=%u ms bt-retry-max=%u ms"
+           " wifi-retry-max=%u ms\n",
            (unsigned long)timer_get_ticks(),
            (unsigned)stm32_hclk_hz(),
            (unsigned)stm32_pclk1_hz(),
@@ -75,12 +78,13 @@ static void diagnostic_performance(void) {
            (unsigned)state->service_slow_calls,
            (unsigned)state->light_max_ms,
            (unsigned)state->sdcard_max_ms,
-           (unsigned)state->bluetooth_retry_max_ms);
+           (unsigned)state->bluetooth_retry_max_ms,
+           (unsigned)state->wifi_retry_max_ms);
 }
 
 static void diagnostic_help(void) {
     printf("Commands:\n");
-    printf("  uart          show USART1/USART3 clock/baud/error state\n");
+    printf("  uart          show all USART clock/baud/error state\n");
     printf("  perf          show clocks and main service latency\n");
     printf("  light         show ADC3 light sensor state\n");
     printf("  sd retry      explicitly probe and initialize the TF card\n");
@@ -88,6 +92,13 @@ static void diagnostic_help(void) {
     printf("  bt retry      rerun HC-05 detection and slave configuration\n");
     printf("  bt probe      scan HC-05 runtime AT baud/key modes\n");
     printf("  bt at <cmd>   send an AT command, for example AT+ROLE?\n");
+    printf("  wifi          show ESP8266 and network state\n");
+    printf("  wifi retry    reprobe ESP8266 on USART2\n");
+    printf("  wifi scan     asynchronously scan access points\n");
+    printf("  wifi join <ssid> <password>  join an access point\n");
+    printf("  wifi open <tcp|udp> <host> <port>  open a socket\n");
+    printf("  wifi send <text> / wifi read / wifi close\n");
+    printf("  wifi at <cmd> send a raw ESP8266 AT command\n");
     printf("  help          show this command list\n");
 }
 
@@ -104,6 +115,21 @@ static void diagnostic_execute(char *line) {
                (unsigned)arch_uart_actual_baud_rate(),
                (unsigned)arch_uart_divider(),
                (unsigned)arch_uart_error_count());
+        const stm32_uart_info_t *uart2 =
+            stm32_uart_info(STM32_UART_USART2);
+        printf("[UART] USART2 PA2/PA3 initialized=%d clock=%u"
+               " requested=%u actual=%u BRR=0x%x 8N1 rx-irq=%d"
+               " errors=%u rx=%u tx=%u edges=%u pin=%d last=0x%x\n",
+               uart2->initialized, (unsigned)uart2->clock_hz,
+               (unsigned)uart2->requested_baud,
+               (unsigned)uart2->actual_baud,
+               (unsigned)uart2->divider, uart2->rx_irq_enabled,
+               (unsigned)uart2->error_count,
+               (unsigned)uart2->rx_bytes,
+               (unsigned)uart2->tx_bytes,
+               (unsigned)uart2->rx_transitions,
+               stm32_uart_rx_pin_level(STM32_UART_USART2),
+               (unsigned)uart2->last_rx_byte);
         const stm32_uart_info_t *uart3 =
             stm32_uart_info(STM32_UART_USART3);
         printf("[UART] USART3 PB10/PB11 initialized=%d clock=%u"
@@ -140,6 +166,60 @@ static void diagnostic_execute(char *line) {
         (void)stm32_bluetooth_debug_probe();
     } else if (text_starts_with(line, "bt at ")) {
         (void)stm32_bluetooth_debug_at(line + 6);
+    } else if (text_equal(line, "wifi")) {
+        stm32_wifi_debug_status();
+    } else if (text_equal(line, "wifi retry")) {
+        int result = stm32_peripherals_retry_wifi();
+        printf("[WIFI-DIAG] retry=%s\n",
+               result == 0 ? "scheduled" : "failed");
+    } else if (text_equal(line, "wifi scan")) {
+        printf("[WIFI-DIAG] scan=%s\n",
+               stm32_wifi_scan() == 0 ? "scheduled" : "busy-or-unavailable");
+    } else if (text_starts_with(line, "wifi join ")) {
+        char *args = line + 10;
+        char *space = strchr(args, ' ');
+        if (!space) {
+            printf("Usage: wifi join <ssid> <password>\n");
+        } else {
+            *space++ = '\0';
+            printf("[WIFI-DIAG] join ssid=%s result=%s\n", args,
+                   stm32_wifi_join(args, space) == 0 ?
+                       "scheduled" : "invalid-or-busy");
+        }
+    } else if (text_starts_with(line, "wifi open ")) {
+        char *save = NULL;
+        char *protocol = strtok_r(line + 10, " ", &save);
+        char *host = strtok_r(NULL, " ", &save);
+        char *port_text = strtok_r(NULL, " ", &save);
+        int port = port_text ? atoi(port_text) : 0;
+        printf("[WIFI-DIAG] open=%s\n",
+               protocol && host && port > 0 && port <= 65535 &&
+               stm32_wifi_open(protocol, host, (uint16_t)port) == 0 ?
+                   "scheduled" : "invalid-or-busy");
+    } else if (text_starts_with(line, "wifi send ")) {
+        const char *data = line + 10;
+        printf("[WIFI-DIAG] send=%s\n",
+               stm32_wifi_send(data, strlen(data)) == 0 ?
+                   "scheduled" : "socket-unavailable-or-busy");
+    } else if (text_equal(line, "wifi read")) {
+        char data[97];
+        int length = stm32_wifi_read(data, sizeof(data) - 1U);
+        if (length > 0) {
+            data[length] = '\0';
+            printf("[WIFI-RX] bytes=%u data=", (unsigned)length);
+            for (int i = 0; i < length; i++)
+                printf("%c", data[i] >= 32 && data[i] <= 126 ? data[i] : '.');
+            printf("\n");
+        } else {
+            printf("[WIFI-RX] empty\n");
+        }
+    } else if (text_equal(line, "wifi close")) {
+        printf("[WIFI-DIAG] close=%s\n",
+               stm32_wifi_close() == 0 ? "scheduled" : "busy");
+    } else if (text_starts_with(line, "wifi at ")) {
+        printf("[WIFI-DIAG] raw-at=%s\n",
+               stm32_wifi_debug_at(line + 8) == 0 ?
+                   "scheduled" : "invalid-or-busy");
     } else {
         printf("Unknown command: %s\n", line);
         printf("Type help for available commands.\n");
@@ -173,7 +253,10 @@ static void diagnostic_service(void) {
             continue;
         }
         diagnostic_line[diagnostic_length++] = (char)c;
-        uart_putc((char)c);
+        diagnostic_line[diagnostic_length] = '\0';
+        if (!text_starts_with((char *)diagnostic_line, "wifi join ") ||
+            !strchr((char *)diagnostic_line + 10, ' '))
+            uart_putc((char)c);
     }
 }
 
