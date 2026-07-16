@@ -20,6 +20,7 @@ user/external/musl/build-*/
 user/external/musl/build-*-nommu/
 user/external/musl/dist/
 user/external/sbase/id
+user/external/musl/build-*/build/
 .clangd
 .vscode/
 kernel-rv

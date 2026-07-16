@@ -45,6 +45,9 @@ typedef struct {
 #define MAX_VIRTIO_INPUT_DEVS 4
 static virtio_input_inst_t g_input_insts[MAX_VIRTIO_INPUT_DEVS];
 static int g_ninputs = 0;
+static device_t g_input_pci_devices[MAX_VIRTIO_INPUT_DEVS];
+static uint8_t g_input_irq_registered[256];
+static unsigned g_input_trace_events;
 
 static void virtio_input_mmio_write32(virtio_transport_t *t, uint32_t off, uint32_t val) {
     writel(val, (volatile void *)((uintptr_t)t->priv + off));
@@ -74,10 +77,9 @@ static void virtio_input_submit_all(virtio_input_inst_t *inst) {
     mb();
 }
 
-static int virtio_input_irq(int irq, void *priv) {
-    (void)irq;
-    virtio_input_inst_t *inst = (virtio_input_inst_t *)priv;
-    if (!inst->valid) return 0;
+static void virtio_input_handle_inst(virtio_input_inst_t *inst) {
+    if (!inst->valid)
+        return;
     
     uint32_t isr = inst->vt.read32(&inst->vt, VIRTIO_MMIO_INTERRUPT_STATUS);
     if (!inst->vt.legacy)
@@ -99,6 +101,12 @@ static int virtio_input_irq(int irq, void *priv) {
         
         struct virtio_input_event *evt = &inst->events[id].event;
         arch_dma_sync_for_cpu(evt, sizeof(*evt));
+
+        if (g_input_trace_events < 8) {
+            kinfo("[INPUT] event type=%u code=%u value=%d\n",
+                  evt->type, evt->code, (int)evt->value);
+            g_input_trace_events++;
+        }
         
         // Add to user ring
         uint32_t next_head = (inst->head + 1) % 256;
@@ -134,13 +142,34 @@ static int virtio_input_irq(int irq, void *priv) {
     }
     
     spin_unlock_irqrestore(&inst->lock, flags);
+}
+
+static int virtio_input_irq(int irq, void *priv) {
+    (void)priv;
+
+    /* QEMU's PCI virtio keyboard and mouse commonly share one INTx line.
+     * The core IRQ table has one handler per line, so drain every input queue
+     * attached to the asserted line instead of replacing the first handler. */
+    for (int i = 0; i < MAX_VIRTIO_INPUT_DEVS; i++) {
+        virtio_input_inst_t *inst = &g_input_insts[i];
+        if (inst->valid && inst->vt.irq == irq)
+            virtio_input_handle_inst(inst);
+    }
     return 0;
+}
+
+static void virtio_input_poll(void) {
+    for (int i = 0; i < g_ninputs; i++)
+        virtio_input_handle_inst(&g_input_insts[i]);
 }
 
 static int input_read(vfile_t *vf, char *buf, size_t count) {
     if (count < sizeof(struct input_event)) return -EINVAL;
     
     while (1) {
+        /* Keep the GUI responsive on QEMU variants whose virtio IRQ route is
+         * masked or unavailable even though the queue itself is operational. */
+        virtio_input_poll();
         for (int i = 0; i < g_ninputs; i++) {
             virtio_input_inst_t *inst = &g_input_insts[i];
             if (!inst->valid) continue;
@@ -193,24 +222,17 @@ vfile_ops_t g_devfs_input_ops = {
     .ioctl = input_ioctl,
 };
 
-static int virtio_input_probe(device_t *dev) {
+static int virtio_input_init_transport(device_t *dev,
+                                       const virtio_transport_t *transport) {
     if (g_ninputs >= MAX_VIRTIO_INPUT_DEVS) return -1;
     virtio_input_inst_t *inst = &g_input_insts[g_ninputs];
 
-    resource_t *mmio_res = device_get_resource(dev, RES_MMIO, 0);
-    resource_t *irq_res = NULL;
-    if (!mmio_res) return -1;
-    
-    
     memset(inst, 0, sizeof(*inst));
     spin_init(&inst->lock);
-    
-    inst->vt.read32  = virtio_input_mmio_read32;
-    inst->vt.write32 = virtio_input_mmio_write32;
-    inst->vt.priv    = (void *)(uintptr_t)mmio_res->start;
-    inst->vt.legacy  = 0;
+    inst->vt = *transport;
     
     virtio_transport_t *vt = &inst->vt;
+    int registered_irq = 0;
 
     uint32_t magic = vt->read32(vt, VIRTIO_MMIO_MAGIC);
     uint32_t version = vt->read32(vt, VIRTIO_MMIO_VERSION);
@@ -275,11 +297,17 @@ static int virtio_input_probe(device_t *dev) {
     vt->write32(vt, VIRTIO_MMIO_QUEUE_READY, 1);
     mb();
     
-    irq_res = device_get_resource(dev, RES_IRQ, 0);
-    if (!irq_res ||
-        request_irq((uint32_t)irq_res->start, virtio_input_irq, 0, inst) != 0) {
+    if (vt->irq < 0 || vt->irq >= (int)sizeof(g_input_irq_registered)) {
         kinfo("[INPUT] Failed to register IRQ\n");
         goto fail;
+    }
+    if (!g_input_irq_registered[vt->irq]) {
+        if (request_irq((uint32_t)vt->irq, virtio_input_irq, 0, NULL) != 0) {
+            kinfo("[INPUT] Failed to register IRQ\n");
+            goto fail;
+        }
+        g_input_irq_registered[vt->irq] = 1;
+        registered_irq = 1;
     }
     
     status |= VIRTIO_STATUS_DRIVER_OK;
@@ -291,17 +319,54 @@ static int virtio_input_probe(device_t *dev) {
     virtio_input_submit_all(inst);
     g_ninputs++;
 
-    kinfo("[INPUT] virtio-input ready at 0x%lx\n",
-          (unsigned long)mmio_res->start);
+    kinfo("[INPUT] virtio-input ready (irq=%d)\n", vt->irq);
     return 0;
 
 fail:
-    if (irq_res)
-        free_irq((uint32_t)irq_res->start, inst);
+    if (registered_irq) {
+        free_irq((uint32_t)vt->irq, inst);
+        g_input_irq_registered[vt->irq] = 0;
+    }
     vt->write32(vt, VIRTIO_MMIO_STATUS,
                 vt->read32(vt, VIRTIO_MMIO_STATUS) | VIRTIO_STATUS_FAILED);
     memset(inst, 0, sizeof(*inst));
     return -1;
+}
+
+static int virtio_input_probe(device_t *dev) {
+    resource_t *mmio_res = device_get_resource(dev, RES_MMIO, 0);
+    resource_t *irq_res = device_get_resource(dev, RES_IRQ, 0);
+    if (!mmio_res || !irq_res)
+        return -1;
+
+    virtio_transport_t vt = {
+        .read32 = virtio_input_mmio_read32,
+        .write32 = virtio_input_mmio_write32,
+        .priv = (void *)(uintptr_t)mmio_res->start,
+        .legacy = 0,
+        .irq = (int)irq_res->start,
+    };
+    return virtio_input_init_transport(dev, &vt);
+}
+
+int virtio_input_init(void) {
+    if (g_ninputs > 0)
+        return 0;
+
+    int initialized = 0;
+    for (int index = 0; index < MAX_VIRTIO_INPUT_DEVS; index++) {
+        virtio_transport_t vt;
+        if (arch_virtio_input_probe(index, &vt) != 0)
+            break;
+
+        device_t *dev = &g_input_pci_devices[index];
+        memset(dev, 0, sizeof(*dev));
+        dev->name = "virtio-input-pci";
+        if (virtio_input_init_transport(dev, &vt) != 0)
+            return initialized ? 0 : -1;
+        initialized++;
+    }
+    return initialized ? 0 : -1;
 }
 
 static const device_id_t virtio_input_ids[] = {

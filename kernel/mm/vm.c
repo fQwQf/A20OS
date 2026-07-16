@@ -1454,6 +1454,27 @@ vaddr_t mm_brk(mm_struct_t *mm, vaddr_t newbrk) {
         if (new_brk_page < old_brk_page)
             arch_tlb_flush();  // 刷新 TLB
     }
+    /*
+     * brk pages are installed lazily by handle_demand_fault().  They still
+     * need a VMA: without it, a first write to the grown heap is rejected as
+     * an unmapped address before the brk fault path can allocate a frame.
+     */
+    if (newbrk > mm->brk) {
+        vaddr_t map_start = ROUND_UP(mm->brk, PAGE_SIZE);
+        vaddr_t map_end = ROUND_UP(newbrk, PAGE_SIZE);
+        if (map_end > map_start) {
+            vm_area_t *vma = kcalloc(1, sizeof(*vma));
+            if (!vma)
+                return mm->brk;
+            vma->start = map_start;
+            vma->end = map_end;
+            vma->vm_flags = VM_ANON | VM_READ | VM_WRITE;
+            vma->pte_flags = mm_user_brk_pte_flags();
+            vma->file_fd = -1;
+            mm_insert_vma(mm, vma);
+            mm->total_vm += (map_end - map_start) / PAGE_SIZE;
+        }
+    }
     mm->brk = newbrk;
     return mm->brk;
 #endif

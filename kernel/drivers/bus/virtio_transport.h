@@ -38,5 +38,7 @@ typedef struct virtio_transport {
  * On failure (no more devices), returns -1. */
 int arch_virtio_blk_probe(int index, virtio_transport_t *vt);
 int arch_virtio_net_probe(int index, virtio_transport_t *vt);
+int arch_virtio_gpu_probe(int index, virtio_transport_t *vt);
+int arch_virtio_input_probe(int index, virtio_transport_t *vt);
 
 #endif /* _VIRTIO_TRANSPORT_H */
