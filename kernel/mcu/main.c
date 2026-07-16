@@ -10,6 +10,7 @@
 #include "peripherals.h"
 #include "heap.h"
 #include "light_sensor.h"
+#include "smarthub.h"
 #include "stm32_uart.h"
 
 static volatile char diagnostic_line[64];
@@ -210,6 +211,12 @@ void kernel_main(void) {
     printf("[BOOT] SysTick=1000Hz source=HCLK=%u, entering WFI loop\n",
            (unsigned)stm32_hclk_hz());
     diagnostic_help();
+#ifdef CONFIG_STM32_QEMU
+    /* On QEMU the peripherals are stubbed out; exercise the hardware-
+     * independent smart-hub core (rule engine + frame protocol) so the run
+     * demonstrates real logic rather than an empty tick loop. */
+    smarthub_selftest();
+#endif
     diagnostic_prompt();
 
     uint64_t last_tick_report = 0;
