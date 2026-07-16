@@ -27,8 +27,9 @@
 #define WIFI_SEND_SIZE 192U
 #define WIFI_DATA_SIZE 512U
 #define WIFI_RESET_ASSERT_MS 500U
-#define WIFI_BOOT_WAIT_MS 1200U
-#define WIFI_AT_TIMEOUT_MS 500U
+#define WIFI_BOOT_WAIT_MS 2000U
+#define WIFI_AT_TIMEOUT_MS 700U
+#define WIFI_AT_ATTEMPTS 3U
 #define WIFI_COMMAND_TIMEOUT_MS 1200U
 #define WIFI_JOIN_TIMEOUT_MS 12000U
 #define WIFI_SCAN_TIMEOUT_MS 8000U
@@ -58,8 +59,14 @@ static size_t wifi_response_processed;
 static size_t wifi_scan_parse_offset;
 static char wifi_command[64];
 static uint32_t wifi_command_baud;
+static uint32_t wifi_command_errors;
+static unsigned wifi_probe_baud_index;
+static unsigned wifi_probe_attempt;
 
-#define WIFI_BAUD_RATE 115200U
+/* Official Nano AT uses 115200; the older PZ example shipped at 9600. */
+static const uint32_t wifi_probe_baud_rates[] = {
+    115200U, 9600U, 57600U, 38400U, 19200U,
+};
 
 static void wifi_set_event(const char *text);
 
@@ -87,7 +94,7 @@ static void wifi_log_response(void) {
             printf("...");
     }
     printf(" bytes=%u errors=%u\n", (unsigned)wifi_response_length,
-           (unsigned)wifi.uart_errors);
+           (unsigned)(wifi.uart_errors - wifi_command_errors));
 }
 
 #ifdef CONFIG_STM32_XUANWU
@@ -159,6 +166,7 @@ static int wifi_begin_command(const char *command,
               strncmp(command, "AT+CWJAP=", 9U) == 0 ?
                   "AT+CWJAP=<credentials-redacted>" : command);
     wifi_command_baud = wifi.baud_rate;
+    wifi_command_errors = wifi.uart_errors;
     if (wifi_send_bytes(command, strlen(command)) != 0 ||
         wifi_send_bytes("\r\n", 2U) != 0) {
         wifi.command_busy = 0;
@@ -431,6 +439,31 @@ static void wifi_start_join(uint64_t now) {
         wifi_enter_ready();
 }
 
+static int wifi_retry_probe(uint64_t now) {
+    if (wifi_probe_attempt < WIFI_AT_ATTEMPTS) {
+        wifi_probe_attempt++;
+        printf("[WIFI] no AT reply at %u, retry=%u/%u\n",
+               (unsigned)wifi.baud_rate, wifi_probe_attempt,
+               WIFI_AT_ATTEMPTS);
+        return wifi_begin_command("AT", STM32_WIFI_AT_WAIT, now,
+                                  WIFI_AT_TIMEOUT_MS);
+    }
+
+    while (++wifi_probe_baud_index <
+           sizeof(wifi_probe_baud_rates) / sizeof(wifi_probe_baud_rates[0])) {
+        uint32_t baud = wifi_probe_baud_rates[wifi_probe_baud_index];
+        if (stm32_uart_set_baud(WIFI_UART, baud) != 0)
+            continue;
+        printf("[WIFI] no AT reply at %u, trying baud=%u\n",
+               (unsigned)wifi.baud_rate, (unsigned)baud);
+        wifi.baud_rate = baud;
+        wifi_probe_attempt = 1U;
+        return wifi_begin_command("AT", STM32_WIFI_AT_WAIT, now,
+                                  WIFI_AT_TIMEOUT_MS);
+    }
+    return -1;
+}
+
 int stm32_wifi_init(void) {
 #ifndef CONFIG_STM32_XUANWU
     return -1;
@@ -440,7 +473,9 @@ int stm32_wifi_init(void) {
     wifi_copy(wifi_password, sizeof(wifi_password), STM32_WIFI_PASSWORD);
     wifi.active = 1;
     wifi.phase = STM32_WIFI_RESET_WAIT;
-    wifi.baud_rate = WIFI_BAUD_RATE;
+    wifi_probe_baud_index = 0;
+    wifi_probe_attempt = 0;
+    wifi.baud_rate = wifi_probe_baud_rates[wifi_probe_baud_index];
     wifi_rx_head = 0;
     wifi_rx_tail = 0;
     wifi_response_length = 0;
@@ -532,6 +567,7 @@ void stm32_wifi_service(uint64_t now) {
     if (wifi.phase == STM32_WIFI_BOOT_WAIT) {
         if (now < wifi_deadline)
             return;
+        wifi_probe_attempt = 1U;
         wifi_begin_command("AT", STM32_WIFI_AT_WAIT, now,
                            WIFI_AT_TIMEOUT_MS);
         return;
@@ -639,6 +675,9 @@ void stm32_wifi_service(uint64_t now) {
         return;
 
     wifi.command_timeouts++;
+    if (wifi.phase == STM32_WIFI_AT_WAIT &&
+        wifi_retry_probe(now) == 0)
+        return;
     if (wifi.phase == STM32_WIFI_GMR_WAIT) {
         wifi_start_mode(now);
         return;
