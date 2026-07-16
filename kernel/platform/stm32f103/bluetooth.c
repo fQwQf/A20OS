@@ -830,12 +830,22 @@ int stm32_bluetooth_init(void) {
         bluetooth_rx_line_is_present(bluetooth.rx_line_state) ||
         bluetooth.detected;
 
+    /*
+     * When the module never drives USART3 RX after its power-on delay there is
+     * no HC-05 answering, so the exhaustive multi-baud AT scan cannot receive a
+     * single byte: the extra retry rounds only stall boot (tens of seconds) and
+     * flood the console without changing the outcome (ready stays 0). Scan once
+     * in that case. A module whose TX line is driven keeps the full retry
+     * budget for robust auto-baud detection, and even the single fallback scan
+     * is a complete 6-baud sweep, so a genuinely present module is never missed.
+     */
+    unsigned init_retries = bluetooth.detected ? BLUETOOTH_INIT_RETRIES : 0U;
     int configured = 0;
-    for (unsigned attempt = 0; attempt <= BLUETOOTH_INIT_RETRIES; attempt++) {
+    for (unsigned attempt = 0; attempt <= init_retries; attempt++) {
         configured = bluetooth_configure() == 0;
         if (configured)
             break;
-        if (attempt < BLUETOOTH_INIT_RETRIES) {
+        if (attempt < init_retries) {
             printf("[BT] configuration attempt %u failed, retrying in %u ms\n",
                    attempt + 1U,
                    (unsigned)BLUETOOTH_INIT_RETRY_DELAY_MS);
