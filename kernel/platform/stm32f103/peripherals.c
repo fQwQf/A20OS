@@ -2,23 +2,29 @@
 
 #include "peripherals.h"
 #include "core/stdio.h"
+#include "core/string.h"
 #include "core/timer.h"
 #include "mm/slab.h"
 #include "actuators.h"
 #include "bluetooth.h"
 #include "dht11.h"
 #include "display.h"
-#include "esp8266.h"
 #include "extsram.h"
 #include "hub_config.h"
 #include "hub_controller.h"
 #include "hub_proto.h"
+#include "hub_ui.h"
 #include "ir.h"
+#include "live2d.h"
+#include "ui_home.h"
 #include "keys.h"
 #include "light_sensor.h"
 #include "memory.h"
 #include "sdcard.h"
+#include "sdfs.h"
 #include "touch.h"
+#include "watchdog.h"
+#include "touch_cal.h"
 #include "wifi.h"
 
 #define TOUCH_POLL_INTERVAL_MS 20U
@@ -52,9 +58,33 @@ static uint8_t last_humidity;
 static int have_env;
 static uint64_t buzzer_off_at;
 static int buzzer_active;
-static int net_ready;   /* ESP8266 joined + proxy TCP connected */
 static uint8_t net_seq; /* SNAPSHOT frame sequence number       */
 static int ir_present;
+
+/* --- cloud control over the non-blocking wifi.c TCP socket --- */
+#define CLOUD_REPLY_TIMEOUT_MS 1500U    /* wait for a CONTROL after a SNAPSHOT */
+#define CLOUD_FRESH_MS 8000U            /* how long a cloud decision overrides */
+#define CLOUD_CONNECT_BACKOFF_MS 5000U  /* retry cadence for CIPSTART          */
+static char cloud_proxy_ip[16] = HUB_PROXY_IP;
+static uint16_t cloud_proxy_port = HUB_PROXY_PORT;
+static uint8_t cloud_rx[HUB_OVERHEAD + HUB_MAX_PAYLOAD]; /* frame reassembly    */
+static size_t cloud_rx_len;
+static uint64_t cloud_connect_retry_at;
+static int cloud_awaiting;           /* SNAPSHOT sent, CONTROL not yet parsed  */
+static uint64_t cloud_reply_deadline;
+static hub_control_t cloud_last;     /* most recent CONTROL from the proxy     */
+static int cloud_last_valid;
+static uint64_t cloud_last_ms;
+
+/* Assembled UI/Live2D state for the on-board renderer (wiring to display.c is
+ * the on-board step; kept current here so it's ready). */
+static ui_home_state_t g_ui_state;
+static live2d_t g_cat;
+static char g_last_speech[HUB_SPEECH_MAX + 1];
+
+/* Config loaded from /CFG/WIFI.TXT at boot (SSID used for a one-shot join). */
+static hub_cfg_t boot_cfg;
+static int cfg_join_attempted;
 
 /* Buzzer feedback durations (ms). */
 #define BUZZ_BOOT_MS 120U  /* "hub is alive" chime at startup       */
@@ -246,9 +276,29 @@ void stm32_peripherals_init(void) {
     peripherals.sdcard_ready = stm32_sdcard_init() == 0;
     report_sdcard();
 
+    /* Mount FAT32 so assets/config/logs on the card are reachable as files. */
+    if (peripherals.sdcard_ready) {
+        int fs = stm32_sdfs_mount();
+        printf("[BOOT] TF filesystem=%s\n",
+               fs == FAT32_OK ? "fat32 mounted" : "mount failed");
+        /* Apply /CFG/WIFI.TXT: retarget the proxy, and stash creds for join. */
+        if (fs == FAT32_OK && stm32_sdfs_load_config(&boot_cfg) > 0) {
+            if (boot_cfg.have_proxy)
+                stm32_peripherals_set_proxy(boot_cfg.proxy_ip,
+                                            boot_cfg.proxy_port);
+            printf("[BOOT] config=/CFG/WIFI.TXT ssid=%s proxy=%s\n",
+                   boot_cfg.have_ssid ? boot_cfg.ssid : "(none)",
+                   boot_cfg.have_proxy ? "set" : "(none)");
+        }
+    }
+
     peripherals.touch_armed = stm32_touch_init() == 0;
     printf("[BOOT] touch interface=%s (optional)\n",
            peripherals.touch_armed ? "armed" : "disabled");
+    /* Apply a saved four-corner calibration if the card carries one. */
+    if (peripherals.touch_armed && stm32_sdfs_ready() &&
+        stm32_sdfs_load_touch_cal() == FAT32_OK)
+        printf("[BOOT] touch calibration=loaded (/CFG/TOUCH.CAL)\n");
 
     peripherals.keys_ready = stm32_keys_init() == 0;
     printf("[BOOT] direction keys=%s\n",
@@ -323,6 +373,8 @@ void stm32_peripherals_init(void) {
     dht_present = stm32_dht11_init() == 0;
     stm32_actuators_init();
     hub_controller_init(&hub_ctl);
+    live2d_init(&g_cat);
+    g_last_speech[0] = '\0';
     have_env = 0;
     buzzer_active = 0;
     printf("[BOOT] smart-hub controller ready dht11=%s (PG11)"
@@ -337,8 +389,10 @@ void stm32_peripherals_init(void) {
      * Do not run the legacy synchronous esp8266.c probe here: it resets the
      * same UART and can hold boot before touch polling and buzzer shutdown.
      */
-    net_ready = 0;
-    printf("[BOOT] cloud control=deferred nonblocking local-rules-active\n");
+    printf("[BOOT] cloud control=nonblocking via wifi.c proxy=%s:%u"
+           " (run `wifi join` then it auto-connects; `proxy <ip> <port>` to"
+           " retarget)\n",
+           cloud_proxy_ip, (unsigned)cloud_proxy_port);
 
     update_display_status();
     update_bluetooth_display();
@@ -346,7 +400,118 @@ void stm32_peripherals_init(void) {
     update_memory_display();
     update_light_display();
     hub_buzz(timer_get_ticks(), BUZZ_BOOT_MS); /* one startup chime */
+
+    /*
+     * Arm the watchdog only now — after the slow one-shot probes (bluetooth AT
+     * scan, SD init) — so bring-up can't trip it. From here the service loop
+     * must feed it within the timeout or the MCU resets.
+     */
+    stm32_watchdog_init(6000);
+    printf("[BOOT] watchdog=%s (IWDG 6s)\n",
+           stm32_watchdog_active() ? "armed" : "off");
+
+    if (stm32_sdfs_ready()) /* one boot marker to /LOG/RUN.LOG */
+        stm32_sdfs_log(timer_get_ticks(), "BOOT", "smart-hub up");
 }
+
+/*
+ * Non-blocking cloud link over wifi.c: keep a TCP socket to the proxy open
+ * (auto-connect once WiFi has an IP), drain incoming bytes, and reassemble
+ * CONTROL frames into cloud_last. Runs every service tick.
+ */
+static void cloud_net_service(uint64_t now) {
+    const stm32_wifi_info_t *w = stm32_wifi_info();
+    if (!w->active || !w->got_ip) {
+        cloud_rx_len = 0;
+        cloud_awaiting = 0;
+        return;
+    }
+    if (!w->socket_connected) {
+        cloud_rx_len = 0;
+        cloud_awaiting = 0;
+        if (!w->command_busy && now >= cloud_connect_retry_at) {
+            if (stm32_wifi_open("TCP", cloud_proxy_ip, cloud_proxy_port) == 0)
+                printf("[NET] connecting proxy %s:%u\n", cloud_proxy_ip,
+                       (unsigned)cloud_proxy_port);
+            cloud_connect_retry_at = now + CLOUD_CONNECT_BACKOFF_MS;
+        }
+        return;
+    }
+
+    /* Drain the socket ring into the frame-reassembly buffer. */
+    for (;;) {
+        uint8_t chunk[64];
+        int n = stm32_wifi_read(chunk, sizeof(chunk));
+        if (n <= 0)
+            break;
+        for (int i = 0; i < n; i++)
+            if (cloud_rx_len < sizeof(cloud_rx))
+                cloud_rx[cloud_rx_len++] = chunk[i];
+    }
+
+    /* Extract every complete CONTROL frame; resync past bad/leading bytes. */
+    size_t off = 0;
+    while (off < cloud_rx_len) {
+        hub_frame_t f;
+        int r = hub_proto_parse(cloud_rx + off, cloud_rx_len - off, &f);
+        if (r == 0)
+            break; /* need more bytes */
+        if (r < 0) {
+            off++; /* drop one byte and re-scan for the magic */
+            continue;
+        }
+        hub_control_t cc;
+        if (hub_proto_decode_control(&f, &cc) == 0) {
+            cloud_last = cc;
+            cloud_last_valid = 1;
+            cloud_last_ms = now;
+            cloud_awaiting = 0;
+            printf("[NET] cloud fan=%u pump=%u theme=%u mood=%u speech=%s\n",
+                   cc.fan_level, cc.pump_on, cc.theme_id, cc.mood, cc.speech);
+        }
+        off += (size_t)r;
+    }
+    if (off > 0) { /* compact consumed bytes */
+        size_t rem = cloud_rx_len - off;
+        for (size_t i = 0; i < rem; i++)
+            cloud_rx[i] = cloud_rx[off + i];
+        cloud_rx_len = rem;
+    } else if (cloud_rx_len == sizeof(cloud_rx)) {
+        cloud_rx_len = 0; /* full of unparseable garbage -> drop it */
+    }
+
+    if (cloud_awaiting && now >= cloud_reply_deadline)
+        cloud_awaiting = 0; /* reply timed out; keep the socket, retry next tick */
+}
+
+/* Retarget the proxy at runtime (console `proxy <ip> <port>`); drops any open
+ * socket so the next service reconnects to the new address. */
+int stm32_peripherals_set_proxy(const char *ip, uint16_t port) {
+    if (!ip || port == 0)
+        return -1;
+    size_t n = 0;
+    while (ip[n] && n < sizeof(cloud_proxy_ip) - 1) {
+        cloud_proxy_ip[n] = ip[n];
+        n++;
+    }
+    if (ip[n]) /* address too long */
+        return -1;
+    cloud_proxy_ip[n] = '\0';
+    cloud_proxy_port = port;
+    cloud_last_valid = 0;
+    cloud_awaiting = 0;
+    cloud_rx_len = 0;
+    cloud_connect_retry_at = 0;
+    if (stm32_wifi_info()->socket_connected)
+        stm32_wifi_close();
+    printf("[NET] proxy set to %s:%u\n", cloud_proxy_ip,
+           (unsigned)cloud_proxy_port);
+    return 0;
+}
+
+/* Latest assembled home-screen state + catgirl, for the on-board renderer. */
+const ui_home_state_t *stm32_peripherals_ui_state(void) { return &g_ui_state; }
+const live2d_t *stm32_peripherals_cat(void) { return &g_cat; }
 
 /* Build an environment snapshot and drive the actuators from the decision. */
 static void run_control_tick(uint64_t now) {
@@ -378,24 +543,50 @@ static void run_control_tick(uint64_t now) {
      * the fallback remains coherent when the network drops.
      */
     int cloud = 0;
-    if (net_ready) {
+    const stm32_wifi_info_t *w = stm32_wifi_info();
+    /*
+     * Send this snapshot to the proxy when the socket is up and no request is
+     * already in flight. The reply (a CONTROL frame) arrives asynchronously and
+     * is parsed in cloud_net_service(); we apply the freshest one below.
+     */
+    if (w->socket_connected && !w->command_busy && !cloud_awaiting) {
         uint8_t txf[HUB_OVERHEAD + 8];
         int tn = hub_proto_encode_snapshot(net_seq++, &s, txf, sizeof(txf));
-        if (tn > 0 && stm32_esp8266_send(txf, tn) == 0) {
-            uint8_t rxf[HUB_OVERHEAD + HUB_MAX_PAYLOAD];
-            int rn = stm32_esp8266_recv(rxf, sizeof(rxf), 600);
-            hub_frame_t f;
-            hub_control_t cc;
-            if (rn > 0 && hub_proto_parse(rxf, (size_t)rn, &f) == rn &&
-                hub_proto_decode_control(&f, &cc) == 0) {
-                a.decision.fan_level = cc.fan_level;
-                a.decision.pump_on = cc.pump_on;
-                a.decision.theme = (env_theme_t)cc.theme_id;
-                cloud = 1;
-                printf("[NET] cloud fan=%u pump=%u mood=%u speech=%s\n",
-                       cc.fan_level, cc.pump_on, cc.mood, cc.speech);
-            }
+        if (tn > 0 && stm32_wifi_send(txf, (size_t)tn) == 0) {
+            cloud_awaiting = 1;
+            cloud_reply_deadline = now + CLOUD_REPLY_TIMEOUT_MS;
         }
+    }
+    /* Cloud-preferred, local fail-safe: override with a fresh cloud decision. */
+    if (cloud_last_valid && now - cloud_last_ms <= CLOUD_FRESH_MS) {
+        a.decision.fan_level = cloud_last.fan_level;
+        a.decision.pump_on = cloud_last.pump_on;
+        a.decision.theme = (env_theme_t)cloud_last.theme_id;
+        cloud = 1;
+    }
+
+    /*
+     * Assemble the home-screen + catgirl state for the renderer. Speech is the
+     * cloud (LLM) line only; a new line makes the catgirl talk, otherwise she
+     * follows the derived mood (without interrupting an active TALK).
+     */
+    hub_ui_input_t uin;
+    uin.snap = s;
+    uin.decision = a.decision;
+    uin.minute = (uint8_t)((now / 60000ULL) % 60ULL);
+    uin.net_cloud = (uint8_t)cloud;
+    uin.cloud_valid = (uint8_t)cloud;
+    uin.cloud_mood = cloud ? cloud_last.mood : 0;
+    uin.cloud_speech = cloud ? cloud_last.speech : (const char *)0;
+    hub_ui_build(&uin, &g_ui_state);
+
+    if (cloud && cloud_last.speech[0] &&
+        strncmp(g_last_speech, cloud_last.speech, sizeof(g_last_speech)) != 0) {
+        live2d_speak(&g_cat, cloud_last.speech, now); /* new line -> TALK */
+        strncpy(g_last_speech, cloud_last.speech, sizeof(g_last_speech) - 1);
+        g_last_speech[sizeof(g_last_speech) - 1] = '\0';
+    } else if (!(g_cat.state == LIVE2D_TALK && g_cat.talk_deadline_ms != 0)) {
+        live2d_set_state(&g_cat, hub_ui_state(&uin), now);
     }
 
     stm32_fan_set_level(a.decision.fan_level);
@@ -417,6 +608,7 @@ static void run_control_tick(uint64_t now) {
 
 void stm32_peripherals_service(uint64_t now) {
     uint64_t service_start = timer_get_ticks();
+    stm32_watchdog_feed(); /* main loop is alive -> stave off the reset */
     stm32_display_update_ticks(now);
 
     /* Non-blocking buzzer off-timer (finer than the control tick). */
@@ -429,6 +621,8 @@ void stm32_peripherals_service(uint64_t now) {
         last_control_tick = now;
         run_control_tick(now);
     }
+
+    live2d_tick(&g_cat, now); /* advance the catgirl animation/TALK timeout */
 
     if (ir_present) {
         uint32_t code;
@@ -511,6 +705,17 @@ void stm32_peripherals_service(uint64_t now) {
             before.transmitted_bytes != after->transmitted_bytes ||
             before.dropped_bytes != after->dropped_bytes)
             update_wifi_display();
+        /* One-shot join with credentials from the card, once the module is
+         * responsive and idle (build-time SSID is empty by default). */
+        if (boot_cfg.have_ssid && !cfg_join_attempted && after->at_responsive &&
+            !after->joined && !after->connecting && !after->command_busy) {
+            if (stm32_wifi_join(boot_cfg.ssid, boot_cfg.pass) == 0) {
+                cfg_join_attempted = 1;
+                printf("[NET] joining ssid=%s (from /CFG/WIFI.TXT)\n",
+                       boot_cfg.ssid);
+            }
+        }
+        cloud_net_service(now); /* keep the proxy socket + parse CONTROL */
     }
 
     if (now - last_memory_poll >= MEMORY_POLL_INTERVAL_MS) {
