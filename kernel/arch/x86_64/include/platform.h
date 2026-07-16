@@ -38,6 +38,8 @@ static inline int arch_ram_range(size_t idx, paddr_t *base, paddr_t *end) {
 #define IRQ_VECTOR_PCI     0x22
 #define IRQ_VECTOR_KEYBOARD 0x21
 
+void x86_64_route_pci_irq(uint32_t gsi, uint8_t vector);
+
 /* Exception / pseudo-cause codes
  * x86_64 does not have a unified cause register like RISC-V.
  * We map CPU exceptions to pseudo-codes used by the generic trap.c.

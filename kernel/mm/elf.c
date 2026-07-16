@@ -200,6 +200,13 @@ static int map_segment(mm_struct_t *mm, pt_root_t *pgdir,
         if (old_pte && (*old_pte & PTE_V)) {
             paddr_t old_pa = arch_pte_addr(*old_pte);
             memcpy(frame, (void *)(old_pa + PAGE_OFFSET), PAGE_SIZE);
+        } else {
+            /*
+             * PT_LOAD pages include the segment's zero-filled tail.  Frames
+             * returned by the physical allocator retain prior contents, so
+             * copying only p_filesz otherwise exposes stale data as .bss.
+             */
+            memset(frame, 0, PAGE_SIZE);
         }
 
         if (page < va + filesz) {

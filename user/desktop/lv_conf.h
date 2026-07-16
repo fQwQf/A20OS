@@ -40,6 +40,13 @@
  * - LV_STDLIB_RTTHREAD:    RT-Thread implementation
  * - LV_STDLIB_CUSTOM:      Implement the functions externally
  */
+/*
+ * Keep LVGL's allocator self-contained.  musl's malloc exercises the VM
+ * paths that are not yet reliable on AArch64 in this kernel; it corrupts
+ * LVGL's style allocations shortly after the desktop starts.  The built-in
+ * TLSF pool is sufficient for the desktop and works identically on every
+ * supported architecture.
+ */
 #define LV_USE_STDLIB_MALLOC    LV_STDLIB_BUILTIN
 
 /** Possible values
@@ -69,7 +76,15 @@
 
 #if LV_USE_STDLIB_MALLOC == LV_STDLIB_BUILTIN
     /** Size of memory available for `lv_malloc()` in bytes (>= 2kB) */
-    #define LV_MEM_SIZE (64 * 1024U)          /**< [bytes] */
+    /*
+     * The desktop builds a full widget tree plus terminal scrollback.  64 KiB
+     * exhausts the TLSF pool on AArch64 while the tree is being constructed;
+     * the resulting allocator metadata corruption used to terminate the
+     * desktop before its first frame.  Leave enough fixed, userspace-owned
+     * storage so the LVGL allocator never needs the kernel's still-small brk
+     * region during startup.
+     */
+    #define LV_MEM_SIZE (8 * 1024 * 1024U)     /**< [bytes] */
 
     /** Size of the memory expand for `lv_malloc()` in bytes */
     #define LV_MEM_POOL_EXPAND_SIZE 0

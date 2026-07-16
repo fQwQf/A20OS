@@ -1,4 +1,5 @@
 #include "drivers/gpu/virtio_gpu.h"
+#include "drivers/gpu/gpu_core.h"
 #include "drivers/bus/virtio_transport.h"
 #include "drivers/core/driver_core.h"
 #include "drivers/core/driver_register.h"
@@ -36,7 +37,8 @@ typedef struct {
 } virtio_gpu_inst_t;
 
 static virtio_gpu_inst_t g_gpu_inst;
-static struct device *g_gpu_device = NULL;
+static device_t g_gpu_pci_device;
+static driver_t virtio_gpu_driver;
 
 static void virtio_gpu_mmio_write32(virtio_transport_t *t, uint32_t off, uint32_t val) {
     writel(val, (volatile void *)((uintptr_t)t->priv + off));
@@ -207,20 +209,14 @@ static const gpu_dev_ops_t gpu_ops = {
     .ioctl    = gpu_ioctl,
 };
 
-static int virtio_gpu_probe(device_t *dev) {
-    resource_t *mmio_res = device_get_resource(dev, RES_MMIO, 0);
-    if (!mmio_res) return -1;
-    
+static int virtio_gpu_init_transport(device_t *dev, const virtio_transport_t *transport) {
     virtio_gpu_inst_t *inst = &g_gpu_inst;
     int order = 0;
     pfn_t fb_pfn = PFN_NONE;
     memset(inst, 0, sizeof(*inst));
     spin_init(&inst->lock);
     
-    inst->vt.read32  = virtio_gpu_mmio_read32;
-    inst->vt.write32 = virtio_gpu_mmio_write32;
-    inst->vt.priv    = (void *)(uintptr_t)mmio_res->start;
-    inst->vt.legacy  = 0;
+    inst->vt = *transport;
     
     virtio_transport_t *vt = &inst->vt;
 
@@ -364,7 +360,8 @@ static int virtio_gpu_probe(device_t *dev) {
     }
 
     inst->valid = 1;
-    g_gpu_device = dev;
+    if (gpu_device_register(dev) < 0)
+        goto fail;
     kinfo("[GPU] virtio-gpu ready: %dx%d (FB: %lu MB at 0x%lx)\n", 
           inst->width, inst->height, inst->fb_size/1024/1024, inst->fb_phys);
     return 0;
@@ -376,6 +373,35 @@ fail:
         pfa_free(fb_pfn, order);
     memset(inst, 0, sizeof(*inst));
     return -1;
+}
+
+static int virtio_gpu_probe(device_t *dev) {
+    resource_t *mmio_res = device_get_resource(dev, RES_MMIO, 0);
+    if (!mmio_res)
+        return -1;
+
+    virtio_transport_t vt = {
+        .read32 = virtio_gpu_mmio_read32,
+        .write32 = virtio_gpu_mmio_write32,
+        .priv = (void *)(uintptr_t)mmio_res->start,
+        .legacy = 0,
+        .irq = -1,
+    };
+    return virtio_gpu_init_transport(dev, &vt);
+}
+
+int virtio_gpu_init(void) {
+    if (g_gpu_inst.valid)
+        return 0;
+
+    virtio_transport_t vt;
+    if (arch_virtio_gpu_probe(0, &vt) != 0)
+        return -1;
+
+    memset(&g_gpu_pci_device, 0, sizeof(g_gpu_pci_device));
+    g_gpu_pci_device.name = "virtio-gpu-pci";
+    g_gpu_pci_device.drv = &virtio_gpu_driver;
+    return virtio_gpu_init_transport(&g_gpu_pci_device, &vt);
 }
 
 static const device_id_t virtio_gpu_ids[] = {
@@ -395,5 +421,5 @@ static driver_t virtio_gpu_driver = {
 DRIVER_REGISTER(virtio_gpu_driver);
 
 struct device *virtio_gpu_get_dev(void) {
-    return g_gpu_device;
+    return gpu_device_get_default();
 }

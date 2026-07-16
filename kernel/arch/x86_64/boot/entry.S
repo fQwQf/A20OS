@@ -75,9 +75,9 @@ _start:
     movl  $0xC0000083, %eax    /* 1GB page: physical 3-4GB */
     movl  %eax, 24(%edi)
 
-    /* Enable PAE */
+    /* Enable PAE and 2 MiB pages used by the temporary identity map. */
     movl  %cr4, %eax
-    orl   $0x20, %eax
+    orl   $0x30, %eax
     movl  %eax, %cr4
 
     /* Load PML4 */
@@ -98,12 +98,14 @@ _start:
     orl   $0x80000000, %eax
     movl  %eax, %cr0
 
-    /* Jump to 64-bit code using iretq (REX.W + iret) */
-    .byte 0x48, 0x9C                    /* pushfq (64-bit) */
-    .byte 0x48, 0x68, 0x20, 0x00, 0x00, 0x00   /* pushq $0x20 */
-    .byte 0x48, 0x68
-    .long _start64 - PAGE_OFFSET                /* pushq $RIP (physical addr) */
-    .byte 0x48, 0xCF                    /* iretq */
+    /*
+     * Reload CS with a 64-bit code descriptor.  The old iretq sequence built
+     * its return frame while still executing in 32-bit mode: pushf pushed a
+     * 32-bit value but iretq consumed 64-bit slots, so it read a corrupt RIP
+     * and reset before the kernel could print anything.  A 16:32 far jump is
+     * the architectural long-mode transition and needs no synthetic frame.
+     */
+    ljmp    $0x20, $(_start64 - PAGE_OFFSET)
 
     .align 8
 gdt:
