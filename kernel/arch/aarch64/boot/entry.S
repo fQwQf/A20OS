@@ -45,8 +45,20 @@ _start:
     str     x2, [x0, #(0 * 8)]
     str     x2, [x0, #(1 * 8)]
 
+#ifdef CONFIG_BOARD_VIRTUALBOX_AARCH64
+    /*
+     * VirtualBox ARM places RAM at 0x08000000 and its platform MMIO near
+     * 0xfc000000.  The shared L1 table supplies both the physical bootstrap
+     * map and the PAGE_OFFSET alias used after the high-half branch.
+     */
+    ldr     x2, =0x0040000000000705  /* PA 0..1 GiB, normal, UXN */
+    str     x2, [x1, #(0 * 8)]
+    ldr     x2, =0x00600000c0000401  /* PA 3..4 GiB, device, PXN|UXN */
+    str     x2, [x1, #(3 * 8)]
+#else
     ldr     x2, =0x0060000000000401  /* L1 block: PA 0x0, device, PXN|UXN */
     str     x2, [x1, #(0 * 8)]
+#endif
 #ifdef CONFIG_NOMMU
     /*
      * Split DRAM into 2 MiB blocks.  Kernel text remains privileged while the
@@ -81,6 +93,8 @@ _start:
     add     x7, x7, #(1 << 21)
     cmp     x5, #256                 /* 512 MiB of configured DRAM */
     b.lo    .Lnommu_l2_loop
+#elif defined(CONFIG_BOARD_VIRTUALBOX_AARCH64)
+    /* RAM is already covered by L1[0] above. */
 #else
     ldr     x2, =0x0040000040000705  /* L1 block: PA 0x40000000, normal, UXN */
     str     x2, [x1, #(1 * 8)]

@@ -508,12 +508,15 @@ DEP_FILES = $(KERNEL_OBJ:.o=.d) $(ASM_OBJ:.o=.d)
 # Kernel image
 KERNEL_ELF = $(BUILD_DIR)/kernel.elf
 KERNEL_BIN = $(BUILD_DIR)/kernel.bin
+VBOX_AARCH64_EFI = $(BUILD_DIR)/BOOTAA64.EFI
+VBOX_AARCH64_IMG = $(BUILD_DIR)/a20os-vbox-aarch64.img
+VBOX_AARCH64_LOAD_ADDRESS ?= 0x08080000ULL
 
 # ================================================================
 # Targets
 # ================================================================
 
-.PHONY: all all-architectures clean run-riscv64 run-gui-riscv64 run-gui-rv run-loongarch64 run-gui-loongarch64 run-gui-la run-arm64 run-gui-arm64 run-gui-aarch64 run-x86_64 run-gui-x86_64 vbox-iso-x86_64 _vbox_iso_x86_64_impl run-arm32 run-gui-arm32 run-riscv32 run-ppc64le debug-riscv64 debug-loongarch64 debug-arm64 debug-x86_64 debug-arm32 debug-riscv32 debug-ppc64le \
+.PHONY: all all-architectures clean run-riscv64 run-gui-riscv64 run-gui-rv run-loongarch64 run-gui-loongarch64 run-gui-la run-arm64 run-gui-arm64 run-gui-aarch64 run-x86_64 run-gui-x86_64 vbox-iso-x86_64 _vbox_iso_x86_64_impl vbox-image-aarch64 _vbox_image_aarch64_impl run-arm32 run-gui-arm32 run-riscv32 run-ppc64le debug-riscv64 debug-loongarch64 debug-arm64 debug-x86_64 debug-arm32 debug-riscv32 debug-ppc64le \
 		run-gui-nommu-arm32 run-nommu-gui-arm32 \
 		stm32f103-bringup stm32f103-xuanwu flash-stm32f103-xuanwu run-stm32f103-qemu \
 		check-stm32f103 \
@@ -1505,6 +1508,28 @@ ext4_img: $(USER_BUILD_STAMP) ext4_img_only
 $(KERNEL_BIN): $(KERNEL_ELF)
 	$(OBJCOPY) -O binary $< $@
 
+$(VBOX_AARCH64_EFI): $(KERNEL_BIN) kernel/boot/uefi/aarch64_loader.c kernel/boot/uefi/aarch64_kernel_blob.S
+	@mkdir -p $(dir $@)
+	$(CC) -march=armv8-a -fpic -fshort-wchar -ffreestanding -fno-stack-protector \
+		-fno-builtin -fvisibility=hidden -mno-outline-atomics \
+		-DKERNEL_LOAD_ADDRESS=$(VBOX_AARCH64_LOAD_ADDRESS) \
+		-c kernel/boot/uefi/aarch64_loader.c \
+		-o $(BUILD_DIR)/uefi-loader.o
+	$(CC) -march=armv8-a -fpic -ffreestanding \
+		-DKERNEL_BIN_PATH='"$(abspath $(KERNEL_BIN))"' \
+		-c kernel/boot/uefi/aarch64_kernel_blob.S -o $(BUILD_DIR)/uefi-kernel.o
+	$(CC) -nostdlib -shared -Wl,-Bsymbolic -Wl,-e,efi_main \
+		-Wl,-T,kernel/boot/uefi/aarch64_efi.lds \
+		-o $(BUILD_DIR)/uefi-loader.so \
+		$(BUILD_DIR)/uefi-loader.o $(BUILD_DIR)/uefi-kernel.o
+	$(OBJCOPY) -j .text -j .reloc -j .dynamic -j .data -j .kernel \
+		-j .rela -j .rela.* -j .rodata -j .dynsym -j .dynstr \
+		-O pei-aarch64-little --subsystem efi-app \
+		$(BUILD_DIR)/uefi-loader.so $@
+
+$(VBOX_AARCH64_IMG): $(VBOX_AARCH64_EFI) scripts/mk_uefi_fat_image.sh
+	scripts/mk_uefi_fat_image.sh $< $@
+
 $(KERNEL_ELF): $(KERNEL_OBJ) $(ASM_OBJ) $(LDSCRIPT)
 	@mkdir -p $(dir $@)
 	$(CC) $(LDFLAGS) $(KERNEL_OBJ) $(ASM_OBJ) $(ARCH_LIBS) -o $@
@@ -1618,6 +1643,12 @@ vbox-iso-x86_64:
 
 _vbox_iso_x86_64_impl: dev-build
 	scripts/mk_grub_iso.sh $(KERNEL_ELF) $(BUILD_DIR)/a20os-x86_64.iso
+
+vbox-image-aarch64:
+	$(MAKE) ARCH=aarch64 BOARD=virtualbox-aarch64 ABI=both BRINGUP=0 _vbox_image_aarch64_impl
+
+_vbox_image_aarch64_impl: $(VBOX_AARCH64_IMG)
+	@echo "VirtualBox ARM64 image ready: $(VBOX_AARCH64_IMG)"
 
 run-arm32:
 	$(MAKE) ARCH=arm32 BRINGUP=$(BRINGUP) _run_impl
