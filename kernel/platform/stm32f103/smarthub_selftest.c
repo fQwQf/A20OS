@@ -15,6 +15,9 @@
 #include "env_rule.h"
 #include "hub_controller.h"
 #include "hub_proto.h"
+#include "touch_cal.h"
+#include "ui_home.h"
+#include "live2d.h"
 #include "core/stdio.h"
 
 static int str_eq(const char *a, const char *b) {
@@ -152,11 +155,120 @@ static int run_proto_tests(void) {
     return fails;
 }
 
+/* --- Touch calibration: four-corner solve + blob round-trip. --- */
+static int run_touch_cal_tests(void) {
+    int fails = 0;
+    const uint16_t W = 320, H = 480;
+
+    /* Non-swapped, non-inverted panel sampled at the four corners. */
+    touch_cal_point_t pts[4] = {
+        {300, 300, 0, 0},
+        {3700, 300, 319, 0},
+        {300, 3700, 0, 479},
+        {3700, 3700, 319, 479},
+    };
+    stm32_touch_calibration_t cal;
+    if (touch_cal_solve(pts, 4, W, H, &cal) != 0 || cal.swap_xy != 0 ||
+        cal.invert_x != 0 || cal.invert_y != 0) {
+        printf("[HUB] FAIL touch-cal solve\n");
+        fails++;
+    }
+
+    uint8_t blob[TOUCH_CAL_BLOB_SIZE];
+    stm32_touch_calibration_t rt;
+    if (touch_cal_serialize(&cal, blob, sizeof(blob)) != TOUCH_CAL_BLOB_SIZE ||
+        touch_cal_deserialize(blob, sizeof(blob), &rt) != 0 ||
+        rt.x_min != cal.x_min || rt.x_max != cal.x_max) {
+        printf("[HUB] FAIL touch-cal blob round-trip\n");
+        fails++;
+    }
+    blob[6] ^= 0xFFu; /* corrupt payload -> CRC must reject */
+    if (touch_cal_deserialize(blob, sizeof(blob), &rt) != -1) {
+        printf("[HUB] FAIL touch-cal blob corruption not detected\n");
+        fails++;
+    }
+    printf("[HUB] touch-cal: solved swap=%u invx=%u invy=%u x[%u,%u] y[%u,%u]\n",
+           cal.swap_xy, cal.invert_x, cal.invert_y, cal.x_min, cal.x_max,
+           cal.y_min, cal.y_max);
+    return fails;
+}
+
+/* --- Home-screen UI model: build + hit-test + speech wrap. --- */
+static int run_ui_home_tests(void) {
+    int fails = 0;
+    /* Speech text is LLM-generated at runtime — never hardcoded. This is a
+     * synthetic mixed ASCII/CJK vector purely to exercise column wrapping. */
+    ui_home_state_t st = {29, 38, 55, 2, 1, 14, 30, ENV_THEME_COZY, 2,
+                          ENV_ALERT_DRY, 1, "WRAP0123换行测试示例文本"};
+    ui_home_model_t m;
+    ui_home_build(&st, &m);
+
+    if (m.card_count != 4 || !str_eq(m.cards[0].value, "29") ||
+        !str_eq(m.cards[1].value, "38") || !str_eq(m.clock, "14:30")) {
+        printf("[HUB] FAIL ui-home build\n");
+        fails++;
+    }
+    /* Centre of the pump button must hit-test to PUMP_TOGGLE. */
+    if (ui_home_hit_test(&m, 60, 309) != UI_ACTION_PUMP_TOGGLE ||
+        ui_home_hit_test(&m, 200, 190) != UI_ACTION_FAN_UP ||
+        ui_home_hit_test(&m, 10, 10) != UI_ACTION_NONE) {
+        printf("[HUB] FAIL ui-home hit-test\n");
+        fails++;
+    }
+    printf("[HUB] ui-home: clock=%s net=%s alert=%s cards=[%sC %s%% L%s F%s]"
+           " speech_lines=%u\n",
+           m.clock, m.net_label, m.alert_label, m.cards[0].value,
+           m.cards[1].value, m.cards[2].value, m.cards[3].value,
+           m.speech_lines);
+    for (unsigned i = 0; i < m.speech_lines; i++)
+        printf("[HUB]   speech[%u]=\"%s\"\n", i, m.speech[i]);
+    return fails;
+}
+
+/* --- Live2D sprite state machine: mood mapping + frame path + TALK timeout. */
+static int run_live2d_tests(void) {
+    int fails = 0;
+    live2d_t l;
+    live2d_init(&l);
+
+    if (live2d_mood_to_state(2, 0) != LIVE2D_HAPPY ||
+        live2d_mood_to_state(2, 1) != LIVE2D_WARN) {
+        printf("[HUB] FAIL live2d mood mapping\n");
+        fails++;
+    }
+
+    char path[LIVE2D_PATH_MAX];
+    live2d_set_state(&l, LIVE2D_TALK, 0);
+    l.frame = 7;
+    if (live2d_frame_path(&l, path, sizeof(path)) <= 0 ||
+        !str_eq(path, "/live2d/talk/07.raw")) {
+        printf("[HUB] FAIL live2d frame path (%s)\n", path);
+        fails++;
+    }
+
+    /* speak() then run past the deadline -> reverts to IDLE. The string is a
+     * synthetic length vector; real speech is LLM-generated. */
+    live2d_init(&l);
+    live2d_speak(&l, "SPEAKLEN示例文本测试", 1000);
+    uint32_t deadline = l.talk_deadline_ms;
+    live2d_tick(&l, deadline + 1);
+    if (l.state != LIVE2D_IDLE) {
+        printf("[HUB] FAIL live2d TALK timeout\n");
+        fails++;
+    }
+    printf("[HUB] live2d: talk window=%ums -> path=%s\n", deadline - 1000,
+           path);
+    return fails;
+}
+
 int smarthub_selftest(void) {
     printf("\n[HUB] ===== smart-hub core self-test =====\n");
     run_rule_demo();
     run_controller_demo();
     int fails = run_proto_tests();
+    fails += run_touch_cal_tests();
+    fails += run_ui_home_tests();
+    fails += run_live2d_tests();
     printf("[HUB] protocol self-test: %s (%d failure%s)\n",
            fails == 0 ? "PASS" : "FAIL", fails, fails == 1 ? "" : "s");
     printf("[HUB] ===== self-test done =====\n\n");

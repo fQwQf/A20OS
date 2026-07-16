@@ -105,6 +105,7 @@ static void diagnostic_help(void) {
     printf("  wifi open <tcp|udp> <host> <port>  open a socket\n");
     printf("  wifi send <text> / wifi read / wifi close\n");
     printf("  wifi at <cmd> send a raw ESP8266 AT command\n");
+    printf("  proxy <ip> <port>  set the cloud proxy for auto cloud control\n");
     printf("  help          show this command list\n");
 }
 
@@ -226,6 +227,15 @@ static void diagnostic_execute(char *line) {
         printf("[WIFI-DIAG] raw-at=%s\n",
                stm32_wifi_debug_at(line + 8) == 0 ?
                    "scheduled" : "invalid-or-busy");
+    } else if (text_starts_with(line, "proxy ")) {
+        char *save = NULL;
+        char *ip = strtok_r(line + 6, " ", &save);
+        char *port_text = strtok_r(NULL, " ", &save);
+        int port = port_text ? atoi(port_text) : 0;
+        printf("[NET-DIAG] proxy=%s\n",
+               ip && port > 0 && port <= 65535 &&
+               stm32_peripherals_set_proxy(ip, (uint16_t)port) == 0 ?
+                   "set" : "invalid");
     } else {
         printf("Unknown command: %s\n", line);
         printf("Type help for available commands.\n");
@@ -315,6 +325,13 @@ void kernel_main(void) {
     timer_init();
 #ifndef CONFIG_STM32_QEMU
     stm32_peripherals_init();
+#else
+    /* On QEMU the peripherals are stubbed out; exercise the hardware-
+     * independent smart-hub core (rule engine, frame protocol, touch
+     * calibration, UI model, Live2D state machine) here — before the
+     * scheduler is brought up — so the run demonstrates real logic even while
+     * the 8KB QEMU RAM model can't yet fit the scheduler task stacks. */
+    smarthub_selftest();
 #endif
 
     proc_init();
@@ -336,12 +353,6 @@ void kernel_main(void) {
     printf("[BOOT] SysTick=1000Hz source=HCLK=%u, entering scheduler\n",
            (unsigned)stm32_hclk_hz());
     diagnostic_help();
-#ifdef CONFIG_STM32_QEMU
-    /* On QEMU the peripherals are stubbed out; exercise the hardware-
-     * independent smart-hub core (rule engine + frame protocol) so the run
-     * demonstrates real logic rather than an empty tick loop. */
-    smarthub_selftest();
-#endif
     diagnostic_prompt();
 
     sched();
