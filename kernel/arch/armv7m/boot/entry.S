@@ -30,7 +30,7 @@ armv7m_vector_table:
     .word Default_Handler
     .endr
     .word USART1_IRQHandler         /* IRQ 37 */
-    .word Default_Handler
+    .word USART2_IRQHandler         /* IRQ 38 */
     .word USART3_IRQHandler         /* IRQ 39 */
     .rept 29
     .word Default_Handler
@@ -152,6 +152,12 @@ SysTick_Handler:
 USART1_IRQHandler:
     push {lr}
     bl armv7m_usart1_irq_handler
+    pop {pc}
+
+    .thumb_func
+USART2_IRQHandler:
+    push {lr}
+    bl armv7m_usart2_irq_handler
     pop {pc}
 
     .thumb_func
