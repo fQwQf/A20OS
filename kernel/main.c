@@ -17,6 +17,14 @@
 #include "core/random.h"
 #include "fs/vfs.h"
 #include "drivers/block/virtio_blk.h"
+#ifdef CONFIG_X86_64
+#include "drivers/block/ahci.h"
+#endif
+#include "drivers/gpu/virtio_gpu.h"
+#include "drivers/input/virtio_input.h"
+#ifdef CONFIG_X86_64
+#include "drivers/input/ps2.h"
+#endif
 #include "fs/block_cache.h"
 #include "core/klog.h"
 #include "proc/signal.h"
@@ -46,8 +54,7 @@ void init_kthread(void);
  * ============================================================ */
 
 #ifndef BRINGUP
-static int try_mount(int dev_idx, const char *mnt, const char *fstype) {
-    block_dev_t *dev = virtio_blk_get_dev(dev_idx);
+static int try_mount(block_dev_t *dev, const char *mnt, const char *fstype) {
     if (!dev) return -1;
     bcache_t *bc = bcache_create(dev);
     if (!bc) return -1;
@@ -58,7 +65,7 @@ static int try_mount(int dev_idx, const char *mnt, const char *fstype) {
     }
     int r = vfs_mount_bc(mnt, fstype, bc);
     if (r == 0) {
-        printf("[INIT] Device %d -> %s (%s)\n", dev_idx, mnt, fstype);
+        printf("[INIT] Block device -> %s (%s)\n", mnt, fstype);
     } else {
         bcache_destroy(bc);
     }
@@ -72,14 +79,25 @@ static void mount_block_devices(void) {
         if (virtio_blk_init() != 0)
             break;
 
-        if (!bin_ok && try_mount(i, "/bin", "fat32") == 0) {
+        if (!bin_ok && try_mount(virtio_blk_get_dev(i), "/bin", "fat32") == 0) {
             bin_ok = 1;
             continue;
         }
-        if (!test_ok && try_mount(i, "/test", "ext4") == 0) {
+        if (!test_ok && try_mount(virtio_blk_get_dev(i), "/test", "ext4") == 0) {
             test_ok = 1;
             continue;
         }
+    }
+
+    block_dev_t *ahci = NULL;
+#ifdef CONFIG_X86_64
+    ahci = ahci_get_dev(0);
+#endif
+    if (ahci) {
+        if (!bin_ok)
+            bin_ok = try_mount(ahci, "/bin", "fat32") == 0;
+        if (!test_ok)
+            test_ok = try_mount(ahci, "/test", "ext4") == 0;
     }
 
     if (!bin_ok)  printf("[INIT] WARNING: no FAT32 device for /bin\n");
@@ -138,6 +156,14 @@ void kernel_main(void) {
     }
     driver_probe_all();
     printf("[INIT] Drivers probed\n");
+    virtio_gpu_init();
+    virtio_input_init();
+#ifdef CONFIG_X86_64
+    if (ps2_input_init() != 0)
+        printf("[INIT] PS/2 input controller unavailable\n");
+    else
+        printf("[INIT] PS/2 input initialized\n");
+#endif
 #ifdef CONFIG_DRIVER_LIFECYCLE_TEST
     driver_lifecycle_test_run();
 #endif

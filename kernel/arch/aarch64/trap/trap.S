@@ -47,29 +47,54 @@ aarch64_vector_table:
     .global user_trap_return
 
 aarch64_sync_el0:
+    /*
+     * Vectors execute before __trap_from_user has saved the EL0 register
+     * file.  Preserve the scratch registers used to publish the trap kind;
+     * otherwise every syscall returned a kernel virtual address in x9 to
+     * userspace.  That is particularly destructive to allocator code which
+     * keeps live pointers in x9 across a syscall.
+     */
+    sub     sp, sp, #16
+    stp     x9, x10, [sp]
     adrp    x9, aarch64_trap_flags
     add     x9, x9, :lo12:aarch64_trap_flags
     str     xzr, [x9]
+    ldp     x9, x10, [sp]
+    add     sp, sp, #16
     b       __trap_from_user
 
 aarch64_irq_el0:
+    sub     sp, sp, #16
+    stp     x9, x10, [sp]
     adrp    x9, aarch64_trap_flags
     add     x9, x9, :lo12:aarch64_trap_flags
     mov     x10, #1
     str     x10, [x9]
+    ldp     x9, x10, [sp]
+    add     sp, sp, #16
     b       __trap_from_user
 
 aarch64_sync_el1:
+    /* Apply the same rule to EL1 exceptions so an interrupted kernel frame
+     * is restored exactly as it was before the vector entry. */
+    sub     sp, sp, #16
+    stp     x9, x10, [sp]
     adrp    x9, aarch64_trap_flags
     add     x9, x9, :lo12:aarch64_trap_flags
     str     xzr, [x9]
+    ldp     x9, x10, [sp]
+    add     sp, sp, #16
     b       __trap_from_kernel
 
 aarch64_irq_el1:
+    sub     sp, sp, #16
+    stp     x9, x10, [sp]
     adrp    x9, aarch64_trap_flags
     add     x9, x9, :lo12:aarch64_trap_flags
     mov     x10, #1
     str     x10, [x9]
+    ldp     x9, x10, [sp]
+    add     sp, sp, #16
     b       __trap_from_kernel
 
 __trap_from_user:

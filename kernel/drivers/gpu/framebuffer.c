@@ -1,5 +1,5 @@
 #include "drivers/gpu/framebuffer.h"
-#include "drivers/gpu/virtio_gpu.h"
+#include "drivers/gpu/gpu_core.h"
 #include "drivers/core/driver_class.h"
 #include "drivers/core/driver_core.h"
 #include "fs/devfs.h"
@@ -28,7 +28,7 @@ static int fb_write(vfile_t *vf, const char *buf, size_t count) {
 
 static int fb_ioctl(vfile_t *vf, unsigned long req, void *arg) {
     (void)vf;
-    struct device *dev = virtio_gpu_get_dev();
+    struct device *dev = gpu_device_get_default();
     if (!dev) return -ENODEV;
     
     gpu_dev_ops_t *ops = (gpu_dev_ops_t *)dev->drv->class_ops;
