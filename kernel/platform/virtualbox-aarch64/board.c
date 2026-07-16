@@ -8,27 +8,15 @@ static inline volatile uint32_t *vbox_gicd_reg32(uint32_t off) {
     return (volatile uint32_t *)(uintptr_t)(GICD_BASE + off);
 }
 
-static inline volatile uint32_t *vbox_gicc_reg32(uint32_t off) {
-    return (volatile uint32_t *)(uintptr_t)(GICC_BASE + off);
-}
-
-static inline volatile uint8_t *vbox_gicd_reg8(uint32_t off) {
-    return (volatile uint8_t *)(uintptr_t)(GICD_BASE + off);
-}
-
 static void vbox_gic_init(void) {
-    *vbox_gicd_reg32(0x000) = 0;
-    *vbox_gicc_reg32(0x0000) = 0;
-
-    *vbox_gicc_reg32(0x0004) = 0xFF;
-    *vbox_gicc_reg32(0x0000) = 1;
-    *vbox_gicd_reg32(0x000) = 1;
+    /* The architecture trap layer owns GICv3 distributor/CPU init. */
 }
 
 static void vbox_gic_enable(uint32_t irq) {
-    *vbox_gicd_reg32(0x100 + (uint32_t)(irq / 32U) * 4) = 1U << (irq % 32U);
-    *vbox_gicd_reg8(0x400 + (uint32_t)irq) = 0x40;
-    *vbox_gicd_reg8(0x800 + (uint32_t)irq) = 0x01;
+    volatile uint32_t *base = irq < 32U
+        ? (volatile uint32_t *)(uintptr_t)(GICR_BASE + 0x10000)
+        : vbox_gicd_reg32(0);
+    base[(0x100 + (uint32_t)(irq / 32U) * 4) / 4] = 1U << (irq % 32U);
 }
 
 static void vbox_gic_disable(uint32_t irq) {
@@ -36,11 +24,11 @@ static void vbox_gic_disable(uint32_t irq) {
 }
 
 static uint32_t vbox_gic_ack(void) {
-    return *vbox_gicc_reg32(0x000C) & 0x3FFU;
+    return 0;
 }
 
 static void vbox_gic_eoi(uint32_t irq) {
-    *vbox_gicc_reg32(0x0010) = irq;
+    __asm__ __volatile__("msr icc_eoir1_el1, %0" :: "r"((uint64_t)irq) : "memory");
 }
 
 static void vbox_gic_send_ipi(uint64_t target_mask) {

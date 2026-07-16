@@ -1,4 +1,6 @@
 #include "desktop_terminal.h"
+#include "desktop_apps.h"
+#include "desktop_utils.h"
 #include "lv_port_indev.h"
 
 #include <errno.h>
@@ -314,6 +316,12 @@ static void terminal_set_focused(bool focused)
         focused ? lv_color_hex(0x56B3A5) : lv_color_hex(0x303840), 0);
 }
 
+void desktop_terminal_release_focus(void)
+{
+    terminal_set_focused(false);
+    lv_port_indev_set_key_handler(NULL, NULL);
+}
+
 static void terminal_key(uint32_t key, void * user_data)
 {
     (void)user_data;
@@ -540,3 +548,16 @@ int desktop_terminal_get_rows(void)
 {
     return TERM_ROWS;
 }
+
+static lv_obj_t *terminal_app_create(lv_obj_t *parent)
+{
+    return desktop_terminal_create(parent);
+}
+
+desktop_app_t desktop_app_terminal = {
+    .name = "Terminal",
+    .symbol = LV_SYMBOL_KEYBOARD,
+    .desc = "Interactive shell",
+    .accent = DESKTOP_COLOR_DARK,
+    .create = terminal_app_create,
+};

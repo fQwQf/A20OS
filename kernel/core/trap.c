@@ -296,6 +296,11 @@ void kernel_trap_handler(trap_context_t *ctx) {
         } else if (code == CAUSE_ILLEGAL_INSN) {
             kerr("\n========== KERNEL OOPS ==========\n");
             kerr("Kernel Illegal Instruction at sepc=0x%lx\n", sepc);
+#ifdef CONFIG_AARCH64
+            kerr("AArch64 ESR_EL1=0x%lx (EC=0x%lx ISS=0x%lx), FAR_EL1=0x%lx\n",
+                 arch_read_esr(), (arch_read_esr() >> 26) & 0x3fUL,
+                 arch_read_esr() & 0x1ffffffUL, stval);
+#endif
             dump_trap_context(ctx);
             panic("Kernel Illegal Instruction");
         } else {
