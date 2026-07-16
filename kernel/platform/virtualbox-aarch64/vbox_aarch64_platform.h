@@ -12,9 +12,14 @@
 
 #define UART0_BASE         (0xFFDDF000UL + PAGE_OFFSET)
 #define GICD_BASE          (0xFCD30000UL + PAGE_OFFSET)
-#define GICC_BASE          (0xFCD40000UL + PAGE_OFFSET)
+#define GICR_BASE          (0xFCD40000UL + PAGE_OFFSET)
+#define GICC_BASE          GICR_BASE
 #define VIRTIO_BASE        0x0UL
 
+#define CONFIG_AARCH64_GICV3 1
+
+/* Reserved for the physical generic-timer PPI; VBox currently traps it. */
+#define IRQ_S_TIMER        30U
 #define UART0_IRQ          33U
 
 #endif /* _VBOX_AARCH64_PLATFORM_H */
