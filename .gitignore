@@ -18,3 +18,4 @@ kernel-la
 *.orig
 *.rej
 __pycache__/
+.env
