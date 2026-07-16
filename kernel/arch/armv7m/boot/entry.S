@@ -140,6 +140,11 @@ SVC_Handler:
 
     .thumb_func
 PendSV_Handler:
+    /*
+     * The generic A20OS scheduler switches C stacks and therefore must run in
+     * thread mode.  Switching MSP while this exception owns an exception
+     * frame would strand that frame on the previous task's stack.
+     */
     bx lr
 
     .thumb_func
@@ -175,7 +180,53 @@ EXTI9_5_IRQHandler:
     .global __switch
     .thumb_func
 __switch:
-    bx lr
+    /*
+     * void __switch(uint32_t next_kstack)
+     *   r0 = pointer to next task's saved task_context_t
+     *        (which is the same as next->kstack / next->kstack_base).
+     *
+     * ARMv7-M keeps the current task pointer in the global
+     * armv7m_task_pointer.  Save the current callee-saved registers on the
+     * current task's kernel stack, then load the next task's context and
+     * resume at its saved return address.
+     */
+
+    /* r3 = &armv7m_task_pointer, r2 = current task pointer */
+    ldr r3, =armv7m_task_pointer
+    ldr r2, [r3]
+
+    /* r1 = current task_context_t (== current->kstack_base) */
+    ldr r1, [r2, #4]
+
+    /* Save r4-r11 into ctx->r4_r11[0..7]; r1 now points to ctx->sp */
+    stmia r1!, {r4-r11}
+
+    /* Save the remaining callee-owned context */
+    str sp, [r1, #0]           /* ctx->sp */
+    str lr, [r1, #4]           /* ctx->ra (return address after this call) */
+    str r2, [r1, #8]           /* ctx->tp (current task pointer) */
+    mrs r4, control
+    str r4, [r1, #12]          /* ctx->control */
+
+    /*
+     * Restore the next task's context.  r0 still holds next->kstack
+     * (== next task_context_t).
+     */
+    ldmia r0!, {r4-r11}        /* restore r4-r11 from ctx->r4_r11[0..7] */
+
+    ldr r1, [r0, #0]           /* next ctx->sp */
+    ldr r2, [r0, #4]           /* next ctx->ra (resume address) */
+    ldr r12, [r0, #8]          /* next ctx->tp (next task pointer) */
+    ldr lr, [r0, #12]           /* next ctx->control */
+    msr control, lr
+    isb
+
+    /* Update the global current task pointer to the next task. */
+    str r12, [r3]
+
+    /* Switch to the next task's stack and resume. */
+    mov sp, r1
+    bx r2
 
     .global user_trap_return
     .global __trap_from_user
