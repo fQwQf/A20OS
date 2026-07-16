@@ -2,6 +2,8 @@
 #define _STM32F103_PERIPHERALS_H
 
 #include "core/types.h"
+#include "ui_home.h"
+#include "live2d.h"
 
 typedef struct stm32_peripheral_state {
     int display_ready;
@@ -31,6 +33,12 @@ void stm32_peripherals_service(uint64_t now);
 int stm32_peripherals_retry_sdcard(void);
 int stm32_peripherals_retry_bluetooth(void);
 int stm32_peripherals_retry_wifi(void);
+int stm32_peripherals_set_proxy(const char *ip, uint16_t port);
 const stm32_peripheral_state_t *stm32_peripherals_state(void);
+
+/* Latest assembled home-screen UI state and catgirl animation state, for the
+ * on-board renderer (ui_render). Updated each control tick. */
+const ui_home_state_t *stm32_peripherals_ui_state(void);
+const live2d_t *stm32_peripherals_cat(void);
 
 #endif
