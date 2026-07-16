@@ -22,6 +22,10 @@ void firmware_console_putchar(char c) {
     arch_uart_putc(c);
 }
 
+void early_uart_init(void) {
+    arch_uart_init();
+}
+
 int firmware_console_getchar(void) {
     return arch_uart_poll_getc();
 }
