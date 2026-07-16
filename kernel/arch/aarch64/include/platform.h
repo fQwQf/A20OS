@@ -41,14 +41,18 @@ static inline int arch_ram_range(size_t idx, paddr_t *base, paddr_t *end) {
 }
 
 #define CLINT_BASE         0x0UL
+#ifndef ARCH_TIMER_FREQ
 #define CLINT_TIMER_FREQ   62500000UL
 #define ARCH_TIMER_FREQ    CLINT_TIMER_FREQ
+#endif
 
 /*
  * Synthetic trap/interrupt codes returned by arch_read_cause().
  * These need only be self-consistent with trap.c.
  */
+#ifndef IRQ_S_TIMER
 #define IRQ_S_TIMER        30U
+#endif
 #define IRQ_S_EXT          UART0_IRQ
 #define IRQ_S_SOFT         1U
 

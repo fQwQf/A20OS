@@ -11,6 +11,12 @@ extern volatile uint64_t aarch64_trap_flags;
 uint64_t aarch64_gic_ack(void);
 uint64_t aarch64_decode_sync_cause(uint64_t esr);
 
+static inline uint64_t arch_read_esr(void) {
+    uint64_t v;
+    __asm__ __volatile__("mrs %0, esr_el1" : "=r"(v));
+    return v;
+}
+
 static inline void arch_mb(void)  { __asm__ __volatile__("dmb ish" ::: "memory"); }
 static inline void arch_rmb(void) { __asm__ __volatile__("dmb ishld" ::: "memory"); }
 static inline void arch_wmb(void) { __asm__ __volatile__("dmb ishst" ::: "memory"); }
@@ -84,12 +90,6 @@ static inline uint64_t arch_read_ra(void) {
     uint64_t ra;
     __asm__ __volatile__("mov %0, x30" : "=r"(ra));
     return ra;
-}
-
-static inline uint64_t arch_read_esr(void) {
-    uint64_t v;
-    __asm__ __volatile__("mrs %0, esr_el1" : "=r"(v));
-    return v;
 }
 
 static inline uint64_t arch_read_cause(void) {
