@@ -22,10 +22,18 @@
 #define WIFI_CH_PIN 6U
 #define WIFI_RST_PIN 7U
 #define WIFI_UART STM32_UART_USART2
+#ifdef CONFIG_STM32_QEMU
+/* QEMU has no ESP8266 model; retain small buffers for link/runtime coverage. */
+#define WIFI_RX_SIZE 64U
+#define WIFI_RESPONSE_SIZE 128U
+#define WIFI_SEND_SIZE 64U
+#define WIFI_DATA_SIZE 64U
+#else
 #define WIFI_RX_SIZE 512U
 #define WIFI_RESPONSE_SIZE 768U
 #define WIFI_SEND_SIZE 192U
 #define WIFI_DATA_SIZE 512U
+#endif
 #define WIFI_RESET_ASSERT_MS 500U
 #define WIFI_BOOT_WAIT_MS 2000U
 #define WIFI_AT_TIMEOUT_MS 700U

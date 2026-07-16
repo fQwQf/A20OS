@@ -407,12 +407,28 @@ ABI_SRCS = $(wildcard $(KERNEL_DIR)/abi/$(ABI)/*.c)
 endif
 
 ifeq ($(PROFILE),mcu)
+CFLAGS += -DCONFIG_MCU -DCONFIG_KLOG_BUF_SIZE=256
 KERNEL_SRC = $(KERNEL_DIR)/mcu/main.c \
              $(KERNEL_DIR)/mcu/uart.c \
              $(KERNEL_DIR)/mcu/heap.c \
+             $(KERNEL_DIR)/mcu/mcu_stubs.c \
              $(KERNEL_DIR)/core/printf.c \
              $(KERNEL_DIR)/core/string.c \
              $(KERNEL_DIR)/core/panic.c \
+             $(KERNEL_DIR)/core/sync.c \
+             $(KERNEL_DIR)/core/klog.c \
+             $(KERNEL_DIR)/core/timekeeping.c \
+             $(KERNEL_DIR)/proc/sched.c \
+             $(KERNEL_DIR)/proc/current.c \
+             $(KERNEL_DIR)/proc/pid.c \
+             $(KERNEL_DIR)/proc/proc.c \
+             $(KERNEL_DIR)/proc/task.c \
+             $(KERNEL_DIR)/proc/exit.c \
+             $(KERNEL_DIR)/proc/signal.c \
+             $(KERNEL_DIR)/proc/cg_cpu.c \
+             $(KERNEL_DIR)/mm/nommu.c \
+             $(KERNEL_DIR)/fs/fdtable.c \
+             $(KERNEL_DIR)/fs/vfs.c \
              $(wildcard $(KERNEL_DIR)/platform/$(BOARD)/*.c) \
              $(shell find $(KERNEL_DIR)/arch/$(ARCH) -type f -name '*.c' | sort)
 else

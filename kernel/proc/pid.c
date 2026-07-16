@@ -3,13 +3,21 @@
 #include "core/lock.h"
 #include "core/string.h"
 
+#ifdef CONFIG_ARMV7M
+/* STM32 has very limited SRAM; keep the PID namespace small. */
+#define PID_MAX_LIMIT   256
+#define PID_HASH_BITS   4
+#else
+#define PID_MAX_LIMIT   4194304
 #define PID_HASH_BITS   10
+#endif
+
 #define PID_HASH_SIZE   (1U << PID_HASH_BITS)
-#define PID_BITMAP_SIZE ((4194304 + 63) / 64)
+#define PID_BITMAP_SIZE ((PID_MAX_LIMIT + 63) / 64)
 
 static spinlock_t pid_lock = SPINLOCK_INIT;
 static int next_pid = 1;
-static int pid_max = 32768;
+static int pid_max = PID_MAX_LIMIT < 32768 ? PID_MAX_LIMIT : 32768;
 static task_t *pid_hash[PID_HASH_SIZE];
 static uint64_t pid_bitmap[PID_BITMAP_SIZE];
 
@@ -73,7 +81,7 @@ void proc_pid_init(void)
     memset(pid_hash, 0, sizeof(pid_hash));
     memset(pid_bitmap, 0, sizeof(pid_bitmap));
     next_pid = 1;
-    pid_max = 32768;
+    pid_max = PID_MAX_LIMIT < 32768 ? PID_MAX_LIMIT : 32768;
 }
 
 int proc_pid_alloc(void)
@@ -157,7 +165,7 @@ int proc_pid_next_value(void)
 
 int proc_set_pid_max(int value)
 {
-    if (value < 1 || value > 4194304)
+    if (value < 1 || value > PID_MAX_LIMIT)
         return -EINVAL;
 
     uint64_t flags = spin_lock_irqsave(&pid_lock);
