@@ -320,31 +320,42 @@ static int bluetooth_at_exchange(const char *command, char *response,
         bluetooth_key_set(0);
 
     size_t length = 0;
-    unsigned idle_ms = 0;
     uint32_t error_bytes = 0;
-    for (unsigned waited = 0; waited < timeout_ms; waited++) {
-        int received = 0;
-        for (;;) {
-            uint8_t value;
-            int result = stm32_uart_poll_byte(
-                BLUETOOTH_UART, &value);
-            if (result == 0)
-                break;
-            if (result < 0) {
-                error_bytes++;
-                bluetooth.at_error_bytes++;
-                continue;
-            }
-            received = 1;
+    /*
+     * Read the reply with a tight cycle-counter spin-poll. At 38400 baud a byte
+     * lands every ~260us and the F103 USART has no RX FIFO, so the previous
+     * 1ms-granularity poll overran and truncated "OK\r\n" to "O", making a
+     * responding module look unconfigured. Poll continuously, end the frame
+     * after a short inter-byte idle, and bound the wait by timeout_ms.
+     */
+    CORE_DEMCR |= CORE_DEMCR_TRCENA;
+    DWT_CTRL |= DWT_CTRL_CYCCNTENA;
+    uint32_t hclk = stm32_hclk_hz();
+    uint32_t idle_cycles = hclk / 500U;   /* ~2 ms of silence ends the frame */
+    uint32_t timeout_cycles = (uint32_t)(((uint64_t)hclk * timeout_ms) / 1000U);
+    uint32_t start = DWT_CYCCNT;
+    uint32_t last_activity = start;
+    uint32_t guard = 0;
+    for (;;) {
+        uint8_t value;
+        int result = stm32_uart_poll_byte(BLUETOOTH_UART, &value);
+        if (result > 0) {
             bluetooth.at_received_bytes++;
             if (length + 1U < capacity)
                 response[length++] = (char)value;
+            last_activity = DWT_CYCCNT;
+        } else if (result < 0) {
+            error_bytes++;
+            bluetooth.at_error_bytes++;
+            last_activity = DWT_CYCCNT;
         }
-        if (received)
-            idle_ms = 0;
-        else if (length != 0 && ++idle_ms >= 20U)
+        uint32_t now = DWT_CYCCNT;
+        if (length != 0U && (uint32_t)(now - last_activity) >= idle_cycles)
             break;
-        bluetooth_delay_ms(1U);
+        if ((uint32_t)(now - start) >= timeout_cycles)
+            break;
+        if (++guard >= 3000000U)   /* backstop if the cycle counter ever stalls */
+            break;
     }
     response[length] = '\0';
     bluetooth_log_response(command, response, length,
@@ -429,8 +440,13 @@ static int bluetooth_reset_to_data_mode(char *response, size_t capacity) {
 }
 
 static int bluetooth_find_at_baud(char *response, size_t capacity) {
+    /*
+     * The HC-05 on this board is fixed at 38400 (STM32_BT_BAUD), so probe that
+     * baud only instead of sweeping every rate — the multi-baud scan just
+     * stalled boot for seconds while every wrong rate returned nothing.
+     */
     static const uint32_t baud_rates[] = {
-        9600U, 38400U, 115200U, 57600U, 19200U, 4800U,
+        BLUETOOTH_BAUD_RATE,
     };
 
     for (unsigned i = 0; i < sizeof(baud_rates) / sizeof(baud_rates[0]);
