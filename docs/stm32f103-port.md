@@ -142,7 +142,7 @@ then checked with saved-and-restored patterns across the detected span. Its
 live allocator use is shown separately only after those probes succeed.
 
 The PZ-HC05 Bluetooth module is connected to `USART3` on `PB10/PB11` at
-9600 8N1. `PA4` drives the module's KEY input and remains low for transparent
+38400 8N1. `PA4` drives the module's KEY input and remains low for transparent
 data mode; `PA15` receives the dedicated PIO9 connection-state output after
 JTAG-only pins are released while SWD remains enabled. PA15 uses a pull-up,
 and a link is accepted only after the signal remains high for 500 ms; this
@@ -165,6 +165,14 @@ the ESP8266 supply must provide adequate 3.3 V current. USART2 and USART3 have
 independent receive interrupts and ring buffers, so WiFi probing cannot take
 ownership of or reconfigure the Bluetooth UART.
 
+The ESP8266 is an ESP8266EX with 1 MiB Flash and official Nano AT v1.7.4.0
+(SDK v3.0.4) at 115200 8N1. The nonblocking probe asserts RESET for 500 ms,
+waits two seconds, then tries each candidate baud up to three times, starting
+at 115200. Hardware testing confirmed reset control and both UART directions.
+The last failure was a defective Dupont wire between PA2 and the module RX;
+replacing it completed the AT hardware link. AP association and the proxy TCP
+connection remain separate configuration/integration steps.
+
 Board early-init keeps PA4 low so the module boots into discoverable data
 mode. Configuration follows the supplied PZ sample's runtime AT sequence
 exactly: it tries 9600 repeatedly, raises KEY only while transmitting the
@@ -184,12 +192,12 @@ electrically driven PB11 or answered AT commands; `WAITING` still requires
 the verified slave configuration and successful reset. This distinguishes
 "module present but AT dialect unknown" from "module absent" without
 claiming an unverified configuration. Defaults are `KasaneTeto`, PIN `2233`,
-UUID `0x1101`, and 9600 baud. They can be changed while building:
+UUID `0x1101`, and 38400 baud. They can be changed while building:
 
 ```sh
 make stm32f103-xuanwu \
     STM32_BT_NAME=MY-BOARD STM32_BT_PIN=6789 \
-    STM32_BT_UUID=1101 STM32_BT_BAUD=9600
+    STM32_BT_UUID=1101 STM32_BT_BAUD=38400
 ```
 
 The service is classic Bluetooth SPP. Standard HC-05 firmware fixes the UUID
@@ -209,7 +217,7 @@ and boot reports `rx=floating`. On Xuanwu this normally means the P10
 incorrectly, the module is inserted backwards, or it is not powered. A
 powered idle module normally reports `rx=driven-high`. Full AT probing is not
 repeated automatically because an absent module can otherwise block the
-single-threaded MCU service loop for several seconds. Use `bt retry` after
+peripheral service task for several seconds. Use `bt retry` after
 changing module wiring or power.
 
 USART1 also provides an interactive bring-up prompt at 115200 8N1:
@@ -235,7 +243,7 @@ errors indicates a baud, wiring, or signal-quality problem; a readable
 command dialect. The `uart` command prints both ports' measured peripheral
 clock, requested and actual baud, BRR, receive-interrupt state, and accumulated
 hardware errors. After Bluetooth initialization, USART3 should report
-`initialized=1`, `requested=9600`, `rx-irq=1`; a nonzero error count is direct
+`initialized=1`, `requested=38400`, `rx-irq=1`; a nonzero error count is direct
 evidence that PB11 is toggling but the received framing is invalid.
 
 SysTick derives its 1 kHz reload from the live RCC HCLK rather than assuming
@@ -244,6 +252,19 @@ the measured maximum duration of the peripheral service loop, light sampling,
 manual Bluetooth retries, and SD-card checks. Optional HC-05 and absent TF-card
 initialization are only retried by explicit UART commands so command timeouts
 cannot periodically freeze input and display updates.
+
+The MCU profile now links the generic A20OS process scheduler. ARMv7-M
+`__switch` saves and restores `r4-r11`, SP, the return address, the task
+pointer, and CONTROL. The physical board runs the peripheral service and the
+USART1 diagnostic console as separate kernel tasks; QEMU substitutes a
+scheduler probe task. Tasks are designed to yield cooperatively with
+`proc_yield()`. `PendSV_Handler` remains a no-op, so SysTick/PendSV time-slice
+preemption is not yet implemented. MCU-only batch limits, a 256-entry PID
+namespace, and compatibility stubs reduce the generic scheduler footprint.
+The 8 KiB QEMU profile currently has only about 2.6 KiB heap after boot and
+panics with `cannot create diagnostic task` before the scheduler probe runs;
+the 64 KiB Xuanwu image links successfully but still requires a hardware
+round-trip test.
 
 The LCD UI remains touch-selectable when a working panel is fitted. The
 storage page shows capacity, FAT32 state, SDIO bus width, and volume label.
@@ -278,8 +299,8 @@ STM32F103C8-style image.
 After flashing, the expected behavior is:
 
 1. LED0 starts lit and then toggles every 500 ms.
-2. USART1 prints the status of each optional peripheral and one tick per
-   second.
+2. USART1 prints boot status and peripheral events. The old once-per-second
+   `[TICK]` line is disabled to keep the console quiet.
 3. The LCD shows external SRAM, TF/FAT32, direction-key, and uptime status.
 4. The yellow direction keys emit `[KEY]` messages. Left/right switch pages,
    while up/down control the current page.
@@ -288,7 +309,7 @@ After flashing, the expected behavior is:
    erases it.
 6. Touching the panel shows coordinates and emits `[TOUCH] down`/`[TOUCH] up`
    messages.
-7. The `BT` page reports the HC-05 link state. Pair a phone at 9600 8N1,
+7. The `BT` page reports the HC-05 link state. Pair a phone at 38400 8N1,
    send text from a Bluetooth serial app, and press up to transmit the
    `A20OS HC05 TEST` response.
 8. Cover and uncover the onboard photoresistor. The `LIGHT` ADC/level values
@@ -301,10 +322,12 @@ non-FAT32 cards still initialize as block devices.
 
 ## Next milestones
 
-1. Add real PendSV context switching and a Cortex-M thread stack ABI.
+1. Extend the working cooperative ARMv7-M kernel-thread switch to SysTick/
+   PendSV preemption; `__switch` currently handles voluntary `proc_yield()`
+   context switches while `PendSV_Handler` is still a no-op.
 2. Decide whether applications run privileged in a flat address space or use
    the Cortex-M MPU for coarse isolation.
-3. Add an MCU configuration profile for scheduler, IPC, and a small VFS that
-   can mount the existing TF `block_dev_t`.
+3. Replace the MCU compatibility stubs with the required IPC and small-VFS
+   implementations, then mount the existing TF `block_dev_t`.
 4. Add GPIO, EXTI, SPI, I2C, and SPI-flash drivers under `kernel/drivers`.
 5. Move SDIO transfers to DMA and use external SRAM for the block cache.
