@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/ioctl.h>
@@ -69,9 +70,17 @@ static void disp_init(void)
         fb_mem = NULL;
     }
 #else
-    fb_mem = (void *)0x60000000; /* Arbitrary aligned address */
+    /*
+     * Keep the framebuffer below the initial user stack (0x40000000).  The
+     * old 0x60000000 address is valid in the abstract user VA range, but it
+     * lies above the stack on the 32-bit-style layout used by A20OS userland
+     * and conflicts with the address-space assumptions in the current MMU
+     * implementation.  This otherwise made FBIO_MAP_FB fail on both ARM64
+     * and x86_64, leaving LVGL with no draw buffer and a black QEMU window.
+     */
+    fb_mem = (void *)0x30000000;
     if (ioctl(fb_fd, A20OS_FBIO_MAP_FB, fb_mem) < 0) {
-        printf("Failed to map framebuffer\n");
+        printf("Failed to map framebuffer: errno=%d\n", errno);
         fb_mem = NULL;
     }
 #endif

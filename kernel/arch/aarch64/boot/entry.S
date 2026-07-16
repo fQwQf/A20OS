@@ -8,6 +8,7 @@
 
     .section .text.entry
     .global _start
+    .extern early_uart_init
 _start:
     adrp    x0, _stack_end
     add     x0, x0, :lo12:_stack_end
@@ -140,6 +141,8 @@ _start:
     adrp    x0, _stack_end
     add     x0, x0, :lo12:_stack_end
     mov     sp, x0
+
+    bl      early_uart_init
 
     adrp    x0, aarch64_vector_table
     add     x0, x0, :lo12:aarch64_vector_table

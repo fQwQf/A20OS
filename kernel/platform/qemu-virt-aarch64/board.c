@@ -16,6 +16,16 @@ static inline volatile uint8_t *aa64_gicd_reg8(uint32_t off) {
     return (volatile uint8_t *)(uintptr_t)(GICD_BASE + off);
 }
 
+static void aa64_gicd_set_target(uint32_t irq, uint8_t target) {
+    uint32_t off = 0x800 + (irq & ~3U);
+    uint32_t shift = (irq & 3U) * 8U;
+    volatile uint32_t *reg = aa64_gicd_reg32(off);
+    uint32_t value = *reg;
+
+    value = (value & ~(0xFFU << shift)) | ((uint32_t)target << shift);
+    *reg = value;
+}
+
 static void aa64_gic_init(void) {
     *aa64_gicd_reg32(0x000) = 0;
     *aa64_gicc_reg32(0x0000) = 0;
@@ -28,7 +38,9 @@ static void aa64_gic_init(void) {
 static void aa64_gic_enable(uint32_t irq) {
     *aa64_gicd_reg32(0x100 + (uint32_t)(irq / 32U) * 4) = 1U << (irq % 32U);
     *aa64_gicd_reg8(0x400 + (uint32_t)irq) = 0x40;
-    *aa64_gicd_reg8(0x800 + (uint32_t)irq) = 0x01;
+    /* QEMU virt requires a word write for GICD_ITARGETSR updates. */
+    aa64_gicd_set_target(irq, 0x01);
+    arch_mb();
 }
 
 static void aa64_gic_disable(uint32_t irq) {
@@ -36,7 +48,8 @@ static void aa64_gic_disable(uint32_t irq) {
 }
 
 static uint32_t aa64_gic_ack(void) {
-    return *aa64_gicc_reg32(0x000C) & 0x3FFU;
+    /* The exception entry already claimed the interrupt through GICC_IAR. */
+    return 0;
 }
 
 static void aa64_gic_eoi(uint32_t irq) {

@@ -3,23 +3,29 @@
 
 #include "core/types.h"
 
-/*
- * QEMU virt (AArch64)
- *
- * DRAM starts at PA 0x40000000.  The kernel is linked in the higher half at
- * VA = PAGE_OFFSET + PA, but all per-process page tables still share a single
- * root page table via TTBR0_EL1.  Root entry 0 covers user space; root entry 1
- * covers the linear-mapped kernel window [PAGE_OFFSET, PAGE_OFFSET + 512G).
- */
-#define PHYS_MEMORY_BASE   0x40000000UL
-#define PHYS_MEMORY_END    0x60000000UL
-#define KERNEL_ENTRY       0x40080000UL
 #ifdef CONFIG_NOMMU
 #define PAGE_OFFSET        0x0UL
 #define USER_VA_LIMIT      PHYS_MEMORY_END
 #else
 #define PAGE_OFFSET        0x0000008000000000UL
 #define USER_VA_LIMIT      0x0000004000000000UL
+#endif
+
+/*
+ * QEMU virt (AArch64) defaults.  Boards with a different memory map can
+ * override these constants by providing a board-specific header.
+ */
+#ifdef CONFIG_BOARD_VIRTUALBOX_AARCH64
+#include "vbox_aarch64_platform.h"
+#else
+#define PHYS_MEMORY_BASE   0x40000000UL
+#define PHYS_MEMORY_END    0x80000000UL
+#define KERNEL_ENTRY       0x40080000UL
+#define UART0_BASE         (0x09000000UL + PAGE_OFFSET)
+#define GICD_BASE          (0x08000000UL + PAGE_OFFSET)
+#define GICC_BASE          (0x08010000UL + PAGE_OFFSET)
+#define VIRTIO_BASE        (0x0A000000UL + PAGE_OFFSET)
+#define UART0_IRQ          33U
 #endif
 
 static inline size_t arch_ram_range_count(void) {
@@ -33,12 +39,6 @@ static inline int arch_ram_range(size_t idx, paddr_t *base, paddr_t *end) {
     *end = PHYS_MEMORY_END;
     return 0;
 }
-
-#define UART0_BASE         (0x09000000UL + PAGE_OFFSET)
-#define GICD_BASE          (0x08000000UL + PAGE_OFFSET)
-#define GICC_BASE          (0x08010000UL + PAGE_OFFSET)
-#define VIRTIO_BASE        (0x0A000000UL + PAGE_OFFSET)
-#define UART0_IRQ          33U
 
 #define CLINT_BASE         0x0UL
 #define CLINT_TIMER_FREQ   62500000UL

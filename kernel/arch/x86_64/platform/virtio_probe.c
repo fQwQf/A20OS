@@ -27,7 +27,7 @@ static void ecam_write(uint8_t bus, uint8_t dev, uint8_t func, uint32_t reg, uin
 }
 
 static int pci_inited = 0;
-static pci_virtio_dev_t pci_devs[8];
+static pci_virtio_dev_t pci_devs[16];
 static int pci_ndevs = 0;
 static uintptr_t pci_mmio_alloc = PCI_MMIO_BASE;
 
@@ -166,8 +166,12 @@ void pci_init(void) {
             virtio_type = sub_dev;
         }
 
-        if (virtio_type != 1 && virtio_type != 2)
+        if (virtio_type != 1 && virtio_type != 2 &&
+            virtio_type != 16 && virtio_type != 18)
             continue;
+
+        if (pci_ndevs >= (int)(sizeof(pci_devs) / sizeof(pci_devs[0])))
+            break;
 
         alloc_device_bars(dev);
         enable_device(dev);
@@ -176,14 +180,22 @@ void pci_init(void) {
         memset(vd, 0, sizeof(*vd));
         vd->dev_num = dev;
         vd->device_type = virtio_type;
+        vd->irq = ecam_read8(0, dev, 0, PCI_INTERRUPT_LINE);
+
+        if (virtio_type == 18 && vd->irq != 0 && vd->irq != 0xFF)
+            x86_64_route_pci_irq(vd->irq, IRQ_VECTOR_PCI);
 
         if (find_virtio_caps(dev, vd) != 0)
             continue;
 
         vd->valid = 1;
         pci_ndevs++;
-        printf("[PCI] Found virtio-%s at 00:%02x.0\n",
-               virtio_type == 1 ? "net" : "blk", dev);
+        const char *type_name = "unknown";
+        if (virtio_type == 1) type_name = "net";
+        if (virtio_type == 2) type_name = "blk";
+        if (virtio_type == 16) type_name = "gpu";
+        if (virtio_type == 18) type_name = "input";
+        printf("[PCI] Found virtio-%s at 00:%02x.0\n", type_name, dev);
     }
 
     printf("[PCI] Found %d virtio device(s)\n", pci_ndevs);
@@ -239,6 +251,12 @@ static uint32_t pci_vt_read32(virtio_transport_t *t, uint32_t mmio_off) {
     uintptr_t cb = vd->common_base;
 
     switch (mmio_off) {
+    case VIRTIO_MMIO_MAGIC:
+        return 0x74726976U;
+    case VIRTIO_MMIO_VERSION:
+        return 2;
+    case VIRTIO_MMIO_DEVICE_ID:
+        return (uint32_t)vd->device_type;
     case VIRTIO_MMIO_DEVICE_FEATURES:
         return pci_common_read32(cb, PCOMMON_DEV_FEAT);
     case VIRTIO_MMIO_DEVICE_FEATURES_SEL:
@@ -285,6 +303,8 @@ static void pci_vt_write32(virtio_transport_t *t, uint32_t mmio_off, uint32_t va
     uintptr_t cb = vd->common_base;
 
     switch (mmio_off) {
+    case VIRTIO_MMIO_INTERRUPT_ACK:
+        break;
     case VIRTIO_MMIO_DEVICE_FEATURES_SEL:
         pci_common_write32(cb, PCOMMON_DEV_FEAT_SEL, val);
         break;
@@ -339,7 +359,7 @@ static void pci_vt_write32(virtio_transport_t *t, uint32_t mmio_off, uint32_t va
     }
 }
 
-static pci_transport_priv_t pci_privs[8];
+static pci_transport_priv_t pci_privs[16];
 static int pci_npriv;
 
 static int arch_virtio_probe_type(int type, int index, virtio_transport_t *vt) {
@@ -367,7 +387,7 @@ static int arch_virtio_probe_type(int type, int index, virtio_transport_t *vt) {
     vt->write32 = pci_vt_write32;
     vt->priv = priv;
     vt->legacy = 0;
-    vt->irq = -1;
+    vt->irq = (vd->irq != 0 && vd->irq != 0xFF) ? IRQ_VECTOR_PCI : -1;
     return 0;
 }
 
@@ -377,6 +397,14 @@ int arch_virtio_blk_probe(int index, virtio_transport_t *vt) {
 
 int arch_virtio_net_probe(int index, virtio_transport_t *vt) {
     return arch_virtio_probe_type(1, index, vt);
+}
+
+int arch_virtio_gpu_probe(int index, virtio_transport_t *vt) {
+    return arch_virtio_probe_type(16, index, vt);
+}
+
+int arch_virtio_input_probe(int index, virtio_transport_t *vt) {
+    return arch_virtio_probe_type(18, index, vt);
 }
 
 #endif
