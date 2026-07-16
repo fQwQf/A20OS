@@ -300,7 +300,7 @@ void stm32_peripherals_init(void) {
 
     peripherals.wifi_ready = stm32_wifi_init() == 0;
     printf("[BOOT] ESP8266 interface=%s uart=USART2/PA2/PA3"
-           " enable=PC6 reset=PC7 baud=115200"
+           " enable=PC6 reset=PC7 baud=auto(115200-first)"
            " probe=deferred nonblocking\n",
            peripherals.wifi_ready ? "armed" : "disabled");
 
@@ -328,34 +328,24 @@ void stm32_peripherals_init(void) {
     printf("[BOOT] smart-hub controller ready dht11=%s (PG11)"
            " actuators=fan(TIM3_CH1/PA6),pump(PA7),buzzer(PB8)\n",
            dht_present ? "armed" : "absent");
-    hub_buzz(timer_get_ticks(), BUZZ_BOOT_MS); /* startup chime */
-
     ir_present = stm32_ir_init() == 0;
     printf("[BOOT] IR receiver=%s (PB9/EXTI9, NEC)\n",
            ir_present ? "armed" : "absent");
 
-    /* Wi-Fi -> cloud proxy (best-effort; local rule engine is the fallback). */
+    /*
+     * wifi.c already owns USART2 and advances its AT probe from service().
+     * Do not run the legacy synchronous esp8266.c probe here: it resets the
+     * same UART and can hold boot before touch polling and buzzer shutdown.
+     */
     net_ready = 0;
-    if (stm32_esp8266_init() == 0) {
-        printf("[BOOT] esp8266 armed USART2/PA2/PA3\n");
-        if (stm32_esp8266_join(HUB_WIFI_SSID, HUB_WIFI_PASS) == 0 &&
-            stm32_esp8266_connect(HUB_PROXY_IP, HUB_PROXY_PORT) == 0) {
-            net_ready = 1;
-            printf("[BOOT] proxy connected %s:%d\n", HUB_PROXY_IP,
-                   HUB_PROXY_PORT);
-        } else {
-            printf("[BOOT] wifi/proxy not connected — using local rules"
-                   " (check hub_config.h)\n");
-        }
-    } else {
-        printf("[BOOT] esp8266 absent — using local rules\n");
-    }
+    printf("[BOOT] cloud control=deferred nonblocking local-rules-active\n");
 
     update_display_status();
     update_bluetooth_display();
     update_wifi_display();
     update_memory_display();
     update_light_display();
+    hub_buzz(timer_get_ticks(), BUZZ_BOOT_MS); /* one startup chime */
 }
 
 /* Build an environment snapshot and drive the actuators from the decision. */
