@@ -1,12 +1,11 @@
 /*
- * Compact FAT32 file layer. Pure logic over a fat32_io_t sector interface, so
- * it runs on the STM32 (SDIO) and on the host (a FAT32 image file). See
- * fat32.h. Names are matched/created in 8.3 short form; LFN entries are
- * skipped on read.
+ * FAT32lite - compact FAT32 file layer for resource-constrained (NOMMU/MCU)
+ * builds; hardware-independent via fat32lite_io_t callbacks; single-threaded;
+ * 8.3 names only. Peer of the VFS-integrated kernel/fs/fat32.c. It runs on the
+ * STM32 (SDIO) and on the host (a FAT32 image file). See fs/fat32lite.h. Names
+ * are matched/created in 8.3 short form; LFN entries are skipped on read.
  */
-#ifdef CONFIG_BOARD_STM32F103
-
-#include "fat32.h"
+#include "fs/fat32lite.h"
 
 #define ATTR_DIRECTORY 0x10u
 #define ATTR_VOLUME_ID 0x08u
@@ -43,24 +42,24 @@ static void wr32(uint8_t *p, uint32_t v) {
     p[3] = (uint8_t)(v >> 24);
 }
 
-static int rd_sector(fat32_fs_t *fs, uint32_t lba, uint8_t *buf) {
-    return fs->io.read(fs->io.ctx, lba, buf, 1) ? FAT32_EIO : FAT32_OK;
+static int rd_sector(fat32lite_fs_t *fs, uint32_t lba, uint8_t *buf) {
+    return fs->io.read(fs->io.ctx, lba, buf, 1) ? FAT32LITE_EIO : FAT32LITE_OK;
 }
-static int wr_sector(fat32_fs_t *fs, uint32_t lba, const uint8_t *buf) {
+static int wr_sector(fat32lite_fs_t *fs, uint32_t lba, const uint8_t *buf) {
     if (!fs->io.write)
-        return FAT32_EROFS;
-    return fs->io.write(fs->io.ctx, lba, buf, 1) ? FAT32_EIO : FAT32_OK;
+        return FAT32LITE_EROFS;
+    return fs->io.write(fs->io.ctx, lba, buf, 1) ? FAT32LITE_EIO : FAT32LITE_OK;
 }
 
-static uint32_t cluster_lba(const fat32_fs_t *fs, uint32_t cluster) {
+static uint32_t cluster_lba(const fat32lite_fs_t *fs, uint32_t cluster) {
     return fs->cluster_begin_lba + (cluster - 2u) * fs->sectors_per_cluster;
 }
-static uint32_t cluster_bytes(const fat32_fs_t *fs) {
+static uint32_t cluster_bytes(const fat32lite_fs_t *fs) {
     return fs->sectors_per_cluster * fs->bytes_per_sector;
 }
 
 /* ---- FAT access (uses fs->scratch) ---- */
-static int fat_get(fat32_fs_t *fs, uint32_t cluster, uint32_t *next) {
+static int fat_get(fat32lite_fs_t *fs, uint32_t cluster, uint32_t *next) {
     uint32_t idx = cluster * 4u;
     uint32_t sec = fs->fat_begin_lba + idx / fs->bytes_per_sector;
     uint32_t off = idx % fs->bytes_per_sector;
@@ -68,9 +67,9 @@ static int fat_get(fat32_fs_t *fs, uint32_t cluster, uint32_t *next) {
     if (r)
         return r;
     *next = rd32(fs->scratch + off) & FAT_MASK;
-    return FAT32_OK;
+    return FAT32LITE_OK;
 }
-static int fat_set(fat32_fs_t *fs, uint32_t cluster, uint32_t val) {
+static int fat_set(fat32lite_fs_t *fs, uint32_t cluster, uint32_t val) {
     uint32_t idx = cluster * 4u;
     uint32_t off = idx % fs->bytes_per_sector;
     for (uint32_t f = 0; f < fs->num_fats; f++) {
@@ -85,11 +84,11 @@ static int fat_set(fat32_fs_t *fs, uint32_t cluster, uint32_t val) {
         if (r)
             return r;
     }
-    return FAT32_OK;
+    return FAT32LITE_OK;
 }
 
 /* Allocate one free cluster, mark EOC. If zero!=0, wipe its data area. */
-static int fat_alloc(fat32_fs_t *fs, int zero, uint32_t *out) {
+static int fat_alloc(fat32lite_fs_t *fs, int zero, uint32_t *out) {
     for (uint32_t c = 2; c < fs->total_clusters + 2u; c++) {
         uint32_t nxt;
         int r = fat_get(fs, c, &nxt);
@@ -100,7 +99,7 @@ static int fat_alloc(fat32_fs_t *fs, int zero, uint32_t *out) {
             if (r)
                 return r;
             if (zero) {
-                uint8_t z[FAT32_SECTOR_SIZE];
+                uint8_t z[FAT32LITE_SECTOR_SIZE];
                 u_memset(z, 0, sizeof(z));
                 for (uint32_t s = 0; s < fs->sectors_per_cluster; s++) {
                     r = wr_sector(fs, cluster_lba(fs, c) + s, z);
@@ -109,13 +108,13 @@ static int fat_alloc(fat32_fs_t *fs, int zero, uint32_t *out) {
                 }
             }
             *out = c;
-            return FAT32_OK;
+            return FAT32LITE_OK;
         }
     }
-    return FAT32_ENOSPC;
+    return FAT32LITE_ENOSPC;
 }
 
-static int free_chain(fat32_fs_t *fs, uint32_t cluster) {
+static int free_chain(fat32lite_fs_t *fs, uint32_t cluster) {
     while (cluster >= 2 && cluster < FAT_EOC) {
         uint32_t next;
         int r = fat_get(fs, cluster, &next);
@@ -126,7 +125,7 @@ static int free_chain(fat32_fs_t *fs, uint32_t cluster) {
             return r;
         cluster = next;
     }
-    return FAT32_OK;
+    return FAT32LITE_OK;
 }
 
 /* ---- 8.3 names ---- */
@@ -137,7 +136,7 @@ static int to_83(const char *name, unsigned len, uint8_t out[11]) {
     /* base */
     while (i < len && name[i] != '.') {
         if (o >= 8)
-            return FAT32_EINVAL;
+            return FAT32LITE_EINVAL;
         char c = name[i++];
         if (c >= 'a' && c <= 'z')
             c = (char)(c - 'a' + 'A');
@@ -148,7 +147,7 @@ static int to_83(const char *name, unsigned len, uint8_t out[11]) {
         unsigned e = 8;
         while (i < len) {
             if (e >= 11)
-                return FAT32_EINVAL;
+                return FAT32LITE_EINVAL;
             char c = name[i++];
             if (c >= 'a' && c <= 'z')
                 c = (char)(c - 'a' + 'A');
@@ -156,15 +155,15 @@ static int to_83(const char *name, unsigned len, uint8_t out[11]) {
         }
     }
     if (o == 0)
-        return FAT32_EINVAL;
-    return FAT32_OK;
+        return FAT32LITE_EINVAL;
+    return FAT32LITE_OK;
 }
 
 /* ---- directory scan ---- */
 /* Iterate the entries of a directory cluster chain, matching name11. On match
  * copies the 32-byte entry to entry_out and reports its sector + index. dirbuf
  * is a 512-byte scratch owned by the caller. */
-static int find_in_dir(fat32_fs_t *fs, uint32_t dir_cluster,
+static int find_in_dir(fat32lite_fs_t *fs, uint32_t dir_cluster,
                        const uint8_t name11[11], uint8_t *dirbuf,
                        uint8_t entry_out[32], uint32_t *out_lba,
                        uint32_t *out_idx) {
@@ -178,7 +177,7 @@ static int find_in_dir(fat32_fs_t *fs, uint32_t dir_cluster,
             for (uint32_t e = 0; e < fs->bytes_per_sector / 32u; e++) {
                 uint8_t *ent = dirbuf + e * 32u;
                 if (ent[0] == 0x00)
-                    return FAT32_ENOENT; /* end of directory */
+                    return FAT32LITE_ENOENT; /* end of directory */
                 if (ent[0] == 0xE5)
                     continue;
                 if ((ent[11] & ATTR_LONG_NAME) == ATTR_LONG_NAME)
@@ -198,7 +197,7 @@ static int find_in_dir(fat32_fs_t *fs, uint32_t dir_cluster,
                         *out_lba = lba;
                     if (out_idx)
                         *out_idx = e;
-                    return FAT32_OK;
+                    return FAT32LITE_OK;
                 }
             }
         }
@@ -208,17 +207,17 @@ static int find_in_dir(fat32_fs_t *fs, uint32_t dir_cluster,
             return r;
         cluster = next;
     }
-    return FAT32_ENOENT;
+    return FAT32LITE_ENOENT;
 }
 
 /* Split a path, walk from root through all but the last component (each must be
  * a directory), returning the parent's first cluster + the 8.3 last name. */
-static int resolve_parent(fat32_fs_t *fs, const char *path, uint8_t *dirbuf,
+static int resolve_parent(fat32lite_fs_t *fs, const char *path, uint8_t *dirbuf,
                           uint32_t *parent_cluster, uint8_t name11[11]) {
     while (*path == '/')
         path++;
     if (!*path)
-        return FAT32_EINVAL;
+        return FAT32LITE_EINVAL;
 
     uint32_t cluster = fs->root_cluster;
     const char *seg = path;
@@ -228,7 +227,7 @@ static int resolve_parent(fat32_fs_t *fs, const char *path, uint8_t *dirbuf,
             slash++;
         unsigned len = (unsigned)(slash - seg);
         if (len == 0)
-            return FAT32_EINVAL;
+            return FAT32LITE_EINVAL;
 
         /* skip any trailing slashes to see if this is the final component */
         const char *rest = slash;
@@ -241,7 +240,7 @@ static int resolve_parent(fat32_fs_t *fs, const char *path, uint8_t *dirbuf,
             return r;
         if (is_last) {
             *parent_cluster = cluster;
-            return FAT32_OK;
+            return FAT32LITE_OK;
         }
         /* descend into this directory */
         uint8_t ent[32];
@@ -249,7 +248,7 @@ static int resolve_parent(fat32_fs_t *fs, const char *path, uint8_t *dirbuf,
         if (r)
             return r;
         if (!(ent[11] & ATTR_DIRECTORY))
-            return FAT32_ENOTDIR;
+            return FAT32LITE_ENOTDIR;
         cluster = ((uint32_t)rd16(ent + 20) << 16) | rd16(ent + 26);
         if (cluster == 0)
             cluster = fs->root_cluster;
@@ -258,18 +257,18 @@ static int resolve_parent(fat32_fs_t *fs, const char *path, uint8_t *dirbuf,
 }
 
 /* ---- mount ---- */
-int fat32_mount(fat32_fs_t *fs, const fat32_io_t *io, uint32_t partition_lba) {
+int fat32lite_mount(fat32lite_fs_t *fs, const fat32lite_io_t *io, uint32_t partition_lba) {
     if (!fs || !io || !io->read)
-        return FAT32_EINVAL;
+        return FAT32LITE_EINVAL;
     u_memset(fs, 0, sizeof(*fs));
     fs->io = *io;
     fs->partition_lba = partition_lba;
 
-    uint8_t bs[FAT32_SECTOR_SIZE];
+    uint8_t bs[FAT32LITE_SECTOR_SIZE];
     if (fs->io.read(fs->io.ctx, partition_lba, bs, 1))
-        return FAT32_EIO;
+        return FAT32LITE_EIO;
     if (rd16(bs + 510) != 0xAA55u)
-        return FAT32_EINVAL;
+        return FAT32LITE_EINVAL;
 
     fs->bytes_per_sector = rd16(bs + 11);
     fs->sectors_per_cluster = bs[13];
@@ -277,9 +276,9 @@ int fat32_mount(fat32_fs_t *fs, const fat32_io_t *io, uint32_t partition_lba) {
     fs->num_fats = bs[16];
     fs->fat_size_sectors = rd32(bs + 36);
     fs->root_cluster = rd32(bs + 44);
-    if (fs->bytes_per_sector != FAT32_SECTOR_SIZE || !fs->sectors_per_cluster ||
+    if (fs->bytes_per_sector != FAT32LITE_SECTOR_SIZE || !fs->sectors_per_cluster ||
         !fs->num_fats || !fs->fat_size_sectors || fs->root_cluster < 2)
-        return FAT32_EINVAL; /* not a FAT32 volume we can handle */
+        return FAT32LITE_EINVAL; /* not a FAT32 volume we can handle */
 
     uint32_t tot = rd32(bs + 32);
     if (tot == 0)
@@ -290,14 +289,14 @@ int fat32_mount(fat32_fs_t *fs, const fat32_io_t *io, uint32_t partition_lba) {
     uint32_t data_sectors =
         tot - (reserved + fs->num_fats * fs->fat_size_sectors);
     fs->total_clusters = data_sectors / fs->sectors_per_cluster;
-    return FAT32_OK;
+    return FAT32LITE_OK;
 }
 
 /* ---- open (read) ---- */
-int fat32_open(fat32_fs_t *fs, const char *path, fat32_file_t *f) {
+int fat32lite_open(fat32lite_fs_t *fs, const char *path, fat32lite_file_t *f) {
     if (!fs || !path || !f)
-        return FAT32_EINVAL;
-    uint8_t dirbuf[FAT32_SECTOR_SIZE];
+        return FAT32LITE_EINVAL;
+    uint8_t dirbuf[FAT32LITE_SECTOR_SIZE];
     uint8_t name11[11];
     uint32_t parent;
     int r = resolve_parent(fs, path, dirbuf, &parent, name11);
@@ -309,7 +308,7 @@ int fat32_open(fat32_fs_t *fs, const char *path, fat32_file_t *f) {
     if (r)
         return r;
     if (ent[11] & ATTR_DIRECTORY)
-        return FAT32_EINVAL;
+        return FAT32LITE_EINVAL;
 
     u_memset(f, 0, sizeof(*f));
     f->fs = fs;
@@ -320,12 +319,12 @@ int fat32_open(fat32_fs_t *fs, const char *path, fat32_file_t *f) {
     f->dir_lba = lba;
     f->dir_index = idx;
     f->writable = 0;
-    return FAT32_OK;
+    return FAT32LITE_OK;
 }
 
 /* Ensure f->cur_cluster is the cluster containing f->pos (walk from start). */
-static int seek_cluster(fat32_file_t *f) {
-    fat32_fs_t *fs = f->fs;
+static int seek_cluster(fat32lite_file_t *f) {
+    fat32lite_fs_t *fs = f->fs;
     uint32_t hops = f->pos / cluster_bytes(fs);
     uint32_t cl = f->first_cluster;
     for (uint32_t i = 0; i < hops && cl >= 2 && cl < FAT_EOC; i++) {
@@ -336,13 +335,13 @@ static int seek_cluster(fat32_file_t *f) {
         cl = next;
     }
     f->cur_cluster = cl;
-    return FAT32_OK;
+    return FAT32LITE_OK;
 }
 
-int fat32_read(fat32_file_t *f, void *buf, uint32_t len) {
+int fat32lite_read(fat32lite_file_t *f, void *buf, uint32_t len) {
     if (!f || !buf)
-        return FAT32_EINVAL;
-    fat32_fs_t *fs = f->fs;
+        return FAT32LITE_EINVAL;
+    fat32lite_fs_t *fs = f->fs;
     if (f->pos >= f->size)
         return 0;
     if (len > f->size - f->pos)
@@ -385,8 +384,8 @@ int fat32_read(fat32_file_t *f, void *buf, uint32_t len) {
 }
 
 /* Ensure the cluster containing f->pos exists, allocating/linking as needed. */
-static int ensure_cluster(fat32_file_t *f) {
-    fat32_fs_t *fs = f->fs;
+static int ensure_cluster(fat32lite_file_t *f) {
+    fat32lite_fs_t *fs = f->fs;
     uint32_t hops = f->pos / cluster_bytes(fs);
 
     if (f->first_cluster == 0) {
@@ -416,17 +415,17 @@ static int ensure_cluster(fat32_file_t *f) {
         cl = next;
     }
     f->cur_cluster = cl;
-    return FAT32_OK;
+    return FAT32LITE_OK;
 }
 
-int fat32_write(fat32_file_t *f, const void *buf, uint32_t len) {
+int fat32lite_write(fat32lite_file_t *f, const void *buf, uint32_t len) {
     if (!f || !buf)
-        return FAT32_EINVAL;
+        return FAT32LITE_EINVAL;
     if (!f->writable)
-        return FAT32_EROFS;
-    fat32_fs_t *fs = f->fs;
+        return FAT32LITE_EROFS;
+    fat32lite_fs_t *fs = f->fs;
     if (!fs->io.write)
-        return FAT32_EROFS;
+        return FAT32LITE_EROFS;
 
     const uint8_t *in = buf;
     uint32_t bpc = cluster_bytes(fs);
@@ -464,21 +463,21 @@ int fat32_write(fat32_file_t *f, const void *buf, uint32_t len) {
     return (int)total;
 }
 
-int fat32_seek(fat32_file_t *f, uint32_t pos) {
+int fat32lite_seek(fat32lite_file_t *f, uint32_t pos) {
     if (!f)
-        return FAT32_EINVAL;
+        return FAT32LITE_EINVAL;
     if (pos > f->size)
         pos = f->size;
     f->pos = pos;
     return seek_cluster(f);
 }
 
-uint32_t fat32_tell(const fat32_file_t *f) { return f ? f->pos : 0; }
-uint32_t fat32_size(const fat32_file_t *f) { return f ? f->size : 0; }
+uint32_t fat32lite_tell(const fat32lite_file_t *f) { return f ? f->pos : 0; }
+uint32_t fat32lite_size(const fat32lite_file_t *f) { return f ? f->size : 0; }
 
 /* Patch the file's short dir entry with its first cluster + size. */
-static int flush_dir_entry(fat32_file_t *f) {
-    fat32_fs_t *fs = f->fs;
+static int flush_dir_entry(fat32lite_file_t *f) {
+    fat32lite_fs_t *fs = f->fs;
     int r = rd_sector(fs, f->dir_lba, fs->scratch);
     if (r)
         return r;
@@ -489,10 +488,10 @@ static int flush_dir_entry(fat32_file_t *f) {
     return wr_sector(fs, f->dir_lba, fs->scratch);
 }
 
-int fat32_close(fat32_file_t *f) {
+int fat32lite_close(fat32lite_file_t *f) {
     if (!f)
-        return FAT32_EINVAL;
-    int r = FAT32_OK;
+        return FAT32LITE_EINVAL;
+    int r = FAT32LITE_OK;
     if (f->writable && f->dirty)
         r = flush_dir_entry(f);
     f->fs = 0;
@@ -501,7 +500,7 @@ int fat32_close(fat32_file_t *f) {
 
 /* Find or extend a free 32-byte slot in a directory; returns its sector+index.
  * dirbuf is caller-owned 512-byte scratch. */
-static int alloc_dir_slot(fat32_fs_t *fs, uint32_t dir_cluster, uint8_t *dirbuf,
+static int alloc_dir_slot(fat32lite_fs_t *fs, uint32_t dir_cluster, uint8_t *dirbuf,
                           uint32_t *out_lba, uint32_t *out_idx) {
     uint32_t cluster = dir_cluster, prev = dir_cluster;
     while (cluster >= 2 && cluster < FAT_EOC) {
@@ -515,7 +514,7 @@ static int alloc_dir_slot(fat32_fs_t *fs, uint32_t dir_cluster, uint8_t *dirbuf,
                 if (c0 == 0x00 || c0 == 0xE5) {
                     *out_lba = lba;
                     *out_idx = e;
-                    return FAT32_OK;
+                    return FAT32LITE_OK;
                 }
             }
         }
@@ -534,7 +533,7 @@ static int alloc_dir_slot(fat32_fs_t *fs, uint32_t dir_cluster, uint8_t *dirbuf,
         return r;
     *out_lba = cluster_lba(fs, nc);
     *out_idx = 0;
-    return FAT32_OK;
+    return FAT32LITE_OK;
 }
 
 static void write_short_entry(uint8_t *ent, const uint8_t name11[11],
@@ -547,12 +546,12 @@ static void write_short_entry(uint8_t *ent, const uint8_t name11[11],
     wr32(ent + 28, size);
 }
 
-int fat32_create(fat32_fs_t *fs, const char *path, fat32_file_t *f) {
+int fat32lite_create(fat32lite_fs_t *fs, const char *path, fat32lite_file_t *f) {
     if (!fs || !path || !f)
-        return FAT32_EINVAL;
+        return FAT32LITE_EINVAL;
     if (!fs->io.write)
-        return FAT32_EROFS;
-    uint8_t dirbuf[FAT32_SECTOR_SIZE];
+        return FAT32LITE_EROFS;
+    uint8_t dirbuf[FAT32LITE_SECTOR_SIZE];
     uint8_t name11[11];
     uint32_t parent;
     int r = resolve_parent(fs, path, dirbuf, &parent, name11);
@@ -562,17 +561,17 @@ int fat32_create(fat32_fs_t *fs, const char *path, fat32_file_t *f) {
     uint8_t ent[32];
     uint32_t lba, idx;
     r = find_in_dir(fs, parent, name11, dirbuf, ent, &lba, &idx);
-    if (r == FAT32_OK) {
+    if (r == FAT32LITE_OK) {
         /* exists -> truncate */
         if (ent[11] & ATTR_DIRECTORY)
-            return FAT32_EINVAL;
+            return FAT32LITE_EINVAL;
         uint32_t first = ((uint32_t)rd16(ent + 20) << 16) | rd16(ent + 26);
         if (first >= 2) {
             r = free_chain(fs, first);
             if (r)
                 return r;
         }
-    } else if (r == FAT32_ENOENT) {
+    } else if (r == FAT32LITE_ENOENT) {
         r = alloc_dir_slot(fs, parent, dirbuf, &lba, &idx);
         if (r)
             return r;
@@ -599,25 +598,25 @@ int fat32_create(fat32_fs_t *fs, const char *path, fat32_file_t *f) {
     f->dir_index = idx;
     f->writable = 1;
     f->dirty = 0;
-    return FAT32_OK;
+    return FAT32LITE_OK;
 }
 
-int fat32_append(fat32_fs_t *fs, const char *path, fat32_file_t *f) {
-    int r = fat32_open(fs, path, f);
-    if (r == FAT32_ENOENT)
-        return fat32_create(fs, path, f); /* new file -> empty, writable */
-    if (r != FAT32_OK)
+int fat32lite_append(fat32lite_fs_t *fs, const char *path, fat32lite_file_t *f) {
+    int r = fat32lite_open(fs, path, f);
+    if (r == FAT32LITE_ENOENT)
+        return fat32lite_create(fs, path, f); /* new file -> empty, writable */
+    if (r != FAT32LITE_OK)
         return r;
     f->writable = 1;
-    return fat32_seek(f, f->size); /* position at EOF for appending */
+    return fat32lite_seek(f, f->size); /* position at EOF for appending */
 }
 
-int fat32_mkdir(fat32_fs_t *fs, const char *path) {
+int fat32lite_mkdir(fat32lite_fs_t *fs, const char *path) {
     if (!fs || !path)
-        return FAT32_EINVAL;
+        return FAT32LITE_EINVAL;
     if (!fs->io.write)
-        return FAT32_EROFS;
-    uint8_t dirbuf[FAT32_SECTOR_SIZE];
+        return FAT32LITE_EROFS;
+    uint8_t dirbuf[FAT32LITE_SECTOR_SIZE];
     uint8_t name11[11];
     uint32_t parent;
     int r = resolve_parent(fs, path, dirbuf, &parent, name11);
@@ -626,9 +625,9 @@ int fat32_mkdir(fat32_fs_t *fs, const char *path) {
 
     uint8_t ent[32];
     r = find_in_dir(fs, parent, name11, dirbuf, ent, 0, 0);
-    if (r == FAT32_OK)
-        return FAT32_EEXIST;
-    if (r != FAT32_ENOENT)
+    if (r == FAT32LITE_OK)
+        return FAT32LITE_EEXIST;
+    if (r != FAT32LITE_ENOENT)
         return r;
 
     uint32_t newc;
@@ -663,12 +662,12 @@ int fat32_mkdir(fat32_fs_t *fs, const char *path) {
     return wr_sector(fs, lba, dirbuf);
 }
 
-int fat32_unlink(fat32_fs_t *fs, const char *path) {
+int fat32lite_unlink(fat32lite_fs_t *fs, const char *path) {
     if (!fs || !path)
-        return FAT32_EINVAL;
+        return FAT32LITE_EINVAL;
     if (!fs->io.write)
-        return FAT32_EROFS;
-    uint8_t dirbuf[FAT32_SECTOR_SIZE];
+        return FAT32LITE_EROFS;
+    uint8_t dirbuf[FAT32LITE_SECTOR_SIZE];
     uint8_t name11[11];
     uint32_t parent;
     int r = resolve_parent(fs, path, dirbuf, &parent, name11);
@@ -680,7 +679,7 @@ int fat32_unlink(fat32_fs_t *fs, const char *path) {
     if (r)
         return r;
     if (ent[11] & ATTR_DIRECTORY)
-        return FAT32_EINVAL;
+        return FAT32LITE_EINVAL;
     uint32_t first = ((uint32_t)rd16(ent + 20) << 16) | rd16(ent + 26);
     if (first >= 2) {
         r = free_chain(fs, first);
@@ -694,10 +693,10 @@ int fat32_unlink(fat32_fs_t *fs, const char *path) {
     return wr_sector(fs, lba, dirbuf);
 }
 
-int fat32_stat(fat32_fs_t *fs, const char *path, int *is_dir, uint32_t *size) {
+int fat32lite_stat(fat32lite_fs_t *fs, const char *path, int *is_dir, uint32_t *size) {
     if (!fs || !path)
-        return FAT32_EINVAL;
-    uint8_t dirbuf[FAT32_SECTOR_SIZE];
+        return FAT32LITE_EINVAL;
+    uint8_t dirbuf[FAT32LITE_SECTOR_SIZE];
     uint8_t name11[11];
     uint32_t parent;
     int r = resolve_parent(fs, path, dirbuf, &parent, name11);
@@ -711,7 +710,7 @@ int fat32_stat(fat32_fs_t *fs, const char *path, int *is_dir, uint32_t *size) {
         *is_dir = (ent[11] & ATTR_DIRECTORY) ? 1 : 0;
     if (size)
         *size = rd32(ent + 28);
-    return FAT32_OK;
+    return FAT32LITE_OK;
 }
 
 /* ---- directory listing ---- */
@@ -728,9 +727,9 @@ static void name_from_83(const uint8_t ent[11], char out[13]) {
     out[o] = '\0';
 }
 
-int fat32_opendir(fat32_fs_t *fs, const char *path, fat32_dir_t *d) {
+int fat32lite_opendir(fat32lite_fs_t *fs, const char *path, fat32lite_dir_t *d) {
     if (!fs || !d)
-        return FAT32_EINVAL;
+        return FAT32LITE_EINVAL;
     const char *p = path ? path : "";
     while (*p == '/')
         p++;
@@ -748,7 +747,7 @@ int fat32_opendir(fat32_fs_t *fs, const char *path, fat32_dir_t *d) {
         if (r)
             return r;
         if (!(ent[11] & ATTR_DIRECTORY))
-            return FAT32_ENOTDIR;
+            return FAT32LITE_ENOTDIR;
         cluster = ((uint32_t)rd16(ent + 20) << 16) | rd16(ent + 26);
         if (cluster == 0)
             cluster = fs->root_cluster;
@@ -757,13 +756,13 @@ int fat32_opendir(fat32_fs_t *fs, const char *path, fat32_dir_t *d) {
     d->cluster = cluster;
     d->sector_in_clus = 0;
     d->ent_in_sector = 0;
-    return FAT32_OK;
+    return FAT32LITE_OK;
 }
 
-int fat32_readdir(fat32_dir_t *d, fat32_dirent_t *out) {
+int fat32lite_readdir(fat32lite_dir_t *d, fat32lite_dirent_t *out) {
     if (!d || !out)
-        return FAT32_EINVAL;
-    fat32_fs_t *fs = d->fs;
+        return FAT32LITE_EINVAL;
+    fat32lite_fs_t *fs = d->fs;
     while (d->cluster >= 2 && d->cluster < FAT_EOC) {
         while (d->sector_in_clus < fs->sectors_per_cluster) {
             uint32_t lba = cluster_lba(fs, d->cluster) + d->sector_in_clus;
@@ -775,7 +774,7 @@ int fat32_readdir(fat32_dir_t *d, fat32_dirent_t *out) {
                 d->ent_in_sector++;
                 if (ent[0] == 0x00) {
                     d->cluster = FAT_EOC; /* mark exhausted */
-                    return FAT32_ENOENT;
+                    return FAT32LITE_ENOENT;
                 }
                 if (ent[0] == 0xE5)
                     continue;
@@ -786,7 +785,7 @@ int fat32_readdir(fat32_dir_t *d, fat32_dirent_t *out) {
                 name_from_83(ent, out->name);
                 out->is_dir = (ent[11] & ATTR_DIRECTORY) ? 1 : 0;
                 out->size = out->is_dir ? 0u : rd32(ent + 28);
-                return FAT32_OK;
+                return FAT32LITE_OK;
             }
             d->ent_in_sector = 0;
             d->sector_in_clus++;
@@ -798,7 +797,5 @@ int fat32_readdir(fat32_dir_t *d, fat32_dirent_t *out) {
             return r;
         d->cluster = next;
     }
-    return FAT32_ENOENT;
+    return FAT32LITE_ENOENT;
 }
-
-#endif /* CONFIG_BOARD_STM32F103 */

@@ -426,9 +426,10 @@ KERNEL_SRC = $(KERNEL_DIR)/mcu/main.c \
              $(KERNEL_DIR)/proc/exit.c \
              $(KERNEL_DIR)/proc/signal.c \
              $(KERNEL_DIR)/proc/cg_cpu.c \
-             $(KERNEL_DIR)/mm/nommu.c \
-             $(KERNEL_DIR)/fs/fdtable.c \
-             $(KERNEL_DIR)/fs/vfs.c \
+              $(KERNEL_DIR)/mm/nommu.c \
+              $(KERNEL_DIR)/fs/fdtable.c \
+              $(KERNEL_DIR)/fs/fat32lite.c \
+              $(KERNEL_DIR)/fs/vfs.c \
              $(wildcard $(KERNEL_DIR)/platform/$(BOARD)/*.c) \
              $(shell find $(KERNEL_DIR)/arch/$(ARCH) -type f -name '*.c' | sort)
 else

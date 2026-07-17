@@ -280,9 +280,9 @@ void stm32_peripherals_init(void) {
     if (peripherals.sdcard_ready) {
         int fs = stm32_sdfs_mount();
         printf("[BOOT] TF filesystem=%s\n",
-               fs == FAT32_OK ? "fat32 mounted" : "mount failed");
+               fs == FAT32LITE_OK ? "fat32 mounted" : "mount failed");
         /* Apply /CFG/WIFI.TXT: retarget the proxy, and stash creds for join. */
-        if (fs == FAT32_OK && stm32_sdfs_load_config(&boot_cfg) > 0) {
+        if (fs == FAT32LITE_OK && stm32_sdfs_load_config(&boot_cfg) > 0) {
             if (boot_cfg.have_proxy)
                 stm32_peripherals_set_proxy(boot_cfg.proxy_ip,
                                             boot_cfg.proxy_port);
@@ -297,7 +297,7 @@ void stm32_peripherals_init(void) {
            peripherals.touch_armed ? "armed" : "disabled");
     /* Apply a saved four-corner calibration if the card carries one. */
     if (peripherals.touch_armed && stm32_sdfs_ready() &&
-        stm32_sdfs_load_touch_cal() == FAT32_OK)
+        stm32_sdfs_load_touch_cal() == FAT32LITE_OK)
         printf("[BOOT] touch calibration=loaded (/CFG/TOUCH.CAL)\n");
 
     peripherals.keys_ready = stm32_keys_init() == 0;
