@@ -1,9 +1,9 @@
 /* Xuanwu 5x5 WS2812B RGB matrix, DAT on PE5. */
 #ifdef CONFIG_BOARD_STM32F103
 
-#include "rgb_matrix.h"
+#include "drivers/stm32f1/rgb_matrix.h"
 #include "core/arch.h"
-#include "stm32_uart.h"
+#include "drivers/stm32f1/stm32_uart.h"
 
 #define RGB_MATRIX_DEFAULT_BRIGHTNESS 32U
 #define RGB_MATRIX_MIN_HCLK_HZ 48000000U

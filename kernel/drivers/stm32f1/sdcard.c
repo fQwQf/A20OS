@@ -1,9 +1,9 @@
 #ifdef CONFIG_BOARD_STM32F103
 
-#include "sdcard.h"
+#include "drivers/stm32f1/sdcard.h"
 #include "core/arch.h" /* arch_irq_save/restore — data-phase critical section */
 #include "core/string.h"
-#include "stm32_uart.h"
+#include "drivers/stm32f1/stm32_uart.h"
 
 #define RCC_AHBENR  (*(volatile uint32_t *)0x40021014UL)
 #define RCC_APB2ENR (*(volatile uint32_t *)0x40021018UL)
