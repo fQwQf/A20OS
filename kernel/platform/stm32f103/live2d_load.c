@@ -10,9 +10,23 @@
 #define LIVE2D_X 176
 #define LIVE2D_Y 340
 
-static uint16_t live2d_band[LIVE2D_IMG_W * LIVE2D_BAND_ROWS];
+/*
+ * The frame cache needs SDIO to read from and external SRAM to cache into.
+ * QEMU's stm32vldiscovery models neither, so on that target every byte of this
+ * is dead weight — and it is not free: the 8KiB QEMU variant links against a
+ * hard SRAM-overflow assert, and the band buffer alone is 1152 B of it.
+ */
+/* Spelled out rather than a macro using defined() — that expansion is undefined
+ * behaviour in #if and warns under -Wexpansion-to-defined. */
+#if defined(CONFIG_BOARD_STM32F103) && defined(CONFIG_MCU) &&                  \
+    !defined(CONFIG_STM32_QEMU)
+#define LIVE2D_LOAD_HW 1
+#else
+#define LIVE2D_LOAD_HW 0
+#endif
 
-#if defined(CONFIG_BOARD_STM32F103) && defined(CONFIG_MCU)
+#if LIVE2D_LOAD_HW
+static uint16_t live2d_band[LIVE2D_IMG_W * LIVE2D_BAND_ROWS];
 static uint16_t *cached_frames;
 static live2d_state_t cached_state;
 static unsigned cached_count;
@@ -169,51 +183,8 @@ void live2d_load_get_stats(live2d_load_stats_t *out) {
 }
 #endif
 
-int live2d_load_draw_fs(ui_gfx_t *gfx, fat32lite_fs_t *fs,
-                        const live2d_t *cat) {
-    char path[LIVE2D_PATH_MAX];
-    fat32lite_file_t file;
-    int is_dir;
-    uint32_t size;
-    uint32_t row;
-    int r;
-
-    if (!gfx || !gfx->blit || !fs || !cat ||
-        live2d_frame_path(cat, path, sizeof(path)) < 0)
-        return 0;
-    r = fat32lite_stat(fs, path, &is_dir, &size);
-    if (r == FAT32LITE_ENOENT)
-        return 0;
-    if (r != FAT32LITE_OK || is_dir || size != LIVE2D_IMG_BYTES)
-        return 0;
-    r = fat32lite_open(fs, path, &file);
-    if (r != FAT32LITE_OK)
-        return 0;
-
-    for (row = 0; row < LIVE2D_IMG_H; row += LIVE2D_BAND_ROWS) {
-        uint32_t rows = LIVE2D_IMG_H - row;
-        uint32_t bytes;
-        uint32_t done = 0;
-        if (rows > LIVE2D_BAND_ROWS)
-            rows = LIVE2D_BAND_ROWS;
-        bytes = rows * LIVE2D_IMG_W * 2U;
-        while (done < bytes) {
-            int n = fat32lite_read(&file, (uint8_t *)live2d_band + done,
-                                    bytes - done);
-            if (n <= 0) {
-                fat32lite_close(&file);
-                return 0;
-            }
-            done += (uint32_t)n;
-        }
-        gfx->blit(gfx->ctx, LIVE2D_X, LIVE2D_Y + (int)row, LIVE2D_IMG_W,
-                  (int)rows, live2d_band);
-    }
-    return fat32lite_close(&file) == FAT32LITE_OK ? 1 : 0;
-}
-
 int live2d_load_draw(ui_gfx_t *gfx, const live2d_t *cat) {
-#if defined(CONFIG_BOARD_STM32F103) && defined(CONFIG_MCU)
+#if LIVE2D_LOAD_HW
     unsigned frame;
 
     if (!gfx || !gfx->blit || !cat || !cached_frames || load_frame == 0 ||
