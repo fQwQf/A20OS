@@ -24,6 +24,15 @@ void rtc_secs_to_hms(uint32_t seconds, int *hour, int *minute, int *second) {
         *second = (int)(seconds % 60U);
 }
 
+uint32_t rtc_unix_to_local_secs(uint32_t unix_utc, int utc_offset_minutes) {
+    int local = (int)(unix_utc % RTC_SECONDS_PER_DAY);
+    local += utc_offset_minutes * 60;
+    local %= (int)RTC_SECONDS_PER_DAY;
+    if (local < 0)
+        local += (int)RTC_SECONDS_PER_DAY;
+    return (uint32_t)local;
+}
+
 #ifdef CONFIG_MCU
 
 #define RCC_APB1ENR (*(volatile uint32_t *)0x4002101CUL)
@@ -65,6 +74,10 @@ void rtc_secs_to_hms(uint32_t seconds, int *hour, int *minute, int *second) {
 #define RTC_SYNC_WAIT_LOOPS 100000U
 
 static int rtc_running;
+static int rtc_network_ready;
+static uint32_t rtc_network_syncs;
+static uint32_t rtc_last_unix;
+static int rtc_last_utc_offset;
 
 static int rtc_wait(uint32_t mask) {
     uint32_t i;
@@ -211,10 +224,31 @@ int stm32_rtc_set_hhmmss(int hour, int minute, int second) {
     if (!rtc_write_counter(rtc_hms_to_secs(hour, minute, second)))
         return -1;
     BKP_DR1 = RTC_BKP_MAGIC;
+    rtc_network_ready = 0;
+    return 0;
+}
+
+int stm32_rtc_set_network_time(uint32_t unix_utc, int utc_offset_minutes) {
+    uint32_t local_seconds;
+    if (!rtc_running || unix_utc < 946684800U || utc_offset_minutes < -720 ||
+        utc_offset_minutes > 840)
+        return -1;
+    local_seconds = rtc_unix_to_local_secs(unix_utc, utc_offset_minutes);
+    if (!rtc_write_counter(local_seconds))
+        return -1;
+    BKP_DR1 = RTC_BKP_MAGIC;
+    rtc_network_ready = 1;
+    rtc_network_syncs++;
+    rtc_last_unix = unix_utc;
+    rtc_last_utc_offset = utc_offset_minutes;
     return 0;
 }
 
 int stm32_rtc_available(void) { return rtc_running; }
+int stm32_rtc_network_synced(void) { return rtc_network_ready; }
+uint32_t stm32_rtc_sync_count(void) { return rtc_network_syncs; }
+uint32_t stm32_rtc_last_unix_utc(void) { return rtc_last_unix; }
+int stm32_rtc_utc_offset_minutes(void) { return rtc_last_utc_offset; }
 
 #endif /* CONFIG_MCU */
 
