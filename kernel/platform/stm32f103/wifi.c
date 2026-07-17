@@ -70,6 +70,8 @@ static uint32_t wifi_command_baud;
 static uint32_t wifi_command_errors;
 static unsigned wifi_probe_baud_index;
 static unsigned wifi_probe_attempt;
+/* One CIFSR recovery attempt per connection — see stm32_wifi_service(). */
+static int wifi_ip_query_done;
 /* 9600 first: at the 8 MHz HSI clock the FIFO-less USART2 RX overruns at
  * 115200 (≈15% byte errors on the dupont-wired ESP8266), which corrupts the
  * multi-byte inbound CONTROL/+IPD frames. The module is set to 9600 via
@@ -411,6 +413,7 @@ static void wifi_drain_rx(void) {
         wifi.got_ip = 0;
         wifi.socket_connected = 0;
         wifi.ip_address[0] = '\0';
+        wifi_ip_query_done = 0;
         wifi_set_event("WIFI DISCONNECT");
     }
     if (wifi_response_has("CLOSED")) {
@@ -499,6 +502,7 @@ int stm32_wifi_init(void) {
     wifi.phase = STM32_WIFI_RESET_WAIT;
     wifi_probe_baud_index = 0;
     wifi_probe_attempt = 0;
+    wifi_ip_query_done = 0;
     wifi.baud_rate = wifi_probe_baud_rates[wifi_probe_baud_index];
     wifi_rx_head = 0;
     wifi_rx_tail = 0;
@@ -593,6 +597,22 @@ void stm32_wifi_service(uint64_t now) {
         wifi_probe_attempt = 1U;
         wifi_begin_command("AT", STM32_WIFI_AT_WAIT, now,
                            WIFI_AT_TIMEOUT_MS);
+        return;
+    }
+
+    /*
+     * Recover the IP string when the module joined behind our back. The
+     * ESP8266 keeps the last AP in its own flash and rejoins at power-on, so it
+     * announces WIFI GOT IP without the firmware ever issuing CWJAP — and that
+     * async path sets got_ip but never runs CIFSR, so `wifi` reported
+     * "ip=(none)" while the proxy socket was plainly working. Ask once per
+     * connection, only when the state machine is otherwise idle; the flag stops
+     * a failed query from re-arming itself every service pass.
+     */
+    if (!wifi.command_busy && wifi.phase == STM32_WIFI_READY && wifi.got_ip &&
+        wifi.ip_address[0] == '\0' && !wifi_ip_query_done) {
+        wifi_ip_query_done = 1;
+        wifi_start_ip_query(now);
         return;
     }
 
@@ -804,7 +824,13 @@ void stm32_wifi_debug_status(void) {
            wifi.joined, wifi.ip_address[0] ? wifi.ip_address : "(none)",
            wifi.mac_address[0] ? wifi.mac_address : "(none)",
            wifi.socket_connected,
-           wifi.ssid[0] ? wifi.ssid : "(not-configured)",
+           /* Distinguish "nobody set an SSID" from "the module rejoined the AP
+            * it remembers in its own flash": in the second case the firmware
+            * legitimately does not know the name, and "(not-configured)" reads
+            * as a fault when the link is in fact up. */
+           wifi.ssid[0] ? wifi.ssid
+                        : (wifi.joined ? "(module-remembered)"
+                                       : "(not-configured)"),
            (unsigned)wifi.access_points,
            wifi.scan_ssid[0] ? wifi.scan_ssid : "(none)",
            (unsigned)wifi.received_bytes,
