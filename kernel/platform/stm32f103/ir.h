@@ -25,7 +25,27 @@ typedef enum ir_action {
     IR_ACT_THEME_CYCLE,
     IR_ACT_TALK,
     IR_ACT_MUTE_BUZZER,
+    IR_ACT_MENU,
+    IR_ACT_LIGHT_UP,
+    IR_ACT_LIGHT_DOWN,
 } ir_action_t;
+
+/*
+ * Built-in bindings for the bundled NEC remote's digit keys 1..9, so the
+ * remote works on a card with no /CFG/IR.CFG. A parsed /CFG/IR.CFG replaces
+ * the whole table (ir_map_parse resets it), which is how a different remote
+ * gets adopted without a rebuild.
+ */
+#define IR_DEFAULT_MAP                                                        \
+    "0x00FF30CF FAN_UP\n"      /* 1 */                                        \
+    "0x00FF18E7 FAN_DOWN\n"    /* 2 */                                        \
+    "0x00FF7A85 PUMP_TOGGLE\n" /* 3 */                                        \
+    "0x00FF10EF THEME_CYCLE\n" /* 4 */                                        \
+    "0x00FF38C7 TALK\n"        /* 5 */                                        \
+    "0x00FF5AA5 MUTE_BUZZER\n" /* 6 */                                        \
+    "0x00FF42BD MENU\n"        /* 7 */                                        \
+    "0x00FF4AB5 LIGHT_UP\n"    /* 8 */                                        \
+    "0x00FF52AD LIGHT_DOWN\n"  /* 9 */
 
 typedef struct ir_map_binding {
     uint32_t code;
@@ -47,6 +67,9 @@ int ir_map_load_default(void);
 int ir_map_load_fs(fat32lite_fs_t *fs, const char *path);
 int ir_map_dispatch(uint32_t code);
 unsigned ir_map_count(void);
+
+/* Action id -> name, for the bring-up log ("unbound" for IR_ACT_NONE). */
+const char *ir_action_name(int action);
 
 /* Pure parser: reset `table`, parse up to `max` bindings, return their count. */
 int ir_map_parse(const char *text, unsigned len, ir_map_binding_t *table,

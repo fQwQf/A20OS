@@ -21,6 +21,7 @@
 
 #include "core/types.h"
 #include "ui_home.h"
+#include "ui_diag.h"
 #include "live2d.h"
 
 /* RGB565 pixel sink. All coordinates are in panel pixels; the backend is
@@ -61,6 +62,22 @@ void ui_render_home_ex(const ui_gfx_t *g, const ui_home_model_t *m,
 /* Redraw only the cat sprite region using the procedural fallback. */
 void ui_render_cat(const ui_gfx_t *g, const ui_home_model_t *m,
                    const live2d_t *cat);
+
+/*
+ * Outline the hit region containing (x,y) in the accent colour — the press
+ * feedback drawn on touch-down. Draws nothing if the point hits no region.
+ * The outline is erased by the next full repaint, which every real action
+ * triggers on release.
+ */
+void ui_render_press(const ui_gfx_t *g, const ui_home_model_t *m, uint16_t x,
+                     uint16_t y);
+
+/*
+ * Paint the diagnostics page (the secondary menu). `m` supplies the live theme
+ * palette so the page matches the home screen; only its colour fields are read.
+ */
+void ui_render_diag(const ui_gfx_t *g, const ui_diag_model_t *d,
+                    const ui_home_model_t *m);
 
 /*
  * Paint one four-corner touch-calibration target (a crosshair) on a blank

@@ -21,6 +21,8 @@
 #include "live2d_load.h"
 #include "rtc.h"
 #include "rgb_matrix.h"
+#include "stm32_uart.h" /* stm32_hclk_hz() for the diagnostics page */
+#include "ui_diag.h"
 #include "ui_home.h"
 #include "ui_render.h"
 #include "keys.h"
@@ -43,6 +45,7 @@
 #define SERVICE_SLOW_THRESHOLD_MS 25U
 #define CONTROL_TICK_INTERVAL_MS 2000U
 #define MANUAL_OVERRIDE_MS 600000U
+#define TOUCH_LONG_PRESS_MS 700U
 
 static stm32_peripheral_state_t peripherals;
 static uint64_t last_touch_poll;
@@ -75,8 +78,23 @@ static uint8_t net_seq; /* SNAPSHOT frame sequence number       */
 static int ir_present;
 
 /* --- cloud control over the non-blocking wifi.c TCP socket --- */
-#define CLOUD_REPLY_TIMEOUT_MS 1500U    /* wait for a CONTROL after a SNAPSHOT */
-#define CLOUD_FRESH_MS 8000U            /* how long a cloud decision overrides */
+/*
+ * How long a SNAPSHOT waits for its CONTROL. This has to cover a real LLM
+ * round-trip, not just the wire: measured on the bench, the proxy's live call
+ * (deepseek-v4-flash) takes 2.5-2.6s, on top of ~140ms RTT and ~75ms to shift a
+ * ~70-byte frame in over the ESP8266's 9600 baud link. At the old 1500ms every
+ * live reply arrived after cloud_awaiting had already been cleared and was
+ * dropped by the seq/deadline check below — no speech ever reached the bubble,
+ * and the catgirl never saw a cloud mood. Keep it under CLOUD_FRESH_MS so a
+ * reply that is accepted is still fresh enough to apply.
+ */
+#define CLOUD_REPLY_TIMEOUT_MS 6000U
+/*
+ * How long a cloud decision keeps overriding the local rules. Must outlast the
+ * gap between asks (CLOUD_HEARTBEAT_MS) plus a reply, or the decision would
+ * lapse back to local between heartbeats and the source would flap.
+ */
+#define CLOUD_FRESH_MS 40000U
 #define CLOUD_CONNECT_BACKOFF_MS 5000U  /* retry cadence for CIPSTART          */
 static char cloud_proxy_ip[16] = HUB_PROXY_IP;
 static uint16_t cloud_proxy_port = HUB_PROXY_PORT;
@@ -89,6 +107,48 @@ static uint64_t cloud_reply_deadline;
 static hub_control_t cloud_last;     /* most recent CONTROL from the proxy     */
 static int cloud_last_valid;
 static uint64_t cloud_last_ms;
+
+/*
+ * When is it worth asking the cloud?
+ *
+ * Every control tick (2s) was wrong on three counts. It re-asked an LLM to
+ * narrate a room that had not changed — ~900 calls an hour, real money for no
+ * information. Each reply carried a new speech line, and a new line restarts
+ * TALK for up to 6s; at one line every ~4s the catgirl never left TALK, so the
+ * cloud mood was never applied (a live TALK outranks it) and IDLE never got to
+ * park — which silently undid the whole point of making IDLE a one-shot.
+ *
+ * So: ask on a real change, on an explicit request (tapping the cat), or on a
+ * slow heartbeat. Light is deliberately not a trigger — it swings tens of
+ * percent as people move past the sensor and says nothing about comfort.
+ */
+#define CLOUD_HEARTBEAT_MS 30000U /* refresh even when nothing changed */
+#define CLOUD_TEMP_DELTA 2        /* degC that counts as "something changed" */
+#define CLOUD_HUMI_DELTA 5        /* %RH  */
+
+static uint64_t cloud_last_ask_ms;
+static env_snapshot_t cloud_asked_snap; /* what the last ask described */
+static int cloud_ask_now;               /* set by a tap: ask on the next tick */
+
+static int abs_diff(int a, int b) { return a > b ? a - b : b - a; }
+
+static int cloud_should_ask(const env_snapshot_t *s, uint64_t now) {
+    if (cloud_ask_now || cloud_last_ask_ms == 0)
+        return 1;
+    if (now - cloud_last_ask_ms >= CLOUD_HEARTBEAT_MS)
+        return 1;
+    if (s->valid != cloud_asked_snap.valid)
+        return 1; /* the sensor came back or died — worth a word */
+    if (!s->valid)
+        return 0;
+    if (abs_diff(s->temp_c, cloud_asked_snap.temp_c) >= CLOUD_TEMP_DELTA)
+        return 1;
+    if (abs_diff(s->humidity, cloud_asked_snap.humidity) >= CLOUD_HUMI_DELTA)
+        return 1;
+    if (s->hour != cloud_asked_snap.hour)
+        return 1; /* the hour drives night/day behaviour */
+    return 0;
+}
 
 static void cloud_parse_frames(uint64_t now) {
     size_t off = 0;
@@ -129,18 +189,33 @@ static void cloud_parse_frames(uint64_t now) {
 static ui_home_state_t g_ui_state;
 static live2d_t g_cat;
 static char g_last_speech[HUB_SPEECH_MAX + 1];
+static uint64_t g_last_speech_ms;
+/* How long the newest LLM line stays in the dialog box without a refresh. */
+#define SPEECH_STICKY_MS 60000U
 static ui_home_model_t g_ui_model;
 static ui_gfx_t g_ui_gfx;
 static uint8_t g_manual_mask;
 static uint8_t g_manual_fan;
 static uint8_t g_manual_pump;
 static uint8_t g_manual_theme;
+static uint8_t g_manual_backlight;
+static uint8_t g_backlight; /* backlight percent in effect, for the LIGHT card */
 static uint64_t g_manual_until;
 static int g_ui_ready;
 
+/* Which page the panel is showing. The SYS/MEM/TF/BT instrumentation lives on
+ * PAGE_DIAG, one level below the hub UI (see ui_diag.h). */
+#define PAGE_HOME 0
+#define PAGE_DIAG 1
+static int g_page;
+static ui_diag_model_t g_diag_model;
+
+/* Mirrors ui_home.h's UI_MANUAL_* bits; the mask is handed to the UI model. */
 #define MANUAL_FAN  0x01U
 #define MANUAL_PUMP 0x02U
 #define MANUAL_THEME 0x04U
+#define MANUAL_BACKLIGHT 0x08U
+#define BACKLIGHT_STEP 10U
 
 static touch_cal_point_t g_cal_points[4];
 static unsigned g_cal_index;
@@ -176,10 +251,53 @@ static void hub_buzz(uint64_t now, uint32_t ms) {
     buzzer_active = 1;
 }
 
+/* Snapshot the driver status the diagnostics page formats. */
+static void diag_state_build(ui_diag_state_t *d) {
+    const stm32_memory_info_t *mem = stm32_memory_info();
+    const stm32_sdcard_info_t *sd = stm32_sdcard_info();
+    const stm32_bluetooth_info_t *bt = stm32_bluetooth_info();
+    const stm32_wifi_info_t *w = stm32_wifi_info();
+
+    d->hclk_hz = stm32_hclk_hz();
+    d->uptime_s = (uint32_t)(timer_get_ticks() / 1000ULL);
+    d->ram_used = mem->internal_ram_used;
+    d->ram_total = mem->internal_ram_total;
+    d->ext_used = mem->external_ram_used;
+    d->ext_total = mem->external_ram_total;
+    d->sd_ready = peripherals.sdcard_ready;
+    d->sd_fat32 = sd->fat32;
+    d->bt_ready = peripherals.bluetooth_ready;
+    d->bt_connected = peripherals.bluetooth_connected;
+    d->bt_waiting = bt->waiting;
+    d->wifi_ready = w->at_responsive;
+    d->wifi_joined = w->joined;
+    d->wifi_socket = w->socket_connected;
+    d->touch_ready = peripherals.touch_armed;
+    d->ir_ready = ir_present;
+    d->ir_bindings = ir_map_count();
+}
+
 static void ui_render_full(void) {
     if (!peripherals.display_ready || g_cal_active)
         return;
+    /*
+     * Give the loader a turn before painting. A repaint triggered by a state
+     * change (tapping the cat, a new cloud mood) would otherwise run before the
+     * service loop had read a single frame of the new state, so it drew the
+     * procedural placeholder — the sprite visibly vanished on every tap. The
+     * loader bursts frame 0 on a state change, so one call is enough.
+     */
+    live2d_load_service(&g_cat);
+    /* Built either way: the diagnostics page borrows this model's palette. */
     ui_home_build(&g_ui_state, &g_ui_model);
+    if (g_page == PAGE_DIAG) {
+        ui_diag_state_t ds;
+        diag_state_build(&ds);
+        ui_diag_build(&ds, &g_diag_model);
+        ui_render_diag(&g_ui_gfx, &g_diag_model, &g_ui_model);
+        g_ui_ready = 1;
+        return;
+    }
     ui_render_home_ex(&g_ui_gfx, &g_ui_model, &g_cat, NULL, 0, 0, 0);
     if (!live2d_load_draw(&g_ui_gfx, &g_cat))
         ui_render_cat(&g_ui_gfx, &g_ui_model, &g_cat);
@@ -187,7 +305,8 @@ static void ui_render_full(void) {
 }
 
 static void ui_render_cat_frame(void) {
-    if (!g_ui_ready || g_cal_active || !peripherals.display_ready)
+    if (!g_ui_ready || g_cal_active || g_page != PAGE_HOME ||
+        !peripherals.display_ready)
         return;
     if (!live2d_load_draw(&g_ui_gfx, &g_cat))
         ui_render_cat(&g_ui_gfx, &g_ui_model, &g_cat);
@@ -221,11 +340,101 @@ static void ui_apply_action(ui_action_t action, uint64_t now) {
         g_manual_theme = (uint8_t)((g_ui_state.theme + 1U) % 3U);
         g_ui_state.theme = g_manual_theme;
         ui_manual_arm(MANUAL_THEME, now);
+    } else if (action == UI_ACTION_LIGHT_UP || action == UI_ACTION_LIGHT_DOWN) {
+        int pct = (int)g_backlight;
+        pct += action == UI_ACTION_LIGHT_UP ? (int)BACKLIGHT_STEP
+                                            : -(int)BACKLIGHT_STEP;
+        if (pct < 0)
+            pct = 0;
+        if (pct > 100)
+            pct = 100;
+        g_manual_backlight = (uint8_t)pct;
+        g_backlight = g_manual_backlight;
+        g_ui_state.backlight = g_manual_backlight;
+        stm32_light_sensor_set_manual_brightness(g_manual_backlight);
+        ui_manual_arm(MANUAL_BACKLIGHT, now);
+    } else if (action == UI_ACTION_MENU) {
+        g_page = g_page == PAGE_HOME ? PAGE_DIAG : PAGE_HOME;
+        g_ui_ready = 0;
     } else if (action == UI_ACTION_TALK) {
+        /*
+         * Replay the current line, and ask the proxy for a new one. The cloud
+         * is otherwise only asked on a real change or a slow heartbeat
+         * (cloud_should_ask), so this is what makes tapping her feel like
+         * asking a question. Speech is never invented here.
+         */
         live2d_speak(&g_cat, g_ui_state.speech, (uint32_t)now);
+        cloud_ask_now = 1;
+        last_control_tick = 0;
     }
+    g_ui_state.manual_mask = g_manual_mask;
     hub_buzz(now, BUZZ_INPUT_MS);
     ui_render_full();
+}
+
+/*
+ * Long-press a control -> hand it straight back to the rule engine. Tapping a
+ * card takes manual ownership for MANUAL_OVERRIDE_MS (10 min); without this
+ * there is no way to give it back early and the card just sits on MANU. Returns
+ * 1 when it released one, 0 to let the normal tap action run instead.
+ */
+static int ui_release_manual(ui_action_t action, uint64_t now) {
+    uint8_t bit = 0;
+
+    if (action == UI_ACTION_FAN_UP || action == UI_ACTION_FAN_DOWN)
+        bit = MANUAL_FAN;
+    else if (action == UI_ACTION_LIGHT_UP || action == UI_ACTION_LIGHT_DOWN)
+        bit = MANUAL_BACKLIGHT;
+    else if (action == UI_ACTION_PUMP_TOGGLE)
+        bit = MANUAL_PUMP;
+    else if (action == UI_ACTION_THEME_CYCLE)
+        bit = MANUAL_THEME;
+    if (!bit || !(g_manual_mask & bit))
+        return 0;
+    g_manual_mask &= (uint8_t)~bit;
+    g_ui_state.manual_mask = g_manual_mask;
+    last_control_tick = 0; /* let the rule engine retake it now, not in 2s */
+    hub_buzz(now, BUZZ_INPUT_MS);
+    printf("[TOUCH] long-press -> auto (manual mask=0x%x)\n",
+           (unsigned)g_manual_mask);
+    ui_render_full();
+    return 1;
+}
+
+/* Diagnostics-page buttons. CAL and the two radio pokes are here rather than
+ * on the home screen because they interrupt what the hub is doing. */
+static void apply_diag_action(ui_diag_action_t action, uint64_t now) {
+    if (action == UI_DIAG_ACTION_NONE)
+        return;
+    hub_buzz(now, BUZZ_INPUT_MS);
+    switch (action) {
+    case UI_DIAG_ACTION_BACK:
+        g_page = PAGE_HOME;
+        g_ui_ready = 0;
+        ui_render_full();
+        break;
+    case UI_DIAG_ACTION_CALIBRATE:
+        /* Calibration owns the whole panel and returns to the home screen. */
+        g_page = PAGE_HOME;
+        g_ui_ready = 0;
+        (void)stm32_peripherals_start_touch_calibration();
+        break;
+    case UI_DIAG_ACTION_WIFI_SCAN:
+        if (stm32_wifi_scan() == 0)
+            printf("[WIFI] AP scan started\n");
+        ui_render_full();
+        break;
+    case UI_DIAG_ACTION_BT_TEST: {
+        static const char message[] = "A20OS HC05 TEST\r\n";
+        if (peripherals.bluetooth_ready &&
+            stm32_bluetooth_send(message, sizeof(message) - 1U) == 0)
+            printf("[BT] sent test message\n");
+        ui_render_full();
+        break;
+    }
+    default:
+        break;
+    }
 }
 
 static ui_action_t ui_action_from_ir(int action) {
@@ -239,6 +448,12 @@ static ui_action_t ui_action_from_ir(int action) {
         return UI_ACTION_THEME_CYCLE;
     if (action == IR_ACT_TALK)
         return UI_ACTION_TALK;
+    if (action == IR_ACT_MENU)
+        return UI_ACTION_MENU;
+    if (action == IR_ACT_LIGHT_UP)
+        return UI_ACTION_LIGHT_UP;
+    if (action == IR_ACT_LIGHT_DOWN)
+        return UI_ACTION_LIGHT_DOWN;
     return UI_ACTION_NONE;
 }
 
@@ -270,32 +485,107 @@ static int text_command_equal(const char *line, const char *command) {
     return *command == '\0' && *line == '\0';
 }
 
+/*
+ * The nine remote keys, in the order the IR remote prints them. IR reaches
+ * them by NEC code (IR_DEFAULT_MAP in ir.h); Bluetooth reaches the same nine
+ * by sending the bare digit. Keep this table and IR_DEFAULT_MAP in step.
+ */
+static const ir_action_t remote_key_actions[9] = {
+    IR_ACT_FAN_UP,      /* 1 */
+    IR_ACT_FAN_DOWN,    /* 2 */
+    IR_ACT_PUMP_TOGGLE, /* 3 */
+    IR_ACT_THEME_CYCLE, /* 4 */
+    IR_ACT_TALK,        /* 5 */
+    IR_ACT_MUTE_BUZZER, /* 6 */
+    IR_ACT_MENU,        /* 7 */
+    IR_ACT_LIGHT_UP,    /* 8 */
+    IR_ACT_LIGHT_DOWN,  /* 9 */
+};
+
+/* One dispatcher for every remote input (IR, Bluetooth, direction keys), so
+ * they cannot drift apart. MUTE is handled here because it drives the buzzer
+ * rather than the UI model. */
+static void apply_remote_action(int action, uint64_t now) {
+    if (action == IR_ACT_NONE)
+        return;
+    if (action == IR_ACT_MUTE_BUZZER) {
+        buzzer_muted = !buzzer_muted;
+        if (buzzer_muted) {
+            stm32_buzzer_set(0);
+            buzzer_active = 0;
+        } else {
+            hub_buzz(now, BUZZ_INPUT_MS);
+        }
+        printf("[IN] buzzer=%s\n", buzzer_muted ? "muted" : "on");
+        return;
+    }
+    ui_apply_action(ui_action_from_ir(action), now);
+}
+
+/*
+ * Bluetooth (HC-05 SPP) command set, kept as small as it can be because it is
+ * typed by hand into a phone's serial terminal: send a single digit 1..9 and
+ * it does what that key on the IR remote does. The word forms are aliases for
+ * readability only.
+ *
+ *   1 FAN_UP   2 FAN_DOWN  3 PUMP    4 THEME     5 TALK
+ *   6 MUTE     7 MENU      8 LIGHT_UP  9 LIGHT_DOWN
+ *
+ * Pairing already gates who can open the link (the HC-05 PIN is checked by the
+ * module before a connection exists), so an established link is not asked to
+ * re-authenticate per command.
+ */
+static int bluetooth_action_from_line(const char *line) {
+    const char *p = line;
+
+    while (*p == ' ' || *p == '\t')
+        p++;
+    if (*p >= '1' && *p <= '9') {
+        const char *rest = p + 1;
+        while (*rest == ' ' || *rest == '\t' || *rest == '\r' || *rest == '\n')
+            rest++;
+        if (*rest == '\0')
+            return remote_key_actions[*p - '1'];
+    }
+    if (text_command_equal(line, "FAN_UP") || text_command_equal(line, "FAN+"))
+        return IR_ACT_FAN_UP;
+    if (text_command_equal(line, "FAN_DOWN") || text_command_equal(line, "FAN-"))
+        return IR_ACT_FAN_DOWN;
+    if (text_command_equal(line, "PUMP"))
+        return IR_ACT_PUMP_TOGGLE;
+    if (text_command_equal(line, "THEME"))
+        return IR_ACT_THEME_CYCLE;
+    if (text_command_equal(line, "TALK"))
+        return IR_ACT_TALK;
+    if (text_command_equal(line, "MUTE"))
+        return IR_ACT_MUTE_BUZZER;
+    if (text_command_equal(line, "MENU"))
+        return IR_ACT_MENU;
+    if (text_command_equal(line, "LIGHT_UP") || text_command_equal(line, "BL+"))
+        return IR_ACT_LIGHT_UP;
+    if (text_command_equal(line, "LIGHT_DOWN") ||
+        text_command_equal(line, "BL-"))
+        return IR_ACT_LIGHT_DOWN;
+    return IR_ACT_NONE;
+}
+
 static void ui_handle_bluetooth_command(const char *line, uint64_t now) {
-    const char *pin = STM32_BLUETOOTH_PIN;
-    const char *command = line;
+    int action;
 
     if (!stm32_bluetooth_connected())
         return;
-    while (*pin && *command == *pin) {
-        pin++;
-        command++;
-    }
-    if (*pin != '\0' || (*command != ' ' && *command != '\t'))
+    action = bluetooth_action_from_line(line);
+    if (action == IR_ACT_NONE) {
+        static const char help[] =
+            "? 1FAN+ 2FAN- 3PUMP 4THEME 5TALK 6MUTE 7MENU 8BL+ 9BL-\r\n";
+        (void)stm32_bluetooth_send(help, sizeof(help) - 1U);
         return;
-    while (*command == ' ' || *command == '\t')
-        command++;
-    if (text_command_equal(command, "FAN_UP") ||
-        text_command_equal(command, "FAN+"))
-        ui_apply_action(UI_ACTION_FAN_UP, now);
-    else if (text_command_equal(command, "FAN_DOWN") ||
-             text_command_equal(command, "FAN-"))
-        ui_apply_action(UI_ACTION_FAN_DOWN, now);
-    else if (text_command_equal(command, "PUMP"))
-        ui_apply_action(UI_ACTION_PUMP_TOGGLE, now);
-    else if (text_command_equal(command, "THEME"))
-        ui_apply_action(UI_ACTION_THEME_CYCLE, now);
-    else if (text_command_equal(command, "TALK"))
-        ui_apply_action(UI_ACTION_TALK, now);
+    }
+    apply_remote_action(action, now);
+    {
+        static const char ok[] = "OK\r\n";
+        (void)stm32_bluetooth_send(ok, sizeof(ok) - 1U);
+    }
 }
 
 static void touch_calibration_render(void) {
@@ -701,8 +991,9 @@ void stm32_peripherals_init(void) {
         if (bindings >= 0)
             printf("[BOOT] IR map=/CFG/IR.CFG bindings=%d\n", bindings);
     }
-    printf("[BOOT] IR receiver=%s (PB9/EXTI9, NEC)\n",
-           ir_present ? "armed" : "absent");
+    printf("[BOOT] IR receiver=%s (PB9/EXTI9, NEC) bindings=%u (%s)\n",
+           ir_present ? "armed" : "absent", ir_map_count(),
+           ir_map_count() ? "keys 1-9 live" : "NO KEYS BOUND");
 
     /*
      * wifi.c already owns USART2 and advances its AT probe from service().
@@ -849,12 +1140,13 @@ static void run_control_tick(uint64_t now) {
     int cloud = 0;
     const stm32_wifi_info_t *w = stm32_wifi_info();
     /*
-     * Send this snapshot to the proxy when the socket is up and no request is
-     * already in flight. The reply (a CONTROL frame) arrives asynchronously and
+     * Send this snapshot to the proxy when the socket is up, no request is in
+     * flight, and there is actually something to ask about (see
+     * cloud_should_ask). The reply (a CONTROL frame) arrives asynchronously and
      * is parsed in cloud_net_service(); we apply the freshest one below.
      */
     if (w->socket_connected && !w->command_busy &&
-        !cloud_awaiting) {
+        !cloud_awaiting && cloud_should_ask(&s, now)) {
         uint8_t txf[HUB_OVERHEAD + 8];
         uint8_t seq = net_seq++;
         int tn = hub_proto_encode_snapshot(seq, &s, txf, sizeof(txf));
@@ -862,6 +1154,9 @@ static void run_control_tick(uint64_t now) {
             cloud_awaiting = 1;
             cloud_expected_seq = seq;
             cloud_reply_deadline = now + CLOUD_REPLY_TIMEOUT_MS;
+            cloud_last_ask_ms = now;
+            cloud_asked_snap = s;
+            cloud_ask_now = 0;
         }
     }
     /* Cloud-preferred, local fail-safe: override with a fresh cloud decision. */
@@ -880,6 +1175,9 @@ static void run_control_tick(uint64_t now) {
         a.decision.pump_on = g_manual_pump;
     if (g_manual_mask & MANUAL_THEME)
         a.decision.theme = (env_theme_t)g_manual_theme;
+    if (g_manual_mask & MANUAL_BACKLIGHT)
+        a.decision.backlight = g_manual_backlight;
+    g_backlight = a.decision.backlight;
 
     /*
      * Assemble the home-screen + catgirl state for the renderer. Speech is the
@@ -894,15 +1192,28 @@ static void run_control_tick(uint64_t now) {
     uin.cloud_valid = (uint8_t)cloud;
     uin.cloud_mood = cloud ? cloud_last.mood : 0;
     uin.cloud_speech = cloud ? cloud_last.speech : (const char *)0;
+    uin.manual_mask = g_manual_mask;
     hub_ui_build(&uin, &g_ui_state);
     if (cloud && cloud_last.speech[0] &&
         strncmp(g_last_speech, cloud_last.speech, sizeof(g_last_speech)) != 0) {
         live2d_speak(&g_cat, cloud_last.speech, now); /* new line -> TALK */
         strncpy(g_last_speech, cloud_last.speech, sizeof(g_last_speech) - 1);
         g_last_speech[sizeof(g_last_speech) - 1] = '\0';
+        g_last_speech_ms = now;
     } else if (!(g_cat.state == LIVE2D_TALK && g_cat.talk_deadline_ms != 0)) {
         live2d_set_state(&g_cat, hub_ui_state(&uin), now);
     }
+    /*
+     * Hold the newest line in the dialog box through ticks the proxy did not
+     * answer. hub_ui_build only reports speech while a CONTROL is fresh
+     * (CLOUD_FRESH_MS), so on a slow reply the box would blank and refill —
+     * which reads as a fault, not as silence. This is still the LLM's own
+     * text, just the most recent one, and it expires so a stale line cannot
+     * outlive the conditions it described.
+     */
+    if (!g_ui_state.speech && g_last_speech[0] &&
+        now - g_last_speech_ms <= SPEECH_STICKY_MS)
+        g_ui_state.speech = g_last_speech;
 
     stm32_fan_set_level(a.decision.fan_level);
     stm32_pump_set(a.decision.pump_on);
@@ -960,23 +1271,14 @@ void stm32_peripherals_service(uint64_t now) {
         uint32_t code;
         if (stm32_ir_poll(&code)) {
             int ir_action = ir_map_dispatch(code);
-            printf("[IR] code=0x%x\n", (unsigned)code);
-            if (ir_action == IR_ACT_MUTE_BUZZER) {
-                buzzer_muted = !buzzer_muted;
-                if (buzzer_muted) {
-                    stm32_buzzer_set(0);
-                    buzzer_active = 0;
-                } else {
-                    hub_buzz(now, BUZZ_INPUT_MS);
-                }
-                printf("[IR] buzzer=%s\n", buzzer_muted ? "muted" : "on");
-            } else {
+            printf("[IR] code=0x%08x action=%s\n", (unsigned)code,
+                   ir_action_name(ir_action));
 #ifdef CONFIG_STM32_LEGACY_DASHBOARD
-                hub_buzz(now, BUZZ_INPUT_MS);
+            (void)ir_action;
+            hub_buzz(now, BUZZ_INPUT_MS);
 #else
-                ui_apply_action(ui_action_from_ir(ir_action), now);
+            apply_remote_action(ir_action, now);
 #endif
-            }
         }
     }
 
@@ -1021,6 +1323,10 @@ void stm32_peripherals_service(uint64_t now) {
             touch_down_x = x;
             touch_down_y = y;
             touch_down_at = now;
+            /* Light up whatever is under the finger right away; the repaint on
+             * release clears it. Only the home page has hit outlines. */
+            if (g_ui_ready && g_page == PAGE_HOME)
+                ui_render_press(&g_ui_gfx, &g_ui_model, x, y);
 #else
             hub_buzz(now, BUZZ_INPUT_MS); /* feedback chirp */
 #endif
@@ -1029,11 +1335,21 @@ void stm32_peripherals_service(uint64_t now) {
             printf("[TOUCH] up\n");
 #ifndef CONFIG_STM32_LEGACY_DASHBOARD
             int dx = (int)touch_last_x - (int)touch_down_x;
-            if (dx > 60 || dx < -60) {
+            if (g_page == PAGE_DIAG) {
+                ui_diag_action_t da = ui_diag_hit_test(&g_diag_model,
+                                                       touch_down_x,
+                                                       touch_down_y);
+                apply_diag_action(da, now);
+            } else if (dx > 60 || dx < -60) {
                 ui_apply_action(UI_ACTION_THEME_CYCLE, now);
             } else {
-                ui_apply_action(ui_home_hit_test(&g_ui_model, touch_down_x,
-                                                 touch_down_y), now);
+                /* A press that outlined a region always resolves to that same
+                 * region's action, so the repaint below clears the outline. */
+                ui_action_t act = ui_home_hit_test(&g_ui_model, touch_down_x,
+                                                   touch_down_y);
+                if (now - touch_down_at < TOUCH_LONG_PRESS_MS ||
+                    !ui_release_manual(act, now))
+                    ui_apply_action(act, now);
             }
 #endif
         }
@@ -1092,10 +1408,22 @@ touch_done:
             before.transmitted_bytes != after->transmitted_bytes ||
             before.dropped_bytes != after->dropped_bytes)
             update_wifi_display();
-        /* One-shot join with credentials from the card, once the module is
-         * responsive and idle (build-time SSID is empty by default). */
+        /*
+         * One-shot join with credentials from the card, once the module is
+         * responsive and idle (build-time SSID is empty by default).
+         *
+         * Gated on got_ip, not joined: the ESP8266 keeps the last AP in its own
+         * flash and auto-rejoins at power-on, so it announces WIFI CONNECTED
+         * (joined=1) before the firmware has asked for anything. The matching
+         * WIFI GOT IP can be missed — it lands while the boot AT probe is still
+         * mid-conversation — and then the board sits joined-with-no-IP forever
+         * with nothing to recover it, because the old `!joined` gate treated the
+         * module's own claim as proof. An IP is what cloud_net_service()
+         * actually needs, and re-issuing CWJAP when already connected is
+         * harmless.
+         */
         if (boot_cfg.have_ssid && !cfg_join_attempted && after->at_responsive &&
-            !after->joined && !after->connecting && !after->command_busy) {
+            !after->got_ip && !after->connecting && !after->command_busy) {
             if (stm32_wifi_join(boot_cfg.ssid, boot_cfg.pass) == 0) {
                 cfg_join_attempted = 1;
                 printf("[NET] joining ssid=%s (from /CFG/WIFI.TXT)\n",
