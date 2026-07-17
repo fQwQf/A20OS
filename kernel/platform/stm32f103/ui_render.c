@@ -239,17 +239,9 @@ static void draw_dialog(const ui_gfx_t *g, const ui_home_model_t *m) {
                          m->color_text, 1);
 }
 
-void ui_render_home_ex(const ui_gfx_t *g, const ui_home_model_t *m,
-                       const live2d_t *cat, const uint16_t *cat_frame,
-                       int cat_w, int cat_h, unsigned flags) {
-    if (!g || !m)
-        return;
-
-    if (!(flags & UI_RENDER_KEEP_BACKGROUND))
-        fill(g, 0, 0, UI_RENDER_W, UI_RENDER_H, m->color_bg);
-
-    /* header: clock (left), net + alert (right) */
+static void draw_header(const ui_gfx_t *g, const ui_home_model_t *m) {
     int header_h = m->card_count ? (int)m->cards[0].rect.y : 60;
+
     fill(g, 0, 0, UI_RENDER_W, header_h, m->color_panel);
     fill(g, 0, header_h - 3, UI_RENDER_W, 3, m->color_accent);
     ui_render_text(g, 14, 20, m->clock, m->color_text, 4);
@@ -263,6 +255,32 @@ void ui_render_home_ex(const ui_gfx_t *g, const ui_home_model_t *m,
         ui_render_text(g, UI_RENDER_W - 14 - aw - 4, 44, m->alert_label,
                        m->color_bg, 2);
     }
+}
+
+void ui_render_home_regions(const ui_gfx_t *g, const ui_home_model_t *m,
+                            unsigned regions) {
+    if (!g || !m)
+        return;
+    if (regions & UI_RENDER_REGION_HEADER)
+        draw_header(g, m);
+    for (unsigned i = 0; i < m->card_count && i < UI_HOME_MAX_CARDS; i++)
+        if (regions & (UI_RENDER_REGION_CARD0 << i))
+            draw_card(g, m, &m->cards[i]);
+    if (regions & UI_RENDER_REGION_DIALOG)
+        draw_dialog(g, m);
+}
+
+void ui_render_home_ex(const ui_gfx_t *g, const ui_home_model_t *m,
+                       const live2d_t *cat, const uint16_t *cat_frame,
+                       int cat_w, int cat_h, unsigned flags) {
+    if (!g || !m)
+        return;
+
+    if (!(flags & UI_RENDER_KEEP_BACKGROUND))
+        fill(g, 0, 0, UI_RENDER_W, UI_RENDER_H, m->color_bg);
+
+    /* header: clock (left), net + alert (right) */
+    draw_header(g, m);
 
     /* data cards */
     for (unsigned i = 0; i < m->card_count; i++)
