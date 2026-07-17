@@ -261,13 +261,15 @@ The MCU profile now links the generic A20OS process scheduler. ARMv7-M
 pointer, and CONTROL. The physical board runs the peripheral service and the
 USART1 diagnostic console as separate kernel tasks; QEMU substitutes a
 scheduler probe task. Tasks are designed to yield cooperatively with
-`proc_yield()`. `PendSV_Handler` remains a no-op, so SysTick/PendSV time-slice
-preemption is not yet implemented. MCU-only batch limits, a 256-entry PID
+`proc_yield()`, and they are also preempted on a 10 ms time slice. SysTick
+pends the lowest-priority PendSV exception. PendSV redirects exception return
+to a thread-mode trampoline, which preserves the volatile register set and
+enters the existing scheduler safely outside handler mode; SVC restores the
+interrupted PC/xPSR when that task resumes. Per-task preemption guards defer a
+tick that lands inside the scheduler. MCU-only batch limits, a 256-entry PID
 namespace, and compatibility stubs reduce the generic scheduler footprint.
-The 8 KiB QEMU profile currently has only about 2.6 KiB heap after boot and
-panics with `cannot create diagnostic task` before the scheduler probe runs;
-the 64 KiB Xuanwu image links successfully but still requires a hardware
-round-trip test.
+The 8 KiB QEMU profile runs two non-yielding busy-loop tasks and reports
+`PREEMPT PASS`, proving that both tasks progress solely through time slicing.
 
 The LCD UI remains touch-selectable when a working panel is fitted. The
 storage page shows capacity, FAT32 state, SDIO bus width, and volume label.
@@ -325,9 +327,8 @@ non-FAT32 cards still initialize as block devices.
 
 ## Next milestones
 
-1. Extend the working cooperative ARMv7-M kernel-thread switch to SysTick/
-   PendSV preemption; `__switch` currently handles voluntary `proc_yield()`
-   context switches while `PendSV_Handler` is still a no-op.
+1. Validate the 10 ms SysTick/PendSV preemption path on the physical Xuanwu
+   board under concurrent LCD, SDIO and UART interrupt load.
 2. Decide whether applications run privileged in a flat address space or use
    the Cortex-M MPU for coarse isolation.
 3. Replace the MCU compatibility stubs with the required IPC and small-VFS
