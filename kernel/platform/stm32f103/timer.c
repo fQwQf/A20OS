@@ -12,6 +12,10 @@
 #define SYST_CVR (*(volatile uint32_t *)0xE000E018UL)
 
 #define STM32_TICK_HZ ARCH_TIMER_FREQ
+#define STM32_PREEMPT_SLICE_MS 10U
+#define SCB_ICSR (*(volatile uint32_t *)0xE000ED04UL)
+#define SCB_ICSR_PENDSVSET (1UL << 28)
+#define SCB_SHPR3 (*(volatile uint32_t *)0xE000ED20UL)
 
 static volatile uint64_t stm32_ticks;
 static uint32_t stm32_systick_reload;
@@ -33,6 +37,9 @@ void timer_init(void) {
     stm32_live2d_countdown = LIVE2D_FRAME_MS;
     SYST_RVR = stm32_systick_reload - 1U;
     SYST_CVR = 0;
+    /* PendSV must run below SysTick and all device IRQs. It only redirects the
+     * eventual exception return; the scheduler itself runs in thread mode. */
+    SCB_SHPR3 = (SCB_SHPR3 & 0x0000FFFFU) | (0x80U << 24) | (0xFFU << 16);
     SYST_CSR = 0x7U;
     arch_irq_restore(flags);
 }
@@ -67,6 +74,8 @@ void armv7m_systick_handler(void) {
     stm32_backlight_systick();
     if ((stm32_ticks % 500U) == 0)
         stm32_status_led_toggle();
+    if ((stm32_ticks % STM32_PREEMPT_SLICE_MS) == 0U)
+        SCB_ICSR = SCB_ICSR_PENDSVSET;
 }
 
 #endif

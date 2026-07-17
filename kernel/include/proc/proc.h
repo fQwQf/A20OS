@@ -201,6 +201,14 @@ typedef struct task_t {
     arch_sigaltstack_t sigaltstack;
     uint64_t       thread_pending;
 
+#ifdef CONFIG_ARMV7M
+    /* Cortex-M exception-return preemption state, private to the ARMv7-M port. */
+    uintptr_t      arch_preempt_resume_pc;
+    uint32_t       arch_preempt_resume_xpsr;
+    uint32_t       arch_preempt_active;
+    uint32_t       arch_preempt_disable;
+#endif
+
     /* Native ABI support */
     uint32_t       abi_mode;        /* 0 = Linux ABI, 1 = Native ABI */
     struct a20_vmo *stack_vmo;
