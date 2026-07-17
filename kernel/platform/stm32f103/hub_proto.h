@@ -23,6 +23,7 @@
 
 enum hub_msg_type {
     HUB_MSG_HEARTBEAT   = 0x10, /* keepalive                        */
+    HUB_MSG_TIME        = 0x11, /* downlink: UTC epoch + zone       */
     HUB_MSG_CONTROL     = 0x01, /* downlink: control command        */
     HUB_MSG_SNAPSHOT    = 0x20, /* uplink: environment snapshot     */
 };
@@ -44,6 +45,12 @@ typedef struct hub_control {
     char    speech[HUB_SPEECH_MAX + 1]; /* NUL-terminated bubble text        */
 } hub_control_t;
 
+/* Network wall clock from the proxy. The offset is minutes east of UTC. */
+typedef struct hub_time {
+    uint32_t unix_utc;
+    int16_t utc_offset_minutes;
+} hub_time_t;
+
 uint16_t hub_crc16(const uint8_t *data, size_t len);
 
 /* Build a frame from a raw payload. Returns total bytes written, or -1 on
@@ -57,7 +64,10 @@ int hub_proto_encode_snapshot(uint8_t seq, const env_snapshot_t *s,
 
 /* Encode a control command as a CONTROL frame. */
 int hub_proto_encode_control(uint8_t seq, const hub_control_t *c, uint8_t *out,
-                             size_t outsize);
+                              size_t outsize);
+
+int hub_proto_encode_time(uint8_t seq, const hub_time_t *t, uint8_t *out,
+                          size_t outsize);
 
 /* Validate and parse one frame at buf[0..len).
  *   > 0 : success, returns the number of bytes the frame occupies
@@ -68,5 +78,6 @@ int hub_proto_parse(const uint8_t *buf, size_t len, hub_frame_t *out);
 /* Decode a CONTROL frame's payload into hub_control_t. Returns 0, or -1 if
  * the frame is not a CONTROL frame or is malformed. */
 int hub_proto_decode_control(const hub_frame_t *f, hub_control_t *out);
+int hub_proto_decode_time(const hub_frame_t *f, hub_time_t *out);
 
 #endif /* _STM32F103_HUB_PROTO_H */
