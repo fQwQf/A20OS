@@ -8,11 +8,11 @@
 
 int clock_gettime(clockid_t clk, struct timespec *ts)
 {
-    a20_time_t t;
-    int64_t r = a20_clock_get((uint32_t)clk, &t);
+    a20_time_ns_t ns;
+    int64_t r = a20_clock_get((uint32_t)clk, &ns);
     if (r < 0) return -1;
-    ts->tv_sec  = (time_t)(t.secs);
-    ts->tv_nsec = (long)(t.nsecs);
+    ts->tv_sec  = (time_t)(ns / 1000000000ULL);
+    ts->tv_nsec = (long)(ns % 1000000000ULL);
     return 0;
 }
 

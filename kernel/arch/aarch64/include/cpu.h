@@ -24,6 +24,7 @@ static inline void arch_wfi(void) { __asm__ __volatile__("wfi"); }
 static inline void arch_cpu_relax(void) { __asm__ __volatile__("yield"); }
 static inline void arch_fence_i(void) {
     __asm__ __volatile__(
+        "dsb ish\n\t"
         "ic iallu\n\t"
         "dsb ish\n\t"
         "isb"

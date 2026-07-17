@@ -1,5 +1,6 @@
 #include "drivers/net/virtio_net.h"
 #include "drivers/bus/virtio_transport.h"
+#include "drivers/bus/pci_bus.h"
 #include "drivers/block/virtio_blk.h"
 #include "drivers/core/driver_core.h"
 #include "drivers/core/driver_class.h"
@@ -516,19 +517,23 @@ static int virtio_net_driver_probe(device_t *dev) {
         return -1;
     }
 
-    resource_t *mmio_res = device_get_resource(dev, RES_MMIO, 0);
-    if (!mmio_res) {
-        kinfo("[VIRTIO-NET] No MMIO resource for device '%s'\n", dev->name);
-        return -1;
-    }
-
     int idx = g_nnet;
     virtio_net_inst_t *net = &g_net[idx];
     memset(net, 0, sizeof(*net));
 
-    net->vt.read32  = virtio_net_mmio_read32;
-    net->vt.write32 = virtio_net_mmio_write32;
-    net->vt.priv    = (void *)(uintptr_t)mmio_res->start;
+    if (dev->bus == &pci_bus) {
+        if (pci_virtio_transport_init(dev, 1, &net->vt) != 0)
+            return -1;
+    } else {
+        resource_t *mmio_res = device_get_resource(dev, RES_MMIO, 0);
+        if (!mmio_res) {
+            kinfo("[VIRTIO-NET] No MMIO resource for device '%s'\n", dev->name);
+            return -1;
+        }
+        net->vt.read32  = virtio_net_mmio_read32;
+        net->vt.write32 = virtio_net_mmio_write32;
+        net->vt.priv    = (void *)(uintptr_t)mmio_res->start;
+    }
     net->slot       = idx;
     net->legacy     = (net->vt.read32(&net->vt, VIRTIO_MMIO_VERSION) == 1);
     spin_init(&net->lock);
@@ -536,7 +541,7 @@ static int virtio_net_driver_probe(device_t *dev) {
     uint32_t magic = net->vt.read32(&net->vt, VIRTIO_MMIO_MAGIC);
     uint32_t dev_id = net->vt.read32(&net->vt, VIRTIO_MMIO_DEVICE_ID);
     if (magic != 0x74726976 || dev_id != 1) {
-        kinfo("[VIRTIO-NET] Invalid device at 0x%lx\n", (unsigned long)mmio_res->start);
+        kinfo("[VIRTIO-NET] Invalid transport for device '%s'\n", dev->name);
         return -1;
     }
 
@@ -548,7 +553,10 @@ static int virtio_net_driver_probe(device_t *dev) {
     }
 
     resource_t *irq_res = device_get_resource(dev, RES_IRQ, 0);
-    if (irq_res) {
+    if (net->vt.irq >= 0) {
+        if (request_irq((uint32_t)net->vt.irq, virtio_net_irq_handler, 0, net) != 0)
+            kinfo("[VIRTIO-NET] Failed to register transport IRQ for '%s'\n", dev->name);
+    } else if (irq_res) {
         if (request_irq((uint32_t)irq_res->start, virtio_net_irq_handler, 0, net) != 0)
             kinfo("[VIRTIO-NET] Failed to register IRQ %lu for '%s'\n",
                   (unsigned long)irq_res->start, dev->name);
@@ -557,8 +565,8 @@ static int virtio_net_driver_probe(device_t *dev) {
     }
 
     g_nnet++;
-    kinfo("[VIRTIO-NET] Probed device '%s' at 0x%lx (irq=%lu)\n",
-          dev->name, (unsigned long)mmio_res->start,
+    kinfo("[VIRTIO-NET] Probed device '%s' (irq=%lu)\n",
+          dev->name,
           irq_res ? (unsigned long)irq_res->start : 0);
     return 0;
 }
@@ -596,7 +604,10 @@ static net_dev_ops_t virtio_net_class_ops = {
 };
 
 static const device_id_t virtio_net_ids[] = {
-    { .vendor = 0x1AF4, .device = 0x1001 },
+    { .vendor = 0x1AF4, .device = 0x1001,
+      .subvendor = VENDOR_ANY, .subdevice = DEVICE_ANY },
+    { .vendor = 0x1AF4, .device = 0x1041,
+      .subvendor = VENDOR_ANY, .subdevice = DEVICE_ANY },
     { 0 },
 };
 

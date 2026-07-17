@@ -10,28 +10,23 @@ static inline void a20_task_exit(int code)
     __builtin_unreachable();
 }
 
-static inline a20_status_t a20_task_spawn(const a20_task_spawn_args_t *args)
+static inline a20_status_t a20_task_spawn(a20_task_spawn_args_t *args)
 {
+    args->size = sizeof(*args);
+    args->version = 1;
     return a20_syscall6(A20_SYS_task_spawn, (uint64_t)args, 0, 0, 0, 0, 0);
 }
-
-typedef struct {
-    a20_handle_t task;
-    int32_t      exit_code;
-    uint32_t     exit_reason;
-    uint64_t     usage_user_time;
-    uint64_t     usage_sys_time;
-} a20_task_wait_result_t;
 
 static inline a20_status_t a20_task_wait(a20_handle_t task, a20_flags_t flags,
                                           a20_task_status_t *out)
 {
-    return a20_syscall6(A20_SYS_task_wait, task, flags, (uint64_t)out, 0, 0, 0);
+    return a20_syscall6(A20_SYS_task_wait, task, flags, (uint64_t)out,
+                        0, 0, 0);
 }
 
 static inline a20_status_t a20_task_kill(a20_handle_t task, uint32_t reason)
 {
-    return a20_syscall6(A20_SYS_task_kill, task, reason, 0, 0, 0, 0);
+    return a20_syscall6(A20_SYS_task_kill, task, (uint64_t)reason, 0, 0, 0, 0);
 }
 
 static inline a20_status_t a20_task_info(a20_handle_t task, a20_task_info_t *out)
@@ -39,16 +34,16 @@ static inline a20_status_t a20_task_info(a20_handle_t task, a20_task_info_t *out
     return a20_syscall6(A20_SYS_task_info, task, (uint64_t)out, 0, 0, 0, 0);
 }
 
-static inline a20_status_t a20_thread_create(const a20_thread_create_args_t *args,
-                                              a20_handle_t *out)
+static inline a20_status_t a20_thread_create(a20_thread_create_args_t *args)
 {
-    return a20_syscall6(A20_SYS_thread_create, (uint64_t)args, (uint64_t)out,
-                        0, 0, 0, 0);
+    args->size = sizeof(*args);
+    args->version = 1;
+    return a20_syscall6(A20_SYS_thread_create, (uint64_t)args, 0, 0, 0, 0, 0);
 }
 
-static inline void a20_thread_exit(void)
+static inline void a20_thread_exit(int code)
 {
-    a20_syscall6(A20_SYS_thread_exit, 0, 0, 0, 0, 0, 0);
+    a20_syscall6(A20_SYS_thread_exit, (uint64_t)(int32_t)code, 0, 0, 0, 0, 0);
     __builtin_unreachable();
 }
 
@@ -61,6 +56,61 @@ static inline a20_status_t a20_thread_sleep(a20_time_t duration)
 static inline a20_status_t a20_thread_yield(void)
 {
     return a20_syscall6(A20_SYS_thread_yield, 0, 0, 0, 0, 0, 0);
+}
+
+static inline a20_status_t a20_sched_set(a20_handle_t task,
+                                          a20_sched_args_t *args)
+{
+    args->size = sizeof(*args);
+    args->version = 1;
+    return a20_syscall6(A20_SYS_task_set_sched, task, (uint64_t)args,
+                        0, 0, 0, 0);
+}
+
+static inline a20_status_t a20_sched_get(a20_handle_t task,
+                                          a20_sched_args_t *out)
+{
+    return a20_syscall6(A20_SYS_task_get_sched, task, (uint64_t)out,
+                        0, 0, 0, 0);
+}
+
+static inline a20_status_t a20_task_set_limit(a20_handle_t task,
+                                               a20_resource_limits_t *limits)
+{
+    return a20_syscall6(A20_SYS_task_set_limits, task, (uint64_t)limits,
+                        0, 0, 0, 0);
+}
+
+static inline a20_status_t a20_task_get_limit(a20_handle_t task,
+                                               a20_resource_limits_t *out)
+{
+    return a20_syscall6(A20_SYS_task_get_limits, task, (uint64_t)out,
+                        0, 0, 0, 0);
+}
+
+static inline a20_status_t a20_task_get_status(a20_handle_t task,
+                                                a20_task_status_t *out)
+{
+    (void)task;
+    (void)out;
+    return -A20_ERR_NOT_SUPPORTED;
+}
+
+static inline a20_status_t a20_thread_set_name(a20_handle_t thread,
+                                                const char *name)
+{
+    (void)thread;
+    (void)name;
+    return -A20_ERR_NOT_SUPPORTED;
+}
+
+static inline a20_status_t a20_thread_get_name(a20_handle_t thread,
+                                                char *buf, uint64_t len)
+{
+    (void)thread;
+    (void)buf;
+    (void)len;
+    return -A20_ERR_NOT_SUPPORTED;
 }
 
 #endif
