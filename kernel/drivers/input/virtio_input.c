@@ -164,10 +164,38 @@ static void virtio_input_poll(void) {
         virtio_input_handle_inst(&g_input_insts[i]);
 }
 
+static int input_read_class_devices(char *buf, size_t count) {
+    size_t copied = 0;
+    for (int index = 0; copied + sizeof(struct input_event) <= count; index++) {
+        device_t *dev = device_find_by_class(DEV_CLASS_INPUT, index);
+        if (!dev)
+            break;
+        /* VirtIO queues are drained by the legacy path below.  Calling the
+         * class hook here would consume their ring twice; this pass is for
+         * additional transports such as VBox xHCI HID. */
+        if (dev->drv && dev->drv->name &&
+            strcmp(dev->drv->name, "virtio-input") == 0)
+            continue;
+        const input_dev_ops_t *ops = dev->drv ? dev->drv->class_ops : NULL;
+        if (!ops || !ops->read)
+            continue;
+        int result = ops->read(dev, buf + copied, count - copied);
+        if (result > 0)
+            copied += (size_t)result;
+    }
+    return copied ? (int)copied : -EAGAIN;
+}
+
 static int input_read(vfile_t *vf, char *buf, size_t count) {
     if (count < sizeof(struct input_event)) return -EINVAL;
     
     while (1) {
+        /* /dev/event0 is a transport-independent evdev multiplexer.  This
+         * includes VBox's xHCI HID controller as well as PCI virtio-input. */
+        int class_result = input_read_class_devices(buf, count);
+        if (class_result > 0)
+            return class_result;
+
         /* Keep the GUI responsive on QEMU variants whose virtio IRQ route is
          * masked or unavailable even though the queue itself is operational. */
         virtio_input_poll();
@@ -381,11 +409,56 @@ static const device_id_t virtio_input_ids[] = {
     { 0 },
 };
 
+static int virtio_input_class_read(device_t *dev, void *buf, size_t count) {
+    virtio_input_inst_t *inst = dev ? dev->drv_priv : NULL;
+    if (!inst || !inst->valid || !buf || count < sizeof(struct input_event))
+        return -EINVAL;
+
+    virtio_input_handle_inst(inst);
+    uint64_t flags = spin_lock_irqsave(&inst->lock);
+    size_t copied = 0;
+    while (inst->head != inst->tail &&
+           copied + sizeof(struct input_event) <= count) {
+        *(struct input_event *)((char *)buf + copied) = inst->user_ring[inst->tail];
+        inst->tail = (inst->tail + 1U) % ARRAY_SIZE(inst->user_ring);
+        copied += sizeof(struct input_event);
+    }
+    spin_unlock_irqrestore(&inst->lock, flags);
+    return copied ? (int)copied : -EAGAIN;
+}
+
+static int virtio_input_class_ioctl(device_t *dev, unsigned long req, void *arg) {
+    (void)dev;
+    (void)req;
+    (void)arg;
+    return -ENOSYS;
+}
+
+static int virtio_input_class_poll(device_t *dev, short events) {
+    virtio_input_inst_t *inst = dev ? dev->drv_priv : NULL;
+    (void)events;
+    if (!inst || !inst->valid)
+        return 0;
+    virtio_input_handle_inst(inst);
+    uint64_t flags = spin_lock_irqsave(&inst->lock);
+    int ready = inst->head != inst->tail;
+    spin_unlock_irqrestore(&inst->lock, flags);
+    return ready;
+}
+
+static const input_dev_ops_t virtio_input_class_ops = {
+    .read = virtio_input_class_read,
+    .ioctl = virtio_input_class_ioctl,
+    .poll = virtio_input_class_poll,
+};
+
 static driver_t virtio_input_driver = {
     .name       = "virtio-input",
     .id_table   = virtio_input_ids,
     .bus        = NULL,
     .probe      = virtio_input_probe,
+    .class_ops  = &virtio_input_class_ops,
+    .class_type = DEV_CLASS_INPUT,
 };
 
 DRIVER_REGISTER(virtio_input_driver);

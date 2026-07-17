@@ -6,7 +6,8 @@
 #include "core/string.h"
 #include "core/consts.h"
 #include "core/lock.h"
-#include "drivers/net/virtio_net.h"
+#include "drivers/core/driver_class.h"
+#include "drivers/core/driver_core.h"
 
 #include "lwip/init.h"
 #include "lwip/netif.h"
@@ -47,16 +48,20 @@
  */
 static int g_lwip_ready;
 static spinlock_t g_lwip_lock = SPINLOCK_INIT;
-static struct netif g_netifs[VIRTIO_NET_MAX_DEVS];
+#define A20_NET_MAX_DEVS 4
+
+static struct netif g_netifs[A20_NET_MAX_DEVS];
 static struct netif g_loopif;
 
 typedef struct {
     int idx;
+    device_t *dev;
+    const net_dev_ops_t *ops;
     uint8_t rx_frame[1536];
     uint8_t tx_frame[1536];
 } a20_lwip_netif_state_t;
 
-static a20_lwip_netif_state_t g_netif_state[VIRTIO_NET_MAX_DEVS];
+static a20_lwip_netif_state_t g_netif_state[A20_NET_MAX_DEVS];
 
 u32_t sys_now(void) {
     return (u32_t)(timer_get_ticks() * 1000UL / TICKS_PER_SEC);
@@ -71,7 +76,7 @@ static err_t a20_lwip_linkoutput(struct netif *netif, struct pbuf *p) {
         return ERR_BUF;
 
     pbuf_copy_partial(p, st->tx_frame, p->tot_len, 0);
-    int r = virtio_net_send(st->idx, st->tx_frame, p->tot_len, 1);
+    int r = st->ops->send(st->dev, st->tx_frame, p->tot_len);
     return (r == (int)p->tot_len) ? ERR_OK : ERR_IF;
 }
 
@@ -80,7 +85,7 @@ static err_t a20_lwip_netif_init_cb(struct netif *netif) {
         return ERR_ARG;
 
     a20_lwip_netif_state_t *st = (a20_lwip_netif_state_t *)netif->state;
-    const uint8_t *mac = virtio_net_mac(st->idx);
+    const uint8_t *mac = st->ops->mac(st->dev);
     if (!mac)
         return ERR_IF;
 
@@ -143,7 +148,7 @@ static void a20_lwip_register_loopif(void)
     n->output = a20_lwip_loopif_output;
 }
 
-static void a20_lwip_register_virtio_netifs(void) {
+static void a20_lwip_register_netifs(void) {
     ip4_addr_t ipaddr;
     ip4_addr_t netmask;
     ip4_addr_t gw;
@@ -164,17 +169,23 @@ static void a20_lwip_register_virtio_netifs(void) {
         ip4_addr_copy(gw, g_a20_net_config.gateway);
     }
 
-    for (int i = 0; i < VIRTIO_NET_MAX_DEVS; i++) {
-        if (!virtio_net_ready(i))
+    for (int i = 0; i < A20_NET_MAX_DEVS; i++) {
+        device_t *dev = device_find_by_class(DEV_CLASS_NET, i);
+        if (!dev || !dev->drv || !dev->drv->class_ops)
+            break;
+        const net_dev_ops_t *ops = (const net_dev_ops_t *)dev->drv->class_ops;
+        if (!ops->send || !ops->recv || !ops->mac)
             continue;
 
         g_netif_state[i].idx = i;
+        g_netif_state[i].dev = dev;
+        g_netif_state[i].ops = ops;
         struct netif *n = netif_add(&g_netifs[i], &ipaddr, &netmask, &gw,
                                     &g_netif_state[i],
                                     a20_lwip_netif_init_cb,
                                     ethernet_input);
         if (!n) {
-            printf("[LWIP] failed to add virtio-net%d\n", i);
+            printf("[LWIP] failed to add %s\n", dev->name ? dev->name : "net");
             continue;
         }
         netif_set_default(n);
@@ -191,16 +202,18 @@ static void a20_lwip_register_virtio_netifs(void) {
         }
 #endif
         if (configured) {
-            printf("[LWIP] netif %c%c%d attached to virtio-net%d ip=%u.%u.%u.%u gw=%u.%u.%u.%u dns_count=%d\n",
-                   n->name[0], n->name[1], n->num, i,
+            printf("[LWIP] netif %c%c%d attached to %s ip=%u.%u.%u.%u gw=%u.%u.%u.%u dns_count=%d\n",
+                   n->name[0], n->name[1], n->num,
+                   dev->name ? dev->name : "net",
                    ip4_addr1(&ipaddr), ip4_addr2(&ipaddr),
                    ip4_addr3(&ipaddr), ip4_addr4(&ipaddr),
                    ip4_addr1(&gw), ip4_addr2(&gw),
                    ip4_addr3(&gw), ip4_addr4(&gw),
                    g_a20_net_config.dns_count);
         } else {
-            printf("[LWIP] netif %c%c%d attached to virtio-net%d (unconfigured)\n",
-                   n->name[0], n->name[1], n->num, i);
+            printf("[LWIP] netif %c%c%d attached to %s (unconfigured)\n",
+                   n->name[0], n->name[1], n->num,
+                   dev->name ? dev->name : "net");
         }
 
 #if LWIP_DHCP
@@ -218,8 +231,11 @@ void a20_lwip_init(void) {
     a20_net_config_init();
     spin_init(&g_lwip_lock);
     lwip_init();
+    a20_lwip_register_netifs();
+    /* Add loopback after physical links.  lwIP prepends netifs to its list;
+     * keeping loopback last here leaves hardware first for polling code and
+     * for diagnostics which inspect netif_list. */
     a20_lwip_register_loopif();
-    a20_lwip_register_virtio_netifs();
     g_lwip_ready = 1;
     printf("[LWIP] initialized: IPv4 IPv6 TCP UDP RAW ICMP DHCP DNS loopif\n");
 }
@@ -242,7 +258,7 @@ static void a20_lwip_process_netif_rx_tx_locked(struct netif *n)
     a20_lwip_netif_state_t *st = (a20_lwip_netif_state_t *)n->state;
 
     for (;;) {
-        int len = virtio_net_recv(st->idx, st->rx_frame, sizeof(st->rx_frame));
+        int len = st->ops->recv(st->dev, st->rx_frame, sizeof(st->rx_frame));
         if (len <= 0)
             break;
         struct pbuf *p = pbuf_alloc(PBUF_RAW, (u16_t)len, PBUF_POOL);
@@ -270,7 +286,11 @@ void a20_lwip_process_netif_irq_locked(int net_idx)
     if (!g_lwip_ready)
         return;
 
-    virtio_net_poll_all();
+    for (int i = 0; i < A20_NET_MAX_DEVS; i++) {
+        a20_lwip_netif_state_t *st = &g_netif_state[i];
+        if (st->dev && st->ops && st->ops->poll)
+            st->ops->poll(st->dev);
+    }
 
     for (struct netif *n = netif_list; n; n = n->next) {
         if (!n->state)
@@ -288,7 +308,11 @@ void a20_lwip_poll_locked(void) {
         return;
     sys_check_timeouts();
     a20_net_config_sync_from_lwip();
-    virtio_net_poll_all();
+    for (int i = 0; i < A20_NET_MAX_DEVS; i++) {
+        a20_lwip_netif_state_t *st = &g_netif_state[i];
+        if (st->dev && st->ops && st->ops->poll)
+            st->ops->poll(st->dev);
+    }
     for (struct netif *n = netif_list; n; n = n->next) {
         if (n->state) {
             a20_lwip_process_netif_rx_tx_locked(n);

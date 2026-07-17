@@ -18,7 +18,7 @@ if [ ! -s "$rootfs_image" ]; then
     echo "Error: root filesystem image missing or empty: $rootfs_image" >&2
     exit 1
 fi
-for command_name in parted mformat mmd mcopy; do
+for command_name in parted mformat mmd mcopy sha256sum awk; do
     command -v "$command_name" >/dev/null 2>&1 || {
         echo "Error: $command_name not found (install parted and mtools)" >&2
         exit 1
@@ -52,4 +52,16 @@ EOF
 MTOOLSRC="$tmp_mtoolsrc" mcopy -s 'a:/*' b:/
 MTOOLSRC="$tmp_mtoolsrc" mmd b:/EFI b:/EFI/BOOT
 MTOOLSRC="$tmp_mtoolsrc" mcopy -o "$efi_image" b:/EFI/BOOT/BOOTAA64.EFI
+manifest=$(mktemp)
+trap 'rm -f "$tmp_mtoolsrc" "$manifest"' EXIT HUP INT TERM
+{
+    printf 'format=a20os-vbox-aarch64-gpt-v1\n'
+    printf 'bootaa64_sha256='
+    sha256sum "$efi_image" | awk '{print $1}'
+    printf 'rootfs_sha256='
+    sha256sum "$rootfs_image" | awk '{print $1}'
+} > "$manifest"
+MTOOLSRC="$tmp_mtoolsrc" mcopy -o "$manifest" b:/A20OS.MANIFEST
+sha256sum "$output" > "$output.sha256"
 echo "VirtualBox ARM64 GPT/UEFI disk with A20OS root filesystem created: $output"
+echo "Image checksum: $output.sha256"

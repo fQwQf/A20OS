@@ -18,9 +18,13 @@ struct input_event {
 
 #define EV_KEY 0x01
 #define EV_REL 0x02
+#define EV_ABS 0x03
 
 #define REL_X 0x00
 #define REL_Y 0x01
+#define ABS_X 0x00
+#define ABS_Y 0x01
+#define USB_TABLET_ABS_MAX 32767
 
 #define BTN_LEFT     0x110
 
@@ -291,6 +295,18 @@ static void poll_events(void)
             } else if (ev.code == REL_Y) {
                 mouse_y += (int32_t)ev.value;
             }
+        } else if (ev.type == EV_ABS) {
+            lv_display_t * display = lv_display_get_default();
+            int32_t width = display != NULL ?
+                lv_display_get_horizontal_resolution(display) : 1024;
+            int32_t height = display != NULL ?
+                lv_display_get_vertical_resolution(display) : 768;
+            if (ev.code == ABS_X)
+                mouse_x = (int32_t)(((int64_t)ev.value * (width - 1)) /
+                                    USB_TABLET_ABS_MAX);
+            else if (ev.code == ABS_Y)
+                mouse_y = (int32_t)(((int64_t)ev.value * (height - 1)) /
+                                    USB_TABLET_ABS_MAX);
         } else if (ev.type == EV_KEY) {
             if (ev.code == BTN_LEFT) {
                 mouse_pressed = (ev.value != 0);

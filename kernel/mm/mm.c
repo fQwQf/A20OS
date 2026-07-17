@@ -266,6 +266,15 @@ int pt_map(pt_root_t *pgdir, vaddr_t va, paddr_t pa, pte_t flags) {
                 frame_put(phys_to_pfn(old_pa));
         }
     }
+    /* Executable mappings may be populated through PAGE_OFFSET before being
+     * installed at their user VA.  Synchronize RAM-backed code before the PTE
+     * becomes visible so demand paging, fork/COW, VMO maps and ELF loading all
+     * obey the same AArch64 I/D-cache contract. */
+    if (flags & PTE_X) {
+        pfn_t pfn = phys_to_pfn(pa);
+        if (pfn_valid(pfn))
+            arch_flush_icache_range(pfn_to_virt(pfn), PAGE_SIZE);
+    }
     *pte = arch_pte_leaf(pa, flags);
     return 0;
 }
@@ -294,6 +303,13 @@ int pt_map_huge(pt_root_t *pgdir, vaddr_t va, paddr_t pa, pte_t flags) {
     pte_t *pte = &table[arch_pt_vpn(va, 1)];
     if (*pte & PTE_V)
         return -EEXIST;
+#ifdef ARCH_HAS_PTE_BLOCK
+    if (flags & PTE_X) {
+        pfn_t pfn = phys_to_pfn(pa);
+        if (pfn_valid(pfn))
+            arch_flush_icache_range(pfn_to_virt(pfn), PMD_SIZE);
+    }
+#endif
 #ifdef ARCH_HAS_PTE_BLOCK
     *pte = arch_pte_block(pa, flags);
 #else

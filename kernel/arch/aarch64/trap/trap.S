@@ -334,6 +334,10 @@ user_trap_return:
     ldr     x9, [x2, #ELR_OFF]
     msr     elr_el1, x9
     ldr     x9, [x2, #SPSR_OFF]
+    /* Only NZCV is meaningful state that EL0 may carry across an exception.
+     * In particular, never return with PSTATE.IL set or with an EL1 mode
+     * supplied by a corrupted/forged signal frame. */
+    and     x9, x9, #0xf0000000
     msr     spsr_el1, x9
     ldr     x9, [x2, #TPIDR_OFF]
     msr     tpidr_el0, x9

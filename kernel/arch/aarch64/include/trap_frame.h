@@ -152,6 +152,11 @@ static inline uint64_t arch_task_kernel_status(void) {
     return 1UL << 7;
 }
 
+/* task_context_t.daif controls EL1 while __switch returns through the kernel
+ * trampoline.  It is not SPSR_EL1, so keep IRQ masked until user_trap_return
+ * has installed the complete user frame and executes eret. */
+#define ARCH_TASK_USER_RESUME_STATUS() arch_task_kernel_status()
+
 static inline uint64_t arch_user_initial_status(void) {
     return SSTATUS_SPIE | SSTATUS_FS_CLEAN;
 }
@@ -222,7 +227,9 @@ static inline void arch_signal_restore_mcontext(trap_context_t *ctx,
         ctx->x[i] = sc->regs[i];
     ctx->sp = sc->sp;
     ctx->elr = sc->pc;
-    ctx->spsr = sc->pstate;
+    /* rt_sigreturn consumes user memory.  Do not let it select EL1, mask
+     * interrupts, or inject the Illegal Execution State bit into PSTATE. */
+    ctx->spsr = sc->pstate & 0xf0000000UL;
     const arch_sigframe_extra_t *extra = (const arch_sigframe_extra_t *)sc->reserved;
     if (extra->fpsimd.head.magic == 0x46508001U &&
         extra->fpsimd.head.size >= sizeof(extra->fpsimd)) {
