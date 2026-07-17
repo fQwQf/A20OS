@@ -4,7 +4,7 @@
  */
 #ifdef CONFIG_BOARD_STM32F103
 
-#include "watchdog.h"
+#include "drivers/stm32f1/watchdog.h"
 
 #define IWDG_KR  (*(volatile uint32_t *)0x40003000UL) /* key register    */
 #define IWDG_PR  (*(volatile uint32_t *)0x40003004UL) /* prescaler       */
