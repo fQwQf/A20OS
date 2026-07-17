@@ -25,6 +25,40 @@ typedef struct {
     uint32_t status;
 } task_context_t;
 
+/* Architecture-private task state used by exception-return preemption. */
+#define ARCH_TASK_FIELDS \
+    uintptr_t arch_preempt_resume_pc; \
+    uint32_t arch_preempt_resume_xpsr; \
+    uint32_t arch_preempt_active; \
+    uint32_t arch_preempt_disable;
+
+#define ARCH_TASK_INIT(task) do { \
+    (task)->arch_preempt_resume_pc = 0; \
+    (task)->arch_preempt_resume_xpsr = 0; \
+    (task)->arch_preempt_active = 0; \
+    (task)->arch_preempt_disable = 0; \
+} while (0)
+
+#define ARCH_SCHED_ENTER(task) do { \
+    if (task) (task)->arch_preempt_disable++; \
+} while (0)
+
+#define ARCH_SCHED_LEAVE(task) do { \
+    if ((task) && (task)->arch_preempt_disable) \
+        (task)->arch_preempt_disable--; \
+} while (0)
+
+#define ARCH_IDLE_CONTEXT_STATIC(name, count) \
+    static task_context_t name[count] __attribute__((aligned(8)))
+#define ARCH_IDLE_STACK(contexts, cpu) ((void *)&(contexts)[cpu])
+#define ARCH_IDLE_STACK_INIT(stack) do { (void)(stack); } while (0)
+#define ARCH_IDLE_STACK_TOP(stack) ({ \
+    uintptr_t __top; \
+    (void)(stack); \
+    __asm__ __volatile__("mov %0, sp" : "=r"(__top)); \
+    __top; \
+})
+
 typedef struct {
     uint32_t r[16];
     uint32_t xpsr;

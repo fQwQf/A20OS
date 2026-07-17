@@ -2,24 +2,17 @@
 #define _ARCH_ARMV7M_PLATFORM_H
 
 #include "core/types.h"
+#include "board_config.h"
 
-#ifndef STM32_FLASH_KB
-#define STM32_FLASH_KB 64
-#endif
-
-#ifndef STM32_RAM_KB
-#define STM32_RAM_KB 20
-#endif
-
-#define FLASH_MEMORY_BASE  0x08000000UL
-#define PHYS_MEMORY_BASE   0x20000000UL
+#define FLASH_MEMORY_BASE  ARMV7M_FLASH_BASE
+#define PHYS_MEMORY_BASE   ARMV7M_RAM_BASE
 #define PHYS_MEMORY_END    (PHYS_MEMORY_BASE + (STM32_RAM_KB * 1024UL))
 #define KERNEL_ENTRY       FLASH_MEMORY_BASE
 #define PAGE_OFFSET        0UL
 #define USER_VA_LIMIT      PHYS_MEMORY_END
 
-#define UART0_BASE         0x40013800UL
-#define UART0_IRQ          37U
+#define UART0_BASE         ARMV7M_CONSOLE_UART_BASE
+#define UART0_IRQ          ARMV7M_CONSOLE_UART_IRQ
 #define IRQ_S_TIMER        15U
 #define IRQ_S_EXT          UART0_IRQ
 #define IRQ_S_SOFT         14U

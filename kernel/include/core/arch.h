@@ -75,6 +75,29 @@ static inline int arch_pt_level_entries(int level)
 # define ARCH_FORK_REQUIRES_PRIVATE_COPY 0
 #endif
 
+#ifndef ARCH_TASK_FIELDS
+# define ARCH_TASK_FIELDS
+#endif
+
+#ifndef ARCH_TASK_INIT
+# define ARCH_TASK_INIT(task) do { (void)(task); } while (0)
+#endif
+
+#ifndef ARCH_SCHED_ENTER
+# define ARCH_SCHED_ENTER(task) do { (void)(task); } while (0)
+#endif
+
+#ifndef ARCH_SCHED_LEAVE
+# define ARCH_SCHED_LEAVE(task) do { (void)(task); } while (0)
+#endif
+
+#ifndef ARCH_IDLE_CONTEXT_STATIC
+# define ARCH_IDLE_CONTEXT_STATIC(name, count)
+# define ARCH_IDLE_STACK(contexts, cpu) kmalloc(KERNEL_STACK_SIZE)
+# define ARCH_IDLE_STACK_INIT(stack) memset((stack), 0, KERNEL_STACK_SIZE)
+# define ARCH_IDLE_STACK_TOP(stack) ((uintptr_t)(stack) + KERNEL_STACK_SIZE)
+#endif
+
 static inline int arch_fork_requires_private_copy(void)
 {
     return ARCH_FORK_REQUIRES_PRIVATE_COPY;

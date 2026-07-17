@@ -17,7 +17,7 @@
  */
 
 #include "core/types.h"
-#include "touch.h"
+#include "drivers/stm32f1/touch.h"
 
 /* One calibration sample: the raw ADC pair recorded while the user touched a
  * known target pixel (screen_x, screen_y). */

@@ -4,9 +4,12 @@ The STM32F103 target is an ARMv7-M, Cortex-M3, NOMMU bring-up profile.
 It deliberately reuses A20OS architecture and board boundaries:
 
 - `kernel/arch/armv7m`: vector table, reset path, CPU primitives, exception
-  frame definitions, firmware hooks, and compiler runtime helpers.
-- `kernel/platform/stm32f103`: USART1, SysTick, NVIC-facing board operations,
-  and fault diagnostics.
+  frame definitions, PendSV/SVC preemption, SysTick, fault handling, firmware
+  hooks, and compiler runtime helpers.
+- `kernel/drivers/stm32f1`: reusable STM32F1 UART, SDIO, display, input,
+  sensor, radio, RTC, watchdog, external SRAM, and actuator drivers.
+- `kernel/platform/stm32f103`: clock/memory configuration, NVIC-facing board
+  operations, external IRQ routing, and board/device composition.
 - `kernel/mcu`: the small-memory kernel profile and allocator.
 
 The first milestone does not build the full process, VFS, network, or VM
@@ -333,5 +336,6 @@ non-FAT32 cards still initialize as block devices.
    the Cortex-M MPU for coarse isolation.
 3. Replace the MCU compatibility stubs with the required IPC and small-VFS
    implementations, then mount the existing TF `block_dev_t`.
-4. Add GPIO, EXTI, SPI, I2C, and SPI-flash drivers under `kernel/drivers`.
+4. Extend the STM32F1 driver layer with reusable GPIO, EXTI, SPI, I2C, and
+   SPI-flash controller interfaces.
 5. Move SDIO transfers to DMA and use external SRAM for the block cache.

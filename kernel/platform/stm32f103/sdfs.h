@@ -15,7 +15,7 @@
 #include "core/types.h"
 #include "fs/fat32lite.h"
 #include "hub_cfg.h"
-#include "touch.h"
+#include "drivers/stm32f1/touch.h"
 
 /* Mount the card's FAT32 volume. Returns FAT32LITE_OK, or a negative FAT32LITE_E* /
  * FAT32LITE_EIO when the card is absent or unreadable. Safe to call again. */

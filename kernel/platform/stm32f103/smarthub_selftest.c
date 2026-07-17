@@ -18,7 +18,7 @@
 #include "touch_cal.h"
 #include "ui_home.h"
 #include "live2d.h"
-#include "rgb_matrix.h"
+#include "drivers/stm32f1/rgb_matrix.h"
 #include "core/stdio.h"
 
 static int str_eq(const char *a, const char *b) {

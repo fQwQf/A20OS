@@ -22,18 +22,10 @@ armv7m_vector_table:
     .word 0
     .word PendSV_Handler
     .word SysTick_Handler
-    .rept 23
-    .word Default_Handler
-    .endr
-    .word EXTI9_5_IRQHandler        /* IRQ 23: EXTI lines 5..9 (IR on PB9) */
-    .rept 13
-    .word Default_Handler
-    .endr
-    .word USART1_IRQHandler         /* IRQ 37 */
-    .word USART2_IRQHandler         /* IRQ 38 */
-    .word USART3_IRQHandler         /* IRQ 39 */
-    .rept 29
-    .word Default_Handler
+    /* External interrupt numbering belongs to the platform. All device IRQs
+     * enter a common architecture stub and are dispatched by the board port. */
+    .rept 68
+    .word External_IRQHandler
     .endr
 
     .section .text.entry, "ax", %progbits
@@ -173,27 +165,9 @@ SysTick_Handler:
     pop {pc}
 
     .thumb_func
-USART1_IRQHandler:
+External_IRQHandler:
     push {lr}
-    bl armv7m_usart1_irq_handler
-    pop {pc}
-
-    .thumb_func
-USART2_IRQHandler:
-    push {lr}
-    bl armv7m_usart2_irq_handler
-    pop {pc}
-
-    .thumb_func
-USART3_IRQHandler:
-    push {lr}
-    bl armv7m_usart3_irq_handler
-    pop {pc}
-
-    .thumb_func
-EXTI9_5_IRQHandler:
-    push {lr}
-    bl armv7m_exti9_5_irq_handler
+    bl armv7m_external_irq_handler
     pop {pc}
 
     .global __switch
