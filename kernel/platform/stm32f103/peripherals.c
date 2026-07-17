@@ -8,6 +8,7 @@
 #include "actuators.h"
 #include "board.h"
 #include "bluetooth.h"
+#include "bluetooth_cmd.h"
 #include "cjk_font.h"
 #include "dht11.h"
 #include "display.h"
@@ -469,39 +470,6 @@ static ui_action_t ui_action_from_key(stm32_key_t key) {
     return UI_ACTION_NONE;
 }
 
-static int text_command_equal(const char *line, const char *command) {
-    while (*line == ' ' || *line == '\t')
-        line++;
-    while (*command && *line) {
-        char a = *line++;
-        char b = *command++;
-        if (a >= 'a' && a <= 'z')
-            a = (char)(a - 'a' + 'A');
-        if (a != b)
-            return 0;
-    }
-    while (*line == ' ' || *line == '\t' || *line == '\r' || *line == '\n')
-        line++;
-    return *command == '\0' && *line == '\0';
-}
-
-/*
- * The nine remote keys, in the order the IR remote prints them. IR reaches
- * them by NEC code (IR_DEFAULT_MAP in ir.h); Bluetooth reaches the same nine
- * by sending the bare digit. Keep this table and IR_DEFAULT_MAP in step.
- */
-static const ir_action_t remote_key_actions[9] = {
-    IR_ACT_FAN_UP,      /* 1 */
-    IR_ACT_FAN_DOWN,    /* 2 */
-    IR_ACT_PUMP_TOGGLE, /* 3 */
-    IR_ACT_THEME_CYCLE, /* 4 */
-    IR_ACT_TALK,        /* 5 */
-    IR_ACT_MUTE_BUZZER, /* 6 */
-    IR_ACT_MENU,        /* 7 */
-    IR_ACT_LIGHT_UP,    /* 8 */
-    IR_ACT_LIGHT_DOWN,  /* 9 */
-};
-
 /* One dispatcher for every remote input (IR, Bluetooth, direction keys), so
  * they cannot drift apart. MUTE is handled here because it drives the buzzer
  * rather than the UI model. */
@@ -522,66 +490,79 @@ static void apply_remote_action(int action, uint64_t now) {
     ui_apply_action(ui_action_from_ir(action), now);
 }
 
-/*
- * Bluetooth (HC-05 SPP) command set, kept as small as it can be because it is
- * typed by hand into a phone's serial terminal: send a single digit 1..9 and
- * it does what that key on the IR remote does. The word forms are aliases for
- * readability only.
- *
- *   1 FAN_UP   2 FAN_DOWN  3 PUMP    4 THEME     5 TALK
- *   6 MUTE     7 MENU      8 LIGHT_UP  9 LIGHT_DOWN
- *
- * Pairing already gates who can open the link (the HC-05 PIN is checked by the
- * module before a connection exists), so an established link is not asked to
- * re-authenticate per command.
- */
-static int bluetooth_action_from_line(const char *line) {
-    const char *p = line;
-
-    while (*p == ' ' || *p == '\t')
-        p++;
-    if (*p >= '1' && *p <= '9') {
-        const char *rest = p + 1;
-        while (*rest == ' ' || *rest == '\t' || *rest == '\r' || *rest == '\n')
-            rest++;
-        if (*rest == '\0')
-            return remote_key_actions[*p - '1'];
-    }
-    if (text_command_equal(line, "FAN_UP") || text_command_equal(line, "FAN+"))
-        return IR_ACT_FAN_UP;
-    if (text_command_equal(line, "FAN_DOWN") || text_command_equal(line, "FAN-"))
-        return IR_ACT_FAN_DOWN;
-    if (text_command_equal(line, "PUMP"))
-        return IR_ACT_PUMP_TOGGLE;
-    if (text_command_equal(line, "THEME"))
-        return IR_ACT_THEME_CYCLE;
-    if (text_command_equal(line, "TALK"))
-        return IR_ACT_TALK;
-    if (text_command_equal(line, "MUTE"))
-        return IR_ACT_MUTE_BUZZER;
-    if (text_command_equal(line, "MENU"))
-        return IR_ACT_MENU;
-    if (text_command_equal(line, "LIGHT_UP") || text_command_equal(line, "BL+"))
-        return IR_ACT_LIGHT_UP;
-    if (text_command_equal(line, "LIGHT_DOWN") ||
-        text_command_equal(line, "BL-"))
-        return IR_ACT_LIGHT_DOWN;
-    return IR_ACT_NONE;
-}
-
 static void ui_handle_bluetooth_command(const char *line, uint64_t now) {
-    int action;
+    bluetooth_cmd_t cmd;
+    int redraw = 1;
+    static const char help[] =
+        "HELP 1..9 STATUS PING | FAN 0..3 | PUMP ON/OFF | "
+        "THEME DAY/NIGHT/COZY | LIGHT 0..100 | MUTE ON/OFF | "
+        "AUTO FAN/PUMP/THEME/LIGHT/ALL\r\n";
 
     if (!stm32_bluetooth_connected())
         return;
-    action = bluetooth_action_from_line(line);
-    if (action == IR_ACT_NONE) {
-        static const char help[] =
-            "? 1FAN+ 2FAN- 3PUMP 4THEME 5TALK 6MUTE 7MENU 8BL+ 9BL-\r\n";
+    if (bluetooth_cmd_parse(line, &cmd) != 0) {
+        static const char error[] = "ERR unknown command; send HELP\r\n";
+        (void)stm32_bluetooth_send(error, sizeof(error) - 1U);
+        return;
+    }
+    if (cmd.kind == BLUETOOTH_CMD_HELP) {
         (void)stm32_bluetooth_send(help, sizeof(help) - 1U);
         return;
     }
-    apply_remote_action(action, now);
+    if (cmd.kind == BLUETOOTH_CMD_PING) {
+        static const char pong[] = "PONG A20OS\r\n";
+        (void)stm32_bluetooth_send(pong, sizeof(pong) - 1U);
+        return;
+    }
+    if (cmd.kind == BLUETOOTH_CMD_STATUS) {
+        char status[128];
+        int n = snprintf(status, sizeof(status),
+            "STATUS T=%d H=%u L=%u FAN=%u PUMP=%u BL=%u THEME=%s "
+            "MODE=%02x MUTE=%u NET=%s\r\n",
+            (int)g_ui_state.temp_c, (unsigned)g_ui_state.humidity,
+            (unsigned)g_ui_state.light, (unsigned)g_ui_state.fan_level,
+            (unsigned)g_ui_state.pump_on, (unsigned)g_ui_state.backlight,
+            env_theme_name((env_theme_t)g_ui_state.theme),
+            (unsigned)g_manual_mask, (unsigned)buzzer_muted,
+            g_ui_state.net_cloud ? "CLOUD" : "LOCAL");
+        if (n > 0)
+            (void)stm32_bluetooth_send(status,
+                (size_t)n < sizeof(status) ? (size_t)n : sizeof(status) - 1U);
+        return;
+    }
+    if (cmd.kind == BLUETOOTH_CMD_ACTION) {
+        apply_remote_action(cmd.value, now);
+        redraw = 0; /* UI actions already repaint; MUTE has nothing to repaint. */
+    } else if (cmd.kind == BLUETOOTH_CMD_FAN_SET) {
+        g_manual_fan = g_ui_state.fan_level = (uint8_t)cmd.value;
+        stm32_fan_set_level(g_manual_fan);
+        ui_manual_arm(MANUAL_FAN, now);
+    } else if (cmd.kind == BLUETOOTH_CMD_PUMP_SET) {
+        g_manual_pump = g_ui_state.pump_on = (uint8_t)cmd.value;
+        stm32_pump_set(g_manual_pump);
+        ui_manual_arm(MANUAL_PUMP, now);
+    } else if (cmd.kind == BLUETOOTH_CMD_THEME_SET) {
+        g_manual_theme = g_ui_state.theme = (uint8_t)cmd.value;
+        ui_manual_arm(MANUAL_THEME, now);
+    } else if (cmd.kind == BLUETOOTH_CMD_LIGHT_SET) {
+        g_manual_backlight = g_backlight = g_ui_state.backlight =
+            (uint8_t)cmd.value;
+        stm32_light_sensor_set_manual_brightness(g_manual_backlight);
+        ui_manual_arm(MANUAL_BACKLIGHT, now);
+    } else if (cmd.kind == BLUETOOTH_CMD_MUTE_SET) {
+        buzzer_muted = cmd.value;
+        if (buzzer_muted) {
+            stm32_buzzer_set(0);
+            buzzer_active = 0;
+        }
+    } else if (cmd.kind == BLUETOOTH_CMD_AUTO) {
+        g_manual_mask &= (uint8_t)~cmd.value;
+        g_ui_state.manual_mask = g_manual_mask;
+        last_control_tick = 0;
+    }
+    g_ui_state.manual_mask = g_manual_mask;
+    if (redraw)
+        ui_render_full();
     {
         static const char ok[] = "OK\r\n";
         (void)stm32_bluetooth_send(ok, sizeof(ok) - 1U);
