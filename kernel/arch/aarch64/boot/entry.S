@@ -10,6 +10,10 @@
     .global _start
     .extern early_uart_init
 _start:
+#ifdef CONFIG_BOARD_VIRTUALBOX_AARCH64
+    /* The UEFI loader passes the ACPI RSDP physical address in x0. */
+    mov     x4, x0
+#endif
     adrp    x0, _stack_end
     add     x0, x0, :lo12:_stack_end
     mov     sp, x0
@@ -24,6 +28,11 @@ _start:
     str     xzr, [x0], #8
     b       1b
 2:
+#ifdef CONFIG_BOARD_VIRTUALBOX_AARCH64
+    adrp    x3, aarch64_boot_acpi_rsdp
+    add     x3, x3, :lo12:aarch64_boot_acpi_rsdp
+    str     x4, [x3]
+#endif
     /* Enable FP/SIMD access at EL1/EL0. */
     mrs     x2, cpacr_el1
     orr     x2, x2, #(3 << 20)
@@ -55,6 +64,14 @@ _start:
     str     x2, [x1, #(0 * 8)]
     ldr     x2, =0x00600000c0000401  /* PA 3..4 GiB, device, PXN|UXN */
     str     x2, [x1, #(3 * 8)]
+    /* UEFI keeps its ACPI tables in conventional RAM above the initial
+     * 512-MiB guest allocation (VBox placed the RSDP at 0x460df018 in a
+     * target run).  Map this window as Normal while parsing those tables;
+     * it is outside A20OS's allocator range and is never handed to kmalloc. */
+    ldr     x2, =0x0040000040000705  /* PA 1..2 GiB, normal, UXN */
+    str     x2, [x1, #(1 * 8)]
+    ldr     x2, =0x0060000080000401  /* PA 2..3 GiB, device, PXN|UXN */
+    str     x2, [x1, #(2 * 8)]
 #else
     ldr     x2, =0x0060000000000401  /* L1 block: PA 0x0, device, PXN|UXN */
     str     x2, [x1, #(0 * 8)]
@@ -182,6 +199,13 @@ boot_l1:
     .align 12
 boot_l2:
     .space 4096
+
+#ifdef CONFIG_BOARD_VIRTUALBOX_AARCH64
+    .align 3
+    .global aarch64_boot_acpi_rsdp
+aarch64_boot_acpi_rsdp:
+    .quad 0
+#endif
 
     .section .bss.stack
     .align 12

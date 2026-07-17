@@ -7,6 +7,9 @@
 [submodule "user/external/lvgl"]
 	path = user/external/lvgl
 	url = https://github.com/lvgl/lvgl.git
+[submodule "user/external/breeze"]
+	path = user/external/breeze
+	url = https://invent.kde.org/plasma/breeze.git
 [submodule "user/external/musl-cross-make"]
 	path = user/external/musl-cross-make
 	url = https://github.com/richfelker/musl-cross-make.git
