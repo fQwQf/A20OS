@@ -15,6 +15,10 @@ typedef struct stm32_touch_calibration {
 
 int stm32_touch_init(void);
 int stm32_touch_poll(uint16_t *x, uint16_t *y);
+/* Read one stable, uncalibrated XPT2046 ADC pair while PENIRQ is active. */
+int stm32_touch_poll_raw(uint16_t *raw_x, uint16_t *raw_y);
+/* Report the physical PENIRQ state independently of ADC sample validity. */
+int stm32_touch_pressed(void);
 int stm32_touch_ready(void);
 void stm32_touch_set_calibration(const stm32_touch_calibration_t *calibration);
 const stm32_touch_calibration_t *stm32_touch_get_calibration(void);

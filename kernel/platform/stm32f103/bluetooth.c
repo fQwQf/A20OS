@@ -225,15 +225,19 @@ static int bluetooth_response_contains(const char *response,
 }
 
 static void bluetooth_log_response(const char *command, const char *response,
-                                   size_t length, int key_mode,
-                                   uint32_t error_bytes) {
+                                    size_t length, int key_mode,
+                                    uint32_t error_bytes) {
+    int sensitive = bluetooth_response_contains(command, "PSWD") ||
+                    bluetooth_response_contains(response, "PSWD");
     const char *key_name =
         key_mode == STM32_BLUETOOTH_AT_KEY_PULSE ? "pulse" :
         key_mode == STM32_BLUETOOTH_AT_KEY_HIGH ? "high" : "low";
     printf("[BT-AT] baud=%u key=%s cmd=",
            (unsigned)bluetooth_uart_baud,
            key_name);
-    for (size_t i = 0; command && command[i]; i++) {
+    if (sensitive) {
+        printf("<redacted>");
+    } else for (size_t i = 0; command && command[i]; i++) {
         char c = command[i];
         if (c == '\r')
             printf("\\r");
@@ -245,7 +249,9 @@ static void bluetooth_log_response(const char *command, const char *response,
             printf("\\x%02x", (unsigned)(uint8_t)c);
     }
     printf(" reply=");
-    if (length == 0) {
+    if (sensitive) {
+        printf("<redacted>");
+    } else if (length == 0) {
         printf("<none>");
     } else {
         for (size_t i = 0; i < length; i++) {
@@ -1036,7 +1042,7 @@ void stm32_bluetooth_debug_status(void) {
            " at=%d at-mode=%s boot-at=%d at-baud=%u data-baud=%u"
            " attempts=%u at-rx=%u at-errors=%u"
            " configured=%d role=%s waiting=%d connected=%d"
-           " name=%s pin=%s uuid=0x%x\n",
+            " name=%s uuid=0x%x\n",
            bluetooth.ready, bluetooth.detected, rx_states[rx_state],
            bluetooth.at_responsive,
            bluetooth.at_key_mode == STM32_BLUETOOTH_AT_KEY_PULSE ?
@@ -1053,7 +1059,6 @@ void stm32_bluetooth_debug_status(void) {
            bluetooth.slave_mode ? "slave" : "unknown",
            bluetooth.waiting, bluetooth.connected,
            bluetooth.device_name[0] ? bluetooth.device_name : "<empty>",
-           bluetooth.pin[0] ? bluetooth.pin : "<empty>",
            (unsigned)bluetooth.service_uuid);
     printf("[BT-UART] requested=%u actual=%u brr=0x%x irq=%d"
            " pin=%d rx=%u tx=%u edges=%u last=0x%x errors=%u\n",

@@ -55,7 +55,7 @@ live2d_state_t live2d_mood_to_state(uint8_t mood, uint8_t alert_active) {
     if (alert_active)
         return LIVE2D_WARN;
     if (mood >= LIVE2D_STATE_COUNT)
-        return LIVE2D_TALK; /* unknown mood -> neutral talking */
+        return LIVE2D_IDLE;
     return (live2d_state_t)mood;
 }
 
@@ -139,6 +139,13 @@ int live2d_tick(live2d_t *l, uint32_t now_ms) {
         changed = 1;
     }
     return changed;
+}
+
+int live2d_frame_clock_consume(uint32_t *observed, uint32_t current) {
+    if (!observed || *observed == current)
+        return 0;
+    *observed = current;
+    return 1;
 }
 
 static int append(char *buf, unsigned cap, unsigned *pos, const char *s) {

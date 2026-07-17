@@ -30,8 +30,11 @@ Outputs:
 
 The binary is linked for flash address `0x08000000`. Flash it with OpenOCD,
 ST-Link, or another STM32 programmer. USART1 uses PA9/PA10 at 115200 8N1.
-The reset-clock implementation intentionally uses the 8 MHz HSI clock.
-The USART1 driver derives its APB2 clock from the live RCC registers and
+The generic bring-up target uses the 8 MHz HSI clock. The Xuanwu target enables
+its 8 MHz HSE and switches to the rated 72 MHz HSE×9 PLL clock before UART and
+SysTick initialization; it falls back to HSI if HSE or PLL startup fails. APB1
+runs at 36 MHz and APB2 at 72 MHz. The USART1 driver derives its APB2 clock from
+the live RCC registers and
 computes BRR instead of assuming the vendor example's 72 MHz clock. Its
 RXNE interrupt feeds a 128-byte receive ring and clears parity, framing,
 noise, and overrun conditions using the required SR/DR read sequence.

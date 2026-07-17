@@ -13,6 +13,7 @@
 #include "dht11.h"
 #include "fs/fat32lite.h"
 #include "peripherals.h"
+#include "rtc.h"
 #include "heap.h"
 #include "light_sensor.h"
 #include "sdfs.h"
@@ -97,6 +98,8 @@ static void diagnostic_help(void) {
     printf("  perf          show clocks and main service latency\n");
     printf("  light         show ADC3 light sensor state\n");
     printf("  dht           one DHT11 read with failure-stage diagnostics\n");
+    printf("  time [set HH:MM[:SS]]  show or set the RTC clock\n");
+    printf("  cal start     run the four-point touch calibration UI\n");
     printf("  sd retry      explicitly probe and initialize the TF card\n");
     printf("  fs [ls <dir>] | cat <path> | write <path> <text>"
            " | rm <path> | test\n");
@@ -257,6 +260,43 @@ static void diagnostic_fs(char *args) {
     }
 }
 
+static void diagnostic_time(const char *args) {
+    int hour;
+    int minute;
+    int second;
+
+    if (args && text_starts_with(args, "set ")) {
+        const char *p = args + 4;
+        if (p[0] < '0' || p[0] > '9' || p[1] < '0' || p[1] > '9' ||
+            p[2] != ':' || p[3] < '0' || p[3] > '9' ||
+            p[4] < '0' || p[4] > '9') {
+            printf("[RTC] usage: time set HH:MM[:SS]\n");
+            return;
+        }
+        hour = (p[0] - '0') * 10 + p[1] - '0';
+        minute = (p[3] - '0') * 10 + p[4] - '0';
+        second = 0;
+        if (p[5] == ':') {
+            if (p[6] < '0' || p[6] > '9' || p[7] < '0' || p[7] > '9' ||
+                p[8] != '\0') {
+                printf("[RTC] usage: time set HH:MM[:SS]\n");
+                return;
+            }
+            second = (p[6] - '0') * 10 + p[7] - '0';
+        } else if (p[5] != '\0') {
+            printf("[RTC] usage: time set HH:MM[:SS]\n");
+            return;
+        }
+        if (stm32_rtc_set_hhmmss(hour, minute, second) != 0) {
+            printf("[RTC] invalid/unavailable\n");
+            return;
+        }
+    }
+    stm32_rtc_get_hhmmss(&hour, &minute, &second);
+    printf("[RTC] %02d:%02d:%02d available=%d\n", hour, minute, second,
+           stm32_rtc_available());
+}
+
 static void diagnostic_execute(char *line) {
     if (!line[0])
         return;
@@ -317,6 +357,14 @@ static void diagnostic_execute(char *line) {
                d.resp_us[0], d.resp_us[1], d.resp_us[2], d.bit_us[0],
                d.bit_us[1], d.bit_us[2], d.bit_us[3], d.bit_us[4], d.bit_us[5],
                d.bit_us[6], d.bit_us[7]);
+    } else if (text_equal(line, "time")) {
+        diagnostic_time(NULL);
+    } else if (text_starts_with(line, "time ")) {
+        diagnostic_time(line + 5);
+    } else if (text_equal(line, "cal start")) {
+        printf("[TOUCH] calibration=%s\n",
+               stm32_peripherals_start_touch_calibration() == 0 ?
+                   "started" : "unavailable");
     } else if (text_equal(line, "sd retry")) {
         int result = stm32_peripherals_retry_sdcard();
         printf("[TF-DIAG] retry=%s\n",

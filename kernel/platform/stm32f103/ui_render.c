@@ -55,6 +55,12 @@ static const uint8_t ui_font5x7[][5] = {
     ['Z' - 32] = {0x61, 0x51, 0x49, 0x45, 0x43},
 };
 
+static ui_cjk_lookup_t cjk_lookup;
+
+void ui_render_set_cjk_lookup(ui_cjk_lookup_t lookup) {
+    cjk_lookup = lookup;
+}
+
 static void fill(const ui_gfx_t *g, int x, int y, int w, int h, uint16_t c) {
     if (w > 0 && h > 0)
         g->fill_rect(g->ctx, x, y, w, h, c);
@@ -82,10 +88,51 @@ int ui_render_text(const ui_gfx_t *g, int x, int y, const char *s,
     return x;
 }
 
-/* One speech line: ASCII via the font, each CJK char (UTF-8 lead >=0xC0) as a
- * placeholder block (the real panel uses an SD-resident CJK font). */
+static int utf8_decode(const char *s, uint32_t *codepoint) {
+    const uint8_t *p = (const uint8_t *)s;
+
+    if (p[0] < 0x80U) {
+        *codepoint = p[0];
+        return 1;
+    }
+    if ((p[0] & 0xE0U) == 0xC0U && p[1] != 0U &&
+        (p[1] & 0xC0U) == 0x80U) {
+        *codepoint = ((uint32_t)(p[0] & 0x1FU) << 6) | (p[1] & 0x3FU);
+        return 2;
+    }
+    if ((p[0] & 0xF0U) == 0xE0U && p[1] != 0U && p[2] != 0U &&
+        (p[1] & 0xC0U) == 0x80U && (p[2] & 0xC0U) == 0x80U) {
+        *codepoint = ((uint32_t)(p[0] & 0x0FU) << 12) |
+                     ((uint32_t)(p[1] & 0x3FU) << 6) | (p[2] & 0x3FU);
+        return 3;
+    }
+    if ((p[0] & 0xF8U) == 0xF0U && p[1] != 0U && p[2] != 0U &&
+        p[3] != 0U && (p[1] & 0xC0U) == 0x80U &&
+        (p[2] & 0xC0U) == 0x80U && (p[3] & 0xC0U) == 0x80U) {
+        *codepoint = ((uint32_t)(p[0] & 0x07U) << 18) |
+                     ((uint32_t)(p[1] & 0x3FU) << 12) |
+                     ((uint32_t)(p[2] & 0x3FU) << 6) | (p[3] & 0x3FU);
+        return 4;
+    }
+    *codepoint = 0xFFFDU;
+    return 1;
+}
+
+static void draw_cjk16(const ui_gfx_t *g, int x, int y,
+                       const uint8_t *glyph, uint16_t color) {
+    for (int row = 0; row < 16; row++) {
+        uint16_t bits = (uint16_t)((uint16_t)glyph[row * 2] << 8) |
+                        glyph[row * 2 + 1];
+        for (int col = 0; col < 16; col++)
+            if (bits & (uint16_t)(0x8000U >> col))
+                fill(g, x + col, y + row, 1, 1, color);
+    }
+}
+
+/* Speech is UTF-8. ASCII uses the 5x7 font; CJK prefers an SD-resident 16x16
+ * glyph and falls back to a visible placeholder when the font is unavailable. */
 static void draw_speech_line(const ui_gfx_t *g, int x, int y, const char *s,
-                             uint16_t color, int scale) {
+                              uint16_t color, int scale) {
     while (*s) {
         unsigned char c = (unsigned char)*s;
         if (c < 0x80u) {
@@ -93,11 +140,15 @@ static void draw_speech_line(const ui_gfx_t *g, int x, int y, const char *s,
             x += 6 * scale;
             s++;
         } else {
-            int bytes = c >= 0xF0u ? 4 : c >= 0xE0u ? 3 : 2;
-            fill(g, x + scale, y, 4 * scale, 7 * scale, color);
-            x += 12 * scale; /* CJK glyph ~2 ASCII cells wide */
-            for (int b = 0; b < bytes && *s; b++)
-                s++;
+            uint32_t codepoint;
+            int bytes = utf8_decode(s, &codepoint);
+            const uint8_t *glyph = cjk_lookup ? cjk_lookup(codepoint) : NULL;
+            if (glyph)
+                draw_cjk16(g, x, y, glyph, color);
+            else
+                fill(g, x + scale, y, 4 * scale, 7 * scale, color);
+            x += 18; /* 16px glyph + 2px gap, three speech budget units */
+            s += bytes;
         }
     }
 }
@@ -168,14 +219,14 @@ static void draw_cat_placeholder(const ui_gfx_t *g, const ui_home_model_t *m,
     }
 }
 
-void ui_render_home(const ui_gfx_t *g, const ui_home_model_t *m,
-                    const live2d_t *cat, const uint16_t *cat_frame, int cat_w,
-                    int cat_h) {
+void ui_render_home_ex(const ui_gfx_t *g, const ui_home_model_t *m,
+                       const live2d_t *cat, const uint16_t *cat_frame,
+                       int cat_w, int cat_h, unsigned flags) {
     if (!g || !m)
         return;
 
-    /* background */
-    fill(g, 0, 0, UI_RENDER_W, UI_RENDER_H, m->color_bg);
+    if (!(flags & UI_RENDER_KEEP_BACKGROUND))
+        fill(g, 0, 0, UI_RENDER_W, UI_RENDER_H, m->color_bg);
 
     /* header: clock (left), net + alert (right) */
     int header_h = m->card_count ? (int)m->cards[0].rect.y : 60;
@@ -222,15 +273,33 @@ void ui_render_home(const ui_gfx_t *g, const ui_home_model_t *m,
             fill(g, bx, by, bw, 3, m->color_accent);
             for (unsigned i = 0; i < m->speech_lines; i++)
                 draw_speech_line(g, bx + 8, by + 10 + (int)i * 22,
-                                 m->speech[i], m->color_text, 2);
+                                 m->speech[i], m->color_text, 1);
         }
     }
+}
+
+void ui_render_home(const ui_gfx_t *g, const ui_home_model_t *m,
+                    const live2d_t *cat, const uint16_t *cat_frame, int cat_w,
+                    int cat_h) {
+    ui_render_home_ex(g, m, cat, cat_frame, cat_w, cat_h, 0);
+}
+
+void ui_render_cat(const ui_gfx_t *g, const ui_home_model_t *m,
+                   const live2d_t *cat) {
+    const ui_rect_t *r;
+
+    if (!g || !m)
+        return;
+    r = hit_rect(m, UI_ACTION_TALK);
+    if (r)
+        draw_cat_placeholder(g, m, r,
+                             cat ? (int)cat->state : m->cat_mood);
 }
 
 void ui_render_cal_target(const ui_gfx_t *g, int index, int total) {
     if (!g)
         return;
-    static const int inset = 32;
+    static const int inset = UI_RENDER_CAL_INSET;
     int xs[4] = {inset, UI_RENDER_W - inset, inset, UI_RENDER_W - inset};
     int ys[4] = {inset, inset, UI_RENDER_H - inset, UI_RENDER_H - inset};
     int i = index < 0 ? 0 : index > 3 ? 3 : index;
