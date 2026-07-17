@@ -141,11 +141,30 @@ SVC_Handler:
     .thumb_func
 PendSV_Handler:
     /*
-     * The generic A20OS scheduler switches C stacks and therefore must run in
-     * thread mode.  Switching MSP while this exception owns an exception
-     * frame would strand that frame on the previous task's stack.
+     * Do not switch MSP while an exception frame belongs to the interrupted
+     * task. The C hook rewrites the stacked PC to a thread-mode trampoline;
+     * that trampoline safely enters the generic scheduler on the task stack.
      */
+    tst lr, #4
+    ite eq
+    mrseq r0, msp
+    mrsne r0, psp
+    push {lr}
+    bl armv7m_pendsv_prepare
+    pop {lr}
     bx lr
+
+    .global armv7m_preempt_trampoline
+    .thumb_func
+armv7m_preempt_trampoline:
+    /* Preserve all hardware-stacked volatile registers while proc_yield()
+     * follows the normal AAPCS and __switch path. */
+    push {r0-r3, r12, lr}
+    bl proc_yield
+    pop {r0-r3, r12, lr}
+    /* The SVC restores the saved interrupted PC without consuming a register. */
+    svc #0x20
+    b .
 
     .thumb_func
 SysTick_Handler:
