@@ -30,8 +30,10 @@ void live2d_load_get_stats(live2d_load_stats_t *out);
 #define LIVE2D_BAND_ROWS 4
 
 /* Returns 1 if the frame was drawn, 0 when its file is absent. */
-int live2d_load_draw_fs(ui_gfx_t *gfx, fat32lite_fs_t *fs,
-                         const live2d_t *cat);
+/* (live2d_load_draw_fs — the uncached "read the frame straight from SD and
+ * blit it" path — was removed: the prefetch cache below replaced it and nothing
+ * had called it since. It was also the only reason the 1152-byte band buffer
+ * had to exist outside the hardware guards.) */
 /* Incrementally prefetch one animation state's frames into external SRAM.
  * Drawing becomes available after the first complete frame; later frames join
  * the animation as they finish loading. */
