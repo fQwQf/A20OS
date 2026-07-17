@@ -116,8 +116,8 @@ static uint64_t cloud_last_ms;
  * narrate a room that had not changed — ~900 calls an hour, real money for no
  * information. Each reply carried a new speech line, and a new line restarts
  * TALK for up to 6s; at one line every ~4s the catgirl never left TALK, so the
- * cloud mood was never applied (a live TALK outranks it) and IDLE never got to
- * park — which silently undid the whole point of making IDLE a one-shot.
+ * cloud mood was never applied (a live TALK outranks it) and IDLE never got a
+ * chance to play normally.
  *
  * So: ask on a real change, on an explicit request (tapping the cat), or on a
  * slow heartbeat. Light is deliberately not a trigger — it swings tens of

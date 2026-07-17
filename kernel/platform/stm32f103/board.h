@@ -5,7 +5,7 @@ void stm32_status_led_init(void);
 void stm32_status_led_set(int on);
 void stm32_status_led_toggle(void);
 
-/* 15 fps animation clock published by the 1 kHz SysTick interrupt. */
+/* Animation clock published by the 1 kHz SysTick interrupt. */
 uint32_t stm32_live2d_frame_clock(void);
 
 #endif
