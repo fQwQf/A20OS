@@ -63,7 +63,9 @@ static int fb_ioctl(vfile_t *vf, unsigned long req, void *arg) {
             r = ops->get_info(dev, &w, &h, &bpp);
             if (r < 0)
                 return r;
-            fix.line_length = w * (bpp / 8);
+            /* The exported framebuffer is a tightly described scanout.  GPU
+             * drivers restrict smem_len to the visible pitch * height. */
+            fix.line_length = (uint32_t)(fb_size / h);
             return copy_to_user(arg, &fix, sizeof(fix)) < 0 ? -EFAULT : 0;
         }
         case FBIO_MAP_FB: {
@@ -106,13 +108,14 @@ static int fb_ioctl(vfile_t *vf, unsigned long req, void *arg) {
             }
 
             /*
-             * Match the normal cacheable attributes used by the ARM32 kernel
-             * linear map. Mixing device and normal aliases for the same RAM is
-             * architecturally unsafe; gpu_flush() performs the DMA clean before
-             * the host reads the backing pages.
+             * A physical VRAM BAR is MMIO, not ordinary RAM.  In particular,
+             * mapping it as cacheable Normal memory on AArch64 leaves LVGL
+             * writes in the CPU cache and produces a permanently black VBox
+             * screen.  The default attribute index is Device; architectures
+             * without memory-type bits simply ignore the omitted MAT1 flag.
              */
             pte_t flags = PTE_V | PTE_R | PTE_W | PTE_U |
-                          PTE_A | PTE_D | PTE_MAT1 | PTE_LEAF;
+                          PTE_A | PTE_D | PTE_LEAF;
             size_t mapped = 0;
             for (; mapped < fb_size; mapped += PAGE_SIZE) {
                 r = pt_map(curr->mm->pgdir, va + mapped,

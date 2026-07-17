@@ -1,6 +1,7 @@
 #include "drivers/gpu/virtio_gpu.h"
 #include "drivers/gpu/gpu_core.h"
 #include "drivers/bus/virtio_transport.h"
+#include "drivers/bus/pci_bus.h"
 #include "drivers/core/driver_core.h"
 #include "drivers/core/driver_register.h"
 #include "drivers/core/driver_hwapi.h"
@@ -376,6 +377,13 @@ fail:
 }
 
 static int virtio_gpu_probe(device_t *dev) {
+    if (dev->bus == &pci_bus) {
+        virtio_transport_t vt;
+        if (pci_virtio_transport_init(dev, 16, &vt) != 0)
+            return -1;
+        return virtio_gpu_init_transport(dev, &vt);
+    }
+
     resource_t *mmio_res = device_get_resource(dev, RES_MMIO, 0);
     if (!mmio_res)
         return -1;
@@ -405,7 +413,9 @@ int virtio_gpu_init(void) {
 }
 
 static const device_id_t virtio_gpu_ids[] = {
-    { .vendor = VENDOR_ANY, .device = 16 }, // VIRTIO_ID_GPU
+    { .vendor = 0x1AF4, .device = 0x1050,
+      .subvendor = VENDOR_ANY, .subdevice = DEVICE_ANY },
+    { .vendor = 0x1AF4, .device = 0x1010, .subvendor = VENDOR_ANY, .subdevice = 16 },
     { 0 },
 };
 
