@@ -30,9 +30,15 @@
 #define TOUCH_HEIGHT 480U
 #define TOUCH_SAMPLE_COUNT 5U
 #define TOUCH_MAX_PAIR_DELTA 50U
+/* Reported press/release only flips after this many consecutive identical raw
+ * reads. Resistive PENIRQ + bit-banged ADC are noisy: without debounce the raw
+ * state flip-flops every poll and floods a fixed phantom coordinate. */
+#define TOUCH_DEBOUNCE 3U
 
 static int touch_initialized;
-static int touch_was_pressed;
+static int touch_stable_pressed; /* debounced, reported state              */
+static unsigned touch_press_run;   /* consecutive raw-pressed reads        */
+static unsigned touch_release_run; /* consecutive raw-released reads       */
 static uint16_t last_x;
 static uint16_t last_y;
 static stm32_touch_calibration_t touch_calibration = {
@@ -185,7 +191,9 @@ static uint16_t scale_axis(uint16_t raw, uint16_t min, uint16_t max,
 
 int stm32_touch_init(void) {
     touch_initialized = 0;
-    touch_was_pressed = 0;
+    touch_stable_pressed = 0;
+    touch_press_run = 0;
+    touch_release_run = 0;
 #ifndef CONFIG_STM32_XUANWU
     return -1;
 #else
@@ -218,47 +226,62 @@ int stm32_touch_ready(void) {
 }
 
 int stm32_touch_poll(uint16_t *x, uint16_t *y) {
-    if (!touch_initialized || touch_pen_released()) {
-        touch_was_pressed = 0;
-        return 0;
+    /* --- one instantaneous ("raw") read --- */
+    int raw_pressed = 0;
+    uint16_t point_x = 0;
+    uint16_t point_y = 0;
+
+    if (touch_initialized && !touch_pen_released()) {
+        uint16_t raw_x;
+        uint16_t raw_y;
+        if (touch_read_xy(&raw_x, &raw_y) == 0 && raw_x >= 50U &&
+            raw_y >= 50U) {
+            if (touch_calibration.swap_xy) {
+                uint16_t tmp = raw_x;
+                raw_x = raw_y;
+                raw_y = tmp;
+            }
+            point_x = scale_axis(raw_x, touch_calibration.x_min,
+                                 touch_calibration.x_max, TOUCH_WIDTH);
+            point_y = scale_axis(raw_y, touch_calibration.y_min,
+                                 touch_calibration.y_max, TOUCH_HEIGHT);
+            if (touch_calibration.invert_x)
+                point_x = TOUCH_WIDTH - 1U - point_x;
+            if (touch_calibration.invert_y)
+                point_y = TOUCH_HEIGHT - 1U - point_y;
+            raw_pressed = 1;
+        }
     }
 
-    uint16_t raw_x;
-    uint16_t raw_y;
-    if (touch_read_xy(&raw_x, &raw_y) != 0)
-        return 0;
-    if (raw_x < 50U || raw_y < 50U)
-        return 0;
-
-    if (touch_calibration.swap_xy) {
-        uint16_t tmp = raw_x;
-        raw_x = raw_y;
-        raw_y = tmp;
+    /* --- debounce: only change the reported state after TOUCH_DEBOUNCE
+     * consecutive identical raw reads (kills phantom flip-flops) --- */
+    if (raw_pressed) {
+        touch_release_run = 0;
+        if (touch_press_run < TOUCH_DEBOUNCE)
+            touch_press_run++;
+        if (touch_press_run >= TOUCH_DEBOUNCE) {
+            if (touch_stable_pressed) {
+                point_x = (uint16_t)(((uint32_t)last_x * 3U + point_x) / 4U);
+                point_y = (uint16_t)(((uint32_t)last_y * 3U + point_y) / 4U);
+            }
+            last_x = point_x;
+            last_y = point_y;
+            touch_stable_pressed = 1;
+        }
+    } else {
+        touch_press_run = 0;
+        if (touch_release_run < TOUCH_DEBOUNCE)
+            touch_release_run++;
+        if (touch_release_run >= TOUCH_DEBOUNCE)
+            touch_stable_pressed = 0;
     }
 
-    uint16_t point_x =
-        scale_axis(raw_x, touch_calibration.x_min, touch_calibration.x_max,
-                   TOUCH_WIDTH);
-    uint16_t point_y =
-        scale_axis(raw_y, touch_calibration.y_min, touch_calibration.y_max,
-                   TOUCH_HEIGHT);
-    if (touch_calibration.invert_x)
-        point_x = TOUCH_WIDTH - 1U - point_x;
-    if (touch_calibration.invert_y)
-        point_y = TOUCH_HEIGHT - 1U - point_y;
-
-    if (touch_was_pressed) {
-        point_x = (uint16_t)(((uint32_t)last_x * 3U + point_x) / 4U);
-        point_y = (uint16_t)(((uint32_t)last_y * 3U + point_y) / 4U);
-    }
-    last_x = point_x;
-    last_y = point_y;
-    touch_was_pressed = 1;
-
+    if (!touch_stable_pressed)
+        return 0;
     if (x)
-        *x = point_x;
+        *x = last_x;
     if (y)
-        *y = point_y;
+        *y = last_y;
     return 1;
 }
 

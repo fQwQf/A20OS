@@ -78,7 +78,18 @@ static const uint32_t wifi_probe_baud_rates[] = {
 
 static void wifi_set_event(const char *text);
 
+/* Per-AT-command logging is OFF by default: at 8 MHz, printing a full command +
+ * reply on USART1 (~6 ms) blocks long enough for the FIFO-less USART2 RX to
+ * overrun and drop the proxy's inbound +IPD CONTROL bytes. Re-enable for manual
+ * debugging via `wifi debug on`. */
+static int wifi_log_verbose;
+
+void stm32_wifi_set_verbose(int on) { wifi_log_verbose = on ? 1 : 0; }
+int stm32_wifi_verbose(void) { return wifi_log_verbose; }
+
 static void wifi_log_response(void) {
+    if (!wifi_log_verbose)
+        return;
     printf("[WIFI-AT] baud=%u cmd=%s reply=",
            (unsigned)wifi_command_baud,
            wifi_command[0] ? wifi_command : "(none)");
@@ -185,10 +196,11 @@ static int wifi_begin_command(const char *command,
     wifi.phase = phase;
     wifi.command_busy = 1;
     wifi_deadline = now + timeout_ms;
-    printf("[WIFI-AT] baud=%u cmd=%s\n",
-           (unsigned)wifi.baud_rate,
-           strncmp(command, "AT+CWJAP=", 9U) == 0 ?
-               "AT+CWJAP=<credentials-redacted>" : command);
+    if (wifi_log_verbose)
+        printf("[WIFI-AT] baud=%u cmd=%s\n",
+               (unsigned)wifi.baud_rate,
+               strncmp(command, "AT+CWJAP=", 9U) == 0 ?
+                   "AT+CWJAP=<credentials-redacted>" : command);
     return 0;
 }
 
