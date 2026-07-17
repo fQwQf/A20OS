@@ -18,6 +18,7 @@
 #include "heap.h"
 #include "light_sensor.h"
 #include "extsram.h"
+#include "ir.h"
 #include "live2d.h"
 #include "live2d_load.h"
 #include "sdcard.h"
@@ -113,6 +114,7 @@ static void diagnostic_help(void) {
     printf("  sd clk <mhz>  retune the SDIO data clock (0.1-24), no reflash\n");
     printf("  sd bus <1|4>  force the SD bus width, then `sd retry`\n");
     printf("  live2d        catgirl sprite state + frame cache + extsram\n");
+    printf("  ir            IR receiver edge/frame/abort counters\n");
     printf("  fs [ls <dir>] | cat <path> | write <path> <text>"
            " | rm <path> | test\n");
     printf("  bt            show HC-05 detection/configuration state\n");
@@ -551,6 +553,14 @@ static void diagnostic_execute(char *line) {
         diagnostic_sd();
     } else if (text_equal(line, "live2d")) {
         diagnostic_live2d();
+    } else if (text_equal(line, "ir")) {
+        uint32_t edges = 0, frames = 0, aborts = 0;
+        stm32_ir_stats(&edges, &frames, &aborts);
+        printf("[IR] edges=%u frames=%u aborts=%u bindings=%u\n",
+               (unsigned)edges, (unsigned)frames, (unsigned)aborts,
+               ir_map_count());
+        printf("[IR] press a remote key; a decoded code prints as"
+               " '[IR] code=0x... action=...'\n");
     } else if (text_starts_with(line, "sd clk ")) {
         int mhz = atoi(line + 7);
         int r = stm32_sdcard_set_transfer_hz((uint32_t)mhz * 1000000U);
