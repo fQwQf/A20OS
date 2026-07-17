@@ -1,5 +1,5 @@
 /* Data-driven NEC remote binding parser. See ir.h. */
-#include "ir.h"
+#include "drivers/stm32f1/ir.h"
 
 static ir_map_binding_t ir_bindings[IR_MAP_MAX];
 static unsigned ir_binding_count;

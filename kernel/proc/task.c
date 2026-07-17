@@ -106,12 +106,7 @@ void proc_task_init_common(task_t *t, task_t *parent)
     t->sig_blocked = parent ? parent->sig_blocked : 0;
     t->sig_old_blocked = 0;
     t->thread_pending = 0;
-#ifdef CONFIG_ARMV7M
-    t->arch_preempt_resume_pc = 0;
-    t->arch_preempt_resume_xpsr = 0;
-    t->arch_preempt_active = 0;
-    t->arch_preempt_disable = 0;
-#endif
+    ARCH_TASK_INIT(t);
     t->limits.stack = parent ? parent->limits.stack : USER_STACK_MAX_SIZE;
     t->limits.nofile = parent ? parent->limits.nofile : MAX_FILES;
     t->limits.memlock = parent ? parent->limits.memlock : (64 * 1024);

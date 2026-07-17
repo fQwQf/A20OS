@@ -1,5 +1,5 @@
 #include "bluetooth_cmd.h"
-#include "ir.h"
+#include "drivers/stm32f1/ir.h"
 
 static char upper(char c) {
     return c >= 'a' && c <= 'z' ? (char)(c - 'a' + 'A') : c;

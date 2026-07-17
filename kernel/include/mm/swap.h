@@ -6,10 +6,8 @@
 
 #define MAX_SWAPFILES 16
 #define SWP_TYPE_BITS 4
-#if defined(CONFIG_ARM32)
+#if UINTPTR_MAX == UINT32_MAX
 #define SWP_OFFSET_BITS 20
-#elif defined(CONFIG_AARCH64)
-#define SWP_OFFSET_BITS 36
 #else
 #define SWP_OFFSET_BITS 40
 #endif
@@ -36,10 +34,7 @@ struct swap_header {
 
 typedef uint64_t swap_entry_t;
 
-#if defined(CONFIG_RISCV64) || defined(CONFIG_LOONGARCH64) || \
-    defined(CONFIG_AARCH64) || defined(CONFIG_X86_64) || \
-    defined(CONFIG_ARM32) || defined(CONFIG_RISCV32) || \
-    defined(CONFIG_PPC64LE) || defined(CONFIG_ARMV7M)
+#if defined(CONFIG_SWAP)
 
 #include "core/errno.h"
 

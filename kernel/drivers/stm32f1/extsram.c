@@ -1,6 +1,6 @@
 #ifdef CONFIG_BOARD_STM32F103
 
-#include "extsram.h"
+#include "drivers/stm32f1/extsram.h"
 #include "core/arch.h"
 #include "core/string.h"
 

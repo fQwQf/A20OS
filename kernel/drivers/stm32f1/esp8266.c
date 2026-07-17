@@ -4,10 +4,10 @@
  */
 #ifdef CONFIG_BOARD_STM32F103
 
-#include "esp8266.h"
+#include "drivers/stm32f1/esp8266.h"
 #include "core/stdio.h"
 #include "core/timer.h"
-#include "stm32_uart.h" /* stm32_pclk1_hz() */
+#include "drivers/stm32f1/stm32_uart.h" /* stm32_pclk1_hz() */
 
 #ifndef CONFIG_STM32_QEMU
 

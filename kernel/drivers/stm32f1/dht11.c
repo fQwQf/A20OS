@@ -4,9 +4,9 @@
  */
 #ifdef CONFIG_BOARD_STM32F103
 
-#include "dht11.h"
+#include "drivers/stm32f1/dht11.h"
 #include "core/arch.h"  /* arch_irq_save/restore — bit-bang critical section */
-#include "stm32_uart.h" /* stm32_hclk_hz() */
+#include "drivers/stm32f1/stm32_uart.h" /* stm32_hclk_hz() */
 
 #ifndef CONFIG_STM32_QEMU
 

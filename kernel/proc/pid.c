@@ -3,7 +3,7 @@
 #include "core/lock.h"
 #include "core/string.h"
 
-#ifdef CONFIG_ARMV7M
+#ifdef CONFIG_MCU
 /* STM32 has very limited SRAM; keep the PID namespace small. */
 #define PID_MAX_LIMIT   256
 #define PID_HASH_BITS   4

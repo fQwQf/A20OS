@@ -513,10 +513,7 @@ void context_switch(task_t *next) {
 
 void sched(void) {
     task_t *sched_owner = proc_current();
-#ifdef CONFIG_ARMV7M
-    if (sched_owner)
-        sched_owner->arch_preempt_disable++;
-#endif
+    ARCH_SCHED_ENTER(sched_owner);
     uint64_t now = timer_get_ticks();
 
     /* Run event-driven network bottom-halves before picking the next task.
@@ -556,11 +553,8 @@ void sched(void) {
     }
 
 out:
-#ifdef CONFIG_ARMV7M
     /* A switched-out task returns here only when that same task is resumed. */
-    if (sched_owner && sched_owner->arch_preempt_disable)
-        sched_owner->arch_preempt_disable--;
-#endif
+    ARCH_SCHED_LEAVE(sched_owner);
 }
 
 void proc_yield(void) {

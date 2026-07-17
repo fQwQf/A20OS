@@ -15,7 +15,7 @@
 #endif
 
 /* ---------- Kernel / user stack sizes ---------- */
-#ifdef CONFIG_ARMV7M
+#ifdef CONFIG_MCU
 /* STM32VL QEMU exposes only 8 KiB; it runs one diagnostic task. */
 #ifdef CONFIG_STM32_QEMU
 #define KERNEL_STACK_SIZE        512
@@ -33,7 +33,7 @@
 #define USER_STACK_MAX_SIZE      (8 * 1024 * 1024UL)
 
 /* ---------- Limits ---------- */
-#ifdef CONFIG_ARMV7M
+#ifdef CONFIG_MCU
 #define MAX_PROCS          32
 #define MAX_FILES          16
 #ifdef CONFIG_STM32_QEMU

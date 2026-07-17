@@ -3,7 +3,7 @@
 
 #ifdef CONFIG_BOARD_STM32F103
 #include "core/string.h"
-#include "extsram.h"
+#include "drivers/stm32f1/extsram.h"
 #include "sdfs.h"
 #endif
 

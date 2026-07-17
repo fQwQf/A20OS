@@ -3,7 +3,7 @@
 #include "console.h"
 #include "core/types.h"
 #include "platform.h"
-#include "stm32_uart.h"
+#include "drivers/stm32f1/stm32_uart.h"
 
 #define STM32_CONSOLE_BAUD 115200U
 

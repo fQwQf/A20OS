@@ -1,7 +1,7 @@
 #ifdef CONFIG_BOARD_STM32F103
 
-#include "display.h"
-#include "backlight.h"
+#include "drivers/stm32f1/display.h"
+#include "drivers/stm32f1/backlight.h"
 #include "core/string.h"
 
 #define RCC_AHBENR  (*(volatile uint32_t *)0x40021014UL)

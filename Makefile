@@ -105,6 +105,7 @@ USER_BUILD_DIR = user/build/$(USER_VARIANT)
 USER_BUILD_STAMP = $(USER_BUILD_DIR)/.build-id
 ARCH_INCLUDE_DIR = $(KERNEL_DIR)/arch/$(ARCH)/include
 BOARD_INCLUDE_DIR = $(KERNEL_DIR)/platform/$(BOARD)
+BOARD_DRIVER_DIR = $(KERNEL_DIR)/drivers/$(if $(filter stm32f103,$(BOARD)),stm32f1,)
 EXT4_STAGING_DIR = $(BUILD_DIR)/ext4-staging
 BUILD_TIME_HDR = $(BUILD_DIR)/generated/build_time.h
 STM32_BT_CONFIG_HDR = $(BUILD_DIR)/generated/stm32_bluetooth_config.h
@@ -435,9 +436,10 @@ KERNEL_SRC = $(KERNEL_DIR)/mcu/main.c \
              $(KERNEL_DIR)/proc/cg_cpu.c \
               $(KERNEL_DIR)/mm/nommu.c \
               $(KERNEL_DIR)/fs/fdtable.c \
-              $(KERNEL_DIR)/fs/fat32lite.c \
-              $(KERNEL_DIR)/fs/vfs.c \
-             $(wildcard $(KERNEL_DIR)/platform/$(BOARD)/*.c) \
+	             $(KERNEL_DIR)/fs/fat32lite.c \
+	             $(KERNEL_DIR)/fs/vfs.c \
+	             $(wildcard $(BOARD_DRIVER_DIR)/*.c) \
+	             $(wildcard $(KERNEL_DIR)/platform/$(BOARD)/*.c) \
              $(shell find $(KERNEL_DIR)/arch/$(ARCH) -type f -name '*.c' | sort)
 else
 KERNEL_SRC = $(wildcard $(KERNEL_DIR)/*.c) \
@@ -455,8 +457,9 @@ KERNEL_SRC = $(wildcard $(KERNEL_DIR)/*.c) \
              $(wildcard $(KERNEL_DIR)/drivers/char/*.c) \
              $(wildcard $(KERNEL_DIR)/drivers/net/*.c) \
              $(wildcard $(KERNEL_DIR)/drivers/gpu/*.c) \
-             $(wildcard $(KERNEL_DIR)/drivers/input/*.c) \
-             $(wildcard $(KERNEL_DIR)/platform/$(BOARD)/*.c) \
+	             $(wildcard $(KERNEL_DIR)/drivers/input/*.c) \
+	             $(wildcard $(BOARD_DRIVER_DIR)/*.c) \
+	             $(wildcard $(KERNEL_DIR)/platform/$(BOARD)/*.c) \
              $(ABI_SRCS) \
              $(wildcard $(KERNEL_DIR)/syscall/*.c) \
              $(wildcard $(KERNEL_DIR)/shell/*.c) \
@@ -1518,6 +1521,12 @@ stm32f103-xuanwu:
 	$(MAKE) ARCH=armv7m BOARD=stm32f103 PROFILE=mcu STM32_FLASH_KB=512 STM32_RAM_KB=64 STM32_XUANWU=1 kernel-only
 
 check-stm32f103:
+	@! rg -n '0x400[0-9A-Fa-f]{5}|0xE000E[0-9A-Fa-f]{3}' \
+		$(KERNEL_DIR)/platform/stm32f103 --glob '*.[ch]' \
+		--glob '!board.c' --glob '!board_config.h'
+	@! rg -n 'CONFIG_ARMV7M' $(KERNEL_DIR) \
+		--glob '!kernel/arch/**' --glob '!kernel/platform/**' \
+		--glob '!kernel/external/**' --glob '!kernel/include/core/arch.h'
 	$(MAKE) stm32f103-xuanwu
 	$(MAKE) STM32_LEGACY_DASHBOARD=1 stm32f103-xuanwu
 	@echo "check-stm32f103: PASS"
