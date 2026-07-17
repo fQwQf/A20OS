@@ -223,6 +223,9 @@ static uint8_t g_manual_backlight;
 static uint8_t g_backlight; /* backlight percent in effect, for the LIGHT card */
 static uint64_t g_manual_until;
 static int g_ui_ready;
+static ui_home_state_t g_rendered_state;
+static char g_rendered_speech[HUB_SPEECH_MAX + 1];
+static int g_rendered_state_valid;
 
 /* Which page the panel is showing. The SYS/MEM/TF/BT instrumentation lives on
  * PAGE_DIAG, one level below the hub UI (see ui_diag.h). */
@@ -317,12 +320,78 @@ static void ui_render_full(void) {
         ui_diag_build(&ds, &g_diag_model);
         ui_render_diag(&g_ui_gfx, &g_diag_model, &g_ui_model);
         g_ui_ready = 1;
+        g_rendered_state_valid = 0;
         return;
     }
     ui_render_home_ex(&g_ui_gfx, &g_ui_model, &g_cat, NULL, 0, 0, 0);
     if (!live2d_load_draw(&g_ui_gfx, &g_cat))
         ui_render_cat(&g_ui_gfx, &g_ui_model, &g_cat);
     g_ui_ready = 1;
+    g_rendered_state = g_ui_state;
+    if (g_ui_state.speech) {
+        strncpy(g_rendered_speech, g_ui_state.speech,
+                sizeof(g_rendered_speech) - 1U);
+        g_rendered_speech[sizeof(g_rendered_speech) - 1U] = '\0';
+        g_rendered_state.speech = g_rendered_speech;
+    } else {
+        g_rendered_speech[0] = '\0';
+        g_rendered_state.speech = NULL;
+    }
+    g_rendered_state_valid = 1;
+}
+
+static int ui_text_changed(const char *a, const char *b) {
+    if (!a || !b)
+        return a != b;
+    return strcmp(a, b) != 0;
+}
+
+/* The 16-bit FSMC panel is written directly, so a full render is visible while
+ * it is in progress. Periodic control ticks update only the regions whose
+ * model inputs changed; theme/alert changes are rare and still repaint fully. */
+static void ui_render_update(void) {
+    unsigned regions = 0;
+
+    if (!peripherals.display_ready || g_cal_active || g_page != PAGE_HOME)
+        return;
+    if (!g_ui_ready || !g_rendered_state_valid ||
+        g_rendered_state.theme != g_ui_state.theme ||
+        g_rendered_state.alert != g_ui_state.alert) {
+        ui_render_full();
+        return;
+    }
+
+    if (g_rendered_state.hour != g_ui_state.hour ||
+        g_rendered_state.minute != g_ui_state.minute ||
+        g_rendered_state.net_cloud != g_ui_state.net_cloud)
+        regions |= UI_RENDER_REGION_HEADER;
+    if (g_rendered_state.temp_c != g_ui_state.temp_c)
+        regions |= UI_RENDER_REGION_CARD0;
+    if (g_rendered_state.humidity != g_ui_state.humidity)
+        regions |= UI_RENDER_REGION_CARD1;
+    if (g_rendered_state.light != g_ui_state.light ||
+        g_rendered_state.backlight != g_ui_state.backlight)
+        regions |= UI_RENDER_REGION_CARD2;
+    if (g_rendered_state.fan_level != g_ui_state.fan_level ||
+        ((g_rendered_state.manual_mask ^ g_ui_state.manual_mask) & MANUAL_FAN))
+        regions |= UI_RENDER_REGION_CARD3;
+    if (ui_text_changed(g_rendered_state.speech, g_ui_state.speech))
+        regions |= UI_RENDER_REGION_DIALOG;
+
+    if (regions) {
+        ui_home_build(&g_ui_state, &g_ui_model);
+        ui_render_home_regions(&g_ui_gfx, &g_ui_model, regions);
+    }
+    g_rendered_state = g_ui_state;
+    if (g_ui_state.speech) {
+        strncpy(g_rendered_speech, g_ui_state.speech,
+                sizeof(g_rendered_speech) - 1U);
+        g_rendered_speech[sizeof(g_rendered_speech) - 1U] = '\0';
+        g_rendered_state.speech = g_rendered_speech;
+    } else {
+        g_rendered_speech[0] = '\0';
+        g_rendered_state.speech = NULL;
+    }
 }
 
 static void ui_render_cat_frame(void) {
@@ -1239,7 +1308,7 @@ static void run_control_tick(uint64_t now) {
                 a.alert_started ? " (NEW)" : a.alert_cleared ? " (clr)" : "");
     }
 #ifndef CONFIG_STM32_LEGACY_DASHBOARD
-    ui_render_full();
+    ui_render_update();
 #endif
 }
 
