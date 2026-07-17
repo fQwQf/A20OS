@@ -33,6 +33,8 @@ static int state_valid(live2d_state_t s) {
     return (unsigned)s < (unsigned)LIVE2D_STATE_COUNT;
 }
 
+int live2d_state_loops(live2d_state_t s) { return s != LIVE2D_IDLE; }
+
 void live2d_init(live2d_t *l) {
     if (!l)
         return;
@@ -41,6 +43,7 @@ void live2d_init(live2d_t *l) {
     l->last_advance_ms = 0;
     l->talk_deadline_ms = 0;
     l->dirty = 1; /* first render should paint frame 0 */
+    l->stopped = 0;
 }
 
 unsigned live2d_frame_count(live2d_state_t s) {
@@ -64,11 +67,12 @@ void live2d_set_state(live2d_t *l, live2d_state_t s, uint32_t now_ms) {
         return;
     l->talk_deadline_ms = 0; /* an explicit state cancels a timed TALK */
     if (l->state == s)
-        return;
+        return; /* re-asserting the current state must not restart a parked one */
     l->state = s;
     l->frame = 0;
     l->last_advance_ms = now_ms;
     l->dirty = 1;
+    l->stopped = 0;
 }
 
 /* Display-column length of a UTF-8 string: ASCII=1, CJK/lead byte>=0xC0 = 2. */
@@ -100,6 +104,7 @@ void live2d_speak(live2d_t *l, const char *speech, uint32_t now_ms) {
         l->frame = 0;
         l->last_advance_ms = now_ms;
         l->dirty = 1;
+        l->stopped = 0;
     }
     l->talk_deadline_ms = now_ms + dur;
     if (l->talk_deadline_ms == 0) /* avoid the "never" sentinel on wrap */
@@ -119,12 +124,14 @@ int live2d_tick(live2d_t *l, uint32_t now_ms) {
         l->frame = 0;
         l->last_advance_ms = now_ms;
         l->dirty = 1;
+        l->stopped = 0; /* the fresh IDLE gets its one cycle */
         changed = 1;
     }
 
     /* Step frames at the fixed cadence. Catch up at most one frame per tick to
      * keep the motion smooth rather than skipping ahead after a stall. */
-    if ((int32_t)(now_ms - l->last_advance_ms) >= (int32_t)LIVE2D_FRAME_MS) {
+    if (!l->stopped &&
+        (int32_t)(now_ms - l->last_advance_ms) >= (int32_t)LIVE2D_FRAME_MS) {
         unsigned count = frame_counts[l->state];
         if (count == 0)
             count = 1;
@@ -132,6 +139,10 @@ int live2d_tick(live2d_t *l, uint32_t now_ms) {
         l->last_advance_ms = now_ms;
         l->dirty = 1;
         changed = 1;
+        /* Wrapping to 0 completes one cycle: a one-shot state parks there, on
+         * the rest pose the loop was authored to return to. */
+        if (l->frame == 0 && !live2d_state_loops(l->state))
+            l->stopped = 1;
     }
 
     if (l->dirty) {
