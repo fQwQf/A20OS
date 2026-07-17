@@ -14,6 +14,7 @@
 #include "fs/fat32lite.h"
 #include "peripherals.h"
 #include "rtc.h"
+#include "rgb_matrix.h"
 #include "heap.h"
 #include "light_sensor.h"
 #include "sdfs.h"
@@ -100,6 +101,9 @@ static void diagnostic_help(void) {
     printf("  dht           one DHT11 read with failure-stage diagnostics\n");
     printf("  time [set HH:MM[:SS]]  show or set the RTC clock\n");
     printf("  cal start     run the four-point touch calibration UI\n");
+    printf("  rgb           show 5x5 matrix status\n");
+    printf("  rgb clear | fill <RRGGBB> | pixel <x> <y> <RRGGBB>\n");
+    printf("  rgb brightness <0-255> | test\n");
     printf("  sd retry      explicitly probe and initialize the TF card\n");
     printf("  fs [ls <dir>] | cat <path> | write <path> <text>"
            " | rm <path> | test\n");
@@ -297,6 +301,112 @@ static void diagnostic_time(const char *args) {
            stm32_rtc_available());
 }
 
+static int parse_hex_color(const char *text, uint32_t *color) {
+    uint32_t value = 0;
+    unsigned digits = 0;
+    if (text[0] == '0' && (text[1] == 'x' || text[1] == 'X'))
+        text += 2;
+    while (*text) {
+        unsigned nibble;
+        if (*text >= '0' && *text <= '9')
+            nibble = (unsigned)(*text - '0');
+        else if (*text >= 'a' && *text <= 'f')
+            nibble = (unsigned)(*text - 'a') + 10U;
+        else if (*text >= 'A' && *text <= 'F')
+            nibble = (unsigned)(*text - 'A') + 10U;
+        else
+            return -1;
+        if (++digits > 6U)
+            return -1;
+        value = (value << 4) | nibble;
+        text++;
+    }
+    if (digits != 6U)
+        return -1;
+    *color = value;
+    return 0;
+}
+
+static int parse_uint_range(const char *text, unsigned maximum,
+                            unsigned *value) {
+    unsigned parsed = 0;
+    unsigned digits = 0;
+    while (*text >= '0' && *text <= '9') {
+        unsigned digit = (unsigned)(*text - '0');
+        if (parsed > maximum / 10U ||
+            (parsed == maximum / 10U && digit > maximum % 10U))
+            return -1;
+        parsed = parsed * 10U + digit;
+        digits++;
+        text++;
+    }
+    if (digits == 0 || *text != '\0')
+        return -1;
+    *value = parsed;
+    return 0;
+}
+
+static void diagnostic_rgb(char *args) {
+    if (!stm32_rgb_matrix_ready()) {
+        printf("[RGB] unavailable (requires Xuanwu PE5 and HCLK >= 48MHz)\n");
+        return;
+    }
+    if (!args[0]) {
+        printf("[RGB] ready=1 size=5x5 pin=PE5 brightness=%u/255\n",
+               (unsigned)stm32_rgb_matrix_brightness());
+        return;
+    }
+    if (text_equal(args, "clear")) {
+        stm32_rgb_matrix_clear();
+    } else if (text_starts_with(args, "fill ")) {
+        uint32_t color;
+        if (parse_hex_color(args + 5, &color) != 0) {
+            printf("[RGB] usage: rgb fill <RRGGBB>\n");
+            return;
+        }
+        stm32_rgb_matrix_fill(color);
+    } else if (text_starts_with(args, "brightness ")) {
+        unsigned brightness;
+        if (parse_uint_range(args + 11, 255U, &brightness) != 0) {
+            printf("[RGB] brightness must be 0..255\n");
+            return;
+        }
+        stm32_rgb_matrix_set_brightness((uint8_t)brightness);
+    } else if (text_starts_with(args, "pixel ")) {
+        char *save = NULL;
+        char *x_text = strtok_r(args + 6, " ", &save);
+        char *y_text = strtok_r(NULL, " ", &save);
+        char *color_text = strtok_r(NULL, " ", &save);
+        char *extra = strtok_r(NULL, " ", &save);
+        uint32_t color;
+        unsigned x;
+        unsigned y;
+        if (!x_text || !y_text || !color_text || extra ||
+            parse_uint_range(x_text, 4U, &x) != 0 ||
+            parse_uint_range(y_text, 4U, &y) != 0 ||
+            parse_hex_color(color_text, &color) != 0 ||
+            stm32_rgb_matrix_set_pixel((uint8_t)x, (uint8_t)y, color) != 0) {
+            printf("[RGB] usage: rgb pixel <0-4> <0-4> <RRGGBB>\n");
+            return;
+        }
+    } else if (text_equal(args, "test")) {
+        stm32_rgb_matrix_clear();
+        for (uint8_t i = 0; i < 5; i++) {
+            (void)stm32_rgb_matrix_set_pixel(i, i, STM32_RGB_COLOR_RED);
+            (void)stm32_rgb_matrix_set_pixel((uint8_t)(4U - i), i,
+                                             STM32_RGB_COLOR_BLUE);
+        }
+        (void)stm32_rgb_matrix_set_pixel(2, 2, STM32_RGB_COLOR_WHITE);
+    } else {
+        printf("[RGB] usage: rgb [clear|fill <RRGGBB>|pixel <x> <y> <RRGGBB>"
+               "|brightness <0-255>|test]\n");
+        return;
+    }
+    printf("[RGB] update=%s brightness=%u/255\n",
+           stm32_rgb_matrix_show() == 0 ? "ok" : "failed",
+           (unsigned)stm32_rgb_matrix_brightness());
+}
+
 static void diagnostic_execute(char *line) {
     if (!line[0])
         return;
@@ -364,7 +474,11 @@ static void diagnostic_execute(char *line) {
     } else if (text_equal(line, "cal start")) {
         printf("[TOUCH] calibration=%s\n",
                stm32_peripherals_start_touch_calibration() == 0 ?
-                   "started" : "unavailable");
+                    "started" : "unavailable");
+    } else if (text_equal(line, "rgb")) {
+        diagnostic_rgb("");
+    } else if (text_starts_with(line, "rgb ")) {
+        diagnostic_rgb(line + 4);
     } else if (text_equal(line, "sd retry")) {
         int result = stm32_peripherals_retry_sdcard();
         printf("[TF-DIAG] retry=%s\n",

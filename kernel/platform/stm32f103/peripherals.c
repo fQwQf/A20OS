@@ -20,6 +20,7 @@
 #include "live2d.h"
 #include "live2d_load.h"
 #include "rtc.h"
+#include "rgb_matrix.h"
 #include "ui_home.h"
 #include "ui_render.h"
 #include "keys.h"
@@ -680,6 +681,10 @@ void stm32_peripherals_init(void) {
            stm32_rtc_available() ? "ready" : "fallback-time");
     dht_present = stm32_dht11_init() == 0;
     stm32_actuators_init();
+    peripherals.rgb_matrix_ready = stm32_rgb_matrix_init() == 0;
+    printf("[BOOT] RGB matrix=%s (WS2812B 5x5/PE5 brightness=%u/255)\n",
+           peripherals.rgb_matrix_ready ? "ready" : "disabled",
+           (unsigned)stm32_rgb_matrix_brightness());
     hub_controller_init(&hub_ctl);
     live2d_init(&g_cat);
     last_live2d_clock = stm32_live2d_frame_clock();
