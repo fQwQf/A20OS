@@ -111,6 +111,26 @@ static void copy_bytes(void *dst, const void *src, size_t count)
         *d++ = *s++;
 }
 
+static void sync_loaded_code(void *addr, size_t size)
+{
+    uint64_t ctr;
+    __asm__ __volatile__("mrs %0, ctr_el0" : "=r"(ctr));
+    size_t dline = (size_t)4U << ((ctr >> 16) & 0xfU);
+    size_t iline = (size_t)4U << (ctr & 0xfU);
+    uintptr_t start = (uintptr_t)addr & ~((uintptr_t)dline - 1);
+    uintptr_t end = ((uintptr_t)addr + size + dline - 1) & ~((uintptr_t)dline - 1);
+
+    for (uintptr_t p = start; p < end; p += dline)
+        __asm__ __volatile__("dc cvau, %0" :: "r"(p) : "memory");
+    __asm__ __volatile__("dsb ish" ::: "memory");
+
+    start = (uintptr_t)addr & ~((uintptr_t)iline - 1);
+    end = ((uintptr_t)addr + size + iline - 1) & ~((uintptr_t)iline - 1);
+    for (uintptr_t p = start; p < end; p += iline)
+        __asm__ __volatile__("ic ivau, %0" :: "r"(p) : "memory");
+    __asm__ __volatile__("dsb ish\n\tisb" ::: "memory");
+}
+
 static void print(struct efi_system_table *st, efi_char16_t *message)
 {
     if (st && st->con_out && st->con_out->output_string)
@@ -166,6 +186,7 @@ efi_status_t efi_main(efi_handle_t image, struct efi_system_table *st)
         return status;
     }
     copy_bytes((void *)(uintptr_t)address, _binary_kernel_bin_start, size);
+    sync_loaded_code((void *)(uintptr_t)address, size);
 
     /* GetMemoryMap changes as allocations occur, so obtain it last and retry
      * ExitBootServices once if firmware invalidates the key asynchronously. */

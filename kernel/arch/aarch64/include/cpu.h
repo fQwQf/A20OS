@@ -22,6 +22,21 @@ static inline void arch_rmb(void) { __asm__ __volatile__("dmb ishld" ::: "memory
 static inline void arch_wmb(void) { __asm__ __volatile__("dmb ishst" ::: "memory"); }
 static inline void arch_wfi(void) { __asm__ __volatile__("wfi"); }
 static inline void arch_cpu_relax(void) { __asm__ __volatile__("yield"); }
+
+static inline uint64_t arch_read_ctr(void) {
+    uint64_t ctr;
+    __asm__ __volatile__("mrs %0, ctr_el0" : "=r"(ctr));
+    return ctr;
+}
+
+static inline size_t arch_dcache_line_size(void) {
+    return (size_t)4U << ((arch_read_ctr() >> 16) & 0xfU);
+}
+
+static inline size_t arch_icache_line_size(void) {
+    return (size_t)4U << (arch_read_ctr() & 0xfU);
+}
+
 static inline void arch_fence_i(void) {
     __asm__ __volatile__(
         "dsb ish\n\t"
@@ -32,15 +47,23 @@ static inline void arch_fence_i(void) {
 }
 
 static inline void arch_flush_icache_range(const void *addr, size_t size) {
-    uintptr_t start = (uintptr_t)addr & ~(uintptr_t)63;
-    uintptr_t end = ((uintptr_t)addr + size + 63) & ~(uintptr_t)63;
-    for (uintptr_t p = start; p < end; p += 64)
-        __asm__ __volatile__("dc cvau, %0" :: "r"(p) : "memory");
-    __asm__ __volatile__("dsb ish" ::: "memory");
-    for (uintptr_t p = start; p < end; p += 64)
-        __asm__ __volatile__("ic ivau, %0" :: "r"(p) : "memory");
-    __asm__ __volatile__("dsb ish" ::: "memory");
-    __asm__ __volatile__("isb" ::: "memory");
+    size_t dline = arch_dcache_line_size();
+    size_t iline = arch_icache_line_size();
+    uintptr_t start = (uintptr_t)addr & ~((uintptr_t)dline - 1);
+    uintptr_t end = ((uintptr_t)addr + size + dline - 1) & ~((uintptr_t)dline - 1);
+    for (uintptr_t p = start; p < end; p += dline)
+        __asm__ __volatile__("dc civac, %0" :: "r"(p) : "memory");
+    __asm__ __volatile__("dsb sy" ::: "memory");
+
+    /*
+     * The loader writes through PAGE_OFFSET but EL0 executes through a
+     * different virtual alias.  Invalidating by the writer VA alone is not
+     * sufficient on all VIPT implementations (including VirtualBox ARM
+     * hosts), so discard the complete local I-cache after the data has
+     * reached PoC.  A20OS currently supports one CPU only.
+     */
+    (void)iline;
+    __asm__ __volatile__("ic iallu\n\tdsb sy\n\tisb" ::: "memory");
 }
 
 static inline unsigned arch_current_cpu_id(void) {
@@ -186,18 +209,20 @@ static inline int arch_is_kernel_address(const void *ptr) {
 }
 
 static inline void arch_dma_sync_for_device(const void *addr, size_t size) {
-    uintptr_t start = (uintptr_t)addr & ~(uintptr_t)63;
-    uintptr_t end = ((uintptr_t)addr + size + 63) & ~(uintptr_t)63;
-    for (uintptr_t p = start; p < end; p += 64)
+    size_t line = arch_dcache_line_size();
+    uintptr_t start = (uintptr_t)addr & ~((uintptr_t)line - 1);
+    uintptr_t end = ((uintptr_t)addr + size + line - 1) & ~((uintptr_t)line - 1);
+    for (uintptr_t p = start; p < end; p += line)
         __asm__ __volatile__("dc civac, %0" :: "r"(p) : "memory");
     __asm__ __volatile__("dsb sy" ::: "memory");
 }
 
 static inline void arch_dma_sync_for_cpu(const void *addr, size_t size) {
-    uintptr_t start = (uintptr_t)addr & ~(uintptr_t)63;
-    uintptr_t end = ((uintptr_t)addr + size + 63) & ~(uintptr_t)63;
+    size_t line = arch_dcache_line_size();
+    uintptr_t start = (uintptr_t)addr & ~((uintptr_t)line - 1);
+    uintptr_t end = ((uintptr_t)addr + size + line - 1) & ~((uintptr_t)line - 1);
     __asm__ __volatile__("dsb sy" ::: "memory");
-    for (uintptr_t p = start; p < end; p += 64)
+    for (uintptr_t p = start; p < end; p += line)
         __asm__ __volatile__("dc ivac, %0" :: "r"(p) : "memory");
     __asm__ __volatile__("dsb sy" ::: "memory");
 }

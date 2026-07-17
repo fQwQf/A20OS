@@ -118,6 +118,15 @@ static inline void arch_task_context_set_user_tp(task_context_t *ctx,
     ARCH_TASK_CONTEXT_SET_USER_TP(ctx, user_tp);
 }
 
+#ifndef ARCH_TASK_USER_RESUME_STATUS
+# define ARCH_TASK_USER_RESUME_STATUS() arch_user_initial_status()
+#endif
+
+static inline uint64_t arch_task_user_resume_status(void)
+{
+    return ARCH_TASK_USER_RESUME_STATUS();
+}
+
 static inline void arch_syscall_dispatch_enter(void)
 {
 #ifndef ARCH_SYSCALL_DISPATCH_NONPREEMPTIBLE

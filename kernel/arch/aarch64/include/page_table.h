@@ -35,17 +35,23 @@
 #define A64_PXN            (1UL << 53)
 #define A64_UXN            (1UL << 54)
 
-/* Software semantic bits. */
-#define PTE_V              (A64_DESC_VALID)
-#define PTE_R              (1UL << 55)
+/*
+ * Keep software state out of architecturally meaningful descriptor bits.
+ * In particular bit 52 is the Contiguous hint, not a software MAT bit: setting
+ * it on independently allocated pages lets hardware combine unrelated PTEs.
+ * AArch64 has no read-disable permission, so a valid leaf is always readable;
+ * dirty is tracked conservatively as writable on systems without HAFDBS.
+ */
+#define PTE_V              A64_DESC_VALID
+#define PTE_R              PTE_V
+#define PTE_LEAF           (1UL << 55)
 #define PTE_W              (1UL << 56)
 #define PTE_X              (1UL << 57)
-#define PTE_U              (1UL << 58)
-#define PTE_G              (1UL << 59)
-#define PTE_A              (1UL << 60)
-#define PTE_D              (1UL << 61)
-#define PTE_COW            (1UL << 62)
-#define PTE_LEAF           (1UL << 63)
+#define PTE_COW            (1UL << 58)
+#define PTE_U              A64_nG
+#define PTE_G              0UL
+#define PTE_A              A64_AF
+#define PTE_D              PTE_W
 
 #ifdef CONFIG_SWAP
 #define PTE_SWAP            PTE_LEAF
@@ -71,7 +77,10 @@ static inline swap_entry_t pte_to_swp_entry(uint64_t pte) {
 }
 #endif
 
-#define PTE_MAT1           (1UL << 52)
+#define PTE_MAT1           (1UL << A64_ATTRINDX_SHIFT)
+
+_Static_assert((PTE_MAT1 & (1UL << 52)) == 0,
+               "AArch64 bit 52 is the hardware Contiguous hint");
 
 #define PTE_KERN           (PTE_V | PTE_R | PTE_W | PTE_X | PTE_A | PTE_D | PTE_G | PTE_MAT1 | PTE_LEAF)
 #define PTE_USER           (PTE_V | PTE_R | PTE_W | PTE_X | PTE_U | PTE_A | PTE_D | PTE_MAT1 | PTE_LEAF)
@@ -116,7 +125,12 @@ static inline uint64_t arch_make_addr_space_token(void *pgdir) {
 }
 
 #define ARCH_PTE_PPN_MASK  0x0000FFFFFFFFF000UL
-#define arch_pte_flags(pte) ((pte) & ~ARCH_PTE_PPN_MASK)
+_Static_assert(((PTE_LEAF | PTE_W | PTE_X | PTE_COW) &
+                ARCH_PTE_PPN_MASK) == 0,
+               "AArch64 software PTE flags overlap the output address");
+#define A64_SEMANTIC_FLAGS (PTE_V | PTE_W | PTE_X | PTE_U | PTE_A | \
+                            PTE_COW | PTE_LEAF | PTE_MAT1)
+#define arch_pte_flags(pte) ((pte) & A64_SEMANTIC_FLAGS)
 
 static inline uint64_t arch_pte_leaf(paddr_t pa, uint64_t flags) {
     uint64_t pte = arch_pte_from_pa(pa) | PTE_V |
@@ -133,7 +147,7 @@ static inline uint64_t arch_pte_leaf(paddr_t pa, uint64_t flags) {
     pte |= A64_AF;
     pte |= A64_DESC_TABLE;
     pte |= (ap << A64_AP_SHIFT);
-    pte |= ((flags & PTE_MAT1) ? 0x1UL : 0x0UL) << A64_ATTRINDX_SHIFT;
+    pte |= flags & PTE_MAT1;
     if (flags & PTE_U)
         pte |= A64_nG;
     if (flags & PTE_MAT1)

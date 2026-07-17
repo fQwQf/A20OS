@@ -604,6 +604,9 @@ static net_dev_ops_t virtio_net_class_ops = {
 };
 
 static const device_id_t virtio_net_ids[] = {
+    /* VirtIO-MMIO bus matching uses the transport device type as device ID. */
+    { .vendor = 0, .device = 1,
+      .subvendor = VENDOR_ANY, .subdevice = DEVICE_ANY },
     { .vendor = 0x1AF4, .device = 0x1001,
       .subvendor = VENDOR_ANY, .subdevice = DEVICE_ANY },
     { .vendor = 0x1AF4, .device = 0x1041,

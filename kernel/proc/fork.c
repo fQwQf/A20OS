@@ -111,6 +111,10 @@ int proc_clone(uint64_t flags, vaddr_t stack, int *ptid, vaddr_t tls, int *ctid,
                 int exit_signal)
 {
     task_t *parent = proc_current();
+#ifdef CONFIG_AARCH64_COOPERATIVE_BOOT
+    kinfo("[PROC] clone begin: parent=%d flags=0x%lx\n",
+          parent ? parent->pid : -1, (unsigned long)flags);
+#endif
 
 #ifdef CONFIG_NOMMU
     /*
@@ -199,6 +203,11 @@ int proc_clone(uint64_t flags, vaddr_t stack, int *ptid, vaddr_t tls, int *ctid,
                 return -ENOMEM;
             }
             t->pgdir = t->mm->pgdir;
+#ifdef CONFIG_AARCH64_COOPERATIVE_BOOT
+            kinfo("[PROC] clone mm ready: child=%d rss=%lu vm=%lu\n",
+                  child_pid, (unsigned long)t->mm->rss,
+                  (unsigned long)t->mm->total_vm);
+#endif
         } else {
             t->pgdir = parent->pgdir;
         }
@@ -237,7 +246,7 @@ int proc_clone(uint64_t flags, vaddr_t stack, int *ptid, vaddr_t tls, int *ctid,
         ctx->tp = (uint64_t)(uintptr_t)t;
         arch_task_context_set_user_tp(ctx, TRAP_CTX_TP(trap));
         TASK_CTX_PAGE_TABLE(ctx) = t->pgdir ? arch_make_addr_space_token(t->pgdir) : 0;
-        TASK_CTX_STATUS(ctx) = TRAP_CTX_STATUS(trap);
+        TASK_CTX_STATUS(ctx) = arch_task_user_resume_status();
         arch_task_context_set_initial_sp(ctx, trap, ks_top);
         t->kstack = (uint64_t)ctx;
     } else {
@@ -282,6 +291,18 @@ int proc_clone(uint64_t flags, vaddr_t stack, int *ptid, vaddr_t tls, int *ctid,
     }
 
     proc_make_ready(t);
+#ifdef CONFIG_AARCH64_COOPERATIVE_BOOT
+    kinfo("[PROC] clone runnable: child=%d kstack=0x%lx\n",
+          child_pid, (unsigned long)t->kstack);
+
+    /* VirtualBox ARM does not expose a usable architectural timer, so there
+     * is no interrupt which can preempt the parent after clone returns.  Run
+     * the newly published child once while both trap frames are still valid.
+     * The parent resumes here when the child next yields or blocks, exactly as
+     * it would after a timer-driven context switch on the normal boards. */
+    if (!(flags & CLONE_VFORK))
+        proc_yield();
+#endif
     if (flags & CLONE_VFORK) {
         for (;;) {
             uint64_t pf = spin_lock_irqsave(&proc_lock);

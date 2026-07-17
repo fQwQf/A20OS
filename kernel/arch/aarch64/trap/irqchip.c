@@ -154,18 +154,18 @@ static void gic_init(void) {
         arch_cpu_relax();
 
     /* The UART SPI is handled as non-secure Group 1. */
-#ifndef CONFIG_BOARD_VIRTUALBOX_AARCH64
+#ifndef CONFIG_AARCH64_COOPERATIVE_BOOT
     /* The normal AArch64 boards use the architected timer PPI as Group 1. */
     *gicr_reg32(0x10000 + 0x80) = 1U << IRQ_S_TIMER;
 #endif
     *gicd_reg32(0x80 + (UART0_IRQ / 32U) * 4) = 1U << (UART0_IRQ % 32U);
     *(volatile uint64_t *)(uintptr_t)(GICD_BASE + 0x6000 + UART0_IRQ * 8U) = 0;
 
-#ifndef CONFIG_BOARD_VIRTUALBOX_AARCH64
+#ifndef CONFIG_AARCH64_COOPERATIVE_BOOT
     gic_set_priority(IRQ_S_TIMER, 0x40);
 #endif
     gic_set_priority(UART0_IRQ, 0x40);
-#ifndef CONFIG_BOARD_VIRTUALBOX_AARCH64
+#ifndef CONFIG_AARCH64_COOPERATIVE_BOOT
     gic_enable_irq(IRQ_S_TIMER);
 #endif
     gic_enable_irq(UART0_IRQ);

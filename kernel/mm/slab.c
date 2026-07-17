@@ -49,7 +49,11 @@ typedef struct big_alloc_hdr {
     uint32_t magic;
     uint16_t order;
     uint16_t _pad;
+    uint64_t reserved;
 } big_alloc_hdr_t;
+
+_Static_assert(sizeof(big_alloc_hdr_t) == 16,
+               "large kmalloc results must retain 16-byte alignment");
 
 // Slab 缓存结构
 typedef struct {
@@ -259,6 +263,7 @@ void *kmalloc(size_t size) {
         hdr->magic = BIG_MAGIC;
         hdr->order = (uint16_t)order;
         hdr->_pad  = 0;
+        hdr->reserved = 0;
         return (void *)(hdr + 1);
     }
 

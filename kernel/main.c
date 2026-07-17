@@ -269,7 +269,7 @@ void kernel_main(void) {
     printf("[INIT] System ready (bringup, no userspace)\n\n");
     bringup_smoke_test();
 #else
-#ifdef CONFIG_BOARD_VIRTUALBOX_AARCH64
+#ifdef CONFIG_AARCH64_COOPERATIVE_BOOT
     /* VBox has no usable preemption timer yet.  Bootstrap PID 1 directly from
      * the idle context instead of requiring an otherwise unnecessary first
      * kernel-thread switch before userspace can exist. */
@@ -311,7 +311,7 @@ void kernel_main(void) {
     printf("Welcome to A20OS!\n\n");
     printf("[INIT] entering scheduler...\n");
 
-#ifdef CONFIG_BOARD_VIRTUALBOX_AARCH64
+#ifdef CONFIG_AARCH64_COOPERATIVE_BOOT
     init_kthread();
 #else
     sched();
@@ -337,6 +337,61 @@ void init_kthread(void) {
         }
     }
 
+    /* Print enough information to distinguish a stale converted VDI from the
+     * image that was just built.  The hash is diagnostic (FNV-1a), not a
+     * security primitive; it deliberately avoids pulling crypto into PID 1
+     * bootstrap. */
+    kstat_t init_stat;
+    union {
+        Elf32_Ehdr e32;
+        Elf64_Ehdr e64;
+    } init_ehdr = {0};
+    uint64_t init_hash = 14695981039346656037ULL;
+    uint64_t init_size = 0;
+    if (vfs_fstat(fd, &init_stat) == 0)
+        init_size = init_stat.st_size;
+    int ehdr_len = vfs_pread(fd, (char *)&init_ehdr, sizeof(init_ehdr), 0);
+    char hash_buf[1024];
+    for (uint64_t off = 0; off < init_size; off += sizeof(hash_buf)) {
+        size_t want = (size_t)(init_size - off);
+        if (want > sizeof(hash_buf))
+            want = sizeof(hash_buf);
+        int got = vfs_pread(fd, hash_buf, want, off);
+        if (got <= 0)
+            break;
+        for (int i = 0; i < got; i++) {
+            init_hash ^= (uint8_t)hash_buf[i];
+            init_hash *= 1099511628211ULL;
+        }
+        if ((size_t)got != want)
+            break;
+    }
+    const uint8_t *ident = init_ehdr.e64.e_ident;
+    int valid_ident = ehdr_len >= 16 && ident[0] == 0x7f && ident[1] == 'E' &&
+                      ident[2] == 'L' && ident[3] == 'F';
+    uint16_t image_machine = 0;
+    uint64_t image_entry = 0;
+    if (valid_ident && ident[4] == ELFCLASS64 &&
+        ehdr_len >= (int)sizeof(init_ehdr.e64)) {
+        image_machine = init_ehdr.e64.e_machine;
+        image_entry = init_ehdr.e64.e_entry;
+    } else if (valid_ident && ident[4] == ELFCLASS32 &&
+               ehdr_len >= (int)sizeof(init_ehdr.e32)) {
+        image_machine = init_ehdr.e32.e_machine;
+        image_entry = init_ehdr.e32.e_entry;
+    } else {
+        valid_ident = 0;
+    }
+    if (valid_ident) {
+        printf("[INIT] image: size=%lu fnv1a64=%016lx class=%u machine=%u file-entry=0x%lx\n",
+               (unsigned long)init_size, (unsigned long)init_hash,
+               (unsigned)ident[4], (unsigned)image_machine,
+               (unsigned long)image_entry);
+    } else {
+        printf("[INIT] image: size=%lu fnv1a64=%016lx (invalid ELF header)\n",
+               (unsigned long)init_size, (unsigned long)init_hash);
+    }
+
     printf("[INIT] loading ELF...\n");
     elf_load_info_t info;
     int ret = elf_load(fd, init_path, &info);
@@ -348,6 +403,19 @@ void init_kthread(void) {
 
     printf("[INIT] ELF loaded: entry=0x%lx stack=0x%lx\n",
            (unsigned long)info.entry, (unsigned long)info.stack_top);
+
+#ifndef CONFIG_NOMMU
+    mm_leaf_info_t entry_leaf;
+    uint32_t entry_insn = 0;
+    if (!mm_query_leaf(info.pgdir, info.entry, &entry_leaf) ||
+        !(entry_leaf.flags & PTE_U) || !(entry_leaf.flags & PTE_X) ||
+        !mm_fetch_user_insn32(info.pgdir, info.entry, &entry_insn)) {
+        panic("init: entry is not a readable user executable mapping");
+    }
+    printf("[INIT] entry map: pa=0x%lx flags=0x%lx insn=0x%08x\n",
+           (unsigned long)entry_leaf.pa, (unsigned long)entry_leaf.flags,
+           entry_insn);
+#endif
 
     /* Set up the initial user stack with argc/argv/envp/auxv so the
      * C runtime (crt1.o / musl) finds a valid stack layout.  Without
@@ -388,7 +456,7 @@ void init_kthread(void) {
     printf("[INIT] user init created: pid=%d entry=0x%lx sp=0x%lx\n",
            ret, (unsigned long)info.entry, (unsigned long)user_sp);
 
-#ifdef CONFIG_BOARD_VIRTUALBOX_AARCH64
+#ifdef CONFIG_AARCH64_COOPERATIVE_BOOT
     /* PID 0 remains the reaper and scheduler host. */
     idle_loop();
 #endif
