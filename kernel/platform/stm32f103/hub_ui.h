@@ -22,9 +22,10 @@
 
 typedef struct hub_ui_input {
     env_snapshot_t snap;
-    env_decision_t decision;
+    env_decision_t decision; /* already carries the backlight to show   */
     uint8_t minute;       /* 0..59 (from RTC or uptime)               */
     uint8_t net_cloud;    /* 1 = this decision came from the cloud     */
+    uint8_t manual_mask;  /* UI_MANUAL_* bits held by touch/remote     */
     uint8_t cloud_valid;  /* 1 = cloud mood/speech below are present   */
     uint8_t cloud_mood;   /* Live2D mood id 0..3 (when cloud_valid)    */
     const char *cloud_speech; /* LLM bubble text (NULL/"" if none)     */
