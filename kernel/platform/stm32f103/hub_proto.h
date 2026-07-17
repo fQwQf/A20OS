@@ -25,22 +25,7 @@ enum hub_msg_type {
     HUB_MSG_HEARTBEAT   = 0x10, /* keepalive                        */
     HUB_MSG_CONTROL     = 0x01, /* downlink: control command        */
     HUB_MSG_SNAPSHOT    = 0x20, /* uplink: environment snapshot     */
-    HUB_MSG_IMAGE_REQ   = 0x22, /* uplink: request a background     */
-    HUB_MSG_IMAGE_CHUNK = 0x02, /* downlink: one RGB565 image slice */
 };
-
-/* Image-chunk payload: offset(4, LE) | flags(1) | rgb565_data(...) (§7.1). */
-#define HUB_IMAGE_CHUNK_HEADER 5u
-#define HUB_IMAGE_FLAG_LAST    0x01u
-#define HUB_IMAGE_MAX_DATA     (HUB_MAX_PAYLOAD - HUB_IMAGE_CHUNK_HEADER)
-
-/* Decoded IMAGE_CHUNK payload — data points into the caller's buffer. */
-typedef struct hub_image_chunk {
-    uint32_t       offset;   /* byte offset into the full RGB565 image */
-    uint8_t        last;     /* 1 on the final chunk                   */
-    uint16_t       data_len; /* RGB565 bytes in this chunk             */
-    const uint8_t *data;
-} hub_image_chunk_t;
 
 /* A parsed frame — payload points into the caller's buffer (no copy). */
 typedef struct hub_frame {
@@ -83,14 +68,5 @@ int hub_proto_parse(const uint8_t *buf, size_t len, hub_frame_t *out);
 /* Decode a CONTROL frame's payload into hub_control_t. Returns 0, or -1 if
  * the frame is not a CONTROL frame or is malformed. */
 int hub_proto_decode_control(const hub_frame_t *f, hub_control_t *out);
-
-/* Encode an IMAGE_REQ frame (request the proxy render a w*h background for the
- * given theme). Returns total bytes written, or -1 on overflow. */
-int hub_proto_encode_image_req(uint8_t seq, uint8_t theme_id, uint16_t w,
-                               uint16_t h, uint8_t *out, size_t outsize);
-
-/* Decode an IMAGE_CHUNK frame into hub_image_chunk_t (data aliases the frame's
- * payload). Returns 0, or -1 if not an IMAGE_CHUNK frame / malformed. */
-int hub_proto_decode_image_chunk(const hub_frame_t *f, hub_image_chunk_t *out);
 
 #endif /* _STM32F103_HUB_PROTO_H */

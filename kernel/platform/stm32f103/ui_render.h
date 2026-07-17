@@ -15,8 +15,8 @@
  *
  * The renderer only ever calls the two sink ops, so it is hardware-independent
  * and produces identical geometry on both backends. Text uses a built-in 5x7
- * ASCII font (the same glyph style as display.c); CJK speech, which needs an
- * SD-resident font on the real panel, is drawn as placeholder blocks here.
+ * ASCII font (the same glyph style as display.c); CJK speech uses an optional
+ * SD-resident 16x16 font and falls back to placeholder blocks when unavailable.
  */
 
 #include "core/types.h"
@@ -31,9 +31,16 @@ typedef struct ui_gfx {
     void (*blit)(void *ctx, int x, int y, int w, int h, const uint16_t *px);
 } ui_gfx_t;
 
+/* Optional 16x16 Unicode bitmap provider. Each glyph is 32 row-major bytes,
+ * two bytes per row, most-significant bit first. NULL keeps placeholders. */
+typedef const uint8_t *(*ui_cjk_lookup_t)(uint32_t codepoint);
+void ui_render_set_cjk_lookup(ui_cjk_lookup_t lookup);
+
 /* Panel geometry the renderer targets. */
 #define UI_RENDER_W 320
 #define UI_RENDER_H 480
+#define UI_RENDER_KEEP_BACKGROUND 0x01U
+#define UI_RENDER_CAL_INSET 32
 
 /*
  * Paint the whole home screen. cat_frame (optional) is the current Live2D
@@ -42,8 +49,18 @@ typedef struct ui_gfx {
  * the mood (for the placeholder's expression) and may be NULL.
  */
 void ui_render_home(const ui_gfx_t *g, const ui_home_model_t *m,
-                    const live2d_t *cat, const uint16_t *cat_frame, int cat_w,
-                    int cat_h);
+                     const live2d_t *cat, const uint16_t *cat_frame, int cat_w,
+                     int cat_h);
+
+/* Extended entry point. UI_RENDER_KEEP_BACKGROUND preserves pixels already
+ * painted by the caller instead of filling the procedural theme background. */
+void ui_render_home_ex(const ui_gfx_t *g, const ui_home_model_t *m,
+                       const live2d_t *cat, const uint16_t *cat_frame,
+                       int cat_w, int cat_h, unsigned flags);
+
+/* Redraw only the cat sprite region using the procedural fallback. */
+void ui_render_cat(const ui_gfx_t *g, const ui_home_model_t *m,
+                   const live2d_t *cat);
 
 /*
  * Paint one four-corner touch-calibration target (a crosshair) on a blank

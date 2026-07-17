@@ -154,24 +154,32 @@ int stm32_light_sensor_sample(void) {
                         light.raw_adc + 2U) / 4U);
     light.samples++;
     light.intensity_percent = intensity_from_adc(light.filtered_adc);
+    if (light.auto_brightness) {
+        uint8_t target = (uint8_t)(20U +
+            ((uint16_t)light.intensity_percent * 80U) / 100U);
+        light.target_backlight_percent = target;
+        stm32_backlight_set_percent(target);
+    }
     light.backlight_percent = stm32_backlight_percent();
     return 0;
 #endif
 }
 
 void stm32_light_sensor_set_auto_brightness(int enable) {
-    (void)enable;
-    light.auto_brightness = 0;
-    light.target_backlight_percent = 100U;
-    stm32_backlight_set_percent(100U);
+    light.auto_brightness = enable ? 1 : 0;
+    if (light.auto_brightness)
+        light.target_backlight_percent =
+            (uint8_t)(20U + ((uint16_t)light.intensity_percent * 80U) / 100U);
+    stm32_backlight_set_percent(light.target_backlight_percent);
     light.backlight_percent = stm32_backlight_percent();
 }
 
 void stm32_light_sensor_set_manual_brightness(uint8_t percent) {
-    (void)percent;
+    if (percent > 100U)
+        percent = 100U;
     light.auto_brightness = 0;
-    light.target_backlight_percent = 100U;
-    stm32_backlight_set_percent(100U);
+    light.target_backlight_percent = percent;
+    stm32_backlight_set_percent(percent);
     light.backlight_percent = stm32_backlight_percent();
 }
 

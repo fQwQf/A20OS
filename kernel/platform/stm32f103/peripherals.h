@@ -34,6 +34,7 @@ int stm32_peripherals_retry_sdcard(void);
 int stm32_peripherals_retry_bluetooth(void);
 int stm32_peripherals_retry_wifi(void);
 int stm32_peripherals_set_proxy(const char *ip, uint16_t port);
+int stm32_peripherals_start_touch_calibration(void);
 const stm32_peripheral_state_t *stm32_peripherals_state(void);
 
 /* Latest assembled home-screen UI state and catgirl animation state, for the

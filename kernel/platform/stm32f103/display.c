@@ -55,6 +55,7 @@
 #define COLOR_DARK   RGB565(6, 17, 30)
 #define COLOR_PANEL  RGB565(16, 32, 50)
 
+/* ---- Legacy dashboard (kept as fallback; superseded by ui_home/ui_render path) ---- */
 static uint64_t display_last_second = (uint64_t)-1;
 static uint16_t display_controller_id;
 static int display_ready;
@@ -223,7 +224,7 @@ static void lcd_set_window(uint16_t x0, uint16_t y0,
 }
 
 static void lcd_fill_rect(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
-                          uint16_t color) {
+                           uint16_t color) {
     if (!w || !h || x >= LCD_WIDTH || y >= LCD_HEIGHT)
         return;
     if ((uint32_t)x + w > LCD_WIDTH)
@@ -234,6 +235,97 @@ static void lcd_fill_rect(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
     uint32_t pixels = (uint32_t)w * h;
     while (pixels--)
         lcd_write_color(color);
+}
+
+static void lcd_blit_stride(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
+                            const uint16_t *px, uint16_t source_stride) {
+    unsigned row;
+
+    if (!px || !w || !h || source_stride < w || x >= LCD_WIDTH ||
+        y >= LCD_HEIGHT)
+        return;
+    if ((uint32_t)x + w > LCD_WIDTH)
+        w = LCD_WIDTH - x;
+    if ((uint32_t)y + h > LCD_HEIGHT)
+        h = LCD_HEIGHT - y;
+
+    lcd_set_window(x, y, x + w - 1U, y + h - 1U);
+    for (row = 0; row < h; row++) {
+        uint16_t column;
+        for (column = 0; column < w; column++)
+            lcd_write_color(*px++);
+        px += source_stride - w;
+    }
+}
+
+void stm32_display_blit(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
+                        const uint16_t *px) {
+    lcd_blit_stride(x, y, w, h, px, w);
+}
+
+void stm32_display_fill_rect(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
+                             uint16_t color) {
+    if (!w || !h || x >= LCD_WIDTH || y >= LCD_HEIGHT)
+        return;
+    if ((uint32_t)x + w > LCD_WIDTH)
+        w = LCD_WIDTH - x;
+    if ((uint32_t)y + h > LCD_HEIGHT)
+        h = LCD_HEIGHT - y;
+
+    lcd_fill_rect(x, y, w, h, color);
+}
+
+static void stm32_display_gfx_fill_rect(void *ctx, int x, int y, int w,
+                                         int h, uint16_t color) {
+    (void)ctx;
+    if (w <= 0 || h <= 0 || x >= (int)LCD_WIDTH || y >= (int)LCD_HEIGHT)
+        return;
+    if (x < 0) {
+        w += x;
+        x = 0;
+    }
+    if (y < 0) {
+        h += y;
+        y = 0;
+    }
+    if (w <= 0 || h <= 0)
+        return;
+    stm32_display_fill_rect((uint16_t)x, (uint16_t)y, (uint16_t)w,
+                            (uint16_t)h, color);
+}
+
+static void stm32_display_gfx_blit(void *ctx, int x, int y, int w, int h,
+                                    const uint16_t *px) {
+    int source_w = w;
+
+    (void)ctx;
+    if (!px || w <= 0 || h <= 0 || x >= (int)LCD_WIDTH ||
+        y >= (int)LCD_HEIGHT)
+        return;
+    if (x < 0) {
+        if (w <= -x)
+            return;
+        px += -x;
+        w += x;
+        x = 0;
+    }
+    if (y < 0) {
+        if (h <= -y)
+            return;
+        px += (size_t)(-y) * source_w;
+        h += y;
+        y = 0;
+    }
+    lcd_blit_stride((uint16_t)x, (uint16_t)y, (uint16_t)w, (uint16_t)h, px,
+                    (uint16_t)source_w);
+}
+
+void stm32_display_gfx(ui_gfx_t *gfx) {
+    if (!gfx)
+        return;
+    gfx->ctx = NULL;
+    gfx->fill_rect = stm32_display_gfx_fill_rect;
+    gfx->blit = stm32_display_gfx_blit;
 }
 
 static const uint8_t font5x7[][5] = {
@@ -1172,11 +1264,13 @@ void stm32_display_show_boot(void) {
     lcd_fill_rect(0, 0, LCD_WIDTH, LCD_HEIGHT, COLOR_BLUE);
     delay_ms(180);
 
+    lcd_fill_rect(0, 0, LCD_WIDTH, LCD_HEIGHT, COLOR_DARK);
+#ifdef CONFIG_STM32_LEGACY_DASHBOARD
     display_page = DISPLAY_PAGE_STATUS;
     display_last_second = (uint64_t)-1;
-    lcd_fill_rect(0, 0, LCD_WIDTH, LCD_HEIGHT, COLOR_DARK);
     lcd_draw_header();
     lcd_render_page();
+#endif
 }
 
 void stm32_display_update_ticks(uint64_t ticks) {

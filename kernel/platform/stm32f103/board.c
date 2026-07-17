@@ -10,6 +10,9 @@
 #define NVIC_ICER_BASE 0xE000E180UL
 
 #define RCC_APB2ENR (*(volatile uint32_t *)0x40021018UL)
+#define RCC_CR      (*(volatile uint32_t *)0x40021000UL)
+#define RCC_CFGR    (*(volatile uint32_t *)0x40021004UL)
+#define FLASH_ACR   (*(volatile uint32_t *)0x40022000UL)
 #define GPIOB_CRL   (*(volatile uint32_t *)0x40010C00UL)
 #define GPIOB_ODR   (*(volatile uint32_t *)0x40010C0CUL)
 #define GPIOB_BSRR  (*(volatile uint32_t *)0x40010C10UL)
@@ -17,6 +20,64 @@
 #define RCC_APB2ENR_IOPBEN (1U << 3)
 #define STATUS_LED_PIN     5U
 #define STATUS_LED_MASK    (1U << STATUS_LED_PIN)
+
+#define RCC_CR_HSEON  (1U << 16)
+#define RCC_CR_HSERDY (1U << 17)
+#define RCC_CR_PLLON  (1U << 24)
+#define RCC_CR_PLLRDY (1U << 25)
+#define RCC_CFGR_SWS_MASK (3U << 2)
+#define RCC_CFGR_SWS_PLL  (2U << 2)
+#define RCC_CFGR_PPRE1_DIV2 (4U << 8)
+#define RCC_CFGR_PLLSRC_HSE (1U << 16)
+#define RCC_CFGR_PLLMUL9    (7U << 18)
+#define FLASH_ACR_LATENCY_2 2U
+#define FLASH_ACR_PRFTBE    (1U << 4)
+
+#if defined(CONFIG_STM32_XUANWU) && !defined(CONFIG_STM32_QEMU)
+static void stm32_clock_init(void) {
+    uint32_t timeout;
+
+    RCC_CR |= RCC_CR_HSEON;
+    for (timeout = 500000U; timeout && !(RCC_CR & RCC_CR_HSERDY); timeout--)
+        ;
+    if (!(RCC_CR & RCC_CR_HSERDY))
+        return;
+
+    FLASH_ACR = FLASH_ACR_PRFTBE | FLASH_ACR_LATENCY_2;
+    RCC_CFGR = (RCC_CFGR & ~((0xFU << 4) | (7U << 8) | (7U << 11))) |
+               RCC_CFGR_PPRE1_DIV2;
+    RCC_CFGR = (RCC_CFGR &
+                ~((1U << 16) | (1U << 17) | (0xFU << 18))) |
+               RCC_CFGR_PLLSRC_HSE | RCC_CFGR_PLLMUL9;
+
+    RCC_CR |= RCC_CR_PLLON;
+    for (timeout = 500000U; timeout && !(RCC_CR & RCC_CR_PLLRDY); timeout--)
+        ;
+    if (!(RCC_CR & RCC_CR_PLLRDY)) {
+        RCC_CFGR &= ~((7U << 8) | (1U << 16) | (1U << 17) |
+                      (0xFU << 18));
+        FLASH_ACR = 0;
+        return;
+    }
+
+    RCC_CFGR = (RCC_CFGR & ~3U) | 2U;
+    for (timeout = 500000U;
+         timeout && (RCC_CFGR & RCC_CFGR_SWS_MASK) != RCC_CFGR_SWS_PLL;
+         timeout--)
+        ;
+    if ((RCC_CFGR & RCC_CFGR_SWS_MASK) != RCC_CFGR_SWS_PLL) {
+        RCC_CFGR &= ~3U;
+        for (timeout = 500000U;
+             timeout && (RCC_CFGR & RCC_CFGR_SWS_MASK) != 0;
+             timeout--)
+            ;
+        if ((RCC_CFGR & RCC_CFGR_SWS_MASK) == 0) {
+            RCC_CFGR &= ~(7U << 8);
+            FLASH_ACR = 0;
+        }
+    }
+}
+#endif
 
 void stm32_status_led_set(int on) {
     /* Xuanwu LED0 is active low on PB5. */
@@ -81,6 +142,9 @@ static const timer_ops_t stm32_timer_ops = {
 };
 
 static void stm32_early_init(void) {
+#if defined(CONFIG_STM32_XUANWU) && !defined(CONFIG_STM32_QEMU)
+    stm32_clock_init();
+#endif
     stm32_status_led_init();
     stm32_bluetooth_early_key_init();
 }

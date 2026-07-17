@@ -73,6 +73,10 @@ void live2d_speak(live2d_t *l, const char *speech, uint32_t now_ms);
  */
 int live2d_tick(live2d_t *l, uint32_t now_ms);
 
+/* Consume a clock-interrupt frame sequence once. Repeated service calls with
+ * the same sequence return 0 and must not advance the animation. */
+int live2d_frame_clock_consume(uint32_t *observed, uint32_t current);
+
 /*
  * Resolve the current frame to its TF-card path, e.g. "/live2d/talk/07.raw".
  * Returns the string length written, or -1 on bad args / insufficient buffer.

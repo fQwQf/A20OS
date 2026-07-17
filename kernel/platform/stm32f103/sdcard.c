@@ -2,9 +2,8 @@
 
 #include "sdcard.h"
 #include "core/string.h"
+#include "stm32_uart.h"
 
-#define RCC_CR      (*(volatile uint32_t *)0x40021000UL)
-#define RCC_CFGR    (*(volatile uint32_t *)0x40021004UL)
 #define RCC_AHBENR  (*(volatile uint32_t *)0x40021014UL)
 #define RCC_APB2ENR (*(volatile uint32_t *)0x40021018UL)
 #define RCC_AHBRSTR (*(volatile uint32_t *)0x40021028UL)
@@ -51,21 +50,36 @@
 #define SDIO_STATIC_FLAGS 0x00C007FFU
 #define SDIO_CMD_TIMEOUT_LOOPS 200000U
 #define SDIO_DATA_TIMEOUT_LOOPS 2000000U
-#define SDIO_INIT_CLKDIV 118U
-#define SDIO_TRANSFER_CLKDIV 10U
 #define SDIO_CARD_ERROR_MASK 0xFDFFE008U
+
+#define SCB_DEMCR  (*(volatile uint32_t *)0xE000EDFCUL)
+#define DWT_CTRL   (*(volatile uint32_t *)0xE0001000UL)
+#define DWT_CYCCNT (*(volatile uint32_t *)0xE0001004UL)
 
 static stm32_sdcard_info_t card;
 static uint8_t sector_buf[512] __attribute__((aligned(4)));
 static block_dev_t sd_block_dev;
-static int sdio_clock_ready;
 
 static int sdio_cmd(uint32_t index, uint32_t arg, uint32_t response,
                     int ignore_crc);
 
-static void delay_loops(uint32_t loops) {
-    while (loops--)
-        __asm__ __volatile__("nop");
+static void sdio_delay_ms(uint32_t ms) {
+    uint32_t cycles_per_ms = stm32_hclk_hz() / 1000U;
+    if (cycles_per_ms == 0U)
+        cycles_per_ms = 1U;
+    SCB_DEMCR |= 1U << 24;
+    DWT_CTRL |= 1U;
+    uint32_t start = DWT_CYCCNT;
+    uint32_t duration = cycles_per_ms * ms;
+    while ((uint32_t)(DWT_CYCCNT - start) < duration)
+        ;
+}
+
+static uint32_t sdio_clock_div(uint32_t target_hz) {
+    uint32_t hclk = stm32_hclk_hz();
+    uint32_t ratio = (hclk + target_hz - 1U) / target_hz;
+    uint32_t div = ratio > 2U ? ratio - 2U : 0U;
+    return div > 255U ? 255U : div;
 }
 
 static void gpio_config_pin(volatile uint32_t *crl, volatile uint32_t *crh,
@@ -76,32 +90,6 @@ static void gpio_config_pin(volatile uint32_t *crl, volatile uint32_t *crh,
     value &= ~(0xFU << shift);
     value |= mode << shift;
     *reg = value;
-}
-
-static int sdio_enable_48mhz_clock(void) {
-    if (sdio_clock_ready)
-        return 0;
-
-    RCC_CR |= 1U << 16;
-    uint32_t timeout = 500000U;
-    while (!(RCC_CR & (1U << 17)) && timeout--)
-        ;
-    if (!(RCC_CR & (1U << 17)))
-        return -1;
-
-    uint32_t cfgr = RCC_CFGR;
-    cfgr &= ~((1U << 16) | (0xFU << 18) | (1U << 22));
-    cfgr |= (1U << 16) | (7U << 18);
-    RCC_CFGR = cfgr;
-
-    RCC_CR |= 1U << 24;
-    timeout = 500000U;
-    while (!(RCC_CR & (1U << 25)) && timeout--)
-        ;
-    if (!(RCC_CR & (1U << 25)))
-        return -1;
-    sdio_clock_ready = 1;
-    return 0;
 }
 
 static void sdio_reset(void) {
@@ -340,9 +328,6 @@ int stm32_sdcard_init(void) {
 #ifndef CONFIG_STM32_XUANWU
     return -1;
 #else
-    if (sdio_enable_48mhz_clock() != 0)
-        return -1;
-
     RCC_APB2ENR |= (1U << 4) | (1U << 5);
     RCC_AHBENR |= 1U << 10;
     sdio_reset();
@@ -352,10 +337,10 @@ int stm32_sdcard_init(void) {
     gpio_config_pin(&GPIOD_CRL, &GPIOD_CRL, 2, 0xBU);
 
     SDIO_POWER = 0;
-    SDIO_CLKCR = SDIO_INIT_CLKDIV;
+    SDIO_CLKCR = sdio_clock_div(400000U);
     SDIO_POWER = 3U;
     SDIO_CLKCR |= 1U << 8;
-    delay_loops(20000U);
+    sdio_delay_ms(2U);
 
     (void)sdio_cmd(0, 0, 0, 0);
     int v2 = sdio_cmd(8, 0x1AAU, SDIO_CMD_WAITRESP_SHORT, 0) == 0 &&
@@ -371,7 +356,7 @@ int stm32_sdcard_init(void) {
         ocr = SDIO_RESP1;
         if (ocr & (1U << 31))
             break;
-        delay_loops(20000U);
+        sdio_delay_ms(5U);
     }
     if (!(ocr & (1U << 31)))
         goto absent;
@@ -415,7 +400,7 @@ int stm32_sdcard_init(void) {
     card.bus_width = 1;
     if (sdio_app_cmd(6, 2, 0) == 0)
         card.bus_width = 4;
-    SDIO_CLKCR = SDIO_TRANSFER_CLKDIV | (1U << 8) |
+    SDIO_CLKCR = sdio_clock_div(24000000U) | (1U << 8) |
                  (card.bus_width == 4 ? (1U << 11) : 0U);
 
     card.present = 1;
