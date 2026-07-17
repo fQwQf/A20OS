@@ -17,6 +17,7 @@ typedef struct stm32_peripheral_state {
     int bluetooth_connected;
     int wifi_ready;
     int light_sensor_ready;
+    int rgb_matrix_ready;
     int memory_capacity_from_silicon;
     uint32_t service_calls;
     uint32_t service_last_ms;
