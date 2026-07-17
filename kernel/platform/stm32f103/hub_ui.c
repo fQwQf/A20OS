@@ -18,18 +18,21 @@ live2d_state_t hub_ui_state(const hub_ui_input_t *in) {
     return LIVE2D_IDLE;      /* active controls do not imply speech */
 }
 
+/* Fills every field of *out — callers must not have to patch it up afterwards. */
 void hub_ui_build(const hub_ui_input_t *in, ui_home_state_t *out) {
     out->temp_c = in->snap.temp_c;
     out->humidity = in->snap.humidity;
     out->light = in->snap.light;
     out->fan_level = in->decision.fan_level;
     out->pump_on = in->decision.pump_on;
+    out->backlight = in->decision.backlight;
     out->hour = in->snap.hour;
     out->minute = in->minute;
     out->theme = (uint8_t)in->decision.theme;
     out->mood = (uint8_t)hub_ui_state(in);
     out->alert = (uint8_t)in->decision.alert;
     out->net_cloud = in->net_cloud;
+    out->manual_mask = in->manual_mask;
     /* Bubble text is LLM-only: never fabricated locally. */
     out->speech = (in->cloud_valid && in->cloud_speech && in->cloud_speech[0])
                       ? in->cloud_speech
