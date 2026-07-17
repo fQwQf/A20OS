@@ -723,7 +723,7 @@ uint64_t mm_pte_flags_to_vm_flags(pte_t pte_flags) {
 }
 
 pte_t mm_user_stack_pte_flags(void) {
-    return mm_prot_to_pte_flags(1 | 2 | 4);
+    return mm_prot_to_pte_flags(PROT_READ | PROT_WRITE);
 }
 
 pte_t mm_user_brk_pte_flags(void) {
@@ -1552,7 +1552,14 @@ int mm_mprotect(mm_struct_t *mm, vaddr_t addr, size_t len, int prot) {
                     if (dr < 0) return dr;
                     continue;
                 }
+                uint64_t old_flags = arch_pte_flags(*pte);
                 uint64_t flags = mm_pte_flags_apply_prot(*pte, ptef);
+                if ((flags & PTE_X) && !(old_flags & PTE_X)) {
+                    paddr_t pa = arch_pte_addr(*pte);
+                    pfn_t pfn = phys_to_pfn(pa);
+                    if (pfn_valid(pfn))
+                        arch_flush_icache_range(pfn_to_virt(pfn), PAGE_SIZE);
+                }
                 *pte = arch_pte_leaf(arch_pte_addr(*pte), flags);
                 va = base + size;
             } else {
