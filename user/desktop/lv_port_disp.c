@@ -34,14 +34,15 @@ static uint32_t fb_width = 1024;
 static uint32_t fb_height = 768;
 static uint32_t fb_bpp = 32;
 static uint32_t fb_size = 0;
+static uint32_t fb_stride = 0;
 static void *fb_mem = NULL;
 
-static void disp_init(void)
+static int disp_init(void)
 {
     fb_fd = open("/dev/fb0", O_RDWR);
     if (fb_fd < 0) {
         printf("Failed to open /dev/fb0\n");
-        return;
+        return -1;
     }
 
     struct a20os_fb_var_screeninfo vinfo;
@@ -58,9 +59,15 @@ static void disp_init(void)
     if (ioctl(fb_fd, A20OS_FBIOGET_FSCREENINFO, &finfo) < 0 ||
         finfo.smem_start == 0 || finfo.smem_len == 0) {
         printf("Failed to get framebuffer address\n");
-        return;
+        return -1;
     }
     fb_size = finfo.smem_len;
+    fb_stride = finfo.line_length;
+    if (fb_stride < fb_width * (fb_bpp / 8U) ||
+        (uint64_t)fb_stride * fb_height > fb_size) {
+        printf("Invalid framebuffer stride: %u\n", fb_stride);
+        return -1;
+    }
 
     /* Map framebuffer memory */
 #ifdef A20OS_NOMMU
@@ -68,6 +75,7 @@ static void disp_init(void)
     if (ioctl(fb_fd, A20OS_FBIO_MAP_FB, NULL) < 0) {
         printf("Failed to access framebuffer\n");
         fb_mem = NULL;
+        return -1;
     }
 #else
     /*
@@ -82,8 +90,12 @@ static void disp_init(void)
     if (ioctl(fb_fd, A20OS_FBIO_MAP_FB, fb_mem) < 0) {
         printf("Failed to map framebuffer: errno=%d\n", errno);
         fb_mem = NULL;
+        return -1;
     }
 #endif
+    printf("Framebuffer mapped: va=%p size=%u stride=%u\n",
+           fb_mem, fb_size, fb_stride);
+    return 0;
 }
 
 static void disp_flush(lv_display_t * disp_drv, const lv_area_t * area, uint8_t * px_map)
@@ -100,15 +112,17 @@ static void disp_flush(lv_display_t * disp_drv, const lv_area_t * area, uint8_t 
 
 void lv_port_disp_init(void)
 {
-    disp_init();
+    if (disp_init() < 0) {
+        fprintf(stderr, "FATAL: framebuffer initialization failed\n");
+        exit(1);
+    }
 
     lv_display_t * disp = lv_display_create(fb_width, fb_height);
     lv_display_set_flush_cb(disp, disp_flush);
 
-    if (fb_mem) {
-        lv_display_set_buffers(disp, fb_mem, NULL, fb_size,
-                               LV_DISPLAY_RENDER_MODE_DIRECT);
-    }
+    lv_display_set_buffers_with_stride(disp, fb_mem, NULL, fb_size,
+                                       fb_stride,
+                                       LV_DISPLAY_RENDER_MODE_DIRECT);
 }
 
 #endif

@@ -77,6 +77,10 @@ static uint64_t elf_aslr_bias(void) {
     return bits << 16;
 }
 
+static int elf_machine_supported(uint16_t machine, int elf_class) {
+    return elf_class == ARCH_ELF_CLASS && machine == ARCH_ELF_MACHINE;
+}
+
 static uint64_t seg_flags(uint32_t p_flags) {
     int prot = 0;
     if (p_flags & PF_R) prot |= 1;
@@ -223,6 +227,12 @@ static int map_segment(mm_struct_t *mm, pt_root_t *pgdir,
                     int nr = vfs_pread(src->fd.fd, tmp, (size_t)to_copy,
                                        (uint64_t)(src->fd.offset + (long)src_off));
                     if (nr < 0) { frame_free(frame); return nr; }
+                    if ((uint64_t)nr != to_copy) {
+                        frame_free(frame);
+                        kerr("[ELF] short segment read: %d/%lu\n", nr,
+                             (unsigned long)to_copy);
+                        return -ENOEXEC;
+                    }
                     memcpy((char *)frame + copy_off, tmp, (size_t)nr);
                 }
             }
@@ -497,6 +507,7 @@ int elf_check_header(const Elf64_Ehdr *eh) {
     if (eh->e_ident[4] != ELFCLASS64)           return -ENOEXEC;
     if (eh->e_ident[5] != ELFDATA2LSB)          return -ENOEXEC;
     if (eh->e_type != ET_EXEC && eh->e_type != ET_DYN) return -ENOEXEC;
+    if (!elf_machine_supported(eh->e_machine, ELFCLASS64)) return -ENOEXEC;
     if (eh->e_phentsize < sizeof(Elf64_Phdr))   return -ENOEXEC;
     if (eh->e_phnum == 0 || eh->e_phnum > MAX_PHDRS) return -ENOEXEC;
     return 0;
@@ -953,6 +964,7 @@ int elf_load(int fd, const char *path, elf_load_info_t *info) {
     const Elf32_Ehdr *eh = (const Elf32_Ehdr *)buf;
     if (eh->e_ident[5] != ELFDATA2LSB ||
         (eh->e_type != ET_EXEC && eh->e_type != ET_DYN) ||
+        !elf_machine_supported(eh->e_machine, ELFCLASS32) ||
         eh->e_phentsize < sizeof(Elf32_Phdr) ||
         eh->e_phnum == 0 || eh->e_phnum > MAX_PHDRS)
         return -ENOEXEC;

@@ -280,11 +280,14 @@ int main(int argc, char **argv)
     (void)argc;
     (void)argv;
 
-    printf("Starting A20OS Mission Control...\n");
+    setvbuf(stdout, NULL, _IONBF, 0);
+    setvbuf(stderr, NULL, _IONBF, 0);
+    printf("[desktop] entered main\n");
 
     lv_init();
     lv_tick_set_cb(desktop_tick_get);
     lv_port_disp_init();
+    printf("[desktop] framebuffer ready\n");
 
     lv_obj_t *screen = lv_screen_active();
     lv_obj_set_style_bg_color(screen, lv_color_hex(DESKTOP_COLOR_CANVAS), 0);

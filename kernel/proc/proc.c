@@ -485,7 +485,7 @@ int proc_alloc_user_image(uintptr_t entry, vaddr_t sp, pt_root_t *pgdir,
     ctx->tp   = (uintptr_t)t;
     arch_task_context_set_user_tp(ctx, tls_tp);
     TASK_CTX_PAGE_TABLE(ctx) = pgdir ? arch_make_addr_space_token(pgdir) : 0;
-    TASK_CTX_STATUS(ctx) = arch_user_initial_status();
+    TASK_CTX_STATUS(ctx) = arch_task_user_resume_status();
     arch_task_context_set_initial_sp(ctx, trap, ks_top);
     t->kstack = (uintptr_t)ctx;
 
