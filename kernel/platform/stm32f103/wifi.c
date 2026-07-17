@@ -71,9 +71,14 @@ static uint32_t wifi_command_errors;
 static unsigned wifi_probe_baud_index;
 static unsigned wifi_probe_attempt;
 
-/* Official Nano AT uses 115200; the older PZ example shipped at 9600. */
+/* 9600 first: at the 8 MHz HSI clock the FIFO-less USART2 RX overruns at
+ * 115200 (≈15% byte errors on the dupont-wired ESP8266), which corrupts the
+ * multi-byte inbound CONTROL/+IPD frames. The module is set to 9600 via
+ * AT+UART_DEF (persists in its flash) — measured 0% RX errors at 9600, and the
+ * full cloud loop (SNAPSHOT→CONTROL) then closes. 115200 stays in the list so a
+ * factory-default module is still detected (just probed second). */
 static const uint32_t wifi_probe_baud_rates[] = {
-    115200U, 9600U, 57600U, 38400U, 19200U,
+    9600U, 115200U, 57600U, 38400U, 19200U,
 };
 
 static void wifi_set_event(const char *text);
