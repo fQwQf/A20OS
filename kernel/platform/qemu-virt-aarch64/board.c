@@ -85,6 +85,14 @@ static const timer_ops_t aa64_generic_timer_ops = {
 static void aa64_early_init(void) {
 }
 
+/* This board does not yet import QEMU's FDT /chosen/bootargs.  Keep the
+ * userspace network regression path deterministic until that handoff exists. */
+const char *arch_bootargs_get(void) {
+    return "a20.ip=10.0.2.15 a20.netmask=255.255.255.0 "
+           "a20.gateway=10.0.2.2 a20.dns=10.0.2.3 "
+           "a20.hostname=a20os-qemu";
+}
+
 static void aa64_poweroff(void) {
     sbi_shutdown();
 }

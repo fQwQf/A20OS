@@ -3,7 +3,7 @@
 #include "core/defs.h"
 #include "core/timer.h"
 
-#ifdef CONFIG_BOARD_VIRTUALBOX_AARCH64
+#ifdef CONFIG_AARCH64_COOPERATIVE_BOOT
 /*
  * VBox's ARM firmware runs this payload at EL1 but traps both CNTP_* and
  * CNTV_* accesses (ESR_EL1.EC=0x00).  Do not touch either interface during
@@ -72,6 +72,6 @@ void timer_disable(void) {
     __asm__ __volatile__("msr cntp_ctl_el0, %0" :: "r"(ctl) : "memory");
 }
 
-#endif /* CONFIG_BOARD_VIRTUALBOX_AARCH64 */
+#endif /* CONFIG_AARCH64_COOPERATIVE_BOOT */
 
 #endif /* CONFIG_AARCH64 */
