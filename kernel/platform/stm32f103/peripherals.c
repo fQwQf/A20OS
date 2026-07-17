@@ -164,6 +164,26 @@ static void cloud_parse_frames(uint64_t now) {
             continue;
         }
         hub_control_t cc;
+        hub_time_t network_time;
+        if (cloud_awaiting && now < cloud_reply_deadline &&
+            f.seq == cloud_expected_seq &&
+            hub_proto_decode_time(&f, &network_time) == 0) {
+            if (stm32_rtc_set_network_time(
+                    network_time.unix_utc,
+                    network_time.utc_offset_minutes) == 0) {
+                int hour, minute, second;
+                stm32_rtc_get_hhmmss(&hour, &minute, &second);
+                printf("[RTC] network sync %02d:%02d:%02d UTC%+d:%02d"
+                       " epoch=%u count=%u\n",
+                       hour, minute, second,
+                       network_time.utc_offset_minutes / 60,
+                       network_time.utc_offset_minutes < 0
+                           ? -(network_time.utc_offset_minutes % 60)
+                           : network_time.utc_offset_minutes % 60,
+                       (unsigned)network_time.unix_utc,
+                       (unsigned)stm32_rtc_sync_count());
+            }
+        }
         if (cloud_awaiting && now < cloud_reply_deadline &&
             f.seq == cloud_expected_seq &&
             hub_proto_decode_control(&f, &cc) == 0) {
@@ -1078,6 +1098,11 @@ int stm32_peripherals_set_proxy(const char *ip, uint16_t port) {
     printf("[NET] proxy set to %s:%u\n", cloud_proxy_ip,
            (unsigned)cloud_proxy_port);
     return 0;
+}
+
+void stm32_peripherals_request_time_sync(void) {
+    cloud_ask_now = 1;
+    last_control_tick = 0;
 }
 
 /* Latest assembled home-screen state + catgirl, for the on-board renderer. */
