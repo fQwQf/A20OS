@@ -162,13 +162,13 @@ static void wrap_speech(const char *s, ui_home_model_t *m) {
         unsigned bytes = 1, cols = 1;
         if (c >= 0xF0u) {
             bytes = 4;
-            cols = 2;
+            cols = 3;
         } else if (c >= 0xE0u) {
             bytes = 3;
-            cols = 2;
+            cols = 3;
         } else if (c >= 0xC0u) {
             bytes = 2;
-            cols = 2;
+            cols = 3;
         }
         if (c == '\n') {
             m->speech[li][pos] = '\0';

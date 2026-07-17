@@ -70,7 +70,6 @@ static uint32_t wifi_command_baud;
 static uint32_t wifi_command_errors;
 static unsigned wifi_probe_baud_index;
 static unsigned wifi_probe_attempt;
-
 /* 9600 first: at the 8 MHz HSI clock the FIFO-less USART2 RX overruns at
  * 115200 (≈15% byte errors on the dupont-wired ESP8266), which corrupts the
  * multi-byte inbound CONTROL/+IPD frames. The module is set to 9600 via
@@ -578,7 +577,6 @@ void stm32_wifi_service(uint64_t now) {
     stm32_wifi_irq();
     arch_irq_restore(irq_flags);
     wifi_drain_rx();
-
     if (wifi.phase == STM32_WIFI_RESET_WAIT) {
         if (now < wifi_deadline)
             return;

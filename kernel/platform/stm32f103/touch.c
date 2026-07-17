@@ -225,6 +225,24 @@ int stm32_touch_ready(void) {
     return touch_initialized;
 }
 
+int stm32_touch_poll_raw(uint16_t *raw_x, uint16_t *raw_y) {
+    uint16_t x;
+    uint16_t y;
+
+    if (!touch_initialized || touch_pen_released() ||
+        touch_read_xy(&x, &y) != 0 || x < 50U || y < 50U)
+        return 0;
+    if (raw_x)
+        *raw_x = x;
+    if (raw_y)
+        *raw_y = y;
+    return 1;
+}
+
+int stm32_touch_pressed(void) {
+    return touch_initialized && !touch_pen_released();
+}
+
 int stm32_touch_poll(uint16_t *x, uint16_t *y) {
     /* --- one instantaneous ("raw") read --- */
     int raw_pressed = 0;

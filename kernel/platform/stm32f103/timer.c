@@ -3,6 +3,8 @@
 #include "core/timer.h"
 #include "core/arch.h"
 #include "board.h"
+#include "backlight.h"
+#include "live2d.h"
 #include "stm32_uart.h"
 
 #define SYST_CSR (*(volatile uint32_t *)0xE000E010UL)
@@ -13,6 +15,8 @@
 
 static volatile uint64_t stm32_ticks;
 static uint32_t stm32_systick_reload;
+static volatile uint32_t stm32_live2d_clock;
+static uint32_t stm32_live2d_countdown;
 
 void timer_init(void) {
     uint32_t hclk = stm32_hclk_hz();
@@ -25,6 +29,8 @@ void timer_init(void) {
 
     uint32_t flags = arch_irq_save();
     stm32_ticks = 0;
+    stm32_live2d_clock = 0;
+    stm32_live2d_countdown = LIVE2D_FRAME_MS;
     SYST_RVR = stm32_systick_reload - 1U;
     SYST_CVR = 0;
     SYST_CSR = 0x7U;
@@ -32,13 +38,9 @@ void timer_init(void) {
 }
 
 void timer_set_interval(uint64_t ticks) {
-    if (ticks == 0)
-        ticks = 1;
-    uint64_t cycles = ticks * stm32_systick_reload;
-    if (cycles > 0x01000000ULL)
-        cycles = 0x01000000ULL;
-    SYST_RVR = (uint32_t)cycles - 1U;
-    SYST_CVR = 0;
+    /* STM32 peripherals use timer_get_ticks() as milliseconds. Keep SysTick at
+     * 1 kHz instead of applying the generic scheduler's tickless rearm request. */
+    (void)ticks;
 }
 
 uint64_t timer_get_ticks(void) {
@@ -52,8 +54,17 @@ void timer_irq_tick(void) {}
 void timer_enable(void) { SYST_CSR |= 0x3U; }
 void timer_disable(void) { SYST_CSR &= ~0x3U; }
 
+uint32_t stm32_live2d_frame_clock(void) {
+    return stm32_live2d_clock;
+}
+
 void armv7m_systick_handler(void) {
     stm32_ticks++;
+    if (--stm32_live2d_countdown == 0U) {
+        stm32_live2d_countdown = LIVE2D_FRAME_MS;
+        stm32_live2d_clock++;
+    }
+    stm32_backlight_systick();
     if ((stm32_ticks % 500U) == 0)
         stm32_status_led_toggle();
 }
