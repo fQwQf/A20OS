@@ -43,6 +43,16 @@ void ui_render_set_cjk_lookup(ui_cjk_lookup_t lookup);
 #define UI_RENDER_KEEP_BACKGROUND 0x01U
 #define UI_RENDER_CAL_INSET 32
 
+/* Independently repaintable home-screen regions. These are used by the STM32
+ * backend to avoid exposing a slow top-to-bottom full repaint on every sensor
+ * tick. Palette changes still require a full render. */
+#define UI_RENDER_REGION_HEADER  (1U << 0)
+#define UI_RENDER_REGION_CARD0   (1U << 1)
+#define UI_RENDER_REGION_CARD1   (1U << 2)
+#define UI_RENDER_REGION_CARD2   (1U << 3)
+#define UI_RENDER_REGION_CARD3   (1U << 4)
+#define UI_RENDER_REGION_DIALOG  (1U << 5)
+
 /*
  * Paint the whole home screen. cat_frame (optional) is the current Live2D
  * sprite as row-major RGB565 of size cat_w x cat_h; when NULL a procedural
@@ -58,6 +68,10 @@ void ui_render_home(const ui_gfx_t *g, const ui_home_model_t *m,
 void ui_render_home_ex(const ui_gfx_t *g, const ui_home_model_t *m,
                        const live2d_t *cat, const uint16_t *cat_frame,
                        int cat_w, int cat_h, unsigned flags);
+
+/* Repaint selected regions without clearing or traversing the whole panel. */
+void ui_render_home_regions(const ui_gfx_t *g, const ui_home_model_t *m,
+                            unsigned regions);
 
 /* Redraw only the cat sprite region using the procedural fallback. */
 void ui_render_cat(const ui_gfx_t *g, const ui_home_model_t *m,
