@@ -33,7 +33,7 @@ static int state_valid(live2d_state_t s) {
     return (unsigned)s < (unsigned)LIVE2D_STATE_COUNT;
 }
 
-int live2d_state_loops(live2d_state_t s) { return s != LIVE2D_IDLE; }
+int live2d_state_loops(live2d_state_t s) { return state_valid(s); }
 
 void live2d_init(live2d_t *l) {
     if (!l)
@@ -124,25 +124,24 @@ int live2d_tick(live2d_t *l, uint32_t now_ms) {
         l->frame = 0;
         l->last_advance_ms = now_ms;
         l->dirty = 1;
-        l->stopped = 0; /* the fresh IDLE gets its one cycle */
+        l->stopped = 0;
         changed = 1;
     }
 
-    /* Step frames at the fixed cadence. Catch up at most one frame per tick to
-     * keep the motion smooth rather than skipping ahead after a stall. */
-    if (!l->stopped &&
-        (int32_t)(now_ms - l->last_advance_ms) >= (int32_t)LIVE2D_FRAME_MS) {
+    /* Keep animation phase tied to the millisecond clock. SD reads and LCD
+     * blits can hold the main loop for more than one frame; advancing only one
+     * frame and resetting the epoch to now made every such stall permanently
+     * slow the animation and produced irregular motion. */
+    uint32_t elapsed = now_ms - l->last_advance_ms;
+    if (elapsed >= LIVE2D_FRAME_MS) {
         unsigned count = frame_counts[l->state];
+        uint32_t steps = elapsed / LIVE2D_FRAME_MS;
         if (count == 0)
             count = 1;
-        l->frame = (l->frame + 1U) % count;
-        l->last_advance_ms = now_ms;
+        l->frame = (l->frame + steps) % count;
+        l->last_advance_ms += steps * LIVE2D_FRAME_MS;
         l->dirty = 1;
         changed = 1;
-        /* Wrapping to 0 completes one cycle: a one-shot state parks there, on
-         * the rest pose the loop was authored to return to. */
-        if (l->frame == 0 && !live2d_state_loops(l->state))
-            l->stopped = 1;
     }
 
     if (l->dirty) {
