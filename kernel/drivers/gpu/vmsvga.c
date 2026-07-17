@@ -60,10 +60,11 @@ typedef struct {
     uint32_t flags;
     uint32_t length;
     uint64_t physical_address;
-    uint32_t offset;
-    uint32_t dx_context;
-    uint32_t reserved[6];
+    uint32_t must_be_zero[8];
 } __attribute__((packed)) svga3_command_buffer_t;
+
+_Static_assert(sizeof(svga3_command_buffer_t) == 64,
+               "SVGAv3 command-buffer header must be 64 bytes");
 
 typedef struct {
     uint32_t command;
@@ -97,6 +98,40 @@ typedef struct vmsvga_device {
 
 static vmsvga_device_t g_vmsvga;
 
+static int vmsvga_flush(device_t *dev, uint32_t x, uint32_t y,
+                        uint32_t width, uint32_t height);
+
+static uint32_t vmsvga_test_color(uint32_t x, uint32_t width) {
+    uint32_t band = width ? (x * 4U) / width : 0;
+    static const uint32_t colors[4] = {
+        0x00ff0000U, 0x0000ff00U, 0x000000ffU, 0x00ffffffU,
+    };
+    return colors[band < 4U ? band : 3U];
+}
+
+static int vmsvga_scanout_self_test(device_t *dev, vmsvga_device_t *svga) {
+    volatile uint32_t *fb = (volatile uint32_t *)svga->fb_virt;
+    uint32_t stride = svga->pitch / sizeof(uint32_t);
+
+    for (uint32_t y = 0; y < svga->height; y++) {
+        for (uint32_t x = 0; x < svga->width; x++)
+            fb[(size_t)y * stride + x] = vmsvga_test_color(x, svga->width);
+    }
+    wmb();
+
+    uint32_t samples[4] = {
+        fb[svga->width / 8U],
+        fb[svga->width * 3U / 8U],
+        fb[svga->width * 5U / 8U],
+        fb[svga->width * 7U / 8U],
+    };
+    int update = vmsvga_flush(dev, 0, 0, svga->width, svga->height);
+    kinfo("[GPU] SVGAv3 scanout test: pixels=%08x,%08x,%08x,%08x update=%s\n",
+          samples[0], samples[1], samples[2], samples[3],
+          update == 0 ? "completed" : "failed");
+    return update;
+}
+
 static void vmsvga_write(vmsvga_device_t *svga, uint32_t offset, uint32_t value) {
     if (svga->legacy) {
         writel(offset, (volatile void *)svga->regs);
@@ -129,7 +164,8 @@ static int vmsvga_submit(vmsvga_device_t *svga, const void *command,
     header->length = (uint32_t)command_size;
     header->physical_address = va_to_pa(payload);
 
-    arch_dma_sync_for_device(svga->command_page, PAGE_SIZE);
+    arch_dma_sync_for_device(svga->command_page,
+                             sizeof(*header) + command_size);
     wmb();
     uint64_t header_pa = va_to_pa(header);
     vmsvga_write(svga, SVGA3_REG_COMMAND_HI, (uint32_t)(header_pa >> 32));
@@ -138,8 +174,15 @@ static int vmsvga_submit(vmsvga_device_t *svga, const void *command,
 
     for (uint32_t i = 0; i < SVGA3_CMD_WAIT_LOOPS; i++) {
         arch_dma_sync_for_cpu(header, sizeof(*header));
-        if (header->status != SVGA3_CB_STATUS_NONE)
-            return header->status == SVGA3_CB_STATUS_COMPLETED ? 0 : -1;
+        if (header->status != SVGA3_CB_STATUS_NONE) {
+            if (header->status == SVGA3_CB_STATUS_COMPLETED)
+                return 0;
+            kerr("[GPU] SVGAv3 command rejected: context=%u command=%u "
+                 "status=%u error-offset=%u\n",
+                 context, *(const uint32_t *)command, header->status,
+                 header->error_offset);
+            return -1;
+        }
         arch_cpu_relax();
     }
     kerr("[GPU] SVGAv3 command timeout (context=%u, command=%u)\n",
@@ -326,17 +369,12 @@ static int vmsvga_probe(device_t *dev) {
     svga->fb_virt += fb_offset;
     svga->fb_size = visible;
 
-    /* VRAM contents survive device reset and otherwise appear as random tiles
-     * until a desktop has rendered its first frame. */
-    memset((void *)svga->fb_virt, 0, svga->fb_size);
-    arch_dma_sync_for_device((void *)svga->fb_virt, svga->fb_size);
-
     dev->drv_priv = svga;
     if (gpu_device_register(dev) < 0) {
         dev->drv_priv = NULL;
         return -1;
     }
-    if (vmsvga_flush(dev, 0, 0, svga->width, svga->height) != 0) {
+    if (vmsvga_scanout_self_test(dev, svga) != 0) {
         dev->drv_priv = NULL;
         return -1;
     }

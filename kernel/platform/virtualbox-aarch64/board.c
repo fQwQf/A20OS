@@ -152,6 +152,15 @@ static const timer_ops_t vbox_aa64_timer_ops = {
 static void vbox_aa64_early_init(void) {
 }
 
+/* The UEFI handoff currently has no command-line channel.  Use VBox NAT's
+ * documented guest subnet directly so networking does not depend on timer
+ * driven DHCP retries while this board still uses its software timer. */
+const char *arch_bootargs_get(void) {
+    return "a20.ip=10.0.2.15 a20.netmask=255.255.255.0 "
+           "a20.gateway=10.0.2.2 a20.dns=10.0.2.3 "
+           "a20.hostname=a20os-vbox";
+}
+
 static void vbox_aa64_poweroff(void) {
     sbi_shutdown();
 }

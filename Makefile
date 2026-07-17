@@ -30,6 +30,7 @@ MODE ?= release
 BRINGUP ?= 0
 OPT ?= -O3
 NR_CPUS ?= 1
+COOPERATIVE_BOOT ?= 0
 ALLOW_UNVERIFIED_SMP ?= 0
 PROFILE ?= full
 CONFIG_SWAP ?= n
@@ -115,7 +116,7 @@ EXTRA_IMAGE_MB ?= 256
 EXTRA_IMG = $(BUILD_DIR)/extra.img
 EXTRA_STAGING_DIR = $(BUILD_DIR)/extra-staging
 EXTRA_PACKAGES = vim git gcc cc
-USER_BUILD_ID = $(ARCH):$(OPT):$(NOMMU)
+USER_BUILD_ID = $(ARCH):$(NOMMU):$(OPT)
 USER_BUILD_CHECK_DIRS = user/init.c user/cmds user/init_common user/desktop user/external/lvgl \
                         user/external/musl user/external/sbase user/external/mksh-cvs2git \
                         user/external/tlse user/external/fastfetch
@@ -341,6 +342,30 @@ CFLAGS = -Wall -Wextra $(OPT) -ffreestanding -nostdlib \
          -DCONFIG_ABI_$(shell echo $(ABI) | tr a-z A-Z) \
          -DCONFIG_NR_CPUS=$(NR_CPUS) \
          -DCONFIG_BOARD_$(shell echo $(BOARD) | tr a-z A-Z | tr - _)
+ifeq ($(COOPERATIVE_BOOT),1)
+CFLAGS += -DCONFIG_AARCH64_COOPERATIVE_BOOT
+endif
+ifeq ($(BOARD),virtualbox-aarch64)
+CFLAGS += -DCONFIG_AARCH64_COOPERATIVE_BOOT
+endif
+ELF_MACHINE_riscv64     := 243
+ELF_MACHINE_loongarch64 := 258
+ELF_MACHINE_aarch64     := 183
+ELF_MACHINE_x86_64      := 62
+ELF_MACHINE_arm32       := 40
+ELF_MACHINE_riscv32     := 243
+ELF_MACHINE_ppc64le     := 21
+ELF_CLASS_riscv64       := 2
+ELF_CLASS_loongarch64   := 2
+ELF_CLASS_aarch64       := 2
+ELF_CLASS_x86_64        := 2
+ELF_CLASS_arm32         := 1
+ELF_CLASS_riscv32       := 1
+ELF_CLASS_ppc64le       := 2
+ifneq ($(ARCH),armv7m)
+CFLAGS += -DARCH_ELF_MACHINE=$(ELF_MACHINE_$(ARCH)) \
+          -DARCH_ELF_CLASS=$(ELF_CLASS_$(ARCH))
+endif
 ifeq ($(ARCH),armv7m)
 CFLAGS += -DSTM32_FLASH_KB=$(STM32_FLASH_KB) -DSTM32_RAM_KB=$(STM32_RAM_KB)
 ifneq ($(shell printf '%s' '$(STM32_BT_NAME)' | LC_ALL=C grep -Eq '^[A-Za-z0-9_-]{1,32}$$' && echo yes),yes)
@@ -510,13 +535,14 @@ KERNEL_ELF = $(BUILD_DIR)/kernel.elf
 KERNEL_BIN = $(BUILD_DIR)/kernel.bin
 VBOX_AARCH64_EFI = $(BUILD_DIR)/BOOTAA64.EFI
 VBOX_AARCH64_IMG = $(BUILD_DIR)/a20os-vbox-aarch64.img
+VBOX_AARCH64_TEXT_IMG = $(BUILD_DIR)/a20os-vbox-aarch64-text.img
 VBOX_AARCH64_LOAD_ADDRESS ?= 0x08080000ULL
 
 # ================================================================
 # Targets
 # ================================================================
 
-.PHONY: all all-architectures clean run-riscv64 run-gui-riscv64 run-gui-rv run-loongarch64 run-gui-loongarch64 run-gui-la run-arm64 run-gui-arm64 run-gui-aarch64 run-x86_64 run-gui-x86_64 vbox-iso-x86_64 _vbox_iso_x86_64_impl vbox-image-aarch64 _vbox_image_aarch64_impl run-arm32 run-gui-arm32 run-riscv32 run-ppc64le debug-riscv64 debug-loongarch64 debug-arm64 debug-x86_64 debug-arm32 debug-riscv32 debug-ppc64le \
+.PHONY: all all-architectures clean run-riscv64 run-gui-riscv64 run-gui-rv run-loongarch64 run-gui-loongarch64 run-gui-la run-arm64 run-gui-arm64 run-gui-aarch64 run-x86_64 run-gui-x86_64 vbox-iso-x86_64 _vbox_iso_x86_64_impl vbox-image-aarch64 _vbox_image_aarch64_impl vbox-text-image-aarch64 _vbox_text_image_aarch64_impl run-arm32 run-gui-arm32 run-riscv32 run-ppc64le debug-riscv64 debug-loongarch64 debug-arm64 debug-x86_64 debug-arm32 debug-riscv32 debug-ppc64le \
 		run-gui-nommu-arm32 run-nommu-gui-arm32 \
 		stm32f103-bringup stm32f103-xuanwu flash-stm32f103-xuanwu run-stm32f103-qemu \
 		check-stm32f103 \
@@ -1384,8 +1410,11 @@ user_apps: $(USER_BUILD_STAMP)
 
 .PHONY: user_apps
 
-.PHONY: force_user_build
+.PHONY: force_user_build force_vbox_rootfs_verify
 force_user_build:
+	@:
+
+force_vbox_rootfs_verify:
 	@:
 
 .PHONY: force_native_build
@@ -1527,7 +1556,30 @@ $(VBOX_AARCH64_EFI): $(KERNEL_BIN) kernel/boot/uefi/aarch64_loader.c kernel/boot
 		-O pei-aarch64-little --subsystem efi-app \
 		$(BUILD_DIR)/uefi-loader.so $@
 
-$(VBOX_AARCH64_IMG): $(VBOX_AARCH64_EFI) $(FAT32_IMG) scripts/mk_uefi_fat_image.sh
+# The user build stamp is intentionally refreshed by a recipe, so a user binary
+# can become newer than an already-created FAT image during the same checkout.
+# Verify the staged /init byte-for-byte every time a VBox image is requested;
+# otherwise make's timestamp graph can leave a bootable but stale userspace in
+# place after interrupted or manually-invoked sub-builds.
+$(BUILD_DIR)/.vbox-rootfs-verified: force_vbox_rootfs_verify $(GUI_FAT32_IMG) $(USER_BUILD_STAMP)
+	@set -e; \
+	tmp=$$(mktemp); \
+	trap 'rm -f "$$tmp"' EXIT HUP INT TERM; \
+	mcopy -i $(GUI_FAT32_IMG) ::/init "$$tmp"; \
+	cmp -s "$$tmp" "$(USER_BUILD_DIR)/init" || { \
+		echo "[VBOX] stale /init detected; rebuilding GUI root filesystem"; \
+		rm -f $(FAT32_IMG) $(GUI_FAT32_IMG); \
+		$(MAKE) ARCH=$(ARCH) BOARD=$(BOARD) ABI=$(ABI) BRINGUP=$(BRINGUP) \
+			NOMMU=$(NOMMU) OPT="$(OPT)" $(GUI_FAT32_IMG); \
+		mcopy -i $(GUI_FAT32_IMG) ::/init "$$tmp"; \
+		cmp -s "$$tmp" "$(USER_BUILD_DIR)/init"; \
+	}; \
+	touch $@
+
+$(VBOX_AARCH64_IMG): $(VBOX_AARCH64_EFI) $(BUILD_DIR)/.vbox-rootfs-verified scripts/mk_uefi_fat_image.sh
+	scripts/mk_uefi_fat_image.sh $(VBOX_AARCH64_EFI) $@ $(GUI_FAT32_IMG)
+
+$(VBOX_AARCH64_TEXT_IMG): $(VBOX_AARCH64_EFI) $(FAT32_IMG) scripts/mk_uefi_fat_image.sh
 	scripts/mk_uefi_fat_image.sh $(VBOX_AARCH64_EFI) $@ $(FAT32_IMG)
 
 $(KERNEL_ELF): $(KERNEL_OBJ) $(ASM_OBJ) $(LDSCRIPT)
@@ -1647,14 +1699,20 @@ _vbox_iso_x86_64_impl: dev-build
 vbox-image-aarch64:
 	$(MAKE) ARCH=aarch64 BOARD=virtualbox-aarch64 ABI=both BRINGUP=0 _vbox_image_aarch64_impl
 
+vbox-text-image-aarch64:
+	$(MAKE) ARCH=aarch64 BOARD=virtualbox-aarch64 ABI=both BRINGUP=0 _vbox_text_image_aarch64_impl
+
 # The ARM VirtualBox target is a graphical machine by default.  Its kernel
 # runs the SVGAv3/VMSVGA driver and the image carries the GUI marker used by
 # /bin/init to start the desktop instead of the serial-only shell.
-vbox-gui-image-aarch64:
+vbox-gui-image-aarch64: vbox-image-aarch64
 	$(MAKE) ARCH=aarch64 BOARD=virtualbox-aarch64 ABI=both BRINGUP=0 _vbox_gui_image_aarch64_impl
 
 _vbox_image_aarch64_impl: $(VBOX_AARCH64_IMG)
 	@echo "VirtualBox ARM64 image ready: $(VBOX_AARCH64_IMG)"
+
+_vbox_text_image_aarch64_impl: $(VBOX_AARCH64_TEXT_IMG)
+	@echo "VirtualBox ARM64 text image ready: $(VBOX_AARCH64_TEXT_IMG)"
 
 _vbox_gui_image_aarch64_impl: $(VBOX_AARCH64_EFI) $(GUI_FAT32_IMG) scripts/mk_uefi_fat_image.sh
 	scripts/mk_uefi_fat_image.sh $(VBOX_AARCH64_EFI) $(BUILD_DIR)/a20os-vbox-aarch64-gui.img $(GUI_FAT32_IMG)

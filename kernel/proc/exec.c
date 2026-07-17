@@ -587,7 +587,7 @@ static int exec_install_process(task_t *t,
         new_ctx->ra = (uint64_t)user_trap_return;
         new_ctx->tp = (uint64_t)(uintptr_t)t;
         arch_task_context_set_user_tp(new_ctx, info->tls_tp);
-        TASK_CTX_STATUS(new_ctx) = arch_user_initial_status();
+        TASK_CTX_STATUS(new_ctx) = arch_task_user_resume_status();
         TASK_CTX_PAGE_TABLE(new_ctx) = arch_make_addr_space_token(info->pgdir);
         arch_task_context_set_initial_sp(new_ctx, trap, ks_top);
         t->trap_ctx = trap;

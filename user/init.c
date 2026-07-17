@@ -30,6 +30,7 @@ static void append_if_dir(char *buf, size_t cap, const char *path)
 
 static pid_t shell_pid;
 static pid_t desktop_pid;
+static pid_t telnet_pid;
 static volatile sig_atomic_t got_signal;
 
 static void sig_handler(int sig)
@@ -40,6 +41,8 @@ static void sig_handler(int sig)
         kill(shell_pid, SIGTERM);
     if (desktop_pid > 0)
         kill(desktop_pid, SIGTERM);
+    if (telnet_pid > 0)
+        kill(telnet_pid, SIGTERM);
 }
 
 static void setup_console(void)
@@ -86,6 +89,8 @@ int main(void)
 {
     setsid();
     setup_console();
+    setvbuf(stdout, NULL, _IONBF, 0);
+    setvbuf(stderr, NULL, _IONBF, 0);
     setup_signals();
 
 #if defined(__powerpc64__)
@@ -147,7 +152,20 @@ int main(void)
         if (desktop_pid < 0) {
             perror("fork desktop");
             desktop_pid = 0;
+        } else {
+            printf("[init] desktop queued: pid=%d\n", desktop_pid);
         }
+    }
+
+    telnet_pid = fork();
+    if (telnet_pid == 0) {
+        char *telnet_argv[] = { "telnetd", "2323", NULL };
+        execve("/bin/telnetd", telnet_argv, envp);
+        _exit(127);
+    }
+    if (telnet_pid < 0) {
+        perror("fork telnetd");
+        telnet_pid = 0;
     }
 
     int contest = (access("/bin/etc/contest-mode", F_OK) == 0);
@@ -192,6 +210,10 @@ int main(void)
         if (w == desktop_pid) {
             desktop_pid = 0;
             printf("[init] desktop exited\n");
+        }
+        if (w == telnet_pid) {
+            telnet_pid = 0;
+            printf("[init] telnetd exited\n");
         }
     }
 

@@ -64,12 +64,26 @@ _start:
     str     x2, [x1, #(0 * 8)]
     ldr     x2, =0x00600000c0000401  /* PA 3..4 GiB, device, PXN|UXN */
     str     x2, [x1, #(3 * 8)]
-    /* UEFI keeps its ACPI tables in conventional RAM above the initial
-     * 512-MiB guest allocation (VBox placed the RSDP at 0x460df018 in a
-     * target run).  Map this window as Normal while parsing those tables;
-     * it is outside A20OS's allocator range and is never handed to kmalloc. */
-    ldr     x2, =0x0040000040000705  /* PA 1..2 GiB, normal, UXN */
+    /*
+     * PA 1..2 GiB is mixed on VBox: UEFI ACPI memory lives below
+     * 0x48000000, while VMSVGA VRAM starts at 0x48000000 and PCI BARs are
+     * placed around 0x50000000.  A 1-GiB Normal-memory block caches MMIO and
+     * produces corrupted scanout.  Split it into 2-MiB blocks instead.
+     */
+    orr     x2, x4, #0x3
     str     x2, [x1, #(1 * 8)]
+    mov     x5, xzr
+    ldr     x6, =0x0040000040000705  /* normal, UXN */
+    ldr     x7, =0x0060000040000401  /* device, PXN|UXN */
+.Lvbox_l2_loop:
+    cmp     x5, #64                  /* 0x40000000..0x47ffffff: ACPI RAM */
+    csel    x2, x6, x7, lo
+    str     x2, [x4, x5, lsl #3]
+    add     x5, x5, #1
+    add     x6, x6, #(1 << 21)
+    add     x7, x7, #(1 << 21)
+    cmp     x5, #512
+    b.lo    .Lvbox_l2_loop
     ldr     x2, =0x0060000080000401  /* PA 2..3 GiB, device, PXN|UXN */
     str     x2, [x1, #(2 * 8)]
 #else
@@ -111,7 +125,7 @@ _start:
     cmp     x5, #256                 /* 512 MiB of configured DRAM */
     b.lo    .Lnommu_l2_loop
 #elif defined(CONFIG_BOARD_VIRTUALBOX_AARCH64)
-    /* RAM is already covered by L1[0] above. */
+    /* RAM and the mixed ACPI/MMIO window are already covered above. */
 #else
     ldr     x2, =0x0040000040000705  /* L1 block: PA 0x40000000, normal, UXN */
     str     x2, [x1, #(1 * 8)]
@@ -130,11 +144,16 @@ _start:
     isb
 
     mrs     x2, sctlr_el1
+    /* Do not inherit firmware byte order or execute-never policy.  A20OS's
+     * initial direct map deliberately contains writable executable kernel
+     * blocks, so WXN must remain clear until the kernel map is split. */
+    bic     x2, x2, #(1 << 25)  /* EE: little-endian EL1 */
+    bic     x2, x2, #(1 << 24)  /* E0E: little-endian EL0 */
+    bic     x2, x2, #(1 << 19)  /* WXN */
 #ifdef CONFIG_NOMMU
     bic     x2, x2, #(1 << 3)   /* SA: kernel stack alignment check */
     bic     x2, x2, #(1 << 4)   /* SA0: EL0 stack alignment check */
     bic     x2, x2, #(1 << 5)   /* CP15BEN: avoid legacy EL0 controls */
-    bic     x2, x2, #(1 << 19)  /* WXN: NOMMU user image is RWX */
     bic     x2, x2, #(1 << 22)  /* UCI: trap EL0 cache maintenance */
     bic     x2, x2, #(1 << 23)  /* nTWE */
 #endif

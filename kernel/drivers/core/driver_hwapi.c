@@ -50,8 +50,23 @@ void irq_disable(uint32_t irq) {
 }
 
 void driver_irq_dispatch(uint32_t irq) {
-    if (irq >= 256 || !irq_handlers[irq])
+    if (irq >= 256)
         return;
+
+    /*
+     * Reading IAR has already acknowledged this interrupt at the CPU
+     * interface.  It must be completed even when no driver claimed the line;
+     * otherwise GICv3 keeps it active and takes it again as soon as a newly
+     * scheduled task unmasks IRQs.  VBox ARM exposes firmware/PCI lines that
+     * are not all registered during early bring-up, so the old early return
+     * could trap the first userspace child in an interrupt storm.
+     */
+    if (!irq_handlers[irq]) {
+        if (current_board && current_board->irqchip &&
+            current_board->irqchip->eoi)
+            current_board->irqchip->eoi(irq);
+        return;
+    }
 
     if (current_board && current_board->irqchip &&
         current_board->irqchip->ack)

@@ -22,10 +22,11 @@ static int fetch_user_insn(task_t *task, vaddr_t va, uint32_t *insn_out) {
 static int ktrap_diag_count = 0;
 
 static void dump_trap_context(trap_context_t *ctx) {
-    kerr("  regs: ra=0x%lx sp=0x%lx tp=0x%lx\n",
+    kerr("  regs: ra=0x%lx sp=0x%lx tp=0x%lx status=0x%lx\n",
          (unsigned long)TRAP_CTX_RA(ctx),
          (unsigned long)TRAP_CTX_SP(ctx),
-         (unsigned long)TRAP_CTX_TP(ctx));
+         (unsigned long)TRAP_CTX_TP(ctx),
+         (unsigned long)TRAP_CTX_STATUS(ctx));
     kerr("  regs: a0=0x%lx a1=0x%lx a2=0x%lx a3=0x%lx\n",
          (unsigned long)TRAP_CTX_ARG0(ctx),
          (unsigned long)TRAP_CTX_ARG1(ctx),
@@ -211,8 +212,15 @@ void trap_handler(trap_context_t *ctx) {
                 return;
             proc_exit_group(-SIGSEGV); 
         } else if (code == CAUSE_ILLEGAL_INSN) {
-            printf("SIGILL: pid=%d sepc=0x%lx stval=0x%lx\n",
+            printf("SIGILL: pid=%d sepc=0x%lx stval=0x%lx",
                   cur ? cur->pid : -1, (unsigned long)sepc, (unsigned long)stval);
+#ifdef CONFIG_AARCH64
+            printf(" esr=0x%lx ec=0x%lx", (unsigned long)arch_read_esr(),
+                   (unsigned long)((arch_read_esr() >> 26) & 0x3fUL));
+#endif
+            if (have_user_insn)
+                printf(" insn=0x%08x", user_insn);
+            printf("\n");
             if (deliver_user_sync_signal(ctx, SIGILL, -SIGILL))
                 return;
             kerr("User Illegal Instruction: pid=%d sepc=0x%lx stval=0x%lx\n",
