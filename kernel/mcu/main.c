@@ -10,6 +10,7 @@
 #include "backlight.h"
 #include "bluetooth.h"
 #include "console.h"
+#include "dht11.h"
 #include "fat32.h"
 #include "peripherals.h"
 #include "heap.h"
@@ -95,6 +96,7 @@ static void diagnostic_help(void) {
     printf("  uart          show all USART clock/baud/error state\n");
     printf("  perf          show clocks and main service latency\n");
     printf("  light         show ADC3 light sensor state\n");
+    printf("  dht           one DHT11 read with failure-stage diagnostics\n");
     printf("  sd retry      explicitly probe and initialize the TF card\n");
     printf("  fs [ls <dir>] | cat <path> | write <path> <text>"
            " | rm <path> | test\n");
@@ -302,6 +304,19 @@ static void diagnostic_execute(char *line) {
         diagnostic_performance();
     } else if (text_equal(line, "light")) {
         diagnostic_light_status();
+    } else if (text_equal(line, "dht")) {
+        stm32_dht11_debug_t d;
+        int r = stm32_dht11_read_debug(&d);
+        printf("[DHT] result=%s rest_level=%d failed_stage=%d bytes=%d"
+               " raw=%02x,%02x,%02x,%02x,%02x sum=%02x/%02x -> T=%dC H=%u%%\n",
+               r == 0 ? "OK" : "FAIL", d.rest_level, d.failed_stage,
+               d.bytes_read, d.raw[0], d.raw[1], d.raw[2], d.raw[3], d.raw[4],
+               d.checksum_calc, d.checksum_recv, (int)d.temp_c,
+               (unsigned)d.humidity);
+        printf("[DHT] resp_us=%d,%d,%d bit_us=%d,%d,%d,%d,%d,%d,%d,%d\n",
+               d.resp_us[0], d.resp_us[1], d.resp_us[2], d.bit_us[0],
+               d.bit_us[1], d.bit_us[2], d.bit_us[3], d.bit_us[4], d.bit_us[5],
+               d.bit_us[6], d.bit_us[7]);
     } else if (text_equal(line, "sd retry")) {
         int result = stm32_peripherals_retry_sdcard();
         printf("[TF-DIAG] retry=%s\n",
