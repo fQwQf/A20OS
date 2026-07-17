@@ -1,7 +1,7 @@
 #include "mm/slab.h"
 #include "core/arch.h"
 #include "core/string.h"
-#include "extsram.h"
+#include "drivers/stm32f1/extsram.h"
 #include "heap.h"
 
 typedef struct mcu_heap_block {

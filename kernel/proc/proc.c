@@ -40,10 +40,7 @@ static pt_root_t *kernel_pgdir_shared;
 spinlock_t proc_lock = SPINLOCK_INIT;
 
 static uint64_t g_idle_kstack[CONFIG_NR_CPUS];
-#ifdef CONFIG_ARMV7M
-static task_context_t armv7m_idle_context[CONFIG_NR_CPUS]
-    __attribute__((aligned(8)));
-#endif
+ARCH_IDLE_CONTEXT_STATIC(arch_idle_context, CONFIG_NR_CPUS);
 
 static void proc_link_task_locked(task_t *t)
 {
@@ -294,23 +291,11 @@ void proc_init(void) {
 #endif
 
     // 分配内核栈
-#ifdef CONFIG_ARMV7M
-    void *idle_stack = &armv7m_idle_context[0];
-    uintptr_t stack_top;
-    __asm__ __volatile__("mov %0, sp" : "=r"(stack_top));
-#else
-    void *idle_stack = kmalloc(KERNEL_STACK_SIZE);
+    void *idle_stack = ARCH_IDLE_STACK(arch_idle_context, 0);
     if (!idle_stack) panic("proc_init: no memory for idle stack");
-    memset(idle_stack, 0, KERNEL_STACK_SIZE);
-
-    // 设置任务上下文
-    uintptr_t stack_top = (uintptr_t)idle_stack + KERNEL_STACK_SIZE;
-#endif
-#ifdef CONFIG_ARMV7M
+    ARCH_IDLE_STACK_INIT(idle_stack);
+    uintptr_t stack_top = ARCH_IDLE_STACK_TOP(idle_stack);
     task_context_t *ctx = arch_task_context_base(idle_stack, stack_top, NULL);
-#else
-    task_context_t *ctx = (task_context_t *)(stack_top - sizeof(task_context_t));
-#endif
     memset(ctx, 0, sizeof(*ctx));
     ctx->ra   = (uintptr_t)idle_loop;
     ctx->tp   = (uintptr_t)idle;

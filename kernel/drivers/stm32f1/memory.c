@@ -1,8 +1,8 @@
 #ifdef CONFIG_BOARD_STM32F103
 
-#include "memory.h"
+#include "drivers/stm32f1/memory.h"
 #include "mcu/heap.h"
-#include "extsram.h"
+#include "drivers/stm32f1/extsram.h"
 
 #define STM32_DBGMCU_IDCODE (*(volatile uint32_t *)0xE0042000UL)
 #define STM32_FLASH_SIZE_KB (*(volatile uint16_t *)0x1FFFF7E0UL)
