@@ -40,7 +40,17 @@ typedef struct live2d {
     uint32_t last_advance_ms;
     uint32_t talk_deadline_ms; /* when TALK auto-reverts to IDLE (0 = never) */
     int dirty;               /* set when the visible frame changed */
+    int stopped;             /* one-shot state finished; parked on frame 0 */
 } live2d_t;
+
+/*
+ * Does state `s` loop forever, or play once and park? IDLE plays a single
+ * cycle and then holds frame 0: it is on screen almost all the time, and an
+ * endlessly looping idle costs a sprite blit every LIVE2D_FRAME_MS (plus the
+ * FSMC traffic behind it) to show a catgirl who is doing nothing. The lively
+ * states (TALK/HAPPY/WARN) keep looping — they are short-lived by design.
+ */
+int live2d_state_loops(live2d_state_t s);
 
 void live2d_init(live2d_t *l);
 
@@ -69,7 +79,8 @@ void live2d_speak(live2d_t *l, const char *speech, uint32_t now_ms);
 /*
  * Advance the animation to now_ms. Handles the TALK->IDLE timeout and frame
  * stepping. Returns 1 if the visible frame/state changed (renderer should
- * redraw the sprite region), 0 otherwise.
+ * redraw the sprite region), 0 otherwise. A parked one-shot state returns 0
+ * forever, so the service loop stops touching the panel entirely.
  */
 int live2d_tick(live2d_t *l, uint32_t now_ms);
 
