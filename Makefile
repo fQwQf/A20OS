@@ -1527,8 +1527,8 @@ $(VBOX_AARCH64_EFI): $(KERNEL_BIN) kernel/boot/uefi/aarch64_loader.c kernel/boot
 		-O pei-aarch64-little --subsystem efi-app \
 		$(BUILD_DIR)/uefi-loader.so $@
 
-$(VBOX_AARCH64_IMG): $(VBOX_AARCH64_EFI) scripts/mk_uefi_fat_image.sh
-	scripts/mk_uefi_fat_image.sh $< $@
+$(VBOX_AARCH64_IMG): $(VBOX_AARCH64_EFI) $(FAT32_IMG) scripts/mk_uefi_fat_image.sh
+	scripts/mk_uefi_fat_image.sh $(VBOX_AARCH64_EFI) $@ $(FAT32_IMG)
 
 $(KERNEL_ELF): $(KERNEL_OBJ) $(ASM_OBJ) $(LDSCRIPT)
 	@mkdir -p $(dir $@)
@@ -1647,8 +1647,18 @@ _vbox_iso_x86_64_impl: dev-build
 vbox-image-aarch64:
 	$(MAKE) ARCH=aarch64 BOARD=virtualbox-aarch64 ABI=both BRINGUP=0 _vbox_image_aarch64_impl
 
+# The ARM VirtualBox target is a graphical machine by default.  Its kernel
+# runs the SVGAv3/VMSVGA driver and the image carries the GUI marker used by
+# /bin/init to start the desktop instead of the serial-only shell.
+vbox-gui-image-aarch64:
+	$(MAKE) ARCH=aarch64 BOARD=virtualbox-aarch64 ABI=both BRINGUP=0 _vbox_gui_image_aarch64_impl
+
 _vbox_image_aarch64_impl: $(VBOX_AARCH64_IMG)
 	@echo "VirtualBox ARM64 image ready: $(VBOX_AARCH64_IMG)"
+
+_vbox_gui_image_aarch64_impl: $(VBOX_AARCH64_EFI) $(GUI_FAT32_IMG) scripts/mk_uefi_fat_image.sh
+	scripts/mk_uefi_fat_image.sh $(VBOX_AARCH64_EFI) $(BUILD_DIR)/a20os-vbox-aarch64-gui.img $(GUI_FAT32_IMG)
+	@echo "VirtualBox ARM64 GUI image ready: $(BUILD_DIR)/a20os-vbox-aarch64-gui.img"
 
 run-arm32:
 	$(MAKE) ARCH=arm32 BRINGUP=$(BRINGUP) _run_impl
@@ -1909,6 +1919,9 @@ NATIVE_LIBC_SRC  := \
     user/liba20c/malloc.c \
     user/liba20c/bare_alloc.c \
     user/liba20c/unistd.c \
+    user/liba20c/dirent.c \
+    user/liba20c/fcntl.c \
+    user/liba20c/stdlib.c \
     user/liba20c/stdio.c \
     user/liba20c/printf.c \
     user/liba20c/string.c \

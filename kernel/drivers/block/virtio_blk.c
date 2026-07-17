@@ -1,5 +1,6 @@
 #include "drivers/block/virtio_blk.h"
 #include "drivers/bus/virtio_transport.h"
+#include "drivers/bus/pci_bus.h"
 #include "drivers/core/driver_core.h"
 #include "drivers/core/driver_class.h"
 #include "drivers/core/driver_hwapi.h"
@@ -536,27 +537,33 @@ static int virtio_blk_driver_probe(device_t *dev) {
         return -1;
     }
 
-    resource_t *mmio_res = device_get_resource(dev, RES_MMIO, 0);
-    if (!mmio_res) {
-        kinfo("[VIRTIO-BLK] No MMIO resource for device '%s'\n", dev->name);
-        return -1;
-    }
-
     int idx = g_ninst;
     virtio_blk_inst_t *inst = &g_insts[idx];
     memset(inst, 0, sizeof(*inst));
 
-    inst->vt.read32  = virtio_blk_mmio_read32;
-    inst->vt.write32 = virtio_blk_mmio_write32;
-    inst->vt.priv    = (void *)(uintptr_t)mmio_res->start;
+    if (dev->bus == &pci_bus) {
+        if (pci_virtio_transport_init(dev, 2, &inst->vt) != 0) {
+            kinfo("[VIRTIO-BLK] PCI transport setup failed for '%s'\n", dev->name);
+            return -1;
+        }
+    } else {
+        resource_t *mmio_res = device_get_resource(dev, RES_MMIO, 0);
+        if (!mmio_res) {
+            kinfo("[VIRTIO-BLK] No MMIO resource for device '%s'\n", dev->name);
+            return -1;
+        }
+        inst->vt.read32  = virtio_blk_mmio_read32;
+        inst->vt.write32 = virtio_blk_mmio_write32;
+        inst->vt.priv    = (void *)(uintptr_t)mmio_res->start;
+    }
 
     uint32_t magic   = inst->vt.read32(&inst->vt, VIRTIO_MMIO_MAGIC);
     uint32_t version = inst->vt.read32(&inst->vt, VIRTIO_MMIO_VERSION);
     uint32_t dev_id  = inst->vt.read32(&inst->vt, VIRTIO_MMIO_DEVICE_ID);
 
     if (magic != 0x74726976 || (version != 1 && version != 2) || dev_id != 2) {
-        kinfo("[VIRTIO-BLK] Invalid device at 0x%lx (magic=0x%x version=%d dev_id=%d)\n",
-              (unsigned long)mmio_res->start, magic, version, dev_id);
+        kinfo("[VIRTIO-BLK] Invalid transport (magic=0x%x version=%d dev_id=%d)\n",
+              magic, version, dev_id);
         return -1;
     }
 
@@ -571,7 +578,10 @@ static int virtio_blk_driver_probe(device_t *dev) {
     }
 
     resource_t *irq_res = device_get_resource(dev, RES_IRQ, 0);
-    if (irq_res) {
+    if (inst->vt.irq >= 0) {
+        /* The generic PCI transport currently uses polling until IRQ routing
+         * is supplied by the VirtualBox ACPI interrupt controller tables. */
+    } else if (irq_res) {
         if (request_irq((uint32_t)irq_res->start, virtio_blk_irq_handler, 0, inst) != 0)
             kinfo("[VIRTIO-BLK] Failed to register IRQ %lu for '%s'\n",
                   (unsigned long)irq_res->start, dev->name);
@@ -580,8 +590,8 @@ static int virtio_blk_driver_probe(device_t *dev) {
     }
 
     g_ninst++;
-    kinfo("[VIRTIO-BLK] Probed device '%s' at 0x%lx (legacy=%d irq=%lu)\n",
-          dev->name, (unsigned long)mmio_res->start, inst->vt.legacy,
+    kinfo("[VIRTIO-BLK] Probed device '%s' (legacy=%d irq=%lu)\n",
+          dev->name, inst->vt.legacy,
           irq_res ? (unsigned long)irq_res->start : 0);
     return 0;
 }
@@ -614,7 +624,10 @@ static block_dev_ops_t virtio_blk_class_ops = {
 };
 
 static const device_id_t virtio_blk_ids[] = {
-    { .vendor = 0x1AF4, .device = 0x1002 },
+    { .vendor = 0x1AF4, .device = 0x1002,
+      .subvendor = VENDOR_ANY, .subdevice = DEVICE_ANY },
+    { .vendor = 0x1AF4, .device = 0x1042,
+      .subvendor = VENDOR_ANY, .subdevice = DEVICE_ANY },
     { 0 },
 };
 

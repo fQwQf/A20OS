@@ -17,9 +17,13 @@
 enum {
     TOPBAR_HEIGHT = 50,
     SIDEBAR_WIDTH = 74,
-    CURSOR_WIDTH = 12,
-    CURSOR_HEIGHT = 20,
+    CURSOR_WIDTH = 32,
+    CURSOR_HEIGHT = 32,
+    CURSOR_HOTSPOT_X = 4,
+    CURSOR_HOTSPOT_Y = 4,
 };
+
+extern const lv_image_dsc_t breeze_cursor_default_image;
 
 static const desktop_app_t *app_registry[] = {
     &desktop_app_dashboard,
@@ -31,7 +35,6 @@ static const desktop_app_t *app_registry[] = {
     &desktop_app_system,
 };
 
-static uint32_t cursor_pixels[CURSOR_WIDTH * CURSOR_HEIGHT];
 static lv_obj_t *topbar_clock_label;
 static lv_obj_t *topbar_date_label;
 static lv_obj_t *topbar_mem_label;
@@ -42,16 +45,6 @@ static lv_obj_t *nav_buttons[sizeof(app_registry) / sizeof(app_registry[0])];
 static lv_obj_t *current_app_view;
 static int current_app_index = -1;
 
-static const lv_image_dsc_t cursor_image = {
-    .header = {
-        .cf = LV_COLOR_FORMAT_ARGB8888,
-        .w = CURSOR_WIDTH,
-        .h = CURSOR_HEIGHT,
-        .stride = CURSOR_WIDTH * sizeof(uint32_t),
-    },
-    .data_size = sizeof(cursor_pixels),
-    .data = (const uint8_t *)cursor_pixels,
-};
 
 static uint32_t desktop_tick_get(void)
 {
@@ -60,18 +53,6 @@ static uint32_t desktop_tick_get(void)
         return 0;
     return (uint32_t)((uint64_t)now.tv_sec * 1000U +
                       (uint64_t)now.tv_nsec / 1000000U);
-}
-
-static void init_cursor_image(void)
-{
-    memset(cursor_pixels, 0, sizeof(cursor_pixels));
-    for (int32_t y = 0; y < CURSOR_HEIGHT; y++) {
-        int32_t row_width = 1 + (y * (CURSOR_WIDTH - 1)) / (CURSOR_HEIGHT - 1);
-        for (int32_t x = 0; x < row_width; x++) {
-            bool edge = x == 0 || x == row_width - 1 || y == CURSOR_HEIGHT - 1;
-            cursor_pixels[y * CURSOR_WIDTH + x] = edge ? 0xff111619U : 0xfff9fbfcU;
-        }
-    }
 }
 
 static void format_uptime(char *buffer, size_t size, unsigned long seconds)
@@ -317,9 +298,9 @@ int main(int argc, char **argv)
     create_sidebar(screen);
     create_content_area(screen);
 
-    init_cursor_image();
     lv_obj_t *cursor_obj = lv_image_create(lv_layer_sys());
-    lv_image_set_src(cursor_obj, &cursor_image);
+    lv_image_set_src(cursor_obj, &breeze_cursor_default_image);
+    lv_obj_set_pos(cursor_obj, -CURSOR_HOTSPOT_X, -CURSOR_HOTSPOT_Y);
     if (mouse_indev)
         lv_indev_set_cursor(mouse_indev, cursor_obj);
 

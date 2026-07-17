@@ -17,6 +17,7 @@
 #include "core/random.h"
 #include "fs/vfs.h"
 #include "drivers/block/virtio_blk.h"
+#include "drivers/block/virtio_scsi.h"
 #ifdef CONFIG_X86_64
 #include "drivers/block/ahci.h"
 #endif
@@ -54,6 +55,69 @@ void init_kthread(void);
  * ============================================================ */
 
 #ifndef BRINGUP
+typedef struct {
+    block_dev_t block;
+    block_dev_t *parent;
+    uint64_t first_lba;
+    uint64_t sectors;
+} partition_block_dev_t;
+
+static int partition_read_sector(block_dev_t *block, uint64_t lba, void *buf,
+                                 size_t count) {
+    partition_block_dev_t *part = (partition_block_dev_t *)block->priv;
+    if (!part || !part->parent || lba > part->sectors ||
+        count > part->sectors - lba)
+        return -1;
+    return part->parent->read_sector(part->parent, part->first_lba + lba, buf, count);
+}
+
+static int partition_write_sector(block_dev_t *block, uint64_t lba, const void *buf,
+                                  size_t count) {
+    partition_block_dev_t *part = (partition_block_dev_t *)block->priv;
+    if (!part || !part->parent || lba > part->sectors ||
+        count > part->sectors - lba)
+        return -1;
+    return part->parent->write_sector(part->parent, part->first_lba + lba, buf, count);
+}
+
+/* The VBox UEFI image is GPT-partitioned.  Expose its first partition to the
+ * existing FAT/ext4 mount code instead of assuming a superfloppy image. */
+static block_dev_t *first_gpt_partition(block_dev_t *parent) {
+    static partition_block_dev_t partition;
+    uint8_t entry[128];
+    uint8_t header[512];
+    if (!parent || !parent->read_sector || parent->read_sector(parent, 1, header, 1) != 0)
+        return NULL;
+    if (memcmp(header, "EFI PART", 8) != 0)
+        return NULL;
+
+    uint64_t entries_lba = 0;
+    for (int i = 0; i < 8; i++)
+        entries_lba |= (uint64_t)header[72 + i] << (i * 8);
+    uint32_t entry_size = (uint32_t)header[84] | ((uint32_t)header[85] << 8) |
+                          ((uint32_t)header[86] << 16) | ((uint32_t)header[87] << 24);
+    if (!entries_lba || entry_size < sizeof(entry) || entry_size > 512 ||
+        parent->read_sector(parent, entries_lba, entry, 1) != 0)
+        return NULL;
+
+    uint64_t first = 0, last = 0;
+    for (int i = 0; i < 8; i++) {
+        first |= (uint64_t)entry[32 + i] << (i * 8);
+        last |= (uint64_t)entry[40 + i] << (i * 8);
+    }
+    if (!first || last < first || last >= parent->capacity)
+        return NULL;
+    partition.parent = parent;
+    partition.first_lba = first;
+    partition.sectors = last - first + 1;
+    partition.block.read_sector = partition_read_sector;
+    partition.block.write_sector = partition_write_sector;
+    partition.block.capacity = partition.sectors;
+    partition.block.sector_size = parent->sector_size;
+    partition.block.priv = &partition;
+    return &partition.block;
+}
+
 static int try_mount(block_dev_t *dev, const char *mnt, const char *fstype) {
     if (!dev) return -1;
     bcache_t *bc = bcache_create(dev);
@@ -87,6 +151,24 @@ static void mount_block_devices(void) {
             test_ok = 1;
             continue;
         }
+    }
+
+    /* VirtualBox ARM exposes its boot disk through a VirtIO-SCSI controller,
+     * not a VirtIO block function. The controller driver is bound during PCI
+     * enumeration, so mount any discovered LUNs alongside virtio-blk disks. */
+    for (int i = 0; i < 4; i++) {
+        block_dev_t *scsi = virtio_scsi_get_dev(i);
+        if (!scsi)
+            continue;
+        block_dev_t *fsdev = first_gpt_partition(scsi);
+        if (!fsdev)
+            fsdev = scsi;
+        if (!bin_ok && try_mount(fsdev, "/bin", "fat32") == 0) {
+            bin_ok = 1;
+            continue;
+        }
+        if (!test_ok && try_mount(fsdev, "/test", "ext4") == 0)
+            test_ok = 1;
     }
 
     block_dev_t *ahci = NULL;
@@ -187,9 +269,16 @@ void kernel_main(void) {
     printf("[INIT] System ready (bringup, no userspace)\n\n");
     bringup_smoke_test();
 #else
+#ifdef CONFIG_BOARD_VIRTUALBOX_AARCH64
+    /* VBox has no usable preemption timer yet.  Bootstrap PID 1 directly from
+     * the idle context instead of requiring an otherwise unnecessary first
+     * kernel-thread switch before userspace can exist. */
+    printf("[INIT] bootstrapping userspace directly on VirtualBox\n");
+#else
     int ret = proc_alloc(init_kthread);
     if (ret < 0)
         panic("Failed to create init_kthread");
+#endif
 
     printf("[INIT] System ready\n\n");
     printf("\033[1;36m");
@@ -222,8 +311,12 @@ void kernel_main(void) {
     printf("Welcome to A20OS!\n\n");
     printf("[INIT] entering scheduler...\n");
 
+#ifdef CONFIG_BOARD_VIRTUALBOX_AARCH64
+    init_kthread();
+#else
     sched();
     idle_loop();
+#endif
 #endif
 }
 
@@ -286,10 +379,19 @@ void init_kthread(void) {
 
 #ifdef CONFIG_NOMMU
     arch_flush_icache_range((const void *)info.load_addr, info.load_size);
+#else
+    /* map_segment() cleaned executable pages through their direct-map alias;
+     * discard any stale instruction lines before this image first runs. */
+    arch_fence_i();
 #endif
 
     printf("[INIT] user init created: pid=%d entry=0x%lx sp=0x%lx\n",
            ret, (unsigned long)info.entry, (unsigned long)user_sp);
+
+#ifdef CONFIG_BOARD_VIRTUALBOX_AARCH64
+    /* PID 0 remains the reaper and scheduler host. */
+    idle_loop();
+#endif
 
     /* Become the init reaper: wait for any children (including the user init
      * process) so they don't become un-reaped zombies. */

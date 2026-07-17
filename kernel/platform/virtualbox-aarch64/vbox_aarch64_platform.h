@@ -22,4 +22,7 @@
 #define IRQ_S_TIMER        30U
 #define UART0_IRQ          33U
 
+/* The ECAM/MMIO windows are supplied by ACPI MCFG and PCI BARs at runtime. */
+#define VBOX_PCI_MAX_BUS    256U
+
 #endif /* _VBOX_AARCH64_PLATFORM_H */

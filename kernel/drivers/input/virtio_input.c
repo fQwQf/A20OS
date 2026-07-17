@@ -1,5 +1,6 @@
 #include "drivers/input/virtio_input.h"
 #include "drivers/bus/virtio_transport.h"
+#include "drivers/bus/pci_bus.h"
 #include "drivers/core/driver_core.h"
 #include "drivers/core/driver_register.h"
 #include "drivers/core/driver_hwapi.h"
@@ -297,11 +298,8 @@ static int virtio_input_init_transport(device_t *dev,
     vt->write32(vt, VIRTIO_MMIO_QUEUE_READY, 1);
     mb();
     
-    if (vt->irq < 0 || vt->irq >= (int)sizeof(g_input_irq_registered)) {
-        kinfo("[INPUT] Failed to register IRQ\n");
-        goto fail;
-    }
-    if (!g_input_irq_registered[vt->irq]) {
+    if (vt->irq >= 0 && vt->irq < (int)sizeof(g_input_irq_registered) &&
+        !g_input_irq_registered[vt->irq]) {
         if (request_irq((uint32_t)vt->irq, virtio_input_irq, 0, NULL) != 0) {
             kinfo("[INPUT] Failed to register IRQ\n");
             goto fail;
@@ -334,6 +332,13 @@ fail:
 }
 
 static int virtio_input_probe(device_t *dev) {
+    if (dev->bus == &pci_bus) {
+        virtio_transport_t vt;
+        if (pci_virtio_transport_init(dev, 18, &vt) != 0)
+            return -1;
+        return virtio_input_init_transport(dev, &vt);
+    }
+
     resource_t *mmio_res = device_get_resource(dev, RES_MMIO, 0);
     resource_t *irq_res = device_get_resource(dev, RES_IRQ, 0);
     if (!mmio_res || !irq_res)
@@ -370,7 +375,9 @@ int virtio_input_init(void) {
 }
 
 static const device_id_t virtio_input_ids[] = {
-    { .vendor = VENDOR_ANY, .device = 18 }, // VIRTIO_ID_INPUT
+    { .vendor = 0x1AF4, .device = 0x1052,
+      .subvendor = VENDOR_ANY, .subdevice = DEVICE_ANY },
+    { .vendor = 0x1AF4, .device = 0x1012, .subvendor = VENDOR_ANY, .subdevice = 18 },
     { 0 },
 };
 

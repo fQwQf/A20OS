@@ -230,6 +230,18 @@ static int map_segment(mm_struct_t *mm, pt_root_t *pgdir,
 
         int r = pt_map(pgdir, page, va_to_pa(frame), flags);
         if (r < 0) { frame_free(frame); return r; }
+
+        /*
+         * The loader populates a user page through its kernel direct-map
+         * alias.  On non-coherent I/D-cache implementations, invalidating
+         * the I-cache later is not sufficient: the new instructions may
+         * still only exist in dirty D-cache lines under this alias.  Clean
+         * and invalidate executable pages while the address used for the
+         * writes is available.  This is required by real AArch64 hardware
+         * and VirtualBox even though QEMU's cache model often hides it.
+         */
+        if (flags & PTE_X)
+            arch_flush_icache_range(frame, PAGE_SIZE);
     }
     arch_tlb_flush();
     return elf_add_vma(mm, start, end, pte_to_vm_flags(flags), flags);
