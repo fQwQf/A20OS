@@ -42,6 +42,9 @@ STM32_BT_PIN ?= 2233
 STM32_BT_UUID ?= 1101
 STM32_BT_BAUD ?= 38400
 STM32_QEMU ?= 0
+STM32_LEGACY_DASHBOARD ?= 0
+STM32_XUANWU_BUILD_DIR = .kernel-build/armv7m-both-bringup-nommu-stm32f103-f512k-r64k$(if $(filter 1,$(STM32_LEGACY_DASHBOARD)),-legacy,)
+STM32_XUANWU_ELF = $(STM32_XUANWU_BUILD_DIR)/kernel.elf
 STM32_WIFI_SSID ?=
 STM32_WIFI_PASSWORD ?=
 ifeq ($(ARCH),armv7m)
@@ -91,6 +94,7 @@ BUILD_VARIANT = $(ABI)-$(if $(filter 1,$(BRINGUP)),bringup,dev)$(if $(filter 1,$
 ifeq ($(ARCH),armv7m)
 BUILD_VARIANT := $(BUILD_VARIANT)-$(BOARD)-f$(STM32_FLASH_KB)k-r$(STM32_RAM_KB)k
 BUILD_VARIANT := $(BUILD_VARIANT)$(if $(filter 1,$(STM32_QEMU)),-qemu,)
+BUILD_VARIANT := $(BUILD_VARIANT)$(if $(filter 1,$(STM32_LEGACY_DASHBOARD)),-legacy,)
 endif
 BUILD_DIR = .kernel-build/$(ARCH)-$(BUILD_VARIANT)
 FAT32_IMG = $(BUILD_DIR)/fat32.img
@@ -357,6 +361,9 @@ CFLAGS += -DCONFIG_STM32_XUANWU
 endif
 ifeq ($(STM32_QEMU),1)
 CFLAGS += -DCONFIG_STM32_QEMU
+endif
+ifeq ($(STM32_LEGACY_DASHBOARD),1)
+CFLAGS += -DCONFIG_STM32_LEGACY_DASHBOARD
 endif
 endif
 ifeq ($(filter $(ARCH),arm32 armv7m riscv32),)
@@ -1511,8 +1518,8 @@ stm32f103-xuanwu:
 	$(MAKE) ARCH=armv7m BOARD=stm32f103 PROFILE=mcu STM32_FLASH_KB=512 STM32_RAM_KB=64 STM32_XUANWU=1 kernel-only
 
 check-stm32f103:
-	$(MAKE) stm32f103-bringup
 	$(MAKE) stm32f103-xuanwu
+	$(MAKE) STM32_LEGACY_DASHBOARD=1 stm32f103-xuanwu
 	@echo "check-stm32f103: PASS"
 
 flash-stm32f103-xuanwu: stm32f103-xuanwu
@@ -1529,8 +1536,8 @@ flash-stm32f103-xuanwu: stm32f103-xuanwu
 		-c "mww 0xE000EDF0 0xA05F0003" \
 		-c "sleep 50" \
 		-c "flash probe 0" \
-		-c "flash write_image erase .kernel-build/armv7m-both-bringup-nommu-stm32f103-f512k-r64k/kernel.elf" \
-		-c "verify_image .kernel-build/armv7m-both-bringup-nommu-stm32f103-f512k-r64k/kernel.elf" \
+		-c "flash write_image erase $(STM32_XUANWU_ELF)" \
+		-c "verify_image $(STM32_XUANWU_ELF)" \
 		-c "set boot_sp [mrw 0x08000000]" \
 		-c "set boot_pc [mrw 0x08000004]" \
 		-c "reg msp \$$boot_sp" \

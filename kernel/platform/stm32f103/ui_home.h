@@ -22,7 +22,7 @@
 #define UI_HOME_MAX_CARDS 4U
 #define UI_HOME_MAX_HITS 6U
 #define UI_HOME_SPEECH_LINES 3U
-#define UI_HOME_SPEECH_COLS 18U /* chars per bubble line (ASCII budget) */
+#define UI_HOME_SPEECH_COLS 18U /* 6 px units; CJK consumes three units */
 
 typedef enum ui_action {
     UI_ACTION_NONE = 0,
@@ -66,8 +66,8 @@ typedef struct ui_home_model {
     const char *alert_label; /* "" when none, else "HEAT"/"DRY"/"SENSOR" */
     uint16_t alert_color;
 
-    /* Speech bubble, word-wrapped into fixed lines (ASCII-measured; multibyte
-     * UTF-8 is kept intact but counts by byte for the width budget). */
+    /* Speech bubble, word-wrapped into fixed pixel-budget units. UTF-8 is kept
+     * intact; ASCII consumes one unit and a 16x16 CJK glyph consumes three. */
     char speech[UI_HOME_SPEECH_LINES][UI_HOME_SPEECH_COLS * 3U + 1U];
     unsigned speech_lines;
     int cat_mood; /* 0..3, mirrors the Live2D state */
