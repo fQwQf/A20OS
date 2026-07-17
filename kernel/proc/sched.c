@@ -512,6 +512,11 @@ void context_switch(task_t *next) {
 }
 
 void sched(void) {
+    task_t *sched_owner = proc_current();
+#ifdef CONFIG_ARMV7M
+    if (sched_owner)
+        sched_owner->arch_preempt_disable++;
+#endif
     uint64_t now = timer_get_ticks();
 
     /* Run event-driven network bottom-halves before picking the next task.
@@ -534,13 +539,13 @@ void sched(void) {
     if (next) {
         next->exec_start = now;
         context_switch(next);
-        return;
+        goto out;
     }
 
     task_t *cur = proc_current();
     if (cur && (cur->state == PROC_READY || cur->state == PROC_RUNNING)) {
         cur->state = PROC_RUNNING;
-        return;
+        goto out;
     }
 
     task_t *idle = proc_idle_task();
@@ -549,6 +554,13 @@ void sched(void) {
             ktrace_sched("[SCHED] fall-to-idle: cur=%d state=%d\n", cur->pid, cur->state);
         context_switch(idle);
     }
+
+out:
+#ifdef CONFIG_ARMV7M
+    /* A switched-out task returns here only when that same task is resumed. */
+    if (sched_owner && sched_owner->arch_preempt_disable)
+        sched_owner->arch_preempt_disable--;
+#endif
 }
 
 void proc_yield(void) {
