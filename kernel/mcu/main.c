@@ -10,9 +10,11 @@
 #include "backlight.h"
 #include "bluetooth.h"
 #include "console.h"
+#include "fat32.h"
 #include "peripherals.h"
 #include "heap.h"
 #include "light_sensor.h"
+#include "sdfs.h"
 #include "smarthub.h"
 #include "stm32_uart.h"
 #include "wifi.h"
@@ -94,6 +96,8 @@ static void diagnostic_help(void) {
     printf("  perf          show clocks and main service latency\n");
     printf("  light         show ADC3 light sensor state\n");
     printf("  sd retry      explicitly probe and initialize the TF card\n");
+    printf("  fs [ls <dir>] | cat <path> | write <path> <text>"
+           " | rm <path> | test\n");
     printf("  bt            show HC-05 detection/configuration state\n");
     printf("  bt retry      rerun HC-05 detection and slave configuration\n");
     printf("  bt probe      scan HC-05 runtime AT baud/key modes\n");
@@ -105,8 +109,150 @@ static void diagnostic_help(void) {
     printf("  wifi open <tcp|udp> <host> <port>  open a socket\n");
     printf("  wifi send <text> / wifi read / wifi close\n");
     printf("  wifi at <cmd> send a raw ESP8266 AT command\n");
+    printf("  wifi debug <on|off>  per-command AT logging (default off)\n");
     printf("  proxy <ip> <port>  set the cloud proxy for auto cloud control\n");
     printf("  help          show this command list\n");
+}
+
+/* Shared scratch for the fs command — keep it off the (small) console stack. */
+static uint8_t fs_buf[256];
+
+static uint8_t fs_pattern(uint32_t i) { return (uint8_t)((i * 7u + 3u) & 0xFF); }
+
+static void diagnostic_fs_ls(fat32_fs_t *fs, const char *path) {
+    fat32_dir_t d;
+    int r = fat32_opendir(fs, path, &d);
+    if (r) {
+        printf("[FS] opendir %s err=%d\n", path, r);
+        return;
+    }
+    printf("[FS] ls %s\n", path);
+    fat32_dirent_t e;
+    unsigned n = 0;
+    while ((r = fat32_readdir(&d, &e)) == FAT32_OK) {
+        printf("  %s\t%s\t%u\n", e.name, e.is_dir ? "<DIR>" : "file",
+               (unsigned)e.size);
+        n++;
+    }
+    printf("[FS] %u entries (end=%d)\n", n, r);
+}
+
+static void diagnostic_fs_cat(fat32_fs_t *fs, const char *path) {
+    fat32_file_t f;
+    int r = fat32_open(fs, path, &f);
+    if (r) {
+        printf("[FS] open %s err=%d\n", path, r);
+        return;
+    }
+    printf("[FS] cat %s size=%u\n", path, (unsigned)fat32_size(&f));
+    uint32_t shown = 0;
+    int n;
+    while (shown < 1024u && (n = fat32_read(&f, fs_buf, sizeof(fs_buf))) > 0) {
+        for (int i = 0; i < n && shown < 1024u; i++, shown++) {
+            char c = (char)fs_buf[i];
+            printf("%c", (c == '\n' || (c >= 32 && c <= 126)) ? c : '.');
+        }
+    }
+    printf("\n[FS] shown=%u bytes\n", (unsigned)shown);
+    fat32_close(&f);
+}
+
+static void diagnostic_fs_test(fat32_fs_t *fs) {
+    const char *path = "/FSTEST.BIN";
+    const uint32_t N = 40000u; /* > one cluster: exercises chain allocation */
+    fat32_file_t f;
+    int r = fat32_create(fs, path, &f);
+    if (r) {
+        printf("[FS] test: create err=%d\n", r);
+        return;
+    }
+    int ok = 1;
+    uint32_t off = 0;
+    while (off < N) {
+        uint32_t chunk = N - off;
+        if (chunk > sizeof(fs_buf))
+            chunk = sizeof(fs_buf);
+        for (uint32_t i = 0; i < chunk; i++)
+            fs_buf[i] = fs_pattern(off + i);
+        int w = fat32_write(&f, fs_buf, chunk);
+        if (w != (int)chunk) {
+            printf("[FS] test: write@%u got=%d\n", (unsigned)off, w);
+            ok = 0;
+            break;
+        }
+        off += chunk;
+    }
+    uint32_t wrote = fat32_size(&f);
+    fat32_close(&f);
+
+    uint32_t got = 0, bad = 0;
+    if (ok && (r = fat32_open(fs, path, &f)) != FAT32_OK) {
+        printf("[FS] test: reopen err=%d\n", r);
+        ok = 0;
+    }
+    if (ok) {
+        int n;
+        while ((n = fat32_read(&f, fs_buf, sizeof(fs_buf))) > 0) {
+            for (int i = 0; i < n; i++)
+                if (fs_buf[i] != fs_pattern(got + (uint32_t)i))
+                    bad++;
+            got += (uint32_t)n;
+        }
+        fat32_close(&f);
+    }
+    fat32_unlink(fs, path);
+    printf("[FS] test %s wrote=%u size=%u readback=%u mismatches=%u\n",
+           (ok && bad == 0 && got == N) ? "PASS" : "FAIL", (unsigned)N,
+           (unsigned)wrote, (unsigned)got, (unsigned)bad);
+}
+
+static void diagnostic_fs(char *args) {
+    if (!stm32_sdfs_ready()) {
+        int m = stm32_sdfs_mount();
+        if (m != FAT32_OK) {
+            printf("[FS] not-mounted err=%d (try 'sd retry' first)\n", m);
+            return;
+        }
+    }
+    fat32_fs_t *fs = stm32_sdfs();
+    if (!fs) {
+        printf("[FS] no filesystem\n");
+        return;
+    }
+    if (!args[0] || text_equal(args, "ls")) {
+        diagnostic_fs_ls(fs, "/");
+    } else if (text_starts_with(args, "ls ")) {
+        diagnostic_fs_ls(fs, args + 3);
+    } else if (text_starts_with(args, "cat ")) {
+        diagnostic_fs_cat(fs, args + 4);
+    } else if (text_starts_with(args, "write ")) {
+        char *rest = args + 6;
+        char *sp = strchr(rest, ' ');
+        if (!sp) {
+            printf("[FS] usage: fs write <path> <text>\n");
+            return;
+        }
+        *sp++ = '\0';
+        fat32_file_t f;
+        int r = fat32_create(fs, rest, &f);
+        if (r) {
+            printf("[FS] write: create %s err=%d\n", rest, r);
+            return;
+        }
+        int w = fat32_write(&f, sp, (uint32_t)strlen(sp));
+        r = fat32_close(&f);
+        printf("[FS] write %s bytes=%d close=%d\n", rest, w, r);
+    } else if (text_starts_with(args, "rm ")) {
+        const char *path = args + 3;
+        int r = fat32_unlink(fs, path);
+        printf("[FS] rm %s %s (err=%d)\n", path, r == FAT32_OK ? "ok" : "fail",
+               r);
+    } else if (text_equal(args, "test")) {
+        diagnostic_fs_test(fs);
+    } else {
+        printf("[FS] usage: fs [ls <dir>] | cat <path>"
+               " | write <path> <text> | rm <path> | test\n");
+    }
 }
 
 static void diagnostic_execute(char *line) {
@@ -161,6 +307,10 @@ static void diagnostic_execute(char *line) {
         printf("[TF-DIAG] retry=%s\n",
                result == 0 ? "ready" : "absent-or-failed");
         diagnostic_performance();
+    } else if (text_equal(line, "fs")) {
+        diagnostic_fs("");
+    } else if (text_starts_with(line, "fs ")) {
+        diagnostic_fs(line + 3);
     } else if (text_equal(line, "bt")) {
         stm32_bluetooth_debug_status();
     } else if (text_equal(line, "bt retry")) {
@@ -175,6 +325,10 @@ static void diagnostic_execute(char *line) {
         (void)stm32_bluetooth_debug_at(line + 6);
     } else if (text_equal(line, "wifi")) {
         stm32_wifi_debug_status();
+    } else if (text_starts_with(line, "wifi debug ")) {
+        int on = text_equal(line + 11, "on");
+        stm32_wifi_set_verbose(on);
+        printf("[WIFI-DIAG] per-command logging=%s\n", on ? "on" : "off");
     } else if (text_equal(line, "wifi retry")) {
         int result = stm32_peripherals_retry_wifi();
         printf("[WIFI-DIAG] retry=%s\n",

@@ -63,6 +63,10 @@ int stm32_wifi_send(const void *data, size_t length);
 int stm32_wifi_read(void *data, size_t capacity);
 int stm32_wifi_debug_at(const char *command);
 void stm32_wifi_debug_status(void);
+
+/* Per-AT-command logging (OFF by default — see wifi.c). */
+void stm32_wifi_set_verbose(int on);
+int stm32_wifi_verbose(void);
 const stm32_wifi_info_t *stm32_wifi_info(void);
 
 #endif

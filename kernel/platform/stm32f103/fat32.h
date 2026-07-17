@@ -106,4 +106,25 @@ int fat32_unlink(fat32_fs_t *fs, const char *path);
  * FAT32_ENOENT. */
 int fat32_stat(fat32_fs_t *fs, const char *path, int *is_dir, uint32_t *size);
 
+/* ---- directory listing ---- */
+typedef struct fat32_dir {
+    fat32_fs_t *fs;
+    uint32_t cluster;       /* current dir cluster (FAT_EOC-ish when done)  */
+    uint32_t sector_in_clus;
+    uint32_t ent_in_sector;
+} fat32_dir_t;
+
+typedef struct fat32_dirent {
+    char name[13]; /* 8.3 short name, "BASE.EXT", NUL-terminated           */
+    int is_dir;
+    uint32_t size; /* bytes (0 for directories)                            */
+} fat32_dirent_t;
+
+/* Open a directory for iteration. path "/" (or "") is the root. */
+int fat32_opendir(fat32_fs_t *fs, const char *path, fat32_dir_t *d);
+
+/* Fetch the next entry (skipping LFN/volume/deleted). Returns FAT32_OK and
+ * fills *out, or FAT32_ENOENT at end of directory, or a negative FAT32_E*. */
+int fat32_readdir(fat32_dir_t *d, fat32_dirent_t *out);
+
 #endif /* _STM32F103_FAT32_H */
