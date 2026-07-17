@@ -18,6 +18,7 @@
 #include "touch_cal.h"
 #include "ui_home.h"
 #include "live2d.h"
+#include "rgb_matrix.h"
 #include "core/stdio.h"
 
 static int str_eq(const char *a, const char *b) {
@@ -261,6 +262,39 @@ static int run_live2d_tests(void) {
     return fails;
 }
 
+/* --- RGB matrix framebuffer: bounds, color layout, fill and brightness. --- */
+static int run_rgb_matrix_tests(void) {
+    int fails = 0;
+    uint8_t saved_brightness = stm32_rgb_matrix_brightness();
+
+    stm32_rgb_matrix_clear();
+    if (stm32_rgb_matrix_set_pixel(2, 3, 0x123456U) != 0 ||
+        stm32_rgb_matrix_get_pixel(2, 3) != 0x123456U ||
+        stm32_rgb_matrix_set_pixel(5, 0, STM32_RGB_COLOR_RED) != -1 ||
+        stm32_rgb_matrix_set_pixel(0, 5, STM32_RGB_COLOR_RED) != -1) {
+        printf("[HUB] FAIL rgb-matrix pixel/bounds\n");
+        fails++;
+    }
+
+    stm32_rgb_matrix_fill(STM32_RGB_COLOR_YELLOW);
+    for (uint8_t y = 0; y < STM32_RGB_MATRIX_HEIGHT; y++) {
+        for (uint8_t x = 0; x < STM32_RGB_MATRIX_WIDTH; x++) {
+            if (stm32_rgb_matrix_get_pixel(x, y) != STM32_RGB_COLOR_YELLOW)
+                fails++;
+        }
+    }
+    stm32_rgb_matrix_set_brightness(73);
+    if (stm32_rgb_matrix_brightness() != 73U) {
+        printf("[HUB] FAIL rgb-matrix brightness\n");
+        fails++;
+    }
+    stm32_rgb_matrix_clear();
+    stm32_rgb_matrix_set_brightness(saved_brightness);
+    printf("[HUB] rgb-matrix: 5x5 framebuffer %s\n",
+           fails == 0 ? "PASS" : "FAIL");
+    return fails;
+}
+
 int smarthub_selftest(void) {
     printf("\n[HUB] ===== smart-hub core self-test =====\n");
     run_rule_demo();
@@ -269,6 +303,7 @@ int smarthub_selftest(void) {
     fails += run_touch_cal_tests();
     fails += run_ui_home_tests();
     fails += run_live2d_tests();
+    fails += run_rgb_matrix_tests();
     printf("[HUB] protocol self-test: %s (%d failure%s)\n",
            fails == 0 ? "PASS" : "FAIL", fails, fails == 1 ? "" : "s");
     printf("[HUB] ===== self-test done =====\n\n");
