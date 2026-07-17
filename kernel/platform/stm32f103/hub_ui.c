@@ -9,11 +9,13 @@
 live2d_state_t hub_ui_state(const hub_ui_input_t *in) {
     if (in->decision.alert != ENV_ALERT_NONE)
         return LIVE2D_WARN; /* something's wrong -> react regardless of cloud */
-    if (in->cloud_valid)
-        return live2d_mood_to_state(in->cloud_mood, 0);
+    if (in->cloud_valid) {
+        live2d_state_t state = live2d_mood_to_state(in->cloud_mood, 0);
+        return state == LIVE2D_TALK ? LIVE2D_IDLE : state;
+    }
     if (in->decision.fan_level == 0 && !in->decision.pump_on)
         return LIVE2D_HAPPY; /* calm, comfortable */
-    return LIVE2D_TALK;      /* actively managing the room */
+    return LIVE2D_IDLE;      /* active controls do not imply speech */
 }
 
 void hub_ui_build(const hub_ui_input_t *in, ui_home_state_t *out) {
