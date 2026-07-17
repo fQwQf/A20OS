@@ -17,6 +17,10 @@
 #include "rgb_matrix.h"
 #include "heap.h"
 #include "light_sensor.h"
+#include "extsram.h"
+#include "live2d.h"
+#include "live2d_load.h"
+#include "sdcard.h"
 #include "sdfs.h"
 #include "smarthub.h"
 #include "stm32_uart.h"
@@ -105,6 +109,10 @@ static void diagnostic_help(void) {
     printf("  rgb clear | fill <RRGGBB> | pixel <x> <y> <RRGGBB>\n");
     printf("  rgb brightness <0-255> | test\n");
     printf("  sd retry      explicitly probe and initialize the TF card\n");
+    printf("  sd            TF transfer diagnostics (SDIO_CK + error counts)\n");
+    printf("  sd clk <mhz>  retune the SDIO data clock (0.1-24), no reflash\n");
+    printf("  sd bus <1|4>  force the SD bus width, then `sd retry`\n");
+    printf("  live2d        catgirl sprite state + frame cache + extsram\n");
     printf("  fs [ls <dir>] | cat <path> | write <path> <text>"
            " | rm <path> | test\n");
     printf("  bt            show HC-05 detection/configuration state\n");
@@ -121,6 +129,61 @@ static void diagnostic_help(void) {
     printf("  wifi debug <on|off>  per-command AT logging (default off)\n");
     printf("  proxy <ip> <port>  set the cloud proxy for auto cloud control\n");
     printf("  help          show this command list\n");
+}
+
+/*
+ * TF transfer diagnostics. SDIOCLK is HCLK on the F103, so SDIO_CK rides the
+ * core clock — this prints the rate actually in effect plus which SDIO error
+ * the card is hitting, because rxoverr / dcrcfail / dtimeout need different
+ * fixes and are indistinguishable from "the card stopped working".
+ */
+static void diagnostic_sd(void) {
+    const stm32_sdcard_info_t *sd = stm32_sdcard_info();
+
+    printf("[TF-DIAG] present=%d fat32=%d bus=%u-bit sectors=%lu\n",
+           sd->present, sd->fat32, (unsigned)sd->bus_width,
+           (unsigned long)sd->sectors);
+    printf("[TF-DIAG] hclk=%u SDIO_CK=%u Hz (target=%u) \n",
+           (unsigned)stm32_hclk_hz(), (unsigned)sd->sdio_ck_hz,
+           (unsigned)sd->transfer_hz);
+    printf("[TF-DIAG] err dcrc=%u dtimeout=%u rxovr=%u txudr=%u stbit=%u"
+           " cmd=%u | retries=%u shutdowns=%u last_sta=0x%x\n",
+           (unsigned)sd->err_dcrcfail, (unsigned)sd->err_dtimeout,
+           (unsigned)sd->err_rxoverr, (unsigned)sd->err_txunderr,
+           (unsigned)sd->err_stbiterr, (unsigned)sd->err_cmd,
+           (unsigned)sd->retries, (unsigned)sd->shutdowns,
+           (unsigned)sd->last_err_sta);
+}
+
+/*
+ * Live2D sprite pipeline. "The catgirl doesn't animate" has several distinct
+ * causes — the state never changes, the frames aren't on the card, the frame
+ * set doesn't fit external SRAM, or the state flips back before one frame can
+ * be read — and they look identical on the panel.
+ */
+static void diagnostic_live2d(void) {
+    static const char *const names[] = {"IDLE", "TALK", "HAPPY", "WARN"};
+    const live2d_t *cat = stm32_peripherals_cat();
+    const ui_home_state_t *ui = stm32_peripherals_ui_state();
+    live2d_load_stats_t st;
+    unsigned s = (unsigned)cat->state;
+    unsigned cs;
+
+    live2d_load_get_stats(&st);
+    cs = (unsigned)st.cached_state;
+    printf("[L2D] state=%s frame=%u/%u stopped=%d talk_deadline=%u now=%u\n",
+           s < 4 ? names[s] : "?", cat->frame,
+           live2d_frame_count(cat->state), cat->stopped,
+           (unsigned)cat->talk_deadline_ms, (unsigned)timer_get_ticks());
+    printf("[L2D] cache state=%s loaded=%u/%u row=%u ready=%d failed=%d"
+           " bytes=%u\n",
+           cs < 4 ? names[cs] : "?", st.loaded, st.count, st.row,
+           st.ready, st.failed, (unsigned)st.bytes);
+    printf("[L2D] extsram free=%u/%u | ui mood=%u alert=%u fan=%u pump=%u"
+           " speech=%s\n",
+           (unsigned)stm32_extsram_available(),
+           (unsigned)stm32_extsram_capacity(), ui->mood, ui->alert,
+           ui->fan_level, ui->pump_on, ui->speech ? "yes" : "none");
 }
 
 /* Shared scratch for the fs command — keep it off the (small) console stack. */
@@ -484,6 +547,21 @@ static void diagnostic_execute(char *line) {
         printf("[TF-DIAG] retry=%s\n",
                result == 0 ? "ready" : "absent-or-failed");
         diagnostic_performance();
+    } else if (text_equal(line, "sd")) {
+        diagnostic_sd();
+    } else if (text_equal(line, "live2d")) {
+        diagnostic_live2d();
+    } else if (text_starts_with(line, "sd clk ")) {
+        int mhz = atoi(line + 7);
+        int r = stm32_sdcard_set_transfer_hz((uint32_t)mhz * 1000000U);
+        printf("[TF-DIAG] clk=%s target=%dMHz -> SDIO_CK=%u Hz\n",
+               r == 0 ? "set" : "rejected(0.1-24MHz)", mhz,
+               (unsigned)stm32_sdcard_info()->sdio_ck_hz);
+    } else if (text_starts_with(line, "sd bus ")) {
+        int width = atoi(line + 7);
+        int r = stm32_sdcard_set_bus_width(width);
+        printf("[TF-DIAG] bus=%s width=%d (run `sd retry` to apply)\n",
+               r == 0 ? "set" : "rejected(1|4)", width);
     } else if (text_equal(line, "fs")) {
         diagnostic_fs("");
     } else if (text_starts_with(line, "fs ")) {

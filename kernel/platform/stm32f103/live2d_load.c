@@ -64,11 +64,42 @@ static int cache_open_frame(void) {
     return 1;
 }
 
-void live2d_load_service(const live2d_t *cat) {
-    uint32_t rows;
+/* Read one LIVE2D_BAND_ROWS band into the cache. 1 = band done, 0 = frame
+ * finished (and the next one opened / cache_ready set), -1 = give up. */
+static int load_one_band(void) {
+    uint32_t rows = LIVE2D_IMG_H - load_row;
     uint32_t bytes;
-    uint32_t done;
+    uint32_t done = 0;
 
+    if (rows > LIVE2D_BAND_ROWS)
+        rows = LIVE2D_BAND_ROWS;
+    bytes = rows * LIVE2D_IMG_W * 2U;
+    while (done < bytes) {
+        int n = fat32lite_read(&load_file, (uint8_t *)live2d_band + done,
+                               bytes - done);
+        if (n <= 0)
+            return -1;
+        done += (uint32_t)n;
+    }
+    for (uint32_t i = 0; i < rows * LIVE2D_IMG_W; i++)
+        cached_frames[(load_frame * LIVE2D_IMG_H + load_row) *
+                      LIVE2D_IMG_W + i] = live2d_band[i];
+    load_row += rows;
+    if (load_row < LIVE2D_IMG_H)
+        return 1;
+    if (fat32lite_close(&load_file) != FAT32LITE_OK)
+        return -1;
+    load_open = 0;
+    load_row = 0;
+    load_frame++;
+    if (load_frame == cached_count)
+        cache_ready = 1;
+    else if (!cache_open_frame())
+        return -1;
+    return 0;
+}
+
+void live2d_load_service(const live2d_t *cat) {
     if (!cat || !stm32_extsram_ready() || !stm32_sdfs())
         return;
     if (cache_failed && cached_state == cat->state)
@@ -87,47 +118,55 @@ void live2d_load_service(const live2d_t *cat) {
             cache_failed = 1;
             return;
         }
+        /*
+         * Frame 0 in one burst rather than a band per service call. A band is
+         * only 4 rows, so frame 0 otherwise took ~35 service passes — measured
+         * at ~0.7s on the board, and for every one of those milliseconds the
+         * panel shows the crude procedural placeholder instead of the catgirl.
+         * Since a state change wipes the cache, that happened on *every*
+         * IDLE<->TALK flip: tapping her made the sprite vanish. The whole frame
+         * is ~40KB, about 20ms of SDIO at 24MHz — one short stall beats a
+         * long ugly one. Frames 1..N-1 stay progressive so the animation fills
+         * in without holding the loop.
+         */
+        while (!cache_ready && load_frame == 0) {
+            int r = load_one_band();
+            if (r < 0) {
+                cache_reset();
+                cache_failed = 1;
+                return;
+            }
+            if (r == 0)
+                break; /* frame 0 complete — the sprite can be drawn now */
+        }
+        return;
     }
     if (cache_ready)
         return;
-    rows = LIVE2D_IMG_H - load_row;
-    if (rows > LIVE2D_BAND_ROWS)
-        rows = LIVE2D_BAND_ROWS;
-    bytes = rows * LIVE2D_IMG_W * 2U;
-    done = 0;
-    while (done < bytes) {
-        int n = fat32lite_read(&load_file, (uint8_t *)live2d_band + done,
-                               bytes - done);
-        if (n <= 0) {
-            cache_reset();
-            cache_failed = 1;
-            return;
-        }
-        done += (uint32_t)n;
-    }
-    for (uint32_t i = 0; i < rows * LIVE2D_IMG_W; i++)
-        cached_frames[(load_frame * LIVE2D_IMG_H + load_row) *
-                      LIVE2D_IMG_W + i] = live2d_band[i];
-    load_row += rows;
-    if (load_row < LIVE2D_IMG_H)
-        return;
-    if (fat32lite_close(&load_file) != FAT32LITE_OK) {
-        cache_reset();
-        cache_failed = 1;
-        return;
-    }
-    load_open = 0;
-    load_row = 0;
-    load_frame++;
-    if (load_frame == cached_count) {
-        cache_ready = 1;
-    } else if (!cache_open_frame()) {
+    if (load_one_band() < 0) {
         cache_reset();
         cache_failed = 1;
     }
 }
+void live2d_load_get_stats(live2d_load_stats_t *out) {
+    if (!out)
+        return;
+    out->cached_state = (int)cached_state;
+    out->count = cached_count;
+    out->loaded = load_frame;
+    out->row = load_row;
+    out->ready = cache_ready;
+    out->failed = cache_failed;
+    out->bytes = cached_frames ? cached_count * LIVE2D_IMG_BYTES : 0U;
+}
 #else
 void live2d_load_service(const live2d_t *cat) { (void)cat; }
+
+void live2d_load_get_stats(live2d_load_stats_t *out) {
+    if (out)
+        for (unsigned i = 0; i < sizeof(*out); i++)
+            ((unsigned char *)out)[i] = 0;
+}
 #endif
 
 int live2d_load_draw_fs(ui_gfx_t *gfx, fat32lite_fs_t *fs,

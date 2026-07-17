@@ -7,6 +7,11 @@
 
 #include "ui_render.h"
 
+/* Severity tones for the diagnostics rows — fixed, not theme-tinted, so a bad
+ * row stays legible against every background. */
+#define RGB565_OK 0x2646U   /* green  */
+#define RGB565_WARN 0xFE20U /* amber  */
+
 /* 5x7 column-major font (same style as display.c), covering ' '..'Z' plus '%'.
  * Unlisted entries are blank. */
 static const uint8_t ui_font5x7[][5] = {
@@ -160,7 +165,7 @@ static const ui_rect_t *hit_rect(const ui_home_model_t *m, ui_action_t a) {
     return 0;
 }
 
-/* Card: panel fill, accent bar, label, big value + unit. */
+/* Card: panel fill, accent bar, label, big value + unit, optional sub-line. */
 static void draw_card(const ui_gfx_t *g, const ui_home_model_t *m,
                       const ui_card_t *c) {
     const ui_rect_t *r = &c->rect;
@@ -169,6 +174,8 @@ static void draw_card(const ui_gfx_t *g, const ui_home_model_t *m,
     ui_render_text(g, r->x + 14, r->y + 10, c->label, m->color_muted, 2);
     int vx = ui_render_text(g, r->x + 14, r->y + 34, c->value, c->accent, 5);
     ui_render_text(g, vx + 4, r->y + 48, c->unit, m->color_muted, 2);
+    if (c->sub[0])
+        ui_render_text(g, r->x + 14, r->y + 78, c->sub, m->color_muted, 1);
 }
 
 static void draw_button(const ui_gfx_t *g, const ui_home_model_t *m,
@@ -219,6 +226,19 @@ static void draw_cat_placeholder(const ui_gfx_t *g, const ui_home_model_t *m,
     }
 }
 
+/* Speech panel + its wrapped lines. */
+static void draw_dialog(const ui_gfx_t *g, const ui_home_model_t *m) {
+    const ui_rect_t *d = &m->dialog;
+
+    if (!d->w || !d->h)
+        return;
+    fill(g, d->x, d->y, d->w, d->h, m->color_panel);
+    fill(g, d->x, d->y, d->w, 3, m->color_accent);
+    for (unsigned i = 0; i < m->speech_lines; i++)
+        draw_speech_line(g, d->x + 8, d->y + 12 + (int)i * 22, m->speech[i],
+                         m->color_text, 1);
+}
+
 void ui_render_home_ex(const ui_gfx_t *g, const ui_home_model_t *m,
                        const live2d_t *cat, const uint16_t *cat_frame,
                        int cat_w, int cat_h, unsigned flags) {
@@ -248,13 +268,14 @@ void ui_render_home_ex(const ui_gfx_t *g, const ui_home_model_t *m,
     for (unsigned i = 0; i < m->card_count; i++)
         draw_card(g, m, &m->cards[i]);
 
-    /* pump + theme buttons */
+    /* pump / theme / menu buttons */
     draw_button(g, m, hit_rect(m, UI_ACTION_PUMP_TOGGLE), "PUMP",
                 m->color_accent, 0);
     draw_button(g, m, hit_rect(m, UI_ACTION_THEME_CYCLE), "THEME",
                 m->color_accent, 0);
+    draw_button(g, m, hit_rect(m, UI_ACTION_MENU), "MENU", m->color_muted, 0);
 
-    /* catgirl sprite region */
+    /* catgirl sprite region (the first TALK hit is the sprite, not the box) */
     const ui_rect_t *cr = hit_rect(m, UI_ACTION_TALK);
     if (cr) {
         if (cat_frame && cat_w > 0 && cat_h > 0)
@@ -263,19 +284,13 @@ void ui_render_home_ex(const ui_gfx_t *g, const ui_home_model_t *m,
             draw_cat_placeholder(g, m, cr, cat ? (int)cat->state : m->cat_mood);
     }
 
-    /* speech bubble: left of the cat, below the buttons */
-    if (m->speech_lines && cr) {
-        int bx = 12, by = cr->y;
-        int bw = cr->x - bx - 8;
-        int bh = 24 + (int)m->speech_lines * 22;
-        if (bw > 20) {
-            fill(g, bx, by, bw, bh, m->color_panel);
-            fill(g, bx, by, bw, 3, m->color_accent);
-            for (unsigned i = 0; i < m->speech_lines; i++)
-                draw_speech_line(g, bx + 8, by + 10 + (int)i * 22,
-                                 m->speech[i], m->color_text, 1);
-        }
-    }
+    /*
+     * Dialog box, left of the cat. Always painted, even with nothing to say:
+     * an empty panel reads as "she has no line yet", whereas appearing and
+     * vanishing with each cloud reply reads as a glitch. The text itself is
+     * only ever the LLM's (ui_home wraps it; never fabricated locally).
+     */
+    draw_dialog(g, m);
 }
 
 void ui_render_home(const ui_gfx_t *g, const ui_home_model_t *m,
@@ -294,6 +309,55 @@ void ui_render_cat(const ui_gfx_t *g, const ui_home_model_t *m,
     if (r)
         draw_cat_placeholder(g, m, r,
                              cat ? (int)cat->state : m->cat_mood);
+}
+
+void ui_render_press(const ui_gfx_t *g, const ui_home_model_t *m, uint16_t x,
+                     uint16_t y) {
+    if (!g || !m)
+        return;
+    for (unsigned i = 0; i < m->hit_count; i++) {
+        const ui_rect_t *r = &m->hits[i].rect;
+        if (x < r->x || x >= r->x + r->w || y < r->y || y >= r->y + r->h)
+            continue;
+        /* Inset outline, so the release repaint of the whole screen erases it
+         * without needing to remember what was underneath. */
+        fill(g, r->x, r->y, r->w, 2, m->color_accent);
+        fill(g, r->x, r->y + r->h - 2, r->w, 2, m->color_accent);
+        fill(g, r->x, r->y, 2, r->h, m->color_accent);
+        fill(g, r->x + r->w - 2, r->y, 2, r->h, m->color_accent);
+        return;
+    }
+}
+
+void ui_render_diag(const ui_gfx_t *g, const ui_diag_model_t *d,
+                    const ui_home_model_t *m) {
+    static const char *const labels[UI_DIAG_MAX_HITS] = {
+        "BACK", "CAL", "SCAN", "BT",
+    };
+
+    if (!g || !d || !m)
+        return;
+
+    fill(g, 0, 0, UI_RENDER_W, UI_RENDER_H, m->color_bg);
+    fill(g, 0, 0, UI_RENDER_W, 60, m->color_panel);
+    fill(g, 0, 57, UI_RENDER_W, 3, m->color_accent);
+    ui_render_text(g, 14, 18, "DIAGNOSTICS", m->color_text, 3);
+
+    for (unsigned i = 0; i < d->row_count; i++) {
+        const ui_diag_row_t *row = &d->rows[i];
+        int y = (int)DIAG_ROW0_Y + (int)i * (int)DIAG_ROW_PITCH;
+        uint16_t tone = row->level == UI_DIAG_OK     ? RGB565_OK
+                        : row->level == UI_DIAG_WARN ? RGB565_WARN
+                                                     : m->color_accent;
+        fill(g, DIAG_ROW_X, y, DIAG_ROW_W, DIAG_ROW_H, m->color_panel);
+        fill(g, DIAG_ROW_X, y, 5, DIAG_ROW_H, tone);
+        ui_render_text(g, DIAG_ROW_X + 14, y + 10, row->label, m->color_muted,
+                       2);
+        ui_render_text(g, DIAG_ROW_X + 140, y + 10, row->value, tone, 2);
+    }
+
+    for (unsigned i = 0; i < d->hit_count && i < UI_DIAG_MAX_HITS; i++)
+        draw_button(g, m, &d->hits[i].rect, labels[i], m->color_accent, 0);
 }
 
 void ui_render_cal_target(const ui_gfx_t *g, int index, int total) {

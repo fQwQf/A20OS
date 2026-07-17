@@ -198,9 +198,16 @@ static int run_touch_cal_tests(void) {
 static int run_ui_home_tests(void) {
     int fails = 0;
     /* Speech text is LLM-generated at runtime — never hardcoded. This is a
-     * synthetic mixed ASCII/CJK vector purely to exercise column wrapping. */
-    ui_home_state_t st = {29, 38, 55, 2, 1, 14, 30, ENV_THEME_COZY, 2,
-                          ENV_ALERT_DRY, 1, "WRAP0123换行测试示例文本"};
+     * synthetic mixed ASCII/CJK vector purely to exercise column wrapping.
+     * Designated so adding a ui_home_state_t field can't silently shift the
+     * values onto the wrong members. */
+    ui_home_state_t st = {
+        .temp_c = 29, .humidity = 38, .light = 55, .fan_level = 2,
+        .pump_on = 1, .backlight = 60, .hour = 14, .minute = 30,
+        .theme = ENV_THEME_COZY, .mood = 2, .alert = ENV_ALERT_DRY,
+        .net_cloud = 1, .manual_mask = 0,
+        .speech = "WRAP0123换行测试示例文本",
+    };
     ui_home_model_t m;
     ui_home_build(&st, &m);
 

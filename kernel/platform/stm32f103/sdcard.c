@@ -1,6 +1,7 @@
 #ifdef CONFIG_BOARD_STM32F103
 
 #include "sdcard.h"
+#include "core/arch.h" /* arch_irq_save/restore — data-phase critical section */
 #include "core/string.h"
 #include "stm32_uart.h"
 
@@ -49,7 +50,6 @@
 
 #define SDIO_STATIC_FLAGS 0x00C007FFU
 #define SDIO_CMD_TIMEOUT_LOOPS 200000U
-#define SDIO_DATA_TIMEOUT_LOOPS 2000000U
 #define SDIO_CARD_ERROR_MASK 0xFDFFE008U
 
 #define SCB_DEMCR  (*(volatile uint32_t *)0xE000EDFCUL)
@@ -59,6 +59,61 @@
 static stm32_sdcard_info_t card;
 static uint8_t sector_buf[512] __attribute__((aligned(4)));
 static block_dev_t sd_block_dev;
+
+/*
+ * Data-phase clock ceiling. SDIOCLK = HCLK on the F103, so this is a target the
+ * divider rounds down from, not the rate itself. Survives re-init so a runtime
+ * `sd clk` choice sticks across `sd retry`.
+ */
+/*
+ * 24MHz — but only because the data phase now runs with interrupts off. Measured
+ * on the xuanwu board at 72MHz HCLK via `sd clk`:
+ *
+ *   without the IRQ guard: 4MHz clean; 6/9/18MHz -> RXOVERR, card dropped;
+ *                          24MHz could not even finish identification
+ *   with the IRQ guard:    4..24MHz all clean; 24MHz soaked 10x40KB
+ *                          write+readback with 0 RXOVERR / 0 retries / 0 drops
+ *
+ * So the failure was never bandwidth or signal integrity — it was an ISR
+ * stealing the CPU mid-block (see sdio_read_one). Faster is also *safer* here:
+ * the critical section is one block long, so 24MHz holds interrupts off ~43us
+ * versus ~256us at 4MHz.
+ */
+#define SDIO_DEFAULT_TRANSFER_HZ 24000000U
+static uint32_t sdio_transfer_hz = SDIO_DEFAULT_TRANSFER_HZ;
+static int sdio_forced_bus_width; /* 0 = negotiate, 1/4 = pinned by console */
+
+/* A single glitched sector used to drop the whole card. Retry first: a bus
+ * error is usually transient, and dropping the card turns one bad read into
+ * "TF absent" until someone types `sd retry`. */
+#define SDIO_IO_ATTEMPTS 3U
+
+/*
+ * Longest the data phase may hold interrupts off. A 512-byte block is ~43us at
+ * 24MHz/4-bit and ~256us at 4MHz, so this only bites when the card has stopped
+ * answering — in which case we hand interrupts back and let the retry/timeout
+ * path deal with it rather than stalling SysTick for a full DTIMEOUT.
+ */
+#define SDIO_DATA_PHASE_MAX_US 4000U
+
+static uint32_t sdio_cycles_per_us(void) {
+    uint32_t per_us = stm32_hclk_hz() / 1000000U;
+    return per_us ? per_us : 1U;
+}
+
+static void sdio_note_error(uint32_t status) {
+    card.last_err_sta = status;
+    if (status & SDIO_STA_DCRCFAIL)
+        card.err_dcrcfail++;
+    if (status & SDIO_STA_DTIMEOUT)
+        card.err_dtimeout++;
+    if (status & SDIO_STA_RXOVERR)
+        card.err_rxoverr++;
+    if (status & SDIO_STA_TXUNDERR)
+        card.err_txunderr++;
+    if (status & SDIO_STA_STBITERR)
+        card.err_stbiterr++;
+}
 
 static int sdio_cmd(uint32_t index, uint32_t arg, uint32_t response,
                     int ignore_crc);
@@ -80,6 +135,16 @@ static uint32_t sdio_clock_div(uint32_t target_hz) {
     uint32_t ratio = (hclk + target_hz - 1U) / target_hz;
     uint32_t div = ratio > 2U ? ratio - 2U : 0U;
     return div > 255U ? 255U : div;
+}
+
+/* Program CLKCR for the data phase from sdio_transfer_hz + the negotiated bus
+ * width, and record what SDIO_CK that actually produced. */
+static void sdio_apply_clock(void) {
+    uint32_t div = sdio_clock_div(sdio_transfer_hz);
+    SDIO_CLKCR = div | (1U << 8) |
+                 (card.bus_width == 4 ? (1U << 11) : 0U);
+    card.transfer_hz = sdio_transfer_hz;
+    card.sdio_ck_hz = stm32_hclk_hz() / (div + 2U);
 }
 
 static void gpio_config_pin(volatile uint32_t *crl, volatile uint32_t *crh,
@@ -182,14 +247,30 @@ static int sdio_read_one(uint64_t lba, void *buf) {
 
     uint32_t *dst = (uint32_t *)buf;
     unsigned words = 0;
-    uint32_t timeout = SDIO_DATA_TIMEOUT_LOOPS;
-    while (timeout--) {
+    int failed = 0;
+
+    /*
+     * Drain the FIFO with interrupts off. The SDIO FIFO is 32 words deep and
+     * there is no DMA and no usable hardware flow control (the F103's is
+     * erratum'd), so the CPU is the only thing keeping up: one ISR arriving
+     * mid-block overruns it and the whole transfer is lost. The IR receiver's
+     * EXTI handler busy-waits ~60ms per frame, which a stray edge can trigger
+     * at any time, so "an ISR might be slow" is not hypothetical here.
+     * Bounded by DWT so a card that stopped answering can't hold interrupts
+     * off for the full DTIMEOUT.
+     */
+    SCB_DEMCR |= 1U << 24;
+    DWT_CTRL |= 1U;
+    uint32_t start = DWT_CYCCNT;
+    uint32_t budget = sdio_cycles_per_us() * SDIO_DATA_PHASE_MAX_US;
+    uint32_t irq = arch_irq_save();
+    for (;;) {
         uint32_t status = SDIO_STA;
         if (status & (SDIO_STA_DCRCFAIL | SDIO_STA_DTIMEOUT |
                       SDIO_STA_RXOVERR | SDIO_STA_STBITERR)) {
-            SDIO_ICR = SDIO_STATIC_FLAGS;
-            SDIO_DCTRL = 0;
-            return -1;
+            sdio_note_error(status);
+            failed = 1;
+            break;
         }
         if (status & SDIO_STA_RXFIFOHF) {
             for (unsigned i = 0; i < 8 && words < 128; i++)
@@ -202,10 +283,16 @@ static int sdio_read_one(uint64_t lba, void *buf) {
         }
         if ((status & SDIO_STA_DATAEND) && words >= 128)
             break;
+        if ((uint32_t)(DWT_CYCCNT - start) > budget) {
+            failed = 1;
+            break;
+        }
     }
+    arch_irq_restore(irq);
+
     SDIO_ICR = SDIO_STATIC_FLAGS;
     SDIO_DCTRL = 0;
-    return words == 128 ? 0 : -1;
+    return (!failed && words == 128) ? 0 : -1;
 }
 
 static int sdio_write_one(uint64_t lba, const void *buf) {
@@ -225,14 +312,22 @@ static int sdio_write_one(uint64_t lba, const void *buf) {
 
     const uint32_t *src = (const uint32_t *)buf;
     unsigned words = 0;
-    uint32_t timeout = SDIO_DATA_TIMEOUT_LOOPS;
-    while (timeout--) {
+    int failed = 0;
+
+    /* Same critical section as the read path — TXUNDERR is the mirror image of
+     * RXOVERR: an ISR mid-block starves the FIFO and the write is lost. */
+    SCB_DEMCR |= 1U << 24;
+    DWT_CTRL |= 1U;
+    uint32_t start = DWT_CYCCNT;
+    uint32_t budget = sdio_cycles_per_us() * SDIO_DATA_PHASE_MAX_US;
+    uint32_t irq = arch_irq_save();
+    for (;;) {
         uint32_t status = SDIO_STA;
         if (status & (SDIO_STA_DCRCFAIL | SDIO_STA_DTIMEOUT |
                       SDIO_STA_TXUNDERR | SDIO_STA_STBITERR)) {
-            SDIO_ICR = SDIO_STATIC_FLAGS;
-            SDIO_DCTRL = 0;
-            return -1;
+            sdio_note_error(status);
+            failed = 1;
+            break;
         }
         if ((status & SDIO_STA_TXFIFOHE) && words < 128) {
             for (unsigned i = 0; i < 8 && words < 128; i++)
@@ -240,10 +335,16 @@ static int sdio_write_one(uint64_t lba, const void *buf) {
         }
         if ((status & SDIO_STA_DATAEND) && words == 128)
             break;
+        if ((uint32_t)(DWT_CYCCNT - start) > budget) {
+            failed = 1;
+            break;
+        }
     }
+    arch_irq_restore(irq);
+
     SDIO_ICR = SDIO_STATIC_FLAGS;
     SDIO_DCTRL = 0;
-    if (words != 128)
+    if (failed || words != 128)
         return -1;
 
     for (unsigned i = 0; i < 10000; i++)
@@ -398,10 +499,9 @@ int stm32_sdcard_init(void) {
         goto absent;
 
     card.bus_width = 1;
-    if (sdio_app_cmd(6, 2, 0) == 0)
+    if (sdio_forced_bus_width != 1 && sdio_app_cmd(6, 2, 0) == 0)
         card.bus_width = 4;
-    SDIO_CLKCR = sdio_clock_div(24000000U) | (1U << 8) |
-                 (card.bus_width == 4 ? (1U << 11) : 0U);
+    sdio_apply_clock();
 
     card.present = 1;
     detect_fat32();
@@ -441,7 +541,16 @@ int stm32_sdcard_read(uint64_t lba, void *buf, size_t count) {
     for (size_t i = 0; i < count; i++) {
         void *dst = (uint8_t *)buf + i * 512U;
         void *io_buf = ((uintptr_t)dst & 3U) ? sector_buf : dst;
-        if (sdio_read_one(lba + i, io_buf) != 0) {
+        unsigned attempt;
+        for (attempt = 0; attempt < SDIO_IO_ATTEMPTS; attempt++) {
+            if (sdio_read_one(lba + i, io_buf) == 0)
+                break;
+            card.retries++;
+            /* Let the card finish/abort the aborted transfer before retrying. */
+            (void)card_status_ready();
+        }
+        if (attempt == SDIO_IO_ATTEMPTS) {
+            card.shutdowns++;
             stm32_sdcard_shutdown();
             return -1;
         }
@@ -462,12 +571,36 @@ int stm32_sdcard_write(uint64_t lba, const void *buf, size_t count) {
             memcpy(sector_buf, src, 512U);
             io_buf = sector_buf;
         }
-        if (sdio_write_one(lba + i, io_buf) != 0) {
+        unsigned attempt;
+        for (attempt = 0; attempt < SDIO_IO_ATTEMPTS; attempt++) {
+            if (sdio_write_one(lba + i, io_buf) == 0)
+                break;
+            card.retries++;
+            (void)card_status_ready();
+        }
+        if (attempt == SDIO_IO_ATTEMPTS) {
+            card.shutdowns++;
             stm32_sdcard_shutdown();
             return -1;
         }
     }
     return 0;
+}
+
+int stm32_sdcard_set_transfer_hz(uint32_t target_hz) {
+    if (target_hz < 100000U || target_hz > 24000000U)
+        return -1;
+    sdio_transfer_hz = target_hz;
+    if (card.present)
+        sdio_apply_clock(); /* takes effect on the next transfer */
+    return 0;
+}
+
+int stm32_sdcard_set_bus_width(int width) {
+    if (width != 1 && width != 4)
+        return -1;
+    sdio_forced_bus_width = width;
+    return 0; /* applied by the next stm32_sdcard_init() */
 }
 
 const stm32_sdcard_info_t *stm32_sdcard_info(void) {

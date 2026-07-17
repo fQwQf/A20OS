@@ -33,6 +33,12 @@ static ir_action_t action_from_span(const char *s, const char *e) {
         return IR_ACT_TALK;
     if (span_eq(s, e, "MUTE_BUZZER"))
         return IR_ACT_MUTE_BUZZER;
+    if (span_eq(s, e, "MENU"))
+        return IR_ACT_MENU;
+    if (span_eq(s, e, "LIGHT_UP"))
+        return IR_ACT_LIGHT_UP;
+    if (span_eq(s, e, "LIGHT_DOWN"))
+        return IR_ACT_LIGHT_DOWN;
     return IR_ACT_NONE;
 }
 
@@ -120,9 +126,26 @@ int ir_map_parse(const char *text, unsigned len, ir_map_binding_t *table,
 }
 
 int ir_map_load_default(void) {
-    int result = ir_map_parse("", 0, ir_bindings, IR_MAP_MAX);
+    static const char defaults[] = IR_DEFAULT_MAP;
+    int result = ir_map_parse(defaults, sizeof(defaults) - 1U, ir_bindings,
+                              IR_MAP_MAX);
     ir_binding_count = result > 0 ? (unsigned)result : 0;
     return result;
+}
+
+const char *ir_action_name(int action) {
+    switch (action) {
+    case IR_ACT_FAN_UP:      return "FAN_UP";
+    case IR_ACT_FAN_DOWN:    return "FAN_DOWN";
+    case IR_ACT_PUMP_TOGGLE: return "PUMP_TOGGLE";
+    case IR_ACT_THEME_CYCLE: return "THEME_CYCLE";
+    case IR_ACT_TALK:        return "TALK";
+    case IR_ACT_MUTE_BUZZER: return "MUTE_BUZZER";
+    case IR_ACT_MENU:        return "MENU";
+    case IR_ACT_LIGHT_UP:    return "LIGHT_UP";
+    case IR_ACT_LIGHT_DOWN:  return "LIGHT_DOWN";
+    default:                 return "unbound";
+    }
 }
 
 int ir_map_dispatch(uint32_t code) {

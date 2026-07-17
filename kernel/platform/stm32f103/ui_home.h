@@ -20,9 +20,15 @@
 #include "core/types.h"
 
 #define UI_HOME_MAX_CARDS 4U
-#define UI_HOME_MAX_HITS 6U
-#define UI_HOME_SPEECH_LINES 3U
-#define UI_HOME_SPEECH_COLS 18U /* 6 px units; CJK consumes three units */
+#define UI_HOME_MAX_HITS 10U
+/*
+ * Speech budget. The dialog box is 156px wide with an 8px inset, so a 16x16
+ * CJK glyph plus its 2px gap (three 6px units) fits seven times per line.
+ * Five lines therefore hold 35 CJK characters — more than the 21 a full
+ * HUB_SPEECH_MAX (63-byte) LLM line can contain, so a reply is never clipped.
+ */
+#define UI_HOME_SPEECH_LINES 5U
+#define UI_HOME_SPEECH_COLS 21U /* 6 px units; CJK consumes three units */
 
 typedef enum ui_action {
     UI_ACTION_NONE = 0,
@@ -30,7 +36,10 @@ typedef enum ui_action {
     UI_ACTION_FAN_DOWN,
     UI_ACTION_PUMP_TOGGLE,
     UI_ACTION_THEME_CYCLE,
-    UI_ACTION_TALK, /* tapped the cat -> trigger an interaction */
+    UI_ACTION_TALK, /* tapped the cat or her dialog box -> ask for a new line */
+    UI_ACTION_MENU, /* open the diagnostics page (ui_diag.h) */
+    UI_ACTION_LIGHT_UP,
+    UI_ACTION_LIGHT_DOWN,
 } ui_action_t;
 
 typedef struct ui_rect {
@@ -46,6 +55,7 @@ typedef struct ui_card {
     const char *label;   /* static string, e.g. "TEMP" */
     char value[8];       /* formatted number, e.g. "-5" or "72" */
     const char *unit;    /* static string, e.g. "C", "%", "LV" */
+    char sub[10];        /* small second line, "" when the card has none */
     uint16_t accent;     /* RGB565 accent bar / value colour */
     ui_rect_t rect;      /* card bounds on the 320x480 panel */
 } ui_card_t;
@@ -71,10 +81,18 @@ typedef struct ui_home_model {
     char speech[UI_HOME_SPEECH_LINES][UI_HOME_SPEECH_COLS * 3U + 1U];
     unsigned speech_lines;
     int cat_mood; /* 0..3, mirrors the Live2D state */
+    ui_rect_t dialog; /* the speech panel; drawn even when there is no line */
 
     ui_hit_region_t hits[UI_HOME_MAX_HITS];
     unsigned hit_count;
 } ui_home_model_t;
+
+/* Bits of ui_home_state_t.manual_mask: a touch/remote override is holding this
+ * output, so the card shows MANU instead of AUTO. Mirrors peripherals.c. */
+#define UI_MANUAL_FAN 0x01U
+#define UI_MANUAL_PUMP 0x02U
+#define UI_MANUAL_THEME 0x04U
+#define UI_MANUAL_LIGHT 0x08U
 
 typedef struct ui_home_state {
     int8_t temp_c;
@@ -82,12 +100,14 @@ typedef struct ui_home_state {
     uint8_t light;    /* 0..100 */
     uint8_t fan_level; /* 0..3  */
     uint8_t pump_on;
+    uint8_t backlight; /* 0..100, the panel brightness in effect */
     uint8_t hour;   /* 0..23 */
     uint8_t minute; /* 0..59 */
     uint8_t theme;  /* env_theme_t */
     uint8_t mood;   /* 0..3        */
     uint8_t alert;  /* env_alert_t */
     uint8_t net_cloud; /* 1 = cloud-controlled, 0 = local fallback */
+    uint8_t manual_mask; /* UI_MANUAL_* bits currently overridden by hand */
     const char *speech; /* may be NULL */
 } ui_home_state_t;
 

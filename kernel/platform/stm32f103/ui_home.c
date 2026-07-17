@@ -13,7 +13,11 @@
     (uint16_t)((((r) & 0xF8U) << 8) | (((g) & 0xFCU) << 3) | ((b) >> 3))
 
 /* --- 320x480 layout -------------------------------------------------------
- * header | 2x2 data cards | pump + theme buttons | cat sprite + speech bubble
+ * header | 2x2 data cards | pump/theme/menu buttons | dialog box + cat sprite
+ *
+ * Every region below the header is touchable: the FAN and LIGHT cards split
+ * into up/down halves, the three buttons act on release, and the cat and her
+ * dialog box both ask for a fresh line.
  */
 #define SCREEN_W 320U
 #define CARD_MARGIN 12U
@@ -26,10 +30,19 @@
 #define CARD_COL1_X 166U
 #define BTN_Y 286U
 #define BTN_H 46U
+#define BTN_GAP 10U
+#define BTN_W 92U /* 3 buttons: 12 + 92 + 10 + 92 + 10 + 92 + 12 = 320 */
+#define BTN_COL0_X 12U
+#define BTN_COL1_X 114U
+#define BTN_COL2_X 216U
 #define CAT_X 176U
 #define CAT_Y 340U
 #define CAT_W 144U
 #define CAT_H 140U
+#define DIALOG_X 12U
+#define DIALOG_Y 340U
+#define DIALOG_W 156U
+#define DIALOG_H 140U
 
 /* Signed decimal into a small buffer; returns the string (always NUL term). */
 static void fmt_int(int value, char *out, unsigned cap) {
@@ -124,17 +137,34 @@ static uint16_t humidity_accent(uint8_t h) {
     return RGB565(44, 190, 112);     /* comfortable */
 }
 
+static void copy_str(char *out, unsigned cap, const char *s) {
+    unsigned i = 0;
+    while (s && s[i] && i + 1U < cap) {
+        out[i] = s[i];
+        i++;
+    }
+    out[i] = '\0';
+}
+
 static void set_card(ui_card_t *c, const char *label, int value,
                      const char *unit, uint16_t accent, uint16_t x,
                      uint16_t y) {
     c->label = label;
     fmt_int(value, c->value, sizeof(c->value));
     c->unit = unit;
+    c->sub[0] = '\0';
     c->accent = accent;
     c->rect.x = x;
     c->rect.y = y;
     c->rect.w = CARD_W;
     c->rect.h = CARD_H;
+}
+
+/* "AUTO" / "MANU" tag telling whether a hand override currently holds a card's
+ * output; the override expires on its own, so the tag has to be live. */
+static void set_card_mode(ui_card_t *c, const ui_home_state_t *st,
+                          uint8_t bit) {
+    copy_str(c->sub, sizeof(c->sub), (st->manual_mask & bit) ? "MANU" : "AUTO");
 }
 
 static void add_hit(ui_home_model_t *m, uint16_t x, uint16_t y, uint16_t w,
@@ -225,8 +255,23 @@ void ui_home_build(const ui_home_state_t *st, ui_home_model_t *m) {
              CARD_COL0_X, CARD_ROW0_Y);
     set_card(&m->cards[1], "HUMI", st->humidity, "%",
              humidity_accent(st->humidity), CARD_COL1_X, CARD_ROW0_Y);
+    /* LIGHT reads the sensor; its sub-line shows the backlight the decision
+     * drives, which is what tapping this card's halves adjusts. */
     set_card(&m->cards[2], "LIGHT", st->light, "LV", m->color_accent,
              CARD_COL0_X, CARD_ROW1_Y);
+    {
+        char *sub = m->cards[2].sub;
+        char pct[8];
+        unsigned j = 0;
+        fmt_int(st->backlight > 100U ? 100 : st->backlight, pct, sizeof(pct));
+        copy_str(sub, sizeof(m->cards[2].sub), "BL ");
+        j = 3;
+        for (unsigned i = 0; pct[i] && j + 1U < sizeof(m->cards[2].sub); i++)
+            sub[j++] = pct[i];
+        if (j + 1U < sizeof(m->cards[2].sub))
+            sub[j++] = '%';
+        sub[j] = '\0';
+    }
     {
         static const uint16_t fan_hue_r[4] = {150, 44, 246, 230};
         static const uint16_t fan_hue_g[4] = {168, 190, 196, 52};
@@ -236,19 +281,33 @@ void ui_home_build(const ui_home_state_t *st, ui_home_model_t *m) {
             RGB565(fan_hue_r[lvl], fan_hue_g[lvl], fan_hue_b[lvl]);
         set_card(&m->cards[3], "FAN", lvl, "LV", accent, CARD_COL1_X,
                  CARD_ROW1_Y);
+        set_card_mode(&m->cards[3], st, UI_MANUAL_FAN);
     }
     m->card_count = 4;
 
     wrap_speech(st->speech, m);
+    m->dialog.x = DIALOG_X;
+    m->dialog.y = DIALOG_Y;
+    m->dialog.w = DIALOG_W;
+    m->dialog.h = DIALOG_H;
 
-    /* Hit regions: fan up/down (top/bottom of the fan card), pump + theme
-     * buttons, and the cat sprite. */
+    /*
+     * Hit regions, in priority order (first match wins). The FAN and LIGHT
+     * cards split into up/down halves; PUMP/THEME/MENU are the button row; the
+     * cat and her dialog box both ask for a fresh line.
+     */
     add_hit(m, CARD_COL1_X, CARD_ROW1_Y, CARD_W, CARD_H / 2U, UI_ACTION_FAN_UP);
     add_hit(m, CARD_COL1_X, CARD_ROW1_Y + CARD_H / 2U, CARD_W,
             CARD_H - CARD_H / 2U, UI_ACTION_FAN_DOWN);
-    add_hit(m, CARD_MARGIN, BTN_Y, CARD_W, BTN_H, UI_ACTION_PUMP_TOGGLE);
-    add_hit(m, CARD_COL1_X, BTN_Y, CARD_W, BTN_H, UI_ACTION_THEME_CYCLE);
+    add_hit(m, CARD_COL0_X, CARD_ROW1_Y, CARD_W, CARD_H / 2U,
+            UI_ACTION_LIGHT_UP);
+    add_hit(m, CARD_COL0_X, CARD_ROW1_Y + CARD_H / 2U, CARD_W,
+            CARD_H - CARD_H / 2U, UI_ACTION_LIGHT_DOWN);
+    add_hit(m, BTN_COL0_X, BTN_Y, BTN_W, BTN_H, UI_ACTION_PUMP_TOGGLE);
+    add_hit(m, BTN_COL1_X, BTN_Y, BTN_W, BTN_H, UI_ACTION_THEME_CYCLE);
+    add_hit(m, BTN_COL2_X, BTN_Y, BTN_W, BTN_H, UI_ACTION_MENU);
     add_hit(m, CAT_X, CAT_Y, CAT_W, CAT_H, UI_ACTION_TALK);
+    add_hit(m, DIALOG_X, DIALOG_Y, DIALOG_W, DIALOG_H, UI_ACTION_TALK);
 }
 
 ui_action_t ui_home_hit_test(const ui_home_model_t *m, uint16_t x, uint16_t y) {

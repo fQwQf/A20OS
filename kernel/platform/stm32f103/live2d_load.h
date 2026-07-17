@@ -3,6 +3,24 @@
 
 #include "fs/fat32lite.h"
 #include "live2d.h"
+
+/*
+ * Loader state, for the `live2d` console command. The sprite either appears or
+ * it doesn't, and "it doesn't" has several very different causes (no frames on
+ * the card, external SRAM too small/fragmented for this state's frame set, the
+ * state changing faster than a frame can be read). These make them separable.
+ */
+typedef struct live2d_load_stats {
+    int cached_state;   /* the state the cache is holding (live2d_state_t)  */
+    unsigned count;     /* frames that state wants                          */
+    unsigned loaded;    /* frames fully read so far (draw needs >= 1)       */
+    unsigned row;       /* row reached inside the frame being read          */
+    int ready;          /* whole set cached                                 */
+    int failed;         /* gave up on this state (alloc or read failure)    */
+    uint32_t bytes;     /* external SRAM the cache asked for                */
+} live2d_load_stats_t;
+
+void live2d_load_get_stats(live2d_load_stats_t *out);
 #include "ui_render.h"
 
 #define LIVE2D_IMG_W 144
