@@ -21,6 +21,7 @@ user/external/musl/build-*-nommu/
 user/external/musl/dist/
 user/external/sbase/id
 user/external/musl/build-*/build/
+user/desktop/desktop_cursor_breeze.c
 .clangd
 .vscode/
 kernel-rv

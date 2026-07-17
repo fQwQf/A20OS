@@ -15,6 +15,7 @@
 #include "a20_fs.h"
 #include "a20_channel.h"
 #include "a20_clock.h"
+#include "a20_net.h"
 
 /* Pure utility functions (no syscall dependency) */
 #include "a20_string.h"

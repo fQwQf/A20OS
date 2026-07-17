@@ -622,10 +622,13 @@ LVGL_CFLAGS += -DA20OS_NOMMU
 endif
 
 DESKTOP_SRCS := desktop/desktop.c desktop/desktop_terminal.c desktop/lv_port_disp.c desktop/lv_port_indev.c \
-                desktop/desktop_utils.c \
-                desktop/desktop_dashboard.c desktop/desktop_monitor.c desktop/desktop_processes.c \
-                desktop/desktop_files.c desktop/desktop_network.c desktop/desktop_system.c
+desktop/desktop_utils.c desktop/desktop_cursor_breeze.c \
+desktop/desktop_dashboard.c desktop/desktop_monitor.c desktop/desktop_processes.c \
+desktop/desktop_files.c desktop/desktop_network.c desktop/desktop_system.c
 DESKTOP_OBJS := $(patsubst desktop/%.c,$(OBJ_DIR)/desktop/%.o,$(DESKTOP_SRCS))
+
+desktop/desktop_cursor_breeze.c: desktop/gen_breeze_cursor.py
+	python3 $< $@ external/breeze
 
 $(OBJ_DIR)/lvgl/%.o: $(LVGL_DIR)/%.c desktop/lv_conf.h | build_dir musl_prepare
 	@mkdir -p $(dir $@)

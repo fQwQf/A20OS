@@ -11,4 +11,6 @@ int fcntl(int fd, int cmd, ...);
 #define F_GETFL  3
 #define F_SETFL  4
 
+#define FD_CLOEXEC 1
+
 #endif
