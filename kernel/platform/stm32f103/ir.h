@@ -1,13 +1,13 @@
 /*
  * Smart home hub — infrared remote receiver (NEC) on PB9 / EXTI9.
  *
- * Ported from docs/pz/28-红外遥控实验. The whole NEC frame is decoded
- * synchronously inside the EXTI9_5 interrupt by measuring high-pulse widths.
+ * Decoded from falling-edge intervals: each EXTI9 interrupt timestamps the
+ * edge, subtracts the previous one, and feeds a small state machine. NEC puts
+ * the information in those gaps (leader 13.5ms, '0' 1.125ms, '1' 2.25ms), so
+ * nothing has to be waited on — the handler is tens of cycles.
  *
  * Hardware only: QEMU's stm32vldiscovery has no IR signal source, so init is a
- * no-op there and no interrupt is enabled. NOT yet verified on real hardware.
- * (A production version should use a timer-capture decoder rather than a
- * busy-loop in the ISR — see docs/stm32-big-exp.md §5.3.)
+ * no-op there and no interrupt is enabled.
  */
 #ifndef _STM32F103_IR_H
 #define _STM32F103_IR_H
@@ -61,6 +61,15 @@ int stm32_ir_poll(uint32_t *code);
 
 /* EXTI9_5 interrupt body — called from the arch IRQ stub via trap.c. */
 void stm32_ir_isr(void);
+
+/*
+ * Receiver counters, for the `ir` console command. edges = every falling edge
+ * seen (ambient IR and fluorescent light produce these with no remote in the
+ * room); frames = complete 32-bit codes; aborts = partial frames dropped for
+ * an out-of-spec gap. A high edges count with zero frames means the receiver
+ * is picking up noise, not that decoding is broken.
+ */
+void stm32_ir_stats(uint32_t *edges, uint32_t *frames, uint32_t *aborts);
 
 /* Data-driven NEC-code bindings loaded from /CFG/IR.CFG. */
 int ir_map_load_default(void);
