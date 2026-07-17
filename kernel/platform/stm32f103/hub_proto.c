@@ -84,6 +84,19 @@ int hub_proto_encode_control(uint8_t seq, const hub_control_t *c, uint8_t *out,
     return hub_proto_frame(HUB_MSG_CONTROL, seq, p, 5 + slen, out, outsize);
 }
 
+int hub_proto_encode_time(uint8_t seq, const hub_time_t *t, uint8_t *out,
+                          size_t outsize) {
+    uint8_t p[6];
+    uint16_t offset = (uint16_t)t->utc_offset_minutes;
+    p[0] = (uint8_t)t->unix_utc;
+    p[1] = (uint8_t)(t->unix_utc >> 8);
+    p[2] = (uint8_t)(t->unix_utc >> 16);
+    p[3] = (uint8_t)(t->unix_utc >> 24);
+    p[4] = (uint8_t)offset;
+    p[5] = (uint8_t)(offset >> 8);
+    return hub_proto_frame(HUB_MSG_TIME, seq, p, sizeof(p), out, outsize);
+}
+
 int hub_proto_parse(const uint8_t *buf, size_t len, hub_frame_t *out) {
     if (len < 2)
         return 0;
@@ -129,6 +142,22 @@ int hub_proto_decode_control(const hub_frame_t *f, hub_control_t *out) {
     for (uint8_t i = 0; i < slen; i++)
         out->speech[i] = (char)p[5 + i];
     out->speech[slen] = '\0';
+    return 0;
+}
+
+int hub_proto_decode_time(const hub_frame_t *f, hub_time_t *out) {
+    uint16_t offset;
+    if (f->type != HUB_MSG_TIME || f->len != 6 || !f->payload || !out)
+        return -1;
+    out->unix_utc = (uint32_t)f->payload[0] |
+                    ((uint32_t)f->payload[1] << 8) |
+                    ((uint32_t)f->payload[2] << 16) |
+                    ((uint32_t)f->payload[3] << 24);
+    offset = (uint16_t)(f->payload[4] | ((uint16_t)f->payload[5] << 8));
+    out->utc_offset_minutes = (int16_t)offset;
+    if (out->unix_utc < 946684800U || out->utc_offset_minutes < -720 ||
+        out->utc_offset_minutes > 840)
+        return -1;
     return 0;
 }
 

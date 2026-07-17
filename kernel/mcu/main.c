@@ -104,7 +104,7 @@ static void diagnostic_help(void) {
     printf("  perf          show clocks and main service latency\n");
     printf("  light         show ADC3 light sensor state\n");
     printf("  dht           one DHT11 read with failure-stage diagnostics\n");
-    printf("  time [set HH:MM[:SS]]  show or set the RTC clock\n");
+    printf("  time [sync|set HH:MM[:SS]]  show, network-sync or set RTC\n");
     printf("  cal start     run the four-point touch calibration UI\n");
     printf("  rgb           show 5x5 matrix status\n");
     printf("  rgb clear | fill <RRGGBB> | pixel <x> <y> <RRGGBB>\n");
@@ -334,7 +334,10 @@ static void diagnostic_time(const char *args) {
     int minute;
     int second;
 
-    if (args && text_starts_with(args, "set ")) {
+    if (args && text_equal(args, "sync")) {
+        stm32_peripherals_request_time_sync();
+        printf("[RTC] network sync queued\n");
+    } else if (args && text_starts_with(args, "set ")) {
         const char *p = args + 4;
         if (p[0] < '0' || p[0] > '9' || p[1] < '0' || p[1] > '9' ||
             p[2] != ':' || p[3] < '0' || p[3] > '9' ||
@@ -362,8 +365,13 @@ static void diagnostic_time(const char *args) {
         }
     }
     stm32_rtc_get_hhmmss(&hour, &minute, &second);
-    printf("[RTC] %02d:%02d:%02d available=%d\n", hour, minute, second,
-           stm32_rtc_available());
+    printf("[RTC] %02d:%02d:%02d available=%d source=%s syncs=%u"
+           " utc-offset=%d last-epoch=%u\n",
+           hour, minute, second, stm32_rtc_available(),
+           stm32_rtc_network_synced() ? "network" : "rtc/manual",
+           (unsigned)stm32_rtc_sync_count(),
+           stm32_rtc_utc_offset_minutes(),
+           (unsigned)stm32_rtc_last_unix_utc());
 }
 
 static int parse_hex_color(const char *text, uint32_t *color) {
