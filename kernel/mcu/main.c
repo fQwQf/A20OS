@@ -680,13 +680,29 @@ static void stm32_peripheral_thread(void) {
 #endif
 
 #ifdef CONFIG_STM32_QEMU
+extern volatile uint32_t armv7m_preemptions;
+static volatile uint32_t preempt_probe_a_progress;
+
 static void scheduler_probe_thread(void) {
-    printf("[SCHED] probe task online, round-trip switching active\n");
     for (;;)
-        proc_yield();
+        preempt_probe_a_progress++;
+}
+
+static void scheduler_observer_thread(void) {
+    printf("[SCHED] two-task preemption probe online (no voluntary yields)\n");
+    uint32_t reported = 0;
+    for (;;) {
+        uint32_t count = armv7m_preemptions;
+        if (!reported && count >= 3U && preempt_probe_a_progress != 0U) {
+            reported = 1;
+            printf("[SCHED] PREEMPT PASS tasks=2 count=%u slice=10ms\n",
+                   (unsigned)count);
+        }
+    }
 }
 #endif
 
+#ifndef CONFIG_STM32_QEMU
 static void diagnostic_thread(void) {
     int c;
     for (;;) {
@@ -723,6 +739,7 @@ static void diagnostic_thread(void) {
         proc_yield();
     }
 }
+#endif
 
 void kernel_main(void) {
     arch_local_irq_disable();
@@ -766,14 +783,19 @@ void kernel_main(void) {
     int probe_pid = proc_alloc(scheduler_probe_thread);
     if (probe_pid < 0)
         panic("cannot create scheduler probe task");
+    int observer_pid = proc_alloc(scheduler_observer_thread);
+    if (observer_pid < 0)
+        panic("cannot create scheduler observer task");
 #else
     int peripheral_pid = proc_alloc(stm32_peripheral_thread);
     if (peripheral_pid < 0)
         panic("cannot create peripheral task");
 #endif
+#ifndef CONFIG_STM32_QEMU
     int diagnostic_pid = proc_alloc(diagnostic_thread);
     if (diagnostic_pid < 0)
         panic("cannot create diagnostic task");
+#endif
     printf("[BOOT] scheduler initialized, tasks created\n");
 
     arch_local_irq_enable();
