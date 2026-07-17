@@ -1,6 +1,6 @@
 #ifdef CONFIG_BOARD_STM32F103
 
-#include "stm32_uart.h"
+#include "drivers/stm32f1/stm32_uart.h"
 
 #define RCC_CFGR    (*(volatile uint32_t *)0x40021004UL)
 #define RCC_APB1RSTR (*(volatile uint32_t *)0x40021010UL)

@@ -1,11 +1,8 @@
-#ifdef CONFIG_BOARD_STM32F103
+#ifdef CONFIG_ARMV7M
 
 #include "core/timer.h"
 #include "core/arch.h"
-#include "board.h"
-#include "backlight.h"
-#include "live2d.h"
-#include "stm32_uart.h"
+#include "arch/platform_hooks.h"
 
 #define SYST_CSR (*(volatile uint32_t *)0xE000E010UL)
 #define SYST_RVR (*(volatile uint32_t *)0xE000E014UL)
@@ -19,11 +16,8 @@
 
 static volatile uint64_t stm32_ticks;
 static uint32_t stm32_systick_reload;
-static volatile uint32_t stm32_live2d_clock;
-static uint32_t stm32_live2d_countdown;
-
 void timer_init(void) {
-    uint32_t hclk = stm32_hclk_hz();
+    uint32_t hclk = armv7m_platform_core_clock_hz();
     stm32_systick_reload =
         (hclk + STM32_TICK_HZ / 2U) / STM32_TICK_HZ;
     if (stm32_systick_reload == 0U)
@@ -33,8 +27,6 @@ void timer_init(void) {
 
     uint32_t flags = arch_irq_save();
     stm32_ticks = 0;
-    stm32_live2d_clock = 0;
-    stm32_live2d_countdown = LIVE2D_FRAME_MS;
     SYST_RVR = stm32_systick_reload - 1U;
     SYST_CVR = 0;
     /* PendSV must run below SysTick and all device IRQs. It only redirects the
@@ -61,19 +53,9 @@ void timer_irq_tick(void) {}
 void timer_enable(void) { SYST_CSR |= 0x3U; }
 void timer_disable(void) { SYST_CSR &= ~0x3U; }
 
-uint32_t stm32_live2d_frame_clock(void) {
-    return stm32_live2d_clock;
-}
-
 void armv7m_systick_handler(void) {
     stm32_ticks++;
-    if (--stm32_live2d_countdown == 0U) {
-        stm32_live2d_countdown = LIVE2D_FRAME_MS;
-        stm32_live2d_clock++;
-    }
-    stm32_backlight_systick();
-    if ((stm32_ticks % 500U) == 0)
-        stm32_status_led_toggle();
+    armv7m_platform_systick(stm32_ticks);
     if ((stm32_ticks % STM32_PREEMPT_SLICE_MS) == 0U)
         SCB_ICSR = SCB_ICSR_PENDSVSET;
 }

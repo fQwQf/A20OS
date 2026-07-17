@@ -4,7 +4,7 @@
 #include "core/arch.h"
 #include "core/timer.h"
 #include "board.h"
-#include "bluetooth.h"
+#include "drivers/stm32f1/bluetooth.h"
 
 #define NVIC_ISER_BASE 0xE000E100UL
 #define NVIC_ICER_BASE 0xE000E180UL

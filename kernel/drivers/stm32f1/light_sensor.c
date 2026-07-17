@@ -1,7 +1,7 @@
 #ifdef CONFIG_BOARD_STM32F103
 
-#include "light_sensor.h"
-#include "backlight.h"
+#include "drivers/stm32f1/light_sensor.h"
+#include "drivers/stm32f1/backlight.h"
 
 #define RCC_CFGR     (*(volatile uint32_t *)0x40021004UL)
 #define RCC_APB2RSTR (*(volatile uint32_t *)0x4002100CUL)

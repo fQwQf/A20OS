@@ -2,8 +2,8 @@
 #define _STM32F103_DISPLAY_H
 
 #include "core/types.h"
-#include "keys.h"
-#include "memory.h"
+#include "drivers/stm32f1/keys.h"
+#include "drivers/stm32f1/memory.h"
 #include "ui_render.h"
 
 typedef enum stm32_display_action {

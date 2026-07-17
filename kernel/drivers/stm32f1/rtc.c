@@ -4,8 +4,8 @@
  */
 #ifdef CONFIG_BOARD_STM32F103
 
-#include "rtc.h"
-#include "stm32_uart.h"
+#include "drivers/stm32f1/rtc.h"
+#include "drivers/stm32f1/stm32_uart.h"
 
 #define RTC_SECONDS_PER_DAY 86400U
 

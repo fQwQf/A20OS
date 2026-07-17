@@ -1,6 +1,6 @@
 #ifdef CONFIG_BOARD_STM32F103
 
-#include "backlight.h"
+#include "drivers/stm32f1/backlight.h"
 
 #define RCC_APB2ENR (*(volatile uint32_t *)0x40021018UL)
 

@@ -1,10 +1,10 @@
 #ifdef CONFIG_BOARD_STM32F103
 
 #include "stm32_bluetooth_config.h"
-#include "bluetooth.h"
+#include "drivers/stm32f1/bluetooth.h"
 #include "core/arch.h"
 #include "core/stdio.h"
-#include "stm32_uart.h"
+#include "drivers/stm32f1/stm32_uart.h"
 
 #define RCC_APB2ENR (*(volatile uint32_t *)0x40021018UL)
 #define AFIO_MAPR   (*(volatile uint32_t *)0x40010004UL)

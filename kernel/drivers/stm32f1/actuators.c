@@ -3,8 +3,8 @@
  */
 #ifdef CONFIG_BOARD_STM32F103
 
-#include "actuators.h"
-#include "stm32_uart.h" /* stm32_hclk_hz() */
+#include "drivers/stm32f1/actuators.h"
+#include "drivers/stm32f1/stm32_uart.h" /* stm32_hclk_hz() */
 
 #ifndef CONFIG_STM32_QEMU
 

@@ -7,7 +7,7 @@
 #include "sdfs.h"
 #include "hub_cfg.h"
 #include "hub_log.h"
-#include "sdcard.h"
+#include "drivers/stm32f1/sdcard.h"
 #include "touch_cal.h"
 
 static fat32lite_fs_t sdfs;

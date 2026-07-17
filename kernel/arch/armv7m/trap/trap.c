@@ -1,12 +1,8 @@
-#ifdef CONFIG_BOARD_STM32F103
+#ifdef CONFIG_ARMV7M
 
 #include "core/arch.h"
 #include "core/stdio.h"
-#include "drivers/char/uart.h"
-#include "board.h"
-#include "bluetooth.h"
-#include "ir.h"
-#include "wifi.h"
+#include "arch/platform_hooks.h"
 #include "proc/proc.h"
 
 #define ARMV7M_PREEMPT_SVC 0x20U
@@ -36,7 +32,7 @@ void armv7m_default_handler(void) {
     uint32_t ipsr;
     __asm__ __volatile__("mrs %0, ipsr" : "=r"(ipsr));
     printf("\n[ARMV7M] unhandled exception %u\n", ipsr);
-    stm32_status_led_set(1);
+    armv7m_platform_fault_notify();
     arch_halt();
 }
 
@@ -50,7 +46,7 @@ void armv7m_fault_handler(uint32_t exception, uint32_t *stack) {
            " cfsr=0x%x hfsr=0x%x addr=0x%x\n",
            exception, armv7m_fault_pc, stack ? stack[5] : 0,
            cfsr, hfsr, armv7m_fault_addr);
-    stm32_status_led_set(1);
+    armv7m_platform_fault_notify();
     arch_halt();
 }
 
@@ -73,23 +69,11 @@ void armv7m_svc_handler(uint32_t *stack) {
         stack[0] = 0xA20U;
 }
 
-void armv7m_usart1_irq_handler(void) {
-    int c;
-    while ((c = arch_uart_poll_getc()) >= 0)
-        uart_receive_char((char)c);
-    arch_uart_ack_irq();
-}
-
-void armv7m_usart2_irq_handler(void) {
-    stm32_wifi_irq();
-}
-
-void armv7m_usart3_irq_handler(void) {
-    stm32_bluetooth_irq();
-}
-
-void armv7m_exti9_5_irq_handler(void) {
-    stm32_ir_isr();
+void armv7m_external_irq_handler(void) {
+    uint32_t ipsr;
+    __asm__ __volatile__("mrs %0, ipsr" : "=r"(ipsr));
+    if (ipsr >= 16U)
+        armv7m_platform_irq_dispatch(ipsr - 16U);
 }
 
 #endif
