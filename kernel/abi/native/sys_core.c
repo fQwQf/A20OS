@@ -572,9 +572,7 @@ int64_t a20_install_gfd_handle(int gfd, uint16_t obj_type_hint,
         if (vf) vfs_put_file_ref(gfd, vf);
     }
 
-    a20_rights_t rights = A20_RIGHT_STAT | A20_RIGHT_SEEK | A20_RIGHT_DUP |
-                          A20_RIGHT_TRANSFER;
-    rights |= (requested_rights & (A20_RIGHT_READ | A20_RIGHT_WRITE));
+    a20_rights_t rights = requested_rights;
 
     task_t *cur = proc_current();
     struct a20_ht_internal *ht = task_get_a20_ht(cur);

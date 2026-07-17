@@ -29,6 +29,7 @@ static void append_if_dir(char *buf, size_t cap, const char *path)
 }
 
 static pid_t shell_pid;
+static pid_t desktop_pid;
 static volatile sig_atomic_t got_signal;
 
 static void sig_handler(int sig)
@@ -37,6 +38,8 @@ static void sig_handler(int sig)
     got_signal = 1;
     if (shell_pid > 0)
         kill(shell_pid, SIGTERM);
+    if (desktop_pid > 0)
+        kill(desktop_pid, SIGTERM);
 }
 
 static void setup_console(void)
@@ -133,10 +136,18 @@ int main(void)
     char *envp[] = {path_env, ld_env, "HOME=/", "SHELL=/bin/mksh", "TERM=vt100", NULL};
 
     if (access("/bin/etc/a20-gui", F_OK) == 0) {
-        char *desktop_argv[] = {"desktop", NULL};
         printf("[init] starting desktop\n");
-        execve("/bin/desktop", desktop_argv, envp);
-        perror("execve desktop");
+        desktop_pid = fork();
+        if (desktop_pid == 0) {
+            char *desktop_argv[] = {"desktop", NULL};
+            execve("/bin/desktop", desktop_argv, envp);
+            perror("execve desktop");
+            _exit(127);
+        }
+        if (desktop_pid < 0) {
+            perror("fork desktop");
+            desktop_pid = 0;
+        }
     }
 
     int contest = (access("/bin/etc/contest-mode", F_OK) == 0);
@@ -177,6 +188,10 @@ int main(void)
         if (w == shell_pid) {
             shell_pid = 0;
             break;
+        }
+        if (w == desktop_pid) {
+            desktop_pid = 0;
+            printf("[init] desktop exited\n");
         }
     }
 
