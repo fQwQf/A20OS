@@ -714,4 +714,91 @@ int fat32_stat(fat32_fs_t *fs, const char *path, int *is_dir, uint32_t *size) {
     return FAT32_OK;
 }
 
+/* ---- directory listing ---- */
+/* Format an 11-byte 8.3 field ("NAME    EXT") into "NAME.EXT\0". */
+static void name_from_83(const uint8_t ent[11], char out[13]) {
+    unsigned o = 0;
+    for (int i = 0; i < 8 && ent[i] != ' '; i++)
+        out[o++] = (char)ent[i];
+    if (ent[8] != ' ') {
+        out[o++] = '.';
+        for (int i = 8; i < 11 && ent[i] != ' '; i++)
+            out[o++] = (char)ent[i];
+    }
+    out[o] = '\0';
+}
+
+int fat32_opendir(fat32_fs_t *fs, const char *path, fat32_dir_t *d) {
+    if (!fs || !d)
+        return FAT32_EINVAL;
+    const char *p = path ? path : "";
+    while (*p == '/')
+        p++;
+    uint32_t cluster;
+    if (!*p) {
+        cluster = fs->root_cluster;
+    } else {
+        uint8_t name11[11];
+        uint32_t parent;
+        int r = resolve_parent(fs, path, fs->scratch, &parent, name11);
+        if (r)
+            return r;
+        uint8_t ent[32];
+        r = find_in_dir(fs, parent, name11, fs->scratch, ent, 0, 0);
+        if (r)
+            return r;
+        if (!(ent[11] & ATTR_DIRECTORY))
+            return FAT32_ENOTDIR;
+        cluster = ((uint32_t)rd16(ent + 20) << 16) | rd16(ent + 26);
+        if (cluster == 0)
+            cluster = fs->root_cluster;
+    }
+    d->fs = fs;
+    d->cluster = cluster;
+    d->sector_in_clus = 0;
+    d->ent_in_sector = 0;
+    return FAT32_OK;
+}
+
+int fat32_readdir(fat32_dir_t *d, fat32_dirent_t *out) {
+    if (!d || !out)
+        return FAT32_EINVAL;
+    fat32_fs_t *fs = d->fs;
+    while (d->cluster >= 2 && d->cluster < FAT_EOC) {
+        while (d->sector_in_clus < fs->sectors_per_cluster) {
+            uint32_t lba = cluster_lba(fs, d->cluster) + d->sector_in_clus;
+            int r = rd_sector(fs, lba, fs->scratch);
+            if (r)
+                return r;
+            while (d->ent_in_sector < fs->bytes_per_sector / 32u) {
+                uint8_t *ent = fs->scratch + d->ent_in_sector * 32u;
+                d->ent_in_sector++;
+                if (ent[0] == 0x00) {
+                    d->cluster = FAT_EOC; /* mark exhausted */
+                    return FAT32_ENOENT;
+                }
+                if (ent[0] == 0xE5)
+                    continue;
+                if ((ent[11] & ATTR_LONG_NAME) == ATTR_LONG_NAME)
+                    continue;
+                if (ent[11] & ATTR_VOLUME_ID)
+                    continue;
+                name_from_83(ent, out->name);
+                out->is_dir = (ent[11] & ATTR_DIRECTORY) ? 1 : 0;
+                out->size = out->is_dir ? 0u : rd32(ent + 28);
+                return FAT32_OK;
+            }
+            d->ent_in_sector = 0;
+            d->sector_in_clus++;
+        }
+        d->sector_in_clus = 0;
+        uint32_t next;
+        int r = fat_get(fs, d->cluster, &next);
+        if (r)
+            return r;
+        d->cluster = next;
+    }
+    return FAT32_ENOENT;
+}
+
 #endif /* CONFIG_BOARD_STM32F103 */
