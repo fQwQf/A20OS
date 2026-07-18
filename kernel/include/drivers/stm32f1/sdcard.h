@@ -42,12 +42,17 @@ typedef struct stm32_sdcard_info {
 } stm32_sdcard_info_t;
 
 int stm32_sdcard_init(void);
+/* Probe/recover the card through the A20 driver model. */
+int stm32_sdcard_recover(void);
 void stm32_sdcard_shutdown(void);
 int stm32_sdcard_check(void);
 int stm32_sdcard_read(uint64_t lba, void *buf, size_t count);
 int stm32_sdcard_write(uint64_t lba, const void *buf, size_t count);
 const stm32_sdcard_info_t *stm32_sdcard_info(void);
 block_dev_t *stm32_sdcard_block_dev(void);
+
+/* Board enumeration hook: publishes the SDIO host as an A20 block device. */
+int stm32_sdcard_register_device(void);
 
 /*
  * Retune the data-phase clock at runtime (console `sd clk <mhz>`), so the safe

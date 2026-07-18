@@ -36,6 +36,7 @@
 #include "drivers/stm32f1/watchdog.h"
 #include "touch_cal.h"
 #include "drivers/stm32f1/wifi.h"
+#include "device_model.h"
 
 #define TOUCH_POLL_INTERVAL_MS 20U
 #define KEY_POLL_INTERVAL_MS 20U
@@ -44,6 +45,7 @@
 #define MEMORY_POLL_INTERVAL_MS 1000U
 #define LIGHT_POLL_INTERVAL_MS 250U
 #define SDCARD_CHECK_INTERVAL_MS 2000U
+#define SDCARD_RETRY_INTERVAL_MS 5000U
 #define SERVICE_SLOW_THRESHOLD_MS 25U
 #define CONTROL_TICK_INTERVAL_MS 2000U
 #define MANUAL_OVERRIDE_MS 600000U
@@ -57,6 +59,7 @@ static uint64_t last_wifi_poll;
 static uint64_t last_memory_poll;
 static uint64_t last_light_poll;
 static uint64_t last_sdcard_check;
+static uint64_t last_sdcard_retry;
 static uint64_t last_control_tick;
 static uint64_t last_environment_poll;
 static uint32_t last_live2d_clock;
@@ -694,9 +697,14 @@ static void ui_handle_bluetooth_command(const char *line, uint64_t now) {
         "THEME DAY/NIGHT/COZY | LIGHT 0..100 | MUTE ON/OFF | "
         "AUTO FAN/PUMP/THEME/LIGHT/ALL\r\n";
 
-    if (!stm32_bluetooth_connected())
+    /* HC-05 modules commonly leave STATE unwired (or report it with a
+     * different polarity). A complete line received on the authenticated
+     * UART is stronger evidence of an active SPP link than that optional pin.
+     * Do not discard valid commands merely because the STATE GPIO is low. */
+    if (!stm32_bluetooth_info()->ready)
         return;
     if (bluetooth_cmd_parse(line, &cmd) != 0) {
+        printf("[BT] command parse failed: '%s'\n", line);
         static const char error[] = "ERR unknown command; send HELP\r\n";
         (void)stm32_bluetooth_send(error, sizeof(error) - 1U);
         return;
@@ -1043,7 +1051,7 @@ void stm32_peripherals_init(void) {
            (unsigned)stm32_extsram_capacity());
     stm32_memory_init();
 
-    peripherals.sdcard_ready = stm32_sdcard_init() == 0;
+    peripherals.sdcard_ready = stm32_sdcard_recover() == 0;
     report_sdcard();
 
     /* Mount FAT32 so assets/config/logs on the card are reachable as files. */
@@ -1206,6 +1214,9 @@ void stm32_peripherals_init(void) {
      * must feed it within the timeout or the MCU resets.
      */
     stm32_watchdog_init(6000);
+    /* Publish successfully initialized high-value peripherals through the
+     * A20 device lifecycle model. The small MCU profile safely ignores this. */
+    stm32_device_model_publish();
     printf("[BOOT] watchdog=%s (IWDG 6s)\n",
            stm32_watchdog_active() ? "armed" : "off");
 
@@ -1600,8 +1611,8 @@ touch_done:
         while ((length = stm32_bluetooth_read_line(
                     bluetooth_line, sizeof(bluetooth_line))) > 0) {
             (void)length;
-            printf("[BT] authenticated command received (%u bytes)\n",
-                   (unsigned)length);
+            printf("[BT] command received (%u bytes): '%s'\n",
+                   (unsigned)length, bluetooth_line);
 #ifndef CONFIG_STM32_LEGACY_DASHBOARD
             ui_handle_bluetooth_command(bluetooth_line, now);
 #endif
@@ -1728,11 +1739,20 @@ void stm32_peripherals_storage_service(uint64_t now) {
         last_sdcard_check = now;
         if (stm32_sdcard_check() != 0) {
             peripherals.sdcard_ready = 0;
+            stm32_sdfs_unmount();
             printf("[TF] card removed or stopped responding\n");
             report_sdcard();
             update_display_status();
         }
         record_max(&peripherals.sdcard_max_ms, elapsed_ms(sd_start));
+    }
+
+    /* A20-style deferred reprobe: transient brownouts do not require a
+     * console command.  The driver performs a complete SD protocol reset. */
+    if (!peripherals.sdcard_ready &&
+        now - last_sdcard_retry >= SDCARD_RETRY_INTERVAL_MS) {
+        last_sdcard_retry = now;
+        (void)stm32_peripherals_retry_sdcard();
     }
 }
 
@@ -1749,7 +1769,7 @@ int stm32_peripherals_retry_sdcard(void) {
     int was_ready = peripherals.sdcard_ready;
 
     stm32_sdfs_lock();
-    peripherals.sdcard_ready = stm32_sdcard_init() == 0;
+    peripherals.sdcard_ready = stm32_sdcard_recover() == 0;
     last_sdcard_check = timer_get_ticks();
     record_max(&peripherals.sdcard_max_ms, elapsed_ms(start));
     if (peripherals.sdcard_ready != was_ready || peripherals.sdcard_ready) {

@@ -6,6 +6,7 @@
 
 #include "sdfs.h"
 #include "core/sync.h"
+#include "core/string.h"
 #include "hub_cfg.h"
 #include "hub_log.h"
 #include "drivers/stm32f1/sdcard.h"
@@ -38,6 +39,13 @@ int stm32_sdfs_mount(void) {
     if (r == FAT32LITE_OK)
         sdfs_mounted = 1;
     return r;
+}
+
+void stm32_sdfs_unmount(void) {
+    /* FAT32lite has no dirty-cache thread; dropping the binding is enough for
+     * this small read-mostly filesystem and prevents stale I/O after removal. */
+    sdfs_mounted = 0;
+    memset(&sdfs, 0, sizeof(sdfs));
 }
 
 int stm32_sdfs_ready(void) { return sdfs_mounted; }

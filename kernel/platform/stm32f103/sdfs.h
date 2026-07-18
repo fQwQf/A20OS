@@ -20,6 +20,7 @@
 /* Mount the card's FAT32 volume. Returns FAT32LITE_OK, or a negative FAT32LITE_E* /
  * FAT32LITE_EIO when the card is absent or unreadable. Safe to call again. */
 int stm32_sdfs_mount(void);
+void stm32_sdfs_unmount(void);
 
 int stm32_sdfs_ready(void);
 
