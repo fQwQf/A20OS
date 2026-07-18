@@ -55,7 +55,7 @@
 #define COLOR_DARK   RGB565(6, 17, 30)
 #define COLOR_PANEL  RGB565(16, 32, 50)
 
-/* ---- Legacy dashboard (kept as fallback; superseded by ui_home/ui_render path) ---- */
+/* ---- Board bring-up dashboard ---- */
 static uint64_t display_last_second = (uint64_t)-1;
 static uint16_t display_controller_id;
 static int display_ready;
@@ -273,59 +273,6 @@ void stm32_display_fill_rect(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
         h = LCD_HEIGHT - y;
 
     lcd_fill_rect(x, y, w, h, color);
-}
-
-static void stm32_display_gfx_fill_rect(void *ctx, int x, int y, int w,
-                                         int h, uint16_t color) {
-    (void)ctx;
-    if (w <= 0 || h <= 0 || x >= (int)LCD_WIDTH || y >= (int)LCD_HEIGHT)
-        return;
-    if (x < 0) {
-        w += x;
-        x = 0;
-    }
-    if (y < 0) {
-        h += y;
-        y = 0;
-    }
-    if (w <= 0 || h <= 0)
-        return;
-    stm32_display_fill_rect((uint16_t)x, (uint16_t)y, (uint16_t)w,
-                            (uint16_t)h, color);
-}
-
-static void stm32_display_gfx_blit(void *ctx, int x, int y, int w, int h,
-                                    const uint16_t *px) {
-    int source_w = w;
-
-    (void)ctx;
-    if (!px || w <= 0 || h <= 0 || x >= (int)LCD_WIDTH ||
-        y >= (int)LCD_HEIGHT)
-        return;
-    if (x < 0) {
-        if (w <= -x)
-            return;
-        px += -x;
-        w += x;
-        x = 0;
-    }
-    if (y < 0) {
-        if (h <= -y)
-            return;
-        px += (size_t)(-y) * source_w;
-        h += y;
-        y = 0;
-    }
-    lcd_blit_stride((uint16_t)x, (uint16_t)y, (uint16_t)w, (uint16_t)h, px,
-                    (uint16_t)source_w);
-}
-
-void stm32_display_gfx(ui_gfx_t *gfx) {
-    if (!gfx)
-        return;
-    gfx->ctx = NULL;
-    gfx->fill_rect = stm32_display_gfx_fill_rect;
-    gfx->blit = stm32_display_gfx_blit;
 }
 
 static const uint8_t font5x7[][5] = {
@@ -1265,12 +1212,10 @@ void stm32_display_show_boot(void) {
     delay_ms(180);
 
     lcd_fill_rect(0, 0, LCD_WIDTH, LCD_HEIGHT, COLOR_DARK);
-#ifdef CONFIG_STM32_LEGACY_DASHBOARD
     display_page = DISPLAY_PAGE_STATUS;
     display_last_second = (uint64_t)-1;
     lcd_draw_header();
     lcd_render_page();
-#endif
 }
 
 void stm32_display_update_ticks(uint64_t ticks) {
