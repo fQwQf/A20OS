@@ -801,7 +801,9 @@ int stm32_bluetooth_init(void) {
                 AFIO_MAPR_SWJ_NOJTAG;
 
     gpio_config_pin(&GPIOA_CRL, &GPIOA_CRH, BLUETOOTH_KEY_PIN, 0x3U);
-    gpio_config_pin(&GPIOA_CRL, &GPIOA_CRH, BLUETOOTH_STATE_PIN, 0x8U);
+    /* Floating input avoids an unwired STATE pin being read as permanently
+     * high through the MCU's internal pull-up. */
+    gpio_config_pin(&GPIOA_CRL, &GPIOA_CRH, BLUETOOTH_STATE_PIN, 0x4U);
     /*
      * Probe the module TX path while KEY is low. The PZ-HC05 board drives
      * TX through a Schottky level-shift network with pull-ups on both sides;
@@ -812,8 +814,6 @@ int stm32_bluetooth_init(void) {
     bluetooth.rx_line_state = bluetooth_probe_rx_line();
     bluetooth.detected =
         bluetooth_rx_line_is_present(bluetooth.rx_line_state);
-
-    GPIOA_BSRR = 1U << BLUETOOTH_STATE_PIN;
 
     if (stm32_uart_init(BLUETOOTH_UART, BLUETOOTH_BAUD_RATE, 0) != 0)
         return -1;
@@ -864,6 +864,8 @@ int stm32_bluetooth_init(void) {
     /* Keep the interface armed even when the optional module does not reply. */
     bluetooth.ready = 1;
     bluetooth.waiting = configured;
+    bluetooth_rx_head = bluetooth_rx_tail = 0;
+    bluetooth_frame_ready = 0;
     stm32_uart_set_rx_irq(BLUETOOTH_UART, 1);
     return configured ? 0 : -1;
 #endif
@@ -893,6 +895,8 @@ int stm32_bluetooth_reprobe(void) {
         (bluetooth.detected || bluetooth.at_responsive) &&
         !!(GPIOA_IDR & (1U << BLUETOOTH_STATE_PIN));
     bluetooth_state_changed_time = 0;
+    bluetooth_rx_head = bluetooth_rx_tail = 0;
+    bluetooth_frame_ready = 0;
     stm32_uart_set_rx_irq(BLUETOOTH_UART, bluetooth.ready);
     return configured ? 0 : -1;
 #endif
@@ -956,6 +960,10 @@ void stm32_bluetooth_service(uint64_t now) {
     if (bluetooth_observed_rx != bluetooth.received_bytes) {
         bluetooth_observed_rx = bluetooth.received_bytes;
         bluetooth_last_rx_time = now;
+        /* Valid SPP traffic is a reliable link indication when STATE is
+         * unwired or electrically unreliable. */
+        if (!bluetooth.connected)
+            bluetooth.connected = 1;
     } else if (bluetooth_rx_head != bluetooth_rx_tail &&
                now - bluetooth_last_rx_time >= BLUETOOTH_FRAME_IDLE_MS) {
         bluetooth_frame_ready = 1;
@@ -972,7 +980,7 @@ int stm32_bluetooth_send(const void *data, size_t length) {
     (void)length;
     return -1;
 #else
-    if (!bluetooth.ready || !bluetooth.connected || (!data && length))
+    if (!bluetooth.ready || (!data && length))
         return -1;
 
     const uint8_t *bytes = data;
