@@ -1,6 +1,9 @@
 #ifdef CONFIG_BOARD_STM32F103
 
 #include "drivers/stm32f1/sdcard.h"
+#include "drivers/core/driver_core.h"
+#include "drivers/core/driver_class.h"
+#include "drivers/core/driver_register.h"
 #include "core/arch.h" /* arch_irq_save/restore — data-phase critical section */
 #include "core/string.h"
 #include "drivers/stm32f1/stm32_uart.h"
@@ -59,6 +62,16 @@
 static stm32_sdcard_info_t card;
 static uint8_t sector_buf[512] __attribute__((aligned(4)));
 static block_dev_t sd_block_dev;
+static device_t sd_device;
+static bus_type_t sd_platform_bus;
+static int sd_device_registered;
+
+/* The tiny MCU profile omits the general driver core to save flash.  Weak
+ * references keep that profile linkable while enabling full registration in
+ * normal A20 builds. */
+extern int bus_register(bus_type_t *) __attribute__((weak));
+extern int device_register(device_t *) __attribute__((weak));
+extern int bus_probe_device(device_t *) __attribute__((weak));
 
 /*
  * Data-phase clock ceiling. SDIOCLK = HCLK on the F103, so this is a target the
@@ -517,6 +530,19 @@ absent:
 #endif
 }
 
+int stm32_sdcard_recover(void) {
+    /* Always start from a quiescent controller. This is important after a
+     * brownout where the card and SDIO may be in different protocol states. */
+    stm32_sdcard_shutdown();
+    if (bus_probe_device && sd_device_registered) {
+        sd_device.drv = NULL;
+        sd_device.drv_priv = NULL;
+        sd_device.state = DEV_STATE_UNINIT;
+        return bus_probe_device(&sd_device);
+    }
+    return stm32_sdcard_init();
+}
+
 void stm32_sdcard_shutdown(void) {
 #ifdef CONFIG_STM32_XUANWU
     sdio_stop();
@@ -531,6 +557,13 @@ int stm32_sdcard_check(void) {
     if (card_status_ready() == 0)
         return 0;
     stm32_sdcard_shutdown();
+    /* Publish removal to the driver model. A later recover() will run the
+     * normal probe path instead of silently bypassing driver ownership. */
+    if (sd_device_registered) {
+        sd_device.drv = NULL;
+        sd_device.drv_priv = NULL;
+        sd_device.state = DEV_STATE_REMOVED;
+    }
     return -1;
 }
 
@@ -625,6 +658,70 @@ block_dev_t *stm32_sdcard_block_dev(void) {
     sd_block_dev.read_sector = sd_block_read;
     sd_block_dev.write_sector = sd_block_write;
     return &sd_block_dev;
+}
+
+static int sd_bus_match(device_t *dev, const driver_t *drv) {
+    return dev && drv && dev->bus == drv->bus && drv->name &&
+           strcmp(drv->name, "stm32-sdio") == 0;
+}
+
+static int sd_driver_probe(device_t *dev) {
+    if (stm32_sdcard_init() != 0)
+        return -1;
+    dev->drv_priv = &sd_block_dev;
+    return 0;
+}
+
+static int sd_driver_remove(device_t *dev) {
+    (void)dev;
+    stm32_sdcard_shutdown();
+    return 0;
+}
+
+static int sd_class_read(struct device *dev, uint64_t lba, void *buf, size_t n) {
+    (void)dev;
+    return stm32_sdcard_read(lba, buf, n);
+}
+static int sd_class_write(struct device *dev, uint64_t lba, const void *buf, size_t n) {
+    (void)dev;
+    return stm32_sdcard_write(lba, buf, n);
+}
+static uint64_t sd_class_capacity(struct device *dev) {
+    (void)dev;
+    return card.sectors;
+}
+static uint32_t sd_class_sector_size(struct device *dev) {
+    (void)dev;
+    return 512U;
+}
+static int sd_class_flush(struct device *dev) { (void)dev; return 0; }
+
+static block_dev_ops_t sd_block_ops = {
+    .read = sd_class_read, .write = sd_class_write,
+    .flush = sd_class_flush, .capacity = sd_class_capacity,
+    .sector_size = sd_class_sector_size,
+};
+
+static bus_type_t sd_platform_bus = { .name = "stm32-platform", .match = sd_bus_match };
+static driver_t sd_driver = {
+    .name = "stm32-sdio", .bus = &sd_platform_bus,
+    .probe = sd_driver_probe, .remove = sd_driver_remove,
+    .class_ops = &sd_block_ops, .class_type = DEV_CLASS_BLOCK,
+};
+
+DRIVER_REGISTER(sd_driver);
+
+int stm32_sdcard_register_device(void) {
+    if (sd_device_registered)
+        return 0;
+    if (!bus_register || !device_register)
+        return 0;
+    memset(&sd_device, 0, sizeof(sd_device));
+    sd_device.name = "tfcard0";
+    sd_device.bus = &sd_platform_bus;
+    sd_device_registered = 1;
+    bus_register(&sd_platform_bus);
+    return device_register(&sd_device);
 }
 
 #endif
