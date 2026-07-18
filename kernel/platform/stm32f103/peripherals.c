@@ -1423,7 +1423,6 @@ static void run_control_tick(uint64_t now) {
 void stm32_peripherals_control_service(uint64_t now) {
     uint64_t service_start = timer_get_ticks();
     stm32_watchdog_feed(); /* main loop is alive -> stave off the reset */
-    stm32_pump_service(now);
 #ifdef CONFIG_STM32_LEGACY_DASHBOARD
     stm32_display_update_ticks(now);
 #endif

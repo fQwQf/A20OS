@@ -117,7 +117,7 @@ static void diagnostic_fan_status(void) {
            (unsigned)fan.gpio_config, (unsigned)fan.gpio_idr,
            (unsigned)fan.gpio_odr, (unsigned)fan.afio_mapr);
     printf("[FAN] TIM3 CR1=0x%x PSC=%u ARR=%u CNT=%u CCR2=%u"
-           " CCMR1=0x%x CCER=0x%x duty=0/20/40/60%% expected=2kHz PB5/TIM3_CH2\n",
+           " CCMR1=0x%x CCER=0x%x duty=0/40/50/60%% expected=2kHz PB5/TIM3_CH2\n",
            (unsigned)fan.tim_cr1, (unsigned)fan.tim_psc,
            (unsigned)fan.tim_arr, (unsigned)fan.tim_cnt,
            (unsigned)fan.tim_ccr, (unsigned)fan.tim_ccmr1,
