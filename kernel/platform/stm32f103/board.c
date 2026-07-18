@@ -80,18 +80,26 @@ static void stm32_clock_init(void) {
 #endif
 
 void stm32_status_led_set(int on) {
+#ifdef CONFIG_STM32_XUANWU
+    /* PB5 belongs to the onboard ULN2003 fan PWM on Xuanwu. */
+    (void)on;
+#else
     /* Xuanwu LED0 is active low on PB5. */
     GPIOB_BSRR = on ? (STATUS_LED_MASK << 16) : STATUS_LED_MASK;
+#endif
 }
 
 void stm32_status_led_toggle(void) {
+#ifndef CONFIG_STM32_XUANWU
     if (GPIOB_ODR & STATUS_LED_MASK)
         GPIOB_BSRR = STATUS_LED_MASK << 16;
     else
         GPIOB_BSRR = STATUS_LED_MASK;
+#endif
 }
 
 void stm32_status_led_init(void) {
+#ifndef CONFIG_STM32_XUANWU
     RCC_APB2ENR |= RCC_APB2ENR_IOPBEN;
 
     uint32_t crl = GPIOB_CRL;
@@ -99,6 +107,7 @@ void stm32_status_led_init(void) {
     crl |= 0x2U << (STATUS_LED_PIN * 4U);
     GPIOB_CRL = crl;
     stm32_status_led_set(1);
+#endif
 }
 
 static void stm32_irqchip_init(void) {}

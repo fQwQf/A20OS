@@ -81,8 +81,9 @@ Debug Halting Control and Status Register, writes and verifies flash, then
 restores MSP and PC from the flash vector table before resuming. A specific probe can be selected with
 `STM32_CMSIS_DAP_SERIAL=<serial>`.
 
-The Xuanwu board's LED0 on PB5 is used as a visible heartbeat. It is active
-low, turns on during early boot, and toggles every 500 ms after SysTick starts.
+PB5 is assigned to the Xuanwu board's ULN2003 motor input and driven by
+TIM3_CH2 using the timer's partial remap. The previous PB5 status heartbeat is
+disabled in the Xuanwu build so it cannot corrupt the fan PWM waveform.
 The onboard 16-bit FSMC LCD is also initialized during boot. Its backlight is
 enabled on PB0 when that signal is populated. The panel reset is wired to the
 board reset rather than a GPIO. The firmware first shows red/green/blue
