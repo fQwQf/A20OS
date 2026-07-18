@@ -224,6 +224,14 @@ void proc_block_until(task_t *t, uint64_t wake_time) {
     spin_unlock_irqrestore(&proc_lock, flags);
 }
 
+void proc_sleep_until(uint64_t wake_time) {
+    task_t *current = proc_current();
+    if (!current)
+        return;
+    proc_block_until(current, wake_time);
+    sched();
+}
+
 // idle 进程的主循环，系统无任务时运行
 void idle_loop(void) {
     while (1) {
