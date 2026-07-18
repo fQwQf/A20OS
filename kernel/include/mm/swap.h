@@ -34,8 +34,6 @@ struct swap_header {
 
 typedef uint64_t swap_entry_t;
 
-#if defined(CONFIG_SWAP)
-
 #include "core/errno.h"
 
 struct block_dev;
@@ -50,7 +48,7 @@ typedef struct swap_info_struct {
     int active;
 } swap_info_struct;
 
-#ifdef CONFIG_SWAP
+#if defined(CONFIG_SWAP)
 extern swap_info_struct swap_info[MAX_SWAPFILES];
 extern size_t total_swap_pages;
 extern size_t nr_swap_pages;
@@ -116,8 +114,6 @@ static inline long sys_mkswap(const char *path, int flags)
     (void)flags;
     return -ENOSYS;
 }
-#endif
-
 #endif
 
 #endif
