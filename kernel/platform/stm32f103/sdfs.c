@@ -5,6 +5,7 @@
 #ifdef CONFIG_BOARD_STM32F103
 
 #include "sdfs.h"
+#include "core/sync.h"
 #include "hub_cfg.h"
 #include "hub_log.h"
 #include "drivers/stm32f1/sdcard.h"
@@ -12,6 +13,10 @@
 
 static fat32lite_fs_t sdfs;
 static int sdfs_mounted;
+static mutex_t sdfs_mutex = MUTEX_INIT;
+
+void stm32_sdfs_lock(void) { mutex_lock(&sdfs_mutex); }
+void stm32_sdfs_unlock(void) { mutex_unlock(&sdfs_mutex); }
 
 static int sd_read(void *ctx, uint32_t lba, void *buf, uint32_t count) {
     (void)ctx;

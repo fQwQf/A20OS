@@ -30,6 +30,14 @@ typedef struct stm32_peripheral_state {
 } stm32_peripheral_state_t;
 
 void stm32_peripherals_init(void);
+/* Independent scheduler domains. Each function is non-blocking at the service
+ * level and owns the driver state named by the function. */
+void stm32_peripherals_control_service(uint64_t now);
+void stm32_peripherals_ui_input_service(uint64_t now);
+void stm32_peripherals_network_service(uint64_t now);
+void stm32_peripherals_sensor_service(uint64_t now);
+void stm32_peripherals_storage_service(uint64_t now);
+/* Compatibility entry point for bring-up code without scheduler threads. */
 void stm32_peripherals_service(uint64_t now);
 int stm32_peripherals_retry_sdcard(void);
 int stm32_peripherals_retry_bluetooth(void);
