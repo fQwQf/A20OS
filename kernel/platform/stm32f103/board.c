@@ -5,6 +5,7 @@
 #include "core/timer.h"
 #include "board.h"
 #include "drivers/stm32f1/bluetooth.h"
+#include "drivers/stm32f1/sdcard.h"
 
 #define NVIC_ISER_BASE 0xE000E100UL
 #define NVIC_ICER_BASE 0xE000E180UL
@@ -160,7 +161,11 @@ static void stm32_early_init(void) {
 
 static void stm32_poweroff(void) { firmware_shutdown(); }
 static void stm32_reboot(void) { firmware_reboot(); }
-static void stm32_enumerate_devices(void) {}
+static void stm32_enumerate_devices(void) {
+    /* SDIO is a fixed platform device, but it still follows the same
+     * register -> match -> probe lifecycle as PCI/VirtIO devices. */
+    (void)stm32_sdcard_register_device();
+}
 
 static const board_config_t stm32f103_board = {
     .name = "stm32f103",
