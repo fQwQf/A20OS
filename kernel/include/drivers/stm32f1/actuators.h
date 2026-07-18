@@ -2,11 +2,10 @@
  * Smart home hub — actuator outputs: fan (PWM), water pump (on/off), buzzer.
  *
  * Hardware driver. No-op under CONFIG_STM32_QEMU (timers/GPIO for these pins
- * are not modelled). See docs/stm32-big-exp.md §5.4.
+ * are not modelled).
  *
- * Buzzer = PB8, confirmed by docs/pz/8-蜂鸣器实验. On Xuanwu the fan
- * uses the board's ULN2003 motor input at PB5/TIM3_CH2 (partial remap), confirmed
- * by docs/pz/12-直流电机调速实验. PB5 is therefore reserved for the fan
+ * Buzzer = PB8. On Xuanwu the fan uses the board's ULN2003 motor input at
+ * PB5/TIM3_CH2 (partial remap). PB5 is therefore reserved for the fan
  * instead of the former status heartbeat. The pump remains provisional at PA7
  * GPIO. The pump/fan MUST go
  * through an external driver stage with a flyback diode and a separate supply

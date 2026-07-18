@@ -5,12 +5,22 @@
  */
 #ifdef CONFIG_BOARD_STM32F103
 
-#include "touch_cal.h"
-#include "hub_proto.h" /* hub_crc16 — shared CRC-16/CCITT-FALSE */
+#include "drivers/stm32f1/touch_cal.h"
 
 #define TOUCH_CAL_MAGIC0 0xCAu
 #define TOUCH_CAL_MAGIC1 0x1Bu
 #define TOUCH_CAL_VERSION 1u
+
+static uint16_t touch_crc16(const uint8_t *data, unsigned len) {
+    uint16_t crc = 0xFFFFu;
+    for (unsigned i = 0; i < len; i++) {
+        crc ^= (uint16_t)data[i] << 8;
+        for (unsigned bit = 0; bit < 8; bit++)
+            crc = (crc & 0x8000u) ? (uint16_t)((crc << 1) ^ 0x1021u)
+                                  : (uint16_t)(crc << 1);
+    }
+    return crc;
+}
 
 /*
  * Mean raw value (and, optionally, mean screen coordinate) over the points on
@@ -167,7 +177,7 @@ int touch_cal_serialize(const stm32_touch_calibration_t *cal, uint8_t *buf,
     put_u16(&buf[6], cal->x_max);
     put_u16(&buf[8], cal->y_min);
     put_u16(&buf[10], cal->y_max);
-    put_u16(&buf[18], hub_crc16(buf, 18));
+    put_u16(&buf[18], touch_crc16(buf, 18));
     return (int)TOUCH_CAL_BLOB_SIZE;
 }
 
@@ -178,7 +188,7 @@ int touch_cal_deserialize(const uint8_t *buf, unsigned buf_size,
     if (buf[0] != TOUCH_CAL_MAGIC0 || buf[1] != TOUCH_CAL_MAGIC1 ||
         buf[2] != TOUCH_CAL_VERSION)
         return -1;
-    if (get_u16(&buf[18]) != hub_crc16(buf, 18))
+    if (get_u16(&buf[18]) != touch_crc16(buf, 18))
         return -1;
 
     stm32_touch_calibration_t c;
