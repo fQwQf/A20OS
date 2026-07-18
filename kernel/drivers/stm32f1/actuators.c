@@ -43,22 +43,16 @@
 
 #define FAN_PERIOD 500U /* with a 1 MHz timer clock -> 2 kHz PWM */
 /* Keep the first revision's fan control below full power.  The Xuanwu
- * ULN2003 channel and the small 5 V rail are happier with 20/40/60% than
- * with the previous 33/66/100% steps. */
-static const uint16_t fan_duty_steps[4] = {0U, 100U, 200U, 300U};
+ * ULN2003 channel and the small 5 V rail are happier with 40/50/60% than
+ * with the previous 35/50/60% steps.  The first step is deliberately above
+ * the motor's observed startup threshold; the second stays close to max. */
+static const uint16_t fan_duty_steps[4] = {0U, 200U, 250U, 300U};
 #define PUMP_PIN 7U  /* PA7 */
 #define BUZZER_PIN 8U /* PB8 */
 
 static volatile uint8_t fan_requested_level;
 static volatile uint8_t fan_debug_override;
 static volatile uint8_t fan_debug_gpio_mode;
-static volatile uint8_t pump_requested;
-static volatile uint8_t pump_output;
-
-/* The pump is a GPIO-only load. Time-proportioning keeps its peak voltage
- * unchanged while limiting average power to 40% (1 s control window). */
-#define PUMP_WINDOW_MS 1000ULL
-#define PUMP_ON_MS 400ULL
 
 static void fan_config_pwm_pin(void) {
 #ifdef CONFIG_STM32_XUANWU
@@ -146,8 +140,6 @@ int stm32_actuators_init(void) {
 #else
     fan_init();
     gpio_out_init();
-    pump_requested = 0;
-    pump_output = 0;
     return 0;
 #endif
 }
@@ -244,27 +236,10 @@ void stm32_pump_set(int on) {
 #ifdef CONFIG_STM32_QEMU
     (void)on;
 #else
-    pump_requested = on ? 1U : 0U;
-    if (!pump_requested && pump_output) {
-        GPIOA_BRR = 1U << PUMP_PIN;
-        pump_output = 0;
-    }
-#endif
-}
-
-void stm32_pump_service(uint64_t now_ms) {
-#ifdef CONFIG_STM32_QEMU
-    (void)now_ms;
-#else
-    int should_run = pump_requested &&
-        (now_ms % PUMP_WINDOW_MS) < PUMP_ON_MS;
-    if (should_run && !pump_output) {
+    if (on)
         GPIOA_BSRR = 1U << PUMP_PIN;
-        pump_output = 1U;
-    } else if (!should_run && pump_output) {
+    else
         GPIOA_BRR = 1U << PUMP_PIN;
-        pump_output = 0U;
-    }
 #endif
 }
 
