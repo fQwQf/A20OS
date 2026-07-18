@@ -9,32 +9,20 @@
 #include "drivers/stm32f1/ir.h"
 #include "drivers/stm32f1/stm32_uart.h"
 #include "drivers/stm32f1/wifi.h"
-#include "live2d.h"
 
 #define STM32_IRQ_EXTI9_5 23U
 #define STM32_IRQ_USART1  37U
 #define STM32_IRQ_USART2  38U
 #define STM32_IRQ_USART3  39U
 
-static volatile uint32_t live2d_clock;
-static uint32_t live2d_countdown = LIVE2D_FRAME_MS;
-
 uint32_t armv7m_platform_core_clock_hz(void) {
     return stm32_hclk_hz();
 }
 
 void armv7m_platform_systick(uint64_t ticks) {
-    if (--live2d_countdown == 0U) {
-        live2d_countdown = LIVE2D_FRAME_MS;
-        live2d_clock++;
-    }
     stm32_backlight_systick();
     if ((ticks % 500U) == 0U)
         stm32_status_led_toggle();
-}
-
-uint32_t stm32_live2d_frame_clock(void) {
-    return live2d_clock;
 }
 
 void armv7m_platform_irq_dispatch(uint32_t irq) {

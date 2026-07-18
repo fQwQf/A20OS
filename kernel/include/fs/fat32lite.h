@@ -6,8 +6,8 @@
  * builds; hardware-independent via fat32lite_io_t callbacks; single-threaded;
  * 8.3 names only. Peer of the VFS-integrated kernel/fs/fat32.c.
  *
- * The onboard Flash is tiny, so backgrounds, Live2D sprite frames, the CJK
- * font, config and logs all live on the TF card. sdcard.c already brings the
+ * The onboard Flash is tiny, so large assets and mutable configuration can
+ * live on the TF card. sdcard.c already brings the
  * card up and gives sector read/write + the partition LBA; this module adds
  * real *file* read/write on top of that sector interface: mount, open, read,
  * seek, create/truncate, sequential write, mkdir, unlink.
@@ -16,7 +16,7 @@
  * same code runs on the STM32 (backed by stm32_sdcard_read/write) and in the
  * host test / simulator (backed by a real FAT32 disk image file). Names are
  * matched on their 8.3 short form (LFN entries are skipped); files this module
- * creates use 8.3-uppercase names, which is what the hub's assets use.
+ * creates use 8.3-uppercase names.
  *
  * Single-threaded use only (one shared metadata scratch sector per fs).
  */

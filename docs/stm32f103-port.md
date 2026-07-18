@@ -12,11 +12,12 @@ It deliberately reuses A20OS architecture and board boundaries:
   operations, external IRQ routing, and board/device composition.
 - `kernel/mcu`: the small-memory kernel profile and allocator.
 
-The first milestone does not build the full process, VFS, network, or VM
-subsystems. STM32F103 parts normally provide only 20 KiB SRAM and no MMU, so
-those facilities require an embedded configuration layer rather than merely
-new CPU and device drivers. The current image proves reset/data/BSS setup,
-UART output, IRQ entry, a 1 kHz SysTick, WFI idle, and dynamic allocation.
+The MCU profile links the generic scheduler and a small NOMMU/VFS subset, but
+not the full network or VM subsystems. STM32F103 parts normally provide only
+20 KiB SRAM and no MMU, so those facilities require an embedded configuration
+layer rather than merely new CPU and device drivers. The current image proves
+reset/data/BSS setup, UART output, IRQ entry, a 1 kHz SysTick, preemptive task
+scheduling, device service tasks, and dynamic allocation.
 
 ## Build
 
@@ -102,9 +103,10 @@ The onboard TF socket uses the STM32 SDIO pins `PC8-PC12` and `PD2`. The
 driver supports SDSC and SDHC/SDXC cards, 1-bit fallback and 4-bit transfer,
 single-sector reads/writes, the generic `block_dev_t` interface, FAT32 boot
 sector detection, volume label reporting, periodic health checks, removal
-handling, and automatic reprobe after insertion. The MCU profile does not yet
-link the full A20OS VFS, so this milestone exposes a real block device rather
-than mounting it into a process-visible namespace.
+handling, and automatic reprobe after insertion. The MCU profile does not
+expose the card in a process-visible namespace. A small board adapter can mount
+FAT32lite for calibration and kernel-side access, while the SDIO driver also
+publishes the generic `block_dev_t` interface.
 
 The 3.5-inch panel carries an XPT2046-compatible resistive touch controller:
 `PB1=T_CLK`, `PB2=T_DOUT`, `PF9=T_DIN`, `PF10=T_PEN`, and `PF11=T_CS`.
@@ -262,9 +264,8 @@ cannot periodically freeze input and display updates.
 
 The MCU profile now links the generic A20OS process scheduler. ARMv7-M
 `__switch` saves and restores `r4-r11`, SP, the return address, the task
-pointer, and CONTROL. The physical board runs the peripheral service and the
-USART1 diagnostic console as separate kernel tasks; QEMU substitutes a
-scheduler probe task. Tasks are designed to yield cooperatively with
+pointer, and CONTROL. The physical board runs peripheral service as a kernel
+task; QEMU substitutes two scheduler probe tasks. Tasks are designed to yield cooperatively with
 `proc_yield()`, and they are also preempted on a 10 ms time slice. SysTick
 pends the lowest-priority PendSV exception. PendSV redirects exception return
 to a thread-mode trampoline, which preserves the volatile register set and
@@ -275,7 +276,7 @@ namespace, and compatibility stubs reduce the generic scheduler footprint.
 The 8 KiB QEMU profile runs two non-yielding busy-loop tasks and reports
 `PREEMPT PASS`, proving that both tasks progress solely through time slicing.
 
-The LCD UI remains touch-selectable when a working panel is fitted. The
+The board bring-up dashboard remains touch-selectable when a working panel is fitted. The
 storage page shows capacity, FAT32 state, SDIO bus width, and volume label.
 The touch page is a small drawing pad with continuous strokes and a `CLEAR`
 button, so panel orientation and calibration can be checked without a serial
