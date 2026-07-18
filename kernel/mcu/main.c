@@ -34,6 +34,14 @@ static volatile char diagnostic_line[160];
 #endif
 static unsigned diagnostic_length;
 
+static void name_mcu_task(int pid, const char *name, int priority) {
+    task_t *task = proc_find(pid);
+    if (!task)
+        return;
+    proc_set_name(task, name);
+    task->priority = priority;
+}
+
 static int text_equal(const char *left, const char *right) {
     while (*left && *right && *left == *right) {
         left++;
@@ -281,16 +289,19 @@ static void diagnostic_fs_test(fat32lite_fs_t *fs) {
 }
 
 static void diagnostic_fs(char *args) {
+    stm32_sdfs_lock();
     if (!stm32_sdfs_ready()) {
         int m = stm32_sdfs_mount();
         if (m != FAT32LITE_OK) {
             printf("[FS] not-mounted err=%d (try 'sd retry' first)\n", m);
+            stm32_sdfs_unlock();
             return;
         }
     }
     fat32lite_fs_t *fs = stm32_sdfs();
     if (!fs) {
         printf("[FS] no filesystem\n");
+        stm32_sdfs_unlock();
         return;
     }
     if (!args[0] || text_equal(args, "ls")) {
@@ -304,6 +315,7 @@ static void diagnostic_fs(char *args) {
         char *sp = strchr(rest, ' ');
         if (!sp) {
             printf("[FS] usage: fs write <path> <text>\n");
+            stm32_sdfs_unlock();
             return;
         }
         *sp++ = '\0';
@@ -311,6 +323,7 @@ static void diagnostic_fs(char *args) {
         int r = fat32lite_create(fs, rest, &f);
         if (r) {
             printf("[FS] write: create %s err=%d\n", rest, r);
+            stm32_sdfs_unlock();
             return;
         }
         int w = fat32lite_write(&f, sp, (uint32_t)strlen(sp));
@@ -327,6 +340,7 @@ static void diagnostic_fs(char *args) {
         printf("[FS] usage: fs [ls <dir>] | cat <path>"
                " | write <path> <text> | rm <path> | test\n");
     }
+    stm32_sdfs_unlock();
 }
 
 static void diagnostic_time(const char *args) {
@@ -670,11 +684,43 @@ static void diagnostic_execute(char *line) {
 }
 
 #ifndef CONFIG_STM32_QEMU
-static void stm32_peripheral_thread(void) {
+static void stm32_control_thread(void) {
     for (;;) {
         uint64_t now = timer_get_ticks();
-        stm32_peripherals_service(now);
-        proc_yield();
+        stm32_peripherals_control_service(now);
+        proc_sleep_until(now + 5U);
+    }
+}
+
+static void stm32_network_thread(void) {
+    for (;;) {
+        uint64_t now = timer_get_ticks();
+        stm32_peripherals_network_service(now);
+        proc_sleep_until(now + 10U);
+    }
+}
+
+static void stm32_ui_input_thread(void) {
+    for (;;) {
+        uint64_t now = timer_get_ticks();
+        stm32_peripherals_ui_input_service(now);
+        proc_sleep_until(now + 10U);
+    }
+}
+
+static void stm32_sensor_thread(void) {
+    for (;;) {
+        uint64_t now = timer_get_ticks();
+        stm32_peripherals_sensor_service(now);
+        proc_sleep_until(now + 20U);
+    }
+}
+
+static void stm32_storage_thread(void) {
+    for (;;) {
+        uint64_t now = timer_get_ticks();
+        stm32_peripherals_storage_service(now);
+        proc_sleep_until(now + 20U);
     }
 }
 #endif
@@ -736,7 +782,7 @@ static void diagnostic_thread(void) {
                 !strchr((char *)diagnostic_line + 10, ' '))
                 uart_putc((char)c);
         }
-        proc_yield();
+        proc_sleep_until(timer_get_ticks() + 10U);
     }
 }
 #endif
@@ -787,14 +833,32 @@ void kernel_main(void) {
     if (observer_pid < 0)
         panic("cannot create scheduler observer task");
 #else
-    int peripheral_pid = proc_alloc(stm32_peripheral_thread);
-    if (peripheral_pid < 0)
-        panic("cannot create peripheral task");
+    int control_pid = proc_alloc(stm32_control_thread);
+    if (control_pid < 0)
+        panic("cannot create control task");
+    name_mcu_task(control_pid, "hub-control", 2);
+    int ui_pid = proc_alloc(stm32_ui_input_thread);
+    if (ui_pid < 0)
+        panic("cannot create UI/input task");
+    name_mcu_task(ui_pid, "hub-ui", 2);
+    int network_pid = proc_alloc(stm32_network_thread);
+    if (network_pid < 0)
+        panic("cannot create network task");
+    name_mcu_task(network_pid, "hub-network", 1);
+    int sensor_pid = proc_alloc(stm32_sensor_thread);
+    if (sensor_pid < 0)
+        panic("cannot create sensor task");
+    name_mcu_task(sensor_pid, "hub-sensor", 1);
+    int storage_pid = proc_alloc(stm32_storage_thread);
+    if (storage_pid < 0)
+        panic("cannot create storage task");
+    name_mcu_task(storage_pid, "hub-storage", 0);
 #endif
 #ifndef CONFIG_STM32_QEMU
     int diagnostic_pid = proc_alloc(diagnostic_thread);
     if (diagnostic_pid < 0)
         panic("cannot create diagnostic task");
+    name_mcu_task(diagnostic_pid, "hub-console", 0);
 #endif
     printf("[BOOT] scheduler initialized, tasks created\n");
 
