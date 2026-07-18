@@ -2,9 +2,6 @@
 #define _STM32F103_PERIPHERALS_H
 
 #include "core/types.h"
-#include "ui_home.h"
-#include "live2d.h"
-
 typedef struct stm32_peripheral_state {
     int display_ready;
     uint16_t display_id;
@@ -30,26 +27,10 @@ typedef struct stm32_peripheral_state {
 } stm32_peripheral_state_t;
 
 void stm32_peripherals_init(void);
-/* Independent scheduler domains. Each function is non-blocking at the service
- * level and owns the driver state named by the function. */
-void stm32_peripherals_control_service(uint64_t now);
-void stm32_peripherals_ui_input_service(uint64_t now);
-void stm32_peripherals_network_service(uint64_t now);
-void stm32_peripherals_sensor_service(uint64_t now);
-void stm32_peripherals_storage_service(uint64_t now);
-/* Compatibility entry point for bring-up code without scheduler threads. */
 void stm32_peripherals_service(uint64_t now);
 int stm32_peripherals_retry_sdcard(void);
 int stm32_peripherals_retry_bluetooth(void);
 int stm32_peripherals_retry_wifi(void);
-int stm32_peripherals_set_proxy(const char *ip, uint16_t port);
-void stm32_peripherals_request_time_sync(void);
-int stm32_peripherals_start_touch_calibration(void);
 const stm32_peripheral_state_t *stm32_peripherals_state(void);
-
-/* Latest assembled home-screen UI state and catgirl animation state, for the
- * on-board renderer (ui_render). Updated each control tick. */
-const ui_home_state_t *stm32_peripherals_ui_state(void);
-const live2d_t *stm32_peripherals_cat(void);
 
 #endif

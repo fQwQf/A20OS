@@ -4,7 +4,6 @@
 #include "core/types.h"
 #include "drivers/stm32f1/keys.h"
 #include "drivers/stm32f1/memory.h"
-#include "ui_render.h"
 
 typedef enum stm32_display_action {
     STM32_DISPLAY_ACTION_NONE = 0,
@@ -20,8 +19,6 @@ void stm32_display_blit(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
 /* Fill a rect with a solid RGB565 color. Clips to 320x480. */
 void stm32_display_fill_rect(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
                              uint16_t color);
-/* Fill *gfx with the on-board sink: ctx=NULL, fill_rect/blit backed above. */
-void stm32_display_gfx(ui_gfx_t *gfx);
 void stm32_display_show_boot(void);
 void stm32_display_update_ticks(uint64_t ticks);
 void stm32_display_set_peripherals(int sram_ready, size_t sram_bytes,

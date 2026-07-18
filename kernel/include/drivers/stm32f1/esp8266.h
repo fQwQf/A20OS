@@ -2,13 +2,12 @@
  * Smart home hub — ESP8266 Wi-Fi (AT firmware) on USART2 (PA2 TX / PA3 RX).
  *
  * USART3 is already taken by the HC-05 bluetooth in this port, so the ESP8266
- * lives on USART2. AT-command driver modelled on docs/pz wifi_function.c.
+ * lives on USART2.
  *
  * Hardware only: QEMU's stm32vldiscovery models neither USART2 nor a peer, so
  * everything is a safe no-op under CONFIG_STM32_QEMU and init reports absent.
  * NOT yet exercised on real hardware — this is a first cut; the AT exchange is
- * blocking with short timeouts and should become DMA/IRQ driven for production
- * (see docs/stm32-big-exp.md §5.11, §7.3).
+ * blocking with short timeouts and should become DMA/IRQ driven for production.
  */
 #ifndef _STM32F103_ESP8266_H
 #define _STM32F103_ESP8266_H

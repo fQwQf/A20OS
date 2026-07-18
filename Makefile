@@ -42,8 +42,7 @@ STM32_BT_PIN ?= 2233
 STM32_BT_UUID ?= 1101
 STM32_BT_BAUD ?= 38400
 STM32_QEMU ?= 0
-STM32_LEGACY_DASHBOARD ?= 0
-STM32_XUANWU_BUILD_DIR = .kernel-build/armv7m-both-bringup-nommu-stm32f103-f512k-r64k$(if $(filter 1,$(STM32_LEGACY_DASHBOARD)),-legacy,)
+STM32_XUANWU_BUILD_DIR = .kernel-build/armv7m-both-bringup-nommu-stm32f103-f512k-r64k
 STM32_XUANWU_ELF = $(STM32_XUANWU_BUILD_DIR)/kernel.elf
 STM32_WIFI_SSID ?=
 STM32_WIFI_PASSWORD ?=
@@ -94,7 +93,6 @@ BUILD_VARIANT = $(ABI)-$(if $(filter 1,$(BRINGUP)),bringup,dev)$(if $(filter 1,$
 ifeq ($(ARCH),armv7m)
 BUILD_VARIANT := $(BUILD_VARIANT)-$(BOARD)-f$(STM32_FLASH_KB)k-r$(STM32_RAM_KB)k
 BUILD_VARIANT := $(BUILD_VARIANT)$(if $(filter 1,$(STM32_QEMU)),-qemu,)
-BUILD_VARIANT := $(BUILD_VARIANT)$(if $(filter 1,$(STM32_LEGACY_DASHBOARD)),-legacy,)
 endif
 BUILD_DIR = .kernel-build/$(ARCH)-$(BUILD_VARIANT)
 FAT32_IMG = $(BUILD_DIR)/fat32.img
@@ -362,9 +360,6 @@ CFLAGS += -DCONFIG_STM32_XUANWU
 endif
 ifeq ($(STM32_QEMU),1)
 CFLAGS += -DCONFIG_STM32_QEMU
-endif
-ifeq ($(STM32_LEGACY_DASHBOARD),1)
-CFLAGS += -DCONFIG_STM32_LEGACY_DASHBOARD
 endif
 endif
 ifeq ($(filter $(ARCH),arm32 armv7m riscv32),)
@@ -1494,8 +1489,8 @@ $(BUILD_DIR)/%.o: $(KERNEL_DIR)/%.c | Makefile $(BUILD_TIME_HDR)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(BUILD_DIR)/platform/stm32f103/bluetooth.o: $(STM32_BT_CONFIG_HDR)
-$(BUILD_DIR)/platform/stm32f103/wifi.o: $(STM32_WIFI_CONFIG_HDR)
+$(BUILD_DIR)/drivers/stm32f1/bluetooth.o: $(STM32_BT_CONFIG_HDR)
+$(BUILD_DIR)/drivers/stm32f1/wifi.o: $(STM32_WIFI_CONFIG_HDR)
 
 $(BUILD_DIR)/%.o: $(KERNEL_DIR)/%.S Makefile | $(BUILD_TIME_HDR)
 	@mkdir -p $(dir $@)
@@ -1528,7 +1523,6 @@ check-stm32f103:
 		--glob '!kernel/arch/**' --glob '!kernel/platform/**' \
 		--glob '!kernel/external/**' --glob '!kernel/include/core/arch.h'
 	$(MAKE) stm32f103-xuanwu
-	$(MAKE) STM32_LEGACY_DASHBOARD=1 stm32f103-xuanwu
 	@echo "check-stm32f103: PASS"
 
 flash-stm32f103-xuanwu: stm32f103-xuanwu
