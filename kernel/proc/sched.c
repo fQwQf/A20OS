@@ -225,6 +225,16 @@ static int sched_note_deadline(uint64_t *slot, uint64_t value)
 {
     if (value == 0)
         return 0;
+#ifdef CONFIG_MCU
+    /* Cortex-M3 has no lock-free 64-bit compare/exchange. Timer deadlines are
+     * shared only with interrupt/preemption paths on this single-core target. */
+    uint64_t flags = arch_irq_save();
+    uint64_t old = *slot;
+    if (value < old)
+        *slot = value;
+    arch_irq_restore(flags);
+    return value < old;
+#else
     uint64_t old = __atomic_load_n(slot, __ATOMIC_RELAXED);
     while (value < old &&
            !__atomic_compare_exchange_n(slot, &old, value, 1,
@@ -232,6 +242,7 @@ static int sched_note_deadline(uint64_t *slot, uint64_t value)
                                         __ATOMIC_RELAXED)) {
     }
     return value < old;
+#endif
 }
 
 static void sched_rearm_timer(void)
