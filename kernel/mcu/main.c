@@ -8,6 +8,7 @@
 #include "drivers/core/driver_core.h"
 #include "mm/slab.h"
 #include "drivers/stm32f1/backlight.h"
+#include "drivers/stm32f1/actuators.h"
 #include "drivers/stm32f1/bluetooth.h"
 #include "console.h"
 #include "drivers/stm32f1/dht11.h"
@@ -106,12 +107,87 @@ static void diagnostic_performance(void) {
            (unsigned)state->wifi_retry_max_ms);
 }
 
+static void diagnostic_fan_status(void) {
+    stm32_fan_debug_t fan;
+    stm32_fan_debug_snapshot(&fan);
+    printf("[FAN] requested=%u override=%u mode=%s pin=%u"
+           " GPIO_CFG=0x%x IDR=0x%x ODR=0x%x AFIO_MAPR=0x%x\n",
+           fan.requested_level, fan.override_active,
+           fan.gpio_mode ? "GPIO" : "PWM", fan.pin_high,
+           (unsigned)fan.gpio_config, (unsigned)fan.gpio_idr,
+           (unsigned)fan.gpio_odr, (unsigned)fan.afio_mapr);
+    printf("[FAN] TIM3 CR1=0x%x PSC=%u ARR=%u CNT=%u CCR2=%u"
+           " CCMR1=0x%x CCER=0x%x duty=0/20/40/60%% expected=2kHz PB5/TIM3_CH2\n",
+           (unsigned)fan.tim_cr1, (unsigned)fan.tim_psc,
+           (unsigned)fan.tim_arr, (unsigned)fan.tim_cnt,
+           (unsigned)fan.tim_ccr, (unsigned)fan.tim_ccmr1,
+           (unsigned)fan.tim_ccer);
+}
+
+static void diagnostic_fan_wait(uint32_t milliseconds) {
+    proc_sleep_until(timer_get_ticks() + milliseconds);
+}
+
+static void diagnostic_fan(const char *args) {
+    if (!args || !*args || text_equal(args, "status")) {
+        diagnostic_fan_status();
+        return;
+    }
+    if (text_equal(args, "high") || text_equal(args, "low")) {
+        int high = text_equal(args, "high");
+        stm32_fan_debug_gpio(high);
+        printf("[FAN-TEST] PB5 forced %s; ULN2003 motor should %s\n",
+               high ? "HIGH" : "LOW", high ? "RUN" : "STOP");
+        diagnostic_fan_status();
+        return;
+    }
+    if (text_equal(args, "auto")) {
+        stm32_fan_debug_release();
+        printf("[FAN-TEST] override released; controller restored\n");
+        diagnostic_fan_status();
+        return;
+    }
+    if (text_equal(args, "test")) {
+        printf("[FAN-TEST] HIGH 3s: this bypasses TIM3 and must run motor\n");
+        stm32_fan_debug_gpio(1);
+        diagnostic_fan_status();
+        diagnostic_fan_wait(3000U);
+        printf("[FAN-TEST] LOW 2s: motor should stop/coast\n");
+        stm32_fan_debug_gpio(0);
+        diagnostic_fan_status();
+        diagnostic_fan_wait(2000U);
+        for (int level = 3; level >= 1; level--) {
+            printf("[FAN-TEST] PWM level=%d for 3s\n", level);
+            stm32_fan_debug_pwm((uint8_t)level);
+            diagnostic_fan_status();
+            diagnostic_fan_wait(3000U);
+        }
+        stm32_fan_debug_pwm(0);
+        printf("[FAN-TEST] PWM level=0 for 2s\n");
+        diagnostic_fan_status();
+        diagnostic_fan_wait(2000U);
+        stm32_fan_debug_release();
+        printf("[FAN-TEST] complete; controller restored\n");
+        diagnostic_fan_status();
+        return;
+    }
+    if (args[0] >= '0' && args[0] <= '3' && args[1] == '\0') {
+        uint8_t level = (uint8_t)(args[0] - '0');
+        stm32_fan_debug_pwm(level);
+        printf("[FAN-TEST] PWM override level=%u\n", level);
+        diagnostic_fan_status();
+        return;
+    }
+    printf("Usage: fan [status|0|1|2|3|high|low|test|auto]\n");
+}
+
 static void diagnostic_help(void) {
     printf("Commands:\n");
     printf("  uart          show all USART clock/baud/error state\n");
     printf("  perf          show clocks and main service latency\n");
     printf("  light         show ADC3 light sensor state\n");
     printf("  dht           one DHT11 read with failure-stage diagnostics\n");
+    printf("  fan [status|0..3|high|low|test|auto]  motor diagnostics\n");
     printf("  time [sync|set HH:MM[:SS]]  show, network-sync or set RTC\n");
     printf("  cal start     run the four-point touch calibration UI\n");
     printf("  rgb           show 5x5 matrix status\n");
@@ -554,6 +630,10 @@ static void diagnostic_execute(char *line) {
                d.resp_us[0], d.resp_us[1], d.resp_us[2], d.bit_us[0],
                d.bit_us[1], d.bit_us[2], d.bit_us[3], d.bit_us[4], d.bit_us[5],
                d.bit_us[6], d.bit_us[7]);
+    } else if (text_equal(line, "fan")) {
+        diagnostic_fan("status");
+    } else if (text_starts_with(line, "fan ")) {
+        diagnostic_fan(line + 4);
     } else if (text_equal(line, "time")) {
         diagnostic_time(NULL);
     } else if (text_starts_with(line, "time ")) {
