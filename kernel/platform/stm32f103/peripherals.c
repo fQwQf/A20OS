@@ -1166,7 +1166,11 @@ void stm32_peripherals_init(void) {
     have_env = 0;
     buzzer_active = 0;
     printf("[BOOT] smart-hub controller ready dht11=%s (PG11)"
+#ifdef CONFIG_STM32_XUANWU
+           " actuators=fan(TIM3_CH2/PB5/ULN2003),pump(PA7),buzzer(PB8)\n",
+#else
            " actuators=fan(TIM3_CH1/PA6),pump(PA7),buzzer(PB8)\n",
+#endif
            dht_present ? "armed" : "absent");
     ir_present = stm32_ir_init() == 0;
     ir_map_load_default();
@@ -1419,6 +1423,7 @@ static void run_control_tick(uint64_t now) {
 void stm32_peripherals_control_service(uint64_t now) {
     uint64_t service_start = timer_get_ticks();
     stm32_watchdog_feed(); /* main loop is alive -> stave off the reset */
+    stm32_pump_service(now);
 #ifdef CONFIG_STM32_LEGACY_DASHBOARD
     stm32_display_update_ticks(now);
 #endif
