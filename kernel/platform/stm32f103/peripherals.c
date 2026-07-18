@@ -1,6 +1,7 @@
 #ifdef CONFIG_BOARD_STM32F103
 
 #include "peripherals.h"
+#include "core/arch.h"
 #include "core/stdio.h"
 #include "core/string.h"
 #include "core/timer.h"
@@ -57,6 +58,7 @@ static uint64_t last_memory_poll;
 static uint64_t last_light_poll;
 static uint64_t last_sdcard_check;
 static uint64_t last_control_tick;
+static uint64_t last_environment_poll;
 static uint32_t last_live2d_clock;
 static int touch_pressed;
 static uint16_t touch_down_x;
@@ -108,6 +110,48 @@ static uint64_t cloud_reply_deadline;
 static hub_control_t cloud_last;     /* most recent CONTROL from the proxy     */
 static int cloud_last_valid;
 static uint64_t cloud_last_ms;
+/* The control task publishes snapshots here; only the network task touches
+ * wifi.c and consumes them. IRQ masking makes the handoff atomic against the
+ * 10 ms PendSV preemption on this single-core target. */
+static env_snapshot_t cloud_snapshot_pending;
+static int cloud_snapshot_pending_valid;
+
+static void cloud_publish_control(const hub_control_t *control, uint64_t now) {
+    uint32_t flags = arch_irq_save();
+    cloud_last = *control;
+    cloud_last_valid = 1;
+    cloud_last_ms = now;
+    arch_irq_restore(flags);
+}
+
+static int cloud_read_control(hub_control_t *control, uint64_t *updated_at) {
+    uint32_t flags = arch_irq_save();
+    int valid = cloud_last_valid;
+    if (valid) {
+        *control = cloud_last;
+        *updated_at = cloud_last_ms;
+    }
+    arch_irq_restore(flags);
+    return valid;
+}
+
+static void cloud_publish_snapshot(const env_snapshot_t *snapshot) {
+    uint32_t flags = arch_irq_save();
+    cloud_snapshot_pending = *snapshot;
+    cloud_snapshot_pending_valid = 1;
+    arch_irq_restore(flags);
+}
+
+static int cloud_take_snapshot(env_snapshot_t *snapshot) {
+    uint32_t flags = arch_irq_save();
+    int valid = cloud_snapshot_pending_valid;
+    if (valid) {
+        *snapshot = cloud_snapshot_pending;
+        cloud_snapshot_pending_valid = 0;
+    }
+    arch_irq_restore(flags);
+    return valid;
+}
 
 /*
  * When is it worth asking the cloud?
@@ -187,9 +231,7 @@ static void cloud_parse_frames(uint64_t now) {
         if (cloud_awaiting && now < cloud_reply_deadline &&
             f.seq == cloud_expected_seq &&
             hub_proto_decode_control(&f, &cc) == 0) {
-            cloud_last = cc;
-            cloud_last_valid = 1;
-            cloud_last_ms = now;
+            cloud_publish_control(&cc, now);
             cloud_awaiting = 0;
             printf("[NET] cloud fan=%u pump=%u theme=%u mood=%u speech=%s\n",
                    cc.fan_level, cc.pump_on, cc.theme_id, cc.mood, cc.speech);
@@ -209,6 +251,10 @@ static void cloud_parse_frames(uint64_t now) {
 /* Assembled UI/Live2D state for the on-board renderer. */
 static ui_home_state_t g_ui_state;
 static live2d_t g_cat;
+static hub_ui_input_t g_ui_pending;
+static char g_ui_pending_speech[HUB_SPEECH_MAX + 1];
+static int g_ui_pending_valid;
+static char g_ui_speech[HUB_SPEECH_MAX + 1];
 static char g_last_speech[HUB_SPEECH_MAX + 1];
 static uint64_t g_last_speech_ms;
 /* How long the newest LLM line stays in the dialog box without a refresh. */
@@ -253,8 +299,56 @@ static unsigned g_cal_release_count;
 /* Config loaded from /CFG/WIFI.TXT at boot (SSID used for a one-shot join). */
 static hub_cfg_t boot_cfg;
 static int cfg_join_attempted;
+static env_snapshot_t sensor_snapshot;
+static int sensor_snapshot_valid;
 
 static void run_control_tick(uint64_t now);
+
+static void ui_publish_input(const hub_ui_input_t *input) {
+    uint32_t flags = arch_irq_save();
+    g_ui_pending = *input;
+    if (input->cloud_speech) {
+        strncpy(g_ui_pending_speech, input->cloud_speech,
+                sizeof(g_ui_pending_speech) - 1U);
+        g_ui_pending_speech[sizeof(g_ui_pending_speech) - 1U] = '\0';
+    } else {
+        g_ui_pending_speech[0] = '\0';
+    }
+    g_ui_pending.cloud_speech = NULL;
+    g_ui_pending_valid = 1;
+    arch_irq_restore(flags);
+}
+
+static int ui_take_input(hub_ui_input_t *input, char *speech) {
+    uint32_t flags = arch_irq_save();
+    int valid = g_ui_pending_valid;
+    if (valid) {
+        *input = g_ui_pending;
+        strncpy(speech, g_ui_pending_speech, HUB_SPEECH_MAX);
+        speech[HUB_SPEECH_MAX] = '\0';
+        g_ui_pending_valid = 0;
+    }
+    arch_irq_restore(flags);
+    if (valid)
+        input->cloud_speech = speech[0] ? speech : NULL;
+    return valid;
+}
+
+static void sensor_publish_snapshot(const env_snapshot_t *snapshot) {
+    uint32_t flags = arch_irq_save();
+    sensor_snapshot = *snapshot;
+    sensor_snapshot_valid = 1;
+    arch_irq_restore(flags);
+}
+
+static int sensor_read_snapshot(env_snapshot_t *snapshot) {
+    uint32_t flags = arch_irq_save();
+    int valid = sensor_snapshot_valid;
+    if (valid)
+        *snapshot = sensor_snapshot;
+    arch_irq_restore(flags);
+    return valid;
+}
 
 /* Buzzer feedback durations (ms). */
 #define BUZZ_BOOT_MS 120U  /* "hub is alive" chime at startup       */
@@ -301,6 +395,14 @@ static void diag_state_build(ui_diag_state_t *d) {
     d->ir_bindings = ir_map_count();
 }
 
+static int ui_draw_cached_live2d(void) {
+    int drawn;
+    stm32_sdfs_lock();
+    drawn = live2d_load_draw(&g_ui_gfx, &g_cat);
+    stm32_sdfs_unlock();
+    return drawn;
+}
+
 static void ui_render_full(void) {
     if (!peripherals.display_ready || g_cal_active)
         return;
@@ -311,7 +413,6 @@ static void ui_render_full(void) {
      * procedural placeholder — the sprite visibly vanished on every tap. The
      * loader bursts frame 0 on a state change, so one call is enough.
      */
-    live2d_load_service(&g_cat);
     /* Built either way: the diagnostics page borrows this model's palette. */
     ui_home_build(&g_ui_state, &g_ui_model);
     if (g_page == PAGE_DIAG) {
@@ -324,7 +425,7 @@ static void ui_render_full(void) {
         return;
     }
     ui_render_home_ex(&g_ui_gfx, &g_ui_model, &g_cat, NULL, 0, 0, 0);
-    if (!live2d_load_draw(&g_ui_gfx, &g_cat))
+    if (!ui_draw_cached_live2d())
         ui_render_cat(&g_ui_gfx, &g_ui_model, &g_cat);
     g_ui_ready = 1;
     g_rendered_state = g_ui_state;
@@ -398,7 +499,7 @@ static void ui_render_cat_frame(void) {
     if (!g_ui_ready || g_cal_active || g_page != PAGE_HOME ||
         !peripherals.display_ready)
         return;
-    if (!live2d_load_draw(&g_ui_gfx, &g_cat))
+    if (!ui_draw_cached_live2d())
         ui_render_cat(&g_ui_gfx, &g_ui_model, &g_cat);
 }
 
@@ -410,6 +511,7 @@ static void ui_manual_arm(uint8_t mask, uint64_t now) {
 static void ui_apply_action(ui_action_t action, uint64_t now) {
     if (action == UI_ACTION_NONE)
         return;
+    uint32_t flags = arch_irq_save();
     if (action == UI_ACTION_FAN_UP || action == UI_ACTION_FAN_DOWN) {
         int level = g_ui_state.fan_level;
         level += action == UI_ACTION_FAN_UP ? 1 : -1;
@@ -458,6 +560,7 @@ static void ui_apply_action(ui_action_t action, uint64_t now) {
         last_control_tick = 0;
     }
     g_ui_state.manual_mask = g_manual_mask;
+    arch_irq_restore(flags);
     hub_buzz(now, BUZZ_INPUT_MS);
     ui_render_full();
 }
@@ -479,11 +582,15 @@ static int ui_release_manual(ui_action_t action, uint64_t now) {
         bit = MANUAL_PUMP;
     else if (action == UI_ACTION_THEME_CYCLE)
         bit = MANUAL_THEME;
-    if (!bit || !(g_manual_mask & bit))
+    uint32_t flags = arch_irq_save();
+    if (!bit || !(g_manual_mask & bit)) {
+        arch_irq_restore(flags);
         return 0;
+    }
     g_manual_mask &= (uint8_t)~bit;
     g_ui_state.manual_mask = g_manual_mask;
     last_control_tick = 0; /* let the rule engine retake it now, not in 2s */
+    arch_irq_restore(flags);
     hub_buzz(now, BUZZ_INPUT_MS);
     printf("[TOUCH] long-press -> auto (manual mask=0x%x)\n",
            (unsigned)g_manual_mask);
@@ -622,32 +729,36 @@ static void ui_handle_bluetooth_command(const char *line, uint64_t now) {
     if (cmd.kind == BLUETOOTH_CMD_ACTION) {
         apply_remote_action(cmd.value, now);
         redraw = 0; /* UI actions already repaint; MUTE has nothing to repaint. */
-    } else if (cmd.kind == BLUETOOTH_CMD_FAN_SET) {
+    } else {
+        uint32_t flags = arch_irq_save();
+        if (cmd.kind == BLUETOOTH_CMD_FAN_SET) {
         g_manual_fan = g_ui_state.fan_level = (uint8_t)cmd.value;
         stm32_fan_set_level(g_manual_fan);
         ui_manual_arm(MANUAL_FAN, now);
-    } else if (cmd.kind == BLUETOOTH_CMD_PUMP_SET) {
+        } else if (cmd.kind == BLUETOOTH_CMD_PUMP_SET) {
         g_manual_pump = g_ui_state.pump_on = (uint8_t)cmd.value;
         stm32_pump_set(g_manual_pump);
         ui_manual_arm(MANUAL_PUMP, now);
-    } else if (cmd.kind == BLUETOOTH_CMD_THEME_SET) {
+        } else if (cmd.kind == BLUETOOTH_CMD_THEME_SET) {
         g_manual_theme = g_ui_state.theme = (uint8_t)cmd.value;
         ui_manual_arm(MANUAL_THEME, now);
-    } else if (cmd.kind == BLUETOOTH_CMD_LIGHT_SET) {
+        } else if (cmd.kind == BLUETOOTH_CMD_LIGHT_SET) {
         g_manual_backlight = g_backlight = g_ui_state.backlight =
             (uint8_t)cmd.value;
         stm32_light_sensor_set_manual_brightness(g_manual_backlight);
         ui_manual_arm(MANUAL_BACKLIGHT, now);
-    } else if (cmd.kind == BLUETOOTH_CMD_MUTE_SET) {
+        } else if (cmd.kind == BLUETOOTH_CMD_MUTE_SET) {
         buzzer_muted = cmd.value;
         if (buzzer_muted) {
             stm32_buzzer_set(0);
             buzzer_active = 0;
         }
-    } else if (cmd.kind == BLUETOOTH_CMD_AUTO) {
+        } else if (cmd.kind == BLUETOOTH_CMD_AUTO) {
         g_manual_mask &= (uint8_t)~cmd.value;
         g_ui_state.manual_mask = g_manual_mask;
         last_control_tick = 0;
+        }
+        arch_irq_restore(flags);
     }
     g_ui_state.manual_mask = g_manual_mask;
     if (redraw)
@@ -728,8 +839,11 @@ static void touch_calibration_service(void) {
                                     UI_RENDER_H, &cal);
             if (r == 0) {
                 stm32_touch_set_calibration(&cal);
-                if (stm32_sdfs_ready())
+                if (stm32_sdfs_ready()) {
+                    stm32_sdfs_lock();
                     r = stm32_sdfs_save_touch_cal(&cal);
+                    stm32_sdfs_unlock();
+                }
             }
             printf("[TOUCH] calibration %s save=%d\n",
                    r == 0 ? "complete" : "failed", r);
@@ -1181,24 +1295,17 @@ const live2d_t *stm32_peripherals_cat(void) { return &g_cat; }
 /* Build an environment snapshot and drive the actuators from the decision. */
 static void run_control_tick(uint64_t now) {
     env_snapshot_t s;
-    int16_t t = last_temp_c;
-    uint8_t h = last_humidity;
     int rtc_hour;
     int rtc_minute;
     int rtc_second;
 
-    if (dht_present && stm32_dht11_read(&t, &h) == 0) {
-        last_temp_c = t;
-        last_humidity = h;
-        have_env = 1;
-        s.valid = 1;
-    } else {
-        /* No fresh reading: fail-safe path (rule engine holds + SENSOR). */
-        s.valid = have_env ? 0 : 0;
+    if (!sensor_read_snapshot(&s)) {
+        s.temp_c = last_temp_c;
+        s.humidity = last_humidity;
+        s.light = 0;
+        s.hour = 0;
+        s.valid = 0;
     }
-    s.temp_c = t;
-    s.humidity = h;
-    s.light = stm32_light_sensor_info()->intensity_percent;
     stm32_rtc_get_hhmmss(&rtc_hour, &rtc_minute, &rtc_second);
     (void)rtc_second;
     s.hour = (uint8_t)rtc_hour;
@@ -1213,46 +1320,45 @@ static void run_control_tick(uint64_t now) {
      * the fallback remains coherent when the network drops.
      */
     int cloud = 0;
-    const stm32_wifi_info_t *w = stm32_wifi_info();
     /*
      * Send this snapshot to the proxy when the socket is up, no request is in
      * flight, and there is actually something to ask about (see
      * cloud_should_ask). The reply (a CONTROL frame) arrives asynchronously and
      * is parsed in cloud_net_service(); we apply the freshest one below.
      */
-    if (w->socket_connected && !w->command_busy &&
-        !cloud_awaiting && cloud_should_ask(&s, now)) {
-        uint8_t txf[HUB_OVERHEAD + 8];
-        uint8_t seq = net_seq++;
-        int tn = hub_proto_encode_snapshot(seq, &s, txf, sizeof(txf));
-        if (tn > 0 && stm32_wifi_send(txf, (size_t)tn) == 0) {
-            cloud_awaiting = 1;
-            cloud_expected_seq = seq;
-            cloud_reply_deadline = now + CLOUD_REPLY_TIMEOUT_MS;
-            cloud_last_ask_ms = now;
-            cloud_asked_snap = s;
-            cloud_ask_now = 0;
-        }
-    }
+    /* The network task owns request throttling and all wifi.c state. This task
+     * only replaces the pending sample with the newest control snapshot. */
+    cloud_publish_snapshot(&s);
     /* Cloud-preferred, local fail-safe: override with a fresh cloud decision. */
-    if (cloud_last_valid &&
-        now - cloud_last_ms <= CLOUD_FRESH_MS) {
-        a.decision.fan_level = cloud_last.fan_level;
-        a.decision.pump_on = cloud_last.pump_on;
-        a.decision.theme = (env_theme_t)cloud_last.theme_id;
+    hub_control_t cloud_control;
+    uint64_t cloud_control_ms = 0;
+    if (cloud_read_control(&cloud_control, &cloud_control_ms) &&
+        now - cloud_control_ms <= CLOUD_FRESH_MS) {
+        a.decision.fan_level = cloud_control.fan_level;
+        a.decision.pump_on = cloud_control.pump_on;
+        a.decision.theme = (env_theme_t)cloud_control.theme_id;
         cloud = 1;
     }
+    uint32_t manual_flags = arch_irq_save();
     if (g_manual_mask && now >= g_manual_until)
         g_manual_mask = 0;
-    if (g_manual_mask & MANUAL_FAN)
-        a.decision.fan_level = g_manual_fan;
-    if (g_manual_mask & MANUAL_PUMP)
-        a.decision.pump_on = g_manual_pump;
-    if (g_manual_mask & MANUAL_THEME)
-        a.decision.theme = (env_theme_t)g_manual_theme;
-    if (g_manual_mask & MANUAL_BACKLIGHT)
-        a.decision.backlight = g_manual_backlight;
+    uint8_t manual_mask = g_manual_mask;
+    uint8_t manual_fan = g_manual_fan;
+    uint8_t manual_pump = g_manual_pump;
+    uint8_t manual_theme = g_manual_theme;
+    uint8_t manual_backlight = g_manual_backlight;
+    arch_irq_restore(manual_flags);
+    if (manual_mask & MANUAL_FAN)
+        a.decision.fan_level = manual_fan;
+    if (manual_mask & MANUAL_PUMP)
+        a.decision.pump_on = manual_pump;
+    if (manual_mask & MANUAL_THEME)
+        a.decision.theme = (env_theme_t)manual_theme;
+    if (manual_mask & MANUAL_BACKLIGHT)
+        a.decision.backlight = manual_backlight;
+    manual_flags = arch_irq_save();
     g_backlight = a.decision.backlight;
+    arch_irq_restore(manual_flags);
 
     /*
      * Assemble the home-screen + catgirl state for the renderer. Speech is the
@@ -1265,18 +1371,16 @@ static void run_control_tick(uint64_t now) {
     uin.minute = (uint8_t)rtc_minute;
     uin.net_cloud = (uint8_t)cloud;
     uin.cloud_valid = (uint8_t)cloud;
-    uin.cloud_mood = cloud ? cloud_last.mood : 0;
-    uin.cloud_speech = cloud ? cloud_last.speech : (const char *)0;
-    uin.manual_mask = g_manual_mask;
-    hub_ui_build(&uin, &g_ui_state);
-    if (cloud && cloud_last.speech[0] &&
-        strncmp(g_last_speech, cloud_last.speech, sizeof(g_last_speech)) != 0) {
-        live2d_speak(&g_cat, cloud_last.speech, now); /* new line -> TALK */
-        strncpy(g_last_speech, cloud_last.speech, sizeof(g_last_speech) - 1);
+    uin.cloud_mood = cloud ? cloud_control.mood : 0;
+    uin.cloud_speech = cloud ? cloud_control.speech : (const char *)0;
+    uin.manual_mask = manual_mask;
+    if (cloud && cloud_control.speech[0] &&
+        strncmp(g_last_speech, cloud_control.speech,
+                sizeof(g_last_speech)) != 0) {
+        strncpy(g_last_speech, cloud_control.speech,
+                sizeof(g_last_speech) - 1);
         g_last_speech[sizeof(g_last_speech) - 1] = '\0';
         g_last_speech_ms = now;
-    } else if (!(g_cat.state == LIVE2D_TALK && g_cat.talk_deadline_ms != 0)) {
-        live2d_set_state(&g_cat, hub_ui_state(&uin), now);
     }
     /*
      * Hold the newest line in the dialog box through ticks the proxy did not
@@ -1286,9 +1390,12 @@ static void run_control_tick(uint64_t now) {
      * text, just the most recent one, and it expires so a stale line cannot
      * outlive the conditions it described.
      */
-    if (!g_ui_state.speech && g_last_speech[0] &&
-        now - g_last_speech_ms <= SPEECH_STICKY_MS)
-        g_ui_state.speech = g_last_speech;
+    if (!uin.cloud_speech && g_last_speech[0] &&
+        now - g_last_speech_ms <= SPEECH_STICKY_MS) {
+        uin.cloud_speech = g_last_speech;
+        uin.cloud_valid = 1;
+    }
+    ui_publish_input(&uin);
 
     stm32_fan_set_level(a.decision.fan_level);
     stm32_pump_set(a.decision.pump_on);
@@ -1300,19 +1407,16 @@ static void run_control_tick(uint64_t now) {
         cloud) {
         printf("[CTRL] src=%s T=%dC H=%u%% L=%u h=%02u v=%u -> fan=%u pump=%u"
                " bl=%u%% theme=%s alert=%s%s\n",
-                g_manual_mask ? "manual" : cloud ? "cloud" : "local",
+                manual_mask ? "manual" : cloud ? "cloud" : "local",
                 (int)s.temp_c, s.humidity, s.light,
                s.hour, s.valid, a.decision.fan_level, a.decision.pump_on,
                a.decision.backlight, env_theme_name(a.decision.theme),
                env_alert_name(a.decision.alert),
                 a.alert_started ? " (NEW)" : a.alert_cleared ? " (clr)" : "");
     }
-#ifndef CONFIG_STM32_LEGACY_DASHBOARD
-    ui_render_update();
-#endif
 }
 
-void stm32_peripherals_service(uint64_t now) {
+void stm32_peripherals_control_service(uint64_t now) {
     uint64_t service_start = timer_get_ticks();
     stm32_watchdog_feed(); /* main loop is alive -> stave off the reset */
 #ifdef CONFIG_STM32_LEGACY_DASHBOARD
@@ -1330,7 +1434,41 @@ void stm32_peripherals_service(uint64_t now) {
         run_control_tick(now);
     }
 
-    live2d_load_service(&g_cat);
+    peripherals.service_calls++;
+    peripherals.service_last_ms = elapsed_ms(service_start);
+    record_max(&peripherals.service_max_ms, peripherals.service_last_ms);
+    if (peripherals.service_last_ms >= SERVICE_SLOW_THRESHOLD_MS)
+        peripherals.service_slow_calls++;
+}
+
+void stm32_peripherals_ui_input_service(uint64_t now) {
+#ifdef CONFIG_STM32_LEGACY_DASHBOARD
+    stm32_display_update_ticks(now);
+#endif
+
+    hub_ui_input_t input;
+    char speech[HUB_SPEECH_MAX + 1];
+    if (ui_take_input(&input, speech)) {
+        ui_home_state_t next;
+        int new_speech = input.cloud_speech &&
+            (!g_ui_state.speech || strcmp(g_ui_state.speech,
+                                          input.cloud_speech) != 0);
+        hub_ui_build(&input, &next);
+        if (next.speech) {
+            strncpy(g_ui_speech, next.speech, sizeof(g_ui_speech) - 1U);
+            g_ui_speech[sizeof(g_ui_speech) - 1U] = '\0';
+            next.speech = g_ui_speech;
+        } else {
+            g_ui_speech[0] = '\0';
+        }
+        g_ui_state = next;
+        if (new_speech)
+            live2d_speak(&g_cat, g_ui_state.speech, (uint32_t)now);
+        else if (!(g_cat.state == LIVE2D_TALK &&
+                   g_cat.talk_deadline_ms != 0))
+            live2d_set_state(&g_cat, hub_ui_state(&input), (uint32_t)now);
+    }
+
     uint32_t live2d_clock = stm32_live2d_frame_clock();
     if (live2d_frame_clock_consume(&last_live2d_clock, live2d_clock)) {
         int changed = live2d_tick(&g_cat, (uint32_t)now);
@@ -1467,45 +1605,85 @@ touch_done:
             update_bluetooth_display();
         }
     }
+#ifndef CONFIG_STM32_LEGACY_DASHBOARD
+    ui_render_update();
+#endif
+}
 
-    if (peripherals.wifi_ready &&
-        now - last_wifi_poll >= WIFI_POLL_INTERVAL_MS) {
-        last_wifi_poll = now;
-        const stm32_wifi_info_t before = *stm32_wifi_info();
-        stm32_wifi_service(now);
-        const stm32_wifi_info_t *after = stm32_wifi_info();
-        if (before.phase != after->phase ||
-            before.joined != after->joined ||
-            before.got_ip != after->got_ip ||
-            before.socket_connected != after->socket_connected ||
-            before.access_points != after->access_points ||
-            before.received_bytes != after->received_bytes ||
-            before.transmitted_bytes != after->transmitted_bytes ||
-            before.dropped_bytes != after->dropped_bytes)
-            update_wifi_display();
-        /*
-         * One-shot join with credentials from the card, once the module is
-         * responsive and idle (build-time SSID is empty by default).
-         *
-         * Gated on got_ip, not joined: the ESP8266 keeps the last AP in its own
-         * flash and auto-rejoins at power-on, so it announces WIFI CONNECTED
-         * (joined=1) before the firmware has asked for anything. The matching
-         * WIFI GOT IP can be missed — it lands while the boot AT probe is still
-         * mid-conversation — and then the board sits joined-with-no-IP forever
-         * with nothing to recover it, because the old `!joined` gate treated the
-         * module's own claim as proof. An IP is what cloud_net_service()
-         * actually needs, and re-issuing CWJAP when already connected is
-         * harmless.
-         */
-        if (boot_cfg.have_ssid && !cfg_join_attempted && after->at_responsive &&
-            !after->got_ip && !after->connecting && !after->command_busy) {
-            if (stm32_wifi_join(boot_cfg.ssid, boot_cfg.pass) == 0) {
-                cfg_join_attempted = 1;
-                printf("[NET] joining ssid=%s (from /CFG/WIFI.TXT)\n",
-                       boot_cfg.ssid);
-            }
+void stm32_peripherals_network_service(uint64_t now) {
+    if (!peripherals.wifi_ready ||
+        now - last_wifi_poll < WIFI_POLL_INTERVAL_MS)
+        return;
+
+    last_wifi_poll = now;
+    const stm32_wifi_info_t before = *stm32_wifi_info();
+    stm32_wifi_service(now);
+    const stm32_wifi_info_t *after = stm32_wifi_info();
+    if (before.phase != after->phase || before.joined != after->joined ||
+        before.got_ip != after->got_ip ||
+        before.socket_connected != after->socket_connected ||
+        before.access_points != after->access_points ||
+        before.received_bytes != after->received_bytes ||
+        before.transmitted_bytes != after->transmitted_bytes ||
+        before.dropped_bytes != after->dropped_bytes)
+        update_wifi_display();
+
+    if (boot_cfg.have_ssid && !cfg_join_attempted && after->at_responsive &&
+        !after->got_ip && !after->connecting && !after->command_busy) {
+        if (stm32_wifi_join(boot_cfg.ssid, boot_cfg.pass) == 0) {
+            cfg_join_attempted = 1;
+            printf("[NET] joining ssid=%s (from /CFG/WIFI.TXT)\n",
+                   boot_cfg.ssid);
         }
-        cloud_net_service(now); /* keep the proxy socket + parse CONTROL */
+    }
+    cloud_net_service(now);
+
+    env_snapshot_t snapshot;
+    if (after->socket_connected && !after->command_busy && !cloud_awaiting &&
+        cloud_take_snapshot(&snapshot) && cloud_should_ask(&snapshot, now)) {
+        uint8_t txf[HUB_OVERHEAD + 8];
+        uint8_t seq = net_seq++;
+        int length = hub_proto_encode_snapshot(seq, &snapshot, txf,
+                                               sizeof(txf));
+        if (length > 0 && stm32_wifi_send(txf, (size_t)length) == 0) {
+            cloud_awaiting = 1;
+            cloud_expected_seq = seq;
+            cloud_reply_deadline = now + CLOUD_REPLY_TIMEOUT_MS;
+            cloud_last_ask_ms = now;
+            cloud_asked_snap = snapshot;
+            cloud_ask_now = 0;
+        } else {
+            cloud_publish_snapshot(&snapshot);
+        }
+    }
+}
+
+void stm32_peripherals_sensor_service(uint64_t now) {
+    if (now - last_environment_poll >= CONTROL_TICK_INTERVAL_MS) {
+        env_snapshot_t snapshot;
+        int16_t temp = last_temp_c;
+        uint8_t humidity = last_humidity;
+        int hour;
+        int minute;
+        int second;
+
+        last_environment_poll = now;
+        if (dht_present && stm32_dht11_read(&temp, &humidity) == 0) {
+            last_temp_c = temp;
+            last_humidity = humidity;
+            have_env = 1;
+            snapshot.valid = 1;
+        } else {
+            snapshot.valid = 0;
+        }
+        snapshot.temp_c = temp;
+        snapshot.humidity = humidity;
+        snapshot.light = stm32_light_sensor_info()->intensity_percent;
+        stm32_rtc_get_hhmmss(&hour, &minute, &second);
+        (void)minute;
+        (void)second;
+        snapshot.hour = (uint8_t)hour;
+        sensor_publish_snapshot(&snapshot);
     }
 
     if (now - last_memory_poll >= MEMORY_POLL_INTERVAL_MS) {
@@ -1527,10 +1705,19 @@ touch_done:
         record_max(&peripherals.light_max_ms, elapsed_ms(light_start));
     }
 
-    /*
-     * Full SDIO initialization has long command timeouts. Never run it
-     * periodically for an absent optional card; use the UART retry command.
-     */
+}
+
+void stm32_peripherals_storage_service(uint64_t now) {
+    /* This thread is the normal runtime owner of FAT32/SDIO resource I/O.
+     * Console and calibration paths are serialized by the SDFS lock. */
+    live2d_t cat;
+    uint32_t flags = arch_irq_save();
+    cat = g_cat;
+    arch_irq_restore(flags);
+    stm32_sdfs_lock();
+    live2d_load_service(&cat);
+    stm32_sdfs_unlock();
+
     if (peripherals.sdcard_ready &&
         now - last_sdcard_check >= SDCARD_CHECK_INTERVAL_MS) {
         uint64_t sd_start = timer_get_ticks();
@@ -1543,18 +1730,21 @@ touch_done:
         }
         record_max(&peripherals.sdcard_max_ms, elapsed_ms(sd_start));
     }
+}
 
-    peripherals.service_calls++;
-    peripherals.service_last_ms = elapsed_ms(service_start);
-    record_max(&peripherals.service_max_ms, peripherals.service_last_ms);
-    if (peripherals.service_last_ms >= SERVICE_SLOW_THRESHOLD_MS)
-        peripherals.service_slow_calls++;
+void stm32_peripherals_service(uint64_t now) {
+    stm32_peripherals_control_service(now);
+    stm32_peripherals_ui_input_service(now);
+    stm32_peripherals_network_service(now);
+    stm32_peripherals_sensor_service(now);
+    stm32_peripherals_storage_service(now);
 }
 
 int stm32_peripherals_retry_sdcard(void) {
     uint64_t start = timer_get_ticks();
     int was_ready = peripherals.sdcard_ready;
 
+    stm32_sdfs_lock();
     peripherals.sdcard_ready = stm32_sdcard_init() == 0;
     last_sdcard_check = timer_get_ticks();
     record_max(&peripherals.sdcard_max_ms, elapsed_ms(start));
@@ -1572,6 +1762,7 @@ int stm32_peripherals_retry_sdcard(void) {
     ui_render_full();
 #endif
     }
+    stm32_sdfs_unlock();
     return peripherals.sdcard_ready ? 0 : -1;
 }
 
