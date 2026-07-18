@@ -156,13 +156,16 @@ PROTOCOLS_LINES = \
     'ipv6-opts 60 IPv6-Opts'
 
 RISCV_ELF_PREFIX ?= $(if $(shell command -v riscv64-unknown-elf-gcc 2>/dev/null),riscv64-unknown-elf-,$(if $(shell command -v riscv64-elf-gcc 2>/dev/null),riscv64-elf-,riscv64-unknown-elf-))
+RISCV_ELF_RV32_MULTIDIR := $(shell if command -v $(RISCV_ELF_PREFIX)gcc >/dev/null 2>&1; then \
+	$(RISCV_ELF_PREFIX)gcc -march=rv32imafdc -mabi=ilp32d -print-multi-directory 2>/dev/null; \
+fi)
 CROSS_PREFIX_riscv64     := $(RISCV_ELF_PREFIX)
 CROSS_PREFIX_loongarch64 := loongarch64-linux-gnu-
 CROSS_PREFIX_aarch64     := aarch64-linux-gnu-
 CROSS_PREFIX_x86_64      := x86_64-linux-gnu-
-CROSS_PREFIX_arm32       := arm-linux-gnueabihf-
+CROSS_PREFIX_arm32       := $(if $(shell command -v arm-linux-gnueabihf-gcc 2>/dev/null),arm-linux-gnueabihf-,$(if $(shell command -v arm-none-eabi-gcc 2>/dev/null),arm-none-eabi-,arm-linux-gnueabihf-))
 CROSS_PREFIX_armv7m      := $(if $(shell command -v arm-none-eabi-gcc 2>/dev/null),arm-none-eabi-,)
-CROSS_PREFIX_riscv32     := $(if $(shell command -v riscv32-linux-gnu-gcc 2>/dev/null),riscv32-linux-gnu-,riscv64-linux-gnu-)
+CROSS_PREFIX_riscv32     := $(if $(filter-out .,$(RISCV_ELF_RV32_MULTIDIR)),$(RISCV_ELF_PREFIX),$(if $(shell command -v riscv32-linux-gnu-gcc 2>/dev/null),riscv32-linux-gnu-,riscv64-linux-gnu-))
 CROSS_PREFIX_ppc64le     := powerpc64le-linux-gnu-
 
 ARCH_CFLAGS_riscv64     := -march=rv64imafdc_zicsr_zifencei -mabi=lp64 -mcmodel=medany
@@ -204,9 +207,9 @@ ARCH_LIBS_riscv64     :=
 ARCH_LIBS_loongarch64 :=
 ARCH_LIBS_aarch64     :=
 ARCH_LIBS_x86_64      :=
-ARCH_LIBS_arm32       := -lgcc
+ARCH_LIBS_arm32       := $(shell $(CROSS_PREFIX_arm32)gcc $(ARCH_CFLAGS_arm32) -print-libgcc-file-name 2>/dev/null)
 ARCH_LIBS_armv7m      :=
-ARCH_LIBS_riscv32     := -lgcc
+ARCH_LIBS_riscv32     := $(shell $(CROSS_PREFIX_riscv32)gcc $(ARCH_CFLAGS_riscv32) -print-libgcc-file-name 2>/dev/null)
 ARCH_LIBS_ppc64le     :=
 
 QEMU_riscv64     := qemu-system-riscv64
