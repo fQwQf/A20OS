@@ -23,6 +23,11 @@ int stm32_sdfs_mount(void);
 
 int stm32_sdfs_ready(void);
 
+/* Serialize FAT32lite and SDIO state across the storage, UI calibration and
+ * diagnostic-console threads. The filesystem object is not re-entrant. */
+void stm32_sdfs_lock(void);
+void stm32_sdfs_unlock(void);
+
 /* The mounted filesystem, or NULL if not mounted. */
 fat32lite_fs_t *stm32_sdfs(void);
 

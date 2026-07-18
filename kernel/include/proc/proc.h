@@ -227,6 +227,7 @@ static inline int proc_has_cap(const task_t *t, int cap)
 void     proc_init(void);
 void     idle_loop(void) NORETURN;
 task_t  *proc_current(void);
+void     proc_sleep_until(uint64_t wake_time);
 task_t  *proc_find(int pid);
 int      proc_pid_max(void);
 int      proc_set_pid_max(int value);
