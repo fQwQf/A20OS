@@ -257,6 +257,9 @@ QEMU_NET_ppc64le     := virtio-net-pci
 QEMU_GUI_DEVICES_aarch64 := -device virtio-keyboard-device,bus=virtio-mmio-bus.5 \
                             -device virtio-mouse-device,bus=virtio-mmio-bus.6 \
                             -device virtio-gpu-device,bus=virtio-mmio-bus.7
+QEMU_GUI_DEVICES_riscv64 := -device virtio-keyboard-device,bus=virtio-mmio-bus.5 \
+                            -device virtio-mouse-device,bus=virtio-mmio-bus.6 \
+                            -device virtio-gpu-device,bus=virtio-mmio-bus.7
 QEMU_GUI_DEVICES_arm32 := -device virtio-keyboard-device,bus=virtio-mmio-bus.5 \
                           -device virtio-mouse-device,bus=virtio-mmio-bus.6 \
                           -device virtio-gpu-device,bus=virtio-mmio-bus.7
@@ -264,6 +267,10 @@ QEMU_GUI_DEVICES_x86_64 := -vga none \
                            -device virtio-gpu-pci \
                            -device virtio-keyboard-pci \
                            -device virtio-mouse-pci
+QEMU_GUI_DEVICES_loongarch64 := -vga none \
+                                -device virtio-gpu-pci \
+                                -device virtio-keyboard-pci \
+                                -device virtio-mouse-pci
 QEMU_GUI_DEVICES_DEFAULT := -device virtio-gpu-device \
                             -device virtio-keyboard-device \
                             -device virtio-mouse-device
@@ -550,7 +557,7 @@ VBOX_AARCH64_LOAD_ADDRESS ?= 0x08080000ULL
 		check-arch-boundary \
 		check-riscv64-bringup check-loongarch64-bringup check-aarch64-bringup check-x86_64-bringup check-arm32-bringup check-riscv32-bringup check-ppc64le-bringup \
 		check-riscv64-user check-loongarch64-user check-aarch64-user check-x86_64-user check-arm32-user check-riscv32-user check-ppc64le-user \
-		smoke-riscv64 smoke-loongarch64 smoke-aarch64 smoke-x86_64 smoke-arm32 smoke-riscv32 smoke-ppc64le smoke-abi-linux smoke-network-suite smoke-proc-a20 smoke-proc-stress smoke-mm-stress smoke-vfs-stress smoke-vfs-edge smoke-sched-stress smoke-futex-stress smoke-socket-stress smoke-driver-lifecycle smoke-native-handle smoke-native-libc smoke-io-event \
+		smoke-riscv64 smoke-loongarch64 smoke-aarch64 smoke-x86_64 smoke-qemu-gui-x86_64 smoke-qemu-gui-riscv64 smoke-qemu-gui-aarch64 smoke-qemu-gui-arm32 smoke-qemu-gui-loongarch64 smoke-arm32 smoke-riscv32 smoke-ppc64le smoke-abi-linux smoke-network-suite smoke-proc-a20 smoke-proc-stress smoke-mm-stress smoke-vfs-stress smoke-vfs-edge smoke-sched-stress smoke-futex-stress smoke-socket-stress smoke-driver-lifecycle smoke-native-handle smoke-native-libc smoke-io-event \
 		smoke-arch-mmu-matrix \
 		FORCE regen-rootfs-overlay \
 		user_apps fs_img kernel-only dev-build contest-rv contest-la \
@@ -811,8 +818,12 @@ check-abi-boundary:
 check-driver-core-model:
 	@rg -q "DRIVER_CORE_CONCURRENCY_MODEL" kernel/drivers/core/driver_core.c
 	@rg -q "spin_lock_irqsave\(&g_driver_core_lock\)" kernel/drivers/core/driver_core.c
+	@rg -q "mutex_lock\(&g_driver_core_ops\)" kernel/drivers/core/driver_core.c
+	@rg -q -- "return -EEXIST" kernel/drivers/core/driver_core.c
 	@rg -q "DRIVER_CORE_DYNAMIC_LIMITS" kernel/drivers/core/driver_core.c
 	@rg -q "DRIVER_IRQ_TABLE_FIXED_LIMIT" kernel/drivers/core/driver_hwapi.c
+	@rg -q "irq_table_lock" kernel/drivers/core/driver_hwapi.c
+	@rg -q "irq_active" kernel/drivers/core/driver_hwapi.c
 	@rg -q "DRIVER_PROBE_FAILURE_CLEANUP" kernel/drivers/core/driver_core.c
 	@rg -q "dev->drv = NULL" kernel/drivers/core/driver_core.c
 	@rg -q "dev->state = DEV_STATE_UNINIT" kernel/drivers/core/driver_core.c
@@ -826,11 +837,16 @@ check-driver-core-model:
 	@rg -q "loop_init" kernel/drivers/block/loop.c
 	@rg -q "pci_enumerate" kernel/drivers/bus/pci_bus.c
 	@rg -q "virtio_mmio_enumerate" kernel/drivers/bus/virtio_mmio_bus.c
-	@rg -q "kernel/drivers/" docs/driver-interface.md
-	@rg -q "kernel/platform/" docs/driver-interface.md
+	@rg -q "kernel/drivers/" docs/drivers/README.md
+	@rg -q "kernel/platform/" docs/drivers/README.md
 	@rg -q "DRIVER_LIFECYCLE_TEST" kernel/drivers/core/driver_lifecycle_test.c kernel/drivers/core/driver_lifecycle_test.h kernel/main.c
 	@rg -q "driver_lifecycle_test_run" kernel/main.c kernel/fs/procfs.c kernel/drivers/core/driver_lifecycle_test.c
-	@! rg -q "kernel/driver/|kernel/drv/|kernel/board/|#include \"driver/" docs/driver-interface.md
+	@rg -q "duplicate driver registration" kernel/drivers/core/driver_lifecycle_test.c
+	@! rg -q "virtio_gpu_init\(\)|virtio_input_init\(\)" kernel/main.c
+	@! rg -q "virtio_(blk|net)_init\(\)" kernel/main.c kernel/net/socket.c
+	@! rg -q "arch_virtio_(gpu|input)_probe" kernel
+	@rg -q "唯一枚举所有权" docs/drivers/core-model.md
+	@! rg -q "kernel/driver/|kernel/drv/|kernel/board/|#include \"driver/" docs/drivers/*.md
 	@echo "check-driver-core-model: PASS"
 
 check-external-dependency-boundary:
@@ -935,6 +951,59 @@ smoke-x86_64:
 		tail -n 40 "$$log"; \
 		exit "$$status"; \
 	fi
+
+# Headless behavioral gate for the QEMU GUI path. QMP injects a real keyboard
+# event and screendump reads the emulated scanout, so this catches regressions
+# that a kernel build or serial-only bring-up cannot observe.
+smoke-qemu-gui-x86_64:
+	$(MAKE) ARCH=x86_64 BOARD=qemu-virt-x86_64 ABI=both BRINGUP=0 dev-build
+	$(MAKE) ARCH=x86_64 BOARD=qemu-virt-x86_64 ABI=both BRINGUP=0 \
+		.kernel-build/x86_64-qemu-virt-x86_64-both-dev/gui-fat32.img
+	python3 scripts/smoke_qemu_gui.py \
+		--arch x86_64 \
+		--qemu qemu-system-x86_64 \
+		--kernel .kernel-build/x86_64-qemu-virt-x86_64-both-dev/kernel.elf \
+		--disk .kernel-build/x86_64-qemu-virt-x86_64-both-dev/gui-fat32.img \
+		--timeout $(SMOKE_TIMEOUT)
+
+smoke-qemu-gui-riscv64:
+	$(MAKE) ARCH=riscv64 BOARD=qemu-virt-riscv64 ABI=both BRINGUP=0 dev-build
+	$(MAKE) ARCH=riscv64 BOARD=qemu-virt-riscv64 ABI=both BRINGUP=0 \
+		.kernel-build/riscv64-qemu-virt-riscv64-both-dev/gui-fat32.img
+	python3 scripts/smoke_qemu_gui.py \
+		--arch riscv64 \
+		--qemu qemu-system-riscv64 \
+		--kernel .kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf \
+		--disk .kernel-build/riscv64-qemu-virt-riscv64-both-dev/gui-fat32.img \
+		--artifacts .kernel-build/smoke/qemu-gui-riscv64 \
+		--timeout $(SMOKE_TIMEOUT)
+
+smoke-qemu-gui-aarch64:
+	$(MAKE) ARCH=aarch64 BOARD=qemu-virt-aarch64 ABI=both BRINGUP=0 dev-build
+	$(MAKE) ARCH=aarch64 BOARD=qemu-virt-aarch64 ABI=both BRINGUP=0 \
+		.kernel-build/aarch64-qemu-virt-aarch64-both-dev/gui-fat32.img
+	python3 scripts/smoke_qemu_gui.py --arch aarch64 --qemu qemu-system-aarch64 \
+		--kernel .kernel-build/aarch64-qemu-virt-aarch64-both-dev/kernel.elf \
+		--disk .kernel-build/aarch64-qemu-virt-aarch64-both-dev/gui-fat32.img \
+		--artifacts .kernel-build/smoke/qemu-gui-aarch64 --timeout $(SMOKE_TIMEOUT)
+
+smoke-qemu-gui-arm32:
+	$(MAKE) ARCH=arm32 BOARD=qemu-virt-arm32 ABI=both BRINGUP=0 dev-build
+	$(MAKE) ARCH=arm32 BOARD=qemu-virt-arm32 ABI=both BRINGUP=0 \
+		.kernel-build/arm32-qemu-virt-arm32-both-dev/gui-fat32.img
+	python3 scripts/smoke_qemu_gui.py --arch arm32 --qemu qemu-system-arm \
+		--kernel .kernel-build/arm32-qemu-virt-arm32-both-dev/kernel.elf \
+		--disk .kernel-build/arm32-qemu-virt-arm32-both-dev/gui-fat32.img \
+		--artifacts .kernel-build/smoke/qemu-gui-arm32 --timeout $(SMOKE_TIMEOUT)
+
+smoke-qemu-gui-loongarch64:
+	$(MAKE) ARCH=loongarch64 BOARD=qemu-virt-loongarch64 ABI=both BRINGUP=0 dev-build
+	$(MAKE) ARCH=loongarch64 BOARD=qemu-virt-loongarch64 ABI=both BRINGUP=0 \
+		.kernel-build/loongarch64-qemu-virt-loongarch64-both-dev/gui-fat32.img
+	python3 scripts/smoke_qemu_gui.py --arch loongarch64 --qemu qemu-system-loongarch64 \
+		--kernel .kernel-build/loongarch64-qemu-virt-loongarch64-both-dev/kernel.elf \
+		--disk .kernel-build/loongarch64-qemu-virt-loongarch64-both-dev/gui-fat32.img \
+		--artifacts .kernel-build/smoke/qemu-gui-loongarch64 --timeout $(SMOKE_TIMEOUT)
 
 smoke-arm32:
 	$(MAKE) ARCH=arm32 ABI=linux BRINGUP=1 kernel-only
@@ -1506,6 +1575,7 @@ $(FAT32_IMG): $(USER_BUILD_STAMP) $(NATIVE_BUILD_STAMP)
 $(GUI_FAT32_IMG): $(FAT32_IMG)
 	cp $(FAT32_IMG) $(GUI_FAT32_IMG)
 	@printf '1\n' | mcopy -o -i $(GUI_FAT32_IMG) - ::/etc/a20-gui
+	@printf '1\n' | mcopy -o -i $(GUI_FAT32_IMG) - ::/a20-gui
 
 $(FS_TEST_IMG): $(FAT32_IMG)
 	cp $(FAT32_IMG) $(FS_TEST_IMG)

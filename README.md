@@ -97,13 +97,13 @@ make run-stm32f103-qemu
 ## 参与贡献
 我们非常欢迎来自开源社区的代码贡献，共同探索下一代操作系统架构！
 * 提交 Pull Request 前，请务必在本地运行相关的验证门禁，确保没有引入新的数据竞争或引发回归错误。
-* 欢迎查阅 [a20os-improvement-todo.md](docs/a20os-improvement-todo.md)，了解当前系统面临的核心工程瓶颈，寻找您感兴趣的开发切入点。
+* 欢迎查阅 [a20os-improvement-todo.md](docs/roadmap/a20os-improvement-todo.md)，了解当前系统面临的核心工程瓶颈，寻找您感兴趣的开发切入点。
 
 ## 赛事与设计文档
 
 有关操作系统设计的完整方案、开发过程中的技术瓶颈、解决思路以及并发模型设计，请参阅：
 * [操作系统设计方案文档 (OS-Design.md)](docs/OS-Design.md)
-* [初赛汇报幻灯片 (PDF)](docs/slides/main.pdf) | [LaTeX 源文件](docs/slides/main.tex)
+* [初赛汇报幻灯片 (PDF) LaTeX 源文件](docs/slides.tex)
 
 ## 目录结构
 ```text

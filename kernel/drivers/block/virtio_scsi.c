@@ -296,6 +296,19 @@ static int virtio_scsi_probe(device_t *pdev) {
     return 0;
 }
 
+static int virtio_scsi_remove(device_t *pdev) {
+    virtio_scsi_dev_t *dev = pdev ? pdev->drv_priv : NULL;
+    if (!dev)
+        return 0;
+    dev->ready = 0;
+    dev->vt.write32(&dev->vt, VIRTIO_MMIO_STATUS, 0);
+    mb();
+    pdev->drv_priv = NULL;
+    while (g_scsi_count > 0 && !g_scsi[g_scsi_count - 1].ready)
+        g_scsi_count--;
+    return 0;
+}
+
 static uint64_t virtio_scsi_class_capacity(device_t *dev) {
     virtio_scsi_dev_t *scsi = dev ? (virtio_scsi_dev_t *)dev->drv_priv : NULL;
     return scsi ? scsi->capacity : 0;
@@ -326,7 +339,8 @@ static const device_id_t virtio_scsi_ids[] = {
 
 static driver_t virtio_scsi_driver = {
     .name = "virtio-scsi", .id_table = virtio_scsi_ids, .bus = &pci_bus,
-    .probe = virtio_scsi_probe, .class_ops = &virtio_scsi_ops,
+    .probe = virtio_scsi_probe, .remove = virtio_scsi_remove,
+    .class_ops = &virtio_scsi_ops,
     .class_type = DEV_CLASS_BLOCK,
 };
 

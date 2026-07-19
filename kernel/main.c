@@ -140,14 +140,14 @@ static void mount_block_devices(void) {
     int bin_ok = 0, test_ok = 0;
 
     for (int i = 0; i < 8; i++) {
-        if (virtio_blk_init() != 0)
+        block_dev_t *blk = virtio_blk_get_dev(i);
+        if (!blk)
             break;
-
-        if (!bin_ok && try_mount(virtio_blk_get_dev(i), "/bin", "fat32") == 0) {
+        if (!bin_ok && try_mount(blk, "/bin", "fat32") == 0) {
             bin_ok = 1;
             continue;
         }
-        if (!test_ok && try_mount(virtio_blk_get_dev(i), "/test", "ext4") == 0) {
+        if (!test_ok && try_mount(blk, "/test", "ext4") == 0) {
             test_ok = 1;
             continue;
         }
@@ -238,8 +238,6 @@ void kernel_main(void) {
     }
     driver_probe_all();
     printf("[INIT] Drivers probed\n");
-    virtio_gpu_init();
-    virtio_input_init();
 #ifdef CONFIG_X86_64
     if (ps2_input_init() != 0)
         printf("[INIT] PS/2 input controller unavailable\n");
@@ -408,7 +406,10 @@ void init_kthread(void) {
     mm_leaf_info_t entry_leaf;
     uint32_t entry_insn = 0;
     if (!mm_query_leaf(info.pgdir, info.entry, &entry_leaf) ||
-        !(entry_leaf.flags & PTE_U) || !(entry_leaf.flags & PTE_X) ||
+        !(entry_leaf.flags & PTE_U) ||
+#if PTE_X != 0
+        !(entry_leaf.flags & PTE_X) ||
+#endif
         !mm_fetch_user_insn32(info.pgdir, info.entry, &entry_insn)) {
         panic("init: entry is not a readable user executable mapping");
     }

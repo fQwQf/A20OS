@@ -386,6 +386,20 @@ static int vmsvga_probe(device_t *dev) {
     return 0;
 }
 
+static int vmsvga_remove(device_t *dev) {
+    vmsvga_device_t *svga = dev ? dev->drv_priv : NULL;
+    if (!svga)
+        return 0;
+    if (svga->legacy)
+        vmsvga_write(svga, SVGA2_REG_ENABLE, 0);
+    else
+        vmsvga_write(svga, SVGA3_REG_ENABLE, 0);
+    gpu_device_unregister(dev);
+    dev->drv_priv = NULL;
+    memset(svga, 0, sizeof(*svga));
+    return 0;
+}
+
 static const device_id_t vmsvga_ids[] = {
     { .vendor = VMSVGA_VENDOR_ID, .device = VMSVGA2_DEVICE_ID,
       .subvendor = VENDOR_ANY, .subdevice = DEVICE_ANY },
@@ -396,7 +410,8 @@ static const device_id_t vmsvga_ids[] = {
 
 static driver_t vmsvga_driver = {
     .name = "vmsvga", .id_table = vmsvga_ids, .bus = &pci_bus,
-    .probe = vmsvga_probe, .class_ops = &vmsvga_ops,
+    .probe = vmsvga_probe, .remove = vmsvga_remove,
+    .class_ops = &vmsvga_ops,
     .class_type = DEV_CLASS_DISPLAY,
 };
 

@@ -23,6 +23,5 @@ struct virtio_input_event {
     uint32_t value;
 } __attribute__((packed));
 
-int virtio_input_init(void);
 
 #endif
