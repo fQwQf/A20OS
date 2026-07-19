@@ -399,12 +399,4 @@ int arch_virtio_net_probe(int index, virtio_transport_t *vt) {
     return arch_virtio_probe_type(1, index, vt);
 }
 
-int arch_virtio_gpu_probe(int index, virtio_transport_t *vt) {
-    return arch_virtio_probe_type(16, index, vt);
-}
-
-int arch_virtio_input_probe(int index, virtio_transport_t *vt) {
-    return arch_virtio_probe_type(18, index, vt);
-}
-
 #endif
