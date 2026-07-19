@@ -1,0 +1,58 @@
+# 构建与运行指南
+
+本文档列出 A20OS 最常用的构建和运行命令。所有命令都在项目根目录执行。更详细的架构设计说明见 [OS-Design.md](OS-Design.md)。
+
+## 环境准备
+
+项目根目录提供 `Dockerfile`，可一键构建全架构交叉编译环境：
+
+```bash
+docker build -t a20os-buildenv .
+docker run -it --rm -v $(pwd):/workspace -w /workspace a20os-buildenv bash
+```
+
+## 最常用的构建与运行命令
+
+| 命令 | 作用 | 使用场景 |
+|------|------|----------|
+| `make ARCH=riscv64 BOARD=qemu-virt-riscv64 run` | 编译内核、用户态和文件系统镜像，并在 QEMU 中启动 | 默认开发流程 |
+| `make ARCH=riscv64 run` | 同上，`BOARD` 默认等于 `qemu-virt-riscv64` | 快速启动 |
+| `make run-riscv64` | 等价于 `make ARCH=riscv64 run` | 记住目标名即可 |
+| `make run-loongarch64` / `make run-arm64` / `make run-x86_64` | 在对应架构的 QEMU 中启动 | 跨架构测试 |
+| `make run-gui-riscv64` / `make run-gui-aarch64` / `make run-gui-x86_64` | 启动带 virtio-gpu 的图形 QEMU | 测试桌面或 GUI 应用 |
+| `make ARCH=riscv64 BRINGUP=1 kernel-only` | 仅编译内核，不生成文件系统镜像 | 只改内核、不需要用户态 |
+| `make ARCH=riscv64 BRINGUP=1 run` | 仅编译内核并在 QEMU 启动 | 内核 bring-up 测试 |
+| `make ARCH=riscv64 NOMMU=1 run` | 以 NOMMU 模式运行 | 测试 NOMMU 路径 |
+| `make debug-riscv64` | 用 `-O0 -g -DDEBUG` 编译并启动 QEMU 等待 GDB | 源码级调试 |
+| `make all` | 构建比赛默认架构产物 | 提交前完整编译 |
+| `make all-architectures` | 构建 RISC-V 与 LoongArch 比赛产物 | 全架构检查 |
+| `make dev-build` | 生成内核、FAT32 和 ext4 镜像 | 需要完整用户态时 |
+| `make kernel-only` | 只生成内核 | 快速编译验证 |
+| `make stm32f103-bringup` | 生成 STM32F103 64 KiB Flash / 20 KiB SRAM 固件 | MCU 起步 |
+| `make stm32f103-xuanwu` | 生成玄武板 512 KiB Flash / 64 KiB SRAM 固件 | 普中玄武板 |
+| `make run-stm32f103-qemu` | 在 QEMU 模拟的 STM32VLDISCOVERY 上运行 | 无硬件验证 |
+| `make flash-stm32f103-xuanwu` | 用 OpenOCD 烧录到玄武板 | 真机部署 |
+| `make -C user ARCH=riscv64` | 单独编译 RISC-V 用户态 | 只改用户程序 |
+| `make check-user-build` | 编译默认架构的用户态 | 提交前检查 |
+
+## 发布与调试模式
+
+- 默认 `OPT=-O3`，对应发布构建。
+- 调试构建使用 `make debug-<arch>`，它会强制 `OPT="-O0 -g -DDEBUG"` 并启动 QEMU 的 GDB 服务器。
+
+## 常用变量
+
+- `ARCH`: 目标架构，如 `riscv64`、`aarch64`、`x86_64`、`loongarch64`、`arm32`、`riscv32`、`ppc64le`、`armv7m`。
+- `BOARD`: 默认 `qemu-virt-<ARCH>`；STM32 时为 `stm32f103`。
+- `BRINGUP`: `1` 只编译内核，`0` 编译完整用户态。
+- `ABI`: `linux` / `native` / `both`，默认 `both`。
+- `NR_CPUS`: 默认 `1`；大于 `1` 需要额外开关。
+- `NOMMU`: `1` 开启 NOMMU 模式。
+
+## ⚠️ 注意
+
+- `BRINGUP=1` 不生成文件系统镜像；`BRINGUP=0` 才会触发用户态和磁盘构建。
+- 默认 `NR_CPUS=1`。`NR_CPUS>1` 会被构建系统拒绝，除非显式设置 `ALLOW_UNVERIFIED_SMP=1`。
+- `ARCH=armv7m` 需要 `arm-none-eabi-gcc` 或 `clang` + `llvm-objcopy`。
+- 图形 QEMU 目标依赖宿主机显示能力；无图形环境请使用普通 `run-*` 目标。
+- 不要直接仿照 Makefile 外的 QEMU 参数手写启动命令，容易遗漏 `-bios default` 等关键选项。

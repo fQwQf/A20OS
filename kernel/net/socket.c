@@ -165,17 +165,8 @@ static net_socket_t *net_find_bind_conflict_locked(net_socket_t *new_s,
 void net_init(void) {
     spin_init(&g_net_lock);
     net_socket_registry_init();
-    /*
-     * Driver-core devices (PCI and virtio-mmio) have already been probed by
-     * this point.  The legacy arch probe is only needed on boards which do
-     * not enumerate a network device through the driver model; probing it
-     * unconditionally creates a second, unregistered virtio instance and
-     * leaves lwIP with no class device to attach to.
-     */
-    if (!device_find_by_class(DEV_CLASS_NET, 0)) {
-        while (virtio_net_init() == 0) {
-        }
-    }
+    /* Bus enumeration and driver core own transport discovery.  Network init
+     * only consumes DEV_CLASS_NET; it must never run a second arch scanner. */
     a20_lwip_init();
     printf("[NET] socket layer initialized\n");
 }

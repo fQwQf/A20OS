@@ -253,7 +253,7 @@ g_lwip_lock -> g_net_lock
             \begin{itemize}
                 \item 摒弃全局大锁，确立严格局部锁层级
                 \item \code{CONFIG\_DEBUG\_LOCKS} 记录 owner/spinner 信息
-                \item 新锁必须在 \code{docs/driver-lock-order.md} 文档化
+                \item 新锁必须在 \code{docs/drivers/lock-order.md} 文档化
             \end{itemize}
         \end{column}
     \end{columns}
@@ -551,7 +551,7 @@ aarch64-unknown-a20elf
         \item 编译期注册：\code{DRIVER\_REGISTER} / \code{BOARD\_REGISTER} 放入 \code{.driver\_init} linker section
     \end{itemize}
     \vspace{0.3em}
-    \small 关键文件：\code{docs/driver-interface.md}、\code{kernel/include/drivers/hwapi.h}
+    \small 关键文件：\code{docs/drivers/README.md}、\code{kernel/include/drivers/hwapi.h}
 \end{frame}
 
 % ==================== 设计文档详解 ====================
@@ -793,7 +793,7 @@ a20_channel_call(&args, &reply);
         \end{column}
     \end{columns}
     \vspace{0.3em}
-    \small 关键文件：\code{docs/network-config-design.md}、\code{docs/driver-interface.md}
+    \small 关键文件：\code{docs/network-config-design.md}、\code{docs/drivers/README.md}
 \end{frame}
 
 % ==================== 测试与验证 ====================
