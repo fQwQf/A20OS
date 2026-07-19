@@ -7,7 +7,9 @@
 #include "core/klog.h"
 #include "core/defs.h"
 #include "core/lock.h"
+#include "core/sync.h"
 #include "core/panic.h"
+#include "core/errno.h"
 #include "mm/slab.h"
 
 /* DRIVER_CORE_DYNAMIC_LIMITS: initial capacity for bringup; registries grow
@@ -20,6 +22,9 @@
  * by driver_core_lock. Probe/remove callbacks run after binding decisions and
  * must leave dev->drv/dev->state consistent on failure. */
 static spinlock_t g_driver_core_lock = SPINLOCK_INIT;
+/* Serializes registry mutation with probe/remove callbacks.  The spinlock only
+ * protects the arrays themselves and is never held across driver code. */
+static mutex_t g_driver_core_ops = MUTEX_INIT;
 
 static driver_t   **g_drivers;
 static int         g_driver_count;
@@ -49,6 +54,7 @@ static int driver_probe_bound_device(driver_t *drv, device_t *dev) {
     /* DRIVER_PROBE_FAILURE_CLEANUP: failed probes leave no half-bound device. */
     dev->drv = NULL;
     dev->drv_priv = NULL;
+    dev->matched_id = NULL;
     dev->state = DEV_STATE_UNINIT;
     return ret;
 }
@@ -62,6 +68,7 @@ static int driver_probe_bound_device(driver_t *drv, device_t *dev) {
  * ============================================================ */
 void driver_core_init(void) {
     spin_init(&g_driver_core_lock);
+    mutex_init(&g_driver_core_ops);
     g_driver_count = 0;
     g_driver_cap   = DRIVER_INITIAL_CAP;
     g_device_count = 0;
@@ -91,16 +98,25 @@ void driver_core_init(void) {
  * After registration, scans existing unbound devices for matches.
  * ============================================================ */
 int driver_register(driver_t *drv) {
-    if (!drv)
-        return -1;
+    if (!drv || !drv->name)
+        return -EINVAL;
 
+    mutex_lock(&g_driver_core_ops);
     uint64_t flags = spin_lock_irqsave(&g_driver_core_lock);
+    for (int i = 0; i < g_driver_count; i++) {
+        if (g_drivers[i] == drv) {
+            spin_unlock_irqrestore(&g_driver_core_lock, flags);
+            mutex_unlock(&g_driver_core_ops);
+            return -EEXIST;
+        }
+    }
     if (g_driver_count >= g_driver_cap) {
         int new_cap = g_driver_cap * 2;
         driver_t **new_arr = krealloc(g_drivers, sizeof(driver_t *) * new_cap);
         if (!new_arr) {
             kerr("[DRIVER] driver_register: capacity exhausted (%d)\n", g_driver_cap);
             spin_unlock_irqrestore(&g_driver_core_lock, flags);
+            mutex_unlock(&g_driver_core_ops);
             return -ENOMEM;
         }
         g_drivers = new_arr;
@@ -128,29 +144,38 @@ int driver_register(driver_t *drv) {
             }
         }
     }
+    mutex_unlock(&g_driver_core_ops);
     return 0;
 }
 
 int driver_unregister(driver_t *drv) {
-    if (!drv) return -1;
+    if (!drv) return -EINVAL;
+    mutex_lock(&g_driver_core_ops);
     uint64_t flags = spin_lock_irqsave(&g_driver_core_lock);
     for (int i = 0; i < g_driver_count; i++) {
         if (g_drivers[i] == drv) {
-            for (int j = 0; j < g_device_count; j++) {
-                device_t *dev = g_devices[j];
-                if (dev->drv == drv) {
-                    if (drv->remove) drv->remove(dev);
-                    dev->drv   = NULL;
-                    dev->state = DEV_STATE_REMOVED;
-                }
-            }
             g_drivers[i] = g_drivers[--g_driver_count];
             spin_unlock_irqrestore(&g_driver_core_lock, flags);
+
+            /* Lifecycle callbacks may release IRQs, DMA memory, or sleep. */
+            for (int j = 0; j < g_device_count; j++) {
+                device_t *dev = g_devices[j];
+                if (dev->drv != drv)
+                    continue;
+                if (drv->remove)
+                    drv->remove(dev);
+                dev->drv = NULL;
+                dev->drv_priv = NULL;
+                dev->matched_id = NULL;
+                dev->state = DEV_STATE_REMOVED;
+            }
+            mutex_unlock(&g_driver_core_ops);
             return 0;
         }
     }
     spin_unlock_irqrestore(&g_driver_core_lock, flags);
-    return -1;
+    mutex_unlock(&g_driver_core_ops);
+    return -ENOENT;
 }
 
 /* ============================================================
@@ -159,16 +184,25 @@ int driver_unregister(driver_t *drv) {
  * After registration, scans all registered drivers for a match.
  * ============================================================ */
 int device_register(device_t *dev) {
-    if (!dev)
-        return -1;
+    if (!dev || !dev->name)
+        return -EINVAL;
 
+    mutex_lock(&g_driver_core_ops);
     uint64_t flags = spin_lock_irqsave(&g_driver_core_lock);
+    for (int i = 0; i < g_device_count; i++) {
+        if (g_devices[i] == dev) {
+            spin_unlock_irqrestore(&g_driver_core_lock, flags);
+            mutex_unlock(&g_driver_core_ops);
+            return -EEXIST;
+        }
+    }
     if (g_device_count >= g_device_cap) {
         int new_cap = g_device_cap * 2;
         device_t **new_arr = krealloc(g_devices, sizeof(device_t *) * new_cap);
         if (!new_arr) {
             kerr("[DRIVER] device_register: capacity exhausted (%d)\n", g_device_cap);
             spin_unlock_irqrestore(&g_driver_core_lock, flags);
+            mutex_unlock(&g_driver_core_ops);
             return -ENOMEM;
         }
         g_devices = new_arr;
@@ -189,40 +223,58 @@ int device_register(device_t *dev) {
             if (ret == 0) {
                 kinfo("[DRIVER] device '%s' bound to driver '%s'\n",
                       dev->name, drv->name);
+                mutex_unlock(&g_driver_core_ops);
                 return 0;
             }
         }
     }
+    mutex_unlock(&g_driver_core_ops);
     return 0;
 }
 
 void device_unregister(device_t *dev) {
     if (!dev) return;
+    mutex_lock(&g_driver_core_ops);
     uint64_t flags = spin_lock_irqsave(&g_driver_core_lock);
     for (int i = 0; i < g_device_count; i++) {
         if (g_devices[i] == dev) {
-            if (dev->drv && dev->drv->remove)
-                dev->drv->remove(dev);
-            dev->drv   = NULL;
-            dev->state = DEV_STATE_REMOVED;
             g_devices[i] = g_devices[--g_device_count];
             spin_unlock_irqrestore(&g_driver_core_lock, flags);
+
+            driver_t *drv = dev->drv;
+            if (drv && drv->remove)
+                drv->remove(dev);
+            dev->drv = NULL;
+            dev->drv_priv = NULL;
+            dev->state = DEV_STATE_REMOVED;
+            dev->matched_id = NULL;
+            mutex_unlock(&g_driver_core_ops);
             return;
         }
     }
     spin_unlock_irqrestore(&g_driver_core_lock, flags);
+    mutex_unlock(&g_driver_core_ops);
 }
 
 int bus_register(bus_type_t *bus) {
-    if (!bus)
-        return -1;
+    if (!bus || !bus->name)
+        return -EINVAL;
+    mutex_lock(&g_driver_core_ops);
     uint64_t flags = spin_lock_irqsave(&g_driver_core_lock);
+    for (int i = 0; i < g_bus_count; i++) {
+        if (g_buses[i] == bus) {
+            spin_unlock_irqrestore(&g_driver_core_lock, flags);
+            mutex_unlock(&g_driver_core_ops);
+            return -EEXIST;
+        }
+    }
     if (g_bus_count >= g_bus_cap) {
         int new_cap = g_bus_cap * 2;
         bus_type_t **new_arr = krealloc(g_buses, sizeof(bus_type_t *) * new_cap);
         if (!new_arr) {
             kerr("[DRIVER] bus_register: capacity exhausted (%d)\n", g_bus_cap);
             spin_unlock_irqrestore(&g_driver_core_lock, flags);
+            mutex_unlock(&g_driver_core_ops);
             return -ENOMEM;
         }
         g_buses = new_arr;
@@ -230,25 +282,34 @@ int bus_register(bus_type_t *bus) {
     }
     g_buses[g_bus_count++] = bus;
     spin_unlock_irqrestore(&g_driver_core_lock, flags);
+    mutex_unlock(&g_driver_core_ops);
     kinfo("[DRIVER] registered bus '%s'\n", bus->name);
     return 0;
 }
 
 void bus_unregister(bus_type_t *bus) {
     if (!bus) return;
+    mutex_lock(&g_driver_core_ops);
     uint64_t flags = spin_lock_irqsave(&g_driver_core_lock);
     for (int i = 0; i < g_bus_count; i++) {
         if (g_buses[i] == bus) {
             g_buses[i] = g_buses[--g_bus_count];
             spin_unlock_irqrestore(&g_driver_core_lock, flags);
+            mutex_unlock(&g_driver_core_ops);
             return;
         }
     }
     spin_unlock_irqrestore(&g_driver_core_lock, flags);
+    mutex_unlock(&g_driver_core_ops);
 }
 
 int bus_probe_device(device_t *dev) {
-    if (!dev) return -1;
+    if (!dev) return -EINVAL;
+    mutex_lock(&g_driver_core_ops);
+    if (dev->drv) {
+        mutex_unlock(&g_driver_core_ops);
+        return -EBUSY;
+    }
     for (int i = 0; i < g_driver_count; i++) {
         driver_t *drv = g_drivers[i];
         int match = 0;
@@ -258,11 +319,14 @@ int bus_probe_device(device_t *dev) {
             match = 1;
         }
         if (match) {
-            if (driver_probe_bound_device(drv, dev) == 0)
+            if (driver_probe_bound_device(drv, dev) == 0) {
+                mutex_unlock(&g_driver_core_ops);
                 return 0;
+            }
         }
     }
-    return -1;
+    mutex_unlock(&g_driver_core_ops);
+    return -ENODEV;
 }
 
 resource_t *device_get_resource(device_t *dev, enum resource_type type, int index) {

@@ -87,7 +87,6 @@ struct virtio_gpu_resource_attach_backing {
     uint32_t nr_entries;
 } __attribute__((packed));
 
-int virtio_gpu_init(void);
 struct device;
 struct device *virtio_gpu_get_dev(void);
 

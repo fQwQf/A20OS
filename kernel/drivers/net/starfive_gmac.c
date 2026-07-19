@@ -4,7 +4,7 @@
  * LOCK_ORDER: This driver uses no private spinlock. send/recv are register-
  * polling paths against a single global gmac_priv_t instance (g_gmac).
  * Future IRQ-driven or SMP-safe versions must add a private lock and
- * document it in docs/driver-lock-order.md.
+ * document it in docs/drivers/lock-order.md.
  */
 #include "drivers/net/starfive_gmac.h"
 #include "drivers/core/driver_core.h"
