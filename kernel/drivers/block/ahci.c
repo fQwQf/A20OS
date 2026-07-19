@@ -9,6 +9,7 @@
 #include "core/lock.h"
 #include "core/stdio.h"
 #include "core/string.h"
+#include "core/errno.h"
 
 #define AHCI_MAX_PORTS          32U
 #define AHCI_CMD_SLOTS          32U
@@ -86,6 +87,8 @@ typedef struct __attribute__((aligned(1024))) ahci_port {
     uint8_t *transfer;
     uint64_t capacity;
     volatile int irq_seen;
+    int irq;
+    int irq_registered;
     spinlock_t lock;
     block_dev_t block;
 } ahci_port_t;
@@ -264,12 +267,13 @@ static int ahci_identify(ahci_port_t *port) {
 }
 
 static int ahci_probe(device_t *dev) {
+    int ret = 0;
     if (g_ahci_ready || pci_enable_and_assign_bars(dev) < 0)
-        return -1;
+        return -ENODEV;
 
     resource_t *abar = device_get_resource(dev, RES_MMIO, 0);
     if (!abar)
-        return -1;
+        return -ENODEV;
 
     ahci_port_t *port = &g_ahci_port;
     memset(port, 0, sizeof(*port));
@@ -283,7 +287,7 @@ static int ahci_probe(device_t *dev) {
             break;
         mdelay(1);
         if (ms + 1U == AHCI_TIMEOUT_MS)
-            return -1;
+            return -ETIMEDOUT;
     }
     writel(AHCI_GHC_AE | AHCI_GHC_IE, ahci_reg(port->regs, AHCI_GHC));
 
@@ -308,29 +312,42 @@ static int ahci_probe(device_t *dev) {
         port->port_no = AHCI_MAX_PORTS;
     }
     if (port->port_no == AHCI_MAX_PORTS)
-        return -1;
+        return -ENODEV;
 
     port->cmd_list = dma_alloc_coherent(1024U, &port->cmd_list_dma);
     port->rfis = dma_alloc_coherent(256U, &port->rfis_dma);
     port->tables = dma_alloc_coherent(AHCI_CMD_SLOTS * sizeof(*port->tables), &port->tables_dma);
     port->transfer = dma_alloc_coherent(AHCI_TRANSFER_BYTES, &port->transfer_dma);
-    if (!port->cmd_list || !port->rfis || !port->tables || !port->transfer)
-        return -1;
+    if (!port->cmd_list || !port->rfis || !port->tables || !port->transfer) {
+        ret = -ENOMEM;
+        goto fail;
+    }
 
-    if (ahci_stop_port(port) != 0)
-        return -1;
+    if (ahci_stop_port(port) != 0) {
+        ret = -ETIMEDOUT;
+        goto fail;
+    }
     ahci_write(port, AHCI_PXCLB, (uint32_t)port->cmd_list_dma);
     ahci_write(port, AHCI_PXCLBU, (uint32_t)(port->cmd_list_dma >> 32));
     ahci_write(port, AHCI_PXFB, (uint32_t)port->rfis_dma);
     ahci_write(port, AHCI_PXFBU, (uint32_t)(port->rfis_dma >> 32));
     ahci_write(port, AHCI_PXIS, 0xFFFFFFFFU);
     ahci_write(port, AHCI_PXIE, 0xFFFFFFFFU);
-    if (ahci_start_port(port) != 0 || ahci_identify(port) != 0)
-        return -1;
+    if (ahci_start_port(port) != 0 || ahci_identify(port) != 0) {
+        ret = -EIO;
+        goto fail;
+    }
 
     resource_t *irq = device_get_resource(dev, RES_IRQ, 0);
-    if (irq && request_irq((uint32_t)irq->start, ahci_irq_handler, 0, port) != 0)
-        printf("[AHCI] failed to register IRQ %lu\n", (unsigned long)irq->start);
+    port->irq = -1;
+    if (irq) {
+        port->irq = (int)irq->start;
+        if (request_irq((uint32_t)port->irq, ahci_irq_handler, 0, port) == 0)
+            port->irq_registered = 1;
+        else
+            printf("[AHCI] failed to register IRQ %lu; polling enabled\n",
+                   (unsigned long)irq->start);
+    }
 
     port->block.read_sector = ahci_block_read;
     port->block.write_sector = ahci_block_write;
@@ -341,6 +358,33 @@ static int ahci_probe(device_t *dev) {
     g_ahci_ready = 1;
     printf("[AHCI] device on port %u, capacity=%lu sectors\n", port->port_no,
            (unsigned long)port->capacity);
+    return 0;
+
+fail:
+    (void)ahci_stop_port(port);
+    if (port->transfer) dma_free_coherent(port->transfer, AHCI_TRANSFER_BYTES, port->transfer_dma);
+    if (port->tables) dma_free_coherent(port->tables, AHCI_CMD_SLOTS * sizeof(*port->tables), port->tables_dma);
+    if (port->rfis) dma_free_coherent(port->rfis, 256U, port->rfis_dma);
+    if (port->cmd_list) dma_free_coherent(port->cmd_list, 1024U, port->cmd_list_dma);
+    memset(port, 0, sizeof(*port));
+    return ret;
+}
+
+static int ahci_remove(device_t *dev) {
+    ahci_port_t *port = dev ? (ahci_port_t *)dev->drv_priv : NULL;
+    if (!port)
+        return 0;
+    g_ahci_ready = 0;
+    if (port->irq_registered)
+        free_irq((uint32_t)port->irq, port);
+    (void)ahci_stop_port(port);
+    ahci_write(port, AHCI_PXIE, 0);
+    if (port->transfer) dma_free_coherent(port->transfer, AHCI_TRANSFER_BYTES, port->transfer_dma);
+    if (port->tables) dma_free_coherent(port->tables, AHCI_CMD_SLOTS * sizeof(*port->tables), port->tables_dma);
+    if (port->rfis) dma_free_coherent(port->rfis, 256U, port->rfis_dma);
+    if (port->cmd_list) dma_free_coherent(port->cmd_list, 1024U, port->cmd_list_dma);
+    dev->drv_priv = NULL;
+    memset(port, 0, sizeof(*port));
     return 0;
 }
 
@@ -382,6 +426,7 @@ static driver_t ahci_driver = {
     .id_table = ahci_ids,
     .bus = &pci_bus,
     .probe = ahci_probe,
+    .remove = ahci_remove,
     .class_ops = &ahci_class_ops,
     .class_type = DEV_CLASS_BLOCK,
 };

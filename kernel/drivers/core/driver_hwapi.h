@@ -89,6 +89,8 @@ typedef int (*irq_handler_t)(int irq, void *priv);
 
 int   request_irq(uint32_t irq, irq_handler_t handler,
                   unsigned long flags, void *priv);
+/* priv is an ownership token and must exactly match request_irq().  free_irq()
+ * masks the line and waits for an in-progress handler before returning. */
 void  free_irq(uint32_t irq, void *priv);
 void  irq_enable(uint32_t irq);
 void  irq_disable(uint32_t irq);

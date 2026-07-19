@@ -41,14 +41,23 @@ typedef struct {
     uint32_t           head;
     uint32_t           tail;
     task_t            *waiter;
+    uint32_t           irq;
+    int                irq_registered;
 } virtio_input_inst_t;
 
 #define MAX_VIRTIO_INPUT_DEVS 4
 static virtio_input_inst_t g_input_insts[MAX_VIRTIO_INPUT_DEVS];
 static int g_ninputs = 0;
-static device_t g_input_pci_devices[MAX_VIRTIO_INPUT_DEVS];
 static uint8_t g_input_irq_registered[256];
 static unsigned g_input_trace_events;
+
+static virtio_input_inst_t *virtio_input_first_active(void) {
+    for (int i = 0; i < MAX_VIRTIO_INPUT_DEVS; i++) {
+        if (g_input_insts[i].valid)
+            return &g_input_insts[i];
+    }
+    return NULL;
+}
 
 static void virtio_input_mmio_write32(virtio_transport_t *t, uint32_t off, uint32_t val) {
     writel(val, (volatile void *)((uintptr_t)t->priv + off));
@@ -199,7 +208,7 @@ static int input_read(vfile_t *vf, char *buf, size_t count) {
         /* Keep the GUI responsive on QEMU variants whose virtio IRQ route is
          * masked or unavailable even though the queue itself is operational. */
         virtio_input_poll();
-        for (int i = 0; i < g_ninputs; i++) {
+        for (int i = 0; i < MAX_VIRTIO_INPUT_DEVS; i++) {
             virtio_input_inst_t *inst = &g_input_insts[i];
             if (!inst->valid) continue;
             
@@ -222,8 +231,8 @@ static int input_read(vfile_t *vf, char *buf, size_t count) {
             return -EAGAIN;
         
         // No data, block on the first device's waiter
-        if (g_ninputs > 0) {
-            virtio_input_inst_t *inst = &g_input_insts[0];
+        virtio_input_inst_t *inst = virtio_input_first_active();
+        if (inst) {
             uint64_t flags = spin_lock_irqsave(&inst->lock);
             if (inst->head == inst->tail) {
                 inst->waiter = proc_current();
@@ -254,7 +263,14 @@ vfile_ops_t g_devfs_input_ops = {
 static int virtio_input_init_transport(device_t *dev,
                                        const virtio_transport_t *transport) {
     if (g_ninputs >= MAX_VIRTIO_INPUT_DEVS) return -1;
-    virtio_input_inst_t *inst = &g_input_insts[g_ninputs];
+    virtio_input_inst_t *inst = NULL;
+    for (int i = 0; i < MAX_VIRTIO_INPUT_DEVS; i++) {
+        if (!g_input_insts[i].valid && !g_input_insts[i].irq_registered) {
+            inst = &g_input_insts[i];
+            break;
+        }
+    }
+    if (!inst) return -1;
 
     memset(inst, 0, sizeof(*inst));
     spin_init(&inst->lock);
@@ -335,6 +351,8 @@ static int virtio_input_init_transport(device_t *dev,
         g_input_irq_registered[vt->irq] = 1;
         registered_irq = 1;
     }
+    inst->irq = vt->irq >= 0 ? (uint32_t)vt->irq : 0;
+    inst->irq_registered = registered_irq;
     
     status |= VIRTIO_STATUS_DRIVER_OK;
     vt->write32(vt, VIRTIO_MMIO_STATUS, status);
@@ -350,7 +368,7 @@ static int virtio_input_init_transport(device_t *dev,
 
 fail:
     if (registered_irq) {
-        free_irq((uint32_t)vt->irq, inst);
+        free_irq((uint32_t)vt->irq, NULL);
         g_input_irq_registered[vt->irq] = 0;
     }
     vt->write32(vt, VIRTIO_MMIO_STATUS,
@@ -382,27 +400,40 @@ static int virtio_input_probe(device_t *dev) {
     return virtio_input_init_transport(dev, &vt);
 }
 
-int virtio_input_init(void) {
-    if (g_ninputs > 0)
+static int virtio_input_remove(device_t *dev) {
+    virtio_input_inst_t *inst = dev ? dev->drv_priv : NULL;
+    if (!inst)
         return 0;
-
-    int initialized = 0;
-    for (int index = 0; index < MAX_VIRTIO_INPUT_DEVS; index++) {
-        virtio_transport_t vt;
-        if (arch_virtio_input_probe(index, &vt) != 0)
-            break;
-
-        device_t *dev = &g_input_pci_devices[index];
-        memset(dev, 0, sizeof(*dev));
-        dev->name = "virtio-input-pci";
-        if (virtio_input_init_transport(dev, &vt) != 0)
-            return initialized ? 0 : -1;
-        initialized++;
+    inst->valid = 0;
+    if (inst->irq_registered && inst->irq < sizeof(g_input_irq_registered)) {
+        virtio_input_inst_t *new_owner = NULL;
+        for (int i = 0; i < MAX_VIRTIO_INPUT_DEVS; i++) {
+            if (&g_input_insts[i] != inst && g_input_insts[i].valid &&
+                g_input_insts[i].vt.irq == (int)inst->irq) {
+                new_owner = &g_input_insts[i];
+                break;
+            }
+        }
+        if (new_owner) {
+            new_owner->irq_registered = 1;
+        } else {
+            free_irq(inst->irq, NULL);
+            g_input_irq_registered[inst->irq] = 0;
+        }
     }
-    return initialized ? 0 : -1;
+    inst->vt.write32(&inst->vt, VIRTIO_MMIO_STATUS, 0);
+    mb();
+    if (g_ninputs > 0)
+        g_ninputs--;
+    dev->drv_priv = NULL;
+    memset(inst, 0, sizeof(*inst));
+    return 0;
 }
 
 static const device_id_t virtio_input_ids[] = {
+    /* VirtIO-MMIO matches the protocol device type, not a PCI device ID. */
+    { .vendor = 0, .device = 18,
+      .subvendor = VENDOR_ANY, .subdevice = DEVICE_ANY },
     { .vendor = 0x1AF4, .device = 0x1052,
       .subvendor = VENDOR_ANY, .subdevice = DEVICE_ANY },
     { .vendor = 0x1AF4, .device = 0x1012, .subvendor = VENDOR_ANY, .subdevice = 18 },
@@ -458,6 +489,7 @@ static driver_t virtio_input_driver = {
     .bus        = NULL,
     .probe      = virtio_input_probe,
     .class_ops  = &virtio_input_class_ops,
+    .remove     = virtio_input_remove,
     .class_type = DEV_CLASS_INPUT,
 };
 

@@ -1,11 +1,16 @@
 #include "drivers/core/driver_hwapi.h"
 #include "drivers/core/driver_core.h"
+#include "mm/mm.h"
+#include "core/errno.h"
+#include "core/lock.h"
 
 extern const board_config_t *const current_board;
 
 static irq_handler_t irq_handlers[256];
 static void         *irq_priv[256];
 static unsigned long irq_flags[256];
+static unsigned int irq_active[256];
+static spinlock_t irq_table_lock = SPINLOCK_INIT;
 
 /* DRIVER_IRQ_TABLE_FIXED_LIMIT: platform IRQ lines are capped at 256 until the
  * irq registry is replaced by a dynamically sized irqdomain-style structure. */
@@ -13,10 +18,16 @@ static unsigned long irq_flags[256];
 int request_irq(uint32_t irq, irq_handler_t handler,
                 unsigned long flags, void *priv) {
     if (irq >= 256 || !handler)
-        return -1;
+        return -EINVAL;
+    uint64_t lock_flags = spin_lock_irqsave(&irq_table_lock);
+    if (irq_handlers[irq]) {
+        spin_unlock_irqrestore(&irq_table_lock, lock_flags);
+        return -EBUSY;
+    }
     irq_handlers[irq] = handler;
     irq_priv[irq]     = priv;
     irq_flags[irq]    = flags;
+    spin_unlock_irqrestore(&irq_table_lock, lock_flags);
 
     if (!(flags & IRQF_NO_AUTO_ENABLE))
         irq_enable(irq);
@@ -25,12 +36,24 @@ int request_irq(uint32_t irq, irq_handler_t handler,
 }
 
 void free_irq(uint32_t irq, void *priv) {
-    (void)priv;
     if (irq >= 256)
         return;
+    uint64_t lock_flags = spin_lock_irqsave(&irq_table_lock);
+    if (!irq_handlers[irq] || irq_priv[irq] != priv) {
+        spin_unlock_irqrestore(&irq_table_lock, lock_flags);
+        return;
+    }
     irq_disable(irq);
     irq_handlers[irq] = NULL;
     irq_priv[irq]     = NULL;
+    irq_flags[irq]    = 0;
+    spin_unlock_irqrestore(&irq_table_lock, lock_flags);
+
+    /* A handler that took its snapshot before the table entry was cleared may
+     * still be running on another CPU.  Driver remove cannot release its
+     * private state until that invocation has returned. */
+    while (__atomic_load_n(&irq_active[irq], __ATOMIC_ACQUIRE) != 0)
+        __asm__ volatile("" ::: "memory");
 }
 
 void irq_enable(uint32_t irq) {
@@ -61,18 +84,25 @@ void driver_irq_dispatch(uint32_t irq) {
      * are not all registered during early bring-up, so the old early return
      * could trap the first userspace child in an interrupt storm.
      */
-    if (!irq_handlers[irq]) {
+    uint64_t lock_flags = spin_lock_irqsave(&irq_table_lock);
+    irq_handler_t handler = irq_handlers[irq];
+    void *priv = irq_priv[irq];
+    if (!handler) {
+        spin_unlock_irqrestore(&irq_table_lock, lock_flags);
         if (current_board && current_board->irqchip &&
             current_board->irqchip->eoi)
             current_board->irqchip->eoi(irq);
         return;
     }
+    irq_active[irq]++;
+    spin_unlock_irqrestore(&irq_table_lock, lock_flags);
 
     if (current_board && current_board->irqchip &&
         current_board->irqchip->ack)
         current_board->irqchip->ack();
 
-    irq_handlers[irq]((int)irq, irq_priv[irq]);
+    handler((int)irq, priv);
+    __atomic_sub_fetch(&irq_active[irq], 1, __ATOMIC_RELEASE);
 
     if (current_board && current_board->irqchip &&
         current_board->irqchip->eoi)
@@ -87,7 +117,7 @@ void *dma_alloc_coherent(size_t size, uint64_t *dma_handle) {
         memset(ptr, 0, size);
     }
     if (dma_handle)
-        *dma_handle = (uint64_t)(uintptr_t)ptr;
+        *dma_handle = ptr ? (uint64_t)va_to_pa(ptr) : 0;
     return ptr;
 }
 
@@ -99,13 +129,13 @@ void dma_free_coherent(void *vaddr, size_t size, uint64_t dma_handle) {
 }
 
 void dma_sync_for_device(void *vaddr, size_t size) {
-    (void)vaddr;
-    (void)size;
+    if (vaddr && size)
+        arch_dma_sync_for_device(vaddr, size);
 }
 
 void dma_sync_for_cpu(void *vaddr, size_t size) {
-    (void)vaddr;
-    (void)size;
+    if (vaddr && size)
+        arch_dma_sync_for_cpu(vaddr, size);
 }
 
 uint64_t clock_get_ticks(void) {

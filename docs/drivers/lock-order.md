@@ -1,6 +1,6 @@
 # 驱动锁顺序契约
 
-本文档是 A20 内核驱动私有锁的权威锁顺序契约。它补充 `kernel/include/core/lock.h` 中的全局契约，并记录每个驱动的例外情况和局部顺序。
+本文是 A20OS 内核驱动私有锁的权威锁顺序契约。它补充 `kernel/include/core/lock.h` 中的全局契约，并记录每个驱动的例外情况和局部顺序。
 
 ## 范围
 
@@ -16,6 +16,12 @@
 | DW SDIO | `kernel/drivers/block/dw_sdio.c` | 无 |
 | StarFive GMAC | `kernel/drivers/net/starfive_gmac.c` | 无 |
 | Loongson-2K GMAC | `kernel/drivers/net/ls2k_gmac.c` | 无 |
+| AHCI | `kernel/drivers/block/ahci.c` | `port->lock` |
+| VirtIO-SCSI | `kernel/drivers/block/virtio_scsi.c` | `dev->lock` |
+| E1000 | `kernel/drivers/net/e1000.c` | `nic->lock` |
+| VMSVGA/SVGAv3 | `kernel/drivers/gpu/vmsvga.c` | `svga->lock` |
+| VirtIO input | `kernel/drivers/input/virtio_input.c` | `inst->lock` |
+| xHCI HID | `kernel/drivers/input/xhci_hid.c` | `xhci->lock` |
 
 ## 全局顺序摘要
 
@@ -199,6 +205,46 @@ g_lwip_lock -> virtio-net nonblocking send/recv paths only
 - 未来的 IRQ 驱动版本或 SMP-safe 版本必须增加私有锁，并在本文档中记录。
 - 今天的并发 send/recv 调用存在竞争；调用者必须在外部串行化。
 
+### AHCI
+
+**锁：** `ahci_port_t.lock`（`port->lock`），保护单端口 command slot、command table 和共享 transfer buffer。
+
+**局部顺序：** 无。类 read/write 获取该锁后串行完成分块 I/O。
+
+**已知限制：** 当前实现会在锁内轮询命令完成，最长可达硬件超时。这不适合作为新驱动范例；IRQ/completion 化时必须只在锁内发布和回收 slot，在无锁状态等待完成。
+
+### VirtIO-SCSI
+
+**锁：** `virtio_scsi_dev_t.lock`（`dev->lock`），保护 request queue descriptor、avail/used index、共享 request/response 和单命令 buffer。
+
+**局部顺序：** 无。当前每控制器只有一个同步 in-flight 命令。
+
+**已知限制：** VirtIO GPU controlq 当前用实例 mutex 串行化，在 mutex 内轮询完成但不关闭中断。请求/响应位于实例 DMA staging。未来多队列/异步实现必须改为 per-request 状态与 completion；禁止退回自旋锁内长等待或栈 DMA。
+
+### E1000
+
+**锁：** `e1000_device_t.lock`（`nic->lock`），保护 RX/TX descriptor、buffer 和 `rx_next/tx_next`。
+
+**局部顺序：** `g_lwip_lock -> nic->lock`。send/recv/poll 可由 lwIP 在外层锁下调用，驱动锁下不得回调 lwIP、分配或睡眠。
+
+### VMSVGA/SVGAv3
+
+**锁：** `vmsvga_device_t.lock`（`svga->lock`），保护 command buffer header、command submission 和 update 序列。
+
+**局部顺序：** 无。`flush` 在锁内提交并轮询短 command completion；不得在此锁下执行 framebuffer 映射、VFS 或用户 copy。
+
+### VirtIO input
+
+**锁：** 每实例 `virtio_input_inst_t.lock`，保护 event virtqueue、用户事件 ring 和 waiter。
+
+**局部顺序：** 无。IRQ/poll 路径在锁内 drain 有界队列并可调用 `proc_make_ready`；阻塞 read 在调度前释放锁。
+
+### xHCI HID
+
+**锁：** `xhci_controller_t.lock`，保护 command/event/endpoint ring、HID report 状态和聚合 input ring。
+
+**局部顺序：** 无。当前 class read/poll 在锁内推进轮询；不得从该路径调用 VFS、分配或调度。
+
 ## 跨驱动规则
 
 1. **禁止反向顺序。** 如果必须在持有驱动锁时获取全局锁，需要在本文档中把它记录为局部顺序。未记录的嵌套就是 bug。
@@ -208,6 +254,9 @@ g_lwip_lock -> virtio-net nonblocking send/recv paths only
    - `UART` Ctrl-C 路径在 `rx_lock` 下嵌套 `proc_lock`。
    - `PTY` 分配在 `g_pty_alloc_lock` 下执行 `kmalloc`。
 4. **新的设备锁** 必须符合全局顺序（`driver registry/IRQ locks -> device-private locks`），或在使用前向本文档增加局部顺序条目。
+
+> ❌ 不要这样做
+> 在设备锁下调用 `kmalloc`、VFS 或 scheduler；在 spinlock 里轮询硬件直到超时；临时发明一种“先拿设备锁，再拿 proc_lock”的嵌套。这些都会在 `make check-concurrency-foundation` 或 SMP smoke 测试里变成死锁或数据竞争。新增锁顺序前请先跑过 [测试门禁](../testing/testing-gates.md)。
 
 ## 参考
 

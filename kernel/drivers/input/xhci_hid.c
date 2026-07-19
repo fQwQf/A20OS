@@ -1134,6 +1134,18 @@ static int xhci_hid_probe(device_t *dev) {
     return 0;
 }
 
+static int xhci_hid_remove(device_t *dev) {
+    xhci_controller_t *xhci = dev ? dev->drv_priv : NULL;
+    if (!xhci)
+        return 0;
+    xhci_write32(xhci->op, XHCI_USBCMD,
+                 xhci_read32(xhci->op, XHCI_USBCMD) & ~XHCI_CMD_RUN);
+    xhci->running = 0;
+    dev->drv_priv = NULL;
+    memset(xhci, 0, sizeof(*xhci));
+    return 0;
+}
+
 static const device_id_t xhci_hid_ids[] = {
     { .vendor = XHCI_VENDOR_INTEL, .device = XHCI_DEVICE_PANTHER_POINT,
       .subvendor = VENDOR_ANY, .subdevice = DEVICE_ANY },
@@ -1145,6 +1157,7 @@ static driver_t xhci_hid_driver = {
     .id_table = xhci_hid_ids,
     .bus = NULL,
     .probe = xhci_hid_probe,
+    .remove = xhci_hid_remove,
     .class_ops = &xhci_hid_ops,
     .class_type = DEV_CLASS_INPUT,
 };

@@ -112,7 +112,10 @@ static void vbox_gic_enable(uint32_t irq) {
 }
 
 static void vbox_gic_disable(uint32_t irq) {
-    (void)irq;
+    volatile uint32_t *base = irq < 32U
+        ? (volatile uint32_t *)(uintptr_t)(GICR_BASE + 0x10000)
+        : vbox_gicd_reg32(0);
+    base[(0x180 + (uint32_t)(irq / 32U) * 4) / 4] = 1U << (irq % 32U);
 }
 
 static uint32_t vbox_gic_ack(void) {

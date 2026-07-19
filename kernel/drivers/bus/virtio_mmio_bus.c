@@ -40,8 +40,10 @@ static int virtio_mmio_match(device_t *dev, const driver_t *drv) {
 
     for (const device_id_t *id = drv->id_table; id->vendor != 0 || id->device != 0; id++) {
         if ((id->vendor == VENDOR_ANY || id->vendor == VIRTIO_VENDOR_ID) &&
-            (id->device == DEVICE_ANY || id->device == dev_vendor))
+            (id->device == DEVICE_ANY || id->device == dev_vendor)) {
+            dev->matched_id = id;
             return 1;
+        }
     }
     return 0;
 }

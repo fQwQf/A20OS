@@ -9,6 +9,6 @@
  * definitions under core/ prevents common code from depending on a selected
  * userspace ABI header bundle.
  */
-#include "abi/linux/errno.h"
+#include "../abi/linux/errno.h"
 
 #endif /* _CORE_ERRNO_H */

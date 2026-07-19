@@ -120,6 +120,11 @@ int driver_lifecycle_test_run(void)
         pass = 0;
         goto out;
     }
+    if (bus_register(&g_lifecycle_bus) != -EEXIST) {
+        kerr("[DRIVER-LIFECYCLE] duplicate bus registration was accepted\n");
+        pass = 0;
+        goto out;
+    }
 
     /* 2. Register the synthetic driver. */
     if (driver_register(&g_lifecycle_driver) != 0) {
@@ -127,10 +132,20 @@ int driver_lifecycle_test_run(void)
         pass = 0;
         goto out;
     }
+    if (driver_register(&g_lifecycle_driver) != -EEXIST) {
+        kerr("[DRIVER-LIFECYCLE] duplicate driver registration was accepted\n");
+        pass = 0;
+        goto out;
+    }
 
     /* 3. Register a non-matching device; it must stay unbound. */
     if (device_register(&dev_nomatch) != 0) {
         kerr("[DRIVER-LIFECYCLE] device_register(nomatch) failed\n");
+        pass = 0;
+        goto out;
+    }
+    if (device_register(&dev_nomatch) != -EEXIST) {
+        kerr("[DRIVER-LIFECYCLE] duplicate device registration was accepted\n");
         pass = 0;
         goto out;
     }
@@ -192,24 +207,24 @@ int driver_lifecycle_test_run(void)
         goto out;
     }
 
-    /* 7. Re-register the same driver and re-probe the device. */
+    /* 7. Re-registering synchronously probes all existing unbound devices. */
     if (driver_register(&g_lifecycle_driver) != 0) {
         kerr("[DRIVER-LIFECYCLE] driver re-register failed\n");
         pass = 0;
         goto out;
     }
-    if (bus_probe_device(&dev_ok) != 0) {
-        kerr("[DRIVER-LIFECYCLE] re-probe failed\n");
-        pass = 0;
-        goto out;
-    }
     if (dev_ok.drv != &g_lifecycle_driver || dev_ok.state != DEV_STATE_PROBED) {
-        kerr("[DRIVER-LIFECYCLE] re-probe did not bind device\n");
+        kerr("[DRIVER-LIFECYCLE] driver re-register did not bind device\n");
         pass = 0;
         goto out;
     }
-    if (plat_ok.probe_count < 2) {
-        kerr("[DRIVER-LIFECYCLE] re-probe was not attempted\n");
+    if (plat_ok.probe_count != 2) {
+        kerr("[DRIVER-LIFECYCLE] automatic re-probe was not attempted once\n");
+        pass = 0;
+        goto out;
+    }
+    if (bus_probe_device(&dev_ok) != -EBUSY) {
+        kerr("[DRIVER-LIFECYCLE] explicitly re-probed an already bound device\n");
         pass = 0;
         goto out;
     }
@@ -227,12 +242,16 @@ int driver_lifecycle_test_run(void)
         goto out;
     }
 
-    /* 9. Clean up the remaining devices and bus. */
+out:
+    /* These objects live on this stack frame.  Always remove them from the
+     * global registries, including after an assertion failure, so later boot
+     * code cannot observe dangling device or platform-data pointers. */
+    device_unregister(&dev_ok);
+    device_unregister(&dev_fail);
     device_unregister(&dev_nomatch);
     driver_unregister(&g_lifecycle_driver);
     bus_unregister(&g_lifecycle_bus);
 
-out:
     if (pass) {
         kinfo("DRIVER_LIFECYCLE: PASS\n");
         return 0;

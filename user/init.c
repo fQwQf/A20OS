@@ -57,6 +57,15 @@ static void setup_console(void)
         close(fd);
 }
 
+static int framebuffer_available(void)
+{
+    int fd = open("/dev/fb0", O_RDWR);
+    if (fd < 0)
+        return 0;
+    close(fd);
+    return 1;
+}
+
 static void setup_signals(void)
 {
     struct sigaction sa;
@@ -140,7 +149,11 @@ int main(void)
 
     char *envp[] = {path_env, ld_env, "HOME=/", "SHELL=/bin/mksh", "TERM=vt100", NULL};
 
-    if (access("/bin/etc/a20-gui", F_OK) == 0) {
+    /* The GUI image carries both locations.  Keep the root marker as a
+     * fallback for 32-bit ports whose early VFS path walk cannot yet resolve
+     * the marker through the /bin mount prefix reliably. */
+    if (access("/bin/etc/a20-gui", F_OK) == 0 ||
+        access("/bin/a20-gui", F_OK) == 0 || framebuffer_available()) {
         printf("[init] starting desktop\n");
         desktop_pid = fork();
         if (desktop_pid == 0) {

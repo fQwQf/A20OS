@@ -50,6 +50,8 @@ typedef struct {
     int valid;
     int legacy;
     int slot;
+    int irq;
+    int irq_registered;
     uint32_t rx_packets;
     uint32_t tx_packets;
     uint32_t rx_drops;
@@ -554,10 +556,16 @@ static int virtio_net_driver_probe(device_t *dev) {
 
     resource_t *irq_res = device_get_resource(dev, RES_IRQ, 0);
     if (net->vt.irq >= 0) {
-        if (request_irq((uint32_t)net->vt.irq, virtio_net_irq_handler, 0, net) != 0)
+        if (request_irq((uint32_t)net->vt.irq, virtio_net_irq_handler, 0, net) == 0) {
+            net->irq = net->vt.irq;
+            net->irq_registered = 1;
+        } else
             kinfo("[VIRTIO-NET] Failed to register transport IRQ for '%s'\n", dev->name);
     } else if (irq_res) {
-        if (request_irq((uint32_t)irq_res->start, virtio_net_irq_handler, 0, net) != 0)
+        if (request_irq((uint32_t)irq_res->start, virtio_net_irq_handler, 0, net) == 0) {
+            net->irq = (int)irq_res->start;
+            net->irq_registered = 1;
+        } else
             kinfo("[VIRTIO-NET] Failed to register IRQ %lu for '%s'\n",
                   (unsigned long)irq_res->start, dev->name);
     } else {
@@ -615,7 +623,16 @@ static const device_id_t virtio_net_ids[] = {
 };
 
 static int virtio_net_driver_remove(device_t *dev) {
-    (void)dev;
+    virtio_net_inst_t *net = dev ? dev->drv_priv : NULL;
+    if (!net)
+        return 0;
+    net->valid = 0;
+    if (net->irq_registered)
+        free_irq((uint32_t)net->irq, net);
+    net->irq_registered = 0;
+    net->vt.write32(&net->vt, VIRTIO_MMIO_STATUS, 0);
+    mb();
+    dev->drv_priv = NULL;
     return 0;
 }
 
