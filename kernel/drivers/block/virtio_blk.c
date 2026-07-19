@@ -14,6 +14,7 @@
 #include "core/lock.h"
 #include "core/timer.h"
 #include "proc/proc.h"
+#include "core/errno.h"
 
 #define VQ_SIZE  VIRTIO_QUEUE_SIZE
 #define VIRTIO_BLK_REQ_SLOTS (VIRTIO_QUEUE_SIZE / 3)
@@ -48,6 +49,7 @@ typedef struct {
     spinlock_t         lock;
     int                slot;
     int                in_flight;
+    int                irq_registered;
 } virtio_blk_inst_t;
 
 static virtio_blk_inst_t g_insts[VIRTIO_MAX_DEVS];
@@ -174,7 +176,9 @@ static int virtio_blk_init_instance(virtio_blk_inst_t *inst) {
     inst->blk_dev.write_sector = NULL;
 
     if (vt->irq >= 0) {
-        if (request_irq((uint32_t)vt->irq, virtio_blk_irq_handler, 0, inst) != 0)
+        if (request_irq((uint32_t)vt->irq, virtio_blk_irq_handler, 0, inst) == 0)
+            inst->irq_registered = 1;
+        else
             printf("[VIRTIO%d] Failed to register IRQ %d\n", idx, vt->irq);
     }
 
@@ -582,7 +586,10 @@ static int virtio_blk_driver_probe(device_t *dev) {
         /* The generic PCI transport currently uses polling until IRQ routing
          * is supplied by the VirtualBox ACPI interrupt controller tables. */
     } else if (irq_res) {
-        if (request_irq((uint32_t)irq_res->start, virtio_blk_irq_handler, 0, inst) != 0)
+        if (request_irq((uint32_t)irq_res->start, virtio_blk_irq_handler, 0, inst) == 0) {
+            inst->vt.irq = (int)irq_res->start;
+            inst->irq_registered = 1;
+        } else
             kinfo("[VIRTIO-BLK] Failed to register IRQ %lu for '%s'\n",
                   (unsigned long)irq_res->start, dev->name);
     } else {
@@ -624,15 +631,32 @@ static block_dev_ops_t virtio_blk_class_ops = {
 };
 
 static const device_id_t virtio_blk_ids[] = {
+    /* VirtIO-MMIO bus matching uses the transport device type as device ID. */
+    { .vendor = 0, .device = 2,
+      .subvendor = VENDOR_ANY, .subdevice = DEVICE_ANY },
     { .vendor = 0x1AF4, .device = 0x1002,
       .subvendor = VENDOR_ANY, .subdevice = DEVICE_ANY },
+    /* QEMU transitional virtio-blk may expose generic 1001 and identify the
+     * device type through subsystem ID 2. */
+    { .vendor = 0x1AF4, .device = 0x1001,
+      .subvendor = VENDOR_ANY, .subdevice = 2 },
     { .vendor = 0x1AF4, .device = 0x1042,
       .subvendor = VENDOR_ANY, .subdevice = DEVICE_ANY },
     { 0 },
 };
 
 static int virtio_blk_driver_remove(device_t *dev) {
-    (void)dev;
+    virtio_blk_inst_t *inst = dev ? dev->drv_priv : NULL;
+    if (!inst)
+        return 0;
+    if (inst->irq_registered && inst->vt.irq >= 0)
+        free_irq((uint32_t)inst->vt.irq, inst);
+    inst->irq_registered = 0;
+    inst->blk.valid = 0;
+    inst->vt.write32(&inst->vt, VIRTIO_MMIO_STATUS, 0);
+    mb();
+    inst->in_flight = 0;
+    dev->drv_priv = NULL;
     return 0;
 }
 

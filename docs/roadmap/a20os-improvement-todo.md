@@ -51,7 +51,7 @@
 
 - [ ] 在块设备和网络设备能够发出完成信号的位置，用事件驱动 wakeup 替换 scheduler/idle 轮询进展。
   - 证据：`docs/external-dependencies.md` 描述了基于轮询的 lwIP 进展；`kernel/drivers/block/virtio_blk.c` 记录了未来 interrupt wake 路径。
-  - 设计：`docs/driver-lock-order.md`（驱动锁契约）、`docs/network-lock-contract.md`（deferred bottom-half 规则）；用户决策：deferred bottom-half / workqueue。
+  - 设计：`docs/drivers/lock-order.md`（驱动锁契约）、`docs/network-lock-contract.md`（deferred bottom-half 规则）；用户决策：deferred bottom-half / workqueue。
   - 完成条件：块设备和网络进展在正常运行中不再依赖通用 hot-path 轮询。
 - [ ] 降低 `g_lwip_lock` 竞争，并为所有 socket 路径记录锁安全入口点。
   - 证据：`kernel/net/lwip_stack.c` 用全局锁串行化 lwIP 核心状态；`kernel/include/core/lock.h` 限制 lwIP 锁下的调用。
@@ -107,11 +107,11 @@
   - 完成条件：registry exhaustion 被测试，且不会静默丢失 device 或 driver。
 - [ ] 在把驱动模型视为通用模型前，增加 hotplug 和 remove-path 生命周期测试。
   - 证据：`kernel/drivers/core/driver_core.c` 有 probe/remove 路径，但模型主要面向内建 bringup。
-  - 设计：`docs/driver-lock-order.md`；用户决策：面向用户的 `/proc/a20/driver_lifecycle` 触发器。
+  - 设计：`docs/drivers/lock-order.md`；用户决策：面向用户的 `/proc/a20/driver_lifecycle` 触发器。
   - 完成条件：bind、probe failure、remove、re-probe 和资源清理都有测试。
 - [ ] 将设备特定锁顺序移动到驱动文档中，放在每个私有锁旁边。
   - 证据：`kernel/include/core/lock.h` 要求新锁符合全局顺序，或记录局部顺序。
-  - 设计：`docs/driver-lock-order.md` 和已更新的 `kernel/include/core/lock.h` 注释（Wave 1 已完成）；inline `LOCK_ORDER:` 注释将在实现期间加入。
+  - 设计：`docs/drivers/lock-order.md` 和已更新的 `kernel/include/core/lock.h` 注释（Wave 1 已完成）；inline `LOCK_ORDER:` 注释将在实现期间加入。
   - 完成条件：virtio-blk、virtio-net、UART、PTY、loop、SDIO 和平台 NIC 都记录各自私有锁规则。
 
 ## P2：测试门禁与工具

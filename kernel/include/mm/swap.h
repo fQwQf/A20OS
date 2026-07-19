@@ -34,7 +34,7 @@ struct swap_header {
 
 typedef uint64_t swap_entry_t;
 
-#include "core/errno.h"
+#include "../core/errno.h"
 
 struct block_dev;
 typedef struct block_dev block_dev_t;

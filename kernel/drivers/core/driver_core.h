@@ -153,7 +153,13 @@ typedef struct bus_type {
  * loop, PCI, and virtio-mmio build/probe anchors before section 7 is complete.
  * ============================================================ */
 
-/* driver_core.c */
+/*
+ * Registration APIs reject NULL/incomplete objects with -EINVAL and duplicate
+ * pointer registration with -EEXIST.  Registration may synchronously invoke
+ * probe on existing objects; unregistration synchronously invokes remove.
+ * These entry points run in task/boot context and must not be called by IRQ
+ * handlers or recursively from lifecycle callbacks.
+ */
 void driver_core_init(void);
 int  driver_register(driver_t *drv);
 int  driver_unregister(driver_t *drv);

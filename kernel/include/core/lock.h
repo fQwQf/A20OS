@@ -11,7 +11,7 @@
 
 /*
  * Global lock order contract (outermost -> innermost).
- * For the full driver-private lock contracts see docs/driver-lock-order.md.
+ * For the full driver-private lock contracts see docs/drivers/lock-order.md.
  *
  * Global order:
  *   cg_node.lock -> proc_lock -> runq_lock -> pfa.lock
@@ -39,7 +39,7 @@
  * - Do not call into VFS, memory allocation, or scheduler paths while holding a
  *   device or lwIP lock unless the callee is documented nonblocking.
  * - New locks must either fit this order or document a narrower local order in
- *   docs/driver-lock-order.md before use.
+ *   docs/drivers/lock-order.md before use.
  */
 
 typedef struct spinlock {

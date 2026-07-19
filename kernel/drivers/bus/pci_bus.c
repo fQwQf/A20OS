@@ -14,7 +14,7 @@
 #include "core/klog.h"
 #include "core/string.h"
 
-#ifdef CONFIG_X86_64
+#if defined(CONFIG_X86_64) || defined(CONFIG_LOONGARCH64)
 #include "platform.h"
 #endif
 
@@ -84,7 +84,7 @@ uint32_t pci_device_id(const device_t *dev) {
     return ((uint32_t)info->vendor << 16) | info->device;
 }
 
-#ifdef CONFIG_X86_64
+#if defined(CONFIG_X86_64) || defined(CONFIG_LOONGARCH64)
 static uintptr_t g_pci_mmio_alloc;
 #endif
 
@@ -149,8 +149,10 @@ static int pci_match(device_t *dev, const driver_t *drv) {
         if ((id->vendor == PCI_ANY_ID || id->vendor == info->vendor) &&
             (id->device == PCI_ANY_ID || id->device == info->device) &&
             (id->subvendor == VENDOR_ANY || id->subvendor == info->subvendor) &&
-            (id->subdevice == DEVICE_ANY || id->subdevice == info->subdevice))
+            (id->subdevice == DEVICE_ANY || id->subdevice == info->subdevice)) {
+            dev->matched_id = id;
             return 1;
+        }
     }
     return 0;
 }
@@ -204,9 +206,13 @@ int pci_enable_and_assign_bars(device_t *dev) {
     if (!info)
         return -1;
 
-#ifdef CONFIG_X86_64
+#if defined(CONFIG_X86_64) || defined(CONFIG_LOONGARCH64)
     if (!g_pci_mmio_alloc)
+#ifdef CONFIG_X86_64
         g_pci_mmio_alloc = PCI_MMIO_BASE - PAGE_OFFSET;
+#else
+        g_pci_mmio_alloc = PCIE_MMIO_BASE;
+#endif
 #endif
 
     /* BAR sizing writes all ones into the BAR.  Disable address decoding
@@ -236,10 +242,19 @@ int pci_enable_and_assign_bars(device_t *dev) {
 
         uint64_t addr = is_io ? (bar_lo & ~0x3U) : pci_bar_address(info, bar, bar_lo);
 
-#ifdef CONFIG_X86_64
+#if defined(CONFIG_X86_64) || defined(CONFIG_LOONGARCH64)
         if (!is_io && addr == 0) {
             uintptr_t aligned = (g_pci_mmio_alloc + (uintptr_t)size - 1U) &
                                 ~((uintptr_t)size - 1U);
+#ifdef CONFIG_LOONGARCH64
+            if (aligned < PCIE_MMIO_BASE ||
+                aligned + (uintptr_t)size > PCIE_MMIO_BASE + PCIE_MMIO_SIZE) {
+                kerr("[PCI] %02x:%02x.%x BAR%d exceeds MMIO window\n",
+                     info->bus, info->dev, info->func, bar);
+                pci_ecam_write(info->bus, info->dev, info->func, 0x04, command);
+                return -1;
+            }
+#endif
             g_pci_mmio_alloc = aligned + (uintptr_t)size;
             pci_ecam_write(info->bus, info->dev, info->func, offset,
                            (uint32_t)(aligned | (bar_lo & 0xFU)));
@@ -427,7 +442,7 @@ void pci_enumerate(uintptr_t ecam_base, int bus_start, int bus_end) {
     g_pci_data.bus_start = bus_start;
     g_pci_data.bus_end   = bus_end;
 
-#ifdef CONFIG_X86_64
+#if defined(CONFIG_X86_64) || defined(CONFIG_LOONGARCH64)
     arch_pci_host_init(ecam_base);
 #endif
 

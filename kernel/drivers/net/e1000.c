@@ -236,6 +236,19 @@ static int e1000_probe(device_t *dev)
     return 0;
 }
 
+static int e1000_remove(device_t *dev)
+{
+    e1000_device_t *nic = dev ? dev->drv_priv : NULL;
+    if (!nic)
+        return 0;
+    e1000_write(nic, E1000_IMC, 0xFFFFFFFFU);
+    e1000_write(nic, E1000_RCTL, 0);
+    e1000_write(nic, E1000_TCTL, 0);
+    dev->drv_priv = NULL;
+    memset(nic, 0, sizeof(*nic));
+    return 0;
+}
+
 static const net_dev_ops_t e1000_ops = {
     .send = e1000_send,
     .recv = e1000_recv,
@@ -254,6 +267,7 @@ static driver_t e1000_driver = {
     .id_table = e1000_ids,
     .bus = &pci_bus,
     .probe = e1000_probe,
+    .remove = e1000_remove,
     .class_ops = &e1000_ops,
     .class_type = DEV_CLASS_NET,
 };
