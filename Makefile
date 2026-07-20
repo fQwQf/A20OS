@@ -655,18 +655,18 @@ check-user-build: $(DEFAULT_USER_CHECK_TARGETS)
 check-user-build-all: check-riscv64-user check-loongarch64-user check-aarch64-user check-x86_64-user check-arm32-user check-riscv32-user check-ppc64le-user
 
 check-build-matrix: check-kernel-build check-user-build
-	@rg -q "BUILD_MATRIX_GATE_CONTRACT" docs/testing-gates.md
+	@rg -q "BUILD_MATRIX_GATE_CONTRACT" docs/testing/testing-gates.md
 	@echo "check-build-matrix: PASS"
 
 check-build-matrix-all: check-kernel-build-all check-user-build-all
-	@rg -q "BUILD_MATRIX_GATE_CONTRACT" docs/testing-gates.md
+	@rg -q "BUILD_MATRIX_GATE_CONTRACT" docs/testing/testing-gates.md
 	@echo "check-build-matrix-all: PASS"
 
 check-arch-boundary:
 	@! rg -n '#if(n?def)?[[:space:]]+(CONFIG_|__)(AARCH64|ARM|RISCV|LOONG|X86|PPC)|CONFIG_ARM32|CONFIG_AARCH64|__aarch64__|__arm__' \
 		kernel --glob '!kernel/arch/**' --glob '!kernel/platform/**' \
 		--glob '!kernel/external/**' --glob '!kernel/include/core/arch.h'
-	@rg -q "ARCH_MMU_RUNTIME_MATRIX_CONTRACT" docs/testing-gates.md
+	@rg -q "ARCH_MMU_RUNTIME_MATRIX_CONTRACT" docs/testing/testing-gates.md
 	@rg -q "smoke-arch-mmu-matrix" Makefile docs/OS-Design.md
 	@for arch in loongarch64 x86_64 ppc64le; do \
 		if $(MAKE) -s ARCH=$$arch NOMMU=1 kernel-only >/dev/null 2>&1; then \
@@ -677,7 +677,7 @@ check-arch-boundary:
 	@echo "check-arch-boundary: PASS"
 
 check-abi-smoke-gate:
-	@rg -q "ABI_SMOKE_GATE_CONTRACT" docs/testing-gates.md
+	@rg -q "ABI_SMOKE_GATE_CONTRACT" docs/testing/testing-gates.md
 	@rg -q "syscall_smoke" Makefile
 	@rg -q "smoke-abi-linux" Makefile
 	@rg -q "native-minimal" Makefile
@@ -686,18 +686,18 @@ check-abi-smoke-gate:
 	@echo "check-abi-smoke-gate: PASS"
 
 check-doc-drift:
-	@rg -q "DOC_DRIFT_KEYWORD_GATE" docs/testing-gates.md
+	@rg -q "DOC_DRIFT_KEYWORD_GATE" docs/testing/testing-gates.md
 	@python3 scripts/gen_linux_syscall_coverage.py
-	@rg -q "stub" kernel/abi/linux/syscall_coverage.md kernel/abi/linux/compat_notes.md docs/testing-gates.md
-	@rg -q "partial" kernel/abi/linux/syscall_coverage.md kernel/abi/linux/compat_notes.md docs/testing-gates.md
-	@rg -q "Future" docs/testing-gates.md kernel/abi/native/sys_core.c
-	@rg -q "not yet" docs/testing-gates.md kernel/abi/native/sys_phase2.c kernel/mm/fault.c
-	@! rg -q "for simplicity" docs kernel --glob '!docs/research/**' --glob '!docs/testing-gates.md' --glob '!kernel/external/**'
+	@rg -q "stub" kernel/abi/linux/syscall_coverage.md kernel/abi/linux/compat_notes.md docs/testing/testing-gates.md
+	@rg -q "partial" kernel/abi/linux/syscall_coverage.md kernel/abi/linux/compat_notes.md docs/testing/testing-gates.md
+	@rg -q "Future" docs/testing/testing-gates.md kernel/abi/native/sys_core.c
+	@rg -q "not yet" docs/testing/testing-gates.md kernel/abi/native/sys_phase2.c kernel/mm/fault.c
+	@! rg -q "for simplicity" docs kernel --glob '!docs/research/**' --glob '!docs/testing/testing-gates.md' --glob '!kernel/external/**'
 	@echo "check-doc-drift: PASS"
 
 check-doc-test-gates: check-concurrency-foundation check-mm-lock-model check-io-progress-model check-vfs-abstraction check-abi-boundary check-driver-core-model check-external-dependency-boundary check-abi-smoke-gate check-doc-drift
-	@rg -q "DOCS_AS_FACT_CONTRACT" docs/testing-gates.md
-	@rg -q "TEST_FIRST_ARCHITECTURE_MATRIX" docs/testing-gates.md
+	@rg -q "DOCS_AS_FACT_CONTRACT" docs/testing/testing-gates.md
+	@rg -q "TEST_FIRST_ARCHITECTURE_MATRIX" docs/testing/testing-gates.md
 	@echo "check-doc-test-gates: PASS"
 
 check-final-definition: check-doc-test-gates
