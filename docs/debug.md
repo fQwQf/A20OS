@@ -105,7 +105,7 @@ make flash-stm32f103-xuanwu
 git submodule update --init --recursive
 ```
 
-## ⚠️ 注意
+##  注意
 
 - `debug-*` 目标默认使用 `BRINGUP=0`；如只需要内核，请指定 `make ARCH=riscv64 BRINGUP=1 debug-riscv64`。
 - 发布构建使用 `-O3`，可能内联或优化变量，导致 GDB 中变量值与源码不一致。

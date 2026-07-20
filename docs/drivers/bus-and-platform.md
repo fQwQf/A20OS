@@ -86,5 +86,5 @@ STM32F103 的 SDIO 是持久块设备，已使用 `DEV_CLASS_BLOCK`。显示、�
 6. 先构建 `kernel-only`，再验证串口日志中的 driver core、总线和设备绑定。
 7. 最后才接用户镜像、网络和 GUI，避免把文件系统/桌面问题误判为平台驱动问题。
 
-> ⚠️ 注意
+> 注意
 > 不要把板的寄存器地址、GIC 编号或引脚号直接写进可复用驱动。不要在 IRQ handler 或持有自旋锁时调用 `udelay/mdelay`。不要给 MMIO 地址无条件加 `PAGE_OFFSET`，也不要把 MMIO BAR 当成普通 RAM 传给 `va_to_pa()`。可复用驱动只消费 `resource_t` 和 `plat_data`；VirtualBox 相关内容见 [VirtualBox](../platforms/virtualbox.md)。

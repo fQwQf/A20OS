@@ -85,8 +85,8 @@ CI 通过后，维护者会进行代码审查。请根据评论修改，并确�
 
 有问题请先查看 [docs/testing/testing-gates.md](testing/testing-gates.md) 和 [docs/build.md](build.md)。若仍未解决，请创建 GitHub Issue，标签选 `question`，并附上相关命令和日志。
 
-## ⚠️ 注意
+##  注意
 
-- 不要直接修改 `docs/testing-gates.md` 或 `docs/external-dependencies.md` 中的契约字符串，除非你的改动确实触及这些契约。
+- 不要直接修改 `docs/testing/testing-gates.md` 或 `docs/project/external-dependencies.md` 中的契约字符串，除非你的改动确实触及这些契约。
 - 不要把 `ALLOW_UNVERIFIED_SMP=1` 作为默认门禁参数，除非 PR 专门处理 SMP。
 - 提交前请执行 `make clean` 再运行一次关键门禁，避免旧产物造成误判。

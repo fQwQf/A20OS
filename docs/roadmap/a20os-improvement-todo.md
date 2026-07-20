@@ -50,39 +50,39 @@
 ## P1：I/O 进展与网络
 
 - [ ] 在块设备和网络设备能够发出完成信号的位置，用事件驱动 wakeup 替换 scheduler/idle 轮询进展。
-  - 证据：`docs/external-dependencies.md` 描述了基于轮询的 lwIP 进展；`kernel/drivers/block/virtio_blk.c` 记录了未来 interrupt wake 路径。
-  - 设计：`docs/drivers/lock-order.md`（驱动锁契约）、`docs/network-lock-contract.md`（deferred bottom-half 规则）；用户决策：deferred bottom-half / workqueue。
+  - 证据：`docs/project/external-dependencies.md` 描述了基于轮询的 lwIP 进展；`kernel/drivers/block/virtio_blk.c` 记录了未来 interrupt wake 路径。
+  - 设计：`docs/drivers/lock-order.md`（驱动锁契约）、`docs/net/network-lock-contract.md`（deferred bottom-half 规则）；用户决策：deferred bottom-half / workqueue。
   - 完成条件：块设备和网络进展在正常运行中不再依赖通用 hot-path 轮询。
 - [ ] 降低 `g_lwip_lock` 竞争，并为所有 socket 路径记录锁安全入口点。
   - 证据：`kernel/net/lwip_stack.c` 用全局锁串行化 lwIP 核心状态；`kernel/include/core/lock.h` 限制 lwIP 锁下的调用。
-  - 设计：`docs/network-lock-contract.md`。
+  - 设计：`docs/net/network-lock-contract.md`。
   - 完成条件：socket send/recv/connect/listen/accept 测试可并发运行，且没有锁顺序告警或饥饿。
 - [ ] 用 board/network 配置管线替换仅适用于 QEMU 的网络地址默认值。
-  - 证据：`docs/external-dependencies.md` 说明 `10.0.2.15`、`10.0.2.2` 和 `10.0.2.3` 只是开发默认值。
-  - 设计：`docs/network-config-design.md`；用户决策：只使用命令行 / 运行时配置，不使用编译期板级默认值。
+  - 证据：`docs/project/external-dependencies.md` 说明 `10.0.2.15`、`10.0.2.2` 和 `10.0.2.3` 只是开发默认值。
+  - 设计：`docs/net/network-config-design.md`；用户决策：只使用命令行 / 运行时配置，不使用编译期板级默认值。
   - 完成条件：真实开发板或非 QEMU 后端无需硬编码 QEMU 假设即可配置 IP、gateway 和 DNS。
 - [ ] 将网络 smoke 覆盖扩展到 wget 成功以外。
-  - 证据：`docs/external-dependencies.md` 说明 TLSe/wget 不能证明存在完整现代 HTTPS 栈。
-  - 设计：`docs/network-config-design.md`；计划新增门禁 `smoke-network-suite`。
+  - 证据：`docs/project/external-dependencies.md` 说明 TLSe/wget 不能证明存在完整现代 HTTPS 栈。
+  - 设计：`docs/net/network-config-design.md`；计划新增门禁 `smoke-network-suite`。
   - 完成条件：DNS、UDP、TCP、ICMP、AF_UNIX、AF_ALG、timeout、partial I/O 和 error-path 测试都有独立门禁。
 
 ## P1：VFS 与文件系统语义
 
 - [ ] 收紧 path resolution、symlink、permission、mount 和文件系统特定的 Linux 边界语义。
   - 证据：`kernel/abi/linux/syscall_coverage.md` 将 path 和 metadata 标记为 partial，并要求清理。
-  - 设计：`docs/vfs-edge-semantics.md`、`docs/fs-consistency-model.md`；用户决策：完整 Linux `openat2` resolve flag 集合。
+  - 设计：`docs/fs/vfs-edge-semantics.md`、`docs/fs/fs-consistency-model.md`；用户决策：完整 Linux `openat2` resolve flag 集合。
   - 完成条件：openat、renameat2、link/symlink、chmod/chown、statx、mount、umount 和 chroot 都有聚焦测试（新增到 `user/cmds/vfs_stress.c`），同时覆盖 openat2、xattr 和文件系统特定边界测试。
 - [x] 将大型 VFS 实现重构为更小的 ownership、path、mount、fd 和 syscall-facing 单元。
   - 证据：`kernel/fs/vfs.c` 是承载 path resolution、open/close、mount、init 和兼容行为的大型中心实现。
   - 完成条件：每个单元都有窄 header 契约和子系统特定测试。
 - [ ] 尽可能从通用 VFS 路径中移除硬编码运行时文件系统初始化。
   - 证据：`kernel/fs/vfs.c` 在 VFS bringup 期间初始化默认虚拟文件和类似环境的内容。
-  - 设计：`docs/fs-consistency-model.md`（ramfs / rootfs 一致性模型）；用户决策：构建期 rootfs overlay / initramfs 风格用户态镜像构造。
+  - 设计：`docs/fs/fs-consistency-model.md`（ramfs / rootfs 一致性模型）；用户决策：构建期 rootfs overlay / initramfs 风格用户态镜像构造。
   - 完成条件：策略文件迁移到 init/userland image 构造，或迁移到声明式启动文件系统 manifest。
 - [ ] 为 FAT32、ext4、ramfs、devfs、procfs、sysfs、pipe 和 anonfd 操作定义清晰的一致性模型。
   - 证据：`kernel/fs/` 包含多个文件系统后端，且 Linux ABI 入口点标记为 partial。
-  - 设计：`docs/fs-consistency-model.md`；每后端 unsupported-op errno 矩阵不属于 P1 范围。
-  - 完成条件：后端能力差异记录在 `docs/fs-consistency-model.md`；P1 不要求专用 smoke 门禁。
+  - 设计：`docs/fs/fs-consistency-model.md`；每后端 unsupported-op errno 矩阵不属于 P1 范围。
+  - 完成条件：后端能力差异记录在 `docs/fs/fs-consistency-model.md`；P1 不要求专用 smoke 门禁。
 
 ## P1：Native ABI 完成度与可维护性
 
@@ -117,13 +117,13 @@
 ## P2：测试门禁与工具
 
 - [ ] 将静态 `rg` 风格架构门禁转换为行为测试，只要该行为能在 QEMU 下执行。
-  - 证据：`docs/testing-gates.md` 定义了可重复门禁，但当前若干检查验证的是文档标记而非运行时行为。
+  - 证据：`docs/testing/testing-gates.md` 定义了可重复门禁，但当前若干检查验证的是文档标记而非运行时行为。
   - 完成条件：每个架构债务 TODO 都有运行时测试、构建矩阵测试，或有正当理由的静态-only 检查。
 - [ ] 在声明更广兼容性前，为每个 Linux ABI 覆盖区域增加 LTP 风格分组 smoke 测试。
   - 证据：`kernel/abi/linux/syscall_coverage.md` 说明每个 syscall 组在升级级别前都需要 smoke 测试。
   - 完成条件：覆盖表生成包含测试目标名称和 last-known status。
 - [ ] 将 Native ABI 测试扩展到最小进程启动和 libc smoke 以外。
-  - 证据：`docs/testing-gates.md` 将 `native-minimal`、`native-test` 和 `user/tests/test_liba20c.c` 列为 Native 覆盖；`user/tests/test_native_handle.c` 现在覆盖 handle dup/transfer，并接入 `make smoke-native-handle`。
+  - 证据：`docs/testing/testing-gates.md` 将 `native-minimal`、`native-test` 和 `user/tests/test_liba20c.c` 列为 Native 覆盖；`user/tests/test_native_handle.c` 现在覆盖 handle dup/transfer，并接入 `make smoke-native-handle`。
   - 完成条件：Native handle、VMO/VMAR、channel、event queue、timer、task、debug 和 rights 测试在类似 CI 的目标中运行。
 - [ ] 增加 memory pressure、fork/exec churn、fd churn、filesystem churn、network churn 和 process reaping 压力测试。
   - 证据：当前 smoke 目标证明基本操作，但不能证明长时间稳定性或竞争行为。
@@ -135,10 +135,10 @@
   - 证据：`kernel/proc/fork.c.orig`、`kernel/proc/fork.c.rej` 和 `kernel/abi/linux/sys_futex.c.orig` 等文件出现在活跃树中。
   - 完成条件：活跃源码目录只包含构建输入、文档或有意跟踪的 fixture。
 - [ ] 除非测试明确是集成测试，否则不要把 vendored code 纳入第一方质量声明和测试。
-  - 证据：`docs/external-dependencies.md` 将 lwIP、musl、sbase、mksh、TLSe 和 wget 的角色与 A20 集成工作区分开。
+  - 证据：`docs/project/external-dependencies.md` 将 lwIP、musl、sbase、mksh、TLSe 和 wget 的角色与 A20 集成工作区分开。
   - 完成条件：TODO 和状态文档一致地把 A20 的工作归功于集成，而不是上游 TCP/IP、libc、shell 或 coreutils 实现。
 - [ ] 增加外部依赖升级 checklist 目标，自动运行相关 smoke 组。
-  - 证据：`docs/external-dependencies.md` 要求修改导入用户态后运行 Linux syscall smoke、shell smoke 和 coreutils smoke。
+  - 证据：`docs/project/external-dependencies.md` 要求修改导入用户态后运行 Linux syscall smoke、shell smoke 和 coreutils smoke。
   - 完成条件：修改 musl、sbase、mksh、lwIP、TLSe 或 wget 时，有记录在案的命令序列和预期 artifact。
 - [ ] 记录哪些归档用户态代码只是历史参考，哪些预计会恢复。
   - 证据：`user/archive/` 包含 A20 syscall bridge、pthread/mutex 代码、测试，以及带 TODO 和 ENOSYS stub 的旧 coreutils。

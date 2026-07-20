@@ -1,6 +1,6 @@
 # VirtualBox ARM64 运行与验收手册
 
-> ❌ 不要这样做：不要只以“出现桌面”或“shell 启动”作为驱动验收证据。必须保留从 `[BUS] pci` 到类消费者 mount、lwIP、framebuffer、input 的连续日志。
+> 不要这样做：不要只以“出现桌面”或“shell 启动”作为驱动验收证据。必须保留从 `[BUS] pci` 到类消费者 mount、lwIP、framebuffer、input 的连续日志。
 
 这份手册说明如何在 VirtualBox ARM64 上制作镜像、配置虚拟机并收集从 ACPI/PCI 到类消费者的完整证据。通用驱动接口和平台规范见 [VirtualBox 驱动栈](virtualbox.md)，驱动开发流程见 [构建、测试与提交](../drivers/testing-and-submission.md)。
 
@@ -67,7 +67,7 @@ $vdi = "C:\Users\super\Downloads\a20os-vbox-aarch64-20260717.vdi"
   $raw $vdi --format VDI
 ```
 
-> ⚠️ 注意：每次生成新镜像后都要用新的输出文件名执行 `convertfromraw`。不要对当前已经挂载到 VM 的 VDI 再次转换，也不要让 VirtualBox 继续保留旧的 medium UUID。
+> 注意：每次生成新镜像后都要用新的输出文件名执行 `convertfromraw`。不要对当前已经挂载到 VM 的 VDI 再次转换，也不要让 VirtualBox 继续保留旧的 medium UUID。
 
 构建还会生成 `a20os-vbox-aarch64.img.sha256` 并在 ESP 中写入 `A20OS.MANIFEST`。如果镜像是当前构建的，串口日志中的 `[INIT] image` 行和 `file-entry` 必须与刚构建的 `/init` 匹配；出现旧构建的 entry 说明 VM 还挂在一个 stale VDI 上。
 

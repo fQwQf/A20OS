@@ -1,11 +1,26 @@
 # 驱动实现符合性与限制
 
+> 不要这样做：不要恢复已清理的双初始化入口；不要扩大本页记录的已知边界却不同时更新说明和文档；不要把“符合”当成“所有平台所有配置都成立”。
+
 本页记录当前源码事实和可依赖的运行边界。审查覆盖 driver core、公共总线、STM32F103、VirtualBox ARM64/x86_64 及其设备驱动。
 
-QEMU x86_64 与 RISC-V64 GUI 的 VirtIO GPU、键盘和鼠标分别由
-`make smoke-qemu-gui-{x86_64,riscv64,aarch64,arm32,loongarch64}` 做行为验证；测试检查非空 scanout，并向
-客户机注入真实按键事件。修改 driver core、IRQ、DMA、PCI/VirtIO transport、
-display、input、framebuffer 或 devfs 聚合路径时，该项是必跑回归测试。
+## 如何阅读矩阵
+
+每行矩阵的格式是：范围、状态、说明。
+
+- **符合**：源码和文档一致，当前可以依赖。
+- **已扩展/基础可用**：已实现，但有明确限制（限制写在说明栏）。
+- **有条件**：只在特定平台或特定序列化假设下工作，SMP/IRQ 化前要先加锁。
+- **固定节点模型**：devfs 当前不是完整 sysfs/uevent，display/input 使用类适配器，其他类不自动生成节点。
+
+## 如何更新矩阵
+
+1. 先在目标平台或 QEMU 或 VirtualBox 上复现实验，记录 commit、构建命令和日志。
+2. 如果是新增行，说明里写清平台、版本、观察到的运行边界和失败行为。
+3. 如果改动了现有项的状态或限制，必须同步更新相关平台文档和 [drivers/testing-and-submission.md](testing-and-submission.md) 中的测试矩阵。
+4. 不要只改状态不改说明。新改动不得扩大已知边界，除非文档里已经解释了原因。
+
+QEMU x86_64 与 RISC-V64 GUI 的 VirtIO GPU、键盘和鼠标分别由 `make smoke-qemu-gui-{x86_64,riscv64,aarch64,arm32,loongarch64}` 做行为验证；测试检查非空 scanout，并向客户机注入真实按键事件。修改 driver core、IRQ、DMA、PCI/VirtIO transport、display、input、framebuffer 或 devfs 聚合路径时，该项是必跑回归测试。门禁入口见 [testing/testing-gates.md](../testing/testing-gates.md)。
 
 ## 核心与公共基础设施
 
@@ -39,9 +54,9 @@ display、input、framebuffer 或 devfs 聚合路径时，该项是必跑回归�
 
 ## VirtualBox 平台
 
-VirtualBox ARM64 源码现位于 `kernel/platform/virtualbox-aarch64/`，通过 UEFI ACPI RSDP/MCFG 枚举 PCI。VirtIO-SCSI、E1000、SVGAv3、xHCI HID 已进入统一类模型。平台 GIC disable 已实现；generic timer trap 和 PCI interrupt routing 仍使数据面主要轮询。
+VirtualBox ARM64 源码位于 `kernel/platform/virtualbox-aarch64/`，通过 UEFI ACPI RSDP/MCFG 枚举 PCI。VirtIO-SCSI、E1000、SVGAv3、xHCI HID 已进入统一类模型。平台 GIC disable 已实现；generic timer trap 和 PCI interrupt routing 仍使数据面主要轮询。运行配置见 [VirtualBox ARM64 运行手册](../platforms/virtualbox-aarch64.md) 与 [VirtualBox x86_64 运行手册](../platforms/virtualbox-x86_64.md)，驱动架构见 [VirtualBox 驱动栈](../platforms/virtualbox.md)。
 
-VirtualBox x86_64 复用 x86_64 平台 PCI、AHCI、VMSVGA、PS/2/E1000/VirtIO 驱动，以 GRUB ISO 启动。运行配置见 [ARM64](virtualbox-aarch64.md) 与 [x86_64](virtualbox-x86_64.md) 手册，驱动架构见 [VirtualBox 驱动栈](virtualbox.md)。
+VirtualBox x86_64 复用 x86_64 平台 PCI、AHCI、VMSVGA、PS/2/E1000/VirtIO 驱动，以 GRUB ISO 启动。
 
 ## 强制边界
 
@@ -55,7 +70,6 @@ VirtualBox x86_64 复用 x86_64 平台 PCI、AHCI、VMSVGA、PS/2/E1000/VirtIO �
 
 新改动不得扩大表中边界。依赖轮询、固定实例数或固定节点时，提交必须写明适用平台、并发假设和失败行为。
 
-已清理的兼容债务：`kernel_main` 不再直调 VirtIO GPU/input 初始化；block mount
-和 network init 不再启动架构私有 VirtIO PCI 扫描。QEMU x86_64 现在只有统一
-PCI bus 拥有 BAR 与 transport，VirtIO-MMIO 通过其 bus device ID 匹配
-virtio-blk。不得恢复这些双初始化入口。
+已清理的兼容债务：`kernel_main` 不再直调 VirtIO GPU/input 初始化；block mount 和 network init 不再启动架构私有 VirtIO PCI 扫描。QEMU x86_64 现在只有统一 PCI bus 拥有 BAR 与 transport，VirtIO-MMIO 通过其 bus device ID 匹配 virtio-blk。不得恢复这些双初始化入口。
+
+> 注意：状态矩阵描述的是当前代码事实，不是未来计划。任何“扩大限制”或“降低状态”的改动都要同步更新平台文档和提交清单。
