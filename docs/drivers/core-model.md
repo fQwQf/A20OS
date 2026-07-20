@@ -1,6 +1,6 @@
 # 核心设备与驱动模型
 
-读完本文后，你会理解 `device_t`、`driver_t`、`bus_type_t` 三个对象如何配合，掌握 probe/remove 的完整回滚流程，并拿到一份可直接编译的 PCI 网络驱动骨架。具体声明以 `kernel/drivers/core/driver_core.h`、`driver_class.h`、`driver_register.h` 为准。
+这份文档说明 `device_t`、`driver_t`、`bus_type_t` 三个对象如何配合，帮助你掌握 probe/remove 的完整回滚流程，并拿到一份可直接编译的 PCI 网络驱动骨架。具体声明以 `kernel/drivers/core/driver_core.h`、`driver_class.h`、`driver_register.h` 为准。
 
 ## 三个核心对象
 
@@ -115,7 +115,7 @@ probe < 0 -> core 清空 drv、drv_priv，状态回到 UNINIT
 5. 释放 DMA、映射和普通内存。
 6. 清空 `dev->drv_priv` 和实例槽。核心随后再次清空绑定字段，因此清理必须幂等。
 
-> ❌ 不要这样做
+> 不要这样做
 > 在枚举函数栈上创建 `device_t` 或 `resource_t`；从 `kernel_main` 手动调用 `probe`；把所有错误返回裸 `-1`；或者在同一平台已经接入总线模型后，又通过 `arch_virtio_*_probe()` 扫描 PCI 并重新分配 BAR。这些做法都会破坏已绑定驱动的 MMIO/notify 地址，导致设备 status 归零、queue 停止。
 
 ## 可编译的 PCI 网络驱动骨架

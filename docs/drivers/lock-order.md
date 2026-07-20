@@ -255,7 +255,7 @@ g_lwip_lock -> virtio-net nonblocking send/recv paths only
    - `PTY` 分配在 `g_pty_alloc_lock` 下执行 `kmalloc`。
 4. **新的设备锁** 必须符合全局顺序（`driver registry/IRQ locks -> device-private locks`），或在使用前向本文档增加局部顺序条目。
 
-> ❌ 不要这样做
+> 不要这样做
 > 在设备锁下调用 `kmalloc`、VFS 或 scheduler；在 spinlock 里轮询硬件直到超时；临时发明一种“先拿设备锁，再拿 proc_lock”的嵌套。这些都会在 `make check-concurrency-foundation` 或 SMP smoke 测试里变成死锁或数据竞争。新增锁顺序前请先跑过 [测试门禁](../testing/testing-gates.md)。
 
 ## 参考

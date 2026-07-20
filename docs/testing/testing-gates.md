@@ -57,8 +57,8 @@
 
 ### 外部依赖边界
 - **How to run**: `make check-external-dependency-boundary`
-- **What it checks**: 检查 `include kernel/external/lwip/sources.mk` 是否在 Makefile 中；`docs/external-dependencies.md` 是否包含 `EXTERNAL_LWIP_SOURCE_MANIFEST`、`EXTERNAL_LWIP_CONFIG_CONTRACT`、`EXTERNAL_USERLAND_UPGRADE_CHECKLIST`、`EXTERNAL_STATIC_LINK_REBUILD_CONTRACT`、`EXTERNAL_TLSE_WGET_LIMITS` 等；确认 `Makefile` 中没有直接定义 `LWIP_SRC`。
-- **When it fails**: 检查 `Makefile` 的 lwIP 包含语句；补充或恢复 `docs/external-dependencies.md` 中的对应契约标题；确认 `kernel/external/lwip/sources.mk` 包含 `LWIP_SRC` 与 `core/timeouts.c`。
+- **What it checks**: 检查 `include kernel/external/lwip/sources.mk` 是否在 Makefile 中；`docs/project/external-dependencies.md` 是否包含 `EXTERNAL_LWIP_SOURCE_MANIFEST`、`EXTERNAL_LWIP_CONFIG_CONTRACT`、`EXTERNAL_USERLAND_UPGRADE_CHECKLIST`、`EXTERNAL_STATIC_LINK_REBUILD_CONTRACT`、`EXTERNAL_TLSE_WGET_LIMITS` 等；确认 `Makefile` 中没有直接定义 `LWIP_SRC`。
+- **When it fails**: 检查 `Makefile` 的 lwIP 包含语句；补充或恢复 `docs/project/external-dependencies.md` 中的对应契约标题；确认 `kernel/external/lwip/sources.mk` 包含 `LWIP_SRC` 与 `core/timeouts.c`。
 
 ### 架构边界
 - **How to run**: `make check-arch-boundary`

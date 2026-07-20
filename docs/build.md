@@ -49,7 +49,7 @@ docker run -it --rm -v $(pwd):/workspace -w /workspace a20os-buildenv bash
 - `NR_CPUS`: 默认 `1`；大于 `1` 需要额外开关。
 - `NOMMU`: `1` 开启 NOMMU 模式。
 
-## ⚠️ 注意
+##  注意
 
 - `BRINGUP=1` 不生成文件系统镜像；`BRINGUP=0` 才会触发用户态和磁盘构建。
 - 默认 `NR_CPUS=1`。`NR_CPUS>1` 会被构建系统拒绝，除非显式设置 `ALLOW_UNVERIFIED_SMP=1`。
