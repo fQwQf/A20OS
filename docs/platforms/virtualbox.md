@@ -1,6 +1,6 @@
 # VirtualBox 驱动栈与运行入口
 
-> ❌ 不要这样做：不要为 VirtualBox 创建“VBox 专用 AHCI/E1000”等重复驱动。优先使用标准 PCI ID 表和通用 class 驱动；同一协议在其他虚拟机或真机上应复用同一驱动。
+> 不要这样做：不要为 VirtualBox 创建“VBox 专用 AHCI/E1000”等重复驱动。优先使用标准 PCI ID 表和通用 class 驱动；同一协议在其他虚拟机或真机上应复用同一驱动。
 
 在 VirtualBox 上运行 A20OS 时，内核通过标准平台发现与通用 PCI 驱动枚举设备。ARM64 与 x86_64 启动路径不同，但 PCI 设备最终进入同一 device/driver/class 模型。
 

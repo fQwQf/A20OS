@@ -283,7 +283,7 @@ fail_priv:
 
 本模板把 IRQ 作为必需资源。若硬件或平台没有可用 IRQ，必须实现 `.poll` 作为明确的数据面进展入口，并保证每次调用工作量有界；不能既没有 IRQ 也没有 poll 却让 probe 成功。轮询命令的完成等待仍要有超时。
 
-⚠️ 注意：probe 中如果先设置 `dev->drv_priv = p` 再启动设备，或者先释放资源再 `goto` 到错误标签，remove 或失败回滚会访问未初始化或已释放的内存。保持“取得资源 → 失败则逆序释放 → 成功最后才发布 ready/drv_priv”的顺序。
+ 注意：probe 中如果先设置 `dev->drv_priv = p` 再启动设备，或者先释放资源再 `goto` 到错误标签，remove 或失败回滚会访问未初始化或已释放的内存。保持“取得资源 → 失败则逆序释放 → 成功最后才发布 ready/drv_priv”的顺序。
 
 ## 10. 实现 remove
 
@@ -395,7 +395,7 @@ make ARCH=<arch> BOARD=<board> ABI=both kernel-only -j4
 | cache、DMA、IRQ、屏障、等待 | [运行时契约](runtime-contracts.md) |
 | 锁可以怎样嵌套 | [锁顺序](lock-order.md) |
 | framebuffer 映射和刷新 | [Display/Framebuffer](display.md) |
-| VirtualBox 的真实发现链和设备 | [VirtualBox 驱动栈](virtualbox.md) |
+| VirtualBox 的真实发现链和设备 | [VirtualBox 驱动栈](../platforms/virtualbox.md) |
 
 ## 16. 评审前的自检
 

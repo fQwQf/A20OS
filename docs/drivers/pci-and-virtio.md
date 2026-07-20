@@ -210,4 +210,4 @@ PCI BAR 的 sizing、分配和 capability 地址解析只属于 `pci_enumerate()
 
 没有 probe 日志时先找 `[BUS] pci ... id=vendor:device`；没有设备说明 ECAM/固件问题。有设备但未绑定，检查 ID 表和 `.driver_init`。BAR setup 失败检查 BAR size/地址窗口。`incomplete capabilities` 是 VirtualBox 控制器模式或 capability 解析问题。feature rejected 是驱动写了设备不接受的位。queue timeout 时同时检查 DMA 地址是否为物理地址、cache sync、descriptor writable 顺序、queue notify offset 和设备 status。
 
-❌ 不要这样做：在 ID 表里只写 `vendor = 0x1af4, device = 0x1000` 这种宽泛 class ID 就指望所有 VirtIO 设备都能匹配。 subsystem 字段必须显式填 ANY，否则匹配语义会错；更不要把不支持的 feature 位写进 `DRIVER_FEATURES` 里协商。
+ 不要这样做：在 ID 表里只写 `vendor = 0x1af4, device = 0x1000` 这种宽泛 class ID 就指望所有 VirtIO 设备都能匹配。 subsystem 字段必须显式填 ANY，否则匹配语义会错；更不要把不支持的 feature 位写进 `DRIVER_FEATURES` 里协商。

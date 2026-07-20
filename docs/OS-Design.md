@@ -241,12 +241,12 @@ RISC-V 64、ARM64、x86_64、LoongArch 64。物理板：VisionFive 2（RISC-V）
 * **构建与运行**：[README.md](../README.md)
 * **当前问题与路线图**：[docs/roadmap/a20os-improvement-todo.md](roadmap/a20os-improvement-todo.md)
 * **源码布局**：
-  * `kernel/abi/` —— 两套 ABI
-  * `kernel/arch/` 和 `kernel/platform/` —— HAL 与板级初始化
-  * `kernel/mm/` —— VMO/VMAR、页缓存、COW、OOM
-  * `kernel/proc/` —— 任务、调度器、信号、Futex、cgroup
-  * `kernel/fs/` —— VFS、FAT32、ext4、ramfs、伪文件系统
-  * `kernel/net/` —— Socket 层、lwIP 集成、DHCP
-  * `kernel/drivers/` —— virtio-blk、virtio-net、UART、PTY、loop
-  * `kernel/ipc/` —— Channel、EventQ
-  * `kernel/core/` —— 锁、时间、panic、progress bottom-half
+  * `kernel/abi/`：两套 ABI
+  * `kernel/arch/` 和 `kernel/platform/`：HAL 与板级初始化
+  * `kernel/mm/`：VMO/VMAR、页缓存、COW、OOM
+  * `kernel/proc/`：任务、调度器、信号、Futex、cgroup
+  * `kernel/fs/`：VFS、FAT32、ext4、ramfs、伪文件系统
+  * `kernel/net/`：Socket 层、lwIP 集成、DHCP
+  * `kernel/drivers/`：virtio-blk、virtio-net、UART、PTY、loop
+  * `kernel/ipc/`：Channel、EventQ
+  * `kernel/core/`：锁、时间、panic、progress bottom-half

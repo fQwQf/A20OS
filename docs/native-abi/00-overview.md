@@ -1,6 +1,6 @@
 # A20 Native ABI 设计
 
-本文档是 A20OS Native ABI 的顶层概述。A20OS 的混合内核动机、双 ABI 与 Linux 兼容层的关系，以及整体架构决策，请阅读 [OS-Design.md](../OS-Design.md)。详细规范见各子文档。
+本文概述 A20OS Native ABI。A20OS 的混合内核动机、双 ABI 与 Linux 兼容层的关系，以及整体架构决策，请阅读 [OS-Design.md](../OS-Design.md)。详细规范见各子文档。
 
 ## 设计定位
 
@@ -24,6 +24,11 @@ Native ABI 不区分 Linux 风格的 fd、pid、tid、timerid、shmid 等编号�
 ```c
 typedef uint32_t a20_handle_t;
 ```
+
+**为什么采用 handle？**
+
+> 我看 Windows NT 搞得不错，内核对象极大丰富，各类资源的调用差异基本消灭，面向对象，安全权能机制也受重视，如果再加上开源，Windows NT 就是我们理想中的操作系统内核。  
+> ——fQwQf
 
 13 种对象类型（详见 [handle.md](03-handle.md)）：
 

@@ -51,4 +51,4 @@ network 由 `lwip_stack.c` 枚举 `DEV_CLASS_NET`，没有网卡字符节点。�
 - remove 后操作返回 `-ENODEV`，不得访问已释放 `drv_priv`。
 - 用户映射必须定义 cache 属性、共享/复制语义、fork 行为和撤销策略。
 
-❌ 不要这样做：从具体硬件驱动里直接创建或修改 devfs 节点。这会让节点生命周期和硬件 remove 脱节， open 的 fd 可能在设备释放后仍然指向已释放 `drv_priv`，造成 use-after-free。
+ 不要这样做：从具体硬件驱动里直接创建或修改 devfs 节点。这会让节点生命周期和硬件 remove 脱节， open 的 fd 可能在设备释放后仍然指向已释放 `drv_priv`，造成 use-after-free。
