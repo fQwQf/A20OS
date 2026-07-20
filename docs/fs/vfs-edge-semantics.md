@@ -238,4 +238,4 @@ P1 保留全局 RAM xattr 表，但收紧 ABI 表面：
 - `smoke-vfs-edge`：openat2 resolve flag、renameat2 flag、statx mask/sync、faccessat2/fchmodat2 flag、xattr namespace、symlink loop limit、mount `..` crossing、chroot。
 - 现有门禁（`smoke-abi-linux`、`check-vfs-abstraction`）必须保持通过。
 
-`smoke-vfs-fs-specific`（每后端 unsupported-op errno 矩阵）不属于 P1 范围；后端能力差异继续记录在 `docs/fs-consistency-model.md`。
+`smoke-vfs-fs-specific`（每后端 unsupported-op errno 矩阵）不属于 P1 范围；后端能力差异继续记录在 `docs/fs/fs-consistency-model.md`。
