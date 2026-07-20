@@ -1,6 +1,6 @@
 # STM32F103 移植与运行手册
 
-> ❌ 不要这样做：不要把板级常量或引脚定义藏进可复用的 `kernel/drivers/stm32f1/` 驱动里。可复用驱动应通过 board config 或 platform data 获取资源；引脚和时钟这些事实属于 `kernel/platform/stm32f103/`。
+> 不要这样做：不要把板级常量或引脚定义藏进可复用的 `kernel/drivers/stm32f1/` 驱动里。可复用驱动应通过 board config 或 platform data 获取资源；引脚和时钟这些事实属于 `kernel/platform/stm32f103/`。
 
 STM32F103 是 ARMv7-M/Cortex-M3、无 MMU 的 bring-up profile。它复用 A20OS 的架构和 board 边界：
 
@@ -212,7 +212,7 @@ QEMU 的 `stm32vldiscovery` 模型有 128 KiB flash 和 8 KiB SRAM，所以该�
 
 用 FAT32 格式化的 TF 卡检查文件系统元数据。原始或非 FAT32 卡仍会被初始化成块设备。
 
-> ⚠️ 注意：不要在装有唯一数据的 TF 卡上做写测试。破坏性块测试先用可丢弃的镜像。
+> 注意：不要在装有有价值数据的 TF 卡上做写测试。
 
 ## 驱动开发提示
 

@@ -146,4 +146,4 @@ SVGAv3 先启动 device command context，再设置模式；flush 提交 `SVGA3_
 - flush 序列必须符合设备 cache/doorbell 协议。
 - 显存映射属性不能与内核已有别名冲突。
 
-⚠️ 注意：不要把整个 PCI BAR 或整段 VRAM 当成 framebuffer 长度返回。`get_fb` 的长度必须只覆盖可见 scanout，否则用户态会映射到未定义或受保护的设备内存。
+ 注意：不要把整个 PCI BAR 或整段 VRAM 当成 framebuffer 长度返回。`get_fb` 的长度必须只覆盖可见 scanout，否则用户态会映射到未定义或受保护的设备内存。
