@@ -37,3 +37,4 @@ __pycache__/
 .env
 /slides.pdf
 /WHU-Beamer.sty
+/user/external/rust/dist/
