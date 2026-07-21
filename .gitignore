@@ -37,3 +37,4 @@ __pycache__/
 .env
 
 
+/user/external/rust/dist/

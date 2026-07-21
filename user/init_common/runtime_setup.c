@@ -281,6 +281,13 @@ static int prepare_glibc_lib_links(void)
 
     if (install_runtime_loader(glibc_dir, GLIBC_LOADER_NAME, GLIBC_LOADER_NAME) != 0)
         return -1;
+    /* rustc and cargo are dynamically linked against these glibc DSOs. */
+    install_runtime_library_from_dirs(glibc_candidates, "libc.so.6");
+    install_runtime_library_from_dirs(glibc_candidates, "libdl.so.2");
+    install_runtime_library_from_dirs(glibc_candidates, "libm.so.6");
+    install_runtime_library_from_dirs(glibc_candidates, "libpthread.so.0");
+    install_runtime_library_from_dirs(glibc_candidates, "librt.so.1");
+    install_runtime_library_from_dirs(glibc_candidates, "libatomic.so.1");
     install_runtime_library_from_dirs(libgcc_candidates, "libgcc_s.so.1");
     done = 1;
     printf("[LIBLINK] glibc loader ready from %s\n", glibc_dir);

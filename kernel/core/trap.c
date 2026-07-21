@@ -161,7 +161,7 @@ void trap_handler(trap_context_t *ctx) {
             printf("SIGSEGV: pid=%d code=%lu sepc=0x%lx stval=0x%lx abi=%d\n",
                   cur ? cur->pid : -1, (unsigned long)code,
                   (unsigned long)sepc, (unsigned long)stval,
-                  cur ? (int)cur->abi_mode : -1);
+                   cur ? (int)cur->abi_mode : -1);
             if (have_user_insn)
                 kerr("  insn@sepc=0x%08x\n", user_insn);
             dump_trap_context(ctx);
