@@ -112,10 +112,10 @@ STM32_BT_CONFIG_HDR = $(BUILD_DIR)/generated/stm32_bluetooth_config.h
 STM32_WIFI_CONFIG_HDR = $(BUILD_DIR)/generated/stm32_wifi_config.h
 FAT32_IMAGE_MB ?= 128
 EXT4_IMAGE_MB ?= 128
-EXTRA_IMAGE_MB ?= 256
+EXTRA_IMAGE_MB ?= 1024
 EXTRA_IMG = $(BUILD_DIR)/extra.img
 EXTRA_STAGING_DIR = $(BUILD_DIR)/extra-staging
-EXTRA_PACKAGES = vim git gcc cc
+EXTRA_PACKAGES ?= vim git gcc rust
 USER_BUILD_ID = $(ARCH):$(NOMMU):$(OPT)
 USER_BUILD_CHECK_DIRS = user/init.c user/cmds user/init_common user/desktop user/external/lvgl \
                         user/external/musl user/external/sbase user/external/mksh-cvs2git \
@@ -1885,7 +1885,7 @@ endif
 # ----------------------------------------------------------------
 
 extra-user-apps:
-	$(MAKE) -f user/extra.mk ARCH=$(ARCH) OPT="$(OPT)"
+	$(MAKE) -f user/extra.mk ARCH=$(ARCH) OPT="$(OPT)" PACKAGES="$(EXTRA_PACKAGES)"
 
 extra-img: extra-user-apps
 	@echo "Building extra packages image..."
@@ -1903,10 +1903,10 @@ extra-img: extra-user-apps
 	for f in user/build/extra/*; do \
 		[ -f "$$f" ] || continue; \
 		name=$$(basename "$$f"); \
-		cp "$$f" "$(EXTRA_STAGING_DIR)/bin/$$name"; \
+		case " $(EXTRA_PACKAGES) " in *" $$name "*) cp "$$f" "$(EXTRA_STAGING_DIR)/bin/$$name" ;; esac; \
 	done
 	@set -e; \
-	if [ -d user/build/extra/obj/$(ARCH)/gcc-install ]; then \
+	if [ -n "$(filter gcc cc,$(EXTRA_PACKAGES))" ] && [ -d user/build/extra/obj/$(ARCH)/gcc-install ]; then \
 		cp -a user/build/extra/obj/$(ARCH)/gcc-install/libexec "$(EXTRA_STAGING_DIR)/libexec"; \
 		cp -a user/build/extra/obj/$(ARCH)/gcc-install/lib "$(EXTRA_STAGING_DIR)/lib"; \
 		for t in user/build/extra/obj/$(ARCH)/gcc-install/bin/*; do \
@@ -1917,34 +1917,23 @@ extra-img: extra-user-apps
 		mv "$(EXTRA_STAGING_DIR)/bin/cc" "$(EXTRA_STAGING_DIR)/bin/cc-real"; \
 		printf '#!/bin/sh\nexec /test/bin/cc-real -fno-lto -fno-use-linker-plugin "$$@"\n' > "$(EXTRA_STAGING_DIR)/bin/cc"; \
 	fi
-	@MCM_LIB=user/external/musl-cross-make/output/riscv64-linux-musl/lib; \
-	if [ -f "$$MCM_LIB/libc.so" ]; then \
-		mkdir -p "$(EXTRA_STAGING_DIR)/lib"; \
-		cp "$$MCM_LIB/libc.so" "$(EXTRA_STAGING_DIR)/lib/libc.so"; \
-		ln -sf libc.so "$(EXTRA_STAGING_DIR)/lib/ld-musl-riscv64.so.1"; \
+	@if [ -n "$(filter rust rustc cargo,$(EXTRA_PACKAGES))" ]; then \
+		RUST=user/build/extra/obj/$(ARCH)/rust; \
+		[ -x "$$RUST/bin/rustc" ] && [ -x "$$RUST/bin/cargo" ] || { echo "Rust installation missing from $$RUST"; exit 1; }; \
+		cp -a "$$RUST" "$(EXTRA_STAGING_DIR)/rust"; \
+		printf '#!/bin/sh\nexec /test/rust/bin/rustc --target riscv64gc-unknown-linux-musl -C linker=/test/rust/lib/rustlib/riscv64gc-unknown-linux-gnu/bin/rust-lld -C relocation-model=static -C link-arg=-L/test/rust/a20-sysroot/lib -C link-arg=-static -C link-arg=/test/rust/a20-sysroot/lib/crt1.o -C link-arg=/test/rust/a20-sysroot/lib/crti.o -C link-arg=/test/rust/a20-sysroot/lib/crtn.o "$$@"\n' > "$(EXTRA_STAGING_DIR)/bin/rustc"; \
+		printf '#!/bin/sh\nexport CARGO_HOME=/test/rust\nexport RUSTC=/test/rust/bin/rustc\nexport CARGO_BUILD_TARGET=riscv64gc-unknown-linux-musl\nexec /test/rust/bin/cargo "$$@"\n' > "$(EXTRA_STAGING_DIR)/bin/cargo"; \
+		printf '[target.riscv64gc-unknown-linux-musl]\nlinker = "/test/rust/lib/rustlib/riscv64gc-unknown-linux-gnu/bin/rust-lld"\nrustflags = ["-C", "relocation-model=static", "-C", "link-arg=-L/test/rust/a20-sysroot/lib", "-C", "link-arg=-static", "-C", "link-arg=/test/rust/a20-sysroot/lib/crt1.o", "-C", "link-arg=/test/rust/a20-sysroot/lib/crti.o", "-C", "link-arg=/test/rust/a20-sysroot/lib/crtn.o"]\n' > "$(EXTRA_STAGING_DIR)/rust/config.toml"; \
+		chmod 0755 "$(EXTRA_STAGING_DIR)/bin/rustc" "$(EXTRA_STAGING_DIR)/bin/cargo"; \
+		GLIBC=/usr/riscv64-linux-gnu/lib; \
+		mkdir -p "$(EXTRA_STAGING_DIR)/glibc/lib"; \
+		for f in ld-linux-riscv64-lp64d.so.1 libc.so.6 libdl.so.2 libm.so.6 libpthread.so.0 librt.so.1 libatomic.so.1 libgcc_s.so.1; do \
+			[ -e "$$GLIBC/$$f" ] && cp -aL "$$GLIBC/$$f" "$(EXTRA_STAGING_DIR)/glibc/lib/$$f"; \
+		done; \
 	fi
-	@MCM_INC=user/external/musl-cross-make/output/riscv64-linux-musl/include; \
-	if [ -d "$$MCM_INC" ]; then \
-		mkdir -p "$(EXTRA_STAGING_DIR)/include"; \
-		cp -a $$MCM_INC/* "$(EXTRA_STAGING_DIR)/include/"; \
-		rm -rf "$(EXTRA_STAGING_DIR)/include/c++"; \
-	fi
-	@MCM_GCC_INC=user/external/musl-cross-make/output/lib/gcc/riscv64-linux-musl/14.2.0/include; \
-	GCC_VER=17.0.0; \
-	if [ -d "$$MCM_GCC_INC" ]; then \
-		mkdir -p "$(EXTRA_STAGING_DIR)/lib/gcc/riscv64-linux-musl/$$GCC_VER/include"; \
-		cp -a $$MCM_GCC_INC/* "$(EXTRA_STAGING_DIR)/lib/gcc/riscv64-linux-musl/$$GCC_VER/include/"; \
-	fi
-	@MCM_GCC_LIB=user/external/musl-cross-make/output/lib/gcc/riscv64-linux-musl/14.2.0; \
-	GCC_VER=17.0.0; \
-	for f in crtbegin.o crtbeginS.o crtbeginT.o crtend.o crtendS.o; do \
-		[ -f "$$MCM_GCC_LIB/$$f" ] && cp "$$MCM_GCC_LIB/$$f" "$(EXTRA_STAGING_DIR)/lib/gcc/riscv64-linux-musl/$$GCC_VER/$$f"; \
-	done
-	@GCC_SPECS_DIR="$(EXTRA_STAGING_DIR)/lib/gcc/riscv64-linux-musl/17.0.0"; \
-	printf '*cc1_options:+ -fno-lto\n' > "$$GCC_SPECS_DIR/specs"
 	@VIM_RT="$(EXTRA_STAGING_DIR)/share/vim/vim92"; \
 	VIM_SRC=user/external/vim/runtime; \
-	mkdir -p "$$VIM_RT"; \
+	if [ -n "$(filter vim,$(EXTRA_PACKAGES))" ]; then mkdir -p "$$VIM_RT"; else exit 0; fi; \
 	for f in defaults.vim filetype.vim ftoff.vim ftplugin.vim ftplugof.vim; do \
 		[ -f "$$VIM_SRC/$$f" ] && cp "$$VIM_SRC/$$f" "$$VIM_RT/$$f"; \
 	done; \

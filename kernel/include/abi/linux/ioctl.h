@@ -8,6 +8,11 @@
 #define TIOCGPGRP     0x540F
 #define TIOCSPGRP     0x5410
 #define TIOCGWINSZ    0x5413
+#define TIOCSWINSZ    0x5414
+#define TIOCSCTTY     0x540E
+#define TIOCGPTN      0x80045430
+#define TIOCSPTLCK    0x40045431
+#define FIONBIO       0x5421
 #define FIONREAD      0x541B
 
 #endif /* _ABI_LINUX_IOCTL_H */
