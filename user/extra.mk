@@ -1,4 +1,4 @@
-# extra.mk — Build vim / git / gcc as static binaries for A20OS "extra" disk
+# extra.mk — Build selected packages for the A20OS "extra" disk
 #
 # Invoked from the top-level Makefile as:
 #   $(MAKE) -f user/extra.mk ARCH=riscv64
@@ -7,6 +7,7 @@
 
 ARCH ?= riscv64
 OPT ?= -O2
+PACKAGES ?= vim git gcc rust
 
 .DEFAULT_GOAL := all
 SUPPORTED_ARCHES := riscv64 loongarch64 aarch64
@@ -37,6 +38,9 @@ TERMCAP_LIB  := $(USER_DIR)/build/extra/obj/$(ARCH)/libtermcap.a
 ZLIB_SRC     := $(USER_DIR)/external/zlib
 ZLIB_BUILD   := $(USER_DIR)/build/extra/obj/$(ARCH)/zlib
 ZLIB_LIB     := $(ZLIB_BUILD)/libz.a
+RUST_INSTALL := $(USER_DIR)/build/extra/obj/$(ARCH)/rust
+RUST_STAMP   := $(STAMP_DIR)/.rust-built
+RUST_SYSROOT := $(RUST_INSTALL)/a20-sysroot
 
 # ----------------------------------------------------------------
 # Toolchain (mirrors user/Makefile)
@@ -52,7 +56,7 @@ LD      := $(CROSS_COMPILE)ld
 AR      := $(CROSS_COMPILE)ar
 RANLIB  := $(CROSS_COMPILE)ranlib
 
-ARCH_CFLAGS_riscv64     := -mabi=lp64 -march=rv64g -mcmodel=medany
+ARCH_CFLAGS_riscv64     := -mabi=lp64d -march=rv64g -mcmodel=medany
 ARCH_CFLAGS_loongarch64 := -mabi=lp64d -march=loongarch64 -mcmodel=normal -fno-pic
 ARCH_CFLAGS_aarch64     := -march=armv8-a -fno-pic -fno-tree-vectorize
 ARCH_CFLAGS := $(ARCH_CFLAGS_$(ARCH))
@@ -65,13 +69,7 @@ CFLAGS  := -Wall -Wextra $(OPT) -ffreestanding -nostdinc $(MUSL_INC) \
            -static -D_GNU_SOURCE $(ARCH_CFLAGS)
 LDFLAGS := -static -nostdlib $(ARCH_LDFLAGS)
 
-LIBGCC_DEFAULT := $(shell $(CC) $(CFLAGS) -print-libgcc-file-name 2>/dev/null)
-ifeq ($(ARCH),riscv64)
-LIBGCC_LP64 := $(dir $(LIBGCC_DEFAULT))rv64i/lp64/libgcc.a
-LIBGCC := $(if $(wildcard $(LIBGCC_LP64)),$(LIBGCC_LP64),$(LIBGCC_DEFAULT))
-else
-LIBGCC := $(LIBGCC_DEFAULT)
-endif
+LIBGCC := $(shell $(CC) $(CFLAGS) -print-libgcc-file-name 2>/dev/null)
 
 CRT_START := $(MUSL_CRT)/crt1.o $(MUSL_CRT)/crti.o
 CRT_END   := $(MUSL_CRT)/crtn.o
@@ -117,6 +115,18 @@ $(ZLIB_LIB): musl_check
 VIM_AVAILABLE := $(if $(wildcard $(VIM_SRC)/main.c),1)
 GIT_AVAILABLE := $(if $(wildcard $(GIT_SRC)/Makefile),1)
 GCC_AVAILABLE := $(if $(wildcard $(GCC_SRC)/configure),1)
+
+VALID_PACKAGES := vim git gcc cc rust rustc cargo
+UNKNOWN_PACKAGES := $(filter-out $(VALID_PACKAGES),$(PACKAGES))
+ifneq ($(strip $(UNKNOWN_PACKAGES)),)
+$(error Unknown extra package(s): $(UNKNOWN_PACKAGES); expected: $(VALID_PACKAGES))
+endif
+
+REQUESTED_TARGETS := $(sort \
+  $(if $(filter vim,$(PACKAGES)),vim) \
+  $(if $(filter git,$(PACKAGES)),git) \
+  $(if $(filter gcc cc,$(PACKAGES)),gcc) \
+  $(if $(filter rust rustc cargo,$(PACKAGES)),rust))
 
 # ================================================================
 # vim
@@ -279,11 +289,32 @@ else
 endif
 
 # ================================================================
+# Rust (official RISC-V distribution)
+# ================================================================
+$(RUST_STAMP): $(EXTRA_DIR)/build-rust.sh
+ifeq ($(ARCH),riscv64)
+	@mkdir -p $(STAMP_DIR)
+	@$(MAKE) --no-print-directory -f $(USER_DIR)/extra.mk ARCH=$(ARCH) musl_check
+	$(EXTRA_DIR)/build-rust.sh $(RUST_INSTALL)
+	@mkdir -p $(RUST_SYSROOT)/lib
+	cp $(MUSL_CRT)/crt1.o $(MUSL_CRT)/crti.o $(MUSL_CRT)/crtn.o $(MUSL_CRT)/libc.a $(RUST_SYSROOT)/lib/
+	cp $(LIBGCC) $(RUST_SYSROOT)/lib/libgcc_s.a
+	@printf 'GROUP ( libc.a )\n' > $(RUST_SYSROOT)/lib/libc.so
+	@printf 'GROUP ( libgcc_s.a )\n' > $(RUST_SYSROOT)/lib/libgcc_s.so
+	@touch $@
+else
+	@echo "[EXTRA] rust is currently supported only on riscv64"
+	@false
+endif
+
+rust: $(RUST_STAMP)
+rustc: rust
+cargo: rust
+
+# ================================================================
 # Top-level targets
 # ================================================================
-all: $(if $(VIM_AVAILABLE),$(BUILD_DIR)/vim) \
-     $(if $(GIT_AVAILABLE),$(BUILD_DIR)/git) \
-     $(if $(GCC_AVAILABLE),$(BUILD_DIR)/gcc $(BUILD_DIR)/cc)
+all: $(REQUESTED_TARGETS)
 
 vim: $(if $(VIM_AVAILABLE),$(VIM_BIN))
 git: $(if $(GIT_AVAILABLE),$(GIT_BIN))
@@ -292,4 +323,4 @@ gcc: $(if $(GCC_AVAILABLE),$(GCC_BIN) $(CC_BIN))
 clean:
 	rm -rf $(USER_DIR)/build/extra
 
-.PHONY: all vim git gcc clean musl_check
+.PHONY: all vim git gcc rust rustc cargo clean musl_check

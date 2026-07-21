@@ -5,7 +5,14 @@
 #include "sys/usercopy.h"
 
 __attribute__((weak)) int64_t sys_set_thread_area(void *ptr) {
-    return -1; // ENOSYS or implement proper thread area logic
+    task_t *t = proc_current();
+    if (!t || !t->trap_ctx)
+        return -ESRCH;
+    /* RISC-V exposes the user TLS pointer through x4 (tp).  musl uses this
+     * syscall during startup on configurations where the generic syscall
+     * table still contains set_thread_area. */
+    TRAP_CTX_TP(t->trap_ctx) = (uint64_t)(uintptr_t)ptr;
+    return 0;
 }
 #define CLD_EXITED     1
 #define CLD_KILLED     2
@@ -478,7 +485,7 @@ int64_t sys_clone3(void *cl_args, size_t size) {
     if (stack && args.stack_size)
         stack += args.stack_size;
     int pid = proc_clone(args.flags, stack, (int *)args.parent_tid, args.tls,
-                         (int *)args.child_tid, (int)args.exit_signal);
+                          (int *)args.child_tid, (int)args.exit_signal);
     if (pid < 0 || !(args.flags & LINUX_CLONE_PIDFD))
         return pid;
 

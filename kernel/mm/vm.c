@@ -495,6 +495,17 @@ static void free_vma_pages(mm_struct_t *mm, vm_area_t *vma)
             continue;
         }
 
+        if (pte && (*pte & PTE_V) && shared_file && vma->file_vnode &&
+            (*pte & PTE_D)) {
+            uint64_t idx = vma->file_offset + (va - vma->start);
+            idx /= PAGE_SIZE;
+            page_cache_page_t *pcp = page_cache_get(vma->file_vnode, idx, 0);
+            if (pcp) {
+                page_cache_mark_dirty(pcp);
+                page_cache_put(pcp);
+            }
+        }
+
         paddr_t pa = 0;
         base = 0;
         size = 0;
@@ -1313,6 +1324,15 @@ int mm_munmap(mm_struct_t *mm, vaddr_t addr, size_t len) {
                 )) {
                 va += PAGE_SIZE;
                 continue;
+            }
+            if (shared_file_vma && vma->file_vnode && (*pte & PTE_D)) {
+                uint64_t idx = vma->file_offset + (va - vma->start);
+                idx /= PAGE_SIZE;
+                page_cache_page_t *pcp = page_cache_get(vma->file_vnode, idx, 0);
+                if (pcp) {
+                    page_cache_mark_dirty(pcp);
+                    page_cache_put(pcp);
+                }
             }
             if (level > 0 && (base < clip_start || base + size > clip_end)) {
                 int dr = mm_demote_huge_page(mm, va);

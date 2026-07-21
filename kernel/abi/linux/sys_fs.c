@@ -15,6 +15,13 @@ static uint64_t linux_poll_wait_quantum(void)
     return ticks ? ticks : 1;
 }
 
+typedef struct {
+    unsigned short ws_row;
+    unsigned short ws_col;
+    unsigned short ws_xpixel;
+    unsigned short ws_ypixel;
+} linux_winsize_t;
+
 static void linux_poll_sleep_until(uint64_t deadline, int has_deadline,
                                    int yield_only)
 {
@@ -506,6 +513,24 @@ int64_t sys_ioctl(int fd, unsigned long req, void *arg) {
         uart_set_foreground_pgid(pgid);
         return 0;
     }
+    if (req == TIOCGWINSZ) {
+        int r = vfs_ioctl((int)gfd, req, arg);
+        if (r != -ENOTTY)
+            return r;
+
+        /* Child tools such as rust-lld inherit pipes, not the tty itself. */
+        linux_winsize_t ws = { .ws_row = 24, .ws_col = 80 };
+        return copy_to_user(arg, &ws, sizeof(ws)) < 0 ? -EFAULT : 0;
+    }
+    if (req == TIOCGPTN) {
+        int pty_number = 0;
+        return copy_to_user(arg, &pty_number, sizeof(pty_number)) < 0 ?
+            -EFAULT : 0;
+    }
+    if (req == TIOCSPTLCK || req == TIOCSCTTY)
+        return 0;
+    if (req == FIONBIO)
+        return 0;
     if (req == FIONREAD) {
         vfile_t *vf = vfs_get_file_ref((int)gfd);
         if (!vf)

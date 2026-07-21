@@ -1088,7 +1088,9 @@ static int ext4_vn_rename(vnode_t *old_dir, const char *old_name,
         np->file_size = ndsz;
     }
 
-    r = ext4_dir_remove(op->sb, &odi, op->file_size, old_name);
+    if (ext4_read_inode(op->sb, op->inode_num, &odi) < 0)
+        return -EIO;
+    r = ext4_dir_remove(op->sb, &odi, odi.i_size_lo, old_name);
     if (r < 0) {
         /* Attempt rollback: remove the new entry */
         ext4_dir_remove(np->sb, &ndi, ndsz, new_name);
@@ -1255,6 +1257,8 @@ static int ext4_fread(vfile_t *vf, char *buf, size_t count) {
     if (fc->is_dir) return -EISDIR;
     if (count == 0) return 0;
 
+    if (vf->vnode && vf->vnode->size != fc->file_size)
+        ext4_fctx_inode_dirty(fc);
     ext4_inode_t *inode = ext4_fctx_inode(fc);
     if (!inode) return -EIO;
     ext4_fctx_set_size(vf, fc, inode->i_size_lo);
@@ -1293,6 +1297,8 @@ static int ext4_fwrite(vfile_t *vf, const char *buf, size_t count) {
     if (fc->is_dir) return -EISDIR;
     if (count == 0) return 0;
 
+    if (vf->vnode && vf->vnode->size != fc->file_size)
+        ext4_fctx_inode_dirty(fc);
     ext4_inode_t *inode = ext4_fctx_inode(fc);
     if (!inode) return -EIO;
     ext4_fctx_set_size(vf, fc, inode->i_size_lo);
@@ -1313,6 +1319,10 @@ static int ext4_fwrite(vfile_t *vf, const char *buf, size_t count) {
             if (!nb) break;
             int gr = ext4_block_grow(fc->sb, inode, lblk, nb);
             if (gr < 0) { ext4_free_block(fc->sb, nb); break; }
+            if (ext4_write_inode(fc->sb, fc->inode_num, inode) < 0) {
+                ext4_free_block(fc->sb, nb);
+                break;
+            }
             phys = nb;
             fc->ext_valid = 0;
         }
