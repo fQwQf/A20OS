@@ -4,7 +4,11 @@ NPROC ?= $(or $(shell getconf _NPROCESSORS_ONLN 2>/dev/null),$(shell sysctl -n h
 NOMMU ?= 0
 
 .DEFAULT_GOAL := all
-.NOTPARALLEL:
+
+# This makefile only recurses into musl.  Keep the parent's jobserver flags,
+# but do not leak command-line overrides such as ARCH and BUILD_DIR into musl.
+override MAKEOVERRIDES =
+MUSL_MAKE_JOBS := $(if $(filter -j%,$(MAKEFLAGS)),,-j$(NPROC))
 
 SUPPORTED_ARCHES := riscv64 loongarch64 aarch64 x86_64 arm32 riscv32 ppc64le
 ifeq ($(filter $(ARCH),$(SUPPORTED_ARCHES)),)
@@ -556,6 +560,12 @@ build_dir: $(ARCH_STAMP)
 
 musl_prepare:
 	@set -e; \
+	lock_file="$(BUILD_DIR).musl.lock"; \
+	if command -v flock >/dev/null 2>&1; then \
+		mkdir -p "$(dir $(BUILD_DIR))"; \
+		exec 9>"$$lock_file"; \
+		flock 9; \
+	fi; \
 	missing=0; \
 	stale=0; \
 	for f in $(MUSL_CHECK_FILES); do \
@@ -574,15 +584,15 @@ musl_prepare:
 		echo "[MUSL] build-$(MUSL_VARIANT) stale or missing, rebuilding..."; \
 		rm -rf "$(MUSL_BUILD)"; \
 		mkdir -p "$(MUSL_BUILD)"; \
-		cd "$(MUSL_BUILD)" && env -u ARCH -u MAKEFLAGS sh ../configure \
+		(cd "$(MUSL_BUILD)" && env -u ARCH -u MAKEFLAGS sh ../configure \
 			--target=$(MUSL_TARGET) \
 			--prefix=/opt/musl-$(ARCH) \
 			--disable-shared \
 			--disable-wrapper \
 			CC=$(CC) CROSS_COMPILE=$(CROSS_COMPILE) \
 			CFLAGS='$(MUSL_CONFIG_CFLAGS)' \
-			LDFLAGS='$(MUSL_CONFIG_LDFLAGS)'; \
-		env -u ARCH -u MAKEFLAGS $(MAKE) -C "$(MUSL_BUILD)" -j$(NPROC); \
+			LDFLAGS='$(MUSL_CONFIG_LDFLAGS)'); \
+		env -u ARCH $(MAKE) -C "$(MUSL_BUILD)" $(MUSL_MAKE_JOBS); \
 		mkdir -p "$(BUILD_DIR)"; \
 		printf '%s\n' '$(MUSL_BUILD_ID)' > "$(MUSL_BUILD_STAMP).tmp"; \
 		mv "$(MUSL_BUILD_STAMP).tmp" "$(MUSL_BUILD_STAMP)"; \
