@@ -177,6 +177,7 @@ else
 	    LDFLAGS="$(LDFLAGS) -L$(dir $(TERMCAP_LIB))" \
 	    --disable-gui \
 	    --without-x \
+	    --without-wayland \
 	    --disable-nls \
 	    --disable-netbeans \
 	    --disable-channel \
@@ -187,7 +188,7 @@ else
 	    --disable-xsmp \
 	    --disable-xsmp-interact \
 	    --with-tlib=termcap \
-	    --with-features=small \
+	    --with-features=normal \
 	    --with-compiledby=A20OS \
 	    --prefix=/usr \
 	    vim_cv_toupper_broken=no \

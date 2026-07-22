@@ -38,3 +38,4 @@ __pycache__/
 /slides.pdf
 /WHU-Beamer.sty
 /user/external/rust/dist/
+/user/external/riscv64-glibc-sysroot/
