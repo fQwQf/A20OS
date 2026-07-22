@@ -713,7 +713,7 @@ check-final-definition: check-doc-test-gates
 	@rg -q "LINUX_ABI_EXPLICIT_STUB_CONTRACT" kernel/abi/linux/syscall_table.def
 	@rg -q "NATIVE_DEBUG_LIMITED_CONTRACT" kernel/abi/native/sys_phase2.c
 	@rg -q "DRIVER_CORE_CONCURRENCY_MODEL" kernel/drivers/core/driver_core.c
-	@rg -q "EXTERNAL_USERLAND_UPGRADE_CHECKLIST" docs/external-dependencies.md
+	@rg -q "EXTERNAL_USERLAND_UPGRADE_CHECKLIST" docs/project/external-dependencies.md
 	@echo "check-final-definition: PASS (SMP smoke tracked separately by TODO section 10)"
 
 check-riscv64-user:
@@ -854,22 +854,22 @@ check-driver-core-model:
 
 check-external-dependency-boundary:
 	@rg -q "include kernel/external/lwip/sources.mk" Makefile
-	@rg -q "EXTERNAL_LWIP_SOURCE_MANIFEST" docs/external-dependencies.md
+	@rg -q "EXTERNAL_LWIP_SOURCE_MANIFEST" docs/project/external-dependencies.md
 	@rg -q "LWIP_SRC" kernel/external/lwip/sources.mk
 	@rg -q "core/timeouts.c" kernel/external/lwip/sources.mk
-	@rg -q "EXTERNAL_LWIP_CONFIG_CONTRACT" docs/external-dependencies.md
-	@rg -q "NO_SYS=1" docs/external-dependencies.md
-	@rg -q "g_lwip_lock" docs/external-dependencies.md kernel/net/lwip_stack.c
-	@rg -q "a20_lwip_poll\(\)" docs/external-dependencies.md
-	@rg -q "kernel_progress_poll\(\)" docs/external-dependencies.md
-	@rg -q "EXTERNAL_QEMU_NET_DEFAULTS" docs/external-dependencies.md
-	@rg -q "10\.0\.2\.15" docs/external-dependencies.md kernel/net/lwip_stack.c
-	@rg -q "EXTERNAL_USERLAND_UPGRADE_CHECKLIST" docs/external-dependencies.md
-	@rg -q "syscall smoke, shell smoke, and coreutils smoke" docs/external-dependencies.md
-	@rg -q "EXTERNAL_STATIC_LINK_REBUILD_CONTRACT" docs/external-dependencies.md
-	@rg -q "user/build/<arch>\\[-nommu\\]/\\.build-id" docs/external-dependencies.md
-	@rg -q "EXTERNAL_TLSE_WGET_LIMITS" docs/external-dependencies.md
-	@rg -q "TLS 1\.3" docs/external-dependencies.md
+	@rg -q "EXTERNAL_LWIP_CONFIG_CONTRACT" docs/project/external-dependencies.md
+	@rg -q "NO_SYS=1" docs/project/external-dependencies.md
+	@rg -q "g_lwip_lock" docs/project/external-dependencies.md kernel/net/lwip_stack.c
+	@rg -q "a20_lwip_poll\(\)" docs/project/external-dependencies.md
+	@rg -q "kernel_progress_poll\(\)" docs/project/external-dependencies.md
+	@rg -q "EXTERNAL_QEMU_NET_DEFAULTS" docs/project/external-dependencies.md
+	@rg -q "10\.0\.2\.15" docs/project/external-dependencies.md kernel/net/lwip_stack.c
+	@rg -q "EXTERNAL_USERLAND_UPGRADE_CHECKLIST" docs/project/external-dependencies.md
+	@rg -q "syscall smoke, shell smoke, and coreutils smoke" docs/project/external-dependencies.md
+	@rg -q "EXTERNAL_STATIC_LINK_REBUILD_CONTRACT" docs/project/external-dependencies.md
+	@rg -q "user/build/<arch>\\[-nommu\\]/\\.build-id" docs/project/external-dependencies.md
+	@rg -q "EXTERNAL_TLSE_WGET_LIMITS" docs/project/external-dependencies.md
+	@rg -q "TLS 1\.3" docs/project/external-dependencies.md
 	@! rg -n "^LWIP_SRC[[:space:]]*=" Makefile
 	@echo "check-external-dependency-boundary: PASS"
 
