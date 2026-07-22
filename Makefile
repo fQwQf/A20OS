@@ -116,6 +116,13 @@ EXTRA_IMAGE_MB ?= 1024
 EXTRA_IMG = $(BUILD_DIR)/extra.img
 EXTRA_STAGING_DIR = $(BUILD_DIR)/extra-staging
 EXTRA_PACKAGES ?= vim git gcc rust
+RISCV_GNU_CC ?= riscv64-linux-gnu-gcc
+RISCV_GLIBC_SYSROOT ?= $(shell $(RISCV_GNU_CC) -print-sysroot 2>/dev/null)
+RISCV_GLIBC_LIB_CANDIDATES := $(RISCV_GLIBC_SYSROOT)/lib \
+                              $(RISCV_GLIBC_SYSROOT)/lib64 \
+                              /usr/riscv64-linux-gnu/lib
+RISCV_GLIBC_LIB_DIR ?= $(patsubst %/ld-linux-riscv64-lp64d.so.1,%,$(firstword \
+                         $(wildcard $(addsuffix /ld-linux-riscv64-lp64d.so.1,$(RISCV_GLIBC_LIB_CANDIDATES)))))
 USER_BUILD_ID = $(ARCH):$(NOMMU):$(OPT)
 USER_BUILD_CHECK_DIRS = user/init.c user/cmds user/init_common user/desktop user/external/lvgl \
                         user/external/musl user/external/sbase user/external/mksh-cvs2git \
@@ -1923,15 +1930,23 @@ extra-img: extra-user-apps
 	@if [ "$(ARCH)" = riscv64 ] && [ -n "$(filter rust rustc cargo,$(EXTRA_PACKAGES))" ]; then \
 		RUST=user/build/extra/$(ARCH)/obj/rust; \
 		[ -x "$$RUST/bin/rustc" ] && [ -x "$$RUST/bin/cargo" ] || { echo "Rust installation missing from $$RUST"; exit 1; }; \
+		GLIBC="$(RISCV_GLIBC_LIB_DIR)"; \
+		REQUIRED_GLIBC="ld-linux-riscv64-lp64d.so.1 libc.so.6 libdl.so.2 libm.so.6 libpthread.so.0 librt.so.1 libatomic.so.1 libgcc_s.so.1"; \
+		MISSING_GLIBC=""; \
+		for f in $$REQUIRED_GLIBC; do [ -n "$$GLIBC" ] && [ -f "$$GLIBC/$$f" ] || MISSING_GLIBC="$$MISSING_GLIBC $$f"; done; \
+		[ -z "$$MISSING_GLIBC" ] || { \
+			echo "RISC-V glibc runtime incomplete in '$$GLIBC'; missing:$$MISSING_GLIBC"; \
+			echo "Install/provide the cross glibc runtime or set RISCV_GLIBC_LIB_DIR to a directory containing all required libraries"; \
+			exit 1; \
+		}; \
 		cp -a "$$RUST" "$(EXTRA_STAGING_DIR)/rust"; \
 		printf '#!/bin/sh\nexec /test/rust/bin/rustc --target riscv64gc-unknown-linux-musl -C linker=/test/rust/lib/rustlib/riscv64gc-unknown-linux-gnu/bin/rust-lld -C relocation-model=static -C link-arg=-L/test/rust/a20-sysroot/lib -C link-arg=-static -C link-arg=/test/rust/a20-sysroot/lib/crt1.o -C link-arg=/test/rust/a20-sysroot/lib/crti.o -C link-arg=/test/rust/a20-sysroot/lib/crtn.o "$$@"\n' > "$(EXTRA_STAGING_DIR)/bin/rustc"; \
 		printf '#!/bin/sh\nexport CARGO_HOME=/test/rust\nexport RUSTC=/test/rust/bin/rustc\nexport CARGO_BUILD_TARGET=riscv64gc-unknown-linux-musl\nexec /test/rust/bin/cargo "$$@"\n' > "$(EXTRA_STAGING_DIR)/bin/cargo"; \
 		printf '[target.riscv64gc-unknown-linux-musl]\nlinker = "/test/rust/lib/rustlib/riscv64gc-unknown-linux-gnu/bin/rust-lld"\nrustflags = ["-C", "relocation-model=static", "-C", "link-arg=-L/test/rust/a20-sysroot/lib", "-C", "link-arg=-static", "-C", "link-arg=/test/rust/a20-sysroot/lib/crt1.o", "-C", "link-arg=/test/rust/a20-sysroot/lib/crti.o", "-C", "link-arg=/test/rust/a20-sysroot/lib/crtn.o"]\n' > "$(EXTRA_STAGING_DIR)/rust/config.toml"; \
 		chmod 0755 "$(EXTRA_STAGING_DIR)/bin/rustc" "$(EXTRA_STAGING_DIR)/bin/cargo"; \
-		GLIBC=/usr/riscv64-linux-gnu/lib; \
 		mkdir -p "$(EXTRA_STAGING_DIR)/glibc/lib"; \
-		for f in ld-linux-riscv64-lp64d.so.1 libc.so.6 libdl.so.2 libm.so.6 libpthread.so.0 librt.so.1 libatomic.so.1 libgcc_s.so.1; do \
-			[ -e "$$GLIBC/$$f" ] && cp -aL "$$GLIBC/$$f" "$(EXTRA_STAGING_DIR)/glibc/lib/$$f"; \
+		for f in $$REQUIRED_GLIBC; do \
+			cp -aL "$$GLIBC/$$f" "$(EXTRA_STAGING_DIR)/glibc/lib/$$f"; \
 		done; \
 	fi
 	@VIM_RT="$(EXTRA_STAGING_DIR)/share/vim/vim92"; \
