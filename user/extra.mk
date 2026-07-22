@@ -222,7 +222,7 @@ else
 	@echo "[EXTRA] Building vim..."
 	$(MAKE) -C $(VIM_WORK_SRC) \
 	  VIMRCLOC=$(VIM_BUILD) \
-	  VIMRUNTIMEDIR=$(VIM_BUILD)/runtime \
+	  VIMRUNTIMEDIR=/test/share/vim/vim92 \
 	  DESTDIR=$(VIM_BUILD)/install \
 	  srcdir=$(VIM_WORK_SRC) \
 	  CC=$(CC) \
