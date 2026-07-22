@@ -510,6 +510,7 @@ FF_CFLAGS := $(filter-out -Wconversion,$(CFLAGS)) \
              -D_GNU_SOURCE -D_XOPEN_SOURCE -D_ATFILE_SOURCE -D__linux__ \
              -D__STDC_WANT_LIB_EXT1__ -D_FILE_OFFSET_BITS=64 -D_TIME_BITS=64 \
              -DFF_DISABLE_DLOPEN=1 \
+             -DFF_HAVE_NO_GL=1 \
              -DFASTFETCH_TARGET_BINARY_NAME=fastfetch \
              -DFF_PACKAGES_DISABLE_LIST=FF_PACKAGES_FLAG_NONE \
              -Wno-unused-parameter -Wno-sign-compare -Wno-unused-function \
