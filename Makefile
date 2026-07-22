@@ -123,6 +123,9 @@ RISCV_GLIBC_LIB_CANDIDATES := $(RISCV_GLIBC_SYSROOT)/lib \
                               /usr/riscv64-linux-gnu/lib
 RISCV_GLIBC_LIB_DIR ?= $(patsubst %/ld-linux-riscv64-lp64d.so.1,%,$(firstword \
                          $(wildcard $(addsuffix /ld-linux-riscv64-lp64d.so.1,$(RISCV_GLIBC_LIB_CANDIDATES)))))
+RISCV_GLIBC_LOCAL_ROOT ?= user/external/riscv64-glibc-sysroot
+RISCV_GLIBC_LOCAL_LIB_DIR = $(RISCV_GLIBC_LOCAL_ROOT)/lib
+FEDORA_RISCV_RELEASE ?=
 USER_BUILD_ID = $(ARCH):$(NOMMU):$(OPT)
 USER_BUILD_CHECK_DIRS = user/init.c user/cmds user/init_common user/desktop user/external/lvgl \
                         user/external/musl user/external/sbase user/external/mksh-cvs2git \
@@ -573,7 +576,7 @@ VBOX_AARCH64_LOAD_ADDRESS ?= 0x08080000ULL
 		user_apps fs_img kernel-only dev-build contest-rv contest-la \
 		eval-dev-build-rv eval-dev-build-la \
 		qemu-disk-rv qemu-disk-la \
-		extra-img extra-user-apps run-riscv64-extra run-loongarch64-extra run-arm64-extra run-x86_64-extra run-arm32-extra run-riscv32-extra run-ppc64le-extra \
+		extra-img extra-user-apps prepare-riscv64-glibc-sysroot run-riscv64-extra run-loongarch64-extra run-arm64-extra run-x86_64-extra run-arm32-extra run-riscv32-extra run-ppc64le-extra \
 		native-test-arch native-handle-test-arch native-libc-arch native-programs \
 		native-test-rv native-test-la native-test-aarch64 native-test-x86_64 native-test-arm32 native-test-rv32 native-test-ppc64le native-test native-test-all \
 		native-minimal-rv native-minimal-la native-minimal \
@@ -1897,7 +1900,16 @@ endif
 extra-user-apps:
 	$(MAKE) -f user/extra.mk ARCH=$(ARCH) OPT="$(OPT)" PACKAGES="$(EXTRA_PACKAGES)"
 
-extra-img: extra-user-apps
+# Debian/Ubuntu cross toolchains already provide a complete target sysroot and
+# return immediately here.  Fedora's cross GCC omits it, so bootstrap the
+# target runtime from Fedora's official RISC-V repository into the project.
+prepare-riscv64-glibc-sysroot:
+	@if [ "$(ARCH)" = riscv64 ] && [ -n "$(filter rust rustc cargo,$(EXTRA_PACKAGES))" ]; then \
+		user/extra/prepare-riscv64-glibc-sysroot.sh \
+			"$(RISCV_GLIBC_LIB_DIR)" "$(RISCV_GLIBC_LOCAL_ROOT)" "$(FEDORA_RISCV_RELEASE)"; \
+	fi
+
+extra-img: extra-user-apps prepare-riscv64-glibc-sysroot
 	@echo "Building extra packages image..."
 	@rm -rf $(EXTRA_STAGING_DIR) && mkdir -p $(EXTRA_STAGING_DIR)/bin
 	@set -e; \
@@ -1934,6 +1946,11 @@ extra-img: extra-user-apps
 		REQUIRED_GLIBC="ld-linux-riscv64-lp64d.so.1 libc.so.6 libdl.so.2 libm.so.6 libpthread.so.0 librt.so.1 libatomic.so.1 libgcc_s.so.1"; \
 		MISSING_GLIBC=""; \
 		for f in $$REQUIRED_GLIBC; do [ -n "$$GLIBC" ] && [ -f "$$GLIBC/$$f" ] || MISSING_GLIBC="$$MISSING_GLIBC $$f"; done; \
+		if [ -n "$$MISSING_GLIBC" ]; then \
+			GLIBC="$(RISCV_GLIBC_LOCAL_LIB_DIR)"; \
+			MISSING_GLIBC=""; \
+			for f in $$REQUIRED_GLIBC; do [ -f "$$GLIBC/$$f" ] || MISSING_GLIBC="$$MISSING_GLIBC $$f"; done; \
+		fi; \
 		[ -z "$$MISSING_GLIBC" ] || { \
 			echo "RISC-V glibc runtime incomplete in '$$GLIBC'; missing:$$MISSING_GLIBC"; \
 			echo "Install/provide the cross glibc runtime or set RISCV_GLIBC_LIB_DIR to a directory containing all required libraries"; \
@@ -1941,7 +1958,7 @@ extra-img: extra-user-apps
 		}; \
 		cp -a "$$RUST" "$(EXTRA_STAGING_DIR)/rust"; \
 		printf '#!/bin/sh\nexec /test/rust/bin/rustc --target riscv64gc-unknown-linux-musl -C linker=/test/rust/lib/rustlib/riscv64gc-unknown-linux-gnu/bin/rust-lld -C relocation-model=static -C link-arg=-L/test/rust/a20-sysroot/lib -C link-arg=-static -C link-arg=/test/rust/a20-sysroot/lib/crt1.o -C link-arg=/test/rust/a20-sysroot/lib/crti.o -C link-arg=/test/rust/a20-sysroot/lib/crtn.o "$$@"\n' > "$(EXTRA_STAGING_DIR)/bin/rustc"; \
-		printf '#!/bin/sh\nexport CARGO_HOME=/test/rust\nexport RUSTC=/test/rust/bin/rustc\nexport CARGO_BUILD_TARGET=riscv64gc-unknown-linux-musl\nexec /test/rust/bin/cargo "$$@"\n' > "$(EXTRA_STAGING_DIR)/bin/cargo"; \
+		printf '#!/bin/sh\nexport RUSTC=/test/rust/bin/rustc\nexport CARGO_BUILD_TARGET=riscv64gc-unknown-linux-musl\nexec /test/rust/bin/cargo --config /test/rust/config.toml "$$@"\n' > "$(EXTRA_STAGING_DIR)/bin/cargo"; \
 		printf '[target.riscv64gc-unknown-linux-musl]\nlinker = "/test/rust/lib/rustlib/riscv64gc-unknown-linux-gnu/bin/rust-lld"\nrustflags = ["-C", "relocation-model=static", "-C", "link-arg=-L/test/rust/a20-sysroot/lib", "-C", "link-arg=-static", "-C", "link-arg=/test/rust/a20-sysroot/lib/crt1.o", "-C", "link-arg=/test/rust/a20-sysroot/lib/crti.o", "-C", "link-arg=/test/rust/a20-sysroot/lib/crtn.o"]\n' > "$(EXTRA_STAGING_DIR)/rust/config.toml"; \
 		chmod 0755 "$(EXTRA_STAGING_DIR)/bin/rustc" "$(EXTRA_STAGING_DIR)/bin/cargo"; \
 		mkdir -p "$(EXTRA_STAGING_DIR)/glibc/lib"; \
@@ -1952,12 +1969,12 @@ extra-img: extra-user-apps
 	@VIM_RT="$(EXTRA_STAGING_DIR)/share/vim/vim92"; \
 	VIM_SRC=user/external/vim/runtime; \
 	if [ -n "$(filter vim,$(EXTRA_PACKAGES))" ]; then mkdir -p "$$VIM_RT"; else exit 0; fi; \
-	for f in defaults.vim filetype.vim ftoff.vim ftplugin.vim ftplugof.vim; do \
+	for f in defaults.vim filetype.vim ftoff.vim ftplugin.vim ftplugof.vim indent.vim indoff.vim; do \
 		[ -f "$$VIM_SRC/$$f" ] && cp "$$VIM_SRC/$$f" "$$VIM_RT/$$f"; \
 	done; \
-	for d in syntax indent; do \
+	for d in syntax indent ftplugin autoload; do \
 		mkdir -p "$$VIM_RT/$$d"; \
-		cp -a "$$VIM_SRC/$$d/"*.vim "$$VIM_RT/$$d/" 2>/dev/null || true; \
+		cp -a "$$VIM_SRC/$$d/." "$$VIM_RT/$$d/"; \
 	done
 	@GIT_TEMPLATE_SRC=user/external/git/templates/blt; \
 	GIT_TEMPLATE_DST="$(EXTRA_STAGING_DIR)/share/git-core/templates"; \
