@@ -1330,8 +1330,13 @@ int vfs_poll_events(int fd, short events) {
 
     if (vfs_is_char_device_vfile(vf)) {
         extern int uart_has_input(void);
-        if ((events & POLLIN) && (fd != 0 || uart_has_input()))
-            revents |= POLLIN;
+        if (events & POLLIN) {
+            /* fd is a global VFS descriptor, not the process-local stdin fd.
+             * TTY readiness must follow the UART receive queue regardless of
+             * which global descriptor number was allocated for the stream. */
+            if (!devfs_is_tty_vfile(vf) || uart_has_input())
+                revents |= POLLIN;
+        }
         if (events & POLLOUT)
             revents |= POLLOUT;
         vfs_put_file_ref(fd, vf);

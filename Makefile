@@ -116,6 +116,13 @@ EXTRA_IMAGE_MB ?= 1024
 EXTRA_IMG = $(BUILD_DIR)/extra.img
 EXTRA_STAGING_DIR = $(BUILD_DIR)/extra-staging
 EXTRA_PACKAGES ?= vim git gcc rust
+RISCV_GNU_CC ?= riscv64-linux-gnu-gcc
+RISCV_GLIBC_SYSROOT ?= $(shell $(RISCV_GNU_CC) -print-sysroot 2>/dev/null)
+RISCV_GLIBC_LIB_CANDIDATES := $(RISCV_GLIBC_SYSROOT)/lib \
+                              $(RISCV_GLIBC_SYSROOT)/lib64 \
+                              /usr/riscv64-linux-gnu/lib
+RISCV_GLIBC_LIB_DIR ?= $(patsubst %/ld-linux-riscv64-lp64d.so.1,%,$(firstword \
+                         $(wildcard $(addsuffix /ld-linux-riscv64-lp64d.so.1,$(RISCV_GLIBC_LIB_CANDIDATES)))))
 USER_BUILD_ID = $(ARCH):$(NOMMU):$(OPT)
 USER_BUILD_CHECK_DIRS = user/init.c user/cmds user/init_common user/desktop user/external/lvgl \
                         user/external/musl user/external/sbase user/external/mksh-cvs2git \
@@ -325,6 +332,9 @@ endif
 ifneq ($(BRINGUP),1)
 QEMU_FLAGS += -drive file=$(FAT32_IMG),if=none,format=raw,id=x0 -device $(QEMU_BLK),drive=x0
 QEMU_FLAGS += $(NETDEV_USER) -device $(QEMU_NET),netdev=net
+# Extra-package runs need extra.img to be the ext4 filesystem mounted at /test,
+# so snapshot the flags before an optional benchmark sdcard is appended.
+QEMU_FLAGS_NO_SDCARD := $(QEMU_FLAGS)
 ifeq ($(ARCH),riscv64)
 ifneq ($(wildcard sdcard-rv.img),)
 QEMU_FLAGS += -drive file=sdcard-rv.img,if=none,format=raw,id=x1 -device $(QEMU_BLK_SECOND),drive=x1
@@ -710,7 +720,7 @@ check-final-definition: check-doc-test-gates
 	@rg -q "LINUX_ABI_EXPLICIT_STUB_CONTRACT" kernel/abi/linux/syscall_table.def
 	@rg -q "NATIVE_DEBUG_LIMITED_CONTRACT" kernel/abi/native/sys_phase2.c
 	@rg -q "DRIVER_CORE_CONCURRENCY_MODEL" kernel/drivers/core/driver_core.c
-	@rg -q "EXTERNAL_USERLAND_UPGRADE_CHECKLIST" docs/external-dependencies.md
+	@rg -q "EXTERNAL_USERLAND_UPGRADE_CHECKLIST" docs/project/external-dependencies.md
 	@echo "check-final-definition: PASS (SMP smoke tracked separately by TODO section 10)"
 
 check-riscv64-user:
@@ -851,22 +861,22 @@ check-driver-core-model:
 
 check-external-dependency-boundary:
 	@rg -q "include kernel/external/lwip/sources.mk" Makefile
-	@rg -q "EXTERNAL_LWIP_SOURCE_MANIFEST" docs/external-dependencies.md
+	@rg -q "EXTERNAL_LWIP_SOURCE_MANIFEST" docs/project/external-dependencies.md
 	@rg -q "LWIP_SRC" kernel/external/lwip/sources.mk
 	@rg -q "core/timeouts.c" kernel/external/lwip/sources.mk
-	@rg -q "EXTERNAL_LWIP_CONFIG_CONTRACT" docs/external-dependencies.md
-	@rg -q "NO_SYS=1" docs/external-dependencies.md
-	@rg -q "g_lwip_lock" docs/external-dependencies.md kernel/net/lwip_stack.c
-	@rg -q "a20_lwip_poll\(\)" docs/external-dependencies.md
-	@rg -q "kernel_progress_poll\(\)" docs/external-dependencies.md
-	@rg -q "EXTERNAL_QEMU_NET_DEFAULTS" docs/external-dependencies.md
-	@rg -q "10\.0\.2\.15" docs/external-dependencies.md kernel/net/lwip_stack.c
-	@rg -q "EXTERNAL_USERLAND_UPGRADE_CHECKLIST" docs/external-dependencies.md
-	@rg -q "syscall smoke, shell smoke, and coreutils smoke" docs/external-dependencies.md
-	@rg -q "EXTERNAL_STATIC_LINK_REBUILD_CONTRACT" docs/external-dependencies.md
-	@rg -q "user/build/<arch>\\[-nommu\\]/\\.build-id" docs/external-dependencies.md
-	@rg -q "EXTERNAL_TLSE_WGET_LIMITS" docs/external-dependencies.md
-	@rg -q "TLS 1\.3" docs/external-dependencies.md
+	@rg -q "EXTERNAL_LWIP_CONFIG_CONTRACT" docs/project/external-dependencies.md
+	@rg -q "NO_SYS=1" docs/project/external-dependencies.md
+	@rg -q "g_lwip_lock" docs/project/external-dependencies.md kernel/net/lwip_stack.c
+	@rg -q "a20_lwip_poll\(\)" docs/project/external-dependencies.md
+	@rg -q "kernel_progress_poll\(\)" docs/project/external-dependencies.md
+	@rg -q "EXTERNAL_QEMU_NET_DEFAULTS" docs/project/external-dependencies.md
+	@rg -q "10\.0\.2\.15" docs/project/external-dependencies.md kernel/net/lwip_stack.c
+	@rg -q "EXTERNAL_USERLAND_UPGRADE_CHECKLIST" docs/project/external-dependencies.md
+	@rg -q "syscall smoke, shell smoke, and coreutils smoke" docs/project/external-dependencies.md
+	@rg -q "EXTERNAL_STATIC_LINK_REBUILD_CONTRACT" docs/project/external-dependencies.md
+	@rg -q "user/build/<arch>\\[-nommu\\]/\\.build-id" docs/project/external-dependencies.md
+	@rg -q "EXTERNAL_TLSE_WGET_LIMITS" docs/project/external-dependencies.md
+	@rg -q "TLS 1\.3" docs/project/external-dependencies.md
 	@! rg -n "^LWIP_SRC[[:space:]]*=" Makefile
 	@echo "check-external-dependency-boundary: PASS"
 
@@ -1891,7 +1901,7 @@ extra-img: extra-user-apps
 	@echo "Building extra packages image..."
 	@rm -rf $(EXTRA_STAGING_DIR) && mkdir -p $(EXTRA_STAGING_DIR)/bin
 	@set -e; \
-	for f in user/build/*; do \
+	for f in $(USER_BUILD_DIR)/*; do \
 		[ -f "$$f" ] || continue; \
 		name=$$(basename "$$f"); \
 		case "$$name" in \
@@ -1900,16 +1910,16 @@ extra-img: extra-user-apps
 		esac; \
 		cp "$$f" "$(EXTRA_STAGING_DIR)/bin/$$name"; \
 	done; \
-	for f in user/build/extra/*; do \
+	for f in user/build/extra/$(ARCH)/*; do \
 		[ -f "$$f" ] || continue; \
 		name=$$(basename "$$f"); \
 		case " $(EXTRA_PACKAGES) " in *" $$name "*) cp "$$f" "$(EXTRA_STAGING_DIR)/bin/$$name" ;; esac; \
 	done
 	@set -e; \
-	if [ -n "$(filter gcc cc,$(EXTRA_PACKAGES))" ] && [ -d user/build/extra/obj/$(ARCH)/gcc-install ]; then \
-		cp -a user/build/extra/obj/$(ARCH)/gcc-install/libexec "$(EXTRA_STAGING_DIR)/libexec"; \
-		cp -a user/build/extra/obj/$(ARCH)/gcc-install/lib "$(EXTRA_STAGING_DIR)/lib"; \
-		for t in user/build/extra/obj/$(ARCH)/gcc-install/bin/*; do \
+	if [ -n "$(filter gcc cc,$(EXTRA_PACKAGES))" ] && [ -d user/build/extra/$(ARCH)/obj/gcc-install ]; then \
+		cp -a user/build/extra/$(ARCH)/obj/gcc-install/libexec "$(EXTRA_STAGING_DIR)/libexec"; \
+		cp -a user/build/extra/$(ARCH)/obj/gcc-install/lib "$(EXTRA_STAGING_DIR)/lib"; \
+		for t in user/build/extra/$(ARCH)/obj/gcc-install/bin/*; do \
 			[ -f "$$t" ] && cp "$$t" "$(EXTRA_STAGING_DIR)/bin/$$(basename $$t)"; \
 		done; \
 		mv "$(EXTRA_STAGING_DIR)/bin/gcc" "$(EXTRA_STAGING_DIR)/bin/gcc-real"; \
@@ -1917,18 +1927,26 @@ extra-img: extra-user-apps
 		mv "$(EXTRA_STAGING_DIR)/bin/cc" "$(EXTRA_STAGING_DIR)/bin/cc-real"; \
 		printf '#!/bin/sh\nexec /test/bin/cc-real -fno-lto -fno-use-linker-plugin "$$@"\n' > "$(EXTRA_STAGING_DIR)/bin/cc"; \
 	fi
-	@if [ -n "$(filter rust rustc cargo,$(EXTRA_PACKAGES))" ]; then \
-		RUST=user/build/extra/obj/$(ARCH)/rust; \
+	@if [ "$(ARCH)" = riscv64 ] && [ -n "$(filter rust rustc cargo,$(EXTRA_PACKAGES))" ]; then \
+		RUST=user/build/extra/$(ARCH)/obj/rust; \
 		[ -x "$$RUST/bin/rustc" ] && [ -x "$$RUST/bin/cargo" ] || { echo "Rust installation missing from $$RUST"; exit 1; }; \
+		GLIBC="$(RISCV_GLIBC_LIB_DIR)"; \
+		REQUIRED_GLIBC="ld-linux-riscv64-lp64d.so.1 libc.so.6 libdl.so.2 libm.so.6 libpthread.so.0 librt.so.1 libatomic.so.1 libgcc_s.so.1"; \
+		MISSING_GLIBC=""; \
+		for f in $$REQUIRED_GLIBC; do [ -n "$$GLIBC" ] && [ -f "$$GLIBC/$$f" ] || MISSING_GLIBC="$$MISSING_GLIBC $$f"; done; \
+		[ -z "$$MISSING_GLIBC" ] || { \
+			echo "RISC-V glibc runtime incomplete in '$$GLIBC'; missing:$$MISSING_GLIBC"; \
+			echo "Install/provide the cross glibc runtime or set RISCV_GLIBC_LIB_DIR to a directory containing all required libraries"; \
+			exit 1; \
+		}; \
 		cp -a "$$RUST" "$(EXTRA_STAGING_DIR)/rust"; \
 		printf '#!/bin/sh\nexec /test/rust/bin/rustc --target riscv64gc-unknown-linux-musl -C linker=/test/rust/lib/rustlib/riscv64gc-unknown-linux-gnu/bin/rust-lld -C relocation-model=static -C link-arg=-L/test/rust/a20-sysroot/lib -C link-arg=-static -C link-arg=/test/rust/a20-sysroot/lib/crt1.o -C link-arg=/test/rust/a20-sysroot/lib/crti.o -C link-arg=/test/rust/a20-sysroot/lib/crtn.o "$$@"\n' > "$(EXTRA_STAGING_DIR)/bin/rustc"; \
 		printf '#!/bin/sh\nexport CARGO_HOME=/test/rust\nexport RUSTC=/test/rust/bin/rustc\nexport CARGO_BUILD_TARGET=riscv64gc-unknown-linux-musl\nexec /test/rust/bin/cargo "$$@"\n' > "$(EXTRA_STAGING_DIR)/bin/cargo"; \
 		printf '[target.riscv64gc-unknown-linux-musl]\nlinker = "/test/rust/lib/rustlib/riscv64gc-unknown-linux-gnu/bin/rust-lld"\nrustflags = ["-C", "relocation-model=static", "-C", "link-arg=-L/test/rust/a20-sysroot/lib", "-C", "link-arg=-static", "-C", "link-arg=/test/rust/a20-sysroot/lib/crt1.o", "-C", "link-arg=/test/rust/a20-sysroot/lib/crti.o", "-C", "link-arg=/test/rust/a20-sysroot/lib/crtn.o"]\n' > "$(EXTRA_STAGING_DIR)/rust/config.toml"; \
 		chmod 0755 "$(EXTRA_STAGING_DIR)/bin/rustc" "$(EXTRA_STAGING_DIR)/bin/cargo"; \
-		GLIBC=/usr/riscv64-linux-gnu/lib; \
 		mkdir -p "$(EXTRA_STAGING_DIR)/glibc/lib"; \
-		for f in ld-linux-riscv64-lp64d.so.1 libc.so.6 libdl.so.2 libm.so.6 libpthread.so.0 librt.so.1 libatomic.so.1 libgcc_s.so.1; do \
-			[ -e "$$GLIBC/$$f" ] && cp -aL "$$GLIBC/$$f" "$(EXTRA_STAGING_DIR)/glibc/lib/$$f"; \
+		for f in $$REQUIRED_GLIBC; do \
+			cp -aL "$$GLIBC/$$f" "$(EXTRA_STAGING_DIR)/glibc/lib/$$f"; \
 		done; \
 	fi
 	@VIM_RT="$(EXTRA_STAGING_DIR)/share/vim/vim92"; \
@@ -1941,6 +1959,12 @@ extra-img: extra-user-apps
 		mkdir -p "$$VIM_RT/$$d"; \
 		cp -a "$$VIM_SRC/$$d/"*.vim "$$VIM_RT/$$d/" 2>/dev/null || true; \
 	done
+	@GIT_TEMPLATE_SRC=user/external/git/templates/blt; \
+	GIT_TEMPLATE_DST="$(EXTRA_STAGING_DIR)/share/git-core/templates"; \
+	if [ -n "$(filter git,$(EXTRA_PACKAGES))" ] && [ -d "$$GIT_TEMPLATE_SRC" ]; then \
+		mkdir -p "$$GIT_TEMPLATE_DST"; \
+		cp -a "$$GIT_TEMPLATE_SRC"/. "$$GIT_TEMPLATE_DST"/; \
+	fi
 	@mkdir -p $(BUILD_DIR)
 	dd if=/dev/zero of=$(EXTRA_IMG) bs=1048576 count=$(EXTRA_IMAGE_MB) 2>/dev/null
 	$(MKFS_EXT4) -F -O ^has_journal,extent,huge_file,flex_bg,uninit_bg,dir_index \
@@ -1988,9 +2012,9 @@ run-ppc64le-extra:
 
 _run_extra_impl:
 	$(MAKE) ARCH=$(ARCH) BRINGUP=0 dev-build
-	$(MAKE) -C user ARCH=$(ARCH) fastfetch || true
+	$(MAKE) -C user ARCH=$(ARCH) fastfetch
 	$(MAKE) ARCH=$(ARCH) EXTRA_IMG=$(EXTRA_IMG) extra-img
-	$(QEMU) $(QEMU_FLAGS) $(EXTRA_QEMU_BLK) -kernel $(KERNEL_ELF)
+	$(QEMU) $(QEMU_FLAGS_NO_SDCARD) $(EXTRA_QEMU_BLK) -kernel $(KERNEL_ELF)
 
 NATIVE_TEST_DIR  := user/tests
 NATIVE_LD        := user/liba20rt/a20-generic.ld
