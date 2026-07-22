@@ -325,6 +325,9 @@ endif
 ifneq ($(BRINGUP),1)
 QEMU_FLAGS += -drive file=$(FAT32_IMG),if=none,format=raw,id=x0 -device $(QEMU_BLK),drive=x0
 QEMU_FLAGS += $(NETDEV_USER) -device $(QEMU_NET),netdev=net
+# Extra-package runs need extra.img to be the ext4 filesystem mounted at /test,
+# so snapshot the flags before an optional contest sdcard is appended.
+QEMU_FLAGS_NO_SDCARD := $(QEMU_FLAGS)
 ifeq ($(ARCH),riscv64)
 ifneq ($(wildcard sdcard-rv.img),)
 QEMU_FLAGS += -drive file=sdcard-rv.img,if=none,format=raw,id=x1 -device $(QEMU_BLK_SECOND),drive=x1
@@ -1891,7 +1894,7 @@ extra-img: extra-user-apps
 	@echo "Building extra packages image..."
 	@rm -rf $(EXTRA_STAGING_DIR) && mkdir -p $(EXTRA_STAGING_DIR)/bin
 	@set -e; \
-	for f in user/build/*; do \
+	for f in $(USER_BUILD_DIR)/*; do \
 		[ -f "$$f" ] || continue; \
 		name=$$(basename "$$f"); \
 		case "$$name" in \
@@ -1900,16 +1903,16 @@ extra-img: extra-user-apps
 		esac; \
 		cp "$$f" "$(EXTRA_STAGING_DIR)/bin/$$name"; \
 	done; \
-	for f in user/build/extra/*; do \
+	for f in user/build/extra/$(ARCH)/*; do \
 		[ -f "$$f" ] || continue; \
 		name=$$(basename "$$f"); \
 		case " $(EXTRA_PACKAGES) " in *" $$name "*) cp "$$f" "$(EXTRA_STAGING_DIR)/bin/$$name" ;; esac; \
 	done
 	@set -e; \
-	if [ -n "$(filter gcc cc,$(EXTRA_PACKAGES))" ] && [ -d user/build/extra/obj/$(ARCH)/gcc-install ]; then \
-		cp -a user/build/extra/obj/$(ARCH)/gcc-install/libexec "$(EXTRA_STAGING_DIR)/libexec"; \
-		cp -a user/build/extra/obj/$(ARCH)/gcc-install/lib "$(EXTRA_STAGING_DIR)/lib"; \
-		for t in user/build/extra/obj/$(ARCH)/gcc-install/bin/*; do \
+	if [ -n "$(filter gcc cc,$(EXTRA_PACKAGES))" ] && [ -d user/build/extra/$(ARCH)/obj/gcc-install ]; then \
+		cp -a user/build/extra/$(ARCH)/obj/gcc-install/libexec "$(EXTRA_STAGING_DIR)/libexec"; \
+		cp -a user/build/extra/$(ARCH)/obj/gcc-install/lib "$(EXTRA_STAGING_DIR)/lib"; \
+		for t in user/build/extra/$(ARCH)/obj/gcc-install/bin/*; do \
 			[ -f "$$t" ] && cp "$$t" "$(EXTRA_STAGING_DIR)/bin/$$(basename $$t)"; \
 		done; \
 		mv "$(EXTRA_STAGING_DIR)/bin/gcc" "$(EXTRA_STAGING_DIR)/bin/gcc-real"; \
@@ -1917,8 +1920,8 @@ extra-img: extra-user-apps
 		mv "$(EXTRA_STAGING_DIR)/bin/cc" "$(EXTRA_STAGING_DIR)/bin/cc-real"; \
 		printf '#!/bin/sh\nexec /test/bin/cc-real -fno-lto -fno-use-linker-plugin "$$@"\n' > "$(EXTRA_STAGING_DIR)/bin/cc"; \
 	fi
-	@if [ -n "$(filter rust rustc cargo,$(EXTRA_PACKAGES))" ]; then \
-		RUST=user/build/extra/obj/$(ARCH)/rust; \
+	@if [ "$(ARCH)" = riscv64 ] && [ -n "$(filter rust rustc cargo,$(EXTRA_PACKAGES))" ]; then \
+		RUST=user/build/extra/$(ARCH)/obj/rust; \
 		[ -x "$$RUST/bin/rustc" ] && [ -x "$$RUST/bin/cargo" ] || { echo "Rust installation missing from $$RUST"; exit 1; }; \
 		cp -a "$$RUST" "$(EXTRA_STAGING_DIR)/rust"; \
 		printf '#!/bin/sh\nexec /test/rust/bin/rustc --target riscv64gc-unknown-linux-musl -C linker=/test/rust/lib/rustlib/riscv64gc-unknown-linux-gnu/bin/rust-lld -C relocation-model=static -C link-arg=-L/test/rust/a20-sysroot/lib -C link-arg=-static -C link-arg=/test/rust/a20-sysroot/lib/crt1.o -C link-arg=/test/rust/a20-sysroot/lib/crti.o -C link-arg=/test/rust/a20-sysroot/lib/crtn.o "$$@"\n' > "$(EXTRA_STAGING_DIR)/bin/rustc"; \
@@ -1941,6 +1944,12 @@ extra-img: extra-user-apps
 		mkdir -p "$$VIM_RT/$$d"; \
 		cp -a "$$VIM_SRC/$$d/"*.vim "$$VIM_RT/$$d/" 2>/dev/null || true; \
 	done
+	@GIT_TEMPLATE_SRC=user/external/git/templates/blt; \
+	GIT_TEMPLATE_DST="$(EXTRA_STAGING_DIR)/share/git-core/templates"; \
+	if [ -n "$(filter git,$(EXTRA_PACKAGES))" ] && [ -d "$$GIT_TEMPLATE_SRC" ]; then \
+		mkdir -p "$$GIT_TEMPLATE_DST"; \
+		cp -a "$$GIT_TEMPLATE_SRC"/. "$$GIT_TEMPLATE_DST"/; \
+	fi
 	@mkdir -p $(BUILD_DIR)
 	dd if=/dev/zero of=$(EXTRA_IMG) bs=1048576 count=$(EXTRA_IMAGE_MB) 2>/dev/null
 	$(MKFS_EXT4) -F -O ^has_journal,extent,huge_file,flex_bg,uninit_bg,dir_index \
@@ -1988,9 +1997,9 @@ run-ppc64le-extra:
 
 _run_extra_impl:
 	$(MAKE) ARCH=$(ARCH) BRINGUP=0 dev-build
-	$(MAKE) -C user ARCH=$(ARCH) fastfetch || true
+	$(MAKE) -C user ARCH=$(ARCH) fastfetch
 	$(MAKE) ARCH=$(ARCH) EXTRA_IMG=$(EXTRA_IMG) extra-img
-	$(QEMU) $(QEMU_FLAGS) $(EXTRA_QEMU_BLK) -kernel $(KERNEL_ELF)
+	$(QEMU) $(QEMU_FLAGS_NO_SDCARD) $(EXTRA_QEMU_BLK) -kernel $(KERNEL_ELF)
 
 NATIVE_TEST_DIR  := user/tests
 NATIVE_LD        := user/liba20rt/a20-generic.ld
