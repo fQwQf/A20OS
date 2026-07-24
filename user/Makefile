@@ -546,13 +546,20 @@ USER_INTERMEDIATE_TARGETS := $(INIT_OBJ) $(INIT_EXTRA_OBJS) $(MKSH_OBJS) \
                              $(WGET_OBJ) $(TLSE_OBJ) $(FF_MAIN_OBJ) $(FF_LIB_OBJS) $(FF_LIB) \
                              $(DESKTOP_OBJS) $(LVGL_OBJS)
 
+BUILD_DESKTOP ?= 1
+ifeq ($(BUILD_DESKTOP),1)
+DESKTOP_TARGET := $(BUILD_DIR)/desktop
+else
+DESKTOP_TARGET :=
+endif
+
 ifneq ($(wildcard $(FF_DIR)/src/fastfetch.c),)
 FF_AVAILABLE := 1
 else
 FF_AVAILABLE :=
 endif
 
-all: build_dir $(BUILD_DIR)/init $(BUILD_DIR)/mksh $(BUILD_DIR)/sh $(SBASE_CMDS) $(LOCAL_CMDS) $(WGET_CMD) $(BUILD_DIR)/desktop
+all: build_dir $(BUILD_DIR)/init $(BUILD_DIR)/mksh $(BUILD_DIR)/sh $(SBASE_CMDS) $(LOCAL_CMDS) $(WGET_CMD) $(DESKTOP_TARGET)
 
 fastfetch: build_dir $(FF_CMD)
 
