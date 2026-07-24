@@ -192,6 +192,7 @@ int64_t sys_sched_yield(void);
 int64_t sys_sched_get_priority_max(int policy);
 int64_t sys_sched_get_priority_min(int policy);
 int64_t sys_sched_getaffinity(int pid, size_t cpusetsize, void *mask);
+int64_t sys_getcpu(unsigned *cpu, unsigned *node, void *cache);
 int64_t sys_sched_setaffinity(int pid, size_t cpusetsize, const void *mask);
 int64_t sys_sched_getparam(int pid, void *param);
 int64_t sys_sched_setparam(int pid, const void *param);
