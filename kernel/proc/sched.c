@@ -456,7 +456,8 @@ void sched_reap_zombies(void)
         uint64_t flags = spin_lock_irqsave(&proc_lock);
         task_t *current = proc_current();
         for (task_t *t = proc_first_task_locked(); t; t = proc_next_task_locked(t)) {
-            if (t == proc_idle_task() || t == current)
+            if (t == proc_idle_task() || t == current ||
+                proc_task_is_current_any_cpu(t))
                 continue;
             if (t->state != PROC_ZOMBIE)
                 continue;

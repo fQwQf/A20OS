@@ -293,6 +293,9 @@ ARCH_LDFLAGS := $(ARCH_LDFLAGS_$(ARCH))
 ARCH_LIBS    := $(ARCH_LIBS_$(ARCH))
 QEMU         := $(QEMU_$(ARCH))
 QEMU_FLAGS   := $(QEMU_FLAGS_BASE_$(ARCH)) -m 1G -nographic -smp $(NR_CPUS)
+ifneq ($(NR_CPUS),1)
+QEMU_FLAGS += -accel tcg,thread=multi
+endif
 
 QEMU_BLK     := $(QEMU_BLK_$(ARCH))
 QEMU_BLK_SECOND := $(QEMU_BLK_SECOND_$(ARCH))

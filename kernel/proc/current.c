@@ -37,3 +37,14 @@ task_t *proc_current_on_cpu(unsigned cpu)
         return NULL;
     return __atomic_load_n(&g_cpu_current[cpu], __ATOMIC_ACQUIRE);
 }
+
+int proc_task_is_current_any_cpu(task_t *task)
+{
+    if (!task)
+        return 0;
+    for (unsigned cpu = 0; cpu < CONFIG_NR_CPUS; cpu++) {
+        if (proc_current_on_cpu(cpu) == task)
+            return 1;
+    }
+    return 0;
+}

@@ -148,6 +148,7 @@
 #define SYS_getrusage      165
 #define SYS_umask          166
 #define SYS_prctl          167
+#define SYS_getcpu         168
 #define SYS_getpid         172
 #define SYS_getppid        173
 #define SYS_getuid         174
