@@ -43,6 +43,8 @@ static uint64_t next_wake_scan = SCHED_NO_DEADLINE;
 static uint64_t next_alarm_scan = SCHED_NO_DEADLINE;
 static unsigned sched_zombies_pending;
 
+unsigned proc_sched_select_cpu(task_t *t);
+
 #define SCHED_TICK_INTERVAL       (TICKS_PER_SEC / 100)
 #define SCHED_MIN_TIMER_INTERVAL  (TICKS_PER_SEC / 10000 ? TICKS_PER_SEC / 10000 : 1)
 #define SCHED_AGING_THRESHOLD     (TICKS_PER_SEC / 20 ? TICKS_PER_SEC / 20 : 1)
@@ -178,7 +180,147 @@ static uint32_t sched_task_cpu_mask(task_t *t)
         mask &= node->res.cpuset.effective_cpus;
     }
 
-    return mask & SCHED_CPU_MASK_ALL;
+    return mask & SCHED_CPU_MASK_ALL & smp_online_cpu_mask();
+}
+
+static int sched_policy_valid(int policy)
+{
+    return policy == SCHED_NORMAL || policy == SCHED_FIFO ||
+           policy == SCHED_RR || policy == SCHED_BATCH ||
+           policy == SCHED_IDLE;
+}
+
+static int sched_policy_rt_value(int policy)
+{
+    return policy == SCHED_FIFO || policy == SCHED_RR;
+}
+
+static int sched_nice_value(task_t *t)
+{
+    if (!sched_policy_rt_value(t->sched_policy))
+        return t->priority;
+    for (int nice = -20; nice <= 19; nice++) {
+        if (sched_weight_for_nice(nice) == t->cfs_weight)
+            return nice;
+    }
+    return 0;
+}
+
+static int sched_task_linked_locked(task_t *target)
+{
+    for (task_t *t = proc_first_task_locked(); t; t = proc_next_task_locked(t)) {
+        if (t == target)
+            return 1;
+    }
+    return 0;
+}
+
+uint32_t proc_sched_effective_affinity(task_t *t)
+{
+    return sched_task_cpu_mask(t);
+}
+
+int proc_sched_priority_range(int policy, int *min, int *max)
+{
+    if (!sched_policy_valid(policy) || !min || !max)
+        return -1;
+    *min = sched_policy_rt_value(policy) ? 1 : 0;
+    *max = sched_policy_rt_value(policy) ? 99 : 0;
+    return 0;
+}
+
+int proc_sched_get(task_t *t, proc_sched_config_t *out)
+{
+    if (!t || !out)
+        return -1;
+    uint64_t lock_flags = spin_lock_irqsave(&proc_lock);
+    if (!sched_task_linked_locked(t)) {
+        spin_unlock_irqrestore(&proc_lock, lock_flags);
+        return -1;
+    }
+    out->fields = PROC_SCHED_POLICY | PROC_SCHED_PRIORITY |
+                  PROC_SCHED_AFFINITY | PROC_SCHED_NICE;
+    out->policy = t->sched_policy;
+    out->priority = sched_policy_rt_value(t->sched_policy) ? t->priority : 0;
+    out->nice = sched_nice_value(t);
+    out->affinity = proc_sched_effective_affinity(t);
+    out->reset_on_fork = t->sched_reset_on_fork;
+    spin_unlock_irqrestore(&proc_lock, lock_flags);
+    return 0;
+}
+
+int proc_sched_set(task_t *t, const proc_sched_config_t *config)
+{
+    const uint32_t all_fields = PROC_SCHED_POLICY | PROC_SCHED_PRIORITY |
+                                PROC_SCHED_AFFINITY | PROC_SCHED_NICE;
+    if (!t || !config || (config->fields & ~all_fields))
+        return -1;
+
+    uint64_t lock_flags = spin_lock_irqsave(&proc_lock);
+    if (!sched_task_linked_locked(t))
+        goto invalid;
+    int policy = (config->fields & PROC_SCHED_POLICY)
+                     ? config->policy : t->sched_policy;
+    int priority = (config->fields & PROC_SCHED_PRIORITY)
+                       ? config->priority
+                       : (sched_policy_rt_value(policy) &&
+                          sched_policy_rt_value(t->sched_policy)
+                              ? t->priority : 0);
+    if (!sched_policy_valid(policy) ||
+        (sched_policy_rt_value(policy)
+             ? (priority < 1 || priority > 99)
+             : priority != 0))
+        goto invalid;
+    if ((config->fields & PROC_SCHED_NICE) &&
+        (config->nice < -20 || config->nice > 19))
+        goto invalid;
+    if (config->fields & PROC_SCHED_AFFINITY) {
+        uint32_t eligible = config->affinity & smp_online_cpu_mask();
+        if (t->cgroup) {
+            cg_node_t *node = (cg_node_t *)t->cgroup;
+            eligible &= node->res.cpuset.effective_cpus;
+        }
+        if (!eligible)
+            goto invalid;
+        if (proc_task_is_current_any_cpu(t) &&
+            (t->cpu_id >= 32 || !(eligible & (1U << t->cpu_id))))
+            goto invalid;
+    }
+
+    int ready = t->on_rq && t->state == PROC_READY;
+    if (t->on_rq)
+        proc_runq_remove_locked(t);
+
+    int old_nice = sched_nice_value(t);
+    int old_rt = sched_policy_rt_value(t->sched_policy);
+    if (config->fields & PROC_SCHED_POLICY) {
+        t->sched_policy = policy;
+        t->sched_reset_on_fork = config->reset_on_fork;
+        if (sched_policy_rt_value(policy))
+            t->sched_level = 0;
+        else if (old_rt)
+            t->priority = old_nice;
+    }
+    if (sched_policy_rt_value(policy))
+        t->priority = priority;
+    if (config->fields & PROC_SCHED_NICE) {
+        if (!sched_policy_rt_value(policy))
+            t->priority = config->nice;
+        t->cfs_weight = sched_weight_for_nice(config->nice);
+    }
+    if (config->fields & PROC_SCHED_AFFINITY) {
+        t->cpus_allowed = config->affinity & SCHED_CPU_MASK_ALL;
+        if (t->cpu_id >= 32 || !(t->cpus_allowed & (1U << t->cpu_id)))
+            t->cpu_id = proc_sched_select_cpu(t);
+    }
+    if (ready)
+        proc_runq_enqueue_locked(t);
+    spin_unlock_irqrestore(&proc_lock, lock_flags);
+    return 0;
+
+invalid:
+    spin_unlock_irqrestore(&proc_lock, lock_flags);
+    return -1;
 }
 
 unsigned proc_sched_select_cpu(task_t *t)
