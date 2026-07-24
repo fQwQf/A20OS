@@ -126,6 +126,19 @@ int64_t sys_sched_getaffinity(int pid, size_t cpusetsize, void *mask)
     return (int64_t)mask_bytes;
 }
 
+int64_t sys_getcpu(unsigned *cpu, unsigned *node, void *cache)
+{
+    (void)cache;
+    unsigned current = cpu_current_id();
+    unsigned numa_node = 0;
+
+    if (cpu && copy_to_user(cpu, &current, sizeof(current)) < 0)
+        return -EFAULT;
+    if (node && copy_to_user(node, &numa_node, sizeof(numa_node)) < 0)
+        return -EFAULT;
+    return 0;
+}
+
 int64_t sys_sched_setaffinity(int pid, size_t cpusetsize, const void *mask)
 {
     if (!mask || cpusetsize == 0) return -EINVAL;

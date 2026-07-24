@@ -253,6 +253,7 @@ because it has an entry in `syscall_table.def`.
 | `getrandom` | system | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
 | `futex` | futex | `partial` | `smoke-proc-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `membarrier` | system | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
+| `getcpu` | scheduler | `partial` | `smoke-proc-stress` | reports the current logical CPU and a single NUMA node; cache argument is ignored |
 | `sync_file_range` | fd I/O | `partial` | `smoke-vfs-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `getsid` | credentials | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
 | `rt_sigpending` | signals | `partial` | `smoke-proc-stress` | implemented subset; Linux edge semantics remain documented gaps |

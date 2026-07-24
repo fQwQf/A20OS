@@ -61,6 +61,7 @@ int proc_wait4(int pid, int *status, int options)
 
     for (;;) {
         int found = 0;
+        int reap_pending = 0;
         uint64_t lock_flags = spin_lock_irqsave(&proc_lock);
         for (task_t *child = proc_first_task_locked(); child;
              child = proc_next_task_locked(child)) {
@@ -70,6 +71,10 @@ int proc_wait4(int pid, int *status, int options)
 
             found = 1;
             if (cstate == PROC_ZOMBIE) {
+                if (proc_task_is_current_any_cpu(child)) {
+                    reap_pending = 1;
+                    continue;
+                }
                 int code = __atomic_load_n(&child->exit_code, __ATOMIC_ACQUIRE);
                 if (status) {
                     if (code >= 0)
@@ -93,6 +98,12 @@ int proc_wait4(int pid, int *status, int options)
                 spin_unlock_irqrestore(&proc_lock, lock_flags);
                 return child->pid;
             }
+        }
+
+        if (reap_pending) {
+            spin_unlock_irqrestore(&proc_lock, lock_flags);
+            proc_yield();
+            continue;
         }
 
         if (!found) {
