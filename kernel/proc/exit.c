@@ -330,6 +330,7 @@ void proc_exit(int exit_code)
     proc_complete_vfork_locked(t);
 
     if (auto_reap) {
+        proc_sched_note_zombie();
         t->parent = proc_idle_task();
         t->ppid = 0;
         if (t->signals) {
