@@ -58,6 +58,11 @@ static inline a20_status_t a20_thread_yield(void)
     return a20_syscall6(A20_SYS_thread_yield, 0, 0, 0, 0, 0, 0);
 }
 
+static inline a20_status_t a20_thread_get_cpu(uint32_t *cpu)
+{
+    return a20_syscall6(A20_SYS_thread_get_cpu, (uint64_t)cpu, 0, 0, 0, 0, 0);
+}
+
 static inline a20_status_t a20_sched_set(a20_handle_t task,
                                           a20_sched_args_t *args)
 {

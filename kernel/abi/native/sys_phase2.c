@@ -140,7 +140,7 @@ int64_t sys_a20_thread_create(const a20_syscall_args_t *args)
 
     int64_t h = a20_handle_install(ht, (void *)(uintptr_t)pid, A20_OBJ_TASK,
                                     A20_RIGHT_WAIT | A20_RIGHT_SIGNAL |
-                                    A20_RIGHT_STAT | A20_RIGHT_DUP |
+                                    A20_RIGHT_STAT | A20_RIGHT_CONTROL | A20_RIGHT_DUP |
                                     A20_RIGHT_TRANSFER);
     if (h < 0) return h;
 
@@ -168,28 +168,21 @@ int64_t sys_a20_task_set_sched(const a20_syscall_args_t *args)
                                             A20_RIGHT_CONTROL, &entry);
     if (r < 0) return r;
 
-    task_t *target = (task_t *)entry.object;
+    task_t *target = proc_find((int)(uintptr_t)entry.object);
     if (!target) return -A20_ERR_BAD_HANDLE;
 
-    if (kargs.flags & 0x01) {
-        if (kargs.priority >= 0 && kargs.priority <= 139)
-            target->priority = kargs.priority;
-    }
-    if (kargs.flags & 0x02) {
-        if (kargs.policy >= 0 && kargs.policy <= 6)
-            target->sched_policy = kargs.policy;
-    }
-    if (kargs.flags & 0x04) {
-        target->priority = kargs.nice + 100;
-    }
-    if (kargs.flags & 0x08 && kargs.affinity_size > 0 && kargs.affinity != 0) {
-        unsigned cpu = 0;
-        uint64_t mask = kargs.affinity;
-        while ((mask & 1) == 0) { cpu++; mask >>= 1; }
-        target->cpu_id = cpu;
-    }
-
-    return A20_OK;
+    proc_sched_config_t config = {
+        .fields = kargs.flags,
+        .policy = kargs.policy,
+        .priority = kargs.priority,
+        .nice = kargs.nice,
+        .affinity = (uint32_t)kargs.affinity,
+    };
+    if ((kargs.flags & A20_SCHED_AFFINITY) &&
+        (kargs.affinity_size < sizeof(uint64_t) || (kargs.affinity >> 32)))
+        return -A20_ERR_INVALID_ARGUMENT;
+    return proc_sched_set(target, &config) < 0
+               ? -A20_ERR_INVALID_ARGUMENT : A20_OK;
 }
 
 int64_t sys_a20_task_get_limits(const a20_syscall_args_t *args)
@@ -207,7 +200,7 @@ int64_t sys_a20_task_get_limits(const a20_syscall_args_t *args)
                                             A20_RIGHT_STAT, &entry);
     if (r < 0) return r;
 
-    task_t *target = (task_t *)entry.object;
+    task_t *target = proc_find((int)(uintptr_t)entry.object);
     struct a20_resource_limits limits;
     a20_resource_limits_init_default(&limits);
     if (target) {
@@ -236,7 +229,7 @@ int64_t sys_a20_task_set_limits(const a20_syscall_args_t *args)
                                             A20_RIGHT_CONTROL, &entry);
     if (r < 0) return r;
 
-    task_t *target = (task_t *)entry.object;
+    task_t *target = proc_find((int)(uintptr_t)entry.object);
     if (!target) return -A20_ERR_BAD_HANDLE;
 
     if (kargs.max_handles > A20_LIMIT_HANDLES_ABSOLUTE)

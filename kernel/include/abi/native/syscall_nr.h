@@ -38,6 +38,7 @@
 #define A20_SYS_task_get_limits   0x020B
 #define A20_SYS_task_set_limits   0x020C
 #define A20_SYS_task_get_usage    0x020D
+#define A20_SYS_thread_get_cpu    0x020E
 
 /* Memory (0x0300) */
 #define A20_SYS_vm_alloc          0x0300

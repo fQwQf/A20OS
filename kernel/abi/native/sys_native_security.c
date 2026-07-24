@@ -124,7 +124,7 @@ int64_t sys_a20_ns_apply(const a20_syscall_args_t *args)
     if (r < 0) return r;
 
     struct a20_namespace *ns = (struct a20_namespace *)ns_entry.object;
-    task_t *target = (task_t *)task_entry.object;
+    task_t *target = proc_find((int)(uintptr_t)task_entry.object);
     if (!ns || !target) return -A20_ERR_BAD_HANDLE;
 
     switch (ns->ns_type) {
@@ -220,7 +220,7 @@ int64_t sys_a20_debug_attach(const a20_syscall_args_t *args)
                                             A20_RIGHT_ADMIN, &entry);
     if (r < 0) return r;
 
-    task_t *target = (task_t *)entry.object;
+    task_t *target = proc_find((int)(uintptr_t)entry.object);
     if (!target) return -A20_ERR_BAD_HANDLE;
 
     int64_t h = a20_handle_install(ht, target, A20_OBJ_DEBUG,
@@ -244,7 +244,7 @@ int64_t sys_a20_debug_read_regs(const a20_syscall_args_t *args)
                                             A20_RIGHT_READ, &entry);
     if (r < 0) return r;
 
-    task_t *target = (task_t *)entry.object;
+    task_t *target = proc_find((int)(uintptr_t)entry.object);
     a20_regs_t regs;
     memset(&regs, 0, sizeof(regs));
     if (target && target->trap_ctx) {
@@ -279,7 +279,7 @@ int64_t sys_a20_debug_write_regs(const a20_syscall_args_t *args)
                                             A20_RIGHT_WRITE, &entry);
     if (r < 0) return r;
 
-    task_t *target = (task_t *)entry.object;
+    task_t *target = proc_find((int)(uintptr_t)entry.object);
     if (target && target->trap_ctx) {
         trap_context_t *tc = target->trap_ctx;
         for (int i = 0; i < 32; i++)
@@ -313,7 +313,7 @@ int64_t sys_a20_debug_map_memory(const a20_syscall_args_t *args)
                                 0x20 /* MAP_ANONYMOUS */, -1, 0);
     if (local == 0) return -A20_ERR_NO_MEMORY;
 
-    task_t *target = (task_t *)entry.object;
+    task_t *target = proc_find((int)(uintptr_t)entry.object);
     if (target && target->pgdir) {
         for (uint64_t off = 0; off < len; off += 4096) {
             uint64_t src_page = remote_addr + off;
@@ -323,4 +323,3 @@ int64_t sys_a20_debug_map_memory(const a20_syscall_args_t *args)
 
     return (int64_t)local;
 }
-

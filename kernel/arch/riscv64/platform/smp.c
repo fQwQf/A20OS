@@ -43,6 +43,7 @@ void smp_send_reschedule(unsigned cpu)
 
 void smp_init(void)
 {
+    smp_core_init();
     riscv64_smp_release = 0;
     for (unsigned cpu = 0; cpu < CONFIG_NR_CPUS; cpu++)
         riscv64_cpu_online[cpu] = 0;
@@ -75,6 +76,7 @@ void smp_secondary_init(unsigned cpu_id)
     proc_init_secondary(cpu_id);
     trap_init();
     timer_init();
+    smp_cpu_mark_online(cpu_id);
     __atomic_store_n(&riscv64_cpu_online[cpu_id], 1, __ATOMIC_RELEASE);
 }
 

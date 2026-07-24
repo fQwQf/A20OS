@@ -624,7 +624,7 @@ static inline uint32_t x86_syscall_to_kernel_nr(uint32_t x86_nr)
         /* 306 */ SYS_syncfs,
         /* 307 */ SYS_sendmmsg,
         /* 308 */ SYS_setns,
-        /* 309 */ (uint16_t)-1,     /* getcpu */
+        /* 309 */ SYS_getcpu,
         /* 310 */ (uint16_t)-1,     /* process_vm_readv */
         /* 311 */ (uint16_t)-1,     /* process_vm_writev */
         /* 312 */ (uint16_t)-1,     /* kcmp */

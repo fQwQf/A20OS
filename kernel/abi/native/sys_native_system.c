@@ -11,6 +11,8 @@
 #include "core/version.h"
 #include "core/timekeeping.h"
 #include "core/timer.h"
+#include "core/cpu.h"
+#include "core/smp.h"
 #include "core/random.h"
 #include "trap_frame.h"
 #include "proc/proc.h"
@@ -62,9 +64,19 @@ int64_t sys_a20_system_info(const a20_syscall_args_t *args)
     a20_system_info_t *out = (a20_system_info_t *)A20_ARG(0);
     if (!out) return -A20_ERR_FAULT;
 
+    uint32_t user_size;
+    if (copy_from_user(&user_size, out, sizeof(user_size)) < 0)
+        return -A20_ERR_FAULT;
+    size_t v1_size = offsetof(a20_system_info_t, configured_cpus);
+    if (user_size == 0)
+        user_size = v1_size;
+    if (user_size < v1_size)
+        return -A20_ERR_INVALID_ARGUMENT;
+
     a20_system_info_t info;
     memset(&info, 0, sizeof(info));
-    info.struct_version = 1;
+    info.size = sizeof(info);
+    info.struct_version = 2;
     strncpy(info.sysname, "A20OS", sizeof(info.sysname));
     strncpy(info.nodename, "a20", sizeof(info.nodename));
     strncpy(info.release, VERSION, sizeof(info.release));
@@ -75,8 +87,14 @@ int64_t sys_a20_system_info(const a20_syscall_args_t *args)
     info.total_swap = 0;
     info.free_swap = 0;
     info.num_procs = (uint16_t)proc_pid_max();
+    info.configured_cpus = smp_configured_cpu_count();
+    info.online_cpus = smp_online_cpu_count();
+    info.current_cpu = cpu_current_id();
+    info.page_size = 4096;
+    info.uptime_ns = timer_get_ticks() * (1000000000ULL / TICKS_PER_SEC);
 
-    if (copy_to_user(out, &info, sizeof(info)) < 0) return -A20_ERR_FAULT;
+    size_t copy_size = user_size < sizeof(info) ? user_size : sizeof(info);
+    if (copy_to_user(out, &info, copy_size) < 0) return -A20_ERR_FAULT;
     return A20_OK;
 }
 
@@ -104,4 +122,3 @@ int64_t sys_a20_system_reboot(const a20_syscall_args_t *args)
     }
     return A20_OK;
 }
-
