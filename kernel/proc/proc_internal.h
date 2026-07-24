@@ -42,6 +42,8 @@ static inline uint32_t sched_weight_for_nice(int nice)
 }
 
 extern spinlock_t proc_lock;
+void proc_sched_note_zombie(void);
+task_t *proc_current_on_cpu(unsigned cpu);
 
 task_t *proc_idle_task(void);
 task_t *proc_first_task_locked(void);

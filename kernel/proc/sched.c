@@ -14,7 +14,7 @@
 #include "abi/native/ipc_internal.h"
 #endif
 
-typedef struct proc_runq {
+typedef struct __attribute__((aligned(64))) proc_runq {
     spinlock_t lock;
     task_t *head[SCHED_LEVELS];
     task_t *tail[SCHED_LEVELS];
@@ -41,6 +41,7 @@ typedef struct proc_runq {
 static proc_runq_t sched_runq[CONFIG_NR_CPUS];
 static uint64_t next_wake_scan = SCHED_NO_DEADLINE;
 static uint64_t next_alarm_scan = SCHED_NO_DEADLINE;
+static unsigned sched_zombies_pending;
 
 #define SCHED_TICK_INTERVAL       (TICKS_PER_SEC / 100)
 #define SCHED_MIN_TIMER_INTERVAL  (TICKS_PER_SEC / 10000 ? TICKS_PER_SEC / 10000 : 1)
@@ -61,9 +62,7 @@ static uint64_t next_alarm_scan = SCHED_NO_DEADLINE;
  * proc_lock protects task_list, task->state transitions, and zombie list.
  *
  * Ordering: proc_lock → runq_lock (never the reverse). */
-static spinlock_t sched_runq_lock[CONFIG_NR_CPUS];
-
-#define RUNQ_LOCK(cpu)     (&sched_runq_lock[(cpu)])
+#define RUNQ_LOCK(cpu)     (&sched_runq[(cpu)].lock)
 #define RUNQ_LOCK_IRQ(cpu) spin_lock_irqsave(RUNQ_LOCK(cpu))
 #define RUNQ_UNLOCK_IRQ(cpu, f) spin_unlock_irqrestore(RUNQ_LOCK(cpu), (f))
 
@@ -137,7 +136,7 @@ static void sched_promote_aged_locked(proc_runq_t *rq, uint64_t now)
 void proc_sched_runq_init(void) {
     memset(sched_runq, 0, sizeof(sched_runq));
     for (unsigned i = 0; i < CONFIG_NR_CPUS; i++)
-        spin_init(&sched_runq_lock[i]);
+        spin_init(&sched_runq[i].lock);
     next_wake_scan = SCHED_NO_DEADLINE;
     next_alarm_scan = SCHED_NO_DEADLINE;
 }
@@ -200,9 +199,14 @@ unsigned proc_sched_select_cpu(task_t *t)
     for (unsigned cpu = 0; cpu < CONFIG_NR_CPUS && cpu < 32; cpu++) {
         if (!(mask & (1U << cpu)))
             continue;
-        if (sched_runq[cpu].nr_running < best_load) {
+        unsigned load = __atomic_load_n(&sched_runq[cpu].nr_running,
+                                        __ATOMIC_RELAXED);
+        task_t *running = proc_current_on_cpu(cpu);
+        if (running && running->pid != 0 && running->state == PROC_RUNNING)
+            load++;
+        if (load < best_load) {
             best = cpu;
-            best_load = sched_runq[cpu].nr_running;
+            best_load = load;
         }
     }
     return best;
@@ -290,7 +294,7 @@ void proc_runq_enqueue_locked(task_t *t) {
     t->ready_since = timer_get_ticks();
     sched_runq_append_at(rq, t, q);
     t->on_rq = 1;
-    rq->nr_running++;
+    __atomic_fetch_add(&rq->nr_running, 1, __ATOMIC_RELAXED);
     RUNQ_UNLOCK_IRQ(cpu, rf);
 }
 
@@ -306,8 +310,8 @@ void proc_runq_remove_locked(task_t *t) {
     sched_runq_unlink_at(rq, t, q);
     t->on_rq = 0;
     t->ready_since = 0;
-    if (rq->nr_running > 0)
-        rq->nr_running--;
+    if (__atomic_load_n(&rq->nr_running, __ATOMIC_RELAXED) > 0)
+        __atomic_fetch_sub(&rq->nr_running, 1, __ATOMIC_RELAXED);
     RUNQ_UNLOCK_IRQ(cpu, rf);
 }
 
@@ -358,8 +362,8 @@ task_t *proc_runq_pick_locked(void) {
         t->rq_prev = NULL;
         t->on_rq = 0;
         t->ready_since = 0;
-        if (rq->nr_running > 0)
-            rq->nr_running--;
+        if (__atomic_load_n(&rq->nr_running, __ATOMIC_RELAXED) > 0)
+            __atomic_fetch_sub(&rq->nr_running, 1, __ATOMIC_RELAXED);
 
         if (t != proc_idle_task() && t->state == PROC_READY && t->kstack
             && !t->cg_throttled) {
@@ -488,6 +492,11 @@ void sched_reap_zombies(void)
     } while (count > 0);
 }
 
+void proc_sched_note_zombie(void)
+{
+    __atomic_store_n(&sched_zombies_pending, 1, __ATOMIC_RELEASE);
+}
+
 void context_switch(task_t *next) {
     if (!next || !next->kstack)
         return;
@@ -534,7 +543,8 @@ void sched(void) {
     /* Thread-heavy workloads can keep waking a parent before idle runs.  Reap
      * older auto-reap zombies here, but never the current task: an exiting
      * current task is still running on its own kernel stack until switch-out. */
-    sched_reap_zombies();
+    if (__atomic_exchange_n(&sched_zombies_pending, 0, __ATOMIC_ACQ_REL))
+        sched_reap_zombies();
 
     /* Timer scanning: only scan when a deadline has actually been reached,
      * avoiding O(n) traversal on every sched() call. */

@@ -9,18 +9,18 @@
 #include "core/progress.h"
 
 static void plic_init_hart(void) {
-    int hart = (int)cpu_current_id();
+    int hart = (int)arch_cpu_hart_id(cpu_current_id());
     *(volatile uint32_t *)PLIC_SENABLE(hart) = (1U << UART0_IRQ);
     *(volatile uint32_t *)PLIC_SPRIORITY(hart) = 0;
 }
 
 static uint32_t plic_claim(void) {
-    int hart = (int)cpu_current_id();
+    int hart = (int)arch_cpu_hart_id(cpu_current_id());
     return *(volatile uint32_t *)PLIC_SCLAIM(hart);
 }
 
 static void plic_complete(uint32_t irq) {
-    int hart = (int)cpu_current_id();
+    int hart = (int)arch_cpu_hart_id(cpu_current_id());
     *(volatile uint32_t *)PLIC_SCLAIM(hart) = irq;
 }
 

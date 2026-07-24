@@ -9,6 +9,7 @@
 #include "proc/proc_internal.h"
 #include "sys/syscall.h"
 #include "core/timer.h"
+#include "core/smp.h"
 #include "core/string.h"
 #include "core/consts.h"
 #include "core/defs.h"
@@ -260,6 +261,8 @@ void kernel_main(void) {
 
     proc_init();
     printf("[INIT] Process manager initialized\n");
+    smp_init();
+    smp_boot_secondaries();
     arch_unmap_boot_identity();
     loop_init();
 
