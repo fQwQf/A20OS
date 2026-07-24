@@ -86,7 +86,7 @@ int a20_prepare_start_info(task_t *task, const char *init_path,
     a20_rights_t task_rights = A20_RIGHT_WAIT | A20_RIGHT_SIGNAL |
                                A20_RIGHT_STAT | A20_RIGHT_DUP;
     info.self_task = (a20_handle_t)a20_handle_install(
-        ht, (void *)task, A20_OBJ_TASK, task_rights);
+        ht, (void *)(uintptr_t)task->pid, A20_OBJ_TASK, task_rights);
     if ((int64_t)info.self_task < 0) info.self_task = A20_HANDLE_NULL;
 
     info.main_thread = info.self_task;

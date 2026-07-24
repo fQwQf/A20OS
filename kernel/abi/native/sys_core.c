@@ -421,14 +421,14 @@ int64_t sys_a20_task_spawn(const a20_syscall_args_t *args)
     }
 
     int64_t child_self_h = a20_handle_install(new_ht, (void *)(uintptr_t)new_pid, A20_OBJ_TASK,
-                       A20_RIGHT_WAIT | A20_RIGHT_SIGNAL | A20_RIGHT_STAT |
-                       A20_RIGHT_DUP | A20_RIGHT_TRANSFER);
+                        A20_RIGHT_WAIT | A20_RIGHT_SIGNAL | A20_RIGHT_STAT |
+                        A20_RIGHT_CONTROL | A20_RIGHT_DUP | A20_RIGHT_TRANSFER);
 
     int64_t task_h = a20_handle_install(ht, (void *)(uintptr_t)new_pid,
-                                         A20_OBJ_TASK,
-                                         A20_RIGHT_WAIT | A20_RIGHT_SIGNAL |
-                                         A20_RIGHT_STAT | A20_RIGHT_DUP |
-                                         A20_RIGHT_TRANSFER);
+                                          A20_OBJ_TASK,
+                                          A20_RIGHT_WAIT | A20_RIGHT_SIGNAL |
+                                          A20_RIGHT_STAT | A20_RIGHT_CONTROL | A20_RIGHT_DUP |
+                                          A20_RIGHT_TRANSFER);
     if (task_h < 0) {
         proc_force_exit(new_task, 1);
         return task_h;
@@ -470,8 +470,7 @@ int64_t sys_a20_task_wait(const a20_syscall_args_t *args)
                                               A20_RIGHT_WAIT, &entry);
     if (ret < 0) return ret;
 
-    /* The object pointer for A20_OBJ_TASK is the task_t* itself */
-    task_t *target = (task_t *)entry.object;
+    task_t *target = proc_find((int)(uintptr_t)entry.object);
     if (!target) return -A20_ERR_BAD_HANDLE;
 
     int status = 0;

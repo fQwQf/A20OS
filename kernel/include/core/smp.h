@@ -24,4 +24,13 @@ void smp_boot_secondaries(void);
 /* secondary CPU 的初始化入口，由架构代码调用 */
 void smp_secondary_init(unsigned cpu_id);
 
+/* Configured CPUs may remain offline when a platform has no secondary-start
+ * backend. Common code schedules only on this architecture-neutral mask. */
+void smp_core_init(void);
+void smp_cpu_mark_online(unsigned cpu);
+unsigned smp_configured_cpu_count(void);
+unsigned smp_online_cpu_count(void);
+uint32_t smp_online_cpu_mask(void);
+int smp_cpu_is_online(unsigned cpu);
+
 #endif /* _CORE_SMP_H */
