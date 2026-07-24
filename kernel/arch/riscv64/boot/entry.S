@@ -22,10 +22,17 @@
     .globl _start
 _start:
     /* a0 = hart ID, a1 = DTB pointer (passed by OpenSBI).
-     * Only the boot hart runs initialization; others park.
+     * Only the boot hart runs global initialization; others wait for release.
      * BSS is cleared below, so boot arguments are saved after that. */
 
-    bnez    a0, .park
+    /* OpenSBI may choose any hart as the cold-boot hart.  Elect exactly one
+     * initializer without touching BSS, which that hart clears below. */
+    la      t0, __boot_hart_claim
+.Lclaim_boot:
+    lr.d    t1, 0(t0)
+    bgez    t1, .secondary_wait
+    sc.d    t2, a0, 0(t0)
+    bnez    t2, .Lclaim_boot
 
     la      sp, _stack_end
 
@@ -71,7 +78,11 @@ _start:
     add     t3, t0, t2
     sd      t1, 0(t3)
 
+    j       .enable_mmu
+
+.enable_mmu:
     /* satp = (MODE=8 << 60) | (boot_pgdir_phys >> 12) */
+    la      t0, boot_pgdir
     li      t2, 8
     slli    t2, t2, 60
     srli    t0, t0, 12
@@ -92,9 +103,38 @@ _start:
     jr      t0
 #endif
 
+.secondary_wait:
+    /* CPU 0 clears BSS before publishing this flag.  Secondary harts need no
+     * stack while parked, so they cannot race global C initialization. */
+    la      t0, riscv64_smp_release
+.Lsecondary_wait:
+    ld      t1, 0(t0)
+    bnez    t1, .Lsecondary_released
+    nop
+    j       .Lsecondary_wait
+.Lsecondary_released:
+    fence   rw, rw
+#ifndef CONFIG_NOMMU
+    j       .enable_mmu
+#else
+    la      t0, .Lhh_entry
+    jr      t0
+#endif
+
 .Lhh_entry:
-    /* Now at HH VA (or PA if NOMMU). la gives VA. Fix SP to VA. */
+    /* Convert the physical hart ID to a dense logical CPU ID with the boot
+     * hart at CPU 0, then select that CPU's 64 KiB early stack. */
+    la      t0, __boot_hart_id
+    ld      t1, 0(t0)
+    sub     a0, a0, t1
+    bgez    a0, .Llogical_id_ready
+    li      t0, CONFIG_NR_CPUS
+    add     a0, a0, t0
+.Llogical_id_ready:
     la      sp, _stack_end
+    li      t0, 65536
+    mul     t0, a0, t0
+    sub     sp, sp, t0
 
     la      t0, __trap_from_kernel
     csrw    stvec, t0
@@ -104,6 +144,10 @@ _start:
     li      t0, 0x100
     csrs    sstatus, t0
 
+    beqz    a0, .Lboot_main
+    call    riscv64_secondary_entry
+    j       .park
+.Lboot_main:
     call    kernel_main
 
 .park:
@@ -118,7 +162,7 @@ boot_pgdir:
 
     .align 12
 _stack_bottom:
-    .space  4096 * 16
+    .space  4096 * 16 * CONFIG_NR_CPUS
     .globl _stack_end
 _stack_end:
 
@@ -129,3 +173,9 @@ __boot_hart_id:
     .globl __boot_dtb_ptr
 __boot_dtb_ptr:
     .dword 0
+
+    .section .data
+    .align 3
+    .globl __boot_hart_claim
+__boot_hart_claim:
+    .dword -1

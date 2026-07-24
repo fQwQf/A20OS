@@ -30,3 +30,10 @@ task_t *proc_set_current(task_t *next)
     g_cpu_current[cpu] = next;
     return old;
 }
+
+task_t *proc_current_on_cpu(unsigned cpu)
+{
+    if (cpu >= CONFIG_NR_CPUS)
+        return NULL;
+    return __atomic_load_n(&g_cpu_current[cpu], __ATOMIC_ACQUIRE);
+}
