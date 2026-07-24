@@ -225,6 +225,7 @@ static inline int proc_has_cap(const task_t *t, int cap)
 
 /* ---- Process management API ---- */
 void     proc_init(void);
+void     proc_init_secondary(unsigned cpu_id);
 void     idle_loop(void) NORETURN;
 task_t  *proc_current(void);
 void     proc_sleep_until(uint64_t wake_time);

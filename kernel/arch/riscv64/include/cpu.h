@@ -11,15 +11,10 @@ static inline void arch_wfi(void) { __asm__ __volatile__("wfi"); }
 static inline void arch_cpu_relax(void) { __asm__ __volatile__("nop"); }
 static inline void arch_fence_i(void) { __asm__ __volatile__("fence.i" ::: "memory"); }
 static inline void arch_flush_icache_range(const void *addr, size_t size) { (void)addr; (void)size; arch_fence_i(); }
-/*
- * RISC-V S 模式无法直接读取 mhartid CSR。
- * 使用 BSS 中的 __boot_hart_id 全局变量，由 entry.S 在启动时保存。
- * UP 模式下始终为 0；SMP 模式下每个 hart 在 entry.S 中写入自己的 ID。
- */
-static inline unsigned arch_current_cpu_id(void) {
-    extern uint64_t __boot_hart_id;
-    return (unsigned)__boot_hart_id;
-}
+/* S-mode cannot read mhartid. Once process management is initialized, tp
+ * points at the current task and supplies its logical CPU id. */
+unsigned arch_current_cpu_id(void);
+unsigned arch_cpu_hart_id(unsigned cpu_id);
 
 static inline void arch_local_irq_disable(void) {
     __asm__ __volatile__("csrc sstatus, %0" :: "r"((uint64_t)(1UL << 1)));

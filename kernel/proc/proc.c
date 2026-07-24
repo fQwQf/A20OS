@@ -195,6 +195,7 @@ void proc_make_ready(task_t *t) {
         spin_unlock_irqrestore(&proc_lock, flags);
         return;
     }
+    int was_blocked = t->state == PROC_BLOCKED;
     if (t->state != PROC_READY) {
         t->state = PROC_READY;
         if (t->wake_time == 0 && t->sched_level > 0)
@@ -203,7 +204,7 @@ void proc_make_ready(task_t *t) {
     if (!t->on_rq) {
         if (t == proc_current())
             t->cpu_id = cpu_current_id();
-        else
+        else if (!was_blocked)
             t->cpu_id = proc_sched_select_cpu_locked(t);
     }
     target_cpu = t->cpu_id;
@@ -237,7 +238,6 @@ void idle_loop(void) {
     while (1) {
         arch_local_irq_enable();
         kernel_progress_run_bottom_halves();
-        sched_reap_zombies();
         sched();
         cpu_relax();
     }
@@ -321,10 +321,46 @@ void proc_init(void) {
     idle->kstack = (uintptr_t)ctx;
     g_idle_kstack[0] = idle->kstack;
 
+    for (unsigned cpu = 1; cpu < CONFIG_NR_CPUS; cpu++) {
+        task_t *secondary = &idle_tasks[cpu];
+        secondary->pid = 0;
+        secondary->state = PROC_RUNNING;
+        secondary->sched_level = SCHED_LEVELS - 1;
+        secondary->cpu_id = cpu;
+        secondary->cpus_allowed = 1U << cpu;
+        secondary->pgdir = kpdir;
+        proc_set_name(secondary, "idle");
+
+        void *stack = ARCH_IDLE_STACK(arch_idle_context, cpu);
+        if (!stack)
+            panic("proc_init: no memory for secondary idle stack");
+        ARCH_IDLE_STACK_INIT(stack);
+        uintptr_t top = ARCH_IDLE_STACK_TOP(stack);
+        task_context_t *secondary_ctx = arch_task_context_base(stack, top, NULL);
+        memset(secondary_ctx, 0, sizeof(*secondary_ctx));
+        secondary_ctx->ra = (uintptr_t)idle_loop;
+        secondary_ctx->tp = (uintptr_t)secondary;
+        TASK_CTX_PAGE_TABLE(secondary_ctx) = arch_make_addr_space_token(kpdir);
+        TASK_CTX_STATUS(secondary_ctx) = arch_task_kernel_status();
+        secondary->kstack_base = stack;
+        secondary->kstack = (uintptr_t)secondary_ctx;
+        g_idle_kstack[cpu] = secondary->kstack;
+    }
+
     arch_set_task_pointer(idle);  // 设置 tp 寄存器
     proc_set_current(idle);
 
     kdebug("[PROC] Initialized, idle task pid=0\n");
+}
+
+void proc_init_secondary(unsigned cpu_id)
+{
+    if (cpu_id == 0 || cpu_id >= CONFIG_NR_CPUS)
+        panic("proc_init_secondary: invalid cpu %u", cpu_id);
+
+    task_t *idle = &idle_tasks[cpu_id];
+    arch_set_task_pointer(idle);
+    proc_set_current(idle);
 }
 
 task_t *proc_idle_task(void) { return &idle_tasks[cpu_current_id()]; }

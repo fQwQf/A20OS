@@ -64,11 +64,13 @@ void sbi_reboot(void) {
     firmware_reboot();
 }
 
-/* 向 hart_mask 指定的 hart 集合发送核间中断（IPI）。
- * hart_mask 是位掩码，bit N 表示 hart N。
- * SBI legacy IPI (EID=4): a0=hart_mask */
-void sbi_send_ipi(uint64_t hart_mask) {
-    sbi_call(SBI_SEND_IPI_EID, 0, hart_mask, 0, 0);
+/* SBI v0.2 IPI extension: a0 is a value mask, not the legacy pointer. */
+void sbi_send_ipi(uint64_t hart_mask, uint64_t hart_mask_base) {
+    sbi_call(SBI_SEND_IPI_EID, 0, hart_mask, hart_mask_base, 0);
+}
+
+int64_t sbi_hart_start(uint64_t hart_id, uint64_t start_addr, uint64_t opaque) {
+    return (int64_t)sbi_call(SBI_HSM_EID, 0, hart_id, start_addr, opaque);
 }
 
 #endif /* CONFIG_RISCV64 */
