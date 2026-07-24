@@ -284,6 +284,8 @@ void proc_init(void) {
     idle->limits.memlock = 64 * 1024;
     idle->sched_level = SCHED_LEVELS - 1;
     idle->cpu_id = 0;
+    idle->cpus_allowed = CONFIG_NR_CPUS >= 32
+                         ? ~0U : (1U << CONFIG_NR_CPUS) - 1U;
     proc_set_name(idle, "idle");
     proc_pid_register(idle);
 
