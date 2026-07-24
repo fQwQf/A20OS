@@ -90,7 +90,7 @@ endif
 # Directories
 KERNEL_DIR = kernel
 INCLUDE_DIR = $(KERNEL_DIR)/include
-BUILD_VARIANT = $(ABI)-$(if $(filter 1,$(BRINGUP)),bringup,dev)$(if $(filter 1,$(NOMMU)),-nommu,)
+BUILD_VARIANT = $(ABI)-$(if $(filter 1,$(BRINGUP)),bringup,dev)$(if $(filter 1,$(NOMMU)),-nommu,)$(if $(filter-out 1,$(NR_CPUS)),-smp$(NR_CPUS),)
 ifeq ($(ARCH),armv7m)
 BUILD_VARIANT := $(BUILD_VARIANT)-$(BOARD)-f$(STM32_FLASH_KB)k-r$(STM32_RAM_KB)k
 BUILD_VARIANT := $(BUILD_VARIANT)$(if $(filter 1,$(STM32_QEMU)),-qemu,)
@@ -126,7 +126,8 @@ RISCV_GLIBC_LIB_DIR ?= $(patsubst %/ld-linux-riscv64-lp64d.so.1,%,$(firstword \
 RISCV_GLIBC_LOCAL_ROOT ?= user/external/riscv64-glibc-sysroot
 RISCV_GLIBC_LOCAL_LIB_DIR = $(RISCV_GLIBC_LOCAL_ROOT)/lib
 FEDORA_RISCV_RELEASE ?=
-USER_BUILD_ID = $(ARCH):$(NOMMU):$(OPT)
+USER_BUILD_ID = $(ARCH):$(NOMMU):$(OPT):$(PROFILE)
+USER_BUILD_DESKTOP = $(if $(filter benchmark,$(PROFILE)),0,1)
 USER_BUILD_CHECK_DIRS = user/init.c user/cmds user/init_common user/desktop user/external/lvgl \
                         user/external/musl user/external/sbase user/external/mksh-cvs2git \
                         user/external/tlse user/external/fastfetch
@@ -360,8 +361,11 @@ CFLAGS = -Wall -Wextra $(OPT) -ffreestanding -nostdlib \
          -D$(shell echo $(ARCH) | tr a-z A-Z) \
          -DCONFIG_$(shell echo $(ARCH) | tr a-z A-Z) \
          -DCONFIG_ABI_$(shell echo $(ABI) | tr a-z A-Z) \
-         -DCONFIG_NR_CPUS=$(NR_CPUS) \
-         -DCONFIG_BOARD_$(shell echo $(BOARD) | tr a-z A-Z | tr - _)
+          -DCONFIG_NR_CPUS=$(NR_CPUS) \
+          -DCONFIG_BOARD_$(shell echo $(BOARD) | tr a-z A-Z | tr - _)
+ifneq ($(NR_CPUS),1)
+CFLAGS += -DCONFIG_SMP
+endif
 ifeq ($(COOPERATIVE_BOOT),1)
 CFLAGS += -DCONFIG_AARCH64_COOPERATIVE_BOOT
 endif
@@ -1525,7 +1529,7 @@ $(USER_BUILD_STAMP): user/Makefile force_user_build | $(USER_BUILD_CHECK_DIRS)
 			$(MAKE) -C user ARCH=$(ARCH) NOMMU=$(NOMMU) OPT="$(OPT)" \
 				BUILD_DIR=build/$(USER_VARIANT) clean; \
 		fi; \
-		$(MAKE) -C user ARCH=$(ARCH) NOMMU=$(NOMMU) OPT="$(OPT)" \
+		$(MAKE) -C user ARCH=$(ARCH) NOMMU=$(NOMMU) OPT="$(OPT)" BUILD_DESKTOP=$(USER_BUILD_DESKTOP) \
 			BUILD_DIR=build/$(USER_VARIANT); \
 		printf '%s\n' '$(USER_BUILD_ID)' > "$@"; \
 	else \

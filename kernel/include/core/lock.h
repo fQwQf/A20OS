@@ -89,8 +89,8 @@ static inline void spin_lock_at(spinlock_t *lock, uintptr_t caller_ra) {
 #else
     (void)caller_ra;
 #endif
-    while (__sync_lock_test_and_set(&lock->locked, 1)) {
-        while (lock->locked) {
+    while (__atomic_exchange_n(&lock->locked, 1, __ATOMIC_ACQUIRE)) {
+        while (__atomic_load_n(&lock->locked, __ATOMIC_RELAXED)) {
 #if CONFIG_DEBUG_LOCKS
             if ((++spins & ((1UL << 24) - 1)) == 0) {
                 task_t *owner = (task_t *)lock->owner;
@@ -104,10 +104,9 @@ static inline void spin_lock_at(spinlock_t *lock, uintptr_t caller_ra) {
                        (unsigned long)waiter_ra, spins);
             }
 #endif
-            __asm__ volatile("" ::: "memory");
+            arch_cpu_relax();
         }
     }
-    mb();
 #if CONFIG_DEBUG_LOCKS
     lock->owner = cur;
     lock->owner_ra = waiter_ra;
@@ -119,12 +118,11 @@ static inline void spin_lock(spinlock_t *lock) {
 }
 
 static inline void spin_unlock(spinlock_t *lock) {
-    mb();
 #if CONFIG_DEBUG_LOCKS
     lock->owner = NULL;
     lock->owner_ra = 0;
 #endif
-    __sync_lock_release(&lock->locked);
+    __atomic_store_n(&lock->locked, 0, __ATOMIC_RELEASE);
 }
 
 static inline uint64_t spin_lock_irqsave(spinlock_t *lock) {
