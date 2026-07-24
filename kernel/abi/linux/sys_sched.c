@@ -19,23 +19,9 @@ static size_t sched_cpu_mask_bytes(void)
            sizeof(unsigned long);
 }
 
-static int sched_policy_valid(int policy)
-{
-    return policy == SCHED_NORMAL || policy == SCHED_FIFO ||
-           policy == SCHED_RR || policy == SCHED_BATCH ||
-           policy == SCHED_IDLE;
-}
-
 static int sched_policy_rt(int policy)
 {
     return policy == SCHED_FIFO || policy == SCHED_RR;
-}
-
-static int sched_param_valid(int policy, int prio)
-{
-    if (sched_policy_rt(policy))
-        return prio >= 1 && prio <= 99;
-    return prio == 0;
 }
 
 static int sched_nice_for_weight(uint32_t weight)
@@ -61,48 +47,20 @@ static int sched_param_for_task(task_t *t)
     return (t->priority >= 1 && t->priority <= 99) ? t->priority : 1;
 }
 
-static int sched_dequeue_if_ready(task_t *t)
-{
-    if (!t || !t->on_rq)
-        return 0;
-    proc_runq_remove_locked(t);
-    return t->state == PROC_READY;
-}
-
-static void sched_requeue_if_ready(task_t *t, int requeue)
-{
-    if (requeue && t && t->state == PROC_READY)
-        proc_runq_enqueue_locked(t);
-}
-
-static uint32_t sched_effective_cpu_mask(task_t *t)
-{
-#if CONFIG_NR_CPUS >= 32
-    uint32_t all = ~0U;
-#else
-    uint32_t all = (1U << CONFIG_NR_CPUS) - 1U;
-#endif
-    uint32_t allowed = t ? t->cpus_allowed : all;
-    if (t && t->cgroup) {
-        cg_node_t *node = (cg_node_t *)t->cgroup;
-        allowed &= node->res.cpuset.effective_cpus;
-    }
-    allowed &= all;
-    return allowed ? allowed : all;
-}
-
 int64_t sys_sched_get_priority_max(int policy)
 {
-    if (!sched_policy_valid(policy))
+    int min, max;
+    if (proc_sched_priority_range(policy, &min, &max) < 0)
         return -EINVAL;
-    return sched_policy_rt(policy) ? 99 : 0;
+    return max;
 }
 
 int64_t sys_sched_get_priority_min(int policy)
 {
-    if (!sched_policy_valid(policy))
+    int min, max;
+    if (proc_sched_priority_range(policy, &min, &max) < 0)
         return -EINVAL;
-    return sched_policy_rt(policy) ? 1 : 0;
+    return min;
 }
 
 int64_t sys_sched_getaffinity(int pid, size_t cpusetsize, void *mask)
@@ -114,7 +72,7 @@ int64_t sys_sched_getaffinity(int pid, size_t cpusetsize, void *mask)
 
     size_t mask_bytes = sched_cpu_mask_bytes();
     if (cpusetsize < mask_bytes) return -EINVAL;
-    uint32_t allowed = sched_effective_cpu_mask(t);
+    uint32_t allowed = proc_sched_effective_affinity(t);
     uint8_t out[mask_bytes];
     memset(out, 0, sizeof(out));
     for (unsigned cpu = 0; cpu < CONFIG_NR_CPUS && cpu < 32; cpu++) {
@@ -152,19 +110,18 @@ int64_t sys_sched_setaffinity(int pid, size_t cpusetsize, const void *mask)
     memset(in, 0, sizeof(in));
     if (copy_from_user(in, mask, mask_bytes) < 0) return -EFAULT;
 
-    int nonempty = 0;
     uint32_t allowed = 0;
     for (unsigned cpu = 0; cpu < CONFIG_NR_CPUS; cpu++) {
         if (in[cpu / 8] & (uint8_t)(1U << (cpu % 8))) {
-            nonempty = 1;
             if (cpu < 32)
                 allowed |= 1U << cpu;
         }
     }
-    if (!nonempty) return -EINVAL;
-    if (allowed)
-        t->cpus_allowed = allowed;
-    return 0;
+    proc_sched_config_t config = {
+        .fields = PROC_SCHED_AFFINITY,
+        .affinity = allowed,
+    };
+    return proc_sched_set(t, &config) < 0 ? -EINVAL : 0;
 }
 
 int64_t sys_sched_getparam(int pid, void *param)
@@ -185,12 +142,11 @@ int64_t sys_sched_setparam(int pid, const void *param)
     if (!t) return -ESRCH;
     int prio;
     if (copy_from_user(&prio, param, sizeof(prio)) < 0) return -EFAULT;
-    if (!sched_param_valid(t->sched_policy, prio)) return -EINVAL;
-    int requeue = sched_dequeue_if_ready(t);
-    if (sched_policy_rt(t->sched_policy))
-        t->priority = prio;
-    sched_requeue_if_ready(t, requeue);
-    return 0;
+    proc_sched_config_t config = {
+        .fields = PROC_SCHED_PRIORITY,
+        .priority = prio,
+    };
+    return proc_sched_set(t, &config) < 0 ? -EINVAL : 0;
 }
 
 int64_t sys_sched_getscheduler(int pid)
@@ -206,25 +162,19 @@ int64_t sys_sched_setscheduler(int pid, int policy, const void *param)
 {
     int reset_on_fork = !!(policy & SCHED_RESET_ON_FORK);
     policy &= ~SCHED_RESET_ON_FORK;
-    if (!sched_policy_valid(policy)) return -EINVAL;
     if (!param) return -EFAULT;
     if (pid < 0) return -EINVAL;
     task_t *t = sched_task_for_pid(pid);
     if (!t) return -ESRCH;
     int prio;
     if (copy_from_user(&prio, param, sizeof(prio)) < 0) return -EFAULT;
-    if (!sched_param_valid(policy, prio)) return -EINVAL;
-    int requeue = sched_dequeue_if_ready(t);
-    if (sched_policy_rt(policy)) {
-        t->priority = prio;
-        t->sched_level = 0;
-    } else if (sched_policy_rt(t->sched_policy)) {
-        t->priority = sched_nice_for_weight(t->cfs_weight);
-    }
-    t->sched_policy = policy;
-    t->sched_reset_on_fork = reset_on_fork;
-    sched_requeue_if_ready(t, requeue);
-    return 0;
+    proc_sched_config_t config = {
+        .fields = PROC_SCHED_POLICY | PROC_SCHED_PRIORITY,
+        .policy = policy,
+        .priority = prio,
+        .reset_on_fork = reset_on_fork,
+    };
+    return proc_sched_set(t, &config) < 0 ? -EINVAL : 0;
 }
 
 int64_t sys_sched_rr_get_interval(int pid, void *tp)
@@ -250,10 +200,11 @@ int64_t sys_setpriority(int which, int who, int prio)
     if (!t) return -ESRCH;
     if (prio < -20) prio = -20;
     if (prio > 19) prio = 19;
-    if (!sched_policy_rt(t->sched_policy))
-        t->priority = prio;
-    t->cfs_weight = sched_weight_for_nice(prio);
-    return 0;
+    proc_sched_config_t config = {
+        .fields = PROC_SCHED_NICE,
+        .nice = prio,
+    };
+    return proc_sched_set(t, &config) < 0 ? -EINVAL : 0;
 }
 
 int64_t sys_nice(int inc)

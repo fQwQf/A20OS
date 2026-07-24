@@ -216,6 +216,20 @@ typedef struct task_t {
     uint64_t        cg_cpu_start;
 } task_t;
 
+#define PROC_SCHED_POLICY   (1U << 0)
+#define PROC_SCHED_PRIORITY (1U << 1)
+#define PROC_SCHED_AFFINITY (1U << 2)
+#define PROC_SCHED_NICE     (1U << 3)
+
+typedef struct proc_sched_config {
+    uint32_t fields;
+    int policy;
+    int priority;
+    int nice;
+    uint32_t affinity;
+    int reset_on_fork;
+} proc_sched_config_t;
+
 static inline int proc_has_cap(const task_t *t, int cap)
 {
     if (!t) return 1;
@@ -252,6 +266,10 @@ void     proc_force_exit(task_t *t, int exit_code);
 void     proc_check_exit_pending(void);
 int      proc_wait4(int pid, int *status, int options);
 void     proc_yield(void);
+int      proc_sched_get(task_t *t, proc_sched_config_t *out);
+int      proc_sched_set(task_t *t, const proc_sched_config_t *config);
+int      proc_sched_priority_range(int policy, int *min, int *max);
+uint32_t proc_sched_effective_affinity(task_t *t);
 void     sched(void);
 void     context_switch(task_t *next);
 uint64_t proc_next_timer_interval(uint64_t now);
