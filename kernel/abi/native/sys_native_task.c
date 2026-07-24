@@ -11,6 +11,7 @@
 #include "core/version.h"
 #include "core/timekeeping.h"
 #include "core/timer.h"
+#include "core/cpu.h"
 #include "core/random.h"
 #include "trap_frame.h"
 #include "proc/proc.h"
@@ -71,7 +72,7 @@ int64_t sys_a20_task_kill(const a20_syscall_args_t *args)
                                             A20_RIGHT_SIGNAL, &entry);
     if (r < 0) return r;
 
-    task_t *target = (task_t *)entry.object;
+    task_t *target = proc_find((int)(uintptr_t)entry.object);
     if (!target) return -A20_ERR_BAD_HANDLE;
 
     if (sig == 9) {
@@ -95,7 +96,7 @@ int64_t sys_a20_task_info(const a20_syscall_args_t *args)
                                             A20_RIGHT_STAT, &entry);
     if (r < 0) return r;
 
-    task_t *target = (task_t *)entry.object;
+    task_t *target = proc_find((int)(uintptr_t)entry.object);
     if (!target) return -A20_ERR_BAD_HANDLE;
 
     a20_task_info_t info;
@@ -137,6 +138,15 @@ int64_t sys_a20_thread_yield(const a20_syscall_args_t *args)
     return A20_OK;
 }
 
+int64_t sys_a20_thread_get_cpu(const a20_syscall_args_t *args)
+{
+    uint32_t *out = (uint32_t *)A20_ARG(0);
+    uint32_t cpu = cpu_current_id();
+    if (!out || copy_to_user(out, &cpu, sizeof(cpu)) < 0)
+        return -A20_ERR_FAULT;
+    return A20_OK;
+}
+
 int64_t sys_a20_thread_exit(const a20_syscall_args_t *args)
 {
     int32_t code = (int32_t)A20_ARG(0);
@@ -159,16 +169,18 @@ int64_t sys_a20_task_get_sched(const a20_syscall_args_t *args)
                                             A20_RIGHT_STAT, &entry);
     if (r < 0) return r;
 
-    task_t *target = (task_t *)entry.object;
+    task_t *target = proc_find((int)(uintptr_t)entry.object);
     a20_sched_args_t kinfo;
     memset(&kinfo, 0, sizeof(kinfo));
     kinfo.size = sizeof(kinfo);
     kinfo.version = 1;
-    if (target) {
-        kinfo.priority = target->priority;
-        kinfo.policy = target->sched_policy;
-        kinfo.nice = target->priority - 100;
-        kinfo.affinity = (uint64_t)1 << target->cpu_id;
+    proc_sched_config_t config;
+    if (target && proc_sched_get(target, &config) == 0) {
+        kinfo.flags = config.fields;
+        kinfo.priority = config.priority;
+        kinfo.policy = config.policy;
+        kinfo.nice = config.nice;
+        kinfo.affinity = config.affinity;
         kinfo.affinity_size = sizeof(uint64_t);
     }
     if (copy_to_user(out, &kinfo, sizeof(kinfo)) < 0)
@@ -191,7 +203,7 @@ int64_t sys_a20_task_get_usage(const a20_syscall_args_t *args)
                                             A20_RIGHT_STAT, &entry);
     if (r < 0) return r;
 
-    task_t *target = (task_t *)entry.object;
+    task_t *target = proc_find((int)(uintptr_t)entry.object);
     a20_rusage_t usage;
     memset(&usage, 0, sizeof(usage));
     if (target) {
@@ -203,4 +215,3 @@ int64_t sys_a20_task_get_usage(const a20_syscall_args_t *args)
         return -A20_ERR_FAULT;
     return A20_OK;
 }
-

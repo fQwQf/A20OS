@@ -324,6 +324,11 @@ typedef struct a20_sched_args {
     uint64_t       affinity_size;
 } a20_sched_args_t;
 
+#define A20_SCHED_POLICY   (1U << 0)
+#define A20_SCHED_PRIORITY (1U << 1)
+#define A20_SCHED_AFFINITY (1U << 2)
+#define A20_SCHED_NICE     (1U << 3)
+
 typedef struct a20_rlimit_args {
     uint32_t       size;
     uint32_t       version;
@@ -754,6 +759,11 @@ typedef struct a20_system_info {
     uint64_t       free_swap;
     uint16_t       num_procs;
     uint16_t       _pad;
+    uint32_t       configured_cpus;
+    uint32_t       online_cpus;
+    uint32_t       current_cpu;
+    uint32_t       page_size;
+    uint64_t       uptime_ns;
 } a20_system_info_t;
 
 #endif /* _ABI_NATIVE_TYPES_H */
