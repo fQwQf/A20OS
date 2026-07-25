@@ -79,6 +79,7 @@ static void detach_mapping_locked(page_cache_page_t *page)
     page->valid = 0;
     page->dirty = 0;
     page->dirty_gen = 0;
+    page->invalidate_gen++;
     page->uptodate = 0;
     if (vn)
         vnode_put(vn);
@@ -123,6 +124,7 @@ int page_cache_init(void)
             return -ENOMEM;
         g_pages[i].data = pfn_to_virt(g_pages[i].pfn);
         refcount_set(&g_pages[i].ref_count, 0);
+        mutex_init(&g_pages[i].fill_lock);
         lru_insert_front(&g_pages[i]);
     }
     g_initialized = 1;
@@ -159,6 +161,7 @@ page_cache_page_t *page_cache_get(vnode_t *vn, uint64_t index, int create)
     page->valid = 1;
     page->dirty = 0;
     page->dirty_gen = 0;
+    page->invalidate_gen++;
     page->uptodate = 0;
     memset(page->data, 0, PAGE_SIZE);
     vnode_get(vn);
@@ -207,31 +210,80 @@ int page_cache_is_uptodate(page_cache_page_t *page)
     return __atomic_load_n(&page->uptodate, __ATOMIC_ACQUIRE) != 0;
 }
 
+static int publish_uptodate(page_cache_page_t *page, uint64_t invalidate_gen)
+{
+    uint64_t flags = spin_lock_irqsave(&g_page_cache_lock);
+    int unchanged = page->valid && page->invalidate_gen == invalidate_gen;
+    if (unchanged)
+        __atomic_store_n(&page->uptodate, 1, __ATOMIC_RELEASE);
+    spin_unlock_irqrestore(&g_page_cache_lock, flags);
+    return unchanged;
+}
+
+static uint64_t snapshot_invalidate_gen(page_cache_page_t *page)
+{
+    uint64_t flags = spin_lock_irqsave(&g_page_cache_lock);
+    uint64_t invalidate_gen = page->invalidate_gen;
+    spin_unlock_irqrestore(&g_page_cache_lock, flags);
+    return invalidate_gen;
+}
+
 int page_cache_fill_vfile_page(vfile_t *vf, page_cache_page_t *page)
 {
     if (!vf || !vf->ops || !vf->ops->read || !vf->ops->lseek)
         return -EINVAL;
 
-    size_t saved = vf->offset;
+    mutex_lock(&page->fill_lock);
+    if (page_cache_is_uptodate(page)) {
+        mutex_unlock(&page->fill_lock);
+        return 0;
+    }
+
     uint64_t page_base = page->index * PAGE_SIZE;
     void *data = page_cache_data(page);
-    if (!data)
+    if (!data) {
+        mutex_unlock(&page->fill_lock);
         return -ENOMEM;
+    }
+
+    uint64_t invalidate_gen;
+retry:
+    invalidate_gen = snapshot_invalidate_gen(page);
+    if (vf->vnode->ops && vf->vnode->ops->readpage) {
+        int r = vf->vnode->ops->readpage(vf->vnode, page->index,
+                                         data, PAGE_SIZE);
+        if (r < 0) {
+            mutex_unlock(&page->fill_lock);
+            return r;
+        }
+        if (!publish_uptodate(page, invalidate_gen))
+            goto retry;
+        mutex_unlock(&page->fill_lock);
+        return r;
+    }
+
+    size_t saved = vf->offset;
 
     long seek_r = vf->ops->lseek(vf, (long)page_base, SEEK_SET);
-    if (seek_r < 0)
+    if (seek_r < 0) {
+        mutex_unlock(&page->fill_lock);
         return (int)seek_r;
+    }
 
     int r = vf->ops->read(vf, (char *)data, PAGE_SIZE);
     int restore_r = vf->ops->lseek(vf, (long)saved, SEEK_SET);
     if (restore_r < 0 && r >= 0)
         r = restore_r;
-    if (r < 0)
+    if (r < 0) {
+        mutex_unlock(&page->fill_lock);
         return r;
+    }
 
     if ((size_t)r < PAGE_SIZE)
         memset((char *)data + r, 0, PAGE_SIZE - (size_t)r);
-    page_cache_mark_uptodate(page);
+    if (!publish_uptodate(page, invalidate_gen))
+        goto retry;
+    mutex_unlock(&page->fill_lock);
     return r;
 }
 
@@ -425,6 +477,7 @@ void page_cache_invalidate_uptodate_range(vnode_t *vn, uint64_t start_byte,
         if (refcount_read(&page->ref_count) == 0) {
             detach_mapping_locked(page);
         } else {
+            page->invalidate_gen++;
             __atomic_store_n(&page->uptodate, 0, __ATOMIC_RELEASE);
         }
     }
@@ -435,14 +488,20 @@ void page_cache_truncate(vnode_t *vn, uint64_t new_size)
 {
     if (!g_initialized || !vn)
         return;
-    uint64_t first_drop = ROUND_UP(new_size, PAGE_SIZE) / PAGE_SIZE;
+    uint64_t eof_index = new_size / PAGE_SIZE;
+    size_t eof_offset = new_size % PAGE_SIZE;
     uint64_t flags = spin_lock_irqsave(&g_page_cache_lock);
     for (int i = 0; i < PAGE_CACHE_MAX_PAGES; i++) {
         page_cache_page_t *page = &g_pages[i];
-        if (!page->valid || page->vnode != vn || page->index < first_drop)
+        if (!page->valid || page->vnode != vn || page->index < eof_index)
             continue;
+        int partial_eof_page = eof_offset && page->index == eof_index;
         if (refcount_read(&page->ref_count) == 0) {
             detach_mapping_locked(page);
+        } else if (partial_eof_page) {
+            memset((char *)page->data + eof_offset, 0,
+                   PAGE_SIZE - eof_offset);
+            page->invalidate_gen++;
         } else {
             /*
              * Page is pinned by a concurrent reader/writer.  We cannot
@@ -451,6 +510,7 @@ void page_cache_truncate(vnode_t *vn, uint64_t new_size)
              * returned.  Zero the data and mark non-uptodate/non-dirty.
              */
             memset(page->data, 0, PAGE_SIZE);
+            page->invalidate_gen++;
             __atomic_store_n(&page->uptodate, 0, __ATOMIC_RELEASE);
             __atomic_store_n(&page->dirty, 0, __ATOMIC_RELEASE);
         }
