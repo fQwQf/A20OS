@@ -12,6 +12,8 @@
 #define SBI_SRST_COLD_REBOOT    1
 #define SBI_SEND_IPI_EID        0x735049UL
 #define SBI_HSM_EID             0x48534DUL
+#define SBI_RFENCE_EID          0x52464E43UL
+#define SBI_RFENCE_SFENCE_VMA   1
 
 void firmware_set_timer(uint64_t time);
 void firmware_console_putchar(char c);
@@ -27,5 +29,7 @@ void sbi_shutdown(void);
 void sbi_reboot(void);
 void sbi_send_ipi(uint64_t hart_mask, uint64_t hart_mask_base);
 int64_t sbi_hart_start(uint64_t hart_id, uint64_t start_addr, uint64_t opaque);
+int64_t sbi_remote_sfence_vma(uint64_t hart_mask, uint64_t hart_mask_base,
+                              uint64_t start, uint64_t size);
 
 #endif

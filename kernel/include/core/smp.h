@@ -30,12 +30,15 @@ typedef struct smp_platform_ops {
     int (*start)(const smp_cpu_desc_t *cpu, uintptr_t entry_pa,
                  uintptr_t logical_context);
     void (*send_ipi)(const smp_cpu_desc_t *cpu, smp_ipi_reason_t reason);
+    int (*remote_tlb_flush)(uint32_t logical_mask, uint64_t addr,
+                            uint64_t size);
     /* Per-CPU controller or firmware setup, run on the secondary CPU. */
     void (*secondary_init)(const smp_cpu_desc_t *cpu);
 } smp_platform_ops_t;
 
 /* Send a reschedule IPI to an online logical CPU. */
 void smp_send_reschedule(unsigned cpu);
+int smp_remote_tlb_flush(uint32_t logical_mask, uint64_t addr, uint64_t size);
 
 /* Discover topology after proc_init(). */
 void smp_init(void);
