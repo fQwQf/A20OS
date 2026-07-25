@@ -1931,7 +1931,7 @@ extra-user-apps:
 # return immediately here.  Fedora's cross GCC omits it, so bootstrap the
 # target runtime from Fedora's official RISC-V repository into the project.
 prepare-riscv64-glibc-sysroot:
-	@if [ "$(ARCH)" = riscv64 ] && [ -n "$(filter rust rustc cargo,$(EXTRA_PACKAGES))" ]; then \
+	@if [ "$(ARCH)" = riscv64 ] && [ -n "$(filter rust rustc cargo rustfmt,$(EXTRA_PACKAGES))" ]; then \
 		user/extra/prepare-riscv64-glibc-sysroot.sh \
 			"$(RISCV_GLIBC_LIB_DIR)" "$(RISCV_GLIBC_LOCAL_ROOT)" "$(FEDORA_RISCV_RELEASE)"; \
 	fi
@@ -1973,7 +1973,7 @@ $(EXTRA_IMAGE_STAMP): force_extra_image_stamp
 				vim) stamp=.vim-built ;; \
 				git) stamp=.git-built ;; \
 				gcc|cc) stamp=.gcc-built ;; \
-				rust|rustc|cargo) stamp=.rust-built ;; \
+				rust|rustc|cargo|rustfmt) stamp=.rust-built ;; \
 				*) continue ;; \
 			esac; \
 			f="user/build/extra/$(ARCH)/stamp/$$stamp"; \
@@ -1985,7 +1985,7 @@ $(EXTRA_IMAGE_STAMP): force_extra_image_stamp
 		if [ -n "$(filter git,$(EXTRA_PACKAGES))" ]; then \
 			find user/external/git/templates/blt -type f -printf 'git-template %P %s %T@\n' 2>/dev/null || true; \
 		fi; \
-		if [ "$(ARCH)" = riscv64 ] && [ -n "$(filter rust rustc cargo,$(EXTRA_PACKAGES))" ]; then \
+		if [ "$(ARCH)" = riscv64 ] && [ -n "$(filter rust rustc cargo rustfmt,$(EXTRA_PACKAGES))" ]; then \
 			for dir in "$(RISCV_GLIBC_LIB_DIR)" "$(RISCV_GLIBC_LOCAL_LIB_DIR)"; do \
 				[ -n "$$dir" ] || continue; \
 				for name in ld-linux-riscv64-lp64d.so.1 libc.so.6 libdl.so.2 libm.so.6 \
@@ -2042,9 +2042,11 @@ $(EXTRA_IMG): $(EXTRA_IMAGE_STAMP)
 		mv "$(EXTRA_STAGING_DIR)/bin/cc" "$(EXTRA_STAGING_DIR)/bin/cc-real"; \
 		printf '#!/bin/sh\nexec /test/bin/cc-real -fno-lto -fno-use-linker-plugin "$$@"\n' > "$(EXTRA_STAGING_DIR)/bin/cc"; \
 	fi
-	@if [ "$(ARCH)" = riscv64 ] && [ -n "$(filter rust rustc cargo,$(EXTRA_PACKAGES))" ]; then \
+	@if [ "$(ARCH)" = riscv64 ] && [ -n "$(filter rust rustc cargo rustfmt,$(EXTRA_PACKAGES))" ]; then \
 		RUST=user/build/extra/$(ARCH)/obj/rust; \
-		[ -x "$$RUST/bin/rustc" ] && [ -x "$$RUST/bin/cargo" ] || { echo "Rust installation missing from $$RUST"; exit 1; }; \
+		[ -x "$$RUST/bin/rustc" ] && [ -x "$$RUST/bin/cargo" ] && \
+			[ -x "$$RUST/bin/rustfmt" ] && [ -x "$$RUST/bin/cargo-fmt" ] || \
+			{ echo "Rust installation incomplete in $$RUST"; exit 1; }; \
 		GLIBC="$(RISCV_GLIBC_LIB_DIR)"; \
 		REQUIRED_GLIBC="ld-linux-riscv64-lp64d.so.1 libc.so.6 libdl.so.2 libm.so.6 libpthread.so.0 librt.so.1 libatomic.so.1 libgcc_s.so.1"; \
 		MISSING_GLIBC=""; \
@@ -2062,8 +2064,11 @@ $(EXTRA_IMG): $(EXTRA_IMAGE_STAMP)
 		cp -a "$$RUST" "$(EXTRA_STAGING_DIR)/rust"; \
 		printf '#!/bin/sh\nexec /test/rust/bin/rustc --target riscv64gc-unknown-linux-musl -C linker=/test/rust/lib/rustlib/riscv64gc-unknown-linux-gnu/bin/rust-lld -C relocation-model=static -C link-arg=-L/test/rust/a20-sysroot/lib -C link-arg=-static -C link-arg=/test/rust/a20-sysroot/lib/crt1.o -C link-arg=/test/rust/a20-sysroot/lib/crti.o -C link-arg=/test/rust/a20-sysroot/lib/crtn.o "$$@"\n' > "$(EXTRA_STAGING_DIR)/bin/rustc"; \
 		printf '#!/bin/sh\nexport RUSTC=/test/rust/bin/rustc\nexport CARGO_BUILD_TARGET=riscv64gc-unknown-linux-musl\nexec /test/rust/bin/cargo --config /test/rust/config.toml "$$@"\n' > "$(EXTRA_STAGING_DIR)/bin/cargo"; \
+		printf '#!/bin/sh\nexec /test/rust/bin/rustfmt "$$@"\n' > "$(EXTRA_STAGING_DIR)/bin/rustfmt"; \
+		printf '#!/bin/sh\nexec /test/rust/bin/cargo-fmt "$$@"\n' > "$(EXTRA_STAGING_DIR)/bin/cargo-fmt"; \
 		printf '[target.riscv64gc-unknown-linux-musl]\nlinker = "/test/rust/lib/rustlib/riscv64gc-unknown-linux-gnu/bin/rust-lld"\nrustflags = ["-C", "relocation-model=static", "-C", "link-arg=-L/test/rust/a20-sysroot/lib", "-C", "link-arg=-static", "-C", "link-arg=/test/rust/a20-sysroot/lib/crt1.o", "-C", "link-arg=/test/rust/a20-sysroot/lib/crti.o", "-C", "link-arg=/test/rust/a20-sysroot/lib/crtn.o"]\n' > "$(EXTRA_STAGING_DIR)/rust/config.toml"; \
-		chmod 0755 "$(EXTRA_STAGING_DIR)/bin/rustc" "$(EXTRA_STAGING_DIR)/bin/cargo"; \
+		chmod 0755 "$(EXTRA_STAGING_DIR)/bin/rustc" "$(EXTRA_STAGING_DIR)/bin/cargo" \
+			"$(EXTRA_STAGING_DIR)/bin/rustfmt" "$(EXTRA_STAGING_DIR)/bin/cargo-fmt"; \
 		mkdir -p "$(EXTRA_STAGING_DIR)/glibc/lib"; \
 		for f in $$REQUIRED_GLIBC; do \
 			cp -aL "$$GLIBC/$$f" "$(EXTRA_STAGING_DIR)/glibc/lib/$$f"; \
