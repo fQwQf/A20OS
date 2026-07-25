@@ -415,6 +415,10 @@ static int handle_file_fault(task_t *t, uint64_t page_va, int file_fd,
         vfs_put_file_ref(file_fd, vf);
         return -1;
     }
+    if (!vf->vnode->ops || !vf->vnode->ops->readpage) {
+        vfs_put_file_ref(file_fd, vf);
+        return -1;
+    }
 
     page_cache_page_t *pcp = page_cache_get(vf->vnode,
                                              file_pos / PAGE_SIZE, 1);
@@ -423,14 +427,15 @@ static int handle_file_fault(task_t *t, uint64_t page_va, int file_fd,
         return -1;
     }
     int fill_r = 0;
-    if (!page_cache_is_uptodate(pcp)) {
-        /* Fault I/O must not change the shared file-description offset or
-         * recursively acquire its mutex from read(fd, mapped_buffer, ...). */
-        vfile_t fault_vf = *vf;
-        mutex_init(&fault_vf.offset_lock);
-        fill_r = page_cache_fill_vfile_page(&fault_vf, pcp);
-    }
+    if (!page_cache_is_uptodate(pcp))
+        fill_r = page_cache_fill_vfile_page(vf, pcp);
     if (fill_r < 0) {
+        page_cache_put(pcp);
+        vfs_put_file_ref(file_fd, vf);
+        return -1;
+    }
+    if (file_pos >= vf->vnode->size) {
+        signal_send(t->pid, SIGBUS);
         page_cache_put(pcp);
         vfs_put_file_ref(file_fd, vf);
         return -1;

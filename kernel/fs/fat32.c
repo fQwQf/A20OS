@@ -748,6 +748,8 @@ static int fat32_vn_rmdir(vnode_t *dir, const char *name) {
 }
 
 static vfile_t *fat32_open_vnode(vnode_t *vn, int flags);
+static int fat32_vn_readpage(vnode_t *vn, uint64_t index,
+                             void *data, size_t len);
 
 static vnode_ops_t g_fat32_vnode_ops = {
     .lookup   = fat32_lookup,
@@ -758,6 +760,7 @@ static vnode_ops_t g_fat32_vnode_ops = {
     .rename   = NULL,
     .stat     = fat32_stat,
     .truncate = fat32_vn_truncate,
+    .readpage = fat32_vn_readpage,
     .writepage = fat32_vn_writepage,
     .chmod    = fat32_vn_chmod,
     .chown    = fat32_vn_chown,
@@ -920,6 +923,40 @@ static int fat32_fread(vfile_t *vf, char *buf, size_t count) {
     fat32_fctx_cache_pos(fc, cluster, cache_index, off);
     fat32_unlock(sb);
     return (int)done;
+}
+
+static int fat32_vn_readpage(vnode_t *vn, uint64_t index,
+                             void *data, size_t len)
+{
+    if (!vn || !vn->fs_data || !data)
+        return -EINVAL;
+    fat32_vnode_priv_t *fp = (fat32_vnode_priv_t *)vn->fs_data;
+    if (fp->is_dir)
+        return -EISDIR;
+
+    memset(data, 0, len);
+    uint64_t off = index * PAGE_SIZE;
+    if (off >= fp->file_size)
+        return 0;
+    size_t n = fp->file_size - (size_t)off;
+    if (n > len)
+        n = len;
+
+    fat32_fctx_t fc;
+    memset(&fc, 0, sizeof(fc));
+    fc.sb = fp->sb;
+    fc.first_cluster = fp->first_cluster;
+    fc.file_size = fp->file_size;
+    fc.file_off = (size_t)off;
+
+    vfile_t local;
+    memset(&local, 0, sizeof(local));
+    local.vnode = vn;
+    local.flags = O_RDONLY;
+    local.offset = (size_t)off;
+    local.priv = &fc;
+    int r = fat32_fread(&local, (char *)data, n);
+    return r;
 }
 
 static int fat32_fwrite_unlocked(vfile_t *vf, const char *buf, size_t count) {

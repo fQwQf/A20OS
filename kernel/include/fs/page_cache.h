@@ -28,7 +28,9 @@ typedef struct page_cache_page {
     int valid;
     int dirty;
     uint64_t dirty_gen;
+    uint64_t invalidate_gen;
     int uptodate;
+    mutex_t fill_lock;
     pfn_t pfn;
     void *data;
     struct page_cache_page *prev;

@@ -20,6 +20,8 @@ static vnode_t *ext4_make_vnode(ext4_sb_info_t *sb, uint32_t ino, uint32_t sz, i
 static int      ext4_inode_remove(ext4_sb_info_t *sb, uint32_t dir_ino, ext4_inode_t *di, const char *name, uint32_t ino);
 static int      ext4_vn_writepage(vnode_t *vn, uint64_t index,
                                   const void *data, size_t len);
+static int      ext4_vn_readpage(vnode_t *vn, uint64_t index,
+                                 void *data, size_t len);
 
 /* ---- inode & extent cache helpers ---- */
 
@@ -1217,6 +1219,7 @@ static vnode_ops_t g_ext4_vnode_ops = {
     .readlink = ext4_readlink,
     .stat     = ext4_stat,
     .truncate = ext4_vn_truncate,
+    .readpage = ext4_vn_readpage,
     .writepage = ext4_vn_writepage,
     .chmod    = ext4_vn_chmod,
     .chown    = ext4_vn_chown,
@@ -1347,6 +1350,41 @@ static int ext4_fwrite(vfile_t *vf, const char *buf, size_t count) {
         vf->offset = fc->file_off;
     }
     return (int)done;
+}
+
+static int ext4_vn_readpage(vnode_t *vn, uint64_t index,
+                            void *data, size_t len)
+{
+    if (!vn || !vn->fs_data || !data)
+        return -EINVAL;
+    ext4_vnode_priv_t *fp = (ext4_vnode_priv_t *)vn->fs_data;
+    if (fp->type == VFS_FT_DIR)
+        return -EISDIR;
+
+    memset(data, 0, len);
+    uint64_t off = index * PAGE_SIZE;
+    if (off >= fp->file_size)
+        return 0;
+    size_t n = fp->file_size - (size_t)off;
+    if (n > len)
+        n = len;
+
+    ext4_fctx_t fc;
+    memset(&fc, 0, sizeof(fc));
+    fc.sb = fp->sb;
+    fc.inode_num = fp->inode_num;
+    fc.file_size = fp->file_size;
+    fc.is_dir = 0;
+    fc.file_off = (size_t)off;
+
+    vfile_t local;
+    memset(&local, 0, sizeof(local));
+    local.vnode = vn;
+    local.flags = O_RDONLY;
+    local.offset = (size_t)off;
+    local.priv = &fc;
+    int r = ext4_fread(&local, (char *)data, n);
+    return r;
 }
 
 static int ext4_vn_writepage(vnode_t *vn, uint64_t index,

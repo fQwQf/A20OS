@@ -23,6 +23,7 @@ typedef struct ramfs_inode {
     uint32_t mode;
     uint32_t uid;
     uint32_t gid;
+    mutex_t data_lock;
     spinlock_t fifo_lock;
     int fifo_readers;
     int fifo_writers;
@@ -53,6 +54,7 @@ static ramfs_inode_t *ramfs_alloc_inode(int type) {
     for (int i = 0; i < RAMFS_MAX_INODES; i++) {
         if (g_inode_table[i].ref_count == 0) {
             memset(&g_inode_table[i], 0, sizeof(g_inode_table[i]));
+            mutex_init(&g_inode_table[i].data_lock);
             spin_init(&g_inode_table[i].fifo_lock);
             g_inode_table[i].inum = g_next_inum++;
             g_inode_table[i].type = type;
@@ -164,6 +166,8 @@ static void ramfs_init_storage(void) {
     g_next_inum = 1;
 
     ramfs_inode_t *root = &g_inode_table[0];
+    mutex_init(&root->data_lock);
+    spin_init(&root->fifo_lock);
     root->inum = 0;
     root->type = FT_DIRECTORY;
     root->ref_count = 1;
@@ -581,13 +585,18 @@ static int ramfs_vnode_truncate(vnode_t *vn, size_t size) {
     if (!inode) return -EINVAL;
     if (inode->type == FT_DIRECTORY) return -EISDIR;
 
+    mutex_lock(&inode->data_lock);
+
     if (size > inode->capacity) {
         size_t new_cap = size * 2;
         char *new_data = (char *)kmalloc(new_cap);
         if (!new_data) {
             new_cap = size;
             new_data = (char *)kmalloc(new_cap);
-            if (!new_data) return -ENOMEM;
+            if (!new_data) {
+                mutex_unlock(&inode->data_lock);
+                return -ENOMEM;
+            }
         }
         if (inode->data) {
             size_t copy_len = inode->size < inode->capacity ? inode->size : inode->capacity;
@@ -603,7 +612,10 @@ static int ramfs_vnode_truncate(vnode_t *vn, size_t size) {
     } else if (size < inode->capacity) {
         size_t new_cap = size ? size : 1;
         char *new_data = (char *)kmalloc(new_cap);
-        if (!new_data) return -ENOMEM;
+        if (!new_data) {
+            mutex_unlock(&inode->data_lock);
+            return -ENOMEM;
+        }
         size_t keep = inode->size < size ? inode->size : size;
         if (keep > inode->capacity) keep = inode->capacity;
         if (inode->data && keep > 0)
@@ -621,6 +633,7 @@ static int ramfs_vnode_truncate(vnode_t *vn, size_t size) {
 
     inode->size = size;
     vn->size = size;
+    mutex_unlock(&inode->data_lock);
     return 0;
 }
 
@@ -633,17 +646,48 @@ static int ramfs_vnode_writepage(vnode_t *vn, uint64_t index,
     if (inode->type == FT_DIRECTORY)
         return -EISDIR;
 
+    mutex_lock(&inode->data_lock);
     uint64_t off = index * PAGE_SIZE;
-    if (off >= inode->size)
+    if (off >= inode->size) {
+        mutex_unlock(&inode->data_lock);
         return 0;
+    }
     size_t n = inode->size - (size_t)off;
     if (n > len)
         n = len;
-    if (off + n > inode->capacity)
+    if (off + n > inode->capacity) {
+        mutex_unlock(&inode->data_lock);
         return -EIO;
+    }
 
     memcpy(inode->data + off, data, n);
+    mutex_unlock(&inode->data_lock);
     return 0;
+}
+
+static int ramfs_vnode_readpage(vnode_t *vn, uint64_t index,
+                                void *data, size_t len)
+{
+    if (!vn || !vn->fs_data || !data)
+        return -EINVAL;
+    ramfs_inode_t *inode = (ramfs_inode_t *)vn->fs_data;
+    if (inode->type == FT_DIRECTORY)
+        return -EISDIR;
+    mutex_lock(&inode->data_lock);
+    memset(data, 0, len);
+    uint64_t off = index * PAGE_SIZE;
+    if (off >= inode->size || off >= inode->capacity || !inode->data) {
+        mutex_unlock(&inode->data_lock);
+        return 0;
+    }
+    size_t n = inode->size - (size_t)off;
+    if (n > inode->capacity - (size_t)off)
+        n = inode->capacity - (size_t)off;
+    if (n > len)
+        n = len;
+    memcpy(data, inode->data + off, n);
+    mutex_unlock(&inode->data_lock);
+    return (int)n;
 }
 
 static vnode_ops_t g_ramfs_vnode_ops = {
@@ -659,6 +703,7 @@ static vnode_ops_t g_ramfs_vnode_ops = {
     .symlink = ramfs_vnode_symlink,
     .readlink = ramfs_vnode_readlink,
     .truncate = ramfs_vnode_truncate,
+    .readpage = ramfs_vnode_readpage,
     .writepage = ramfs_vnode_writepage,
     .chmod = ramfs_vnode_chmod,
     .chown = ramfs_vnode_chown,
@@ -667,14 +712,18 @@ static vnode_ops_t g_ramfs_vnode_ops = {
 
 static int ramfs_fread(vfile_t *vf, char *buf, size_t count) {
     ramfs_inode_t *inode = (ramfs_inode_t *)vf->vnode->fs_data;
+    mutex_lock(&inode->data_lock);
     if (vf->offset >= inode->size) {
         if ((inode->mode & S_IFMT) == S_IFIFO) {
             spin_lock(&inode->fifo_lock);
             int writers = inode->fifo_writers;
             spin_unlock(&inode->fifo_lock);
-            if (writers > 0 && (vf->flags & O_NONBLOCK))
+            if (writers > 0 && (vf->flags & O_NONBLOCK)) {
+                mutex_unlock(&inode->data_lock);
                 return -EAGAIN;
+            }
         }
+        mutex_unlock(&inode->data_lock);
         return 0;
     }
 
@@ -692,12 +741,15 @@ static int ramfs_fread(vfile_t *vf, char *buf, size_t count) {
             memset(buf + copied, 0, n - copied);
         vf->offset += n;
     }
+    mutex_unlock(&inode->data_lock);
     return (int)n;
 }
 
 static int ramfs_fwrite(vfile_t *vf, const char *buf, size_t count) {
     ramfs_inode_t *inode = (ramfs_inode_t *)vf->vnode->fs_data;
     if (inode->type == FT_DIRECTORY) return -EISDIR;
+
+    mutex_lock(&inode->data_lock);
 
     size_t needed = vf->offset + count;
     if (needed > inode->capacity) {
@@ -706,7 +758,10 @@ static int ramfs_fwrite(vfile_t *vf, const char *buf, size_t count) {
         if (!new_data) {
             new_cap = needed;
             new_data = (char *)kmalloc(new_cap);
-            if (!new_data) return -ENOMEM;
+            if (!new_data) {
+                mutex_unlock(&inode->data_lock);
+                return -ENOMEM;
+            }
         }
         if (inode->data) {
             size_t copy_len = inode->size < inode->capacity ? inode->size : inode->capacity;
@@ -727,6 +782,7 @@ static int ramfs_fwrite(vfile_t *vf, const char *buf, size_t count) {
         inode->size = vf->offset;
         vf->vnode->size = inode->size;
     }
+    mutex_unlock(&inode->data_lock);
     return (int)count;
 }
 

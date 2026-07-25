@@ -118,6 +118,8 @@ typedef struct vnode_ops {
     int     (*readlink)(struct vnode *vn, char *buf, size_t sz);
     int     (*stat)(struct vnode *vn, kstat_t *st);
     int     (*truncate)(struct vnode *vn, size_t size);
+    int     (*readpage)(struct vnode *vn, uint64_t index,
+                        void *data, size_t len);
     int     (*writepage)(struct vnode *vn, uint64_t index,
                          const void *data, size_t len);
     int     (*chmod)(struct vnode *vn, int mode);
