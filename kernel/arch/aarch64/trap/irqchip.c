@@ -8,8 +8,17 @@
 #include "drivers/core/driver_hwapi.h"
 #include "core/progress.h"
 #include "core/stdio.h"
+#include "core/cpu.h"
+#include "core/smp.h"
 
-volatile uint64_t aarch64_trap_flags;
+volatile uint64_t aarch64_trap_flags[CONFIG_NR_CPUS];
+#ifndef CONFIG_AARCH64_GICV3
+static uint32_t aarch64_gic_iar[CONFIG_NR_CPUS];
+#endif
+
+#ifdef CONFIG_BOARD_QEMU_VIRT_AARCH64
+void aarch64_reschedule_ipi_received(void);
+#endif
 
 static inline volatile uint32_t *gicd_reg32(uint32_t off) {
     return (volatile uint32_t *)(uintptr_t)(GICD_BASE + off);
@@ -33,6 +42,7 @@ static inline volatile uint32_t *gicr_reg32(uint32_t off) {
 #define GICD_ISENABLER(n)   (0x100 + (uint32_t)(n) * 4)
 #define GICD_IPRIORITYR(n)  (0x400 + (uint32_t)(n))
 #define GICD_ITARGETSR(n)   (0x800 + (uint32_t)(n))
+#define GIC_RESCHEDULE_SGI  IRQ_S_SOFT
 
 #define GICC_CTLR           0x0000
 #define GICC_PMR            0x0004
@@ -120,7 +130,9 @@ static void gic_eoi(uint32_t irq) {
 #ifdef CONFIG_AARCH64_GICV3
     __asm__ __volatile__("msr icc_eoir1_el1, %0" :: "r"((uint64_t)irq) : "memory");
 #else
-    *gicc_reg32(GICC_EOIR) = irq;
+    unsigned cpu = cpu_current_id();
+    uint32_t iar = aarch64_gic_iar[cpu];
+    *gicc_reg32(GICC_EOIR) = (iar & 0x3FFU) == irq ? iar : irq;
 #endif
 }
 
@@ -130,7 +142,10 @@ uint64_t aarch64_gic_ack(void) {
     __asm__ __volatile__("mrs %0, icc_iar1_el1" : "=r"(irq));
     return irq & 0xFFFFFFU;
 #else
-    return *gicc_reg32(GICC_IAR) & 0x3FFU;
+    unsigned cpu = cpu_current_id();
+    uint32_t iar = *gicc_reg32(GICC_IAR);
+    aarch64_gic_iar[cpu] = iar;
+    return iar & 0x3FFU;
 #endif
 }
 
@@ -177,18 +192,26 @@ static void gic_init(void) {
     value = 1;
     __asm__ __volatile__("msr icc_igrpen1_el1, %0\n\tisb" :: "r"(value) : "memory");
 #else
-    *gicd_reg32(GICD_CTLR) = 0;
+    unsigned cpu = cpu_current_id();
+    if (cpu == 0)
+        *gicd_reg32(GICD_CTLR) = 0;
     *gicc_reg32(GICC_CTLR) = 0;
 
+    gic_set_priority(GIC_RESCHEDULE_SGI, 0x20);
     gic_set_priority(IRQ_S_TIMER, 0x40);
-    gic_set_priority(UART0_IRQ, 0x40);
-    gic_set_target(UART0_IRQ, 0x01);
+    if (cpu == 0) {
+        gic_set_priority(UART0_IRQ, 0x40);
+        gic_set_target(UART0_IRQ, 0x01);
+    }
+    gic_enable_irq(GIC_RESCHEDULE_SGI);
     gic_enable_irq(IRQ_S_TIMER);
-    gic_enable_irq(UART0_IRQ);
+    if (cpu == 0)
+        gic_enable_irq(UART0_IRQ);
 
     *gicc_reg32(GICC_PMR) = 0xFF;
     *gicc_reg32(GICC_CTLR) = 1;
-    *gicd_reg32(GICD_CTLR) = 1;
+    if (cpu == 0)
+        *gicd_reg32(GICD_CTLR) = 1;
 #endif
 }
 
@@ -217,6 +240,16 @@ void arch_handle_irq(uint64_t irq, int from_user) {
 
     if (irq == IRQ_S_TIMER) {
         handle_timer_irq(from_user);
+        return;
+    }
+
+    if (irq == GIC_RESCHEDULE_SGI) {
+        gic_eoi(GIC_RESCHEDULE_SGI);
+#ifdef CONFIG_BOARD_QEMU_VIRT_AARCH64
+        aarch64_reschedule_ipi_received();
+#endif
+        if (from_user)
+            proc_yield();
         return;
     }
 

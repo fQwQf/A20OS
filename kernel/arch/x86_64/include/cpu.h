@@ -26,7 +26,7 @@ static inline unsigned arch_current_cpu_id(void) {
                          : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx)
                          : "a"(1)
                          :);
-    return (unsigned)(ebx >> 24);
+    return x86_64_apic_to_cpu((unsigned)(ebx >> 24));
 }
 
 static inline void arch_local_irq_disable(void) {
@@ -100,14 +100,10 @@ static inline uint64_t arch_read_ra(void) {
 
 /* x86_64 does not have CSRs.  During trap entry we stash values into
  * these globals so that the generic C trap handler can read them. */
-extern uint64_t __x86_64_trap_cause;
-extern uint64_t __x86_64_trap_epc;
-extern uint64_t __x86_64_trap_tval;
-
-static inline uint64_t arch_read_cause(void)  { return __x86_64_trap_cause; }
-static inline uint64_t arch_read_epc(void)    { return __x86_64_trap_epc; }
-static inline uint64_t arch_read_tval(void)   { return __x86_64_trap_tval; }
-static inline void arch_write_epc(uint64_t v) { __x86_64_trap_epc = v; }
+static inline uint64_t arch_read_cause(void)  { return x86_64_get_trap_cause(); }
+static inline uint64_t arch_read_epc(void)    { return x86_64_get_trap_epc(); }
+static inline uint64_t arch_read_tval(void)   { return x86_64_get_trap_tval(); }
+static inline void arch_write_epc(uint64_t v) { x86_64_set_trap_epc(v); }
 static inline void arch_write_tvec(uint64_t v) { (void)v; /* IDT fixed in entry.S */ }
 
 static inline uint64_t arch_read_satp(void) {

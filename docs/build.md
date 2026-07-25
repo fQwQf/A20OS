@@ -46,13 +46,13 @@ docker run -it --rm -v $(pwd):/workspace -w /workspace a20os-buildenv bash
 - `BOARD`: 默认 `qemu-virt-<ARCH>`；STM32 时为 `stm32f103`。
 - `BRINGUP`: `1` 只编译内核，`0` 编译完整用户态。
 - `ABI`: `linux` / `native` / `both`，默认 `both`。
-- `NR_CPUS`: 默认 `1`；大于 `1` 需要额外开关。
+- `NR_CPUS`: 默认 `1`；已验证的 64 位 QEMU virt 平台可直接配置为大于 `1`。
 - `NOMMU`: `1` 开启 NOMMU 模式。
 
 ##  注意
 
 - `BRINGUP=1` 不生成文件系统镜像；`BRINGUP=0` 才会触发用户态和磁盘构建。
-- 默认 `NR_CPUS=1`。`NR_CPUS>1` 会被构建系统拒绝，除非显式设置 `ALLOW_UNVERIFIED_SMP=1`。
+- 默认 `NR_CPUS=1`。RISC-V 64、AArch64、LoongArch64 和 x86_64 的 QEMU virt 平台已验证 SMP，可直接设置 `NR_CPUS>1`。其他架构或板卡仍会被构建系统拒绝，除非显式设置 `ALLOW_UNVERIFIED_SMP=1`。
 - `ARCH=armv7m` 需要 `arm-none-eabi-gcc` 或 `clang` + `llvm-objcopy`。
 - 图形 QEMU 目标依赖宿主机显示能力；无图形环境请使用普通 `run-*` 目标。
 - 不要直接仿照 Makefile 外的 QEMU 参数手写启动命令，容易遗漏 `-bios default` 等关键选项。

@@ -17,6 +17,7 @@ SECTIONS
 
     . = ALIGN(4096);
     .rodata : AT(ADDR(.rodata) - LOAD_DELTA) {
+        KEEP(*(.rodata.ap_trampoline))
         *(.rodata .rodata.*)
     }
 
