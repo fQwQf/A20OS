@@ -1,22 +1,18 @@
 #ifdef CONFIG_RISCV32
 
 #include "core/smp.h"
-#include "firmware.h"
+#include "platform.h"
 
-void smp_send_reschedule(unsigned cpu) {
-    if (cpu >= CONFIG_NR_CPUS)
-        return;
-    sbi_send_ipi(1U << cpu);
+uint64_t arch_smp_boot_hw_id(void)
+{
+    extern uint32_t __boot_hart_id;
+    return __boot_hart_id;
 }
 
-void smp_init(void) {
-}
-
-void smp_boot_secondaries(void) {
-}
-
-void smp_secondary_init(unsigned cpu_id) {
-    (void)cpu_id;
+uintptr_t arch_smp_secondary_entry_pa(void)
+{
+    extern char _start[];
+    return (uintptr_t)_start - PAGE_OFFSET;
 }
 
 #endif /* CONFIG_RISCV32 */
