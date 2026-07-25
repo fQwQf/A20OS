@@ -192,7 +192,6 @@ typedef struct irqchip_ops {
     void     (*disable_irq)(uint32_t irq);
     uint32_t (*ack)(void);
     void     (*eoi)(uint32_t irq);
-    void     (*send_ipi)(uint64_t target_mask);
 } irqchip_ops_t;
 
 typedef struct timer_ops {
@@ -202,12 +201,15 @@ typedef struct timer_ops {
     uint64_t (*ticks_per_sec)(void);
 } timer_ops_t;
 
+typedef struct smp_platform_ops smp_platform_ops_t;
+
 typedef struct board_config {
     const char            *name;         /* "qemu-virt-rv64" */
     paddr_t                ram_base;
     paddr_t                ram_end;
     const irqchip_ops_t   *irqchip;
     const timer_ops_t     *timer;
+    const smp_platform_ops_t *smp;
     void                 (*early_init)(void);   /* UART + MMIO setup */
     void                 (*poweroff)(void);
     void                 (*reboot)(void);

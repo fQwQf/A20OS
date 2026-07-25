@@ -132,7 +132,6 @@ static uint32_t stm32_irqchip_ack(void) {
 }
 
 static void stm32_irqchip_eoi(uint32_t irq) { (void)irq; }
-static void stm32_irqchip_send_ipi(uint64_t mask) { (void)mask; }
 
 static const irqchip_ops_t stm32_irqchip_ops = {
     .init = stm32_irqchip_init,
@@ -140,7 +139,6 @@ static const irqchip_ops_t stm32_irqchip_ops = {
     .disable_irq = stm32_irqchip_disable,
     .ack = stm32_irqchip_ack,
     .eoi = stm32_irqchip_eoi,
-    .send_ipi = stm32_irqchip_send_ipi,
 };
 
 static uint64_t stm32_timer_read_ticks(void) { return timer_get_ticks(); }

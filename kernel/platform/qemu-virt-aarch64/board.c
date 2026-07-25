@@ -2,7 +2,15 @@
 
 #include "drivers/core/driver_core.h"
 #include "core/arch.h"
+#include "core/smp.h"
 #include "core/timer.h"
+#include "firmware.h"
+
+#if CONFIG_NR_CPUS > 8
+#error "QEMU virt AArch64 SMP supports at most 8 CPUs with GICv2 SGI targets"
+#endif
+
+#define GICD_SGIR 0xF00U
 
 static inline volatile uint32_t *aa64_gicd_reg32(uint32_t off) {
     return (volatile uint32_t *)(uintptr_t)(GICD_BASE + off);
@@ -56,17 +64,12 @@ static void aa64_gic_eoi(uint32_t irq) {
     *aa64_gicc_reg32(0x0010) = irq;
 }
 
-static void aa64_gic_send_ipi(uint64_t target_mask) {
-    (void)target_mask;
-}
-
 static const irqchip_ops_t aa64_gic_ops = {
     .init       = aa64_gic_init,
     .enable_irq = aa64_gic_enable,
     .disable_irq = aa64_gic_disable,
     .ack        = aa64_gic_ack,
     .eoi        = aa64_gic_eoi,
-    .send_ipi   = aa64_gic_send_ipi,
 };
 
 static uint64_t aa64_timer_read_ticks(void) {
@@ -80,6 +83,44 @@ static uint64_t aa64_timer_ticks_per_sec(void) {
 static const timer_ops_t aa64_generic_timer_ops = {
     .read_ticks    = aa64_timer_read_ticks,
     .ticks_per_sec = aa64_timer_ticks_per_sec,
+};
+
+static unsigned aa64_smp_discover(smp_cpu_desc_t *cpus, unsigned capacity,
+                                  uint64_t boot_mpidr) {
+    if (boot_mpidr != 0)
+        return 0;
+    for (unsigned cpu = 0; cpu < capacity; cpu++) {
+        cpus[cpu].hw_id = cpu;
+        cpus[cpu].platform_cookie = 0;
+    }
+    return capacity;
+}
+
+static int aa64_smp_start(const smp_cpu_desc_t *cpu, uintptr_t entry_pa,
+                          uintptr_t logical_context) {
+    return (int)firmware_cpu_on(cpu->hw_id, entry_pa, logical_context);
+}
+
+static void aa64_smp_send_ipi(const smp_cpu_desc_t *cpu,
+                              smp_ipi_reason_t reason) {
+    (void)reason;
+    arch_wmb();
+    *aa64_gicd_reg32(GICD_SGIR) =
+        (1U << (16 + cpu->hw_id)) | IRQ_S_SOFT;
+}
+
+static void aa64_smp_secondary_init(const smp_cpu_desc_t *cpu) {
+    (void)cpu;
+    *aa64_gicc_reg32(0x0000) = 0;
+    *aa64_gicc_reg32(0x0004) = 0xFF;
+    *aa64_gicc_reg32(0x0000) = 1;
+}
+
+static const smp_platform_ops_t aa64_smp_ops = {
+    .discover       = aa64_smp_discover,
+    .start          = aa64_smp_start,
+    .send_ipi       = aa64_smp_send_ipi,
+    .secondary_init = aa64_smp_secondary_init,
 };
 
 static void aa64_early_init(void) {
@@ -113,6 +154,7 @@ static const board_config_t qemu_virt_aa64 = {
     .ram_end           = PHYS_MEMORY_END,
     .irqchip           = &aa64_gic_ops,
     .timer             = &aa64_generic_timer_ops,
+    .smp               = &aa64_smp_ops,
     .early_init        = aa64_early_init,
     .poweroff          = aa64_poweroff,
     .reboot            = aa64_reboot,

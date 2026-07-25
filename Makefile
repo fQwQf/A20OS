@@ -700,6 +700,21 @@ check-arch-boundary:
 	done
 	@echo "check-arch-boundary: PASS"
 
+check-smp-platform-boundary:
+	@rg -q "typedef struct smp_platform_ops" kernel/include/core/smp.h
+	@rg -q "const smp_platform_ops_t \*smp" kernel/drivers/core/driver_core.h
+	@files="kernel/arch/riscv64/platform/smp.c kernel/arch/aarch64/platform/smp.c kernel/arch/x86_64/platform/smp.c kernel/arch/loongarch64/platform/smp.c"; \
+		test -r kernel/arch/riscv64/platform/smp.c && \
+		test -r kernel/arch/aarch64/platform/smp.c && \
+		test -r kernel/arch/x86_64/platform/smp.c && \
+		test -r kernel/arch/loongarch64/platform/smp.c && \
+		if rg -n "CONFIG_BOARD|firmware_cpu_on|sbi_hart_start|firmware_acpi_apic_ids|IOCSR_MBUF" $$files; then exit 1; fi
+	@! rg -n "void smp_(init|boot_secondaries|send_reschedule|secondary_init)\\(" kernel/arch
+	@for board in qemu-virt-riscv64 qemu-virt-aarch64 qemu-virt-loongarch64 qemu-virt-x86_64; do \
+		rg -q "\\.smp[[:space:]]*=" "kernel/platform/$$board/board.c" || exit 1; \
+	done
+	@echo "check-smp-platform-boundary: PASS"
+
 check-abi-smoke-gate:
 	@rg -q "ABI_SMOKE_GATE_CONTRACT" docs/testing/testing-gates.md
 	@rg -q "syscall_smoke" Makefile
@@ -719,7 +734,7 @@ check-doc-drift:
 	@! rg -q "for simplicity" docs kernel --glob '!docs/research/**' --glob '!docs/testing/testing-gates.md' --glob '!kernel/external/**'
 	@echo "check-doc-drift: PASS"
 
-check-doc-test-gates: check-concurrency-foundation check-mm-lock-model check-io-progress-model check-vfs-abstraction check-abi-boundary check-driver-core-model check-external-dependency-boundary check-abi-smoke-gate check-doc-drift
+check-doc-test-gates: check-concurrency-foundation check-smp-platform-boundary check-mm-lock-model check-io-progress-model check-vfs-abstraction check-abi-boundary check-driver-core-model check-external-dependency-boundary check-abi-smoke-gate check-doc-drift
 	@rg -q "DOCS_AS_FACT_CONTRACT" docs/testing/testing-gates.md
 	@rg -q "TEST_FIRST_ARCHITECTURE_MATRIX" docs/testing/testing-gates.md
 	@echo "check-doc-test-gates: PASS"
