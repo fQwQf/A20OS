@@ -132,7 +132,7 @@ GCC_AVAILABLE := $(if $(and $(filter riscv64,$(ARCH)), \
                             $(wildcard $(GCC_SRC)/configure), \
                             $(wildcard $(MCM_OUTPUT)/bin/riscv64-linux-musl-gcc)),1)
 
-VALID_PACKAGES := vim git gcc cc rust rustc cargo
+VALID_PACKAGES := vim git gcc cc rust rustc cargo rustfmt
 UNKNOWN_PACKAGES := $(filter-out $(VALID_PACKAGES),$(PACKAGES))
 ifneq ($(strip $(UNKNOWN_PACKAGES)),)
 $(error Unknown extra package(s): $(UNKNOWN_PACKAGES); expected: $(VALID_PACKAGES))
@@ -142,7 +142,7 @@ REQUESTED_TARGETS := $(sort \
   $(if $(filter vim,$(PACKAGES)),vim) \
   $(if $(filter git,$(PACKAGES)),git) \
   $(if $(filter gcc cc,$(PACKAGES)),gcc) \
-  $(if $(and $(filter riscv64,$(ARCH)),$(filter rust rustc cargo,$(PACKAGES))),rust))
+  $(if $(and $(filter riscv64,$(ARCH)),$(filter rust rustc cargo rustfmt,$(PACKAGES))),rust))
 
 # ================================================================
 # vim
@@ -336,6 +336,7 @@ endif
 rust: $(RUST_STAMP)
 rustc: rust
 cargo: rust
+rustfmt: rust
 
 # ================================================================
 # Top-level targets
@@ -349,4 +350,4 @@ gcc: $(if $(GCC_AVAILABLE),$(GCC_BIN) $(CC_BIN))
 clean:
 	rm -rf $(BUILD_ROOT)
 
-.PHONY: all vim git gcc rust rustc cargo clean musl_check
+.PHONY: all vim git gcc rust rustc cargo rustfmt clean musl_check

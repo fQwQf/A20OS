@@ -402,6 +402,7 @@ void proc_exit_group(int exit_code)
 
     int pids[128];
     int pid_count;
+    int self_tgid = proc_task_tgid(self);
 
     do {
         pid_count = 0;
@@ -411,7 +412,13 @@ void proc_exit_group(int exit_code)
                 continue;
             if (__atomic_load_n(&t->exit_pending, __ATOMIC_ACQUIRE))
                 continue;
-            if (self->mm && t->mm == self->mm) {
+            /*
+             * Linux exit_group() targets a thread group, not every task
+             * sharing an address space.  A vfork()/posix_spawn() child uses
+             * CLONE_VM temporarily but has its own TGID; treating shared mm
+             * as group membership would incorrectly terminate its parent.
+             */
+            if (proc_task_tgid(t) == self_tgid) {
                 if (pid_count < (int)(sizeof(pids) / sizeof(pids[0])))
                     pids[pid_count++] = t->pid;
                 else
