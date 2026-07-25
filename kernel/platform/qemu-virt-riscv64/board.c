@@ -3,22 +3,24 @@
 #include "drivers/core/driver_core.h"
 #include "core/arch.h"
 #include "core/cpu.h"
+#include "core/smp.h"
 #include "core/timer.h"
+#include "firmware.h"
 
 static void rv64_plic_init(void) {
-    int hart = (int)cpu_current_id();
+    int hart = (int)arch_cpu_hart_id(cpu_current_id());
     *(volatile uint32_t *)PLIC_SENABLE(hart) = 0;
     *(volatile uint32_t *)PLIC_SPRIORITY(hart) = 0;
 }
 
 static void rv64_plic_enable(uint32_t irq) {
-    int hart = (int)cpu_current_id();
+    int hart = (int)arch_cpu_hart_id(cpu_current_id());
     *(volatile uint32_t *)PLIC_SENABLE(hart) |= (1U << irq);
     *(volatile uint32_t *)(PLIC_PRIORITY + (uint64_t)irq * 4) = 1;
 }
 
 static void rv64_plic_disable(uint32_t irq) {
-    int hart = (int)cpu_current_id();
+    int hart = (int)arch_cpu_hart_id(cpu_current_id());
     *(volatile uint32_t *)PLIC_SENABLE(hart) &= ~(1U << irq);
 }
 
@@ -34,17 +36,12 @@ static void rv64_plic_eoi(uint32_t irq) {
     (void)irq;
 }
 
-static void rv64_plic_send_ipi(uint64_t target_mask) {
-    (void)target_mask;
-}
-
 static const irqchip_ops_t rv64_plic_ops = {
     .init       = rv64_plic_init,
     .enable_irq = rv64_plic_enable,
     .disable_irq = rv64_plic_disable,
     .ack        = rv64_plic_ack,
     .eoi        = rv64_plic_eoi,
-    .send_ipi   = rv64_plic_send_ipi,
 };
 
 static uint64_t rv64_timer_read_ticks(void) {
@@ -58,6 +55,38 @@ static uint64_t rv64_timer_ticks_per_sec(void) {
 static const timer_ops_t rv64_sbi_timer_ops = {
     .read_ticks    = rv64_timer_read_ticks,
     .ticks_per_sec = rv64_timer_ticks_per_sec,
+};
+
+static unsigned rv64_smp_discover(smp_cpu_desc_t *cpus, unsigned capacity,
+                                  uint64_t boot_hart) {
+    for (unsigned cpu = 0; cpu < capacity; cpu++) {
+        cpus[cpu].hw_id = (boot_hart + cpu) % capacity;
+        cpus[cpu].platform_cookie = 0;
+    }
+    return capacity;
+}
+
+static int rv64_smp_start(const smp_cpu_desc_t *cpu, uintptr_t entry_pa,
+                          uintptr_t logical_context) {
+    return (int)sbi_hart_start(cpu->hw_id, entry_pa, logical_context);
+}
+
+static void rv64_smp_send_ipi(const smp_cpu_desc_t *cpu,
+                              smp_ipi_reason_t reason) {
+    (void)reason;
+    sbi_send_ipi(1UL, cpu->hw_id);
+}
+
+static void rv64_smp_secondary_init(const smp_cpu_desc_t *cpu) {
+    (void)cpu;
+    rv64_plic_init();
+}
+
+static const smp_platform_ops_t rv64_smp_ops = {
+    .discover       = rv64_smp_discover,
+    .start          = rv64_smp_start,
+    .send_ipi       = rv64_smp_send_ipi,
+    .secondary_init = rv64_smp_secondary_init,
 };
 
 static void rv64_early_init(void) {
@@ -83,6 +112,7 @@ static const board_config_t qemu_virt_rv64 = {
     .ram_end           = PHYS_MEMORY_END,
     .irqchip           = &rv64_plic_ops,
     .timer             = &rv64_sbi_timer_ops,
+    .smp               = &rv64_smp_ops,
     .early_init        = rv64_early_init,
     .poweroff          = rv64_poweroff,
     .reboot            = rv64_reboot,

@@ -1,23 +1,17 @@
 #ifdef CONFIG_PPC64LE
 
 #include "core/smp.h"
+#include "platform.h"
 
-void smp_send_reschedule(unsigned cpu)
+uint64_t arch_smp_boot_hw_id(void)
 {
-    (void)cpu;
+    return arch_current_cpu_id();
 }
 
-void smp_init(void)
+uintptr_t arch_smp_secondary_entry_pa(void)
 {
-}
-
-void smp_boot_secondaries(void)
-{
-}
-
-void smp_secondary_init(unsigned cpu_id)
-{
-    (void)cpu_id;
+    extern char _start[];
+    return (uintptr_t)_start - PAGE_OFFSET;
 }
 
 #endif /* CONFIG_PPC64LE */

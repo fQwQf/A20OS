@@ -27,6 +27,12 @@
 - [drivers/pci-and-virtio.md](drivers/pci-and-virtio.md)：PCI 与 VirtIO 设备的接入方法
 - [drivers/display.md](drivers/display.md)：Framebuffer 与显示设备
 
+## 平台移植与运行
+
+- [platforms/porting-guide.md](platforms/porting-guide.md)：架构与平台边界、SMP hooks 和 bring-up 验收
+- [platforms/stm32f103-port.md](platforms/stm32f103-port.md)：STM32F103 移植与硬件验证
+- [platforms/virtualbox.md](platforms/virtualbox.md)：VirtualBox 平台与驱动栈
+
 ## Native ABI 与子系统细节
 
 如果你想深入 Native ABI 或具体内核子系统：
@@ -47,8 +53,6 @@
 - [research/00-index.md](research/00-index.md)：Native ABI 研究笔记的阅读索引
 - [roadmap/a20os-improvement-todo.md](roadmap/a20os-improvement-todo.md)：当前改进清单与开发路线图
 - [project/external-dependencies.md](project/external-dependencies.md)：外部依赖与协议说明
-- [platforms/stm32f103-port.md](platforms/stm32f103-port.md)：STM32F103 移植与 bring-up 记录
-- [platforms/virtualbox.md](platforms/virtualbox.md)：VirtualBox 驱动栈与运行说明
 
 ---
 

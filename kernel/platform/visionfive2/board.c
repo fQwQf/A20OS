@@ -57,17 +57,12 @@ static void vf2_plic_eoi(uint32_t irq) {
     *vf2_plic_sclaim(hart) = irq;
 }
 
-static void vf2_plic_send_ipi(uint64_t target_mask) {
-    (void)target_mask;
-}
-
 static const irqchip_ops_t vf2_plic_ops = {
     .init       = vf2_plic_init,
     .enable_irq = vf2_plic_enable,
     .disable_irq = vf2_plic_disable,
     .ack        = vf2_plic_ack,
     .eoi        = vf2_plic_eoi,
-    .send_ipi   = vf2_plic_send_ipi,
 };
 
 static uint64_t vf2_timer_read_ticks(void) {

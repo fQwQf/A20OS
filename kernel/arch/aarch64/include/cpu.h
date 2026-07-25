@@ -69,13 +69,7 @@ static inline void arch_flush_icache_range(const void *addr, size_t size) {
 static inline unsigned arch_current_cpu_id(void) {
     uint64_t mpidr;
     __asm__ __volatile__("mrs %0, mpidr_el1" : "=r"(mpidr));
-#ifdef CONFIG_BOARD_QEMU_VIRT_AARCH64
-    /* QEMU virt -smp uses dense Aff0 values in a single cluster. */
     return (unsigned)(mpidr & 0xff);
-#else
-    /* Preserve the established Aff0 fallback for other AArch64 boards. */
-    return (unsigned)(mpidr & 0xff);
-#endif
 }
 
 static inline void arch_local_irq_disable(void) {

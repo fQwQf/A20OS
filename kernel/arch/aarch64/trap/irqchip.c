@@ -16,10 +16,6 @@ volatile uint64_t aarch64_trap_flags[CONFIG_NR_CPUS];
 static uint32_t aarch64_gic_iar[CONFIG_NR_CPUS];
 #endif
 
-#ifdef CONFIG_BOARD_QEMU_VIRT_AARCH64
-void aarch64_reschedule_ipi_received(void);
-#endif
-
 static inline volatile uint32_t *gicd_reg32(uint32_t off) {
     return (volatile uint32_t *)(uintptr_t)(GICD_BASE + off);
 }
@@ -245,9 +241,6 @@ void arch_handle_irq(uint64_t irq, int from_user) {
 
     if (irq == GIC_RESCHEDULE_SGI) {
         gic_eoi(GIC_RESCHEDULE_SGI);
-#ifdef CONFIG_BOARD_QEMU_VIRT_AARCH64
-        aarch64_reschedule_ipi_received();
-#endif
         if (from_user)
             proc_yield();
         return;

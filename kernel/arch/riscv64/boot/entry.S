@@ -114,6 +114,30 @@ _start:
     j       .Lsecondary_wait
 .Lsecondary_released:
     fence   rw, rw
+    /* Resolve the platform-published hardware ID mapping. This also supports
+     * firmware that entered every hart before the boot CPU initialized SMP;
+     * such harts wait until their topology slot becomes valid. */
+.Lsecondary_resolve:
+    la      t0, riscv64_smp_context_valid
+    lw      t1, 0(t0)
+    la      t2, riscv64_smp_context_hw_id
+    li      t3, 1
+.Lsecondary_scan:
+    li      t4, CONFIG_NR_CPUS
+    bgeu    t3, t4, .Lsecondary_wait
+    li      t4, 1
+    sll     t4, t4, t3
+    and     t4, t4, t1
+    beqz    t4, .Lsecondary_next
+    slli    t4, t3, 3
+    add     t4, t2, t4
+    ld      t4, 0(t4)
+    beq     a0, t4, .Lsecondary_found
+.Lsecondary_next:
+    addi    t3, t3, 1
+    j       .Lsecondary_scan
+.Lsecondary_found:
+    mv      s0, t3
 #ifndef CONFIG_NOMMU
     j       .enable_mmu
 #else
@@ -122,15 +146,18 @@ _start:
 #endif
 
 .Lhh_entry:
-    /* Convert the physical hart ID to a dense logical CPU ID with the boot
-     * hart at CPU 0, then select that CPU's 64 KiB early stack. */
+    /* The bootstrap CPU is logical CPU 0. Secondaries consume the logical ID
+     * selected by the platform and passed through SBI HSM's opaque value. */
     la      t0, __boot_hart_id
     ld      t1, 0(t0)
-    sub     a0, a0, t1
-    bgez    a0, .Llogical_id_ready
-    li      t0, CONFIG_NR_CPUS
-    add     a0, a0, t0
+    beq     a0, t1, .Lboot_logical_id
+    mv      a0, s0
+    j       .Llogical_id_ready
+.Lboot_logical_id:
+    li      a0, 0
 .Llogical_id_ready:
+    li      t0, CONFIG_NR_CPUS
+    bgeu    a0, t0, .park
     la      sp, _stack_end
     li      t0, 65536
     mul     t0, a0, t0

@@ -126,17 +126,12 @@ static void vbox_gic_eoi(uint32_t irq) {
     __asm__ __volatile__("msr icc_eoir1_el1, %0" :: "r"((uint64_t)irq) : "memory");
 }
 
-static void vbox_gic_send_ipi(uint64_t target_mask) {
-    (void)target_mask;
-}
-
 static const irqchip_ops_t vbox_aa64_gic_ops = {
     .init       = vbox_gic_init,
     .enable_irq = vbox_gic_enable,
     .disable_irq = vbox_gic_disable,
     .ack        = vbox_gic_ack,
     .eoi        = vbox_gic_eoi,
-    .send_ipi   = vbox_gic_send_ipi,
 };
 
 static uint64_t vbox_aa64_timer_read_ticks(void) {

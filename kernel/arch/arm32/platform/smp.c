@@ -1,21 +1,17 @@
 #ifdef CONFIG_ARM32
 
 #include "core/smp.h"
-#include "core/cpu.h"
+#include "platform.h"
 
-void smp_send_reschedule(unsigned cpu) {
-    (void)cpu;
+uint64_t arch_smp_boot_hw_id(void)
+{
+    return arch_current_cpu_id();
 }
 
-void smp_init(void) {
-    smp_core_init();
-}
-
-void smp_boot_secondaries(void) {
-}
-
-void smp_secondary_init(unsigned cpu_id) {
-    (void)cpu_id;
+uintptr_t arch_smp_secondary_entry_pa(void)
+{
+    extern char _start[];
+    return (uintptr_t)_start - PAGE_OFFSET;
 }
 
 #endif

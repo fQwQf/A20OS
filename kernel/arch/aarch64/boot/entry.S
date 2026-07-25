@@ -205,7 +205,6 @@ _start:
     wfi
     b       .Lhalt
 
-#ifdef CONFIG_BOARD_QEMU_VIRT_AARCH64
     .global aarch64_secondary_start
 aarch64_secondary_start:
     /* PSCI enters with the MMU off and the logical CPU number in x0. */
@@ -266,7 +265,6 @@ aarch64_secondary_start:
     mov     x0, x19
     bl      aarch64_secondary_entry
     b       .Lhalt
-#endif
 
     .section .bss
     .align 12
