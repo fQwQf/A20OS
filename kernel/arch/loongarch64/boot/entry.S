@@ -52,12 +52,18 @@ _start:
     la.global   $t0, tlb_refill_entry_la64
     csrwr       $t0, 0x88
 
-    /* Set up boot stack */
+    /* Select a private early stack before touching any shared state. */
     csrrd       $a0, CSR_CPUID
+    li.d        $t0, CONFIG_NR_CPUS
+    bgeu        $a0, $t0, early_halt
     li.d        $t0, 64 * 1024
     mul.d       $t1, $a0, $t0
     la.global   $sp, boot_stack_top
     sub.d       $sp, $sp, $t1
+
+    /* QEMU's reset ROM starts only CPU 0 here directly.  Secondary CPUs are
+     * released later through IOCSR mailbox 0 and must not clear global BSS. */
+    bnez        $a0, secondary_start
 
     /* Clear BSS */
     la.global   $t0, _bss_start
@@ -77,6 +83,14 @@ bss_pgdir:
     addi.d      $t0, $t0, 8
     addi.d      $t1, $t1, -1
     bnez        $t1, bss_pgdir
+
+    b           setup_mmu
+
+secondary_start:
+    /* The mailbox write and boot IPI are ordered by the bootstrap CPU. */
+    dbar        0
+
+setup_mmu:
 
     /* Load boot_pgdir into PGDL and PGDH.
      * Kernel uses DMW direct mapping; page tables are for user space only.
@@ -112,24 +126,25 @@ bss_pgdir:
     li.d        $t0, 12
     csrwr       $t0, 0x1E              /* CSR_STLBPS */
 
-    /* Enable paging: CRMD.PG=1, DA=0, IE=1, PLV=0
+    /* Enable paging: CRMD.PG=1, DA=0, IE=0, PLV=0
      *   DATF=01 (CC) bit [6:5]  — coherent cached for fetch
      *   DATM=01 (CC) bit [8:7]  — coherent cached for memory
-     * CRMD = (1<<4)|(1<<2)|(1<<5)|(1<<7) = PG + IE + DATF_CC + DATM_CC = 0xB4
+     * The common path uses 0xB0 with IE clear. CPU 0 restores its historical
+     * 0xB4 value before kernel_main; secondary CPUs enable IE after local init.
      * Wait: bit5=DATF[0], bit6=DATF[1]. 01 means only bit5 set.
      *       bit7=DATM[0], bit8=DATM[1]. 01 means only bit7 set.
      * So DATF=01 → bit5=1, bit6=0 → (1<<5) = 0x20
      *    DATM=01 → bit7=1, bit8=0 → (1<<7) = 0x80
-     * Total = PG(0x10) + IE(0x04) + DATF(0x20) + DATM(0x80) = 0xB4
+     * PG(0x10) + DATF(0x20) + DATM(0x80) = 0xB0.
      *
      * Hmm, that IS 0xB4. But actual DATF[1:0] at bits [6:5]:
      *   bit5=1, bit6=0 → DATF = 01? No! bits [6:5] means bit6 is high bit, bit5 is low bit.
      *   So DATF = (bit6 << 1) | bit5 = (0 << 1) | 1 = 1 = CC. Correct!
      * And DATM = (bit8 << 1) | bit7 = (0 << 1) | 1 = 1 = CC. Correct!
      *
-     * So 0xB4 already has DATF=01 (CC) and DATM=01 (CC). The CRMD is correct.
+     * Both 0xB0 and 0xB4 have DATF=01 (CC) and DATM=01 (CC).
      */
-    li.d        $t0, 0xB4
+    li.d        $t0, 0xB0
     csrwr       $t0, CSR_CRMD
 
     invtlb      0, $zero, $zero
@@ -137,16 +152,29 @@ bss_pgdir:
     csrrd       $a0, CSR_CPUID
     li.d        $a1, 0x100000
 
+    bnez        $a0, call_secondary
+    /* Preserve the UP bootstrap behavior: kernel_main historically starts
+     * with local interrupts enabled on this architecture. */
+    li.d        $t0, 0xB4
+    csrwr       $t0, CSR_CRMD
     bl          kernel_main
+    b           halt
+
+call_secondary:
+    bl          loongarch64_secondary_entry
 
 halt:
     idle    0
     b           halt
 
+early_halt:
+    idle        0
+    b           early_halt
+
     .section .bss.stack
     .globl boot_stack
 boot_stack:
-    .space 64 * 1024 * 4
+    .space 64 * 1024 * CONFIG_NR_CPUS
     .globl boot_stack_top
 boot_stack_top:
 

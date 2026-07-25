@@ -7,6 +7,7 @@
 
 #define PSCI_SYSTEM_OFF   0x84000008UL
 #define PSCI_SYSTEM_RESET 0x84000009UL
+#define PSCI_CPU_ON       0xC4000003UL
 
 static inline uint64_t psci_call0(uint64_t fn) {
     register uint64_t x0 __asm__("x0") = fn;
@@ -16,6 +17,19 @@ static inline uint64_t psci_call0(uint64_t fn) {
         :
         : "x1", "x2", "x3", "memory");
     return x0;
+}
+
+int64_t firmware_cpu_on(uint64_t target_cpu, uint64_t entry, uint64_t context) {
+    register uint64_t x0 __asm__("x0") = PSCI_CPU_ON;
+    register uint64_t x1 __asm__("x1") = target_cpu;
+    register uint64_t x2 __asm__("x2") = entry;
+    register uint64_t x3 __asm__("x3") = context;
+    __asm__ __volatile__(
+        "hvc #0"
+        : "+r"(x0)
+        : "r"(x1), "r"(x2), "r"(x3)
+        : "memory");
+    return (int64_t)x0;
 }
 
 void firmware_console_putchar(char c) {
