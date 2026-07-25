@@ -100,7 +100,18 @@ isr_common:
     movq  %rax, 176(%rsp)       /* ctx->padding[0] */
 3:
 
-    /* Save global trap variables */
+    /* A kernel IRQ may interrupt the now-preemptible syscall handler.  Save
+     * its outer syscall state in fields unused by kernel-mode trap frames. */
+    movq  144(%rsp), %rax
+    testq $3, %rax
+    jnz   5f
+    leaq  176(%rsp), %rdi
+    leaq  192(%rsp), %rsi
+    leaq  200(%rsp), %rdx
+    call  x86_64_save_trap_state
+5:
+
+    /* Save CPU-local trap variables. */
     movq  208(%rsp), %rax       /* vec */
     cmpq  $0x80, %rax
     je    2f                    /* int $0x80 syscall */
@@ -108,16 +119,10 @@ isr_common:
     jb    2f
     btsq  $63, %rax             /* Set CAUSE_INTR_MASK for IRQs */
 2:
-    movabsq $__x86_64_trap_cause, %rcx
-    movq  %rax, (%rcx)
-
-    movq  128(%rsp), %rax       /* ctx->rip */
-    movabsq $__x86_64_trap_epc, %rcx
-    movq  %rax, (%rcx)
-
-    movq  168(%rsp), %rax       /* ctx->kscratch0 (CR2) */
-    movabsq $__x86_64_trap_tval, %rcx
-    movq  %rax, (%rcx)
+    movq  %rax, %rdi
+    movq  128(%rsp), %rsi       /* ctx->rip */
+    movq  168(%rsp), %rdx       /* ctx->kscratch0 (CR2) */
+    call  x86_64_set_trap_state
 
     /* Dispatch by the interrupted privilege level.  User-mode page faults
      * and other exceptions must go through trap_handler so demand paging,
@@ -134,6 +139,13 @@ isr_common:
 kernel_trap:
     movq  %rsp, %rdi
     call  kernel_trap_handler
+
+    /* Restore an interrupted syscall's cause/epc/tval before its C handler
+     * resumes and reads the CPU-local trap state. */
+    movq  176(%rsp), %rdi
+    movq  192(%rsp), %rsi
+    movq  200(%rsp), %rdx
+    call  x86_64_restore_trap_state
 
     /* Restore the common CPU-pushed frame in case C modified it. */
     movq  128(%rsp), %rax
@@ -202,9 +214,56 @@ kernel_trap:
      * __return_to_user (which uses iretq) so we do not need sysret.
      */
     .globl __x86_64_syscall_scratch
-    .globl syscall_entry
     .align 16
-syscall_entry:
+
+    .macro syscall_cpu_entry cpu
+    .globl syscall_entry_\cpu
+syscall_entry_\cpu:
+    cli
+    movq  %rax,  __x86_64_syscall_scratch+(\cpu * 128)+0(%rip)
+    movq  %rcx,  __x86_64_syscall_scratch+(\cpu * 128)+8(%rip)
+    movq  %rdx,  __x86_64_syscall_scratch+(\cpu * 128)+16(%rip)
+    movq  %r10,  __x86_64_syscall_scratch+(\cpu * 128)+24(%rip)
+    movq  %r11,  __x86_64_syscall_scratch+(\cpu * 128)+32(%rip)
+    movq  %rsp,  __x86_64_syscall_scratch+(\cpu * 128)+40(%rip)
+    movq  %r9,   __x86_64_syscall_scratch+(\cpu * 128)+48(%rip)
+    movq  %r8,   __x86_64_syscall_scratch+(\cpu * 128)+56(%rip)
+    movq  %rdi,  __x86_64_syscall_scratch+(\cpu * 128)+64(%rip)
+    movq  %rsi,  __x86_64_syscall_scratch+(\cpu * 128)+72(%rip)
+    movq  %rbx,  __x86_64_syscall_scratch+(\cpu * 128)+80(%rip)
+    movq  %rbp,  __x86_64_syscall_scratch+(\cpu * 128)+88(%rip)
+    movq  %r12,  __x86_64_syscall_scratch+(\cpu * 128)+96(%rip)
+    movq  %r13,  __x86_64_syscall_scratch+(\cpu * 128)+104(%rip)
+    movq  %r14,  __x86_64_syscall_scratch+(\cpu * 128)+112(%rip)
+    movq  %r15,  __x86_64_syscall_scratch+(\cpu * 128)+120(%rip)
+    leaq  __x86_64_syscall_scratch+(\cpu * 128)(%rip), %r11
+    jmp syscall_entry_saved
+    .endm
+
+    syscall_cpu_entry 0
+#if CONFIG_NR_CPUS > 1
+    syscall_cpu_entry 1
+#endif
+#if CONFIG_NR_CPUS > 2
+    syscall_cpu_entry 2
+#endif
+#if CONFIG_NR_CPUS > 3
+    syscall_cpu_entry 3
+#endif
+#if CONFIG_NR_CPUS > 4
+    syscall_cpu_entry 4
+#endif
+#if CONFIG_NR_CPUS > 5
+    syscall_cpu_entry 5
+#endif
+#if CONFIG_NR_CPUS > 6
+    syscall_cpu_entry 6
+#endif
+#if CONFIG_NR_CPUS > 7
+    syscall_cpu_entry 7
+#endif
+
+syscall_entry_saved:
     /*
      * SYSCALL preserves the GS base MSR (current task pointer) but may leave
      * the GS segment selector in a state where %gs: memory operands fault.
@@ -221,28 +280,6 @@ syscall_entry:
      * a small kernel scratch array while we compute the kernel stack top and
      * switch stacks.
      */
-    cli
-
-    /* Save everything we need into the kernel scratch array. */
-    movq  %rax,  __x86_64_syscall_scratch+0(%rip)    /* syscall number */
-    movq  %rcx,  __x86_64_syscall_scratch+8(%rip)    /* user RIP */
-    movq  %rdx,  __x86_64_syscall_scratch+16(%rip)   /* arg2 */
-    movq  %r10,  __x86_64_syscall_scratch+24(%rip)   /* arg3 */
-    movq  %r11,  __x86_64_syscall_scratch+32(%rip)   /* user RFLAGS */
-    movq  %rsp,  __x86_64_syscall_scratch+40(%rip)   /* user RSP */
-    movq  %r9,   __x86_64_syscall_scratch+48(%rip)   /* arg6 */
-    movq  %r8,   __x86_64_syscall_scratch+56(%rip)   /* arg4 */
-    movq  %rdi,  __x86_64_syscall_scratch+64(%rip)   /* arg0 */
-    movq  %rsi,  __x86_64_syscall_scratch+72(%rip)   /* arg1 */
-    movq  %rbx,  __x86_64_syscall_scratch+80(%rip)
-    movq  %rbp,  __x86_64_syscall_scratch+88(%rip)
-    movq  %r12,  __x86_64_syscall_scratch+96(%rip)
-    movq  %r13,  __x86_64_syscall_scratch+104(%rip)
-    movq  %r14,  __x86_64_syscall_scratch+112(%rip)
-    movq  %r15,  __x86_64_syscall_scratch+120(%rip)
-
-    leaq  __x86_64_syscall_scratch(%rip), %r11       /* r11 = scratch base */
-
     /* Read GS base (task pointer) into r9. */
     movl  $0xC0000101, %ecx
     rdmsr
@@ -266,7 +303,6 @@ syscall_entry:
     movq  %rax, %rsp
     subq  $208, %rsp
     movq  %rax, %r15            /* r15 = kernel stack top (for later fields) */
-    sti
 
     /* Copy the saved registers from the scratch array into the trap_context_t. */
     movq  0(%r11), %rax         /* syscall number */
@@ -328,17 +364,15 @@ syscall_entry:
     /* Original task->kstack so __return_to_user / __switch can restore it. */
     movq  %r14, 192(%rsp)
 
-    /* Publish the trap cause as 0x80 so the generic syscall path runs. */
-    movq  $0x80, %rax
-    movabsq $__x86_64_trap_cause, %rcx
-    movq  %rax, (%rcx)
-    movq  128(%rsp), %rax
-    movabsq $__x86_64_trap_epc, %rcx
-    movq  %rax, (%rcx)
-    movq  $0, %rax
-    movabsq $__x86_64_trap_tval, %rcx
-    movq  %rax, (%rcx)
+    /* Publish the syscall cause in this CPU's trap state. */
+    movq  $0x80, %rdi
+    movq  128(%rsp), %rsi
+    xorl  %edx, %edx
+    call  x86_64_set_trap_state
 
+    /* The scratch slot is no longer live: the complete user state now resides
+     * on the task's kernel stack.  Permit timer and reschedule IRQs in C. */
+    sti
     movq  %rsp, %rdi
     call  trap_handler
     jmp   __return_to_user
@@ -481,3 +515,28 @@ isr_stub_table:
         isr_table_entry %i
         .set i, i+1
     .endr
+
+    .globl syscall_entry_table
+syscall_entry_table:
+    .quad syscall_entry_0
+#if CONFIG_NR_CPUS > 1
+    .quad syscall_entry_1
+#endif
+#if CONFIG_NR_CPUS > 2
+    .quad syscall_entry_2
+#endif
+#if CONFIG_NR_CPUS > 3
+    .quad syscall_entry_3
+#endif
+#if CONFIG_NR_CPUS > 4
+    .quad syscall_entry_4
+#endif
+#if CONFIG_NR_CPUS > 5
+    .quad syscall_entry_5
+#endif
+#if CONFIG_NR_CPUS > 6
+    .quad syscall_entry_6
+#endif
+#if CONFIG_NR_CPUS > 7
+    .quad syscall_entry_7
+#endif

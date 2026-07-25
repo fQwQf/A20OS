@@ -88,5 +88,5 @@ CI 通过后，维护者会进行代码审查。请根据评论修改，并确�
 ##  注意
 
 - 不要直接修改 `docs/testing/testing-gates.md` 或 `docs/project/external-dependencies.md` 中的契约字符串，除非你的改动确实触及这些契约。
-- 不要把 `ALLOW_UNVERIFIED_SMP=1` 作为默认门禁参数，除非 PR 专门处理 SMP。
+- 不要把 `ALLOW_UNVERIFIED_SMP=1` 作为默认门禁参数。已验证的 64 位 QEMU virt 平台不再需要该参数；其他平台仅可在专门处理 SMP 的变更中使用。
 - 提交前请执行 `make clean` 再运行一次关键门禁，避免旧产物造成误判。

@@ -6,7 +6,7 @@
 
 #define AARCH64_TRAP_FLAG_IRQ  (1UL << 0)
 
-extern volatile uint64_t aarch64_trap_flags;
+extern volatile uint64_t aarch64_trap_flags[CONFIG_NR_CPUS];
 
 uint64_t aarch64_gic_ack(void);
 uint64_t aarch64_decode_sync_cause(uint64_t esr);
@@ -69,7 +69,13 @@ static inline void arch_flush_icache_range(const void *addr, size_t size) {
 static inline unsigned arch_current_cpu_id(void) {
     uint64_t mpidr;
     __asm__ __volatile__("mrs %0, mpidr_el1" : "=r"(mpidr));
+#ifdef CONFIG_BOARD_QEMU_VIRT_AARCH64
+    /* QEMU virt -smp uses dense Aff0 values in a single cluster. */
     return (unsigned)(mpidr & 0xff);
+#else
+    /* Preserve the established Aff0 fallback for other AArch64 boards. */
+    return (unsigned)(mpidr & 0xff);
+#endif
 }
 
 static inline void arch_local_irq_disable(void) {
@@ -117,7 +123,10 @@ static inline uint64_t arch_read_ra(void) {
 }
 
 static inline uint64_t arch_read_cause(void) {
-    if (aarch64_trap_flags & AARCH64_TRAP_FLAG_IRQ)
+    unsigned cpu = arch_current_cpu_id();
+    if (cpu >= CONFIG_NR_CPUS)
+        cpu = 0;
+    if (aarch64_trap_flags[cpu] & AARCH64_TRAP_FLAG_IRQ)
         return CAUSE_INTR_MASK | aarch64_gic_ack();
     return aarch64_decode_sync_cause(arch_read_esr());
 }
