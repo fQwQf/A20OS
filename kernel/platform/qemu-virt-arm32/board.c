@@ -52,17 +52,12 @@ static void arm32_irqchip_eoi(uint32_t irq) {
     (void)irq;
 }
 
-static void arm32_irqchip_send_ipi(uint64_t target_mask) {
-    (void)target_mask;
-}
-
 static const irqchip_ops_t arm32_irqchip_ops = {
     .init = arm32_irqchip_init,
     .enable_irq = arm32_irqchip_enable,
     .disable_irq = arm32_irqchip_disable,
     .ack = arm32_irqchip_ack,
     .eoi = arm32_irqchip_eoi,
-    .send_ipi = arm32_irqchip_send_ipi,
 };
 
 static uint64_t arm32_timer_read_ticks(void) {

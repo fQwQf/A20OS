@@ -4,33 +4,64 @@
 #include "core/cpu.h"
 
 /*
- * 架构无关的 SMP 接口。
- *
- * 架构相关代码在 kernel/arch/ 中实现这些函数，
- * 内核其他部分通过此头文件调用，不直接依赖具体硬件机制。
- *
- * 当前 CONFIG_NR_CPUS=1 时，所有函数退化为空操作。
+ * Architecture-independent SMP topology and startup interface.  Logical CPU
+ * IDs are dense, start at zero, and are limited to the 32-bit scheduler mask.
+ * Hardware IDs and platform cookies are opaque to common code.
  */
 
-/* 向指定 CPU 发送调度 IPI，唤醒目标 CPU 进行重新调度 */
+#if CONFIG_NR_CPUS > 32
+#error "The shared SMP CPU mask supports at most 32 CPUs"
+#endif
+
+typedef struct smp_cpu_desc {
+    unsigned logical_id;
+    uint64_t hw_id;
+    uintptr_t platform_cookie;
+} smp_cpu_desc_t;
+
+typedef enum smp_ipi_reason {
+    SMP_IPI_RESCHEDULE = 0,
+} smp_ipi_reason_t;
+
+typedef struct smp_platform_ops {
+    /* Fill and return the CPUs this kernel can manage, up to capacity. */
+    unsigned (*discover)(smp_cpu_desc_t *cpus, unsigned capacity,
+                         uint64_t boot_hw_id);
+    int (*start)(const smp_cpu_desc_t *cpu, uintptr_t entry_pa,
+                 uintptr_t logical_context);
+    void (*send_ipi)(const smp_cpu_desc_t *cpu, smp_ipi_reason_t reason);
+    /* Per-CPU controller or firmware setup, run on the secondary CPU. */
+    void (*secondary_init)(const smp_cpu_desc_t *cpu);
+} smp_platform_ops_t;
+
+/* Send a reschedule IPI to an online logical CPU. */
 void smp_send_reschedule(unsigned cpu);
 
-/* 初始化 SMP 子系统（在 proc_init 之后调用） */
+/* Discover topology after proc_init(). */
 void smp_init(void);
 
-/* 启动所有 secondary CPU 进入各自的 idle 循环 */
+/* Start configured secondary CPUs; failures leave those CPUs offline. */
 void smp_boot_secondaries(void);
 
-/* secondary CPU 的初始化入口，由架构代码调用 */
+/* Secondary CPU initialization entry, called by architecture entry code. */
 void smp_secondary_init(unsigned cpu_id);
 
-/* Configured CPUs may remain offline when a platform has no secondary-start
- * backend. Common code schedules only on this architecture-neutral mask. */
-void smp_core_init(void);
+/* Online-state helpers used by the shared lifecycle and status APIs. */
 void smp_cpu_mark_online(unsigned cpu);
+/* CPUs discovered and described by the selected platform, capped by the
+ * build-time capacity. This is not a count of ignored physical CPUs. */
+unsigned smp_present_cpu_count(void);
 unsigned smp_configured_cpu_count(void);
 unsigned smp_online_cpu_count(void);
 uint32_t smp_online_cpu_mask(void);
 int smp_cpu_is_online(unsigned cpu);
+const smp_cpu_desc_t *smp_cpu_desc(unsigned logical_id);
+int smp_hw_to_logical(uint64_t hw_id, unsigned *logical_id);
+int smp_logical_to_hw(unsigned logical_id, uint64_t *hw_id);
+
+/* Minimal architecture hooks used by the shared startup path. */
+uint64_t arch_smp_boot_hw_id(void);
+uintptr_t arch_smp_secondary_entry_pa(void);
+int arch_smp_secondary_prepare(const smp_cpu_desc_t *cpu);
 
 #endif /* _CORE_SMP_H */

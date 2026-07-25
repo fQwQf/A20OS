@@ -2,7 +2,15 @@
 
 #include "drivers/core/driver_core.h"
 #include "core/arch.h"
+#include "core/smp.h"
 #include "core/timer.h"
+
+#define IPI_BOOT_VECTOR       0
+#define IPI_RESCHEDULE_VECTOR 1
+#define IOCSR_MBUF_SEND       0x1048
+#define IOCSR_SEND_BLOCKING   (1UL << 31)
+#define IOCSR_SEND_CPU_SHIFT  16
+#define IOCSR_MBUF_DATA_SHIFT 32
 
 static void la64_irqchip_init(void) {
     arch_irqchip_init();
@@ -25,17 +33,12 @@ static void la64_irqchip_eoi(uint32_t irq) {
     (void)irq;
 }
 
-static void la64_irqchip_send_ipi(uint64_t target_mask) {
-    (void)target_mask;
-}
-
 static const irqchip_ops_t la64_irqchip_ops = {
     .init       = la64_irqchip_init,
     .enable_irq = la64_irqchip_enable,
     .disable_irq = la64_irqchip_disable,
     .ack        = la64_irqchip_ack,
     .eoi        = la64_irqchip_eoi,
-    .send_ipi   = la64_irqchip_send_ipi,
 };
 
 static uint64_t la64_timer_read_ticks(void) {
@@ -51,7 +54,54 @@ static const timer_ops_t la64_timer_ops = {
     .ticks_per_sec = la64_timer_ticks_per_sec,
 };
 
+static unsigned la64_smp_discover(smp_cpu_desc_t *cpus, unsigned capacity,
+                                  uint64_t boot_hw_id) {
+    unsigned count = capacity;
+    for (unsigned cpu = 0; cpu < count; cpu++) {
+        cpus[cpu].hw_id = cpu;
+        cpus[cpu].platform_cookie = cpu;
+    }
+    return boot_hw_id < count ? count : 0;
+}
+
+static int la64_smp_start(const smp_cpu_desc_t *cpu, uintptr_t entry_pa,
+                          uintptr_t logical_context) {
+    (void)logical_context;
+    uint64_t common = IOCSR_SEND_BLOCKING |
+                      (cpu->hw_id << IOCSR_SEND_CPU_SHIFT);
+
+    /* QEMU consumes mailbox 0 as two masked 32-bit writes. */
+    loongarch64_iocsr_write64(
+        common | (1UL << 2) | (entry_pa & 0xffffffff00000000UL),
+        IOCSR_MBUF_SEND);
+    loongarch64_iocsr_write64(
+        common | ((uint64_t)(uint32_t)entry_pa << IOCSR_MBUF_DATA_SHIFT),
+        IOCSR_MBUF_SEND);
+    loongarch64_smp_send_ipi((unsigned)cpu->hw_id, IPI_BOOT_VECTOR);
+    return 0;
+}
+
+static void la64_smp_send(const smp_cpu_desc_t *cpu,
+                          smp_ipi_reason_t reason) {
+    if (reason == SMP_IPI_RESCHEDULE)
+        loongarch64_smp_send_ipi((unsigned)cpu->hw_id,
+                                 IPI_RESCHEDULE_VECTOR);
+}
+
+static void la64_smp_secondary(const smp_cpu_desc_t *cpu) {
+    (void)cpu;
+    loongarch64_smp_local_init();
+}
+
+static const smp_platform_ops_t la64_smp_ops = {
+    .discover = la64_smp_discover,
+    .start = la64_smp_start,
+    .send_ipi = la64_smp_send,
+    .secondary_init = la64_smp_secondary,
+};
+
 static void la64_early_init(void) {
+    loongarch64_smp_local_init();
 }
 
 static void la64_poweroff(void) {
@@ -77,6 +127,7 @@ static const board_config_t qemu_virt_la64 = {
     .ram_end           = PHYS_MEMORY_END,
     .irqchip           = &la64_irqchip_ops,
     .timer             = &la64_timer_ops,
+    .smp               = &la64_smp_ops,
     .early_init        = la64_early_init,
     .poweroff          = la64_poweroff,
     .reboot            = la64_reboot,

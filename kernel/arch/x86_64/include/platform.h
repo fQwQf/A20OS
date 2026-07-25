@@ -46,6 +46,10 @@ uint64_t x86_64_get_trap_epc(void);
 uint64_t x86_64_get_trap_tval(void);
 void x86_64_set_trap_epc(uint64_t value);
 unsigned x86_64_apic_to_cpu(unsigned apic_id);
+int x86_64_smp_start_ap(unsigned apic_id, uintptr_t entry,
+                        unsigned logical_id);
+void x86_64_smp_send_ipi(unsigned apic_id, uint32_t vector);
+void x86_64_smp_secondary_init(void);
 
 /* Exception / pseudo-cause codes
  * x86_64 does not have a unified cause register like RISC-V.

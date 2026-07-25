@@ -78,9 +78,11 @@ STM32F103 的 SDIO 是持久块设备，已使用 `DEV_CLASS_BLOCK`。显示、�
 
 ## 移植新平台的步骤
 
+完整的架构/platform 边界、SMP hooks 和验收要求见[平台移植指南](../platforms/porting-guide.md)。
+
 1. 创建 `kernel/platform/<board>/` 和平台头，定义 RAM、启动地址、早期 MMIO 映射。
 2. 提供链接脚本，包含 `.driver_init` 的 start/end 与 `KEEP`。
-3. 实现 `current_board`、irqchip、timer、early console 和 power/reboot。
+3. 实现 `current_board`、irqchip、timer、early console 和 power/reboot；多核平台还要提供 `smp_platform_ops`。
 4. 从 ACPI/FDT/固件或固定资源枚举设备；优先调用已有总线枚举器。
 5. 在 Makefile 选择正确 `BOARD_INCLUDE_DIR`、平台源文件和链接脚本。
 6. 先构建 `kernel-only`，再验证串口日志中的 driver core、总线和设备绑定。

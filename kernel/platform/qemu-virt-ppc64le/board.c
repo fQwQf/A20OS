@@ -23,17 +23,12 @@ static void ppc64le_irqchip_eoi(uint32_t irq) {
     (void)irq;
 }
 
-static void ppc64le_irqchip_send_ipi(uint64_t target_mask) {
-    (void)target_mask;
-}
-
 static const irqchip_ops_t ppc64le_irqchip_ops = {
     .init = ppc64le_irqchip_init,
     .enable_irq = ppc64le_irqchip_enable,
     .disable_irq = ppc64le_irqchip_disable,
     .ack = ppc64le_irqchip_ack,
     .eoi = ppc64le_irqchip_eoi,
-    .send_ipi = ppc64le_irqchip_send_ipi,
 };
 
 static uint64_t ppc64le_timer_read_ticks(void) {

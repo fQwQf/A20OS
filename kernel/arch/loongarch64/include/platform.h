@@ -55,6 +55,10 @@ static inline int arch_ram_range(size_t idx, paddr_t *base, paddr_t *end) {
 #define CLINT_TIMER_FREQ   100000000UL   /* 100 MHz — QEMU loongarch rdtime.d runs at 10ns period */
 #define ARCH_TIMER_FREQ    CLINT_TIMER_FREQ
 
+void loongarch64_smp_send_ipi(unsigned cpu, unsigned vector);
+void loongarch64_iocsr_write64(uint64_t value, uint32_t reg);
+void loongarch64_smp_local_init(void);
+
 /* LoongArch ESTAT IS bit positions */
 #define IRQ_S_SOFT         0   /* SWI0 */
 #define IRQ_S_TIMER        11  /* TI — timer interrupt */
