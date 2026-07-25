@@ -2,6 +2,7 @@
 
 #include "core/smp.h"
 #include "core/defs.h"
+#include "core/panic.h"
 #include "proc/proc.h"
 
 volatile uint64_t riscv64_smp_release;
@@ -36,6 +37,21 @@ uint64_t arch_smp_boot_hw_id(void)
 {
     extern uint64_t __boot_hart_id;
     return __boot_hart_id;
+}
+
+void riscv64_remote_tlb_flush(uint64_t addr, uint64_t size)
+{
+#ifdef CONFIG_SMP
+    uint32_t pending = smp_online_cpu_mask();
+    unsigned current = arch_current_cpu_id();
+    if (current < 32)
+        pending &= ~(1U << current);
+    if (pending && smp_remote_tlb_flush(pending, addr, size) < 0)
+        panic("RISC-V remote TLB flush failed");
+#else
+    (void)addr;
+    (void)size;
+#endif
 }
 
 uintptr_t arch_smp_secondary_entry_pa(void)

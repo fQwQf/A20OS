@@ -2,6 +2,7 @@
 #define _ARCH_RISCV64_CPU_H
 
 #include "core/types.h"
+#include "core/consts.h"
 #include "platform.h"
 
 static inline void arch_mb(void)  { __asm__ __volatile__("fence iorw,iorw" ::: "memory"); }
@@ -28,11 +29,19 @@ static inline int arch_irqs_enabled(void) {
     return !!(s & (1UL << 1));
 }
 
+void riscv64_remote_tlb_flush(uint64_t addr, uint64_t size);
+
 static inline void arch_tlb_flush(void) {
     __asm__ __volatile__("sfence.vma" ::: "memory");
+#ifdef CONFIG_SMP
+    riscv64_remote_tlb_flush(0, ~(uint64_t)0);
+#endif
 }
 static inline void arch_tlb_flush_page(uint64_t addr) {
     __asm__ __volatile__("sfence.vma %0, zero" :: "r"(addr) : "memory");
+#ifdef CONFIG_SMP
+    riscv64_remote_tlb_flush(addr, PAGE_SIZE);
+#endif
 }
 
 static inline void arch_set_task_pointer(void *task) {
