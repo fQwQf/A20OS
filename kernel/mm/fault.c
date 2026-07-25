@@ -75,7 +75,7 @@ int mm_shared_file_fault(mm_struct_t *mm, vm_area_t *vma, uint64_t page_va,
     return 0;
 }
 
-int handle_cow_fault(task_t *t, uint64_t stval) {
+static int handle_cow_fault_locked(task_t *t, uint64_t stval) {
 #ifdef CONFIG_NOMMU
     (void)t;
     (void)stval;
@@ -174,7 +174,7 @@ int handle_cow_fault(task_t *t, uint64_t stval) {
  *   read through the file into a private frame and therefore do not yet provide
  *   full MAP_SHARED dirty/writeback coherence.
  */
-int handle_demand_fault(task_t *t, uint64_t stval) {
+static int handle_demand_fault_locked(task_t *t, uint64_t stval) {
 #ifdef CONFIG_NOMMU
     (void)t;
     (void)stval;
@@ -199,8 +199,7 @@ int handle_demand_fault(task_t *t, uint64_t stval) {
             return -1;
         if (cg_mem_charge(t->cgroup, 1) != 0) {
             frame_put(pfn);
-            cg_mem_oom_kill(t->cgroup);
-            return -1;
+            return -ENOMEM;
         }
         if (swap_read_page(entry, pfn_to_virt(pfn)) < 0) {
             cg_mem_uncharge(t->cgroup, 1);
@@ -239,8 +238,7 @@ int handle_demand_fault(task_t *t, uint64_t stval) {
             if (pfn == PFN_NONE) return -1;
             if (cg_mem_charge(t->cgroup, 1) != 0) {
                 frame_put(pfn);
-                cg_mem_oom_kill(t->cgroup);
-                return -1;
+                return -ENOMEM;
             }
             memset(pfn_to_virt(pfn), 0, PAGE_SIZE);
 
@@ -259,8 +257,7 @@ int handle_demand_fault(task_t *t, uint64_t stval) {
     if (page_va >= t->mm->start_brk &&
         page_va < ROUND_UP(t->mm->brk, PAGE_SIZE)) {
         if (cg_mem_charge(t->cgroup, 1) != 0) {
-            cg_mem_oom_kill(t->cgroup);
-            return -1;
+            return -ENOMEM;
         }
         pfn_t pfn = pfa_alloc_page();
         if (pfn == PFN_NONE) { cg_mem_uncharge(t->cgroup, 1); return -1; }
@@ -324,8 +321,7 @@ int handle_demand_fault(task_t *t, uint64_t stval) {
 
                 if (cg_mem_charge(t->cgroup, 1) != 0) {
                     page_cache_put(pcp);
-                    cg_mem_oom_kill(t->cgroup);
-                    return -1;
+                    return -ENOMEM;
                 }
                 pfn_t copy = pfa_alloc_page();
                 if (copy == PFN_NONE) {
@@ -373,8 +369,7 @@ int handle_demand_fault(task_t *t, uint64_t stval) {
                 if (hpfn != PFN_NONE) {
                     if (cg_mem_charge(t->cgroup, PMD_PAGE_COUNT) != 0) {
                         frame_put(hpfn);
-                        cg_mem_oom_kill(t->cgroup);
-                        return -1;
+                        return -ENOMEM;
                     }
                     memset(pfn_to_virt(hpfn), 0, PMD_SIZE);
                     int hr = pt_map_huge(t->mm->pgdir, hbase, pfn_to_phys(hpfn),
@@ -394,8 +389,7 @@ int handle_demand_fault(task_t *t, uint64_t stval) {
         if (pfn == PFN_NONE) return -1;
         if (cg_mem_charge(t->cgroup, 1) != 0) {
             frame_put(pfn);
-            cg_mem_oom_kill(t->cgroup);
-            return -1;
+            return -ENOMEM;
         }
         memset(pfn_to_virt(pfn), 0, PAGE_SIZE);
 
@@ -409,5 +403,178 @@ int handle_demand_fault(task_t *t, uint64_t stval) {
     }
 
     return -1;
+#endif
+}
+
+#ifndef CONFIG_NOMMU
+static int handle_file_fault(task_t *t, uint64_t page_va, int file_fd,
+                             uint64_t file_pos, int shared, vfile_t *vf)
+{
+    if (file_pos >= vf->vnode->size) {
+        signal_send(t->pid, SIGBUS);
+        vfs_put_file_ref(file_fd, vf);
+        return -1;
+    }
+
+    page_cache_page_t *pcp = page_cache_get(vf->vnode,
+                                             file_pos / PAGE_SIZE, 1);
+    if (!pcp) {
+        vfs_put_file_ref(file_fd, vf);
+        return -1;
+    }
+    int fill_r = 0;
+    if (!page_cache_is_uptodate(pcp)) {
+        /* Fault I/O must not change the shared file-description offset or
+         * recursively acquire its mutex from read(fd, mapped_buffer, ...). */
+        vfile_t fault_vf = *vf;
+        mutex_init(&fault_vf.offset_lock);
+        fill_r = page_cache_fill_vfile_page(&fault_vf, pcp);
+    }
+    if (fill_r < 0) {
+        page_cache_put(pcp);
+        vfs_put_file_ref(file_fd, vf);
+        return -1;
+    }
+
+    pfn_t candidate = page_cache_pfn(pcp);
+    int charged = 0;
+    if (!pfn_valid(candidate)) {
+        page_cache_put(pcp);
+        vfs_put_file_ref(file_fd, vf);
+        return -1;
+    }
+
+    if (!shared) {
+        if (cg_mem_charge(t->cgroup, 1) != 0) {
+            page_cache_put(pcp);
+            vfs_put_file_ref(file_fd, vf);
+            cg_mem_oom_kill(t->cgroup);
+            return -1;
+        }
+        charged = 1;
+        candidate = pfa_alloc_page();
+        if (candidate == PFN_NONE) {
+            cg_mem_uncharge(t->cgroup, 1);
+            page_cache_put(pcp);
+            vfs_put_file_ref(file_fd, vf);
+            return -1;
+        }
+        memcpy(pfn_to_virt(candidate), page_cache_data(pcp), PAGE_SIZE);
+        page_cache_put(pcp);
+        pcp = NULL;
+    }
+
+    mm_struct_t *mm = t->mm;
+    uint64_t mm_flags = spin_lock_irqsave(&mm->lock);
+    vm_area_t *vma = mm_find_vma(mm, page_va);
+    vfile_t *current_vf = vma && (vma->vm_flags & VM_FILE) &&
+                          vma->file_fd >= 0
+        ? vfs_get_file_ref(vma->file_fd) : NULL;
+    int mapping_valid = vma && current_vf && current_vf->vnode == vf->vnode &&
+        (vma->vm_flags & VM_FILE) &&
+        mm_pte_flags_allow_access(vma->pte_flags) &&
+        !!(vma->vm_flags & VM_SHARED) == !!shared &&
+        vma->file_fd == file_fd &&
+        vma->file_offset + (page_va - vma->start) == file_pos;
+    if (current_vf)
+        vfs_put_file_ref(vma->file_fd, current_vf);
+
+    int result = -1;
+    pte_t *pte = pt_lookup_leaf(mm->pgdir, page_va, NULL, NULL, NULL);
+    if (mapping_valid && pte && (*pte & PTE_V)) {
+        result = 0;
+    } else if (mapping_valid &&
+               pt_map(mm->pgdir, page_va, pfn_to_phys(candidate),
+                      vma->pte_flags) == 0) {
+        mm->rss++;
+        arch_tlb_flush_page(page_va);
+        result = 0;
+        candidate = PFN_NONE;
+        if (shared)
+            pcp = NULL; /* The mapping retains the page-cache pin. */
+    }
+    spin_unlock_irqrestore(&mm->lock, mm_flags);
+
+    if (candidate != PFN_NONE && !shared)
+        frame_put(candidate);
+    if (pcp)
+        page_cache_put(pcp);
+    if (charged && candidate != PFN_NONE)
+        cg_mem_uncharge(t->cgroup, 1);
+    vfs_put_file_ref(file_fd, vf);
+    return result;
+}
+#endif
+
+int handle_cow_fault(task_t *t, uint64_t stval)
+{
+#ifdef CONFIG_NOMMU
+    return handle_cow_fault_locked(t, stval);
+#else
+    if (!t || !t->mm)
+        return -1;
+    mm_struct_t *mm = t->mm;
+    uint64_t flags = spin_lock_irqsave(&mm->lock);
+    int r = handle_cow_fault_locked(t, stval);
+    spin_unlock_irqrestore(&mm->lock, flags);
+    return r;
+#endif
+}
+
+int handle_demand_fault(task_t *t, uint64_t stval)
+{
+#ifdef CONFIG_NOMMU
+    return handle_demand_fault_locked(t, stval);
+#else
+    if (!t || !t->mm || !t->mm->pgdir)
+        return -1;
+
+    mm_struct_t *mm = t->mm;
+    uint64_t page_va = stval & ~(PAGE_SIZE - 1);
+    uint64_t flags = spin_lock_irqsave(&mm->lock);
+    pte_t *pte = pt_lookup_leaf(mm->pgdir, page_va, NULL, NULL, NULL);
+#ifdef CONFIG_SWAP
+    if (pte && pte_is_swap(*pte)) {
+        /* Swap I/O cannot run under the IRQ-disabling mm spinlock.  A future
+         * busy swap PTE will close the remaining duplicate-swapin race. */
+        spin_unlock_irqrestore(&mm->lock, flags);
+        int r = handle_demand_fault_locked(t, stval);
+        if (r == -ENOMEM) {
+            cg_mem_oom_kill(t->cgroup);
+            return -1;
+        }
+        return r;
+    }
+#endif
+    if (pte && (*pte & PTE_V)) {
+        spin_unlock_irqrestore(&mm->lock, flags);
+        return -1;
+    }
+    vm_area_t *vma = mm_find_vma(mm, page_va);
+    if (vma && (vma->vm_flags & VM_FILE) && vma->file_fd >= 0) {
+        if (!mm_pte_flags_allow_access(vma->pte_flags)) {
+            spin_unlock_irqrestore(&mm->lock, flags);
+            return -1;
+        }
+        int file_fd = vma->file_fd;
+        int shared = (vma->vm_flags & VM_SHARED) != 0;
+        uint64_t file_pos = vma->file_offset + (page_va - vma->start);
+        vfile_t *vf = vfs_get_file_ref(file_fd);
+        spin_unlock_irqrestore(&mm->lock, flags);
+        if (!vf || !vf->vnode) {
+            if (vf)
+                vfs_put_file_ref(file_fd, vf);
+            return -1;
+        }
+        return handle_file_fault(t, page_va, file_fd, file_pos, shared, vf);
+    }
+
+    int r = handle_demand_fault_locked(t, stval);
+    spin_unlock_irqrestore(&mm->lock, flags);
+    if (r == -ENOMEM) {
+        cg_mem_oom_kill(t->cgroup);
+        return -1;
+    }
+    return r;
 #endif
 }
