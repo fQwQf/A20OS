@@ -2,8 +2,8 @@
 set -euo pipefail
 
 # Install the official RISC-V Rust distribution needed by the A20OS extra
-# image.  rustc/cargo run against glibc; generated programs use the bundled
-# static musl target and the native GCC package as their linker.
+# image.  rustc/cargo/rustfmt run against glibc; generated programs use the
+# bundled static musl target and the native GCC package as their linker.
 #
 # Usage: build-rust.sh <install-dir>
 
@@ -42,7 +42,10 @@ download "$MUSL_STD_URL" "$MUSL_STD_ARCHIVE" "$MUSL_STD_SHA256"
 
 if [ -f "$INSTALL_DIR/.rust-version" ] && \
    [ "$(cat "$INSTALL_DIR/.rust-version")" = "$RUST_VERSION" ] && \
-   [ -x "$INSTALL_DIR/bin/rustc" ] && [ -x "$INSTALL_DIR/bin/cargo" ]; then
+   [ -x "$INSTALL_DIR/bin/rustc" ] && \
+   [ -x "$INSTALL_DIR/bin/cargo" ] && \
+   [ -x "$INSTALL_DIR/bin/rustfmt" ] && \
+   [ -x "$INSTALL_DIR/bin/cargo-fmt" ]; then
     echo "[RUST] Rust $RUST_VERSION already installed in $INSTALL_DIR"
     exit 0
 fi
@@ -55,10 +58,10 @@ tar -xJf "$MUSL_STD_ARCHIVE" -C "$WORK_DIR"
 RUST_SRC="$WORK_DIR/rust-$RUST_VERSION-$HOST_TRIPLE"
 MUSL_STD_SRC="$WORK_DIR/rust-std-$RUST_VERSION-$MUSL_TRIPLE"
 
-echo "[RUST] Installing rustc, cargo, and $HOST_TRIPLE std..."
+echo "[RUST] Installing rustc, cargo, rustfmt, and $HOST_TRIPLE std..."
 "$RUST_SRC/install.sh" \
     --prefix="$INSTALL_DIR" \
-    --components=rustc,cargo,rust-std-$HOST_TRIPLE \
+    --components=rustc,cargo,rustfmt-preview,rust-std-$HOST_TRIPLE \
     --disable-ldconfig
 
 echo "[RUST] Installing $MUSL_TRIPLE std..."
