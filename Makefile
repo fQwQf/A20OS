@@ -32,6 +32,7 @@ OPT ?= -O3
 NR_CPUS ?= 1
 COOPERATIVE_BOOT ?= 0
 ALLOW_UNVERIFIED_SMP ?= 0
+SMP_VERIFIED_QEMU_ARCHES := riscv64 aarch64 loongarch64 x86_64
 PROFILE ?= full
 CONFIG_SWAP ?= n
 STM32_OPENOCD_INTERFACE ?= interface/cmsis-dap.cfg
@@ -72,9 +73,12 @@ endif
 
 ifneq ($(NR_CPUS),1)
 ifeq ($(ALLOW_UNVERIFIED_SMP),0)
+SMP_PLATFORM_VERIFIED := $(and $(filter $(ARCH),$(SMP_VERIFIED_QEMU_ARCHES)),$(filter $(BOARD),qemu-virt-$(ARCH)))
+ifeq ($(SMP_PLATFORM_VERIFIED),)
 SMP_VALIDATION_GOALS := check-concurrency-foundation check-doc-test-gates check-final-definition
 ifeq ($(filter $(SMP_VALIDATION_GOALS),$(MAKECMDGOALS)),)
-$(error NR_CPUS=$(NR_CPUS) is blocked until scheduler/MM/VFS concurrency gates pass; set ALLOW_UNVERIFIED_SMP=1 only for explicit SMP bringup experiments)
+$(error NR_CPUS=$(NR_CPUS) is unverified for ARCH=$(ARCH) BOARD=$(BOARD); set ALLOW_UNVERIFIED_SMP=1 only for explicit SMP bringup experiments)
+endif
 endif
 endif
 endif
