@@ -455,6 +455,11 @@ __return_to_user:
 user_trap_return:
     jmp   __return_to_user
 
+    .globl arch_return_to_user
+arch_return_to_user:
+    movq  %rdi, %rsp
+    jmp   __return_to_user
+
     .globl __trap_from_user
 __trap_from_user:
     jmp   isr_common

@@ -7,8 +7,13 @@
 #include "mm/mm.h"
 #include "mm/vm.h"
 #include "core/cpu.h"
+#include "core/panic.h"
 #include "core/string.h"
 #include "cg/cgroup.h"
+
+#ifndef CONFIG_MCU
+extern void arch_return_to_user(trap_context_t *ctx) NORETURN;
+#endif
 
 void proc_set_name(task_t *t, const char *name)
 {
@@ -111,6 +116,7 @@ void proc_task_init_common(task_t *t, task_t *parent)
     t->limits.nofile = parent ? parent->limits.nofile : MAX_FILES;
     t->limits.memlock = parent ? parent->limits.memlock : (64 * 1024);
     t->mm        = NULL;
+    t->first_kernel_entry = 0;
 
     t->cgroup     = parent ? parent->cgroup : NULL;
     t->cpus_allowed = parent ? parent->cpus_allowed
@@ -156,6 +162,24 @@ void proc_task_init_common(task_t *t, task_t *parent)
     t->files = NULL;
     t->signals = NULL;
 #endif
+}
+
+void proc_task_first_entry(void)
+{
+    task_t *t = proc_current();
+    void (*entry)(void) = t ? (void (*)(void))t->first_kernel_entry : NULL;
+
+    if (t)
+        t->first_kernel_entry = 0;
+    proc_switch_complete();
+#ifndef CONFIG_MCU
+    if (t && t->trap_ctx)
+        arch_return_to_user(t->trap_ctx);
+#endif
+    if (!entry)
+        panic("proc_task_first_entry: no entry");
+    entry();
+    proc_exit(0);
 }
 
 void proc_task_release_resources(task_t *t)

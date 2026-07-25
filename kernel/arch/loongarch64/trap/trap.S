@@ -395,6 +395,11 @@ user_trap_return:
 
     ertn
 
+    .global arch_return_to_user
+arch_return_to_user:
+    move    $sp, $a0
+    b       __return_to_user
+
 /* ---- TLB Refill entry (CSR 0x88 = TLBRENTRY) ----
  *
  * 3-level page table walk using lddir + ldpte + tlbfill.

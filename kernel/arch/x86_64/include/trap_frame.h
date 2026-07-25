@@ -147,7 +147,8 @@ static inline void arch_task_context_set_initial_sp(task_context_t *ctx,
     /* __switch loads rsp directly from the saved context.  For user tasks the
      * resume path must land on the trap_context_t; for kernel threads it must
      * land at the top of the kernel stack. */
-    ctx->rsp = trap ? (uint64_t)trap : stack_top;
+    ctx->rsp = (trap ? (uint64_t)trap : stack_top) - sizeof(uint64_t);
+    *(uint64_t *)(uintptr_t)ctx->rsp = 0;
     /* syscall_entry needs the real kernel stack top independent of whether
      * the resume target is the pre-allocated trap frame (user) or ks_top
      * (kernel thread).  Keep it in an unused padding slot; use a volatile

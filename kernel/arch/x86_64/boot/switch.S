@@ -69,7 +69,7 @@ __switch:
     movq  48(%rdi), %r14
     movq  56(%rdi), %r15
     movq  64(%rdi), %r8         /* rsp */
-    movq  72(%rdi), %rdx        /* rflags */
+    movq  72(%rdi), %r10        /* rflags */
     movq  80(%rdi), %rsi        /* cr3 */
 
     /* Set tp via gsbase */
@@ -88,12 +88,12 @@ __switch:
     movq  %rsi, %cr3
 1:
 
-    /* Restore rflags */
-    pushq %rdx
-    popfq
-
     /* Switch to next task's stack */
     movq  %r8, %rsp
+
+    /* Restore rflags only after the incoming stack is active. */
+    pushq %r10
+    popfq
 
     /* Jump to next task's return address */
     jmp   *%r11

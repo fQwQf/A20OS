@@ -44,7 +44,7 @@ __switch:
 1:
 #endif
     lw      t0, 15*4(a0)
-    csrw    sstatus, t0
     addi    a0, a0, 16*4
     mv      sp, a0
+    csrw    sstatus, t0
     ret

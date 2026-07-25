@@ -175,3 +175,8 @@ user_trap_return:
     std     11,72(12)
     std     2,80(12)
     b       __return_to_user
+
+    .globl arch_return_to_user
+arch_return_to_user:
+    mr      1,3
+    b       user_trap_return

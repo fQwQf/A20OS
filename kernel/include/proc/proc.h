@@ -169,6 +169,7 @@ typedef struct task_t {
     mm_struct_t *mm;
 
     uintptr_t entry;
+    uintptr_t first_kernel_entry;
     vaddr_t   exec_load_addr;
     size_t    exec_load_size;
 
