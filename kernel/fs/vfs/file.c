@@ -83,6 +83,8 @@ int vfs_write_file(vfile_t *vf, const char *buf, size_t count)
         vf->offset + count > vf->vnode->size)
         return -EPERM;
     int use_page_cache = vfs_file_uses_page_cache(vf->vnode);
+    int has_mmap_cache = vf->vnode && vf->vnode->ops &&
+                         vf->vnode->ops->readpage;
     if ((vf->flags & O_DIRECT) && use_page_cache) {
         page_cache_writeback_vnode(vf->vnode, NULL, NULL);
         long cur_off = (long)vf->offset;
@@ -98,7 +100,7 @@ int vfs_write_file(vfile_t *vf, const char *buf, size_t count)
             if ((vf->flags & O_DIRECT) && use_page_cache)
                 page_cache_invalidate_uptodate_range(vf->vnode, write_start,
                                                       write_start + (size_t)r);
-            else if (use_page_cache)
+            else if (use_page_cache || has_mmap_cache)
                 page_cache_invalidate_uptodate_range(vf->vnode, write_start,
                                                       write_start + (size_t)r);
             vfs_touch_mtime(vf->vnode);

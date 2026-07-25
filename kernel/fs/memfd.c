@@ -11,6 +11,7 @@ typedef struct {
     uint8_t *data;
     size_t size;
     size_t cap;
+    mutex_t data_lock;
 } memfd_file_t;
 
 static int memfd_file_grow(memfd_file_t *mf, size_t need)
@@ -34,11 +35,16 @@ static int memfd_file_read(vfile_t *vf, char *buf, size_t count)
 {
     memfd_file_t *mf = vf ? vf->priv : NULL;
     if (!mf) return -EBADF;
-    if (vf->offset >= mf->size) return 0;
+    mutex_lock(&mf->data_lock);
+    if (vf->offset >= mf->size) {
+        mutex_unlock(&mf->data_lock);
+        return 0;
+    }
     size_t n = mf->size - vf->offset;
     if (n > count) n = count;
     memcpy(buf, mf->data + vf->offset, n);
     vf->offset += n;
+    mutex_unlock(&mf->data_lock);
     return (int)n;
 }
 
@@ -46,12 +52,17 @@ static int memfd_file_write(vfile_t *vf, const char *buf, size_t count)
 {
     memfd_file_t *mf = vf ? vf->priv : NULL;
     if (!mf) return -EBADF;
+    mutex_lock(&mf->data_lock);
     int r = memfd_file_grow(mf, vf->offset + count);
-    if (r < 0) return r;
+    if (r < 0) {
+        mutex_unlock(&mf->data_lock);
+        return r;
+    }
     memcpy(mf->data + vf->offset, buf, count);
     vf->offset += count;
     if (vf->offset > mf->size) mf->size = vf->offset;
     if (vf->vnode) vf->vnode->size = mf->size;
+    mutex_unlock(&mf->data_lock);
     return (int)count;
 }
 
@@ -97,12 +108,38 @@ static int memfd_file_truncate(vnode_t *vn, size_t size)
     if (!vn) return -EINVAL;
     memfd_file_t *mf = vn->fs_data;
     if (!mf) return -EINVAL;
+    mutex_lock(&mf->data_lock);
     int r = memfd_file_grow(mf, size);
-    if (r < 0) return r;
+    if (r < 0) {
+        mutex_unlock(&mf->data_lock);
+        return r;
+    }
     if (size > mf->size) memset(mf->data + mf->size, 0, size - mf->size);
     mf->size = size;
     vn->size = size;
+    mutex_unlock(&mf->data_lock);
     return 0;
+}
+
+static int memfd_file_readpage(vnode_t *vn, uint64_t index,
+                               void *data, size_t len)
+{
+    if (!vn || !vn->fs_data || !data)
+        return -EINVAL;
+    memfd_file_t *mf = vn->fs_data;
+    mutex_lock(&mf->data_lock);
+    memset(data, 0, len);
+    uint64_t off = index * PAGE_SIZE;
+    if (off >= mf->size || !mf->data) {
+        mutex_unlock(&mf->data_lock);
+        return 0;
+    }
+    size_t n = mf->size - (size_t)off;
+    if (n > len)
+        n = len;
+    memcpy(data, mf->data + off, n);
+    mutex_unlock(&mf->data_lock);
+    return (int)n;
 }
 
 static void memfd_file_release(vnode_t *vn)
@@ -120,6 +157,7 @@ static vfile_ops_t g_memfile_fops = {
 static vnode_ops_t g_memfile_vops = {
     .stat = memfd_file_stat,
     .truncate = memfd_file_truncate,
+    .readpage = memfd_file_readpage,
     .release = memfd_file_release,
 };
 
@@ -136,6 +174,7 @@ int memfd_create_file(int flags)
         return -ENOMEM;
     }
     memset(mf, 0, sizeof(*mf));
+    mutex_init(&mf->data_lock);
     memset(vn, 0, sizeof(*vn));
     vn->ino = (uint64_t)(uintptr_t)vn;
     vn->type = VFS_FT_REGULAR;
