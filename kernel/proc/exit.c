@@ -215,11 +215,17 @@ static void proc_reparent_children(task_t *dead, task_t *reaper)
             (actual_reaper == proc_idle_task() ||
              child->exit_signal != SIGCHLD ||
              (child->clone_flags & CLONE_THREAD)) &&
-            child->state == PROC_ZOMBIE) {
-            child->state = PROC_UNUSED;
-            proc_unlink_task_locked(child);
-            if (destroy_count < (int)(sizeof(to_destroy) / sizeof(to_destroy[0])))
+            child->state == PROC_ZOMBIE &&
+            !proc_task_is_current_any_cpu(child)) {
+            if (destroy_count < (int)(sizeof(to_destroy) / sizeof(to_destroy[0]))) {
+                child->state = PROC_UNUSED;
+                proc_unlink_task_locked(child);
                 to_destroy[destroy_count++] = child;
+            } else {
+                proc_sched_note_zombie();
+                child->ppid = actual_reaper->pid;
+                child->parent = actual_reaper;
+            }
 
             thread_reaper = proc_find_live_thread_reaper_locked(dead);
             actual_reaper = thread_reaper;
@@ -230,8 +236,10 @@ static void proc_reparent_children(task_t *dead, task_t *reaper)
                     actual_reaper->state == PROC_ZOMBIE)
                     actual_reaper = proc_idle_task();
             }
-            child = next;
-            continue;
+            if (child->state == PROC_UNUSED) {
+                child = next;
+                continue;
+            }
         }
 
         if (force_kill_children && child->state != PROC_ZOMBIE) {

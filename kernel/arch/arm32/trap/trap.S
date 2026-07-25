@@ -320,3 +320,8 @@ user_trap_return:
     ldr     r12, [r0, #48]
     ldr     r0, [r0, #0]
     subs    pc, lr, #0
+
+    .global arch_return_to_user
+arch_return_to_user:
+    mov     sp, r0
+    b       user_trap_return
