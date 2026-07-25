@@ -110,7 +110,8 @@ static inline void arch_task_context_set_initial_sp(task_context_t *ctx,
     uint64_t toc;
     __asm__ __volatile__("mr %0,2" : "=r"(toc));
     ctx->toc = toc;
-    ctx->sp = trap ? (uint64_t)trap : stack_top;
+    ctx->sp = (trap ? (uint64_t)trap : stack_top) - 32;
+    *(uint64_t *)(uintptr_t)ctx->sp = 0;
 }
 
 static inline task_context_t *arch_task_context_base(void *kstack_base,

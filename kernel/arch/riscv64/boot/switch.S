@@ -93,12 +93,13 @@ __switch:
     sfence.vma
 .Lskip_switch_satp:
 #endif
-    ld      t0, 15*8(a0)
-    csrw    sstatus, t0
-
     /* Set sp past the TaskContext area on next task's stack */
+    ld      t0, 15*8(a0)
     addi    a0, a0, 16*8
     mv      sp, a0
+
+    /* Do not unmask interrupts until the incoming stack is active. */
+    csrw    sstatus, t0
 
     /* Return to next task's execution point */
     ret

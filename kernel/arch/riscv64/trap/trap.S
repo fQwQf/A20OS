@@ -254,3 +254,8 @@ __trap_from_kernel:
 
 user_trap_return:
     j __return_to_user
+
+    .globl arch_return_to_user
+arch_return_to_user:
+    mv sp, a0
+    j __return_to_user
