@@ -30,17 +30,12 @@ static void rv32_plic_eoi(uint32_t irq) {
     (void)irq;
 }
 
-static void rv32_plic_send_ipi(uint64_t target_mask) {
-    (void)target_mask;
-}
-
 static const irqchip_ops_t rv32_plic_ops = {
     .init = rv32_plic_init,
     .enable_irq = rv32_plic_enable,
     .disable_irq = rv32_plic_disable,
     .ack = rv32_plic_ack,
     .eoi = rv32_plic_eoi,
-    .send_ipi = rv32_plic_send_ipi,
 };
 
 static uint64_t rv32_timer_read_ticks(void) {

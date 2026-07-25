@@ -2,7 +2,10 @@
 
 #include "drivers/core/driver_core.h"
 #include "core/arch.h"
+#include "core/smp.h"
+#include "core/stdio.h"
 #include "core/timer.h"
+#include "firmware.h"
 
 static void x86_64_irqchip_init(void) {}
 
@@ -23,17 +26,12 @@ static void x86_64_irqchip_eoi(uint32_t irq) {
     lapic_write(LAPIC_EOI, 0);
 }
 
-static void x86_64_irqchip_send_ipi(uint64_t target_mask) {
-    (void)target_mask;
-}
-
 static const irqchip_ops_t x86_64_irqchip_ops = {
     .init       = x86_64_irqchip_init,
     .enable_irq = x86_64_irqchip_enable,
     .disable_irq = x86_64_irqchip_disable,
     .ack        = x86_64_irqchip_ack,
     .eoi        = x86_64_irqchip_eoi,
-    .send_ipi   = x86_64_irqchip_send_ipi,
 };
 
 static uint64_t x86_64_timer_read_ticks(void) {
@@ -47,6 +45,48 @@ static uint64_t x86_64_timer_ticks_per_sec(void) {
 static const timer_ops_t x86_64_timer_ops = {
     .read_ticks    = x86_64_timer_read_ticks,
     .ticks_per_sec = x86_64_timer_ticks_per_sec,
+};
+
+static unsigned x86_64_smp_discover(smp_cpu_desc_t *cpus, unsigned capacity,
+                                     uint64_t boot_hw_id) {
+    uint32_t apic_ids[CONFIG_NR_CPUS];
+    size_t count = firmware_acpi_apic_ids(apic_ids, capacity,
+                                          (uint32_t)boot_hw_id);
+    if (!count) {
+        printf("[SMP] No valid ACPI MADT; using BSP only\n");
+        cpus[0].hw_id = boot_hw_id;
+        cpus[0].platform_cookie = 0;
+        return 1;
+    }
+    for (size_t cpu = 0; cpu < count; cpu++) {
+        cpus[cpu].hw_id = apic_ids[cpu];
+        cpus[cpu].platform_cookie = apic_ids[cpu];
+    }
+    return (unsigned)count;
+}
+
+static int x86_64_smp_start(const smp_cpu_desc_t *cpu, uintptr_t entry_pa,
+                            uintptr_t logical_context) {
+    return x86_64_smp_start_ap((unsigned)cpu->hw_id, entry_pa,
+                               (unsigned)logical_context);
+}
+
+static void x86_64_smp_send(const smp_cpu_desc_t *cpu,
+                            smp_ipi_reason_t reason) {
+    if (reason == SMP_IPI_RESCHEDULE)
+        x86_64_smp_send_ipi((unsigned)cpu->hw_id, IRQ_VECTOR_RESCHEDULE);
+}
+
+static void x86_64_smp_secondary(const smp_cpu_desc_t *cpu) {
+    (void)cpu;
+    x86_64_smp_secondary_init();
+}
+
+static const smp_platform_ops_t x86_64_smp_ops = {
+    .discover = x86_64_smp_discover,
+    .start = x86_64_smp_start,
+    .send_ipi = x86_64_smp_send,
+    .secondary_init = x86_64_smp_secondary,
 };
 
 static void x86_64_early_init(void) {
@@ -79,6 +119,7 @@ static const board_config_t qemu_virt_x86_64 = {
     .ram_end           = PHYS_MEMORY_END,
     .irqchip           = &x86_64_irqchip_ops,
     .timer             = &x86_64_timer_ops,
+    .smp               = &x86_64_smp_ops,
     .early_init        = x86_64_early_init,
     .poweroff          = x86_64_poweroff,
     .reboot            = x86_64_reboot,

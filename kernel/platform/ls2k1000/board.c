@@ -34,17 +34,12 @@ static void ls2k_irqchip_eoi(uint32_t irq) {
     (void)irq;
 }
 
-static void ls2k_irqchip_send_ipi(uint64_t target_mask) {
-    (void)target_mask;
-}
-
 static const irqchip_ops_t ls2k_irqchip_ops = {
     .init       = ls2k_irqchip_init,
     .enable_irq = ls2k_irqchip_enable,
     .disable_irq = ls2k_irqchip_disable,
     .ack        = ls2k_irqchip_ack,
     .eoi        = ls2k_irqchip_eoi,
-    .send_ipi   = ls2k_irqchip_send_ipi,
 };
 
 static uint64_t ls2k_timer_read_ticks(void) {
