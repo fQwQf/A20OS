@@ -17,6 +17,7 @@
  *   interrupt.
  */
 static task_t *g_cpu_current[CONFIG_NR_CPUS];
+static task_t *g_cpu_switching_out[CONFIG_NR_CPUS];
 
 task_t *proc_current(void)
 {
@@ -27,8 +28,22 @@ task_t *proc_set_current(task_t *next)
 {
     unsigned cpu = cpu_current_id();
     task_t *old = g_cpu_current[cpu];
-    g_cpu_current[cpu] = next;
+    /* Publish the outgoing task before replacing current. Reapers must keep
+     * its task storage and kernel stack alive until the switch completes. */
+    __atomic_store_n(&g_cpu_switching_out[cpu], old, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_cpu_current[cpu], next, __ATOMIC_RELEASE);
     return old;
+}
+
+void proc_switch_complete(void)
+{
+    unsigned cpu = cpu_current_id();
+    task_t *old = __atomic_load_n(&g_cpu_switching_out[cpu], __ATOMIC_ACQUIRE);
+    int reap = old && __atomic_load_n(&old->state, __ATOMIC_ACQUIRE) == PROC_ZOMBIE;
+
+    __atomic_store_n(&g_cpu_switching_out[cpu], NULL, __ATOMIC_RELEASE);
+    if (reap)
+        proc_sched_note_zombie();
 }
 
 task_t *proc_current_on_cpu(unsigned cpu)
@@ -43,7 +58,8 @@ int proc_task_is_current_any_cpu(task_t *task)
     if (!task)
         return 0;
     for (unsigned cpu = 0; cpu < CONFIG_NR_CPUS; cpu++) {
-        if (proc_current_on_cpu(cpu) == task)
+        if (proc_current_on_cpu(cpu) == task ||
+            __atomic_load_n(&g_cpu_switching_out[cpu], __ATOMIC_ACQUIRE) == task)
             return 1;
     }
     return 0;

@@ -45,6 +45,7 @@ extern spinlock_t proc_lock;
 void proc_sched_note_zombie(void);
 task_t *proc_current_on_cpu(unsigned cpu);
 int proc_task_is_current_any_cpu(task_t *task);
+void proc_switch_complete(void);
 
 task_t *proc_idle_task(void);
 task_t *proc_first_task_locked(void);
@@ -60,6 +61,7 @@ void proc_pid_unregister(task_t *t);
 int proc_pid_next_value(void);
 
 void proc_task_init_common(task_t *t, task_t *parent);
+void proc_task_first_entry(void) NORETURN;
 void proc_task_release_resources(task_t *t);
 void proc_destroy_task(task_t *t);
 task_t *proc_alloc_task_slot(void);
