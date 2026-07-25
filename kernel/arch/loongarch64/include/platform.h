@@ -58,6 +58,7 @@ static inline int arch_ram_range(size_t idx, paddr_t *base, paddr_t *end) {
 /* LoongArch ESTAT IS bit positions */
 #define IRQ_S_SOFT         0   /* SWI0 */
 #define IRQ_S_TIMER        11  /* TI — timer interrupt */
+#define IRQ_S_IPI          12  /* IOCSR inter-processor interrupt */
 #define IRQ_S_EXT          2   /* HWI0 */
 
 /*

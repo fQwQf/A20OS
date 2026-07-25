@@ -37,8 +37,15 @@ static inline int arch_ram_range(size_t idx, paddr_t *base, paddr_t *end) {
 #define IRQ_VECTOR_UART    0x24
 #define IRQ_VECTOR_PCI     0x22
 #define IRQ_VECTOR_KEYBOARD 0x21
+#define IRQ_VECTOR_RESCHEDULE 0xF0
 
 void x86_64_route_pci_irq(uint32_t gsi, uint8_t vector);
+void x86_64_set_trap_state(uint64_t cause, uint64_t epc, uint64_t tval);
+uint64_t x86_64_get_trap_cause(void);
+uint64_t x86_64_get_trap_epc(void);
+uint64_t x86_64_get_trap_tval(void);
+void x86_64_set_trap_epc(uint64_t value);
+unsigned x86_64_apic_to_cpu(unsigned apic_id);
 
 /* Exception / pseudo-cause codes
  * x86_64 does not have a unified cause register like RISC-V.

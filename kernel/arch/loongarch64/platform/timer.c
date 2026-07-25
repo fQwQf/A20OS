@@ -6,7 +6,6 @@
 
 void timer_init(void) {
     timer_set_interval(TICKS_PER_SEC / 100);
-    timer_enable();
 }
 
 void timer_set_interval(uint64_t ticks) {
