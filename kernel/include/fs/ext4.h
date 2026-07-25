@@ -253,6 +253,7 @@ typedef struct ext4_sb_info {
     ext4_group_desc_t *group_descs;
     bcache_t *bc;
     mutex_t alloc_lock;
+    mutex_t metadata_lock;
 } ext4_sb_info_t;
 
 typedef struct ext4_vnode_priv {
