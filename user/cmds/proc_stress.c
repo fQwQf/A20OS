@@ -1,5 +1,6 @@
 #include <errno.h>
 #include <signal.h>
+#include <spawn.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -7,6 +8,8 @@
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+
+extern char **environ;
 
 #ifndef SYS_futex
 #define SYS_futex 98
@@ -65,6 +68,24 @@ static int scenario_exec_wait(void)
         _exit(127);
     }
     return wait_exit(pid, 0, "wait-exec");
+}
+
+static int scenario_spawn_missing(void)
+{
+    pid_t pid = -1;
+    char *argv[] = {"a20os-definitely-missing-executable", NULL};
+    int ret = posix_spawnp(&pid, argv[0], NULL, NULL, argv, environ);
+
+    if (ret == ENOENT)
+        return 0;
+    if (ret == 0) {
+        int status = 0;
+        (void)waitpid(pid, &status, 0);
+        errno = 0;
+    } else {
+        errno = ret;
+    }
+    return fail("spawn-missing-enoent");
 }
 
 static int scenario_sleep_signal(void)
@@ -149,6 +170,8 @@ int main(void)
     if (scenario_fork_wait_yield() != 0)
         return 1;
     if (scenario_exec_wait() != 0)
+        return 1;
+    if (scenario_spawn_missing() != 0)
         return 1;
     if (scenario_sleep_signal() != 0)
         return 1;
