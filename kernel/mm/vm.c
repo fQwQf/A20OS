@@ -1613,6 +1613,50 @@ mm_struct_t *mm_fork(mm_struct_t *parent) {
     if (!parent) return NULL;
     mm_struct_t *child = kcalloc(1, sizeof(mm_struct_t));
     if (!child) return NULL;
+    pt_root_t *child_pgdir = pt_create();
+    if (!child_pgdir) { kfree(child); return NULL; }
+    pt_map_kernel(child_pgdir);
+
+    vm_area_t *vma_pool = NULL;
+    size_t vma_capacity = 0;
+    uint64_t parent_flags;
+    for (;;) {
+        parent_flags = spin_lock_irqsave(&parent->lock);
+        size_t needed = 0;
+        for (vm_area_t *pv = parent->mmap; pv; pv = pv->next) {
+            if (!(pv->vm_flags & VM_DONTFORK))
+                needed++;
+        }
+        spin_unlock_irqrestore(&parent->lock, parent_flags);
+
+        while (vma_capacity < needed) {
+            vm_area_t *node = kcalloc(1, sizeof(vm_area_t));
+            if (!node) {
+                while (vma_pool) {
+                    node = vma_pool->next;
+                    kfree(vma_pool);
+                    vma_pool = node;
+                }
+                pt_destroy_user(child_pgdir);
+                kfree(child);
+                return NULL;
+            }
+            node->next = vma_pool;
+            vma_pool = node;
+            vma_capacity++;
+        }
+
+        parent_flags = spin_lock_irqsave(&parent->lock);
+        needed = 0;
+        for (vm_area_t *pv = parent->mmap; pv; pv = pv->next) {
+            if (!(pv->vm_flags & VM_DONTFORK))
+                needed++;
+        }
+        if (needed <= vma_capacity)
+            break;
+        spin_unlock_irqrestore(&parent->lock, parent_flags);
+    }
+
     *child = *parent;
     spin_init(&child->lock);
     spin_set_debug(&child->lock, "mm", child);
@@ -1623,9 +1667,7 @@ mm_struct_t *mm_fork(mm_struct_t *parent) {
     child->def_flags = 0;
     child->mmap = NULL;
 
-    child->pgdir = pt_create();
-    if (!child->pgdir) { kfree(child); return NULL; }
-    pt_map_kernel(child->pgdir);
+    child->pgdir = child_pgdir;
 
     // 复制所有 VMA
     vm_area_t **tail = &child->mmap;
@@ -1633,14 +1675,15 @@ mm_struct_t *mm_fork(mm_struct_t *parent) {
     for (vm_area_t *pv = parent->mmap; pv; pv = pv->next) {
         if (pv->vm_flags & VM_DONTFORK)
             continue;
-        vm_area_t *cv = kcalloc(1, sizeof(vm_area_t));
-        if (!cv) goto fail;
+        vm_area_t *cv = vma_pool;
+        vma_pool = vma_pool->next;
+        vma_capacity--;
         *cv = *pv;
         cv->vm_flags &= ~VM_LOCKED;
         if (vma_ref_fork(cv) < 0) {
             vma_release_file(cv);
             kfree(cv);
-            goto fail;
+            goto fail_locked;
         }
         cv->prev = prev;
         cv->next = NULL;
@@ -1650,8 +1693,7 @@ mm_struct_t *mm_fork(mm_struct_t *parent) {
         child->total_vm += (cv->end - cv->start) / PAGE_SIZE;
     }
 
-    /* 持有 parent->lock 遍历 VMA 并克隆页表，防止父进程并发修改 PTE */
-    uint64_t parent_flags = spin_lock_irqsave(&parent->lock);
+    /* parent->lock covers both the VMA snapshot and the page-table clone. */
     for (vm_area_t *pv = parent->mmap; pv; pv = pv->next) {
         if (pv->vm_flags & (VM_DONTFORK | VM_WIPEONFORK))
             continue;
@@ -1661,37 +1703,45 @@ mm_struct_t *mm_fork(mm_struct_t *parent) {
              * shared mappings still need backing pages before COW logic runs. */
             if (!(pv->vm_flags & VM_FILE) &&
                 mm_populate_shared_range(parent, pv) < 0) {
-                spin_unlock_irqrestore(&parent->lock, parent_flags);
-                goto fail;
+                goto fail_locked;
             }
         }
         if (mm_fork_clone_present_range(child, parent, pv->start, pv->end,
                                         (pv->vm_flags & VM_SHARED) != 0) < 0) {
-            spin_unlock_irqrestore(&parent->lock, parent_flags);
-            goto fail;
+            goto fail_locked;
         }
     }
 
     if (parent->start_brk < parent->brk) {
         if (mm_fork_clone_range(child, parent, parent->start_brk,
                                 parent->brk, 0) < 0) {
-            spin_unlock_irqrestore(&parent->lock, parent_flags);
-            goto fail;
+            goto fail_locked;
         }
     }
 
     if (parent->stack_bottom && parent->stack_top) {
         if (mm_fork_clone_range(child, parent, parent->stack_bottom,
                                 parent->stack_top, 0) < 0) {
-            spin_unlock_irqrestore(&parent->lock, parent_flags);
-            goto fail;
+            goto fail_locked;
         }
     }
     spin_unlock_irqrestore(&parent->lock, parent_flags);
 
+    while (vma_pool) {
+        vm_area_t *next = vma_pool->next;
+        kfree(vma_pool);
+        vma_pool = next;
+    }
+
     arch_tlb_flush();
     return child;
-fail:
+fail_locked:
+    spin_unlock_irqrestore(&parent->lock, parent_flags);
+    while (vma_pool) {
+        vm_area_t *next = vma_pool->next;
+        kfree(vma_pool);
+        vma_pool = next;
+    }
     mm_destroy(child);
     return NULL;
 }
