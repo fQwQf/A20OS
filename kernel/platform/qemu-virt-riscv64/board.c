@@ -77,6 +77,39 @@ static void rv64_smp_send_ipi(const smp_cpu_desc_t *cpu,
     sbi_send_ipi(1UL, cpu->hw_id);
 }
 
+static int rv64_smp_remote_tlb_flush(uint32_t pending, uint64_t addr,
+                                     uint64_t size) {
+    while (pending) {
+        uint64_t base = ~(uint64_t)0;
+        for (unsigned cpu = 0; cpu < CONFIG_NR_CPUS; cpu++) {
+            if (pending & (1U << cpu)) {
+                uint64_t hw_id;
+                if (!smp_logical_to_hw(cpu, &hw_id) && hw_id < base)
+                    base = hw_id;
+            }
+        }
+        if (base == ~(uint64_t)0)
+            return -1;
+
+        uint64_t hart_mask = 0;
+        uint32_t sent = 0;
+        for (unsigned cpu = 0; cpu < CONFIG_NR_CPUS; cpu++) {
+            uint64_t hw_id;
+            if (!(pending & (1U << cpu)) ||
+                smp_logical_to_hw(cpu, &hw_id) < 0 ||
+                hw_id < base || hw_id - base >= 64)
+                continue;
+            hart_mask |= 1ULL << (hw_id - base);
+            sent |= 1U << cpu;
+        }
+        if (!hart_mask ||
+            sbi_remote_sfence_vma(hart_mask, base, addr, size) < 0)
+            return -1;
+        pending &= ~sent;
+    }
+    return 0;
+}
+
 static void rv64_smp_secondary_init(const smp_cpu_desc_t *cpu) {
     (void)cpu;
     rv64_plic_init();
@@ -86,6 +119,7 @@ static const smp_platform_ops_t rv64_smp_ops = {
     .discover       = rv64_smp_discover,
     .start          = rv64_smp_start,
     .send_ipi       = rv64_smp_send_ipi,
+    .remote_tlb_flush = rv64_smp_remote_tlb_flush,
     .secondary_init = rv64_smp_secondary_init,
 };
 

@@ -207,6 +207,17 @@ void smp_send_reschedule(unsigned cpu)
     ops->send_ipi(&cpu_descs[cpu], SMP_IPI_RESCHEDULE);
 }
 
+int smp_remote_tlb_flush(uint32_t logical_mask, uint64_t addr, uint64_t size)
+{
+    const smp_platform_ops_t *ops = platform_ops();
+    if (!logical_mask)
+        return 0;
+    if (!ops || !ops->remote_tlb_flush)
+        return -1;
+    return ops->remote_tlb_flush(logical_mask & smp_online_cpu_mask(),
+                                 addr, size);
+}
+
 void smp_secondary_init(unsigned cpu_id)
 {
     const smp_platform_ops_t *ops = platform_ops();
