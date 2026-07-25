@@ -8,6 +8,7 @@ void firmware_reboot(void);
 void firmware_console_putchar(char c);
 int  firmware_console_getchar(void);
 void firmware_set_timer(uint64_t time);
+int64_t firmware_cpu_on(uint64_t target_cpu, uint64_t entry, uint64_t context);
 
 void sbi_set_timer(uint64_t time);
 void sbi_console_putchar(char c);

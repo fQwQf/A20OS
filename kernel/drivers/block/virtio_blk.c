@@ -20,6 +20,7 @@
 #define VIRTIO_BLK_REQ_SLOTS (VIRTIO_QUEUE_SIZE / 3)
 #define VIRTIO_BLK_WAIT_TIMEOUT_TICKS (TICKS_PER_SEC * 10)
 #define VIRTIO_BLK_MAX_RETRIES        3
+#define VIRTIO_BLK_RESET_SPINS        1000000U
 
 typedef struct {
     int                in_use;
@@ -283,6 +284,35 @@ static virtio_blk_req_t *virtio_blk_alloc_req_locked(virtio_blk_inst_t *inst) {
     return NULL;
 }
 
+static void virtio_blk_fail_queue_locked(virtio_blk_inst_t *inst) {
+    if (!inst->blk.valid)
+        return;
+
+    /* Reset acknowledgement is the DMA ownership boundary.  Until the device
+     * reports status zero, every submitted descriptor and buffer remains live. */
+    inst->vt.write32(&inst->vt, VIRTIO_MMIO_STATUS, VIRTIO_STATUS_FAILED);
+    mb();
+    inst->vt.write32(&inst->vt, VIRTIO_MMIO_STATUS, 0);
+    mb();
+    unsigned spins = VIRTIO_BLK_RESET_SPINS;
+    while (inst->vt.read32(&inst->vt, VIRTIO_MMIO_STATUS) != 0 && --spins)
+        cpu_relax();
+    if (!spins)
+        panic("virtio-blk%d: device did not acknowledge queue reset",
+              inst->slot);
+
+    inst->blk.valid = 0;
+    for (int i = 0; i < VIRTIO_BLK_REQ_SLOTS; i++) {
+        virtio_blk_req_t *req = &inst->req[i];
+        if (!req->in_use)
+            continue;
+        req->result = -1;
+        req->done = 1;
+        if (req->waiter && req->waiter->state == PROC_BLOCKED)
+            proc_make_ready(req->waiter);
+    }
+}
+
 static int virtio_blk_submit_req(virtio_blk_inst_t *inst, virtio_blk_req_t *req,
                                  uint64_t lba, void *buf, size_t sectors,
                                  int write) {
@@ -351,7 +381,8 @@ static int virtio_blk_wait_req(virtio_blk_inst_t *inst, virtio_blk_req_t *req,
     for (;;) {
         uint64_t flags = spin_lock_irqsave(&inst->lock);
         /* LOCK_ORDER: inst->lock held while checking request completion. */
-        virtio_blk_complete_used_locked(inst);
+        if (inst->blk.valid)
+            virtio_blk_complete_used_locked(inst);
         if (req->done) {
             int ret = req->result;
             req->in_use = 0;
@@ -363,22 +394,25 @@ static int virtio_blk_wait_req(virtio_blk_inst_t *inst, virtio_blk_req_t *req,
         spin_unlock_irqrestore(&inst->lock, flags);
 
         if (timer_get_ticks() >= deadline) {
+            flags = spin_lock_irqsave(&inst->lock);
+            virtio_blk_complete_used_locked(inst);
+            if (req->done) {
+                int ret = req->result;
+                req->in_use = 0;
+                if (inst->in_flight > 0)
+                    inst->in_flight--;
+                spin_unlock_irqrestore(&inst->lock, flags);
+                return ret;
+            }
+            virtio_blk_fail_queue_locked(inst);
+            spin_unlock_irqrestore(&inst->lock, flags);
+
             uint32_t dev_status = inst->vt.read32(&inst->vt, VIRTIO_MMIO_STATUS);
             printf("[VIRTIO%d] I/O timeout! lba=%lu dev_status=0x%x\n",
                    inst->slot, (unsigned long)lba, dev_status);
-            /* LOCK_ORDER: acquire inst->lock (innermost) to abort a timed-out request. */
-            flags = spin_lock_irqsave(&inst->lock);
-            if (!req->done) {
-                req->done = 1;
-                req->result = -1;
-            }
-            req->in_use = 0;
-            if (inst->in_flight > 0)
-                inst->in_flight--;
-            spin_unlock_irqrestore(&inst->lock, flags);
             printf("[VIRTIO%d] wait_req timeout lba=%lu pid=%d\n",
                    inst->slot, (unsigned long)lba, cur ? cur->pid : -1);
-            return -1;
+            continue;
         }
 
         /*
@@ -429,6 +463,7 @@ static int virtio_blk_rw(int idx, uint64_t lba, void *buf, size_t sectors, int w
     int retries = 0;
     for (retries = 0; retries <= VIRTIO_BLK_MAX_RETRIES; retries++) {
         virtio_blk_req_t *req = NULL;
+        uint64_t alloc_deadline = timer_get_ticks() + VIRTIO_BLK_WAIT_TIMEOUT_TICKS;
         while (!req) {
             /* LOCK_ORDER: acquire inst->lock (innermost) to allocate/submit a request. */
             uint64_t flags = spin_lock_irqsave(&inst->lock);
@@ -439,6 +474,17 @@ static int virtio_blk_rw(int idx, uint64_t lba, void *buf, size_t sectors, int w
                 break;
             }
             spin_unlock_irqrestore(&inst->lock, flags);
+            if (!inst->blk.valid)
+                return -1;
+            if (timer_get_ticks() >= alloc_deadline) {
+                flags = spin_lock_irqsave(&inst->lock);
+                virtio_blk_complete_used_locked(inst);
+                virtio_blk_fail_queue_locked(inst);
+                spin_unlock_irqrestore(&inst->lock, flags);
+                printf("[VIRTIO%d] descriptor allocation timed out; queue reset\n",
+                       inst->slot);
+                return -1;
+            }
             if (proc_current())
                 proc_yield();
             else
@@ -448,6 +494,8 @@ static int virtio_blk_rw(int idx, uint64_t lba, void *buf, size_t sectors, int w
         int ret = virtio_blk_wait_req(inst, req, lba);
         if (ret == 0)
             return 0;
+        if (!inst->blk.valid)
+            return ret;
         if (ret < 0 && retries < VIRTIO_BLK_MAX_RETRIES) {
             printf("[VIRTIO%d] Retrying I/O (%d/%d) lba=%lu\n",
                    idx, retries + 1, VIRTIO_BLK_MAX_RETRIES, (unsigned long)lba);
@@ -585,6 +633,8 @@ static int virtio_blk_driver_probe(device_t *dev) {
     if (inst->vt.irq >= 0) {
         /* The generic PCI transport currently uses polling until IRQ routing
          * is supplied by the VirtualBox ACPI interrupt controller tables. */
+    } else if (dev->bus == &pci_bus) {
+        kinfo("[VIRTIO-BLK] PCI transport using completion polling\n");
     } else if (irq_res) {
         if (request_irq((uint32_t)irq_res->start, virtio_blk_irq_handler, 0, inst) == 0) {
             inst->vt.irq = (int)irq_res->start;

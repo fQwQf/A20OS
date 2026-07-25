@@ -205,6 +205,69 @@ _start:
     wfi
     b       .Lhalt
 
+#ifdef CONFIG_BOARD_QEMU_VIRT_AARCH64
+    .global aarch64_secondary_start
+aarch64_secondary_start:
+    /* PSCI enters with the MMU off and the logical CPU number in x0. */
+    msr     daifset, #2
+    mov     x19, x0
+    adrp    x1, _stack_end
+    add     x1, x1, :lo12:_stack_end
+    mov     x2, #(4096 * 16)
+    mul     x2, x19, x2
+    sub     sp, x1, x2
+
+    mrs     x2, cpacr_el1
+    orr     x2, x2, #(3 << 20)
+    msr     cpacr_el1, x2
+    isb
+
+    adrp    x0, boot_pgdir
+    add     x0, x0, :lo12:boot_pgdir
+    ldr     x2, =0x000000000000FF00
+    msr     mair_el1, x2
+    ldr     x2, =0x0000000280003510
+    msr     tcr_el1, x2
+    msr     ttbr0_el1, x0
+    dsb     sy
+    isb
+    mrs     x2, sctlr_el1
+    bic     x2, x2, #(1 << 25)
+    bic     x2, x2, #(1 << 24)
+    bic     x2, x2, #(1 << 19)
+    orr     x2, x2, #(1 << 0)
+    orr     x2, x2, #(1 << 2)
+    orr     x2, x2, #(1 << 12)
+    msr     sctlr_el1, x2
+    isb
+    b       .Lsecondary_translation_live
+
+.Lsecondary_translation_live:
+#ifndef CONFIG_NOMMU
+    adrp    x0, .Lsecondary_hh_entry
+    add     x0, x0, :lo12:.Lsecondary_hh_entry
+    movz    x1, #0x0080, lsl #32
+    add     x0, x0, x1
+    br      x0
+#else
+    b       .Lsecondary_hh_entry
+#endif
+
+.Lsecondary_hh_entry:
+    adrp    x1, _stack_end
+    add     x1, x1, :lo12:_stack_end
+    mov     x2, #(4096 * 16)
+    mul     x2, x19, x2
+    sub     sp, x1, x2
+    adrp    x1, aarch64_vector_table
+    add     x1, x1, :lo12:aarch64_vector_table
+    msr     vbar_el1, x1
+    isb
+    mov     x0, x19
+    bl      aarch64_secondary_entry
+    b       .Lhalt
+#endif
+
     .section .bss
     .align 12
     .global boot_pgdir
@@ -229,6 +292,6 @@ aarch64_boot_acpi_rsdp:
     .section .bss.stack
     .align 12
 _stack_bottom:
-    .space 4096 * 16
+    .space 4096 * 16 * CONFIG_NR_CPUS
     .global _stack_end
 _stack_end:

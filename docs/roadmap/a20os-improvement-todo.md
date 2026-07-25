@@ -5,7 +5,7 @@
 ## P0：并发与 SMP 就绪
 
 - [x] 在默认启用多核构建前，用可通过的 SMP 验证门禁替换当前 `NR_CPUS != 1` 的构建期阻断。
-  - 证据：`Makefile` 会在未设置 `ALLOW_UNVERIFIED_SMP=1` 时阻断 SMP；`kernel/proc/sched.c` 列出了 scheduler/MM/VFS 并发前置条件。
+  - 证据：`Makefile` 直接允许已验证的 RISC-V 64、AArch64、LoongArch64 和 x86_64 QEMU virt SMP 构建，其他平台仍需 `ALLOW_UNVERIFIED_SMP=1`；`kernel/proc/sched.c` 列出了 scheduler/MM/VFS 并发前置条件。
   - 完成条件：`make NR_CPUS=2 check-concurrency-foundation` 无需 override flag 即可通过。
 - [x] 审计每个 task 状态转换是否符合 `proc_lock -> runq_lock` 顺序契约。
   - 证据：`kernel/include/core/lock.h` 定义全局锁顺序；`kernel/proc/sched.c` 依赖 per-CPU runqueue 状态。
