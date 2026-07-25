@@ -584,7 +584,8 @@ static int exec_install_process(task_t *t,
          */
         task_context_t *new_ctx  = arch_task_context_base(t->kstack_base, ks_top, trap);
         memset(new_ctx, 0, sizeof(*new_ctx));
-        new_ctx->ra = (uint64_t)user_trap_return;
+        t->first_kernel_entry = (uintptr_t)user_trap_return;
+        new_ctx->ra = (uint64_t)proc_task_first_entry;
         new_ctx->tp = (uint64_t)(uintptr_t)t;
         arch_task_context_set_user_tp(new_ctx, info->tls_tp);
         TASK_CTX_STATUS(new_ctx) = arch_task_user_resume_status();

@@ -36,7 +36,7 @@ static void pid_bitmap_set(int pid)
 
 static void pid_bitmap_clear(int pid)
 {
-    if (pid < 1 || pid > pid_max) return;
+    if (pid < 1 || pid > PID_MAX_LIMIT) return;
     unsigned idx = (unsigned)(pid - 1) / 64;
     unsigned bit = (unsigned)(pid - 1) % 64;
     pid_bitmap[idx] &= ~(1ULL << bit);
@@ -67,7 +67,14 @@ static int pid_bitmap_find_free(int start)
         int bit_base = wi * 64;
         uint64_t bits = pid_bitmap[wi];
         uint64_t inv = ~bits;
+        if (wi == word_start) {
+            int start_bit = (start - 1) % 64;
+            if (start_bit > 0)
+                inv &= ~((1ULL << start_bit) - 1);
+        }
         int first_bit = ctz64(inv);
+        if (first_bit == 64)
+            continue;
         int candidate = bit_base + first_bit + 1;
         if (candidate >= 1 && candidate <= limit)
             return candidate;

@@ -307,7 +307,8 @@ void proc_init(void) {
     uintptr_t stack_top = ARCH_IDLE_STACK_TOP(idle_stack);
     task_context_t *ctx = arch_task_context_base(idle_stack, stack_top, NULL);
     memset(ctx, 0, sizeof(*ctx));
-    ctx->ra   = (uintptr_t)idle_loop;
+    idle->first_kernel_entry = (uintptr_t)idle_loop;
+    ctx->ra   = (uintptr_t)proc_task_first_entry;
     ctx->tp   = (uintptr_t)idle;
     arch_task_context_set_initial_sp(ctx, NULL, stack_top);
 
@@ -340,7 +341,8 @@ void proc_init(void) {
         uintptr_t top = ARCH_IDLE_STACK_TOP(stack);
         task_context_t *secondary_ctx = arch_task_context_base(stack, top, NULL);
         memset(secondary_ctx, 0, sizeof(*secondary_ctx));
-        secondary_ctx->ra = (uintptr_t)idle_loop;
+        secondary->first_kernel_entry = (uintptr_t)idle_loop;
+        secondary_ctx->ra = (uintptr_t)proc_task_first_entry;
         secondary_ctx->tp = (uintptr_t)secondary;
         TASK_CTX_PAGE_TABLE(secondary_ctx) = arch_make_addr_space_token(kpdir);
         TASK_CTX_STATUS(secondary_ctx) = arch_task_kernel_status();
@@ -417,7 +419,8 @@ int proc_alloc(void (*entry)(void)) {
 
     task_context_t *ctx = arch_task_context_base(stack, stack_top, NULL);
     memset(ctx, 0, sizeof(*ctx));
-    ctx->ra   = (uintptr_t)entry;
+    t->first_kernel_entry = (uintptr_t)entry;
+    ctx->ra   = (uintptr_t)proc_task_first_entry;
     ctx->tp   = (uintptr_t)t;
     t->pgdir  = kernel_pgdir_shared;
     TASK_CTX_PAGE_TABLE(ctx) = kernel_pgdir_shared ? arch_make_addr_space_token(kernel_pgdir_shared) : 0;
@@ -519,7 +522,8 @@ int proc_alloc_user_image(uintptr_t entry, vaddr_t sp, pt_root_t *pgdir,
      */
     task_context_t *ctx = arch_task_context_base(kstack, ks_top, trap);
     memset(ctx, 0, sizeof(*ctx));
-    ctx->ra   = (uintptr_t)user_trap_return;
+    t->first_kernel_entry = (uintptr_t)user_trap_return;
+    ctx->ra   = (uintptr_t)proc_task_first_entry;
     ctx->tp   = (uintptr_t)t;
     arch_task_context_set_user_tp(ctx, tls_tp);
     TASK_CTX_PAGE_TABLE(ctx) = pgdir ? arch_make_addr_space_token(pgdir) : 0;

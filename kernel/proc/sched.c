@@ -672,6 +672,7 @@ void context_switch(task_t *next) {
     if (old)
         arch_set_task_pointer(old);
     __switch(next->kstack);
+    proc_switch_complete();
 }
 
 void sched(void) {

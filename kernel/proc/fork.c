@@ -242,7 +242,8 @@ int proc_clone(uint64_t flags, vaddr_t stack, int *ptid, vaddr_t tls, int *ctid,
          * it just below the pre-allocated trap frame.
          */
         task_context_t *ctx = arch_task_context_base(kstack, ks_top, trap);
-        ctx->ra = (uint64_t)user_trap_return;
+        t->first_kernel_entry = (uintptr_t)user_trap_return;
+        ctx->ra = (uint64_t)proc_task_first_entry;
         ctx->tp = (uint64_t)(uintptr_t)t;
         arch_task_context_set_user_tp(ctx, TRAP_CTX_TP(trap));
         TASK_CTX_PAGE_TABLE(ctx) = t->pgdir ? arch_make_addr_space_token(t->pgdir) : 0;
@@ -252,7 +253,8 @@ int proc_clone(uint64_t flags, vaddr_t stack, int *ptid, vaddr_t tls, int *ctid,
     } else {
         task_context_t *ctx = arch_task_context_base(kstack, ks_top, NULL);
         memset(ctx, 0, sizeof(*ctx));
-        ctx->ra = (uint64_t)idle_loop;
+        t->first_kernel_entry = (uintptr_t)idle_loop;
+        ctx->ra = (uint64_t)proc_task_first_entry;
         ctx->tp = (uint64_t)t;
         arch_task_context_set_initial_sp(ctx, NULL, ks_top);
         t->kstack = (uint64_t)ctx;

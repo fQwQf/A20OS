@@ -308,6 +308,11 @@ __trap_from_kernel:
     ldr     x2,  [x2, #X_OFF(2)]
     eret
 
+    .global arch_return_to_user
+arch_return_to_user:
+    mov     sp, x0
+    b       __return_to_user
+
 __return_to_user:
 user_trap_return:
     mov     x2, sp
