@@ -119,6 +119,7 @@ EXT4_IMAGE_MB ?= 128
 EXTRA_IMAGE_MB ?= 1024
 EXTRA_IMG = $(BUILD_DIR)/extra.img
 EXTRA_STAGING_DIR = $(BUILD_DIR)/extra-staging
+EXTRA_IMAGE_STAMP = $(BUILD_DIR)/.extra-image-id
 EXTRA_PACKAGES ?= vim git gcc rust
 RISCV_GNU_CC ?= riscv64-linux-gnu-gcc
 RISCV_GLIBC_SYSROOT ?= $(shell $(RISCV_GNU_CC) -print-sysroot 2>/dev/null)
@@ -587,7 +588,7 @@ VBOX_AARCH64_LOAD_ADDRESS ?= 0x08080000ULL
 		user_apps fs_img kernel-only dev-build contest-rv contest-la \
 		eval-dev-build-rv eval-dev-build-la \
 		qemu-disk-rv qemu-disk-la \
-		extra-img extra-user-apps prepare-riscv64-glibc-sysroot run-riscv64-extra run-loongarch64-extra run-arm64-extra run-x86_64-extra run-arm32-extra run-riscv32-extra run-ppc64le-extra \
+		extra-img _extra-img extra-user-apps prepare-riscv64-glibc-sysroot force_extra_image_stamp run-riscv64-extra run-loongarch64-extra run-arm64-extra run-x86_64-extra run-arm32-extra run-riscv32-extra run-ppc64le-extra \
 		native-test-arch native-handle-test-arch native-libc-arch native-programs \
 		native-test-rv native-test-la native-test-aarch64 native-test-x86_64 native-test-arm32 native-test-rv32 native-test-ppc64le native-test native-test-all \
 		native-minimal-rv native-minimal-la native-minimal \
@@ -1549,9 +1550,9 @@ $(USER_BUILD_STAMP): user/Makefile force_user_build | $(USER_BUILD_CHECK_DIRS)
 	if [ "$$need_build" -eq 1 ]; then \
 		if [ "$$need_clean" -eq 1 ]; then \
 			$(MAKE) -C user ARCH=$(ARCH) NOMMU=$(NOMMU) OPT="$(OPT)" \
-				BUILD_DIR=build/$(USER_VARIANT) clean; \
+				PROFILE=$(PROFILE) BUILD_DIR=build/$(USER_VARIANT) clean; \
 		fi; \
-		$(MAKE) -C user ARCH=$(ARCH) NOMMU=$(NOMMU) OPT="$(OPT)" BUILD_DESKTOP=$(USER_BUILD_DESKTOP) \
+		$(MAKE) -C user ARCH=$(ARCH) NOMMU=$(NOMMU) OPT="$(OPT)" PROFILE=$(PROFILE) BUILD_DESKTOP=$(USER_BUILD_DESKTOP) \
 			BUILD_DIR=build/$(USER_VARIANT); \
 		printf '%s\n' '$(USER_BUILD_ID)' > "$@"; \
 	else \
@@ -1935,7 +1936,83 @@ prepare-riscv64-glibc-sysroot:
 			"$(RISCV_GLIBC_LIB_DIR)" "$(RISCV_GLIBC_LOCAL_ROOT)" "$(FEDORA_RISCV_RELEASE)"; \
 	fi
 
+force_extra_image_stamp:
+	@:
+
+$(EXTRA_IMAGE_STAMP): force_extra_image_stamp
+	@set -e; \
+	mkdir -p "$(dir $@)"; \
+	tmp="$@.tmp"; \
+	{ \
+		printf '%s\n' \
+			"arch=$(ARCH)" \
+			"nommu=$(NOMMU)" \
+			"opt=$(OPT)" \
+			"profile=$(PROFILE)" \
+			"user_variant=$(USER_VARIANT)" \
+			"packages=$(sort $(EXTRA_PACKAGES))" \
+			"image_mb=$(EXTRA_IMAGE_MB)" \
+			"image=$(EXTRA_IMG)" \
+			"glibc_dir=$(RISCV_GLIBC_LIB_DIR)" \
+			"glibc_local_dir=$(RISCV_GLIBC_LOCAL_LIB_DIR)"; \
+		for f in "$(USER_BUILD_DIR)"/*; do \
+			[ -f "$$f" ] || continue; \
+			name=$$(basename "$$f"); \
+			case "$$name" in *.o|*.a|*.so|*.d) continue ;; esac; \
+			find -H "$$f" -maxdepth 0 -printf 'user %f %s %T@\n'; \
+		done; \
+		for f in user/build/extra/$(ARCH)/*; do \
+			[ -f "$$f" ] || continue; \
+			name=$$(basename "$$f"); \
+			case " $(EXTRA_PACKAGES) " in *" $$name "*) \
+				find -H "$$f" -maxdepth 0 -printf 'extra %f %s %T@\n' ;; \
+			esac; \
+		done; \
+		for package in $(sort $(EXTRA_PACKAGES)); do \
+			case "$$package" in \
+				vim) stamp=.vim-built ;; \
+				git) stamp=.git-built ;; \
+				gcc|cc) stamp=.gcc-built ;; \
+				rust|rustc|cargo) stamp=.rust-built ;; \
+				*) continue ;; \
+			esac; \
+			f="user/build/extra/$(ARCH)/stamp/$$stamp"; \
+			[ ! -f "$$f" ] || find "$$f" -maxdepth 0 -printf 'stamp %f %s %T@\n'; \
+		done; \
+		if [ -n "$(filter vim,$(EXTRA_PACKAGES))" ]; then \
+			find user/external/vim/runtime -type f -printf 'vim-runtime %P %s %T@\n' 2>/dev/null || true; \
+		fi; \
+		if [ -n "$(filter git,$(EXTRA_PACKAGES))" ]; then \
+			find user/external/git/templates/blt -type f -printf 'git-template %P %s %T@\n' 2>/dev/null || true; \
+		fi; \
+		if [ "$(ARCH)" = riscv64 ] && [ -n "$(filter rust rustc cargo,$(EXTRA_PACKAGES))" ]; then \
+			for dir in "$(RISCV_GLIBC_LIB_DIR)" "$(RISCV_GLIBC_LOCAL_LIB_DIR)"; do \
+				[ -n "$$dir" ] || continue; \
+				for name in ld-linux-riscv64-lp64d.so.1 libc.so.6 libdl.so.2 libm.so.6 \
+					libpthread.so.0 librt.so.1 libatomic.so.1 libgcc_s.so.1; do \
+					f="$$dir/$$name"; \
+					[ ! -f "$$f" ] || find -H "$$f" -maxdepth 0 -printf 'glibc %p %s %T@\n'; \
+				done; \
+			done; \
+		fi; \
+		find Makefile user/extra.mk -maxdepth 0 -type f -printf 'recipe %p %s %T@\n'; \
+	} | LC_ALL=C sort > "$$tmp"; \
+	if [ -f "$@" ] && cmp -s "$@" "$$tmp"; then \
+		rm -f "$$tmp"; \
+	else \
+		mv "$$tmp" "$@"; \
+		echo "[EXTRA] image inputs changed"; \
+	fi
+
+# Refresh the input manifest after package preparation, then let a second make
+# decide from real timestamps whether the expensive image recipe is necessary.
 extra-img: extra-user-apps prepare-riscv64-glibc-sysroot
+	$(MAKE) ARCH=$(ARCH) EXTRA_IMG="$(EXTRA_IMG)" "$(EXTRA_IMAGE_STAMP)"
+	$(MAKE) ARCH=$(ARCH) EXTRA_IMG="$(EXTRA_IMG)" _extra-img
+
+_extra-img: $(EXTRA_IMG)
+
+$(EXTRA_IMG): $(EXTRA_IMAGE_STAMP)
 	@echo "Building extra packages image..."
 	@rm -rf $(EXTRA_STAGING_DIR) && mkdir -p $(EXTRA_STAGING_DIR)/bin
 	@set -e; \
@@ -2057,7 +2134,8 @@ run-ppc64le-extra:
 _run_extra_impl:
 	$(MAKE) ARCH=$(ARCH) BRINGUP=0 dev-build
 	@if [ -f user/external/fastfetch/src/fastfetch.c ]; then \
-		$(MAKE) -C user ARCH=$(ARCH) fastfetch; \
+		$(MAKE) -C user ARCH=$(ARCH) NOMMU=$(NOMMU) OPT="$(OPT)" PROFILE=$(PROFILE) \
+			BUILD_DIR=build/$(USER_VARIANT) fastfetch; \
 	else \
 		echo "[EXTRA] fastfetch source unavailable; skipping"; \
 	fi
