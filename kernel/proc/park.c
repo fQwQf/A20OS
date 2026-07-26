@@ -8,9 +8,12 @@
 #include "core/klog.h"
 #include "core/panic.h"
 
-static proc_wait_token_t proc_wait_token_none(void)
+static proc_wait_token_t
+proc_wait_token_none(proc_park_prepare_error_t prepare_error)
 {
-    proc_wait_token_t token = {0};
+    proc_wait_token_t token = {
+        .prepare_error = prepare_error,
+    };
     return token;
 }
 
@@ -81,7 +84,7 @@ proc_wait_token_t proc_park_prepare_locked(proc_wait_mode_t mode,
     task_t *task = proc_current();
     if (!task || task == proc_idle_task() ||
         task->state == PROC_UNUSED || task->state == PROC_ZOMBIE)
-        return proc_wait_token_none();
+        return proc_wait_token_none(PROC_PARK_PREPARE_INVALID);
 
     /*
      * A task owns only one active park token.  A non-IDLE state here means a
@@ -92,7 +95,7 @@ proc_wait_token_t proc_park_prepare_locked(proc_wait_mode_t mode,
         panic("park: nested prepare pid=%d state=%d seq=%lu",
               task->pid, task->park_state, (unsigned long)task->wait_seq);
 #endif
-        return proc_wait_token_none();
+        return proc_wait_token_none(PROC_PARK_PREPARE_INVALID);
     }
 
     task->wait_seq++;
@@ -102,18 +105,24 @@ proc_wait_token_t proc_park_prepare_locked(proc_wait_mode_t mode,
     task->wait_mode = mode;
     task->wake_reason = PROC_WAKE_NONE;
     task->park_state = PROC_PARK_PREPARING;
-    if (deadline &&
-        proc_wait_timer_register_locked(task, deadline,
-                                        task->wait_seq) < 0) {
+    int timer_result = deadline
+        ? proc_wait_timer_register_locked(task, deadline, task->wait_seq)
+        : PROC_PARK_PREPARE_OK;
+    if (timer_result != PROC_PARK_PREPARE_OK) {
         task->wait_deadline = 0;
+        task->wake_time = 0;
+        task->wake_reason = PROC_WAKE_NONE;
+        task->wait_mode = PROC_WAIT_UNINTERRUPTIBLE;
         task->park_state = PROC_PARK_IDLE;
-        return proc_wait_token_none();
+        return proc_wait_token_none(
+            (proc_park_prepare_error_t)timer_result);
     }
     proc_sched_assert_task_locked(task);
 
     proc_wait_token_t token = {
         .task = task,
         .seq = task->wait_seq,
+        .prepare_error = PROC_PARK_PREPARE_OK,
     };
 
     /*
@@ -272,6 +281,9 @@ void proc_park_finish(proc_wait_token_t token)
 proc_wake_reason_t proc_park_wait(proc_wait_mode_t mode, uint64_t deadline)
 {
     proc_wait_token_t token = proc_park_prepare(mode, deadline);
+    if (!token.task &&
+        token.prepare_error == PROC_PARK_PREPARE_TIMEOUT_CAPACITY)
+        return PROC_WAKE_TIMEOUT_CAPACITY;
     if (!token.task)
         return PROC_WAKE_CANCEL;
     proc_wake_reason_t reason = proc_park_commit(token);

@@ -206,6 +206,57 @@ static int unrelated_wake_isolation(void)
     return r;
 }
 
+static int stale_timeout_isolation(void)
+{
+    enum { FIRST = 0, SECOND = 1, READY = 2 };
+    int *words = shared_words(3);
+    if (!words)
+        return fail("stale-timeout-mmap");
+    memset(words, 0, 3 * sizeof(*words));
+
+    pid_t waiter = fork();
+    if (waiter < 0)
+        return fail("stale-timeout-fork");
+    if (waiter == 0) {
+        struct timespec first_timeout = {0, 100000000};
+        __atomic_store_n(&words[READY], 1, __ATOMIC_RELEASE);
+        long first = syscall(SYS_futex, &words[FIRST], FUTEX_WAIT, 0,
+                             &first_timeout, NULL, 0);
+        if (first != 0 || words[FIRST] != 1)
+            _exit(30);
+
+        struct timespec start;
+        struct timespec finish;
+        struct timespec second_timeout = {0, 300000000};
+        if (clock_gettime(CLOCK_MONOTONIC, &start) < 0)
+            _exit(31);
+        errno = 0;
+        long second = syscall(SYS_futex, &words[SECOND], FUTEX_WAIT, 0,
+                              &second_timeout, NULL, 0);
+        int saved_errno = errno;
+        if (clock_gettime(CLOCK_MONOTONIC, &finish) < 0)
+            _exit(32);
+        int64_t elapsed_ns =
+            (int64_t)(finish.tv_sec - start.tv_sec) * 1000000000LL +
+            (int64_t)finish.tv_nsec - (int64_t)start.tv_nsec;
+        if (second != -1 || saved_errno != ETIMEDOUT ||
+            elapsed_ns < 200000000ULL)
+            _exit(33);
+        _exit(0);
+    }
+
+    while (!__atomic_load_n(&words[READY], __ATOMIC_ACQUIRE))
+        syscall(SYS_sched_yield);
+    usleep(20000);
+    __atomic_store_n(&words[FIRST], 1, __ATOMIC_RELEASE);
+    if (syscall(SYS_futex, &words[FIRST], FUTEX_WAKE, 1,
+                NULL, NULL, 0) != 1)
+        return fail("stale-timeout-first-wake");
+    int result = wait_exit(waiter, 0, "stale-timeout-waiter");
+    munmap(words, 3 * sizeof(*words));
+    return result;
+}
+
 static int robust_list_case(void)
 {
     struct robust_list_head head;
@@ -271,6 +322,9 @@ int main(void)
     if (unrelated_wake_isolation() != 0)
         return 1;
     printf("FUTEX_STRESS: unrelated-wake-isolation PASS\n");
+    if (stale_timeout_isolation() != 0)
+        return 1;
+    printf("FUTEX_STRESS: stale-timeout-isolation PASS\n");
     if (robust_list_case() != 0)
         return 1;
     printf("FUTEX_STRESS: PASS\n");

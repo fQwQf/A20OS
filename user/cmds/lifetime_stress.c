@@ -23,6 +23,8 @@
 
 #define RACE_ROUNDS 8
 #define RACE_WORKERS 8
+#define TIMEOUT_CAPACITY_TEST_MAX 128
+#define TIMEOUT_CAPACITY_SLEEP_SEC 30
 
 typedef struct lifetime_stats {
     unsigned long task_objects;
@@ -33,6 +35,11 @@ typedef struct lifetime_stats {
     unsigned long wait_entries;
     unsigned long wake_entries;
     unsigned long timeout_entries;
+    unsigned long timeout_capacity;
+    unsigned long timeout_full_failures;
+    unsigned long timeout_duplicate_rejections;
+    unsigned long timeout_stale_expirations;
+    unsigned long timeout_heap_violations;
     unsigned long lifetime_errors;
     unsigned seen;
 } lifetime_stats_t;
@@ -46,8 +53,13 @@ enum {
     SEEN_WAIT_ENTRIES = 1U << 5,
     SEEN_WAKE_ENTRIES = 1U << 6,
     SEEN_TIMEOUT_ENTRIES = 1U << 7,
-    SEEN_LIFETIME_ERRORS = 1U << 8,
-    SEEN_ALL = (1U << 9) - 1,
+    SEEN_TIMEOUT_CAPACITY = 1U << 8,
+    SEEN_TIMEOUT_FULL_FAILURES = 1U << 9,
+    SEEN_TIMEOUT_DUPLICATE_REJECTIONS = 1U << 10,
+    SEEN_TIMEOUT_STALE_EXPIRATIONS = 1U << 11,
+    SEEN_TIMEOUT_HEAP_VIOLATIONS = 1U << 12,
+    SEEN_LIFETIME_ERRORS = 1U << 13,
+    SEEN_ALL = (1U << 14) - 1,
 };
 
 static int fail(const char *what)
@@ -100,6 +112,21 @@ static int read_stats(lifetime_stats_t *stats)
         } else if (strcmp(key, "timeout_entries") == 0) {
             stats->timeout_entries = value;
             stats->seen |= SEEN_TIMEOUT_ENTRIES;
+        } else if (strcmp(key, "timeout_capacity") == 0) {
+            stats->timeout_capacity = value;
+            stats->seen |= SEEN_TIMEOUT_CAPACITY;
+        } else if (strcmp(key, "timeout_full_failures") == 0) {
+            stats->timeout_full_failures = value;
+            stats->seen |= SEEN_TIMEOUT_FULL_FAILURES;
+        } else if (strcmp(key, "timeout_duplicate_rejections") == 0) {
+            stats->timeout_duplicate_rejections = value;
+            stats->seen |= SEEN_TIMEOUT_DUPLICATE_REJECTIONS;
+        } else if (strcmp(key, "timeout_stale_expirations") == 0) {
+            stats->timeout_stale_expirations = value;
+            stats->seen |= SEEN_TIMEOUT_STALE_EXPIRATIONS;
+        } else if (strcmp(key, "timeout_heap_violations") == 0) {
+            stats->timeout_heap_violations = value;
+            stats->seen |= SEEN_TIMEOUT_HEAP_VIOLATIONS;
         } else if (strcmp(key, "lifetime_errors") == 0) {
             stats->lifetime_errors = value;
             stats->seen |= SEEN_LIFETIME_ERRORS;
@@ -132,6 +159,10 @@ static int compare_stats(const lifetime_stats_t *before,
     CHECK_FIELD(wait_entries);
     CHECK_FIELD(wake_entries);
     CHECK_FIELD(timeout_entries);
+    CHECK_FIELD(timeout_capacity);
+    CHECK_FIELD(timeout_duplicate_rejections);
+    CHECK_FIELD(timeout_stale_expirations);
+    CHECK_FIELD(timeout_heap_violations);
 #undef CHECK_FIELD
     if (after->lifetime_errors != 0)
         return fail("post-stress-lifetime-errors");
@@ -293,6 +324,198 @@ static int race_futex_exit(void)
     return 0;
 }
 
+static int wait_timeout_entries(unsigned long expected)
+{
+    for (int attempt = 0; attempt < 8192; attempt++) {
+        lifetime_stats_t stats;
+        if (read_stats(&stats) != 0)
+            return 1;
+        if (stats.timeout_entries == expected)
+            return 0;
+        syscall(SYS_sched_yield);
+    }
+    printf("LIFETIME_STRESS: FAIL timeout-entries expected=%lu\n",
+           expected);
+    return 1;
+}
+
+static int read_exact(int fd, void *buf, size_t len)
+{
+    size_t done = 0;
+    while (done < len) {
+        ssize_t n = read(fd, (char *)buf + done, len - done);
+        if (n <= 0)
+            return -1;
+        done += (size_t)n;
+    }
+    return 0;
+}
+
+static void stop_timeout_sleepers(pid_t *pids, size_t count)
+{
+    for (size_t i = 0; i < count; i++) {
+        if (pids[i] > 0)
+            (void)kill(pids[i], SIGKILL);
+    }
+    for (size_t i = 0; i < count; i++) {
+        if (pids[i] > 0)
+            (void)wait_any_exit(pids[i], "wait-timeout-capacity-child");
+    }
+}
+
+static int fill_timeout_heap(unsigned long target_entries,
+                             unsigned long baseline_entries,
+                             pid_t **pids_out, size_t *count_out)
+{
+    if (target_entries < baseline_entries)
+        return fail("timeout-capacity-target");
+
+    size_t count = (size_t)(target_entries - baseline_entries);
+    pid_t *pids = calloc(count ? count : 1, sizeof(*pids));
+    int ready[2];
+    if (!pids || pipe(ready) < 0) {
+        free(pids);
+        return fail("timeout-capacity-setup");
+    }
+
+    size_t started = 0;
+    for (; started < count; started++) {
+        pids[started] = fork();
+        if (pids[started] < 0)
+            break;
+        if (pids[started] == 0) {
+            close(ready[0]);
+            char byte = 'R';
+            if (write(ready[1], &byte, 1) != 1)
+                _exit(20);
+            struct timespec sleep_for = {
+                .tv_sec = TIMEOUT_CAPACITY_SLEEP_SEC,
+                .tv_nsec = 0,
+            };
+            (void)nanosleep(&sleep_for, NULL);
+            _exit(21);
+        }
+    }
+    close(ready[1]);
+    if (started != count) {
+        close(ready[0]);
+        stop_timeout_sleepers(pids, started);
+        free(pids);
+        return fail("fork-timeout-capacity");
+    }
+
+    char byte;
+    for (size_t i = 0; i < count; i++) {
+        if (read_exact(ready[0], &byte, 1) < 0) {
+            close(ready[0]);
+            stop_timeout_sleepers(pids, count);
+            free(pids);
+            return fail("timeout-capacity-ready");
+        }
+    }
+    close(ready[0]);
+    if (wait_timeout_entries(target_entries) != 0) {
+        stop_timeout_sleepers(pids, count);
+        free(pids);
+        return 1;
+    }
+
+    *pids_out = pids;
+    *count_out = count;
+    return 0;
+}
+
+static int timeout_capacity_boundaries(const lifetime_stats_t *baseline)
+{
+    unsigned long capacity = baseline->timeout_capacity;
+    unsigned long base = baseline->timeout_entries;
+    if (capacity > TIMEOUT_CAPACITY_TEST_MAX) {
+        printf("LIFETIME_STRESS: timeout-capacity SKIP capacity=%lu\n",
+               capacity);
+        return 0;
+    }
+    if (capacity < 2 || base >= capacity - 1)
+        return fail("timeout-capacity-baseline");
+
+    const unsigned long targets[] = {capacity - 1, capacity};
+    const char *labels[] = {"capacity-1", "capacity"};
+    for (size_t i = 0; i < 2; i++) {
+        pid_t *pids = NULL;
+        size_t count = 0;
+        if (fill_timeout_heap(targets[i], base, &pids, &count) != 0)
+            return 1;
+        printf("LIFETIME_STRESS: timeout-%s PASS entries=%lu\n",
+               labels[i], targets[i]);
+        stop_timeout_sleepers(pids, count);
+        free(pids);
+        if (wait_timeout_entries(base) != 0)
+            return 1;
+    }
+
+    pid_t *pids = NULL;
+    size_t count = 0;
+    if (fill_timeout_heap(capacity, base, &pids, &count) != 0)
+        return 1;
+
+    int result_pipe[2];
+    if (pipe(result_pipe) < 0) {
+        stop_timeout_sleepers(pids, count);
+        free(pids);
+        return fail("timeout-capacity-result-pipe");
+    }
+    pid_t overflow = fork();
+    if (overflow < 0) {
+        close(result_pipe[0]);
+        close(result_pipe[1]);
+        stop_timeout_sleepers(pids, count);
+        free(pids);
+        return fail("fork-timeout-capacity-overflow");
+    }
+    if (overflow == 0) {
+        close(result_pipe[0]);
+        struct timespec sleep_for = {
+            .tv_sec = TIMEOUT_CAPACITY_SLEEP_SEC,
+            .tv_nsec = 0,
+        };
+        errno = 0;
+        int rc = nanosleep(&sleep_for, NULL);
+        int result = rc < 0 ? errno : 0;
+        (void)write(result_pipe[1], &result, sizeof(result));
+        _exit(0);
+    }
+    close(result_pipe[1]);
+    int result = 0;
+    int read_result = read_exact(result_pipe[0], &result, sizeof(result));
+    close(result_pipe[0]);
+    if (wait_any_exit(overflow, "wait-timeout-capacity-overflow") != 0)
+        read_result = -1;
+
+    lifetime_stats_t full;
+    int stats_result = read_stats(&full);
+    if (read_result < 0 || stats_result != 0 || result != EAGAIN ||
+        full.timeout_entries != capacity ||
+        full.timeout_full_failures !=
+            baseline->timeout_full_failures + 1) {
+        printf("LIFETIME_STRESS: FAIL timeout-capacity+1 errno=%d "
+               "entries=%lu failures=%lu expected_failures=%lu\n",
+               result, full.timeout_entries, full.timeout_full_failures,
+               baseline->timeout_full_failures + 1);
+        stop_timeout_sleepers(pids, count);
+        free(pids);
+        return 1;
+    }
+    printf("LIFETIME_STRESS: timeout-capacity+1 PASS entries=%lu "
+           "errno=%d\n", capacity, result);
+    stop_timeout_sleepers(pids, count);
+    free(pids);
+    if (wait_timeout_entries(base) != 0)
+        return 1;
+
+    printf("LIFETIME_STRESS: timeout-capacity PASS capacity=%lu\n",
+           capacity);
+    return 0;
+}
+
 int main(void)
 {
     static const char *existing[] = {
@@ -322,6 +545,8 @@ int main(void)
     if (race_timeout_exit() != 0)
         return 1;
     if (race_futex_exit() != 0)
+        return 1;
+    if (timeout_capacity_boundaries(&before) != 0)
         return 1;
 
     settle();
