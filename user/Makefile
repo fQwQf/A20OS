@@ -195,7 +195,7 @@ WGET_CMD := $(BUILD_DIR)/wget
 LOCAL_CMD_SRCS := $(filter-out $(WGET_CMD_SRC),$(wildcard cmds/*.c))
 LOCAL_CMD_NAMES := $(basename $(notdir $(LOCAL_CMD_SRCS)))
 
-SBASE_ALL_BINS := basename cat chgrp chmod chown cksum cmp comm cp cut date dd \
+SBASE_ALL_BINS := basename cat chgrp chmod chown chroot cksum cmp comm cp cut date dd \
                   dirname du echo env expand expr false find fold grep head hostname \
                   id join kill link ln logger logname ls mkdir mkfifo mknod mktemp mv \
                   nice nl nohup od paste pathchk printenv printf pwd readlink rev rm \

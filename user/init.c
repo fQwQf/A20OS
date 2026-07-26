@@ -110,7 +110,20 @@ int main(void)
     perror("execve mksh");
     do_shutdown();
 #else
-    setup_runtime_links();
+    int benchmark = (access("/bin/etc/benchmark-mode", F_OK) == 0);
+    int final_benchmark =
+        benchmark &&
+        (access("/test/glibc/functest_testcode.sh", F_OK) == 0 ||
+         access("/test/glibc/parallel-build_testcode.sh", F_OK) == 0);
+
+    /*
+     * release images are complete root filesystems.  Their dynamic
+     * loader and libraries become available after the static chroot helper
+     * enters /test, so copying those files into the RAMFS only delays entry.
+     * Keep the original setup for interactive and legacy benchmark images.
+     */
+    if (!final_benchmark)
+        setup_runtime_links();
 
     xmkdir("/tmp");
     xmkdir("/tmp/sysinfo");
@@ -181,7 +194,6 @@ int main(void)
         telnet_pid = 0;
     }
 
-    int benchmark = (access("/bin/etc/benchmark-mode", F_OK) == 0);
     char *script = benchmark ? "/bin/benchmark.sh" : NULL;
     char *argv[] = {"mksh", script, NULL};
 
