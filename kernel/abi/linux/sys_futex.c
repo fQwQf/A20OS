@@ -4,6 +4,7 @@
 #include "proc/proc_internal.h"
 #include "proc/lifetime.h"
 #include "core/lock.h"
+#include "mm/frame.h"
 
 #define FUTEX_WAITERS_MAX 1024
 
@@ -24,7 +25,6 @@ typedef struct futex_wake_token {
 
 static spinlock_t g_futex_lock = SPINLOCK_INIT;
 static futex_waiter_t g_futex_waiters[FUTEX_WAITERS_MAX];
-static uint64_t g_futex_wake_generation;
 
 static int futex_timeout_ticks(void *timeout, int absolute, int realtime,
                                uint64_t *ticks_out)
@@ -98,6 +98,42 @@ static uintptr_t futex_phys_key(int *uaddr)
     return pa ? (uintptr_t)pa : 0;
 }
 
+/*
+ * FUTEX_WAIT_RECHECK_PROTOCOL
+ *
+ * The first copy_from_user() below may fault the page in.  The actual
+ * wait-side linearization point is this non-faulting load while mm->lock and
+ * g_futex_lock are both held: munmap cannot invalidate the translation, and
+ * a matching FUTEX_WAKE cannot inspect the bucket until the waiter is linked.
+ */
+static int futex_user_load_locked(task_t *task, int *uaddr, int *value,
+                                  uintptr_t *pkey)
+{
+    if (!task || !task->mm || !uaddr || !value || !pkey)
+        return -EFAULT;
+
+#ifdef CONFIG_NOMMU
+    *value = __atomic_load_n(uaddr, __ATOMIC_ACQUIRE);
+    *pkey = (uintptr_t)uaddr;
+    return 0;
+#else
+    if (!task->pgdir)
+        return -EFAULT;
+    paddr_t pa = pt_translate(task->pgdir, (vaddr_t)(uintptr_t)uaddr);
+    if (!pa)
+        return -EFAULT;
+    pfn_t pfn = phys_to_pfn(pa);
+    if (!pfn_valid(pfn))
+        return -EFAULT;
+    volatile int *word =
+        (volatile int *)((uintptr_t)pfn_to_virt(pfn) +
+                         (pa & (PAGE_SIZE - 1)));
+    *value = __atomic_load_n(word, __ATOMIC_ACQUIRE);
+    *pkey = (uintptr_t)pa;
+    return 0;
+#endif
+}
+
 static int futex_waiter_matches(const futex_waiter_t *w, mm_struct_t *mm,
                                 uintptr_t vkey, uintptr_t pkey)
 {
@@ -141,14 +177,11 @@ static int futex_wait_on(int *uaddr, int expected, void *timeout, uint32_t bitse
                          int absolute_timeout, int realtime_timeout)
 {
     if (!uaddr) return -EFAULT;
+    if ((uintptr_t)uaddr & (sizeof(int) - 1)) return -EINVAL;
     if (bitset == 0) return -EINVAL;
 
     task_t *t = proc_current();
     if (!t) return -ESRCH;
-
-    uint64_t flags = spin_lock_irqsave(&g_futex_lock);
-    uint64_t wait_generation = g_futex_wake_generation;
-    spin_unlock_irqrestore(&g_futex_lock, flags);
 
     int uval;
     if (copy_from_user(&uval, uaddr, sizeof(uval)) < 0) return -EFAULT;
@@ -159,22 +192,26 @@ static int futex_wait_on(int *uaddr, int expected, void *timeout, uint32_t bitse
     if (tr < 0) return tr;
     uint64_t until = ticks ? timer_get_ticks() + ticks : 0;
     uintptr_t vkey = (uintptr_t)uaddr;
-    uintptr_t pkey = futex_phys_key(uaddr);
+    uintptr_t pkey = 0;
 
     proc_wait_token_t token =
         proc_park_prepare(PROC_WAIT_INTERRUPTIBLE, until);
     if (!token.task)
         return -EAGAIN;
 
-    flags = spin_lock_irqsave(&g_futex_lock);
-    if (wait_generation != g_futex_wake_generation) {
+    uint64_t mm_flags = spin_lock_irqsave(&t->mm->lock);
+    uint64_t flags = spin_lock_irqsave(&g_futex_lock);
+    int load_ret = futex_user_load_locked(t, uaddr, &uval, &pkey);
+    if (load_ret < 0 || uval != expected) {
         spin_unlock_irqrestore(&g_futex_lock, flags);
+        spin_unlock_irqrestore(&t->mm->lock, mm_flags);
         (void)proc_park_cancel(token);
         proc_park_finish(token);
-        return 0;
+        return load_ret < 0 ? load_ret : -EAGAIN;
     }
     if (signal_task_has_unblocked(t)) {
         spin_unlock_irqrestore(&g_futex_lock, flags);
+        spin_unlock_irqrestore(&t->mm->lock, mm_flags);
         (void)proc_park_cancel(token);
         proc_park_finish(token);
         return -ERESTARTSYS;
@@ -182,11 +219,13 @@ static int futex_wait_on(int *uaddr, int expected, void *timeout, uint32_t bitse
     int slot = futex_waiter_alloc(vkey, pkey, t->mm, bitset, token);
     if (slot < 0) {
         spin_unlock_irqrestore(&g_futex_lock, flags);
+        spin_unlock_irqrestore(&t->mm->lock, mm_flags);
         (void)proc_park_cancel(token);
         proc_park_finish(token);
         return slot;
     }
     spin_unlock_irqrestore(&g_futex_lock, flags);
+    spin_unlock_irqrestore(&t->mm->lock, mm_flags);
 
     proc_wake_reason_t reason = proc_park_commit(token);
     proc_park_finish(token);
@@ -221,8 +260,6 @@ static int futex_wake_on(int *uaddr, int nr, uint32_t bitset)
     futex_wake_token_t wake_list[FUTEX_WAITERS_MAX];
     int wake_count = 0;
     uint64_t flags = spin_lock_irqsave(&g_futex_lock);
-    if (nr > 0)
-        g_futex_wake_generation++;
     for (int i = 0; i < FUTEX_WAITERS_MAX && wake_count < nr; i++) {
         futex_waiter_t *w = &g_futex_waiters[i];
         if (!futex_waiter_matches(w, mm, vkey, pkey) || !(w->bitset & bitset))
@@ -272,8 +309,6 @@ static int futex_requeue(int *uaddr, int wake_nr, int requeue_nr, int *uaddr2,
     task_t *cur = proc_current();
     mm_struct_t *mm = cur ? cur->mm : NULL;
     uint64_t flags = spin_lock_irqsave(&g_futex_lock);
-    if (wake_nr > 0 || requeue_nr > 0)
-        g_futex_wake_generation++;
     for (int i = 0; i < FUTEX_WAITERS_MAX && done < wake_nr; i++) {
         futex_waiter_t *w = &g_futex_waiters[i];
         if (!futex_waiter_matches(w, mm, vkey1, pkey1)) continue;
@@ -365,9 +400,6 @@ static int futex_wake_op(int *uaddr, int wake_nr, int wake2_nr,
     int woke = 0;
 
     uint64_t flags = spin_lock_irqsave(&g_futex_lock);
-    if (wake_nr > 0 || wake2_nr > 0)
-        g_futex_wake_generation++;
-
     for (int i = 0; i < FUTEX_WAITERS_MAX && woke < wake_nr; i++) {
         futex_waiter_t *w = &g_futex_waiters[i];
         if (!futex_waiter_matches(w, mm, vkey1, pkey1))
