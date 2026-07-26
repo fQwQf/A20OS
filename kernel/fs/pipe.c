@@ -33,7 +33,8 @@ static void pipe_wake_writers(pipe_buf_t *pb)
     wait_queue_wake_all(&pb->write_waiters, 0, PROC_WAKE_EVENT);
 }
 
-static int pipe_wait_interruptible_locked(pipe_buf_t *pb, wait_queue_t *wq)
+static int pipe_wait_interruptible_locked(pipe_buf_t *pb, wait_queue_t *wq,
+                                          size_t needed)
 {
     task_t *t = proc_current();
     if (!t) {
@@ -45,12 +46,39 @@ static int pipe_wait_interruptible_locked(pipe_buf_t *pb, wait_queue_t *wq)
     if (signal_task_has_unblocked(t))
         return -ERESTARTSYS;
 
+    spin_unlock(&pb->lock);
+    proc_wait_token_t token =
+        proc_park_prepare(PROC_WAIT_INTERRUPTIBLE, 0);
+    spin_lock(&pb->lock);
+    if (!token.task)
+        return 0;
+
+    int should_wait =
+        (wq == &pb->read_waiters) ?
+            (pb->used == 0 && !pb->writer_closed) :
+            (pb->capacity - pb->used < needed && !pb->reader_closed);
+    int interrupted = signal_task_has_unblocked(t);
+    if (!should_wait || interrupted) {
+        spin_unlock(&pb->lock);
+        (void)proc_park_cancel(token);
+        proc_park_finish(token);
+        spin_lock(&pb->lock);
+        return interrupted ? -ERESTARTSYS : 0;
+    }
+
     wait_queue_entry_t entry = {0};
-    wait_queue_prepare(wq, &entry, PROC_WAIT_INTERRUPTIBLE, 0, 0);
+    bool linked = wait_queue_link(wq, &entry, token, 0);
 
     spin_unlock(&pb->lock);
-    proc_wake_reason_t reason = wait_queue_commit(wq, &entry);
-    wait_queue_finish(wq, &entry);
+    proc_wake_reason_t reason;
+    if (linked)
+        reason = proc_park_commit(token);
+    else {
+        (void)proc_park_cancel(token);
+        reason = PROC_WAKE_CANCEL;
+    }
+    wait_queue_unlink(wq, &entry);
+    proc_park_finish(token);
     spin_lock(&pb->lock);
 
     if (reason == PROC_WAKE_SIGNAL || signal_task_has_unblocked(t))
@@ -74,7 +102,7 @@ static int pipe_read(vfile_t *vf, char *buf, size_t count)
             spin_unlock(&pb->lock);
             return -EAGAIN;
         }
-        int wr = pipe_wait_interruptible_locked(pb, &pb->read_waiters);
+        int wr = pipe_wait_interruptible_locked(pb, &pb->read_waiters, 1);
         if (wr < 0) {
             spin_unlock(&pb->lock);
             return wr;
@@ -128,7 +156,8 @@ static int pipe_write(vfile_t *vf, const char *buf, size_t count)
                     spin_unlock(&pb->lock);
                     return n ? (int)n : -EAGAIN;
                 }
-                int wr = pipe_wait_interruptible_locked(pb, &pb->write_waiters);
+                int wr = pipe_wait_interruptible_locked(
+                    pb, &pb->write_waiters, remaining);
                 if (wr < 0) {
                     spin_unlock(&pb->lock);
                     return n ? (int)n : wr;
@@ -163,7 +192,8 @@ static int pipe_write(vfile_t *vf, const char *buf, size_t count)
                     spin_unlock(&pb->lock);
                     return n ? (int)n : -EAGAIN;
                 }
-                int wr = pipe_wait_interruptible_locked(pb, &pb->write_waiters);
+                int wr = pipe_wait_interruptible_locked(
+                    pb, &pb->write_waiters, 1);
                 if (wr < 0) {
                     spin_unlock(&pb->lock);
                     return n ? (int)n : wr;

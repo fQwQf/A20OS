@@ -167,6 +167,21 @@ extern spinlock_t g_net_lock;
 extern net_socket_t *g_sockets[NET_MAX_SOCKETS];
 extern volatile int g_net_bh_pending[NET_MAX_SOCKETS];
 
+/*
+ * Return true when the bounded deferred-wake batch filled before the queue
+ * was drained.  The caller must drop g_net_lock, flush wake_q, and finish the
+ * queue with wait_queue_wake_all().
+ */
+static inline bool
+net_wait_queue_collect_all_locked(wait_queue_t *q,
+                                  proc_wake_reason_t reason,
+                                  proc_wake_q_t *wake_q)
+{
+    bool complete = false;
+    (void)wait_queue_collect_all(q, 0, reason, wake_q, &complete);
+    return !complete;
+}
+
 void     net_socket_registry_init(void);
 uint16_t net_alloc_ephemeral_port_locked(void);
 uint16_t net_ntohs(uint16_t x);

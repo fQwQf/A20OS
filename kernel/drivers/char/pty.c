@@ -191,13 +191,40 @@ static int pty_wait_interruptible_locked(pty_pair_t *pty, wait_queue_t *wq,
     if (signal_task_has_unblocked(task))
         return -ERESTARTSYS;
 
+    spin_unlock_irqrestore(&pty->lock, *pty_flags);
+    proc_wait_token_t token =
+        proc_park_prepare(PROC_WAIT_INTERRUPTIBLE, 0);
+    *pty_flags = spin_lock_irqsave(&pty->lock);
+    if (!token.task)
+        return 0;
+
+    int should_wait =
+        (wq == &pty->master_readers) ?
+            (pty->s2m_used == 0 && pty->slave_refs != 0) :
+            (pty->m2s_used == 0 && pty->master_refs != 0);
+    int interrupted = signal_task_has_unblocked(task);
+    if (!should_wait || interrupted) {
+        spin_unlock_irqrestore(&pty->lock, *pty_flags);
+        (void)proc_park_cancel(token);
+        proc_park_finish(token);
+        *pty_flags = spin_lock_irqsave(&pty->lock);
+        return interrupted ? -ERESTARTSYS : 0;
+    }
+
     wait_queue_entry_t entry = {0};
-    wait_queue_prepare(wq, &entry, PROC_WAIT_INTERRUPTIBLE, 0, 0);
+    bool linked = wait_queue_link(wq, &entry, token, 0);
     (*waiting)++;
 
     spin_unlock_irqrestore(&pty->lock, *pty_flags);
-    proc_wake_reason_t reason = wait_queue_commit(wq, &entry);
-    wait_queue_finish(wq, &entry);
+    proc_wake_reason_t reason;
+    if (linked)
+        reason = proc_park_commit(token);
+    else {
+        (void)proc_park_cancel(token);
+        reason = PROC_WAKE_CANCEL;
+    }
+    wait_queue_unlink(wq, &entry);
+    proc_park_finish(token);
     *pty_flags = spin_lock_irqsave(&pty->lock);
     (*waiting)--;
 

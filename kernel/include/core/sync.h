@@ -24,22 +24,22 @@ typedef struct wait_queue {
 
 /*
  * WAIT_QUEUE_PARK_PROTOCOL:
- * - The caller checks its condition while holding the object lock, then calls
- *   wait_queue_prepare() before releasing that lock.
+ * - The caller creates one park token before acquiring the object lock.
+ * - While holding the object lock it rechecks the persistent condition and
+ *   links one or more entries with wait_queue_link().
  * - A waker detaches the stack entry and copies task + wait_seq while holding
  *   q->lock, clears the entry, releases q->lock, then calls proc_try_wake().
- * - commit handles both wake-before-commit and wake-after-park without ever
- *   queueing a task that is still executing.
+ * - The waiter commits after dropping the object lock, unlinks every remaining
+ *   entry after wake, rechecks the condition under its object lock, and then
+ *   finishes the token.
+ * - If the condition became true before link/commit, the caller explicitly
+ *   cancels and finishes the token.
  */
 
 void wait_queue_init(wait_queue_t *q);
-void wait_queue_prepare(wait_queue_t *q, wait_queue_entry_t *entry,
-                        proc_wait_mode_t mode, uint64_t deadline,
-                        uintptr_t key);
-proc_wake_reason_t wait_queue_commit(wait_queue_t *q,
-                                     wait_queue_entry_t *entry);
-void wait_queue_finish(wait_queue_t *q, wait_queue_entry_t *entry);
-void wait_queue_sleep(wait_queue_t *q);
+bool wait_queue_link(wait_queue_t *q, wait_queue_entry_t *entry,
+                     proc_wait_token_t token, uintptr_t key);
+void wait_queue_unlink(wait_queue_t *q, wait_queue_entry_t *entry);
 unsigned wait_queue_wake_one(wait_queue_t *q, uintptr_t key,
                              proc_wake_reason_t reason);
 unsigned wait_queue_wake_all(wait_queue_t *q, uintptr_t key,
@@ -49,7 +49,8 @@ unsigned wait_queue_collect_one(wait_queue_t *q, uintptr_t key,
                                 proc_wake_q_t *wake_q);
 unsigned wait_queue_collect_all(wait_queue_t *q, uintptr_t key,
                                 proc_wake_reason_t reason,
-                                proc_wake_q_t *wake_q);
+                                proc_wake_q_t *wake_q,
+                                bool *complete);
 
 typedef struct mutex {
     spinlock_t lock;

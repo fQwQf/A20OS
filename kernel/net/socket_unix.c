@@ -144,6 +144,8 @@ int net_unix_socket_connect(net_socket_t *s, const void *addr, size_t addrlen)
     if (ur < 0)
         return ur;
 
+    proc_wake_q_t wake_q;
+    proc_wake_q_init(&wake_q);
     uint64_t irq = spin_lock_irqsave(&g_net_lock);
     memcpy(s->peer_addr, peer_addr, peer_len);
     s->peer_len = peer_len;
@@ -188,10 +190,13 @@ int net_unix_socket_connect(net_socket_t *s, const void *addr, size_t addrlen)
             spin_unlock_irqrestore(&g_net_lock, irq);
             return qr;
         }
+        (void)wait_queue_collect_one(
+            &listener->accept_waitq, 0, PROC_WAKE_EVENT, &wake_q);
     } else {
         s->peer = listener;
     }
     spin_unlock_irqrestore(&g_net_lock, irq);
+    (void)proc_wake_q_flush(&wake_q);
     return 0;
 }
 
@@ -234,6 +239,12 @@ int net_unix_socket_sendto(net_socket_t *s, const void *buf, size_t len,
         return dst_addr ? -ECONNREFUSED : -EDESTADDRREQ;
     }
     int r = net_enqueue_msg_locked(dst, buf, len, s->local, s->local_len);
+    proc_wake_q_t wake_q;
+    proc_wake_q_init(&wake_q);
+    if (r >= 0)
+        (void)wait_queue_collect_one(
+            &dst->read_waitq, 0, PROC_WAKE_EVENT, &wake_q);
     spin_unlock_irqrestore(&g_net_lock, irq);
+    (void)proc_wake_q_flush(&wake_q);
     return r;
 }
