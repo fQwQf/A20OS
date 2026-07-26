@@ -1,5 +1,6 @@
 ARCH ?= riscv64
 OPT ?= -O3
+PROFILE ?= full
 NPROC ?= $(or $(shell getconf _NPROCESSORS_ONLN 2>/dev/null),$(shell sysctl -n hw.logicalcpu 2>/dev/null),4)
 NOMMU ?= 0
 
@@ -23,7 +24,7 @@ MUSL_BUILD := $(MUSL_BASE)/build-$(MUSL_VARIANT)
 MUSL_CRT := $(MUSL_BUILD)/lib
 
 ARCH_STAMP := $(BUILD_DIR)/.build-id
-ARCH_BUILD_ID := $(ARCH):$(NOMMU):$(OPT)
+ARCH_BUILD_ID := $(ARCH):$(NOMMU):$(OPT):$(PROFILE)
 
 .PHONY: arch-stamp-refresh
 arch-stamp-refresh:
