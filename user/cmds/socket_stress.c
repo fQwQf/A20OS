@@ -23,7 +23,7 @@ static uint16_t bswap16(uint16_t x)
     return (uint16_t)((x << 8) | (x >> 8));
 }
 
-static int tcp_server_loop(void)
+static int tcp_server_loop(int ready_fd)
 {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0)
@@ -45,6 +45,15 @@ static int tcp_server_loop(void)
     if (listen(fd, 8) < 0) {
         close(fd);
         return fail("tcp-server-listen");
+    }
+    if (ready_fd >= 0) {
+        char ready = 'R';
+        if (write(ready_fd, &ready, 1) != 1) {
+            close(ready_fd);
+            close(fd);
+            return fail("tcp-server-ready");
+        }
+        close(ready_fd);
     }
 
     for (int i = 0; i < ITERATIONS; i++) {
@@ -182,13 +191,31 @@ static int udp_ping_pong(void)
 
 static int concurrent_tcp_stress(void)
 {
+    int ready_pipe[2];
+    if (pipe(ready_pipe) < 0)
+        return fail("tcp-ready-pipe");
+
     pid_t pid = fork();
-    if (pid < 0)
+    if (pid < 0) {
+        close(ready_pipe[0]);
+        close(ready_pipe[1]);
         return fail("tcp-fork");
+    }
 
     if (pid == 0) {
-        int r = tcp_server_loop();
+        close(ready_pipe[0]);
+        int r = tcp_server_loop(ready_pipe[1]);
         _exit(r);
+    }
+
+    close(ready_pipe[1]);
+    char ready = 0;
+    ssize_t ready_n = read(ready_pipe[0], &ready, 1);
+    close(ready_pipe[0]);
+    if (ready_n != 1 || ready != 'R') {
+        int status = 0;
+        (void)waitpid(pid, &status, 0);
+        return fail("tcp-server-ready");
     }
 
     int r = tcp_client_loop();
