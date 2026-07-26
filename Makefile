@@ -30,6 +30,7 @@ ABI ?= both
 MODE ?= release
 BRINGUP ?= 0
 OPT ?= -O3
+USER_OPT ?= $(OPT)
 NR_CPUS ?= 1
 COOPERATIVE_BOOT ?= 0
 ALLOW_UNVERIFIED_SMP ?= 0
@@ -132,7 +133,7 @@ RISCV_GLIBC_LIB_DIR ?= $(patsubst %/ld-linux-riscv64-lp64d.so.1,%,$(firstword \
 RISCV_GLIBC_LOCAL_ROOT ?= user/external/riscv64-glibc-sysroot
 RISCV_GLIBC_LOCAL_LIB_DIR = $(RISCV_GLIBC_LOCAL_ROOT)/lib
 FEDORA_RISCV_RELEASE ?=
-USER_BUILD_ID = $(ARCH):$(NOMMU):$(OPT):$(PROFILE)
+USER_BUILD_ID = $(ARCH):$(NOMMU):$(USER_OPT):$(PROFILE)
 USER_BUILD_DESKTOP = $(if $(filter benchmark,$(PROFILE)),0,1)
 USER_BUILD_CHECK_DIRS = user/init.c user/cmds user/init_common user/desktop user/external/lvgl \
                         user/external/musl user/external/sbase user/external/mksh-cvs2git \
@@ -158,6 +159,10 @@ NETDEV_USER = -netdev user,id=net$(if $(strip $(NET_HOSTFWD)),$(comma)$(NET_HOST
 SMOKE_TIMEOUT ?= 20s
 SMOKE_INPUT_DELAY ?= 2
 SMOKE_LOG_DIR ?= .kernel-build/smoke
+STEP35_TIMEOUT ?= 300s
+STEP35_INPUT_DELAY ?= 3
+STEP35_LOG_DIR ?= .eval-state/2026/logs
+QEMU_MEMORY ?= 1G
 
 PROTOCOLS_LINES = \
     'hopopt 0 HOPOPT' \
@@ -298,7 +303,7 @@ ARCH_CFLAGS  := $(ARCH_CFLAGS_$(ARCH))
 ARCH_LDFLAGS := $(ARCH_LDFLAGS_$(ARCH))
 ARCH_LIBS    := $(ARCH_LIBS_$(ARCH))
 QEMU         := $(QEMU_$(ARCH))
-QEMU_FLAGS   := $(QEMU_FLAGS_BASE_$(ARCH)) -m 1G -nographic -smp $(NR_CPUS)
+QEMU_FLAGS   := $(QEMU_FLAGS_BASE_$(ARCH)) -m $(QEMU_MEMORY) -nographic -smp $(NR_CPUS)
 ifneq ($(NR_CPUS),1)
 QEMU_FLAGS += -accel tcg,thread=multi
 endif
@@ -764,7 +769,21 @@ check-doc-drift:
 	@! rg -q "for simplicity" docs kernel --glob '!docs/research/**' --glob '!docs/testing/testing-gates.md' --glob '!kernel/external/**'
 	@echo "check-doc-drift: PASS"
 
-check-doc-test-gates: check-concurrency-foundation check-smp-platform-boundary check-task-state-boundary check-mm-lock-model check-io-progress-model check-vfs-abstraction check-abi-boundary check-driver-core-model check-external-dependency-boundary check-abi-smoke-gate check-doc-drift
+check-task-lifetime-boundary:
+	@rg -q "STEP35_TASK_LIFETIME_DIAGNOSTICS" kernel/include/proc/lifetime.h
+	@rg -q "proc_lifetime_note_task_init" kernel/proc/task.c
+	@rg -q "proc_lifetime_note_pid_add" kernel/proc/pid.c
+	@rg -q "proc_lifetime_note_wait_to_wake" kernel/core/sync.c
+	@rg -q "proc_lifetime_note_wake_remove" kernel/proc/park.c
+	@rg -q "proc_wait_timer_count_locked" kernel/proc/sched.c
+	@rg -q "proc_current_lifetime_violations_locked" kernel/proc/current.c
+	@rg -q "PF_A20_TASK_LIFETIME" kernel/fs/procfs.c
+	@rg -q "TASK_LIFETIME_OWNERSHIP_AUDIT" docs/testing/task-lifetime-audit.md
+	@! rg -n --pcre2 '\bproc_find[[:space:]]*\(' kernel \
+		--glob '*.[ch]' --glob '!kernel/external/**'
+	@echo "check-task-lifetime-boundary: PASS"
+
+check-doc-test-gates: check-concurrency-foundation check-smp-platform-boundary check-task-state-boundary check-task-lifetime-boundary check-mm-lock-model check-io-progress-model check-vfs-abstraction check-abi-boundary check-driver-core-model check-external-dependency-boundary check-abi-smoke-gate check-doc-drift
 	@rg -q "DOCS_AS_FACT_CONTRACT" docs/testing/testing-gates.md
 	@rg -q "TEST_FIRST_ARCHITECTURE_MATRIX" docs/testing/testing-gates.md
 	@echo "check-doc-test-gates: PASS"
@@ -784,25 +803,25 @@ check-final-definition: check-doc-test-gates
 	@echo "check-final-definition: PASS (SMP smoke tracked separately by TODO section 10)"
 
 check-riscv64-user:
-	$(MAKE) -C user ARCH=riscv64 OPT="$(OPT)"
+	$(MAKE) -C user ARCH=riscv64 OPT="$(USER_OPT)"
 
 check-loongarch64-user:
-	$(MAKE) -C user ARCH=loongarch64 OPT="$(OPT)"
+	$(MAKE) -C user ARCH=loongarch64 OPT="$(USER_OPT)"
 
 check-aarch64-user:
-	$(MAKE) -C user ARCH=aarch64 OPT="$(OPT)"
+	$(MAKE) -C user ARCH=aarch64 OPT="$(USER_OPT)"
 
 check-x86_64-user:
-	$(MAKE) -C user ARCH=x86_64 OPT="$(OPT)"
+	$(MAKE) -C user ARCH=x86_64 OPT="$(USER_OPT)"
 
 check-arm32-user:
-	$(MAKE) -C user ARCH=arm32 OPT="$(OPT)"
+	$(MAKE) -C user ARCH=arm32 OPT="$(USER_OPT)"
 
 check-riscv32-user:
-	$(MAKE) -C user ARCH=riscv32 OPT="$(OPT)"
+	$(MAKE) -C user ARCH=riscv32 OPT="$(USER_OPT)"
 
 check-ppc64le-user:
-	$(MAKE) -C user ARCH=ppc64le OPT="$(OPT)"
+	$(MAKE) -C user ARCH=ppc64le OPT="$(USER_OPT)"
 
 check-dev-build:
 	$(MAKE) ARCH=riscv64 ABI=$(ABI) BRINGUP=0 dev-build
@@ -1424,6 +1443,90 @@ smoke-futex-stress:
 		exit 1; \
 	fi
 
+.PHONY: check-task-lifetime-boundary check-proc-step35 \
+	check-proc-step35-local step35-rv-debug-1c step35-la-debug-1c \
+	step35-rv-release-8c step35-la-release-8c _step35_smoke
+
+step35-rv-debug-1c:
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 NR_CPUS=1 \
+		OPT="-O0 -g -DDEBUG" USER_OPT="-O3" PROFILE=benchmark QEMU_MEMORY=1G \
+		BUILD_DIR=.kernel-build/step35/riscv64-debug-1c \
+		STEP35_LABEL=riscv64-debug-1c _step35_smoke
+
+step35-la-debug-1c:
+	$(MAKE) ARCH=loongarch64 ABI=linux BRINGUP=0 NR_CPUS=1 \
+		OPT="-O0 -g -DDEBUG" USER_OPT="-O3" PROFILE=benchmark QEMU_MEMORY=1G \
+		BUILD_DIR=.kernel-build/step35/loongarch64-debug-1c \
+		STEP35_LABEL=loongarch64-debug-1c _step35_smoke
+
+step35-rv-release-8c:
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 NR_CPUS=8 \
+		OPT="-O3" USER_OPT="-O3" PROFILE=benchmark QEMU_MEMORY=8G \
+		BUILD_DIR=.kernel-build/step35/riscv64-release-8c \
+		STEP35_LABEL=riscv64-release-8c _step35_smoke
+
+step35-la-release-8c:
+	$(MAKE) ARCH=loongarch64 ABI=linux BRINGUP=0 NR_CPUS=8 \
+		OPT="-O3" USER_OPT="-O3" PROFILE=benchmark QEMU_MEMORY=8G \
+		BUILD_DIR=.kernel-build/step35/loongarch64-release-8c \
+		STEP35_LABEL=loongarch64-release-8c _step35_smoke
+
+_step35_smoke: dev-build
+	@mkdir -p $(STEP35_LOG_DIR)
+	@set -e; \
+	stamp=$$(date -u +%Y%m%dT%H%M%SZ); \
+	log="$(STEP35_LOG_DIR)/step35-$(STEP35_LABEL)-$$stamp.log"; \
+	status=0; \
+	{ sleep $(STEP35_INPUT_DELAY); \
+	  printf 'lifetime_stress\ncat /proc/a20/task_lifetime\npoweroff\n'; } | \
+	$(TIMEOUT) $(STEP35_TIMEOUT) $(QEMU) $(QEMU_FLAGS_NO_SDCARD) \
+		-kernel $(KERNEL_ELF) \
+		-append 'a20.ip=10.0.2.15 a20.netmask=255.255.255.0 a20.gateway=10.0.2.2 a20.dns=10.0.2.3 a20.hostname=a20os' \
+		> "$$log" 2>&1 || status=$$?; \
+	if [ "$$status" -ne 0 ]; then \
+		echo "_step35_smoke: QEMU failed status=$$status log=$$log"; \
+		tail -n 120 "$$log"; \
+		exit 1; \
+	fi; \
+	for marker in \
+		'SCHED_STRESS: PASS' \
+		'FUTEX_STRESS: PASS' \
+		'PROC_STRESS: PASS' \
+		'IO_EVENT_TEST: PASS' \
+		'VFS_STRESS: PASS' \
+		'LIFETIME_STRESS: PASS' \
+		'lifetime_errors: 0' \
+		'System is going down for power-off NOW.'; do \
+		if ! grep -q "$$marker" "$$log"; then \
+			echo "_step35_smoke: missing '$$marker' log=$$log"; \
+			tail -n 120 "$$log"; \
+			exit 1; \
+		fi; \
+	done; \
+	if [ "$(NR_CPUS)" -gt 1 ] && \
+	   ! grep -Fq '[SMP] $(NR_CPUS)/$(NR_CPUS) configured CPUs online' "$$log"; then \
+		echo "_step35_smoke: not all $(NR_CPUS) CPUs came online log=$$log"; \
+		tail -n 120 "$$log"; \
+		exit 1; \
+	fi; \
+	if grep -Eq 'PANIC|sched invariant|reference underflow|use-after-free|\[LOCK\]' "$$log"; then \
+		echo "_step35_smoke: lifecycle diagnostic failure log=$$log"; \
+		grep -E 'PANIC|sched invariant|reference underflow|use-after-free|\[LOCK\]' "$$log" | head -n 20; \
+		exit 1; \
+	fi; \
+	echo "_step35_smoke: PASS ($(STEP35_LABEL)); log saved to $$log"
+
+check-proc-step35-local: check-task-state-boundary \
+	check-concurrency-foundation check-task-lifetime-boundary \
+	step35-rv-debug-1c step35-la-debug-1c \
+	step35-rv-release-8c step35-la-release-8c
+	@git diff --check
+	@echo "check-proc-step35-local: PASS"
+
+check-proc-step35: check-proc-step35-local \
+	final-eval-rv-cagent final-eval-la-cagent
+	@echo "check-proc-step35: PASS"
+
 smoke-socket-stress:
 	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
@@ -1584,10 +1687,10 @@ $(USER_BUILD_STAMP): user/Makefile force_user_build | $(USER_BUILD_CHECK_DIRS)
 	fi; \
 	if [ "$$need_build" -eq 1 ]; then \
 		if [ "$$need_clean" -eq 1 ]; then \
-			$(MAKE) -C user ARCH=$(ARCH) NOMMU=$(NOMMU) OPT="$(OPT)" \
+			$(MAKE) -C user ARCH=$(ARCH) NOMMU=$(NOMMU) OPT="$(USER_OPT)" \
 				PROFILE=$(PROFILE) BUILD_DIR=build/$(USER_VARIANT) clean; \
 		fi; \
-		$(MAKE) -C user ARCH=$(ARCH) NOMMU=$(NOMMU) OPT="$(OPT)" PROFILE=$(PROFILE) BUILD_DESKTOP=$(USER_BUILD_DESKTOP) \
+		$(MAKE) -C user ARCH=$(ARCH) NOMMU=$(NOMMU) OPT="$(USER_OPT)" PROFILE=$(PROFILE) BUILD_DESKTOP=$(USER_BUILD_DESKTOP) \
 			BUILD_DIR=build/$(USER_VARIANT); \
 		printf '%s\n' '$(USER_BUILD_ID)' > "$@"; \
 	else \
@@ -2179,7 +2282,7 @@ run-ppc64le-extra:
 _run_extra_impl:
 	$(MAKE) ARCH=$(ARCH) BRINGUP=0 dev-build
 	@if [ -f user/external/fastfetch/src/fastfetch.c ]; then \
-		$(MAKE) -C user ARCH=$(ARCH) NOMMU=$(NOMMU) OPT="$(OPT)" PROFILE=$(PROFILE) \
+		$(MAKE) -C user ARCH=$(ARCH) NOMMU=$(NOMMU) OPT="$(USER_OPT)" PROFILE=$(PROFILE) \
 			BUILD_DIR=build/$(USER_VARIANT) fastfetch; \
 	else \
 		echo "[EXTRA] fastfetch source unavailable; skipping"; \
