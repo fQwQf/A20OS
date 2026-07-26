@@ -82,6 +82,7 @@ typedef enum {
     PF_SYS_FS_PIPE_MAX_SIZE,
     PF_SYS_FS_LEASE_BREAK_TIME,
     PF_SYS_KERNEL,
+    PF_SYS_KERNEL_OSRELEASE,
     PF_SYS_KERNEL_PID_MAX,
     PF_SYS_KERNEL_PIDMAP,
     PF_SYS_KERNEL_TAINTED,
@@ -460,7 +461,8 @@ static int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
         break;
     }
     case PF_VERSION:
-        snprintf(buf, bufsz, "A20OS version " VERSION " (" ARCH_NAME ")\n"); 
+        snprintf(buf, bufsz, "Linux version %s (%s) (%s)\n",
+                 LINUX_ABI_RELEASE, ARCH_NAME, LINUX_ABI_VERSION);
         break;
     case PF_UPTIME: {  // 生成运行时间
         uint64_t ticks = timer_get_ticks();
@@ -767,6 +769,9 @@ static int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
     case PF_SYS_KERNEL_PID_MAX:
         snprintf(buf, bufsz, "%d\n", proc_pid_max());
         break;
+    case PF_SYS_KERNEL_OSRELEASE:
+        snprintf(buf, bufsz, "%s\n", LINUX_ABI_RELEASE);
+        break;
     case PF_SYS_KERNEL_PIDMAP:
         proc_format_pidmap(buf, bufsz);
         break;
@@ -969,6 +974,9 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
     } else if (dp && dp->type == PF_SYS && strcmp(name, "kernel") == 0) {
         child = new_entry(name, PF_SYS_KERNEL, 0);
         type = PF_SYS_KERNEL;
+    } else if (dp && dp->type == PF_SYS_KERNEL && strcmp(name, "osrelease") == 0) {
+        child = new_entry(name, PF_SYS_KERNEL_OSRELEASE, 0);
+        type = PF_SYS_KERNEL_OSRELEASE;
     } else if (dp && dp->type == PF_SYS_KERNEL && strcmp(name, "pid_max") == 0) {
         child = new_entry(name, PF_SYS_KERNEL_PID_MAX, 0);
         type = PF_SYS_KERNEL_PID_MAX;
@@ -1389,7 +1397,7 @@ static int procfs_freaddir(vfile_t *vf, void *dirp, size_t count) {
         ".", "..", "pipe-max-size", "lease-break-time", "inotify", NULL
     };
     static const char *sys_kernel_entries[] = {
-        ".", "..", "pid_max", "pidmap", "tainted", "sched_autogroup_enabled",
+        ".", "..", "osrelease", "pid_max", "pidmap", "tainted", "sched_autogroup_enabled",
         "core_pattern", "io_uring_disabled", NULL
     };
     static const char *sys_net_entries[] = {
