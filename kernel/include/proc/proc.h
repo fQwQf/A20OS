@@ -93,14 +93,18 @@ typedef struct proc_vm_stats {
  *   zombie or unused task must never be requeued.
  * - proc_lock protects allocation, PID membership, all-task list membership,
  *   parent/wait relationships, zombie/reap transitions, and most task state
- *   transitions. Per-CPU runqueue locks protect rq_next/rq_prev/on_rq and queue
- *   membership; callers that need both follow proc_lock -> runq_lock.
+ *   transitions and scheduler ownership metadata. Per-CPU runqueue locks
+ *   protect rq_next/rq_prev/on_rq and queue membership; callers that need both
+ *   follow proc_lock -> runq_lock.
  * - cpu_id selects the owning run queue while on_rq is true. Code that changes
  *   cpu_id for a queued task must first remove it from its current run queue or
  *   hold the locks needed to move it atomically.
- * - proc_current()/proc_set_current() use CPU-local slots. A running task is
- *   owned by exactly one CPU slot until context_switch() replaces it. SMP still
- *   needs scheduler and locking work before tasks can run concurrently on CPUs.
+ * - on_rq, dispatching, and on_cpu are mutually exclusive. owner_cpu identifies
+ *   the CPU which selected or still owns a dispatching/on_cpu task; it is
+ *   PROC_CPU_NONE otherwise.
+ * - proc_current()/proc_set_current() use CPU-local slots. A task remains
+ *   on_cpu until the replacement task has taken over the kernel stack and
+ *   proc_switch_complete() releases the old ownership.
  * - External modules should prefer proc_* and signal_* helpers instead of
  *   directly changing state, credentials, fs context, or run-queue fields.
  *
@@ -110,10 +114,13 @@ typedef struct proc_vm_stats {
  *   the matching wait token.
  * - Timed or indefinite sleeps go through the Park/Wake protocol or a wait
  *   object. The caller registers object-specific waiter state before commit.
- * - RUNNING is assigned only by context_switch()/sched() after the task has
- *   been removed from any run queue. ZOMBIE/UNUSED are exit/reap states and
- *   must not be written by synchronization primitives.
+ * - RUNNING is assigned only by context_switch()/sched() after a task has moved
+ *   from on_rq to dispatching. A READY task that is still on_cpu is queued only
+ *   by proc_switch_complete(). ZOMBIE/UNUSED are exit/reap states and must not
+ *   be written by synchronization primitives.
  */
+#define PROC_CPU_NONE ((unsigned)-1)
+
 #ifdef CONFIG_NOMMU
 typedef struct nommu_vfork_snap_entry {
     void   *dst;
@@ -144,6 +151,9 @@ typedef struct task_t {
     int      sched_level;
     unsigned cpu_id;
     int      on_rq;
+    int      dispatching;
+    int      on_cpu;
+    unsigned owner_cpu;
     int      vfork_waiting;
 #ifdef CONFIG_NOMMU
     /* A NOMMU vfork child shares writable memory until exec/exit. */

@@ -323,9 +323,8 @@ void proc_exit(int exit_code)
     fdtable_close_all(t);
     proc_release_exiting_mm(t);
 
-    proc_runq_remove_locked(t);
-
     uint64_t flags = spin_lock_irqsave(&proc_lock);
+    proc_runq_remove_locked(t);
     task_t *parent = t->parent;
     if (!proc_task_is_live_locked(parent))
         parent = NULL;

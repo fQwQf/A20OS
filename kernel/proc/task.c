@@ -23,6 +23,7 @@ task_t *proc_task_alloc_storage(void)
     t->state = PROC_BLOCKED;
     t->dynamic_alloc = 1;
     t->wait_timer_index = -1;
+    t->owner_cpu = PROC_CPU_NONE;
     return t;
 }
 
@@ -33,6 +34,9 @@ void proc_task_init_idle_state(task_t *t, unsigned cpu)
     t->state = PROC_RUNNING;
     t->cpu_id = cpu;
     t->on_rq = 0;
+    t->dispatching = 0;
+    t->on_cpu = 1;
+    t->owner_cpu = cpu;
     t->wait_timer_index = -1;
 }
 
@@ -76,6 +80,9 @@ void proc_task_init_common(task_t *t, task_t *parent)
     t->sched_level = 0;
     t->cpu_id    = parent ? parent->cpu_id : cpu_current_id();
     t->on_rq     = 0;
+    t->dispatching = 0;
+    t->on_cpu    = 0;
+    t->owner_cpu = PROC_CPU_NONE;
     t->vfork_waiting = 0;
     t->rq_next   = NULL;
     t->rq_prev   = NULL;
