@@ -250,7 +250,7 @@ static void virtio_blk_complete_used_locked(virtio_blk_inst_t *inst,
             req->done = 1;
             if (wake_q)
                 (void)wait_queue_collect_all(&req->waiters, 0,
-                                             PROC_WAKE_EVENT, wake_q);
+                                             PROC_WAKE_EVENT, wake_q, NULL);
         }
 
         blk->last_used++;
@@ -320,7 +320,7 @@ static void virtio_blk_fail_queue_locked(virtio_blk_inst_t *inst,
         req->done = 1;
         if (wake_q)
             (void)wait_queue_collect_all(&req->waiters, 0,
-                                         PROC_WAKE_EXIT, wake_q);
+                                         PROC_WAKE_EXIT, wake_q, NULL);
     }
 }
 
@@ -441,13 +441,36 @@ static int virtio_blk_wait_req(virtio_blk_inst_t *inst, virtio_blk_req_t *req,
         }
 
         if (cur) {
-            wait_queue_entry_t entry = {0};
-            wait_queue_prepare(&req->waiters, &entry,
-                               PROC_WAIT_UNINTERRUPTIBLE, deadline, 0);
             spin_unlock_irqrestore(&inst->lock, flags);
             (void)proc_wake_q_flush(&wake_q);
-            (void)wait_queue_commit(&req->waiters, &entry);
-            wait_queue_finish(&req->waiters, &entry);
+            proc_wait_token_t token =
+                proc_park_prepare(PROC_WAIT_UNINTERRUPTIBLE, deadline);
+            if (!token.task) {
+                cpu_relax();
+                continue;
+            }
+
+            wait_queue_entry_t entry = {0};
+            flags = spin_lock_irqsave(&inst->lock);
+            if (inst->blk.valid)
+                virtio_blk_complete_used_locked(inst, &wake_q);
+            if (req->done) {
+                spin_unlock_irqrestore(&inst->lock, flags);
+                (void)proc_wake_q_flush(&wake_q);
+                (void)proc_park_cancel(token);
+                proc_park_finish(token);
+                continue;
+            }
+            bool linked =
+                wait_queue_link(&req->waiters, &entry, token, 0);
+            spin_unlock_irqrestore(&inst->lock, flags);
+            (void)proc_wake_q_flush(&wake_q);
+            if (linked)
+                (void)proc_park_commit(token);
+            else
+                (void)proc_park_cancel(token);
+            wait_queue_unlink(&req->waiters, &entry);
+            proc_park_finish(token);
         } else {
             spin_unlock_irqrestore(&inst->lock, flags);
             (void)proc_wake_q_flush(&wake_q);

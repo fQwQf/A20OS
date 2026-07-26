@@ -187,15 +187,33 @@ int uart_getc(void) {
         }
         uint64_t deadline =
             timer_get_ticks() + (TICKS_PER_SEC / 20);
+        spin_unlock_irqrestore(&rx_lock, flags);
+        proc_wait_token_t token =
+            proc_park_prepare(PROC_WAIT_INTERRUPTIBLE, deadline);
+        if (!token.task)
+            continue;
+
         wait_queue_entry_t entry = {0};
-        wait_queue_prepare(&rx_waiters, &entry,
-                           PROC_WAIT_INTERRUPTIBLE, deadline, 0);
+        flags = spin_lock_irqsave(&rx_lock);
+        c = arch_uart_poll_getc();
+        if (c >= 0) {
+            spin_unlock_irqrestore(&rx_lock, flags);
+            (void)proc_park_cancel(token);
+            proc_park_finish(token);
+            uart_rx_push((char)c);
+            continue;
+        }
+        bool linked = wait_queue_link(&rx_waiters, &entry, token, 0);
         spin_unlock_irqrestore(&rx_lock, flags);
 
         arch_local_irq_enable();
-        (void)wait_queue_commit(&rx_waiters, &entry);
+        if (linked)
+            (void)proc_park_commit(token);
+        else
+            (void)proc_park_cancel(token);
         arch_local_irq_disable();
-        wait_queue_finish(&rx_waiters, &entry);
+        wait_queue_unlink(&rx_waiters, &entry);
+        proc_park_finish(token);
     }
 }
 

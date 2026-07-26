@@ -859,8 +859,8 @@ static int elf_load64(int fd, const Elf64_Ehdr *eh, const char *path,
         char resolved[MAX_PATH_LEN];
         int interp_fd = resolve_interp(path, interp_path,
                                        resolved, sizeof(resolved));
-        printf("[ELF] interp: exec='%s' pt_interp='%s' resolved='%s' fd=%d\n",
-              path ? path : "(null)", interp_path, resolved, interp_fd);
+        ktrace_mm("[ELF] interp: exec='%s' pt_interp='%s' resolved='%s' fd=%d\n",
+                  path ? path : "(null)", interp_path, resolved, interp_fd);
         if (interp_fd < 0) {
             printf("[ELF] INTERP NOT FOUND for '%s' wanted '%s'\n",
                   path ? path : "(null)", interp_path);

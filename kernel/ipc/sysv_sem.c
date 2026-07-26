@@ -345,10 +345,15 @@ int sysv_sem_timedop(int semid, const void *sops, size_t nsops, uint64_t deadlin
     if (copy_from_user(ops, sops, nsops * sizeof(sysv_sembuf_t)) < 0)
         return -EFAULT;
 
+    proc_wait_token_t token = {0};
     for (;;) {
         uint64_t flags = spin_lock_irqsave(&g_sem_lock);
         if (!sem_valid_locked(semid)) {
             spin_unlock_irqrestore(&g_sem_lock, flags);
+            if (token.task) {
+                (void)proc_park_cancel(token);
+                proc_park_finish(token);
+            }
             return -EINVAL;
         }
         sysv_sem_set_t *set = &g_sem[semid];
@@ -357,11 +362,19 @@ int sysv_sem_timedop(int semid, const void *sops, size_t nsops, uint64_t deadlin
         int can = sem_ops_can_apply(set, ops, nsops, &wait_sem, &wait_zero);
         if (can < 0) {
             spin_unlock_irqrestore(&g_sem_lock, flags);
+            if (token.task) {
+                (void)proc_park_cancel(token);
+                proc_park_finish(token);
+            }
             return can;
         }
         if (can > 0) {
             sem_ops_apply(set, ops, nsops);
             spin_unlock_irqrestore(&g_sem_lock, flags);
+            if (token.task) {
+                (void)proc_park_cancel(token);
+                proc_park_finish(token);
+            }
             wait_queue_wake_all(&set->waiters, 0, PROC_WAKE_EVENT);
             return 0;
         }
@@ -375,30 +388,52 @@ int sysv_sem_timedop(int semid, const void *sops, size_t nsops, uint64_t deadlin
         }
         if (nowait) {
             spin_unlock_irqrestore(&g_sem_lock, flags);
+            if (token.task) {
+                (void)proc_park_cancel(token);
+                proc_park_finish(token);
+            }
             return -EAGAIN;
         }
         if (signal_task_has_unblocked(proc_current())) {
             spin_unlock_irqrestore(&g_sem_lock, flags);
+            if (token.task) {
+                (void)proc_park_cancel(token);
+                proc_park_finish(token);
+            }
             return -EINTR;
         }
         if (deadline && (int64_t)(timer_get_ticks() - deadline) >= 0) {
             spin_unlock_irqrestore(&g_sem_lock, flags);
+            if (token.task) {
+                (void)proc_park_cancel(token);
+                proc_park_finish(token);
+            }
             return -EAGAIN;
         }
 
-        task_t *cur = proc_current();
+        if (!token.task) {
+            spin_unlock_irqrestore(&g_sem_lock, flags);
+            token = proc_park_prepare(PROC_WAIT_INTERRUPTIBLE, deadline);
+            if (!token.task)
+                return -EAGAIN;
+            continue;
+        }
+
         wait_queue_entry_t entry = {0};
-        wait_queue_prepare(&set->waiters, &entry,
-                           PROC_WAIT_INTERRUPTIBLE, deadline, 0);
+        bool linked = wait_queue_link(&set->waiters, &entry, token, 0);
         if (wait_zero)
             set->zcnt[wait_sem]++;
         else
             set->ncnt[wait_sem]++;
         spin_unlock_irqrestore(&g_sem_lock, flags);
 
-        (void)cur;
-        (void)wait_queue_commit(&set->waiters, &entry);
-        wait_queue_finish(&set->waiters, &entry);
+        if (linked)
+            (void)proc_park_commit(token);
+        else
+            (void)proc_park_cancel(token);
+        wait_queue_unlink(&set->waiters, &entry);
+        proc_park_finish(token);
+        token = (proc_wait_token_t){0};
 
         flags = spin_lock_irqsave(&g_sem_lock);
         if (wait_zero) {

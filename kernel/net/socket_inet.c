@@ -455,31 +455,48 @@ void net_tcp_drop_pcb(net_socket_t *s)
  * Process a single socket's deferred bottom-half work.
  *
  * Runs with g_net_lock held and WITHOUT g_lwip_lock.  Allocates net_msg_t
- * entries, copies staged payload data, enqueues messages, and wakes waiters.
+ * entries, copies staged payload data, and detaches waiters into wake_q.
+ * The caller flushes wake_q only after dropping g_net_lock.
  */
-static void net_inet_bottom_half_process_socket_locked(net_socket_t *s)
+#define NET_BH_DRAIN_READ  (1U << 0)
+#define NET_BH_DRAIN_WRITE (1U << 1)
+
+static unsigned
+net_inet_bottom_half_process_socket_locked(net_socket_t *s,
+                                           proc_wake_q_t *wake_q)
 {
+    unsigned drain = 0;
     if (__atomic_exchange_n(&s->bh_connected, 0, __ATOMIC_ACQUIRE)) {
         int err = __atomic_load_n(&s->bh_err_code, __ATOMIC_RELAXED);
         s->tcp_connecting = 0;
         s->tcp_err = err;
         if (err == ERR_OK)
             s->connected = 1;
-        wait_queue_wake_all(&s->read_waitq, 0, PROC_WAKE_EVENT);
+        if (net_wait_queue_collect_all_locked(
+                &s->read_waitq, PROC_WAKE_EVENT, wake_q))
+            drain |= NET_BH_DRAIN_READ;
     }
 
     if (__atomic_exchange_n(&s->bh_error, 0, __ATOMIC_ACQUIRE)) {
         s->tcp_connecting = 0;
         s->tcp_err = __atomic_load_n(&s->bh_err_code, __ATOMIC_RELAXED);
         s->closed = 1;
-        wait_queue_wake_all(&s->read_waitq, 0, PROC_WAKE_EVENT);
-        wait_queue_wake_all(&s->write_waitq, 0, PROC_WAKE_EVENT);
+        if (net_wait_queue_collect_all_locked(
+                &s->read_waitq, PROC_WAKE_EVENT, wake_q))
+            drain |= NET_BH_DRAIN_READ;
+        if (net_wait_queue_collect_all_locked(
+                &s->write_waitq, PROC_WAKE_EVENT, wake_q))
+            drain |= NET_BH_DRAIN_WRITE;
     }
 
     if (__atomic_exchange_n(&s->bh_closed, 0, __ATOMIC_ACQUIRE)) {
         s->closed = 1;
-        wait_queue_wake_all(&s->read_waitq, 0, PROC_WAKE_EVENT);
-        wait_queue_wake_all(&s->write_waitq, 0, PROC_WAKE_EVENT);
+        if (net_wait_queue_collect_all_locked(
+                &s->read_waitq, PROC_WAKE_EVENT, wake_q))
+            drain |= NET_BH_DRAIN_READ;
+        if (net_wait_queue_collect_all_locked(
+                &s->write_waitq, PROC_WAKE_EVENT, wake_q))
+            drain |= NET_BH_DRAIN_WRITE;
     }
 
     for (;;) {
@@ -487,30 +504,50 @@ static void net_inet_bottom_half_process_socket_locked(net_socket_t *s)
         if (!e)
             break;
         if (!s->closed) {
-            net_enqueue_msg_locked_meta(s, e->data, e->len,
-                                        e->addrlen ? e->addr : NULL, e->addrlen,
-                                        e);
+            int queued = net_enqueue_msg_locked_meta(
+                s, e->data, e->len,
+                e->addrlen ? e->addr : NULL, e->addrlen, e);
+            if (queued >= 0) {
+                if (wake_q->count >= PROC_WAKE_Q_CAPACITY)
+                    drain |= NET_BH_DRAIN_READ;
+                else
+                    (void)wait_queue_collect_one(
+                        &s->read_waitq, 0, PROC_WAKE_EVENT, wake_q);
+            }
         }
         bh_ring_consume_commit(&s->bh_ring);
     }
 
     if (__atomic_exchange_n(&s->bh_tx_wake, 0, __ATOMIC_ACQUIRE)) {
-        wait_queue_wake_all(&s->write_waitq, 0, PROC_WAKE_EVENT);
+        if (net_wait_queue_collect_all_locked(
+                &s->write_waitq, PROC_WAKE_EVENT, wake_q))
+            drain |= NET_BH_DRAIN_WRITE;
     }
+    return drain;
 }
 
 void net_inet_bottom_half_process_socket(net_socket_t *s)
 {
     if (!s)
         return;
+    proc_wake_q_t wake_q;
+    proc_wake_q_init(&wake_q);
+    unsigned drain = 0;
     uint64_t irq = spin_lock_irqsave(&g_net_lock);
     if (net_socket_is_valid_locked(s) && !s->closed)
-        net_inet_bottom_half_process_socket_locked(s);
+        drain = net_inet_bottom_half_process_socket_locked(s, &wake_q);
     __atomic_store_n(&s->bh_pending, 0, __ATOMIC_RELEASE);
     int idx = s->reg_idx;
     if (idx >= 0 && idx < NET_MAX_SOCKETS)
         __atomic_store_n(&g_net_bh_pending[idx], 0, __ATOMIC_RELEASE);
     spin_unlock_irqrestore(&g_net_lock, irq);
+    (void)proc_wake_q_flush(&wake_q);
+    if (drain & NET_BH_DRAIN_READ)
+        (void)wait_queue_wake_all(
+            &s->read_waitq, 0, PROC_WAKE_EVENT);
+    if (drain & NET_BH_DRAIN_WRITE)
+        (void)wait_queue_wake_all(
+            &s->write_waitq, 0, PROC_WAKE_EVENT);
 }
 
 void net_inet_bottom_half_process_all(void)
@@ -518,6 +555,9 @@ void net_inet_bottom_half_process_all(void)
     for (int i = 0; i < NET_MAX_SOCKETS; i++) {
         if (!__atomic_load_n(&g_net_bh_pending[i], __ATOMIC_ACQUIRE))
             continue;
+        proc_wake_q_t wake_q;
+        proc_wake_q_init(&wake_q);
+        unsigned drain = 0;
         uint64_t irq = spin_lock_irqsave(&g_net_lock);
         net_socket_t *s = g_sockets[i];
         if (!s || !net_socket_is_valid_locked(s) || s->closed) {
@@ -527,10 +567,17 @@ void net_inet_bottom_half_process_all(void)
             spin_unlock_irqrestore(&g_net_lock, irq);
             continue;
         }
-        net_inet_bottom_half_process_socket_locked(s);
+        drain = net_inet_bottom_half_process_socket_locked(s, &wake_q);
         __atomic_store_n(&s->bh_pending, 0, __ATOMIC_RELEASE);
         __atomic_store_n(&g_net_bh_pending[i], 0, __ATOMIC_RELEASE);
         spin_unlock_irqrestore(&g_net_lock, irq);
+        (void)proc_wake_q_flush(&wake_q);
+        if (drain & NET_BH_DRAIN_READ)
+            (void)wait_queue_wake_all(
+                &s->read_waitq, 0, PROC_WAKE_EVENT);
+        if (drain & NET_BH_DRAIN_WRITE)
+            (void)wait_queue_wake_all(
+                &s->write_waitq, 0, PROC_WAKE_EVENT);
     }
 }
 
@@ -675,6 +722,8 @@ static int net_inet_connect_stream(net_socket_t *s, const void *addr, size_t add
     uint16_t connect_port = 0;
     net_sockaddr_port(connect_addr, peer_len, &connect_port);
     int local_target = net_sockaddr_is_local_target(connect_addr, peer_len);
+    proc_wake_q_t wake_q;
+    proc_wake_q_init(&wake_q);
     uint64_t irq = spin_lock_irqsave(&g_net_lock);
     net_socket_t *listener =
         local_target ? net_find_stream_listener_locked(s, connect_port) : NULL;
@@ -712,7 +761,10 @@ static int net_inet_connect_stream(net_socket_t *s, const void *addr, size_t add
             return qr;
         }
         ktrace_net("[NET] connect: pushed child to listener accept queue\n");
+        (void)wait_queue_collect_one(
+            &listener->accept_waitq, 0, PROC_WAKE_EVENT, &wake_q);
         spin_unlock_irqrestore(&g_net_lock, irq);
+        (void)proc_wake_q_flush(&wake_q);
         net_tcp_drop_pcb(s);
         ktrace_net("[NET] connect: local TCP connect done\n");
         return 0;
@@ -768,13 +820,40 @@ static int net_inet_connect_stream(net_socket_t *s, const void *addr, size_t add
             s->connected = 0;
             return -ERESTARTSYS;
         }
-        wait_queue_entry_t entry = {0};
-        wait_queue_prepare(&s->read_waitq, &entry,
-                           PROC_WAIT_INTERRUPTIBLE, deadline, 0);
         spin_unlock_irqrestore(&g_net_lock, wait_irq);
-        proc_wake_reason_t reason =
-            wait_queue_commit(&s->read_waitq, &entry);
-        wait_queue_finish(&s->read_waitq, &entry);
+        proc_wait_token_t token =
+            proc_park_prepare(PROC_WAIT_INTERRUPTIBLE, deadline);
+        if (!token.task)
+            return -EAGAIN;
+
+        wait_queue_entry_t entry = {0};
+        wait_irq = spin_lock_irqsave(&g_net_lock);
+        if (!s->tcp_connecting) {
+            spin_unlock_irqrestore(&g_net_lock, wait_irq);
+            (void)proc_park_cancel(token);
+            proc_park_finish(token);
+            continue;
+        }
+        if (net_task_has_unblocked_signal(cur)) {
+            spin_unlock_irqrestore(&g_net_lock, wait_irq);
+            (void)proc_park_cancel(token);
+            proc_park_finish(token);
+            net_tcp_drop_pcb(s);
+            s->tcp_connecting = 0;
+            s->connected = 0;
+            return -ERESTARTSYS;
+        }
+        bool linked = wait_queue_link(&s->read_waitq, &entry, token, 0);
+        spin_unlock_irqrestore(&g_net_lock, wait_irq);
+        proc_wake_reason_t reason;
+        if (linked)
+            reason = proc_park_commit(token);
+        else {
+            (void)proc_park_cancel(token);
+            reason = PROC_WAKE_CANCEL;
+        }
+        wait_queue_unlink(&s->read_waitq, &entry);
+        proc_park_finish(token);
         if (reason == PROC_WAKE_TIMEOUT) {
             net_tcp_drop_pcb(s);
             s->tcp_connecting = 0;
@@ -886,7 +965,13 @@ static int net_inet_send_udp(net_socket_t *s, const void *buf, size_t len,
                                             dontwait, s->send_timeout_ticks);
         }
         int rr = net_enqueue_msg_locked(local_dst, buf, len, s->local, s->local_len);
+        proc_wake_q_t wake_q;
+        proc_wake_q_init(&wake_q);
+        if (rr >= 0)
+            (void)wait_queue_collect_one(
+                &local_dst->read_waitq, 0, PROC_WAKE_EVENT, &wake_q);
         spin_unlock_irqrestore(&g_net_lock, irq);
+        (void)proc_wake_q_flush(&wake_q);
         return rr;
     }
     spin_unlock_irqrestore(&g_net_lock, irq);
@@ -998,21 +1083,32 @@ static int net_inet_send_tcp(net_socket_t *s, const void *buf, size_t len)
                 return -ERESTARTSYS;
             if (net_socket_wait_expired(s, start, 1))
                 return -EAGAIN;
-            uint64_t irq = spin_lock_irqsave(&g_net_lock);
             uint64_t deadline = s->send_timeout_ticks ?
                                 start + s->send_timeout_ticks : 0;
+            proc_wait_token_t token =
+                proc_park_prepare(PROC_WAIT_INTERRUPTIBLE, deadline);
+            if (!token.task)
+                return -EAGAIN;
+
             wait_queue_entry_t entry = {0};
-            wait_queue_prepare(&s->write_waitq, &entry,
-                               PROC_WAIT_INTERRUPTIBLE, deadline, 0);
+            uint64_t irq = spin_lock_irqsave(&g_net_lock);
+            bool linked =
+                wait_queue_link(&s->write_waitq, &entry, token, 0);
             spin_unlock_irqrestore(&g_net_lock, irq);
             uint64_t room_flags = a20_lwip_lock();
             int room_now = s->tcp && tcp_sndbuf(s->tcp) > 0;
             a20_lwip_unlock(room_flags);
             if (room_now)
-                (void)proc_try_wake(cur, entry.wait_seq, PROC_WAKE_EVENT);
-            proc_wake_reason_t reason =
-                wait_queue_commit(&s->write_waitq, &entry);
-            wait_queue_finish(&s->write_waitq, &entry);
+                (void)proc_try_wake(cur, token.seq, PROC_WAKE_EVENT);
+            proc_wake_reason_t reason;
+            if (linked)
+                reason = proc_park_commit(token);
+            else {
+                (void)proc_park_cancel(token);
+                reason = PROC_WAKE_CANCEL;
+            }
+            wait_queue_unlink(&s->write_waitq, &entry);
+            proc_park_finish(token);
             if (reason == PROC_WAKE_SIGNAL)
                 return -ERESTARTSYS;
             if (reason == PROC_WAKE_TIMEOUT)

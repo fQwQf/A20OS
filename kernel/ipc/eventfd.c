@@ -31,12 +31,29 @@ static int eventfd_read(vfile_t *vf, char *buf, size_t count)
             spin_unlock(&efd->lock);
             return -EAGAIN;
         }
-        wait_queue_entry_t entry = {0};
-        wait_queue_prepare(&efd->readers, &entry,
-                           PROC_WAIT_UNINTERRUPTIBLE, 0, 0);
         spin_unlock(&efd->lock);
-        (void)wait_queue_commit(&efd->readers, &entry);
-        wait_queue_finish(&efd->readers, &entry);
+        proc_wait_token_t token =
+            proc_park_prepare(PROC_WAIT_UNINTERRUPTIBLE, 0);
+        if (!token.task)
+            return -EAGAIN;
+
+        wait_queue_entry_t entry = {0};
+        spin_lock(&efd->lock);
+        if (efd->counter != 0) {
+            spin_unlock(&efd->lock);
+            (void)proc_park_cancel(token);
+            proc_park_finish(token);
+            spin_lock(&efd->lock);
+            continue;
+        }
+        bool linked = wait_queue_link(&efd->readers, &entry, token, 0);
+        spin_unlock(&efd->lock);
+        if (linked)
+            (void)proc_park_commit(token);
+        else
+            (void)proc_park_cancel(token);
+        wait_queue_unlink(&efd->readers, &entry);
+        proc_park_finish(token);
         spin_lock(&efd->lock);
     }
     uint64_t val = efd->semaphore ? 1 : efd->counter;
@@ -65,12 +82,29 @@ static int eventfd_write(vfile_t *vf, const char *buf, size_t count)
             spin_unlock(&efd->lock);
             return -EAGAIN;
         }
-        wait_queue_entry_t entry = {0};
-        wait_queue_prepare(&efd->writers, &entry,
-                           PROC_WAIT_UNINTERRUPTIBLE, 0, 0);
         spin_unlock(&efd->lock);
-        (void)wait_queue_commit(&efd->writers, &entry);
-        wait_queue_finish(&efd->writers, &entry);
+        proc_wait_token_t token =
+            proc_park_prepare(PROC_WAIT_UNINTERRUPTIBLE, 0);
+        if (!token.task)
+            return -EAGAIN;
+
+        wait_queue_entry_t entry = {0};
+        spin_lock(&efd->lock);
+        if (efd->counter + val <= ~0ULL - 1) {
+            spin_unlock(&efd->lock);
+            (void)proc_park_cancel(token);
+            proc_park_finish(token);
+            spin_lock(&efd->lock);
+            continue;
+        }
+        bool linked = wait_queue_link(&efd->writers, &entry, token, 0);
+        spin_unlock(&efd->lock);
+        if (linked)
+            (void)proc_park_commit(token);
+        else
+            (void)proc_park_cancel(token);
+        wait_queue_unlink(&efd->writers, &entry);
+        proc_park_finish(token);
         spin_lock(&efd->lock);
     }
     int wake_readers = (efd->counter == 0);

@@ -30,6 +30,7 @@ static fs_file_lock_t g_file_locks[FS_FILE_LOCK_MAX];
 static fs_bsd_flock_t g_bsd_flocks[FS_FILE_LOCK_MAX];
 static spinlock_t g_file_lock_table_lock = SPINLOCK_INIT;
 static wait_queue_t g_file_lock_waiters = WAIT_QUEUE_INIT;
+static uint64_t g_file_lock_generation;
 
 static int fs_lock_wait(uint64_t table_flags)
 {
@@ -44,14 +45,34 @@ static int fs_lock_wait(uint64_t table_flags)
         return -ERESTARTSYS;
     }
 
+    uint64_t generation = g_file_lock_generation;
+    spin_unlock_irqrestore(&g_file_lock_table_lock, table_flags);
+    proc_wait_token_t token =
+        proc_park_prepare(PROC_WAIT_INTERRUPTIBLE, 0);
+    if (!token.task)
+        return 0;
+
     wait_queue_entry_t entry = {0};
-    wait_queue_prepare(&g_file_lock_waiters, &entry,
-                       PROC_WAIT_INTERRUPTIBLE, 0, 0);
+    table_flags = spin_lock_irqsave(&g_file_lock_table_lock);
+    if (generation != g_file_lock_generation) {
+        spin_unlock_irqrestore(&g_file_lock_table_lock, table_flags);
+        (void)proc_park_cancel(token);
+        proc_park_finish(token);
+        return 0;
+    }
+    bool linked =
+        wait_queue_link(&g_file_lock_waiters, &entry, token, 0);
     spin_unlock_irqrestore(&g_file_lock_table_lock, table_flags);
 
-    proc_wake_reason_t reason =
-        wait_queue_commit(&g_file_lock_waiters, &entry);
-    wait_queue_finish(&g_file_lock_waiters, &entry);
+    proc_wake_reason_t reason;
+    if (linked)
+        reason = proc_park_commit(token);
+    else {
+        (void)proc_park_cancel(token);
+        reason = PROC_WAKE_CANCEL;
+    }
+    wait_queue_unlink(&g_file_lock_waiters, &entry);
+    proc_park_finish(token);
     return reason == PROC_WAKE_SIGNAL || signal_task_has_unblocked(cur) ?
            -ERESTARTSYS : 0;
 }
@@ -362,9 +383,12 @@ retry:
         }
     }
 
-    if (changed || lk->l_type == F_UNLCK)
-        fs_lock_wake_waiters();
+    int wake_waiters = changed || lk->l_type == F_UNLCK;
+    if (wake_waiters)
+        g_file_lock_generation++;
     spin_unlock_irqrestore(&g_file_lock_table_lock, flags);
+    if (wake_waiters)
+        fs_lock_wake_waiters();
     return 0;
 }
 
@@ -381,8 +405,10 @@ void fs_locks_release_process(int pid)
         }
     }
     if (changed)
-        fs_lock_wake_waiters();
+        g_file_lock_generation++;
     spin_unlock_irqrestore(&g_file_lock_table_lock, flags);
+    if (changed)
+        fs_lock_wake_waiters();
 }
 
 void fs_locks_release_process_file(vfile_t *vf, int pid)
@@ -400,8 +426,10 @@ void fs_locks_release_process_file(vfile_t *vf, int pid)
         }
     }
     if (changed)
-        fs_lock_wake_waiters();
+        g_file_lock_generation++;
     spin_unlock_irqrestore(&g_file_lock_table_lock, flags);
+    if (changed)
+        fs_lock_wake_waiters();
 }
 
 void fs_locks_release_file(vfile_t *vf, uintptr_t owner)
@@ -433,8 +461,10 @@ void fs_locks_release_file(vfile_t *vf, uintptr_t owner)
         }
     }
     if (changed)
-        fs_lock_wake_waiters();
+        g_file_lock_generation++;
     spin_unlock_irqrestore(&g_file_lock_table_lock, flags);
+    if (changed)
+        fs_lock_wake_waiters();
 }
 
 int fs_flocks_apply(vfile_t *vf, int operation)
@@ -459,8 +489,10 @@ int fs_flocks_apply(vfile_t *vf, int operation)
             }
         }
         if (changed)
-            fs_lock_wake_waiters();
+            g_file_lock_generation++;
         spin_unlock_irqrestore(&g_file_lock_table_lock, flags);
+        if (changed)
+            fs_lock_wake_waiters();
         return 0;
     }
 
@@ -496,8 +528,9 @@ retry:
             g_bsd_flocks[i].key == key &&
             g_bsd_flocks[i].owner == vf) {
             g_bsd_flocks[i].type = type;
-            fs_lock_wake_waiters();
+            g_file_lock_generation++;
             spin_unlock_irqrestore(&g_file_lock_table_lock, flags);
+            fs_lock_wake_waiters();
             return 0;
         }
     }
@@ -508,8 +541,9 @@ retry:
             g_bsd_flocks[i].key = key;
             g_bsd_flocks[i].owner = vf;
             g_bsd_flocks[i].type = type;
-            fs_lock_wake_waiters();
+            g_file_lock_generation++;
             spin_unlock_irqrestore(&g_file_lock_table_lock, flags);
+            fs_lock_wake_waiters();
             return 0;
         }
     }
