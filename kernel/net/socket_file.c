@@ -208,6 +208,11 @@ static vfile_ops_t g_net_ops = {
     .close = net_socket_close_file,
 };
 
+int net_is_socket_vfile(struct vfile *vf)
+{
+    return vf && vf->ops == &g_net_ops && vf->priv;
+}
+
 net_socket_t *net_socket_from_file(int gfd) {
     vfile_t *vf = vfs_get_file_ref(gfd);
     if (!vf)
