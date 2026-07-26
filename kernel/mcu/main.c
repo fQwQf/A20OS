@@ -78,7 +78,9 @@ void kernel_main(void) {
     int peripheral_pid = proc_alloc(stm32_peripheral_thread);
     if (peripheral_pid < 0)
         panic("cannot create peripheral task");
-    proc_set_name(proc_find(peripheral_pid), "stm32-peripherals");
+    task_t *peripheral = proc_find_get(peripheral_pid);
+    proc_set_name(peripheral, "stm32-peripherals");
+    proc_put(peripheral);
 #endif
     printf("[BOOT] scheduler initialized\n");
     arch_local_irq_enable();

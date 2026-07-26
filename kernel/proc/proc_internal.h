@@ -72,7 +72,6 @@ void proc_task_init_common(task_t *t, task_t *parent);
 task_t *proc_task_alloc_storage(void);
 void proc_task_init_idle_state(task_t *t, unsigned cpu);
 void proc_task_first_entry(void) NORETURN;
-void proc_task_release_resources(task_t *t);
 void proc_destroy_task(task_t *t);
 task_t *proc_alloc_task_slot(void);
 void proc_complete_vfork(task_t *child);

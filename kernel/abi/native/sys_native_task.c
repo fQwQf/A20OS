@@ -72,12 +72,14 @@ int64_t sys_a20_task_kill(const a20_syscall_args_t *args)
                                             A20_RIGHT_SIGNAL, &entry);
     if (r < 0) return r;
 
-    task_t *target = proc_find((int)(uintptr_t)entry.object);
+    task_t *target = proc_find_get((int)(uintptr_t)entry.object);
     if (!target) return -A20_ERR_BAD_HANDLE;
 
     if (sig == 9) {
+        proc_put(target);
         proc_exit(128 + 9);
     }
+    proc_put(target);
     return A20_OK;
 }
 
@@ -96,7 +98,7 @@ int64_t sys_a20_task_info(const a20_syscall_args_t *args)
                                             A20_RIGHT_STAT, &entry);
     if (r < 0) return r;
 
-    task_t *target = proc_find((int)(uintptr_t)entry.object);
+    task_t *target = proc_find_get((int)(uintptr_t)entry.object);
     if (!target) return -A20_ERR_BAD_HANDLE;
 
     a20_task_info_t info;
@@ -115,6 +117,7 @@ int64_t sys_a20_task_info(const a20_syscall_args_t *args)
     info.user_time_ns = target->total_time * 10000000ULL;
     info.sys_time_ns = 0; /* kernel time not separately tracked */
 
+    proc_put(target);
     if (copy_to_user(out, &info, sizeof(info)) < 0)
         return -A20_ERR_FAULT;
     return A20_OK;
@@ -169,7 +172,7 @@ int64_t sys_a20_task_get_sched(const a20_syscall_args_t *args)
                                             A20_RIGHT_STAT, &entry);
     if (r < 0) return r;
 
-    task_t *target = proc_find((int)(uintptr_t)entry.object);
+    task_t *target = proc_find_get((int)(uintptr_t)entry.object);
     a20_sched_args_t kinfo;
     memset(&kinfo, 0, sizeof(kinfo));
     kinfo.size = sizeof(kinfo);
@@ -183,6 +186,7 @@ int64_t sys_a20_task_get_sched(const a20_syscall_args_t *args)
         kinfo.affinity = config.affinity;
         kinfo.affinity_size = sizeof(uint64_t);
     }
+    proc_put(target);
     if (copy_to_user(out, &kinfo, sizeof(kinfo)) < 0)
         return -A20_ERR_FAULT;
     return A20_OK;
@@ -203,7 +207,7 @@ int64_t sys_a20_task_get_usage(const a20_syscall_args_t *args)
                                             A20_RIGHT_STAT, &entry);
     if (r < 0) return r;
 
-    task_t *target = proc_find((int)(uintptr_t)entry.object);
+    task_t *target = proc_find_get((int)(uintptr_t)entry.object);
     a20_rusage_t usage;
     memset(&usage, 0, sizeof(usage));
     if (target) {
@@ -211,6 +215,7 @@ int64_t sys_a20_task_get_usage(const a20_syscall_args_t *args)
         usage.max_rss = target->mm ? target->mm->rss * 4096ULL : 0;
         usage.sys_time_ns = (target->child_utime + target->child_stime) * 10000000ULL;
     }
+    proc_put(target);
     if (copy_to_user(out, &usage, sizeof(usage)) < 0)
         return -A20_ERR_FAULT;
     return A20_OK;

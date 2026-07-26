@@ -222,8 +222,11 @@ static void proc_reparent_children(task_t *dead, task_t *reaper)
             child->state == PROC_ZOMBIE &&
             !proc_task_is_current_any_cpu(child)) {
             if (destroy_count < (int)(sizeof(to_destroy) / sizeof(to_destroy[0]))) {
-                proc_reap_detach_locked(child);
-                to_destroy[destroy_count++] = child;
+                task_t *owned = proc_get(child);
+                if (owned) {
+                    proc_reap_detach_locked(child);
+                    to_destroy[destroy_count++] = owned;
+                }
             } else {
                 proc_sched_note_zombie();
                 child->ppid = actual_reaper->pid;
@@ -259,15 +262,15 @@ static void proc_reparent_children(task_t *dead, task_t *reaper)
     spin_unlock_irqrestore(&proc_lock, flags);
 
     for (int i = 0; i < destroy_count; i++) {
-        proc_pid_unregister(to_destroy[i]);
-        proc_task_release_resources(to_destroy[i]);
-        kfree(to_destroy[i]);
+        proc_destroy_task(to_destroy[i]);
+        proc_put(to_destroy[i]);
     }
 
     for (int i = 0; i < child_pid_count; i++) {
-        task_t *child = proc_find(child_pids[i]);
+        task_t *child = proc_find_get(child_pids[i]);
         if (child && child->state != PROC_UNUSED && child->state != PROC_ZOMBIE)
             proc_force_exit(child, dead->exit_code);
+        proc_put(child);
     }
 }
 
@@ -343,20 +346,11 @@ void proc_exit(int exit_code)
         proc_sched_note_zombie();
         t->parent = proc_idle_task();
         t->ppid = 0;
-        if (t->signals) {
-            signal_state_t *ss = (signal_state_t *)t->signals;
-            t->signals = NULL;
-            if (refcount_dec_and_test(&ss->refcount))
-                kfree(ss);
-        }
-        if (t->scratch_buf) {
-            kfree(t->scratch_buf);
-            t->scratch_buf = NULL;
-            t->scratch_size = 0;
-        }
     } else {
         proc_wake_child_waiters_locked(parent);
     }
+    int notify_parent_pid =
+        !auto_reap && parent && t->exit_signal > 0 ? parent->pid : -1;
     spin_unlock_irqrestore(&proc_lock, flags);
 
     if (vfork_completed)
@@ -364,10 +358,12 @@ void proc_exit(int exit_code)
 
     a20_event_notify(t, A20_OBJ_TASK, 0, (uint64_t)exit_code, 0);
 
-    proc_reparent_children(t, auto_reap ? NULL : proc_find(1));
+    task_t *init_reaper = auto_reap ? NULL : proc_find_get(1);
+    proc_reparent_children(t, init_reaper);
+    proc_put(init_reaper);
 
-    if (!auto_reap && parent && t->exit_signal > 0)
-        signal_send(parent->pid, t->exit_signal);
+    if (notify_parent_pid > 0)
+        signal_send(notify_parent_pid, t->exit_signal);
 
     sched();
     panic("proc_exit: sched returned");
@@ -439,9 +435,11 @@ void proc_exit_group(int exit_code)
         }
         spin_unlock_irqrestore(&proc_lock, flags);
         for (int i = 0; i < pid_count; i++) {
-            task_t *t = proc_find(pids[i]);
-            if (t)
+            task_t *t = proc_find_get(pids[i]);
+            if (t) {
                 proc_force_exit(t, exit_code);
+                proc_put(t);
+            }
         }
     } while (pid_count == (int)(sizeof(pids) / sizeof(pids[0])));
     proc_exit(exit_code);

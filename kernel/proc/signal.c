@@ -140,15 +140,20 @@ void signal_copy(const signal_state_t *src, signal_state_t *dst) {
 
 int signal_send_info(int pid, int signum, const void *info, size_t info_size) {
     if (signum <= 0 || signum >= NSIG) return -EINVAL;
-    task_t *t = proc_find(pid);
+    task_t *t = proc_find_get(pid);
     if (!t) return -ESRCH;
-    if (!t->signals) return -EINVAL;
+    if (!t->signals) {
+        proc_put(t);
+        return -EINVAL;
+    }
 
     signal_state_t *ss = (signal_state_t *)t->signals;
     sigaction_t *sa = &ss->actions[signum];
 
-    if (sa->sa_handler == SIG_IGN)
+    if (sa->sa_handler == SIG_IGN) {
+        proc_put(t);
         return 0;
+    }
 
     /* For kernel threads (no pgdir), immediately apply default action.
      * For user processes, always queue the signal — it will be delivered
@@ -161,6 +166,7 @@ int signal_send_info(int pid, int signum, const void *info, size_t info_size) {
         sa->sa_handler == SIG_DFL &&
         signal_default_terminate(signum)) {
         proc_force_exit(t, -signal_wait_status(signum));
+        proc_put(t);
         return 0;
     }
 
@@ -184,6 +190,7 @@ int signal_send_info(int pid, int signum, const void *info, size_t info_size) {
     if (!is_user && t == proc_current()) {
         signal_deliver();
     }
+    proc_put(t);
     return 0;
 }
 
@@ -195,15 +202,20 @@ int signal_send_user(int pid, int signum) {
 
 int signal_send_thread(int tid, int signum) {
     if (signum <= 0 || signum >= NSIG) return -EINVAL;
-    task_t *t = proc_find(tid);
+    task_t *t = proc_find_get(tid);
     if (!t) return -ESRCH;
-    if (!t->signals) return -EINVAL;
+    if (!t->signals) {
+        proc_put(t);
+        return -EINVAL;
+    }
 
     signal_state_t *ss = (signal_state_t *)t->signals;
     sigaction_t *sa = &ss->actions[signum];
 
-    if (sa->sa_handler == SIG_IGN)
+    if (sa->sa_handler == SIG_IGN) {
+        proc_put(t);
         return 0;
+    }
 
     int is_user = (t->pgdir != NULL);
 
@@ -212,6 +224,7 @@ int signal_send_thread(int tid, int signum) {
         sa->sa_handler == SIG_DFL &&
         signal_default_terminate(signum)) {
         proc_force_exit(t, -signal_wait_status(signum));
+        proc_put(t);
         return 0;
     }
 
@@ -220,20 +233,26 @@ int signal_send_thread(int tid, int signum) {
         (t->state == PROC_BLOCKED || t->state == PROC_STOPPED)) {
         proc_make_ready(t);
     }
+    proc_put(t);
     return 0;
 }
 
 int signal_send_thread_user(int tid, int signum) {
     if (signum <= 0 || signum >= NSIG) return -EINVAL;
-    task_t *t = proc_find(tid);
+    task_t *t = proc_find_get(tid);
     if (!t) return -ESRCH;
-    if (!t->signals) return -EINVAL;
+    if (!t->signals) {
+        proc_put(t);
+        return -EINVAL;
+    }
 
     signal_state_t *ss = (signal_state_t *)t->signals;
     sigaction_t *sa = &ss->actions[signum];
 
-    if (sa->sa_handler == SIG_IGN)
+    if (sa->sa_handler == SIG_IGN) {
+        proc_put(t);
         return 0;
+    }
 
     int is_user = (t->pgdir != NULL);
 
@@ -242,6 +261,7 @@ int signal_send_thread_user(int tid, int signum) {
         sa->sa_handler == SIG_DFL &&
         signal_default_terminate(signum)) {
         proc_force_exit(t, -signal_wait_status(signum));
+        proc_put(t);
         return 0;
     }
 
@@ -256,6 +276,7 @@ int signal_send_thread_user(int tid, int signum) {
         (t->state == PROC_BLOCKED || t->state == PROC_STOPPED)) {
         proc_make_ready(t);
     }
+    proc_put(t);
     return 0;
 }
 

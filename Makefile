@@ -720,8 +720,14 @@ check-task-state-boundary:
 		--glob '!kernel/proc/task.c'
 	@! rg -n --pcre2 'task_t[[:space:]]*\*[[:space:]]*(waiter|rx_waiter)\b' \
 		kernel --glob '*.[ch]' --glob '!kernel/external/**'
+	@! rg -n --pcre2 '\bproc_find[[:space:]]*\(' kernel \
+		--glob '*.[ch]' --glob '!kernel/external/**'
 	@rg -q 'A20_PARK_WAKE_PROTOCOL' kernel/include/proc/park.h
 	@rg -q 'WAIT_QUEUE_PARK_PROTOCOL' kernel/include/core/sync.h
+	@rg -q 'TASK_REFERENCE_LIFETIME' kernel/include/proc/proc.h
+	@rg -q 'proc_get\(token\.task\)' kernel/core/sync.c
+	@rg -q '_Static_assert\(offsetof\(task_t, kstack\) == 0' kernel/include/proc/proc.h
+	@rg -q '_Static_assert\(offsetof\(task_t, kstack_base\) == sizeof\(uintptr_t\)' kernel/include/proc/proc.h
 	@echo "check-task-state-boundary: PASS"
 
 check-smp-platform-boundary:
@@ -766,6 +772,7 @@ check-doc-test-gates: check-concurrency-foundation check-smp-platform-boundary c
 check-final-definition: check-doc-test-gates
 	@rg -q "MM_LOCK_MODEL" kernel/include/mm/vm.h
 	@rg -q "TASK_STATE_MUTATION_CONTRACT" kernel/include/proc/proc.h
+	@rg -q "TASK_REFERENCE_LIFETIME" kernel/include/proc/proc.h
 	@rg -q "VFS_REFCOUNT_HELPER_CONTRACT" kernel/include/fs/vfs.h
 	@rg -q "NATIVE_HANDLE_CAPABILITY_CONSISTENCY_MATRIX" kernel/abi/native/handle_table.h
 	@rg -q "KERNEL_PROGRESS_SERVICE_CONTRACT" kernel/include/core/progress.h

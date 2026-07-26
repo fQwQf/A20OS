@@ -28,13 +28,17 @@ bool wait_queue_link(wait_queue_t *q, wait_queue_entry_t *entry,
                      proc_wait_token_t token, uintptr_t key) {
     if (!q || !entry || !token.task || !token.seq)
         return false;
+    task_t *task = proc_get(token.task);
+    if (!task)
+        return false;
 
     uint64_t flags = spin_lock_irqsave(&q->lock);
     if (entry->linked) {
         spin_unlock_irqrestore(&q->lock, flags);
+        proc_put(task);
         return false;
     }
-    entry->task = token.task;
+    entry->task = task;
     entry->wait_seq = token.seq;
     entry->flags = 0;
     entry->key = key;
@@ -53,7 +57,9 @@ void wait_queue_unlink(wait_queue_t *q, wait_queue_entry_t *entry) {
         return;
 
     uint64_t flags = spin_lock_irqsave(&q->lock);
+    task_t *task = NULL;
     if (entry->linked) {
+        task = entry->task;
         if (entry->prev)
             entry->prev->next = entry->next;
         else if (q->head == entry)
@@ -63,6 +69,7 @@ void wait_queue_unlink(wait_queue_t *q, wait_queue_entry_t *entry) {
     }
     wait_queue_entry_clear(entry);
     spin_unlock_irqrestore(&q->lock, flags);
+    proc_put(task);
 }
 
 unsigned wait_queue_wake_one(wait_queue_t *q, uintptr_t key,
@@ -100,6 +107,10 @@ static void wait_queue_detach_locked(wait_queue_t *q,
         q->head = entry->next;
     if (entry->next)
         entry->next->prev = entry->prev;
+    /*
+     * The entry's task reference is transferred to proc_wake_q_add() before
+     * this helper clears the stack entry.
+     */
     wait_queue_entry_clear(entry);
 }
 

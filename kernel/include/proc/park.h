@@ -75,6 +75,7 @@ int proc_try_wake_locked(struct task_t *task, uint64_t seq,
 int proc_interrupt_wait(struct task_t *task, proc_wake_reason_t reason);
 
 void proc_wake_q_init(proc_wake_q_t *wake_q);
+/* On success, transfers one caller-owned task reference into wake_q. */
 int proc_wake_q_add(proc_wake_q_t *wake_q, struct task_t *task,
                     uint64_t seq, proc_wake_reason_t reason);
 unsigned proc_wake_q_flush(proc_wake_q_t *wake_q);

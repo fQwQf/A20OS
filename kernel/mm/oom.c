@@ -61,9 +61,13 @@ static int swap_out_victim_pages(int target_pages)
     if (victim_pid <= 0)
         return 0;
 
-    task_t *victim = proc_find(victim_pid);
-    if (!victim || !victim->mm || !victim->mm->pgdir)
+    task_t *victim = proc_find_get(victim_pid);
+    if (!victim)
         return 0;
+    if (!victim->mm || !victim->mm->pgdir) {
+        proc_put(victim);
+        return 0;
+    }
 
     mm_struct_t *mm = victim->mm;
     int reclaimed = 0;
@@ -122,6 +126,7 @@ static int swap_out_victim_pages(int target_pages)
     }
 
     spin_unlock_irqrestore(&mm->lock, flags);
+    proc_put(victim);
     return reclaimed;
 }
 #else
@@ -159,7 +164,7 @@ int oom_try_reclaim(void)
         return 0;
     }
 
-    task_t *victim = proc_find(victim_pid);
+    task_t *victim = proc_find_get(victim_pid);
     if (!victim) {
         __atomic_store_n(&oom_in_progress, 0, __ATOMIC_RELAXED);
         return 0;
@@ -175,6 +180,7 @@ int oom_try_reclaim(void)
          (unsigned long)pfa_free_count());
 
     proc_force_exit(victim, -9);
+    proc_put(victim);
 
     __atomic_store_n(&oom_in_progress, 0, __ATOMIC_RELAXED);
     return 1;
