@@ -52,10 +52,16 @@ _start:
     sd      a1, 0(t0)
 
     /*
-     * Fill boot page directory with 3 Sv39 1GB megapages:
-     *   pgdir[2]   → PA 0x80000000  (identity RAM)
-     *   pgdir[256] → PA 0x00000000  (HH MMIO)
-     *   pgdir[258] → PA 0x80000000  (HH RAM)
+     * Fill the boot page directory with Sv39 1GB megapages:
+     *   pgdir[2..9]     → PA 0x80000000..0x27fffffff (identity RAM)
+     *   pgdir[256]      → PA 0x00000000              (HH MMIO)
+     *   pgdir[258..265] → PA 0x80000000..0x27fffffff (HH RAM)
+     *
+     * QEMU places the DTB near the top of RAM.  The final uses -m 8G, so a
+     * single RAM megapage leaves the DTB inaccessible before C code can parse
+     * the memory node.  Mapping the competition maximum here is safe when the
+     * VM has less RAM: the allocator later uses the DTB-reported range and
+     * never allocates pages beyond actual memory.
      *
      * PTE = (PPN << 10) | flags
      * flags = V|R|W|X|A|D = 0xAF
@@ -63,18 +69,28 @@ _start:
 #ifndef CONFIG_NOMMU
     la      t0, boot_pgdir
 
+    /* Map eight 1GB RAM windows in both the identity and higher-half slots. */
     li      t1, 0x200000AF
-    li      t2, 2*8
-    add     t3, t0, t2
+    li      t2, 2
+    li      t4, 10
+.Lmap_boot_ram:
+    slli    t3, t2, 3
+    add     t3, t0, t3
     sd      t1, 0(t3)
 
+    addi    t5, t2, 256
+    slli    t5, t5, 3
+    add     t5, t0, t5
+    sd      t1, 0(t5)
+
+    li      t6, 0x10000000
+    add     t1, t1, t6
+    addi    t2, t2, 1
+    bltu    t2, t4, .Lmap_boot_ram
+
+    /* Higher-half MMIO maps PA 0..1GB. */
     li      t1, 0x000000AF
     li      t2, 256*8
-    add     t3, t0, t2
-    sd      t1, 0(t3)
-
-    li      t1, 0x200000AF
-    li      t2, 258*8
     add     t3, t0, t2
     sd      t1, 0(t3)
 
