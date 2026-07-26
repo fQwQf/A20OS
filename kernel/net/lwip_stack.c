@@ -337,6 +337,7 @@ int a20_lwip_format_status(char *buf, size_t bufsz) {
     const char *ifname = "none";
     const char *state = "down";
     char ipbuf[24] = "0.0.0.0";
+    char maskbuf[24] = "0.0.0.0";
     char gwbuf[24] = "0.0.0.0";
     char dnsbuf[24] = "0.0.0.0";
     if (netif_default) {
@@ -347,9 +348,12 @@ int a20_lwip_format_status(char *buf, size_t bufsz) {
         ifname = namebuf;
         state = netif_is_up(netif_default) ? "up" : "down";
         const ip4_addr_t *ip = netif_ip4_addr(netif_default);
+        const ip4_addr_t *mask = netif_ip4_netmask(netif_default);
         const ip4_addr_t *gw = netif_ip4_gw(netif_default);
         snprintf(ipbuf, sizeof(ipbuf), "%u.%u.%u.%u",
                  ip4_addr1(ip), ip4_addr2(ip), ip4_addr3(ip), ip4_addr4(ip));
+        snprintf(maskbuf, sizeof(maskbuf), "%u.%u.%u.%u",
+                 ip4_addr1(mask), ip4_addr2(mask), ip4_addr3(mask), ip4_addr4(mask));
         snprintf(gwbuf, sizeof(gwbuf), "%u.%u.%u.%u",
                  ip4_addr1(gw), ip4_addr2(gw), ip4_addr3(gw), ip4_addr4(gw));
     }
@@ -363,11 +367,11 @@ int a20_lwip_format_status(char *buf, size_t bufsz) {
 #endif
 
     int n = snprintf(buf, bufsz,
-        "lwip: ready=%d if=%s state=%s ip=%s gw=%s dns=%s\n"
+        "lwip: ready=%d if=%s state=%s ip=%s mask=%s gw=%s dns=%s\n"
         "protocols: ipv4 ipv6 tcp udp raw icmp icmp6 dhcp dhcp6 dns arp igmp mld loopif\n"
         "pcbs: udp=%u tcp_active=%u tcp_listen=%u raw=%u\n"
         "link: xmit=%u recv=%u drop=%u chkerr=%u memerr=%u\n",
-        g_lwip_ready, ifname, state, ipbuf, gwbuf, dnsbuf,
+        g_lwip_ready, ifname, state, ipbuf, maskbuf, gwbuf, dnsbuf,
         (unsigned)lwip_stats.memp[MEMP_UDP_PCB]->used,
         (unsigned)lwip_stats.memp[MEMP_TCP_PCB]->used,
         (unsigned)lwip_stats.memp[MEMP_TCP_PCB_LISTEN]->used,

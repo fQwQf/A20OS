@@ -96,7 +96,7 @@ MUSL_CONFIG_CFLAGS_x86_64 := $(OPT) -m64 -fno-pic -fno-pie -mno-red-zone -static
 MUSL_CONFIG_CFLAGS_arm32 := $(OPT) -march=armv7-a -marm -mfpu=vfpv3-d16 -mfloat-abi=hard -fno-pic -mno-unaligned-access -static
 MUSL_CONFIG_CFLAGS_riscv32 := $(OPT) -march=rv32imafdc -mabi=ilp32d -mcmodel=medany -static
 MUSL_CONFIG_CFLAGS_ppc64le := $(OPT) -m64 -mcpu=power8 -mtune=power8 -mlong-double-64 -fno-pic -static -mno-vsx -mno-altivec -fno-tree-vectorize
-MUSL_CONFIG_CFLAGS := $(MUSL_CONFIG_CFLAGS_$(ARCH))
+MUSL_CONFIG_CFLAGS := $(MUSL_CONFIG_CFLAGS_$(ARCH)) -D__A20OS__
 
 ifeq ($(NOMMU),1)
 ifeq ($(ARCH),aarch64)
@@ -261,6 +261,7 @@ FF_COMMON_SRCS := \
 	src/common/impl/init.c \
 	src/common/impl/jsonconfig.c \
 	src/common/impl/library.c \
+	src/common/impl/lua.c \
 	src/common/impl/netif.c \
 	src/common/impl/networking_common.c \
 	src/common/impl/option.c \
@@ -279,6 +280,7 @@ FF_COMMON_SRCS := \
 	src/common/impl/path.c \
 	src/common/impl/FFPlatform.c \
 	src/common/impl/smbios.c \
+	src/common/impl/strutil.c \
 	src/common/impl/dbus.c \
 	src/common/impl/io_unix.c \
 	src/common/impl/netif_linux.c \
@@ -292,7 +294,10 @@ FF_DETECT_SRCS := \
 	src/detection/bluetoothradio/bluetoothradio.c \
 	src/detection/bootmgr/bootmgr.c \
 	src/detection/chassis/chassis.c \
+	src/detection/codec/codec.c \
+	src/detection/codec/codec_vulkan.c \
 	src/detection/cpu/cpu.c \
+	src/detection/cpu/cpu_x86.c \
 	src/detection/cpuusage/cpuusage.c \
 	src/detection/command/command.c \
 	src/detection/disk/disk.c \
@@ -326,6 +331,7 @@ FF_LINUX_DETECT_SRCS := \
 	src/detection/brightness/brightness_linux.c \
 	src/detection/btrfs/btrfs_linux.c \
 	src/detection/chassis/chassis_linux.c \
+	src/detection/codec/codec_linux.c \
 	src/detection/cpu/cpu_linux.c \
 	src/detection/cpucache/cpucache_linux.c \
 	src/detection/cpuusage/cpuusage_linux.c \
@@ -342,11 +348,10 @@ FF_LINUX_DETECT_SRCS := \
 	src/detection/displayserver/linux/drm.c \
 	src/detection/displayserver/linux/wayland/wayland.c \
 	src/detection/displayserver/linux/wayland/global-output.c \
-	src/detection/displayserver/linux/wayland/zwlr-output.c \
+	src/detection/displayserver/linux/wayland/wl-output-protocol.c \
+	src/detection/displayserver/linux/wayland/wp-color-management-v1-protocol.c \
 	src/detection/displayserver/linux/wayland/kde-output.c \
-	src/detection/displayserver/linux/wayland/wlr-output-management-unstable-v1-protocol.c \
 	src/detection/displayserver/linux/wayland/kde-output-device-v2-protocol.c \
-	src/detection/displayserver/linux/wayland/kde-output-order-v1-protocol.c \
 	src/detection/displayserver/linux/wayland/xdg-output-unstable-v1-protocol.c \
 	src/detection/displayserver/linux/wmde.c \
 	src/detection/displayserver/linux/xcb.c \
@@ -415,6 +420,7 @@ FF_MODULES_SRCS := \
 	src/modules/btrfs/btrfs.c \
 	src/modules/camera/camera.c \
 	src/modules/chassis/chassis.c \
+	src/modules/codec/codec.c \
 	src/modules/colors/colors.c \
 	src/modules/cpu/cpu.c \
 	src/modules/cpucache/cpucache.c \
@@ -505,6 +511,7 @@ FF_LINUX_INC_x86_64 := -isystem /usr/include/x86_64-linux-gnu
 FF_LINUX_INC := $(FF_LINUX_INC_$(ARCH))
 
 FF_CFLAGS := $(filter-out -Wconversion,$(CFLAGS)) \
+             -std=gnu23 \
              -I$(FF_DIR)/src -I$(FF_GEN) \
              -isystem /usr/include $(FF_LINUX_INC) \
              -include wchar.h \
@@ -512,6 +519,7 @@ FF_CFLAGS := $(filter-out -Wconversion,$(CFLAGS)) \
              -D__STDC_WANT_LIB_EXT1__ -D_FILE_OFFSET_BITS=64 -D_TIME_BITS=64 \
              -DFF_DISABLE_DLOPEN=1 \
              -DFF_HAVE_NO_GL=1 \
+             -DFF_ENABLE_WCWIDTH=1 \
              -DFASTFETCH_TARGET_BINARY_NAME=fastfetch \
              -DFF_PACKAGES_DISABLE_LIST=FF_PACKAGES_FLAG_NONE \
              -Wno-unused-parameter -Wno-sign-compare -Wno-unused-function \
@@ -556,11 +564,13 @@ endif
 
 ifneq ($(wildcard $(FF_DIR)/src/fastfetch.c),)
 FF_AVAILABLE := 1
+FASTFETCH_TARGET := $(FF_CMD)
 else
 FF_AVAILABLE :=
+FASTFETCH_TARGET :=
 endif
 
-all: build_dir $(BUILD_DIR)/init $(BUILD_DIR)/mksh $(BUILD_DIR)/sh $(SBASE_CMDS) $(LOCAL_CMDS) $(WGET_CMD) $(DESKTOP_TARGET)
+all: build_dir $(BUILD_DIR)/init $(BUILD_DIR)/mksh $(BUILD_DIR)/sh $(SBASE_CMDS) $(LOCAL_CMDS) $(WGET_CMD) $(DESKTOP_TARGET) $(FASTFETCH_TARGET)
 
 fastfetch: build_dir $(FF_CMD)
 
@@ -712,8 +722,8 @@ $(OBJ_DIR)/mksh/%.o: $(MKSH_DIR)/%.c Makefile | build_dir musl_prepare
 	@mkdir -p $(dir $@)
 	$(CC) $(MKSH_CFLAGS) -c $< -o $@
 
-$(FF_GEN)/.headers-stamp: $(wildcard $(FF_DIR)/src/logo/ascii/*.txt) \
-                          $(FF_DIR)/src/data/help.json $(FF_DIR)/src/data/structure.txt
+$(FF_GEN)/.headers-stamp: $(shell find $(FF_DIR)/src/logo/ascii -name '*.txt' 2>/dev/null) \
+                          $(FF_DIR)/doc/help.json $(FF_DIR)/CMakeLists.txt
 	@mkdir -p $(FF_GEN)
 	$(SHELL) extra/fastfetch_gen_headers.sh $(abspath $(FF_DIR)) $(FF_GEN)
 	@touch $@
@@ -727,12 +737,13 @@ $(FF_MAIN_OBJ): $(FF_MAIN) Makefile $(FF_GEN)/fastfetch_config.h $(FF_GEN)/fastf
 $(OBJ_DIR)/fastfetch/src/%.c: $(FF_DIR)/src/%.c Makefile | build_dir musl_prepare $(FF_GEN)/.headers-stamp
 	@mkdir -p $(dir $@)
 
-$(OBJ_DIR)/fastfetch/src/%.o: $(FF_DIR)/src/%.c Makefile $(FF_GEN)/fastfetch_config.h $(FF_GEN)/fastfetch_datatext.h | build_dir musl_prepare
+$(OBJ_DIR)/fastfetch/src/%.o: $(FF_DIR)/src/%.c Makefile $(FF_GEN)/fastfetch_config.h $(FF_GEN)/fastfetch_datatext.h $(FF_GEN)/logo_builtin.h | build_dir musl_prepare
 	@mkdir -p $(dir $@)
 	$(CC) $(FF_CFLAGS) -c $< -o $@
 
 $(FF_LIB): $(FF_LIB_OBJS) | build_dir
 	@mkdir -p $(dir $@)
+	$(RM) $@
 	$(AR) rcs $@ $^
 	$(RANLIB) $@
 
