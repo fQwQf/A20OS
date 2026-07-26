@@ -61,24 +61,36 @@ int64_t sys_pidfd_send_signal(int pidfd, int sig, void *uinfo, unsigned flags)
     vfs_put_file_ref(gfd, vf);
 
     task_t *self = proc_current();
-    task_t *target = proc_find(pid);
-    if (!target || target->state == PROC_ZOMBIE)
+    task_t *target = proc_find_get(pid);
+    if (!target)
         return -ESRCH;
+    if (target->state == PROC_ZOMBIE) {
+        proc_put(target);
+        return -ESRCH;
+    }
     if (!proc_has_cap(self, CAP_KILL) &&
         self->cred.uid != target->cred.uid &&
         self->cred.uid != target->cred.suid &&
         self->cred.euid != target->cred.uid &&
-        self->cred.euid != target->cred.suid)
+        self->cred.euid != target->cred.suid) {
+        proc_put(target);
         return -EPERM;
-    if (sig == 0)
+    }
+    if (sig == 0) {
+        proc_put(target);
         return 0;
+    }
 
     if (uinfo) {
         uint8_t info[SIGNAL_INFO_SIZE];
-        if (copy_from_user(info, uinfo, sizeof(info)) < 0)
+        if (copy_from_user(info, uinfo, sizeof(info)) < 0) {
+            proc_put(target);
             return -EFAULT;
+        }
         *(int *)info = sig;
+        proc_put(target);
         return signal_send_info(pid, sig, info, sizeof(info));
     }
+    proc_put(target);
     return signal_send(pid, sig);
 }

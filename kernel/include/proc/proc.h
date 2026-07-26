@@ -5,6 +5,7 @@
 #include "core/consts.h"
 #include "core/trap.h"
 #include "core/defs.h"
+#include "core/refcount.h"
 #include "core/sync.h"
 #include "proc/park.h"
 #include <signal_abi.h>
@@ -81,8 +82,10 @@ typedef struct proc_vm_stats {
 /*
  * task_t lifetime and state invariants:
  * - The idle task is static; normal tasks are dynamically allocated, linked
- *   into the global task list, and released only after they are unreachable from
- *   PID lookup, parent/wait lists, run queues, and current CPU slots.
+ *   into the global task list, and released only after they are unreachable
+ *   from PID lookup, parent/wait lists, run queues, wait/timer entries, and
+ *   current CPU slots. Every pointer which survives its protecting lock owns a
+ *   task reference.
  * - Normal task state flows are:
  *     PROC_UNUSED -> PROC_READY -> PROC_RUNNING
  *     PROC_RUNNING -> PROC_READY     (yield/preemption)
@@ -130,8 +133,14 @@ typedef struct nommu_vfork_snap_entry {
 #endif
 
 typedef struct task_t {
+    /*
+     * Architecture context-switch assembly depends on these two offsets.
+     * Keep them first and guard the layout with static assertions below.
+     */
     uintptr_t kstack;
     void    *kstack_base;
+    refcount_t refs;
+    int      destroy_started;
     int      pid;
     int      tgid;
     int      ppid;
@@ -238,6 +247,11 @@ typedef struct task_t {
     proc_wake_reason_t wake_reason;
 } task_t;
 
+_Static_assert(offsetof(task_t, kstack) == 0,
+               "task_t.kstack must remain at assembly ABI offset 0");
+_Static_assert(offsetof(task_t, kstack_base) == sizeof(uintptr_t),
+               "task_t.kstack_base must remain at assembly ABI offset 8/4");
+
 #define PROC_SCHED_POLICY   (1U << 0)
 #define PROC_SCHED_PRIORITY (1U << 1)
 #define PROC_SCHED_AFFINITY (1U << 2)
@@ -265,7 +279,15 @@ void     proc_init_secondary(unsigned cpu_id);
 void     idle_loop(void) NORETURN;
 task_t  *proc_current(void);
 void     proc_sleep_until(uint64_t wake_time);
-task_t  *proc_find(int pid);
+/*
+ * TASK_REFERENCE_LIFETIME:
+ * proc_find_get() returns a referenced task which remains valid after the PID
+ * lock is released. Every successful lookup must be paired with proc_put().
+ * proc_get() is for scheduler/wait/timer owners which already have a live task.
+ */
+task_t  *proc_get(task_t *task);
+void     proc_put(task_t *task);
+task_t  *proc_find_get(int pid);
 int      proc_pid_max(void);
 int      proc_set_pid_max(int value);
 void     proc_get_vm_stats(proc_vm_stats_t *stats);

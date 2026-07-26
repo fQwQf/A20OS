@@ -190,8 +190,11 @@ static void tty_write_owned_char(int pid, char c) {
 static int tty_line_owner_live_locked(void) {
     if (g_tty_line_owner < 0)
         return 0;
-    task_t *owner = proc_find(g_tty_line_owner);
-    return owner && owner->state != PROC_ZOMBIE && owner->state != PROC_UNUSED;
+    task_t *owner = proc_find_get(g_tty_line_owner);
+    int live =
+        owner && owner->state != PROC_ZOMBIE && owner->state != PROC_UNUSED;
+    proc_put(owner);
+    return live;
 }
 
 static void tty_drain_pending_locked(void) {

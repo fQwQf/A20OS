@@ -363,13 +363,17 @@ int64_t sys_a20_task_spawn(const a20_syscall_args_t *args)
                                           );
     if (new_pid < 0) return -A20_ERR_NO_MEMORY;
 
-    task_t *new_task = proc_find(new_pid);
+    task_t *new_task = proc_find_get(new_pid);
     if (!new_task) return -A20_ERR_NO_MEMORY;
 
     new_task->abi_mode = 1;
 
     struct a20_ht_internal *new_ht = a20_ht_create();
-    if (!new_ht) { proc_force_exit(new_task, 1); return -A20_ERR_NO_MEMORY; }
+    if (!new_ht) {
+        proc_force_exit(new_task, 1);
+        proc_put(new_task);
+        return -A20_ERR_NO_MEMORY;
+    }
     new_task->scratch_buf = new_ht;
 
     a20_handle_entry_t root_entry;
@@ -389,6 +393,7 @@ int64_t sys_a20_task_spawn(const a20_syscall_args_t *args)
         a20_spawn_handle_t sh_buf[64];
         if (copy_from_user(sh_buf, (void *)kargs.handles, nh * sizeof(a20_spawn_handle_t)) < 0) {
             proc_force_exit(new_task, 1);
+            proc_put(new_task);
             return -A20_ERR_FAULT;
         }
         for (uint32_t i = 0; i < nh; i++) {
@@ -431,18 +436,25 @@ int64_t sys_a20_task_spawn(const a20_syscall_args_t *args)
                                           A20_RIGHT_TRANSFER);
     if (task_h < 0) {
         proc_force_exit(new_task, 1);
+        proc_put(new_task);
         return task_h;
     }
 
     kargs.out_task = (a20_handle_t)task_h;
-    if (copy_to_user(uargs, &kargs, sizeof(kargs)) < 0)
+    if (copy_to_user(uargs, &kargs, sizeof(kargs)) < 0) {
+        proc_put(new_task);
         return -A20_ERR_FAULT;
+    }
 
     a20_handle_t child_self_task = (child_self_h >= 0) ? (a20_handle_t)child_self_h : 0;
 
     uint64_t sp = elf_setup_stack_a20(info.stack_top, argc, argv_buf, envp_buf,
                                       &info, 0, 0, 0, child_self_task);
-    if (sp == 0) { proc_force_exit(new_task, 1); return -A20_ERR_NO_MEMORY; }
+    if (sp == 0) {
+        proc_force_exit(new_task, 1);
+        proc_put(new_task);
+        return -A20_ERR_NO_MEMORY;
+    }
 
     trap_context_t *trap = (trap_context_t *)
         ((uint64_t)new_task->kstack_base + KERNEL_STACK_SIZE - sizeof(trap_context_t));
@@ -450,6 +462,7 @@ int64_t sys_a20_task_spawn(const a20_syscall_args_t *args)
     TRAP_CTX_SET_ARG0(trap, sp);
 
     proc_make_ready(new_task);
+    proc_put(new_task);
     return task_h;
 }
 
@@ -470,11 +483,12 @@ int64_t sys_a20_task_wait(const a20_syscall_args_t *args)
                                               A20_RIGHT_WAIT, &entry);
     if (ret < 0) return ret;
 
-    task_t *target = proc_find((int)(uintptr_t)entry.object);
+    task_t *target = proc_find_get((int)(uintptr_t)entry.object);
     if (!target) return -A20_ERR_BAD_HANDLE;
 
     int status = 0;
     int wret = proc_wait4(target->pid, &status, 0);
+    proc_put(target);
     if (wret < 0) return -A20_ERR_INVALID_ARGUMENT;
 
     if (out) {

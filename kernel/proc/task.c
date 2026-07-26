@@ -20,6 +20,7 @@ task_t *proc_task_alloc_storage(void)
     task_t *t = kcalloc(1, sizeof(*t));
     if (!t)
         return NULL;
+    refcount_set(&t->refs, 1);
     t->state = PROC_BLOCKED;
     t->dynamic_alloc = 1;
     t->wait_timer_index = -1;
@@ -31,6 +32,8 @@ void proc_task_init_idle_state(task_t *t, unsigned cpu)
 {
     if (!t)
         return;
+    refcount_set(&t->refs, 1);
+    t->destroy_started = 0;
     t->state = PROC_RUNNING;
     t->cpu_id = cpu;
     t->on_rq = 0;
@@ -217,14 +220,9 @@ void proc_task_first_entry(void)
     proc_exit(0);
 }
 
-void proc_task_release_resources(task_t *t)
+static void proc_task_release_resources(task_t *t)
 {
     if (!t)
-        return;
-
-    /* 防止重复释放：proc_reparent_children、proc_wait4、sched_reap_zombies
-     * 都可能对同一个 zombie 任务调用此函数。用 kstack==0 作为"已释放"标记。 */
-    if (t->kstack == 0 && t->mm == NULL && t->kstack_base == NULL)
         return;
 
     if (t->cgroup) {
@@ -232,6 +230,7 @@ void proc_task_release_resources(task_t *t)
         t->cgroup = NULL;
     }
 
+    vfs_release_process_locks(t->pid);
     fdtable_close_all(t);
     bpf_release_process(t->pid);
 
@@ -274,32 +273,59 @@ void proc_task_release_resources(task_t *t)
     }
 }
 
+task_t *proc_get(task_t *t)
+{
+    if (!t || !refcount_inc_not_zero(&t->refs))
+        return NULL;
+    return t;
+}
+
+void proc_put(task_t *t)
+{
+    if (!t || !refcount_dec_and_test(&t->refs))
+        return;
+
+    /*
+     * Static idle tasks retain their allocation reference for the lifetime of
+     * the kernel. Reaching zero indicates an ownership-transfer bug.
+     */
+    if (!t->dynamic_alloc)
+        panic("proc_put: static task pid=%d reached zero references", t->pid);
+    if (!t->destroy_started)
+        panic("proc_put: live task pid=%d reached zero references", t->pid);
+
+    proc_task_release_resources(t);
+    memset(t, 0, sizeof(*t));
+    kfree(t);
+}
+
 void proc_destroy_task(task_t *t)
 {
     if (!t)
         return;
-    int free_storage = t->dynamic_alloc;
-
-    vfs_release_process_locks(t->pid);
 
     uint64_t flags = spin_lock_irqsave(&proc_lock);
+    if (t->destroy_started) {
+        spin_unlock_irqrestore(&proc_lock, flags);
+        return;
+    }
+    t->destroy_started = 1;
+    t->state = PROC_UNUSED;
     proc_wait_timer_cancel_locked(t, t->wait_seq);
     proc_runq_remove_locked(t);
     proc_unlink_task_locked(t);
     spin_unlock_irqrestore(&proc_lock, flags);
+
     proc_pid_unregister(t);
-
-    proc_task_release_resources(t);
-
-    memset(t, 0, sizeof(*t));
-    if (free_storage)
-        kfree(t);
+    /* Drop the allocation/global-list lifetime reference. */
+    proc_put(t);
 }
 
 void proc_free_pid(int pid)
 {
-    task_t *t = proc_find(pid);
+    task_t *t = proc_find_get(pid);
     if (!t)
         return;
     proc_destroy_task(t);
+    proc_put(t);
 }

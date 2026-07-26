@@ -86,18 +86,25 @@ int proc_wait4(int pid, int *status, int options)
                 }
                 int child_pid = child->pid;
                 wait_accumulate_child_time(t, child);
+                task_t *reap_child = proc_get(child);
+                if (!reap_child) {
+                    spin_unlock_irqrestore(&proc_lock, lock_flags);
+                    return -ECHILD;
+                }
                 proc_reap_detach_locked(child);
                 spin_unlock_irqrestore(&proc_lock, lock_flags);
-                proc_destroy_task(child);
+                proc_destroy_task(reap_child);
+                proc_put(reap_child);
                 return child_pid;
             }
             if ((options & WUNTRACED) && cstate == PROC_STOPPED) {
                 int sig = __atomic_load_n(&child->exit_code, __ATOMIC_ACQUIRE);
+                int child_pid = child->pid;
                 if (status) {
                     *status = (sig << 8) | 0x7F;
                 }
                 spin_unlock_irqrestore(&proc_lock, lock_flags);
-                return child->pid;
+                return child_pid;
             }
         }
 

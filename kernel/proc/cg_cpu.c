@@ -67,10 +67,11 @@ void cg_cpu_throttle_task(struct cg_node *cg)
     cg_node_t *node = (cg_node_t *)cg;
 
     for (int i = 0; i < node->pid_count; i++) {
-        task_t *t = proc_find(node->pids[i]);
+        task_t *t = proc_find_get(node->pids[i]);
         if (t && t->state == PROC_READY) {
             t->cg_throttled = 1;
         }
+        proc_put(t);
     }
 }
 
@@ -95,12 +96,13 @@ void cg_cpu_check_unthrottle(struct cg_node *cg, uint64_t now)
         spin_unlock_irqrestore(&node->lock, flags);
 
         for (int i = 0; i < node->pid_count; i++) {
-            task_t *t = proc_find(node->pids[i]);
+            task_t *t = proc_find_get(node->pids[i]);
             if (t) {
                 t->cg_throttled = 0;
                 if (t->state == PROC_READY)
                     proc_make_ready(t);
             }
+            proc_put(t);
         }
         return;
     }

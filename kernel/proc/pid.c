@@ -117,7 +117,7 @@ int proc_pid_alloc(void)
 
 void proc_pid_register(task_t *t)
 {
-    if (!t)
+    if (!t || !proc_get(t))
         return;
 
     uint64_t flags = spin_lock_irqsave(&pid_lock);
@@ -132,6 +132,7 @@ void proc_pid_unregister(task_t *t)
     if (!t)
         return;
 
+    int removed = 0;
     uint64_t flags = spin_lock_irqsave(&pid_lock);
     unsigned h = pid_hash_index(t->pid);
     task_t **pp = &pid_hash[h];
@@ -139,15 +140,19 @@ void proc_pid_unregister(task_t *t)
         if (*pp == t) {
             *pp = t->pid_hash_next;
             t->pid_hash_next = NULL;
+            removed = 1;
             break;
         }
         pp = &(*pp)->pid_hash_next;
     }
-    pid_bitmap_clear(t->pid);
+    if (removed)
+        pid_bitmap_clear(t->pid);
     spin_unlock_irqrestore(&pid_lock, flags);
+    if (removed)
+        proc_put(t);
 }
 
-task_t *proc_find(int pid)
+task_t *proc_find_get(int pid)
 {
     uint64_t flags = spin_lock_irqsave(&pid_lock);
     task_t *t = pid_hash[pid_hash_index(pid)];
@@ -156,6 +161,8 @@ task_t *proc_find(int pid)
             break;
         t = t->pid_hash_next;
     }
+    if (t && !proc_get(t))
+        t = NULL;
     spin_unlock_irqrestore(&pid_lock, flags);
     return t;
 }

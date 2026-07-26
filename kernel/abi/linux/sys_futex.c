@@ -62,8 +62,10 @@ static int futex_timeout_ticks(void *timeout, int absolute, int realtime,
     return 0;
 }
 
-static void futex_waiter_clear_slot(futex_waiter_t *w)
+/* Remove a waiter and transfer its task reference to the caller. */
+static task_t *futex_waiter_take_slot(futex_waiter_t *w)
 {
+    task_t *task = w->active ? w->task : NULL;
     w->active = 0;
     w->task = NULL;
     w->wait_seq = 0;
@@ -71,14 +73,17 @@ static void futex_waiter_clear_slot(futex_waiter_t *w)
     w->pkey = 0;
     w->mm = NULL;
     w->bitset = 0;
+    return task;
 }
 
 static void futex_waiter_clear_task(task_t *task)
 {
     if (!task) return;
     for (int i = 0; i < FUTEX_WAITERS_MAX; i++) {
-        if (g_futex_waiters[i].active && g_futex_waiters[i].task == task)
-            futex_waiter_clear_slot(&g_futex_waiters[i]);
+        if (g_futex_waiters[i].active && g_futex_waiters[i].task == task) {
+            task_t *old = futex_waiter_take_slot(&g_futex_waiters[i]);
+            proc_put(old);
+        }
     }
 }
 
@@ -110,12 +115,15 @@ static int futex_waiter_alloc(uintptr_t vkey, uintptr_t pkey, mm_struct_t *mm,
     futex_waiter_clear_task(token.task);
     for (int i = 0; i < FUTEX_WAITERS_MAX; i++) {
         if (!g_futex_waiters[i].active) {
+            task_t *task = proc_get(token.task);
+            if (!task)
+                return -ESRCH;
             g_futex_waiters[i].active = 1;
             g_futex_waiters[i].vkey = vkey;
             g_futex_waiters[i].pkey = pkey;
             g_futex_waiters[i].mm = mm;
             g_futex_waiters[i].bitset = bitset;
-            g_futex_waiters[i].task = token.task;
+            g_futex_waiters[i].task = task;
             g_futex_waiters[i].wait_seq = token.seq;
             return i;
         }
@@ -180,12 +188,14 @@ static int futex_wait_on(int *uaddr, int expected, void *timeout, uint32_t bitse
     proc_park_finish(token);
 
     flags = spin_lock_irqsave(&g_futex_lock);
+    task_t *waiter_ref = NULL;
     if (slot >= 0 && slot < FUTEX_WAITERS_MAX) {
         futex_waiter_t *w = &g_futex_waiters[slot];
         if (w->active && w->task == t && w->wait_seq == token.seq)
-            futex_waiter_clear_slot(w);
+            waiter_ref = futex_waiter_take_slot(w);
     }
     spin_unlock_irqrestore(&g_futex_lock, flags);
+    proc_put(waiter_ref);
 
     if (reason == PROC_WAKE_SIGNAL || signal_task_has_unblocked(t))
         return -ERESTARTSYS;
@@ -213,18 +223,21 @@ static int futex_wake_on(int *uaddr, int nr, uint32_t bitset)
         futex_waiter_t *w = &g_futex_waiters[i];
         if (!futex_waiter_matches(w, mm, vkey, pkey) || !(w->bitset & bitset))
             continue;
-        if (w->task) {
-            wake_list[wake_count].task = w->task;
-            wake_list[wake_count].wait_seq = w->wait_seq;
+        uint64_t wait_seq = w->wait_seq;
+        task_t *task = futex_waiter_take_slot(w);
+        if (task) {
+            wake_list[wake_count].task = task;
+            wake_list[wake_count].wait_seq = wait_seq;
             wake_count++;
         }
-        futex_waiter_clear_slot(w);
     }
     spin_unlock_irqrestore(&g_futex_lock, flags);
     int woke = 0;
-    for (int i = 0; i < wake_count; i++)
+    for (int i = 0; i < wake_count; i++) {
         woke += proc_try_wake(wake_list[i].task, wake_list[i].wait_seq,
                               PROC_WAKE_EVENT) ? 1 : 0;
+        proc_put(wake_list[i].task);
+    }
     return woke;
 }
 
@@ -260,13 +273,14 @@ static int futex_requeue(int *uaddr, int wake_nr, int requeue_nr, int *uaddr2,
     for (int i = 0; i < FUTEX_WAITERS_MAX && done < wake_nr; i++) {
         futex_waiter_t *w = &g_futex_waiters[i];
         if (!futex_waiter_matches(w, mm, vkey1, pkey1)) continue;
-        if (w->task) {
-            wake_list[wake_count].task = w->task;
-            wake_list[wake_count].wait_seq = w->wait_seq;
+        uint64_t wait_seq = w->wait_seq;
+        task_t *task = futex_waiter_take_slot(w);
+        if (task) {
+            wake_list[wake_count].task = task;
+            wake_list[wake_count].wait_seq = wait_seq;
             wake_count++;
             done++;
         }
-        futex_waiter_clear_slot(w);
     }
     for (int i = 0; i < FUTEX_WAITERS_MAX && moved < requeue_nr; i++) {
         futex_waiter_t *w = &g_futex_waiters[i];
@@ -277,9 +291,11 @@ static int futex_requeue(int *uaddr, int wake_nr, int requeue_nr, int *uaddr2,
         moved++;
     }
     spin_unlock_irqrestore(&g_futex_lock, flags);
-    for (int i = 0; i < wake_count; i++)
+    for (int i = 0; i < wake_count; i++) {
         (void)proc_try_wake(wake_list[i].task, wake_list[i].wait_seq,
                             PROC_WAKE_EVENT);
+        proc_put(wake_list[i].task);
+    }
     return done + moved;
 }
 
@@ -352,13 +368,14 @@ static int futex_wake_op(int *uaddr, int wake_nr, int wake2_nr,
         futex_waiter_t *w = &g_futex_waiters[i];
         if (!futex_waiter_matches(w, mm, vkey1, pkey1))
             continue;
-        if (w->task) {
-            wake_list[wake_count].task = w->task;
-            wake_list[wake_count].wait_seq = w->wait_seq;
+        uint64_t wait_seq = w->wait_seq;
+        task_t *task = futex_waiter_take_slot(w);
+        if (task) {
+            wake_list[wake_count].task = task;
+            wake_list[wake_count].wait_seq = wait_seq;
             wake_count++;
             woke++;
         }
-        futex_waiter_clear_slot(w);
     }
 
     if (futex_wake_op_cmp(oldval, cmp, cmparg)) {
@@ -367,21 +384,24 @@ static int futex_wake_op(int *uaddr, int wake_nr, int wake2_nr,
             futex_waiter_t *w = &g_futex_waiters[i];
             if (!futex_waiter_matches(w, mm, vkey2, pkey2))
                 continue;
-            if (w->task) {
-                wake_list[wake_count].task = w->task;
-                wake_list[wake_count].wait_seq = w->wait_seq;
+            uint64_t wait_seq = w->wait_seq;
+            task_t *task = futex_waiter_take_slot(w);
+            if (task) {
+                wake_list[wake_count].task = task;
+                wake_list[wake_count].wait_seq = wait_seq;
                 wake_count++;
                 woke++;
                 woke2++;
             }
-            futex_waiter_clear_slot(w);
         }
     }
     spin_unlock_irqrestore(&g_futex_lock, flags);
 
-    for (int i = 0; i < wake_count; i++)
+    for (int i = 0; i < wake_count; i++) {
         (void)proc_try_wake(wake_list[i].task, wake_list[i].wait_seq,
                             PROC_WAKE_EVENT);
+        proc_put(wake_list[i].task);
+    }
     return woke;
 }
 

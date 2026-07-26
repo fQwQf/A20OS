@@ -29,8 +29,6 @@
 #include "drivers/core/driver_lifecycle_test.h"
 #endif
 
-extern task_t *proc_current(void);
-extern task_t *proc_find(int pid);
 extern size_t  frame_free_count(void);
 extern int     vfs_mount_count(void);
 extern struct mount *vfs_mount_at(int index);
@@ -574,17 +572,18 @@ static int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
         buf[0] = '\0';
         return 0;
     case PF_PID_STAT: {  // 生成进程 stat 信息
-        task_t *t = proc_find(pid);
+        task_t *t = proc_find_get(pid);
         if (!t) { snprintf(buf, bufsz, "%d (unknown) S 0 0\n", pid); break; }
         snprintf(buf, bufsz,
             "%d (%s) %c %d %d %d 0 0 0 0 0 0 0 0 %lu 0\n",
             t->pid, t->name, procfs_task_state_char(t),
             t->ppid, t->pgid, t->sid,
             (unsigned long)t->total_time);
+        proc_put(t);
         break;
     }
     case PF_PID_STATUS: {  // 生成进程 status 信息
-        task_t *t = proc_find(pid);
+        task_t *t = proc_find_get(pid);
         if (!t) { snprintf(buf, bufsz, "Name:\tunknown\nPid:\t%d\n", pid); break; }
         const char *state = procfs_task_state_text(t);
         char groups[160];
@@ -644,34 +643,40 @@ static int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
             (unsigned long)rss_kb,
             (unsigned long)vmlck_kb,
             (unsigned long)vmdata_kb);
+        proc_put(t);
         break;
     }
     case PF_PID_STATM: {
-        task_t *t = proc_find(pid);
+        task_t *t = proc_find_get(pid);
         size_t total = t && t->mm ? t->mm->total_vm : 0;
         size_t rss = t && t->mm ? t->mm->rss : 0;
         snprintf(buf, bufsz, "%lu %lu 0 0 0 0 0\n",
                  (unsigned long)total, (unsigned long)rss);
+        proc_put(t);
         break;
     }
     case PF_PID_MAPS: {
-        task_t *t = proc_find(pid);
+        task_t *t = proc_find_get(pid);
         generate_pid_maps(t, buf, bufsz, 0);
+        proc_put(t);
         break;
     }
     case PF_PID_SMAPS: {
-        task_t *t = proc_find(pid);
+        task_t *t = proc_find_get(pid);
         generate_pid_maps(t, buf, bufsz, 1);
+        proc_put(t);
         break;
     }
     case PF_PID_OOM_SCORE_ADJ: {
-        task_t *t = proc_find(pid);
+        task_t *t = proc_find_get(pid);
         snprintf(buf, bufsz, "%d\n", t ? t->policy.oom_score_adj : 0);
+        proc_put(t);
         break;
     }
     case PF_PID_OOM_SCORE: {
-        task_t *t = proc_find(pid);
+        task_t *t = proc_find_get(pid);
         snprintf(buf, bufsz, "%d\n", t ? (t->policy.oom_score_adj >= 0 ? t->policy.oom_score_adj : 0) : 0);
+        proc_put(t);
         break;
     }
     case PF_PID_CGROUP:
@@ -679,37 +684,42 @@ static int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
             "0::/init.scope\n");
         break;
     case PF_PID_CMDLINE: {
-        task_t *t = proc_find(pid);
+        task_t *t = proc_find_get(pid);
         if (!t || !t->exec_path[0]) {
             buf[0] = '\0';
+            proc_put(t);
             return 1;
         }
         size_t len = strlen(t->exec_path);
         if (len + 1 > bufsz) len = bufsz - 1;
         memcpy(buf, t->exec_path, len);
         buf[len] = '\0';
+        proc_put(t);
         return (int)(len + 1);
     }
     case PF_PID_COMM: {
-        task_t *t = proc_find(pid);
+        task_t *t = proc_find_get(pid);
         snprintf(buf, bufsz, "%s\n", t ? t->name : "unknown");
+        proc_put(t);
         break;
     }
     case PF_PID_EXE: {
-        task_t *t = proc_find(pid);
+        task_t *t = proc_find_get(pid);
         snprintf(buf, bufsz, "%s\n", t && t->exec_path[0] ? t->exec_path : "/sbin/init");
+        proc_put(t);
         break;
     }
     case PF_PID_CWD: {
-        task_t *t = proc_find(pid);
+        task_t *t = proc_find_get(pid);
         snprintf(buf, bufsz, "%s\n", t ? t->fs.cwd : "/");
+        proc_put(t);
         break;
     }
     case PF_PID_ENVIRON:
         buf[0] = '\0';
         return 0;
     case PF_PID_IO: {
-        task_t *t = proc_find(pid);
+        task_t *t = proc_find_get(pid);
         snprintf(buf, bufsz,
             "rchar: %lu\n"
             "wchar: %lu\n"
@@ -718,14 +728,16 @@ static int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
             "cancelled_write_bytes: 0\n",
             (unsigned long)(t ? t->total_time : 0),
             (unsigned long)(t ? t->child_stime : 0));
+        proc_put(t);
         break;
     }
     case PF_PID_LOGINUID:
         snprintf(buf, bufsz, "4294967295\n");
         break;
     case PF_PID_SESSIONID: {
-        task_t *t = proc_find(pid);
+        task_t *t = proc_find_get(pid);
         snprintf(buf, bufsz, "%d\n", t ? t->sid : 0);
+        proc_put(t);
         break;
     }
     case PF_PID_NS_PID:
@@ -1045,8 +1057,10 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
             task_t *cur = proc_current();
             real_pid = cur ? cur->pid : 0;
         }
-        task_t *task = proc_find(real_pid);
-        if (!task || fdtable_get(task, fd_entry) < 0)
+        task_t *task = proc_find_get(real_pid);
+        int task_fd = task ? fdtable_get(task, fd_entry) : -1;
+        proc_put(task);
+        if (task_fd < 0)
             return -ENOENT;
         child = new_entry(name, PF_PID_FD, dp->pid);
         type = PF_PID_FD;
@@ -1159,15 +1173,20 @@ static int procfs_readlink(vnode_t *vn, char *buf, size_t sz)
         task_t *cur = proc_current();
         pid = cur ? cur->pid : 0;
     }
-    task_t *task = proc_find(pid);
+    task_t *task = proc_find_get(pid);
     int gfd = task ? fdtable_get(task, fd) : -EBADF;
-    if (gfd < 0)
+    if (gfd < 0) {
+        proc_put(task);
         return -ENOENT;
+    }
     vfile_t *target = vfs_get_file_ref(gfd);
-    if (!target)
+    if (!target) {
+        proc_put(task);
         return -ENOENT;
+    }
     if (!target->path[0]) {
         vfs_put_file_ref(gfd, target);
+        proc_put(task);
         return -ENOENT;
     }
     size_t len = strlen(target->path);
@@ -1175,6 +1194,7 @@ static int procfs_readlink(vnode_t *vn, char *buf, size_t sz)
         len = sz;
     memcpy(buf, target->path, len);
     vfs_put_file_ref(gfd, target);
+    proc_put(task);
     return (int)len;
 }
 
@@ -1202,9 +1222,12 @@ static int procfs_fread(vfile_t *vf, char *buf, size_t count) {
     if (!vf || !vf->priv) return -EBADF;
     procfs_priv_t *p = (procfs_priv_t *)vf->priv;
     if (p->type == PF_PID_PAGEMAP) {
-        task_t *t = proc_find(p->pid);
+        task_t *t = proc_find_get(p->pid);
         if (!t) return -ESRCH;
-        if (!t->mm || !t->mm->pgdir) return 0;
+        if (!t->mm || !t->mm->pgdir) {
+            proc_put(t);
+            return 0;
+        }
 
         size_t read_bytes = 0;
         while (read_bytes < count && vf->offset < p->content_len) {
@@ -1228,6 +1251,7 @@ static int procfs_fread(vfile_t *vf, char *buf, size_t count) {
             read_bytes += chunk;
             vf->offset += chunk;
         }
+        proc_put(t);
         return (int)read_bytes;
     }
     if (vf->offset >= p->content_len) return 0;
@@ -1249,9 +1273,10 @@ static int procfs_fwrite(vfile_t *vf, const char *buf, size_t count) {
         int value = atoi(tmp);
         if (value < -1000 || value > 1000)
             return -EINVAL;
-        task_t *t = proc_find(p->pid);
-        if (!t) t = proc_current();
-        if (t) t->policy.oom_score_adj = value;
+        task_t *t = proc_find_get(p->pid);
+        task_t *target = t ? t : proc_current();
+        if (target) target->policy.oom_score_adj = value;
+        proc_put(t);
         return (int)count;
     }
     if (p->type == PF_SYS_KERNEL_PID_MAX) {
@@ -1326,7 +1351,7 @@ static long procfs_flseek(vfile_t *vf, long offset, int whence) {
 static int procfs_fd_readdir(vfile_t *vf, procfs_priv_t *p,
                              void *dirp, size_t count)
 {
-    task_t *task = proc_find(p->pid);
+    task_t *task = proc_find_get(p->pid);
     if (!task)
         return -ENOENT;
 
@@ -1374,6 +1399,7 @@ static int procfs_fd_readdir(vfile_t *vf, procfs_priv_t *p,
     }
 
     vf->offset = (size_t)cursor;
+    proc_put(task);
     return (int)total;
 }
 
