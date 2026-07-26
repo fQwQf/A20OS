@@ -17,16 +17,6 @@ void net_msg_free(net_msg_t *m)
     obj_cache_free(&g_net_msg_cache, m);
 }
 
-static void net_wake_socket_waiter_locked(net_socket_t *s)
-{
-    wait_queue_wake_one(&s->read_waitq, 0, PROC_WAKE_EVENT);
-}
-
-static void net_wake_queue_space_waiter_locked(net_socket_t *s)
-{
-    wait_queue_wake_one(&s->write_waitq, 0, PROC_WAKE_EVENT);
-}
-
 int net_enqueue_msg_locked_meta(net_socket_t *dst, const void *buf, size_t len,
                                 const void *addr, size_t addrlen,
                                 const net_bh_event_t *meta)
@@ -68,7 +58,6 @@ int net_enqueue_msg_locked_meta(net_socket_t *dst, const void *buf, size_t len,
         dst->rx_head = m;
     dst->rx_tail = m;
     dst->rx_count++;
-    net_wake_socket_waiter_locked(dst);
     return (int)len;
 }
 
@@ -84,6 +73,8 @@ int net_enqueue_msg_blocking(net_socket_t *s, net_socket_t *dst, const void *buf
 {
     uint64_t start = timer_get_ticks();
     for (;;) {
+        proc_wake_q_t wake_q;
+        proc_wake_q_init(&wake_q);
         uint64_t irq = spin_lock_irqsave(&g_net_lock);
         if (!net_socket_is_valid_locked(s) || s->closed) {
             spin_unlock_irqrestore(&g_net_lock, irq);
@@ -102,7 +93,11 @@ int net_enqueue_msg_blocking(net_socket_t *s, net_socket_t *dst, const void *buf
         }
         int r = net_enqueue_msg_locked(dst, buf, len, addr, addrlen);
         if (r != -EAGAIN || dontwait) {
+            if (r >= 0)
+                (void)wait_queue_collect_one(
+                    &dst->read_waitq, 0, PROC_WAKE_EVENT, &wake_q);
             spin_unlock_irqrestore(&g_net_lock, irq);
+            (void)proc_wake_q_flush(&wake_q);
             return r;
         }
         task_t *cur = proc_current();
@@ -138,13 +133,51 @@ int net_enqueue_msg_blocking(net_socket_t *s, net_socket_t *dst, const void *buf
             deadline = start + MS_TO_TICKS(200);
         if (!deadline && s->type == SOCK_STREAM)
             deadline = start + MS_TO_TICKS(5000);
-        wait_queue_entry_t entry = {0};
-        wait_queue_prepare(&dst->write_waitq, &entry,
-                           PROC_WAIT_INTERRUPTIBLE, deadline, 0);
         spin_unlock_irqrestore(&g_net_lock, irq);
-        proc_wake_reason_t reason =
-            wait_queue_commit(&dst->write_waitq, &entry);
-        wait_queue_finish(&dst->write_waitq, &entry);
+        proc_wait_token_t token =
+            proc_park_prepare(PROC_WAIT_INTERRUPTIBLE, deadline);
+        if (!token.task)
+            return -EAGAIN;
+
+        wait_queue_entry_t entry = {0};
+        irq = spin_lock_irqsave(&g_net_lock);
+        if (!net_socket_is_valid_locked(s) || s->closed ||
+            !net_socket_is_valid_locked(dst) || dst->closed ||
+            (s->connected && s->peer != dst && s->type != SOCK_DGRAM)) {
+            spin_unlock_irqrestore(&g_net_lock, irq);
+            (void)proc_park_cancel(token);
+            proc_park_finish(token);
+            return -ENOTCONN;
+        }
+        r = net_enqueue_msg_locked(dst, buf, len, addr, addrlen);
+        if (r != -EAGAIN) {
+            if (r >= 0)
+                (void)wait_queue_collect_one(
+                    &dst->read_waitq, 0, PROC_WAKE_EVENT, &wake_q);
+            spin_unlock_irqrestore(&g_net_lock, irq);
+            (void)proc_park_cancel(token);
+            proc_park_finish(token);
+            (void)proc_wake_q_flush(&wake_q);
+            return r;
+        }
+        if (net_task_has_unblocked_signal(cur)) {
+            spin_unlock_irqrestore(&g_net_lock, irq);
+            (void)proc_park_cancel(token);
+            proc_park_finish(token);
+            return -ERESTARTSYS;
+        }
+        bool linked =
+            wait_queue_link(&dst->write_waitq, &entry, token, 0);
+        spin_unlock_irqrestore(&g_net_lock, irq);
+        proc_wake_reason_t reason;
+        if (linked)
+            reason = proc_park_commit(token);
+        else {
+            (void)proc_park_cancel(token);
+            reason = PROC_WAKE_CANCEL;
+        }
+        wait_queue_unlink(&dst->write_waitq, &entry);
+        proc_park_finish(token);
         if (reason == PROC_WAKE_SIGNAL)
             return -ERESTARTSYS;
         if (reason == PROC_WAKE_TIMEOUT)
@@ -190,8 +223,6 @@ int net_dequeue_msg_locked_meta(net_socket_t *s, void *buf, size_t len,
         s->rx_tail = NULL;
     s->rx_count--;
     net_msg_free(m);
-    net_wake_socket_waiter_locked(s);
-    net_wake_queue_space_waiter_locked(s);
     return (int)n;
 }
 
@@ -215,7 +246,6 @@ int net_accept_queue_push_locked(net_socket_t *listener, net_socket_t *child)
         listener->accept_head = child;
     listener->accept_tail = child;
     listener->accept_count++;
-    wait_queue_wake_one(&listener->accept_waitq, 0, PROC_WAKE_EVENT);
     return 0;
 }
 

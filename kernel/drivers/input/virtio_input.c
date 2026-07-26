@@ -240,9 +240,12 @@ static int input_read(vfile_t *vf, char *buf, size_t count) {
          * first, then recheck all rings: events before registration are found
          * by the recheck, and events after registration wake this exact token.
          */
+        proc_wait_token_t token =
+            proc_park_prepare(PROC_WAIT_INTERRUPTIBLE, 0);
+        if (!token.task)
+            return -EAGAIN;
         wait_queue_entry_t entry = {0};
-        wait_queue_prepare(&g_input_waiters, &entry,
-                           PROC_WAIT_INTERRUPTIBLE, 0, 0);
+        bool linked = wait_queue_link(&g_input_waiters, &entry, token, 0);
         int ready = 0;
         for (int i = 0; i < MAX_VIRTIO_INPUT_DEVS; i++) {
             virtio_input_inst_t *inst = &g_input_insts[i];
@@ -255,12 +258,20 @@ static int input_read(vfile_t *vf, char *buf, size_t count) {
                 break;
         }
         if (ready) {
-            wait_queue_finish(&g_input_waiters, &entry);
+            wait_queue_unlink(&g_input_waiters, &entry);
+            (void)proc_park_cancel(token);
+            proc_park_finish(token);
             continue;
         }
-        proc_wake_reason_t reason =
-            wait_queue_commit(&g_input_waiters, &entry);
-        wait_queue_finish(&g_input_waiters, &entry);
+        proc_wake_reason_t reason;
+        if (linked)
+            reason = proc_park_commit(token);
+        else {
+            (void)proc_park_cancel(token);
+            reason = PROC_WAKE_CANCEL;
+        }
+        wait_queue_unlink(&g_input_waiters, &entry);
+        proc_park_finish(token);
         if (reason == PROC_WAKE_SIGNAL)
             return -ERESTARTSYS;
     }
