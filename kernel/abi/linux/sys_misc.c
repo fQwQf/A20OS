@@ -13,10 +13,10 @@ int64_t sys_uname(void *buf) {
     if (!buf) return -EFAULT;
     struct uname u;
     memset(&u, 0, sizeof(u));
-    strcpy(u.s, "A20OS");
-    strcpy(u.n, "AAAAAAAAAAAAAAAAAAAA");
-    strcpy(u.r, VERSION);
-    strcpy(u.v, "A20OS version " VERSION " (Linux 6.8.0 compatible)");
+    strcpy(u.s, "Linux");
+    strcpy(u.n, "a20os");
+    strcpy(u.r, LINUX_ABI_RELEASE);
+    strcpy(u.v, LINUX_ABI_VERSION);
     strcpy(u.m, ARCH_NAME);
     if (copy_to_user(buf, &u, sizeof(u)) < 0) return -EFAULT;
     return 0;

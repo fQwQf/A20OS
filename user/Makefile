@@ -737,6 +737,11 @@ $(FF_MAIN_OBJ): $(FF_MAIN) Makefile $(FF_GEN)/fastfetch_config.h $(FF_GEN)/fastf
 $(OBJ_DIR)/fastfetch/src/%.c: $(FF_DIR)/src/%.c Makefile | build_dir musl_prepare $(FF_GEN)/.headers-stamp
 	@mkdir -p $(dir $@)
 
+# gpu.c auto-detects optional host EGL headers with __has_include.  Those
+# headers are not valid cross-target feature probes, so disable that probe for
+# this translation unit; the A20OS build already disables GL backends.
+$(OBJ_DIR)/fastfetch/src/detection/gpu/gpu.o: FF_CFLAGS += -D'__has_include(x)=0'
+
 $(OBJ_DIR)/fastfetch/src/%.o: $(FF_DIR)/src/%.c Makefile $(FF_GEN)/fastfetch_config.h $(FF_GEN)/fastfetch_datatext.h $(FF_GEN)/logo_builtin.h | build_dir musl_prepare
 	@mkdir -p $(dir $@)
 	$(CC) $(FF_CFLAGS) -c $< -o $@
