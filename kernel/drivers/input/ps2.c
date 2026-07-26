@@ -8,6 +8,7 @@
 #include "proc/proc.h"
 #include "core/cpu.h"
 #include "core/lock.h"
+#include "core/sync.h"
 #include "core/string.h"
 #include "abi/linux/errno.h"
 
@@ -26,7 +27,7 @@ typedef struct {
     uint32_t head;
     uint32_t tail;
     spinlock_t lock;
-    task_t *waiter;
+    wait_queue_t waiters;
     uint8_t initialized;
     uint8_t extended;
     uint8_t pause_bytes;
@@ -122,6 +123,8 @@ static void ps2_flush_output(void) {
 }
 
 static void ps2_push_event(uint16_t type, uint16_t code, int32_t value) {
+    proc_wake_q_t wake_q;
+    proc_wake_q_init(&wake_q);
     uint64_t flags = spin_lock_irqsave(&g_ps2.lock);
     uint32_t next = (g_ps2.head + 1) % PS2_RING_SIZE;
     if (next != g_ps2.tail) {
@@ -132,10 +135,11 @@ static void ps2_push_event(uint16_t type, uint16_t code, int32_t value) {
         event->code = code;
         event->value = value;
         g_ps2.head = next;
-        if (g_ps2.waiter && g_ps2.waiter->state == PROC_BLOCKED)
-            proc_make_ready(g_ps2.waiter);
+        (void)wait_queue_collect_one(&g_ps2.waiters, 0,
+                                     PROC_WAKE_EVENT, &wake_q);
     }
     spin_unlock_irqrestore(&g_ps2.lock, flags);
+    (void)proc_wake_q_flush(&wake_q);
 }
 
 static uint16_t ps2_extended_keycode(uint8_t scancode) {
@@ -261,13 +265,15 @@ static int ps2_input_read(vfile_t *vf, char *buf, size_t count) {
             spin_unlock_irqrestore(&g_ps2.lock, flags);
             return -EAGAIN;
         }
-        g_ps2.waiter = proc_current();
+        wait_queue_entry_t entry = {0};
+        wait_queue_prepare(&g_ps2.waiters, &entry,
+                           PROC_WAIT_INTERRUPTIBLE, 0, 0);
         spin_unlock_irqrestore(&g_ps2.lock, flags);
-        sched();
-        flags = spin_lock_irqsave(&g_ps2.lock);
-        if (g_ps2.waiter == proc_current())
-            g_ps2.waiter = NULL;
-        spin_unlock_irqrestore(&g_ps2.lock, flags);
+        proc_wake_reason_t reason =
+            wait_queue_commit(&g_ps2.waiters, &entry);
+        wait_queue_finish(&g_ps2.waiters, &entry);
+        if (reason == PROC_WAKE_SIGNAL)
+            return -ERESTARTSYS;
     }
 }
 
@@ -291,6 +297,7 @@ int ps2_input_init(void) {
 
     memset(&g_ps2, 0, sizeof(g_ps2));
     spin_init(&g_ps2.lock);
+    wait_queue_init(&g_ps2.waiters);
 
     if (ps2_write_cmd(0xad) || ps2_write_cmd(0xa7))
         return -1;

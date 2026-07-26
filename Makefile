@@ -580,7 +580,7 @@ VBOX_AARCH64_LOAD_ADDRESS ?= 0x08080000ULL
 		stm32f103-bringup stm32f103-xuanwu flash-stm32f103-xuanwu run-stm32f103-qemu \
 		check-stm32f103 \
 		check-kernel-build check-kernel-build-all check-user-build check-user-build-all check-dev-build check-contest-build check-contest-build-all check-build-matrix check-build-matrix-all check-abi-smoke-gate check-doc-drift check-doc-test-gates check-final-definition check-concurrency-foundation check-mm-lock-model check-abi-boundary check-driver-core-model check-external-dependency-boundary \
-		check-arch-boundary \
+		check-arch-boundary check-task-state-boundary \
 		check-riscv64-bringup check-loongarch64-bringup check-aarch64-bringup check-x86_64-bringup check-arm32-bringup check-riscv32-bringup check-ppc64le-bringup \
 		check-riscv64-user check-loongarch64-user check-aarch64-user check-x86_64-user check-arm32-user check-riscv32-user check-ppc64le-user \
 		smoke-riscv64 smoke-loongarch64 smoke-aarch64 smoke-x86_64 smoke-qemu-gui-x86_64 smoke-qemu-gui-riscv64 smoke-qemu-gui-aarch64 smoke-qemu-gui-arm32 smoke-qemu-gui-loongarch64 smoke-arm32 smoke-riscv32 smoke-ppc64le smoke-abi-linux smoke-network-suite smoke-proc-a20 smoke-proc-stress smoke-mm-stress smoke-vfs-stress smoke-vfs-edge smoke-sched-stress smoke-futex-stress smoke-socket-stress smoke-driver-lifecycle smoke-native-handle smoke-native-libc smoke-io-event \
@@ -704,6 +704,24 @@ check-arch-boundary:
 	done
 	@echo "check-arch-boundary: PASS"
 
+check-task-state-boundary:
+	@! rg -n --pcre2 --glob '*.c' --glob '!kernel/external/**' \
+		--glob '!kernel/proc/park.c' --glob '!kernel/proc/sched.c' \
+		--glob '!kernel/proc/exit.c' --glob '!kernel/proc/task.c' \
+		-- '->state[[:space:]]*=[[:space:]]*PROC_' kernel
+	@! rg -n --pcre2 --glob '*.c' --glob '!kernel/external/**' \
+		--glob '!kernel/proc/sched.c' --glob '!kernel/proc/task.c' \
+		-- '->(on_rq|rq_next|rq_prev)[[:space:]]*=' kernel
+	@! rg -n 'proc_runq_(enqueue|remove)_locked[[:space:]]*\(' kernel \
+		--glob '*.c' --glob '!kernel/proc/park.c' \
+		--glob '!kernel/proc/sched.c' --glob '!kernel/proc/exit.c' \
+		--glob '!kernel/proc/task.c'
+	@! rg -n --pcre2 'task_t[[:space:]]*\*[[:space:]]*(waiter|rx_waiter)\b' \
+		kernel --glob '*.[ch]' --glob '!kernel/external/**'
+	@rg -q 'A20_PARK_WAKE_PROTOCOL' kernel/include/proc/park.h
+	@rg -q 'WAIT_QUEUE_PARK_PROTOCOL' kernel/include/core/sync.h
+	@echo "check-task-state-boundary: PASS"
+
 check-smp-platform-boundary:
 	@rg -q "typedef struct smp_platform_ops" kernel/include/core/smp.h
 	@rg -q "const smp_platform_ops_t \*smp" kernel/drivers/core/driver_core.h
@@ -738,7 +756,7 @@ check-doc-drift:
 	@! rg -q "for simplicity" docs kernel --glob '!docs/research/**' --glob '!docs/testing/testing-gates.md' --glob '!kernel/external/**'
 	@echo "check-doc-drift: PASS"
 
-check-doc-test-gates: check-concurrency-foundation check-smp-platform-boundary check-mm-lock-model check-io-progress-model check-vfs-abstraction check-abi-boundary check-driver-core-model check-external-dependency-boundary check-abi-smoke-gate check-doc-drift
+check-doc-test-gates: check-concurrency-foundation check-smp-platform-boundary check-task-state-boundary check-mm-lock-model check-io-progress-model check-vfs-abstraction check-abi-boundary check-driver-core-model check-external-dependency-boundary check-abi-smoke-gate check-doc-drift
 	@rg -q "DOCS_AS_FACT_CONTRACT" docs/testing/testing-gates.md
 	@rg -q "TEST_FIRST_ARCHITECTURE_MATRIX" docs/testing/testing-gates.md
 	@echo "check-doc-test-gates: PASS"
@@ -790,7 +808,8 @@ check-concurrency-foundation:
 	@rg -q "SCHEDULER_CONCURRENCY_PREREQS" kernel/proc/sched.c
 	@rg -q "PER_CPU_CURRENT_VALIDATION" kernel/proc/current.c
 	@rg -q "TASK_STATE_MUTATION_CONTRACT" kernel/include/proc/proc.h
-	@rg -q "BLOCK_WAKE_PROTOCOL" kernel/include/core/sync.h
+	@rg -q "A20_PARK_WAKE_PROTOCOL" kernel/include/proc/park.h
+	@rg -q "WAIT_QUEUE_PARK_PROTOCOL" kernel/include/core/sync.h
 	@$(MAKE) ARCH=$(ARCH) NR_CPUS=2 ALLOW_UNVERIFIED_SMP=1 BRINGUP=1 kernel-only >/dev/null
 	@echo "check-concurrency-foundation: PASS"
 

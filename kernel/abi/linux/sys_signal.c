@@ -125,10 +125,8 @@ int64_t sys_sigsuspend(void *mask, size_t sigsetsize) {
     t->sig_blocked = new_mask;
 
     uint64_t deliverable = (ss->pending | t->thread_pending) & ~t->sig_blocked;
-    if (!deliverable) {
-        proc_block_until(t, 0);
-        sched();
-    }
+    if (!deliverable)
+        (void)proc_park_wait(PROC_WAIT_INTERRUPTIBLE, 0);
     return -EINTR;
 }
 
@@ -199,10 +197,7 @@ int64_t sys_sigtimedwait(const uint64_t *set, void *info, const void *timeout, s
                              nsec * TICKS_PER_SEC / 1000000000ULL;
             until = timer_get_ticks() + (ticks ? ticks : 1);
         }
-        proc_block_until(t, until);
-        sched();
-        if (until)
-            proc_set_wake_time(t, 0);
+        (void)proc_park_wait(PROC_WAIT_INTERRUPTIBLE, until);
         deliverable = (ss->pending | t->thread_pending) & mask;
         if (!deliverable)
             return -EAGAIN;

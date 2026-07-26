@@ -12,6 +12,7 @@
 #include "core/stdio.h"
 #include "core/klog.h"
 #include "core/lock.h"
+#include "core/sync.h"
 #include "abi/linux/errno.h"
 #include "drivers/block/virtio_blk.h"
 
@@ -40,7 +41,6 @@ typedef struct {
     struct input_event user_ring[256];
     uint32_t           head;
     uint32_t           tail;
-    task_t            *waiter;
     uint32_t           irq;
     int                irq_registered;
 } virtio_input_inst_t;
@@ -50,6 +50,7 @@ static virtio_input_inst_t g_input_insts[MAX_VIRTIO_INPUT_DEVS];
 static int g_ninputs = 0;
 static uint8_t g_input_irq_registered[256];
 static unsigned g_input_trace_events;
+static wait_queue_t g_input_waiters;
 
 static virtio_input_inst_t *virtio_input_first_active(void) {
     for (int i = 0; i < MAX_VIRTIO_INPUT_DEVS; i++) {
@@ -95,6 +96,8 @@ static void virtio_input_handle_inst(virtio_input_inst_t *inst) {
     if (!inst->vt.legacy)
         inst->vt.write32(&inst->vt, VIRTIO_MMIO_INTERRUPT_ACK, isr);
         
+    proc_wake_q_t wake_q;
+    proc_wake_q_init(&wake_q);
     uint64_t flags = spin_lock_irqsave(&inst->lock);
     
     volatile virtq_used_t *used = &inst->used;
@@ -146,12 +149,11 @@ static void virtio_input_handle_inst(virtio_input_inst_t *inst) {
         mb();
     }
     if (waked) {
-        if (inst->waiter && inst->waiter->state == PROC_BLOCKED) {
-            proc_make_ready(inst->waiter);
-        }
+        (void)wait_queue_collect_one(&g_input_waiters, 0,
+                                     PROC_WAKE_EVENT, &wake_q);
     }
-    
     spin_unlock_irqrestore(&inst->lock, flags);
+    (void)proc_wake_q_flush(&wake_q);
 }
 
 static int virtio_input_irq(int irq, void *priv) {
@@ -230,23 +232,37 @@ static int input_read(vfile_t *vf, char *buf, size_t count) {
         if (vf->flags & O_NONBLOCK)
             return -EAGAIN;
         
-        // No data, block on the first device's waiter
-        virtio_input_inst_t *inst = virtio_input_first_active();
-        if (inst) {
-            uint64_t flags = spin_lock_irqsave(&inst->lock);
-            if (inst->head == inst->tail) {
-                inst->waiter = proc_current();
-                spin_unlock_irqrestore(&inst->lock, flags);
-                sched();
-                flags = spin_lock_irqsave(&inst->lock);
-                inst->waiter = NULL;
-                spin_unlock_irqrestore(&inst->lock, flags);
-            } else {
-                spin_unlock_irqrestore(&inst->lock, flags);
-            }
-        } else {
+        if (!virtio_input_first_active())
             return -EAGAIN;
+
+        /*
+         * The mux spans several independently locked device rings. Register
+         * first, then recheck all rings: events before registration are found
+         * by the recheck, and events after registration wake this exact token.
+         */
+        wait_queue_entry_t entry = {0};
+        wait_queue_prepare(&g_input_waiters, &entry,
+                           PROC_WAIT_INTERRUPTIBLE, 0, 0);
+        int ready = 0;
+        for (int i = 0; i < MAX_VIRTIO_INPUT_DEVS; i++) {
+            virtio_input_inst_t *inst = &g_input_insts[i];
+            if (!inst->valid)
+                continue;
+            uint64_t flags = spin_lock_irqsave(&inst->lock);
+            ready |= inst->head != inst->tail;
+            spin_unlock_irqrestore(&inst->lock, flags);
+            if (ready)
+                break;
         }
+        if (ready) {
+            wait_queue_finish(&g_input_waiters, &entry);
+            continue;
+        }
+        proc_wake_reason_t reason =
+            wait_queue_commit(&g_input_waiters, &entry);
+        wait_queue_finish(&g_input_waiters, &entry);
+        if (reason == PROC_WAKE_SIGNAL)
+            return -ERESTARTSYS;
     }
 }
 
@@ -274,6 +290,8 @@ static int virtio_input_init_transport(device_t *dev,
 
     memset(inst, 0, sizeof(*inst));
     spin_init(&inst->lock);
+    if (g_ninputs == 0)
+        wait_queue_init(&g_input_waiters);
     inst->vt = *transport;
     
     virtio_transport_t *vt = &inst->vt;

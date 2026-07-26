@@ -12,6 +12,7 @@
 #include "core/defs.h"
 #include "core/consts.h"
 #include "core/lock.h"
+#include "core/sync.h"
 #include "core/timer.h"
 #include "proc/proc.h"
 #include "core/errno.h"
@@ -30,7 +31,7 @@ typedef struct {
     uint16_t           head;
     void              *buf;
     size_t             bytes;
-    task_t            *waiter;
+    wait_queue_t       waiters;
 } virtio_blk_req_t;
 
 typedef struct {
@@ -219,15 +220,17 @@ static virtio_blk_req_t *virtio_blk_find_req_locked(virtio_blk_inst_t *inst, uin
 
 /*
  * VIRTIO_BLK_COMPLETION_MODEL:
- * - Request submission records the waiter and kicks the device under inst->lock.
- * - Completion drains used-ring entries, records req->done/result, and wakes a
- *   blocked waiter through proc_make_ready().
+ * - Request submission publishes the request and kicks the device under
+ *   inst->lock.
+ * - Completion drains used-ring entries, records req->done/result, and
+ *   detaches waiters into a deferred wake queue.
  * - kernel_progress_poll() may call virtio_blk_poll_all() as a compatibility
  *   bridge, but scheduler/idle code must not call this driver directly.
  * - The target model is IRQ or bottom-half completion that invokes the same
  *   wake path without requiring scheduler hot-path polling.
  */
-static void virtio_blk_complete_used_locked(virtio_blk_inst_t *inst) {
+static void virtio_blk_complete_used_locked(virtio_blk_inst_t *inst,
+                                            proc_wake_q_t *wake_q) {
     virtio_blk_t *blk = &inst->blk;
     virtq_used_t *used = blk->used;
 
@@ -245,8 +248,9 @@ static void virtio_blk_complete_used_locked(virtio_blk_inst_t *inst) {
                 arch_dma_sync_for_cpu(req->buf, req->bytes);
             req->result = (inst->status[head] == VIRTIO_BLK_S_OK) ? 0 : -1;
             req->done = 1;
-            if (req->waiter && req->waiter->state == PROC_BLOCKED)
-                proc_make_ready(req->waiter);
+            if (wake_q)
+                (void)wait_queue_collect_all(&req->waiters, 0,
+                                             PROC_WAKE_EVENT, wake_q);
         }
 
         blk->last_used++;
@@ -258,11 +262,14 @@ static void virtio_blk_poll_inst(virtio_blk_inst_t *inst) {
         return;
     if (__atomic_load_n(&inst->in_flight, __ATOMIC_ACQUIRE) <= 0)
         return;
+    proc_wake_q_t wake_q;
+    proc_wake_q_init(&wake_q);
     /* LOCK_ORDER: acquire inst->lock (innermost) for completion polling. */
     uint64_t flags = spin_lock_irqsave(&inst->lock);
     if (inst->in_flight > 0)
-        virtio_blk_complete_used_locked(inst);
+        virtio_blk_complete_used_locked(inst, &wake_q);
     spin_unlock_irqrestore(&inst->lock, flags);
+    (void)proc_wake_q_flush(&wake_q);
 }
 
 void virtio_blk_poll_all(void) {
@@ -270,12 +277,14 @@ void virtio_blk_poll_all(void) {
         virtio_blk_poll_inst(&g_insts[i]);
 }
 
-static virtio_blk_req_t *virtio_blk_alloc_req_locked(virtio_blk_inst_t *inst) {
-    virtio_blk_complete_used_locked(inst);
+static virtio_blk_req_t *virtio_blk_alloc_req_locked(virtio_blk_inst_t *inst,
+                                                      proc_wake_q_t *wake_q) {
+    virtio_blk_complete_used_locked(inst, wake_q);
     for (int i = 0; i < VIRTIO_BLK_REQ_SLOTS; i++) {
         if (!inst->req[i].in_use) {
             virtio_blk_req_t *req = &inst->req[i];
             memset(req, 0, sizeof(*req));
+            wait_queue_init(&req->waiters);
             req->in_use = 1;
             req->head = (uint16_t)(i * 3);
             return req;
@@ -284,7 +293,8 @@ static virtio_blk_req_t *virtio_blk_alloc_req_locked(virtio_blk_inst_t *inst) {
     return NULL;
 }
 
-static void virtio_blk_fail_queue_locked(virtio_blk_inst_t *inst) {
+static void virtio_blk_fail_queue_locked(virtio_blk_inst_t *inst,
+                                         proc_wake_q_t *wake_q) {
     if (!inst->blk.valid)
         return;
 
@@ -308,8 +318,9 @@ static void virtio_blk_fail_queue_locked(virtio_blk_inst_t *inst) {
             continue;
         req->result = -1;
         req->done = 1;
-        if (req->waiter && req->waiter->state == PROC_BLOCKED)
-            proc_make_ready(req->waiter);
+        if (wake_q)
+            (void)wait_queue_collect_all(&req->waiters, 0,
+                                         PROC_WAKE_EXIT, wake_q);
     }
 }
 
@@ -325,7 +336,6 @@ static int virtio_blk_submit_req(virtio_blk_inst_t *inst, virtio_blk_req_t *req,
     req->write = write;
     req->buf = buf;
     req->bytes = bytes;
-    req->waiter = proc_current();
     inst->in_flight++;
 
     inst->req_hdr[slot].type     = write ? VIRTIO_BLK_T_OUT : VIRTIO_BLK_T_IN;
@@ -379,33 +389,35 @@ static int virtio_blk_wait_req(virtio_blk_inst_t *inst, virtio_blk_req_t *req,
     uint64_t deadline = timer_get_ticks() + VIRTIO_BLK_WAIT_TIMEOUT_TICKS;
 
     for (;;) {
+        proc_wake_q_t wake_q;
+        proc_wake_q_init(&wake_q);
         uint64_t flags = spin_lock_irqsave(&inst->lock);
         /* LOCK_ORDER: inst->lock held while checking request completion. */
         if (inst->blk.valid)
-            virtio_blk_complete_used_locked(inst);
+            virtio_blk_complete_used_locked(inst, &wake_q);
         if (req->done) {
             int ret = req->result;
             req->in_use = 0;
             if (inst->in_flight > 0)
                 inst->in_flight--;
             spin_unlock_irqrestore(&inst->lock, flags);
+            (void)proc_wake_q_flush(&wake_q);
             return ret;
         }
-        spin_unlock_irqrestore(&inst->lock, flags);
-
         if (timer_get_ticks() >= deadline) {
-            flags = spin_lock_irqsave(&inst->lock);
-            virtio_blk_complete_used_locked(inst);
+            virtio_blk_complete_used_locked(inst, &wake_q);
             if (req->done) {
                 int ret = req->result;
                 req->in_use = 0;
                 if (inst->in_flight > 0)
                     inst->in_flight--;
                 spin_unlock_irqrestore(&inst->lock, flags);
+                (void)proc_wake_q_flush(&wake_q);
                 return ret;
             }
-            virtio_blk_fail_queue_locked(inst);
+            virtio_blk_fail_queue_locked(inst, &wake_q);
             spin_unlock_irqrestore(&inst->lock, flags);
+            (void)proc_wake_q_flush(&wake_q);
 
             uint32_t dev_status = inst->vt.read32(&inst->vt, VIRTIO_MMIO_STATUS);
             printf("[VIRTIO%d] I/O timeout! lba=%lu dev_status=0x%x\n",
@@ -421,35 +433,24 @@ static int virtio_blk_wait_req(virtio_blk_inst_t *inst, virtio_blk_req_t *req,
          * scheduler pass to notice the completion.
          */
         if (inst->vt.irq < 0) {
+            spin_unlock_irqrestore(&inst->lock, flags);
+            (void)proc_wake_q_flush(&wake_q);
             virtio_blk_poll_inst(inst);
             cpu_relax();
             continue;
         }
 
         if (cur) {
-            proc_set_wake_time(cur, deadline);
-
-            /* A request can complete after the loop's first req->done check
-             * but before we mark ourselves blocked.  In that case the
-             * completion path records req->done but intentionally does not
-             * wake a still-running waiter.  Poll and re-check under the
-             * virtio lock before entering PROC_BLOCKED so sched() can safely
-             * perform the next completion poll and wake this task. */
-            /* LOCK_ORDER: inst->lock held across scheduler state change;
-             * lock released before sched() is invoked. */
-            flags = spin_lock_irqsave(&inst->lock);
-            virtio_blk_complete_used_locked(inst);
-            int completed = req->done;
-            if (!completed)
-                cur->state = PROC_BLOCKED;
+            wait_queue_entry_t entry = {0};
+            wait_queue_prepare(&req->waiters, &entry,
+                               PROC_WAIT_UNINTERRUPTIBLE, deadline, 0);
             spin_unlock_irqrestore(&inst->lock, flags);
-            if (completed) {
-                proc_set_wake_time(cur, 0);
-                continue;
-            }
-            sched();
-            proc_set_wake_time(cur, 0);
+            (void)proc_wake_q_flush(&wake_q);
+            (void)wait_queue_commit(&req->waiters, &entry);
+            wait_queue_finish(&req->waiters, &entry);
         } else {
+            spin_unlock_irqrestore(&inst->lock, flags);
+            (void)proc_wake_q_flush(&wake_q);
             cpu_relax();
         }
     }
@@ -465,22 +466,28 @@ static int virtio_blk_rw(int idx, uint64_t lba, void *buf, size_t sectors, int w
         virtio_blk_req_t *req = NULL;
         uint64_t alloc_deadline = timer_get_ticks() + VIRTIO_BLK_WAIT_TIMEOUT_TICKS;
         while (!req) {
+            proc_wake_q_t wake_q;
+            proc_wake_q_init(&wake_q);
             /* LOCK_ORDER: acquire inst->lock (innermost) to allocate/submit a request. */
             uint64_t flags = spin_lock_irqsave(&inst->lock);
-            req = virtio_blk_alloc_req_locked(inst);
+            req = virtio_blk_alloc_req_locked(inst, &wake_q);
             if (req) {
                 virtio_blk_submit_req(inst, req, lba, buf, sectors, write);
                 spin_unlock_irqrestore(&inst->lock, flags);
+                (void)proc_wake_q_flush(&wake_q);
                 break;
             }
             spin_unlock_irqrestore(&inst->lock, flags);
+            (void)proc_wake_q_flush(&wake_q);
             if (!inst->blk.valid)
                 return -1;
             if (timer_get_ticks() >= alloc_deadline) {
+                proc_wake_q_init(&wake_q);
                 flags = spin_lock_irqsave(&inst->lock);
-                virtio_blk_complete_used_locked(inst);
-                virtio_blk_fail_queue_locked(inst);
+                virtio_blk_complete_used_locked(inst, &wake_q);
+                virtio_blk_fail_queue_locked(inst, &wake_q);
                 spin_unlock_irqrestore(&inst->lock, flags);
+                (void)proc_wake_q_flush(&wake_q);
                 printf("[VIRTIO%d] descriptor allocation timed out; queue reset\n",
                        inst->slot);
                 return -1;
@@ -551,7 +558,7 @@ int virtio_blk_ready(int idx) {
  * VIRTIO_BLK_IRQ_MODEL:
  * - The device raises an IRQ when a request completes.
  * - The handler runs under inst->lock, drains the used ring, records
- *   req->done/result, and wakes blocked waiters through proc_make_ready().
+ *   req->done/result, and flushes detached waiters after dropping inst->lock.
  * - This is the same completion path used by the old polling routine, now
  *   driven by the device IRQ instead of scheduler hot-path polling.
  */
@@ -567,11 +574,12 @@ static int virtio_blk_irq_handler(int irq, void *priv) {
     if (!inst->blk.legacy)
         inst->vt.write32(&inst->vt, VIRTIO_MMIO_INTERRUPT_ACK, isr);
 
-    /* LOCK_ORDER: inst->lock is innermost; completion path only touches
-     * scheduler wake state through proc_make_ready(). */
+    proc_wake_q_t wake_q;
+    proc_wake_q_init(&wake_q);
     uint64_t flags = spin_lock_irqsave(&inst->lock);
-    virtio_blk_complete_used_locked(inst);
+    virtio_blk_complete_used_locked(inst, &wake_q);
     spin_unlock_irqrestore(&inst->lock, flags);
+    (void)proc_wake_q_flush(&wake_q);
     return 0;
 }
 

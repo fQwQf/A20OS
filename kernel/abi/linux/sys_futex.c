@@ -8,13 +8,18 @@
 
 typedef struct futex_waiter {
     int active;
-    int woken;
     uintptr_t vkey;
     uintptr_t pkey;
     mm_struct_t *mm;
     uint32_t bitset;
     task_t *task;
+    uint64_t wait_seq;
 } futex_waiter_t;
+
+typedef struct futex_wake_token {
+    task_t *task;
+    uint64_t wait_seq;
+} futex_wake_token_t;
 
 static spinlock_t g_futex_lock = SPINLOCK_INIT;
 static futex_waiter_t g_futex_waiters[FUTEX_WAITERS_MAX];
@@ -60,8 +65,8 @@ static int futex_timeout_ticks(void *timeout, int absolute, int realtime,
 static void futex_waiter_clear_slot(futex_waiter_t *w)
 {
     w->active = 0;
-    w->woken = 0;
     w->task = NULL;
+    w->wait_seq = 0;
     w->vkey = 0;
     w->pkey = 0;
     w->mm = NULL;
@@ -90,8 +95,6 @@ static int futex_waiter_matches(const futex_waiter_t *w, mm_struct_t *mm,
 {
     if (!w->active)
         return 0;
-    if (w->woken)
-        return 0;
     if (w->task && (w->task->state == PROC_UNUSED || w->task->state == PROC_ZOMBIE))
         return 0;
     if (w->mm == mm && w->vkey == vkey)
@@ -102,26 +105,26 @@ static int futex_waiter_matches(const futex_waiter_t *w, mm_struct_t *mm,
 }
 
 static int futex_waiter_alloc(uintptr_t vkey, uintptr_t pkey, mm_struct_t *mm,
-                              uint32_t bitset, task_t *task)
+                              uint32_t bitset, proc_wait_token_t token)
 {
-    futex_waiter_clear_task(task);
+    futex_waiter_clear_task(token.task);
     for (int i = 0; i < FUTEX_WAITERS_MAX; i++) {
         if (!g_futex_waiters[i].active) {
             g_futex_waiters[i].active = 1;
-            g_futex_waiters[i].woken = 0;
             g_futex_waiters[i].vkey = vkey;
             g_futex_waiters[i].pkey = pkey;
             g_futex_waiters[i].mm = mm;
             g_futex_waiters[i].bitset = bitset;
-            g_futex_waiters[i].task = task;
+            g_futex_waiters[i].task = token.task;
+            g_futex_waiters[i].wait_seq = token.seq;
             return i;
         }
     }
     return -ENOMEM;
 }
 
-/* Futex wait/wake participates in BLOCK_WAKE_PROTOCOL: g_futex_lock protects
- * waiter slot publication, then wake paths drop it before proc_make_ready(). */
+/* g_futex_lock protects waiter publication/removal; proc_try_wake() is always
+ * called after dropping it, using wait_seq to reject stale wakeups. */
 static int futex_wait_on(int *uaddr, int expected, void *timeout, uint32_t bitset,
                          int absolute_timeout, int realtime_timeout)
 {
@@ -155,39 +158,34 @@ static int futex_wait_on(int *uaddr, int expected, void *timeout, uint32_t bitse
         spin_unlock_irqrestore(&g_futex_lock, flags);
         return -ERESTARTSYS;
     }
-    int slot = futex_waiter_alloc(vkey, pkey, t->mm, bitset, t);
+    proc_wait_token_t token =
+        proc_park_prepare(PROC_WAIT_INTERRUPTIBLE, until);
+    if (!token.task) {
+        spin_unlock_irqrestore(&g_futex_lock, flags);
+        return -EAGAIN;
+    }
+    int slot = futex_waiter_alloc(vkey, pkey, t->mm, bitset, token);
     if (slot < 0) {
+        proc_park_finish(token);
         spin_unlock_irqrestore(&g_futex_lock, flags);
         return slot;
     }
-    if (until)
-        proc_set_wake_time(t, until);
-    t->state = PROC_BLOCKED;
     spin_unlock_irqrestore(&g_futex_lock, flags);
 
-    sched();
+    proc_wake_reason_t reason = proc_park_commit(token);
+    proc_park_finish(token);
 
     flags = spin_lock_irqsave(&g_futex_lock);
-    int was_woken = 0;
-    int still_waiting = 0;
     if (slot >= 0 && slot < FUTEX_WAITERS_MAX) {
         futex_waiter_t *w = &g_futex_waiters[slot];
-        was_woken = w->woken;
-        if (w->active && w->task == t) {
-            still_waiting = 1;
+        if (w->active && w->task == t && w->wait_seq == token.seq)
             futex_waiter_clear_slot(w);
-        } else {
-            futex_waiter_clear_slot(w);
-        }
     }
-    proc_set_wake_time(t, 0);
     spin_unlock_irqrestore(&g_futex_lock, flags);
 
-    if (was_woken)
-        return 0;
-    if (signal_task_has_unblocked(t))
+    if (reason == PROC_WAKE_SIGNAL || signal_task_has_unblocked(t))
         return -ERESTARTSYS;
-    if (!was_woken && still_waiting && until && timer_get_ticks() >= until)
+    if (reason == PROC_WAKE_TIMEOUT)
         return -ETIMEDOUT;
     return 0;
 }
@@ -199,32 +197,30 @@ static int futex_wake_on(int *uaddr, int nr, uint32_t bitset)
     if (bitset == 0) return -EINVAL;
     if (nr < 0) return -EINVAL;
 
-    int woke = 0;
     uintptr_t vkey = (uintptr_t)uaddr;
     uintptr_t pkey = futex_phys_key(uaddr);
     mm_struct_t *mm = cur ? cur->mm : NULL;
-    task_t *wake_list[FUTEX_WAITERS_MAX];
+    futex_wake_token_t wake_list[FUTEX_WAITERS_MAX];
     int wake_count = 0;
     uint64_t flags = spin_lock_irqsave(&g_futex_lock);
     if (nr > 0)
         g_futex_wake_generation++;
-    for (int i = 0; i < FUTEX_WAITERS_MAX && woke < nr; i++) {
+    for (int i = 0; i < FUTEX_WAITERS_MAX && wake_count < nr; i++) {
         futex_waiter_t *w = &g_futex_waiters[i];
         if (!futex_waiter_matches(w, mm, vkey, pkey) || !(w->bitset & bitset))
             continue;
-        task_t *task = w->task;
-        w->woken = 1;
-        if (task) {
-            wake_list[wake_count++] = task;
-            woke++;
+        if (w->task) {
+            wake_list[wake_count].task = w->task;
+            wake_list[wake_count].wait_seq = w->wait_seq;
+            wake_count++;
         }
+        futex_waiter_clear_slot(w);
     }
     spin_unlock_irqrestore(&g_futex_lock, flags);
-    for (int i = 0; i < wake_count; i++) {
-        task_t *task = wake_list[i];
-        proc_set_wake_time(task, 0);
-        proc_make_ready(task);
-    }
+    int woke = 0;
+    for (int i = 0; i < wake_count; i++)
+        woke += proc_try_wake(wake_list[i].task, wake_list[i].wait_seq,
+                              PROC_WAKE_EVENT) ? 1 : 0;
     return woke;
 }
 
@@ -246,7 +242,7 @@ static int futex_requeue(int *uaddr, int wake_nr, int requeue_nr, int *uaddr2,
 
     int done = 0;
     int moved = 0;
-    task_t *wake_list[FUTEX_WAITERS_MAX];
+    futex_wake_token_t wake_list[FUTEX_WAITERS_MAX];
     int wake_count = 0;
     uintptr_t vkey1 = (uintptr_t)uaddr;
     uintptr_t pkey1 = futex_phys_key(uaddr);
@@ -260,12 +256,13 @@ static int futex_requeue(int *uaddr, int wake_nr, int requeue_nr, int *uaddr2,
     for (int i = 0; i < FUTEX_WAITERS_MAX && done < wake_nr; i++) {
         futex_waiter_t *w = &g_futex_waiters[i];
         if (!futex_waiter_matches(w, mm, vkey1, pkey1)) continue;
-        task_t *task = w->task;
-        w->woken = 1;
-        if (task) {
-            wake_list[wake_count++] = task;
+        if (w->task) {
+            wake_list[wake_count].task = w->task;
+            wake_list[wake_count].wait_seq = w->wait_seq;
+            wake_count++;
             done++;
         }
+        futex_waiter_clear_slot(w);
     }
     for (int i = 0; i < FUTEX_WAITERS_MAX && moved < requeue_nr; i++) {
         futex_waiter_t *w = &g_futex_waiters[i];
@@ -276,11 +273,9 @@ static int futex_requeue(int *uaddr, int wake_nr, int requeue_nr, int *uaddr2,
         moved++;
     }
     spin_unlock_irqrestore(&g_futex_lock, flags);
-    for (int i = 0; i < wake_count; i++) {
-        task_t *task = wake_list[i];
-        proc_set_wake_time(task, 0);
-        proc_make_ready(task);
-    }
+    for (int i = 0; i < wake_count; i++)
+        (void)proc_try_wake(wake_list[i].task, wake_list[i].wait_seq,
+                            PROC_WAKE_EVENT);
     return done + moved;
 }
 
@@ -341,7 +336,7 @@ static int futex_wake_op(int *uaddr, int wake_nr, int wake2_nr,
     uintptr_t pkey1 = futex_phys_key(uaddr);
     uintptr_t vkey2 = (uintptr_t)uaddr2;
     uintptr_t pkey2 = futex_phys_key(uaddr2);
-    task_t *wake_list[FUTEX_WAITERS_MAX];
+    futex_wake_token_t wake_list[FUTEX_WAITERS_MAX];
     int wake_count = 0;
     int woke = 0;
 
@@ -353,12 +348,13 @@ static int futex_wake_op(int *uaddr, int wake_nr, int wake2_nr,
         futex_waiter_t *w = &g_futex_waiters[i];
         if (!futex_waiter_matches(w, mm, vkey1, pkey1))
             continue;
-        task_t *task = w->task;
-        w->woken = 1;
-        if (task) {
-            wake_list[wake_count++] = task;
+        if (w->task) {
+            wake_list[wake_count].task = w->task;
+            wake_list[wake_count].wait_seq = w->wait_seq;
+            wake_count++;
             woke++;
         }
+        futex_waiter_clear_slot(w);
     }
 
     if (futex_wake_op_cmp(oldval, cmp, cmparg)) {
@@ -367,22 +363,21 @@ static int futex_wake_op(int *uaddr, int wake_nr, int wake2_nr,
             futex_waiter_t *w = &g_futex_waiters[i];
             if (!futex_waiter_matches(w, mm, vkey2, pkey2))
                 continue;
-            task_t *task = w->task;
-            w->woken = 1;
-            if (task) {
-                wake_list[wake_count++] = task;
+            if (w->task) {
+                wake_list[wake_count].task = w->task;
+                wake_list[wake_count].wait_seq = w->wait_seq;
+                wake_count++;
                 woke++;
                 woke2++;
             }
+            futex_waiter_clear_slot(w);
         }
     }
     spin_unlock_irqrestore(&g_futex_lock, flags);
 
-    for (int i = 0; i < wake_count; i++) {
-        task_t *task = wake_list[i];
-        proc_set_wake_time(task, 0);
-        proc_make_ready(task);
-    }
+    for (int i = 0; i < wake_count; i++)
+        (void)proc_try_wake(wake_list[i].task, wake_list[i].wait_seq,
+                            PROC_WAKE_EVENT);
     return woke;
 }
 
