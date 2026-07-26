@@ -33,7 +33,7 @@ static int eventfd_read(vfile_t *vf, char *buf, size_t count)
         }
         spin_unlock(&efd->lock);
         proc_wait_token_t token =
-            proc_park_prepare(PROC_WAIT_UNINTERRUPTIBLE, 0);
+            proc_park_prepare(PROC_WAIT_INTERRUPTIBLE, 0);
         if (!token.task)
             return -EAGAIN;
 
@@ -48,12 +48,17 @@ static int eventfd_read(vfile_t *vf, char *buf, size_t count)
         }
         bool linked = wait_queue_link(&efd->readers, &entry, token, 0);
         spin_unlock(&efd->lock);
+        proc_wake_reason_t reason;
         if (linked)
-            (void)proc_park_commit(token);
-        else
+            reason = proc_park_commit(token);
+        else {
             (void)proc_park_cancel(token);
+            reason = PROC_WAKE_CANCEL;
+        }
         wait_queue_unlink(&efd->readers, &entry);
         proc_park_finish(token);
+        if (proc_wake_reason_is_task_interrupt(reason))
+            return -ERESTARTSYS;
         spin_lock(&efd->lock);
     }
     uint64_t val = efd->semaphore ? 1 : efd->counter;
@@ -84,7 +89,7 @@ static int eventfd_write(vfile_t *vf, const char *buf, size_t count)
         }
         spin_unlock(&efd->lock);
         proc_wait_token_t token =
-            proc_park_prepare(PROC_WAIT_UNINTERRUPTIBLE, 0);
+            proc_park_prepare(PROC_WAIT_INTERRUPTIBLE, 0);
         if (!token.task)
             return -EAGAIN;
 
@@ -99,12 +104,17 @@ static int eventfd_write(vfile_t *vf, const char *buf, size_t count)
         }
         bool linked = wait_queue_link(&efd->writers, &entry, token, 0);
         spin_unlock(&efd->lock);
+        proc_wake_reason_t reason;
         if (linked)
-            (void)proc_park_commit(token);
-        else
+            reason = proc_park_commit(token);
+        else {
             (void)proc_park_cancel(token);
+            reason = PROC_WAKE_CANCEL;
+        }
         wait_queue_unlink(&efd->writers, &entry);
         proc_park_finish(token);
+        if (proc_wake_reason_is_task_interrupt(reason))
+            return -ERESTARTSYS;
         spin_lock(&efd->lock);
     }
     int wake_readers = (efd->counter == 0);
