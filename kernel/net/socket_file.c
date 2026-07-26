@@ -98,7 +98,7 @@ static int net_vfile_read(vfile_t *vf, char *buf, size_t count) {
         }
         wait_queue_unlink(&s->read_waitq, &entry);
         proc_park_finish(token);
-        if (reason == PROC_WAKE_SIGNAL)
+        if (proc_wake_reason_is_task_interrupt(reason))
             return -ERESTARTSYS;
         if (reason == PROC_WAKE_TIMEOUT)
             return -EAGAIN;

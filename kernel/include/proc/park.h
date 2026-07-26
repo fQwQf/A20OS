@@ -17,6 +17,8 @@ typedef enum {
     PROC_WAKE_EVENT,
     PROC_WAKE_TIMEOUT,
     PROC_WAKE_SIGNAL,
+    PROC_WAKE_FATAL_SIGNAL,
+    PROC_WAKE_TASK_EXIT,
     PROC_WAKE_EXIT,
     PROC_WAKE_CANCEL,
 } proc_wake_reason_t;
@@ -26,6 +28,13 @@ typedef enum {
     PROC_WAIT_INTERRUPTIBLE,
     PROC_WAIT_KILLABLE,
 } proc_wait_mode_t;
+
+static inline int proc_wake_reason_is_task_interrupt(proc_wake_reason_t reason)
+{
+    return reason == PROC_WAKE_SIGNAL ||
+           reason == PROC_WAKE_FATAL_SIGNAL ||
+           reason == PROC_WAKE_TASK_EXIT;
+}
 
 typedef struct proc_wait_token {
     struct task_t *task;

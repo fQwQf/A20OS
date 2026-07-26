@@ -100,6 +100,7 @@ static int signal_default_ignore(int sig) {
         case SIGCHLD:
         case SIGURG:
         case SIGWINCH:
+        case SIGCONT:
             return 1;
         default:
             return 0;
@@ -127,48 +128,103 @@ static void build_siginfo(arch_siginfo_t *si, int sig, task_t *sender)
 void signal_init(signal_state_t *ss) {
     memset(ss, 0, sizeof(*ss));
     refcount_set(&ss->refcount, 1);
+    spin_init(&ss->lock);
+    spin_set_debug(&ss->lock, "signal_state", ss);
 }
 
 // 复制信号状态（用于 fork 时继承父进程的信号处理函数）
 void signal_copy(const signal_state_t *src, signal_state_t *dst) {
-    memcpy(dst, src, sizeof(*dst));
-    refcount_set(&dst->refcount, 1);
-    dst->pending = 0;  // 子进程不继承未处理的信号
-    memset(dst->pending_has_info, 0, sizeof(dst->pending_has_info));
-    memset(dst->pending_info, 0, sizeof(dst->pending_info));
+    signal_init(dst);
+    if (!src)
+        return;
+    signal_state_t *mutable_src = (signal_state_t *)src;
+    uint64_t flags = spin_lock_irqsave(&mutable_src->lock);
+    memcpy(dst->actions, src->actions, sizeof(dst->actions));
+    spin_unlock_irqrestore(&mutable_src->lock, flags);
 }
 
-int signal_send_info(int pid, int signum, const void *info, size_t info_size) {
-    if (signum <= 0 || signum >= NSIG) return -EINVAL;
-    task_t *t = proc_find_get(pid);
-    if (!t) return -ESRCH;
-    if (!t->signals) {
-        proc_put(t);
-        return -EINVAL;
+static uint64_t signal_deliverable_locked(task_t *t, signal_state_t *ss)
+{
+    return (ss->pending | t->thread_pending) & ~t->sig_blocked;
+}
+
+static int signal_action_deliverable_locked(task_t *t, signal_state_t *ss,
+                                            int signum)
+{
+    if (t->sig_blocked & signal_mask_bit(signum))
+        return 0;
+    sigaction_t *sa = &ss->actions[signum];
+    if (sa->sa_handler == SIG_IGN)
+        return 0;
+    if (sa->sa_handler == SIG_DFL && signal_default_ignore(signum))
+        return 0;
+    return 1;
+}
+
+static int signal_action_fatal_locked(task_t *t, signal_state_t *ss,
+                                      int signum)
+{
+    return signal_action_deliverable_locked(t, ss, signum) &&
+           ss->actions[signum].sa_handler == SIG_DFL &&
+           signal_default_terminate(signum);
+}
+
+static void signal_clear_pending_locked(task_t *t, signal_state_t *ss,
+                                        int signum)
+{
+    uint64_t bit = signal_mask_bit(signum);
+    ss->pending &= ~bit;
+    t->thread_pending &= ~bit;
+    ss->pending_has_info[signum] = 0;
+    memset(ss->pending_info[signum], 0, SIGNAL_INFO_SIZE);
+}
+
+static void signal_apply_generation_rules_locked(task_t *t,
+                                                 signal_state_t *ss,
+                                                 int signum)
+{
+    if (signum == SIGCONT) {
+        signal_clear_pending_locked(t, ss, SIGSTOP);
+        signal_clear_pending_locked(t, ss, SIGTSTP);
+        signal_clear_pending_locked(t, ss, SIGTTIN);
+        signal_clear_pending_locked(t, ss, SIGTTOU);
+    } else if (signal_default_stop(signum)) {
+        signal_clear_pending_locked(t, ss, SIGCONT);
     }
+}
+
+static int signal_queue_task(task_t *t, int signum, const void *info,
+                             size_t info_size, int thread_directed)
+{
+    if (!t || !t->signals)
+        return -EINVAL;
 
     signal_state_t *ss = (signal_state_t *)t->signals;
-    sigaction_t *sa = &ss->actions[signum];
+    int is_user = t->pgdir != NULL;
+    int fatal = 0;
+    int deliverable = 0;
+    int sigwait_match = 0;
+    int immediate_kernel_exit = 0;
 
-    if (sa->sa_handler == SIG_IGN) {
-        proc_put(t);
+    uint64_t flags = spin_lock_irqsave(&ss->lock);
+    signal_apply_generation_rules_locked(t, ss, signum);
+    sigaction_t action = ss->actions[signum];
+
+    /*
+     * SIGCONT always leaves a pending marker until the target reaches a
+     * signal boundary.  proc_sched_stop_current() checks that marker while
+     * holding proc_lock, closing SIGCONT-versus-STOPPED publication races.
+     * Other ignored/default-ignored signals can be discarded at generation.
+     */
+    if (signum != SIGCONT &&
+        (action.sa_handler == SIG_IGN ||
+         (action.sa_handler == SIG_DFL && signal_default_ignore(signum)))) {
+        spin_unlock_irqrestore(&ss->lock, flags);
         return 0;
     }
 
-    /* For kernel threads (no pgdir), immediately apply default action.
-     * For user processes, always queue the signal — it will be delivered
-     * at the next trap boundary via signal_deliver_user(), which sets up
-     * the proper signal frame on the user stack. */
-    int is_user = (t->pgdir != NULL);
-
-    if (!is_user &&
-        !(t->sig_blocked & signal_mask_bit(signum)) &&
-        sa->sa_handler == SIG_DFL &&
-        signal_default_terminate(signum)) {
-        proc_force_exit(t, -signal_wait_status(signum));
-        proc_put(t);
-        return 0;
-    }
+    fatal = signal_action_fatal_locked(t, ss, signum);
+    immediate_kernel_exit = !is_user && fatal;
 
     if (info && info_size) {
         size_t n = info_size > SIGNAL_INFO_SIZE ? SIGNAL_INFO_SIZE : info_size;
@@ -181,17 +237,44 @@ int signal_send_info(int pid, int signum, const void *info, size_t info_size) {
         memset(ss->pending_info[signum], 0, SIGNAL_INFO_SIZE);
         *(int *)ss->pending_info[signum] = signum;
     }
-    ss->pending |= signal_mask_bit(signum);
-    if (!proc_interrupt_wait(t, PROC_WAKE_SIGNAL) &&
-        (t->state == PROC_BLOCKED || t->state == PROC_STOPPED)) {
-        proc_make_ready(t);
+    if (thread_directed)
+        t->thread_pending |= signal_mask_bit(signum);
+    else
+        ss->pending |= signal_mask_bit(signum);
+
+    deliverable = signal_action_deliverable_locked(t, ss, signum);
+    sigwait_match = t->sigwait_active &&
+                    (t->sigwait_mask & signal_mask_bit(signum));
+    spin_unlock_irqrestore(&ss->lock, flags);
+
+    if (immediate_kernel_exit) {
+        proc_force_exit(t, -signal_wait_status(signum));
+        return 0;
     }
 
-    if (!is_user && t == proc_current()) {
-        signal_deliver();
+    if (signum == SIGCONT)
+        (void)proc_sched_resume_stopped(t, 1);
+    else if (fatal)
+        (void)proc_sched_resume_stopped(t, 0);
+
+    if (deliverable || sigwait_match) {
+        proc_wake_reason_t reason =
+            fatal ? PROC_WAKE_FATAL_SIGNAL : PROC_WAKE_SIGNAL;
+        (void)proc_interrupt_wait(t, reason);
     }
-    proc_put(t);
+
+    if (!is_user && t == proc_current())
+        signal_deliver();
     return 0;
+}
+
+int signal_send_info(int pid, int signum, const void *info, size_t info_size) {
+    if (signum <= 0 || signum >= NSIG) return -EINVAL;
+    task_t *t = proc_find_get(pid);
+    if (!t) return -ESRCH;
+    int ret = signal_queue_task(t, signum, info, info_size, 0);
+    proc_put(t);
+    return ret;
 }
 
 int signal_send_user(int pid, int signum) {
@@ -204,80 +287,20 @@ int signal_send_thread(int tid, int signum) {
     if (signum <= 0 || signum >= NSIG) return -EINVAL;
     task_t *t = proc_find_get(tid);
     if (!t) return -ESRCH;
-    if (!t->signals) {
-        proc_put(t);
-        return -EINVAL;
-    }
-
-    signal_state_t *ss = (signal_state_t *)t->signals;
-    sigaction_t *sa = &ss->actions[signum];
-
-    if (sa->sa_handler == SIG_IGN) {
-        proc_put(t);
-        return 0;
-    }
-
-    int is_user = (t->pgdir != NULL);
-
-    if (!is_user &&
-        !(t->sig_blocked & signal_mask_bit(signum)) &&
-        sa->sa_handler == SIG_DFL &&
-        signal_default_terminate(signum)) {
-        proc_force_exit(t, -signal_wait_status(signum));
-        proc_put(t);
-        return 0;
-    }
-
-    t->thread_pending |= signal_mask_bit(signum);
-    if (!proc_interrupt_wait(t, PROC_WAKE_SIGNAL) &&
-        (t->state == PROC_BLOCKED || t->state == PROC_STOPPED)) {
-        proc_make_ready(t);
-    }
+    int ret = signal_queue_task(t, signum, NULL, 0, 1);
     proc_put(t);
-    return 0;
+    return ret;
 }
 
 int signal_send_thread_user(int tid, int signum) {
     if (signum <= 0 || signum >= NSIG) return -EINVAL;
     task_t *t = proc_find_get(tid);
     if (!t) return -ESRCH;
-    if (!t->signals) {
-        proc_put(t);
-        return -EINVAL;
-    }
-
-    signal_state_t *ss = (signal_state_t *)t->signals;
-    sigaction_t *sa = &ss->actions[signum];
-
-    if (sa->sa_handler == SIG_IGN) {
-        proc_put(t);
-        return 0;
-    }
-
-    int is_user = (t->pgdir != NULL);
-
-    if (!is_user &&
-        !(t->sig_blocked & signal_mask_bit(signum)) &&
-        sa->sa_handler == SIG_DFL &&
-        signal_default_terminate(signum)) {
-        proc_force_exit(t, -signal_wait_status(signum));
-        proc_put(t);
-        return 0;
-    }
-
     arch_siginfo_t si;
     build_siginfo_code(&si, signum, proc_current(), SI_TKILL);
-    memset(ss->pending_info[signum], 0, SIGNAL_INFO_SIZE);
-    memcpy(ss->pending_info[signum], &si, sizeof(si));
-    ss->pending_has_info[signum] = 1;
-
-    t->thread_pending |= signal_mask_bit(signum);
-    if (!proc_interrupt_wait(t, PROC_WAKE_SIGNAL) &&
-        (t->state == PROC_BLOCKED || t->state == PROC_STOPPED)) {
-        proc_make_ready(t);
-    }
+    int ret = signal_queue_task(t, signum, &si, sizeof(si), 1);
     proc_put(t);
-    return 0;
+    return ret;
 }
 
 // 向指定进程发送信号
@@ -292,10 +315,9 @@ int signal_task_has_unblocked(void *task) {
     if (__atomic_load_n(&t->exit_pending, __ATOMIC_ACQUIRE))
         return 1;
     signal_state_t *ss = (signal_state_t *)t->signals;
-    uint64_t deliverable = (ss->pending | t->thread_pending) & ~t->sig_blocked;
-    if (!deliverable)
-        return 0;
-
+    uint64_t flags = spin_lock_irqsave(&ss->lock);
+    uint64_t deliverable = signal_deliverable_locked(t, ss);
+    int result = 0;
     for (int sig = 1; sig < NSIG; sig++) {
         if (!(deliverable & signal_mask_bit(sig)))
             continue;
@@ -304,9 +326,198 @@ int signal_task_has_unblocked(void *task) {
             continue;
         if (sa->sa_handler == SIG_DFL && signal_default_ignore(sig))
             continue;
-        return 1;
+        result = 1;
+        break;
     }
+    spin_unlock_irqrestore(&ss->lock, flags);
+    return result;
+}
+
+int signal_task_has_fatal(void *task)
+{
+    task_t *t = (task_t *)task;
+    if (!t || !t->signals)
+        return 0;
+    signal_state_t *ss = (signal_state_t *)t->signals;
+    uint64_t flags = spin_lock_irqsave(&ss->lock);
+    uint64_t deliverable = signal_deliverable_locked(t, ss);
+    int fatal = 0;
+    for (int sig = 1; sig < NSIG; sig++) {
+        if ((deliverable & signal_mask_bit(sig)) &&
+            signal_action_fatal_locked(t, ss, sig)) {
+            fatal = 1;
+            break;
+        }
+    }
+    spin_unlock_irqrestore(&ss->lock, flags);
+    return fatal;
+}
+
+int signal_task_should_restart(void *task)
+{
+    task_t *t = (task_t *)task;
+    if (!t || !t->signals)
+        return 0;
+    signal_state_t *ss = (signal_state_t *)t->signals;
+    uint64_t flags = spin_lock_irqsave(&ss->lock);
+    uint64_t deliverable = signal_deliverable_locked(t, ss);
+    int restart = deliverable != 0;
+    for (int sig = 1; sig < NSIG && restart; sig++) {
+        if (!(deliverable & signal_mask_bit(sig)))
+            continue;
+        sigaction_t *sa = &ss->actions[sig];
+        if (sa->sa_handler == SIG_IGN ||
+            (sa->sa_handler == SIG_DFL && signal_default_ignore(sig)))
+            continue;
+        if (sa->sa_handler != SIG_DFL && !(sa->sa_flags & SA_RESTART))
+            restart = 0;
+    }
+    spin_unlock_irqrestore(&ss->lock, flags);
+    return restart;
+}
+
+int signal_task_user_handler_available(void *task, int signum)
+{
+    task_t *t = (task_t *)task;
+    if (!t || !t->signals || !t->pgdir ||
+        signum <= 0 || signum >= NSIG)
+        return 0;
+    signal_state_t *ss = (signal_state_t *)t->signals;
+    uint64_t flags = spin_lock_irqsave(&ss->lock);
+    sigaction_t action = ss->actions[signum];
+    int available = action.sa_handler != SIG_DFL &&
+                    action.sa_handler != SIG_IGN &&
+                    !(t->sig_blocked & signal_mask_bit(signum));
+    spin_unlock_irqrestore(&ss->lock, flags);
+    return available;
+}
+
+int signal_task_sigchld_auto_reap(void *task)
+{
+    task_t *t = (task_t *)task;
+    if (!t || !t->signals)
+        return 0;
+    signal_state_t *ss = (signal_state_t *)t->signals;
+    uint64_t flags = spin_lock_irqsave(&ss->lock);
+    sigaction_t action = ss->actions[SIGCHLD];
+    spin_unlock_irqrestore(&ss->lock, flags);
+    return action.sa_handler == SIG_IGN ||
+           (action.sa_flags & SA_NOCLDWAIT);
+}
+
+int signal_task_sigchld_no_cldstop(void *task)
+{
+    task_t *t = (task_t *)task;
+    if (!t || !t->signals)
+        return 0;
+    signal_state_t *ss = (signal_state_t *)t->signals;
+    uint64_t flags = spin_lock_irqsave(&ss->lock);
+    int no_cldstop = (ss->actions[SIGCHLD].sa_flags & SA_NOCLDSTOP) != 0;
+    spin_unlock_irqrestore(&ss->lock, flags);
+    return no_cldstop;
+}
+
+int signal_task_continue_pending(void *task)
+{
+    task_t *t = (task_t *)task;
+    if (!t || !t->signals)
+        return 0;
+    signal_state_t *ss = (signal_state_t *)t->signals;
+    uint64_t flags = spin_lock_irqsave(&ss->lock);
+    int pending = ((ss->pending | t->thread_pending) &
+                   signal_mask_bit(SIGCONT)) != 0;
+    spin_unlock_irqrestore(&ss->lock, flags);
+    return pending;
+}
+
+int signal_task_set_temporary_mask(void *task, uint64_t new_mask,
+                                   uint64_t *old_mask)
+{
+    task_t *t = (task_t *)task;
+    if (!t || !t->signals || !old_mask)
+        return -EINVAL;
+    signal_state_t *ss = (signal_state_t *)t->signals;
+    uint64_t flags = spin_lock_irqsave(&ss->lock);
+    *old_mask = t->sig_blocked;
+    t->sig_blocked = new_mask &
+        ~(signal_mask_bit(SIGKILL) | signal_mask_bit(SIGSTOP));
+    spin_unlock_irqrestore(&ss->lock, flags);
     return 0;
+}
+
+void signal_task_restore_mask(void *task, uint64_t old_mask)
+{
+    task_t *t = (task_t *)task;
+    if (!t || !t->signals)
+        return;
+    signal_state_t *ss = (signal_state_t *)t->signals;
+    uint64_t flags = spin_lock_irqsave(&ss->lock);
+    t->sig_blocked = old_mask;
+    spin_unlock_irqrestore(&ss->lock, flags);
+}
+
+void signal_task_defer_mask_restore(void *task, uint64_t old_mask)
+{
+    task_t *t = (task_t *)task;
+    if (!t || !t->signals)
+        return;
+    signal_state_t *ss = (signal_state_t *)t->signals;
+    uint64_t flags = spin_lock_irqsave(&ss->lock);
+    t->sigsuspend_old_blocked = old_mask;
+    t->sigsuspend_active = 1;
+    spin_unlock_irqrestore(&ss->lock, flags);
+}
+
+void signal_task_restore_sigsuspend(void *task)
+{
+    task_t *t = (task_t *)task;
+    if (!t || !t->signals)
+        return;
+    signal_state_t *ss = (signal_state_t *)t->signals;
+    uint64_t flags = spin_lock_irqsave(&ss->lock);
+    if (t->sigsuspend_active && !t->sig_handling) {
+        t->sig_blocked = t->sigsuspend_old_blocked;
+        t->sigsuspend_active = 0;
+    }
+    spin_unlock_irqrestore(&ss->lock, flags);
+}
+
+void signal_exec_reset(void *task)
+{
+    task_t *t = (task_t *)task;
+    if (!t || !t->signals)
+        return;
+    signal_state_t *ss = (signal_state_t *)t->signals;
+    uint64_t flags = spin_lock_irqsave(&ss->lock);
+    for (int sig = 1; sig < NSIG; sig++) {
+        if (ss->actions[sig].sa_handler != SIG_IGN &&
+            ss->actions[sig].sa_handler != SIG_DFL)
+            ss->actions[sig].sa_handler = SIG_DFL;
+        ss->actions[sig].sa_flags = 0;
+        ss->actions[sig].sa_mask = 0;
+    }
+    ss->pending = 0;
+    memset(ss->pending_has_info, 0, sizeof(ss->pending_has_info));
+    memset(ss->pending_info, 0, sizeof(ss->pending_info));
+    t->sig_handling = 0;
+    t->thread_pending = 0;
+    t->sigsuspend_active = 0;
+    t->sigwait_active = 0;
+    t->sigwait_mask = 0;
+    spin_unlock_irqrestore(&ss->lock, flags);
+}
+
+uint64_t signal_task_pending_blocked(void *task)
+{
+    task_t *t = (task_t *)task;
+    if (!t || !t->signals)
+        return 0;
+    signal_state_t *ss = (signal_state_t *)t->signals;
+    uint64_t flags = spin_lock_irqsave(&ss->lock);
+    uint64_t pending =
+        (ss->pending | t->thread_pending) & t->sig_blocked;
+    spin_unlock_irqrestore(&ss->lock, flags);
+    return pending;
 }
 
 // 传递信号（内核线程使用）
@@ -315,31 +526,37 @@ void signal_deliver(void) {
     if (!t || !t->signals) return;
 
     signal_state_t *ss = (signal_state_t *)t->signals;
-    uint64_t deliverable = (ss->pending | t->thread_pending) & ~t->sig_blocked;
-    if (!deliverable) return;
-
     int is_user = t->pgdir != NULL;
     if (is_user)
         return;
 
-    for (int sig = 1; sig < NSIG; sig++) {
-        if (!(deliverable & (1ULL << sig))) continue;
+    for (;;) {
+        uint64_t flags = spin_lock_irqsave(&ss->lock);
+        uint64_t deliverable = signal_deliverable_locked(t, ss);
+        int sig = 0;
+        for (int candidate = 1; candidate < NSIG; candidate++) {
+            if (deliverable & signal_mask_bit(candidate)) {
+                sig = candidate;
+                break;
+            }
+        }
+        if (!sig) {
+            spin_unlock_irqrestore(&ss->lock, flags);
+            return;
+        }
 
-        sigaction_t *sa = &ss->actions[sig];
-
-        if (sa->sa_handler == SIG_IGN) {
-            ss->pending &= ~signal_mask_bit(sig);
-            t->thread_pending &= ~signal_mask_bit(sig);
-            ss->pending_has_info[sig] = 0;
+        sigaction_t action = ss->actions[sig];
+        if (action.sa_handler == SIG_IGN ||
+            (action.sa_handler == SIG_DFL && signal_default_ignore(sig))) {
+            signal_clear_pending_locked(t, ss, sig);
+            spin_unlock_irqrestore(&ss->lock, flags);
             continue;
         }
 
-        if (sa->sa_handler == SIG_DFL) {
-            ss->pending &= ~signal_mask_bit(sig);
-            t->thread_pending &= ~signal_mask_bit(sig);
-            ss->pending_has_info[sig] = 0;
-            if (signal_default_ignore(sig))
-                continue;
+        signal_clear_pending_locked(t, ss, sig);
+        spin_unlock_irqrestore(&ss->lock, flags);
+
+        if (action.sa_handler == SIG_DFL) {
             if (signal_default_stop(sig)) {
                 proc_sched_stop_current(sig);
                 continue;
@@ -347,14 +564,8 @@ void signal_deliver(void) {
             proc_exit_group(-signal_wait_status(sig));
         }
 
-        if (is_user) {
-            continue;
-        }
-
-        ss->pending &= ~signal_mask_bit(sig);
-        t->thread_pending &= ~signal_mask_bit(sig);
-        ss->pending_has_info[sig] = 0;
-        void (*handler)(int) = (void (*)(int))(uintptr_t)sa->sa_handler;
+        void (*handler)(int) =
+            (void (*)(int))(uintptr_t)action.sa_handler;
         handler(sig);
     }
 }
@@ -375,43 +586,44 @@ void signal_deliver_user(trap_context_t *ctx) {
     if (!t || !t->signals || !t->pgdir) return;
 
     signal_state_t *ss = (signal_state_t *)t->signals;
-    uint64_t deliverable = (ss->pending | t->thread_pending) & ~t->sig_blocked;
-    if (!deliverable) return;
+    for (;;) {
+        uint64_t flags = spin_lock_irqsave(&ss->lock);
+        uint64_t deliverable = signal_deliverable_locked(t, ss);
+        int sig = 0;
+        for (int candidate = 1; candidate < NSIG; candidate++) {
+            if (deliverable & signal_mask_bit(candidate)) {
+                sig = candidate;
+                break;
+            }
+        }
+        if (!sig) {
+            spin_unlock_irqrestore(&ss->lock, flags);
+            return;
+        }
 
-    for (int sig = 1; sig < NSIG; sig++) {
-        if (!(deliverable & (1ULL << sig))) continue;
-
-        sigaction_t *sa = &ss->actions[sig];
-
-        if (sa->sa_handler == SIG_IGN) {
-            ss->pending &= ~signal_mask_bit(sig);
-            t->thread_pending &= ~signal_mask_bit(sig);
-            ss->pending_has_info[sig] = 0;
+        sigaction_t action = ss->actions[sig];
+        if (action.sa_handler == SIG_IGN ||
+            (action.sa_handler == SIG_DFL && signal_default_ignore(sig))) {
+            signal_clear_pending_locked(t, ss, sig);
             if (t->sigsuspend_active) {
                 t->sig_blocked = t->sigsuspend_old_blocked;
                 t->sigsuspend_active = 0;
             }
+            spin_unlock_irqrestore(&ss->lock, flags);
             continue;
         }
 
-        if (sa->sa_handler == SIG_DFL) {
-            ss->pending &= ~signal_mask_bit(sig);
-            t->thread_pending &= ~signal_mask_bit(sig);
-            ss->pending_has_info[sig] = 0;
-            if (signal_default_ignore(sig)) {
-                if (t->sigsuspend_active) {
-                    t->sig_blocked = t->sigsuspend_old_blocked;
-                    t->sigsuspend_active = 0;
-                }
-                continue;
-            }
+        if (action.sa_handler == SIG_DFL) {
+            signal_clear_pending_locked(t, ss, sig);
             if (signal_default_stop(sig)) {
                 t->sig_blocked = t->sigsuspend_active ?
                               t->sigsuspend_old_blocked : t->sig_blocked;
                 t->sigsuspend_active = 0;
+                spin_unlock_irqrestore(&ss->lock, flags);
                 proc_sched_stop_current(sig);
                 continue;
             }
+            spin_unlock_irqrestore(&ss->lock, flags);
             proc_exit_group(-signal_wait_status(sig));
         }
 
@@ -420,12 +632,10 @@ void signal_deliver_user(trap_context_t *ctx) {
         if (has_queued_info)
             memcpy(&queued_info, ss->pending_info[sig], sizeof(queued_info));
 
-        ss->pending &= ~signal_mask_bit(sig);
-        t->thread_pending &= ~signal_mask_bit(sig);
-        ss->pending_has_info[sig] = 0;
+        signal_clear_pending_locked(t, ss, sig);
 
-        if (sa->sa_flags & SA_RESETHAND)
-            sa->sa_handler = SIG_DFL;
+        if (action.sa_flags & SA_RESETHAND)
+            ss->actions[sig].sa_handler = SIG_DFL;
 
         t->sig_saved_ctx = *ctx;
         uint64_t old_blocked = t->sigsuspend_active ?
@@ -438,15 +648,16 @@ void signal_deliver_user(trap_context_t *ctx) {
          * two operations cannot re-enter the handler path and corrupt
          * sig_saved_ctx.  Once sig_handling is set, the signal must
          * already be blocked to prevent reentrant delivery. */
-        t->sig_blocked |= sa->sa_mask;
-        if (!(sa->sa_flags & SA_NODEFER))
+        t->sig_blocked |= action.sa_mask;
+        if (!(action.sa_flags & SA_NODEFER))
             t->sig_blocked |= signal_mask_bit(sig);
 
         t->sig_handling = sig;
+        spin_unlock_irqrestore(&ss->lock, flags);
 
         uint64_t sp = TRAP_CTX_SP(ctx);
 
-        if ((sa->sa_flags & SA_ONSTACK) &&
+        if ((action.sa_flags & SA_ONSTACK) &&
             t->sigaltstack.ss_flags == 0 &&
             t->sigaltstack.ss_sp != NULL &&
             t->sigaltstack.ss_size >= MINSIGSTKSZ) {
@@ -480,10 +691,10 @@ void signal_deliver_user(trap_context_t *ctx) {
         signal_make_page_exec(tramp_addr);
 
         TRAP_CTX_SP(ctx) = sp;
-        TRAP_CTX_EPC(ctx) = sa->sa_handler;
+        TRAP_CTX_EPC(ctx) = action.sa_handler;
         TRAP_CTX_ARG0(ctx) = sig;
 
-        if (sa->sa_flags & SA_SIGINFO) {
+        if (action.sa_flags & SA_SIGINFO) {
             TRAP_CTX_ARG1(ctx) = sp + arch_sigframe_info_offset();
             TRAP_CTX_ARG2(ctx) = sp + arch_sigframe_uc_offset();
         }
@@ -501,12 +712,15 @@ int64_t sys_rt_sigreturn_impl(trap_context_t *ctx) {
     if (copy_from_user(&frame, (void *)sp, sizeof(frame)) < 0)
         return -EFAULT;
 
-    t->sig_blocked = arch_user_sigset_to_kernel(arch_ucontext_sigmask_const_ptr(arch_sigframe_ucontext_ptr(&frame)));
+    signal_state_t *ss = (signal_state_t *)t->signals;
+    uint64_t flags = spin_lock_irqsave(&ss->lock);
+    t->sig_blocked = arch_user_sigset_to_kernel(
+        arch_ucontext_sigmask_const_ptr(arch_sigframe_ucontext_ptr(&frame)));
+    t->sig_handling = 0;
+    spin_unlock_irqrestore(&ss->lock, flags);
 
     arch_signal_restore_mcontext(ctx, &arch_sigframe_ucontext_ptr(&frame)->uc_mcontext);
     arch_signal_restore_frame_extra(ctx, arch_sigframe_extra_ptr(&frame));
-
-    t->sig_handling = 0;
     return 0;
 }
 
@@ -520,12 +734,16 @@ int sys_sigaction_impl(int signum, const void *act, void *oldact, size_t sigsets
     if (!t || !t->signals) return -EINVAL;
     signal_state_t *ss = (signal_state_t *)t->signals;
 
+    arch_user_sigaction_t oldk;
+    memset(&oldk, 0, sizeof(oldk));
     if (oldact) {
-        arch_user_sigaction_t oldk;
-        memset(&oldk, 0, sizeof(oldk));
-        arch_sigaction_set_handler(&oldk, ss->actions[signum].sa_handler);
-        arch_sigaction_set_flags(&oldk, (uint64_t)(uint32_t)ss->actions[signum].sa_flags);
-        arch_sigaction_set_mask(&oldk, ss->actions[signum].sa_mask);
+        uint64_t flags = spin_lock_irqsave(&ss->lock);
+        sigaction_t old_action = ss->actions[signum];
+        spin_unlock_irqrestore(&ss->lock, flags);
+        arch_sigaction_set_handler(&oldk, old_action.sa_handler);
+        arch_sigaction_set_flags(
+            &oldk, (uint64_t)(uint32_t)old_action.sa_flags);
+        arch_sigaction_set_mask(&oldk, old_action.sa_mask);
         if (copy_to_user(oldact, &oldk, sizeof(oldk)) < 0)
             return -EFAULT;
     }
@@ -533,9 +751,11 @@ int sys_sigaction_impl(int signum, const void *act, void *oldact, size_t sigsets
         arch_user_sigaction_t ukact;
         if (copy_from_user(&ukact, act, sizeof(ukact)) < 0)
             return -EFAULT;
+        uint64_t flags = spin_lock_irqsave(&ss->lock);
         ss->actions[signum].sa_handler = arch_sigaction_get_handler(&ukact);
         ss->actions[signum].sa_mask = arch_sigaction_get_mask(&ukact);
         ss->actions[signum].sa_flags = (int)arch_sigaction_get_flags(&ukact);
+        spin_unlock_irqrestore(&ss->lock, flags);
     }
     return 0;
 }
@@ -546,8 +766,12 @@ int sys_sigprocmask_impl(int how, const void *set, void *oldset, size_t sigsetsi
 
     task_t *t = proc_current();
     if (!t || !t->signals) return -EINVAL;
+    signal_state_t *ss = (signal_state_t *)t->signals;
     if (oldset) {
-        arch_sigset_t oldmask = arch_user_sigset_from_kernel(t->sig_blocked);
+        uint64_t flags = spin_lock_irqsave(&ss->lock);
+        uint64_t blocked = t->sig_blocked;
+        spin_unlock_irqrestore(&ss->lock, flags);
+        arch_sigset_t oldmask = arch_user_sigset_from_kernel(blocked);
         if (copy_to_user(oldset, &oldmask, sizeof(oldmask)) < 0)
             return -EFAULT;
     }
@@ -559,11 +783,15 @@ int sys_sigprocmask_impl(int how, const void *set, void *oldset, size_t sigsetsi
     uint64_t mask = arch_user_sigset_to_kernel(&usermask);
     mask &= ~(signal_mask_bit(SIGKILL) | signal_mask_bit(SIGSTOP));
 
+    uint64_t flags = spin_lock_irqsave(&ss->lock);
     switch (how) {
         case SIG_BLOCK:   t->sig_blocked |=  mask; break;
         case SIG_UNBLOCK: t->sig_blocked &= ~mask; break;
         case SIG_SETMASK: t->sig_blocked  =  mask; break;
-        default: return -EINVAL;
+        default:
+            spin_unlock_irqrestore(&ss->lock, flags);
+            return -EINVAL;
     }
+    spin_unlock_irqrestore(&ss->lock, flags);
     return 0;
 }

@@ -15,6 +15,7 @@
 | 外部依赖 | `make check-external-dependency-boundary` |
 | 架构边界 | `make check-arch-boundary` |
 | SMP 平台边界 | `make check-smp-platform-boundary` |
+| 信号、停止与退出边界 | `make check-signal-exit-boundary` |
 
 `BUILD_MATRIX_GATE_CONTRACT`：bringup 构建覆盖 `riscv64`、`loongarch64`、`aarch64` 和 `x86_64`；用户态构建通过 `make check-user-build` 覆盖同一组架构。
 
@@ -82,6 +83,11 @@
 - **How to run**: `make smoke-abi-linux`
 - **What it checks**: 构建 `riscv64 ABI=linux BRINGUP=0` 的镜像，在 QEMU 中运行 `syscall_smoke` 与 `poweroff`，确认串口日志出现 `SYSCALL_SMOKE: PASS`。
 - **When it fails**: 检查 `.kernel-build/smoke/abi-linux-riscv64.log` 中是否因 `SYSCALL_SMOKE: PASS` 未出现而超时；修复 `user/cmds/syscall_smoke.c` 或 Linux ABI 实现。
+
+### 信号、停止与退出
+- **How to run**: `make check-signal-exit-boundary`；完整步骤五本地矩阵运行 `make check-proc-step5-local`。
+- **What it checks**: 检查 Park mode 与普通/致命/退出唤醒原因的映射、`signal_state.lock` 所有权、`STOPPED` 的显式恢复路径和远程退出安全边界；禁止信号或退出路径通过 `proc_make_ready()` 绕过 token；确认 `proc_stress` 覆盖停止态隔离、`SIGCONT`、停止态 `SIGKILL`、`sigsuspend` 交接和 eventfd 信号中断。
+- **When it fails**: 先运行 `make PYTHON='conda run --no-capture-output -n a20os python' NETDEV_USER='-netdev user,id=net' smoke-proc-stress` 并查看 `.kernel-build/smoke/proc-stress-riscv64.log`；再检查 `kernel/proc/{signal,park,sched,exit}.c` 的锁顺序与唤醒原因。
 
 ### Native ABI 测试
 - **How to run**: `make native-minimal` 或 `make native-test` 生成并运行原生测试；`make smoke-native-handle` 在 QEMU 中运行 handle dup/transfer 覆盖。`user/tests/test_liba20c.c` 是 liba20c 内部测试源文件，随 `native-test` 或用户态构建编译。

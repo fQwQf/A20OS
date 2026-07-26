@@ -83,10 +83,7 @@ static int deliver_user_sync_signal(trap_context_t *ctx, int sig, int fatal_code
         proc_exit_group(fatal_code);
     }
 
-    signal_state_t *ss = (signal_state_t *)cur->signals;
-    sigaction_t *sa = &ss->actions[sig];
-    if (sa->sa_handler == SIG_DFL || sa->sa_handler == SIG_IGN ||
-        (cur->sig_blocked & signal_mask_bit(sig))) {
+    if (!signal_task_user_handler_available(cur, sig)) {
         printf("FATAL: pid=%d signal=%d abi=%d pc=0x%lx sp=0x%lx\n",
                cur->pid, sig, cur->abi_mode,
                (unsigned long)TRAP_CTX_EPC(ctx),
@@ -103,13 +100,7 @@ static int user_sync_signal_is_handled(task_t *task, int sig) {
     if (!task || !task->signals || !task->pgdir)
         return 0;
 
-    signal_state_t *ss = (signal_state_t *)task->signals;
-    sigaction_t *sa = &ss->actions[sig];
-    if (sa->sa_handler == SIG_DFL || sa->sa_handler == SIG_IGN ||
-        (task->sig_blocked & signal_mask_bit(sig)))
-        return 0;
-
-    return 1;
+    return signal_task_user_handler_available(task, sig);
 }
 
 void trap_handler(trap_context_t *ctx) {

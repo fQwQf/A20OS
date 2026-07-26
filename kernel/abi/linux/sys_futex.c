@@ -240,7 +240,8 @@ static int futex_wait_on(int *uaddr, int expected, void *timeout, uint32_t bitse
     spin_unlock_irqrestore(&g_futex_lock, flags);
     proc_put(waiter_ref);
 
-    if (reason == PROC_WAKE_SIGNAL || signal_task_has_unblocked(t))
+    if (proc_wake_reason_is_task_interrupt(reason) ||
+        signal_task_has_unblocked(t))
         return -ERESTARTSYS;
     if (reason == PROC_WAKE_TIMEOUT)
         return -ETIMEDOUT;

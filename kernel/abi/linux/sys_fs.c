@@ -64,17 +64,15 @@ static int linux_poll_apply_sigmask(task_t *t, void *sigmask,
         return -EFAULT;
 
     *saved_ss = (signal_state_t *)t->signals;
-    *saved_blocked = t->sig_blocked;
-    t->sig_blocked = signal_mask_from_user(user_mask) &
-        ~(signal_mask_bit(SIGKILL) | signal_mask_bit(SIGSTOP));
-    return 0;
+    return signal_task_set_temporary_mask(
+        t, signal_mask_from_user(user_mask), saved_blocked);
 }
 
 static void linux_poll_restore_sigmask(task_t *t, signal_state_t *saved_ss,
                                        uint64_t saved_blocked)
 {
     if (t && saved_ss)
-        t->sig_blocked = saved_blocked;
+        signal_task_restore_mask(t, saved_blocked);
 }
 
 static void linux_poll_defer_sigmask_restore(task_t *t,
@@ -83,8 +81,7 @@ static void linux_poll_defer_sigmask_restore(task_t *t,
 {
     if (!t || !saved_ss)
         return;
-    t->sigsuspend_old_blocked = saved_blocked;
-    t->sigsuspend_active = 1;
+    signal_task_defer_mask_restore(t, saved_blocked);
 }
 
 static int64_t read_into_user(vfile_t *vf, char *buf, size_t count)
@@ -920,17 +917,18 @@ int64_t sys_pselect6(int nfds, void *readfds, void *writefds,
                 return -EFAULT;
             if (!t->signals) return -EINVAL;
             saved_ss = (signal_state_t *)t->signals;
-            saved_blocked = t->sig_blocked;
-            t->sig_blocked = signal_mask_from_user(user_mask) &
-                ~(signal_mask_bit(SIGKILL) | signal_mask_bit(SIGSTOP));
+            int mask_ret = signal_task_set_temporary_mask(
+                t, signal_mask_from_user(user_mask), &saved_blocked);
+            if (mask_ret < 0)
+                return mask_ret;
         }
     }
-#define PSELECT_RETURN(v) do { if (saved_ss) t->sig_blocked = saved_blocked; return (v); } while (0)
+#define PSELECT_RETURN(v) do { \
+    if (saved_ss) signal_task_restore_mask(t, saved_blocked); \
+    return (v); \
+} while (0)
 #define PSELECT_SIGNAL_RETURN(v) do { \
-    if (saved_ss) { \
-        t->sigsuspend_old_blocked = saved_blocked; \
-        t->sigsuspend_active = 1; \
-    } \
+    if (saved_ss) signal_task_defer_mask_restore(t, saved_blocked); \
     return (v); \
 } while (0)
     int yield_budget = LINUX_POLL_ACTIVE_YIELDS;

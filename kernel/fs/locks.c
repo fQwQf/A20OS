@@ -73,7 +73,8 @@ static int fs_lock_wait(uint64_t table_flags)
     }
     wait_queue_unlink(&g_file_lock_waiters, &entry);
     proc_park_finish(token);
-    return reason == PROC_WAKE_SIGNAL || signal_task_has_unblocked(cur) ?
+    return proc_wake_reason_is_task_interrupt(reason) ||
+           signal_task_has_unblocked(cur) ?
            -ERESTARTSYS : 0;
 }
 

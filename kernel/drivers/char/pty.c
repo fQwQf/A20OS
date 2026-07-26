@@ -228,7 +228,8 @@ static int pty_wait_interruptible_locked(pty_pair_t *pty, wait_queue_t *wq,
     *pty_flags = spin_lock_irqsave(&pty->lock);
     (*waiting)--;
 
-    if (reason == PROC_WAKE_SIGNAL || signal_task_has_unblocked(task))
+    if (proc_wake_reason_is_task_interrupt(reason) ||
+        signal_task_has_unblocked(task))
         return -ERESTARTSYS;
     return 0;
 }

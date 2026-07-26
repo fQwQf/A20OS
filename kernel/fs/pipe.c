@@ -81,7 +81,8 @@ static int pipe_wait_interruptible_locked(pipe_buf_t *pb, wait_queue_t *wq,
     proc_park_finish(token);
     spin_lock(&pb->lock);
 
-    if (reason == PROC_WAKE_SIGNAL || signal_task_has_unblocked(t))
+    if (proc_wake_reason_is_task_interrupt(reason) ||
+        signal_task_has_unblocked(t))
         return -ERESTARTSYS;
     return 0;
 }

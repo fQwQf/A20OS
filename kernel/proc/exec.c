@@ -554,22 +554,7 @@ static int exec_install_process(task_t *t,
     proc_set_name(t, base ? base + 1 : t->exec_path);
 
     /* ---- 5. Reset signal handlers (POSIX exec semantics) ---- */
-    if (t->signals) {
-        signal_state_t *ss = (signal_state_t *)t->signals;
-        for (int sig = 1; sig < NSIG; sig++) {
-            if (ss->actions[sig].sa_handler != SIG_IGN &&
-                ss->actions[sig].sa_handler != SIG_DFL)
-                ss->actions[sig].sa_handler = SIG_DFL;
-            ss->actions[sig].sa_flags  = 0;
-            ss->actions[sig].sa_mask   = 0;
-        }
-        ss->pending = 0;
-        memset(ss->pending_has_info, 0, sizeof(ss->pending_has_info));
-        memset(ss->pending_info, 0, sizeof(ss->pending_info));
-    }
-    t->sig_handling       = 0;
-    t->thread_pending     = 0;
-    t->sigsuspend_active  = 0;
+    signal_exec_reset(t);
 
     /* ---- 6. Set up trap context for return to user ---- */
     uint64_t saved_kernel_sp = (uint64_t)(uintptr_t)t->kstack_base + KERNEL_STACK_SIZE;

@@ -7,6 +7,8 @@
 
 #define WNOHANG     1
 #define WUNTRACED   2
+#define WCONTINUED  8
+#define WNOWAIT     0x1000000
 #define __WNOTHREAD 0x20000000
 
 static void wait_accumulate_child_time(task_t *parent, task_t *child)
@@ -85,6 +87,10 @@ int proc_wait4(int pid, int *status, int options)
                         *status = (-code) & 0xFF;
                 }
                 int child_pid = child->pid;
+                if (options & WNOWAIT) {
+                    spin_unlock_irqrestore(&proc_lock, lock_flags);
+                    return child_pid;
+                }
                 wait_accumulate_child_time(t, child);
                 task_t *reap_child = proc_get(child);
                 if (!reap_child) {
@@ -97,12 +103,24 @@ int proc_wait4(int pid, int *status, int options)
                 proc_put(reap_child);
                 return child_pid;
             }
-            if ((options & WUNTRACED) && cstate == PROC_STOPPED) {
+            if ((options & WUNTRACED) && cstate == PROC_STOPPED &&
+                child->stop_report_pending) {
                 int sig = __atomic_load_n(&child->exit_code, __ATOMIC_ACQUIRE);
                 int child_pid = child->pid;
                 if (status) {
                     *status = (sig << 8) | 0x7F;
                 }
+                if (!(options & WNOWAIT))
+                    child->stop_report_pending = 0;
+                spin_unlock_irqrestore(&proc_lock, lock_flags);
+                return child_pid;
+            }
+            if ((options & WCONTINUED) && child->continue_report_pending) {
+                int child_pid = child->pid;
+                if (status)
+                    *status = 0xffff;
+                if (!(options & WNOWAIT))
+                    child->continue_report_pending = 0;
                 spin_unlock_irqrestore(&proc_lock, lock_flags);
                 return child_pid;
             }
@@ -138,7 +156,7 @@ int proc_wait4(int pid, int *status, int options)
         uint64_t pf2 = spin_lock_irqsave(&proc_lock);
         t->waiting_for_child = 0;
         spin_unlock_irqrestore(&proc_lock, pf2);
-        if (reason == PROC_WAKE_SIGNAL || sig)
+        if (proc_wake_reason_is_task_interrupt(reason) || sig)
             return -ERESTARTSYS;
     }
 }

@@ -91,6 +91,8 @@ typedef struct proc_vm_stats {
  *     PROC_RUNNING -> PROC_READY     (yield/preemption)
  *     PROC_RUNNING -> PROC_BLOCKED   (wait queue, sleep, child wait, futex)
  *     PROC_BLOCKED -> PROC_READY     (wake, timeout, signal)
+ *     PROC_RUNNING -> PROC_STOPPED   (job-control stop)
+ *     PROC_STOPPED -> PROC_READY     (SIGCONT, fatal signal, or task exit)
  *     PROC_RUNNING/BLOCKED -> PROC_ZOMBIE -> PROC_UNUSED
  *   A task must not be put on a run queue unless its state is PROC_READY, and a
  *   zombie or unused task must never be requeued.
@@ -112,9 +114,10 @@ typedef struct proc_vm_stats {
  *   directly changing state, credentials, fs context, or run-queue fields.
  *
  * TASK_STATE_MUTATION_CONTRACT:
- * - New-task activation and STOPPED-task resumption go through
- *   proc_make_ready(). A parked task is resumed only by proc_try_wake() with
- *   the matching wait token.
+ * - New-task activation goes through proc_make_ready(). STOPPED tasks resume
+ *   only through proc_sched_resume_stopped() for SIGCONT, fatal signal, or
+ *   task exit. A parked task is resumed only by proc_try_wake() with the
+ *   matching wait token and a reason allowed by its wait mode.
  * - Timed or indefinite sleeps go through the Park/Wake protocol or a wait
  *   object. The caller registers object-specific waiter state before commit.
  * - RUNNING is assigned only by context_switch()/sched() after a task has moved
@@ -183,6 +186,8 @@ typedef struct task_t {
     int      waiting_for_child;
     int      exit_pending;
     int      pending_exit_code;
+    int      stop_report_pending;
+    int      continue_report_pending;
 
     struct signal_state *signals;
 
@@ -219,6 +224,8 @@ typedef struct task_t {
     int            sig_handling;
     uint64_t       sigsuspend_old_blocked;
     int            sigsuspend_active;
+    uint64_t       sigwait_mask;
+    int            sigwait_active;
     arch_sigaltstack_t sigaltstack;
     uint64_t       thread_pending;
 

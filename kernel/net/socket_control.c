@@ -151,7 +151,7 @@ int net_accept(int gfd, void *addr, size_t *addrlen, int flags)
         }
         wait_queue_unlink(&s->accept_waitq, &entry);
         proc_park_finish(token);
-        if (reason == PROC_WAKE_SIGNAL ||
+        if (proc_wake_reason_is_task_interrupt(reason) ||
             net_task_has_unblocked_signal(cur))
             return -ERESTARTSYS;
         if (reason == PROC_WAKE_TIMEOUT)

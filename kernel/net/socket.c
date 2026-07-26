@@ -42,12 +42,7 @@ static int sockaddr_family(const void *addr, size_t len) {
 }
 
 int net_task_has_unblocked_signal(task_t *t) {
-    if (!t || !t->signals)
-        return 0;
-    if (__atomic_load_n(&t->exit_pending, __ATOMIC_ACQUIRE))
-        return 1;
-    signal_state_t *ss = (signal_state_t *)t->signals;
-    return ((ss->pending | t->thread_pending) & ~t->sig_blocked) != 0;
+    return signal_task_has_unblocked(t);
 }
 
 int net_socket_wait_expired(net_socket_t *s, uint64_t start, int for_write) {
@@ -599,7 +594,7 @@ int net_recvfrom_meta(int gfd, void *buf, size_t len, int flags,
         }
         wait_queue_unlink(&s->read_waitq, &entry);
         proc_park_finish(token);
-        if (reason == PROC_WAKE_SIGNAL)
+        if (proc_wake_reason_is_task_interrupt(reason))
             return -ERESTARTSYS;
         if (reason == PROC_WAKE_TIMEOUT)
             return -EAGAIN;
