@@ -23,6 +23,7 @@ task_t *proc_task_alloc_storage(void)
         return NULL;
     refcount_set(&t->refs, 1);
     proc_lifetime_note_task_init(1);
+    /* PROC_BLOCKED_ALLOCATION_WHITELIST: unpublished task, no wait token. */
     t->state = PROC_BLOCKED;
     t->dynamic_alloc = 1;
     t->wait_timer_index = -1;

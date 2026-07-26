@@ -783,7 +783,34 @@ check-task-lifetime-boundary:
 		--glob '*.[ch]' --glob '!kernel/external/**'
 	@echo "check-task-lifetime-boundary: PASS"
 
-check-doc-test-gates: check-concurrency-foundation check-smp-platform-boundary check-task-state-boundary check-task-lifetime-boundary check-mm-lock-model check-io-progress-model check-vfs-abstraction check-abi-boundary check-driver-core-model check-external-dependency-boundary check-abi-smoke-gate check-doc-drift
+check-blocking-point-boundary:
+	@rg -q "BLOCKING_POINT_PROTOCOL_AUDIT" docs/testing/blocking-point-audit.md
+	@rg -q "PROC_BLOCKED_ALLOCATION_WHITELIST" kernel/proc/task.c
+	@rg -q "FUTEX_WAIT_RECHECK_PROTOCOL" kernel/abi/linux/sys_futex.c
+	@rg -q "proc_try_wake_locked\(t, t->wait_seq, PROC_WAKE_EVENT\)" kernel/proc/sched.c
+	@! rg -n --pcre2 '\bproc_block_until[[:space:]]*\(' kernel \
+		--glob '*.[ch]' --glob '!kernel/external/**'
+	@bad=$$(rg -n --pcre2 '(?:->|\.)state[[:space:]]*=[[:space:]]*PROC_BLOCKED' \
+		kernel --glob '*.[ch]' --glob '!kernel/external/**' | \
+		rg -v '^kernel/proc/(task|park)\.c:' || true); \
+		test -z "$$bad" || { echo "$$bad"; exit 1; }
+	@bad=$$(rg -n --pcre2 '(?:->|\.)(?:on_rq|cpu_id|rq_next|rq_prev)[[:space:]]*=' \
+		kernel --glob '*.[ch]' --glob '!kernel/external/**' | \
+		rg -v '^kernel/proc/(task|sched)\.c:' || true); \
+		test -z "$$bad" || { echo "$$bad"; exit 1; }
+	@bad=$$(rg -n --pcre2 '\bproc_make_ready[[:space:]]*\(' kernel \
+		--glob '*.c' --glob '!kernel/external/**' | \
+		rg -v '^kernel/(proc/(fork|proc|sched|cg_cpu|signal)\.c|abi/native/sys_core\.c):' || true); \
+		test -z "$$bad" || { echo "$$bad"; exit 1; }
+	@rg -Uq 'typedef struct wait_queue_entry[^{]*\{[^}]*task[^}]*wait_seq' kernel/include/core/sync.h
+	@rg -Uq 'typedef struct futex_waiter[^{]*\{[^}]*task[^}]*wait_seq' kernel/abi/linux/sys_futex.c
+	@rg -Uq 'typedef struct wait_timer[^{]*\{[^}]*task[^}]*wait_seq' kernel/proc/sched.c
+	@rg -Uq 'typedef struct proc_wake_q_item[^{]*\{[^}]*task[^}]*seq' kernel/include/proc/park.h
+	@rg -q "FUTEX_STRESS: unrelated-wake-isolation PASS" user/cmds/futex_stress.c
+	@rg -q "PROC_STRESS: vfork-auto-reap PASS" user/cmds/proc_stress.c
+	@echo "check-blocking-point-boundary: PASS"
+
+check-doc-test-gates: check-concurrency-foundation check-smp-platform-boundary check-task-state-boundary check-task-lifetime-boundary check-blocking-point-boundary check-mm-lock-model check-io-progress-model check-vfs-abstraction check-abi-boundary check-driver-core-model check-external-dependency-boundary check-abi-smoke-gate check-doc-drift
 	@rg -q "DOCS_AS_FACT_CONTRACT" docs/testing/testing-gates.md
 	@rg -q "TEST_FIRST_ARCHITECTURE_MATRIX" docs/testing/testing-gates.md
 	@echo "check-doc-test-gates: PASS"
@@ -1443,7 +1470,8 @@ smoke-futex-stress:
 		exit 1; \
 	fi
 
-.PHONY: check-task-lifetime-boundary check-proc-step35 \
+.PHONY: check-task-lifetime-boundary check-blocking-point-boundary \
+	check-proc-step35 check-proc-step4 check-proc-step4-local \
 	check-proc-step35-local step35-rv-debug-1c step35-la-debug-1c \
 	step35-rv-release-8c step35-la-release-8c _step35_smoke
 
@@ -1491,9 +1519,12 @@ _step35_smoke: dev-build
 	for marker in \
 		'SCHED_STRESS: PASS' \
 		'FUTEX_STRESS: PASS' \
+		'FUTEX_STRESS: unrelated-wake-isolation PASS' \
 		'PROC_STRESS: PASS' \
+		'PROC_STRESS: vfork-auto-reap PASS' \
 		'IO_EVENT_TEST: PASS' \
 		'VFS_STRESS: PASS' \
+		'SOCKET_STRESS: PASS' \
 		'LIFETIME_STRESS: PASS' \
 		'lifetime_errors: 0' \
 		'System is going down for power-off NOW.'; do \
@@ -1526,6 +1557,14 @@ check-proc-step35-local: check-task-state-boundary \
 check-proc-step35: check-proc-step35-local \
 	final-eval-rv-cagent final-eval-la-cagent
 	@echo "check-proc-step35: PASS"
+
+check-proc-step4-local: check-blocking-point-boundary check-proc-step35-local
+	@git diff --check
+	@echo "check-proc-step4-local: PASS"
+
+check-proc-step4: check-proc-step4-local \
+	final-eval-rv-cagent final-eval-la-cagent
+	@echo "check-proc-step4: PASS"
 
 smoke-socket-stress:
 	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
