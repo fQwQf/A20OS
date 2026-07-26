@@ -1487,7 +1487,10 @@ _contest_build: $(KERNEL_ELF) $(USER_BUILD_STAMP) $(NATIVE_BUILD_STAMP)
 	cp $(KERNEL_ELF) $(KERNEL_OUT)
 	@echo "  -> $(KERNEL_OUT) + $(DISK_OUT)"
 
-_contest_disk: $(USER_BUILD_STAMP)
+_contest_disk: $(USER_BUILD_STAMP) \
+		user/contest_init/contest.sh \
+		user/contest_init/run_ltp_resume.sh \
+		user/contest_init/ltp_blacklist.txt
 	rm -f $(DISK_OUT)
 	$(MKFS_FAT) -C -F 32 $(DISK_OUT) 131072
 	@set -e; \
@@ -1582,7 +1585,11 @@ $(NATIVE_BUILD_STAMP): $(USER_BUILD_STAMP) force_native_build
 
 fs_img: $(FS_TEST_IMG)
 
-$(FAT32_IMG): $(USER_BUILD_STAMP) $(NATIVE_BUILD_STAMP)
+$(FAT32_IMG): $(USER_BUILD_STAMP) $(NATIVE_BUILD_STAMP) \
+		user/contest_init/contest.sh \
+		user/contest_init/final_contest.sh \
+		user/contest_init/run_ltp_resume.sh \
+		user/contest_init/ltp_blacklist.txt
 	@echo "Building FAT32 image..."
 	@mkdir -p $(BUILD_DIR)
 	dd if=/dev/zero of=$(FAT32_IMG) bs=1048576 count=$(FAT32_IMAGE_MB)
@@ -1607,6 +1614,7 @@ $(FAT32_IMG): $(USER_BUILD_STAMP) $(NATIVE_BUILD_STAMP)
 	@printf 'ID=A20OS\nNAME="A20OS"\nPRETTY_NAME="A20OS"\nVERSION="0.2"\nVERSION_ID="0.2"\n' | mcopy -o -i $(FAT32_IMG) - ::/etc/os-release
 	@printf 'Hello from A20OS FAT32!\n' | mcopy -i $(FAT32_IMG) - ::/test.txt
 	mcopy -o -i $(FAT32_IMG) user/contest_init/contest.sh ::/contest.sh
+	mcopy -o -i $(FAT32_IMG) user/contest_init/final_contest.sh ::/final_contest.sh
 	mcopy -o -i $(FAT32_IMG) user/contest_init/run_ltp_resume.sh ::/run_ltp_resume.sh
 	mcopy -o -i $(FAT32_IMG) user/contest_init/ltp_blacklist.txt ::/etc/ltp_blacklist.txt
 
