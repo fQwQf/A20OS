@@ -7,6 +7,14 @@
 #define SCHED_LEVELS 8
 #define SCHED_NO_DEADLINE (~0ULL)
 
+#ifndef CONFIG_DEBUG_SCHED_STATE
+#ifdef DEBUG
+#define CONFIG_DEBUG_SCHED_STATE 1
+#else
+#define CONFIG_DEBUG_SCHED_STATE 0
+#endif
+#endif
+
 #define SCHED_NORMAL   0
 #define SCHED_FIFO     1
 #define SCHED_RR       2

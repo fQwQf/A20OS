@@ -1,5 +1,6 @@
 #include "proc/proc_internal.h"
 #include "core/cpu.h"
+#include "core/panic.h"
 
 /*
  * Current task storage.
@@ -12,12 +13,44 @@
  *   slot exactly once before enabling preemption or taking scheduler IPIs.
  * - proc_set_current() is the only writer for g_cpu_current[cpu]. A context
  *   switch changes exactly the current CPU slot and never another CPU's slot.
+ * - g_cpu_switching_out keeps the old stack owner visible until the replacement
+ *   task calls proc_switch_complete(). That completion is also the only path
+ *   which clears old->on_cpu and publishes a raced READY task to a runqueue.
  * - Cross-CPU wakeup and IPI reschedule tests must prove that cpu_current_id(),
  *   runqueue selection, and current slot lookup agree for the CPU handling the
  *   interrupt.
  */
 static task_t *g_cpu_current[CONFIG_NR_CPUS];
 static task_t *g_cpu_switching_out[CONFIG_NR_CPUS];
+
+/* Caller holds proc_lock whenever a pending outgoing task can exist. */
+static int proc_switch_complete_locked(unsigned cpu)
+{
+    task_t *old =
+        __atomic_load_n(&g_cpu_switching_out[cpu], __ATOMIC_ACQUIRE);
+    if (!old)
+        return 0;
+
+#if CONFIG_DEBUG_SCHED_STATE
+    if (!old->on_cpu || old->owner_cpu != cpu)
+        panic("switch complete: pid=%d on_cpu=%d owner=%u cpu=%u",
+              old->pid, old->on_cpu, old->owner_cpu, cpu);
+#endif
+    old->on_cpu = 0;
+    old->owner_cpu = PROC_CPU_NONE;
+
+    /*
+     * yield and Park/Wake may publish READY while the old task still owns this
+     * CPU. It becomes queueable only after execution has continued on the
+     * replacement stack.
+     */
+    if (old->state == PROC_READY && !old->dispatching && !old->on_rq)
+        proc_runq_enqueue_locked(old);
+    proc_sched_assert_task_locked(old);
+
+    __atomic_store_n(&g_cpu_switching_out[cpu], NULL, __ATOMIC_RELEASE);
+    return old->state == PROC_ZOMBIE;
+}
 
 task_t *proc_current(void)
 {
@@ -27,6 +60,16 @@ task_t *proc_current(void)
 task_t *proc_set_current(task_t *next)
 {
     unsigned cpu = cpu_current_id();
+    /*
+     * Some architectures restore interrupt state in __switch before returning
+     * to the C completion hook. If that incoming task is immediately
+     * preempted, finish the already-inactive predecessor before replacing the
+     * single switching_out slot.
+     */
+    if (__atomic_load_n(&g_cpu_switching_out[cpu], __ATOMIC_ACQUIRE) &&
+        proc_switch_complete_locked(cpu))
+        proc_sched_note_zombie();
+
     task_t *old = g_cpu_current[cpu];
     /* Publish the outgoing task before replacing current. Reapers must keep
      * its task storage and kernel stack alive until the switch completes. */
@@ -38,10 +81,10 @@ task_t *proc_set_current(task_t *next)
 void proc_switch_complete(void)
 {
     unsigned cpu = cpu_current_id();
-    task_t *old = __atomic_load_n(&g_cpu_switching_out[cpu], __ATOMIC_ACQUIRE);
-    int reap = old && __atomic_load_n(&old->state, __ATOMIC_ACQUIRE) == PROC_ZOMBIE;
 
-    __atomic_store_n(&g_cpu_switching_out[cpu], NULL, __ATOMIC_RELEASE);
+    uint64_t flags = spin_lock_irqsave(&proc_lock);
+    int reap = proc_switch_complete_locked(cpu);
+    spin_unlock_irqrestore(&proc_lock, flags);
     if (reap)
         proc_sched_note_zombie();
 }

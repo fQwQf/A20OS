@@ -33,7 +33,8 @@ typedef struct __attribute__((aligned(64))) proc_runq {
  * - Cross-CPU wakeup must hold proc_lock before choosing target cpu_id, then
  *   acquire only the target runqueue lock for enqueue. Reverse order is banned.
  * - context_switch() must be the only path that publishes PROC_RUNNING for a
- *   runnable task; proc_runq_pick_locked() must clear on_rq before that point.
+ *   runnable task; proc_runq_pick_locked() must atomically move on_rq to
+ *   dispatching before that point.
  * - Timer wake, signal wake, futex wake, wait queue wake, fork/exec/wait, and
  *   exit/reap must all preserve TASK_STATE_MUTATION_CONTRACT before NR_CPUS>1
  *   may be enabled without ALLOW_UNVERIFIED_SMP.
@@ -44,13 +45,15 @@ static uint64_t next_wake_scan = SCHED_NO_DEADLINE;
 static uint64_t next_alarm_scan = SCHED_NO_DEADLINE;
 static unsigned sched_zombies_pending;
 
-#ifndef CONFIG_DEBUG_SCHED_STATE
-#ifdef DEBUG
-#define CONFIG_DEBUG_SCHED_STATE 1
-#else
-#define CONFIG_DEBUG_SCHED_STATE 0
-#endif
-#endif
+/*
+ * SCHEDULER_CPU_OWNERSHIP:
+ *   on_rq -> dispatching -> on_cpu -> unowned
+ *
+ * proc_lock serializes scheduler ownership transitions. The selected runqueue
+ * lock is nested below it while queue membership changes. An outgoing task
+ * keeps on_cpu set across __switch; proc_switch_complete() clears ownership
+ * only after the replacement task is executing on its own kernel stack.
+ */
 
 typedef struct wait_timer {
     uint64_t deadline;
@@ -297,8 +300,9 @@ int proc_sched_set(task_t *t, const proc_sched_config_t *config)
         }
         if (!eligible)
             goto invalid;
-        if (proc_task_is_current_any_cpu(t) &&
-            (t->cpu_id >= 32 || !(eligible & (1U << t->cpu_id))))
+        if ((t->on_cpu || t->dispatching) &&
+            (t->owner_cpu >= 32 ||
+             !(eligible & (1U << t->owner_cpu))))
             goto invalid;
     }
 
@@ -325,7 +329,9 @@ int proc_sched_set(task_t *t, const proc_sched_config_t *config)
     }
     if (config->fields & PROC_SCHED_AFFINITY) {
         t->cpus_allowed = config->affinity & SCHED_CPU_MASK_ALL;
-        if (t->cpu_id >= 32 || !(t->cpus_allowed & (1U << t->cpu_id)))
+        if (!t->on_cpu && !t->dispatching &&
+            (t->cpu_id >= 32 ||
+             !(t->cpus_allowed & (1U << t->cpu_id))))
             t->cpu_id = proc_sched_select_cpu(t);
     }
     if (ready)
@@ -423,6 +429,9 @@ void proc_sched_assert_task_locked(task_t *t)
         }
     }
     int on_rq = t->on_rq;
+    int dispatching = t->dispatching;
+    int on_cpu = t->on_cpu;
+    unsigned owner_cpu = t->owner_cpu;
     int state = t->state;
     unsigned task_cpu = t->cpu_id;
     for (unsigned cpu = CONFIG_NR_CPUS; cpu > 0; cpu--)
@@ -439,6 +448,27 @@ void proc_sched_assert_task_locked(task_t *t)
     if (memberships > 1 || (!!on_rq != (memberships == 1)))
         panic("sched invariant: pid=%d on_rq=%d memberships=%u",
               t->pid, on_rq, memberships);
+    if (on_rq && (dispatching || on_cpu))
+        panic("sched invariant: pid=%d on_rq=%d dispatching=%d on_cpu=%d",
+              t->pid, on_rq, dispatching, on_cpu);
+    if (dispatching && on_cpu)
+        panic("sched invariant: pid=%d dispatching and on_cpu owner=%u",
+              t->pid, owner_cpu);
+    if (dispatching && state != PROC_READY)
+        panic("sched invariant: pid=%d dispatching state=%d owner=%u",
+              t->pid, state, owner_cpu);
+    if (!!(dispatching || on_cpu) != (owner_cpu != PROC_CPU_NONE))
+        panic("sched invariant: pid=%d dispatching=%d on_cpu=%d owner=%u",
+              t->pid, dispatching, on_cpu, owner_cpu);
+    if ((dispatching || on_cpu) && owner_cpu >= CONFIG_NR_CPUS)
+        panic("sched invariant: pid=%d invalid owner=%u",
+              t->pid, owner_cpu);
+    if (state == PROC_RUNNING && t != proc_idle_task() && !on_cpu)
+        panic("sched invariant: running pid=%d without cpu ownership",
+              t->pid);
+    if (state == PROC_UNUSED && (on_rq || dispatching || on_cpu))
+        panic("sched invariant: unused pid=%d rq=%d dispatch=%d cpu=%d",
+              t->pid, on_rq, dispatching, on_cpu);
 #else
     (void)t;
 #endif
@@ -455,19 +485,23 @@ void proc_make_ready(task_t *t)
         spin_unlock_irqrestore(&proc_lock, flags);
         return;
     }
-#if CONFIG_DEBUG_SCHED_STATE
-    if (t->state == PROC_RUNNING && t != proc_current())
-        panic("sched invariant: remote ready of running pid=%d caller=0x%lx",
-              t->pid,
-              (unsigned long)(uintptr_t)__builtin_return_address(0));
-    if (t->state == PROC_RUNNING && t->on_rq)
-        panic("sched invariant: running pid=%d already queued caller=0x%lx",
-              t->pid,
-              (unsigned long)(uintptr_t)__builtin_return_address(0));
-#endif
     if (t->park_state == PROC_PARK_PREPARING ||
         t->park_state == PROC_PARK_PARKED) {
         (void)proc_try_wake_locked(t, t->wait_seq, PROC_WAKE_EVENT);
+        proc_sched_assert_task_locked(t);
+        spin_unlock_irqrestore(&proc_lock, flags);
+        return;
+    }
+
+    /*
+     * A remote RUNNING task is already making progress and must not be
+     * converted to READY behind its owner CPU. The local current task reaches
+     * this path for yield and publishes READY without becoming queueable until
+     * switch completion.
+     */
+    if (t->state == PROC_RUNNING &&
+        (t != proc_current() || !t->on_cpu ||
+         t->owner_cpu != cpu_current_id())) {
         proc_sched_assert_task_locked(t);
         spin_unlock_irqrestore(&proc_lock, flags);
         return;
@@ -479,18 +513,19 @@ void proc_make_ready(task_t *t)
         if (t->wake_time == 0 && t->sched_level > 0)
             t->sched_level--;
     }
-    if (!t->on_rq) {
-        if (t == proc_current())
-            t->cpu_id = cpu_current_id();
-        else if (!was_blocked)
+    if (t->on_cpu) {
+        t->cpu_id = t->owner_cpu;
+    } else if (!t->dispatching && !t->on_rq) {
+        if (!was_blocked)
             t->cpu_id = proc_sched_select_cpu_locked(t);
     }
     target_cpu = t->cpu_id;
     proc_runq_enqueue_locked(t);
+    int queued = t->on_rq;
     proc_sched_assert_task_locked(t);
     spin_unlock_irqrestore(&proc_lock, flags);
 
-    if (target_cpu != cpu_current_id())
+    if (queued && target_cpu != cpu_current_id())
         proc_sched_kick_cpu(target_cpu);
 }
 
@@ -659,7 +694,7 @@ void proc_set_alarm_expire(task_t *t, uint64_t alarm_expire)
         sched_rearm_timer();
 }
 
-/* Enqueue a task onto its CPU's runqueue. Caller must hold runq_lock. */
+/* Enqueue a task onto its CPU's runqueue. Caller must hold proc_lock. */
 void proc_runq_enqueue_locked(task_t *t) {
     if (!t || t == proc_idle_task() || t->state != PROC_READY)
         return;
@@ -669,10 +704,15 @@ void proc_runq_enqueue_locked(task_t *t) {
     uint64_t rf = RUNQ_LOCK_IRQ(cpu);
     proc_runq_t *rq = &sched_runq[cpu];
 
-    if (t->on_rq) {
+    if (t->on_rq || t->dispatching || t->on_cpu) {
         RUNQ_UNLOCK_IRQ(cpu, rf);
         return;
     }
+#if CONFIG_DEBUG_SCHED_STATE
+    if (t->owner_cpu != PROC_CPU_NONE)
+        panic("runq enqueue: pid=%d unowned with owner=%u",
+              t->pid, t->owner_cpu);
+#endif
 
     int q = sched_task_rt(t) ? 0 : sched_level_clamp(t->sched_level);
     t->sched_level = q;
@@ -684,6 +724,7 @@ void proc_runq_enqueue_locked(task_t *t) {
     RUNQ_UNLOCK_IRQ(cpu, rf);
 }
 
+/* Remove a queued task. Caller must hold proc_lock. */
 void proc_runq_remove_locked(task_t *t) {
     if (!t || !t->on_rq)
         return;
@@ -701,7 +742,10 @@ void proc_runq_remove_locked(task_t *t) {
     RUNQ_UNLOCK_IRQ(cpu, rf);
 }
 
-/* Pick next task from current CPU's runqueue. No longer does O(n) task-list scan. */
+/*
+ * Pick the next task and transfer on_rq -> dispatching while both proc_lock and
+ * the local runqueue lock serialize observers. Caller must hold proc_lock.
+ */
 task_t *proc_runq_pick_locked(void) {
     unsigned cpu = cpu_current_id();
     uint64_t rf = RUNQ_LOCK_IRQ(cpu);
@@ -753,6 +797,8 @@ task_t *proc_runq_pick_locked(void) {
 
         if (t != proc_idle_task() && t->state == PROC_READY && t->kstack
             && !t->cg_throttled) {
+            t->dispatching = 1;
+            t->owner_cpu = cpu;
             RUNQ_UNLOCK_IRQ(cpu, rf);
             return t;
         }
@@ -905,16 +951,39 @@ void context_switch(task_t *next) {
     next->cg_cpu_start = now;
 
     uint64_t flags = spin_lock_irqsave(&proc_lock);
+    unsigned cpu = cpu_current_id();
     if (next == proc_current()) {
         next->state = PROC_RUNNING;
         next->on_rq = 0;
+        next->dispatching = 0;
+        next->on_cpu = 1;
+        next->owner_cpu = cpu;
         proc_sched_assert_task_locked(next);
         spin_unlock_irqrestore(&proc_lock, flags);
         return;
     }
+#if CONFIG_DEBUG_SCHED_STATE
+    if (next != proc_idle_task() &&
+        (!next->dispatching || next->on_cpu ||
+         next->owner_cpu != cpu))
+        panic("context switch: next=%d dispatch=%d on_cpu=%d owner=%u cpu=%u",
+              next->pid, next->dispatching, next->on_cpu,
+              next->owner_cpu, cpu);
+    if (next->on_rq)
+        panic("context switch: queued next pid=%d", next->pid);
+#endif
+
+    /*
+     * Publish the current slot before dispatching -> on_cpu. Remote observers
+     * holding proc_lock therefore see either a selected task or an owned task,
+     * never an unowned dequeue gap.
+     */
     task_t *old = proc_set_current(next);
     next->state  = PROC_RUNNING;
     next->on_rq  = 0;
+    next->dispatching = 0;
+    next->on_cpu = 1;
+    next->owner_cpu = cpu;
     proc_sched_assert_task_locked(next);
     spin_unlock_irqrestore(&proc_lock, flags);
     if (prev && prev->pid >= 4 && next->pid >= 4)
@@ -946,7 +1015,11 @@ void sched(void) {
         now >= __atomic_load_n(&next_alarm_scan, __ATOMIC_RELAXED))
         sched_scan_timers(now);
 
+    uint64_t flags = spin_lock_irqsave(&proc_lock);
     task_t *next = proc_runq_pick_locked();
+    if (next)
+        proc_sched_assert_task_locked(next);
+    spin_unlock_irqrestore(&proc_lock, flags);
 
     if (next) {
         next->exec_start = now;
@@ -962,7 +1035,7 @@ void sched(void) {
      * to continue as RUNNING.
      */
     int keep_current = 0;
-    uint64_t flags = spin_lock_irqsave(&proc_lock);
+    flags = spin_lock_irqsave(&proc_lock);
     task_t *cur = proc_current();
     if (cur && (cur->state == PROC_READY || cur->state == PROC_RUNNING)) {
         if (cur->on_rq)
