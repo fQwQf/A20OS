@@ -800,7 +800,7 @@ check-blocking-point-boundary:
 		test -z "$$bad" || { echo "$$bad"; exit 1; }
 	@bad=$$(rg -n --pcre2 '\bproc_make_ready[[:space:]]*\(' kernel \
 		--glob '*.c' --glob '!kernel/external/**' | \
-		rg -v '^kernel/(proc/(fork|proc|sched|cg_cpu|signal)\.c|abi/native/sys_core\.c):' || true); \
+		rg -v '^kernel/(proc/(fork|proc|sched|cg_cpu)\.c|abi/native/sys_core\.c):' || true); \
 		test -z "$$bad" || { echo "$$bad"; exit 1; }
 	@rg -Uq 'typedef struct wait_queue_entry[^{]*\{[^}]*task[^}]*wait_seq' kernel/include/core/sync.h
 	@rg -Uq 'typedef struct futex_waiter[^{]*\{[^}]*task[^}]*wait_seq' kernel/abi/linux/sys_futex.c
@@ -810,7 +810,33 @@ check-blocking-point-boundary:
 	@rg -q "PROC_STRESS: vfork-auto-reap PASS" user/cmds/proc_stress.c
 	@echo "check-blocking-point-boundary: PASS"
 
-check-doc-test-gates: check-concurrency-foundation check-smp-platform-boundary check-task-state-boundary check-task-lifetime-boundary check-blocking-point-boundary check-mm-lock-model check-io-progress-model check-vfs-abstraction check-abi-boundary check-driver-core-model check-external-dependency-boundary check-abi-smoke-gate check-doc-drift
+check-signal-exit-boundary:
+	@rg -q "SIGNAL_EXIT_PROTOCOL_AUDIT" docs/testing/signal-exit-audit.md
+	@rg -q "SIGNAL_STATE_LOCK_CONTRACT" kernel/include/proc/signal.h
+	@rg -q "PARK_SIGNAL_MODE_PROTOCOL" kernel/proc/park.c
+	@rg -q "SIGNAL_MASK_PARK_PROTOCOL" kernel/abi/linux/sys_signal.c
+	@rg -q "REMOTE_EXIT_SAFE_BOUNDARY" kernel/proc/exit.c
+	@rg -q "PROC_WAKE_FATAL_SIGNAL" kernel/include/proc/park.h kernel/proc/park.c
+	@rg -q "PROC_WAKE_TASK_EXIT" kernel/include/proc/park.h kernel/proc/exit.c
+	@! rg -n --pcre2 '\bproc_make_ready[[:space:]]*\(' \
+		kernel/proc/signal.c kernel/proc/exit.c
+	@! rg -n --pcre2 'reason[[:space:]]*==[[:space:]]*PROC_WAKE_SIGNAL' \
+		kernel --glob '*.c' --glob '!kernel/external/**' \
+		--glob '!kernel/proc/park.c'
+	@bad=$$(rg -n --pcre2 \
+		'(?:->|\.)(?:sig_blocked|thread_pending|sigsuspend_old_blocked|sigsuspend_active|sigwait_mask|sigwait_active)\b|(?:ss|signal_state)->(?:pending|pending_has_info|pending_info|actions)\b' \
+		kernel --glob '*.c' --glob '!kernel/external/**' | \
+		rg -v '^kernel/(proc/(signal|task)\.c|abi/linux/sys_signal\.c):' || true); \
+		test -z "$$bad" || { echo "$$bad"; exit 1; }
+	@rg -Uq 'eventfd_read[\s\S]*proc_park_prepare\(PROC_WAIT_INTERRUPTIBLE' \
+		kernel/ipc/eventfd.c
+	@rg -Uq 'timerfd_read[\s\S]*proc_park_prepare\(PROC_WAIT_INTERRUPTIBLE' \
+		kernel/ipc/timerfd.c
+	@rg -q "PROC_STRESS: signal-stop-exit PASS" user/cmds/proc_stress.c
+	@rg -q "PROC_STRESS: signal-mask-park PASS" user/cmds/proc_stress.c
+	@echo "check-signal-exit-boundary: PASS"
+
+check-doc-test-gates: check-concurrency-foundation check-smp-platform-boundary check-task-state-boundary check-task-lifetime-boundary check-blocking-point-boundary check-signal-exit-boundary check-mm-lock-model check-io-progress-model check-vfs-abstraction check-abi-boundary check-driver-core-model check-external-dependency-boundary check-abi-smoke-gate check-doc-drift
 	@rg -q "DOCS_AS_FACT_CONTRACT" docs/testing/testing-gates.md
 	@rg -q "TEST_FIRST_ARCHITECTURE_MATRIX" docs/testing/testing-gates.md
 	@echo "check-doc-test-gates: PASS"
@@ -1318,7 +1344,9 @@ smoke-proc-stress:
 		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
 		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
 		> "$$log" 2>&1 || status=$$?; \
-	if grep -q 'PROC_STRESS: PASS' "$$log"; then \
+	if grep -q 'PROC_STRESS: PASS' "$$log" && \
+	   grep -q 'PROC_STRESS: signal-stop-exit PASS' "$$log" && \
+	   grep -q 'PROC_STRESS: signal-mask-park PASS' "$$log"; then \
 		echo "smoke-proc-stress: PASS; log saved to $$log"; \
 	else \
 		echo "smoke-proc-stress: failed with status $$status; tail of $$log:"; \
@@ -1471,7 +1499,9 @@ smoke-futex-stress:
 	fi
 
 .PHONY: check-task-lifetime-boundary check-blocking-point-boundary \
-	check-proc-step35 check-proc-step4 check-proc-step4-local \
+	check-signal-exit-boundary check-proc-step35 \
+	check-proc-step4 check-proc-step4-local \
+	check-proc-step5 check-proc-step5-local \
 	check-proc-step35-local step35-rv-debug-1c step35-la-debug-1c \
 	step35-rv-release-8c step35-la-release-8c _step35_smoke
 
@@ -1522,6 +1552,8 @@ _step35_smoke: dev-build
 		'FUTEX_STRESS: unrelated-wake-isolation PASS' \
 		'PROC_STRESS: PASS' \
 		'PROC_STRESS: vfork-auto-reap PASS' \
+		'PROC_STRESS: signal-stop-exit PASS' \
+		'PROC_STRESS: signal-mask-park PASS' \
 		'IO_EVENT_TEST: PASS' \
 		'VFS_STRESS: PASS' \
 		'SOCKET_STRESS: PASS' \
@@ -1565,6 +1597,14 @@ check-proc-step4-local: check-blocking-point-boundary check-proc-step35-local
 check-proc-step4: check-proc-step4-local \
 	final-eval-rv-cagent final-eval-la-cagent
 	@echo "check-proc-step4: PASS"
+
+check-proc-step5-local: check-signal-exit-boundary check-proc-step4-local
+	@git diff --check
+	@echo "check-proc-step5-local: PASS"
+
+check-proc-step5: check-proc-step5-local \
+	final-eval-rv-cagent final-eval-la-cagent
+	@echo "check-proc-step5: PASS"
 
 smoke-socket-stress:
 	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
