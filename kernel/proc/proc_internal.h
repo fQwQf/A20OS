@@ -61,19 +61,26 @@ void proc_pid_unregister(task_t *t);
 int proc_pid_next_value(void);
 
 void proc_task_init_common(task_t *t, task_t *parent);
+task_t *proc_task_alloc_storage(void);
+void proc_task_init_idle_state(task_t *t, unsigned cpu);
 void proc_task_first_entry(void) NORETURN;
 void proc_task_release_resources(task_t *t);
 void proc_destroy_task(task_t *t);
 task_t *proc_alloc_task_slot(void);
 void proc_complete_vfork(task_t *child);
+void proc_reap_detach_locked(task_t *t);
 
 void proc_sched_runq_init(void);
 unsigned proc_sched_select_cpu_locked(task_t *t);
 void proc_sched_kick_cpu(unsigned cpu);
+void proc_sched_stop_current(int exit_code);
+void proc_sched_assert_task_locked(task_t *t);
+int proc_wait_timer_register_locked(task_t *t, uint64_t deadline,
+                                    uint64_t wait_seq);
+void proc_wait_timer_cancel_locked(task_t *t, uint64_t wait_seq);
 void proc_runq_enqueue_locked(task_t *t);
 void proc_runq_remove_locked(task_t *t);
 task_t *proc_runq_pick_locked(void);
 void sched_reap_zombies(void);
-void proc_block_until(task_t *t, uint64_t wake_time);
 
 #endif

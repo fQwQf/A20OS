@@ -157,10 +157,9 @@ int64_t sys_clock_nanosleep(int clk, int flags, const void *req, void *rem)
 
     task_t *t = proc_current();
     if (t) {
-        proc_block_until(t, until);
-        sched();
-        proc_set_wake_time(t, 0);
-        if (signal_task_has_unblocked(t))
+        proc_wake_reason_t reason =
+            proc_park_wait(PROC_WAIT_INTERRUPTIBLE, until);
+        if (reason == PROC_WAKE_SIGNAL || signal_task_has_unblocked(t))
             return -ERESTARTSYS;
     } else {
         while (timer_get_ticks() < until) cpu_relax();

@@ -288,7 +288,6 @@ int proc_clone(uint64_t flags, vaddr_t stack, int *ptid, vaddr_t tls, int *ctid,
     if (flags & CLONE_VFORK) {
         uint64_t pf = spin_lock_irqsave(&proc_lock);
         parent->vfork_waiting = 1;
-        parent->state = PROC_BLOCKED;
         spin_unlock_irqrestore(&proc_lock, pf);
     }
 
@@ -306,18 +305,7 @@ int proc_clone(uint64_t flags, vaddr_t stack, int *ptid, vaddr_t tls, int *ctid,
         proc_yield();
 #endif
     if (flags & CLONE_VFORK) {
-        for (;;) {
-            uint64_t pf = spin_lock_irqsave(&proc_lock);
-            int done = (t->state == PROC_UNUSED || t->state == PROC_ZOMBIE ||
-                        !(t->clone_flags & CLONE_VFORK));
-            if (done) {
-                parent->vfork_waiting = 0;
-                spin_unlock_irqrestore(&proc_lock, pf);
-                break;
-            }
-            spin_unlock_irqrestore(&proc_lock, pf);
-            sched();
-        }
+        wait_for_completion(&t->vfork_done);
     }
     return child_pid;
 }

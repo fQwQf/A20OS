@@ -3,11 +3,16 @@
 
 #include "core/lock.h"
 #include "core/types.h"
+#include "proc/park.h"
 
 typedef struct wait_queue_entry {
     struct wait_queue_entry *next;
     struct wait_queue_entry *prev;
-    void *task;
+    struct task_t *task;
+    uint64_t wait_seq;
+    uint32_t flags;
+    uintptr_t key;
+    bool linked;
 } wait_queue_entry_t;
 
 typedef struct wait_queue {
@@ -18,23 +23,33 @@ typedef struct wait_queue {
 #define WAIT_QUEUE_INIT { SPINLOCK_INIT, NULL }
 
 /*
- * BLOCK_WAKE_PROTOCOL:
- * - A blocking object first links the current task into its waiter structure,
- *   then publishes PROC_BLOCKED before dropping the object lock and calling
- *   sched(). This prevents lost wakeups between condition check and sleep.
- * - Wake paths detach waiter entries under the object lock, drop that lock, then
- *   call proc_make_ready() for each task. They must not enqueue directly.
- * - wait_queue, mutex, completion, and futex all follow the same
- *   PROC_BLOCKED -> proc_make_ready() handoff. Object-specific locks may nest
- *   outside proc_make_ready(), never inside it.
+ * WAIT_QUEUE_PARK_PROTOCOL:
+ * - The caller checks its condition while holding the object lock, then calls
+ *   wait_queue_prepare() before releasing that lock.
+ * - A waker detaches the stack entry and copies task + wait_seq while holding
+ *   q->lock, clears the entry, releases q->lock, then calls proc_try_wake().
+ * - commit handles both wake-before-commit and wake-after-park without ever
+ *   queueing a task that is still executing.
  */
 
 void wait_queue_init(wait_queue_t *q);
-void wait_queue_prepare(wait_queue_t *q, wait_queue_entry_t *entry);
+void wait_queue_prepare(wait_queue_t *q, wait_queue_entry_t *entry,
+                        proc_wait_mode_t mode, uint64_t deadline,
+                        uintptr_t key);
+proc_wake_reason_t wait_queue_commit(wait_queue_t *q,
+                                     wait_queue_entry_t *entry);
 void wait_queue_finish(wait_queue_t *q, wait_queue_entry_t *entry);
 void wait_queue_sleep(wait_queue_t *q);
-void wait_queue_wake_one(wait_queue_t *q);
-void wait_queue_wake_all(wait_queue_t *q);
+unsigned wait_queue_wake_one(wait_queue_t *q, uintptr_t key,
+                             proc_wake_reason_t reason);
+unsigned wait_queue_wake_all(wait_queue_t *q, uintptr_t key,
+                             proc_wake_reason_t reason);
+unsigned wait_queue_collect_one(wait_queue_t *q, uintptr_t key,
+                                proc_wake_reason_t reason,
+                                proc_wake_q_t *wake_q);
+unsigned wait_queue_collect_all(wait_queue_t *q, uintptr_t key,
+                                proc_wake_reason_t reason,
+                                proc_wake_q_t *wake_q);
 
 typedef struct mutex {
     spinlock_t lock;

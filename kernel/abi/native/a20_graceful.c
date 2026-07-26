@@ -38,7 +38,7 @@ static inline void a20_graceful_channel_peer_died(struct a20_channel_ep *ep)
 {
     if (!ep) return;
     ep->peer_closed = 1;
-    wait_queue_wake_one(&ep->waiters);
+    wait_queue_wake_one(&ep->waiters, 0, PROC_WAKE_EVENT);
 }
 
 /*
@@ -64,5 +64,5 @@ static inline int a20_cascade_check(int depth)
 static inline void a20_graceful_eventq_full(struct a20_eventq *eq)
 {
     if (!eq) return;
-    wait_queue_wake_one(&eq->waiters);
+    wait_queue_wake_one(&eq->waiters, 0, PROC_WAKE_EVENT);
 }

@@ -19,30 +19,12 @@ void net_msg_free(net_msg_t *m)
 
 static void net_wake_socket_waiter_locked(net_socket_t *s)
 {
-    if (s->waiter && s->waiter->state == PROC_BLOCKED)
-        proc_make_ready(s->waiter);
-}
-
-static void net_block_on_queue_space_locked(net_socket_t *s, task_t *cur)
-{
-    s->send_waiter = cur;
-    proc_set_wake_time(cur, timer_get_ticks() + NET_WAIT_TICKS);
-    cur->state = PROC_BLOCKED;
-}
-
-static void net_clear_queue_space_waiter(net_socket_t *s, task_t *cur)
-{
-    uint64_t irq = spin_lock_irqsave(&g_net_lock);
-    if (s && !s->closed && s->send_waiter == cur)
-        s->send_waiter = NULL;
-    proc_set_wake_time(cur, 0);
-    spin_unlock_irqrestore(&g_net_lock, irq);
+    wait_queue_wake_one(&s->read_waitq, 0, PROC_WAKE_EVENT);
 }
 
 static void net_wake_queue_space_waiter_locked(net_socket_t *s)
 {
-    if (s->send_waiter && s->send_waiter->state == PROC_BLOCKED)
-        proc_make_ready(s->send_waiter);
+    wait_queue_wake_one(&s->write_waitq, 0, PROC_WAKE_EVENT);
 }
 
 int net_enqueue_msg_locked_meta(net_socket_t *dst, const void *buf, size_t len,
@@ -151,10 +133,22 @@ int net_enqueue_msg_blocking(net_socket_t *s, net_socket_t *dst, const void *buf
                 return -EAGAIN;
             }
         }
-        net_block_on_queue_space_locked(dst, cur);
+        uint64_t deadline = timeout_ticks ? start + timeout_ticks : 0;
+        if (!deadline && s->type == SOCK_DGRAM)
+            deadline = start + MS_TO_TICKS(200);
+        if (!deadline && s->type == SOCK_STREAM)
+            deadline = start + MS_TO_TICKS(5000);
+        wait_queue_entry_t entry = {0};
+        wait_queue_prepare(&dst->write_waitq, &entry,
+                           PROC_WAIT_INTERRUPTIBLE, deadline, 0);
         spin_unlock_irqrestore(&g_net_lock, irq);
-        sched();
-        net_clear_queue_space_waiter(dst, cur);
+        proc_wake_reason_t reason =
+            wait_queue_commit(&dst->write_waitq, &entry);
+        wait_queue_finish(&dst->write_waitq, &entry);
+        if (reason == PROC_WAKE_SIGNAL)
+            return -ERESTARTSYS;
+        if (reason == PROC_WAKE_TIMEOUT)
+            return -EAGAIN;
     }
 }
 
@@ -221,7 +215,7 @@ int net_accept_queue_push_locked(net_socket_t *listener, net_socket_t *child)
         listener->accept_head = child;
     listener->accept_tail = child;
     listener->accept_count++;
-    net_wake_socket_waiter_locked(listener);
+    wait_queue_wake_one(&listener->accept_waitq, 0, PROC_WAKE_EVENT);
     return 0;
 }
 

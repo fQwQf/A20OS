@@ -24,6 +24,9 @@ net_socket_t *net_socket_alloc(void) {
         s->bpf_prog_fd = -1;
         s->ipv6_checksum_offset = -1;
         s->reg_idx = -1;
+        wait_queue_init(&s->accept_waitq);
+        wait_queue_init(&s->read_waitq);
+        wait_queue_init(&s->write_waitq);
     }
     return s;
 }
@@ -36,22 +39,6 @@ static int sockaddr_family(const void *addr, size_t len) {
     if (!addr || len < sizeof(uint16_t))
         return -EINVAL;
     return *(const uint16_t *)addr;
-}
-
-void net_block_on_socket_locked(net_socket_t *s, task_t *cur) {
-    s->waiter = cur;
-    proc_set_wake_time(cur, timer_get_ticks() + NET_WAIT_TICKS);
-    cur->state = PROC_BLOCKED;
-}
-
-void net_clear_socket_waiter(net_socket_t *s, task_t *cur) {
-    uint64_t irq = spin_lock_irqsave(&g_net_lock);
-    if (net_socket_is_valid_locked(s)) {
-        if (s->waiter == cur)
-            s->waiter = NULL;
-    }
-    proc_set_wake_time(cur, 0);
-    spin_unlock_irqrestore(&g_net_lock, irq);
 }
 
 int net_task_has_unblocked_signal(task_t *t) {
@@ -236,7 +223,6 @@ int net_socket_create(int domain, int type, int protocol) {
     if (!s) {
         return -ENOMEM;
     }
-    memset(s, 0, sizeof(*s));
     s->domain = domain;
     s->type = base_type;
     s->protocol = protocol;
@@ -546,10 +532,19 @@ int net_recvfrom_meta(int gfd, void *buf, size_t len, int flags,
             spin_unlock_irqrestore(&g_net_lock, irq);
             return -EAGAIN;
         }
-        net_block_on_socket_locked(s, cur);
+        uint64_t deadline = s->recv_timeout_ticks ?
+                            start + s->recv_timeout_ticks : 0;
+        wait_queue_entry_t entry = {0};
+        wait_queue_prepare(&s->read_waitq, &entry,
+                           PROC_WAIT_INTERRUPTIBLE, deadline, 0);
         spin_unlock_irqrestore(&g_net_lock, irq);
-        sched();
-        net_clear_socket_waiter(s, cur);
+        proc_wake_reason_t reason =
+            wait_queue_commit(&s->read_waitq, &entry);
+        wait_queue_finish(&s->read_waitq, &entry);
+        if (reason == PROC_WAKE_SIGNAL)
+            return -ERESTARTSYS;
+        if (reason == PROC_WAKE_TIMEOUT)
+            return -EAGAIN;
     }
 }
 

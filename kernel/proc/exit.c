@@ -32,6 +32,14 @@ static int proc_task_tgid(task_t *t)
     return t ? (t->tgid > 0 ? t->tgid : t->pid) : -1;
 }
 
+void proc_reap_detach_locked(task_t *t)
+{
+    if (!t)
+        return;
+    t->state = PROC_UNUSED;
+    proc_unlink_task_locked(t);
+}
+
 static int proc_task_is_live_locked(task_t *needle)
 {
     if (!needle)
@@ -43,13 +51,13 @@ static int proc_task_is_live_locked(task_t *needle)
     return 0;
 }
 
-static void proc_complete_vfork_locked(task_t *child)
+static int proc_complete_vfork_locked(task_t *child)
 {
     if (!child)
-        return;
+        return 0;
 
     if (!(child->clone_flags & CLONE_VFORK))
-        return;
+        return 0;
 
     child->clone_flags &= ~CLONE_VFORK;
     task_t *parent = child->parent;
@@ -72,20 +80,18 @@ static void proc_complete_vfork_locked(task_t *child)
     }
 #endif
 
-    if (parent && parent->state == PROC_BLOCKED) {
+    if (parent)
         parent->vfork_waiting = 0;
-        parent->state = PROC_READY;
-        proc_runq_enqueue_locked(parent);
-    } else if (parent) {
-        parent->vfork_waiting = 0;
-    }
+    return 1;
 }
 
 void proc_complete_vfork(task_t *child)
 {
     uint64_t flags = spin_lock_irqsave(&proc_lock);
-    proc_complete_vfork_locked(child);
+    int completed = proc_complete_vfork_locked(child);
     spin_unlock_irqrestore(&proc_lock, flags);
+    if (completed)
+        complete(&child->vfork_done);
 }
 
 static int proc_child_auto_reaps(task_t *child, task_t *parent)
@@ -106,13 +112,11 @@ static void proc_wake_child_waiters_locked(task_t *parent)
 
     int parent_tgid = proc_task_tgid(parent);
     for (task_t *t = proc_first_task_locked(); t; t = proc_next_task_locked(t)) {
-        if (t->state != PROC_BLOCKED || !t->waiting_for_child)
+        if (!t->waiting_for_child)
             continue;
         if (proc_task_tgid(t) != parent_tgid)
             continue;
-        t->waiting_for_child = 0;
-        t->state = PROC_READY;
-        proc_runq_enqueue_locked(t);
+        (void)proc_try_wake_locked(t, t->wait_seq, PROC_WAKE_EVENT);
     }
 }
 
@@ -218,8 +222,7 @@ static void proc_reparent_children(task_t *dead, task_t *reaper)
             child->state == PROC_ZOMBIE &&
             !proc_task_is_current_any_cpu(child)) {
             if (destroy_count < (int)(sizeof(to_destroy) / sizeof(to_destroy[0]))) {
-                child->state = PROC_UNUSED;
-                proc_unlink_task_locked(child);
+                proc_reap_detach_locked(child);
                 to_destroy[destroy_count++] = child;
             } else {
                 proc_sched_note_zombie();
@@ -335,7 +338,7 @@ void proc_exit(int exit_code)
     ktrace_exit("[EXIT] pid=%d: zombie, auto_reap=%d ctid=%p\n",
                 t->pid, auto_reap, (void *)ctid_to_wake);
 
-    proc_complete_vfork_locked(t);
+    int vfork_completed = proc_complete_vfork_locked(t);
 
     if (auto_reap) {
         proc_sched_note_zombie();
@@ -356,6 +359,9 @@ void proc_exit(int exit_code)
         proc_wake_child_waiters_locked(parent);
     }
     spin_unlock_irqrestore(&proc_lock, flags);
+
+    if (vfork_completed)
+        complete(&t->vfork_done);
 
     a20_event_notify(t, A20_OBJ_TASK, 0, (uint64_t)exit_code, 0);
 
@@ -381,9 +387,16 @@ void proc_force_exit(task_t *t, int exit_code)
         __atomic_store_n(&t->exit_pending, 1, __ATOMIC_RELEASE);
         if (t->state == PROC_BLOCKED || t->state == PROC_STOPPED) {
             t->waiting_for_child = 0;
-            t->wake_time = 0;
-            t->state = PROC_READY;
-            proc_runq_enqueue_locked(t);
+            /*
+             * Preserve the park token boundary when force-exit races a
+             * blocking operation.  The STOPPED fallback has no park token.
+             */
+            if (!proc_try_wake_locked(t, t->wait_seq, PROC_WAKE_EXIT)) {
+                proc_wait_timer_cancel_locked(t, t->wait_seq);
+                t->wake_time = 0;
+                t->state = PROC_READY;
+                proc_runq_enqueue_locked(t);
+            }
         }
     }
     spin_unlock_irqrestore(&proc_lock, flags);

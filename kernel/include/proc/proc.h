@@ -5,6 +5,8 @@
 #include "core/consts.h"
 #include "core/trap.h"
 #include "core/defs.h"
+#include "core/sync.h"
+#include "proc/park.h"
 #include <signal_abi.h>
 
 struct signal_state;
@@ -103,12 +105,11 @@ typedef struct proc_vm_stats {
  *   directly changing state, credentials, fs context, or run-queue fields.
  *
  * TASK_STATE_MUTATION_CONTRACT:
- * - READY transitions go through proc_make_ready() so state, CPU selection,
- *   runqueue insertion, wake_time cleanup, and remote reschedule kicks stay
- *   together.
- * - Timed or indefinite sleeps go through proc_block_until() or a wait object
- *   that follows BLOCK_WAKE_PROTOCOL. The caller sets object-specific waiter
- *   state before publishing PROC_BLOCKED.
+ * - New-task activation and STOPPED-task resumption go through
+ *   proc_make_ready(). A parked task is resumed only by proc_try_wake() with
+ *   the matching wait token.
+ * - Timed or indefinite sleeps go through the Park/Wake protocol or a wait
+ *   object. The caller registers object-specific waiter state before commit.
  * - RUNNING is assigned only by context_switch()/sched() after the task has
  *   been removed from any run queue. ZOMBIE/UNUSED are exit/reap states and
  *   must not be written by synchronization primitives.
@@ -215,6 +216,16 @@ typedef struct task_t {
     uint32_t        cpus_allowed;
     int             cg_throttled;
     uint64_t        cg_cpu_start;
+
+    completion_t vfork_done;
+
+    /* Scheduler-private A20 park/wake state. */
+    uint64_t           wait_seq;
+    uint64_t           wait_deadline;
+    int                wait_timer_index;
+    proc_park_state_t  park_state;
+    proc_wait_mode_t   wait_mode;
+    proc_wake_reason_t wake_reason;
 } task_t;
 
 #define PROC_SCHED_POLICY   (1U << 0)
@@ -274,7 +285,6 @@ uint32_t proc_sched_effective_affinity(task_t *t);
 void     sched(void);
 void     context_switch(task_t *next);
 uint64_t proc_next_timer_interval(uint64_t now);
-void     proc_set_wake_time(task_t *t, uint64_t wake_time);
 void     proc_set_alarm_expire(task_t *t, uint64_t alarm_expire);
 void     proc_dump(void);
 int      proc_kill(int pid, int signum);

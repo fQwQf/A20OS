@@ -193,7 +193,7 @@ void a20_eventq_release(a20_eventq_t *eq)
         kfree(w);
         w = next;
     }
-    wait_queue_wake_all(&eq->waiters);
+    wait_queue_wake_all(&eq->waiters, 0, PROC_WAKE_EVENT);
     kfree(eq->ring);
     kfree(eq);
 }
@@ -242,7 +242,7 @@ void a20_event_notify(void *target_object, uint16_t target_type,
     spin_unlock_irqrestore(&g_evq_hash_lock, hash_flags);
 
     for (int i = 0; i < wake_count; i++)
-        wait_queue_wake_one(&wake_queues[i]->waiters);
+        wait_queue_wake_one(&wake_queues[i]->waiters, 0, PROC_WAKE_EVENT);
 }
 
 void a20_eventq_on_object_destroy(void *object)

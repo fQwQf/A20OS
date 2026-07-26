@@ -50,13 +50,13 @@ static int timerfd_read(vfile_t *vf, char *buf, size_t count)
             spin_unlock(&tfd->lock);
             return -EAGAIN;
         }
-        if (tfd->armed) {
-            uint64_t remaining = tfd->expire_tick - timer_get_ticks();
-            if (remaining > 0)
-                proc_set_wake_time(proc_current(), tfd->expire_tick);
-        }
+        uint64_t deadline = tfd->armed ? tfd->expire_tick : 0;
+        wait_queue_entry_t entry = {0};
+        wait_queue_prepare(&tfd->waiters, &entry,
+                           PROC_WAIT_UNINTERRUPTIBLE, deadline, 0);
         spin_unlock(&tfd->lock);
-        wait_queue_sleep(&tfd->waiters);
+        (void)wait_queue_commit(&tfd->waiters, &entry);
+        wait_queue_finish(&tfd->waiters, &entry);
         spin_lock(&tfd->lock);
     }
     uint64_t expirations = 1;
@@ -132,7 +132,7 @@ int timerfd_settime_file(int gfd, int flags, const uint64_t new_value[4], uint64
     }
     spin_unlock(&tfd->lock);
     if (tfd->armed)
-        wait_queue_wake_all(&tfd->waiters);
+        wait_queue_wake_all(&tfd->waiters, 0, PROC_WAKE_EVENT);
     vfs_put_file_ref(gfd, vf);
     return 0;
 }
