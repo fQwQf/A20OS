@@ -819,6 +819,10 @@ static int ext4_stat(vnode_t *vn, kstat_t *st) {
     st->st_uid = dinode.i_uid;
     st->st_gid = dinode.i_gid;
     st->st_nlink = 1;
+    /* Keep metadata fingerprints stable by exposing the on-disk inode times. */
+    st->st_atime = dinode.i_atime;
+    st->st_mtime = dinode.i_mtime;
+    st->st_ctime = dinode.i_ctime;
     return 0;
 }
 
