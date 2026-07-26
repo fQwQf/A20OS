@@ -349,7 +349,7 @@ int vfs_openat2(int dirfd, const char *path, int flags, int mode, uint64_t resol
             return -ENAMETOOLONG;
     }
 
-    if (strcmp(root, "/") != 0) {
+    if (strcmp(root, "/") != 0 && !path_is_beneath(root, logical)) {
         char rooted[MAX_PATH_LEN];
         if (strcmp(logical, "/") == 0)
             snprintf(rooted, sizeof(rooted), "%s", root);
@@ -774,7 +774,7 @@ vnode_t *vfs_resolve_no_follow_final(const char *path) {
     char resolved[MAX_PATH_LEN];
     if (vfs_path_join(cwd, path, resolved, sizeof(resolved)) < 0)
         return NULL;
-    if (strcmp(root, "/") != 0) {
+    if (strcmp(root, "/") != 0 && !path_is_beneath(root, resolved)) {
         char rooted[MAX_PATH_LEN];
         if (strcmp(resolved, "/") == 0)
             snprintf(rooted, sizeof(rooted), "%s", root);

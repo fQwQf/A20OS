@@ -673,6 +673,30 @@ int proc_exec(const char *path, char *const argv[], char *const envp[])
         kfree(bprm.path);
         return r;
     }
+    /*
+     * Linux accepts execve(path, NULL, envp), and also an argv array whose
+     * first entry is NULL, by supplying an empty argv[0].  Modern glibc
+     * rejects a literal argc == 0 during startup, so normalize the call here
+     * before constructing the initial stack.  Use the requested path as the
+     * useful argv[0] value while preserving the Linux guarantee argc >= 1.
+     */
+    if (bprm.argc == 0) {
+        size_t len = strlen(bprm.path) + 1;
+        if (arg_bytes + len > MAX_ARG_BYTES ||
+            arg_bytes + len > (t ? t->limits.stack / 4 : MAX_ARG_BYTES)) {
+            bprm_free(&bprm);
+            return -E2BIG;
+        }
+        bprm.args[0] = kmalloc(len);
+        if (!bprm.args[0]) {
+            bprm_free(&bprm);
+            return -ENOMEM;
+        }
+        memcpy(bprm.args[0], bprm.path, len);
+        bprm.args[1] = NULL;
+        bprm.argc = 1;
+        arg_bytes += len;
+    }
 
 #ifdef CONFIG_NOMMU
     int env_is_kptr = 0;

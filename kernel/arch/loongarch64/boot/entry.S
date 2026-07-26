@@ -41,7 +41,12 @@ _start:
     li.d        $t0, 0
     csrwr       $t0, CSR_PRMD
 
-    li.d        $t0, 1
+    /*
+     * FPEN | LSXEN.  The final LoongArch glibc image executes LSX
+     * instructions in its dynamic loader before main(), so every CPU must
+     * enable LSX before it can enter userspace.
+     */
+    li.d        $t0, 3
     csrwr       $t0, CSR_EUEN
 
     /* Set exception entry point */
