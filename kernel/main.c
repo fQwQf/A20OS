@@ -408,17 +408,31 @@ void init_kthread(void) {
 #ifndef CONFIG_NOMMU
     mm_leaf_info_t entry_leaf;
     uint32_t entry_insn = 0;
-    if (!mm_query_leaf(info.pgdir, info.entry, &entry_leaf) ||
-        !(entry_leaf.flags & PTE_U) ||
+    int entry_present = mm_query_leaf(info.pgdir, info.entry, &entry_leaf);
+    if (entry_present) {
+        if (!(entry_leaf.flags & PTE_U) ||
 #if PTE_X != 0
-        !(entry_leaf.flags & PTE_X) ||
+            !(entry_leaf.flags & PTE_X) ||
 #endif
-        !mm_fetch_user_insn32(info.pgdir, info.entry, &entry_insn)) {
-        panic("init: entry is not a readable user executable mapping");
+            !mm_fetch_user_insn32(info.pgdir, info.entry, &entry_insn))
+            panic("init: entry is not a readable user executable mapping");
+        printf("[INIT] entry map: pa=0x%lx flags=0x%lx insn=0x%08x\n",
+               (unsigned long)entry_leaf.pa, (unsigned long)entry_leaf.flags,
+               entry_insn);
+    } else {
+        vm_area_t *entry_vma = info.mmap;
+        while (entry_vma &&
+               !(info.entry >= entry_vma->start && info.entry < entry_vma->end))
+            entry_vma = entry_vma->next;
+        if (!entry_vma ||
+#if PTE_X != 0
+            !(entry_vma->pte_flags & PTE_X) ||
+#endif
+            !(entry_vma->pte_flags & PTE_U))
+            panic("init: entry is not an executable demand mapping");
+        printf("[INIT] entry map: demand-paged flags=0x%lx\n",
+               (unsigned long)entry_vma->pte_flags);
     }
-    printf("[INIT] entry map: pa=0x%lx flags=0x%lx insn=0x%08x\n",
-           (unsigned long)entry_leaf.pa, (unsigned long)entry_leaf.flags,
-           entry_insn);
 #endif
 
     /* Set up the initial user stack with argc/argv/envp/auxv so the

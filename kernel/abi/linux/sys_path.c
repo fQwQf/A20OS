@@ -348,12 +348,12 @@ int64_t sys_statx(int dirfd, const char *path, int flags, unsigned mask, void *b
         *(uint32_t *)(stx + 72) = (uint32_t)kst.st_atime_nsec;
     }
     if (mask & STATX_CTIME) {
-        *(int64_t *)(stx + 80)  = (int64_t)kst.st_ctime;
-        *(uint32_t *)(stx + 88) = (uint32_t)kst.st_ctime_nsec;
-    }
-    if (mask & STATX_BTIME) {
         *(int64_t *)(stx + 96)  = (int64_t)kst.st_ctime;
         *(uint32_t *)(stx + 104) = (uint32_t)kst.st_ctime_nsec;
+    }
+    if (mask & STATX_BTIME) {
+        *(int64_t *)(stx + 80)  = (int64_t)kst.st_ctime;
+        *(uint32_t *)(stx + 88) = (uint32_t)kst.st_ctime_nsec;
     }
     if (mask & STATX_MTIME) {
         *(int64_t *)(stx + 112)  = (int64_t)kst.st_mtime;

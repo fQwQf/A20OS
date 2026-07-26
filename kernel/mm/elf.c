@@ -108,6 +108,22 @@ static int elf_add_vma(mm_struct_t *mm, vaddr_t start, vaddr_t end,
     return 0;
 }
 
+static void elf_discard_vmas(mm_struct_t *mm)
+{
+    vm_area_t *vma = mm->mmap;
+    while (vma) {
+        vm_area_t *next = vma->next;
+        if ((vma->vm_flags & VM_FILE) && vma->file_fd >= 0) {
+            if (vma->file_vnode)
+                vnode_put(vma->file_vnode);
+            vfs_close(vma->file_fd);
+        }
+        kfree(vma);
+        vma = next;
+    }
+    mm->mmap = NULL;
+}
+
 static void *phys_for_va(pt_root_t *pgdir, vaddr_t va) {
     paddr_t pa = pt_translate(pgdir, va);
     if (pa == 0) return NULL;
@@ -142,6 +158,26 @@ static void *stack_ensure_mapped(pt_root_t *pgdir, vaddr_t sp_va,
     return phys_for_va(pgdir, sp_va);
 }
 
+static int stack_copy(pt_root_t *pgdir, vaddr_t dst_va, const void *src,
+                      size_t len, vaddr_t *stack_bottom)
+{
+    /* User-stack virtual pages need not be physically adjacent. */
+    const char *from = src;
+    while (len > 0) {
+        void *dst = stack_ensure_mapped(pgdir, dst_va, stack_bottom, 64);
+        if (!dst)
+            return -ENOMEM;
+        size_t chunk = PAGE_SIZE - (size_t)(dst_va & (PAGE_SIZE - 1));
+        if (chunk > len)
+            chunk = len;
+        memcpy(dst, from, chunk);
+        dst_va += chunk;
+        from += chunk;
+        len -= chunk;
+    }
+    return 0;
+}
+
 /* ------------------------------------------------------------------ */
 /*  Segment source abstraction                                        */
 /* ------------------------------------------------------------------ */
@@ -161,6 +197,100 @@ static inline seg_src_t seg_from_buf(const void *data) {
 static inline seg_src_t seg_from_fd(int fd, long offset) {
     return (seg_src_t){ .kind = SEG_FD, .fd = { .fd = fd, .offset = offset } };
 }
+
+#ifndef CONFIG_NOMMU
+/*
+ * Install an fd-backed PT_LOAD as a demand-paged private mapping.
+ *
+ * Complete file pages stay file-backed.  A partial p_filesz tail is copied
+ * into one zeroed anonymous page so bytes between p_filesz and p_memsz obey
+ * ELF BSS semantics even when the backing file contains unrelated data there.
+ * Remaining BSS pages are anonymous demand mappings.
+ */
+static int map_fd_segment_lazy(mm_struct_t *mm, pt_root_t *pgdir,
+                               vaddr_t va, uint64_t memsz,
+                               int fd, uint64_t file_offset,
+                               uint64_t filesz, pte_t flags)
+{
+    vaddr_t start = va & ~(vaddr_t)(PAGE_SIZE - 1);
+    vaddr_t mem_end = va + memsz;
+    vaddr_t end = ROUND_UP(mem_end, PAGE_SIZE);
+    uint64_t file_page_offset =
+        file_offset & ~(uint64_t)(PAGE_SIZE - 1);
+
+    if (filesz > memsz)
+        return -ENOEXEC;
+    if ((file_offset & (PAGE_SIZE - 1)) != (va & (PAGE_SIZE - 1)) ||
+        mem_end < va || va + filesz < va)
+        return -EINVAL;
+
+    vaddr_t file_end = va + filesz;
+    vaddr_t file_map_end = ROUND_DOWN(file_end, PAGE_SIZE);
+    int prot = mm_pte_flags_to_prot(flags);
+
+    /*
+     * Adjacent PT_LOAD entries may share a page.  MAP_FIXED would replace
+     * the earlier entry, whereas the eager loader preserves and overlays its
+     * contents.  Keep that established behaviour by selecting the eager path
+     * before installing any lazy VMA whenever this segment overlaps one.
+     */
+    for (vm_area_t *vma = mm->mmap; vma; vma = vma->next) {
+        if (vma->start < end && vma->end > start)
+            return -EINVAL;
+    }
+
+    if (file_map_end > start) {
+        vaddr_t mapped = mm_mmap_file(mm, start, file_map_end - start,
+                                      prot, MAP_PRIVATE | MAP_FIXED, fd,
+                                      file_page_offset);
+        if ((intptr_t)mapped < 0)
+            return (int)(intptr_t)mapped;
+    }
+
+    vaddr_t anon_start;
+    if (file_end > file_map_end) {
+        vaddr_t page = file_map_end;
+        void *frame = frame_alloc();
+        if (!frame)
+            return -ENOMEM;
+        memset(frame, 0, PAGE_SIZE);
+
+        vaddr_t copy_start = page < va ? va : page;
+        uint64_t src_off = copy_start - va;
+        uint64_t to_copy = filesz - src_off;
+        size_t copy_off = (size_t)(copy_start - page);
+        if (to_copy > PAGE_SIZE - copy_off)
+            to_copy = PAGE_SIZE - copy_off;
+        int nr = vfs_pread(fd, (char *)frame + copy_off, (size_t)to_copy,
+                           file_offset + src_off);
+        if (nr < 0 || (uint64_t)nr != to_copy) {
+            frame_free(frame);
+            return nr < 0 ? nr : -ENOEXEC;
+        }
+        int r = pt_map(pgdir, page, va_to_pa(frame), flags);
+        if (r < 0) {
+            frame_free(frame);
+            return r;
+        }
+        if (flags & PTE_X)
+            arch_flush_icache_range(frame, PAGE_SIZE);
+        r = elf_add_vma(mm, page, page + PAGE_SIZE,
+                        pte_to_vm_flags(flags), flags);
+        if (r < 0)
+            return r;
+        mm->rss++;
+        anon_start = page + PAGE_SIZE;
+    } else {
+        anon_start = file_end;
+    }
+
+    anon_start = ROUND_UP(anon_start, PAGE_SIZE);
+    if (anon_start < end)
+        return elf_add_vma(mm, anon_start, end,
+                           pte_to_vm_flags(flags), flags);
+    return 0;
+}
+#endif
 
 /*
  * Map an ELF segment into the page table.
@@ -195,6 +325,14 @@ static int map_segment(mm_struct_t *mm, pt_root_t *pgdir,
     }
     return 0;
 #else
+    if (src->kind == SEG_FD) {
+        int r = map_fd_segment_lazy(mm, pgdir, va, memsz, src->fd.fd,
+                                    (uint64_t)src->fd.offset, filesz, flags);
+        if (r != -EINVAL)
+            return r;
+        /* Non-conforming offset/vaddr alignment retains the eager fallback. */
+    }
+
     for (vaddr_t page = start; page < end; page += PAGE_SIZE) {
         void *frame = frame_alloc();
         if (!frame) return -ENOMEM;
@@ -743,7 +881,8 @@ static int elf_load64(int fd, const Elf64_Ehdr *eh, const char *path,
     vaddr_t tls_va = 0, tls_tp = 0;
     r = setup_tls(&mm, pgdir, tls_data, tls_filesz, tls_memsz, tls_align,
                   &tls_va, &tls_tp);
-    if (r < 0) { kfree(tls_data); pt_destroy_user(pgdir); return r; }
+    if (r < 0)
+        goto fail64;
 
     *info = (elf_load_info_t){
         .entry       = has_interp ? interp_entry : (eh->e_entry + load_bias),
@@ -774,14 +913,7 @@ static int elf_load64(int fd, const Elf64_Ehdr *eh, const char *path,
 
 fail64:
     kfree(tls_data);
-    {
-        vm_area_t *vma = mm.mmap;
-        while (vma) {
-            vm_area_t *next = vma->next;
-            kfree(vma);
-            vma = next;
-        }
-    }
+    elf_discard_vmas(&mm);
     pt_destroy_user(pgdir);
     return r;
 }
@@ -888,7 +1020,8 @@ static int elf_load32(int fd, const Elf32_Ehdr *eh, const char *path,
     vaddr_t tls_va = 0, tls_tp = 0;
     r = setup_tls(&mm, pgdir, tls_data, tls_filesz, tls_memsz, tls_align,
                   &tls_va, &tls_tp);
-    if (r < 0) { kfree(tls_data); pt_destroy_user(pgdir); return r; }
+    if (r < 0)
+        goto fail32;
 
     *info = (elf_load_info_t){
         .entry       = (vaddr_t)eh->e_entry + load_bias,
@@ -919,14 +1052,7 @@ static int elf_load32(int fd, const Elf32_Ehdr *eh, const char *path,
 
 fail32:
     kfree(tls_data);
-    {
-        vm_area_t *vma = mm.mmap;
-        while (vma) {
-            vm_area_t *next = vma->next;
-            kfree(vma);
-            vma = next;
-        }
-    }
+    elf_discard_vmas(&mm);
     pt_destroy_user(pgdir);
     return r;
 }
@@ -996,32 +1122,35 @@ int elf_load(int fd, const char *path, elf_load_info_t *info) {
 
 vaddr_t elf_setup_stack(vaddr_t stack_top, int argc, char *const argv[],
                         char *const envp[], const elf_load_info_t *info) {
+    if (argc < 0 || argc > MAX_ARG_STRINGS)
+        return 0;
+
     pt_root_t *pgdir = info->pgdir;
     vaddr_t sp_va  = stack_top;
     vaddr_t stack_bottom = stack_top - (uint64_t)USER_STACK_INITIAL_PAGES * PAGE_SIZE;
 
     int envc = 0;
-    uintptr_t env_ptrs[64];
+    uintptr_t env_ptrs[MAX_ARG_STRINGS + 1];
     if (envp) {
-        while (envp[envc] && envc < 63) {
+        while (envc < MAX_ARG_STRINGS && envp[envc]) {
             int len = (int)strlen(envp[envc]) + 1;
             sp_va -= len;
-            void *dst = stack_ensure_mapped(pgdir, sp_va, &stack_bottom, 64);
-            if (!dst) return 0;
-            memcpy(dst, envp[envc], len);
+            if (stack_copy(pgdir, sp_va, envp[envc], (size_t)len,
+                           &stack_bottom) < 0)
+                return 0;
             env_ptrs[envc] = (uintptr_t)sp_va;
             envc++;
         }
     }
     env_ptrs[envc] = 0;
 
-    uintptr_t arg_ptrs[64];
+    uintptr_t arg_ptrs[MAX_ARG_STRINGS + 1];
     for (int i = argc - 1; i >= 0; i--) {
         int len = (int)strlen(argv[i]) + 1;
         sp_va -= len;
-        void *dst = stack_ensure_mapped(pgdir, sp_va, &stack_bottom, 64);
-        if (!dst) return 0;
-        memcpy(dst, argv[i], len);
+        if (stack_copy(pgdir, sp_va, argv[i], (size_t)len,
+                       &stack_bottom) < 0)
+            return 0;
         arg_ptrs[i] = (uintptr_t)sp_va;
     }
     arg_ptrs[argc] = 0;
@@ -1039,18 +1168,18 @@ vaddr_t elf_setup_stack(vaddr_t stack_top, int argc, char *const argv[],
 
     sp_va -= plat_len;
     vaddr_t platform_va = sp_va;
-    {
-        void *dst = stack_ensure_mapped(pgdir, sp_va, &stack_bottom, 64);
-        if (!dst) return 0;
-        memcpy(dst, platform, plat_len);
-    }
+    if (stack_copy(pgdir, sp_va, platform, (size_t)plat_len,
+                   &stack_bottom) < 0)
+        return 0;
 
     sp_va -= 16;
     vaddr_t random_va = sp_va;
     {
-        void *dst = stack_ensure_mapped(pgdir, sp_va, &stack_bottom, 64);
-        if (!dst) return 0;
-        random_fill(dst, 16);
+        unsigned char random_bytes[16];
+        random_fill(random_bytes, sizeof(random_bytes));
+        if (stack_copy(pgdir, sp_va, random_bytes, sizeof(random_bytes),
+                       &stack_bottom) < 0)
+            return 0;
     }
 
     uintptr_t auxv[][2] = {
@@ -1076,25 +1205,22 @@ vaddr_t elf_setup_stack(vaddr_t stack_top, int argc, char *const argv[],
     int naux = (int)(sizeof(auxv) / sizeof(auxv[0]));
 
     sp_va -= naux * 2 * sizeof(uintptr_t);
-    {
-        void *dst = stack_ensure_mapped(pgdir, sp_va, &stack_bottom, 64);
-        if (!dst) return 0;
-        memcpy(dst, auxv, naux * 2 * sizeof(uintptr_t));
-    }
+    if (stack_copy(pgdir, sp_va, auxv,
+                   (size_t)naux * 2 * sizeof(uintptr_t),
+                   &stack_bottom) < 0)
+        return 0;
 
     sp_va -= (envc + 1) * sizeof(uintptr_t);
-    {
-        void *dst = stack_ensure_mapped(pgdir, sp_va, &stack_bottom, 64);
-        if (!dst) return 0;
-        memcpy(dst, env_ptrs, (envc + 1) * sizeof(uintptr_t));
-    }
+    if (stack_copy(pgdir, sp_va, env_ptrs,
+                   (size_t)(envc + 1) * sizeof(uintptr_t),
+                   &stack_bottom) < 0)
+        return 0;
 
     sp_va -= (argc + 1) * sizeof(uintptr_t);
-    {
-        void *dst = stack_ensure_mapped(pgdir, sp_va, &stack_bottom, 64);
-        if (!dst) return 0;
-        memcpy(dst, arg_ptrs, (argc + 1) * sizeof(uintptr_t));
-    }
+    if (stack_copy(pgdir, sp_va, arg_ptrs,
+                   (size_t)(argc + 1) * sizeof(uintptr_t),
+                   &stack_bottom) < 0)
+        return 0;
 
     /*
      * Linux process entry requires SP to satisfy the architecture ABI
@@ -1104,9 +1230,10 @@ vaddr_t elf_setup_stack(vaddr_t stack_top, int argc, char *const argv[],
      */
     sp_va = (sp_va - sizeof(uintptr_t)) & ~15UL;
     {
-        void *dst = stack_ensure_mapped(pgdir, sp_va, &stack_bottom, 64);
-        if (!dst) return 0;
-        *(uintptr_t *)dst = (uintptr_t)argc;
+        uintptr_t argc_value = (uintptr_t)argc;
+        if (stack_copy(pgdir, sp_va, &argc_value, sizeof(argc_value),
+                       &stack_bottom) < 0)
+            return 0;
     }
 
     return sp_va;
@@ -1118,52 +1245,53 @@ vaddr_t elf_setup_stack_a20(vaddr_t stack_top, int argc, char *const argv[],
                             uint32_t stdin_h, uint32_t stdout_h,
                             uint32_t stderr_h, uint32_t self_task_h)
 {
+    if (argc < 0 || argc > MAX_ARG_STRINGS)
+        return 0;
+
     pt_root_t *pgdir = info->pgdir;
     vaddr_t sp_va = stack_top;
     vaddr_t stack_bottom = stack_top - (uint64_t)USER_STACK_INITIAL_PAGES * PAGE_SIZE;
 
     int envc = 0;
-    vaddr_t env_ptrs[64];
+    vaddr_t env_ptrs[MAX_ARG_STRINGS + 1];
     if (envp) {
-        while (envp[envc] && envc < 63) {
+        while (envc < MAX_ARG_STRINGS && envp[envc]) {
             int len = (int)strlen(envp[envc]) + 1;
             sp_va -= len;
-            void *dst = stack_ensure_mapped(pgdir, sp_va, &stack_bottom, 64);
-            if (!dst) return 0;
-            memcpy(dst, envp[envc], len);
+            if (stack_copy(pgdir, sp_va, envp[envc], (size_t)len,
+                           &stack_bottom) < 0)
+                return 0;
             env_ptrs[envc] = sp_va;
             envc++;
         }
     }
     env_ptrs[envc] = 0;
 
-    vaddr_t arg_ptrs[64];
+    vaddr_t arg_ptrs[MAX_ARG_STRINGS + 1];
     for (int i = argc - 1; i >= 0; i--) {
         int len = (int)strlen(argv[i]) + 1;
         sp_va -= len;
-        void *dst = stack_ensure_mapped(pgdir, sp_va, &stack_bottom, 64);
-        if (!dst) return 0;
-        memcpy(dst, argv[i], len);
+        if (stack_copy(pgdir, sp_va, argv[i], (size_t)len,
+                       &stack_bottom) < 0)
+            return 0;
         arg_ptrs[i] = sp_va;
     }
     arg_ptrs[argc] = 0;
 
     sp_va &= ~15UL;
 
-    sp_va -= (envc + 1) * 8;
-    {
-        void *dst = stack_ensure_mapped(pgdir, sp_va, &stack_bottom, 64);
-        if (!dst) return 0;
-        memcpy(dst, env_ptrs, (envc + 1) * 8);
-    }
+    sp_va -= (envc + 1) * sizeof(vaddr_t);
+    if (stack_copy(pgdir, sp_va, env_ptrs,
+                   (size_t)(envc + 1) * sizeof(vaddr_t),
+                   &stack_bottom) < 0)
+        return 0;
     vaddr_t envp_va = sp_va;
 
-    sp_va -= (argc + 1) * 8;
-    {
-        void *dst = stack_ensure_mapped(pgdir, sp_va, &stack_bottom, 64);
-        if (!dst) return 0;
-        memcpy(dst, arg_ptrs, (argc + 1) * 8);
-    }
+    sp_va -= (argc + 1) * sizeof(vaddr_t);
+    if (stack_copy(pgdir, sp_va, arg_ptrs,
+                   (size_t)(argc + 1) * sizeof(vaddr_t),
+                   &stack_bottom) < 0)
+        return 0;
     vaddr_t argv_va = sp_va;
 
     sp_va -= sizeof(a20_start_info_t);
@@ -1182,9 +1310,8 @@ vaddr_t elf_setup_stack_a20(vaddr_t stack_top, int argc, char *const argv[],
         si.stderr_handle = stderr_h;
         si.self_task = self_task_h;
         si.page_size = PAGE_SIZE;
-        void *dst = stack_ensure_mapped(pgdir, sp_va, &stack_bottom, 64);
-        if (!dst) return 0;
-        memcpy(dst, &si, sizeof(si));
+        if (stack_copy(pgdir, sp_va, &si, sizeof(si), &stack_bottom) < 0)
+            return 0;
     }
 
     return sp_va;
