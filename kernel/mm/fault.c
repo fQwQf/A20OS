@@ -64,6 +64,8 @@ int mm_shared_file_fault(mm_struct_t *mm, vm_area_t *vma, uint64_t page_va,
         return -1;
     }
 
+    if (vma->pte_flags & PTE_X)
+        arch_flush_icache_range(page_cache_data(pcp), PAGE_SIZE);
     int r = pt_map(mm->pgdir, page_va, pfn_to_phys(cache_pfn), vma->pte_flags);
     if (r < 0) {
         page_cache_put(pcp);
@@ -330,6 +332,8 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval) {
                     return -1;
                 }
                 memcpy(pfn_to_virt(copy), page_cache_data(pcp), PAGE_SIZE);
+                if (vma->pte_flags & PTE_X)
+                    arch_flush_icache_range(pfn_to_virt(copy), PAGE_SIZE);
                 page_cache_put(pcp);
                 int r = pt_map(t->mm->pgdir, page_va, pfn_to_phys(copy),
                                vma->pte_flags);
