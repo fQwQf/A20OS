@@ -710,10 +710,12 @@ check-task-state-boundary:
 		--glob '!kernel/proc/exit.c' --glob '!kernel/proc/task.c' \
 		-- '->state[[:space:]]*=[[:space:]]*PROC_' kernel
 	@! rg -n --pcre2 --glob '*.c' --glob '!kernel/external/**' \
-		--glob '!kernel/proc/sched.c' --glob '!kernel/proc/task.c' \
-		-- '->(on_rq|rq_next|rq_prev)[[:space:]]*=' kernel
+		--glob '!kernel/proc/sched.c' --glob '!kernel/proc/current.c' \
+		--glob '!kernel/proc/task.c' \
+		-- '->(on_rq|dispatching|on_cpu|owner_cpu|rq_next|rq_prev)[[:space:]]*=' kernel
 	@! rg -n 'proc_runq_(enqueue|remove)_locked[[:space:]]*\(' kernel \
 		--glob '*.c' --glob '!kernel/proc/park.c' \
+		--glob '!kernel/proc/current.c' \
 		--glob '!kernel/proc/sched.c' --glob '!kernel/proc/exit.c' \
 		--glob '!kernel/proc/task.c'
 	@! rg -n --pcre2 'task_t[[:space:]]*\*[[:space:]]*(waiter|rx_waiter)\b' \
@@ -806,6 +808,7 @@ check-contest-build-all:
 
 check-concurrency-foundation:
 	@rg -q "SCHEDULER_CONCURRENCY_PREREQS" kernel/proc/sched.c
+	@rg -q "SCHEDULER_CPU_OWNERSHIP" kernel/proc/sched.c
 	@rg -q "PER_CPU_CURRENT_VALIDATION" kernel/proc/current.c
 	@rg -q "TASK_STATE_MUTATION_CONTRACT" kernel/include/proc/proc.h
 	@rg -q "A20_PARK_WAKE_PROTOCOL" kernel/include/proc/park.h
