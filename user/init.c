@@ -110,11 +110,17 @@ int main(void)
     perror("execve mksh");
     do_shutdown();
 #else
-    int contest = (access("/bin/etc/contest-mode", F_OK) == 0);
+    int preliminary_contest =
+        (access("/bin/etc/contest-mode", F_OK) == 0);
     int final_contest =
-        contest &&
-        (access("/test/glibc/cagent_testcode.sh", F_OK) == 0 ||
-         access("/test/glibc/buildstorm_testcode.sh", F_OK) == 0);
+        (access("/bin/etc/final-eval-group", F_OK) == 0);
+
+    if (preliminary_contest && final_contest) {
+        printf("[init] conflicting contest entry markers\n");
+        printf("[init] use contest-mode for preliminary evaluation or "
+               "final-eval-group for final evaluation, not both\n");
+        do_shutdown();
+    }
 
     /*
      * Final-round images are complete root filesystems.  Their dynamic
@@ -194,7 +200,8 @@ int main(void)
         telnet_pid = 0;
     }
 
-    char *script = contest ? "/bin/contest.sh" : NULL;
+    char *script = final_contest ? "/bin/final_contest.sh" :
+                   preliminary_contest ? "/bin/contest.sh" : NULL;
     char *argv[] = {"mksh", script, NULL};
 
     printf("[init] forking...\n");
