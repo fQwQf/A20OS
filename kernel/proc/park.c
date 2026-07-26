@@ -285,6 +285,10 @@ unsigned proc_wake_q_flush(proc_wake_q_t *wake_q)
     }
     spin_unlock_irqrestore(&proc_lock, flags);
 
+    for (unsigned i = 0; i < wake_q->count; i++) {
+        proc_put(wake_q->items[i].task);
+        wake_q->items[i].task = NULL;
+    }
     wake_q->count = 0;
     for (unsigned cpu = 0; cpu < CONFIG_NR_CPUS && cpu < 64; cpu++) {
         if (remote_cpus & (1ULL << cpu))
