@@ -78,19 +78,27 @@ int64_t sys_capget(void *hdrp, void *datap)
     task_t *cur = proc_current();
     if (hdr.pid < 0) return -EINVAL;
     task_t *target = cur;
+    task_t *target_ref = NULL;
     if (hdr.pid > 0) {
-        target = proc_find(hdr.pid);
+        target_ref = proc_find_get(hdr.pid);
+        target = target_ref;
         if (!target) return -ESRCH;
     }
-    if (!datap) return 0;
+    if (!datap) {
+        proc_put(target_ref);
+        return 0;
+    }
 
     cap_user_data_t data[2];
     uint64_t effective = target ? target->cred.cap_effective : 0;
     uint64_t permitted = target ? target->cred.cap_permitted : 0;
     uint64_t inheritable = target ? target->cred.cap_inheritable : 0;
     cap_put_words(data, words, effective, permitted, inheritable);
-    return copy_to_user(datap, data, sizeof(cap_user_data_t) * (size_t)words) < 0 ?
-           -EFAULT : 0;
+    int64_t result =
+        copy_to_user(datap, data, sizeof(cap_user_data_t) * (size_t)words) < 0
+            ? -EFAULT : 0;
+    proc_put(target_ref);
+    return result;
 }
 
 int64_t sys_capset(void *hdrp, const void *datap)
@@ -107,8 +115,9 @@ int64_t sys_capset(void *hdrp, const void *datap)
     task_t *cur = proc_current();
     if (hdr.pid < 0) return -EINVAL;
     if (hdr.pid > 0) {
-        task_t *target = proc_find(hdr.pid);
+        task_t *target = proc_find_get(hdr.pid);
         if (!target) return -ESRCH;
+        proc_put(target);
         if (!cur || hdr.pid != cur->pid) return -EPERM;
     }
     cap_user_data_t data[2];

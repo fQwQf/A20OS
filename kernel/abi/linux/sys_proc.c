@@ -121,23 +121,32 @@ int64_t sys_arch_prctl(int op, uint64_t addr) {
 int64_t sys_get_robust_list(int pid, void *head_ptr, size_t *len_ptr) {
     task_t *t;
     if (pid == 0) {
-        t = proc_current();
+        t = proc_get(proc_current());
     } else {
-        t = proc_find(pid);
+        t = proc_find_get(pid);
         if (!t) return -ESRCH;
         task_t *cur = proc_current();
         if (cur && t->cred.uid != cur->cred.uid &&
             t->cred.euid != cur->cred.euid &&
-            !proc_has_cap(cur, CAP_SETUID))
+            !proc_has_cap(cur, CAP_SETUID)) {
+            proc_put(t);
             return -EPERM;
+        }
     }
     if (!t) return -ESRCH;
     uintptr_t head = t->robust_list_head;
-    if (copy_to_user(head_ptr, &head, sizeof(head)) < 0) return -EFAULT;
+    if (copy_to_user(head_ptr, &head, sizeof(head)) < 0) {
+        proc_put(t);
+        return -EFAULT;
+    }
     if (len_ptr) {
         size_t sz = sizeof(struct robust_list_head);
-        if (copy_to_user(len_ptr, &sz, sizeof(sz)) < 0) return -EFAULT;
+        if (copy_to_user(len_ptr, &sz, sizeof(sz)) < 0) {
+            proc_put(t);
+            return -EFAULT;
+        }
     }
+    proc_put(t);
     return 0;
 }
 
@@ -327,20 +336,35 @@ int64_t sys_setfsgid(int gid) {
 
 int64_t sys_getpgid(int pid) {
     task_t *self = proc_current();
-    task_t *t = pid == 0 ? self : proc_find(pid);
+    task_t *t = pid == 0 ? proc_get(self) : proc_find_get(pid);
     if (!t) return -ESRCH;
-    return t->pgid;
+    int pgid = t->pgid;
+    proc_put(t);
+    return pgid;
 }
 
 int64_t sys_setpgid(int pid, int pgid) {
     task_t *self = proc_current();
-    task_t *t = pid == 0 ? self : proc_find(pid);
-    if (!self || !t) return -ESRCH;
+    task_t *t = pid == 0 ? proc_get(self) : proc_find_get(pid);
+    if (!self || !t) {
+        proc_put(t);
+        return -ESRCH;
+    }
     if (pgid == 0) pgid = t->pid;
-    if (pgid <= 0) return -EINVAL;
-    if (t != self && t->ppid != self->pid) return -ESRCH;
-    if (t->sid != self->sid) return -EPERM;
+    if (pgid <= 0) {
+        proc_put(t);
+        return -EINVAL;
+    }
+    if (t != self && t->ppid != self->pid) {
+        proc_put(t);
+        return -ESRCH;
+    }
+    if (t->sid != self->sid) {
+        proc_put(t);
+        return -EPERM;
+    }
     t->pgid = pgid;
+    proc_put(t);
     return 0;
 }
 
@@ -355,9 +379,11 @@ int64_t sys_setsid(void) {
 
 int64_t sys_getsid(int pid) {
     task_t *self = proc_current();
-    task_t *t = pid == 0 ? self : proc_find(pid);
+    task_t *t = pid == 0 ? proc_get(self) : proc_find_get(pid);
     if (!t) return -ESRCH;
-    return t->sid;
+    int sid = t->sid;
+    proc_put(t);
+    return sid;
 }
 
 static char g_hostname[65] = "A20OS";

@@ -65,7 +65,16 @@ static inline void arch_tlb_flush_page(uint64_t addr) {
  * These are called during proc_init / context_switch to set up the
  * SAVE1 register so that __trap_from_user can recover tp. */
 static inline void arch_set_task_pointer(void *task) {
-    __asm__ __volatile("csrwr %0, 0x31" :: "r"(task));
+    /*
+     * csrwr exchanges the GPR and CSR values: the source register is also
+     * overwritten with SAVE1's old value.  Model that side effect explicitly
+     * so an inlined caller cannot reuse the clobbered register for `task`.
+     */
+    uintptr_t value = (uintptr_t)task;
+    __asm__ __volatile("csrwr %0, 0x31"
+                       : "+r"(value)
+                       :
+                       : "memory");
 }
 static inline void *arch_get_task_pointer(void) {
     void *tp;

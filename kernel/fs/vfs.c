@@ -95,7 +95,7 @@ static int vfs_proc_fd_target(const char *path, task_t **task_out, int *fd_out)
     const char *p = path + prefix_len;
     task_t *task;
     if (strncmp(p, "self/fd/", 8) == 0) {
-        task = proc_current();
+        task = proc_get(proc_current());
         p += 8;
     } else {
         if (*p < '0' || *p > '9')
@@ -111,25 +111,33 @@ static int vfs_proc_fd_target(const char *path, task_t **task_out, int *fd_out)
         }
         if (strncmp(p, "/fd/", 4) != 0)
             return 0;
-        task = proc_find(pid);
+        task = proc_find_get(pid);
         p += 4;
     }
-    if (!task || *p < '0' || *p > '9')
+    if (!task)
         return -ENOENT;
+    if (*p < '0' || *p > '9') {
+        proc_put(task);
+        return -ENOENT;
+    }
 
     int fd = 0;
     while (*p >= '0' && *p <= '9') {
         if (fd > (MAX_FILES - 1) / 10)
-            return -ENOENT;
+            goto invalid;
         fd = fd * 10 + (*p++ - '0');
         if (fd >= MAX_FILES)
-            return -ENOENT;
+            goto invalid;
     }
     if (*p != '\0')
-        return -ENOENT;
+        goto invalid;
     *task_out = task;
     *fd_out = fd;
     return 1;
+
+invalid:
+    proc_put(task);
+    return -ENOENT;
 }
 
 static int vfs_proc_fd_path(const char *path, char *out, size_t outsz)
@@ -140,18 +148,24 @@ static int vfs_proc_fd_path(const char *path, char *out, size_t outsz)
     if (match <= 0)
         return match;
     int gfd = fdtable_get(task, fd);
-    if (gfd < 0)
+    if (gfd < 0) {
+        proc_put(task);
         return -ENOENT;
+    }
     vfile_t *vf = vfs_get_file_ref(gfd);
-    if (!vf)
+    if (!vf) {
+        proc_put(task);
         return -ENOENT;
+    }
     size_t len = strlen(vf->path);
     if (len == 0 || len >= outsz) {
         vfs_put_file_ref(gfd, vf);
+        proc_put(task);
         return len == 0 ? -ENOENT : -ENAMETOOLONG;
     }
     memcpy(out, vf->path, len + 1);
     vfs_put_file_ref(gfd, vf);
+    proc_put(task);
     return 1;
 }
 
@@ -1103,13 +1117,18 @@ int vfs_readlinkat(int dirfd, const char *path, char *buf, size_t sz) {
         return proc_fd_match;
     if (proc_fd_match > 0) {
         int gfd = fdtable_get(proc_fd_task, proc_fd);
-        if (gfd < 0)
+        if (gfd < 0) {
+            proc_put(proc_fd_task);
             return -ENOENT;
+        }
         vfile_t *vf = vfs_get_file_ref(gfd);
-        if (!vf)
+        if (!vf) {
+            proc_put(proc_fd_task);
             return -EBADF;
+        }
         int r = vf->path[0] ? vfs_readlink_copy_target(vf->path, buf, sz) : -ENOENT;
         vfs_put_file_ref(gfd, vf);
+        proc_put(proc_fd_task);
         return r;
     }
 
@@ -1125,14 +1144,18 @@ int vfs_readlinkat(int dirfd, const char *path, char *buf, size_t sz) {
         }
         if (pid > 0 && q != p) {
             if (strcmp(q, "/exe") == 0) {
-                task_t *t = proc_find(pid);
+                task_t *t = proc_find_get(pid);
                 const char *exe = t && t->exec_path[0] ? t->exec_path : "/bin/sh";
-                return vfs_readlink_copy_target(exe, buf, sz);
+                int r = vfs_readlink_copy_target(exe, buf, sz);
+                proc_put(t);
+                return r;
             }
             if (strcmp(q, "/cwd") == 0) {
-                task_t *t = proc_find(pid);
+                task_t *t = proc_find_get(pid);
                 const char *cwd_res = t ? t->fs.cwd : "/";
-                return vfs_readlink_copy_target(cwd_res, buf, sz);
+                int r = vfs_readlink_copy_target(cwd_res, buf, sz);
+                proc_put(t);
+                return r;
             }
         }
     }

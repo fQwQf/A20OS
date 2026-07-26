@@ -838,8 +838,9 @@ static int cg_fwrite(vfile_t *vf, const char *buf, size_t count)
         cg_cpuset_update_effective(p->node, CONFIG_NR_CPUS);
         spin_unlock_irqrestore(&p->node->lock, flags);
         for (int i = 0; i < p->node->pid_count; i++) {
-            task_t *t = proc_find(p->node->pids[i]);
+            task_t *t = proc_find_get(p->node->pids[i]);
             if (t) t->cpus_allowed = mask;
+            proc_put(t);
         }
     }
 
@@ -1135,7 +1136,7 @@ struct cg_node *cg_root_node(void)
 
 void cg_attach_task(struct cg_node *cg, int pid)
 {
-    task_t *t = proc_find(pid);
+    task_t *t = proc_find_get(pid);
     if (!t) return;
     t->cgroup = cg;
     uint64_t flags = spin_lock_irqsave(&((cg_node_t *)cg)->lock);
@@ -1143,13 +1144,15 @@ void cg_attach_task(struct cg_node *cg, int pid)
     spin_unlock_irqrestore(&((cg_node_t *)cg)->lock, flags);
     if (!t->cpus_allowed)
         t->cpus_allowed = (1U << CONFIG_NR_CPUS) - 1;
+    proc_put(t);
 }
 
 void cg_detach_task(struct cg_node *cg, int pid)
 {
     (void)cg;
-    task_t *t = proc_find(pid);
+    task_t *t = proc_find_get(pid);
     if (!t) return;
     t->cgroup = NULL;
     t->cg_throttled = 0;
+    proc_put(t);
 }

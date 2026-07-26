@@ -22,7 +22,7 @@ static volatile char rx_buffer[RX_BUF_SIZE];
 static volatile uint32_t rx_head;  // 缓冲区头指针
 static volatile uint32_t rx_tail;  // 缓冲区尾指针
 /* LOCK_ORDER: rx_lock protects the RX ring and tty_foreground_pgid.
- * Ctrl-C path holds rx_lock while calling proc_find()/proc_kill() under proc_lock.
+ * Ctrl-C path holds rx_lock while calling proc_find_get()/proc_kill().
  * All other paths must not acquire additional locks while holding rx_lock. */
 static spinlock_t rx_lock = SPINLOCK_INIT;
 static wait_queue_t rx_waiters;
@@ -54,11 +54,14 @@ static int uart_signal_user_pgid(int pgid, int signum)
         return 0;
     int max_pid = proc_pid_max();
     for (int pid = 1; pid <= max_pid; pid++) {
-        task_t *t = proc_find(pid);
-        if (!t || t->pid <= 1 || !t->pgdir || t->pgid != pgid)
+        task_t *t = proc_find_get(pid);
+        if (!t)
             continue;
-        proc_kill(t->pid, signum);
-        count++;
+        if (t->pid > 1 && t->pgdir && t->pgid == pgid) {
+            proc_kill(t->pid, signum);
+            count++;
+        }
+        proc_put(t);
     }
     return count;
 }
@@ -67,13 +70,14 @@ static void uart_signal_all_user(int signum, int spare_shells)
 {
     int max_pid = proc_pid_max();
     for (int pid = 1; pid <= max_pid; pid++) {
-        task_t *t = proc_find(pid);
+        task_t *t = proc_find_get(pid);
         if (t && t->pid > 1 && t->pgdir &&
             (!spare_shells || !uart_task_should_spare(t))) {
             kdebug("[UART-SIG] pid=%d state=%d name=%s\n",
                    t->pid, t->state, t->name);
             proc_kill(t->pid, signum);
         }
+        proc_put(t);
     }
 }
 
