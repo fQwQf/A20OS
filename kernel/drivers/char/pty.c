@@ -192,25 +192,16 @@ static int pty_wait_interruptible_locked(pty_pair_t *pty, wait_queue_t *wq,
         return -ERESTARTSYS;
 
     wait_queue_entry_t entry = {0};
-    entry.task = task;
-
-    uint64_t wait_flags = spin_lock_irqsave(&wq->lock);
-    entry.next = wq->head;
-    entry.prev = NULL;
-    if (wq->head)
-        wq->head->prev = &entry;
-    wq->head = &entry;
+    wait_queue_prepare(wq, &entry, PROC_WAIT_INTERRUPTIBLE, 0, 0);
     (*waiting)++;
-    task->state = PROC_BLOCKED;
-    spin_unlock_irqrestore(&wq->lock, wait_flags);
 
     spin_unlock_irqrestore(&pty->lock, *pty_flags);
-    sched();
+    proc_wake_reason_t reason = wait_queue_commit(wq, &entry);
     wait_queue_finish(wq, &entry);
     *pty_flags = spin_lock_irqsave(&pty->lock);
     (*waiting)--;
 
-    if (signal_task_has_unblocked(task))
+    if (reason == PROC_WAKE_SIGNAL || signal_task_has_unblocked(task))
         return -ERESTARTSYS;
     return 0;
 }
@@ -266,7 +257,7 @@ int pty_master_write(int idx, const char *buf, size_t count) {
                           buf, count);
     spin_unlock_irqrestore(&g_ptys[idx].lock, flags);
     if (n > 0)
-        wait_queue_wake_all(&g_ptys[idx].slave_readers);
+        wait_queue_wake_all(&g_ptys[idx].slave_readers, 0, PROC_WAKE_EVENT);
     return (int)n;
 }
 
@@ -321,7 +312,7 @@ int pty_slave_write(int idx, const char *buf, size_t count) {
                           buf, count);
     spin_unlock_irqrestore(&g_ptys[idx].lock, flags);
     if (n > 0)
-        wait_queue_wake_all(&g_ptys[idx].master_readers);
+        wait_queue_wake_all(&g_ptys[idx].master_readers, 0, PROC_WAKE_EVENT);
     return (int)n;
 }
 
@@ -450,7 +441,7 @@ void pty_master_close(int idx) {
         pty->master_refs--;
     pty_maybe_free_locked(pty);
     spin_unlock_irqrestore(&pty->lock, flags);
-    wait_queue_wake_all(&pty->slave_readers);
+    wait_queue_wake_all(&pty->slave_readers, 0, PROC_WAKE_EVENT);
 }
 
 void pty_slave_close(int idx) {
@@ -465,7 +456,7 @@ void pty_slave_close(int idx) {
         pty->slave_refs--;
     pty_maybe_free_locked(pty);
     spin_unlock_irqrestore(&pty->lock, flags);
-    wait_queue_wake_all(&pty->master_readers);
+    wait_queue_wake_all(&pty->master_readers, 0, PROC_WAKE_EVENT);
 }
 
 int pty_slave_open(int idx) {

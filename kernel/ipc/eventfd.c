@@ -31,8 +31,12 @@ static int eventfd_read(vfile_t *vf, char *buf, size_t count)
             spin_unlock(&efd->lock);
             return -EAGAIN;
         }
+        wait_queue_entry_t entry = {0};
+        wait_queue_prepare(&efd->readers, &entry,
+                           PROC_WAIT_UNINTERRUPTIBLE, 0, 0);
         spin_unlock(&efd->lock);
-        wait_queue_sleep(&efd->readers);
+        (void)wait_queue_commit(&efd->readers, &entry);
+        wait_queue_finish(&efd->readers, &entry);
         spin_lock(&efd->lock);
     }
     uint64_t val = efd->semaphore ? 1 : efd->counter;
@@ -41,7 +45,7 @@ static int eventfd_read(vfile_t *vf, char *buf, size_t count)
     spin_unlock(&efd->lock);
 
     if (wake_writers)
-        wait_queue_wake_all(&efd->writers);
+        wait_queue_wake_all(&efd->writers, 0, PROC_WAKE_EVENT);
     memcpy(buf, &val, sizeof(val));
     return sizeof(val);
 }
@@ -61,8 +65,12 @@ static int eventfd_write(vfile_t *vf, const char *buf, size_t count)
             spin_unlock(&efd->lock);
             return -EAGAIN;
         }
+        wait_queue_entry_t entry = {0};
+        wait_queue_prepare(&efd->writers, &entry,
+                           PROC_WAIT_UNINTERRUPTIBLE, 0, 0);
         spin_unlock(&efd->lock);
-        wait_queue_sleep(&efd->writers);
+        (void)wait_queue_commit(&efd->writers, &entry);
+        wait_queue_finish(&efd->writers, &entry);
         spin_lock(&efd->lock);
     }
     int wake_readers = (efd->counter == 0);
@@ -70,7 +78,7 @@ static int eventfd_write(vfile_t *vf, const char *buf, size_t count)
     spin_unlock(&efd->lock);
 
     if (wake_readers)
-        wait_queue_wake_all(&efd->readers);
+        wait_queue_wake_all(&efd->readers, 0, PROC_WAKE_EVENT);
     return sizeof(val);
 }
 
