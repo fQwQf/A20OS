@@ -301,6 +301,7 @@ int main(void)
         "proc_stress",
         "io_event_test",
         "vfs_stress",
+        "socket_stress",
     };
 
     printf("LIFETIME_STRESS: start\n");

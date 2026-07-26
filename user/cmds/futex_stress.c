@@ -158,6 +158,54 @@ static int private_shared_boundary(void)
     return 0;
 }
 
+static int unrelated_wake_isolation(void)
+{
+    enum { TARGET = 0, UNRELATED = 1, START = 2, STOP = 3 };
+    int *words = shared_words(4);
+    if (!words)
+        return fail("unrelated-mmap");
+    memset(words, 0, 4 * sizeof(*words));
+
+    pid_t spinner = fork();
+    if (spinner < 0)
+        return fail("unrelated-spinner-fork");
+    if (spinner == 0) {
+        while (!__atomic_load_n(&words[START], __ATOMIC_ACQUIRE))
+            syscall(SYS_sched_yield);
+        unsigned long iterations = 0;
+        while (!__atomic_load_n(&words[STOP], __ATOMIC_ACQUIRE)) {
+            (void)syscall(SYS_futex, &words[UNRELATED], FUTEX_WAKE, 1,
+                          NULL, NULL, 0);
+            if ((++iterations & 15) == 0)
+                syscall(SYS_sched_yield);
+        }
+        _exit(0);
+    }
+
+    pid_t waiter = fork();
+    if (waiter < 0)
+        return fail("unrelated-waiter-fork");
+    if (waiter == 0) {
+        __atomic_store_n(&words[START], 1, __ATOMIC_RELEASE);
+        for (int i = 0; i < 32; i++) {
+            struct timespec timeout = {0, 1000000};
+            errno = 0;
+            long r = syscall(SYS_futex, &words[TARGET], FUTEX_WAIT, 0,
+                             &timeout, NULL, 0);
+            if (r != -1 || errno != ETIMEDOUT)
+                _exit(5);
+        }
+        _exit(0);
+    }
+
+    int r = wait_exit(waiter, 0, "unrelated-waiter");
+    __atomic_store_n(&words[STOP], 1, __ATOMIC_RELEASE);
+    if (wait_exit(spinner, 0, "unrelated-spinner") != 0)
+        r = 1;
+    munmap(words, 4 * sizeof(*words));
+    return r;
+}
+
 static int robust_list_case(void)
 {
     struct robust_list_head head;
@@ -220,6 +268,9 @@ int main(void)
         return 1;
     if (private_shared_boundary() != 0)
         return 1;
+    if (unrelated_wake_isolation() != 0)
+        return 1;
+    printf("FUTEX_STRESS: unrelated-wake-isolation PASS\n");
     if (robust_list_case() != 0)
         return 1;
     printf("FUTEX_STRESS: PASS\n");

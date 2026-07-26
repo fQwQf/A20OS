@@ -207,6 +207,31 @@ static int scenario_futex_wake(void)
     return r;
 }
 
+static int scenario_vfork_auto_reap(void)
+{
+    struct sigaction old_action;
+    struct sigaction ignore_action;
+    memset(&ignore_action, 0, sizeof(ignore_action));
+    ignore_action.sa_handler = SIG_IGN;
+    sigemptyset(&ignore_action.sa_mask);
+    if (sigaction(SIGCHLD, &ignore_action, &old_action) < 0)
+        return fail("vfork-ignore-sigchld");
+
+    for (int i = 0; i < 128; i++) {
+        pid_t pid = vfork();
+        if (pid < 0) {
+            (void)sigaction(SIGCHLD, &old_action, NULL);
+            return fail("vfork-auto-reap");
+        }
+        if (pid == 0)
+            _exit(0);
+    }
+
+    if (sigaction(SIGCHLD, &old_action, NULL) < 0)
+        return fail("vfork-restore-sigchld");
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     if (argc > 1 && strcmp(argv[1], "--verify-exec-args") == 0)
@@ -227,6 +252,9 @@ int main(int argc, char **argv)
         return 1;
     if (scenario_futex_wake() != 0)
         return 1;
+    if (scenario_vfork_auto_reap() != 0)
+        return 1;
+    printf("PROC_STRESS: vfork-auto-reap PASS\n");
     printf("PROC_STRESS: PASS\n");
     return 0;
 }
