@@ -291,6 +291,27 @@ int proc_clone(uint64_t flags, vaddr_t stack, int *ptid, vaddr_t tls, int *ctid,
         spin_unlock_irqrestore(&proc_lock, pf);
     }
 
+    /*
+     * The completion is embedded in the child task.  Once the child is made
+     * runnable it may exit, complete vfork_done, and be auto-reaped by another
+     * CPU before the parent has unlinked its completion wait entry.  Pin the
+     * child across the whole wait so the completion object remains alive.
+     */
+    task_t *vfork_child_ref = NULL;
+    if (flags & CLONE_VFORK) {
+        vfork_child_ref = proc_get(t);
+        if (!vfork_child_ref) {
+            uint64_t pf = spin_lock_irqsave(&proc_lock);
+            parent->vfork_waiting = 0;
+            spin_unlock_irqrestore(&proc_lock, pf);
+#ifdef CONFIG_NOMMU
+            nommu_vfork_snapshot_discard(parent);
+#endif
+            proc_destroy_task(t);
+            return -ESRCH;
+        }
+    }
+
     proc_make_ready(t);
 #ifdef CONFIG_AARCH64_COOPERATIVE_BOOT
     kinfo("[PROC] clone runnable: child=%d kstack=0x%lx\n",
@@ -305,7 +326,8 @@ int proc_clone(uint64_t flags, vaddr_t stack, int *ptid, vaddr_t tls, int *ctid,
         proc_yield();
 #endif
     if (flags & CLONE_VFORK) {
-        wait_for_completion(&t->vfork_done);
+        wait_for_completion(&vfork_child_ref->vfork_done);
+        proc_put(vfork_child_ref);
     }
     return child_pid;
 }
