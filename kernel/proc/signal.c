@@ -308,6 +308,13 @@ int signal_send(int pid, int signum) {
     return signal_send_info(pid, signum, NULL, 0);
 }
 
+int signal_send_task(void *task, int signum)
+{
+    if (signum <= 0 || signum >= NSIG)
+        return -EINVAL;
+    return signal_queue_task((task_t *)task, signum, NULL, 0, 0);
+}
+
 int signal_task_has_unblocked(void *task) {
     task_t *t = (task_t *)task;
     if (!t || !t->signals)

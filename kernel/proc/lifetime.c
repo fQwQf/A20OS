@@ -128,6 +128,15 @@ void proc_lifetime_snapshot(proc_lifetime_stats_t *stats)
 
     uint64_t flags = spin_lock_irqsave(&proc_lock);
     stats->timeout_entries = proc_wait_timer_count_locked();
+    stats->timeout_capacity = proc_wait_timer_capacity();
+    stats->timeout_full_failures =
+        proc_wait_timer_full_failures_locked();
+    stats->timeout_duplicate_rejections =
+        proc_wait_timer_duplicate_rejections_locked();
+    stats->timeout_stale_expirations =
+        proc_wait_timer_stale_expirations_locked();
+    stats->timeout_heap_violations =
+        proc_wait_timer_violations_locked();
     for (task_t *t = proc_first_task_locked(); t;
          t = proc_next_task_locked(t)) {
         stats->listed_tasks++;
@@ -173,7 +182,7 @@ void proc_lifetime_snapshot(proc_lifetime_stats_t *stats)
     stats->lifetime_errors =
         stats->ref_get_failures + stats->ref_underflows +
         stats->duplicate_destroy + stats->bad_final_put +
-        stats->state_violations;
+        stats->state_violations + stats->timeout_heap_violations;
 }
 
 size_t proc_lifetime_format(char *buf, size_t bufsz)
@@ -196,6 +205,11 @@ size_t proc_lifetime_format(char *buf, size_t bufsz)
         "wait_entries: %lu\n"
         "wake_entries: %lu\n"
         "timeout_entries: %lu\n"
+        "timeout_capacity: %lu\n"
+        "timeout_full_failures: %lu\n"
+        "timeout_duplicate_rejections: %lu\n"
+        "timeout_stale_expirations: %lu\n"
+        "timeout_heap_violations: %lu\n"
         "zombies: %lu\n"
         "ref_get_failures: %lu\n"
         "ref_underflows: %lu\n"
@@ -206,7 +220,9 @@ size_t proc_lifetime_format(char *buf, size_t bufsz)
         s.task_objects, s.task_refs, s.listed_tasks, s.listed_refs,
         s.pid_entries, s.runqueue_entries, s.dispatching_tasks,
         s.cpu_owned_tasks, s.wait_entries, s.wake_entries,
-        s.timeout_entries, s.zombies, s.ref_get_failures,
+        s.timeout_entries, s.timeout_capacity, s.timeout_full_failures,
+        s.timeout_duplicate_rejections, s.timeout_stale_expirations,
+        s.timeout_heap_violations, s.zombies, s.ref_get_failures,
         s.ref_underflows, s.duplicate_destroy, s.bad_final_put,
         s.state_violations, s.lifetime_errors);
     if (n < 0)
