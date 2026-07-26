@@ -1,6 +1,7 @@
 [submodule "user/external/fastfetch"]
 	path = user/external/fastfetch
-	url = https://github.com/fastfetch-cli/fastfetch.git
+	url = https://github.com/fQwQf/fastfetch.git
+	branch = dev
 [submodule "user/external/git"]
 	path = user/external/git
 	url = https://github.com/git/git.git
