@@ -23,7 +23,8 @@
 #include "core/klog.h"
 
 extern vnode_t *cgroupfs_mount(int is_v2, const char *opts, void **out_sb);
-extern vnode_t *sysfs_mount(int is_v2, const char *opts, void **out_sb);
+extern vnode_t *procfs_mount(void);
+extern vnode_t *sysfs_mount(void);
 
 /* ============================================================
  * VFS Mount
@@ -113,6 +114,53 @@ int vfs_mount(const char *dev, const char *path, const char *fstype, int flags, 
             vfs_dcache_invalidate_all();
             return 0;
         }
+    }
+    /*
+     * A final-round image is used as a chroot rather than replacing A20OS's
+     * bootstrap ramfs.  Allow procfs, sysfs and devfs to be mounted below
+     * that root so absolute paths keep normal Linux rootfs semantics after
+     * chroot(2).
+     */
+    if (strcmp(fstype, "proc") == 0 ||
+        strcmp(fstype, "sysfs") == 0 ||
+        strcmp(fstype, "devtmpfs") == 0 ||
+        strcmp(fstype, "devfs") == 0) {
+        vnode_t *target = vfs_resolve(path);
+        if (!target) return -ENOENT;
+        int is_dir = target->type == VFS_FT_DIR;
+        vnode_put(target);
+        if (!is_dir) return -ENOTDIR;
+
+        vnode_t *root = NULL;
+        int type = 0;
+        if (strcmp(fstype, "proc") == 0) {
+            root = procfs_mount();
+            type = FS_TYPE_PROCFS;
+        } else if (strcmp(fstype, "sysfs") == 0) {
+            root = sysfs_mount();
+            type = FS_TYPE_SYSFS;
+        } else {
+            root = devfs_mount();
+            type = FS_TYPE_DEVFS;
+        }
+        if (!root) return -ENOMEM;
+
+        mount_t *mnt = vfs_mount_alloc();
+        if (!mnt) return -ENOMEM;
+        strncpy(mnt->path, path, MAX_PATH_LEN - 1);
+        mnt->path[MAX_PATH_LEN - 1] = '\0';
+        mnt->type = type;
+        mnt->flags = flags;
+        mnt->root = root;
+        root->mnt = mnt;
+        strncpy(mnt->dev, dev ? dev : "none", sizeof(mnt->dev) - 1);
+        mnt->dev[sizeof(mnt->dev) - 1] = '\0';
+        strncpy(mnt->fstype, fstype, sizeof(mnt->fstype) - 1);
+        mnt->fstype[sizeof(mnt->fstype) - 1] = '\0';
+        strncpy(mnt->opts, "rw", sizeof(mnt->opts) - 1);
+        mnt->opts[sizeof(mnt->opts) - 1] = '\0';
+        vfs_dcache_invalidate_all();
+        return 0;
     }
     if (strcmp(fstype, "tmpfs") == 0 || strcmp(fstype, "ramfs") == 0) {
         vnode_t *target = vfs_resolve(path);

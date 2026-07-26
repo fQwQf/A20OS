@@ -110,7 +110,20 @@ int main(void)
     perror("execve mksh");
     do_shutdown();
 #else
-    setup_runtime_links();
+    int contest = (access("/bin/etc/contest-mode", F_OK) == 0);
+    int final_contest =
+        contest &&
+        (access("/test/glibc/cagent_testcode.sh", F_OK) == 0 ||
+         access("/test/glibc/buildstorm_testcode.sh", F_OK) == 0);
+
+    /*
+     * Final-round images are complete root filesystems.  Their dynamic
+     * loader and libraries become available after the static chroot helper
+     * enters /test, so copying those files into the RAMFS only delays entry.
+     * Keep the original setup for interactive and legacy contest images.
+     */
+    if (!final_contest)
+        setup_runtime_links();
 
     xmkdir("/tmp");
     xmkdir("/tmp/sysinfo");
@@ -181,7 +194,6 @@ int main(void)
         telnet_pid = 0;
     }
 
-    int contest = (access("/bin/etc/contest-mode", F_OK) == 0);
     char *script = contest ? "/bin/contest.sh" : NULL;
     char *argv[] = {"mksh", script, NULL};
 

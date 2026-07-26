@@ -3,6 +3,71 @@
 # contest.sh — automated test runner
 # Replaces contest_init.c. Execution path identical to manual mode.
 
+# ── 2026 final-round rootfs entry ───────────────────────────
+#
+# The published final image is a complete Debian root filesystem.  Execute
+# its scripts after chroot so /lib, /usr, /proc and all toolchain paths have
+# their normal root-directory meaning.  Older preliminary images do not carry
+# either script and continue through the legacy runner below unchanged.
+run_final_group() {
+    typeset group=$1
+    typeset script="/glibc/${group}_testcode.sh"
+    typeset chroot_bin=
+
+    for chroot_bin in /bin/chroot /test/usr/sbin/chroot /test/usr/bin/chroot; do
+        [[ -x $chroot_bin ]] && break
+        chroot_bin=
+    done
+    if [[ -z $chroot_bin ]]; then
+        print "[FINAL-EVAL][ERROR] chroot utility not found in published rootfs"
+        return 127
+    fi
+    if ! cp /bin/mksh /test/a20-eval-shell; then
+        print "[FINAL-EVAL][ERROR] failed to install evaluation shell"
+        return 127
+    fi
+    chmod 755 /test/a20-eval-shell
+
+    print "#### A20OS 2026 FINAL EVAL START $group ####"
+    "$chroot_bin" /test /a20-eval-shell -c \
+        "cd /glibc && exec /a20-eval-shell '$script'"
+    typeset -i rc=$?
+    print "[FINAL-EVAL] $group runner exit=$rc"
+    print "#### A20OS 2026 FINAL EVAL END $group ####"
+    return $rc
+}
+
+if [[ -f /test/glibc/cagent_testcode.sh ||
+      -f /test/glibc/buildstorm_testcode.sh ]]; then
+    typeset final_group=all
+    if [[ -f /bin/etc/final-eval-group ]]; then
+        IFS= read -r final_group </bin/etc/final-eval-group
+    fi
+
+    typeset -i final_failed=0
+    case "$final_group" in
+    cagent)
+        run_final_group cagent || final_failed=1
+        ;;
+    buildstorm)
+        run_final_group buildstorm || final_failed=1
+        ;;
+    all|"")
+        [[ ! -f /test/glibc/cagent_testcode.sh ]] ||
+            run_final_group cagent || final_failed=1
+        [[ ! -f /test/glibc/buildstorm_testcode.sh ]] ||
+            run_final_group buildstorm || final_failed=1
+        ;;
+    *)
+        print "[FINAL-EVAL][ERROR] unknown group: $final_group"
+        final_failed=1
+        ;;
+    esac
+    sync
+    poweroff
+    exit $final_failed
+fi
+
 # ── early setup ─────────────────────────────────────────────
 [[ -x /test/musl/busybox ]]  && cp /test/musl/busybox /busybox 2>/dev/null
 [[ -x /test/musl/busybox ]]  && cp /test/musl/busybox /bin/busybox 2>/dev/null

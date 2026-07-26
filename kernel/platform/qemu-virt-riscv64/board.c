@@ -124,6 +124,7 @@ static const smp_platform_ops_t rv64_smp_ops = {
 };
 
 static void rv64_early_init(void) {
+    riscv64_memory_init();
 }
 
 static void rv64_poweroff(void) {
