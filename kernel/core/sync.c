@@ -2,6 +2,7 @@
 
 #include "core/consts.h"
 #include "proc/proc.h"
+#include "proc/lifetime.h"
 
 #define COMPLETION_DONE_ALL ((unsigned)-1)
 
@@ -48,6 +49,7 @@ bool wait_queue_link(wait_queue_t *q, wait_queue_entry_t *entry,
         q->head->prev = entry;
     q->head = entry;
     entry->linked = true;
+    proc_lifetime_note_wait_add();
     spin_unlock_irqrestore(&q->lock, flags);
     return true;
 }
@@ -67,6 +69,8 @@ void wait_queue_unlink(wait_queue_t *q, wait_queue_entry_t *entry) {
         if (entry->next)
             entry->next->prev = entry->prev;
     }
+    if (task)
+        proc_lifetime_note_wait_remove();
     wait_queue_entry_clear(entry);
     spin_unlock_irqrestore(&q->lock, flags);
     proc_put(task);
@@ -128,6 +132,7 @@ unsigned wait_queue_collect_one(wait_queue_t *q, uintptr_t key,
     unsigned collected = 0;
     if (entry && proc_wake_q_add(wake_q, entry->task, entry->wait_seq,
                                  reason)) {
+        proc_lifetime_note_wait_to_wake();
         wait_queue_detach_locked(q, entry);
         collected = 1;
     }
@@ -157,6 +162,7 @@ unsigned wait_queue_collect_all(wait_queue_t *q, uintptr_t key,
                 drained = false;
                 break;
             }
+            proc_lifetime_note_wait_to_wake();
             wait_queue_detach_locked(q, entry);
             collected++;
         }

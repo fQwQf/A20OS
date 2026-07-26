@@ -12,6 +12,7 @@
 #include "fs/page_cache.h"
 #include "proc/proc.h"
 #include "proc/proc_internal.h"
+#include "proc/lifetime.h"
 #include "mm/mm.h"
 #include "mm/frame.h"
 #include "mm/slab.h"
@@ -98,6 +99,7 @@ typedef enum {
     PF_A20_BCACHE,
     PF_A20_PAGE_CACHE,
     PF_A20_OOM,
+    PF_A20_TASK_LIFETIME,
     PF_A20_DRIVER_LIFECYCLE,
     PF_CGROUPS,
     PF_SELF,
@@ -568,6 +570,8 @@ static int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
             os.in_progress);
         break;
     }
+    case PF_A20_TASK_LIFETIME:
+        return (int)proc_lifetime_format(buf, bufsz);
     case PF_A20_DRIVER_LIFECYCLE:
         buf[0] = '\0';
         return 0;
@@ -870,6 +874,7 @@ static pf_type_t name_to_type(const char *name, int *out_pid) {
     if (strcmp(name, "bcache") == 0) return PF_A20_BCACHE;
     if (strcmp(name, "page_cache") == 0) return PF_A20_PAGE_CACHE;
     if (strcmp(name, "oom") == 0) return PF_A20_OOM;
+    if (strcmp(name, "task_lifetime") == 0) return PF_A20_TASK_LIFETIME;
     if (strcmp(name, "driver_lifecycle") == 0) return PF_A20_DRIVER_LIFECYCLE;
     if (strcmp(name, "cmdline") == 0) return PF_CMDLINE;
     if (is_pid_str(name)) {
@@ -1043,6 +1048,10 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
     } else if (dp && dp->type == PF_A20 && strcmp(name, "oom") == 0) {
         child = new_entry(name, PF_A20_OOM, 0);
         type = PF_A20_OOM;
+    } else if (dp && dp->type == PF_A20 &&
+               strcmp(name, "task_lifetime") == 0) {
+        child = new_entry(name, PF_A20_TASK_LIFETIME, 0);
+        type = PF_A20_TASK_LIFETIME;
     } else if (dp && dp->type == PF_A20 && strcmp(name, "driver_lifecycle") == 0) {
         child = new_entry(name, PF_A20_DRIVER_LIFECYCLE, 0);
         type = PF_A20_DRIVER_LIFECYCLE;
@@ -1439,7 +1448,8 @@ static int procfs_freaddir(vfile_t *vf, void *dirp, size_t count) {
         ".", "..", "max_queued_events", "max_user_instances", NULL
     };
     static const char *a20_entries[] = {
-        ".", "..", "bcache", "page_cache", "oom", "driver_lifecycle", NULL
+        ".", "..", "bcache", "page_cache", "oom", "task_lifetime",
+        "driver_lifecycle", NULL
     };
     static const char *ns_entries[] = {
         ".", "..", "pid", "uts", "user", "ipc", "mnt", "net", "cgroup", NULL

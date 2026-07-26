@@ -2,6 +2,7 @@
 
 #include "proc/proc.h"
 #include "proc/proc_internal.h"
+#include "proc/lifetime.h"
 #include "core/cpu.h"
 #include "core/klog.h"
 #include "core/panic.h"
@@ -287,6 +288,7 @@ unsigned proc_wake_q_flush(proc_wake_q_t *wake_q)
 
     for (unsigned i = 0; i < wake_q->count; i++) {
         proc_put(wake_q->items[i].task);
+        proc_lifetime_note_wake_remove();
         wake_q->items[i].task = NULL;
     }
     wake_q->count = 0;

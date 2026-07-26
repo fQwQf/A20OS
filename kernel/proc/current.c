@@ -115,3 +115,68 @@ int proc_task_is_current_any_cpu(task_t *task)
     }
     return 0;
 }
+
+unsigned proc_current_owner_memberships_locked(task_t *task)
+{
+    if (!task)
+        return 0;
+    unsigned memberships = 0;
+    for (unsigned cpu = 0; cpu < CONFIG_NR_CPUS; cpu++) {
+        if (__atomic_load_n(&g_cpu_current[cpu], __ATOMIC_ACQUIRE) == task)
+            memberships++;
+        if (__atomic_load_n(&g_cpu_switching_out[cpu], __ATOMIC_ACQUIRE) ==
+            task)
+            memberships++;
+    }
+    return memberships;
+}
+
+unsigned proc_current_slot_count_locked(void)
+{
+    unsigned count = 0;
+    for (unsigned cpu = 0; cpu < CONFIG_NR_CPUS; cpu++) {
+        if (__atomic_load_n(&g_cpu_current[cpu], __ATOMIC_ACQUIRE))
+            count++;
+        if (__atomic_load_n(&g_cpu_switching_out[cpu], __ATOMIC_ACQUIRE))
+            count++;
+    }
+    return count;
+}
+
+unsigned proc_current_lifetime_violations_locked(void)
+{
+    unsigned violations = 0;
+    for (unsigned cpu = 0; cpu < CONFIG_NR_CPUS; cpu++) {
+        task_t *slots[2] = {
+            __atomic_load_n(&g_cpu_current[cpu], __ATOMIC_ACQUIRE),
+            __atomic_load_n(&g_cpu_switching_out[cpu], __ATOMIC_ACQUIRE),
+        };
+        for (unsigned slot = 0; slot < 2; slot++) {
+            task_t *task = slots[slot];
+            if (!task)
+                continue;
+            if (!task->on_cpu || task->owner_cpu != cpu ||
+                refcount_read(&task->refs) <= 0)
+                violations++;
+            if (!task->dynamic_alloc && refcount_read(&task->refs) < 2)
+                violations++;
+            for (unsigned other_cpu = 0; other_cpu < CONFIG_NR_CPUS;
+                 other_cpu++) {
+                task_t *other_current =
+                    __atomic_load_n(&g_cpu_current[other_cpu],
+                                    __ATOMIC_ACQUIRE);
+                task_t *other_switching =
+                    __atomic_load_n(&g_cpu_switching_out[other_cpu],
+                                    __ATOMIC_ACQUIRE);
+                if (other_cpu < cpu && other_current == task)
+                    violations++;
+                if (other_cpu < cpu && other_switching == task)
+                    violations++;
+                if (other_cpu == cpu && slot == 1 &&
+                    other_current == task)
+                    violations++;
+            }
+        }
+    }
+    return violations;
+}
