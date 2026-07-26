@@ -70,6 +70,49 @@ static int scenario_exec_wait(void)
     return wait_exit(pid, 0, "wait-exec");
 }
 
+static int verify_large_exec_args(int argc, char **argv)
+{
+    if (argc != 98)
+        return 1;
+    for (int i = 0; i < 96; i++) {
+        char expected[96];
+        int prefix = snprintf(expected, sizeof(expected), "arg-%03d-", i);
+        memset(expected + prefix, 'A' + (i % 26),
+               sizeof(expected) - (size_t)prefix - 1);
+        expected[sizeof(expected) - 1] = '\0';
+        if (strcmp(argv[i + 2], expected) != 0)
+            return 1;
+    }
+    return 0;
+}
+
+static int scenario_exec_large_args(void)
+{
+    static char arg_storage[96][96];
+    char *argv[99];
+    argv[0] = "proc_stress";
+    argv[1] = "--verify-exec-args";
+    for (int i = 0; i < 96; i++) {
+        int prefix = snprintf(arg_storage[i], sizeof(arg_storage[i]),
+                              "arg-%03d-", i);
+        memset(arg_storage[i] + prefix, 'A' + (i % 26),
+               sizeof(arg_storage[i]) - (size_t)prefix - 1);
+        arg_storage[i][sizeof(arg_storage[i]) - 1] = '\0';
+        argv[i + 2] = arg_storage[i];
+    }
+    argv[98] = NULL;
+
+    pid_t pid = fork();
+    if (pid < 0)
+        return fail("fork-exec-large-args");
+    if (pid == 0) {
+        char *envp[] = {"PATH=/bin", NULL};
+        execve("/bin/proc_stress", argv, envp);
+        _exit(127);
+    }
+    return wait_exit(pid, 0, "wait-exec-large-args");
+}
+
 static int scenario_spawn_missing(void)
 {
     pid_t pid = -1;
@@ -164,12 +207,17 @@ static int scenario_futex_wake(void)
     return r;
 }
 
-int main(void)
+int main(int argc, char **argv)
 {
+    if (argc > 1 && strcmp(argv[1], "--verify-exec-args") == 0)
+        return verify_large_exec_args(argc, argv);
+
     printf("PROC_STRESS: start\n");
     if (scenario_fork_wait_yield() != 0)
         return 1;
     if (scenario_exec_wait() != 0)
+        return 1;
+    if (scenario_exec_large_args() != 0)
         return 1;
     if (scenario_spawn_missing() != 0)
         return 1;
