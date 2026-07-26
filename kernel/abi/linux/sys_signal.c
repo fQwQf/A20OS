@@ -12,15 +12,20 @@ static int signal_send_permission(task_t *self, task_t *target) {
 int64_t sys_kill(int pid, int sig) {
     if (sig < 0 || sig >= NSIG) return -EINVAL;
     if (sig == 0) {
-        if (pid > 0)
-            return proc_find(pid) ? 0 : -ESRCH;
+        if (pid > 0) {
+            task_t *target = proc_find_get(pid);
+            if (!target)
+                return -ESRCH;
+            proc_put(target);
+        }
         return 0;
     }
     if (pid > 0) {
         task_t *self = proc_current();
-        task_t *target = proc_find(pid);
+        task_t *target = proc_find_get(pid);
         if (!target) return -ESRCH;
         int perm = signal_send_permission(self, target);
+        proc_put(target);
         if (perm < 0) return perm;
         return proc_kill(pid, sig);
     }
@@ -38,26 +43,34 @@ int64_t sys_kill(int pid, int sig) {
     int count = 0;
     int max_pid = proc_pid_max();
     for (int p = 1; p <= max_pid; p++) {
-        task_t *target = proc_find(p);
-        if (!target || target->pid <= 1 || !target->pgdir)
+        task_t *target = proc_find_get(p);
+        if (!target)
             continue;
-        int perm = signal_send_permission(proc_current(), target);
-        if (perm < 0)
-            continue;
-        if (proc_kill(target->pid, sig) == 0)
-            count++;
+        if (target->pid > 1 && target->pgdir) {
+            int perm = signal_send_permission(proc_current(), target);
+            if (perm >= 0 && proc_kill(target->pid, sig) == 0)
+                count++;
+        }
+        proc_put(target);
     }
     return count ? 0 : -ESRCH;
 }
 
 int64_t sys_tgkill(int tgid, int tid, int sig) {
     task_t *self = proc_current();
-    task_t *target = proc_find(tid);
+    task_t *target = proc_find_get(tid);
     if (!target) return -ESRCH;
-    if (target->state == PROC_ZOMBIE) return -ESRCH;
+    if (target->state == PROC_ZOMBIE) {
+        proc_put(target);
+        return -ESRCH;
+    }
     int target_tgid = target->tgid > 0 ? target->tgid : target->pid;
-    if (target_tgid != tgid) return -ESRCH;
+    if (target_tgid != tgid) {
+        proc_put(target);
+        return -ESRCH;
+    }
     int perm = signal_send_permission(self, target);
+    proc_put(target);
     if (perm < 0) return perm;
     if (sig == 0) return 0;
     return signal_send_thread_user(tid, sig);
@@ -65,10 +78,14 @@ int64_t sys_tgkill(int tgid, int tid, int sig) {
 
 int64_t sys_tkill(int tid, int sig) {
     task_t *self = proc_current();
-    task_t *target = proc_find(tid);
+    task_t *target = proc_find_get(tid);
     if (!target) return -ESRCH;
-    if (target->state == PROC_ZOMBIE) return -ESRCH;
+    if (target->state == PROC_ZOMBIE) {
+        proc_put(target);
+        return -ESRCH;
+    }
     int perm = signal_send_permission(self, target);
+    proc_put(target);
     if (perm < 0) return perm;
     if (sig == 0) return 0;
     return signal_send_thread_user(tid, sig);
@@ -78,9 +95,10 @@ int64_t sys_rt_sigqueueinfo(int tgid, int sig, void *uinfo) {
     if (sig <= 0 || sig >= NSIG) return -EINVAL;
     if (!uinfo) return -EFAULT;
     task_t *self = proc_current();
-    task_t *target = proc_find(tgid);
+    task_t *target = proc_find_get(tgid);
     if (!target) return -ESRCH;
     int perm = signal_send_permission(self, target);
+    proc_put(target);
     if (perm < 0) return perm;
     uint8_t info[SIGNAL_INFO_SIZE];
     if (copy_from_user(info, uinfo, sizeof(info)) < 0) return -EFAULT;

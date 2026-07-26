@@ -660,7 +660,13 @@ int proc_wait_timer_register_locked(task_t *t, uint64_t deadline,
         wait_timer_count ? wait_timer_heap[0].deadline : SCHED_NO_DEADLINE;
     unsigned index = wait_timer_count++;
     wait_timer_heap[index].deadline = deadline;
-    wait_timer_heap[index].task = t;
+    wait_timer_heap[index].task = proc_get(t);
+    if (!wait_timer_heap[index].task) {
+        wait_timer_count--;
+        memset(&wait_timer_heap[wait_timer_count], 0,
+               sizeof(wait_timer_heap[wait_timer_count]));
+        return -1;
+    }
     wait_timer_heap[index].wait_seq = wait_seq;
     t->wait_timer_index = (int)index;
     t->wake_time = deadline;
@@ -681,8 +687,9 @@ void proc_wait_timer_cancel_locked(task_t *t, uint64_t wait_seq)
         wait_timer_heap[index].task != t ||
         wait_timer_heap[index].wait_seq != wait_seq)
         return;
-    (void)wait_timer_remove_index_locked(index);
+    wait_timer_t removed = wait_timer_remove_index_locked(index);
     t->wake_time = 0;
+    proc_put(removed.task);
 }
 
 void proc_set_alarm_expire(task_t *t, uint64_t alarm_expire)
@@ -715,6 +722,10 @@ void proc_runq_enqueue_locked(task_t *t) {
 #endif
 
     int q = sched_task_rt(t) ? 0 : sched_level_clamp(t->sched_level);
+    if (!proc_get(t)) {
+        RUNQ_UNLOCK_IRQ(cpu, rf);
+        return;
+    }
     t->sched_level = q;
     t->cpu_id = cpu;
     t->ready_since = timer_get_ticks();
@@ -740,6 +751,7 @@ void proc_runq_remove_locked(task_t *t) {
     if (__atomic_load_n(&rq->nr_running, __ATOMIC_RELAXED) > 0)
         __atomic_fetch_sub(&rq->nr_running, 1, __ATOMIC_RELAXED);
     RUNQ_UNLOCK_IRQ(cpu, rf);
+    proc_put(t);
 }
 
 /*
@@ -802,6 +814,8 @@ task_t *proc_runq_pick_locked(void) {
             RUNQ_UNLOCK_IRQ(cpu, rf);
             return t;
         }
+        /* The removed runqueue reference was not transferred to dispatch. */
+        proc_put(t);
     }
 
     RUNQ_UNLOCK_IRQ(cpu, rf);
@@ -828,6 +842,7 @@ static void sched_scan_timers(uint64_t now)
             (void)proc_try_wake_locked(timer.task, timer.wait_seq,
                                        PROC_WAKE_TIMEOUT);
         }
+        proc_put(timer.task);
     }
 
     if (scan_alarms) {
@@ -905,8 +920,11 @@ void sched_reap_zombies(void)
                 if (act->sa_handler == SIG_IGN || (act->sa_flags & SA_NOCLDWAIT))
                     reap = 1;
             }
-            if (reap && count < (int)(sizeof(to_reap) / sizeof(to_reap[0])))
-                to_reap[count++] = t;
+            if (reap && count < (int)(sizeof(to_reap) / sizeof(to_reap[0]))) {
+                task_t *owned = proc_get(t);
+                if (owned)
+                    to_reap[count++] = owned;
+            }
         }
 
         /* Reserve and detach the zombies while still holding proc_lock.
@@ -922,6 +940,7 @@ void sched_reap_zombies(void)
 
         for (int i = 0; i < count; i++) {
             proc_destroy_task(to_reap[i]);
+            proc_put(to_reap[i]);
         }
     } while (count > 0);
 }
@@ -953,12 +972,15 @@ void context_switch(task_t *next) {
     uint64_t flags = spin_lock_irqsave(&proc_lock);
     unsigned cpu = cpu_current_id();
     if (next == proc_current()) {
+        int had_dispatch_ref = next->dispatching;
         next->state = PROC_RUNNING;
         next->on_rq = 0;
         next->dispatching = 0;
         next->on_cpu = 1;
         next->owner_cpu = cpu;
         proc_sched_assert_task_locked(next);
+        if (had_dispatch_ref)
+            proc_put(next);
         spin_unlock_irqrestore(&proc_lock, flags);
         return;
     }
@@ -978,6 +1000,7 @@ void context_switch(task_t *next) {
      * holding proc_lock therefore see either a selected task or an owned task,
      * never an unowned dequeue gap.
      */
+    int had_dispatch_ref = next->dispatching;
     task_t *old = proc_set_current(next);
     next->state  = PROC_RUNNING;
     next->on_rq  = 0;
@@ -985,6 +1008,8 @@ void context_switch(task_t *next) {
     next->on_cpu = 1;
     next->owner_cpu = cpu;
     proc_sched_assert_task_locked(next);
+    if (had_dispatch_ref)
+        proc_put(next);
     spin_unlock_irqrestore(&proc_lock, flags);
     if (prev && prev->pid >= 4 && next->pid >= 4)
         ktrace_sched("[SCHED] ctxsw: %d -> %d\n", prev->pid, next->pid);

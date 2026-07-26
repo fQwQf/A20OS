@@ -48,8 +48,11 @@ static int proc_switch_complete_locked(unsigned cpu)
         proc_runq_enqueue_locked(old);
     proc_sched_assert_task_locked(old);
 
+    int zombie = old->state == PROC_ZOMBIE;
     __atomic_store_n(&g_cpu_switching_out[cpu], NULL, __ATOMIC_RELEASE);
-    return old->state == PROC_ZOMBIE;
+    /* Drop the CPU slot reference after the outgoing stack is inactive. */
+    proc_put(old);
+    return zombie;
 }
 
 task_t *proc_current(void)
@@ -60,6 +63,11 @@ task_t *proc_current(void)
 task_t *proc_set_current(task_t *next)
 {
     unsigned cpu = cpu_current_id();
+    if (!proc_get(next))
+        panic("proc_set_current: cpu=%u next=%p refs=%d state=%d owner=%u",
+              cpu, next, next ? refcount_read(&next->refs) : 0,
+              next ? next->state : PROC_UNUSED,
+              next ? next->owner_cpu : PROC_CPU_NONE);
     /*
      * Some architectures restore interrupt state in __switch before returning
      * to the C completion hook. If that incoming task is immediately
