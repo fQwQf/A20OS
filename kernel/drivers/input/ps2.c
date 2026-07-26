@@ -265,13 +265,31 @@ static int ps2_input_read(vfile_t *vf, char *buf, size_t count) {
             spin_unlock_irqrestore(&g_ps2.lock, flags);
             return -EAGAIN;
         }
-        wait_queue_entry_t entry = {0};
-        wait_queue_prepare(&g_ps2.waiters, &entry,
-                           PROC_WAIT_INTERRUPTIBLE, 0, 0);
         spin_unlock_irqrestore(&g_ps2.lock, flags);
-        proc_wake_reason_t reason =
-            wait_queue_commit(&g_ps2.waiters, &entry);
-        wait_queue_finish(&g_ps2.waiters, &entry);
+        proc_wait_token_t token =
+            proc_park_prepare(PROC_WAIT_INTERRUPTIBLE, 0);
+        if (!token.task)
+            return -EAGAIN;
+
+        wait_queue_entry_t entry = {0};
+        flags = spin_lock_irqsave(&g_ps2.lock);
+        if (g_ps2.head != g_ps2.tail) {
+            spin_unlock_irqrestore(&g_ps2.lock, flags);
+            (void)proc_park_cancel(token);
+            proc_park_finish(token);
+            continue;
+        }
+        bool linked = wait_queue_link(&g_ps2.waiters, &entry, token, 0);
+        spin_unlock_irqrestore(&g_ps2.lock, flags);
+        proc_wake_reason_t reason;
+        if (linked)
+            reason = proc_park_commit(token);
+        else {
+            (void)proc_park_cancel(token);
+            reason = PROC_WAKE_CANCEL;
+        }
+        wait_queue_unlink(&g_ps2.waiters, &entry);
+        proc_park_finish(token);
         if (reason == PROC_WAKE_SIGNAL)
             return -ERESTARTSYS;
     }

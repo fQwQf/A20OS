@@ -119,13 +119,38 @@ int net_accept(int gfd, void *addr, size_t *addrlen, int flags)
         }
         uint64_t deadline = s->recv_timeout_ticks ?
                             start + s->recv_timeout_ticks : 0;
-        wait_queue_entry_t entry = {0};
-        wait_queue_prepare(&s->accept_waitq, &entry,
-                           PROC_WAIT_INTERRUPTIBLE, deadline, 0);
         spin_unlock_irqrestore(&g_net_lock, irq);
-        proc_wake_reason_t reason =
-            wait_queue_commit(&s->accept_waitq, &entry);
-        wait_queue_finish(&s->accept_waitq, &entry);
+        proc_wait_token_t token =
+            proc_park_prepare(PROC_WAIT_INTERRUPTIBLE, deadline);
+        if (!token.task)
+            return -EAGAIN;
+
+        wait_queue_entry_t entry = {0};
+        irq = spin_lock_irqsave(&g_net_lock);
+        if (s->closed || s->accept_head) {
+            spin_unlock_irqrestore(&g_net_lock, irq);
+            (void)proc_park_cancel(token);
+            proc_park_finish(token);
+            continue;
+        }
+        if (net_task_has_unblocked_signal(cur)) {
+            spin_unlock_irqrestore(&g_net_lock, irq);
+            (void)proc_park_cancel(token);
+            proc_park_finish(token);
+            return -ERESTARTSYS;
+        }
+        bool linked =
+            wait_queue_link(&s->accept_waitq, &entry, token, 0);
+        spin_unlock_irqrestore(&g_net_lock, irq);
+        proc_wake_reason_t reason;
+        if (linked)
+            reason = proc_park_commit(token);
+        else {
+            (void)proc_park_cancel(token);
+            reason = PROC_WAKE_CANCEL;
+        }
+        wait_queue_unlink(&s->accept_waitq, &entry);
+        proc_park_finish(token);
         if (reason == PROC_WAKE_SIGNAL ||
             net_task_has_unblocked_signal(cur))
             return -ERESTARTSYS;
@@ -145,18 +170,31 @@ int net_accept(int gfd, void *addr, size_t *addrlen, int flags)
     ktrace_net("[NET] accept: done, installing file\n");
     int newfd = net_socket_install_file(child, O_RDWR | (child->nonblock ? O_NONBLOCK : 0));
     if (newfd < 0) {
+        proc_wake_q_t wake_q;
+        proc_wake_q_init(&wake_q);
+        net_socket_t *peer = NULL;
+        bool drain_peer_read = false;
+        bool drain_peer_write = false;
         uint64_t irq = spin_lock_irqsave(&g_net_lock);
         child->closed = 1;
         if (child->peer && child->peer->peer == child) {
-            child->peer->peer = NULL;
-            child->peer->peer_closed = 1;
-            wait_queue_wake_all(&child->peer->read_waitq, 0,
-                                PROC_WAKE_EVENT);
-            wait_queue_wake_all(&child->peer->write_waitq, 0,
-                                PROC_WAKE_EVENT);
+            peer = child->peer;
+            peer->peer = NULL;
+            peer->peer_closed = 1;
+            drain_peer_read = net_wait_queue_collect_all_locked(
+                &peer->read_waitq, PROC_WAKE_EVENT, &wake_q);
+            drain_peer_write = net_wait_queue_collect_all_locked(
+                &peer->write_waitq, PROC_WAKE_EVENT, &wake_q);
         }
         net_unregister_socket_locked(child);
         spin_unlock_irqrestore(&g_net_lock, irq);
+        (void)proc_wake_q_flush(&wake_q);
+        if (drain_peer_read)
+            (void)wait_queue_wake_all(
+                &peer->read_waitq, 0, PROC_WAKE_EVENT);
+        if (drain_peer_write)
+            (void)wait_queue_wake_all(
+                &peer->write_waitq, 0, PROC_WAKE_EVENT);
         net_inet_socket_destroy(child);
         net_socket_free(child);
         return newfd;
@@ -517,6 +555,14 @@ int net_shutdown(int gfd, int how)
     net_socket_t *s = net_socket_from_file(gfd);
     if (!s)
         return -ENOTSOCK;
+    proc_wake_q_t wake_q;
+    proc_wake_q_init(&wake_q);
+    net_socket_t *peer = NULL;
+    bool drain_accept = false;
+    bool drain_read = false;
+    bool drain_write = false;
+    bool drain_peer_read = false;
+    bool drain_peer_write = false;
     uint64_t irq = spin_lock_irqsave(&g_net_lock);
 
     if (how == SHUT_RDWR) {
@@ -541,19 +587,40 @@ int net_shutdown(int gfd, int how)
         irq = spin_lock_irqsave(&g_net_lock);
     }
 
-    wait_queue_wake_all(&s->accept_waitq, 0, PROC_WAKE_EVENT);
-    wait_queue_wake_all(&s->read_waitq, 0, PROC_WAKE_EVENT);
-    wait_queue_wake_all(&s->write_waitq, 0, PROC_WAKE_EVENT);
+    drain_accept = net_wait_queue_collect_all_locked(
+        &s->accept_waitq, PROC_WAKE_EVENT, &wake_q);
+    drain_read = net_wait_queue_collect_all_locked(
+        &s->read_waitq, PROC_WAKE_EVENT, &wake_q);
+    drain_write = net_wait_queue_collect_all_locked(
+        &s->write_waitq, PROC_WAKE_EVENT, &wake_q);
 
     if (s->peer && (s->type == SOCK_STREAM || s->type == SOCK_SEQPACKET || net_socket_is_valid_locked(s->peer)) && s->peer->peer == s) {
+        peer = s->peer;
         if (how == SHUT_WR || how == SHUT_RDWR) {
-            s->peer->peer_closed = 1;
-            wait_queue_wake_all(&s->peer->read_waitq, 0,
-                                PROC_WAKE_EVENT);
+            peer->peer_closed = 1;
+            drain_peer_read = net_wait_queue_collect_all_locked(
+                &peer->read_waitq, PROC_WAKE_EVENT, &wake_q);
         }
-        wait_queue_wake_all(&s->peer->write_waitq, 0, PROC_WAKE_EVENT);
+        drain_peer_write = net_wait_queue_collect_all_locked(
+            &peer->write_waitq, PROC_WAKE_EVENT, &wake_q);
     }
     spin_unlock_irqrestore(&g_net_lock, irq);
+    (void)proc_wake_q_flush(&wake_q);
+    if (drain_accept)
+        (void)wait_queue_wake_all(
+            &s->accept_waitq, 0, PROC_WAKE_EVENT);
+    if (drain_read)
+        (void)wait_queue_wake_all(
+            &s->read_waitq, 0, PROC_WAKE_EVENT);
+    if (drain_write)
+        (void)wait_queue_wake_all(
+            &s->write_waitq, 0, PROC_WAKE_EVENT);
+    if (drain_peer_read)
+        (void)wait_queue_wake_all(
+            &peer->read_waitq, 0, PROC_WAKE_EVENT);
+    if (drain_peer_write)
+        (void)wait_queue_wake_all(
+            &peer->write_waitq, 0, PROC_WAKE_EVENT);
     return 0;
 }
 
