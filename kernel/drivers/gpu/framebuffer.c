@@ -55,7 +55,9 @@ static int fb_ioctl(vfile_t *vf, unsigned long req, void *arg) {
                 return r;
             
             memset(&fix, 0, sizeof(fix));
-            strncpy(fix.id, "A20_FB", sizeof(fix.id) - 1);
+            const char *driver_name = dev->drv && dev->drv->name ?
+                                      dev->drv->name : "A20_FB";
+            strncpy(fix.id, driver_name, sizeof(fix.id) - 1);
             fix.smem_start = fb_phys;
             fix.smem_len = fb_size;
             

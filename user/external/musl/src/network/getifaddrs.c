@@ -9,6 +9,12 @@
 #include <netinet/in.h>
 #include "netlink.h"
 
+#ifdef __A20OS__
+#include <arpa/inet.h>
+#include <fcntl.h>
+#include <stdio.h>
+#endif
+
 #define IFADDRS_HASH_SIZE 64
 
 /* getifaddrs() reports hardware addresses with PF_PACKET that implies
@@ -204,8 +210,55 @@ static int netlink_msg_to_ifaddr(void *pctx, struct nlmsghdr *h)
 	return 0;
 }
 
+#ifdef __A20OS__
+static int a20os_getifaddrs(struct ifaddrs **ifap)
+{
+	char status[512];
+	int fd = open("/proc/net/status", O_RDONLY | O_CLOEXEC);
+	if (fd < 0) return -1;
+	ssize_t length = read(fd, status, sizeof(status) - 1);
+	close(fd);
+	if (length < 0) return -1;
+	status[length] = '\0';
+
+	int ready = 0;
+	char name[IFNAMSIZ + 1] = "";
+	char state[16] = "";
+	char address[INET_ADDRSTRLEN] = "";
+	char netmask[INET_ADDRSTRLEN] = "";
+	const char *line = strstr(status, "lwip:");
+	if (!line || sscanf(line, "lwip: ready=%d if=%16s state=%15s ip=%15s mask=%15s",
+	                    &ready, name, state, address, netmask) != 5 ||
+	    !ready || strcmp(state, "up") != 0 || strcmp(address, "0.0.0.0") == 0) {
+		*ifap = 0;
+		return 0;
+	}
+
+	struct ifaddrs_storage *ifs = calloc(1, sizeof(*ifs));
+	if (!ifs) return -1;
+	memcpy(ifs->name, name, sizeof(name));
+	ifs->ifa.ifa_name = ifs->name;
+	ifs->ifa.ifa_flags = IFF_UP | IFF_RUNNING;
+	ifs->addr.v4.sin_family = AF_INET;
+	ifs->netmask.v4.sin_family = AF_INET;
+	if (inet_pton(AF_INET, address, &ifs->addr.v4.sin_addr) != 1 ||
+	    inet_pton(AF_INET, netmask, &ifs->netmask.v4.sin_addr) != 1) {
+		free(ifs);
+		errno = EINVAL;
+		return -1;
+	}
+	ifs->ifa.ifa_addr = &ifs->addr.sa;
+	ifs->ifa.ifa_netmask = &ifs->netmask.sa;
+	*ifap = &ifs->ifa;
+	return 0;
+}
+#endif
+
 int getifaddrs(struct ifaddrs **ifap)
 {
+#ifdef __A20OS__
+	return a20os_getifaddrs(ifap);
+#else
 	struct ifaddrs_ctx _ctx, *ctx = &_ctx;
 	int r;
 	memset(ctx, 0, sizeof *ctx);
@@ -213,4 +266,5 @@ int getifaddrs(struct ifaddrs **ifap)
 	if (r == 0) *ifap = ctx->first;
 	else freeifaddrs(ctx->first);
 	return r;
+#endif
 }

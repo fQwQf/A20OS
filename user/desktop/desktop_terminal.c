@@ -386,6 +386,10 @@ static bool terminal_start_shell(void)
             "HOME=/",
             "SHELL=/bin/mksh",
             "TERM=xterm",
+            "TERM_PROGRAM=a20-terminal",
+            "XDG_CURRENT_DESKTOP=A20OS",
+            "XDG_SESSION_DESKTOP=A20OS",
+            "XDG_SESSION_TYPE=lvgl",
             "USER=root",
             NULL,
         };
