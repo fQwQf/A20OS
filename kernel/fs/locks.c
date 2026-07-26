@@ -45,25 +45,20 @@ static int fs_lock_wait(uint64_t table_flags)
     }
 
     wait_queue_entry_t entry = {0};
-    entry.task = cur;
-    uint64_t wf = spin_lock_irqsave(&g_file_lock_waiters.lock);
-    entry.next = g_file_lock_waiters.head;
-    entry.prev = NULL;
-    if (g_file_lock_waiters.head)
-        g_file_lock_waiters.head->prev = &entry;
-    g_file_lock_waiters.head = &entry;
-    cur->state = PROC_BLOCKED;
-    spin_unlock_irqrestore(&g_file_lock_waiters.lock, wf);
+    wait_queue_prepare(&g_file_lock_waiters, &entry,
+                       PROC_WAIT_INTERRUPTIBLE, 0, 0);
     spin_unlock_irqrestore(&g_file_lock_table_lock, table_flags);
 
-    sched();
+    proc_wake_reason_t reason =
+        wait_queue_commit(&g_file_lock_waiters, &entry);
     wait_queue_finish(&g_file_lock_waiters, &entry);
-    return signal_task_has_unblocked(cur) ? -ERESTARTSYS : 0;
+    return reason == PROC_WAKE_SIGNAL || signal_task_has_unblocked(cur) ?
+           -ERESTARTSYS : 0;
 }
 
 static void fs_lock_wake_waiters(void)
 {
-    wait_queue_wake_all(&g_file_lock_waiters);
+    wait_queue_wake_all(&g_file_lock_waiters, 0, PROC_WAKE_EVENT);
 }
 
 static uintptr_t fs_lock_key(vfile_t *vf)

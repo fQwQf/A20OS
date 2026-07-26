@@ -117,12 +117,20 @@ int net_accept(int gfd, void *addr, size_t *addrlen, int flags)
             spin_unlock_irqrestore(&g_net_lock, irq);
             return -EAGAIN;
         }
-        net_block_on_socket_locked(s, cur);
+        uint64_t deadline = s->recv_timeout_ticks ?
+                            start + s->recv_timeout_ticks : 0;
+        wait_queue_entry_t entry = {0};
+        wait_queue_prepare(&s->accept_waitq, &entry,
+                           PROC_WAIT_INTERRUPTIBLE, deadline, 0);
         spin_unlock_irqrestore(&g_net_lock, irq);
-        sched();
-        net_clear_socket_waiter(s, cur);
-        if (net_task_has_unblocked_signal(cur))
+        proc_wake_reason_t reason =
+            wait_queue_commit(&s->accept_waitq, &entry);
+        wait_queue_finish(&s->accept_waitq, &entry);
+        if (reason == PROC_WAKE_SIGNAL ||
+            net_task_has_unblocked_signal(cur))
             return -ERESTARTSYS;
+        if (reason == PROC_WAKE_TIMEOUT)
+            return -EAGAIN;
     }
 
     net_inet_accept_child_ready(child);
@@ -142,10 +150,10 @@ int net_accept(int gfd, void *addr, size_t *addrlen, int flags)
         if (child->peer && child->peer->peer == child) {
             child->peer->peer = NULL;
             child->peer->peer_closed = 1;
-            if (child->peer->waiter && child->peer->waiter->state == PROC_BLOCKED)
-                proc_make_ready(child->peer->waiter);
-            if (child->peer->send_waiter && child->peer->send_waiter->state == PROC_BLOCKED)
-                proc_make_ready(child->peer->send_waiter);
+            wait_queue_wake_all(&child->peer->read_waitq, 0,
+                                PROC_WAKE_EVENT);
+            wait_queue_wake_all(&child->peer->write_waitq, 0,
+                                PROC_WAKE_EVENT);
         }
         net_unregister_socket_locked(child);
         spin_unlock_irqrestore(&g_net_lock, irq);
@@ -533,19 +541,17 @@ int net_shutdown(int gfd, int how)
         irq = spin_lock_irqsave(&g_net_lock);
     }
 
-    if (s->waiter && s->waiter->state == PROC_BLOCKED)
-        proc_make_ready(s->waiter);
-    if (s->send_waiter && s->send_waiter->state == PROC_BLOCKED)
-        proc_make_ready(s->send_waiter);
+    wait_queue_wake_all(&s->accept_waitq, 0, PROC_WAKE_EVENT);
+    wait_queue_wake_all(&s->read_waitq, 0, PROC_WAKE_EVENT);
+    wait_queue_wake_all(&s->write_waitq, 0, PROC_WAKE_EVENT);
 
     if (s->peer && (s->type == SOCK_STREAM || s->type == SOCK_SEQPACKET || net_socket_is_valid_locked(s->peer)) && s->peer->peer == s) {
         if (how == SHUT_WR || how == SHUT_RDWR) {
             s->peer->peer_closed = 1;
-            if (s->peer->waiter && s->peer->waiter->state == PROC_BLOCKED)
-                proc_make_ready(s->peer->waiter);
+            wait_queue_wake_all(&s->peer->read_waitq, 0,
+                                PROC_WAKE_EVENT);
         }
-        if (s->peer->send_waiter && s->peer->send_waiter->state == PROC_BLOCKED)
-            proc_make_ready(s->peer->send_waiter);
+        wait_queue_wake_all(&s->peer->write_waitq, 0, PROC_WAKE_EVENT);
     }
     spin_unlock_irqrestore(&g_net_lock, irq);
     return 0;

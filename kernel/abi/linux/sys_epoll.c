@@ -409,11 +409,7 @@ static int epoll_do_wait(int epfd, void *events, int maxevents,
             uint64_t sleep_until = now + MS_TO_TICKS(20);
             if (has_timeout && deadline < sleep_until)
                 sleep_until = deadline;
-            proc_block_until(t, sleep_until);
-            sched();
-            if (t->state == PROC_BLOCKED)
-                t->state = PROC_RUNNING;
-            proc_set_wake_time(t, 0);
+            (void)proc_park_wait(PROC_WAIT_INTERRUPTIBLE, sleep_until);
         } else {
             /*
              * No task context — cannot sleep.  For infinite timeout

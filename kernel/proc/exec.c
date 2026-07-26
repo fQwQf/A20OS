@@ -636,7 +636,6 @@ static int exec_install_process(task_t *t,
 #else
     arch_fence_i();
 #endif
-    t->state = PROC_RUNNING;
     return 0;
 }
 

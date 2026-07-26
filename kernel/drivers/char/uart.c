@@ -9,6 +9,7 @@
 #include "core/klog.h"
 #include "core/lock.h"
 #include "core/string.h"
+#include "core/sync.h"
 #include "core/timer.h"
 #include "proc/proc.h"
 #include "proc/proc_internal.h"
@@ -20,21 +21,12 @@
 static volatile char rx_buffer[RX_BUF_SIZE];
 static volatile uint32_t rx_head;  // 缓冲区头指针
 static volatile uint32_t rx_tail;  // 缓冲区尾指针
-/* LOCK_ORDER: rx_lock protects the RX ring, rx_waiter, and tty_foreground_pgid.
- * Local order (sole documented exception): rx_lock -> proc_lock.
+/* LOCK_ORDER: rx_lock protects the RX ring and tty_foreground_pgid.
  * Ctrl-C path holds rx_lock while calling proc_find()/proc_kill() under proc_lock.
  * All other paths must not acquire additional locks while holding rx_lock. */
 static spinlock_t rx_lock = SPINLOCK_INIT;
-static task_t *rx_waiter;
+static wait_queue_t rx_waiters;
 static int tty_foreground_pgid;
-
-static void uart_wake_waiter_locked(void) {
-    if (rx_waiter && rx_waiter->state == PROC_BLOCKED) {
-        task_t *t = rx_waiter;
-        rx_waiter = NULL;
-        proc_make_ready(t);
-    }
-}
 
 static int uart_task_is_interrupt_target(task_t *t)
 {
@@ -121,14 +113,18 @@ static void uart_rx_push(char c) {
     }
 
     /* LOCK_ORDER: acquire rx_lock to push a character into the RX ring. */
+    proc_wake_q_t wake_q;
+    proc_wake_q_init(&wake_q);
     uint64_t flags = spin_lock_irqsave(&rx_lock);
     uint32_t next = (rx_head + 1) % RX_BUF_SIZE;
     if (next != rx_tail) {
         rx_buffer[rx_head] = c;
         rx_head = next;
-        uart_wake_waiter_locked();
+        (void)wait_queue_collect_one(&rx_waiters, 0, PROC_WAKE_EVENT,
+                                     &wake_q);
     }
     spin_unlock_irqrestore(&rx_lock, flags);
+    (void)proc_wake_q_flush(&wake_q);
 }
 
 void uart_receive_char(char c) {
@@ -141,10 +137,10 @@ static int uart_irq_wrapper(int irq, void *priv);
 void uart_init(void) {
     rx_head = 0;
     rx_tail = 0;
-    rx_waiter = NULL;
     tty_foreground_pgid = 1;
     /* LOCK_ORDER: initialize rx_lock before any UART paths run. */
     spin_init(&rx_lock);
+    wait_queue_init(&rx_waiters);
     arch_uart_init();
     uart_flush();  // 等待发送完成
     request_irq(UART0_IRQ, uart_irq_wrapper, 0, NULL);
@@ -189,21 +185,17 @@ int uart_getc(void) {
             uart_rx_push((char)c);
             continue;
         }
-        /* LOCK_ORDER: rx_lock released before blocking the current task. */
-        rx_waiter = cur;
-        proc_set_wake_time(cur, timer_get_ticks() + (TICKS_PER_SEC / 20));
-        cur->state = PROC_BLOCKED;
+        uint64_t deadline =
+            timer_get_ticks() + (TICKS_PER_SEC / 20);
+        wait_queue_entry_t entry = {0};
+        wait_queue_prepare(&rx_waiters, &entry,
+                           PROC_WAIT_INTERRUPTIBLE, deadline, 0);
         spin_unlock_irqrestore(&rx_lock, flags);
 
         arch_local_irq_enable();
-        sched();
+        (void)wait_queue_commit(&rx_waiters, &entry);
         arch_local_irq_disable();
-
-        flags = spin_lock_irqsave(&rx_lock);
-        if (rx_waiter == cur)
-            rx_waiter = NULL;
-        proc_set_wake_time(cur, 0);
-        spin_unlock_irqrestore(&rx_lock, flags);
+        wait_queue_finish(&rx_waiters, &entry);
     }
 }
 

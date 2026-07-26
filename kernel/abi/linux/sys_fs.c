@@ -45,11 +45,7 @@ static void linux_poll_sleep_until(uint64_t deadline, int has_deadline,
         return;
     }
 
-    proc_block_until(t, wake);
-    sched();
-    if (t->state == PROC_BLOCKED)
-        t->state = PROC_RUNNING;
-    proc_set_wake_time(t, 0);
+    (void)proc_park_wait(PROC_WAIT_INTERRUPTIBLE, wake);
 }
 
 static int linux_poll_apply_sigmask(task_t *t, void *sigmask,
@@ -95,9 +91,11 @@ static int64_t read_into_user(vfile_t *vf, char *buf, size_t count)
 {
     if (!vf)
         return -EBADF;
-    int short_read_ok = vfs_is_pipe_vfile(vf) || vfs_is_char_device_vfile(vf);
+    int short_read_ok = vfs_is_pipe_vfile(vf) ||
+                        vfs_is_char_device_vfile(vf) ||
+                        net_is_socket_vfile(vf);
     if (short_read_ok && count > 0) {
-        /* User-page boundaries must not split a single stream read. */
+        /* A user-page boundary must not turn one syscall into two reads. */
         size_t chunk = count;
         if (chunk > LINUX_IO_CHUNK_SIZE)
             chunk = LINUX_IO_CHUNK_SIZE;

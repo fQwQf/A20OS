@@ -136,7 +136,7 @@ int64_t a20_channel_send(a20_channel_ep_t *ep, const void *data, uint32_t data_l
     peer->msg_count++;
     peer->total_data += data_len;
 
-    wait_queue_wake_one(&peer->waiters);
+    wait_queue_wake_one(&peer->waiters, 0, PROC_WAKE_EVENT);
     a20_event_notify(peer, A20_OBJ_CHANNEL_ENDPOINT, 0, 0, 0);
     spin_unlock(&peer->lock);
     return A20_OK;
@@ -189,7 +189,7 @@ int64_t a20_channel_recv(a20_channel_ep_t *ep, void *data, uint32_t *data_len,
     if (handle_count) *handle_count = hc;
 
     if (ep->peer) {
-        wait_queue_wake_one(&ep->peer->waiters);
+        wait_queue_wake_one(&ep->peer->waiters, 0, PROC_WAKE_EVENT);
     }
 
     ch_msg_free(msg);
@@ -205,7 +205,7 @@ void a20_channel_ep_release(a20_channel_ep_t *ep)
     if (peer) {
         spin_lock(&peer->lock);
         peer->peer_closed = 1;
-        wait_queue_wake_all(&peer->waiters);
+        wait_queue_wake_all(&peer->waiters, 0, PROC_WAKE_EVENT);
         a20_event_notify(peer, A20_OBJ_CHANNEL_ENDPOINT, 1, 0, 0);
         spin_unlock(&peer->lock);
     }

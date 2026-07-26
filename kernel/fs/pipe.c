@@ -25,12 +25,12 @@ typedef struct pipe_buf {
 
 static void pipe_wake_readers(pipe_buf_t *pb)
 {
-    wait_queue_wake_all(&pb->read_waiters);
+    wait_queue_wake_all(&pb->read_waiters, 0, PROC_WAKE_EVENT);
 }
 
 static void pipe_wake_writers(pipe_buf_t *pb)
 {
-    wait_queue_wake_all(&pb->write_waiters);
+    wait_queue_wake_all(&pb->write_waiters, 0, PROC_WAKE_EVENT);
 }
 
 static int pipe_wait_interruptible_locked(pipe_buf_t *pb, wait_queue_t *wq)
@@ -46,23 +46,14 @@ static int pipe_wait_interruptible_locked(pipe_buf_t *pb, wait_queue_t *wq)
         return -ERESTARTSYS;
 
     wait_queue_entry_t entry = {0};
-    entry.task = t;
-
-    uint64_t wf = spin_lock_irqsave(&wq->lock);
-    entry.next = wq->head;
-    entry.prev = NULL;
-    if (wq->head)
-        wq->head->prev = &entry;
-    wq->head = &entry;
-    t->state = PROC_BLOCKED;
-    spin_unlock_irqrestore(&wq->lock, wf);
+    wait_queue_prepare(wq, &entry, PROC_WAIT_INTERRUPTIBLE, 0, 0);
 
     spin_unlock(&pb->lock);
-    sched();
+    proc_wake_reason_t reason = wait_queue_commit(wq, &entry);
     wait_queue_finish(wq, &entry);
     spin_lock(&pb->lock);
 
-    if (signal_task_has_unblocked(t))
+    if (reason == PROC_WAKE_SIGNAL || signal_task_has_unblocked(t))
         return -ERESTARTSYS;
     return 0;
 }

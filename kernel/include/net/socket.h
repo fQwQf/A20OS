@@ -3,6 +3,8 @@
 
 #include "core/types.h"
 
+struct vfile;
+
 #define AF_UNSPEC  0
 #define AF_UNIX    1
 #define AF_INET    2
@@ -140,5 +142,6 @@ int net_getsockopt(int gfd, int level, int optname, void *optval, size_t *optlen
 int net_shutdown(int gfd, int how);
 int net_set_nonblock(int gfd, int nonblock);
 int net_poll_events(int gfd, short events);
+int net_is_socket_vfile(struct vfile *vf);
 
 #endif /* _NET_SOCKET_H */

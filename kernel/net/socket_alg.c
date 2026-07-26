@@ -81,7 +81,6 @@ int net_alg_socket_accept(net_socket_t *s, size_t *addrlen, int flags)
     net_socket_t *child = net_socket_alloc();
     if (!child)
         return -ENOMEM;
-    memset(child, 0, sizeof(*child));
     child->domain = AF_ALG;
     child->type = s->type;
     child->protocol = s->protocol;

@@ -185,52 +185,8 @@ size_t proc_format_pidmap(char *buf, size_t bufsz)
     return off;
 }
 
-void proc_make_ready(task_t *t) {
-    if (!t || t->state == PROC_UNUSED || t->state == PROC_ZOMBIE)
-        return;
-
-    unsigned target_cpu = cpu_current_id();
-    uint64_t flags = spin_lock_irqsave(&proc_lock);
-    if (t->vfork_waiting) {
-        spin_unlock_irqrestore(&proc_lock, flags);
-        return;
-    }
-    int was_blocked = t->state == PROC_BLOCKED;
-    if (t->state != PROC_READY) {
-        t->state = PROC_READY;
-        if (t->wake_time == 0 && t->sched_level > 0)
-            t->sched_level--;
-    }
-    if (!t->on_rq) {
-        if (t == proc_current())
-            t->cpu_id = cpu_current_id();
-        else if (!was_blocked)
-            t->cpu_id = proc_sched_select_cpu_locked(t);
-    }
-    target_cpu = t->cpu_id;
-    proc_runq_enqueue_locked(t);
-    spin_unlock_irqrestore(&proc_lock, flags);
-
-    if (target_cpu != cpu_current_id())
-        proc_sched_kick_cpu(target_cpu);
-}
-
-void proc_block_until(task_t *t, uint64_t wake_time) {
-    if (!t)
-        return;
-    if (wake_time)
-        proc_set_wake_time(t, wake_time);
-    uint64_t flags = spin_lock_irqsave(&proc_lock);
-    t->state = PROC_BLOCKED;
-    spin_unlock_irqrestore(&proc_lock, flags);
-}
-
 void proc_sleep_until(uint64_t wake_time) {
-    task_t *current = proc_current();
-    if (!current)
-        return;
-    proc_block_until(current, wake_time);
-    sched();
+    (void)proc_park_wait(PROC_WAIT_UNINTERRUPTIBLE, wake_time);
 }
 
 // idle 进程的主循环，系统无任务时运行
@@ -256,7 +212,7 @@ void proc_init(void) {
     proc_link_task_locked(idle);
     idle->pid    = 0;
     idle->ppid   = 0;
-    idle->state  = PROC_RUNNING;
+    proc_task_init_idle_state(idle, 0);
     idle->fs.cwd[0] = '/';
     idle->fs.cwd[1] = '\0';
     idle->fs.root_path[0] = '/';
@@ -283,7 +239,6 @@ void proc_init(void) {
     idle->limits.nofile = MAX_FILES;
     idle->limits.memlock = 64 * 1024;
     idle->sched_level = SCHED_LEVELS - 1;
-    idle->cpu_id = 0;
     idle->cpus_allowed = CONFIG_NR_CPUS >= 32
                          ? ~0U : (1U << CONFIG_NR_CPUS) - 1U;
     proc_set_name(idle, "idle");
@@ -327,9 +282,8 @@ void proc_init(void) {
     for (unsigned cpu = 1; cpu < CONFIG_NR_CPUS; cpu++) {
         task_t *secondary = &idle_tasks[cpu];
         secondary->pid = 0;
-        secondary->state = PROC_RUNNING;
+        proc_task_init_idle_state(secondary, cpu);
         secondary->sched_level = SCHED_LEVELS - 1;
-        secondary->cpu_id = cpu;
         secondary->cpus_allowed = 1U << cpu;
         secondary->pgdir = kpdir;
         proc_set_name(secondary, "idle");
@@ -375,11 +329,9 @@ pt_root_t *proc_kernel_pgdir_shared(void) { return kernel_pgdir_shared; }
 
 // 分配一个空闲的任务槽
 task_t *proc_alloc_task_slot(void) {
-    task_t *t = kcalloc(1, sizeof(*t));
+    task_t *t = proc_task_alloc_storage();
     if (!t)
         return NULL;
-    t->state = PROC_BLOCKED;
-    t->dynamic_alloc = 1;
 
     uint64_t flags = spin_lock_irqsave(&proc_lock);
     proc_link_task_locked(t);

@@ -213,7 +213,7 @@ int sysv_sem_control(int semid, int semnum, int cmd, void *arg)
     case IPC_RMID:
         set->used = 0;
         spin_unlock_irqrestore(&g_sem_lock, flags);
-        wait_queue_wake_all(&set->waiters);
+        wait_queue_wake_all(&set->waiters, 0, PROC_WAKE_EVENT);
         return 0;
     case GETVAL: {
         int v = set->val[semnum];
@@ -240,7 +240,7 @@ int sysv_sem_control(int semid, int semnum, int cmd, void *arg)
         set->val[semnum] = (unsigned short)(raw & 0xffff);
         set->last_pid = proc_current() ? proc_current()->pid : 0;
         spin_unlock_irqrestore(&g_sem_lock, flags);
-        wait_queue_wake_all(&set->waiters);
+        wait_queue_wake_all(&set->waiters, 0, PROC_WAKE_EVENT);
         return 0;
     }
     case GETALL: {
@@ -254,7 +254,7 @@ int sysv_sem_control(int semid, int semnum, int cmd, void *arg)
             set->last_pid = proc_current() ? proc_current()->pid : 0;
         spin_unlock_irqrestore(&g_sem_lock, flags);
         if (r == 0)
-            wait_queue_wake_all(&set->waiters);
+            wait_queue_wake_all(&set->waiters, 0, PROC_WAKE_EVENT);
         return r;
     }
     case IPC_SET: {
@@ -362,7 +362,7 @@ int sysv_sem_timedop(int semid, const void *sops, size_t nsops, uint64_t deadlin
         if (can > 0) {
             sem_ops_apply(set, ops, nsops);
             spin_unlock_irqrestore(&g_sem_lock, flags);
-            wait_queue_wake_all(&set->waiters);
+            wait_queue_wake_all(&set->waiters, 0, PROC_WAKE_EVENT);
             return 0;
         }
 
@@ -388,27 +388,16 @@ int sysv_sem_timedop(int semid, const void *sops, size_t nsops, uint64_t deadlin
 
         task_t *cur = proc_current();
         wait_queue_entry_t entry = {0};
-        entry.task = cur;
-        uint64_t wf = spin_lock_irqsave(&set->waiters.lock);
-        entry.next = set->waiters.head;
-        entry.prev = NULL;
-        if (set->waiters.head)
-            set->waiters.head->prev = &entry;
-        set->waiters.head = &entry;
+        wait_queue_prepare(&set->waiters, &entry,
+                           PROC_WAIT_INTERRUPTIBLE, deadline, 0);
         if (wait_zero)
             set->zcnt[wait_sem]++;
         else
             set->ncnt[wait_sem]++;
-        if (cur)
-            cur->state = PROC_BLOCKED;
-        spin_unlock_irqrestore(&set->waiters.lock, wf);
         spin_unlock_irqrestore(&g_sem_lock, flags);
 
-        if (cur && deadline)
-            proc_set_wake_time(cur, deadline);
-        sched();
-        if (cur)
-            proc_set_wake_time(cur, 0);
+        (void)cur;
+        (void)wait_queue_commit(&set->waiters, &entry);
         wait_queue_finish(&set->waiters, &entry);
 
         flags = spin_lock_irqsave(&g_sem_lock);

@@ -15,6 +15,27 @@
 extern void arch_return_to_user(trap_context_t *ctx) NORETURN;
 #endif
 
+task_t *proc_task_alloc_storage(void)
+{
+    task_t *t = kcalloc(1, sizeof(*t));
+    if (!t)
+        return NULL;
+    t->state = PROC_BLOCKED;
+    t->dynamic_alloc = 1;
+    t->wait_timer_index = -1;
+    return t;
+}
+
+void proc_task_init_idle_state(task_t *t, unsigned cpu)
+{
+    if (!t)
+        return;
+    t->state = PROC_RUNNING;
+    t->cpu_id = cpu;
+    t->on_rq = 0;
+    t->wait_timer_index = -1;
+}
+
 void proc_set_name(task_t *t, const char *name)
 {
     if (!t)
@@ -68,6 +89,13 @@ void proc_task_init_common(task_t *t, task_t *parent)
     t->exit_pending = 0;
     t->pending_exit_code = 0;
     t->wake_time = 0;
+    t->wait_seq = 0;
+    t->wait_deadline = 0;
+    t->wait_timer_index = -1;
+    t->park_state = PROC_PARK_IDLE;
+    t->wait_mode = PROC_WAIT_UNINTERRUPTIBLE;
+    t->wake_reason = PROC_WAKE_NONE;
+    completion_init(&t->vfork_done);
     t->alarm_expire = 0;
     t->itimer_real_interval = 0;
     memset(t->itimer_values, 0, sizeof(t->itimer_values));
@@ -248,6 +276,7 @@ void proc_destroy_task(task_t *t)
     vfs_release_process_locks(t->pid);
 
     uint64_t flags = spin_lock_irqsave(&proc_lock);
+    proc_wait_timer_cancel_locked(t, t->wait_seq);
     proc_runq_remove_locked(t);
     proc_unlink_task_locked(t);
     spin_unlock_irqrestore(&proc_lock, flags);
