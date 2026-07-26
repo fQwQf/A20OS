@@ -82,6 +82,11 @@ unsigned proc_sched_select_cpu_locked(task_t *t);
 void proc_sched_kick_cpu(unsigned cpu);
 void proc_sched_stop_current(int exit_code);
 void proc_sched_assert_task_locked(task_t *t);
+unsigned proc_sched_task_runq_memberships_locked(task_t *t);
+unsigned proc_current_owner_memberships_locked(task_t *t);
+unsigned proc_current_slot_count_locked(void);
+unsigned proc_current_lifetime_violations_locked(void);
+unsigned proc_wait_timer_count_locked(void);
 int proc_wait_timer_register_locked(task_t *t, uint64_t deadline,
                                     uint64_t wait_seq);
 void proc_wait_timer_cancel_locked(task_t *t, uint64_t wait_seq);
