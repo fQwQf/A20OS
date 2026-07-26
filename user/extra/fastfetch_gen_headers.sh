@@ -27,10 +27,10 @@ cat > "$OUT_DIR/fastfetch_config.h" <<'HCONFIG'
 #pragma once
 
 #define FASTFETCH_PROJECT_NAME "fastfetch"
-#define FASTFETCH_PROJECT_VERSION "2.62.1"
+#define FASTFETCH_PROJECT_VERSION "2.66.0"
 #define FASTFETCH_PROJECT_VERSION_MAJOR 2
-#define FASTFETCH_PROJECT_VERSION_MINOR 62
-#define FASTFETCH_PROJECT_VERSION_PATCH 1
+#define FASTFETCH_PROJECT_VERSION_MINOR 66
+#define FASTFETCH_PROJECT_VERSION_PATCH 0
 #define FASTFETCH_PROJECT_VERSION_GIT ""
 #define FASTFETCH_PROJECT_VERSION_TWEAK ""
 #define FASTFETCH_PROJECT_VERSION_TWEAK_NUM 0
@@ -50,7 +50,7 @@ HCONFIG
 echo "[FASTFETCH] Generated fastfetch_config.h"
 
 # ---------------------------------------------------------------
-# fastfetch_datatext.h  (embed help.json + structure.txt)
+# fastfetch_datatext.h  (embed help.json + default module structure)
 # ---------------------------------------------------------------
 
 # Helper: encode file content as a C string literal
@@ -76,8 +76,8 @@ sys.stdout.write("\"" + data + "\"")
     fi
 }
 
-DATATEXT_JSON_HELP=$(encode_c_string "$FF_SRC/src/data/help.json")
-DATATEXT_STRUCTURE=$(encode_c_string "$FF_SRC/src/data/structure.txt")
+DATATEXT_JSON_HELP=$(encode_c_string "$FF_SRC/doc/help.json")
+DATATEXT_STRUCTURE='"Title:Separator:OS:Host:Kernel:Uptime:Packages:Shell:Display:DE:WM:WMTheme:Theme:Icons:Font:Cursor:Terminal:TerminalFont:CPU:GPU:Memory:Swap:Disk:LocalIp:Battery:PowerAdapter:Locale:Break:Colors"'
 
 cat > "$OUT_DIR/fastfetch_datatext.h" <<DATACFG
 #pragma once
@@ -96,8 +96,7 @@ echo "[FASTFETCH] Generated fastfetch_datatext.h"
     printf '%s\n' '#pragma once'
     printf '%s\n' '#pragma GCC diagnostic ignored "-Wtrigraphs"'
     printf '%s\n' ''
-    for logo_file in "$FF_SRC"/src/logo/ascii/*.txt; do
-        [ -f "$logo_file" ] || continue
+    find "$FF_SRC/src/logo/ascii" -mindepth 2 -maxdepth 2 -name '*.txt' -type f | sort | while IFS= read -r logo_file; do
         name=$(basename "$logo_file" .txt)
         upper=$(echo "$name" | tr '[:lower:]' '[:upper:]')
         content=$(encode_c_string "$logo_file")
