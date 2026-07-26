@@ -110,11 +110,17 @@ int main(void)
     perror("execve mksh");
     do_shutdown();
 #else
-    int benchmark = (access("/bin/etc/benchmark-mode", F_OK) == 0);
+    int external_benchmark =
+        (access("/bin/etc/benchmark-mode", F_OK) == 0);
     int final_benchmark =
-        benchmark &&
-        (access("/test/glibc/functest_testcode.sh", F_OK) == 0 ||
-         access("/test/glibc/parallel-build_testcode.sh", F_OK) == 0);
+        (access("/bin/etc/release-eval-group", F_OK) == 0);
+
+    if (external_benchmark && final_benchmark) {
+        printf("[init] conflicting benchmark entry markers\n");
+        printf("[init] use benchmark-mode for external images or "
+               "release-eval-group for release evaluation, not both\n");
+        do_shutdown();
+    }
 
     /*
      * release images are complete root filesystems.  Their dynamic
@@ -194,7 +200,8 @@ int main(void)
         telnet_pid = 0;
     }
 
-    char *script = benchmark ? "/bin/benchmark.sh" : NULL;
+    char *script = final_benchmark ? "/bin/final_benchmark.sh" :
+                   external_benchmark ? "/bin/benchmark.sh" : NULL;
     char *argv[] = {"mksh", script, NULL};
 
     printf("[init] forking...\n");
