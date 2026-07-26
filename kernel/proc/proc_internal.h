@@ -89,6 +89,11 @@ unsigned proc_current_owner_memberships_locked(task_t *t);
 unsigned proc_current_slot_count_locked(void);
 unsigned proc_current_lifetime_violations_locked(void);
 unsigned proc_wait_timer_count_locked(void);
+unsigned proc_wait_timer_capacity(void);
+unsigned long proc_wait_timer_full_failures_locked(void);
+unsigned long proc_wait_timer_duplicate_rejections_locked(void);
+unsigned long proc_wait_timer_stale_expirations_locked(void);
+unsigned proc_wait_timer_violations_locked(void);
 int proc_wait_timer_register_locked(task_t *t, uint64_t deadline,
                                     uint64_t wait_seq);
 void proc_wait_timer_cancel_locked(task_t *t, uint64_t wait_seq);

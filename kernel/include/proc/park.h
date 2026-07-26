@@ -16,6 +16,7 @@ typedef enum {
     PROC_WAKE_NONE = 0,
     PROC_WAKE_EVENT,
     PROC_WAKE_TIMEOUT,
+    PROC_WAKE_TIMEOUT_CAPACITY,
     PROC_WAKE_SIGNAL,
     PROC_WAKE_FATAL_SIGNAL,
     PROC_WAKE_TASK_EXIT,
@@ -29,6 +30,14 @@ typedef enum {
     PROC_WAIT_KILLABLE,
 } proc_wait_mode_t;
 
+typedef enum {
+    PROC_PARK_PREPARE_OK = 0,
+    PROC_PARK_PREPARE_INVALID = -1,
+    PROC_PARK_PREPARE_TIMEOUT_CAPACITY = -2,
+    PROC_PARK_PREPARE_TIMEOUT_DUPLICATE = -3,
+    PROC_PARK_PREPARE_TIMEOUT_REF = -4,
+} proc_park_prepare_error_t;
+
 static inline int proc_wake_reason_is_task_interrupt(proc_wake_reason_t reason)
 {
     return reason == PROC_WAKE_SIGNAL ||
@@ -39,6 +48,7 @@ static inline int proc_wake_reason_is_task_interrupt(proc_wake_reason_t reason)
 typedef struct proc_wait_token {
     struct task_t *task;
     uint64_t seq;
+    proc_park_prepare_error_t prepare_error;
 } proc_wait_token_t;
 
 #define PROC_WAKE_Q_CAPACITY 64

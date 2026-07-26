@@ -28,6 +28,7 @@
 #include "core/consts.h"
 #include "core/defs.h"
 #include "core/klog.h"
+#include "core/timer.h"
 #include "core/lock.h"
 #include "sys/futex.h"
 #include "core/progress.h"
@@ -186,7 +187,13 @@ size_t proc_format_pidmap(char *buf, size_t bufsz)
 }
 
 void proc_sleep_until(uint64_t wake_time) {
-    (void)proc_park_wait(PROC_WAIT_UNINTERRUPTIBLE, wake_time);
+    while (timer_get_ticks() < wake_time) {
+        proc_wake_reason_t reason =
+            proc_park_wait(PROC_WAIT_UNINTERRUPTIBLE, wake_time);
+        if (reason != PROC_WAKE_TIMEOUT_CAPACITY)
+            break;
+        proc_yield();
+    }
 }
 
 // idle 进程的主循环，系统无任务时运行
