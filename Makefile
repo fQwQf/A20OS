@@ -1994,7 +1994,8 @@ extra-img: extra-user-apps prepare-riscv64-glibc-sysroot
 	fi
 	@VIM_RT="$(EXTRA_STAGING_DIR)/share/vim/vim92"; \
 	VIM_SRC=user/external/vim/runtime; \
-	if [ -n "$(filter vim,$(EXTRA_PACKAGES))" ]; then mkdir -p "$$VIM_RT"; else exit 0; fi; \
+	if [ -z "$(filter vim,$(EXTRA_PACKAGES))" ] || [ ! -d "$$VIM_SRC" ]; then exit 0; fi; \
+	mkdir -p "$$VIM_RT"; \
 	for f in defaults.vim filetype.vim ftoff.vim ftplugin.vim ftplugof.vim indent.vim indoff.vim; do \
 		[ -f "$$VIM_SRC/$$f" ] && cp "$$VIM_SRC/$$f" "$$VIM_RT/$$f"; \
 	done; \
@@ -2033,29 +2034,33 @@ EXTRA_QEMU_BLK = -drive file=$(EXTRA_IMG),if=none,format=raw,id=xextra -device v
 endif
 
 run-riscv64-extra:
-	$(MAKE) ARCH=riscv64 BRINGUP=0 _run_extra_impl
+	$(MAKE) ARCH=riscv64 BRINGUP=0 PROFILE=benchmark _run_extra_impl
 
 run-loongarch64-extra:
-	$(MAKE) ARCH=loongarch64 BRINGUP=0 _run_extra_impl
+	$(MAKE) ARCH=loongarch64 BRINGUP=0 PROFILE=benchmark _run_extra_impl
 
 run-arm64-extra:
-	$(MAKE) ARCH=aarch64 BRINGUP=0 _run_extra_impl
+	$(MAKE) ARCH=aarch64 BRINGUP=0 PROFILE=benchmark _run_extra_impl
 
 run-x86_64-extra:
-	$(MAKE) ARCH=x86_64 BRINGUP=0 _run_extra_impl
+	$(MAKE) ARCH=x86_64 BRINGUP=0 PROFILE=benchmark _run_extra_impl
 
 run-arm32-extra:
-	$(MAKE) ARCH=arm32 BRINGUP=0 _run_extra_impl
+	$(MAKE) ARCH=arm32 BRINGUP=0 PROFILE=benchmark _run_extra_impl
 
 run-riscv32-extra:
-	$(MAKE) ARCH=riscv32 BRINGUP=0 _run_extra_impl
+	$(MAKE) ARCH=riscv32 BRINGUP=0 PROFILE=benchmark _run_extra_impl
 
 run-ppc64le-extra:
-	$(MAKE) ARCH=ppc64le BRINGUP=0 _run_extra_impl
+	$(MAKE) ARCH=ppc64le BRINGUP=0 PROFILE=benchmark _run_extra_impl
 
 _run_extra_impl:
 	$(MAKE) ARCH=$(ARCH) BRINGUP=0 dev-build
-	$(MAKE) -C user ARCH=$(ARCH) fastfetch
+	@if [ -f user/external/fastfetch/src/fastfetch.c ]; then \
+		$(MAKE) -C user ARCH=$(ARCH) fastfetch; \
+	else \
+		echo "[EXTRA] fastfetch source unavailable; skipping"; \
+	fi
 	$(MAKE) ARCH=$(ARCH) EXTRA_IMG=$(EXTRA_IMG) extra-img
 	$(QEMU) $(QEMU_FLAGS_NO_SDCARD) $(EXTRA_QEMU_BLK) -kernel $(KERNEL_ELF)
 
