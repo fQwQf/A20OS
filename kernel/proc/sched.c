@@ -71,6 +71,11 @@ typedef struct wait_timer {
 static wait_timer_t wait_timer_heap[WAIT_TIMER_HEAP_MAX];
 static unsigned wait_timer_count;
 
+unsigned proc_wait_timer_count_locked(void)
+{
+    return wait_timer_count;
+}
+
 unsigned proc_sched_select_cpu(task_t *t);
 
 #define SCHED_TICK_INTERVAL       (TICKS_PER_SEC / 100)
@@ -472,6 +477,31 @@ void proc_sched_assert_task_locked(task_t *t)
 #else
     (void)t;
 #endif
+}
+
+unsigned proc_sched_task_runq_memberships_locked(task_t *t)
+{
+    if (!t)
+        return 0;
+
+    uint64_t rq_flags[CONFIG_NR_CPUS];
+    for (unsigned cpu = 0; cpu < CONFIG_NR_CPUS; cpu++)
+        rq_flags[cpu] = RUNQ_LOCK_IRQ(cpu);
+
+    unsigned memberships = 0;
+    for (unsigned cpu = 0; cpu < CONFIG_NR_CPUS; cpu++) {
+        proc_runq_t *rq = &sched_runq[cpu];
+        for (int level = 0; level < SCHED_LEVELS; level++) {
+            for (task_t *it = rq->head[level]; it; it = it->rq_next) {
+                if (it == t)
+                    memberships++;
+            }
+        }
+    }
+
+    for (unsigned cpu = CONFIG_NR_CPUS; cpu > 0; cpu--)
+        RUNQ_UNLOCK_IRQ(cpu - 1, rq_flags[cpu - 1]);
+    return memberships;
 }
 
 void proc_make_ready(task_t *t)

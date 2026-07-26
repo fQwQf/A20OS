@@ -48,6 +48,10 @@
 #define SYS_getpriority 141
 #endif
 
+#ifndef SYS_getcpu
+#define SYS_getcpu 168
+#endif
+
 #ifndef SYS_setpriority
 #define SYS_setpriority 140
 #endif
@@ -118,14 +122,36 @@ static int affinity_roundtrip(void)
         return fail("getaffinity");
     if ((mask[0] & 1U) == 0)
         return fail("affinity-missing-cpu0");
-    unsigned char one[8] = {1, 0, 0, 0, 0, 0, 0, 0};
-    if (syscall(SYS_sched_setaffinity, 0, sizeof(one), one) < 0)
-        return fail("setaffinity-cpu0");
+
+    /*
+     * Step 3.5 validates affinity accounting but deliberately does not require
+     * migration of an on-CPU task. Pin to the CPU executing this process; retry
+     * if preemption moved it between getcpu and setaffinity.
+     */
+    unsigned char one[8];
+    unsigned pinned_cpu = 0;
+    int pinned = 0;
+    for (int attempt = 0; attempt < 32 && !pinned; attempt++) {
+        unsigned cpu = 0;
+        if (syscall(SYS_getcpu, &cpu, NULL, NULL) < 0 || cpu >= 64)
+            return fail("getcpu");
+        memset(one, 0, sizeof(one));
+        one[cpu / 8] = (unsigned char)(1U << (cpu % 8));
+        if (syscall(SYS_sched_setaffinity, 0, sizeof(one), one) == 0) {
+            pinned_cpu = cpu;
+            pinned = 1;
+        } else if (errno != EINVAL) {
+            return fail("setaffinity-current");
+        }
+    }
+    if (!pinned)
+        return fail("setaffinity-current-raced");
+
     memset(mask, 0, sizeof(mask));
     if (syscall(SYS_sched_getaffinity, 0, sizeof(mask), mask) <= 0)
         return fail("getaffinity-after-set");
-    if ((mask[0] & 1U) == 0)
-        return fail("affinity-cpu0-after-set");
+    if ((mask[pinned_cpu / 8] & (1U << (pinned_cpu % 8))) == 0)
+        return fail("affinity-current-after-set");
     unsigned char empty[8] = {0};
     errno = 0;
     if (syscall(SYS_sched_setaffinity, 0, sizeof(empty), empty) == 0 || errno != EINVAL)
@@ -177,7 +203,12 @@ static int cgroup_cpuset_affinity(void)
         return fail("cgroup-mount");
     }
 
-    if (write_all("/tmp/sched_cg/cpuset.cpus", "0\n") != 0)
+    unsigned cpu = 0;
+    if (syscall(SYS_getcpu, &cpu, NULL, NULL) < 0 || cpu >= 32)
+        return fail("cgroup-getcpu");
+    char cpubuf[16];
+    snprintf(cpubuf, sizeof(cpubuf), "%u\n", cpu);
+    if (write_all("/tmp/sched_cg/cpuset.cpus", cpubuf) != 0)
         return 1;
 
     char pidbuf[32];
@@ -189,7 +220,7 @@ static int cgroup_cpuset_affinity(void)
     memset(mask, 0, sizeof(mask));
     if (syscall(SYS_sched_getaffinity, 0, sizeof(mask), mask) <= 0)
         return fail("cgroup-getaffinity");
-    if ((mask[0] & 1U) == 0)
+    if ((mask[cpu / 8] & (1U << (cpu % 8))) == 0)
         return fail("cgroup-cpuset-mask");
 
     syscall(SYS_umount2, "/tmp/sched_cg", 0);

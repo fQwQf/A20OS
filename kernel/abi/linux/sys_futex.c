@@ -2,6 +2,7 @@
 #include "sys/futex.h"
 #include "abi/linux/futex.h"
 #include "proc/proc_internal.h"
+#include "proc/lifetime.h"
 #include "core/lock.h"
 
 #define FUTEX_WAITERS_MAX 1024
@@ -66,6 +67,8 @@ static int futex_timeout_ticks(void *timeout, int absolute, int realtime,
 static task_t *futex_waiter_take_slot(futex_waiter_t *w)
 {
     task_t *task = w->active ? w->task : NULL;
+    if (w->active)
+        proc_lifetime_note_wait_remove();
     w->active = 0;
     w->task = NULL;
     w->wait_seq = 0;
@@ -125,6 +128,7 @@ static int futex_waiter_alloc(uintptr_t vkey, uintptr_t pkey, mm_struct_t *mm,
             g_futex_waiters[i].bitset = bitset;
             g_futex_waiters[i].task = task;
             g_futex_waiters[i].wait_seq = token.seq;
+            proc_lifetime_note_wait_add();
             return i;
         }
     }
