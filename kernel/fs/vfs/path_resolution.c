@@ -501,7 +501,7 @@ vnode_t *vfs_resolve_at(const char *path, const char *cwd) {
 
     task_t *cur = proc_current();
     const char *root = (cur && cur->fs.root_path[0]) ? cur->fs.root_path : "/";
-    if (strcmp(root, "/") != 0) {
+    if (strcmp(root, "/") != 0 && !path_is_beneath(root, resolved)) {
         char rooted[MAX_PATH_LEN];
         if (strcmp(resolved, "/") == 0)
             snprintf(rooted, sizeof(rooted), "%s", root);
@@ -520,4 +520,3 @@ vnode_t *vfs_resolve_at(const char *path, const char *cwd) {
     const char *rel = vfs_strip_mount_prefix(resolved, mnt);
     return vnode_lookup_path(mnt->root, rel);
 }
-
