@@ -3,6 +3,7 @@
 #include "proc/proc.h"
 #include "proc/proc_internal.h"
 #include "core/cpu.h"
+#include "core/klog.h"
 
 static proc_wait_token_t proc_wait_token_none(void)
 {
@@ -70,8 +71,13 @@ proc_wait_token_t proc_park_prepare_locked(proc_wait_mode_t mode,
      * A task owns only one active park token.  A non-IDLE state here means a
      * caller forgot finish(); do not overwrite the live sequence.
      */
-    if (task->park_state != PROC_PARK_IDLE)
+    if (task->park_state != PROC_PARK_IDLE) {
+#if defined(CONFIG_DEBUG_KERNEL) && CONFIG_DEBUG_KERNEL
+        panic("park: nested prepare pid=%d state=%d seq=%lu",
+              task->pid, task->park_state, (unsigned long)task->wait_seq);
+#endif
         return proc_wait_token_none();
+    }
 
     task->wait_seq++;
     if (task->wait_seq == 0)
@@ -135,6 +141,28 @@ int proc_interrupt_wait(task_t *task, proc_wake_reason_t reason)
     return woke;
 }
 
+int proc_park_cancel(proc_wait_token_t token)
+{
+    task_t *task = token.task;
+    if (!task || !token.seq)
+        return 0;
+
+    uint64_t flags = spin_lock_irqsave(&proc_lock);
+    int cancelled = 0;
+    if (task == proc_current() && task->wait_seq == token.seq &&
+        task->park_state == PROC_PARK_PREPARING) {
+        proc_wait_timer_cancel_locked(task, token.seq);
+        task->wait_deadline = 0;
+        task->wake_time = 0;
+        task->wake_reason = PROC_WAKE_CANCEL;
+        task->park_state = PROC_PARK_WOKEN;
+        proc_sched_assert_task_locked(task);
+        cancelled = 1;
+    }
+    spin_unlock_irqrestore(&proc_lock, flags);
+    return cancelled;
+}
+
 proc_wake_reason_t proc_park_commit(proc_wait_token_t token)
 {
     task_t *task = token.task;
@@ -183,7 +211,8 @@ void proc_park_finish(proc_wait_token_t token)
         return;
 
     uint64_t flags = spin_lock_irqsave(&proc_lock);
-    if (task->wait_seq == token.seq) {
+    if (task->wait_seq == token.seq &&
+        task->park_state == PROC_PARK_WOKEN) {
         proc_wait_timer_cancel_locked(task, token.seq);
         task->wait_deadline = 0;
         task->wake_time = 0;
@@ -191,6 +220,12 @@ void proc_park_finish(proc_wait_token_t token)
         task->wake_reason = PROC_WAKE_NONE;
         task->park_state = PROC_PARK_IDLE;
         proc_sched_assert_task_locked(task);
+#if defined(CONFIG_DEBUG_KERNEL) && CONFIG_DEBUG_KERNEL
+    } else if (task->wait_seq == token.seq &&
+               task->park_state == PROC_PARK_PREPARING) {
+        panic("park: finish without cancel/commit pid=%d seq=%lu",
+              task->pid, (unsigned long)token.seq);
+#endif
     }
     spin_unlock_irqrestore(&proc_lock, flags);
 }

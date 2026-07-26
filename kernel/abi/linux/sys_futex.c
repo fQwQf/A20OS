@@ -149,25 +149,29 @@ static int futex_wait_on(int *uaddr, int expected, void *timeout, uint32_t bitse
     uintptr_t vkey = (uintptr_t)uaddr;
     uintptr_t pkey = futex_phys_key(uaddr);
 
+    proc_wait_token_t token =
+        proc_park_prepare(PROC_WAIT_INTERRUPTIBLE, until);
+    if (!token.task)
+        return -EAGAIN;
+
     flags = spin_lock_irqsave(&g_futex_lock);
     if (wait_generation != g_futex_wake_generation) {
         spin_unlock_irqrestore(&g_futex_lock, flags);
+        (void)proc_park_cancel(token);
+        proc_park_finish(token);
         return 0;
     }
     if (signal_task_has_unblocked(t)) {
         spin_unlock_irqrestore(&g_futex_lock, flags);
+        (void)proc_park_cancel(token);
+        proc_park_finish(token);
         return -ERESTARTSYS;
-    }
-    proc_wait_token_t token =
-        proc_park_prepare(PROC_WAIT_INTERRUPTIBLE, until);
-    if (!token.task) {
-        spin_unlock_irqrestore(&g_futex_lock, flags);
-        return -EAGAIN;
     }
     int slot = futex_waiter_alloc(vkey, pkey, t->mm, bitset, token);
     if (slot < 0) {
-        proc_park_finish(token);
         spin_unlock_irqrestore(&g_futex_lock, flags);
+        (void)proc_park_cancel(token);
+        proc_park_finish(token);
         return slot;
     }
     spin_unlock_irqrestore(&g_futex_lock, flags);

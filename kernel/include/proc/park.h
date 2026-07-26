@@ -53,11 +53,17 @@ typedef struct proc_wake_q {
  * wake without scheduling, or atomically publishes PARKED + PROC_BLOCKED.
  * Every wake carries wait_seq, so a delayed event or timeout cannot wake a
  * later wait by the same task.
+ *
+ * A token belongs to one logical wait, not to one wait queue.  The caller may
+ * link the same token into several wait queues.  prepare/cancel/commit/finish
+ * must never be called while an object or wait-queue lock is held; queue
+ * link/unlink operations do not acquire proc_lock.
  */
 proc_wait_token_t proc_park_prepare(proc_wait_mode_t mode,
                                     uint64_t deadline);
 proc_wait_token_t proc_park_prepare_locked(proc_wait_mode_t mode,
                                            uint64_t deadline);
+int proc_park_cancel(proc_wait_token_t token);
 proc_wake_reason_t proc_park_commit(proc_wait_token_t token);
 void proc_park_finish(proc_wait_token_t token);
 proc_wake_reason_t proc_park_wait(proc_wait_mode_t mode, uint64_t deadline);
