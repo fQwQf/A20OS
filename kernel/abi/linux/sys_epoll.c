@@ -411,7 +411,14 @@ static int epoll_do_wait(int epfd, void *events, int maxevents,
             uint64_t sleep_until = now + MS_TO_TICKS(20);
             if (has_timeout && deadline < sleep_until)
                 sleep_until = deadline;
-            (void)proc_park_wait(PROC_WAIT_INTERRUPTIBLE, sleep_until);
+            proc_wake_reason_t reason =
+                proc_park_wait(PROC_WAIT_INTERRUPTIBLE, sleep_until);
+            if (reason == PROC_WAKE_TIMEOUT_CAPACITY) {
+                if (sigmask && saved_ss)
+                    signal_task_restore_mask(t, saved_blocked);
+                epoll_put_ref(ep_gfd, ep_vf);
+                return -EAGAIN;
+            }
         } else {
             /*
              * No task context — cannot sleep.  For infinite timeout

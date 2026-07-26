@@ -162,6 +162,8 @@ SMOKE_LOG_DIR ?= .kernel-build/smoke
 STEP35_TIMEOUT ?= 300s
 STEP35_INPUT_DELAY ?= 3
 STEP35_LOG_DIR ?= .eval-state/2026/logs
+WAIT_TIMER_HEAP_MAX ?=
+REQUIRE_TIMEOUT_CAPACITY ?= 0
 QEMU_MEMORY ?= 1G
 
 PROTOCOLS_LINES = \
@@ -377,6 +379,9 @@ CFLAGS = -Wall -Wextra $(OPT) -ffreestanding -nostdlib \
          -DCONFIG_ABI_$(shell echo $(ABI) | tr a-z A-Z) \
           -DCONFIG_NR_CPUS=$(NR_CPUS) \
           -DCONFIG_BOARD_$(shell echo $(BOARD) | tr a-z A-Z | tr - _)
+ifneq ($(strip $(WAIT_TIMER_HEAP_MAX)),)
+CFLAGS += -DCONFIG_WAIT_TIMER_HEAP_MAX=$(WAIT_TIMER_HEAP_MAX)
+endif
 ifneq ($(NR_CPUS),1)
 CFLAGS += -DCONFIG_SMP
 endif
@@ -836,7 +841,25 @@ check-signal-exit-boundary:
 	@rg -q "PROC_STRESS: signal-mask-park PASS" user/cmds/proc_stress.c
 	@echo "check-signal-exit-boundary: PASS"
 
-check-doc-test-gates: check-concurrency-foundation check-smp-platform-boundary check-task-state-boundary check-task-lifetime-boundary check-blocking-point-boundary check-signal-exit-boundary check-mm-lock-model check-io-progress-model check-vfs-abstraction check-abi-boundary check-driver-core-model check-external-dependency-boundary check-abi-smoke-gate check-doc-drift
+check-timeout-ownership-boundary:
+	@rg -q "TIMEOUT_OWNERSHIP_AUDIT" docs/testing/timeout-ownership-audit.md
+	@rg -Uq 'typedef struct wait_timer[^{]*\{[^}]*deadline[^}]*task[^}]*wait_seq' \
+		kernel/proc/sched.c
+	@rg -q "PROC_PARK_PREPARE_TIMEOUT_CAPACITY" \
+		kernel/include/proc/park.h kernel/proc/park.c kernel/proc/sched.c
+	@rg -q "wait_timer_duplicate_rejections" kernel/proc/sched.c
+	@rg -Uq 'proc_try_wake_locked\(timer\.task,[[:space:]]*timer\.wait_seq' \
+		kernel/proc/sched.c
+	@rg -q "timeout_heap_violations" \
+		kernel/include/proc/lifetime.h kernel/proc/lifetime.c
+	@rg -Fq "timeout-capacity+1 PASS" user/cmds/lifetime_stress.c
+	@rg -q "FUTEX_STRESS: stale-timeout-isolation PASS" \
+		user/cmds/futex_stress.c
+	@! rg -U --pcre2 \
+		'wait_timer_count[\s\S]{0,500}PROC_READY' kernel/proc/sched.c
+	@echo "check-timeout-ownership-boundary: PASS"
+
+check-doc-test-gates: check-concurrency-foundation check-smp-platform-boundary check-task-state-boundary check-task-lifetime-boundary check-blocking-point-boundary check-signal-exit-boundary check-timeout-ownership-boundary check-mm-lock-model check-io-progress-model check-vfs-abstraction check-abi-boundary check-driver-core-model check-external-dependency-boundary check-abi-smoke-gate check-doc-drift
 	@rg -q "DOCS_AS_FACT_CONTRACT" docs/testing/testing-gates.md
 	@rg -q "TEST_FIRST_ARCHITECTURE_MATRIX" docs/testing/testing-gates.md
 	@echo "check-doc-test-gates: PASS"
@@ -1499,11 +1522,15 @@ smoke-futex-stress:
 	fi
 
 .PHONY: check-task-lifetime-boundary check-blocking-point-boundary \
-	check-signal-exit-boundary check-proc-step35 \
+	check-signal-exit-boundary check-timeout-ownership-boundary \
+	check-proc-step35 \
 	check-proc-step4 check-proc-step4-local \
 	check-proc-step5 check-proc-step5-local \
+	check-proc-step6 check-proc-step6-local \
 	check-proc-step35-local step35-rv-debug-1c step35-la-debug-1c \
-	step35-rv-release-8c step35-la-release-8c _step35_smoke
+	step35-rv-release-8c step35-la-release-8c \
+	step6-rv-debug-1c step6-la-debug-1c \
+	step6-rv-release-8c step6-la-release-8c _step35_smoke
 
 step35-rv-debug-1c:
 	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 NR_CPUS=1 \
@@ -1529,6 +1556,38 @@ step35-la-release-8c:
 		BUILD_DIR=.kernel-build/step35/loongarch64-release-8c \
 		STEP35_LABEL=loongarch64-release-8c _step35_smoke
 
+step6-rv-debug-1c:
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 NR_CPUS=1 \
+		OPT="-O0 -g -DDEBUG" USER_OPT="-O3" PROFILE=benchmark QEMU_MEMORY=1G \
+		WAIT_TIMER_HEAP_MAX=64 REQUIRE_TIMEOUT_CAPACITY=1 \
+		NET_HOSTFWD= \
+		BUILD_DIR=.kernel-build/step6/riscv64-debug-1c \
+		STEP35_LABEL=step6-riscv64-debug-1c _step35_smoke
+
+step6-la-debug-1c:
+	$(MAKE) ARCH=loongarch64 ABI=linux BRINGUP=0 NR_CPUS=1 \
+		OPT="-O0 -g -DDEBUG" USER_OPT="-O3" PROFILE=benchmark QEMU_MEMORY=1G \
+		WAIT_TIMER_HEAP_MAX=64 REQUIRE_TIMEOUT_CAPACITY=1 \
+		NET_HOSTFWD= \
+		BUILD_DIR=.kernel-build/step6/loongarch64-debug-1c \
+		STEP35_LABEL=step6-loongarch64-debug-1c _step35_smoke
+
+step6-rv-release-8c:
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 NR_CPUS=8 \
+		OPT="-O3" USER_OPT="-O3" PROFILE=benchmark QEMU_MEMORY=8G \
+		WAIT_TIMER_HEAP_MAX=64 REQUIRE_TIMEOUT_CAPACITY=1 \
+		NET_HOSTFWD= \
+		BUILD_DIR=.kernel-build/step6/riscv64-release-8c \
+		STEP35_LABEL=step6-riscv64-release-8c _step35_smoke
+
+step6-la-release-8c:
+	$(MAKE) ARCH=loongarch64 ABI=linux BRINGUP=0 NR_CPUS=8 \
+		OPT="-O3" USER_OPT="-O3" PROFILE=benchmark QEMU_MEMORY=8G \
+		WAIT_TIMER_HEAP_MAX=64 REQUIRE_TIMEOUT_CAPACITY=1 \
+		NET_HOSTFWD= \
+		BUILD_DIR=.kernel-build/step6/loongarch64-release-8c \
+		STEP35_LABEL=step6-loongarch64-release-8c _step35_smoke
+
 _step35_smoke: dev-build
 	@mkdir -p $(STEP35_LOG_DIR)
 	@set -e; \
@@ -1550,6 +1609,7 @@ _step35_smoke: dev-build
 		'SCHED_STRESS: PASS' \
 		'FUTEX_STRESS: PASS' \
 		'FUTEX_STRESS: unrelated-wake-isolation PASS' \
+		'FUTEX_STRESS: stale-timeout-isolation PASS' \
 		'PROC_STRESS: PASS' \
 		'PROC_STRESS: vfork-auto-reap PASS' \
 		'PROC_STRESS: signal-stop-exit PASS' \
@@ -1566,6 +1626,19 @@ _step35_smoke: dev-build
 			exit 1; \
 		fi; \
 	done; \
+	if [ "$(REQUIRE_TIMEOUT_CAPACITY)" = "1" ]; then \
+		for marker in \
+			'LIFETIME_STRESS: timeout-capacity-1 PASS' \
+			'LIFETIME_STRESS: timeout-capacity PASS entries=' \
+			'LIFETIME_STRESS: timeout-capacity+1 PASS' \
+			'LIFETIME_STRESS: timeout-capacity PASS capacity='; do \
+			if ! grep -q "$$marker" "$$log"; then \
+				echo "_step35_smoke: missing '$$marker' log=$$log"; \
+				tail -n 120 "$$log"; \
+				exit 1; \
+			fi; \
+		done; \
+	fi; \
 	if [ "$(NR_CPUS)" -gt 1 ] && \
 	   ! grep -Fq '[SMP] $(NR_CPUS)/$(NR_CPUS) configured CPUs online' "$$log"; then \
 		echo "_step35_smoke: not all $(NR_CPUS) CPUs came online log=$$log"; \
@@ -1586,9 +1659,22 @@ check-proc-step35-local: check-task-state-boundary \
 	@git diff --check
 	@echo "check-proc-step35-local: PASS"
 
+check-proc-step6-local: check-task-state-boundary \
+	check-concurrency-foundation check-task-lifetime-boundary \
+	check-blocking-point-boundary check-signal-exit-boundary \
+	check-timeout-ownership-boundary \
+	step6-rv-debug-1c step6-la-debug-1c \
+	step6-rv-release-8c step6-la-release-8c
+	@git diff --check
+	@echo "check-proc-step6-local: PASS"
+
 check-proc-step35: check-proc-step35-local \
 	final-eval-rv-cagent final-eval-la-cagent
 	@echo "check-proc-step35: PASS"
+
+check-proc-step6: check-proc-step6-local \
+	final-eval-rv-cagent final-eval-la-cagent
+	@echo "check-proc-step6: PASS"
 
 check-proc-step4-local: check-blocking-point-boundary check-proc-step35-local
 	@git diff --check

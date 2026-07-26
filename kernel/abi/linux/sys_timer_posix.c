@@ -109,7 +109,8 @@ static int fill_getitimer(task_t *t, int which, uint64_t out[4])
         return 0;
     }
 
-    ticks_to_timeval(t->itimer_real_interval, out);
+    ticks_to_timeval(
+        __atomic_load_n(&t->itimer_real_interval, __ATOMIC_RELAXED), out);
     uint64_t now = timer_get_ticks();
     uint64_t expire = __atomic_load_n(&t->alarm_expire, __ATOMIC_RELAXED);
     uint64_t rem = (expire > now) ? (expire - now) : 0;
@@ -159,6 +160,8 @@ int64_t sys_clock_nanosleep(int clk, int flags, const void *req, void *rem)
     if (t) {
         proc_wake_reason_t reason =
             proc_park_wait(PROC_WAIT_INTERRUPTIBLE, until);
+        if (reason == PROC_WAKE_TIMEOUT_CAPACITY)
+            return -EAGAIN;
         if (proc_wake_reason_is_task_interrupt(reason) ||
             signal_task_has_unblocked(t))
             return -ERESTARTSYS;
@@ -196,7 +199,9 @@ int64_t sys_setitimer(int which, const void *new_value, void *old_value)
     if (next[1] >= 1000000ULL || next[3] >= 1000000ULL) return -EINVAL;
     memcpy(cur->itimer_values[which], next, sizeof(next));
     if (which == 0) {
-        cur->itimer_real_interval = timeval_to_ticks(next[0], next[1]);
+        __atomic_store_n(&cur->itimer_real_interval,
+                         timeval_to_ticks(next[0], next[1]),
+                         __ATOMIC_RELAXED);
         uint64_t ticks = timeval_to_ticks(next[2], next[3]);
         proc_set_alarm_expire(cur, ticks ? timer_get_ticks() + ticks : 0);
     }
@@ -214,7 +219,7 @@ int64_t sys_alarm(unsigned seconds)
         uint64_t rem = expire - now;
         old = (unsigned)((rem + TICKS_PER_SEC - 1) / TICKS_PER_SEC);
     }
-    cur->itimer_real_interval = 0;
+    __atomic_store_n(&cur->itimer_real_interval, 0, __ATOMIC_RELAXED);
     memset(cur->itimer_values[0], 0, sizeof(cur->itimer_values[0]));
     cur->itimer_values[0][2] = seconds;
     proc_set_alarm_expire(cur, seconds ? now + (uint64_t)seconds * TICKS_PER_SEC : 0);
