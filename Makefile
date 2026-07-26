@@ -2,7 +2,8 @@
 
 # Parallel build
 NPROC ?= $(or $(shell getconf _NPROCESSORS_ONLN 2>/dev/null),$(shell sysctl -n hw.logicalcpu 2>/dev/null),4)
-TIMEOUT ?= python3 scripts/run_with_timeout.py
+PYTHON ?= python3
+TIMEOUT ?= $(PYTHON) scripts/run_with_timeout.py
 HOST_OS ?= $(shell uname -s 2>/dev/null)
 
 ifeq ($(HOST_OS),Darwin)
@@ -594,7 +595,9 @@ VBOX_AARCH64_LOAD_ADDRESS ?= 0x08080000ULL
 		native-minimal-rv native-minimal-la native-minimal \
 		native-handle-test-rv native-handle-test-la native-handle-test-aarch64 native-handle-test-x86_64 native-handle-test-arm32 native-handle-test-rv32 native-handle-test-ppc64le native-handle-test native-handle-test-all \
 		native-libc-rv native-libc-la native-libc-aarch64 native-libc-x86_64 native-libc-arm32 native-libc-rv32 native-libc-ppc64le native-libc native-libc-all \
-		eval eval-all eval-rv eval-la
+		eval eval-all eval-rv eval-la \
+		final-eval-rv-cagent final-eval-la-cagent \
+		final-eval-rv-buildstorm final-eval-la-buildstorm
 
 FORCE:
 
@@ -630,10 +633,10 @@ $(STM32_WIFI_CONFIG_HDR): FORCE
 
 regen-rootfs-overlay: scripts/gen_rootfs_overlay.py $(ROOTFS_OVERLAY_FILES)
 	@mkdir -p $(dir $(ROOTFS_OVERLAY_SRC)) $(dir $(ROOTFS_OVERLAY_HDR))
-	python3 $< --out-c $(ROOTFS_OVERLAY_SRC) --out-h $(ROOTFS_OVERLAY_HDR) --root $(ROOTFS_OVERLAY_DIR)
+	$(PYTHON) $< --out-c $(ROOTFS_OVERLAY_SRC) --out-h $(ROOTFS_OVERLAY_HDR) --root $(ROOTFS_OVERLAY_DIR)
 
 $(ROOTFS_OVERLAY_SRC) $(ROOTFS_OVERLAY_HDR): scripts/gen_rootfs_overlay.py $(ROOTFS_OVERLAY_FILES)
-	python3 $< --out-c $(ROOTFS_OVERLAY_SRC) --out-h $(ROOTFS_OVERLAY_HDR) --root $(ROOTFS_OVERLAY_DIR)
+	$(PYTHON) $< --out-c $(ROOTFS_OVERLAY_SRC) --out-h $(ROOTFS_OVERLAY_HDR) --root $(ROOTFS_OVERLAY_DIR)
 
 # ----------------------------------------------------------------
 # Competition build. Linux produces both contest architectures; macOS builds
@@ -727,7 +730,7 @@ check-abi-smoke-gate:
 
 check-doc-drift:
 	@rg -q "DOC_DRIFT_KEYWORD_GATE" docs/testing/testing-gates.md
-	@python3 scripts/gen_linux_syscall_coverage.py
+	@$(PYTHON) scripts/gen_linux_syscall_coverage.py
 	@rg -q "stub" kernel/abi/linux/syscall_coverage.md kernel/abi/linux/compat_notes.md docs/testing/testing-gates.md
 	@rg -q "partial" kernel/abi/linux/syscall_coverage.md kernel/abi/linux/compat_notes.md docs/testing/testing-gates.md
 	@rg -q "Future" docs/testing/testing-gates.md kernel/abi/native/sys_core.c
@@ -833,7 +836,7 @@ check-vfs-abstraction:
 	@echo "check-vfs-abstraction: PASS"
 
 check-abi-boundary:
-	@python3 scripts/gen_linux_syscall_coverage.py
+	@$(PYTHON) scripts/gen_linux_syscall_coverage.py
 	@rg -q "LINUX_ABI_BOUNDARY_CONTRACT" kernel/abi/linux/syscall_impl.h
 	@rg -q "LINUX_ABI_EXPLICIT_STUB_CONTRACT" kernel/abi/linux/syscall_table.def
 	@rg -q "LINUX_ABI_SCHED_STUB_BOUNDARY" kernel/abi/linux/sys_sched.c
@@ -999,7 +1002,7 @@ smoke-qemu-gui-x86_64:
 	$(MAKE) ARCH=x86_64 BOARD=qemu-virt-x86_64 ABI=both BRINGUP=0 dev-build
 	$(MAKE) ARCH=x86_64 BOARD=qemu-virt-x86_64 ABI=both BRINGUP=0 \
 		.kernel-build/x86_64-qemu-virt-x86_64-both-dev/gui-fat32.img
-	python3 scripts/smoke_qemu_gui.py \
+	$(PYTHON) scripts/smoke_qemu_gui.py \
 		--arch x86_64 \
 		--qemu qemu-system-x86_64 \
 		--kernel .kernel-build/x86_64-qemu-virt-x86_64-both-dev/kernel.elf \
@@ -1010,7 +1013,7 @@ smoke-qemu-gui-riscv64:
 	$(MAKE) ARCH=riscv64 BOARD=qemu-virt-riscv64 ABI=both BRINGUP=0 dev-build
 	$(MAKE) ARCH=riscv64 BOARD=qemu-virt-riscv64 ABI=both BRINGUP=0 \
 		.kernel-build/riscv64-qemu-virt-riscv64-both-dev/gui-fat32.img
-	python3 scripts/smoke_qemu_gui.py \
+	$(PYTHON) scripts/smoke_qemu_gui.py \
 		--arch riscv64 \
 		--qemu qemu-system-riscv64 \
 		--kernel .kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf \
@@ -1022,7 +1025,7 @@ smoke-qemu-gui-aarch64:
 	$(MAKE) ARCH=aarch64 BOARD=qemu-virt-aarch64 ABI=both BRINGUP=0 dev-build
 	$(MAKE) ARCH=aarch64 BOARD=qemu-virt-aarch64 ABI=both BRINGUP=0 \
 		.kernel-build/aarch64-qemu-virt-aarch64-both-dev/gui-fat32.img
-	python3 scripts/smoke_qemu_gui.py --arch aarch64 --qemu qemu-system-aarch64 \
+	$(PYTHON) scripts/smoke_qemu_gui.py --arch aarch64 --qemu qemu-system-aarch64 \
 		--kernel .kernel-build/aarch64-qemu-virt-aarch64-both-dev/kernel.elf \
 		--disk .kernel-build/aarch64-qemu-virt-aarch64-both-dev/gui-fat32.img \
 		--artifacts .kernel-build/smoke/qemu-gui-aarch64 --timeout $(SMOKE_TIMEOUT)
@@ -1031,7 +1034,7 @@ smoke-qemu-gui-arm32:
 	$(MAKE) ARCH=arm32 BOARD=qemu-virt-arm32 ABI=both BRINGUP=0 dev-build
 	$(MAKE) ARCH=arm32 BOARD=qemu-virt-arm32 ABI=both BRINGUP=0 \
 		.kernel-build/arm32-qemu-virt-arm32-both-dev/gui-fat32.img
-	python3 scripts/smoke_qemu_gui.py --arch arm32 --qemu qemu-system-arm \
+	$(PYTHON) scripts/smoke_qemu_gui.py --arch arm32 --qemu qemu-system-arm \
 		--kernel .kernel-build/arm32-qemu-virt-arm32-both-dev/kernel.elf \
 		--disk .kernel-build/arm32-qemu-virt-arm32-both-dev/gui-fat32.img \
 		--artifacts .kernel-build/smoke/qemu-gui-arm32 --timeout $(SMOKE_TIMEOUT)
@@ -1040,7 +1043,7 @@ smoke-qemu-gui-loongarch64:
 	$(MAKE) ARCH=loongarch64 BOARD=qemu-virt-loongarch64 ABI=both BRINGUP=0 dev-build
 	$(MAKE) ARCH=loongarch64 BOARD=qemu-virt-loongarch64 ABI=both BRINGUP=0 \
 		.kernel-build/loongarch64-qemu-virt-loongarch64-both-dev/gui-fat32.img
-	python3 scripts/smoke_qemu_gui.py --arch loongarch64 --qemu qemu-system-loongarch64 \
+	$(PYTHON) scripts/smoke_qemu_gui.py --arch loongarch64 --qemu qemu-system-loongarch64 \
 		--kernel .kernel-build/loongarch64-qemu-virt-loongarch64-both-dev/kernel.elf \
 		--disk .kernel-build/loongarch64-qemu-virt-loongarch64-both-dev/gui-fat32.img \
 		--artifacts .kernel-build/smoke/qemu-gui-loongarch64 --timeout $(SMOKE_TIMEOUT)
@@ -2562,3 +2565,32 @@ eval-check-la:
 	echo "[eval][la] log is complete enough for scorer parsing"
 
 eval-check: eval-check-rv eval-check-la
+
+# ----------------------------------------------------------------
+# 2026 final-round evaluation.  Each target builds an 8-CPU image, restores a
+# read-only official ext4 base from its .gz, creates a per-run qcow2 overlay,
+# runs QEMU with the published 8 GiB/8-CPU TCG configuration, invokes the
+# official judge, and archives the complete run under .eval-state/2026.
+# ----------------------------------------------------------------
+FINAL_EVAL_IMAGE_DIR ?= contest/2026OSImage-Pub
+FINAL_EVAL_STATE_DIR ?= .eval-state/2026
+FINAL_EVAL_TIMEOUT ?=
+
+define RUN_FINAL_EVAL
+	FINAL_EVAL_IMAGE_DIR="$(FINAL_EVAL_IMAGE_DIR)" \
+	FINAL_EVAL_STATE_DIR="$(FINAL_EVAL_STATE_DIR)" \
+	$(if $(strip $(FINAL_EVAL_TIMEOUT)),FINAL_EVAL_TIMEOUT="$(FINAL_EVAL_TIMEOUT)") \
+	bash ./scripts/run_final_eval.sh $(1) $(2)
+endef
+
+final-eval-rv-cagent:
+	$(call RUN_FINAL_EVAL,riscv64,cagent)
+
+final-eval-la-cagent:
+	$(call RUN_FINAL_EVAL,loongarch64,cagent)
+
+final-eval-rv-buildstorm:
+	$(call RUN_FINAL_EVAL,riscv64,buildstorm)
+
+final-eval-la-buildstorm:
+	$(call RUN_FINAL_EVAL,loongarch64,buildstorm)
