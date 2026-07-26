@@ -1,5 +1,6 @@
 #include "proc/proc.h"
 #include "proc/proc_internal.h"
+#include "proc/lifetime.h"
 #include "core/lock.h"
 #include "core/string.h"
 
@@ -124,6 +125,7 @@ void proc_pid_register(task_t *t)
     unsigned h = pid_hash_index(t->pid);
     t->pid_hash_next = pid_hash[h];
     pid_hash[h] = t;
+    proc_lifetime_note_pid_add();
     spin_unlock_irqrestore(&pid_lock, flags);
 }
 
@@ -148,8 +150,10 @@ void proc_pid_unregister(task_t *t)
     if (removed)
         pid_bitmap_clear(t->pid);
     spin_unlock_irqrestore(&pid_lock, flags);
-    if (removed)
+    if (removed) {
+        proc_lifetime_note_pid_remove();
         proc_put(t);
+    }
 }
 
 task_t *proc_find_get(int pid)

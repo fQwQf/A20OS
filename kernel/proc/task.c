@@ -1,5 +1,6 @@
 #include "proc/proc.h"
 #include "proc/proc_internal.h"
+#include "proc/lifetime.h"
 #include "proc/signal.h"
 #include "bpf/bpf.h"
 #include "fs/fdtable.h"
@@ -21,6 +22,7 @@ task_t *proc_task_alloc_storage(void)
     if (!t)
         return NULL;
     refcount_set(&t->refs, 1);
+    proc_lifetime_note_task_init(1);
     t->state = PROC_BLOCKED;
     t->dynamic_alloc = 1;
     t->wait_timer_index = -1;
@@ -33,6 +35,7 @@ void proc_task_init_idle_state(task_t *t, unsigned cpu)
     if (!t)
         return;
     refcount_set(&t->refs, 1);
+    proc_lifetime_note_task_init(0);
     t->destroy_started = 0;
     t->state = PROC_RUNNING;
     t->cpu_id = cpu;
@@ -275,26 +278,50 @@ static void proc_task_release_resources(task_t *t)
 
 task_t *proc_get(task_t *t)
 {
-    if (!t || !refcount_inc_not_zero(&t->refs))
+    if (!t)
         return NULL;
+    if (!refcount_inc_not_zero(&t->refs)) {
+        proc_lifetime_note_ref_get_failure();
+        return NULL;
+    }
+    proc_lifetime_note_ref_get();
     return t;
 }
 
 void proc_put(task_t *t)
 {
-    if (!t || !refcount_dec_and_test(&t->refs))
+    if (!t)
+        return;
+
+    int old = __atomic_load_n(&t->refs.value, __ATOMIC_RELAXED);
+    while (old > 0 &&
+           !__atomic_compare_exchange_n(&t->refs.value, &old, old - 1, 0,
+                                        __ATOMIC_ACQ_REL,
+                                        __ATOMIC_RELAXED)) {
+    }
+    if (old <= 0) {
+        proc_lifetime_note_ref_underflow();
+        panic("proc_put: pid=%d reference underflow old=%d", t->pid, old);
+    }
+    proc_lifetime_note_ref_put();
+    if (old != 1)
         return;
 
     /*
      * Static idle tasks retain their allocation reference for the lifetime of
      * the kernel. Reaching zero indicates an ownership-transfer bug.
      */
-    if (!t->dynamic_alloc)
+    if (!t->dynamic_alloc) {
+        proc_lifetime_note_bad_final_put();
         panic("proc_put: static task pid=%d reached zero references", t->pid);
-    if (!t->destroy_started)
+    }
+    if (!t->destroy_started) {
+        proc_lifetime_note_bad_final_put();
         panic("proc_put: live task pid=%d reached zero references", t->pid);
+    }
 
     proc_task_release_resources(t);
+    proc_lifetime_note_task_free();
     memset(t, 0, sizeof(*t));
     kfree(t);
 }
@@ -306,6 +333,7 @@ void proc_destroy_task(task_t *t)
 
     uint64_t flags = spin_lock_irqsave(&proc_lock);
     if (t->destroy_started) {
+        proc_lifetime_note_duplicate_destroy();
         spin_unlock_irqrestore(&proc_lock, flags);
         return;
     }
