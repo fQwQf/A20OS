@@ -19,7 +19,10 @@ static int net_vfile_read(vfile_t *vf, char *buf, size_t count) {
     uint64_t start = timer_get_ticks();
     for (;;) {
         a20_lwip_poll();
+        proc_wake_q_t wake_q;
+        proc_wake_q_init(&wake_q);
         uint64_t irq = spin_lock_irqsave(&g_net_lock);
+        int rx_count_before = s->rx_count;
         int r = net_dequeue_msg_locked(s, buf, count, NULL, NULL);
         if (r > 0 && s->type == SOCK_STREAM) {
             size_t total = (size_t)r;
@@ -36,7 +39,14 @@ static int net_vfile_read(vfile_t *vf, char *buf, size_t count) {
             if (r == -EAGAIN && (s->closed || s->peer_closed || s->shut_rd))
                 r = 0;
             int recved = (r > 0 && s->type == SOCK_STREAM) ? r : 0;
+            if (r > 0 && s->rx_count < rx_count_before)
+                (void)wait_queue_collect_one(
+                    &s->write_waitq, 0, PROC_WAKE_EVENT, &wake_q);
+            if (r > 0 && s->rx_head)
+                (void)wait_queue_collect_one(
+                    &s->read_waitq, 0, PROC_WAKE_EVENT, &wake_q);
             spin_unlock_irqrestore(&g_net_lock, irq);
+            (void)proc_wake_q_flush(&wake_q);
             if (recved)
                 net_tcp_recved(s, (size_t)recved);
             return r;
@@ -56,13 +66,38 @@ static int net_vfile_read(vfile_t *vf, char *buf, size_t count) {
         }
         uint64_t deadline = s->recv_timeout_ticks ?
                             start + s->recv_timeout_ticks : 0;
-        wait_queue_entry_t entry = {0};
-        wait_queue_prepare(&s->read_waitq, &entry,
-                           PROC_WAIT_INTERRUPTIBLE, deadline, 0);
         spin_unlock_irqrestore(&g_net_lock, irq);
-        proc_wake_reason_t reason =
-            wait_queue_commit(&s->read_waitq, &entry);
-        wait_queue_finish(&s->read_waitq, &entry);
+        proc_wait_token_t token =
+            proc_park_prepare(PROC_WAIT_INTERRUPTIBLE, deadline);
+        if (!token.task)
+            return -EAGAIN;
+
+        wait_queue_entry_t entry = {0};
+        irq = spin_lock_irqsave(&g_net_lock);
+        if (s->rx_head || s->nonblock || s->closed || s->peer_closed ||
+            s->shut_rd) {
+            spin_unlock_irqrestore(&g_net_lock, irq);
+            (void)proc_park_cancel(token);
+            proc_park_finish(token);
+            continue;
+        }
+        if (net_task_has_unblocked_signal(cur)) {
+            spin_unlock_irqrestore(&g_net_lock, irq);
+            (void)proc_park_cancel(token);
+            proc_park_finish(token);
+            return -ERESTARTSYS;
+        }
+        bool linked = wait_queue_link(&s->read_waitq, &entry, token, 0);
+        spin_unlock_irqrestore(&g_net_lock, irq);
+        proc_wake_reason_t reason;
+        if (linked)
+            reason = proc_park_commit(token);
+        else {
+            (void)proc_park_cancel(token);
+            reason = PROC_WAKE_CANCEL;
+        }
+        wait_queue_unlink(&s->read_waitq, &entry);
+        proc_park_finish(token);
         if (reason == PROC_WAKE_SIGNAL)
             return -ERESTARTSYS;
         if (reason == PROC_WAKE_TIMEOUT)
@@ -108,7 +143,13 @@ static int net_vfile_write(vfile_t *vf, const char *buf, size_t count) {
                                             s->nonblock, s->send_timeout_ticks);
         }
         int r = net_enqueue_msg_locked(dst, buf, count, s->local, s->local_len);
+        proc_wake_q_t wake_q;
+        proc_wake_q_init(&wake_q);
+        if (r >= 0)
+            (void)wait_queue_collect_one(
+                &dst->read_waitq, 0, PROC_WAKE_EVENT, &wake_q);
         spin_unlock_irqrestore(&g_net_lock, irq);
+        (void)proc_wake_q_flush(&wake_q);
         return r;
     }
 
@@ -143,16 +184,30 @@ int net_socket_close_file(vfile_t *vf) {
                (void *)s->peer, s->closed);
     net_inet_socket_destroy(s);
     ktrace_net("[NET] close: pcb dropped, unregistering\n");
+    proc_wake_q_t wake_q;
+    proc_wake_q_init(&wake_q);
+    net_socket_t *peer = NULL;
+    bool drain_accept = false;
+    bool drain_read = false;
+    bool drain_write = false;
+    bool drain_peer_read = false;
+    bool drain_peer_write = false;
     uint64_t flags = spin_lock_irqsave(&g_net_lock);
     net_unregister_socket_locked(s);
-    wait_queue_wake_all(&s->accept_waitq, 0, PROC_WAKE_EXIT);
-    wait_queue_wake_all(&s->read_waitq, 0, PROC_WAKE_EXIT);
-    wait_queue_wake_all(&s->write_waitq, 0, PROC_WAKE_EXIT);
+    drain_accept = net_wait_queue_collect_all_locked(
+        &s->accept_waitq, PROC_WAKE_EXIT, &wake_q);
+    drain_read = net_wait_queue_collect_all_locked(
+        &s->read_waitq, PROC_WAKE_EXIT, &wake_q);
+    drain_write = net_wait_queue_collect_all_locked(
+        &s->write_waitq, PROC_WAKE_EXIT, &wake_q);
     if (s->peer && (s->type == SOCK_STREAM || s->type == SOCK_SEQPACKET || net_socket_is_valid_locked(s->peer)) && s->peer->peer == s) {
-        s->peer->peer = NULL;
-        s->peer->peer_closed = 1;
-        wait_queue_wake_all(&s->peer->read_waitq, 0, PROC_WAKE_EVENT);
-        wait_queue_wake_all(&s->peer->write_waitq, 0, PROC_WAKE_EVENT);
+        peer = s->peer;
+        peer->peer = NULL;
+        peer->peer_closed = 1;
+        drain_peer_read = net_wait_queue_collect_all_locked(
+            &peer->read_waitq, PROC_WAKE_EVENT, &wake_q);
+        drain_peer_write = net_wait_queue_collect_all_locked(
+            &peer->write_waitq, PROC_WAKE_EVENT, &wake_q);
     }
     s->closed = 1;
     net_msg_t *m = s->rx_head;
@@ -167,6 +222,22 @@ int net_socket_close_file(vfile_t *vf) {
     s->accept_head = s->accept_tail = NULL;
     s->accept_count = 0;
     spin_unlock_irqrestore(&g_net_lock, flags);
+    (void)proc_wake_q_flush(&wake_q);
+    if (drain_accept)
+        (void)wait_queue_wake_all(
+            &s->accept_waitq, 0, PROC_WAKE_EXIT);
+    if (drain_read)
+        (void)wait_queue_wake_all(
+            &s->read_waitq, 0, PROC_WAKE_EXIT);
+    if (drain_write)
+        (void)wait_queue_wake_all(
+            &s->write_waitq, 0, PROC_WAKE_EXIT);
+    if (drain_peer_read)
+        (void)wait_queue_wake_all(
+            &peer->read_waitq, 0, PROC_WAKE_EVENT);
+    if (drain_peer_write)
+        (void)wait_queue_wake_all(
+            &peer->write_waitq, 0, PROC_WAKE_EVENT);
     ktrace_net("[NET] close: unregistered, rx=%d accept_q=%d\n", rx_count, acc_count);
 
     while (m) {
@@ -176,19 +247,41 @@ int net_socket_close_file(vfile_t *vf) {
     }
     while (accepted) {
         net_socket_t *next = accepted->accept_next;
+        proc_wake_q_init(&wake_q);
+        peer = NULL;
+        drain_read = false;
+        drain_write = false;
+        drain_peer_read = false;
+        drain_peer_write = false;
         uint64_t accepted_flags = spin_lock_irqsave(&g_net_lock);
         accepted->closed = 1;
         if (accepted->peer && accepted->peer->peer == accepted) {
-            accepted->peer->peer = NULL;
-            accepted->peer->peer_closed = 1;
-            wait_queue_wake_all(&accepted->peer->read_waitq, 0,
-                                PROC_WAKE_EVENT);
-            wait_queue_wake_all(&accepted->peer->write_waitq, 0,
-                                PROC_WAKE_EVENT);
+            peer = accepted->peer;
+            peer->peer = NULL;
+            peer->peer_closed = 1;
+            drain_peer_read = net_wait_queue_collect_all_locked(
+                &peer->read_waitq, PROC_WAKE_EVENT, &wake_q);
+            drain_peer_write = net_wait_queue_collect_all_locked(
+                &peer->write_waitq, PROC_WAKE_EVENT, &wake_q);
         }
-        wait_queue_wake_all(&accepted->read_waitq, 0, PROC_WAKE_EXIT);
-        wait_queue_wake_all(&accepted->write_waitq, 0, PROC_WAKE_EXIT);
+        drain_read = net_wait_queue_collect_all_locked(
+            &accepted->read_waitq, PROC_WAKE_EXIT, &wake_q);
+        drain_write = net_wait_queue_collect_all_locked(
+            &accepted->write_waitq, PROC_WAKE_EXIT, &wake_q);
         spin_unlock_irqrestore(&g_net_lock, accepted_flags);
+        (void)proc_wake_q_flush(&wake_q);
+        if (drain_read)
+            (void)wait_queue_wake_all(
+                &accepted->read_waitq, 0, PROC_WAKE_EXIT);
+        if (drain_write)
+            (void)wait_queue_wake_all(
+                &accepted->write_waitq, 0, PROC_WAKE_EXIT);
+        if (drain_peer_read)
+            (void)wait_queue_wake_all(
+                &peer->read_waitq, 0, PROC_WAKE_EVENT);
+        if (drain_peer_write)
+            (void)wait_queue_wake_all(
+                &peer->write_waitq, 0, PROC_WAKE_EVENT);
         net_inet_socket_destroy(accepted);
         uint64_t unregister_flags = spin_lock_irqsave(&g_net_lock);
         net_unregister_socket_locked(accepted);

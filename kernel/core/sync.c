@@ -13,24 +13,26 @@ void wait_queue_init(wait_queue_t *q) {
     q->head = NULL;
 }
 
-void wait_queue_prepare(wait_queue_t *q, wait_queue_entry_t *entry,
-                        proc_wait_mode_t mode, uint64_t deadline,
-                        uintptr_t key) {
-    task_t *cur = proc_current();
-    if (!q || !entry || !cur)
-        return;
+static void wait_queue_entry_clear(wait_queue_entry_t *entry)
+{
+    entry->next = NULL;
+    entry->prev = NULL;
+    entry->task = NULL;
+    entry->wait_seq = 0;
+    entry->flags = 0;
+    entry->key = 0;
+    entry->linked = false;
+}
+
+bool wait_queue_link(wait_queue_t *q, wait_queue_entry_t *entry,
+                     proc_wait_token_t token, uintptr_t key) {
+    if (!q || !entry || !token.task || !token.seq)
+        return false;
 
     uint64_t flags = spin_lock_irqsave(&q->lock);
-    for (wait_queue_entry_t *e = q->head; e; e = e->next) {
-        if (e == entry || e->task == cur) {
-            spin_unlock_irqrestore(&q->lock, flags);
-            return;
-        }
-    }
-    proc_wait_token_t token = proc_park_prepare(mode, deadline);
-    if (!token.task) {
+    if (entry->linked) {
         spin_unlock_irqrestore(&q->lock, flags);
-        return;
+        return false;
     }
     entry->task = token.task;
     entry->wait_seq = token.seq;
@@ -43,21 +45,10 @@ void wait_queue_prepare(wait_queue_t *q, wait_queue_entry_t *entry,
     q->head = entry;
     entry->linked = true;
     spin_unlock_irqrestore(&q->lock, flags);
+    return true;
 }
 
-proc_wake_reason_t wait_queue_commit(wait_queue_t *q,
-                                     wait_queue_entry_t *entry) {
-    (void)q;
-    if (!entry || !entry->wait_seq)
-        return PROC_WAKE_CANCEL;
-    proc_wait_token_t token = {
-        .task = proc_current(),
-        .seq = entry->wait_seq,
-    };
-    return proc_park_commit(token);
-}
-
-void wait_queue_finish(wait_queue_t *q, wait_queue_entry_t *entry) {
+void wait_queue_unlink(wait_queue_t *q, wait_queue_entry_t *entry) {
     if (!q || !entry)
         return;
 
@@ -70,28 +61,8 @@ void wait_queue_finish(wait_queue_t *q, wait_queue_entry_t *entry) {
         if (entry->next)
             entry->next->prev = entry->prev;
     }
-    entry->next = NULL;
-    entry->prev = NULL;
-    entry->task = NULL;
-    entry->linked = false;
+    wait_queue_entry_clear(entry);
     spin_unlock_irqrestore(&q->lock, flags);
-
-    proc_wait_token_t token = {
-        .task = proc_current(),
-        .seq = entry->wait_seq,
-    };
-    proc_park_finish(token);
-    entry->wait_seq = 0;
-}
-
-void wait_queue_sleep(wait_queue_t *q) {
-    if (!q || !proc_current())
-        return;
-
-    wait_queue_entry_t entry = {0};
-    wait_queue_prepare(q, &entry, PROC_WAIT_UNINTERRUPTIBLE, 0, 0);
-    (void)wait_queue_commit(q, &entry);
-    wait_queue_finish(q, &entry);
 }
 
 unsigned wait_queue_wake_one(wait_queue_t *q, uintptr_t key,
@@ -108,11 +79,14 @@ unsigned wait_queue_wake_all(wait_queue_t *q, uintptr_t key,
     for (;;) {
         proc_wake_q_t wake_q;
         proc_wake_q_init(&wake_q);
+        bool complete = false;
         unsigned collected =
-            wait_queue_collect_all(q, key, reason, &wake_q);
+            wait_queue_collect_all(q, key, reason, &wake_q, &complete);
         if (!collected)
             break;
         woke += proc_wake_q_flush(&wake_q);
+        if (complete)
+            break;
     }
     return woke;
 }
@@ -126,9 +100,7 @@ static void wait_queue_detach_locked(wait_queue_t *q,
         q->head = entry->next;
     if (entry->next)
         entry->next->prev = entry->prev;
-    entry->next = NULL;
-    entry->prev = NULL;
-    entry->linked = false;
+    wait_queue_entry_clear(entry);
 }
 
 unsigned wait_queue_collect_one(wait_queue_t *q, uintptr_t key,
@@ -146,7 +118,6 @@ unsigned wait_queue_collect_one(wait_queue_t *q, uintptr_t key,
     if (entry && proc_wake_q_add(wake_q, entry->task, entry->wait_seq,
                                  reason)) {
         wait_queue_detach_locked(q, entry);
-        entry->task = NULL;
         collected = 1;
     }
     spin_unlock_irqrestore(&q->lock, flags);
@@ -155,25 +126,34 @@ unsigned wait_queue_collect_one(wait_queue_t *q, uintptr_t key,
 
 unsigned wait_queue_collect_all(wait_queue_t *q, uintptr_t key,
                                 proc_wake_reason_t reason,
-                                proc_wake_q_t *wake_q)
+                                proc_wake_q_t *wake_q,
+                                bool *complete)
 {
+    if (complete)
+        *complete = false;
     if (!q || !wake_q)
         return 0;
 
     unsigned collected = 0;
+    bool drained = true;
     uint64_t flags = spin_lock_irqsave(&q->lock);
     wait_queue_entry_t *entry = q->head;
-    while (entry && wake_q->count < PROC_WAKE_Q_CAPACITY) {
+    while (entry) {
         wait_queue_entry_t *next = entry->next;
-        if ((!key || entry->key == key) &&
-            proc_wake_q_add(wake_q, entry->task, entry->wait_seq, reason)) {
+        if (!key || entry->key == key) {
+            if (!proc_wake_q_add(wake_q, entry->task, entry->wait_seq,
+                                 reason)) {
+                drained = false;
+                break;
+            }
             wait_queue_detach_locked(q, entry);
-            entry->task = NULL;
             collected++;
         }
         entry = next;
     }
     spin_unlock_irqrestore(&q->lock, flags);
+    if (complete)
+        *complete = drained;
     return collected;
 }
 
@@ -221,14 +201,33 @@ void mutex_lock(mutex_t *m) {
             spin_unlock_irqrestore(&m->lock, flags);
             return;
         }
-
-        wait_queue_entry_t entry = {0};
-        wait_queue_prepare(&m->waiters, &entry,
-                           PROC_WAIT_UNINTERRUPTIBLE, 0, 0);
         spin_unlock_irqrestore(&m->lock, flags);
 
-        (void)wait_queue_commit(&m->waiters, &entry);
-        wait_queue_finish(&m->waiters, &entry);
+        proc_wait_token_t token =
+            proc_park_prepare(PROC_WAIT_UNINTERRUPTIBLE, 0);
+        if (!token.task) {
+            proc_yield();
+            continue;
+        }
+        wait_queue_entry_t entry = {0};
+        flags = spin_lock_irqsave(&m->lock);
+        if (!m->locked) {
+            m->locked = 1;
+            m->owner = cur;
+            spin_unlock_irqrestore(&m->lock, flags);
+            (void)proc_park_cancel(token);
+            proc_park_finish(token);
+            return;
+        }
+        bool linked = wait_queue_link(&m->waiters, &entry, token, 0);
+        spin_unlock_irqrestore(&m->lock, flags);
+
+        if (linked)
+            (void)proc_park_commit(token);
+        else
+            (void)proc_park_cancel(token);
+        wait_queue_unlink(&m->waiters, &entry);
+        proc_park_finish(token);
     }
 }
 
@@ -281,11 +280,32 @@ void wait_for_completion(completion_t *c) {
             spin_unlock_irqrestore(&c->lock, flags);
             return;
         }
-        wait_queue_entry_t entry = {0};
-        wait_queue_prepare(&c->waiters, &entry,
-                           PROC_WAIT_UNINTERRUPTIBLE, 0, 0);
         spin_unlock_irqrestore(&c->lock, flags);
-        (void)wait_queue_commit(&c->waiters, &entry);
-        wait_queue_finish(&c->waiters, &entry);
+
+        proc_wait_token_t token =
+            proc_park_prepare(PROC_WAIT_UNINTERRUPTIBLE, 0);
+        if (!token.task) {
+            proc_yield();
+            continue;
+        }
+        wait_queue_entry_t entry = {0};
+        flags = spin_lock_irqsave(&c->lock);
+        if (c->done) {
+            if (c->done != COMPLETION_DONE_ALL)
+                c->done--;
+            spin_unlock_irqrestore(&c->lock, flags);
+            (void)proc_park_cancel(token);
+            proc_park_finish(token);
+            return;
+        }
+        bool linked = wait_queue_link(&c->waiters, &entry, token, 0);
+        spin_unlock_irqrestore(&c->lock, flags);
+
+        if (linked)
+            (void)proc_park_commit(token);
+        else
+            (void)proc_park_cancel(token);
+        wait_queue_unlink(&c->waiters, &entry);
+        proc_park_finish(token);
     }
 }
