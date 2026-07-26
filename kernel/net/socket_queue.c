@@ -178,7 +178,7 @@ int net_enqueue_msg_blocking(net_socket_t *s, net_socket_t *dst, const void *buf
         }
         wait_queue_unlink(&dst->write_waitq, &entry);
         proc_park_finish(token);
-        if (reason == PROC_WAKE_SIGNAL)
+        if (proc_wake_reason_is_task_interrupt(reason))
             return -ERESTARTSYS;
         if (reason == PROC_WAKE_TIMEOUT)
             return -EAGAIN;
