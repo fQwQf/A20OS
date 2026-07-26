@@ -565,14 +565,87 @@ void proc_sched_stop_current(int exit_code)
     if (!t || t == proc_idle_task())
         return;
 
+    task_t *notify_parent = NULL;
     uint64_t flags = spin_lock_irqsave(&proc_lock);
+    /*
+     * SIGCONT generation publishes a persistent pending marker before it
+     * attempts to resume STOPPED.  If it raced the stop transition and found
+     * the task still RUNNING, consume that fact here by declining to publish
+     * STOPPED.
+     */
+    if (__atomic_load_n(&t->exit_pending, __ATOMIC_ACQUIRE) ||
+        signal_task_has_fatal(t) ||
+        signal_task_continue_pending(t)) {
+        spin_unlock_irqrestore(&proc_lock, flags);
+        return;
+    }
     if (t->state == PROC_RUNNING) {
         t->exit_code = exit_code;
+        t->stop_report_pending = 1;
+        t->continue_report_pending = 0;
         t->state = PROC_STOPPED;
+        task_t *parent = t->parent;
+        if (parent && parent->state != PROC_UNUSED &&
+            parent->state != PROC_ZOMBIE) {
+            proc_wake_child_waiters_locked(parent);
+            if (!signal_task_sigchld_no_cldstop(parent))
+                notify_parent = proc_get(parent);
+        }
         proc_sched_assert_task_locked(t);
     }
     spin_unlock_irqrestore(&proc_lock, flags);
+
+    if (notify_parent) {
+        (void)signal_send(notify_parent->pid, SIGCHLD);
+        proc_put(notify_parent);
+    }
     sched();
+}
+
+int proc_sched_resume_stopped(task_t *t, int report_continued)
+{
+    if (!t)
+        return 0;
+
+    unsigned target_cpu = cpu_current_id();
+    int queued = 0;
+    int resumed = 0;
+    task_t *notify_parent = NULL;
+    uint64_t flags = spin_lock_irqsave(&proc_lock);
+    if (t->state == PROC_STOPPED) {
+        t->state = PROC_READY;
+        t->stop_report_pending = 0;
+        t->continue_report_pending = report_continued != 0;
+        if (t->on_cpu) {
+            t->cpu_id = t->owner_cpu;
+        } else if (!t->dispatching && !t->on_rq) {
+            t->cpu_id = proc_sched_select_cpu_locked(t);
+        }
+        target_cpu = t->cpu_id;
+        proc_runq_enqueue_locked(t);
+        queued = t->on_rq;
+        resumed = 1;
+
+        if (report_continued) {
+            task_t *parent = t->parent;
+            if (parent && parent->state != PROC_UNUSED &&
+                parent->state != PROC_ZOMBIE) {
+                proc_wake_child_waiters_locked(parent);
+                if (!signal_task_sigchld_no_cldstop(parent))
+                    notify_parent = proc_get(parent);
+            }
+        }
+        proc_sched_assert_task_locked(t);
+    }
+    spin_unlock_irqrestore(&proc_lock, flags);
+
+    if (queued && target_cpu != cpu_current_id())
+        proc_sched_kick_cpu(target_cpu);
+    if (notify_parent) {
+        (void)signal_send(notify_parent->pid, SIGCHLD);
+        proc_put(notify_parent);
+    }
+    return resumed;
 }
 
 static int sched_note_deadline(uint64_t *slot, uint64_t value)
@@ -944,12 +1017,8 @@ void sched_reap_zombies(void)
             if (!parent || parent == proc_idle_task() ||
                 t->ppid == 0 || (t->clone_flags & CLONE_THREAD))
                 reap = 1;
-            else if (parent->signals) {
-                signal_state_t *ss = (signal_state_t *)parent->signals;
-                sigaction_t *act = &ss->actions[SIGCHLD];
-                if (act->sa_handler == SIG_IGN || (act->sa_flags & SA_NOCLDWAIT))
-                    reap = 1;
-            }
+            else if (signal_task_sigchld_auto_reap(parent))
+                reap = 1;
             if (reap && count < (int)(sizeof(to_reap) / sizeof(to_reap[0]))) {
                 task_t *owned = proc_get(t);
                 if (owned)

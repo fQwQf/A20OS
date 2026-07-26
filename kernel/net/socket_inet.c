@@ -860,7 +860,7 @@ static int net_inet_connect_stream(net_socket_t *s, const void *addr, size_t add
             s->closed = 1;
             return -ETIMEDOUT;
         }
-        if (reason == PROC_WAKE_SIGNAL ||
+        if (proc_wake_reason_is_task_interrupt(reason) ||
             net_task_has_unblocked_signal(cur)) {
             net_tcp_drop_pcb(s);
             s->tcp_connecting = 0;
@@ -1109,7 +1109,7 @@ static int net_inet_send_tcp(net_socket_t *s, const void *buf, size_t len)
             }
             wait_queue_unlink(&s->write_waitq, &entry);
             proc_park_finish(token);
-            if (reason == PROC_WAKE_SIGNAL)
+            if (proc_wake_reason_is_task_interrupt(reason))
                 return -ERESTARTSYS;
             if (reason == PROC_WAKE_TIMEOUT)
                 return -EAGAIN;

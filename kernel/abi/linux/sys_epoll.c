@@ -325,9 +325,12 @@ static int epoll_do_wait(int epfd, void *events, int maxevents,
             return -EFAULT;
         }
         saved_ss = (signal_state_t *)t->signals;
-        saved_blocked = t->sig_blocked;
-        t->sig_blocked = arch_user_sigset_to_kernel(&user_mask) &
-            ~(signal_mask_bit(SIGKILL) | signal_mask_bit(SIGSTOP));
+        int mask_ret = signal_task_set_temporary_mask(
+            t, arch_user_sigset_to_kernel(&user_mask), &saved_blocked);
+        if (mask_ret < 0) {
+            epoll_put_ref(ep_gfd, ep_vf);
+            return mask_ret;
+        }
     }
 
     int has_timeout = timeout_ms >= 0;
@@ -361,7 +364,7 @@ static int epoll_do_wait(int epfd, void *events, int maxevents,
             if (copy_to_user((char *)events + (size_t)n * sizeof(epoll_event_t),
                              &out_ev, sizeof(epoll_event_t)) < 0) {
                 if (sigmask && saved_ss)
-                    t->sig_blocked = saved_blocked;
+                    signal_task_restore_mask(t, saved_blocked);
                 epoll_put_ref(ep_gfd, ep_vf);
                 return -EFAULT;
             }
@@ -385,8 +388,7 @@ static int epoll_do_wait(int epfd, void *events, int maxevents,
             }
             if (t && signal_task_has_unblocked(t)) {
                 if (sigmask && saved_ss) {
-                    t->sigsuspend_old_blocked = saved_blocked;
-                    t->sigsuspend_active = 1;
+                    signal_task_defer_mask_restore(t, saved_blocked);
                 }
                 epoll_put_ref(ep_gfd, ep_vf);
                 return -EINTR;
@@ -421,7 +423,7 @@ static int epoll_do_wait(int epfd, void *events, int maxevents,
     }
 
     if (sigmask && saved_ss)
-        t->sig_blocked = saved_blocked;
+        signal_task_restore_mask(t, saved_blocked);
 
     epoll_put_ref(ep_gfd, ep_vf);
     return total_ready;
