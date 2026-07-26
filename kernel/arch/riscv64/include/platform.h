@@ -6,6 +6,7 @@
 /* Physical memory layout (QEMU virt) */
 #define PHYS_MEMORY_BASE   0x80000000UL
 #define PHYS_MEMORY_END    0xC0000000UL
+#define PHYS_MEMORY_MAX_END 0x280000000UL
 #define KERNEL_ENTRY       0x80200000UL
 #ifdef CONFIG_NOMMU
 #define PAGE_OFFSET        0x0UL
@@ -14,16 +15,9 @@
 #endif
 #define USER_VA_LIMIT      0x4000000000UL
 
-static inline size_t arch_ram_range_count(void) {
-    return 1;
-}
-
-static inline int arch_ram_range(size_t idx, paddr_t *base, paddr_t *end) {
-    if (idx != 0 || !base || !end) return -1;
-    *base = PHYS_MEMORY_BASE;
-    *end = PHYS_MEMORY_END;
-    return 0;
-}
+size_t arch_ram_range_count(void);
+int arch_ram_range(size_t idx, paddr_t *base, paddr_t *end);
+void riscv64_memory_init(void);
 
 /* MMIO base addresses */
 #define UART0_BASE         (0x10000000UL + PAGE_OFFSET)

@@ -11,11 +11,17 @@ typedef struct {
     uint64_t prmd;
     uint64_t kernel_tp;
     uint64_t kernel_sp;
-    uint64_t f[32];
+    /*
+     * LoongArch floating-point registers alias the low 64 bits of the
+     * 128-bit LSX vector registers.  Saving the full vector registers keeps
+     * both scalar FP and LSX state intact across traps and task switches.
+     */
+    uint64_t vr[32][2];
     uint64_t fcsr;
+    uint64_t reserved;
 } __attribute__((aligned(16))) trap_context_t;
 
-_Static_assert(sizeof(trap_context_t) == 70 * 8, "TrapContext must be 560 bytes");
+_Static_assert(sizeof(trap_context_t) == 102 * 8, "TrapContext must be 816 bytes");
 
 typedef struct {
     uint64_t ra;
@@ -59,9 +65,9 @@ typedef struct {
 
 #define ARCH_SIGFRAME_EXTRA_FIELDS arch_sigframe_extra_t arch_extra;
 
-#define TRAP_CONTEXT_SIZE  (70 * 8)
+#define TRAP_CONTEXT_SIZE  (102 * 8)
 #define TASK_CONTEXT_SIZE  (15 * 8)
-#define KTRAP_CONTEXT_SIZE (70 * 8)
+#define KTRAP_CONTEXT_SIZE (102 * 8)
 #define ARCH_SYSCALL_TRACE_MIN_PID 3
 
 extern void __trap_from_user(void);
@@ -177,7 +183,7 @@ static inline void arch_signal_build_frame_extra(arch_sigframe_extra_t *extra,
     extra->fpu_head.size = sizeof(extra->fpu_head) + sizeof(extra->fpu);
     extra->fpu_head.padding = 0;
     for (int i = 0; i < 32; i++)
-        extra->fpu.regs[i] = ctx->f[i];
+        extra->fpu.regs[i] = ctx->vr[i][0];
     extra->fpu.fcc = 0;
     extra->fpu.fcsr = (uint32_t)ctx->fcsr;
     extra->fpu.reserved = 0;
@@ -199,7 +205,7 @@ static inline void arch_signal_restore_frame_extra(trap_context_t *ctx,
         extra->fpu_head.size < sizeof(extra->fpu_head) + sizeof(extra->fpu))
         return;
     for (int i = 0; i < 32; i++)
-        ctx->f[i] = extra->fpu.regs[i];
+        ctx->vr[i][0] = extra->fpu.regs[i];
     ctx->fcsr = extra->fpu.fcsr;
 }
 

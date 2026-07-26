@@ -137,6 +137,36 @@ static int try_mount(block_dev_t *dev, const char *mnt, const char *fstype) {
     return r;
 }
 
+static void mount_final_root_pseudo_filesystems(void) {
+    struct {
+        const char *path;
+        const char *dev;
+        const char *fstype;
+    } mounts[] = {
+        { "/test/dev",     "none",  "devtmpfs" },
+        { "/test/dev/shm", "none",  "tmpfs" },
+        { "/test/proc",    "proc",  "proc" },
+        { "/test/sys",     "sysfs", "sysfs" },
+    };
+
+    /*
+     * These directories already exist in the published Debian images.  The
+     * mkdir calls also make the setup harmless for smaller local ext4 images.
+     */
+    vfs_mkdir("/test/dev", 0755);
+    vfs_mkdir("/test/dev/shm", 01777);
+    vfs_mkdir("/test/proc", 0755);
+    vfs_mkdir("/test/sys", 0755);
+
+    for (size_t i = 0; i < sizeof(mounts) / sizeof(mounts[0]); i++) {
+        int r = vfs_mount(mounts[i].dev, mounts[i].path,
+                          mounts[i].fstype, 0, NULL);
+        if (r < 0)
+            printf("[INIT] WARNING: mount %s at %s failed: %d\n",
+                   mounts[i].fstype, mounts[i].path, r);
+    }
+}
+
 static void mount_block_devices(void) {
     int bin_ok = 0, test_ok = 0;
 
@@ -184,7 +214,11 @@ static void mount_block_devices(void) {
     }
 
     if (!bin_ok)  printf("[INIT] WARNING: no FAT32 device for /bin\n");
-    if (!test_ok) printf("[INIT] no ext4 device for /test (ok without sdcard)\n");
+    if (!test_ok) {
+        printf("[INIT] no ext4 device for /test (ok without sdcard)\n");
+    } else {
+        mount_final_root_pseudo_filesystems();
+    }
 }
 #endif /* BRINGUP */
 
