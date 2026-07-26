@@ -130,36 +130,53 @@ int64_t sys_sigsuspend(void *mask, size_t sigsetsize) {
     if (!t || !t->signals || !mask) return -EINVAL;
     if (sigsetsize != ARCH_SIGSET_SIZE) return -EINVAL;
 
-    signal_state_t *ss = (signal_state_t *)t->signals;
-    uint64_t old_blocked = t->sig_blocked;
     arch_sigset_t user_mask;
     if (copy_from_user(&user_mask, mask, sizeof(user_mask)) < 0) return -EFAULT;
 
     /* Can't block SIGKILL or SIGSTOP */
     uint64_t new_mask = arch_user_sigset_to_kernel(&user_mask);
     new_mask &= ~(signal_mask_bit(SIGKILL) | signal_mask_bit(SIGSTOP));
-    t->sigsuspend_old_blocked = old_blocked;
+
+    /*
+     * SIGNAL_MASK_PARK_PROTOCOL: proc_lock excludes the sender's wake half
+     * while the temporary mask is published and the Park token is prepared.
+     * A sender which queues in the small unlocked-signal-lock interval is
+     * observed by proc_park_prepare_locked() before it can sleep.
+     */
+    signal_state_t *ss = (signal_state_t *)t->signals;
+    proc_wait_token_t token = {0};
+    uint64_t proc_flags = spin_lock_irqsave(&proc_lock);
+    uint64_t signal_flags = spin_lock_irqsave(&ss->lock);
+    t->sigsuspend_old_blocked = t->sig_blocked;
     t->sigsuspend_active = 1;
     t->sig_blocked = new_mask;
+    spin_unlock_irqrestore(&ss->lock, signal_flags);
+    if (!signal_task_has_unblocked(t))
+        token = proc_park_prepare_locked(PROC_WAIT_INTERRUPTIBLE, 0);
+    spin_unlock_irqrestore(&proc_lock, proc_flags);
 
-    uint64_t deliverable = (ss->pending | t->thread_pending) & ~t->sig_blocked;
-    if (!deliverable)
-        (void)proc_park_wait(PROC_WAIT_INTERRUPTIBLE, 0);
+    if (token.task) {
+        (void)proc_park_commit(token);
+        proc_park_finish(token);
+    }
     return -EINTR;
 }
 
 int64_t sys_sigaltstack(void *ss, void *old_ss) {
     task_t *t = proc_current();
-    if (!t) return -EINVAL;
+    if (!t || !t->signals) return -EINVAL;
+    signal_state_t *signal_state = (signal_state_t *)t->signals;
 
     /* Return current alt-stack info if requested */
     if (old_ss) {
         arch_sigaltstack_t cur;
         memset(&cur, 0, sizeof(cur));
+        uint64_t flags = spin_lock_irqsave(&signal_state->lock);
         cur.ss_sp    = t->sigaltstack.ss_sp;
         cur.ss_size  = t->sigaltstack.ss_size;
         cur.ss_flags = t->sigaltstack.ss_flags;
-        if (t->sigaltstack.ss_flags & SS_DISABLE)
+        spin_unlock_irqrestore(&signal_state->lock, flags);
+        if (cur.ss_flags & SS_DISABLE)
             cur.ss_flags = SS_DISABLE;
         else
             cur.ss_flags = 0;
@@ -174,17 +191,22 @@ int64_t sys_sigaltstack(void *ss, void *old_ss) {
             return -EFAULT;
         if (new_ss.ss_flags & ~SS_DISABLE)
             return -EINVAL;
+        uint64_t flags = spin_lock_irqsave(&signal_state->lock);
         if (new_ss.ss_flags & SS_DISABLE) {
             t->sigaltstack.ss_sp    = 0;
             t->sigaltstack.ss_size  = 0;
             t->sigaltstack.ss_flags = SS_DISABLE;
         } else {
             if (new_ss.ss_size < MINSIGSTKSZ)
+            {
+                spin_unlock_irqrestore(&signal_state->lock, flags);
                 return -ENOMEM;
+            }
             t->sigaltstack.ss_sp    = new_ss.ss_sp;
             t->sigaltstack.ss_size  = new_ss.ss_size;
             t->sigaltstack.ss_flags = 0;
         }
+        spin_unlock_irqrestore(&signal_state->lock, flags);
     }
 
     return 0;
@@ -195,50 +217,92 @@ int64_t sys_sigtimedwait(const uint64_t *set, void *info, const void *timeout, s
     if (!t || !t->signals || !set) return -EINVAL;
     if (sigsetsize != ARCH_SIGSET_SIZE) return -EINVAL;
 
-    signal_state_t *ss = (signal_state_t *)t->signals;
     arch_sigset_t user_mask;
     if (copy_from_user(&user_mask, set, sizeof(user_mask)) < 0) return -EFAULT;
     uint64_t mask = arch_user_sigset_to_kernel(&user_mask);
-    uint64_t deliverable = (ss->pending | t->thread_pending) & mask;
-
-    if (!deliverable) {
-        uint64_t until = 0;
-        if (timeout) {
-            uint64_t to[2];
-            if (copy_from_user(to, timeout, sizeof(to)) < 0) return -EFAULT;
-            uint64_t sec = to[0];
-            uint64_t nsec = to[1];
-            if (nsec >= 1000000000ULL) return -EINVAL;
-            if (sec == 0 && nsec == 0)
-                return -EAGAIN;
+    uint64_t until = 0;
+    int poll_only = 0;
+    if (timeout) {
+        uint64_t to[2];
+        if (copy_from_user(to, timeout, sizeof(to)) < 0) return -EFAULT;
+        uint64_t sec = to[0];
+        uint64_t nsec = to[1];
+        if (nsec >= 1000000000ULL) return -EINVAL;
+        if (sec == 0 && nsec == 0)
+            poll_only = 1;
+        else {
             uint64_t ticks = sec * TICKS_PER_SEC +
                              nsec * TICKS_PER_SEC / 1000000000ULL;
             until = timer_get_ticks() + (ticks ? ticks : 1);
         }
-        (void)proc_park_wait(PROC_WAIT_INTERRUPTIBLE, until);
-        deliverable = (ss->pending | t->thread_pending) & mask;
-        if (!deliverable)
-            return -EAGAIN;
     }
 
-    for (int sig = 1; sig < NSIG; sig++) {
-        if (deliverable & (1ULL << sig)) {
-            ss->pending &= ~signal_mask_bit(sig);
-            t->thread_pending &= ~signal_mask_bit(sig);
-            if (info) {
-                uint8_t infobuf[128];
-                memset(infobuf, 0, 128);
+    signal_state_t *ss = (signal_state_t *)t->signals;
+    uint8_t infobuf[SIGNAL_INFO_SIZE];
+    memset(infobuf, 0, sizeof(infobuf));
+
+    for (;;) {
+        proc_wait_token_t token = {0};
+        int selected = 0;
+        uint64_t proc_flags = spin_lock_irqsave(&proc_lock);
+        uint64_t signal_flags = spin_lock_irqsave(&ss->lock);
+        uint64_t matching = (ss->pending | t->thread_pending) & mask;
+        if (matching) {
+            for (int sig = 1; sig < NSIG; sig++) {
+                if (!(matching & signal_mask_bit(sig)))
+                    continue;
+                selected = sig;
+                ss->pending &= ~signal_mask_bit(sig);
+                t->thread_pending &= ~signal_mask_bit(sig);
                 if (ss->pending_has_info[sig])
                     memcpy(infobuf, ss->pending_info[sig], sizeof(infobuf));
                 else
                     *(int *)infobuf = sig;
-                copy_to_user(info, infobuf, 128);
+                ss->pending_has_info[sig] = 0;
+                break;
             }
-            ss->pending_has_info[sig] = 0;
-            return sig;
+        } else if (!poll_only) {
+            t->sigwait_mask = mask;
+            t->sigwait_active = 1;
         }
+        spin_unlock_irqrestore(&ss->lock, signal_flags);
+        if (!selected && !poll_only)
+            token = proc_park_prepare_locked(PROC_WAIT_INTERRUPTIBLE, until);
+        spin_unlock_irqrestore(&proc_lock, proc_flags);
+
+        if (selected) {
+            if (info && copy_to_user(info, infobuf, sizeof(infobuf)) < 0)
+                return -EFAULT;
+            return selected;
+        }
+        if (poll_only)
+            return -EAGAIN;
+        if (!token.task) {
+            signal_flags = spin_lock_irqsave(&ss->lock);
+            t->sigwait_active = 0;
+            t->sigwait_mask = 0;
+            spin_unlock_irqrestore(&ss->lock, signal_flags);
+            return -EAGAIN;
+        }
+
+        proc_wake_reason_t reason = proc_park_commit(token);
+        proc_park_finish(token);
+
+        signal_flags = spin_lock_irqsave(&ss->lock);
+        t->sigwait_active = 0;
+        t->sigwait_mask = 0;
+        int has_matching =
+            ((ss->pending | t->thread_pending) & mask) != 0;
+        spin_unlock_irqrestore(&ss->lock, signal_flags);
+
+        if (reason == PROC_WAKE_TIMEOUT)
+            return -EAGAIN;
+        if (proc_wake_reason_is_task_interrupt(reason) &&
+            !has_matching &&
+            signal_task_has_unblocked(t))
+            return -EINTR;
+        /* A matching queued signal is consumed at the top of the loop. */
     }
-    return -EAGAIN;
 }
 
 int64_t sys_rt_sigpending(void *set, size_t sigsetsize) {
@@ -246,8 +310,7 @@ int64_t sys_rt_sigpending(void *set, size_t sigsetsize) {
     if (sigsetsize != ARCH_SIGSET_SIZE) return -EINVAL;
     task_t *t = proc_current();
     if (!t || !t->signals) return -EINVAL;
-    signal_state_t *ss = (signal_state_t *)t->signals;
-    uint64_t pending = (ss->pending | t->thread_pending) & t->sig_blocked;
+    uint64_t pending = signal_task_pending_blocked(t);
     arch_sigset_t user_pending = arch_user_sigset_from_kernel(pending);
     if (copy_to_user(set, &user_pending, sizeof(user_pending)) < 0) return -EFAULT;
     return 0;

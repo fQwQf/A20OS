@@ -53,7 +53,7 @@ static int timerfd_read(vfile_t *vf, char *buf, size_t count)
         uint64_t deadline = tfd->armed ? tfd->expire_tick : 0;
         spin_unlock(&tfd->lock);
         proc_wait_token_t token =
-            proc_park_prepare(PROC_WAIT_UNINTERRUPTIBLE, deadline);
+            proc_park_prepare(PROC_WAIT_INTERRUPTIBLE, deadline);
         if (!token.task)
             return -EAGAIN;
 
@@ -68,12 +68,17 @@ static int timerfd_read(vfile_t *vf, char *buf, size_t count)
         }
         bool linked = wait_queue_link(&tfd->waiters, &entry, token, 0);
         spin_unlock(&tfd->lock);
+        proc_wake_reason_t reason;
         if (linked)
-            (void)proc_park_commit(token);
-        else
+            reason = proc_park_commit(token);
+        else {
             (void)proc_park_cancel(token);
+            reason = PROC_WAKE_CANCEL;
+        }
         wait_queue_unlink(&tfd->waiters, &entry);
         proc_park_finish(token);
+        if (proc_wake_reason_is_task_interrupt(reason))
+            return -ERESTARTSYS;
         spin_lock(&tfd->lock);
     }
     uint64_t expirations = 1;

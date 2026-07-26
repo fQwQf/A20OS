@@ -3,6 +3,7 @@
 #include "proc/proc.h"
 #include "proc/proc_internal.h"
 #include "proc/lifetime.h"
+#include "proc/signal.h"
 #include "core/cpu.h"
 #include "core/klog.h"
 #include "core/panic.h"
@@ -21,7 +22,12 @@ static int proc_try_wake_locked_common(task_t *task, uint64_t seq,
         task->state == PROC_UNUSED || task->state == PROC_ZOMBIE)
         return 0;
 
+    /* PARK_SIGNAL_MODE_PROTOCOL */
     if (reason == PROC_WAKE_SIGNAL &&
+        task->wait_mode != PROC_WAIT_INTERRUPTIBLE)
+        return 0;
+    if ((reason == PROC_WAKE_FATAL_SIGNAL ||
+         reason == PROC_WAKE_TASK_EXIT) &&
         task->wait_mode == PROC_WAIT_UNINTERRUPTIBLE)
         return 0;
 
@@ -109,6 +115,28 @@ proc_wait_token_t proc_park_prepare_locked(proc_wait_mode_t mode,
         .task = task,
         .seq = task->wait_seq,
     };
+
+    /*
+     * Close the "signal/exit already pending before prepare" side of the
+     * publication race.  A sender which queues after these checks observes
+     * PREPARING/PARKED and wins the same sequence through proc_try_wake().
+     */
+    if (__atomic_load_n(&task->exit_pending, __ATOMIC_ACQUIRE) &&
+        mode != PROC_WAIT_UNINTERRUPTIBLE) {
+        (void)proc_try_wake_locked_common(
+            task, token.seq, PROC_WAKE_TASK_EXIT, NULL);
+    } else if (mode == PROC_WAIT_KILLABLE) {
+        if (signal_task_has_fatal(task))
+            (void)proc_try_wake_locked_common(
+                task, token.seq, PROC_WAKE_FATAL_SIGNAL, NULL);
+    } else if (mode == PROC_WAIT_INTERRUPTIBLE) {
+        if (signal_task_has_fatal(task))
+            (void)proc_try_wake_locked_common(
+                task, token.seq, PROC_WAKE_FATAL_SIGNAL, NULL);
+        else if (signal_task_has_unblocked(task))
+            (void)proc_try_wake_locked_common(
+                task, token.seq, PROC_WAKE_SIGNAL, NULL);
+    }
     return token;
 }
 

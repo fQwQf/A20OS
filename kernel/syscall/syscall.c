@@ -123,25 +123,7 @@ int64_t syscall_dispatch(trap_context_t *ctx)
     int restart_syscall = 0;
     if (ret == -ERESTARTSYS) {
         task_t *cur = proc_current();
-        int restart = 0;
-        if (cur && cur->signals) {
-            signal_state_t *ss = (signal_state_t *)cur->signals;
-            uint64_t deliverable = (ss->pending | cur->thread_pending) &
-                                   ~cur->sig_blocked;
-            if (deliverable) {
-                restart = 1;
-                for (int sig = 1; sig < NSIG && restart; sig++) {
-                    if (!(deliverable & signal_mask_bit(sig)))
-                        continue;
-                    sigaction_t *sa = &ss->actions[sig];
-                    if (sa->sa_handler == SIG_IGN ||
-                        sa->sa_handler == SIG_DFL)
-                        continue;
-                    if (!(sa->sa_flags & SA_RESTART))
-                        restart = 0;
-                }
-            }
-        }
+        int restart = signal_task_should_restart(cur);
         if (restart) {
             TRAP_CTX_EPC(ctx) -= 4;
             restart_syscall = 1;
@@ -165,14 +147,7 @@ int64_t syscall_dispatch(trap_context_t *ctx)
         proc_yield();
     proc_check_exit_pending();
     if (args.nr == SYS_sigsuspend)
-    {
-        task_t *cur = proc_current();
-        if (cur && cur->signals && cur->sigsuspend_active && !cur->sig_handling)
-        {
-            cur->sig_blocked = cur->sigsuspend_old_blocked;
-            cur->sigsuspend_active = 0;
-        }
-    }
+        signal_task_restore_sigsuspend(proc_current());
     return ret;
 #endif
     return -ENOSYS;

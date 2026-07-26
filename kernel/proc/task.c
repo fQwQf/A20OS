@@ -102,6 +102,8 @@ void proc_task_init_common(task_t *t, task_t *parent)
     t->waiting_for_child = 0;
     t->exit_pending = 0;
     t->pending_exit_code = 0;
+    t->stop_report_pending = 0;
+    t->continue_report_pending = 0;
     t->wake_time = 0;
     t->wait_seq = 0;
     t->wait_deadline = 0;
@@ -149,8 +151,16 @@ void proc_task_init_common(task_t *t, task_t *parent)
     t->sigaltstack.ss_size = 0;
     t->sig_handling = 0;
     t->sigsuspend_active = 0;
+    t->sigwait_active = 0;
+    t->sigwait_mask = 0;
     t->sig_saved_ctx = (trap_context_t){0};
-    t->sig_blocked = parent ? parent->sig_blocked : 0;
+    t->sig_blocked = 0;
+    if (parent && parent->signals) {
+        signal_state_t *parent_ss = (signal_state_t *)parent->signals;
+        uint64_t signal_flags = spin_lock_irqsave(&parent_ss->lock);
+        t->sig_blocked = parent->sig_blocked;
+        spin_unlock_irqrestore(&parent_ss->lock, signal_flags);
+    }
     t->sig_old_blocked = 0;
     t->thread_pending = 0;
     ARCH_TASK_INIT(t);

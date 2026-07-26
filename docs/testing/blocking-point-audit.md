@@ -5,9 +5,9 @@
 This is the acceptance record for `PROC.md` step 4.  A blocking operation is
 closed only when its persistent condition, condition lock, Park token,
 asynchronous task reference, one-shot wake winner, and resume cleanup are all
-identifiable.  Signal/stop/exit policy and timeout-heap capacity remain the
-separately scoped work of steps 5 and 6; their compatibility paths are listed
-below instead of being silently treated as complete.
+identifiable.  Signal/stop/exit policy is closed by
+`docs/testing/signal-exit-audit.md`; timeout-heap capacity remains the
+separately scoped work of step 6.
 
 ## Audited blocking families
 
@@ -45,10 +45,9 @@ The following paths are intentionally visible to the static gate:
    and cgroup unthrottle.  Its Park branch delegates to
    `proc_try_wake_locked(task, wait_seq, EVENT)`, so it cannot bypass a live
    token.
-4. The three signal fallback call sites and the STOPPED fallback in
-   `proc_force_exit()` are step-5 debt.  They are not new blocking APIs:
-   a Parked task first goes through sequence-checked SIGNAL/EXIT wake; only the
-   legacy non-Park STOPPED path reaches generic READY publication.
+4. Signal, stop, and exit paths no longer appear in this whitelist.  They use
+   mode-checked Park wake reasons or the explicit STOPPED resumption helper,
+   as recorded in `docs/testing/signal-exit-audit.md`.
 5. Linux `poll`, `select`, and `epoll` currently use bounded periodic
    `proc_park_wait()` deadlines and rescan persistent readiness after every
    quantum.  They store no asynchronous task pointer and cannot lose

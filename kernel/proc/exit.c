@@ -20,11 +20,7 @@
 
 static int proc_ignores_sigchld(task_t *parent)
 {
-    if (!parent || !parent->signals)
-        return 0;
-    signal_state_t *ss = (signal_state_t *)parent->signals;
-    return ss->actions[SIGCHLD].sa_handler == SIG_IGN ||
-	       (ss->actions[SIGCHLD].sa_flags & SA_NOCLDWAIT);
+    return signal_task_sigchld_auto_reap(parent);
 }
 
 static int proc_task_tgid(task_t *t)
@@ -105,7 +101,7 @@ static int proc_child_auto_reaps(task_t *child, task_t *parent)
     return proc_ignores_sigchld(parent);
 }
 
-static void proc_wake_child_waiters_locked(task_t *parent)
+void proc_wake_child_waiters_locked(task_t *parent)
 {
     if (!parent)
         return;
@@ -371,30 +367,35 @@ void proc_exit(int exit_code)
 
 void proc_force_exit(task_t *t, int exit_code)
 {
-    if (!t || t->state == PROC_UNUSED || t->state == PROC_ZOMBIE)
+    if (!t)
         return;
     if (t == proc_current())
         proc_exit(exit_code);
 
+    int resume_stopped = 0;
     uint64_t flags = spin_lock_irqsave(&proc_lock);
     if (t->state != PROC_UNUSED && t->state != PROC_ZOMBIE) {
         t->pending_exit_code = exit_code;
         __atomic_store_n(&t->exit_pending, 1, __ATOMIC_RELEASE);
-        if (t->state == PROC_BLOCKED || t->state == PROC_STOPPED) {
+        if (t->state == PROC_BLOCKED) {
             t->waiting_for_child = 0;
             /*
-             * Preserve the park token boundary when force-exit races a
-             * blocking operation.  The STOPPED fallback has no park token.
+             * REMOTE_EXIT_SAFE_BOUNDARY: a cancelable Park consumes the task
+             * exit reason through its current sequence.  If an event already
+             * won, exit_pending remains persistent and is consumed at the
+             * next syscall/trap boundary.  Uninterruptible waits are left
+             * blocked until their resource event; there is no READY fallback.
              */
-            if (!proc_try_wake_locked(t, t->wait_seq, PROC_WAKE_EXIT)) {
-                proc_wait_timer_cancel_locked(t, t->wait_seq);
-                t->wake_time = 0;
-                t->state = PROC_READY;
-                proc_runq_enqueue_locked(t);
-            }
+            (void)proc_try_wake_locked(
+                t, t->wait_seq, PROC_WAKE_TASK_EXIT);
+        } else if (t->state == PROC_STOPPED) {
+            resume_stopped = 1;
         }
     }
     spin_unlock_irqrestore(&proc_lock, flags);
+
+    if (resume_stopped)
+        (void)proc_sched_resume_stopped(t, 0);
 }
 
 void proc_exit_group(int exit_code)

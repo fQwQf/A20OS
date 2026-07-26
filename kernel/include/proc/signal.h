@@ -3,6 +3,7 @@
 
 #include "core/types.h"
 #include "core/consts.h"
+#include "core/lock.h"
 #include "core/refcount.h"
 #include "core/trap.h"
 #include <signal_abi.h>
@@ -42,6 +43,13 @@ typedef struct sigaction {
 /* Per-process signal state */
 typedef struct signal_state {
     refcount_t refcount;
+    /*
+     * SIGNAL_STATE_LOCK_CONTRACT: protects shared actions/process pending
+     * state and the per-task mask/thread-pending/sigwait fields of every task
+     * referencing this object.  When proc_lock is also needed the order is
+     * proc_lock -> signal_state.lock.
+     */
+    spinlock_t lock;
     sigaction_t actions[NSIG];
     uint64_t    pending;     /* bitmask of pending signals */
     uint8_t     pending_has_info[NSIG];
@@ -80,6 +88,19 @@ int  signal_send_info(int pid, int signum, const void *info, size_t info_size);
 int  signal_send_thread(int tid, int signum);
 int  signal_send_thread_user(int tid, int signum);
 int  signal_task_has_unblocked(void *task);
+int  signal_task_has_fatal(void *task);
+int  signal_task_should_restart(void *task);
+int  signal_task_user_handler_available(void *task, int signum);
+int  signal_task_sigchld_auto_reap(void *task);
+int  signal_task_sigchld_no_cldstop(void *task);
+int  signal_task_continue_pending(void *task);
+int  signal_task_set_temporary_mask(void *task, uint64_t new_mask,
+                                    uint64_t *old_mask);
+void signal_task_restore_mask(void *task, uint64_t old_mask);
+void signal_task_defer_mask_restore(void *task, uint64_t old_mask);
+void signal_task_restore_sigsuspend(void *task);
+void signal_exec_reset(void *task);
+uint64_t signal_task_pending_blocked(void *task);
 
 void signal_deliver(void);
 void signal_deliver_user(trap_context_t *ctx);

@@ -634,6 +634,8 @@ int64_t sys_waitid(int type, int id, void *info, int options, void *rusage) {
     int status = 0;
     int wait_opts = (options & WNOHANG);
     if (options & WSTOPPED) wait_opts |= 2;
+    if (options & WCONTINUED) wait_opts |= WCONTINUED;
+    if (options & WNOWAIT) wait_opts |= WNOWAIT;
     int ret = proc_wait4(pid, &status, wait_opts);
     if (ret < 0) return ret;
 

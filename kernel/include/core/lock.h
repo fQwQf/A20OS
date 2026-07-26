@@ -16,6 +16,7 @@
  * Global order:
  *   cg_node.lock -> proc_lock -> runq_lock -> pfa.lock
  *   proc_lock -> runq_lock
+ *   proc_lock -> signal_state.lock
  *   proc_lock -> files_struct.lock -> VFS global-file/vnode locks
  *   proc_lock -> mm_struct.lock
  *   proc_lock -> a20_handle_table.lock

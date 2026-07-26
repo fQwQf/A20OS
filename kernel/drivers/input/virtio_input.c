@@ -272,7 +272,7 @@ static int input_read(vfile_t *vf, char *buf, size_t count) {
         }
         wait_queue_unlink(&g_input_waiters, &entry);
         proc_park_finish(token);
-        if (reason == PROC_WAKE_SIGNAL)
+        if (proc_wake_reason_is_task_interrupt(reason))
             return -ERESTARTSYS;
     }
 }
