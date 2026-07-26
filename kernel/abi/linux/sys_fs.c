@@ -45,11 +45,7 @@ static void linux_poll_sleep_until(uint64_t deadline, int has_deadline,
         return;
     }
 
-    proc_block_until(t, wake);
-    sched();
-    if (t->state == PROC_BLOCKED)
-        t->state = PROC_RUNNING;
-    proc_set_wake_time(t, 0);
+    (void)proc_park_wait(PROC_WAIT_INTERRUPTIBLE, wake);
 }
 
 static int linux_poll_apply_sigmask(task_t *t, void *sigmask,

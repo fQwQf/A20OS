@@ -26,29 +26,31 @@ static int wait_is_direct_child(task_t *child, task_t *parent)
     return child && parent && (child->parent == parent || child->ppid == parent->pid);
 }
 
-static int wait_is_child_for_waiter_locked(task_t *child, task_t *waiter, int options)
+static int wait_is_child_for_waiter_locked(task_t *child,
+                                           task_t *waiting_task,
+                                           int options)
 {
     if (options & __WNOTHREAD)
-        return wait_is_direct_child(child, waiter);
+        return wait_is_direct_child(child, waiting_task);
 
-    if (wait_is_direct_child(child, waiter))
+    if (wait_is_direct_child(child, waiting_task))
         return 1;
 
-    int waiter_tgid = wait_task_tgid(waiter);
+    int waiter_tgid = wait_task_tgid(waiting_task);
     if (wait_task_tgid(child->parent) == waiter_tgid)
         return 1;
 
     return 0;
 }
 
-static int wait_child_matches_locked(task_t *child, task_t *waiter,
+static int wait_child_matches_locked(task_t *child, task_t *waiting_task,
                                      int pid, int options)
 {
-    if (!wait_is_child_for_waiter_locked(child, waiter, options))
+    if (!wait_is_child_for_waiter_locked(child, waiting_task, options))
         return 0;
     if (pid > 0 && child->pid != pid)
         return 0;
-    if (pid == 0 && child->pgid != waiter->pgid)
+    if (pid == 0 && child->pgid != waiting_task->pgid)
         return 0;
     if (pid < -1 && child->pgid != (-pid))
         return 0;
@@ -84,8 +86,7 @@ int proc_wait4(int pid, int *status, int options)
                 }
                 int child_pid = child->pid;
                 wait_accumulate_child_time(t, child);
-                child->state = PROC_UNUSED;
-                proc_unlink_task_locked(child);
+                proc_reap_detach_locked(child);
                 spin_unlock_irqrestore(&proc_lock, lock_flags);
                 proc_destroy_task(child);
                 return child_pid;
@@ -117,24 +118,21 @@ int proc_wait4(int pid, int *status, int options)
         }
 
         t->waiting_for_child = 1;
-        t->state = PROC_BLOCKED;
+        proc_wait_token_t token =
+            proc_park_prepare_locked(PROC_WAIT_INTERRUPTIBLE, 0);
         int sig = signal_task_has_unblocked(t);
+        if (sig)
+            (void)proc_try_wake_locked(t, token.seq, PROC_WAKE_SIGNAL);
         spin_unlock_irqrestore(&proc_lock, lock_flags);
 
-        if (sig) {
-            uint64_t pf2 = spin_lock_irqsave(&proc_lock);
-            t->waiting_for_child = 0;
-            t->state = PROC_RUNNING;
-            spin_unlock_irqrestore(&proc_lock, pf2);
-            return -ERESTARTSYS;
-        }
+        proc_wake_reason_t reason = proc_park_commit(token);
+        proc_park_finish(token);
 
-        if (t->state == PROC_BLOCKED)
-            sched();
         uint64_t pf2 = spin_lock_irqsave(&proc_lock);
         t->waiting_for_child = 0;
-        t->state = PROC_RUNNING;
         spin_unlock_irqrestore(&proc_lock, pf2);
+        if (reason == PROC_WAKE_SIGNAL || sig)
+            return -ERESTARTSYS;
     }
 }
 

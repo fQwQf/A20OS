@@ -465,22 +465,21 @@ static void net_inet_bottom_half_process_socket_locked(net_socket_t *s)
         s->tcp_err = err;
         if (err == ERR_OK)
             s->connected = 1;
-        if (s->waiter && s->waiter->state == PROC_BLOCKED)
-            proc_make_ready(s->waiter);
+        wait_queue_wake_all(&s->read_waitq, 0, PROC_WAKE_EVENT);
     }
 
     if (__atomic_exchange_n(&s->bh_error, 0, __ATOMIC_ACQUIRE)) {
         s->tcp_connecting = 0;
         s->tcp_err = __atomic_load_n(&s->bh_err_code, __ATOMIC_RELAXED);
         s->closed = 1;
-        if (s->waiter && s->waiter->state == PROC_BLOCKED)
-            proc_make_ready(s->waiter);
+        wait_queue_wake_all(&s->read_waitq, 0, PROC_WAKE_EVENT);
+        wait_queue_wake_all(&s->write_waitq, 0, PROC_WAKE_EVENT);
     }
 
     if (__atomic_exchange_n(&s->bh_closed, 0, __ATOMIC_ACQUIRE)) {
         s->closed = 1;
-        if (s->waiter && s->waiter->state == PROC_BLOCKED)
-            proc_make_ready(s->waiter);
+        wait_queue_wake_all(&s->read_waitq, 0, PROC_WAKE_EVENT);
+        wait_queue_wake_all(&s->write_waitq, 0, PROC_WAKE_EVENT);
     }
 
     for (;;) {
@@ -496,8 +495,7 @@ static void net_inet_bottom_half_process_socket_locked(net_socket_t *s)
     }
 
     if (__atomic_exchange_n(&s->bh_tx_wake, 0, __ATOMIC_ACQUIRE)) {
-        if (s->send_waiter && s->send_waiter->state == PROC_BLOCKED)
-            proc_make_ready(s->send_waiter);
+        wait_queue_wake_all(&s->write_waitq, 0, PROC_WAKE_EVENT);
     }
 }
 
@@ -674,42 +672,12 @@ static int net_inet_connect_stream(net_socket_t *s, const void *addr, size_t add
     net_socket_t *child = net_socket_alloc();
     if (!child)
         return -ENOMEM;
-    memset(child, 0, sizeof(*child));
-
     uint16_t connect_port = 0;
     net_sockaddr_port(connect_addr, peer_len, &connect_port);
     int local_target = net_sockaddr_is_local_target(connect_addr, peer_len);
-    int wait_error = 0;
     uint64_t irq = spin_lock_irqsave(&g_net_lock);
-    net_socket_t *listener = NULL;
-    uint64_t wait_deadline = timer_get_ticks() + MS_TO_TICKS(1000);
-    for (;;) {
-        listener = net_find_stream_listener_locked(s, connect_port);
-        if (listener || !local_target || s->nonblock ||
-            (int64_t)(timer_get_ticks() - wait_deadline) >= 0)
-            break;
-        task_t *cur = proc_current();
-        if (!cur)
-            break;
-        if (net_task_has_unblocked_signal(cur)) {
-            wait_error = -EINTR;
-            break;
-        }
-        net_block_on_socket_locked(s, cur);
-        spin_unlock_irqrestore(&g_net_lock, irq);
-        sched();
-        net_clear_socket_waiter(s, cur);
-        irq = spin_lock_irqsave(&g_net_lock);
-        if (net_task_has_unblocked_signal(cur)) {
-            wait_error = -EINTR;
-            break;
-        }
-    }
-    if (wait_error) {
-        spin_unlock_irqrestore(&g_net_lock, irq);
-        net_socket_free(child);
-        return wait_error;
-    }
+    net_socket_t *listener =
+        local_target ? net_find_stream_listener_locked(s, connect_port) : NULL;
     if (listener && listener->listening && listener->accept_count < NET_MAX_QUEUE) {
         child->domain = listener->domain;
         child->type = SOCK_STREAM;
@@ -782,30 +750,39 @@ static int net_inet_connect_stream(net_socket_t *s, const void *addr, size_t add
 
     uint64_t timeout = s->send_timeout_ticks ? s->send_timeout_ticks : NET_CONNECT_TIMEOUT_TICKS;
     uint64_t deadline = timer_get_ticks() + timeout;
-    while (s->tcp_connecting) {
-        if ((int64_t)(timer_get_ticks() - deadline) >= 0) {
-            net_tcp_drop_pcb(s);
-            s->tcp_connecting = 0;
-            s->closed = 1;
-            return -ETIMEDOUT;
-        }
+    for (;;) {
         task_t *cur = proc_current();
         if (!cur) {
             a20_lwip_poll();
             continue;
         }
+        uint64_t wait_irq = spin_lock_irqsave(&g_net_lock);
+        if (!s->tcp_connecting) {
+            spin_unlock_irqrestore(&g_net_lock, wait_irq);
+            break;
+        }
         if (net_task_has_unblocked_signal(cur)) {
+            spin_unlock_irqrestore(&g_net_lock, wait_irq);
             net_tcp_drop_pcb(s);
             s->tcp_connecting = 0;
             s->connected = 0;
             return -ERESTARTSYS;
         }
-        uint64_t wait_irq = spin_lock_irqsave(&g_net_lock);
-        net_block_on_socket_locked(s, cur);
+        wait_queue_entry_t entry = {0};
+        wait_queue_prepare(&s->read_waitq, &entry,
+                           PROC_WAIT_INTERRUPTIBLE, deadline, 0);
         spin_unlock_irqrestore(&g_net_lock, wait_irq);
-        sched();
-        net_clear_socket_waiter(s, cur);
-        if (net_task_has_unblocked_signal(cur)) {
+        proc_wake_reason_t reason =
+            wait_queue_commit(&s->read_waitq, &entry);
+        wait_queue_finish(&s->read_waitq, &entry);
+        if (reason == PROC_WAKE_TIMEOUT) {
+            net_tcp_drop_pcb(s);
+            s->tcp_connecting = 0;
+            s->closed = 1;
+            return -ETIMEDOUT;
+        }
+        if (reason == PROC_WAKE_SIGNAL ||
+            net_task_has_unblocked_signal(cur)) {
             net_tcp_drop_pcb(s);
             s->tcp_connecting = 0;
             s->connected = 0;
@@ -1022,10 +999,24 @@ static int net_inet_send_tcp(net_socket_t *s, const void *buf, size_t len)
             if (net_socket_wait_expired(s, start, 1))
                 return -EAGAIN;
             uint64_t irq = spin_lock_irqsave(&g_net_lock);
-            net_block_on_socket_locked(s, cur);
+            uint64_t deadline = s->send_timeout_ticks ?
+                                start + s->send_timeout_ticks : 0;
+            wait_queue_entry_t entry = {0};
+            wait_queue_prepare(&s->write_waitq, &entry,
+                               PROC_WAIT_INTERRUPTIBLE, deadline, 0);
             spin_unlock_irqrestore(&g_net_lock, irq);
-            sched();
-            net_clear_socket_waiter(s, cur);
+            uint64_t room_flags = a20_lwip_lock();
+            int room_now = s->tcp && tcp_sndbuf(s->tcp) > 0;
+            a20_lwip_unlock(room_flags);
+            if (room_now)
+                (void)proc_try_wake(cur, entry.wait_seq, PROC_WAKE_EVENT);
+            proc_wake_reason_t reason =
+                wait_queue_commit(&s->write_waitq, &entry);
+            wait_queue_finish(&s->write_waitq, &entry);
+            if (reason == PROC_WAKE_SIGNAL)
+                return -ERESTARTSYS;
+            if (reason == PROC_WAKE_TIMEOUT)
+                return -EAGAIN;
             continue;
         }
         size_t n = len - sent;

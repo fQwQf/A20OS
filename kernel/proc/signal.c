@@ -7,6 +7,7 @@
 
 #include "proc/signal.h"
 #include "proc/proc.h"
+#include "proc/proc_internal.h"
 #include "mm/mm.h"
 #include "mm/vm.h"
 #include "core/string.h"
@@ -175,7 +176,8 @@ int signal_send_info(int pid, int signum, const void *info, size_t info_size) {
         *(int *)ss->pending_info[signum] = signum;
     }
     ss->pending |= signal_mask_bit(signum);
-    if (t->state == PROC_BLOCKED || t->state == PROC_STOPPED) {
+    if (!proc_interrupt_wait(t, PROC_WAKE_SIGNAL) &&
+        (t->state == PROC_BLOCKED || t->state == PROC_STOPPED)) {
         proc_make_ready(t);
     }
 
@@ -214,7 +216,8 @@ int signal_send_thread(int tid, int signum) {
     }
 
     t->thread_pending |= signal_mask_bit(signum);
-    if (t->state == PROC_BLOCKED || t->state == PROC_STOPPED) {
+    if (!proc_interrupt_wait(t, PROC_WAKE_SIGNAL) &&
+        (t->state == PROC_BLOCKED || t->state == PROC_STOPPED)) {
         proc_make_ready(t);
     }
     return 0;
@@ -249,7 +252,8 @@ int signal_send_thread_user(int tid, int signum) {
     ss->pending_has_info[signum] = 1;
 
     t->thread_pending |= signal_mask_bit(signum);
-    if (t->state == PROC_BLOCKED || t->state == PROC_STOPPED) {
+    if (!proc_interrupt_wait(t, PROC_WAKE_SIGNAL) &&
+        (t->state == PROC_BLOCKED || t->state == PROC_STOPPED)) {
         proc_make_ready(t);
     }
     return 0;
@@ -316,9 +320,7 @@ void signal_deliver(void) {
             if (signal_default_ignore(sig))
                 continue;
             if (signal_default_stop(sig)) {
-                t->state = PROC_STOPPED;
-                t->exit_code = sig;
-                sched();
+                proc_sched_stop_current(sig);
                 continue;
             }
             proc_exit_group(-signal_wait_status(sig));
@@ -386,10 +388,7 @@ void signal_deliver_user(trap_context_t *ctx) {
                 t->sig_blocked = t->sigsuspend_active ?
                               t->sigsuspend_old_blocked : t->sig_blocked;
                 t->sigsuspend_active = 0;
-                t->state = PROC_STOPPED;
-                t->exit_code = sig;
-                sched();
-                t->state = PROC_RUNNING;
+                proc_sched_stop_current(sig);
                 continue;
             }
             proc_exit_group(-signal_wait_status(sig));

@@ -5,6 +5,7 @@
 #include "fs/vfs.h"
 #include "proc/proc.h"
 #include "core/lock.h"
+#include "core/sync.h"
 #include "core/timer.h"
 #include "lwip/ip_addr.h"
 
@@ -16,7 +17,6 @@ struct tcp_pcb;
 #define NET_MAX_STREAM_PAYLOAD 2048
 #define NET_MAX_PAYLOAD 65535
 #define NET_MAX_QUEUE   128
-#define NET_WAIT_TICKS  (MS_TO_TICKS(5) ? MS_TO_TICKS(5) : 1)
 #define NET_CONNECT_TIMEOUT_TICKS MS_TO_TICKS(10000)
 #define NET_BH_RING_SIZE 16
 
@@ -102,8 +102,9 @@ typedef struct net_socket {
     net_msg_t *rx_head;
     net_msg_t *rx_tail;
     int rx_count;
-    task_t *waiter;
-    task_t *send_waiter;
+    wait_queue_t accept_waitq;
+    wait_queue_t read_waitq;
+    wait_queue_t write_waitq;
     struct udp_pcb *udp;
     struct raw_pcb *raw;
     struct tcp_pcb *tcp;
@@ -207,8 +208,6 @@ void          net_msg_free(net_msg_t *m);
 net_socket_t *net_socket_alloc(void);
 void          net_socket_free(net_socket_t *s);
 
-void     net_block_on_socket_locked(net_socket_t *s, task_t *cur);
-void     net_clear_socket_waiter(net_socket_t *s, task_t *cur);
 int      net_task_has_unblocked_signal(task_t *t);
 int      net_socket_wait_expired(net_socket_t *s, uint64_t start, int for_write);
 

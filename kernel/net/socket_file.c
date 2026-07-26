@@ -54,10 +54,19 @@ static int net_vfile_read(vfile_t *vf, char *buf, size_t count) {
             spin_unlock_irqrestore(&g_net_lock, irq);
             return -EAGAIN;
         }
-        net_block_on_socket_locked(s, cur);
+        uint64_t deadline = s->recv_timeout_ticks ?
+                            start + s->recv_timeout_ticks : 0;
+        wait_queue_entry_t entry = {0};
+        wait_queue_prepare(&s->read_waitq, &entry,
+                           PROC_WAIT_INTERRUPTIBLE, deadline, 0);
         spin_unlock_irqrestore(&g_net_lock, irq);
-        sched();
-        net_clear_socket_waiter(s, cur);
+        proc_wake_reason_t reason =
+            wait_queue_commit(&s->read_waitq, &entry);
+        wait_queue_finish(&s->read_waitq, &entry);
+        if (reason == PROC_WAKE_SIGNAL)
+            return -ERESTARTSYS;
+        if (reason == PROC_WAKE_TIMEOUT)
+            return -EAGAIN;
     }
 }
 
@@ -136,19 +145,16 @@ int net_socket_close_file(vfile_t *vf) {
     ktrace_net("[NET] close: pcb dropped, unregistering\n");
     uint64_t flags = spin_lock_irqsave(&g_net_lock);
     net_unregister_socket_locked(s);
-    if (s->send_waiter && s->send_waiter->state == PROC_BLOCKED)
-        proc_make_ready(s->send_waiter);
+    wait_queue_wake_all(&s->accept_waitq, 0, PROC_WAKE_EXIT);
+    wait_queue_wake_all(&s->read_waitq, 0, PROC_WAKE_EXIT);
+    wait_queue_wake_all(&s->write_waitq, 0, PROC_WAKE_EXIT);
     if (s->peer && (s->type == SOCK_STREAM || s->type == SOCK_SEQPACKET || net_socket_is_valid_locked(s->peer)) && s->peer->peer == s) {
         s->peer->peer = NULL;
         s->peer->peer_closed = 1;
-        if (s->peer->waiter && s->peer->waiter->state == PROC_BLOCKED)
-            proc_make_ready(s->peer->waiter);
-        if (s->peer->send_waiter && s->peer->send_waiter->state == PROC_BLOCKED)
-            proc_make_ready(s->peer->send_waiter);
+        wait_queue_wake_all(&s->peer->read_waitq, 0, PROC_WAKE_EVENT);
+        wait_queue_wake_all(&s->peer->write_waitq, 0, PROC_WAKE_EVENT);
     }
     s->closed = 1;
-    if (s->waiter && s->waiter->state == PROC_BLOCKED)
-        proc_make_ready(s->waiter);
     net_msg_t *m = s->rx_head;
 #if CONFIG_DEBUG_NET_TRACE
     int rx_count = s->rx_count;
@@ -175,11 +181,13 @@ int net_socket_close_file(vfile_t *vf) {
         if (accepted->peer && accepted->peer->peer == accepted) {
             accepted->peer->peer = NULL;
             accepted->peer->peer_closed = 1;
-            if (accepted->peer->waiter && accepted->peer->waiter->state == PROC_BLOCKED)
-                proc_make_ready(accepted->peer->waiter);
-            if (accepted->peer->send_waiter && accepted->peer->send_waiter->state == PROC_BLOCKED)
-                proc_make_ready(accepted->peer->send_waiter);
+            wait_queue_wake_all(&accepted->peer->read_waitq, 0,
+                                PROC_WAKE_EVENT);
+            wait_queue_wake_all(&accepted->peer->write_waitq, 0,
+                                PROC_WAKE_EVENT);
         }
+        wait_queue_wake_all(&accepted->read_waitq, 0, PROC_WAKE_EXIT);
+        wait_queue_wake_all(&accepted->write_waitq, 0, PROC_WAKE_EXIT);
         spin_unlock_irqrestore(&g_net_lock, accepted_flags);
         net_inet_socket_destroy(accepted);
         uint64_t unregister_flags = spin_lock_irqsave(&g_net_lock);
