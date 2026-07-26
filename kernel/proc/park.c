@@ -4,6 +4,7 @@
 #include "proc/proc_internal.h"
 #include "core/cpu.h"
 #include "core/klog.h"
+#include "core/panic.h"
 
 static proc_wait_token_t proc_wait_token_none(void)
 {
@@ -34,7 +35,9 @@ static int proc_try_wake_locked_common(task_t *task, uint64_t seq,
         return 1;
 
     case PROC_PARK_PARKED: {
-        unsigned target_cpu = task->cpu_id;
+        unsigned target_cpu =
+            (task->on_cpu || task->dispatching)
+                ? task->owner_cpu : task->cpu_id;
         proc_wait_timer_cancel_locked(task, seq);
         task->park_state = PROC_PARK_WOKEN;
         task->wake_reason = reason;
@@ -43,8 +46,14 @@ static int proc_try_wake_locked_common(task_t *task, uint64_t seq,
         task->state = PROC_READY;
         if (task->sched_level > 0)
             task->sched_level--;
+        /*
+         * An on_cpu task is still executing the commit/sched boundary; a
+         * dispatching task has already been selected. The runqueue helper
+         * publishes only an unowned READY task. Switch completion handles a
+         * READY task whose wake raced its final on_cpu interval.
+         */
         proc_runq_enqueue_locked(task);
-        if (target_cpu != cpu_current_id()) {
+        if (task->on_rq && target_cpu != cpu_current_id()) {
             if (remote_cpus && target_cpu < 64)
                 *remote_cpus |= 1ULL << target_cpu;
             else
@@ -191,9 +200,10 @@ proc_wake_reason_t proc_park_commit(proc_wait_token_t token)
     spin_unlock_irqrestore(&proc_lock, flags);
 
     /*
-     * sched() is mandatory even if a wake races immediately after the unlock:
-     * that wake has published READY + on_rq, and the scheduler must consume
-     * the runqueue entry before this task continues.
+     * sched() is mandatory even if a wake races immediately after the unlock.
+     * While this task remains on_cpu the wake publishes READY but cannot queue
+     * it. sched() either restores the current task to RUNNING or switches away;
+     * switch completion then publishes the raced READY task exactly once.
      */
     sched();
 
