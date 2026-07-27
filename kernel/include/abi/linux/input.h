@@ -71,7 +71,7 @@ struct input_absinfo {
 #define A20_IOC_TYPE(req) (((req) >> A20_IOC_TYPESHIFT) & ((1U << A20_IOC_TYPEBITS) - 1))
 #define A20_IOC_SIZE(req) (((req) >> A20_IOC_SIZESHIFT) & ((1U << A20_IOC_SIZEBITS) - 1))
 
-#define EVIOCGVERSION A20_IOR('E', 0x00, 4)  /* int: EV_VERSION */
+#define EVIOCGVERSION A20_IOR('E', 0x01, 4)  /* int: EV_VERSION */
 #define EVIOCGID      A20_IOR('E', 0x02, 8)  /* struct input_id */
 #define EVIOCGRAB     A20_IOW('E', 0x90, 4)
 #define EVIOCREVOKE   A20_IOW('E', 0x91, 4)
