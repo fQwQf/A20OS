@@ -1,0 +1,13 @@
+diff --git a/user/external/breeze b/user/external/breeze
+--- a/user/external/breeze
++++ b/user/external/breeze
+@@ -1 +1 @@
+-Subproject commit f122227ffb8e25afbc74f8252d478a14aec28e4b
++Subproject commit f122227ffb8e25afbc74f8252d478a14aec28e4b-dirty
+diff --git a/user/external/weston b/user/external/weston
+index 015b3b4..04d3ae2 160000
+--- a/user/external/weston
++++ b/user/external/weston
+@@ -1 +1 @@
+-Subproject commit 015b3b4d4c05da44a22349ea6e651d1a8f678c59
++Subproject commit 04d3ae265d8d8f84352c8dac21ec40b2fe07e7d2-dirty
