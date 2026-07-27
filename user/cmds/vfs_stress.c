@@ -500,6 +500,36 @@ static int chroot_boundary(void)
             _exit(3);
         }
         close(fd);
+
+        int rootfd = syscall(SYS_openat, AT_FDCWD, "/", O_RDONLY | O_DIRECTORY);
+        if (rootfd < 0)
+            _exit(4);
+        if (mkdirat(rootfd, "subdir", 0755) < 0)
+            _exit(5);
+        int subfd = syscall(SYS_openat, rootfd, "subdir",
+                            O_RDONLY | O_DIRECTORY);
+        if (subfd < 0)
+            _exit(6);
+        fd = syscall(SYS_openat, subfd, "before.txt",
+                     O_CREAT | O_TRUNC | O_RDWR, 0644);
+        if (fd < 0)
+            _exit(7);
+        if (write(fd, "dirfd", 5) != 5)
+            _exit(8);
+        close(fd);
+
+        struct stat st;
+        if (fstatat(subfd, "before.txt", &st, 0) < 0 || st.st_size != 5)
+            _exit(9);
+        if (syscall(SYS_renameat2, subfd, "before.txt",
+                    subfd, "after.txt", 0) < 0)
+            _exit(10);
+        if (unlinkat(subfd, "after.txt", 0) < 0)
+            _exit(11);
+        close(subfd);
+        if (unlinkat(rootfd, "subdir", AT_REMOVEDIR) < 0)
+            _exit(12);
+        close(rootfd);
         _exit(0);
     }
 
@@ -510,6 +540,8 @@ static int chroot_boundary(void)
         return fail("chroot-wait");
     }
     if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        printf("VFS_STRESS: chroot child status=%d\n",
+               WIFEXITED(status) ? WEXITSTATUS(status) : -1);
         unlink(path);
         rmdir(dir);
         return fail("chroot-child");

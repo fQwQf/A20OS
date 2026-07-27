@@ -9,6 +9,7 @@ struct vfile;
 #define AF_UNIX    1
 #define AF_INET    2
 #define AF_INET6   10
+#define AF_NETLINK 16
 #define AF_ALG     38
 
 #define SOCK_STREAM 1
@@ -19,12 +20,16 @@ struct vfile;
 #define SOCK_NONBLOCK 04000
 #define SOCK_CLOEXEC  02000000
 
+#define MSG_PEEK       0x0002
+#define MSG_TRUNC      0x0020
 #define MSG_DONTWAIT   0x0040
 #define MSG_NOSIGNAL   0x4000
 #define MSG_WAITFORONE 0x10000
 
 #define SOL_SOCKET   1
+#define SOL_NETLINK  270
 #define SOL_ALG      279
+#define NETLINK_SOCK_DIAG 4
 #define IPPROTO_IP   0
 #define IPPROTO_ICMP 1
 #define IPPROTO_TCP  6
@@ -121,6 +126,13 @@ typedef struct net_sockaddr_in6 {
     uint8_t  sin6_addr[16];
     uint32_t sin6_scope_id;
 } net_sockaddr_in6_t;
+
+typedef struct net_sockaddr_nl {
+    uint16_t nl_family;
+    uint16_t nl_pad;
+    uint32_t nl_pid;
+    uint32_t nl_groups;
+} net_sockaddr_nl_t;
 
 void net_init(void);
 int  net_format_status(char *buf, size_t bufsz);

@@ -237,6 +237,8 @@ typedef struct __attribute__((packed)) ext4_dir_entry {
 } ext4_dir_entry_t;
 
 typedef struct ext4_sb_info {
+    uint64_t blocks_count;
+    uint64_t reserved_blocks_count;
     uint32_t block_size;
     uint32_t blocks_per_group;
     uint32_t inodes_per_group;

@@ -51,31 +51,29 @@ typedef struct linux_statfs64_64le {
     uint64_t f_spare[4];
 } linux_statfs64_64le_t;
 
-static inline void fill_linux_statfs64_64le(linux_statfs64_64le_t *sb, int fs_type)
+static inline void fill_linux_statfs64_64le(linux_statfs64_64le_t *sb,
+                                            const kstatfs_t *kst)
 {
     memset(sb, 0, sizeof(*sb));
-    switch (fs_type) {
-    case FS_TYPE_EXT4: sb->f_type = EXT4_SUPER_MAGIC; break;
-    case FS_TYPE_FAT32: sb->f_type = 0x4d44; break;
-    case FS_TYPE_PROCFS: sb->f_type = 0x9fa0; break;
-    case FS_TYPE_DEVFS: sb->f_type = 0x01021994; break;
-    case FS_TYPE_RAMFS:
-    default: sb->f_type = 0x858458f6; break;
-    }
-    sb->f_bsize = PAGE_SIZE;
-    sb->f_frsize = PAGE_SIZE;
-    sb->f_blocks = 1024 * 1024;
-    sb->f_bfree = 512 * 1024;
-    sb->f_bavail = 512 * 1024;
-    sb->f_files = VFS_MAX_OPEN;
-    sb->f_ffree = VFS_MAX_OPEN / 2;
-    sb->f_namelen = MAX_NAME_LEN;
+    sb->f_type = kst->f_type;
+    sb->f_bsize = kst->f_bsize;
+    sb->f_blocks = kst->f_blocks;
+    sb->f_bfree = kst->f_bfree;
+    sb->f_bavail = kst->f_bavail;
+    sb->f_files = kst->f_files;
+    sb->f_ffree = kst->f_ffree;
+    sb->f_fsid[0] = (int32_t)kst->f_fsid;
+    sb->f_fsid[1] = (int32_t)(kst->f_fsid >> 32);
+    sb->f_namelen = kst->f_namelen;
+    sb->f_frsize = kst->f_frsize;
+    sb->f_flags = kst->f_flags;
 }
 
-static inline int arch_copy_statfs64_64le_to_user(void *buf, int fs_type)
+static inline int arch_copy_statfs64_64le_to_user(void *buf,
+                                                  const kstatfs_t *kst)
 {
     linux_statfs64_64le_t sb;
-    fill_linux_statfs64_64le(&sb, fs_type);
+    fill_linux_statfs64_64le(&sb, kst);
     return copy_to_user(buf, &sb, sizeof(sb));
 }
 

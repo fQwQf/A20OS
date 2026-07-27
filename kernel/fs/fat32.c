@@ -751,6 +751,32 @@ static vfile_t *fat32_open_vnode(vnode_t *vn, int flags);
 static int fat32_vn_readpage(vnode_t *vn, uint64_t index,
                              void *data, size_t len);
 
+static int fat32_vn_statfs(vnode_t *vn, kstatfs_t *st)
+{
+    if (!vn || !vn->fs_data || !st)
+        return -EINVAL;
+    fat32_sb_t *sb = ((fat32_vnode_priv_t *)vn->fs_data)->sb;
+    uint64_t free_clusters = 0;
+
+    fat32_lock(sb);
+    for (uint32_t cluster = 2; cluster < sb->total_clusters + 2; cluster++) {
+        if (fat_read(sb, cluster) == FAT32_CLUSTER_FREE)
+            free_clusters++;
+    }
+    fat32_unlock(sb);
+
+    st->f_type = 0x4d44;
+    st->f_bsize = sb->bytes_per_cluster;
+    st->f_frsize = sb->bytes_per_cluster;
+    st->f_blocks = sb->total_clusters;
+    st->f_bfree = free_clusters;
+    st->f_bavail = free_clusters;
+    st->f_files = 0;
+    st->f_ffree = 0;
+    st->f_namelen = 255;
+    return 0;
+}
+
 static vnode_ops_t g_fat32_vnode_ops = {
     .lookup   = fat32_lookup,
     .create   = fat32_vn_create,
@@ -759,6 +785,7 @@ static vnode_ops_t g_fat32_vnode_ops = {
     .rmdir    = fat32_vn_rmdir,
     .rename   = NULL,
     .stat     = fat32_stat,
+    .statfs   = fat32_vn_statfs,
     .truncate = fat32_vn_truncate,
     .readpage = fat32_vn_readpage,
     .writepage = fat32_vn_writepage,

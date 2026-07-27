@@ -411,17 +411,21 @@ int64_t sys_symlinkat(const char *target, int newdirfd, const char *linkpath) {
 
 int64_t sys_statfs(const char *path, void *buf) {
     if (!path || !buf) return -EFAULT;
-    int fs_type = FS_TYPE_RAMFS;
     char kpath[MAX_PATH_LEN];
     long copied = user_strncpy(kpath, path, MAX_PATH_LEN);
     if (copied < 0) return -EFAULT;
     if (copied >= MAX_PATH_LEN - 1) return -ENAMETOOLONG;
     if (kpath[0] == '\0') return -ENOENT;
-    vnode_t *vn = vfs_resolve(kpath);
+    char full[MAX_PATH_LEN];
+    int pr = syscall_path_at(AT_FDCWD, kpath, full, sizeof(full));
+    if (pr < 0) return pr;
+    vnode_t *vn = vfs_resolve(full);
     if (!vn) return g_lookup_errno ? g_lookup_errno : -ENOENT;
-    if (vn->mnt) fs_type = vn->mnt->type;
+    kstatfs_t st;
+    int r = vfs_statfs(vn, &st);
     vnode_put(vn);
-    return arch_copy_statfs64_to_user(buf, fs_type) < 0 ? -EFAULT : 0;
+    if (r < 0) return r;
+    return arch_copy_statfs64_to_user(buf, &st) < 0 ? -EFAULT : 0;
 }
 
 int64_t sys_fstatfs(int fd, void *buf) {
@@ -430,11 +434,15 @@ int64_t sys_fstatfs(int fd, void *buf) {
     if (gfd < 0) return gfd;
     vfile_t *vf = vfs_get_file_ref((int)gfd);
     if (!vf) return -EBADF;
-    int fs_type = FS_TYPE_RAMFS;
-    if (vf->vnode && vf->vnode->mnt)
-        fs_type = vf->vnode->mnt->type;
+    if (!vf->vnode) {
+        vfs_put_file_ref((int)gfd, vf);
+        return -EINVAL;
+    }
+    kstatfs_t st;
+    int r = vfs_statfs(vf->vnode, &st);
     vfs_put_file_ref((int)gfd, vf);
-    return arch_copy_statfs64_to_user(buf, fs_type) < 0 ? -EFAULT : 0;
+    if (r < 0) return r;
+    return arch_copy_statfs64_to_user(buf, &st) < 0 ? -EFAULT : 0;
 }
 
 int64_t sys_mount(const char *src, const char *target,
