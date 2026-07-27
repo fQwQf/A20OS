@@ -134,6 +134,8 @@ PCI 协议驱动只能依赖以下公共输入：
 
 LoongArch 验证入口是 `make smoke-pci-portability`。它在同一客户机挂载 HDA codec 与 NVMe namespace，要求 HDA PCM DMA 完成且两个 class 驱动都绑定。目标自动创建 128 MiB 可丢弃 NVMe 镜像，并以 `CONFIG_NVME_SMOKE_TEST` 写入 LBA 0 开始的 17 个 512 字节扇区，强制跨越 8 KiB bounce chunk，再执行 flush、读回和逐字节比较。该配置会改写介质，禁止对普通镜像或真实磁盘启用。
 
+NVMe controller 启用前必须由 `CAP.CSS` 声明 NVM command set，并由 `CAP.MPSMIN/MPSMAX` 覆盖内核使用的 4 KiB memory page；驱动据此设置 `CC.MPS`，并按 `CAP.TO` 等待 `CSTS.RDY`。能力不兼容时 probe 直接返回 `-EOPNOTSUPP`，不能写 `CC.EN` 后等待无意义的固定超时。
+
 ## VirtIO transport
 
 `virtio_transport_t` 提供 MMIO 风格的 `read32/write32`、私有数据、legacy 标志和 IRQ。设备驱动使用统一 `VIRTIO_MMIO_*` offset；PCI transport 在内部翻译 common/notify/ISR/device capabilities，MMIO transport 直接访问 slot。
