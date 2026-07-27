@@ -11,7 +11,7 @@
 - **符合**：源码和文档一致，当前可以依赖。
 - **已扩展/基础可用**：已实现，但有明确限制（限制写在说明栏）。
 - **有条件**：只在特定平台或特定序列化假设下工作，SMP/IRQ 化前要先加锁。
-- **固定节点模型**：devfs 当前不是完整 sysfs/uevent，display/input 使用类适配器，其他类不自动生成节点。
+- **动态类视图**：char/block/audio 自动发布 devfs 节点，所有 class 发布 sysfs 目录；display/input 的旧聚合节点仍保留。
 
 ## 如何更新矩阵
 
@@ -26,13 +26,14 @@ QEMU x86_64 与 RISC-V64 GUI 的 VirtIO GPU、键盘和鼠标分别由 `make smo
 
 | 范围 | 状态 | 说明 |
 |---|---|---|
-| driver core | 符合 | 动态 registry；操作 mutex 串行化注册、probe/remove 与遍历；数组 spinlock 不跨回调；拒绝重复注册；probe 失败完整解绑 |
-| PCI bus | 已扩展 | ECAM、ID/subsystem match、BAR sizing/assignment、BAR 编号查询、modern VirtIO capabilities；已设置 `matched_id` |
+| driver core | 符合 | 动态 registry；bus ID 后可执行无副作用的 driver protocol match；操作 mutex 串行化注册、probe/remove 与遍历；数组 spinlock 不跨回调；probe 失败完整解绑 |
+| PCI bus | 已扩展 | ECAM、ID/subsystem match、零值未分配 BAR sizing/assignment、BAR 编号查询、modern VirtIO capabilities；已设置 `matched_id` |
 | VirtIO-MMIO bus | 符合 | MMIO/IRQ 资源、type match、`matched_id`；静态最多 8 个设备 |
 | hwapi MMIO | 符合 | 宽度访问和 barrier；relaxed 版本需谨慎 |
 | hwapi IRQ | 明确边界 | 固定 256 线、每线一个 handler；表操作受锁保护，重复注册返回 `-EBUSY`；`free_irq` 校验 owner token 并等待在途 handler |
 | hwapi DMA | 基础可用 | coherent helper 返回物理 handle，sync 委托 arch cache hook；尚无 DMA mask/IOMMU/大对齐能力 |
-| devfs | 固定节点模型 | display/input 使用类适配器；其他类不自动生成节点 |
+| class publication | 已扩展 | probe 成功自动建立带引用的 class device；remove 前先下线并排空在途调用 |
+| devfs/sysfs | 动态类视图 | char/block/audio 自动生成 `/dev/charN`、`diskN`、`audioN`；所有 class 动态暴露于 `/sys/class`；旧 display/input 聚合节点暂时保留 |
 
 ## 设备驱动
 
@@ -44,10 +45,13 @@ QEMU x86_64 与 RISC-V64 GUI 的 VirtIO GPU、键盘和鼠标分别由 `make smo
 | virtio-gpu | DISPLAY | class registry、framebuffer 页释放和 transport reset；单实例、同步 controlq |
 | VirtIO-SCSI | BLOCK | VirtualBox ARM 已验证，remove 复位/释放槽；只支持 target/LUN 0、READ/WRITE(10)、512B sector、轮询 |
 | AHCI | BLOCK | VirtualBox x86_64；单 controller/单 port/单 slot、LBA48、轮询；probe 回滚和 remove 释放 DMA/IRQ |
+| NVMe | BLOCK | 架构无关 PCI class 驱动；x86_64 与 LoongArch64 构建，LoongArch QEMU 已验证 BAR、admin/I/O queue 建立和 Identify；首个活动 namespace、读写/flush、轮询、每 controller 只发布一个 namespace；LoongArch 数据读写尚未单独验证 |
 | E1000 | NET | VirtualBox 82540EM，轮询 ring，已加 stop/remove；静态单实例 |
 | VMSVGA/SVGAv3 | DISPLAY | VirtualBox x86_64/ARM，BAR offset/pitch 边界和 class registry，已加 remove；静态单实例 |
 | xHCI HID | INPUT | VBox ARM keyboard/mouse/tablet，class、轮询和 controller stop/remove；只匹配 `8086:1e31`，静态单 controller |
 | PS/2 | x86 板级服务 | 提供基础键鼠控制器服务；可复用输入设备使用 `DEV_CLASS_INPUT` |
+| PC Speaker | AUDIO | x86 platform device，动态 `/dev/audioN`；支持有界 tone/stop ABI，不冒充 PCM |
+| Intel HDA | AUDIO | 架构无关 PCI class 驱动；x86_64 与 LoongArch64 QEMU 已完成 BDL DMA smoke；自动发现 codec、AFG、DAC 和输出 pin，支持 48 kHz 双声道 S16_LE PCM、同步播放、stop 和完整 remove |
 | STM32 SDIO | BLOCK | 统一类 + MCU bridge；板级 bus 仍用名称匹配 |
 | STM32 简单外设 | 允许例外 | 板级轮询轻量 API，不强制统一对象；扩展到多实例/用户 ABI 时必须迁移 |
 | StarFive/LS2K GMAC、DW SDIO | 有条件 | 单实例轮询并依赖外部串行化，SMP/IRQ 化前必须增加实例锁 |
@@ -57,6 +61,12 @@ QEMU x86_64 与 RISC-V64 GUI 的 VirtIO GPU、键盘和鼠标分别由 `make smo
 VirtualBox ARM64 源码位于 `kernel/platform/virtualbox-aarch64/`，通过 UEFI ACPI RSDP/MCFG 枚举 PCI。VirtIO-SCSI、E1000、SVGAv3、xHCI HID 已进入统一类模型。平台 GIC disable 已实现；generic timer trap 和 PCI interrupt routing 仍使数据面主要轮询。运行配置见 [VirtualBox ARM64 运行手册](../platforms/virtualbox-aarch64.md) 与 [VirtualBox x86_64 运行手册](../platforms/virtualbox-x86_64.md)，驱动架构见 [VirtualBox 驱动栈](../platforms/virtualbox.md)。
 
 VirtualBox x86_64 复用 x86_64 平台 PCI、AHCI、VMSVGA、PS/2/E1000/VirtIO 驱动，以 GRUB ISO 启动。
+
+## 跨架构 PCI 协议验证
+
+NVMe/HDA 源码不含 CPU 架构门禁，它们的运行条件来自下层 PCI/MMIO/DMA 能力。`make smoke-pci-portability` 在 QEMU LoongArch64 virt 上联合挂载 `intel-hda`、`hda-duplex` 和 NVMe，验证零值 BAR sizing/assignment、HDA codec topology、PCM BDL DMA，以及 NVMe queue/Identify。该结果证明协议驱动并非 x86 专用，但不代表所有已构建架构都具备 PCI host。
+
+QEMU AArch64 与 RISC-V64 board 当前只枚举 VirtIO-MMIO，因此对 HDA/NVMe 是编译覆盖，不是运行覆盖。VirtualBox AArch64 有 ACPI MCFG PCI 枚举，但 BAR 依赖固件预分配且目前没有这两类设备的运行日志。状态表必须继续按“构建”“绑定”“实际 I/O”三个等级记录证据。
 
 ## 强制边界
 
