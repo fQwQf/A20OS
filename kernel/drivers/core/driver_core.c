@@ -3,6 +3,7 @@
  */
 #include "drivers/core/driver_core.h"
 #include "drivers/core/driver_register.h"
+#include "drivers/core/driver_class.h"
 #include "core/stdio.h"
 #include "core/klog.h"
 #include "core/defs.h"
@@ -49,6 +50,16 @@ static int driver_probe_bound_device(driver_t *drv, device_t *dev) {
     int ret = drv->probe(dev);
     if (ret == 0) {
         dev->state = DEV_STATE_PROBED;
+        ret = class_device_publish(dev);
+        if (ret < 0) {
+            if (drv->remove)
+                drv->remove(dev);
+            dev->drv = NULL;
+            dev->drv_priv = NULL;
+            dev->matched_id = NULL;
+            dev->state = DEV_STATE_UNINIT;
+            return ret;
+        }
         return 0;
     }
     /* DRIVER_PROBE_FAILURE_CLEANUP: failed probes leave no half-bound device. */
@@ -162,6 +173,8 @@ int driver_unregister(driver_t *drv) {
                 device_t *dev = g_devices[j];
                 if (dev->drv != drv)
                     continue;
+                dev->state = DEV_STATE_REMOVING;
+                class_device_unpublish(dev);
                 if (drv->remove)
                     drv->remove(dev);
                 dev->drv = NULL;
@@ -242,6 +255,8 @@ void device_unregister(device_t *dev) {
             spin_unlock_irqrestore(&g_driver_core_lock, flags);
 
             driver_t *drv = dev->drv;
+            dev->state = DEV_STATE_REMOVING;
+            class_device_unpublish(dev);
             if (drv && drv->remove)
                 drv->remove(dev);
             dev->drv = NULL;

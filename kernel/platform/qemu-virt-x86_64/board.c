@@ -1,6 +1,8 @@
 #ifdef CONFIG_BOARD_QEMU_VIRT_X86_64
 
 #include "drivers/core/driver_core.h"
+#include "drivers/bus/platform_bus.h"
+#include "drivers/audio/pc_speaker.h"
 #include "core/arch.h"
 #include "core/smp.h"
 #include "core/stdio.h"
@@ -110,7 +112,25 @@ static void x86_64_reboot(void) {
 extern void pci_enumerate(uintptr_t ecam_base, int bus_start, int bus_end);
 
 static void x86_64_enumerate_devices(void) {
+    static resource_t speaker_resources[] = {
+        { .type = RES_IOPORT, .start = 0x42, .end = 0x43,
+          .name = "pit-channel2" },
+        { .type = RES_IOPORT, .start = 0x61, .end = 0x61,
+          .name = "speaker-control" },
+    };
+    static platform_device_t speaker = {
+        .dev = {
+            .name = "pc-speaker",
+            .res = speaker_resources,
+            .res_count = 2,
+        },
+        .id = {
+            .vendor = A20_PLATFORM_VENDOR,
+            .device = A20_DEVICE_PC_SPEAKER,
+        },
+    };
     pci_enumerate(PCI_ECAM_BASE, 0, 255);
+    (void)platform_device_register(&speaker);
 }
 
 static const board_config_t qemu_virt_x86_64 = {

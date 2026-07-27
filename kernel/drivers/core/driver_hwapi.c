@@ -1,8 +1,12 @@
 #include "drivers/core/driver_hwapi.h"
 #include "drivers/core/driver_core.h"
 #include "mm/mm.h"
+#include "mm/frame.h"
 #include "core/errno.h"
 #include "core/lock.h"
+#ifdef CONFIG_X86_64
+#include "cpu.h"
+#endif
 
 extern const board_config_t *const current_board;
 
@@ -11,6 +15,26 @@ static void         *irq_priv[256];
 static unsigned long irq_flags[256];
 static unsigned int irq_active[256];
 static spinlock_t irq_table_lock = SPINLOCK_INIT;
+
+uint8_t ioport_read8(uint16_t port)
+{
+#ifdef CONFIG_X86_64
+    return inb(port);
+#else
+    (void)port;
+    return 0xffU;
+#endif
+}
+
+void ioport_write8(uint16_t port, uint8_t value)
+{
+#ifdef CONFIG_X86_64
+    outb(port, value);
+#else
+    (void)port;
+    (void)value;
+#endif
+}
 
 /* DRIVER_IRQ_TABLE_FIXED_LIMIT: platform IRQ lines are capped at 256 until the
  * irq registry is replaced by a dynamically sized irqdomain-style structure. */
@@ -126,6 +150,54 @@ void dma_free_coherent(void *vaddr, size_t size, uint64_t dma_handle) {
     (void)dma_handle;
     extern void kfree(void *);
     kfree(vaddr);
+}
+
+static int dma_page_order(size_t size, size_t alignment)
+{
+    size_t bytes = PAGE_SIZE;
+    int order = 0;
+    if (alignment < PAGE_SIZE)
+        alignment = PAGE_SIZE;
+    while ((bytes < size || bytes < alignment) && order < MAX_ORDER) {
+        bytes <<= 1;
+        order++;
+    }
+    return (bytes < size || bytes < alignment) ? -1 : order;
+}
+
+void *dma_alloc_coherent_aligned(size_t size, size_t alignment,
+                                 uint64_t *dma_handle)
+{
+    if (!size || !alignment || alignment > PAGE_SIZE ||
+        (alignment & (alignment - 1U)))
+        return NULL;
+    int order = dma_page_order(size, alignment);
+    if (order < 0)
+        return NULL;
+    pfn_t pfn = pfa_alloc(order);
+    if (pfn == PFN_NONE)
+        return NULL;
+    void *ptr = pfn_to_virt(pfn);
+    if (!ptr) {
+        pfa_free(pfn, order);
+        return NULL;
+    }
+    extern void *memset(void *, int, size_t);
+    memset(ptr, 0, PAGE_SIZE << order);
+    if (dma_handle)
+        *dma_handle = pfn_to_phys(pfn);
+    return ptr;
+}
+
+void dma_free_coherent_aligned(void *vaddr, size_t size, uint64_t dma_handle)
+{
+    (void)dma_handle;
+    if (!vaddr || !size)
+        return;
+    int order = dma_page_order(size, PAGE_SIZE);
+    pfn_t pfn = virt_to_pfn(vaddr);
+    if (order >= 0 && pfn != PFN_NONE)
+        pfa_free(pfn, order);
 }
 
 void dma_sync_for_device(void *vaddr, size_t size) {
