@@ -108,12 +108,43 @@ make ARCH=loongarch64 BOARD=qemu-virt-loongarch64 run
 
 ### 进程调度与 SMP（`kernel/proc/`）
 
-调度器使用 per-CPU 运行队列，没有全局调度锁。每个运行队列维护 8 级优先级和一个 bitmap，实现 O(1) 选任务。支持老化提升、SCHED_FIFO/RR，并通过 `kernel/proc/cg_cpu.c` 的 cgroup CPU quota 实现限流调度。
+调度器使用 per-CPU 运行队列，每个队列维护 8 个调度级别和非空 bitmap。
+普通任务结合 nice/weight 与老化选择级别，实时任务支持 `SCHED_FIFO` 和
+`SCHED_RR`；affinity 同时受 online CPU 与 cgroup cpuset 限制，CPU quota
+由 `kernel/proc/cg_cpu.c` 执行。
+
+“任务状态”和“CPU 所有权”是两个不同维度。`PROC_READY` 任务可能仍在
+runqueue，也可能已经被本地 CPU 选中：
+
+```text
+on_rq -> dispatching -> on_cpu -> unowned
+```
+
+本地 picker 只持有本 CPU 的 runqueue 锁，原子完成
+`on_rq -> dispatching`；释放队列锁后，调度器才获取 `proc_lock` 发布
+context switch。旧任务的 `on_cpu` 跨底层切换保持有效，直到新任务在自己的
+内核栈上完成 switch cleanup。迁移同时获取源、目标 runqueue 锁，固定按 CPU
+编号升序。
+
+远程入队通过 per-CPU 持久 `need_resched` 请求抢占。IPI 只通知目标 CPU，
+不会在任意中断上下文直接切换；请求在 trap/syscall/timer 返回或显式调度
+安全点消费。
+
+所有对象等待使用 tokenized Park/Wake。waiter 先生成 `(task, wait_seq)`
+token，在对象锁内重查条件并 link，释放对象锁后才 commit；waker 在对象锁内
+只把 task 引用和 token 转移到 wake queue，释放对象锁后再进入 scheduler。
+因此提前到达的事件、旧 timeout 和重复 wake 都不能唤醒后续等待。
+
+带 deadline 的 Park 注册到持有 task 引用的最小堆；cancel 与 expiry 只有一方
+负责摘除和释放。信号状态由独立 `signal_state.lock` 保护；
+`INTERRUPTIBLE`、`KILLABLE`、`UNINTERRUPTIBLE` 对普通信号、致命信号和退出
+使用不同的唤醒规则。`PROC_STOPPED` 是独立 job-control 状态，不借用 Park。
 
 锁遵循严格的部分顺序，记录在 `kernel/include/core/lock.h`：
 
 ```text
 cg_node.lock -> proc_lock -> runq_lock -> pfa.lock
+proc_lock -> signal_state.lock
 proc_lock -> files_struct.lock -> VFS global-file/vnode locks
 proc_lock -> mm_struct.lock
 proc_lock -> a20_handle_table.lock
@@ -121,9 +152,18 @@ driver registry/IRQ locks -> device-private locks
 g_lwip_lock -> g_net_lock
 ```
 
-核心规则：持有自旋锁时禁止阻塞；持有 `runq_lock` 时禁止获取 `proc_lock`；持有设备或 lwIP 锁时，除非被调用方明确声明非阻塞，否则禁止调用 VFS、内存分配或调度路径。
+核心规则：持有自旋锁时禁止阻塞；持有 `runq_lock` 时禁止获取
+`proc_lock`；对象/设备锁内只 collect waiter，实际 wake 在释放对象锁后
+flush；持有设备或 lwIP 锁时，除非被调用方明确声明非阻塞，否则禁止调用
+VFS、内存分配或调度路径。
 
-Linux ABI 的 Futex 实现在 `kernel/abi/linux/sys_futex.c`，支持 wait、wake、requeue 和私有/共享键。Native 程序使用 `event_wait` 替代。
+Linux ABI 的 Futex 实现在 `kernel/abi/linux/sys_futex.c`，支持 wait、wake、
+requeue 和私有/共享键。Futex waiter 同样保存 task 引用和 `wait_seq`，wait
+入队前在 `mm->lock -> futex lock` 下做不缺页的用户值二次检查。Native 程序
+使用 `event_wait` 替代。
+
+完整状态机、所有权表和验证入口见
+[进程、调度与阻塞协议](process-scheduler.md)。
 
 ### 文件系统与 VFS（`kernel/fs/`）
 
@@ -215,7 +255,10 @@ Linux ABI：223 个；Native ABI：90 个。
 RISC-V 64、ARM64、x86_64、LoongArch 64。物理板：VisionFive 2（RISC-V）和龙芯 LS2K1000（LoongArch）。
 
 **SMP 并发如何保证安全？**  
-通过文档化的局部锁顺序、per-CPU 运行队列、per-process `mm->lock` 和局部驱动锁。`make check-concurrency-foundation` 在高压下验证该模型。
+通过文档化的锁顺序、per-CPU 运行队列、显式
+`on_rq/dispatching/on_cpu` 所有权、带序号 Park/Wake、异步 task 引用和持久
+抢占请求。`make check-concurrency-foundation` 检查基础契约；
+`make check-proc-step8-local` 执行双架构 1 核/8 核累计压力矩阵。
 
 **内存共享怎么工作？**  
 先用 `vm_create_object` 创建 VMO，再用 `vm_map` 把它映射到一个或多个 VMAR。最终生效的保护位是请求保护、handle rights 和 VMAR 标志三者的交集。
@@ -237,6 +280,7 @@ RISC-V 64、ARM64、x86_64、LoongArch 64。物理板：VisionFive 2（RISC-V）
 ## 接下来看什么
 
 * **Native ABI 完整规范**：[docs/native-abi/00-overview.md](native-abi/00-overview.md)
+* **进程、调度与阻塞协议**：[docs/process-scheduler.md](process-scheduler.md)
 * **驱动锁顺序**：[docs/drivers/lock-order.md](drivers/lock-order.md)
 * **构建与运行**：[README.md](../README.md)
 * **当前问题与路线图**：[docs/roadmap/a20os-improvement-todo.md](roadmap/a20os-improvement-todo.md)
