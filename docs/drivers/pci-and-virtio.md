@@ -128,11 +128,11 @@ PCI 协议驱动只能依赖以下公共输入：
 | 平台 | PCI 发现/BAR | NVMe/HDA 证据 |
 |---|---|---|
 | QEMU x86_64 q35 | ECAM 与 MMIO BAR 分配 | HDA BDL DMA smoke 已验证；NVMe 可绑定 |
-| QEMU LoongArch64 virt | ECAM 与 `0x40000000` PCI MMIO 窗口分配 | HDA BDL DMA、NVMe admin queue/Identify 已联合验证 |
+| QEMU LoongArch64 virt | ECAM 与 `0x40000000` PCI MMIO 窗口分配 | HDA BDL DMA；NVMe queue/Identify、跨 chunk 写入/flush/读回已联合验证 |
 | VirtualBox AArch64 | ACPI MCFG；依赖固件预分配且低于已映射范围的 BAR | 通用驱动可编译，尚无 HDA/NVMe 运行日志 |
 | QEMU AArch64/RISC-V64 virt | 当前 board 只枚举 VirtIO-MMIO | 驱动可编译，不构成 PCI 运行支持 |
 
-LoongArch 验证入口是 `make smoke-pci-portability`。它在同一客户机挂载 HDA codec 与 NVMe namespace，要求 HDA PCM DMA 完成且两个 class 驱动都绑定。NVMe 当前验证到 Identify；块数据读写仍需独立的可丢弃镜像测试。
+LoongArch 验证入口是 `make smoke-pci-portability`。它在同一客户机挂载 HDA codec 与 NVMe namespace，要求 HDA PCM DMA 完成且两个 class 驱动都绑定。目标自动创建 128 MiB 可丢弃 NVMe 镜像，并以 `CONFIG_NVME_SMOKE_TEST` 写入 LBA 0 开始的 17 个 512 字节扇区，强制跨越 8 KiB bounce chunk，再执行 flush、读回和逐字节比较。该配置会改写介质，禁止对普通镜像或真实磁盘启用。
 
 ## VirtIO transport
 
