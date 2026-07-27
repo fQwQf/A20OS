@@ -96,11 +96,14 @@ typedef struct proc_vm_stats {
  *     PROC_RUNNING/BLOCKED -> PROC_ZOMBIE -> PROC_UNUSED
  *   A task must not be put on a run queue unless its state is PROC_READY, and a
  *   zombie or unused task must never be requeued.
- * - proc_lock protects allocation, PID membership, all-task list membership,
- *   parent/wait relationships, zombie/reap transitions, and most task state
- *   transitions and scheduler ownership metadata. Per-CPU runqueue locks
- *   protect rq_next/rq_prev/on_rq and queue membership; callers that need both
- *   follow proc_lock -> runq_lock.
+ * - proc_lock protects allocation, all-task list membership, parent/wait
+ *   relationships, zombie/reap transitions, and most task state transitions
+ *   and scheduler ownership metadata. PID lookup has its own pid_lock and
+ *   signal pending/actions have signal_state.lock. Per-CPU runqueue locks
+ *   protect rq_next/rq_prev/on_rq and queue membership. Local pick atomically
+ *   publishes on_rq -> dispatching under only that CPU's runqueue lock, then
+ *   releases it before switch publication takes proc_lock. Every path needing
+ *   both locks follows proc_lock -> runq_lock.
  * - cpu_id selects the owning run queue while on_rq is true. Code that changes
  *   cpu_id for a queued task must first remove it from its current run queue or
  *   hold the locks needed to move it atomically.
