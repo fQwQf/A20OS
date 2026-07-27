@@ -528,6 +528,7 @@ KERNEL_SRC = $(wildcard $(KERNEL_DIR)/*.c) \
              $(wildcard $(KERNEL_DIR)/drivers/char/*.c) \
              $(wildcard $(KERNEL_DIR)/drivers/net/*.c) \
              $(wildcard $(KERNEL_DIR)/drivers/gpu/*.c) \
+	             $(wildcard $(KERNEL_DIR)/drivers/audio/*.c) \
 	             $(wildcard $(KERNEL_DIR)/drivers/input/*.c) \
 	             $(wildcard $(BOARD_DRIVER_DIR)/*.c) \
 	             $(wildcard $(KERNEL_DIR)/platform/$(BOARD)/*.c) \
@@ -902,6 +903,12 @@ check-driver-core-model:
 	@rg -q "DRIVER_ENUMERATION_FAILURE_MODEL" kernel/drivers/bus/virtio_mmio_bus.c kernel/drivers/bus/pci_bus.c
 	@rg -q "DRIVER_IRQ_DMA_SEMANTICS" kernel/drivers/core/driver_hwapi.h
 	@rg -q "DRIVER_SMOKE_MATRIX" kernel/drivers/core/driver_core.h
+	@rg -q "class_device_publish" kernel/drivers/core/driver_core.c kernel/drivers/core/driver_class.c
+	@rg -q "class_device_unpublish" kernel/drivers/core/driver_core.c kernel/drivers/core/driver_class.c
+	@rg -q "DEV_STATE_REMOVING" kernel/drivers/core/driver_core.h kernel/drivers/core/driver_core.c
+	@rg -q "platform_device_register" kernel/drivers/bus/platform_bus.c kernel/platform/qemu-virt-x86_64/board.c
+	@rg -q "DEV_CLASS_AUDIO" kernel/drivers/core/driver_core.h kernel/drivers/audio/pc_speaker.c
+	@rg -Fq "pci_class_code(dev) != 0x010802" kernel/drivers/block/nvme.c
 	@rg -q "virtio_blk_driver_probe" kernel/drivers/block/virtio_blk.c
 	@rg -q "virtio_net_driver_probe" kernel/drivers/net/virtio_net.c
 	@rg -q "uart_driver_probe" kernel/drivers/char/uart.c
