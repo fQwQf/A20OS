@@ -45,7 +45,7 @@ struct input_absinfo {
 #define IOC(dir, type, nr, size) \
     (((dir) << 30) | ((type) << 8) | (nr) | ((size) << 16))
 
-#define EVIOCGVERSION IOC(IOC_READ, 'E', 0x00, 4)
+#define EVIOCGVERSION IOC(IOC_READ, 'E', 0x01, 4)
 #define EVIOCGID      IOC(IOC_READ, 'E', 0x02, 8)
 #define EVIOCGRAB     IOC(1U, 'E', 0x90, 4)
 #define EVIOCGNAME(len)   IOC(IOC_READ, 'E', 0x06, len)
