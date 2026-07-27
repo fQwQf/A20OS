@@ -20,6 +20,7 @@
 struct device;
 struct driver;
 struct bus_type;
+struct class_device;
 
 /* ============================================================
  * device_id — identifies a device for driver matching
@@ -48,6 +49,7 @@ enum resource_type {
     RES_MMIO,
     RES_DMA,
     RES_MEM,
+    RES_IOPORT,
 };
 
 #define IORESOURCE_IRQ_EDGE     0x01
@@ -76,6 +78,7 @@ typedef struct resource {
 #define DEV_STATE_RUNNING   2
 #define DEV_STATE_SUSPENDED 3
 #define DEV_STATE_REMOVED   4
+#define DEV_STATE_REMOVING  5
 
 typedef struct device {
     const char        *name;       /* e.g. "virtio-net0" */
@@ -85,9 +88,11 @@ typedef struct device {
     void              *drv_priv;   /* driver private data (driver allocates) */
     void              *plat_data;  /* platform/board data */
     const device_id_t *matched_id; /* ID entry that caused the match */
+    const device_id_t *hardware_id; /* platform/non-enumerable identity */
     resource_t        *res;        /* resource array */
     int                res_count;
     int                state;      /* DEV_STATE_* */
+    struct class_device *class_dev; /* core-owned userspace publication */
 } device_t;
 
 /* ============================================================
@@ -102,11 +107,16 @@ typedef struct device {
 #define DEV_CLASS_NET    3
 #define DEV_CLASS_INPUT  4
 #define DEV_CLASS_DISPLAY 5
+#define DEV_CLASS_AUDIO  6
 
 typedef struct driver {
     const char         *name;      /* e.g. "virtio-net" */
     const device_id_t  *id_table;  /* NULL-terminated array */
     struct bus_type    *bus;       /* bus this driver lives on */
+
+    /* Optional protocol-level narrowing after the bus ID match.  It must not
+     * access device registers or allocate resources. */
+    int  (*match)(device_t *dev);
 
     /* lifecycle */
     int  (*probe)(device_t *dev);
