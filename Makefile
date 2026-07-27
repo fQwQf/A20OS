@@ -96,7 +96,7 @@ endif
 # Directories
 KERNEL_DIR = kernel
 INCLUDE_DIR = $(KERNEL_DIR)/include
-BUILD_VARIANT = $(ABI)-$(if $(filter 1,$(BRINGUP)),bringup,dev)$(if $(filter 1,$(NOMMU)),-nommu,)$(if $(filter-out 1,$(NR_CPUS)),-smp$(NR_CPUS),)$(if $(filter y,$(CONFIG_DRIVER_LIFECYCLE_TEST)),-driver-lifecycle,)$(if $(filter y,$(CONFIG_HDA_SMOKE_TEST)),-hda-smoke,)
+BUILD_VARIANT = $(ABI)-$(if $(filter 1,$(BRINGUP)),bringup,dev)$(if $(filter 1,$(NOMMU)),-nommu,)$(if $(filter-out 1,$(NR_CPUS)),-smp$(NR_CPUS),)$(if $(filter y,$(CONFIG_DRIVER_LIFECYCLE_TEST)),-driver-lifecycle,)$(if $(filter y,$(CONFIG_HDA_SMOKE_TEST)),-hda-smoke,)$(if $(filter y,$(CONFIG_NVME_SMOKE_TEST)),-nvme-smoke,)
 ifeq ($(ARCH),armv7m)
 BUILD_VARIANT := $(BUILD_VARIANT)-$(BOARD)-f$(STM32_FLASH_KB)k-r$(STM32_RAM_KB)k
 BUILD_VARIANT := $(BUILD_VARIANT)$(if $(filter 1,$(STM32_QEMU)),-qemu,)
@@ -473,6 +473,10 @@ endif
 
 ifeq ($(CONFIG_HDA_SMOKE_TEST),y)
 CFLAGS += -DCONFIG_HDA_SMOKE_TEST
+endif
+
+ifeq ($(CONFIG_NVME_SMOKE_TEST),y)
+CFLAGS += -DCONFIG_NVME_SMOKE_TEST
 endif
 
 ifeq ($(CONFIG_SWAP),y)
@@ -1054,6 +1058,7 @@ check-driver-core-model:
 	@rg -Fq "if (!size && bar_lo == 0)" kernel/drivers/bus/pci_bus.c
 	@rg -q "\.match = hda_match" kernel/drivers/audio/hda.c
 	@rg -q "\.match = nvme_match" kernel/drivers/block/nvme.c
+	@rg -q "NVME_IO_SMOKE: PASS" kernel/drivers/block/nvme.c Makefile
 	@! rg -q "CONFIG_X86_64" kernel/drivers/audio/hda.c kernel/drivers/block/nvme.c
 	@rg -q "CONFIG_X86_64" kernel/drivers/audio/pc_speaker.c
 	@rg -q "virtio_blk_driver_probe" kernel/drivers/block/virtio_blk.c
@@ -1943,7 +1948,7 @@ smoke-hda:
 	fi
 
 smoke-pci-portability:
-	$(MAKE) ARCH=loongarch64 BOARD=qemu-virt-loongarch64 ABI=linux BRINGUP=1 CONFIG_HDA_SMOKE_TEST=y kernel-only
+	$(MAKE) ARCH=loongarch64 BOARD=qemu-virt-loongarch64 ABI=linux BRINGUP=1 CONFIG_HDA_SMOKE_TEST=y CONFIG_NVME_SMOKE_TEST=y kernel-only
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/pci-portability-loongarch64.log"; \
@@ -1956,9 +1961,10 @@ smoke-pci-portability:
 		-device intel-hda -device hda-duplex,audiodev=audio0 \
 		-drive file="$$image",if=none,format=raw,id=nvme0 \
 		-device nvme,drive=nvme0,serial=A20NVME \
-		-kernel .kernel-build/loongarch64-qemu-virt-loongarch64-linux-bringup-hda-smoke/kernel.elf \
+		-kernel .kernel-build/loongarch64-qemu-virt-loongarch64-linux-bringup-hda-smoke-nvme-smoke/kernel.elf \
 		> "$$log" 2>&1 || status=$$?; \
 	if grep -q 'HDA_STREAM_SMOKE: PASS' "$$log" && \
+	   grep -q 'NVME_IO_SMOKE: PASS' "$$log" && \
 	   grep -q "bound to driver 'hda'" "$$log" && \
 	   grep -q "bound to driver 'nvme'" "$$log" && \
 	   ! grep -qi 'panic' "$$log"; then \

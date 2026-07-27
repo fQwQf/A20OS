@@ -268,8 +268,8 @@ static int nvme_rw(device_t *dev, uint64_t lba, void *buffer,
         size_t bytes = (size_t)chunk * ctrl->sector_size;
         if (write) {
             memcpy(ctrl->bounce, cursor, bytes);
-            dma_sync_for_device(ctrl->bounce, bytes);
         }
+        dma_sync_for_device(ctrl->bounce, bytes);
         int ret = nvme_io_cmd(ctrl, write ? NVME_NVM_WRITE : NVME_NVM_READ,
                               lba, chunk);
         if (ret < 0) {
@@ -321,6 +321,47 @@ static uint32_t nvme_sector_size(device_t *dev)
     nvme_controller_t *ctrl = dev ? dev->drv_priv : NULL;
     return ctrl ? ctrl->sector_size : 0;
 }
+
+#ifdef CONFIG_NVME_SMOKE_TEST
+static int nvme_io_smoke_test(device_t *dev, nvme_controller_t *ctrl)
+{
+    size_t max_sectors = NVME_DMA_BYTES / ctrl->sector_size;
+    size_t sectors = max_sectors + 1U;
+    if (ctrl->capacity < sectors)
+        sectors = (size_t)ctrl->capacity;
+    if (!sectors)
+        return -ENODEV;
+
+    size_t bytes = sectors * ctrl->sector_size;
+    uint8_t *written = kmalloc(bytes);
+    uint8_t *read_back = kmalloc(bytes);
+    if (!written || !read_back) {
+        kfree(read_back);
+        kfree(written);
+        return -ENOMEM;
+    }
+    for (size_t i = 0; i < bytes; i++)
+        written[i] = (uint8_t)(0x5aU + i * 37U);
+    memset(read_back, 0, bytes);
+
+    dev->drv_priv = ctrl;
+    int ret = nvme_write(dev, 0, written, sectors);
+    if (ret == 0)
+        ret = nvme_flush(dev);
+    if (ret == 0)
+        ret = nvme_read(dev, 0, read_back, sectors);
+    dev->drv_priv = NULL;
+    if (ret == 0 && memcmp(written, read_back, bytes) != 0)
+        ret = -EIO;
+
+    kfree(read_back);
+    kfree(written);
+    if (ret == 0)
+        kinfo("NVME_IO_SMOKE: PASS sectors=%lu bytes=%lu\n",
+              (unsigned long)sectors, (unsigned long)bytes);
+    return ret;
+}
+#endif
 
 static void nvme_release(nvme_controller_t *ctrl)
 {
@@ -406,6 +447,10 @@ static int nvme_probe(device_t *dev)
                                                &ctrl->bounce_dma);
     if (!ctrl->identify || !ctrl->bounce || nvme_identify(ctrl) < 0)
         goto fail;
+#ifdef CONFIG_NVME_SMOKE_TEST
+    if (nvme_io_smoke_test(dev, ctrl) < 0)
+        goto fail;
+#endif
     dev->drv_priv = ctrl;
     kinfo("[NVME] %s ns%u: %lu sectors, sector=%u\n", dev->name,
           ctrl->namespace_id, (unsigned long)ctrl->capacity,
