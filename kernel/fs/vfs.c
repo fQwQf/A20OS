@@ -18,6 +18,7 @@
 #include "fs/vfs/stat_perm.h"
 #include "fs/file.h"
 #include "fs/fdtable.h"
+#include "ipc/signalfd.h"
 #include "fs/locks.h"
 #include "fs/page_cache.h"
 #include "fs/pipe.h"
@@ -1378,6 +1379,12 @@ int vfs_poll_events(int fd, short events) {
     if (nr >= 0) {
         vfs_put_file_ref(fd, vf);
         return nr;
+    }
+
+    int sr = signalfd_poll_events(vf, events);
+    if (sr >= 0) {
+        vfs_put_file_ref(fd, vf);
+        return sr;
     }
 
     short revents = 0;
