@@ -165,6 +165,7 @@ STEP35_LOG_DIR ?= .eval-state/2026/logs
 WAIT_TIMER_HEAP_MAX ?=
 REQUIRE_TIMEOUT_CAPACITY ?= 0
 REQUIRE_SMP_RUNQUEUE ?= 0
+REQUIRE_LOCK_SPLIT ?= 0
 QEMU_MEMORY ?= 1G
 
 PROTOCOLS_LINES = \
@@ -885,7 +886,22 @@ check-smp-runqueue-boundary:
 	@rg -q "SCHED_STRESS: smp-runqueue PASS" user/cmds/sched_stress.c
 	@echo "check-smp-runqueue-boundary: PASS"
 
-check-doc-test-gates: check-concurrency-foundation check-smp-platform-boundary check-task-state-boundary check-task-lifetime-boundary check-blocking-point-boundary check-signal-exit-boundary check-timeout-ownership-boundary check-smp-runqueue-boundary check-mm-lock-model check-io-progress-model check-vfs-abstraction check-abi-boundary check-driver-core-model check-external-dependency-boundary check-abi-smoke-gate check-doc-drift
+check-process-lock-split-boundary:
+	@rg -q "PROCESS_LOCK_SPLIT_AUDIT" \
+		docs/testing/process-lock-split-audit.md
+	@rg -q "SCHED_LOCAL_PICK_LOCK_SPLIT_BEGIN" kernel/proc/sched.c
+	@rg -Uq 'task_t \*next = proc_runq_pick_local\(\);[[:space:]]*uint64_t flags = spin_lock_irqsave\(&proc_lock\)' \
+		kernel/proc/sched.c
+	@! rg -U --pcre2 \
+		'SCHED_LOCAL_PICK_LOCK_SPLIT_BEGIN(?:(?!SCHED_LOCAL_PICK_LOCK_SPLIT_END)[\s\S])*spin_lock_irqsave\(&proc_lock\)' \
+		kernel/proc/sched.c
+	@! rg -n 'proc_runq_pick_locked' kernel/proc kernel/include/proc
+	@rg -q "runqueue_parallel_pick_peak" \
+		kernel/include/proc/lifetime.h kernel/proc/lifetime.c
+	@rg -q "SCHED_STRESS: lock-split PASS" user/cmds/sched_stress.c
+	@echo "check-process-lock-split-boundary: PASS"
+
+check-doc-test-gates: check-concurrency-foundation check-smp-platform-boundary check-task-state-boundary check-task-lifetime-boundary check-blocking-point-boundary check-signal-exit-boundary check-timeout-ownership-boundary check-smp-runqueue-boundary check-process-lock-split-boundary check-mm-lock-model check-io-progress-model check-vfs-abstraction check-abi-boundary check-driver-core-model check-external-dependency-boundary check-abi-smoke-gate check-doc-drift
 	@rg -q "DOCS_AS_FACT_CONTRACT" docs/testing/testing-gates.md
 	@rg -q "TEST_FIRST_ARCHITECTURE_MATRIX" docs/testing/testing-gates.md
 	@echo "check-doc-test-gates: PASS"
@@ -1549,18 +1565,21 @@ smoke-futex-stress:
 
 .PHONY: check-task-lifetime-boundary check-blocking-point-boundary \
 	check-signal-exit-boundary check-timeout-ownership-boundary \
-	check-smp-runqueue-boundary \
+	check-smp-runqueue-boundary check-process-lock-split-boundary \
 	check-proc-step35 \
 	check-proc-step4 check-proc-step4-local \
 	check-proc-step5 check-proc-step5-local \
 	check-proc-step6 check-proc-step6-local \
 	check-proc-step7 check-proc-step7-local \
+	check-proc-step8 check-proc-step8-local \
 	check-proc-step35-local step35-rv-debug-1c step35-la-debug-1c \
 	step35-rv-release-8c step35-la-release-8c \
 	step6-rv-debug-1c step6-la-debug-1c \
 	step6-rv-release-8c step6-la-release-8c \
 	step7-rv-debug-1c step7-la-debug-1c \
-	step7-rv-release-8c step7-la-release-8c _step35_smoke
+	step7-rv-release-8c step7-la-release-8c \
+	step8-rv-debug-1c step8-la-debug-1c \
+	step8-rv-release-8c step8-la-release-8c _step35_smoke
 
 step35-rv-debug-1c:
 	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 NR_CPUS=1 \
@@ -1646,6 +1665,34 @@ step7-la-release-8c:
 		BUILD_DIR=.kernel-build/step7/loongarch64-release-8c \
 		STEP35_LABEL=step7-loongarch64-release-8c _step35_smoke
 
+step8-rv-debug-1c:
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 NR_CPUS=1 \
+		OPT="-O0 -g -DDEBUG" USER_OPT="-O3" PROFILE=benchmark QEMU_MEMORY=1G \
+		REQUIRE_LOCK_SPLIT=1 NET_HOSTFWD= \
+		BUILD_DIR=.kernel-build/step8/riscv64-debug-1c \
+		STEP35_LABEL=step8-riscv64-debug-1c _step35_smoke
+
+step8-la-debug-1c:
+	$(MAKE) ARCH=loongarch64 ABI=linux BRINGUP=0 NR_CPUS=1 \
+		OPT="-O0 -g -DDEBUG" USER_OPT="-O3" PROFILE=benchmark QEMU_MEMORY=1G \
+		REQUIRE_LOCK_SPLIT=1 NET_HOSTFWD= \
+		BUILD_DIR=.kernel-build/step8/loongarch64-debug-1c \
+		STEP35_LABEL=step8-loongarch64-debug-1c _step35_smoke
+
+step8-rv-release-8c:
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 NR_CPUS=8 \
+		OPT="-O3" USER_OPT="-O3" PROFILE=benchmark QEMU_MEMORY=8G \
+		REQUIRE_SMP_RUNQUEUE=1 REQUIRE_LOCK_SPLIT=1 NET_HOSTFWD= \
+		BUILD_DIR=.kernel-build/step8/riscv64-release-8c \
+		STEP35_LABEL=step8-riscv64-release-8c _step35_smoke
+
+step8-la-release-8c:
+	$(MAKE) ARCH=loongarch64 ABI=linux BRINGUP=0 NR_CPUS=8 \
+		OPT="-O3" USER_OPT="-O3" PROFILE=benchmark QEMU_MEMORY=8G \
+		REQUIRE_SMP_RUNQUEUE=1 REQUIRE_LOCK_SPLIT=1 NET_HOSTFWD= \
+		BUILD_DIR=.kernel-build/step8/loongarch64-release-8c \
+		STEP35_LABEL=step8-loongarch64-release-8c _step35_smoke
+
 _step35_smoke: dev-build
 	@mkdir -p $(STEP35_LOG_DIR)
 	@set -e; \
@@ -1708,6 +1755,20 @@ _step35_smoke: dev-build
 			fi; \
 		done; \
 	fi; \
+	if [ "$(REQUIRE_LOCK_SPLIT)" = "1" ]; then \
+		for marker in \
+			'SCHED_STRESS: lock-split PASS' \
+			'runqueue_local_picks:' \
+			'runqueue_lock_acquires:' \
+			'runqueue_parallel_pick_peak:' \
+			'scheduler_violations: 0'; do \
+			if ! grep -q "$$marker" "$$log"; then \
+				echo "_step35_smoke: missing '$$marker' log=$$log"; \
+				tail -n 120 "$$log"; \
+				exit 1; \
+			fi; \
+		done; \
+	fi; \
 	if [ "$(NR_CPUS)" -gt 1 ] && \
 	   ! grep -Fq '[SMP] $(NR_CPUS)/$(NR_CPUS) configured CPUs online' "$$log"; then \
 		echo "_step35_smoke: not all $(NR_CPUS) CPUs came online log=$$log"; \
@@ -1746,6 +1807,16 @@ check-proc-step7-local: check-task-state-boundary \
 	@git diff --check
 	@echo "check-proc-step7-local: PASS"
 
+check-proc-step8-local: check-task-state-boundary \
+	check-concurrency-foundation check-task-lifetime-boundary \
+	check-blocking-point-boundary check-signal-exit-boundary \
+	check-timeout-ownership-boundary check-smp-runqueue-boundary \
+	check-process-lock-split-boundary \
+	step8-rv-debug-1c step8-la-debug-1c \
+	step8-rv-release-8c step8-la-release-8c
+	@git diff --check
+	@echo "check-proc-step8-local: PASS"
+
 check-proc-step35: check-proc-step35-local \
 	final-eval-rv-cagent final-eval-la-cagent
 	@echo "check-proc-step35: PASS"
@@ -1757,6 +1828,10 @@ check-proc-step6: check-proc-step6-local \
 check-proc-step7: check-proc-step7-local \
 	final-eval-rv-cagent final-eval-la-cagent
 	@echo "check-proc-step7: PASS"
+
+check-proc-step8: check-proc-step8-local \
+	final-eval-rv-cagent final-eval-la-cagent
+	@echo "check-proc-step8: PASS"
 
 check-proc-step4-local: check-blocking-point-boundary check-proc-step35-local
 	@git diff --check
