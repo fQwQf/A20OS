@@ -7,6 +7,12 @@
 | 领域 | 门禁 |
 | --- | --- |
 | 并发基础 | `make check-concurrency-foundation` |
+| task 引用与异步所有权 | `make check-task-lifetime-boundary` |
+| Park/Wake 与阻塞点 | `make check-blocking-point-boundary` |
+| 信号、停止与远程退出 | `make check-signal-exit-boundary` |
+| timeout heap 所有权 | `make check-timeout-ownership-boundary` |
+| SMP runqueue、迁移与抢占 | `make check-smp-runqueue-boundary` |
+| 本地 pick 锁拆分 | `make check-process-lock-split-boundary` |
 | MM/VMA/页表 | `make check-mm-lock-model` |
 | I/O 进展 | `make check-io-progress-model` |
 | VFS 抽象 | `make check-vfs-abstraction` |
@@ -31,8 +37,35 @@
 
 ### 并发基础
 - **How to run**: `make check-concurrency-foundation`
-- **What it checks**: 检查 `SCHEDULER_CONCURRENCY_PREREQS`、`PER_CPU_CURRENT_VALIDATION`、`TASK_STATE_MUTATION_CONTRACT`、`BLOCK_WAKE_PROTOCOL` 等静态契约；并用 `NR_CPUS=2 ALLOW_UNVERIFIED_SMP=1 BRINGUP=1` 构建一次以验证 SMP 基础编译路径。
-- **When it fails**: 检查 `kernel/proc/sched.c`、`kernel/proc/current.c`、`kernel/include/proc/proc.h`、`kernel/include/core/sync.h` 中对应契约字符串是否缺失；若 SMP 编译失败，通常是新增代码持有大锁或违反锁顺序。
+- **What it checks**: 检查 `SCHEDULER_CONCURRENCY_PREREQS`、
+  `SCHEDULER_CPU_OWNERSHIP`、`PER_CPU_CURRENT_VALIDATION`、
+  `TASK_STATE_MUTATION_CONTRACT`、`A20_PARK_WAKE_PROTOCOL` 和
+  `WAIT_QUEUE_PARK_PROTOCOL`；并用两核 bringup 配置验证 SMP 基础编译路径。
+- **When it fails**: 检查 `kernel/proc/{sched,current}.c`、
+  `kernel/include/proc/{proc,park}.h`、`kernel/include/core/sync.h` 中对应
+  契约；不要通过删除所有权字段或放宽门禁来绕过失败。
+
+### Task 引用与异步所有权
+- **How to run**: `make check-task-lifetime-boundary`；双架构累计运行使用
+  `make check-proc-step35-local`。
+- **What it checks**: PID 查询必须返回带引用的 task；task list、PID table、
+  runqueue、dispatch/current、wait/wake 和 timeout owner 的引用能够闭环；
+  `/proc/a20/task_lifetime` 的错误计数与压力测试入口仍然存在；禁止重新引入
+  裸 `proc_find()`。
+- **When it fails**: 检查新增的异步 task 指针是否在发布前 `proc_get()`，
+  并在摘除后的唯一所有者路径 `proc_put()`；比较压力测试前后的 task/ref、
+  wait/wake、timeout 和 zombie 基线。
+
+### Park/Wake 与阻塞点
+- **How to run**: `make check-blocking-point-boundary`；完整累计矩阵使用
+  `make check-proc-step4-local`。
+- **What it checks**: 只有 `task.c`/`park.c` 能发布 `PROC_BLOCKED`，只有
+  scheduler 白名单能直接调用 `proc_make_ready()`；wait queue、futex、
+  timeout 和 wake queue entry 都保存 task 引用与 `wait_seq`；Futex wait
+  在入队前完成用户值二次检查。
+- **When it fails**: 把阻塞路径改成 prepare → 对象锁内重查/link → unlock
+  → commit → unlink/recheck → finish；waker 必须在对象锁内 collect，在
+  解锁后 flush，不能直接写 task 状态。
 
 ### MM/VMA/页表
 - **How to run**: `make check-mm-lock-model`
@@ -88,6 +121,47 @@
 - **How to run**: `make check-signal-exit-boundary`；完整步骤五本地矩阵运行 `make check-proc-step5-local`。
 - **What it checks**: 检查 Park mode 与普通/致命/退出唤醒原因的映射、`signal_state.lock` 所有权、`STOPPED` 的显式恢复路径和远程退出安全边界；禁止信号或退出路径通过 `proc_make_ready()` 绕过 token；确认 `proc_stress` 覆盖停止态隔离、`SIGCONT`、停止态 `SIGKILL`、`sigsuspend` 交接和 eventfd 信号中断。
 - **When it fails**: 先运行 `make PYTHON='conda run --no-capture-output -n a20os python' NETDEV_USER='-netdev user,id=net' smoke-proc-stress` 并查看 `.kernel-build/smoke/proc-stress-riscv64.log`；再检查 `kernel/proc/{signal,park,sched,exit}.c` 的锁顺序与唤醒原因。
+
+### Timeout heap 所有权
+- **How to run**: `make check-timeout-ownership-boundary`；双架构容量和竞态
+  矩阵使用 `make check-proc-step6-local`。
+- **What it checks**: heap entry 保存 deadline、task 引用和 `wait_seq`；
+  cancel/expiry 唯一摘除；容量满与重复注册显式失败；旧 timeout 不能唤醒
+  后续 token；压力测试覆盖 capacity-1、capacity、capacity+1。
+- **When it fails**: 检查 register 失败是否完整回滚 Park prepare，cancel
+  和 expiry 是否都在 `proc_lock` 下先摘除再释放引用，以及 expiry 是否通过
+  `proc_try_wake_locked(task, wait_seq, PROC_WAKE_TIMEOUT)`。
+
+### SMP runqueue、迁移与抢占
+- **How to run**: `make check-smp-runqueue-boundary`；双架构 1 核/8 核矩阵
+  使用 `make check-proc-step7-local`。
+- **What it checks**: 迁移按 CPU 编号升序获取源/目标队列锁；`cpu_id` 只在
+  off-rq 区间改变；per-CPU `need_resched` 是持久状态；IPI handler 只确认
+  通知，调度请求由公共安全点消费；压力测试观察迁移、优先级抢占和 IPI
+  send/ack/consume。
+- **When it fails**: 先检查任务是否同时出现在两个 runqueue，或是否同时设置
+  `on_rq`、`dispatching`、`on_cpu`；再检查远程 enqueue 是否先发布队列状态、
+  后设置请求并发送 IPI。
+
+### 本地 pick 锁拆分
+- **How to run**: `make check-process-lock-split-boundary`；完整累计矩阵使用
+  `make check-proc-step8-local`。
+- **What it checks**: `proc_runq_pick_local()` 内不获取 `proc_lock`，并在本地
+  runqueue 锁下原子完成 `on_rq -> dispatching` 与引用转交；调用者释放
+  runqueue 锁后才获取 `proc_lock`；运行时统计能观察并行 pick 与锁争用。
+- **When it fails**: 不要恢复旧的全局 pick 锁。检查 picker 是否在队列锁内
+  调用需要 `proc_lock` 的 helper，或 unpick/switch completion 是否丢失
+  dispatch 引用。
+
+### Proc/Sched 累计矩阵
+- **How to run**: `make check-proc-step8-local`；包含正式双架构 CAgent 时运行
+  `make check-proc-step8`。
+- **What it checks**: 依次包含 task state、引用生命周期、阻塞点、信号/退出、
+  timeout、SMP runqueue 和本地 pick 门禁，并在 RISC-V64/LoongArch64 的
+  debug/release、1 核/8 核组合中运行 scheduler、futex、process、I/O、
+  VFS 和 socket 压力测试。
+- **When it fails**: 从失败日志中的首个 invariant、引用计数或 lock warning
+  开始定位；后续 timeout 往往只是首个所有权错误的结果。
 
 ### Native ABI 测试
 - **How to run**: `make native-minimal` 或 `make native-test` 生成并运行原生测试；`make smoke-native-handle` 在 QEMU 中运行 handle dup/transfer 覆盖。`user/tests/test_liba20c.c` 是 liba20c 内部测试源文件，随 `native-test` 或用户态构建编译。

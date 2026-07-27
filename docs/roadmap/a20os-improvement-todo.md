@@ -4,12 +4,44 @@
 
 ## P0：并发与 SMP 就绪
 
-- [x] 在默认启用多核构建前，用可通过的 SMP 验证门禁替换当前 `NR_CPUS != 1` 的构建期阻断。
-  - 证据：`Makefile` 直接允许已验证的 RISC-V 64、AArch64、LoongArch64 和 x86_64 QEMU virt SMP 构建，其他平台仍需 `ALLOW_UNVERIFIED_SMP=1`；`kernel/proc/sched.c` 列出了 scheduler/MM/VFS 并发前置条件。
-  - 完成条件：`make NR_CPUS=2 check-concurrency-foundation` 无需 override flag 即可通过。
-- [x] 审计每个 task 状态转换是否符合 `proc_lock -> runq_lock` 顺序契约。
-  - 证据：`kernel/include/core/lock.h` 定义全局锁顺序；`kernel/proc/sched.c` 依赖 per-CPU runqueue 状态。
-  - 完成条件：fork、exec、exit、wait、signal wake、timer wake、futex wake 和 wait-queue wake 都被运行时压力测试覆盖。
+- [x] 建立 tokenized Park/Wake，消除“检查条件后、真正睡眠前”的丢失唤醒窗口。
+  - 证据：`kernel/include/proc/park.h` 的 `A20_PARK_WAKE_PROTOCOL` 与
+    `kernel/include/core/sync.h` 的 `WAIT_QUEUE_PARK_PROTOCOL`；wait queue、
+    futex、timeout 和 wake queue 都保存 task 引用及 `wait_seq`。
+  - 验证：`make check-blocking-point-boundary`。
+- [x] 收口 task 引用与异步所有权。
+  - 证据：PID 查询使用 `proc_find_get()`；task list、PID table、runqueue、
+    dispatch/current、wait/wake 和 timeout owner 都有显式引用交接；
+    `/proc/a20/task_lifetime` 提供基线与错误计数。
+  - 验证：`make check-task-lifetime-boundary` 和
+    `make check-proc-step35-local`。
+- [x] 统一信号、停止态和远程退出协议。
+  - 证据：`signal_state.lock` 保护共享 action/pending 与 task mask 交接；
+    `PROC_STOPPED` 使用显式 resume；远程退出发布 `exit_pending`，不再把任意
+    blocked task 直接改为 READY。
+  - 验证：`make check-signal-exit-boundary` 和
+    `make check-proc-step5-local`。
+- [x] 关闭 timeout heap 的引用、取消、过期和容量边界。
+  - 证据：heap entry 保存 `(deadline, task, wait_seq)`；cancel/expiry
+    唯一摘除；容量失败向 syscall 传播；压力测试覆盖 capacity±1 和 stale
+    timeout isolation。
+  - 验证：`make check-timeout-ownership-boundary` 和
+    `make check-proc-step6-local`。
+- [x] 建立 SMP runqueue 迁移和持久抢占请求。
+  - 证据：`on_rq -> dispatching -> on_cpu` 所有权链；跨队列迁移按 CPU
+    编号升序锁定；per-CPU `need_resched` 由安全点消费，IPI 只负责通知。
+  - 验证：`make check-smp-runqueue-boundary` 和
+    `make check-proc-step7-local`。
+- [x] 从本地 pick 热路径移除全局 `proc_lock`。
+  - 证据：`proc_runq_pick_local()` 只持本 CPU runqueue 锁完成
+    `on_rq -> dispatching`，释放队列锁后调用者才获取 `proc_lock`；
+    `/proc/a20/task_lifetime` 暴露 pick、争用和并行峰值。
+  - 验证：`make check-process-lock-split-boundary` 和
+    `make check-proc-step8-local`。
+- [x] 修复低地址用户 `execve` 参数在 identity-mapped 架构上的来源误判。
+  - 证据：`proc_exec()` 始终按用户指针复制 `argv/envp`；
+    `proc_stress` 在 `0x02000000` 构造参数数组。
+  - 验证：双架构 `PROC_STRESS: low-user-argv PASS` 和正式 CAgent 10/10。
 - [x] 将仍依赖单线程执行的 MM 路径改为在 VMA 和页表修改期间持有 `mm->lock`。
   - 证据：`kernel/include/mm/vm.h` 说明部分路径仍依赖单线程执行或更窄的局部锁。
   - 完成条件：`make check-mm-lock-model` 包含 concurrent mmap、munmap、fault、fork COW 和 exit teardown 的行为测试。
@@ -146,10 +178,13 @@
 
 ## 验证环境说明
 
-- 本环境未安装 `aarch64-linux-gnu-gcc`，因此无法在这里运行 `check-aarch64-bringup`、`check-aarch64-user` 和 `smoke-aarch64`。
-- 本环境未安装 `qemu-system-x86_64`，因此无法运行 `smoke-x86_64`，但 x86_64 内核构建（`ARCH=x86_64 ABI=both BRINGUP=1 kernel-only`）可以成功。
-- 架构边界与本次相关静态门禁通过：`check-arch-boundary`、`check-mm-lock-model`。`check-abi-boundary` 当前因仓库未包含 Makefile 引用的 `scripts/gen_linux_syscall_coverage.py` 而无法执行，这一缺失与本次架构修复无关。
-- 在本 host 上成功运行的 smoke 测试（riscv64/loongarch64 bringup 在 bringup 模式下按设计 timeout）：`smoke-riscv64`、`smoke-loongarch64`、`smoke-abi-linux`、`smoke-proc-a20`、`smoke-vfs-stress`、`smoke-mm-stress`、`smoke-proc-stress`、`smoke-sched-stress`、`smoke-futex-stress`、`smoke-native-handle`。
-- `smoke-arch-mmu-matrix` 已在 QEMU 中验证 `arm32`、`aarch64`、`riscv64`、`riscv32` 的 MMU/NOMMU 八种组合均可进入 shell、执行 shell builtin 和外部程序并正常关机。
-- NOMMU 支持集合已显式限制为上述四个架构；LoongArch64、x86_64、PPC64LE 等未实现组合会在构建入口报错，不再暴露伪支持配置。
-- 用户态构建产物已按 `user/build/<arch>[-nommu]/` 隔离；不同架构/MMU 组合可并行构建。仍应避免并发 smoke 复用相同 QEMU 端口等外部资源。
+- 文档不再固化某一台 host 的工具缺失状态。工具链和 QEMU 可用性由对应
+  build/smoke 目标在运行时报告。
+- Proc/Sched 的当前累计静态门禁是 `make check-doc-test-gates`；双架构
+  debug/release、1 核/8 核运行矩阵是 `make check-proc-step8-local`。
+- 需要同时验证正式比赛 workload 时运行 `make check-proc-step8`，它会追加
+  RISC-V64 与 LoongArch64 正式 CAgent。
+- 项目 Python 命令统一通过 conda 环境 `a20os`；正式入口负责记录 QEMU
+  命令、镜像哈希、退出状态、timeout、guest CPU 与 judge 状态。
+- NOMMU 支持集合由构建入口和 `smoke-arch-mmu-matrix` 验证，不以本文中的
+  历史成功列表代替当前运行结果。
