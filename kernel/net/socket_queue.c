@@ -1,4 +1,5 @@
 #include "net/socket_internal.h"
+#include "fs/file.h"
 #include "mm/objcache.h"
 #include "sys/bpf.h"
 #include "core/string.h"
@@ -14,7 +15,20 @@ net_msg_t *net_msg_alloc(void)
 
 void net_msg_free(net_msg_t *m)
 {
+    if (!m)
+        return;
+    for (int i = 0; i < m->scm_nfiles; i++)
+        vfile_put_ref_only(m->scm_files[i]);
+    m->scm_nfiles = 0;
     obj_cache_free(&g_net_msg_cache, m);
+}
+
+void net_scm_drop_files(vfile_t **files, int nfiles)
+{
+    if (!files)
+        return;
+    for (int i = 0; i < nfiles; i++)
+        vfile_put_ref_only(files[i]);
 }
 
 int net_enqueue_msg_locked_meta(net_socket_t *dst, const void *buf, size_t len,
@@ -65,6 +79,25 @@ int net_enqueue_msg_locked(net_socket_t *dst, const void *buf, size_t len,
                            const void *addr, size_t addrlen)
 {
     return net_enqueue_msg_locked_meta(dst, buf, len, addr, addrlen, NULL);
+}
+
+int net_enqueue_msg_locked_fds(net_socket_t *dst, const void *buf,
+                               size_t len, const void *addr,
+                               size_t addrlen,
+                               vfile_t **files, int nfiles)
+{
+    if (nfiles < 0 || nfiles > NET_SCM_MAX_FDS)
+        return -EINVAL;
+    int r = net_enqueue_msg_locked(dst, buf, len, addr, addrlen);
+    if (r < 0)
+        return r;
+    if (nfiles > 0 && files) {
+        net_msg_t *m = dst->rx_tail;
+        m->scm_nfiles = nfiles;
+        for (int i = 0; i < nfiles; i++)
+            m->scm_files[i] = files[i];
+    }
+    return r;
 }
 
 int net_enqueue_msg_blocking(net_socket_t *s, net_socket_t *dst, const void *buf, size_t len,
@@ -211,6 +244,25 @@ int net_dequeue_msg_locked_meta(net_socket_t *s, void *buf, size_t len,
         memcpy(meta->pktinfo_addr, m->pktinfo_addr, sizeof(meta->pktinfo_addr));
         meta->hoplimit = m->hoplimit;
         meta->tclass = m->tclass;
+        /* SCM_RIGHTS fds attach to the first byte of the message: they
+         * are delivered exactly once, with the first dequeue.  Appends to
+         * any fds already collected from earlier messages in the same
+         * recv; overflow stays attached and is dropped when the message
+         * is freed. */
+        if (m->off == 0 && m->scm_nfiles > 0) {
+            for (int i = 0; i < m->scm_nfiles; i++) {
+                if (meta->scm_nfiles < NET_SCM_MAX_FDS) {
+                    meta->scm_files[meta->scm_nfiles++] = m->scm_files[i];
+                    m->scm_files[i] = NULL;
+                }
+            }
+            int left = 0;
+            for (int i = 0; i < m->scm_nfiles; i++) {
+                if (m->scm_files[i])
+                    m->scm_files[left++] = m->scm_files[i];
+            }
+            m->scm_nfiles = left;
+        }
     }
 
     if (s->type == SOCK_STREAM && n < avail) {

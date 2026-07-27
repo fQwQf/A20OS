@@ -23,11 +23,13 @@ struct vfile;
 #define MSG_PEEK       0x0002
 #define MSG_TRUNC      0x0020
 #define MSG_DONTWAIT   0x0040
+#define MSG_CTRUNC     0x0008
 #define MSG_NOSIGNAL   0x4000
 #define MSG_WAITFORONE 0x10000
-
+#define MSG_CMSG_CLOEXEC 0x40000000
 #define SOL_SOCKET   1
 #define SOL_NETLINK  270
+#define SCM_RIGHTS   1
 #define SOL_ALG      279
 #define NETLINK_SOCK_DIAG 4
 #define IPPROTO_IP   0

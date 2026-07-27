@@ -200,8 +200,10 @@ int net_unix_socket_connect(net_socket_t *s, const void *addr, size_t addrlen)
     return 0;
 }
 
-int net_unix_socket_sendto(net_socket_t *s, const void *buf, size_t len,
-                           const void *addr, size_t addrlen)
+static int net_unix_socket_sendto_impl(net_socket_t *s, const void *buf,
+                                       size_t len, const void *addr,
+                                       size_t addrlen,
+                                       vfile_t **files, int nfiles)
 {
     if (!s)
         return -ENOTSOCK;
@@ -238,7 +240,12 @@ int net_unix_socket_sendto(net_socket_t *s, const void *buf, size_t len,
         spin_unlock_irqrestore(&g_net_lock, irq);
         return dst_addr ? -ECONNREFUSED : -EDESTADDRREQ;
     }
-    int r = net_enqueue_msg_locked(dst, buf, len, s->local, s->local_len);
+    /*
+     * On success the enqueued message takes ownership of the fd
+     * references; on failure the caller still owns them.
+     */
+    int r = net_enqueue_msg_locked_fds(dst, buf, len, s->local, s->local_len,
+                                       files, nfiles);
     proc_wake_q_t wake_q;
     proc_wake_q_init(&wake_q);
     if (r >= 0)
@@ -247,4 +254,19 @@ int net_unix_socket_sendto(net_socket_t *s, const void *buf, size_t len,
     spin_unlock_irqrestore(&g_net_lock, irq);
     (void)proc_wake_q_flush(&wake_q);
     return r;
+}
+
+int net_unix_socket_sendto(net_socket_t *s, const void *buf, size_t len,
+                           const void *addr, size_t addrlen)
+{
+    return net_unix_socket_sendto_impl(s, buf, len, addr, addrlen, NULL, 0);
+}
+
+int net_unix_socket_sendto_fds(net_socket_t *s, const void *buf,
+                               size_t len, const void *addr,
+                               size_t addrlen,
+                               vfile_t **files, int nfiles)
+{
+    return net_unix_socket_sendto_impl(s, buf, len, addr, addrlen,
+                                       files, nfiles);
 }
