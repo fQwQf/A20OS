@@ -5,6 +5,7 @@ Requires ImageMagick (convert) to render SVG to ARGB8888 raster.
 Usage: gen_breeze_cursor.py <output.c> [<breeze-dir>]
 """
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -25,8 +26,17 @@ if not os.path.exists(SVG):
 
 with tempfile.TemporaryDirectory() as tmp:
     png = os.path.join(tmp, "default.png")
+    if shutil.which("convert"):
+        command = ["convert", "-density", "96", "-background", "none", SVG,
+                   "PNG32:" + png]
+    elif shutil.which("ffmpeg"):
+        command = ["ffmpeg", "-loglevel", "error", "-i", SVG, "-frames:v", "1",
+                   "-pix_fmt", "rgba", png]
+    else:
+        print("error: ImageMagick convert or FFmpeg is required", file=sys.stderr)
+        sys.exit(1)
     subprocess.run(
-        ["convert", "-density", "96", "-background", "none", SVG, "PNG32:" + png],
+        command,
         check=True,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,

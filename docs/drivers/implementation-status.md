@@ -45,13 +45,13 @@ QEMU x86_64 与 RISC-V64 GUI 的 VirtIO GPU、键盘和鼠标分别由 `make smo
 | virtio-gpu | DISPLAY | class registry、framebuffer 页释放和 transport reset；单实例、同步 controlq |
 | VirtIO-SCSI | BLOCK | VirtualBox ARM 已验证，remove 复位/释放槽；只支持 target/LUN 0、READ/WRITE(10)、512B sector、轮询 |
 | AHCI | BLOCK | VirtualBox x86_64；单 controller/单 port/单 slot、LBA48、轮询；probe 回滚和 remove 释放 DMA/IRQ |
-| NVMe | BLOCK | 架构无关 PCI class 驱动；x86_64 与 LoongArch64 构建，LoongArch QEMU 已验证 BAR、admin/I/O queue、Identify，以及跨 8 KiB bounce chunk 的写入/flush/读回比较；首个活动 namespace、轮询、每 controller 只发布一个 namespace |
+| NVMe | BLOCK | 架构无关 PCI class 驱动；x86_64 与 LoongArch64 构建，LoongArch QEMU 已验证 BAR、CAP、admin/I/O queue、Identify，以及跨 8 KiB bounce chunk 的写入/flush/读回比较；要求 NVM command set 和兼容 4 KiB memory page，首个活动 namespace、轮询、每 controller 只发布一个 namespace |
 | E1000 | NET | VirtualBox 82540EM，轮询 ring，已加 stop/remove；静态单实例 |
 | VMSVGA/SVGAv3 | DISPLAY | VirtualBox x86_64/ARM，BAR offset/pitch 边界和 class registry，已加 remove；静态单实例 |
 | xHCI HID | INPUT | VBox ARM keyboard/mouse/tablet，class、轮询和 controller stop/remove；只匹配 `8086:1e31`，静态单 controller |
 | PS/2 | x86 板级服务 | 提供基础键鼠控制器服务；可复用输入设备使用 `DEV_CLASS_INPUT` |
-| PC Speaker | AUDIO | x86 platform device，动态 `/dev/audioN`；支持有界 tone/stop ABI，不冒充 PCM |
-| Intel HDA | AUDIO | 架构无关 PCI class 驱动；x86_64 与 LoongArch64 QEMU 已完成 BDL DMA smoke；自动发现 codec、AFG、DAC 和输出 pin，支持 48 kHz 双声道 S16_LE PCM、同步播放、stop 和完整 remove |
+| PC Speaker | AUDIO | x86 platform device，动态 `/dev/audioN`；支持 19 Hz–20 kHz 有界 tone/stop ABI，不冒充 PCM |
+| Intel HDA | AUDIO | 架构无关 PCI class 驱动；x86_64 与 LoongArch64 QEMU 已完成 BDL DMA smoke，x86_64 已完成用户态 tone 到 QEMU WAV 的非零采样验证，两个 `run-gui` 目标连接宿主音频；自动发现 codec、AFG、DAC 和输出 pin，支持 48 kHz 双声道 S16_LE PCM、同步播放、stop、完整 remove，以及用户态 WAV/raw/tone 播放器 |
 | STM32 SDIO | BLOCK | 统一类 + MCU bridge；板级 bus 仍用名称匹配 |
 | STM32 简单外设 | 允许例外 | 板级轮询轻量 API，不强制统一对象；扩展到多实例/用户 ABI 时必须迁移 |
 | StarFive/LS2K GMAC、DW SDIO | 有条件 | 单实例轮询并依赖外部串行化，SMP/IRQ 化前必须增加实例锁 |

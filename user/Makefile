@@ -680,6 +680,9 @@ $(OBJ_DIR)/cmds/%.o: cmds/%.c Makefile | build_dir musl_prepare
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
 
+$(OBJ_DIR)/cmds/audioplay.o: CFLAGS += -I../kernel/include
+$(OBJ_DIR)/cmds/audioplay.o: ../kernel/include/uapi/a20/audio.h
+
 $(OBJ_DIR)/sbase/%.o: $(SBASE_DIR)/%.c Makefile | build_dir musl_prepare
 	@mkdir -p $(dir $@)
 	$(CC) $(SBASE_CFLAGS) -c $< -o $@

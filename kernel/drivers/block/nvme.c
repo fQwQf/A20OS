@@ -24,6 +24,7 @@
 #define NVME_REG_DBS   0x1000U
 
 #define NVME_CC_EN             1U
+#define NVME_CC_MPS_SHIFT      7U
 #define NVME_CSTS_RDY          1U
 #define NVME_CSTS_CFS          2U
 #define NVME_ADMIN_CREATE_SQ   0x01U
@@ -35,10 +36,17 @@
 #define NVME_NVM_READ          0x02U
 #define NVME_FID_NUM_QUEUES    0x07U
 
+#define NVME_CAP_CSS_NVM       (1ULL << 37)
+#define NVME_CAP_TO_SHIFT      24U
+#define NVME_CAP_TO_MASK       0xffU
+#define NVME_CAP_MPSMIN_SHIFT  48U
+#define NVME_CAP_MPSMAX_SHIFT  52U
+#define NVME_CAP_MPS_MASK      0x0fU
+
 #define NVME_ADMIN_DEPTH 16U
 #define NVME_IO_DEPTH    64U
 #define NVME_DMA_BYTES   (2U * PAGE_SIZE)
-#define NVME_TIMEOUT_MS  5000U
+#define NVME_COMMAND_TIMEOUT_MS 5000U
 
 typedef struct __attribute__((packed)) nvme_sqe {
     uint32_t cdw0;
@@ -66,6 +74,7 @@ typedef struct __attribute__((packed)) nvme_cqe {
 
 _Static_assert(sizeof(nvme_sqe_t) == 64, "NVMe SQE size");
 _Static_assert(sizeof(nvme_cqe_t) == 16, "NVMe CQE size");
+_Static_assert(PAGE_SIZE_BITS >= 12, "NVMe page size encoding");
 
 typedef struct nvme_queue {
     nvme_sqe_t *sq;
@@ -84,6 +93,7 @@ typedef struct nvme_queue {
 typedef struct nvme_controller {
     uintptr_t regs;
     uint32_t stride;
+    uint32_t ready_timeout_ms;
     uint32_t namespace_id;
     uint32_t sector_size;
     uint64_t capacity;
@@ -102,9 +112,36 @@ static inline volatile void *nvme_reg(nvme_controller_t *ctrl, uint32_t off)
     return (volatile void *)(ctrl->regs + off);
 }
 
+static int nvme_capabilities_supported(uint64_t cap)
+{
+    uint32_t memory_page_size = PAGE_SIZE_BITS - 12U;
+    uint32_t minimum = (uint32_t)(cap >> NVME_CAP_MPSMIN_SHIFT) &
+                       NVME_CAP_MPS_MASK;
+    uint32_t maximum = (uint32_t)(cap >> NVME_CAP_MPSMAX_SHIFT) &
+                       NVME_CAP_MPS_MASK;
+    return (cap & NVME_CAP_CSS_NVM) && minimum <= memory_page_size &&
+           memory_page_size <= maximum;
+}
+
+#ifdef CONFIG_NVME_SMOKE_TEST
+static int nvme_capability_smoke_test(void)
+{
+    uint64_t compatible = NVME_CAP_CSS_NVM;
+    uint64_t page_too_small = NVME_CAP_CSS_NVM |
+                              (1ULL << NVME_CAP_MPSMIN_SHIFT) |
+                              (1ULL << NVME_CAP_MPSMAX_SHIFT);
+    if (!nvme_capabilities_supported(compatible) ||
+        nvme_capabilities_supported(0) ||
+        nvme_capabilities_supported(page_too_small))
+        return -EIO;
+    kinfo("NVME_CAP_SMOKE: PASS\n");
+    return 0;
+}
+#endif
+
 static int nvme_wait_ready(nvme_controller_t *ctrl, int ready)
 {
-    for (unsigned ms = 0; ms < NVME_TIMEOUT_MS; ms++) {
+    for (unsigned ms = 0; ms < ctrl->ready_timeout_ms; ms++) {
         uint32_t csts = readl(nvme_reg(ctrl, NVME_REG_CSTS));
         if (csts & NVME_CSTS_CFS)
             return -EIO;
@@ -153,7 +190,7 @@ static int nvme_submit(nvme_controller_t *ctrl, nvme_queue_t *q,
     q->sq_tail = (uint16_t)((tail + 1U) % q->depth);
     writel(q->sq_tail, q->sq_db);
 
-    for (unsigned ms = 0; ms < NVME_TIMEOUT_MS; ms++) {
+    for (unsigned ms = 0; ms < NVME_COMMAND_TIMEOUT_MS; ms++) {
         nvme_cqe_t *cqe = &q->cq[q->cq_head];
         dma_sync_for_cpu(cqe, sizeof(*cqe));
         if ((cqe->status & 1U) != q->phase) {
@@ -399,6 +436,19 @@ static int nvme_probe(device_t *dev)
     ctrl->regs = (uintptr_t)bar->start;
     mutex_init(&ctrl->io_lock);
     uint64_t cap = readq(nvme_reg(ctrl, NVME_REG_CAP));
+    ctrl->ready_timeout_ms =
+        (((uint32_t)(cap >> NVME_CAP_TO_SHIFT) & NVME_CAP_TO_MASK) + 1U) *
+        500U;
+#ifdef CONFIG_NVME_SMOKE_TEST
+    if (nvme_capability_smoke_test() < 0)
+        goto fail;
+#endif
+    if (!nvme_capabilities_supported(cap)) {
+        kinfo("[NVME] %s: unsupported command set or memory page size\n",
+              dev->name);
+        kfree(ctrl);
+        return -EOPNOTSUPP;
+    }
     ctrl->stride = 4U << ((cap >> 32) & 0x0fU);
     uint64_t required_bar = NVME_REG_DBS + 3ULL * ctrl->stride + 4U;
     uint64_t bar_size = bar->end - bar->start + 1U;
@@ -425,7 +475,8 @@ static int nvme_probe(device_t *dev)
     writel(aqa, nvme_reg(ctrl, NVME_REG_AQA));
     writeq(ctrl->admin.sq_dma, nvme_reg(ctrl, NVME_REG_ASQ));
     writeq(ctrl->admin.cq_dma, nvme_reg(ctrl, NVME_REG_ACQ));
-    writel(NVME_CC_EN | (6U << 16) | (4U << 20),
+    writel(NVME_CC_EN | ((PAGE_SIZE_BITS - 12U) << NVME_CC_MPS_SHIFT) |
+               (6U << 16) | (4U << 20),
            nvme_reg(ctrl, NVME_REG_CC));
     if (nvme_wait_ready(ctrl, 1) < 0)
         goto fail;

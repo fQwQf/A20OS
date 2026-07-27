@@ -20,12 +20,15 @@ make check-driver-core-model
 make check-doc-drift
 make smoke-driver-lifecycle
 make smoke-hda
+make smoke-audio-userspace
 make smoke-pci-portability
 ```
 
 `smoke-driver-lifecycle` 用 RISC-V64 bringup 配置和 `CONFIG_DRIVER_LIFECYCLE_TEST=y` 启动合成 bus/device，验证注册、probe 失败解绑、class 发布、unregister 下线、陈旧引用返回 `-ENODEV` 和重新 probe；宿主需要能运行仓库配置的 QEMU。只改平台私有轻量设备时可以不跑它，但修改 driver core、bus 或生命周期代码时必须跑。
 
 `smoke-hda` 在 x86_64 q35 上挂载 Intel HDA controller 和 duplex codec，验证 codec 拓扑识别、audio class 绑定以及一段静音 PCM 的 BDL DMA 完成。该测试使用 QEMU null audio backend，不依赖宿主声卡。
+
+`smoke-audio-userspace` 构建完整 x86_64 用户态，在来宾 shell 中执行 `audioplay --tone 440 --duration 500`，再由 QEMU WAV backend 捕获 HDA 输出。测试同时检查驱动绑定、命令成功、正常关机和 WAV 中的非零 PCM 采样，因此覆盖 UAPI、devfs、用户态短写循环、HDA DMA 与 QEMU codec 的完整链路，且不依赖宿主声卡服务。
 
 `smoke-pci-portability` 在 LoongArch64 QEMU virt 上同时挂载 HDA 和 NVMe，验证未分配零值 BAR 的 sizing/assignment、HDA PCM DMA、NVMe queue/Identify 以及两个 class 绑定。目标创建专用 128 MiB 可丢弃镜像，写入超过单次 8 KiB bounce chunk 的数据，再执行 flush、读回和比较。`CONFIG_NVME_SMOKE_TEST` 会从 LBA 0 开始改写介质，只能由该目标配合自动生成的镜像启用。
 

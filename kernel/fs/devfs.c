@@ -831,7 +831,8 @@ static int devfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
             dynamic->rdev = cdev->devt;
             dynamic->class_dev = cdev;
             dynamic->dynamic = 1;
-            vn->ino = 0x10000U + cdev->index;
+            vn->ino = 0x10000U + ((uint64_t)cdev->class_type << 8) +
+                      cdev->index;
             vn->type = VFS_FT_REGULAR;
             vn->mode = (cdev->class_type == DEV_CLASS_BLOCK ? S_IFBLK : S_IFCHR) | 0660;
             vnode_ref_init(vn, 1);
@@ -882,9 +883,15 @@ static int devfs_stat(vnode_t *vn, kstat_t *st) {
         st->st_gid = 0;
         st->st_nlink = 2;
         st->st_blksize = 4096;
-    } else if (node->kind == DEVFS_LOOP ||
-               (node->kind == DEVFS_CLASS && node->class_dev &&
-                node->class_dev->class_type == DEV_CLASS_BLOCK)) {
+    } else if (node->kind == DEVFS_CLASS && node->class_dev) {
+        st->st_mode = (node->class_dev->class_type == DEV_CLASS_BLOCK ?
+                       S_IFBLK : S_IFCHR) | 0660;
+        st->st_rdev = node->rdev;
+        st->st_uid = 0;
+        st->st_gid = 0;
+        st->st_nlink = 1;
+        st->st_blksize = 4096;
+    } else if (node->kind == DEVFS_LOOP) {
         st->st_mode = S_IFBLK | 0660;
         st->st_rdev = node->rdev;
         st->st_uid = 0;
