@@ -216,13 +216,7 @@ static void handle_timer_irq(int from_user) {
     kernel_progress_timer_tick();
     timer_set_interval(proc_next_timer_interval(timer_get_ticks()));
     gic_eoi(IRQ_S_TIMER);
-    if (!from_user)
-        return;
-
-    task_t *cur = proc_current();
-    if (cur)
-        cur->total_time++;
-    proc_yield();
+    proc_sched_tick(from_user);
 }
 
 void trap_init(void) {
@@ -241,8 +235,7 @@ void arch_handle_irq(uint64_t irq, int from_user) {
 
     if (irq == GIC_RESCHEDULE_SGI) {
         gic_eoi(GIC_RESCHEDULE_SGI);
-        if (from_user)
-            proc_yield();
+        proc_sched_handle_reschedule_ipi();
         return;
     }
 

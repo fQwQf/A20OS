@@ -44,8 +44,11 @@ static int proc_switch_complete_locked(unsigned cpu)
      * CPU. It becomes queueable only after execution has continued on the
      * replacement stack.
      */
-    if (old->state == PROC_READY && !old->dispatching && !old->on_rq)
+    if (old->state == PROC_READY && !old->dispatching && !old->on_rq) {
         proc_runq_enqueue_locked(old);
+        if (old->on_rq && proc_sched_should_preempt_locked(old, cpu))
+            proc_sched_request_cpu(cpu, 1);
+    }
     proc_sched_assert_task_locked(old);
 
     int zombie = old->state == PROC_ZOMBIE;

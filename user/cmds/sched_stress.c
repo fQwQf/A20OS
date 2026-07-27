@@ -1,11 +1,15 @@
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <sched.h>
+#include <signal.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/resource.h>
 #include <sys/syscall.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #ifndef SYS_sched_setattr
@@ -67,10 +71,74 @@ struct sched_attr_compat {
     unsigned long sched_period;
 };
 
+typedef struct sched_diag {
+    unsigned long runqueue_migrations;
+    unsigned long resched_requests;
+    unsigned long resched_priority_requests;
+    unsigned long resched_ipi_sent;
+    unsigned long resched_ipi_acks;
+    unsigned long resched_consumed;
+    unsigned long scheduler_violations;
+    unsigned seen;
+} sched_diag_t;
+
+enum {
+    SEEN_MIGRATIONS = 1U << 0,
+    SEEN_REQUESTS = 1U << 1,
+    SEEN_PRIORITY_REQUESTS = 1U << 2,
+    SEEN_IPI_SENT = 1U << 3,
+    SEEN_IPI_ACKS = 1U << 4,
+    SEEN_CONSUMED = 1U << 5,
+    SEEN_VIOLATIONS = 1U << 6,
+    SEEN_SCHED_DIAG_ALL = (1U << 7) - 1,
+};
+
 static int fail(const char *what)
 {
     printf("SCHED_STRESS: FAIL %s errno=%d\n", what, errno);
     return 1;
+}
+
+static int read_sched_diag(sched_diag_t *diag)
+{
+    memset(diag, 0, sizeof(*diag));
+    FILE *fp = fopen("/proc/a20/task_lifetime", "r");
+    if (!fp)
+        return fail("open-sched-diag");
+
+    char line[128];
+    while (fgets(line, sizeof(line), fp)) {
+        char key[64];
+        unsigned long value;
+        if (sscanf(line, "%63[^:]: %lu", key, &value) != 2)
+            continue;
+        if (strcmp(key, "runqueue_migrations") == 0) {
+            diag->runqueue_migrations = value;
+            diag->seen |= SEEN_MIGRATIONS;
+        } else if (strcmp(key, "resched_requests") == 0) {
+            diag->resched_requests = value;
+            diag->seen |= SEEN_REQUESTS;
+        } else if (strcmp(key, "resched_priority_requests") == 0) {
+            diag->resched_priority_requests = value;
+            diag->seen |= SEEN_PRIORITY_REQUESTS;
+        } else if (strcmp(key, "resched_ipi_sent") == 0) {
+            diag->resched_ipi_sent = value;
+            diag->seen |= SEEN_IPI_SENT;
+        } else if (strcmp(key, "resched_ipi_acks") == 0) {
+            diag->resched_ipi_acks = value;
+            diag->seen |= SEEN_IPI_ACKS;
+        } else if (strcmp(key, "resched_consumed") == 0) {
+            diag->resched_consumed = value;
+            diag->seen |= SEEN_CONSUMED;
+        } else if (strcmp(key, "scheduler_violations") == 0) {
+            diag->scheduler_violations = value;
+            diag->seen |= SEEN_VIOLATIONS;
+        }
+    }
+    fclose(fp);
+    if (diag->seen != SEEN_SCHED_DIAG_ALL)
+        return fail("parse-sched-diag");
+    return 0;
 }
 
 static int priority_bounds(void)
@@ -122,6 +190,8 @@ static int affinity_roundtrip(void)
         return fail("getaffinity");
     if ((mask[0] & 1U) == 0)
         return fail("affinity-missing-cpu0");
+    unsigned char original[sizeof(mask)];
+    memcpy(original, mask, sizeof(original));
 
     /*
      * Step 3.5 validates affinity accounting but deliberately does not require
@@ -156,6 +226,281 @@ static int affinity_roundtrip(void)
     errno = 0;
     if (syscall(SYS_sched_setaffinity, 0, sizeof(empty), empty) == 0 || errno != EINVAL)
         return fail("setaffinity-empty");
+    if (syscall(SYS_sched_setaffinity, 0, sizeof(original), original) < 0)
+        return fail("restore-affinity");
+    return 0;
+}
+
+static int wait_byte(int fd, char *value, int timeout_ms)
+{
+    struct pollfd pfd = {
+        .fd = fd,
+        .events = POLLIN,
+    };
+    int ready = poll(&pfd, 1, timeout_ms);
+    if (ready != 1 || !(pfd.revents & POLLIN))
+        return -1;
+    return read(fd, value, 1) == 1 ? 0 : -1;
+}
+
+static int set_single_cpu_retry(pid_t pid, unsigned cpu)
+{
+    unsigned char mask[8] = {0};
+    if (cpu >= sizeof(mask) * 8)
+        return -1;
+    mask[cpu / 8] = (unsigned char)(1U << (cpu % 8));
+    for (int attempt = 0; attempt < 10000; attempt++) {
+        if (syscall(SYS_sched_setaffinity, pid, sizeof(mask), mask) == 0)
+            return 0;
+        if (errno != EINVAL && errno != ESRCH)
+            return -1;
+        syscall(SYS_sched_yield);
+    }
+    return -1;
+}
+
+static int wait_child_ok(pid_t pid)
+{
+    int status = 0;
+    if (waitpid(pid, &status, 0) != pid)
+        return -1;
+    return WIFEXITED(status) && WEXITSTATUS(status) == 0 ? 0 : -1;
+}
+
+static int smp_runqueue_preempt(void)
+{
+    unsigned char original[8] = {0};
+    if (syscall(SYS_sched_getaffinity, 0, sizeof(original), original) <= 0)
+        return fail("smp-getaffinity");
+
+    unsigned parent_cpu = 0;
+    if (syscall(SYS_getcpu, &parent_cpu, NULL, NULL) < 0 ||
+        parent_cpu >= sizeof(original) * 8)
+        return fail("smp-getcpu");
+
+    unsigned remote_cpu = (unsigned)-1;
+    for (unsigned cpu = 0; cpu < sizeof(original) * 8; cpu++) {
+        if (cpu != parent_cpu &&
+            (original[cpu / 8] & (1U << (cpu % 8)))) {
+            remote_cpu = cpu;
+            break;
+        }
+    }
+    if (remote_cpu == (unsigned)-1) {
+        printf("SCHED_STRESS: smp-runqueue SKIP cpus=1\n");
+        return 0;
+    }
+
+    sched_diag_t before;
+    if (read_sched_diag(&before) != 0 ||
+        before.scheduler_violations != 0)
+        return fail("smp-preexisting-diag");
+    if (set_single_cpu_retry(0, parent_cpu) != 0)
+        return fail("smp-pin-parent");
+
+    int hog_gate[2] = {-1, -1};
+    int hog_ready[2] = {-1, -1};
+    int target_gate[2] = {-1, -1};
+    int target_ready[2] = {-1, -1};
+    int target_result[2] = {-1, -1};
+    pid_t hog = -1;
+    pid_t target = -1;
+    int result = 1;
+    unsigned observed_cpu = (unsigned)-1;
+    const char *failure_stage = "pipe";
+    int failure_errno = 0;
+
+    if (pipe(hog_gate) < 0 || pipe(hog_ready) < 0 ||
+        pipe(target_gate) < 0 || pipe(target_ready) < 0 ||
+        pipe(target_result) < 0) {
+        failure_errno = errno;
+        goto cleanup;
+    }
+
+    failure_stage = "fork-hog";
+    hog = fork();
+    if (hog < 0) {
+        failure_errno = errno;
+        goto cleanup;
+    }
+    if (hog == 0) {
+        char byte;
+        close(hog_gate[1]);
+        close(hog_ready[0]);
+        if (read(hog_gate[0], &byte, 1) != 1)
+            _exit(2);
+        struct sched_param param = {.sched_priority = 99};
+        if (syscall(SYS_sched_setscheduler, 0, SCHED_FIFO, &param) < 0)
+            _exit(3);
+        byte = 'H';
+        if (write(hog_ready[1], &byte, 1) != 1)
+            _exit(4);
+        for (;;)
+            __asm__ __volatile__("" ::: "memory");
+    }
+    close(hog_gate[0]);
+    hog_gate[0] = -1;
+    close(hog_ready[1]);
+    hog_ready[1] = -1;
+    failure_stage = "start-hog";
+    if (set_single_cpu_retry(hog, remote_cpu) != 0 ||
+        write(hog_gate[1], "G", 1) != 1) {
+        failure_errno = errno;
+        goto cleanup;
+    }
+    char byte = 0;
+    failure_stage = "wait-hog-ready";
+    if (wait_byte(hog_ready[0], &byte, 3000) != 0 || byte != 'H') {
+        failure_errno = errno;
+        goto cleanup;
+    }
+
+    failure_stage = "fork-target";
+    target = fork();
+    if (target < 0) {
+        failure_errno = errno;
+        goto cleanup;
+    }
+    if (target == 0) {
+        char gate;
+        close(target_gate[1]);
+        close(target_ready[0]);
+        close(target_result[0]);
+        struct sched_param param = {.sched_priority = 50};
+        if (syscall(SYS_sched_setscheduler, 0, SCHED_FIFO, &param) < 0)
+            _exit(5);
+        if (write(target_ready[1], "R", 1) != 1)
+            _exit(6);
+        if (read(target_gate[0], &gate, 1) != 1)
+            _exit(7);
+        unsigned cpu = 0;
+        if (syscall(SYS_getcpu, &cpu, NULL, NULL) < 0 ||
+            write(target_result[1], &cpu, sizeof(cpu)) !=
+                (ssize_t)sizeof(cpu))
+            _exit(8);
+        _exit(0);
+    }
+    close(target_gate[0]);
+    target_gate[0] = -1;
+    close(target_ready[1]);
+    target_ready[1] = -1;
+    close(target_result[1]);
+    target_result[1] = -1;
+    failure_stage = "wait-target-ready";
+    if (wait_byte(target_ready[0], &byte, 3000) != 0 || byte != 'R') {
+        failure_errno = errno;
+        goto cleanup;
+    }
+    failure_stage = "wake-target-remote";
+    if (set_single_cpu_retry(target, remote_cpu) != 0 ||
+        write(target_gate[1], "W", 1) != 1) {
+        failure_errno = errno;
+        goto cleanup;
+    }
+
+    usleep(20000);
+    failure_stage = "migrate-target-local";
+    if (set_single_cpu_retry(target, parent_cpu) != 0) {
+        failure_errno = errno;
+        goto cleanup;
+    }
+
+    struct pollfd result_pfd = {
+        .fd = target_result[0],
+        .events = POLLIN,
+    };
+    failure_stage = "wait-target-result";
+    if (poll(&result_pfd, 1, 3000) != 1 ||
+        !(result_pfd.revents & POLLIN)) {
+        failure_errno = errno;
+        goto cleanup;
+    }
+    failure_stage = "read-target-result";
+    ssize_t result_bytes =
+        read(target_result[0], &observed_cpu, sizeof(observed_cpu));
+    if (result_bytes != (ssize_t)sizeof(observed_cpu)) {
+        failure_errno = errno;
+        goto cleanup;
+    }
+    failure_stage = "verify-target-cpu";
+    if (observed_cpu != parent_cpu)
+        goto cleanup;
+    failure_stage = "reap-target";
+    if (wait_child_ok(target) != 0) {
+        failure_errno = errno;
+        goto cleanup;
+    }
+    target = -1;
+
+    failure_stage = "reap-hog";
+    if (kill(hog, SIGKILL) < 0 || waitpid(hog, NULL, 0) != hog) {
+        failure_errno = errno;
+        goto cleanup;
+    }
+    hog = -1;
+
+    sched_diag_t after;
+    memset(&after, 0, sizeof(after));
+    failure_stage = "read-diagnostics";
+    for (int attempt = 0; attempt < 200; attempt++) {
+        syscall(SYS_sched_yield);
+        usleep(1000);
+        if (read_sched_diag(&after) != 0) {
+            failure_errno = errno;
+            goto cleanup;
+        }
+        if (after.resched_ipi_acks > before.resched_ipi_acks)
+            break;
+    }
+    failure_stage = "verify-diagnostics";
+    if (after.scheduler_violations != 0 ||
+        after.runqueue_migrations <= before.runqueue_migrations ||
+        after.resched_requests <= before.resched_requests ||
+        after.resched_priority_requests <=
+            before.resched_priority_requests ||
+        after.resched_ipi_sent <= before.resched_ipi_sent ||
+        after.resched_ipi_acks <= before.resched_ipi_acks ||
+        after.resched_consumed <= before.resched_consumed)
+        goto cleanup;
+
+    printf("SCHED_STRESS: smp-runqueue PASS migrations=%lu requests=%lu "
+           "priority=%lu ipi=%lu/%lu consumed=%lu\n",
+           after.runqueue_migrations - before.runqueue_migrations,
+           after.resched_requests - before.resched_requests,
+           after.resched_priority_requests -
+               before.resched_priority_requests,
+           after.resched_ipi_sent - before.resched_ipi_sent,
+           after.resched_ipi_acks - before.resched_ipi_acks,
+           after.resched_consumed - before.resched_consumed);
+    result = 0;
+
+cleanup:
+    if (result != 0)
+        printf("SCHED_STRESS: smp-runqueue DETAIL stage=%s errno=%d "
+               "parent=%u remote=%u observed=%u\n",
+               failure_stage, failure_errno, parent_cpu, remote_cpu,
+               observed_cpu);
+    if (target > 0) {
+        kill(target, SIGKILL);
+        waitpid(target, NULL, 0);
+    }
+    if (hog > 0) {
+        kill(hog, SIGKILL);
+        waitpid(hog, NULL, 0);
+    }
+    int *pipes[] = {
+        hog_gate, hog_ready, target_gate, target_ready, target_result,
+    };
+    for (unsigned i = 0; i < sizeof(pipes) / sizeof(pipes[0]); i++) {
+        for (int end = 0; end < 2; end++) {
+            if (pipes[i][end] >= 0)
+                close(pipes[i][end]);
+        }
+    }
+    if (syscall(SYS_sched_setaffinity, 0, sizeof(original), original) < 0)
+        return fail("smp-restore-parent");
+    if (result != 0)
+        return fail("smp-runqueue");
     return 0;
 }
 
@@ -236,6 +581,8 @@ int main(void)
     if (policy_param_roundtrip() != 0)
         return 1;
     if (affinity_roundtrip() != 0)
+        return 1;
+    if (smp_runqueue_preempt() != 0)
         return 1;
     if (nice_and_attr() != 0)
         return 1;

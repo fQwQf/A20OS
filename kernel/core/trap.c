@@ -103,7 +103,7 @@ static int user_sync_signal_is_handled(task_t *task, int sig) {
     return signal_task_user_handler_available(task, sig);
 }
 
-void trap_handler(trap_context_t *ctx) {
+static void user_trap_handler(trap_context_t *ctx) {
     reg_t scause = arch_read_cause();
     vaddr_t stval = arch_read_tval();
     vaddr_t sepc = arch_read_epc();
@@ -131,8 +131,6 @@ void trap_handler(trap_context_t *ctx) {
             syscall_dispatch(ctx);
             arch_syscall_dispatch_leave();
             proc_check_exit_pending();
-            if (arch_syscall_resched_allowed())
-                proc_yield();
             return;
         }
         if (code == CAUSE_LOAD_PAGE_FAULT || code == CAUSE_STORE_PAGE_FAULT || code == CAUSE_INSN_PAGE_FAULT) {
@@ -239,6 +237,18 @@ void trap_handler(trap_context_t *ctx) {
             signal_deliver_user(ctx);
     }
     proc_check_exit_pending();
+}
+
+void trap_handler(trap_context_t *ctx)
+{
+    user_trap_handler(ctx);
+    /*
+     * All user trap exits share this safe point. A reschedule IPI or a timer
+     * interrupt may have arrived while the task was in a long syscall; the
+     * persistent request is consumed here, never in the IPI handler.
+     */
+    if (arch_syscall_resched_allowed())
+        (void)proc_sched_safe_point();
 }
 
 void kernel_trap_handler(trap_context_t *ctx) {

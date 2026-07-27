@@ -287,6 +287,16 @@ void     idle_loop(void) NORETURN;
 task_t  *proc_current(void);
 void     proc_sleep_until(uint64_t wake_time);
 /*
+ * SMP_RUNQUEUE_PREEMPT_PROTOCOL:
+ * Reschedule requests are persistent per-CPU state. Architecture IPI handlers
+ * only acknowledge notification; scheduling is consumed by a common trap or
+ * syscall return safe point, a timer-return safe point, or an explicit sched().
+ */
+void     proc_sched_handle_reschedule_ipi(void);
+void     proc_sched_tick(int from_user);
+void     proc_sched_request_current(void);
+int      proc_sched_safe_point(void);
+/*
  * TASK_REFERENCE_LIFETIME:
  * proc_find_get() returns a referenced task which remains valid after the PID
  * lock is released. Every successful lookup must be paired with proc_put().

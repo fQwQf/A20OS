@@ -126,6 +126,18 @@ void proc_lifetime_snapshot(proc_lifetime_stats_t *stats)
     stats->duplicate_destroy = counter_read(&g_duplicate_destroy);
     stats->bad_final_put = counter_read(&g_bad_final_put);
 
+    proc_sched_diag_t sched_diag;
+    proc_sched_diag_snapshot(&sched_diag);
+    stats->runqueue_migrations = sched_diag.runqueue_migrations;
+    stats->resched_requests = sched_diag.resched_requests;
+    stats->resched_priority_requests =
+        sched_diag.resched_priority_requests;
+    stats->resched_ipi_sent = sched_diag.resched_ipi_sent;
+    stats->resched_ipi_acks = sched_diag.resched_ipi_acks;
+    stats->resched_consumed = sched_diag.resched_consumed;
+    stats->resched_pending = sched_diag.resched_pending;
+    stats->scheduler_violations = sched_diag.scheduler_violations;
+
     uint64_t flags = spin_lock_irqsave(&proc_lock);
     stats->timeout_entries = proc_wait_timer_count_locked();
     stats->timeout_capacity = proc_wait_timer_capacity();
@@ -151,10 +163,16 @@ void proc_lifetime_snapshot(proc_lifetime_stats_t *stats)
             stats->dispatching_tasks++;
 
         unsigned memberships = proc_sched_task_runq_memberships_locked(t);
+        uint64_t runqueue_cpu_mask =
+            proc_sched_task_runq_cpu_mask_locked(t);
         unsigned cpu_memberships =
             proc_current_owner_memberships_locked(t);
         stats->runqueue_entries += memberships;
         if (memberships != (unsigned)!!t->on_rq)
+            stats->state_violations++;
+        if (t->on_rq &&
+            (t->cpu_id >= 64 ||
+             runqueue_cpu_mask != (1ULL << t->cpu_id)))
             stats->state_violations++;
         if ((!!t->on_rq + !!t->dispatching + !!t->on_cpu) > 1)
             stats->state_violations++;
@@ -182,7 +200,8 @@ void proc_lifetime_snapshot(proc_lifetime_stats_t *stats)
     stats->lifetime_errors =
         stats->ref_get_failures + stats->ref_underflows +
         stats->duplicate_destroy + stats->bad_final_put +
-        stats->state_violations + stats->timeout_heap_violations;
+        stats->state_violations + stats->timeout_heap_violations +
+        stats->scheduler_violations;
 }
 
 size_t proc_lifetime_format(char *buf, size_t bufsz)
@@ -210,6 +229,14 @@ size_t proc_lifetime_format(char *buf, size_t bufsz)
         "timeout_duplicate_rejections: %lu\n"
         "timeout_stale_expirations: %lu\n"
         "timeout_heap_violations: %lu\n"
+        "runqueue_migrations: %lu\n"
+        "resched_requests: %lu\n"
+        "resched_priority_requests: %lu\n"
+        "resched_ipi_sent: %lu\n"
+        "resched_ipi_acks: %lu\n"
+        "resched_consumed: %lu\n"
+        "resched_pending: %lu\n"
+        "scheduler_violations: %lu\n"
         "zombies: %lu\n"
         "ref_get_failures: %lu\n"
         "ref_underflows: %lu\n"
@@ -222,7 +249,11 @@ size_t proc_lifetime_format(char *buf, size_t bufsz)
         s.cpu_owned_tasks, s.wait_entries, s.wake_entries,
         s.timeout_entries, s.timeout_capacity, s.timeout_full_failures,
         s.timeout_duplicate_rejections, s.timeout_stale_expirations,
-        s.timeout_heap_violations, s.zombies, s.ref_get_failures,
+        s.timeout_heap_violations, s.runqueue_migrations,
+        s.resched_requests, s.resched_priority_requests,
+        s.resched_ipi_sent, s.resched_ipi_acks, s.resched_consumed,
+        s.resched_pending, s.scheduler_violations, s.zombies,
+        s.ref_get_failures,
         s.ref_underflows, s.duplicate_destroy, s.bad_final_put,
         s.state_violations, s.lifetime_errors);
     if (n < 0)
