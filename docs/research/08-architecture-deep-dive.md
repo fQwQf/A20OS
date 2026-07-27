@@ -2,6 +2,10 @@
 
 > 本文档是 `03-implementation-plan.md` 的深度补充。基于对内核现有数据结构的分析（`task_t`, `vnode_t`, `vfile_t`, `mm_struct_t`, `vm_area_t`, `spinlock_t`, `wait_queue_t`, `refcount_t`），定义 Native ABI 对象到内核结构的具体映射、各子系统的实现架构、以及关键路径的锁序协议。
 
+> **实现更新：** 本文保留 Native ABI 的研究映射和证明背景；其中早期
+> wait-queue 伪代码已由 tokenized Park/Wake 取代。当前阻塞、唤醒和 task
+> 引用协议见 [进程、调度与阻塞协议](../process-scheduler.md)。
+
 ---
 
 ## 1. Native 对象到内核结构体的映射
@@ -197,13 +201,18 @@ typedef struct a20_eventq {
 
 **Q2：wake-up 机制？**
 
-当事件追加到 pending ring 后，调用 `wait_queue_wake_one(&eq->waiters)`。这是 O(1) 定向唤醒（唤醒等待队列中的第一个线程）。
+事件追加到 pending ring 后，通知路径先释放 eventq/hash 对象锁，再调用
+`wait_queue_wake_one(&eq->waiters, 0, PROC_WAKE_EVENT)`。wait queue entry
+保存带引用的 task 和 `wait_seq`，因此延迟 wake 不能命中后续等待。
 
 若多个线程等待同一 event queue（合法但罕见），一次 wake_one 只唤醒一个。其余线程在后续事件到达时被唤醒。
 
 **Q3：与调度器的交互？**
 
-`wait_queue_wake_one` 调用 `proc_make_ready`，将等待线程加入就绪队列。无优先级反转风险——等待线程恢复其原始优先级。
+`wait_queue_wake_one` 先从对象队列 collect `(task, wait_seq, reason)`，再在
+对象锁外 flush。`proc_try_wake()` 只有在 token 仍匹配时才完成
+`PARKED -> WOKEN` 和 runqueue 发布；远程 CPU 通过持久
+`need_resched`/IPI 通知在安全点消费调度请求。
 
 ### 3.3 事件分发机制
 
@@ -260,7 +269,7 @@ void a20_eventq_destroy(a20_eventq_t *eq) {
     // 步骤 2：唤醒等待中的线程（使其返回错误）
     // 等待线程被唤醒后，发现 eq 已被销毁（通过检查 eq 的状态标记），
     // 返回 err(CANCELLED)
-    wait_queue_wake_all(&eq->waiters);
+    wait_queue_wake_all(&eq->waiters, 0, PROC_WAKE_EVENT);
 
     // 步骤 3：释放 ring buffer
     if (eq->ring) {
@@ -452,7 +461,7 @@ int64_t native_sys_channel_send(a20_msg_send_args_t *args) {
     enqueue_message(ep->peer, msg);
 
     // 唤醒对端等待者
-    wait_queue_wake_one(&ep->peer->waiters);
+    wait_queue_wake_one(&ep->peer->waiters, 0, PROC_WAKE_EVENT);
 
     // 释放锁（先释放 peer lock，再释放 HT lock）
     spin_unlock(&ep->peer->lock);
@@ -966,7 +975,7 @@ void a20_channel_ep_destroy(a20_channel_ep_t *ep) {
         spin_lock(&ep->peer->lock);
         ep->peer->peer_closed = 1;
         // 唤醒对端等待者（使其返回 PEER_CLOSED）
-        wait_queue_wake_all(&ep->peer->waiters);
+        wait_queue_wake_all(&ep->peer->waiters, 0, PROC_WAKE_EVENT);
         ep->peer->peer = NULL;  // 断开双向链接
         spin_unlock(&ep->peer->lock);
         // 注意：不 refcount_dec peer，因为 peer 的生命周期由自己的 handle 管理
@@ -1066,7 +1075,7 @@ void a20_timer_destroy(a20_timer_t *timer) {
 | `spin_lock_irqsave(&eq->lock, flags)` | ✅ 安全 | 禁用本地 CPU 中断，防止 IRQ 重入 |
 | `kfree(msg)` | ❌ 不安全 | `kfree` 可能涉及睡眠（如 slab 分配器的锁） |
 | `ring_buffer_enqueue(eq, event)` | ✅ 安全 | 纯内存写入 + 索引更新，无内存分配 |
-| `wait_queue_wake_one(&eq->waiters)` | ✅ 安全 | 仅将等待线程移入就绪队列，不调度 |
+| `wait_queue_wake_one(&eq->waiters, 0, PROC_WAKE_EVENT)` | ✅ 安全 | collect token 后在锁外发布持久 reschedule 请求，不在 IRQ 中直接切换 |
 
 ### 12.3 安全的 IRQ 事件分发
 
@@ -1113,11 +1122,11 @@ void a20_event_notify_irq(void *target_object, uint16_t target_type,
             eq->ring_tail = (eq->ring_tail + 1) % eq->ring_cap;
             eq->ring_count++;
             // 唤醒消费者
-            wait_queue_wake_one(&eq->waiters);
+            wait_queue_wake_one(&eq->waiters, 0, PROC_WAKE_EVENT);
         } else {
             // Ring buffer 满：唤醒消费者但不追加事件
             // （定理 2.3 情况 2："先唤醒后丢弃"策略）
-            wait_queue_wake_one(&eq->waiters);
+            wait_queue_wake_one(&eq->waiters, 0, PROC_WAKE_EVENT);
         }
 
         spin_unlock_irqrestore(&eq->lock, flags);
@@ -1138,12 +1147,17 @@ void a20_event_notify_irq(void *target_object, uint16_t target_type,
 ### 12.5 与调度器交互
 
 `wait_queue_wake_one` 在 IRQ 上下文中被调用时的行为：
-- 将等待线程从 `waiters` 队列移到就绪队列
-- **不立即调度**——标记 `need_resched`，在 IRQ 返回时检查
-- 在 `spin_unlock_irqrestore` 后，若 `need_resched` 且从中断返回到内核态，触发调度
-- 若返回到用户态，在 `restore_user_context` 中检查调度
+- 在 wait-queue 锁内摘除 entry，并把 task 引用和 `wait_seq` 转移到局部
+  wake queue；
+- 释放对象/wait-queue 锁后验证 Park token 并发布 READY/runqueue 状态；
+- **不立即调度**，而是以 release 语义设置目标 CPU 的持久
+  `need_resched`，必要时发送 IPI；
+- IPI handler 只确认通知；trap/syscall/timer 返回或显式 `sched()` 安全点
+  消费请求。
 
-这保证了事件通知的原子性：事件追加和消费者唤醒在同一 `irqsave` 临界区内完成。
+事件 ring 更新在对象锁内原子完成，scheduler wake 则刻意位于对象锁外。
+这避免了 IRQ/设备私有锁反向嵌套 `proc_lock`，同时由 `wait_seq` 保证事件不会
+错配到下一次等待。
 
 ---
 

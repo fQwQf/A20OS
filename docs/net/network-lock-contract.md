@@ -106,10 +106,12 @@ callback 只能执行轻量、有界工作：
 
 - 从 pbuf 复制少量数据到预分配的 per-PCB staging buffer。
 - 更新少量 socket 状态标志。
-- 通过 `g_net_lock` 和 `proc_make_ready()` 唤醒 waiter。
+- 记录需要由 bottom-half 处理的事件；不得在 callback 中直接进入 scheduler。
 - 释放传入 pbuf。
 
-所有重工作，包括内存分配、队列插入和大块数据复制，都必须推迟到底半部。
+所有重工作，包括内存分配、队列插入、大块数据复制和 waiter wake，都必须
+推迟到底半部。bottom-half 在对象锁内 collect 带 `wait_seq` 的 wait entry，
+释放对象锁后 flush wake queue。
 
 ## Deferred Bottom-Half 设计
 

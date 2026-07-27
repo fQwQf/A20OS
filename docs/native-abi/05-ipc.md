@@ -408,7 +408,7 @@ void a20_eventq_destroy(a20_eventq_t *eq) {
     }
 
     // 步骤 2：唤醒等待线程（返回 CANCELED）
-    wait_queue_wake_all(&eq->waiters);
+    wait_queue_wake_all(&eq->waiters, 0, PROC_WAKE_EVENT);
 
     // 步骤 3：释放 ring buffer
     kfree(eq->ring);
