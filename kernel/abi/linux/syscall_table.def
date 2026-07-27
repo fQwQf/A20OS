@@ -241,7 +241,7 @@ LINUX_SYSCALL(syncfs, 0, sys_syncfs((int)A(0)))
  * owner decisions on each placeholder. */
 LINUX_SYSCALL(fanotify_init, 0, -ENOSYS)
 LINUX_SYSCALL(fanotify_mark, 0, -ENOSYS)
-LINUX_SYSCALL(signalfd4, 0, -ENOSYS)
+LINUX_SYSCALL(signalfd4, 0, sys_signalfd4((int)A(0), (const void *)A(1), (size_t)A(2), (int)A(3)))
 LINUX_SYSCALL(acct, 0, -ENOSYS)
 LINUX_SYSCALL(add_key, 0, -ENOSYS)
 LINUX_SYSCALL(request_key, 0, -ENOSYS)
