@@ -35,7 +35,9 @@
  * - lwIP callbacks run under g_lwip_lock and must only stage events into the
  *   preallocated per-PCB ring; allocation, enqueue, and wakeup happen in the
  *   bottom-half with g_net_lock held.
- * - Never acquire proc_lock while holding a runqueue lock.
+ * - Never acquire proc_lock while holding a runqueue lock. A local scheduler
+ *   pick is runqueue-only and releases the runqueue lock before publishing the
+ *   selected task under proc_lock.
  * - Never block while holding a spinlock or while interrupts are disabled.
  * - Do not call into VFS, memory allocation, or scheduler paths while holding a
  *   device or lwIP lock unless the callee is documented nonblocking.

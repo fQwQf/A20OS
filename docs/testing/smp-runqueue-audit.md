@@ -7,9 +7,11 @@ priority classes or architecture context layouts.
 
 ## Ownership and lock order
 
-`proc_lock` remains the coarse scheduler/lifecycle serialization boundary.
-Every operation which changes task state, `cpu_id`, `on_rq`, `dispatching`, or
-`on_cpu` holds `proc_lock`. A runqueue lock is nested below it.
+`proc_lock` remains the coarse scheduler/lifecycle serialization boundary for
+enqueue, migration, Park/Wake, switch publication and completion, exit and
+reap. Step 8 narrows one hot-path exception: local pick changes
+`on_rq -> dispatching` and publishes `owner_cpu` under only that CPU's runqueue
+lock, then releases it before switch publication acquires `proc_lock`.
 
 Cross-CPU migration uses `sched_runq_requeue_locked()`:
 

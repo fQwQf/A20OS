@@ -21,6 +21,8 @@ typedef struct __attribute__((aligned(64))) proc_runq {
     task_t *tail[SCHED_LEVELS];
     uint32_t bitmap;
     unsigned nr_running;
+    unsigned long lock_acquires;
+    unsigned long lock_contentions;
 } proc_runq_t;
 
 typedef struct __attribute__((aligned(64))) proc_cpu_sched {
@@ -42,7 +44,7 @@ typedef struct __attribute__((aligned(64))) proc_cpu_sched {
  * - Cross-CPU wakeup must hold proc_lock before choosing target cpu_id, then
  *   acquire only the target runqueue lock for enqueue. Reverse order is banned.
  * - context_switch() must be the only path that publishes PROC_RUNNING for a
- *   runnable task; proc_runq_pick_locked() must atomically move on_rq to
+ *   runnable task; proc_runq_pick_local() must atomically move on_rq to
  *   dispatching before that point.
  * - Timer wake, signal wake, futex wake, wait queue wake, fork/exec/wait, and
  *   exit/reap must all preserve TASK_STATE_MUTATION_CONTRACT before NR_CPUS>1
@@ -56,15 +58,22 @@ static uint64_t next_alarm_scan = SCHED_NO_DEADLINE;
 static unsigned sched_zombies_pending;
 static unsigned long sched_runqueue_migrations;
 static unsigned long sched_violations;
+static unsigned long sched_local_picks;
+static unsigned long sched_empty_picks;
+static unsigned long sched_local_pick_active;
+static unsigned long sched_local_pick_parallel_peak;
 
 /*
  * SCHEDULER_CPU_OWNERSHIP:
  *   on_rq -> dispatching -> on_cpu -> unowned
  *
- * proc_lock serializes scheduler ownership transitions. The selected runqueue
- * lock is nested below it while queue membership changes. An outgoing task
- * keeps on_cpu set across __switch; proc_switch_complete() clears ownership
- * only after the replacement task is executing on its own kernel stack.
+ * proc_lock serializes task-state and CPU ownership transitions except for the
+ * local on_rq -> dispatching hand-off. That hand-off changes queue membership
+ * and dispatch ownership atomically under the selected per-CPU runqueue lock,
+ * without holding proc_lock. All enqueue, migration, unpick, switch publication,
+ * Park, exit, and reap paths retain proc_lock -> runqueue lock ordering. An
+ * outgoing task keeps on_cpu set across __switch; proc_switch_complete() clears
+ * ownership only after the replacement task is executing on its own stack.
  */
 
 typedef struct wait_timer {
@@ -152,10 +161,28 @@ unsigned proc_sched_select_cpu(task_t *t);
  * runq_lock protects enqueue/dequeue/pick and per-runqueue state.
  * proc_lock protects task_list, task->state transitions, and zombie list.
  *
- * Ordering: proc_lock → runq_lock (never the reverse). */
-#define RUNQ_LOCK(cpu)     (&sched_runq[(cpu)].lock)
-#define RUNQ_LOCK_IRQ(cpu) spin_lock_irqsave(RUNQ_LOCK(cpu))
-#define RUNQ_UNLOCK_IRQ(cpu, f) spin_unlock_irqrestore(RUNQ_LOCK(cpu), (f))
+ * Ordering: proc_lock -> runq_lock (never the reverse). A local picker acquires
+ * only its runqueue lock and releases it before acquiring proc_lock to publish
+ * the selected task. */
+static uint64_t sched_runq_lock_irq(unsigned cpu)
+{
+    proc_runq_t *rq = &sched_runq[cpu];
+    int contended =
+        __atomic_load_n(&rq->lock.locked, __ATOMIC_RELAXED) != 0;
+    uint64_t flags = spin_lock_irqsave(&rq->lock);
+    __atomic_fetch_add(&rq->lock_acquires, 1, __ATOMIC_RELAXED);
+    if (contended)
+        __atomic_fetch_add(&rq->lock_contentions, 1, __ATOMIC_RELAXED);
+    return flags;
+}
+
+static void sched_runq_unlock_irq(unsigned cpu, uint64_t flags)
+{
+    spin_unlock_irqrestore(&sched_runq[cpu].lock, flags);
+}
+
+#define RUNQ_LOCK_IRQ(cpu) sched_runq_lock_irq(cpu)
+#define RUNQ_UNLOCK_IRQ(cpu, f) sched_runq_unlock_irq((cpu), (f))
 
 static int sched_level_clamp(int level) {
     if (level < 0) return 0;
@@ -239,6 +266,10 @@ void proc_sched_runq_init(void) {
     next_alarm_scan = SCHED_NO_DEADLINE;
     sched_runqueue_migrations = 0;
     sched_violations = 0;
+    sched_local_picks = 0;
+    sched_empty_picks = 0;
+    sched_local_pick_active = 0;
+    sched_local_pick_parallel_peak = 0;
     wait_timer_count = 0;
     wait_timer_full_failures = 0;
     wait_timer_duplicate_rejections = 0;
@@ -634,8 +665,19 @@ void proc_sched_diag_snapshot(proc_sched_diag_t *diag)
         __atomic_load_n(&sched_runqueue_migrations, __ATOMIC_RELAXED);
     diag->scheduler_violations =
         __atomic_load_n(&sched_violations, __ATOMIC_RELAXED);
+    diag->runqueue_local_picks =
+        __atomic_load_n(&sched_local_picks, __ATOMIC_RELAXED);
+    diag->runqueue_empty_picks =
+        __atomic_load_n(&sched_empty_picks, __ATOMIC_RELAXED);
+    diag->runqueue_parallel_pick_peak =
+        __atomic_load_n(&sched_local_pick_parallel_peak, __ATOMIC_RELAXED);
     for (unsigned cpu = 0; cpu < CONFIG_NR_CPUS; cpu++) {
+        proc_runq_t *rq = &sched_runq[cpu];
         proc_cpu_sched_t *state = &sched_cpu[cpu];
+        diag->runqueue_lock_acquires +=
+            __atomic_load_n(&rq->lock_acquires, __ATOMIC_RELAXED);
+        diag->runqueue_lock_contentions +=
+            __atomic_load_n(&rq->lock_contentions, __ATOMIC_RELAXED);
         diag->resched_requests +=
             __atomic_load_n(&state->requests, __ATOMIC_RELAXED);
         diag->resched_priority_requests +=
@@ -1152,11 +1194,30 @@ void proc_runq_remove_locked(task_t *t) {
 }
 
 /*
- * Pick the next task and transfer on_rq -> dispatching while both proc_lock and
- * the local runqueue lock serialize observers. Caller must hold proc_lock.
+ * SCHED_LOCAL_PICK_LOCK_SPLIT_BEGIN
+ *
+ * Pick the next task and transfer on_rq -> dispatching using only the current
+ * CPU's runqueue lock. Queue membership, cpu_id, and the dispatch owner are
+ * published as one local critical section. The caller acquires proc_lock only
+ * after this function returns, to validate current-versus-next and publish the
+ * context switch. A path holding a runqueue lock must never acquire proc_lock.
  */
-task_t *proc_runq_pick_locked(void) {
+task_t *proc_runq_pick_local(void)
+{
     unsigned cpu = cpu_current_id();
+    task_t *picked = NULL;
+    unsigned long active =
+        __atomic_add_fetch(&sched_local_pick_active, 1, __ATOMIC_ACQ_REL);
+    unsigned long peak =
+        __atomic_load_n(&sched_local_pick_parallel_peak, __ATOMIC_RELAXED);
+    while (active > peak &&
+           !__atomic_compare_exchange_n(&sched_local_pick_parallel_peak,
+                                        &peak, active, 0,
+                                        __ATOMIC_RELAXED,
+                                        __ATOMIC_RELAXED)) {
+    }
+    __atomic_fetch_add(&sched_local_picks, 1, __ATOMIC_RELAXED);
+
     uint64_t rf = RUNQ_LOCK_IRQ(cpu);
     proc_runq_t *rq = &sched_runq[cpu];
     sched_promote_aged_locked(rq, timer_get_ticks());
@@ -1208,16 +1269,20 @@ task_t *proc_runq_pick_locked(void) {
             && !t->cg_throttled) {
             t->dispatching = 1;
             t->owner_cpu = cpu;
-            RUNQ_UNLOCK_IRQ(cpu, rf);
-            return t;
+            picked = t;
+            break;
         }
         /* The removed runqueue reference was not transferred to dispatch. */
         proc_put(t);
     }
 
+    if (!picked)
+        __atomic_fetch_add(&sched_empty_picks, 1, __ATOMIC_RELAXED);
     RUNQ_UNLOCK_IRQ(cpu, rf);
-    return NULL;
+    __atomic_fetch_sub(&sched_local_pick_active, 1, __ATOMIC_RELEASE);
+    return picked;
 }
+/* SCHED_LOCAL_PICK_LOCK_SPLIT_END */
 
 /*
  * Reverse an unpublished on_rq -> dispatching transfer. This is needed when a
@@ -1484,8 +1549,13 @@ void sched(void) {
         now >= __atomic_load_n(&next_alarm_scan, __ATOMIC_RELAXED))
         sched_scan_timers(now);
 
+    /*
+     * Local queue traversal and on_rq -> dispatching no longer serialize on
+     * proc_lock across CPUs. The global lock is acquired only after the local
+     * runqueue lock has been released, for state/ownership publication.
+     */
+    task_t *next = proc_runq_pick_local();
     uint64_t flags = spin_lock_irqsave(&proc_lock);
-    task_t *next = proc_runq_pick_locked();
     task_t *current = proc_current();
     if (next && current && current != proc_idle_task() &&
         current->state == PROC_READY && current->on_cpu &&

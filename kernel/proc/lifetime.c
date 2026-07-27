@@ -129,6 +129,13 @@ void proc_lifetime_snapshot(proc_lifetime_stats_t *stats)
     proc_sched_diag_t sched_diag;
     proc_sched_diag_snapshot(&sched_diag);
     stats->runqueue_migrations = sched_diag.runqueue_migrations;
+    stats->runqueue_local_picks = sched_diag.runqueue_local_picks;
+    stats->runqueue_empty_picks = sched_diag.runqueue_empty_picks;
+    stats->runqueue_lock_acquires = sched_diag.runqueue_lock_acquires;
+    stats->runqueue_lock_contentions =
+        sched_diag.runqueue_lock_contentions;
+    stats->runqueue_parallel_pick_peak =
+        sched_diag.runqueue_parallel_pick_peak;
     stats->resched_requests = sched_diag.resched_requests;
     stats->resched_priority_requests =
         sched_diag.resched_priority_requests;
@@ -230,6 +237,11 @@ size_t proc_lifetime_format(char *buf, size_t bufsz)
         "timeout_stale_expirations: %lu\n"
         "timeout_heap_violations: %lu\n"
         "runqueue_migrations: %lu\n"
+        "runqueue_local_picks: %lu\n"
+        "runqueue_empty_picks: %lu\n"
+        "runqueue_lock_acquires: %lu\n"
+        "runqueue_lock_contentions: %lu\n"
+        "runqueue_parallel_pick_peak: %lu\n"
         "resched_requests: %lu\n"
         "resched_priority_requests: %lu\n"
         "resched_ipi_sent: %lu\n"
@@ -250,6 +262,9 @@ size_t proc_lifetime_format(char *buf, size_t bufsz)
         s.timeout_entries, s.timeout_capacity, s.timeout_full_failures,
         s.timeout_duplicate_rejections, s.timeout_stale_expirations,
         s.timeout_heap_violations, s.runqueue_migrations,
+        s.runqueue_local_picks, s.runqueue_empty_picks,
+        s.runqueue_lock_acquires, s.runqueue_lock_contentions,
+        s.runqueue_parallel_pick_peak,
         s.resched_requests, s.resched_priority_requests,
         s.resched_ipi_sent, s.resched_ipi_acks, s.resched_consumed,
         s.resched_pending, s.scheduler_violations, s.zombies,

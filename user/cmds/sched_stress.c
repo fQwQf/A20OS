@@ -73,6 +73,11 @@ struct sched_attr_compat {
 
 typedef struct sched_diag {
     unsigned long runqueue_migrations;
+    unsigned long runqueue_local_picks;
+    unsigned long runqueue_empty_picks;
+    unsigned long runqueue_lock_acquires;
+    unsigned long runqueue_lock_contentions;
+    unsigned long runqueue_parallel_pick_peak;
     unsigned long resched_requests;
     unsigned long resched_priority_requests;
     unsigned long resched_ipi_sent;
@@ -90,7 +95,12 @@ enum {
     SEEN_IPI_ACKS = 1U << 4,
     SEEN_CONSUMED = 1U << 5,
     SEEN_VIOLATIONS = 1U << 6,
-    SEEN_SCHED_DIAG_ALL = (1U << 7) - 1,
+    SEEN_LOCAL_PICKS = 1U << 7,
+    SEEN_EMPTY_PICKS = 1U << 8,
+    SEEN_LOCK_ACQUIRES = 1U << 9,
+    SEEN_LOCK_CONTENTIONS = 1U << 10,
+    SEEN_PARALLEL_PICK_PEAK = 1U << 11,
+    SEEN_SCHED_DIAG_ALL = (1U << 12) - 1,
 };
 
 static int fail(const char *what)
@@ -115,6 +125,21 @@ static int read_sched_diag(sched_diag_t *diag)
         if (strcmp(key, "runqueue_migrations") == 0) {
             diag->runqueue_migrations = value;
             diag->seen |= SEEN_MIGRATIONS;
+        } else if (strcmp(key, "runqueue_local_picks") == 0) {
+            diag->runqueue_local_picks = value;
+            diag->seen |= SEEN_LOCAL_PICKS;
+        } else if (strcmp(key, "runqueue_empty_picks") == 0) {
+            diag->runqueue_empty_picks = value;
+            diag->seen |= SEEN_EMPTY_PICKS;
+        } else if (strcmp(key, "runqueue_lock_acquires") == 0) {
+            diag->runqueue_lock_acquires = value;
+            diag->seen |= SEEN_LOCK_ACQUIRES;
+        } else if (strcmp(key, "runqueue_lock_contentions") == 0) {
+            diag->runqueue_lock_contentions = value;
+            diag->seen |= SEEN_LOCK_CONTENTIONS;
+        } else if (strcmp(key, "runqueue_parallel_pick_peak") == 0) {
+            diag->runqueue_parallel_pick_peak = value;
+            diag->seen |= SEEN_PARALLEL_PICK_PEAK;
         } else if (strcmp(key, "resched_requests") == 0) {
             diag->resched_requests = value;
             diag->seen |= SEEN_REQUESTS;
@@ -527,6 +552,37 @@ static int nice_and_attr(void)
     return 0;
 }
 
+static int runqueue_lock_split(void)
+{
+    sched_diag_t before;
+    sched_diag_t after;
+    if (read_sched_diag(&before) != 0 ||
+        before.scheduler_violations != 0)
+        return fail("lock-split-preexisting-diag");
+
+    for (int i = 0; i < 256; i++)
+        syscall(SYS_sched_yield);
+
+    if (read_sched_diag(&after) != 0)
+        return fail("lock-split-read-diag");
+    if (after.scheduler_violations != 0 ||
+        after.runqueue_local_picks <= before.runqueue_local_picks ||
+        after.runqueue_lock_acquires <= before.runqueue_lock_acquires ||
+        after.runqueue_lock_contentions > after.runqueue_lock_acquires ||
+        after.runqueue_parallel_pick_peak == 0)
+        return fail("lock-split-diagnostics");
+
+    printf("SCHED_STRESS: lock-split PASS picks=%lu empty=%lu "
+           "locks=%lu contended=%lu parallel_peak=%lu\n",
+           after.runqueue_local_picks - before.runqueue_local_picks,
+           after.runqueue_empty_picks - before.runqueue_empty_picks,
+           after.runqueue_lock_acquires - before.runqueue_lock_acquires,
+           after.runqueue_lock_contentions -
+               before.runqueue_lock_contentions,
+           after.runqueue_parallel_pick_peak);
+    return 0;
+}
+
 static int write_all(const char *path, const char *text)
 {
     int fd = open(path, O_WRONLY);
@@ -583,6 +639,8 @@ int main(void)
     if (affinity_roundtrip() != 0)
         return 1;
     if (smp_runqueue_preempt() != 0)
+        return 1;
+    if (runqueue_lock_split() != 0)
         return 1;
     if (nice_and_attr() != 0)
         return 1;
