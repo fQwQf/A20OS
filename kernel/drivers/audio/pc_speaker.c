@@ -16,6 +16,8 @@
 #include "uapi/a20/audio.h"
 
 #define PIT_INPUT_HZ 1193182U
+#define PC_SPEAKER_MIN_HZ ((PIT_INPUT_HZ + 0xffffU - 1U) / 0xffffU)
+#define PC_SPEAKER_MAX_HZ 20000U
 
 typedef struct pc_speaker {
     uint16_t pit_command;
@@ -34,7 +36,8 @@ static void pc_speaker_stop_locked(pc_speaker_t *speaker)
 static int pc_speaker_tone(pc_speaker_t *speaker, uint32_t hz,
                            uint32_t duration_ms)
 {
-    if (hz < 18U || hz > 20000U || duration_ms > 5000U)
+    if (hz < PC_SPEAKER_MIN_HZ || hz > PC_SPEAKER_MAX_HZ ||
+        duration_ms > 5000U)
         return -EINVAL;
     uint32_t divisor = PIT_INPUT_HZ / hz;
     if (!divisor || divisor > 0xffffU)
@@ -86,8 +89,8 @@ static int pc_speaker_ioctl(device_t *dev, unsigned long req, void *arg)
         a20_audio_caps_t caps = {
             .version = 1,
             .flags = A20_AUDIO_CAP_TONE,
-            .min_rate = 18,
-            .max_rate = 20000,
+            .min_rate = PC_SPEAKER_MIN_HZ,
+            .max_rate = PC_SPEAKER_MAX_HZ,
         };
         return copy_to_user(arg, &caps, sizeof(caps)) < 0 ? -EFAULT : 0;
     }

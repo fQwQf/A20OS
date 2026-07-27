@@ -33,6 +33,28 @@ static uint64_t class_devt(uint32_t type, uint32_t index)
     return ((uint64_t)majors[type] << 8) | (index & 0xffU);
 }
 
+static int class_allocate_index(uint32_t type, uint32_t *index)
+{
+    unsigned start = g_class_next_index[type] & 0xffU;
+    for (unsigned offset = 0; offset <= 0xffU; offset++) {
+        unsigned candidate = (start + offset) & 0xffU;
+        int used = 0;
+        for (unsigned i = 0; i < g_class_count; i++) {
+            if (g_class_devices[i]->class_type == type &&
+                g_class_devices[i]->index == candidate) {
+                used = 1;
+                break;
+            }
+        }
+        if (!used) {
+            *index = candidate;
+            g_class_next_index[type] = (candidate + 1U) & 0xffU;
+            return 0;
+        }
+    }
+    return -ENOSPC;
+}
+
 int class_device_publish(struct device *dev)
 {
     if (!dev || !dev->drv || !dev->drv->class_ops ||
@@ -73,7 +95,12 @@ int class_device_publish(struct device *dev)
         g_class_devices = new_devices;
         g_class_cap = new_cap;
     }
-    cdev->index = g_class_next_index[cdev->class_type]++;
+    int ret = class_allocate_index(cdev->class_type, &cdev->index);
+    if (ret < 0) {
+        spin_unlock_irqrestore(&g_class_lock, flags);
+        kfree(cdev);
+        return ret;
+    }
     cdev->devt = class_devt(cdev->class_type, cdev->index);
     snprintf(cdev->name, sizeof(cdev->name), "%s%u",
              class_prefix(cdev->class_type), cdev->index);
