@@ -114,6 +114,10 @@ typedef struct driver {
     const device_id_t  *id_table;  /* NULL-terminated array */
     struct bus_type    *bus;       /* bus this driver lives on */
 
+    /* Optional protocol-level narrowing after the bus ID match.  It must not
+     * access device registers or allocate resources. */
+    int  (*match)(device_t *dev);
+
     /* lifecycle */
     int  (*probe)(device_t *dev);
     int  (*remove)(device_t *dev);
