@@ -37,6 +37,20 @@ static bus_type_t **g_buses;
 static int         g_bus_count;
 static int         g_bus_cap;
 
+static int driver_matches_device(driver_t *drv, device_t *dev)
+{
+    int match = 0;
+    if (dev->bus && dev->bus->match)
+        match = dev->bus->match(dev, drv);
+    else if (!dev->bus && !drv->bus)
+        match = 1;
+    if (match && drv->match && !drv->match(dev)) {
+        dev->matched_id = NULL;
+        match = 0;
+    }
+    return match;
+}
+
 /* ---- Linker-generated section boundaries for built-in drivers ---- */
 extern const driver_t *__driver_init_start;
 extern const driver_t *__driver_init_end;
@@ -144,7 +158,7 @@ int driver_register(driver_t *drv) {
         device_t *dev = g_devices[i];
         if (dev->drv != NULL)
             continue;
-        if (dev->bus && dev->bus->match && dev->bus->match(dev, drv)) {
+        if (driver_matches_device(drv, dev)) {
             int ret = driver_probe_bound_device(drv, dev);
             if (ret == 0) {
                 kinfo("[DRIVER] device '%s' bound to driver '%s'\n",
@@ -231,7 +245,7 @@ int device_register(device_t *dev) {
 
     for (int i = 0; i < g_driver_count; i++) {
         driver_t *drv = g_drivers[i];
-        if (dev->bus && dev->bus->match && dev->bus->match(dev, drv)) {
+        if (driver_matches_device(drv, dev)) {
             int ret = driver_probe_bound_device(drv, dev);
             if (ret == 0) {
                 kinfo("[DRIVER] device '%s' bound to driver '%s'\n",
@@ -327,13 +341,7 @@ int bus_probe_device(device_t *dev) {
     }
     for (int i = 0; i < g_driver_count; i++) {
         driver_t *drv = g_drivers[i];
-        int match = 0;
-        if (dev->bus && dev->bus->match) {
-            match = dev->bus->match(dev, drv);
-        } else if (!dev->bus && !drv->bus) {
-            match = 1;
-        }
-        if (match) {
+        if (driver_matches_device(drv, dev)) {
             if (driver_probe_bound_device(drv, dev) == 0) {
                 mutex_unlock(&g_driver_core_ops);
                 return 0;
