@@ -626,7 +626,9 @@ VBOX_AARCH64_LOAD_ADDRESS ?= 0x08080000ULL
 		native-libc-rv native-libc-la native-libc-aarch64 native-libc-x86_64 native-libc-arm32 native-libc-rv32 native-libc-ppc64le native-libc native-libc-all \
 		eval eval-all eval-rv eval-la \
 		release-eval-rv-functional tests release-eval-la-functional tests \
-		release-eval-rv-parallel-build release-eval-la-parallel-build
+		release-eval-rv-parallel-build release-eval-la-parallel-build \
+		final-probe-rv-parallel-build-1c final-probe-rv-parallel-build-8c \
+		final-probe-la-parallel-build-1c final-probe-la-parallel-build-8c
 
 FORCE:
 
@@ -2226,6 +2228,7 @@ fs_img: $(FS_TEST_IMG)
 $(FAT32_IMG): $(USER_BUILD_STAMP) $(NATIVE_BUILD_STAMP) \
 		user/benchmark_init/benchmark.sh \
 		user/benchmark_init/final_benchmark.sh \
+		user/benchmark_init/parallel-build_probe.sh \
 		user/benchmark_init/run_ltp_resume.sh \
 		user/benchmark_init/ltp_blacklist.txt
 	@echo "Building FAT32 image..."
@@ -2253,6 +2256,7 @@ $(FAT32_IMG): $(USER_BUILD_STAMP) $(NATIVE_BUILD_STAMP) \
 	@printf 'Hello from A20OS FAT32!\n' | mcopy -i $(FAT32_IMG) - ::/test.txt
 	mcopy -o -i $(FAT32_IMG) user/benchmark_init/benchmark.sh ::/benchmark.sh
 	mcopy -o -i $(FAT32_IMG) user/benchmark_init/final_benchmark.sh ::/final_benchmark.sh
+	mcopy -o -i $(FAT32_IMG) user/benchmark_init/parallel-build_probe.sh ::/parallel-build_probe.sh
 	mcopy -o -i $(FAT32_IMG) user/benchmark_init/run_ltp_resume.sh ::/run_ltp_resume.sh
 	mcopy -o -i $(FAT32_IMG) user/benchmark_init/ltp_blacklist.txt ::/etc/ltp_blacklist.txt
 
@@ -3215,7 +3219,7 @@ define RUN_RELEASE_EVAL
 	RELEASE_EVAL_IMAGE_DIR="$(RELEASE_EVAL_IMAGE_DIR)" \
 	RELEASE_EVAL_STATE_DIR="$(RELEASE_EVAL_STATE_DIR)" \
 	$(if $(strip $(RELEASE_EVAL_TIMEOUT)),RELEASE_EVAL_TIMEOUT="$(RELEASE_EVAL_TIMEOUT)") \
-	bash ./scripts/run_release_eval.sh $(1) $(2)
+	bash ./scripts/run_release_eval.sh $(1) $(2) $(3)
 endef
 
 release-eval-rv-functional tests:
@@ -3229,3 +3233,15 @@ release-eval-rv-parallel-build:
 
 release-eval-la-parallel-build:
 	$(call RUN_RELEASE_EVAL,loongarch64,parallel-build)
+
+final-probe-rv-parallel-build-1c:
+	$(call RUN_RELEASE_EVAL,riscv64,parallel-build-probe,1)
+
+final-probe-rv-parallel-build-8c:
+	$(call RUN_RELEASE_EVAL,riscv64,parallel-build-probe,8)
+
+final-probe-la-parallel-build-1c:
+	$(call RUN_RELEASE_EVAL,loongarch64,parallel-build-probe,1)
+
+final-probe-la-parallel-build-8c:
+	$(call RUN_RELEASE_EVAL,loongarch64,parallel-build-probe,8)

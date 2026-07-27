@@ -264,6 +264,102 @@ static int concurrent_rename_unlink(void)
     return 0;
 }
 
+static int mkdir_immediate_visibility(void)
+{
+    const char *base = "/tmp/vfs_mkdir_visibility";
+    rmdir(base);
+    if (mkdir(base, 0755) < 0)
+        return fail("mkdir-visible-base");
+
+    for (int i = 0; i < 100; i++) {
+        char level0[128], level1[128], level2[128], level3[128];
+        snprintf(level0, sizeof(level0), "%s/round-%d", base, i);
+        snprintf(level1, sizeof(level1), "%s/a", level0);
+        snprintf(level2, sizeof(level2), "%s/b", level1);
+        snprintf(level3, sizeof(level3), "%s/c", level2);
+        if (mkdir(level0, 0755) < 0 || mkdir(level1, 0755) < 0 ||
+            mkdir(level2, 0755) < 0 || mkdir(level3, 0755) < 0)
+            return fail("mkdir-visible-nested");
+
+        int dfd = open(level3, O_RDONLY | O_DIRECTORY);
+        if (dfd < 0)
+            return fail("mkdir-visible-open-dir");
+        int fd = openat(dfd, "before", O_CREAT | O_TRUNC | O_RDWR, 0644);
+        if (fd < 0) {
+            close(dfd);
+            return fail("mkdir-visible-openat");
+        }
+        if (write(fd, "visible", 7) != 7) {
+            close(fd);
+            close(dfd);
+            return fail("mkdir-visible-write");
+        }
+        close(fd);
+
+        struct stat st;
+        if (fstatat(dfd, "before", &st, 0) < 0 || st.st_size != 7) {
+            close(dfd);
+            return fail("mkdir-visible-fstatat");
+        }
+        if (syscall(SYS_renameat2, dfd, "before", dfd, "after", 0) < 0) {
+            close(dfd);
+            return fail("mkdir-visible-renameat2");
+        }
+        if (unlinkat(dfd, "after", 0) < 0) {
+            close(dfd);
+            return fail("mkdir-visible-unlinkat");
+        }
+        close(dfd);
+        if (rmdir(level3) < 0 || rmdir(level2) < 0 ||
+            rmdir(level1) < 0 || rmdir(level0) < 0)
+            return fail("mkdir-visible-rmdir");
+    }
+
+    pid_t pid = fork();
+    if (pid < 0)
+        return fail("mkdir-visible-fork");
+    for (int i = 0; i < 20; i++) {
+        char path[128];
+        snprintf(path, sizeof(path), "%s/%s-%d",
+                 base, pid == 0 ? "child" : "parent", i);
+        if (mkdir(path, 0755) < 0) {
+            if (pid == 0) _exit(1);
+            return fail("mkdir-visible-concurrent");
+        }
+        int dfd = open(path, O_RDONLY | O_DIRECTORY);
+        if (dfd < 0) {
+            if (pid == 0) _exit(2);
+            return fail("mkdir-visible-concurrent-open");
+        }
+        int fd = openat(dfd, "file", O_CREAT | O_TRUNC | O_RDWR, 0644);
+        if (fd < 0) {
+            close(dfd);
+            if (pid == 0) _exit(3);
+            return fail("mkdir-visible-concurrent-openat");
+        }
+        close(fd);
+        if (unlinkat(dfd, "file", 0) < 0) {
+            close(dfd);
+            if (pid == 0) _exit(4);
+            return fail("mkdir-visible-concurrent-unlinkat");
+        }
+        close(dfd);
+        if (rmdir(path) < 0) {
+            if (pid == 0) _exit(5);
+            return fail("mkdir-visible-concurrent-rmdir");
+        }
+    }
+    if (pid == 0)
+        _exit(0);
+    int status = 0;
+    if (waitpid(pid, &status, 0) != pid || !WIFEXITED(status) ||
+        WEXITSTATUS(status) != 0)
+        return fail("mkdir-visible-concurrent-wait");
+    if (rmdir(base) < 0)
+        return fail("mkdir-visible-base-rmdir");
+    return 0;
+}
+
 static int openat_relative(void)
 {
     const char *dir = "/tmp/vfs_openat_dir";
@@ -510,6 +606,28 @@ static int chroot_boundary(void)
                             O_RDONLY | O_DIRECTORY);
         if (subfd < 0)
             _exit(6);
+        if (fchdir(subfd) < 0)
+            _exit(13);
+        char cwd[64] = {0};
+        if (!getcwd(cwd, sizeof(cwd)) || strcmp(cwd, "/subdir") != 0)
+            _exit(14);
+        char proc_cwd[64] = {0};
+        long proc_cwd_len =
+            syscall(SYS_readlinkat, AT_FDCWD, "/proc/self/cwd",
+                    proc_cwd, sizeof(proc_cwd) - 1);
+        if (proc_cwd_len != 7 || strcmp(proc_cwd, "/subdir") != 0)
+            _exit(15);
+        char proc_exe[128] = {0};
+        long proc_exe_len =
+            syscall(SYS_readlinkat, AT_FDCWD, "/proc/self/exe",
+                    proc_exe, sizeof(proc_exe) - 1);
+        if (proc_exe_len <= 0 || proc_exe[0] != '/')
+            _exit(16);
+        if (fchdir(rootfd) < 0)
+            _exit(17);
+        memset(cwd, 0, sizeof(cwd));
+        if (!getcwd(cwd, sizeof(cwd)) || strcmp(cwd, "/") != 0)
+            _exit(18);
         fd = syscall(SYS_openat, subfd, "before.txt",
                      O_CREAT | O_TRUNC | O_RDWR, 0644);
         if (fd < 0)
@@ -631,6 +749,8 @@ int main(void)
     if (concurrent_open_close() != 0)
         return 1;
     if (concurrent_rename_unlink() != 0)
+        return 1;
+    if (mkdir_immediate_visibility() != 0)
         return 1;
     if (openat_relative() != 0)
         return 1;

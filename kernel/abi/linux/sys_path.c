@@ -61,7 +61,11 @@ int64_t sys_chdir(const char *path) {
     if (copied < 0) return -EFAULT;
     if (copied >= MAX_PATH_LEN - 1 && kpath[MAX_PATH_LEN - 1] == '\0')
         return -ENAMETOOLONG;
-    return vfs_chdir(kpath);
+    if (kpath[0] == '\0') return -ENOENT;
+    char full[MAX_PATH_LEN];
+    int pr = syscall_path_at(AT_FDCWD, kpath, full, sizeof(full));
+    if (pr < 0) return pr;
+    return vfs_chdir(full);
 }
 
 int64_t sys_fchdir(int fd) {
