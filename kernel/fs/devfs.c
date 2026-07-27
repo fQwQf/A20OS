@@ -1019,6 +1019,10 @@ int devfs_is_zero_vfile(vfile_t *vf) {
     return vf && vf->ops == &g_devfs_zero_ops;
 }
 
+int devfs_is_fb_vfile(vfile_t *vf) {
+    return vf && vf->ops == &g_devfs_fb_ops;
+}
+
 
 vfile_t *devfs_create_stdio(int fd) {
     if (fd == STDIN_FILENO) return &g_stdin_file;
