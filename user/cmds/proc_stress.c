@@ -146,6 +146,42 @@ static int scenario_exec_large_args(void)
     return wait_exit(pid, 0, "wait-exec-large-args");
 }
 
+static int scenario_exec_low_user_argv(void)
+{
+    const uintptr_t low_addr = 0x02000000UL;
+    char *page = mmap((void *)low_addr, 4096, PROT_READ | PROT_WRITE,
+                      MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+    if (page == MAP_FAILED)
+        return fail("mmap-low-exec-argv");
+
+    char **low_argv = (char **)page;
+    char *arg0 = page + 128;
+    char *arg1 = page + 160;
+    char *arg2 = page + 208;
+    strcpy(arg0, "proc_stress");
+    strcpy(arg1, "--verify-low-exec-args");
+    strcpy(arg2, "low-user-argv-ok");
+    low_argv[0] = arg0;
+    low_argv[1] = arg1;
+    low_argv[2] = arg2;
+    low_argv[3] = NULL;
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        munmap(page, 4096);
+        return fail("fork-low-exec-argv");
+    }
+    if (pid == 0) {
+        char *envp[] = {"PATH=/bin", NULL};
+        execve("/bin/proc_stress", low_argv, envp);
+        _exit(127);
+    }
+
+    int result = wait_exit(pid, 0, "wait-low-exec-argv");
+    munmap(page, 4096);
+    return result;
+}
+
 static int scenario_spawn_missing(void)
 {
     pid_t pid = -1;
@@ -487,6 +523,8 @@ int main(int argc, char **argv)
 {
     if (argc > 1 && strcmp(argv[1], "--verify-exec-args") == 0)
         return verify_large_exec_args(argc, argv);
+    if (argc > 1 && strcmp(argv[1], "--verify-low-exec-args") == 0)
+        return argc == 3 && strcmp(argv[2], "low-user-argv-ok") == 0 ? 0 : 1;
 
     printf("PROC_STRESS: start\n");
     if (scenario_fork_wait_yield() != 0)
@@ -495,6 +533,9 @@ int main(int argc, char **argv)
         return 1;
     if (scenario_exec_large_args() != 0)
         return 1;
+    if (scenario_exec_low_user_argv() != 0)
+        return 1;
+    printf("PROC_STRESS: low-user-argv PASS\n");
     if (scenario_spawn_missing() != 0)
         return 1;
     if (scenario_sleep_signal() != 0)
