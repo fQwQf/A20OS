@@ -3,6 +3,7 @@
  */
 #include "drivers/core/driver_core.h"
 #include "drivers/core/driver_register.h"
+#include "drivers/core/driver_class.h"
 #include "core/stdio.h"
 #include "core/klog.h"
 #include "core/defs.h"
@@ -36,6 +37,20 @@ static bus_type_t **g_buses;
 static int         g_bus_count;
 static int         g_bus_cap;
 
+static int driver_matches_device(driver_t *drv, device_t *dev)
+{
+    int match = 0;
+    if (dev->bus && dev->bus->match)
+        match = dev->bus->match(dev, drv);
+    else if (!dev->bus && !drv->bus)
+        match = 1;
+    if (match && drv->match && !drv->match(dev)) {
+        dev->matched_id = NULL;
+        match = 0;
+    }
+    return match;
+}
+
 /* ---- Linker-generated section boundaries for built-in drivers ---- */
 extern const driver_t *__driver_init_start;
 extern const driver_t *__driver_init_end;
@@ -49,6 +64,16 @@ static int driver_probe_bound_device(driver_t *drv, device_t *dev) {
     int ret = drv->probe(dev);
     if (ret == 0) {
         dev->state = DEV_STATE_PROBED;
+        ret = class_device_publish(dev);
+        if (ret < 0) {
+            if (drv->remove)
+                drv->remove(dev);
+            dev->drv = NULL;
+            dev->drv_priv = NULL;
+            dev->matched_id = NULL;
+            dev->state = DEV_STATE_UNINIT;
+            return ret;
+        }
         return 0;
     }
     /* DRIVER_PROBE_FAILURE_CLEANUP: failed probes leave no half-bound device. */
@@ -133,7 +158,7 @@ int driver_register(driver_t *drv) {
         device_t *dev = g_devices[i];
         if (dev->drv != NULL)
             continue;
-        if (dev->bus && dev->bus->match && dev->bus->match(dev, drv)) {
+        if (driver_matches_device(drv, dev)) {
             int ret = driver_probe_bound_device(drv, dev);
             if (ret == 0) {
                 kinfo("[DRIVER] device '%s' bound to driver '%s'\n",
@@ -162,6 +187,8 @@ int driver_unregister(driver_t *drv) {
                 device_t *dev = g_devices[j];
                 if (dev->drv != drv)
                     continue;
+                dev->state = DEV_STATE_REMOVING;
+                class_device_unpublish(dev);
                 if (drv->remove)
                     drv->remove(dev);
                 dev->drv = NULL;
@@ -218,7 +245,7 @@ int device_register(device_t *dev) {
 
     for (int i = 0; i < g_driver_count; i++) {
         driver_t *drv = g_drivers[i];
-        if (dev->bus && dev->bus->match && dev->bus->match(dev, drv)) {
+        if (driver_matches_device(drv, dev)) {
             int ret = driver_probe_bound_device(drv, dev);
             if (ret == 0) {
                 kinfo("[DRIVER] device '%s' bound to driver '%s'\n",
@@ -242,6 +269,8 @@ void device_unregister(device_t *dev) {
             spin_unlock_irqrestore(&g_driver_core_lock, flags);
 
             driver_t *drv = dev->drv;
+            dev->state = DEV_STATE_REMOVING;
+            class_device_unpublish(dev);
             if (drv && drv->remove)
                 drv->remove(dev);
             dev->drv = NULL;
@@ -312,13 +341,7 @@ int bus_probe_device(device_t *dev) {
     }
     for (int i = 0; i < g_driver_count; i++) {
         driver_t *drv = g_drivers[i];
-        int match = 0;
-        if (dev->bus && dev->bus->match) {
-            match = dev->bus->match(dev, drv);
-        } else if (!dev->bus && !drv->bus) {
-            match = 1;
-        }
-        if (match) {
+        if (driver_matches_device(drv, dev)) {
             if (driver_probe_bound_device(drv, dev) == 0) {
                 mutex_unlock(&g_driver_core_ops);
                 return 0;

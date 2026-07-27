@@ -6,9 +6,26 @@
 
 `device_t` 代表一个硬件实例，由总线或板级枚举器创建。创建者拥有 `device_t` 本身、设备名、资源数组和 `plat_data` 的存储，这些内存必须活到 `device_unregister()` 完成。不要在枚举函数栈上分配它们。
 
-`driver_t` 代表一种驱动实现，通常是一个文件内的静态对象。一份驱动可以绑定多个设备。`class_type` 和 `class_ops` 向块层、网络栈、输入层或显示层提供稳定接口。
+`driver_t` 代表一种驱动实现，通常是一个文件内的静态对象。一份驱动可以绑定多个设备。`class_type` 和 `class_ops` 向块层、网络栈、输入层、显示层或音频层提供稳定接口。
 
-`bus_type_t` 决定某个 `device_t` 是否匹配某个 `driver_t`。PCI 和 VirtIO-MMIO 已有公共总线；固定平台设备可以定义小型 platform bus。
+`bus_type_t` 决定某个 `device_t` 是否匹配某个 `driver_t`。PCI、VirtIO-MMIO 和 platform bus 已有公共实现。固定设备由板级文件填写 `platform_device_t` 的 ID 与资源并调用 `platform_device_register()`，不应再为每个设备定义私有 bus。
+
+## 四层边界
+
+设备支持按以下四层组织。上层只能依赖下层公开的能力，不能跨层读取板级常量：
+
+| 层 | 负责内容 | 不负责内容 |
+|---|---|---|
+| CPU 架构层 | MMIO/port I/O 原语、内存屏障、cache sync、虚实地址转换、异常与中断入口 | PCI class、NVMe queue、HDA widget 等设备协议 |
+| 平台/board 层 | RAM 与设备窗口、ECAM 地址和 bus 范围、IRQ controller/路由、固定 platform device 资源 | 解析通用 PCI function 或实现协议 I/O |
+| 总线层 | 枚举 function、读取 ID、BAR sizing/assignment、资源发布和第一阶段 ID 匹配 | 控制器复位、命令队列和 class 语义 |
+| 协议驱动层 | 通过公共 PCI/MMIO/DMA/IRQ API 实现寄存器协议、probe/remove 和 class ops | 硬编码 ECAM、物理 BAR 窗口、页表偏移或 CPU 指令 |
+
+因此 NVMe 和 HDA 属于 PCI 协议驱动：源码不应由 `CONFIG_X86_64` 包围。它们能否在某个平台实际工作，取决于该平台是否已经提供可访问的 ECAM、BAR 资源、DMA 地址转换和必要的 cache 一致性。PC Speaker 直接依赖 x86 port I/O 与 PIT，保留架构门禁是正确的。
+
+“架构无关”不等于“所有平台已可运行”。驱动在某架构成功编译，只证明没有静态架构依赖；必须在该平台观察到枚举、绑定和真实 DMA/I/O 完成后，才能标记运行验证。
+
+probe 成功后，核心自动创建一个 `class_device_t`。该对象负责稳定 class 编号、devt、devfs/sysfs 发布和断开状态。驱动不得自行创建硬件节点。当前 char、block、audio 分别自动发布为 `/dev/charN`、`/dev/diskN`、`/dev/audioN`；所有 class 都出现在 `/sys/class/<class>/`。
 
 绑定后的关系如下：
 
@@ -23,7 +40,7 @@ device_t                         driver_t
   matched_id --> matched id_table entry
 ```
 
-`plat_data` 属于总线或板级代码，驱动不得释放。`drv_priv` 属于驱动，probe 时创建或选定，remove 时清理。类操作只接收 `device_t *`，通过 `dev->drv_priv` 找到实例。
+`plat_data` 属于总线或板级代码，驱动不得释放。`drv_priv` 属于驱动，probe 时创建或选定，remove 时清理。类操作只接收 `device_t *`，通过 `dev->drv_priv` 找到实例。remove 前核心先把 class device 标记为 offline，阻止新调用，并等待已经进入驱动的 class 调用退出；已打开的文件随后返回 `-ENODEV`。
 
 ## 数据结构字段
 
@@ -55,6 +72,10 @@ uint64_t size = res->end - res->start + 1;
 
 `probe`、`remove`、`suspend`、`resume` 是生命周期回调。`class_ops` 的真实类型由 `class_type` 决定。内建驱动的 `module` 必须为 `NULL`，该字段由核心保留，不属于当前驱动开发接口。
 
+匹配分两阶段完成：总线 `bus_type_t.match(dev, drv)` 先按 transport identity 匹配并设置 `dev->matched_id`；可选的 `driver_t.match(dev)` 再按协议字段缩小范围。例如 HDA 检查 `04:03:00`，NVMe 检查 `01:08:02`。第二阶段只能读取已经枚举的身份信息，不得访问设备寄存器、分配 BAR/DMA 或改变硬件；拒绝时核心清除 `matched_id`，不会调用 probe。
+
+宽泛 PCI class 驱动使用 ANY ID 表加 `.match`，不能把 class 检查只放在 probe 中。精确 vendor/device 驱动通常不需要 `.match`。
+
 ## 注册与链接
 
 驱动文件必须包含：
@@ -82,11 +103,11 @@ Makefile 对 full profile 使用 `kernel/drivers/<class>/*.c` 通配，所以放
 UNINIT --match--> probe
                     | 0
                     v
-                  PROBED
+                  PROBED + class_device online
                     |
         remove/device_unregister/driver_unregister
                     v
-                  REMOVED
+          REMOVING -> class_device offline -> REMOVED
 
 probe < 0 -> core 清空 drv、drv_priv，状态回到 UNINIT
 ```
@@ -198,15 +219,20 @@ static int example_remove(device_t *dev) {
 }
 
 static const device_id_t example_ids[] = {
-    { .vendor = 0x1234, .device = 0x5678,
+    { .vendor = VENDOR_ANY, .device = DEVICE_ANY,
       .subvendor = VENDOR_ANY, .subdevice = DEVICE_ANY },
     { 0 },
 };
+
+static int example_match(device_t *dev) {
+    return pci_class_code(dev) == 0x020000U;
+}
 
 static driver_t example_driver = {
     .name = "example-net",
     .id_table = example_ids,
     .bus = &pci_bus,
+    .match = example_match,
     .probe = example_probe,
     .remove = example_remove,
     .class_ops = &example_ops,

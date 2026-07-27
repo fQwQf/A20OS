@@ -9,8 +9,41 @@
 #define _DRIVER_CLASS_H
 
 #include "core/types.h"
+#include "core/refcount.h"
+#include "core/lock.h"
 
 struct device;
+
+#define CLASS_DEVICE_NAME_MAX 32
+
+/*
+ * A class device is the stable publication object between a bound hardware
+ * device and devfs/sysfs. The registry owns one reference while online; open
+ * files may keep it alive after unplug, but new operations then return ENODEV.
+ */
+typedef struct class_device {
+    struct device *dev;
+    uint32_t class_type;
+    uint32_t index;
+    uint64_t devt;
+    char name[CLASS_DEVICE_NAME_MAX];
+    refcount_t refs;
+    spinlock_t state_lock;
+    volatile unsigned active_calls;
+    volatile int online;
+} class_device_t;
+
+int class_device_publish(struct device *dev);
+void class_device_unpublish(struct device *dev);
+class_device_t *class_device_get_by_name(const char *name);
+class_device_t *class_device_get_by_type(uint32_t class_type, unsigned index);
+class_device_t *class_device_get_nth(unsigned index);
+void class_device_get(class_device_t *cdev);
+void class_device_put(class_device_t *cdev);
+int class_device_call_begin(class_device_t *cdev);
+void class_device_call_end(class_device_t *cdev);
+int class_device_has_devnode(const class_device_t *cdev);
+uint8_t class_device_dirent_type(const class_device_t *cdev);
 
 /* ============================================================
  * Block device operations
@@ -87,5 +120,14 @@ typedef struct gpu_dev_ops {
     int     (*flush)(struct device *dev, uint32_t x, uint32_t y, uint32_t w, uint32_t h);
     int     (*ioctl)(struct device *dev, unsigned long req, void *arg);
 } gpu_dev_ops_t;
+
+/* PCM-oriented audio interface. Drivers own buffering and blocking policy;
+ * devfs provides stable /dev/audioN publication and disconnect handling. */
+typedef struct audio_dev_ops {
+    int (*read)(struct device *dev, void *buf, size_t count);
+    int (*write)(struct device *dev, const void *buf, size_t count);
+    int (*ioctl)(struct device *dev, unsigned long req, void *arg);
+    int (*poll)(struct device *dev, short events);
+} audio_dev_ops_t;
 
 #endif /* _DRIVER_CLASS_H */
