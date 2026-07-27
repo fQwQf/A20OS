@@ -63,7 +63,9 @@ g_lwip_lock -> virtio-net nonblocking send/recv paths only
 **规则：**
 
 - 提交、完成轮询和请求分配都在 `inst->lock` 下运行。
-- 完成路径在持有 `inst->lock` 时调用 `proc_make_ready(req->waiter)`。这是安全的，因为设备锁是最内层锁，而 `proc_make_ready` 只通过自身加锁触碰 runqueue 侧。
+- 完成路径在 `inst->lock` 下通过 `wait_queue_collect_all()` 把 task 引用和
+  `wait_seq` 转移到局部 wake queue；释放 `inst->lock` 后才调用
+  `proc_wake_q_flush()` 进入 scheduler。
 - 当没有可用 slot 时，`virtio_blk_rw()` 在 yield CPU 前释放锁。
 - 不要在 `inst->lock` 下调用 VFS、`kmalloc` 或阻塞式 scheduler 函数。
 
@@ -101,17 +103,18 @@ g_lwip_lock -> virtio-net nonblocking send/recv paths only
 - `rx_waiter`
 - `tty_foreground_pgid`
 
-**局部顺序：** `rx_lock -> proc_lock`。
+**局部顺序：** 无。`rx_lock` 不与 `proc_lock` 嵌套。
 
-- 普通 RX 处理只在 `rx_lock` 下触碰环形缓冲区和 `rx_waiter`。
-- Ctrl-C 路径（`uart_rx_push()` 处理 `0x03`）持有 `rx_lock`，随后通过 `uart_signal_user_pgid()` / `uart_signal_all_user()` 调用 `proc_find()` / `proc_kill()`。这些函数会获取 `proc_lock`。
-- `uart_dump_tasks()` 也会获取 `proc_lock`，并在 Ctrl-C 路径中于 `rx_lock` 下调用。
-- 这是唯一记录在案的驱动私有锁嵌套 `proc_lock` 例外。
+- 普通 RX 处理只在 `rx_lock` 下触碰环形缓冲区和前台 PGID。
+- RX 唤醒在 `rx_lock` 下 collect wait entry，释放锁后 flush wake queue。
+- Ctrl-C 路径不持有 `rx_lock`；task dump、带引用 PID 查询和信号发送各自在
+  驱动锁外获取所需的进程锁。
 
 **规则：**
 
-- 其他所有 UART 路径在持有 `rx_lock` 时不得获取额外锁。
-- `uart_getc()` 在阻塞当前任务前释放 `rx_lock`。
+- 所有 UART 路径在持有 `rx_lock` 时不得获取额外锁。
+- `uart_getc()` 使用 prepare → 锁内重查/link → unlock → commit 的
+  Park/Wake 协议，并在阻塞当前任务前释放 `rx_lock`。
 
 ### PTY
 
@@ -237,7 +240,9 @@ g_lwip_lock -> virtio-net nonblocking send/recv paths only
 
 **锁：** 每实例 `virtio_input_inst_t.lock`，保护 event virtqueue、用户事件 ring 和 waiter。
 
-**局部顺序：** 无。IRQ/poll 路径在锁内 drain 有界队列并可调用 `proc_make_ready`；阻塞 read 在调度前释放锁。
+**局部顺序：** 无。IRQ/poll 路径在锁内 drain 有界队列并 collect 一个带
+token 的 waiter，释放实例锁后 flush wake queue；阻塞 read 使用 Park/Wake
+协议并在调度前释放锁。
 
 ### xHCI HID
 
@@ -250,9 +255,8 @@ g_lwip_lock -> virtio-net nonblocking send/recv paths only
 1. **禁止反向顺序。** 如果必须在持有驱动锁时获取全局锁，需要在本文档中把它记录为局部顺序。未记录的嵌套就是 bug。
 2. **禁止在 spinlock 下阻塞。** 任何可能阻塞的路径都必须先释放所有 spinlock。
 3. **除非已记录，否则禁止在驱动锁下执行 VFS 和分配。** 唯一已记录的例外是：
-   - `virtio-blk` 完成路径调用 `proc_make_ready`（调度通知，不是 VFS）。
-   - `UART` Ctrl-C 路径在 `rx_lock` 下嵌套 `proc_lock`。
    - `PTY` 分配在 `g_pty_alloc_lock` 下执行 `kmalloc`。
+   驱动完成路径若需要唤醒任务，只能在驱动锁内 collect，在解锁后 flush。
 4. **新的设备锁** 必须符合全局顺序（`driver registry/IRQ locks -> device-private locks`），或在使用前向本文档增加局部顺序条目。
 
 > 不要这样做
