@@ -1,0 +1,157 @@
+/*
+ * PC speaker tone backend
+ */
+#ifdef CONFIG_X86_64
+
+#include "drivers/audio/pc_speaker.h"
+#include "drivers/bus/platform_bus.h"
+#include "drivers/core/driver_class.h"
+#include "drivers/core/driver_hwapi.h"
+#include "drivers/core/driver_register.h"
+#include "core/errno.h"
+#include "core/string.h"
+#include "core/lock.h"
+#include "mm/slab.h"
+#include "sys/usercopy.h"
+#include "uapi/a20/audio.h"
+
+#define PIT_INPUT_HZ 1193182U
+
+typedef struct pc_speaker {
+    uint16_t pit_command;
+    uint16_t pit_channel2;
+    uint16_t control;
+    spinlock_t lock;
+    uint32_t generation;
+} pc_speaker_t;
+
+static void pc_speaker_stop_locked(pc_speaker_t *speaker)
+{
+    uint8_t value = ioport_read8(speaker->control);
+    ioport_write8(speaker->control, value & (uint8_t)~0x03U);
+}
+
+static int pc_speaker_tone(pc_speaker_t *speaker, uint32_t hz,
+                           uint32_t duration_ms)
+{
+    if (hz < 18U || hz > 20000U || duration_ms > 5000U)
+        return -EINVAL;
+    uint32_t divisor = PIT_INPUT_HZ / hz;
+    if (!divisor || divisor > 0xffffU)
+        return -EINVAL;
+    uint64_t flags = spin_lock_irqsave(&speaker->lock);
+    uint32_t generation = ++speaker->generation;
+    ioport_write8(speaker->pit_command, 0xb6U);
+    ioport_write8(speaker->pit_channel2, (uint8_t)divisor);
+    ioport_write8(speaker->pit_channel2, (uint8_t)(divisor >> 8));
+    uint8_t value = ioport_read8(speaker->control);
+    ioport_write8(speaker->control, value | 0x03U);
+    spin_unlock_irqrestore(&speaker->lock, flags);
+    if (duration_ms) {
+        mdelay(duration_ms);
+        flags = spin_lock_irqsave(&speaker->lock);
+        if (speaker->generation == generation)
+            pc_speaker_stop_locked(speaker);
+        spin_unlock_irqrestore(&speaker->lock, flags);
+    }
+    return 0;
+}
+
+static int pc_speaker_write(device_t *dev, const void *buf, size_t count)
+{
+    pc_speaker_t *speaker = dev ? dev->drv_priv : NULL;
+    if (!speaker || !buf || count != sizeof(a20_audio_tone_t))
+        return -EINVAL;
+    a20_audio_tone_t tone;
+    memcpy(&tone, buf, sizeof(tone));
+    int ret = pc_speaker_tone(speaker, tone.frequency_hz, tone.duration_ms);
+    return ret < 0 ? ret : (int)count;
+}
+
+static int pc_speaker_ioctl(device_t *dev, unsigned long req, void *arg)
+{
+    pc_speaker_t *speaker = dev ? dev->drv_priv : NULL;
+    if (!speaker)
+        return -ENODEV;
+    if (req == A20_AUDIO_IOCTL_STOP) {
+        uint64_t flags = spin_lock_irqsave(&speaker->lock);
+        speaker->generation++;
+        pc_speaker_stop_locked(speaker);
+        spin_unlock_irqrestore(&speaker->lock, flags);
+        return 0;
+    }
+    if (!arg)
+        return -EFAULT;
+    if (req == A20_AUDIO_IOCTL_GET_CAPS) {
+        a20_audio_caps_t caps = {
+            .version = 1,
+            .flags = A20_AUDIO_CAP_TONE,
+            .min_rate = 18,
+            .max_rate = 20000,
+        };
+        return copy_to_user(arg, &caps, sizeof(caps)) < 0 ? -EFAULT : 0;
+    }
+    if (req == A20_AUDIO_IOCTL_TONE) {
+        a20_audio_tone_t tone;
+        if (copy_from_user(&tone, arg, sizeof(tone)) < 0)
+            return -EFAULT;
+        return pc_speaker_tone(speaker, tone.frequency_hz, tone.duration_ms);
+    }
+    return -ENOTTY;
+}
+
+static int pc_speaker_probe(device_t *dev)
+{
+    resource_t *pit = device_get_resource(dev, RES_IOPORT, 0);
+    resource_t *control = device_get_resource(dev, RES_IOPORT, 1);
+    if (!pit || !control || pit->end < pit->start + 1U)
+        return -ENODEV;
+    pc_speaker_t *speaker = kcalloc(1, sizeof(*speaker));
+    if (!speaker)
+        return -ENOMEM;
+    speaker->pit_channel2 = (uint16_t)pit->start;
+    speaker->pit_command = (uint16_t)(pit->start + 1U);
+    speaker->control = (uint16_t)control->start;
+    spin_init(&speaker->lock);
+    pc_speaker_stop_locked(speaker);
+    dev->drv_priv = speaker;
+    return 0;
+}
+
+static int pc_speaker_remove(device_t *dev)
+{
+    pc_speaker_t *speaker = dev ? dev->drv_priv : NULL;
+    if (speaker) {
+        uint64_t flags = spin_lock_irqsave(&speaker->lock);
+        speaker->generation++;
+        pc_speaker_stop_locked(speaker);
+        spin_unlock_irqrestore(&speaker->lock, flags);
+        kfree(speaker);
+        dev->drv_priv = NULL;
+    }
+    return 0;
+}
+
+static const audio_dev_ops_t pc_speaker_ops = {
+    .write = pc_speaker_write,
+    .ioctl = pc_speaker_ioctl,
+};
+
+static const device_id_t pc_speaker_ids[] = {
+    { .vendor = A20_PLATFORM_VENDOR, .device = A20_DEVICE_PC_SPEAKER },
+    { 0 },
+};
+
+static driver_t pc_speaker_driver = {
+    .name = "pc-speaker",
+    .id_table = pc_speaker_ids,
+    .bus = &platform_bus,
+    .probe = pc_speaker_probe,
+    .remove = pc_speaker_remove,
+    .class_ops = &pc_speaker_ops,
+    .class_type = DEV_CLASS_AUDIO,
+};
+
+DRIVER_REGISTER(pc_speaker_driver);
+
+#endif
