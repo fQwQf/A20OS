@@ -45,7 +45,7 @@ QEMU x86_64 与 RISC-V64 GUI 的 VirtIO GPU、键盘和鼠标分别由 `make smo
 | virtio-gpu | DISPLAY | class registry、framebuffer 页释放和 transport reset；单实例、同步 controlq |
 | VirtIO-SCSI | BLOCK | VirtualBox ARM 已验证，remove 复位/释放槽；只支持 target/LUN 0、READ/WRITE(10)、512B sector、轮询 |
 | AHCI | BLOCK | VirtualBox x86_64；单 controller/单 port/单 slot、LBA48、轮询；probe 回滚和 remove 释放 DMA/IRQ |
-| NVMe | BLOCK | 架构无关 PCI class 驱动；x86_64 与 LoongArch64 构建，LoongArch QEMU 已验证 BAR、admin/I/O queue 建立和 Identify；首个活动 namespace、读写/flush、轮询、每 controller 只发布一个 namespace；LoongArch 数据读写尚未单独验证 |
+| NVMe | BLOCK | 架构无关 PCI class 驱动；x86_64 与 LoongArch64 构建，LoongArch QEMU 已验证 BAR、admin/I/O queue、Identify，以及跨 8 KiB bounce chunk 的写入/flush/读回比较；首个活动 namespace、轮询、每 controller 只发布一个 namespace |
 | E1000 | NET | VirtualBox 82540EM，轮询 ring，已加 stop/remove；静态单实例 |
 | VMSVGA/SVGAv3 | DISPLAY | VirtualBox x86_64/ARM，BAR offset/pitch 边界和 class registry，已加 remove；静态单实例 |
 | xHCI HID | INPUT | VBox ARM keyboard/mouse/tablet，class、轮询和 controller stop/remove；只匹配 `8086:1e31`，静态单 controller |
@@ -64,7 +64,7 @@ VirtualBox x86_64 复用 x86_64 平台 PCI、AHCI、VMSVGA、PS/2/E1000/VirtIO �
 
 ## 跨架构 PCI 协议验证
 
-NVMe/HDA 源码不含 CPU 架构门禁，它们的运行条件来自下层 PCI/MMIO/DMA 能力。`make smoke-pci-portability` 在 QEMU LoongArch64 virt 上联合挂载 `intel-hda`、`hda-duplex` 和 NVMe，验证零值 BAR sizing/assignment、HDA codec topology、PCM BDL DMA，以及 NVMe queue/Identify。该结果证明协议驱动并非 x86 专用，但不代表所有已构建架构都具备 PCI host。
+NVMe/HDA 源码不含 CPU 架构门禁，它们的运行条件来自下层 PCI/MMIO/DMA 能力。`make smoke-pci-portability` 在 QEMU LoongArch64 virt 上联合挂载 `intel-hda`、`hda-duplex` 和 NVMe，验证零值 BAR sizing/assignment、HDA codec topology、PCM BDL DMA，以及 NVMe queue/Identify 和 17 个扇区的写入、flush、读回比较。该结果证明协议驱动并非 x86 专用，但不代表所有已构建架构都具备 PCI host。
 
 QEMU AArch64 与 RISC-V64 board 当前只枚举 VirtIO-MMIO，因此对 HDA/NVMe 是编译覆盖，不是运行覆盖。VirtualBox AArch64 有 ACPI MCFG PCI 枚举，但 BAR 依赖固件预分配且目前没有这两类设备的运行日志。状态表必须继续按“构建”“绑定”“实际 I/O”三个等级记录证据。
 

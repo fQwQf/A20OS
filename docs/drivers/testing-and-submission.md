@@ -27,7 +27,7 @@ make smoke-pci-portability
 
 `smoke-hda` 在 x86_64 q35 上挂载 Intel HDA controller 和 duplex codec，验证 codec 拓扑识别、audio class 绑定以及一段静音 PCM 的 BDL DMA 完成。该测试使用 QEMU null audio backend，不依赖宿主声卡。
 
-`smoke-pci-portability` 在 LoongArch64 QEMU virt 上同时挂载 HDA 和 NVMe，验证未分配零值 BAR 的 sizing/assignment、HDA PCM DMA、NVMe queue/Identify 以及两个 class 绑定。该测试证明协议实现没有依赖 x86；NVMe 块数据读写仍需按下方 I/O 表使用可丢弃镜像验证。
+`smoke-pci-portability` 在 LoongArch64 QEMU virt 上同时挂载 HDA 和 NVMe，验证未分配零值 BAR 的 sizing/assignment、HDA PCM DMA、NVMe queue/Identify 以及两个 class 绑定。目标创建专用 128 MiB 可丢弃镜像，写入超过单次 8 KiB bounce chunk 的数据，再执行 flush、读回和比较。`CONFIG_NVME_SMOKE_TEST` 会从 LBA 0 开始改写介质，只能由该目标配合自动生成的镜像启用。
 
 检查源中没有板级硬编码泄漏：
 
