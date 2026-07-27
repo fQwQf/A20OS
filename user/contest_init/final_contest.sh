@@ -32,7 +32,7 @@ run_final_group() {
 
     print "#### A20OS 2026 FINAL EVAL START $group ####"
     "$chroot_bin" /test /a20-eval-shell -c \
-        "cd /glibc && exec /a20-eval-shell '$script'"
+        "PATH=/glibc:/bin:/usr/bin:/sbin:/usr/sbin; export PATH; cd /glibc && exec /a20-eval-shell '$script'"
     typeset -i rc=$?
     print "[FINAL-EVAL] $group runner exit=$rc"
     print "#### A20OS 2026 FINAL EVAL END $group ####"
