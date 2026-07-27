@@ -142,11 +142,11 @@ static int exec_replace_path(exec_bprm_t *bprm, const char *path)
 /* ================================================================== */
 
 /*
- * Copy an array of string pointers from user or kernel space into
- * kernel-owned copies.  Works for both argv and envp.
+ * Copy an array of string pointers from user space into kernel-owned
+ * copies.  proc_exec() is an ABI syscall boundary, so argv and envp always
+ * retain user-pointer provenance even on identity-mapped architectures.
  *
- * @src        pointer to the user/kernel pointer array
- * @is_kernel  if true, src is in kernel space
+ * @src        pointer to the user pointer array, or NULL
  * @out        pre-allocated array of char* (at least MAX_ARG_STRINGS+1)
  * @out_count  output: number of strings copied
  * @arg_bytes  in/out: running total of bytes (for limit check)
@@ -155,23 +155,24 @@ static int exec_replace_path(exec_bprm_t *bprm, const char *path)
  * Returns 0 on success, negative errno on failure.
  * On failure, any partially copied strings are freed.
  */
-static int exec_copy_args(char *const *src, int is_kernel,
-                          char **out, int *out_count,
+static int exec_copy_args(char *const *src, char **out, int *out_count,
                           size_t *arg_bytes, size_t max_bytes)
 {
     task_t *t = proc_current();
     int count = 0;
 
+    if (!src) {
+        out[0] = NULL;
+        *out_count = 0;
+        return 0;
+    }
+
     while (count < MAX_ARG_STRINGS) {
         char *ptr;
-        if (is_kernel) {
-            ptr = src[count];
-        } else {
-            if (copy_from_user(&ptr, &src[count], sizeof(char *)) < 0) {
-                /* cleanup */
-                for (int i = 0; i < count; i++) { kfree(out[i]); out[i] = NULL; }
-                return -EFAULT;
-            }
+        if (copy_from_user(&ptr, &src[count], sizeof(char *)) < 0) {
+            /* cleanup */
+            for (int i = 0; i < count; i++) { kfree(out[i]); out[i] = NULL; }
+            return -EFAULT;
         }
         if (!ptr)
             break;
@@ -183,28 +184,18 @@ static int exec_copy_args(char *const *src, int is_kernel,
         }
 
         size_t len;
-        if (is_kernel) {
-            len = strlen(ptr) + 1;
-            if (len > MAX_ARG_STRLEN) {
-                kfree(out[count]); out[count] = NULL;
-                for (int i = 0; i < count; i++) { kfree(out[i]); out[i] = NULL; }
-                return -E2BIG;
-            }
-            memcpy(out[count], ptr, len);
-        } else {
-            long copied = user_strncpy(out[count], ptr, MAX_ARG_STRLEN);
-            if (copied < 0) {
-                kfree(out[count]); out[count] = NULL;
-                for (int i = 0; i < count; i++) { kfree(out[i]); out[i] = NULL; }
-                return (int)copied;
-            }
-            if ((size_t)copied >= MAX_ARG_STRLEN - 1) {
-                kfree(out[count]); out[count] = NULL;
-                for (int i = 0; i < count; i++) { kfree(out[i]); out[i] = NULL; }
-                return -E2BIG;
-            }
-            len = (size_t)copied + 1;
+        long copied = user_strncpy(out[count], ptr, MAX_ARG_STRLEN);
+        if (copied < 0) {
+            kfree(out[count]); out[count] = NULL;
+            for (int i = 0; i < count; i++) { kfree(out[i]); out[i] = NULL; }
+            return (int)copied;
         }
+        if ((size_t)copied >= MAX_ARG_STRLEN - 1) {
+            kfree(out[count]); out[count] = NULL;
+            for (int i = 0; i < count; i++) { kfree(out[i]); out[i] = NULL; }
+            return -E2BIG;
+        }
+        len = (size_t)copied + 1;
 
         *arg_bytes += len;
         if (*arg_bytes > max_bytes ||
@@ -219,11 +210,8 @@ static int exec_copy_args(char *const *src, int is_kernel,
     /* Check for overflow: if the array has more than MAX_ARG_STRINGS entries */
     if (count == MAX_ARG_STRINGS) {
         char *extra;
-        if (is_kernel) {
-            extra = src[count];
-        } else if (copy_from_user(&extra, &src[count], sizeof(char *)) < 0) {
+        if (copy_from_user(&extra, &src[count], sizeof(char *)) < 0)
             extra = NULL;
-        }
         if (extra) {
             for (int i = 0; i < count; i++) { kfree(out[i]); out[i] = NULL; }
             return -E2BIG;
@@ -644,14 +632,7 @@ int proc_exec(const char *path, char *const argv[], char *const envp[])
     strcpy(bprm.path, path);
 
     size_t arg_bytes = 0;
-#ifdef CONFIG_NOMMU
-    /* In NOMMU, proc_exec is only called from syscall handlers, so argv/envp
-     * are always user pointers even though they live in physical memory. */
-    int is_kptr = 0;
-#else
-    int is_kptr = argv && arch_is_kernel_address(argv);
-#endif
-    int r = exec_copy_args(argv, is_kptr, bprm.args, &bprm.argc,
+    int r = exec_copy_args(argv, bprm.args, &bprm.argc,
                            &arg_bytes, MAX_ARG_BYTES);
     if (r < 0) {
         kfree(bprm.path);
@@ -682,12 +663,7 @@ int proc_exec(const char *path, char *const argv[], char *const envp[])
         arg_bytes += len;
     }
 
-#ifdef CONFIG_NOMMU
-    int env_is_kptr = 0;
-#else
-    int env_is_kptr = envp && arch_is_kernel_address(envp);
-#endif
-    r = exec_copy_args(envp, env_is_kptr, bprm.envs, &bprm.envc,
+    r = exec_copy_args(envp, bprm.envs, &bprm.envc,
                        &arg_bytes, MAX_ARG_BYTES);
     if (r < 0) {
         bprm_free(&bprm);
