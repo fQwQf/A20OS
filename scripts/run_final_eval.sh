@@ -4,6 +4,7 @@
 #
 # Usage:
 #   scripts/run_final_eval.sh riscv64|loongarch64 cagent|buildstorm
+#   scripts/run_final_eval.sh riscv64|loongarch64 buildstorm-probe 1|8
 #
 # The official ext4 image is never opened writable.  A read-only base restored
 # from the published .gz and a fresh qcow2 overlay are used for every run.
@@ -12,12 +13,14 @@ set -euo pipefail
 
 usage() {
     echo "usage: $0 riscv64|loongarch64 cagent|buildstorm" >&2
+    echo "       $0 riscv64|loongarch64 buildstorm-probe 1|8" >&2
     exit 2
 }
 
-[[ $# -eq 2 ]] || usage
+[[ $# -ge 2 && $# -le 3 ]] || usage
 arch=$1
 group=$2
+guest_cpus=${3:-8}
 
 case "$arch" in
 riscv64)
@@ -44,10 +47,23 @@ buildstorm)
     default_timeout=36000
     judge_name=judge_buildstorm-glibc.py
     ;;
+buildstorm-probe)
+    default_timeout=1800
+    judge_name=
+    [[ $# -eq 3 ]] || usage
+    ;;
 *)
     usage
     ;;
 esac
+if [[ "$guest_cpus" != 1 && "$guest_cpus" != 8 ]]; then
+    echo "[final-eval] guest CPU count must be 1 or 8" >&2
+    exit 2
+fi
+if [[ "$group" != buildstorm-probe && "$guest_cpus" != 8 ]]; then
+    echo "[final-eval] formal cagent/buildstorm runs require 8 guest CPUs" >&2
+    exit 2
+fi
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 repo_root=$(cd "$script_dir/.." && pwd -P)
@@ -83,7 +99,7 @@ if [[ ! -r "$image_gz" ]]; then
     echo "[final-eval] missing official image archive: $image_gz" >&2
     exit 1
 fi
-if [[ ! -r "$judge" ]]; then
+if [[ -n "$judge_name" && ! -r "$judge" ]]; then
     echo "[final-eval] missing official judge: $judge" >&2
     exit 1
 fi
@@ -97,20 +113,28 @@ mkdir -p \
     "$state_dir/logs" \
     "$state_dir/scores" \
     "$state_dir/metadata" \
+    "$state_dir/probes" \
     "$state_dir/runs"
 
 commit=$(git rev-parse --verify HEAD)
 short_commit=$(git rev-parse --short=12 HEAD)
 timestamp=$(date -u +%Y%m%dT%H%M%SZ)
 run_nonce=$(date -u +%N)
-run_id="${arch_tag}-${group}-${short_commit}-${timestamp}-${run_nonce}-$$"
+if [[ "$group" == buildstorm-probe ]]; then
+    run_id="${arch_tag}-${group}-${guest_cpus}c-${short_commit}-${timestamp}-${run_nonce}-$$"
+    artifact_stem="${arch_tag}-${group}-${guest_cpus}c-${commit}-${timestamp}-${run_nonce}-$$"
+else
+    run_id="${arch_tag}-${group}-${short_commit}-${timestamp}-${run_nonce}-$$"
+    artifact_stem="${arch_tag}-${group}-${commit}-${timestamp}-${run_nonce}-$$"
+fi
 run_dir="$state_dir/runs/$run_id"
 mkdir "$run_dir"
 
-serial_log="$state_dir/logs/${arch_tag}-${group}-${commit}-${timestamp}-${run_nonce}-$$.log"
-score_json="$state_dir/scores/${arch_tag}-${group}-${commit}-${timestamp}-${run_nonce}-$$.json"
-metadata="$state_dir/metadata/${arch_tag}-${group}-${commit}-${timestamp}-${run_nonce}-$$.txt"
+serial_log="$state_dir/logs/${artifact_stem}.log"
+score_json="$state_dir/scores/${artifact_stem}.json"
+metadata="$state_dir/metadata/${artifact_stem}.txt"
 judge_stderr="$run_dir/judge.stderr"
+probe_artifacts="$state_dir/probes/$run_id"
 
 image_gz_sha=$(sha256sum "$image_gz" | awk '{print $1}')
 # Key the base cache by the published archive checksum.  A future archive
@@ -153,7 +177,7 @@ build_args=(
     ABI=both
     MODE=release
     PROFILE=full
-    NR_CPUS=8
+    NR_CPUS="$guest_cpus"
     FAT32_IMAGE_MB=128
     PYTHON="conda run -n $conda_env python"
     dev-build
@@ -161,7 +185,11 @@ build_args=(
 echo "[final-eval] building $arch kernel and FAT32 user image"
 make "${build_args[@]}"
 
-build_dir=".kernel-build/${arch}-qemu-virt-${arch}-both-dev-smp8"
+if [[ "$guest_cpus" == 1 ]]; then
+    build_dir=".kernel-build/${arch}-qemu-virt-${arch}-both-dev"
+else
+    build_dir=".kernel-build/${arch}-qemu-virt-${arch}-both-dev-smp${guest_cpus}"
+fi
 kernel="$build_dir/kernel.elf"
 fat32="$build_dir/fat32.img"
 if [[ ! -s "$kernel" || ! -s "$fat32" ]]; then
@@ -186,6 +214,25 @@ if [[ "$marker" != "$group" ]]; then
     exit 1
 fi
 
+if [[ "$group" == buildstorm-probe ]]; then
+    host_probe_dir="$run_dir/host-probe-build"
+    bash scripts/build_buildstorm_probes.sh \
+        "$arch" "$base_image" "$host_probe_dir"
+    mmd -i "$run_fat32" ::/a20-probe >/dev/null 2>&1 || true
+    mcopy -o -i "$run_fat32" "$host_probe_dir/cwd-probe" \
+        ::/a20-probe/cwd-probe
+    mcopy -o -i "$run_fat32" "$host_probe_dir/exec-pages-probe" \
+        ::/a20-probe/exec-pages-probe
+    mcopy -o -i "$run_fat32" "$host_probe_dir/liba20probe.so" \
+        ::/a20-probe/liba20probe.so
+    for probe_name in cwd-probe exec-pages-probe liba20probe.so; do
+        if ! mtype -i "$run_fat32" "::/a20-probe/$probe_name" >/dev/null; then
+            echo "[final-eval] failed to install $probe_name" >&2
+            exit 1
+        fi
+    done
+fi
+
 overlay="$run_dir/official-rootfs.qcow2"
 base_image_abs=$(readlink -f "$base_image")
 qemu-img create -q -f qcow2 -F raw -b "$base_image_abs" "$overlay"
@@ -194,7 +241,7 @@ common_qemu_args=(
     -machine virt
     -accel tcg,thread=multi
     -m 8G
-    -smp 8
+    -smp "$guest_cpus"
     -nographic
     -kernel "$kernel"
 )
@@ -259,10 +306,16 @@ fi
     echo "official_image_sha256=$base_sha"
     echo "official_image_overlay=$overlay"
     echo "qemu_memory=8G"
-    echo "qemu_smp=8"
+    echo "qemu_smp=$guest_cpus"
     echo "qemu_accel=tcg,thread=multi"
     echo "qemu_timeout_s=$timeout_s"
     echo "qemu_command=$qemu_command_text"
+    if [[ "$group" == buildstorm-probe ]]; then
+        echo "probe_cwd_sha256=$(sha256sum "$host_probe_dir/cwd-probe" | awk '{print $1}')"
+        echo "probe_exec_pages_sha256=$(sha256sum "$host_probe_dir/exec-pages-probe" | awk '{print $1}')"
+        echo "probe_dso_sha256=$(sha256sum "$host_probe_dir/liba20probe.so" | awk '{print $1}')"
+        echo "probe_process_models=static-elf,single-process,cargo-j1,cargo-default"
+    fi
 } >"$metadata"
 
 echo "[final-eval] run=$run_id timeout=${timeout_s}s"
@@ -282,19 +335,47 @@ guest_cores=$(
     sed -nE 's/.*\[SMP\] ([0-9]+\/[0-9]+) configured CPUs online.*/\1/p' \
         "$serial_log" | tail -n 1
 )
-guest_cores=${guest_cores:-not-observed}
+if [[ -n "$guest_cores" ]]; then
+    guest_cores_source=kernel-smp-line
+elif [[ "$guest_cpus" == 1 ]]; then
+    guest_cores=1/1
+    guest_cores_source=single-core-kernel-build-and-qemu-command
+else
+    guest_cores=not-observed
+    guest_cores_source=not-observed
+fi
 
 set +e
 if [[ "$group" == cagent ]]; then
     conda run -n "$conda_env" --no-capture-output python "$judge" \
         <"$serial_log" >"$score_json" 2>"$judge_stderr"
-else
+    judge_status=$?
+elif [[ "$group" == buildstorm ]]; then
     conda run -n "$conda_env" python "$judge" "$serial_log" \
         >"$score_json" 2>"$judge_stderr"
+    judge_status=$?
+else
+    mkdir -p "$probe_artifacts"
+    awk -v output_dir="$probe_artifacts" '
+        /^#### BUILDSTORM PROBE START / {
+            name = $5
+            output = output_dir "/" name ".log"
+            active = 1
+        }
+        active { print >output }
+        /^#### BUILDSTORM PROBE END / {
+            close(output)
+            active = 0
+        }
+    ' "$serial_log"
+    grep '^\[BUILDSTORM-PROBE\] case=.* rc=' "$serial_log" \
+        >"$probe_artifacts/results.txt"
+    grep '^\[BUILDSTORM-PROBE\] summary ' "$serial_log" \
+        >>"$probe_artifacts/results.txt"
+    judge_status=0
 fi
-judge_status=$?
 set -e
-if [[ "$judge_status" -eq 0 ]]; then
+if [[ "$group" != buildstorm-probe && "$judge_status" -eq 0 ]]; then
     set +e
     conda run -n "$conda_env" python -m json.tool \
         "$score_json" >/dev/null 2>>"$judge_stderr"
@@ -310,20 +391,33 @@ fi
     echo "qemu_exit_status=$qemu_status"
     echo "qemu_timed_out=$timed_out"
     echo "guest_cores=$guest_cores"
-    echo "judge=$judge"
-    echo "judge_exit_status=$judge_status"
+    echo "guest_cores_source=$guest_cores_source"
+    if [[ "$group" == buildstorm-probe ]]; then
+        echo "probe_phase=1"
+        echo "probe_artifacts=$probe_artifacts"
+        echo "probe_results=$probe_artifacts/results.txt"
+        echo "judge=not-run"
+        echo "judge_exit_status=not-run"
+    else
+        echo "judge=$judge"
+        echo "judge_exit_status=$judge_status"
+    fi
     echo "serial_log=$serial_log"
     echo "score_json=$score_json"
     echo "judge_stderr=$judge_stderr"
 } >>"$metadata"
 
-if [[ "$judge_status" -ne 0 ]]; then
+if [[ "$group" != buildstorm-probe && "$judge_status" -ne 0 ]]; then
     echo "[final-eval] judge failed with status $judge_status" >&2
     exit "$judge_status"
 fi
 
 echo "[final-eval] serial:   $serial_log"
-echo "[final-eval] score:    $score_json"
+if [[ "$group" == buildstorm-probe ]]; then
+    echo "[final-eval] probes:  $probe_artifacts"
+else
+    echo "[final-eval] score:    $score_json"
+fi
 echo "[final-eval] metadata: $metadata"
 if [[ "$qemu_status" -ne 0 ]]; then
     echo "[final-eval] QEMU ended with status $qemu_status (timed_out=$timed_out)" >&2
