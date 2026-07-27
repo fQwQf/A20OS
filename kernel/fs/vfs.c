@@ -1125,6 +1125,29 @@ static int vfs_readlink_copy_target(const char *target, char *buf, size_t sz) {
     return (int)len;
 }
 
+/*
+ * Paths kept by vfiles and exec are global VFS paths.  A task's cwd and
+ * procfs symlink results, however, are paths in that task's chroot-visible
+ * namespace.  Translate only on the visibility boundary; callers doing VFS
+ * lookup continue to use the physical path.
+ */
+static const char *vfs_chroot_visible_path(task_t *task, const char *physical,
+                                           char *visible, size_t visible_sz) {
+    const char *root =
+        task && task->fs.root_path[0] ? task->fs.root_path : "/";
+    if (!physical || !visible || visible_sz == 0)
+        return NULL;
+    if (strcmp(root, "/") == 0 || !path_is_beneath(root, physical))
+        return physical;
+    const char *relative = physical + strlen(root);
+    if (*relative == '\0')
+        relative = "/";
+    if (strlen(relative) >= visible_sz)
+        return NULL;
+    strcpy(visible, relative);
+    return visible;
+}
+
 int vfs_readlinkat(int dirfd, const char *path, char *buf, size_t sz) {
     (void)dirfd;
     if (!path || !buf || sz == 0) return -EINVAL;
@@ -1135,14 +1158,24 @@ int vfs_readlinkat(int dirfd, const char *path, char *buf, size_t sz) {
     if (pr < 0)
         return pr;
 
-    if (strcmp(resolved, "/proc/self/exe") == 0) {
-        task_t *cur = proc_current();
+    char visible_path[MAX_PATH_LEN];
+    const char *visible =
+        vfs_chroot_visible_path(cur, resolved, visible_path,
+                                sizeof(visible_path));
+    if (!visible)
+        return -ENAMETOOLONG;
+
+    if (strcmp(visible, "/proc/self/exe") == 0) {
         const char *exe = cur && cur->exec_path[0] ? cur->exec_path : "/bin/sh";
-        return vfs_readlink_copy_target(exe, buf, sz);
+        char visible_exe[MAX_PATH_LEN];
+        const char *target =
+            vfs_chroot_visible_path(cur, exe, visible_exe,
+                                    sizeof(visible_exe));
+        return target ? vfs_readlink_copy_target(target, buf, sz)
+                      : -ENAMETOOLONG;
     }
 
-    if (strcmp(resolved, "/proc/self/cwd") == 0) {
-        task_t *cur = proc_current();
+    if (strcmp(visible, "/proc/self/cwd") == 0) {
         const char *cwd_res = cur ? cur->fs.cwd : "/";
         return vfs_readlink_copy_target(cwd_res, buf, sz);
     }
@@ -1163,15 +1196,21 @@ int vfs_readlinkat(int dirfd, const char *path, char *buf, size_t sz) {
             proc_put(proc_fd_task);
             return -EBADF;
         }
-        int r = vf->path[0] ? vfs_readlink_copy_target(vf->path, buf, sz) : -ENOENT;
+        char visible_fd[MAX_PATH_LEN];
+        const char *target =
+            vf->path[0]
+                ? vfs_chroot_visible_path(cur, vf->path, visible_fd,
+                                          sizeof(visible_fd))
+                : NULL;
+        int r = target ? vfs_readlink_copy_target(target, buf, sz) : -ENOENT;
         vfs_put_file_ref(gfd, vf);
         proc_put(proc_fd_task);
         return r;
     }
 
     /* Handle /proc/<pid>/exe and /proc/<pid>/cwd symlinks */
-    if (strncmp(resolved, "/proc/", 6) == 0) {
-        const char *p = resolved + 6;
+    if (strncmp(visible, "/proc/", 6) == 0) {
+        const char *p = visible + 6;
         if (strncmp(p, "self/", 5) == 0) p += 5;
         int pid = 0;
         const char *q = p;
@@ -1183,7 +1222,12 @@ int vfs_readlinkat(int dirfd, const char *path, char *buf, size_t sz) {
             if (strcmp(q, "/exe") == 0) {
                 task_t *t = proc_find_get(pid);
                 const char *exe = t && t->exec_path[0] ? t->exec_path : "/bin/sh";
-                int r = vfs_readlink_copy_target(exe, buf, sz);
+                char visible_exe[MAX_PATH_LEN];
+                const char *target =
+                    vfs_chroot_visible_path(cur, exe, visible_exe,
+                                            sizeof(visible_exe));
+                int r = target ? vfs_readlink_copy_target(target, buf, sz)
+                               : -ENAMETOOLONG;
                 proc_put(t);
                 return r;
             }
@@ -1352,12 +1396,21 @@ int vfs_chdir(const char *path) {
     if (pr < 0)
         return pr;
 
+    const char *root = cur->fs.root_path[0] ? cur->fs.root_path : "/";
+    if (strcmp(root, "/") != 0 && !path_is_beneath(root, canon))
+        return -EACCES;
+
     vnode_t *vn = vfs_resolve(canon);
     if (!vn) return g_lookup_errno ? g_lookup_errno : -ENOENT;
     if (vn->type != VFS_FT_DIR) { vnode_put(vn); return -ENOTDIR; }
     if (vfs_vnode_permission(vn, X_OK) < 0) { vnode_put(vn); return -EACCES; }
     vnode_put(vn);
-    strncpy(cur->fs.cwd, canon, MAX_PATH_LEN - 1);
+    char visible[MAX_PATH_LEN];
+    const char *cwd_visible =
+        vfs_chroot_visible_path(cur, canon, visible, sizeof(visible));
+    if (!cwd_visible)
+        return -ENAMETOOLONG;
+    strncpy(cur->fs.cwd, cwd_visible, MAX_PATH_LEN - 1);
     cur->fs.cwd[MAX_PATH_LEN - 1] = '\0';
     return 0;
 }

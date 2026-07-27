@@ -140,7 +140,24 @@ static void user_trap_handler(trap_context_t *ctx) {
                     return;
                 }
             }
+            enum mm_fault_access access =
+                code == CAUSE_STORE_PAGE_FAULT ? MM_FAULT_ACCESS_WRITE :
+                code == CAUSE_INSN_PAGE_FAULT ? MM_FAULT_ACCESS_EXEC :
+                                                MM_FAULT_ACCESS_READ;
+            if (handle_present_page_fault(cur, stval, access) == 0) {
+                signal_deliver_user(ctx);
+                return;
+            }
             if (handle_demand_fault(cur, stval) == 0) {
+                signal_deliver_user(ctx);
+                return;
+            }
+            /*
+             * Demand paging may drop mm->lock for file I/O. Another thread can
+             * complete the same mapping between our first present-PTE check
+             * and a failed/redundant demand-fault attempt.
+             */
+            if (handle_present_page_fault(cur, stval, access) == 0) {
                 signal_deliver_user(ctx);
                 return;
             }
@@ -275,7 +292,18 @@ void kernel_trap_handler(trap_context_t *ctx) {
                         return;
                     }
                 }
+                enum mm_fault_access access =
+                    (code == CAUSE_STORE_PAGE_FAULT ||
+                     code == CAUSE_PAGE_MODIFICATION) ? MM_FAULT_ACCESS_WRITE :
+                    code == CAUSE_INSN_PAGE_FAULT ? MM_FAULT_ACCESS_EXEC :
+                                                   MM_FAULT_ACCESS_READ;
+                if (handle_present_page_fault(cur, stval, access) == 0) {
+                    return;
+                }
                 if (handle_demand_fault(cur, stval) == 0) {
+                    return;
+                }
+                if (handle_present_page_fault(cur, stval, access) == 0) {
                     return;
                 }
             }
