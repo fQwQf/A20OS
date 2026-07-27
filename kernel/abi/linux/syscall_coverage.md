@@ -280,7 +280,7 @@ because it has an entry in `syscall_table.def`.
 | `syncfs` | fd I/O | `partial` | `smoke-vfs-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `fanotify_init` | path/fs | `stub` | `smoke-vfs-stress` | explicit -ENOSYS compatibility placeholder |
 | `fanotify_mark` | path/fs | `stub` | `smoke-vfs-stress` | explicit -ENOSYS compatibility placeholder |
-| `signalfd4` | signals | `stub` | `smoke-proc-stress` | explicit -ENOSYS compatibility placeholder |
+| `signalfd4` | signals | `partial` | `smoke-signalfd-stress` | implemented subset; create/mask-update/read/poll/epoll; Linux edge semantics remain documented gaps |
 | `acct` | system | `stub` | `smoke-abi-linux` | explicit -ENOSYS compatibility placeholder |
 | `add_key` | keyring | `stub` | `stub-review` | explicit -ENOSYS compatibility placeholder |
 | `request_key` | keyring | `stub` | `stub-review` | explicit -ENOSYS compatibility placeholder |
@@ -306,7 +306,6 @@ The following explicit `-ENOSYS` placeholders in `syscall_table.def` have been r
 | --- | --- | --- | --- |
 | `fanotify_init` | **keep stub** | Filesystem monitoring; not required by base userland (musl, sbase, mksh). | No |
 | `fanotify_mark` | **keep stub** | Companion to `fanotify_init`; same rationale. | No |
-| `signalfd4` | **keep stub** | Signal file descriptors; `sigtimedwait` and signal handlers provide equivalent functionality for current userland. | No |
 | `acct` | **keep stub** | Process accounting; no userland dependency and no accounting subsystem. | No |
 | `add_key` | **keep stub** | Keyring management; security subsystem does not implement a keyring. | No |
 | `request_key` | **keep stub** | Keyring management; same rationale as `add_key`. | No |
