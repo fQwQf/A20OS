@@ -14,7 +14,43 @@
 #include "core/lock.h"
 #include "core/sync.h"
 #include "abi/linux/errno.h"
+#include "abi/linux/input.h"
+#include "sys/usercopy.h"
 #include "drivers/block/virtio_blk.h"
+
+#define EV_MUX_KEY_STATE_BYTES ((KEY_MAX + 8) / 8)
+
+static spinlock_t g_mux_state_lock = SPINLOCK_INIT;
+static uint8_t g_mux_key_state[EV_MUX_KEY_STATE_BYTES];
+static int32_t g_mux_abs_value[2];
+
+/*
+ * Track pressed keys and absolute axis values for EVIOCGKEY/EVIOCGABS.
+ * Called for every event consumed from the mux, from both IRQ and
+ * read-side paths.
+ */
+static void evdev_mux_track_event(uint16_t type, uint16_t code, int32_t value) {
+    if (type == EV_KEY && code <= KEY_MAX) {
+        uint64_t flags = spin_lock_irqsave(&g_mux_state_lock);
+        if (value)
+            g_mux_key_state[code >> 3] |= (uint8_t)(1U << (code & 7));
+        else
+            g_mux_key_state[code >> 3] &= (uint8_t)~(1U << (code & 7));
+        spin_unlock_irqrestore(&g_mux_state_lock, flags);
+    } else if (type == EV_ABS && code <= ABS_Y) {
+        uint64_t flags = spin_lock_irqsave(&g_mux_state_lock);
+        g_mux_abs_value[code] = value;
+        spin_unlock_irqrestore(&g_mux_state_lock, flags);
+    }
+}
+
+static void evdev_mux_track_buffer(const char *buf, size_t copied) {
+    for (size_t off = 0; off + sizeof(struct input_event) <= copied;
+         off += sizeof(struct input_event)) {
+        const struct input_event *ev = (const struct input_event *)(buf + off);
+        evdev_mux_track_event(ev->type, ev->code, ev->value);
+    }
+}
 
 #define VIRTIO_INPUT_QUEUE_SIZE VIRTIO_QUEUE_SIZE
 #define VIRTIO_INPUT_DMA_LINE   64
@@ -204,8 +240,10 @@ static int input_read(vfile_t *vf, char *buf, size_t count) {
         /* /dev/event0 is a transport-independent evdev multiplexer.  This
          * includes VBox's xHCI HID controller as well as PCI virtio-input. */
         int class_result = input_read_class_devices(buf, count);
-        if (class_result > 0)
+        if (class_result > 0) {
+            evdev_mux_track_buffer(buf, (size_t)class_result);
             return class_result;
+        }
 
         /* Keep the GUI responsive on QEMU variants whose virtio IRQ route is
          * masked or unavailable even though the queue itself is operational. */
@@ -213,7 +251,7 @@ static int input_read(vfile_t *vf, char *buf, size_t count) {
         for (int i = 0; i < MAX_VIRTIO_INPUT_DEVS; i++) {
             virtio_input_inst_t *inst = &g_input_insts[i];
             if (!inst->valid) continue;
-            
+
             uint64_t flags = spin_lock_irqsave(&inst->lock);
             if (inst->head != inst->tail) {
                 size_t copied = 0;
@@ -224,6 +262,7 @@ static int input_read(vfile_t *vf, char *buf, size_t count) {
                     copied += sizeof(struct input_event);
                 }
                 spin_unlock_irqrestore(&inst->lock, flags);
+                evdev_mux_track_buffer(buf, copied);
                 return copied;
             }
             spin_unlock_irqrestore(&inst->lock, flags);
@@ -277,9 +316,139 @@ static int input_read(vfile_t *vf, char *buf, size_t count) {
     }
 }
 
+static void evdev_bit_set(uint8_t *bits, uint32_t bit) {
+    bits[bit >> 3] |= (uint8_t)(1U << (bit & 7));
+}
+
+static int evdev_copy_zeros(void *arg, uint32_t len) {
+    uint8_t zeros[96];
+    memset(zeros, 0, sizeof(zeros));
+    while (len) {
+        uint32_t chunk = len < sizeof(zeros) ? len : (uint32_t)sizeof(zeros);
+        if (copy_to_user(arg, zeros, chunk) < 0)
+            return -EFAULT;
+        arg = (char *)arg + chunk;
+        len -= chunk;
+    }
+    return 0;
+}
+
+static int evdev_bit_ioctl(uint32_t ev, uint32_t len, void *arg) {
+    uint8_t bits[EV_MUX_KEY_STATE_BYTES];
+    memset(bits, 0, sizeof(bits));
+    switch (ev) {
+    case 0: /* EVIOCGBIT(0) and EVIOCGBIT(EV_SYN) are the same request:
+             * the supported event type bitmap (as on Linux). */
+        evdev_bit_set(bits, EV_SYN);
+        evdev_bit_set(bits, EV_KEY);
+        evdev_bit_set(bits, EV_REL);
+        evdev_bit_set(bits, EV_ABS);
+        break;
+    case EV_KEY:
+        /* The mux aggregates keyboards and pointer buttons across
+         * transports; advertise a superset. */
+        for (uint32_t k = 1; k <= 0xff; k++)
+            evdev_bit_set(bits, k);
+        for (uint32_t k = BTN_MOUSE_FIRST; k <= BTN_MOUSE_LAST; k++)
+            evdev_bit_set(bits, k);
+        evdev_bit_set(bits, BTN_TOUCH);
+        break;
+    case EV_REL:
+        evdev_bit_set(bits, REL_X);
+        evdev_bit_set(bits, REL_Y);
+        evdev_bit_set(bits, REL_WHEEL);
+        evdev_bit_set(bits, REL_HWHEEL);
+        break;
+    case EV_ABS:
+        evdev_bit_set(bits, ABS_X);
+        evdev_bit_set(bits, ABS_Y);
+        break;
+    default:
+        break; /* empty bitmap */
+    }
+    uint32_t n = len < sizeof(bits) ? len : (uint32_t)sizeof(bits);
+    if (n && copy_to_user(arg, bits, n) < 0)
+        return -EFAULT;
+    if (len > n)
+        return evdev_copy_zeros((char *)arg + n, len - n);
+    return 0;
+}
+
 static int input_ioctl(vfile_t *vf, unsigned long req, void *arg) {
-    (void)vf; (void)req; (void)arg;
-    return -ENOSYS;
+    (void)vf;
+    if (A20_IOC_TYPE(req) != 'E')
+        return -EINVAL;
+    uint32_t nr = A20_IOC_NR(req);
+    uint32_t len = A20_IOC_SIZE(req);
+
+    if (req == EVIOCGVERSION) {
+        int version = EV_VERSION;
+        return copy_to_user(arg, &version, sizeof(version)) < 0 ? -EFAULT : 0;
+    }
+    if (req == EVIOCGID) {
+        struct input_id id = { BUS_VIRTUAL, 0, 0, 0 };
+        return copy_to_user(arg, &id, sizeof(id)) < 0 ? -EFAULT : 0;
+    }
+    if (req == EVIOCGRAB || req == EVIOCREVOKE) {
+        /* The mux has a single implicit client; grabbing is a no-op. */
+        return 0;
+    }
+    if (req == EVIOCSCLOCKID)
+        return 0;
+    if (req == EVIOCGCLOCKID) {
+        int clockid = 1; /* CLOCK_MONOTONIC */
+        return copy_to_user(arg, &clockid, sizeof(clockid)) < 0 ? -EFAULT : 0;
+    }
+
+    switch (nr) {
+    case EVIOCGNAME_NR: {
+        static const char name[] = "A20OS evdev mux";
+        uint32_t n = len < sizeof(name) ? len : (uint32_t)sizeof(name);
+        return n && copy_to_user(arg, name, n) < 0 ? -EFAULT : 0;
+    }
+    case EVIOCGPHYS_NR:
+    case EVIOCGUNIQ_NR: {
+        char z = 0;
+        return len && copy_to_user(arg, &z, 1) < 0 ? -EFAULT : 0;
+    }
+    case EVIOCGPROP_NR:
+        return evdev_copy_zeros(arg, len);
+    case EVIOCGMTSLOTS_NR:
+        return -EINVAL;
+    case EVIOCGKEY_NR: {
+        uint8_t state[EV_MUX_KEY_STATE_BYTES];
+        uint64_t flags = spin_lock_irqsave(&g_mux_state_lock);
+        memcpy(state, g_mux_key_state, sizeof(state));
+        spin_unlock_irqrestore(&g_mux_state_lock, flags);
+        uint32_t n = len < sizeof(state) ? len : (uint32_t)sizeof(state);
+        if (n && copy_to_user(arg, state, n) < 0)
+            return -EFAULT;
+        if (len > n)
+            return evdev_copy_zeros((char *)arg + n, len - n);
+        return 0;
+    }
+    default:
+        break;
+    }
+
+    if (nr >= EVIOCGBIT_NR_BASE && nr < EVIOCGABS_NR_BASE)
+        return evdev_bit_ioctl(nr - EVIOCGBIT_NR_BASE, len, arg);
+
+    if (nr >= EVIOCGABS_NR_BASE && nr < EVIOCGABS_NR_BASE + 0x40) {
+        uint32_t axis = nr - EVIOCGABS_NR_BASE;
+        if (axis > ABS_Y)
+            return -EINVAL;
+        struct input_absinfo ai;
+        memset(&ai, 0, sizeof(ai));
+        uint64_t flags = spin_lock_irqsave(&g_mux_state_lock);
+        ai.value = g_mux_abs_value[axis];
+        spin_unlock_irqrestore(&g_mux_state_lock, flags);
+        ai.minimum = 0;
+        ai.maximum = 32767; /* virtio-input tablet axis range */
+        return copy_to_user(arg, &ai, sizeof(ai)) < 0 ? -EFAULT : 0;
+    }
+
+    return -EINVAL;
 }
 
 vfile_ops_t g_devfs_input_ops = {
