@@ -84,6 +84,7 @@ int64_t sys_epoll_wait(int epfd, void *events, int maxevents, int timeout);
 int64_t sys_epoll_pwait(int epfd, void *events, int maxevents, int timeout, const void *sigmask, size_t sigsetsize);
 int64_t sys_eventfd2(unsigned initval, int flags);
 int64_t sys_timerfd_create(int clockid, int flags);
+int64_t sys_signalfd4(int fd, const void *mask, size_t sigsetsize, int flags);
 int64_t sys_timerfd_settime(int fd, int flags, const void *new_value, void *old_value);
 int64_t sys_timerfd_gettime(int fd, void *curr_value);
 int64_t sys_inotify_init1(int flags);
