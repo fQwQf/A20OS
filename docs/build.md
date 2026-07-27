@@ -19,7 +19,7 @@ docker run -it --rm -v $(pwd):/workspace -w /workspace a20os-buildenv bash
 | `make ARCH=riscv64 run` | 同上，`BOARD` 默认等于 `qemu-virt-riscv64` | 快速启动 |
 | `make run-riscv64` | 等价于 `make ARCH=riscv64 run` | 记住目标名即可 |
 | `make run-loongarch64` / `make run-arm64` / `make run-x86_64` | 在对应架构的 QEMU 中启动 | 跨架构测试 |
-| `make run-gui-riscv64` / `make run-gui-aarch64` / `make run-gui-x86_64` | 启动带 virtio-gpu 的图形 QEMU | 测试桌面或 GUI 应用 |
+| `make run-gui-riscv64` / `make run-gui-aarch64` / `make run-gui-x86_64` / `make run-gui-loongarch64` | 启动带 virtio-gpu 的图形 QEMU；x86_64/LoongArch64 同时挂载 HDA | 测试桌面、GUI 和音频应用 |
 | `make ARCH=riscv64 BRINGUP=1 kernel-only` | 仅编译内核，不生成文件系统镜像 | 只改内核、不需要用户态 |
 | `make ARCH=riscv64 BRINGUP=1 run` | 仅编译内核并在 QEMU 启动 | 内核 bring-up 测试 |
 | `make ARCH=riscv64 NOMMU=1 run` | 以 NOMMU 模式运行 | 测试 NOMMU 路径 |
@@ -48,6 +48,18 @@ docker run -it --rm -v $(pwd):/workspace -w /workspace a20os-buildenv bash
 - `ABI`: `linux` / `native` / `both`，默认 `both`。
 - `NR_CPUS`: 默认 `1`；已验证的 64 位 QEMU virt 平台可直接配置为大于 `1`。
 - `NOMMU`: `1` 开启 NOMMU 模式。
+- `QEMU_GUI_AUDIO_DRIVER`: x86_64/LoongArch64 图形 QEMU 的宿主音频 backend；Linux 默认 `pa`，macOS 默认 `coreaudio`，也可设置为 `pipewire`、`alsa`、`sdl` 或 `none`。
+
+## QEMU 音频
+
+`make run-gui-x86_64` 和 `make run-gui-loongarch64` 会挂载标准 Intel HDA controller 与 duplex codec。启动后可在终端直接验证 PCM 输出：
+
+```bash
+audioplay --tone 440
+audioplay music.wav
+```
+
+WAV 输入必须是 48 kHz、双声道、S16_LE PCM；原始 PCM 使用 `audioplay --raw file.pcm`。播放器通过 `GET_CAPS` 自动寻找 PCM 设备，不假定 HDA 的动态编号。宿主使用 PipeWire 而不提供 PulseAudio 兼容服务时，可执行 `make run-gui-x86_64 QEMU_GUI_AUDIO_DRIVER=pipewire`。
 
 ##  注意
 

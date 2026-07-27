@@ -249,6 +249,7 @@ QEMU_armv7m      := qemu-system-arm
 QEMU_riscv32     := qemu-system-riscv32
 QEMU_ppc64le     := qemu-system-ppc64
 QEMU_GUI_DISPLAY ?= $(if $(filter Darwin,$(shell uname -s 2>/dev/null)),cocoa,gtk)
+QEMU_GUI_AUDIO_DRIVER ?= $(if $(filter Darwin,$(shell uname -s 2>/dev/null)),coreaudio,pa)
 
 QEMU_FLAGS_BASE_riscv64     := -machine virt -bios default -global virtio-mmio.force-legacy=false
 QEMU_FLAGS_BASE_loongarch64 := -machine virt
@@ -294,9 +295,15 @@ QEMU_GUI_DEVICES_x86_64 := -vga none \
                            -device virtio-keyboard-pci \
                            -device virtio-mouse-pci
 QEMU_GUI_DEVICES_loongarch64 := -vga none \
-                                -device virtio-gpu-pci \
-                                -device virtio-keyboard-pci \
-                                -device virtio-mouse-pci
+                                 -device virtio-gpu-pci \
+                                 -device virtio-keyboard-pci \
+                                 -device virtio-mouse-pci
+QEMU_GUI_AUDIO_x86_64 := -audiodev driver=$(QEMU_GUI_AUDIO_DRIVER),id=a20audio \
+                         -device intel-hda \
+                         -device hda-duplex,audiodev=a20audio
+QEMU_GUI_AUDIO_loongarch64 := -audiodev driver=$(QEMU_GUI_AUDIO_DRIVER),id=a20audio \
+                              -device intel-hda \
+                              -device hda-duplex,audiodev=a20audio
 QEMU_GUI_DEVICES_DEFAULT := -device virtio-gpu-device \
                             -device virtio-keyboard-device \
                             -device virtio-mouse-device
@@ -316,6 +323,7 @@ QEMU_BLK     := $(QEMU_BLK_$(ARCH))
 QEMU_BLK_SECOND := $(QEMU_BLK_SECOND_$(ARCH))
 QEMU_NET     := $(QEMU_NET_$(ARCH))
 QEMU_GUI_DEVICES := $(if $(QEMU_GUI_DEVICES_$(ARCH)),$(QEMU_GUI_DEVICES_$(ARCH)),$(QEMU_GUI_DEVICES_DEFAULT))
+QEMU_GUI_AUDIO := $(QEMU_GUI_AUDIO_$(ARCH))
 
 ifeq ($(ARCH),armv7m)
 ifeq ($(CROSS_PREFIX),)
@@ -604,7 +612,7 @@ VBOX_AARCH64_LOAD_ADDRESS ?= 0x08080000ULL
 		check-arch-boundary check-task-state-boundary \
 		check-riscv64-bringup check-loongarch64-bringup check-aarch64-bringup check-x86_64-bringup check-arm32-bringup check-riscv32-bringup check-ppc64le-bringup \
 		check-riscv64-user check-loongarch64-user check-aarch64-user check-x86_64-user check-arm32-user check-riscv32-user check-ppc64le-user \
-		smoke-riscv64 smoke-loongarch64 smoke-aarch64 smoke-x86_64 smoke-qemu-gui-x86_64 smoke-qemu-gui-riscv64 smoke-qemu-gui-aarch64 smoke-qemu-gui-arm32 smoke-qemu-gui-loongarch64 smoke-arm32 smoke-riscv32 smoke-ppc64le smoke-abi-linux smoke-network-suite smoke-proc-a20 smoke-proc-stress smoke-mm-stress smoke-vfs-stress smoke-vfs-edge smoke-sched-stress smoke-futex-stress smoke-socket-stress smoke-driver-lifecycle smoke-hda smoke-pci-portability smoke-native-handle smoke-native-libc smoke-io-event \
+		smoke-riscv64 smoke-loongarch64 smoke-aarch64 smoke-x86_64 smoke-qemu-gui-x86_64 smoke-qemu-gui-riscv64 smoke-qemu-gui-aarch64 smoke-qemu-gui-arm32 smoke-qemu-gui-loongarch64 smoke-arm32 smoke-riscv32 smoke-ppc64le smoke-abi-linux smoke-network-suite smoke-proc-a20 smoke-proc-stress smoke-mm-stress smoke-vfs-stress smoke-vfs-edge smoke-sched-stress smoke-futex-stress smoke-socket-stress smoke-driver-lifecycle smoke-hda smoke-audio-userspace smoke-pci-portability smoke-native-handle smoke-native-libc smoke-io-event \
 		smoke-arch-mmu-matrix \
 		FORCE regen-rootfs-overlay \
 		user_apps fs_img kernel-only dev-build contest-rv contest-la \
@@ -1947,6 +1955,37 @@ smoke-hda:
 		exit 1; \
 	fi
 
+smoke-audio-userspace:
+	$(MAKE) ARCH=x86_64 BOARD=qemu-virt-x86_64 ABI=linux BRINGUP=0 dev-build
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/audio-userspace-x86_64.log"; \
+	wav="$(SMOKE_LOG_DIR)/audio-userspace-x86_64.wav"; \
+	rm -f "$$wav"; \
+	status=0; \
+	{ sleep $(SMOKE_INPUT_DELAY); printf '/bin/audioplay --tone 440 --duration 500\npoweroff\n'; } | \
+	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-x86_64 \
+		-machine q35 -m 1G -nographic -smp 1 -no-reboot -snapshot \
+		-drive file=.kernel-build/x86_64-qemu-virt-x86_64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
+		-device virtio-blk-pci,drive=x0 \
+		-audiodev driver=wav,id=audio0,path="$$wav" \
+		-device intel-hda -device hda-duplex,audiodev=audio0 \
+		-kernel .kernel-build/x86_64-qemu-virt-x86_64-linux-dev/kernel.elf \
+		> "$$log" 2>&1 || status=$$?; \
+	if grep -q 'audioplay: 440 Hz for 500 ms -> /dev/audio' "$$log" && \
+	   grep -q 'audioplay: playback complete' "$$log" && \
+	   grep -q "bound to driver 'hda'" "$$log" && \
+	   grep -q 'System is going down for power-off NOW' "$$log" && \
+	   ! grep -q 'audioplay: playback failed' "$$log" && \
+	   ! grep -qi 'panic' "$$log" && \
+	   python3 scripts/check_wav_pcm.py "$$wav"; then \
+		echo "smoke-audio-userspace: PASS; log=$$log wav=$$wav"; \
+	else \
+		echo "smoke-audio-userspace: failed with status $$status; tail of $$log:"; \
+		tail -n 100 "$$log"; \
+		exit 1; \
+	fi
+
 smoke-pci-portability:
 	$(MAKE) ARCH=loongarch64 BOARD=qemu-virt-loongarch64 ABI=linux BRINGUP=1 CONFIG_HDA_SMOKE_TEST=y CONFIG_NVME_SMOKE_TEST=y kernel-only
 	@mkdir -p $(SMOKE_LOG_DIR)
@@ -1964,6 +2003,7 @@ smoke-pci-portability:
 		-kernel .kernel-build/loongarch64-qemu-virt-loongarch64-linux-bringup-hda-smoke-nvme-smoke/kernel.elf \
 		> "$$log" 2>&1 || status=$$?; \
 	if grep -q 'HDA_STREAM_SMOKE: PASS' "$$log" && \
+	   grep -q 'NVME_CAP_SMOKE: PASS' "$$log" && \
 	   grep -q 'NVME_IO_SMOKE: PASS' "$$log" && \
 	   grep -q "bound to driver 'hda'" "$$log" && \
 	   grep -q "bound to driver 'nvme'" "$$log" && \
@@ -2418,7 +2458,7 @@ else
 endif
 	$(MAKE) ARCH=$(ARCH) BRINGUP=$(BRINGUP) $(GUI_FAT32_IMG)
 	@test -s $(KERNEL_ELF) || (echo "ERROR: kernel ELF missing or empty: $(KERNEL_ELF)" ; exit 1)
-	$(QEMU) $(subst $(FAT32_IMG),$(GUI_FAT32_IMG),$(patsubst -nographic,-display $(QEMU_GUI_DISPLAY) $(QEMU_GUI_DEVICES) -serial stdio,$(QEMU_FLAGS))) -kernel $(KERNEL_ELF)
+	$(QEMU) $(subst $(FAT32_IMG),$(GUI_FAT32_IMG),$(patsubst -nographic,-display $(QEMU_GUI_DISPLAY) $(QEMU_GUI_DEVICES) $(QEMU_GUI_AUDIO) -serial stdio,$(QEMU_FLAGS))) -kernel $(KERNEL_ELF)
 
 # --- Debug Targets ---
 
