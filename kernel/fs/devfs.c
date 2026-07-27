@@ -9,6 +9,9 @@
 #include "core/random.h"
 #include "core/sync.h"
 #include "proc/proc.h"
+#include "drivers/core/driver_core.h"
+#include "drivers/core/driver_class.h"
+#include "mm/slab.h"
 
 extern void uart_putc(char c);
 extern int  uart_getc(void);
@@ -42,6 +45,7 @@ enum {
     DEVFS_SHM_DIR,
     DEVFS_FB,
     DEVFS_INPUT,
+    DEVFS_CLASS,
 };
 
 #define KTTY_NCCS 19
@@ -71,6 +75,8 @@ typedef struct {
     int kind;
     const char *name;
     uint64_t rdev;
+    class_device_t *class_dev;
+    int dynamic;
 } devfs_node_t;
 
 static int devfs_lookup(vnode_t *dir, const char *name, vnode_t **out);
@@ -85,40 +91,41 @@ static vnode_ops_t g_devfs_ops = {
     .release = devfs_release,
 };
 
+#define STATIC_NODE(k, n, d) { .kind = (k), .name = (n), .rdev = (d) }
 static devfs_node_t g_nodes[] = {
-    { DEVFS_ROOT, "", 0 },
-    { DEVFS_MISC, "misc", 0 },
-    { DEVFS_NULL, "null", 0x103 },
-    { DEVFS_ZERO, "zero", 0x105 },
-    { DEVFS_RANDOM, "random", 0x108 },
-    { DEVFS_RANDOM, "urandom", 0x109 },
-    { DEVFS_NULL, "cpu_dma_latency", 0x10a },
-    { DEVFS_TTY,  "tty", 0x500 },
-    { DEVFS_TTY,  "console", 0x501 },
-    { DEVFS_RTC,  "rtc", 0xfe00 },
-    { DEVFS_RTC,  "rtc0", 0xfe00 },
-    { DEVFS_LOOP, "loop0", 0x700 },
-    { DEVFS_LOOP, "loop1", 0x701 },
-    { DEVFS_LOOP, "loop2", 0x702 },
-    { DEVFS_FB, "fb0", 0x1d00 },
-    { DEVFS_INPUT, "event0", 0x1d01 },
-    { DEVFS_LOOP, "loop3", 0x703 },
-    { DEVFS_LOOP, "loop4", 0x704 },
-    { DEVFS_LOOP, "loop5", 0x705 },
-    { DEVFS_LOOP, "loop6", 0x706 },
-    { DEVFS_LOOP, "loop7", 0x707 },
-    { DEVFS_LOOP_CTRL, "loop-control", 0x70c },
-    { DEVFS_PTMX, "ptmx", 0x502 },
-    { DEVFS_PTS_DIR, "pts", 0 },
-    { DEVFS_PTS, "0", 0x8000 },
-    { DEVFS_PTS, "1", 0x8001 },
-    { DEVFS_PTS, "2", 0x8002 },
-    { DEVFS_PTS, "3", 0x8003 },
-    { DEVFS_PTS, "4", 0x8004 },
-    { DEVFS_PTS, "5", 0x8005 },
-    { DEVFS_PTS, "6", 0x8006 },
-    { DEVFS_PTS, "7", 0x8007 },
-    { DEVFS_SHM_DIR, "shm", 0 },
+    STATIC_NODE(DEVFS_ROOT, "", 0),
+    STATIC_NODE(DEVFS_MISC, "misc", 0),
+    STATIC_NODE(DEVFS_NULL, "null", 0x103),
+    STATIC_NODE(DEVFS_ZERO, "zero", 0x105),
+    STATIC_NODE(DEVFS_RANDOM, "random", 0x108),
+    STATIC_NODE(DEVFS_RANDOM, "urandom", 0x109),
+    STATIC_NODE(DEVFS_NULL, "cpu_dma_latency", 0x10a),
+    STATIC_NODE(DEVFS_TTY, "tty", 0x500),
+    STATIC_NODE(DEVFS_TTY, "console", 0x501),
+    STATIC_NODE(DEVFS_RTC, "rtc", 0xfe00),
+    STATIC_NODE(DEVFS_RTC, "rtc0", 0xfe00),
+    STATIC_NODE(DEVFS_LOOP, "loop0", 0x700),
+    STATIC_NODE(DEVFS_LOOP, "loop1", 0x701),
+    STATIC_NODE(DEVFS_LOOP, "loop2", 0x702),
+    STATIC_NODE(DEVFS_FB, "fb0", 0x1d00),
+    STATIC_NODE(DEVFS_INPUT, "event0", 0x1d01),
+    STATIC_NODE(DEVFS_LOOP, "loop3", 0x703),
+    STATIC_NODE(DEVFS_LOOP, "loop4", 0x704),
+    STATIC_NODE(DEVFS_LOOP, "loop5", 0x705),
+    STATIC_NODE(DEVFS_LOOP, "loop6", 0x706),
+    STATIC_NODE(DEVFS_LOOP, "loop7", 0x707),
+    STATIC_NODE(DEVFS_LOOP_CTRL, "loop-control", 0x70c),
+    STATIC_NODE(DEVFS_PTMX, "ptmx", 0x502),
+    STATIC_NODE(DEVFS_PTS_DIR, "pts", 0),
+    STATIC_NODE(DEVFS_PTS, "0", 0x8000),
+    STATIC_NODE(DEVFS_PTS, "1", 0x8001),
+    STATIC_NODE(DEVFS_PTS, "2", 0x8002),
+    STATIC_NODE(DEVFS_PTS, "3", 0x8003),
+    STATIC_NODE(DEVFS_PTS, "4", 0x8004),
+    STATIC_NODE(DEVFS_PTS, "5", 0x8005),
+    STATIC_NODE(DEVFS_PTS, "6", 0x8006),
+    STATIC_NODE(DEVFS_PTS, "7", 0x8007),
+    STATIC_NODE(DEVFS_SHM_DIR, "shm", 0),
 };
 
 static vnode_t g_vnodes[sizeof(g_nodes) / sizeof(g_nodes[0])];
@@ -352,6 +359,40 @@ static int devfs_dir_readdir(vfile_t *vf, void *dirp, size_t count) {
         memcpy(d->d_name, entries[idx].name, namelen + 1);
         total += reclen;
         idx++;
+    }
+
+    if (kind == DEVFS_ROOT && idx >= nentries) {
+        unsigned visible = (unsigned)(idx - nentries);
+        unsigned ordinal = 0;
+        for (;;) {
+            class_device_t *cdev = class_device_get_nth(ordinal++);
+            if (!cdev)
+                break;
+            if (!class_device_has_devnode(cdev)) {
+                class_device_put(cdev);
+                continue;
+            }
+            if (visible > 0) {
+                visible--;
+                class_device_put(cdev);
+                continue;
+            }
+            size_t namelen = strlen(cdev->name);
+            size_t reclen = (offsetof(vfs_dirent64_t, d_name) + namelen + 1 + 7) & ~7UL;
+            if (total + reclen > count) {
+                class_device_put(cdev);
+                break;
+            }
+            vfs_dirent64_t *d = (vfs_dirent64_t *)(out + total);
+            d->d_ino = 0x10000U + cdev->index;
+            d->d_off = (int64_t)(idx + 1);
+            d->d_reclen = (uint16_t)reclen;
+            d->d_type = class_device_dirent_type(cdev);
+            memcpy(d->d_name, cdev->name, namelen + 1);
+            total += reclen;
+            idx++;
+            class_device_put(cdev);
+        }
     }
     vf->offset = idx;
     return (int)total;
@@ -609,6 +650,151 @@ static vfile_ops_t g_devfs_zero_ops   = { .read = devfs_zero_read,  .write = dev
 static vfile_ops_t g_devfs_random_ops = { .read = devfs_random_read,.write = devfs_null_write,   .lseek = devfs_noop_lseek, .ioctl = devfs_ioctl };
 static vfile_ops_t g_devfs_rtc_ops    = { .read = devfs_null_read,  .write = devfs_null_write,   .lseek = devfs_noop_lseek, .ioctl = devfs_ioctl };
 
+static int devfs_class_read(vfile_t *vf, char *buf, size_t count)
+{
+    class_device_t *cdev = vf ? (class_device_t *)vf->priv : NULL;
+    if (class_device_call_begin(cdev) < 0)
+        return -ENODEV;
+    device_t *dev = cdev->dev;
+    int ret = -ENOSYS;
+    if (cdev->class_type == DEV_CLASS_BLOCK) {
+        const block_dev_ops_t *ops = dev->drv->class_ops;
+        uint32_t sector = ops->sector_size ? ops->sector_size(dev) : 512;
+        if (!sector || (vf->offset % sector) || (count % sector))
+            ret = -EINVAL;
+        else if (ops->read) {
+            ret = ops->read(dev, vf->offset / sector, buf, count / sector);
+            if (ret == 0) {
+                vf->offset += count;
+                ret = (int)count;
+            }
+        }
+    } else if (cdev->class_type == DEV_CLASS_CHAR) {
+        const char_dev_ops_t *ops = dev->drv->class_ops;
+        if (ops->read) ret = ops->read(dev, buf, count);
+    } else if (cdev->class_type == DEV_CLASS_AUDIO) {
+        const audio_dev_ops_t *ops = dev->drv->class_ops;
+        if (ops->read) ret = ops->read(dev, buf, count);
+    }
+    class_device_call_end(cdev);
+    return ret;
+}
+
+static int devfs_class_write(vfile_t *vf, const char *buf, size_t count)
+{
+    class_device_t *cdev = vf ? (class_device_t *)vf->priv : NULL;
+    if (class_device_call_begin(cdev) < 0)
+        return -ENODEV;
+    device_t *dev = cdev->dev;
+    int ret = -ENOSYS;
+    if (cdev->class_type == DEV_CLASS_BLOCK) {
+        const block_dev_ops_t *ops = dev->drv->class_ops;
+        uint32_t sector = ops->sector_size ? ops->sector_size(dev) : 512;
+        if (!sector || (vf->offset % sector) || (count % sector))
+            ret = -EINVAL;
+        else if (ops->write) {
+            ret = ops->write(dev, vf->offset / sector, buf, count / sector);
+            if (ret == 0) {
+                vf->offset += count;
+                ret = (int)count;
+            }
+        }
+    } else if (cdev->class_type == DEV_CLASS_CHAR) {
+        const char_dev_ops_t *ops = dev->drv->class_ops;
+        if (ops->write) ret = ops->write(dev, buf, count);
+    } else if (cdev->class_type == DEV_CLASS_AUDIO) {
+        const audio_dev_ops_t *ops = dev->drv->class_ops;
+        if (ops->write) ret = ops->write(dev, buf, count);
+    }
+    class_device_call_end(cdev);
+    return ret;
+}
+
+static int devfs_class_ioctl(vfile_t *vf, unsigned long req, void *arg)
+{
+    class_device_t *cdev = vf ? (class_device_t *)vf->priv : NULL;
+    if (class_device_call_begin(cdev) < 0)
+        return -ENODEV;
+    device_t *dev = cdev->dev;
+    int ret = -ENOTTY;
+    if (cdev->class_type == DEV_CLASS_BLOCK) {
+        const block_dev_ops_t *ops = dev->drv->class_ops;
+        if (req == BLK_IOCTL_GET_CAPACITY && ops->capacity && arg) {
+            uint64_t capacity = ops->capacity(dev);
+            ret = copy_to_user(arg, &capacity, sizeof(capacity)) < 0 ?
+                  -EFAULT : 0;
+        } else if (req == BLK_IOCTL_GET_SECTOR_SZ && ops->sector_size && arg) {
+            uint32_t sector = ops->sector_size(dev);
+            ret = copy_to_user(arg, &sector, sizeof(sector)) < 0 ?
+                  -EFAULT : 0;
+        } else if (req == BLK_IOCTL_SYNC && ops->flush) {
+            ret = ops->flush(dev);
+        } else if (ops->ioctl) {
+            ret = ops->ioctl(dev, req, arg);
+        }
+    } else if (cdev->class_type == DEV_CLASS_CHAR) {
+        const char_dev_ops_t *ops = dev->drv->class_ops;
+        if (ops->ioctl) ret = ops->ioctl(dev, req, arg);
+    } else if (cdev->class_type == DEV_CLASS_AUDIO) {
+        const audio_dev_ops_t *ops = dev->drv->class_ops;
+        if (ops->ioctl) ret = ops->ioctl(dev, req, arg);
+    }
+    class_device_call_end(cdev);
+    return ret;
+}
+
+static long devfs_class_lseek(vfile_t *vf, long offset, int whence)
+{
+    class_device_t *cdev = vf ? (class_device_t *)vf->priv : NULL;
+    if (!cdev || cdev->class_type != DEV_CLASS_BLOCK)
+        return -ESPIPE;
+    if (class_device_call_begin(cdev) < 0)
+        return -ENODEV;
+    device_t *dev = cdev->dev;
+    const block_dev_ops_t *ops = dev->drv->class_ops;
+    uint32_t sector = ops->sector_size ? ops->sector_size(dev) : 512;
+    uint64_t sectors = ops->capacity ? ops->capacity(dev) : 0;
+    size_t end = 0;
+    int invalid = !sector || sectors > (uint64_t)(~(size_t)0) / sector;
+    if (!invalid)
+        end = (size_t)sectors * sector;
+    size_t base = 0;
+    if (whence == SEEK_SET) base = 0;
+    else if (whence == SEEK_CUR) base = vf->offset;
+    else if (whence == SEEK_END) base = end;
+    else invalid = 1;
+    size_t next = base;
+    if (!invalid && offset >= 0) {
+        if ((size_t)offset > ~(size_t)0 - base) invalid = 1;
+        else next = base + (size_t)offset;
+    } else if (!invalid) {
+        size_t magnitude = (size_t)(-(offset + 1L)) + 1U;
+        if (magnitude > base) invalid = 1;
+        else next = base - magnitude;
+    }
+    if (!invalid && next > end)
+        invalid = 1;
+    if (!invalid)
+        vf->offset = next;
+    class_device_call_end(cdev);
+    return invalid ? -EINVAL : (long)next;
+}
+
+static int devfs_class_close(vfile_t *vf)
+{
+    if (vf && vf->priv)
+        class_device_put((class_device_t *)vf->priv);
+    return 0;
+}
+
+static vfile_ops_t g_devfs_class_ops = {
+    .read = devfs_class_read,
+    .write = devfs_class_write,
+    .lseek = devfs_class_lseek,
+    .ioctl = devfs_class_ioctl,
+    .close = devfs_class_close,
+};
+
 static vfile_t g_stdin_file  = { .ref_count = REFCOUNT_INIT(999), .ops = &g_devfs_stdin_ops,  .flags = O_RDONLY, .priv = (void *)(intptr_t)DEVFS_TTY };
 static vfile_t g_stdout_file = { .ref_count = REFCOUNT_INIT(999), .ops = &g_devfs_stdout_ops, .flags = O_WRONLY, .priv = (void *)(intptr_t)DEVFS_TTY };
 static vfile_t g_stderr_file = { .ref_count = REFCOUNT_INIT(999), .ops = &g_devfs_stderr_ops, .flags = O_WRONLY, .priv = (void *)(intptr_t)DEVFS_TTY };
@@ -630,6 +816,33 @@ static int devfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
                 return 0;
             }
         }
+        class_device_t *cdev = class_device_get_by_name(name);
+        if (cdev && class_device_has_devnode(cdev)) {
+            devfs_node_t *dynamic = kcalloc(1, sizeof(*dynamic));
+            vnode_t *vn = kcalloc(1, sizeof(*vn));
+            if (!dynamic || !vn) {
+                kfree(dynamic);
+                kfree(vn);
+                class_device_put(cdev);
+                return -ENOMEM;
+            }
+            dynamic->kind = DEVFS_CLASS;
+            dynamic->name = cdev->name;
+            dynamic->rdev = cdev->devt;
+            dynamic->class_dev = cdev;
+            dynamic->dynamic = 1;
+            vn->ino = 0x10000U + cdev->index;
+            vn->type = VFS_FT_REGULAR;
+            vn->mode = (cdev->class_type == DEV_CLASS_BLOCK ? S_IFBLK : S_IFCHR) | 0660;
+            vnode_ref_init(vn, 1);
+            vn->parent = dir;
+            vnode_get(dir);
+            vn->fs_data = dynamic;
+            vn->ops = &g_devfs_ops;
+            *out = vn;
+            return 0;
+        }
+        class_device_put(cdev);
     } else if (node->kind == DEVFS_MISC && strcmp(name, "rtc") == 0) {
         for (size_t i = 1; i < sizeof(g_nodes) / sizeof(g_nodes[0]); i++) {
             if (g_nodes[i].kind == DEVFS_RTC && strcmp(g_nodes[i].name, "rtc") == 0) {
@@ -669,7 +882,9 @@ static int devfs_stat(vnode_t *vn, kstat_t *st) {
         st->st_gid = 0;
         st->st_nlink = 2;
         st->st_blksize = 4096;
-    } else if (node->kind == DEVFS_LOOP) {
+    } else if (node->kind == DEVFS_LOOP ||
+               (node->kind == DEVFS_CLASS && node->class_dev &&
+                node->class_dev->class_type == DEV_CLASS_BLOCK)) {
         st->st_mode = S_IFBLK | 0660;
         st->st_rdev = node->rdev;
         st->st_uid = 0;
@@ -689,7 +904,14 @@ static int devfs_stat(vnode_t *vn, kstat_t *st) {
 }
 
 static void devfs_release(vnode_t *vn) {
-    (void)vn;
+    devfs_node_t *node = vn ? (devfs_node_t *)vn->fs_data : NULL;
+    if (!node || !node->dynamic)
+        return;
+    if (vn->parent)
+        vnode_put(vn->parent);
+    class_device_put(node->class_dev);
+    kfree(node);
+    kfree(vn);
 }
 
 static vfile_t *devfs_open_vnode(vnode_t *vn, int flags) {
@@ -715,6 +937,17 @@ static vfile_t *devfs_open_vnode(vnode_t *vn, int flags) {
     case DEVFS_RTC:  vf->ops = &g_devfs_rtc_ops; break;
     case DEVFS_FB:   vf->ops = &g_devfs_fb_ops; break;
     case DEVFS_INPUT: vf->ops = &g_devfs_input_ops; break;
+    case DEVFS_CLASS:
+        if (!node->class_dev || !__atomic_load_n(&node->class_dev->online,
+                                                 __ATOMIC_ACQUIRE)) {
+            vnode_put(vf->vnode);
+            vfile_free(vf);
+            return NULL;
+        }
+        class_device_get(node->class_dev);
+        vf->ops = &g_devfs_class_ops;
+        vf->priv = node->class_dev;
+        break;
     case DEVFS_LOOP: {
         int loop_idx = (int)(node->rdev & 0xFF);
         vf->ops = &g_devfs_loop_ops;
@@ -764,7 +997,8 @@ int devfs_is_char_vfile(vfile_t *vf) {
                   vf->ops == &g_devfs_stdin_ops ||
                   vf->ops == &g_devfs_stdout_ops ||
                   vf->ops == &g_devfs_stderr_ops ||
-                  vf->ops == &g_devfs_rtc_ops);
+                  vf->ops == &g_devfs_rtc_ops ||
+                  vf->ops == &g_devfs_class_ops);
 }
 
 int devfs_is_tty_vfile(vfile_t *vf) {
