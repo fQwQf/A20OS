@@ -6,9 +6,11 @@
 
 `device_t` 代表一个硬件实例，由总线或板级枚举器创建。创建者拥有 `device_t` 本身、设备名、资源数组和 `plat_data` 的存储，这些内存必须活到 `device_unregister()` 完成。不要在枚举函数栈上分配它们。
 
-`driver_t` 代表一种驱动实现，通常是一个文件内的静态对象。一份驱动可以绑定多个设备。`class_type` 和 `class_ops` 向块层、网络栈、输入层或显示层提供稳定接口。
+`driver_t` 代表一种驱动实现，通常是一个文件内的静态对象。一份驱动可以绑定多个设备。`class_type` 和 `class_ops` 向块层、网络栈、输入层、显示层或音频层提供稳定接口。
 
-`bus_type_t` 决定某个 `device_t` 是否匹配某个 `driver_t`。PCI 和 VirtIO-MMIO 已有公共总线；固定平台设备可以定义小型 platform bus。
+`bus_type_t` 决定某个 `device_t` 是否匹配某个 `driver_t`。PCI、VirtIO-MMIO 和 platform bus 已有公共实现。固定设备由板级文件填写 `platform_device_t` 的 ID 与资源并调用 `platform_device_register()`，不应再为每个设备定义私有 bus。
+
+probe 成功后，核心自动创建一个 `class_device_t`。该对象负责稳定 class 编号、devt、devfs/sysfs 发布和断开状态。驱动不得自行创建硬件节点。当前 char、block、audio 分别自动发布为 `/dev/charN`、`/dev/diskN`、`/dev/audioN`；所有 class 都出现在 `/sys/class/<class>/`。
 
 绑定后的关系如下：
 
@@ -23,7 +25,7 @@ device_t                         driver_t
   matched_id --> matched id_table entry
 ```
 
-`plat_data` 属于总线或板级代码，驱动不得释放。`drv_priv` 属于驱动，probe 时创建或选定，remove 时清理。类操作只接收 `device_t *`，通过 `dev->drv_priv` 找到实例。
+`plat_data` 属于总线或板级代码，驱动不得释放。`drv_priv` 属于驱动，probe 时创建或选定，remove 时清理。类操作只接收 `device_t *`，通过 `dev->drv_priv` 找到实例。remove 前核心先把 class device 标记为 offline，阻止新调用，并等待已经进入驱动的 class 调用退出；已打开的文件随后返回 `-ENODEV`。
 
 ## 数据结构字段
 
@@ -82,11 +84,11 @@ Makefile 对 full profile 使用 `kernel/drivers/<class>/*.c` 通配，所以放
 UNINIT --match--> probe
                     | 0
                     v
-                  PROBED
+                  PROBED + class_device online
                     |
         remove/device_unregister/driver_unregister
                     v
-                  REMOVED
+          REMOVING -> class_device offline -> REMOVED
 
 probe < 0 -> core 清空 drv、drv_priv，状态回到 UNINIT
 ```
