@@ -1,6 +1,8 @@
 #define LINUX_SYSCALL_DECLARE_PROTOTYPES
 #include "syscall_impl.h"
 #include "net/socket_internal.h"
+#include "fs/fdtable.h"
+#include "fs/file.h"
 #include "lwip/raw.h"
 
 typedef struct {
@@ -50,6 +52,16 @@ typedef struct {
     int hoplimit;
     int tclass;
 } socket_recv_meta_t;
+
+/*
+ * SCM_RIGHTS fds resolved from a sendmsg control buffer.  Each entry is a
+ * vfile reference (dup semantics) owned by this struct until the message
+ * is enqueued or the refs are dropped.
+ */
+typedef struct {
+    int nfiles;
+    vfile_t *files[NET_SCM_MAX_FDS];
+} scm_rights_t;
 
 static size_t cmsg_align(size_t len)
 {
@@ -110,6 +122,56 @@ static int parse_send_control(const socket_msghdr_t *mh, int *ttl, int *tclass)
             if (cmsg->cmsg_len < cmsg_len(sizeof(int)))
                 return -EINVAL;
             memcpy(tclass, cmsg_data_const(cmsg), sizeof(int));
+        }
+        cmsg = cmsg_nxthdr(mh, cmsg);
+    }
+    return 0;
+}
+
+static void scm_rights_clear(scm_rights_t *scm)
+{
+    net_scm_drop_files(scm->files, scm->nfiles);
+    scm->nfiles = 0;
+}
+
+/*
+ * Resolve SCM_RIGHTS fd arrays in a send control buffer to vfile
+ * references.  On error, partially resolved refs are dropped.
+ */
+static int parse_send_rights(const socket_msghdr_t *mh, scm_rights_t *out)
+{
+    out->nfiles = 0;
+    if (!mh->msg_control || mh->msg_controllen < sizeof(socket_cmsghdr_t))
+        return 0;
+    socket_cmsghdr_t *cmsg = cmsg_firsthdr(mh);
+    while (cmsg) {
+        size_t need = cmsg_len(0);
+        if (cmsg->cmsg_len < need || cmsg->cmsg_len > mh->msg_controllen) {
+            scm_rights_clear(out);
+            return -EINVAL;
+        }
+        if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS) {
+            size_t payload = cmsg->cmsg_len - need;
+            if (payload == 0 || (payload % sizeof(int)) != 0 ||
+                payload / sizeof(int) > NET_SCM_MAX_FDS) {
+                scm_rights_clear(out);
+                return -EINVAL;
+            }
+            int n = (int)(payload / sizeof(int));
+            const int *fds = (const int *)cmsg_data_const(cmsg);
+            for (int i = 0; i < n; i++) {
+                if (out->nfiles >= NET_SCM_MAX_FDS) {
+                    scm_rights_clear(out);
+                    return -EINVAL;
+                }
+                int64_t gfd = fdtable_get_current(fds[i]);
+                vfile_t *vf = gfd >= 0 ? vfs_get_file_ref((int)gfd) : NULL;
+                if (!vf) {
+                    scm_rights_clear(out);
+                    return -EBADF;
+                }
+                out->files[out->nfiles++] = vf;
+            }
         }
         cmsg = cmsg_nxthdr(mh, cmsg);
     }
@@ -277,6 +339,7 @@ static int64_t sys_sendmsg_from_msghdr(int fd, const socket_msghdr_t *mh,
     int have_override = 0;
     socket_msghdr_t cmh = *mh;
     void *cbuf = NULL;
+    scm_rights_t scm = {0};
     if (mh->msg_control && mh->msg_controllen) {
         cbuf = kmalloc(mh->msg_controllen);
         if (!cbuf) {
@@ -290,6 +353,11 @@ static int64_t sys_sendmsg_from_msghdr(int fd, const socket_msghdr_t *mh,
         int ttl = 0;
         int tclass = 0;
         int pr = parse_send_control(&cmh, &ttl, &tclass);
+        if (pr < 0) {
+            kfree(cbuf);
+            return pr;
+        }
+        pr = parse_send_rights(&cmh, &scm);
         if (pr < 0) {
             kfree(cbuf);
             return pr;
@@ -312,6 +380,29 @@ static int64_t sys_sendmsg_from_msghdr(int fd, const socket_msghdr_t *mh,
             goto out_send;
         ka = kaddr;
     }
+    if (scm.nfiles > 0) {
+        /* SCM_RIGHTS is only defined for AF_UNIX sockets. */
+        if (!sock || sock->domain != AF_UNIX) {
+            scm_rights_clear(&scm);
+            if (have_override && sock && sock->raw) {
+                sock->raw->ttl = old_ttl;
+                sock->raw->tos = old_tclass;
+            }
+            kfree(cbuf);
+            return -EOPNOTSUPP;
+        }
+        int64_t r = net_unix_socket_sendto_fds(sock, buf, total, ka,
+                                               mh->msg_namelen,
+                                               scm.files, scm.nfiles);
+        if (r < 0)
+            scm_rights_clear(&scm);
+        if (have_override && sock && sock->raw) {
+            sock->raw->ttl = old_ttl;
+            sock->raw->tos = old_tclass;
+        }
+        kfree(cbuf);
+        return r;
+    }
     {
         int64_t r = net_sendto((int)gfd, buf, total, flags, ka, mh->msg_namelen);
         if (have_override && sock && sock->raw) {
@@ -323,6 +414,8 @@ static int64_t sys_sendmsg_from_msghdr(int fd, const socket_msghdr_t *mh,
     }
 
 out_send:
+    if (scm.nfiles > 0)
+        scm_rights_clear(&scm);
     if (have_override && sock && sock->raw) {
         sock->raw->ttl = old_ttl;
         sock->raw->tos = old_tclass;
@@ -404,6 +497,7 @@ int64_t sys_recvmsg(int fd, void *msg, int flags)
                 n = iov[i].len;
             if (n && (!iov[i].base ||
                       copy_to_user(iov[i].base, buf + copied, n) < 0)) {
+                net_scm_drop_files(meta.scm_files, meta.scm_nfiles);
                 kfree(iov);
                 return -EFAULT;
             }
@@ -411,23 +505,28 @@ int64_t sys_recvmsg(int fd, void *msg, int flags)
         }
         if (mh.msg_name) {
             if (copy_to_user(mh.msg_name, kaddr, klen) < 0) {
+                net_scm_drop_files(meta.scm_files, meta.scm_nfiles);
                 kfree(iov);
                 return -EFAULT;
             }
             namelen = (uint32_t)klen;
             if (copy_to_user(&((socket_msghdr_t *)msg)->msg_namelen,
                              &namelen, sizeof(namelen)) < 0) {
+                net_scm_drop_files(meta.scm_files, meta.scm_nfiles);
                 kfree(iov);
                 return -EFAULT;
             }
         }
+        int ctrunc = 0;
         if (mh.msg_control && mh.msg_controllen > 0) {
             socket_recv_meta_t recv_meta = {0};
             size_t used = 0;
+            int want_control = meta.scm_nfiles > 0;
             if (sock && sock->domain == AF_INET6 &&
                 (sock->ipv6_recv_pktinfo || sock->ipv6_recv_hoplimit ||
                  sock->ipv6_recv_tclass || sock->ipv6_recv_2292_pktinfo ||
                  sock->ipv6_recv_2292_hoplimit)) {
+                want_control = 1;
                 if (sock->ipv6_recv_pktinfo) {
                     recv_meta.has_pktinfo = 1;
                     if (meta.has_pktinfo) {
@@ -454,16 +553,72 @@ int64_t sys_recvmsg(int fd, void *msg, int flags)
                     recv_meta.has_2292_hoplimit = 1;
                     recv_meta.hoplimit = meta.has_hoplimit ? meta.hoplimit : 0;
                 }
-                uint8_t *cbuf = (uint8_t *)kmalloc(mh.msg_controllen);
+            }
+            uint8_t *cbuf = NULL;
+            if (want_control) {
+                cbuf = (uint8_t *)kmalloc(mh.msg_controllen);
                 if (!cbuf) {
+                    net_scm_drop_files(meta.scm_files, meta.scm_nfiles);
                     kfree(iov);
                     return -ENOMEM;
                 }
-                socket_msghdr_t cmh = mh;
-                cmh.msg_control = cbuf;
-                cmh.msg_controllen = mh.msg_controllen;
-                used = build_recv_control(&cmh, &meta, &recv_meta);
-                if (copy_to_user(mh.msg_control, cbuf, used) < 0) {
+                if (recv_meta.has_pktinfo || recv_meta.has_hoplimit ||
+                    recv_meta.has_tclass || recv_meta.has_2292_pktinfo ||
+                    recv_meta.has_2292_hoplimit) {
+                    socket_msghdr_t cmh = mh;
+                    cmh.msg_control = cbuf;
+                    cmh.msg_controllen = mh.msg_controllen;
+                    used = build_recv_control(&cmh, &meta, &recv_meta);
+                }
+            }
+            /*
+             * SCM_RIGHTS delivery: install the received vfile refs into
+             * the receiving process fd table and report the new fds in an
+             * SCM_RIGHTS cmsg.  Fds that cannot be reported (no control
+             * buffer, truncation, EMFILE) are closed, per Linux.
+             */
+            if (meta.scm_nfiles > 0) {
+                size_t need = cmsg_space(meta.scm_nfiles * sizeof(int));
+                if (!cbuf || used + need > mh.msg_controllen) {
+                    ctrunc = 1;
+                } else {
+                    socket_cmsghdr_t *cmsg = (socket_cmsghdr_t *)(cbuf + used);
+                    int *fdout = (int *)cmsg_data(cmsg);
+                    int delivered = 0;
+                    for (int i = 0; i < meta.scm_nfiles; i++) {
+                        vfile_t *vf = meta.scm_files[i];
+                        meta.scm_files[i] = NULL;
+                        if (!vf)
+                            continue;
+                        int g2 = vfs_alloc_fd(vf);
+                        if (g2 < 0) {
+                            vfile_put_ref_only(vf);
+                            ctrunc = 1;
+                            continue;
+                        }
+                        int u2 = fdtable_install_current(
+                            g2, (flags & MSG_CMSG_CLOEXEC) ? O_CLOEXEC : 0);
+                        if (u2 < 0) {
+                            vfs_close(g2);
+                            ctrunc = 1;
+                            continue;
+                        }
+                        fdout[delivered++] = u2;
+                    }
+                    if (delivered > 0) {
+                        cmsg->cmsg_level = SOL_SOCKET;
+                        cmsg->cmsg_type = SCM_RIGHTS;
+                        cmsg->cmsg_len =
+                            (uint32_t)cmsg_len((size_t)delivered * sizeof(int));
+                        used += cmsg_space((size_t)delivered * sizeof(int));
+                    } else {
+                        ctrunc = 1;
+                    }
+                }
+                net_scm_drop_files(meta.scm_files, meta.scm_nfiles);
+            }
+            if (cbuf) {
+                if (used > 0 && copy_to_user(mh.msg_control, cbuf, used) < 0) {
                     kfree(cbuf);
                     kfree(iov);
                     return -EFAULT;
@@ -476,8 +631,12 @@ int64_t sys_recvmsg(int fd, void *msg, int flags)
                 kfree(iov);
                 return -EFAULT;
             }
+        } else if (meta.scm_nfiles > 0) {
+            /* No control buffer at all: received fds are closed. */
+            net_scm_drop_files(meta.scm_files, meta.scm_nfiles);
+            ctrunc = 1;
         }
-        mh.msg_flags = 0;
+        mh.msg_flags = ctrunc ? MSG_CTRUNC : 0;
         copy_to_user(&((socket_msghdr_t *)msg)->msg_flags, &mh.msg_flags, sizeof(mh.msg_flags));
     }
     kfree(iov);

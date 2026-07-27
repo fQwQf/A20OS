@@ -17,6 +17,7 @@ struct tcp_pcb;
 #define NET_MAX_STREAM_PAYLOAD 2048
 #define NET_MAX_PAYLOAD 65535
 #define NET_MAX_QUEUE   128
+#define NET_SCM_MAX_FDS 16
 #define NET_CONNECT_TIMEOUT_TICKS MS_TO_TICKS(10000)
 #define NET_BH_RING_SIZE 16
 
@@ -67,10 +68,19 @@ typedef struct net_msg {
     uint8_t hoplimit;
     uint8_t tclass;
     uint16_t __pad_meta;
+    /*
+     * SCM_RIGHTS in-flight fd references (vfile_get refs, dup semantics).
+     * Ownership transfers to the receiver on the first dequeue of this
+     * message; net_msg_free drops whatever is still attached.
+     */
+    int scm_nfiles;
+    vfile_t *scm_files[NET_SCM_MAX_FDS];
     uint8_t data[NET_MAX_PAYLOAD];
 } net_msg_t;
 
 typedef struct net_recv_meta {
+    int scm_nfiles;
+    vfile_t *scm_files[NET_SCM_MAX_FDS];
     uint8_t has_pktinfo;
     uint8_t has_hoplimit;
     uint8_t has_tclass;
@@ -202,6 +212,10 @@ int      net_socket_is_valid_locked(net_socket_t *s);
 
 int      net_enqueue_msg_locked(net_socket_t *dst, const void *buf, size_t len,
                                 const void *addr, size_t addrlen);
+int      net_enqueue_msg_locked_fds(net_socket_t *dst, const void *buf,
+                                    size_t len, const void *addr,
+                                    size_t addrlen,
+                                    vfile_t **files, int nfiles);
 int      net_enqueue_msg_locked_meta(net_socket_t *dst, const void *buf, size_t len,
                                      const void *addr, size_t addrlen,
                                      const net_bh_event_t *meta);
@@ -220,6 +234,7 @@ int      net_accept_queue_push_locked(net_socket_t *listener,
 net_socket_t *net_accept_queue_pop_locked(net_socket_t *listener);
 net_msg_t    *net_msg_alloc(void);
 void          net_msg_free(net_msg_t *m);
+void          net_scm_drop_files(vfile_t **files, int nfiles);
 net_socket_t *net_socket_alloc(void);
 void          net_socket_free(net_socket_t *s);
 
@@ -243,6 +258,10 @@ int      net_unix_socket_bind(net_socket_t *s, const void *addr, size_t addrlen)
 int      net_unix_socket_connect(net_socket_t *s, const void *addr, size_t addrlen);
 int      net_unix_socket_sendto(net_socket_t *s, const void *buf, size_t len,
                                 const void *addr, size_t addrlen);
+int      net_unix_socket_sendto_fds(net_socket_t *s, const void *buf,
+                                    size_t len, const void *addr,
+                                    size_t addrlen,
+                                    vfile_t **files, int nfiles);
 int      net_netlink_bind(net_socket_t *s, const void *addr, size_t addrlen);
 int      net_netlink_diag_request(net_socket_t *s, const void *buf, size_t len,
                                   const void *addr, size_t addrlen);

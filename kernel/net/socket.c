@@ -564,7 +564,7 @@ int net_recvfrom_meta(int gfd, void *buf, size_t len, int flags,
         if (r > 0 && s->type == SOCK_STREAM) {
             size_t total = (size_t)r;
             while (total < len && s->rx_head) {
-                int nr = net_dequeue_msg_locked_meta(s, (char *)buf + total, len - total, NULL, NULL, NULL);
+                int nr = net_dequeue_msg_locked_meta(s, (char *)buf + total, len - total, NULL, NULL, meta);
                 if (nr <= 0)
                     break;
                 total += (size_t)nr;
