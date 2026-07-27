@@ -9,8 +9,159 @@
 #include "core/string.h"
 #include "core/stdio.h"
 #include "abi/linux/errno.h"
+#include "abi/linux/mman.h"
 #include "mm/vm.h"
 #include "mm/slab.h"
+#include "sys/usercopy.h"
+
+static void fb_fill_var_screeninfo(struct fb_var_screeninfo *var,
+                                   uint32_t w, uint32_t h, uint32_t bpp) {
+    memset(var, 0, sizeof(*var));
+    var->xres = w;
+    var->yres = h;
+    var->xres_virtual = w;
+    var->yres_virtual = h;
+    var->bits_per_pixel = bpp;
+    switch (bpp) {
+    case 32:
+        var->red.offset = 16;   var->red.length = 8;
+        var->green.offset = 8;  var->green.length = 8;
+        var->blue.offset = 0;   var->blue.length = 8;
+        break;
+    case 24:
+        var->red.offset = 16;   var->red.length = 8;
+        var->green.offset = 8;  var->green.length = 8;
+        var->blue.offset = 0;   var->blue.length = 8;
+        break;
+    case 16:
+        var->red.offset = 11;   var->red.length = 5;
+        var->green.offset = 5;  var->green.length = 6;
+        var->blue.offset = 0;   var->blue.length = 5;
+        break;
+    default:
+        break;
+    }
+    var->height = (uint32_t)-1;
+    var->width = (uint32_t)-1;
+}
+
+int64_t fbdev_linux_mmap(uint64_t addr, size_t len, int prot, int flags,
+                         uint64_t off) {
+    struct device *dev = gpu_device_get_default();
+    if (!dev) return -ENODEV;
+    gpu_dev_ops_t *ops = (gpu_dev_ops_t *)dev->drv->class_ops;
+    if (!ops) return -ENODEV;
+
+    uintptr_t fb_phys;
+    size_t fb_size;
+    int r = ops->get_fb(dev, &fb_phys, &fb_size);
+    if (r < 0)
+        return r;
+
+    if (off & (PAGE_SIZE - 1))
+        return -EINVAL;
+    len = ROUND_UP(len, PAGE_SIZE);
+    if (len == 0)
+        return -EINVAL;
+    if (off >= fb_size || len > fb_size - off)
+        return -ENXIO;
+
+#ifdef CONFIG_NOMMU
+    /*
+     * NOMMU user and kernel code share the physical address space; the
+     * caller uses the returned physical address directly.
+     */
+    (void)addr; (void)prot; (void)flags;
+    return (int64_t)(fb_phys + off);
+#else
+    task_t *curr = proc_current();
+    if (!curr || !curr->mm) return -EFAULT;
+    mm_struct_t *mm = curr->mm;
+
+    if ((flags & (MAP_FIXED | MAP_FIXED_NOREPLACE)) && addr != 0 &&
+        (addr & (PAGE_SIZE - 1)))
+        return -EINVAL;
+
+    /*
+     * A physical VRAM BAR is MMIO, not ordinary RAM.  Omitting PTE_MAT1
+     * keeps the mapping at the default (Device) attribute index on
+     * AArch64; see FBIO_MAP_FB.
+     */
+    pte_t ptef = PTE_V | PTE_U | PTE_A | PTE_LEAF;
+    if (prot & PROT_READ) ptef |= PTE_R;
+    if (prot & PROT_WRITE) ptef |= PTE_W | PTE_D | PTE_R;
+    if (prot & PROT_EXEC) ptef |= PTE_X;
+
+    uint64_t lock_flags = spin_lock_irqsave(&mm->lock);
+
+    if ((flags & MAP_FIXED_NOREPLACE) && addr != 0) {
+        for (vm_area_t *vma = mm->mmap; vma; vma = vma->next) {
+            if (vma->start < addr + len && vma->end > addr) {
+                spin_unlock_irqrestore(&mm->lock, lock_flags);
+                return -EEXIST;
+            }
+            if (vma->start >= addr + len)
+                break;
+        }
+        flags |= MAP_FIXED;
+    }
+    if ((flags & MAP_FIXED) && addr != 0) {
+        mm_munmap(mm, addr, len);
+    } else if (addr != 0) {
+        vm_area_t *existing = mm_find_vma(mm, addr);
+        if (existing && existing->start < addr + len && existing->end > addr)
+            addr = 0;
+    }
+    if (addr == 0)
+        addr = mm_find_gap(mm, MMAP_BASE_ADDR, len);
+    if (addr == 0 || addr + len < addr || addr + len > USER_VA_LIMIT) {
+        spin_unlock_irqrestore(&mm->lock, lock_flags);
+        return -ENOMEM;
+    }
+
+    size_t mapped = 0;
+    for (; mapped < len; mapped += PAGE_SIZE) {
+        r = pt_map(mm->pgdir, addr + mapped, fb_phys + off + mapped, ptef);
+        if (r < 0)
+            break;
+    }
+    if (r < 0) {
+        while (mapped > 0) {
+            mapped -= PAGE_SIZE;
+            pt_unmap(mm->pgdir, addr + mapped);
+        }
+        spin_unlock_irqrestore(&mm->lock, lock_flags);
+        arch_tlb_flush();
+        return r;
+    }
+
+    vm_area_t *vma = kcalloc(1, sizeof(*vma));
+    if (!vma) {
+        while (mapped > 0) {
+            mapped -= PAGE_SIZE;
+            pt_unmap(mm->pgdir, addr + mapped);
+        }
+        spin_unlock_irqrestore(&mm->lock, lock_flags);
+        arch_tlb_flush();
+        return -ENOMEM;
+    }
+    vma->start = addr;
+    vma->end = addr + len;
+    vma->vm_flags = VM_SHARED | VM_DONTFORK | VM_PFNMAP;
+    if (prot & PROT_READ) vma->vm_flags |= VM_READ;
+    if (prot & PROT_WRITE) vma->vm_flags |= VM_WRITE;
+    if (prot & PROT_EXEC) vma->vm_flags |= VM_EXEC;
+    vma->pte_flags = ptef;
+    vma->file_fd = -1;
+    mm_insert_vma(mm, vma);
+    mm->total_vm += len / PAGE_SIZE;
+    mm->rss += len / PAGE_SIZE;
+
+    arch_tlb_flush();
+    spin_unlock_irqrestore(&mm->lock, lock_flags);
+    return (int64_t)addr;
+#endif
+}
 
 static int fb_read(vfile_t *vf, char *buf, size_t count) {
     (void)vf;
@@ -41,10 +192,25 @@ static int fb_ioctl(vfile_t *vf, unsigned long req, void *arg) {
             int r = ops->get_info(dev, &w, &h, &bpp);
             if (r < 0)
                 return r;
-            var.xres = w;
-            var.yres = h;
-            var.bits_per_pixel = bpp;
+            fb_fill_var_screeninfo(&var, w, h, bpp);
             return copy_to_user(arg, &var, sizeof(var)) < 0 ? -EFAULT : 0;
+        }
+        case FBIOPUT_VSCREENINFO: {
+            struct fb_var_screeninfo var;
+            if (copy_from_user(&var, arg, sizeof(var)) < 0)
+                return -EFAULT;
+            uint32_t w, h, bpp;
+            int r = ops->get_info(dev, &w, &h, &bpp);
+            if (r < 0)
+                return r;
+            /*
+             * Mode setting is not supported.  Accept requests that match
+             * the current mode as a no-op so standard fbdev userspace
+             * (weston, Xfbdev) can run unmodified.
+             */
+            if (var.xres != w || var.yres != h || var.bits_per_pixel != bpp)
+                return -EINVAL;
+            return 0;
         }
         case FBIOGET_FSCREENINFO: {
             struct fb_fix_screeninfo fix;
@@ -53,14 +219,16 @@ static int fb_ioctl(vfile_t *vf, unsigned long req, void *arg) {
             int r = ops->get_fb(dev, &fb_phys, &fb_size);
             if (r < 0)
                 return r;
-            
+
             memset(&fix, 0, sizeof(fix));
             const char *driver_name = dev->drv && dev->drv->name ?
                                       dev->drv->name : "A20_FB";
             strncpy(fix.id, driver_name, sizeof(fix.id) - 1);
             fix.smem_start = fb_phys;
             fix.smem_len = fb_size;
-            
+            fix.type = FB_TYPE_PACKED_PIXELS;
+            fix.visual = FB_VISUAL_TRUECOLOR;
+
             uint32_t w, h, bpp;
             r = ops->get_info(dev, &w, &h, &bpp);
             if (r < 0)

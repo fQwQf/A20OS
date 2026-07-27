@@ -115,13 +115,15 @@ if (width > fb_width - x)
 
 | ioctl | 行为 |
 |---|---|
-| `FBIOGET_VSCREENINFO` | 返回 `xres/yres/bits_per_pixel` |
-| `FBIOGET_FSCREENINFO` | 返回物理地址、长度和 `line_length` |
-| `FBIO_MAP_FB` | 把 framebuffer 映射到参数指定的用户虚拟地址 |
-| `FBIO_FLUSH` | 当前提交全屏刷新 |
-| `FBIOPUT_VSCREENINFO` | 常量保留，当前未实现 |
+| `FBIOGET_VSCREENINFO` | 返回完整 Linux `fb_var_screeninfo`（含 `xres_virtual`、`xoffset`、RGB bitfield） |
+| `FBIOGET_FSCREENINFO` | 返回完整 Linux `fb_fix_screeninfo`（`smem_start`、`smem_len`、`type=FB_TYPE_PACKED_PIXELS`、`visual=FB_VISUAL_TRUECOLOR`、`line_length`） |
+| `FBIOPUT_VSCREENINFO` | 不支持模式设置；请求与当前模式一致时按 no-op 成功返回，否则 `-EINVAL` |
+| `FBIO_MAP_FB` | 把 framebuffer 映射到参数指定的用户虚拟地址（A20OS 专有） |
+| `FBIO_FLUSH` | 当前提交全屏刷新（A20OS 专有） |
 
-MMU 映射要求用户地址页对齐、范围不溢出 `USER_VA_LIMIT`、不与已有 VMA/PTE 重叠；失败撤销已映射页。NOMMU 不建页表，应用从 fixed info 使用物理地址。物理地址暴露是现有兼容 ABI，不应复制到其他类。
+`/dev/fb0` 同时支持标准 `mmap(2)`（`kernel/drivers/gpu/framebuffer.c` 的 `fbdev_linux_mmap`）：偏移页对齐且范围不超过 `smem_len`，地址为 0 时由 `mm_find_gap` 选址；VMA 标记 `VM_PFNMAP|VM_SHARED|VM_DONTFORK`。PTE 不带 `PTE_MAT1`，在 AArch64 上保持 Device memory 属性。标准 fbdev 用户态（Xfbdev、weston fbdev 后端）因此可以不加修改地映射 scanout。
+
+FBIO_MAP_FB 映射要求用户地址页对齐、范围不溢出 `USER_VA_LIMIT`、不与已有 VMA/PTE 重叠；失败撤销已映射页。NOMMU 不建页表，应用从 fixed info 使用物理地址。物理地址暴露是现有兼容 ABI，不应复制到其他类。
 
 ## VirtIO GPU 范例
 

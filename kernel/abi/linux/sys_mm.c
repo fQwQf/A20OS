@@ -6,6 +6,7 @@
 #include "mm/mm.h"
 #include "fs/devfs.h"
 #include "fs/page_cache.h"
+#include "drivers/gpu/framebuffer.h"
 
 static uint64_t linux_mm_lock(task_t *t)
 {
@@ -54,6 +55,12 @@ int64_t sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, long of
                     vfs_put_file_ref(gfd, vf);
                     return -EBADF;
                 }
+            }
+
+            if (devfs_is_fb_vfile(vf)) {
+                vfs_put_file_ref(gfd, vf);
+                if (off < 0) return -EINVAL;
+                return fbdev_linux_mmap(addr, len, prot, flags, (uint64_t)off);
             }
             vfs_put_file_ref(gfd, vf);
         }
