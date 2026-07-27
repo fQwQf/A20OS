@@ -27,6 +27,14 @@ typedef struct proc_lifetime_stats {
     unsigned long timeout_duplicate_rejections;
     unsigned long timeout_stale_expirations;
     unsigned long timeout_heap_violations;
+    unsigned long runqueue_migrations;
+    unsigned long resched_requests;
+    unsigned long resched_priority_requests;
+    unsigned long resched_ipi_sent;
+    unsigned long resched_ipi_acks;
+    unsigned long resched_consumed;
+    unsigned long resched_pending;
+    unsigned long scheduler_violations;
     unsigned long zombies;
     unsigned long ref_get_failures;
     unsigned long ref_underflows;
