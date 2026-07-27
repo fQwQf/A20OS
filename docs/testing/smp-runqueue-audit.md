@@ -1,0 +1,94 @@
+# SMP runqueue and preemption audit
+
+`SMP_RUNQUEUE_PREEMPT_AUDIT`
+
+This document closes PROC.md step 7 without changing the scheduler's existing
+priority classes or architecture context layouts.
+
+## Ownership and lock order
+
+`proc_lock` remains the coarse scheduler/lifecycle serialization boundary.
+Every operation which changes task state, `cpu_id`, `on_rq`, `dispatching`, or
+`on_cpu` holds `proc_lock`. A runqueue lock is nested below it.
+
+Cross-CPU migration uses `sched_runq_requeue_locked()`:
+
+1. acquire `proc_lock`;
+2. acquire the source and destination runqueue locks in ascending CPU-number
+   order;
+3. unlink the task from the source queue and publish `on_rq = 0`;
+4. change `cpu_id`;
+5. link the task to the destination queue and publish `on_rq = 1`;
+6. release runqueue locks in reverse order, then release `proc_lock`.
+
+The runqueue-owned task reference is transferred through the operation. There
+is no put/get gap and no interval observable to a picker in which a READY task
+is owned by neither queue. A same-CPU policy requeue follows the same
+`on_rq -> off-rq -> on_rq` rule while holding one runqueue lock.
+
+`cpu_id` is initialized only for unpublished/off-runqueue tasks. Once a task is
+queued, it changes only in the protected off-runqueue interval above.
+
+## Persistent reschedule requests
+
+Each CPU has cacheline-separated scheduler state containing a persistent
+`need_resched` flag and diagnostic counters. A request:
+
+- publishes `need_resched = 1` with release ordering;
+- sends at most one IPI while the flag remains pending;
+- never relies on the IPI itself as the stored scheduling decision.
+
+The target IPI handler acknowledges the hardware notification and increments
+the acknowledgement counter. It does not call `sched()`, `proc_yield()`, or
+change task/runqueue ownership.
+
+The pending flag is consumed only when `sched()` is entered from:
+
+- the common user trap/syscall return safe point;
+- a timer return which first publishes a timeslice request;
+- an explicit kernel scheduling point, including the idle loop.
+
+If a new request races after consumption, the release-store leaves the flag set
+for the next safe point. IPI acknowledgement never clears it.
+
+## Wakeup and priority policy
+
+Every remote queued wake publishes a request for its target CPU. Local wakeups
+request preemption only when the woken task outranks the current task:
+
+- an RT task outranks a non-RT task;
+- among RT tasks, the larger existing RT priority wins;
+- among non-RT tasks, the existing lower scheduler level wins;
+- any runnable task outranks idle.
+
+This only decides whether to request a safe-point reschedule. Queue selection,
+FIFO/RR behavior, aging, nice values, and the existing priority strategy are
+unchanged. At a safe point, a yielding task remains the CPU owner until switch
+completion. If it still strictly outranks the selected queued task, the
+scheduler reverses the unpublished `on_rq -> dispatching` transfer and retains
+the current task. Equal-priority tasks still switch, preserving yield and
+round-robin progress; a lower-priority task cannot run in the ownership gap.
+
+## Diagnostics and regression
+
+`/proc/a20/task_lifetime` exposes:
+
+- `runqueue_migrations`;
+- request, priority-request, IPI sent/acknowledged, consumed, and pending
+  counters;
+- `scheduler_violations`.
+
+`sched_stress` creates a remote CPU RT hog, queues a lower RT task behind it,
+then atomically migrates that queued task to the parent CPU. It verifies:
+
+- the task executes only on the destination CPU;
+- at least one cross-runqueue migration occurred;
+- remote requests caused IPI send and acknowledgement;
+- a higher-priority destination wake requested preemption;
+- a safe point consumed the request;
+- scheduler violations remain zero.
+
+The test reports a one-CPU skip and runs the full protocol on the eight-CPU
+debug/release matrix. The cumulative lifetime stress continues to check that a
+task occupies at most one runqueue/CPU and that all earlier Park/Wake, signal,
+timeout, process, VFS, socket, futex, and reference invariants remain green.

@@ -23,6 +23,15 @@ typedef struct __attribute__((aligned(64))) proc_runq {
     unsigned nr_running;
 } proc_runq_t;
 
+typedef struct __attribute__((aligned(64))) proc_cpu_sched {
+    unsigned need_resched;
+    unsigned long requests;
+    unsigned long priority_requests;
+    unsigned long ipi_sent;
+    unsigned long ipi_acks;
+    unsigned long consumed;
+} proc_cpu_sched_t;
+
 /*
  * SCHEDULER_CONCURRENCY_PREREQS:
  * - secondary CPU bootstrap must call smp_secondary_init(), set a unique
@@ -41,9 +50,12 @@ typedef struct __attribute__((aligned(64))) proc_runq {
  */
 
 static proc_runq_t sched_runq[CONFIG_NR_CPUS];
+static proc_cpu_sched_t sched_cpu[CONFIG_NR_CPUS];
 static uint64_t next_wake_scan = SCHED_NO_DEADLINE;
 static uint64_t next_alarm_scan = SCHED_NO_DEADLINE;
 static unsigned sched_zombies_pending;
+static unsigned long sched_runqueue_migrations;
+static unsigned long sched_violations;
 
 /*
  * SCHEDULER_CPU_OWNERSHIP:
@@ -156,6 +168,21 @@ static int sched_task_rt(task_t *t)
     return t && (t->sched_policy == SCHED_FIFO || t->sched_policy == SCHED_RR);
 }
 
+static int sched_task_strictly_preempts(task_t *candidate, task_t *running)
+{
+    if (!candidate || !running || candidate == running)
+        return 0;
+
+    int candidate_rt = sched_task_rt(candidate);
+    int running_rt = sched_task_rt(running);
+    if (candidate_rt != running_rt)
+        return candidate_rt;
+    if (candidate_rt)
+        return candidate->priority > running->priority;
+    return sched_level_clamp(candidate->sched_level) <
+           sched_level_clamp(running->sched_level);
+}
+
 static void sched_runq_unlink_at(proc_runq_t *rq, task_t *t, int q)
 {
     if (t->rq_prev)
@@ -205,10 +232,13 @@ static void sched_promote_aged_locked(proc_runq_t *rq, uint64_t now)
 
 void proc_sched_runq_init(void) {
     memset(sched_runq, 0, sizeof(sched_runq));
+    memset(sched_cpu, 0, sizeof(sched_cpu));
     for (unsigned i = 0; i < CONFIG_NR_CPUS; i++)
         spin_init(&sched_runq[i].lock);
     next_wake_scan = SCHED_NO_DEADLINE;
     next_alarm_scan = SCHED_NO_DEADLINE;
+    sched_runqueue_migrations = 0;
+    sched_violations = 0;
     wait_timer_count = 0;
     wait_timer_full_failures = 0;
     wait_timer_duplicate_rejections = 0;
@@ -287,6 +317,56 @@ static int sched_task_linked_locked(task_t *target)
     return 0;
 }
 
+/*
+ * SMP_RUNQUEUE_MIGRATION_PROTOCOL:
+ * A queued task moves from source to destination while proc_lock and both
+ * runqueue locks are held. Runqueue locks are always acquired by ascending CPU
+ * number and released in reverse order. cpu_id changes only during the
+ * on_rq=0 interval protected by those locks; the runqueue-owned task reference
+ * is transferred without a put/get gap.
+ */
+static void sched_runq_requeue_locked(task_t *t, unsigned dst_cpu,
+                                      int old_level)
+{
+    if (!t || !t->on_rq || t->state != PROC_READY ||
+        t->cpu_id >= CONFIG_NR_CPUS || dst_cpu >= CONFIG_NR_CPUS) {
+        __atomic_fetch_add(&sched_violations, 1, __ATOMIC_RELAXED);
+        return;
+    }
+
+    unsigned src_cpu = t->cpu_id;
+    unsigned first = src_cpu < dst_cpu ? src_cpu : dst_cpu;
+    unsigned second = src_cpu < dst_cpu ? dst_cpu : src_cpu;
+    uint64_t first_flags = RUNQ_LOCK_IRQ(first);
+    uint64_t second_flags = 0;
+    if (second != first)
+        second_flags = RUNQ_LOCK_IRQ(second);
+
+    proc_runq_t *src = &sched_runq[src_cpu];
+    proc_runq_t *dst = &sched_runq[dst_cpu];
+    sched_runq_unlink_at(src, t, sched_level_clamp(old_level));
+    t->on_rq = 0;
+    if (src_cpu != dst_cpu) {
+        if (__atomic_load_n(&src->nr_running, __ATOMIC_RELAXED) > 0)
+            __atomic_fetch_sub(&src->nr_running, 1, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&dst->nr_running, 1, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&sched_runqueue_migrations, 1,
+                           __ATOMIC_RELAXED);
+    }
+
+    int new_level =
+        sched_task_rt(t) ? 0 : sched_level_clamp(t->sched_level);
+    t->cpu_id = dst_cpu;
+    t->sched_level = new_level;
+    t->ready_since = timer_get_ticks();
+    sched_runq_append_at(dst, t, new_level);
+    t->on_rq = 1;
+
+    if (second != first)
+        RUNQ_UNLOCK_IRQ(second, second_flags);
+    RUNQ_UNLOCK_IRQ(first, first_flags);
+}
+
 uint32_t proc_sched_effective_affinity(task_t *t)
 {
     return sched_task_cpu_mask(t);
@@ -361,9 +441,8 @@ int proc_sched_set(task_t *t, const proc_sched_config_t *config)
     }
 
     int ready = t->on_rq && t->state == PROC_READY;
-    if (t->on_rq)
-        proc_runq_remove_locked(t);
-
+    unsigned old_cpu = t->cpu_id;
+    int old_level = t->sched_level;
     int old_nice = sched_nice_value(t);
     int old_rt = sched_policy_rt_value(t->sched_policy);
     if (config->fields & PROC_SCHED_POLICY) {
@@ -383,14 +462,32 @@ int proc_sched_set(task_t *t, const proc_sched_config_t *config)
     }
     if (config->fields & PROC_SCHED_AFFINITY) {
         t->cpus_allowed = config->affinity & SCHED_CPU_MASK_ALL;
-        if (!t->on_cpu && !t->dispatching &&
-            (t->cpu_id >= 32 ||
-             !(t->cpus_allowed & (1U << t->cpu_id))))
-            t->cpu_id = proc_sched_select_cpu(t);
     }
-    if (ready)
-        proc_runq_enqueue_locked(t);
+
+    unsigned target_cpu = t->cpu_id;
+    if (!t->on_cpu && !t->dispatching) {
+        uint32_t eligible = sched_task_cpu_mask(t);
+        if (target_cpu >= 32 || !(eligible & (1U << target_cpu)))
+            target_cpu = proc_sched_select_cpu_locked(t);
+    }
+
+    int queue_fields_changed =
+        (config->fields &
+         (PROC_SCHED_POLICY | PROC_SCHED_PRIORITY | PROC_SCHED_NICE)) != 0;
+    if (ready && (queue_fields_changed || target_cpu != old_cpu))
+        sched_runq_requeue_locked(t, target_cpu, old_level);
+    else if (!ready && !t->on_cpu && !t->dispatching && !t->on_rq)
+        t->cpu_id = target_cpu;
+
+    int queued = t->on_rq;
+    int priority_preempt =
+        queued && proc_sched_should_preempt_locked(t, target_cpu);
+    proc_sched_assert_task_locked(t);
     spin_unlock_irqrestore(&proc_lock, lock_flags);
+
+    if (queued &&
+        (target_cpu != cpu_current_id() || priority_preempt))
+        proc_sched_request_cpu(target_cpu, priority_preempt);
     return 0;
 
 invalid:
@@ -435,11 +532,123 @@ unsigned proc_sched_select_cpu_locked(task_t *t)
     return proc_sched_select_cpu(t);
 }
 
+int proc_sched_should_preempt_locked(task_t *t, unsigned cpu)
+{
+    if (!t || cpu >= CONFIG_NR_CPUS)
+        return 0;
+
+    task_t *running = proc_current_on_cpu(cpu);
+    if (!running || running->pid == 0)
+        return 1;
+    if (running == t || running->state != PROC_RUNNING)
+        return 0;
+
+    return sched_task_strictly_preempts(t, running);
+}
+
+void proc_sched_request_cpu(unsigned cpu, int priority)
+{
+    if (cpu >= CONFIG_NR_CPUS || !smp_cpu_is_online(cpu)) {
+        __atomic_fetch_add(&sched_violations, 1, __ATOMIC_RELAXED);
+        return;
+    }
+
+    proc_cpu_sched_t *state = &sched_cpu[cpu];
+    __atomic_fetch_add(&state->requests, 1, __ATOMIC_RELAXED);
+    if (priority)
+        __atomic_fetch_add(&state->priority_requests, 1, __ATOMIC_RELAXED);
+
+    unsigned already_pending =
+        __atomic_exchange_n(&state->need_resched, 1, __ATOMIC_RELEASE);
+    if (cpu == cpu_current_id() || already_pending)
+        return;
+
+    __atomic_fetch_add(&state->ipi_sent, 1, __ATOMIC_RELAXED);
+    smp_send_reschedule(cpu);
+}
+
 void proc_sched_kick_cpu(unsigned cpu)
 {
-    if (cpu >= CONFIG_NR_CPUS || cpu == cpu_current_id())
+    proc_sched_request_cpu(cpu, 0);
+}
+
+void proc_sched_request_current(void)
+{
+    proc_sched_request_cpu(cpu_current_id(), 0);
+}
+
+void proc_sched_handle_reschedule_ipi(void)
+{
+    unsigned cpu = cpu_current_id();
+    if (cpu >= CONFIG_NR_CPUS) {
+        __atomic_fetch_add(&sched_violations, 1, __ATOMIC_RELAXED);
         return;
-    smp_send_reschedule(cpu);
+    }
+    __atomic_fetch_add(&sched_cpu[cpu].ipi_acks, 1, __ATOMIC_RELAXED);
+    __atomic_thread_fence(__ATOMIC_ACQUIRE);
+}
+
+void proc_sched_tick(int from_user)
+{
+    task_t *cur = proc_current();
+    if (!cur)
+        return;
+    if (from_user)
+        cur->total_time++;
+    if (cur->pid == 0 || cur->state != PROC_RUNNING)
+        return;
+
+    uint64_t slice = TICKS_PER_SEC / 100;
+    if (slice == 0)
+        slice = 1;
+    if (timer_get_ticks() - cur->exec_start >= slice)
+        proc_sched_request_cpu(cpu_current_id(), 0);
+}
+
+int proc_sched_safe_point(void)
+{
+    unsigned cpu = cpu_current_id();
+    if (cpu >= CONFIG_NR_CPUS ||
+        !__atomic_load_n(&sched_cpu[cpu].need_resched, __ATOMIC_ACQUIRE))
+        return 0;
+    proc_yield();
+    return 1;
+}
+
+static void sched_consume_resched(unsigned cpu)
+{
+    if (cpu >= CONFIG_NR_CPUS)
+        return;
+    if (__atomic_exchange_n(&sched_cpu[cpu].need_resched, 0,
+                            __ATOMIC_ACQ_REL))
+        __atomic_fetch_add(&sched_cpu[cpu].consumed, 1,
+                           __ATOMIC_RELAXED);
+}
+
+void proc_sched_diag_snapshot(proc_sched_diag_t *diag)
+{
+    if (!diag)
+        return;
+    memset(diag, 0, sizeof(*diag));
+    diag->runqueue_migrations =
+        __atomic_load_n(&sched_runqueue_migrations, __ATOMIC_RELAXED);
+    diag->scheduler_violations =
+        __atomic_load_n(&sched_violations, __ATOMIC_RELAXED);
+    for (unsigned cpu = 0; cpu < CONFIG_NR_CPUS; cpu++) {
+        proc_cpu_sched_t *state = &sched_cpu[cpu];
+        diag->resched_requests +=
+            __atomic_load_n(&state->requests, __ATOMIC_RELAXED);
+        diag->resched_priority_requests +=
+            __atomic_load_n(&state->priority_requests, __ATOMIC_RELAXED);
+        diag->resched_ipi_sent +=
+            __atomic_load_n(&state->ipi_sent, __ATOMIC_RELAXED);
+        diag->resched_ipi_acks +=
+            __atomic_load_n(&state->ipi_acks, __ATOMIC_RELAXED);
+        diag->resched_consumed +=
+            __atomic_load_n(&state->consumed, __ATOMIC_RELAXED);
+        diag->resched_pending +=
+            !!__atomic_load_n(&state->need_resched, __ATOMIC_ACQUIRE);
+    }
 }
 
 void proc_sched_assert_task_locked(task_t *t)
@@ -502,6 +711,10 @@ void proc_sched_assert_task_locked(task_t *t)
     if (memberships > 1 || (!!on_rq != (memberships == 1)))
         panic("sched invariant: pid=%d on_rq=%d memberships=%u",
               t->pid, on_rq, memberships);
+    if (on_rq &&
+        (task_cpu >= 64 || membership_cpus != (1ULL << task_cpu)))
+        panic("sched invariant: pid=%d cpu_id=%u membership_cpus=0x%lx",
+              t->pid, task_cpu, (unsigned long)membership_cpus);
     if (on_rq && (dispatching || on_cpu))
         panic("sched invariant: pid=%d on_rq=%d dispatching=%d on_cpu=%d",
               t->pid, on_rq, dispatching, on_cpu);
@@ -553,6 +766,31 @@ unsigned proc_sched_task_runq_memberships_locked(task_t *t)
     return memberships;
 }
 
+uint64_t proc_sched_task_runq_cpu_mask_locked(task_t *t)
+{
+    if (!t)
+        return 0;
+
+    uint64_t rq_flags[CONFIG_NR_CPUS];
+    for (unsigned cpu = 0; cpu < CONFIG_NR_CPUS; cpu++)
+        rq_flags[cpu] = RUNQ_LOCK_IRQ(cpu);
+
+    uint64_t mask = 0;
+    for (unsigned cpu = 0; cpu < CONFIG_NR_CPUS && cpu < 64; cpu++) {
+        proc_runq_t *rq = &sched_runq[cpu];
+        for (int level = 0; level < SCHED_LEVELS; level++) {
+            for (task_t *it = rq->head[level]; it; it = it->rq_next) {
+                if (it == t)
+                    mask |= 1ULL << cpu;
+            }
+        }
+    }
+
+    for (unsigned cpu = CONFIG_NR_CPUS; cpu > 0; cpu--)
+        RUNQ_UNLOCK_IRQ(cpu - 1, rq_flags[cpu - 1]);
+    return mask;
+}
+
 void proc_make_ready(task_t *t)
 {
     if (!t)
@@ -601,11 +839,14 @@ void proc_make_ready(task_t *t)
     target_cpu = t->cpu_id;
     proc_runq_enqueue_locked(t);
     int queued = t->on_rq;
+    int priority_preempt =
+        queued && proc_sched_should_preempt_locked(t, target_cpu);
     proc_sched_assert_task_locked(t);
     spin_unlock_irqrestore(&proc_lock, flags);
 
-    if (queued && target_cpu != cpu_current_id())
-        proc_sched_kick_cpu(target_cpu);
+    if (queued &&
+        (target_cpu != cpu_current_id() || priority_preempt))
+        proc_sched_request_cpu(target_cpu, priority_preempt);
 }
 
 void proc_sched_stop_current(int exit_code)
@@ -686,10 +927,13 @@ int proc_sched_resume_stopped(task_t *t, int report_continued)
         }
         proc_sched_assert_task_locked(t);
     }
+    int priority_preempt =
+        queued && proc_sched_should_preempt_locked(t, target_cpu);
     spin_unlock_irqrestore(&proc_lock, flags);
 
-    if (queued && target_cpu != cpu_current_id())
-        proc_sched_kick_cpu(target_cpu);
+    if (queued &&
+        (target_cpu != cpu_current_id() || priority_preempt))
+        proc_sched_request_cpu(target_cpu, priority_preempt);
     if (notify_parent) {
         (void)signal_send(notify_parent->pid, SIGCHLD);
         proc_put(notify_parent);
@@ -975,6 +1219,37 @@ task_t *proc_runq_pick_locked(void) {
     return NULL;
 }
 
+/*
+ * Reverse an unpublished on_rq -> dispatching transfer. This is needed when a
+ * yielding current task still strictly outranks the selected task: the old
+ * stack cannot relinquish CPU ownership before the replacement stack runs, so
+ * retaining the current task avoids exposing a lower-priority interval.
+ * Caller holds proc_lock and the dispatch reference becomes the runqueue
+ * reference again without a put/get gap.
+ */
+static void sched_runq_unpick_locked(task_t *t)
+{
+    if (!t || !t->dispatching || t->on_rq || t->on_cpu ||
+        t->owner_cpu >= CONFIG_NR_CPUS || t->state != PROC_READY) {
+        __atomic_fetch_add(&sched_violations, 1, __ATOMIC_RELAXED);
+        return;
+    }
+
+    unsigned cpu = t->owner_cpu;
+    uint64_t rf = RUNQ_LOCK_IRQ(cpu);
+    proc_runq_t *rq = &sched_runq[cpu];
+    int q = sched_task_rt(t) ? 0 : sched_level_clamp(t->sched_level);
+    t->dispatching = 0;
+    t->owner_cpu = PROC_CPU_NONE;
+    t->cpu_id = cpu;
+    t->sched_level = q;
+    t->ready_since = timer_get_ticks();
+    sched_runq_append_at(rq, t, q);
+    t->on_rq = 1;
+    __atomic_fetch_add(&rq->nr_running, 1, __ATOMIC_RELAXED);
+    RUNQ_UNLOCK_IRQ(cpu, rf);
+}
+
 static void sched_scan_timers(uint64_t now)
 {
     int scan_alarms =
@@ -1190,6 +1465,7 @@ void context_switch(task_t *next) {
 void sched(void) {
     task_t *sched_owner = proc_current();
     ARCH_SCHED_ENTER(sched_owner);
+    sched_consume_resched(cpu_current_id());
     uint64_t now = timer_get_ticks();
 
     /* Run event-driven network bottom-halves before picking the next task.
@@ -1210,6 +1486,20 @@ void sched(void) {
 
     uint64_t flags = spin_lock_irqsave(&proc_lock);
     task_t *next = proc_runq_pick_locked();
+    task_t *current = proc_current();
+    if (next && current && current != proc_idle_task() &&
+        current->state == PROC_READY && current->on_cpu &&
+        current->owner_cpu == cpu_current_id() &&
+        sched_task_strictly_preempts(current, next)) {
+        /*
+         * A READY current task is still the CPU owner until switch completion
+         * and therefore cannot sit on the runqueue beside next. If it strictly
+         * outranks next (not merely ties), retain it and return next atomically.
+         */
+        sched_runq_unpick_locked(next);
+        current->state = PROC_RUNNING;
+        next = NULL;
+    }
     if (next)
         proc_sched_assert_task_locked(next);
     spin_unlock_irqrestore(&proc_lock, flags);

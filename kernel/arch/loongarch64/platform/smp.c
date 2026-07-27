@@ -69,8 +69,9 @@ void loongarch64_smp_handle_ipi(int from_user)
     iocsr_write32(action, IOCSR_IPI_CLEAR);
     arch_mb();
 
-    if ((action & IPI_RESCHEDULE) && from_user)
-        proc_yield();
+    if (action & IPI_RESCHEDULE)
+        proc_sched_handle_reschedule_ipi();
+    (void)from_user;
 }
 
 void loongarch64_secondary_entry(unsigned cpu_id)

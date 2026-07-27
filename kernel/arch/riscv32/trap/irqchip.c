@@ -28,12 +28,7 @@ static void handle_timer_irq(int from_user) {
     kernel_progress_timer_tick();
     uint64_t now = timer_get_ticks();
     timer_set_interval(proc_next_timer_interval(now));
-    if (!from_user)
-        return;
-    task_t *cur = proc_current();
-    if (cur)
-        cur->total_time++;
-    proc_yield();
+    proc_sched_tick(from_user);
 }
 
 void trap_init(void) {
@@ -59,8 +54,7 @@ void arch_handle_irq(reg_t irq, int from_user) {
     if (irq == IRQ_S_SOFT) {
         arch_write_sip(arch_read_sip() & ~SIE_SSIE);
         timer_set_interval(proc_next_timer_interval(timer_get_ticks()));
-        if (from_user)
-            proc_yield();
+        proc_sched_request_current();
     }
 }
 

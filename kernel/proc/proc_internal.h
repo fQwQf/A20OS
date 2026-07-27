@@ -82,9 +82,16 @@ void proc_reap_detach_locked(task_t *t);
 void proc_sched_runq_init(void);
 unsigned proc_sched_select_cpu_locked(task_t *t);
 void proc_sched_kick_cpu(unsigned cpu);
+void proc_sched_request_cpu(unsigned cpu, int priority);
+void proc_sched_request_current(void);
+void proc_sched_handle_reschedule_ipi(void);
+void proc_sched_tick(int from_user);
+int proc_sched_safe_point(void);
 void proc_sched_stop_current(int exit_code);
 void proc_sched_assert_task_locked(task_t *t);
 unsigned proc_sched_task_runq_memberships_locked(task_t *t);
+uint64_t proc_sched_task_runq_cpu_mask_locked(task_t *t);
+int proc_sched_should_preempt_locked(task_t *t, unsigned cpu);
 unsigned proc_current_owner_memberships_locked(task_t *t);
 unsigned proc_current_slot_count_locked(void);
 unsigned proc_current_lifetime_violations_locked(void);
@@ -101,5 +108,18 @@ void proc_runq_enqueue_locked(task_t *t);
 void proc_runq_remove_locked(task_t *t);
 task_t *proc_runq_pick_locked(void);
 void sched_reap_zombies(void);
+
+typedef struct proc_sched_diag {
+    unsigned long runqueue_migrations;
+    unsigned long resched_requests;
+    unsigned long resched_priority_requests;
+    unsigned long resched_ipi_sent;
+    unsigned long resched_ipi_acks;
+    unsigned long resched_consumed;
+    unsigned long resched_pending;
+    unsigned long scheduler_violations;
+} proc_sched_diag_t;
+
+void proc_sched_diag_snapshot(proc_sched_diag_t *diag);
 
 #endif

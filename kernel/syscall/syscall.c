@@ -143,8 +143,9 @@ int64_t syscall_dispatch(trap_context_t *ctx)
     proc_check_exit_pending();
     if (!context_restored && proc_current() &&
         arch_syscall_resched_allowed() &&
-        (++syscall_resched_counter & 0x1f) == 0)
-        proc_yield();
+        (__atomic_add_fetch(&syscall_resched_counter, 1,
+                            __ATOMIC_RELAXED) & 0x1f) == 0)
+        proc_sched_request_current();
     proc_check_exit_pending();
     if (args.nr == SYS_sigsuspend)
         signal_task_restore_sigsuspend(proc_current());

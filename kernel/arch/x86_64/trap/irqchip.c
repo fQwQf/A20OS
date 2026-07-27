@@ -49,14 +49,7 @@ static void handle_timer_irq(int from_user) {
     timer_irq_tick();
     kernel_progress_timer_tick();
     timer_set_interval(proc_next_timer_interval(timer_get_ticks()));
-    if (!from_user) return;
-    task_t *cur = proc_current();
-    if (cur) {
-        cur->total_time++;
-        uint64_t now = timer_get_ticks();
-        if (now - cur->exec_start >= TICKS_PER_SEC / 100)
-            proc_yield();
-    }
+    proc_sched_tick(from_user);
 }
 
 static uint64_t gdt[CONFIG_NR_CPUS][8];
@@ -269,8 +262,7 @@ void arch_handle_irq(uint64_t irq, int from_user) {
     (void)from_user;
     if (irq == IRQ_VECTOR_RESCHEDULE) {
         lapic_write(LAPIC_EOI, 0);
-        if (from_user)
-            proc_yield();
+        proc_sched_handle_reschedule_ipi();
         return;
     } else if (irq == IRQ_VECTOR_TIMER) {
         handle_timer_irq(from_user);

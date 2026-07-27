@@ -19,7 +19,8 @@ proc_wait_token_none(proc_park_prepare_error_t prepare_error)
 
 static int proc_try_wake_locked_common(task_t *task, uint64_t seq,
                                        proc_wake_reason_t reason,
-                                       uint64_t *remote_cpus)
+                                       uint64_t *remote_cpus,
+                                       uint64_t *priority_cpus)
 {
     if (!task || !seq || task->wait_seq != seq ||
         task->state == PROC_UNUSED || task->state == PROC_ZOMBIE)
@@ -63,11 +64,20 @@ static int proc_try_wake_locked_common(task_t *task, uint64_t seq,
          * READY task whose wake raced its final on_cpu interval.
          */
         proc_runq_enqueue_locked(task);
-        if (task->on_rq && target_cpu != cpu_current_id()) {
-            if (remote_cpus && target_cpu < 64)
-                *remote_cpus |= 1ULL << target_cpu;
-            else
-                proc_sched_kick_cpu(target_cpu);
+        if (task->on_rq) {
+            int priority_preempt =
+                proc_sched_should_preempt_locked(task, target_cpu);
+            if (target_cpu != cpu_current_id()) {
+                if (remote_cpus && target_cpu < 64) {
+                    *remote_cpus |= 1ULL << target_cpu;
+                    if (priority_preempt && priority_cpus)
+                        *priority_cpus |= 1ULL << target_cpu;
+                } else {
+                    proc_sched_request_cpu(target_cpu, priority_preempt);
+                }
+            } else if (priority_preempt) {
+                proc_sched_request_cpu(target_cpu, 1);
+            }
         }
         proc_sched_assert_task_locked(task);
         return 1;
@@ -133,18 +143,18 @@ proc_wait_token_t proc_park_prepare_locked(proc_wait_mode_t mode,
     if (__atomic_load_n(&task->exit_pending, __ATOMIC_ACQUIRE) &&
         mode != PROC_WAIT_UNINTERRUPTIBLE) {
         (void)proc_try_wake_locked_common(
-            task, token.seq, PROC_WAKE_TASK_EXIT, NULL);
+            task, token.seq, PROC_WAKE_TASK_EXIT, NULL, NULL);
     } else if (mode == PROC_WAIT_KILLABLE) {
         if (signal_task_has_fatal(task))
             (void)proc_try_wake_locked_common(
-                task, token.seq, PROC_WAKE_FATAL_SIGNAL, NULL);
+                task, token.seq, PROC_WAKE_FATAL_SIGNAL, NULL, NULL);
     } else if (mode == PROC_WAIT_INTERRUPTIBLE) {
         if (signal_task_has_fatal(task))
             (void)proc_try_wake_locked_common(
-                task, token.seq, PROC_WAKE_FATAL_SIGNAL, NULL);
+                task, token.seq, PROC_WAKE_FATAL_SIGNAL, NULL, NULL);
         else if (signal_task_has_unblocked(task))
             (void)proc_try_wake_locked_common(
-                task, token.seq, PROC_WAKE_SIGNAL, NULL);
+                task, token.seq, PROC_WAKE_SIGNAL, NULL, NULL);
     }
     return token;
 }
@@ -161,19 +171,23 @@ proc_wait_token_t proc_park_prepare(proc_wait_mode_t mode,
 int proc_try_wake_locked(task_t *task, uint64_t seq,
                          proc_wake_reason_t reason)
 {
-    return proc_try_wake_locked_common(task, seq, reason, NULL);
+    return proc_try_wake_locked_common(task, seq, reason, NULL, NULL);
 }
 
 int proc_try_wake(task_t *task, uint64_t seq,
                   proc_wake_reason_t reason)
 {
     uint64_t remote_cpus = 0;
+    uint64_t priority_cpus = 0;
     uint64_t flags = spin_lock_irqsave(&proc_lock);
-    int woke = proc_try_wake_locked_common(task, seq, reason, &remote_cpus);
+    int woke = proc_try_wake_locked_common(
+        task, seq, reason, &remote_cpus, &priority_cpus);
     spin_unlock_irqrestore(&proc_lock, flags);
     for (unsigned cpu = 0; cpu < CONFIG_NR_CPUS && cpu < 64; cpu++) {
-        if (remote_cpus & (1ULL << cpu))
-            proc_sched_kick_cpu(cpu);
+        if (remote_cpus & (1ULL << cpu)) {
+            proc_sched_request_cpu(
+                cpu, (priority_cpus & (1ULL << cpu)) != 0);
+        }
     }
     return woke;
 }
@@ -317,11 +331,12 @@ unsigned proc_wake_q_flush(proc_wake_q_t *wake_q)
 
     unsigned woke = 0;
     uint64_t remote_cpus = 0;
+    uint64_t priority_cpus = 0;
     uint64_t flags = spin_lock_irqsave(&proc_lock);
     for (unsigned i = 0; i < wake_q->count; i++) {
         proc_wake_q_item_t *item = &wake_q->items[i];
         if (proc_try_wake_locked_common(item->task, item->seq, item->reason,
-                                        &remote_cpus))
+                                        &remote_cpus, &priority_cpus))
             woke++;
     }
     spin_unlock_irqrestore(&proc_lock, flags);
@@ -334,7 +349,8 @@ unsigned proc_wake_q_flush(proc_wake_q_t *wake_q)
     wake_q->count = 0;
     for (unsigned cpu = 0; cpu < CONFIG_NR_CPUS && cpu < 64; cpu++) {
         if (remote_cpus & (1ULL << cpu))
-            proc_sched_kick_cpu(cpu);
+            proc_sched_request_cpu(
+                cpu, (priority_cpus & (1ULL << cpu)) != 0);
     }
     return woke;
 }
