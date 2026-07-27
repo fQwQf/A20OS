@@ -415,6 +415,10 @@ static int input_ioctl(vfile_t *vf, unsigned long req, void *arg) {
         return evdev_copy_zeros(arg, len);
     case EVIOCGMTSLOTS_NR:
         return -EINVAL;
+    case 0x19: /* EVIOCGLED: mux claims no LEDs */
+    case 0x1a: /* EVIOCGSND */
+    case 0x1b: /* EVIOCGSW */
+        return evdev_copy_zeros(arg, len);
     case EVIOCGKEY_NR: {
         uint8_t state[EV_MUX_KEY_STATE_BYTES];
         uint64_t flags = spin_lock_irqsave(&g_mux_state_lock);
