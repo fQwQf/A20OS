@@ -166,18 +166,23 @@ bus_type_t *get_pci_bus(void) {
     return &pci_bus;
 }
 
-static uint64_t pci_bar_size(const pci_dev_info_t *info, int bar, uint32_t bar_lo) {
+static uint64_t pci_bar_size(const pci_dev_info_t *info, int bar,
+                             uint32_t bar_lo, uint32_t *bar_flags) {
     uint32_t offset = 0x10U + (uint32_t)bar * 4U;
     uint32_t original_hi = 0;
-    int is_64 = !(bar_lo & 1U) && ((bar_lo & 0x6U) == 0x4U);
-
-    if (is_64)
-        original_hi = pci_ecam_read(info->bus, info->dev, info->func, offset + 4U);
     pci_ecam_write(info->bus, info->dev, info->func, offset, 0xFFFFFFFFU);
-    if (is_64)
-        pci_ecam_write(info->bus, info->dev, info->func, offset + 4U, 0xFFFFFFFFU);
-
     uint32_t mask_lo = pci_ecam_read(info->bus, info->dev, info->func, offset);
+    uint32_t flags = bar_lo ? bar_lo : mask_lo;
+    int is_io = (flags & 1U) != 0;
+    int is_64 = !is_io && ((flags & 0x6U) == 0x4U);
+
+    if (bar_flags)
+        *bar_flags = flags;
+    if (is_64) {
+        original_hi = pci_ecam_read(info->bus, info->dev, info->func, offset + 4U);
+        pci_ecam_write(info->bus, info->dev, info->func, offset + 4U,
+                       0xFFFFFFFFU);
+    }
     uint32_t mask_hi = is_64 ?
         pci_ecam_read(info->bus, info->dev, info->func, offset + 4U) : 0;
 
@@ -185,7 +190,7 @@ static uint64_t pci_bar_size(const pci_dev_info_t *info, int bar, uint32_t bar_l
     if (is_64)
         pci_ecam_write(info->bus, info->dev, info->func, offset + 4U, original_hi);
 
-    if (bar_lo & 1U)
+    if (is_io)
         return (uint64_t)(~(mask_lo & ~0x3U) + 1U);
     if (!is_64)
         return (uint64_t)(~(mask_lo & ~0xFU) + 1U);
@@ -193,11 +198,11 @@ static uint64_t pci_bar_size(const pci_dev_info_t *info, int bar, uint32_t bar_l
 }
 
 static uint64_t pci_bar_address(const pci_dev_info_t *info, int bar,
-                                uint32_t bar_lo) {
+                                uint32_t bar_lo, int is_64) {
     uint64_t address = (uint64_t)(bar_lo & ~0xFU);
-    if (!(bar_lo & 1U) && (bar_lo & 0x6U) == 0x4U)
+    if (is_64)
         address |= (uint64_t)pci_ecam_read(info->bus, info->dev, info->func,
-                                            0x10U + (uint32_t)(bar + 1) * 4U) << 32;
+                                             0x10U + (uint32_t)(bar + 1) * 4U) << 32;
     return address;
 }
 
@@ -226,12 +231,13 @@ int pci_enable_and_assign_bars(device_t *dev) {
     for (int bar = 0; bar < 6; bar++) {
         uint32_t offset = 0x10U + (uint32_t)bar * 4U;
         uint32_t bar_lo = pci_ecam_read(info->bus, info->dev, info->func, offset);
-        if (bar_lo == 0 || bar_lo == 0xFFFFFFFFU)
+        if (bar_lo == 0xFFFFFFFFU)
             continue;
 
-        int is_io = (bar_lo & 1U) != 0;
-        int is_64 = !is_io && ((bar_lo & 0x6U) == 0x4U);
-        uint64_t size = pci_bar_size(info, bar, bar_lo);
+        uint32_t bar_flags = 0;
+        uint64_t size = pci_bar_size(info, bar, bar_lo, &bar_flags);
+        if (!size && bar_lo == 0)
+            continue;
         if (!size || (size & (size - 1U)) != 0) {
             kerr("[PCI] %02x:%02x.%x BAR%d invalid size 0x%lx (raw=0x%x)\n",
                  info->bus, info->dev, info->func, bar,
@@ -240,7 +246,10 @@ int pci_enable_and_assign_bars(device_t *dev) {
             return -1;
         }
 
-        uint64_t addr = is_io ? (bar_lo & ~0x3U) : pci_bar_address(info, bar, bar_lo);
+        int is_io = (bar_flags & 1U) != 0;
+        int is_64 = !is_io && ((bar_flags & 0x6U) == 0x4U);
+        uint64_t addr = is_io ? (bar_lo & ~0x3U) :
+                                pci_bar_address(info, bar, bar_lo, is_64);
 
 #if defined(CONFIG_X86_64) || defined(CONFIG_LOONGARCH64)
         if (!is_io && addr == 0) {
@@ -257,11 +266,18 @@ int pci_enable_and_assign_bars(device_t *dev) {
 #endif
             g_pci_mmio_alloc = aligned + (uintptr_t)size;
             pci_ecam_write(info->bus, info->dev, info->func, offset,
-                           (uint32_t)(aligned | (bar_lo & 0xFU)));
+                           (uint32_t)(aligned | (bar_flags & 0xFU)));
             if (is_64)
                 pci_ecam_write(info->bus, info->dev, info->func, offset + 4U,
                                (uint32_t)(aligned >> 32));
             addr = aligned;
+        }
+#else
+        if (!is_io && addr == 0) {
+            kerr("[PCI] %02x:%02x.%x BAR%d is unassigned and platform has no MMIO allocator\n",
+                 info->bus, info->dev, info->func, bar);
+            pci_ecam_write(info->bus, info->dev, info->func, 0x04, command);
+            return -1;
         }
 #endif
 
@@ -397,8 +413,9 @@ int pci_virtio_transport_init(device_t *dev, int type,
                 (uint64_t)offset < info->bar_size[bar]) {
                 uint32_t bar_lo = pci_ecam_read(info->bus, info->dev, info->func,
                                                  0x10U + (uint32_t)bar * 4U);
+                int is_64 = !(bar_lo & 1U) && ((bar_lo & 0x6U) == 0x4U);
                 uintptr_t base = arch_pci_bar_to_resource(
-                    pci_bar_address(info, bar, bar_lo));
+                    pci_bar_address(info, bar, bar_lo, is_64));
                 switch (cfg_type) {
                 case VIRTIO_PCI_CAP_COMMON_CFG: candidate.common = base + offset; found |= 1; break;
                 case VIRTIO_PCI_CAP_NOTIFY_CFG:
@@ -482,8 +499,9 @@ void pci_enumerate(uintptr_t ecam_base, int bus_start, int bus_end) {
 
                 for (int b = 0; b < 6; b++) {
                     uint32_t bar_lo = pci_ecam_read(bus, dev, func, 0x10 + b * 4);
+                    int is_64 = !(bar_lo & 1U) && ((bar_lo & 0x6U) == 0x4U);
                     info->bar[b] = (bar_lo == 0xFFFFFFFF || bar_lo == 0) ? 0 :
-                                   pci_bar_address(info, b, bar_lo);
+                                   pci_bar_address(info, b, bar_lo, is_64);
                     info->bar_size[b] = 0;
                     info->bar_resource[b] = -1;
                 }

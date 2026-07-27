@@ -1,8 +1,6 @@
 /*
  * A20OS NVMe PCI driver
  */
-#ifdef CONFIG_X86_64
-
 #include "drivers/block/nvme.h"
 #include "drivers/bus/pci_bus.h"
 #include "drivers/core/driver_class.h"
@@ -443,10 +441,16 @@ static const device_id_t nvme_ids[] = {
     { 0 },
 };
 
+static int nvme_match(device_t *dev)
+{
+    return pci_class_code(dev) == 0x010802U;
+}
+
 static driver_t nvme_driver = {
     .name = "nvme",
     .id_table = nvme_ids,
     .bus = &pci_bus,
+    .match = nvme_match,
     .probe = nvme_probe,
     .remove = nvme_remove,
     .class_ops = &nvme_ops,
@@ -454,5 +458,3 @@ static driver_t nvme_driver = {
 };
 
 DRIVER_REGISTER(nvme_driver);
-
-#endif

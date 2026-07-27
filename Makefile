@@ -95,7 +95,7 @@ endif
 # Directories
 KERNEL_DIR = kernel
 INCLUDE_DIR = $(KERNEL_DIR)/include
-BUILD_VARIANT = $(ABI)-$(if $(filter 1,$(BRINGUP)),bringup,dev)$(if $(filter 1,$(NOMMU)),-nommu,)$(if $(filter-out 1,$(NR_CPUS)),-smp$(NR_CPUS),)
+BUILD_VARIANT = $(ABI)-$(if $(filter 1,$(BRINGUP)),bringup,dev)$(if $(filter 1,$(NOMMU)),-nommu,)$(if $(filter-out 1,$(NR_CPUS)),-smp$(NR_CPUS),)$(if $(filter y,$(CONFIG_DRIVER_LIFECYCLE_TEST)),-driver-lifecycle,)$(if $(filter y,$(CONFIG_HDA_SMOKE_TEST)),-hda-smoke,)
 ifeq ($(ARCH),armv7m)
 BUILD_VARIANT := $(BUILD_VARIANT)-$(BOARD)-f$(STM32_FLASH_KB)k-r$(STM32_RAM_KB)k
 BUILD_VARIANT := $(BUILD_VARIANT)$(if $(filter 1,$(STM32_QEMU)),-qemu,)
@@ -459,6 +459,10 @@ ifeq ($(CONFIG_DRIVER_LIFECYCLE_TEST),y)
 CFLAGS += -DCONFIG_DRIVER_LIFECYCLE_TEST
 endif
 
+ifeq ($(CONFIG_HDA_SMOKE_TEST),y)
+CFLAGS += -DCONFIG_HDA_SMOKE_TEST
+endif
+
 ifeq ($(CONFIG_SWAP),y)
 CFLAGS += -DCONFIG_SWAP
 endif
@@ -584,7 +588,7 @@ VBOX_AARCH64_LOAD_ADDRESS ?= 0x08080000ULL
 		check-arch-boundary check-task-state-boundary \
 		check-riscv64-bringup check-loongarch64-bringup check-aarch64-bringup check-x86_64-bringup check-arm32-bringup check-riscv32-bringup check-ppc64le-bringup \
 		check-riscv64-user check-loongarch64-user check-aarch64-user check-x86_64-user check-arm32-user check-riscv32-user check-ppc64le-user \
-		smoke-riscv64 smoke-loongarch64 smoke-aarch64 smoke-x86_64 smoke-qemu-gui-x86_64 smoke-qemu-gui-riscv64 smoke-qemu-gui-aarch64 smoke-qemu-gui-arm32 smoke-qemu-gui-loongarch64 smoke-arm32 smoke-riscv32 smoke-ppc64le smoke-abi-linux smoke-network-suite smoke-proc-a20 smoke-proc-stress smoke-mm-stress smoke-vfs-stress smoke-vfs-edge smoke-sched-stress smoke-futex-stress smoke-socket-stress smoke-driver-lifecycle smoke-native-handle smoke-native-libc smoke-io-event \
+		smoke-riscv64 smoke-loongarch64 smoke-aarch64 smoke-x86_64 smoke-qemu-gui-x86_64 smoke-qemu-gui-riscv64 smoke-qemu-gui-aarch64 smoke-qemu-gui-arm32 smoke-qemu-gui-loongarch64 smoke-arm32 smoke-riscv32 smoke-ppc64le smoke-abi-linux smoke-network-suite smoke-proc-a20 smoke-proc-stress smoke-mm-stress smoke-vfs-stress smoke-vfs-edge smoke-sched-stress smoke-futex-stress smoke-socket-stress smoke-driver-lifecycle smoke-hda smoke-pci-portability smoke-native-handle smoke-native-libc smoke-io-event \
 		smoke-arch-mmu-matrix \
 		FORCE regen-rootfs-overlay \
 		user_apps fs_img kernel-only dev-build contest-rv contest-la \
@@ -908,7 +912,13 @@ check-driver-core-model:
 	@rg -q "DEV_STATE_REMOVING" kernel/drivers/core/driver_core.h kernel/drivers/core/driver_core.c
 	@rg -q "platform_device_register" kernel/drivers/bus/platform_bus.c kernel/platform/qemu-virt-x86_64/board.c
 	@rg -q "DEV_CLASS_AUDIO" kernel/drivers/core/driver_core.h kernel/drivers/audio/pc_speaker.c
+	@rg -Fq "pci_class_code(dev) != 0x040300" kernel/drivers/audio/hda.c
 	@rg -Fq "pci_class_code(dev) != 0x010802" kernel/drivers/block/nvme.c
+	@rg -Fq "if (!size && bar_lo == 0)" kernel/drivers/bus/pci_bus.c
+	@rg -q "\.match = hda_match" kernel/drivers/audio/hda.c
+	@rg -q "\.match = nvme_match" kernel/drivers/block/nvme.c
+	@! rg -q "CONFIG_X86_64" kernel/drivers/audio/hda.c kernel/drivers/block/nvme.c
+	@rg -q "CONFIG_X86_64" kernel/drivers/audio/pc_speaker.c
 	@rg -q "virtio_blk_driver_probe" kernel/drivers/block/virtio_blk.c
 	@rg -q "virtio_net_driver_probe" kernel/drivers/net/virtio_net.c
 	@rg -q "uart_driver_probe" kernel/drivers/char/uart.c
@@ -1471,7 +1481,7 @@ smoke-driver-lifecycle:
 	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
 		-machine virt -m 1G -nographic -smp 1 -bios default \
 		-global virtio-mmio.force-legacy=false \
-		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-bringup/kernel.elf \
+		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-bringup-driver-lifecycle/kernel.elf \
 		> "$$log" 2>&1 || status=$$?; \
 	if grep -q 'DRIVER_LIFECYCLE: PASS' "$$log"; then \
 		echo "smoke-driver-lifecycle: PASS; log saved to $$log"; \
@@ -1482,6 +1492,55 @@ smoke-driver-lifecycle:
 	else \
 		echo "smoke-driver-lifecycle: failed with status $$status; tail of $$log:"; \
 		tail -n 80 "$$log"; \
+		exit 1; \
+	fi
+
+smoke-hda:
+	$(MAKE) ARCH=x86_64 BOARD=qemu-virt-x86_64 ABI=linux BRINGUP=1 CONFIG_HDA_SMOKE_TEST=y kernel-only
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/hda-x86_64.log"; \
+	status=0; \
+	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-x86_64 \
+		-machine q35 -m 1G -nographic -smp 1 -no-reboot \
+		-audiodev driver=none,id=audio0 \
+		-device intel-hda -device hda-duplex,audiodev=audio0 \
+		-kernel .kernel-build/x86_64-qemu-virt-x86_64-linux-bringup-hda-smoke/kernel.elf \
+		> "$$log" 2>&1 || status=$$?; \
+	if grep -q 'HDA_STREAM_SMOKE: PASS' "$$log" && \
+	   grep -q "bound to driver 'hda'" "$$log" && \
+	   ! grep -qi 'panic' "$$log"; then \
+		echo "smoke-hda: PASS; log saved to $$log"; \
+	else \
+		echo "smoke-hda: failed with status $$status; tail of $$log:"; \
+		tail -n 80 "$$log"; \
+		exit 1; \
+	fi
+
+smoke-pci-portability:
+	$(MAKE) ARCH=loongarch64 BOARD=qemu-virt-loongarch64 ABI=linux BRINGUP=1 CONFIG_HDA_SMOKE_TEST=y kernel-only
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/pci-portability-loongarch64.log"; \
+	image="$(SMOKE_LOG_DIR)/pci-portability-nvme.img"; \
+	truncate -s 128M "$$image"; \
+	status=0; \
+	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-loongarch64 \
+		-machine virt -m 1G -nographic -smp 1 -no-reboot -snapshot \
+		-audiodev driver=none,id=audio0 \
+		-device intel-hda -device hda-duplex,audiodev=audio0 \
+		-drive file="$$image",if=none,format=raw,id=nvme0 \
+		-device nvme,drive=nvme0,serial=A20NVME \
+		-kernel .kernel-build/loongarch64-qemu-virt-loongarch64-linux-bringup-hda-smoke/kernel.elf \
+		> "$$log" 2>&1 || status=$$?; \
+	if grep -q 'HDA_STREAM_SMOKE: PASS' "$$log" && \
+	   grep -q "bound to driver 'hda'" "$$log" && \
+	   grep -q "bound to driver 'nvme'" "$$log" && \
+	   ! grep -qi 'panic' "$$log"; then \
+		echo "smoke-pci-portability: PASS; log saved to $$log"; \
+	else \
+		echo "smoke-pci-portability: failed with status $$status; tail of $$log:"; \
+		tail -n 100 "$$log"; \
 		exit 1; \
 	fi
 
