@@ -19,9 +19,15 @@ git diff --check
 make check-driver-core-model
 make check-doc-drift
 make smoke-driver-lifecycle
+make smoke-hda
+make smoke-pci-portability
 ```
 
-`smoke-driver-lifecycle` 用 RISC-V64 bringup 配置和 `CONFIG_DRIVER_LIFECYCLE_TEST=y` 启动合成 bus/device，验证注册、probe 失败解绑、unregister 和重新 probe；宿主需要能运行仓库配置的 QEMU。只改平台私有轻量设备时可以不跑它，但修改 driver core、bus 或生命周期代码时必须跑。
+`smoke-driver-lifecycle` 用 RISC-V64 bringup 配置和 `CONFIG_DRIVER_LIFECYCLE_TEST=y` 启动合成 bus/device，验证注册、probe 失败解绑、class 发布、unregister 下线、陈旧引用返回 `-ENODEV` 和重新 probe；宿主需要能运行仓库配置的 QEMU。只改平台私有轻量设备时可以不跑它，但修改 driver core、bus 或生命周期代码时必须跑。
+
+`smoke-hda` 在 x86_64 q35 上挂载 Intel HDA controller 和 duplex codec，验证 codec 拓扑识别、audio class 绑定以及一段静音 PCM 的 BDL DMA 完成。该测试使用 QEMU null audio backend，不依赖宿主声卡。
+
+`smoke-pci-portability` 在 LoongArch64 QEMU virt 上同时挂载 HDA 和 NVMe，验证未分配零值 BAR 的 sizing/assignment、HDA PCM DMA、NVMe queue/Identify 以及两个 class 绑定。该测试证明协议实现没有依赖 x86；NVMe 块数据读写仍需按下方 I/O 表使用可丢弃镜像验证。
 
 检查源中没有板级硬编码泄漏：
 
@@ -43,6 +49,8 @@ make ARCH=x86_64 ABI=both kernel-only -j4
 make ARCH=arm32 BOARD=qemu-virt-arm32 ABI=both kernel-only -j4
 make check-stm32f103
 ```
+
+跨架构结论分三级记录：只编译通过；设备枚举并绑定；实际 DMA/I/O 完成。只有第三级可以写“运行验证”。某架构的 board 没有 PCI enumerator 时，HDA/NVMe 编译成功只能计入第一级。
 
 不相关架构可按改动范围缩减，但修改 driver core、class、PCI、VirtIO 或 hwapi 时应扩大矩阵。本地门禁入口见 [testing/testing-gates.md](../testing/testing-gates.md)。
 

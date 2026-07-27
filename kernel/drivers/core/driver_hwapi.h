@@ -70,6 +70,11 @@ static inline void writel_relaxed(uint32_t val, volatile void *addr) {
     *(volatile uint32_t *)addr = val;
 }
 
+/* Port-mapped I/O. Unsupported architectures return all-ones on reads and
+ * ignore writes; drivers must only use ports supplied as RES_IOPORT. */
+uint8_t ioport_read8(uint16_t port);
+void ioport_write8(uint16_t port, uint8_t value);
+
 /* ============================================================
  * DMA API — delegates to arch_dma_sync_for_*
  * DRIVER_IRQ_DMA_SEMANTICS: coherent allocations return zeroed CPU addresses
@@ -79,6 +84,12 @@ static inline void writel_relaxed(uint32_t val, volatile void *addr) {
  * ============================================================ */
 void  *dma_alloc_coherent(size_t size, uint64_t *dma_handle);
 void   dma_free_coherent(void *vaddr, size_t size, uint64_t dma_handle);
+/* Page-backed physically contiguous allocation for queue/ring hardware whose
+ * base address has an alignment requirement stronger than kmalloc provides. */
+void  *dma_alloc_coherent_aligned(size_t size, size_t alignment,
+                                  uint64_t *dma_handle);
+void   dma_free_coherent_aligned(void *vaddr, size_t size,
+                                 uint64_t dma_handle);
 void   dma_sync_for_device(void *vaddr, size_t size);
 void   dma_sync_for_cpu(void *vaddr, size_t size);
 
