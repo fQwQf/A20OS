@@ -102,6 +102,7 @@ static const smp_platform_ops_t la64_smp_ops = {
 
 static void la64_early_init(void) {
     loongarch64_smp_local_init();
+    loongarch64_memory_init();
 }
 
 static void la64_poweroff(void) {

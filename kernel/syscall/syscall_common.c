@@ -13,6 +13,8 @@ int syscall_path_at(int dirfd, const char *path, char *out, size_t outsz) {
         return -ENAMETOOLONG;
 
     const char *base = NULL;
+    bool dirfd_path_is_physical = false;
+    char base_buf[MAX_PATH_LEN];
     char logical[MAX_PATH_LEN];
     if (path[0] == '/') {
         strncpy(logical, path, sizeof(logical) - 1);
@@ -48,11 +50,17 @@ int syscall_path_at(int dirfd, const char *path, char *out, size_t outsz) {
             vfs_put_file_ref(gfd, vf);
             return -EINVAL;
         } else {
-            strncpy(logical, vf->path, sizeof(logical) - 1);
-            logical[sizeof(logical) - 1] = '\0';
+            strncpy(base_buf, vf->path, sizeof(base_buf) - 1);
+            base_buf[sizeof(base_buf) - 1] = '\0';
         }
         vfs_put_file_ref(gfd, vf);
-        base = logical;
+        /*
+         * vfile::path is stored in the global VFS namespace.  In particular,
+         * after chroot it already contains root_path.  Keep that provenance:
+         * treating it as a task-logical path would prefix root_path twice.
+         */
+        base = base_buf;
+        dirfd_path_is_physical = true;
         size_t len = strlen(base);
         int n;
         if (path[0] == '\0') {
@@ -68,7 +76,11 @@ int syscall_path_at(int dirfd, const char *path, char *out, size_t outsz) {
 
     const char *root = t->fs.root_path[0] ? t->fs.root_path : "/";
     int n;
-    if (strcmp(root, "/") == 0) {
+    if (dirfd_path_is_physical) {
+        if (strcmp(root, "/") != 0 && !path_is_beneath(root, base_buf))
+            return -EACCES;
+        n = snprintf(out, outsz, "%s", logical);
+    } else if (strcmp(root, "/") == 0) {
         n = snprintf(out, outsz, "%s", logical);
     } else if (strcmp(logical, "/") == 0) {
         n = snprintf(out, outsz, "%s", root);

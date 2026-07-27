@@ -189,15 +189,19 @@ int net_format_status(char *buf, size_t bufsz) {
 
 int net_socket_create(int domain, int type, int protocol) {
     int base_type = type & 0xf;
-    if (domain != AF_UNIX && domain != AF_INET && domain != AF_INET6 && domain != AF_ALG)
+    if (domain != AF_UNIX && domain != AF_INET && domain != AF_INET6 &&
+        domain != AF_NETLINK && domain != AF_ALG)
         return -EAFNOSUPPORT;
     if (base_type != SOCK_STREAM && base_type != SOCK_DGRAM && base_type != SOCK_RAW &&
         base_type != SOCK_SEQPACKET)
         return -EPROTOTYPE;
     if (domain == AF_ALG && base_type != SOCK_SEQPACKET)
         return -EPROTOTYPE;
-    if (base_type == SOCK_RAW &&
+    if (base_type == SOCK_RAW && domain != AF_NETLINK &&
         ((domain != AF_INET && domain != AF_INET6) || protocol < 0 || protocol > 255))
+        return -EPROTONOSUPPORT;
+    if (domain == AF_NETLINK &&
+        (base_type != SOCK_RAW || protocol != NETLINK_SOCK_DIAG))
         return -EPROTONOSUPPORT;
 
     if (domain == AF_INET || domain == AF_INET6) {
@@ -295,6 +299,8 @@ int net_bind(int gfd, const void *addr, size_t addrlen) {
     }
     if (s->domain == AF_ALG)
         return net_alg_socket_bind(s, addr, addrlen);
+    if (s->domain == AF_NETLINK)
+        return net_netlink_bind(s, addr, addrlen);
     if (s->domain == AF_UNIX)
         return net_unix_socket_bind(s, addr, addrlen);
 
@@ -438,6 +444,8 @@ int net_sendto(int gfd, const void *buf, size_t len, int flags,
     int dontwait = s->nonblock || ((flags & MSG_DONTWAIT) != 0);
     if (s->domain == AF_ALG)
         return net_alg_socket_send(s, buf, len);
+    if (s->domain == AF_NETLINK)
+        return net_netlink_diag_request(s, buf, len, addr, addrlen);
     if (s->domain == AF_INET6 && s->type == SOCK_RAW)
         return net_sendto_raw_ipv6(s, (void *)buf, len, addr, addrlen);
     if ((s->domain == AF_INET || s->domain == AF_INET6) &&
@@ -520,7 +528,39 @@ int net_recvfrom_meta(int gfd, void *buf, size_t len, int flags,
         proc_wake_q_init(&wake_q);
         uint64_t irq = spin_lock_irqsave(&g_net_lock);
         int rx_count_before = s->rx_count;
-        int r = net_dequeue_msg_locked_meta(s, buf, len, addr, addrlen, meta);
+        net_msg_t *head = s->rx_head;
+        size_t datagram_len =
+            (head && s->type != SOCK_STREAM) ? head->len - head->off : 0;
+        int r;
+        if ((flags & MSG_PEEK) && head) {
+            size_t avail = head->len - head->off;
+            size_t n = avail < len ? avail : len;
+            if (n)
+                memcpy(buf, head->data + head->off, n);
+            if (addr && addrlen && *addrlen > 0) {
+                size_t alen = head->addrlen < *addrlen
+                                  ? head->addrlen : *addrlen;
+                memcpy(addr, head->addr, alen);
+                *addrlen = alen;
+            }
+            if (meta) {
+                meta->has_pktinfo = head->has_pktinfo;
+                meta->has_hoplimit = head->has_hoplimit;
+                meta->has_tclass = head->has_tclass;
+                meta->pktinfo_ifindex = head->pktinfo_ifindex;
+                memcpy(meta->pktinfo_addr, head->pktinfo_addr,
+                       sizeof(meta->pktinfo_addr));
+                meta->hoplimit = head->hoplimit;
+                meta->tclass = head->tclass;
+            }
+            r = ((flags & MSG_TRUNC) && s->type != SOCK_STREAM)
+                    ? (int)avail : (int)n;
+        } else {
+            r = net_dequeue_msg_locked_meta(s, buf, len, addr, addrlen, meta);
+            if (r >= 0 && (flags & MSG_TRUNC) &&
+                s->type != SOCK_STREAM && datagram_len > (size_t)r)
+                r = (int)datagram_len;
+        }
         if (r > 0 && s->type == SOCK_STREAM) {
             size_t total = (size_t)r;
             while (total < len && s->rx_head) {

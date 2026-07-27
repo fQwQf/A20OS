@@ -11,25 +11,9 @@
 #define PAGE_OFFSET        0x00000000UL
 #define USER_VA_LIMIT      0x4000000000UL
 
-static inline size_t arch_ram_range_count(void) {
-    return 2;
-}
-
-static inline int arch_ram_range(size_t idx, paddr_t *base, paddr_t *end) {
-    if (!base || !end) return -1;
-    switch (idx) {
-    case 0:
-        *base = 0x00000000UL;
-        *end = 0x10000000UL;
-        return 0;
-    case 1:
-        *base = PHYS_MEMORY_BASE;
-        *end = PHYS_MEMORY_END;
-        return 0;
-    default:
-        return -1;
-    }
-}
+size_t arch_ram_range_count(void);
+int arch_ram_range(size_t idx, paddr_t *base, paddr_t *end);
+void loongarch64_memory_init(void);
 
 #define UART0_BASE         0x1FE001E0UL
 #define VIRTIO_BASE        0x10001000UL

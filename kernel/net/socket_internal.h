@@ -243,6 +243,9 @@ int      net_unix_socket_bind(net_socket_t *s, const void *addr, size_t addrlen)
 int      net_unix_socket_connect(net_socket_t *s, const void *addr, size_t addrlen);
 int      net_unix_socket_sendto(net_socket_t *s, const void *buf, size_t len,
                                 const void *addr, size_t addrlen);
+int      net_netlink_bind(net_socket_t *s, const void *addr, size_t addrlen);
+int      net_netlink_diag_request(net_socket_t *s, const void *buf, size_t len,
+                                  const void *addr, size_t addrlen);
 
 void     net_tcp_close_pcb(net_socket_t *s);
 void     net_tcp_drop_pcb(net_socket_t *s);
