@@ -25,7 +25,7 @@ static const device_id_t ids[] = {
 };
 ```
 
-`vendor/device` 是 PCI configuration space 的 16 位值。未限制的 subsystem 字段必须显式填 ANY。不要仅用 class code 做宽泛匹配后假定所有控制器实现相同；如确需 class 驱动，应先扩展 bus match 语义并验证 prog-if。
+`vendor/device` 是 PCI configuration space 的 16 位值。未限制的 subsystem 字段必须显式填 ANY。class 驱动使用 ANY ID 表和 `driver_t.match`，在 bus ID 匹配后验证完整的 class/subclass/prog-if；不能只检查 class/subclass 后假定所有 programming interface 相同。
 
 匹配后 `dev->matched_id` 可读取 `driver_data`。`pci_device_id(dev)` 返回 `vendor << 16 | device`；`pci_class_code(dev)` 返回 `class << 16 | subclass << 8 | prog-if`。
 
@@ -40,7 +40,9 @@ if (ret < 0)
 resource_t *regs = pci_get_bar_resource(dev, 0);
 ```
 
-helper 会在 BAR sizing 时暂时关闭地址 decoding，计算大小，为 x86_64 或 LoongArch 未分配的 MMIO BAR 从平台 PCI 窗口分配地址，启用 memory/bus-master，并把 MMIO BAR 转换成 `RES_MMIO`。LoongArch 分配必须完全落在 `PCIE_MMIO_BASE..PCIE_MMIO_BASE+PCIE_MMIO_SIZE`，越界时 probe 失败而不是写入截断地址。I/O port BAR 当前不进入资源数组。INTx line 如果有效会追加 `RES_IRQ`。
+helper 会在 BAR sizing 时暂时关闭地址 decoding，计算大小，为 x86_64 或 LoongArch 未分配的 MMIO BAR 从平台 PCI 窗口分配地址，启用 memory/bus-master，并把 MMIO BAR 转换成 `RES_MMIO`。原始 BAR 为零可能表示“已实现但固件尚未分配”，因此仍须写全一 sizing；只有 sizing mask 也表明 size 为零时才是未实现 BAR。分配时必须保留 sizing mask 返回的 I/O、32/64 位和 prefetchable 类型位。
+
+LoongArch 分配必须完全落在 `PCIE_MMIO_BASE..PCIE_MMIO_BASE+PCIE_MMIO_SIZE`，越界时 probe 失败而不是写入截断地址。I/O port BAR 当前不进入资源数组。INTx line 如果有效会追加 `RES_IRQ`。
 
 64 位 BAR 占两个配置 BAR slot，但只生成一个 MMIO resource，所以必须用 `pci_get_bar_resource(dev, physical_bar_number)`。校验 `end >= start` 和最小 aperture 大小后才能访问。BAR 地址已经通过 `arch_pci_bar_to_resource` 变成内核可访问地址。
 
@@ -108,6 +110,29 @@ static int my_pci_remove(device_t *dev)
     return 0;
 }
 ```
+
+## 协议驱动的可移植契约
+
+PCI 协议驱动只能依赖以下公共输入：
+
+- `device_t`、`matched_id` 与 `pci_class_code()` 提供身份；
+- `pci_enable_and_assign_bars()` 与 `pci_get_bar_resource()` 提供可访问 MMIO；
+- `read*/write*` 提供有序寄存器访问；
+- `dma_alloc_coherent_aligned()` 返回 CPU 地址和设备 DMA handle，`dma_sync_for_*()` 转移可见性；
+- `request_irq/free_irq` 提供中断能力，或由驱动明确记录轮询模式。
+
+驱动不得包含架构私有 `platform.h`，不得自行加 `PAGE_OFFSET`，也不得假定 DMA handle 等于 CPU 指针。平台若缺少 PCI 枚举、BAR 窗口分配或正确 DMA/cache hook，应在平台层补齐；不能用 `CONFIG_<ARCH>` 把通用协议代码隐藏起来。
+
+当前平台状态：
+
+| 平台 | PCI 发现/BAR | NVMe/HDA 证据 |
+|---|---|---|
+| QEMU x86_64 q35 | ECAM 与 MMIO BAR 分配 | HDA BDL DMA smoke 已验证；NVMe 可绑定 |
+| QEMU LoongArch64 virt | ECAM 与 `0x40000000` PCI MMIO 窗口分配 | HDA BDL DMA、NVMe admin queue/Identify 已联合验证 |
+| VirtualBox AArch64 | ACPI MCFG；依赖固件预分配且低于已映射范围的 BAR | 通用驱动可编译，尚无 HDA/NVMe 运行日志 |
+| QEMU AArch64/RISC-V64 virt | 当前 board 只枚举 VirtIO-MMIO | 驱动可编译，不构成 PCI 运行支持 |
+
+LoongArch 验证入口是 `make smoke-pci-portability`。它在同一客户机挂载 HDA codec 与 NVMe namespace，要求 HDA PCM DMA 完成且两个 class 驱动都绑定。NVMe 当前验证到 Identify；块数据读写仍需独立的可丢弃镜像测试。
 
 ## VirtIO transport
 
