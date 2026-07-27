@@ -8,6 +8,7 @@
  */
 #include "drivers/core/driver_lifecycle_test.h"
 #include "drivers/core/driver_core.h"
+#include "drivers/core/driver_class.h"
 #include "core/klog.h"
 #include "core/stdio.h"
 #include "core/string.h"
@@ -64,6 +65,17 @@ static int lifecycle_remove(device_t *dev)
     return 0;
 }
 
+static int lifecycle_char_read(device_t *dev, void *buf, size_t count)
+{
+    (void)dev;
+    (void)buf;
+    return (int)count;
+}
+
+static const char_dev_ops_t lifecycle_char_ops = {
+    .read = lifecycle_char_read,
+};
+
 static bus_type_t g_lifecycle_bus = {
     .name  = "lifecycle",
     .match = lifecycle_match,
@@ -82,8 +94,8 @@ static driver_t g_lifecycle_driver = {
     .bus        = &g_lifecycle_bus,
     .probe      = lifecycle_probe,
     .remove     = lifecycle_remove,
-    .class_ops  = NULL,
-    .class_type = DEV_CLASS_NONE,
+    .class_ops  = &lifecycle_char_ops,
+    .class_type = DEV_CLASS_CHAR,
 };
 
 int driver_lifecycle_test_run(void)
@@ -189,6 +201,13 @@ int driver_lifecycle_test_run(void)
         pass = 0;
         goto out;
     }
+    if (!dev_ok.class_dev || !dev_ok.class_dev->online) {
+        kerr("[DRIVER-LIFECYCLE] successful probe was not published\n");
+        pass = 0;
+        goto out;
+    }
+    class_device_t *stale = dev_ok.class_dev;
+    class_device_get(stale);
 
     /* 6. Unregister the driver; remove must be called on bound devices. */
     if (driver_unregister(&g_lifecycle_driver) != 0) {
@@ -206,6 +225,13 @@ int driver_lifecycle_test_run(void)
         pass = 0;
         goto out;
     }
+    if (dev_ok.class_dev != NULL || class_device_call_begin(stale) != -ENODEV) {
+        kerr("[DRIVER-LIFECYCLE] unbind left class publication online\n");
+        class_device_put(stale);
+        pass = 0;
+        goto out;
+    }
+    class_device_put(stale);
 
     /* 7. Re-registering synchronously probes all existing unbound devices. */
     if (driver_register(&g_lifecycle_driver) != 0) {
