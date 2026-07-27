@@ -615,7 +615,7 @@ int vfs_rename_flags(const char *old, const char *newpath, unsigned int flags) {
     if (pr < 0)
         return pr;
 
-    if (strcmp(root, "/") != 0) {
+    if (strcmp(root, "/") != 0 && !path_is_beneath(root, old_resolved)) {
         char rooted[MAX_PATH_LEN];
         if (strcmp(old_resolved, "/") == 0)
             snprintf(rooted, sizeof(rooted), "%s", root);
@@ -624,7 +624,12 @@ int vfs_rename_flags(const char *old, const char *newpath, unsigned int flags) {
         vfs_path_normalize_absolute_with_root(rooted, root);
         strncpy(old_resolved, rooted, sizeof(old_resolved) - 1);
         old_resolved[sizeof(old_resolved) - 1] = '\0';
-
+    } else {
+        if (vfs_path_normalize_absolute_with_root(old_resolved, root) < 0)
+            return -ENAMETOOLONG;
+    }
+    if (strcmp(root, "/") != 0 && !path_is_beneath(root, new_resolved)) {
+        char rooted[MAX_PATH_LEN];
         if (strcmp(new_resolved, "/") == 0)
             snprintf(rooted, sizeof(rooted), "%s", root);
         else
@@ -633,9 +638,7 @@ int vfs_rename_flags(const char *old, const char *newpath, unsigned int flags) {
         strncpy(new_resolved, rooted, sizeof(new_resolved) - 1);
         new_resolved[sizeof(new_resolved) - 1] = '\0';
     } else {
-        if (vfs_path_normalize_absolute(old_resolved) < 0)
-            return -ENAMETOOLONG;
-        if (vfs_path_normalize_absolute(new_resolved) < 0)
+        if (vfs_path_normalize_absolute_with_root(new_resolved, root) < 0)
             return -ENAMETOOLONG;
     }
 
@@ -905,6 +908,39 @@ int vfs_fstat(int fd, kstat_t *st) {
     }
     vfs_put_file_ref(fd, vf);
     return r;
+}
+
+int vfs_statfs(vnode_t *vn, kstatfs_t *st) {
+    if (!vn || !st)
+        return -EINVAL;
+
+    memset(st, 0, sizeof(*st));
+    st->f_bsize = PAGE_SIZE;
+    st->f_frsize = PAGE_SIZE;
+    st->f_namelen = MAX_NAME_LEN;
+    if (vn->mnt) {
+        st->f_flags = (uint64_t)(unsigned int)vn->mnt->flags;
+        switch (vn->mnt->type) {
+        case FS_TYPE_FAT32:  st->f_type = 0x4d44; break;
+        case FS_TYPE_EXT4:   st->f_type = EXT4_DISK_MAGIC; break;
+        case FS_TYPE_PROCFS: st->f_type = 0x9fa0; break;
+        case FS_TYPE_DEVFS:  st->f_type = 0x01021994; break;
+        case FS_TYPE_CGROUP: st->f_type = 0x63677270; break;
+        case FS_TYPE_SYSFS:  st->f_type = 0x62656572; break;
+        case FS_TYPE_RAMFS:
+        default:             st->f_type = 0x858458f6; break;
+        }
+    } else {
+        st->f_type = 0x858458f6;
+    }
+
+    /*
+     * Synthetic filesystems deliberately report zero capacity.  Backed
+     * filesystems override this through their vnode operation.
+     */
+    if (vn->ops && vn->ops->statfs)
+        return vn->ops->statfs(vn, st);
+    return 0;
 }
 
 int vfs_fstatat(int dirfd, const char *path, kstat_t *st, int flags) {

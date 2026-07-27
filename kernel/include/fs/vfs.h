@@ -82,6 +82,21 @@ typedef struct kstat {
     uint64_t st_ctime_nsec;
 } kstat_t;
 
+/* Filesystem-wide statistics, independent of userspace ABI layout. */
+typedef struct kstatfs {
+    uint64_t f_type;
+    uint64_t f_bsize;
+    uint64_t f_blocks;
+    uint64_t f_bfree;
+    uint64_t f_bavail;
+    uint64_t f_files;
+    uint64_t f_ffree;
+    uint64_t f_fsid;
+    uint64_t f_namelen;
+    uint64_t f_frsize;
+    uint64_t f_flags;
+} kstatfs_t;
+
 /* ---- Mode bits ---- */
 #define S_IFMT   0170000
 #define S_IFREG  0100000
@@ -117,6 +132,7 @@ typedef struct vnode_ops {
     int     (*symlink)(struct vnode *dir, const char *name, const char *target);
     int     (*readlink)(struct vnode *vn, char *buf, size_t sz);
     int     (*stat)(struct vnode *vn, kstat_t *st);
+    int     (*statfs)(struct vnode *vn, kstatfs_t *st);
     int     (*truncate)(struct vnode *vn, size_t size);
     int     (*readpage)(struct vnode *vn, uint64_t index,
                         void *data, size_t len);
@@ -294,6 +310,7 @@ int      vfs_stat(const char *path, kstat_t *st);
 int      vfs_statx(const char *path, kstat_t *st, unsigned int mask, int sync_hint);
 int      vfs_fstatx(int dirfd, const char *path, kstat_t *st, int flags, unsigned int mask);
 int      vfs_fstat(int fd, kstat_t *st);
+int      vfs_statfs(vnode_t *vn, kstatfs_t *st);
 int      vfs_fstatat(int dirfd, const char *path, kstat_t *st, int flags);
 int      vfs_faccessat(int dirfd, const char *path, int mode);
 int      vfs_faccessat2(int dirfd, const char *path, int mode, int flags);

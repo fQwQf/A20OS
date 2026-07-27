@@ -1298,6 +1298,38 @@ static int ext4_vn_truncate(vnode_t *vn, size_t size)
     return r;
 }
 
+static int ext4_vn_statfs(vnode_t *vn, kstatfs_t *st)
+{
+    if (!vn || !vn->fs_data || !st)
+        return -EINVAL;
+    ext4_sb_info_t *sb = ((ext4_vnode_priv_t *)vn->fs_data)->sb;
+    uint64_t free_blocks = 0;
+    uint64_t free_inodes = 0;
+
+    mutex_lock(&sb->alloc_lock);
+    for (uint32_t g = 0; g < sb->groups_count; g++) {
+        free_blocks +=
+            (uint64_t)sb->group_descs[g].bg_free_blocks_count_lo |
+            ((uint64_t)sb->group_descs[g].bg_free_blocks_count_hi << 16);
+        free_inodes +=
+            (uint64_t)sb->group_descs[g].bg_free_inodes_count_lo |
+            ((uint64_t)sb->group_descs[g].bg_free_inodes_count_hi << 16);
+    }
+    mutex_unlock(&sb->alloc_lock);
+
+    st->f_type = EXT4_DISK_MAGIC;
+    st->f_bsize = sb->block_size;
+    st->f_frsize = sb->block_size;
+    st->f_blocks = sb->blocks_count;
+    st->f_bfree = free_blocks;
+    st->f_bavail = free_blocks > sb->reserved_blocks_count
+                       ? free_blocks - sb->reserved_blocks_count : 0;
+    st->f_files = sb->inodes_count;
+    st->f_ffree = free_inodes;
+    st->f_namelen = 255;
+    return 0;
+}
+
 static vnode_ops_t g_ext4_vnode_ops = {
     .lookup   = ext4_lookup,
     .create   = ext4_vn_create,
@@ -1308,6 +1340,7 @@ static vnode_ops_t g_ext4_vnode_ops = {
     .symlink  = ext4_vn_symlink,
     .readlink = ext4_readlink,
     .stat     = ext4_stat,
+    .statfs   = ext4_vn_statfs,
     .truncate = ext4_vn_truncate,
     .readpage = ext4_vn_readpage,
     .writepage = ext4_vn_writepage,
@@ -1682,10 +1715,16 @@ vnode_t *ext4_mount(bcache_t *bc) {
 
     esi->inodes_count = sb.s_inodes_count;
 
-    uint32_t blocks_count = sb.s_blocks_count_lo;
-    uint32_t groups = (blocks_count - sb.s_first_data_block + sb.s_blocks_per_group - 1)
-                      / sb.s_blocks_per_group;
+    uint64_t blocks_count = (uint64_t)sb.s_blocks_count_lo |
+                            ((uint64_t)sb.s_blocks_count_hi << 32);
+    uint64_t reserved_blocks = (uint64_t)sb.s_r_blocks_count_lo |
+                               ((uint64_t)sb.s_r_blocks_count_hi << 32);
+    uint32_t groups =
+        (uint32_t)((blocks_count - sb.s_first_data_block +
+                    sb.s_blocks_per_group - 1) / sb.s_blocks_per_group);
 
+    esi->blocks_count = blocks_count;
+    esi->reserved_blocks_count = reserved_blocks;
     esi->block_size   = block_size;
     esi->blocks_per_group = sb.s_blocks_per_group;
     esi->inodes_per_group = sb.s_inodes_per_group;
