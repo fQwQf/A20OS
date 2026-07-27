@@ -106,11 +106,16 @@ int proc_wait_timer_register_locked(task_t *t, uint64_t deadline,
 void proc_wait_timer_cancel_locked(task_t *t, uint64_t wait_seq);
 void proc_runq_enqueue_locked(task_t *t);
 void proc_runq_remove_locked(task_t *t);
-task_t *proc_runq_pick_locked(void);
+task_t *proc_runq_pick_local(void);
 void sched_reap_zombies(void);
 
 typedef struct proc_sched_diag {
     unsigned long runqueue_migrations;
+    unsigned long runqueue_local_picks;
+    unsigned long runqueue_empty_picks;
+    unsigned long runqueue_lock_acquires;
+    unsigned long runqueue_lock_contentions;
+    unsigned long runqueue_parallel_pick_peak;
     unsigned long resched_requests;
     unsigned long resched_priority_requests;
     unsigned long resched_ipi_sent;

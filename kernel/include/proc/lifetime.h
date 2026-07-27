@@ -28,6 +28,11 @@ typedef struct proc_lifetime_stats {
     unsigned long timeout_stale_expirations;
     unsigned long timeout_heap_violations;
     unsigned long runqueue_migrations;
+    unsigned long runqueue_local_picks;
+    unsigned long runqueue_empty_picks;
+    unsigned long runqueue_lock_acquires;
+    unsigned long runqueue_lock_contentions;
+    unsigned long runqueue_parallel_pick_peak;
     unsigned long resched_requests;
     unsigned long resched_priority_requests;
     unsigned long resched_ipi_sent;
