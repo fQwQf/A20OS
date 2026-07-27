@@ -79,6 +79,12 @@ bss_clear:
     addi.d      $t0, $t0, 8
     b           bss_clear
 bss_done:
+    /* QEMU's LoongArch virt machine publishes its FDT in low RAM at 1 MiB.
+     * Preserve the pointer after clearing BSS so early platform code can
+     * discover every RAM bank instead of relying on the 512 MiB fallback. */
+    li.d        $t0, 0x100000
+    la.global   $t1, __boot_dtb_ptr
+    st.d        $t0, $t1, 0
 
     /* Zero out boot_pgdir (512 entries) */
     la.global   $t0, boot_pgdir
@@ -188,3 +194,7 @@ boot_stack_top:
     .align 4
 boot_pgdir:
     .space 512 * 8
+
+    .globl __boot_dtb_ptr
+__boot_dtb_ptr:
+    .dword 0
