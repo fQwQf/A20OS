@@ -491,6 +491,13 @@ static int handle_file_fault(task_t *t, uint64_t page_va, int file_fd,
     int result = -1;
     pte_t *pte = pt_lookup_leaf(mm->pgdir, page_va, NULL, NULL, NULL);
     if (mapping_valid && pte && (*pte & PTE_V)) {
+        /*
+         * Another thread completed this file fault while we performed I/O
+         * without mm->lock. The faulting CPU may still cache the old
+         * non-present translation, so redundant success needs the same
+         * synchronization as a newly installed PTE.
+         */
+        arch_tlb_flush_page(page_va);
         result = 0;
     } else if (mapping_valid &&
                pt_map(mm->pgdir, page_va, pfn_to_phys(candidate),
