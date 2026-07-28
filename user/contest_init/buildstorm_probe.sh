@@ -188,6 +188,21 @@ probe_dynamic_pages() {
     LD_LIBRARY_PATH=/a20-probe /a20-probe/exec-pages-probe
 }
 
+probe_stage3_dynamic_pages_100() {
+    typeset -i round=1
+    while (( round <= 100 )); do
+        LD_LIBRARY_PATH=/a20-probe /a20-probe/exec-pages-probe \
+            >/tmp/a20-dynamic-pages || return
+        if (( round % 10 == 0 )); then
+            print "BUILDSTORM_STAGE3_DYNAMIC progress=$round/100"
+        fi
+        (( round++ ))
+    done
+    cat /tmp/a20-dynamic-pages
+    rm -f /tmp/a20-dynamic-pages
+    print "BUILDSTORM_STAGE3_DYNAMIC_100 ok"
+}
+
 probe_rustc_hello() {
     typeset base=/tmp/a20-probe-rustc
     rm -rf "$base"
@@ -230,6 +245,7 @@ run_named_case() {
     stage2-rustup-rustc-100) probe_stage2_proxy_rustc_100 ;;
     stage2-rustup-cargo-100) probe_stage2_proxy_cargo_100 ;;
     dynamic-pie-dso-pages) probe_dynamic_pages ;;
+    stage3-dynamic-pie-dso-100) probe_stage3_dynamic_pages_100 ;;
     direct-rustc-hello) probe_rustc_hello ;;
     cargo-minibuild-j1) probe_cargo_minibuild_j1 ;;
     cargo-minibuild-default) probe_cargo_minibuild_default ;;
@@ -246,7 +262,7 @@ if [[ ${1:-} == --case ]]; then
     exit $?
 fi
 
-print "#### A20OS BUILDSTORM STAGE2 PROBE START arch=$arch ####"
+print "#### A20OS BUILDSTORM STAGE3 PROBE START arch=$arch ####"
 run_case static-elf
 run_case cwd-root
 run_case cwd-glibc
@@ -261,11 +277,12 @@ run_case stage2-directory-100
 run_case stage2-rustup-rustc-100
 run_case stage2-rustup-cargo-100
 run_case dynamic-pie-dso-pages
+run_case stage3-dynamic-pie-dso-100
 run_case direct-rustc-hello
 run_case cargo-minibuild-j1
 run_case cargo-minibuild-default
 print "[BUILDSTORM-PROBE] summary total=$total failures=$failures"
-print "#### A20OS BUILDSTORM STAGE2 PROBE END arch=$arch ####"
+print "#### A20OS BUILDSTORM STAGE3 PROBE END arch=$arch ####"
 
 # Probe failures are diagnostic outcomes, not a runner failure.  Every case
 # emits its own return code, and the host archives the complete serial stream.
