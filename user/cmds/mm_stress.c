@@ -635,6 +635,14 @@ static int shared_file_read_after_mmap_write(void)
     int ok = (total == (ssize_t)sizeof(readback) &&
               memcmp(mem, readback, sizeof(readback)) == 0);
     if (!ok) {
+        size_t mismatch = 0;
+        while (mismatch < sizeof(readback) &&
+               mem[mismatch] == readback[mismatch])
+            mismatch++;
+        printf("MM_STRESS: m2r mismatch total=%ld index=%lu mapped=0x%x read=0x%x\n",
+               (long)total, (unsigned long)mismatch,
+               mismatch < sizeof(readback) ? (unsigned char)mem[mismatch] : 0,
+               mismatch < sizeof(readback) ? (unsigned char)readback[mismatch] : 0);
         munmap(mem, sizeof(initial));
         close(fd);
         unlink(path);
