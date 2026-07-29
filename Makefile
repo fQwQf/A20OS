@@ -3257,3 +3257,9 @@ final-stage4-la-parallel-build-1c:
 
 final-stage4-la-parallel-build-8c:
 	$(call RUN_RELEASE_EVAL,loongarch64,parallel-build-probe,8,stage4-cargo-minibuild)
+
+final-stage5-rv-parallel-build:
+	$(call RUN_RELEASE_EVAL,riscv64,parallel-build-probe,8,stage5-official-minibuild)
+
+final-stage5-la-parallel-build:
+	$(call RUN_RELEASE_EVAL,loongarch64,parallel-build-probe,8,stage5-official-minibuild)
