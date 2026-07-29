@@ -54,7 +54,7 @@ run_case() {
     typeset -i case_timeout=180
 
     case "$name" in
-    stage2-*-100|stage3-*-100|stage4-*) case_timeout=900 ;;
+    stage2-*-100|stage3-*-100|stage4-*|stage5-*) case_timeout=900 ;;
     esac
 
     (( total++ ))
@@ -245,6 +245,23 @@ probe_stage4_cargo_minibuild() {
     print "BUILDSTORM_STAGE4_CARGO_MINIBUILD ok"
 }
 
+probe_stage5_official_minibuild() {
+    typeset base=/tmp/minibuild
+    rm -rf "$base"
+
+    unset RUSTC LD_LIBRARY_PATH CARGO_BUILD_JOBS
+    /root/.cargo/bin/rustc --version || return
+    /root/.cargo/bin/cargo --version || return
+    print "BUILDSTORM_TOOLCHAIN ok"
+
+    /root/.cargo/bin/cargo new --vcs none "$base" || return
+    (cd "$base" && /root/.cargo/bin/cargo build) || return
+    "$base/target/debug/minibuild" || return
+    print "BUILDSTORM_MINIBUILD ok"
+
+    rm -rf "$base" || return
+}
+
 run_named_case() {
     case "$1" in
     static-elf) probe_static_elf ;;
@@ -266,6 +283,7 @@ run_named_case() {
     cargo-minibuild-j1) probe_cargo_minibuild_j1 ;;
     cargo-minibuild-default) probe_cargo_minibuild_default ;;
     stage4-cargo-minibuild) probe_stage4_cargo_minibuild ;;
+    stage5-official-minibuild) probe_stage5_official_minibuild ;;
     *)
         print "[BUILDSTORM-PROBE][FATAL] unknown case: $1"
         return 2
@@ -280,10 +298,10 @@ if [[ ${1:-} == --case ]]; then
 fi
 if [[ ${1:-} == --only ]]; then
     [[ -n ${2:-} ]] || exit 2
-    print "#### A20OS BUILDSTORM STAGE4 PROBE START arch=$arch ####"
+    print "#### A20OS BUILDSTORM SELECTED PROBE START arch=$arch ####"
     run_case "$2"
     print "[BUILDSTORM-PROBE] summary total=$total failures=$failures"
-    print "#### A20OS BUILDSTORM STAGE4 PROBE END arch=$arch ####"
+    print "#### A20OS BUILDSTORM SELECTED PROBE END arch=$arch ####"
     exit 0
 fi
 

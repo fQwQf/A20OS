@@ -6,6 +6,8 @@
 #include "core/lock.h"
 #include "proc/proc.h"
 
+typedef struct vfile vfile_t;
+
 /*
  * files_struct lifetime invariants:
  * - task_t.files points to one files_struct. fork-like sharing increments
@@ -36,6 +38,8 @@ void fdtable_close_on_exec(task_t *task);
 
 int  fdtable_get(task_t *task, int fd);
 int  fdtable_get_current(int fd);
+vfile_t *fdtable_get_file_ref(task_t *task, int fd, int *out_gfd);
+vfile_t *fdtable_get_current_file_ref(int fd, int *out_gfd);
 int  fdtable_install(task_t *task, int gfd, int flags);
 int  fdtable_install_current(int gfd, int flags);
 int  fdtable_close(task_t *task, int fd);

@@ -79,6 +79,8 @@ cd "$repo_root"
 
 image_dir=${FINAL_EVAL_IMAGE_DIR:-contest/2026OSImage-Pub}
 state_dir=${FINAL_EVAL_STATE_DIR:-.eval-state/2026}
+image_cache_dir=${FINAL_EVAL_IMAGE_CACHE_DIR:-$state_dir/images}
+work_dir=${FINAL_EVAL_WORK_DIR:-$state_dir/runs}
 timeout_s=${FINAL_EVAL_TIMEOUT:-$default_timeout}
 verify_base=${FINAL_EVAL_VERIFY_BASE:-1}
 conda_env=a20os
@@ -117,12 +119,13 @@ if ! conda run -n "$conda_env" python --version >/dev/null; then
 fi
 
 mkdir -p \
-    "$state_dir/images" \
+    "$image_cache_dir" \
+    "$work_dir" \
     "$state_dir/logs" \
     "$state_dir/scores" \
     "$state_dir/metadata" \
     "$state_dir/probes" \
-    "$state_dir/runs"
+    "$state_dir/locks"
 
 commit=$(git rev-parse --verify HEAD)
 short_commit=$(git rev-parse --short=12 HEAD)
@@ -139,7 +142,7 @@ else
     run_id="${arch_tag}-${group}-${short_commit}-${timestamp}-${run_nonce}-$$"
     artifact_stem="${arch_tag}-${group}-${commit}-${timestamp}-${run_nonce}-$$"
 fi
-run_dir="$state_dir/runs/$run_id"
+run_dir="$work_dir/$run_id"
 mkdir "$run_dir"
 
 serial_log="$state_dir/logs/${artifact_stem}.log"
@@ -152,7 +155,7 @@ image_gz_sha=$(sha256sum "$image_gz" | awk '{print $1}')
 # Key the base cache by the published archive checksum.  A future archive
 # update therefore gets a new immutable backing file and cannot silently
 # change the backing of an older run's overlay.
-base_image="$state_dir/images/${arch_tag}-${image_gz_sha}-official-base.img"
+base_image="$image_cache_dir/${arch_tag}-${image_gz_sha}-official-base.img"
 base_sha_file="${base_image}.sha256"
 base_lock="${base_image}.lock"
 
@@ -194,6 +197,12 @@ build_args=(
     PYTHON="conda run -n $conda_env python"
     dev-build
 )
+# Builds with different NR_CPUS values still share architecture user
+# artifacts.  Serialize preparation per architecture, then release the lock
+# before QEMU so fully prepared guests can execute concurrently.
+build_lock="$state_dir/locks/final-eval-build-${arch_tag}.lock"
+exec 8>"$build_lock"
+flock 8
 echo "[final-eval] building $arch kernel and FAT32 user image"
 make "${build_args[@]}"
 
@@ -249,6 +258,7 @@ if [[ "$group" == buildstorm-probe ]]; then
         fi
     done
 fi
+flock -u 8
 
 overlay="$run_dir/official-rootfs.qcow2"
 base_image_abs=$(readlink -f "$base_image")
@@ -322,6 +332,7 @@ fi
     echo "official_image_base=$base_image"
     echo "official_image_sha256=$base_sha"
     echo "official_image_overlay=$overlay"
+    echo "runtime_work_dir=$run_dir"
     echo "qemu_memory=8G"
     echo "qemu_smp=$guest_cpus"
     echo "qemu_accel=tcg,thread=multi"
