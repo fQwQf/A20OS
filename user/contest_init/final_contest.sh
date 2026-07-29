@@ -41,6 +41,7 @@ run_final_group() {
 
 run_buildstorm_probe() {
     typeset chroot_bin=
+    typeset probe_case=
 
     if [[ ! -f /bin/buildstorm_probe.sh ]]; then
         print "[FINAL-EVAL][ERROR] missing /bin/buildstorm_probe.sh"
@@ -67,12 +68,23 @@ run_buildstorm_probe() {
     cp /bin/a20-probe/cwd-probe /test/a20-probe/cwd-probe || return
     cp /bin/a20-probe/exec-pages-probe /test/a20-probe/exec-pages-probe || return
     cp /bin/a20-probe/liba20probe.so /test/a20-probe/liba20probe.so || return
+    cp /bin/arch_context_stress /test/a20-context-stress || return
     chmod 755 /test/a20-eval-shell /test/a20-buildstorm-probe.sh \
-        /test/a20-probe/cwd-probe /test/a20-probe/exec-pages-probe
+        /test/a20-probe/cwd-probe /test/a20-probe/exec-pages-probe \
+        /test/a20-context-stress
     chmod 644 /test/a20-probe/liba20probe.so
 
     print "#### A20OS 2026 FINAL EVAL START buildstorm-probe ####"
-    "$chroot_bin" /test /a20-eval-shell /a20-buildstorm-probe.sh
+    if [[ -f /bin/etc/final-eval-probe-case ]]; then
+        IFS= read -r probe_case </bin/etc/final-eval-probe-case
+    fi
+    if [[ -n $probe_case ]]; then
+        print "[FINAL-EVAL] selected buildstorm probe case=$probe_case"
+        "$chroot_bin" /test /a20-eval-shell \
+            /a20-buildstorm-probe.sh --only "$probe_case"
+    else
+        "$chroot_bin" /test /a20-eval-shell /a20-buildstorm-probe.sh
+    fi
     typeset -i rc=$?
     print "[FINAL-EVAL] buildstorm-probe runner exit=$rc"
     print "#### A20OS 2026 FINAL EVAL END buildstorm-probe ####"
