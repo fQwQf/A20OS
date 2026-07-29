@@ -159,6 +159,7 @@ typedef struct vfile_ops {
     long    (*lseek)(struct vfile *vf, long offset, int whence);
     int     (*readdir)(struct vfile *vf, void *dirp, size_t count);
     int     (*ioctl)(struct vfile *vf, unsigned long req, void *arg);
+    int     (*poll)(struct vfile *vf, short events);
     int     (*close)(struct vfile *vf);
 } vfile_ops_t;
 
