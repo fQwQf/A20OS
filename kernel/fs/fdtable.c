@@ -307,6 +307,27 @@ int fdtable_get_current(int fd)
     return fdtable_get(proc_current(), fd);
 }
 
+vfile_t *fdtable_get_file_ref(task_t *task, int fd, int *out_gfd)
+{
+    if (out_gfd)
+        *out_gfd = -1;
+    if (!task || !task->files || fd < 0 || fd >= MAX_FILES)
+        return NULL;
+    files_struct_t *files = (files_struct_t *)task->files;
+    uint64_t flags = spin_lock_irqsave(&files->lock);
+    int gfd = files->fd[fd];
+    vfile_t *vf = gfd >= 0 ? vfs_get_file_ref(gfd) : NULL;
+    spin_unlock_irqrestore(&files->lock, flags);
+    if (vf && out_gfd)
+        *out_gfd = gfd;
+    return vf;
+}
+
+vfile_t *fdtable_get_current_file_ref(int fd, int *out_gfd)
+{
+    return fdtable_get_file_ref(proc_current(), fd, out_gfd);
+}
+
 int fdtable_install(task_t *task, int gfd, int flags)
 {
     if (!task || gfd < 0)
