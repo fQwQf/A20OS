@@ -22,6 +22,13 @@ typedef struct proc_lifetime_stats {
     unsigned long wait_entries;
     unsigned long wake_entries;
     unsigned long timeout_entries;
+    unsigned long open_fds;
+    unsigned long vfile_objects;
+    unsigned long vnode_objects;
+    unsigned long free_frames;
+    unsigned long page_cache_valid;
+    unsigned long page_cache_dirty;
+    unsigned long page_cache_pinned;
     unsigned long timeout_capacity;
     unsigned long timeout_full_failures;
     unsigned long timeout_duplicate_rejections;

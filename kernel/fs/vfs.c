@@ -465,20 +465,26 @@ int vfs_openat2(int dirfd, const char *path, int flags, int mode, uint64_t resol
     return gfd;
 }
 
+void vfs_finalize_closed_file(int fd, vfile_t *vf)
+{
+    if (!vf)
+        return;
+    vnode_t *vn = vf->vnode;
+    vfs_release_open_file_locks(vf, fd);
+    if (vn && (vn->mode & S_IFMT) == S_IFREG)
+        page_cache_writeback_vnode(vn, NULL, NULL);
+    if (vf->ops && vf->ops->close)
+        vf->ops->close(vf);
+    vfile_free(vf);
+    vnode_put(vn);
+    ktrace_vfs("[VFS] close: gfd=%d done\n", fd);
+}
+
 int vfs_close(int fd) {
     vfile_t *vf = NULL;
     int r = file_close_prepare(fd, &vf);
     if (r < 0) return r;
-    if (vf) {
-        vnode_t *vn = vf->vnode;
-        vfs_release_open_file_locks(vf, fd);
-        if (vn && (vn->mode & S_IFMT) == S_IFREG)
-            page_cache_writeback_vnode(vn, NULL, NULL);
-        if (vf->ops && vf->ops->close) vf->ops->close(vf);
-        vfile_free(vf);
-        vnode_put(vn);
-        ktrace_vfs("[VFS] close: gfd=%d done\n", fd);
-    }
+    vfs_finalize_closed_file(fd, vf);
     return 0;
 }
 
