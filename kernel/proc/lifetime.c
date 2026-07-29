@@ -4,6 +4,9 @@
 #include "proc/proc_internal.h"
 #include "core/string.h"
 #include "core/stdio.h"
+#include "fs/file.h"
+#include "fs/page_cache.h"
+#include "mm/mm.h"
 
 static unsigned long g_task_objects;
 static unsigned long g_task_refs;
@@ -125,6 +128,15 @@ void proc_lifetime_snapshot(proc_lifetime_stats_t *stats)
     stats->ref_underflows = counter_read(&g_ref_underflows);
     stats->duplicate_destroy = counter_read(&g_duplicate_destroy);
     stats->bad_final_put = counter_read(&g_bad_final_put);
+    stats->open_fds = file_open_fd_count();
+    stats->vfile_objects = vfile_live_count();
+    stats->vnode_objects = vnode_live_count();
+    stats->free_frames = frame_free_count();
+    page_cache_stats_t page_cache;
+    page_cache_get_stats(&page_cache);
+    stats->page_cache_valid = page_cache.valid;
+    stats->page_cache_dirty = page_cache.dirty;
+    stats->page_cache_pinned = page_cache.pinned;
 
     proc_sched_diag_t sched_diag;
     proc_sched_diag_snapshot(&sched_diag);
@@ -231,6 +243,13 @@ size_t proc_lifetime_format(char *buf, size_t bufsz)
         "wait_entries: %lu\n"
         "wake_entries: %lu\n"
         "timeout_entries: %lu\n"
+        "open_fds: %lu\n"
+        "vfile_objects: %lu\n"
+        "vnode_objects: %lu\n"
+        "free_frames: %lu\n"
+        "page_cache_valid: %lu\n"
+        "page_cache_dirty: %lu\n"
+        "page_cache_pinned: %lu\n"
         "timeout_capacity: %lu\n"
         "timeout_full_failures: %lu\n"
         "timeout_duplicate_rejections: %lu\n"
@@ -259,7 +278,9 @@ size_t proc_lifetime_format(char *buf, size_t bufsz)
         s.task_objects, s.task_refs, s.listed_tasks, s.listed_refs,
         s.pid_entries, s.runqueue_entries, s.dispatching_tasks,
         s.cpu_owned_tasks, s.wait_entries, s.wake_entries,
-        s.timeout_entries, s.timeout_capacity, s.timeout_full_failures,
+        s.timeout_entries, s.open_fds, s.vfile_objects, s.vnode_objects,
+        s.free_frames, s.page_cache_valid, s.page_cache_dirty,
+        s.page_cache_pinned, s.timeout_capacity, s.timeout_full_failures,
         s.timeout_duplicate_rejections, s.timeout_stale_expirations,
         s.timeout_heap_violations, s.runqueue_migrations,
         s.runqueue_local_picks, s.runqueue_empty_picks,
