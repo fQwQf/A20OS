@@ -9,7 +9,7 @@
  *   [35]     = kernel_sp  (kernel stack pointer for return-to-user)
  *   [36..99] = vr[32][2]  (128-bit LSX registers; low halves alias FP regs)
  *   [100]    = fcsr0      (floating-point control/status)
- *   [101]    = padding
+ *   [101]    = packed FCC0..FCC7
  *
  * CSR usage for user↔kernel transitions:
  *   SAVE0 (0x30) = kernel stack pointer
@@ -34,6 +34,7 @@
 #define KSP_OFF     (35 * 8)
 #define VR_OFF(n)   ((36 + ((n) * 2)) * 8)
 #define FCSR_OFF    (100 * 8)
+#define FCC_OFF     (101 * 8)
 
     .section .text
     .align 4
@@ -145,6 +146,29 @@ __trap_from_kernel:
     vst     $vr31, $sp, VR_OFF(31)
     movfcsr2gr $t0, $fcsr0
     st.d    $t0, $sp, FCSR_OFF
+    movcf2gr $t0, $fcc0
+    movcf2gr $t1, $fcc1
+    slli.d  $t1, $t1, 1
+    or      $t0, $t0, $t1
+    movcf2gr $t1, $fcc2
+    slli.d  $t1, $t1, 2
+    or      $t0, $t0, $t1
+    movcf2gr $t1, $fcc3
+    slli.d  $t1, $t1, 3
+    or      $t0, $t0, $t1
+    movcf2gr $t1, $fcc4
+    slli.d  $t1, $t1, 4
+    or      $t0, $t0, $t1
+    movcf2gr $t1, $fcc5
+    slli.d  $t1, $t1, 5
+    or      $t0, $t0, $t1
+    movcf2gr $t1, $fcc6
+    slli.d  $t1, $t1, 6
+    or      $t0, $t0, $t1
+    movcf2gr $t1, $fcc7
+    slli.d  $t1, $t1, 7
+    or      $t0, $t0, $t1
+    st.d    $t0, $sp, FCC_OFF
 
     csrrd   $t0, 0x6
     st.d    $t0, $sp, ERA_OFF
@@ -265,6 +289,29 @@ __trap_from_user:
     vst     $vr31, $sp, VR_OFF(31)
     movfcsr2gr $t0, $fcsr0
     st.d    $t0, $sp, FCSR_OFF
+    movcf2gr $t0, $fcc0
+    movcf2gr $t1, $fcc1
+    slli.d  $t1, $t1, 1
+    or      $t0, $t0, $t1
+    movcf2gr $t1, $fcc2
+    slli.d  $t1, $t1, 2
+    or      $t0, $t0, $t1
+    movcf2gr $t1, $fcc3
+    slli.d  $t1, $t1, 3
+    or      $t0, $t0, $t1
+    movcf2gr $t1, $fcc4
+    slli.d  $t1, $t1, 4
+    or      $t0, $t0, $t1
+    movcf2gr $t1, $fcc5
+    slli.d  $t1, $t1, 5
+    or      $t0, $t0, $t1
+    movcf2gr $t1, $fcc6
+    slli.d  $t1, $t1, 6
+    or      $t0, $t0, $t1
+    movcf2gr $t1, $fcc7
+    slli.d  $t1, $t1, 7
+    or      $t0, $t0, $t1
+    st.d    $t0, $sp, FCC_OFF
 
     csrrd   $t0, 0x6
     st.d    $t0, $sp, ERA_OFF
@@ -353,6 +400,22 @@ user_trap_return:
     vld     $vr31, $sp, VR_OFF(31)
     ld.d    $t0, $sp, FCSR_OFF
     movgr2fcsr $fcsr0, $t0
+    ld.d    $t0, $sp, FCC_OFF
+    movgr2cf $fcc0, $t0
+    srli.d  $t1, $t0, 1
+    movgr2cf $fcc1, $t1
+    srli.d  $t1, $t0, 2
+    movgr2cf $fcc2, $t1
+    srli.d  $t1, $t0, 3
+    movgr2cf $fcc3, $t1
+    srli.d  $t1, $t0, 4
+    movgr2cf $fcc4, $t1
+    srli.d  $t1, $t0, 5
+    movgr2cf $fcc5, $t1
+    srli.d  $t1, $t0, 6
+    movgr2cf $fcc6, $t1
+    srli.d  $t1, $t0, 7
+    movgr2cf $fcc7, $t1
 
     /* Restore GPRs (except $sp — that's done last) */
     ld.d    $ra,  $sp, REG_OFF(1)
