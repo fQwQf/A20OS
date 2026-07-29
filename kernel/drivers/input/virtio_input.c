@@ -13,8 +13,10 @@
 #include "core/klog.h"
 #include "core/lock.h"
 #include "core/sync.h"
+#include "core/timer.h"
 #include "abi/linux/errno.h"
 #include "abi/linux/input.h"
+#include "abi/linux/poll.h"
 #include "sys/usercopy.h"
 #include "drivers/block/virtio_blk.h"
 
@@ -160,8 +162,11 @@ static void virtio_input_handle_inst(virtio_input_inst_t *inst) {
         // Add to user ring
         uint32_t next_head = (inst->head + 1) % 256;
         if (next_head != inst->tail) {
-            inst->user_ring[inst->head].time_sec = 0;
-            inst->user_ring[inst->head].time_usec = 0;
+            uint64_t now = timer_get_ticks();
+            inst->user_ring[inst->head].time_sec =
+                now / TICKS_PER_SEC;
+            inst->user_ring[inst->head].time_usec =
+                (now % TICKS_PER_SEC) * 1000000ULL / TICKS_PER_SEC;
             inst->user_ring[inst->head].type = evt->type;
             inst->user_ring[inst->head].code = evt->code;
             inst->user_ring[inst->head].value = evt->value;
@@ -316,6 +321,37 @@ static int input_read(vfile_t *vf, char *buf, size_t count) {
     }
 }
 
+static int input_poll(vfile_t *vf, short events) {
+    (void)vf;
+    if (!(events & POLLIN))
+        return 0;
+
+    for (int index = 0;; index++) {
+        device_t *dev = device_find_by_class(DEV_CLASS_INPUT, index);
+        if (!dev)
+            break;
+        if (dev->drv && dev->drv->name &&
+            strcmp(dev->drv->name, "virtio-input") == 0)
+            continue;
+        const input_dev_ops_t *ops = dev->drv ? dev->drv->class_ops : NULL;
+        if (ops && ops->poll && ops->poll(dev, POLLIN) > 0)
+            return POLLIN;
+    }
+
+    virtio_input_poll();
+    for (int i = 0; i < MAX_VIRTIO_INPUT_DEVS; i++) {
+        virtio_input_inst_t *inst = &g_input_insts[i];
+        if (!inst->valid)
+            continue;
+        uint64_t flags = spin_lock_irqsave(&inst->lock);
+        int ready = inst->head != inst->tail;
+        spin_unlock_irqrestore(&inst->lock, flags);
+        if (ready)
+            return POLLIN;
+    }
+    return 0;
+}
+
 static void evdev_bit_set(uint8_t *bits, uint32_t bit) {
     bits[bit >> 3] |= (uint8_t)(1U << (bit & 7));
 }
@@ -458,6 +494,7 @@ static int input_ioctl(vfile_t *vf, unsigned long req, void *arg) {
 vfile_ops_t g_devfs_input_ops = {
     .read  = input_read,
     .ioctl = input_ioctl,
+    .poll  = input_poll,
 };
 
 static int virtio_input_init_transport(device_t *dev,
