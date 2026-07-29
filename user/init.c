@@ -176,8 +176,15 @@ int main(void)
         printf("[init] starting desktop\n");
         desktop_pid = fork();
         if (desktop_pid == 0) {
-            char *desktop_argv[] = {"desktop", NULL};
-            execve("/bin/desktop", desktop_argv, envp);
+            if (access("/bin/run-desktop.sh", F_OK) == 0) {
+                char *desktop_argv[] = {
+                    "mksh", "/bin/run-desktop.sh", NULL
+                };
+                execve("/bin/mksh", desktop_argv, envp);
+            } else {
+                char *desktop_argv[] = {"desktop", NULL};
+                execve("/bin/desktop", desktop_argv, envp);
+            }
             perror("execve desktop");
             _exit(127);
         }

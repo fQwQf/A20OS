@@ -557,13 +557,15 @@ extern int  loop_dev_write(int idx, const char *buf, size_t count, size_t offset
 extern int  loop_dev_ioctl(vfile_t *vf, unsigned long req, void *arg);
 extern int  loop_control_ioctl(unsigned long req, void *arg);
 extern int  pty_alloc_and_open(void);
-extern int  pty_master_read(int idx, char *buf, size_t count);
+extern int  pty_master_read(int idx, char *buf, size_t count, int nonblock);
 extern int  pty_master_write(int idx, const char *buf, size_t count);
 extern int  pty_master_ioctl(int idx, unsigned long req, void *arg);
+extern int  pty_master_poll(int idx, short events);
 extern void pty_master_close(int idx);
-extern int  pty_slave_read(int idx, char *buf, size_t count);
+extern int  pty_slave_read(int idx, char *buf, size_t count, int nonblock);
 extern int  pty_slave_write(int idx, const char *buf, size_t count);
 extern int  pty_slave_ioctl(int idx, unsigned long req, void *arg);
+extern int  pty_slave_poll(int idx, short events);
 extern void pty_slave_close(int idx);
 extern int  pty_slave_open(int idx);
 extern void pty_init(void);
@@ -604,7 +606,7 @@ static vfile_ops_t g_devfs_loop_ctrl_ops = { .read = devfs_loop_control_read, .i
 
 static int devfs_ptm_read(vfile_t *vf, char *buf, size_t count) {
     int idx = (int)(intptr_t)vf->priv;
-    return pty_master_read(idx, buf, count);
+    return pty_master_read(idx, buf, count, (vf->flags & O_NONBLOCK) != 0);
 }
 static int devfs_ptm_write(vfile_t *vf, const char *buf, size_t count) {
     int idx = (int)(intptr_t)vf->priv;
@@ -614,16 +616,19 @@ static int devfs_ptm_ioctl(vfile_t *vf, unsigned long req, void *arg) {
     int idx = (int)(intptr_t)vf->priv;
     return pty_master_ioctl(idx, req, arg);
 }
+static int devfs_ptm_poll(vfile_t *vf, short events) {
+    return pty_master_poll((int)(intptr_t)vf->priv, events);
+}
 static int devfs_ptm_close(vfile_t *vf) {
     int idx = (int)(intptr_t)vf->priv;
     pty_master_close(idx);
     return 0;
 }
-static vfile_ops_t g_devfs_ptm_ops = { .read = devfs_ptm_read, .write = devfs_ptm_write, .ioctl = devfs_ptm_ioctl, .close = devfs_ptm_close };
+static vfile_ops_t g_devfs_ptm_ops = { .read = devfs_ptm_read, .write = devfs_ptm_write, .ioctl = devfs_ptm_ioctl, .poll = devfs_ptm_poll, .close = devfs_ptm_close };
 
 static int devfs_pts_read(vfile_t *vf, char *buf, size_t count) {
     int idx = (int)(intptr_t)vf->priv;
-    return pty_slave_read(idx, buf, count);
+    return pty_slave_read(idx, buf, count, (vf->flags & O_NONBLOCK) != 0);
 }
 static int devfs_pts_write(vfile_t *vf, const char *buf, size_t count) {
     int idx = (int)(intptr_t)vf->priv;
@@ -633,12 +638,15 @@ static int devfs_pts_ioctl(vfile_t *vf, unsigned long req, void *arg) {
     int idx = (int)(intptr_t)vf->priv;
     return pty_slave_ioctl(idx, req, arg);
 }
+static int devfs_pts_poll(vfile_t *vf, short events) {
+    return pty_slave_poll((int)(intptr_t)vf->priv, events);
+}
 static int devfs_pts_close(vfile_t *vf) {
     int idx = (int)(intptr_t)vf->priv;
     pty_slave_close(idx);
     return 0;
 }
-static vfile_ops_t g_devfs_pts_ops = { .read = devfs_pts_read, .write = devfs_pts_write, .ioctl = devfs_pts_ioctl, .close = devfs_pts_close };
+static vfile_ops_t g_devfs_pts_ops = { .read = devfs_pts_read, .write = devfs_pts_write, .ioctl = devfs_pts_ioctl, .poll = devfs_pts_poll, .close = devfs_pts_close };
 
 static vfile_ops_t g_devfs_tty_ops    = { .read = devfs_stdin_read, .write = devfs_stdout_write, .ioctl = devfs_ioctl };
 static vfile_ops_t g_devfs_dir_ops    = { .read = devfs_null_read,  .readdir = devfs_dir_readdir, .ioctl = devfs_ioctl };

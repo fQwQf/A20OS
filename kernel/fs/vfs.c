@@ -1387,6 +1387,12 @@ int vfs_poll_events(int fd, short events) {
         return sr;
     }
 
+    if (vf->ops && vf->ops->poll) {
+        int revents = vf->ops->poll(vf, events);
+        vfs_put_file_ref(fd, vf);
+        return revents;
+    }
+
     short revents = 0;
     if (vfs_is_pipe_vfile(vf)) {
         revents = pipe_poll_events(vf, events);

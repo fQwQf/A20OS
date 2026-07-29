@@ -521,9 +521,10 @@ static int setup_tls(mm_struct_t *mm, pt_root_t *pgdir,
  *
  * Resolution order:
  *   1. Exact PT_INTERP path
- *   2. Sibling of executable (strip last path component, append interp)
- *   3. Sibling libc.so (musl convention: libc.so IS the dynamic linker)
- *   4. Arch-specific fallbacks (glibc paths, mount-relative paths)
+ *   2. Interpreter relative to the executable's mount root
+ *   3. Sibling of executable (strip last path component, append interp)
+ *   4. Sibling libc.so (musl convention: libc.so IS the dynamic linker)
+ *   5. Arch-specific fallbacks
  *
  * On success, @resolved is set to the path that worked.
  */
@@ -537,21 +538,30 @@ static int resolve_interp(const char *exec_path, const char *interp_path,
         return fd;
     }
 
-    /* 2. Sibling of executable */
+    /* 2. Mount-relative path.  A20OS commonly mounts a userspace image at
+     * /bin, so /bin/libexec/tool must resolve /lib/ld.so as /bin/lib/ld.so,
+     * just like /bin/tool does. */
+    if (exec_path && path_build_mount_relative(exec_path, interp_path,
+                                                resolved, resolved_size) == 0) {
+        fd = vfs_open(resolved, O_RDONLY, 0);
+        if (fd >= 0) return fd;
+    }
+
+    /* 3. Sibling of executable */
     if (exec_path && path_build_sibling(exec_path, interp_path,
                                         resolved, resolved_size) == 0) {
         fd = vfs_open(resolved, O_RDONLY, 0);
         if (fd >= 0) return fd;
     }
 
-    /* 3. Sibling libc.so (musl: libc.so doubles as ldso) */
+    /* 4. Sibling libc.so (musl: libc.so doubles as ldso) */
     if (exec_path && path_build_sibling(exec_path, "/lib/libc.so",
                                         resolved, resolved_size) == 0) {
         fd = vfs_open(resolved, O_RDONLY, 0);
         if (fd >= 0) return fd;
     }
 
-    /* 4. Arch-specific fallbacks */
+    /* 5. Arch-specific fallbacks */
     char alt[MAX_PATH_LEN];
     if (arch_resolve_interp_fallback(exec_path, interp_path,
                                      alt, sizeof(alt)) == 0) {

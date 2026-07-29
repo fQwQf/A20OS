@@ -10,8 +10,13 @@
 #define EV_ABS          0x03
 
 struct input_event {
+#ifdef CONFIG_64BIT
+    uint64_t time_sec;
+    uint64_t time_usec;
+#else
     uint32_t time_sec;
     uint32_t time_usec;
+#endif
     uint16_t type;
     uint16_t code;
     int32_t  value;

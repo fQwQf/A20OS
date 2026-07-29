@@ -89,6 +89,12 @@ typedef struct __attribute__((packed)) {
 } fat32_lfn_t;
 
 /* ---- In-memory FAT32 superblock info ---- */
+#define FAT32_VCACHE_MAX 512
+typedef struct fat32_vcache_ent {
+    vnode_t *vn;
+    uint64_t ino;
+} fat32_vcache_ent_t;
+
 typedef struct fat32_sb {
     uint32_t first_fat_sector;
     uint32_t sectors_per_fat;
@@ -100,6 +106,11 @@ typedef struct fat32_sb {
     uint32_t next_free_cluster;
     bcache_t *bc;
     mutex_t lock;
+    /* Strong-reference vnode cache: keeps one vnode per inode (cluster).
+     * Entries hold a vnode reference until unlink/rmdir/unmount removes
+     * them; unlinked inodes keep their data until the last fd closes. */
+    fat32_vcache_ent_t vcache[FAT32_VCACHE_MAX];
+    int vcache_count;
 } fat32_sb_t;
 
 /* ---- Per-file/dir handle ---- */

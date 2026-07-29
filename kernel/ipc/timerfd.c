@@ -1,5 +1,6 @@
 #include "ipc/timerfd.h"
 
+#include "abi/linux/poll.h"
 #include "core/consts.h"
 #include "core/lock.h"
 #include "core/sync.h"
@@ -96,8 +97,23 @@ static int timerfd_read(vfile_t *vf, char *buf, size_t count)
     return sizeof(expirations);
 }
 
+static int timerfd_poll(vfile_t *vf, short events)
+{
+    timerfd_t *tfd = vf ? vf->priv : NULL;
+    if (!tfd) return POLLNVAL;
+
+    int revents = 0;
+    spin_lock(&tfd->lock);
+    if ((events & POLLIN) && tfd->armed &&
+        timer_get_ticks() >= tfd->expire_tick)
+        revents |= POLLIN;
+    spin_unlock(&tfd->lock);
+    return revents;
+}
+
 static vfile_ops_t g_timerfd_ops = {
     .read = timerfd_read,
+    .poll = timerfd_poll,
     .close = anonfd_free_priv_close,
 };
 
