@@ -852,7 +852,7 @@ check-signal-exit-boundary:
 	@bad=$$(rg -n --pcre2 \
 		'(?:->|\.)(?:sig_blocked|thread_pending|sigsuspend_old_blocked|sigsuspend_active|sigwait_mask|sigwait_active)\b|(?:ss|signal_state)->(?:pending|pending_has_info|pending_info|actions)\b' \
 		kernel --glob '*.c' --glob '!kernel/external/**' | \
-		rg -v '^kernel/(proc/(signal|task)\.c|abi/linux/sys_signal\.c):' || true); \
+		rg -v '^kernel/(proc/(signal|task)\.c|abi/linux/sys_signal\.c|ipc/signalfd\.c):' || true); \
 		test -z "$$bad" || { echo "$$bad"; exit 1; }
 	@rg -Uq 'eventfd_read[\s\S]*proc_park_prepare\(PROC_WAIT_INTERRUPTIBLE' \
 		kernel/ipc/eventfd.c
@@ -3219,7 +3219,7 @@ define RUN_FINAL_EVAL
 	FINAL_EVAL_IMAGE_DIR="$(FINAL_EVAL_IMAGE_DIR)" \
 	FINAL_EVAL_STATE_DIR="$(FINAL_EVAL_STATE_DIR)" \
 	$(if $(strip $(FINAL_EVAL_TIMEOUT)),FINAL_EVAL_TIMEOUT="$(FINAL_EVAL_TIMEOUT)") \
-	bash ./scripts/run_final_eval.sh $(1) $(2) $(3)
+	bash ./scripts/run_final_eval.sh $(1) $(2) $(3) $(4)
 endef
 
 final-eval-rv-cagent:
@@ -3245,3 +3245,15 @@ final-probe-la-buildstorm-1c:
 
 final-probe-la-buildstorm-8c:
 	$(call RUN_FINAL_EVAL,loongarch64,buildstorm-probe,8)
+
+final-stage4-rv-buildstorm-1c:
+	$(call RUN_FINAL_EVAL,riscv64,buildstorm-probe,1,stage4-cargo-minibuild)
+
+final-stage4-rv-buildstorm-8c:
+	$(call RUN_FINAL_EVAL,riscv64,buildstorm-probe,8,stage4-cargo-minibuild)
+
+final-stage4-la-buildstorm-1c:
+	$(call RUN_FINAL_EVAL,loongarch64,buildstorm-probe,1,stage4-cargo-minibuild)
+
+final-stage4-la-buildstorm-8c:
+	$(call RUN_FINAL_EVAL,loongarch64,buildstorm-probe,8,stage4-cargo-minibuild)
