@@ -164,6 +164,240 @@ static int mount_umount_boundary(void)
     return 0;
 }
 
+/* open_unlink_persist: POSIX allows unlinking a file that is still open;
+ * the data must stay readable/writable through the open fd until the last
+ * close.  Exercises the filesystem's deferred inode reclamation. */
+static int open_unlink_persist(const char *mp)
+{
+    char path[128];
+    snprintf(path, sizeof(path), "%s/oul.bin", mp);
+
+    static const char payload[] = "persist-data-0123456789";
+    int fd = open(path, O_CREAT | O_TRUNC | O_RDWR, 0644);
+    if (fd < 0)
+        return fail("oul-open");
+    if (write(fd, payload, sizeof(payload)) != (int)sizeof(payload)) {
+        close(fd);
+        return fail("oul-write");
+    }
+    if (unlink(path) < 0) {
+        close(fd);
+        return fail("oul-unlink");
+    }
+    if (lseek(fd, 0, SEEK_SET) < 0) {
+        close(fd);
+        return fail("oul-lseek");
+    }
+    char buf[64] = {0};
+    if (read(fd, buf, sizeof(payload)) != (int)sizeof(payload) ||
+        memcmp(buf, payload, sizeof(payload)) != 0) {
+        close(fd);
+        return fail("oul-readback");
+    }
+    static const char extra[] = "-tail";
+    if (lseek(fd, 0, SEEK_END) < 0 || write(fd, extra, sizeof(extra)) != (int)sizeof(extra)) {
+        close(fd);
+        return fail("oul-append");
+    }
+    errno = 0;
+    int rfd = open(path, O_RDONLY);
+    if (rfd >= 0) {
+        close(rfd);
+        close(fd);
+        return fail("oul-reopen-should-fail");
+    }
+    if (errno != ENOENT) {
+        close(fd);
+        return fail("oul-reopen-errno");
+    }
+    if (close(fd) < 0)
+        return fail("oul-close");
+
+    /* After the last close the inode is reclaimed: recreating the name
+     * must yield an empty new file. */
+    int nfd = open(path, O_CREAT | O_RDWR, 0644);
+    if (nfd < 0)
+        return fail("oul-recreate");
+    struct stat st;
+    if (fstat(nfd, &st) < 0 || st.st_size != 0) {
+        close(nfd);
+        return fail("oul-recreate-size");
+    }
+    close(nfd);
+    unlink(path);
+    return 0;
+}
+
+/* Truncation must preserve the FAT vnode identity and remain visible through
+ * file descriptions that were opened before the truncate. */
+static int open_trunc_unlink_persist(const char *mp)
+{
+    char path[128];
+    snprintf(path, sizeof(path), "%s/oult.bin", mp);
+
+    int fd = open(path, O_CREAT | O_TRUNC | O_RDWR, 0644);
+    if (fd < 0)
+        return fail("oult-open");
+    if (write(fd, "AAAAAAAAAAAAAAAA", 16) != 16) {
+        close(fd);
+        return fail("oult-write-a");
+    }
+    close(fd);
+
+    int oldfd = open(path, O_RDWR);
+    if (oldfd < 0)
+        return fail("oult-old-open");
+    int tfd = open(path, O_TRUNC | O_RDWR);
+    if (tfd < 0)
+        return fail("oult-trunc-open");
+    if (lseek(oldfd, 0, SEEK_SET) < 0 || write(oldfd, "CCCC", 4) != 4) {
+        close(oldfd);
+        close(tfd);
+        return fail("oult-old-write");
+    }
+    if (lseek(tfd, 0, SEEK_SET) < 0) {
+        close(oldfd);
+        close(tfd);
+        return fail("oult-new-lseek");
+    }
+    char shared[8] = {0};
+    if (read(tfd, shared, 4) != 4 || memcmp(shared, "CCCC", 4) != 0) {
+        close(oldfd);
+        close(tfd);
+        return fail("oult-shared-vnode");
+    }
+    close(oldfd);
+    if (ftruncate(tfd, 0) < 0 || lseek(tfd, 0, SEEK_SET) < 0) {
+        close(tfd);
+        return fail("oult-second-trunc");
+    }
+    if (write(tfd, "BBBB", 4) != 4) {
+        close(tfd);
+        return fail("oult-write-b");
+    }
+    if (unlink(path) < 0) {
+        close(tfd);
+        return fail("oult-unlink");
+    }
+    if (lseek(tfd, 0, SEEK_SET) < 0) {
+        close(tfd);
+        return fail("oult-lseek");
+    }
+    char buf[8] = {0};
+    if (read(tfd, buf, 4) != 4 || memcmp(buf, "BBBB", 4) != 0) {
+        close(tfd);
+        return fail("oult-readback");
+    }
+    close(tfd);
+    return 0;
+}
+
+static int fat32_long_names(const char *mp)
+{
+    char base[128], first[160], second[160], directory[160], child[192];
+    snprintf(base, sizeof(base), "%s/ltest", mp);
+    snprintf(first, sizeof(first), "%s/weston-component-alpha.log", base);
+    snprintf(second, sizeof(second), "%s/weston-component-beta.log", base);
+    snprintf(directory, sizeof(directory), "%s/wayland-runtime-directory", base);
+    snprintf(child, sizeof(child), "%s/socket-state-file", directory);
+    unlink(child);
+    rmdir(directory);
+    unlink(first);
+    unlink(second);
+    rmdir(base);
+    if (mkdir(base, 0755) < 0)
+        return fail("fat-lfn-base-mkdir");
+
+    int fd = open(first, O_CREAT | O_TRUNC | O_RDWR, 0644);
+    if (fd < 0 || write(fd, "alpha", 5) != 5 || close(fd) < 0)
+        return fail("fat-lfn-create-first");
+    fd = open(second, O_CREAT | O_TRUNC | O_RDWR, 0644);
+    if (fd < 0 || write(fd, "beta", 4) != 4 || close(fd) < 0)
+        return fail("fat-lfn-create-second");
+
+    char buf[8] = {0};
+    fd = open(first, O_RDONLY);
+    if (fd < 0 || read(fd, buf, 5) != 5 || memcmp(buf, "alpha", 5) != 0) {
+        if (fd >= 0) close(fd);
+        return fail("fat-lfn-reopen-first");
+    }
+    close(fd);
+    memset(buf, 0, sizeof(buf));
+    fd = open(second, O_RDONLY);
+    if (fd < 0 || read(fd, buf, 4) != 4 || memcmp(buf, "beta", 4) != 0) {
+        if (fd >= 0) close(fd);
+        return fail("fat-lfn-reopen-second");
+    }
+    close(fd);
+
+    if (unlink(first) < 0)
+        return fail("fat-lfn-unlink-first");
+    fd = open(second, O_RDONLY);
+    if (fd < 0) return fail("fat-lfn-second-survives");
+    close(fd);
+
+    if (mkdir(directory, 0755) < 0)
+        return fail("fat-lfn-mkdir");
+    fd = open(child, O_CREAT | O_RDWR, 0644);
+    if (fd < 0) return fail("fat-lfn-child");
+    close(fd);
+    unlink(child);
+    rmdir(directory);
+    unlink(second);
+    rmdir(base);
+    return 0;
+}
+
+static int ext4_open_unlink(void)
+{
+    mkdir("/tmp/e4m", 0755);
+    errno = 0;
+    long r = syscall(SYS_mount, "/dev/vdb", "/tmp/e4m", "ext4", 0, "");
+    if (r < 0) {
+        if (errno == ENODEV || errno == ENOENT || errno == EINVAL ||
+            errno == ENOSYS || errno == EPERM) {
+            printf("VFS_STRESS: skip ext4 (mount errno=%d)\n", errno);
+            rmdir("/tmp/e4m");
+            return 0;
+        }
+        return fail("ext4-mount");
+    }
+    int rc = 0;
+    if (open_unlink_persist("/tmp/e4m") != 0)
+        rc = 1;
+    if (syscall(SYS_umount2, "/tmp/e4m", 0) < 0 && rc == 0)
+        rc = fail("ext4-umount");
+    rmdir("/tmp/e4m");
+    return rc;
+}
+
+static int fat32_open_unlink(void)
+{
+    mkdir("/tmp/fatm", 0755);
+    errno = 0;
+    long r = syscall(SYS_mount, "/dev/vda", "/tmp/fatm", "fat32", 0, "");
+    if (r < 0) {
+        if (errno == ENODEV || errno == ENOENT || errno == EINVAL ||
+            errno == ENOSYS || errno == EPERM) {
+            printf("VFS_STRESS: skip fat32 (mount errno=%d)\n", errno);
+            rmdir("/tmp/fatm");
+            return 0;
+        }
+        return fail("fat32-mount");
+    }
+    int rc = 0;
+    if (open_unlink_persist("/tmp/fatm") != 0)
+        rc = 1;
+    else if (open_trunc_unlink_persist("/tmp/fatm") != 0)
+        rc = 1;
+    else if (fat32_long_names("/tmp/fatm") != 0)
+        rc = 1;
+    if (syscall(SYS_umount2, "/tmp/fatm", 0) < 0 && rc == 0)
+        rc = fail("fat32-umount");
+    rmdir("/tmp/fatm");
+    return rc;
+}
+
 /* concurrent_open_close: parent and child rapidly open/close the same file
  * to stress vnode reference counting and fdtable correctness. */
 static int concurrent_open_close(void)
@@ -627,6 +861,12 @@ int main(void)
     if (symlink_loop_boundary() != 0)
         return 1;
     if (mount_umount_boundary() != 0)
+        return 1;
+    if (open_unlink_persist("/tmp") != 0)
+        return 1;
+    if (fat32_open_unlink() != 0)
+        return 1;
+    if (ext4_open_unlink() != 0)
         return 1;
     if (concurrent_open_close() != 0)
         return 1;

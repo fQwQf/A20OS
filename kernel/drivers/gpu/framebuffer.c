@@ -5,6 +5,7 @@
 #include "fs/devfs.h"
 #include "fs/vfs.h"
 #include "proc/proc.h"
+#include "core/timer.h"
 #include "mm/mm.h"
 #include "core/string.h"
 #include "core/stdio.h"
@@ -45,12 +46,48 @@ static void fb_fill_var_screeninfo(struct fb_var_screeninfo *var,
     var->width = (uint32_t)-1;
 }
 
+/*
+ * Periodic framebuffer refresh.  Compositors written for Linux fbdev
+ * semantics (weston, X) draw into the mmap'd scanout and never issue a
+ * flush ioctl, because on real hardware the scanout is the memory they
+ * write.  Virtualized GPUs (virtio-gpu, vmsvga) instead require an
+ * explicit transfer+flush to make writes visible.  Rather than patching
+ * every userspace, refresh the whole scanout at ~30 Hz once anyone has
+ * mmap'd the framebuffer; drivers without a flush op simply skip.
+ */
+static volatile int g_fb_autoflush_started;
+
+static void fb_autoflush_thread(void) {
+    for (;;) {
+        struct device *dev = gpu_device_get_default();
+        if (dev && dev->drv && dev->drv->class_ops) {
+            gpu_dev_ops_t *ops = (gpu_dev_ops_t *)dev->drv->class_ops;
+            if (ops->get_info && ops->flush) {
+                uint32_t w = 0, h = 0, bpp = 0;
+                if (ops->get_info(dev, &w, &h, &bpp) == 0 && w && h)
+                    (void)ops->flush(dev, 0, 0, w, h);
+            }
+        }
+        proc_sleep_until(timer_get_ticks() + TICKS_PER_SEC / 30);
+    }
+}
+
+static void fb_autoflush_kick(void) {
+    if (g_fb_autoflush_started)
+        return;
+    g_fb_autoflush_started = 1;
+    if (proc_alloc(fb_autoflush_thread) < 0)
+        g_fb_autoflush_started = 0;
+}
+
 int64_t fbdev_linux_mmap(uint64_t addr, size_t len, int prot, int flags,
                          uint64_t off) {
     struct device *dev = gpu_device_get_default();
     if (!dev) return -ENODEV;
     gpu_dev_ops_t *ops = (gpu_dev_ops_t *)dev->drv->class_ops;
     if (!ops) return -ENODEV;
+
+    fb_autoflush_kick();
 
     uintptr_t fb_phys;
     size_t fb_size;
@@ -244,6 +281,7 @@ static int fb_ioctl(vfile_t *vf, unsigned long req, void *arg) {
             int r = ops->get_fb(dev, &fb_phys, &fb_size);
             if (r < 0)
                 return r;
+            fb_autoflush_kick();
 
 #ifdef CONFIG_NOMMU
             /*
@@ -339,7 +377,6 @@ static int fb_ioctl(vfile_t *vf, unsigned long req, void *arg) {
             return -EINVAL;
     }
 }
-
 static int fb_close(vfile_t *vf) {
     (void)vf;
     return 0;

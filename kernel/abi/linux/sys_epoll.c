@@ -43,6 +43,30 @@ typedef struct {
     epoll_item_t items[EPOLL_MAX_FDS];
 } epoll_t;
 
+static short epoll_events_to_poll(uint32_t events);
+static uint32_t poll_events_to_epoll(short pe, uint32_t orig_events);
+
+static int epoll_poll(vfile_t *vf, short events)
+{
+    epoll_t *ep = vf ? vf->priv : NULL;
+    if (!ep) return POLLNVAL;
+    if (!(events & POLLIN)) return 0;
+
+    for (int i = 0; i < EPOLL_MAX_FDS; i++) {
+        if (!ep->items[i].registered)
+            continue;
+        int64_t gfd = fdtable_get_current(ep->items[i].fd);
+        if (gfd < 0)
+            continue;
+        short requested = epoll_events_to_poll(ep->items[i].ev.events);
+        int ready = vfs_poll_events((int)gfd, requested);
+        if (ready > 0 &&
+            poll_events_to_epoll((short)ready, ep->items[i].ev.events))
+            return POLLIN;
+    }
+    return 0;
+}
+
 static int epoll_close(vfile_t *vf)
 {
     if (vf && vf->priv) kfree(vf->priv);
@@ -50,6 +74,7 @@ static int epoll_close(vfile_t *vf)
 }
 
 static vfile_ops_t g_epoll_ops = {
+    .poll = epoll_poll,
     .close = epoll_close,
 };
 
@@ -359,6 +384,8 @@ static int epoll_do_wait(int epfd, void *events, int maxevents,
             epoll_event_t out_ev;
             out_ev.events = poll_events_to_epoll((short)revents,
                                                   ep->items[i].ev.events);
+            if (!out_ev.events)
+                continue;
             out_ev.data = ep->items[i].ev.data;
 
             if (copy_to_user((char *)events + (size_t)n * sizeof(epoll_event_t),
