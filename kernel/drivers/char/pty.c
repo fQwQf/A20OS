@@ -1,3 +1,4 @@
+#include "abi/linux/poll.h"
 #include "core/defs.h"
 #include "core/string.h"
 #include "core/stdio.h"
@@ -234,7 +235,7 @@ static int pty_wait_interruptible_locked(pty_pair_t *pty, wait_queue_t *wq,
     return 0;
 }
 
-int pty_master_read(int idx, char *buf, size_t count) {
+int pty_master_read(int idx, char *buf, size_t count, int nonblock) {
     if (idx < 0 || idx >= MAX_PTYS) return -EIO;
     if (count == 0) return 0;
 
@@ -249,7 +250,7 @@ int pty_master_read(int idx, char *buf, size_t count) {
             spin_unlock_irqrestore(&pty->lock, flags);
             return 0;
         }
-        if (pty->master_nonblock) {
+        if (nonblock || pty->master_nonblock) {
             spin_unlock_irqrestore(&pty->lock, flags);
             return -EAGAIN;
         }
@@ -289,7 +290,7 @@ int pty_master_write(int idx, const char *buf, size_t count) {
     return (int)n;
 }
 
-int pty_slave_read(int idx, char *buf, size_t count) {
+int pty_slave_read(int idx, char *buf, size_t count, int nonblock) {
     if (idx < 0 || idx >= MAX_PTYS) return -EIO;
     if (count == 0) return 0;
 
@@ -304,7 +305,7 @@ int pty_slave_read(int idx, char *buf, size_t count) {
             spin_unlock_irqrestore(&pty->lock, flags);
             return 0;
         }
-        if (pty->slave_nonblock) {
+        if (nonblock || pty->slave_nonblock) {
             spin_unlock_irqrestore(&pty->lock, flags);
             return -EAGAIN;
         }
@@ -321,6 +322,46 @@ int pty_slave_read(int idx, char *buf, size_t count) {
                          buf, count);
     spin_unlock_irqrestore(&pty->lock, flags);
     return (int)n;
+}
+
+int pty_master_poll(int idx, short events) {
+    if (idx < 0 || idx >= MAX_PTYS) return POLLNVAL;
+    pty_pair_t *pty = &g_ptys[idx];
+    int revents = 0;
+    uint64_t flags = spin_lock_irqsave(&pty->lock);
+    if (!pty->in_use) {
+        revents = POLLNVAL;
+    } else {
+        if ((events & POLLIN) && (pty->s2m_used > 0 || pty->slave_refs == 0))
+            revents |= POLLIN;
+        if ((events & POLLOUT) && pty->slave_refs > 0 &&
+            pty->m2s_used < PTY_BUF_SIZE)
+            revents |= POLLOUT;
+        if (pty->slave_refs == 0)
+            revents |= POLLHUP;
+    }
+    spin_unlock_irqrestore(&pty->lock, flags);
+    return revents;
+}
+
+int pty_slave_poll(int idx, short events) {
+    if (idx < 0 || idx >= MAX_PTYS) return POLLNVAL;
+    pty_pair_t *pty = &g_ptys[idx];
+    int revents = 0;
+    uint64_t flags = spin_lock_irqsave(&pty->lock);
+    if (!pty->in_use) {
+        revents = POLLNVAL;
+    } else {
+        if ((events & POLLIN) && (pty->m2s_used > 0 || pty->master_refs == 0))
+            revents |= POLLIN;
+        if ((events & POLLOUT) && pty->master_refs > 0 &&
+            pty->s2m_used < PTY_BUF_SIZE)
+            revents |= POLLOUT;
+        if (pty->master_refs == 0)
+            revents |= POLLHUP;
+    }
+    spin_unlock_irqrestore(&pty->lock, flags);
+    return revents;
 }
 
 int pty_slave_write(int idx, const char *buf, size_t count) {
