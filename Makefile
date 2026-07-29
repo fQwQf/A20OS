@@ -3257,3 +3257,9 @@ final-stage4-la-buildstorm-1c:
 
 final-stage4-la-buildstorm-8c:
 	$(call RUN_FINAL_EVAL,loongarch64,buildstorm-probe,8,stage4-cargo-minibuild)
+
+final-stage5-rv-buildstorm:
+	$(call RUN_FINAL_EVAL,riscv64,buildstorm-probe,8,stage5-official-minibuild)
+
+final-stage5-la-buildstorm:
+	$(call RUN_FINAL_EVAL,loongarch64,buildstorm-probe,8,stage5-official-minibuild)
