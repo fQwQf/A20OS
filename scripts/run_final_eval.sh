@@ -4,7 +4,7 @@
 #
 # Usage:
 #   scripts/run_final_eval.sh riscv64|loongarch64 cagent|buildstorm
-#   scripts/run_final_eval.sh riscv64|loongarch64 buildstorm-probe 1|8
+#   scripts/run_final_eval.sh riscv64|loongarch64 buildstorm-probe 1|8 [probe-case]
 #
 # The official ext4 image is never opened writable.  A read-only base restored
 # from the published .gz and a fresh qcow2 overlay are used for every run.
@@ -13,14 +13,15 @@ set -euo pipefail
 
 usage() {
     echo "usage: $0 riscv64|loongarch64 cagent|buildstorm" >&2
-    echo "       $0 riscv64|loongarch64 buildstorm-probe 1|8" >&2
+    echo "       $0 riscv64|loongarch64 buildstorm-probe 1|8 [probe-case]" >&2
     exit 2
 }
 
-[[ $# -ge 2 && $# -le 3 ]] || usage
+[[ $# -ge 2 && $# -le 4 ]] || usage
 arch=$1
 group=$2
 guest_cpus=${3:-8}
+probe_case=${4:-}
 
 case "$arch" in
 riscv64)
@@ -50,12 +51,19 @@ buildstorm)
 buildstorm-probe)
     default_timeout=1800
     judge_name=
-    [[ $# -eq 3 ]] || usage
+    [[ $# -ge 3 && $# -le 4 ]] || usage
     ;;
 *)
     usage
     ;;
 esac
+if [[ -n "$probe_case" && "$group" != buildstorm-probe ]]; then
+    usage
+fi
+if [[ -n "$probe_case" && ! "$probe_case" =~ ^[a-z0-9][a-z0-9-]*$ ]]; then
+    echo "[final-eval] invalid probe case: $probe_case" >&2
+    exit 2
+fi
 if [[ "$guest_cpus" != 1 && "$guest_cpus" != 8 ]]; then
     echo "[final-eval] guest CPU count must be 1 or 8" >&2
     exit 2
@@ -121,8 +129,12 @@ short_commit=$(git rev-parse --short=12 HEAD)
 timestamp=$(date -u +%Y%m%dT%H%M%SZ)
 run_nonce=$(date -u +%N)
 if [[ "$group" == buildstorm-probe ]]; then
-    run_id="${arch_tag}-${group}-${guest_cpus}c-${short_commit}-${timestamp}-${run_nonce}-$$"
-    artifact_stem="${arch_tag}-${group}-${guest_cpus}c-${commit}-${timestamp}-${run_nonce}-$$"
+    probe_suffix=
+    if [[ -n "$probe_case" ]]; then
+        probe_suffix="-${probe_case}"
+    fi
+    run_id="${arch_tag}-${group}-${guest_cpus}c${probe_suffix}-${short_commit}-${timestamp}-${run_nonce}-$$"
+    artifact_stem="${arch_tag}-${group}-${guest_cpus}c${probe_suffix}-${commit}-${timestamp}-${run_nonce}-$$"
 else
     run_id="${arch_tag}-${group}-${short_commit}-${timestamp}-${run_nonce}-$$"
     artifact_stem="${arch_tag}-${group}-${commit}-${timestamp}-${run_nonce}-$$"
@@ -203,7 +215,12 @@ run_fat32="$run_dir/fat32.img"
 cp --reflink=auto "$fat32" "$run_fat32"
 mdel -i "$run_fat32" ::/etc/contest-mode >/dev/null 2>&1 || true
 mdel -i "$run_fat32" ::/etc/final-eval-group >/dev/null 2>&1 || true
+mdel -i "$run_fat32" ::/etc/final-eval-probe-case >/dev/null 2>&1 || true
 printf '%s\n' "$group" | mcopy -o -i "$run_fat32" - ::/etc/final-eval-group
+if [[ -n "$probe_case" ]]; then
+    printf '%s\n' "$probe_case" |
+        mcopy -o -i "$run_fat32" - ::/etc/final-eval-probe-case
+fi
 if mtype -i "$run_fat32" ::/etc/contest-mode >/dev/null 2>&1; then
     echo "[final-eval] refusing to run with both contest entry markers" >&2
     exit 1
@@ -311,6 +328,7 @@ fi
     echo "qemu_timeout_s=$timeout_s"
     echo "qemu_command=$qemu_command_text"
     if [[ "$group" == buildstorm-probe ]]; then
+        echo "probe_case=${probe_case:-all}"
         echo "probe_cwd_sha256=$(sha256sum "$host_probe_dir/cwd-probe" | awk '{print $1}')"
         echo "probe_exec_pages_sha256=$(sha256sum "$host_probe_dir/exec-pages-probe" | awk '{print $1}')"
         echo "probe_dso_sha256=$(sha256sum "$host_probe_dir/liba20probe.so" | awk '{print $1}')"
