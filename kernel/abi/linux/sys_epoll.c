@@ -9,7 +9,11 @@
 typedef struct {
     uint32_t events;
     uint64_t data;
-} epoll_event_t;
+}
+#if defined(CONFIG_X86_64)
+__attribute__((packed))
+#endif
+epoll_event_t;
 
 #define EPOLL_CTL_ADD 1
 #define EPOLL_CTL_DEL 2
@@ -434,6 +438,9 @@ static int epoll_do_wait(int epfd, void *events, int maxevents,
         }
 
         if (t) {
+#if defined(CONFIG_X86_64)
+            proc_yield();
+#else
             uint64_t now = timer_get_ticks();
             uint64_t sleep_until = now + MS_TO_TICKS(20);
             if (has_timeout && deadline < sleep_until)
@@ -446,6 +453,7 @@ static int epoll_do_wait(int epfd, void *events, int maxevents,
                 epoll_put_ref(ep_gfd, ep_vf);
                 return -EAGAIN;
             }
+#endif
         } else {
             /*
              * No task context — cannot sleep.  For infinite timeout

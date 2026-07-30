@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # Install the wayland/weston stack onto an A20OS FAT32 disk image.
-# Usage: user/wayland/install-image.sh <fat32.img> [ARCH]
+# Usage: user/wayland/install-image.sh <fat32.img> [ARCH] [media.mp4]
 set -euo pipefail
 
 IMG=$1
 ARCH=${2:-riscv64}
 USER_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+MEDIA=${3:-$USER_DIR/external/lvgl/tests/src/test_assets/test_video_birds.mp4}
 BUILD=$USER_DIR/build/wayland
 SYSROOT=$BUILD/$ARCH/sysroot
 MUSL_SH=$BUILD/musl-$ARCH
@@ -34,6 +35,7 @@ echo "[image] musl runtime"
 copy_file "$MUSL_SH/install/lib/libc.so" /lib/libc.so
 case $ARCH in
     riscv64) copy_file "$MUSL_SH/install/lib/libc.so" /lib/ld-musl-riscv64.so.1 ;;
+    loongarch64) copy_file "$MUSL_SH/install/lib/libc.so" /lib/ld-musl-loongarch64.so.1 ;;
     aarch64) copy_file "$MUSL_SH/install/lib/libc.so" /lib/ld-musl-aarch64.so.1 ;;
     x86_64)  copy_file "$MUSL_SH/install/lib/libc.so" /lib/ld-musl-x86_64.so.1 ;;
 esac
@@ -49,6 +51,22 @@ copy_soname "$(cd "$SYSROOT/lib" && ls libinput.so.10.*.* | head -1)" libinput.s
 copy_soname "$(cd "$SYSROOT/lib" && ls libevdev.so.2.*.* | head -1)" libevdev.so.2
 copy_soname "$(cd "$SYSROOT/lib" && ls libudev.so.1.*.* | head -1)" libudev.so.1
 copy_soname "$(cd "$SYSROOT/lib" && ls libmtdev.so.1.*.* | head -1)" libmtdev.so.1
+
+if [ -f "$SYSROOT/bin/a20-player" ]; then
+    echo "[image] FFmpeg + media player"
+    copy_soname "$(cd "$SYSROOT/lib" && ls libavformat.so.61.*.* | head -1)" libavformat.so.61
+    copy_soname "$(cd "$SYSROOT/lib" && ls libavcodec.so.61.*.* | head -1)" libavcodec.so.61
+    copy_soname "$(cd "$SYSROOT/lib" && ls libswresample.so.5.*.* | head -1)" libswresample.so.5
+    copy_soname "$(cd "$SYSROOT/lib" && ls libswscale.so.8.*.* | head -1)" libswscale.so.8
+    copy_soname "$(cd "$SYSROOT/lib" && ls libavutil.so.59.*.* | head -1)" libavutil.so.59
+    copy_file "$SYSROOT/bin/a20-player" /a20-player
+    copy_file "$SYSROOT/bin/wayland-session" /wayland-session
+    if [ -f "$MEDIA" ]; then
+        copy_file "$MEDIA" /media/demo.mp4
+    else
+        echo "[image] WARNING: media file not found: $MEDIA" >&2
+    fi
+fi
 
 if [ -f "$SYSROOT/lib/libcairo.so.2" ]; then
     echo "[image] cairo + font stack"
@@ -93,6 +111,12 @@ if [ -f "$SYSROOT/bin/weston-terminal" ]; then
 fi
 if [ -f "$SYSROOT/libexec/weston-desktop-shell" ]; then
     copy_file "$SYSROOT/libexec/weston-desktop-shell" /libexec/weston-desktop-shell
+fi
+if [ -f "$SYSROOT/bin/a20-desktop-shell" ]; then
+    copy_file "$SYSROOT/bin/a20-desktop-shell" /libexec/weston-desktop-shell
+fi
+if [ -f "$SYSROOT/bin/a20-input-method" ]; then
+    copy_file "$SYSROOT/bin/a20-input-method" /libexec/weston-keyboard
 fi
 if [ -f "$SYSROOT/libexec/weston-keyboard" ]; then
     copy_file "$SYSROOT/libexec/weston-keyboard" /libexec/weston-keyboard
@@ -156,6 +180,9 @@ background-color=0xff002244
 [launcher]
 icon=/bin/share/weston/terminal.png
 path=/bin/weston-terminal
+[launcher]
+icon=/bin/share/weston/fullscreen.png
+path=/bin/run-player.sh
 '
 printf '%s' "$WESTON_CONFIG" | \
     mcopy -o -i "$IMG" - ::/etc/xdg/weston/weston.ini 2>/dev/null || {
@@ -180,9 +207,10 @@ export FONTCONFIG_FILE=/bin/etc/fonts/fonts.conf
 export WESTON_DATA_DIR=/bin/share/weston
 export XCURSOR_PATH=/bin/share/icons
 export XCURSOR_THEME=Breeze
+chmod 700 /tmp
 mkdir -p /tmp/fontconfig
 export WESTON_MODULE_MAP="fbdev-backend.so=/bin/lib/libweston-9/fbdev-backend.so;kiosk-shell.so=/bin/lib/weston/kiosk-shell.so;desktop-shell.so=/bin/lib/weston/desktop-shell.so;weston-desktop-shell=/bin/libexec/weston-desktop-shell;weston-keyboard=/bin/libexec/weston-keyboard"
-exec weston --backend=fbdev-backend.so --device=/dev/fb0 --seat=seat1 --shell=kiosk-shell.so "$@"
+exec weston --backend=fbdev-backend.so --seat=seat1 --shell=kiosk-shell.so "$@"
 EOS
 copy_file /tmp/opencode/run-weston-$$.sh /run-weston.sh
 
@@ -196,9 +224,14 @@ export FONTCONFIG_FILE=/bin/etc/fonts/fonts.conf
 export WESTON_DATA_DIR=/bin/share/weston
 export XCURSOR_PATH=/bin/share/icons
 export XCURSOR_THEME=Breeze
+chmod 700 /tmp
 mkdir -p /tmp/fontconfig
 export WESTON_MODULE_MAP="fbdev-backend.so=/bin/lib/libweston-9/fbdev-backend.so;kiosk-shell.so=/bin/lib/weston/kiosk-shell.so;desktop-shell.so=/bin/lib/weston/desktop-shell.so;weston-desktop-shell=/bin/libexec/weston-desktop-shell;weston-keyboard=/bin/libexec/weston-keyboard"
-exec weston --backend=fbdev-backend.so --device=/dev/fb0 --seat=seat1 --shell=desktop-shell.so "$@"
+if [ -x /bin/libexec/weston-desktop-shell ]; then
+    exec weston --backend=fbdev-backend.so --seat=seat1 --shell=desktop-shell.so "$@"
+fi
+echo "run-desktop: weston-desktop-shell is not installed" >&2
+exit 1
 EOS
 copy_file /tmp/opencode/run-desktop-$$.sh /run-desktop.sh
 
@@ -212,11 +245,19 @@ export WESTON_DATA_DIR=/bin/share/weston
 export XCURSOR_PATH=/bin/share/icons
 export XCURSOR_THEME=Breeze
 export SHELL=/bin/mksh
+chmod 700 /tmp
 mkdir -p /tmp/fontconfig
 exec weston-terminal "$@"
 EOS
 copy_file /tmp/opencode/run-terminal-$$.sh /run-terminal.sh
+
+cat > /tmp/opencode/run-player-$$.sh <<'EOS'
+#!/bin/sh
+export XDG_RUNTIME_DIR=/tmp
+exec a20-player /bin/media/demo.mp4 "$@"
+EOS
+copy_file /tmp/opencode/run-player-$$.sh /run-player.sh
 rm -f /tmp/opencode/run-weston-$$.sh /tmp/opencode/run-desktop-$$.sh \
-    /tmp/opencode/run-terminal-$$.sh
+    /tmp/opencode/run-terminal-$$.sh /tmp/opencode/run-player-$$.sh
 
 echo "[image] done"

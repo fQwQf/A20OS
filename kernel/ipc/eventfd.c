@@ -126,9 +126,25 @@ static int eventfd_write(vfile_t *vf, const char *buf, size_t count)
     return sizeof(val);
 }
 
+static int eventfd_poll(vfile_t *vf, short events)
+{
+    eventfd_t *efd = vf ? vf->priv : NULL;
+    if (!efd)
+        return POLLNVAL;
+    short revents = 0;
+    spin_lock(&efd->lock);
+    if ((events & POLLIN) && efd->counter != 0)
+        revents |= POLLIN;
+    if ((events & POLLOUT) && efd->counter < ~0ULL - 1)
+        revents |= POLLOUT;
+    spin_unlock(&efd->lock);
+    return revents;
+}
+
 static vfile_ops_t g_eventfd_ops = {
     .read = eventfd_read,
     .write = eventfd_write,
+    .poll = eventfd_poll,
     .close = anonfd_free_priv_close,
 };
 

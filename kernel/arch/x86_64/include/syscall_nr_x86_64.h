@@ -29,7 +29,7 @@
 #define X86_SYS_stat            4   /* -> fstatat */
 #define X86_SYS_fstat           5
 #define X86_SYS_lstat           6   /* -> fstatat */
-#define X86_SYS_poll            7   /* -> ppoll */
+#define X86_SYS_poll            7
 #define X86_SYS_lseek           8
 #define X86_SYS_mmap            9
 #define X86_SYS_mprotect        10
@@ -216,7 +216,7 @@
 #define X86_SYS_set_robust_list 273
 #define X86_SYS_get_robust_list 274
 #define X86_SYS_epoll_create    213
-#define X86_SYS_epoll_ctl       232
+#define X86_SYS_epoll_ctl       233
 #define X86_SYS_epoll_wait      232
 #define X86_SYS_epoll_pwait     281
 #define X86_SYS_epoll_create1   291
@@ -322,7 +322,7 @@ static inline uint32_t x86_syscall_to_kernel_nr(uint32_t x86_nr)
         /* 4  */ SYS_fstatat,       /* stat -> fstatat */
         /* 5  */ SYS_fstat,
         /* 6  */ SYS_fstatat,       /* lstat -> fstatat */
-        /* 7  */ SYS_ppoll,         /* poll -> ppoll */
+        /* 7  */ SYS_poll,
         /* 8  */ SYS_lseek,
         /* 9  */ SYS_mmap,
         /* 10 */ SYS_mprotect,
@@ -547,9 +547,9 @@ static inline uint32_t x86_syscall_to_kernel_nr(uint32_t x86_nr)
         /* 229 */ SYS_clock_getres,
         /* 230 */ SYS_clock_nanosleep,
         /* 231 */ SYS_exit_group,
-        /* 232 */ SYS_epoll_ctl,
-        /* 233 */ SYS_tgkill,
-        /* 234 */ (uint16_t)-1,     /* utimes */
+        /* 232 */ SYS_epoll_pwait,  /* epoll_wait -> epoll_pwait */
+        /* 233 */ SYS_epoll_ctl,
+        /* 234 */ SYS_tgkill,
         /* 235 */ (uint16_t)-1,
         /* 236 */ (uint16_t)-1,
         /* 237 */ (uint16_t)-1,
@@ -857,6 +857,10 @@ static inline int x86_syscall_rewrite_args(uint32_t x86_nr,
             return 1;
         case X86_SYS_dup2:
             args->arg[2] = 0;
+            return 1;
+        case X86_SYS_epoll_wait:
+            args->arg[4] = 0;
+            args->arg[5] = 0;
             return 1;
     }
     return 0;
