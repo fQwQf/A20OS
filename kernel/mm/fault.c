@@ -491,6 +491,13 @@ static int handle_file_fault(task_t *t, uint64_t page_va, int file_fd,
     int result = -1;
     pte_t *pte = pt_lookup_leaf(mm->pgdir, page_va, NULL, NULL, NULL);
     if (mapping_valid && pte && (*pte & PTE_V)) {
+        /*
+         * Another thread completed this file fault while we performed I/O
+         * without mm->lock. The faulting CPU may still cache the old
+         * non-present translation, so redundant success needs the same
+         * synchronization as a newly installed PTE.
+         */
+        arch_tlb_flush_page(page_va);
         result = 0;
     } else if (mapping_valid &&
                pt_map(mm->pgdir, page_va, pfn_to_phys(candidate),
@@ -585,5 +592,40 @@ int handle_demand_fault(task_t *t, uint64_t stval)
         return -1;
     }
     return r;
+#endif
+}
+
+int handle_present_page_fault(task_t *t, uint64_t stval,
+                              enum mm_fault_access access)
+{
+#ifdef CONFIG_NOMMU
+    (void)t;
+    (void)stval;
+    (void)access;
+    return -1;
+#else
+    if (!t || !t->mm || !t->mm->pgdir)
+        return -1;
+
+    mm_struct_t *mm = t->mm;
+    uint64_t flags = spin_lock_irqsave(&mm->lock);
+    pte_t *pte = pt_lookup_leaf(mm->pgdir, stval, NULL, NULL, NULL);
+    int allowed = pte && (*pte & PTE_V) && arch_pte_is_leaf(*pte) &&
+                  (*pte & PTE_U);
+    if (allowed) {
+        if (access == MM_FAULT_ACCESS_WRITE)
+            allowed = (*pte & PTE_W) != 0;
+        else if (access == MM_FAULT_ACCESS_EXEC)
+            allowed = (*pte & PTE_X) != 0;
+        else
+            allowed = (*pte & PTE_R) != 0;
+    }
+    spin_unlock_irqrestore(&mm->lock, flags);
+
+    if (!allowed)
+        return -1;
+
+    arch_tlb_flush_page(stval & ~(PAGE_SIZE - 1));
+    return 0;
 #endif
 }

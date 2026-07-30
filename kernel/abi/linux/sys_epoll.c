@@ -114,15 +114,14 @@ static epoll_t *epoll_get(int epfd)
  */
 static epoll_t *epoll_get_ref(int epfd, int *out_gfd, vfile_t **out_vf)
 {
-    int64_t gfd = fdtable_get_current(epfd);
-    if (gfd < 0) return NULL;
-    vfile_t *vf = vfs_get_file_ref((int)gfd);
+    int gfd = -1;
+    vfile_t *vf = fdtable_get_current_file_ref(epfd, &gfd);
     if (!vf) return NULL;
     if (!vfile_is_epoll(vf)) {
         vfs_put_file_ref((int)gfd, vf);
         return NULL;
     }
-    *out_gfd = (int)gfd;
+    *out_gfd = gfd;
     *out_vf = vf;
     return (epoll_t *)vf->priv;
 }
@@ -323,9 +322,6 @@ static int epoll_do_wait(int epfd, void *events, int maxevents,
                          int timeout_ms, const void *sigmask,
                          size_t sigsetsize)
 {
-    int err = check_epfd(epfd);
-    if (err < 0) return err;
-
     int ep_gfd = -1;
     vfile_t *ep_vf = NULL;
     epoll_t *ep = epoll_get_ref(epfd, &ep_gfd, &ep_vf);

@@ -18,7 +18,7 @@ typedef struct {
      */
     uint64_t vr[32][2];
     uint64_t fcsr;
-    uint64_t reserved;
+    uint64_t fcc;
 } __attribute__((aligned(16))) trap_context_t;
 
 _Static_assert(sizeof(trap_context_t) == 102 * 8, "TrapContext must be 816 bytes");
@@ -51,15 +51,15 @@ typedef struct {
 } __attribute__((aligned(16))) arch_loongarch_sctx_info_t;
 
 typedef struct {
-    uint64_t regs[32];
+    uint64_t regs[32][2];
     uint64_t fcc;
     uint32_t fcsr;
     uint32_t reserved;
-} __attribute__((aligned(8))) arch_loongarch_fpu_context_t;
+} __attribute__((aligned(16))) arch_loongarch_lsx_context_t;
 
 typedef struct {
-    arch_loongarch_sctx_info_t fpu_head;
-    arch_loongarch_fpu_context_t fpu;
+    arch_loongarch_sctx_info_t lsx_head;
+    arch_loongarch_lsx_context_t lsx;
     arch_loongarch_sctx_info_t end;
 } __attribute__((aligned(16))) arch_sigframe_extra_t;
 
@@ -179,14 +179,17 @@ static inline void arch_signal_build_mcontext(arch_sigcontext_t *sc,
 
 static inline void arch_signal_build_frame_extra(arch_sigframe_extra_t *extra,
                                                  const trap_context_t *ctx) {
-    extra->fpu_head.magic = 0x46505501U;
-    extra->fpu_head.size = sizeof(extra->fpu_head) + sizeof(extra->fpu);
-    extra->fpu_head.padding = 0;
-    for (int i = 0; i < 32; i++)
-        extra->fpu.regs[i] = ctx->vr[i][0];
-    extra->fpu.fcc = 0;
-    extra->fpu.fcsr = (uint32_t)ctx->fcsr;
-    extra->fpu.reserved = 0;
+    /* Linux LSX_CTX_MAGIC.  LSX state subsumes the scalar FPU register file. */
+    extra->lsx_head.magic = 0x53580001U;
+    extra->lsx_head.size = sizeof(extra->lsx_head) + sizeof(extra->lsx);
+    extra->lsx_head.padding = 0;
+    for (int i = 0; i < 32; i++) {
+        extra->lsx.regs[i][0] = ctx->vr[i][0];
+        extra->lsx.regs[i][1] = ctx->vr[i][1];
+    }
+    extra->lsx.fcc = ctx->fcc;
+    extra->lsx.fcsr = (uint32_t)ctx->fcsr;
+    extra->lsx.reserved = 0;
     extra->end.magic = 0;
     extra->end.size = 0;
     extra->end.padding = 0;
@@ -201,12 +204,15 @@ static inline void arch_signal_restore_mcontext(trap_context_t *ctx,
 
 static inline void arch_signal_restore_frame_extra(trap_context_t *ctx,
                                                    const arch_sigframe_extra_t *extra) {
-    if (extra->fpu_head.magic != 0x46505501U ||
-        extra->fpu_head.size < sizeof(extra->fpu_head) + sizeof(extra->fpu))
+    if (extra->lsx_head.magic != 0x53580001U ||
+        extra->lsx_head.size < sizeof(extra->lsx_head) + sizeof(extra->lsx))
         return;
-    for (int i = 0; i < 32; i++)
-        ctx->vr[i][0] = extra->fpu.regs[i];
-    ctx->fcsr = extra->fpu.fcsr;
+    for (int i = 0; i < 32; i++) {
+        ctx->vr[i][0] = extra->lsx.regs[i][0];
+        ctx->vr[i][1] = extra->lsx.regs[i][1];
+    }
+    ctx->fcc = extra->lsx.fcc;
+    ctx->fcsr = extra->lsx.fcsr;
 }
 
 #endif

@@ -15,6 +15,7 @@ static uint64_t g_file_mask[GFILE_WORDS];
 static int g_file_next = 3;
 static spinlock_t g_file_lock = SPINLOCK_INIT;
 static obj_cache_t g_vfile_cache = OBJ_CACHE_INIT("vfile", vfile_t, 256);
+static size_t g_vfile_live;
 
 static inline void file_mask_set(int fd)
 {
@@ -75,12 +76,29 @@ void file_table_init(void)
     memset(g_files, 0, sizeof(g_files));
     memset(g_file_mask, 0, sizeof(g_file_mask));
     g_file_next = 3;
+    g_vfile_live = 0;
+}
+
+size_t file_open_fd_count(void)
+{
+    size_t count = 0;
+    uint64_t flags = spin_lock_irqsave(&g_file_lock);
+    for (int word = 0; word < GFILE_WORDS; word++)
+        count += (size_t)__builtin_popcountll(g_file_mask[word]);
+    spin_unlock_irqrestore(&g_file_lock, flags);
+    return count;
+}
+
+size_t vfile_live_count(void)
+{
+    return __atomic_load_n(&g_vfile_live, __ATOMIC_RELAXED);
 }
 
 vfile_t *vfile_alloc(void)
 {
     vfile_t *vf = (vfile_t *)obj_cache_alloc_zero(&g_vfile_cache);
     if (vf) {
+        __atomic_fetch_add(&g_vfile_live, 1, __ATOMIC_RELAXED);
         mutex_init(&vf->offset_lock);
         vf->lease = F_UNLCK;
     }
@@ -89,6 +107,8 @@ vfile_t *vfile_alloc(void)
 
 void vfile_free(vfile_t *vf)
 {
+    if (vf)
+        __atomic_fetch_sub(&g_vfile_live, 1, __ATOMIC_RELAXED);
     obj_cache_free(&g_vfile_cache, vf);
 }
 
@@ -173,10 +193,20 @@ vfile_t *vfs_get_file_ref(int fd)
 
 void vfs_put_file_ref(int fd, vfile_t *vf)
 {
-    (void)fd;
     if (!vf)
         return;
-    vfile_put_ref_only(vf);
+    vfile_t *closed = NULL;
+    uint64_t flags = spin_lock_irqsave(&g_file_lock);
+    if (vfile_put_ref_only(vf)) {
+        if (fd >= 0 && fd < GFILE_MAX && g_files[fd] == vf) {
+            g_files[fd] = NULL;
+            file_note_free(fd);
+        }
+        closed = vf;
+    }
+    spin_unlock_irqrestore(&g_file_lock, flags);
+    if (closed)
+        vfs_finalize_closed_file(fd, closed);
 }
 
 int vfs_ref_fd(int fd)
