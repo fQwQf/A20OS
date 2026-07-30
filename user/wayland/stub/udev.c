@@ -155,7 +155,7 @@ int udev_enumerate_scan_devices(struct udev_enumerate *udev_enumerate) { (void)u
 int udev_enumerate_scan_subsystems(struct udev_enumerate *udev_enumerate) { (void)udev_enumerate; return 0; }
 struct udev_list_entry *udev_enumerate_get_list_entry(struct udev_enumerate *udev_enumerate) {
     struct stub_udev_enumerate *enumerate = (struct stub_udev_enumerate *)udev_enumerate;
-    return enumerate && enumerate->graphics && access("/dev/fb0", F_OK) == 0
+    return enumerate && enumerate->graphics
         ? (struct udev_list_entry *)&g_graphics_entry : NULL;
 }
 

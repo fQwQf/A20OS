@@ -3,6 +3,10 @@
 # Usage: user/wayland/install-image.sh <fat32.img> [ARCH] [media.mp4]
 set -euo pipefail
 
+# A second GUI build must fail quickly instead of leaving the terminal waiting
+# inside mtools while another process owns the image.
+export MTOOLS_LOCK_TIMEOUT=${MTOOLS_LOCK_TIMEOUT:-5}
+
 IMG=$1
 ARCH=${2:-riscv64}
 USER_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -21,7 +25,7 @@ copy_file() { # copy_file <src> <dst-path-in-image>
     for p in "${part[@]}"; do
         [ -n "$p" ] || continue
         cur="$cur/$p"
-        mmd -i "$IMG" "$cur" >/dev/null 2>&1 || true
+        mmd -D s -i "$IMG" "$cur" >/dev/null 2>&1 || true
     done
     mcopy -o -i "$IMG" "$src" "::${dst}"
 }
@@ -186,8 +190,8 @@ path=/bin/run-player.sh
 '
 printf '%s' "$WESTON_CONFIG" | \
     mcopy -o -i "$IMG" - ::/etc/xdg/weston/weston.ini 2>/dev/null || {
-    mmd -i "$IMG" ::/etc/xdg >/dev/null 2>&1 || true
-    mmd -i "$IMG" ::/etc/xdg/weston >/dev/null 2>&1 || true
+    mmd -D s -i "$IMG" ::/etc/xdg >/dev/null 2>&1 || true
+    mmd -D s -i "$IMG" ::/etc/xdg/weston >/dev/null 2>&1 || true
     printf '%s' "$WESTON_CONFIG" | \
         mcopy -o -i "$IMG" - ::/etc/xdg/weston/weston.ini
 }
