@@ -115,15 +115,13 @@ if [ -f "$SYSROOT/bin/weston-terminal" ]; then
 fi
 if [ -f "$SYSROOT/libexec/weston-desktop-shell" ]; then
     copy_file "$SYSROOT/libexec/weston-desktop-shell" /libexec/weston-desktop-shell
-fi
-if [ -f "$SYSROOT/bin/a20-desktop-shell" ]; then
+elif [ -f "$SYSROOT/bin/a20-desktop-shell" ]; then
     copy_file "$SYSROOT/bin/a20-desktop-shell" /libexec/weston-desktop-shell
-fi
-if [ -f "$SYSROOT/bin/a20-input-method" ]; then
-    copy_file "$SYSROOT/bin/a20-input-method" /libexec/weston-keyboard
 fi
 if [ -f "$SYSROOT/libexec/weston-keyboard" ]; then
     copy_file "$SYSROOT/libexec/weston-keyboard" /libexec/weston-keyboard
+elif [ -f "$SYSROOT/bin/a20-input-method" ]; then
+    copy_file "$SYSROOT/bin/a20-input-method" /libexec/weston-keyboard
 fi
 
 echo "[image] weston data"
@@ -185,7 +183,7 @@ background-color=0xff002244
 icon=/bin/share/weston/terminal.png
 path=/bin/weston-terminal
 [launcher]
-icon=/bin/share/weston/fullscreen.png
+icon=/bin/share/weston/icon_editor.png
 path=/bin/run-player.sh
 '
 printf '%s' "$WESTON_CONFIG" | \
@@ -211,6 +209,8 @@ export FONTCONFIG_FILE=/bin/etc/fonts/fonts.conf
 export WESTON_DATA_DIR=/bin/share/weston
 export XCURSOR_PATH=/bin/share/icons
 export XCURSOR_THEME=Breeze
+unset WESTON_LIBINPUT_UDEV
+export WESTON_LIBINPUT_DEVICE=/dev/event0
 chmod 700 /tmp
 mkdir -p /tmp/fontconfig
 export WESTON_MODULE_MAP="fbdev-backend.so=/bin/lib/libweston-9/fbdev-backend.so;kiosk-shell.so=/bin/lib/weston/kiosk-shell.so;desktop-shell.so=/bin/lib/weston/desktop-shell.so;weston-desktop-shell=/bin/libexec/weston-desktop-shell;weston-keyboard=/bin/libexec/weston-keyboard"
@@ -228,6 +228,8 @@ export FONTCONFIG_FILE=/bin/etc/fonts/fonts.conf
 export WESTON_DATA_DIR=/bin/share/weston
 export XCURSOR_PATH=/bin/share/icons
 export XCURSOR_THEME=Breeze
+unset WESTON_LIBINPUT_UDEV
+export WESTON_LIBINPUT_DEVICE=/dev/event0
 chmod 700 /tmp
 mkdir -p /tmp/fontconfig
 export WESTON_MODULE_MAP="fbdev-backend.so=/bin/lib/libweston-9/fbdev-backend.so;kiosk-shell.so=/bin/lib/weston/kiosk-shell.so;desktop-shell.so=/bin/lib/weston/desktop-shell.so;weston-desktop-shell=/bin/libexec/weston-desktop-shell;weston-keyboard=/bin/libexec/weston-keyboard"
