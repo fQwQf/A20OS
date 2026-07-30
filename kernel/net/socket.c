@@ -59,6 +59,9 @@ net_socket_t *net_find_bound_socket_locked(int domain, int type,
             net_socket_t *s = g_sockets[i];
             if (!s || !s->bound || s->domain != domain || s->type != type)
                 continue;
+            if ((type == SOCK_STREAM || type == SOCK_SEQPACKET) &&
+                s->connected && !s->listening)
+                continue;
             if (s->local_len == addrlen && memcmp(s->local, addr, addrlen) == 0)
                 return s;
         }

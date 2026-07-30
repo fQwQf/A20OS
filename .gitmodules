@@ -50,3 +50,6 @@
 [submodule "user/external/libdrm"]
 	path = user/external/libdrm
 	url = https://gitlab.freedesktop.org/mesa/drm.git
+[submodule "user/external/ffmpeg"]
+	path = user/external/ffmpeg
+	url = https://github.com/FFmpeg/FFmpeg.git

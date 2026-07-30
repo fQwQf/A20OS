@@ -176,7 +176,10 @@ int main(void)
         printf("[init] starting desktop\n");
         desktop_pid = fork();
         if (desktop_pid == 0) {
-            if (access("/bin/run-desktop.sh", F_OK) == 0) {
+            if (access("/bin/wayland-session", X_OK) == 0) {
+                char *desktop_argv[] = {"wayland-session", NULL};
+                execve("/bin/wayland-session", desktop_argv, envp);
+            } else if (access("/bin/run-desktop.sh", F_OK) == 0) {
                 char *desktop_argv[] = {
                     "mksh", "/bin/run-desktop.sh", NULL
                 };

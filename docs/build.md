@@ -49,6 +49,17 @@ docker run -it --rm -v $(pwd):/workspace -w /workspace a20os-buildenv bash
 - `NR_CPUS`: 默认 `1`；已验证的 64 位 QEMU virt 平台可直接配置为大于 `1`。
 - `NOMMU`: `1` 开启 NOMMU 模式。
 - `QEMU_GUI_AUDIO_DRIVER`: x86_64/LoongArch64 图形 QEMU 的宿主音频 backend；Linux 默认 `pa`，macOS 默认 `coreaudio`，也可设置为 `pipewire`、`alsa`、`sdl` 或 `none`。
+- `GUI_MEDIA`: 写入 GUI 镜像 `/media/demo.mp4` 的 H.264/AAC MP4；默认使用仓库自带的 20 秒测试视频。
+
+## Wayland 媒体播放
+
+`run-gui-riscv64`、`run-gui-aarch64`、`run-gui-x86_64` 和 `run-gui-loongarch64` 会构建并安装 Weston、A20OS SHM desktop helper、精简 FFmpeg 共享库和 `a20-player`。启动后会持久进入 Weston desktop shell；播放器不再由 session 自动启动或退出时关闭桌面，可通过镜像中的 `/bin/run-player.sh` 启动。
+
+```bash
+make run-gui-x86_64 GUI_MEDIA=/path/to/video.mp4
+```
+
+播放器支持本地 MP4 中的 H.264 视频和 AAC 音频，视频使用 Wayland SHM，音频自动寻找 `/dev/audioN` PCM 设备，并重采样为 48 kHz 双声道 S16_LE。没有 PCM 设备的架构会继续静音播放视频。
 
 ## QEMU 音频
 
