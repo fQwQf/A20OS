@@ -321,10 +321,14 @@ int main(int argc, char **argv)
         if (saved_errno)
             fprintf(stderr, "audioplay: playback failed: %s\n",
                     strerror(saved_errno));
-    } else {
-        printf("audioplay: playback complete\n");
     }
-    close(audio_fd);
+    if (close(audio_fd) < 0 && result == 0) {
+        fprintf(stderr, "audioplay: drain on close failed: %s\n",
+                strerror(errno));
+        result = -1;
+    }
+    if (result == 0)
+        printf("audioplay: playback complete\n");
     if (input_fd >= 0)
         close(input_fd);
     return result < 0 ? 1 : 0;

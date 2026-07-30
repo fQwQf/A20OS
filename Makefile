@@ -121,13 +121,14 @@ EXT4_IMAGE_MB ?= 128
 EXTRA_IMAGE_MB ?= 1024
 WAYLAND_GUI_ARCHES := riscv64 loongarch64 aarch64 x86_64
 WAYLAND_GUI ?= $(if $(filter $(ARCH),$(WAYLAND_GUI_ARCHES)),1,0)
-GUI_MEDIA ?= user/external/lvgl/tests/src/test_assets/test_video_birds.mp4
+GUI_MEDIA ?=
+GUI_MEDIA_STAMP = $(BUILD_DIR)/.gui-media-id
 WAYLAND_PLAYER_STAMP = user/build/wayland/$(ARCH)/stamp/player
 WAYLAND_FFMPEG_STAMP = user/build/wayland/$(ARCH)/stamp/ffmpeg
 WAYLAND_STUBS_STAMP = user/build/wayland/$(ARCH)/stamp/stubs
 WAYLAND_WESTON_STAMP = user/build/wayland/$(ARCH)/stamp/weston
 WAYLAND_WESTON_PATCH = user/wayland/patches/weston-a20.patch
-GUI_WAYLAND_DEPS = $(if $(filter 1,$(WAYLAND_GUI)),$(WAYLAND_PLAYER_STAMP) user/wayland/install-image.sh $(GUI_MEDIA),)
+GUI_WAYLAND_DEPS = $(if $(filter 1,$(WAYLAND_GUI)),$(WAYLAND_PLAYER_STAMP) user/wayland/install-image.sh $(if $(strip $(GUI_MEDIA)),$(GUI_MEDIA),),)
 EXTRA_IMG = $(BUILD_DIR)/extra.img
 EXTRA_STAGING_DIR = $(BUILD_DIR)/extra-staging
 EXTRA_IMAGE_STAMP = $(BUILD_DIR)/.extra-image-id
@@ -2044,7 +2045,7 @@ smoke-audio-userspace:
 	wav="$(SMOKE_LOG_DIR)/audio-userspace-x86_64.wav"; \
 	rm -f "$$wav"; \
 	status=0; \
-	{ sleep $(SMOKE_INPUT_DELAY); printf '/bin/audioplay --tone 440 --duration 500\npoweroff\n'; } | \
+	{ sleep $(SMOKE_INPUT_DELAY); printf '/bin/audioplay --tone 440 --duration 5000\npoweroff\n'; } | \
 	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-x86_64 \
 		-machine q35 -m 1G -nographic -smp 1 -no-reboot -snapshot \
 		-drive file=.kernel-build/x86_64-qemu-virt-x86_64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
@@ -2053,13 +2054,15 @@ smoke-audio-userspace:
 		-device intel-hda -device hda-duplex,audiodev=audio0 \
 		-kernel .kernel-build/x86_64-qemu-virt-x86_64-linux-dev/kernel.elf \
 		> "$$log" 2>&1 || status=$$?; \
-	if grep -q 'audioplay: 440 Hz for 500 ms -> /dev/audio' "$$log" && \
+	if grep -q 'audioplay: 440 Hz for 5000 ms -> /dev/audio' "$$log" && \
 	   grep -q 'audioplay: playback complete' "$$log" && \
+	   grep -q '\[HDA\] playback starts=1 underruns=0' "$$log" && \
 	   grep -q "bound to driver 'hda'" "$$log" && \
 	   grep -q 'System is going down for power-off NOW' "$$log" && \
 	   ! grep -q 'audioplay: playback failed' "$$log" && \
 	   ! grep -qi 'panic' "$$log" && \
-	   python3 scripts/check_wav_pcm.py "$$wav"; then \
+	   python3 scripts/check_wav_pcm.py --max-delta 1000 \
+	       --min-frames 200000 "$$wav"; then \
 		echo "smoke-audio-userspace: PASS; log=$$log wav=$$wav"; \
 	else \
 		echo "smoke-audio-userspace: failed with status $$status; tail of $$log:"; \
@@ -2294,7 +2297,20 @@ $(WAYLAND_PLAYER_STAMP): user/wayland/build.sh user/wayland/player.c \
 	@rm -f $(WAYLAND_PLAYER_STAMP)
 	user/wayland/build.sh $(ARCH)
 
-$(GUI_FAT32_IMG): $(FAT32_IMG) $(GUI_WAYLAND_DEPS)
+$(GUI_MEDIA_STAMP): FORCE
+	@mkdir -p $(dir $@)
+	@set -e; \
+	tmp="$@.tmp.$$$$"; \
+	trap 'rm -f "$$tmp"' EXIT INT TERM; \
+	printf '%s\n' '$(GUI_MEDIA)' > "$$tmp"; \
+	if [ -f "$@" ] && cmp -s "$$tmp" "$@"; then \
+		rm -f "$$tmp"; \
+	else \
+		mv -f "$$tmp" "$@"; \
+	fi; \
+	trap - EXIT INT TERM
+
+$(GUI_FAT32_IMG): $(FAT32_IMG) $(GUI_WAYLAND_DEPS) $(GUI_MEDIA_STAMP)
 	@set -e; \
 	lock="$(GUI_FAT32_IMG).lock"; \
 	tmp="$(GUI_FAT32_IMG).tmp.$$$$"; \

@@ -790,9 +790,19 @@ static long devfs_class_lseek(vfile_t *vf, long offset, int whence)
 
 static int devfs_class_close(vfile_t *vf)
 {
-    if (vf && vf->priv)
-        class_device_put((class_device_t *)vf->priv);
-    return 0;
+    class_device_t *cdev = vf ? (class_device_t *)vf->priv : NULL;
+    int ret = 0;
+    if (cdev && cdev->class_type == DEV_CLASS_AUDIO &&
+        class_device_call_begin(cdev) == 0) {
+        device_t *dev = cdev->dev;
+        const audio_dev_ops_t *ops = dev->drv->class_ops;
+        if (ops->close)
+            ret = ops->close(dev);
+        class_device_call_end(cdev);
+    }
+    if (cdev)
+        class_device_put(cdev);
+    return ret;
 }
 
 static vfile_ops_t g_devfs_class_ops = {
