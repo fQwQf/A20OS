@@ -136,9 +136,11 @@ static void rv64_reboot(void) {
 }
 
 extern void virtio_mmio_enumerate(uintptr_t base, int max_slots, int irq_base);
+extern void pci_enumerate(uintptr_t ecam_base, int bus_start, int bus_end);
 
 static void rv64_enumerate_devices(void) {
     virtio_mmio_enumerate(VIRTIO_BASE, 8, 1);
+    pci_enumerate(PCIE_ECAM_BASE, 0, 1);
 }
 
 static const board_config_t qemu_virt_rv64 = {

@@ -94,6 +94,12 @@ _start:
     add     t3, t0, t2
     sd      t1, 0(t3)
 
+    /* QEMU virt PCIe MMIO window: PA 1GB..2GB. */
+    li      t1, 0x100000AF
+    li      t2, 257*8
+    add     t3, t0, t2
+    sd      t1, 0(t3)
+
     j       .enable_mmu
 
 .enable_mmu:
