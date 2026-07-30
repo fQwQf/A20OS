@@ -38,6 +38,10 @@ VFS/ABI 层负责用户地址检查和 `copy_to_user/copy_from_user`。class ops
 
 `/dev/event0` 是聚合器，不是严格的一设备一节点 evdev。它枚举 `DEV_CLASS_INPUT`（例如 xHCI）并合并 VirtIO input 事件。新 input 类驱动实现 `read/poll` 即可被发现。事件必须是完整 `struct input_event`；class read 在无事件时返回 `-EAGAIN`，不得让适配器依赖硬件私有 getter。
 
+## Audio
+
+每个 `DEV_CLASS_AUDIO` 实例自动发布一个 `/dev/audioN`。devfs 只负责断开检查、用户 buffer 转换和 class op 转发，不应包含 HDA、PC Speaker 或其他硬件策略。客户端必须先查询 capability；PCM fd 的正常 close 会调用驱动 close 操作完成 drain，立即中止则使用 STOP。完整 ABI 见 [音频与 Intel HDA](audio.md)。
+
 ## Block 与 network
 
 network 由 `lwip_stack.c` 枚举 `DEV_CLASS_NET`，没有网卡字符节点。文件系统适配器负责把 `DEV_CLASS_BLOCK` 接入挂载请求；驱动只实现 class ops，不创建挂载节点或私有 getter。

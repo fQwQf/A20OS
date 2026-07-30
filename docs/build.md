@@ -49,7 +49,7 @@ docker run -it --rm -v $(pwd):/workspace -w /workspace a20os-buildenv bash
 - `NR_CPUS`: 默认 `1`；已验证的 64 位 QEMU virt 平台可直接配置为大于 `1`。
 - `NOMMU`: `1` 开启 NOMMU 模式。
 - `QEMU_GUI_AUDIO_DRIVER`: RISC-V/x86_64/LoongArch64 图形 QEMU 的宿主音频 backend；Linux 默认 `pa`，macOS 默认 `coreaudio`，也可设置为 `pipewire`、`alsa`、`sdl` 或 `none`。
-- `GUI_MEDIA`: 写入 GUI 镜像 `/media/demo.mp4` 的 H.264/AAC MP4；默认使用仓库自带的 20 秒测试视频。
+- `GUI_MEDIA`: 可选的 H.264/AAC MP4。仅在命令行显式设置时写入 GUI 镜像的 `/media/demo.mp4`；未设置时桌面和播放器仍会安装，但不会创建默认媒体或播放器 launcher。
 
 ## Wayland 媒体播放
 
@@ -59,18 +59,20 @@ docker run -it --rm -v $(pwd):/workspace -w /workspace a20os-buildenv bash
 make run-gui-x86_64 GUI_MEDIA=/path/to/video.mp4
 ```
 
+未设置 `GUI_MEDIA` 时，`run-player.sh` 不带参数会显示用法；仍可执行 `run-player.sh /path/to/video.mp4` 播放镜像中其他位置的媒体。显式指定但文件不存在时，镜像构建会失败，而不是静默换用测试素材。
+
 播放器支持本地 MP4 中的 H.264 视频和 AAC 音频，视频使用 Wayland SHM，音频自动寻找 `/dev/audioN` PCM 设备，并重采样为 48 kHz 双声道 S16_LE。没有 PCM 设备的架构会继续静音播放视频。
 
 ## QEMU 音频
 
-`make run-gui-x86_64` 和 `make run-gui-loongarch64` 会挂载标准 Intel HDA controller 与 duplex codec。启动后可在终端直接验证 PCM 输出：
+`make run-gui-riscv64`、`make run-gui-x86_64` 和 `make run-gui-loongarch64` 会挂载标准 Intel HDA controller 与 duplex codec。启动后可在终端直接验证 PCM 输出：
 
 ```bash
 audioplay --tone 440
 audioplay music.wav
 ```
 
-WAV 输入必须是 48 kHz、双声道、S16_LE PCM；原始 PCM 使用 `audioplay --raw file.pcm`。播放器通过 `GET_CAPS` 自动寻找 PCM 设备，不假定 HDA 的动态编号。宿主使用 PipeWire 而不提供 PulseAudio 兼容服务时，可执行 `make run-gui-x86_64 QEMU_GUI_AUDIO_DRIVER=pipewire`。
+WAV 输入必须是 48 kHz、双声道、S16_LE PCM；原始 PCM 使用 `audioplay --raw file.pcm`。播放器通过 `GET_CAPS` 自动寻找 PCM 设备，不假定 HDA 的动态编号。PCM 客户端可使用 `A20_AUDIO_IOCTL_DRAIN` 等待已提交音频播放完毕，关闭设备时也会自动 drain。宿主使用 PipeWire 而不提供 PulseAudio 兼容服务时，可执行 `make run-gui-x86_64 QEMU_GUI_AUDIO_DRIVER=pipewire`。
 
 ##  注意
 
