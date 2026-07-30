@@ -124,6 +124,7 @@ WAYLAND_GUI ?= $(if $(filter $(ARCH),$(WAYLAND_GUI_ARCHES)),1,0)
 GUI_MEDIA ?= user/external/lvgl/tests/src/test_assets/test_video_birds.mp4
 WAYLAND_PLAYER_STAMP = user/build/wayland/$(ARCH)/stamp/player
 WAYLAND_FFMPEG_STAMP = user/build/wayland/$(ARCH)/stamp/ffmpeg
+WAYLAND_STUBS_STAMP = user/build/wayland/$(ARCH)/stamp/stubs
 GUI_WAYLAND_DEPS = $(if $(filter 1,$(WAYLAND_GUI)),$(WAYLAND_PLAYER_STAMP) user/wayland/install-image.sh $(GUI_MEDIA),)
 EXTRA_IMG = $(BUILD_DIR)/extra.img
 EXTRA_STAGING_DIR = $(BUILD_DIR)/extra-staging
@@ -2266,6 +2267,7 @@ $(FAT32_IMG): $(USER_BUILD_STAMP) $(NATIVE_BUILD_STAMP) \
 # init uses this marker to replace the serial shell with the LVGL desktop.
 $(WAYLAND_PLAYER_STAMP): user/wayland/build.sh user/wayland/player.c \
 		user/wayland/desktop-shell.c user/wayland/input-method.c \
+		user/wayland/stub/udev.c user/wayland/stub/mtdev.c \
 		user/cmds/wayland-session.c \
 		user/external/ffmpeg/configure kernel/include/uapi/a20/audio.h
 	@if [ ! -f $(WAYLAND_FFMPEG_STAMP) ] || \
@@ -2273,16 +2275,29 @@ $(WAYLAND_PLAYER_STAMP): user/wayland/build.sh user/wayland/player.c \
 		[ user/external/ffmpeg/configure -nt $(WAYLAND_FFMPEG_STAMP) ]; then \
 		rm -f $(WAYLAND_FFMPEG_STAMP); \
 	fi
+	@if [ ! -f $(WAYLAND_STUBS_STAMP) ] || \
+		[ user/wayland/stub/udev.c -nt $(WAYLAND_STUBS_STAMP) ] || \
+		[ user/wayland/stub/mtdev.c -nt $(WAYLAND_STUBS_STAMP) ]; then \
+		rm -f $(WAYLAND_STUBS_STAMP); \
+	fi
 	@rm -f $(WAYLAND_PLAYER_STAMP)
 	user/wayland/build.sh $(ARCH)
 
 $(GUI_FAT32_IMG): $(FAT32_IMG) $(GUI_WAYLAND_DEPS)
-	cp $(FAT32_IMG) $(GUI_FAT32_IMG)
-	@printf '1\n' | mcopy -o -i $(GUI_FAT32_IMG) - ::/etc/a20-gui
-	@printf '1\n' | mcopy -o -i $(GUI_FAT32_IMG) - ::/a20-gui
-	@if [ "$(WAYLAND_GUI)" = 1 ]; then \
-		user/wayland/install-image.sh $(GUI_FAT32_IMG) $(ARCH) "$(GUI_MEDIA)"; \
-	fi
+	@set -e; \
+	lock="$(GUI_FAT32_IMG).lock"; \
+	tmp="$(GUI_FAT32_IMG).tmp.$$$$"; \
+	exec 9>"$$lock"; \
+	flock 9; \
+	trap 'rm -f "$$tmp"' EXIT INT TERM; \
+	cp "$(FAT32_IMG)" "$$tmp"; \
+	printf '1\n' | mcopy -o -i "$$tmp" - ::/etc/a20-gui; \
+	printf '1\n' | mcopy -o -i "$$tmp" - ::/a20-gui; \
+	if [ "$(WAYLAND_GUI)" = 1 ]; then \
+		user/wayland/install-image.sh "$$tmp" $(ARCH) "$(GUI_MEDIA)"; \
+	fi; \
+	mv -f "$$tmp" "$(GUI_FAT32_IMG)"; \
+	trap - EXIT INT TERM
 
 $(FS_TEST_IMG): $(FAT32_IMG)
 	cp $(FAT32_IMG) $(FS_TEST_IMG)
