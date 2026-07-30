@@ -3,8 +3,9 @@
 #
 # Usage: user/wayland/build.sh [ARCH] [phase ...]
 #   ARCH: riscv64 (default)
-#   phase: musl wayland-native wayland protocols pixman xkbcommon libevdev
-#          stubs libdrm libinput weston image
+#   phase: musl wayland-native wayland protocols pixman xkeyboard-config
+#          xkbcommon libevdev
+#          stubs libdrm libinput weston ffmpeg player
 #   No phase = build everything in dependency order.
 #
 # Layout:
@@ -33,6 +34,23 @@ ARCH_CFLAGS_riscv64="-mcmodel=medany -march=rv64g -mabi=lp64d"
 CPU_FAMILY_riscv64=riscv64
 MUSL_TARGET_riscv64=riscv64
 
+CROSS_loongarch64=loongarch64-linux-gnu-
+ARCH_CFLAGS_loongarch64="-march=loongarch64 -mabi=lp64d"
+CPU_FAMILY_loongarch64=loongarch64
+MUSL_TARGET_loongarch64=loongarch64
+
+CROSS_aarch64=aarch64-linux-gnu-
+ARCH_CFLAGS_aarch64="-march=armv8-a"
+CPU_FAMILY_aarch64=aarch64
+MUSL_TARGET_aarch64=aarch64
+
+CROSS_x86_64=x86_64-linux-gnu-
+ARCH_CFLAGS_x86_64="-m64"
+CPU_FAMILY_x86_64=x86_64
+MUSL_TARGET_x86_64=x86_64
+LIBFFI_HOST_x86_64=x86_64-linux-musl
+UAPI_ASM_x86_64=/usr/include/x86_64-linux-gnu/asm
+
 CROSS_VAR=CROSS_$ARCH
 CROSS=${CROSS:-${!CROSS_VAR}}
 CC=${CROSS}gcc
@@ -43,6 +61,10 @@ CPU_FAMILY_VAR=CPU_FAMILY_$ARCH
 CPU_FAMILY=${!CPU_FAMILY_VAR}
 MUSL_TARGET_VAR=MUSL_TARGET_$ARCH
 MUSL_TARGET=${!MUSL_TARGET_VAR}
+LIBFFI_HOST_VAR=LIBFFI_HOST_$ARCH
+LIBFFI_HOST=${!LIBFFI_HOST_VAR:-$MUSL_TARGET-linux-gnu}
+UAPI_ASM_VAR=UAPI_ASM_$ARCH
+UAPI_ASM=${!UAPI_ASM_VAR:-/usr/$MUSL_TARGET-linux-gnu/include/asm}
 DYNLINKER=/lib/ld-musl-$MUSL_TARGET.so.1
 
 export PATH=$HOME/.local/bin:$HOME/.local/rootfs/usr/bin:$PATH
@@ -52,8 +74,9 @@ export M4=$HOME/.local/rootfs/usr/bin/m4
 WANT_ALL=0
 if [ ${#PHASES[@]} -eq 0 ]; then
     WANT_ALL=1
-    PHASES=(musl wayland-native libffi wayland protocols pixman xkbcommon \
-            libevdev stubs libdrm libinput weston)
+    PHASES=(musl wayland-native libffi wayland protocols pixman \
+            xkeyboard-config xkbcommon \
+            libevdev stubs libdrm libinput weston ffmpeg player)
 fi
 
 want() {
@@ -84,6 +107,7 @@ if want musl && ! stamp musl; then
         CC="$CC" CROSS_COMPILE="$CROSS" \
         CFLAGS="-O2 $ARCH_CFLAGS")
     env -u ARCH make -C "$MUSL_SH" -j"$(nproc)"
+    env -u ARCH make -C "$MUSL_SH" install
     mark musl
 fi
 
@@ -167,17 +191,20 @@ meson_pkg() {
 # ---------------------------------------------------------------- libffi
 if want libffi && ! stamp libffi; then
     echo "=== libffi ==="
+    mkdir -p "$SYSROOT/include/linux"
+    cp /usr/include/linux/limits.h "$SYSROOT/include/linux/limits.h"
     SRC=$BUILD/libffi-3.4.6
     OB=$B/build-libffi
     rm -rf "$OB" && mkdir -p "$OB"
     (cd "$OB" && "$SRC/configure" \
-        --host="$MUSL_TARGET-linux-gnu" \
+        --host="$LIBFFI_HOST" \
         --prefix="$SYSROOT" --libdir="$SYSROOT/lib" \
         --includedir="$SYSROOT/include" \
-        --disable-static --disable-docs \
-        CC="$MUSL_GCC" CFLAGS="-O2 -fPIC")
-    make -C "$OB" -j"$(nproc)"
-    make -C "$OB" install
+        --disable-static --disable-docs --disable-exec-static-tramp \
+        CC="$MUSL_GCC" CFLAGS="-O2 -fPIC" \
+        CPPFLAGS="-I$SYSROOT/include")
+    env -u ARCH -u MAKEFLAGS make -C "$OB" -j"$(nproc)"
+    env -u ARCH -u MAKEFLAGS make -C "$OB" install
     # libffi installs headers into lib/libffi-3.4.6/include; move them out
     if [ -d "$SYSROOT/lib/libffi-3.4.6/include" ]; then
         cp "$SYSROOT/lib/libffi-3.4.6/include/"*.h "$SYSROOT/include/"
@@ -215,6 +242,16 @@ if want pixman && ! stamp pixman; then
     mark pixman
 fi
 
+# ------------------------------------------------------ xkeyboard-config
+if want xkeyboard-config && ! stamp xkeyboard-config; then
+    echo "=== xkeyboard-config (native data) ==="
+    rm -rf "$USER_DIR/build/xkeyboard-config"
+    meson setup "$USER_DIR/build/xkeyboard-config" \
+        "$USER_DIR/external/xkeyboard-config"
+    ninja -C "$USER_DIR/build/xkeyboard-config"
+    mark xkeyboard-config
+fi
+
 # ------------------------------------------------------------ libxkbcommon
 if want xkbcommon && ! stamp xkbcommon; then
     echo "=== libxkbcommon ==="
@@ -231,7 +268,10 @@ fi
 if want libevdev && ! stamp libevdev; then
     echo "=== libevdev (manual) ==="
     # linux/input.h UAPI headers (musl does not ship them)
-    mkdir -p "$SYSROOT/include/linux"
+    mkdir -p "$SYSROOT/include"
+    cp -R /usr/include/linux /usr/include/asm-generic "$SYSROOT/include/"
+    rm -rf "$SYSROOT/include/asm"
+    cp -RL "$UAPI_ASM" "$SYSROOT/include/asm"
     for h in input.h input-event-codes.h uinput.h; do
         [ -f "/usr/$MUSL_TARGET-linux-gnu/include/linux/$h" ] && \
             cp "/usr/$MUSL_TARGET-linux-gnu/include/linux/$h" \
@@ -316,6 +356,7 @@ Version: 243
 Libs: -L\${libdir} -ludev
 Cflags: -I\${includedir}
 EOF
+    cp "$WL_DIR/stub/mtdev.h" "$SYSROOT/include/mtdev-plumbing.h"
     "$MUSL_GCC" -O2 -fPIC -I"$WL_DIR/stub" -I"$SYSROOT/include" \
         -c "$WL_DIR/stub/mtdev.c" -o "$OB/mtdev.o"
     "$MUSL_GCC" -shared -Wl,-soname,libmtdev.so.1 \
@@ -323,7 +364,6 @@ EOF
     cp "$OB/libmtdev.so.1.1.6" "$SYSROOT/lib/"
     ln -sf libmtdev.so.1.1.6 "$SYSROOT/lib/libmtdev.so.1"
     ln -sf libmtdev.so.1.1.6 "$SYSROOT/lib/libmtdev.so"
-    cp "$WL_DIR/stub/mtdev.h" "$SYSROOT/include/mtdev-plumbing.h"
     sed -i 's|#include "mtdev.h"|#include <mtdev-plumbing.h>|' "$SYSROOT/include/mtdev-plumbing.h"
     cat > "$SYSROOT/lib/pkgconfig/mtdev.pc" <<EOF
 prefix=$SYSROOT
@@ -388,6 +428,80 @@ if want weston && ! stamp weston; then
         -Dsimple-clients=shm -Ddemo-clients=false -Dtools= \
         -Dwcap-decode=false -Dtest-junit-xml=false
     mark weston
+fi
+
+# ---------------------------------------------------------------- ffmpeg
+if want ffmpeg && ! stamp ffmpeg; then
+    echo "=== ffmpeg ==="
+    SRC=$USER_DIR/external/ffmpeg
+    OB=$B/build-ffmpeg
+    rm -rf "$OB" && mkdir -p "$OB"
+    # FFmpeg 7.1 H.264 SEI shares its AOM film-grain object with HEVC.
+    (cd "$OB" && "$SRC/configure" \
+        --prefix="$SYSROOT" --libdir="$SYSROOT/lib" \
+        --arch="$CPU_FAMILY" --target-os=linux --enable-cross-compile \
+        --cross-prefix="$CROSS" --cc="$MUSL_GCC" --ar="$AR" \
+        --strip="${CROSS}strip" \
+        --enable-shared --disable-static --disable-programs \
+        --disable-doc --disable-debug --disable-autodetect \
+        --disable-network --disable-avdevice --disable-avfilter \
+        --disable-postproc --disable-encoders --disable-muxers \
+        --disable-bsfs --disable-protocols --enable-protocol=file \
+        --disable-demuxers --enable-demuxer=mov \
+        --disable-decoders --enable-decoder=h264,aac,hevc \
+        --disable-parsers --enable-parser=h264,aac \
+        --disable-hwaccels --disable-filters --disable-devices \
+        --disable-iconv --disable-zlib --disable-bzlib --disable-lzma \
+        --disable-asm --disable-inline-asm --disable-neon --enable-pthreads \
+        --extra-cflags="-O2 -fPIC -I$SYSROOT/include" \
+        --extra-ldflags="-L$SYSROOT/lib")
+    env -u ARCH -u MAKEFLAGS make -C "$OB" -j"$(nproc)"
+    env -u ARCH -u MAKEFLAGS make -C "$OB" install
+    mark ffmpeg
+fi
+
+# ----------------------------------------------------------- media player
+if want player && ! stamp player; then
+    echo "=== a20-player ==="
+    OB=$B/build-player
+    rm -rf "$OB" && mkdir -p "$OB"
+    SCANNER=$HOST_TOOLS/wayland/bin/wayland-scanner
+    XDG_XML=$SYSROOT/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml
+    "$SCANNER" client-header "$XDG_XML" "$OB/xdg-shell-client-protocol.h"
+    "$SCANNER" private-code "$XDG_XML" "$OB/xdg-shell-protocol.c"
+    DESKTOP_XML=$USER_DIR/external/weston/protocol/weston-desktop-shell.xml
+    "$SCANNER" client-header "$DESKTOP_XML" \
+        "$OB/weston-desktop-shell-client-protocol.h"
+    "$SCANNER" private-code "$DESKTOP_XML" \
+        "$OB/weston-desktop-shell-protocol.c"
+    mkdir -p "$SYSROOT/include/uapi/a20" "$SYSROOT/bin"
+    cp "$USER_DIR/../kernel/include/uapi/a20/audio.h" \
+       "$SYSROOT/include/uapi/a20/audio.h"
+    "$MUSL_GCC" -O2 -D_GNU_SOURCE -I"$OB" -I"$SYSROOT/include" \
+        -c "$WL_DIR/player.c" -o "$OB/player.o"
+    "$MUSL_GCC" -O2 -D_GNU_SOURCE -I"$OB" -I"$SYSROOT/include" \
+        -c "$OB/xdg-shell-protocol.c" -o "$OB/xdg-shell-protocol.o"
+    "$MUSL_GCC" -O2 -D_GNU_SOURCE -I"$OB" -I"$SYSROOT/include" \
+        -c "$WL_DIR/desktop-shell.c" -o "$OB/desktop-shell.o"
+    "$MUSL_GCC" -O2 -D_GNU_SOURCE -I"$OB" -I"$SYSROOT/include" \
+        -c "$OB/weston-desktop-shell-protocol.c" \
+        -o "$OB/weston-desktop-shell-protocol.o"
+    "$MUSL_GCC" -o "$SYSROOT/bin/a20-player" \
+        "$OB/player.o" "$OB/xdg-shell-protocol.o" \
+        -Wl,-rpath-link,"$SYSROOT/lib" \
+        -L"$SYSROOT/lib" -lavformat -lavcodec -lswresample -lswscale \
+         -lavutil -lwayland-client -lffi -lpthread -lm
+    "$MUSL_GCC" -o "$SYSROOT/bin/a20-desktop-shell" \
+        "$OB/desktop-shell.o" "$OB/weston-desktop-shell-protocol.o" \
+        -Wl,-rpath-link,"$SYSROOT/lib" -L"$SYSROOT/lib" \
+        -lwayland-client -lffi -lpthread -lm
+    "$MUSL_GCC" -O2 -D_GNU_SOURCE -I"$SYSROOT/include" \
+        "$WL_DIR/input-method.c" -o "$SYSROOT/bin/a20-input-method" \
+        -Wl,-rpath-link,"$SYSROOT/lib" -L"$SYSROOT/lib" \
+        -lwayland-client -lffi -lpthread -lm
+    "$MUSL_GCC" -O2 -static "$USER_DIR/cmds/wayland-session.c" \
+        -o "$SYSROOT/bin/wayland-session"
+    mark player
 fi
 
 echo "=== done ==="

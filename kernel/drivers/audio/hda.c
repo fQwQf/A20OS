@@ -12,6 +12,7 @@
 #include "core/string.h"
 #include "core/sync.h"
 #include "mm/slab.h"
+#include "proc/proc.h"
 #include "sys/usercopy.h"
 #include "uapi/a20/audio.h"
 
@@ -468,7 +469,7 @@ static int hda_play_chunk(hda_controller_t *hda, const uint8_t *data,
             ret = 0;
             break;
         }
-        mdelay(1);
+        proc_yield();
     }
     writel(readl(hda_stream_reg(hda, HDA_SD_CTL)) & ~HDA_SD_CTL_RUN,
            hda_stream_reg(hda, HDA_SD_CTL));
