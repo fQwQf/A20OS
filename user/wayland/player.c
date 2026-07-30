@@ -4,6 +4,7 @@
 #include <poll.h>
 #include <pthread.h>
 #include <sched.h>
+#include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -19,6 +20,7 @@
 #include <libavutil/channel_layout.h>
 #include <libavutil/error.h>
 #include <libavutil/imgutils.h>
+#include <libavutil/log.h>
 #include <libavutil/samplefmt.h>
 #include <libswresample/swresample.h>
 #include <libswscale/swscale.h>
@@ -31,6 +33,7 @@
 #define AUDIO_SCAN_LIMIT 32
 #define AUDIO_QUEUE_LIMIT (48000U * 4U)
 #define VIDEO_BUFFER_COUNT 3
+#define VIDEO_LATE_FLOOR 0.040
 
 struct video_buffer {
     struct wl_buffer *wl_buffer;
@@ -72,7 +75,9 @@ struct audio_state {
     struct audio_chunk *tail;
     size_t queued;
     int stopping;
+    int aborting;
     int failed;
+    int error;
 };
 
 static double monotonic_seconds(void)
@@ -87,6 +92,15 @@ static void print_av_error(const char *operation, int error)
     char text[AV_ERROR_MAX_STRING_SIZE];
     av_strerror(error, text, sizeof(text));
     fprintf(stderr, "a20-player: %s: %s\n", operation, text);
+}
+
+static void player_log_callback(void *context, int level, const char *format,
+                                va_list args)
+{
+    if (level == AV_LOG_WARNING &&
+        strstr(format, "No accelerated colorspace conversion"))
+        return;
+    av_log_default_callback(context, level, format, args);
 }
 
 static void buffer_release(void *data, struct wl_buffer *buffer)
@@ -317,10 +331,18 @@ static int open_audio_device(void)
     return -1;
 }
 
-static int write_all(int fd, const uint8_t *data, size_t size)
+static int write_all(struct audio_state *audio, const uint8_t *data,
+                     size_t size)
 {
     while (size) {
-        ssize_t count = write(fd, data, size);
+        pthread_mutex_lock(&audio->lock);
+        int aborting = audio->aborting;
+        pthread_mutex_unlock(&audio->lock);
+        if (aborting) {
+            errno = ECANCELED;
+            return -1;
+        }
+        ssize_t count = write(audio->fd, data, size);
         if (count < 0 && errno == EINTR)
             continue;
         if (count <= 0)
@@ -338,6 +360,10 @@ static void *audio_worker(void *opaque)
         pthread_mutex_lock(&audio->lock);
         while (!audio->head && !audio->stopping)
             pthread_cond_wait(&audio->ready, &audio->lock);
+        if (audio->aborting) {
+            pthread_mutex_unlock(&audio->lock);
+            break;
+        }
         if (!audio->head && audio->stopping) {
             pthread_mutex_unlock(&audio->lock);
             break;
@@ -348,14 +374,22 @@ static void *audio_worker(void *opaque)
             audio->tail = NULL;
         pthread_mutex_unlock(&audio->lock);
 
-        if (write_all(audio->fd, chunk->data, chunk->size) < 0)
-            audio->failed = 1;
+        int write_error = 0;
+        if (write_all(audio, chunk->data, chunk->size) < 0)
+            write_error = errno ? errno : EIO;
         pthread_mutex_lock(&audio->lock);
         audio->queued -= chunk->size;
+        if (write_error && !audio->aborting) {
+            audio->failed = 1;
+            audio->error = write_error;
+        }
         pthread_cond_broadcast(&audio->space);
+        pthread_cond_broadcast(&audio->ready);
+        int failed = audio->failed;
+        int aborting = audio->aborting;
         pthread_mutex_unlock(&audio->lock);
         free(chunk);
-        if (audio->failed)
+        if (failed || aborting)
             break;
     }
     return NULL;
@@ -388,11 +422,13 @@ static int audio_enqueue(struct audio_state *audio, const uint8_t *data,
     chunk->size = size;
     memcpy(chunk->data, data, size);
     pthread_mutex_lock(&audio->lock);
-    while (audio->queued + size > AUDIO_QUEUE_LIMIT && !audio->failed)
+    while (audio->queued + size > AUDIO_QUEUE_LIMIT && !audio->failed &&
+           !audio->stopping && !audio->aborting)
         pthread_cond_wait(&audio->space, &audio->lock);
-    if (audio->failed) {
+    if (audio->failed || audio->stopping || audio->aborting) {
         pthread_mutex_unlock(&audio->lock);
         free(chunk);
+        errno = audio->failed && audio->error ? audio->error : ECANCELED;
         return -1;
     }
     if (audio->tail)
@@ -406,17 +442,44 @@ static int audio_enqueue(struct audio_state *audio, const uint8_t *data,
     return 0;
 }
 
-static void audio_stop(struct audio_state *audio)
+static int audio_stop(struct audio_state *audio, int abort_playback)
 {
     if (audio->fd < 0)
-        return;
+        return 0;
     pthread_mutex_lock(&audio->lock);
     audio->stopping = 1;
+    audio->aborting = abort_playback;
     pthread_cond_broadcast(&audio->ready);
+    pthread_cond_broadcast(&audio->space);
     pthread_mutex_unlock(&audio->lock);
+    if (abort_playback)
+        ioctl(audio->fd, A20_AUDIO_IOCTL_STOP, NULL);
     pthread_join(audio->thread, NULL);
+    pthread_mutex_lock(&audio->lock);
+    int failed = audio->failed;
+    int error = audio->error;
+    struct audio_chunk *chunk = audio->head;
+    audio->head = NULL;
+    audio->tail = NULL;
+    audio->queued = 0;
+    pthread_mutex_unlock(&audio->lock);
+    while (chunk) {
+        struct audio_chunk *next = chunk->next;
+        free(chunk);
+        chunk = next;
+    }
+    if (!failed && !abort_playback &&
+        ioctl(audio->fd, A20_AUDIO_IOCTL_DRAIN, NULL) < 0) {
+        failed = 1;
+        error = errno ? errno : EIO;
+    }
     ioctl(audio->fd, A20_AUDIO_IOCTL_STOP, NULL);
     close(audio->fd);
+    audio->fd = -1;
+    if (failed)
+        fprintf(stderr, "a20-player: audio output failed: %s\n",
+                strerror(error));
+    return failed ? -1 : 0;
 }
 
 static AVCodecContext *open_decoder(AVFormatContext *format, int stream_index)
@@ -444,6 +507,7 @@ static double frame_time(const AVFrame *frame, const AVStream *stream)
 
 int main(int argc, char **argv)
 {
+    av_log_set_callback(player_log_callback);
     if (argc != 2) {
         fprintf(stderr, "usage: %s FILE.mp4\n", argv[0]);
         return 2;
@@ -500,7 +564,7 @@ int main(int argc, char **argv)
         av_channel_layout_uninit(&stereo);
         if (error < 0 || swr_init(swr) < 0) {
             fprintf(stderr, "a20-player: cannot initialize audio converter\n");
-            audio_stop(&output);
+            audio_stop(&output, 1);
             output.fd = -1;
             swr_free(&swr);
         }
@@ -512,6 +576,12 @@ int main(int argc, char **argv)
     AVFrame *frame = av_frame_alloc();
     double media_origin = NAN;
     double clock_origin = 0.0;
+    AVRational guessed_rate = av_guess_frame_rate(
+        format, format->streams[video_index], NULL);
+    double frame_interval = guessed_rate.num && guessed_rate.den ?
+                            av_q2d(av_inv_q(guessed_rate)) : VIDEO_LATE_FLOOR;
+    double late_limit = frame_interval > VIDEO_LATE_FLOOR ?
+                        frame_interval : VIDEO_LATE_FLOOR;
     int failed = !packet || !frame;
     while (!failed && !display.closed && av_read_frame(format, packet) >= 0) {
         AVCodecContext *decoder = NULL;
@@ -532,20 +602,25 @@ int main(int argc, char **argv)
         while ((error = avcodec_receive_frame(decoder, frame)) >= 0) {
             if (decoder == video) {
                 double pts = frame_time(frame, format->streams[video_index]);
+                double deadline = NAN;
                 if (!isnan(pts)) {
                     if (isnan(media_origin)) {
                         media_origin = pts;
                         clock_origin = monotonic_seconds();
                     }
-                    double wait = clock_origin + (pts - media_origin) -
-                                  monotonic_seconds();
+                    deadline = clock_origin + (pts - media_origin);
+                    double wait = deadline - monotonic_seconds();
                     while (wait > 0.0 && !display.closed) {
                         int ms = wait > 0.02 ? 20 : (int)(wait * 1000.0);
                         if (display_pump(&display, ms > 0 ? ms : 1) < 0)
                             break;
-                        wait = clock_origin + (pts - media_origin) -
-                               monotonic_seconds();
+                        wait = deadline - monotonic_seconds();
                     }
+                }
+                if (!isnan(deadline) &&
+                    monotonic_seconds() - deadline > late_limit) {
+                    av_frame_unref(frame);
+                    continue;
                 }
                 if (!display.closed && display_frame(&display, sws, frame) < 0)
                     failed = 1;
@@ -560,10 +635,11 @@ int main(int argc, char **argv)
                     failed = 1;
                 } else {
                     int samples = swr_convert(swr, &converted, out_samples,
-                                              (const uint8_t **)frame->extended_data,
-                                              frame->nb_samples);
-                    if (samples < 0 || audio_enqueue(&output, converted,
-                                                     (size_t)samples * 4U) < 0)
+                                               (const uint8_t **)frame->extended_data,
+                                               frame->nb_samples);
+                    if (samples < 0 || (samples > 0 &&
+                        audio_enqueue(&output, converted,
+                                      (size_t)samples * 4U) < 0))
                         failed = 1;
                     av_freep(&converted);
                 }
@@ -577,7 +653,8 @@ int main(int argc, char **argv)
         display_pump(&display, 0);
     }
 
-    audio_stop(&output);
+    if (audio_stop(&output, failed) < 0)
+        failed = 1;
     av_frame_free(&frame);
     av_packet_free(&packet);
     swr_free(&swr);
