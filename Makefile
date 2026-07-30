@@ -310,6 +310,9 @@ QEMU_GUI_DEVICES_loongarch64 := -vga none \
 QEMU_GUI_AUDIO_x86_64 := -audiodev driver=$(QEMU_GUI_AUDIO_DRIVER),id=a20audio \
                          -device intel-hda \
                          -device hda-duplex,audiodev=a20audio
+QEMU_GUI_AUDIO_riscv64 := -audiodev driver=$(QEMU_GUI_AUDIO_DRIVER),id=a20audio \
+                           -device intel-hda \
+                           -device hda-duplex,audiodev=a20audio
 QEMU_GUI_AUDIO_loongarch64 := -audiodev driver=$(QEMU_GUI_AUDIO_DRIVER),id=a20audio \
                               -device intel-hda \
                               -device hda-duplex,audiodev=a20audio
