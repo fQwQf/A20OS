@@ -19,7 +19,8 @@ static void configure_environment(void)
     setenv("WESTON_DATA_DIR", "/bin/share/weston", 1);
     setenv("XCURSOR_PATH", "/bin/share/icons", 1);
     setenv("XCURSOR_THEME", "Breeze", 1);
-    setenv("WESTON_LIBINPUT_UDEV", "1", 1);
+    unsetenv("WESTON_LIBINPUT_UDEV");
+    setenv("WESTON_LIBINPUT_DEVICE", "/dev/event0", 1);
     setenv("WESTON_MODULE_MAP",
            "fbdev-backend.so=/bin/lib/libweston-9/fbdev-backend.so;"
            "kiosk-shell.so=/bin/lib/weston/kiosk-shell.so;"

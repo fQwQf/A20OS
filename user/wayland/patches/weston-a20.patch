@@ -1,13 +1,83 @@
-diff --git a/user/external/breeze b/user/external/breeze
---- a/user/external/breeze
-+++ b/user/external/breeze
-@@ -1 +1 @@
--Subproject commit f122227ffb8e25afbc74f8252d478a14aec28e4b
-+Subproject commit f122227ffb8e25afbc74f8252d478a14aec28e4b-dirty
-diff --git a/user/external/weston b/user/external/weston
-index 015b3b4..04d3ae2 160000
---- a/user/external/weston
-+++ b/user/external/weston
-@@ -1 +1 @@
--Subproject commit 015b3b4d4c05da44a22349ea6e651d1a8f678c59
-+Subproject commit 04d3ae265d8d8f84352c8dac21ec40b2fe07e7d2-dirty
+diff --git a/clients/meson.build b/clients/meson.build
+index 2c016b8..6733567 100644
+--- a/clients/meson.build
++++ b/clients/meson.build
+@@ -4,0 +5 @@ endif
++if not get_option('a20-no-cairo')
+@@ -37,0 +39,3 @@ dep_toytoolkit = declare_dependency(
++else
++dep_toytoolkit = declare_dependency()
++endif
+@@ -318 +322 @@ endif
+-if get_option('shell-desktop')
++if get_option('shell-desktop') and not get_option('a20-no-cairo')
+@@ -359 +363 @@ endif
+-if get_option('shell-ivi')
++if get_option('shell-ivi') and not get_option('a20-no-cairo')
+diff --git a/libweston/libinput-seat.c b/libweston/libinput-seat.c
+index 9801551..8f937f4 100644
+--- a/libweston/libinput-seat.c
++++ b/libweston/libinput-seat.c
+@@ -337,4 +337,23 @@ udev_input_init(struct udev_input *input, struct weston_compositor *c,
+-	input->libinput = libinput_udev_create_context(&libinput_interface,
+-						       input, udev);
+-	if (!input->libinput) {
+-		return -1;
++	if (getenv("WESTON_LIBINPUT_UDEV")) {
++		input->libinput = libinput_udev_create_context(&libinput_interface,
++							       input, udev);
++		if (!input->libinput)
++			return -1;
++		if (libinput_udev_assign_seat(input->libinput, seat_id) != 0) {
++			libinput_unref(input->libinput);
++			return -1;
++		}
++	} else {
++		/* A20OS: no udev device database.  Use the libinput path
++		 * backend with the evdev multiplexer device directly. */
++		const char *a20_dev = getenv("WESTON_LIBINPUT_DEVICE");
++		if (!a20_dev)
++			a20_dev = "/dev/event0";
++		input->libinput = libinput_path_create_context(&libinput_interface,
++							       input);
++		if (!input->libinput)
++			return -1;
++		if (!libinput_path_add_device(input->libinput, a20_dev)) {
++			libinput_unref(input->libinput);
++			return -1;
++		}
+@@ -357,5 +375,0 @@ udev_input_init(struct udev_input *input, struct weston_compositor *c,
+-	if (libinput_udev_assign_seat(input->libinput, seat_id) != 0) {
+-		libinput_unref(input->libinput);
+-		return -1;
+-	}
+-
+diff --git a/meson.build b/meson.build
+index e7d053b..caadbb1 100644
+--- a/meson.build
++++ b/meson.build
+@@ -165,0 +166 @@ subdir('wcap')
++if not get_option('a20-no-cairo')
+@@ -166,0 +168 @@ subdir('tests')
++endif
+diff --git a/meson_options.txt b/meson_options.txt
+index 239bd2d..295d35c 100644
+--- a/meson_options.txt
++++ b/meson_options.txt
+@@ -224,0 +225,6 @@ option(
++option(
++	'a20-no-cairo',
++	type: 'boolean',
++	value: false,
++	description: 'A20OS: skip cairo, toytoolkit and cairo-based clients'
++)
+diff --git a/shared/meson.build b/shared/meson.build
+index 8073dcd..20adeeb 100644
+--- a/shared/meson.build
++++ b/shared/meson.build
+@@ -29,0 +30 @@ srcs_cairo_shared = [
++if not get_option('a20-no-cairo')
+@@ -78,0 +80,3 @@ dep_lib_cairo_shared = declare_dependency(
++else
++dep_lib_cairo_shared = declare_dependency()
++endif

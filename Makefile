@@ -125,6 +125,8 @@ GUI_MEDIA ?= user/external/lvgl/tests/src/test_assets/test_video_birds.mp4
 WAYLAND_PLAYER_STAMP = user/build/wayland/$(ARCH)/stamp/player
 WAYLAND_FFMPEG_STAMP = user/build/wayland/$(ARCH)/stamp/ffmpeg
 WAYLAND_STUBS_STAMP = user/build/wayland/$(ARCH)/stamp/stubs
+WAYLAND_WESTON_STAMP = user/build/wayland/$(ARCH)/stamp/weston
+WAYLAND_WESTON_PATCH = user/wayland/patches/weston-a20.patch
 GUI_WAYLAND_DEPS = $(if $(filter 1,$(WAYLAND_GUI)),$(WAYLAND_PLAYER_STAMP) user/wayland/install-image.sh $(GUI_MEDIA),)
 EXTRA_IMG = $(BUILD_DIR)/extra.img
 EXTRA_STAGING_DIR = $(BUILD_DIR)/extra-staging
@@ -2269,6 +2271,7 @@ $(WAYLAND_PLAYER_STAMP): user/wayland/build.sh user/wayland/player.c \
 		user/wayland/desktop-shell.c user/wayland/input-method.c \
 		user/wayland/stub/udev.c user/wayland/stub/mtdev.c \
 		user/cmds/wayland-session.c \
+		$(WAYLAND_WESTON_PATCH) \
 		user/external/ffmpeg/configure kernel/include/uapi/a20/audio.h
 	@if [ ! -f $(WAYLAND_FFMPEG_STAMP) ] || \
 		[ user/wayland/build.sh -nt $(WAYLAND_FFMPEG_STAMP) ] || \
@@ -2279,6 +2282,11 @@ $(WAYLAND_PLAYER_STAMP): user/wayland/build.sh user/wayland/player.c \
 		[ user/wayland/stub/udev.c -nt $(WAYLAND_STUBS_STAMP) ] || \
 		[ user/wayland/stub/mtdev.c -nt $(WAYLAND_STUBS_STAMP) ]; then \
 		rm -f $(WAYLAND_STUBS_STAMP); \
+	fi
+	@if [ ! -f $(WAYLAND_WESTON_STAMP) ] || \
+		[ user/wayland/build.sh -nt $(WAYLAND_WESTON_STAMP) ] || \
+		[ $(WAYLAND_WESTON_PATCH) -nt $(WAYLAND_WESTON_STAMP) ]; then \
+		rm -f $(WAYLAND_WESTON_STAMP); \
 	fi
 	@rm -f $(WAYLAND_PLAYER_STAMP)
 	user/wayland/build.sh $(ARCH)
