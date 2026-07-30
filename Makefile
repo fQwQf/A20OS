@@ -639,7 +639,9 @@ VBOX_AARCH64_LOAD_ADDRESS ?= 0x08080000ULL
 		native-libc-rv native-libc-la native-libc-aarch64 native-libc-x86_64 native-libc-arm32 native-libc-rv32 native-libc-ppc64le native-libc native-libc-all \
 		eval eval-all eval-rv eval-la \
 		final-eval-rv-cagent final-eval-la-cagent \
-		final-eval-rv-buildstorm final-eval-la-buildstorm
+		final-eval-rv-buildstorm final-eval-la-buildstorm \
+		final-probe-rv-buildstorm-1c final-probe-rv-buildstorm-8c \
+		final-probe-la-buildstorm-1c final-probe-la-buildstorm-8c
 
 FORCE:
 
@@ -863,7 +865,7 @@ check-signal-exit-boundary:
 	@bad=$$(rg -n --pcre2 \
 		'(?:->|\.)(?:sig_blocked|thread_pending|sigsuspend_old_blocked|sigsuspend_active|sigwait_mask|sigwait_active)\b|(?:ss|signal_state)->(?:pending|pending_has_info|pending_info|actions)\b' \
 		kernel --glob '*.c' --glob '!kernel/external/**' | \
-		rg -v '^kernel/(proc/(signal|task)\.c|abi/linux/sys_signal\.c):' || true); \
+		rg -v '^kernel/(proc/(signal|task)\.c|abi/linux/sys_signal\.c|ipc/signalfd\.c):' || true); \
 		test -z "$$bad" || { echo "$$bad"; exit 1; }
 	@rg -Uq 'eventfd_read[\s\S]*proc_park_prepare\(PROC_WAIT_INTERRUPTIBLE' \
 		kernel/ipc/eventfd.c
@@ -2241,6 +2243,7 @@ fs_img: $(FS_TEST_IMG)
 $(FAT32_IMG): $(USER_BUILD_STAMP) $(NATIVE_BUILD_STAMP) \
 		user/contest_init/contest.sh \
 		user/contest_init/final_contest.sh \
+		user/contest_init/buildstorm_probe.sh \
 		user/contest_init/run_ltp_resume.sh \
 		user/contest_init/ltp_blacklist.txt
 	@echo "Building FAT32 image..."
@@ -2268,6 +2271,7 @@ $(FAT32_IMG): $(USER_BUILD_STAMP) $(NATIVE_BUILD_STAMP) \
 	@printf 'Hello from A20OS FAT32!\n' | mcopy -i $(FAT32_IMG) - ::/test.txt
 	mcopy -o -i $(FAT32_IMG) user/contest_init/contest.sh ::/contest.sh
 	mcopy -o -i $(FAT32_IMG) user/contest_init/final_contest.sh ::/final_contest.sh
+	mcopy -o -i $(FAT32_IMG) user/contest_init/buildstorm_probe.sh ::/buildstorm_probe.sh
 	mcopy -o -i $(FAT32_IMG) user/contest_init/run_ltp_resume.sh ::/run_ltp_resume.sh
 	mcopy -o -i $(FAT32_IMG) user/contest_init/ltp_blacklist.txt ::/etc/ltp_blacklist.txt
 
@@ -3278,7 +3282,7 @@ define RUN_FINAL_EVAL
 	FINAL_EVAL_IMAGE_DIR="$(FINAL_EVAL_IMAGE_DIR)" \
 	FINAL_EVAL_STATE_DIR="$(FINAL_EVAL_STATE_DIR)" \
 	$(if $(strip $(FINAL_EVAL_TIMEOUT)),FINAL_EVAL_TIMEOUT="$(FINAL_EVAL_TIMEOUT)") \
-	bash ./scripts/run_final_eval.sh $(1) $(2)
+	bash ./scripts/run_final_eval.sh $(1) $(2) $(3) $(4)
 endef
 
 final-eval-rv-cagent:
@@ -3292,3 +3296,33 @@ final-eval-rv-buildstorm:
 
 final-eval-la-buildstorm:
 	$(call RUN_FINAL_EVAL,loongarch64,buildstorm)
+
+final-probe-rv-buildstorm-1c:
+	$(call RUN_FINAL_EVAL,riscv64,buildstorm-probe,1)
+
+final-probe-rv-buildstorm-8c:
+	$(call RUN_FINAL_EVAL,riscv64,buildstorm-probe,8)
+
+final-probe-la-buildstorm-1c:
+	$(call RUN_FINAL_EVAL,loongarch64,buildstorm-probe,1)
+
+final-probe-la-buildstorm-8c:
+	$(call RUN_FINAL_EVAL,loongarch64,buildstorm-probe,8)
+
+final-stage4-rv-buildstorm-1c:
+	$(call RUN_FINAL_EVAL,riscv64,buildstorm-probe,1,stage4-cargo-minibuild)
+
+final-stage4-rv-buildstorm-8c:
+	$(call RUN_FINAL_EVAL,riscv64,buildstorm-probe,8,stage4-cargo-minibuild)
+
+final-stage4-la-buildstorm-1c:
+	$(call RUN_FINAL_EVAL,loongarch64,buildstorm-probe,1,stage4-cargo-minibuild)
+
+final-stage4-la-buildstorm-8c:
+	$(call RUN_FINAL_EVAL,loongarch64,buildstorm-probe,8,stage4-cargo-minibuild)
+
+final-stage5-rv-buildstorm:
+	$(call RUN_FINAL_EVAL,riscv64,buildstorm-probe,8,stage5-official-minibuild)
+
+final-stage5-la-buildstorm:
+	$(call RUN_FINAL_EVAL,loongarch64,buildstorm-probe,8,stage5-official-minibuild)

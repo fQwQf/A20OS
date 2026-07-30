@@ -192,6 +192,12 @@ void page_cache_mark_uptodate(page_cache_page_t *page)
 void page_cache_mark_dirty(page_cache_page_t *page)
 {
     if (page) {
+        /*
+         * Dirty data is necessarily authoritative. This matters for a page
+         * dirtied through MAP_SHARED after an earlier invalidation: read()
+         * must not refill it from the backing store and destroy mmap writes.
+         */
+        __atomic_store_n(&page->uptodate, 1, __ATOMIC_RELEASE);
         __atomic_add_fetch(&page->dirty_gen, 1, __ATOMIC_RELEASE);
         __atomic_store_n(&page->dirty, 1, __ATOMIC_RELEASE);
     }
