@@ -10,12 +10,16 @@ export MTOOLS_LOCK_TIMEOUT=${MTOOLS_LOCK_TIMEOUT:-5}
 IMG=$1
 ARCH=${2:-riscv64}
 USER_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-MEDIA=${3:-$USER_DIR/external/lvgl/tests/src/test_assets/test_video_birds.mp4}
+MEDIA=${3:-}
 BUILD=$USER_DIR/build/wayland
 SYSROOT=$BUILD/$ARCH/sysroot
 MUSL_SH=$BUILD/musl-$ARCH
 
 [ -f "$IMG" ] || { echo "image not found: $IMG" >&2; exit 1; }
+if [ -n "$MEDIA" ] && [ ! -f "$MEDIA" ]; then
+    echo "media file not found: $MEDIA" >&2
+    exit 1
+fi
 
 copy_file() { # copy_file <src> <dst-path-in-image>
     local src=$1 dst=$2 dir part cur
@@ -56,6 +60,7 @@ copy_soname "$(cd "$SYSROOT/lib" && ls libevdev.so.2.*.* | head -1)" libevdev.so
 copy_soname "$(cd "$SYSROOT/lib" && ls libudev.so.1.*.* | head -1)" libudev.so.1
 copy_soname "$(cd "$SYSROOT/lib" && ls libmtdev.so.1.*.* | head -1)" libmtdev.so.1
 
+MEDIA_INSTALLED=0
 if [ -f "$SYSROOT/bin/a20-player" ]; then
     echo "[image] FFmpeg + media player"
     copy_soname "$(cd "$SYSROOT/lib" && ls libavformat.so.61.*.* | head -1)" libavformat.so.61
@@ -65,10 +70,9 @@ if [ -f "$SYSROOT/bin/a20-player" ]; then
     copy_soname "$(cd "$SYSROOT/lib" && ls libavutil.so.59.*.* | head -1)" libavutil.so.59
     copy_file "$SYSROOT/bin/a20-player" /a20-player
     copy_file "$SYSROOT/bin/wayland-session" /wayland-session
-    if [ -f "$MEDIA" ]; then
+    if [ -n "$MEDIA" ]; then
         copy_file "$MEDIA" /media/demo.mp4
-    else
-        echo "[image] WARNING: media file not found: $MEDIA" >&2
+        MEDIA_INSTALLED=1
     fi
 fi
 
@@ -182,10 +186,13 @@ background-color=0xff002244
 [launcher]
 icon=/bin/share/weston/terminal.png
 path=/bin/weston-terminal
-[launcher]
+'
+if [ "$MEDIA_INSTALLED" = 1 ]; then
+    WESTON_CONFIG+='[launcher]
 icon=/bin/share/weston/icon_editor.png
 path=/bin/run-player.sh
 '
+fi
 printf '%s' "$WESTON_CONFIG" | \
     mcopy -o -i "$IMG" - ::/etc/xdg/weston/weston.ini 2>/dev/null || {
     mmd -D s -i "$IMG" ::/etc/xdg >/dev/null 2>&1 || true
@@ -260,7 +267,14 @@ copy_file /tmp/opencode/run-terminal-$$.sh /run-terminal.sh
 cat > /tmp/opencode/run-player-$$.sh <<'EOS'
 #!/bin/sh
 export XDG_RUNTIME_DIR=/tmp
-exec a20-player /bin/media/demo.mp4 "$@"
+if [ "$#" -eq 0 ]; then
+    if [ ! -f /bin/media/demo.mp4 ]; then
+        echo "usage: run-player.sh FILE.mp4" >&2
+        exit 2
+    fi
+    set -- /bin/media/demo.mp4
+fi
+exec a20-player "$@"
 EOS
 copy_file /tmp/opencode/run-player-$$.sh /run-player.sh
 rm -f /tmp/opencode/run-weston-$$.sh /tmp/opencode/run-desktop-$$.sh \
