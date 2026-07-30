@@ -58,9 +58,18 @@ int vfs_read_file(vfile_t *vf, char *buf, size_t count)
         page_cache_invalidate_uptodate_range(vf->vnode, (uint64_t)cur_off,
                                               (uint64_t)(cur_off + count));
     }
-    if (vfs_file_uses_page_cache(vf->vnode) &&
+    int has_mmap_cache = vf->vnode && vf->vnode->ops &&
+                         vf->vnode->ops->readpage;
+    if ((vfs_file_uses_page_cache(vf->vnode) || has_mmap_cache) &&
         !(vf->flags & O_DIRECT) &&
         vf->ops && vf->ops->read && vf->ops->lseek) {
+        /*
+         * MAP_SHARED writers update the canonical cache frame directly.
+         * Harvest hardware dirty bits before deciding whether the cached page
+         * is authoritative, otherwise a stale !uptodate flag can refill the
+         * page from disk and overwrite newer mmap data.
+         */
+        mm_sync_shared_dirty_for_vnode(vf->vnode);
         int r = page_cache_read_vfile(vf, buf, count);
         if (r != -ENOSYS)
             return r;

@@ -264,6 +264,7 @@ void     vfs_init(void);
 
 /* Path resolution */
 void     vnode_ref_init(vnode_t *vn, int refs);
+size_t   vnode_live_count(void);
 void     vnode_get(vnode_t *vn);
 int      vnode_ref_read(vnode_t *vn);
 void     vnode_put(vnode_t *vn);
