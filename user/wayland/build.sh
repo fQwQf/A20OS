@@ -412,7 +412,9 @@ fi
 if want weston && ! stamp weston; then
     echo "=== weston ==="
     for p in "$WL_DIR/patches/weston-"*.patch; do
-        (cd "$USER_DIR/external/weston" && git apply --check "$p" 2>/dev/null && git apply "$p") || true
+        (cd "$USER_DIR/external/weston" && \
+            git apply --unidiff-zero --check "$p" 2>/dev/null && \
+            git apply --unidiff-zero "$p") || true
     done
     meson_pkg weston "$USER_DIR/external/weston" \
         -Dbackend-drm=false -Dbackend-headless=false -Dbackend-rdp=false \
