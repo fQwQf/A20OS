@@ -421,6 +421,20 @@ static int my_gpu_remove(device_t *dev)
 
  注意：注册 display 是 probe 的最后一个步骤。在它之前失败，用户不会看到半成品设备；在它之后失败，必须先 `gpu_device_unregister` 再释放资源，否则 `/dev/fb0` 可能指向已释放内存。
 
+## Audio：`DEV_CLASS_AUDIO`
+
+```c
+typedef struct audio_dev_ops {
+    int (*read)(device_t *, void *buf, size_t count);
+    int (*write)(device_t *, const void *buf, size_t count);
+    int (*ioctl)(device_t *, unsigned long req, void *arg);
+    int (*poll)(device_t *, short events);
+    int (*close)(device_t *);
+} audio_dev_ops_t;
+```
+
+audio class 自动发布为 `/dev/audioN`。设备编号只表示绑定顺序，不表示能力；PC Speaker 可能先占用 `audio0`，因此客户端必须通过 `GET_CAPS` 区分 tone 与 PCM。PCM write 返回实际接受的字节数，DRAIN、STOP、关闭语义及 HDA ring 约束见 [音频与 Intel HDA](audio.md)。
+
 ## 新增设备类
 
 仅在至少两个硬件实现，或一个硬件实现和一个独立内核消费者共享稳定语义时新增类。必须同时完成：在 `driver_class.h` 定义最小 ops；规定每个参数单位、返回值、阻塞和并发语义；实现按类枚举的消费者；定义用户 ABI 时使用固定宽度字段并带版本/长度；增加文档和构建门禁。不得把任意厂商命令 blob 塞入通用 ioctl 代替类设计。

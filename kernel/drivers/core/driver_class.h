@@ -128,6 +128,7 @@ typedef struct audio_dev_ops {
     int (*write)(struct device *dev, const void *buf, size_t count);
     int (*ioctl)(struct device *dev, unsigned long req, void *arg);
     int (*poll)(struct device *dev, short events);
+    int (*close)(struct device *dev);
 } audio_dev_ops_t;
 
 #endif /* _DRIVER_CLASS_H */
