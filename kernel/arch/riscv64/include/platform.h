@@ -24,6 +24,9 @@ void riscv64_memory_init(void);
 #define CLINT_BASE         (0x02000000UL + PAGE_OFFSET)
 #define VIRTIO_BASE        (0x10001000UL + PAGE_OFFSET)
 #define PLIC_BASE          (0x0C000000UL + PAGE_OFFSET)
+#define PCIE_ECAM_BASE     (0x30000000UL + PAGE_OFFSET)
+#define PCIE_MMIO_BASE     0x40000000UL
+#define PCIE_MMIO_SIZE     0x40000000UL
 #define UART0_IRQ          10
 
 /* PLIC register offsets */
