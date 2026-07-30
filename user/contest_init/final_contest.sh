@@ -39,6 +39,58 @@ run_final_group() {
     return $rc
 }
 
+run_buildstorm_probe() {
+    typeset chroot_bin=
+    typeset probe_case=
+
+    if [[ ! -f /bin/buildstorm_probe.sh ]]; then
+        print "[FINAL-EVAL][ERROR] missing /bin/buildstorm_probe.sh"
+        return 127
+    fi
+    if [[ ! -x /bin/a20-probe/cwd-probe ||
+          ! -x /bin/a20-probe/exec-pages-probe ||
+          ! -f /bin/a20-probe/liba20probe.so ]]; then
+        print "[FINAL-EVAL][ERROR] incomplete architecture probe payload"
+        return 127
+    fi
+    for chroot_bin in /bin/chroot /test/usr/sbin/chroot /test/usr/bin/chroot; do
+        [[ -x $chroot_bin ]] && break
+        chroot_bin=
+    done
+    if [[ -z $chroot_bin ]]; then
+        print "[FINAL-EVAL][ERROR] chroot utility not found in published rootfs"
+        return 127
+    fi
+
+    cp /bin/mksh /test/a20-eval-shell || return
+    cp /bin/buildstorm_probe.sh /test/a20-buildstorm-probe.sh || return
+    mkdir -p /test/a20-probe || return
+    cp /bin/a20-probe/cwd-probe /test/a20-probe/cwd-probe || return
+    cp /bin/a20-probe/exec-pages-probe /test/a20-probe/exec-pages-probe || return
+    cp /bin/a20-probe/liba20probe.so /test/a20-probe/liba20probe.so || return
+    cp /bin/arch_context_stress /test/a20-context-stress || return
+    chmod 755 /test/a20-eval-shell /test/a20-buildstorm-probe.sh \
+        /test/a20-probe/cwd-probe /test/a20-probe/exec-pages-probe \
+        /test/a20-context-stress
+    chmod 644 /test/a20-probe/liba20probe.so
+
+    print "#### A20OS 2026 FINAL EVAL START buildstorm-probe ####"
+    if [[ -f /bin/etc/final-eval-probe-case ]]; then
+        IFS= read -r probe_case </bin/etc/final-eval-probe-case
+    fi
+    if [[ -n $probe_case ]]; then
+        print "[FINAL-EVAL] selected buildstorm probe case=$probe_case"
+        "$chroot_bin" /test /a20-eval-shell \
+            /a20-buildstorm-probe.sh --only "$probe_case"
+    else
+        "$chroot_bin" /test /a20-eval-shell /a20-buildstorm-probe.sh
+    fi
+    typeset -i rc=$?
+    print "[FINAL-EVAL] buildstorm-probe runner exit=$rc"
+    print "#### A20OS 2026 FINAL EVAL END buildstorm-probe ####"
+    return $rc
+}
+
 typeset final_group=
 if [[ ! -f /bin/etc/final-eval-group ]]; then
     print "[FINAL-EVAL][ERROR] missing /bin/etc/final-eval-group"
@@ -55,6 +107,9 @@ cagent)
     ;;
 buildstorm)
     run_final_group buildstorm || final_failed=1
+    ;;
+buildstorm-probe)
+    run_buildstorm_probe || final_failed=1
     ;;
 *)
     print "[FINAL-EVAL][ERROR] unknown group: $final_group"
