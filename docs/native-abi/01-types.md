@@ -36,9 +36,9 @@ typedef struct a20_abi_header {
 
 ### 演进规则
 
-1. 用户传入的 `size` 小于内核支持结构体大小时，缺失字段按 0 处理。
+1. 用户传入的 `size` 必须覆盖其所声明 `version` 的完整必需前缀；当前所有 version-1 结构体均要求 `size >= sizeof(struct)`，拒绝通过零填充补齐必需字段。
 2. 用户传入的 `size` 大于内核支持结构体大小时，内核只读取已知字段。
-3. 新字段只能追加，不能改变已有字段含义。
+3. 新字段只能追加并提高 `version`；旧 version 的最小 `size` 必须在该 version 引入时固定。
 4. flag 保留位必须为 0，否则返回 `A20_ERR_INVALID_ARGUMENT`。
 
 这些规则使 ABI 可以在不破坏旧程序的情况下扩展。内核通过 `size` 和 `version` 确定调用方使用的结构体版本。
@@ -118,6 +118,29 @@ typedef struct a20_control_args {
 
 规则：`namespace_id` 表明命令属于哪个对象协议；命令结构也必须版本化；通用操作应优先设计成明确 syscall，不滥用 control。
 
+### handle_control 命令与 a20_handle_temporal_args_t — 时态能力控制
+
+当前 `handle_control` 的 syscall 形式为 `handle_control(handle, op, arg0, arg1)`。op 0/1 为 file/device 的 ioctl/fcntl 透传；op 2–4 操作 handle 条目本身：
+
+```c
+#define A20_HANDLE_CTRL_IOCTL          0u
+#define A20_HANDLE_CTRL_FCNTL          1u
+#define A20_HANDLE_CTRL_SET_TEMPORAL   2u  /* arg0 = a20_handle_temporal_args_t* */
+#define A20_HANDLE_CTRL_GET_TEMPORAL   3u  /* arg0 = a20_handle_temporal_args_t* */
+#define A20_HANDLE_CTRL_SET_LABEL      4u  /* arg0 = 新标签（0=L,1=M,2=H，仅可上调） */
+
+/* 时态能力控制（03-handle.md §2.6，06-security.md §6）。
+ * SET 仅可增强（non-refreshability）：flag 只能添加不能清除，
+ * expiry 只能提前，remaining_ops 只能减少。 */
+typedef struct a20_handle_temporal_args {
+    uint32_t size;
+    uint32_t version;
+    uint64_t expiry_ns;      /* 绝对 CLOCK_MONOTONIC 纳秒；0 = 无过期 */
+    uint32_t remaining_ops;  /* OP_COUNT flag 置位时的操作预算；0 = 已耗尽 */
+    uint32_t temporal_flags; /* A20_TEMPORAL_* */
+} a20_handle_temporal_args_t;
+```
+
 ---
 
 ## 5. Task / Thread 结构体
@@ -150,9 +173,7 @@ typedef struct a20_task_spawn_args {
     uint64_t handles;            /* a20_spawn_handle_t[] */
     uint32_t handle_count;
     uint32_t flags;
-    a20_rights_t task_rights;    /* 新进程的初始权限 */
     a20_handle_t out_task;       /* 输出：新进程的 task handle */
-    uint32_t reserved;
 } a20_task_spawn_args_t;
 ```
 
@@ -210,12 +231,13 @@ typedef struct a20_vm_alloc_args {
 typedef struct a20_vm_map_args {
     uint32_t size;
     uint32_t version;
-    a20_handle_t source;         /* 源对象 handle（file/shm/device） */
+    a20_handle_t source;         /* 源对象 handle（MEMORY/FILE/DEVICE），A20_HANDLE_NULL = 匿名 */
+    uint32_t _pad;
+    uint64_t addr_hint;          /* 建议地址 */
+    uint64_t length;             /* 映射长度 */
+    uint64_t offset;             /* 源对象内偏移 */
     uint32_t prot;               /* 保护标志 */
     uint32_t flags;              /* 映射标志 */
-    uint64_t offset;             /* 源对象内偏移 */
-    uint64_t length;             /* 映射长度 */
-    uint64_t addr_hint;          /* 建议地址 */
     uint64_t out_addr;           /* 输出：映射到的地址 */
 } a20_vm_map_args_t;
 ```
@@ -229,9 +251,7 @@ typedef struct a20_vm_share_args {
     uint64_t addr;               /* 要共享的地址 */
     uint64_t length;             /* 共享长度 */
     a20_rights_t rights;         /* 导出权限 */
-    uint32_t flags;
-    uint32_t reserved;
-    a20_handle_t out_memory;     /* 输出：共享内存对象 handle */
+    a20_handle_t out_handle;     /* 输出：共享内存对象 handle */
 } a20_vm_share_args_t;
 ```
 
@@ -300,17 +320,17 @@ typedef struct a20_io_args {
 typedef struct a20_stat {
     uint32_t size;
     uint32_t version;
-    uint32_t object_type;        /* A20_OBJ_FILE 或 A20_OBJ_DIRECTORY */
+    uint64_t dev;                /* 设备号 */
+    uint64_t ino;                /* inode 号 */
     uint32_t mode;               /* 文件模式 */
-    uint64_t length;             /* 文件大小 */
-    uint64_t block_size;         /* 块大小 */
+    uint32_t nlink;              /* 硬链接数 */
+    uint32_t uid;
+    uint32_t gid;
+    uint64_t size_bytes;         /* 文件大小 */
     uint64_t blocks;             /* 块数 */
-    uint64_t create_time_ns;     /* 创建时间 */
-    uint64_t modify_time_ns;     /* 修改时间 */
-    uint64_t access_time_ns;     /* 访问时间 */
-    uint64_t change_time_ns;     /* 元数据变更时间 */
-    uint64_t fs_id;              /* 文件系统标识 */
-    uint64_t inode_hint;         /* inode 号（仅调试用） */
+    uint64_t atime_ns;           /* 访问时间 */
+    uint64_t mtime_ns;           /* 修改时间 */
+    uint64_t ctime_ns;           /* 元数据变更时间 */
 } a20_stat_t;
 ```
 
@@ -324,8 +344,8 @@ typedef struct a20_stat {
 typedef struct a20_event_queue_create_args {
     uint32_t size;
     uint32_t version;
-    uint32_t flags;
     uint32_t capacity_hint;      /* 容量提示 */
+    uint32_t flags;
     a20_handle_t out_queue;      /* 输出：事件队列 handle */
 } a20_event_queue_create_args_t;
 ```
@@ -338,39 +358,51 @@ typedef struct a20_event_watch_args {
     uint32_t version;
     a20_handle_t queue;          /* 事件队列 handle */
     a20_handle_t target;         /* 被观察的 handle */
-    uint64_t events;             /* 关注的事件位图 */
+    uint64_t event_mask;         /* 关注的事件位图 */
     uint64_t user_data;          /* 用户关联数据 */
-    uint32_t flags;
-    uint32_t reserved;
 } a20_event_watch_args_t;
 ```
 
-### a20_event_t / a20_event_wait_args_t — 等待事件
+### a20_pending_event_t / a20_event_wait_args_t — 等待事件
 
 ```c
-typedef struct a20_event {
-    uint32_t size;
-    uint32_t version;
+typedef struct a20_pending_event {
     a20_handle_t source;         /* 产生事件的 handle */
-    uint32_t type;               /* 事件类型 */
-    uint64_t events;             /* 触发的事件位图 */
+    uint32_t type;               /* 事件类型（A20_EVENT_* 索引） */
+    uint64_t events;             /* 触发的事件位图 = 1ull << type */
     uint64_t user_data;          /* 注册时的 user_data */
-    uint64_t data0;              /* 事件相关数据 */
-    uint64_t data1;
-    uint64_t data2;
-} a20_event_t;
+    uint64_t data0, data1, data2;/* 事件相关数据 */
+} a20_pending_event_t;
+
+/* 可观察事件类型（05-ipc.md §3.3）；事件掩码为 1ull << 类型 */
+#define A20_EVENT_READABLE        0u   /* file/socket/pipe：可读 */
+#define A20_EVENT_WRITABLE        1u   /* file/socket/pipe：可写 */
+#define A20_EVENT_ERROR           2u   /* file/socket：I/O 错误 */
+#define A20_EVENT_CLOSED          3u   /* 对象被关闭 */
+#define A20_EVENT_CONNECTION      4u   /* socket：新连接到达 */
+#define A20_EVENT_ACCEPT_READY    5u   /* socket：可 accept */
+#define A20_EVENT_EXPIRED         6u   /* timer：到期 */
+#define A20_EVENT_EXITED          7u   /* task/thread：退出 */
+#define A20_EVENT_MESSAGE_READY   8u   /* channel：有消息可接收 */
+#define A20_EVENT_PEER_CLOSED     9u   /* channel：对端关闭 */
+#define A20_EVENT_MASK(ev)        (1ull << (ev))
 
 typedef struct a20_event_wait_args {
     uint32_t size;
     uint32_t version;
     a20_handle_t queue;          /* 事件队列 handle */
-    uint32_t flags;              /* 等待标志 */
-    uint64_t events;             /* a20_event_t[] 输出缓冲区 */
-    uint32_t max_events;         /* 缓冲区容量 */
+    uint32_t _pad;
+    uint64_t events;             /* a20_pending_event_t[] 输出缓冲区 */
+    uint32_t max_events;         /* 缓冲区容量（内核上限 64） */
+    uint32_t _pad2;
+    uint64_t timeout_ns;         /* 相对超时（纳秒）：0 = 不等待，
+                                  * A20_TIMEOUT_INFINITE = 无限等待 */
+    uint32_t flags;              /* 保留 */
     uint32_t out_count;          /* 输出：实际事件数 */
-    uint64_t timeout_ns;         /* 超时（纳秒），0 表示不等待 */
 } a20_event_wait_args_t;
 ```
+
+`event_wait` 在队列为空时默认**阻塞**（tokenized Park/Wake），`timeout_ns == 0` 退化为轮询（空队列返回 `A20_ERR_WOULD_BLOCK`），超时返回 `A20_ERR_TIMED_OUT`。当前产生事件的对象：channel（MESSAGE_READY/PEER_CLOSED/CLOSED）、timer（EXPIRED）、task 退出（EXITED）；file/socket 的 READABLE/WRITABLE 等事件源尚未接入。
 
 ### a20_msg_send_args_t / a20_msg_recv_args_t — 消息通道
 
@@ -379,27 +411,35 @@ typedef struct a20_msg_send_args {
     uint32_t size;
     uint32_t version;
     a20_handle_t channel;        /* 通道端点 handle */
-    uint32_t flags;
-    uint64_t bytes;              /* 消息字节缓冲区 */
-    uint64_t byte_count;         /* 字节数 */
+    uint32_t _pad;
+    uint64_t data;               /* 消息字节缓冲区 */
+    uint32_t data_len;           /* 字节数（上限 64KB） */
+    uint32_t flags;              /* A20_MSG_* */
     uint64_t handles;            /* a20_handle_t[]：要传递的 handle */
-    uint32_t handle_count;       /* 传递的 handle 数量 */
-    uint32_t reserved;
+    uint32_t handle_count;       /* 传递的 handle 数量（上限 8） */
+    uint64_t transfer_rights;    /* a20_rights_t[] 每 handle 权限上限，0 = 源权限 */
 } a20_msg_send_args_t;
 
 typedef struct a20_msg_recv_args {
     uint32_t size;
     uint32_t version;
     a20_handle_t channel;        /* 通道端点 handle */
-    uint32_t flags;
-    uint64_t bytes;              /* 接收缓冲区 */
-    uint64_t byte_capacity;      /* 缓冲区容量 */
-    uint64_t out_byte_count;     /* 输出：实际接收字节数 */
-    uint64_t handles;            /* a20_handle_t[]：接收 handle 缓冲区 */
-    uint32_t handle_capacity;    /* handle 缓冲区容量 */
+    uint32_t _pad;
+    uint64_t data_buf;           /* 接收缓冲区 */
+    uint32_t data_buf_len;       /* 缓冲区容量 */
+    uint32_t _pad2;
+    uint64_t handle_buf;         /* a20_handle_t[]：接收 handle 缓冲区 */
+    uint32_t handle_buf_count;   /* handle 缓冲区容量 */
+    uint32_t flags;              /* A20_MSG_*（原 _pad3 字段，布局不变） */
+    uint64_t out_data_len;       /* 输出：实际接收字节数 */
     uint32_t out_handle_count;   /* 输出：实际接收 handle 数 */
+    uint64_t out_rights_buf;     /* a20_rights_t[]：每个接收 handle 的权限 */
 } a20_msg_recv_args_t;
+
+#define A20_MSG_NONBLOCK   (1u << 0)  /* 不阻塞，无法立即完成时返回 WOULD_BLOCK */
 ```
+
+`channel_send` 在对端队列满时默认阻塞，`channel_recv` 在队列空时默认阻塞；传 `A20_MSG_NONBLOCK` 退化为非阻塞。接收方 handle table 空间不足时 `channel_recv` 返回 `A20_ERR_NO_SPACE`，消息留在队列中（不做部分投递，05-ipc.md §2.6）。
 
 ---
 
@@ -411,10 +451,9 @@ typedef struct a20_msg_recv_args {
 typedef struct a20_net_socket_args {
     uint32_t size;
     uint32_t version;
-    uint32_t domain;             /* 地址族（AF_INET 等） */
-    uint32_t type;               /* 套接字类型 */
-    uint32_t protocol;           /* 协议 */
-    uint32_t flags;
+    int32_t domain;              /* 地址族（AF_INET 等） */
+    int32_t type;                /* 套接字类型 */
+    int32_t protocol;            /* 协议 */
     a20_rights_t rights;         /* 请求的权限 */
     a20_handle_t out_socket;     /* 输出：套接字 handle */
 } a20_net_socket_args_t;
@@ -424,15 +463,14 @@ typedef struct a20_net_socket_args {
 
 ```c
 typedef struct a20_net_addr {
-    uint32_t size;
-    uint32_t version;
-    uint32_t family;             /* 地址族 */
-    uint32_t flags;
-    uint8_t  data[128];          /* 地址数据（足够容纳任何地址族） */
+    uint16_t family;             /* AF_INET / AF_INET6 */
+    uint16_t port;
+    uint32_t _pad;
+    uint8_t  addr[16];           /* IPv4 使用前 4 字节 */
 } a20_net_addr_t;
 ```
 
-不直接承诺 Linux `sockaddr` 布局，通过 `family` 和 `size` 做版本化。
+不直接承诺 Linux `sockaddr` 布局；调用方通过 syscall 参数中的地址长度区分有效字段。
 
 ---
 
@@ -444,17 +482,14 @@ typedef struct a20_net_addr {
 typedef struct a20_timer_create_args {
     uint32_t size;
     uint32_t version;
-    uint32_t clock_id;           /* 时钟源（monotonic/realtime/boottime） */
-    uint32_t flags;
-    uint64_t deadline_ns;        /* 首次到期时间 */
-    uint64_t interval_ns;        /* 周期间隔，0 表示单次 */
     a20_handle_t event_queue;    /* 事件队列 handle（到期事件投递目标） */
     uint64_t user_data;          /* 事件关联数据 */
+    uint32_t flags;
     a20_handle_t out_timer;      /* 输出：定时器 handle */
 } a20_timer_create_args_t;
 ```
 
-Timer 是 handle，可被 event queue watch，不需要复制 POSIX timer id + signal delivery 模型。
+Timer 是 handle，可被 event queue watch，不需要复制 POSIX timer id + signal delivery 模型。创建后通过 `timer_set(timer, absolute_deadline_ns, interval_ns)` 设置单次或周期到期时间；到期投递 `A20_EVENT_EXPIRED`，不投递 SIGALRM。
 
 ---
 
@@ -541,13 +576,13 @@ typedef struct a20_xattr_args {
     uint32_t size;
     uint32_t version;
     a20_handle_t handle;          /* 目标 handle */
+    uint32_t _pad;
     uint64_t name;                /* const char*：属性名 */
-    uint64_t name_len;            /* 属性名长度，0 表示 nul-terminated */
+    uint32_t name_len;            /* 属性名长度，0 表示 nul-terminated */
+    uint32_t _pad2;
     uint64_t value;               /* void*：值缓冲区 */
     uint64_t value_len;           /* 值大小（set 时为输入，get 时为缓冲区容量） */
-    uint64_t out_value_len;       /* 输出：实际值大小（get/list 时有效） */
     uint32_t flags;               /* A20_XATTR_* */
-    uint32_t reserved;
 } a20_xattr_args_t;
 ```
 
@@ -558,10 +593,10 @@ typedef struct a20_xattr_list_args {
     uint32_t size;
     uint32_t version;
     a20_handle_t handle;          /* 目标 handle */
-    uint64_t buffer;              /* char*：输出缓冲区，包含 nul-terminated 的名称列表 */
-    uint64_t buffer_len;          /* 缓冲区容量 */
-    uint64_t out_size;            /* 输出：实际需要的总大小 */
-    uint32_t reserved;
+    uint32_t _pad;
+    uint64_t buf;                 /* char*：输出缓冲区，包含 nul-terminated 的名称列表 */
+    uint64_t buf_len;             /* 缓冲区容量 */
+    uint64_t out_len;             /* 输出：实际需要的总大小 */
 } a20_xattr_list_args_t;
 ```
 
@@ -583,22 +618,21 @@ typedef struct a20_xattr_list_args {
 #define A20_SCHED_DEADLINE  6
 
 /* 调度标志 */
-#define A20_SCHED_SET_POLICY    0x0001u
-#define A20_SCHED_SET_PRIORITY  0x0002u
-#define A20_SCHED_SET_AFFINITY  0x0004u
-#define A20_SCHED_SET_NICE      0x0008u
+#define A20_SCHED_POLICY        (1u << 0)
+#define A20_SCHED_PRIORITY      (1u << 1)
+#define A20_SCHED_AFFINITY      (1u << 2)
+#define A20_SCHED_NICE          (1u << 3)
 
 typedef struct a20_sched_args {
     uint32_t size;
     uint32_t version;
     a20_handle_t task;            /* 目标 task/thread handle */
     uint32_t flags;               /* 指定要设置/查询的字段 */
-    uint32_t policy;              /* 调度策略 */
+    int32_t  policy;              /* 调度策略 */
     int32_t  priority;            /* 静态优先级（1-99 for FIFO/RR） */
     int32_t  nice;                /* nice 值（-20..19 for OTHER） */
     uint64_t affinity;            /* CPU 亲和性位图 */
-    uint32_t affinity_size;       /* 亲和性位图大小（字节） */
-    uint32_t reserved;
+    uint64_t affinity_size;       /* 亲和性位图大小（字节） */
 } a20_sched_args_t;
 ```
 
@@ -610,6 +644,8 @@ typedef struct a20_sched_args {
 ---
 
 ## 15. Resource Limits 结构体
+
+> **当前调用契约**：`task_get_limits(task, out)` / `task_set_limits(task, in)` 使用 `abi/native/resource.h` 中的聚合 `a20_resource_limits_t`（handles/channels/threads/memory 四个上限）。下述 `a20_rlimit_args_t` 是按 POSIX resource 编号细分的保留布局，当前 syscall 入口尚未使用它。
 
 ### a20_rlimit_args_t — 资源限制
 
@@ -629,7 +665,6 @@ typedef struct a20_rlimit_args {
     uint32_t version;
     a20_handle_t task;            /* 目标 task handle，A20_HANDLE_NULL 表示当前 task */
     uint32_t resource;            /* A20_RLIMIT_* */
-    uint32_t reserved;
     uint64_t cur;                 /* 当前软限制 */
     uint64_t max;                 /* 硬限制上限 */
 } a20_rlimit_args_t;
@@ -639,19 +674,16 @@ typedef struct a20_rlimit_args {
 
 ```c
 typedef struct a20_rusage {
-    uint32_t size;
-    uint32_t version;
     uint64_t user_time_ns;        /* 用户态 CPU 时间 */
-    uint64_t kernel_time_ns;      /* 内核态 CPU 时间 */
+    uint64_t sys_time_ns;         /* 内核态 CPU 时间 */
     uint64_t max_rss;             /* 最大驻内存集大小 */
-    uint64_t minor_faults;        /* 次 page fault 数 */
-    uint64_t major_faults;        /* 主 page fault 数 */
-    uint64_t voluntary_cs;        /* 自愿上下文切换 */
-    uint64_t involuntary_cs;      /* 非自愿上下文切换 */
-    uint64_t io_read_bytes;       /* I/O 读取字节数 */
-    uint64_t io_write_bytes;      /* I/O 写入字节数 */
+    uint64_t page_faults;         /* page fault 总数 */
+    uint64_t io_read;             /* I/O 读取计数 */
+    uint64_t io_write;            /* I/O 写入计数 */
 } a20_rusage_t;
 ```
+
+`a20_rusage_t` 是 syscall 输出载荷，不单独携带 `{size, version}`；调用方通过对应查询 syscall 的 ABI 版本确定布局。
 
 ---
 
@@ -669,10 +701,9 @@ typedef struct a20_vm_remap_args {
     uint32_t version;
     uint64_t old_addr;            /* 现有映射地址 */
     uint64_t old_size;            /* 现有映射大小 */
+    uint64_t new_addr_hint;       /* 建议新地址 */
     uint64_t new_size;            /* 新大小 */
-    uint64_t new_addr;            /* 建议新地址（REMAP_EXACT 时为强制地址） */
     uint32_t flags;               /* A20_REMAP_* */
-    uint32_t reserved;
     uint64_t out_addr;            /* 输出：实际映射地址 */
 } a20_vm_remap_args_t;
 ```
@@ -690,17 +721,13 @@ typedef struct a20_vm_remap_args {
 typedef struct a20_vm_object_args {
     uint32_t size;
     uint32_t version;
-    uint64_t initial_size;        /* 初始大小 */
-    uint32_t flags;               /* A20_VM_OBJ_* */
-    uint32_t reserved;
-    a20_rights_t rights;          /* 请求的权限 */
-    uint64_t name;                /* const char*：可选名称（调试用） */
-    uint64_t name_len;
+    uint64_t size_bytes;          /* 初始大小 */
+    uint32_t flags;               /* 当前实现传给 VMO options */
     a20_handle_t out_handle;      /* 输出：内存对象 handle */
 } a20_vm_object_args_t;
 ```
 
-创建的内存对象可通过 `vm_map` 映射到地址空间，通过 `handle_dup` 分享给其他进程，通过 `handle_set_meta`（`TRUNCATE` flag）调整大小。
+创建的内存对象可通过 `vm_map` 映射到地址空间，通过 `handle_dup` 或 channel 传递分享。命名、seal、hugetlb 与通过 metadata 调整 VMO 大小尚未实现。
 
 ---
 
@@ -712,14 +739,13 @@ typedef struct a20_vm_object_args {
 typedef struct a20_path_link_args {
     uint32_t size;
     uint32_t version;
-    a20_handle_t src_dir;         /* 源文件所在目录 handle */
-    uint64_t src_path;            /* const char*：源文件路径 */
-    uint64_t src_path_len;
-    a20_handle_t dst_dir;         /* 目标目录 handle */
-    uint64_t dst_path;            /* const char*：链接路径 */
-    uint64_t dst_path_len;
+    a20_handle_t old_dir;         /* 源文件所在目录 handle */
+    a20_handle_t new_dir;         /* 目标目录 handle */
+    uint64_t old_path;            /* const char*：源文件路径 */
+    uint32_t old_path_len;
+    uint64_t new_path;            /* const char*：链接路径 */
+    uint32_t new_path_len;
     uint32_t flags;               /* 保留 */
-    uint32_t reserved;
 } a20_path_link_args_t;
 ```
 
@@ -730,11 +756,10 @@ typedef struct a20_path_symlink_args {
     uint32_t size;
     uint32_t version;
     a20_handle_t dir;             /* 创建链接的父目录 handle */
-    uint64_t link_path;           /* const char*：链接路径 */
-    uint64_t link_path_len;
     uint64_t target;              /* const char*：链接目标 */
-    uint64_t target_len;
-    uint32_t reserved;
+    uint32_t target_len;
+    uint64_t linkpath;            /* const char*：链接路径 */
+    uint32_t linkpath_len;
 } a20_path_symlink_args_t;
 ```
 
@@ -746,9 +771,9 @@ typedef struct a20_path_readlink_args {
     uint32_t version;
     a20_handle_t dir;             /* 父目录 handle */
     uint64_t path;                /* const char*：链接路径 */
-    uint64_t path_len;
-    uint64_t buffer;              /* char*：输出缓冲区 */
-    uint64_t buffer_len;          /* 缓冲区容量 */
+    uint32_t path_len;
+    uint64_t buf;                 /* char*：输出缓冲区 */
+    uint64_t buf_len;             /* 缓冲区容量 */
     uint64_t out_len;             /* 输出：实际写入字节数 */
 } a20_path_readlink_args_t;
 ```
@@ -891,23 +916,18 @@ A20 的安全上下文同时支持原生 capability 模型和 POSIX 兼容身份
 typedef struct a20_security_context {
     uint32_t size;
     uint32_t version;
-    uint32_t flags;               /* A20_SEC_SET_*（set 时有效） */
-    uint32_t reserved;
-    /* POSIX 兼容身份 */
-    uint32_t uid;
-    uint32_t gid;
-    uint32_t euid;
-    uint32_t egid;
-    uint32_t saved_uid;
-    uint32_t saved_gid;
-    uint64_t groups;              /* uint32_t*：补充组 ID 数组 */
-    uint32_t group_count;
-    uint32_t reserved2;
-    uint64_t posix_caps;          /* POSIX capability 位图 */
-    /* A20 原生 */
-    a20_rights_t effective_rights; /* 当前有效 rights 集合 */
-    a20_rights_t permitted_rights; /* 允许提升到的 rights 集合 */
+    int32_t uid;
+    int32_t euid;
+    int32_t gid;
+    int32_t egid;
+    int32_t ngroups;
+    int32_t _pad;
+    uint64_t groups;              /* int[]：补充组 ID 数组 */
+    uint64_t cap_effective;       /* POSIX capability 位图 */
     uint64_t namespace_mask;      /* 所属 namespace 掩码 */
+    a20_rights_t effective_rights;/* 当前有效 rights 集合 */
+    uint32_t flags;               /* A20_SEC_SET_*（set 时有效） */
+    uint32_t label;               /* 0=L, 1=M, 2=H */
 } a20_security_context_t;
 ```
 
@@ -915,7 +935,7 @@ typedef struct a20_security_context {
 - `security_get_context` 查询当前完整的身份和权限状态。
 - `security_set_context` 只修改 `flags` 指定的字段（类似 `setuid`/`setgid`/`setgroups` 的统一接口）。
 - 修改 uid/gid 需要对应的 POSIX capability 或 A20 rights。
-- A20 原生字段（effective_rights, namespace_mask）是只读的，由内核根据 handle 权限和 namespace 推导。
+- A20 原生字段（effective_rights, namespace_mask）是只读的，由内核根据 handle 权限和 namespace 推导；`label` 只能上调。
 
 ---
 
@@ -928,7 +948,7 @@ typedef struct a20_security_context {
 ```c
 typedef struct a20_system_info {
     uint32_t size;
-    uint32_t version;
+    uint32_t struct_version;
     /* uname 等价 */
     char     sysname[64];         /* 操作系统名 */
     char     nodename[64];        /* 网络节点名 */
@@ -940,11 +960,13 @@ typedef struct a20_system_info {
     uint64_t free_ram;            /* 空闲物理内存 */
     uint64_t total_swap;          /* 总交换空间 */
     uint64_t free_swap;           /* 空闲交换空间 */
-    uint16_t procs;               /* 进程数 */
-    uint16_t reserved;
-    uint64_t uptime_ns;           /* 系统运行时间（纳秒） */
+    uint16_t num_procs;           /* 进程数 */
+    uint16_t _pad;
+    uint32_t configured_cpus;     /* 配置 CPU 数 */
+    uint32_t online_cpus;         /* 在线 CPU 数 */
+    uint32_t current_cpu;         /* 当前 CPU */
     uint32_t page_size;           /* 页大小 */
-    uint32_t num_cpus;            /* CPU 数量 */
+    uint64_t uptime_ns;           /* 系统运行时间（纳秒） */
 } a20_system_info_t;
 ```
 
@@ -986,17 +1008,53 @@ typedef struct a20_event_watch_fs_args {
     a20_handle_t queue;           /* 事件队列 handle */
     a20_handle_t dir;             /* 监控目录 handle */
     uint64_t path;                /* const char*：监控路径（相对于 dir） */
-    uint64_t path_len;
-    uint64_t events;              /* A20_FS_EVENT_* 组合 */
+    uint32_t path_len;
+    uint32_t event_mask;          /* A20_FS_EVENT_* 组合 */
     uint64_t user_data;           /* 事件关联数据 */
-    uint32_t flags;               /* 保留 */
-    uint32_t reserved;
-    a20_handle_t out_watch;       /* 输出：watch handle（用于取消） */
 } a20_event_watch_fs_args_t;
 ```
 
 设计说明：
 - Linux 的 `inotify_init`/`inotify_add_watch`/`inotify_rm_watch` 是独立于 epoll 的子系统。
 - A20 将文件系统事件**统一纳入现有 event_queue 框架**：`event_watch_fs` 向已有事件队列注册文件系统关注。
-- 变更事件通过 `event_wait` 返回标准的 `a20_event_t`，无需新的等待机制。
-- 取消关注：`handle_close(out_watch)` 即可。
+- 目标实现要求变更事件通过 `event_wait` 返回 `a20_pending_event_t`。当前实现仅把 `dir` 注册为普通 watch 目标，尚未实现路径过滤与 VFS 事件源，因此本结构体目前是最小占位契约。
+- 取消关注使用 `event_cancel(queue, dir)`；当前没有独立 `out_watch` handle。
+
+---
+
+## 22. Sync 结构体
+
+futex 是**用户地址上的同步原语，不是内核对象**，因此不分配 handle、不携带 rights。这与 Zircon `zx_futex_wait`/`zx_futex_wake` 的定位一致：快速路径是纯用户态原子操作，只有竞争路径才进入内核睡眠。
+
+设计说明：
+- 早期草案（startup.md §4.4.4）曾考虑用 event_queue 承担互斥等待，但 event_queue 缺少"投递事件到队列"的用户语义，且每个竞争锁都需要一个内核 handle，成本与语义都不合适。Sync 分区因此回归地址型 futex。
+- 快速路径（无竞争）与 Linux futex 一样快：纯用户态 CAS。
+- 慢路径通过 `futex_wait`/`futex_futex_wake` 进入内核，复用内核 futex 等待表。
+- 跨进程共享内存（`vm_share` 导出的 VMO）上的 futex 字同样有效：等待键同时匹配虚拟地址与物理页。
+
+```c
+#define A20_TIMEOUT_INFINITE  ((uint64_t)-1)  /* futex_wait 无限等待 */
+
+typedef struct a20_futex_wait_args {
+    uint32_t size;
+    uint32_t version;
+    uint64_t addr;          /* 用户态 32 位 futex 字地址，必须 4 字节对齐 */
+    uint32_t expected;      /* 期望值；*addr != expected 时立即返回 A20_ERR_WOULD_BLOCK */
+    uint32_t flags;         /* 保留，必须为 0 */
+    uint64_t timeout_ns;    /* 相对超时（纳秒），A20_TIMEOUT_INFINITE 表示无限等待 */
+} a20_futex_wait_args_t;
+
+typedef struct a20_futex_wake_args {
+    uint32_t size;
+    uint32_t version;
+    uint64_t addr;          /* 用户态 32 位 futex 字地址 */
+    uint32_t count;         /* 最多唤醒的等待者数量，必须 >= 1 */
+    uint32_t flags;         /* 保留，必须为 0 */
+    uint32_t out_woken;     /* 输出：实际唤醒数量 */
+    uint32_t reserved;
+} a20_futex_wake_args_t;
+```
+
+错误映射：`A20_ERR_WOULD_BLOCK`（值不匹配）、`A20_ERR_TIMED_OUT`（超时）、`A20_ERR_FAULT`（地址无效）、`A20_ERR_INVALID_ARGUMENT`（对齐/flag 错误）、`A20_ERR_INTERRUPTED`（被中断）。
+
+能力发现：`abi_info.feature_bits[0]` 的 bit 2 表示 Sync (0x0B00) 分区可用。
