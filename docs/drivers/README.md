@@ -13,7 +13,7 @@
    - [PCI 与 VirtIO](pci-and-virtio.md)：PCI ID、BAR、ECAM、VirtIO transport。
 4. [设备类](device-classes.md)：各类操作、单位、返回值和阻塞语义。
 5. [运行时契约](runtime-contracts.md) + [锁顺序](lock-order.md)：IRQ、DMA、屏障、并发。
-6. [用户接口与 devfs](userspace-and-devfs.md)：从 class 到 `/dev`；显示设备另读 [Display/Framebuffer](display.md)，音频设备另读 [音频与 Intel HDA](audio.md)。
+6. [用户接口与 devfs](userspace-and-devfs.md)：从 class 到 `/dev`；显示设备另读 [Display/Framebuffer](display.md)，音频设备另读 [音频子系统](audio.md)。
 7. [构建、测试与提交](testing-and-submission.md)：编译矩阵、失败清理和提交证据。
 
 ## 文档列表

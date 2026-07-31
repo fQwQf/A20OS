@@ -4,6 +4,7 @@
 #ifdef CONFIG_X86_64
 
 #include "drivers/audio/pc_speaker.h"
+#include "drivers/audio/audio_core.h"
 #include "drivers/bus/platform_bus.h"
 #include "drivers/core/driver_class.h"
 #include "drivers/core/driver_hwapi.h"
@@ -12,8 +13,6 @@
 #include "core/string.h"
 #include "core/lock.h"
 #include "mm/slab.h"
-#include "sys/usercopy.h"
-#include "uapi/a20/audio.h"
 
 #define PIT_INPUT_HZ 1193182U
 #define PC_SPEAKER_MIN_HZ ((PIT_INPUT_HZ + 0xffffU - 1U) / 0xffffU)
@@ -71,36 +70,25 @@ static int pc_speaker_write(device_t *dev, const void *buf, size_t count)
     return ret < 0 ? ret : (int)count;
 }
 
-static int pc_speaker_ioctl(device_t *dev, unsigned long req, void *arg)
+static int pc_speaker_stop(device_t *dev)
 {
     pc_speaker_t *speaker = dev ? dev->drv_priv : NULL;
     if (!speaker)
         return -ENODEV;
-    if (req == A20_AUDIO_IOCTL_STOP) {
-        uint64_t flags = spin_lock_irqsave(&speaker->lock);
-        speaker->generation++;
-        pc_speaker_stop_locked(speaker);
-        spin_unlock_irqrestore(&speaker->lock, flags);
-        return 0;
-    }
-    if (!arg)
-        return -EFAULT;
-    if (req == A20_AUDIO_IOCTL_GET_CAPS) {
-        a20_audio_caps_t caps = {
-            .version = 1,
-            .flags = A20_AUDIO_CAP_TONE,
-            .min_rate = PC_SPEAKER_MIN_HZ,
-            .max_rate = PC_SPEAKER_MAX_HZ,
-        };
-        return copy_to_user(arg, &caps, sizeof(caps)) < 0 ? -EFAULT : 0;
-    }
-    if (req == A20_AUDIO_IOCTL_TONE) {
-        a20_audio_tone_t tone;
-        if (copy_from_user(&tone, arg, sizeof(tone)) < 0)
-            return -EFAULT;
-        return pc_speaker_tone(speaker, tone.frequency_hz, tone.duration_ms);
-    }
-    return -ENOTTY;
+    uint64_t flags = spin_lock_irqsave(&speaker->lock);
+    speaker->generation++;
+    pc_speaker_stop_locked(speaker);
+    spin_unlock_irqrestore(&speaker->lock, flags);
+    return 0;
+}
+
+static int pc_speaker_tone_device(device_t *dev,
+                                  const a20_audio_tone_t *tone)
+{
+    pc_speaker_t *speaker = dev ? dev->drv_priv : NULL;
+    if (!speaker || !tone)
+        return -ENODEV;
+    return pc_speaker_tone(speaker, tone->frequency_hz, tone->duration_ms);
 }
 
 static int pc_speaker_probe(device_t *dev)
@@ -136,8 +124,15 @@ static int pc_speaker_remove(device_t *dev)
 }
 
 static const audio_dev_ops_t pc_speaker_ops = {
+    .caps = {
+        .version = 1,
+        .flags = A20_AUDIO_CAP_TONE,
+        .min_rate = PC_SPEAKER_MIN_HZ,
+        .max_rate = PC_SPEAKER_MAX_HZ,
+    },
     .write = pc_speaker_write,
-    .ioctl = pc_speaker_ioctl,
+    .tone = pc_speaker_tone_device,
+    .stop = pc_speaker_stop,
 };
 
 static const device_id_t pc_speaker_ids[] = {
