@@ -18,7 +18,8 @@ resource_t *pci_get_bar_resource(device_t *dev, unsigned int bar);
 void pci_enumerate(uintptr_t ecam_base, int bus_start, int bus_end);
 
 /* Create a VirtIO 1.0 (modern PCI) transport for an enumerated PCI function.
- * type is the VirtIO device ID (1=net, 2=blk, 8=scsi, 16=gpu, 18=input). */
+ * type is the VirtIO device ID (1=net, 2=blk, 8=scsi, 16=gpu, 18=input,
+ * 25=sound). */
 struct virtio_transport;
 int pci_virtio_transport_init(device_t *dev, int type,
                               struct virtio_transport *transport);

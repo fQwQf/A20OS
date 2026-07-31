@@ -28,6 +28,7 @@
 - [drivers/runtime-contracts.md](drivers/runtime-contracts.md)：MMIO、IRQ、DMA 与锁的运行时契约
 - [drivers/pci-and-virtio.md](drivers/pci-and-virtio.md)：PCI 与 VirtIO 设备的接入方法
 - [drivers/display.md](drivers/display.md)：Framebuffer 与显示设备
+- [drivers/audio.md](drivers/audio.md)：通用音频 UAPI、HDA、virtio-sound 与 PC Speaker
 
 ## 平台移植与运行
 
