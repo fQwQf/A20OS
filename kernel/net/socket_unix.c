@@ -119,7 +119,8 @@ int net_unix_socket_bind(net_socket_t *s, const void *addr, size_t addrlen)
     spin_unlock_irqrestore(&g_net_lock, flags);
 
     if (unix_pathname) {
-        int fd = vfs_open(unix_path, O_CREAT | O_EXCL | O_RDWR, 0777);
+        int fd = vfs_open(unix_path, O_CREAT | O_EXCL | O_RDWR,
+                          S_IFSOCK | 0777);
         if (fd < 0) {
             uint64_t undo = spin_lock_irqsave(&g_net_lock);
             s->bound = 0;

@@ -203,7 +203,7 @@ for (int i = 0; i < ITERATIONS; i++) {
 2. 测量 handle_dup、handle_close、handle_query 在不同 N 下的延迟
 3. 对比 Linux fd table 在同等数量 fd 下的操作延迟
 
-**预期结果**：A20OS 使用动态数组 + free bitmap 实现 handle table（参见 08-architecture-deep-dive.md §2），lookup/close 为 O(1)，alloc 为 O(n/64)（bitmap word 扫描，实际接近 O(1)）。Linux fd table 在旧版本中使用数组（O(n) 扫描），新版本使用红黑树。如果实现正确，A20OS 在高 handle 数量下应优于 Linux 数组实现。
+**预期结果**：A20OS 使用动态数组 + free bitmap 实现 handle table（参见 08-architecture-deep-dive.md §2），lookup/close 为 O(1)，alloc 为 O(n/64)（bitmap word 扫描，实际接近 O(1)）。Linux 的 `files_struct/fdtable` 同样以可增长数组与 open/cloexec 位图为核心，并非红黑树；因此本实验应比较具体实现常数、增长策略、bitmap 扫描和锁竞争，不能预设 A20OS 在高 handle 数量下必然优于 Linux。
 
 **报告格式**：
 ```
@@ -405,7 +405,7 @@ liba20posix (shim layer)
   open()   → path_open() + fd↔handle mapping
   read()   → handle_read()
   write()  → handle_write()
-  fork()   → task_spawn() + address space copy
+  fork()   → ENOSYS（Native ABI 明确不提供 fork 语义）
   epoll_wait() → event_wait()
       |
       v
@@ -420,7 +420,7 @@ A20OS Native ABI
 | read(fd, buf) | fd→handle 查找 + handle_read | 1 次哈希查找 |
 | write(fd, buf) | fd→handle 查找 + handle_write | 1 次哈希查找 |
 | close(fd) | fd→handle 查找 + handle_close + fd_free | 1 次查找 + 1 次释放 |
-| fork() | task_spawn + addr_copy + fd_table_copy | 地址空间复制 + fd 表遍历 |
+| fork() | ENOSYS | 不评估“伪 fork”开销；使用显式 task_spawn 工作负载另测 |
 | epoll_wait() | event_wait() + event 格式转换 | 事件结构体转换 |
 | pipe() | channel_create + fd_alloc × 2 | channel 创建 + 2 次 fd 映射 |
 | socket() | net_socket + fd_alloc | 1 次映射 |
@@ -659,10 +659,12 @@ PROPERTY 5: no dangling references after close            // 引用完整性
 
 | 配置 | 规格 |
 |------|------|
-| 平台 | ARM64 (A20 SoC, Cortex-A7 双核) |
-| 内存 | 512MB DDR3 |
-| 存储 | SD 卡 |
-| 对照平台 | x86_64 (用于 Linux 对照数据) |
+| 主基线 | QEMU `virt`：riscv64（ABI=both，smoke 与微基准可复现） |
+| 交叉架构 | qemu-virt-aarch64、qemu-virt-x86_64、qemu-virt-loongarch64（构建/语义一致性） |
+| 物理板卡 | VisionFive 2 / LS2K1000（具备硬件时再记录具体 CPU、频率、内存、存储） |
+| 对照平台 | 同一宿主上的 Linux 6.x；固定 QEMU 参数和 CPU 配额 |
+
+> 旧稿中的“ARM64 (A20 SoC, Cortex-A7)”不成立：Cortex-A7 是 ARMv7-A 32 位处理器，不能作为 ARM64 配置。任何物理硬件数据必须在运行基准时按实际板卡重新填写；本文档当前仍是实验方案，不包含实测结果。
 
 ### 11.2 软件
 

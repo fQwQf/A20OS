@@ -22,6 +22,7 @@
 #define A20_SYS_handle_xattr_get  0x0109
 #define A20_SYS_handle_xattr_list 0x010A
 #define A20_SYS_handle_xattr_remove 0x010B
+#define A20_SYS_handle_poll       0x010C
 
 /* Task / Thread (0x0200) */
 #define A20_SYS_task_exit         0x0200
@@ -118,6 +119,10 @@
 #define A20_SYS_system_random     0x0A01
 #define A20_SYS_system_reboot     0x0A02
 
-#define A20_NATIVE_SYSCALL_COUNT  90
+/* Sync (0x0B00) */
+#define A20_SYS_futex_wait        0x0B00
+#define A20_SYS_futex_wake        0x0B01
+
+#define A20_NATIVE_SYSCALL_COUNT  94
 
 #endif

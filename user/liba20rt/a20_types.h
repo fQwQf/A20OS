@@ -165,7 +165,9 @@ typedef struct a20_handle_entry {
     uint16_t        _pad;
     a20_rights_t    rights;        /* Declared rights bitmask */
     uint64_t        expiry_tick;   /* Absolute expiry (kernel ticks), 0 = none */
-    uint32_t        remaining_ops; /* Remaining ops, 0 = unlimited */
+    uint32_t        remaining_ops; /* Remaining ops; with A20_TEMPORAL_OP_COUNT
+                                    * set, 0 = exhausted.  Flag clear = ignored
+                                    * (unlimited). */
     uint32_t        temporal_flags;/* A20_TEMPORAL_* flags */
     uint8_t         security_label;/* L=0, M=1, H=2 (Bell-LaPadula) */
     uint8_t         state;         /* a20_handle_state_t */
@@ -274,6 +276,24 @@ typedef struct a20_control_args {
     uint64_t       out_size;
     uint64_t       out_actual;
 } a20_control_args_t;
+
+/* ---- handle_control commands ---- */
+
+#define A20_HANDLE_CTRL_IOCTL          0u
+#define A20_HANDLE_CTRL_FCNTL          1u
+#define A20_HANDLE_CTRL_SET_TEMPORAL   2u  /* arg0 = a20_handle_temporal_args_t*  */
+#define A20_HANDLE_CTRL_GET_TEMPORAL   3u  /* arg0 = a20_handle_temporal_args_t*  */
+#define A20_HANDLE_CTRL_SET_LABEL      4u  /* arg0 = new label (raise-only)       */
+
+/* Temporal capability control.  SET is strengthening-only
+ * (non-refreshability, docs/native-abi/06-security.md §6.4). */
+typedef struct a20_handle_temporal_args {
+    uint32_t       size;
+    uint32_t       version;
+    uint64_t       expiry_ns;      /* absolute CLOCK_MONOTONIC ns; 0 = no expiry */
+    uint32_t       remaining_ops;  /* operation budget when OP_COUNT flag set   */
+    uint32_t       temporal_flags; /* A20_TEMPORAL_*                            */
+} a20_handle_temporal_args_t;
 
 /* ========================================================================
  * I/O structures (kernel/include/abi/native/types.h)
@@ -691,6 +711,21 @@ typedef struct a20_pending_event {
     uint64_t       data0, data1, data2;
 } a20_pending_event_t;
 
+/* ---- Observable event types (docs/native-abi/05-ipc.md §3.3) ---- */
+
+#define A20_EVENT_READABLE        0u
+#define A20_EVENT_WRITABLE        1u
+#define A20_EVENT_ERROR           2u
+#define A20_EVENT_CLOSED          3u
+#define A20_EVENT_CONNECTION      4u
+#define A20_EVENT_ACCEPT_READY    5u
+#define A20_EVENT_EXPIRED         6u
+#define A20_EVENT_EXITED          7u
+#define A20_EVENT_MESSAGE_READY   8u
+#define A20_EVENT_PEER_CLOSED     9u
+
+#define A20_EVENT_MASK(ev)        (1ull << (ev))
+
 typedef struct a20_event_wait_args {
     uint32_t       size;
     uint32_t       version;
@@ -783,11 +818,15 @@ typedef struct a20_msg_recv_args {
     uint32_t       _pad2;
     uint64_t       handle_buf;      /* a20_handle_t[] */
     uint32_t       handle_buf_count;
-    uint32_t       _pad3;
+    uint32_t       flags;           /* A20_MSG_* (was _pad3) */
     uint64_t       out_data_len;
     uint32_t       out_handle_count;
     uint64_t       out_rights_buf;
 } a20_msg_recv_args_t;
+
+/* ---- Message flags (channel_send / channel_recv) ---- */
+
+#define A20_MSG_NONBLOCK   (1u << 0)  /* fail with WOULD_BLOCK instead of sleeping */
 
 /* ========================================================================
  * Network structures (kernel/include/abi/native/types.h)
@@ -890,6 +929,31 @@ typedef struct a20_regs {
     uint64_t       sp;
     uint64_t       sr;
 } a20_regs_t;
+
+/* ========================================================================
+ * Sync structures (kernel/include/abi/native/types.h)
+ * ======================================================================== */
+
+#define A20_TIMEOUT_INFINITE  ((uint64_t)-1)
+
+typedef struct a20_futex_wait_args {
+    uint32_t       size;
+    uint32_t       version;
+    uint64_t       addr;
+    uint32_t       expected;
+    uint32_t       flags;
+    uint64_t       timeout_ns;
+} a20_futex_wait_args_t;
+
+typedef struct a20_futex_wake_args {
+    uint32_t       size;
+    uint32_t       version;
+    uint64_t       addr;
+    uint32_t       count;
+    uint32_t       flags;
+    uint32_t       out_woken;
+    uint32_t       reserved;
+} a20_futex_wake_args_t;
 
 /* ========================================================================
  * System info (kernel/include/abi/native/types.h)
