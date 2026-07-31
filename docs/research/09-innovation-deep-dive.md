@@ -282,7 +282,7 @@ typedef struct a20_channel_protocol {
 
 ### 3.1 问题
 
-当前设计中，一旦 handle 被授予 rights $\rho$，这些权限就永久有效直到显式关闭或替换。不存在"这个 handle 在 $N$ 次操作后或 $T$ 毫秒后自动衰减"的概念。
+基础 53-syscall 模型中，一旦 handle 被授予 rights $\rho$，这些权限永久有效直到显式关闭或替换；本节提出并形式化“在 $N$ 次操作后或 $T$ 毫秒后自动衰减”的扩展。当前内核已经实现该扩展，入口与实现状态见下文。
 
 这在以下场景中是不足的：
 - **供应链安全**：第三方库只需要在请求处理期间的网络访问权限
@@ -305,7 +305,8 @@ typedef struct a20_handle_entry {
     uint64_t          expiry_tick;      // 绝对过期时刻（kernel ticks）
                                        // 0 = 无时间过期
     uint32_t          remaining_ops;    // 剩余操作次数
-                                       // 0 = 无限次（不是"已耗尽"！）
+                                       // OP_COUNT 置位时 0 = 已耗尽
+                                       // OP_COUNT 未置位时字段被忽略（无限）
     uint32_t          temporal_flags;   // 时态标志
     // A20_TEMPORAL_EXPIRY_ABSOLUTE (1<<0): 使用绝对过期时刻
     // A20_TEMPORAL_OP_COUNT        (1<<1): 使用操作次数限制
@@ -315,9 +316,11 @@ typedef struct a20_handle_entry {
 
 **有效权限定义**：
 
-$$\rho_{eff}(h, t) = \begin{cases} \rho(h) & \text{if } expiry(h) = 0 \text{ or } t < expiry(h) \text{, and } remaining(h) \neq 0 \\ \emptyset & \text{otherwise} \end{cases}$$
+$$\rho_{eff}(h, t) = \begin{cases} \rho(h) & \text{if } (\neg EXP(h) \lor expiry(h)=0 \lor t < expiry(h)) \land (\neg OP(h) \lor remaining(h)>0) \\ \emptyset & \text{otherwise} \end{cases}$$
 
-即：如果 handle 未过期且操作次数未耗尽，有效权限等于声明权限；否则有效权限为空。
+其中 $EXP(h)$ / $OP(h)$ 表示对应 temporal flag 是否置位。即：时间与操作次数约束只在各自 flag 置位时生效；`remaining_ops == 0` 在 OP_COUNT 模式下表示耗尽，flag 未置位时不表示“无限”的特殊数值，而是整个字段被忽略。
+
+> **当前实现**：`handle_control(SET_TEMPORAL/GET_TEMPORAL)` 已提供用户态入口；SET 只允许添加 flag、提前 expiry、减少 remaining_ops。deadline-driven sweeper 已接入，约每 100ms 扫描并执行 AUTO_CLOSE。dup、replace、spawn、vm_share 与 channel transfer 均继承时态参数和安全标签；`user/tests/test_native_handle.c` 覆盖 op-count 衰减、typed channel 与 expiry AUTO_CLOSE。
 
 ### 3.3 时间参数化 SOS
 
@@ -786,7 +789,7 @@ $$\text{Safe}_{combined}(\sigma) = \text{TemporalSafe}(\sigma) \wedge \text{Type
 
 **关键区别**：传统撤销是**按需**的（revocation request 触发遍历），时态撤销是**持续**的（sweeper 周期性扫描）。传统撤销的延迟取决于 $n$（副本数量），时态撤销的延迟取决于 sweeper 周期（与 $n$ 无关）。$\square$
 
-**洞察**：时态撤销将撤销的**计算成本**从"撤销时刻"转移到了"创建时刻"——创建时多存储一个 expiry 字段（+8 bytes），换来了撤销时的 $O(1)$ 复杂度。这是**空间换时间**的经典 trade-off，但在能力撤销场景中首次被形式化分析。
+**洞察**：时态撤销将撤销的主要决策成本从“撤销时刻”转移到 handle 创建/约束设置时——当前条目新增 `expiry_tick`（8B）、`remaining_ops`（4B）和 `temporal_flags`（4B），合计 **+16 bytes**，换来 lookup 时 $O(1)$ 的失效判定。AUTO_CLOSE 仍需 deadline-driven sweep 回收 slot，其系统总成本取决于活跃 handle table 数与扫描节奏，尚需按 05 的框架实测；因此不能把整个回收过程笼统声称为最坏情况 $O(1)$。
 
 ### 8.3 痛点三：能力系统的渐进式采用（Gradual Adoption）
 

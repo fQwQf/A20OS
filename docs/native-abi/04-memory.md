@@ -149,13 +149,13 @@ int64_t vm_alloc(a20_vm_alloc_args_t *args);
 int64_t vm_map(a20_vm_map_args_t *args);
 ```
 
-语义：
-1. 验证 source handle 有效且类型为 file/shm/device
-2. 检查 `MAP` 权限
-3. 如果 source 是 file：创建 paged VMO，后备存储为文件内容
-4. 如果 source 是 shm：复用已有的 shm VMO
-5. 在地址空间中分配 VMAR，映射 VMO
-6. `refcount_inc(vmo)`
+当前实现语义：
+1. `source == A20_HANDLE_NULL`：创建匿名 VMO 并映射
+2. 否则验证 source handle 有效、检查 `MAP` 权限，类型必须为 `MEMORY`、`FILE` 或 `DEVICE`
+3. source 是 `MEMORY`：复用已有 VMO，验证 `[offset, offset+length)` 不越界
+4. source 是 `FILE`/`DEVICE`：创建匿名 VMO，将文件区间 **eager-load** 到 VMO 后映射（当前不是 demand-paged 文件后备，也不是 COW）
+5. 计算 `prot_eff = prot_req ∩ prot_handle`：缺少 READ/WRITE right 时相应保护位被移除
+6. 在地址空间中创建 VMO-backed VMA；映射持有一个 VMO 引用，解除映射时释放
 
 **与 POSIX mmap 的关键区别**：映射的目标是 handle，不是 fd。handle 的 rights 决定映射的保护位——如果 handle 只有 READ 权限，映射不能是 WRITABLE，即使 prot 参数请求了 W。
 
@@ -188,16 +188,18 @@ int64_t vm_protect(uint64_t addr, uint64_t length, uint32_t prot);
 ### 4.5 vm_share — 内存共享
 
 ```c
-int64_t vm_share(a20_vm_share_args_t *args);
+int64_t vm_share(a20_handle_t vmo, a20_handle_t target_task,
+                 a20_rights_t rights);
 ```
 
-语义：
-1. 查找 [addr, addr+length) 对应的 VMO
-2. 创建新的 shm 对象（类型 A20_OBJ_MEMORY），引用同一 VMO
-3. 设置导出权限（rights 参数限制接收方权限）
-4. 返回 shm handle
+当前 syscall 形式为 `vm_share(vmo_handle, target_task, rights)`：
+1. source 必须是 `A20_OBJ_MEMORY`，需要 `READ | TRANSFER` right
+2. `target_task == A20_HANDLE_NULL` 时安装到当前进程 HT；否则 task handle 需要 `CONTROL`，内核找到目标进程 HT 并安装
+3. 接收权限为 `rights ∩ source.rights`，空集返回 `ACCESS`
+4. 新 handle 继承源 VMO handle 的 expiry、remaining_ops、temporal flags 与安全标签，并增加 VMO 引用
+5. 对目标进程执行 Bell-LaPadula No Read Up 检查
 
-接收方通过 `vm_map(shm_handle)` 映射到自己的地址空间。
+接收方通过返回的目标 HT handle 编号调用 `vm_map`。当前仍未提供“按地址区间反查 VMO 并导出”的 `a20_vm_share_args_t` 形式；用户应先使用 `vm_create_object` 创建 VMO，再映射和分享。
 
 ### 4.6 vm_flush — 刷新
 

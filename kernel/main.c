@@ -492,7 +492,7 @@ void init_kthread(void) {
                                 , info.nommu_allocs, info.nommu_alloc_sizes,
                                 info.nommu_alloc_types, info.num_nommu_allocs
 #endif
-                                );
+                                , 0);
     if (ret < 0) {
         panic("init: proc_alloc_user failed: %d\n", ret);
     }

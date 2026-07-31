@@ -54,13 +54,14 @@ typedef struct a20_channel_ep {
     struct a20_channel_ep  *peer;           /* 对端 endpoint */
     int                     peer_closed;    /* 对端是否已关闭 */
 
-    /* 消息队列（单向：从本端发往对端） */
-    a20_ch_message_t      **msg_queue;      /* 消息指针数组 */
+    /* 本端接收队列（单链 FIFO） */
+    a20_ch_message_t       *msg_head;
+    a20_ch_message_t       *msg_tail;
     uint32_t                msg_cap;        /* 队列容量 */
-    uint32_t                msg_head;       /* 消费位置 */
-    uint32_t                msg_tail;       /* 生产位置 */
     uint32_t                msg_count;      /* 当前消息数 */
     uint32_t                total_data;     /* 当前缓冲数据总量 */
+    a20_channel_type_t     *chan_type;      /* NULL 或指向本端副本 */
+    a20_channel_type_t      chan_type_storage;
 } a20_channel_ep_t;
 ```
 
@@ -77,8 +78,8 @@ typedef struct a20_channel_type {
     uint32_t max_data_size;      // 最大字节负载（0 = 使用 A20_CH_MAX_DATA）
     uint32_t max_handles;        // 单条消息最大 handle 数（0 = 使用 A20_CH_MAX_HANDLES）
     uint32_t flags;
-    // A20_CHAN_TYPE_ORDERED (1<<0): 强制消息按类型序列（协议合规模式）
-    // A20_CHAN_TYPE_STRICT  (1<<1): 拒绝未声明类型
+    // A20_CHAN_TYPE_ORDERED (1<<0): FIFO 顺序声明（当前 channel 本身即 FIFO）
+    // A20_CHAN_TYPE_STRICT  (1<<1): 严格类型声明（当前 typed channel 始终严格检查）
 } a20_channel_type_t;
 
 // 类型 bit 位（与 a20_object_type_t 对齐）
@@ -94,9 +95,12 @@ typedef struct a20_channel_type {
 #define A20_CHAN_TYPE_ANY      0xFFFFFFFF  // 不限制类型
 ```
 
+`a20_channel_type_t` 是由版本化 `a20_channel_create_args_t` 指针引用的固定子结构，目前以 `version` 开头而不单独携带 `size`；创建入口只接受 version 0/1，并将整份已知布局复制到内核。后续若需要追加字段，应先新增 version 并在 create 入口显式按版本复制，不能直接扩大 version 1 的读取长度。
+
 **类型强制执行**：
 - `send_handle_types`：`channel_send` 时，每个被传输的 handle 的对象类型必须在此 bitmask 中
 - `recv_handle_types`：`channel_recv` 时，从消息中取出的 handle 的对象类型必须在此 bitmask 中
+- `max_data_size` / `max_handles`：创建时将 0 或超出全局上限的值归一化为 64KB / 8，send 时强制检查
 - 类型检查失败返回 `A20_ERR_TYPE_MISMATCH`
 
 > **内核执行**：`a20_channel_send()` 调用 `ch_check_send_types()` 检查 `send_handle_types` bitmask；`a20_channel_recv()` 在取出消息后调用 `ch_check_recv_types()` 检查 `recv_handle_types` bitmask。两者均在 `kernel/ipc/a20_channel.c` 中实现。
@@ -123,12 +127,14 @@ int64_t channel_create(a20_channel_create_args_t *args);
 
 创建过程：
 1. 分配两个 `a20_channel_ep_t`，互相指向对方（peer）
-2. 如果 `type != NULL`，将类型签名复制到两个 endpoint（类型签名共享同一份拷贝）
+2. 如果 `type != NULL`，将类型签名分别复制到两个 endpoint 的内嵌存储（避免共享生命周期问题）
 3. 在调用者的 handle table 中分配两个 handle
 4. 每个 handle 获得 READ | WRITE | DUP | TRANSFER 权限
 5. 返回两个 endpoint handle
 
 **向后兼容**：`type == NULL` 时行为与无类型约束的 channel 完全一致。
+
+> **实现状态：已接入。** `sys_a20_channel_create` 已读取 `args.type`，不再硬编码 `NULL`；SDK 提供 `a20_channel_create_typed()`。
 
 ### 2.4 Send 协议（两阶段锁）
 
@@ -159,6 +165,8 @@ int64_t channel_send(a20_msg_send_args_t *args);
 - 阶段 2 队列满：返回 `WOULD_BLOCK`（非阻塞）或阻塞等待空间（阻塞模式）
 - 对端已关闭：返回 `CANCELED`，释放消息和 handle 引用
 
+默认模式为阻塞；`a20_msg_send_args_t.flags` 设置 `A20_MSG_NONBLOCK` 时，队列满立即返回 `WOULD_BLOCK`。阻塞实现使用 tokenized Park/Wake，并以 wait-queue key 区分等待消息的接收者与等待空间的发送者。
+
 ### 2.5 Recv 协议
 
 ```c
@@ -167,17 +175,14 @@ int64_t channel_recv(a20_msg_recv_args_t *args);
 
 ```text
 1. lookup channel handle → 验证 READ 权限
-2. spin_lock(&ep->lock)
+2. `recv_begin` 获取 `ep->lock`
 3. 检查 msg_count > 0：
    - 是：取出队头消息
-   - 否：阻塞等待（释放锁 → 等待 → 重新获取锁）
-4. 拷贝数据到用户缓冲区
-5. 对每个附带的 handle：
-   - 在当前进程 HT 中分配新槽位
-   - 写入 (object, type, requested_rights)
-   - refcount 已经在 send 时 inc 过
-6. 解锁
-7. 唤醒可能在等待空间的发送方
+   - 否：默认阻塞等待；`A20_MSG_NONBLOCK` 立即返回 `WOULD_BLOCK`
+4. 在仍持有 endpoint lock 时调用 `a20_handle_reserve_many` 预留全部接收槽位
+5. 预留成功后才由 `recv_finish` 出队；失败则 `recv_abort` 解锁并返回 `NO_SPACE`，消息保持排队
+6. 将消息中的 `(object, type, rights, expiry_tick, remaining_ops, temporal_flags, security_label)` 提交到预留槽位
+7. 拷贝数据与新 handle 编号到用户缓冲区；唤醒等待空间的发送方
 ```
 
 ### 2.6 Partial Delivery 状态机
@@ -197,7 +202,7 @@ int64_t channel_recv(a20_msg_recv_args_t *args);
   PARTIAL → 重试投递 / 超时 → ROLLED_BACK（释放所有 handle 引用）
 ```
 
-**设计决策**：不使用部分投递。如果接收方 HT 空间不足，整个 recv 返回错误（`NO_SPACE`），消息留在队列中。这简化了实现且避免了部分状态。
+**实现决策（已落地）**：不使用部分投递。`reserve-many → dequeue → commit` 保证接收方 HT 空间不足时整个 recv 返回 `NO_SPACE`，消息留在队列中；commit 对已预留槽位不再失败。
 
 ### 2.7 Handle Transfer 语义
 
@@ -210,6 +215,8 @@ $$\rho_{recv} = \rho_{send} \cap \rho_{transfer}$$
 - $\rho_{recv}$：接收方获得的权限
 
 **共享语义**（不是移动语义）：发送方在 send 后仍持有原 handle。对象的引用计数增加。这避免了"send 后 handle 消失"的惊讶行为。
+
+消息同时携带源 handle 的时态约束和安全标签。接收方安装时原样继承，不能将过期时间、操作预算或标签重置为更宽松值（06-security.md §6.4）。
 
 ### 2.8 Channel 关闭
 
@@ -285,20 +292,20 @@ typedef struct a20_eventq {
 
 ### 3.3 可观察事件类型
 
-| 对象类型 | 事件 | 说明 |
-|---------|------|------|
-| file | READABLE | 数据可读 |
-| file | WRITABLE | 缓冲区可写 |
-| file | ERROR | I/O 错误 |
-| file | CLOSED | 文件被关闭 |
-| socket | READABLE, WRITABLE, ERROR, CLOSED | 同 file |
-| socket | CONNECTION | 新连接到达 |
-| socket | ACCEPT_READY | 可接受连接 |
-| timer | EXPIRED | 定时器到期 |
-| task | EXITED | 进程退出 |
-| thread | EXITED | 线程退出 |
-| channel | MESSAGE_READY | 有消息可接收 |
-| pipe | READABLE, WRITABLE | 同 file |
+| 索引 | 常量 | 对象类型 | 说明 | 当前事件源 |
+|------|------|---------|------|-----------|
+| 0 | `A20_EVENT_READABLE` | file/socket/pipe | 数据可读 | 未接入 |
+| 1 | `A20_EVENT_WRITABLE` | file/socket/pipe | 缓冲区可写 | 未接入 |
+| 2 | `A20_EVENT_ERROR` | file/socket | I/O 错误 | 未接入 |
+| 3 | `A20_EVENT_CLOSED` | object/channel | 对象关闭 | channel endpoint 已接入 |
+| 4 | `A20_EVENT_CONNECTION` | socket | 新连接到达 | 未接入 |
+| 5 | `A20_EVENT_ACCEPT_READY` | socket | 可接受连接 | 未接入 |
+| 6 | `A20_EVENT_EXPIRED` | timer | 定时器到期 | 已接入 |
+| 7 | `A20_EVENT_EXITED` | task/thread | 任务退出 | task 已接入 |
+| 8 | `A20_EVENT_MESSAGE_READY` | channel | 有消息可接收 | 已接入 |
+| 9 | `A20_EVENT_PEER_CLOSED` | channel | 对端关闭 | 已接入 |
+
+事件掩码使用 `A20_EVENT_MASK(index) = 1ull << index`。当前可实际观测的是 channel、timer 与 task 退出；file/socket/pipe 和文件系统路径事件仍是后续接入项。
 
 ### 3.4 操作
 
@@ -332,8 +339,8 @@ int64_t event_wait(a20_event_wait_args_t *args);
 1. 验证 queue handle（READ 权限）
 2. spin_lock(&eq->lock)
 3. 检查 ring_count > 0：
-   - 是：从 ring buffer 取出最多 max_events 个事件，拷贝到用户缓冲区
-   - 否：阻塞等待（timeout_ns = 0 时直接返回 WOULD_BLOCK）
+   - 是：从 ring buffer 取出最多 `min(max_events, 64)` 个事件，拷贝到用户缓冲区
+   - 否：基于 tokenized Park/Wake 阻塞等待（`timeout_ns = 0` 时直接返回 `WOULD_BLOCK`，`A20_TIMEOUT_INFINITE` 无限等待，有限相对超时返回 `TIMED_OUT`）
 4. 解锁
 5. 返回事件数量
 
@@ -423,8 +430,8 @@ void a20_eventq_destroy(a20_eventq_t *eq) {
 ### 4.3 被监控对象销毁
 
 ```c
-void a20_eventq_on_object_destroy(void *object) {
-    a20_watch_entry_list_t *list = object_watches_lookup(object);
+void a20_eventq_on_object_destroy(void *object, uint16_t object_type) {
+    a20_watch_entry_list_t *list = object_watches_lookup(object, object_type);
     for each watch_entry w in list {
         spin_lock(&w->owner_queue->lock);
         linked_list_remove(&w->owner_queue->watches, w);

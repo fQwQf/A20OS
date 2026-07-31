@@ -161,7 +161,8 @@ NATIVE_BUILD_DIR       := $(USER_BUILD_DIR)
 NATIVE_HELLO_BIN       := $(NATIVE_BUILD_DIR)/native-hello-$(NATIVE_TAG)
 NATIVE_HANDLE_BIN      := $(NATIVE_BUILD_DIR)/native-handle-$(NATIVE_TAG)
 NATIVE_LIBC_BIN        := $(NATIVE_BUILD_DIR)/native-libc-$(NATIVE_TAG)
-NATIVE_OUTPUTS         := $(NATIVE_HELLO_BIN) $(NATIVE_HANDLE_BIN) $(NATIVE_LIBC_BIN)
+NATIVE_FUTEX_BIN       := $(NATIVE_BUILD_DIR)/native-futex-$(NATIVE_TAG)
+NATIVE_OUTPUTS         := $(NATIVE_HELLO_BIN) $(NATIVE_HANDLE_BIN) $(NATIVE_LIBC_BIN) $(NATIVE_FUTEX_BIN)
 NATIVE_BUILD_STAMP     := $(NATIVE_BUILD_DIR)/.native-build-id
 comma := ,
 NET_HOSTFWD ?= hostfwd=tcp::5555-:5555,hostfwd=udp::5555-:5555
@@ -629,7 +630,7 @@ VBOX_AARCH64_LOAD_ADDRESS ?= 0x08080000ULL
 		check-arch-boundary check-task-state-boundary \
 		check-riscv64-bringup check-loongarch64-bringup check-aarch64-bringup check-x86_64-bringup check-arm32-bringup check-riscv32-bringup check-ppc64le-bringup \
 		check-riscv64-user check-loongarch64-user check-aarch64-user check-x86_64-user check-arm32-user check-riscv32-user check-ppc64le-user \
-		smoke-riscv64 smoke-loongarch64 smoke-aarch64 smoke-x86_64 smoke-qemu-gui-x86_64 smoke-qemu-gui-riscv64 smoke-qemu-gui-aarch64 smoke-qemu-gui-arm32 smoke-qemu-gui-loongarch64 smoke-arm32 smoke-riscv32 smoke-ppc64le smoke-abi-linux smoke-network-suite smoke-proc-a20 smoke-proc-stress smoke-mm-stress smoke-vfs-stress smoke-vfs-edge smoke-sched-stress smoke-futex-stress smoke-socket-stress smoke-driver-lifecycle smoke-hda smoke-audio-userspace smoke-virtio-sound smoke-pci-portability smoke-native-handle smoke-native-libc smoke-io-event smoke-signalfd-stress smoke-evdev-stress smoke-scm-stress \
+		smoke-riscv64 smoke-loongarch64 smoke-aarch64 smoke-x86_64 smoke-qemu-gui-x86_64 smoke-qemu-gui-riscv64 smoke-qemu-gui-aarch64 smoke-qemu-gui-arm32 smoke-qemu-gui-loongarch64 smoke-arm32 smoke-riscv32 smoke-ppc64le smoke-abi-linux smoke-network-suite smoke-proc-a20 smoke-proc-stress smoke-procfs-stress smoke-mm-stress smoke-vfs-stress smoke-vfs-edge smoke-sched-stress smoke-futex-stress smoke-socket-stress smoke-driver-lifecycle smoke-hda smoke-audio-userspace smoke-virtio-sound smoke-pci-portability smoke-native-handle smoke-native-libc smoke-native-futex smoke-io-event smoke-signalfd-stress smoke-evdev-stress smoke-scm-stress \
 		smoke-arch-mmu-matrix \
 		FORCE regen-rootfs-overlay \
 		user_apps fs_img kernel-only dev-build contest-rv contest-la \
@@ -637,6 +638,7 @@ VBOX_AARCH64_LOAD_ADDRESS ?= 0x08080000ULL
 		qemu-disk-rv qemu-disk-la \
 		extra-img _extra-img extra-user-apps prepare-riscv64-glibc-sysroot force_extra_image_stamp run-riscv64-extra run-loongarch64-extra run-arm64-extra run-x86_64-extra run-arm32-extra run-riscv32-extra run-ppc64le-extra \
 		native-test-arch native-handle-test-arch native-libc-arch native-programs \
+	native-futex-arch native-futex-rv smoke-native-futex mlibc-sysroot mlibc-hello-rv smoke-mlibc \
 		native-test-rv native-test-la native-test-aarch64 native-test-x86_64 native-test-arm32 native-test-rv32 native-test-ppc64le native-test native-test-all \
 		native-minimal-rv native-minimal-la native-minimal \
 		native-handle-test-rv native-handle-test-la native-handle-test-aarch64 native-handle-test-x86_64 native-handle-test-arm32 native-handle-test-rv32 native-handle-test-ppc64le native-handle-test native-handle-test-all \
@@ -1468,6 +1470,29 @@ smoke-proc-stress:
 		exit 1; \
 	fi
 
+smoke-procfs-stress:
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/procfs-stress-riscv64.log"; \
+	status=0; \
+	{ sleep $(SMOKE_INPUT_DELAY); printf 'procfs_stress\npoweroff\n'; } | \
+	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
+		-machine virt -m 1G -nographic -smp 1 -bios default \
+		-global virtio-mmio.force-legacy=false \
+		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
+		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
+		> "$$log" 2>&1 || status=$$?; \
+	if grep -q 'PROCFS_STRESS: PASS' "$$log"; then \
+		echo "smoke-procfs-stress: PASS; log saved to $$log"; \
+	else \
+		echo "smoke-procfs-stress: failed with status $$status; tail of $$log:"; \
+		tail -n 80 "$$log"; \
+		exit 1; \
+	fi
+
 smoke-mm-stress:
 	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
@@ -1503,6 +1528,8 @@ smoke-vfs-stress:
 		-global virtio-mmio.force-legacy=false \
 		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
 		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/ext4.img,if=none,format=raw,id=x1 \
+		-device virtio-blk-device,drive=x1,bus=virtio-mmio-bus.1 \
 		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
 			-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
 			> "$$log" 2>&1 || status=$$?; \
@@ -2152,7 +2179,10 @@ smoke-native-handle:
 		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
 		-kernel .kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf \
 		> "$$log" 2>&1 || status=$$?; \
-	if grep -q 'part ok' "$$log" && grep -q 'System is going down for power-off NOW' "$$log"; then \
+	if grep -q 'part ok' "$$log" && grep -q 'tchan ok' "$$log" && \
+	   grep -q 'bch ok' "$$log" && grep -q 'evq ok' "$$log" && \
+	   grep -q 'opc ok' "$$log" && grep -q 'ac ok' "$$log" && \
+	   grep -q 'System is going down for power-off NOW' "$$log"; then \
 		echo "smoke-native-handle: PASS; log saved to $$log"; \
 	else \
 		echo "smoke-native-handle: failed with status $$status; tail of $$log:"; \
@@ -2261,7 +2291,7 @@ $(NATIVE_BUILD_STAMP): $(USER_BUILD_STAMP) force_native_build
 	if [ "$$current" != "$(USER_BUILD_ID)" ]; then \
 		need_build=1; \
 	elif [ ! -x "$(NATIVE_HELLO_BIN)" ] || [ ! -x "$(NATIVE_HANDLE_BIN)" ] || \
-	     [ ! -x "$(NATIVE_LIBC_BIN)" ]; then \
+	     [ ! -x "$(NATIVE_LIBC_BIN)" ] || [ ! -x "$(NATIVE_FUTEX_BIN)" ]; then \
 		need_build=1; \
 	elif find user/liba20rt user/liba20c user/tests -type f -newer "$@" \
 		-print -quit | grep -q .; then \
@@ -3096,6 +3126,120 @@ native-libc: $(DEFAULT_NATIVE_LIBC_TARGETS)
 native-libc-all: native-libc-rv native-libc-la native-libc-aarch64 native-libc-x86_64 native-libc-arm32 native-libc-rv32 native-libc-ppc64le
 
 native-programs: $(NATIVE_OUTPUTS)
+
+define NATIVE_FUTEX_RECIPE
+@mkdir -p $(dir $(4))
+$(1) -ffreestanding -nostdlib -static \
+    $(2) \
+    -Iuser -Iuser/liba20rt \
+    -T$(NATIVE_LD) \
+    $(3) \
+    $(NATIVE_SDK_SRC) \
+    $(NATIVE_COMPILER_RT_SRC) \
+    $(NATIVE_ARCH_SRC) \
+    user/tests/test_native_futex.c \
+    $(NATIVE_LIBS) \
+    -o $(4)
+endef
+
+$(NATIVE_FUTEX_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) user/tests/test_native_futex.c \
+		user/liba20rt/a20-generic.ld user/liba20rt/crt0_a20.h user/liba20rt/a20_syscall.h user/liba20rt/a20_sync.h
+	$(call NATIVE_FUTEX_RECIPE,$(NATIVE_CC),$(NATIVE_CFLAGS),$(NATIVE_CRT0),$@)
+
+native-futex-arch: $(NATIVE_FUTEX_BIN)
+
+native-futex-rv:
+	$(MAKE) ARCH=riscv64 NOMMU=$(NOMMU) native-futex-arch
+
+smoke-native-futex:
+	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/native-futex-riscv64.log"; \
+	status=0; \
+	{ sleep $(SMOKE_INPUT_DELAY); printf '/bin/native-futex-rv\npoweroff\n'; } | \
+	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
+		-machine virt -m 1G -nographic -smp 1 -bios default \
+		-global virtio-mmio.force-legacy=false \
+		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-both-dev/fat32.img,if=none,format=raw,id=x0 \
+		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		-kernel .kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf \
+		> "$$log" 2>&1 || status=$$?; \
+	if grep -q 'NATIVE_FUTEX: PASS' "$$log" && grep -q 'System is going down for power-off NOW' "$$log"; then \
+		echo "smoke-native-futex: PASS; log saved to $$log"; \
+	else \
+		echo "smoke-native-futex: failed with status $$status; tail of $$log:"; \
+		tail -n 80 "$$log"; \
+		exit 1; \
+	fi
+
+# ----------------------------------------------------------------
+# mlibc port (sysdeps/a20) — full libc on the native ABI
+# ----------------------------------------------------------------
+MLIBC_DIR      := user/external/mlibc
+MLIBC_BUILD    := $(MLIBC_DIR)/build-a20-riscv64
+MLIBC_SYSROOT  := user/build/mlibc-sysroot
+MLIBC_HELLO_BIN := $(NATIVE_BUILD_DIR)/mlibc-hello-$(NATIVE_TAG)
+MLIBC_CHILD_BIN := $(NATIVE_BUILD_DIR)/mlibc-child-$(NATIVE_TAG)
+MLIBC_FAST_TYPE_FLAGS := \
+	-D__INT_FAST8_TYPE__="signed char" -D__INT_FAST16_TYPE__=long -D__INT_FAST32_TYPE__=long \
+	-D__UINT_FAST8_TYPE__="unsigned char" -D__UINT_FAST16_TYPE__="unsigned long" -D__UINT_FAST32_TYPE__="unsigned long"
+
+$(MLIBC_SYSROOT)/lib/libc.a: $(wildcard $(MLIBC_DIR)/sysdeps/a20/*) $(MLIBC_DIR)/ci/a20-riscv64.cross-file
+	@test -d "$(MLIBC_BUILD)" || meson setup $(MLIBC_BUILD) $(MLIBC_DIR) \
+		--cross-file $(MLIBC_DIR)/ci/a20-riscv64.cross-file \
+		-Ddefault_library=static -Dbuild_tests=false --prefix=$(abspath $(MLIBC_SYSROOT))
+	ninja -C $(MLIBC_BUILD)
+	meson install -C $(MLIBC_BUILD) --no-rebuild --quiet
+
+mlibc-sysroot: $(MLIBC_SYSROOT)/lib/libc.a
+
+define MLIBC_LINK_RECIPE
+@mkdir -p $(dir $(3))
+$(RISCV_ELF_PREFIX)gcc -march=rv64gc -mabi=lp64d -mcmodel=medany -static -nostdlib \
+	-D_GNU_SOURCE $(MLIBC_FAST_TYPE_FLAGS) \
+	-isystem $(MLIBC_SYSROOT)/include \
+	-T user/mlibc/a20-mlibc.ld \
+	$(MLIBC_SYSROOT)/lib/crt1.o $(MLIBC_SYSROOT)/lib/a20_thread_entry.o \
+	$(1) \
+	-L$(MLIBC_SYSROOT)/lib $(2) -lgcc \
+	-o $(3)
+endef
+
+$(MLIBC_HELLO_BIN): $(MLIBC_SYSROOT)/lib/libc.a user/tests/test_mlibc_hello.c user/mlibc/a20-mlibc.ld
+	$(call MLIBC_LINK_RECIPE,user/tests/test_mlibc_hello.c,-lc -lpthread -lm -lrt,$@)
+
+$(MLIBC_CHILD_BIN): $(MLIBC_SYSROOT)/lib/libc.a user/tests/test_mlibc_child.c user/mlibc/a20-mlibc.ld
+	$(call MLIBC_LINK_RECIPE,user/tests/test_mlibc_child.c,-lc,$@)
+
+mlibc-hello-rv: $(MLIBC_HELLO_BIN) $(MLIBC_CHILD_BIN)
+
+smoke-mlibc:
+	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
+	$(MAKE) ARCH=riscv64 NOMMU=0 mlibc-hello-rv
+	mcopy -o -i $(FAT32_IMG) $(MLIBC_HELLO_BIN) ::/mlibc-hello-rv
+	mcopy -o -i $(FAT32_IMG) $(MLIBC_CHILD_BIN) ::/mlibc-child-rv
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/mlibc-riscv64.log"; \
+	status=0; \
+	{ sleep $(SMOKE_INPUT_DELAY); printf '/bin/mlibc-hello-rv\npoweroff\n'; } | \
+	$(TIMEOUT) 40s qemu-system-riscv64 \
+		-machine virt -m 1G -nographic -smp 1 -bios default \
+		-global virtio-mmio.force-legacy=false \
+		-drive file=$(FAT32_IMG),if=none,format=raw,id=x0 \
+		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		-kernel .kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf \
+		> "$$log" 2>&1 || status=$$?; \
+	if grep -q 'MLIBC_A20: PASS' "$$log" && grep -q 'System is going down for power-off NOW' "$$log"; then \
+		echo "smoke-mlibc: PASS; log saved to $$log"; \
+	else \
+		echo "smoke-mlibc: failed with status $$status; tail of $$log:"; \
+		tail -n 120 "$$log"; \
+		exit 1; \
+	fi
 
 smoke-native-libc:
 	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build

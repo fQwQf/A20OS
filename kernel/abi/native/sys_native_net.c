@@ -45,9 +45,16 @@ extern int64_t a20_handle_install_temporal(struct a20_ht_internal *ht, void *obj
                                            uint64_t expiry_tick, uint32_t remaining_ops,
                                            uint32_t temporal_flags, uint8_t security_label);
 extern int64_t a20_handle_lookup_internal(struct a20_ht_internal *ht, a20_handle_t h,
-                                          uint16_t expected_type, a20_rights_t required_rights,
-                                          a20_handle_entry_t *out);
-extern void a20_handle_remove(struct a20_ht_internal *ht, a20_handle_t h);
+                                           uint16_t expected_type, a20_rights_t required_rights,
+                                           a20_handle_entry_t *out);
+extern int64_t a20_handle_lookup_ref_internal(struct a20_ht_internal *ht,
+                                               a20_handle_t h,
+                                               uint16_t expected_type,
+                                               a20_rights_t required_rights,
+                                               a20_handle_entry_t *out);
+extern int64_t a20_handle_remove(struct a20_ht_internal *ht, a20_handle_t h);
+extern void a20_object_release(void *object, uint16_t type);
+
 extern uint8_t a20_ht_get_label(struct a20_ht_internal *ht);
 extern void a20_ht_set_label(struct a20_ht_internal *ht, uint8_t label);
 
@@ -88,12 +95,14 @@ int64_t sys_a20_net_bind(const a20_syscall_args_t *args)
     if (!ht) return -A20_ERR_BAD_HANDLE;
 
     a20_handle_entry_t entry;
-    int64_t r = a20_handle_lookup_internal(ht, h, A20_OBJ_SOCKET,
-                                            A20_RIGHT_CONTROL, &entry);
+    int64_t r = a20_handle_lookup_ref_internal(ht, h, A20_OBJ_SOCKET,
+                                               A20_RIGHT_CONTROL, &entry);
     if (r < 0) return r;
 
-    int gfd = (int)(uintptr_t)entry.object;
-    return net_bind(gfd, addr, addrlen);
+    r = net_bind((int)(uintptr_t)entry.object, addr, addrlen);
+    a20_object_release(entry.object, entry.type);
+    return r;
+
 }
 
 int64_t sys_a20_net_connect(const a20_syscall_args_t *args)
@@ -107,11 +116,14 @@ int64_t sys_a20_net_connect(const a20_syscall_args_t *args)
     if (!ht) return -A20_ERR_BAD_HANDLE;
 
     a20_handle_entry_t entry;
-    int64_t r = a20_handle_lookup_internal(ht, h, A20_OBJ_SOCKET,
-                                            A20_RIGHT_WRITE, &entry);
+    int64_t r = a20_handle_lookup_ref_internal(ht, h, A20_OBJ_SOCKET,
+                                               A20_RIGHT_WRITE, &entry);
     if (r < 0) return r;
 
-    return net_connect((int)(uintptr_t)entry.object, addr, addrlen);
+    r = net_connect((int)(uintptr_t)entry.object, addr, addrlen);
+    a20_object_release(entry.object, entry.type);
+    return r;
+
 }
 
 int64_t sys_a20_net_accept(const a20_syscall_args_t *args)
@@ -125,12 +137,14 @@ int64_t sys_a20_net_accept(const a20_syscall_args_t *args)
     if (!ht) return -A20_ERR_BAD_HANDLE;
 
     a20_handle_entry_t entry;
-    int64_t r = a20_handle_lookup_internal(ht, h, A20_OBJ_SOCKET,
-                                            A20_RIGHT_READ, &entry);
+    int64_t r = a20_handle_lookup_ref_internal(ht, h, A20_OBJ_SOCKET,
+                                               A20_RIGHT_READ, &entry);
     if (r < 0) return r;
 
     int new_gfd = net_accept((int)(uintptr_t)entry.object, addr, addrlen, 0);
+    a20_object_release(entry.object, entry.type);
     if (new_gfd < 0) return -A20_ERR_IO;
+
 
     a20_rights_t rights = A20_RIGHT_READ | A20_RIGHT_WRITE | A20_RIGHT_STAT |
                           A20_RIGHT_DUP | A20_RIGHT_TRANSFER | A20_RIGHT_CONTROL;
@@ -149,11 +163,14 @@ int64_t sys_a20_net_listen(const a20_syscall_args_t *args)
     if (!ht) return -A20_ERR_BAD_HANDLE;
 
     a20_handle_entry_t entry;
-    int64_t r = a20_handle_lookup_internal(ht, h, A20_OBJ_SOCKET,
-                                            A20_RIGHT_CONTROL, &entry);
+    int64_t r = a20_handle_lookup_ref_internal(ht, h, A20_OBJ_SOCKET,
+                                               A20_RIGHT_CONTROL, &entry);
     if (r < 0) return r;
 
-    return net_listen((int)(uintptr_t)entry.object, backlog);
+    r = net_listen((int)(uintptr_t)entry.object, backlog);
+    a20_object_release(entry.object, entry.type);
+    return r;
+
 }
 
 int64_t sys_a20_net_sendmsg(const a20_syscall_args_t *args)
@@ -163,35 +180,67 @@ int64_t sys_a20_net_sendmsg(const a20_syscall_args_t *args)
 
     a20_net_sendmsg_args_t kargs;
     A20_VALIDATE_AND_COPY(uargs, kargs);
+    if (kargs.iov_count > 64) return -A20_ERR_INVALID_ARGUMENT;
 
     task_t *cur = proc_current();
     struct a20_ht_internal *ht = task_get_a20_ht(cur);
     if (!ht) return -A20_ERR_BAD_HANDLE;
 
     a20_handle_entry_t entry;
-    int64_t r = a20_handle_lookup_internal(ht, kargs.socket, A20_OBJ_SOCKET,
-                                            A20_RIGHT_WRITE, &entry);
+    int64_t r = a20_handle_lookup_ref_internal(ht, kargs.socket, A20_OBJ_SOCKET,
+                                               A20_RIGHT_WRITE, &entry);
     if (r < 0) return r;
+
+    uint8_t kaddr[NET_SOCKADDR_MAX];
+    size_t kaddrlen = 0;
+    if (kargs.addr) {
+        kaddrlen = sizeof(a20_net_addr_t);
+        if (copy_from_user(kaddr, (const void *)kargs.addr, kaddrlen) < 0) {
+            a20_object_release(entry.object, entry.type);
+            return -A20_ERR_FAULT;
+        }
+    }
 
     int gfd = (int)(uintptr_t)entry.object;
     uint64_t total_sent = 0;
+    char kbuf[512];
 
     a20_iovec_t *iov = (a20_iovec_t *)kargs.iov;
     for (uint32_t i = 0; i < kargs.iov_count; i++) {
         a20_iovec_t v;
-        if (copy_from_user(&v, &iov[i], sizeof(v)) < 0) return -A20_ERR_FAULT;
-        if (v.len == 0) continue;
-
-        int64_t n = net_sendto(gfd, (const void *)v.base, (size_t)v.len,
-                                (int)kargs.flags,
-                                (const void *)kargs.addr, 0);
-        if (n < 0) return (total_sent > 0) ? (int64_t)total_sent : -A20_ERR_IO;
-        total_sent += (uint64_t)n;
+        if (copy_from_user(&v, &iov[i], sizeof(v)) < 0) {
+            r = -A20_ERR_FAULT;
+            goto out_entry;
+        }
+        uint64_t done = 0;
+        while (done < v.len) {
+            size_t chunk = v.len - done;
+            if (chunk > sizeof(kbuf)) chunk = sizeof(kbuf);
+            if (copy_from_user(kbuf, (const void *)(v.base + done), chunk) < 0) {
+                r = -A20_ERR_FAULT;
+                goto out_entry;
+            }
+            int64_t n = net_sendto(gfd, kbuf, chunk, (int)kargs.flags,
+                                   kaddrlen ? kaddr : NULL, kaddrlen);
+            if (n < 0) {
+                r = (total_sent > 0) ? (int64_t)total_sent : -A20_ERR_IO;
+                goto out_entry;
+            }
+            done += (uint64_t)n;
+            total_sent += (uint64_t)n;
+            if ((size_t)n < chunk) break;
+        }
     }
 
     kargs.out_sent = total_sent;
-    if (copy_to_user(uargs, &kargs, sizeof(kargs)) < 0) return -A20_ERR_FAULT;
+    a20_object_release(entry.object, entry.type);
+    if (a20_copy_struct_to_user(uargs, &kargs, sizeof(kargs)) < 0)
+        return -A20_ERR_FAULT;
     return (int64_t)total_sent;
+
+out_entry:
+    a20_object_release(entry.object, entry.type);
+    return r;
 }
 
 int64_t sys_a20_net_recvmsg(const a20_syscall_args_t *args)
@@ -201,35 +250,70 @@ int64_t sys_a20_net_recvmsg(const a20_syscall_args_t *args)
 
     a20_net_recvmsg_args_t kargs;
     A20_VALIDATE_AND_COPY(uargs, kargs);
+    if (kargs.iov_count > 64) return -A20_ERR_INVALID_ARGUMENT;
 
     task_t *cur = proc_current();
     struct a20_ht_internal *ht = task_get_a20_ht(cur);
     if (!ht) return -A20_ERR_BAD_HANDLE;
 
     a20_handle_entry_t entry;
-    int64_t r = a20_handle_lookup_internal(ht, kargs.socket, A20_OBJ_SOCKET,
-                                            A20_RIGHT_READ, &entry);
+    int64_t r = a20_handle_lookup_ref_internal(ht, kargs.socket, A20_OBJ_SOCKET,
+                                               A20_RIGHT_READ, &entry);
     if (r < 0) return r;
 
     int gfd = (int)(uintptr_t)entry.object;
     uint64_t total_recv = 0;
+    char kbuf[512];
+    uint8_t kaddr[NET_SOCKADDR_MAX];
+    size_t kaddrlen = kargs.addr ? sizeof(kaddr) : 0;
+    int have_addr = 0;
 
     a20_iovec_t *iov = (a20_iovec_t *)kargs.iov;
     for (uint32_t i = 0; i < kargs.iov_count; i++) {
         a20_iovec_t v;
-        if (copy_from_user(&v, &iov[i], sizeof(v)) < 0) return -A20_ERR_FAULT;
-        if (v.len == 0) continue;
-
-        int64_t n = net_recvfrom(gfd, (void *)v.base, (size_t)v.len,
-                                  (int)kargs.flags,
-                                  (void *)kargs.addr, NULL);
-        if (n < 0) return (total_recv > 0) ? (int64_t)total_recv : -A20_ERR_IO;
-        total_recv += (uint64_t)n;
+        if (copy_from_user(&v, &iov[i], sizeof(v)) < 0) {
+            r = -A20_ERR_FAULT;
+            goto out_entry;
+        }
+        uint64_t done = 0;
+        while (done < v.len) {
+            size_t chunk = v.len - done;
+            if (chunk > sizeof(kbuf)) chunk = sizeof(kbuf);
+            int64_t n = net_recvfrom(gfd, kbuf, chunk, (int)kargs.flags,
+                                     kargs.addr ? kaddr : NULL,
+                                     kargs.addr ? &kaddrlen : NULL);
+            if (n < 0) {
+                r = (total_recv > 0) ? (int64_t)total_recv : -A20_ERR_IO;
+                goto out_entry;
+            }
+            if (n == 0) break;
+            if (copy_to_user((void *)(v.base + done), kbuf, (size_t)n) < 0) {
+                r = -A20_ERR_FAULT;
+                goto out_entry;
+            }
+            have_addr = kargs.addr != 0;
+            done += (uint64_t)n;
+            total_recv += (uint64_t)n;
+            if ((size_t)n < chunk) break;
+        }
     }
 
     kargs.out_received = total_recv;
-    if (copy_to_user(uargs, &kargs, sizeof(kargs)) < 0) return -A20_ERR_FAULT;
+    kargs.out_addr_len = have_addr ? (uint32_t)kaddrlen : 0;
+    a20_object_release(entry.object, entry.type);
+    if (have_addr) {
+        size_t out_len = kaddrlen < sizeof(a20_net_addr_t)
+                         ? kaddrlen : sizeof(a20_net_addr_t);
+        if (copy_to_user((void *)kargs.addr, kaddr, out_len) < 0)
+            return -A20_ERR_FAULT;
+    }
+    if (a20_copy_struct_to_user(uargs, &kargs, sizeof(kargs)) < 0)
+        return -A20_ERR_FAULT;
     return (int64_t)total_recv;
+
+out_entry:
+    a20_object_release(entry.object, entry.type);
+    return r;
 }
 
 int64_t sys_a20_net_socketpair(const a20_syscall_args_t *args)
@@ -252,11 +336,22 @@ int64_t sys_a20_net_socketpair(const a20_syscall_args_t *args)
                           A20_RIGHT_DUP | A20_RIGHT_TRANSFER;
     int64_t h0 = a20_handle_install(ht, (void *)(uintptr_t)gfds[0], A20_OBJ_SOCKET, rights);
     int64_t h1 = a20_handle_install(ht, (void *)(uintptr_t)gfds[1], A20_OBJ_SOCKET, rights);
+    if (h0 < 0 || h1 < 0) {
+        if (h0 >= 0) a20_handle_remove(ht, (a20_handle_t)h0);
+        else vfs_close(gfds[0]);
+        if (h1 >= 0) a20_handle_remove(ht, (a20_handle_t)h1);
+        else vfs_close(gfds[1]);
+        return (h0 < 0) ? h0 : h1;
+    }
 
     a20_handle_t result[2];
-    result[0] = (a20_handle_t)(h0 >= 0 ? h0 : A20_HANDLE_NULL);
-    result[1] = (a20_handle_t)(h1 >= 0 ? h1 : A20_HANDLE_NULL);
-    if (copy_to_user(out, result, sizeof(result)) < 0) return -A20_ERR_FAULT;
+    result[0] = (a20_handle_t)h0;
+    result[1] = (a20_handle_t)h1;
+    if (copy_to_user(out, result, sizeof(result)) < 0) {
+        a20_handle_remove(ht, (a20_handle_t)h0);
+        a20_handle_remove(ht, (a20_handle_t)h1);
+        return -A20_ERR_FAULT;
+    }
     return A20_OK;
 }
 
@@ -272,13 +367,17 @@ int64_t sys_a20_net_getname(const a20_syscall_args_t *args)
     if (!ht) return -A20_ERR_BAD_HANDLE;
 
     a20_handle_entry_t entry;
-    int64_t r = a20_handle_lookup_internal(ht, h, A20_OBJ_SOCKET,
-                                            A20_RIGHT_STAT, &entry);
+    int64_t r = a20_handle_lookup_ref_internal(ht, h, A20_OBJ_SOCKET,
+                                               A20_RIGHT_STAT, &entry);
     if (r < 0) return r;
 
     if (peer)
-        return net_getpeername((int)(uintptr_t)entry.object, addr, addrlen);
-    return net_getsockname((int)(uintptr_t)entry.object, addr, addrlen);
+        r = net_getpeername((int)(uintptr_t)entry.object, addr, addrlen);
+    else
+        r = net_getsockname((int)(uintptr_t)entry.object, addr, addrlen);
+    a20_object_release(entry.object, entry.type);
+    return r;
+
 }
 
 int64_t sys_a20_net_shutdown(const a20_syscall_args_t *args)
@@ -291,10 +390,12 @@ int64_t sys_a20_net_shutdown(const a20_syscall_args_t *args)
     if (!ht) return -A20_ERR_BAD_HANDLE;
 
     a20_handle_entry_t entry;
-    int64_t r = a20_handle_lookup_internal(ht, h, A20_OBJ_SOCKET,
-                                            A20_RIGHT_CONTROL, &entry);
+    int64_t r = a20_handle_lookup_ref_internal(ht, h, A20_OBJ_SOCKET,
+                                               A20_RIGHT_CONTROL, &entry);
     if (r < 0) return r;
 
-    return net_shutdown((int)(uintptr_t)entry.object, how);
-}
+    r = net_shutdown((int)(uintptr_t)entry.object, how);
+    a20_object_release(entry.object, entry.type);
+    return r;
 
+}
