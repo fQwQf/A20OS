@@ -1347,4 +1347,58 @@ vaddr_t elf_setup_stack_a20(vaddr_t stack_top, int argc, char *const argv[],
 
     return sp_va;
 }
+
+/*
+ * A dynamically linked native program has two consumers of its initial
+ * stack: the ELF interpreter expects the conventional Linux layout, while
+ * the A20 crt1 entry expects a20_start_info_t in a0.  Keep the native
+ * descriptor in the reserved top of the stack and return the conventional
+ * stack pointer to the interpreter.
+ */
+vaddr_t elf_setup_stack_a20_dynamic(vaddr_t stack_top, int argc,
+                                    char *const argv[], char *const envp[],
+                                    const elf_load_info_t *info,
+                                    uint32_t stdin_h, uint32_t stdout_h,
+                                    uint32_t stderr_h, uint32_t self_task_h,
+                                    uint32_t root_h, uint32_t cwd_h,
+                                    vaddr_t *start_info_out)
+{
+    if (!start_info_out)
+        return 0;
+
+    vaddr_t si_va = stack_top - sizeof(a20_start_info_t);
+    vaddr_t sp_va = elf_setup_stack(si_va, argc, argv, envp, info);
+    if (!sp_va)
+        return 0;
+
+    int envc = 0;
+    if (envp) {
+        while (envc < MAX_ARG_STRINGS && envp[envc])
+            envc++;
+    }
+
+    a20_start_info_t si;
+    memset(&si, 0, sizeof(si));
+    si.size = sizeof(si);
+    si.version = 1;
+    si.argc = (uint32_t)argc;
+    si.envc = (uint32_t)envc;
+    si.argv = sp_va + sizeof(vaddr_t);
+    si.envp = si.argv + (uint64_t)(argc + 1) * sizeof(vaddr_t);
+    si.stdin_handle = stdin_h;
+    si.stdout_handle = stdout_h;
+    si.stderr_handle = stderr_h;
+    si.self_task = self_task_h;
+    si.root_dir = root_h;
+    si.cwd_dir = cwd_h;
+    si.page_size = PAGE_SIZE;
+
+    vaddr_t stack_bottom = stack_top -
+        (uint64_t)USER_STACK_INITIAL_PAGES * PAGE_SIZE;
+    if (stack_copy(info->pgdir, si_va, &si, sizeof(si), &stack_bottom) < 0)
+        return 0;
+
+    *start_info_out = si_va;
+    return sp_va;
+}
 #endif

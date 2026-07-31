@@ -401,7 +401,8 @@ nomem:
 static uint64_t exec_setup_native_abi(task_t *t,
                                        const elf_load_info_t *info,
                                        int argc, char *const *k_argv,
-                                       char *const *k_envp)
+                                       char *const *k_envp,
+                                       vaddr_t *start_info_out)
 {
     struct a20_ht_internal *ht = a20_ht_create();
     if (ht) __atomic_store_n(&t->scratch_buf, ht, __ATOMIC_RELEASE);
@@ -458,10 +459,17 @@ static uint64_t exec_setup_native_abi(task_t *t,
         }
     }
 
+    if (info->interp_base) {
+        return elf_setup_stack_a20_dynamic(
+            info->stack_top, argc, k_argv, k_envp, info,
+            stdin_h, stdout_h, stderr_h, self_h, root_h, cwd_h,
+            start_info_out);
+    }
+
     return elf_setup_stack_a20(info->stack_top, argc,
-                                k_argv, k_envp, info,
-                                stdin_h, stdout_h, stderr_h, self_h,
-                                root_h, cwd_h);
+                               k_argv, k_envp, info,
+                               stdin_h, stdout_h, stderr_h, self_h,
+                               root_h, cwd_h);
 }
 #endif /* CONFIG_ABI_NATIVE */
 
@@ -495,11 +503,13 @@ static int exec_install_process(task_t *t,
 
     /* ---- 2. Build user stack (Linux or Native ABI) ---- */
     uint64_t sp;
+    vaddr_t native_start_info = 0;
 #ifdef CONFIG_ABI_NATIVE
     if (info->is_native_abi) {
         sp = exec_setup_native_abi(t, info, bprm->argc,
                                     (char *const *)bprm->args,
-                                    (char *const *)bprm->envs);
+                                    (char *const *)bprm->envs,
+                                    &native_start_info);
     } else
 #endif
     {
@@ -601,7 +611,7 @@ static int exec_install_process(task_t *t,
         TRAP_CTX_TP(trap)        = info->tls_tp;
 #ifdef CONFIG_ABI_NATIVE
         if (info->is_native_abi) {
-            TRAP_CTX_SET_ARG0(trap, sp);
+            TRAP_CTX_SET_ARG0(trap, native_start_info ? native_start_info : sp);
         }
 #endif
         trap->kernel_tp = (uint64_t)(uintptr_t)t;
