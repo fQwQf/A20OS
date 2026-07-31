@@ -40,7 +40,7 @@ VFS/ABI 层负责用户地址检查和 `copy_to_user/copy_from_user`。class ops
 
 ## Audio
 
-每个 `DEV_CLASS_AUDIO` 实例自动发布一个 `/dev/audioN`。devfs 只负责断开检查、用户 buffer 转换和 class op 转发，不应包含 HDA、PC Speaker 或其他硬件策略。客户端必须先查询 capability；PCM fd 的正常 close 会调用驱动 close 操作完成 drain，立即中止则使用 STOP。完整 ABI 见 [音频与 Intel HDA](audio.md)。
+每个 `DEV_CLASS_AUDIO` 实例自动发布一个 `/dev/audioN`。devfs 只负责断开检查、用户 buffer 转换，并把通用 ioctl/close 交给 `audio_core`；它不包含 HDA、virtio-sound、PC Speaker 或其他硬件策略。客户端必须先查询 capability；PCM fd 的正常 close 会先 drain，立即中止则使用 STOP。完整 ABI 见 [音频子系统](audio.md)。
 
 ## Block 与 network
 
