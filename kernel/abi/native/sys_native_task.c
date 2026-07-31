@@ -48,7 +48,7 @@ extern int64_t a20_handle_install_temporal(struct a20_ht_internal *ht, void *obj
 extern int64_t a20_handle_lookup_internal(struct a20_ht_internal *ht, a20_handle_t h,
                                           uint16_t expected_type, a20_rights_t required_rights,
                                           a20_handle_entry_t *out);
-extern void a20_handle_remove(struct a20_ht_internal *ht, a20_handle_t h);
+extern int64_t a20_handle_remove(struct a20_ht_internal *ht, a20_handle_t h);
 extern uint8_t a20_ht_get_label(struct a20_ht_internal *ht);
 extern void a20_ht_set_label(struct a20_ht_internal *ht, uint8_t label);
 

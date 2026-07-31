@@ -4,7 +4,7 @@
 
 ## 设计定位
 
-`abi/linux` 承担 Linux 用户态兼容职责，`abi/native` 面向原生用户态设计，不复制 POSIX 或 Linux syscall 编号。当前用户态主运行时是 Linux ABI 上的 musl 兼容层；Native ABI 在内核侧已实现 90 个 syscall 入口，用户态活跃组件是 `liba20rt`（Native SDK）和 `liba20c`（最小原生 C 库）。
+`abi/linux` 承担 Linux 用户态兼容职责，`abi/native` 面向原生用户态设计，不复制 POSIX 或 Linux syscall 编号。当前用户态主运行时是 Linux ABI 上的 musl 兼容层；Native ABI 在内核侧已实现 93 个 syscall 入口，用户态活跃组件是 `liba20rt`（Native SDK）和 `liba20c`（最小原生 C 库）。
 
 长期布局：
 
@@ -68,9 +68,9 @@ new_rights 必须是 old_rights 的子集
 
 规则：
 
-1. 用户传入的 `size` 小于内核支持结构体大小时，缺失字段按 0 处理。
+1. 用户传入的 `size` 必须覆盖所声明 version 的完整必需前缀（version 1 即完整结构体）。
 2. 用户传入的 `size` 大于内核支持结构体大小时，内核只读取已知字段。
-3. 新字段只能追加，不能改变已有字段含义。
+3. 新字段只能追加并提高 `version`，不能改变已有字段含义。
 4. flag 保留位必须为 0，否则返回 `A20_ERR_INVALID_ARGUMENT`。
 
 ### 4. ABI 必须可版本协商
@@ -106,11 +106,12 @@ Native ABI syscall 编号按子系统分区：
 0x0800 - 0x08ff  security / namespace
 0x0900 - 0x09ff  debug / trace
 0x0a00 - 0x0aff  system info / random / power
-0x0b00 - 0x0fff  reserved for future core extensions
+0x0b00 - 0x0bff  sync (futex)
+0x0c00 - 0x0fff  reserved for future core extensions
 0x1000 - 0x1fff  experimental, not stable
 ```
 
-稳定 syscall 不允许随意改号。实验 syscall 只能在 `0x1000+` 范围内。完整的 90 个 syscall 编号表见 [handle.md](03-handle.md) §6。
+稳定 syscall 不允许随意改号。实验 syscall 只能在 `0x1000+` 范围内。完整的 93 个 syscall 编号表见 [handle.md](03-handle.md) §6。
 
 ## 文档索引
 
@@ -209,7 +210,7 @@ Native ABI 一旦稳定，需要遵守：
 kernel/abi/native/
   DESIGN.md            顶层设计参考
   syscall_table.c      syscall 分发表
-  syscall_table.def    syscall 编号宏定义（90 条）
+  syscall_table.def    syscall 编号宏定义（93 条）
   sys_core.c           Phase 1 syscall 实现（17 个核心 syscall）
   sys_phase2.c         Phase 2 syscall 实现（73 个扩展 syscall）
   handle_table.c       Handle table 实现（状态机 + 查找/安装/移除）
@@ -267,7 +268,7 @@ Native ABI 不应该：
 
 ## Syscall 完整性
 
-Native ABI 用 90 个 syscall 覆盖 Linux ABI 已实现的 223 个 syscall。关键统一机制包括：
+Native ABI 用 93 个 syscall 覆盖 Linux ABI 分发表当前定义的 254 个 syscall。关键统一机制包括：
 
 - `handle_set_meta`：一次调用修改 chmod/chown/utimes/truncate 等元数据。
 - `handle_transfer`：统一 splice/sendfile/copy_file_range/tee 的零拷贝语义。
@@ -281,9 +282,9 @@ Native ABI 用 90 个 syscall 覆盖 Linux ABI 已实现的 223 个 syscall。�
 
 已完成的阶段：
 
-- Phase 0：`liba20rt` 最小运行时（syscall 发射宏、90 个 syscall 编号、多架构 crt0、hello world 测试）。
+- Phase 0：`liba20rt` 最小运行时（syscall 发射宏、93 个 syscall 编号、多架构 crt0、hello world 测试）。
 - Phase 1：`liba20c` 最小 C 库（malloc、fd↔handle 映射、FILE*、errno、基础 POSIX open/read/write/close 包装）。
-- Phase 2：内核侧 90 个 syscall 扩展（task_spawn、thread_create、timer、channel、socket、VMO/VMAR 等）。
+- Phase 2：内核侧 93 个 syscall 扩展（task_spawn、thread_create、timer、channel、socket、VMO/VMAR 等）。
 
 剩余工作：
 
@@ -293,4 +294,3 @@ Native ABI 用 90 个 syscall 覆盖 Linux ABI 已实现的 223 个 syscall。�
 - 设计 Native ABI 动态链接器。
 
 详细运行时状态与后续路线图见 [08-runtime-status.md](08-runtime-status.md)。
-

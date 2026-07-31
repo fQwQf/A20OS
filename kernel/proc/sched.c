@@ -1140,6 +1140,19 @@ void proc_set_alarm_expire(task_t *t, uint64_t alarm_expire)
         sched_rearm_timer();
 }
 
+/*
+ * sched_note_timer_deadline — request a sched_scan_timers() run at the
+ * given tick WITHOUT arming a per-task SIGALRM alarm.  Native A20 timer
+ * objects fire via a20_timer_tick() and must not signal the arming task.
+ */
+void sched_note_timer_deadline(uint64_t deadline)
+{
+    if (!deadline)
+        return;
+    if (sched_note_deadline(&next_alarm_scan, deadline))
+        sched_rearm_timer();
+}
+
 /* Enqueue a task onto its CPU's runqueue. Caller must hold proc_lock. */
 void proc_runq_enqueue_locked(task_t *t) {
     if (!t || t == proc_idle_task() || t->state != PROC_READY)

@@ -1,5 +1,6 @@
 #include "fs/fdtable.h"
 #include "fs/vfs.h"
+#include "proc/proc_internal.h"
 #include "core/consts.h"
 #include "core/panic.h"
 #include "core/stdio.h"
@@ -24,6 +25,8 @@ static files_struct_t *fdtable_alloc_files(void)
         files->open_mask[i] = 0;
     files->next_fd = 0;
     refcount_set(&files->refcount, 1);
+    files->owners = 1;
+    files->release_owner_pid = -1;
     ktrace_fd("[FDDBG] files=%p lock=%p\n", (void *)files, (void *)&files->lock);
     return files;
 }
@@ -50,6 +53,33 @@ static inline void fdtable_mask_set(files_struct_t *files, int fd)
 static inline void fdtable_mask_clear(files_struct_t *files, int fd)
 {
     files->open_mask[fd >> 6] &= ~(1ULL << (fd & 63));
+}
+
+static void fdtable_files_put(files_struct_t *files)
+{
+    if (!files || !refcount_dec_and_test(&files->refcount))
+        return;
+
+    int to_close[MAX_FILES];
+    int close_count = 0;
+    uint64_t flags = spin_lock_irqsave(&files->lock);
+    for (int i = 0; i < MAX_FILES; i++) {
+        if (files->fd[i] < 0)
+            continue;
+        to_close[close_count++] = files->fd[i];
+        files->fd[i] = -1;
+        files->cloexec[i] = 0;
+        fdtable_mask_clear(files, i);
+    }
+    spin_unlock_irqrestore(&files->lock, flags);
+
+    for (int i = 0; i < close_count; i++) {
+        if (files->release_owner_pid >= 0)
+            vfs_release_process_file_locks(to_close[i],
+                                           files->release_owner_pid);
+        vfs_close(to_close[i]);
+    }
+    kfree(files);
 }
 
 static int fdtable_ctz64(uint64_t bits)
@@ -168,20 +198,22 @@ void fdtable_copy(task_t *dst, const task_t *src)
         fdtable_init_stdio(dst);
         return;
     }
-    const files_struct_t *src_files = (const files_struct_t *)src->files;
+    files_struct_t *src_files = (files_struct_t *)src->files;
     files_struct_t *dst_files = (files_struct_t *)dst->files;
     if (!src_files) {
         fdtable_init_stdio(dst);
         return;
     }
+    uint64_t flags = spin_lock_irqsave(&src_files->lock);
     for (int i = 0; i < MAX_FILES; i++) {
         int gfd = src_files->fd[i];
         dst_files->fd[i] = gfd;
         dst_files->cloexec[i] = src_files->cloexec[i];
-        if (gfd >= 0)
-            fdtable_ref_gfd(gfd);
+        if (gfd >= 0 && fdtable_ref_gfd(gfd) < 0)
+            panic("fdtable_copy: live local fd %d has dead gfd %d", i, gfd);
     }
     fdtable_recompute_next(dst_files);
+    spin_unlock_irqrestore(&src_files->lock, flags);
 }
 
 void fdtable_share(task_t *dst, const task_t *src)
@@ -190,9 +222,14 @@ void fdtable_share(task_t *dst, const task_t *src)
         return;
     if (dst->files)
         fdtable_close_all(dst);
+    uint64_t flags = spin_lock_irqsave(&proc_lock);
     dst->files = (struct files_struct *)src->files;
-    if (dst->files)
-        refcount_inc(&((files_struct_t *)dst->files)->refcount);
+    if (dst->files) {
+        files_struct_t *files = (files_struct_t *)dst->files;
+        refcount_inc(&files->refcount);
+        files->owners++;
+    }
+    spin_unlock_irqrestore(&proc_lock, flags);
 }
 
 int fdtable_unshare(task_t *task)
@@ -202,7 +239,10 @@ int fdtable_unshare(task_t *task)
     files_struct_t *old = fdtable_files(task);
     if (!old)
         return -ENOMEM;
-    if (refcount_read(&old->refcount) == 1)
+    uint64_t owner_flags = spin_lock_irqsave(&proc_lock);
+    int shared = old->owners > 1;
+    spin_unlock_irqrestore(&proc_lock, owner_flags);
+    if (!shared)
         return 0;
 
     files_struct_t *files = fdtable_alloc_files();
@@ -226,8 +266,11 @@ int fdtable_unshare(task_t *task)
     }
     fdtable_recompute_next(files);
     spin_unlock_irqrestore(&old->lock, flags);
+    uint64_t task_flags = spin_lock_irqsave(&proc_lock);
     task->files = files;
-    refcount_dec_and_test(&old->refcount);
+    old->owners--;
+    spin_unlock_irqrestore(&proc_lock, task_flags);
+    fdtable_files_put(old);
     return 0;
 }
 
@@ -235,31 +278,16 @@ void fdtable_close_all(task_t *task)
 {
     if (!task || !task->files)
         return;
+    uint64_t flags = spin_lock_irqsave(&proc_lock);
     files_struct_t *files = (files_struct_t *)task->files;
     task->files = NULL;
-    if (!refcount_dec_and_test(&files->refcount)) {
-        files = NULL;
-        ktrace_fd("[FD] close_all: pid=%d shared fdtable, skipping\n", task->pid);
-        return;
+    if (files) {
+        files->owners--;
+        if (files->owners == 0)
+            files->release_owner_pid = task->pid;
     }
-    uint64_t flags = spin_lock_irqsave(&files->lock);
-    int to_close[MAX_FILES];
-    int close_count = 0;
-    for (int i = 0; i < MAX_FILES; i++) {
-        if (files->fd[i] >= 0) {
-            to_close[close_count++] = files->fd[i];
-            files->fd[i] = -1;
-            files->cloexec[i] = 0;
-            fdtable_mask_clear(files, i);
-        }
-    }
-    spin_unlock_irqrestore(&files->lock, flags);
-    ktrace_fd("[FD] close_all: pid=%d closing %d fds\n", task->pid, close_count);
-    for (int i = 0; i < close_count; i++) {
-        vfs_release_process_file_locks(to_close[i], task->pid);
-        vfs_close(to_close[i]);
-    }
-    kfree(files);
+    spin_unlock_irqrestore(&proc_lock, flags);
+    fdtable_files_put(files);
 }
 
 void fdtable_close_on_exec(task_t *task)
@@ -307,25 +335,39 @@ int fdtable_get_current(int fd)
     return fdtable_get(proc_current(), fd);
 }
 
-vfile_t *fdtable_get_file_ref(task_t *task, int fd, int *out_gfd)
+struct vfile *fdtable_get_file_ref(task_t *task, int fd, int *gfd_out,
+                                   int *cloexec_out)
 {
-    if (out_gfd)
-        *out_gfd = -1;
-    if (!task || !task->files || fd < 0 || fd >= MAX_FILES)
+    if (!task || fd < 0 || fd >= MAX_FILES)
         return NULL;
+
+    uint64_t task_flags = spin_lock_irqsave(&proc_lock);
     files_struct_t *files = (files_struct_t *)task->files;
+    if (files && !refcount_inc_not_zero(&files->refcount))
+        files = NULL;
+    spin_unlock_irqrestore(&proc_lock, task_flags);
+    if (!files)
+        return NULL;
+
     uint64_t flags = spin_lock_irqsave(&files->lock);
     int gfd = files->fd[fd];
+    int cloexec = files->cloexec[fd] != 0;
     vfile_t *vf = gfd >= 0 ? vfs_get_file_ref(gfd) : NULL;
     spin_unlock_irqrestore(&files->lock, flags);
-    if (vf && out_gfd)
-        *out_gfd = gfd;
+
+    fdtable_files_put(files);
+    if (!vf)
+        return NULL;
+    if (gfd_out)
+        *gfd_out = gfd;
+    if (cloexec_out)
+        *cloexec_out = cloexec;
     return vf;
 }
 
-vfile_t *fdtable_get_current_file_ref(int fd, int *out_gfd)
+vfile_t *fdtable_get_current_file_ref(int fd, int *gfd_out)
 {
-    return fdtable_get_file_ref(proc_current(), fd, out_gfd);
+    return fdtable_get_file_ref(proc_current(), fd, gfd_out, NULL);
 }
 
 int fdtable_install(task_t *task, int gfd, int flags)

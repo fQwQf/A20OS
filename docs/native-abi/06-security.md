@@ -271,7 +271,7 @@ $$\forall t_1, t_2.\ t_2 > t_1 \implies \rho_{eff}(h, t_2) \subseteq \rho_{eff}(
 
 证明要点：`handle_dup` 的时态约束要求 `expiry' ≤ expiry(h)` 和 `ops' ≤ remaining_ops(h)`。因此 $\rho_{eff}(h', t') \subseteq \rho_{eff}(h, t')$。
 
-> **内核执行**：`handle_dup` 和 `handle_replace` 通过 `a20_handle_install_temporal()` 继承源 handle 的 `expiry_tick`、`remaining_ops`、`temporal_flags` 和 `security_label`，确保降级单调性。`vm_share` 创建派生 handle 时同样继承源 VMO 的时态约束和标签。`a20_handle_lookup_internal()` 在每次查找时调用 `a20_effective_rights()` 并递减 `remaining_ops`。
+> **内核执行**：`handle_control(SET_TEMPORAL)` 是用户态入口，只允许添加 flag、提前 expiry、减少 remaining_ops；违反不可刷新性返回 `A20_ERR_ACCESS`。`handle_dup`、`handle_replace`、spawn handle 转移、`vm_share` 和 channel handle 传递均继承源 handle 的 `expiry_tick`、`remaining_ops`、`temporal_flags` 和 `security_label`。`a20_handle_lookup_internal()` 每次查找时计算 `a20_effective_rights()` 并在 OP_COUNT 模式下递减预算。`GET_TEMPORAL` 用于查询当前参数，`SET_LABEL` 只能上调标签。
 
 ### 6.5 过期行为
 
@@ -280,9 +280,9 @@ Handle 过期后有两种行为：
 | 模式 | `temporal_flags` | 过期后行为 | 适用场景 |
 |------|------------------|-----------|---------|
 | 惰性化 | 未设 `AUTO_CLOSE` | $\rho_{eff} = \emptyset$，entry 仍占用 slot 和 refcount | 需要显式控制资源回收 |
-| 自动关闭 | `AUTO_CLOSE` | 内核 sweeper 自动执行 `handle_close` | 自动资源回收 |
+| 自动关闭 | `AUTO_CLOSE` | deadline 驱动 sweeper 摘下 entry，并在 HT 锁外按对象类型执行 `handle_close` 等效释放 | 自动资源回收 |
 
-惰性化的好处是过期 handle 仍可通过 `handle_query` 查询（STAT 权限不依赖 $\rho_{eff}$），便于调试和审计。
+当前实现中所有 syscall（包括 `handle_query`）都按 $\rho_{eff}$ 检查 rights：惰性过期条目访问时返回 `ACCESS`，直接访问已标记 `EXPIRED` 的条目返回 `A20_ERR_EXPIRED`；其 slot 与对象引用保留到显式 `handle_close` 或进程退出。若需要对过期 handle 做独立审计，应后续增加不依赖 handle rights 的管理员审计接口，而不是绕过统一权限检查。
 
 ### 6.6 与其他系统的对比
 

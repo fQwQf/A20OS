@@ -41,6 +41,7 @@
 #include "abi/native/syscall_entry.h"
 #include "abi/native/startup.h"
 #include "abi/linux/fcntl.h"
+#include "abi/linux/errno.h"
 #include "sys_validate.h"
 
 #define A20_ARG(n) (args->arg[(n)])
@@ -49,6 +50,7 @@
 struct a20_ht_internal;
 struct a20_ht_internal *a20_ht_create(void);
 void a20_ht_destroy(struct a20_ht_internal *ht);
+void a20_ht_put_ref(struct a20_ht_internal *ht);
 int64_t a20_handle_install(struct a20_ht_internal *ht, void *object,
                             uint16_t type, a20_rights_t rights);
 int64_t a20_handle_install_temporal(struct a20_ht_internal *ht, void *object,
@@ -58,7 +60,14 @@ int64_t a20_handle_install_temporal(struct a20_ht_internal *ht, void *object,
 int64_t a20_handle_lookup_internal(struct a20_ht_internal *ht, a20_handle_t h,
                                     uint16_t expected_type, a20_rights_t required_rights,
                                     a20_handle_entry_t *out);
-void a20_handle_remove(struct a20_ht_internal *ht, a20_handle_t h);
+int64_t a20_handle_lookup_ref_internal(struct a20_ht_internal *ht,
+                                       a20_handle_t h,
+                                       uint16_t expected_type,
+                                       a20_rights_t required_rights,
+                                       a20_handle_entry_t *out);
+int64_t a20_handle_remove(struct a20_ht_internal *ht, a20_handle_t h);
+void a20_object_ref(void *object, uint16_t type);
+void a20_object_release(void *object, uint16_t type);
 struct a20_ht_internal *task_get_a20_ht(task_t *t);
 uint8_t a20_ht_get_label(struct a20_ht_internal *ht);
 
@@ -79,8 +88,9 @@ int64_t sys_a20_abi_info(const a20_syscall_args_t *args)
     info.pointer_bits = 64;
     info.page_size = 4096;
     info.handle_bits = 32;
-    /* feature_bits: bit 0 = handle_table, bit 1 = temporal_capabilities */
-    info.feature_bits[0] = (1ULL << 0) | (1ULL << 1);
+    /* feature_bits: bit 0 = handle_table, bit 1 = temporal_capabilities,
+     * bit 2 = futex (Sync 0x0B00) */
+    info.feature_bits[0] = (1ULL << 0) | (1ULL << 1) | (1ULL << 2);
     if (copy_to_user(out, &info, sizeof(info)) < 0)
         return -A20_ERR_FAULT;
     return A20_OK;
@@ -95,7 +105,7 @@ int64_t sys_a20_feature_test(const a20_syscall_args_t *args)
 
     /* Match the feature_bits from abi_info */
     uint64_t features[4] = {0};
-    features[0] = (1ULL << 0) | (1ULL << 1); /* handle_table + temporal */
+    features[0] = (1ULL << 0) | (1ULL << 1) | (1ULL << 2); /* handle_table + temporal + futex */
 
     if (features[word] & (1ULL << bit))
         return A20_OK;
@@ -111,24 +121,14 @@ int64_t sys_a20_handle_close(const a20_syscall_args_t *args)
     struct a20_ht_internal *ht = task_get_a20_ht(cur);
     if (!ht) return -A20_ERR_BAD_HANDLE;
 
-    /* Lookup without requiring any specific rights — closing always works
-     * on valid handles. We read the entry to potentially release object refs. */
-    a20_handle_entry_t entry;
-    int64_t ret = a20_handle_lookup_internal(ht, h, A20_OBJ_INVALID, 0, &entry);
-    if (ret < 0) return ret;
-
-    /* For vfile-backed objects, close the underlying kernel fd.
-     * The object pointer in handle entries for file/dir/device/pipe types
-     * stores the kernel global fd as an integer (cast to void*). */
-    if (entry.object != NULL &&
-        (entry.type == A20_OBJ_FILE || entry.type == A20_OBJ_DIRECTORY ||
-         entry.type == A20_OBJ_PIPE_ENDPOINT || entry.type == A20_OBJ_DEVICE)) {
-        int gfd = (int)(uintptr_t)entry.object;
-        vfs_close(gfd);
-    }
-
-    a20_handle_remove(ht, h);
-    return A20_OK;
+    /*
+     * handle_remove detaches the entry and drops the object reference
+     * (docs/native-abi/03-handle.md §4.1): vfile-backed objects are closed,
+     * channels see peer_closed, event queues and VMOs are released, and
+     * watches keyed by the object are torn down.  Closing consumes no
+     * operation budget because no lookup is performed.
+     */
+    return a20_handle_remove(ht, h);
 }
 
 int64_t sys_a20_handle_dup(const a20_syscall_args_t *args)
@@ -144,31 +144,37 @@ int64_t sys_a20_handle_dup(const a20_syscall_args_t *args)
     if (!ht) return -A20_ERR_BAD_HANDLE;
 
     a20_handle_entry_t src;
-    int64_t ret = a20_handle_lookup_internal(ht, kargs.source,
-                                              A20_OBJ_INVALID, A20_RIGHT_DUP, &src);
+    int64_t ret = a20_handle_lookup_ref_internal(ht, kargs.source,
+                                                 A20_OBJ_INVALID, A20_RIGHT_DUP,
+                                                 &src);
     if (ret < 0) return ret;
 
     /* rights_mask must be subset of source rights docs/native-abi/06-security.md §2.2) */
-    if (kargs.rights_mask != 0 && (kargs.rights_mask & ~src.rights) != 0)
+    if (kargs.rights_mask != 0 && (kargs.rights_mask & ~src.rights) != 0) {
+        a20_object_release(src.object, src.type);
         return -A20_ERR_ACCESS;
+    }
 
     a20_rights_t new_rights = kargs.rights_mask ? kargs.rights_mask : src.rights;
     int64_t new_h = a20_handle_install_temporal(ht, src.object, src.type, new_rights,
                                                 src.expiry_tick, src.remaining_ops,
                                                 src.temporal_flags, src.security_label);
-    if (new_h < 0) return new_h;
-
-    /* For vfile-backed objects, dup the kernel fd ref */
-    if (src.object != NULL &&
-        (src.type == A20_OBJ_FILE || src.type == A20_OBJ_DIRECTORY ||
-         src.type == A20_OBJ_PIPE_ENDPOINT || src.type == A20_OBJ_DEVICE)) {
-        int gfd = (int)(uintptr_t)src.object;
-        vfs_ref_fd(gfd);
+    if (new_h < 0) {
+        a20_object_release(src.object, src.type);
+        return new_h;
     }
 
+    /* The new handle owns one object reference; the lookup reference keeps
+     * the object alive until this second reference has been taken. */
+    a20_object_ref(src.object, src.type);
+    a20_object_release(src.object, src.type);
+
     kargs.out_handle = (a20_handle_t)new_h;
-    if (copy_to_user(uargs, &kargs, sizeof(kargs)) < 0)
+    if (a20_copy_struct_to_user(uargs, &kargs, sizeof(kargs)) < 0) {
+        a20_handle_remove(ht, (a20_handle_t)new_h);
         return -A20_ERR_FAULT;
+    }
+
     return A20_OK;
 }
 
@@ -209,27 +215,38 @@ int64_t sys_a20_handle_replace(const a20_syscall_args_t *args)
     if (!ht) return -A20_ERR_BAD_HANDLE;
 
     a20_handle_entry_t src;
-    int64_t ret = a20_handle_lookup_internal(ht, h, A20_OBJ_INVALID,
-                                              A20_RIGHT_DUP, &src);
+    int64_t ret = a20_handle_lookup_ref_internal(ht, h, A20_OBJ_INVALID,
+                                                 A20_RIGHT_DUP, &src);
     if (ret < 0) return ret;
 
-    if (rights != 0 && (rights & ~src.rights) != 0)
+    if (rights != 0 && (rights & ~src.rights) != 0) {
+        a20_object_release(src.object, src.type);
         return -A20_ERR_ACCESS;
+    }
 
     a20_rights_t new_rights = rights ? rights : src.rights;
     int64_t new_h = a20_handle_install_temporal(ht, src.object, src.type, new_rights,
                                                 src.expiry_tick, src.remaining_ops,
                                                 src.temporal_flags, src.security_label);
-    if (new_h < 0) return new_h;
+    if (new_h < 0) {
+        a20_object_release(src.object, src.type);
+        return new_h;
+    }
 
-    /* Atomic replace: remove old, keep refcount same docs/native-abi/03-handle.md §4.3) */
+    /* The new entry takes a reference while the lookup reference still pins
+     * the object; removing the old handle then drops the old entry's ref. */
+    a20_object_ref(src.object, src.type);
+    a20_object_release(src.object, src.type);
     a20_handle_remove(ht, h);
 
     if (out) {
         a20_handle_t result = (a20_handle_t)new_h;
-        if (copy_to_user(out, &result, sizeof(result)) < 0)
+        if (copy_to_user(out, &result, sizeof(result)) < 0) {
+            a20_handle_remove(ht, (a20_handle_t)new_h);
             return -A20_ERR_FAULT;
+        }
     }
+
     return A20_OK;
 }
 
@@ -241,10 +258,20 @@ int64_t sys_a20_handle_close_many(const a20_syscall_args_t *args)
     if (!handles || count > 4096) return -A20_ERR_FAULT;
 
     uint32_t closed = 0;
-    for (uint32_t i = 0; i < count; i++) {
-        a20_syscall_args_t single = { .arg = { handles[i] } };
-        if (sys_a20_handle_close(&single) >= 0)
-            closed++;
+    uint32_t done = 0;
+    a20_handle_t khandles[64];
+    while (done < count) {
+        uint32_t n = count - done;
+        if (n > 64) n = 64;
+        if (copy_from_user(khandles, handles + done,
+                           n * sizeof(a20_handle_t)) < 0)
+            break;
+        for (uint32_t i = 0; i < n; i++) {
+            a20_syscall_args_t single = { .arg = { khandles[i] } };
+            if (sys_a20_handle_close(&single) >= 0)
+                closed++;
+        }
+        done += n;
     }
     return (int64_t)closed;
 }
@@ -262,23 +289,35 @@ int64_t sys_a20_handle_seek(const a20_syscall_args_t *args)
     if (!ht) return -A20_ERR_BAD_HANDLE;
 
     a20_handle_entry_t entry;
-    int64_t ret = a20_handle_lookup_internal(ht, h, A20_OBJ_INVALID,
-                                              A20_RIGHT_SEEK, &entry);
+    int64_t ret = a20_handle_lookup_ref_internal(ht, h, A20_OBJ_INVALID,
+                                                 A20_RIGHT_SEEK, &entry);
     if (ret < 0) return ret;
 
     /* Only file-type handles support seeking */
-    if (entry.type != A20_OBJ_FILE && entry.type != A20_OBJ_DEVICE)
+    if (entry.type != A20_OBJ_FILE && entry.type != A20_OBJ_DEVICE) {
+        a20_object_release(entry.object, entry.type);
         return -A20_ERR_INVALID_ARGUMENT;
+    }
 
     a20_off_t cur_offset;
-    if (copy_from_user(&cur_offset, offset_ptr, sizeof(cur_offset)) < 0)
+    if (copy_from_user(&cur_offset, offset_ptr, sizeof(cur_offset)) < 0) {
+        a20_object_release(entry.object, entry.type);
         return -A20_ERR_FAULT;
+    }
 
     int gfd = (int)(uintptr_t)entry.object;
     long new_off = vfs_lseek(gfd, (long)cur_offset, (int)whence);
-    if (new_off < 0) return -A20_ERR_INVALID_ARGUMENT;
+    if (new_off < 0) {
+        a20_object_release(entry.object, entry.type);
+        /* Non-seekable objects (console, pipe, socket) report a distinct
+         * error so the libc layer can map it to POSIX ESPIPE. */
+        if (new_off == -ESPIPE) return -A20_ERR_NOT_SUPPORTED;
+        return -A20_ERR_INVALID_ARGUMENT;
+    }
 
     cur_offset = (a20_off_t)new_off;
+    a20_object_release(entry.object, entry.type);
+
     if (copy_to_user(offset_ptr, &cur_offset, sizeof(cur_offset)) < 0)
         return -A20_ERR_FAULT;
     return A20_OK;
@@ -291,13 +330,18 @@ int64_t sys_a20_task_exit(const a20_syscall_args_t *args)
     int32_t code = (int32_t)A20_ARG(0);
     task_t *cur = proc_current();
 
+    /* Drop this thread's handle-table reference; the table outlives until
+     * the last thread of the process exits (process-local semantics). */
     struct a20_ht_internal *ht = task_get_a20_ht(cur);
     if (ht) {
-        a20_ht_destroy(ht);
-        cur->scratch_buf = NULL;
+        struct a20_ht_internal *owned = (struct a20_ht_internal *)
+            __atomic_exchange_n(&cur->scratch_buf, NULL, __ATOMIC_ACQ_REL);
+        if (owned) a20_ht_put_ref(owned);
     }
 
-    proc_exit(code);
+    /* task_exit terminates the whole process (all threads), matching the
+     * design intent that a task is the process container. */
+    proc_exit_group(code);
     return 0;
 }
 
@@ -306,21 +350,45 @@ int64_t sys_a20_task_spawn(const a20_syscall_args_t *args)
     a20_task_spawn_args_t *uargs = (a20_task_spawn_args_t *)A20_ARG(0);
     if (!uargs) return -A20_ERR_FAULT;
 
+    /* Version-aware validation (types.md §2): v1 = base layout, v2 appends
+     * the stdio handles.  Unknown trailing bytes are ignored, missing
+     * trailing fields default to "not inherited". */
     a20_task_spawn_args_t kargs;
-    A20_VALIDATE_AND_COPY(uargs, kargs);
+    memset(&kargs, 0, sizeof(kargs));
+    uint32_t hdr[2];
+    if (copy_from_user(hdr, uargs, sizeof(hdr)) < 0)
+        return -A20_ERR_FAULT;
+    if (hdr[1] < 1 || hdr[1] > 2)
+        return -A20_ERR_INVALID_ARGUMENT;
+    uint32_t min_size = (hdr[1] == 1) ? A20_TASK_SPAWN_ARGS_V1_SIZE
+                                      : (uint32_t)sizeof(kargs);
+    if (hdr[0] < min_size)
+        return -A20_ERR_INVALID_ARGUMENT;
+    uint32_t copy_size = hdr[0] < (uint32_t)sizeof(kargs) ? hdr[0]
+                                                          : (uint32_t)sizeof(kargs);
+    kargs.stdin_handle = A20_HANDLE_NULL;
+    kargs.stdout_handle = A20_HANDLE_NULL;
+    kargs.stderr_handle = A20_HANDLE_NULL;
+    if (copy_from_user(&kargs, uargs, copy_size) < 0)
+        return -A20_ERR_FAULT;
+    kargs.version = hdr[1];
 
     task_t *cur = proc_current();
     struct a20_ht_internal *ht = task_get_a20_ht(cur);
     if (!ht) return -A20_ERR_BAD_HANDLE;
 
     a20_handle_entry_t img_entry;
-    int64_t r = a20_handle_lookup_internal(ht, kargs.image, A20_OBJ_FILE,
-                                           A20_RIGHT_READ | A20_RIGHT_EXEC, &img_entry);
+    int64_t r = a20_handle_lookup_ref_internal(ht, kargs.image, A20_OBJ_FILE,
+                                               A20_RIGHT_READ | A20_RIGHT_EXEC,
+                                               &img_entry);
     if (r < 0) return r;
 
     int img_fd = (int)(uintptr_t)img_entry.object;
     vfile_t *img_vf = vfs_get_file_ref(img_fd);
-    if (!img_vf) return -A20_ERR_BAD_HANDLE;
+    if (!img_vf) {
+        a20_object_release(img_entry.object, img_entry.type);
+        return -A20_ERR_BAD_HANDLE;
+    }
 
     char path_buf[MAX_PATH_LEN];
     strncpy(path_buf, img_vf->path, MAX_PATH_LEN);
@@ -329,9 +397,13 @@ int64_t sys_a20_task_spawn(const a20_syscall_args_t *args)
     elf_load_info_t info;
     memset(&info, 0, sizeof(info));
     r = elf_load(img_fd, path_buf, &info);
+    a20_object_release(img_entry.object, img_entry.type);
+
     if (r < 0) return -A20_ERR_IO;
-    if (!info.is_native_abi)
+    if (!info.is_native_abi) {
+        elf_load_info_discard(&info);
         return -A20_ERR_NOT_SUPPORTED;
+    }
 
     char *argv_buf[16] = {0};
     char *envp_buf[16] = {0};
@@ -340,13 +412,17 @@ int64_t sys_a20_task_spawn(const a20_syscall_args_t *args)
 
     if (argc > 0 && kargs.argv) {
         int copy_n = argc < 16 ? argc : 16;
-        if (copy_from_user(argv_buf, (void *)kargs.argv, copy_n * sizeof(char *)) < 0)
+        if (copy_from_user(argv_buf, (void *)kargs.argv, copy_n * sizeof(char *)) < 0) {
+            elf_load_info_discard(&info);
             return -A20_ERR_FAULT;
+        }
     }
     if (envc > 0 && kargs.envp) {
         int copy_n = envc < 16 ? envc : 16;
-        if (copy_from_user(envp_buf, (void *)kargs.envp, copy_n * sizeof(char *)) < 0)
+        if (copy_from_user(envp_buf, (void *)kargs.envp, copy_n * sizeof(char *)) < 0) {
+            elf_load_info_discard(&info);
             return -A20_ERR_FAULT;
+        }
     }
 
     size_t total_vm = (size_t)(info.end_va - info.base);
@@ -360,8 +436,12 @@ int64_t sys_a20_task_spawn(const a20_syscall_args_t *args)
                                           info.nommu_alloc_types,
                                           info.num_nommu_allocs
 #endif
-                                          );
-    if (new_pid < 0) return -A20_ERR_NO_MEMORY;
+                                           , 1);
+
+    if (new_pid < 0) {
+        elf_load_info_discard(&info);
+        return -A20_ERR_NO_MEMORY;
+    }
 
     task_t *new_task = proc_find_get(new_pid);
     if (!new_task) return -A20_ERR_NO_MEMORY;
@@ -371,19 +451,71 @@ int64_t sys_a20_task_spawn(const a20_syscall_args_t *args)
     struct a20_ht_internal *new_ht = a20_ht_create();
     if (!new_ht) {
         proc_force_exit(new_task, 1);
+        proc_make_ready(new_task);
         proc_put(new_task);
         return -A20_ERR_NO_MEMORY;
     }
-    new_task->scratch_buf = new_ht;
+    __atomic_store_n(&new_task->scratch_buf, new_ht, __ATOMIC_RELEASE);
 
     a20_handle_entry_t root_entry;
-    if (a20_handle_lookup_internal(ht, kargs.root_dir, A20_OBJ_DIRECTORY,
-                                   A20_RIGHT_READ | A20_RIGHT_STAT, &root_entry) == A20_OK) {
-        int fd = (int)(uintptr_t)root_entry.object;
-        vfs_ref_fd(fd);
-        a20_handle_install(new_ht, root_entry.object, A20_OBJ_DIRECTORY,
-                           A20_RIGHT_READ | A20_RIGHT_STAT |
-                           A20_RIGHT_DUP | A20_RIGHT_TRANSFER);
+    a20_handle_t child_root_h = A20_HANDLE_NULL;
+    if (a20_handle_lookup_ref_internal(ht, kargs.root_dir, A20_OBJ_DIRECTORY,
+                                       A20_RIGHT_READ | A20_RIGHT_STAT,
+                                       &root_entry) == A20_OK) {
+        a20_object_ref(root_entry.object, root_entry.type);
+        int64_t root_h = a20_handle_install(new_ht, root_entry.object,
+                                            A20_OBJ_DIRECTORY,
+                                            A20_RIGHT_READ | A20_RIGHT_STAT |
+                                            A20_RIGHT_DUP | A20_RIGHT_TRANSFER);
+        if (root_h < 0)
+            a20_object_release(root_entry.object, root_entry.type);
+        else
+            child_root_h = (a20_handle_t)root_h;
+        a20_object_release(root_entry.object, root_entry.type);
+    }
+
+    /* cwd_dir: fall back to the root handle when absent or invalid */
+    a20_handle_t child_cwd_h = A20_HANDLE_NULL;
+    if (kargs.cwd_dir != A20_HANDLE_NULL &&
+        a20_handle_lookup_ref_internal(ht, kargs.cwd_dir, A20_OBJ_DIRECTORY,
+                                       A20_RIGHT_READ | A20_RIGHT_STAT,
+                                       &root_entry) == A20_OK) {
+        a20_object_ref(root_entry.object, root_entry.type);
+        int64_t cwd_h = a20_handle_install(new_ht, root_entry.object,
+                                           A20_OBJ_DIRECTORY,
+                                           A20_RIGHT_READ | A20_RIGHT_STAT |
+                                           A20_RIGHT_DUP);
+        if (cwd_h < 0)
+            a20_object_release(root_entry.object, root_entry.type);
+        else
+            child_cwd_h = (a20_handle_t)cwd_h;
+        a20_object_release(root_entry.object, root_entry.type);
+    }
+    if (child_cwd_h == A20_HANDLE_NULL)
+        child_cwd_h = child_root_h;
+
+    /* v2: inherit stdio handles into the child's start_info slots */
+    a20_handle_t child_stdio[3] = { A20_HANDLE_NULL, A20_HANDLE_NULL,
+                                    A20_HANDLE_NULL };
+    const a20_handle_t want_stdio[3] = { kargs.stdin_handle,
+                                         kargs.stdout_handle,
+                                         kargs.stderr_handle };
+    for (int i = 0; i < 3; i++) {
+        if (want_stdio[i] == A20_HANDLE_NULL)
+            continue;
+        a20_handle_entry_t src;
+        if (a20_handle_lookup_ref_internal(ht, want_stdio[i], A20_OBJ_INVALID,
+                                           A20_RIGHT_DUP, &src) < 0)
+            continue;
+        a20_object_ref(src.object, src.type);
+        int64_t sh = a20_handle_install(new_ht, src.object, src.type,
+                                        src.rights);
+        a20_object_release(src.object, src.type);
+        if (sh < 0) {
+            a20_object_release(src.object, src.type);
+            continue;
+        }
+        child_stdio[i] = (a20_handle_t)sh;
     }
 
     /* ---- Transfer handle array from parent to child (spawn.md §3.4) ---- */
@@ -393,6 +525,7 @@ int64_t sys_a20_task_spawn(const a20_syscall_args_t *args)
         a20_spawn_handle_t sh_buf[64];
         if (copy_from_user(sh_buf, (void *)kargs.handles, nh * sizeof(a20_spawn_handle_t)) < 0) {
             proc_force_exit(new_task, 1);
+            proc_make_ready(new_task);
             proc_put(new_task);
             return -A20_ERR_FAULT;
         }
@@ -400,21 +533,31 @@ int64_t sys_a20_task_spawn(const a20_syscall_args_t *args)
             a20_spawn_handle_t *sh = &sh_buf[i];
             /* Parent must have DUP right to transfer (rights.md §4.2) */
             a20_handle_entry_t src;
-            int64_t lr = a20_handle_lookup_internal(ht, sh->handle, A20_OBJ_INVALID,
-                                                     A20_RIGHT_DUP, &src);
+            int64_t lr = a20_handle_lookup_ref_internal(ht, sh->handle,
+                                                        A20_OBJ_INVALID,
+                                                        A20_RIGHT_DUP, &src);
             if (lr < 0) continue;
 
             /* Mask child rights to requested subset (never exceed source) */
             a20_rights_t child_rights = sh->rights & src.rights;
-            if (child_rights == 0) continue;
-
-            /* Ref-count the underlying object if it's a vfile */
-            if (src.type == A20_OBJ_FILE || src.type == A20_OBJ_DIRECTORY) {
-                int fd = (int)(uintptr_t)src.object;
-                vfs_ref_fd(fd);
+            if (child_rights == 0) {
+                a20_object_release(src.object, src.type);
+                continue;
             }
 
-            int64_t child_h = a20_handle_install(new_ht, src.object, src.type, child_rights);
+            /* Ref-count the underlying object for the child's new handle */
+            a20_object_ref(src.object, src.type);
+
+            int64_t child_h = a20_handle_install_temporal(
+                new_ht, src.object, src.type, child_rights,
+                src.expiry_tick, src.remaining_ops,
+                src.temporal_flags, src.security_label);
+            a20_object_release(src.object, src.type);
+            if (child_h < 0) {
+                a20_object_release(src.object, src.type);
+                continue;
+            }
+
             /* If target_slot specified, try to install at that exact slot */
             if (child_h >= 0 && sh->target_slot != 0 &&
                 sh->target_slot != (uint32_t)child_h) {
@@ -436,12 +579,16 @@ int64_t sys_a20_task_spawn(const a20_syscall_args_t *args)
                                           A20_RIGHT_TRANSFER);
     if (task_h < 0) {
         proc_force_exit(new_task, 1);
+        proc_make_ready(new_task);
         proc_put(new_task);
         return task_h;
     }
 
     kargs.out_task = (a20_handle_t)task_h;
-    if (copy_to_user(uargs, &kargs, sizeof(kargs)) < 0) {
+    if (a20_copy_struct_to_user(uargs, &kargs, sizeof(kargs)) < 0) {
+        a20_handle_remove(ht, (a20_handle_t)task_h);
+        proc_force_exit(new_task, 1);
+        proc_make_ready(new_task);
         proc_put(new_task);
         return -A20_ERR_FAULT;
     }
@@ -449,9 +596,12 @@ int64_t sys_a20_task_spawn(const a20_syscall_args_t *args)
     a20_handle_t child_self_task = (child_self_h >= 0) ? (a20_handle_t)child_self_h : 0;
 
     uint64_t sp = elf_setup_stack_a20(info.stack_top, argc, argv_buf, envp_buf,
-                                      &info, 0, 0, 0, child_self_task);
+                                      &info, child_stdio[0], child_stdio[1],
+                                      child_stdio[2], child_self_task,
+                                      child_root_h, child_cwd_h);
     if (sp == 0) {
         proc_force_exit(new_task, 1);
+        proc_make_ready(new_task);
         proc_put(new_task);
         return -A20_ERR_NO_MEMORY;
     }
@@ -522,7 +672,7 @@ int64_t sys_a20_vm_alloc(const a20_syscall_args_t *args)
     if (addr == 0) return -A20_ERR_NO_MEMORY;
 
     kargs.out_addr = addr;
-    if (copy_to_user(uargs, &kargs, sizeof(kargs)) < 0)
+    if (a20_copy_struct_to_user(uargs, &kargs, sizeof(kargs)) < 0)
         return -A20_ERR_FAULT;
     return A20_OK;
 }
@@ -550,23 +700,20 @@ int64_t a20_dir_handle_to_dirfd(a20_handle_t dir_h, a20_rights_t required_rights
         return -A20_ERR_BAD_HANDLE;
 
     a20_handle_entry_t entry;
-    int64_t r = a20_handle_lookup_internal(ht, dir_h, A20_OBJ_DIRECTORY,
-                                           required_rights, &entry);
+    int64_t r = a20_handle_lookup_ref_internal(ht, dir_h, A20_OBJ_DIRECTORY,
+                                               required_rights, &entry);
     if (r < 0)
         return r;
 
     int gfd = (int)(uintptr_t)entry.object;
-    int ref_r = vfs_ref_fd(gfd);
-    if (ref_r < 0)
-        return -A20_ERR_BAD_HANDLE;
-
     int lfd = fdtable_install_current(gfd, 0);
-    if (lfd < 0) {
-        vfs_close(gfd);
+    if (lfd < 0)
         return -A20_ERR_BAD_HANDLE;
-    }
 
+    /* fdtable_install_current() consumes the lookup reference on both
+     * success and failure (its failure path closes the gfd). */
     *out_dirfd = lfd;
+
     return 0;
 }
 
@@ -641,11 +788,14 @@ int64_t a20_path_open_impl(const a20_path_open_args_t *kargs,
     if (vf) vfs_put_file_ref(gfd, vf);
 
     a20_rights_t rights = A20_RIGHT_STAT | A20_RIGHT_SEEK | A20_RIGHT_DUP |
-                          A20_RIGHT_TRANSFER;
+                          A20_RIGHT_TRANSFER | A20_RIGHT_CONTROL |
+                          A20_RIGHT_MAP;
     if (!(kargs->flags & O_WRONLY))
         rights |= A20_RIGHT_READ;
     if (kargs->flags & (O_WRONLY | O_RDWR))
         rights |= A20_RIGHT_WRITE;
+    if (obj_type != A20_OBJ_DIRECTORY)
+        rights |= A20_RIGHT_EXEC; /* exec permission is gated by file mode, not open flags */
     if (kargs->rights != 0)
         rights = kargs->rights & rights; /* user can only restrict */
 
@@ -665,8 +815,12 @@ int64_t sys_a20_path_open(const a20_syscall_args_t *args)
     if (r < 0) return r;
 
     kargs.out_handle = h;
-    if (copy_to_user(uargs, &kargs, sizeof(kargs)) < 0)
+    if (a20_copy_struct_to_user(uargs, &kargs, sizeof(kargs)) < 0) {
+        task_t *cur = proc_current();
+        struct a20_ht_internal *ht = task_get_a20_ht(cur);
+        if (ht) a20_handle_remove(ht, h);
         return -A20_ERR_FAULT;
+    }
     return A20_OK;
 }
 
@@ -683,17 +837,23 @@ int64_t sys_a20_handle_read(const a20_syscall_args_t *args)
     if (!ht) return -A20_ERR_BAD_HANDLE;
 
     a20_handle_entry_t entry;
-    int64_t ret = a20_handle_lookup_internal(ht, kargs.handle,
-                                              A20_OBJ_INVALID, A20_RIGHT_READ,
-                                              &entry);
+    int64_t ret = a20_handle_lookup_ref_internal(ht, kargs.handle,
+                                                 A20_OBJ_INVALID, A20_RIGHT_READ,
+                                                 &entry);
     if (ret < 0) return ret;
 
     /* Bell-LaPadula No Read Up (docs/native-abi/06-security.md §5.2) */
-    if (a20_ht_get_label(ht) < entry.security_label)
+    if (a20_ht_get_label(ht) < entry.security_label) {
+        a20_object_release(entry.object, entry.type);
         return -A20_ERR_ACCESS;
+    }
     int gfd = (int)(uintptr_t)entry.object;
     vfile_t *vf = vfs_get_file_ref(gfd);
-    if (!vf) return -A20_ERR_BAD_HANDLE;
+    if (!vf) {
+        a20_object_release(entry.object, entry.type);
+        return -A20_ERR_BAD_HANDLE;
+    }
+
 
     /* Read iov buffers */
     uint64_t total_read = 0;
@@ -732,9 +892,10 @@ int64_t sys_a20_handle_read(const a20_syscall_args_t *args)
 read_done:
 
     vfs_put_file_ref(gfd, vf);
+    a20_object_release(entry.object, entry.type);
 
     kargs.out_count = total_read;
-    if (copy_to_user(uargs, &kargs, sizeof(kargs)) < 0)
+    if (a20_copy_struct_to_user(uargs, &kargs, sizeof(kargs)) < 0)
         return -A20_ERR_FAULT;
     return (int64_t)total_read;
 }
@@ -752,18 +913,24 @@ int64_t sys_a20_handle_write(const a20_syscall_args_t *args)
     if (!ht) return -A20_ERR_BAD_HANDLE;
 
     a20_handle_entry_t entry;
-    int64_t ret = a20_handle_lookup_internal(ht, kargs.handle,
-                                              A20_OBJ_INVALID, A20_RIGHT_WRITE,
-                                              &entry);
+    int64_t ret = a20_handle_lookup_ref_internal(ht, kargs.handle,
+                                                 A20_OBJ_INVALID, A20_RIGHT_WRITE,
+                                                 &entry);
     if (ret < 0) return ret;
 
     /* Bell-LaPadula No Write Down (docs/native-abi/06-security.md §5.2) */
-    if (a20_ht_get_label(ht) > entry.security_label)
+    if (a20_ht_get_label(ht) > entry.security_label) {
+        a20_object_release(entry.object, entry.type);
         return -A20_ERR_ACCESS;
+    }
 
     int gfd = (int)(uintptr_t)entry.object;
     vfile_t *vf = vfs_get_file_ref(gfd);
-    if (!vf) return -A20_ERR_BAD_HANDLE;
+    if (!vf) {
+        a20_object_release(entry.object, entry.type);
+        return -A20_ERR_BAD_HANDLE;
+    }
+
 
     uint64_t total_written = 0;
     a20_iovec_t *iov = (a20_iovec_t *)kargs.iov;
@@ -801,9 +968,10 @@ int64_t sys_a20_handle_write(const a20_syscall_args_t *args)
 write_done:
 
     vfs_put_file_ref(gfd, vf);
+    a20_object_release(entry.object, entry.type);
 
     kargs.out_count = total_written;
-    if (copy_to_user(uargs, &kargs, sizeof(kargs)) < 0)
+    if (a20_copy_struct_to_user(uargs, &kargs, sizeof(kargs)) < 0)
         return -A20_ERR_FAULT;
     return (int64_t)total_written;
 }
@@ -819,8 +987,8 @@ int64_t sys_a20_handle_stat(const a20_syscall_args_t *args)
     if (!ht) return -A20_ERR_BAD_HANDLE;
 
     a20_handle_entry_t entry;
-    int64_t ret = a20_handle_lookup_internal(ht, h, A20_OBJ_INVALID,
-                                              A20_RIGHT_STAT, &entry);
+    int64_t ret = a20_handle_lookup_ref_internal(ht, h, A20_OBJ_INVALID,
+                                                 A20_RIGHT_STAT, &entry);
     if (ret < 0) return ret;
 
     /* For vfile-backed handles, use vfs_fstat */
@@ -829,7 +997,9 @@ int64_t sys_a20_handle_stat(const a20_syscall_args_t *args)
         int gfd = (int)(uintptr_t)entry.object;
         kstat_t ks;
         int sr = vfs_fstat(gfd, &ks);
+        a20_object_release(entry.object, entry.type);
         if (sr < 0) return -A20_ERR_IO;
+
 
         a20_stat_t st;
         memset(&st, 0, sizeof(st));
@@ -851,6 +1021,8 @@ int64_t sys_a20_handle_stat(const a20_syscall_args_t *args)
             return -A20_ERR_FAULT;
         return A20_OK;
     }
+
+    a20_object_release(entry.object, entry.type);
 
     /* Non-file handles: return minimal info */
     a20_stat_t st;

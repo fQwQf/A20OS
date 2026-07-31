@@ -45,6 +45,9 @@ Native ABI 的错误码不要求等于 Linux errno。兼容层可以在 libc 或
 #define A20_ERR_CANCELED             20   /* 操作被取消 */
 #define A20_ERR_PROTOCOL             21   /* 协议错误 */
 #define A20_ERR_RANGE                22   /* 参数超出范围 */
+#define A20_ERR_TYPE_MISMATCH        23   /* typed channel 的 handle 类型/大小越界 */
+#define A20_ERR_NOT_FOUND            24   /* 对象未找到（如 event_cancel 的 target） */
+#define A20_ERR_EXPIRED              25   /* 时态能力已过期（访问 EXPIRED 状态的 handle） */
 ```
 
 ---

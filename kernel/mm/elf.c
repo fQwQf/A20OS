@@ -124,6 +124,21 @@ static void elf_discard_vmas(mm_struct_t *mm)
     mm->mmap = NULL;
 }
 
+void elf_load_info_discard(elf_load_info_t *info)
+{
+    if (!info)
+        return;
+    mm_struct_t mm = { .mmap = info->mmap, .pgdir = info->pgdir };
+    elf_discard_vmas(&mm);
+    if (info->pgdir)
+        pt_destroy_user(info->pgdir);
+#ifdef CONFIG_NOMMU
+    for (int i = 0; i < info->num_nommu_allocs; i++)
+        kfree(info->nommu_allocs[i]);
+#endif
+    memset(info, 0, sizeof(*info));
+}
+
 static void *phys_for_va(pt_root_t *pgdir, vaddr_t va) {
     paddr_t pa = pt_translate(pgdir, va);
     if (pa == 0) return NULL;
@@ -148,6 +163,7 @@ static void *stack_ensure_mapped(pt_root_t *pgdir, vaddr_t sp_va,
     while (page_va < *stack_bottom && max_grow > 0) {
         void *frame = frame_alloc();
         if (!frame) return NULL;
+        memset(frame, 0, PAGE_SIZE);
         vaddr_t map_va = *stack_bottom - PAGE_SIZE;
         int r = pt_map(pgdir, map_va, va_to_pa(frame),
                        mm_user_stack_pte_flags());
@@ -406,6 +422,7 @@ static int map_stack(mm_struct_t *mm, pt_root_t *pgdir, vaddr_t *stack_top_out) 
     size_t stack_alloc_size = stack_size + PAGE_SIZE;
     void *stack_alloc = kmalloc(stack_alloc_size);
     if (!stack_alloc) return -ENOMEM;
+    memset(stack_alloc, 0, stack_alloc_size);
     mm_track_nommu_alloc(mm, stack_alloc, stack_alloc_size, NOMMU_ALLOC_STACK);
     /*
      * Big kmalloc allocations carry an allocator header before the returned
@@ -428,6 +445,7 @@ static int map_stack(mm_struct_t *mm, pt_root_t *pgdir, vaddr_t *stack_top_out) 
                       (uint64_t)(USER_STACK_INITIAL_PAGES - 1 - i) * PAGE_SIZE;
         void *frame = frame_alloc();
         if (!frame) return -ENOMEM;
+        memset(frame, 0, PAGE_SIZE);
         int r = pt_map(pgdir, va, va_to_pa(frame),
                        mm_user_stack_pte_flags());
         if (r < 0) { frame_free(frame); return r; }
@@ -1253,7 +1271,8 @@ vaddr_t elf_setup_stack(vaddr_t stack_top, int argc, char *const argv[],
 vaddr_t elf_setup_stack_a20(vaddr_t stack_top, int argc, char *const argv[],
                             char *const envp[], const elf_load_info_t *info,
                             uint32_t stdin_h, uint32_t stdout_h,
-                            uint32_t stderr_h, uint32_t self_task_h)
+                            uint32_t stderr_h, uint32_t self_task_h,
+                            uint32_t root_h, uint32_t cwd_h)
 {
     if (argc < 0 || argc > MAX_ARG_STRINGS)
         return 0;
@@ -1319,6 +1338,8 @@ vaddr_t elf_setup_stack_a20(vaddr_t stack_top, int argc, char *const argv[],
         si.stdout_handle = stdout_h;
         si.stderr_handle = stderr_h;
         si.self_task = self_task_h;
+        si.root_dir = root_h;
+        si.cwd_dir = cwd_h;
         si.page_size = PAGE_SIZE;
         if (stack_copy(pgdir, sp_va, &si, sizeof(si), &stack_bottom) < 0)
             return 0;

@@ -10,6 +10,7 @@
 #include "mm/frame.h"
 #include "mm/mm.h"
 #include "abi/native/vmo.h"
+#include "abi/native/ipc_internal.h"
 #include "abi/native/errno.h"
 
 struct a20_vmo *a20_vmo_create(uint32_t type, uint64_t size, uint32_t options)
@@ -55,8 +56,10 @@ void a20_vmo_destroy(struct a20_vmo *vmo)
 
 void a20_vmo_release(struct a20_vmo *vmo)
 {
-    if (vmo && refcount_dec_and_test(&vmo->refcount))
+    if (vmo && refcount_dec_and_test(&vmo->refcount)) {
+        a20_eventq_on_object_destroy(vmo, A20_OBJ_MEMORY);
         a20_vmo_destroy(vmo);
+    }
 }
 
 pfn_t a20_vmo_get_page(struct a20_vmo *vmo, uint32_t index)

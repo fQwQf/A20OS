@@ -404,26 +404,26 @@ static uint64_t exec_setup_native_abi(task_t *t,
                                        char *const *k_envp)
 {
     struct a20_ht_internal *ht = a20_ht_create();
-    if (ht) t->scratch_buf = ht;
+    if (ht) __atomic_store_n(&t->scratch_buf, ht, __ATOMIC_RELEASE);
 
     uint32_t stdin_h = 0xFFFFFFFF, stdout_h = 0xFFFFFFFF, stderr_h = 0xFFFFFFFF;
     if (ht) {
         int console_rd = vfs_open("/dev/console", O_RDONLY, 0);
         if (console_rd >= 0) {
             int64_t h = a20_handle_install(ht, (void *)(uintptr_t)console_rd,
-                                           A20_OBJ_FILE, A20_RIGHT_READ | A20_RIGHT_DUP);
+                                           A20_OBJ_FILE, A20_RIGHT_READ | A20_RIGHT_SEEK | A20_RIGHT_DUP);
             if (h >= 0) stdin_h = (uint32_t)h;
         }
         int console_wr = vfs_open("/dev/console", O_WRONLY, 0);
         if (console_wr >= 0) {
             int64_t h = a20_handle_install(ht, (void *)(uintptr_t)console_wr,
-                                           A20_OBJ_FILE, A20_RIGHT_WRITE | A20_RIGHT_DUP);
+                                           A20_OBJ_FILE, A20_RIGHT_WRITE | A20_RIGHT_SEEK | A20_RIGHT_DUP);
             if (h >= 0) stdout_h = (uint32_t)h;
         }
         int console_wr2 = vfs_open("/dev/console", O_WRONLY, 0);
         if (console_wr2 >= 0) {
             int64_t h = a20_handle_install(ht, (void *)(uintptr_t)console_wr2,
-                                           A20_OBJ_FILE, A20_RIGHT_WRITE | A20_RIGHT_DUP);
+                                           A20_OBJ_FILE, A20_RIGHT_WRITE | A20_RIGHT_SEEK | A20_RIGHT_DUP);
             if (h >= 0) stderr_h = (uint32_t)h;
         }
     }
@@ -437,9 +437,31 @@ static uint64_t exec_setup_native_abi(task_t *t,
         if (h >= 0) self_h = (a20_handle_t)h;
     }
 
+    uint32_t root_h = 0, cwd_h = 0;
+    if (ht) {
+        int root_fd = vfs_open("/", O_RDONLY, 0);
+        if (root_fd >= 0) {
+            int64_t h = a20_handle_install(ht, (void *)(uintptr_t)root_fd,
+                                           A20_OBJ_DIRECTORY,
+                                           A20_RIGHT_READ | A20_RIGHT_STAT |
+                                           A20_RIGHT_DUP | A20_RIGHT_TRANSFER);
+            if (h >= 0) {
+                root_h = (uint32_t)h;
+                vfs_ref_fd(root_fd);
+                int64_t h2 = a20_handle_install(ht, (void *)(uintptr_t)root_fd,
+                                                A20_OBJ_DIRECTORY,
+                                                A20_RIGHT_READ | A20_RIGHT_STAT |
+                                                A20_RIGHT_DUP);
+                if (h2 >= 0) cwd_h = (uint32_t)h2;
+                if (!cwd_h) cwd_h = root_h;
+            }
+        }
+    }
+
     return elf_setup_stack_a20(info->stack_top, argc,
                                 k_argv, k_envp, info,
-                                stdin_h, stdout_h, stderr_h, self_h);
+                                stdin_h, stdout_h, stderr_h, self_h,
+                                root_h, cwd_h);
 }
 #endif /* CONFIG_ABI_NATIVE */
 
@@ -529,11 +551,12 @@ static int exec_install_process(task_t *t,
     arch_setup_signal_trampoline(new_mm);
 
     /* ---- 4. Atomically swap mm ---- */
+    uint64_t mm_swap_flags = spin_lock_irqsave(&proc_lock);
     mm_struct_t *old_mm    = t->mm;
     pt_root_t   *old_pgdir = t->pgdir;
-
     t->mm   = new_mm;
     t->pgdir = info->pgdir;
+    spin_unlock_irqrestore(&proc_lock, mm_swap_flags);
     t->entry = info->entry;
     t->ustack = sp;
     strncpy(t->exec_path, abs_path, MAX_PATH_LEN - 1);

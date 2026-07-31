@@ -17,7 +17,7 @@ static uint64_t ext4_block_map(ext4_sb_info_t *sb, ext4_inode_t *inode, uint32_t
 static int      ext4_block_grow(ext4_sb_info_t *sb, ext4_inode_t *inode, uint32_t lblk, uint64_t phys);
 static void     ext4_block_truncate(ext4_sb_info_t *sb, ext4_inode_t *inode);
 static vnode_t *ext4_make_vnode(ext4_sb_info_t *sb, uint32_t ino, uint32_t sz, int type, vnode_t *par);
-static int      ext4_inode_remove(ext4_sb_info_t *sb, uint32_t dir_ino, ext4_inode_t *di, const char *name, uint32_t ino);
+static int      ext4_inode_remove(ext4_sb_info_t *sb, uint32_t dir_ino, ext4_inode_t *di, const char *name, uint32_t ino, vnode_t **deferred_put);
 static int      ext4_vn_writepage(vnode_t *vn, uint64_t index,
                                   const void *data, size_t len);
 static int      ext4_vn_readpage(vnode_t *vn, uint64_t index,
@@ -65,30 +65,66 @@ static uint64_t ext4_block_map_cached(ext4_fctx_t *fc, ext4_inode_t *inode,
 /* ================================================================
  * Vnode lifecycle
  *
- * Ext4 now follows the same short-lived vnode model as FAT32: every lookup
- * creates a fresh vnode, and the vnode is freed when its refcount drops to 0.
- *
- * The previous ext4-specific vnode cache tried to keep permanent references
- * by inode number, but in practice it amplified stale-pointer bugs into
- * deterministic panics on both architectures.  Keeping ext4 aligned with the
- * rest of the VFS is simpler and more robust.
+ * Ext4 keeps exactly one live vnode per inode through a strong-reference
+ * cache (below).  The cache owns one reference per entry; unlink/rmdir
+ * and rename-over remove the victim from the cache and mark it unlinked,
+ * deferring block/inode reclamation to ext4_release_vn() so that files
+ * can be unlinked while still open (standard POSIX/Linux semantics).
  * ================================================================ */
 
+/* ================================================================
+ * VNode cache (strong reference, one vnode per inode)
+ *
+ * Each cached entry owns one vnode reference, so a cached vnode never
+ * reaches release().  unlink/rmdir/rename-remove pull the victim out of
+ * the cache and mark it unlinked; the cluster/inode data is then freed
+ * by ext4_release_vn() once the last reference (e.g. an open fd) drops.
+ * Callers must hold sb->metadata_lock; remove transfers the cache-owned
+ * reference to the caller, who must vnode_put it after dropping the lock.
+ * ================================================================ */
+
+#define EXT4_VCACHE_MAX 512
+typedef struct {
+    ext4_sb_info_t *sb;
+    uint32_t ino;
+    vnode_t *vn;
+} ext4_vcache_ent_t;
+
+static ext4_vcache_ent_t g_ext4_vcache[EXT4_VCACHE_MAX];
+
 static vnode_t *ext4_vnode_cache_lookup(ext4_sb_info_t *sb, uint32_t ino) {
-    (void)sb;
-    (void)ino;
+    for (int i = 0; i < EXT4_VCACHE_MAX; i++) {
+        if (g_ext4_vcache[i].vn && g_ext4_vcache[i].sb == sb &&
+            g_ext4_vcache[i].ino == ino)
+            return g_ext4_vcache[i].vn;
+    }
     return NULL;
 }
 
 static void ext4_vnode_cache_insert(ext4_sb_info_t *sb, uint32_t ino, vnode_t *vn) {
-    (void)sb;
-    (void)ino;
-    (void)vn;
+    for (int i = 0; i < EXT4_VCACHE_MAX; i++) {
+        if (!g_ext4_vcache[i].vn) {
+            vnode_get(vn);
+            g_ext4_vcache[i].sb = sb;
+            g_ext4_vcache[i].ino = ino;
+            g_ext4_vcache[i].vn = vn;
+            return;
+        }
+    }
 }
 
-static void ext4_vnode_cache_remove(ext4_sb_info_t *sb, uint32_t ino) {
-    (void)sb;
-    (void)ino;
+static vnode_t *ext4_vnode_cache_remove(ext4_sb_info_t *sb, uint32_t ino) {
+    for (int i = 0; i < EXT4_VCACHE_MAX; i++) {
+        if (g_ext4_vcache[i].vn && g_ext4_vcache[i].sb == sb &&
+            g_ext4_vcache[i].ino == ino) {
+            vnode_t *vn = g_ext4_vcache[i].vn;
+            g_ext4_vcache[i].sb = NULL;
+            g_ext4_vcache[i].ino = 0;
+            g_ext4_vcache[i].vn = NULL;
+            return vn;
+        }
+    }
+    return NULL;
 }
 
 /* ================================================================
@@ -738,9 +774,24 @@ static int ext4_dir_update_entry(ext4_sb_info_t *sb, ext4_inode_t *di, uint32_t 
  * ================================================================ */
 
 static int ext4_inode_remove(ext4_sb_info_t *sb, uint32_t dir_ino __attribute__((unused)),
-                              ext4_inode_t *di, const char *name, uint32_t ino) {
+                              ext4_inode_t *di, const char *name, uint32_t ino,
+                              vnode_t **deferred_put) {
     int r = ext4_dir_remove(sb, di, di->i_size_lo, name);
     if (r < 0) return r;
+
+    /* If a vnode is still alive (open fd, dcache, ...), keep the inode and
+     * its blocks; ext4_release_vn() reclaims them when the last reference
+     * drops.  The inode number stays allocated until then, so it cannot be
+     * recycled while data is still reachable. */
+    vnode_t *live = ext4_vnode_cache_remove(sb, ino);
+    if (live) {
+        ext4_vnode_priv_t *vp = (ext4_vnode_priv_t *)live->fs_data;
+        if (vp)
+            vp->unlinked = 1;
+        if (deferred_put)
+            *deferred_put = live;
+        return 0;
+    }
 
     ext4_inode_t victim;
     r = ext4_read_inode(sb, ino, &victim);
@@ -751,7 +802,6 @@ static int ext4_inode_remove(ext4_sb_info_t *sb, uint32_t dir_ino __attribute__(
     victim.i_dtime = 1;
     ext4_write_inode(sb, ino, &victim);
     ext4_free_inode(sb, ino);
-    ext4_vnode_cache_remove(sb, ino);
     return 0;
 }
 
@@ -828,7 +878,22 @@ static int ext4_stat(vnode_t *vn, kstat_t *st) {
 
 static void ext4_release_vn(vnode_t *vn) {
     ext4_vnode_priv_t *p = (ext4_vnode_priv_t *)vn->fs_data;
-    if (p) ext4_vnode_cache_remove(p->sb, p->inode_num);
+    if (p && p->unlinked) {
+        /* Inode was unlinked while still referenced: reclaim its blocks
+         * and the inode itself now that the last reference is gone. */
+        ext4_sb_info_t *sb = p->sb;
+        p->unlinked = 0;
+        mutex_lock(&sb->metadata_lock);
+        ext4_inode_t victim;
+        if (ext4_read_inode(sb, p->inode_num, &victim) == 0) {
+            ext4_block_truncate(sb, &victim);
+            memset(&victim, 0, sizeof(victim));
+            victim.i_dtime = 1;
+            ext4_write_inode(sb, p->inode_num, &victim);
+        }
+        ext4_free_inode(sb, p->inode_num);
+        mutex_unlock(&sb->metadata_lock);
+    }
     if (vn->fs_data) { kfree(vn->fs_data); vn->fs_data = NULL; }
     if (vn->parent && vn->parent != vn) vnode_put(vn->parent);
     kfree(vn);
@@ -966,7 +1031,7 @@ static int ext4_vn_mkdir_unlocked(vnode_t *dir, const char *name, int mode) {
     return 0;
 }
 
-static int ext4_vn_unlink_unlocked(vnode_t *dir, const char *name) {
+static int ext4_vn_unlink_unlocked(vnode_t *dir, const char *name, vnode_t **deferred_put) {
     ext4_vnode_priv_t *p = (ext4_vnode_priv_t *)dir->fs_data;
     if (p->type != VFS_FT_DIR) return -ENOTDIR;
 
@@ -978,7 +1043,7 @@ static int ext4_vn_unlink_unlocked(vnode_t *dir, const char *name) {
     if (r < 0) return r;
     if (ft == EXT4_FT_DIR) return -EISDIR;
 
-    return ext4_inode_remove(p->sb, p->inode_num, &di, name, child_ino);
+    return ext4_inode_remove(p->sb, p->inode_num, &di, name, child_ino, deferred_put);
 }
 
 static int ext4_dir_empty(ext4_sb_info_t *sb, ext4_inode_t *di, uint32_t dsz) {
@@ -1003,7 +1068,7 @@ static int ext4_dir_empty(ext4_sb_info_t *sb, ext4_inode_t *di, uint32_t dsz) {
     return 0;
 }
 
-static int ext4_vn_rmdir_unlocked(vnode_t *dir, const char *name) {
+static int ext4_vn_rmdir_unlocked(vnode_t *dir, const char *name, vnode_t **deferred_put) {
     ext4_vnode_priv_t *p = (ext4_vnode_priv_t *)dir->fs_data;
     if (p->type != VFS_FT_DIR) return -ENOTDIR;
 
@@ -1020,12 +1085,13 @@ static int ext4_vn_rmdir_unlocked(vnode_t *dir, const char *name) {
     r = ext4_dir_empty(p->sb, &cdi, cdi.i_size_lo);
     if (r < 0) return r;
 
-    return ext4_inode_remove(p->sb, p->inode_num, &di, name, child_ino);
+    return ext4_inode_remove(p->sb, p->inode_num, &di, name, child_ino, deferred_put);
 }
 
 static int ext4_vn_rename_unlocked(vnode_t *old_dir, const char *old_name,
                                    vnode_t *new_dir, const char *new_name,
-                                   unsigned int flags) {
+                                   unsigned int flags, vnode_t **deferred_put,
+                                   vnode_t **deferred_parent_put) {
     ext4_vnode_priv_t *op = (ext4_vnode_priv_t *)old_dir->fs_data;
     ext4_vnode_priv_t *np = (ext4_vnode_priv_t *)new_dir->fs_data;
     if (op->type != VFS_FT_DIR || np->type != VFS_FT_DIR) return -ENOTDIR;
@@ -1083,7 +1149,7 @@ static int ext4_vn_rename_unlocked(vnode_t *old_dir, const char *old_name,
 
     /* Check if target exists — if so, remove it */
     if (tgt_exists) {
-        r = ext4_inode_remove(np->sb, np->inode_num, &ndi, new_name, tgt_ino);
+        r = ext4_inode_remove(np->sb, np->inode_num, &ndi, new_name, tgt_ino, deferred_put);
         if (r < 0) return r;
         /* Re-read ndi after modification */
         if (ext4_read_inode(np->sb, np->inode_num, &ndi) < 0) return -EIO;
@@ -1106,6 +1172,17 @@ static int ext4_vn_rename_unlocked(vnode_t *old_dir, const char *old_name,
         /* Attempt rollback: remove the new entry */
         ext4_dir_remove(np->sb, &ndi, ndsz, new_name);
         return r;
+    }
+
+    /* The moved inode keeps its single cached vnode; repoint its parent so
+     * that ".." resolution follows the new location.  The old parent
+     * reference is dropped by the caller after the lock is released. */
+    vnode_t *moved = ext4_vnode_cache_lookup(op->sb, src_ino);
+    if (moved && moved->parent && moved->parent != new_dir) {
+        if (deferred_parent_put)
+            *deferred_parent_put = moved->parent;
+        vnode_get(new_dir);
+        moved->parent = new_dir;
     }
     return 0;
 }
@@ -1249,18 +1326,24 @@ static int ext4_vn_mkdir(vnode_t *dir, const char *name, int mode)
 static int ext4_vn_unlink(vnode_t *dir, const char *name)
 {
     ext4_sb_info_t *sb = ((ext4_vnode_priv_t *)dir->fs_data)->sb;
+    vnode_t *deferred = NULL;
     mutex_lock(&sb->metadata_lock);
-    int r = ext4_vn_unlink_unlocked(dir, name);
+    int r = ext4_vn_unlink_unlocked(dir, name, &deferred);
     mutex_unlock(&sb->metadata_lock);
+    if (deferred)
+        vnode_put(deferred);
     return r;
 }
 
 static int ext4_vn_rmdir(vnode_t *dir, const char *name)
 {
     ext4_sb_info_t *sb = ((ext4_vnode_priv_t *)dir->fs_data)->sb;
+    vnode_t *deferred = NULL;
     mutex_lock(&sb->metadata_lock);
-    int r = ext4_vn_rmdir_unlocked(dir, name);
+    int r = ext4_vn_rmdir_unlocked(dir, name, &deferred);
     mutex_unlock(&sb->metadata_lock);
+    if (deferred)
+        vnode_put(deferred);
     return r;
 }
 
@@ -1273,9 +1356,15 @@ static int ext4_vn_rename(vnode_t *old_dir, const char *old_name,
     if (sb != new_sb)
         return -EXDEV;
     mutex_lock(&sb->metadata_lock);
+    vnode_t *deferred = NULL;
+    vnode_t *deferred_parent = NULL;
     int r = ext4_vn_rename_unlocked(old_dir, old_name, new_dir, new_name,
-                                    flags);
+                                    flags, &deferred, &deferred_parent);
     mutex_unlock(&sb->metadata_lock);
+    if (deferred)
+        vnode_put(deferred);
+    if (deferred_parent)
+        vnode_put(deferred_parent);
     return r;
 }
 
@@ -1643,10 +1732,15 @@ static vfile_ops_t g_ext4_fops = {
 
 static vnode_t *ext4_make_vnode(ext4_sb_info_t *sb, uint32_t ino, uint32_t sz,
                                  int type, vnode_t *parent) {
-    /* The cache hook is currently disabled; keep the lookup call so the
-     * make_vnode path stays self-contained if we ever reintroduce it. */
+    /* Caller holds sb->metadata_lock: reuse the cached vnode so an inode
+     * has exactly one live vnode.  The in-memory file_size is authoritative
+     * while the vnode is alive (the on-disk inode size lags behind until
+     * writeback), so a cache hit must not overwrite it. */
     vnode_t *cached = ext4_vnode_cache_lookup(sb, ino);
-    if (cached) return cached;
+    if (cached) {
+        vnode_get(cached);
+        return cached;
+    }
 
     vnode_t *vn = (vnode_t *)kmalloc(sizeof(vnode_t));
     if (!vn) return NULL;
@@ -1677,6 +1771,7 @@ static vnode_t *ext4_make_vnode(ext4_sb_info_t *sb, uint32_t ino, uint32_t sz,
     fp->inode_num = ino;
     fp->file_size = sz;
     fp->type      = type;
+    fp->unlinked  = 0;
     vn->fs_data   = fp;
 
     ext4_vnode_cache_insert(sb, ino, vn);
@@ -1786,6 +1881,25 @@ void ext4_unmount(vnode_t *root) {
     ext4_vnode_priv_t *fp = (ext4_vnode_priv_t *)root->fs_data;
     ext4_sb_info_t *esi = fp->sb;
     bcache_sync(esi->bc);
+
+    /* Drop all cache-owned vnode references for this filesystem; survivors
+     * (still-open files) stay alive on their remaining references and
+     * unlinked inodes are reclaimed by release(). */
+    vnode_t *held[EXT4_VCACHE_MAX];
+    int held_count = 0;
+    mutex_lock(&esi->metadata_lock);
+    for (int i = 0; i < EXT4_VCACHE_MAX; i++) {
+        if (g_ext4_vcache[i].vn && g_ext4_vcache[i].sb == esi) {
+            held[held_count++] = g_ext4_vcache[i].vn;
+            g_ext4_vcache[i].sb = NULL;
+            g_ext4_vcache[i].ino = 0;
+            g_ext4_vcache[i].vn = NULL;
+        }
+    }
+    mutex_unlock(&esi->metadata_lock);
+    for (int i = 0; i < held_count; i++)
+        vnode_put(held[i]);
+
     if (root->ops && root->ops->release) root->ops->release(root);
     if (esi->group_descs) {
         kfree(esi->group_descs);

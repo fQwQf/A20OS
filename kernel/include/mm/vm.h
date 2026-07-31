@@ -120,6 +120,7 @@ typedef struct mm_struct {
 } mm_struct_t;
 
 mm_struct_t *mm_create(void);
+mm_struct_t *mm_get(mm_struct_t *mm);
 void         mm_destroy(mm_struct_t *mm);
 mm_struct_t *mm_fork(mm_struct_t *parent_mm);
 

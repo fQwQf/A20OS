@@ -46,11 +46,26 @@ extern int64_t a20_handle_install_temporal(struct a20_ht_internal *ht, void *obj
                                            uint64_t expiry_tick, uint32_t remaining_ops,
                                            uint32_t temporal_flags, uint8_t security_label);
 extern int64_t a20_handle_lookup_internal(struct a20_ht_internal *ht, a20_handle_t h,
-                                          uint16_t expected_type, a20_rights_t required_rights,
-                                          a20_handle_entry_t *out);
-extern void a20_handle_remove(struct a20_ht_internal *ht, a20_handle_t h);
+                                           uint16_t expected_type, a20_rights_t required_rights,
+                                           a20_handle_entry_t *out);
+extern int64_t a20_handle_lookup_ref_internal(struct a20_ht_internal *ht,
+                                               a20_handle_t h,
+                                               uint16_t expected_type,
+                                               a20_rights_t required_rights,
+                                               a20_handle_entry_t *out);
+extern int64_t a20_handle_remove(struct a20_ht_internal *ht, a20_handle_t h);
+extern void a20_object_release(void *object, uint16_t type);
+
 extern uint8_t a20_ht_get_label(struct a20_ht_internal *ht);
 extern void a20_ht_set_label(struct a20_ht_internal *ht, uint8_t label);
+extern int64_t a20_handle_set_temporal(struct a20_ht_internal *ht, a20_handle_t h,
+                                       uint64_t expiry_tick, uint32_t remaining_ops,
+                                       uint32_t temporal_flags);
+extern int64_t a20_handle_get_temporal(struct a20_ht_internal *ht, a20_handle_t h,
+                                       uint64_t *expiry_tick, uint32_t *remaining_ops,
+                                       uint32_t *temporal_flags);
+extern int64_t a20_handle_set_label(struct a20_ht_internal *ht, a20_handle_t h,
+                                    uint8_t label);
 
 extern int copy_path_from_user(char *dst, const char *uptr, uint32_t len);
 extern void resolve_path(const char *in, char *out);
@@ -134,8 +149,12 @@ int64_t sys_a20_path_create(const a20_syscall_args_t *args)
     if (rc < 0) return rc;
 
     kargs.out_handle = h;
-    if (copy_to_user(uargs, &kargs, sizeof(kargs)) < 0)
+    if (a20_copy_struct_to_user(uargs, &kargs, sizeof(kargs)) < 0) {
+        task_t *cur = proc_current();
+        struct a20_ht_internal *ht = task_get_a20_ht(cur);
+        if (ht) a20_handle_remove(ht, h);
         return -A20_ERR_FAULT;
+    }
     return A20_OK;
 }
 
@@ -186,8 +205,8 @@ int64_t sys_a20_path_readdir(const a20_syscall_args_t *args)
     if (!ht) return -A20_ERR_BAD_HANDLE;
 
     a20_handle_entry_t entry;
-    int64_t r = a20_handle_lookup_internal(ht, dir_h, A20_OBJ_DIRECTORY,
-                                            A20_RIGHT_READ, &entry);
+    int64_t r = a20_handle_lookup_ref_internal(ht, dir_h, A20_OBJ_DIRECTORY,
+                                               A20_RIGHT_READ, &entry);
     if (r < 0) return r;
 
     int gfd = (int)(uintptr_t)entry.object;
@@ -195,7 +214,9 @@ int64_t sys_a20_path_readdir(const a20_syscall_args_t *args)
     char kbuf[4096];
     if (len > sizeof(kbuf)) len = sizeof(kbuf);
     int64_t n = vfs_getdents64(gfd, kbuf, len);
+    a20_object_release(entry.object, entry.type);
     if (n < 0) return -A20_ERR_IO;
+
 
     uint64_t out_off = 0;
     uint64_t in_off = 0;
@@ -305,8 +326,8 @@ int64_t sys_a20_fs_stat(const a20_syscall_args_t *args)
     if (!ht) return -A20_ERR_BAD_HANDLE;
 
     a20_handle_entry_t entry;
-    int64_t r = a20_handle_lookup_internal(ht, h, A20_OBJ_INVALID,
-                                            A20_RIGHT_STAT, &entry);
+    int64_t r = a20_handle_lookup_ref_internal(ht, h, A20_OBJ_INVALID,
+                                               A20_RIGHT_STAT, &entry);
     if (r < 0) return r;
 
     a20_fs_stat_t fs;
@@ -320,6 +341,8 @@ int64_t sys_a20_fs_stat(const a20_syscall_args_t *args)
         }
         if (vf) vfs_put_file_ref(gfd, vf);
     }
+    a20_object_release(entry.object, entry.type);
+
 
     if (copy_to_user(out, &fs, sizeof(fs)) < 0) return -A20_ERR_FAULT;
     return A20_OK;
@@ -337,27 +360,107 @@ int64_t sys_a20_handle_control(const a20_syscall_args_t *args)
     if (!ht) return -A20_ERR_BAD_HANDLE;
 
     a20_handle_entry_t entry;
-    int64_t r = a20_handle_lookup_internal(ht, h, A20_OBJ_INVALID,
-                                            A20_RIGHT_CONTROL, &entry);
+    int64_t r = a20_handle_lookup_ref_internal(ht, h, A20_OBJ_INVALID,
+                                               A20_RIGHT_CONTROL, &entry);
     if (r < 0) return r;
+
+    /* Temporal capability management (docs/native-abi/03-handle.md §2.6).
+     * The user ABI speaks CLOCK_MONOTONIC nanoseconds; entries store ticks. */
+    if (op == A20_HANDLE_CTRL_SET_TEMPORAL) {
+        a20_handle_temporal_args_t *uta = (a20_handle_temporal_args_t *)arg0;
+        if (!uta) {
+            r = -A20_ERR_FAULT;
+            goto out_entry;
+        }
+        a20_handle_temporal_args_t ta;
+        r = a20_validate_struct_header(uta, sizeof(ta), 1);
+        if (r < 0) goto out_entry;
+        uint32_t usz;
+        if (copy_from_user(&usz, uta, sizeof(usz)) < 0) {
+            r = -A20_ERR_FAULT;
+            goto out_entry;
+        }
+        memset(&ta, 0, sizeof(ta));
+        uint32_t cpn = usz < (uint32_t)sizeof(ta) ? usz : (uint32_t)sizeof(ta);
+        if (copy_from_user(&ta, uta, cpn) < 0) {
+            r = -A20_ERR_FAULT;
+            goto out_entry;
+        }
+        uint64_t expiry_tick = 0;
+        if (ta.expiry_ns > 0) {
+            uint64_t sec = ta.expiry_ns / 1000000000ULL;
+            uint64_t nsec = ta.expiry_ns % 1000000000ULL;
+            if (sec > UINT64_MAX / TICKS_PER_SEC)
+                expiry_tick = UINT64_MAX / 2;
+            else
+                expiry_tick = sec * TICKS_PER_SEC +
+                              nsec * TICKS_PER_SEC / 1000000000ULL;
+        }
+        a20_object_release(entry.object, entry.type);
+        return a20_handle_set_temporal(ht, h, expiry_tick, ta.remaining_ops,
+                                       ta.temporal_flags);
+    }
+    if (op == A20_HANDLE_CTRL_GET_TEMPORAL) {
+        a20_handle_temporal_args_t *uta = (a20_handle_temporal_args_t *)arg0;
+        if (!uta) {
+            r = -A20_ERR_FAULT;
+            goto out_entry;
+        }
+        uint64_t expiry_tick;
+        uint32_t remaining_ops, temporal_flags;
+        r = a20_handle_get_temporal(ht, h, &expiry_tick, &remaining_ops,
+                                    &temporal_flags);
+        if (r < 0) goto out_entry;
+        a20_handle_temporal_args_t ta;
+        memset(&ta, 0, sizeof(ta));
+        ta.size = sizeof(ta);
+        ta.version = 1;
+        ta.expiry_ns = expiry_tick
+                       ? expiry_tick * (1000000000ULL / TICKS_PER_SEC) : 0;
+        ta.remaining_ops = remaining_ops;
+        ta.temporal_flags = temporal_flags;
+        a20_object_release(entry.object, entry.type);
+        if (copy_to_user(uta, &ta, sizeof(ta)) < 0)
+            return -A20_ERR_FAULT;
+        return A20_OK;
+    }
+    if (op == A20_HANDLE_CTRL_SET_LABEL) {
+        if (arg1 != 0) {
+            r = -A20_ERR_INVALID_ARGUMENT;
+            goto out_entry;
+        }
+        a20_object_release(entry.object, entry.type);
+        return a20_handle_set_label(ht, h, (uint8_t)arg0);
+    }
 
     if (entry.type == A20_OBJ_FILE || entry.type == A20_OBJ_DEVICE) {
         int gfd = (int)(uintptr_t)entry.object;
         switch (op) {
-        case 0: return vfs_ioctl(gfd, (unsigned long)arg0, (void *)arg1);
-        case 1: return vfs_fcntl(gfd, (int)arg0, (long)arg1);
-        default: return -A20_ERR_INVALID_ARGUMENT;
+        case A20_HANDLE_CTRL_IOCTL:
+            r = vfs_ioctl(gfd, (unsigned long)arg0, (void *)arg1);
+            break;
+        case A20_HANDLE_CTRL_FCNTL:
+            r = vfs_fcntl(gfd, (int)arg0, (long)arg1);
+            break;
+        default:
+            r = -A20_ERR_INVALID_ARGUMENT;
+            break;
         }
+        goto out_entry;
     }
 
     if (entry.type == A20_OBJ_EVENT_QUEUE && op == 0) {
         a20_eventq_t *eq = (a20_eventq_t *)entry.object;
         if (arg0 == 1) {
-            return a20_eventq_cancel(eq, (a20_handle_t)arg1);
+            r = a20_eventq_cancel(eq, (a20_handle_t)arg1);
+            goto out_entry;
         }
     }
 
-    return -A20_ERR_INVALID_ARGUMENT;
+    r = -A20_ERR_INVALID_ARGUMENT;
+out_entry:
+    a20_object_release(entry.object, entry.type);
+    return r;
 }
 
 int64_t sys_a20_fs_mount(const a20_syscall_args_t *args)
@@ -407,4 +510,3 @@ int64_t sys_a20_fs_sync(const a20_syscall_args_t *args)
 {
     return vfs_sync();
 }
-

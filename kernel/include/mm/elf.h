@@ -158,6 +158,7 @@ typedef struct elf_load_info {
  * Returns 0 on success, negative errno on failure.
  * On success, fills *info with entry point and memory layout. */
 int elf_load(int fd, const char *path, elf_load_info_t *info);
+void elf_load_info_discard(elf_load_info_t *info);
 
 /* Load an ELF from a memory buffer (for embedded init binary) */
 int elf_load_from_buf(const void *buf, size_t len, elf_load_info_t *info);
@@ -172,9 +173,10 @@ vaddr_t elf_setup_stack(vaddr_t stack_top, int argc, char *const argv[],
 
 #ifdef CONFIG_ABI_NATIVE
 vaddr_t elf_setup_stack_a20(vaddr_t stack_top, int argc, char *const argv[],
-                            char *const envp[], const elf_load_info_t *info,
-                            uint32_t stdin_h, uint32_t stdout_h,
-                            uint32_t stderr_h, uint32_t self_task_h);
+                             char *const envp[], const elf_load_info_t *info,
+                             uint32_t stdin_h, uint32_t stdout_h,
+                             uint32_t stderr_h, uint32_t self_task_h,
+                             uint32_t root_h, uint32_t cwd_h);
 #endif
 
 #endif /* _ELF_H */

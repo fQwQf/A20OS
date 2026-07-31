@@ -82,6 +82,19 @@ static void do_format(const char *fmt, va_list args, putc_fn putc, void *ctx) {
             nlen = utoa(v, num_buf, 10, 0);
             break;
         }
+        case 'o': {
+            uint64_t v;
+            if (length_mode == 3)
+                v = (uint64_t)va_arg(args, size_t);
+            else if (length_mode == 2)
+                v = va_arg(args, unsigned long long);
+            else if (length_mode == 1)
+                v = va_arg(args, unsigned long);
+            else
+                v = va_arg(args, unsigned int);
+            nlen = utoa(v, num_buf, 8, 0);
+            break;
+        }
         case 'x': {
             uint64_t v;
             if (length_mode == 3)

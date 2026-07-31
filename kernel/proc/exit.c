@@ -118,10 +118,9 @@ void proc_wake_child_waiters_locked(task_t *parent)
 
 static void proc_release_exiting_mm(task_t *t)
 {
-    if (!t || !t->mm)
+    if (!t)
         return;
 
-    mm_struct_t *mm = t->mm;
     pt_root_t *kernel_pgdir = proc_kernel_pgdir_shared();
     uint64_t kernel_as = kernel_pgdir ? arch_make_addr_space_token(kernel_pgdir) : 0;
 
@@ -130,8 +129,15 @@ static void proc_release_exiting_mm(task_t *t)
         arch_tlb_flush();
     }
 
+    uint64_t mm_swap_flags = spin_lock_irqsave(&proc_lock);
+    mm_struct_t *mm = t->mm;
+    if (!mm) {
+        spin_unlock_irqrestore(&proc_lock, mm_swap_flags);
+        return;
+    }
     t->mm = NULL;
     t->pgdir = kernel_pgdir;
+    spin_unlock_irqrestore(&proc_lock, mm_swap_flags);
     if (t->trap_ctx)
         TRAP_CTX_KScratch0(t->trap_ctx) = kernel_as;
 
@@ -352,7 +358,11 @@ void proc_exit(int exit_code)
     if (vfork_completed)
         complete(&t->vfork_done);
 
-    a20_event_notify(t, A20_OBJ_TASK, 0, (uint64_t)exit_code, 0);
+    /* Native ABI task handles store the pid as the object pointer, so the
+     * watch key must be pid-as-pointer (docs/native-abi/05-ipc.md §3.3). */
+    a20_event_notify((void *)(uintptr_t)t->pid, A20_OBJ_TASK,
+                     A20_EVENT_EXITED, (uint64_t)exit_code, 0);
+    a20_eventq_on_object_destroy((void *)(uintptr_t)t->pid, A20_OBJ_TASK);
 
     task_t *init_reaper = auto_reap ? NULL : proc_find_get(1);
     proc_reparent_children(t, init_reaper);

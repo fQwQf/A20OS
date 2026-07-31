@@ -46,9 +46,16 @@ extern int64_t a20_handle_install_temporal(struct a20_ht_internal *ht, void *obj
                                            uint64_t expiry_tick, uint32_t remaining_ops,
                                            uint32_t temporal_flags, uint8_t security_label);
 extern int64_t a20_handle_lookup_internal(struct a20_ht_internal *ht, a20_handle_t h,
-                                          uint16_t expected_type, a20_rights_t required_rights,
-                                          a20_handle_entry_t *out);
-extern void a20_handle_remove(struct a20_ht_internal *ht, a20_handle_t h);
+                                           uint16_t expected_type, a20_rights_t required_rights,
+                                           a20_handle_entry_t *out);
+extern int64_t a20_handle_lookup_ref_internal(struct a20_ht_internal *ht,
+                                               a20_handle_t h,
+                                               uint16_t expected_type,
+                                               a20_rights_t required_rights,
+                                               a20_handle_entry_t *out);
+extern int64_t a20_handle_remove(struct a20_ht_internal *ht, a20_handle_t h);
+extern void a20_object_release(void *object, uint16_t type);
+
 extern uint8_t a20_ht_get_label(struct a20_ht_internal *ht);
 extern void a20_ht_set_label(struct a20_ht_internal *ht, uint8_t label);
 
@@ -73,6 +80,7 @@ int64_t sys_a20_ns_create(const a20_syscall_args_t *args)
     struct a20_namespace *ns = kmalloc(sizeof(struct a20_namespace));
     if (!ns) return -A20_ERR_NO_MEMORY;
     memset(ns, 0, sizeof(*ns));
+    refcount_set(&ns->refcount, 1);
     ns->ns_type = ns_type;
     ns->flags = flags;
 
@@ -114,21 +122,27 @@ int64_t sys_a20_ns_apply(const a20_syscall_args_t *args)
     if (!ht) return -A20_ERR_BAD_HANDLE;
 
     a20_handle_entry_t ns_entry;
-    int64_t r = a20_handle_lookup_internal(ht, ns_h, A20_OBJ_NAMESPACE,
-                                            A20_RIGHT_ADMIN, &ns_entry);
+    int64_t r = a20_handle_lookup_ref_internal(ht, ns_h, A20_OBJ_NAMESPACE,
+                                               A20_RIGHT_ADMIN, &ns_entry);
+
     if (r < 0) return r;
 
     a20_handle_entry_t task_entry;
     r = a20_handle_lookup_internal(ht, task_h, A20_OBJ_TASK,
                                     A20_RIGHT_CONTROL, &task_entry);
-    if (r < 0) return r;
+    if (r < 0) {
+        a20_object_release(ns_entry.object, ns_entry.type);
+        return r;
+    }
 
     struct a20_namespace *ns = (struct a20_namespace *)ns_entry.object;
     task_t *target = proc_find_get((int)(uintptr_t)task_entry.object);
     if (!ns || !target) {
+        a20_object_release(ns_entry.object, ns_entry.type);
         proc_put(target);
         return -A20_ERR_BAD_HANDLE;
     }
+
 
     switch (ns->ns_type) {
     case A20_NS_FILESYSTEM:
@@ -153,6 +167,7 @@ int64_t sys_a20_ns_apply(const a20_syscall_args_t *args)
     }
 
     proc_put(target);
+    a20_object_release(ns_entry.object, ns_entry.type);
     return A20_OK;
 }
 
@@ -263,8 +278,10 @@ int64_t sys_a20_debug_read_regs(const a20_syscall_args_t *args)
     }
 
     proc_put(target);
-    if (copy_to_user(out, &regs, sizeof(regs)) < 0) return -A20_ERR_FAULT;
+    if (copy_to_user(out, &regs, sizeof(regs)) < 0)
+        return -A20_ERR_FAULT;
     return A20_OK;
+
 }
 
 int64_t sys_a20_debug_write_regs(const a20_syscall_args_t *args)
@@ -299,6 +316,44 @@ int64_t sys_a20_debug_write_regs(const a20_syscall_args_t *args)
     return A20_OK;
 }
 
+static int a20_debug_user_range_ok(uint64_t va, size_t n)
+{
+    va = (uint64_t)(vaddr_t)va;
+    if (n == 0) return 1;
+    if (va >= USER_VA_LIMIT) return 0;
+    return n <= USER_VA_LIMIT - va;
+}
+
+static int a20_debug_copy_from_task(mm_struct_t *mm, uint64_t remote_addr,
+                                    void *dst, size_t len)
+{
+    if (!mm || !mm->pgdir)
+        return -A20_ERR_BAD_HANDLE;
+    if (!a20_debug_user_range_ok(remote_addr, len))
+        return -A20_ERR_FAULT;
+
+    size_t done = 0;
+    while (done < len) {
+        uint64_t va = remote_addr + done;
+        vm_area_t *vma = mm_find_vma(mm, va);
+        if (!vma || va < vma->start || va >= vma->end)
+            return -A20_ERR_FAULT;
+        paddr_t pa = pt_translate(mm->pgdir, va);
+        if (!pa)
+            return -A20_ERR_FAULT;
+        pfn_t pfn = phys_to_pfn(pa);
+        if (!pfn_valid(pfn))
+            return -A20_ERR_FAULT;
+        size_t chunk = PAGE_SIZE - (va & (PAGE_SIZE - 1));
+        if (chunk > len - done)
+            chunk = len - done;
+        memcpy((char *)dst + done,
+               (char *)pfn_to_virt(pfn) + (pa & (PAGE_SIZE - 1)), chunk);
+        done += chunk;
+    }
+    return A20_OK;
+}
+
 int64_t sys_a20_debug_map_memory(const a20_syscall_args_t *args)
 {
     a20_handle_t dbg_h = (a20_handle_t)A20_ARG(0);
@@ -306,7 +361,7 @@ int64_t sys_a20_debug_map_memory(const a20_syscall_args_t *args)
     uint64_t len = A20_ARG(2);
     uint32_t prot = (uint32_t)A20_ARG(3);
 
-    if (len == 0) return -A20_ERR_INVALID_ARGUMENT;
+    if (len == 0 || len > (16ULL << 20)) return -A20_ERR_INVALID_ARGUMENT;
 
     task_t *cur = proc_current();
     struct a20_ht_internal *ht = task_get_a20_ht(cur);
@@ -317,18 +372,43 @@ int64_t sys_a20_debug_map_memory(const a20_syscall_args_t *args)
                                             A20_RIGHT_READ, &entry);
     if (r < 0) return r;
 
-    uint64_t local = proc_mmap(0, (size_t)len, (int)prot ? (int)prot : 3,
-                                0x20 /* MAP_ANONYMOUS */, -1, 0);
-    if (local == 0) return -A20_ERR_NO_MEMORY;
-
     task_t *target = proc_find_get((int)(uintptr_t)entry.object);
-    if (target && target->pgdir) {
-        for (uint64_t off = 0; off < len; off += 4096) {
-            uint64_t src_page = remote_addr + off;
-            memcpy((void *)(local + off), (const void *)src_page, 4096);
-        }
+    if (!target) return -A20_ERR_BAD_HANDLE;
+    mm_struct_t *target_mm = proc_task_get_mm(target);
+    if (!target_mm) {
+        proc_put(target);
+        return -A20_ERR_BAD_HANDLE;
     }
 
+    uint64_t local = proc_mmap(0, (size_t)len, (int)prot ? (int)prot : 3,
+                                0x20 /* MAP_ANONYMOUS */, -1, 0);
+    if (local == 0) {
+        mm_destroy(target_mm);
+        proc_put(target);
+        return -A20_ERR_NO_MEMORY;
+    }
+
+    char kbuf[512];
+    uint64_t done = 0;
+    while (done < len) {
+        size_t chunk = len - done;
+        if (chunk > sizeof(kbuf)) chunk = sizeof(kbuf);
+        r = a20_debug_copy_from_task(target_mm, remote_addr + done, kbuf, chunk);
+        if (r < 0) goto out_unmap;
+        if (copy_to_user((void *)(local + done), kbuf, chunk) < 0) {
+            r = -A20_ERR_FAULT;
+            goto out_unmap;
+        }
+        done += chunk;
+    }
+
+    mm_destroy(target_mm);
     proc_put(target);
     return (int64_t)local;
+
+out_unmap:
+    proc_munmap(local, (size_t)len);
+    mm_destroy(target_mm);
+    proc_put(target);
+    return r;
 }

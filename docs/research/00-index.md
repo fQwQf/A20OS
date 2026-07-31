@@ -15,7 +15,7 @@
 | 编号 | 文档 | 核心内容 | 行数 | 状态 |
 |------|------|---------|------|------|
 | 01 | [POSIX 设计局限性分析](01-posix-limitations.md) | POSIX 核心设计缺陷、TOCTOU 形式化、信号模型批判、io_uring 深度分析、替代方案综述 | ~500 | 已完成 |
-| 02 | [Native API 设计](02-native-api-design.md) | 53 个 syscall 设计、handle/channel/event 模型、VMO/VMAR 内存模型、handle 生命周期、rights 代数、POSIX shim | ~900 | 已完成 |
+| 02 | [Native API 设计](02-native-api-design.md) | 53 个形式化核心 syscall 设计、handle/channel/event 模型、VMO/VMAR 内存模型、handle 生命周期、rights 代数、POSIX shim | ~900 | 已完成（实现已扩展到 93，见下文） |
 | 03 | [实现方案](03-implementation-plan.md) | 组件划分、数据结构、libc 设计、分阶段实施路线 | ~960 | 已完成 |
 | 04 | [形式化理论基础](04-theory-deep-dive.md) | SOS 操作语义、安全/活性/并发/IF 证明、LTL 活性框架、双 ABI 信息流能力边界、ABI 演进 | ~1050 | 已完成 |
 | 05 | [评估框架](05-evaluation-framework.md) | 测量方法论、统计方法、微基准、安全性测试、POSIX shim 开销、形式化验证方法 | ~760 | 已完成 |
@@ -220,10 +220,11 @@
 
 | 参数 | 值 | 来源 |
 |------|-----|------|
-| Syscall 总数 | 53 | 02 §4.3 |
+| 形式化核心 syscall | 53 | 02 §4.3、07 §1.2 |
+| 当前实现 syscall | 93 | `kernel/abi/native/syscall_table.def`、`docs/native-abi/03-handle.md` §6 |
 | 对象类型数 | 13 | 04 §1.1 |
 | 权限位数 | 14 | 04 §1.2 |
-| Handle 表最大条目 | 65536 | 03 §2.2 |
+| Handle 表最大条目 | 65536 | 08 §2.1 |
 | 锁层级 | L0-L4（5 层） | 07 §4 |
 | Channel 消息上限 | 64KB | 02 §5.1 |
 | 安全标签格 | {L, M, H} | 04 §8.5 |
@@ -232,20 +233,25 @@
 
 ---
 
-## 7. 与 kernel/abi/native/ 的关系
+## 7. 与实现和规范的关系
 
-`kernel/abi/native/` 目录包含 A20OS Native ABI 的完整设计规范：
+设计规范位于 `docs/native-abi/`，实现位于 `kernel/abi/native/`、`kernel/ipc/` 和 `kernel/mm/`：
 
 ```text
-kernel/abi/native/
-  DESIGN.md     顶层概述、设计原则、文档索引
-  types.md      基础类型、ABI 头约定、所有 syscall 参数结构体
-  errors.md     错误码、返回约定
-  startup.md    启动协议、libc 分层设计
-  handle.md     13 种对象类型、handle table（含时态能力 §2.6）、syscall 完整列表（53 个）
-  memory.md     VMO/VMAR 模型、内存操作语义
-  ipc.md        Channel、Event Queue、IPC 机制（含类型化通道 §2.3-§2.4）
-  security.md   Rights 代数、handle transfer、安全模型、时态权限模型（§6）
+docs/native-abi/
+  00-overview.md        顶层概述、设计原则、文档索引
+  01-types.md           基础类型、ABI 头约定、syscall 参数结构体
+  02-errors.md          错误码、返回约定
+  03-handle.md          13 种对象、handle table、时态能力、93 syscall 列表
+  04-memory.md          VMO/VMAR 模型与当前 source 映射语义
+  05-ipc.md             Typed Channel、阻塞 Channel、Event Queue
+  06-security.md        Rights、标签、transfer、时态权限模型
+  07-startup.md         启动协议、libc 分层设计
+  08-runtime-status.md  当前实现状态与剩余差距
+
+kernel/abi/native/      syscall 分派、handle table、各子系统入口
+kernel/ipc/             channel、event queue、对象生命周期
+kernel/mm/              VMO/VMAR
 ```
 
 本文档体系中的 01-08 号研究笔记在设计规范基础上进行：
@@ -257,7 +263,7 @@ kernel/abi/native/
 5. **架构详述**（08）：设计中隐含的实现决策的显式分析
 6. **评估与贡献**（05+06）：如何验证和定位工作
 
-设计规范已整合研究发现（13 种对象类型、VMO/VMAR 模型、channel 两阶段锁、rights 代数等）。研究笔记中的形式化证明和分析为设计规范提供理论基础。
+设计规范已整合研究发现，并以当前实现为准更新：13 种对象类型、93 个 syscall、typed channel 强制、时态控制入口与 deadline-driven sweeper、阻塞 channel/event_wait、reserve-then-dequeue 无部分投递、对象级联释放、VMO source 映射。研究笔记中的形式化证明仍以 53 个核心 syscall 模型为主，因此“设计已证明”与“93 个实现入口全部被证明”必须明确区分。
 
 ---
 
@@ -269,8 +275,10 @@ kernel/abi/native/
 4. **无硬件 capability 支持**：与 CHERI 的结合未探讨（06 §5.4）
 5. **性能数据待实测**：05 中的所有基准测试值为设计框架，非实测结果
 6. **无锁数据结构未分析**：若未来引入无锁优化（如 event queue ring buffer），需补充 RELAXED 操作的内存序论证（07 §9.8.5）
-7. **时态能力开销未评估**：时态字段增加了 handle entry 大小（+16 bytes），sweeper 扫描的开销需实测
-8. **类型化通道的静态分析未工具化**：推论 2.2.1 承诺的静态能力流分析未实现
+7. **时态能力开销未评估**：时态字段增加了 handle entry 大小（+16 bytes）；控制入口与 deadline-driven sweeper 已接入并通过 smoke，但扫描开销仍需实测
+8. **类型化通道的静态分析未工具化**：内核创建/send/recv 强制已接入并通过 smoke；推论 2.2.1 承诺的静态能力流分析仍未实现
+9. **形式化覆盖与实现存在边界**：07 的 trace 归纳穷举覆盖 53 个核心 syscall；当前实现为 93 个，新增的 futex、xattr、扩展网络/调度/系统调用尚未逐项加入 SOS 规则与 error-path 精化矩阵
+10. **事件源覆盖不完整**：channel、timer、task 退出已产生事件；file/socket/pipe 的 READABLE/WRITABLE/ERROR 以及 `event_watch_fs` 路径事件尚未接入
 
 ---
 

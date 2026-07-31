@@ -263,6 +263,7 @@ typedef struct ext4_vnode_priv {
     uint32_t        inode_num;
     uint32_t        file_size;
     int             type;
+    int             unlinked;   /* dirent removed; free blocks+inode on release */
 } ext4_vnode_priv_t;
 
 typedef struct ext4_fctx {

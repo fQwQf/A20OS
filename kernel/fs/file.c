@@ -11,11 +11,14 @@
 #define GFILE_WORDS ((GFILE_MAX + 63) / 64)
 
 static vfile_t *g_files[GFILE_MAX];
+static uint32_t g_file_slot_refs[GFILE_MAX];
 static uint64_t g_file_mask[GFILE_WORDS];
 static int g_file_next = 3;
 static spinlock_t g_file_lock = SPINLOCK_INIT;
 static obj_cache_t g_vfile_cache = OBJ_CACHE_INIT("vfile", vfile_t, 256);
 static size_t g_vfile_live;
+
+extern void a20_eventq_on_vfile_destroy(int fd);
 
 static inline void file_mask_set(int fd)
 {
@@ -74,6 +77,7 @@ void file_table_init(void)
     spin_init(&g_file_lock);
     obj_cache_init(&g_vfile_cache, "vfile", sizeof(vfile_t), 256);
     memset(g_files, 0, sizeof(g_files));
+    memset(g_file_slot_refs, 0, sizeof(g_file_slot_refs));
     memset(g_file_mask, 0, sizeof(g_file_mask));
     g_file_next = 3;
     g_vfile_live = 0;
@@ -150,6 +154,7 @@ int file_install_at(int fd, vfile_t *vf)
         return -EBUSY;
     }
     g_files[fd] = vf;
+    g_file_slot_refs[fd] = 1;
     file_note_alloc(fd);
     spin_unlock_irqrestore(&g_file_lock, flags);
     return fd;
@@ -164,6 +169,7 @@ int vfs_alloc_fd(vfile_t *vf)
         gfd = file_find_free_from(3);
     if (gfd >= 0) {
         g_files[gfd] = vf;
+        g_file_slot_refs[gfd] = 1;
         file_note_alloc(gfd);
     }
     spin_unlock_irqrestore(&g_file_lock, flags);
@@ -191,35 +197,16 @@ vfile_t *vfs_get_file_ref(int fd)
     return vf;
 }
 
-void vfs_put_file_ref(int fd, vfile_t *vf)
-{
-    if (!vf)
-        return;
-    vfile_t *closed = NULL;
-    uint64_t flags = spin_lock_irqsave(&g_file_lock);
-    if (vfile_put_ref_only(vf)) {
-        if (fd >= 0 && fd < GFILE_MAX && g_files[fd] == vf) {
-            g_files[fd] = NULL;
-            file_note_free(fd);
-        }
-        closed = vf;
-    }
-    spin_unlock_irqrestore(&g_file_lock, flags);
-    if (closed)
-        vfs_finalize_closed_file(fd, closed);
-}
-
 int vfs_ref_fd(int fd)
 {
     if (fd < 0 || fd >= GFILE_MAX)
         return -EBADF;
     uint64_t flags = spin_lock_irqsave(&g_file_lock);
-    vfile_t *vf = g_files[fd];
-    if (!vf) {
+    if (!g_files[fd] || g_file_slot_refs[fd] == ~(uint32_t)0) {
         spin_unlock_irqrestore(&g_file_lock, flags);
         return -EBADF;
     }
-    vfile_get(vf);
+    g_file_slot_refs[fd]++;
     spin_unlock_irqrestore(&g_file_lock, flags);
     return 0;
 }
@@ -236,12 +223,28 @@ int file_close_prepare(int fd, vfile_t **closed)
         return -EBADF;
     }
 
-    if (vfile_put_ref_only(vf)) {
+    if (--g_file_slot_refs[fd] == 0) {
+        a20_eventq_on_vfile_destroy(fd);
         g_files[fd] = NULL;
         file_note_free(fd);
-        if (closed) *closed = vf;
+        if (vfile_put_ref_only(vf) && closed)
+            *closed = vf;
     }
     spin_unlock_irqrestore(&g_file_lock, flags);
+    return 0;
+}
+
+int file_put_ref_prepare(int fd, vfile_t *vf, vfile_t **closed)
+{
+    if (closed)
+        *closed = NULL;
+    (void)fd;
+    if (!vf)
+        return -EBADF;
+    if (vfile_put_ref_only(vf)) {
+        if (closed)
+            *closed = vf;
+    }
     return 0;
 }
 
@@ -253,16 +256,15 @@ int vfs_dupfd(int fd, int minfd)
         spin_unlock_irqrestore(&g_file_lock, flags);
         return -EBADF;
     }
-    vfile_t *vf = g_files[fd];
-    vfile_get(vf);
     int newfd = file_find_free_from(minfd);
     if (newfd >= 0) {
-        g_files[newfd] = vf;
+        g_files[newfd] = g_files[fd];
+        g_file_slot_refs[newfd] = 1;
+        vfile_get(g_files[newfd]);
         file_note_alloc(newfd);
         spin_unlock_irqrestore(&g_file_lock, flags);
         return newfd;
     }
-    vfile_put_ref_only(vf);
     spin_unlock_irqrestore(&g_file_lock, flags);
     return -EMFILE;
 }
@@ -288,6 +290,7 @@ int vfs_dup3(int oldfd, int newfd, int flags)
         return -EBUSY;
     }
     g_files[newfd] = g_files[oldfd];
+    g_file_slot_refs[newfd] = 1;
     vfile_get(g_files[newfd]);
     file_note_alloc(newfd);
     spin_unlock_irqrestore(&g_file_lock, irqflags);

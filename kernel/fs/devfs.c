@@ -70,6 +70,9 @@ typedef struct {
 typedef struct {
     ktty_termios_t termios;
     kwinsize_t winsize;
+    int kbmode;      /* K_XLATE / K_RAW — keyboard mode of the console */
+    int kdmode;      /* KD_TEXT / KD_GRAPHICS — display mode of the console */
+    int vt_process;  /* VT mode: 0 = VT_AUTO, 1 = VT_PROCESS */
 } tty_state_t;
 
 typedef struct {
@@ -103,6 +106,7 @@ static devfs_node_t g_nodes[] = {
     STATIC_NODE(DEVFS_NULL, "cpu_dma_latency", 0x10a),
     STATIC_NODE(DEVFS_TTY, "tty", 0x500),
     STATIC_NODE(DEVFS_TTY, "console", 0x501),
+    STATIC_NODE(DEVFS_TTY, "tty0", 0x400),
     STATIC_NODE(DEVFS_RTC, "rtc", 0xfe00),
     STATIC_NODE(DEVFS_RTC, "rtc0", 0xfe00),
     STATIC_NODE(DEVFS_LOOP, "loop0", 0x700),
@@ -160,6 +164,9 @@ static void init_default_tty_state(tty_state_t *tty) {
     tty->winsize.ws_col = 80;
     tty->winsize.ws_xpixel = 0;
     tty->winsize.ws_ypixel = 0;
+    tty->kbmode = 0x01;    /* K_XLATE */
+    tty->kdmode = 0x00;    /* KD_TEXT */
+    tty->vt_process = 0;   /* VT_AUTO */
 }
 
 static int devfs_stdin_read(vfile_t *vf, char *buf, size_t count) {
@@ -528,26 +535,118 @@ static int devfs_rtc_ioctl(unsigned long req, void *arg) {
     }
 }
 
+/* Linux console (VT/KD) ioctl numbers — asm-generic, same on all archs. */
+#define DEVFS_KDSETMODE    0x4B3A
+#define DEVFS_KDGETMODE    0x4B3B
+#define DEVFS_KDGKBMODE    0x4B44
+#define DEVFS_KDSKBMODE    0x4B45
+#define DEVFS_KDGKBTYPE    0x4B33
+#define DEVFS_KB_101       0x02
+#define DEVFS_VT_OPENQRY   0x5600
+#define DEVFS_VT_GETMODE   0x5601
+#define DEVFS_VT_SETMODE   0x5602
+#define DEVFS_VT_GETSTATE  0x5603
+#define DEVFS_VT_RELDISP   0x5605
+#define DEVFS_VT_ACTIVATE  0x5606
+#define DEVFS_VT_WAITACTIVE 0x5607
+#define DEVFS_TIOCSWINSZ   0x5414
+
+typedef struct __attribute__((packed)) {
+    uint8_t mode;
+    uint8_t waitv;
+    int16_t relsig;
+    int16_t acqsig;
+    int16_t frsig;
+} devfs_vt_mode_t;
+
+typedef struct {
+    uint16_t v_active;
+    uint16_t v_signal;
+    uint16_t v_state;
+} devfs_vt_stat_t;
+
+static int devfs_tty_ioctl(unsigned long req, void *arg) {
+    /* Value-passing requests (no pointer dereference): the argument is the
+     * mode/VT number itself, so NULL is a legitimate value (K_RAW/KD_TEXT). */
+    if (req == DEVFS_KDSKBMODE) {
+        g_dev_tty.kbmode = (int)(uintptr_t)arg;
+        return 0;
+    }
+    if (req == DEVFS_KDSETMODE) {
+        g_dev_tty.kdmode = (int)(uintptr_t)arg;
+        return 0;
+    }
+    if (req == DEVFS_VT_RELDISP || req == DEVFS_VT_ACTIVATE ||
+        req == DEVFS_VT_WAITACTIVE) {
+        return 0;
+    }
+    if (!arg)
+        return -EFAULT;
+    if (req == TCGETS) {
+        if (copy_to_user(arg, &g_dev_tty.termios, sizeof(g_dev_tty.termios)) < 0) return -EFAULT;
+        return 0;
+    }
+    if (req == TCSETS || req == TCSETSW || req == TCSETSF) {
+        ktty_termios_t tio;
+        if (copy_from_user(&tio, arg, sizeof(tio)) < 0) return -EFAULT;
+        g_dev_tty.termios = tio;
+        return 0;
+    }
+    if (req == TIOCGWINSZ) {
+        if (copy_to_user(arg, &g_dev_tty.winsize, sizeof(g_dev_tty.winsize)) < 0) return -EFAULT;
+        return 0;
+    }
+    if (req == DEVFS_TIOCSWINSZ) {
+        kwinsize_t ws;
+        if (copy_from_user(&ws, arg, sizeof(ws)) < 0) return -EFAULT;
+        g_dev_tty.winsize = ws;
+        return 0;
+    }
+    /* ---- console KD/VT ioctls: single-VT semantics ---- */
+    if (req == DEVFS_KDGKBMODE) {
+        if (copy_to_user(arg, &g_dev_tty.kbmode, sizeof(int)) < 0) return -EFAULT;
+        return 0;
+    }
+    if (req == DEVFS_KDGETMODE) {
+        if (copy_to_user(arg, &g_dev_tty.kdmode, sizeof(int)) < 0) return -EFAULT;
+        return 0;
+    }
+    if (req == DEVFS_KDGKBTYPE) {
+        char kbtype = DEVFS_KB_101;
+        if (copy_to_user(arg, &kbtype, sizeof(kbtype)) < 0) return -EFAULT;
+        return 0;
+    }
+    if (req == DEVFS_VT_OPENQRY) {
+        int free_vt = 1;
+        if (copy_to_user(arg, &free_vt, sizeof(free_vt)) < 0) return -EFAULT;
+        return 0;
+    }
+    if (req == DEVFS_VT_GETMODE) {
+        devfs_vt_mode_t vm = {0};
+        vm.mode = (uint8_t)g_dev_tty.vt_process;
+        if (copy_to_user(arg, &vm, sizeof(vm)) < 0) return -EFAULT;
+        return 0;
+    }
+    if (req == DEVFS_VT_SETMODE) {
+        devfs_vt_mode_t vm;
+        if (copy_from_user(&vm, arg, sizeof(vm)) < 0) return -EFAULT;
+        g_dev_tty.vt_process = vm.mode;
+        return 0;
+    }
+    if (req == DEVFS_VT_GETSTATE) {
+        devfs_vt_stat_t vs = {0};
+        vs.v_active = 1;
+        vs.v_state = 1;
+        if (copy_to_user(arg, &vs, sizeof(vs)) < 0) return -EFAULT;
+        return 0;
+    }
+    return -ENOTTY;
+}
+
 static int devfs_ioctl(vfile_t *vf, unsigned long req, void *arg) {
     int kind = (int)(intptr_t)vf->priv;
-    if (kind == DEVFS_TTY) {
-        if (!arg) return -EFAULT;
-        if (req == TCGETS) {
-            if (copy_to_user(arg, &g_dev_tty.termios, sizeof(g_dev_tty.termios)) < 0) return -EFAULT;
-            return 0;
-        }
-        if (req == TCSETS || req == TCSETSW || req == TCSETSF) {
-            ktty_termios_t tio;
-            if (copy_from_user(&tio, arg, sizeof(tio)) < 0) return -EFAULT;
-            g_dev_tty.termios = tio;
-            return 0;
-        }
-        if (req == TIOCGWINSZ) {
-            if (copy_to_user(arg, &g_dev_tty.winsize, sizeof(g_dev_tty.winsize)) < 0) return -EFAULT;
-            return 0;
-        }
-        return -ENOTTY;
-    }
+    if (kind == DEVFS_TTY)
+        return devfs_tty_ioctl(req, arg);
     if (kind == DEVFS_RTC)
         return devfs_rtc_ioctl(req, arg);
     return -ENOTTY;
