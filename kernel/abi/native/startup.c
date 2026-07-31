@@ -54,7 +54,7 @@ int a20_prepare_start_info(task_t *task, const char *init_path,
 
     struct a20_ht_internal *ht = a20_ht_create();
     if (!ht) return -1;
-    task->scratch_buf = ht;
+    __atomic_store_n(&task->scratch_buf, ht, __ATOMIC_RELEASE);
 
     a20_start_info_t info;
     memset(&info, 0, sizeof(info));
@@ -71,10 +71,10 @@ int a20_prepare_start_info(task_t *task, const char *init_path,
 
     info.stdin_handle = (a20_handle_t)install_vfile_handle(
         ht, "/dev/console", O_RDONLY, A20_OBJ_INVALID,
-        A20_RIGHT_READ | A20_RIGHT_DUP);
+        A20_RIGHT_READ | A20_RIGHT_SEEK | A20_RIGHT_DUP);
     if ((int64_t)info.stdin_handle < 0) info.stdin_handle = A20_HANDLE_NULL;
 
-    a20_rights_t write_rights = A20_RIGHT_WRITE | A20_RIGHT_DUP;
+    a20_rights_t write_rights = A20_RIGHT_WRITE | A20_RIGHT_SEEK | A20_RIGHT_DUP;
     info.stdout_handle = (a20_handle_t)install_vfile_handle(
         ht, "/dev/console", O_WRONLY, A20_OBJ_INVALID, write_rights);
     if ((int64_t)info.stdout_handle < 0) info.stdout_handle = A20_HANDLE_NULL;

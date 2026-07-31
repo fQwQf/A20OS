@@ -71,7 +71,10 @@ typedef struct a20_handle_entry {
     uint16_t        _pad;
     a20_rights_t    rights;        /* Declared rights bitmask */
     uint64_t        expiry_tick;   /* Absolute expiry (kernel ticks), 0 = none */
-    uint32_t        remaining_ops; /* Remaining ops, 0 = unlimited */
+    uint32_t        remaining_ops; /* Remaining ops; only meaningful when
+                                    * A20_TEMPORAL_OP_COUNT is set — then
+                                    * 0 = exhausted (rights revoked). With the
+                                    * flag clear the field is ignored (unlimited). */
     uint32_t        temporal_flags;/* A20_TEMPORAL_* flags */
     uint8_t         security_label;/* L=0, M=1, H=2 (Bell-LaPadula) */
     uint8_t         state;         /* a20_handle_state_t */
@@ -148,6 +151,29 @@ typedef struct a20_control_args {
     uint64_t       out_size;
     uint64_t       out_actual;
 } a20_control_args_t;
+
+/* ---- handle_control commands ----
+ * The syscall form is handle_control(handle, op, arg0, arg1).
+ * op 0/1 are file/device ioctl/fcntl pass-through; op 2-4 operate on the
+ * handle entry itself (temporal capability + label management). */
+
+#define A20_HANDLE_CTRL_IOCTL          0u
+#define A20_HANDLE_CTRL_FCNTL          1u
+#define A20_HANDLE_CTRL_SET_TEMPORAL   2u  /* arg0 = a20_handle_temporal_args_t*  */
+#define A20_HANDLE_CTRL_GET_TEMPORAL   3u  /* arg0 = a20_handle_temporal_args_t*  */
+#define A20_HANDLE_CTRL_SET_LABEL      4u  /* arg0 = new label (raise-only)       */
+
+/* Temporal capability control (docs/native-abi/03-handle.md §2.6,
+ * docs/native-abi/06-security.md §6).  SET_TEMPORAL is strengthening-only
+ * (non-refreshability): an existing expiry can only be lowered, an existing
+ * operation count can only be decreased, and set flags cannot be cleared. */
+typedef struct a20_handle_temporal_args {
+    uint32_t       size;
+    uint32_t       version;
+    uint64_t       expiry_ns;      /* absolute CLOCK_MONOTONIC ns; 0 = no expiry */
+    uint32_t       remaining_ops;  /* operation budget when OP_COUNT flag set   */
+    uint32_t       temporal_flags; /* A20_TEMPORAL_*                            */
+} a20_handle_temporal_args_t;
 
 /* ---- I/O structures ---- */
 
@@ -263,7 +289,7 @@ typedef struct a20_spawn_handle {
 
 typedef struct a20_task_spawn_args {
     uint32_t       size;
-    uint32_t       version;
+    uint32_t       version;        /* 1 = 基础布局；2 = 追加 stdio 字段 */
     a20_handle_t   image;
     a20_handle_t   root_dir;
     a20_handle_t   cwd_dir;
@@ -276,7 +302,15 @@ typedef struct a20_task_spawn_args {
     uint32_t       handle_count;
     uint32_t       flags;
     a20_handle_t   out_task;
+    /* ---- version 2 追加（子进程 start_info 的标准 I/O handle） ---- */
+    a20_handle_t   stdin_handle;   /* A20_HANDLE_NULL 表示不继承 */
+    a20_handle_t   stdout_handle;
+    a20_handle_t   stderr_handle;
+    uint32_t       reserved;
 } a20_task_spawn_args_t;
+
+/* v1 结构体大小（含尾部对齐填充）：即 v2 中 stdin_handle 之前的布局。 */
+#define A20_TASK_SPAWN_ARGS_V1_SIZE  72
 
 typedef struct a20_task_status {
     uint32_t       size;
@@ -553,6 +587,23 @@ typedef struct a20_pending_event {
     uint64_t       data0, data1, data2;
 } a20_pending_event_t;
 
+/* ---- Observable event types (docs/native-abi/05-ipc.md §3.3) ----
+ * Event masks are bitsets: mask bit (1ull << A20_EVENT_*) selects the event.
+ * a20_pending_event_t.type carries the event index, .events the bitmask. */
+
+#define A20_EVENT_READABLE        0u   /* file/socket/pipe: data readable   */
+#define A20_EVENT_WRITABLE        1u   /* file/socket/pipe: space writable  */
+#define A20_EVENT_ERROR           2u   /* file/socket: I/O error            */
+#define A20_EVENT_CLOSED          3u   /* object closed                     */
+#define A20_EVENT_CONNECTION      4u   /* socket: new connection arrived    */
+#define A20_EVENT_ACCEPT_READY    5u   /* socket: accept would not block    */
+#define A20_EVENT_EXPIRED         6u   /* timer: expiry fired               */
+#define A20_EVENT_EXITED          7u   /* task/thread: exited               */
+#define A20_EVENT_MESSAGE_READY   8u   /* channel: message available        */
+#define A20_EVENT_PEER_CLOSED     9u   /* channel: peer endpoint closed     */
+
+#define A20_EVENT_MASK(ev)        (1ull << (ev))
+
 typedef struct a20_event_wait_args {
     uint32_t       size;
     uint32_t       version;
@@ -643,11 +694,15 @@ typedef struct a20_msg_recv_args {
     uint32_t       _pad2;
     uint64_t       handle_buf;      /* a20_handle_t[] */
     uint32_t       handle_buf_count;
-    uint32_t       _pad3;
+    uint32_t       flags;           /* A20_MSG_* (was _pad3) */
     uint64_t       out_data_len;
     uint32_t       out_handle_count;
     uint64_t       out_rights_buf;
 } a20_msg_recv_args_t;
+
+/* ---- Message flags (channel_send / channel_recv) ---- */
+
+#define A20_MSG_NONBLOCK   (1u << 0)  /* fail with WOULD_BLOCK instead of sleeping */
 
 /* ---- Network structures ---- */
 
@@ -742,6 +797,45 @@ typedef struct a20_regs {
     uint64_t       sp;
     uint64_t       sr;
 } a20_regs_t;
+
+/* ---- Sync structures ---- */
+
+/* handle_poll：非阻塞就绪查询（对应 POSIX poll() 的查询语义，永不睡眠）。
+ * 阻塞等待仍由 event_queue 承担；handle_poll 只回答"此刻是否就绪"。 */
+
+typedef struct a20_handle_poll_args {
+    uint32_t       size;
+    uint32_t       version;
+    a20_handle_t   handle;
+    uint32_t       flags;         /* 保留，必须为 0 */
+    uint64_t       event_mask;    /* 输入：关注的事件位图（1ull << A20_EVENT_*） */
+    uint64_t       out_events;    /* 输出：当前活跃的事件位图 */
+} a20_handle_poll_args_t;
+
+/* futex 是用户地址上的同步原语，不是内核对象，因此不分配 handle。
+ * 语义与 Zircon zx_futex_wait/zx_futex_wake 对齐：
+ * 原子地比较 *addr == expected，相等则睡眠，否则立即返回 A20_ERR_WOULD_BLOCK。 */
+
+#define A20_TIMEOUT_INFINITE  ((uint64_t)-1)  /* futex_wait 无限等待 */
+
+typedef struct a20_futex_wait_args {
+    uint32_t       size;
+    uint32_t       version;
+    uint64_t       addr;          /* 用户态 32 位 futex 字地址，必须 4 字节对齐 */
+    uint32_t       expected;      /* 期望值 */
+    uint32_t       flags;         /* 保留，必须为 0 */
+    uint64_t       timeout_ns;    /* 相对超时（纳秒），A20_TIMEOUT_INFINITE 表示无限 */
+} a20_futex_wait_args_t;
+
+typedef struct a20_futex_wake_args {
+    uint32_t       size;
+    uint32_t       version;
+    uint64_t       addr;          /* 用户态 32 位 futex 字地址 */
+    uint32_t       count;         /* 最多唤醒的等待者数量，必须 >= 1 */
+    uint32_t       flags;         /* 保留，必须为 0 */
+    uint32_t       out_woken;     /* 输出：实际唤醒数量 */
+    uint32_t       reserved;
+} a20_futex_wake_args_t;
 
 /* ---- System info ---- */
 

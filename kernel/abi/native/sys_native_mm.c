@@ -38,6 +38,8 @@
 #define A20_ARG(n) (args->arg[(n)])
 
 extern struct a20_ht_internal *task_get_a20_ht(task_t *t);
+extern struct a20_ht_internal *task_get_a20_ht_ref(task_t *t);
+extern void a20_ht_put_ref(struct a20_ht_internal *ht);
 extern int64_t a20_handle_install(struct a20_ht_internal *ht, void *object,
                                   uint16_t type, a20_rights_t rights);
 extern int64_t a20_handle_install_temporal(struct a20_ht_internal *ht, void *object,
@@ -45,15 +47,31 @@ extern int64_t a20_handle_install_temporal(struct a20_ht_internal *ht, void *obj
                                            uint64_t expiry_tick, uint32_t remaining_ops,
                                            uint32_t temporal_flags, uint8_t security_label);
 extern int64_t a20_handle_lookup_internal(struct a20_ht_internal *ht, a20_handle_t h,
-                                          uint16_t expected_type, a20_rights_t required_rights,
-                                          a20_handle_entry_t *out);
-extern void a20_handle_remove(struct a20_ht_internal *ht, a20_handle_t h);
+                                           uint16_t expected_type, a20_rights_t required_rights,
+                                           a20_handle_entry_t *out);
+extern int64_t a20_handle_lookup_ref_internal(struct a20_ht_internal *ht,
+                                               a20_handle_t h,
+                                               uint16_t expected_type,
+                                               a20_rights_t required_rights,
+                                               a20_handle_entry_t *out);
+extern int64_t a20_handle_remove(struct a20_ht_internal *ht, a20_handle_t h);
+extern void a20_object_ref(void *object, uint16_t type);
+extern void a20_object_release(void *object, uint16_t type);
+
 extern uint8_t a20_ht_get_label(struct a20_ht_internal *ht);
 extern void a20_ht_set_label(struct a20_ht_internal *ht, uint8_t label);
 
 extern int copy_path_from_user(char *dst, const char *uptr, uint32_t len);
 extern void resolve_path(const char *in, char *out);
 extern int64_t sys_a20_path_open(const a20_syscall_args_t *args);
+
+static int a20_mm_user_range_ok(uint64_t va, size_t n)
+{
+    va = (uint64_t)(vaddr_t)va;
+    if (n == 0) return 1;
+    if (va >= USER_VA_LIMIT) return 0;
+    return n <= USER_VA_LIMIT - va;
+}
 
 /* ===== Memory (0x0300) continued ===== */
 
@@ -66,6 +84,23 @@ int64_t sys_a20_vm_protect(const a20_syscall_args_t *args)
     return a20_vmar_protect(addr, len, prot);
 }
 
+/*
+ * prot_eff — requested protection intersected with the handle's rights
+ * (docs/native-abi/04-memory.md §4.2: prot_eff = prot_req ∩ prot_handle).
+ */
+static uint32_t a20_vm_prot_eff(uint32_t prot, a20_rights_t rights)
+{
+    uint32_t eff = 0;
+    if ((prot & A20_PROT_READ) && (rights & A20_RIGHT_READ))
+        eff |= A20_PROT_READ;
+    if ((prot & A20_PROT_WRITE) && (rights & A20_RIGHT_WRITE))
+        eff |= A20_PROT_WRITE;
+    /* No EXEC right exists for MEMORY/FILE handles; EXEC passes through. */
+    if (prot & A20_PROT_EXEC)
+        eff |= A20_PROT_EXEC;
+    return eff;
+}
+
 int64_t sys_a20_vm_map(const a20_syscall_args_t *args)
 {
     a20_vm_map_args_t *uargs = (a20_vm_map_args_t *)A20_ARG(0);
@@ -76,21 +111,118 @@ int64_t sys_a20_vm_map(const a20_syscall_args_t *args)
 
     if (kargs.length == 0) return -A20_ERR_INVALID_ARGUMENT;
 
-    struct a20_vmo *vmo = a20_vmo_create(A20_VMO_ANONYMOUS, kargs.length, 0);
-    if (!vmo) return -A20_ERR_NO_MEMORY;
+    struct a20_vmo *vmo = NULL;
+    uint32_t prot_eff = kargs.prot;
+    uint64_t map_offset = 0;
+    int owned_vmo = 0;
+    a20_handle_entry_t src;
+    int src_ref = 0;
+    int64_t r = A20_OK;
 
-    uint64_t addr = 0;
-    int64_t r = a20_vmar_map(vmo, 0, kargs.length, kargs.prot,
-                              kargs.flags, kargs.addr_hint, &addr);
-    if (r < 0) {
-        a20_vmo_release(vmo);
-        return r;
+    if (kargs.source != A20_HANDLE_NULL) {
+        task_t *cur = proc_current();
+        struct a20_ht_internal *ht = task_get_a20_ht(cur);
+        if (!ht) return -A20_ERR_BAD_HANDLE;
+
+        r = a20_handle_lookup_ref_internal(ht, kargs.source,
+                                           A20_OBJ_INVALID,
+                                           A20_RIGHT_MAP, &src);
+        if (r < 0) return r;
+        src_ref = 1;
+
+        if (src.type == A20_OBJ_MEMORY) {
+            /* Map an existing VMO: shared pages, prot intersected with the
+             * handle's rights. */
+            vmo = (struct a20_vmo *)src.object;
+            if (kargs.offset >= vmo->size ||
+                kargs.length > vmo->size - kargs.offset) {
+                r = -A20_ERR_INVALID_ARGUMENT;
+                goto out_src;
+            }
+            map_offset = kargs.offset;
+            prot_eff = a20_vm_prot_eff(kargs.prot, src.rights);
+        } else if (src.type == A20_OBJ_FILE || src.type == A20_OBJ_DEVICE) {
+            /* File-backed mapping (eager load): read the file region into a
+             * new VMO and map it.  COW/demand paging is future work. */
+            if (!(src.rights & A20_RIGHT_READ)) {
+                r = -A20_ERR_ACCESS;
+                goto out_src;
+            }
+            prot_eff = a20_vm_prot_eff(kargs.prot, src.rights);
+            vmo = a20_vmo_create(A20_VMO_ANONYMOUS, kargs.length, 0);
+            if (!vmo) {
+                r = -A20_ERR_NO_MEMORY;
+                goto out_src;
+            }
+            owned_vmo = 1;
+
+            int gfd = (int)(uintptr_t)src.object;
+            if (kargs.offset > 0 &&
+                vfs_lseek(gfd, (long)kargs.offset, SEEK_SET) < 0) {
+                r = -A20_ERR_INVALID_ARGUMENT;
+                goto out_vmo;
+            }
+            uint64_t done = 0;
+            while (done < kargs.length) {
+                uint32_t page_idx = (uint32_t)(done / 4096);
+                uint32_t page_off = (uint32_t)(done % 4096);
+                size_t chunk = 4096 - page_off;
+                if (chunk > kargs.length - done)
+                    chunk = (size_t)(kargs.length - done);
+                pfn_t pfn = a20_vmo_get_page(vmo, page_idx);
+                if (pfn == PFN_NONE) {
+                    r = -A20_ERR_NO_MEMORY;
+                    goto out_vmo;
+                }
+                vfile_t *vf = vfs_get_file_ref(gfd);
+                if (!vf) {
+                    r = -A20_ERR_BAD_HANDLE;
+                    goto out_vmo;
+                }
+                int64_t n = vfs_read_file(vf, (char *)pfn_to_virt(pfn) + page_off,
+                                          chunk);
+                vfs_put_file_ref(gfd, vf);
+                if (n < 0) {
+                    r = -A20_ERR_IO;
+                    goto out_vmo;
+                }
+                done += (uint64_t)n;
+                if ((size_t)n < chunk)
+                    break; /* EOF: rest of the VMO stays zero-filled */
+            }
+        } else {
+            r = -A20_ERR_INVALID_ARGUMENT;
+            goto out_src;
+        }
+    } else {
+        vmo = a20_vmo_create(A20_VMO_ANONYMOUS, kargs.length, 0);
+        if (!vmo) return -A20_ERR_NO_MEMORY;
+        owned_vmo = 1;
     }
 
+    uint64_t addr = 0;
+    r = a20_vmar_map(vmo, map_offset, kargs.length, prot_eff,
+                     kargs.flags, kargs.addr_hint, &addr);
+    if (owned_vmo)
+        a20_vmo_release(vmo);
+    if (src_ref)
+        a20_object_release(src.object, src.type);
+    if (r < 0) return r;
+
     kargs.out_addr = addr;
-    if (copy_to_user(uargs, &kargs, sizeof(kargs)) < 0)
+    if (a20_copy_struct_to_user(uargs, &kargs, sizeof(kargs)) < 0) {
+        a20_vmar_unmap(addr, kargs.length);
         return -A20_ERR_FAULT;
+    }
     return A20_OK;
+
+out_vmo:
+    if (owned_vmo)
+        a20_vmo_release(vmo);
+out_src:
+    if (src_ref)
+        a20_object_release(src.object, src.type);
+    return r;
 }
 
 int64_t sys_a20_vm_share(const a20_syscall_args_t *args)
@@ -104,30 +236,43 @@ int64_t sys_a20_vm_share(const a20_syscall_args_t *args)
     if (!ht) return -A20_ERR_BAD_HANDLE;
 
     a20_handle_entry_t vmo_entry;
-    int64_t r = a20_handle_lookup_internal(ht, vmo_h, A20_OBJ_MEMORY,
-                                            A20_RIGHT_READ | A20_RIGHT_TRANSFER, &vmo_entry);
+    int64_t r = a20_handle_lookup_ref_internal(ht, vmo_h, A20_OBJ_MEMORY,
+                                               A20_RIGHT_READ | A20_RIGHT_TRANSFER,
+                                               &vmo_entry);
     if (r < 0) return r;
 
+    task_t *target_task = NULL;
+    struct a20_ht_internal *target_ht = ht;
     if (target_h != A20_HANDLE_NULL) {
         a20_handle_entry_t tgt_entry;
         r = a20_handle_lookup_internal(ht, target_h, A20_OBJ_TASK,
-                                        A20_RIGHT_WRITE, &tgt_entry);
-        if (r < 0) return r;
+                                       A20_RIGHT_CONTROL, &tgt_entry);
+        if (r < 0) goto out_vmo;
 
-        if (tgt_entry.security_label > vmo_entry.security_label)
-            return -A20_ERR_ACCESS;
+        target_task = proc_find_get((int)(uintptr_t)tgt_entry.object);
+        if (!target_task) {
+            r = -A20_ERR_BAD_HANDLE;
+            goto out_vmo;
+        }
+        target_ht = task_get_a20_ht_ref(target_task);
+        if (!target_ht) {
+            proc_put(target_task);
+            r = -A20_ERR_BAD_HANDLE;
+            goto out_vmo;
+        }
     }
 
-    a20_handle_entry_t tgt;
-    if (target_h != A20_HANDLE_NULL) {
-        r = a20_handle_lookup_internal(ht, target_h, A20_OBJ_TASK,
-                                        A20_RIGHT_DUP, &tgt);
-        if (r < 0) return r;
+    /* Bell-LaPadula No Read Up for either the current or target process. */
+    if (a20_ht_get_label(target_ht) < vmo_entry.security_label) {
+        r = -A20_ERR_ACCESS;
+        goto out_target;
     }
 
-    struct a20_ht_internal *target_ht = ht;
     a20_rights_t child_rights = rights & vmo_entry.rights;
-    if (child_rights == 0) return -A20_ERR_ACCESS;
+    if (child_rights == 0) {
+        r = -A20_ERR_ACCESS;
+        goto out_target;
+    }
 
     int64_t new_h = a20_handle_install_temporal(target_ht, vmo_entry.object,
                                                 vmo_entry.type, child_rights,
@@ -135,8 +280,23 @@ int64_t sys_a20_vm_share(const a20_syscall_args_t *args)
                                                 vmo_entry.remaining_ops,
                                                 vmo_entry.temporal_flags,
                                                 vmo_entry.security_label);
-    return new_h;
+    if (new_h < 0) {
+        r = new_h;
+        goto out_target;
+    }
+    a20_object_ref(vmo_entry.object, vmo_entry.type);
+    r = new_h;
+
+out_target:
+    if (target_task) {
+        a20_ht_put_ref(target_ht);
+        proc_put(target_task);
+    }
+out_vmo:
+    a20_object_release(vmo_entry.object, vmo_entry.type);
+    return r;
 }
+
 
 int64_t sys_a20_vm_flush(const a20_syscall_args_t *args)
 {
@@ -214,25 +374,43 @@ int64_t sys_a20_vm_remap(const a20_syscall_args_t *args)
     uint64_t new_addr_hint = A20_ARG(4);
 
     if (old_len == 0 && new_len == 0) return -A20_ERR_INVALID_ARGUMENT;
+    if (new_len > (256ULL << 20) || old_len > (256ULL << 20))
+        return -A20_ERR_INVALID_ARGUMENT;
 
     if (new_len <= old_len) {
+        if (!a20_mm_user_range_ok(old_addr, (size_t)old_len))
+            return -A20_ERR_FAULT;
         if (new_len < old_len)
             proc_munmap(old_addr + new_len, (size_t)(old_len - new_len));
         return (int64_t)old_addr;
     }
+
+    if (!a20_mm_user_range_ok(old_addr, (size_t)old_len))
+        return -A20_ERR_FAULT;
 
     uint64_t new_addr = proc_mmap(new_addr_hint, (size_t)new_len,
                                    (int)prot ? (int)prot : 3,
                                    0x20 /* MAP_ANONYMOUS */, -1, 0);
     if (new_addr == 0) return -A20_ERR_NO_MEMORY;
 
-    if (old_len > 0) {
-        memcpy((void *)new_addr, (const void *)old_addr, (size_t)old_len);
-        proc_munmap(old_addr, (size_t)old_len);
+    char kbuf[512];
+    uint64_t done = 0;
+    while (done < old_len) {
+        size_t chunk = old_len - done;
+        if (chunk > sizeof(kbuf)) chunk = sizeof(kbuf);
+        if (copy_from_user(kbuf, (const void *)(old_addr + done), chunk) < 0 ||
+            copy_to_user((void *)(new_addr + done), kbuf, chunk) < 0) {
+            proc_munmap(new_addr, (size_t)new_len);
+            return -A20_ERR_FAULT;
+        }
+        done += chunk;
     }
+    if (old_len > 0)
+        proc_munmap(old_addr, (size_t)old_len);
 
     return (int64_t)new_addr;
 }
+
 
 int64_t sys_a20_vm_lock(const a20_syscall_args_t *args)
 {
@@ -274,7 +452,7 @@ int64_t sys_a20_vm_create_object(const a20_syscall_args_t *args)
 
     int64_t h = a20_handle_install(ht, vmo, A20_OBJ_MEMORY,
                                     A20_RIGHT_READ | A20_RIGHT_WRITE |
-                                    A20_RIGHT_STAT | A20_RIGHT_DUP |
+                                    A20_RIGHT_MAP | A20_RIGHT_STAT | A20_RIGHT_DUP |
                                     A20_RIGHT_TRANSFER | A20_RIGHT_CONTROL);
     if (h < 0) a20_vmo_release(vmo);
     return h;

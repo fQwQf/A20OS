@@ -50,6 +50,7 @@ typedef struct proc_cred {
 #define CAP_SETUID           7
 #define CAP_SETPCAP          8
 #define CAP_SYS_CHROOT       18
+#define CAP_SYS_PTRACE       19
 #define CAP_SYS_ADMIN        21
 #define CAP_SYS_RESOURCE     24
 #define CAP_NET_RAW          13
@@ -308,6 +309,8 @@ int      proc_sched_safe_point(void);
 task_t  *proc_get(task_t *task);
 void     proc_put(task_t *task);
 task_t  *proc_find_get(int pid);
+mm_struct_t *proc_task_get_mm(task_t *task);
+int proc_task_may_access(const task_t *caller, const task_t *target);
 int      proc_pid_max(void);
 int      proc_set_pid_max(int value);
 void     proc_get_vm_stats(proc_vm_stats_t *stats);
@@ -322,7 +325,7 @@ int      proc_alloc_user_image(uintptr_t entry, vaddr_t sp, pt_root_t *pgdir,
                           , void **nommu_allocs, const size_t *nommu_alloc_sizes,
                           const uint8_t *nommu_alloc_types, int num_nommu_allocs
 #endif
-                          );
+                          , int defer_ready);
 void     proc_free_pid(int pid);
 void     proc_exit(int exit_code) NORETURN;
 void     proc_exit_group(int exit_code) NORETURN;
@@ -338,6 +341,7 @@ void     sched(void);
 void     context_switch(task_t *next);
 uint64_t proc_next_timer_interval(uint64_t now);
 void     proc_set_alarm_expire(task_t *t, uint64_t alarm_expire);
+void     sched_note_timer_deadline(uint64_t deadline);
 void     proc_dump(void);
 int      proc_kill(int pid, int signum);
 int      proc_kill_pgid(int pgid, int signum, int skip_self);
@@ -355,6 +359,10 @@ int      proc_munmap(vaddr_t addr, size_t len);
 
 /* Clone (fork-like) */
 int      proc_clone(uint64_t flags, vaddr_t stack, int *ptid, vaddr_t tls, int *ctid, int exit_signal);
+
+/* Native ABI thread creation: shares address space / fd table / handle table,
+ * starts at `entry` with `arg` in the first argument register. */
+int      proc_create_thread(uint64_t entry, uint64_t arg, vaddr_t sp, vaddr_t tls);
 
 task_t *proc_first_task_locked(void);
 task_t *proc_next_task_locked(task_t *t);

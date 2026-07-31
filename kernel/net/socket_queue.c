@@ -18,7 +18,7 @@ void net_msg_free(net_msg_t *m)
     if (!m)
         return;
     for (int i = 0; i < m->scm_nfiles; i++)
-        vfile_put_ref_only(m->scm_files[i]);
+        vfs_put_file(m->scm_files[i]);
     m->scm_nfiles = 0;
     obj_cache_free(&g_net_msg_cache, m);
 }
@@ -28,7 +28,7 @@ void net_scm_drop_files(vfile_t **files, int nfiles)
     if (!files)
         return;
     for (int i = 0; i < nfiles; i++)
-        vfile_put_ref_only(files[i]);
+        vfs_put_file(files[i]);
 }
 
 int net_enqueue_msg_locked_meta(net_socket_t *dst, const void *buf, size_t len,

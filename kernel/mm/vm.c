@@ -467,6 +467,13 @@ mm_struct_t *mm_create(void) {
     ktrace_mm("[MMDBG] mm=%p lock=%p\n", (void *)mm, (void *)&mm->lock);
     return mm;
 }
+
+mm_struct_t *mm_get(mm_struct_t *mm) {
+    if (!mm || !refcount_inc_not_zero(&mm->refcount))
+        return NULL;
+    return mm;
+}
+
 // 释放 VMA 对应的物理页面
 static void free_vma_pages(mm_struct_t *mm, vm_area_t *vma)
 {

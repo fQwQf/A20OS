@@ -100,7 +100,7 @@ $$\pi = \sigma_0 \xrightarrow{op_1} \sigma_1 \xrightarrow{op_2} \cdots \xrightar
 **类别 N：调试操作**（debug_attach, debug_read_regs, debug_write_regs）
 - 只读或修改寄存器状态，不修改 handle table。$\mathcal{I}$ 保持。
 
-**穷举性论证**：以上 14 个类别（A-N）覆盖了全部 53 个 syscall。每个 syscall 属于且仅属于一个类别。新增 SOS 规则（H-REPLACE, H-CLOSE-MANY, T-THREAD-CREATE, O-DESTROY）已纳入相应类别。因此归纳步的 case analysis 是穷举的。
+**穷举性论证（形式化核心边界）**：以上 14 个类别（A-N）覆盖 02 文档定义的全部 53 个**形式化核心 syscall**。每个核心 syscall 属于且仅属于一个类别。新增 SOS 规则（H-REPLACE, H-CLOSE-MANY, T-THREAD-CREATE, O-DESTROY）已纳入相应类别，因此对该 53-syscall 子集的归纳 case analysis 是穷举的。当前内核分发表有 93 个入口；新增 40 个工程 syscall 尚未全部加入本分类，故本结论不得外推为“现行实现 93 个 syscall 已穷举证明”。
 
 由数学归纳，$\pi$ 是安全的。$\square$
 

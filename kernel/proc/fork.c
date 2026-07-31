@@ -9,6 +9,9 @@
 #include "mm/mm.h"
 #include "mm/vm.h"
 #include "sys/usercopy.h"
+#if defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)
+#include "abi/native/handle_table.h"
+#endif
 
 static int proc_copy_to_task_user(task_t *task, void *dst, const void *src, size_t n)
 {
@@ -107,8 +110,8 @@ fail:
 }
 #endif
 
-int proc_clone(uint64_t flags, vaddr_t stack, int *ptid, vaddr_t tls, int *ctid,
-                int exit_signal)
+static int proc_clone_impl(uint64_t flags, vaddr_t stack, int *ptid, vaddr_t tls, int *ctid,
+                 int exit_signal, task_t **out_task)
 {
     task_t *parent = proc_current();
 #ifdef CONFIG_AARCH64_COOPERATIVE_BOOT
@@ -137,6 +140,7 @@ int proc_clone(uint64_t flags, vaddr_t stack, int *ptid, vaddr_t tls, int *ctid,
     }
     int child_pid = t->pid;
     proc_task_init_common(t, parent);
+    t->abi_mode = parent ? parent->abi_mode : 0;
     if (parent && parent->sched_reset_on_fork) {
         if (parent->sched_policy == SCHED_FIFO || parent->sched_policy == SCHED_RR) {
             t->sched_policy = SCHED_NORMAL;
@@ -190,6 +194,20 @@ int proc_clone(uint64_t flags, vaddr_t stack, int *ptid, vaddr_t tls, int *ctid,
         t->signals = parent->signals;
         refcount_inc(&((signal_state_t *)t->signals)->refcount);
     }
+
+    /*
+     * Native ABI: the handle table is process-local (docs/native-abi/03-handle.md
+     * §2), so threads share it and hold one reference each.
+     */
+#if defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)
+    if ((flags & CLONE_THREAD) && parent && parent->abi_mode == 1 &&
+        parent->scratch_buf) {
+        __atomic_store_n(
+            &t->scratch_buf,
+            a20_ht_get_ref((struct a20_ht_internal *)parent->scratch_buf),
+            __ATOMIC_RELEASE);
+    }
+#endif
 
     if (parent->pgdir) {
         if (parent->mm && (flags & CLONE_VM)) {
@@ -312,6 +330,16 @@ int proc_clone(uint64_t flags, vaddr_t stack, int *ptid, vaddr_t tls, int *ctid,
         }
     }
 
+    /*
+     * Deferred-ready path (native thread creation): the caller finalizes the
+     * child's trap frame (entry PC, argument register) and then calls
+     * proc_make_ready() itself.  Never combined with CLONE_VFORK.
+     */
+    if (out_task) {
+        *out_task = t;
+        return child_pid;
+    }
+
     proc_make_ready(t);
 #ifdef CONFIG_AARCH64_COOPERATIVE_BOOT
     kinfo("[PROC] clone runnable: child=%d kstack=0x%lx\n",
@@ -330,4 +358,31 @@ int proc_clone(uint64_t flags, vaddr_t stack, int *ptid, vaddr_t tls, int *ctid,
         proc_put(vfork_child_ref);
     }
     return child_pid;
+}
+
+int proc_clone(uint64_t flags, vaddr_t stack, int *ptid, vaddr_t tls, int *ctid,
+                 int exit_signal)
+{
+    return proc_clone_impl(flags, stack, ptid, tls, ctid, exit_signal, NULL);
+}
+
+/*
+ * Native ABI thread creation: the new thread shares the caller's address
+ * space, fd table, signal handlers and (for native tasks) handle table, and
+ * starts executing at `entry` with `arg` in the first argument register.
+ */
+int proc_create_thread(uint64_t entry, uint64_t arg, vaddr_t sp, vaddr_t tls)
+{
+    task_t *t = NULL;
+    uint64_t flags = CLONE_VM | CLONE_FILES | CLONE_SIGHAND |
+                     CLONE_THREAD | CLONE_SETTLS;
+    int pid = proc_clone_impl(flags, sp, NULL, tls, NULL, 0, &t);
+    if (pid < 0 || !t)
+        return pid < 0 ? pid : -ENOMEM;
+
+    trap_context_t *tc = t->trap_ctx;
+    TRAP_CTX_EPC(tc) = entry;
+    TRAP_CTX_SET_ARG0(tc, arg);
+    proc_make_ready(t);
+    return pid;
 }

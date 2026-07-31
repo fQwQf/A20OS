@@ -58,6 +58,10 @@
 	path = user/external/mksh-cvs2git
 	url = https://github.com/fQwQf/mksh-cvs2git.git
 
+[submodule "user/external/mlibc"]
+	path = user/external/mlibc
+	url = https://github.com/fQwQf/mlibc.git
+
 [submodule "user/external/musl"]
 	path = user/external/musl
 	url = https://github.com/fQwQf/musl.git
