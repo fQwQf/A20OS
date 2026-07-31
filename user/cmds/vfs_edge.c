@@ -94,6 +94,117 @@ static int fail(const char *what)
     return 1;
 }
 
+#ifndef SYS_ioctl
+#define SYS_ioctl 29
+#endif
+
+#define EDGE_KDSETMODE    0x4B3A
+#define EDGE_KDGETMODE    0x4B3B
+#define EDGE_KDGKBMODE    0x4B44
+#define EDGE_KDSKBMODE    0x4B45
+#define EDGE_KDGKBTYPE    0x4B33
+#define EDGE_VT_OPENQRY   0x5600
+#define EDGE_VT_GETMODE   0x5601
+#define EDGE_VT_SETMODE   0x5602
+#define EDGE_VT_GETSTATE  0x5603
+#define EDGE_VT_ACTIVATE  0x5606
+#define EDGE_VT_WAITACTIVE 0x5607
+#define EDGE_KD_TEXT      0x00
+#define EDGE_KD_GRAPHICS  0x01
+#define EDGE_K_XLATE      0x01
+#define EDGE_K_RAW        0x00
+
+struct edge_vt_mode {
+    char mode;
+    char waitv;
+    short relsig;
+    short acqsig;
+    short frsig;
+};
+
+struct edge_vt_stat {
+    unsigned short v_active;
+    unsigned short v_signal;
+    unsigned short v_state;
+};
+
+/* /dev/tty0 exposes single-VT console ioctls so display servers (weston)
+ * can switch the console to graphics/raw mode without patching userspace. */
+static int tty0_console_ioctls(void)
+{
+    int fd = open("/dev/tty0", O_RDWR | O_NONBLOCK);
+    if (fd < 0)
+        return fail("tty0-open");
+
+    int mode = -1;
+    if (syscall(SYS_ioctl, fd, EDGE_KDGKBMODE, &mode) < 0 || mode != EDGE_K_XLATE) {
+        close(fd);
+        return fail("tty0-kdgkbmode");
+    }
+    if (syscall(SYS_ioctl, fd, EDGE_KDSKBMODE, EDGE_K_RAW) < 0) {
+        close(fd);
+        return fail("tty0-kdskbmode-raw");
+    }
+    mode = -1;
+    if (syscall(SYS_ioctl, fd, EDGE_KDGKBMODE, &mode) < 0 || mode != EDGE_K_RAW) {
+        close(fd);
+        return fail("tty0-kdgkbmode-raw");
+    }
+
+    if (syscall(SYS_ioctl, fd, EDGE_KDSETMODE, EDGE_KD_GRAPHICS) < 0) {
+        close(fd);
+        return fail("tty0-kdsetmode-gfx");
+    }
+    mode = -1;
+    if (syscall(SYS_ioctl, fd, EDGE_KDGETMODE, &mode) < 0 || mode != EDGE_KD_GRAPHICS) {
+        close(fd);
+        return fail("tty0-kdgetmode-gfx");
+    }
+    if (syscall(SYS_ioctl, fd, EDGE_KDSETMODE, EDGE_KD_TEXT) < 0) {
+        close(fd);
+        return fail("tty0-kdsetmode-text");
+    }
+
+    char kbtype = 0;
+    if (syscall(SYS_ioctl, fd, EDGE_KDGKBTYPE, &kbtype) < 0 || kbtype != 0x02) {
+        close(fd);
+        return fail("tty0-kdgkbtype");
+    }
+
+    int free_vt = 0;
+    if (syscall(SYS_ioctl, fd, EDGE_VT_OPENQRY, &free_vt) < 0 || free_vt != 1) {
+        close(fd);
+        return fail("tty0-vt-openqry");
+    }
+    struct edge_vt_mode vm;
+    memset(&vm, 0, sizeof(vm));
+    if (syscall(SYS_ioctl, fd, EDGE_VT_GETMODE, &vm) < 0) {
+        close(fd);
+        return fail("tty0-vt-getmode");
+    }
+    vm.mode = 1; /* VT_PROCESS */
+    if (syscall(SYS_ioctl, fd, EDGE_VT_SETMODE, &vm) < 0) {
+        close(fd);
+        return fail("tty0-vt-setmode");
+    }
+    struct edge_vt_stat vs;
+    memset(&vs, 0, sizeof(vs));
+    if (syscall(SYS_ioctl, fd, EDGE_VT_GETSTATE, &vs) < 0 || vs.v_active != 1) {
+        close(fd);
+        return fail("tty0-vt-getstate");
+    }
+    if (syscall(SYS_ioctl, fd, EDGE_VT_ACTIVATE, 1) < 0) {
+        close(fd);
+        return fail("tty0-vt-activate");
+    }
+    if (syscall(SYS_ioctl, fd, EDGE_VT_WAITACTIVE, 1) < 0) {
+        close(fd);
+        return fail("tty0-vt-waitactive");
+    }
+    close(fd);
+    return 0;
+}
+
 static int openat2_beneath(void)
 {
     const char *dir = "/tmp/vfs_edge_beneath";
@@ -658,6 +769,8 @@ int main(void)
 {
     printf("VFS_EDGE: start\n");
     mkdir("/tmp", 0755);
+    if (tty0_console_ioctls() != 0)
+        return 1;
     if (openat2_beneath() != 0)
         return 1;
     if (openat2_beneath_symlink_escape() != 0)

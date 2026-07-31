@@ -69,7 +69,7 @@ typedef struct a20_handle_entry {
     a20_rights_t      rights;    /* 该 handle 的声明权限位域 */
     // 时态能力字段（temporal capability）
     uint64_t          expiry_tick;    /* 绝对过期时刻（kernel ticks），0 = 无时间过期 */
-    uint32_t          remaining_ops;  /* 剩余操作次数，0 = 无限次（不是"已耗尽"） */
+    uint32_t          remaining_ops;  /* OP_COUNT 置位时 0 = 已耗尽；未置位时忽略 */
     uint32_t          temporal_flags; /* 时态标志位 */
 } a20_handle_entry_t;
 
@@ -98,7 +98,7 @@ typedef struct a20_handle_table {
 
 ### 2.3 设计决策
 
-**动态数组 vs 红黑树**：A20OS 的 handle 编号是连续 `uint32_t`。动态数组提供 O(1) 的 lookup 和 close，而树的 lookup 是 O(log n)。在 65536 个 handle 上限下，数组占用约 65536 × 24 bytes ≈ 1.5 MB。
+**动态数组 vs 红黑树**：A20OS 的 handle 编号是连续 `uint32_t`。动态数组提供 O(1) 的 lookup 和 close，而树的 lookup 是 O(log n)。当前 64 位布局中 `a20_handle_entry_t` 为 48 bytes（含 16-byte 时态字段与标签/状态），在 65536 个 handle 上限下条目数组约占 3 MB，另有 bitmap 与表结构开销；实际占用应纳入 05 的评估。
 
 **Free bitmap 的作用**：Free slot 查找在纯数组上是 O(n)。Bitmap 将其优化为 O(n/64) 的 word 级扫描，配合 `free_hint` 记录上次释放的位置，实际接近 O(1)。
 
@@ -167,7 +167,7 @@ A20OS 的 handle 条目支持**时态约束**——权限可以在时间或操�
 
 Handle 的有效权限是声明权限的时态投影：
 
-$$\rho_{eff}(h, t) = \begin{cases} \rho(h) & \text{if } expiry(h) = 0 \text{ or } t < expiry(h) \text{, and } remaining(h) \neq 0 \\ \emptyset & \text{otherwise} \end{cases}$$
+$$\rho_{eff}(h, t) = \begin{cases} \rho(h) & \text{if } (\neg EXP(h) \lor expiry(h)=0 \lor t<expiry(h)) \land (\neg OP(h) \lor remaining(h)>0) \\ \emptyset & \text{otherwise} \end{cases}$$
 
 所有 syscall 的权限检查统一使用 $\rho_{eff}$ 而非声明权限 $\rho$。
 
@@ -191,14 +191,30 @@ Handle 过期后有两种行为模式：
 
 #### 2.6.4 Sweeper 机制
 
-内核维护一个后台 sweeper，定期扫描 handle table 中设置了 `A20_TEMPORAL_EXPIRY_ABSOLUTE | A20_TEMPORAL_AUTO_CLOSE` 的条目：
+所有活跃的 handle table 在内核中注册于一个全局注册表。Sweeper 以 **deadline 驱动**的方式周期运行（节奏约 `A20_SWEEP_INTERVAL_TICKS` = 100ms）：`SET_TEMPORAL` 在设置约束时登记下一个扫描 deadline，每次扫描后续期下一个 deadline（`sched_note_timer_deadline`），扫描在 `sched()` 上下文执行，不依赖任何 per-task alarm，也不会向任务投递信号。
+
+每个扫描周期内 sweeper 遍历全部 handle table：
 
 1. 获取 `ht->lock`
-2. 检查 `current_tick ≥ entry.expiry_tick`
-3. 若已过期，执行 `handle_close` 的效果（清空 entry、递减 refcount、释放 bitmap bit）
+2. 检查 `current_tick ≥ entry.expiry_tick`（或 `OP_COUNT` 预算耗尽）
+3. 过期条目按 `temporal_flags` 处理：未设 `AUTO_CLOSE` 转为 `EXPIRED`；设 `AUTO_CLOSE` 的条目摘下 slot 并在**锁外**按对象类型释放（channel 端点触发 `peer_closed`，eventq/VMO/timer/namespace 释放，vfile 关闭 fd）
 4. 释放锁
 
 Sweeper 与正常操作的竞争通过同一把 `ht->lock` 串行化，保证过期原子性（定理 3.3，见 09 §3.6）。
+
+#### 2.6.5 时态约束的用户态入口
+
+时态约束通过 `handle_control` 设置与查询（`kernel/abi/native/sys_native_fs.c`）：
+
+| op | 名称 | 参数 | 语义 |
+|---|---|---|---|
+| 2 | `A20_HANDLE_CTRL_SET_TEMPORAL` | arg0 = `a20_handle_temporal_args_t*` | 设置时态约束，**仅可增强**：flag 只能添加不能清除；已有 `expiry` 只能提前不能延后；已有 `remaining_ops` 只能减少不能增加；违反返回 `A20_ERR_ACCESS` |
+| 3 | `A20_HANDLE_CTRL_GET_TEMPORAL` | arg0 = `a20_handle_temporal_args_t*` | 查询当前时态参数 |
+| 4 | `A20_HANDLE_CTRL_SET_LABEL` | arg0 = 新标签（0/1/2） | 上调 handle 条目的 Bell-LaPadula 标签（仅可上调） |
+
+用户态 ABI 中 `expiry_ns` 以 `CLOCK_MONOTONIC` 纳秒表示（0 = 无过期）；内核条目内部以 tick 存储。`remaining_ops` 仅在 `A20_TEMPORAL_OP_COUNT` 置位时有意义，此时 **0 表示已耗尽**（$ho_{eff} = \emptyset$）；flag 未置位时该字段被忽略（即"无限"由 flag 缺省表达，而非特殊值 0）。
+
+Channel 传递、dup、replace、spawn 转移、`vm_share` 都继承源 handle 的时态参数与安全标签——任何路径都不能刷新约束（§6.4 不可刷新性的完整实现）。
 
 ---
 
@@ -386,9 +402,9 @@ L0 (IRQ) < L1 (handle table) < L2 (内核对象) < L3 (调度器) < L4 (mm)
 | 0x0106 | `handle_transfer` | `int64_t handle_transfer(a20_transfer_args_t *args)` | 内核缓冲拷贝传输（splice/sendfile/copy_file_range 语义统一；当前为 4 KiB 栈缓冲拷贝，非零拷贝） |
 | 0x0107 | `handle_set_meta` | `int64_t handle_set_meta(a20_handle_t h, uint32_t flags, uint64_t val0, uint64_t val1)` | 修改文件元数据（chmod/chown，当前仅支持 mode/owner） |
 | 0x0108 | `handle_xattr_set` | `int64_t handle_xattr_set(a20_handle_t h, const char *name, const void *value, uint64_t size)` | 设置扩展属性 |
-| 0x0109 | `handle_xattr_get` | `int64_t handle_xattr_get(a20_xattr_args_t *args)` | 获取扩展属性 |
-| 0x010A | `handle_xattr_list` | `int64_t handle_xattr_list(a20_xattr_list_args_t *args)` | 列出扩展属性名 |
-| 0x010B | `handle_xattr_remove` | `int64_t handle_xattr_remove(a20_xattr_args_t *args)` | 删除扩展属性 |
+| 0x0109 | `handle_xattr_get` | `int64_t handle_xattr_get(a20_handle_t h, const char *name, void *value, uint64_t size)` | 获取扩展属性 |
+| 0x010A | `handle_xattr_list` | `int64_t handle_xattr_list(a20_handle_t h, void *list, uint64_t size)` | 列出扩展属性名 |
+| 0x010B | `handle_xattr_remove` | `int64_t handle_xattr_remove(a20_handle_t h, const char *name)` | 删除扩展属性 |
 
 ### Task / Thread (0x0200)
 
@@ -403,11 +419,12 @@ L0 (IRQ) < L1 (handle table) < L2 (内核对象) < L3 (调度器) < L4 (mm)
 | 0x0206 | `thread_exit` | `void thread_exit(int32_t code)` | 退出当前线程 |
 | 0x0207 | `thread_sleep` | `int64_t thread_sleep(a20_time_ns_t duration_ns)` | 线程睡眠指定纳秒数（相对当前时间） |
 | 0x0208 | `thread_yield` | `int64_t thread_yield(void)` | 主动让出 CPU |
-| 0x0209 | `task_set_sched` | `int64_t task_set_sched(a20_sched_args_t *args)` | 设置调度参数（优先级/策略/亲和性） |
-| 0x020A | `task_get_sched` | `int64_t task_get_sched(a20_sched_args_t *args)` | 查询调度参数 |
-| 0x020B | `task_get_limits` | `int64_t task_get_limits(a20_rlimit_args_t *args)` | 查询资源限制 |
-| 0x020C | `task_set_limits` | `int64_t task_set_limits(a20_rlimit_args_t *args)` | 设置资源限制 |
+| 0x0209 | `task_set_sched` | `int64_t task_set_sched(a20_handle_t task, a20_sched_args_t *args)` | 设置调度参数（优先级/策略/亲和性） |
+| 0x020A | `task_get_sched` | `int64_t task_get_sched(a20_handle_t task, a20_sched_args_t *out)` | 查询调度参数 |
+| 0x020B | `task_get_limits` | `int64_t task_get_limits(a20_handle_t task, a20_resource_limits_t *out)` | 查询聚合资源限制 |
+| 0x020C | `task_set_limits` | `int64_t task_set_limits(a20_handle_t task, a20_resource_limits_t *args)` | 设置聚合资源限制 |
 | 0x020D | `task_get_usage` | `int64_t task_get_usage(a20_handle_t task, a20_rusage_t *out)` | 查询资源使用量 |
+| 0x020E | `thread_get_cpu` | `int64_t thread_get_cpu(uint32_t *out)` | 查询当前线程所在 CPU |
 
 ### Memory (0x0300)
 
@@ -417,7 +434,7 @@ L0 (IRQ) < L1 (handle table) < L2 (内核对象) < L3 (调度器) < L4 (mm)
 | 0x0301 | `vm_unmap` | `int64_t vm_unmap(uint64_t addr, uint64_t len)` | 解除映射 |
 | 0x0302 | `vm_protect` | `int64_t vm_protect(uint64_t addr, uint64_t len, uint32_t prot)` | 修改保护 |
 | 0x0303 | `vm_map` | `int64_t vm_map(a20_vm_map_args_t *args)` | 映射对象到地址空间 |
-| 0x0304 | `vm_share` | `int64_t vm_share(a20_vm_share_args_t *args)` | 导出内存为共享对象 |
+| 0x0304 | `vm_share` | `int64_t vm_share(a20_handle_t vmo, a20_handle_t target_task, a20_rights_t rights)` | 向当前或目标 Native task HT 安装共享 VMO handle |
 | 0x0305 | `vm_flush` | `int64_t vm_flush(uint64_t addr, uint64_t len, uint32_t flags)` | 刷新内存 |
 | 0x0306 | `vm_advise` | `int64_t vm_advise(uint64_t addr, uint64_t len, uint32_t advice)` | 内存使用建议（madvise） |
 | 0x0307 | `vm_remap` | `int64_t vm_remap(a20_vm_remap_args_t *args)` | 重映射虚拟内存（mremap） |
@@ -435,7 +452,7 @@ L0 (IRQ) < L1 (handle table) < L2 (内核对象) < L3 (调度器) < L4 (mm)
 | 0x0404 | `path_create` | `int64_t path_create(a20_path_create_args_t *args)` | 创建节点 |
 | 0x0405 | `path_unlink` | `int64_t path_unlink(const char *path, uint32_t path_len)` | 删除节点（当前按 cwd 解析相对路径） |
 | 0x0406 | `path_rename` | `int64_t path_rename(const char *old_path, uint32_t old_len, const char *new_path, uint32_t new_len)` | 重命名 |
-| 0x0407 | `handle_control` | `int64_t handle_control(a20_control_args_t *args)` | 对象控制 |
+| 0x0407 | `handle_control` | `int64_t handle_control(a20_handle_t h, uint32_t op, uint64_t arg0, uint64_t arg1)` | 对象控制：op 0/1 为 file/device 的 ioctl/fcntl；op 2/3 为 `SET_TEMPORAL`/`GET_TEMPORAL`（arg0 = `a20_handle_temporal_args_t*`，见 §2.6）；op 4 为 `SET_LABEL`（arg0 = 新标签，仅可上调） |
 | 0x0408 | `path_readdir` | `int64_t path_readdir(a20_handle_t dir, a20_dirent_t *entries, uint32_t buf_len)` | 目录列举（`buf_len` 为字节数） |
 | 0x0409 | `path_link` | `int64_t path_link(const char *old_path, uint32_t old_len, const char *new_path, uint32_t new_len)` | 创建硬链接 |
 | 0x040A | `path_symlink` | `int64_t path_symlink(const char *target, uint32_t target_len, const char *linkpath, uint32_t linkpath_len)` | 创建符号链接 |
@@ -457,20 +474,20 @@ L0 (IRQ) < L1 (handle table) < L2 (内核对象) < L3 (调度器) < L4 (mm)
 | 0x0504 | `channel_create` | `int64_t channel_create(a20_channel_create_args_t *args)` | 创建消息通道 |
 | 0x0505 | `channel_send` | `int64_t channel_send(a20_msg_send_args_t *args)` | 发送消息 |
 | 0x0506 | `channel_recv` | `int64_t channel_recv(a20_msg_recv_args_t *args)` | 接收消息 |
-| 0x0507 | `event_watch_fs` | `int64_t event_watch_fs(a20_event_watch_fs_args_t *args)` | 注册文件系统变更通知（inotify 等价） |
+| 0x0507 | `event_watch_fs` | `int64_t event_watch_fs(a20_handle_t dir, a20_handle_t queue, uint32_t mask, uint64_t user_data)` | 当前为目录普通 watch 占位；路径过滤/VFS 事件源未实现 |
 
 ### Network (0x0600)
 
 | 编号 | 名称 | 签名 | 说明 |
 |------|------|------|------|
-| 0x0600 | `net_socket` | `int64_t net_socket(a20_net_socket_args_t *args)` | 创建 socket |
+| 0x0600 | `net_socket` | `int64_t net_socket(int domain, int type, int protocol)` | 创建 socket，成功直接返回 handle |
 | 0x0601 | `net_bind` | `int64_t net_bind(a20_handle_t sock, const a20_net_addr_t *addr)` | 绑定 |
 | 0x0602 | `net_connect` | `int64_t net_connect(a20_handle_t sock, const a20_net_addr_t *addr)` | 连接 |
 | 0x0603 | `net_accept` | `int64_t net_accept(a20_handle_t listener, a20_flags_t flags, a20_handle_t *out)` | 接受连接 |
 | 0x0604 | `net_listen` | `int64_t net_listen(a20_handle_t sock, uint32_t backlog)` | 监听 |
 | 0x0605 | `net_sendmsg` | `int64_t net_sendmsg(a20_net_sendmsg_args_t *args)` | 发送消息 |
 | 0x0606 | `net_recvmsg` | `int64_t net_recvmsg(a20_net_recvmsg_args_t *args)` | 接收消息 |
-| 0x0607 | `net_socketpair` | `int64_t net_socketpair(a20_net_socketpair_args_t *args)` | 创建已连接的套接字对 |
+| 0x0607 | `net_socketpair` | `int64_t net_socketpair(int domain, int type, int protocol, a20_handle_t out[2])` | 创建已连接的套接字对 |
 | 0x0608 | `net_getname` | `int64_t net_getname(a20_handle_t sock, uint32_t flags, a20_net_addr_t *out)` | 获取套接字本地/对端地址 |
 | 0x0609 | `net_shutdown` | `int64_t net_shutdown(a20_handle_t sock, uint32_t how)` | 关闭套接字读写方向 |
 
@@ -511,4 +528,11 @@ L0 (IRQ) < L1 (handle table) < L2 (内核对象) < L3 (调度器) < L4 (mm)
 | 0x0A01 | `system_random` | `int64_t system_random(void *buf, uint64_t len, uint32_t flags)` | 获取密码学安全随机字节 |
 | 0x0A02 | `system_reboot` | `int64_t system_reboot(uint32_t cmd, uint64_t arg)` | 重启/关机/电源控制 |
 
-**总计：90 个 syscall。**
+### Sync (0x0B00)
+
+| 编号 | 名称 | 签名 | 说明 |
+|------|------|------|------|
+| 0x0B00 | `futex_wait` | `int64_t futex_wait(a20_futex_wait_args_t *args)` | futex 等待（复用内核 futex 核心，见 01-types.md §22） |
+| 0x0B01 | `futex_wake` | `int64_t futex_wake(a20_futex_wake_args_t *args)` | futex 唤醒 |
+
+**总计：93 个 syscall。**

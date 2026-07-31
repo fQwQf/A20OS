@@ -35,6 +35,7 @@ int64_t sys_a20_handle_xattr_set(const a20_syscall_args_t *args);
 int64_t sys_a20_handle_xattr_get(const a20_syscall_args_t *args);
 int64_t sys_a20_handle_xattr_list(const a20_syscall_args_t *args);
 int64_t sys_a20_handle_xattr_remove(const a20_syscall_args_t *args);
+int64_t sys_a20_handle_poll(const a20_syscall_args_t *args);
 int64_t sys_a20_task_kill(const a20_syscall_args_t *args);
 int64_t sys_a20_task_info(const a20_syscall_args_t *args);
 int64_t sys_a20_thread_create(const a20_syscall_args_t *args);
@@ -102,6 +103,8 @@ int64_t sys_a20_debug_map_memory(const a20_syscall_args_t *args);
 int64_t sys_a20_system_info(const a20_syscall_args_t *args);
 int64_t sys_a20_system_random(const a20_syscall_args_t *args);
 int64_t sys_a20_system_reboot(const a20_syscall_args_t *args);
+int64_t sys_a20_futex_wait(const a20_syscall_args_t *args);
+int64_t sys_a20_futex_wake(const a20_syscall_args_t *args);
 
 /* Generate handler stubs from .def */
 #define A20_NATIVE_SYSCALL(name, ...) \

@@ -592,7 +592,7 @@ int64_t sys_recvmsg(int fd, void *msg, int flags)
                             continue;
                         int g2 = vfs_alloc_fd(vf);
                         if (g2 < 0) {
-                            vfile_put_ref_only(vf);
+                            vfs_put_file(vf);
                             ctrunc = 1;
                             continue;
                         }

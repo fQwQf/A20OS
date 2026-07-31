@@ -403,7 +403,7 @@ int proc_alloc_user_image(uintptr_t entry, vaddr_t sp, pt_root_t *pgdir,
                           , void **nommu_allocs, const size_t *nommu_alloc_sizes,
                           const uint8_t *nommu_alloc_types, int num_nommu_allocs
 #endif
-                          ) {
+                          , int defer_ready) {
     task_t *t = proc_alloc_task_slot();
     if (!t) return -EAGAIN;
     t->pid = proc_pid_alloc();
@@ -493,7 +493,8 @@ int proc_alloc_user_image(uintptr_t entry, vaddr_t sp, pt_root_t *pgdir,
     kinfo("[PROC] user task pid=%d entry=0x%lx sp=0x%lx trap_sp=0x%lx\n", t->pid,
           (unsigned long)entry, (unsigned long)sp, (unsigned long)TRAP_CTX_SP(trap));
 
-    proc_make_ready(t);
+    if (!defer_ready)
+        proc_make_ready(t);
     return t->pid;
 }
 
@@ -502,7 +503,7 @@ int proc_alloc_user(uintptr_t entry, vaddr_t sp, pt_root_t *pgdir) {
 #ifdef CONFIG_NOMMU
                                , NULL, NULL, NULL, 0
 #endif
-                               );
+                               , 0);
 }
 
 /* ============================================================

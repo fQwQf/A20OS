@@ -420,7 +420,7 @@ arch/a20/
 #define __NR_a20_path_open         0x0400
 #define __NR_a20_handle_read       0x0401
 #define __NR_a20_handle_write      0x0402
-/* ... 全部 90 个 */
+/* ... 全部 93 个 */
 
 /* A20 使用相同的 SVC #0 指令，但 x8 放 A20 编号 */
 static inline long __syscall0(long nr)
@@ -998,7 +998,7 @@ void _start(const a20_start_info_t *si) {
 
 工作项：
 - [x] syscall 发射宏（`a20_syscall6`）
-- [x] 全部 90 个 syscall 编号定义
+- [x] 全部 93 个 syscall 编号定义
 - [x] crt0 启动汇编（aarch64）
 - [x] 简单测试：write stdout + exit
 
@@ -1064,7 +1064,7 @@ Phase 0 ──→ Phase 1 ──→ Phase 2 ──→ Phase 3
   │            │            │            └── 内核: A20_SPAWN_FORK_SELF
   │            │            │            └── 内核: 异步信号投递
   │            │            ✅ 已完成    └── 待实现
-  │            ✅ 已完成    └── 内核: 全部 90 个 syscall ✅
+  │            ✅ 已完成    └── 内核: 全部 93 个 syscall ✅
   ✅ 已完成    └── 内核: ~15 个基础 syscall ✅
   └── 内核: 启动协议 + abi_info + handle_close + vm_alloc ✅
           + handle_write + path_open + task_exit ✅

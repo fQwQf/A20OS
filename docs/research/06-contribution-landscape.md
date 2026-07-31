@@ -159,7 +159,7 @@ Zircon 是 A20OS 最直接的前驱工作。两者的核心模型高度相似（
 
 | 属性 | Zircon | A20OS | 差异的意义 |
 |------|--------|-------|-----------|
-| 总 syscall 数 | ~150 | 53 | A20OS 追求最小充分集 |
+| 总 syscall 数 | ~150 | 53（形式化核心）/ 93（当前实现） | 核心模型保持可管理，实现按工程需求扩展 |
 | 对象类型 | ~25 | 13 | A20OS 合并了可合并的类型 |
 | Rights 位数 | ~30 | 14 | A20OS 使用更少的通用权限 |
 | 进程创建 | create + start (两步) | spawn (单步) | A20OS 简化常见路径 |
@@ -171,7 +171,7 @@ Zircon 是 A20OS 最直接的前驱工作。两者的核心模型高度相似（
 | POSIX 兼容 | libfdio (用户态) | liba20posix (用户态) + Linux ABI (内核) | A20OS 有内核级双 ABI |
 | **双 ABI 隔离** | **无** | **信息流能力边界定理（9.5）** | **A20OS 有形式化证明** |
 | **委托模式分析** | **无** | **5 种模式 + 组合安全证明** | **A20OS 首创模式分类法** |
-| 形式化证明 | 无 | 41 个定理/引理 (SOS) | A20OS 提供了形式化 |
+| 形式化证明 | 无 | 48 个纸笔定理/引理 (SOS) | A20OS 提供了形式化，但尚未机器检验 |
 | 代码复杂度 | ~200K LOC | 目标 < 5K LOC | A20OS 面向教学 |
 | 生产使用 | Google 产品 | 教学内核 | 不同的验证标准 |
 
@@ -235,7 +235,7 @@ jsix 证明了 handle-based ABI 在教学内核中的可行性。A20OS 在此基
 **问题描述**：现有的 capability-based 系统（seL4, Zircon）要么过于复杂无法在教学内核中实现，要么缺乏形式化安全保证。教学/竞赛内核需要一个**简单到可实现、但安全到可证明**的 capability 模型。
 
 **A20OS 的回答**：
-- 13 种类型、14 种权限、53 个 syscall——可在一个学期内实现
+- 13 种类型、14 种权限、53 个形式化核心 syscall——保持可证明的核心边界；当前工程实现为 93 个入口
 - SOS 操作语义 + 不变式证明——可以在论文中完整呈现
 - 不追求 seL4 级别的机器检验证明——但在逻辑上等价于更简单的不变式证明
 
@@ -276,8 +276,8 @@ jsix 证明了 handle-based ABI 在教学内核中的可行性。A20OS 在此基
 
 **T4（教学内核 vs 生产系统）**：
 - 在教学内核上的设计决策可能无法直接推广到生产系统
-- 性能数据来自 A20 SoC（ARM Cortex-A7 双核），可能不代表高性能硬件
-- **缓解措施**：明确声明目标域为教学/竞赛内核；在对比分析中使用归一化比率而非绝对值
+- 05-evaluation-framework.md 目前仍是评估方案，**尚无可引用的 Native ABI 实测性能数据**
+- **缓解措施**：明确声明目标域为教学/竞赛内核；先在 QEMU/当前支持板卡采集可复现实验，再用归一化比率比较，避免把预估值写成结果
 
 **T5（双 ABI 的实际价值）**：
 - 双 ABI 的隔离证明在理论上成立，但在实践中是否真的有用？
@@ -306,7 +306,7 @@ jsix 证明了 handle-based ABI 在教学内核中的可行性。A20OS 在此基
 
 ### 6.1 一句话定位
 
-> A20OS Native ABI 提出了四个原创贡献：内核级时态能力演算、混合信任能力边界形式化、类型化通道协议和委托模式组合安全，在教学内核中实现了 41 个定理/引理覆盖的可证明安全 capability 系统。
+> A20OS Native ABI 提出了四个原创贡献：内核级时态能力演算、混合信任能力边界形式化、类型化通道协议和委托模式组合安全；在教学内核中实现了可运行的 93-syscall capability ABI，并以 48 个纸笔定理/引理覆盖其中 53 个形式化核心 syscall。实现覆盖、纸笔证明与机器验证必须分别声明。
 
 ### 6.2 面向审稿人的核心论述
 
@@ -326,11 +326,11 @@ jsix 证明了 handle-based ABI 在教学内核中的可行性。A20OS 在此基
 3. 在 send/recv 路径中增加类型 bitmask 检查（09 §2.3）
 4. 提出 5 种委托模式并证明组合安全性（09 §4.4）
 
-**结果**：53 个 syscall、13 种对象类型的 Native ABI，配合独立的 Linux ABI，41 个定理/引理覆盖安全性。
+**结果**：当前实现为 93 个 syscall、13 种对象类型的 Native ABI，配合独立的 Linux ABI；48 个纸笔定理/引理覆盖 53 个形式化核心 syscall。typed channel、时态控制入口/sweeper、阻塞 IPC、无部分投递与对象级联释放已接入并有 smoke 覆盖，新增 40 个工程 syscall 的形式化覆盖仍待补齐。
 
 ### 6.3 论文可能的标题候选
 
-1. "Temporal Capabilities and Mixed-Trust Boundaries: A Formally Verified Handle-Based ABI with 41 Theorems"
+1. "Temporal Capabilities and Mixed-Trust Boundaries in a Dual-ABI Teaching Kernel"
 2. "Beyond Simplified Zircon: Typed Channels, Temporal Capabilities, and Delegation Safety in A20OS"
 3. "Proving Capability Safety Under Mixed Trust: The A20OS Native ABI"
 4. "From Dependencies to Information Flow: Formal Capability Isolation in a Dual-ABI Kernel"
@@ -364,16 +364,16 @@ jsix 证明了 handle-based ABI 在教学内核中的可行性。A20OS 在此基
 
 ### 7.1 短期（1-3 个月）
 
-1. **完成 Native ABI 最小原型**：实现 15 个核心 syscall（参见 DESIGN.md §"最小可实现原型"）
-2. **运行不变式测试**：实现 §10.3 的运行时检查器
-3. **微基准测试**：完成 §2 的全部微基准测试
+1. **锁定实现基线**：以当前 93 syscall 分发表和 `docs/native-abi/08-runtime-status.md` 为准，建立 syscall → rights → object type → SOS 覆盖矩阵
+2. **运行不变式测试**：实现 §10.3 的运行时检查器，将 rights 单调性、时态不可刷新、reserve/commit 原子性和对象引用平衡加入 smoke gate
+3. **微基准测试**：优先完成 handle、typed channel、event_wait、时态 sweeper 四组实验，替换所有预估性能值
 
 ### 7.2 中期（3-6 个月）
 
-1. **完整 Native ABI 实现**：53 个 syscall 全部实现
-2. **POSIX shim (liba20posix)**：实现基本的 POSIX 兼容层
-3. **宏基准测试**：运行完整应用（cp, ls, httpd, make）
-4. **TLA+ 模型检验**：验证核心不变式（§10.1）
+1. **形式化覆盖扩展**：把 93 个实现入口中安全相关的新增 syscall 纳入 SOS/error-path 精化；对纯查询/调试入口明确排除理由
+2. **POSIX shim (liba20posix)**：实现基本兼容层；`fork()` 明确返回 ENOSYS，不以隐式地址空间复制冒充等价语义
+3. **宏基准测试**：运行 spawn-based 的完整应用（cp、ls、httpd 等），不使用依赖 fork 的 `make -j` 作为 shim 已支持的证据
+4. **TLA+ 模型检验**：优先验证 handle table、channel reserve-then-dequeue 与 Park/Wake 活性（§10.1）
 
 ### 7.3 长期（6-12 个月）
 

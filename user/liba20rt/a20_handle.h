@@ -136,6 +136,36 @@ static inline a20_status_t a20_hdl_control(a20_handle_t h, uint32_t op,
     return a20_syscall6(A20_SYS_handle_control, h, op, arg0, arg1, 0, 0);
 }
 
+/* ---- Temporal capabilities (docs/native-abi/03-handle.md §2.6) ---- */
+
+static inline a20_status_t a20_hdl_set_temporal(a20_handle_t h, uint64_t expiry_ns,
+                                                  uint32_t remaining_ops,
+                                                  uint32_t temporal_flags)
+{
+    a20_handle_temporal_args_t ta;
+    ta.size          = sizeof(ta);
+    ta.version       = 1;
+    ta.expiry_ns     = expiry_ns;
+    ta.remaining_ops = remaining_ops;
+    ta.temporal_flags = temporal_flags;
+    return a20_hdl_control(h, A20_HANDLE_CTRL_SET_TEMPORAL, (uint64_t)&ta, 0);
+}
+
+static inline a20_status_t a20_hdl_get_temporal(a20_handle_t h,
+                                                  a20_handle_temporal_args_t *out)
+{
+    if (!out)
+        return -A20_ERR_FAULT;
+    out->size    = sizeof(*out);
+    out->version = 1;
+    return a20_hdl_control(h, A20_HANDLE_CTRL_GET_TEMPORAL, (uint64_t)out, 0);
+}
+
+static inline a20_status_t a20_hdl_set_label(a20_handle_t h, uint32_t label)
+{
+    return a20_hdl_control(h, A20_HANDLE_CTRL_SET_LABEL, label, 0);
+}
+
 static inline uint32_t a20__str_len(const char *s)
 {
     const char *p = s;
