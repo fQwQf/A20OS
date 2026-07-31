@@ -11,6 +11,7 @@
 #include "proc/proc.h"
 #include "drivers/core/driver_core.h"
 #include "drivers/core/driver_class.h"
+#include "drivers/audio/audio_core.h"
 #include "mm/slab.h"
 
 extern void uart_putc(char c);
@@ -745,7 +746,7 @@ static int devfs_class_ioctl(vfile_t *vf, unsigned long req, void *arg)
         if (ops->ioctl) ret = ops->ioctl(dev, req, arg);
     } else if (cdev->class_type == DEV_CLASS_AUDIO) {
         const audio_dev_ops_t *ops = dev->drv->class_ops;
-        if (ops->ioctl) ret = ops->ioctl(dev, req, arg);
+        ret = audio_device_ioctl(dev, ops, req, arg);
     }
     class_device_call_end(cdev);
     return ret;
@@ -796,8 +797,7 @@ static int devfs_class_close(vfile_t *vf)
         class_device_call_begin(cdev) == 0) {
         device_t *dev = cdev->dev;
         const audio_dev_ops_t *ops = dev->drv->class_ops;
-        if (ops->close)
-            ret = ops->close(dev);
+        ret = audio_device_close(dev, ops);
         class_device_call_end(cdev);
     }
     if (cdev)

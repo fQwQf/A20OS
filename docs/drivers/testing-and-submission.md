@@ -6,7 +6,7 @@
 
 ## 把驱动接到构建里
 
-full profile 自动包含 `kernel/drivers/core|bus|block|char|net|gpu|input/*.c`。把源文件放到已有类目录即可。公共声明放 `kernel/include/drivers/<class>/`；只在一个 `.c` 里使用的寄存器和私有结构不要进公共头。
+full profile 自动包含 `kernel/drivers/core|bus|block|char|net|gpu|audio|input/*.c`。把源文件放到已有类目录即可。公共声明放 `kernel/include/drivers/<class>/`；只在一个驱动内部共享的寄存器和私有结构放驱动私有头，不要进入公共 include 树。
 
 MCU profile 只编译 `BOARD_DRIVER_DIR` 和选中的平台，新增文件要检查 Makefile 的 profile 分支。新平台还需要平台链接脚本和 `BOARD_INCLUDE_DIR`。
 
@@ -21,6 +21,7 @@ make check-doc-drift
 make smoke-driver-lifecycle
 make smoke-hda
 make smoke-audio-userspace
+make PYTHON='conda run -n a20os python' smoke-virtio-sound
 make smoke-pci-portability
 ```
 
@@ -29,6 +30,8 @@ make smoke-pci-portability
 `smoke-hda` 在 x86_64 q35 上挂载 Intel HDA controller 和 duplex codec，验证 codec 拓扑识别、audio class 绑定以及一段静音 PCM 的 BDL DMA 完成。该测试使用 QEMU null audio backend，不依赖宿主声卡。
 
 `smoke-audio-userspace` 构建完整 x86_64 用户态，在来宾 shell 中执行 `audioplay --tone 440 --duration 5000`，再由 QEMU WAV backend 捕获 HDA 输出。测试同时检查驱动绑定、命令成功、正常关机和 WAV 中的非零 PCM 采样，因此覆盖 UAPI、devfs、用户态短写循环、持续 HDA DMA 与 QEMU codec 的完整链路，且不依赖宿主声卡服务。
+
+`smoke-virtio-sound` 使用同一个五秒用户态负载，但只挂载 QEMU `virtio-sound-pci`。它验证 modern PCI transport、PCM_INFO、SET_PARAMS/PREPARE/START、TX completion、DRAIN 后 STOP/RELEASE，以及 WAV 非静音和采样连续性。
 
 `smoke-pci-portability` 在 LoongArch64 QEMU virt 上同时挂载 HDA 和 NVMe，验证未分配零值 BAR 的 sizing/assignment、HDA PCM DMA、NVMe queue/Identify 以及两个 class 绑定。目标创建专用 128 MiB 可丢弃镜像，写入超过单次 8 KiB bounce chunk 的数据，再执行 flush、读回和比较。`CONFIG_NVME_SMOKE_TEST` 会从 LBA 0 开始改写介质，只能由该目标配合自动生成的镜像启用。
 

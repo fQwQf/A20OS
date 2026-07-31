@@ -425,15 +425,21 @@ static int my_gpu_remove(device_t *dev)
 
 ```c
 typedef struct audio_dev_ops {
+    a20_audio_caps_t caps;
+    a20_audio_format_t pcm_format;
     int (*read)(device_t *, void *buf, size_t count);
     int (*write)(device_t *, const void *buf, size_t count);
+    int (*set_format)(device_t *, const a20_audio_format_t *format);
+    int (*tone)(device_t *, const a20_audio_tone_t *tone);
+    int (*stop)(device_t *);
+    int (*drain)(device_t *);
     int (*ioctl)(device_t *, unsigned long req, void *arg);
     int (*poll)(device_t *, short events);
     int (*close)(device_t *);
 } audio_dev_ops_t;
 ```
 
-audio class 自动发布为 `/dev/audioN`。设备编号只表示绑定顺序，不表示能力；PC Speaker 可能先占用 `audio0`，因此客户端必须通过 `GET_CAPS` 区分 tone 与 PCM。PCM write 返回实际接受的字节数，DRAIN、STOP、关闭语义及 HDA ring 约束见 [音频与 Intel HDA](audio.md)。
+audio class 自动发布为 `/dev/audioN`。设备编号只表示绑定顺序，不表示能力；PC Speaker 可能先占用 `audio0`，因此客户端必须通过 `GET_CAPS` 区分 tone 与 PCM。`audio_core` 统一处理通用 ioctl 的 usercopy、capability/format 校验和 close 时的 drain/stop；具体驱动不能重复解释 UAPI。PCM write 返回实际接受的字节数，DRAIN、STOP、HDA ring 与 VirtIO queue 约束见 [音频子系统](audio.md)。
 
 ## 新增设备类
 

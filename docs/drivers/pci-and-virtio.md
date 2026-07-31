@@ -125,11 +125,11 @@ PCI 协议驱动只能依赖以下公共输入：
 
 当前平台状态：
 
-| 平台 | PCI 发现/BAR | NVMe/HDA 证据 |
+| 平台 | PCI 发现/BAR | NVMe/HDA/VirtIO Sound 证据 |
 |---|---|---|
-| QEMU x86_64 q35 | ECAM 与 MMIO BAR 分配 | HDA BDL DMA smoke 已验证；NVMe 可绑定 |
+| QEMU x86_64 q35 | ECAM 与 MMIO BAR 分配 | HDA BDL DMA、virtio-sound PCI PCM/WAV 已验证；NVMe 可绑定 |
 | QEMU LoongArch64 virt | ECAM 与 `0x40000000` PCI MMIO 窗口分配 | HDA BDL DMA；NVMe queue/Identify、跨 chunk 写入/flush/读回已联合验证 |
-| QEMU RISC-V64 virt | ECAM 与高半核映射的 PCI MMIO BAR 窗口 | HDA 绑定、环形 PCM DMA 和 Wayland/FFmpeg/PulseAudio 播放已验证 |
+| QEMU RISC-V64 virt | ECAM 与高半核映射的 PCI MMIO BAR 窗口 | HDA 环形 PCM 与 Wayland/PulseAudio 已验证；virtio-sound MMIO probe 已验证 |
 | VirtualBox AArch64 | ACPI MCFG；依赖固件预分配且低于已映射范围的 BAR | 通用驱动可编译，尚无 HDA/NVMe 运行日志 |
 | QEMU AArch64 virt | 当前 board 只枚举 VirtIO-MMIO | 驱动可编译，不构成 PCI 运行支持 |
 
@@ -139,7 +139,7 @@ NVMe controller 启用前必须由 `CAP.CSS` 声明 NVM command set，并由 `CA
 
 ## VirtIO transport
 
-`virtio_transport_t` 提供 MMIO 风格的 `read32/write32`、私有数据、legacy 标志和 IRQ。设备驱动使用统一 `VIRTIO_MMIO_*` offset；PCI transport 在内部翻译 common/notify/ISR/device capabilities，MMIO transport 直接访问 slot。
+`virtio_transport_t` 提供 MMIO 风格的 `read32/write32`、私有数据、legacy 标志和 IRQ。设备驱动使用统一 `VIRTIO_MMIO_*` offset；PCI transport 在内部翻译 common/notify/ISR/device capabilities，MMIO transport 直接访问 slot。block、net、GPU、input 和 sound 都复用该边界；virtio-sound 的同一个协议驱动可绑定 PCI device 25 或 VirtIO-MMIO device 25。
 
 modern PCI 初始化：
 

@@ -13,6 +13,7 @@
 #include "core/lock.h"
 
 struct device;
+struct audio_dev_ops;
 
 #define CLASS_DEVICE_NAME_MAX 32
 
@@ -121,14 +122,6 @@ typedef struct gpu_dev_ops {
     int     (*ioctl)(struct device *dev, unsigned long req, void *arg);
 } gpu_dev_ops_t;
 
-/* PCM-oriented audio interface. Drivers own buffering and blocking policy;
- * devfs provides stable /dev/audioN publication and disconnect handling. */
-typedef struct audio_dev_ops {
-    int (*read)(struct device *dev, void *buf, size_t count);
-    int (*write)(struct device *dev, const void *buf, size_t count);
-    int (*ioctl)(struct device *dev, unsigned long req, void *arg);
-    int (*poll)(struct device *dev, short events);
-    int (*close)(struct device *dev);
-} audio_dev_ops_t;
+typedef struct audio_dev_ops audio_dev_ops_t;
 
 #endif /* _DRIVER_CLASS_H */
