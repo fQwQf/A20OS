@@ -11,6 +11,9 @@
 #include "core/panic.h"
 #include "core/string.h"
 #include "cg/cgroup.h"
+#if defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)
+#include "abi/native/handle_table.h"
+#endif
 
 #ifndef CONFIG_MCU
 extern void arch_return_to_user(trap_context_t *ctx) NORETURN;
@@ -260,9 +263,17 @@ static void proc_task_release_resources(task_t *t)
         if (refcount_dec_and_test(&ss->refcount))
             kfree(ss);
     }
-    if (t->scratch_buf) {
-        kfree(t->scratch_buf);
-        t->scratch_buf = NULL;
+    void *scratch = __atomic_exchange_n(&t->scratch_buf, NULL, __ATOMIC_ACQ_REL);
+    if (scratch) {
+#if defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)
+        if (t->abi_mode == 1) {
+            /* Native handle table: shared by the thread group, refcounted. */
+            a20_ht_put_ref((struct a20_ht_internal *)scratch);
+        } else
+#endif
+        {
+            kfree(scratch);
+        }
         t->scratch_size = 0;
     }
 
@@ -335,6 +346,30 @@ void proc_put(task_t *t)
     proc_lifetime_note_task_free();
     memset(t, 0, sizeof(*t));
     kfree(t);
+}
+
+mm_struct_t *proc_task_get_mm(task_t *t)
+{
+    if (!t)
+        return NULL;
+    uint64_t flags = spin_lock_irqsave(&proc_lock);
+    mm_struct_t *mm = mm_get(t->mm);
+    spin_unlock_irqrestore(&proc_lock, flags);
+    return mm;
+}
+
+int proc_task_may_access(const task_t *caller, const task_t *target)
+{
+    if (!caller || !target)
+        return 0;
+    uint64_t flags = spin_lock_irqsave(&proc_lock);
+    int allowed = caller->tgid == target->tgid ||
+        proc_has_cap(caller, CAP_SYS_PTRACE) ||
+        (caller->cred.fsuid == target->cred.uid &&
+         caller->cred.fsuid == target->cred.euid &&
+         caller->cred.fsuid == target->cred.suid);
+    spin_unlock_irqrestore(&proc_lock, flags);
+    return allowed;
 }
 
 void proc_destroy_task(task_t *t)

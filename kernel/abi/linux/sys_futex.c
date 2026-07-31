@@ -172,9 +172,9 @@ static int futex_waiter_alloc(uintptr_t vkey, uintptr_t pkey, mm_struct_t *mm,
 }
 
 /* g_futex_lock protects waiter publication/removal; proc_try_wake() is always
- * called after dropping it, using wait_seq to reject stale wakeups. */
-static int futex_wait_on(int *uaddr, int expected, void *timeout, uint32_t bitset,
-                         int absolute_timeout, int realtime_timeout)
+ * called after dropping it, using wait_seq to reject stale wakeups.
+ * ticks == 0 waits indefinitely. */
+static int futex_wait_ticks(int *uaddr, int expected, uint64_t ticks, uint32_t bitset)
 {
     if (!uaddr) return -EFAULT;
     if ((uintptr_t)uaddr & (sizeof(int) - 1)) return -EINVAL;
@@ -187,9 +187,6 @@ static int futex_wait_on(int *uaddr, int expected, void *timeout, uint32_t bitse
     if (copy_from_user(&uval, uaddr, sizeof(uval)) < 0) return -EFAULT;
     if (uval != expected) return -EAGAIN;
 
-    uint64_t ticks = 0;
-    int tr = futex_timeout_ticks(timeout, absolute_timeout, realtime_timeout, &ticks);
-    if (tr < 0) return tr;
     uint64_t until = ticks ? timer_get_ticks() + ticks : 0;
     uintptr_t vkey = (uintptr_t)uaddr;
     uintptr_t pkey = 0;
@@ -246,6 +243,35 @@ static int futex_wait_on(int *uaddr, int expected, void *timeout, uint32_t bitse
     if (reason == PROC_WAKE_TIMEOUT)
         return -ETIMEDOUT;
     return 0;
+}
+
+static int futex_wait_on(int *uaddr, int expected, void *timeout, uint32_t bitset,
+                         int absolute_timeout, int realtime_timeout)
+{
+    uint64_t ticks = 0;
+    int tr = futex_timeout_ticks(timeout, absolute_timeout, realtime_timeout, &ticks);
+    if (tr < 0) return tr;
+    return futex_wait_ticks(uaddr, expected, ticks, bitset);
+}
+
+/* Native ABI entry point: relative timeout in nanoseconds,
+ * FUTEX_NS_INFINITE (UINT64_MAX) waits indefinitely. */
+int futex_wait_user_ns(int *uaddr, int expected, uint64_t timeout_ns)
+{
+    uint64_t ticks = 0;
+    if (timeout_ns != UINT64_MAX) {
+        uint64_t sec = timeout_ns / 1000000000ULL;
+        uint64_t nsec = timeout_ns % 1000000000ULL;
+        uint64_t now = timer_get_ticks();
+        if (sec > (UINT64_MAX - now) / TICKS_PER_SEC) {
+            ticks = UINT64_MAX - now; /* saturate: effectively infinite */
+        } else {
+            ticks = sec * TICKS_PER_SEC +
+                    (nsec * TICKS_PER_SEC + 999999999ULL) / 1000000000ULL;
+            if (!ticks) ticks = 1;
+        }
+    }
+    return futex_wait_ticks(uaddr, expected, ticks, FUTEX_BITSET_MATCH_ANY);
 }
 
 static int futex_wake_on(int *uaddr, int nr, uint32_t bitset)

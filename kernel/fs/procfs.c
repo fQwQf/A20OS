@@ -74,6 +74,7 @@ typedef enum {
     PF_PID_NS_NET,
     PF_PID_NS_CGROUP,
     PF_PID_FDINFO,
+    PF_PID_FDINFO_ENTRY,
     PF_PID_MOUNTINFO,
     PF_PID_PAGEMAP,
     PF_SYS,
@@ -218,21 +219,16 @@ static void appendf(char *buf, size_t bufsz, size_t *off, const char *fmt, ...) 
         *off += wrote;
 }
 
-static const char *vma_name(vm_area_t *vma) {
-    if (vma->vm_flags & VM_STACK) return "[stack]";
-    if (vma->vm_flags & VM_ANON) return "";
-    return "";
-}
-
-static void append_vma_flags(char *buf, size_t bufsz, size_t *off, vm_area_t *vma) {
+static void append_vma_flags(char *buf, size_t bufsz, size_t *off,
+                             uint64_t vm_flags) {
     appendf(buf, bufsz, off, "VmFlags:");
-    if (vma->vm_flags & VM_READ) appendf(buf, bufsz, off, " rd");
-    if (vma->vm_flags & VM_WRITE) appendf(buf, bufsz, off, " wr");
-    if (vma->vm_flags & VM_EXEC) appendf(buf, bufsz, off, " ex");
+    if (vm_flags & VM_READ) appendf(buf, bufsz, off, " rd");
+    if (vm_flags & VM_WRITE) appendf(buf, bufsz, off, " wr");
+    if (vm_flags & VM_EXEC) appendf(buf, bufsz, off, " ex");
     appendf(buf, bufsz, off, " mr mw me ac");
-    if (vma->vm_flags & VM_STACK) appendf(buf, bufsz, off, " gd");
-    if (vma->vm_flags & VM_HUGEPAGE) appendf(buf, bufsz, off, " hg");
-    if (vma->vm_flags & VM_NOHUGEPAGE) appendf(buf, bufsz, off, " nh");
+    if (vm_flags & VM_STACK) appendf(buf, bufsz, off, " gd");
+    if (vm_flags & VM_HUGEPAGE) appendf(buf, bufsz, off, " hg");
+    if (vm_flags & VM_NOHUGEPAGE) appendf(buf, bufsz, off, " nh");
     appendf(buf, bufsz, off, "\n");
 }
 
@@ -248,19 +244,23 @@ typedef struct vma_smaps_stats {
     size_t file_pmd_pages;
 } vma_smaps_stats_t;
 
-static void vma_collect_smaps_stats(mm_struct_t *mm, vm_area_t *vma,
+static void vma_collect_smaps_stats(mm_struct_t *mm, uint64_t start,
+                                    uint64_t end, uint64_t vm_flags,
                                     vma_smaps_stats_t *stats) {
     if (!stats) return;
     memset(stats, 0, sizeof(*stats));
-    if (!mm || !mm->pgdir || !vma) return;
+    if (!mm || !mm->pgdir) return;
 
-    for (uint64_t va = vma->start; va < vma->end; ) {
+    for (uint64_t va = start; va < end; ) {
         mm_leaf_info_t leaf;
-        if (mm_query_leaf(mm->pgdir, va, &leaf)) {
+        uint64_t lock_flags = spin_lock_irqsave(&mm->lock);
+        int present = mm_query_leaf(mm->pgdir, va, &leaf);
+        spin_unlock_irqrestore(&mm->lock, lock_flags);
+        if (present) {
             size_t pages = leaf.size / PAGE_SIZE;
-            int shared = (vma->vm_flags & VM_SHARED) != 0;
+            int shared = (vm_flags & VM_SHARED) != 0;
             int dirty = leaf.dirty;
-            int anon = (vma->vm_flags & VM_ANON) != 0;
+            int anon = (vm_flags & VM_ANON) != 0;
 
             stats->rss_pages += pages;
             if (shared) {
@@ -280,66 +280,168 @@ static void vma_collect_smaps_stats(mm_struct_t *mm, vm_area_t *vma,
                 else
                     stats->file_pmd_pages += pages;
             }
-            va = leaf.base + leaf.size;
+            uint64_t next = leaf.base + leaf.size;
+            va = next > va ? next : va + PAGE_SIZE;
         } else {
             va += PAGE_SIZE;
         }
     }
 }
 
-static void generate_pid_maps(task_t *t, char *buf, size_t bufsz, int smaps) {
-    size_t off = 0;
-    if (!t || !t->mm) return;
-    for (vm_area_t *v = t->mm->mmap; v && off + 128 < bufsz; v = v->next) {
-        char r = (v->vm_flags & VM_READ) ? 'r' : '-';
-        char w = (v->vm_flags & VM_WRITE) ? 'w' : '-';
-        char x = (v->vm_flags & VM_EXEC) ? 'x' : '-';
-        char s = (v->vm_flags & VM_SHARED) ? 's' : 'p';
-        size_t kb = (size_t)(v->end - v->start) / 1024;
-        vma_smaps_stats_t st;
-        vma_collect_smaps_stats(t->mm, v, &st);
-        size_t rss_kb = st.rss_pages * PAGE_SIZE / 1024;
-        int thp_eligible = !t->policy.thp_disabled && !(v->vm_flags & VM_NOHUGEPAGE) &&
-                           (v->vm_flags & (VM_HUGEPAGE | VM_ANON)) &&
-                           (v->end - v->start) >= (2UL * 1024 * 1024);
+typedef struct procfs_vma_snapshot {
+    uint64_t start;
+    uint64_t end;
+    uint64_t vm_flags;
+    uint64_t file_offset;
+    unsigned long ino;
+    int thp_eligible;
+    char name[MAX_PATH_LEN];
+    vma_smaps_stats_t stats;
+} procfs_vma_snapshot_t;
 
-        const char *name = "";
-        char path_buf[MAX_PATH_LEN];
-        path_buf[0] = '\0';
-        unsigned long ino = 0;
-        if (v->vm_flags & VM_STACK) {
-            name = "[stack]";
-        } else if (t->mm && v->start >= t->mm->start_brk && v->start < t->mm->brk) {
-            name = "[heap]";
-        } else if (v->file_fd >= 0 && t->files) {
-            if (v->file_fd < MAX_FILES) {
-                int gfd = t->files->fd[v->file_fd];
-                vfile_t *vf = vfs_get_file(gfd);
+static int snapshot_pid_maps(int pid, int smaps,
+                             procfs_vma_snapshot_t **records_out,
+                             size_t *count_out)
+{
+    task_t *task = proc_find_get(pid);
+    if (!task)
+        return -ESRCH;
+    if (!proc_task_may_access(proc_current(), task)) {
+        proc_put(task);
+        return -EACCES;
+    }
+    int thp_disabled = task->policy.thp_disabled;
+    mm_struct_t *mm = proc_task_get_mm(task);
+    proc_put(task);
+    if (!mm)
+        return -ESRCH;
+
+    procfs_vma_snapshot_t *records = NULL;
+    size_t capacity = 0;
+    for (;;) {
+        uint64_t flags = spin_lock_irqsave(&mm->lock);
+        size_t needed = 0;
+        for (vm_area_t *v = mm->mmap; v; v = v->next)
+            needed++;
+        spin_unlock_irqrestore(&mm->lock, flags);
+
+        if (needed > capacity) {
+            if (needed > SIZE_MAX / sizeof(*records)) {
+                kfree(records);
+                mm_destroy(mm);
+                return -ENOMEM;
+            }
+            procfs_vma_snapshot_t *new_records =
+                krealloc(records, needed * sizeof(*records));
+            if (!new_records && needed) {
+                kfree(records);
+                mm_destroy(mm);
+                return -ENOMEM;
+            }
+            records = new_records;
+            capacity = needed;
+        }
+
+        flags = spin_lock_irqsave(&mm->lock);
+        size_t count = 0;
+        int retry = 0;
+        for (vm_area_t *v = mm->mmap; v; v = v->next) {
+            if (count >= capacity) {
+                retry = 1;
+                break;
+            }
+            procfs_vma_snapshot_t *rec = &records[count++];
+            memset(rec, 0, sizeof(*rec));
+            rec->start = v->start;
+            rec->end = v->end;
+            rec->vm_flags = v->vm_flags;
+            rec->file_offset = v->file_offset;
+            rec->thp_eligible = !thp_disabled &&
+                !(v->vm_flags & VM_NOHUGEPAGE) &&
+                (v->vm_flags & (VM_HUGEPAGE | VM_ANON)) &&
+                (v->end - v->start) >= (2UL * 1024 * 1024);
+            if (v->vm_flags & VM_STACK) {
+                strncpy(rec->name, "[stack]", sizeof(rec->name) - 1);
+            } else if (v->start >= mm->start_brk && v->start < mm->brk) {
+                strncpy(rec->name, "[heap]", sizeof(rec->name) - 1);
+            } else if (v->file_fd >= 0) {
+                vfile_t *vf = vfs_get_file_ref(v->file_fd);
                 if (vf) {
-                    if (vf->path[0]) {
-                        strncpy(path_buf, vf->path, sizeof(path_buf) - 1);
-                        path_buf[sizeof(path_buf) - 1] = '\0';
-                        name = path_buf;
-                    }
-                    if (vf->vnode) {
-                        ino = (unsigned long)vf->vnode->ino;
-                    }
+                    if (vf->path[0])
+                        strncpy(rec->name, vf->path,
+                                sizeof(rec->name) - 1);
+                    if (vf->vnode)
+                        rec->ino = (unsigned long)vf->vnode->ino;
+                    vfs_put_file_ref(v->file_fd, vf);
                 }
             }
         }
-
-        if (name && name[0] != '\0') {
-            appendf(buf, bufsz, &off, "%08lx-%08lx %c%c%c%c %08lx 00:00 %lu %s\n",
-                    (unsigned long)v->start, (unsigned long)v->end,
-                    r, w, x, s, (unsigned long)v->file_offset, ino, name);
-        } else {
-            appendf(buf, bufsz, &off, "%08lx-%08lx %c%c%c%c %08lx 00:00 %lu\n",
-                    (unsigned long)v->start, (unsigned long)v->end,
-                    r, w, x, s, (unsigned long)v->file_offset, ino);
+        spin_unlock_irqrestore(&mm->lock, flags);
+        if (!retry) {
+            if (smaps) {
+                for (size_t i = 0; i < count; i++) {
+                    procfs_vma_snapshot_t *rec = &records[i];
+                    vma_collect_smaps_stats(mm, rec->start, rec->end,
+                                            rec->vm_flags, &rec->stats);
+                }
+            }
+            mm_destroy(mm);
+            *records_out = records;
+            *count_out = count;
+            return 0;
         }
-        if (!smaps) continue;
+    }
+}
+
+static int generate_pid_maps_alloc(int pid, int smaps, char **buf_out,
+                                   size_t *len_out)
+{
+    procfs_vma_snapshot_t *records = NULL;
+    size_t count = 0;
+    int ret = snapshot_pid_maps(pid, smaps, &records, &count);
+    if (ret < 0)
+        return ret;
+
+    size_t per_record = MAX_PATH_LEN + (smaps ? 1024 : 128);
+    if (count > (SIZE_MAX - 1) / per_record) {
+        kfree(records);
+        return -ENOMEM;
+    }
+    size_t bufsz = count * per_record + 1;
+    char *buf = kmalloc(bufsz);
+    if (!buf) {
+        kfree(records);
+        return -ENOMEM;
+    }
+    buf[0] = '\0';
+    size_t off = 0;
+    for (size_t i = 0; i < count; i++) {
+        procfs_vma_snapshot_t *rec = &records[i];
+        char r = (rec->vm_flags & VM_READ) ? 'r' : '-';
+        char w = (rec->vm_flags & VM_WRITE) ? 'w' : '-';
+        char x = (rec->vm_flags & VM_EXEC) ? 'x' : '-';
+        char s = (rec->vm_flags & VM_SHARED) ? 's' : 'p';
+        size_t kb = (size_t)(rec->end - rec->start) / 1024;
+        size_t rss_kb = rec->stats.rss_pages * PAGE_SIZE / 1024;
+
+        if (rec->name[0]) {
+            appendf(buf, bufsz, &off,
+                    "%08lx-%08lx %c%c%c%c %08lx 00:00 %lu %s\n",
+                    (unsigned long)rec->start, (unsigned long)rec->end,
+                    r, w, x, s, (unsigned long)rec->file_offset,
+                    rec->ino, rec->name);
+        } else {
+            appendf(buf, bufsz, &off,
+                    "%08lx-%08lx %c%c%c%c %08lx 00:00 %lu\n",
+                    (unsigned long)rec->start, (unsigned long)rec->end,
+                    r, w, x, s, (unsigned long)rec->file_offset,
+                    rec->ino);
+        }
+        if (!smaps)
+            continue;
+        vma_smaps_stats_t *st = &rec->stats;
         appendf(buf, bufsz, &off,
-                "Size:           %8lu kB\n"
+                 "Size:           %8lu kB\n"
                 "KernelPageSize: %8lu kB\n"
                 "MMUPageSize:    %8lu kB\n"
                 "Rss:            %8lu kB\n"
@@ -359,18 +461,22 @@ static void generate_pid_maps(task_t *t, char *buf, size_t bufsz, int smaps) {
                 (unsigned long)(PAGE_SIZE / 1024),
                 (unsigned long)rss_kb,
                 (unsigned long)rss_kb,
-                (unsigned long)(st.shared_clean_pages * PAGE_SIZE / 1024),
-                (unsigned long)(st.shared_dirty_pages * PAGE_SIZE / 1024),
-                (unsigned long)(st.private_clean_pages * PAGE_SIZE / 1024),
-                (unsigned long)(st.private_dirty_pages * PAGE_SIZE / 1024),
+                (unsigned long)(st->shared_clean_pages * PAGE_SIZE / 1024),
+                (unsigned long)(st->shared_dirty_pages * PAGE_SIZE / 1024),
+                (unsigned long)(st->private_clean_pages * PAGE_SIZE / 1024),
+                (unsigned long)(st->private_dirty_pages * PAGE_SIZE / 1024),
                 (unsigned long)rss_kb,
-                (unsigned long)(st.anonymous_pages * PAGE_SIZE / 1024),
-                (unsigned long)(st.anon_huge_pages * PAGE_SIZE / 1024),
-                (unsigned long)(st.shmem_pmd_pages * PAGE_SIZE / 1024),
-                (unsigned long)(st.file_pmd_pages * PAGE_SIZE / 1024),
-                thp_eligible);
-        append_vma_flags(buf, bufsz, &off, v);
+                (unsigned long)(st->anonymous_pages * PAGE_SIZE / 1024),
+                (unsigned long)(st->anon_huge_pages * PAGE_SIZE / 1024),
+                (unsigned long)(st->shmem_pmd_pages * PAGE_SIZE / 1024),
+                (unsigned long)(st->file_pmd_pages * PAGE_SIZE / 1024),
+                rec->thp_eligible);
+        append_vma_flags(buf, bufsz, &off, rec->vm_flags);
     }
+    kfree(records);
+    *buf_out = buf;
+    *len_out = off;
+    return 0;
 }
 
 // 生成 procfs 文件的内容
@@ -660,15 +766,11 @@ static int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
         break;
     }
     case PF_PID_MAPS: {
-        task_t *t = proc_find_get(pid);
-        generate_pid_maps(t, buf, bufsz, 0);
-        proc_put(t);
+        buf[0] = '\0';
         break;
     }
     case PF_PID_SMAPS: {
-        task_t *t = proc_find_get(pid);
-        generate_pid_maps(t, buf, bufsz, 1);
-        proc_put(t);
+        buf[0] = '\0';
         break;
     }
     case PF_PID_OOM_SCORE_ADJ: {
@@ -912,10 +1014,34 @@ static pf_type_t name_to_type(const char *name, int *out_pid) {
     return PF_ROOT;
 }
 
+static int procfs_root_file_type(pf_type_t type)
+{
+    switch (type) {
+    case PF_MEMINFO:
+    case PF_VERSION:
+    case PF_UPTIME:
+    case PF_CMDLINE:
+    case PF_CPUINFO:
+    case PF_MOUNTS:
+    case PF_LOADAVG:
+    case PF_NET:
+    case PF_CONFIG_GZ:
+    case PF_FSTYPE:
+    case PF_CGROUPS:
+    case PF_SWAPS:
+    case PF_INTERRUPTS:
+    case PF_SYS_KERNEL_PIDMAP:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
 // Lightweight metadata stored in vnode->fs_data (no content buffer)
 typedef struct {
     pf_type_t type;
     int pid;
+    int fd;
     size_t content_len;
 } procfs_meta_t;
 
@@ -924,22 +1050,57 @@ typedef struct {
     pf_type_t type;
     int pid;
     size_t content_len;
-    char content[4096];
+    char *content;
 } procfs_priv_t;
 
-static procfs_meta_t *procfs_meta_create(pf_type_t type, int pid) {
+static int generate_pid_fdinfo(int pid, int fd, char *buf, size_t bufsz)
+{
+    task_t *task = proc_find_get(pid);
+    if (!task)
+        return -ESRCH;
+    if (!proc_task_may_access(proc_current(), task)) {
+        proc_put(task);
+        return -EACCES;
+    }
+    int gfd = -1;
+    int cloexec = 0;
+    vfile_t *target = fdtable_get_file_ref(task, fd, &gfd, &cloexec);
+    proc_put(task);
+    if (!target)
+        return -ENOENT;
+
+    mutex_lock(&target->offset_lock);
+    size_t pos = target->offset;
+    mutex_unlock(&target->offset_lock);
+    unsigned int open_flags = (unsigned int)target->flags;
+    if (cloexec)
+        open_flags |= O_CLOEXEC;
+    unsigned long ino = target->vnode ?
+        (unsigned long)target->vnode->ino : 0;
+    int len = snprintf(buf, bufsz,
+                       "pos:\t%lu\nflags:\t0%o\nino:\t%lu\n",
+                       (unsigned long)pos, open_flags, ino);
+    vfs_put_file_ref(gfd, target);
+    return len < 0 ? 0 : len;
+}
+
+static procfs_meta_t *procfs_meta_create(pf_type_t type, int pid, int fd) {
     procfs_meta_t *m = (procfs_meta_t *)kmalloc(sizeof(*m));
     if (!m) return NULL;
     memset(m, 0, sizeof(*m));
     m->type = type;
     m->pid = pid;
+    m->fd = fd;
     int real_pid = pid;
     if (pid == -1) {
         task_t *cur = proc_current();
         real_pid = cur ? cur->pid : 0;
     }
-    if (type == PF_PID_PAGEMAP) {
+    if (type == PF_PID_PAGEMAP || type == PF_PID_MAPS ||
+        type == PF_PID_SMAPS || type == PF_PID_FDINFO_ENTRY) {
         m->content_len = (256ULL * 1024 * 1024 * 1024 / PAGE_SIZE) * 8;
+        if (type != PF_PID_PAGEMAP)
+            m->content_len = 0;
     } else {
         char tmp[4096];
         m->content_len = (size_t)generate_content(type, real_pid, tmp, sizeof(tmp));
@@ -947,7 +1108,7 @@ static procfs_meta_t *procfs_meta_create(pf_type_t type, int pid) {
     return m;
 }
 
-static procfs_priv_t *procfs_priv_create(pf_type_t type, int pid) {
+static procfs_priv_t *procfs_priv_create(pf_type_t type, int pid, int fd) {
     procfs_priv_t *p = (procfs_priv_t *)kmalloc(sizeof(*p));
     if (!p) return NULL;
     memset(p, 0, sizeof(*p));
@@ -960,8 +1121,28 @@ static procfs_priv_t *procfs_priv_create(pf_type_t type, int pid) {
     p->pid = real_pid;
     if (type == PF_PID_PAGEMAP) {
         p->content_len = (256ULL * 1024 * 1024 * 1024 / PAGE_SIZE) * 8;
+    } else if (type == PF_PID_MAPS || type == PF_PID_SMAPS) {
+        int ret = generate_pid_maps_alloc(real_pid, type == PF_PID_SMAPS,
+                                          &p->content, &p->content_len);
+        if (ret < 0) {
+            kfree(p);
+            return NULL;
+        }
     } else {
-        p->content_len = (size_t)generate_content(type, real_pid, p->content, sizeof(p->content));
+        p->content = kmalloc(4096);
+        if (!p->content) {
+            kfree(p);
+            return NULL;
+        }
+        int len = type == PF_PID_FDINFO_ENTRY ?
+            generate_pid_fdinfo(real_pid, fd, p->content, 4096) :
+            generate_content(type, real_pid, p->content, 4096);
+        if (len < 0) {
+            kfree(p->content);
+            kfree(p);
+            return NULL;
+        }
+        p->content_len = (size_t)len;
     }
     return p;
 }
@@ -976,6 +1157,7 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
 
     pf_entry_t *child = NULL;
     int fd_entry = -1;
+    int fd_symlink = 0;
     if (dp && dp->type == PF_ROOT && dp->pid == 0 && strcmp(name, "sys") == 0) {
         child = new_entry(name, PF_SYS, 0);
         type = PF_SYS;
@@ -1067,28 +1249,70 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
             real_pid = cur ? cur->pid : 0;
         }
         task_t *task = proc_find_get(real_pid);
-        int task_fd = task ? fdtable_get(task, fd_entry) : -1;
+        if (task && !proc_task_may_access(proc_current(), task)) {
+            proc_put(task);
+            return -EACCES;
+        }
+        int gfd = -1;
+        vfile_t *target = task ?
+            fdtable_get_file_ref(task, fd_entry, &gfd, NULL) : NULL;
         proc_put(task);
-        if (task_fd < 0)
+        if (!target)
             return -ENOENT;
+        vfs_put_file_ref(gfd, target);
         child = new_entry(name, PF_PID_FD, dp->pid);
         type = PF_PID_FD;
-    } else if (type == PF_SELF) {
+        fd_symlink = 1;
+    } else if (dp && dp->type == PF_PID_FDINFO) {
+        if (parse_fd_name(name, &fd_entry) < 0)
+            return -ENOENT;
+        int real_pid = dp->pid;
+        if (real_pid == -1) {
+            task_t *cur = proc_current();
+            real_pid = cur ? cur->pid : 0;
+        }
+        task_t *task = proc_find_get(real_pid);
+        if (task && !proc_task_may_access(proc_current(), task)) {
+            proc_put(task);
+            return -EACCES;
+        }
+        int gfd = -1;
+        vfile_t *target = task ?
+            fdtable_get_file_ref(task, fd_entry, &gfd, NULL) : NULL;
+        proc_put(task);
+        if (!target)
+            return -ENOENT;
+        vfs_put_file_ref(gfd, target);
+        child = new_entry(name, PF_PID_FDINFO_ENTRY, dp->pid);
+        type = PF_PID_FDINFO_ENTRY;
+    } else if (dp && dp->type == PF_PID_NS) {
+        if (strcmp(name, "pid") == 0)
+            type = PF_PID_NS_PID;
+        else if (strcmp(name, "uts") == 0)
+            type = PF_PID_NS_UTS;
+        else if (strcmp(name, "user") == 0)
+            type = PF_PID_NS_USER;
+        else if (strcmp(name, "ipc") == 0)
+            type = PF_PID_NS_IPC;
+        else if (strcmp(name, "mnt") == 0)
+            type = PF_PID_NS_MNT;
+        else if (strcmp(name, "net") == 0)
+            type = PF_PID_NS_NET;
+        else if (strcmp(name, "cgroup") == 0)
+            type = PF_PID_NS_CGROUP;
+        else
+            return -ENOENT;
+        child = new_entry(name, type, dp->pid);
+    } else if (dp && dp->type == PF_ROOT && dp->pid == 0 &&
+               type == PF_SELF) {
         child = new_entry(name, PF_ROOT, -1);
-    } else if (is_pid_str(name)) {
+    } else if (dp && dp->type == PF_ROOT && dp->pid == 0 &&
+               is_pid_str(name)) {
+        task_t *task = proc_find_get(pid);
+        if (!task)
+            return -ENOENT;
+        proc_put(task);
         child = new_entry(name, PF_ROOT, pid);
-    } else if (type == PF_PID_STAT || type == PF_PID_STATUS ||
-               type == PF_PID_STATM || type == PF_PID_MAPS ||
-               type == PF_PID_SMAPS || type == PF_PID_OOM_SCORE_ADJ ||
-               type == PF_PID_OOM_SCORE || type == PF_PID_CGROUP ||
-               type == PF_PID_CMDLINE || type == PF_PID_COMM ||
-               type == PF_PID_EXE || type == PF_PID_CWD ||
-               type == PF_PID_FD || type == PF_PID_ENVIRON ||
-               type == PF_PID_IO || type == PF_PID_LOGINUID ||
-               type == PF_PID_SESSIONID || type == PF_PID_NS ||
-               type == PF_PID_FDINFO || type == PF_PID_MOUNTINFO ||
-               type == PF_PID_PAGEMAP) {
-        child = new_entry(name, type, dp ? dp->pid : 0);
     } else if (dp && dp->type == PF_ROOT && (dp->pid > 0 || dp->pid == -1) &&
                strcmp(name, "cmdline") == 0) {
         child = new_entry(name, PF_PID_CMDLINE, dp->pid);
@@ -1096,22 +1320,31 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
                strcmp(name, "mounts") == 0) {
         /* /proc/<pid>/mounts — same as /proc/mounts */
         child = new_entry(name, PF_MOUNTS, 0);
-    } else if (dp->type == PF_PID_NS) {
-        if (type == PF_PID_NS_PID || type == PF_PID_NS_UTS ||
-            type == PF_PID_NS_USER || type == PF_PID_NS_IPC ||
-            type == PF_PID_NS_MNT || type == PF_PID_NS_NET ||
-            type == PF_PID_NS_CGROUP) {
+    } else if (dp && dp->type == PF_ROOT &&
+               (dp->pid > 0 || dp->pid == -1) &&
+               strcmp(name, "cgroup") == 0) {
+        type = PF_PID_CGROUP;
+        child = new_entry(name, type, dp->pid);
+    } else if (dp && dp->type == PF_ROOT && (dp->pid > 0 || dp->pid == -1)) {
+        if (type == PF_PID_STAT || type == PF_PID_STATUS ||
+            type == PF_PID_STATM || type == PF_PID_MAPS ||
+            type == PF_PID_SMAPS || type == PF_PID_OOM_SCORE_ADJ ||
+            type == PF_PID_OOM_SCORE || type == PF_PID_CGROUP ||
+            type == PF_PID_COMM || type == PF_PID_EXE ||
+            type == PF_PID_CWD || type == PF_PID_FD ||
+            type == PF_PID_ENVIRON || type == PF_PID_IO ||
+            type == PF_PID_LOGINUID || type == PF_PID_SESSIONID ||
+            type == PF_PID_NS || type == PF_PID_FDINFO ||
+            type == PF_PID_MOUNTINFO || type == PF_PID_PAGEMAP) {
             child = new_entry(name, type, dp->pid);
         } else {
             return -ENOENT;
         }
-    } else if (dp->type == PF_PID_FD ||
-               dp->type == PF_PID_FDINFO) {
-        return -ENOENT;
-    } else if (dp && dp->type == PF_ROOT && (dp->pid > 0 || dp->pid == -1)) {
-        return -ENOENT;
     } else {
-        if (type == PF_ROOT) return -ENOENT;
+        if (!dp || dp->type != PF_ROOT || dp->pid != 0)
+            return -ENOENT;
+        if (!procfs_root_file_type(type))
+            return -ENOENT;
         child = new_entry(name, type, 0);
     }
     if (!child) return -ENOMEM;
@@ -1120,7 +1353,7 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
     if (!vn) { kfree(child); return -ENOMEM; }
     memset(vn, 0, sizeof(*vn));
     vn->ino = (uint64_t)(uintptr_t)child;
-    vn->type = fd_entry >= 0 ? VFS_FT_SYMLINK :
+    vn->type = fd_symlink ? VFS_FT_SYMLINK :
                ((type == PF_ROOT && is_pid_str(name)) || type == PF_SELF ||
                 type == PF_SYS || type == PF_SYS_FS || type == PF_SYS_KERNEL ||
                 type == PF_SYS_NET || type == PF_SYS_VM ||
@@ -1143,10 +1376,18 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
     vnode_ref_init(vn, 1);
     vn->parent = dir;
     vnode_get(dir);
+    vn->mnt = dir->mnt;
     vn->ops = dir->ops;
 
-    procfs_meta_t *meta = procfs_meta_create(child->type, child->pid);
-    if (meta) vn->size = meta->content_len;
+    procfs_meta_t *meta = procfs_meta_create(child->type, child->pid,
+                                              fd_entry);
+    if (!meta) {
+        vnode_put(dir);
+        kfree(vn);
+        kfree(child);
+        return -ENOMEM;
+    }
+    vn->size = meta->content_len;
     vn->fs_data = meta;
 
     *out = vn;
@@ -1183,12 +1424,13 @@ static int procfs_readlink(vnode_t *vn, char *buf, size_t sz)
         pid = cur ? cur->pid : 0;
     }
     task_t *task = proc_find_get(pid);
-    int gfd = task ? fdtable_get(task, fd) : -EBADF;
-    if (gfd < 0) {
+    if (task && !proc_task_may_access(proc_current(), task)) {
         proc_put(task);
-        return -ENOENT;
+        return -EACCES;
     }
-    vfile_t *target = vfs_get_file_ref(gfd);
+    int gfd = -1;
+    vfile_t *target = task ?
+        fdtable_get_file_ref(task, fd, &gfd, NULL) : NULL;
     if (!target) {
         proc_put(task);
         return -ENOENT;
@@ -1363,6 +1605,10 @@ static int procfs_fd_readdir(vfile_t *vf, procfs_priv_t *p,
     task_t *task = proc_find_get(p->pid);
     if (!task)
         return -ENOENT;
+    if (!proc_task_may_access(proc_current(), task)) {
+        proc_put(task);
+        return -EACCES;
+    }
 
     int cursor = (int)vf->offset;
     size_t total = 0;
@@ -1382,8 +1628,15 @@ static int procfs_fd_readdir(vfile_t *vf, procfs_priv_t *p,
             next_cursor = 2;
         } else {
             fd = cursor - 2;
-            while (fd < MAX_FILES && fdtable_get(task, fd) < 0)
+            while (fd < MAX_FILES) {
+                int gfd = -1;
+                vfile_t *target = fdtable_get_file_ref(task, fd, &gfd, NULL);
+                if (target) {
+                    vfs_put_file_ref(gfd, target);
+                    break;
+                }
                 fd++;
+            }
             if (fd >= MAX_FILES)
                 break;
             snprintf(fd_name, sizeof(fd_name), "%d", fd);
@@ -1460,7 +1713,7 @@ static int procfs_freaddir(vfile_t *vf, void *dirp, size_t count) {
 
     const char **entries = root_entries;
     int is_root = (p && p->type == PF_ROOT && p->pid == 0);
-    if (p && p->type == PF_ROOT && p->pid > 0)
+    if (p && p->type == PF_ROOT && (p->pid > 0 || p->pid == -1))
         entries = pid_entries;
     else if (p && p->type == PF_SYS)
         entries = sys_entries;
@@ -1499,7 +1752,7 @@ static int procfs_freaddir(vfile_t *vf, void *dirp, size_t count) {
                 int cur_idx = 0;
                 task_t *t;
                 for (t = proc_first_task_locked(); t; t = proc_next_task_locked(t)) {
-                    if (t->state == PROC_UNUSED || t->pid <= 1)
+                    if (t->state == PROC_UNUSED || t->pid <= 0)
                         continue;
                     if (cur_idx == pid_idx)
                         break;
@@ -1551,7 +1804,12 @@ static int procfs_freaddir(vfile_t *vf, void *dirp, size_t count) {
 
 // procfs 的 close 操作（关闭文件）
 static int procfs_fclose(vfile_t *vf) {
-    if (vf && vf->priv) { kfree(vf->priv); vf->priv = NULL; }
+    if (vf && vf->priv) {
+        procfs_priv_t *p = (procfs_priv_t *)vf->priv;
+        kfree(p->content);
+        kfree(p);
+        vf->priv = NULL;
+    }
     return 0;
 }
 
@@ -1576,7 +1834,7 @@ vnode_t *procfs_mount(void) {
     root->ops = &g_procfs_vnode_ops;
     root->size = 0;
 
-    procfs_meta_t *meta = procfs_meta_create(PF_ROOT, 0);
+    procfs_meta_t *meta = procfs_meta_create(PF_ROOT, 0, -1);
     root->fs_data = meta;
     return root;
 }
@@ -1587,13 +1845,15 @@ static vfile_t *procfs_open_vnode(vnode_t *vn, int flags) {
     if (!vf) return NULL;
     vf->vnode = vn;
     vf->flags = flags;
-    vnode_get(vn);
     vf->ops = &g_procfs_fops;
     vfile_ref_init(vf, 1);
 
     procfs_meta_t *meta = (procfs_meta_t *)vn->fs_data;
-    procfs_priv_t *priv = procfs_priv_create(meta ? meta->type : PF_ROOT, meta ? meta->pid : 0);
+    procfs_priv_t *priv = procfs_priv_create(meta ? meta->type : PF_ROOT,
+                                              meta ? meta->pid : 0,
+                                              meta ? meta->fd : -1);
     if (!priv) { vfile_free(vf); return NULL; }
+    vnode_get(vn);
     vf->priv = priv;
     return vf;
 }

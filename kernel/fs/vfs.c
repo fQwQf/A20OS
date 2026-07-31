@@ -141,33 +141,90 @@ invalid:
     return -ENOENT;
 }
 
-static int vfs_proc_fd_path(const char *path, char *out, size_t outsz)
+static int vfs_proc_fd_open(const char *path, int flags)
 {
     task_t *task = NULL;
     int fd = -1;
     int match = vfs_proc_fd_target(path, &task, &fd);
     if (match <= 0)
         return match;
-    int gfd = fdtable_get(task, fd);
-    if (gfd < 0) {
+    if (!proc_task_may_access(proc_current(), task)) {
         proc_put(task);
-        return -ENOENT;
+        return -EACCES;
     }
-    vfile_t *vf = vfs_get_file_ref(gfd);
+    int gfd = -1;
+    vfile_t *vf = fdtable_get_file_ref(task, fd, &gfd, NULL);
     if (!vf) {
         proc_put(task);
         return -ENOENT;
     }
-    size_t len = strlen(vf->path);
-    if (len == 0 || len >= outsz) {
+    if ((flags & (O_CREAT | O_EXCL)) == (O_CREAT | O_EXCL)) {
         vfs_put_file_ref(gfd, vf);
         proc_put(task);
-        return len == 0 ? -ENOENT : -ENAMETOOLONG;
+        return -EEXIST;
     }
-    memcpy(out, vf->path, len + 1);
+
+    vnode_t *vn = vf->vnode;
+    char target_path[MAX_PATH_LEN];
+    if (vn)
+        vnode_get(vn);
+    strncpy(target_path, vf->path, sizeof(target_path) - 1);
+    target_path[sizeof(target_path) - 1] = '\0';
     vfs_put_file_ref(gfd, vf);
     proc_put(task);
-    return 1;
+    if (!vn)
+        return -ENXIO;
+
+    if ((flags & O_DIRECTORY) && vn->type != VFS_FT_DIR) {
+        vnode_put(vn);
+        return -ENOTDIR;
+    }
+    int mask = 0;
+    if (vfs_should_read(flags))
+        mask |= R_OK;
+    if (vfs_should_write(flags) || (flags & O_TRUNC))
+        mask |= W_OK;
+    if (mask && vfs_vnode_permission(vn, mask) < 0) {
+        vnode_put(vn);
+        return -EACCES;
+    }
+    if (vn->type == VFS_FT_DIR && vfs_should_write(flags)) {
+        vnode_put(vn);
+        return -EISDIR;
+    }
+    if ((flags & O_TRUNC) && vn->type == VFS_FT_REGULAR &&
+        vn->ops && vn->ops->truncate) {
+        int r = vn->ops->truncate(vn, 0);
+        if (r < 0) {
+            vnode_put(vn);
+            return r;
+        }
+        page_cache_truncate(vn, 0);
+    }
+    if (!vn->ops || !vn->ops->open) {
+        vnode_put(vn);
+        return -ENXIO;
+    }
+
+    vfile_t *opened = vn->ops->open(vn, flags);
+    if (!opened) {
+        vnode_put(vn);
+        return -ENOMEM;
+    }
+    strncpy(opened->path, target_path, MAX_PATH_LEN - 1);
+    opened->path[MAX_PATH_LEN - 1] = '\0';
+    int opened_gfd = vfs_alloc_fd(opened);
+    if (opened_gfd < 0) {
+        vnode_t *opened_vn = opened->vnode;
+        if (opened->ops && opened->ops->close)
+            opened->ops->close(opened);
+        vfile_free(opened);
+        vnode_put(opened_vn);
+        vnode_put(vn);
+        return -EMFILE;
+    }
+    vnode_put(vn);
+    return opened_gfd;
 }
 
 int vfs_open(const char *path, int flags, int mode) {
@@ -200,13 +257,11 @@ int vfs_open(const char *path, int flags, int mode) {
         return vfs_open(exe, flags, mode);
     }
 
-    char proc_fd_path[MAX_PATH_LEN];
-    int proc_fd_match = vfs_proc_fd_path(resolved, proc_fd_path,
-                                         sizeof(proc_fd_path));
+    int proc_fd_match = vfs_proc_fd_open(resolved, flags);
     if (proc_fd_match < 0)
         return proc_fd_match;
     if (proc_fd_match > 0)
-        return vfs_open(proc_fd_path, flags, mode);
+        return proc_fd_match;
 
     /* Find mount point */
     mount_t *mnt = vfs_find_mount(resolved);
@@ -465,7 +520,7 @@ int vfs_openat2(int dirfd, const char *path, int flags, int mode, uint64_t resol
     return gfd;
 }
 
-void vfs_finalize_closed_file(int fd, vfile_t *vf)
+static void vfs_release_file_final(int fd, vfile_t *vf)
 {
     if (!vf)
         return;
@@ -480,11 +535,25 @@ void vfs_finalize_closed_file(int fd, vfile_t *vf)
     ktrace_vfs("[VFS] close: gfd=%d done\n", fd);
 }
 
+void vfs_put_file_ref(int fd, vfile_t *vf)
+{
+    vfile_t *closed = NULL;
+    if (file_put_ref_prepare(fd, vf, &closed) == 0)
+        vfs_release_file_final(fd, closed);
+}
+
+void vfs_put_file(vfile_t *vf)
+{
+    vfile_t *closed = NULL;
+    if (file_put_ref_prepare(-1, vf, &closed) == 0)
+        vfs_release_file_final(-1, closed);
+}
+
 int vfs_close(int fd) {
     vfile_t *vf = NULL;
     int r = file_close_prepare(fd, &vf);
     if (r < 0) return r;
-    vfs_finalize_closed_file(fd, vf);
+    vfs_release_file_final(fd, vf);
     return 0;
 }
 
@@ -844,16 +913,48 @@ vnode_t *vfs_resolve_no_follow_final(const char *path) {
     return vn;
 }
 
-int vfs_statx(const char *path, kstat_t *st, unsigned int mask, int sync_hint) {
+static int vfs_vfile_stat(vfile_t *vf, kstat_t *st)
+{
+    if (vf->vnode)
+        return vfs_vnode_stat(vf->vnode, st);
+    if (vfs_is_char_device_vfile(vf)) {
+        fill_char_kstat(st);
+        return 0;
+    }
+    if (vfs_is_pipe_vfile(vf)) {
+        fill_pipe_kstat(st);
+        return 0;
+    }
+    return -EBADF;
+}
+
+static int vfs_proc_fd_stat(const char *path, kstat_t *st, int *matched)
+{
     task_t *task = NULL;
     int fd = -1;
-    int proc_fd_match = vfs_proc_fd_target(path, &task, &fd);
-    if (proc_fd_match < 0)
-        return proc_fd_match;
-    if (proc_fd_match > 0) {
-        int gfd = fdtable_get(task, fd);
-        return gfd < 0 ? -ENOENT : vfs_fstat(gfd, st);
+    int match = vfs_proc_fd_target(path, &task, &fd);
+    *matched = match != 0;
+    if (match <= 0)
+        return match;
+    if (!proc_task_may_access(proc_current(), task)) {
+        proc_put(task);
+        return -EACCES;
     }
+    int gfd = -1;
+    vfile_t *vf = fdtable_get_file_ref(task, fd, &gfd, NULL);
+    proc_put(task);
+    if (!vf)
+        return -ENOENT;
+    int r = vfs_vfile_stat(vf, st);
+    vfs_put_file_ref(gfd, vf);
+    return r;
+}
+
+int vfs_statx(const char *path, kstat_t *st, unsigned int mask, int sync_hint) {
+    int proc_fd_match = 0;
+    int proc_fd_result = vfs_proc_fd_stat(path, st, &proc_fd_match);
+    if (proc_fd_match)
+        return proc_fd_result;
     vnode_t *vn = vfs_resolve(path);
     if (!vn) return g_lookup_errno ? g_lookup_errno : -ENOENT;
     if (sync_hint == AT_STATX_FORCE_SYNC) {
@@ -883,15 +984,10 @@ int vfs_fstatx(int dirfd, const char *path, kstat_t *st, int flags, unsigned int
 }
 
 int vfs_stat(const char *path, kstat_t *st) {
-    task_t *task = NULL;
-    int fd = -1;
-    int proc_fd_match = vfs_proc_fd_target(path, &task, &fd);
-    if (proc_fd_match < 0)
-        return proc_fd_match;
-    if (proc_fd_match > 0) {
-        int gfd = fdtable_get(task, fd);
-        return gfd < 0 ? -ENOENT : vfs_fstat(gfd, st);
-    }
+    int proc_fd_match = 0;
+    int proc_fd_result = vfs_proc_fd_stat(path, st, &proc_fd_match);
+    if (proc_fd_match)
+        return proc_fd_result;
     vnode_t *vn = vfs_resolve(path);
     if (!vn) return g_lookup_errno ? g_lookup_errno : -ENOENT;
     int r = vfs_vnode_stat(vn, st);
@@ -901,18 +997,7 @@ int vfs_stat(const char *path, kstat_t *st) {
 
 int vfs_fstat(int fd, kstat_t *st) {
     vfile_t *vf = vfs_get_file_ref(fd);
-    int r = -EBADF;
-    if (vf) {
-        if (vf->vnode)
-            r = vfs_vnode_stat(vf->vnode, st);
-        else if (vfs_is_char_device_vfile(vf)) {
-            fill_char_kstat(st);
-            r = 0;
-        } else if (vfs_is_pipe_vfile(vf)) {
-            fill_pipe_kstat(st);
-            r = 0;
-        }
-    }
+    int r = vf ? vfs_vfile_stat(vf, st) : -EBADF;
     vfs_put_file_ref(fd, vf);
     return r;
 }
@@ -1192,15 +1277,16 @@ int vfs_readlinkat(int dirfd, const char *path, char *buf, size_t sz) {
     if (proc_fd_match < 0)
         return proc_fd_match;
     if (proc_fd_match > 0) {
-        int gfd = fdtable_get(proc_fd_task, proc_fd);
-        if (gfd < 0) {
+        if (!proc_task_may_access(proc_current(), proc_fd_task)) {
             proc_put(proc_fd_task);
-            return -ENOENT;
+            return -EACCES;
         }
-        vfile_t *vf = vfs_get_file_ref(gfd);
+        int gfd = -1;
+        vfile_t *vf = fdtable_get_file_ref(proc_fd_task, proc_fd, &gfd,
+                                           NULL);
         if (!vf) {
             proc_put(proc_fd_task);
-            return -EBADF;
+            return -ENOENT;
         }
         char visible_fd[MAX_PATH_LEN];
         const char *target =

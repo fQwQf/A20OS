@@ -112,33 +112,21 @@ int64_t sys_a20_thread_create(const a20_syscall_args_t *args)
     a20_thread_create_args_t kargs;
     A20_VALIDATE_AND_COPY(uargs, kargs);
 
+    if (!kargs.entry || !kargs.stack_base || !kargs.stack_size)
+        return -A20_ERR_INVALID_ARGUMENT;
+    if (kargs.flags != 0) return -A20_ERR_INVALID_ARGUMENT;
+
     task_t *cur = proc_current();
-
-    /* CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_THREAD | CLONE_SIGHAND
-     * to create a thread (shares address space, fd table, signal handlers) */
-    uint64_t clone_flags = 0x00000100ULL /* CLONE_VM */ |
-                           0x00000200ULL /* CLONE_FS */ |
-                           0x00000400ULL /* CLONE_FILES */ |
-                           0x00008000ULL /* CLONE_THREAD */ |
-                           0x00000800ULL /* CLONE_SIGHAND */;
-
-    int ctid = 0;
-    int pid = proc_clone(clone_flags, kargs.stack_base, NULL,
-                          kargs.tls_base, &ctid, 0);
-    if (pid < 0) return -A20_ERR_NO_MEMORY;
-
-    task_t *new_task = proc_find_get(pid);
-    if (new_task && new_task->trap_ctx && kargs.entry) {
-        trap_context_t *tc = new_task->trap_ctx;
-        TRAP_CTX_SET_RET(tc, (uint64_t)kargs.entry);
-        TRAP_CTX_ARG1(tc) = (uint64_t)kargs.arg;
-        TRAP_CTX_SET_SP(tc, kargs.stack_base);
-    }
-    proc_put(new_task);
-
     struct a20_ht_internal *ht = task_get_a20_ht(cur);
     if (!ht) return -A20_ERR_BAD_HANDLE;
 
+    int pid = proc_create_thread(kargs.entry, kargs.arg,
+                                 (vaddr_t)kargs.stack_base,
+                                 (vaddr_t)kargs.tls_base);
+    if (pid < 0) return -A20_ERR_NO_MEMORY;
+
+    /* Thread handles currently use A20_OBJ_TASK so task_wait/task_kill apply;
+     * see docs/native-abi/08-runtime-status.md (THREAD type is reserved). */
     int64_t h = a20_handle_install(ht, (void *)(uintptr_t)pid, A20_OBJ_TASK,
                                     A20_RIGHT_WAIT | A20_RIGHT_SIGNAL |
                                     A20_RIGHT_STAT | A20_RIGHT_CONTROL | A20_RIGHT_DUP |
@@ -146,7 +134,7 @@ int64_t sys_a20_thread_create(const a20_syscall_args_t *args)
     if (h < 0) return h;
 
     kargs.out_thread = (a20_handle_t)h;
-    if (copy_to_user(uargs, &kargs, sizeof(kargs)) < 0)
+    if (a20_copy_struct_to_user(uargs, &kargs, sizeof(kargs)) < 0)
         return -A20_ERR_FAULT;
     return h;
 }

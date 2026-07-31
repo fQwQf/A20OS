@@ -22,11 +22,15 @@ typedef struct vfile vfile_t;
 typedef struct files_struct {
     spinlock_t lock;
     refcount_t refcount;
+    int     owners;
+    int     release_owner_pid;
     int     fd[MAX_FILES];
     uint8_t cloexec[MAX_FILES];
     uint64_t open_mask[(MAX_FILES + 63) / 64];
     int     next_fd;
 } files_struct_t;
+
+struct vfile;
 
 void fdtable_init(task_t *task);
 void fdtable_init_stdio(task_t *task);
@@ -38,7 +42,8 @@ void fdtable_close_on_exec(task_t *task);
 
 int  fdtable_get(task_t *task, int fd);
 int  fdtable_get_current(int fd);
-vfile_t *fdtable_get_file_ref(task_t *task, int fd, int *out_gfd);
+struct vfile *fdtable_get_file_ref(task_t *task, int fd, int *gfd,
+                                   int *cloexec);
 vfile_t *fdtable_get_current_file_ref(int fd, int *out_gfd);
 int  fdtable_install(task_t *task, int gfd, int flags);
 int  fdtable_install_current(int gfd, int flags);
