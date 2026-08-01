@@ -204,6 +204,10 @@ int vfs_vnode_permission(vnode_t *vn, int mask)
     int r = vfs_vnode_stat(vn, &st);
     if (r < 0)
         return r;
+    /* A read-only mount rejects write/truncate access regardless of mode
+     * or capability (Linux: -EROFS). */
+    if ((mask & W_OK) && vn->mnt && (vn->mnt->flags & 1))
+        return -EROFS;
     return vfs_mode_has_perm(st.st_mode, st.st_uid, st.st_gid, mask);
 }
 

@@ -11,7 +11,7 @@ A20OS 内置 NTFS 读/写文件系统（`kernel/fs/ntfs.c`）。实现依据 NTF
 | 文件读 | ✅ | 常驻（resident）与非驻留（non-resident）`$DATA`，稀疏 run 返回零 |
 | 文件写 / 截断 | ✅ | 常驻写入、常驻→非驻留转换、经 `$Bitmap` 分配簇并扩展 run list |
 | 创建 / 删除 | ✅ | 分配 MFT 记录、构建 `$STANDARD_INFORMATION`/`$FILE_NAME`/`$DATA`/`$INDEX_ROOT`，目录索引增删 |
-| 重命名 | ❌ | 未实现（`rename` 返回 -ENOSYS） |
+| 重命名 | ✅ | 移除旧索引项，改写子记录 `$FILE_NAME`（新 parent ref + 新 name），插入新索引项；失败时恢复旧索引项 |
 | 压缩 / 加密属性 | ❌ | 读路径显式拒绝（返回 EIO） |
 | 目录索引扩容 | ⚠️ | 追加到索引根或已有索引分配块，两者都满时返回 `-ENOSPC`（不做 B-tree 块分裂） |
 

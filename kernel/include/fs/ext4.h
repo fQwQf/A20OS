@@ -43,6 +43,7 @@
 #define EXT4_FEATURE_INCOMPAT_FLEX_BG      0x0200
 #define EXT4_FEATURE_INCOMPAT_EA_INODE     0x0400
 #define EXT4_FEATURE_INCOMPAT_DIRDATA      0x1000
+#define EXT4_FEATURE_INCOMPAT_CSUM_SEED    0x2000
 
 #define EXT4_FEATURE_RO_COMPAT_SPARSE_SUPER  0x0001
 #define EXT4_FEATURE_RO_COMPAT_LARGE_FILE    0x0002
@@ -261,7 +262,7 @@ typedef struct ext4_sb_info {
 typedef struct ext4_vnode_priv {
     ext4_sb_info_t *sb;
     uint32_t        inode_num;
-    uint32_t        file_size;
+    uint64_t        file_size;
     int             type;
     int             unlinked;   /* dirent removed; free blocks+inode on release */
 } ext4_vnode_priv_t;
@@ -269,7 +270,7 @@ typedef struct ext4_vnode_priv {
 typedef struct ext4_fctx {
     ext4_sb_info_t *sb;
     uint32_t        inode_num;
-    uint32_t        file_size;
+    uint64_t        file_size;
     int             is_dir;
     size_t          file_off;
     size_t          dir_off;
