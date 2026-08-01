@@ -34,6 +34,7 @@
 #include "net/socket.h"
 #include "drivers/core/driver_core.h"
 #include "drivers/usb/usb.h"
+#include "drivers/usb/usb_storage.h"
 #ifdef CONFIG_SWAP
 #include "mm/swap.h"
 #endif
@@ -212,6 +213,24 @@ static void mount_block_devices(void) {
             bin_ok = try_mount(ahci, "/bin", "fat32") == 0;
         if (!test_ok)
             test_ok = try_mount(ahci, "/test", "ext4") == 0;
+    }
+
+    /* USB mass-storage disks (U-disk / USB HDD).  These enumerate after the
+     * PCI/virtio buses and are scanned by usb_core_scan() from the scheduler
+     * context, so they are mounted last and only when a core disk is absent. */
+    for (int i = 0; i < 4; i++) {
+        block_dev_t *usb = usb_storage_get_dev(i);
+        if (!usb)
+            continue;
+        block_dev_t *fsdev = first_gpt_partition(usb);
+        if (!fsdev)
+            fsdev = usb;
+        if (!bin_ok && try_mount(fsdev, "/bin", "fat32") == 0) {
+            bin_ok = 1;
+            continue;
+        }
+        if (!test_ok && try_mount(fsdev, "/test", "ext4") == 0)
+            test_ok = 1;
     }
 
     if (!bin_ok)  printf("[INIT] WARNING: no FAT32 device for /bin\n");

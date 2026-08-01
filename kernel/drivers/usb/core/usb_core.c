@@ -287,6 +287,11 @@ int usb_submit_urb(usb_urb_t *urb)
             return -EINVAL;
         return urb->dev->hcd->ops->submit_interrupt(urb->dev->hcd, urb);
     }
+    if (urb->transfer_type == USB_XFER_BULK) {
+        if (!urb->dev->hcd->ops->submit_bulk)
+            return -EINVAL;
+        return urb->dev->hcd->ops->submit_bulk(urb->dev->hcd, urb);
+    }
     return -EOPNOTSUPP;
 }
 

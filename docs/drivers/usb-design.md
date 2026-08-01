@@ -1,8 +1,7 @@
 # A20OS USB 子系统设计
 
-> 状态：设计稿（未实现）。
-> 净室说明：本设计及后续实现参考 USB 2.0/3.0 规范与 Uinxed-Kernel 的
-> `drivers/usb/` 功能划分，但不复用其任何代码。
+> 状态：已实现（HID + Mass Storage + xHCI）。本设计文档记录了最初的架构决策；当前实现为
+> `kernel/drivers/usb/`（core / host/xhci / class/usb-hid / class/usb-storage）。
 
 ## 1. 背景与目标
 
