@@ -3,8 +3,8 @@
 # Reproducible 2026 final-round evaluation entry point.
 #
 # Usage:
-#   scripts/run_final_eval.sh riscv64|loongarch64 cagent|buildstorm
-#   scripts/run_final_eval.sh riscv64|loongarch64 buildstorm-probe 1|8 [probe-case]
+#   tools/run_final_eval.sh riscv64|loongarch64 cagent|buildstorm
+#   tools/run_final_eval.sh riscv64|loongarch64 buildstorm-probe 1|8 [probe-case]
 #
 # The official ext4 image is never opened writable.  A read-only base restored
 # from the published .gz and a fresh qcow2 overlay are used for every run.
@@ -242,7 +242,7 @@ fi
 
 if [[ "$group" == buildstorm-probe ]]; then
     host_probe_dir="$run_dir/host-probe-build"
-    bash scripts/build_buildstorm_probes.sh \
+    bash tools/build_buildstorm_probes.sh \
         "$arch" "$base_image" "$host_probe_dir"
     mmd -i "$run_fat32" ::/a20-probe >/dev/null 2>&1 || true
     mcopy -o -i "$run_fat32" "$host_probe_dir/cwd-probe" \
@@ -350,7 +350,7 @@ fi
 echo "[final-eval] run=$run_id timeout=${timeout_s}s"
 set +e
 conda run -n "$conda_env" --no-capture-output \
-    python scripts/run_with_timeout.py --foreground "$timeout_s" \
+    python tools/run_with_timeout.py --foreground "$timeout_s" \
     "${qemu_command[@]}" 2>&1 | tee "$serial_log"
 qemu_status=${PIPESTATUS[0]}
 set -e
