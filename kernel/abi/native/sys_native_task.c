@@ -160,11 +160,35 @@ int64_t sys_a20_task_info(const a20_syscall_args_t *args)
 int64_t sys_a20_thread_sleep(const a20_syscall_args_t *args)
 {
     uint64_t duration_ns = A20_ARG(0);
-    uint64_t now_ns = timer_get_ticks() * (1000000000ULL / TICKS_PER_SEC);
-    uint64_t deadline_ns = now_ns + duration_ns;
-    while (timer_get_ticks() * (1000000000ULL / TICKS_PER_SEC) < deadline_ns) {
+    if (duration_ns == 0) {
         proc_yield();
+        return A20_OK;
     }
+
+    /* Interruptible park-based sleep: a task_kill wakes the sleeper with
+     * PROC_WAKE_SIGNAL, so the sleep returns -A20_ERR_INTERRUPTED and the
+     * caller can dispatch signals at this checkpoint.  The wait-timer heap
+     * fires the deadline on timeout. */
+    uint64_t sec  = duration_ns / 1000000000ULL;
+    uint64_t nsec = duration_ns % 1000000000ULL;
+    uint64_t ticks = sec * TICKS_PER_SEC +
+                     nsec * TICKS_PER_SEC / 1000000000ULL;
+    if (ticks == 0)
+        ticks = 1;
+    uint64_t now = timer_get_ticks();
+    uint64_t deadline = now + ticks;
+    if (deadline < now)
+        deadline = UINT64_MAX / 2;   /* overflow: cap far future */
+
+    proc_wait_token_t token = proc_park_prepare(PROC_WAIT_INTERRUPTIBLE, deadline);
+    if (!token.task) {
+        proc_yield();
+        return A20_OK;
+    }
+    proc_wake_reason_t reason = proc_park_commit(token);
+    proc_park_finish(token);
+    if (proc_wake_reason_is_task_interrupt(reason))
+        return -A20_ERR_INTERRUPTED;
     return A20_OK;
 }
 
