@@ -44,7 +44,6 @@ extern "C" const a20_start_info *__a20_start_info;
 namespace {
 
 static int a20_to_errno(a20_status_t st);
-static void a20_dispatch_pending_signals();
 
 /* ------------------------------------------------------------------ */
 /* fd table: POSIX fd  <->  A20 handle                                 */
@@ -471,6 +470,61 @@ int Sysdeps<TcbSet>::operator()(void *pointer) {
 #error "Missing architecture specific code."
 #endif
 	return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* signals: checkpoint dispatch (handlers table + default actions)      */
+/* ------------------------------------------------------------------ */
+
+static struct sigaction g_a20_sig_handlers[64];
+static uint64_t g_a20_sig_blocked;
+
+/* Default action for a signal with no handler: terminate the process for
+ * the signals POSIX terminates on, ignore the rest. */
+static void a20_sig_default(int sig) {
+	switch (sig) {
+	case SIGHUP:
+	case SIGINT:
+	case SIGQUIT:
+	case SIGKILL:
+	case SIGPIPE:
+	case SIGTERM:
+	case SIGUSR1:
+	case SIGUSR2:
+	case SIGBUS:
+	case SIGSEGV:
+	case SIGSYS:
+	case SIGABRT:
+	case SIGILL:
+	case SIGFPE:
+	case SIGTRAP:
+		/* Terminate with 128+sig (shell convention). */
+		a20_syscall6(A20_SYS_task_exit, (uint64_t)(128 + sig), 0, 0, 0, 0, 0);
+		break;
+	default:
+		/* SIGCHLD, SIGURG, SIGCONT, SIGTSTP etc.: ignore. */
+		break;
+	}
+}
+
+/* Run the handlers for any delivered signals at an explicit checkpoint.
+ * Called from the futex wait path after A20_ERR_INTERRUPTED and from
+ * pthread_testcancel; never from an arbitrary instruction boundary. */
+static void a20_dispatch_pending_signals() {
+	int64_t sigs = a20_rt_signal_check();
+	if (!sigs)
+		return;
+	for (int sig = 1; sig < 64; sig++) {
+		if (!((uint64_t)sigs & (1ULL << sig)))
+			continue;
+		const struct sigaction &sa = g_a20_sig_handlers[sig];
+		if (sa.sa_handler && sa.sa_handler != SIG_IGN &&
+		    sa.sa_handler != SIG_DFL) {
+			sa.sa_handler(sig);
+		} else if (!sa.sa_handler) {
+			a20_sig_default(sig);
+		}
+	}
 }
 
 /* ------------------------------------------------------------------ */
@@ -1316,6 +1370,35 @@ int Sysdeps<Renameat>::operator()(int olddirfd, const char *oldpath, int newdirf
 
 } // namespace mlibc
 
+/* pid -> task-handle registry for spawned children (used by kill/waitpid).
+ * File scope so both the mlibc-namespaced sysdeps and the extern "C"
+ * posix_spawn below can use it. */
+struct ChildReg {
+	pid_t pid = 0;
+	a20_handle_t task = A20_HANDLE_NULL;
+};
+
+static ChildReg g_children[32];
+
+static int child_register(pid_t pid, a20_handle_t task) {
+	for (auto &c : g_children) {
+		if (c.pid == 0) {
+			c.pid = pid;
+			c.task = task;
+			return 0;
+		}
+	}
+	return ENOMEM;
+}
+
+static ChildReg *child_find(pid_t pid) {
+	for (auto &c : g_children) {
+		if (c.pid == pid)
+			return &c;
+	}
+	return nullptr;
+}
+
 namespace mlibc {
 
 /* ------------------------------------------------------------------ */
@@ -1465,7 +1548,9 @@ int Sysdeps<ClockGetres>::operator()(int clock, time_t *secs, long *nanos) {
 int Sysdeps<Sleep>::operator()(time_t *secs, long *nanos) {
 	uint64_t duration = (uint64_t)*secs * 1000000000ULL + (uint64_t)*nanos;
 	a20_status_t st = a20_syscall6(A20_SYS_thread_sleep, duration, 0, 0, 0, 0, 0);
-	if (st < 0)
+	if (st == -A20_ERR_INTERRUPTED)
+		a20_dispatch_pending_signals();
+	else if (st < 0)
 		return a20_to_errno(st);
 	*secs = 0;
 	*nanos = 0;
@@ -1534,45 +1619,29 @@ int Sysdeps<Execve>::operator()(const char *path, char *const argv[], char *cons
 /* signals: checkpoint-based simulation (native ABI has no async signals) */
 /* ------------------------------------------------------------------ */
 
-static struct sigaction g_a20_sig_handlers[64];
-static uint64_t g_a20_sig_blocked;
-
-/* Run the handlers for any delivered signals at an explicit checkpoint.
- * Called from the futex wait path after A20_ERR_INTERRUPTED and from
- * pthread_testcancel; never from an arbitrary instruction boundary. */
-static void a20_dispatch_pending_signals() {
-	int64_t sigs = a20_rt_signal_check();
-	if (!sigs)
-		return;
-	for (int sig = 1; sig < 64; sig++) {
-		if (!((uint64_t)sigs & (1ULL << sig)))
-			continue;
-		const struct sigaction &sa = g_a20_sig_handlers[sig];
-		if (sa.sa_handler && sa.sa_handler != SIG_IGN &&
-		    sa.sa_handler != SIG_DFL) {
-			sa.sa_handler(sig);
-		}
-		/* SIG_DFL/SIG_IGN: no-op at the checkpoint for now. */
-	}
-}
-
 int Sysdeps<Kill>::operator()(pid_t pid, int sig) {
 	if (sig <= 0 || sig >= 64)
 		return EINVAL;
-	/* Only self-directed signals are wired for now; cross-process kill needs
-	 * the pid -> task-handle registry (documented future work). */
-	if (pid != Sysdeps<GetPid>{}() && pid != 0 && pid != -1)
-		return ESRCH;
 	if (sig == SIGKILL) {
 		a20_syscall6(A20_SYS_task_exit, (uint64_t)(128 + SIGKILL), 0, 0, 0, 0, 0);
 		return 0;
 	}
-	a20_handle_t self = __a20_start_info ? __a20_start_info->self_task
-	                                     : A20_HANDLE_NULL;
-	if (self == A20_HANDLE_NULL)
+	/* Resolve the target task handle: a spawned child, or self. */
+	a20_handle_t target = A20_HANDLE_NULL;
+	if (ChildReg *c = child_find(pid)) {
+		target = c->task;
+	} else if (pid == Sysdeps<GetPid>{}() || pid == 0 || pid == -1) {
+		target = __a20_start_info ? __a20_start_info->self_task
+		                         : A20_HANDLE_NULL;
+	} else {
+		return ESRCH;
+	}
+	if (target == A20_HANDLE_NULL)
 		return ENOSYS;
-	a20_status_t st = a20_syscall6(A20_SYS_task_kill, self, (uint64_t)sig,
+	a20_status_t st = a20_syscall6(A20_SYS_task_kill, target, (uint64_t)sig,
 	                               0, 0, 0, 0);
+	if (st == A20_OK)
+		return 0;
 	return a20_to_errno(st);
 }
 
@@ -1891,36 +1960,6 @@ int Sysdeps<Sysconf>::operator()(int num, long *ret) {
 /* ==================================================================== */
 /* posix_spawn over task_spawn (native process model, no fork/execve)   */
 /* ==================================================================== */
-
-namespace {
-
-struct ChildReg {
-	pid_t pid = 0;
-	a20_handle_t task = A20_HANDLE_NULL;
-};
-
-ChildReg g_children[32];
-
-int child_register(pid_t pid, a20_handle_t task) {
-	for (auto &c : g_children) {
-		if (c.pid == 0) {
-			c.pid = pid;
-			c.task = task;
-			return 0;
-		}
-	}
-	return ENOMEM;
-}
-
-ChildReg *child_find(pid_t pid) {
-	for (auto &c : g_children) {
-		if (c.pid == pid)
-			return &c;
-	}
-	return nullptr;
-}
-
-} // namespace
 
 extern "C" int posix_spawn(pid_t *pid_out, const char *path,
                            const posix_spawn_file_actions_t *fa,
