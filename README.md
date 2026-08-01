@@ -123,6 +123,8 @@ make run-stm32f103-qemu
 ```
 
 ## 许可协议与鸣谢
-* 本项目主体代码使用 Apache 2.0 协议开源。
-* 内核网络协议栈以 `NO_SYS=1` 的模式集成了轻量级的 [lwIP](https://savannah.nongnu.org/projects/lwip/)，遵循其原始的 BSD 许可证。
+* 本项目主体代码使用 **Apache 2.0** 协议开源，详见 **[LICENSE](LICENSE)**。
+* 第三方组件的集中许可证声明见 **[docs/THIRD_PARTY_NOTICES.md](docs/THIRD_PARTY_NOTICES.md)**。
+* 项目集成、参考和借鉴的第三方项目与公开标准，以及对应的致谢，请参阅 **[docs/ACKNOWLEDGMENTS.md](docs/ACKNOWLEDGMENTS.md)**。
+* 镜像文件（`disk.img`、`extra.img` 等）均为由本仓库源码与 submodule 源码**构建出的构建产物**，不作为独立的二进制包分发；GPL/LGPL 组件的源码以 submodule 形式随仓库提供。
 * 感谢全国大学生操作系统大赛平台提供的交流机会与测试环境。

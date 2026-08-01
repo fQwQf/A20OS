@@ -85,7 +85,7 @@
 ### ABI 边界
 - **How to run**: `make check-abi-boundary`
 - **What it checks**: 重新生成 Linux syscall 覆盖表；检查 `LINUX_ABI_BOUNDARY_CONTRACT`、`LINUX_ABI_EXPLICIT_STUB_CONTRACT`、`NATIVE_HANDLE_CAPABILITY_CONSISTENCY_MATRIX`、`NATIVE_DEBUG_LIMITED_CONTRACT` 等静态契约；确认 `docs/native-abi/00-overview.md` 仍包含 `Debug 分区受限`。
-- **When it fails**: 运行 `python3 scripts/gen_linux_syscall_coverage.py` 看是否生成失败；检查 `kernel/abi/linux/syscall_impl.h`、`kernel/abi/linux/syscall_table.def`、`kernel/abi/native/handle_table.h`、`kernel/abi/native/sys_phase2.c` 中契约字符串；确认 `00-overview.md` 的 `Debug 分区受限` 说明未删除。
+- **When it fails**: 运行 `python3 tools/gen_linux_syscall_coverage.py` 看是否生成失败；检查 `kernel/abi/linux/syscall_impl.h`、`kernel/abi/linux/syscall_table.def`、`kernel/abi/native/handle_table.h`、`kernel/abi/native/sys_phase2.c` 中契约字符串；确认 `00-overview.md` 的 `Debug 分区受限` 说明未删除。
 
 ### 驱动核心
 - **How to run**: `make check-driver-core-model`
