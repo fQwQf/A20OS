@@ -20,6 +20,7 @@
 #include "mm/frame.h"
 #include "mm/vm.h"
 #include "fs/vfs.h"
+#include "fs/vfs/path.h"
 #include "fs/fdtable.h"
 #include "fs/xattr.h"
 #include "net/socket.h"
@@ -76,6 +77,71 @@ extern int64_t a20_dir_handle_to_dirfd(a20_handle_t dir_h, a20_rights_t required
 extern int64_t a20_install_gfd_handle(int gfd, uint16_t obj_type_hint,
                                        a20_rights_t requested_rights,
                                        a20_handle_t *out_handle);
+
+static int64_t a20_native_vfs_result(int r)
+{
+    if (r >= 0) return r;
+    switch (-r) {
+    case EPERM:        return -A20_ERR_PERM;
+    case EACCES:       return -A20_ERR_ACCESS;
+    case ENOENT:       return -A20_ERR_NO_ENTRY;
+    case EBADF:        return -A20_ERR_BAD_HANDLE;
+    case ENOMEM:       return -A20_ERR_NO_MEMORY;
+    case EEXIST:       return -A20_ERR_EXISTS;
+    case ENOTDIR:      return -A20_ERR_NOT_DIR;
+    case EISDIR:       return -A20_ERR_IS_DIR;
+    case ENOTEMPTY:    return -A20_ERR_NOT_EMPTY;
+    case ENAMETOOLONG: return -A20_ERR_NAME_TOO_LONG;
+    case ENOSPC:       return -A20_ERR_NO_SPACE;
+    case EAGAIN:       return -A20_ERR_WOULD_BLOCK;
+    case ETIMEDOUT:    return -A20_ERR_TIMED_OUT;
+    case EINVAL:       return -A20_ERR_INVALID_ARGUMENT;
+    case ENOSYS:       return -A20_ERR_NOT_SUPPORTED;
+    case EOPNOTSUPP:   return -A20_ERR_NOT_SUPPORTED;
+    default:           return -A20_ERR_IO;
+    }
+}
+
+/* Resolve a relative path against a directory capability.  The older Native
+ * path syscalls resolve against the task cwd; the *_at extension keeps the
+ * POSIX dirfd contract without exposing kernel fd numbers to userspace. */
+static int64_t a20_native_join_dir_path(a20_handle_t dir_h, const char *path,
+                                         char *out)
+{
+    if (!path || !out)
+        return -A20_ERR_INVALID_ARGUMENT;
+    if (path[0] == '/') {
+        if (strlen(path) >= MAX_PATH_LEN)
+            return -A20_ERR_NAME_TOO_LONG;
+        strncpy(out, path, MAX_PATH_LEN - 1);
+        out[MAX_PATH_LEN - 1] = '\0';
+        return A20_OK;
+    }
+
+    int dirfd;
+    int64_t r = a20_dir_handle_to_dirfd(dir_h, A20_RIGHT_READ, &dirfd);
+    if (r < 0)
+        return r;
+    char base[MAX_PATH_LEN];
+    int vr = vfs_dirfd_path(dirfd, base, sizeof(base));
+    if (dirfd != AT_FDCWD)
+        fdtable_close_current(dirfd);
+    if (vr < 0)
+        return a20_native_vfs_result(vr);
+    vr = vfs_path_join(base, path, out, MAX_PATH_LEN);
+    if (vr < 0 || vfs_path_normalize_absolute(out) < 0)
+        return -A20_ERR_NAME_TOO_LONG;
+    return A20_OK;
+}
+
+static int64_t a20_native_copy_join(a20_handle_t dir_h, uint64_t upath,
+                                    uint32_t path_len, char *out)
+{
+    char path[MAX_PATH_LEN];
+    if (copy_path_from_user(path, (const char *)upath, path_len) < 0)
+        return -A20_ERR_FAULT;
+    return a20_native_join_dir_path(dir_h, path, out);
+}
 
 /* ===== Path/Filesystem (0x0400) continued ===== */
 
@@ -433,6 +499,41 @@ int64_t sys_a20_handle_control(const a20_syscall_args_t *args)
         return a20_handle_set_label(ht, h, (uint8_t)arg0);
     }
 
+    if (op == A20_HANDLE_CTRL_CHDIR) {
+        if (arg0 != 0 || arg1 != 0 || entry.type != A20_OBJ_DIRECTORY) {
+            r = -A20_ERR_INVALID_ARGUMENT;
+            goto out_entry;
+        }
+
+        int gfd = (int)(uintptr_t)entry.object;
+        vfile_t *vf = vfs_get_file_ref(gfd);
+        if (!vf || !vf->path[0]) {
+            if (vf) vfs_put_file_ref(gfd, vf);
+            r = -A20_ERR_BAD_HANDLE;
+            goto out_entry;
+        }
+
+        char path[MAX_PATH_LEN];
+        strncpy(path, vf->path, sizeof(path) - 1);
+        path[sizeof(path) - 1] = '\0';
+        vfs_put_file_ref(gfd, vf);
+
+        int chdir_ret = vfs_chdir(path);
+        if (chdir_ret == 0)
+            r = A20_OK;
+        else if (chdir_ret == -EACCES)
+            r = -A20_ERR_ACCESS;
+        else if (chdir_ret == -ENOENT)
+            r = -A20_ERR_NO_ENTRY;
+        else if (chdir_ret == -ENOTDIR)
+            r = -A20_ERR_NOT_DIR;
+        else if (chdir_ret == -ENAMETOOLONG)
+            r = -A20_ERR_NAME_TOO_LONG;
+        else
+            r = -A20_ERR_IO;
+        goto out_entry;
+    }
+
     if (entry.type == A20_OBJ_FILE || entry.type == A20_OBJ_DEVICE) {
         int gfd = (int)(uintptr_t)entry.object;
         switch (op) {
@@ -446,6 +547,17 @@ int64_t sys_a20_handle_control(const a20_syscall_args_t *args)
             r = -A20_ERR_INVALID_ARGUMENT;
             break;
         }
+        goto out_entry;
+    }
+
+    if (entry.type == A20_OBJ_SOCKET) {
+        int gfd = (int)(uintptr_t)entry.object;
+        if (op == A20_HANDLE_CTRL_FCNTL && arg0 == F_SETFL) {
+            int socket_result = net_set_nonblock(gfd, ((int)arg1 & O_NONBLOCK) != 0);
+            r = a20_native_vfs_result(socket_result);
+            goto out_entry;
+        }
+        r = -A20_ERR_NOT_SUPPORTED;
         goto out_entry;
     }
 
@@ -509,4 +621,102 @@ int64_t sys_a20_fs_umount(const a20_syscall_args_t *args)
 int64_t sys_a20_fs_sync(const a20_syscall_args_t *args)
 {
     return vfs_sync();
+}
+
+int64_t sys_a20_path_unlink_at(const a20_syscall_args_t *args)
+{
+    a20_path_unlink_args_t *uargs = (a20_path_unlink_args_t *)A20_ARG(0);
+    if (!uargs) return -A20_ERR_FAULT;
+    a20_path_unlink_args_t kargs;
+    A20_VALIDATE_AND_COPY(uargs, kargs);
+    if (kargs.flags & ~AT_REMOVEDIR)
+        return -A20_ERR_INVALID_ARGUMENT;
+
+    char full[MAX_PATH_LEN];
+    int64_t r = a20_native_copy_join(kargs.dir, kargs.path,
+                                     kargs.path_len, full);
+    if (r < 0) return r;
+    int vr = (kargs.flags & AT_REMOVEDIR) ? vfs_rmdir(full) : vfs_unlink(full);
+    return a20_native_vfs_result(vr);
+}
+
+int64_t sys_a20_path_rename_at(const a20_syscall_args_t *args)
+{
+    a20_path_rename_args_t *uargs = (a20_path_rename_args_t *)A20_ARG(0);
+    if (!uargs) return -A20_ERR_FAULT;
+    a20_path_rename_args_t kargs;
+    A20_VALIDATE_AND_COPY(uargs, kargs);
+
+    char old_path[MAX_PATH_LEN], new_path[MAX_PATH_LEN];
+    int64_t r = a20_native_copy_join(kargs.old_dir, kargs.old_path,
+                                     kargs.old_path_len, old_path);
+    if (r < 0) return r;
+    r = a20_native_copy_join(kargs.new_dir, kargs.new_path,
+                             kargs.new_path_len, new_path);
+    if (r < 0) return r;
+    return a20_native_vfs_result(vfs_rename_flags(old_path, new_path,
+                                                   kargs.flags));
+}
+
+int64_t sys_a20_path_link_at(const a20_syscall_args_t *args)
+{
+    a20_path_link_args_t *uargs = (a20_path_link_args_t *)A20_ARG(0);
+    if (!uargs) return -A20_ERR_FAULT;
+    a20_path_link_args_t kargs;
+    A20_VALIDATE_AND_COPY(uargs, kargs);
+    if (kargs.flags != 0)
+        return -A20_ERR_INVALID_ARGUMENT;
+
+    char old_path[MAX_PATH_LEN], new_path[MAX_PATH_LEN];
+    int64_t r = a20_native_copy_join(kargs.old_dir, kargs.old_path,
+                                     kargs.old_path_len, old_path);
+    if (r < 0) return r;
+    r = a20_native_copy_join(kargs.new_dir, kargs.new_path,
+                             kargs.new_path_len, new_path);
+    if (r < 0) return r;
+    return a20_native_vfs_result(vfs_link(old_path, new_path));
+}
+
+int64_t sys_a20_path_symlink_at(const a20_syscall_args_t *args)
+{
+    a20_path_symlink_args_t *uargs = (a20_path_symlink_args_t *)A20_ARG(0);
+    if (!uargs) return -A20_ERR_FAULT;
+    a20_path_symlink_args_t kargs;
+    A20_VALIDATE_AND_COPY(uargs, kargs);
+
+    char target[MAX_PATH_LEN], link_path[MAX_PATH_LEN];
+    if (copy_path_from_user(target, (const char *)kargs.target,
+                             kargs.target_len) < 0)
+        return -A20_ERR_FAULT;
+    int64_t r = a20_native_copy_join(kargs.dir, kargs.linkpath,
+                                     kargs.linkpath_len, link_path);
+    if (r < 0) return r;
+    return a20_native_vfs_result(vfs_symlink(target, link_path));
+}
+
+int64_t sys_a20_path_readlink_at(const a20_syscall_args_t *args)
+{
+    a20_path_readlink_args_t *uargs = (a20_path_readlink_args_t *)A20_ARG(0);
+    if (!uargs) return -A20_ERR_FAULT;
+    a20_path_readlink_args_t kargs;
+    A20_VALIDATE_AND_COPY(uargs, kargs);
+
+    char full[MAX_PATH_LEN];
+    int64_t r = a20_native_copy_join(kargs.dir, kargs.path,
+                                     kargs.path_len, full);
+    if (r < 0) return r;
+    if (kargs.buf_len > 0 && !kargs.buf)
+        return -A20_ERR_FAULT;
+
+    char buffer[4096];
+    size_t size = kargs.buf_len < sizeof(buffer) ? (size_t)kargs.buf_len : sizeof(buffer);
+    int vr = vfs_readlinkat(-1, full, buffer, size);
+    if (vr < 0)
+        return a20_native_vfs_result(vr);
+    if (vr > 0 && copy_to_user((void *)kargs.buf, buffer, (size_t)vr) < 0)
+        return -A20_ERR_FAULT;
+    kargs.out_len = (uint64_t)vr;
+    if (a20_copy_struct_to_user(uargs, &kargs, sizeof(kargs)) < 0)
+        return -A20_ERR_FAULT;
+    return A20_OK;
 }

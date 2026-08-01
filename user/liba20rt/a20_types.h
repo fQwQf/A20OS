@@ -103,6 +103,9 @@ typedef uint64_t a20_vaddr_t;      /* Virtual address */
 
 #define A20_RIGHTS_NONE  ((a20_rights_t)0)
 
+/* handle_control operations */
+#define A20_HANDLE_CTRL_CHDIR 5u
+
 /* ========================================================================
  * ABI header convention
  * ======================================================================== */
@@ -221,7 +224,7 @@ typedef struct a20_start_info {
     uint32_t argc;
     uint32_t envc;
     uint32_t auxc;
-    uint32_t reserved0;
+    uint32_t reserved0; /* Native spawn fd mapping limit; zero for normal exec. */
 
     uint64_t argv;
     uint64_t envp;
@@ -239,6 +242,8 @@ typedef struct a20_start_info {
     uint64_t page_size;
     uint64_t user_clock_freq;
 } a20_start_info_t;
+
+#define A20_NATIVE_FD_HANDLE_BASE 64u
 
 /* ========================================================================
  * Handle operation structures (kernel/include/abi/native/types.h)
@@ -607,6 +612,29 @@ typedef struct a20_path_create_args {
     uint64_t       dev;        /* device node major:minor */
     a20_handle_t   out_handle;
 } a20_path_create_args_t;
+
+typedef struct a20_path_unlink_args {
+    uint32_t       size;
+    uint32_t       version;
+    a20_handle_t   dir;
+    uint32_t       flags;
+    uint64_t       path;
+    uint32_t       path_len;
+    uint32_t       _pad;
+} a20_path_unlink_args_t;
+
+typedef struct a20_path_rename_args {
+    uint32_t       size;
+    uint32_t       version;
+    a20_handle_t   old_dir;
+    a20_handle_t   new_dir;
+    uint64_t       old_path;
+    uint32_t       old_path_len;
+    uint32_t       _pad0;
+    uint64_t       new_path;
+    uint32_t       new_path_len;
+    uint32_t       flags;
+} a20_path_rename_args_t;
 
 typedef struct a20_path_link_args {
     uint32_t       size;

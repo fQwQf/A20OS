@@ -45,11 +45,18 @@ void a20_ht_put_ref(struct a20_ht_internal *ht);
 int64_t a20_handle_install(struct a20_ht_internal *ht, void *object,
                            uint16_t type, a20_rights_t rights);
 int64_t a20_handle_install_temporal(struct a20_ht_internal *ht, void *object,
-                                    uint16_t type, a20_rights_t rights,
-                                    uint64_t expiry_tick,
-                                    uint32_t remaining_ops,
-                                    uint32_t temporal_flags,
-                                    uint8_t security_label);
+                                     uint16_t type, a20_rights_t rights,
+                                     uint64_t expiry_tick,
+                                     uint32_t remaining_ops,
+                                     uint32_t temporal_flags,
+                                     uint8_t security_label);
+int64_t a20_handle_install_at_temporal(struct a20_ht_internal *ht,
+                                       a20_handle_t slot, void *object,
+                                       uint16_t type, a20_rights_t rights,
+                                       uint64_t expiry_tick,
+                                       uint32_t remaining_ops,
+                                       uint32_t temporal_flags,
+                                       uint8_t security_label);
 int64_t a20_handle_lookup_internal(struct a20_ht_internal *ht, a20_handle_t h,
                                      uint16_t expected_type,
                                      a20_rights_t required_rights,
