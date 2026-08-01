@@ -43,7 +43,7 @@
 
   <div class="spectrum-copy">
     <p class="spectrum-kicker">WHAT IS A20OS?</p>
-    <h2>A20OS: 再一次，重新定义操作系统接口</h2>
+    <h2>A20OS: 再一次，重新定义操作系统接口<sup class="source-ref">10</sup></h2>
     <p class="spectrum-description">A20OS 是一个从零写起的多架构混合内核。驱动、网络栈、文件系统和内存管理都在内核空间运行，子系统之间直接调用；用户程序则通过带权限的 handle 使用文件、任务、设备等资源，内存和 IPC 分别由 VMO / VMAR、Channel / EventQ 负责。内核同时实现 Linux ABI 和自研 Native ABI：前者用来运行 musl 和现有程序，后者用于尝试不依赖 POSIX 习惯的新接口。目前系统已经具备进程、SMP、虚拟内存、VFS、socket、驱动框架、图形和音频，从 Cortex-M3 / NOMMU 运行到 Wayland 桌面均提供良好支持。</p>
     <div class="bridge">
       <div class="bridge-node">
@@ -76,7 +76,7 @@
   <div class="col">
 
     <section class="card driver-model meme">
-      <h2>开发者的大事，大快所有人心的大好事<span class="kick">DRIVER MODEL</span></h2>
+      <h2>开发者的大事，大快所有人心的大好事<sup class="source-ref">1</sup><span class="kick">DRIVER MODEL</span></h2>
       <p class="lead">A20OS 为设备发现、资源访问、类接口和卸载回收规定了共同流程，统一的驱动框架与接口使得移植工作前所未有地简单。</p>
       <div class="driver-flow">
         <span>Board / Bus</span><i>→</i><span>match</span><i>→</i><span>probe</span><i>→</i><span>Class Ops</span><i>→</i><span>/dev · /sys</span>
@@ -91,14 +91,14 @@
     </section>
 
     <section class="card multimedia meme">
-      <h2>A20多媒体，让他尽情摇摆<span class="kick">MULTIMEDIA</span></h2>
+      <h2>A20多媒体，让他尽情摇摆<sup class="source-ref">2</sup><span class="kick">MULTIMEDIA</span></h2>
       <p class="lead">A20OS 的桌面支持建立在一套完整的多媒体栈上。图形输入、合成、视频解码和音频输出均运行良好。</p>
       <p><b>显示与输入：</b>virtio-gpu 和 virtio-input 通过 display / input class 接入 Weston，compositor、desktop shell 运行在 Linux ABI 用户态。</p>
       <p><b>视频与音频：</b>FFmpeg、Weston 和 Intel HDA 已经连通。图中的 QEMU 截图来自实际播放过程；音频支持 48 kHz 双声道 S16_LE、环形 BDL DMA 以及 stop / drain。</p>
     </section>
 
     <section class="card native-status meme">
-      <h2>头抬起。是的，您正在AAAAA!<span class="kick">STATUS</span></h2>
+      <h2>头抬起。是的，您正在AAAAA!<sup class="source-ref">3</sup><span class="kick">STATUS</span></h2>
       <p>Native ABI 是A20OS的独特创举，旨在克服posix的固有缺陷。目前已经实现 93 个 syscall 入口、13 类对象、handle table、启动协议、Channel 和 EventQ；用户态提供 liba20rt SDK、liba20c 最小 C 库、多架构 crt0 与原生示例程序。接下来还要完成动态链接器、更完整的回归套件，以及真实应用对两套 ABI 的同核评测。</p>
     </section>
 
@@ -106,7 +106,7 @@
   <div class="col">
 
     <section class="card native-rationale">
-      <h2>重新编排，事事好安排。<span class="kick">WHY DUAL ABI</span></h2>
+      <h2>重新编排，事事好安排。<sup class="source-ref">4</sup><span class="kick">WHY DUAL ABI</span></h2>
       <p class="lead">A20 实现 Linux ABI 用来兼容已有软件，同时用作研究中的baseline；Native ABI 则用来尝试新的接口设计。两套 ABI 都由内核直接提供，彼此不相互依赖。</p>
       <div class="why-list">
         <div class="why-row"><b>资源编号</b><p>文件、任务、定时器和 IPC 端点都使用进程本地 handle，不再分别维护 fd、pid、timerid 等编号体系。</p></div>
@@ -121,13 +121,13 @@
       </div>
     </section>
 
-    <section class="quote">
-      <p>我看 Windows NT 搞得不错，内核对象极大丰富，各类资源的调用差异基本消灭，面向对象，安全权能机制也受重视，如果再加上开源，Windows NT 就是我们理想中的操作系统内核。</p>
-      <footer>—— fQwQf</footer>
+    <section class="card native-status meme">
+      <h2>A20设计哲学<span class="kick">PHILOSOPHY</span></h2>
+      <p>现代操作系统的设计哲学是：Handle/Capability 统一资源模型；显式权限降级和最小权限；结构化、可版本化的 syscall 参数；异步事件驱动的等待机制；从内核中移除策略，只保留机制。A20OS 的 Native ABI 设计应吸收了这些哲学，同时力求避免过度设计。</p>
     </section>
 
     <section class="card research-plan meme">
-      <h2>轰！嚓-嚓-嚓！<span class="kick">RESEARCH</span></h2>
+      <h2>轰！嚓-嚓-嚓！<sup class="source-ref">5</sup><span class="kick">RESEARCH</span></h2>
       <p>A20的远景不止于此！通过提出一套新的ABI，A20实际上同时是一个系统研究项目。围绕 Native ABI，项目正在整理 rights 代数、双 ABI 隔离和对象生命周期，并计划在同一套内核实现上比较两种 ABI 的接口规模、权限表达、攻击面和性能。</p>
       <p>这些工作会整理成可复现实验和系统方向会议论文，目标包括 OSDI 和 SOSP 。如果你对这些问题感兴趣，可以联系项目组，参与评测、实现和写作。贡献者可以列入作者名单——甚至是共一！</p>
     </section>
@@ -136,7 +136,7 @@
   <div class="col">
 
     <section class="card architecture-detail">
-      <h2>你的架构，总有A20很专业<span class="kick">ARCHITECTURE</span></h2>
+      <h2>你的架构，总有A20很专业<sup class="source-ref">11</sup><span class="kick">ARCHITECTURE</span></h2>
       <p class="lead">A20OS 的架构支持广泛。主要 QEMU 目标包括 RISC-V64、LoongArch64、AArch64 和 x86_64；实机支持 VisionFive 2 与龙芯 LS2K1000 开发板以及 STM32F103 。RISC-V32、ARM32 和 PPC64LE 仍处于不同阶段的开发中。</p>
       <p>Linux ABI 用户态当前以 musl 为主，可以运行 git、vim、mksh、fastfetch、wget 以及 Weston / FFmpeg 等程序。</p>
       <p>Native ABI 用户态除实验性的 liba20rt 和 liba20c 外，项目正在移植 mlibc 的 <code>sysdeps/a20</code>。RISC-V64 静态 libc 与基础 smoke 已经通过，覆盖 stdio、malloc、文件 I/O、线程互斥、pipe / poll、socketpair 和 posix_spawn；动态链接与更多架构仍在继续。</p>
@@ -162,7 +162,7 @@
     </section>
 
     <section class="card foundation meme">
-      <h2>坐和放宽。好东西就要来了！<span class="kick">RELIABILITY</span></h2>
+      <h2>坐和放宽，好东西就要来了<sup class="source-ref">6,7</sup><span class="kick">RELIABILITY</span></h2>
       <p class="lead">为了让内核在长期运行和压力测试中保持可靠，A20OS 为多核调度、阻塞唤醒和资源生命周期规定了明确的状态与所有权规则。</p>
       <p>调度器为每个 CPU 维护运行队列，并明确区分 on_rq、dispatching 与 on_cpu 状态；tokenized Park/Wake 用序号隔离旧唤醒和旧超时，内核锁顺序则记录在 <code>lock.h</code> 中。</p>
       <p>内存侧为 COW、大页拆分、page cache writeback 和 OOM 回收指定所有者；任务、文件、页面和设备引用也都有成对的获取与释放规则。</p>
@@ -173,7 +173,7 @@
   <div class="col">
 
     <section class="card distro-card meme">
-      <h2>你的下一个A20，何必是A20OS<span class="kick">DOWNSTREAM</span></h2>
+      <h2>你的下一个A20，何必是A20OS<sup class="source-ref">8</sup><span class="kick">DOWNSTREAM</span></h2>
       <p class="lead">A20OS 仓库提供内核、SDK 和多架构构建脚本。基于这些组件，发行版可以自行选择用户态、目标板、软件包、桌面和默认服务。</p>
       <div class="distro-paths">
         <span>Wayland 桌面</span><span>开发板系统</span><span>嵌入式设备</span><span>教学 / 研究</span>
@@ -189,7 +189,7 @@
     </section>
 
     <section class="card join meme join-meme">
-      <h2>AI 颠覆了行业—— 请加入我们，我们还要进一步颠覆行业！<span class="kick">JOIN US</span></h2>
+      <h2>AI 颠覆了行业—— <br> 请加入我们，我们还要进一步颠覆行业<sup class="source-ref">9</sup><span class="kick">JOIN US</span></h2>
       <p class="lead">A20OS 还有许多可以独立推进的模块。设计文档位于 <code>docs/</code>，Docker 提供交叉编译环境。</p>
       <p>你可以从一块新板、一个 PCI / VirtIO 驱动、一段显示或音频支持开始；也可以构建 Native 动态链接器、软件包、桌面或下游镜像。再往深处，还有 SMP、内存、VFS、capability、性能评测与论文实验。</p>
       <p class="ai-note"><b>关于 AI：</b>项目不限制 AI 工具。然而，无论代码是否由 AI 辅助完成，提交者都应该理解代码并对其负责。</p>
@@ -197,6 +197,7 @@
 
     <section class="cta">
       <div class="qr-wrap">
+        <img class="qr-image" src="a20os-qr.png" alt="扫描访问 A20OS GitHub 仓库">
         <svg class="qr" viewBox="0 0 29 29" xmlns="http://www.w3.org/2000/svg"><path stroke="#101418" d="M0 0.5h7m2 0h6m5 0h1m1 0h7m-29 1h1m5 0h1m2 0h2m2 0h3m3 0h2m1 0h1m5 0h1m-29 1h1m1 0h3m1 0h1m1 0h1m1 0h1m3 0h1m1 0h2m1 0h1m2 0h1m1 0h3m1 0h1m-29 1h1m1 0h3m1 0h1m2 0h2m4 0h1m2 0h1m1 0h1m1 0h1m1 0h3m1 0h1m-29 1h1m1 0h3m1 0h1m1 0h4m3 0h1m2 0h1m3 0h1m1 0h3m1 0h1m-29 1h1m5 0h1m1 0h7m1 0h1m1 0h2m2 0h1m5 0h1m-29 1h7m1 0h1m1 0h1m1 0h1m1 0h1m1 0h1m1 0h1m1 0h1m1 0h7m-20 1h2m2 0h2m1 0h2m-17 1h1m2 0h1m1 0h1m1 0h1m1 0h2m2 0h1m6 0h1m1 0h2m1 0h1m-26 1h1m1 0h2m5 0h3m4 0h2m1 0h2m1 0h2m2 0h2m-28 1h10m1 0h2m1 0h1m1 0h1m2 0h2m2 0h2m2 0h1m-29 1h1m2 0h3m1 0h1m3 0h3m1 0h1m1 0h1m3 0h1m5 0h2m-28 1h1m2 0h1m1 0h1m2 0h1m1 0h4m1 0h2m1 0h2m2 0h1m1 0h1m2 0h1m-29 1h2m3 0h1m2 0h3m2 0h2m1 0h2m4 0h1m1 0h1m1 0h1m1 0h1m-25 1h1m1 0h1m6 0h2m3 0h1m1 0h3m1 0h1m3 0h1m-28 1h2m1 0h1m2 0h1m3 0h2m1 0h1m2 0h4m1 0h2m1 0h1m-25 1h1m4 0h2m2 0h2m3 0h1m3 0h3m1 0h1m3 0h2m-29 1h2m1 0h1m5 0h5m2 0h1m2 0h1m2 0h3m3 0h1m-27 1h1m1 0h3m2 0h1m1 0h3m2 0h3m1 0h1m4 0h2m1 0h1m-25 1h2m1 0h6m1 0h1m2 0h4m2 0h1m1 0h1m1 0h1m-28 1h2m4 0h5m4 0h1m1 0h1m2 0h6m1 0h2m-21 1h2m4 0h3m1 0h3m3 0h1m1 0h1m1 0h1m-29 1h7m3 0h3m1 0h3m2 0h2m1 0h1m1 0h1m3 0h1m-29 1h1m5 0h1m2 0h1m2 0h1m1 0h1m2 0h4m3 0h2m-26 1h1m1 0h3m1 0h1m1 0h4m1 0h3m2 0h7m-25 1h1m1 0h3m1 0h1m6 0h1m4 0h1m4 0h1m2 0h2m-28 1h1m1 0h3m1 0h1m2 0h1m1 0h1m1 0h1m1 0h1m1 0h2m2 0h3m4 0h3m-29 1h1m5 0h1m1 0h2m2 0h2m1 0h3m2 0h1m1 0h2m1 0h1m1 0h2m-29 1h7m5 0h1m1 0h1m2 0h4m1 0h1m1 0h1m1 0h2"/></svg>
       </div>
       <div>
@@ -208,6 +209,10 @@
 
   </div>
 </main>
+
+<aside class="attributions">
+  <p><b>参考资料：</b>¹ iOS 8「开发者的大事，大快所有人心的大好事」；² Apple 父亲节广告「AirPlay 扬声器，让他尽情摇摆」；³ Windows 10 更新提示「头抬起」；⁴ macOS Catalina「重新编排，事事好安排」；⁵ Windows 10 中文宣传片「轰！嚓-嚓-嚓」；⁶ Windows 10 Build 10041「坐和放宽」；⁷ Windows 11 OOBE「好东西就要来了」；⁸ iPad Pro 2020「你的下一台电脑，何必是电脑」；⁹ Microsoft Learn 2024-04 中文置顶 banner「AI 扰乱了行业，请加入我们，我们还要进一步扰乱行业」；¹⁰ iPhone 4「再一次，改变一切」；¹¹ Apple 2026 年春季 Mac 广告「你的专业，总有 Mac 很专业」。</p>
+</aside>
 
 <footer class="page">
   <span>AOSCC 2026 · A20OS · fQwQf</span>
