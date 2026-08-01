@@ -481,6 +481,21 @@ main {
   right: 0;
 }
 
+.source-ref {
+  margin-left: 1mm;
+  font-size: 0.55em;
+  line-height: 0;
+  vertical-align: super;
+  color: var(--green);
+  font-weight: 800;
+
+  display: none;
+}
+
+.distro-card .source-ref {
+  color: var(--paper);
+}
+
 .card.join-meme h2 {
   padding-right: 28mm;
   font-size: 27pt;
@@ -838,17 +853,21 @@ code {
 
 .qr-wrap {
   background: #fff;
-  border-radius: 1.5mm;
-  padding: 4.5mm;
-  width: 62mm;
+  border-radius: 0;
+  padding: 0;
+  width: 76mm;
   flex: none;
 }
 
 .qr {
+  display: none;
+}
+
+.qr-image {
   display: block;
   width: 100%;
   height: auto;
-  shape-rendering: crispEdges;
+  image-rendering: pixelated;
 }
 
 .cta .url {
@@ -870,4 +889,28 @@ footer.page {
   padding: 3mm 34mm 8mm;
   font-size: 17pt;
   color: var(--muted);
+}
+
+.attributions {
+  position: absolute;
+  right: 34mm;
+  bottom: 22mm;
+  left: 34mm;
+  padding: 2mm 3mm;
+  border-top: 0.35mm solid var(--green-line);
+  background: rgba(243, 244, 240, 0.78);
+  font-size: 10.5pt;
+  line-height: 1.28;
+  color: var(--muted);
+
+  display: none;
+}
+
+.attributions p {
+  margin: 0;
+}
+
+.attributions a {
+  color: inherit;
+  text-decoration: underline;
 }
