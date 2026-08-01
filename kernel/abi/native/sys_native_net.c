@@ -62,6 +62,27 @@ extern int copy_path_from_user(char *dst, const char *uptr, uint32_t len);
 extern void resolve_path(const char *in, char *out);
 extern int64_t sys_a20_path_open(const a20_syscall_args_t *args);
 
+static int64_t a20_native_net_result(int64_t r)
+{
+    if (r >= 0) return r;
+    switch (-r) {
+    case EPERM:        return -A20_ERR_PERM;
+    case EACCES:       return -A20_ERR_ACCESS;
+    case EBADF:        return -A20_ERR_BAD_HANDLE;
+    case EFAULT:       return -A20_ERR_FAULT;
+    case ENOMEM:       return -A20_ERR_NO_MEMORY;
+    case EINVAL:       return -A20_ERR_INVALID_ARGUMENT;
+    case EAGAIN:       return -A20_ERR_WOULD_BLOCK;
+    case ETIMEDOUT:    return -A20_ERR_TIMED_OUT;
+    case ENOSPC:       return -A20_ERR_NO_SPACE;
+    case EADDRINUSE:   return -A20_ERR_BUSY;
+    case ENOTSOCK:     return -A20_ERR_TYPE_MISMATCH;
+    case ENOPROTOOPT:  return -A20_ERR_NOT_SUPPORTED;
+    case EOPNOTSUPP:   return -A20_ERR_NOT_SUPPORTED;
+    default:           return -A20_ERR_IO;
+    }
+}
+
 /* ===== Network (0x0600) ===== */
 
 int64_t sys_a20_net_socket(const a20_syscall_args_t *args)
@@ -71,7 +92,7 @@ int64_t sys_a20_net_socket(const a20_syscall_args_t *args)
     int protocol = (int)A20_ARG(2);
 
     int gfd = net_socket_create(domain, type, protocol);
-    if (gfd < 0) return -A20_ERR_NO_MEMORY;
+    if (gfd < 0) return a20_native_net_result(gfd);
 
     task_t *cur = proc_current();
     struct a20_ht_internal *ht = task_get_a20_ht(cur);
@@ -101,7 +122,7 @@ int64_t sys_a20_net_bind(const a20_syscall_args_t *args)
 
     r = net_bind((int)(uintptr_t)entry.object, addr, addrlen);
     a20_object_release(entry.object, entry.type);
-    return r;
+    return a20_native_net_result(r);
 
 }
 
@@ -122,7 +143,7 @@ int64_t sys_a20_net_connect(const a20_syscall_args_t *args)
 
     r = net_connect((int)(uintptr_t)entry.object, addr, addrlen);
     a20_object_release(entry.object, entry.type);
-    return r;
+    return a20_native_net_result(r);
 
 }
 
@@ -143,7 +164,7 @@ int64_t sys_a20_net_accept(const a20_syscall_args_t *args)
 
     int new_gfd = net_accept((int)(uintptr_t)entry.object, addr, addrlen, 0);
     a20_object_release(entry.object, entry.type);
-    if (new_gfd < 0) return -A20_ERR_IO;
+    if (new_gfd < 0) return a20_native_net_result(new_gfd);
 
 
     a20_rights_t rights = A20_RIGHT_READ | A20_RIGHT_WRITE | A20_RIGHT_STAT |
@@ -169,7 +190,7 @@ int64_t sys_a20_net_listen(const a20_syscall_args_t *args)
 
     r = net_listen((int)(uintptr_t)entry.object, backlog);
     a20_object_release(entry.object, entry.type);
-    return r;
+    return a20_native_net_result(r);
 
 }
 
@@ -223,7 +244,7 @@ int64_t sys_a20_net_sendmsg(const a20_syscall_args_t *args)
             int64_t n = net_sendto(gfd, kbuf, chunk, (int)kargs.flags,
                                    kaddrlen ? kaddr : NULL, kaddrlen);
             if (n < 0) {
-                r = (total_sent > 0) ? (int64_t)total_sent : -A20_ERR_IO;
+                r = (total_sent > 0) ? (int64_t)total_sent : a20_native_net_result(n);
                 goto out_entry;
             }
             done += (uint64_t)n;
@@ -283,7 +304,7 @@ int64_t sys_a20_net_recvmsg(const a20_syscall_args_t *args)
                                      kargs.addr ? kaddr : NULL,
                                      kargs.addr ? &kaddrlen : NULL);
             if (n < 0) {
-                r = (total_recv > 0) ? (int64_t)total_recv : -A20_ERR_IO;
+                r = (total_recv > 0) ? (int64_t)total_recv : a20_native_net_result(n);
                 goto out_entry;
             }
             if (n == 0) break;
@@ -326,14 +347,14 @@ int64_t sys_a20_net_socketpair(const a20_syscall_args_t *args)
 
     int gfds[2];
     int r = net_socketpair_create(domain, type, protocol, gfds);
-    if (r < 0) return -A20_ERR_IO;
+    if (r < 0) return a20_native_net_result(r);
 
     task_t *cur = proc_current();
     struct a20_ht_internal *ht = task_get_a20_ht(cur);
     if (!ht) { vfs_close(gfds[0]); vfs_close(gfds[1]); return -A20_ERR_BAD_HANDLE; }
 
     a20_rights_t rights = A20_RIGHT_READ | A20_RIGHT_WRITE | A20_RIGHT_STAT |
-                          A20_RIGHT_DUP | A20_RIGHT_TRANSFER;
+                          A20_RIGHT_DUP | A20_RIGHT_TRANSFER | A20_RIGHT_CONTROL;
     int64_t h0 = a20_handle_install(ht, (void *)(uintptr_t)gfds[0], A20_OBJ_SOCKET, rights);
     int64_t h1 = a20_handle_install(ht, (void *)(uintptr_t)gfds[1], A20_OBJ_SOCKET, rights);
     if (h0 < 0 || h1 < 0) {
@@ -376,7 +397,7 @@ int64_t sys_a20_net_getname(const a20_syscall_args_t *args)
     else
         r = net_getsockname((int)(uintptr_t)entry.object, addr, addrlen);
     a20_object_release(entry.object, entry.type);
-    return r;
+    return a20_native_net_result(r);
 
 }
 
@@ -396,6 +417,6 @@ int64_t sys_a20_net_shutdown(const a20_syscall_args_t *args)
 
     r = net_shutdown((int)(uintptr_t)entry.object, how);
     a20_object_release(entry.object, entry.type);
-    return r;
+    return a20_native_net_result(r);
 
 }

@@ -1,5 +1,11 @@
 #ifdef CONFIG_BOARD_VISIONFIVE2
 
+/*
+ * StarFive VisionFive 2 (星光 2) board support.
+ * Porting reference: RocketOS (MIT), specifically its StarFive VisionFive 2
+ * board / driver bring-up.  See docs/ACKNOWLEDGMENTS.md.
+ */
+
 #include "drivers/core/driver_core.h"
 #include "core/timer.h"
 

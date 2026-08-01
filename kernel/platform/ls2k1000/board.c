@@ -1,5 +1,11 @@
 #ifdef CONFIG_BOARD_LS2K1000
 
+/*
+ * Loongson 2K1000 (龙芯 LS2K1000) board support.
+ * Porting reference: RocketOS (MIT), used as a reference for the LoongArch
+ * board bring-up and driver development.  See docs/ACKNOWLEDGMENTS.md.
+ */
+
 #include "drivers/core/driver_core.h"
 #include "core/arch.h"
 #include "core/timer.h"
