@@ -163,7 +163,8 @@ NATIVE_HANDLE_BIN      := $(NATIVE_BUILD_DIR)/native-handle-$(NATIVE_TAG)
 NATIVE_LIBC_BIN        := $(NATIVE_BUILD_DIR)/native-libc-$(NATIVE_TAG)
 NATIVE_FUTEX_BIN       := $(NATIVE_BUILD_DIR)/native-futex-$(NATIVE_TAG)
 NATIVE_MM_BIN          := $(NATIVE_BUILD_DIR)/native-mm-$(NATIVE_TAG)
-NATIVE_OUTPUTS         := $(NATIVE_HELLO_BIN) $(NATIVE_HANDLE_BIN) $(NATIVE_LIBC_BIN) $(NATIVE_FUTEX_BIN) $(NATIVE_MM_BIN)
+NATIVE_SIGNAL_BIN      := $(NATIVE_BUILD_DIR)/native-signal-$(NATIVE_TAG)
+NATIVE_OUTPUTS         := $(NATIVE_HELLO_BIN) $(NATIVE_HANDLE_BIN) $(NATIVE_LIBC_BIN) $(NATIVE_FUTEX_BIN) $(NATIVE_MM_BIN) $(NATIVE_SIGNAL_BIN)
 NATIVE_BUILD_STAMP     := $(NATIVE_BUILD_DIR)/.native-build-id
 comma := ,
 NET_HOSTFWD ?= hostfwd=tcp::5555-:5555,hostfwd=udp::5555-:5555
@@ -1000,7 +1001,7 @@ check-concurrency-foundation:
 	@$(MAKE) ARCH=$(ARCH) NR_CPUS=2 ALLOW_UNVERIFIED_SMP=1 BRINGUP=1 kernel-only >/dev/null
 	@echo "check-concurrency-foundation: PASS"
 
-check-mm-lock-model:
+check-mm-lock-model: smoke-mm-stress
 	@rg -q "MM_LOCK_MODEL" kernel/include/mm/vm.h
 	@rg -q "MM_VMA_PTE_AUDIT" kernel/mm/vm.c
 	@rg -q "COW_FAULT_TLB_CONTRACT" kernel/mm/fault.c
@@ -1008,7 +1009,6 @@ check-mm-lock-model:
 	@rg -q "MM_FORK_COW_REGRESSION_GUARD" kernel/mm/vm.c
 	@rg -q "FILE_MMAP_PAGE_CACHE_CONTRACT" kernel/include/fs/page_cache.h
 	@rg -q "OOM_RECLAIM_LIFETIME_CONTRACT" kernel/include/mm/oom.h
-	@rg -q "smoke-mm-stress" Makefile
 	@rg -q "MM_STRESS: PASS" user/cmds/mm_stress.c
 	@echo "check-mm-lock-model: PASS"
 
@@ -1041,7 +1041,7 @@ host-tests: $(HOST_TESTS_BIN)
 /tmp/a20-host-%: tools/tests/%.c
 	$(HOST_CC) -Ikernel/include -O2 -Wall -Wextra $< -o $@
 
-check-vfs-abstraction:
+check-vfs-abstraction: smoke-vfs-stress
 	@rg -q "VFS_OPEN_DISPATCH_CONTRACT" kernel/include/fs/vfs.h
 	@rg -q "VFS_REFCOUNT_HELPER_CONTRACT" kernel/include/fs/vfs.h
 	@rg -q "VFS_DCACHE_MOUNT_VNODE_INVARIANT" kernel/include/fs/vfs.h
@@ -1051,7 +1051,6 @@ check-vfs-abstraction:
 	@rg -q "\.open[[:space:]]*=" kernel/fs/ramfs.c kernel/fs/fat32.c kernel/fs/ext4.c kernel/fs/procfs.c kernel/fs/devfs.c kernel/fs/cgroupfs.c kernel/fs/sysfs.c
 	@rg -q "CGROUPFS_DOTDOT_PARENT_LOOKUP" kernel/fs/cgroupfs.c
 	@rg -q "VFS_CONCURRENCY_SMOKE_MATRIX" kernel/fs/vfs.c
-	@rg -q "smoke-vfs-stress" Makefile
 	@rg -q "VFS_STRESS: PASS" user/cmds/vfs_stress.c
 	@! rg -q "FS_TYPE_(FAT32|EXT4|RAMFS|PROCFS|DEVFS|CGROUP|SYSFS).*open|fat32_open_vnode|ext4_open_vnode|ramfs_open_vnode|procfs_open_vnode|devfs_open_vnode|cgroupfs_open_vnode|sysfs_open_vnode" kernel/fs/vfs.c
 	@! rg -q "refcount_(set|inc|dec_and_test)\(&[A-Za-z0-9_>\.-]*->ref_count" kernel/fs/ramfs.c kernel/fs/fat32.c kernel/fs/ext4.c kernel/fs/procfs.c kernel/fs/devfs.c kernel/fs/cgroupfs.c kernel/fs/sysfs.c kernel/fs/inotify.c kernel/fs/memfd.c kernel/fs/pipe.c
@@ -1081,7 +1080,7 @@ check-abi-boundary:
 	@! rg -q "无 stub 残留|all Phase 2\+ syscalls|Debug \(0x0900\) — stubs" docs/native-abi/00-overview.md kernel/abi/native/sys_core.c kernel/abi/native/sys_phase2.c
 	@echo "check-abi-boundary: PASS"
 
-check-driver-core-model:
+check-driver-core-model: smoke-driver-lifecycle
 	@rg -q "DRIVER_CORE_CONCURRENCY_MODEL" kernel/drivers/core/driver_core.c
 	@rg -q "spin_lock_irqsave\(&g_driver_core_lock\)" kernel/drivers/core/driver_core.c
 	@rg -q "mutex_lock\(&g_driver_core_ops\)" kernel/drivers/core/driver_core.c
@@ -2336,7 +2335,7 @@ $(NATIVE_BUILD_STAMP): $(USER_BUILD_STAMP) force_native_build
 		need_build=1; \
 	elif [ ! -x "$(NATIVE_HELLO_BIN)" ] || [ ! -x "$(NATIVE_HANDLE_BIN)" ] || \
 	     [ ! -x "$(NATIVE_LIBC_BIN)" ] || [ ! -x "$(NATIVE_FUTEX_BIN)" ] || \
-	     [ ! -x "$(NATIVE_MM_BIN)" ]; then \
+	     [ ! -x "$(NATIVE_MM_BIN)" ] || [ ! -x "$(NATIVE_SIGNAL_BIN)" ]; then \
 		need_build=1; \
 	elif find user/liba20rt user/liba20c user/tests -type f -newer "$@" \
 		-print -quit | grep -q .; then \
@@ -3219,6 +3218,53 @@ native-mm-arch: $(NATIVE_MM_BIN)
 
 native-mm-rv:
 	$(MAKE) ARCH=riscv64 NOMMU=$(NOMMU) native-mm-arch
+
+define NATIVE_SIGNAL_RECIPE
+@mkdir -p $(dir $(4))
+$(1) -ffreestanding -nostdlib -static \
+    $(2) \
+    -Iuser -Iuser/liba20rt \
+    -T$(NATIVE_LD) \
+    $(3) \
+    $(NATIVE_SDK_SRC) \
+    $(NATIVE_COMPILER_RT_SRC) \
+    $(NATIVE_ARCH_SRC) \
+    user/tests/test_native_signal.c \
+    $(NATIVE_LIBS) \
+    -o $(4)
+endef
+
+$(NATIVE_SIGNAL_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) user/tests/test_native_signal.c \
+		user/liba20rt/a20-generic.ld user/liba20rt/crt0_a20.h user/liba20rt/a20_syscall.h user/liba20rt/a20_task.h
+	$(call NATIVE_SIGNAL_RECIPE,$(NATIVE_CC),$(NATIVE_CFLAGS),$(NATIVE_CRT0),$@)
+
+native-signal-arch: $(NATIVE_SIGNAL_BIN)
+
+native-signal-rv:
+	$(MAKE) ARCH=riscv64 NOMMU=$(NOMMU) native-signal-arch
+
+smoke-native-signal:
+	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/native-signal-riscv64.log"; \
+	status=0; \
+	{ sleep $(SMOKE_INPUT_DELAY); printf '/bin/native-signal-rv\npoweroff\n'; } | \
+	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
+		-machine virt -m 1G -nographic -smp 1 -bios default \
+		-global virtio-mmio.force-legacy=false \
+		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-both-dev/fat32.img,if=none,format=raw,id=x0 \
+		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		-kernel .kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf \
+		> "$$log" 2>&1 || status=$$?; \
+	if grep -q 'NATIVE_SIGNAL: PASS' "$$log" && grep -q 'System is going down for power-off NOW' "$$log"; then \
+		echo "smoke-native-signal: PASS; log saved to $$log"; \
+	else \
+		echo "smoke-native-signal: failed with status $$status; tail of $$log:"; \
+		tail -n 80 "$$log"; \
+		exit 1; \
+	fi
 
 smoke-native-mm:
 	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build

@@ -18,7 +18,7 @@ typedef struct a20_start_info {
     uint32_t argc;               /* 命令行参数数量 */
     uint32_t envc;               /* 环境变量数量 */
     uint32_t auxc;               /* 辅助向量条目数 */
-    uint32_t reserved0;
+    uint32_t reserved0;          /* Native spawn fd mapping limit, or zero */
 
     uint64_t argv;               /* 用户指针：char*[] */
     uint64_t envp;               /* 用户指针：char*[] */
@@ -617,8 +617,9 @@ int posix_spawn(pid_t *pid, const char *path,
             !(__fd_table[i].fd_flags & FD_CLOEXEC)) {
             handles[nh++] = (struct a20_spawn_handle){
                 .handle = __fd_table[i].handle,
-                .rights = 0,   /* 继承全部 rights */
-                .target_slot = i,  /* 子进程中的目标 fd */
+                .rights = 0,       /* inherit all source rights */
+                /* Native libc maps fd i to this reserved child slot. */
+                .target_slot = 64 + i,
             };
         }
     }
@@ -1050,7 +1051,7 @@ int main(int argc, char *argv[]) {
 
 工作项：
 - [ ] fork 模拟（COW + state transfer，需要内核 A20_SPAWN_FORK_SELF）
-- [ ] 信号完整模拟（异步投递通过 event + channel）
+- [x] 信号检查点式模拟（内核 `task_kill`/`signal_check`/`signal_mask` + mlibc `sigaction`/`kill`/`sigprocmask` + futex 检查点投递）
 - [ ] select/poll → event_wait 映射
 - [ ] timerfd → A20 timer + event_queue
 - [ ] inotify → event_watch_fs

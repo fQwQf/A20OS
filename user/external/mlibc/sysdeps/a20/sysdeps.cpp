@@ -27,10 +27,13 @@
 #include <signal.h>
 #include <spawn.h>
 #include <stdio.h>
+#include <stdarg.h>
 #include <string.h>
 #include <stdlib.h>
 #include <sys/mman.h>
 #include <sys/resource.h>
+#include <sys/select.h>
+#include <poll.h>
 #include <sys/uio.h>
 #include <sys/utsname.h>
 #include <termios.h>
@@ -39,6 +42,9 @@
 extern "C" const a20_start_info *__a20_start_info;
 
 namespace {
+
+static int a20_to_errno(a20_status_t st);
+static void a20_dispatch_pending_signals();
 
 /* ------------------------------------------------------------------ */
 /* fd table: POSIX fd  <->  A20 handle                                 */
@@ -60,7 +66,8 @@ struct PipeRx {
 	size_t off = 0;
 };
 constexpr int kPipeRxMax = 4096;
-PipeRx g_pipe_rx[128];
+constexpr int kPipeFdSlots = 1024;
+PipeRx g_pipe_rx[kPipeFdSlots];
 
 
 FdEntry *g_fds = nullptr;
@@ -76,45 +83,95 @@ static void fd_unlock() {
 }
 
 static void fd_table_init() {
-	if (g_fds)
+	if (__atomic_load_n(&g_fds, __ATOMIC_ACQUIRE))
 		return;
-	g_fds = (FdEntry *)calloc(kFdInitial, sizeof(FdEntry));
-	g_fd_count = kFdInitial;
-	for (int i = 0; i < g_fd_count; i++)
-		g_fds[i].handle = A20_HANDLE_NULL;
-	if (__a20_start_info) {
-		g_fds[0].handle = __a20_start_info->stdin_handle;
-		g_fds[0].flags = O_RDONLY;
-		g_fds[1].handle = __a20_start_info->stdout_handle;
-		g_fds[1].flags = O_WRONLY;
-		g_fds[2].handle = __a20_start_info->stderr_handle;
-		g_fds[2].flags = O_WRONLY;
+	fd_lock();
+	if (!g_fds) {
+		FdEntry *table = (FdEntry *)calloc(kFdInitial, sizeof(FdEntry));
+		if (table) {
+			g_fd_count = kFdInitial;
+			for (int i = 0; i < g_fd_count; i++)
+				table[i].handle = A20_HANDLE_NULL;
+			if (__a20_start_info) {
+				table[0].handle = __a20_start_info->stdin_handle;
+				table[0].flags = O_RDONLY;
+				table[1].handle = __a20_start_info->stdout_handle;
+				table[1].flags = O_WRONLY;
+				table[2].handle = __a20_start_info->stderr_handle;
+				table[2].flags = O_WRONLY;
+
+				/* task_spawn places explicit non-stdio file actions in a
+				 * reserved Native handle range.  Reconstruct the POSIX fd
+				 * table before user code can observe the child. */
+				uint32_t limit = __a20_start_info->reserved0;
+				if (limit > (uint32_t)g_fd_count)
+					limit = (uint32_t)g_fd_count;
+				for (uint32_t i = 3; i < limit; i++) {
+					a20_handle_t h = A20_NATIVE_FD_HANDLE_BASE + i;
+					a20_handle_info info{};
+					info.size = sizeof(info);
+					info.version = 1;
+					if (a20_syscall6(A20_SYS_handle_query, h, (uint64_t)&info,
+					                  0, 0, 0, 0) >= 0) {
+						table[i].handle = h;
+						if ((info.rights & (A20_RIGHT_READ | A20_RIGHT_WRITE)) ==
+						    (A20_RIGHT_READ | A20_RIGHT_WRITE))
+							table[i].flags = O_RDWR;
+						else if (info.rights & A20_RIGHT_WRITE)
+							table[i].flags = O_WRONLY;
+						else
+							table[i].flags = O_RDONLY;
+						table[i].kind =
+						    info.object_type == A20_OBJ_CHANNEL_ENDPOINT ? 1 : 0;
+					}
+				}
+			}
+			__atomic_store_n(&g_fds, table, __ATOMIC_RELEASE);
+		}
 	}
+	fd_unlock();
 }
 
-static int fd_alloc(a20_handle_t h, int flags) {
+static int fd_alloc_min(a20_handle_t h, int flags, int min_fd, bool close_on_spawn) {
 	fd_table_init();
+	if (!g_fds || g_fd_count <= 0)
+		return -1;
+	if (min_fd < 0)
+		min_fd = 0;
 	fd_lock();
-	for (int i = 0; i < g_fd_count; i++) {
+	for (int i = min_fd; i < g_fd_count; i++) {
 		if (g_fds[i].handle == A20_HANDLE_NULL) {
 			g_fds[i].handle = h;
 			g_fds[i].flags = flags;
+			g_fds[i].close_on_spawn = close_on_spawn;
 			fd_unlock();
 			return i;
 		}
 	}
 	int old_count = g_fd_count;
-	FdEntry *grown = (FdEntry *)calloc(old_count * 2, sizeof(FdEntry));
+	int new_count = old_count * 2;
+	while (new_count <= min_fd)
+		new_count *= 2;
+	FdEntry *grown = (FdEntry *)calloc(new_count, sizeof(FdEntry));
+	if (!grown) {
+		fd_unlock();
+		return -1;
+	}
 	memcpy(grown, g_fds, old_count * sizeof(FdEntry));
-	for (int i = old_count; i < old_count * 2; i++)
+	for (int i = old_count; i < new_count; i++)
 		grown[i].handle = A20_HANDLE_NULL;
 	free(g_fds);
 	g_fds = grown;
-	g_fd_count = old_count * 2;
-	g_fds[old_count].handle = h;
-	g_fds[old_count].flags = flags;
+	g_fd_count = new_count;
+	g_fds[min_fd < old_count ? old_count : min_fd].handle = h;
+	g_fds[min_fd < old_count ? old_count : min_fd].flags = flags;
+	g_fds[min_fd < old_count ? old_count : min_fd].close_on_spawn = close_on_spawn;
 	fd_unlock();
-	return old_count;
+	return min_fd < old_count ? old_count : min_fd;
+}
+
+static int fd_alloc(a20_handle_t h, int flags) {
+	return fd_alloc_min(h, flags & ~O_CLOEXEC, 0, (flags & O_CLOEXEC) != 0);
 }
 
 static a20_handle_t fd_handle(int fd) {
@@ -131,6 +188,50 @@ static int fd_flags(int fd) {
 	return g_fds[fd].flags;
 }
 
+static bool fd_close_on_spawn(int fd) {
+	fd_table_init();
+	if (fd < 0 || fd >= g_fd_count)
+		return false;
+	return g_fds[fd].close_on_spawn;
+}
+
+static void fd_set_close_on_spawn(int fd, bool value) {
+	fd_lock();
+	if (fd >= 0 && fd < g_fd_count)
+		g_fds[fd].close_on_spawn = value;
+	fd_unlock();
+}
+
+static int fd_set_flags(int fd, int flags) {
+	a20_handle_t h = fd_handle(fd);
+	if (h == A20_HANDLE_NULL)
+		return EBADF;
+
+	/* Keep the kernel open-file description in sync for regular files and
+	 * devices.  Channel pipes are libc-managed and sockets receive their
+	 * nonblocking state from the native networking layer. */
+	a20_handle_info info{};
+	info.size = sizeof(info);
+	info.version = 1;
+	if (a20_syscall6(A20_SYS_handle_query, h, (uint64_t)&info,
+	                 0, 0, 0, 0) >= 0 &&
+	    (info.object_type == A20_OBJ_FILE || info.object_type == A20_OBJ_DEVICE ||
+	     info.object_type == A20_OBJ_SOCKET)) {
+		a20_status_t st = a20_syscall6(A20_SYS_handle_control, h,
+		                               A20_HANDLE_CTRL_FCNTL, F_SETFL,
+		                               (uint64_t)(unsigned int)flags, 0, 0);
+		if (st < 0 && st != -A20_ERR_ACCESS &&
+		    st != -A20_ERR_INVALID_ARGUMENT)
+			return a20_to_errno(st);
+	}
+
+	fd_lock();
+	if (fd >= 0 && fd < g_fd_count)
+		g_fds[fd].flags = flags;
+	fd_unlock();
+	return 0;
+}
+
 static int fd_kind(int fd) {
 	fd_table_init();
 	if (fd < 0 || fd >= g_fd_count)
@@ -145,6 +246,16 @@ static void fd_set_kind(int fd, int kind) {
 	fd_unlock();
 }
 
+static int fd_install(a20_handle_t h, int flags, int kind) {
+	int fd = fd_alloc(h, flags);
+	if (fd < 0) {
+		a20_syscall6(A20_SYS_handle_close, h, 0, 0, 0, 0, 0);
+		return -1;
+	}
+	fd_set_kind(fd, kind);
+	return fd;
+}
+
 static void fd_clear(int fd) {
 	fd_table_init();
 	fd_lock();
@@ -155,7 +266,7 @@ static void fd_clear(int fd) {
 		g_fds[fd].kind = 0;
 	}
 	fd_unlock();
-	if (fd >= 0 && fd < 128) {
+	if (fd >= 0 && fd < kPipeFdSlots) {
 		free(g_pipe_rx[fd].buf);
 		g_pipe_rx[fd] = PipeRx{};
 	}
@@ -166,13 +277,32 @@ static void fd_clear(int fd) {
 /* ------------------------------------------------------------------ */
 
 char g_cwd[PATH_MAX] = "/";
+a20_handle_t g_cwd_handle = A20_HANDLE_NULL;
+bool g_cwd_handle_owned = false;
+bool g_cwd_handle_initialized = false;
+
+static void refresh_cwd_from_kernel() {
+	static const char proc_cwd[] = "/proc/self/cwd";
+	char path[PATH_MAX];
+	a20_status_t st = a20_syscall6(A20_SYS_path_readlink,
+	                               (uint64_t)proc_cwd, 0,
+	                               (uint64_t)path, sizeof(path) - 1, 0, 0);
+	if (st < 0 || st >= (a20_status_t)sizeof(path) || path[0] != '/')
+		return;
+	path[st] = '\0';
+	memcpy(g_cwd, path, (size_t)st + 1);
+}
 
 static a20_handle_t cwd_handle() {
-	if (!__a20_start_info)
-		return A20_HANDLE_NULL;
-	return __a20_start_info->cwd_dir != A20_HANDLE_NULL
-	           ? __a20_start_info->cwd_dir
-	           : __a20_start_info->root_dir;
+	if (!g_cwd_handle_initialized) {
+		g_cwd_handle = __a20_start_info
+		                    ? (__a20_start_info->cwd_dir != A20_HANDLE_NULL
+		                           ? __a20_start_info->cwd_dir
+		                           : __a20_start_info->root_dir)
+		                    : A20_HANDLE_NULL;
+		g_cwd_handle_initialized = true;
+	}
+	return g_cwd_handle;
 }
 
 static a20_handle_t root_handle() {
@@ -183,6 +313,7 @@ static a20_handle_t root_handle() {
  * not take a dir handle resolve against the kernel cwd, which we keep in
  * sync, but absolutizing is robust either way). */
 static void absolutize(const char *path, char *out, size_t out_size) {
+	refresh_cwd_from_kernel();
 	if (path[0] == '/') {
 		strncpy(out, path, out_size);
 		out[out_size - 1] = '\0';
@@ -368,6 +499,9 @@ int Sysdeps<FutexWait>::operator()(int *pointer, int expected, const struct time
 		return EAGAIN;
 	if (st == -A20_ERR_TIMED_OUT)
 		return ETIMEDOUT;
+	/* A20_ERR_INTERRUPTED: a signal arrived at the checkpoint. */
+	if (st == -A20_ERR_INTERRUPTED)
+		a20_dispatch_pending_signals();
 	return a20_to_errno(st);
 }
 
@@ -598,7 +732,9 @@ int Sysdeps<Open>::operator()(const char *pathname, int flags, mode_t mode, int 
 	a20_status_t st = do_path_open(cwd_handle(), pathname, (uint32_t)flags, (uint32_t)mode, &h);
 	if (st < 0)
 		return a20_to_errno(st);
-	*fd = fd_alloc(h, flags);
+	*fd = fd_install(h, flags, 0);
+	if (*fd < 0)
+		return EMFILE;
 	return 0;
 }
 
@@ -611,17 +747,25 @@ int Sysdeps<Openat>::operator()(int dirfd, const char *path, int flags, mode_t m
 	a20_status_t st = do_path_open(base, path, (uint32_t)flags, (uint32_t)mode, &h);
 	if (st < 0)
 		return a20_to_errno(st);
-	*fd = fd_alloc(h, flags);
+	*fd = fd_install(h, flags, 0);
+	if (*fd < 0)
+		return EMFILE;
 	return 0;
 }
 
 static ssize_t pipe_read(int fd, a20_handle_t h, void *buf, size_t count, int flags);
 
 int Sysdeps<Read>::operator()(int fd, void *buf, size_t count, ssize_t *bytes_read) {
+	if (count == 0) {
+		if (fd_handle(fd) == A20_HANDLE_NULL)
+			return EBADF;
+		*bytes_read = 0;
+		return 0;
+	}
 	a20_handle_t h = fd_handle(fd);
 	if (h == A20_HANDLE_NULL)
 		return EBADF;
-	if (fd < 128 && fd_kind(fd) == 1) {
+	if (fd >= 0 && fd < kPipeFdSlots && fd_kind(fd) == 1) {
 		ssize_t r = pipe_read(fd, h, buf, count, fd_flags(fd));
 		if (r < 0)
 			return (int)-r;
@@ -671,10 +815,16 @@ static ssize_t pipe_read(int fd, a20_handle_t h, void *buf, size_t count, int fl
 }
 
 int Sysdeps<Write>::operator()(int fd, const void *buf, size_t count, ssize_t *bytes_written) {
+	if (count == 0) {
+		if (fd_handle(fd) == A20_HANDLE_NULL)
+			return EBADF;
+		*bytes_written = 0;
+		return 0;
+	}
 	a20_handle_t h = fd_handle(fd);
 	if (h == A20_HANDLE_NULL)
 		return EBADF;
-	if (fd < 128 && fd_kind(fd) == 1) {
+	if (fd >= 0 && fd < kPipeFdSlots && fd_kind(fd) == 1) {
 		a20_msg_send_args args{
 		    .size = sizeof(args), .version = 1, .channel = h, ._pad = 0,
 		    .data = (uint64_t)buf,
@@ -810,21 +960,24 @@ int Sysdeps<Stat>::operator()(mlibc::fsfd_target fsfdt, int fd, const char *path
 	fd_table_init();
 	a20_handle_t h;
 	a20_handle_t opened = A20_HANDLE_NULL;
+	a20_status_t open_status = A20_OK;
 	switch (fsfdt) {
 	case mlibc::fsfd_target::fd:
 		h = fd_handle(fd);
 		break;
 	case mlibc::fsfd_target::path:
-		if (do_path_open(cwd_handle(), path, O_RDONLY, 0, &opened) < 0)
-			return ENOENT;
+		open_status = do_path_open(cwd_handle(), path, O_RDONLY, 0, &opened);
+		if (open_status < 0)
+			return a20_to_errno(open_status);
 		h = opened;
 		break;
 	case mlibc::fsfd_target::fd_path: {
 		a20_handle_t base = fd_handle(fd);
 		if (base == A20_HANDLE_NULL)
 			return EBADF;
-		if (do_path_open(base, path, O_RDONLY, 0, &opened) < 0)
-			return ENOENT;
+		open_status = do_path_open(base, path, O_RDONLY, 0, &opened);
+		if (open_status < 0)
+			return a20_to_errno(open_status);
 		h = opened;
 		break;
 	}
@@ -833,7 +986,7 @@ int Sysdeps<Stat>::operator()(mlibc::fsfd_target fsfdt, int fd, const char *path
 	}
 	if (h == A20_HANDLE_NULL)
 		return EBADF;
-	a20_stat ks;
+	a20_stat ks{};
 	a20_status_t st = do_handle_stat(h, &ks);
 	if (opened != A20_HANDLE_NULL)
 		a20_syscall6(A20_SYS_handle_close, opened, 0, 0, 0, 0, 0);
@@ -849,7 +1002,9 @@ int Sysdeps<OpenDir>::operator()(const char *path, int *handle) {
 	a20_status_t st = do_path_open(cwd_handle(), path, O_RDONLY | O_DIRECTORY, 0, &h);
 	if (st < 0)
 		return a20_to_errno(st);
-	*handle = fd_alloc(h, O_RDONLY | O_DIRECTORY);
+	*handle = fd_install(h, O_RDONLY | O_DIRECTORY | O_CLOEXEC, 0);
+	if (*handle < 0)
+		return EMFILE;
 	return 0;
 }
 
@@ -900,17 +1055,23 @@ int Sysdeps<Dup>::operator()(int fd, int flags, int *newfd) {
 		return EBADF;
 	a20_handle_dup_args args{
 	    .size = sizeof(args), .version = 1, .source = h, .flags = 0,
-	    .rights_mask = ~0ULL, .out_handle = A20_HANDLE_NULL, .reserved = 0,
+	    .rights_mask = 0, .out_handle = A20_HANDLE_NULL, .reserved = 0,
 	};
 	a20_status_t st = a20_syscall6(A20_SYS_handle_dup, (uint64_t)&args, 0, 0, 0, 0, 0);
 	if (st < 0)
 		return a20_to_errno(st);
-	*newfd = fd_alloc(args.out_handle, fd_flags(fd));
+	*newfd = fd_alloc_min(args.out_handle, fd_flags(fd), 0, false);
+	if (*newfd < 0) {
+		a20_syscall6(A20_SYS_handle_close, args.out_handle, 0, 0, 0, 0, 0);
+		return EMFILE;
+	}
+	fd_set_kind(*newfd, fd_kind(fd));
 	return 0;
 }
 
 int Sysdeps<Dup2>::operator()(int fd, int flags, int newfd) {
-	(void)flags;
+	if (flags & ~O_CLOEXEC)
+		return EINVAL;
 	if (fd == newfd)
 		return 0;
 	a20_handle_t h = fd_handle(fd);
@@ -918,7 +1079,7 @@ int Sysdeps<Dup2>::operator()(int fd, int flags, int newfd) {
 		return EBADF;
 	a20_handle_dup_args args{
 	    .size = sizeof(args), .version = 1, .source = h, .flags = 0,
-	    .rights_mask = ~0ULL, .out_handle = A20_HANDLE_NULL, .reserved = 0,
+	    .rights_mask = 0, .out_handle = A20_HANDLE_NULL, .reserved = 0,
 	};
 	a20_status_t st = a20_syscall6(A20_SYS_handle_dup, (uint64_t)&args, 0, 0, 0, 0, 0);
 	if (st < 0)
@@ -929,13 +1090,120 @@ int Sysdeps<Dup2>::operator()(int fd, int flags, int newfd) {
 	if (newfd >= 0 && newfd < g_fd_count) {
 		g_fds[newfd].handle = args.out_handle;
 		g_fds[newfd].flags = fd_flags(fd);
+		g_fds[newfd].close_on_spawn = (flags & O_CLOEXEC) != 0;
+		g_fds[newfd].kind = (uint8_t)fd_kind(fd);
 		fd_unlock();
 		return 0;
 	}
 	fd_unlock();
 	/* Slot beyond current table: fall back to a fresh allocation. */
-	int allocated = fd_alloc(args.out_handle, fd_flags(fd));
-	return allocated == newfd ? 0 : EBADF;
+	int allocated = fd_alloc_min(args.out_handle, fd_flags(fd), newfd,
+	                             (flags & O_CLOEXEC) != 0);
+	if (allocated < 0) {
+		a20_syscall6(A20_SYS_handle_close, args.out_handle, 0, 0, 0, 0, 0);
+		return EMFILE;
+	}
+	fd_set_kind(allocated, fd_kind(fd));
+	if (allocated != newfd) {
+		sysdep<Close>(allocated);
+		return EBADF;
+	}
+	return 0;
+}
+
+int Sysdeps<Fcntl>::operator()(int fd, int request, va_list args, int *result) {
+	if (fd_handle(fd) == A20_HANDLE_NULL)
+		return EBADF;
+
+	switch (request) {
+	case F_GETFD:
+		*result = fd_close_on_spawn(fd) ? FD_CLOEXEC : 0;
+		return 0;
+	case F_SETFD: {
+		int value = va_arg(args, int);
+		if (value & ~FD_CLOEXEC)
+			return EINVAL;
+		fd_set_close_on_spawn(fd, (value & FD_CLOEXEC) != 0);
+		*result = 0;
+		return 0;
+	}
+	case F_GETFL:
+		*result = fd_flags(fd);
+		return 0;
+	case F_SETFL: {
+		int value = va_arg(args, int);
+		int old = fd_flags(fd);
+		/* Access mode and creation flags are immutable after open. */
+		constexpr int mutable_flags = O_APPEND | O_ASYNC | O_DIRECT |
+		                              O_NOATIME | O_NONBLOCK | O_DSYNC | O_SYNC;
+		int next = (old & ~mutable_flags) | (value & mutable_flags);
+		if (int e = fd_set_flags(fd, next))
+			return e;
+		*result = 0;
+		return 0;
+	}
+	case F_DUPFD:
+	case F_DUPFD_CLOEXEC: {
+		int min_fd = va_arg(args, int);
+		if (min_fd < 0)
+			return EINVAL;
+		a20_handle_dup_args dup_args{
+		    .size = sizeof(dup_args), .version = 1,
+		    .source = fd_handle(fd), .flags = 0,
+		    .rights_mask = 0, .out_handle = A20_HANDLE_NULL, .reserved = 0,
+		};
+		a20_status_t st = a20_syscall6(A20_SYS_handle_dup,
+		                               (uint64_t)&dup_args, 0, 0, 0, 0, 0);
+		if (st < 0)
+			return a20_to_errno(st);
+		int out = fd_alloc_min(dup_args.out_handle, fd_flags(fd), min_fd,
+		                       request == F_DUPFD_CLOEXEC);
+		if (out < 0) {
+			a20_syscall6(A20_SYS_handle_close, dup_args.out_handle, 0, 0, 0, 0, 0);
+			return EMFILE;
+		}
+		fd_set_kind(out, fd_kind(fd));
+		*result = out;
+		return 0;
+	}
+	case F_GETLK:
+	case F_SETLK:
+	case F_SETLKW:
+#ifdef F_OFD_GETLK
+	case F_OFD_GETLK:
+	case F_OFD_SETLK:
+	case F_OFD_SETLKW:
+#endif
+	case F_SETOWN:
+	case F_GETOWN:
+	case F_SETOWN_EX:
+	case F_GETOWN_EX:
+	case F_SETSIG:
+	case F_GETSIG: {
+		/* The Native handle control path already forwards these operations to
+		 * the VFS, including file locks and owner metadata. */
+		uint64_t value = 0;
+		if (request == F_GETLK || request == F_SETLK || request == F_SETLKW
+#ifdef F_OFD_GETLK
+		    || request == F_OFD_GETLK || request == F_OFD_SETLK || request == F_OFD_SETLKW
+#endif
+		    || request == F_SETOWN_EX || request == F_GETOWN_EX)
+			value = (uint64_t)va_arg(args, void *);
+		else if (request == F_GETOWN || request == F_GETSIG)
+			value = 0;
+		else
+			value = (uint64_t)(unsigned long)va_arg(args, int);
+		a20_status_t st = a20_syscall6(A20_SYS_handle_control, fd_handle(fd),
+		                               A20_HANDLE_CTRL_FCNTL, (uint64_t)request,
+		                               value, 0, 0);
+		if (st < 0)
+			return a20_to_errno(st);
+		*result = (int)st;
+		return 0;
+	}
+	default:
+		return EINVAL;
+	}
 }
 
 int Sysdeps<Access>::operator()(const char *path, int mode) {
@@ -950,8 +1218,22 @@ int Sysdeps<Access>::operator()(const char *path, int mode) {
 }
 
 int Sysdeps<Faccessat>::operator()(int dirfd, const char *pathname, int mode, int flags) {
-	(void)dirfd; (void)flags;
-	return sysdep<Access>(pathname, mode);
+	if (flags & ~AT_SYMLINK_NOFOLLOW)
+		return EINVAL;
+	a20_handle_t dir = (dirfd == AT_FDCWD) ? cwd_handle() : fd_handle(dirfd);
+	if (dir == A20_HANDLE_NULL)
+		return EBADF;
+	int open_flags = O_RDONLY;
+	if ((mode & R_OK) && (mode & W_OK))
+		open_flags = O_RDWR;
+	else if (mode & W_OK)
+		open_flags = O_WRONLY;
+	a20_handle_t h;
+	a20_status_t st = do_path_open(dir, pathname, (uint32_t)open_flags, 0, &h);
+	if (st < 0)
+		return a20_to_errno(st);
+	a20_syscall6(A20_SYS_handle_close, h, 0, 0, 0, 0, 0);
+	return 0;
 }
 
 int Sysdeps<Ftruncate>::operator()(int fd, size_t size) {
@@ -989,33 +1271,47 @@ int Sysdeps<Truncate>::operator()(const char *path, off_t length) {
 }
 
 int Sysdeps<Rmdir>::operator()(const char *path) {
-	char abs[PATH_MAX];
-	absolutize(path, abs, sizeof(abs));
-	a20_status_t st = a20_syscall6(A20_SYS_path_unlink, (uint64_t)abs, 0, 0, 0, 0, 0);
+	a20_path_unlink_args args{
+	    .size = sizeof(args), .version = 1, .dir = cwd_handle(),
+	    .flags = AT_REMOVEDIR, .path = (uint64_t)path, .path_len = 0, ._pad = 0,
+	};
+	a20_status_t st = a20_syscall6(A20_SYS_path_unlink_at,
+	                               (uint64_t)&args, 0, 0, 0, 0, 0);
 	if (st < 0)
 		return a20_to_errno(st);
 	return 0;
 }
 
 int Sysdeps<Unlinkat>::operator()(int dirfd, const char *path, int flags) {
-	(void)dirfd; (void)flags;
-	return sysdep<Rmdir>(path);
+	a20_handle_t dir = (dirfd == AT_FDCWD) ? cwd_handle() : fd_handle(dirfd);
+	if (dir == A20_HANDLE_NULL)
+		return EBADF;
+	a20_path_unlink_args args{
+	    .size = sizeof(args), .version = 1, .dir = dir,
+	    .flags = (uint32_t)flags, .path = (uint64_t)path, .path_len = 0, ._pad = 0,
+	};
+	a20_status_t st = a20_syscall6(A20_SYS_path_unlink_at,
+	                               (uint64_t)&args, 0, 0, 0, 0, 0);
+	return st < 0 ? a20_to_errno(st) : 0;
 }
 
 int Sysdeps<Rename>::operator()(const char *path, const char *new_path) {
-	char old_abs[PATH_MAX], new_abs[PATH_MAX];
-	absolutize(path, old_abs, sizeof(old_abs));
-	absolutize(new_path, new_abs, sizeof(new_abs));
-	a20_status_t st = a20_syscall6(A20_SYS_path_rename, (uint64_t)old_abs, 0,
-	                               (uint64_t)new_abs, 0, 0, 0);
-	if (st < 0)
-		return a20_to_errno(st);
-	return 0;
+	return sysdep<Renameat>(AT_FDCWD, path, AT_FDCWD, new_path);
 }
 
 int Sysdeps<Renameat>::operator()(int olddirfd, const char *oldpath, int newdirfd, const char *newpath) {
-	(void)olddirfd; (void)newdirfd;
-	return sysdep<Rename>(oldpath, newpath);
+	a20_handle_t old_dir = (olddirfd == AT_FDCWD) ? cwd_handle() : fd_handle(olddirfd);
+	a20_handle_t new_dir = (newdirfd == AT_FDCWD) ? cwd_handle() : fd_handle(newdirfd);
+	if (old_dir == A20_HANDLE_NULL || new_dir == A20_HANDLE_NULL)
+		return EBADF;
+	a20_path_rename_args args{
+	    .size = sizeof(args), .version = 1, .old_dir = old_dir, .new_dir = new_dir,
+	    .old_path = (uint64_t)oldpath, .old_path_len = 0, ._pad0 = 0,
+	    .new_path = (uint64_t)newpath, .new_path_len = 0, .flags = 0,
+	};
+	a20_status_t st = a20_syscall6(A20_SYS_path_rename_at,
+	                               (uint64_t)&args, 0, 0, 0, 0, 0);
+	return st < 0 ? a20_to_errno(st) : 0;
 }
 
 } // namespace mlibc
@@ -1026,9 +1322,9 @@ namespace mlibc {
 /* directories and links                                               */
 /* ------------------------------------------------------------------ */
 
-static int do_create_node(const char *path, uint32_t type, uint32_t mode) {
+static int do_create_node(a20_handle_t dir, const char *path, uint32_t type, uint32_t mode) {
 	a20_path_create_args args{
-	    .size = sizeof(args), .version = 1, .dir = cwd_handle(),
+	    .size = sizeof(args), .version = 1, .dir = dir,
 	    .type = type, .mode = mode,
 	    .path = (uint64_t)path, .path_len = 0, .dev = 0,
 	    .out_handle = A20_HANDLE_NULL,
@@ -1041,60 +1337,79 @@ static int do_create_node(const char *path, uint32_t type, uint32_t mode) {
 	return 0;
 }
 
+static int do_create_node(const char *path, uint32_t type, uint32_t mode) {
+	/* AT_FDCWD is already tracked by the kernel after chdir/fchdir.  Do not
+	 * reuse a possibly read-only directory fd as the mutation capability. */
+	return do_create_node(A20_HANDLE_NULL, path, type, mode);
+}
+
 int Sysdeps<Mkdir>::operator()(const char *path, mode_t mode) {
 	return do_create_node(path, 1 /* dir */, (uint32_t)mode);
 }
 
 int Sysdeps<Mkdirat>::operator()(int dirfd, const char *path, mode_t mode) {
-	(void)dirfd;
-	return sysdep<Mkdir>(path, mode);
+	a20_handle_t dir = (dirfd == AT_FDCWD) ? A20_HANDLE_NULL : fd_handle(dirfd);
+	if (dirfd != AT_FDCWD && dir == A20_HANDLE_NULL)
+		return EBADF;
+	return do_create_node(dir, path, 1 /* dir */, (uint32_t)mode);
 }
 
 int Sysdeps<Link>::operator()(const char *oldpath, const char *newpath) {
-	char old_abs[PATH_MAX], new_abs[PATH_MAX];
-	absolutize(oldpath, old_abs, sizeof(old_abs));
-	absolutize(newpath, new_abs, sizeof(new_abs));
-	a20_status_t st = a20_syscall6(A20_SYS_path_link, (uint64_t)old_abs, 0,
-	                               (uint64_t)new_abs, 0, 0, 0);
-	if (st < 0)
-		return a20_to_errno(st);
-	return 0;
+	return sysdep<Linkat>(AT_FDCWD, oldpath, AT_FDCWD, newpath, 0);
 }
 
 int Sysdeps<Linkat>::operator()(int olddirfd, const char *oldpath, int newdirfd, const char *newpath, int flags) {
-	(void)olddirfd; (void)newdirfd; (void)flags;
-	return sysdep<Link>(oldpath, newpath);
+	a20_handle_t old_dir = (olddirfd == AT_FDCWD) ? cwd_handle() : fd_handle(olddirfd);
+	a20_handle_t new_dir = (newdirfd == AT_FDCWD) ? cwd_handle() : fd_handle(newdirfd);
+	if (old_dir == A20_HANDLE_NULL || new_dir == A20_HANDLE_NULL)
+		return EBADF;
+	a20_path_link_args args{
+	    .size = sizeof(args), .version = 1, .old_dir = old_dir, .new_dir = new_dir,
+	    .old_path = (uint64_t)oldpath, .old_path_len = 0,
+	    .new_path = (uint64_t)newpath, .new_path_len = 0, .flags = (uint32_t)flags,
+	};
+	a20_status_t st = a20_syscall6(A20_SYS_path_link_at,
+	                               (uint64_t)&args, 0, 0, 0, 0, 0);
+	return st < 0 ? a20_to_errno(st) : 0;
 }
 
 int Sysdeps<Symlink>::operator()(const char *target, const char *linkpath) {
-	char link_abs[PATH_MAX];
-	absolutize(linkpath, link_abs, sizeof(link_abs));
-	a20_status_t st = a20_syscall6(A20_SYS_path_symlink, (uint64_t)target, 0,
-	                               (uint64_t)link_abs, 0, 0, 0);
-	if (st < 0)
-		return a20_to_errno(st);
-	return 0;
+	return sysdep<Symlinkat>(target, AT_FDCWD, linkpath);
 }
 
 int Sysdeps<Symlinkat>::operator()(const char *target, int dirfd, const char *linkpath) {
-	(void)dirfd;
-	return sysdep<Symlink>(target, linkpath);
+	a20_handle_t dir = (dirfd == AT_FDCWD) ? cwd_handle() : fd_handle(dirfd);
+	if (dir == A20_HANDLE_NULL)
+		return EBADF;
+	a20_path_symlink_args args{
+	    .size = sizeof(args), .version = 1, .dir = dir,
+	    .target = (uint64_t)target, .target_len = 0,
+	    .linkpath = (uint64_t)linkpath, .linkpath_len = 0,
+	};
+	a20_status_t st = a20_syscall6(A20_SYS_path_symlink_at,
+	                               (uint64_t)&args, 0, 0, 0, 0, 0);
+	return st < 0 ? a20_to_errno(st) : 0;
 }
 
 int Sysdeps<Readlink>::operator()(const char *path, void *buffer, size_t max_size, ssize_t *length) {
-	char abs[PATH_MAX];
-	absolutize(path, abs, sizeof(abs));
-	a20_status_t st = a20_syscall6(A20_SYS_path_readlink, (uint64_t)abs, 0,
-	                               (uint64_t)buffer, (uint64_t)max_size, 0, 0);
-	if (st < 0)
-		return a20_to_errno(st);
-	*length = (ssize_t)st;
-	return 0;
+	return sysdep<Readlinkat>(AT_FDCWD, path, buffer, max_size, length);
 }
 
 int Sysdeps<Readlinkat>::operator()(int dirfd, const char *path, void *buffer, size_t max_size, ssize_t *length) {
-	(void)dirfd;
-	return sysdep<Readlink>(path, buffer, max_size, length);
+	a20_handle_t dir = (dirfd == AT_FDCWD) ? cwd_handle() : fd_handle(dirfd);
+	if (dir == A20_HANDLE_NULL)
+		return EBADF;
+	a20_path_readlink_args args{
+	    .size = sizeof(args), .version = 1, .dir = dir,
+	    .path = (uint64_t)path, .path_len = 0,
+	    .buf = (uint64_t)buffer, .buf_len = (uint64_t)max_size, .out_len = 0,
+	};
+	a20_status_t st = a20_syscall6(A20_SYS_path_readlink_at,
+	                               (uint64_t)&args, 0, 0, 0, 0, 0);
+	if (st < 0)
+		return a20_to_errno(st);
+	*length = (ssize_t)args.out_len;
+	return 0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1216,26 +1531,82 @@ int Sysdeps<Execve>::operator()(const char *path, char *const argv[], char *cons
 }
 
 /* ------------------------------------------------------------------ */
-/* signals: inert compatibility stubs (native ABI has no signals)      */
+/* signals: checkpoint-based simulation (native ABI has no async signals) */
 /* ------------------------------------------------------------------ */
 
+static struct sigaction g_a20_sig_handlers[64];
+static uint64_t g_a20_sig_blocked;
+
+/* Run the handlers for any delivered signals at an explicit checkpoint.
+ * Called from the futex wait path after A20_ERR_INTERRUPTED and from
+ * pthread_testcancel; never from an arbitrary instruction boundary. */
+static void a20_dispatch_pending_signals() {
+	int64_t sigs = a20_rt_signal_check();
+	if (!sigs)
+		return;
+	for (int sig = 1; sig < 64; sig++) {
+		if (!((uint64_t)sigs & (1ULL << sig)))
+			continue;
+		const struct sigaction &sa = g_a20_sig_handlers[sig];
+		if (sa.sa_handler && sa.sa_handler != SIG_IGN &&
+		    sa.sa_handler != SIG_DFL) {
+			sa.sa_handler(sig);
+		}
+		/* SIG_DFL/SIG_IGN: no-op at the checkpoint for now. */
+	}
+}
+
 int Sysdeps<Kill>::operator()(pid_t pid, int sig) {
-	(void)pid; (void)sig;
-	return 0;
+	if (sig <= 0 || sig >= 64)
+		return EINVAL;
+	/* Only self-directed signals are wired for now; cross-process kill needs
+	 * the pid -> task-handle registry (documented future work). */
+	if (pid != Sysdeps<GetPid>{}() && pid != 0 && pid != -1)
+		return ESRCH;
+	if (sig == SIGKILL) {
+		a20_syscall6(A20_SYS_task_exit, (uint64_t)(128 + SIGKILL), 0, 0, 0, 0, 0);
+		return 0;
+	}
+	a20_handle_t self = __a20_start_info ? __a20_start_info->self_task
+	                                     : A20_HANDLE_NULL;
+	if (self == A20_HANDLE_NULL)
+		return ENOSYS;
+	a20_status_t st = a20_syscall6(A20_SYS_task_kill, self, (uint64_t)sig,
+	                               0, 0, 0, 0);
+	return a20_to_errno(st);
 }
 
 int Sysdeps<Sigprocmask>::operator()(int how, const sigset_t *__restrict set, sigset_t *__restrict retrieve) {
-	(void)how; (void)set;
-	if (retrieve)
-		memset(retrieve, 0, sizeof(*retrieve));
+	uint64_t old = g_a20_sig_blocked;
+	if (set) {
+		uint64_t bits = 0;
+		for (int sig = 1; sig < 64; sig++)
+			if (sigismember(set, sig))
+				bits |= (1ULL << sig);
+		if (how == SIG_BLOCK)
+			g_a20_sig_blocked = old | bits;
+		else if (how == SIG_UNBLOCK)
+			g_a20_sig_blocked = old & ~bits;
+		else if (how == SIG_SETMASK)
+			g_a20_sig_blocked = bits;
+		(void)a20_rt_signal_mask(g_a20_sig_blocked, nullptr);
+	}
+	if (retrieve) {
+		sigemptyset(retrieve);
+		for (int sig = 1; sig < 64; sig++)
+			if (g_a20_sig_blocked & (1ULL << sig))
+				sigaddset(retrieve, sig);
+	}
 	return 0;
 }
 
 int Sysdeps<Sigaction>::operator()(int signum, const struct sigaction *__restrict act, struct sigaction *__restrict oldact) {
-	(void)signum;
+	if (signum <= 0 || signum >= 64)
+		return EINVAL;
 	if (oldact)
-		memset(oldact, 0, sizeof(*oldact));
-	(void)act;
+		*oldact = g_a20_sig_handlers[signum];
+	if (act)
+		g_a20_sig_handlers[signum] = *act;
 	return 0;
 }
 
@@ -1245,7 +1616,11 @@ int Sysdeps<Sigsuspend>::operator()(const sigset_t *set) {
 }
 
 int Sysdeps<Sigpending>::operator()(sigset_t *set) {
-	memset(set, 0, sizeof(*set));
+	sigemptyset(set);
+	int64_t sigs = a20_rt_signal_check();
+	for (int sig = 1; sig < 64; sig++)
+		if ((uint64_t)sigs & (1ULL << sig))
+			sigaddset(set, sig);
 	return 0;
 }
 
@@ -1310,7 +1685,8 @@ int Sysdeps<Tcsetwinsize>::operator()(int fd, const struct winsize *winsz) {
 /* ------------------------------------------------------------------ */
 
 int Sysdeps<Pipe>::operator()(int *fds, int flags) {
-	(void)flags;
+	if (flags & ~(O_NONBLOCK | O_CLOEXEC))
+		return EINVAL;
 	a20_channel_create_args args{
 	    .size = sizeof(args), .version = 1, .msg_capacity = 64, .flags = 0,
 	    .type = 0, .out_endpoints = {A20_HANDLE_NULL, A20_HANDLE_NULL},
@@ -1318,14 +1694,22 @@ int Sysdeps<Pipe>::operator()(int *fds, int flags) {
 	a20_status_t st = a20_syscall6(A20_SYS_channel_create, (uint64_t)&args, 0, 0, 0, 0, 0);
 	if (st < 0)
 		return a20_to_errno(st);
-	fds[0] = fd_alloc(args.out_endpoints[0], O_RDONLY);
-	fds[1] = fd_alloc(args.out_endpoints[1], O_WRONLY);
-	fd_set_kind(fds[0], 1);
-	fd_set_kind(fds[1], 1);
+	int fd_flags = flags & (O_NONBLOCK | O_CLOEXEC);
+	fds[0] = fd_install(args.out_endpoints[0], O_RDONLY | fd_flags, 1);
+	if (fds[0] < 0) {
+		a20_syscall6(A20_SYS_handle_close, args.out_endpoints[1], 0, 0, 0, 0, 0);
+		return EMFILE;
+	}
+	fds[1] = fd_install(args.out_endpoints[1], O_WRONLY | fd_flags, 1);
+	if (fds[1] < 0) {
+		sysdep<Close>(fds[0]);
+		return EMFILE;
+	}
 	return 0;
 }
 
 int Sysdeps<GetCwd>::operator()(char *buffer, size_t size) {
+	refresh_cwd_from_kernel();
 	size_t len = strlen(g_cwd) + 1;
 	if (size < len)
 		return ERANGE;
@@ -1334,27 +1718,55 @@ int Sysdeps<GetCwd>::operator()(char *buffer, size_t size) {
 }
 
 int Sysdeps<Chdir>::operator()(const char *path) {
-	/* Validate that the target is a directory, then track it libc-side. */
+	/* Open the target first so the capability check and cwd update are atomic
+	 * from the libc caller's point of view. */
 	a20_handle_t h;
 	a20_status_t st = do_path_open(cwd_handle(), path, O_RDONLY | O_DIRECTORY, 0, &h);
 	if (st < 0)
 		return a20_to_errno(st);
-	a20_syscall6(A20_SYS_handle_close, h, 0, 0, 0, 0, 0);
-
-	char abs[PATH_MAX];
-	absolutize(path, abs, sizeof(abs));
-	/* Normalize trailing slashes. */
-	size_t len = strlen(abs);
-	while (len > 1 && abs[len - 1] == '/')
-		abs[--len] = '\0';
-	strncpy(g_cwd, abs, sizeof(g_cwd) - 1);
-	g_cwd[sizeof(g_cwd) - 1] = '\0';
+	st = a20_syscall6(A20_SYS_handle_control, h,
+	                  A20_HANDLE_CTRL_CHDIR, 0, 0, 0, 0);
+	if (st < 0) {
+		a20_syscall6(A20_SYS_handle_close, h, 0, 0, 0, 0, 0);
+		return a20_to_errno(st);
+	}
+	a20_handle_t old_cwd = cwd_handle();
+	bool old_owned = g_cwd_handle_owned;
+	g_cwd_handle = h;
+	g_cwd_handle_owned = true;
+	if (old_owned && old_cwd != A20_HANDLE_NULL)
+		a20_syscall6(A20_SYS_handle_close, old_cwd, 0, 0, 0, 0, 0);
+	refresh_cwd_from_kernel();
 	return 0;
 }
 
 int Sysdeps<Fchdir>::operator()(int fd) {
-	(void)fd;
-	return ENOSYS; /* cannot recover a path from a handle */
+	a20_handle_t h = fd_handle(fd);
+	if (h == A20_HANDLE_NULL)
+		return EBADF;
+	a20_handle_dup_args args{
+	    .size = sizeof(args), .version = 1, .source = h, .flags = 0,
+	    .rights_mask = 0, .out_handle = A20_HANDLE_NULL, .reserved = 0,
+	};
+	a20_status_t st = a20_syscall6(A20_SYS_handle_dup,
+	                               (uint64_t)&args, 0, 0, 0, 0, 0);
+	if (st < 0)
+		return a20_to_errno(st);
+	a20_handle_t new_cwd = args.out_handle;
+	st = a20_syscall6(A20_SYS_handle_control, new_cwd,
+	                               A20_HANDLE_CTRL_CHDIR, 0, 0, 0, 0);
+	if (st < 0) {
+		a20_syscall6(A20_SYS_handle_close, new_cwd, 0, 0, 0, 0, 0);
+		return a20_to_errno(st);
+	}
+	a20_handle_t old_cwd = cwd_handle();
+	bool old_owned = g_cwd_handle_owned;
+	g_cwd_handle = new_cwd;
+	g_cwd_handle_owned = true;
+	if (old_owned && old_cwd != A20_HANDLE_NULL)
+		a20_syscall6(A20_SYS_handle_close, old_cwd, 0, 0, 0, 0, 0);
+	refresh_cwd_from_kernel();
+	return 0;
 }
 
 int Sysdeps<Umask>::operator()(mode_t mode, mode_t *old) {
@@ -1384,6 +1796,8 @@ int Sysdeps<Uname>::operator()(struct utsname *buf) {
 }
 
 int Sysdeps<GetHostname>::operator()(char *name, size_t len) {
+	if (len == 0)
+		return EINVAL;
 	struct utsname uts;
 	if (int e = sysdep<Uname>(&uts))
 		return e;
@@ -1439,8 +1853,19 @@ int Sysdeps<Sysconf>::operator()(int num, long *ret) {
 		*ret = 1024;
 		return 0;
 	case _SC_NPROCESSORS_ONLN:
+	case _SC_NPROCESSORS_CONF: {
+		a20_system_info info{};
+		info.size = sizeof(info);
+		info.struct_version = 2;
+		if (a20_syscall6(A20_SYS_system_info, (uint64_t)&info, 0, 0, 0, 0, 0) >= 0) {
+			uint32_t cpus = num == _SC_NPROCESSORS_CONF
+			                    ? info.configured_cpus : info.online_cpus;
+			*ret = cpus ? (long)cpus : 1;
+			return 0;
+		}
 		*ret = 1;
 		return 0;
+	}
 	case _SC_CLK_TCK:
 		*ret = 100;
 		return 0;
@@ -1514,38 +1939,123 @@ extern "C" int posix_spawn(pid_t *pid_out, const char *path,
 			return a20_to_errno(st);
 	}
 
-	/* 2. stdio inheritance, applying file actions to slots 0..2. */
-	a20_handle_t stdio_h[3] = { fd_handle(0), fd_handle(1), fd_handle(2) };
-	a20_handle_t close_after[8];
+	/* 2. Build the child fd view and apply file actions.  Untouched descriptors
+	 * are inherited unless their libc-side close-on-spawn bit is set. */
+	constexpr int kSpawnFdMax = 64;
+	a20_handle_t child_fd[kSpawnFdMax];
+	bool child_fd_touched[kSpawnFdMax] = {};
+	for (int i = 0; i < kSpawnFdMax; i++)
+		child_fd[i] = A20_HANDLE_NULL;
+	for (int i = 0; i < 3; i++) {
+		if (!fd_close_on_spawn(i))
+			child_fd[i] = fd_handle(i);
+	}
+	a20_handle_t child_cwd = cwd_handle();
+	a20_handle_t close_after[128];
 	int n_close = 0;
+	int action_error = 0;
 	if (fa) {
 		auto *actions = __mlibc_spawn_file_actions::from(fa);
 		if (actions) {
 			for (auto &op : actions->ops) {
 				switch (op.cmd) {
 				case 1: /* CLOSE */
-					if (op.fd >= 0 && op.fd <= 2)
-						stdio_h[op.fd] = A20_HANDLE_NULL;
-					break;
-				case 2: /* DUP2 */
-					if (op.fd >= 0 && op.fd <= 2)
-						stdio_h[op.fd] = fd_handle(op.srcfd);
-					break;
-				case 3: /* OPEN */
-					if (op.fd >= 0 && op.fd <= 2 && n_close < 8) {
-						a20_handle_t oh;
-						if (do_path_open(cwd_handle(), op.path.data(),
-						                 (uint32_t)op.oflag, op.mode, &oh) >= 0) {
-							stdio_h[op.fd] = oh;
-							close_after[n_close++] = oh;
-						}
+					if (op.fd < 0 || op.fd >= kSpawnFdMax) {
+						action_error = EINVAL;
+						break;
 					}
+					child_fd[op.fd] = A20_HANDLE_NULL;
+					child_fd_touched[op.fd] = true;
 					break;
+				case 2: { /* DUP2 */
+					if (op.fd < 0 || op.fd >= kSpawnFdMax || op.srcfd < 0 ||
+					    op.srcfd >= kSpawnFdMax) {
+						action_error = EINVAL;
+						break;
+					}
+					a20_handle_t source = child_fd_touched[op.srcfd]
+					                          ? child_fd[op.srcfd]
+					                          : fd_handle(op.srcfd);
+					if (source == A20_HANDLE_NULL) {
+						action_error = EBADF;
+						break;
+					}
+					child_fd[op.fd] = source;
+					child_fd_touched[op.fd] = true;
+					break;
+				}
+				case 3: /* OPEN */ {
+					if (op.fd < 0 || op.fd >= kSpawnFdMax ||
+					    n_close >= (int)(sizeof(close_after) / sizeof(close_after[0]))) {
+						action_error = op.fd < 0 || op.fd >= kSpawnFdMax ? EINVAL : ENOMEM;
+						break;
+					}
+					a20_handle_t oh;
+					a20_status_t ost = do_path_open(child_cwd, op.path.data(),
+					                               (uint32_t)op.oflag, op.mode, &oh);
+					if (ost < 0) {
+						action_error = a20_to_errno(ost);
+						break;
+					}
+					child_fd[op.fd] = oh;
+					child_fd_touched[op.fd] = true;
+					close_after[n_close++] = oh;
+					break;
+				}
+				case 4: { /* CHDIR */
+					a20_handle_t chdir_h;
+					if (n_close >= (int)(sizeof(close_after) / sizeof(close_after[0]))) {
+						action_error = ENOMEM;
+						break;
+					}
+					a20_status_t cst = do_path_open(child_cwd, op.path.data(),
+					                               O_RDONLY, 0, &chdir_h);
+					if (cst < 0) {
+						action_error = a20_to_errno(cst);
+						break;
+					}
+					child_cwd = chdir_h;
+					close_after[n_close++] = chdir_h;
+					break;
+				}
+				case 5: { /* FCHDIR */
+					if (op.fd < 0 || op.fd >= kSpawnFdMax) {
+						action_error = EINVAL;
+						break;
+					}
+					child_cwd = child_fd_touched[op.fd]
+					                 ? child_fd[op.fd] : fd_handle(op.fd);
+					if (child_cwd == A20_HANDLE_NULL)
+						action_error = EBADF;
+					break;
+				}
 				default:
 					break;
 				}
 			}
 		}
+	}
+	if (action_error) {
+		a20_syscall6(A20_SYS_handle_close, image, 0, 0, 0, 0, 0);
+		for (int i = 0; i < n_close; i++)
+			a20_syscall6(A20_SYS_handle_close, close_after[i], 0, 0, 0, 0, 0);
+		return action_error;
+	}
+
+	a20_spawn_handle transfers[kSpawnFdMax - 3];
+	uint32_t transfer_count = 0;
+	for (int fd = 3; fd < kSpawnFdMax; fd++) {
+		if (!child_fd_touched[fd] && !fd_close_on_spawn(fd))
+			child_fd[fd] = fd_handle(fd);
+	}
+	for (int fd = 3; fd < kSpawnFdMax; fd++) {
+		if (child_fd[fd] == A20_HANDLE_NULL)
+			continue;
+		transfers[transfer_count++] = a20_spawn_handle{
+		    .handle = child_fd[fd], .rights = 0,
+		    .target_slot = A20_NATIVE_FD_HANDLE_BASE + (uint32_t)fd,
+		    .flags = 0,
+		};
 	}
 
 	/* 3. Count arguments; inherit environ when envp is NULL. */
@@ -1562,15 +2072,16 @@ extern "C" int posix_spawn(pid_t *pid_out, const char *path,
 	    .size = sizeof(sa), .version = 2,
 	    .image = image,
 	    .root_dir = root_handle(),
-	    .cwd_dir = cwd_handle(),
+	    .cwd_dir = child_cwd,
 	    .event_queue = A20_HANDLE_NULL,
 	    .argv = (uint64_t)argv, .envp = (uint64_t)envp,
 	    .argc = argc, .envc = envc,
-	    .handles = 0, .handle_count = 0, .flags = 0,
+	    .handles = transfer_count ? (uint64_t)transfers : 0,
+	    .handle_count = transfer_count, .flags = 0,
 	    .out_task = A20_HANDLE_NULL,
-	    .stdin_handle = stdio_h[0],
-	    .stdout_handle = stdio_h[1],
-	    .stderr_handle = stdio_h[2],
+	    .stdin_handle = child_fd[0],
+	    .stdout_handle = child_fd[1],
+	    .stderr_handle = child_fd[2],
 	    .reserved = 0,
 	};
 	a20_status_t st = a20_syscall6(A20_SYS_task_spawn, (uint64_t)&sa, 0, 0, 0, 0, 0);
@@ -1685,6 +2196,9 @@ int Sysdeps<Poll>::operator()(struct pollfd *fds, nfds_t count, int timeout, int
 		int ready = 0;
 		for (nfds_t i = 0; i < count; i++) {
 			fds[i].revents = 0;
+			/* POSIX reserves negative descriptors as ignored entries. */
+			if (fds[i].fd < 0)
+				continue;
 			a20_handle_t h = fd_handle(fds[i].fd);
 			if (h == A20_HANDLE_NULL) {
 				fds[i].revents = POLLNVAL;
@@ -1742,28 +2256,145 @@ int Sysdeps<Poll>::operator()(struct pollfd *fds, nfds_t count, int timeout, int
 	}
 }
 
+int Sysdeps<Ppoll>::operator()(struct pollfd *fds, nfds_t count,
+		const struct timespec *timeout, const sigset_t *mask, int *num_events) {
+	(void)mask; /* Native signal masks are compatibility stubs. */
+	if (!timeout)
+		return sysdep<Poll>(fds, count, -1, num_events);
+	if (timeout->tv_sec < 0 || timeout->tv_nsec < 0 || timeout->tv_nsec >= 1000000000L)
+		return EINVAL;
+	uint64_t millis = (uint64_t)timeout->tv_sec * 1000ULL +
+	                  (uint64_t)timeout->tv_nsec / 1000000ULL;
+	if (timeout->tv_nsec % 1000000L)
+		millis++;
+	int timeout_ms = millis > (uint64_t)INT_MAX ? INT_MAX : (int)millis;
+	return sysdep<Poll>(fds, count, timeout_ms, num_events);
+}
+
+int Sysdeps<Pselect>::operator()(int num_fds, fd_set *read_set,
+		fd_set *write_set, fd_set *except_set, const struct timespec *timeout,
+		const sigset_t *mask, int *num_events) {
+	(void)mask; /* Native signal masks are compatibility stubs. */
+	if (num_fds < 0 || num_fds > FD_SETSIZE)
+		return EINVAL;
+
+	nfds_t count = 0;
+	for (int fd = 0; fd < num_fds; fd++) {
+		if ((read_set && FD_ISSET(fd, read_set)) ||
+		    (write_set && FD_ISSET(fd, write_set)) ||
+		    (except_set && FD_ISSET(fd, except_set)))
+			count++;
+	}
+
+	struct pollfd *pfds = count ? (struct pollfd *)malloc(count * sizeof(*pfds)) : nullptr;
+	if (count && !pfds)
+		return ENOMEM;
+	nfds_t pos = 0;
+	for (int fd = 0; fd < num_fds; fd++) {
+		short events = 0;
+		if (read_set && FD_ISSET(fd, read_set))
+			events |= POLLIN;
+		if (write_set && FD_ISSET(fd, write_set))
+			events |= POLLOUT;
+		if (except_set && FD_ISSET(fd, except_set))
+			events |= POLLPRI;
+		if (events)
+			pfds[pos++] = {fd, events, 0};
+	}
+
+	int timeout_ms = -1;
+	if (timeout) {
+		if (timeout->tv_sec < 0 || timeout->tv_nsec < 0 || timeout->tv_nsec >= 1000000000L)
+			return (free(pfds), EINVAL);
+		uint64_t millis = (uint64_t)timeout->tv_sec * 1000ULL +
+		                  (uint64_t)timeout->tv_nsec / 1000000ULL;
+		if (timeout->tv_nsec % 1000000L)
+			millis++;
+		timeout_ms = millis > (uint64_t)INT_MAX ? INT_MAX : (int)millis;
+	}
+
+	int e = sysdep<Poll>(pfds, count, timeout_ms, num_events);
+	if (e) {
+		free(pfds);
+		return e;
+	}
+
+	if (read_set)
+		for (int fd = 0; fd < num_fds; fd++)
+			if (FD_ISSET(fd, read_set)) FD_CLR(fd, read_set);
+	if (write_set)
+		for (int fd = 0; fd < num_fds; fd++)
+			if (FD_ISSET(fd, write_set)) FD_CLR(fd, write_set);
+	if (except_set)
+		for (int fd = 0; fd < num_fds; fd++)
+			if (FD_ISSET(fd, except_set)) FD_CLR(fd, except_set);
+
+	int selected = 0;
+	for (nfds_t i = 0; i < count; i++) {
+		short rev = pfds[i].revents;
+		bool selected_fd = false;
+		if (read_set && (rev & (POLLIN | POLLERR | POLLHUP))) {
+			FD_SET(pfds[i].fd, read_set);
+			selected_fd = true;
+		}
+		if (write_set && (rev & (POLLOUT | POLLERR | POLLHUP))) {
+			FD_SET(pfds[i].fd, write_set);
+			selected_fd = true;
+		}
+		if (except_set && (rev & POLLPRI)) {
+			FD_SET(pfds[i].fd, except_set);
+			selected_fd = true;
+		}
+		if (selected_fd)
+			selected++;
+	}
+	*num_events = selected;
+	free(pfds);
+	return 0;
+}
+
 /* ------------------------------------------------------------------ */
 /* sockets                                                              */
 /* ------------------------------------------------------------------ */
 
 int Sysdeps<Socket>::operator()(int family, int type, int protocol, int *fd) {
 	a20_status_t st = a20_syscall6(A20_SYS_net_socket, (uint32_t)family,
-	                               (uint32_t)(type & 0xFFFF), (uint32_t)protocol, 0, 0, 0);
+	                               (uint32_t)type, (uint32_t)protocol, 0, 0, 0);
 	if (st < 0)
 		return a20_to_errno(st);
-	*fd = fd_alloc((a20_handle_t)st, 0);
+	int fd_flags = O_RDWR;
+	if (type & SOCK_NONBLOCK)
+		fd_flags |= O_NONBLOCK;
+	if (type & SOCK_CLOEXEC)
+		fd_flags |= O_CLOEXEC;
+	*fd = fd_install((a20_handle_t)st, fd_flags, 0);
+	if (*fd < 0)
+		return EMFILE;
 	return 0;
 }
 
 int Sysdeps<Socketpair>::operator()(int domain, int type_and_flags, int proto, int *fds) {
 	a20_handle_t out[2] = { A20_HANDLE_NULL, A20_HANDLE_NULL };
 	a20_status_t st = a20_syscall6(A20_SYS_net_socketpair, (uint32_t)domain,
-	                               (uint32_t)(type_and_flags & 0xFFFF), (uint32_t)proto,
+	                               (uint32_t)type_and_flags, (uint32_t)proto,
 	                               (uint64_t)out, 0, 0);
 	if (st < 0)
 		return a20_to_errno(st);
-	fds[0] = fd_alloc(out[0], 0);
-	fds[1] = fd_alloc(out[1], 0);
+	int fd_flags = O_RDWR;
+	if (type_and_flags & SOCK_NONBLOCK)
+		fd_flags |= O_NONBLOCK;
+	if (type_and_flags & SOCK_CLOEXEC)
+		fd_flags |= O_CLOEXEC;
+	fds[0] = fd_install(out[0], fd_flags, 0);
+	if (fds[0] < 0) {
+		a20_syscall6(A20_SYS_handle_close, out[1], 0, 0, 0, 0, 0);
+		return EMFILE;
+	}
+	fds[1] = fd_install(out[1], fd_flags, 0);
+	if (fds[1] < 0) {
+		sysdep<Close>(fds[0]);
+		return EMFILE;
+	}
 	return 0;
 }
 
@@ -1800,18 +2431,24 @@ int Sysdeps<Listen>::operator()(int fd, int backlog) {
 }
 
 int Sysdeps<Accept>::operator()(int fd, int *newfd, struct sockaddr *addr_ptr, socklen_t *addr_length, int flags) {
-	(void)flags;
 	a20_handle_t h = fd_handle(fd);
 	if (h == A20_HANDLE_NULL)
 		return EBADF;
 	socklen_t alen = addr_length ? *addr_length : 0;
 	a20_status_t st = a20_syscall6(A20_SYS_net_accept, h, (uint64_t)addr_ptr,
-	                               (uint64_t)&alen, 0, 0, 0);
+	                               (uint64_t)&alen, (uint64_t)(uint32_t)flags, 0, 0);
 	if (st < 0)
 		return a20_to_errno(st);
 	if (addr_length)
 		*addr_length = alen;
-	*newfd = fd_alloc((a20_handle_t)st, 0);
+	int fd_flags = O_RDWR;
+	if (flags & SOCK_NONBLOCK)
+		fd_flags |= O_NONBLOCK;
+	if (flags & SOCK_CLOEXEC)
+		fd_flags |= O_CLOEXEC;
+	*newfd = fd_install((a20_handle_t)st, fd_flags, 0);
+	if (*newfd < 0)
+		return EMFILE;
 	return 0;
 }
 
