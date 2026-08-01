@@ -2,6 +2,7 @@
 #include "mm/mm.h"
 #include "mm/frame.h"
 #include "mm/slab.h"
+#include "mm/vmo.h"
 #include "mm/fault.h"
 #include "mm/swap.h"
 #include "fs/vfs.h"
@@ -78,6 +79,11 @@ static void vma_release(vm_area_t *vma)
 {
     vma_release_file(vma);
     vma_release_ipc(vma);
+    if (vma && (vma->vm_flags & VM_VMO) && vma->vmo) {
+        vmo_release(vma->vmo);
+        vma->vmo = NULL;
+        vma->vm_flags &= ~(uint64_t)VM_VMO;
+    }
 }
 
 static int vma_ref_file(vm_area_t *vma)
@@ -101,6 +107,23 @@ static __attribute__((unused)) int vma_ref_fork(vm_area_t *vma)
             return r;
         }
     }
+    if (vma && (vma->vm_flags & VM_VMO) && vma->vmo)
+        vmo_ref(vma->vmo);
+    return 0;
+}
+
+/*
+ * Retain every backing resource a copied VMA must own independently of the
+ * original.  Used by the split paths (vma_split, mm_split_vma_at, munmap
+ * split) after the tail VMA has been struct-copied from the head.
+ */
+static int vma_ref_aux(vm_area_t *vma)
+{
+    int r = vma_ref_file(vma);
+    if (r < 0)
+        return r;
+    if (vma && (vma->vm_flags & VM_VMO) && vma->vmo)
+        vmo_ref(vma->vmo);
     return 0;
 }
 
@@ -116,6 +139,13 @@ static int vma_can_merge(vm_area_t *a, vm_area_t *b)
         if (a->file_fd != b->file_fd)
             return 0;
         return a->file_offset + (a->end - a->start) == b->file_offset;
+    }
+    if ((a->vm_flags | b->vm_flags) & VM_VMO) {
+        if (!(a->vm_flags & VM_VMO) || !(b->vm_flags & VM_VMO))
+            return 0;
+        if (a->vmo != b->vmo)
+            return 0;
+        return a->vmo_offset + (a->end - a->start) == b->vmo_offset;
     }
     return 1;
 }
@@ -645,7 +675,7 @@ int mm_split_vma_at(mm_struct_t *mm, vaddr_t addr) {
     *tail = *v;
     tail->start = addr;
     tail->file_offset += addr - v->start;
-    int fr = vma_ref_file(tail);
+    int fr = vma_ref_aux(tail);
     if (fr < 0) {
         kfree(tail);
         return fr;
@@ -670,7 +700,7 @@ static __attribute__((unused)) vm_area_t *vma_split(vm_area_t *vma, vaddr_t spli
     *tail = *vma;
     tail->start = split;
     tail->file_offset += split - vma->start;
-    if (vma_ref_file(tail) < 0) {
+    if (vma_ref_aux(tail) < 0) {
         kfree(tail);
         return NULL;
     }
@@ -949,6 +979,80 @@ vaddr_t mm_mmap_file(mm_struct_t *mm, vaddr_t addr, size_t len,
         vma->vm_flags |= VM_LOCKED;
         mm->locked_vm += len;
     }
+
+    mm_insert_vma(mm, vma);
+    mm->total_vm += len / PAGE_SIZE;
+    return addr;
+}
+
+/*
+ * mm_mmap_vmo — map a VMO into an address space (Native ABI page source).
+ *
+ * VM_VMO is a shared mapping of the VMO's canonical frames: the VMO owns the
+ * frames, demand faults materialize them on first touch, and fork shares the
+ * same frames rather than copy-on-writing them.  The VMA takes one VMO
+ * reference, released by vma_release() on unmap/teardown.
+ */
+vaddr_t mm_mmap_vmo(mm_struct_t *mm, vaddr_t addr, size_t len,
+                    int prot, int flags, struct vmo *vmo, uint64_t vmo_offset)
+{
+    if (!mm || !vmo)
+        return (uint64_t)-EINVAL;
+    if ((flags & (MAP_FIXED | MAP_FIXED_NOREPLACE)) && (addr & (PAGE_SIZE - 1)))
+        return (uint64_t)-EINVAL;
+
+    len = ROUND_UP(len, PAGE_SIZE);
+    if (len == 0)
+        return (uint64_t)-EINVAL;
+    if (len > USER_VA_LIMIT)
+        return (uint64_t)-ENOMEM;
+    if (vmo_offset >= vmo->size || len > vmo->size - vmo_offset)
+        return (uint64_t)-EINVAL;
+    if (vmo_offset & (PAGE_SIZE - 1))
+        return (uint64_t)-EINVAL;
+
+    if ((flags & MAP_FIXED_NOREPLACE) && addr != 0) {
+        if (mm_range_overlaps(mm, addr, len, NULL))
+            return (uint64_t)-EEXIST;
+        flags |= MAP_FIXED;
+    }
+
+    if ((flags & MAP_FIXED) && addr != 0) {
+        mm_munmap(mm, addr, len);
+    } else if (addr != 0) {
+        vm_area_t *existing = mm_find_vma(mm, addr);
+        if (existing && existing->start < addr + len && existing->end > addr)
+            addr = 0;
+    }
+
+#ifdef CONFIG_NOMMU
+    (void)vmo_offset;
+    return (uint64_t)-ENOTSUP;
+#else
+    if (addr == 0)
+        addr = mm_find_gap(mm, MMAP_BASE_ADDR, len);
+
+    if (addr == 0 || addr + len < addr || addr + len > USER_VA_LIMIT)
+        return (uint64_t)-ENOMEM;
+#endif
+
+    uint64_t vmf = VM_VMO;
+    if (prot & 1) vmf |= VM_READ;
+    if (prot & 2) vmf |= VM_WRITE;
+    if (prot & 4) vmf |= VM_EXEC;
+    if (flags & MAP_SHARED) vmf |= VM_SHARED;
+
+    vm_area_t *vma = kcalloc(1, sizeof(vm_area_t));
+    if (!vma)
+        return (uint64_t)-ENOMEM;
+    vma->start       = addr;
+    vma->end         = addr + len;
+    vma->vm_flags    = vmf;
+    vma->pte_flags   = mm_prot_to_pte_flags(prot);
+    vma->file_fd     = -1;
+    vma->vmo         = vmo;
+    vma->vmo_offset  = vmo_offset;
+    vmo_ref(vmo);
 
     mm_insert_vma(mm, vma);
     mm->total_vm += len / PAGE_SIZE;
@@ -1360,7 +1464,7 @@ int mm_munmap(mm_struct_t *mm, vaddr_t addr, size_t len) {
                                 page_cache_put(pcp);
                             }
                         }
-                    } else if (!(vma->vm_flags & VM_PFNMAP)) {
+                    } else if (!(vma->vm_flags & (VM_PFNMAP | VM_VMO))) {
                         frame_put(pfn);
                     }
                     size_t pages = size / PAGE_SIZE;
@@ -1402,7 +1506,7 @@ int mm_munmap(mm_struct_t *mm, vaddr_t addr, size_t len) {
             tail->start = clip_end;
             tail->end = vma->end;
             tail->file_offset += clip_end - vma->start;
-            int fr = vma_ref_file(tail);
+            int fr = vma_ref_aux(tail);
             if (fr < 0) {
                 kfree(tail);
                 return fr;
@@ -1704,6 +1808,17 @@ mm_struct_t *mm_fork(mm_struct_t *parent) {
     for (vm_area_t *pv = parent->mmap; pv; pv = pv->next) {
         if (pv->vm_flags & (VM_DONTFORK | VM_WIPEONFORK))
             continue;
+        if (pv->vm_flags & VM_VMO) {
+            /* VMO mappings share canonical frames across fork: the child's
+             * struct-copied VMA already holds a VMO reference (vma_ref_fork).
+             * Clone already-present frames as shared and leave the rest to
+             * lazy faults on the same canonical VMO pages. */
+            if (mm_fork_clone_present_range(child, parent, pv->start,
+                                            pv->end, 1) < 0) {
+                goto fail_locked;
+            }
+            continue;
+        }
         if (pv->vm_flags & VM_SHARED) {
             /* File-backed shared mappings are left populated on demand; fault
              * under parent->lock would perform blocking file I/O. Anonymous
