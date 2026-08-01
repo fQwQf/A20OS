@@ -45,6 +45,16 @@ inline constexpr a20_status_t A20_ERR_TYPE_MISMATCH     = 23;
 inline constexpr a20_status_t A20_ERR_NOT_FOUND         = 24;
 inline constexpr a20_status_t A20_ERR_EXPIRED           = 25;
 
+/* Native object types and the small subset needed by the fd bridge. */
+inline constexpr uint32_t A20_OBJ_FILE             = 3;
+inline constexpr uint32_t A20_OBJ_DIRECTORY        = 4;
+inline constexpr uint32_t A20_OBJ_SOCKET           = 5;
+inline constexpr uint32_t A20_OBJ_CHANNEL_ENDPOINT = 7;
+inline constexpr uint32_t A20_OBJ_DEVICE           = 11;
+
+inline constexpr a20_rights_t A20_RIGHT_READ  = 1ull << 0;
+inline constexpr a20_rights_t A20_RIGHT_WRITE = 1ull << 1;
+
 /* Syscall numbers (kernel/include/abi/native/syscall_nr.h) */
 inline constexpr uint64_t A20_SYS_abi_info          = 0x0000;
 inline constexpr uint64_t A20_SYS_handle_close      = 0x0100;
@@ -59,6 +69,8 @@ inline constexpr uint64_t A20_SYS_task_exit         = 0x0200;
 inline constexpr uint64_t A20_SYS_task_spawn        = 0x0201;
 inline constexpr uint64_t A20_SYS_task_wait         = 0x0202;
 inline constexpr uint64_t A20_SYS_task_kill         = 0x0203;
+inline constexpr uint64_t A20_SYS_signal_check      = 0x020F;
+inline constexpr uint64_t A20_SYS_signal_mask       = 0x0210;
 inline constexpr uint64_t A20_SYS_task_info         = 0x0204;
 inline constexpr uint64_t A20_SYS_thread_create     = 0x0205;
 inline constexpr uint64_t A20_SYS_thread_exit       = 0x0206;
@@ -86,6 +98,11 @@ inline constexpr uint64_t A20_SYS_fs_stat           = 0x040D;
 inline constexpr uint64_t A20_SYS_fs_mount          = 0x040E;
 inline constexpr uint64_t A20_SYS_fs_umount         = 0x040F;
 inline constexpr uint64_t A20_SYS_fs_sync           = 0x0410;
+inline constexpr uint64_t A20_SYS_path_unlink_at    = 0x0411;
+inline constexpr uint64_t A20_SYS_path_rename_at    = 0x0412;
+inline constexpr uint64_t A20_SYS_path_link_at      = 0x0413;
+inline constexpr uint64_t A20_SYS_path_symlink_at   = 0x0414;
+inline constexpr uint64_t A20_SYS_path_readlink_at  = 0x0415;
 inline constexpr uint64_t A20_SYS_event_queue_create = 0x0500;
 inline constexpr uint64_t A20_SYS_event_watch       = 0x0501;
 inline constexpr uint64_t A20_SYS_event_wait        = 0x0502;
@@ -112,6 +129,9 @@ inline constexpr uint64_t A20_SYS_system_reboot     = 0x0A02;
 inline constexpr uint64_t A20_SYS_futex_wait        = 0x0B00;
 inline constexpr uint64_t A20_SYS_futex_wake        = 0x0B01;
 inline constexpr uint64_t A20_SYS_handle_poll       = 0x010C;
+
+inline constexpr uint32_t A20_HANDLE_CTRL_CHDIR     = 5;
+inline constexpr uint32_t A20_HANDLE_CTRL_FCNTL     = 1;
 
 #if defined(__riscv)
 #define A20_SYSCALL_INSN "ecall"
@@ -191,7 +211,7 @@ struct a20_start_info {
 	uint32_t argc;
 	uint32_t envc;
 	uint32_t auxc;
-	uint32_t reserved0;
+	uint32_t reserved0; /* Native spawn fd mapping limit; zero for normal exec. */
 	uint64_t argv;
 	uint64_t envp;
 	uint64_t auxv;
@@ -206,6 +226,8 @@ struct a20_start_info {
 	uint64_t page_size;
 	uint64_t user_clock_freq;
 };
+
+inline constexpr uint32_t A20_NATIVE_FD_HANDLE_BASE = 64;
 
 /* ---- I/O ---- */
 
@@ -266,6 +288,62 @@ struct a20_path_create_args {
 	uint32_t path_len;
 	uint64_t dev;
 	a20_handle_t out_handle;
+};
+
+struct a20_path_unlink_args {
+	uint32_t size;
+	uint32_t version;
+	a20_handle_t dir;
+	uint32_t flags;
+	uint64_t path;
+	uint32_t path_len;
+	uint32_t _pad;
+};
+
+struct a20_path_rename_args {
+	uint32_t size;
+	uint32_t version;
+	a20_handle_t old_dir;
+	a20_handle_t new_dir;
+	uint64_t old_path;
+	uint32_t old_path_len;
+	uint32_t _pad0;
+	uint64_t new_path;
+	uint32_t new_path_len;
+	uint32_t flags;
+};
+
+struct a20_path_link_args {
+	uint32_t size;
+	uint32_t version;
+	a20_handle_t old_dir;
+	a20_handle_t new_dir;
+	uint64_t old_path;
+	uint32_t old_path_len;
+	uint64_t new_path;
+	uint32_t new_path_len;
+	uint32_t flags;
+};
+
+struct a20_path_symlink_args {
+	uint32_t size;
+	uint32_t version;
+	a20_handle_t dir;
+	uint64_t target;
+	uint32_t target_len;
+	uint64_t linkpath;
+	uint32_t linkpath_len;
+};
+
+struct a20_path_readlink_args {
+	uint32_t size;
+	uint32_t version;
+	a20_handle_t dir;
+	uint64_t path;
+	uint32_t path_len;
+	uint64_t buf;
+	uint64_t buf_len;
+	uint64_t out_len;
 };
 
 struct a20_dirent {
@@ -645,4 +723,17 @@ static inline a20_status_t a20_rt_futex_wake(uint32_t *addr, uint32_t count,
 	if (st == A20_OK && out_woken)
 		*out_woken = args.out_woken;
 	return st;
+}
+
+/* Checkpoint-based signal simulation.  Signals are recorded by task_kill and
+ * consumed at explicit checkpoints (futex wait return, pthread_testcancel);
+ * they are never delivered asynchronously. */
+static inline int64_t a20_rt_signal_check() {
+	return a20_syscall6(A20_SYS_signal_check, 0, 0, 0, 0, 0, 0);
+}
+
+static inline a20_status_t a20_rt_signal_mask(uint64_t new_mask,
+                                              uint64_t *old_mask) {
+	return a20_syscall6(A20_SYS_signal_mask, new_mask,
+	                    (uint64_t)old_mask, 0, 0, 0, 0);
 }
