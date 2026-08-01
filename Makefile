@@ -3,7 +3,7 @@
 # Parallel build
 NPROC ?= $(or $(shell getconf _NPROCESSORS_ONLN 2>/dev/null),$(shell sysctl -n hw.logicalcpu 2>/dev/null),4)
 PYTHON ?= python3
-TIMEOUT ?= $(PYTHON) scripts/run_with_timeout.py
+TIMEOUT ?= $(PYTHON) tools/run_with_timeout.py
 HOST_OS ?= $(shell uname -s 2>/dev/null)
 
 ifeq ($(HOST_OS),Darwin)
@@ -106,6 +106,7 @@ FAT32_IMG = $(BUILD_DIR)/fat32.img
 GUI_FAT32_IMG = $(BUILD_DIR)/gui-fat32.img
 EXT4_IMG = $(BUILD_DIR)/ext4.img
 FS_TEST_IMG = $(BUILD_DIR)/fs_test.img
+ISOFS_IMG = $(BUILD_DIR)/isofs.img
 USER_VARIANT = $(ARCH)$(if $(filter 1,$(NOMMU)),-nommu,)
 USER_BUILD_DIR = user/build/$(USER_VARIANT)
 USER_BUILD_STAMP = $(USER_BUILD_DIR)/.build-id
@@ -684,11 +685,11 @@ $(STM32_WIFI_CONFIG_HDR): FORCE
 	} > $@.tmp
 	@if cmp -s $@.tmp $@; then rm -f $@.tmp; else mv $@.tmp $@; fi
 
-regen-rootfs-overlay: scripts/gen_rootfs_overlay.py $(ROOTFS_OVERLAY_FILES)
+regen-rootfs-overlay: tools/gen_rootfs_overlay.py $(ROOTFS_OVERLAY_FILES)
 	@mkdir -p $(dir $(ROOTFS_OVERLAY_SRC)) $(dir $(ROOTFS_OVERLAY_HDR))
 	$(PYTHON) $< --out-c $(ROOTFS_OVERLAY_SRC) --out-h $(ROOTFS_OVERLAY_HDR) --root $(ROOTFS_OVERLAY_DIR)
 
-$(ROOTFS_OVERLAY_SRC) $(ROOTFS_OVERLAY_HDR): scripts/gen_rootfs_overlay.py $(ROOTFS_OVERLAY_FILES)
+$(ROOTFS_OVERLAY_SRC) $(ROOTFS_OVERLAY_HDR): tools/gen_rootfs_overlay.py $(ROOTFS_OVERLAY_FILES)
 	$(PYTHON) $< --out-c $(ROOTFS_OVERLAY_SRC) --out-h $(ROOTFS_OVERLAY_HDR) --root $(ROOTFS_OVERLAY_DIR)
 
 # ----------------------------------------------------------------
@@ -809,7 +810,7 @@ check-abi-smoke-gate:
 
 check-doc-drift:
 	@rg -q "DOC_DRIFT_KEYWORD_GATE" docs/testing/testing-gates.md
-	@$(PYTHON) scripts/gen_linux_syscall_coverage.py
+	@$(PYTHON) tools/gen_linux_syscall_coverage.py
 	@rg -q "stub" kernel/abi/linux/syscall_coverage.md kernel/abi/linux/compat_notes.md docs/testing/testing-gates.md
 	@rg -q "partial" kernel/abi/linux/syscall_coverage.md kernel/abi/linux/compat_notes.md docs/testing/testing-gates.md
 	@rg -q "Future" docs/testing/testing-gates.md kernel/abi/native/sys_core.c
@@ -1041,6 +1042,12 @@ host-tests: $(HOST_TESTS_BIN)
 /tmp/a20-host-%: tools/tests/%.c
 	$(HOST_CC) -Ikernel/include -O2 -Wall -Wextra $< -o $@
 
+# Minimal ISO9660 test image for the isofs driver (no mkisofs/xorriso needed).
+$(ISOFS_IMG): tools/mkisofs_test.c
+	@mkdir -p $(BUILD_DIR)
+	$(HOST_CC) -O2 -Wall -Wextra $< -o /tmp/a20-mkisofs
+	/tmp/a20-mkisofs $@
+
 check-vfs-abstraction: smoke-vfs-stress
 	@rg -q "VFS_OPEN_DISPATCH_CONTRACT" kernel/include/fs/vfs.h
 	@rg -q "VFS_REFCOUNT_HELPER_CONTRACT" kernel/include/fs/vfs.h
@@ -1058,7 +1065,7 @@ check-vfs-abstraction: smoke-vfs-stress
 	@echo "check-vfs-abstraction: PASS"
 
 check-abi-boundary:
-	@$(PYTHON) scripts/gen_linux_syscall_coverage.py
+	@$(PYTHON) tools/gen_linux_syscall_coverage.py
 	@rg -q "LINUX_ABI_BOUNDARY_CONTRACT" kernel/abi/linux/syscall_impl.h
 	@rg -q "LINUX_ABI_EXPLICIT_STUB_CONTRACT" kernel/abi/linux/syscall_table.def
 	@rg -q "LINUX_ABI_SCHED_STUB_BOUNDARY" kernel/abi/linux/sys_sched.c
@@ -1237,7 +1244,7 @@ smoke-qemu-gui-x86_64:
 	$(MAKE) ARCH=x86_64 BOARD=qemu-virt-x86_64 ABI=both BRINGUP=0 dev-build
 	$(MAKE) ARCH=x86_64 BOARD=qemu-virt-x86_64 ABI=both BRINGUP=0 \
 		.kernel-build/x86_64-qemu-virt-x86_64-both-dev/gui-fat32.img
-	$(PYTHON) scripts/smoke_qemu_gui.py \
+	$(PYTHON) tools/smoke_qemu_gui.py \
 		--arch x86_64 \
 		--qemu qemu-system-x86_64 \
 		--kernel .kernel-build/x86_64-qemu-virt-x86_64-both-dev/kernel.elf \
@@ -1248,7 +1255,7 @@ smoke-qemu-gui-riscv64:
 	$(MAKE) ARCH=riscv64 BOARD=qemu-virt-riscv64 ABI=both BRINGUP=0 dev-build
 	$(MAKE) ARCH=riscv64 BOARD=qemu-virt-riscv64 ABI=both BRINGUP=0 \
 		.kernel-build/riscv64-qemu-virt-riscv64-both-dev/gui-fat32.img
-	$(PYTHON) scripts/smoke_qemu_gui.py \
+	$(PYTHON) tools/smoke_qemu_gui.py \
 		--arch riscv64 \
 		--qemu qemu-system-riscv64 \
 		--kernel .kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf \
@@ -1260,7 +1267,7 @@ smoke-qemu-gui-aarch64:
 	$(MAKE) ARCH=aarch64 BOARD=qemu-virt-aarch64 ABI=both BRINGUP=0 dev-build
 	$(MAKE) ARCH=aarch64 BOARD=qemu-virt-aarch64 ABI=both BRINGUP=0 \
 		.kernel-build/aarch64-qemu-virt-aarch64-both-dev/gui-fat32.img
-	$(PYTHON) scripts/smoke_qemu_gui.py --arch aarch64 --qemu qemu-system-aarch64 \
+	$(PYTHON) tools/smoke_qemu_gui.py --arch aarch64 --qemu qemu-system-aarch64 \
 		--kernel .kernel-build/aarch64-qemu-virt-aarch64-both-dev/kernel.elf \
 		--disk .kernel-build/aarch64-qemu-virt-aarch64-both-dev/gui-fat32.img \
 		--artifacts .kernel-build/smoke/qemu-gui-aarch64 --timeout $(SMOKE_TIMEOUT)
@@ -1269,7 +1276,7 @@ smoke-qemu-gui-arm32:
 	$(MAKE) ARCH=arm32 BOARD=qemu-virt-arm32 ABI=both BRINGUP=0 dev-build
 	$(MAKE) ARCH=arm32 BOARD=qemu-virt-arm32 ABI=both BRINGUP=0 \
 		.kernel-build/arm32-qemu-virt-arm32-both-dev/gui-fat32.img
-	$(PYTHON) scripts/smoke_qemu_gui.py --arch arm32 --qemu qemu-system-arm \
+	$(PYTHON) tools/smoke_qemu_gui.py --arch arm32 --qemu qemu-system-arm \
 		--kernel .kernel-build/arm32-qemu-virt-arm32-both-dev/kernel.elf \
 		--disk .kernel-build/arm32-qemu-virt-arm32-both-dev/gui-fat32.img \
 		--artifacts .kernel-build/smoke/qemu-gui-arm32 --timeout $(SMOKE_TIMEOUT)
@@ -1278,7 +1285,7 @@ smoke-qemu-gui-loongarch64:
 	$(MAKE) ARCH=loongarch64 BOARD=qemu-virt-loongarch64 ABI=both BRINGUP=0 dev-build
 	$(MAKE) ARCH=loongarch64 BOARD=qemu-virt-loongarch64 ABI=both BRINGUP=0 \
 		.kernel-build/loongarch64-qemu-virt-loongarch64-both-dev/gui-fat32.img
-	$(PYTHON) scripts/smoke_qemu_gui.py --arch loongarch64 --qemu qemu-system-loongarch64 \
+	$(PYTHON) tools/smoke_qemu_gui.py --arch loongarch64 --qemu qemu-system-loongarch64 \
 		--kernel .kernel-build/loongarch64-qemu-virt-loongarch64-both-dev/kernel.elf \
 		--disk .kernel-build/loongarch64-qemu-virt-loongarch64-both-dev/gui-fat32.img \
 		--artifacts .kernel-build/smoke/qemu-gui-loongarch64 --timeout $(SMOKE_TIMEOUT)
@@ -1535,7 +1542,7 @@ smoke-mm-stress:
 	fi
 
 smoke-vfs-stress:
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build $(ISOFS_IMG)
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/vfs-stress-riscv64.log"; \
@@ -1548,6 +1555,8 @@ smoke-vfs-stress:
 		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
 		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/ext4.img,if=none,format=raw,id=x1 \
 		-device virtio-blk-device,drive=x1,bus=virtio-mmio-bus.1 \
+		-drive file=$(ISOFS_IMG),if=none,format=raw,id=x2 \
+		-device virtio-blk-device,drive=x2,bus=virtio-mmio-bus.2 \
 		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
 			-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
 			> "$$log" 2>&1 || status=$$?; \
@@ -2112,7 +2121,7 @@ smoke-audio-userspace:
 	   grep -q 'System is going down for power-off NOW' "$$log" && \
 	   ! grep -q 'audioplay: playback failed' "$$log" && \
 	   ! grep -qi 'panic' "$$log" && \
-	   python3 scripts/check_wav_pcm.py --max-delta 1000 \
+	   python3 tools/check_wav_pcm.py --max-delta 1000 \
 	       --min-frames 200000 "$$wav"; then \
 		echo "smoke-audio-userspace: PASS; log=$$log wav=$$wav"; \
 	else \
@@ -2169,7 +2178,7 @@ smoke-virtio-sound:
 	   grep -q 'System is going down for power-off NOW' "$$log" && \
 	   ! grep -q 'audioplay: playback failed' "$$log" && \
 	   ! grep -qi 'panic' "$$log" && \
-	   $(PYTHON) scripts/check_wav_pcm.py --max-delta 1000 \
+	   $(PYTHON) tools/check_wav_pcm.py --max-delta 1000 \
 	       --min-frames 200000 "$$wav"; then \
 		echo "smoke-virtio-sound: PASS; log=$$log wav=$$wav"; \
 	else \
@@ -2509,11 +2518,11 @@ $(BUILD_DIR)/.vbox-rootfs-verified: force_vbox_rootfs_verify $(GUI_FAT32_IMG) $(
 	}; \
 	touch $@
 
-$(VBOX_AARCH64_IMG): $(VBOX_AARCH64_EFI) $(BUILD_DIR)/.vbox-rootfs-verified scripts/mk_uefi_fat_image.sh
-	scripts/mk_uefi_fat_image.sh $(VBOX_AARCH64_EFI) $@ $(GUI_FAT32_IMG)
+$(VBOX_AARCH64_IMG): $(VBOX_AARCH64_EFI) $(BUILD_DIR)/.vbox-rootfs-verified tools/mk_uefi_fat_image.sh
+	tools/mk_uefi_fat_image.sh $(VBOX_AARCH64_EFI) $@ $(GUI_FAT32_IMG)
 
-$(VBOX_AARCH64_TEXT_IMG): $(VBOX_AARCH64_EFI) $(FAT32_IMG) scripts/mk_uefi_fat_image.sh
-	scripts/mk_uefi_fat_image.sh $(VBOX_AARCH64_EFI) $@ $(FAT32_IMG)
+$(VBOX_AARCH64_TEXT_IMG): $(VBOX_AARCH64_EFI) $(FAT32_IMG) tools/mk_uefi_fat_image.sh
+	tools/mk_uefi_fat_image.sh $(VBOX_AARCH64_EFI) $@ $(FAT32_IMG)
 
 $(KERNEL_ELF): $(KERNEL_OBJ) $(ASM_OBJ) $(LDSCRIPT)
 	@mkdir -p $(dir $@)
@@ -2627,7 +2636,7 @@ vbox-iso-x86_64:
 	$(MAKE) ARCH=x86_64 ABI=both BRINGUP=0 _vbox_iso_x86_64_impl
 
 _vbox_iso_x86_64_impl: dev-build
-	scripts/mk_grub_iso.sh $(KERNEL_ELF) $(BUILD_DIR)/a20os-x86_64.iso
+	tools/mk_grub_iso.sh $(KERNEL_ELF) $(BUILD_DIR)/a20os-x86_64.iso
 
 vbox-image-aarch64:
 	$(MAKE) ARCH=aarch64 BOARD=virtualbox-aarch64 ABI=both BRINGUP=0 _vbox_image_aarch64_impl
@@ -2647,8 +2656,8 @@ _vbox_image_aarch64_impl: $(VBOX_AARCH64_IMG)
 _vbox_text_image_aarch64_impl: $(VBOX_AARCH64_TEXT_IMG)
 	@echo "VirtualBox ARM64 text image ready: $(VBOX_AARCH64_TEXT_IMG)"
 
-_vbox_gui_image_aarch64_impl: $(VBOX_AARCH64_EFI) $(GUI_FAT32_IMG) scripts/mk_uefi_fat_image.sh
-	scripts/mk_uefi_fat_image.sh $(VBOX_AARCH64_EFI) $(BUILD_DIR)/a20os-vbox-aarch64-gui.img $(GUI_FAT32_IMG)
+_vbox_gui_image_aarch64_impl: $(VBOX_AARCH64_EFI) $(GUI_FAT32_IMG) tools/mk_uefi_fat_image.sh
+	tools/mk_uefi_fat_image.sh $(VBOX_AARCH64_EFI) $(BUILD_DIR)/a20os-vbox-aarch64-gui.img $(GUI_FAT32_IMG)
 	@echo "VirtualBox ARM64 GUI image ready: $(BUILD_DIR)/a20os-vbox-aarch64-gui.img"
 
 run-arm32:
@@ -3602,7 +3611,7 @@ define RUN_FINAL_EVAL
 	FINAL_EVAL_IMAGE_DIR="$(FINAL_EVAL_IMAGE_DIR)" \
 	FINAL_EVAL_STATE_DIR="$(FINAL_EVAL_STATE_DIR)" \
 	$(if $(strip $(FINAL_EVAL_TIMEOUT)),FINAL_EVAL_TIMEOUT="$(FINAL_EVAL_TIMEOUT)") \
-	bash ./scripts/run_final_eval.sh $(1) $(2) $(3) $(4)
+	bash ./tools/run_final_eval.sh $(1) $(2) $(3) $(4)
 endef
 
 final-eval-rv-cagent:
