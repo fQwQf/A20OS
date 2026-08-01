@@ -143,6 +143,25 @@ uintptr_t firmware_acpi_hpet_address(void) {
     return PAGE_OFFSET + (uintptr_t)address;
 }
 
+/* TPM2 ACPI table: returns the physical address of the TPM2 control area
+ * (or 0 if absent).  The control-area address points at the tail registers
+ * for CRB; TIS uses the base. */
+uint64_t firmware_acpi_tpm2(void) {
+    const acpi_sdt_t *tpm2 = acpi_find_table("TPM2");
+    if (!tpm2 || tpm2->length < 52)
+        return 0;
+    const uint8_t *body = (const uint8_t *)tpm2 + sizeof(*tpm2);
+    uint32_t start_method = *(const uint32_t *)(body + 12);   /* offset 48 */
+    uint64_t control = *(const uint64_t *)(body + 4);         /* offset 40 */
+    /* start_method: 6 = TIS FIFO, 7/8 = CRB.  Legacy fallback handled by the
+     * caller via a 0xFED40000 probe. */
+    if (start_method == 6)
+        return control ? control : 0xFED40000ULL;
+    if (start_method == 7 || start_method == 8)
+        return control;
+    return 0;
+}
+
 void firmware_shutdown(void) {
     outw(0x604, 0x2000);
     arch_halt();
