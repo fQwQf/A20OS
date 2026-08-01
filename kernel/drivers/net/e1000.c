@@ -10,7 +10,12 @@
 #include "mm/mm.h"
 
 #define E1000_VENDOR_INTEL 0x8086U
-#define E1000_DEVICE_82540EM 0x100EU
+/* Common e1000 / e1000e PCI device IDs (Linux e1000/e1000e supported set). */
+#define E1000_DEVICE_82540EM 0x100EU   /* 82540EM (QEMU default) */
+#define E1000_DEVICE_82545EM 0x100FU   /* 82545EM / 82545GM */
+#define E1000_DEVICE_82546EB 0x1010U   /* 82546EB */
+#define E1000_DEVICE_82541PI 0x107CU   /* 82541PI / 82547GI */
+#define E1000_DEVICE_82574L  0x10D3U   /* 82574L (e1000e) */
 
 #define E1000_CTRL   0x0000U
 #define E1000_STATUS 0x0008U
@@ -258,6 +263,14 @@ static const net_dev_ops_t e1000_ops = {
 
 static const device_id_t e1000_ids[] = {
     { .vendor = E1000_VENDOR_INTEL, .device = E1000_DEVICE_82540EM,
+      .subvendor = VENDOR_ANY, .subdevice = DEVICE_ANY },
+    { .vendor = E1000_VENDOR_INTEL, .device = E1000_DEVICE_82545EM,
+      .subvendor = VENDOR_ANY, .subdevice = DEVICE_ANY },
+    { .vendor = E1000_VENDOR_INTEL, .device = E1000_DEVICE_82546EB,
+      .subvendor = VENDOR_ANY, .subdevice = DEVICE_ANY },
+    { .vendor = E1000_VENDOR_INTEL, .device = E1000_DEVICE_82541PI,
+      .subvendor = VENDOR_ANY, .subdevice = DEVICE_ANY },
+    { .vendor = E1000_VENDOR_INTEL, .device = E1000_DEVICE_82574L,
       .subvendor = VENDOR_ANY, .subdevice = DEVICE_ANY },
     { 0 },
 };

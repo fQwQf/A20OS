@@ -1,6 +1,9 @@
 /*
  * A20OS Loongson-2K GMAC driver.
  *
+ * Developed for the Loongson LS2K1000 board, referencing RocketOS (MIT)
+ * board/driver bring-up.  See docs/ACKNOWLEDGMENTS.md.
+ *
  * LOCK_ORDER: This driver uses no private spinlock. send/recv are register-
  * polling paths against a single global ls2k_gmac_priv_t instance
  * (g_ls2k_gmac). Future IRQ-driven or SMP-safe versions must add a private
