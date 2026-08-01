@@ -150,8 +150,8 @@ typedef struct a20_handle_temporal_args {
 ```c
 typedef struct a20_spawn_handle {
     a20_handle_t handle;         /* 要传递的 handle */
-    a20_rights_t rights;         /* 传递后的权限（必须是原 handle 权限子集） */
-    uint32_t target_slot;        /* 可选目标槽位，0 表示自动分配 */
+    a20_rights_t rights;         /* 0 = inherit all; otherwise source subset */
+    uint32_t target_slot;        /* Native fd: 64 + fd; otherwise optional */
     uint32_t flags;              /* 保留 */
 } a20_spawn_handle_t;
 ```
