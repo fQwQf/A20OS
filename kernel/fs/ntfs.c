@@ -1260,6 +1260,8 @@ static vnode_t *ntfs_make_vnode(ntfs_sb_t *sb, uint64_t mft_index,
     vn->parent = parent;
     if (parent)
         vnode_get(parent);
+    if (parent)
+        vn->mnt = parent->mnt;        /* inherit mount for link()/dcache */
 
     ntfs_vnode_priv_t *fp = (ntfs_vnode_priv_t *)kmalloc(sizeof(ntfs_vnode_priv_t));
     if (!fp) {
@@ -1374,6 +1376,59 @@ static void ntfs_update_file_name_size(ntfs_sb_t *sb, uint64_t mft_index,
         ntfs_write_record(sb, mft_index, rec);
     }
     kfree(rec);
+}
+
+/* Rewrite a record's resident $FILE_NAME attribute with a new parent
+ * reference and name (used by rename).  The attribute may change length, so
+ * the attributes that follow are shifted and the record's used-size is
+ * updated.  On-disk state is only touched once the new layout is fully
+ * staged in memory. */
+static int ntfs_update_file_name(ntfs_sb_t *sb, uint64_t mft_index,
+                                 uint64_t parent_ref, const char *name,
+                                 int is_dir, uint64_t data_size)
+{
+    uint8_t *rec = kmalloc(sb->mft_record_size);
+    if (!rec)
+        return -ENOMEM;
+    if (ntfs_read_record(sb, mft_index, rec) < 0) {
+        kfree(rec);
+        return -EIO;
+    }
+
+    uint8_t *fn = ntfs_find_attr(rec, sb->mft_record_size, NTFS_AT_FILE_NAME, 0);
+    if (!fn || fn[8] != 0) {
+        kfree(rec);
+        return -EIO;
+    }
+
+    uint32_t old_len = nget32(fn + 4);
+
+    uint8_t new_attr[1024];
+    int new_len = ntfs_build_file_name_attr(new_attr, sizeof(new_attr),
+                                            parent_ref, name, is_dir,
+                                            data_size);
+    if (new_len < 0) {
+        kfree(rec);
+        return -EINVAL;
+    }
+
+    int32_t delta = new_len - (int32_t)old_len;
+    uint32_t used = nget32(rec + 0x18);
+    if ((int32_t)used + delta > (int32_t)sb->mft_record_size) {
+        kfree(rec);
+        return -ENOSPC;
+    }
+
+    if (delta != 0) {
+        uint8_t *after = fn + old_len;
+        memmove(fn + new_len, after, used - (uint32_t)(after - rec));
+    }
+    memcpy(fn, new_attr, (size_t)new_len);
+    nput32(rec + 0x18, used + (uint32_t)delta);
+
+    int r = ntfs_write_record(sb, mft_index, rec);
+    kfree(rec);
+    return r;
 }
 
 /* Create a new MFT record for a file/dir and register it in dir's index. */
@@ -1603,8 +1658,139 @@ static int ntfs_vn_rmdir(vnode_t *dir, const char *name)
     return r;
 }
 
-/* ------------------------------------------------------------------ */
-/* vnode ops: readpage / writepage                                     */
+/* vnode_ops: rename (file or directory)
+ * Steps, all under sb->lock so no other mutation can interleave:
+ *   1. resolve the source child and look for a target of the same name;
+ *   2. remove the old directory entry;
+ *   3. rewrite the child's $FILE_NAME attribute (new parent ref + new name);
+ *   4. insert the child into the new directory index.
+ * If step 3 or 4 fails, the old entry is restored so the name is never
+ * silently lost.  Directory moves repoint the cached vnode's parent. */
+static int ntfs_vn_rename(vnode_t *old_dir, const char *old_name,
+                          vnode_t *new_dir, const char *new_name,
+                          unsigned int flags)
+{
+    if (flags & ~(RENAME_NOREPLACE))
+        return -EINVAL;
+
+    ntfs_vnode_priv_t *ofp = (ntfs_vnode_priv_t *)old_dir->fs_data;
+    ntfs_vnode_priv_t *nfp = (ntfs_vnode_priv_t *)new_dir->fs_data;
+    if (!ofp || !nfp)
+        return -EINVAL;
+    if (!ofp->is_dir || !nfp->is_dir)
+        return -ENOTDIR;
+    if (ofp->sb != nfp->sb)
+        return -EXDEV;
+
+    ntfs_lock(ofp->sb);
+
+    vnode_t *src = NULL;
+    int lr = ntfs_lookup(old_dir, old_name, &src);
+    if (lr < 0) {
+        ntfs_unlock(ofp->sb);
+        return lr;
+    }
+    ntfs_vnode_priv_t *sp = (ntfs_vnode_priv_t *)src->fs_data;
+
+    if (old_dir == new_dir && strcmp(old_name, new_name) == 0) {
+        vnode_put(src);
+        ntfs_unlock(ofp->sb);
+        return 0;
+    }
+
+    vnode_t *tgt = NULL;
+    int tgt_exists = (ntfs_lookup(new_dir, new_name, &tgt) == 0);
+    if (tgt_exists && flags & RENAME_NOREPLACE) {
+        vnode_put(src);
+        vnode_put(tgt);
+        ntfs_unlock(ofp->sb);
+        return -EEXIST;
+    }
+
+    /* Cross-type replacement is refused; replacing a directory requires the
+     * target to be empty. */
+    if (tgt_exists) {
+        ntfs_vnode_priv_t *tp = (ntfs_vnode_priv_t *)tgt->fs_data;
+        if (sp->is_dir != tp->is_dir) {
+            vnode_put(src);
+            vnode_put(tgt);
+            ntfs_unlock(ofp->sb);
+            return sp->is_dir ? -ENOTDIR : -EISDIR;
+        }
+        if (tp->is_dir) {
+            ntfs_dir_entry_t *e = NULL;
+            uint32_t c = 0;
+            int empty = ntfs_read_directory(tp, &e, &c) == 0 && c == 0;
+            kfree(e);
+            if (!empty) {
+                vnode_put(src);
+                vnode_put(tgt);
+                ntfs_unlock(ofp->sb);
+                return -ENOTEMPTY;
+            }
+        }
+    }
+
+    int r = ntfs_index_remove(ofp, old_name);
+    if (r < 0) {
+        vnode_put(src);
+        if (tgt) vnode_put(tgt);
+        ntfs_unlock(ofp->sb);
+        return r;
+    }
+
+    /* Rewrite the child's FILE_NAME to point at the new parent. */
+    uint64_t parent_ref = nfp->mft_index | ((uint64_t)nfp->seq << 48);
+    r = ntfs_update_file_name(ofp->sb, sp->mft_index, parent_ref, new_name,
+                              sp->is_dir, sp->data_size);
+    if (r < 0) {
+        /* Restore the old entry so the source name survives. */
+        ntfs_index_insert(ofp, old_name, sp->mft_index |
+                          ((uint64_t)sp->seq << 48), sp->is_dir, sp->data_size);
+        vnode_put(src);
+        if (tgt) vnode_put(tgt);
+        ntfs_unlock(ofp->sb);
+        return r;
+    }
+
+    /* Replace the target entry (if any) *after* the new entry is staged so a
+     * crash leaves at most one name pointing at the child. */
+    if (tgt_exists) {
+        ntfs_vnode_priv_t *tp = (ntfs_vnode_priv_t *)tgt->fs_data;
+        ntfs_index_remove(nfp, new_name);
+        if (tp->is_dir || (!tp->data_resident && tp->runs)) {
+            ntfs_free_mft_record(ofp->sb, tp->mft_index);
+        }
+    }
+
+    r = ntfs_index_insert(nfp, new_name, sp->mft_index |
+                          ((uint64_t)sp->seq << 48), sp->is_dir, sp->data_size);
+    if (r < 0) {
+        /* Roll back the FILE_NAME rewrite and restore the old entry. */
+        uint64_t oparent = ofp->mft_index | ((uint64_t)ofp->seq << 48);
+        ntfs_update_file_name(ofp->sb, sp->mft_index, oparent, old_name,
+                              sp->is_dir, sp->data_size);
+        ntfs_index_insert(ofp, old_name, sp->mft_index |
+                          ((uint64_t)sp->seq << 48), sp->is_dir, sp->data_size);
+        vnode_put(src);
+        if (tgt) vnode_put(tgt);
+        ntfs_unlock(ofp->sb);
+        return r;
+    }
+
+    /* Repoint the cached vnode's parent for ".." resolution. */
+    if (src->parent && src->parent != new_dir) {
+        vnode_t *old_parent = src->parent;
+        vnode_get(new_dir);
+        src->parent = new_dir;
+        vnode_put(old_parent);
+    }
+
+    vnode_put(src);
+    if (tgt) vnode_put(tgt);
+    ntfs_unlock(ofp->sb);
+    return 0;
+}
 /* ------------------------------------------------------------------ */
 
 static int ntfs_vn_readpage(vnode_t *vn, uint64_t index, void *data, size_t len)
@@ -1950,7 +2136,7 @@ static vnode_ops_t g_ntfs_vnode_ops = {
     .mkdir    = ntfs_vn_mkdir,
     .unlink   = ntfs_vn_unlink,
     .rmdir    = ntfs_vn_rmdir,
-    .rename   = NULL,
+    .rename   = ntfs_vn_rename,
     .stat     = ntfs_stat,
     .statfs   = ntfs_statfs,
     .truncate = ntfs_vn_truncate,
