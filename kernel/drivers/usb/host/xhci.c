@@ -589,6 +589,39 @@ static int xhci_op_submit_interrupt(usb_hcd_t *hcd, usb_urb_t *urb) {
     return 0;
 }
 
+/* Bulk transfer: arm a NORMAL TRB on the endpoint ring and wait for its
+ * transfer event.  Synchronous (like the control path) because BOT is a
+ * strictly serial CBW → data → CSW protocol.  We deliberately do NOT arm
+ * ep->pending: xhci_wait_event consumes pending URBs' events and continues,
+ * which would starve this synchronous wait.  The caller receives the result
+ * directly from the return value. */
+static int xhci_op_submit_bulk(usb_hcd_t *hcd, usb_urb_t *urb) {
+    xhci_controller_t *xhci = hcd->priv;
+    if (!urb || !urb->ep)
+        return -EINVAL;
+    uint8_t addr = urb->ep->addr;
+    uint8_t number = addr & 0x0fU;
+    uint8_t dci = (uint8_t)((addr & USB_DIR_IN) ? number * 2U + 1U : number * 2U);
+    xhci_ep_t *ep = xhci_find_ep(xhci, urb->dev->slot, dci);
+    if (!ep)
+        return -ENODEV;
+    if (ep->pending)
+        return -EBUSY;
+
+    arch_dma_sync_for_device(urb->buf, urb->len);
+    uint64_t pointer = xhci_ring_enqueue(&ep->ring, va_to_pa(urb->buf),
+                                         (uint32_t)urb->len,
+                                         XHCI_TRB_TYPE(XHCI_TRB_NORMAL) |
+                                         XHCI_TRB_ISP | XHCI_TRB_IOC);
+    wmb();
+    xhci_write32(xhci->doorbell, (uint32_t)urb->dev->slot * 4U, dci);
+
+    int result = xhci_wait_event(xhci, XHCI_TRB_TRANSFER_EVENT, pointer, NULL);
+    if (result == 0)
+        arch_dma_sync_for_cpu(urb->buf, urb->len);
+    return result;
+}
+
 static int xhci_op_abort_slot(usb_hcd_t *hcd, uint8_t slot) {
     xhci_controller_t *xhci = hcd->priv;
     xhci_ep_t **pp = &xhci->eps;
@@ -727,6 +760,7 @@ static const usb_hcd_ops_t xhci_hcd_ops = {
     .get_descriptor = xhci_op_get_descriptor,
     .configure_endpoint = xhci_op_configure_endpoint,
     .submit_interrupt = xhci_op_submit_interrupt,
+    .submit_bulk = xhci_op_submit_bulk,
     .abort_slot = xhci_op_abort_slot,
 };
 
