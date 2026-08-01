@@ -1,6 +1,9 @@
 /*
  * A20OS StarFive EQOS GMAC driver.
  *
+ * Developed for the StarFive VisionFive 2 board, referencing RocketOS
+ * (MIT) board/driver bring-up.  See docs/ACKNOWLEDGMENTS.md.
+ *
  * LOCK_ORDER: This driver uses no private spinlock. send/recv are register-
  * polling paths against a single global gmac_priv_t instance (g_gmac).
  * Future IRQ-driven or SMP-safe versions must add a private lock and
