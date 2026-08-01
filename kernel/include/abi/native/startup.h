@@ -14,7 +14,7 @@ typedef struct a20_start_info {
     uint32_t argc;
     uint32_t envc;
     uint32_t auxc;
-    uint32_t reserved0;
+    uint32_t reserved0; /* Native spawn fd mapping limit; zero for normal exec */
 
     uint64_t argv;
     uint64_t envp;

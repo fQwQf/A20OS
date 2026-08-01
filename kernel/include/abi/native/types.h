@@ -21,6 +21,7 @@ typedef uint64_t a20_size_t;       /* Size */
 typedef uint64_t a20_vaddr_t;      /* Virtual address */
 
 #define A20_HANDLE_NULL  ((a20_handle_t)0xFFFFFFFF)
+#define A20_NATIVE_FD_HANDLE_BASE 64u
 
 /* ---- ABI header convention ---- */
 
@@ -155,13 +156,15 @@ typedef struct a20_control_args {
 /* ---- handle_control commands ----
  * The syscall form is handle_control(handle, op, arg0, arg1).
  * op 0/1 are file/device ioctl/fcntl pass-through; op 2-4 operate on the
- * handle entry itself (temporal capability + label management). */
+ * handle entry itself (temporal capability + label management).  Op 5 changes
+ * the calling task's cwd to a directory handle. */
 
 #define A20_HANDLE_CTRL_IOCTL          0u
 #define A20_HANDLE_CTRL_FCNTL          1u
 #define A20_HANDLE_CTRL_SET_TEMPORAL   2u  /* arg0 = a20_handle_temporal_args_t*  */
 #define A20_HANDLE_CTRL_GET_TEMPORAL   3u  /* arg0 = a20_handle_temporal_args_t*  */
 #define A20_HANDLE_CTRL_SET_LABEL      4u  /* arg0 = new label (raise-only)       */
+#define A20_HANDLE_CTRL_CHDIR          5u  /* directory handle -> current cwd     */
 
 /* Temporal capability control (docs/native-abi/03-handle.md §2.6,
  * docs/native-abi/06-security.md §6).  SET_TEMPORAL is strengthening-only
@@ -485,6 +488,29 @@ typedef struct a20_path_create_args {
     uint64_t       dev;        /* device node major:minor */
     a20_handle_t   out_handle;
 } a20_path_create_args_t;
+
+typedef struct a20_path_unlink_args {
+    uint32_t       size;
+    uint32_t       version;
+    a20_handle_t   dir;
+    uint32_t       flags;       /* AT_REMOVEDIR or 0 */
+    uint64_t       path;
+    uint32_t       path_len;
+    uint32_t       _pad;
+} a20_path_unlink_args_t;
+
+typedef struct a20_path_rename_args {
+    uint32_t       size;
+    uint32_t       version;
+    a20_handle_t   old_dir;
+    a20_handle_t   new_dir;
+    uint64_t       old_path;
+    uint32_t       old_path_len;
+    uint32_t       _pad0;
+    uint64_t       new_path;
+    uint32_t       new_path_len;
+    uint32_t       flags;
+} a20_path_rename_args_t;
 
 typedef struct a20_path_link_args {
     uint32_t       size;

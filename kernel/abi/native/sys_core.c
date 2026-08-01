@@ -54,9 +54,16 @@ void a20_ht_put_ref(struct a20_ht_internal *ht);
 int64_t a20_handle_install(struct a20_ht_internal *ht, void *object,
                             uint16_t type, a20_rights_t rights);
 int64_t a20_handle_install_temporal(struct a20_ht_internal *ht, void *object,
-                                    uint16_t type, a20_rights_t rights,
-                                    uint64_t expiry_tick, uint32_t remaining_ops,
-                                    uint32_t temporal_flags, uint8_t security_label);
+                                     uint16_t type, a20_rights_t rights,
+                                     uint64_t expiry_tick, uint32_t remaining_ops,
+                                     uint32_t temporal_flags, uint8_t security_label);
+int64_t a20_handle_install_at_temporal(struct a20_ht_internal *ht,
+                                       a20_handle_t slot, void *object,
+                                       uint16_t type, a20_rights_t rights,
+                                       uint64_t expiry_tick,
+                                       uint32_t remaining_ops,
+                                       uint32_t temporal_flags,
+                                       uint8_t security_label);
 int64_t a20_handle_lookup_internal(struct a20_ht_internal *ht, a20_handle_t h,
                                     uint16_t expected_type, a20_rights_t required_rights,
                                     a20_handle_entry_t *out);
@@ -494,6 +501,25 @@ int64_t sys_a20_task_spawn(const a20_syscall_args_t *args)
     if (child_cwd_h == A20_HANDLE_NULL)
         child_cwd_h = child_root_h;
 
+    /* Keep the kernel's path-based filesystem view aligned with the cwd
+     * capability.  Native libc resolves most operations through the handle,
+     * but procfs, absolute path helpers, and getcwd still use task->fs.cwd. */
+    a20_handle_t cwd_source = kargs.cwd_dir != A20_HANDLE_NULL
+                                  ? kargs.cwd_dir : kargs.root_dir;
+    if (cwd_source != A20_HANDLE_NULL &&
+        a20_handle_lookup_ref_internal(ht, cwd_source, A20_OBJ_DIRECTORY,
+                                       A20_RIGHT_READ | A20_RIGHT_STAT,
+                                       &root_entry) == A20_OK) {
+        int cwd_gfd = (int)(uintptr_t)root_entry.object;
+        vfile_t *cwd_vf = vfs_get_file_ref(cwd_gfd);
+        if (cwd_vf && cwd_vf->path[0]) {
+            strncpy(new_task->fs.cwd, cwd_vf->path, MAX_PATH_LEN - 1);
+            new_task->fs.cwd[MAX_PATH_LEN - 1] = '\0';
+        }
+        if (cwd_vf) vfs_put_file_ref(cwd_gfd, cwd_vf);
+        a20_object_release(root_entry.object, root_entry.type);
+    }
+
     /* v2: inherit stdio handles into the child's start_info slots */
     a20_handle_t child_stdio[3] = { A20_HANDLE_NULL, A20_HANDLE_NULL,
                                     A20_HANDLE_NULL };
@@ -519,6 +545,7 @@ int64_t sys_a20_task_spawn(const a20_syscall_args_t *args)
     }
 
     /* ---- Transfer handle array from parent to child (spawn.md §3.4) ---- */
+    uint32_t child_fd_limit = 0;
     if (kargs.handle_count > 0 && kargs.handles) {
         uint32_t nh = kargs.handle_count;
         if (nh > 64) nh = 64;
@@ -539,7 +566,9 @@ int64_t sys_a20_task_spawn(const a20_syscall_args_t *args)
             if (lr < 0) continue;
 
             /* Mask child rights to requested subset (never exceed source) */
-            a20_rights_t child_rights = sh->rights & src.rights;
+            a20_rights_t child_rights = sh->rights
+                                            ? sh->rights & src.rights
+                                            : src.rights;
             if (child_rights == 0) {
                 a20_object_release(src.object, src.type);
                 continue;
@@ -548,23 +577,30 @@ int64_t sys_a20_task_spawn(const a20_syscall_args_t *args)
             /* Ref-count the underlying object for the child's new handle */
             a20_object_ref(src.object, src.type);
 
-            int64_t child_h = a20_handle_install_temporal(
-                new_ht, src.object, src.type, child_rights,
-                src.expiry_tick, src.remaining_ops,
-                src.temporal_flags, src.security_label);
+            int64_t child_h;
+            if (sh->target_slot >= A20_NATIVE_FD_HANDLE_BASE &&
+                sh->target_slot - A20_NATIVE_FD_HANDLE_BASE < 1024) {
+                child_h = a20_handle_install_at_temporal(
+                    new_ht, sh->target_slot, src.object, src.type,
+                    child_rights, src.expiry_tick, src.remaining_ops,
+                    src.temporal_flags, src.security_label);
+                if (child_h >= 0) {
+                    uint32_t fd = sh->target_slot - A20_NATIVE_FD_HANDLE_BASE;
+                    if (fd + 1 > child_fd_limit)
+                        child_fd_limit = fd + 1;
+                }
+            } else {
+                child_h = a20_handle_install_temporal(
+                    new_ht, src.object, src.type, child_rights,
+                    src.expiry_tick, src.remaining_ops,
+                    src.temporal_flags, src.security_label);
+            }
             a20_object_release(src.object, src.type);
             if (child_h < 0) {
                 a20_object_release(src.object, src.type);
                 continue;
             }
 
-            /* If target_slot specified, try to install at that exact slot */
-            if (child_h >= 0 && sh->target_slot != 0 &&
-                sh->target_slot != (uint32_t)child_h) {
-                /* Best-effort: we installed at child_h, target_slot is advisory */
-                /* Future: slot-swap support. For now, accept what alloc gave us. */
-                (void)sh->target_slot;
-            }
         }
     }
 
@@ -598,7 +634,8 @@ int64_t sys_a20_task_spawn(const a20_syscall_args_t *args)
     uint64_t sp = elf_setup_stack_a20(info.stack_top, argc, argv_buf, envp_buf,
                                       &info, child_stdio[0], child_stdio[1],
                                       child_stdio[2], child_self_task,
-                                      child_root_h, child_cwd_h);
+                                      child_root_h, child_cwd_h,
+                                      child_fd_limit);
     if (sp == 0) {
         proc_force_exit(new_task, 1);
         proc_make_ready(new_task);

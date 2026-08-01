@@ -1,6 +1,8 @@
 /*
  * A20OS Native ABI — Channel endpoints.
  * Design reference: docs/native-abi/05-ipc.md §2
+ * Design inspiration: Zircon (Fuchsia) Channel handle-transfer semantics
+ * and seL4 Endpoint capability transfer; see docs/ACKNOWLEDGMENTS.md §3.
  *
  * CH_PEER_TEARDOWN_PROTOCOL:
  * Both endpoints are freed independently once their refcount hits zero, so

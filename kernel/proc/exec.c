@@ -463,13 +463,14 @@ static uint64_t exec_setup_native_abi(task_t *t,
         return elf_setup_stack_a20_dynamic(
             info->stack_top, argc, k_argv, k_envp, info,
             stdin_h, stdout_h, stderr_h, self_h, root_h, cwd_h,
+            0,
             start_info_out);
     }
 
     return elf_setup_stack_a20(info->stack_top, argc,
                                k_argv, k_envp, info,
                                stdin_h, stdout_h, stderr_h, self_h,
-                               root_h, cwd_h);
+                               root_h, cwd_h, 0);
 }
 #endif /* CONFIG_ABI_NATIVE */
 
