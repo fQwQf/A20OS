@@ -576,6 +576,7 @@ KERNEL_SRC = $(wildcard $(KERNEL_DIR)/*.c) \
              $(wildcard $(KERNEL_DIR)/drivers/gpu/*.c) \
 	             $(wildcard $(KERNEL_DIR)/drivers/audio/*.c) \
 	             $(wildcard $(KERNEL_DIR)/drivers/input/*.c) \
+	             $(wildcard $(KERNEL_DIR)/drivers/usb/*/*.c) \
 	             $(wildcard $(BOARD_DRIVER_DIR)/*.c) \
 	             $(wildcard $(KERNEL_DIR)/platform/$(BOARD)/*.c) \
              $(ABI_SRCS) \
@@ -2103,6 +2104,31 @@ smoke-audio-userspace:
 		exit 1; \
 	fi
 
+smoke-usb-x86_64:
+	$(MAKE) ARCH=x86_64 ABI=both BRINGUP=0 kernel-only
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/usb-x86_64.log"; \
+	status=0; \
+	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-x86_64 \
+		-machine q35 -m 1G -nographic -smp 1 -no-reboot \
+		-device qemu-xhci,id=xhci \
+		-device usb-kbd \
+		-device usb-mouse \
+		-kernel .kernel-build/x86_64-qemu-virt-x86_64-both-dev/kernel.elf \
+		> "$$log" 2>&1 || status=$$?; \
+	if grep -q '\[USB-HID\] keyboard ready' "$$log" && \
+	   grep -q '\[USB-HID\] mouse ready' "$$log" && \
+	   grep -q "bound to driver 'usb-hid'" "$$log" && \
+	   ! grep -q '\[USB\] port.*enumeration failed' "$$log" && \
+	   ! grep -q '\[XHCI\].*failed' "$$log"; then \
+		echo "smoke-usb-x86_64: PASS; log saved to $$log"; \
+	else \
+		echo "smoke-usb-x86_64: failed with status $$status; tail of $$log:"; \
+		tail -n 60 "$$log"; \
+		exit 1; \
+	fi
+
 smoke-virtio-sound:
 	$(MAKE) ARCH=x86_64 BOARD=qemu-virt-x86_64 ABI=linux BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
@@ -3186,7 +3212,9 @@ MLIBC_FAST_TYPE_FLAGS := \
 	-D__INT_FAST8_TYPE__="signed char" -D__INT_FAST16_TYPE__=long -D__INT_FAST32_TYPE__=long \
 	-D__UINT_FAST8_TYPE__="unsigned char" -D__UINT_FAST16_TYPE__="unsigned long" -D__UINT_FAST32_TYPE__="unsigned long"
 
-$(MLIBC_SYSROOT)/lib/libc.a: $(wildcard $(MLIBC_DIR)/sysdeps/a20/*) $(MLIBC_DIR)/ci/a20-riscv64.cross-file
+$(MLIBC_SYSROOT)/lib/libc.a: $(wildcard $(MLIBC_DIR)/sysdeps/a20/*) \
+	$(MLIBC_DIR)/options/posix/include/spawn.h \
+	$(MLIBC_DIR)/ci/a20-riscv64.cross-file
 	@test -d "$(MLIBC_BUILD)" || meson setup $(MLIBC_BUILD) $(MLIBC_DIR) \
 		--cross-file $(MLIBC_DIR)/ci/a20-riscv64.cross-file \
 		-Ddefault_library=static -Dbuild_tests=false --prefix=$(abspath $(MLIBC_SYSROOT))

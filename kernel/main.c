@@ -33,6 +33,7 @@
 #include "drivers/block/loop.h"
 #include "net/socket.h"
 #include "drivers/core/driver_core.h"
+#include "drivers/usb/usb.h"
 #ifdef CONFIG_SWAP
 #include "mm/swap.h"
 #endif
@@ -266,6 +267,8 @@ void kernel_main(void) {
     printf("[INIT] Boot arguments parsed\n");
     driver_core_init();
     printf("[INIT] Driver core initialized\n");
+    usb_core_init();
+    printf("[INIT] USB core initialized\n");
     if (current_board && current_board->enumerate_devices) {
         current_board->enumerate_devices();
         printf("[INIT] Board devices enumerated (%s)\n",
@@ -273,6 +276,8 @@ void kernel_main(void) {
     }
     driver_probe_all();
     printf("[INIT] Drivers probed\n");
+    usb_core_scan();
+    printf("[INIT] USB devices scanned\n");
 #ifdef CONFIG_X86_64
     if (ps2_input_init() != 0)
         printf("[INIT] PS/2 input controller unavailable\n");
