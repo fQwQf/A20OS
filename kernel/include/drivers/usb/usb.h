@@ -32,6 +32,12 @@
 #define USB_CLASS_MASS_STORAGE 8U
 #define USB_CLASS_HUB          9U
 
+#define USB_SUBCLASS_SCSI        0x06U
+#define USB_PROTOCOL_BULK_ONLY   0x50U
+
+#define USB_REQ_BULK_ONLY_RESET  0xFFU
+#define USB_REQ_GET_MAX_LUN      0xFEU
+
 #define USB_SPEED_LOW   1U
 #define USB_SPEED_FULL  2U
 #define USB_SPEED_HIGH  3U
@@ -191,6 +197,8 @@ typedef struct usb_hcd_ops {
                                uint16_t max_packet, uint8_t interval);
     /* Arm a periodic IN transfer; completion calls urb->complete(). */
     int  (*submit_interrupt)(struct usb_hcd *hcd, usb_urb_t *urb);
+    /* Submit a bulk transfer; completion calls urb->complete(). */
+    int  (*submit_bulk)(struct usb_hcd *hcd, usb_urb_t *urb);
     /* Tear down a slot on removal. */
     int  (*abort_slot)(struct usb_hcd *hcd, uint8_t slot);
 } usb_hcd_ops_t;
