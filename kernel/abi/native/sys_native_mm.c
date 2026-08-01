@@ -111,103 +111,68 @@ int64_t sys_a20_vm_map(const a20_syscall_args_t *args)
 
     if (kargs.length == 0) return -A20_ERR_INVALID_ARGUMENT;
 
-    struct a20_vmo *vmo = NULL;
-    uint32_t prot_eff = kargs.prot;
-    uint64_t map_offset = 0;
-    int owned_vmo = 0;
-    a20_handle_entry_t src;
-    int src_ref = 0;
+    task_t *cur = proc_current();
+    if (!cur || !cur->mm) return -A20_ERR_FAULT;
+
+    uint64_t addr = 0;
     int64_t r = A20_OK;
 
     if (kargs.source != A20_HANDLE_NULL) {
-        task_t *cur = proc_current();
         struct a20_ht_internal *ht = task_get_a20_ht(cur);
         if (!ht) return -A20_ERR_BAD_HANDLE;
 
-        r = a20_handle_lookup_ref_internal(ht, kargs.source,
-                                           A20_OBJ_INVALID,
+        a20_handle_entry_t src;
+        r = a20_handle_lookup_ref_internal(ht, kargs.source, A20_OBJ_INVALID,
                                            A20_RIGHT_MAP, &src);
         if (r < 0) return r;
-        src_ref = 1;
 
         if (src.type == A20_OBJ_MEMORY) {
-            /* Map an existing VMO: shared pages, prot intersected with the
-             * handle's rights. */
-            vmo = (struct a20_vmo *)src.object;
-            if (kargs.offset >= vmo->size ||
-                kargs.length > vmo->size - kargs.offset) {
+            /* Map an existing VMO: shared canonical frames, prot intersected
+             * with the handle's rights.  The VMA takes its own VMO reference. */
+            struct vmo *vmo = (struct vmo *)src.object;
+            uint32_t prot_eff = a20_vm_prot_eff(kargs.prot, src.rights);
+            if (kargs.offset & (PAGE_SIZE - 1)) {
                 r = -A20_ERR_INVALID_ARGUMENT;
-                goto out_src;
+            } else if (kargs.offset >= vmo->size ||
+                       kargs.length > vmo->size - kargs.offset) {
+                r = -A20_ERR_INVALID_ARGUMENT;
+            } else {
+                r = a20_vmar_map(vmo, kargs.offset, kargs.length, prot_eff,
+                                 kargs.flags, kargs.addr_hint, &addr);
             }
-            map_offset = kargs.offset;
-            prot_eff = a20_vm_prot_eff(kargs.prot, src.rights);
+            a20_object_release(src.object, src.type);
+            if (r < 0) return r;
         } else if (src.type == A20_OBJ_FILE || src.type == A20_OBJ_DEVICE) {
-            /* File-backed mapping (eager load): read the file region into a
-             * new VMO and map it.  COW/demand paging is future work. */
             if (!(src.rights & A20_RIGHT_READ)) {
-                r = -A20_ERR_ACCESS;
-                goto out_src;
+                a20_object_release(src.object, src.type);
+                return -A20_ERR_ACCESS;
             }
-            prot_eff = a20_vm_prot_eff(kargs.prot, src.rights);
-            vmo = a20_vmo_create(A20_VMO_ANONYMOUS, kargs.length, 0);
-            if (!vmo) {
-                r = -A20_ERR_NO_MEMORY;
-                goto out_src;
-            }
-            owned_vmo = 1;
-
+            uint32_t prot_eff = a20_vm_prot_eff(kargs.prot, src.rights);
             int gfd = (int)(uintptr_t)src.object;
-            if (kargs.offset > 0 &&
-                vfs_lseek(gfd, (long)kargs.offset, SEEK_SET) < 0) {
-                r = -A20_ERR_INVALID_ARGUMENT;
-                goto out_vmo;
+            /* Demand-paged file mapping through the core page cache.  The VMA
+             * holds its own fd reference; no eager anonymous VMO is created. */
+            if (kargs.offset & (PAGE_SIZE - 1)) {
+                a20_object_release(src.object, src.type);
+                return -A20_ERR_INVALID_ARGUMENT;
             }
-            uint64_t done = 0;
-            while (done < kargs.length) {
-                uint32_t page_idx = (uint32_t)(done / 4096);
-                uint32_t page_off = (uint32_t)(done % 4096);
-                size_t chunk = 4096 - page_off;
-                if (chunk > kargs.length - done)
-                    chunk = (size_t)(kargs.length - done);
-                pfn_t pfn = a20_vmo_get_page(vmo, page_idx);
-                if (pfn == PFN_NONE) {
-                    r = -A20_ERR_NO_MEMORY;
-                    goto out_vmo;
-                }
-                vfile_t *vf = vfs_get_file_ref(gfd);
-                if (!vf) {
-                    r = -A20_ERR_BAD_HANDLE;
-                    goto out_vmo;
-                }
-                int64_t n = vfs_read_file(vf, (char *)pfn_to_virt(pfn) + page_off,
-                                          chunk);
-                vfs_put_file_ref(gfd, vf);
-                if (n < 0) {
-                    r = -A20_ERR_IO;
-                    goto out_vmo;
-                }
-                done += (uint64_t)n;
-                if ((size_t)n < chunk)
-                    break; /* EOF: rest of the VMO stays zero-filled */
-            }
+            addr = mm_mmap_file(cur->mm, kargs.addr_hint, kargs.length,
+                                a20_prot_to_mmap(prot_eff), MAP_PRIVATE,
+                                gfd, kargs.offset);
+            a20_object_release(src.object, src.type);
+            if ((int64_t)addr < 0)
+                return -A20_ERR_NO_MEMORY;
         } else {
-            r = -A20_ERR_INVALID_ARGUMENT;
-            goto out_src;
+            a20_object_release(src.object, src.type);
+            return -A20_ERR_INVALID_ARGUMENT;
         }
     } else {
-        vmo = a20_vmo_create(A20_VMO_ANONYMOUS, kargs.length, 0);
+        struct vmo *vmo = vmo_create(VMO_ANONYMOUS, kargs.length, 0);
         if (!vmo) return -A20_ERR_NO_MEMORY;
-        owned_vmo = 1;
+        r = a20_vmar_map(vmo, 0, kargs.length, kargs.prot, kargs.flags,
+                         kargs.addr_hint, &addr);
+        vmo_release(vmo);
+        if (r < 0) return r;
     }
-
-    uint64_t addr = 0;
-    r = a20_vmar_map(vmo, map_offset, kargs.length, prot_eff,
-                     kargs.flags, kargs.addr_hint, &addr);
-    if (owned_vmo)
-        a20_vmo_release(vmo);
-    if (src_ref)
-        a20_object_release(src.object, src.type);
-    if (r < 0) return r;
 
     kargs.out_addr = addr;
     if (a20_copy_struct_to_user(uargs, &kargs, sizeof(kargs)) < 0) {
@@ -215,14 +180,6 @@ int64_t sys_a20_vm_map(const a20_syscall_args_t *args)
         return -A20_ERR_FAULT;
     }
     return A20_OK;
-
-out_vmo:
-    if (owned_vmo)
-        a20_vmo_release(vmo);
-out_src:
-    if (src_ref)
-        a20_object_release(src.object, src.type);
-    return r;
 }
 
 int64_t sys_a20_vm_share(const a20_syscall_args_t *args)
@@ -347,6 +304,18 @@ int64_t sys_a20_vm_advise(const a20_syscall_args_t *args)
             size_t leaf_size = 0;
             pte_t *pte = pt_lookup_leaf(cur->mm->pgdir, va, &level, &base, &leaf_size);
             if (!pte || !(*pte & PTE_V)) { va += 4096; continue; }
+            vm_area_t *vma = mm_find_vma(cur->mm, va);
+            if (vma && (vma->vm_flags & VM_VMO)) {
+                /* VMO frames are owned by the VMO; unmapping a PTE must not
+                 * frame_put() them.  Drop the PTE and let the VMO keep the
+                 * canonical frame. */
+                paddr_t dummy = 0;
+                pt_unmap_leaf(cur->mm->pgdir, va, &dummy, &base, &leaf_size, NULL);
+                cur->mm->rss = (cur->mm->rss > leaf_size / 4096)
+                                   ? cur->mm->rss - leaf_size / 4096 : 0;
+                va = base + leaf_size;
+                continue;
+            }
             paddr_t pa = 0;
             if (pt_unmap_leaf(cur->mm->pgdir, va, &pa, &base, &leaf_size, NULL) == 0) {
                 if (pa) {
@@ -443,17 +412,17 @@ int64_t sys_a20_vm_create_object(const a20_syscall_args_t *args)
 
     if (size == 0) return -A20_ERR_INVALID_ARGUMENT;
 
-    struct a20_vmo *vmo = a20_vmo_create(A20_VMO_ANONYMOUS, size, options);
+    struct vmo *vmo = vmo_create(VMO_ANONYMOUS, size, options);
     if (!vmo) return -A20_ERR_NO_MEMORY;
 
     task_t *cur = proc_current();
     struct a20_ht_internal *ht = task_get_a20_ht(cur);
-    if (!ht) { a20_vmo_release(vmo); return -A20_ERR_BAD_HANDLE; }
+    if (!ht) { vmo_release(vmo); return -A20_ERR_BAD_HANDLE; }
 
     int64_t h = a20_handle_install(ht, vmo, A20_OBJ_MEMORY,
                                     A20_RIGHT_READ | A20_RIGHT_WRITE |
                                     A20_RIGHT_MAP | A20_RIGHT_STAT | A20_RIGHT_DUP |
                                     A20_RIGHT_TRANSFER | A20_RIGHT_CONTROL);
-    if (h < 0) a20_vmo_release(vmo);
+    if (h < 0) vmo_release(vmo);
     return h;
 }

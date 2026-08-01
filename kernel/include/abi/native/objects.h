@@ -21,7 +21,7 @@ struct a20_socket {
 
 struct a20_shm {
     refcount_t  refcount;
-    struct a20_vmo *vmo;
+    struct vmo *vmo;
     uint32_t    export_rights;
 };
 
