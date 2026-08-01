@@ -115,7 +115,7 @@ Linux ABI 侧已有完整 PT_INTERP 加载，mlibc 的 rtld 现成，native 侧�
 - file/socket/pipe 的 `READABLE`/`WRITABLE`/`ERROR`/`CONNECTION` 事件源尚未接入 VFS/网络栈（event queue 目前只对 channel、timer、task 退出产生事件）。
 - `event_watch_fs` 仍是目录级 watch 的壳，不支持路径过滤、不产生 FS 事件。
 - VMO 映射已是**按需调页**：`vmar_map` 只建立 `VM_VMO` VMA，页面在首次 fault 时经核心 `handle_demand_fault_locked` 的 VMO 分支按 `vmo_get_page()` 物化；VMO 帧由 VMO 自身持有（类比 page-cache 帧），fork 时父子共享同一批 canonical 帧而非 COW。文件映射走核心 `mm_mmap_file`，经 page cache 需求填充。
-- 仍缺：VMAR 不是层级模型；`vm_share` 尚未提供"按地址区间反查 VMO 并导出"的结构化 `a20_vm_share_args_t` 形式；VMO 页分配未接入 cgroup 内存记账。
+- 仍缺：VMAR 不是层级模型；`vm_share` 尚未提供"按地址区间反查 VMO 并导出"的结构化 `a20_vm_share_args_t` 形式。VMO 页分配已接入 cgroup 记账（fault 时对首个触页任务记账、destroy 时返还；`vmo_get_page_charged`）。
 - 性能未实测（研究文档 05 的 G1–G7 阈值仍待验证）；静态能力流分析工具未实现。
 
 ## 路线图

@@ -15,6 +15,7 @@
  *     block and returns -ENOSPC when neither has room (no B-tree block split).
  */
 #include "fs/ntfs.h"
+#include "fs/ntfs_format.h"
 
 #include "core/consts.h"
 #include "core/string.h"
@@ -25,6 +26,17 @@
 #include "mm/slab.h"
 #include "proc/proc.h"
 #include "sys/usercopy.h"
+
+/* Byte/VLI helpers live in ntfs_format.h; keep the local names. */
+#define nget16 nf_get16
+#define nget32 nf_get32
+#define nget64 nf_get64
+#define nput16 nf_put16
+#define nput32 nf_put32
+#define nput64 nf_put64
+#define nvli_len nf_vli_len
+#define nvli_len_s nf_vli_len_s
+#define nenc_vli nf_encode_vli
 
 /* ------------------------------------------------------------------ */
 /* On-disk constants                                                   */
@@ -57,11 +69,6 @@
 /* ------------------------------------------------------------------ */
 /* In-memory structures                                                */
 /* ------------------------------------------------------------------ */
-
-typedef struct ntfs_run {
-    uint64_t lcn;               /* 0 => sparse */
-    uint64_t length;            /* clusters */
-} ntfs_run_t;
 
 typedef struct ntfs_sb {
     struct bcache *bc;
@@ -136,42 +143,10 @@ static vnode_ops_t g_ntfs_vnode_ops;
 static vfile_ops_t g_ntfs_fops;
 
 /* ------------------------------------------------------------------ */
-/* Byte helpers                                                        */
-/* ------------------------------------------------------------------ */
-
-static inline uint16_t nget16(const uint8_t *p) { return (uint16_t)(p[0] | (p[1] << 8)); }
-static inline uint32_t nget32(const uint8_t *p) {
-    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) |
-           ((uint32_t)p[3] << 24);
-}
-static inline uint64_t nget64(const uint8_t *p) {
-    return (uint64_t)nget32(p) | ((uint64_t)nget32(p + 4) << 32);
-}
-static inline void nput16(uint8_t *p, uint16_t v) { p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); }
-static inline void nput32(uint8_t *p, uint32_t v) {
-    p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); p[2] = (uint8_t)(v >> 16); p[3] = (uint8_t)(v >> 24);
-}
-static inline void nput64(uint8_t *p, uint64_t v) { nput32(p, (uint32_t)v); nput32(p + 4, (uint32_t)(v >> 32)); }
-
+/* Byte/VLI helpers come from ntfs_format.h. */
 /* ------------------------------------------------------------------ */
 /* Low-level I/O                                                       */
 /* ------------------------------------------------------------------ */
-
-static int ntfs_map_vcn(const ntfs_run_t *runs, uint32_t count, uint64_t vcn,
-                        uint64_t *lcn)
-{
-    uint64_t base = 0;
-    for (uint32_t i = 0; i < count; i++) {
-        if (vcn >= base && vcn < base + runs[i].length) {
-            if (runs[i].lcn == 0)
-                return 0;
-            *lcn = runs[i].lcn + (vcn - base);
-            return 1;
-        }
-        base += runs[i].length;
-    }
-    return -1;
-}
 
 static int ntfs_stream_read(ntfs_sb_t *sb, const ntfs_run_t *runs,
                             uint32_t count, uint64_t size, uint64_t off,
@@ -485,64 +460,7 @@ static int ntfs_resolve_data(ntfs_vnode_priv_t *fp)
 }
 
 /* ------------------------------------------------------------------ */
-/* Run-list encoding                                                   */
-/* ------------------------------------------------------------------ */
-
-static int nvli_len(uint64_t v)
-{
-    int n = 1;
-    while (v >> (8 * n))
-        n++;
-    return n;
-}
-
-static int nvli_len_s(int64_t v)
-{
-    uint64_t u = (v < 0) ? (uint64_t)(~v) : (uint64_t)v;
-    int n = 1;
-    while (u >> (8 * n))
-        n++;
-    return n;
-}
-
-static void nenc_vli(uint8_t *p, uint64_t v, int len)
-{
-    for (int i = 0; i < len; i++)
-        p[i] = (uint8_t)(v >> (8 * i));
-}
-
-static int ntfs_encode_runs(uint8_t *out, size_t cap,
-                            const ntfs_run_t *runs, uint32_t count)
-{
-    size_t used = 0;
-    int64_t prev_lcn = 0;
-    for (uint32_t i = 0; i < count; i++) {
-        uint64_t length = runs[i].length;
-        uint8_t lcn_len;
-        int64_t delta = 0;
-        if (runs[i].lcn == 0) {
-            lcn_len = 0;
-        } else {
-            delta = (int64_t)runs[i].lcn - prev_lcn;
-            prev_lcn = (int64_t)runs[i].lcn;
-            lcn_len = (uint8_t)nvli_len_s(delta);
-        }
-        uint8_t ll = (uint8_t)nvli_len(length);
-        if (used + 1 + ll + lcn_len > cap)
-            return -1;
-        out[used++] = (uint8_t)(ll | (lcn_len << 4));
-        nenc_vli(out + used, length, ll);
-        used += ll;
-        if (lcn_len) {
-            nenc_vli(out + used, (uint64_t)delta, lcn_len);
-            used += lcn_len;
-        }
-    }
-    if (used + 1 > cap)
-        return -1;
-    out[used++] = 0;
-    return (int)used;
-}
+/* Run-list encoding lives in ntfs_format.h. */
 
 /* ------------------------------------------------------------------ */
 /* $Bitmap cluster allocator                                           */
