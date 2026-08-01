@@ -42,7 +42,7 @@ void a20_object_ref(void *object, uint16_t type)
         refcount_inc(&((a20_eventq_t *)object)->refcount);
         break;
     case A20_OBJ_MEMORY:
-        a20_vmo_ref((struct a20_vmo *)object);
+        vmo_ref((struct vmo *)object);
         break;
     case A20_OBJ_TIMER:
         a20_timer_object_ref((int)(uintptr_t)object - 1);
@@ -81,7 +81,10 @@ void a20_object_release(void *object, uint16_t type)
         a20_eventq_release((a20_eventq_t *)object);
         break;
     case A20_OBJ_MEMORY:
-        a20_vmo_release((struct a20_vmo *)object);
+        /* Native watchers key on the VMO object; fire before the final ref
+         * drops so a destroyed object still notifies its event queue. */
+        a20_eventq_on_object_destroy(object, A20_OBJ_MEMORY);
+        vmo_release((struct vmo *)object);
         break;
     case A20_OBJ_TIMER:
         a20_timer_object_release((int)(uintptr_t)object - 1);

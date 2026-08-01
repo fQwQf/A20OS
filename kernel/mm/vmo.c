@@ -1,6 +1,10 @@
 /*
- * A20OS Native ABI — VMO implementation.
- * Design reference: docs/native-abi/04-memory.md §2
+ * A20OS core — Virtual Memory Object (VMO).
+ *
+ * The VMO is the core "page source" used by the Native ABI for anonymous
+ * memory, file-backed mappings and shared memory.  It lives in the core MM
+ * layer so that both ABIs map through the same VMA/fault machinery and so
+ * that the core fault handler does not depend on any ABI-specific header.
  */
 #include "core/types.h"
 #include "core/string.h"
@@ -9,13 +13,11 @@
 #include "mm/slab.h"
 #include "mm/frame.h"
 #include "mm/mm.h"
-#include "abi/native/vmo.h"
-#include "abi/native/ipc_internal.h"
-#include "abi/native/errno.h"
+#include "mm/vmo.h"
 
-struct a20_vmo *a20_vmo_create(uint32_t type, uint64_t size, uint32_t options)
+struct vmo *vmo_create(uint32_t type, uint64_t size, uint32_t options)
 {
-    struct a20_vmo *vmo = kmalloc(sizeof(*vmo));
+    struct vmo *vmo = kmalloc(sizeof(*vmo));
     if (!vmo) return NULL;
 
     uint32_t npages = (uint32_t)((size + PAGE_SIZE - 1) / PAGE_SIZE);
@@ -40,29 +42,36 @@ struct a20_vmo *a20_vmo_create(uint32_t type, uint64_t size, uint32_t options)
     return vmo;
 }
 
-void a20_vmo_destroy(struct a20_vmo *vmo)
+static void vmo_destroy(struct vmo *vmo)
 {
     if (!vmo) return;
     if (vmo->pages) {
         for (uint32_t i = 0; i < vmo->page_count; i++) {
-            if (vmo->pages[i] != PFN_NONE) {
+            if (vmo->pages[i] != PFN_NONE)
                 pfa_free_page(vmo->pages[i]);
-            }
         }
         kfree(vmo->pages);
     }
     kfree(vmo);
 }
 
-void a20_vmo_release(struct a20_vmo *vmo)
+void vmo_release(struct vmo *vmo)
 {
-    if (vmo && refcount_dec_and_test(&vmo->refcount)) {
-        a20_eventq_on_object_destroy(vmo, A20_OBJ_MEMORY);
-        a20_vmo_destroy(vmo);
-    }
+    if (vmo && refcount_dec_and_test(&vmo->refcount))
+        vmo_destroy(vmo);
 }
 
-pfn_t a20_vmo_get_page(struct a20_vmo *vmo, uint32_t index)
+void vmo_ref(struct vmo *vmo)
+{
+    if (vmo) refcount_inc(&vmo->refcount);
+}
+
+/*
+ * Return the canonical frame for page @index, materializing it on first
+ * touch.  The caller must hold the owning task's mm->lock; the frame is
+ * owned by the VMO and is never released by unmapping a PTE.
+ */
+pfn_t vmo_get_page(struct vmo *vmo, uint32_t index)
 {
     if (!vmo || index >= vmo->page_count) return PFN_NONE;
 
@@ -87,9 +96,9 @@ pfn_t a20_vmo_get_page(struct a20_vmo *vmo, uint32_t index)
     return pfn;
 }
 
-int64_t a20_vmo_resize(struct a20_vmo *vmo, uint64_t new_size)
+int64_t vmo_resize(struct vmo *vmo, uint64_t new_size)
 {
-    if (!vmo) return -A20_ERR_INVALID_ARGUMENT;
+    if (!vmo) return -1;
 
     uint32_t new_np = (uint32_t)((new_size + PAGE_SIZE - 1) / PAGE_SIZE);
 
@@ -105,13 +114,13 @@ int64_t a20_vmo_resize(struct a20_vmo *vmo, uint64_t new_size)
         vmo->size = new_size;
         vmo->page_count = new_np;
         spin_unlock(&vmo->lock);
-        return A20_OK;
+        return 0;
     }
 
     pfn_t *new_pages = kmalloc(new_np * sizeof(pfn_t));
     if (!new_pages) {
         spin_unlock(&vmo->lock);
-        return -A20_ERR_NO_MEMORY;
+        return -1;
     }
     for (uint32_t i = 0; i < vmo->page_count; i++)
         new_pages[i] = vmo->pages[i];
@@ -125,5 +134,5 @@ int64_t a20_vmo_resize(struct a20_vmo *vmo, uint64_t new_size)
     spin_unlock(&vmo->lock);
 
     kfree(old);
-    return A20_OK;
+    return 0;
 }
