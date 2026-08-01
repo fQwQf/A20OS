@@ -356,12 +356,16 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval) {
                 return -1;
             }
             uint32_t pg_idx = (uint32_t)(voff / PAGE_SIZE);
-            pfn_t vpfn = vmo_get_page(vma->vmo, pg_idx);
-            if (vpfn == PFN_NONE) return -1;
+            pfn_t vpfn;
+            int r = vmo_get_page_charged(vma->vmo, pg_idx, t->cgroup, &vpfn);
+            if (r == -ENOMEM)
+                return -ENOMEM;
+            if (r != 0 || vpfn == PFN_NONE)
+                return -1;
 
-            int r = pt_map(t->mm->pgdir, page_va, pfn_to_phys(vpfn),
-                           vma->pte_flags);
-            if (r < 0) return -1;
+            if (pt_map(t->mm->pgdir, page_va, pfn_to_phys(vpfn),
+                       vma->pte_flags) < 0)
+                return -1;
 
             t->mm->rss++;
             arch_tlb_flush_page(stval);

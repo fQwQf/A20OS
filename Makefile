@@ -162,7 +162,8 @@ NATIVE_HELLO_BIN       := $(NATIVE_BUILD_DIR)/native-hello-$(NATIVE_TAG)
 NATIVE_HANDLE_BIN      := $(NATIVE_BUILD_DIR)/native-handle-$(NATIVE_TAG)
 NATIVE_LIBC_BIN        := $(NATIVE_BUILD_DIR)/native-libc-$(NATIVE_TAG)
 NATIVE_FUTEX_BIN       := $(NATIVE_BUILD_DIR)/native-futex-$(NATIVE_TAG)
-NATIVE_OUTPUTS         := $(NATIVE_HELLO_BIN) $(NATIVE_HANDLE_BIN) $(NATIVE_LIBC_BIN) $(NATIVE_FUTEX_BIN)
+NATIVE_MM_BIN          := $(NATIVE_BUILD_DIR)/native-mm-$(NATIVE_TAG)
+NATIVE_OUTPUTS         := $(NATIVE_HELLO_BIN) $(NATIVE_HANDLE_BIN) $(NATIVE_LIBC_BIN) $(NATIVE_FUTEX_BIN) $(NATIVE_MM_BIN)
 NATIVE_BUILD_STAMP     := $(NATIVE_BUILD_DIR)/.native-build-id
 comma := ,
 NET_HOSTFWD ?= hostfwd=tcp::5555-:5555,hostfwd=udp::5555-:5555
@@ -1022,6 +1023,23 @@ check-io-progress-model:
 	@! rg -q "virtio_blk_poll_all" kernel/proc/sched.c kernel/proc/proc.c
 	@! rg -q "a20_lwip_poll" kernel/proc/sched.c kernel/proc/proc.c
 	@echo "check-io-progress-model: PASS"
+
+# Host-side unit tests for pure kernel format/helper logic.  These compile
+# shared headers with the host compiler and run on the build machine, so
+# format regressions are caught without booting the kernel.
+HOST_CC ?= gcc
+HOST_TESTS_SRC := $(wildcard tools/tests/*.c)
+HOST_TESTS_BIN := $(patsubst tools/tests/%.c,/tmp/a20-host-%,$(HOST_TESTS_SRC))
+
+host-tests: $(HOST_TESTS_BIN)
+	@for t in $(HOST_TESTS_BIN); do \
+		echo "== $$t =="; \
+		"$$t" || exit 1; \
+	done
+	@echo "host-tests: PASS"
+
+/tmp/a20-host-%: tools/tests/%.c
+	$(HOST_CC) -Ikernel/include -O2 -Wall -Wextra $< -o $@
 
 check-vfs-abstraction:
 	@rg -q "VFS_OPEN_DISPATCH_CONTRACT" kernel/include/fs/vfs.h
@@ -2317,7 +2335,8 @@ $(NATIVE_BUILD_STAMP): $(USER_BUILD_STAMP) force_native_build
 	if [ "$$current" != "$(USER_BUILD_ID)" ]; then \
 		need_build=1; \
 	elif [ ! -x "$(NATIVE_HELLO_BIN)" ] || [ ! -x "$(NATIVE_HANDLE_BIN)" ] || \
-	     [ ! -x "$(NATIVE_LIBC_BIN)" ] || [ ! -x "$(NATIVE_FUTEX_BIN)" ]; then \
+	     [ ! -x "$(NATIVE_LIBC_BIN)" ] || [ ! -x "$(NATIVE_FUTEX_BIN)" ] || \
+	     [ ! -x "$(NATIVE_MM_BIN)" ]; then \
 		need_build=1; \
 	elif find user/liba20rt user/liba20c user/tests -type f -newer "$@" \
 		-print -quit | grep -q .; then \
@@ -3176,6 +3195,53 @@ native-futex-arch: $(NATIVE_FUTEX_BIN)
 
 native-futex-rv:
 	$(MAKE) ARCH=riscv64 NOMMU=$(NOMMU) native-futex-arch
+
+define NATIVE_MM_RECIPE
+@mkdir -p $(dir $(4))
+$(1) -ffreestanding -nostdlib -static \
+    $(2) \
+    -Iuser -Iuser/liba20rt \
+    -T$(NATIVE_LD) \
+    $(3) \
+    $(NATIVE_SDK_SRC) \
+    $(NATIVE_COMPILER_RT_SRC) \
+    $(NATIVE_ARCH_SRC) \
+    user/tests/test_native_mm.c \
+    $(NATIVE_LIBS) \
+    -o $(4)
+endef
+
+$(NATIVE_MM_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) user/tests/test_native_mm.c \
+		user/liba20rt/a20-generic.ld user/liba20rt/crt0_a20.h user/liba20rt/a20_syscall.h user/liba20rt/a20_mem.h
+	$(call NATIVE_MM_RECIPE,$(NATIVE_CC),$(NATIVE_CFLAGS),$(NATIVE_CRT0),$@)
+
+native-mm-arch: $(NATIVE_MM_BIN)
+
+native-mm-rv:
+	$(MAKE) ARCH=riscv64 NOMMU=$(NOMMU) native-mm-arch
+
+smoke-native-mm:
+	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/native-mm-riscv64.log"; \
+	status=0; \
+	{ sleep $(SMOKE_INPUT_DELAY); printf '/bin/native-mm-rv\npoweroff\n'; } | \
+	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
+		-machine virt -m 1G -nographic -smp 1 -bios default \
+		-global virtio-mmio.force-legacy=false \
+		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-both-dev/fat32.img,if=none,format=raw,id=x0 \
+		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		-kernel .kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf \
+		> "$$log" 2>&1 || status=$$?; \
+	if grep -q 'NATIVE_MM: PASS' "$$log" && grep -q 'System is going down for power-off NOW' "$$log"; then \
+		echo "smoke-native-mm: PASS; log saved to $$log"; \
+	else \
+		echo "smoke-native-mm: failed with status $$status; tail of $$log:"; \
+		tail -n 80 "$$log"; \
+		exit 1; \
+	fi
 
 smoke-native-futex:
 	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
