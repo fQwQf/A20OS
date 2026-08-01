@@ -173,4 +173,11 @@ static inline int arch_syscall_resched_allowed(void)
 int arch_resolve_interp_fallback(const char *exec_path, const char *interp_path,
                                  char *resolved, size_t resolved_size);
 
+/*
+ * Optional hardware entropy source.  Returns 1 and writes a fresh 64-bit
+ * hardware random value to *out on success, or 0 if the platform has no
+ * usable hardware RNG.  The core RNG mixes this into the software PRNG state;
+ * architectures without a hardware RNG use the weak default (returns 0).
+ */
+int arch_hw_entropy_sample(uint64_t *out);
 #endif /* _ARCH_H */
