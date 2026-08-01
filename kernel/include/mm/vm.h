@@ -6,7 +6,7 @@
 #include "core/refcount.h"
 #include "core/lock.h"
 
-struct a20_vmo;
+struct vmo;
 struct vnode;
 
 #define VM_READ      (1UL << 0)
@@ -43,7 +43,7 @@ typedef struct vm_area {
     int             file_fd;
     int             sysv_shmid;
     uint64_t        file_offset;
-    struct a20_vmo *vmo;
+    struct vmo     *vmo;
     uint64_t        vmo_offset;
     struct vnode   *file_vnode;     /* referenced vnode for VM_FILE+VM_SHARED */
 #ifdef CONFIG_NOMMU
@@ -140,6 +140,8 @@ vaddr_t mm_mmap(mm_struct_t *mm, vaddr_t addr, size_t len,
                 int prot, int flags);
 vaddr_t mm_mmap_file(mm_struct_t *mm, vaddr_t addr, size_t len,
                      int prot, int flags, int file_fd, uint64_t file_offset);
+vaddr_t mm_mmap_vmo(mm_struct_t *mm, vaddr_t addr, size_t len,
+                    int prot, int flags, struct vmo *vmo, uint64_t vmo_offset);
 int     mm_munmap(mm_struct_t *mm, vaddr_t addr, size_t len);
 vaddr_t mm_brk(mm_struct_t *mm, vaddr_t newbrk);
 int     mm_mprotect(mm_struct_t *mm, vaddr_t addr, size_t len, int prot);

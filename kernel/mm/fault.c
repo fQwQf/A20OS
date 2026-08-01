@@ -8,11 +8,11 @@
 #include "mm/mm.h"
 #include "mm/frame.h"
 #include "mm/vm.h"
+#include "mm/vmo.h"
 #include "core/consts.h"
 #include "core/defs.h"
 #include "core/lock.h"
 #include "core/string.h"
-#include "abi/native/vmo.h"
 #include "cg/cgroup.h"
 #include "mm/swap.h"
 
@@ -350,13 +350,18 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval) {
         }
 
         if ((vma->vm_flags & VM_VMO) && vma->vmo) {
-            uint32_t pg_idx = (uint32_t)((vma->vmo_offset + (page_va - vma->start)) / PAGE_SIZE);
-            pfn_t vpfn = a20_vmo_get_page(vma->vmo, pg_idx);
+            uint64_t voff = vma->vmo_offset + (page_va - vma->start);
+            if (voff >= vma->vmo->size) {
+                signal_send(t->pid, SIGBUS);
+                return -1;
+            }
+            uint32_t pg_idx = (uint32_t)(voff / PAGE_SIZE);
+            pfn_t vpfn = vmo_get_page(vma->vmo, pg_idx);
             if (vpfn == PFN_NONE) return -1;
 
-                int r = pt_map(t->mm->pgdir, page_va, pfn_to_phys(vpfn),
-                               vma->pte_flags);
-                if (r < 0) return -1;
+            int r = pt_map(t->mm->pgdir, page_va, pfn_to_phys(vpfn),
+                           vma->pte_flags);
+            if (r < 0) return -1;
 
             t->mm->rss++;
             arch_tlb_flush_page(stval);

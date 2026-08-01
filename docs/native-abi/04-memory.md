@@ -152,12 +152,14 @@ int64_t vm_map(a20_vm_map_args_t *args);
 当前实现语义：
 1. `source == A20_HANDLE_NULL`：创建匿名 VMO 并映射
 2. 否则验证 source handle 有效、检查 `MAP` 权限，类型必须为 `MEMORY`、`FILE` 或 `DEVICE`
-3. source 是 `MEMORY`：复用已有 VMO，验证 `[offset, offset+length)` 不越界
-4. source 是 `FILE`/`DEVICE`：创建匿名 VMO，将文件区间 **eager-load** 到 VMO 后映射（当前不是 demand-paged 文件后备，也不是 COW）
+3. source 是 `MEMORY`：复用已有 VMO，验证 `[offset, offset+length)` 不越界；`offset` 需页对齐
+4. source 是 `FILE`/`DEVICE`：走核心 `mm_mmap_file`，经 page cache **按需分页**填充（不再 eager-load 到匿名 VMO）；`offset` 需页对齐
 5. 计算 `prot_eff = prot_req ∩ prot_handle`：缺少 READ/WRITE right 时相应保护位被移除
 6. 在地址空间中创建 VMO-backed VMA；映射持有一个 VMO 引用，解除映射时释放
 
 **与 POSIX mmap 的关键区别**：映射的目标是 handle，不是 fd。handle 的 rights 决定映射的保护位——如果 handle 只有 READ 权限，映射不能是 WRITABLE，即使 prot 参数请求了 W。
+
+**实现分层（2026-08 更新）**：VMO 位于核心 MM（`kernel/mm/vmo.c`、`mm/vmo.h`），VMAR 是核心 `mm_mmap_vmo`/`mm_munmap`/`mm_mprotect` 的薄包装（`kernel/abi/native/vmar.c`）。VMO 帧由 VMO 自持，映射按需调页，fork 共享同一批帧。
 
 ### 4.3 vm_unmap — 解除映射
 

@@ -14,7 +14,7 @@ struct signal_state;
 struct mm_struct;
 struct vm_area;
 struct files_struct;
-struct a20_vmo;
+struct vmo;
 struct cg_node;
 typedef struct mm_struct mm_struct_t;
 
@@ -237,8 +237,8 @@ typedef struct task_t {
 
     /* Native ABI support */
     uint32_t       abi_mode;        /* 0 = Linux ABI, 1 = Native ABI */
-    struct a20_vmo *stack_vmo;
-    struct a20_vmo *heap_vmo;
+    struct vmo *stack_vmo;
+    struct vmo *heap_vmo;
     proc_ns_context_t ns_ctx;
 
     /* Cgroup resource control */
