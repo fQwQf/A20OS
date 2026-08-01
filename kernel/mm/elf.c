@@ -706,7 +706,7 @@ int elf_load_from_buf(const void *buf, size_t len, elf_load_info_t *info) {
     }
     vaddr_t load_bias = 0;
     r = elf_alloc_nommu_image(&mm, min_vaddr, max_vaddr, &load_bias);
-    if (r < 0) return r; // FIXME: leaks pgdir
+    if (r < 0) { pt_destroy_user(pgdir); return r; }
 #else
     vaddr_t load_bias = (eh->e_type == ET_DYN) ? (USER_DYN_BASE + elf_aslr_bias()) : 0;
 #endif
@@ -817,7 +817,7 @@ static int elf_load64(int fd, const Elf64_Ehdr *eh, const char *path,
     }
     vaddr_t load_bias = 0;
     r = elf_alloc_nommu_image(&mm, min_vaddr, max_vaddr, &load_bias);
-    if (r < 0) return r; // FIXME: leaks pgdir
+    if (r < 0) { pt_destroy_user(pgdir); return r; }
 #else
     vaddr_t load_bias = (eh->e_type == ET_DYN) ? (USER_DYN_BASE + elf_aslr_bias()) : 0;
 #endif
@@ -1272,7 +1272,8 @@ vaddr_t elf_setup_stack_a20(vaddr_t stack_top, int argc, char *const argv[],
                             char *const envp[], const elf_load_info_t *info,
                             uint32_t stdin_h, uint32_t stdout_h,
                             uint32_t stderr_h, uint32_t self_task_h,
-                            uint32_t root_h, uint32_t cwd_h)
+                            uint32_t root_h, uint32_t cwd_h,
+                            uint32_t inherited_fd_limit)
 {
     if (argc < 0 || argc > MAX_ARG_STRINGS)
         return 0;
@@ -1332,6 +1333,7 @@ vaddr_t elf_setup_stack_a20(vaddr_t stack_top, int argc, char *const argv[],
         si.version = 1;
         si.argc = (uint32_t)argc;
         si.envc = (uint32_t)envc;
+        si.reserved0 = inherited_fd_limit;
         si.argv = argv_va;
         si.envp = envp_va;
         si.stdin_handle = stdin_h;
@@ -1358,10 +1360,11 @@ vaddr_t elf_setup_stack_a20(vaddr_t stack_top, int argc, char *const argv[],
 vaddr_t elf_setup_stack_a20_dynamic(vaddr_t stack_top, int argc,
                                     char *const argv[], char *const envp[],
                                     const elf_load_info_t *info,
-                                    uint32_t stdin_h, uint32_t stdout_h,
-                                    uint32_t stderr_h, uint32_t self_task_h,
-                                    uint32_t root_h, uint32_t cwd_h,
-                                    vaddr_t *start_info_out)
+                                     uint32_t stdin_h, uint32_t stdout_h,
+                                     uint32_t stderr_h, uint32_t self_task_h,
+                                     uint32_t root_h, uint32_t cwd_h,
+                                     uint32_t inherited_fd_limit,
+                                     vaddr_t *start_info_out)
 {
     if (!start_info_out)
         return 0;
@@ -1383,6 +1386,7 @@ vaddr_t elf_setup_stack_a20_dynamic(vaddr_t stack_top, int argc,
     si.version = 1;
     si.argc = (uint32_t)argc;
     si.envc = (uint32_t)envc;
+    si.reserved0 = inherited_fd_limit;
     si.argv = sp_va + sizeof(vaddr_t);
     si.envp = si.argv + (uint64_t)(argc + 1) * sizeof(vaddr_t);
     si.stdin_handle = stdin_h;
