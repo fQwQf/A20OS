@@ -2,6 +2,7 @@
 #include "core/timer.h"
 #include "core/defs.h"
 #include "core/lock.h"
+#include "core/arch.h"
 #include "core/string.h"
 #include "proc/proc.h"
 #include "mm/mm.h"
@@ -10,6 +11,13 @@ static uint64_t rng_s[4];
 static int rng_ready;
 static uint64_t rng_generation;
 static spinlock_t rng_lock = SPINLOCK_INIT;
+
+/* Weak default: platforms without a hardware RNG contribute no extra bits. */
+__attribute__((weak)) int arch_hw_entropy_sample(uint64_t *out)
+{
+    (void)out;
+    return 0;
+}
 
 static uint64_t splitmix64(uint64_t *x) {
     uint64_t z = (*x += 0x9e3779b97f4a7c15ULL);
@@ -29,6 +37,10 @@ static uint64_t arch_entropy_sample(void) {
     v ^= arch_read_addr_space_token();
     v ^= frame_free_count() << 32;
     v ^= (uint64_t)(uintptr_t)proc_current();
+
+    uint64_t hw = 0;
+    if (arch_hw_entropy_sample(&hw))
+        v ^= hw;
     return v;
 }
 
