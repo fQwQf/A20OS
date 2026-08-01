@@ -13,6 +13,7 @@
 #include "fs/locks.h"
 #include "fs/fat32.h"
 #include "fs/ext4.h"
+#include "fs/ntfs.h"
 #include "fs/ramfs.h"
 #include "fs/devfs.h"
 #include "fs/procfs.h"
@@ -234,6 +235,34 @@ int vfs_mount_bc(const char *path, const char *fstype, bcache_t *bc) {
         return 0;
     }
 
+    if (strcmp(fstype, "ntfs") == 0) {
+        if (!bc) { kdebug("[VFS] No bcache for NTFS mount\n"); return -ENODEV; }
+
+        mount_t *mnt = vfs_mount_alloc();
+        if (!mnt) return -ENOMEM;
+        vnode_t *root = ntfs_mount(bc);
+        if (!root) {
+            vfs_mount_remove(mnt);
+            return -EIO;
+        }
+
+        strncpy(mnt->path, path, MAX_PATH_LEN - 1);
+        mnt->path[MAX_PATH_LEN - 1] = '\0';
+        mnt->type  = FS_TYPE_NTFS;
+        strncpy(mnt->dev, "/dev/vda", sizeof(mnt->dev) - 1);
+        strncpy(mnt->fstype, "ntfs", sizeof(mnt->fstype) - 1);
+        strncpy(mnt->opts, "rw", sizeof(mnt->opts) - 1);
+        mnt->root  = root;
+        mnt->fs_data = bc;
+
+        root->mnt = mnt;
+        vnode_get(root);  /* mount holds a persistent reference */
+
+        kdebug("[VFS] Mounted NTFS at %s\n", path);
+        vfs_dcache_invalidate_all();
+        return 0;
+    }
+
     if (strcmp(fstype, "ext4") == 0) {
         if (!bc) { kdebug("[VFS] No bcache for ext4 mount\n"); return -ENODEV; }
 
@@ -298,6 +327,8 @@ int vfs_umount(const char *path) {
                 fat32_unmount(root);
             } else if (mnt->type == FS_TYPE_EXT4) {
                 ext4_unmount(root);
+            } else if (mnt->type == FS_TYPE_NTFS) {
+                ntfs_unmount(root);
             }
             vfs_mount_remove(mnt);
             return 0;
