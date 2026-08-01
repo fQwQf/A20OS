@@ -180,8 +180,10 @@ requeue 和私有/共享键。Futex waiter 同样保存 task 引用和 `wait_seq
 
 | 后端 | rename | link | symlink | 关键限制 |
 |------|--------|------|---------|---------|
-| FAT32 | 不支持 | 不支持 | 不支持 | 元数据仅存 RAM |
-| ext4 | 支持 | 不支持 | 快链 <= 60 B | 无日志；`st_nlink` 硬编码为 1 |
+| FAT32 | 支持 | 不支持 | 不支持 | 元数据仅存 RAM；rename 改写 `..` 项 |
+| ext4 | 支持 | 支持 | 快链 <= 60 B | 无日志；64 位文件大小 + 部分截断回收；硬链接维护 `i_links_count` |
+| NTFS | 支持 | 不支持 | 不支持 | 索引无 B-tree 分裂；不支持 `$ATTRIBUTE_LIST` |
+| ISO9660 | 不支持 | 不支持 | 不支持 | 只读 CD-ROM；名字转小写；跨块目录记录 |
 | ramfs | 支持 | 支持 | 支持 | 单目录 entry 上限 256；总 inode 上限 4096 |
 | pipe | 不适用 | 不适用 | 不适用 | `PIPE_BUF` 原子写 |
 | devfs | 不支持 | 不支持 | 不支持 | 节点编译期固定；只读设备树 |
@@ -289,7 +291,7 @@ RISC-V 64、ARM64、x86_64、LoongArch 64。物理板：VisionFive 2（RISC-V）
   * `kernel/arch/` 和 `kernel/platform/`：HAL 与板级初始化
   * `kernel/mm/`：VMO/VMAR、页缓存、COW、OOM
   * `kernel/proc/`：任务、调度器、信号、Futex、cgroup
-  * `kernel/fs/`：VFS、FAT32、ext4、ramfs、伪文件系统
+  * `kernel/fs/`：VFS、FAT32、ext4、NTFS、ISO9660、ramfs、伪文件系统
   * `kernel/net/`：Socket 层、lwIP 集成、DHCP
   * `kernel/drivers/`：virtio-blk、virtio-net、UART、PTY、loop
   * `kernel/ipc/`：Channel、EventQ

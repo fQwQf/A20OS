@@ -1030,6 +1030,7 @@ int vfs_statfs(vnode_t *vn, kstatfs_t *st) {
         switch (vn->mnt->type) {
         case FS_TYPE_FAT32:  st->f_type = 0x4d44; break;
         case FS_TYPE_EXT4:   st->f_type = EXT4_DISK_MAGIC; break;
+        case FS_TYPE_ISOFS:  st->f_type = 0x9660; break;
         case FS_TYPE_PROCFS: st->f_type = 0x9fa0; break;
         case FS_TYPE_DEVFS:  st->f_type = 0x01021994; break;
         case FS_TYPE_CGROUP: st->f_type = 0x63677270; break;

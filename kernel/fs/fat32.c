@@ -948,6 +948,121 @@ static int fat32_vn_rmdir(vnode_t *dir, const char *name) {
     return 0;
 }
 
+/* vnode_ops: rename (file or directory, same volume)
+ * FAT has no single rename primitive; we create the new directory entry
+ * pointing at the source cluster, then delete the old entry.  If the target
+ * already exists it is replaced (unlink the old target first).  Moving a
+ * directory additionally rewrites its ".." entry to the new parent.  The
+ * operation is not atomic on disk (matches Linux semantics closely enough
+ * for a hobby kernel) but every step is under sb->lock so no concurrent
+ * rename can interleave. */
+static int fat32_vn_rename(vnode_t *old_dir, const char *old_name,
+                           vnode_t *new_dir, const char *new_name,
+                           unsigned int flags) {
+    if (flags & ~(RENAME_NOREPLACE))
+        return -EINVAL;
+
+    fat32_vnode_priv_t *op = (fat32_vnode_priv_t *)old_dir->fs_data;
+    fat32_vnode_priv_t *np = (fat32_vnode_priv_t *)new_dir->fs_data;
+    if (!op->is_dir || !np->is_dir) return -ENOTDIR;
+    if (op->sb != np->sb) return -EXDEV;
+
+    fat32_sb_t *sb = op->sb;
+    fat32_lock(sb);
+
+    int s_is_dir; size_t s_sz; size_t s_doff;
+    uint32_t src_cluster = fat32_dir_lookup(sb, op->first_cluster, old_name,
+                                            &s_is_dir, &s_sz, &s_doff);
+    if (!src_cluster) {
+        fat32_unlock(sb);
+        return -ENOENT;
+    }
+
+    int t_is_dir; size_t t_sz; size_t t_doff;
+    uint32_t tgt_cluster = fat32_dir_lookup(sb, np->first_cluster, new_name,
+                                            &t_is_dir, &t_sz, &t_doff);
+
+    /* Same inode (rename onto itself) is a no-op. */
+    if (tgt_cluster && tgt_cluster == src_cluster) {
+        fat32_unlock(sb);
+        return 0;
+    }
+
+    if (tgt_cluster && flags & RENAME_NOREPLACE) {
+        fat32_unlock(sb);
+        return -EEXIST;
+    }
+
+    /* Replacing a directory with a non-empty one (or with a file) is
+     * forbidden; replacing a file with a directory is likewise an error. */
+    if (tgt_cluster) {
+        if (t_is_dir) {
+            if (!s_is_dir) { fat32_unlock(sb); return -EISDIR; }
+            int r = fat32_dir_is_empty(sb, tgt_cluster);
+            if (r < 0) { fat32_unlock(sb); return r; }
+        } else if (s_is_dir) {
+            fat32_unlock(sb);
+            return -ENOTDIR;
+        }
+    }
+
+    int r = fat32_create_dirents(sb, np->first_cluster, new_name,
+                                 s_is_dir ? FAT_ATTR_DIRECTORY : FAT_ATTR_ARCHIVE,
+                                 src_cluster);
+    if (r < 0) {
+        fat32_unlock(sb);
+        return r;
+    }
+
+    /* Moving a directory: repoint its ".." entry at the new parent. */
+    if (s_is_dir) {
+        uint32_t c = src_cluster;
+        if (c < 2) c = sb->root_cluster;
+        fat32_dirent_t dotdot;
+        memset(&dotdot, 0, sizeof(dotdot));
+        if (read_raw_dirent(sb, c, 32, &dotdot) > 0) {
+            dotdot.fst_clus_hi = (uint16_t)(np->first_cluster >> 16);
+            dotdot.fst_clus_lo = (uint16_t)np->first_cluster;
+            bcache_write_bytes(sb->bc, cluster_byte_offset(sb, c) + 32,
+                               &dotdot, sizeof(dotdot));
+        }
+    }
+
+    /* Replace the old target (if any) *after* the new entry is in place so
+     * a crash leaves at most one name pointing at the source. */
+    if (tgt_cluster) {
+        fat32_delete_dirents(sb, np->first_cluster, t_doff);
+        vnode_t *tvictim = fat32_vcache_remove(sb, (uint64_t)tgt_cluster);
+        if (tvictim) {
+            fat32_vnode_priv_t *vp = (fat32_vnode_priv_t *)tvictim->fs_data;
+            if (vp)
+                vp->unlinked = 1;
+            vnode_put(tvictim);
+        } else {
+            fat32_free_cluster_chain(sb, tgt_cluster);
+        }
+    }
+
+    /* Remove the old source name. */
+    fat32_delete_dirents(sb, op->first_cluster, s_doff);
+
+    /* Repoint the cached vnode's parent so ".." resolution and dcache
+     * lookups follow the new location.  Defer the old-parent put until the
+     * lock is released, mirroring the ext4 rename contract. */
+    vnode_t *old_parent = NULL;
+    vnode_t *moved = fat32_vcache_find(sb, (uint64_t)src_cluster);
+    if (moved && moved->parent && moved->parent != new_dir) {
+        old_parent = moved->parent;
+        vnode_get(new_dir);
+        moved->parent = new_dir;
+    }
+
+    fat32_unlock(sb);
+    if (old_parent)
+        vnode_put(old_parent);
+    return 0;
+}
+
 static vfile_t *fat32_open_vnode(vnode_t *vn, int flags);
 static int fat32_vn_readpage(vnode_t *vn, uint64_t index,
                              void *data, size_t len);
@@ -984,7 +1099,7 @@ static vnode_ops_t g_fat32_vnode_ops = {
     .mkdir    = fat32_vn_mkdir,
     .unlink   = fat32_vn_unlink,
     .rmdir    = fat32_vn_rmdir,
-    .rename   = NULL,
+    .rename   = fat32_vn_rename,
     .stat     = fat32_stat,
     .statfs   = fat32_vn_statfs,
     .truncate = fat32_vn_truncate,
@@ -1023,6 +1138,8 @@ static vnode_t *fat32_make_vnode(fat32_sb_t *sb, uint32_t cluster,
     vnode_ref_init(vn, 1);
     vn->parent    = parent;
     if (parent) vnode_get(parent);
+    if (parent)
+        vn->mnt = parent->mnt;        /* inherit mount for link()/dcache */
     vn->ops       = &g_fat32_vnode_ops;
 
     fat32_vnode_priv_t *fp = (fat32_vnode_priv_t *)kmalloc(sizeof(fat32_vnode_priv_t));

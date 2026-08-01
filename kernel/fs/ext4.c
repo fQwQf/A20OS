@@ -9,11 +9,24 @@
 #include "core/consts.h"
 #include "core/defs.h"
 #include "core/klog.h"
+#include "core/timekeeping.h"
 #include "proc/proc.h"
 
 static int      ext4_read_inode(ext4_sb_info_t *sb, uint32_t ino, ext4_inode_t *out);
 static int      ext4_write_inode(ext4_sb_info_t *sb, uint32_t ino, ext4_inode_t *inp);
 static uint64_t ext4_block_map(ext4_sb_info_t *sb, ext4_inode_t *inode, uint32_t lblk);
+
+/* ---- 64-bit inode size accessors ----
+ * i_size_high sits in the static 128-byte inode area (offset 108) and is
+ * already covered by ext4_read_inode()/ext4_write_inode(), so big (>4 GiB)
+ * files work without enlarging the inode I/O size. */
+static inline uint64_t ext4_inode_size(const ext4_inode_t *in) {
+    return ((uint64_t)in->i_size_high << 32) | in->i_size_lo;
+}
+static inline void ext4_inode_set_size(ext4_inode_t *in, uint64_t size) {
+    in->i_size_lo  = (uint32_t)(size & 0xffffffffu);
+    in->i_size_high = (uint32_t)(size >> 32);
+}
 static int      ext4_block_grow(ext4_sb_info_t *sb, ext4_inode_t *inode, uint32_t lblk, uint64_t phys);
 static void     ext4_block_truncate(ext4_sb_info_t *sb, ext4_inode_t *inode);
 static vnode_t *ext4_make_vnode(ext4_sb_info_t *sb, uint32_t ino, uint32_t sz, int type, vnode_t *par);
@@ -523,6 +536,229 @@ static void ext4_extent_truncate(ext4_sb_info_t *sb, ext4_inode_t *inode) {
     memcpy(raw, &rst, sizeof(rst));
 }
 
+/* ---- Partial extent truncate (collect → rebuild) ----
+ * ext4_vn_truncate() used to free blocks only for size==0, leaking every
+ * block beyond a non-zero EOF.  To reclaim them safely we flatten the whole
+ * extent tree (depth 0/1, the shapes this driver itself creates), drop every
+ * extent at/after the new logical EOF block, free those physical blocks, and
+ * rebuild a fresh tree from the survivors.  Trees deeper than depth 1 are
+ * left untouched (blocks preserved, not corrupted) — partial truncate then
+ * merely resizes, matching the previous behaviour. */
+
+typedef struct {
+    uint32_t start;
+    uint32_t len;
+    uint64_t phys;
+} ext4_flatext_t;
+
+#define EXT4_MAX_FLATEXT (4 * 512)   /* 4 depth-1 leaves × max entries */
+
+static int ext4_extent_collect(ext4_sb_info_t *sb, const ext4_inode_t *inode,
+                               ext4_flatext_t *out, int max) {
+    uint8_t *raw = (uint8_t *)inode + offsetof(ext4_inode_t, i_block);
+    ext4_extent_header_t hdr; memcpy(&hdr, raw, sizeof(hdr));
+    if (hdr.eh_magic != EXT4_EXT_MAGIC || hdr.eh_entries == 0) return 0;
+    int cnt = 0;
+
+    if (hdr.eh_depth == 0) {
+        int n = hdr.eh_entries; if (n > 4) n = 4;
+        ext4_extent_t ext[4];
+        memcpy(ext, raw + sizeof(hdr), n * sizeof(ext4_extent_t));
+        for (int i = 0; i < n && cnt < max; i++) {
+            uint16_t len = ext[i].ee_len; if (len > 0x8000) len -= 0x8000;
+            out[cnt].start = ext[i].ee_block;
+            out[cnt].len   = len;
+            out[cnt].phys  = (uint64_t)ext[i].ee_start_lo |
+                             ((uint64_t)ext[i].ee_start_hi << 32);
+            cnt++;
+        }
+        return cnt;
+    }
+
+    ext4_extent_idx_t idx[4];
+    int ni = hdr.eh_entries; if (ni > 4) ni = 4;
+    memcpy(idx, raw + sizeof(hdr), ni * sizeof(ext4_extent_idx_t));
+    for (int i = 0; i < ni; i++) {
+        uint64_t lb = (uint64_t)idx[i].ei_leaf_lo | ((uint64_t)idx[i].ei_leaf_hi << 32);
+        char *b = (char *)kmalloc(sb->block_size);
+        if (!b) break;
+        if (bcache_read_bytes(sb->bc, lb * sb->block_size, b, sb->block_size) < 0)
+            { kfree(b); break; }
+        ext4_extent_header_t lh; memcpy(&lh, b, sizeof(lh));
+        if (lh.eh_magic == EXT4_EXT_MAGIC) {
+            ext4_extent_t *ep = (ext4_extent_t *)(b + sizeof(lh));
+            for (int j = 0; j < lh.eh_entries && cnt < max; j++) {
+                uint16_t len = ep[j].ee_len; if (len > 0x8000) len -= 0x8000;
+                out[cnt].start = ep[j].ee_block;
+                out[cnt].len   = len;
+                out[cnt].phys  = (uint64_t)ep[j].ee_start_lo |
+                                 ((uint64_t)ep[j].ee_start_hi << 32);
+                cnt++;
+            }
+        }
+        kfree(b);
+    }
+    return cnt;
+}
+
+/* Drop old depth-0/1 extent tree blocks (leaf + index blocks). */
+static void ext4_extent_free_tree(ext4_sb_info_t *sb, const ext4_inode_t *inode) {
+    uint8_t *raw = (uint8_t *)inode + offsetof(ext4_inode_t, i_block);
+    ext4_extent_header_t hdr; memcpy(&hdr, raw, sizeof(hdr));
+    if (hdr.eh_magic != EXT4_EXT_MAGIC || hdr.eh_entries == 0) return;
+
+    if (hdr.eh_depth == 0) return;
+
+    ext4_extent_idx_t idx[4];
+    int ni = hdr.eh_entries; if (ni > 4) ni = 4;
+    memcpy(idx, raw + sizeof(hdr), ni * sizeof(ext4_extent_idx_t));
+    for (int i = 0; i < ni; i++) {
+        uint64_t lb = (uint64_t)idx[i].ei_leaf_lo | ((uint64_t)idx[i].ei_leaf_hi << 32);
+        ext4_free_block(sb, lb);
+    }
+}
+
+static int ext4_extent_truncate_at(ext4_sb_info_t *sb, ext4_inode_t *inode,
+                                   uint32_t lblk) {
+    uint8_t *raw = (uint8_t *)inode + offsetof(ext4_inode_t, i_block);
+    ext4_extent_header_t hdr; memcpy(&hdr, raw, sizeof(hdr));
+    if (hdr.eh_magic != EXT4_EXT_MAGIC || hdr.eh_entries == 0) return 0;
+
+    /* Depth > 1: not a shape we can safely rebuild; leave untouched. */
+    if (hdr.eh_depth > 1) return 0;
+
+    ext4_flatext_t *all = (ext4_flatext_t *)kmalloc(sizeof(ext4_flatext_t) * EXT4_MAX_FLATEXT);
+    if (!all) return -ENOMEM;
+
+    int n = ext4_extent_collect(sb, inode, all, EXT4_MAX_FLATEXT);
+    if (n <= 0) { kfree(all); return 0; }
+
+    /* First pass: compute the surviving extents (shrunk at lblk) without
+     * freeing anything yet, so an allocation failure below cannot leave the
+     * old tree referencing freed blocks.  Freed data blocks are remembered
+     * in the survivors' space (drop marker) and reclaimed only after the new
+     * tree has been fully staged. */
+    int keep = 0;
+    for (int i = 0; i < n; i++) {
+        uint32_t s = all[i].start, len = all[i].len;
+        if (s >= lblk)
+            continue;                    /* whole extent goes away */
+        if (s + len > lblk) {
+            all[i].len = lblk - s;       /* keep the head below lblk */
+            all[keep++] = all[i];
+        } else {
+            all[keep++] = all[i];        /* fully below lblk */
+        }
+    }
+
+    /* ---- stage the new tree ---- */
+    uint32_t epb = EXT_PER_BLK(sb->block_size);
+    uint64_t leaves[4] = {0, 0, 0, 0};
+    ext4_extent_idx_t idx[4];
+    int nleaves = 0;
+    char *lbuf = NULL;
+
+    if (keep > 0 && keep > 4) {
+        /* depth-1 rebuild needs leaf blocks; allocate+write them now. */
+        if (keep > 4 * (int)epb) { kfree(all); return -ENOSPC; }
+        nleaves = (keep + (int)epb - 1) / (int)epb;
+        lbuf = (char *)kmalloc(sb->block_size);
+        if (!lbuf) { kfree(all); return -ENOMEM; }
+        int li = 0, in_leaf = 0;
+        for (int i = 0; i < keep; i++) {
+            if (in_leaf == 0) {
+                uint64_t nl = ext4_alloc_block(sb);
+                if (!nl) goto stage_fail;
+                leaves[li] = nl;
+                memset(lbuf, 0, sb->block_size);
+                ext4_extent_header_t lh; lh.eh_magic = EXT4_EXT_MAGIC;
+                lh.eh_entries = 0; lh.eh_max = (uint16_t)epb; lh.eh_depth = 0;
+                lh.eh_generation = 0;
+                memcpy(lbuf, &lh, sizeof(lh));
+                idx[li].ei_block   = all[i].start;
+                idx[li].ei_leaf_lo = (uint32_t)(nl & 0xffffffffu);
+                idx[li].ei_leaf_hi = (uint16_t)(nl >> 32);
+                idx[li].ei_unused  = 0;
+            }
+            ext4_extent_t *ep = (ext4_extent_t *)(lbuf + sizeof(ext4_extent_header_t));
+            ep[in_leaf].ee_block    = all[i].start;
+            ep[in_leaf].ee_len      = (uint16_t)all[i].len;
+            ep[in_leaf].ee_start_hi = (uint16_t)(all[i].phys >> 32);
+            ep[in_leaf].ee_start_lo = (uint32_t)(all[i].phys & 0xffffffffu);
+            in_leaf++;
+            ((ext4_extent_header_t *)lbuf)->eh_entries = (uint16_t)in_leaf;
+            if (in_leaf == (int)epb || i == keep - 1) {
+                if (bcache_write_bytes(sb->bc, leaves[li] * sb->block_size,
+                                       lbuf, sb->block_size) < 0)
+                    goto stage_fail;
+                li++;
+                in_leaf = 0;
+            }
+        }
+        kfree(lbuf); lbuf = NULL;
+        if (li != nleaves) goto stage_fail;
+    }
+
+    /* ---- commit: free the reclaimed blocks, then swap in the new tree ---- */
+    for (int i = 0; i < n; i++) {
+        uint32_t s = all[i].start, len = all[i].len;
+        uint64_t p = all[i].phys;
+        if (s >= lblk) {
+            for (uint32_t j = 0; j < len; j++) ext4_free_block(sb, p + j);
+        } else if (s + len > lblk) {
+            uint32_t tail = s + len - lblk;
+            for (uint32_t j = 0; j < tail; j++) ext4_free_block(sb, p + len - tail + j);
+        }
+    }
+
+    ext4_extent_free_tree(sb, inode);
+
+    if (keep == 0) {
+        ext4_extent_header_t rst; rst.eh_magic = EXT4_EXT_MAGIC;
+        rst.eh_entries = 0; rst.eh_max = 4; rst.eh_depth = 0; rst.eh_generation = 0;
+        memcpy(raw, &rst, sizeof(rst));
+        kfree(all);
+        return 0;
+    }
+
+    if (keep <= 4) {
+        ext4_extent_header_t nh; nh.eh_magic = EXT4_EXT_MAGIC;
+        nh.eh_entries = (uint16_t)keep; nh.eh_max = 4; nh.eh_depth = 0;
+        nh.eh_generation = 0;
+        memcpy(raw, &nh, sizeof(nh));
+        ext4_extent_t ext[4];
+        for (int i = 0; i < keep; i++) {
+            ext[i].ee_block    = all[i].start;
+            ext[i].ee_len      = (uint16_t)all[i].len;
+            ext[i].ee_start_hi = (uint16_t)(all[i].phys >> 32);
+            ext[i].ee_start_lo = (uint32_t)(all[i].phys & 0xffffffffu);
+        }
+        memcpy(raw + sizeof(nh), ext, keep * sizeof(ext4_extent_t));
+        kfree(all);
+        return 0;
+    }
+
+    /* keep > 4: install the depth-1 tree staged above. */
+    {
+        ext4_extent_header_t nh; nh.eh_magic = EXT4_EXT_MAGIC;
+        nh.eh_entries = (uint16_t)nleaves; nh.eh_max = 4; nh.eh_depth = 1;
+        nh.eh_generation = 0;
+        memcpy(raw, &nh, sizeof(nh));
+        memcpy(raw + sizeof(nh), idx, nleaves * sizeof(ext4_extent_idx_t));
+    }
+    kfree(all);
+    return 0;
+
+stage_fail:
+    /* New tree not yet installed and nothing was freed: undo the freshly
+     * allocated leaf blocks and leave the old tree intact. */
+    if (lbuf) kfree(lbuf);
+    for (int i = 0; i < 4; i++)
+        if (leaves[i]) ext4_free_block(sb, leaves[i]);
+    kfree(all);
+    return -EIO;
+}
+
 /* ================================================================
  * Indirect block mapping
  * ================================================================ */
@@ -616,6 +852,119 @@ static void ext4_indirect_truncate(ext4_sb_info_t *sb, ext4_inode_t *inode) {
     memset(inode->i_block.i_data.i_block, 0, 60);
 }
 
+/* ---- Partial indirect truncate (free blocks at/after lblk) ----
+ * Mirrors ext4_indirect_truncate but only reclaims the range starting at
+ * logical block lblk, keeping everything below it intact.  Handles the
+ * 12 direct + single + double indirect levels the writer can create. */
+static void ext4_indirect_truncate_at(ext4_sb_info_t *sb, ext4_inode_t *inode,
+                                      uint32_t lblk) {
+    uint32_t b[15]; memcpy(b, inode->i_block.i_data.i_block, sizeof(b));
+    uint32_t apb = sb->addr_per_block;
+    uint32_t single_start = 12;
+    uint32_t double_start = 12 + apb;
+
+    if (lblk <= single_start) {
+        /* Free direct blocks from lblk on, then the whole indirect trees. */
+        for (uint32_t i = lblk; i < 12; i++) if (b[i]) ext4_free_block(sb, b[i]);
+        if (b[12]) {
+            uint32_t *ind = (uint32_t *)kmalloc(sb->block_size);
+            if (ind) {
+                bcache_read_bytes(sb->bc, (uint64_t)b[12] * sb->block_size, ind, sb->block_size);
+                for (uint32_t i = 0; i < apb; i++) if (ind[i]) ext4_free_block(sb, ind[i]);
+                kfree(ind);
+            }
+            ext4_free_block(sb, b[12]);
+        }
+        if (b[13]) {
+            uint32_t *di = (uint32_t *)kmalloc(sb->block_size);
+            if (di) {
+                bcache_read_bytes(sb->bc, (uint64_t)b[13] * sb->block_size, di, sb->block_size);
+                for (uint32_t i = 0; i < apb; i++) if (di[i]) {
+                    uint32_t *ind = (uint32_t *)kmalloc(sb->block_size);
+                    if (ind) {
+                        bcache_read_bytes(sb->bc, (uint64_t)di[i] * sb->block_size, ind, sb->block_size);
+                        for (uint32_t j = 0; j < apb; j++) if (ind[j]) ext4_free_block(sb, ind[j]);
+                        kfree(ind);
+                    }
+                    ext4_free_block(sb, di[i]);
+                }
+                kfree(di);
+            }
+            ext4_free_block(sb, b[13]);
+        }
+        for (uint32_t i = lblk; i < 15; i++) b[i] = 0;
+        memcpy(inode->i_block.i_data.i_block, b, sizeof(b));
+        return;
+    }
+
+    if (lblk < double_start) {
+        /* Keep the single indirect block, zero+free its tail entries, and
+         * drop the double indirect tree entirely. */
+        uint32_t *ind = (uint32_t *)kmalloc(sb->block_size);
+        if (ind) {
+            bcache_read_bytes(sb->bc, (uint64_t)b[12] * sb->block_size, ind, sb->block_size);
+            for (uint32_t i = lblk - single_start; i < apb; i++)
+                if (ind[i]) { ext4_free_block(sb, ind[i]); ind[i] = 0; }
+            bcache_write_bytes(sb->bc, (uint64_t)b[12] * sb->block_size, ind, sb->block_size);
+            kfree(ind);
+        }
+        if (b[13]) {
+            uint32_t *di = (uint32_t *)kmalloc(sb->block_size);
+            if (di) {
+                bcache_read_bytes(sb->bc, (uint64_t)b[13] * sb->block_size, di, sb->block_size);
+                for (uint32_t i = 0; i < apb; i++) if (di[i]) {
+                    uint32_t *ind2 = (uint32_t *)kmalloc(sb->block_size);
+                    if (ind2) {
+                        bcache_read_bytes(sb->bc, (uint64_t)di[i] * sb->block_size, ind2, sb->block_size);
+                        for (uint32_t j = 0; j < apb; j++) if (ind2[j]) ext4_free_block(sb, ind2[j]);
+                        kfree(ind2);
+                    }
+                    ext4_free_block(sb, di[i]);
+                }
+                kfree(di);
+            }
+            ext4_free_block(sb, b[13]);
+            b[13] = 0;
+        }
+        b[14] = 0;
+        memcpy(inode->i_block.i_data.i_block, b, sizeof(b));
+        return;
+    }
+
+    /* lblk >= double_start: keep direct + single, trim the double indirect
+     * tree from the offset (lblk - double_start). */
+    uint32_t rem = lblk - double_start;
+    if (!b[13]) return;
+    uint32_t *di = (uint32_t *)kmalloc(sb->block_size);
+    if (!di) return;
+    if (bcache_read_bytes(sb->bc, (uint64_t)b[13] * sb->block_size, di, sb->block_size) < 0)
+        { kfree(di); return; }
+    uint32_t first_ii = rem / apb;
+    for (uint32_t i = first_ii; i < apb; i++) {
+        if (!di[i]) continue;
+        uint32_t *ind = (uint32_t *)kmalloc(sb->block_size);
+        if (!ind) continue;
+        if (bcache_read_bytes(sb->bc, (uint64_t)di[i] * sb->block_size, ind, sb->block_size) < 0)
+            { kfree(ind); continue; }
+        uint32_t j0 = (i == first_ii) ? (rem % apb) : 0;
+        for (uint32_t j = j0; j < apb; j++)
+            if (ind[j]) { ext4_free_block(sb, ind[j]); ind[j] = 0; }
+        if (j0 == 0) {
+            bcache_write_bytes(sb->bc, (uint64_t)di[i] * sb->block_size, ind, sb->block_size);
+            kfree(ind);
+            ext4_free_block(sb, di[i]);
+            di[i] = 0;
+        } else {
+            bcache_write_bytes(sb->bc, (uint64_t)di[i] * sb->block_size, ind, sb->block_size);
+            kfree(ind);
+        }
+    }
+    bcache_write_bytes(sb->bc, (uint64_t)b[13] * sb->block_size, di, sb->block_size);
+    kfree(di);
+    b[14] = 0;
+    memcpy(inode->i_block.i_data.i_block, b, sizeof(b));
+}
+
 /* ---- generic dispatch ---- */
 
 static uint64_t ext4_block_map(ext4_sb_info_t *sb, ext4_inode_t *inode, uint32_t lblk) {
@@ -632,11 +981,22 @@ static void ext4_block_truncate(ext4_sb_info_t *sb, ext4_inode_t *inode) {
     else ext4_indirect_truncate(sb, inode);
 }
 
+/* Free every block at/after logical block lblk (partial truncate).  Keeps
+ * the blocks below lblk, reclaiming the rest; used by truncate() on non-zero
+ * new sizes so blocks beyond EOF are not leaked. */
+static void ext4_block_truncate_at(ext4_sb_info_t *sb, ext4_inode_t *inode,
+                                   uint32_t lblk) {
+    if (inode->i_flags & EXT4_EXTENTS_FL)
+        ext4_extent_truncate_at(sb, inode, lblk);
+    else
+        ext4_indirect_truncate_at(sb, inode, lblk);
+}
+
 /* ================================================================
  * Directory helpers
  * ================================================================ */
 
-static int ext4_dir_find(ext4_sb_info_t *sb, ext4_inode_t *di, uint32_t dsz,
+static int ext4_dir_find(ext4_sb_info_t *sb, ext4_inode_t *di, uint64_t dsz,
                           const char *name, uint32_t *out_ino, uint8_t *out_ft) {
     uint32_t bs = sb->block_size, nb = (dsz + bs - 1) / bs;
     size_t nl = strlen(name);
@@ -660,7 +1020,7 @@ static int ext4_dir_find(ext4_sb_info_t *sb, ext4_inode_t *di, uint32_t dsz,
     return -ENOENT;
 }
 
-static int ext4_dir_add(ext4_sb_info_t *sb, ext4_inode_t *di, uint32_t *dsz,
+static int ext4_dir_add(ext4_sb_info_t *sb, ext4_inode_t *di, uint64_t *dsz,
                          const char *name, uint32_t ino, uint8_t ft) {
     uint32_t bs = sb->block_size;
     size_t nl = strlen(name);
@@ -716,7 +1076,7 @@ static int ext4_dir_add(ext4_sb_info_t *sb, ext4_inode_t *di, uint32_t *dsz,
     return 0;
 }
 
-static int ext4_dir_remove(ext4_sb_info_t *sb, ext4_inode_t *di, uint32_t dsz,
+static int ext4_dir_remove(ext4_sb_info_t *sb, ext4_inode_t *di, uint64_t dsz,
                             const char *name) {
     uint32_t bs = sb->block_size, nb = (dsz + bs - 1) / bs;
     size_t nl = strlen(name);
@@ -740,7 +1100,7 @@ static int ext4_dir_remove(ext4_sb_info_t *sb, ext4_inode_t *di, uint32_t dsz,
     return -ENOENT;
 }
 
-static int ext4_dir_update_entry(ext4_sb_info_t *sb, ext4_inode_t *di, uint32_t *dsz,
+static int ext4_dir_update_entry(ext4_sb_info_t *sb, ext4_inode_t *di, uint64_t *dsz,
                                   const char *name, uint32_t ino, uint8_t ft) {
     uint32_t bs = sb->block_size;
     size_t nl = strlen(name);
@@ -776,8 +1136,21 @@ static int ext4_dir_update_entry(ext4_sb_info_t *sb, ext4_inode_t *di, uint32_t 
 static int ext4_inode_remove(ext4_sb_info_t *sb, uint32_t dir_ino __attribute__((unused)),
                               ext4_inode_t *di, const char *name, uint32_t ino,
                               vnode_t **deferred_put) {
-    int r = ext4_dir_remove(sb, di, di->i_size_lo, name);
+    int r = ext4_dir_remove(sb, di, ext4_inode_size(di), name);
     if (r < 0) return r;
+
+    /* Drop one link.  Hard-linked files survive until the last link is gone. */
+    ext4_inode_t victim;
+    r = ext4_read_inode(sb, ino, &victim);
+    if (r < 0) return r;
+    if (victim.i_links_count > 1) {
+        victim.i_links_count--;
+        uint64_t now[2];
+        timekeeping_get_realtime(now);
+        victim.i_ctime = (uint32_t)now[0];
+        ext4_write_inode(sb, ino, &victim);
+        return 0;
+    }
 
     /* If a vnode is still alive (open fd, dcache, ...), keep the inode and
      * its blocks; ext4_release_vn() reclaims them when the last reference
@@ -792,10 +1165,6 @@ static int ext4_inode_remove(ext4_sb_info_t *sb, uint32_t dir_ino __attribute__(
             *deferred_put = live;
         return 0;
     }
-
-    ext4_inode_t victim;
-    r = ext4_read_inode(sb, ino, &victim);
-    if (r < 0) return r;
 
     ext4_block_truncate(sb, &victim);
     memset(&victim, 0, sizeof(victim));
@@ -828,7 +1197,7 @@ static int ext4_lookup_unlocked(vnode_t *dir, const char *name, vnode_t **out) {
     if (ext4_read_inode(p->sb, p->inode_num, &di) < 0) return -EIO;
 
     uint32_t child_ino; uint8_t ft;
-    int r = ext4_dir_find(p->sb, &di, di.i_size_lo, name, &child_ino, &ft);
+    int r = ext4_dir_find(p->sb, &di, ext4_inode_size(&di), name, &child_ino, &ft);
     if (r < 0) return r;
 
     ext4_inode_t ci;
@@ -837,7 +1206,7 @@ static int ext4_lookup_unlocked(vnode_t *dir, const char *name, vnode_t **out) {
     int type = VFS_FT_REGULAR;
     if (ft == EXT4_FT_DIR) type = VFS_FT_DIR;
     else if (ft == EXT4_FT_SYMLINK) type = VFS_FT_SYMLINK;
-    *out = ext4_make_vnode(p->sb, child_ino, ci.i_size_lo, type, dir);
+    *out = ext4_make_vnode(p->sb, child_ino, ext4_inode_size(&ci), type, dir);
     if (!*out) return -ENOMEM;
     /* parent ref_count bumped in make_vnode */
     return 0;
@@ -849,7 +1218,7 @@ static int ext4_stat(vnode_t *vn, kstat_t *st) {
     ext4_inode_t dinode;
     memset(&dinode, 0, sizeof(dinode));
     if (ext4_read_inode(p->sb, p->inode_num, &dinode) == 0) {
-        sz = dinode.i_size_lo;
+        sz = ext4_inode_size(&dinode);
         p->file_size = sz;
         vn->size = sz;
     }
@@ -868,7 +1237,7 @@ static int ext4_stat(vnode_t *vn, kstat_t *st) {
         st->st_mode = (st->st_mode & ~S_IFMT) | vtype_mode;
     st->st_uid = dinode.i_uid;
     st->st_gid = dinode.i_gid;
-    st->st_nlink = 1;
+    st->st_nlink = dinode.i_links_count ? dinode.i_links_count : 1;
     /* Keep metadata fingerprints stable by exposing the on-disk inode times. */
     st->st_atime = dinode.i_atime;
     st->st_mtime = dinode.i_mtime;
@@ -908,7 +1277,7 @@ static int ext4_vn_create_unlocked(vnode_t *dir, const char *name, int mode, vno
 
     /* Check if already exists */
     uint32_t existing_ino;
-    if (ext4_dir_find(p->sb, &di, di.i_size_lo, name, &existing_ino, NULL) == 0)
+    if (ext4_dir_find(p->sb, &di, ext4_inode_size(&di), name, &existing_ino, NULL) == 0)
         return -EEXIST;
 
     uint32_t new_ino = ext4_alloc_inode(p->sb);
@@ -925,15 +1294,15 @@ static int ext4_vn_create_unlocked(vnode_t *dir, const char *name, int mode, vno
     ext4_write_inode(p->sb, new_ino, &ni);
 
     /* Add dir entry */
-    uint32_t dsz = di.i_size_lo;
+    uint64_t dsz = ext4_inode_size(&di);
     int r = ext4_dir_add(p->sb, &di, &dsz, name, new_ino, EXT4_FT_REG_FILE);
     if (r < 0) {
         ext4_free_inode(p->sb, new_ino);
         return r;
     }
 
-    if (dsz != di.i_size_lo) {
-        di.i_size_lo = dsz;
+    if (dsz != ext4_inode_size(&di)) {
+        ext4_inode_set_size(&di, dsz);
         ext4_write_inode(p->sb, p->inode_num, &di);
         p->file_size = dsz;
     }
@@ -953,7 +1322,7 @@ static int ext4_vn_mkdir_unlocked(vnode_t *dir, const char *name, int mode) {
     if (ext4_read_inode(p->sb, p->inode_num, &di) < 0) return -EIO;
 
     uint32_t existing_ino;
-    if (ext4_dir_find(p->sb, &di, di.i_size_lo, name, &existing_ino, NULL) == 0)
+    if (ext4_dir_find(p->sb, &di, ext4_inode_size(&di), name, &existing_ino, NULL) == 0)
         return -EEXIST;
 
     uint32_t new_ino = ext4_alloc_inode(p->sb);
@@ -972,7 +1341,7 @@ static int ext4_vn_mkdir_unlocked(vnode_t *dir, const char *name, int mode) {
         ni.i_mode |= S_ISGID;
     ni.i_uid = cur ? (uint16_t)cur->cred.fsuid : 0;
     ni.i_gid = (di.i_mode & S_ISGID) ? di.i_gid : (cur ? (uint16_t)cur->cred.fsgid : 0);
-    ni.i_size_lo = p->sb->block_size;
+    ext4_inode_set_size(&ni, p->sb->block_size);
     ni.i_links_count = 2; /* . and .. */
     ni.i_flags |= EXT4_EXTENTS_FL;
 
@@ -1015,7 +1384,7 @@ static int ext4_vn_mkdir_unlocked(vnode_t *dir, const char *name, int mode) {
     kfree(buf);
 
     /* Add entry in parent directory */
-    uint32_t dsz = di.i_size_lo;
+    uint64_t dsz = ext4_inode_size(&di);
     int r = ext4_dir_add(p->sb, &di, &dsz, name, new_ino, EXT4_FT_DIR);
     if (r < 0) {
         ext4_free_block(p->sb, blk);
@@ -1023,12 +1392,65 @@ static int ext4_vn_mkdir_unlocked(vnode_t *dir, const char *name, int mode) {
         return r;
     }
 
-    if (dsz != di.i_size_lo) {
-        di.i_size_lo = dsz;
+    if (dsz != ext4_inode_size(&di)) {
+        ext4_inode_set_size(&di, dsz);
         ext4_write_inode(p->sb, p->inode_num, &di);
         p->file_size = dsz;
     }
     return 0;
+}
+
+static int ext4_vn_link_unlocked(vnode_t *dir, const char *name, vnode_t *target) {
+    ext4_vnode_priv_t *p = (ext4_vnode_priv_t *)dir->fs_data;
+    if (p->type != VFS_FT_DIR) return -ENOTDIR;
+    if (!target || !target->fs_data) return -EINVAL;
+    if (target->type == VFS_FT_DIR) return -EPERM;
+
+    ext4_vnode_priv_t *tp = (ext4_vnode_priv_t *)target->fs_data;
+    if (tp->sb != p->sb) return -EXDEV;
+
+    ext4_inode_t di;
+    if (ext4_read_inode(p->sb, p->inode_num, &di) < 0) return -EIO;
+
+    /* Linux refuses to hard-link across different mounts; same sb is enough
+     * here, but also refuse to re-link to the very same directory entry. */
+    uint32_t existing_ino;
+    if (ext4_dir_find(p->sb, &di, ext4_inode_size(&di), name, &existing_ino, NULL) == 0) {
+        if (existing_ino == tp->inode_num) return -EEXIST;
+        return -EEXIST;
+    }
+
+    ext4_inode_t inode;
+    if (ext4_read_inode(p->sb, tp->inode_num, &inode) < 0) return -EIO;
+
+    inode.i_links_count++;
+    uint64_t now[2];
+    timekeeping_get_realtime(now);
+    inode.i_ctime = (uint32_t)now[0];
+    if (ext4_write_inode(p->sb, tp->inode_num, &inode) < 0) return -EIO;
+
+    uint64_t dsz = ext4_inode_size(&di);
+    int r = ext4_dir_add(p->sb, &di, &dsz, name, tp->inode_num, EXT4_FT_REG_FILE);
+    if (r < 0) {
+        /* Roll back the link count on failure. */
+        inode.i_links_count--;
+        ext4_write_inode(p->sb, tp->inode_num, &inode);
+        return r;
+    }
+    if (dsz != ext4_inode_size(&di)) {
+        ext4_inode_set_size(&di, dsz);
+        ext4_write_inode(p->sb, p->inode_num, &di);
+        p->file_size = dsz;
+    }
+    return 0;
+}
+
+static int ext4_vn_link(vnode_t *dir, const char *name, vnode_t *target) {
+    ext4_sb_info_t *sb = ((ext4_vnode_priv_t *)dir->fs_data)->sb;
+    mutex_lock(&sb->metadata_lock);
+    int r = ext4_vn_link_unlocked(dir, name, target);
+    mutex_unlock(&sb->metadata_lock);
+    return r;
 }
 
 static int ext4_vn_unlink_unlocked(vnode_t *dir, const char *name, vnode_t **deferred_put) {
@@ -1039,14 +1461,14 @@ static int ext4_vn_unlink_unlocked(vnode_t *dir, const char *name, vnode_t **def
     if (ext4_read_inode(p->sb, p->inode_num, &di) < 0) return -EIO;
 
     uint32_t child_ino; uint8_t ft;
-    int r = ext4_dir_find(p->sb, &di, di.i_size_lo, name, &child_ino, &ft);
+    int r = ext4_dir_find(p->sb, &di, ext4_inode_size(&di), name, &child_ino, &ft);
     if (r < 0) return r;
     if (ft == EXT4_FT_DIR) return -EISDIR;
 
     return ext4_inode_remove(p->sb, p->inode_num, &di, name, child_ino, deferred_put);
 }
 
-static int ext4_dir_empty(ext4_sb_info_t *sb, ext4_inode_t *di, uint32_t dsz) {
+static int ext4_dir_empty(ext4_sb_info_t *sb, ext4_inode_t *di, uint64_t dsz) {
     uint32_t bs = sb->block_size, nb = (dsz + bs - 1) / bs;
     for (uint32_t b = 0; b < nb; b++) {
         uint64_t p = ext4_block_map(sb, di, b); if (!p) continue;
@@ -1076,13 +1498,13 @@ static int ext4_vn_rmdir_unlocked(vnode_t *dir, const char *name, vnode_t **defe
     if (ext4_read_inode(p->sb, p->inode_num, &di) < 0) return -EIO;
 
     uint32_t child_ino; uint8_t ft;
-    int r = ext4_dir_find(p->sb, &di, di.i_size_lo, name, &child_ino, &ft);
+    int r = ext4_dir_find(p->sb, &di, ext4_inode_size(&di), name, &child_ino, &ft);
     if (r < 0) return r;
     if (ft != EXT4_FT_DIR) return -ENOTDIR;
 
     ext4_inode_t cdi;
     if (ext4_read_inode(p->sb, child_ino, &cdi) < 0) return -EIO;
-    r = ext4_dir_empty(p->sb, &cdi, cdi.i_size_lo);
+    r = ext4_dir_empty(p->sb, &cdi, ext4_inode_size(&cdi));
     if (r < 0) return r;
 
     return ext4_inode_remove(p->sb, p->inode_num, &di, name, child_ino, deferred_put);
@@ -1107,13 +1529,13 @@ static int ext4_vn_rename_unlocked(vnode_t *old_dir, const char *old_name,
 
     /* Find source */
     uint32_t src_ino; uint8_t src_ft;
-    int r = ext4_dir_find(op->sb, &odi, odi.i_size_lo, old_name, &src_ino,
+    int r = ext4_dir_find(op->sb, &odi, ext4_inode_size(&odi), old_name, &src_ino,
                           &src_ft);
     if (r < 0) return r;
 
     /* Find target */
     uint32_t tgt_ino = 0; uint8_t tgt_ft = 0;
-    int tgt_exists = (ext4_dir_find(np->sb, &ndi, ndi.i_size_lo, new_name,
+    int tgt_exists = (ext4_dir_find(np->sb, &ndi, ext4_inode_size(&ndi), new_name,
                                     &tgt_ino, &tgt_ft) == 0);
 
     if (flags & RENAME_NOREPLACE) {
@@ -1124,8 +1546,8 @@ static int ext4_vn_rename_unlocked(vnode_t *old_dir, const char *old_name,
         if (!tgt_exists) return -ENOENT;
         if (old_dir == new_dir && strcmp(old_name, new_name) == 0) return 0;
 
-        uint32_t odsz = odi.i_size_lo;
-        uint32_t ndsz = ndi.i_size_lo;
+        uint64_t odsz = ext4_inode_size(&odi);
+        uint64_t ndsz = ext4_inode_size(&ndi);
 
         r = ext4_dir_update_entry(op->sb, &odi, &odsz, old_name, tgt_ino, tgt_ft);
         if (r < 0) return r;
@@ -1134,13 +1556,13 @@ static int ext4_vn_rename_unlocked(vnode_t *old_dir, const char *old_name,
             ext4_dir_update_entry(op->sb, &odi, &odsz, old_name, src_ino, src_ft);
             return r;
         }
-        if (odsz != odi.i_size_lo) {
-            odi.i_size_lo = odsz;
+        if (odsz != ext4_inode_size(&odi)) {
+            ext4_inode_set_size(&odi, odsz);
             ext4_write_inode(op->sb, op->inode_num, &odi);
             op->file_size = odsz;
         }
-        if (ndsz != ndi.i_size_lo) {
-            ndi.i_size_lo = ndsz;
+        if (ndsz != ext4_inode_size(&ndi)) {
+            ext4_inode_set_size(&ndi, ndsz);
             ext4_write_inode(np->sb, np->inode_num, &ndi);
             np->file_size = ndsz;
         }
@@ -1156,18 +1578,18 @@ static int ext4_vn_rename_unlocked(vnode_t *old_dir, const char *old_name,
     }
 
     /* Add new entry in target dir */
-    uint32_t ndsz = ndi.i_size_lo;
+    uint64_t ndsz = ext4_inode_size(&ndi);
     r = ext4_dir_add(np->sb, &ndi, &ndsz, new_name, src_ino, src_ft);
     if (r < 0) return r;
-    if (ndsz != ndi.i_size_lo) {
-        ndi.i_size_lo = ndsz;
+    if (ndsz != ext4_inode_size(&ndi)) {
+        ext4_inode_set_size(&ndi, ndsz);
         ext4_write_inode(np->sb, np->inode_num, &ndi);
         np->file_size = ndsz;
     }
 
     if (ext4_read_inode(op->sb, op->inode_num, &odi) < 0)
         return -EIO;
-    r = ext4_dir_remove(op->sb, &odi, odi.i_size_lo, old_name);
+    r = ext4_dir_remove(op->sb, &odi, ext4_inode_size(&odi), old_name);
     if (r < 0) {
         /* Attempt rollback: remove the new entry */
         ext4_dir_remove(np->sb, &ndi, ndsz, new_name);
@@ -1204,15 +1626,14 @@ static int ext4_readlink(vnode_t *vn, char *buf, size_t sz) {
 }
 
 static int ext4_vn_symlink_unlocked(vnode_t *dir, const char *name,
-                                    const char *target) {
-    ext4_vnode_priv_t *p = (ext4_vnode_priv_t *)dir->fs_data;
+                                    const char *target) {    ext4_vnode_priv_t *p = (ext4_vnode_priv_t *)dir->fs_data;
     if (p->type != VFS_FT_DIR) return -ENOTDIR;
 
     ext4_inode_t di;
     if (ext4_read_inode(p->sb, p->inode_num, &di) < 0) return -EIO;
 
     uint32_t existing_ino;
-    if (ext4_dir_find(p->sb, &di, di.i_size_lo, name, &existing_ino, NULL) == 0)
+    if (ext4_dir_find(p->sb, &di, ext4_inode_size(&di), name, &existing_ino, NULL) == 0)
         return -EEXIST;
 
     size_t tlen = strlen(target);
@@ -1228,18 +1649,18 @@ static int ext4_vn_symlink_unlocked(vnode_t *dir, const char *name,
     ni.i_uid = cur ? (uint16_t)cur->cred.fsuid : 0;
     ni.i_gid = (di.i_mode & S_ISGID) ? di.i_gid : (cur ? (uint16_t)cur->cred.fsgid : 0);
     ni.i_links_count = 1;
-    ni.i_size_lo = (uint32_t)tlen;
+    ext4_inode_set_size(&ni, tlen);
     memcpy(ni.i_block.i_data.i_block, target, tlen);
     ext4_write_inode(p->sb, new_ino, &ni);
 
-    uint32_t dsz = di.i_size_lo;
+    uint64_t dsz = ext4_inode_size(&di);
     int r = ext4_dir_add(p->sb, &di, &dsz, name, new_ino, EXT4_FT_SYMLINK);
     if (r < 0) {
         ext4_free_inode(p->sb, new_ino);
         return r;
     }
-    if (dsz != di.i_size_lo) {
-        di.i_size_lo = dsz;
+    if (dsz != ext4_inode_size(&di)) {
+        ext4_inode_set_size(&di, dsz);
         ext4_write_inode(p->sb, p->inode_num, &di);
         p->file_size = dsz;
     }
@@ -1250,15 +1671,23 @@ static int ext4_vn_truncate_unlocked(vnode_t *vn, size_t size) {
     ext4_vnode_priv_t *p = (ext4_vnode_priv_t *)vn->fs_data;
     if (!p) return -EINVAL;
     if (vn->type == VFS_FT_DIR) return -EISDIR;
-    if (size > 0xffffffffUL) return -EINVAL;
 
     ext4_inode_t inode;
     if (ext4_read_inode(p->sb, p->inode_num, &inode) < 0) return -EIO;
 
-    if (size == 0)
+    uint64_t old_size = ext4_inode_size(&inode);
+    if (size == 0) {
         ext4_block_truncate(p->sb, &inode);
+    } else if (size < old_size) {
+        /* Reclaim blocks beyond the new EOF instead of leaking them.  The
+         * first logical block to drop is the one holding the new EOF. */
+        uint32_t bs = p->sb->block_size;
+        uint32_t lblk = (uint32_t)((size + bs - 1) / bs);
+        if (lblk < (old_size + bs - 1) / bs)
+            ext4_block_truncate_at(p->sb, &inode, lblk);
+    }
 
-    inode.i_size_lo = (uint32_t)size;
+    ext4_inode_set_size(&inode, size);
     ext4_write_inode(p->sb, p->inode_num, &inode);
     p->file_size = size;
     vn->size = size;
@@ -1426,6 +1855,7 @@ static vnode_ops_t g_ext4_vnode_ops = {
     .unlink   = ext4_vn_unlink,
     .rmdir    = ext4_vn_rmdir,
     .rename   = ext4_vn_rename,
+    .link     = ext4_vn_link,
     .symlink  = ext4_vn_symlink,
     .readlink = ext4_readlink,
     .stat     = ext4_stat,
@@ -1446,7 +1876,7 @@ static vnode_ops_t g_ext4_vnode_ops = {
 static void ext4_fctx_refresh_size(vfile_t *vf, ext4_fctx_t *fc) {
     ext4_inode_t inode;
     if (ext4_read_inode(fc->sb, fc->inode_num, &inode) < 0) return;
-    fc->file_size = inode.i_size_lo;
+    fc->file_size = ext4_inode_size(&inode);
     if (vf->vnode) {
         vf->vnode->size = fc->file_size;
         if (vf->vnode->fs_data) {
@@ -1456,7 +1886,7 @@ static void ext4_fctx_refresh_size(vfile_t *vf, ext4_fctx_t *fc) {
     }
 }
 
-static void ext4_fctx_set_size(vfile_t *vf, ext4_fctx_t *fc, uint32_t size) {
+static void ext4_fctx_set_size(vfile_t *vf, ext4_fctx_t *fc, uint64_t size) {
     fc->file_size = size;
     if (vf->vnode) {
         vf->vnode->size = fc->file_size;
@@ -1476,7 +1906,7 @@ static int ext4_fread(vfile_t *vf, char *buf, size_t count) {
         ext4_fctx_inode_dirty(fc);
     ext4_inode_t *inode = ext4_fctx_inode(fc);
     if (!inode) return -EIO;
-    ext4_fctx_set_size(vf, fc, inode->i_size_lo);
+    ext4_fctx_set_size(vf, fc, ext4_inode_size(inode));
     if (fc->file_off >= fc->file_size) return 0;
 
     size_t remaining = fc->file_size - fc->file_off;
@@ -1516,7 +1946,7 @@ static int ext4_fwrite(vfile_t *vf, const char *buf, size_t count) {
         ext4_fctx_inode_dirty(fc);
     ext4_inode_t *inode = ext4_fctx_inode(fc);
     if (!inode) return -EIO;
-    ext4_fctx_set_size(vf, fc, inode->i_size_lo);
+    ext4_fctx_set_size(vf, fc, ext4_inode_size(inode));
 
     uint32_t bs = fc->sb->block_size;
     size_t done = 0;
@@ -1551,7 +1981,7 @@ static int ext4_fwrite(vfile_t *vf, const char *buf, size_t count) {
         fc->file_off += done;
         if (fc->file_off > fc->file_size) {
             fc->file_size = fc->file_off;
-            inode->i_size_lo = (uint32_t)fc->file_size;
+            ext4_inode_set_size(inode, fc->file_size);
             ext4_write_inode(fc->sb, fc->inode_num, inode);
             if (vf->vnode && vf->vnode->fs_data) {
                 ext4_vnode_priv_t *fp = (ext4_vnode_priv_t *)vf->vnode->fs_data;
@@ -1763,6 +2193,8 @@ static vnode_t *ext4_make_vnode(ext4_sb_info_t *sb, uint32_t ino, uint32_t sz,
     vnode_ref_init(vn, 1);            /* 1 for the caller */
     vn->parent    = parent;
     if (parent) vnode_get(parent);
+    if (parent)
+        vn->mnt = parent->mnt;        /* inherit mount for link()/dcache */
     vn->ops       = &g_ext4_vnode_ops;
 
     ext4_vnode_priv_t *fp = (ext4_vnode_priv_t *)kmalloc(sizeof(ext4_vnode_priv_t));
@@ -1792,6 +2224,39 @@ vnode_t *ext4_mount(bcache_t *bc) {
     if (sb.s_magic != EXT4_DISK_MAGIC) {
         printf("[EXT4] Bad magic: 0x%x (expected 0x%x)\n", sb.s_magic, EXT4_DISK_MAGIC);
         return NULL;
+    }
+
+    /* ---- fail-closed feature gate ----
+     * This driver understands extents, 64-bit block counts, flex_bg and
+     * linear directory scans, but cannot safely read journal-required,
+     * meta_bg, bigalloc, inline-data, casefold, encryption or MMP
+     * filesystems.  Refuse to mount instead of silently misreading the
+     * image (mirrors how Linux rejects unknown incompatible features with a
+     * clear error).
+     *
+     * CSUM_SEED is benign here: it only changes how the (unchecked) metadata
+     * checksum seed is derived, so it is allowed.  RO-compat flags
+     * (sparse_super, large_file, gdt_csum, dir_nlink, extra_isize,
+     * htree-index) are ubiquitous on modern mkfs.ext4 images and are safe:
+     * sparse_super/htree do not change the block layout the linear walk
+     * depends on, and csums are simply not written back.  They must NOT be
+     * rejected, otherwise ordinary Linux-formatted images would refuse to
+     * mount (a regression). */
+    {
+        uint32_t ino = sb.s_feature_incompat;
+        uint32_t unsupported_incompat = ino & ~(EXT4_FEATURE_INCOMPAT_FILETYPE |
+                                                EXT4_FEATURE_INCOMPAT_EXTENTS |
+                                                EXT4_FEATURE_INCOMPAT_64BIT |
+                                                EXT4_FEATURE_INCOMPAT_FLEX_BG |
+                                                EXT4_FEATURE_INCOMPAT_CSUM_SEED);
+        /* RECOVER means a journal exists and needs replay; without jbd2 we
+         * cannot trust metadata, so it is treated as unsupported too. */
+        unsupported_incompat |= ino & EXT4_FEATURE_INCOMPAT_RECOVER;
+        if (unsupported_incompat) {
+            printf("[EXT4] Unsupported incompat features: 0x%x "
+                   "(unsupported: 0x%x)\n", ino, unsupported_incompat);
+            return NULL;
+        }
     }
 
     uint32_t block_size = 1024 << sb.s_log_block_size;
@@ -1866,7 +2331,7 @@ vnode_t *ext4_mount(bcache_t *bc) {
     }
 
     vnode_t *root = ext4_make_vnode(esi, EXT4_ROOT_INO,
-                                     root_inode.i_size_lo, VFS_FT_DIR, NULL);
+                                     ext4_inode_size(&root_inode), VFS_FT_DIR, NULL);
     if (!root) {
         kfree(esi->group_descs);
         kfree(esi);
@@ -1921,7 +2386,7 @@ static vfile_t *ext4_open_vnode(vnode_t *vn, int flags) {
     fc->inode_num = fp->inode_num;
     uint64_t current_size = fp->file_size;
     if (ext4_read_inode(fp->sb, fp->inode_num, &fc->inode) == 0) {
-        current_size = fc->inode.i_size_lo;
+        current_size = ext4_inode_size(&fc->inode);
         fp->file_size = current_size;
         vn->size = current_size;
         fc->inode_valid = 1;

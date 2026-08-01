@@ -109,13 +109,13 @@ static const unsigned char rootfs_overlay_etc_protocols[] = {
 };
 
 const rootfs_overlay_entry_t g_rootfs_overlay[] = {
-    { "/etc/fastfetch/config.jsonc", rootfs_overlay_etc_fastfetch_config_jsonc, 475, 0644 },
-    { "/etc/group", rootfs_overlay_etc_group, 38, 0644 },
-    { "/etc/hostname", rootfs_overlay_etc_hostname, 20, 0644 },
-    { "/etc/hosts", rootfs_overlay_etc_hosts, 35, 0644 },
-    { "/etc/os-release", rootfs_overlay_etc_os_release, 103, 0644 },
-    { "/etc/passwd", rootfs_overlay_etc_passwd, 130, 0644 },
-    { "/etc/protocols", rootfs_overlay_etc_protocols, 213, 0644 },
+    { "/etc/fastfetch/config.jsonc", rootfs_overlay_etc_fastfetch_config_jsonc, 475, 0664 },
+    { "/etc/group", rootfs_overlay_etc_group, 38, 0664 },
+    { "/etc/hostname", rootfs_overlay_etc_hostname, 20, 0664 },
+    { "/etc/hosts", rootfs_overlay_etc_hosts, 35, 0664 },
+    { "/etc/os-release", rootfs_overlay_etc_os_release, 103, 0664 },
+    { "/etc/passwd", rootfs_overlay_etc_passwd, 130, 0664 },
+    { "/etc/protocols", rootfs_overlay_etc_protocols, 213, 0664 },
 };
 
 const size_t g_rootfs_overlay_count = sizeof(g_rootfs_overlay) / sizeof(g_rootfs_overlay[0]);

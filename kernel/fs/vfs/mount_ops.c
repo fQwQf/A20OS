@@ -14,6 +14,7 @@
 #include "fs/fat32.h"
 #include "fs/ext4.h"
 #include "fs/ntfs.h"
+#include "fs/isofs.h"
 #include "fs/ramfs.h"
 #include "fs/devfs.h"
 #include "fs/procfs.h"
@@ -291,6 +292,35 @@ int vfs_mount_bc(const char *path, const char *fstype, bcache_t *bc) {
         return 0;
     }
 
+    if (strcmp(fstype, "isofs") == 0 || strcmp(fstype, "iso9660") == 0) {
+        if (!bc) { kdebug("[VFS] No bcache for isofs mount\n"); return -ENODEV; }
+
+        mount_t *mnt = vfs_mount_alloc();
+        if (!mnt) return -ENOMEM;
+        vnode_t *root = isofs_mount(bc);
+        if (!root) {
+            vfs_mount_remove(mnt);
+            return -EIO;
+        }
+
+        strncpy(mnt->path, path, MAX_PATH_LEN - 1);
+        mnt->path[MAX_PATH_LEN - 1] = '\0';
+        mnt->type  = FS_TYPE_ISOFS;
+        strncpy(mnt->dev, "/dev/cdrom", sizeof(mnt->dev) - 1);
+        strncpy(mnt->fstype, "iso9660", sizeof(mnt->fstype) - 1);
+        strncpy(mnt->opts, "ro", sizeof(mnt->opts) - 1);
+        mnt->flags = 1;               /* read-only */
+        mnt->root  = root;
+        mnt->fs_data = bc;
+
+        root->mnt = mnt;
+        vnode_get(root);  /* mount holds a persistent reference */
+
+        kdebug("[VFS] Mounted iso9660 at %s\n", path);
+        vfs_dcache_invalidate_all();
+        return 0;
+    }
+
     kdebug("[VFS] Unknown fstype: %s\n", fstype);
     return -EINVAL;
 }
@@ -329,6 +359,8 @@ int vfs_umount(const char *path) {
                 ext4_unmount(root);
             } else if (mnt->type == FS_TYPE_NTFS) {
                 ntfs_unmount(root);
+            } else if (mnt->type == FS_TYPE_ISOFS) {
+                isofs_unmount(root);
             }
             vfs_mount_remove(mnt);
             return 0;
