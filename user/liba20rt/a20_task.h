@@ -118,4 +118,20 @@ static inline a20_status_t a20_thread_get_name(a20_handle_t thread,
     return -A20_ERR_NOT_SUPPORTED;
 }
 
+/*
+ * Checkpoint-based signal simulation.  Signals are never delivered
+ * asynchronously: they are recorded by a20_task_kill() and consumed here at
+ * explicit checkpoints (event_wait return, pthread_testcancel).  Returns the
+ * bitmap of delivered signals (pending & ~blocked) and clears them.
+ */
+static inline int64_t a20_signal_check(void)
+{
+    return a20_syscall6(A20_SYS_signal_check, 0, 0, 0, 0, 0, 0);
+}
+
+static inline a20_status_t a20_signal_mask(uint64_t new_mask, uint64_t *old_mask)
+{
+    return a20_syscall6(A20_SYS_signal_mask, new_mask, (uint64_t)old_mask, 0, 0, 0, 0);
+}
+
 #endif

@@ -61,7 +61,7 @@ int64_t r = a20_vm_alloc(&args);
 
 ### 5a. mlibc 移植（sysdeps/a20，Phase 1–2 已完成）
 
-`user/external/mlibc` 以 vendor 方式引入 [managarm/mlibc](https://github.com/managarm/mlibc)，新增 `sysdeps/a20/` 移植层（约 1800 行），严格遵守 native ABI 设计取舍：fd↔handle 映射在 libc 内完成；无 fork/execve（ENOSYS）；信号为惰性桩；同步原语走 native futex；线程经 `thread_create` + TCB 蹦床；静态链接（`user/mlibc/a20-mlibc.ld` 提供 init_array 边界、PT_TLS phdr 与 `PT_A20_START_INFO` 标记）。
+`user/external/mlibc` 以 vendor 方式引入 [managarm/mlibc](https://github.com/managarm/mlibc)，新增 `sysdeps/a20/` 移植层（约 1800 行），严格遵守 native ABI 设计取舍：fd↔handle 映射在 libc 内完成；无 fork/execve（ENOSYS）；信号为**检查点式模拟**（`sigaction` 记录 handler，`kill` 经 `task_kill` 记录并在阻塞等待返回时于显式检查点投递，见 §5c）；同步原语走 native futex；线程经 `thread_create` + TCB 蹦床；静态链接（`user/mlibc/a20-mlibc.ld` 提供 init_array 边界、PT_TLS phdr 与 `PT_A20_START_INFO` 标记）。
 
 Phase 2 新增：
 
@@ -73,7 +73,7 @@ Phase 2 新增：
 
 构建与验证：`make mlibc-sysroot`（meson+ninja 构建静态 libc.a），`make smoke-mlibc`（QEMU 冒烟：stdio/malloc/文件 I/O/4 线程 mutex/pipe/poll/socketpair/posix_spawn+waitpid，测试程序 `user/tests/test_mlibc_hello.c` + `test_mlibc_child.c`）。
 
-已知限制：fork/execve（ENOSYS，设计取舍）、信号（桩）、动态链接（评估见 §8a）、task_spawn 的非 stdio handle 继承（仅 fd 0/1/2）、多架构交叉文件（仅 riscv64 验证过）。工具链注意：mlibc 需要 glibc LP64 fast 类型与 `_GNU_SOURCE`，elf 工具链用 `-D` 宏补齐（`ci/a20-riscv64.cross-file`、`Makefile` 的 `MLIBC_FAST_TYPE_FLAGS`）。
+已知限制：fork/execve（ENOSYS，设计取舍）、信号（检查点式模拟已实现，但跨进程 kill 需 pid→handle 注册表、默认动作 SIG_DFL 未退出进程）、动态链接（评估见 §8a）、task_spawn 的非 stdio handle 继承（仅 fd 0/1/2）、多架构交叉文件（仅 riscv64 验证过）。工具链注意：mlibc 需要 glibc LP64 fast 类型与 `_GNU_SOURCE`，elf 工具链用 `-D` 宏补齐（`ci/a20-riscv64.cross-file`、`Makefile` 的 `MLIBC_FAST_TYPE_FLAGS`）。
 
 ### 8a. 动态链接工作量评估
 
