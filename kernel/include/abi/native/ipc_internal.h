@@ -10,6 +10,12 @@
 
 struct a20_ht_internal;
 
+/* Checkpoint-based signal simulation (kernel/abi/native/handle_table.c). */
+void     a20_ht_sig_pend(struct a20_ht_internal *ht, int sig);
+uint64_t a20_ht_sig_take(struct a20_ht_internal *ht);
+uint64_t a20_ht_sig_blocked(struct a20_ht_internal *ht);
+uint64_t a20_ht_sig_set_blocked(struct a20_ht_internal *ht, uint64_t mask);
+
 #define A20_CH_MAX_DATA      65536
 #define A20_CH_MAX_HANDLES   8
 #define A20_CH_DEFAULT_CAP   64
