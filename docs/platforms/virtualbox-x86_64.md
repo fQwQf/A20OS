@@ -33,7 +33,7 @@ make ARCH=x86_64 ABI=both kernel-only -j4
 make vbox-iso-x86_64
 ```
 
-第二条命令会递归用 `ARCH=x86_64 ABI=both BRINGUP=0` 执行完整 `dev-build`，再由 `scripts/mk_grub_iso.sh` 生成：
+第二条命令会递归用 `ARCH=x86_64 ABI=both BRINGUP=0` 执行完整 `dev-build`，再由 `tools/mk_grub_iso.sh` 生成：
 
 ```text
 .kernel-build/x86_64-qemu-virt-x86_64-both-dev/a20os-x86_64.iso

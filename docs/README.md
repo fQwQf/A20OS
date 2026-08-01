@@ -58,6 +58,8 @@
 - [research/00-index.md](research/00-index.md)：Native ABI 研究笔记的阅读索引
 - [roadmap/a20os-improvement-todo.md](roadmap/a20os-improvement-todo.md)：当前改进清单与开发路线图
 - [project/external-dependencies.md](project/external-dependencies.md)：外部依赖与协议说明
+- [ACKNOWLEDGMENTS.md](ACKNOWLEDGMENTS.md)：第三方项目致谢与出处说明
+- [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)：第三方组件许可证集中声明
 
 ---
 
