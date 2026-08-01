@@ -21,6 +21,7 @@
 #include "ipc/signalfd.h"
 #include "fs/locks.h"
 #include "fs/page_cache.h"
+#include "fs/inotify.h"
 #include "fs/pipe.h"
 #include "fs/ramfs.h"
 #include "fs/devfs.h"
@@ -304,6 +305,8 @@ int vfs_open(const char *path, int flags, int mode) {
 
         int cmode = (mode & S_IFMT) | ((mode & 07777) & ~(cur ? cur->fs.umask : 022));
         int r = parent->ops->create(parent, fname, cmode, &vn);
+        if (r == 0)
+            inotify_vnode_event(parent, fname, IN_CREATE);
         vnode_put(parent);
         if (r < 0) { kdebug("[VFS] open '%s': create failed r=%d\n", resolved, r); return r; }
         vfs_dcache_invalidate_all();
@@ -611,6 +614,8 @@ int vfs_mkdir(const char *path, int mode) {
     }
     int cmode = (mode & 07777) & ~(cur ? cur->fs.umask : 022);
     int r = parent->ops->mkdir(parent, name, cmode);
+    if (r == 0)
+        inotify_vnode_event(parent, name, IN_CREATE | IN_ISDIR);
     vnode_put(parent);
     if (r == 0)
         vfs_dcache_invalidate_all();
@@ -662,8 +667,12 @@ int vfs_unlink(const char *path) {
     }
 
     int r = parent->ops->unlink(parent, name);
-    if (r == 0)
+    if (r == 0) {
         vfs_drop_time_meta(victim);
+        inotify_vnode_event(parent, name, IN_DELETE);
+        if (victim)
+            inotify_vnode_event(victim, NULL, IN_DELETE_SELF);
+    }
     vnode_put(victim);
     vnode_put(parent);
     if (r == 0)
@@ -788,6 +797,8 @@ int vfs_rename_flags(const char *old, const char *newpath, unsigned int flags) {
 
     int r = old_dir->ops->rename(old_dir, old_name, new_dir, new_name, flags);
     if (r == 0) {
+        inotify_vnode_event(old_dir, old_name, IN_MOVED_FROM);
+        inotify_vnode_event(new_dir, new_name, IN_MOVED_TO);
         if (new_victim && !(flags & RENAME_EXCHANGE))
             vfs_drop_time_meta(new_victim);
         vfs_dcache_invalidate(old_dir, old_name);
@@ -848,8 +859,12 @@ int vfs_rmdir(const char *path) {
     }
 
     int r = parent->ops->rmdir(parent, name);
-    if (r == 0)
+    if (r == 0) {
         vfs_drop_time_meta(victim);
+        inotify_vnode_event(parent, name, IN_DELETE | IN_ISDIR);
+        if (victim)
+            inotify_vnode_event(victim, NULL, IN_DELETE_SELF);
+    }
     vnode_put(victim);
     vnode_put(parent);
     if (r == 0)
@@ -1431,6 +1446,8 @@ int vfs_link(const char *oldpath, const char *newpath) {
         return -ENOSYS;
     }
     int r = parent->ops->link(parent, name, target);
+    if (r == 0)
+        inotify_vnode_event(parent, name, IN_CREATE);
     vnode_put(parent);
     vnode_put(target);
     if (r == 0)
@@ -1469,6 +1486,8 @@ int vfs_symlink(const char *target, const char *linkpath) {
         return -ENOSYS;
     }
     int r = parent->ops->symlink(parent, name, target);
+    if (r == 0)
+        inotify_vnode_event(parent, name, IN_CREATE);
     vnode_put(parent);
     if (r == 0)
         vfs_dcache_invalidate_all();

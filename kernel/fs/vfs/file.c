@@ -6,6 +6,7 @@
 #include "fs/devfs.h"
 #include "fs/block_cache.h"
 #include "fs/page_cache.h"
+#include "fs/inotify.h"
 #include "mm/vm.h"
 
 int vfs_is_pipe_vfile(vfile_t *vf)
@@ -113,6 +114,7 @@ int vfs_write_file(vfile_t *vf, const char *buf, size_t count)
                 page_cache_invalidate_uptodate_range(vf->vnode, write_start,
                                                       write_start + (size_t)r);
             vfs_touch_mtime(vf->vnode);
+            inotify_vnode_event(vf->vnode, NULL, IN_MODIFY);
         }
         return r;
     }
