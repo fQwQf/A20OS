@@ -35,6 +35,10 @@ struct a20_ht_internal {
     uint8_t             security_label; /* Bell-LaPadula process label: 0=L, 1=M, 2=H */
     refcount_t          refcount;       /* shared by all threads of a process */
     struct a20_ht_internal *registry_next; /* global sweeper registry */
+    /* Checkpoint-based signal simulation (native ABI has no async signals).
+     * bit n == signal n; SIGKILL (9) is handled immediately, never queued. */
+    uint64_t            sig_pending;
+    uint64_t            sig_blocked;
 };
 
 /* ---- Global handle-table registry (sweeper) ----
@@ -330,9 +334,9 @@ int64_t a20_handle_install(struct a20_ht_internal *ht, void *object,
  * the new handle's expiry ≤ source expiry, ops ≤ source remaining_ops.
  */
 int64_t a20_handle_install_temporal(struct a20_ht_internal *ht, void *object,
-                                    uint16_t type, a20_rights_t rights,
-                                    uint64_t expiry_tick, uint32_t remaining_ops,
-                                    uint32_t temporal_flags, uint8_t security_label)
+                                     uint16_t type, a20_rights_t rights,
+                                     uint64_t expiry_tick, uint32_t remaining_ops,
+                                     uint32_t temporal_flags, uint8_t security_label)
 {
     a20_rights_t valid = a20_type_valid_rights(type);
     if ((rights & ~valid) != 0)
@@ -348,6 +352,55 @@ int64_t a20_handle_install_temporal(struct a20_ht_internal *ht, void *object,
             return -A20_ERR_NO_SPACE;
         }
     }
+    ht->entries[slot].object = object;
+    ht->entries[slot].type = type;
+    ht->entries[slot].rights = rights;
+    ht->entries[slot].expiry_tick = expiry_tick;
+    ht->entries[slot].remaining_ops = remaining_ops;
+    ht->entries[slot].temporal_flags = temporal_flags;
+    ht->entries[slot].security_label = security_label;
+    ht->entries[slot].state = A20_HS_ACTIVE;
+    ht->count++;
+    spin_unlock_irqrestore(&ht->lock, flags);
+    return (int64_t)slot;
+}
+
+/* Install at a caller-selected slot for Native fd inheritance.  The reserved
+ * range is kept separate from ordinary allocation so libc can reconstruct
+ * fd-to-handle mapping from the startup count. */
+int64_t a20_handle_install_at_temporal(struct a20_ht_internal *ht,
+                                       a20_handle_t slot, void *object,
+                                       uint16_t type, a20_rights_t rights,
+                                       uint64_t expiry_tick,
+                                       uint32_t remaining_ops,
+                                       uint32_t temporal_flags,
+                                       uint8_t security_label)
+{
+    if (!ht || slot >= A20_HT_MAX_CAP)
+        return -A20_ERR_INVALID_ARGUMENT;
+
+    a20_rights_t valid = a20_type_valid_rights(type);
+    if ((rights & ~valid) != 0)
+        rights &= valid;
+
+    uint64_t flags = spin_lock_irqsave(&ht->lock);
+    while (slot >= ht->capacity) {
+        if (ht_grow(ht) < 0) {
+            spin_unlock_irqrestore(&ht->lock, flags);
+            return -A20_ERR_NO_SPACE;
+        }
+    }
+
+    uint32_t word_idx = slot / 64;
+    uint32_t bit_idx = slot % 64;
+    if (ht->free_bitmap[word_idx] & (1ULL << bit_idx)) {
+        spin_unlock_irqrestore(&ht->lock, flags);
+        return -A20_ERR_EXISTS;
+    }
+
+    ht->free_bitmap[word_idx] |= (1ULL << bit_idx);
+    if (ht->free_hint <= slot)
+        ht->free_hint = slot + 1;
     ht->entries[slot].object = object;
     ht->entries[slot].type = type;
     ht->entries[slot].rights = rights;
@@ -758,4 +811,52 @@ void a20_temporal_sweep_all(void)
         a20_ht_put_ref(ht);
         ht = next;
     }
+}
+
+/* ------------------------------------------------------------------ */
+/* Checkpoint-based signal simulation                                  */
+/* ------------------------------------------------------------------ */
+
+/* Queue signal @sig for a process (bitmap in its handle table). */
+void a20_ht_sig_pend(struct a20_ht_internal *ht, int sig)
+{
+    if (!ht || sig <= 0 || sig >= 64)
+        return;
+    uint64_t flags = spin_lock_irqsave(&ht->lock);
+    ht->sig_pending |= (1ULL << sig);
+    spin_unlock_irqrestore(&ht->lock, flags);
+}
+
+/* Return the deliverable signals (pending & ~blocked) and clear them.
+ * Blocked signals stay pending until unblocked. */
+uint64_t a20_ht_sig_take(struct a20_ht_internal *ht)
+{
+    if (!ht)
+        return 0;
+    uint64_t flags = spin_lock_irqsave(&ht->lock);
+    uint64_t deliver = ht->sig_pending & ~ht->sig_blocked;
+    ht->sig_pending &= ht->sig_blocked;
+    spin_unlock_irqrestore(&ht->lock, flags);
+    return deliver;
+}
+
+uint64_t a20_ht_sig_blocked(struct a20_ht_internal *ht)
+{
+    if (!ht)
+        return 0;
+    uint64_t flags = spin_lock_irqsave(&ht->lock);
+    uint64_t m = ht->sig_blocked;
+    spin_unlock_irqrestore(&ht->lock, flags);
+    return m;
+}
+
+uint64_t a20_ht_sig_set_blocked(struct a20_ht_internal *ht, uint64_t mask)
+{
+    if (!ht)
+        return 0;
+    uint64_t flags = spin_lock_irqsave(&ht->lock);
+    uint64_t old = ht->sig_blocked;
+    ht->sig_blocked = mask & ~(1ULL << 9);   /* SIGKILL cannot be blocked */
+    spin_unlock_irqrestore(&ht->lock, flags);
+    return old;
 }
