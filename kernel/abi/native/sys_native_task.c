@@ -79,7 +79,41 @@ int64_t sys_a20_task_kill(const a20_syscall_args_t *args)
         proc_put(target);
         proc_exit(128 + 9);
     }
+
+    /* Checkpoint-based delivery: record the signal and wake the target if it
+     * is parked at a checkpoint (event/futex wait).  The handler runs on the
+     * next explicit checkpoint (signal_check / pthread_testcancel), never
+     * asynchronously. */
+    struct a20_ht_internal *tht = task_get_a20_ht(target);
+    if (tht)
+        a20_ht_sig_pend(tht, sig);
+    proc_interrupt_wait(target, PROC_WAKE_SIGNAL);
     proc_put(target);
+    return A20_OK;
+}
+
+int64_t sys_a20_signal_check(const a20_syscall_args_t *args)
+{
+    (void)args;
+    task_t *cur = proc_current();
+    struct a20_ht_internal *ht = task_get_a20_ht(cur);
+    if (!ht)
+        return 0;
+    return (int64_t)a20_ht_sig_take(ht);
+}
+
+int64_t sys_a20_signal_mask(const a20_syscall_args_t *args)
+{
+    uint64_t new_mask = A20_ARG(0);
+    uint64_t *old_out = (uint64_t *)A20_ARG(1);
+
+    task_t *cur = proc_current();
+    struct a20_ht_internal *ht = task_get_a20_ht(cur);
+    if (!ht)
+        return -A20_ERR_BAD_HANDLE;
+    uint64_t old = a20_ht_sig_set_blocked(ht, new_mask);
+    if (old_out && copy_to_user(old_out, &old, sizeof(old)) < 0)
+        return -A20_ERR_FAULT;
     return A20_OK;
 }
 

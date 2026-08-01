@@ -40,6 +40,8 @@
 #define A20_SYS_task_set_limits   0x020C
 #define A20_SYS_task_get_usage    0x020D
 #define A20_SYS_thread_get_cpu    0x020E
+#define A20_SYS_signal_check      0x020F
+#define A20_SYS_signal_mask       0x0210
 
 /* Memory (0x0300) */
 #define A20_SYS_vm_alloc          0x0300
@@ -71,6 +73,11 @@
 #define A20_SYS_fs_mount          0x040E
 #define A20_SYS_fs_umount         0x040F
 #define A20_SYS_fs_sync           0x0410
+#define A20_SYS_path_unlink_at    0x0411
+#define A20_SYS_path_rename_at    0x0412
+#define A20_SYS_path_link_at      0x0413
+#define A20_SYS_path_symlink_at   0x0414
+#define A20_SYS_path_readlink_at  0x0415
 
 /* Event / IPC (0x0500) */
 #define A20_SYS_event_queue_create 0x0500
@@ -123,6 +130,6 @@
 #define A20_SYS_futex_wait        0x0B00
 #define A20_SYS_futex_wake        0x0B01
 
-#define A20_NATIVE_SYSCALL_COUNT  94
+#define A20_NATIVE_SYSCALL_COUNT  101
 
 #endif
