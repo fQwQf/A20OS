@@ -51,6 +51,7 @@ struct open_how {
 #define FS_TYPE_DEVFS    5
 #define FS_TYPE_CGROUP   6
 #define FS_TYPE_SYSFS    7
+#define FS_TYPE_NTFS     8
 
 /* ---- Forward declarations ---- */
 struct vnode;
