@@ -183,11 +183,23 @@ int posix_spawn_file_actions_addopen(posix_spawn_file_actions_t *fa, int fd,
 }
 
 int posix_spawn_file_actions_addchdir_np(posix_spawn_file_actions_t *fa, const char *path) {
-	(void)fa; (void)path;
-	return ENOSYS;
+	auto *a = __mlibc_spawn_file_actions::from(fa);
+	if (!a || !path)
+		return EINVAL;
+	__mlibc_spawn_file_actions::fdop op{};
+	op.cmd = 4; /* FDOP_CHDIR */
+	op.path = frg::string<MemoryAllocator>{getAllocator(), path};
+	a->ops.push_back(std::move(op));
+	return 0;
 }
 
 int posix_spawn_file_actions_addfchdir_np(posix_spawn_file_actions_t *fa, int fd) {
-	(void)fa; (void)fd;
-	return ENOSYS;
+	auto *a = __mlibc_spawn_file_actions::from(fa);
+	if (!a || fd < 0)
+		return EINVAL;
+	__mlibc_spawn_file_actions::fdop op{};
+	op.cmd = 5; /* FDOP_FCHDIR */
+	op.fd = fd;
+	a->ops.push_back(std::move(op));
+	return 0;
 }
