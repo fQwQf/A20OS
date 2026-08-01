@@ -11,5 +11,6 @@ int  firmware_console_getchar(void);
 size_t firmware_acpi_apic_ids(uint32_t *ids, size_t capacity,
                               uint32_t bsp_apic_id);
 uintptr_t firmware_acpi_hpet_address(void);
+uint64_t firmware_acpi_tpm2(void);
 
 #endif
