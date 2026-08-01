@@ -14,6 +14,7 @@
 #include "mm/frame.h"
 #include "mm/mm.h"
 #include "mm/vmo.h"
+#include "cg/cgroup.h"
 
 struct vmo *vmo_create(uint32_t type, uint64_t size, uint32_t options)
 {
@@ -52,6 +53,9 @@ static void vmo_destroy(struct vmo *vmo)
         }
         kfree(vmo->pages);
     }
+    /* Release the cgroup charge for materialized pages. */
+    if (vmo->charge_cg && vmo->charged_pages)
+        cg_mem_uncharge(vmo->charge_cg, vmo->charged_pages);
     kfree(vmo);
 }
 
@@ -96,6 +100,51 @@ pfn_t vmo_get_page(struct vmo *vmo, uint32_t index)
     return pfn;
 }
 
+/*
+ * Demand-fault page source with cgroup accounting: materializes page @index
+ * and charges the new frame to @cg.  Returns 0 with *out set, or -ENOMEM if
+ * the charge or frame allocation fails.  The charge is recorded per-VMO and
+ * released on destroy.
+ */
+int vmo_get_page_charged(struct vmo *vmo, uint32_t index,
+                         struct cg_node *cg, pfn_t *out)
+{
+    if (!vmo || !out || index >= vmo->page_count)
+        return -EINVAL;
+
+    spin_lock(&vmo->lock);
+    if (vmo->pages[index] != PFN_NONE) {
+        *out = vmo->pages[index];
+        spin_unlock(&vmo->lock);
+        return 0;
+    }
+
+    if (cg && cg_mem_charge(cg, 1) != 0) {
+        spin_unlock(&vmo->lock);
+        return -ENOMEM;
+    }
+
+    pfn_t pfn = pfa_alloc_page();
+    if (pfn == PFN_NONE) {
+        if (cg)
+            cg_mem_uncharge(cg, 1);
+        spin_unlock(&vmo->lock);
+        return -ENOMEM;
+    }
+
+    void *va = pfn_to_virt(pfn);
+    memset(va, 0, PAGE_SIZE);
+    vmo->pages[index] = pfn;
+    vmo->phys_size += PAGE_SIZE;
+    if (cg) {
+        vmo->charge_cg = cg;
+        vmo->charged_pages++;
+    }
+    spin_unlock(&vmo->lock);
+    *out = pfn;
+    return 0;
+}
+
 int64_t vmo_resize(struct vmo *vmo, uint64_t new_size)
 {
     if (!vmo) return -1;
@@ -109,8 +158,12 @@ int64_t vmo_resize(struct vmo *vmo, uint64_t new_size)
             if (vmo->pages[i] != PFN_NONE) {
                 pfa_free_page(vmo->pages[i]);
                 vmo->pages[i] = PFN_NONE;
+                if (vmo->charge_cg && vmo->charged_pages)
+                    vmo->charged_pages--;
             }
         }
+        if (vmo->charge_cg && vmo->charged_pages == 0)
+            vmo->charge_cg = NULL;
         vmo->size = new_size;
         vmo->page_count = new_np;
         spin_unlock(&vmo->lock);

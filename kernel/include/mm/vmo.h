@@ -41,6 +41,8 @@ struct vmo {
     spinlock_t  lock;
     pfn_t      *pages;         /* canonical frames, owned by this VMO */
     uint32_t    page_count;
+    struct cg_node *charge_cg; /* cgroup charged for materialized pages */
+    uint64_t    charged_pages;
 };
 
 struct vmo *vmo_create(uint32_t type, uint64_t size, uint32_t options);
@@ -48,5 +50,10 @@ void        vmo_ref(struct vmo *vmo);
 void        vmo_release(struct vmo *vmo);
 pfn_t       vmo_get_page(struct vmo *vmo, uint32_t index);
 int64_t     vmo_resize(struct vmo *vmo, uint64_t new_size);
+
+/* Like vmo_get_page, but charges the frame to @cg on first materialization.
+ * Returns 0 on success (pfn in *out), -ENOMEM on charge/alloc failure. */
+int         vmo_get_page_charged(struct vmo *vmo, uint32_t index,
+                                 struct cg_node *cg, pfn_t *out);
 
 #endif /* _MM_VMO_H */
