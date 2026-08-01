@@ -348,6 +348,106 @@ static int fat32_long_names(const char *mp)
     return 0;
 }
 
+/* ext4_hardlink_truncate: exercise hard links (link/unlink with link count)
+ * and non-zero truncate block reclaim on an ext4 mount. */
+static int ext4_hardlink_truncate(const char *mp)
+{
+    char base[128], a[160], b[160];
+    snprintf(base, sizeof(base), "%s/e4hl", mp);
+    snprintf(a, sizeof(a), "%s/src.txt", base);
+    snprintf(b, sizeof(b), "%s/dst.txt", base);
+    unlink(b);
+    unlink(a);
+    rmdir(base);
+    if (mkdir(base, 0755) < 0)
+        return fail("e4hl-mkdir");
+
+    int fd = open(a, O_CREAT | O_TRUNC | O_RDWR, 0644);
+    if (fd < 0)
+        return fail("e4hl-open-a");
+    static const char payload[] = "hardlink-data-0123456789";
+    if (write(fd, payload, sizeof(payload)) != (int)sizeof(payload)) {
+        close(fd);
+        return fail("e4hl-write-a");
+    }
+    close(fd);
+
+    /* Create a hard link; both names must resolve to the same inode. */
+    if (syscall(SYS_linkat, AT_FDCWD, a, AT_FDCWD, b, 0) < 0)
+        return fail("e4hl-link");
+    struct stat sta, stb;
+    if (stat(a, &sta) < 0 || stat(b, &stb) < 0)
+        return fail("e4hl-stat");
+    if (sta.st_ino != stb.st_ino)
+        return fail("e4hl-ino-mismatch");
+    if (sta.st_nlink != 2)
+        return fail("e4hl-nlink");
+
+    /* Truncating through one link must be visible through the other. */
+    if (truncate(b, 8) < 0)
+        return fail("e4hl-truncate");
+    if (stat(a, &sta) < 0 || sta.st_size != 8)
+        return fail("e4hl-truncate-visible");
+
+    /* Writing via the second link must reach the shared inode. */
+    fd = open(b, O_RDWR);
+    if (fd < 0)
+        return fail("e4hl-open-b");
+    if (write(fd, "XY", 2) != 2) {
+        close(fd);
+        return fail("e4hl-write-b");
+    }
+    close(fd);
+    char buf[16] = {0};
+    fd = open(a, O_RDONLY);
+    if (fd < 0)
+        return fail("e4hl-reopen-a");
+    int nr = read(fd, buf, 6);
+    if (nr != 6 || memcmp(buf, "XYrdli", 6) != 0) {
+        close(fd);
+        return fail("e4hl-readback");
+    }
+    close(fd);
+
+    /* Drop one link: data must survive via the other. */
+    if (unlink(a) < 0)
+        return fail("e4hl-unlink-a");
+    if (stat(b, &stb) < 0 || stb.st_nlink != 1)
+        return fail("e4hl-nlink-after-unlink");
+    fd = open(b, O_RDONLY);
+    if (fd < 0)
+        return fail("e4hl-open-b-after-unlink");
+    close(fd);
+
+    /* Recreate a file of the same size and truncate it to force the
+     * partial-truncate block-reclaim path (>= 1 block freed). */
+    int tfd = open(b, O_TRUNC | O_RDWR);
+    if (tfd < 0)
+        return fail("e4hl-trunc-big");
+    for (int i = 0; i < 64; i++)
+        if (write(tfd, "0123456789abcdef", 16) != 16) {
+            close(tfd);
+            return fail("e4hl-fill");
+        }
+    close(tfd);
+    if (truncate(b, 40) < 0)
+        return fail("e4hl-trunc-small");
+    if (stat(b, &stb) < 0 || stb.st_size != 40)
+        return fail("e4hl-trunc-small-size");
+    fd = open(b, O_RDONLY);
+    if (fd < 0)
+        return fail("e4hl-reopen-small");
+    if (read(fd, buf, 8) != 8 || memcmp(buf, "01234567", 8) != 0) {
+        close(fd);
+        return fail("e4hl-trunc-readback");
+    }
+    close(fd);
+
+    unlink(b);
+    rmdir(base);
+    return 0;
+}
+
 static int ext4_open_unlink(void)
 {
     mkdir("/tmp/e4m", 0755);
@@ -365,10 +465,72 @@ static int ext4_open_unlink(void)
     int rc = 0;
     if (open_unlink_persist("/tmp/e4m") != 0)
         rc = 1;
+    else if (ext4_hardlink_truncate("/tmp/e4m") != 0)
+        rc = 1;
     if (syscall(SYS_umount2, "/tmp/e4m", 0) < 0 && rc == 0)
         rc = fail("ext4-umount");
     rmdir("/tmp/e4m");
     return rc;
+}
+
+/* fat32_rename_root: exercise the FAT32 rename op on the mounted boot disk
+ * (/bin is the fat32.img root).  If /bin is not writable/fat32 this is
+ * skipped non-fatally. */
+static int fat32_rename_root(void)
+{
+    char a[160], b[160], sub[160], moved[192];
+    snprintf(a, sizeof(a), "/bin/vfs_ren_a.txt");
+    snprintf(b, sizeof(b), "/bin/vfs_ren_b.txt");
+    snprintf(sub, sizeof(sub), "/bin/vfs_ren_sub");
+    snprintf(moved, sizeof(moved), "/bin/vfs_ren_sub/moved.txt");
+    unlink(b);
+    rmdir(sub);
+    unlink(a);
+
+    int fd = open(a, O_CREAT | O_TRUNC | O_RDWR, 0644);
+    if (fd < 0)
+        return fail("fren-open-a");
+    if (write(fd, "fren", 4) != 4) {
+        close(fd);
+        return fail("fren-write-a");
+    }
+    close(fd);
+
+    /* Same-directory rename. */
+    if (syscall(SYS_renameat2, AT_FDCWD, a, AT_FDCWD, b, 0) < 0)
+        return fail("fren-rename-same-dir");
+    if (open(a, O_RDONLY) >= 0)
+        return fail("fren-old-gone");
+    fd = open(b, O_RDONLY);
+    if (fd < 0)
+        return fail("fren-open-b");
+    char buf[8] = {0};
+    if (read(fd, buf, 4) != 4 || memcmp(buf, "fren", 4) != 0) {
+        close(fd);
+        return fail("fren-read-b");
+    }
+    close(fd);
+
+    /* Cross-directory rename into a subdirectory. */
+    if (mkdir(sub, 0755) < 0)
+        return fail("fren-mkdir-sub");
+    if (syscall(SYS_renameat2, AT_FDCWD, b, AT_FDCWD, moved, 0) < 0)
+        return fail("fren-rename-cross-dir");
+    if (open(b, O_RDONLY) >= 0)
+        return fail("fren-b-gone");
+    fd = open(moved, O_RDONLY);
+    if (fd < 0)
+        return fail("fren-open-moved");
+    memset(buf, 0, sizeof(buf));
+    if (read(fd, buf, 4) != 4 || memcmp(buf, "fren", 4) != 0) {
+        close(fd);
+        return fail("fren-read-moved");
+    }
+    close(fd);
+
+    unlink(moved);
+    rmdir(sub);
+    return 0;
 }
 
 static int fat32_open_unlink(void)
@@ -391,6 +553,8 @@ static int fat32_open_unlink(void)
     else if (open_trunc_unlink_persist("/tmp/fatm") != 0)
         rc = 1;
     else if (fat32_long_names("/tmp/fatm") != 0)
+        rc = 1;
+    else if (fat32_rename_root() != 0)
         rc = 1;
     if (syscall(SYS_umount2, "/tmp/fatm", 0) < 0 && rc == 0)
         rc = fail("fat32-umount");
@@ -968,6 +1132,62 @@ static int symlink_relative_target(void)
     return 0;
 }
 
+/* isofs_read: mount the ISO9660 disk at /dev/vdc (the smoke-vfs-stress
+ * harness attaches a third virtio-blk drive) and read a known file. */
+static int isofs_read(void)
+{
+    mkdir("/tmp/isom", 0755);
+    errno = 0;
+    long r = syscall(SYS_mount, "/dev/vdc", "/tmp/isom", "iso9660", 0, "");
+    if (r < 0) {
+        if (errno == ENODEV || errno == ENOENT || errno == EINVAL ||
+            errno == ENOSYS || errno == EPERM || errno == EBUSY) {
+            printf("VFS_STRESS: skip isofs (mount errno=%d)\n", errno);
+            rmdir("/tmp/isom");
+            return 0;
+        }
+        return fail("isofs-mount");
+    }
+
+    int rc = 0;
+    /* ISO names are translated to lowercase by the driver. */
+    int fd = open("/tmp/isom/hello.txt", O_RDONLY);
+    if (fd < 0)
+        rc = fail("isofs-open-hello");
+    else {
+        char buf[64] = {0};
+        int n = read(fd, buf, sizeof(buf) - 1);
+        if (n < 0 || strncmp(buf, "hello iso9660", 13) != 0)
+            rc = fail("isofs-read-hello");
+        close(fd);
+    }
+
+    /* Nested directory + file. */
+    fd = open("/tmp/isom/sub/nested.txt", O_RDONLY);
+    if (fd < 0)
+        rc = fail("isofs-open-nested");
+    else {
+        char buf[64] = {0};
+        int n = read(fd, buf, sizeof(buf) - 1);
+        if (n < 0 || strncmp(buf, "nested file", 11) != 0)
+            rc = fail("isofs-read-nested");
+        close(fd);
+    }
+
+    /* ISO is read-only: writes must fail. */
+    errno = 0;
+    fd = open("/tmp/isom/hello.txt", O_WRONLY);
+    if (fd >= 0) {
+        close(fd);
+        rc = fail("isofs-should-be-ro");
+    }
+
+    if (syscall(SYS_umount2, "/tmp/isom", 0) < 0 && rc == 0)
+        rc = fail("isofs-umount");
+    rmdir("/tmp/isom");
+    return rc;
+}
+
 int main(void)
 {
     printf("VFS_STRESS: start\n");
@@ -985,6 +1205,8 @@ int main(void)
     if (fat32_open_unlink() != 0)
         return 1;
     if (ext4_open_unlink() != 0)
+        return 1;
+    if (isofs_read() != 0)
         return 1;
     if (concurrent_open_close() != 0)
         return 1;
