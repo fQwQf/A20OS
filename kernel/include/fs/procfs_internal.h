@@ -8,6 +8,7 @@ struct mm_struct;
 
 extern int g_procfs_pipe_max_size;
 extern int g_procfs_lease_break_time;
+extern int g_sched_base_slice_ms;
 
 /*
  * Private procfs glue shared between fs/procfs/procfs.c (vnode/file operations and
@@ -84,6 +85,7 @@ typedef enum {
     PF_A20_OOM,
     PF_A20_TASK_LIFETIME,
     PF_A20_DRIVER_LIFECYCLE,
+    PF_A20_SCHED_BASE_SLICE,
     PF_CGROUPS,
     PF_SELF,
     PF_FSTYPE,
