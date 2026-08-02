@@ -21,6 +21,8 @@ typedef struct __attribute__((aligned(64))) proc_runq {
     task_t *tail[SCHED_LEVELS];
     uint32_t bitmap;
     unsigned nr_running;
+    uint64_t eevdf_vtime;      /* system virtual time (advances with run) */
+    uint64_t eevdf_weight;     /* sum of weights of runnable EEVDF tasks */
     unsigned long lock_acquires;
     unsigned long lock_contentions;
 } proc_runq_t;
@@ -143,25 +145,32 @@ static int sched_task_strictly_preempts(task_t *candidate, task_t *running)
 /* ================================================================
  * EEVDF proportional-share core
  *
- * Normal (SCHED_NORMAL/BATCH/IDLE) tasks are served in Earliest Eligible
- * Virtual Deadline First order.  Each task accumulates a weighted virtual
- * run time (`vruntime += dt * NICE0 / weight`), so a heavier (lower nice)
- * task accrues virtual time more slowly and is therefore entitled to more
- * real CPU time.  Its virtual deadline is `vruntime + virtual_slice`; the
- * runqueue is kept sorted by deadline and the earliest is picked next.
+ * Normal tasks are served in Earliest-Eligible-Virtual-Deadline-First order.
+ * Each task accumulates a weighted virtual run time
+ * (`vruntime += dt * NICE0 / weight`), so a heavier (lower nice) task accrues
+ * virtual time more slowly and is entitled to more real CPU.  The runqueue
+ * also tracks a system virtual time `eevdf_vtime` that advances at the
+ * aggregate rate `dt * NICE0 / total_weight`; a task is *eligible* when
+ * `vruntime <= vtime` (it has not yet consumed more than its fair share).
+ * Among eligible tasks the earliest `deadline = vruntime + virtual slice` is
+ * picked, which is what gives short-slice (latency sensitive) tasks an early
+ * turn without letting them exceed their weighted share.
+ *
+ * A freshly-woken task keeps its historical vruntime (sleeper bonus), but the
+ * bonus is clamped to EEVDF_MAX_LAG so a task that sleeps for a long time
+ * cannot then hog the CPU.
  *
  * RT tasks stay on runqueue level 0 with their existing fixed-priority
  * FIFO/RR semantics and are never charged virtual time, so they always run
  * ahead of the EEVDF list on level 1.
- *
- * Phase-A simplification: a task keeps its historical vruntime across sleep,
- * giving freshly-woken tasks an early deadline (sleeper bonus / latency
- * friendliness).  The strict lag-based eligibility gate and latency-nice
- * slice scaling are follow-up phases.
  */
 #define EEVDF_LEVEL           1     /* runqueue slot holding the EEVDF list */
 #define EEVDF_NICE0_LOAD      1024UL
 #define EEVDF_BASE_SLICE      (TICKS_PER_SEC / 100)   /* 10 ms base slice */
+#define EEVDF_MAX_LAG         (TICKS_PER_SEC / 100)   /* max sleeper bonus */
+
+/* Schedulable base slice (ms), writable via /proc/a20/sched_base_slice. */
+extern int g_sched_base_slice_ms;
 
 static inline uint64_t eevdf_weight(task_t *t)
 {
@@ -171,7 +180,11 @@ static inline uint64_t eevdf_weight(task_t *t)
 
 static inline uint64_t eevdf_vslice(task_t *t)
 {
-    return (EEVDF_BASE_SLICE * EEVDF_NICE0_LOAD) / eevdf_weight(t);
+    uint64_t slice = EEVDF_BASE_SLICE;
+    int ms = g_sched_base_slice_ms;
+    if (ms > 0)
+        slice = (uint64_t)ms * (TICKS_PER_SEC / 1000);
+    return (slice * EEVDF_NICE0_LOAD) / eevdf_weight(t);
 }
 
 static void eevdf_reset_deadline(task_t *t)
@@ -185,15 +198,24 @@ static void eevdf_account_run(task_t *t, uint64_t dt)
     t->eevdf_deadline = t->eevdf_vruntime + eevdf_vslice(t);
 }
 
-/* Charge `now - last_account` of real run time to t's virtual time. */
-static void eevdf_charge(task_t *t, uint64_t now)
+static inline int eevdf_eligible(proc_runq_t *rq, task_t *t)
+{
+    return t->eevdf_vruntime <= rq->eevdf_vtime;
+}
+
+/* Charge `now - last_account` of run time to t and advance system vtime. */
+static void eevdf_charge(proc_runq_t *rq, task_t *t, uint64_t now)
 {
     if (!t || sched_task_rt(t) || t->pid == 0)
         return;
     uint64_t dt = now - t->eevdf_last_account;
     t->eevdf_last_account = now;
-    if (dt)
-        eevdf_account_run(t, dt);
+    if (!dt)
+        return;
+    eevdf_account_run(t, dt);
+    uint64_t total = rq->eevdf_weight;
+    if (total)
+        rq->eevdf_vtime += (dt * EEVDF_NICE0_LOAD) / total;
 }
 
 static void sched_runq_unlink_at(proc_runq_t *rq, task_t *t, int q)
@@ -227,6 +249,20 @@ static void sched_runq_append_at(proc_runq_t *rq, task_t *t, int q)
 /* Insert an EEVDF task into level 1, keeping the list sorted by deadline. */
 static void sched_runq_eevdf_insert(proc_runq_t *rq, task_t *t)
 {
+    if (t->eevdf_deadline == 0)
+        eevdf_reset_deadline(t);
+
+    /* Clamp the sleeper bonus so a long-sleeper cannot hog the CPU. */
+    if (rq->head[EEVDF_LEVEL] &&
+        t->eevdf_vruntime + EEVDF_MAX_LAG < rq->eevdf_vtime) {
+        t->eevdf_vruntime = rq->eevdf_vtime - EEVDF_MAX_LAG;
+        eevdf_reset_deadline(t);
+    }
+
+    /* First EEVDF task on this CPU defines the system virtual time. */
+    if (!rq->head[EEVDF_LEVEL])
+        rq->eevdf_vtime = t->eevdf_vruntime;
+
     task_t *it = rq->head[EEVDF_LEVEL];
     while (it && it->eevdf_deadline <= t->eevdf_deadline)
         it = it->rq_next;
@@ -242,6 +278,13 @@ static void sched_runq_eevdf_insert(proc_runq_t *rq, task_t *t)
     else
         rq->tail[EEVDF_LEVEL] = t;
     rq->bitmap |= (1U << EEVDF_LEVEL);
+    rq->eevdf_weight += eevdf_weight(t);
+}
+
+static void sched_runq_eevdf_del_weight(proc_runq_t *rq, task_t *t)
+{
+    uint64_t w = eevdf_weight(t);
+    rq->eevdf_weight = (rq->eevdf_weight > w) ? rq->eevdf_weight - w : 0;
 }
 
 void proc_sched_runq_init(void) {
@@ -340,6 +383,8 @@ static void sched_runq_requeue_locked(task_t *t, unsigned dst_cpu,
     proc_runq_t *src = &sched_runq[src_cpu];
     proc_runq_t *dst = &sched_runq[dst_cpu];
     sched_runq_unlink_at(src, t, sched_level_clamp(old_level));
+    if (sched_level_clamp(old_level) == EEVDF_LEVEL)
+        sched_runq_eevdf_del_weight(src, t);
     t->on_rq = 0;
     if (src_cpu != dst_cpu) {
         if (__atomic_load_n(&src->nr_running, __ATOMIC_RELAXED) > 0)
@@ -598,7 +643,7 @@ void proc_sched_tick(int from_user)
         return;
 
     uint64_t now = timer_get_ticks();
-    eevdf_charge(cur, now);
+    eevdf_charge(&sched_runq[cpu_current_id()], cur, now);
 
     uint64_t slice = EEVDF_BASE_SLICE;
     if (slice == 0)
@@ -1003,6 +1048,8 @@ void proc_runq_remove_locked(task_t *t) {
 
     int q = sched_level_clamp(t->sched_level);
     sched_runq_unlink_at(rq, t, q);
+    if (q == EEVDF_LEVEL)
+        sched_runq_eevdf_del_weight(rq, t);
     t->on_rq = 0;
     t->ready_since = 0;
     if (__atomic_load_n(&rq->nr_running, __ATOMIC_RELAXED) > 0)
@@ -1051,6 +1098,7 @@ static task_t *sched_runq_steal_locked(proc_runq_t *lrq, unsigned local)
         }
 
         sched_runq_unlink_at(rrq, t, EEVDF_LEVEL);
+        sched_runq_eevdf_del_weight(rrq, t);
         t->on_rq = 0;
         t->ready_since = 0;
         if (__atomic_load_n(&rrq->nr_running, __ATOMIC_RELAXED) > 0)
@@ -1120,6 +1168,18 @@ task_t *proc_runq_pick_local(void)
             }
             if (best)
                 t = best;
+        } else if (q == EEVDF_LEVEL) {
+            /* Earliest eligible virtual deadline: skip over-run tasks. */
+            task_t *eligible = NULL;
+            for (task_t *it = rq->head[q]; it; it = it->rq_next) {
+                if (eevdf_eligible(rq, it)) {
+                    eligible = it;
+                    break;
+                }
+            }
+            if (eligible)
+                t = eligible;
+            /* else: keep the earliest deadline as a progress fallback */
         }
 
         if (t->rq_prev)
@@ -1137,6 +1197,8 @@ task_t *proc_runq_pick_local(void)
         t->rq_prev = NULL;
         t->on_rq = 0;
         t->ready_since = 0;
+        if (q == EEVDF_LEVEL)
+            sched_runq_eevdf_del_weight(rq, t);
         if (__atomic_load_n(&rq->nr_running, __ATOMIC_RELAXED) > 0)
             __atomic_fetch_sub(&rq->nr_running, 1, __ATOMIC_RELAXED);
 
@@ -1259,7 +1321,7 @@ void context_switch(task_t *next) {
     uint64_t now = timer_get_ticks();
 
     task_t *prev = proc_current();
-    eevdf_charge(prev, now);
+    eevdf_charge(&sched_runq[cpu_current_id()], prev, now);
     if (prev && prev->cgroup && prev->cg_cpu_start > 0) {
         uint64_t elapsed_ticks = now - prev->cg_cpu_start;
         uint64_t elapsed_ns = elapsed_ticks * 1000000000ULL / TICKS_PER_SEC;
@@ -1413,7 +1475,7 @@ void proc_yield(void) {
     task_t *idle = proc_idle_task();
     if (cur && cur != idle && cur->state == PROC_RUNNING) {
         uint64_t now = timer_get_ticks();
-        eevdf_charge(cur, now);
+        eevdf_charge(&sched_runq[cpu_current_id()], cur, now);
         if (cur->pid >= 4)
             ktrace_sched("[SCHED] yield: pid=%d\n", cur->pid);
         proc_make_ready(cur);

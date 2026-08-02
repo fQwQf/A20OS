@@ -5,7 +5,8 @@
 > **范围说明：** `docs/research/` 保存研究假设、形式化模型和实现演进记录，
 > 其中的伪代码不作为当前内核并发协议。当前 task 生命周期、wait queue、
 > Park/Wake、timeout、信号和 SMP 调度实现以
-> [进程、调度与阻塞协议](../process-scheduler.md)、`kernel/include/proc/`
+> [进程、调度与阻塞协议](../process-scheduler.md)、
+> [EEVDF 调度器设计](../eevdf-scheduler.md)、`kernel/include/proc/`
 > 及 `docs/testing/*-audit.md` 为准。
 
 ---
