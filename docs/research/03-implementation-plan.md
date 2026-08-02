@@ -406,7 +406,7 @@ typedef struct task {
 |------|------|
 | `kernel/mm/*` | vm_alloc/vm_map 调用相同的内部 mm API |
 | `kernel/fs/vfs.c` | path_open 调用 vfs 内部 API |
-| `kernel/fs/ext4.c`, `fat32.c` | 文件系统不关心上层 ABI |
+| `kernel/fs/diskfs/ext4.c`, `fat32.c` | 文件系统不关心上层 ABI |
 | `kernel/net/*` | socket 操作调用相同的 net API |
 | `kernel/core/trap.c` | trap 入口不改变 |
 | `kernel/arch/*` | 架构代码不改变 |
