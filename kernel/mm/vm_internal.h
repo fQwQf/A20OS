@@ -35,8 +35,4 @@ int mm_fork_clone_present_level(mm_struct_t *child, mm_struct_t *parent,
 int mm_fork_clone_present_range(mm_struct_t *child, mm_struct_t *parent,
                                 vaddr_t start, vaddr_t end, int shared);
 
-#ifdef CONFIG_NOMMU
-void *nommu_alloc_aligned(size_t len, vaddr_t *addr_out);
-#endif
-
 #endif /* _MM_VM_INTERNAL_H */

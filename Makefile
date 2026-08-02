@@ -600,6 +600,7 @@ KERNEL_SRC = $(wildcard $(KERNEL_DIR)/*.c) \
              $(wildcard $(KERNEL_DIR)/drivers/gpu/*.c) \
 	             $(wildcard $(KERNEL_DIR)/drivers/audio/*.c) \
 	             $(wildcard $(KERNEL_DIR)/drivers/input/*.c) \
+	             $(wildcard $(KERNEL_DIR)/drivers/security/*.c) \
 	             $(wildcard $(KERNEL_DIR)/drivers/usb/*/*.c) \
 	             $(wildcard $(BOARD_DRIVER_DIR)/*.c) \
 	             $(wildcard $(KERNEL_DIR)/platform/$(BOARD)/*.c) \

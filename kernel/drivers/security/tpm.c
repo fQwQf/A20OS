@@ -229,9 +229,12 @@ static void tpm2_cmd_hdr(uint8_t *cmd, uint16_t cc, uint32_t total) {
     tpm_put_be32(cmd + 6, cc);
 }
 
+/* Extract and normalise the response code from a TPM2 response. */
+static uint32_t tpm2_response_code(const uint8_t *rsp, uint32_t rsp_len);
+
 /* Run a TPM2 command, returning the response code (0 = success) and
  * leaving the response body in rsp. */
-static uint32_t tpm2_command(const uint8_t *params, uint32_t param_len,
+static __attribute__((unused)) uint32_t tpm2_command(const uint8_t *params, uint32_t param_len,
                              uint16_t cc, uint8_t *rsp, uint32_t rsp_cap,
                              uint32_t *rsp_len) {
     uint8_t cmd[128];
