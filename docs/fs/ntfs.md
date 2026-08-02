@@ -1,6 +1,6 @@
 # NTFS 文件系统
 
-A20OS 内置 NTFS 读/写文件系统（`kernel/fs/ntfs.c`）。实现依据 NTFS 磁盘格式规范独立编写，
+A20OS 内置 NTFS 读/写文件系统（`kernel/fs/diskfs/ntfs.c`）。实现依据 NTFS 磁盘格式规范独立编写，
 
 ## 支持范围
 

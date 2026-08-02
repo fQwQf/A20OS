@@ -6,11 +6,11 @@
 
 覆盖的后端：
 
-- `kernel/fs/fat32.c`：FAT32 块设备文件系统
-- `kernel/fs/ext4.c`：ext4 块设备文件系统
-- `kernel/fs/ramfs.c`：内存文件系统（rootfs、`/dev/shm`、`tmpfs`）
-- `kernel/fs/devfs.c`：设备特殊文件树（`/dev`）
-- `kernel/fs/procfs.c`：进程 / 合成文件树（`/proc`）
+- `kernel/fs/diskfs/fat32.c`：FAT32 块设备文件系统
+- `kernel/fs/diskfs/ext4.c`：ext4 块设备文件系统
+- `kernel/fs/diskfs/ramfs.c`：内存文件系统（rootfs、`/dev/shm`、`tmpfs`）
+- `kernel/fs/devfs/devfs.c`：设备特殊文件树（`/dev`）
+- `kernel/fs/procfs/procfs.c`：进程 / 合成文件树（`/proc`）
 - `kernel/fs/sysfs.c`：系统对象树（`/sys`）
 - `kernel/fs/pipe.c`：匿名 pipe 实现
 - `kernel/fs/anonfd.c`：匿名 fd 安装 helper
@@ -35,7 +35,7 @@
 
 ## 3. 各后端矩阵
 
-### 3.1 FAT32（`kernel/fs/fat32.c`）
+### 3.1 FAT32（`kernel/fs/diskfs/fat32.c`）
 
 FAT32 从 virtio-blk block cache 挂载。superblock 由 `fat32_sb_t.lock` 保护。per-inode metadata（mode、uid、gid）保存在按 cluster number 索引的全局 RAM 表 `g_fat32_meta` 中（`fat32.c:295`）。
 
@@ -75,7 +75,7 @@ FAT32 从 virtio-blk block cache 挂载。superblock 由 `fat32_sb_t.lock` 保�
 - `st_nlink` 总是 1。
 - 没有 xattr 持久化。
 
-### 3.2 ext4（`kernel/fs/ext4.c`）
+### 3.2 ext4（`kernel/fs/diskfs/ext4.c`）
 
 ext4 从 block cache 挂载，并使用短生命周期 vnode 模型：每次 lookup 都创建新的 vnode，refcount 到零时释放（`ext4.c:67`）。inode cache hook 是 stub（`ext4.c:75`）。
 
@@ -114,7 +114,7 @@ ext4 从 block cache 挂载，并使用短生命周期 vnode 模型：每次 loo
 - 没有 xattr。
 - mount 时做 fail-closed feature 检查：不支持的 incompat 特性（journal/recover、meta_bg、bigalloc、inline_data、casefold、encryption、MMP）会拒绝挂载，而不是静默误读镜像。
 
-### 3.3 NTFS（`kernel/fs/ntfs.c`）
+### 3.3 NTFS（`kernel/fs/diskfs/ntfs.c`）
 
 NTFS 从 block cache 挂载，直接解析 MFT（master file table）记录，支持 `$I30` 目录索引（index root + index allocation block）。`ntfs_sb_t` 由 `ntfs_lock` 保护。
 
@@ -149,7 +149,7 @@ NTFS 从 block cache 挂载，直接解析 MFT（master file table）记录，�
 - `$MFT` bitmap 不维护；通过扫描 MFT record 的 in-use flag 找空闲记录。
 - 非 ASCII 文件名变成 `?`。
 
-### 3.4 ISO9660（`kernel/fs/isofs.c`）
+### 3.4 ISO9660（`kernel/fs/diskfs/isofs.c`）
 
 ISO9660 是只读 CD-ROM 文件系统，从 block cache 挂载。在逻辑块 16 处扫描主卷描述符（PVD），按逻辑块大小（512–4096）读取目录记录；文件数据直接按 extent × block_size + 偏移从 block cache 读取。
 
@@ -175,7 +175,7 @@ ISO9660 是只读 CD-ROM 文件系统，从 block cache 挂载。在逻辑块 16
 - 没有 Joliet（补充卷描述符未解析）。
 - 只读；所有 mutation 返回 `-EROFS`。
 
-### 3.5 ramfs（`kernel/fs/ramfs.c`）
+### 3.5 ramfs（`kernel/fs/diskfs/ramfs.c`）
 
 ramfs 是 root filesystem，也是 `/dev/shm` 和显式 `tmpfs`/`ramfs` mount 的后端。它使用单个全局 inode table，每个目录有固定的 `RAMFS_MAX_INODES`（4096）和 `RAMFS_MAX_DIR_ENTRIES`（256）上限。
 | Op | Support | Errno | 说明 / 代码引用 |
@@ -211,7 +211,7 @@ ramfs 是 root filesystem，也是 `/dev/shm` 和显式 `tmpfs`/`ramfs` mount �
 - 总 inode 上限为 4096（`ramfs.c:10`）。
 - 没有持久化；xattr 也只是全局 RAM 状态。
 
-### 3.4 devfs（`kernel/fs/devfs.c`）
+### 3.4 devfs（`kernel/fs/devfs/devfs.c`）
 
 devfs 是合成设备树。它没有可变目录内容；entry 在编译期固定于 `g_nodes`（`devfs.c:71`）。
 
@@ -241,7 +241,7 @@ devfs 是合成设备树。它没有可变目录内容；entry 在编译期固�
 - 不支持 `chmod`/`chown`。
 - `/dev` 内容硬编码；未实现 uevent 驱动的节点创建。
 
-### 3.5 procfs（`kernel/fs/procfs.c`）
+### 3.5 procfs（`kernel/fs/procfs/procfs.c`）
 
 procfs 是完全合成的文件系统。entry 在 `lookup` 和 `open` 时生成。没有后端 mutation 操作。
 
