@@ -4,7 +4,7 @@
 #include <unistd.h>
 #include <sys/syscall.h>
 
-#include "../../kernel/include/mm/swap.h"
+#include "../../../kernel/include/mm/swap.h"
 
 #define SYS_mkswap 1020
 
