@@ -190,7 +190,7 @@ MUSL_CHECK_FILES := $(MUSL_CRT)/crt1.o \
 
 SBASE_DIR := external/sbase
 WGET_CMD_SRC := cmds/net/wget.c
-WGET_OBJ := $(OBJ_DIR)/cmds/wget.o
+WGET_OBJ := $(OBJ_DIR)/cmds/net/wget.o
 WGET_CMD := $(BUILD_DIR)/wget
 LOCAL_CMD_SRCS := $(filter-out $(WGET_CMD_SRC),$(wildcard cmds/*/*.c))
 LOCAL_CMD_NAMES := $(basename $(notdir $(LOCAL_CMD_SRCS)))
@@ -244,7 +244,7 @@ TLSE_CFLAGS := $(TLSE_BASE_CFLAGS) $(TLSE_OPT) $(TLSE_ARCH_CFLAGS) $(TLSE_NOMMU_
                 -DA20OS_NO_FAST_MUL_HIGH \
                 -DA20OS_NO_FAST_SQR
 
-LOCAL_CMD_OBJS := $(addprefix $(OBJ_DIR)/cmds/,$(addsuffix .o,$(LOCAL_CMD_NAMES)))
+LOCAL_CMD_OBJS := $(patsubst cmds/%.c,$(OBJ_DIR)/cmds/%.o,$(LOCAL_CMD_SRCS))
 LOCAL_CMDS := $(addprefix $(BUILD_DIR)/,$(LOCAL_CMD_NAMES))
 
 FF_DIR := external/fastfetch
@@ -631,9 +631,14 @@ $(BUILD_DIR)/init: $(INIT_OBJ) $(INIT_EXTRA_OBJS) | build_dir musl_prepare
 	@mkdir -p $(dir $@)
 	$(CC) $(LDFLAGS) -o $@ $(CRT_START) $(INIT_OBJ) $(INIT_EXTRA_OBJS) $(CRT_END) $(LIBC)
 
-$(LOCAL_CMDS): $(BUILD_DIR)/%: $(OBJ_DIR)/cmds/%.o | build_dir musl_prepare
-	@mkdir -p $(dir $@)
-	$(CC) $(LDFLAGS) -o $@ $(CRT_START) $< $(CRT_END) $(LIBC)
+# One explicit rule per local command: flat binary -> subdir object, so make
+# tracks the source dependency (the object rule below builds it from cmds/%/%.c).
+define LOCAL_CMD_RULE
+$(BUILD_DIR)/$(basename $(notdir $(1))): $(patsubst cmds/%.c,$(OBJ_DIR)/cmds/%.o,$(1)) | build_dir musl_prepare
+	@mkdir -p $$(dir $$@)
+	$(CC) $(LDFLAGS) -o $$@ $(CRT_START) $$< $(CRT_END) $(LIBC)
+endef
+$(foreach src,$(LOCAL_CMD_SRCS),$(eval $(call LOCAL_CMD_RULE,$(src))))
 
 $(SBASE_CMDS): $(BUILD_DIR)/%: $(OBJ_DIR)/sbase/%.o $(SBASE_LIBUTIL) $(SBASE_LIBUTF) | build_dir musl_prepare
 	@mkdir -p $(dir $@)
@@ -676,14 +681,12 @@ $(INIT_OBJ): $(INIT_MAIN_SRC) Makefile | build_dir musl_prepare
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(OBJ_DIR)/cmds/%.o: | build_dir musl_prepare
-	@src=$$(find cmds -name '$*.c' -print -quit); \
-	if [ -z "$$src" ]; then echo "error: no cmds source for $*"; exit 1; fi; \
-	mkdir -p $(dir $@); \
-	$(CC) $(CFLAGS) -c "$$src" -o $@
+$(OBJ_DIR)/cmds/%.o: cmds/%.c Makefile | build_dir musl_prepare
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -c $< -o $@
 
-$(OBJ_DIR)/cmds/audioplay.o: CFLAGS += -I../kernel/include
-$(OBJ_DIR)/cmds/audioplay.o: ../kernel/include/uapi/a20/audio.h
+$(OBJ_DIR)/cmds/core/audioplay.o: CFLAGS += -I../kernel/include
+$(OBJ_DIR)/cmds/core/audioplay.o: ../kernel/include/uapi/a20/audio.h
 
 $(OBJ_DIR)/sbase/%.o: $(SBASE_DIR)/%.c Makefile | build_dir musl_prepare
 	@mkdir -p $(dir $@)

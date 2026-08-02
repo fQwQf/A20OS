@@ -209,8 +209,12 @@ static int vfs_proc_fd_open(const char *path, int flags)
 
     vfile_t *opened = vn->ops->open(vn, flags);
     if (!opened) {
+        task_t *cur = proc_current();
+        int open_err = cur ? cur->vfs_open_errno : 0;
+        if (cur)
+            cur->vfs_open_errno = 0;
         vnode_put(vn);
-        return -ENOMEM;
+        return open_err ? open_err : -ENOMEM;
     }
     strncpy(opened->path, target_path, MAX_PATH_LEN - 1);
     opened->path[MAX_PATH_LEN - 1] = '\0';
@@ -231,6 +235,8 @@ static int vfs_proc_fd_open(const char *path, int flags)
 int vfs_open(const char *path, int flags, int mode) {
     /* Resolve cwd from current process */
     task_t *cur = proc_current();
+    if (cur)
+        cur->vfs_open_errno = 0;
     const char *cwd = cur ? cur->fs.cwd : "/";
 
     /* Check for special device files */
@@ -341,7 +347,13 @@ int vfs_open(const char *path, int flags, int mode) {
         return -ENOSYS;
     }
     vfile_t *vf = vn->ops->open(vn, flags);
-    if (!vf) { vnode_put(vn); return -ENOMEM; }
+    if (!vf) {
+        int open_err = cur ? cur->vfs_open_errno : 0;
+        if (cur)
+            cur->vfs_open_errno = 0;
+        vnode_put(vn);
+        return open_err ? open_err : -ENOMEM;
+    }
     strncpy(vf->path, resolved, MAX_PATH_LEN - 1);
     vf->path[MAX_PATH_LEN - 1] = '\0';
 
@@ -390,6 +402,8 @@ int vfs_dirfd_path(int dirfd, char *out, size_t outsz) {
 int vfs_openat2(int dirfd, const char *path, int flags, int mode, uint64_t resolve) {
     if (!path) return -EFAULT;
     task_t *cur = proc_current();
+    if (cur)
+        cur->vfs_open_errno = 0;
     const char *root = cur && cur->fs.root_path[0] ? cur->fs.root_path : "/";
 
     char start[MAX_PATH_LEN];
@@ -508,7 +522,13 @@ int vfs_openat2(int dirfd, const char *path, int flags, int mode, uint64_t resol
         return -ENOSYS;
     }
     vfile_t *vf = vn->ops->open(vn, flags);
-    if (!vf) { vnode_put(vn); return -ENOMEM; }
+    if (!vf) {
+        int open_err = cur ? cur->vfs_open_errno : 0;
+        if (cur)
+            cur->vfs_open_errno = 0;
+        vnode_put(vn);
+        return open_err ? open_err : -ENOMEM;
+    }
     strncpy(vf->path, resolved, MAX_PATH_LEN - 1);
     vf->path[MAX_PATH_LEN - 1] = '\0';
 

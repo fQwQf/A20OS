@@ -158,6 +158,7 @@ typedef struct task_t {
     int      exit_code;
     struct files_struct *files;
     proc_fs_context_t fs;
+    int      vfs_open_errno;   /* specific error from the last failed vnode open */
     struct task_t *parent;
     uint64_t wake_time;
     uint64_t alarm_expire;
@@ -185,6 +186,9 @@ typedef struct task_t {
     uint64_t exec_start;
     uint64_t ready_since;
     uint32_t cfs_weight;
+    uint64_t eevdf_vruntime;     /* weighted virtual run time (ticks) */
+    uint64_t eevdf_deadline;     /* virtual deadline: vruntime + virtual slice */
+    uint64_t eevdf_last_account; /* tick stamp of the last vruntime charge */
     int      sched_policy;
     int      sched_reset_on_fork;
     int      waiting_for_child;
