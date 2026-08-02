@@ -116,7 +116,7 @@ MUSL_INC := -isystem $(MUSL_BUILD)/obj/include \
             -isystem $(MUSL_BASE)/arch/generic
 
 CFLAGS := -Wall -Wextra $(OPT) -ffreestanding -nostdinc $(MUSL_INC) \
-          -Iinit_common $(ARCH_CFLAGS)
+          -Iinit_common -Icmds $(ARCH_CFLAGS)
 LDFLAGS := -static -nostdlib -Wl,--build-id=none -Wl,-Ttext-segment=0x10000 $(ARCH_LDFLAGS)
 
 ifeq ($(NOMMU),1)
@@ -189,10 +189,10 @@ MUSL_CHECK_FILES := $(MUSL_CRT)/crt1.o \
                     $(MUSL_BUILD_STAMP)
 
 SBASE_DIR := external/sbase
-WGET_CMD_SRC := cmds/wget.c
+WGET_CMD_SRC := cmds/net/wget.c
 WGET_OBJ := $(OBJ_DIR)/cmds/wget.o
 WGET_CMD := $(BUILD_DIR)/wget
-LOCAL_CMD_SRCS := $(filter-out $(WGET_CMD_SRC),$(wildcard cmds/*.c))
+LOCAL_CMD_SRCS := $(filter-out $(WGET_CMD_SRC),$(wildcard cmds/*/*.c))
 LOCAL_CMD_NAMES := $(basename $(notdir $(LOCAL_CMD_SRCS)))
 
 SBASE_ALL_BINS := basename cat chgrp chmod chown chroot cksum cmp comm cp cut date dd \
@@ -244,8 +244,8 @@ TLSE_CFLAGS := $(TLSE_BASE_CFLAGS) $(TLSE_OPT) $(TLSE_ARCH_CFLAGS) $(TLSE_NOMMU_
                 -DA20OS_NO_FAST_MUL_HIGH \
                 -DA20OS_NO_FAST_SQR
 
-LOCAL_CMD_OBJS := $(patsubst cmds/%.c,$(OBJ_DIR)/cmds/%.o,$(LOCAL_CMD_SRCS))
-LOCAL_CMDS := $(patsubst cmds/%.c,$(BUILD_DIR)/%,$(LOCAL_CMD_SRCS))
+LOCAL_CMD_OBJS := $(addprefix $(OBJ_DIR)/cmds/,$(addsuffix .o,$(LOCAL_CMD_NAMES)))
+LOCAL_CMDS := $(addprefix $(BUILD_DIR)/,$(LOCAL_CMD_NAMES))
 
 FF_DIR := external/fastfetch
 FF_GEN := $(OBJ_DIR)/fastfetch/gen
@@ -676,9 +676,11 @@ $(INIT_OBJ): $(INIT_MAIN_SRC) Makefile | build_dir musl_prepare
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(OBJ_DIR)/cmds/%.o: cmds/%.c Makefile | build_dir musl_prepare
-	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -c $< -o $@
+$(OBJ_DIR)/cmds/%.o: | build_dir musl_prepare
+	@src=$$(find cmds -name '$*.c' -print -quit); \
+	if [ -z "$$src" ]; then echo "error: no cmds source for $*"; exit 1; fi; \
+	mkdir -p $(dir $@); \
+	$(CC) $(CFLAGS) -c "$$src" -o $@
 
 $(OBJ_DIR)/cmds/audioplay.o: CFLAGS += -I../kernel/include
 $(OBJ_DIR)/cmds/audioplay.o: ../kernel/include/uapi/a20/audio.h
