@@ -172,6 +172,9 @@ NET_HOSTFWD ?= hostfwd=tcp::5555-:5555,hostfwd=udp::5555-:5555
 NETDEV_USER = -netdev user,id=net$(if $(strip $(NET_HOSTFWD)),$(comma)$(NET_HOSTFWD),)
 SMOKE_TIMEOUT ?= 20s
 SMOKE_INPUT_DELAY ?= 2
+# mm_stress drives ~8 MiB of ramfs page-cache eviction plus fork/mremap/huge
+# page coverage under TCG; it is the heaviest smoke and needs a longer budget.
+SMOKE_TIMEOUT_MM_ST ?= 45s
 SMOKE_LOG_DIR ?= .kernel-build/smoke
 STEP35_TIMEOUT ?= 300s
 STEP35_INPUT_DELAY ?= 3
@@ -877,8 +880,8 @@ check-blocking-point-boundary:
 	@rg -Uq 'typedef struct futex_waiter[^{]*\{[^}]*task[^}]*wait_seq' kernel/abi/linux/sys_futex.c
 	@rg -Uq 'typedef struct wait_timer[^{]*\{[^}]*task[^}]*wait_seq' kernel/proc/timer_heap.c
 	@rg -Uq 'typedef struct proc_wake_q_item[^{]*\{[^}]*task[^}]*seq' kernel/include/proc/park.h
-	@rg -q "FUTEX_STRESS: unrelated-wake-isolation PASS" user/cmds/futex_stress.c
-	@rg -q "PROC_STRESS: vfork-auto-reap PASS" user/cmds/proc_stress.c
+	@rg -q "FUTEX_STRESS: unrelated-wake-isolation PASS" user/cmds/stress/futex_stress.c
+	@rg -q "PROC_STRESS: vfork-auto-reap PASS" user/cmds/stress/proc_stress.c
 	@echo "check-blocking-point-boundary: PASS"
 
 check-signal-exit-boundary:
@@ -903,8 +906,8 @@ check-signal-exit-boundary:
 		kernel/ipc/eventfd.c
 	@rg -Uq 'timerfd_read[\s\S]*proc_park_prepare\(PROC_WAIT_INTERRUPTIBLE' \
 		kernel/ipc/timerfd.c
-	@rg -q "PROC_STRESS: signal-stop-exit PASS" user/cmds/proc_stress.c
-	@rg -q "PROC_STRESS: signal-mask-park PASS" user/cmds/proc_stress.c
+	@rg -q "PROC_STRESS: signal-stop-exit PASS" user/cmds/stress/proc_stress.c
+	@rg -q "PROC_STRESS: signal-mask-park PASS" user/cmds/stress/proc_stress.c
 	@echo "check-signal-exit-boundary: PASS"
 
 check-timeout-ownership-boundary:
@@ -918,9 +921,9 @@ check-timeout-ownership-boundary:
 		kernel/proc/timer_heap.c
 	@rg -q "timeout_heap_violations" \
 		kernel/include/proc/lifetime.h kernel/proc/lifetime.c
-	@rg -Fq "timeout-capacity+1 PASS" user/cmds/lifetime_stress.c
+	@rg -Fq "timeout-capacity+1 PASS" user/cmds/stress/lifetime_stress.c
 	@rg -q "FUTEX_STRESS: stale-timeout-isolation PASS" \
-		user/cmds/futex_stress.c
+		user/cmds/stress/futex_stress.c
 	@! rg -U --pcre2 \
 		'wait_timer_count[\s\S]{0,500}PROC_READY' kernel/proc/sched.c
 	@echo "check-timeout-ownership-boundary: PASS"
@@ -947,7 +950,7 @@ check-smp-runqueue-boundary:
 		kernel/arch/x86_64/trap/irqchip.c
 	@rg -q "scheduler_violations" \
 		kernel/include/proc/lifetime.h kernel/proc/lifetime.c
-	@rg -q "SCHED_STRESS: smp-runqueue PASS" user/cmds/sched_stress.c
+	@rg -q "SCHED_STRESS: smp-runqueue PASS" user/cmds/stress/sched_stress.c
 	@echo "check-smp-runqueue-boundary: PASS"
 
 check-process-lock-split-boundary:
@@ -962,7 +965,7 @@ check-process-lock-split-boundary:
 	@! rg -n 'proc_runq_pick_locked' kernel/proc kernel/include/proc
 	@rg -q "runqueue_parallel_pick_peak" \
 		kernel/include/proc/lifetime.h kernel/proc/lifetime.c
-	@rg -q "SCHED_STRESS: lock-split PASS" user/cmds/sched_stress.c
+	@rg -q "SCHED_STRESS: lock-split PASS" user/cmds/stress/sched_stress.c
 	@echo "check-process-lock-split-boundary: PASS"
 
 check-doc-test-gates: check-concurrency-foundation check-smp-platform-boundary check-task-state-boundary check-task-lifetime-boundary check-blocking-point-boundary check-signal-exit-boundary check-timeout-ownership-boundary check-smp-runqueue-boundary check-process-lock-split-boundary check-mm-lock-model check-io-progress-model check-vfs-abstraction check-abi-boundary check-driver-core-model check-external-dependency-boundary check-abi-smoke-gate check-doc-drift
@@ -1032,7 +1035,7 @@ check-mm-lock-model: smoke-mm-stress
 	@rg -q "MM_FORK_COW_REGRESSION_GUARD" kernel/mm/vm.c
 	@rg -q "FILE_MMAP_PAGE_CACHE_CONTRACT" kernel/include/fs/page_cache.h
 	@rg -q "OOM_RECLAIM_LIFETIME_CONTRACT" kernel/include/mm/oom.h
-	@rg -q "MM_STRESS: PASS" user/cmds/mm_stress.c
+	@rg -q "MM_STRESS: PASS" user/cmds/stress/mm_stress.c
 	@echo "check-mm-lock-model: PASS"
 
 check-io-progress-model:
@@ -1080,7 +1083,7 @@ check-vfs-abstraction: smoke-vfs-stress
 	@rg -q "\.open[[:space:]]*=" kernel/fs/diskfs/ramfs.c kernel/fs/diskfs/fat32.c kernel/fs/diskfs/ext4.c kernel/fs/procfs/procfs.c kernel/fs/devfs/devfs.c kernel/fs/cgroupfs.c kernel/fs/sysfs.c
 	@rg -q "CGROUPFS_DOTDOT_PARENT_LOOKUP" kernel/fs/cgroupfs.c
 	@rg -q "VFS_CONCURRENCY_SMOKE_MATRIX" kernel/fs/vfs.c
-	@rg -q "VFS_STRESS: PASS" user/cmds/vfs_stress.c
+	@rg -q "VFS_STRESS: PASS" user/cmds/stress/vfs_stress.c
 	@! rg -q "FS_TYPE_(FAT32|EXT4|RAMFS|PROCFS|DEVFS|CGROUP|SYSFS).*open|fat32_open_vnode|ext4_open_vnode|ramfs_open_vnode|procfs_open_vnode|devfs_open_vnode|cgroupfs_open_vnode|sysfs_open_vnode" kernel/fs/vfs.c
 	@! rg -q "refcount_(set|inc|dec_and_test)\(&[A-Za-z0-9_>\.-]*->ref_count" kernel/fs/diskfs/ramfs.c kernel/fs/diskfs/fat32.c kernel/fs/diskfs/ext4.c kernel/fs/procfs/procfs.c kernel/fs/devfs/devfs.c kernel/fs/cgroupfs.c kernel/fs/sysfs.c kernel/fs/inotify.c kernel/fs/memfd.c kernel/fs/pipe.c
 	@! rg -q "for simplicity" kernel/fs/cgroupfs.c
@@ -1092,9 +1095,9 @@ check-abi-boundary:
 	@rg -q "LINUX_ABI_EXPLICIT_STUB_CONTRACT" kernel/abi/linux/syscall_table.def
 	@rg -q "LINUX_ABI_SCHED_STUB_BOUNDARY" kernel/abi/linux/sys_sched.c
 	@rg -q "smoke-sched-stress" Makefile
-	@rg -q "SCHED_STRESS: PASS" user/cmds/sched_stress.c
+	@rg -q "SCHED_STRESS: PASS" user/cmds/stress/sched_stress.c
 	@rg -q "smoke-futex-stress" Makefile
-	@rg -q "FUTEX_STRESS: PASS" user/cmds/futex_stress.c
+	@rg -q "FUTEX_STRESS: PASS" user/cmds/stress/futex_stress.c
 	@rg -q "LINUX_ABI_BPF_STUB_BOUNDARY" kernel/abi/linux/sys_bpf.c
 	@rg -q "LINUX_ABI_NAMESPACE_STUB_BOUNDARY" kernel/abi/linux/sys_namespace.c
 	@rg -q "LINUX_ABI_CAPABILITY_STUB_BOUNDARY" kernel/abi/linux/sys_capability.c
@@ -1547,7 +1550,7 @@ smoke-mm-stress:
 	log="$(SMOKE_LOG_DIR)/mm-stress-riscv64.log"; \
 	status=0; \
 	{ sleep $(SMOKE_INPUT_DELAY); printf 'mm_stress\npoweroff\n'; } | \
-	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
+	$(TIMEOUT) $(SMOKE_TIMEOUT_MM_ST) qemu-system-riscv64 \
 		-machine virt -m 1G -nographic -smp 1 -bios default \
 		-global virtio-mmio.force-legacy=false \
 		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
