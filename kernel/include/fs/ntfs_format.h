@@ -3,7 +3,7 @@
 
 /*
  * Pure NTFS on-disk format helpers shared between the kernel filesystem
- * driver (fs/ntfs.c) and the host-side format regression tests
+ * driver (fs/diskfs/ntfs.c) and the host-side format regression tests
  * (tools/tests/ntfs_format_test.c).  No kernel services are used here.
  */
 

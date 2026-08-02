@@ -10,7 +10,7 @@ extern int g_procfs_pipe_max_size;
 extern int g_procfs_lease_break_time;
 
 /*
- * Private procfs glue shared between fs/procfs.c (vnode/file operations and
+ * Private procfs glue shared between fs/procfs/procfs.c (vnode/file operations and
  * directory lookup) and fs/procfs_render.c (on-demand content generation for
  * the synthetic /proc files).  These types and helpers are not part of the
  * public VFS API and must not be referenced outside kernel/fs/.
