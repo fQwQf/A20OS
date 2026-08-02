@@ -47,6 +47,7 @@ typedef struct pf_entry {
 } pf_entry_t;
 
 int g_procfs_pipe_max_size = 1048576;
+int g_sched_base_slice_ms = 10;
 int g_procfs_lease_break_time = 45;
 
 
@@ -104,6 +105,7 @@ static pf_type_t name_to_type(const char *name, int *out_pid) {
     if (strcmp(name, "pidmap") == 0) return PF_SYS_KERNEL_PIDMAP;
     if (strcmp(name, "a20") == 0) return PF_A20;
     if (strcmp(name, "bcache") == 0) return PF_A20_BCACHE;
+    if (strcmp(name, "sched_base_slice") == 0) return PF_A20_SCHED_BASE_SLICE;
     if (strcmp(name, "page_cache") == 0) return PF_A20_PAGE_CACHE;
     if (strcmp(name, "oom") == 0) return PF_A20_OOM;
     if (strcmp(name, "task_lifetime") == 0) return PF_A20_TASK_LIFETIME;
@@ -339,6 +341,9 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
     } else if (dp && dp->type == PF_A20 && strcmp(name, "driver_lifecycle") == 0) {
         child = new_entry(name, PF_A20_DRIVER_LIFECYCLE, 0);
         type = PF_A20_DRIVER_LIFECYCLE;
+    } else if (dp && dp->type == PF_A20 && strcmp(name, "sched_base_slice") == 0) {
+        child = new_entry(name, PF_A20_SCHED_BASE_SLICE, 0);
+        type = PF_A20_SCHED_BASE_SLICE;
     } else if (dp && dp->type == PF_ROOT && dp->pid == 0 && strcmp(name, "interrupts") == 0) {
         child = new_entry(name, PF_INTERRUPTS, 0);
         type = PF_INTERRUPTS;
@@ -468,7 +473,8 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
     if (type == PF_A20_DRIVER_LIFECYCLE)
         vn->mode = S_IFREG | 0200;
     else if (type == PF_PID_OOM_SCORE_ADJ ||
-        type == PF_SYS_FS_PIPE_MAX_SIZE || type == PF_SYS_FS_LEASE_BREAK_TIME ||
+        type == PF_A20_SCHED_BASE_SLICE || type == PF_SYS_FS_PIPE_MAX_SIZE ||
+        type == PF_SYS_FS_LEASE_BREAK_TIME ||
         type == PF_SYS_KERNEL_SCHED_AUTOGROUP ||
         type == PF_SYS_KERNEL_CORE_PATTERN ||
         type == PF_SYS_VM_DROP_CACHES ||
@@ -640,6 +646,17 @@ static int procfs_fwrite(vfile_t *vf, const char *buf, size_t count) {
         int value = atoi(tmp);
         int r = proc_set_pid_max(value);
         return r < 0 ? r : (int)count;
+    }
+    if (p->type == PF_A20_SCHED_BASE_SLICE) {
+        char tmp[32];
+        size_t n = count < sizeof(tmp) - 1 ? count : sizeof(tmp) - 1;
+        memcpy(tmp, buf, n);
+        tmp[n] = '\0';
+        int value = atoi(tmp);
+        if (value < 1 || value > 1000)
+            return -EINVAL;
+        g_sched_base_slice_ms = value;
+        return (int)count;
     }
     if (p->type == PF_SYS_FS_PIPE_MAX_SIZE || p->type == PF_SYS_FS_LEASE_BREAK_TIME) {
         char tmp[32];

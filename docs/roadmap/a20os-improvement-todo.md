@@ -45,9 +45,18 @@
 - [x] 将仍依赖单线程执行的 MM 路径改为在 VMA 和页表修改期间持有 `mm->lock`。
   - 证据：`kernel/include/mm/vm.h` 说明部分路径仍依赖单线程执行或更窄的局部锁。
   - 完成条件：`make check-mm-lock-model` 包含 concurrent mmap、munmap、fault、fork COW 和 exit teardown 的行为测试。
-- [x] 为 close/read/write、dup/close_range、rename/unlink/open、symlink loop 和 mount/unmount 增加运行时 VFS 并发压力测试。
-  - 证据：`kernel/fs/vfs.c` 在 VFS 并发 smoke 矩阵中将运行时扩展描述为未来工作。
-  - 完成条件：`make check-vfs-abstraction` 能在这些竞争回归时失败，而不仅仅检查文档标记是否存在。
+ - [x] 为 close/read/write、dup/close_range、rename/unlink/open、symlink loop 和 mount/unmount 增加运行时 VFS 并发压力测试。
+   - 证据：`kernel/fs/vfs.c` 在 VFS 并发 smoke 矩阵中将运行时扩展描述为未来工作。
+   - 完成条件：`make check-vfs-abstraction` 能在这些竞争回归时失败，而不仅仅检查文档标记是否存在。
+- [x] 用 EEVDF 替换 8 级 MLFQ，作为普通任务的统一调度核心。
+  - 证据：`kernel/proc/sched.c` 实现加权 vruntime、系统虚拟时间资格门控、
+    虚拟截止时间选择、空闲窃取与时间片旋钮；`/proc/a20/sched_base_slice`
+    可运行时切换桌面/HPC；nice -20 相对 nice 19 获得约 10^5 倍 CPU，
+    8 个忙任务在 8 核上全核分布。
+  - 验证：`make check-doc-test-gates`、双架构 sched/futex/proc 压力、
+    riscv64 8 核 `sched_stress` smp-runqueue + lock-split PASS。
+  - 设计：`docs/eevdf-scheduler.md`。
+
 
 ## P0：Linux ABI 正确性
 
