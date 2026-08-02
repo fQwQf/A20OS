@@ -1,4 +1,4 @@
-#ifdef CONFIG_X86_64
+#ifdef CONFIG_AHCI
 
 #include "drivers/block/ahci.h"
 #include "drivers/bus/pci_bus.h"
@@ -433,4 +433,4 @@ static driver_t ahci_driver = {
 
 DRIVER_REGISTER(ahci_driver);
 
-#endif /* CONFIG_X86_64 */
+#endif /* CONFIG_AHCI */

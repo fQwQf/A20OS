@@ -417,10 +417,30 @@ ifneq ($(NR_CPUS),1)
 CFLAGS += -DCONFIG_SMP
 endif
 ifeq ($(COOPERATIVE_BOOT),1)
-CFLAGS += -DCONFIG_AARCH64_COOPERATIVE_BOOT
+CFLAGS += -DCONFIG_COOPERATIVE_BOOT
 endif
 ifeq ($(BOARD),virtualbox-aarch64)
-CFLAGS += -DCONFIG_AARCH64_COOPERATIVE_BOOT
+CFLAGS += -DCONFIG_COOPERATIVE_BOOT
+endif
+
+# ------------------------------------------------------------------
+# Hardware/board features consumed by common code.
+#
+# Feature names stay arch-agnostic so common code never branches on
+# CONFIG_<architecture>; the check-arch-boundary gate enforces that.
+# ------------------------------------------------------------------
+ifeq ($(ARCH),x86_64)
+CFLAGS += -DCONFIG_IOPORT -DCONFIG_AHCI -DCONFIG_PS2_INPUT \
+          -DCONFIG_PC_SPEAKER -DCONFIG_TPM -DCONFIG_PCI_MMIO_BASE_LEGACY
+endif
+ifneq ($(filter x86_64 loongarch64 riscv64,$(ARCH)),)
+CFLAGS += -DCONFIG_PCI_MMIO_ALLOC
+endif
+ifneq ($(filter loongarch64 riscv64,$(ARCH)),)
+CFLAGS += -DCONFIG_PCI_MMIO_BASE_ECAM
+endif
+ifeq ($(ARCH),aarch64)
+CFLAGS += -DCONFIG_TRAP_ESR_DIAG
 endif
 ELF_MACHINE_riscv64     := 243
 ELF_MACHINE_loongarch64 := 258
@@ -1543,7 +1563,8 @@ smoke-mm-stress:
 	fi
 
 smoke-vfs-stress:
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build $(ISOFS_IMG)
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
+	$(MAKE) -s ARCH=riscv64 ABI=linux BRINGUP=0 .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/isofs.img
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/vfs-stress-riscv64.log"; \
@@ -1556,7 +1577,7 @@ smoke-vfs-stress:
 		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
 		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/ext4.img,if=none,format=raw,id=x1 \
 		-device virtio-blk-device,drive=x1,bus=virtio-mmio-bus.1 \
-		-drive file=$(ISOFS_IMG),if=none,format=raw,id=x2 \
+		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/isofs.img,if=none,format=raw,id=x2 \
 		-device virtio-blk-device,drive=x2,bus=virtio-mmio-bus.2 \
 		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
 			-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
