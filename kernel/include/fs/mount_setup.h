@@ -1,0 +1,21 @@
+#ifndef _MOUNT_SETUP_H
+#define _MOUNT_SETUP_H
+
+/*
+ * Block-device mount strategy, split out of kernel/main.c.
+ *
+ * Probes all virtio-blk / virtio-scsi / AHCI / USB-storage devices and
+ * auto-detects filesystems:
+ *   fat32 -> /bin   (our utilities: init, mksh, cmds, ...)
+ *   ext4  -> /test  (judge sdcard or local sdcard image)
+ *
+ * The logic is independent of device ordering and works regardless of how the
+ * disks are enumerated.  In BRINGUP mode there are no block devices and this
+ * module compiles to nothing.
+ */
+
+#ifndef BRINGUP
+void mount_block_devices(void);
+#endif
+
+#endif /* _MOUNT_SETUP_H */
