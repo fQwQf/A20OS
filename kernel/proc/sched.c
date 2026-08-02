@@ -1012,6 +1012,64 @@ void proc_runq_remove_locked(task_t *t) {
 }
 
 /*
+ * Idle-task stealing: when the local runqueue is empty, pull a runnable task
+ * from a remote CPU's runqueue so idle CPUs keep absorbing load (prevents
+ * persistent per-CPU imbalance under bursty wakeups, e.g. Cargo spawning many
+ * compiler threads).  The local runqueue lock is already held; each remote
+ * queue is tried non-blockingly so an idle CPU never waits on a busy one.
+ * The stolen runqueue reference is transferred to the local dispatch without
+ * a put/get gap, matching the migration protocol.  Only EEVDF (normal) tasks
+ * are stolen: RT tasks are deliberately placed by the wakeup path and must
+ * not be yanked off their target CPU by an idle peer (keeps sched_setaffinity
+ * and wake-affinity placement deterministic).  We prefer the least-urgent task
+ * (latest EEVDF deadline) so the remote keeps its hot work.
+ */
+static task_t *sched_runq_steal_locked(proc_runq_t *lrq, unsigned local)
+{
+    for (unsigned remote = 0; remote < CONFIG_NR_CPUS; remote++) {
+        if (remote == local || !smp_cpu_is_online(remote))
+            continue;
+        proc_runq_t *rrq = &sched_runq[remote];
+        uint64_t rrf = 0;
+        if (!spin_trylock_irqsave(&rrq->lock, &rrf))
+            continue;
+
+        /* Steal only a genuine surplus: keep at least one task on the remote
+         * so a deliberately-placed single task is never yanked off its CPU. */
+        if (__atomic_load_n(&rrq->nr_running, __ATOMIC_RELAXED) < 2) {
+            spin_unlock_irqrestore(&rrq->lock, rrf);
+            continue;
+        }
+        task_t *t = NULL;
+        if (rrq->bitmap & (1U << EEVDF_LEVEL))
+            t = rrq->tail[EEVDF_LEVEL];
+        if (!t || t->state != PROC_READY || !t->on_rq || !t->kstack ||
+            t->cg_throttled ||
+            !(sched_task_cpu_mask(t) & (1U << local))) {
+            spin_unlock_irqrestore(&rrq->lock, rrf);
+            continue;
+        }
+
+        sched_runq_unlink_at(rrq, t, EEVDF_LEVEL);
+        t->on_rq = 0;
+        t->ready_since = 0;
+        if (__atomic_load_n(&rrq->nr_running, __ATOMIC_RELAXED) > 0)
+            __atomic_fetch_sub(&rrq->nr_running, 1, __ATOMIC_RELAXED);
+        spin_unlock_irqrestore(&rrq->lock, rrf);
+
+        /* Publish dispatch ownership under the (held) local runqueue lock. */
+        t->cpu_id = local;
+        t->dispatching = 1;
+        t->owner_cpu = local;
+        t->rq_next = NULL;
+        t->rq_prev = NULL;
+        __atomic_fetch_add(&sched_runqueue_migrations, 1, __ATOMIC_RELAXED);
+        return t;
+    }
+    return NULL;
+}
+
+/*
  * SCHED_LOCAL_PICK_LOCK_SPLIT_BEGIN
  *
  * Pick the next task and transfer on_rq -> dispatching using only the current
@@ -1092,6 +1150,9 @@ task_t *proc_runq_pick_local(void)
         /* The removed runqueue reference was not transferred to dispatch. */
         proc_put(t);
     }
+
+    if (!picked)
+        picked = sched_runq_steal_locked(rq, cpu);
 
     if (!picked)
         __atomic_fetch_add(&sched_empty_picks, 1, __ATOMIC_RELAXED);
