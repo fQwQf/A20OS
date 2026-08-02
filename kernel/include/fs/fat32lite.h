@@ -4,7 +4,7 @@
 /*
  * FAT32lite - compact FAT32 file layer for resource-constrained (NOMMU/MCU)
  * builds; hardware-independent via fat32lite_io_t callbacks; single-threaded;
- * 8.3 names only. Peer of the VFS-integrated kernel/fs/fat32.c.
+ * 8.3 names only. Peer of the VFS-integrated kernel/fs/diskfs/fat32.c.
  *
  * The onboard Flash is tiny, so large assets and mutable configuration can
  * live on the TF card. sdcard.c already brings the

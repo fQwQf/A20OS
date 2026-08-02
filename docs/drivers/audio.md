@@ -7,7 +7,7 @@ A20OS 音频栈把设备发现、通用用户接口和具体硬件协议分开�
 - `kernel/include/uapi/a20/audio.h`：用户态可见的 capability、PCM format 和 ioctl。
 - `kernel/include/drivers/audio/audio_core.h` 与 `kernel/drivers/audio/audio_core.c`：内核内部 `audio_dev_ops_t`、通用 ioctl 参数封送、capability/format 校验和 close 策略。
 - `kernel/drivers/core/driver_class.c`：audio class 编号与发布。
-- `kernel/fs/devfs.c`：`/dev/audioN` 的 read/write、ioctl 和 close 转发。
+- `kernel/fs/devfs/devfs.c`：`/dev/audioN` 的 read/write、ioctl 和 close 转发。
 - `kernel/drivers/audio/hda.c`：PCI Intel HDA controller、输出 stream 和 PCM DMA。
 - `kernel/drivers/audio/hda_codec.c`：HDA immediate command、codec topology 和输出路径配置。
 - `kernel/drivers/audio/virtio_snd.c`：VirtIO 1.2 sound control/event/TX/RX queue 与 PCM playback。
