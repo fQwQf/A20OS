@@ -114,7 +114,7 @@ static int proc_clone_impl(uint64_t flags, vaddr_t stack, int *ptid, vaddr_t tls
                  int exit_signal, task_t **out_task)
 {
     task_t *parent = proc_current();
-#ifdef CONFIG_AARCH64_COOPERATIVE_BOOT
+#ifdef CONFIG_COOPERATIVE_BOOT
     kinfo("[PROC] clone begin: parent=%d flags=0x%lx\n",
           parent ? parent->pid : -1, (unsigned long)flags);
 #endif
@@ -221,7 +221,7 @@ static int proc_clone_impl(uint64_t flags, vaddr_t stack, int *ptid, vaddr_t tls
                 return -ENOMEM;
             }
             t->pgdir = t->mm->pgdir;
-#ifdef CONFIG_AARCH64_COOPERATIVE_BOOT
+#ifdef CONFIG_COOPERATIVE_BOOT
             kinfo("[PROC] clone mm ready: child=%d rss=%lu vm=%lu\n",
                   child_pid, (unsigned long)t->mm->rss,
                   (unsigned long)t->mm->total_vm);
@@ -341,7 +341,7 @@ static int proc_clone_impl(uint64_t flags, vaddr_t stack, int *ptid, vaddr_t tls
     }
 
     proc_make_ready(t);
-#ifdef CONFIG_AARCH64_COOPERATIVE_BOOT
+#ifdef CONFIG_COOPERATIVE_BOOT
     kinfo("[PROC] clone runnable: child=%d kstack=0x%lx\n",
           child_pid, (unsigned long)t->kstack);
 
