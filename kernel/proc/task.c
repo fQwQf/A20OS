@@ -100,6 +100,9 @@ void proc_task_init_common(task_t *t, task_t *parent)
     t->exec_start = 0;
     t->ready_since = 0;
     t->cfs_weight = sched_weight_for_nice(t->priority);
+    t->eevdf_vruntime = 0;
+    t->eevdf_deadline = 0;
+    t->eevdf_last_account = 0;
     t->sched_policy = parent ? parent->sched_policy : SCHED_NORMAL;
     t->sched_reset_on_fork = 0;
     t->waiting_for_child = 0;
