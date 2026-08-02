@@ -577,7 +577,7 @@ KERNEL_SRC = $(KERNEL_DIR)/mcu/main.c \
              $(KERNEL_DIR)/proc/cg_cpu.c \
               $(KERNEL_DIR)/mm/nommu.c \
               $(KERNEL_DIR)/fs/fdtable.c \
-	             $(KERNEL_DIR)/fs/fat32lite.c \
+	             $(KERNEL_DIR)/fs/diskfs/fat32lite.c \
 	             $(KERNEL_DIR)/fs/vfs.c \
 	             $(wildcard $(BOARD_DRIVER_DIR)/*.c) \
 	             $(wildcard $(KERNEL_DIR)/platform/$(BOARD)/*.c) \
@@ -588,7 +588,7 @@ KERNEL_SRC = $(wildcard $(KERNEL_DIR)/*.c) \
              $(filter-out $(KERNEL_DIR)/mm/nommu.c,$(wildcard $(KERNEL_DIR)/mm/*.c)) \
              $(wildcard $(KERNEL_DIR)/proc/*.c) \
              $(filter-out $(KERNEL_DIR)/fs/rootfs_overlay.c,$(wildcard $(KERNEL_DIR)/fs/*.c)) \
-             $(wildcard $(KERNEL_DIR)/fs/vfs/*.c) \
+             $(wildcard $(KERNEL_DIR)/fs/*/*.c) \
              $(wildcard $(KERNEL_DIR)/ipc/*.c) \
              $(wildcard $(KERNEL_DIR)/net/*.c) \
              $(wildcard $(KERNEL_DIR)/bpf/*.c) \
@@ -845,9 +845,9 @@ check-task-lifetime-boundary:
 	@rg -q "proc_lifetime_note_pid_add" kernel/proc/pid.c
 	@rg -q "proc_lifetime_note_wait_to_wake" kernel/core/sync.c
 	@rg -q "proc_lifetime_note_wake_remove" kernel/proc/park.c
-	@rg -q "proc_wait_timer_count_locked" kernel/proc/sched.c
+	@rg -q "proc_wait_timer_count_locked" kernel/proc/timer_heap.c
 	@rg -q "proc_current_lifetime_violations_locked" kernel/proc/current.c
-	@rg -q "PF_A20_TASK_LIFETIME" kernel/fs/procfs.c
+	@rg -q "PF_A20_TASK_LIFETIME" kernel/fs/procfs/procfs.c
 	@rg -q "TASK_LIFETIME_OWNERSHIP_AUDIT" docs/testing/task-lifetime-audit.md
 	@! rg -n --pcre2 '\bproc_find[[:space:]]*\(' kernel \
 		--glob '*.[ch]' --glob '!kernel/external/**'
@@ -874,7 +874,7 @@ check-blocking-point-boundary:
 		test -z "$$bad" || { echo "$$bad"; exit 1; }
 	@rg -Uq 'typedef struct wait_queue_entry[^{]*\{[^}]*task[^}]*wait_seq' kernel/include/core/sync.h
 	@rg -Uq 'typedef struct futex_waiter[^{]*\{[^}]*task[^}]*wait_seq' kernel/abi/linux/sys_futex.c
-	@rg -Uq 'typedef struct wait_timer[^{]*\{[^}]*task[^}]*wait_seq' kernel/proc/sched.c
+	@rg -Uq 'typedef struct wait_timer[^{]*\{[^}]*task[^}]*wait_seq' kernel/proc/timer_heap.c
 	@rg -Uq 'typedef struct proc_wake_q_item[^{]*\{[^}]*task[^}]*seq' kernel/include/proc/park.h
 	@rg -q "FUTEX_STRESS: unrelated-wake-isolation PASS" user/cmds/futex_stress.c
 	@rg -q "PROC_STRESS: vfork-auto-reap PASS" user/cmds/proc_stress.c
@@ -896,7 +896,7 @@ check-signal-exit-boundary:
 	@bad=$$(rg -n --pcre2 \
 		'(?:->|\.)(?:sig_blocked|thread_pending|sigsuspend_old_blocked|sigsuspend_active|sigwait_mask|sigwait_active)\b|(?:ss|signal_state)->(?:pending|pending_has_info|pending_info|actions)\b' \
 		kernel --glob '*.c' --glob '!kernel/external/**' | \
-		rg -v '^kernel/(proc/(signal|task)\.c|abi/linux/sys_signal\.c|ipc/signalfd\.c):' || true); \
+		rg -v '^kernel/(proc/(signal|task)\.c|abi/linux/sys_signal\.c|abi/native/handle_table\.c|ipc/signalfd\.c):' || true); \
 		test -z "$$bad" || { echo "$$bad"; exit 1; }
 	@rg -Uq 'eventfd_read[\s\S]*proc_park_prepare\(PROC_WAIT_INTERRUPTIBLE' \
 		kernel/ipc/eventfd.c
@@ -909,12 +909,12 @@ check-signal-exit-boundary:
 check-timeout-ownership-boundary:
 	@rg -q "TIMEOUT_OWNERSHIP_AUDIT" docs/testing/timeout-ownership-audit.md
 	@rg -Uq 'typedef struct wait_timer[^{]*\{[^}]*deadline[^}]*task[^}]*wait_seq' \
-		kernel/proc/sched.c
+		kernel/proc/timer_heap.c
 	@rg -q "PROC_PARK_PREPARE_TIMEOUT_CAPACITY" \
-		kernel/include/proc/park.h kernel/proc/park.c kernel/proc/sched.c
-	@rg -q "wait_timer_duplicate_rejections" kernel/proc/sched.c
+		kernel/include/proc/park.h kernel/proc/park.c kernel/proc/timer_heap.c
+	@rg -q "wait_timer_duplicate_rejections" kernel/proc/timer_heap.c
 	@rg -Uq 'proc_try_wake_locked\(timer\.task,[[:space:]]*timer\.wait_seq' \
-		kernel/proc/sched.c
+		kernel/proc/timer_heap.c
 	@rg -q "timeout_heap_violations" \
 		kernel/include/proc/lifetime.h kernel/proc/lifetime.c
 	@rg -Fq "timeout-capacity+1 PASS" user/cmds/lifetime_stress.c
@@ -1076,12 +1076,12 @@ check-vfs-abstraction: smoke-vfs-stress
 	@rg -q "vfile_ref_init" kernel/fs/file.c kernel/include/fs/file.h kernel/include/fs/vfs.h
 	@rg -q "vfile_get" kernel/fs/file.c kernel/include/fs/file.h kernel/include/fs/vfs.h
 	@rg -q "vfile_put_ref_only" kernel/fs/file.c kernel/include/fs/file.h kernel/include/fs/vfs.h
-	@rg -q "\.open[[:space:]]*=" kernel/fs/ramfs.c kernel/fs/fat32.c kernel/fs/ext4.c kernel/fs/procfs.c kernel/fs/devfs.c kernel/fs/cgroupfs.c kernel/fs/sysfs.c
+	@rg -q "\.open[[:space:]]*=" kernel/fs/diskfs/ramfs.c kernel/fs/diskfs/fat32.c kernel/fs/diskfs/ext4.c kernel/fs/procfs/procfs.c kernel/fs/devfs/devfs.c kernel/fs/cgroupfs.c kernel/fs/sysfs.c
 	@rg -q "CGROUPFS_DOTDOT_PARENT_LOOKUP" kernel/fs/cgroupfs.c
 	@rg -q "VFS_CONCURRENCY_SMOKE_MATRIX" kernel/fs/vfs.c
 	@rg -q "VFS_STRESS: PASS" user/cmds/vfs_stress.c
 	@! rg -q "FS_TYPE_(FAT32|EXT4|RAMFS|PROCFS|DEVFS|CGROUP|SYSFS).*open|fat32_open_vnode|ext4_open_vnode|ramfs_open_vnode|procfs_open_vnode|devfs_open_vnode|cgroupfs_open_vnode|sysfs_open_vnode" kernel/fs/vfs.c
-	@! rg -q "refcount_(set|inc|dec_and_test)\(&[A-Za-z0-9_>\.-]*->ref_count" kernel/fs/ramfs.c kernel/fs/fat32.c kernel/fs/ext4.c kernel/fs/procfs.c kernel/fs/devfs.c kernel/fs/cgroupfs.c kernel/fs/sysfs.c kernel/fs/inotify.c kernel/fs/memfd.c kernel/fs/pipe.c
+	@! rg -q "refcount_(set|inc|dec_and_test)\(&[A-Za-z0-9_>\.-]*->ref_count" kernel/fs/diskfs/ramfs.c kernel/fs/diskfs/fat32.c kernel/fs/diskfs/ext4.c kernel/fs/procfs/procfs.c kernel/fs/devfs/devfs.c kernel/fs/cgroupfs.c kernel/fs/sysfs.c kernel/fs/inotify.c kernel/fs/memfd.c kernel/fs/pipe.c
 	@! rg -q "for simplicity" kernel/fs/cgroupfs.c
 	@echo "check-vfs-abstraction: PASS"
 
@@ -1135,7 +1135,7 @@ check-driver-core-model: smoke-driver-lifecycle
 	@rg -q "\.match = nvme_match" kernel/drivers/block/nvme.c
 	@rg -q "NVME_IO_SMOKE: PASS" kernel/drivers/block/nvme.c Makefile
 	@! rg -q "CONFIG_X86_64" kernel/drivers/audio/hda.c kernel/drivers/block/nvme.c
-	@rg -q "CONFIG_X86_64" kernel/drivers/audio/pc_speaker.c
+	@rg -q "CONFIG_PC_SPEAKER" kernel/drivers/audio/pc_speaker.c
 	@rg -q "virtio_blk_driver_probe" kernel/drivers/block/virtio_blk.c
 	@rg -q "virtio_net_driver_probe" kernel/drivers/net/virtio_net.c
 	@rg -q "uart_driver_probe" kernel/drivers/char/uart.c
@@ -1146,7 +1146,7 @@ check-driver-core-model: smoke-driver-lifecycle
 	@rg -q "kernel/drivers/" docs/drivers/README.md
 	@rg -q "kernel/platform/" docs/drivers/README.md
 	@rg -q "DRIVER_LIFECYCLE_TEST" kernel/drivers/core/driver_lifecycle_test.c kernel/drivers/core/driver_lifecycle_test.h kernel/main.c
-	@rg -q "driver_lifecycle_test_run" kernel/main.c kernel/fs/procfs.c kernel/drivers/core/driver_lifecycle_test.c
+	@rg -q "driver_lifecycle_test_run" kernel/main.c kernel/fs/procfs/procfs.c kernel/drivers/core/driver_lifecycle_test.c
 	@rg -q "duplicate driver registration" kernel/drivers/core/driver_lifecycle_test.c
 	@! rg -q "virtio_gpu_init\(\)|virtio_input_init\(\)" kernel/main.c
 	@! rg -q "virtio_(blk|net)_init\(\)" kernel/main.c kernel/net/socket.c

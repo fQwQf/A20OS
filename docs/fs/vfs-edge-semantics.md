@@ -73,9 +73,9 @@
 
 - `kernel/abi/linux/sys_path.c`：校验 flag；允许 `RENAME_NOREPLACE | RENAME_EXCHANGE`；拒绝 `RENAME_WHITEOUT` 和不兼容组合。
 - `kernel/fs/vfs.c`：为 `vfs_rename` 增加 `flags` 参数。在委托给 `old_dir->ops->rename` 前检查 cross-mount（`-EXDEV`）、same target（`-EINVAL`）和 permission/sticky-bit 规则。
-- `kernel/fs/ramfs.c`：在 `ramfs_vnode_rename` 中实现 `RENAME_NOREPLACE`（现有 lookup）和 `RENAME_EXCHANGE`。
-- `kernel/fs/ext4.c`：扩展 `ext4_vn_rename`，处理 `RENAME_NOREPLACE` 和 `RENAME_EXCHANGE`。
-- `kernel/fs/fat32.c`：保持 `.rename = NULL`；VFS 会继续对 FAT32 返回 `-ENOSYS`。
+- `kernel/fs/diskfs/ramfs.c`：在 `ramfs_vnode_rename` 中实现 `RENAME_NOREPLACE`（现有 lookup）和 `RENAME_EXCHANGE`。
+- `kernel/fs/diskfs/ext4.c`：扩展 `ext4_vn_rename`，处理 `RENAME_NOREPLACE` 和 `RENAME_EXCHANGE`。
+- `kernel/fs/diskfs/fat32.c`：保持 `.rename = NULL`；VFS 会继续对 FAT32 返回 `-ENOSYS`。
 - 后端 vnode ops 签名变更：`int (*rename)(vnode_t *old_dir, const char *old_name, vnode_t *new_dir, const char *new_name, unsigned int flags)`。
 - `kernel/include/fs/vfs.h`：更新 `rename` 函数指针类型并增加 `RENAME_*` 常量。
 - `user/cmds/vfs_stress.c`：增加 renameat2 flag 测试。
@@ -98,7 +98,7 @@
 - `kernel/abi/linux/sys_path.c`：将 `mask` 和 sync type 传给 `vfs_statx`。
 - `kernel/fs/vfs.c`：增加 `vfs_statx(dirfd, path, flags, mask, buf)`。
 - `kernel/fs/vfs/stat_perm.c`：扩展 `vfs_vnode_stat` 以接受 sync hint，或增加 `vfs_vnode_statx`。
-- `kernel/fs/fat32.c` / `kernel/fs/ext4.c` / `kernel/fs/ramfs.c`：后端 `stat` ops 已提供所有基础字段；增加 btime 报告。
+- `kernel/fs/diskfs/fat32.c` / `kernel/fs/diskfs/ext4.c` / `kernel/fs/diskfs/ramfs.c`：后端 `stat` ops 已提供所有基础字段；增加 btime 报告。
 - `kernel/fs/page_cache.c`：为 `FORCE_SYNC` 提供 `page_cache_writeback_vnode` 调用。
 - `kernel/include/abi/linux/stat.h`：已经定义 `STATX_*` 和 `AT_STATX_*`。
 - `user/cmds/vfs_stress.c`：增加 statx mask 和 sync-type 测试。
@@ -146,7 +146,7 @@ P1 保留全局 RAM xattr 表，但收紧 ABI 表面：
 - `kernel/fs/xattr.c`：增加 `xattr_check_namespace` helper。
 - `kernel/abi/linux/sys_xattr.c`：存储前调用 namespace 检查。
 - `kernel/include/fs/xattr.h`：如未存在，定义 namespace 常量。
-- `kernel/fs/fat32.c` / `kernel/fs/ext4.c`：记录本轮不增加后端 xattr hook。
+- `kernel/fs/diskfs/fat32.c` / `kernel/fs/diskfs/ext4.c`：记录本轮不增加后端 xattr hook。
 - `user/cmds/vfs_stress.c`：增加 xattr namespace 和 permission 测试。
 
 ## 7. Symlink loop limit
@@ -222,9 +222,9 @@ P1 保留全局 RAM xattr 表，但收紧 ABI 表面：
 | `kernel/fs/vfs/dcache.c` | `RESOLVE_CACHED` lookup helper |
 | `kernel/fs/vfs/stat_perm.c` | `vfs_vnode_statx` / sync hint |
 | `kernel/fs/xattr.c` | namespace validation helper |
-| `kernel/fs/ramfs.c` | `RENAME_NOREPLACE` / `RENAME_EXCHANGE` |
-| `kernel/fs/ext4.c` | `RENAME_NOREPLACE` / `RENAME_EXCHANGE` |
-| `kernel/fs/fat32.c` | 无 rename 变更（仍不支持） |
+| `kernel/fs/diskfs/ramfs.c` | `RENAME_NOREPLACE` / `RENAME_EXCHANGE` |
+| `kernel/fs/diskfs/ext4.c` | `RENAME_NOREPLACE` / `RENAME_EXCHANGE` |
+| `kernel/fs/diskfs/fat32.c` | 无 rename 变更（仍不支持） |
 | `kernel/include/fs/vfs.h` | 新常量和 vnode ops 签名 |
 | `kernel/include/abi/linux/fcntl.h` | `RESOLVE_*` 和 `RENAME_*` ABI 值 |
 | `kernel/include/abi/linux/stat.h` | 已定义 `STATX_*` |
