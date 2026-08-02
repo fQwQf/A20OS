@@ -135,6 +135,27 @@ static inline uint64_t spin_lock_irqsave(spinlock_t *lock) {
     return flags;
 }
 
+/*
+ * Non-blocking variant used by the idle-task steal path.  On success the lock
+ * is held with interrupts disabled and *flags must be passed to
+ * spin_unlock_irqrestore(); on failure interrupts are restored and 0 returned.
+ */
+static inline int spin_trylock_irqsave(spinlock_t *lock, uint64_t *flags) {
+    uint64_t f = arch_irqs_enabled() ? 1 : 0;
+    arch_local_irq_disable();
+    if (__atomic_exchange_n(&lock->locked, 1, __ATOMIC_ACQUIRE)) {
+        if (f)
+            arch_local_irq_enable();
+        return 0;
+    }
+#if CONFIG_DEBUG_LOCKS
+    lock->owner = proc_current();
+    lock->owner_ra = (uintptr_t)__builtin_return_address(0);
+#endif
+    *flags = f;
+    return 1;
+}
+
 static inline void spin_unlock_irqrestore(spinlock_t *lock, uint64_t flags) {
     spin_unlock(lock);
     if (flags)
