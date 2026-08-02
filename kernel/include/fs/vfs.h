@@ -287,7 +287,10 @@ vnode_t *vnode_lookup_path_openat2(const char *path,
                                    char *resolved_out,
                                    size_t resolved_out_sz,
                                    int *lookup_err);
-extern int g_lookup_errno;
+ extern int g_lookup_errno;
+
+/* Resolve a "/proc/<pid|self>/fd/<n>" path to the target task and fd. */
+int vfs_proc_fd_target(const char *path, struct task_t **task_out, int *fd_out);
 
 /* File operations */
 int      vfs_open(const char *path, int flags, int mode);
