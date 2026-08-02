@@ -1,7 +1,7 @@
 /*
  * PC speaker tone backend
  */
-#ifdef CONFIG_X86_64
+#ifdef CONFIG_PC_SPEAKER
 
 #include "drivers/audio/pc_speaker.h"
 #include "drivers/audio/audio_core.h"

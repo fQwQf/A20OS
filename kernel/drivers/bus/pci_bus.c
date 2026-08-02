@@ -14,7 +14,7 @@
 #include "core/klog.h"
 #include "core/string.h"
 
-#if defined(CONFIG_X86_64) || defined(CONFIG_LOONGARCH64) || defined(CONFIG_RISCV64)
+#ifdef CONFIG_PCI_MMIO_ALLOC
 #include "platform.h"
 #endif
 
@@ -84,7 +84,7 @@ uint32_t pci_device_id(const device_t *dev) {
     return ((uint32_t)info->vendor << 16) | info->device;
 }
 
-#if defined(CONFIG_X86_64) || defined(CONFIG_LOONGARCH64) || defined(CONFIG_RISCV64)
+#ifdef CONFIG_PCI_MMIO_ALLOC
 static uintptr_t g_pci_mmio_alloc;
 #endif
 
@@ -211,9 +211,9 @@ int pci_enable_and_assign_bars(device_t *dev) {
     if (!info)
         return -1;
 
-#if defined(CONFIG_X86_64) || defined(CONFIG_LOONGARCH64) || defined(CONFIG_RISCV64)
+#ifdef CONFIG_PCI_MMIO_ALLOC
     if (!g_pci_mmio_alloc)
-#ifdef CONFIG_X86_64
+#ifdef CONFIG_PCI_MMIO_BASE_LEGACY
         g_pci_mmio_alloc = PCI_MMIO_BASE - PAGE_OFFSET;
 #else
         g_pci_mmio_alloc = PCIE_MMIO_BASE;
@@ -251,11 +251,11 @@ int pci_enable_and_assign_bars(device_t *dev) {
         uint64_t addr = is_io ? (bar_lo & ~0x3U) :
                                 pci_bar_address(info, bar, bar_lo, is_64);
 
-#if defined(CONFIG_X86_64) || defined(CONFIG_LOONGARCH64) || defined(CONFIG_RISCV64)
+#ifdef CONFIG_PCI_MMIO_ALLOC
         if (!is_io && addr == 0) {
             uintptr_t aligned = (g_pci_mmio_alloc + (uintptr_t)size - 1U) &
                                 ~((uintptr_t)size - 1U);
-#if defined(CONFIG_LOONGARCH64) || defined(CONFIG_RISCV64)
+#ifdef CONFIG_PCI_MMIO_BASE_ECAM
             if (aligned < PCIE_MMIO_BASE ||
                 aligned + (uintptr_t)size > PCIE_MMIO_BASE + PCIE_MMIO_SIZE) {
                 kerr("[PCI] %02x:%02x.%x BAR%d exceeds MMIO window\n",
@@ -459,7 +459,7 @@ void pci_enumerate(uintptr_t ecam_base, int bus_start, int bus_end) {
     g_pci_data.bus_start = bus_start;
     g_pci_data.bus_end   = bus_end;
 
-#if defined(CONFIG_X86_64) || defined(CONFIG_LOONGARCH64) || defined(CONFIG_RISCV64)
+#ifdef CONFIG_PCI_MMIO_ALLOC
     arch_pci_host_init(ecam_base);
 #endif
 

@@ -20,12 +20,12 @@
 #include "fs/mount_setup.h"
 #include "drivers/block/virtio_blk.h"
 #include "drivers/block/virtio_scsi.h"
-#ifdef CONFIG_X86_64
+#ifdef CONFIG_AHCI
 #include "drivers/block/ahci.h"
 #endif
 #include "drivers/gpu/virtio_gpu.h"
 #include "drivers/input/virtio_input.h"
-#ifdef CONFIG_X86_64
+#ifdef CONFIG_PS2_INPUT
 #include "drivers/input/ps2.h"
 #endif
 #include "fs/block_cache.h"
@@ -114,7 +114,7 @@ void kernel_main(void) {
     printf("[INIT] Drivers probed\n");
     usb_core_scan();
     printf("[INIT] USB devices scanned\n");
-#ifdef CONFIG_X86_64
+#ifdef CONFIG_PS2_INPUT
     if (ps2_input_init() != 0)
         printf("[INIT] PS/2 input controller unavailable\n");
     else
@@ -145,7 +145,7 @@ void kernel_main(void) {
     printf("[INIT] System ready (bringup, no userspace)\n\n");
     bringup_smoke_test();
 #else
-#ifdef CONFIG_AARCH64_COOPERATIVE_BOOT
+#ifdef CONFIG_COOPERATIVE_BOOT
     /* VBox has no usable preemption timer yet.  Bootstrap PID 1 directly from
      * the idle context instead of requiring an otherwise unnecessary first
      * kernel-thread switch before userspace can exist. */
@@ -187,7 +187,7 @@ void kernel_main(void) {
     printf("Welcome to A20OS!\n\n");
     printf("[INIT] entering scheduler...\n");
 
-#ifdef CONFIG_AARCH64_COOPERATIVE_BOOT
+#ifdef CONFIG_COOPERATIVE_BOOT
     init_kthread();
 #else
     sched();
@@ -349,7 +349,7 @@ void init_kthread(void) {
     printf("[INIT] user init created: pid=%d entry=0x%lx sp=0x%lx\n",
            ret, (unsigned long)info.entry, (unsigned long)user_sp);
 
-#ifdef CONFIG_AARCH64_COOPERATIVE_BOOT
+#ifdef CONFIG_COOPERATIVE_BOOT
     /* PID 0 remains the reaper and scheduler host. */
     idle_loop();
 #endif
