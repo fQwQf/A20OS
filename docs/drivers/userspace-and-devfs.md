@@ -13,7 +13,7 @@ userspace read/ioctl
   -> drv_priv / hardware
 ```
 
-devfs 当前在 `kernel/fs/devfs.c` 的静态 `g_nodes[]` 中定义节点。通用固定节点包括 `/dev/fb0` 和 `/dev/event0`。display 使用 `gpu_device_get_default()`；input 适配器枚举 `DEV_CLASS_INPUT` 并聚合事件。
+devfs 当前在 `kernel/fs/devfs/devfs.c` 的静态 `g_nodes[]` 中定义节点。通用固定节点包括 `/dev/fb0` 和 `/dev/event0`。display 使用 `gpu_device_get_default()`；input 适配器枚举 `DEV_CLASS_INPUT` 并聚合事件。
 
 ## 用户 buffer 边界
 

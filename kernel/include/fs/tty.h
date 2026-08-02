@@ -6,7 +6,7 @@
 struct vfile;
 
 /*
- * Console TTY line discipline and termios handling, split out of fs/devfs.c.
+ * Console TTY line discipline and termios handling, split out of fs/devfs/devfs.c.
  *
  * Owns the single virtual console state (termios/winsize/VT mode) plus the
  * per-pid line-buffer hand-off used to serialize interleaved console writes.
