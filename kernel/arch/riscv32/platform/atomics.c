@@ -30,6 +30,16 @@ uint64_t __atomic_fetch_add_8(volatile void *ptr, uint64_t val, int memorder) {
     return old;
 }
 
+uint64_t __atomic_exchange_8(volatile void *ptr, uint64_t val, int memorder) {
+    (void)memorder;
+    uint32_t flags = arch_irq_save();
+    volatile uint64_t *p = (volatile uint64_t *)ptr;
+    uint64_t old = *p;
+    *p = val;
+    arch_irq_restore(flags);
+    return old;
+}
+
 _Bool __atomic_compare_exchange_8(volatile void *ptr, void *expected, uint64_t desired,
                                   _Bool weak, int success_memorder, int failure_memorder) {
     (void)weak;

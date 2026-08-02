@@ -220,7 +220,7 @@ static void user_trap_handler(trap_context_t *ctx) {
         } else if (code == CAUSE_ILLEGAL_INSN) {
             printf("SIGILL: pid=%d sepc=0x%lx stval=0x%lx",
                   cur ? cur->pid : -1, (unsigned long)sepc, (unsigned long)stval);
-#ifdef CONFIG_AARCH64
+#ifdef CONFIG_TRAP_ESR_DIAG
             printf(" esr=0x%lx ec=0x%lx", (unsigned long)arch_read_esr(),
                    (unsigned long)((arch_read_esr() >> 26) & 0x3fUL));
 #endif
@@ -333,7 +333,7 @@ void kernel_trap_handler(trap_context_t *ctx) {
         } else if (code == CAUSE_ILLEGAL_INSN) {
             kerr("\n========== KERNEL OOPS ==========\n");
             kerr("Kernel Illegal Instruction at sepc=0x%lx\n", sepc);
-#ifdef CONFIG_AARCH64
+#ifdef CONFIG_TRAP_ESR_DIAG
             kerr("AArch64 ESR_EL1=0x%lx (EC=0x%lx ISS=0x%lx), FAR_EL1=0x%lx\n",
                  arch_read_esr(), (arch_read_esr() >> 26) & 0x3fUL,
                  arch_read_esr() & 0x1ffffffUL, stval);

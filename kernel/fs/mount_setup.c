@@ -170,7 +170,7 @@ void mount_block_devices(void) {
     }
 
     block_dev_t *ahci = NULL;
-#ifdef CONFIG_X86_64
+#ifdef CONFIG_AHCI
     ahci = ahci_get_dev(0);
 #endif
     if (ahci) {
