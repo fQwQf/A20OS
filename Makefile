@@ -547,6 +547,7 @@ KERNEL_SRC = $(KERNEL_DIR)/mcu/main.c \
              $(KERNEL_DIR)/core/klog.c \
              $(KERNEL_DIR)/core/timekeeping.c \
              $(KERNEL_DIR)/proc/sched.c \
+             $(KERNEL_DIR)/proc/timer_heap.c \
              $(KERNEL_DIR)/proc/current.c \
              $(KERNEL_DIR)/proc/pid.c \
              $(KERNEL_DIR)/proc/proc.c \
