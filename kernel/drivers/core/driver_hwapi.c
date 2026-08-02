@@ -4,7 +4,7 @@
 #include "mm/frame.h"
 #include "core/errno.h"
 #include "core/lock.h"
-#ifdef CONFIG_X86_64
+#ifdef CONFIG_IOPORT
 #include "cpu.h"
 #endif
 
@@ -18,7 +18,7 @@ static spinlock_t irq_table_lock = SPINLOCK_INIT;
 
 uint8_t ioport_read8(uint16_t port)
 {
-#ifdef CONFIG_X86_64
+#ifdef CONFIG_IOPORT
     return inb(port);
 #else
     (void)port;
@@ -28,7 +28,7 @@ uint8_t ioport_read8(uint16_t port)
 
 void ioport_write8(uint16_t port, uint8_t value)
 {
-#ifdef CONFIG_X86_64
+#ifdef CONFIG_IOPORT
     outb(port, value);
 #else
     (void)port;

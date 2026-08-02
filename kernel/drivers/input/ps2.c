@@ -1,4 +1,4 @@
-#ifdef CONFIG_X86_64
+#ifdef CONFIG_PS2_INPUT
 
 #include "drivers/input/ps2.h"
 #include "drivers/input/virtio_input.h"
@@ -359,4 +359,4 @@ int ps2_input_init(void) {
     return 0;
 }
 
-#endif /* CONFIG_X86_64 */
+#endif /* CONFIG_PS2_INPUT */
