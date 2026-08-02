@@ -108,10 +108,14 @@ make ARCH=loongarch64 BOARD=qemu-virt-loongarch64 run
 
 ### 进程调度与 SMP（`kernel/proc/`）
 
-调度器使用 per-CPU 运行队列，每个队列维护 8 个调度级别和非空 bitmap。
-普通任务结合 nice/weight 与老化选择级别，实时任务支持 `SCHED_FIFO` 和
-`SCHED_RR`；affinity 同时受 online CPU 与 cgroup cpuset 限制，CPU quota
-由 `kernel/proc/cg_cpu.c` 执行。
+调度器使用 per-CPU 运行队列。级 0 承载实时任务（`SCHED_FIFO`/`SCHED_RR`，
+优先级 1..99）；普通任务使用 **EEVDF（最早资格虚拟截止时间优先）**：每个
+任务按权重累加虚拟运行时间（`vruntime += dt * NICE0 / weight`），runqueue
+跟踪随总权重推进的系统虚拟时间 `vtime`，只有 `vruntime <= vtime`（未超用
+公平份额）的任务有资格被选中，其中 `deadline = vruntime + 虚拟时间片` 最早
+者先跑。因此 nice/weight 真实控制 CPU 份额，短时间片任务获得低延迟，且
+不需要老化的启发式。affinity 同时受 online CPU 与 cgroup cpuset 限制，CPU
+quota 由 `kernel/proc/cg_cpu.c` 执行。
 
 “任务状态”和“CPU 所有权”是两个不同维度。`PROC_READY` 任务可能仍在
 runqueue，也可能已经被本地 CPU 选中：
@@ -122,7 +126,9 @@ on_rq -> dispatching -> on_cpu -> unowned
 
 本地 picker 只持有本 CPU 的 runqueue 锁，原子完成
 `on_rq -> dispatching`；释放队列锁后，调度器才获取 `proc_lock` 发布
-context switch。旧任务的 `on_cpu` 跨底层切换保持有效，直到新任务在自己的
+context switch。本地队列为空时，picker 会非阻塞地尝试从其他 CPU 窃取
+EEVDF 任务（远端有富余、尊重 affinity），使空闲核吸收突发负载，避免
+8 核失衡。旧任务的 `on_cpu` 跨底层切换保持有效，直到新任务在自己的
 内核栈上完成 switch cleanup。迁移同时获取源、目标 runqueue 锁，固定按 CPU
 编号升序。
 
@@ -163,7 +169,8 @@ requeue 和私有/共享键。Futex waiter 同样保存 task 引用和 `wait_seq
 使用 `event_wait` 替代。
 
 完整状态机、所有权表和验证入口见
-[进程、调度与阻塞协议](process-scheduler.md)。
+[进程、调度与阻塞协议](process-scheduler.md)；公平/延迟选择策略、资格门控、
+空闲窃取和时间片旋钮见 [EEVDF 调度器设计](eevdf-scheduler.md)。
 
 ### 文件系统与 VFS（`kernel/fs/`）
 
