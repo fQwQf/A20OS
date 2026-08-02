@@ -136,11 +136,65 @@ static int sched_task_strictly_preempts(task_t *candidate, task_t *running)
         return candidate_rt;
     if (candidate_rt)
         return candidate->priority > running->priority;
-    return sched_level_clamp(candidate->sched_level) <
-           sched_level_clamp(running->sched_level);
+    /* EEVDF: an earlier virtual deadline strictly outranks. */
+    return candidate->eevdf_deadline < running->eevdf_deadline;
 }
 
-#define SCHED_AGING_THRESHOLD     (TICKS_PER_SEC / 20 ? TICKS_PER_SEC / 20 : 1)
+/* ================================================================
+ * EEVDF proportional-share core
+ *
+ * Normal (SCHED_NORMAL/BATCH/IDLE) tasks are served in Earliest Eligible
+ * Virtual Deadline First order.  Each task accumulates a weighted virtual
+ * run time (`vruntime += dt * NICE0 / weight`), so a heavier (lower nice)
+ * task accrues virtual time more slowly and is therefore entitled to more
+ * real CPU time.  Its virtual deadline is `vruntime + virtual_slice`; the
+ * runqueue is kept sorted by deadline and the earliest is picked next.
+ *
+ * RT tasks stay on runqueue level 0 with their existing fixed-priority
+ * FIFO/RR semantics and are never charged virtual time, so they always run
+ * ahead of the EEVDF list on level 1.
+ *
+ * Phase-A simplification: a task keeps its historical vruntime across sleep,
+ * giving freshly-woken tasks an early deadline (sleeper bonus / latency
+ * friendliness).  The strict lag-based eligibility gate and latency-nice
+ * slice scaling are follow-up phases.
+ */
+#define EEVDF_LEVEL           1     /* runqueue slot holding the EEVDF list */
+#define EEVDF_NICE0_LOAD      1024UL
+#define EEVDF_BASE_SLICE      (TICKS_PER_SEC / 100)   /* 10 ms base slice */
+
+static inline uint64_t eevdf_weight(task_t *t)
+{
+    uint32_t w = t->cfs_weight;
+    return w ? (uint64_t)w : EEVDF_NICE0_LOAD;
+}
+
+static inline uint64_t eevdf_vslice(task_t *t)
+{
+    return (EEVDF_BASE_SLICE * EEVDF_NICE0_LOAD) / eevdf_weight(t);
+}
+
+static void eevdf_reset_deadline(task_t *t)
+{
+    t->eevdf_deadline = t->eevdf_vruntime + eevdf_vslice(t);
+}
+
+static void eevdf_account_run(task_t *t, uint64_t dt)
+{
+    t->eevdf_vruntime += (dt * EEVDF_NICE0_LOAD) / eevdf_weight(t);
+    t->eevdf_deadline = t->eevdf_vruntime + eevdf_vslice(t);
+}
+
+/* Charge `now - last_account` of real run time to t's virtual time. */
+static void eevdf_charge(task_t *t, uint64_t now)
+{
+    if (!t || sched_task_rt(t) || t->pid == 0)
+        return;
+    uint64_t dt = now - t->eevdf_last_account;
+    t->eevdf_last_account = now;
+    if (dt)
+        eevdf_account_run(t, dt);
+}
 
 static void sched_runq_unlink_at(proc_runq_t *rq, task_t *t, int q)
 {
@@ -170,23 +224,24 @@ static void sched_runq_append_at(proc_runq_t *rq, task_t *t, int q)
     rq->bitmap |= (1U << q);
 }
 
-static void sched_promote_aged_locked(proc_runq_t *rq, uint64_t now)
+/* Insert an EEVDF task into level 1, keeping the list sorted by deadline. */
+static void sched_runq_eevdf_insert(proc_runq_t *rq, task_t *t)
 {
-    for (int q = 1; q < SCHED_LEVELS; q++) {
-        task_t *it = rq->head[q];
-        while (it) {
-            task_t *next = it->rq_next;
-            if (!sched_task_rt(it) && it->state == PROC_READY &&
-                it->ready_since > 0 &&
-                now - it->ready_since >= SCHED_AGING_THRESHOLD) {
-                sched_runq_unlink_at(rq, it, q);
-                it->sched_level = 0;
-                it->ready_since = now;
-                sched_runq_append_at(rq, it, 0);
-            }
-            it = next;
-        }
-    }
+    task_t *it = rq->head[EEVDF_LEVEL];
+    while (it && it->eevdf_deadline <= t->eevdf_deadline)
+        it = it->rq_next;
+
+    t->rq_next = it;
+    t->rq_prev = it ? it->rq_prev : rq->tail[EEVDF_LEVEL];
+    if (t->rq_prev)
+        t->rq_prev->rq_next = t;
+    else
+        rq->head[EEVDF_LEVEL] = t;
+    if (it)
+        it->rq_prev = t;
+    else
+        rq->tail[EEVDF_LEVEL] = t;
+    rq->bitmap |= (1U << EEVDF_LEVEL);
 }
 
 void proc_sched_runq_init(void) {
@@ -294,12 +349,14 @@ static void sched_runq_requeue_locked(task_t *t, unsigned dst_cpu,
                            __ATOMIC_RELAXED);
     }
 
-    int new_level =
-        sched_task_rt(t) ? 0 : sched_level_clamp(t->sched_level);
+    int new_level = sched_task_rt(t) ? 0 : EEVDF_LEVEL;
     t->cpu_id = dst_cpu;
     t->sched_level = new_level;
     t->ready_since = timer_get_ticks();
-    sched_runq_append_at(dst, t, new_level);
+    if (new_level == 0)
+        sched_runq_append_at(dst, t, 0);
+    else
+        sched_runq_eevdf_insert(dst, t);
     t->on_rq = 1;
 
     if (second != first)
@@ -399,6 +456,8 @@ int proc_sched_set(task_t *t, const proc_sched_config_t *config)
         if (!sched_policy_rt_value(policy))
             t->priority = config->nice;
         t->cfs_weight = sched_weight_for_nice(config->nice);
+        if (!sched_policy_rt_value(policy))
+            eevdf_reset_deadline(t);
     }
     if (config->fields & PROC_SCHED_AFFINITY) {
         t->cpus_allowed = config->affinity & SCHED_CPU_MASK_ALL;
@@ -538,10 +597,13 @@ void proc_sched_tick(int from_user)
     if (cur->pid == 0 || cur->state != PROC_RUNNING)
         return;
 
-    uint64_t slice = TICKS_PER_SEC / 100;
+    uint64_t now = timer_get_ticks();
+    eevdf_charge(cur, now);
+
+    uint64_t slice = EEVDF_BASE_SLICE;
     if (slice == 0)
         slice = 1;
-    if (timer_get_ticks() - cur->exec_start >= slice)
+    if (now - cur->exec_start >= slice)
         proc_sched_request_cpu(cpu_current_id(), 0);
 }
 
@@ -913,7 +975,7 @@ void proc_runq_enqueue_locked(task_t *t) {
               t->pid, t->owner_cpu);
 #endif
 
-    int q = sched_task_rt(t) ? 0 : sched_level_clamp(t->sched_level);
+    int q = sched_task_rt(t) ? 0 : EEVDF_LEVEL;
     if (!proc_get(t)) {
         RUNQ_UNLOCK_IRQ(cpu, rf);
         return;
@@ -921,7 +983,10 @@ void proc_runq_enqueue_locked(task_t *t) {
     t->sched_level = q;
     t->cpu_id = cpu;
     t->ready_since = timer_get_ticks();
-    sched_runq_append_at(rq, t, q);
+    if (q == 0)
+        sched_runq_append_at(rq, t, 0);
+    else
+        sched_runq_eevdf_insert(rq, t);
     t->on_rq = 1;
     __atomic_fetch_add(&rq->nr_running, 1, __ATOMIC_RELAXED);
     RUNQ_UNLOCK_IRQ(cpu, rf);
@@ -973,7 +1038,6 @@ task_t *proc_runq_pick_local(void)
 
     uint64_t rf = RUNQ_LOCK_IRQ(cpu);
     proc_runq_t *rq = &sched_runq[cpu];
-    sched_promote_aged_locked(rq, timer_get_ticks());
 
     while (rq->bitmap) {
         int q = 0;
@@ -1134,6 +1198,7 @@ void context_switch(task_t *next) {
     uint64_t now = timer_get_ticks();
 
     task_t *prev = proc_current();
+    eevdf_charge(prev, now);
     if (prev && prev->cgroup && prev->cg_cpu_start > 0) {
         uint64_t elapsed_ticks = now - prev->cg_cpu_start;
         uint64_t elapsed_ns = elapsed_ticks * 1000000000ULL / TICKS_PER_SEC;
@@ -1244,6 +1309,7 @@ void sched(void) {
 
     if (next) {
         next->exec_start = now;
+        next->eevdf_last_account = now;
         context_switch(next);
         goto out;
     }
@@ -1285,16 +1351,8 @@ void proc_yield(void) {
     task_t *cur = proc_current();
     task_t *idle = proc_idle_task();
     if (cur && cur != idle && cur->state == PROC_RUNNING) {
-        /* Only demote to a *lower* priority level (higher number) after the
-         * task has used a full time-slice worth of CPU time at its current
-         * level.  A single 10 ms preemption tick is not enough to justify
-         * demotion — the task may just be doing brief work between I/O. */
         uint64_t now = timer_get_ticks();
-        uint64_t elapsed = now - cur->exec_start;
-        uint64_t slice = TICKS_PER_SEC / 100;
-        if (!sched_task_rt(cur) && elapsed >= slice &&
-            cur->sched_level < SCHED_LEVELS - 1)
-            cur->sched_level++;
+        eevdf_charge(cur, now);
         if (cur->pid >= 4)
             ktrace_sched("[SCHED] yield: pid=%d\n", cur->pid);
         proc_make_ready(cur);
