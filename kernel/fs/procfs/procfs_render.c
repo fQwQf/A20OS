@@ -503,6 +503,9 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
         memcpy(buf, g_proc_config_gz, n);
         return (int)n;
     }
+    case PF_A20_SCHED_BASE_SLICE:
+        snprintf(buf, bufsz, "%d\n", g_sched_base_slice_ms);
+        return (int)strlen(buf);
     case PF_A20_BCACHE: {
         bcache_stats_t bc;
         bcache_get_stats(&bc);
