@@ -7,6 +7,7 @@
 
 #include "fs/procfs.h"
 #include "fs/procfs_internal.h"
+#include "core/klog.h"
 #include "fs/file.h"
 #include "fs/fdtable.h"
 #include "fs/block_cache.h"
@@ -223,6 +224,9 @@ static procfs_priv_t *procfs_priv_create(pf_type_t type, int pid, int fd) {
         int ret = generate_pid_maps_alloc(real_pid, type == PF_PID_SMAPS,
                                           &p->content, &p->content_len);
         if (ret < 0) {
+            task_t *cur = proc_current();
+            if (cur)
+                cur->vfs_open_errno = ret;
             kfree(p);
             return NULL;
         }

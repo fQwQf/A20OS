@@ -33,12 +33,19 @@
 #define CLONE_CHILD_CLEARTID 0x00200000
 #define CLONE_CHILD_SETTID   0x01000000
 
+/*
+ * nice -> weight table (Linux orientation): lower nice = higher priority =
+ * larger weight = more CPU share.  This was previously stored in reverse,
+ * which made nice levels behave as decorative only in the level scheduler.
+ * EEVDF relies on this table being correct: a task's weight scales its
+ * virtual runtime so proportional fairness actually holds.
+ */
 static const uint32_t sched_prio_to_weight[40] = {
-     88,   110,   132,   156,   183,   215,   251,   292,
-    341,   399,   465,   543,   635,   742,   867,  1013,
-   1185,  1386,  1622,  1898,  2218,  2593,  3032,  3546,
-   4148,  4851,  5668,  6623,  7738,  9041, 10562, 12340,
-  14424, 16860, 19711, 23044, 26940, 31492, 36814, 43020,
+    43020, 36814, 31492, 26940, 23044, 19711, 16860, 14424,
+    12340, 10562,  9041,  7738,  6623,  5668,  4851,  4148,
+     3546,  3032,  2593,  2218,  1898,  1622,  1386,  1185,
+     1013,   867,   742,   635,   543,   465,   399,   341,
+      292,   251,   215,   183,   156,   132,   110,    88,
 };
 
 static inline uint32_t sched_weight_for_nice(int nice)

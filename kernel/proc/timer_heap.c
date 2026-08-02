@@ -92,7 +92,6 @@ unsigned proc_wait_timer_violations_locked(void)
 
 #define SCHED_TICK_INTERVAL       (TICKS_PER_SEC / 100)
 #define SCHED_MIN_TIMER_INTERVAL  (TICKS_PER_SEC / 10000 ? TICKS_PER_SEC / 10000 : 1)
-#define SCHED_AGING_THRESHOLD     (TICKS_PER_SEC / 20 ? TICKS_PER_SEC / 20 : 1)
 
 #ifdef CONFIG_MCU
 #define SCHED_SIGNAL_BATCH 8
