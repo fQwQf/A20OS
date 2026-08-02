@@ -13,7 +13,7 @@
  * of ViudiraTech/Uinxed-Kernel (Apache-2.0); this implementation is
  * rewritten for A20OS.  See docs/ACKNOWLEDGMENTS.md.
  */
-#ifdef CONFIG_X86_64
+#ifdef CONFIG_TPM
 
 #include "drivers/bus/platform_bus.h"
 #include "drivers/core/driver_class.h"
@@ -341,4 +341,4 @@ static driver_t tpm_driver = {
 
 DRIVER_REGISTER(tpm_driver);
 
-#endif /* CONFIG_X86_64 */
+#endif /* CONFIG_TPM */
