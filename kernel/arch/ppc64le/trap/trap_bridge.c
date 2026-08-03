@@ -38,6 +38,17 @@ void ppc64_trap_dispatch(trap_context_t *ctx)
             ctx->gpr[1] = ppc64_rtu_r1;
         if (ppc64_rtu_r2)
             ctx->gpr[2] = ppc64_rtu_r2;
+        /* QEMU 10.0.11 clobbers SRR0 to the trap-entry address for both
+         * instruction and data storage faults; recover the user PC from the
+         * last user return target so __return_to_user does not resume in
+         * kernel code. */
+        {
+            uint64_t fa = ctx->nip;
+            if ((fa & 0xc000000000000000UL) == 0xc000000000000000UL &&
+                ppc64_rtu_nip && !(ppc64_rtu_nip & 0xc000000000000000UL))
+                fa = ppc64_rtu_nip;
+            ctx->nip = fa;
+        }
         if (scratch[5] & 0x40000000UL) {
             /*
              * The QEMU 10.0.11 0x500 delivery for an instruction fetch
@@ -59,9 +70,21 @@ void ppc64_trap_dispatch(trap_context_t *ctx)
             uint64_t dsisr, dar;
             __asm__ __volatile__("mfspr %0,18" : "=r"(dsisr));
             __asm__ __volatile__("mfspr %0,19" : "=r"(dar));
-            scratch[6] = (dsisr & 0x02000000UL) ? CAUSE_STORE_PAGE_FAULT
-                                                : CAUSE_LOAD_PAGE_FAULT;
-            scratch[11] = dar;
+            /*
+             * QEMU 10.0.11 sometimes delivers an instruction-fetch storage
+             * fault to the external vector without the SRR1 instruction bit;
+             * DAR is then clobbered to 0 and only the recovered user PC is
+             * meaningful.  Treat such faults as instruction page faults.
+             */
+            if (dar == 0 && ppc64_rtu_nip &&
+                !(ppc64_rtu_nip & 0xc000000000000000UL)) {
+                scratch[6] = CAUSE_INSN_PAGE_FAULT;
+                scratch[11] = ppc64_rtu_nip;
+            } else {
+                scratch[6] = (dsisr & 0x02000000UL) ? CAUSE_STORE_PAGE_FAULT
+                                                    : CAUSE_LOAD_PAGE_FAULT;
+                scratch[11] = dar;
+            }
         }
     }
     trap_handler(ctx);
