@@ -26,10 +26,22 @@ __trap_from_user:
     /*
      * The real-mode vector at 0xc00 saved r0-r3 and SRR0/SRR1 in physical
      * scratch memory, then returned here with translation enabled.
+     *
+     * Choose the trap frame location from the interrupted MSR.PR so a
+     * kernel-mode exception (e.g. the SLOF console `sc 1` hypercall fired
+     * from the middle of a write syscall) gets a frame below the current
+     * kernel stack instead of overwriting the outer user trap frame.
      */
     LOAD_TRAP_SCRATCH 12
 
+    ld      4,40(12)
+    andi.   4,4,PPC64_MSR_PR
+    beq     1f
     ld      1,64(12)
+    b       2f
+1:
+    ld      1,8(12)
+2:
     addi    1,1,-336
 
     ld      4,104(12)
@@ -147,6 +159,39 @@ __return_to_user:
     ld      30,240(12)
     ld      31,248(12)
     ld      1,8(12)
+    /*
+     * Refresh the user r1/r2 recovery anchors only for genuine user-mode
+     * returns (MSR.PR set) and only when r1 was not already clobbered to the
+     * TIMA scratch base by the storage-fault delivery.  Kernel-mode nested
+     * exceptions such as the SLOF console `sc 1` otherwise leak the kernel's
+     * r1/r2 into the anchors and the next user fault would recover garbage.
+     */
+    ld      11,264(12)
+    andi.   11,11,PPC64_MSR_PR
+    beq     4f
+    cmpdi   1,PPC64_TRAP_SCRATCH_PA
+    beq     4f
+    lis     11,ppc64_rtu_r1@highest
+    ori     11,11,ppc64_rtu_r1@higher
+    sldi    11,11,32
+    oris    11,11,ppc64_rtu_r1@high
+    ori     11,11,ppc64_rtu_r1@l
+    std     1,0(11)
+    ld      2,16(12)
+    lis     11,ppc64_rtu_r2@highest
+    ori     11,11,ppc64_rtu_r2@higher
+    sldi    11,11,32
+    oris    11,11,ppc64_rtu_r2@high
+    ori     11,11,ppc64_rtu_r2@l
+    std     2,0(11)
+    ld      4,256(12)
+    lis     11,ppc64_rtu_nip@highest
+    ori     11,11,ppc64_rtu_nip@higher
+    sldi    11,11,32
+    oris    11,11,ppc64_rtu_nip@high
+    ori     11,11,ppc64_rtu_nip@l
+    std     4,0(11)
+4:
     ld      12,96(12)
     rfid
 

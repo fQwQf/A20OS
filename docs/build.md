@@ -19,6 +19,7 @@ docker run -it --rm -v $(pwd):/workspace -w /workspace a20os-buildenv bash
 | `make ARCH=riscv64 run` | 同上，`BOARD` 默认等于 `qemu-virt-riscv64` | 快速启动 |
 | `make run-riscv64` | 等价于 `make ARCH=riscv64 run` | 记住目标名即可 |
 | `make run-loongarch64` / `make run-arm64` / `make run-x86_64` | 在对应架构的 QEMU 中启动 | 跨架构测试 |
+| `make run-ppc64le` | 在 QEMU pSeries 中启动 PPC64LE | PPC64LE 单核 bring-up 和 shell 验证 |
 | `make run-gui-riscv64` / `make run-gui-aarch64` / `make run-gui-x86_64` / `make run-gui-loongarch64` | 启动带 virtio-gpu 的图形 QEMU；RISC-V/x86_64/LoongArch64 默认挂载 HDA，也可切换 virtio-sound | 测试桌面、GUI 和音频应用 |
 | `make ARCH=riscv64 BRINGUP=1 kernel-only` | 仅编译内核，不生成文件系统镜像 | 只改内核、不需要用户态 |
 | `make ARCH=riscv64 BRINGUP=1 run` | 仅编译内核并在 QEMU 启动 | 内核 bring-up 测试 |
@@ -42,7 +43,7 @@ docker run -it --rm -v $(pwd):/workspace -w /workspace a20os-buildenv bash
 
 ## 常用变量
 
-- `ARCH`: 目标架构，如 `riscv64`、`aarch64`、`x86_64`、`loongarch64`、`arm32`、`riscv32`、`ppc64le`、`armv7m`。
+- `ARCH`: 目标架构，如 `riscv64`、`aarch64`、`x86_64`、`loongarch64`、`ppc64le`、`arm32`、`riscv32`、`armv7m`。
 - `BOARD`: 默认 `qemu-virt-<ARCH>`；STM32 时为 `stm32f103`。
 - `BRINGUP`: `1` 只编译内核，`0` 编译完整用户态。
 - `ABI`: `linux` / `native` / `both`，默认 `both`。
@@ -84,7 +85,7 @@ WAV 输入必须是 48 kHz、双声道、S16_LE PCM；原始 PCM 使用 `audiopl
 ##  注意
 
 - `BRINGUP=1` 不生成文件系统镜像；`BRINGUP=0` 才会触发用户态和磁盘构建。
-- 默认 `NR_CPUS=1`。RISC-V 64、AArch64、LoongArch64 和 x86_64 的 QEMU virt 平台已验证 SMP，可直接设置 `NR_CPUS>1`。其他架构或板卡仍会被构建系统拒绝，除非显式设置 `ALLOW_UNVERIFIED_SMP=1`。
+- 默认 `NR_CPUS=1`。RISC-V 64、AArch64、LoongArch64 和 x86_64 的 QEMU virt 平台已验证 SMP，可直接设置 `NR_CPUS>1`；PPC64LE 当前仅验证 QEMU pSeries 单核路径。其他架构或板卡仍会被构建系统拒绝，除非显式设置 `ALLOW_UNVERIFIED_SMP=1`。
 - `ARCH=armv7m` 需要 `arm-none-eabi-gcc` 或 `clang` + `llvm-objcopy`。
 - 图形 QEMU 目标依赖宿主机显示能力；无图形环境请使用普通 `run-*` 目标。
 - 不要直接仿照 Makefile 外的 QEMU 参数手写启动命令，容易遗漏 `-bios default` 等关键选项。

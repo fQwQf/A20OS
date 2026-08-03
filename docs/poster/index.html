@@ -137,7 +137,7 @@
 
     <section class="card architecture-detail">
       <h2>你的架构，总有A20很专业<sup class="source-ref">11</sup><span class="kick">ARCHITECTURE</span></h2>
-      <p class="lead">A20OS 的架构支持广泛。主要 QEMU 目标包括 RISC-V64、LoongArch64、AArch64 和 x86_64；实机支持 VisionFive 2 与龙芯 LS2K1000 开发板以及 STM32F103 。RISC-V32、ARM32 和 PPC64LE 仍处于不同阶段的开发中。</p>
+      <p class="lead">A20OS 的架构支持广泛。主要 QEMU 目标包括 RISC-V64、LoongArch64、AArch64、x86_64 和 PPC64LE；实机支持 VisionFive 2 与龙芯 LS2K1000 开发板以及 STM32F103。RISC-V32、ARM32 和 ARMv7-M 仍由独立 bring-up 门禁验证。</p>
       <p>Linux ABI 用户态当前以 musl 为主，可以运行 git、vim、mksh、fastfetch、wget 以及 Weston / FFmpeg 等程序。</p>
       <p>Native ABI 用户态除实验性的 liba20rt 和 liba20c 外，项目正在移植 mlibc 的 <code>sysdeps/a20</code>。RISC-V64 静态 libc 与基础 smoke 已经通过，覆盖 stdio、malloc、文件 I/O、线程互斥、pipe / poll、socketpair 和 posix_spawn；动态链接与更多架构仍在继续。</p>
       <div class="arch">
