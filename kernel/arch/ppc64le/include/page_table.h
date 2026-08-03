@@ -22,9 +22,25 @@
 #define ARCH_PT_USER_START 0
 #define ARCH_PT_USER_END   256
 
+/*
+ * qemu-system-ppc64 compiles the ppc64 target big-endian, so every physical
+ * table load (ldq_phys -> ldq_be_p) reads the process table and the radix
+ * page tables BIG-ENDIAN.  The bootstrap (entry.S) therefore installs tables
+ * with stdbrx (byte-reversed stores) so the memory bytes are the BE image of
+ * the architectural value.
+ *
+ * The C runtime stores through little-endian stores, so every PTE value must
+ * be byte-swapped before storing: the kernel keeps the swap-image of the
+ * architectural entry (arch_pte_from_pa swaps the RPN, the PTE_* flags below
+ * are positioned so that a bswap maps them onto the PowerISA radix bits that
+ * QEMU checks, see target/ppc/mmu-radix64.c):
+ *   VALID bit63 <- bswap(PTE_V), LEAF bit62 <- bswap(PTE_LEAF),
+ *   RPN bits12-52, R bit8, C bit7, EAA X/RW/R/PRIV bits0-3,
+ *   software bits 9-11 (R_PTE_SW1).
+ */
 #define PTE_V              0x0000000000000080UL
 #define PTE_LEAF           0x0000000000000040UL
-#define PTE_COW            0x0000000000000020UL
+#define PTE_COW            0x0008000000000000UL
 #define PTE_G              0x0004000000000000UL
 #define PTE_U              0x0002000000000000UL
 #define PTE_D              0x8000000000000000UL
@@ -56,9 +72,10 @@ static inline uint64_t swp_entry_to_pte(swap_entry_t entry) {
 }
 #endif
 
-#define PTE_PRIV           0x0008000000000000UL
+#define PTE_PRIV           0x0800000000000000UL
 #define PTE_KERN           (PTE_V | PTE_R | PTE_W | PTE_X | PTE_A | PTE_D | PTE_G | PTE_MAT1 | PTE_LEAF | PTE_PRIV)
 #define PTE_USER           (PTE_V | PTE_R | PTE_W | PTE_X | PTE_U | PTE_A | PTE_D | PTE_MAT1 | PTE_LEAF)
+/* Non-leaf entry: bswap(VALID | 9), the 9-bit next-level size in R_PDE_NLS. */
 #define PTE_DIR            (PTE_V | 0x0900000000000000UL)
 
 #define ARCH_PT_LEVEL_ENTRIES(level) \
@@ -80,7 +97,7 @@ static inline uint64_t arch_pte_ppn(uint64_t pte) {
 }
 
 static inline uint64_t arch_pte_addr(uint64_t pte) {
-    return arch_pte_ppn(pte) << PAGE_SHIFT;
+    return __builtin_bswap64(pte) & 0x01FFFFFFFFFFF000UL;
 }
 
 static inline uint64_t arch_pte_from_pa(uint64_t pa) {
@@ -106,7 +123,7 @@ static inline uint64_t arch_pte_leaf(paddr_t pa, uint64_t flags) {
     return arch_pte_from_pa(pa) | PTE_V |
            (flags & (PTE_R | PTE_W | PTE_X | PTE_U |
                      PTE_G | PTE_A | PTE_D | PTE_COW |
-                     PTE_LEAF | PTE_MAT1));
+                     PTE_LEAF | PTE_MAT1 | PTE_PRIV));
 }
 
 #endif
