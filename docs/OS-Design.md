@@ -1,6 +1,6 @@
 # A20OS 设计速查
 
-A20OS 是为 2026 年全国大学生计算机系统能力大赛（操作系统内核实现赛道）开发的混合内核操作系统。它支持 RISC-V、ARM64、x86_64 和 LoongArch 四种架构，并同时提供 Linux 兼容 musl 程序运行环境和一套新的 Native ABI。
+A20OS 是为 2026 年全国大学生计算机系统能力大赛（操作系统内核实现赛道）开发的混合内核操作系统。它支持 RISC-V、ARM64、x86_64、LoongArch 和 PPC64LE 五种 64 位架构，并同时提供 Linux 兼容 musl 程序运行环境和一套新的 Native ABI。
 
 本文档面向新贡献者，用于快速理解项目整体结构。完整的 Native ABI 规范见 [docs/native-abi/00-overview.md](native-abi/00-overview.md)。
 
@@ -71,14 +71,18 @@ Native ABI 的完整规范见 [docs/native-abi/00-overview.md](native-abi/00-ove
 
 ## 支持的平台
 
-A20OS 面向四种架构构建：
+A20OS 面向五种 64 位架构构建，另外保留 ARM32、RISC-V32 和 ARMv7-M 的
+bring-up 构建入口：
 
 * **RISC-V 64**：QEMU `qemu-virt-riscv64` 和 StarFive VisionFive 2 开发板
 * **ARM64**：QEMU `qemu-virt-aarch64`
 * **x86_64**：QEMU `qemu-virt-x86_64`
 * **LoongArch 64**：QEMU `qemu-virt-loongarch64` 和龙芯 LS2K1000 开发板
+* **PPC64LE**：QEMU `qemu-virt-ppc64le`（pSeries 固件）
 
-NOMMU 仅支持部分架构：`arm32`、`aarch64`、`riscv32`、`riscv64`。顶层构建会拒绝尚未实现 NOMMU 的组合，如 LoongArch64 和 x86_64。
+PPC64LE 当前使用 Radix MMU，按 QEMU pSeries 单核路径验收；SMP 和 NOMMU
+尚未列入该架构的已验证能力。NOMMU 支持集合为 `arm32`、`aarch64`、`riscv32`
+和 `riscv64`，顶层构建会拒绝其他架构的 NOMMU 组合。
 
 典型构建命令：
 
@@ -87,9 +91,11 @@ make ARCH=riscv64 BOARD=qemu-virt-riscv64 run
 make ARCH=aarch64 BOARD=qemu-virt-aarch64 run
 make ARCH=x86_64 BOARD=qemu-virt-x86_64 run
 make ARCH=loongarch64 BOARD=qemu-virt-loongarch64 run
+make ARCH=ppc64le BOARD=qemu-virt-ppc64le run
 ```
 
-`make check-kernel-build` 验证四种架构是否都能构建通过。
+`make check-kernel-build` 验证默认构建矩阵；PPC64LE 的独立入口是
+`make check-ppc64le-bringup` 和 `make check-ppc64le-user`。
 
 ---
 

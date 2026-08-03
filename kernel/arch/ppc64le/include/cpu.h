@@ -23,6 +23,14 @@ static inline void arch_fence_i(void) {
 static inline void arch_flush_icache_range(const void *addr, size_t size) { (void)addr; (void)size; arch_fence_i(); }
 
 static inline unsigned arch_current_cpu_id(void) {
+    /*
+     * QEMU pSeries guests cannot read PIR (SPR 286) from supervisor mode:
+     * mfspr raises a program exception (0x700), which turns any caller such
+     * as proc_current() into a silent recursive trap.  The pSeries port is
+     * single-CPU only, so report CPU 0.  SMP bringup must not depend on PIR
+     * until a readable per-CPU identifier is available.
+     */
+    (void)PPC64_SPR_PIR;
     return 0;
 }
 
@@ -71,7 +79,9 @@ static inline int arch_local_irq_enabled(void) {
 }
 
 static inline void arch_tlb_flush(void) {
-    const uint64_t rs = 1UL << 32; /* PID 1 */
+    uint64_t pid;
+    __asm__ __volatile__("mfspr %0,%1" : "=r"(pid) : "i"(PPC64_SPR_PID));
+    const uint64_t rs = pid << 32;
     __asm__ __volatile__("ptesync" ::: "memory");
     for (uint64_t set = 0; set < 128; set++) {
         uint64_t rb = (1UL << 10) | (set << 12); /* IS=process */
@@ -95,17 +105,10 @@ static inline void arch_tlb_flush(void) {
 }
 
 static inline void arch_tlb_flush_page(uint64_t addr) {
-    const uint64_t rs = 1UL << 32; /* PID 1 */
-    uint64_t rb = addr & ~0xfffUL;
-    register uint64_t rb_reg __asm__("r4") = rb;
-    register uint64_t rs_reg __asm__("r5") = rs;
-    __asm__ __volatile__(
-        "ptesync\n\t"
-        ".long %2\n\t"
-        "ptesync"
-        :: "r"(rb_reg), "r"(rs_reg),
-           "i"(PPC64_TLBIEL_INSN(4, 5, 0, 1, 1))
-        : "memory");
+    (void)addr;
+    /* The address-form tlbie is not honoured reliably by QEMU's TCG for a
+     * freshly installed PTE; fall back to the full IS-form invalidation. */
+    arch_tlb_flush();
 }
 
 static inline void arch_set_task_pointer(void *task) {
