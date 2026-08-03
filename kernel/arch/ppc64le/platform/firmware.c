@@ -2,10 +2,14 @@
 
 #include "firmware.h"
 #include "cpu.h"
+#include "core/stdio.h"
 
+#define VTERMNO         0x71000000UL
 #define H_GET_TERM_CHAR 0x54UL
 #define H_PUT_TERM_CHAR 0x58UL
 #define H_PUT_TCE       0x20UL
+#define RTAS_TOKEN_POWER_OFF  0x2003U
+#define RTAS_TOKEN_SYSTEM_REBOOT 0x2004U
 
 #define PSERIES_PCI_LIOBN       0x80000000UL
 #define PSERIES_DMA_WINDOW_SIZE 0x40000000UL
@@ -35,36 +39,50 @@ static long pseries_hcall(uint64_t opcode, uint64_t arg1, uint64_t arg2,
     return (long)r3;
 }
 
+typedef struct {
+    uint32_t token;
+    uint32_t nargs;
+    uint32_t nret;
+    uint32_t data[4];
+} ppc64_rtas_args_t;
+
+static int ppc64_rtas_call(uint32_t token, uint32_t nargs, uint32_t nret,
+                           const int32_t *inputs)
+{
+    static ppc64_rtas_args_t args __attribute__((aligned(64)));
+
+    args.token = __builtin_bswap32(token);
+    args.nargs = __builtin_bswap32(nargs);
+    args.nret = __builtin_bswap32(nret);
+    for (uint32_t i = 0; i < nargs && i < 4; i++)
+        args.data[i] = __builtin_bswap32((uint32_t)inputs[i]);
+    for (uint32_t i = nargs; i < 4; i++)
+        args.data[i] = 0;
+
+    uint64_t physical = (uint64_t)(uintptr_t)&args - PAGE_OFFSET;
+    long hrc = pseries_hcall(0xf000UL, physical, 0, 0, 0,
+                             NULL, NULL, NULL);
+    if (hrc != 0)
+        return (int)hrc;
+    return (int)(int32_t)__builtin_bswap32(args.data[nargs]);
+}
+
 void arch_firmware_init(void)
 {
     /*
-     * pseries PCI devices DMA through a TCE IOMMU.  Keep the driver's
-     * existing physical-address DMA contract by installing a 1:1 map for
-     * the whole 1 GiB guest window before any virtio queue is created.
+     * Do not populate the whole TCE window here.  A 1 GiB identity map would
+     * require 262144 H_PUT_TCE hypercalls before the first kernel subsystem
+     * can run.  The current pSeries bring-up path does not enumerate a DMA
+     * device, and the generic DMA API still uses physical addresses directly.
+     * A bounded, device-aware TCE setup belongs in the PCI/DMA path.
      */
-    /*
-     * SLOF leaves a small identity range populated.  Replace it too: stale
-     * translations there otherwise redirect low guest IOVAs into firmware
-     * scratch memory after the kernel starts allocating from low RAM.
-     */
-    for (uint64_t pa = PSERIES_DMA_IOVA_BASE;
-         pa < PSERIES_DMA_WINDOW_SIZE; pa += 4096) {
-        register uint64_t r3 __asm__("r3") = H_PUT_TCE;
-        register uint64_t r4 __asm__("r4") = PSERIES_PCI_LIOBN;
-        register uint64_t r5 __asm__("r5") = pa;
-        register uint64_t r6 __asm__("r6") = pa | 3UL;
-        __asm__ __volatile__(
-            "sc 1"
-            : "+r"(r3), "+r"(r4), "+r"(r5), "+r"(r6)
-            :
-            : "r7", "r8", "r9", "r10", "r11", "r12",
-              "ctr", "lr", "cr0", "memory");
-        if (r3 != 0)
-            break;
-    }
+    (void)H_PUT_TCE;
+    (void)PSERIES_PCI_LIOBN;
+    (void)PSERIES_DMA_WINDOW_SIZE;
+    (void)PSERIES_DMA_IOVA_BASE;
+    /* Mask every XIVE external interrupt (the port only polls). */
+    ppc64_xics_ack();
 }
-
-#define VTERMNO 0x71000000UL
 
 void firmware_console_putchar(char c)
 {
@@ -123,11 +141,14 @@ void firmware_set_timer(uint64_t time)
 
 void firmware_shutdown(void)
 {
+    static const int32_t args[] = { -1, -1 };
+    (void)ppc64_rtas_call(RTAS_TOKEN_POWER_OFF, 2, 1, args);
     arch_halt();
 }
 
 void firmware_reboot(void)
 {
+    (void)ppc64_rtas_call(RTAS_TOKEN_SYSTEM_REBOOT, 0, 1, NULL);
     arch_halt();
 }
 
@@ -149,6 +170,37 @@ int sbi_console_getchar(void)
 void sbi_shutdown(void)
 {
     firmware_shutdown();
+}
+
+/*
+ * The pSeries machine is POWER10 XIVE (ov5 XIVE_EXPLOIT): the legacy XICS
+ * hypercalls (H_XIRR/H_EOI) are not registered and there is no ICP MMIO.
+ * entry.S maps the XIVE Thread Interrupt Management Area (TIMA) at VA
+ * 0xC000800040000000; the OS/pool/HV rings live at +0x190000/+0x1A0000/
+ * +0x1B0000 and their CPPR bytes at +0x011/+0x021/+0x031.
+ */
+#define PPC64_TIMA_VA      0xC000800040000000UL
+#define PPC64_TIMA_OS_OFF  0x190000UL
+#define PPC64_TIMA_POOL_OFF 0x1A0000UL
+#define PPC64_TIMA_HV_OFF  0x1B0000UL
+#define PPC64_TIMA_CPPR    0x011UL
+
+/*
+ * The XIVE Thread Interrupt Management Area (TIMA) pages are mapped at
+ * 0xC000800040000000 with the OS (ring 1), pool (ring 2) and HV (ring 3)
+ * pages at 0x190000, 0x1A0000 and 0x1B0000.  The Current Processor Priority
+ * Register (CPPR) of each ring lives at +0x011/+0x021/+0x031.  Every driver
+ * on this port polls and the decrementer is a separate exception, so raising
+ * all CPPRs to 0xff masks every XIVE external interrupt.
+ */
+void ppc64_xics_ack(void)
+{
+    *(volatile uint8_t *)(PPC64_TIMA_VA + PPC64_TIMA_OS_OFF +
+                          PPC64_TIMA_CPPR) = 0xff;
+    *(volatile uint8_t *)(PPC64_TIMA_VA + PPC64_TIMA_POOL_OFF +
+                          PPC64_TIMA_CPPR + 0x10) = 0xff;
+    *(volatile uint8_t *)(PPC64_TIMA_VA + PPC64_TIMA_HV_OFF +
+                          PPC64_TIMA_CPPR + 0x20) = 0xff;
 }
 
 void sbi_reboot(void)

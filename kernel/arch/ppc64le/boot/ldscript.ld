@@ -2,7 +2,7 @@ OUTPUT_ARCH(powerpc:common64)
 ENTRY(_start)
 
 PROVIDE(PHYS_BASE = 0x00400000);
-PROVIDE(VIRT_BASE = 0xC000000000800000);
+PROVIDE(VIRT_BASE = 0xC000800000800000);
 LOAD_DELTA = VIRT_BASE - PHYS_BASE;
 
 PHDRS
@@ -50,6 +50,7 @@ SECTIONS
         *(.bss .bss.*)
         *(.sbss .sbss.*)
         *(COMMON)
+        *(.bss.page_tables)
         *(.bss.stack)
         . = ALIGN(4096);
         _bss_end = .;

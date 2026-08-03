@@ -629,12 +629,19 @@ int handle_present_page_fault(task_t *t, uint64_t stval,
         else
             allowed = (*pte & PTE_R) != 0;
     }
+    /*
+     * Radix-style MMUs take a reference/access (R/C) fault on a present
+     * page whose R bit is clear.  Mark the leaf referenced so the retry
+     * does not re-fault; the TLB flush below drops the stale entry.
+     */
+    if (allowed && pte)
+        *pte |= PTE_A;
     spin_unlock_irqrestore(&mm->lock, flags);
 
     if (!allowed)
         return -1;
 
-    arch_tlb_flush_page(stval & ~(PAGE_SIZE - 1));
+    arch_tlb_flush();
     return 0;
 #endif
 }

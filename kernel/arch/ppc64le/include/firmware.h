@@ -16,4 +16,6 @@ int  sbi_console_getchar(void);
 void sbi_shutdown(void);
 void sbi_reboot(void);
 
+void ppc64_xics_ack(void);
+
 #endif

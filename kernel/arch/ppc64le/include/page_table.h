@@ -26,7 +26,7 @@
 #define PTE_LEAF           0x0000000000000040UL
 #define PTE_COW            0x0000000000000020UL
 #define PTE_G              0x0004000000000000UL
-#define PTE_U              0x0008000000000000UL
+#define PTE_U              0x0002000000000000UL
 #define PTE_D              0x8000000000000000UL
 #define PTE_A              0x0001000000000000UL
 #define PTE_R              0x0400000000000000UL
@@ -56,7 +56,7 @@ static inline uint64_t swp_entry_to_pte(swap_entry_t entry) {
 }
 #endif
 
-#define PTE_PRIV           0x0800000000000000UL
+#define PTE_PRIV           0x0008000000000000UL
 #define PTE_KERN           (PTE_V | PTE_R | PTE_W | PTE_X | PTE_A | PTE_D | PTE_G | PTE_MAT1 | PTE_LEAF | PTE_PRIV)
 #define PTE_USER           (PTE_V | PTE_R | PTE_W | PTE_X | PTE_U | PTE_A | PTE_D | PTE_MAT1 | PTE_LEAF)
 #define PTE_DIR            (PTE_V | 0x0900000000000000UL)

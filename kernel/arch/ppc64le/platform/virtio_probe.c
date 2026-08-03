@@ -4,6 +4,9 @@
 #include "drivers/block/virtio_blk.h"
 #include "core/stdio.h"
 #include "core/string.h"
+#include "platform.h"
+
+#define VIRTQ_AVAIL_F_NO_INTERRUPT 1
 
 #define PPC64_H_LOGICAL_CI_LOAD  0x3CUL
 #define PPC64_H_LOGICAL_CI_STORE 0x40UL
@@ -190,6 +193,8 @@ static void pci_init(void) {
 
 typedef struct {
     pci_virtio_dev_t *pdev;
+    uint64_t avail_pa;
+    int avail_valid;
 } pci_transport_priv_t;
 
 static uint32_t pci_vt_read32(virtio_transport_t *t, uint32_t off) {
@@ -233,7 +238,8 @@ static uint32_t pci_vt_read32(virtio_transport_t *t, uint32_t off) {
 }
 
 static void pci_vt_write32(virtio_transport_t *t, uint32_t off, uint32_t val) {
-    pci_virtio_dev_t *vd = ((pci_transport_priv_t *)t->priv)->pdev;
+    pci_transport_priv_t *priv = (pci_transport_priv_t *)t->priv;
+    pci_virtio_dev_t *vd = priv->pdev;
     uintptr_t cb = vd->common_base;
 
     switch (off) {
@@ -257,6 +263,12 @@ static void pci_vt_write32(virtio_transport_t *t, uint32_t off, uint32_t val) {
         break;
     case VIRTIO_MMIO_QUEUE_READY:
         mmio_write16(cb + PCOMMON_QUEUE_ENABLE, (uint16_t)val);
+        if (val && priv->avail_valid) {
+            volatile uint16_t *flags =
+                (volatile uint16_t *)(uintptr_t)(PAGE_OFFSET + priv->avail_pa);
+            *flags |= VIRTQ_AVAIL_F_NO_INTERRUPT;
+            priv->avail_valid = 0;
+        }
         break;
     case VIRTIO_MMIO_QUEUE_DESC_LOW:
         mmio_write32(cb + PCOMMON_QUEUE_DESC_LO, val);
@@ -266,9 +278,13 @@ static void pci_vt_write32(virtio_transport_t *t, uint32_t off, uint32_t val) {
         break;
     case VIRTIO_MMIO_QUEUE_DRIVER_LOW:
         mmio_write32(cb + PCOMMON_QUEUE_DRV_LO, val);
+        priv->avail_pa = (priv->avail_pa & 0xFFFFFFFF00000000ULL) | val;
+        priv->avail_valid = 1;
         break;
     case VIRTIO_MMIO_QUEUE_DRIVER_HIGH:
         mmio_write32(cb + PCOMMON_QUEUE_DRV_HI, val);
+        priv->avail_pa = (priv->avail_pa & 0x00000000FFFFFFFFULL) |
+                         ((uint64_t)val << 32);
         break;
     case VIRTIO_MMIO_QUEUE_DEVICE_LOW:
         mmio_write32(cb + PCOMMON_QUEUE_DEV_LO, val);

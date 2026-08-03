@@ -29,8 +29,10 @@ void arch_handle_irq(uint64_t irq, int from_user)
         handle_timer_irq(from_user);
         return;
     }
-    if (irq == IRQ_S_EXT)
+    if (irq == IRQ_S_EXT) {
+        ppc64_xics_ack();
         driver_irq_dispatch(UART0_IRQ);
+    }
 }
 
 #endif /* CONFIG_PPC64LE */

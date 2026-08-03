@@ -12,6 +12,8 @@
     .set RADIX_EXEC,       0x0000000000000001
     .set RADIX_DIR_BITS,   9
     .set RADIX_KERNEL_PTE, 0xc00000000000018f
+    /* XIVE TIMA 2 MiB leaf: V|LEAF|C|PRIV|R|RW|X + RPN of the TIMA base. */
+    .set PPC64_TIMA_PTE,   0xc00603020300018f
 
     .macro LOAD_PHYS_ADDR reg,sym
     lis     \reg,\sym@highest
@@ -169,6 +171,8 @@ enter_64le:
     ori     20,15,RADIX_DIR_BITS
     or      20,20,19
     stdbrx  20,0,14
+    li      17,2048
+    stdbrx  20,17,14
     ori     20,16,RADIX_DIR_BITS
     or      20,20,19
     stdbrx  20,0,15
@@ -184,10 +188,24 @@ enter_64le:
     addis   23,23,0x20
     bdnz    4b
 
+    /*
+     * Map the XIVE TIMA (real 0x6030203000000) at VA 0xC000800040000000
+     * using a 2 MiB leaf.  The OS (ring 1) TIMA page is at real
+     * 0x6030203190000, i.e. offset 0x190000 inside this 2 MiB region.
+     */
+    LOAD_PHYS_ADDR 17,boot_pmd_tima
+    ori     25,17,RADIX_DIR_BITS
+    or      25,25,19
+    li      18,8
+    stdbrx  25,18,15
+    LOAD_IMM64 24,PPC64_TIMA_PTE
+    li      18,0
+    stdbrx  24,18,17
+    isync
+
     /* Register the process table through PAPR. */
     lis     26,0x2
     LOAD_IMM64 27,0x8000000000000000
-    /* RTS=52 bits: low RTS nibble in bits 6..8, high bits in 62..63. */
     LOAD_IMM64 28,0x40000000000000a0
     ori     21,21,13
     or      21,21,28
@@ -312,7 +330,7 @@ copy_exception_vector:
     PPC64_EXCEPTION_VECTOR ppc64_machine_check_vector,0x200,0
     PPC64_EXCEPTION_VECTOR ppc64_dsi_vector,0x300,1
     PPC64_EXCEPTION_VECTOR ppc64_dseg_vector,0x380,1
-    PPC64_EXCEPTION_VECTOR ppc64_isi_vector,0x301,0
+    PPC64_EXCEPTION_VECTOR ppc64_isi_vector,0x301,2
     PPC64_EXCEPTION_VECTOR ppc64_external_vector,0x500,0,1
     PPC64_EXCEPTION_VECTOR ppc64_program_vector,0x700,0
     PPC64_EXCEPTION_VECTOR ppc64_fp_unavailable_vector,0x700,0
@@ -374,6 +392,9 @@ boot_pgdir:
 boot_pud:
     .space 4096
 boot_pmd:
+    .space 4096
+    .align 12
+boot_pmd_tima:
     .space 4096
 
     .globl __boot_dtb_ptr
