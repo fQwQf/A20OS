@@ -257,7 +257,8 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval) {
     }
 
     if (page_va >= t->mm->start_brk &&
-        page_va < ROUND_UP(t->mm->brk, PAGE_SIZE)) {
+        page_va < ROUND_UP(t->mm->brk, PAGE_SIZE) &&
+        !mm_find_vma(t->mm, page_va)) {
         if (cg_mem_charge(t->cgroup, 1) != 0) {
             return -ENOMEM;
         }
