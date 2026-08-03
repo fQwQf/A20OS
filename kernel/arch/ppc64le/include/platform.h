@@ -6,7 +6,15 @@
 #define PHYS_MEMORY_BASE   0x00000000UL
 #define PHYS_MEMORY_END    0x40000000UL
 #define KERNEL_ENTRY       0x02000000UL
-#define PAGE_OFFSET        0xC000000000000000UL
+/*
+ * PAGE_OFFSET must give the kernel linear map a Radix root index of 256
+ * (EA bits 51..39 == 0x100).  The shared page-table code keeps user pages in
+ * root entries 0..255 and copies root entries 256..511 (pt_map_kernel) into
+ * every new address space for the kernel.  With the old 0xC000000000000000
+ * base the hardware would walk kernel VAs through root entry 0, which is the
+ * user root, so a task's kernel mappings would never be found.
+ */
+#define PAGE_OFFSET        0xC000800000000000UL
 #define USER_VA_LIMIT      0x0000800000000000UL
 
 static inline size_t arch_ram_range_count(void) {

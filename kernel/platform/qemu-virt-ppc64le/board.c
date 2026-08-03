@@ -57,6 +57,18 @@ static void ppc64le_reboot(void) {
 }
 
 static void ppc64le_enumerate_devices(void) {
+    /*
+     * pSeries has no ECAM config space: PCI config cycles go through RTAS and
+     * PCI MMIO through H_LOGICAL_CI_* hypercalls, so the generic pci_bus
+     * enumeration cannot discover devices.  Probe the RTAS-scanned virtio
+     * transports directly (arch_virtio_blk_probe/net_probe in
+     * kernel/arch/ppc64le/platform/virtio_probe.c) so mount_block_devices()
+     * finds the /bin and /test disks.
+     */
+    extern int virtio_blk_init(void);
+    extern int virtio_net_init(void);
+    (void)virtio_blk_init();
+    (void)virtio_net_init();
 }
 
 static const board_config_t qemu_virt_ppc64le = {
