@@ -30,5 +30,6 @@
 #define PPC64_TRAP_SCRATCH_PA        0x1000
 
 #define PPC64_SPR_PID                0x030
+#define PPC64_SPR_PIR                0x11e
 
 #endif
