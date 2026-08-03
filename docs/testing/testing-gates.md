@@ -23,7 +23,7 @@
 | SMP 平台边界 | `make check-smp-platform-boundary` |
 | 信号、停止与退出边界 | `make check-signal-exit-boundary` |
 
-`BUILD_MATRIX_GATE_CONTRACT`：bringup 构建覆盖 `riscv64`、`loongarch64`、`aarch64` 和 `x86_64`；用户态构建通过 `make check-user-build` 覆盖同一组架构。
+`BUILD_MATRIX_GATE_CONTRACT`：默认 hosted 构建覆盖 `riscv64`、`loongarch64`、`aarch64`、`x86_64`、`arm32`、`riscv32` 和 `ppc64le`；用户态构建通过 `make check-user-build` 覆盖同一组可用用户态架构。ARMv7-M 由独立 STM32 bring-up 目标验证。
 
 `ARCH_MMU_RUNTIME_MATRIX_CONTRACT`：当前 NOMMU 支持集合明确限定为 `arm32`、`aarch64`、`riscv64`、`riscv32`；其他架构在构建入口即被拒绝，不再形成可链接但不可运行的伪配置。`make smoke-arch-mmu-matrix` 在 QEMU 中覆盖这四个架构的 MMU 与 NOMMU 八种有效组合。每个组合必须进入交互式 shell，分别执行 shell builtin 与外部程序，并通过用户态 `poweroff` 正常关机。架构差异通过 `kernel/arch/<arch>/` 提供的 hook/capability 表达；`make check-arch-boundary` 禁止通用内核代码直接按具体架构条件编译。
 
@@ -104,7 +104,7 @@
 
 ### 构建矩阵
 - **How to run**: `make check-build-matrix`
-- **What it checks**: 运行默认四架构的内核 bringup 构建与用户态构建；确认 `BUILD_MATRIX_GATE_CONTRACT` 字符串仍存在于本文档。
+- **What it checks**: 运行默认 hosted 架构的内核 bringup 构建与用户态构建；确认 `BUILD_MATRIX_GATE_CONTRACT` 字符串仍存在于本文档。
 - **When it fails**: 修复对应架构的 `check-<arch>-bringup` 或 `check-<arch>-user` 错误；确保 `BUILD_MATRIX_GATE_CONTRACT` 仍存在于本文档。
 
 ### 架构 / MMU 运行矩阵

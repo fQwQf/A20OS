@@ -13,6 +13,8 @@
 #include "core/consts.h"
 #include "core/klog.h"
 
+__attribute__((weak)) void arch_dump_trap_ring(void) {}
+
 static int fetch_user_insn(task_t *task, vaddr_t va, uint32_t *insn_out) {
     if (!task || !task->mm || !task->mm->pgdir || !insn_out)
         return 0;
@@ -168,6 +170,7 @@ static void user_trap_handler(trap_context_t *ctx) {
                   cur ? cur->pid : -1, (unsigned long)code,
                   (unsigned long)sepc, (unsigned long)stval,
                    cur ? (int)cur->abi_mode : -1);
+            arch_dump_trap_ring();
             if (have_user_insn)
                 kerr("  insn@sepc=0x%08x\n", user_insn);
             dump_trap_context(ctx);

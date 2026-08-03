@@ -3,6 +3,14 @@
     .section .text
     .globl __switch
 __switch:
+    /*
+     * Allocate the outgoing task_context_t 192 bytes below the current stack
+     * pointer.  The ppc64le ELFv2 C frames of the callers (scheduler ->
+     * context_switch) place their saved LR at [orig_r1+16], which overlaps
+     * the context's r21 slot if the context were saved at the frame base.
+     * Saving strictly below the whole C frame keeps the two disjoint.
+     */
+    addi    1,1,-192
     mflr    9
     std     9,0(1)
     std     2,8(1)
@@ -25,7 +33,8 @@ __switch:
     std     29,144(1)
     std     30,152(1)
     std     31,160(1)
-    std     1,168(1)
+    addi    9,1,192
+    std     9,168(1)
     cmpdi   13,0
     beq     1f
     std     1,0(13)

@@ -33,7 +33,7 @@
 **高性能、高兼容性的混合内核操作系统**
  
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](#)
-[![Architecture](https://img.shields.io/badge/Arch-RISC--V%20%7C%20ARM64%20%7C%20x86__64%20%7C%20LoongArch-orange.svg)](#)
+[![Architecture](https://img.shields.io/badge/Arch-RISC--V%20%7C%20ARM64%20%7C%20x86__64%20%7C%20LoongArch%20%7C%20PPC64LE-orange.svg)](#)
 
 </div>
 
@@ -44,7 +44,7 @@ A20OS 是一款探索现代操作系统架构边界的高级混合内核 (Hybrid
 
 ## 支持的硬件平台
 A20OS 具备优秀的跨平台移植性，硬件抽象层 (HAL) 目前官方支持和维护以下目标：
-* **虚拟机环境 (QEMU)**：`qemu-virt-riscv64`, `qemu-virt-aarch64`, `qemu-virt-x86_64`, `qemu-virt-loongarch64`
+* **虚拟机环境 (QEMU)**：`qemu-virt-riscv64`, `qemu-virt-aarch64`, `qemu-virt-x86_64`, `qemu-virt-loongarch64`、`qemu-virt-ppc64le`（pSeries）
 * **物理开发板**：星光 2 (StarFive VisionFive 2)、龙芯 (Loongson LS2K1000)
 * **MCU bring-up**：STM32F103（ARMv7-M/Cortex-M3，NOMMU；当前提供启动、USART1、SysTick 与基础堆）
 
@@ -68,6 +68,9 @@ make ARCH=riscv64 BOARD=qemu-virt-riscv64 run
 
 # 构建其他架构 (例: aarch64)
 make ARCH=aarch64 BOARD=qemu-virt-aarch64 run
+
+# QEMU pSeries 上运行 PPC64LE（MMU、单核）
+make ARCH=ppc64le BOARD=qemu-virt-ppc64le run
 
 # 带 GUI 的 QEMU 运行
 make run-gui-x86_64
