@@ -261,6 +261,39 @@ static int map_fd_segment_lazy(mm_struct_t *mm, pt_root_t *pgdir,
                                       file_page_offset);
         if ((intptr_t)mapped < 0)
             return (int)(intptr_t)mapped;
+        /*
+         * ppc64le pSeries delivers instruction storage faults to the external
+         * vector with SRR0 clobbered to the trap-entry address, so a code page
+         * fault cannot recover the faulting EA and demand paging never maps the
+         * page.  Map executable file pages eagerly to avoid code-fetch faults.
+         */
+#if defined(CONFIG_PPC64LE)
+        if (flags & PTE_X) {
+            for (vaddr_t page = start; page < file_map_end; page += PAGE_SIZE) {
+                pte_t *pte = pt_lookup_leaf(pgdir, page, NULL, NULL, NULL);
+                if (pte && (*pte & PTE_V))
+                    continue;
+                void *frame = frame_alloc();
+                if (!frame)
+                    return -ENOMEM;
+                memset(frame, 0, PAGE_SIZE);
+                int nr = vfs_pread(fd, (char *)frame, PAGE_SIZE,
+                                   file_page_offset + (page - start));
+                if (nr < 0) {
+                    frame_free(frame);
+                    return nr;
+                }
+                int r = pt_map(pgdir, page, va_to_pa(frame), flags);
+                if (r < 0) {
+                    frame_free(frame);
+                    return r;
+                }
+                if (flags & PTE_X)
+                    arch_flush_icache_range(frame, PAGE_SIZE);
+                mm->rss++;
+            }
+        }
+#endif
     }
 
     vaddr_t anon_start;
