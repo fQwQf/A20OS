@@ -726,6 +726,35 @@ typedef struct a20_msg_recv_args {
     uint64_t       out_rights_buf;
 } a20_msg_recv_args_t;
 
+/*
+ * Fused RPC (docs/hybrid-kernel/00-design.md §4.1): one trap performs the
+ * request send and the reply wait, sharing a single handle lookup and a
+ * single rights check (READ|WRITE).  Semantics equal channel_send followed
+ * by channel_recv on the same endpoint; the reply stage honors
+ * A20_MSG_NONBLOCK (request may already be delivered when the reply stage
+ * returns A20_ERR_WOULD_BLOCK — the caller can recv it later).
+ */
+typedef struct a20_channel_call_args {
+    uint32_t       size;
+    uint32_t       version;
+    a20_handle_t   channel;
+    uint32_t       flags;           /* A20_MSG_* */
+    uint64_t       data;            /* request bytes */
+    uint32_t       data_len;
+    uint32_t       _pad;
+    uint64_t       handles;         /* a20_handle_t[] sent with the request */
+    uint32_t       handle_count;
+    uint64_t       transfer_rights; /* a20_rights_t[] per-handle, or 0 */
+    uint64_t       reply_buf;
+    uint32_t       reply_buf_len;
+    uint32_t       _pad2;
+    uint64_t       reply_handle_buf;      /* a20_handle_t[] */
+    uint32_t       reply_handle_buf_count;
+    uint64_t       reply_rights_buf;      /* a20_rights_t[] out, or 0 */
+    uint32_t       out_reply_len;         /* out: reply bytes */
+    uint32_t       out_reply_handles;     /* out: reply handle count */
+} a20_channel_call_args_t;
+
 /* ---- Message flags (channel_send / channel_recv) ---- */
 
 #define A20_MSG_NONBLOCK   (1u << 0)  /* fail with WOULD_BLOCK instead of sleeping */

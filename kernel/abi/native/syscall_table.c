@@ -84,6 +84,7 @@ int64_t sys_a20_channel_create(const a20_syscall_args_t *args);
 int64_t sys_a20_channel_send(const a20_syscall_args_t *args);
 int64_t sys_a20_channel_recv(const a20_syscall_args_t *args);
 int64_t sys_a20_event_watch_fs(const a20_syscall_args_t *args);
+int64_t sys_a20_channel_call(const a20_syscall_args_t *args);
 int64_t sys_a20_net_socket(const a20_syscall_args_t *args);
 int64_t sys_a20_net_bind(const a20_syscall_args_t *args);
 int64_t sys_a20_net_connect(const a20_syscall_args_t *args);
