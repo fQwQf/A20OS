@@ -437,6 +437,11 @@ typedef struct a20_task_spawn_args {
     uint32_t       handle_count;
     uint32_t       flags;
     a20_handle_t   out_task;
+    /* ---- version 2: child start_info stdio handles (NULL = not inherited) ---- */
+    a20_handle_t   stdin_handle;
+    a20_handle_t   stdout_handle;
+    a20_handle_t   stderr_handle;
+    uint32_t       reserved;
 } a20_task_spawn_args_t;
 
 typedef struct a20_task_status {
