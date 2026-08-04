@@ -8,7 +8,7 @@
 | 阶段 | 内容 | 状态 |
 |------|------|------|
 | 1 | `channel_call` 融合 RPC 快路径（内核 + SDK + 基准） | 完成（riscv64） |
-| 2 | svcman 服务监管者 + 崩溃自愈演示 | 未开始 |
+| 2 | svcman 服务监管者 + 崩溃自愈演示 | 完成（riscv64） |
 | 3 | 共享 VMO 环形队列 uapi 协议 + 数据面基准 | 未开始 |
 | 3B | Linux ABI 透明桥接：pipe over VMO 环 + vDSO | 未开始 |
 | 4 | 低速驱动外迁试点（用户态驱动框架） | 未开始 |
@@ -72,6 +72,23 @@
 
 - `make smoke-native-svc`：日志依次出现服务就绪、崩溃检测、重启、
   二次请求成功，最终 `NATIVE_SVC: PASS`。
+
+**结果（已达成）**
+
+- 服务端点通过 `task_spawn` 的 `target_slot`（≥ `A20_NATIVE_FD_HANDLE_BASE`
+  时按槽位精确安装）传递到子进程固定槽位，服务二进制用编译期常量
+  命名自己的服务端点（`user/svc/svc_proto.h`）——无需全局注册表。
+- `task_spawn` v2 stdio 继承可用；SDK 的 `a20_task_spawn_args_t` 补齐了
+  v2 字段（内核早已支持）。
+- svcman 用 EventQ watch 服务 TASK handle 的 `A20_EVENT_EXITED`，
+  `ev.data0` 即退出码（`kernel/proc/exit.c`）；重启 = 新建 channel 对 +
+  重新 spawn + 重新 watch，旧端点随对端关闭退役。
+- 自愈演示：两轮「`crash` 请求 → 检测 exit_code=42 → 50ms 退避 →
+  重启 → `channel_call` 回显验证」全部通过。
+- 客户端 RPC 全部走阶段 1 的 `channel_call` 快路径。
+- 待做：声明式清单与多服务依赖；健康 ping 超时强杀；服务崩溃后的
+  客户端重绑定协议（当前由 svcman 兼任客户端，跨进程服务发现留给
+  阶段 3 之后的 namespace/注册服务）。
 
 ## 阶段 3：共享 VMO 环形队列
 
