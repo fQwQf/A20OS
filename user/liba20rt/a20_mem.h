@@ -35,6 +35,33 @@ static inline a20_status_t a20_vm_alloc_pages(uint64_t num_pages, uint32_t flags
     return r;
 }
 
+/* Create a VMO; on success returns the MEMORY handle (>= 0). */
+static inline a20_status_t a20_vm_create_object(uint64_t size, uint32_t options)
+{
+    return a20_syscall6(A20_SYS_vm_create_object, size, options, 0, 0, 0, 0);
+}
+
+/* Map a VMO (source = MEMORY handle) into this task's address space. */
+static inline a20_status_t a20_vm_map(a20_handle_t source, uint64_t length,
+                                      uint64_t offset, uint32_t prot,
+                                      uint64_t *out_addr)
+{
+    a20_vm_map_args_t args;
+    args.size      = sizeof(args);
+    args.version   = 1;
+    args.source    = source;
+    args._pad      = 0;
+    args.addr_hint = 0;
+    args.length    = length;
+    args.offset    = offset;
+    args.prot      = prot;
+    args.flags     = 0;
+    args.out_addr  = 0;
+    a20_status_t r = a20_syscall6(A20_SYS_vm_map, (uint64_t)&args, 0, 0, 0, 0, 0);
+    if (r >= 0 && out_addr) *out_addr = args.out_addr;
+    return r;
+}
+
 void *a20_malloc(uint64_t size);
 void  a20_free(void *ptr);
 void *a20_calloc(uint64_t nmemb, uint64_t size);
