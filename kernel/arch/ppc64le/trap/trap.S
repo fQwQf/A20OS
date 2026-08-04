@@ -8,6 +8,9 @@
     .globl __trap_from_kernel
     .globl user_trap_return
 
+    .set PPC64_VECTOR_CONTEXT_OFFSET, 336
+    .set PPC64_TRAP_CONTEXT_SIZE, 848
+
     .macro LOAD_ADDR reg,sym
     lis     \reg,\sym@highest
     ori     \reg,\reg,\sym@higher
@@ -20,6 +23,16 @@
     lis     \reg,0xc000
     sldi    \reg,\reg,32
     ori     \reg,\reg,PPC64_TRAP_SCRATCH_PA
+    .endm
+
+    .macro SAVE_VECTOR_REG reg
+    stvx    \reg,1,4
+    addi    4,4,16
+    .endm
+
+    .macro LOAD_VECTOR_REG reg
+    lvx     \reg,12,4
+    addi    4,4,16
     .endm
 
 __trap_from_user:
@@ -37,12 +50,12 @@ __trap_from_user:
     ld      4,40(12)
     andi.   4,4,PPC64_MSR_PR
     beq     1f
-    ld      1,64(12)
+    mfsprg  1,2
     b       2f
 1:
     ld      1,8(12)
 2:
-    addi    1,1,-336
+    addi    1,1,-PPC64_TRAP_CONTEXT_SIZE
 
     ld      4,104(12)
     std     4,32(1)
@@ -96,9 +109,49 @@ __trap_from_user:
     std     4,288(1)
     ld      4,112(12)
     std     4,296(1)
-    std     13,304(1)
-    addi    4,1,336
+    ld      4,72(12)
+    std     4,304(1)
+    addi    4,1,PPC64_TRAP_CONTEXT_SIZE
     std     4,312(1)
+
+    /* VMX is lazy-enabled, so only used contexts contain live vectors. */
+    ld      4,40(12)
+    andis.  4,4,0x0200
+    beq     .Lvector_save_done
+    li      4,PPC64_VECTOR_CONTEXT_OFFSET
+    SAVE_VECTOR_REG 0
+    SAVE_VECTOR_REG 1
+    SAVE_VECTOR_REG 2
+    SAVE_VECTOR_REG 3
+    SAVE_VECTOR_REG 4
+    SAVE_VECTOR_REG 5
+    SAVE_VECTOR_REG 6
+    SAVE_VECTOR_REG 7
+    SAVE_VECTOR_REG 8
+    SAVE_VECTOR_REG 9
+    SAVE_VECTOR_REG 10
+    SAVE_VECTOR_REG 11
+    SAVE_VECTOR_REG 12
+    SAVE_VECTOR_REG 13
+    SAVE_VECTOR_REG 14
+    SAVE_VECTOR_REG 15
+    SAVE_VECTOR_REG 16
+    SAVE_VECTOR_REG 17
+    SAVE_VECTOR_REG 18
+    SAVE_VECTOR_REG 19
+    SAVE_VECTOR_REG 20
+    SAVE_VECTOR_REG 21
+    SAVE_VECTOR_REG 22
+    SAVE_VECTOR_REG 23
+    SAVE_VECTOR_REG 24
+    SAVE_VECTOR_REG 25
+    SAVE_VECTOR_REG 26
+    SAVE_VECTOR_REG 27
+    SAVE_VECTOR_REG 28
+    SAVE_VECTOR_REG 29
+    SAVE_VECTOR_REG 30
+    SAVE_VECTOR_REG 31
+.Lvector_save_done:
 
     ld      13,72(12)
     ld      2,80(12)
@@ -115,6 +168,49 @@ __trap_from_user:
 
 __return_to_user:
     mr      12,1
+
+    ld      4,264(12)
+    andis.  4,4,0x0200
+    beq     .Lvector_restore_done
+    mfmsr   4
+    oris    4,4,0x0200
+    mtmsrd  4
+    isync
+    li      4,PPC64_VECTOR_CONTEXT_OFFSET
+    LOAD_VECTOR_REG 0
+    LOAD_VECTOR_REG 1
+    LOAD_VECTOR_REG 2
+    LOAD_VECTOR_REG 3
+    LOAD_VECTOR_REG 4
+    LOAD_VECTOR_REG 5
+    LOAD_VECTOR_REG 6
+    LOAD_VECTOR_REG 7
+    LOAD_VECTOR_REG 8
+    LOAD_VECTOR_REG 9
+    LOAD_VECTOR_REG 10
+    LOAD_VECTOR_REG 11
+    LOAD_VECTOR_REG 12
+    LOAD_VECTOR_REG 13
+    LOAD_VECTOR_REG 14
+    LOAD_VECTOR_REG 15
+    LOAD_VECTOR_REG 16
+    LOAD_VECTOR_REG 17
+    LOAD_VECTOR_REG 18
+    LOAD_VECTOR_REG 19
+    LOAD_VECTOR_REG 20
+    LOAD_VECTOR_REG 21
+    LOAD_VECTOR_REG 22
+    LOAD_VECTOR_REG 23
+    LOAD_VECTOR_REG 24
+    LOAD_VECTOR_REG 25
+    LOAD_VECTOR_REG 26
+    LOAD_VECTOR_REG 27
+    LOAD_VECTOR_REG 28
+    LOAD_VECTOR_REG 29
+    LOAD_VECTOR_REG 30
+    LOAD_VECTOR_REG 31
+.Lvector_restore_done:
+
     ld      4,256(12)
     mtsrr0  4
     ld      4,264(12)
@@ -159,39 +255,6 @@ __return_to_user:
     ld      30,240(12)
     ld      31,248(12)
     ld      1,8(12)
-    /*
-     * Refresh the user r1/r2 recovery anchors only for genuine user-mode
-     * returns (MSR.PR set) and only when r1 was not already clobbered to the
-     * TIMA scratch base by the storage-fault delivery.  Kernel-mode nested
-     * exceptions such as the SLOF console `sc 1` otherwise leak the kernel's
-     * r1/r2 into the anchors and the next user fault would recover garbage.
-     */
-    ld      11,264(12)
-    andi.   11,11,PPC64_MSR_PR
-    beq     4f
-    cmpdi   1,PPC64_TRAP_SCRATCH_PA
-    beq     4f
-    lis     11,ppc64_rtu_r1@highest
-    ori     11,11,ppc64_rtu_r1@higher
-    sldi    11,11,32
-    oris    11,11,ppc64_rtu_r1@high
-    ori     11,11,ppc64_rtu_r1@l
-    std     1,0(11)
-    ld      2,16(12)
-    lis     11,ppc64_rtu_r2@highest
-    ori     11,11,ppc64_rtu_r2@higher
-    sldi    11,11,32
-    oris    11,11,ppc64_rtu_r2@high
-    ori     11,11,ppc64_rtu_r2@l
-    std     2,0(11)
-    ld      4,256(12)
-    lis     11,ppc64_rtu_nip@highest
-    ori     11,11,ppc64_rtu_nip@higher
-    sldi    11,11,32
-    oris    11,11,ppc64_rtu_nip@high
-    ori     11,11,ppc64_rtu_nip@l
-    std     4,0(11)
-4:
     ld      12,96(12)
     rfid
 
@@ -201,10 +264,9 @@ __trap_from_kernel:
 user_trap_return:
     LOAD_TRAP_SCRATCH 12
     /*
-     * pseries firmware/hypercalls do not preserve the guest SPRG scratch
-     * value installed during early boot.  Exception entry runs in real
-     * mode, so refresh SPRG1 with the physical address immediately before
-     * every return to userspace.
+     * pseries firmware/hypercalls do not preserve the guest SPRG values
+     * installed during early boot.  Refresh the real-mode scratch pointer
+     * and publish this task's kernel stack before every user return.
      */
     li      11,PPC64_TRAP_SCRATCH_PA
     mtsprg  3,11
@@ -215,6 +277,7 @@ user_trap_return:
     ori     11,11,__trap_from_user@l
     std     11,56(12)
     ld      11,312(1)
+    mtsprg  2,11
     std     11,64(12)
     ld      11,304(1)
     std     11,72(12)
