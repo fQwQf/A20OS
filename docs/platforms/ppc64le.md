@@ -13,6 +13,8 @@ make ARCH=ppc64le BOARD=qemu-virt-ppc64le ABI=linux BRINGUP=1 kernel-only
 make ARCH=ppc64le BOARD=qemu-virt-ppc64le run
 make check-ppc64le-bringup
 make check-ppc64le-user
+make ARCH=ppc64le NOMMU=0 native-programs   # native ABI 测试程序
+make ARCH=ppc64le ABI=both BRINGUP=0 dev-build   # 完整 dev 镜像（含 native-*）
 ```
 
 QEMU 目标使用 pSeries 固件提供的虚拟终端、RTAS、PCI 配置访问和 TCE
@@ -110,3 +112,7 @@ DMA 窗口。`poweroff` 和 `reboot` 通过 RTAS token 请求固件动作；virt
   句柄写入未按预期被拒）；`native-futex-ppc64le` 报 `did not return
   WOULDBLOCK`；`native-signal-ppc64le` 在 worker 线程的 `signal_check`
   检查点触发 SIGSEGV（native 线程/信号路径）。
+- mksh 交互启动时仍打印 `can't find controlling tty: Not a directory`：TTY
+  ioctl 已可工作、prompt/回显/作业执行不受影响，但 `tty_init_fd()` 打开
+  `/dev/tty` 的完整 controlling-tty 语义（`TIOCSCTTY`/前台进程组）尚未
+  实现，完整 job control 属于后续工作。
