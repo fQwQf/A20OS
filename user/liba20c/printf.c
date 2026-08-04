@@ -35,29 +35,29 @@ static int parse_num(const char **fmt)
     return n;
 }
 
-static int64_t get_signed(va_list ap, int len)
+static int64_t get_signed(va_list *pap, int len)
 {
     switch (len) {
-    case 1:  return (int64_t)va_arg(ap, long);
-    case 2:  return (int64_t)va_arg(ap, long long);
-    case 3:  return (int64_t)va_arg(ap, ptrdiff_t); /* z */
-    case 4:  return (int64_t)va_arg(ap, ptrdiff_t);       /* t */
-    case 5:  return (int64_t)(short)va_arg(ap, int);       /* h */
-    case 6:  return (int64_t)(signed char)va_arg(ap, int); /* hh */
-    default: return (int64_t)va_arg(ap, int);
+    case 1:  return (int64_t)va_arg(*pap, long);
+    case 2:  return (int64_t)va_arg(*pap, long long);
+    case 3:  return (int64_t)va_arg(*pap, ptrdiff_t); /* z */
+    case 4:  return (int64_t)va_arg(*pap, ptrdiff_t);       /* t */
+    case 5:  return (int64_t)(short)va_arg(*pap, int);       /* h */
+    case 6:  return (int64_t)(signed char)va_arg(*pap, int); /* hh */
+    default: return (int64_t)va_arg(*pap, int);
     }
 }
 
-static uint64_t get_unsigned(va_list ap, int len)
+static uint64_t get_unsigned(va_list *pap, int len)
 {
     switch (len) {
-    case 1:  return (uint64_t)va_arg(ap, unsigned long);
-    case 2:  return (uint64_t)va_arg(ap, unsigned long long);
-    case 3:  return (uint64_t)va_arg(ap, size_t);                  /* z */
-    case 4:  return (uint64_t)(size_t)va_arg(ap, ptrdiff_t);      /* t */
-    case 5:  return (uint64_t)(unsigned short)va_arg(ap, int);     /* h */
-    case 6:  return (uint64_t)(unsigned char)va_arg(ap, int);    /* hh */
-    default: return (uint64_t)va_arg(ap, unsigned int);
+    case 1:  return (uint64_t)va_arg(*pap, unsigned long);
+    case 2:  return (uint64_t)va_arg(*pap, unsigned long long);
+    case 3:  return (uint64_t)va_arg(*pap, size_t);                  /* z */
+    case 4:  return (uint64_t)(size_t)va_arg(*pap, ptrdiff_t);      /* t */
+    case 5:  return (uint64_t)(unsigned short)va_arg(*pap, int);     /* h */
+    case 6:  return (uint64_t)(unsigned char)va_arg(*pap, int);    /* hh */
+    default: return (uint64_t)va_arg(*pap, unsigned int);
     }
 }
 
@@ -262,23 +262,23 @@ int vsnprintf(char *buf, size_t size, const char *fmt, va_list ap)
         switch (spec) {
         case 'd':
         case 'i': {
-            int64_t v = get_signed(ap, len);
+            int64_t v = get_signed(&ap, len);
             fmt_int(buf, size, &pos, v, width, prec, left, zero, plus, space);
             break;
         }
         case 'u': {
-            uint64_t v = get_unsigned(ap, len);
+            uint64_t v = get_unsigned(&ap, len);
             fmt_uint(buf, size, &pos, v, 10, 0, 0, width, prec, left, zero);
             break;
         }
         case 'o': {
-            uint64_t v = get_unsigned(ap, len);
+            uint64_t v = get_unsigned(&ap, len);
             fmt_uint(buf, size, &pos, v, 8, 0, alt, width, prec, left, zero);
             break;
         }
         case 'x':
         case 'X': {
-            uint64_t v = get_unsigned(ap, len);
+            uint64_t v = get_unsigned(&ap, len);
             fmt_uint(buf, size, &pos, v, 16, spec == 'X', alt,
                      width, prec, left, zero);
             break;
