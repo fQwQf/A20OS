@@ -52,6 +52,9 @@ static inline int arch_ram_range(size_t idx, paddr_t *base, paddr_t *end) {
 #define CAUSE_STORE_PAGE_FAULT  0x380UL
 #define CAUSE_PAGE_MODIFICATION 0x381UL
 #define CAUSE_INSN_FAULT        0x700UL
+#define CAUSE_FP_UNAVAILABLE    0x800UL
+#define CAUSE_EMU_ASSIST        0xE40UL
+#define CAUSE_VPU_UNAVAILABLE   0xF20UL
 #define CAUSE_LOAD_FAULT        0x701UL
 #define CAUSE_STORE_FAULT       0x702UL
 #define CAUSE_BREAKPOINT        0x700UL

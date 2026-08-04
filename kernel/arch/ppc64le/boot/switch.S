@@ -2,6 +2,15 @@
 
     .section .text
     .globl __switch
+
+    .macro LOAD_ADDR reg,sym
+    lis     \reg,\sym@highest
+    ori     \reg,\reg,\sym@higher
+    sldi    \reg,\reg,32
+    oris    \reg,\reg,\sym@high
+    ori     \reg,\reg,\sym@l
+    .endm
+
 __switch:
     /*
      * Allocate the outgoing task_context_t 192 bytes below the current stack
@@ -35,6 +44,9 @@ __switch:
     std     31,160(1)
     addi    9,1,192
     std     9,168(1)
+    LOAD_ADDR 9,ppc64_current_addr_space
+    ld      9,0(9)
+    std     9,176(1)
     cmpdi   13,0
     beq     1f
     std     1,0(13)

@@ -19,7 +19,7 @@ QEMU 目标使用 pSeries 固件提供的虚拟终端、RTAS、PCI 配置访问�
 DMA 窗口。`poweroff` 和 `reboot` 通过 RTAS token 请求固件动作；virtio
 块设备和网络设备通过 pSeries PCI transport 探测。
 
-## 当前进展（2026-08-02）
+## 当前进展（2026-08-04）
 
 已完成并可在干净提交上复现：
 
@@ -31,59 +31,71 @@ DMA 窗口。`poweroff` 和 `reboot` 通过 RTAS token 请求固件动作；virt
   fat32 到 `/bin`，`/bin/init` ELF 可加载，用户任务（pid 2）可创建。
 - 修复了 ISI 取指页错误不保存故障地址的问题：指令页故障的 tval 应为
   SRR0 而不是 DAR，否则 demand paging 永远映射不了入口页。
+- **`mksh` 交互 shell 已跑通**：真实 O3 init/mksh 可启动，shell 能执行内建
+  `echo`、`ls` 与外部 `/bin/echo`（`fork` + `execve` + COW + `wait` +
+  `SIGCHLD` 全链路）；`#` prompt、输入回显、父进程信号返回和阻塞读均正常。
 
 ## 已知边界与阻塞
 
-- **用户任务可执行（打印 mksh 横幅），但 shell 尚未跑通**。上一版“外部
-  中断（0x500）风暴”已经消除，关键修复包括：
-  1. 根因：QEMU pSeries（默认 POWER10 CPU）在 `ibm,arch-vec-5-platform-
-     support` 中把 byte 23 宣告为 `SPAPR_OV5_XIVE_EXPLOIT(0x80)`，即实际
-     使用 **XIVE** 中断控制器（`H_XIRR`/`H_EOI` 未注册、FDT 无 ICP reg、
-     `ic-mode=xics` 与 `-cpu power8` 均不可用）。
-  2. `kernel/arch/ppc64le/boot/entry.S` + `ldscript.ld`：把 XIVE TIMA
-     （real `0x6030203000000`，OS 页偏移 `0x190000`）以 2 MiB 叶映射到
-     VA `0xC000800040000000`。
-  3. `firmware.c ppc64_xics_ack()`：通过 TIMA OS/pool/HV 三环 CPPR 写
-     0xff 屏蔽所有 XIVE 外部中断（本移植全部设备轮询，定时器走独立
-     0x900 异常）。
-  4. `trap_bridge.c`：`-d int` 实测显示存储页故障实际投递到 **0x400
-     (ISI)** 而非 0x500（trace 只出现 1 次 ISI，无 EXTERNAL）；保留 0x500
-     重定向仅为防御性兼容。
-  - **2026-08-03 修复：`__switch` 任务上下文与 C 帧碰撞导致内核跳 0**。
-    gdb 实测 `context_switch.part.0+508`（`bl __switch` 返回点）恢复时把
-    `__switch` 保存区的 r21 槽（`[orig_r1+16]`）当作 C 帧 LR，`blr` 跳到
-    0x0 使内核崩溃。修复：`switch.S` 先把 task_context_t（192 字节）分配
-    在当前栈下方（同 loongarch64），保存后 `task->kstack` 指向该位置，
-    恢复时 `sp` 仍取原帧基址。修复后 gdb 不再命中 0x0，trace 无 ISEG。
-  - **2026-08-03 用户态突破**（无 SIGSEGV，用户任务与横幅正常启动）：
-    1. **根因：PTE_U 与硬件 EAA_PRIV 位冲突**。ppc64le 的 `PTE_U` 定义在
-       bit 59，经 bswap 恰好映射到 radix PTE 的 **EAA_PRIV**（bit 3），导致
-       用户页设了 U 位反而变成"特权页"，用户无法访问自己的 .text，陷入
-       取指缺页循环。修复：`page_table.h` 把 `PTE_U` 移到软件位（bit 49），
-       `PTE_PRIV` 移到 bit 59（真正的 EAA_PRIV）。
-    2. **0x500 交付破坏 SRR0**：QEMU 10.0.11 把同步存储故障投递到 0x500
-       向量时，`r0-r2` 与 `SRR0` 均被破坏（SRR0 变成 trap 入口地址）。
-       `trap_bridge.c` 的 redirect 对取指故障用 `ppc64_rtu_nip`（最近恢复的
-       用户 PC）恢复真实故障地址，并把 `ctx->nip` 一并改正（`__return_to_user`
-       会从 trap 帧重载用户 PC）。
-    3. `__return_to_user` 仅在用户态且 r1 未被破坏时更新
-       `ppc64_rtu_r1/r2/nip`，避免内核态嵌套 trap 泄漏内核值。
-    4. `handle_present_page_fault` 对 present 页设置 `PTE_A`（硬件 R 位），
-       避免 R/C 故障复发；`arch_tlb_flush_page` 回退到完整 `arch_tlb_flush`
-       （address-form tlbie 在 TCG 下不可靠）。
-  - **2026-08-03 用户缺页修复（RPDB）**：根因是 `ppc64_radix_root_entry`
-    对进程表条目做 `__builtin_bswap64`，QEMU 按 LE（`ldq_phys`）读表后，
-    `PRTBE_R_RPDB`（走查基址）被字节反转破坏成 `0x0d00903f00000000`（应为
-    token `0x3f900000`），导致 QEMU 走查错误物理而报 NOPTE。修复：条目直接
-    用 `(root_pa & 0x0FFFFFFFFFFFFF00) | 13`（RTS=52/RPDS=13，无字节交换）。
-    验证：用户入口页（0x10434）demand paging 成功，用户执行到 `__libc_start_main`
-    附近；boot 的 PID0 仍用原 `stdbrx` 编码（改 `std` 会破坏 boot，保留原样）。
-  - **当前剩余阻塞**：用户执行中段后 SIGSEGV，`pc` 落在内核 `__trap_from_user`
-    （`sepc=0x931fc4`，`sp=0x3ffffe90` 正确）。这是 QEMU 0x500 投递破坏
-    SRR0/nip 的残留问题：`ppc64_rtu_nip` 恢复对某些嵌套/后续故障未生效
-    （`ppc64_rtu_nip` 被内核态返回污染或 r1 被破坏时跳过存储）。另一用户
-    进程（0x3daf0000）的缺页/syscall 正常，说明进程表/RTS/页表走查已基本
-    可用。
+- **用户态 shell 已跑通**（`mksh` 交互 + `fork/exec` 外部命令），关键
+  PPC64LE 架构修复如下：
+  1. **低向量布局**：`0x300/0x380/0x400/0x480` Book3S 槽只有 0x80 字节，
+     完整异常体不再直接覆盖；改为 4 字节绝对跳转 stub，完整 DSI/DSEG/ISI
+     trampoline 复制到 scratch 页内的 `0x1100/0x1200/0x1300`。旧版把完整
+     向量直接复制进窄槽，导致向量互相覆盖（DSI 串入后续槽并最终被写到
+     `0x500`），这是之前误判为“QEMU 0x500 破坏 SRR0”的真实根因。
+  2. **VMX/VPU 上下文**：musl/GCC 的 `__setjmp_toc` 会执行 `stvx` 保存
+     v20-v31。新增 `0xf20` VPU-unavailable stub（`0x1400` trampoline），
+     `trap_bridge.c` 在首次 VPU trap 时设置 `MSR_VEC`（lazy enable）；
+     `trap_context_t` 扩到 848 字节并在 trap 入口/返回按 `MSR_VEC` 保存/
+     恢复 v0-v31（`trap.S`）。此前没有 VPU 支持，首个 `stvx` 立即死于
+     `0xf24`。
+  3. **上下文切换丢失地址空间**：`__switch` 保存 `task_context_t` 时未写
+     偏移 176 的 `pgdir`，恢复时 `switch.S` 把未初始化栈内容装进 PID 1
+     process-table entry，切回被 park 的任务后用户页表根被破坏，`read`
+     syscall 的下一条指令（如 `0x73590`）无限 ISI。修复：切出时把
+     `ppc64_current_addr_space` 存入 `pgdir` 槽。
+  4. **DSI 未区分 load/store**：DSI 向量把所有数据页故障标成
+     `CAUSE_LOAD_PAGE_FAULT`，fork 后的 COW 写故障（`std` 到只读页）不会
+     走 store/COW 修复，原指令无限重试。修复：按 DSISR 的 ISSTORE 位
+     （`andis. 0x0200`）把 store 故障动态标成 `0x380`。
+  5. **powerpc64 `struct stat` 布局**：musl powerpc64 的 `nlink_t` 为 64 位，
+     `st_nlink@16`、`st_mode@24`、结构总长 144 字节；此前误用 asm-generic
+     64LE 布局（`st_mode@16`、128 字节），导致 `[[ -f ]]`/`[[ -x ]]` 判错、
+     `exec` 报 `EACCES`。修复：`stat_abi.c` 改为 144 字节 PPC64 专用布局。
+  6. **`proc_sched_tick`**：timer IRQ 补上 `proc_sched_tick(from_user)`，
+     使 park 的等待任务能按 deadline 被调度检查（与其余架构一致）。
+  7. **TTY ioctl ABI 与输入回显**：powerpc64 musl 使用 `_IOC` 编码的
+     `TIOCGWINSZ/TCGETS/TCSETS`，而内核此前只接受 asm-generic 编号，导致
+     `isatty()` 失败、mksh 不进入交互模式。内核现兼容 PPC64 请求号和
+     44 字节 termios 布局，并按 `ECHO` 回显 console 输入。
+  8. **跨任务 trap stack 归属**：低向量曾从共享 scratch 读取 kernel stack
+     top；子进程运行后会覆盖该值，使父进程下一次 syscall 把 trap frame
+     写到子进程内核栈。调度切换和用户返回现通过每 CPU `SPRG2` 发布当前
+     任务 kernel stack，异常入口不再使用跨任务共享槽。
+  9. **SIGCHLD/sigreturn**：PPC64 trampoline 原来使用旧 syscall `172`，但
+     本项目 powerpc64 musl 使用 asm-generic `rt_sigreturn=139`，实际会误调
+     `getpid` 后执行栈上零字节。trampoline 已改为 139；signal mcontext 同时
+     保存/恢复 LR、CTR、XER、CR，sigreturn 也不再套用普通 syscall 的 CR0
+     返回值改写。
+  10. **异常编号拆分**：program exception、FP unavailable 和 emulation
+      assist 不再共用 `0x700`；scalar FP unavailable 现在按 `0x800` 独立
+      lazy-enable，避免合法浮点指令被误报为用户程序异常。
+  - **历史修复（已保留，不再引用为当前阻塞）**：
+    - 2026-08-03 `__switch` 任务上下文与 C 帧碰撞导致内核跳 0：`switch.S`
+      先把 `task_context_t` 分配在当前栈下方（同 loongarch64），保存后
+      `task->kstack` 指向该位置，恢复时 `sp` 仍取原帧基址。
+    - 2026-08-03 用户态突破：`PTE_U` 与硬件 EAA_PRIV 位冲突已修复
+      （`PTE_U` 移到软件位 bit 49，`PTE_PRIV` 移到 bit 59）；`handle_present_page_fault`
+      对 present 页设置 `PTE_A`；`arch_tlb_flush_page` 回退到完整
+      `arch_tlb_flush`（address-form tlbie 在 TCG 下不可靠）。
+    - 2026-08-03 RPDB：进程表条目不再对 `PRTBE_R_RPDB` 做字节交换，直接
+      用 `(root_pa & 0x0FFFFFFFFFFFFF00) | 13`。
+    - **过期结论，不再引用**：早期把存储故障投递解释为“QEMU 0x500 破坏
+      SRR0/nip”并用 `ppc64_rtu_r1/r2/nip` 恢复的说法已被推翻——真实根因
+      是本移植低向量布局错误（完整向量覆盖 0x300-0x4ff 窄槽），相关
+      `trap_bridge.c`/`trap.S` 恢复逻辑已删除。musl mallocng/GCC 误编译的
+      调查报告也已过期，`mksh` 现可完整运行。
 - NOMMU 不支持，SMP 平台启动和远程 TLB shootdown 尚未加入已验证矩阵；
   构建系统默认拒绝该架构的 NOMMU 配置，SMP 实验必须显式设置
   `ALLOW_UNVERIFIED_SMP=1`。
