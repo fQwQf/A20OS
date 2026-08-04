@@ -91,6 +91,10 @@ static inline int arch_pt_level_entries(int level)
 # define ARCH_SCHED_LEAVE(task) do { (void)(task); } while (0)
 #endif
 
+#ifndef ARCH_SCHED_SWITCH
+# define ARCH_SCHED_SWITCH(task) do { (void)(task); } while (0)
+#endif
+
 #ifndef ARCH_IDLE_CONTEXT_STATIC
 # define ARCH_IDLE_CONTEXT_STATIC(name, count)
 # define ARCH_IDLE_STACK(contexts, cpu) kmalloc(KERNEL_STACK_SIZE)
