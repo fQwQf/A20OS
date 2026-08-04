@@ -11,11 +11,7 @@ static void handle_timer_irq(int from_user)
     timer_irq_tick();
     kernel_progress_timer_tick();
     timer_set_interval(proc_next_timer_interval(timer_get_ticks()));
-    if (!from_user)
-        return;
-    task_t *cur = proc_current();
-    if (cur)
-        cur->total_time++;
+    proc_sched_tick(from_user);
 }
 
 void trap_init(void)
