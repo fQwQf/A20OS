@@ -17,9 +17,11 @@ typedef struct {
     uint64_t kernel_tp;
     uint64_t kernel_sp;
     uint64_t addr_space;
+    uint64_t vector_pad;
+    uint64_t vr[32][2];
 } __attribute__((aligned(16))) trap_context_t;
 
-_Static_assert(sizeof(trap_context_t) == 42 * 8, "TrapContext must be 336 bytes");
+_Static_assert(sizeof(trap_context_t) == 106 * 8, "TrapContext must be 848 bytes");
 
 typedef struct {
     uint64_t ra;
@@ -60,9 +62,9 @@ typedef struct {
 #define ARCH_UCONTEXT_PAD_FIELDS uint64_t uc_pad;
 #define ARCH_SIGFRAME_EXTRA_FIELDS uint64_t arch_extra;
 
-#define TRAP_CONTEXT_SIZE  (42 * 8)
+#define TRAP_CONTEXT_SIZE  (106 * 8)
 #define TASK_CONTEXT_SIZE  (24 * 8)
-#define KTRAP_CONTEXT_SIZE (42 * 8)
+#define KTRAP_CONTEXT_SIZE (106 * 8)
 #define ARCH_SYSCALL_TRACE_MIN_PID 3
 /*
  * The pseries low-vector bridge currently has one per-CPU scratch frame.
@@ -70,6 +72,12 @@ typedef struct {
  * their own save area.
  */
 #define ARCH_SYSCALL_DISPATCH_NONPREEMPTIBLE 1
+
+/* Publish the stack used by the next task's user trap entry. */
+#define ARCH_SCHED_SWITCH(task) do { \
+    uint64_t __ppc64_kernel_sp = (uint64_t)(task)->kstack_base + KERNEL_STACK_SIZE; \
+    __asm__ __volatile__("mtsprg 2,%0" :: "r"(__ppc64_kernel_sp) : "memory"); \
+} while (0)
 
 extern void __trap_from_user(void);
 extern void __return_to_user(void);
@@ -140,13 +148,13 @@ static inline void arch_trap_ctx_set_user_entry(trap_context_t *ctx,
 }
 
 static inline void arch_signal_prepare_trampoline(uint32_t tramp[2]) {
-    tramp[0] = 0x380000acU;
+    tramp[0] = 0x3800008bU;
     tramp[1] = 0x44000002U;
 }
 
 static inline void arch_signal_write_trampoline(void *page) {
     uint32_t *p = (uint32_t *)page;
-    p[0] = 0x380000acU;
+    p[0] = 0x3800008bU;
     p[1] = 0x44000002U;
 }
 
@@ -172,6 +180,10 @@ static inline void arch_signal_build_mcontext(arch_sigcontext_t *sc,
         sc->gp_regs[i] = ctx->gpr[i];
     sc->nip = ctx->nip;
     sc->msr = ctx->msr;
+    sc->reserved[0] = ctx->ra;
+    sc->reserved[1] = ctx->ctr;
+    sc->reserved[2] = ctx->xer;
+    sc->reserved[3] = ctx->cr;
 }
 
 static inline void arch_signal_build_frame_extra(void *extra,
@@ -186,6 +198,10 @@ static inline void arch_signal_restore_mcontext(trap_context_t *ctx,
         ctx->gpr[i] = sc->gp_regs[i];
     ctx->nip = sc->nip;
     ctx->msr = sc->msr;
+    ctx->ra = sc->reserved[0];
+    ctx->ctr = sc->reserved[1];
+    ctx->xer = sc->reserved[2];
+    ctx->cr = sc->reserved[3];
 }
 
 static inline void arch_signal_restore_frame_extra(trap_context_t *ctx,
