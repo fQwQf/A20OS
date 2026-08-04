@@ -165,7 +165,8 @@ NATIVE_LIBC_BIN        := $(NATIVE_BUILD_DIR)/native-libc-$(NATIVE_TAG)
 NATIVE_FUTEX_BIN       := $(NATIVE_BUILD_DIR)/native-futex-$(NATIVE_TAG)
 NATIVE_MM_BIN          := $(NATIVE_BUILD_DIR)/native-mm-$(NATIVE_TAG)
 NATIVE_SIGNAL_BIN      := $(NATIVE_BUILD_DIR)/native-signal-$(NATIVE_TAG)
-NATIVE_OUTPUTS         := $(NATIVE_HELLO_BIN) $(NATIVE_HANDLE_BIN) $(NATIVE_LIBC_BIN) $(NATIVE_FUTEX_BIN) $(NATIVE_MM_BIN) $(NATIVE_SIGNAL_BIN)
+NATIVE_IPC_BIN         := $(NATIVE_BUILD_DIR)/native-ipc-$(NATIVE_TAG)
+NATIVE_OUTPUTS         := $(NATIVE_HELLO_BIN) $(NATIVE_HANDLE_BIN) $(NATIVE_LIBC_BIN) $(NATIVE_FUTEX_BIN) $(NATIVE_MM_BIN) $(NATIVE_SIGNAL_BIN) $(NATIVE_IPC_BIN)
 NATIVE_BUILD_STAMP     := $(NATIVE_BUILD_DIR)/.native-build-id
 comma := ,
 NET_HOSTFWD ?= hostfwd=tcp::5555-:5555,hostfwd=udp::5555-:5555
@@ -668,6 +669,7 @@ VBOX_AARCH64_LOAD_ADDRESS ?= 0x08080000ULL
 		extra-img _extra-img extra-user-apps prepare-riscv64-glibc-sysroot force_extra_image_stamp run-riscv64-extra run-loongarch64-extra run-arm64-extra run-x86_64-extra run-arm32-extra run-riscv32-extra run-ppc64le-extra \
 		native-test-arch native-handle-test-arch native-libc-arch native-programs \
 	native-futex-arch native-futex-rv smoke-native-futex mlibc-sysroot mlibc-hello-rv smoke-mlibc \
+		native-ipc-arch native-ipc-rv native-ipc-la smoke-native-ipc \
 		native-test-rv native-test-la native-test-aarch64 native-test-x86_64 native-test-arm32 native-test-rv32 native-test-ppc64le native-test native-test-all \
 		native-minimal-rv native-minimal-la native-minimal \
 		native-handle-test-rv native-handle-test-la native-handle-test-aarch64 native-handle-test-x86_64 native-handle-test-arm32 native-handle-test-rv32 native-handle-test-ppc64le native-handle-test native-handle-test-all \
@@ -2370,7 +2372,8 @@ $(NATIVE_BUILD_STAMP): $(USER_BUILD_STAMP) force_native_build
 		need_build=1; \
 	elif [ ! -x "$(NATIVE_HELLO_BIN)" ] || [ ! -x "$(NATIVE_HANDLE_BIN)" ] || \
 	     [ ! -x "$(NATIVE_LIBC_BIN)" ] || [ ! -x "$(NATIVE_FUTEX_BIN)" ] || \
-	     [ ! -x "$(NATIVE_MM_BIN)" ] || [ ! -x "$(NATIVE_SIGNAL_BIN)" ]; then \
+	     [ ! -x "$(NATIVE_MM_BIN)" ] || [ ! -x "$(NATIVE_SIGNAL_BIN)" ] || \
+	     [ ! -x "$(NATIVE_IPC_BIN)" ]; then \
 		need_build=1; \
 	elif find user/liba20rt user/liba20c user/tests -type f -newer "$@" \
 		-print -quit | grep -q .; then \
@@ -3277,6 +3280,56 @@ native-signal-arch: $(NATIVE_SIGNAL_BIN)
 
 native-signal-rv:
 	$(MAKE) ARCH=riscv64 NOMMU=$(NOMMU) native-signal-arch
+
+define NATIVE_IPC_RECIPE
+@mkdir -p $(dir $(4))
+$(1) -ffreestanding -nostdlib -static \
+    $(2) \
+    -Iuser -Iuser/liba20rt \
+    -T$(NATIVE_LD) \
+    $(3) \
+    $(NATIVE_SDK_SRC) \
+    $(NATIVE_COMPILER_RT_SRC) \
+    $(NATIVE_ARCH_SRC) \
+    user/tests/test_native_ipc.c \
+    $(NATIVE_LIBS) \
+    -o $(4)
+endef
+
+$(NATIVE_IPC_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) user/tests/test_native_ipc.c \
+		user/liba20rt/a20-generic.ld user/liba20rt/crt0_a20.h user/liba20rt/a20_syscall.h user/liba20rt/a20_channel.h
+	$(call NATIVE_IPC_RECIPE,$(NATIVE_CC),$(NATIVE_CFLAGS),$(NATIVE_CRT0),$@)
+
+native-ipc-arch: $(NATIVE_IPC_BIN)
+
+native-ipc-rv:
+	$(MAKE) ARCH=riscv64 NOMMU=$(NOMMU) native-ipc-arch
+
+native-ipc-la:
+	$(MAKE) ARCH=loongarch64 NOMMU=$(NOMMU) native-ipc-arch
+
+smoke-native-ipc:
+	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/native-ipc-riscv64.log"; \
+	status=0; \
+	{ sleep $(SMOKE_INPUT_DELAY); printf '/bin/native-ipc-rv\npoweroff\n'; } | \
+	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
+		-machine virt -m 1G -nographic -smp 1 -bios default \
+		-global virtio-mmio.force-legacy=false \
+		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-both-dev/fat32.img,if=none,format=raw,id=x0 \
+		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		-kernel .kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf \
+		> "$$log" 2>&1 || status=$$?; \
+	if grep -q 'NATIVE_IPC: PASS' "$$log" && grep -q 'System is going down for power-off NOW' "$$log"; then \
+		echo "smoke-native-ipc: PASS; log saved to $$log"; \
+	else \
+		echo "smoke-native-ipc: failed with status $$status; tail of $$log:"; \
+		tail -n 80 "$$log"; \
+		exit 1; \
+	fi
 
 smoke-native-signal:
 	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build

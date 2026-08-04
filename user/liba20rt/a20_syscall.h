@@ -193,6 +193,7 @@ static inline int64_t a20_syscall6(uint64_t nr, uint64_t a0, uint64_t a1,
 #define A20_SYS_channel_send      0x0505
 #define A20_SYS_channel_recv      0x0506
 #define A20_SYS_event_watch_fs    0x0507
+#define A20_SYS_channel_call      0x0508
 
 /* ===== Network (0x0600) ===== */
 #define A20_SYS_net_socket        0x0600
