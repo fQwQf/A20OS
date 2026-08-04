@@ -7,7 +7,7 @@
 
 | 阶段 | 内容 | 状态 |
 |------|------|------|
-| 1 | `channel_call` 融合 RPC 快路径（内核 + SDK + 基准） | 进行中 |
+| 1 | `channel_call` 融合 RPC 快路径（内核 + SDK + 基准） | 完成（riscv64） |
 | 2 | svcman 服务监管者 + 崩溃自愈演示 | 未开始 |
 | 3 | 共享 VMO 环形队列 uapi 协议 + 数据面基准 | 未开始 |
 | 3B | Linux ABI 透明桥接：pipe over VMO 环 + vDSO | 未开始 |
@@ -33,6 +33,26 @@
 - `make native-ipc-test-rv` 构建通过；`make smoke-native-ipc` 在 QEMU
   riscv64 输出 `NATIVE_IPC: PASS` 并打印往返延迟对比。
 - 既有 `smoke-native-*` 全部无退化。
+
+**结果（已达成）**
+
+- 实现：`sys_a20_channel_call`（`kernel/abi/native/sys_native_ipc.c`），
+  syscall 号 `0x0508`；SDK 封装 `a20_channel_call[_flags]`
+  （`user/liba20rt/a20_channel.h`）。单次陷入完成 request+reply 等待，
+  单次句柄查找（READ|WRITE）+ 单次参数校验。
+- 功能测试：RPC 回显、双向句柄传递、NONBLOCK 语义、对端关闭
+  CANCELED，全部通过。
+- 基准（QEMU TCG、smp=1、2000 次往返）：send+recv 80818 ns/RT，
+  channel_call 83130 ns/RT，比值 102%。TCG 下每次陷入/上下文切换
+  开销被模拟器放大，融合省去的 1 次陷入 + 1 次句柄查找淹没在
+  两次上下文切换的成本中；真实硬件上陷入占比更高，融合才有可测
+  收益。结论：机制正确、性能中性，符合"不牺牲性能"底线。
+- 排障记录：内核严格校验「handle_count=0 且 handles 指针非空」
+  返回 `-EINVAL`（`sys_native_ipc.c` send 路径），RPC 服务端回复
+  时必须传 NULL 指针而非空数组——已固化进测试注释。
+- 回归：`smoke-native-futex/mm/signal` 全绿。
+- 待做：真实捐赠式直接切换（L4 direct switch）留作后续优化；
+  loongarch64 构建验证（`native-ipc-la` 目标已提供）。
 
 ## 阶段 2：svcman 服务监管者
 

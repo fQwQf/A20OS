@@ -23,6 +23,7 @@
 #include "fs/xattr.h"
 #include "net/socket.h"
 #include "sys/usercopy.h"
+#include "core/klog.h"
 
 #include "abi/native/types.h"
 #include "abi/native/errno.h"
@@ -508,6 +509,246 @@ out_rollback:
     for (uint32_t i = 0; i < installed; i++)
         a20_handle_remove(ht, out_handles[i]);
     kfree(kdata);
+out_ep:
+    a20_object_release(entry.object, entry.type);
+    return r;
+}
+
+/*
+ * sys_a20_channel_call — fused RPC (docs/hybrid-kernel/00-design.md §4.1).
+ *
+ * One trap performs channel_send(request) + channel_recv(reply) on the same
+ * endpoint with a single handle lookup (READ|WRITE) and a single args
+ * validation.  Compared to the two-syscall sequence this halves the trap
+ * count of an RPC round trip; the peer wakeup still goes through the
+ * wait_queue priority-preempt path, so a blocked server is scheduled
+ * immediately after the request lands.
+ *
+ * Error partition: a failure from the send stage means the request was not
+ * delivered.  A failure from the reply stage (only possible with
+ * A20_MSG_NONBLOCK, or on interrupt) means the request may already be
+ * delivered and a reply may arrive later.
+ */
+int64_t sys_a20_channel_call(const a20_syscall_args_t *args)
+{
+    a20_channel_call_args_t *uargs = (a20_channel_call_args_t *)A20_ARG(0);
+    if (!uargs) return -A20_ERR_FAULT;
+
+    a20_channel_call_args_t kargs;
+    A20_VALIDATE_AND_COPY(uargs, kargs);
+
+    if (kargs.flags & ~A20_MSG_NONBLOCK)
+        return -A20_ERR_INVALID_ARGUMENT;
+
+    task_t *cur = proc_current();
+    struct a20_ht_internal *ht = task_get_a20_ht(cur);
+    if (!ht) return -A20_ERR_BAD_HANDLE;
+
+    a20_handle_entry_t entry;
+    int64_t r = a20_handle_lookup_ref_internal(ht, kargs.channel,
+                                               A20_OBJ_CHANNEL_ENDPOINT,
+                                               A20_RIGHT_READ | A20_RIGHT_WRITE,
+                                               &entry);
+    if (r < 0) return r;
+
+    /* Combined BLP: write requires no-write-down... the send and recv
+     * checks together reduce to label equality with the endpoint. */
+    if (a20_ht_get_label(ht) != entry.security_label) {
+        r = -A20_ERR_ACCESS;
+        goto out_ep;
+    }
+    a20_channel_ep_t *ep = (a20_channel_ep_t *)entry.object;
+
+    /* ---- Send stage (mirrors sys_a20_channel_send) ---- */
+    void *kdata = NULL;
+    if (kargs.data_len > 0) {
+        if (!kargs.data || kargs.data_len > A20_CH_MAX_DATA) {
+            r = kargs.data_len > A20_CH_MAX_DATA
+                ? -A20_ERR_INVALID_ARGUMENT : -A20_ERR_FAULT;
+            goto out_ep;
+        }
+        kdata = kmalloc(kargs.data_len);
+        if (!kdata) {
+            r = -A20_ERR_NO_MEMORY;
+            goto out_ep;
+        }
+        if (copy_from_user(kdata, (const void *)kargs.data,
+                           kargs.data_len) < 0) {
+            r = -A20_ERR_FAULT;
+            goto out_data;
+        }
+    }
+
+    a20_ch_handle_info_t hinfos[A20_CH_MAX_HANDLES];
+    uint32_t actual_hcount = 0;
+
+    if (kargs.handle_count > 0 && kargs.handles) {
+        if (kargs.handle_count > A20_CH_MAX_HANDLES) {
+            r = -A20_ERR_INVALID_ARGUMENT;
+            goto out_data;
+        }
+
+        a20_handle_t user_handles[A20_CH_MAX_HANDLES];
+        a20_rights_t user_rights[A20_CH_MAX_HANDLES];
+        if (copy_from_user(user_handles, (void *)kargs.handles,
+                           kargs.handle_count * sizeof(a20_handle_t)) < 0) {
+            r = -A20_ERR_FAULT;
+            goto out_data;
+        }
+
+        uint32_t rights_count = 0;
+        if (kargs.transfer_rights) {
+            if (copy_from_user(user_rights, (void *)kargs.transfer_rights,
+                               kargs.handle_count * sizeof(a20_rights_t)) < 0) {
+                r = -A20_ERR_FAULT;
+                goto out_data;
+            }
+            rights_count = kargs.handle_count;
+        }
+
+        for (uint32_t i = 0; i < kargs.handle_count; i++) {
+            a20_handle_entry_t he;
+            r = a20_handle_lookup_ref_internal(ht, user_handles[i],
+                                               A20_OBJ_INVALID,
+                                               A20_RIGHT_TRANSFER, &he);
+            if (r < 0) goto out_handles;
+
+            a20_rights_t xfer_rights = (rights_count > 0)
+                                       ? user_rights[i] : he.rights;
+            hinfos[actual_hcount].object = he.object;
+            hinfos[actual_hcount].type = he.type;
+            hinfos[actual_hcount].transfer_rights = he.rights & xfer_rights;
+            hinfos[actual_hcount].expiry_tick = he.expiry_tick;
+            hinfos[actual_hcount].remaining_ops = he.remaining_ops;
+            hinfos[actual_hcount].temporal_flags = he.temporal_flags;
+            hinfos[actual_hcount].security_label = he.security_label;
+            actual_hcount++;
+            if (hinfos[actual_hcount - 1].transfer_rights == 0) {
+                r = -A20_ERR_ACCESS;
+                goto out_handles;
+            }
+        }
+    } else if (kargs.handle_count > 0 || kargs.handles) {
+        r = -A20_ERR_INVALID_ARGUMENT;
+        goto out_data;
+    }
+
+    r = a20_channel_send(ep, kdata, kargs.data_len,
+                         hinfos, actual_hcount, ht, kargs.flags);
+
+out_handles:
+    for (uint32_t i = 0; i < actual_hcount; i++)
+        a20_object_release(hinfos[i].object, hinfos[i].type);
+out_data:
+    kfree(kdata);
+    if (r < 0) goto out_ep; /* send stage failed: request not delivered */
+
+    /* ---- Reply stage (mirrors sys_a20_channel_recv) ---- */
+    uint32_t msg_data_len = 0;
+    uint32_t msg_handles = 0;
+    r = a20_channel_recv_begin(ep, kargs.flags, &msg_data_len, &msg_handles);
+    if (r < 0) goto out_ep;
+
+    if ((msg_data_len > 0 && (!kargs.reply_buf ||
+                              kargs.reply_buf_len < msg_data_len)) ||
+        (msg_handles > 0 && (!kargs.reply_handle_buf ||
+                             kargs.reply_handle_buf_count < msg_handles))) {
+        a20_channel_recv_abort(ep);
+        r = -A20_ERR_NO_SPACE;
+        goto out_ep;
+    }
+
+    a20_handle_t reserved[A20_CH_MAX_HANDLES];
+    uint32_t nreserved = 0;
+    if (msg_handles > 0) {
+        r = a20_handle_reserve_many(ht, reserved, msg_handles);
+        if (r < 0) {
+            a20_channel_recv_abort(ep);
+            goto out_ep;
+        }
+        nreserved = msg_handles;
+    }
+
+    void *rdata = NULL;
+    if (msg_data_len > 0) {
+        rdata = kmalloc(msg_data_len);
+        if (!rdata) {
+            a20_handle_abort_reserved(ht, reserved, nreserved);
+            a20_channel_recv_abort(ep);
+            r = -A20_ERR_NO_MEMORY;
+            goto out_ep;
+        }
+    }
+
+    a20_ch_handle_info_t rhinfos[A20_CH_MAX_HANDLES];
+    uint32_t out_hcount = msg_handles;
+    uint32_t out_len = msg_data_len;
+    r = a20_channel_recv_finish(ep, rdata, &out_len, rhinfos, &out_hcount);
+    if (r < 0) {
+        kfree(rdata);
+        a20_handle_abort_reserved(ht, reserved, nreserved);
+        goto out_ep;
+    }
+
+    a20_handle_t out_handles[A20_CH_MAX_HANDLES];
+    a20_rights_t out_rights[A20_CH_MAX_HANDLES];
+    uint32_t installed = 0;
+    for (uint32_t i = 0; i < out_hcount; i++) {
+        out_rights[i] = rhinfos[i].transfer_rights;
+        int64_t cr = a20_handle_commit_reserved_temporal(
+            ht, reserved[i], rhinfos[i].object, rhinfos[i].type,
+            rhinfos[i].transfer_rights,
+            rhinfos[i].expiry_tick, rhinfos[i].remaining_ops,
+            rhinfos[i].temporal_flags, rhinfos[i].security_label);
+        if (cr < 0) {
+            a20_object_release(rhinfos[i].object, rhinfos[i].type);
+            for (uint32_t j = i + 1; j < out_hcount; j++)
+                a20_object_release(rhinfos[j].object, rhinfos[j].type);
+            for (uint32_t j = 0; j < installed; j++)
+                a20_handle_remove(ht, out_handles[j]);
+            a20_handle_abort_reserved(ht, &reserved[i], out_hcount - i);
+            kfree(rdata);
+            r = cr;
+            goto out_ep;
+        }
+        out_handles[i] = reserved[i];
+        installed++;
+    }
+
+    kargs.out_reply_len = out_len;
+    kargs.out_reply_handles = installed;
+    if (out_len > 0 &&
+        copy_to_user((void *)kargs.reply_buf, rdata, out_len) < 0) {
+        r = -A20_ERR_FAULT;
+        goto out_call_rollback;
+    }
+    if (installed > 0 &&
+        copy_to_user((void *)kargs.reply_handle_buf, out_handles,
+                     installed * sizeof(a20_handle_t)) < 0) {
+        r = -A20_ERR_FAULT;
+        goto out_call_rollback;
+    }
+    if (kargs.reply_rights_buf && installed > 0 &&
+        copy_to_user((void *)kargs.reply_rights_buf, out_rights,
+                     installed * sizeof(a20_rights_t)) < 0) {
+        r = -A20_ERR_FAULT;
+        goto out_call_rollback;
+    }
+    if (a20_copy_struct_to_user(uargs, &kargs, sizeof(kargs)) < 0) {
+        r = -A20_ERR_FAULT;
+        goto out_call_rollback;
+    }
+
+    kfree(rdata);
+    a20_object_release(entry.object, entry.type);
+    return (int64_t)out_len;
+
+out_call_rollback:
+    for (uint32_t i = 0; i < installed; i++)
+        a20_handle_remove(ht, out_handles[i]);
+    kfree(rdata);
+    goto out_ep;
+
 out_ep:
     a20_object_release(entry.object, entry.type);
     return r;
