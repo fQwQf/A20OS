@@ -123,3 +123,26 @@
 - 现有 93 个 native syscall 不改语义；新增 syscall 走空闲号段。
 - 每个阶段提供独立 smoke 目标（见 01-roadmap.md 验收表），任一阶段
   可独立回退。
+
+## 7. Linux ABI 程序的透明获益路径
+
+原则：Linux ABI 的 API 形状（223 个 syscall）不变，把**底下的实现**
+换到混合内核的快路径上，原生 musl 程序零改动受益。
+
+1. **pipe → 共享 VMO 环**（`kernel/fs/pipe.c`）：数据面改为 VMO-backed
+   SPSC 环 + doorbell 合并唤醒；大块 write/read 从双拷贝降为单拷贝。
+   管道是 shell 管线的热路径，收益面最大。
+2. **AF_UNIX SOCK_STREAM → Channel**（`kernel/net/socket_unix.c`）：
+   unix socket 是 Linux 本地 RPC 的标准传输（DBus/Wayland/容器运行时）。
+   SCM_RIGHTS 与 Channel 句柄传递同构，语义可完整保留。
+3. **vDSO**：exec 时装载 vDSO 页并在 auxv 填 `AT_SYSINFO_EHDR`，
+   `clock_gettime/gettimeofday/getcpu` 绕过陷入。musl 的
+   `clock_gettime` 检测到 vDSO 即自动使用，静态链接程序同样受益。
+4. **唤醒捐赠**：pipe/socket/futex 的 wake 统一走 `proc_try_wake` 的
+   priority-preempt 路径（`kernel/proc/park.c`），对该路径的优化
+   两个 ABI 自动共享。
+
+边界说明：POSIX 单次 `read()` 必然伴随一次陷入，"融合 RPC"的 syscall
+形态在 POSIX 中不存在（Linux 的对应答案是 io_uring，工程量大，列为
+远期候选）。因此 Linux ABI 的收益形式是**底下变快**而非**调用变少**，
+vDSO 除外。
