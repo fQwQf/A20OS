@@ -13,6 +13,8 @@ make ARCH=ppc64le BOARD=qemu-virt-ppc64le ABI=linux BRINGUP=1 kernel-only
 make ARCH=ppc64le BOARD=qemu-virt-ppc64le run
 make check-ppc64le-bringup
 make check-ppc64le-user
+make ARCH=ppc64le NOMMU=0 native-programs   # native ABI 测试程序
+make ARCH=ppc64le ABI=both BRINGUP=0 dev-build   # 完整 dev 镜像（含 native-*）
 ```
 
 QEMU 目标使用 pSeries 固件提供的虚拟终端、RTAS、PCI 配置访问和 TCE
@@ -34,6 +36,12 @@ DMA 窗口。`poweroff` 和 `reboot` 通过 RTAS token 请求固件动作；virt
 - **`mksh` 交互 shell 已跑通**：真实 O3 init/mksh 可启动，shell 能执行内建
   `echo`、`ls` 与外部 `/bin/echo`（`fork` + `execve` + COW + `wait` +
   `SIGCHLD` 全链路）；`#` prompt、输入回显、父进程信号返回和阻塞读均正常。
+- **native ABI libc（liba20c）已移植并在 QEMU 中运行**：`native-libc-ppc64le`
+  `PASS`（字符串/malloc/time/printf 全通过），`native-hello-ppc64le` 与
+  `native-mm-ppc64le` 也通过。crt0 补上 ELFv2 TOC 初始化（`_start` 先设 r2
+  为 `.TOC.` 基址，native ABI loader 保证 r12=入口地址）；liba20c 的
+  `printf` vararg 读取改为经 `va_list *` 推进，修复 `%d` 后 `%s` 等混合
+  宽度格式错位（该 bug 影响所有架构，ppc64le 的 -O0 构建使其最先暴露）。
 
 ## 已知边界与阻塞
 
@@ -99,3 +107,12 @@ DMA 窗口。`poweroff` 和 `reboot` 通过 RTAS token 请求固件动作；virt
 - NOMMU 不支持，SMP 平台启动和远程 TLB shootdown 尚未加入已验证矩阵；
   构建系统默认拒绝该架构的 NOMMU 配置，SMP 实验必须显式设置
   `ALLOW_UNVERIFIED_SMP=1`。
+- native ABI 其余子系统测试尚未全绿（均与 libc 移植无关，属内核逻辑/功能
+  缺口）：`native-handle-ppc64le` 在 `dup-write-denied` 处失败（dup 降级后的
+  句柄写入未按预期被拒）；`native-futex-ppc64le` 报 `did not return
+  WOULDBLOCK`；`native-signal-ppc64le` 在 worker 线程的 `signal_check`
+  检查点触发 SIGSEGV（native 线程/信号路径）。
+- mksh 交互启动时仍打印 `can't find controlling tty: Not a directory`：TTY
+  ioctl 已可工作、prompt/回显/作业执行不受影响，但 `tty_init_fd()` 打开
+  `/dev/tty` 的完整 controlling-tty 语义（`TIOCSCTTY`/前台进程组）尚未
+  实现，完整 job control 属于后续工作。
