@@ -497,18 +497,18 @@ int64_t sys_ioctl(int fd, unsigned long req, void *arg) {
 
     int64_t gfd = fdtable_get_current(fd);
     if (gfd < 0) return gfd;
-    if (req == TIOCGPGRP) {
+    if (req == TIOCGPGRP || req == PPC64_TIOCGPGRP) {
         int pgid = uart_get_foreground_pgid();
         return copy_to_user(arg, &pgid, sizeof(pgid)) < 0 ? -EFAULT : 0;
     }
-    if (req == TIOCSPGRP) {
+    if (req == TIOCSPGRP || req == PPC64_TIOCSPGRP) {
         int pgid = 0;
         if (copy_from_user(&pgid, arg, sizeof(pgid)) < 0) return -EFAULT;
         if (pgid <= 0) return -EINVAL;
         uart_set_foreground_pgid(pgid);
         return 0;
     }
-    if (req == TIOCGWINSZ) {
+    if (req == TIOCGWINSZ || req == PPC64_TIOCGWINSZ) {
         int r = vfs_ioctl((int)gfd, req, arg);
         if (r != -ENOTTY)
             return r;
@@ -524,9 +524,9 @@ int64_t sys_ioctl(int fd, unsigned long req, void *arg) {
     }
     if (req == TIOCSPTLCK || req == TIOCSCTTY)
         return 0;
-    if (req == FIONBIO)
+    if (req == FIONBIO || req == PPC64_FIONBIO)
         return 0;
-    if (req == FIONREAD) {
+    if (req == FIONREAD || req == PPC64_FIONREAD) {
         vfile_t *vf = vfs_get_file_ref((int)gfd);
         if (!vf)
             return -EBADF;
