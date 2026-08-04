@@ -1380,6 +1380,7 @@ void context_switch(task_t *next) {
         ktrace_sched("[SCHED] ctxsw: %d -> %d\n", prev->pid, next->pid);
     if (old)
         arch_set_task_pointer(old);
+    ARCH_SCHED_SWITCH(next);
     __switch(next->kstack);
     proc_switch_complete();
 }

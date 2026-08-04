@@ -14,6 +14,13 @@
     .set RADIX_KERNEL_PTE, 0xc00000000000018f
     /* XIVE TIMA 2 MiB leaf: V|LEAF|C|PRIV|R|RW|X + RPN of the TIMA base. */
     .set PPC64_TIMA_PTE,   0xc00603020300018f
+    /* The 0x300-0x4ff Book3S slots are only 0x80 bytes wide.  Keep their
+     * complete save paths out of line in the unused part of the scratch
+     * page and install one-instruction branch stubs in the fixed slots. */
+    .set PPC64_DSI_TRAMP_PA,  0x1100
+    .set PPC64_DSEG_TRAMP_PA, 0x1200
+    .set PPC64_ISI_TRAMP_PA,  0x1300
+    .set PPC64_VPU_TRAMP_PA,  0x1400
 
     .macro LOAD_PHYS_ADDR reg,sym
     lis     \reg,\sym@highest
@@ -114,20 +121,20 @@ enter_64le:
     li      5,ppc64_machine_check_vector_end-ppc64_machine_check_vector
     bl      copy_exception_vector
     li      3,0x300
-    LOAD_PHYS_ADDR 4,ppc64_dsi_vector
-    li      5,ppc64_dsi_vector_end-ppc64_dsi_vector
+    LOAD_PHYS_ADDR 4,ppc64_dsi_stub
+    li      5,ppc64_dsi_stub_end-ppc64_dsi_stub
     bl      copy_exception_vector
     li      3,0x380
-    LOAD_PHYS_ADDR 4,ppc64_dseg_vector
-    li      5,ppc64_dseg_vector_end-ppc64_dseg_vector
+    LOAD_PHYS_ADDR 4,ppc64_dseg_stub
+    li      5,ppc64_dseg_stub_end-ppc64_dseg_stub
     bl      copy_exception_vector
     li      3,0x400
-    LOAD_PHYS_ADDR 4,ppc64_isi_vector
-    li      5,ppc64_isi_vector_end-ppc64_isi_vector
+    LOAD_PHYS_ADDR 4,ppc64_isi_stub
+    li      5,ppc64_isi_stub_end-ppc64_isi_stub
     bl      copy_exception_vector
     li      3,0x480
-    LOAD_PHYS_ADDR 4,ppc64_isi_vector
-    li      5,ppc64_isi_vector_end-ppc64_isi_vector
+    LOAD_PHYS_ADDR 4,ppc64_isi_stub
+    li      5,ppc64_isi_stub_end-ppc64_isi_stub
     bl      copy_exception_vector
     li      3,0x500
     LOAD_PHYS_ADDR 4,ppc64_external_vector
@@ -152,6 +159,27 @@ enter_64le:
     li      3,0xe40
     LOAD_PHYS_ADDR 4,ppc64_emu_assist_vector
     li      5,ppc64_emu_assist_vector_end-ppc64_emu_assist_vector
+    bl      copy_exception_vector
+    li      3,0xf20
+    LOAD_PHYS_ADDR 4,ppc64_vpu_unavailable_stub
+    li      5,ppc64_vpu_unavailable_stub_end-ppc64_vpu_unavailable_stub
+    bl      copy_exception_vector
+
+    li      3,PPC64_DSI_TRAMP_PA
+    LOAD_PHYS_ADDR 4,ppc64_dsi_vector
+    li      5,ppc64_dsi_vector_end-ppc64_dsi_vector
+    bl      copy_exception_vector
+    li      3,PPC64_DSEG_TRAMP_PA
+    LOAD_PHYS_ADDR 4,ppc64_dseg_vector
+    li      5,ppc64_dseg_vector_end-ppc64_dseg_vector
+    bl      copy_exception_vector
+    li      3,PPC64_ISI_TRAMP_PA
+    LOAD_PHYS_ADDR 4,ppc64_isi_vector
+    li      5,ppc64_isi_vector_end-ppc64_isi_vector
+    bl      copy_exception_vector
+    li      3,PPC64_VPU_TRAMP_PA
+    LOAD_PHYS_ADDR 4,ppc64_vpu_unavailable_vector
+    li      5,ppc64_vpu_unavailable_vector_end-ppc64_vpu_unavailable_vector
     bl      copy_exception_vector
 
     LOAD_PHYS_ADDR 9,__boot_dtb_ptr
@@ -269,7 +297,7 @@ copy_exception_vector:
     isync
     blr
 
-    .macro PPC64_EXCEPTION_VECTOR name,cause,tval,interrupt=0
+    .macro PPC64_EXCEPTION_VECTOR name,cause,tval,interrupt=0,check_store=0
 \name:
     mtsprg  0,0
     mtsprg  1,1
@@ -295,14 +323,24 @@ copy_exception_vector:
     mfsrr1  0
     std     0,40(1)
     li      0,\cause
+    .if \check_store
+    mfspr   2,18
+    andis.  2,2,0x0200
+    beq     8f
+    li      0,0x380
+8:
+    .endif
     .if \interrupt
     li      2,-1
     sldi    2,2,63
     or      0,0,2
     .endif
     std     0,48(1)
-    .if \tval
+    .if \tval == 1
     mfdar   0
+    std     0,88(1)
+    .elseif \tval == 2
+    mfsrr0  0
     std     0,88(1)
     .else
     li      0,0
@@ -327,15 +365,27 @@ copy_exception_vector:
 \name\()_end:
     .endm
 
+    .macro PPC64_ABS_VECTOR_STUB name,target
+\name:
+    ba      \target
+\name\()_end:
+    .endm
+
+    PPC64_ABS_VECTOR_STUB ppc64_dsi_stub,PPC64_DSI_TRAMP_PA
+    PPC64_ABS_VECTOR_STUB ppc64_dseg_stub,PPC64_DSEG_TRAMP_PA
+    PPC64_ABS_VECTOR_STUB ppc64_isi_stub,PPC64_ISI_TRAMP_PA
+    PPC64_ABS_VECTOR_STUB ppc64_vpu_unavailable_stub,PPC64_VPU_TRAMP_PA
+
     PPC64_EXCEPTION_VECTOR ppc64_machine_check_vector,0x200,0
-    PPC64_EXCEPTION_VECTOR ppc64_dsi_vector,0x300,1
+    PPC64_EXCEPTION_VECTOR ppc64_dsi_vector,0x300,1,0,1
     PPC64_EXCEPTION_VECTOR ppc64_dseg_vector,0x380,1
     PPC64_EXCEPTION_VECTOR ppc64_isi_vector,0x301,2
     PPC64_EXCEPTION_VECTOR ppc64_external_vector,0x500,0,1
     PPC64_EXCEPTION_VECTOR ppc64_program_vector,0x700,0
-    PPC64_EXCEPTION_VECTOR ppc64_fp_unavailable_vector,0x700,0
+    PPC64_EXCEPTION_VECTOR ppc64_fp_unavailable_vector,0x800,0
     PPC64_EXCEPTION_VECTOR ppc64_decrementer_vector,0x900,0,1
-    PPC64_EXCEPTION_VECTOR ppc64_emu_assist_vector,0x700,0
+    PPC64_EXCEPTION_VECTOR ppc64_emu_assist_vector,0xe40,0
+    PPC64_EXCEPTION_VECTOR ppc64_vpu_unavailable_vector,0xf20,0
 
 ppc64_syscall_vector:
     mtsprg  0,0
