@@ -10,6 +10,7 @@
 | 1 | `channel_call` 融合 RPC 快路径（内核 + SDK + 基准） | 进行中 |
 | 2 | svcman 服务监管者 + 崩溃自愈演示 | 未开始 |
 | 3 | 共享 VMO 环形队列 uapi 协议 + 数据面基准 | 未开始 |
+| 3B | Linux ABI 透明桥接：pipe over VMO 环 + vDSO | 未开始 |
 | 4 | 低速驱动外迁试点（用户态驱动框架） | 未开始 |
 | 5 | 块/网驱动外迁评估（按基准数据决策） | 未开始 |
 
@@ -64,6 +65,29 @@
 **验收**
 
 - `make smoke-native-shmring` 输出 `NATIVE_SHMRING: PASS` 与吞吐对比。
+
+## 阶段 3B：Linux ABI 透明桥接
+
+让未修改的原生 Linux 程序共享混合内核收益（设计见 00-design.md §7）。
+顺序按收益/风险比排列，每步独立验收：
+
+1. **唤醒捐赠核对**：确认 pipe/AF_UNIX/futex 的 wake 全部走
+   `proc_try_wake` priority-preempt；补齐遗漏点。零风险，两个 ABI
+   自动共享。
+2. **vDSO**：exec 装载只读 vDSO 页 + auxv `AT_SYSINFO_EHDR`；
+   先实现 `clock_gettime(CLOCK_MONOTONIC)` 与 `gettimeofday`。
+   验收：Linux 用户态基准（musl `clock_gettime` 循环）陷入次数降为零；
+   与内核 syscall 结果交叉校验单调性与精度。
+3. **pipe over VMO 环**：`kernel/fs/pipe.c` 数据面替换为 VMO-backed
+   SPSC 环。验收：`pipe_stress`/`vfs_stress` 全过；大块管线吞吐
+   （如 `cat bigfile | wc -c`）不劣于旧实现。
+4. **AF_UNIX over Channel（评估后决策）**：SOCK_STREAM 数据面重建于
+   Channel；SCM_RIGHTS 映射到句柄传递。仅在 1–3 的基准证明底层
+   快路径成熟后进行。
+
+**统一验收**：每条改动前后跑同一组 Linux ABI 基准（`socket_stress`、
+pipe 吞吐、`clock_gettime` 延迟），中位数不允许回归；既有
+`smoke-native-*` 与 Linux ABI smoke 全绿。
 
 ## 阶段 4：低速驱动外迁试点（规划要点）
 
