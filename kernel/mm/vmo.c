@@ -40,6 +40,10 @@ struct vmo *vmo_create(uint32_t type, uint64_t size, uint32_t options)
     vmo->options = options;
     spin_init(&vmo->lock);
     vmo->page_count = npages;
+    /* Must be zeroed: vmo_destroy uncharges charge_cg whenever it is
+     * non-NULL, and tasks without a cgroup never overwrite the field. */
+    vmo->charge_cg = NULL;
+    vmo->charged_pages = 0;
     return vmo;
 }
 
