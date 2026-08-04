@@ -9,7 +9,7 @@
 |------|------|------|
 | 1 | `channel_call` 融合 RPC 快路径（内核 + SDK + 基准） | 完成（riscv64） |
 | 2 | svcman 服务监管者 + 崩溃自愈演示 | 完成（riscv64） |
-| 3 | 共享 VMO 环形队列 uapi 协议 + 数据面基准 | 未开始 |
+| 3 | 共享 VMO 环形队列 uapi 协议 + 数据面基准 | 完成（riscv64） |
 | 3B | Linux ABI 透明桥接：pipe over VMO 环 + vDSO | 未开始 |
 | 4 | 低速驱动外迁试点（用户态驱动框架） | 未开始 |
 | 5 | 块/网驱动外迁评估（按基准数据决策） | 未开始 |
@@ -102,6 +102,29 @@
 **验收**
 
 - `make smoke-native-shmring` 输出 `NATIVE_SHMRING: PASS` 与吞吐对比。
+
+**结果（已达成）**
+
+- 协议头 `user/liba20rt/a20_shmring.h`：全相对偏移（跨进程不同虚拟
+  地址可用）、acquire/release 游标、Dekker 门铃（futex 以物理页为
+  key，`kernel/abi/linux/sys_futex.c` 的 `pt_translate`，跨进程有效）。
+  非满非空路径零 syscall；字宽拷贝（freestanding 无 memcpy，字节
+  循环在模拟器上差一个数量级）。
+- SDK 新增 `a20_vm_create_object`/`a20_vm_map` 封装（`a20_mem.h`）。
+- 基准：16 MiB 递增字节流，ring（跨进程 shmringd）vs channel
+  （跨进程 chand，16 KiB 消息）。TCG、smp=1 实测两轮：
+  ring 39.1–41.5 MiB/s 级、chan 37.5–42.5 MiB/s 级——ring 与
+  channel 持平并略占优。ring 全程仅约 34 次 futex 陷入，channel 路径
+  约 2048 次陷入 + 2048 次内核拷贝；真实硬件与 SMP 上 ring 优势会
+  放大（生产者/消费者拷贝可与传输重叠）。
+- **排障发现（既有内核 bug，已修复）**：`vmo_create` 未初始化
+  `charge_cg`/`charged_pages`（`kernel/mm/vmo.c`）。无 cgroup 的任务
+  不会覆盖这两个字段，kmalloc 复用的脏指针在 `vmo_destroy` 时被
+  `cg_mem_uncharge` 解引用 → 内核页错误 panic。smoke-native-shmring
+  首次正式运行即暴露（进程退出阶段 pid 访问 0x3ffexxxx 用户地址）。
+  修复后六项 native smoke + `smoke-mm-stress` 全绿。
+- 待做：MPSC/MPMC 变体；批处理 doorbell（合并多次推进一次唤醒）；
+  ring 在 SMP 下的吞吐曲线；作为块驱动请求环（阶段 4）复用。
 
 ## 阶段 3B：Linux ABI 透明桥接
 
