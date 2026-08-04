@@ -17,6 +17,10 @@ int main(int argc, char **argv)
     for (int i = 0; i < argc; i++)
         printf("  argv[%d] = %s\n", i, argv[i]);
 
+    /* Mixed-width varargs: an int followed by a pointer must not shift the
+     * va_list cursor (regression for the ppc64le helper-va_arg bug). */
+    printf("  mix: %d %s\n", 7, "hello");
+
     printf("\n--- string test ---\n");
     const char *hello = "Hello, A20!";
     printf("strlen(\"%s\") = %lu\n", hello, (unsigned long)strlen(hello));
