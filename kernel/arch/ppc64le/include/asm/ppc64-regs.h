@@ -5,7 +5,7 @@
 #define PPC64_MSR_ISF   (1UL << 61)
 #define PPC64_MSR_HV    (1UL << 60)
 #define PPC64_MSR_VEC   (1UL << 25)
-#define PPC64_MSR_VSX   (1UL << 24)
+#define PPC64_MSR_VSX   (1UL << 23)
 #define PPC64_MSR_EE    (1UL << 15)
 #define PPC64_MSR_PR    (1UL << 14)
 #define PPC64_MSR_FP    (1UL << 13)

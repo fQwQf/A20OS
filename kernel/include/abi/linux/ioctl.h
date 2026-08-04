@@ -15,4 +15,16 @@
 #define FIONBIO       0x5421
 #define FIONREAD      0x541B
 
+/* PPC64 uses the Linux _IOC encoding rather than asm-generic numbers. */
+#define PPC64_TCGETS       0x402C7413UL
+#define PPC64_TCSETS       0x802C7414UL
+#define PPC64_TCSETSW      0x802C7415UL
+#define PPC64_TCSETSF      0x802C7416UL
+#define PPC64_TIOCSPGRP    0x80047476UL
+#define PPC64_TIOCGPGRP    0x40047477UL
+#define PPC64_TIOCSWINSZ   0x80087467UL
+#define PPC64_TIOCGWINSZ   0x40087468UL
+#define PPC64_FIONBIO      0x8004667EUL
+#define PPC64_FIONREAD     0x4004667FUL
+
 #endif /* _ABI_LINUX_IOCTL_H */
