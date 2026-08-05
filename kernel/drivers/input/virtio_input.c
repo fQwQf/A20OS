@@ -586,7 +586,7 @@ static int virtio_input_init_transport(device_t *dev,
         /* PCI transports share INTx lines: the global handler drains every
          * input instance, so one registration per line is enough, but the
          * line must accept other devices' handlers too. */
-        unsigned long irq_flags = vt->shared_irq ? IRQF_SHARED : 0;
+        unsigned long irq_flags = dev->bus == &pci_bus ? IRQF_SHARED : 0;
         if (request_irq((uint32_t)vt->irq, virtio_input_irq, irq_flags, NULL) != 0) {
             kinfo("[INPUT] Failed to register IRQ\n");
             goto fail;
