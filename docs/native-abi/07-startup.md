@@ -726,8 +726,7 @@ Linux 的 `pthread_mutex` 底层用 `futex` 系统调用做等待/唤醒。A20 �
 
 /* A20 的轻量级等待机制：
  * 利用 vm_alloc 的 MAP_SHARED 页做原子变量，
- * 用 event_queue 做阻塞等待。
- */
+ * 用 event_queue 做阻塞等待。 */
 
 /* mutex 内部结构 */struct a20_mutex_internal {
     _Atomic uint32_t state;      /* 0=unlocked, 1=locked, 2=contended */

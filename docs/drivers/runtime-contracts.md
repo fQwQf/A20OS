@@ -40,8 +40,7 @@ void *dma_alloc_coherent(size_t size, uint64_t *dma_handle);void dma_free_cohere
 
 静态 ring/buffer 使用 `va_to_pa()` 生成 DMA 地址，并必须在各架构线性映射范围内。不得把栈上对象交给异步 DMA；同步命令也只有在确认完成后才能离开栈帧。设备超时后可能仍持有 buffer，必须先复位/停止设备，再复用或释放。
 
-> 注意
-> 不要把栈上变量或临时结构传给 DMA，即使你认为命令会很快完成。设备超时后仍可能访问该内存，而栈帧早已释放。超时后也不要立即复用同一块 buffer，先停止或复位设备。
+> 注意不要把栈上变量或临时结构传给 DMA，即使你认为命令会很快完成。设备超时后仍可能访问该内存，而栈帧早已释放。超时后也不要立即复用同一块 buffer，先停止或复位设备。
 
 ## IRQ API
 
@@ -51,91 +50,13 @@ int request_irq(uint32_t irq, irq_handler_t handler,
 void free_irq(uint32_t irq, void *priv);
 ```
 
-成功注册后由驱动拥有，remove 和 probe 回滚必须成对 `free_irq`。`priv` 应是设备实例，释放时必须传回同一值。
+成功注册后由驱动拥有，remove 和 probe 回滚必须成对 `free_irq`。`priv` 应是设备实例，释放时必须传回同一值。重复注册已占用 IRQ 返回 `-EBUSY`；驱动只有在协议明确支持轮询时才可降级。
 
 handler 返回 `int`，当前 dispatch 不使用返回值。handler 必须：确认设备中断源；清硬件状态；完成有界 ring 推进；记录/唤醒后立即返回。不得分配、访问 VFS、睡眠或长时间轮询。ack/eoi 由核心/板级 irqchip 处理。
 
-当前限制：IRQ 表固定 256 项。`IRQF_SHARED` 已实现通用 handler 链：已有注册与新请求都带 `IRQF_SHARED` 时同线追加 handler，dispatch 依次调用全部 handler，因此共享电平线的每个设备都必须确认并清自己的中断源；任何一方不带 `IRQF_SHARED` 则第二个注册返回 `-EBUSY`。x86_64 QEMU（q35）PCI INTx 已实现 IOAPIC 路由（GSI 20-23，`arch_pci_intx_irq` 覆盖，路由即屏蔽、`request_irq` 自动解掩，i440fx 因缺少 ACPI _PRT 保持轮询）；VirtualBox ARM 的 PCI 驱动目前多数采用轮询，直到 ACPI MSI/INTx 路由完整。
+当前限制：IRQ 表固定 256 项；每 IRQ 一个 handler；`IRQF_SHARED` 没有通用 handler 链；VirtualBox ARM 的 PCI 驱动目前多数采用轮询，直到 ACPI MSI/INTx 路由完整。
 
 `priv` 同时是 handler 参数和 IRQ 所有权 token。`free_irq(irq, priv)` 的 `priv` 必须与 `request_irq` 完全相同；不匹配不会移除他人的 handler。成功释放会先从 dispatch 表摘除 handler、屏蔽中断线，并等待已取得快照的在途 handler 返回，因此随后才能释放 `priv` 指向的内存。不得从该 IRQ 自己的 handler 中调用 `free_irq`。
-
-## 标准完成模型（IRQ hybrid）
-
-IRQ 驱动是 A20OS 的默认数据面范式。新驱动不得把"全程 busy-poll 直到硬件超时"作为完成模型；只有在平台确实无法提供中断时，才允许明确的轮询降级。参考实现：`kernel/drivers/block/virtio_blk.c`（`VIRTIO_BLK_IRQ_MODEL`）、`kernel/drivers/block/nvme.c`（`NVME_IRQ_MODEL`）、`kernel/drivers/block/ahci.c`（`AHCI_IRQ_MODEL`）。
-
-标准模型由四部分组成：
-
-1. **IRQ 解析**。PCI 驱动用 `pci_intx_irq(dev)` 取得平台路由后的中断标识；VirtIO 驱动使用 transport 的 `vt.irq`（PCI transport 由 `pci_virtio_transport_init` 填充并置 `shared_irq=1`）；MMIO/platform 驱动使用 `RES_IRQ` 资源。**禁止**把 PCI 配置空间 0x3C 的 IRQ Line 寄存器当作可用中断标识——它是固件遗留值，与平台中断控制器无关。解析结果为 `-1` 表示平台无路由，进入轮询降级。
-
-2. **注册与设备中断使能的顺序**。`request_irq()` 必须在设备能够产生中断之前完成；**设备级中断使能位（PxIE、IMS、INTMC、queue IEN 等）只在 handler 注册成功后才打开**。反向顺序会让无 handler 的中断源一直保持共享电平线有效，形成中断风暴。PCI INTx 注册必须带 `IRQF_SHARED`。注册失败必须把实例显式标记为轮询模式（如 `vt->irq = -1`）并保持设备中断屏蔽——绝不允许"注册失败但结构看起来仍是 IRQ 驱动"，等待路径会 park 在一个永远不会到来的中断上。
-
-3. **hybrid 等待**。提交路径先在有界窗口内轮询完成（通常数百微秒，覆盖快速完成，省去一次中断往返和睡眠切换），仍未完成则 park 在实例的 `wait_queue_t` 上，由 IRQ top-half 唤醒：
-
-```c
-uint64_t deadline = timer_get_ticks() + MS_TO_TICKS(CMD_TIMEOUT_MS);uint64_t pre_poll_until = timer_get_ticks() + US_TO_TICKS(800);for (;;) {
-    int ret = consume_completion_locked_or_lockfree(priv);
-    if (ret != -EAGAIN)
-        return ret;
-    if (!priv->irq_registered) {            /* 轮询降级：有界忙等 */
-        if (timer_get_ticks() >= deadline)
-            return -ETIMEDOUT;
-        udelay(1000);
-        continue;
-    }
-    uint64_t now = timer_get_ticks();
-    if (now >= deadline)
-        return -ETIMEDOUT;
-    if (now < pre_poll_until) {             /* hybrid 预轮询窗口 */
-        udelay(20);
-        continue;
-    }
-    uint64_t chunk = now + MS_TO_TICKS(50); /* 有界 park 块 */
-    if (chunk > deadline)
-        chunk = deadline;
-    proc_wait_token_t token =
-        proc_park_prepare(PROC_WAIT_UNINTERRUPTIBLE, chunk);
-    wait_queue_entry_t entry = {0};
-    wait_queue_link(&priv->waiters, &entry, token, 0);
-    ret = consume_completion_locked_or_lockfree(priv);  /* link 后重查 */
-    if (ret != -EAGAIN) {
-        wait_queue_unlink(&priv->waiters, &entry);
-        (void)proc_park_cancel(token);
-        proc_park_finish(token);
-        return ret;
-    }
-    (void)proc_park_commit(token);
-    wait_queue_unlink(&priv->waiters, &entry);
-    proc_park_finish(token);
-}
-```
-
-park 块必须有界（50 ms 量级），把理论上丢失的唤醒降级为一次重查，而不是整个命令超时的停滞。boot 早期没有 `proc_current()` 的路径只能使用有界轮询，不得 park。等待期间需要串行化多命令时，实例锁应使用可睡眠的 `mutex_t`（IRQ top-half 永不获取它）；自旋锁必须在 park 之前释放。
-
-4. **top-half 只唤醒**。handler 确认并清设备中断源（ISR 读取/写回、PxIS 写清、ICR 读清等），然后 collect waiters 并 flush，不触碰提交者拥有的 ring 状态——被唤醒的提交者自己重查完成：
-
-```c
-static int acme_irq(int irq, void *priv){
-    acme_priv_t *p = priv;
-    if (!p)
-        return 0;
-    uint32_t is = acme_read(p, ACME_REG_INT_STATUS);
-    if (!is)
-        return 0;                     /* 共享线上的他人中断 */
-    acme_write(p, ACME_REG_INT_STATUS, is);
-    proc_wake_q_t wake_q;
-    proc_wake_q_init(&wake_q);
-    (void)wait_queue_collect_all(&p->waiters, 0, PROC_WAKE_EVENT,
-                                 &wake_q, NULL);
-    (void)proc_wake_q_flush(&wake_q);
-    return 0;
-}
-```
-
-若 handler 清状态会吃掉 waiter 必须观察的位（如 AHCI 的 TFES），先把原始状态记入实例字段（如 `last_is`）再清寄存器。`wait_queue_t` 内部自锁，IRQ 上下文 collect 不需要也不能持有实例 mutex。
-
-**remove / probe 回滚的顺序**：先屏蔽设备中断（清设备使能位或设备复位），再 `free_irq()`，最后释放 DMA 和实例内存。`free_irq` 返回时保证在途 handler 已退出。
-
-**轮询降级的纪律**：允许降级的驱动必须在 [实现状态](implementation-status.md) 记录适用平台与解除轮询的条件；每次轮询调用工作量必须有界；无 IRQ 也无 `.poll` 进展入口的设备不得让 probe 成功。
 
 ## 锁
 
@@ -147,11 +68,11 @@ uint64_t flags = spin_lock_irqsave(&priv->lock);/* 只做不会睡眠、不会�
 
 全局顺序为 `driver registry/IRQ locks -> device-private locks`。driver core 不得持有 registry 锁调用生命周期回调。设备锁通常最内层；不得在其下调用 VFS、`kmalloc`、调度或长 busy wait。网络另有 `g_lwip_lock -> device lock`。现有例外与具体锁保护字段见 [锁顺序](lock-order.md)。
 
-自旋锁只能保护请求分配、descriptor 发布和完成回收。命令等待不得用自旋锁包住完整硬件超时周期：要么在锁外按 [标准完成模型](#标准完成模型irq-hybrid) park，要么把实例串行化锁换成可睡眠的 `mutex_t` 并允许持 mutex park（IRQ top-half 永不获取该 mutex）。
+自旋锁只能保护请求分配、descriptor 发布和完成回收。命令等待必须在锁外使用 completion/wait queue，或使用具备明确超时且不会关闭抢占的串行化机制；不得用自旋锁包住完整硬件超时周期。
 
 ## 等待与唤醒
 
-避免“检查为空 -> IRQ 到来 -> 登记 waiter -> 永久睡眠”的丢唤醒。基本循环是：持锁检查条件；在同一锁下登记 waiter/队列；解锁；调度；醒来后重新检查。多个读者必须使用 wait queue，不能只放单个 `task_t *waiter`。硬件完成等待的完整范式（hybrid 预轮询、有界 park 块、link 后重查）见上文 [标准完成模型](#标准完成模型irq-hybrid)。
+避免“检查为空 -> IRQ 到来 -> 登记 waiter -> 永久睡眠”的丢唤醒。基本循环是：持锁检查条件；在同一锁下登记 waiter/队列；解锁；调度；醒来后重新检查。多个读者必须使用 wait queue，不能只放单个 `task_t *waiter`。
 
 remove 必须先禁止新等待，再唤醒所有等待者并让其返回 `-ENODEV`。中断 handler 只唤醒，不在锁下执行使用者逻辑。
 

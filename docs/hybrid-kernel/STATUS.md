@@ -8,8 +8,7 @@
 用户态 ── syscall 线格式 ──> ABI 层（薄包装）── 内部 API ──> 内部实现
 ```
 
-- 内部实现（`kernel/ipc`、`kernel/mm`、`kernel/proc`、`kernel/drivers`、
-  `kernel/include/core`）独立自包含，对 `abi/` **零依赖**（全仓审计）；
+- 内部实现（`kernel/ipc`、`kernel/mm`、`kernel/proc`、`kernel/drivers`、 `kernel/include/core`）独立自包含，对 `abi/` **零依赖**（全仓审计）；
 - Linux ABI 线格式常量由 `kernel/include/core/` 自持，`abi/linux/*` 再导出；
 - 内部 IPC 子系统头位于 `kernel/include/ipc/`；
 - 结论：**任何 ABI 只需薄包装即可共享内部混合内核机制**。
@@ -53,22 +52,20 @@
 
 SMP=2/8 下 `native-shmring`（16MiB channel 批量 + 共享 VMO 环）的偶发内存破坏（`[SLAB BUG] kfree`、用户栈/代码页被数据覆盖、buddy 链表损坏）已定位并修复：
 
-1. **handle table 与 Linux I/O scratch buffer 共用存储**：exec/startup 把 Native
-   handle table 存入 `task->scratch_buf`，而 `proc_scratch_buffer()`（Linux ABI的 I/O 缓冲）复用同一字段，Native 任务执行 Linux syscall 会 `kfree(ht)` 或把数据写进句柄表。新增 `task->a20_ht` 专用字段，exec 切换 ABI 时释放旧表，退出清理分离（commit `98a1260`）。
-2. **VMA 链表无锁修改**：`mm_mmap/munmap/brk/mprotect/mremap` 原先不持
-   `mm->lock`，与 fault 的持锁遍历竞争导致链表撕裂。拆 `_locked` 变体 + 持锁wrapper；`proc_brk/mmap/munmap` 与 Linux `sys_mprotect/sys_mremap` 改调locked 版（后两者原本自己持锁，直接调 wrapper 会同锁重入死锁，mm_stress 卡死在 mremap 阶段，已修复）——commit `98a1260`、`933026e`。
-3. **远程 TLB flush 死锁与 TCG 不可靠**：SBI REMOTE SFENCE.VMA 在 QEMU TCG 下
-   不可靠，且持 `mm->lock`（关中断）时互发远程刷会 ABBA 死锁。改为 IPI-based远程刷（pending + generation，等待时开中断），并把所有远程刷延迟到解锁后（wrapper、trap 返回前、mm_destroy/vmo_destroy 在页释放**之前**刷）——commit `98a1260`、`1af0d02`。
-4. **buddy 脏块重入**：释放 order>0 块时若内部帧仍被引用（COW/VMO 分离引用），
-   整个脏块会被 push 回空闲链表，之后分配把在用页再次给出（VMO memset 覆盖用户页）。`fl_push_clean()` 现在拆解脏块、只回填干净子块，并有 DIRTY-SPLIT 诊断守卫 —— commit `1af0d02`。
-5. **channel enqueue 无 peer 引用**：`ch_try_enqueue()`（send 快路径）未像 park
-   路径那样 `refcount_inc_not_zero`，并发 `ep_release()` 可能释放正在入队的 peer；现在入队期间钉住 peer 引用 —— commit `1af0d02`。
+1. **handle table 与 Linux I/O scratch buffer 共用存储**：exec/startup 把 Native handle table 存入 `task->scratch_buf`，而 `proc_scratch_buffer()`（Linux ABI的 I/O 缓冲）复用同一字段，Native 任务执行 Linux syscall 会 `kfree(ht)` 或把数据写进句柄表。新增 `task->a20_ht` 专用字段，exec 切换 ABI 时释放旧表，退出清理分离（commit `98a1260`）。
+2. **VMA 链表无锁修改**：`mm_mmap/munmap/brk/mprotect/mremap` 原先不持 `mm->lock`，与 fault 的持锁遍历竞争导致链表撕裂。拆 `_locked` 变体 + 持锁 wrapper；`proc_brk/mmap/munmap` 与 Linux `sys_mprotect/sys_mremap` 改调 locked 版（后两者原本自己持锁，直接调 wrapper 会同锁重入死锁，mm_stress 卡死在 mremap 阶段，已修复）——commit `98a1260`、`933026e`。
+3. **远程 TLB flush 死锁与 TCG 不可靠**：SBI REMOTE SFENCE.VMA 在 QEMU TCG 下不可靠，且持 `mm->lock`（关中断）时互发远程刷会 ABBA 死锁。改为 IPI-based 远程刷（pending + generation，等待时开中断），并把所有远程刷延迟到解锁后（wrapper、trap 返回前、mm_destroy/vmo_destroy 在页释放**之前**刷）——commit `98a1260`、`1af0d02`。
+4. **buddy 脏块重入**：释放 order>0 块时若内部帧仍被引用（COW/VMO 分离引用），整个脏块会被 push 回空闲链表，之后分配把在用页再次给出（VMO memset 覆盖用户页）。`fl_push_clean()` 现在拆解脏块、只回填干净子块，并有 DIRTY-SPLIT 诊断守卫 —— commit `1af0d02`。
+5. **channel enqueue 无 peer 引用**：`ch_try_enqueue()`（send 快路径）未像 park 路径那样 `refcount_inc_not_zero`，并发 `ep_release()` 可能释放正在入队的 peer；现在入队期间钉住 peer 引用 —— commit `1af0d02`。
 
 验证：IPI TLB flush 全量服务（598/598）；`mm_stress` 全 PASS；RISC-V32 构建修复（`__atomic_exchange_8`/`arch_tlb_flush_page_local` 缺失）；`check-build-matrix-all`、`check-arch-boundary`、`check-abi-boundary`、`check-mm-lock-model`、`check-concurrency-foundation`、`check-final-definition`、`check-doc-test-gates` 全绿。
 
 ## 诚实边界（未完成 / 待验证）
 
 - **SMP**：时间片捐赠仅限 UP（SMP 缺跨核唤醒簿记，`current.c` 文档化的未完成项）；SMP=2/8 下 `native-shmring` 仍有极低概率的偶发破坏（页表/页表项交互方向，`frame_trace`/`VMO-PAGE` 诊断已就位，待继续收敛）；
+- **Native ABI 偶发破坏（已知问题，低优先级）**：上述 `native-shmring` 残余破坏只在 **Native ABI** 的"跨进程共享 VMO + channel 大块批量"负载下复现（SMP=2/8，约 30% 概率）；**Native ABI 当前不常用**（比赛与日常路径均为 Linux ABI），且 Linux ABI 同负载下实测稳定（`mm_stress` SMP=2 连跑 15 轮零崩溃，`smoke-vfs/futex/sched/abi-linux` 全绿），因此该项暂不作为优先修复项。若后续重新启用 Native ABI 作为主要运行时，需先收敛此问题（诊断挂载点：`frame_trace_dump_pfn`、`[VMO-PAGE]`、`[PFA DIRTY-SPLIT]`、`[LOCK-STALL]`）。
+
+- **SMP**：时间片捐赠仅限 UP（SMP 缺跨核唤醒簿记，`current.c` 文档化的未完成项）；SMP=8 下 channel 批量路径有既有竞态（非本次引入），比赛路径（Linux ABI）不受影响；
 - **网络协议栈**仍在内核（lwIP）；netd 外迁是后续最大单项；
 - **loongarch64**：内核与 native 测试均构建通过，运行时复测受工具链/镜像条件所限未完整执行；
 - **性能数据**全部来自 QEMU TCG 模拟器；真实硬件基准待测；
