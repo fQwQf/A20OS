@@ -203,8 +203,8 @@ static int proc_clone_impl(uint64_t flags, vaddr_t stack, int *ptid, vaddr_t tls
     if ((flags & CLONE_THREAD) && parent && parent->abi_mode == 1 &&
         parent->scratch_buf) {
         __atomic_store_n(
-            &t->scratch_buf,
-            a20_ht_get_ref((struct a20_ht_internal *)parent->scratch_buf),
+            &t->a20_ht,
+            a20_ht_get_ref((struct a20_ht_internal *)parent->a20_ht),
             __ATOMIC_RELEASE);
     }
 #endif

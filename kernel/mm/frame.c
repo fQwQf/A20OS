@@ -33,6 +33,13 @@ static const pfa_range_t *find_range_by_pa(paddr_t pa) {
 // Buddy System 各阶的空闲块的入队和出队
 static void fl_push(pfn_t pfn, int order) {
     frame_meta_t *m = meta_of(pfn);
+    if (m->prev != PFN_NONE || m->next != PFN_NONE) {
+        printf("[PFA DOUBLE-PUSH] pfn=%lu order=%d prev=%lu next=%lu flags=0x%x refcount=%u cpu=%u\n",
+               (unsigned long)pfn, order,
+               (unsigned long)m->prev, (unsigned long)m->next,
+               m->flags, m->refcount, cpu_current_id());
+        panic("pfa: duplicate free-list push");
+    }
     m->prev = PFN_NONE;
     m->next = pfa.free_lists[order].head;
     if (m->next != PFN_NONE)
@@ -95,6 +102,9 @@ void pfa_init(paddr_t kernel_end) {
     memset(meta, 0, meta_sz);
     pfa.meta = meta;
     pfa.free_frames = 0;
+    printf("[PFA] meta=%p total_frames=%lu meta_sz=%lu\n",
+           (void *)meta, (unsigned long)pfa.total_frames,
+           (unsigned long)meta_sz);
     spin_init(&pfa.lock);
 
     for (int i = 0; i <= MAX_ORDER; i++) {
@@ -169,6 +179,14 @@ static pfn_t pfa_alloc_from_buddy(int order)
     pfn_t blk = pfa.free_lists[o].head;
     fl_remove(blk, o);
 
+    if (pfa.meta[blk].flags != FRAME_F_FREE || pfa.meta[blk].order != (uint8_t)o ||
+        (blk & ((1u << o) - 1)) != 0) {
+        printf("[PFA DOUBLE-ALLOC] pfn=%lu flags=0x%x refcount=%u order_meta=%d list_order=%d free_lists[%d].count=%u cpu=%u\n",
+               (unsigned long)blk, pfa.meta[blk].flags, pfa.meta[blk].refcount,
+               (int)pfa.meta[blk].order, o, o, pfa.free_lists[o].count, cpu_current_id());
+        panic("pfa: double allocation detected");
+    }
+
     while (o > order) {
         o--;
         pfn_t buddy = blk ^ (1u << o);
@@ -199,7 +217,7 @@ static pfn_t pfa_alloc_from_buddy(int order)
     return blk;
 }
 
-pfn_t pfa_alloc(int order) {
+pfn_t pfa_alloc_flags(int order, int can_reclaim) {
     if (order < 0 || order > MAX_ORDER) return PFN_NONE;
 
     int retries = 0;
@@ -213,7 +231,7 @@ pfn_t pfa_alloc(int order) {
         spin_unlock_irqrestore(&pfa.lock, flags);
 
         if (retries == 0) {
-            if (oom_try_reclaim()) {
+            if (can_reclaim && oom_try_reclaim()) {
                 retries++;
                 continue;
             }
@@ -223,6 +241,8 @@ pfn_t pfa_alloc(int order) {
 
     return PFN_NONE;
 }
+
+pfn_t pfa_alloc(int order) { return pfa_alloc_flags(order, 1); }
 
 void pfa_free(pfn_t pfn, int order) {
     if (pfn >= pfa.total_frames) return;

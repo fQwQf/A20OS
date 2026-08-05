@@ -15,7 +15,7 @@
  * Per-frame reference counting for COW support.
  */
 
-#define MAX_ORDER    11   /* orders 0..10 → 4KB to 8MB */
+#define MAX_ORDER    11   /* orders 0..11 → 4KB to 8MB */
 #define PFN_NONE     ((uint32_t)-1)
 #define PFA_MAX_RANGES 4
 
@@ -71,6 +71,7 @@ typedef struct pfa_huge_stats {
 /* Core API */
 void   pfa_init(paddr_t kernel_end);
 pfn_t  pfa_alloc(int order);
+pfn_t  pfa_alloc_flags(int order, int can_reclaim);
 void   pfa_free(pfn_t pfn, int order);
 pfn_t  pfa_alloc_page(void);
 void   pfa_free_page(pfn_t pfn);

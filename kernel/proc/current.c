@@ -183,3 +183,9 @@ unsigned proc_current_lifetime_violations_locked(void)
     }
     return violations;
 }
+
+int proc_task_pid(const void *task)
+{
+    const task_t *t = (const task_t *)task;
+    return t ? t->pid : -1;
+}
