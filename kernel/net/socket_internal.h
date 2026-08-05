@@ -2,6 +2,7 @@
 #define _NET_SOCKET_INTERNAL_H
 
 #include "net/socket.h"
+#include "ipc/ipc.h"
 #include "fs/vfs.h"
 #include "proc/proc.h"
 #include "core/lock.h"
@@ -109,6 +110,12 @@ typedef struct net_socket {
     uint8_t peer_addr[NET_SOCKADDR_MAX];
     size_t peer_len;
     struct net_socket *peer;
+    /* AF_UNIX socketpair channel-backed data plane (internal IPC bridge):
+     * plain data flows through the channel; SCM_RIGHTS messages fall back
+     * to the legacy queue (rx_head).  ch_buf holds a stream leftover. */
+    a20_channel_ep_t *ch_ep;
+    char             *ch_buf;
+    uint32_t          ch_len;
     net_msg_t *rx_head;
     net_msg_t *rx_tail;
     int rx_count;
@@ -286,3 +293,9 @@ int      net_socket_close_file(vfile_t *vf);
 #endif /* _NET_SOCKET_INTERNAL_H */
 
 void net_tcp_recved(net_socket_t *s, size_t len);
+
+/* Internal IPC bridge (AF_UNIX socketpair): plain data flows through the
+ * internal channel; SCM_RIGHTS messages fall back to the legacy queue.
+ * Implemented in socket_unix.c, used by net/socket.c recv path. */
+int unix_ch_recv(net_socket_t *s, void *buf, size_t len);
+int unix_ch_send(net_socket_t *s, net_socket_t *dst, const void *buf, size_t len);

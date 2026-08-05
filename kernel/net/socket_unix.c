@@ -1,7 +1,9 @@
 #include "net/socket_internal.h"
+#include "ipc/ipc.h"
 #include "fs/vfs.h"
 #include "core/stdio.h"
 #include "core/string.h"
+#include "mm/slab.h"
 
 static int unix_path_make_absolute(const char *path, char *out, size_t outsz)
 {
@@ -241,6 +243,16 @@ static int net_unix_socket_sendto_impl(net_socket_t *s, const void *buf,
         spin_unlock_irqrestore(&g_net_lock, irq);
         return dst_addr ? -ECONNREFUSED : -EDESTADDRREQ;
     }
+    /* Channel-backed data plane: plain data goes through the internal
+     * channel (no g_net_lock; the channel has its own locking).  SCM_RIGHTS
+     * messages fall back to the legacy queue below. */
+    if (dst->ch_ep && !(files && nfiles > 0)) {
+        spin_unlock_irqrestore(&g_net_lock, irq);
+        int cr = unix_ch_send(s, dst, buf, len);
+        if (cr >= 0)
+            wait_queue_wake_all(&dst->read_waitq, 0, PROC_WAKE_EVENT);
+        return cr;
+    }
     /*
      * On success the enqueued message takes ownership of the fd
      * references; on failure the caller still owns them.
@@ -255,6 +267,78 @@ static int net_unix_socket_sendto_impl(net_socket_t *s, const void *buf,
     spin_unlock_irqrestore(&g_net_lock, irq);
     (void)proc_wake_q_flush(&wake_q);
     return r;
+}
+
+
+/* ---- Channel-backed data plane (internal IPC bridge) ----
+ * Plain data of a channel-backed AF_UNIX socketpair flows through an
+ * internal channel; the legacy queue is only used for SCM_RIGHTS
+ * messages (which need vfile_t* delivery). */
+
+int unix_ch_send(net_socket_t *s, net_socket_t *dst, const void *buf, size_t len)
+{
+    /* a20_channel_send(ep) delivers to ep->peer, so the sender must send
+     * on its OWN endpoint: its peer is the receiver's ch_ep. */
+    const uint8_t *p = (const uint8_t *)buf;
+    size_t left = len;
+    size_t sent = 0;
+    uint32_t chflags = s->nonblock ? A20_MSG_NONBLOCK : 0;
+    while (left > 0) {
+        uint32_t n = left > A20_CH_MAX_DATA ? A20_CH_MAX_DATA : (uint32_t)left;
+        int64_t r = a20_channel_send(s->ch_ep, p, n, NULL, 0, NULL, chflags);
+        if (r < 0) {
+            if (r == -A20_ERR_WOULD_BLOCK)
+                return sent ? (int)sent : -EAGAIN;
+            if (r == -A20_ERR_CANCELED)
+                return sent ? (int)sent : -EPIPE;
+            if (r == -A20_ERR_INTERRUPTED)
+                return sent ? (int)sent : -EINTR;
+            return sent ? (int)sent : -EIO;
+        }
+        p += n;
+        left -= n;
+        sent += n;
+    }
+    return (int)sent;
+}
+
+int unix_ch_recv(net_socket_t *s, void *buf, size_t len)
+{
+    size_t total = 0;
+    uint8_t *out = (uint8_t *)buf;
+    while (total < len) {
+        if (s->ch_len > 0) {
+            size_t n = s->ch_len < (len - total) ? s->ch_len : (len - total);
+            memcpy(out + total, s->ch_buf, n);
+            total += n;
+            if (n < s->ch_len)
+                memmove(s->ch_buf, s->ch_buf + n, s->ch_len - n);
+            s->ch_len -= (uint32_t)n;
+            continue;
+        }
+        if (!s->ch_buf) {
+            s->ch_buf = kmalloc(A20_CH_MAX_DATA);
+            if (!s->ch_buf)
+                return total ? (int)total : -ENOMEM;
+        }
+        uint32_t cap = A20_CH_MAX_DATA;
+        int64_t r = a20_channel_recv(s->ch_ep, s->ch_buf, &cap,
+                                     NULL, NULL, NULL, A20_MSG_NONBLOCK);
+        if (r < 0) {
+            if (total > 0)
+                return (int)total;
+            if (r == -A20_ERR_WOULD_BLOCK)
+                return -EAGAIN;
+            if (r == -A20_ERR_CANCELED)
+                return 0; /* EOF: peer endpoint released */
+            if (r == -A20_ERR_INTERRUPTED)
+                return -EINTR;
+            return -EIO;
+        }
+        /* a20_channel_recv returns the status; the byte count is in cap. */
+        s->ch_len = cap;
+    }
+    return (int)total;
 }
 
 int net_unix_socket_sendto(net_socket_t *s, const void *buf, size_t len,

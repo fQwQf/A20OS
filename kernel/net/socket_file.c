@@ -1,4 +1,5 @@
 #include "net/socket_internal.h"
+#include "ipc/ipc.h"
 #include "net/lwip_stack.h"
 #include "core/consts.h"
 #include "core/klog.h"
@@ -183,6 +184,10 @@ int net_socket_close_file(vfile_t *vf) {
                s->domain, s->type, s->listening, (void *)s->tcp,
                (void *)s->peer, s->closed);
     net_inet_socket_destroy(s);
+    if (s->ch_ep) {
+        a20_channel_ep_release(s->ch_ep);
+        s->ch_ep = NULL;
+    }
     ktrace_net("[NET] close: pcb dropped, unregistering\n");
     proc_wake_q_t wake_q;
     proc_wake_q_init(&wake_q);
