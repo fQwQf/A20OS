@@ -131,6 +131,12 @@
 #define A20_SYS_futex_wait        0x0B00
 #define A20_SYS_futex_wake        0x0B01
 
-#define A20_NATIVE_SYSCALL_COUNT  101
+/* Device / user-space drivers (0x0C00) */
+#define A20_SYS_device_map_mmio   0x0C00
+#define A20_SYS_device_irq_listen 0x0C01
+#define A20_SYS_device_irq_ack    0x0C02
+#define A20_SYS_device_irq_unlisten 0x0C03
+
+#define A20_NATIVE_SYSCALL_COUNT  105
 
 #endif
