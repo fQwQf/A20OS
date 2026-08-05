@@ -239,6 +239,24 @@ typedef struct task_t {
     arch_sigaltstack_t sigaltstack;
     uint64_t       thread_pending;
 
+    /* Debug/tracing state (kernel/proc/debug.c).  Protected by proc_lock
+     * for transitions; the tracer reads the snapshot fields only while the
+     * tracee is in a ptrace stop (ptrace_stop_active), which the tracee
+     * publishes under proc_lock before blocking. */
+    struct task_t *ptracer;          /* observing task, or NULL */
+    int            ptrace_orig_parent_pid; /* real parent pid, restored on detach */
+    uint32_t       ptrace_flags;     /* PT_DEBUG_FLAG_* */
+    int            ptrace_stop_active;
+    int            ptrace_stop_kind; /* PT_DEBUG_STOP_* */
+    int            ptrace_event;     /* PT_DEBUG_EVENT_*, 0 = none */
+    uint64_t       ptrace_event_msg;
+    int            ptrace_stop_sig;  /* signal reported by this stop */
+    uint8_t        ptrace_siginfo[128]; /* siginfo snapshot of this stop */
+    int            ptrace_siginfo_valid;
+    int            ptrace_deliver_sig; /* one-shot no-re-stop signal */
+    int            ptrace_ctx_valid;
+    trap_context_t ptrace_saved_ctx; /* regs snapshot at stop time */
+
     ARCH_TASK_FIELDS
 
     /* Native ABI support */

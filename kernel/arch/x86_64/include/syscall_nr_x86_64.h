@@ -416,7 +416,7 @@ static inline uint32_t x86_syscall_to_kernel_nr(uint32_t x86_nr)
         /* 98 */ SYS_getrusage,
         /* 99 */ SYS_sysinfo,
         /* 100 */ SYS_times,
-        /* 101 */ (uint16_t)-1,     /* ptrace */
+        /* 101 */ SYS_ptrace,   /* ptrace */
         /* 102 */ SYS_getuid,
         /* 103 */ SYS_syslog,
         /* 104 */ SYS_getgid,

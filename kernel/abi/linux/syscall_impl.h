@@ -188,6 +188,7 @@ int64_t sys_setsid(void);
 int64_t sys_clone(uint64_t flags, void *stack, int *ptid, uint64_t tls, int *ctid);
 int64_t sys_execve(const char *path, char **argv, char **envp);
 int64_t sys_wait4(int pid, int *status, int options, void *rusage);
+int64_t sys_ptrace(int request, int pid, void *addr, void *data);
 int64_t sys_waitid(int type, int id, void *info, int options, void *rusage);
 int64_t sys_sched_yield(void);
 int64_t sys_sched_get_priority_max(int policy);
