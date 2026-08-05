@@ -241,6 +241,10 @@ typedef struct a20_start_info {
 
     uint64_t page_size;
     uint64_t user_clock_freq;
+
+    /* Well-known service-registry client endpoint (may be NULL). */
+    a20_handle_t service_registry;
+    uint32_t _pad_registry;
 } a20_start_info_t;
 
 #define A20_NATIVE_FD_HANDLE_BASE 64u
