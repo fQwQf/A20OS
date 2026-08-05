@@ -56,7 +56,9 @@ typedef struct udisk_inst {
     uint32_t         id_counter;
     uint32_t         in_flight;
     uint64_t         capacity;
+    int              owner_pid;
     uint8_t          active;
+    uint8_t          driver_dead; /* set at driver exit; cleared at re-attach */
 } udisk_inst_t;
 
 static udisk_inst_t g_insts[UDISK_MAX_INST];
@@ -81,7 +83,7 @@ static void udisk_mount_kthread(void)
 static int udisk_rw(udisk_inst_t *u, uint64_t lba, void *buf, size_t count, int dir)
 {
     udisk_ring_t *r = u->ring;
-    if (!r)
+    if (!r || u->driver_dead)
         return -1;
 
     uint32_t id;
@@ -183,14 +185,6 @@ static void udisk_wake(udisk_inst_t *u)
 int udisk_attach(struct vmo *vmo, uint64_t capacity,
                  a20_channel_ep_t **out_doorbell, int owner_pid)
 {
-    udisk_inst_t *u = NULL;
-    for (int i = 0; i < UDISK_MAX_INST; i++) {
-        if (!g_insts[i].active) { u = &g_insts[i]; break; }
-    }
-    if (!u)
-        return -1;
-    memset(u, 0, sizeof(*u));
-
     udisk_ring_t *ring = (udisk_ring_t *)pfn_to_virt(vmo_peek_page(vmo, 0));
     if (!ring)
         return -1;
@@ -201,6 +195,43 @@ int udisk_attach(struct vmo *vmo, uint64_t capacity,
     a20_channel_ep_t *ubd_ep = ep0->peer;
     /* The ubd_ep reference moves to the caller via the returned handle. */
 
+    /* Re-attach path: replace ring/doorbell on the surviving instance so
+     * the block_dev (and any mount built on it) keeps working.  Pending
+     * requests were already failed at driver exit. */
+    for (int i = 0; i < UDISK_MAX_INST; i++) {
+        udisk_inst_t *u = &g_insts[i];
+        if (!u->active || !u->driver_dead || u->capacity != capacity)
+            continue;
+        memset(ring, 0, PAGE_SIZE);
+        uint64_t flags = spin_lock_irqsave(&u->lock);
+        u->ring = ring;
+        u->ring_vmo = vmo;
+        vmo_ref(vmo);
+        u->doorbell = ep0;
+        u->id_counter = 0;
+        u->in_flight = 0;
+        u->owner_pid = owner_pid;
+        u->driver_dead = 0;
+        spin_unlock_irqrestore(&u->lock, flags);
+        a20_objstat_add(&g_a20_objstats.channel_eps, 1);
+        klog(KLOG_INFO, "udisk: re-attached pid=%d capacity=%lu\n",
+             owner_pid, (unsigned long)capacity);
+        *out_doorbell = ubd_ep;
+        return 0;
+    }
+
+    /* Fresh instance. */
+    udisk_inst_t *u = NULL;
+    for (int i = 0; i < UDISK_MAX_INST; i++) {
+        if (!g_insts[i].active) { u = &g_insts[i]; break; }
+    }
+    if (!u) {
+        a20_channel_ep_release(ep0);
+        a20_channel_ep_release(ubd_ep);
+        return -1;
+    }
+    memset(u, 0, sizeof(*u));
+
     spin_init(&u->lock);
     wait_queue_init(&u->waiters);
     u->ring_vmo = vmo;
@@ -209,6 +240,8 @@ int udisk_attach(struct vmo *vmo, uint64_t capacity,
     u->doorbell = ep0;
     u->capacity = capacity;
     u->id_counter = 0;
+    u->in_flight = 0;
+    u->owner_pid = owner_pid;
     u->active = 1;
     u->bdev.read_sector = udisk_read_sector;
     u->bdev.write_sector = udisk_write_sector;
@@ -230,6 +263,39 @@ int udisk_attach(struct vmo *vmo, uint64_t capacity,
 
     *out_doorbell = ubd_ep;
     return 0;
+}
+
+/*
+ * udisk_task_exit — driver death: fail every in-flight request and wake
+ * its waiter so the kernel caller observes -EIO instead of hanging
+ * (docs/hybrid-kernel/02-mainstream-plan.md M4 crash recovery).  The
+ * instance itself survives so a supervisor respawn can re-attach the
+ * same block device (mount included).
+ */
+void udisk_task_exit(int pid)
+{
+    for (int i = 0; i < UDISK_MAX_INST; i++) {
+        udisk_inst_t *u = &g_insts[i];
+        if (!u->active || u->owner_pid != pid)
+            continue;
+        uint64_t flags = spin_lock_irqsave(&u->lock);
+        udisk_ring_t *r = u->ring;
+        if (r) {
+            for (uint32_t s = 0; s < UDISK_RING_REQS; s++) {
+                if (!__atomic_load_n(&r->reqs[s].done, __ATOMIC_ACQUIRE)) {
+                    __atomic_store_n(&r->reqs[s].result, 1,
+                                     __ATOMIC_RELEASE);
+                    __atomic_store_n(&r->reqs[s].done, 1,
+                                     __ATOMIC_RELEASE);
+                }
+            }
+        }
+        u->driver_dead = 1;
+        spin_unlock_irqrestore(&u->lock, flags);
+        wait_queue_wake_all(&u->waiters, 0, PROC_WAKE_EVENT);
+        klog(KLOG_WARN, "udisk: driver pid=%d exited; requests failed\n",
+             pid);
+    }
 }
 
 int udisk_complete(int pid, uint32_t n_done)
