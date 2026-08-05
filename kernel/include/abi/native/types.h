@@ -777,6 +777,16 @@ typedef struct a20_device_irq_listen_args {
     uint64_t       user_data;       /* echoed back as event data0 */
 } a20_device_irq_listen_args_t;
 
+typedef struct a20_device_vmo_phys_args {
+    uint32_t       size;
+    uint32_t       version;
+    a20_handle_t   vmo;             /* MEMORY handle (needs STAT right) */
+    uint32_t       _pad;
+    uint64_t       out_paddrs;      /* u64[] written with physical addrs */
+    uint32_t       max_pages;
+    uint32_t       out_count;
+} a20_device_vmo_phys_args_t;
+
 /* ---- Message flags (channel_send / channel_recv) ---- */
 
 #define A20_MSG_NONBLOCK   (1u << 0)  /* fail with WOULD_BLOCK instead of sleeping */
