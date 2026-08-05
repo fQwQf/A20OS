@@ -12,7 +12,60 @@
 | 3 | 共享 VMO 环形队列 uapi 协议 + 数据面基准 | 完成（riscv64） |
 | 3B | Linux ABI 透明桥接：pipe over VMO 环 + vDSO | vDSO 完成（riscv64），pipe 环待做 |
 | 4 | 低速驱动外迁试点（用户态驱动框架） | 完成（riscv64，goldfish RTC） |
-| 5 | 块/网驱动外迁评估（按基准数据决策） | 未开始 |
+| 5 | 块/网驱动外迁评估（按基准数据决策） | 见文末「阶段 5 评估结论」 |
+
+## 最终状态小结（2026-08-05）
+
+**已完成并全部通过门禁（riscv64）**：
+
+- 混合内核 IPC 底座：`channel_call` 融合 RPC（一次陷入 = 请求+等复），
+  共享 VMO SPSC 环（非满非空零 syscall + futex 门铃），两者构成
+  用户态服务的控制面/数据面传输。
+- 服务化与稳定性：svcman 监管者（task_spawn 固定槽位端点传递、
+  EventQ EXITED 监控、退避重启），两轮崩溃自愈演示。
+- 用户态驱动框架：白名单 MMIO 授权 + IRQ→EventQ（VFIO/UIO 电平协议）
+  + 退出前 IRQ 释放；goldfish RTC 整体用户态化，含 100ms 闹钟与
+  崩溃重启恢复。
+- Linux ABI 透明获益：vDSO（musl `clock_gettime` 4.3× 加速，双路径
+  位级一致）；唤醒捐赠审计确认两 ABI 共享 priority-preempt。
+- 门禁：`smoke-native-{ipc,svc,shmring,rtcd,mm,futex,signal}`、
+  `smoke-clock-vdso`、`smoke-mm-stress`、`smoke-vfs-stress` 全绿；
+  riscv64 与 loongarch64 内核均构建通过；native 测试双架构构建通过。
+
+**顺带修复的既有内核 bug**：
+
+1. `vmo_create` 未初始化 `charge_cg`/`charged_pages` → `vmo_destroy`
+   解引用野指针 panic（阶段 3 smoke 暴露）。
+
+**明确未完成（诚实清单）**：
+
+1. pipe over VMO 环、AF_UNIX over Channel（3B 后半）；
+2. devfs 代理转发（/dev/rtc → 用户态服务；阶段 4 的集成层）；
+3. 块/网驱动外迁（见阶段 5 评估结论）；
+4. loongarch64 的运行时验证（当前仅构建级验证；vDSO 仅 riscv64 实现）；
+5. 真实硬件性能测量（全部数据来自 QEMU TCG，结论限于"性能中性、
+   机制正确"）。
+
+## 阶段 5 评估结论
+
+阶段 1–4 的 TCG 数据显示：RPC 往返的主要成本是**上下文切换**而非
+陷入次数（80µs 量级 vs 陷一 µs 量级）；块/网驱动的 I/O 路径是多次
+上下文切换 + 数据拷贝的长链路，在现有调度成本下外迁必然劣化
+（参考阶段 3：channel 与共享环在 TCG 上仅持平）。因此**当前决策为
+不外迁块/网驱动**，混合内核形态稳定在「服务化 + 低速驱动外迁 +
+vDSO」；该决策应在使用优先级捐赠/直接切换降低切换成本后重估。
+
+## 复现命令
+
+```bash
+make smoke-native-ipc       # 阶段 1: channel_call 功能 + 基准
+make smoke-native-svc       # 阶段 2: svcman 崩溃自愈
+make smoke-native-shmring   # 阶段 3: 共享环 16MiB 完整性 + 吞吐对比
+make smoke-clock-vdso       # 阶段 3B: vDSO 正确性 + 4.3x 加速
+make smoke-native-rtcd      # 阶段 4: 用户态 RTC 驱动 + IRQ + 自愈
+make smoke-mm-stress smoke-vfs-stress   # Linux ABI 回归
+make ARCH=loongarch64 ABI=both kernel-only   # 跨架构构建
+```
 
 ## 阶段 1：`channel_call` 融合 RPC 快路径
 
