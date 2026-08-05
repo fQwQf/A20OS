@@ -98,6 +98,10 @@ a20_channel_ep_t *a20_channel_create(uint32_t msg_cap, const a20_channel_type_t 
 int64_t a20_channel_send(a20_channel_ep_t *ep, const void *data, uint32_t data_len,
                          a20_ch_handle_info_t *handles, uint32_t handle_count,
                          struct a20_ht_internal *sender_ht, uint32_t flags);
+int64_t a20_channel_send_dwc(a20_channel_ep_t *ep, const void *data, uint32_t data_len,
+                             a20_ch_handle_info_t *handles, uint32_t handle_count,
+                             struct a20_ht_internal *sender_ht, uint32_t flags,
+                             int defer_wake);
 int64_t a20_channel_recv(a20_channel_ep_t *ep, void *data, uint32_t *data_len,
                          a20_ch_handle_info_t *handles, uint32_t *handle_count,
                          struct a20_ht_internal *receiver_ht, uint32_t flags);
@@ -112,6 +116,9 @@ int64_t a20_channel_recv(a20_channel_ep_t *ep, void *data, uint32_t *data_len,
 int64_t a20_channel_recv_begin(a20_channel_ep_t *ep, uint32_t flags,
                                uint32_t *out_msg_data_len,
                                uint32_t *out_msg_handles);
+int64_t a20_channel_recv_begin_donate(a20_channel_ep_t *ep, uint32_t flags,
+                                      uint32_t *out_msg_data_len,
+                                      uint32_t *out_msg_handles);
 int64_t a20_channel_recv_finish(a20_channel_ep_t *ep, void *data, uint32_t *data_len,
                                 a20_ch_handle_info_t *handles, uint32_t *handle_count);
 void a20_channel_recv_abort(a20_channel_ep_t *ep);
