@@ -110,11 +110,11 @@
             \toprule
             \textbf{维度} & \textbf{状态} & \textbf{关键指标} \\
             \midrule
-            内核代码规模 & 完成 & \high{约 12.5 万行} / 533 个源文件 \\
+            内核代码规模 & 完成 & \high{约 18 万行} / 800 余个源文件 \\
             支持架构 & 完成 & \high{RISC-V / ARM64 / x86\_64 / LoongArch} \\
             Linux ABI 兼容 & 基本完成 & musl / git / vim / gcc / fastfetch / mksh \\
             SMP 并发 & 完成 & NR\_CPUS $>$ 1 通过压力门禁 \\
-            Native ABI & 完成 & \high{90 个原生 syscall} 入口 \\
+            Native ABI & 完成 & \high{109 个原生 syscall} 入口 \\
             网络栈 & 完成 & lwIP + virtio-net 事件驱动 \\
             \bottomrule
         \end{tabular}
@@ -183,7 +183,7 @@
                 \begin{itemize}
                     \item 基于 Capability 的对象句柄
                     \item VMO/VMAR、Channel、EventQ
-                    \item \high{90 个}原生 syscall 入口
+                    \item \high{109 个}原生 syscall 入口
                 \end{itemize}
             \end{exampleblock}
         \end{column}
@@ -461,7 +461,7 @@ typedef struct a20_msg_send_args {
 \begin{frame}
     \frametitle{特色九：Native ABI 设计哲学}
     \begin{itemize}
-        \item \high{系统调用压缩}：223 个 Linux 系统调用 $\rightarrow$ 90 个 Native syscall（约 2.5 倍压缩）
+        \item \high{系统调用压缩}：223 个 Linux 系统调用 $\rightarrow$ 109 个 Native syscall（约 2 倍压缩）
         \item \high{统一抽象}：\code{handle\_set\_meta} 替代 chmod/chown/utimes/truncate；\code{handle\_transfer} 统一 splice/sendfile/copy\_file\_range/tee
         \item \high{版本化 ABI}：每个复杂结构以 \code{size + version} 开头，支持运行时协商
         \item 无 fork/exec/signal/ioctl；以 \code{task\_spawn}、Channel、EventQ 替代
@@ -838,13 +838,13 @@ a20_channel_call(&args, &reply);
                     \item Huge-page demotion / COW
                     \item OOM reclaim 安全策略
                     \item vim / git / gcc / fastfetch 移植与静态构建
+                    \item 块/网络 I/O 事件驱动：LoongArch PCI INTx IRQ 接线、块 hybrid poll$\to$park、网络 RX pending 标志取代调度热路径轮询
                 \end{itemize}
             \end{block}
         \end{column}
         \begin{column}{0.48\textwidth}
             \begin{alertblock}{Remaining P1/P2}
                 \begin{itemize}
-                    \item 块/网络设备完全事件驱动唤醒
                     \item \code{g\_lwip\_lock} 竞争优化
                     \item VFS 边界语义持续收紧
                     \item 更多 LTP 风格压力测试
@@ -860,12 +860,12 @@ a20_channel_call(&args, &reply);
 \begin{frame}
     \frametitle{下一步工作}
     \begin{enumerate}
-        \item \high{I/O 完全事件驱动}：替换块/网络设备中的兼容轮询路径
+        \item \high{I/O 事件驱动深化}：双架构 8 核下继续削减轮询残余、合并连续块请求
         \item \high{网络栈深化}：扩展 socket 并发测试，降低 lwIP 全局锁竞争
         \item \high{VFS 语义收紧}：完整 \code{renameat2}、\code{statx}、xattr 等边界行为
         \item \high{测试强化}：将静态文档门禁转化为可执行的行为测试
         \item \high{架构探索}：在 \code{riir} 分支继续 Rust 重写实验（研究性质）
-    \end{enumerate}
+    \end{enumerate} 
     \vspace{0.5em}
     \begin{block}{核心追求}
         在保证 Linux 生态兼容的前提下，构建更安全、更高性能、更可维护的下一代内核底座。

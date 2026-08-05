@@ -5,13 +5,9 @@
 
 ## 1. 背景与目标
 
-A20OS 目前仅有一个窄用途驱动 `kernel/drivers/input/xhci_hid.c`
-（1165 行）：硬编码绑定 Intel 8086:1e31 XHCI 控制器，只解析 HID 1.11
-**boot protocol** 键盘/鼠标，轮询工作，单控制器单实例（静态 `g_xhci`）。
-它没有 USB 设备树、没有 URB 抽象、不支持存储设备、不支持热插拔。
+A20OS 目前仅有一个窄用途驱动 `kernel/drivers/input/xhci_hid.c`（1165 行）：硬编码绑定 Intel 8086:1e31 XHCI 控制器，只解析 HID 1.11**boot protocol** 键盘/鼠标，轮询工作，单控制器单实例（静态 `g_xhci`）。它没有 USB 设备树、没有 URB 抽象、不支持存储设备、不支持热插拔。
 
-目标：引入一个**通用 USB 子系统**，使任意 USB 宿主控制器上的 HID 与
-Mass Storage 设备通过统一模型工作，并接入现有输入/块设备类接口。
+目标：引入一个**通用 USB 子系统**，使任意 USB 宿主控制器上的 HID 与Mass Storage 设备通过统一模型工作，并接入现有输入/块设备类接口。
 
 ## 2. 现状评估（A20OS 已有基础）
 
@@ -25,8 +21,7 @@ Mass Storage 设备通过统一模型工作，并接入现有输入/块设备类
 | XHCI 底层 | `xhci_hid.c` | MMIO、TRB/事件环、输入/输出上下文、命令与控制传输、端口枚举、轮询——全部已有，只是与 HID 解析耦合 |
 | 内核线程 | `init_kthread` 等 | 可承载枚举/轮询工作 |
 
-**结论**：A20OS 的驱动模型已经预见了热插拔总线，输入/块类接口开箱可用。
-移植通用 USB **不需要改动现有驱动模型**，但**需要新增三个东西**：
+**结论**：A20OS 的驱动模型已经预见了热插拔总线，输入/块类接口开箱可用。移植通用 USB **不需要改动现有驱动模型**，但**需要新增三个东西**：
 
 1. **USB 核心子系统**（URB 抽象 + 设备/接口/端点模型 + 枚举流程）；
 2. **HCD（宿主控制器驱动）抽象**（把 `xhci_hid.c` 的控制器逻辑重构为
@@ -98,8 +93,7 @@ typedef struct urb {
 ### 4.2 设备树模型
 
 ```c
-usb_device_t     /* 逻辑设备：地址、速度、device descriptor、配置 */
-  └─ usb_interface_t[]  /* 来自配置描述符；每个 interface 一个 device_t */
+usb_device_t     /* 逻辑设备：地址、速度、device descriptor、配置 */└─ usb_interface_t[]  /* 来自配置描述符；每个 interface 一个 device_t */
        └─ usb_endpoint_t[]  /* 端点描述符 */
 ```
 
@@ -120,8 +114,7 @@ usb_device_t     /* 逻辑设备：地址、速度、device descriptor、配置 
 ### 4.4 多控制器
 
 - 每控制器独立 `xhci_controller_t`（由 `device_t->drv_priv` 持有），
-  替换当前单例 `g_xhci`。`xhci_hid` 的 `id_table` 泛化为支持更多
-  XHCI PCI ID（`VENDOR_ANY` + 类匹配或通用 XHCI PCI class 0x0C0330）。
+  替换当前单例 `g_xhci`。`xhci_hid` 的 `id_table` 泛化为支持更多XHCI PCI ID（`VENDOR_ANY` + 类匹配或通用 XHCI PCI class 0x0C0330）。
 
 ## 5. HCD 接口（由 xhci_hid 重构而来）
 
@@ -189,8 +182,7 @@ typedef struct usb_hcd {
 ## 9. 集成点与 Makefile
 
 - 新增目录：`kernel/drivers/usb/{core,host,class}/`，随
-  `$(wildcard $(KERNEL_DIR)/drivers/*/*.c)` 自动编译（Makefile 无需改动，
-  现有通配已覆盖 `drivers/usb/core|host|class` 三层需确认展开）。
+  `$(wildcard $(KERNEL_DIR)/drivers/*/*.c)` 自动编译（Makefile 无需改动，现有通配已覆盖 `drivers/usb/core|host|class` 三层需确认展开）。
 - `bus_type "usb"` 注册在 `driver_core_init` 之后（现有总线注册序列）。
 - 类驱动 `DRIVER_REGISTER()` 自动进入 `.driver_init`。
 
