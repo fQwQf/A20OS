@@ -68,10 +68,10 @@ static page_cache_page_t *find_locked(vnode_t *vn, uint64_t index)
     return NULL;
 }
 
-static void detach_mapping_locked(page_cache_page_t *page)
+static vnode_t *detach_mapping_deferred_locked(page_cache_page_t *page)
 {
     if (!page->valid)
-        return;
+        return NULL;
     hash_remove(page);
     vnode_t *vn = page->vnode;
     page->vnode = NULL;
@@ -81,6 +81,12 @@ static void detach_mapping_locked(page_cache_page_t *page)
     page->dirty_gen = 0;
     page->invalidate_gen++;
     page->uptodate = 0;
+    return vn;
+}
+
+static void detach_mapping_locked(page_cache_page_t *page)
+{
+    vnode_t *vn = detach_mapping_deferred_locked(page);
     if (vn)
         vnode_put(vn);
 }
@@ -522,6 +528,40 @@ void page_cache_truncate(vnode_t *vn, uint64_t new_size)
         }
     }
     spin_unlock_irqrestore(&g_page_cache_lock, flags);
+}
+
+size_t page_cache_drop_clean(void)
+{
+    if (!g_initialized)
+        return 0;
+
+    size_t dropped = 0;
+    int cursor = 0;
+    while (cursor < PAGE_CACHE_MAX_PAGES) {
+        vnode_t *held[64];
+        int held_count = 0;
+        uint64_t flags = spin_lock_irqsave(&g_page_cache_lock);
+        while (cursor < PAGE_CACHE_MAX_PAGES && held_count < 64) {
+            page_cache_page_t *page = &g_pages[cursor++];
+            if (!page->valid || page->dirty ||
+                refcount_read(&page->ref_count) != 0 ||
+                !pfn_valid(page->pfn) ||
+                pfa.meta[page->pfn].refcount > 1)
+                continue;
+            vnode_t *vn = detach_mapping_deferred_locked(page);
+            if (vn)
+                held[held_count++] = vn;
+            dropped++;
+        }
+        spin_unlock_irqrestore(&g_page_cache_lock, flags);
+
+        /* A final vnode_put() may enter the filesystem and acquire sleeping
+         * locks.  Transfer the cache references out of the spinlocked region
+         * before releasing them. */
+        for (int i = 0; i < held_count; i++)
+            vnode_put(held[i]);
+    }
+    return dropped;
 }
 
 void page_cache_get_stats(page_cache_stats_t *stats)
