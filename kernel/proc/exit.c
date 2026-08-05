@@ -19,7 +19,7 @@ extern void a20_registry_task_exit(int pid);
 #include "core/panic.h"
 #include "core/string.h"
 #include "sys/futex.h"
-#include "abi/native/ipc_internal.h"
+#include "ipc/ipc.h"
 #include "sys/usercopy.h"
 #include "cg/cgroup.h"
 
