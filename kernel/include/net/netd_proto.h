@@ -12,7 +12,7 @@ typedef struct netd_frame_ring {
     volatile uint32_t tail;
     volatile uint32_t doorbell;
     uint32_t          slot_mask;
-    uint8_t           data[];
+    uint8_t           data[NETD_RING_SLOTS * (4 + NETD_MAX_FRAME)];
 } netd_frame_ring_t;
 
 typedef struct netd_rings {
