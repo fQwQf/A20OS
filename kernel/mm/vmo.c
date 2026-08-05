@@ -15,6 +15,7 @@
 #include "mm/mm.h"
 #include "mm/vmo.h"
 #include "cg/cgroup.h"
+#include "ipc/objstats.h"
 
 struct vmo *vmo_create(uint32_t type, uint64_t size, uint32_t options)
 {
@@ -44,12 +45,16 @@ struct vmo *vmo_create(uint32_t type, uint64_t size, uint32_t options)
      * non-NULL, and tasks without a cgroup never overwrite the field. */
     vmo->charge_cg = NULL;
     vmo->charged_pages = 0;
+    a20_objstat_add(&g_a20_objstats.vmos, 1);
     return vmo;
 }
 
 static void vmo_destroy(struct vmo *vmo)
 {
     if (!vmo) return;
+    a20_objstat_add(&g_a20_objstats.vmos, -1);
+    a20_objstat_add(&g_a20_objstats.vmo_pages,
+                    -(int64_t)(vmo->phys_size / PAGE_SIZE));
     if (vmo->pages) {
         for (uint32_t i = 0; i < vmo->page_count; i++) {
             if (vmo->pages[i] != PFN_NONE)
@@ -100,6 +105,7 @@ pfn_t vmo_get_page(struct vmo *vmo, uint32_t index)
     memset(va, 0, PAGE_SIZE);
     vmo->pages[index] = pfn;
     vmo->phys_size += PAGE_SIZE;
+    a20_objstat_add(&g_a20_objstats.vmo_pages, 1);
     spin_unlock(&vmo->lock);
     return pfn;
 }
@@ -140,6 +146,7 @@ int vmo_get_page_charged(struct vmo *vmo, uint32_t index,
     memset(va, 0, PAGE_SIZE);
     vmo->pages[index] = pfn;
     vmo->phys_size += PAGE_SIZE;
+    a20_objstat_add(&g_a20_objstats.vmo_pages, 1);
     if (cg) {
         vmo->charge_cg = cg;
         vmo->charged_pages++;
@@ -162,6 +169,7 @@ int64_t vmo_resize(struct vmo *vmo, uint64_t new_size)
             if (vmo->pages[i] != PFN_NONE) {
                 pfa_free_page(vmo->pages[i]);
                 vmo->pages[i] = PFN_NONE;
+                a20_objstat_add(&g_a20_objstats.vmo_pages, -1);
                 if (vmo->charge_cg && vmo->charged_pages)
                     vmo->charged_pages--;
             }

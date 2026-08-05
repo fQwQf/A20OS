@@ -16,6 +16,9 @@
 #include "abi/native/ipc_internal.h"
 #include "abi/native/vmo.h"
 #include "abi/native/objects.h"
+#include "ipc/objstats.h"
+
+a20_objstats_t g_a20_objstats;
 
 __attribute__((weak)) void a20_timer_object_ref(int slot) { (void)slot; }
 __attribute__((weak)) void a20_timer_object_release(int slot) { (void)slot; }

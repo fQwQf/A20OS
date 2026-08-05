@@ -4,6 +4,7 @@
 #include "fs/fdtable.h"
 #include "fs/block_cache.h"
 #include "fs/page_cache.h"
+#include "ipc/objstats.h"
 #include "proc/proc.h"
 #include "proc/proc_internal.h"
 #include "proc/lifetime.h"
@@ -564,6 +565,21 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
     }
     case PF_A20_TASK_LIFETIME:
         return (int)proc_lifetime_format(buf, bufsz);
+    case PF_A20_OBJECTS:
+        snprintf(buf, bufsz,
+            "handles: %lu\n"
+            "channel_eps: %lu\n"
+            "eventqs: %lu\n"
+            "vmos: %lu\n"
+            "vmo_pages: %lu\n"
+            "irq_bindings: %lu\n",
+            (unsigned long)__atomic_load_n(&g_a20_objstats.handles, __ATOMIC_RELAXED),
+            (unsigned long)__atomic_load_n(&g_a20_objstats.channel_eps, __ATOMIC_RELAXED),
+            (unsigned long)__atomic_load_n(&g_a20_objstats.eventqs, __ATOMIC_RELAXED),
+            (unsigned long)__atomic_load_n(&g_a20_objstats.vmos, __ATOMIC_RELAXED),
+            (unsigned long)__atomic_load_n(&g_a20_objstats.vmo_pages, __ATOMIC_RELAXED),
+            (unsigned long)__atomic_load_n(&g_a20_objstats.irq_bindings, __ATOMIC_RELAXED));
+        break;
     case PF_A20_DRIVER_LIFECYCLE:
         buf[0] = '\0';
         return 0;

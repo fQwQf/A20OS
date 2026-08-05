@@ -14,6 +14,7 @@
 #include "drivers/core/udriver.h"
 #include "abi/native/types.h"
 #include "abi/native/ipc_internal.h"
+#include "ipc/objstats.h"
 
 /* ---- Whitelisted user-mappable MMIO windows ---- */
 
@@ -147,6 +148,7 @@ int udriver_irq_listen(uint32_t irq, a20_eventq_t *queue,
     slot->user_data = user_data;
     slot->owner_pid = owner_pid;
     slot->active = 1;
+    a20_objstat_add(&g_a20_objstats.irq_bindings, 1);
     spin_unlock_irqrestore(&g_udr_lock, flags);
 
     refcount_inc(&queue->refcount);
@@ -188,6 +190,7 @@ int udriver_irq_unlisten(uint32_t irq)
         e->active = 0;
         queue = e->queue;
         e->queue = NULL;
+        a20_objstat_add(&g_a20_objstats.irq_bindings, -1);
     }
     spin_unlock_irqrestore(&g_udr_lock, flags);
     if (!e)
@@ -213,6 +216,7 @@ void udriver_task_cleanup(int pid)
             irqs[n] = g_udr_irq[i].irq;
             privs[n] = &g_udr_irq[i];
             g_udr_irq[i].queue = NULL;
+            a20_objstat_add(&g_a20_objstats.irq_bindings, -1);
             n++;
         }
     }

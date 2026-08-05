@@ -86,6 +86,7 @@ typedef struct a20_handle_entry {
 
 #define A20_HT_INITIAL_CAP    256
 #define A20_HT_MAX_CAP        65536
+#define A20_HT_DEFAULT_QUOTA  4096   /* per-task native-handle quota (M2) */
 #define A20_HT_GROWTH_FACTOR  2
 
 typedef struct a20_handle_table {

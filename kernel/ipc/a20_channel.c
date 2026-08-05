@@ -23,6 +23,7 @@
 #include "abi/native/errno.h"
 #include "abi/native/rights.h"
 #include "proc/proc.h"
+#include "ipc/objstats.h"
 
 extern void a20_object_ref(void *object, uint16_t type);
 extern void a20_object_release(void *object, uint16_t type);
@@ -132,6 +133,7 @@ a20_channel_ep_t *a20_channel_create(uint32_t msg_cap, const a20_channel_type_t 
         ep1->chan_type = &ep1->chan_type_storage;
     }
 
+    a20_objstat_add(&g_a20_objstats.channel_eps, 2);
     return ep0;
 }
 
@@ -597,6 +599,7 @@ void a20_channel_ep_release(a20_channel_ep_t *ep)
 {
     if (!ep) return;
     if (!refcount_dec_and_test(&ep->refcount)) return;
+    a20_objstat_add(&g_a20_objstats.channel_eps, -1);
 
     spin_lock(&g_ch_lock);
     spin_lock(&ep->lock);
