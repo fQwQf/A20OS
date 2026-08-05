@@ -12,6 +12,7 @@
 #if defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)
 extern void a20_registry_task_exit(int pid);
 #endif
+extern void udisk_task_exit(int pid);
 #include "mm/frame.h"
 #include "mm/mm.h"
 #include "mm/vm.h"
@@ -367,6 +368,7 @@ void proc_exit(int exit_code)
      * event fires, so a supervisor reacting to that event can immediately
      * re-register the device (reap-time cleanup would race the respawn). */
     udriver_task_cleanup(t->pid);
+    udisk_task_exit(t->pid);
 #if defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)
     a20_registry_task_exit(t->pid);
 #endif
