@@ -86,7 +86,7 @@ static block_dev_t *first_gpt_partition(block_dev_t *parent) {
     return &partition.block;
 }
 
-static int try_mount(block_dev_t *dev, const char *mnt, const char *fstype) {
+int try_mount(block_dev_t *dev, const char *mnt, const char *fstype) {
     if (!dev) return -1;
     bcache_t *bc = bcache_create(dev);
     if (!bc) return -1;
