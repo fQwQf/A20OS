@@ -87,7 +87,7 @@ int udriver_map_mmio(mm_struct_t *mm, uint64_t phys, uint64_t size,
     if (!(ptef & (PTE_R | PTE_W)))
         return -1;
 
-    uint64_t lock_flags = spin_lock_irqsave(&mm->lock);
+    spin_lock(&mm->lock);
     vaddr_t va = mm_find_gap(mm, mm->mmap_base, size);
     if (!va)
         goto fail;
@@ -102,12 +102,13 @@ int udriver_map_mmio(mm_struct_t *mm, uint64_t phys, uint64_t size,
     vma->end = va + size;
     vma->vm_flags = vma_flags;
     mm_insert_vma(mm, vma);
-    spin_unlock_irqrestore(&mm->lock, lock_flags);
+    spin_unlock(&mm->lock);
+    mm_vma_flush_deferred(mm);
     *out_va = va;
     return 0;
 
 fail:
-    spin_unlock_irqrestore(&mm->lock, lock_flags);
+    spin_unlock(&mm->lock);
     return -1;
 }
 

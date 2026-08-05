@@ -29,7 +29,7 @@ static int mm_clone_shared_mapping(mm_struct_t *mm, vm_area_t *src_vma,
 
     int prot = mm_pte_flags_to_prot(src_vma->pte_flags);
     vaddr_t target = (flags & MREMAP_FIXED) ? new_addr : 0;
-    vaddr_t dst = mm_mmap(mm, target, len, prot,
+    vaddr_t dst = mm_mmap_locked(mm, target, len, prot,
                            (target ? MAP_FIXED : 0) | MAP_ANONYMOUS |
                            ((src_vma->vm_flags & VM_SHARED) ? MAP_SHARED : MAP_PRIVATE));
     if ((int64_t)dst < 0)
@@ -42,19 +42,19 @@ static int mm_clone_shared_mapping(mm_struct_t *mm, vm_area_t *src_vma,
 #else
     int sr = mm_split_vma_at(mm, dst);
     if (sr < 0) {
-        mm_munmap(mm, dst, len);
+        mm_munmap_locked(mm, dst, len);
         return sr;
     }
     sr = mm_split_vma_at(mm, dst + len);
     if (sr < 0) {
-        mm_munmap(mm, dst, len);
+        mm_munmap_locked(mm, dst, len);
         return sr;
     }
 #endif
 
     vm_area_t *dst_vma = mm_find_vma(mm, dst);
     if (!dst_vma || dst_vma->start != dst || dst_vma->end != dst + len) {
-        mm_munmap(mm, dst, len);
+        mm_munmap_locked(mm, dst, len);
         return -ENOMEM;
     }
 
@@ -69,7 +69,7 @@ static int mm_clone_shared_mapping(mm_struct_t *mm, vm_area_t *src_vma,
             vnode_put(dst_vma->file_vnode);
             dst_vma->file_vnode = NULL;
         }
-        mm_munmap(mm, dst, len);
+        mm_munmap_locked(mm, dst, len);
         return -EBADF;
     }
 
@@ -87,7 +87,7 @@ static int mm_clone_shared_mapping(mm_struct_t *mm, vm_area_t *src_vma,
         if (level > 0 && (base < src_addr || base + leaf_size > src_addr + len)) {
             int dr = mm_demote_huge_page(mm, src_va);
             if (dr < 0) {
-                mm_munmap(mm, dst, len);
+                mm_munmap_locked(mm, dst, len);
                 return dr;
             }
             continue;
@@ -96,7 +96,7 @@ static int mm_clone_shared_mapping(mm_struct_t *mm, vm_area_t *src_vma,
         paddr_t pa = arch_pte_addr(*src);
         pfn_t pfn = phys_to_pfn(pa);
         if (!pfn_valid(pfn)) {
-            mm_munmap(mm, dst, len);
+            mm_munmap_locked(mm, dst, len);
             return -ENOMEM;
         }
 
@@ -109,7 +109,7 @@ static int mm_clone_shared_mapping(mm_struct_t *mm, vm_area_t *src_vma,
             idx /= PAGE_SIZE;
             pcp = page_cache_get(src_vma->file_vnode, idx, 0);
             if (!pcp) {
-                mm_munmap(mm, dst, len);
+                mm_munmap_locked(mm, dst, len);
                 return -ENOMEM;
             }
         } else if (!shared_file) {
@@ -123,7 +123,7 @@ static int mm_clone_shared_mapping(mm_struct_t *mm, vm_area_t *src_vma,
             } else if (!shared_file) {
                 frame_put(pfn);
             }
-            mm_munmap(mm, dst, len);
+            mm_munmap_locked(mm, dst, len);
             return r;
         }
         mm->rss += leaf_size / PAGE_SIZE;
@@ -197,13 +197,13 @@ static __attribute__((unused)) int mm_move_mapping_pages(mm_struct_t *mm, vaddr_
         }
         off += leaf_size;
     }
-    arch_tlb_flush();
+    arch_tlb_flush_page_local(old_addr);  /* wrapper flushes remotely */
     return 0;
 }
 
-int mm_mremap(mm_struct_t *mm, vaddr_t old_addr, size_t old_size,
-              size_t new_size, int flags, vaddr_t new_addr,
-              vaddr_t *out_addr) {
+int mm_mremap_locked(mm_struct_t *mm, vaddr_t old_addr, size_t old_size,
+                    size_t new_size, int flags, vaddr_t new_addr,
+                    vaddr_t *out_addr) {
     if (!mm || !out_addr) return -EINVAL;
     if (new_size == 0) return -EINVAL;
     if (old_addr & (PAGE_SIZE - 1)) return -EINVAL;
@@ -252,7 +252,7 @@ int mm_mremap(mm_struct_t *mm, vaddr_t old_addr, size_t old_size,
 
     if (new_len <= old_len && !(flags & (MREMAP_DONTUNMAP | MREMAP_FIXED))) {
         if (new_len < old_len)
-            mm_munmap(mm, old_addr + new_len, old_len - new_len);
+            mm_munmap_locked(mm, old_addr + new_len, old_len - new_len);
         *out_addr = old_addr;
         return 0;
     }
@@ -266,7 +266,7 @@ int mm_mremap(mm_struct_t *mm, vaddr_t old_addr, size_t old_size,
                                            new_len - old_len, vma)) {
             vma->end = new_end;
             mm->total_vm += (new_len - old_len) / PAGE_SIZE;
-            vma_try_merge(vma);
+            vma_try_merge(mm, vma);
             *out_addr = old_addr;
             return 0;
         }
@@ -281,7 +281,7 @@ int mm_mremap(mm_struct_t *mm, vaddr_t old_addr, size_t old_size,
 
     int prot = mm_pte_flags_to_prot(vma->pte_flags);
     vaddr_t target = (flags & MREMAP_FIXED) ? new_addr : 0;
-    vaddr_t dst = mm_mmap(mm, target, new_len, prot,
+    vaddr_t dst = mm_mmap_locked(mm, target, new_len, prot,
                            (target ? MAP_FIXED : 0) | MAP_ANONYMOUS |
                            ((vma->vm_flags & VM_SHARED) ? MAP_SHARED : MAP_PRIVATE));
     if ((int64_t)dst < 0)
@@ -291,18 +291,18 @@ int mm_mremap(mm_struct_t *mm, vaddr_t old_addr, size_t old_size,
      * boundaries before turning it into a file-backed mapping. */
     int sr = mm_split_vma_at(mm, dst);
     if (sr < 0) {
-        mm_munmap(mm, dst, new_len);
+        mm_munmap_locked(mm, dst, new_len);
         return sr;
     }
     sr = mm_split_vma_at(mm, dst + new_len);
     if (sr < 0) {
-        mm_munmap(mm, dst, new_len);
+        mm_munmap_locked(mm, dst, new_len);
         return sr;
     }
 
     vm_area_t *dst_vma = mm_find_vma(mm, dst);
     if (!dst_vma || dst_vma->start != dst || dst_vma->end != dst + new_len) {
-        mm_munmap(mm, dst, new_len);
+        mm_munmap_locked(mm, dst, new_len);
         return -ENOMEM;
     }
 
@@ -317,7 +317,7 @@ int mm_mremap(mm_struct_t *mm, vaddr_t old_addr, size_t old_size,
             vnode_put(dst_vma->file_vnode);
             dst_vma->file_vnode = NULL;
         }
-        mm_munmap(mm, dst, new_len);
+        mm_munmap_locked(mm, dst, new_len);
         return -EBADF;
     }
 
@@ -330,13 +330,27 @@ int mm_mremap(mm_struct_t *mm, vaddr_t old_addr, size_t old_size,
                               (flags & MREMAP_DONTUNMAP) != 0);
 #endif
     if (r < 0) {
-        mm_munmap(mm, dst, new_len);
+        mm_munmap_locked(mm, dst, new_len);
         return r;
     }
 
     if (!(flags & MREMAP_DONTUNMAP))
-        mm_munmap(mm, old_addr, old_len);
+        mm_munmap_locked(mm, old_addr, old_len);
 
     *out_addr = dst;
     return 0;
+}
+
+int mm_mremap(mm_struct_t *mm, vaddr_t old_addr, size_t old_size,
+              size_t new_size, int flags, vaddr_t new_addr,
+              vaddr_t *out_addr)
+{
+    if (!mm) return -EINVAL;
+    uint64_t flags_l = spin_lock_irqsave(&mm->lock);
+    int r = mm_mremap_locked(mm, old_addr, old_size, new_size, flags,
+                             new_addr, out_addr);
+    spin_unlock_irqrestore(&mm->lock, flags_l);
+    mm_vma_flush_deferred(mm);
+    arch_tlb_flush();  // deferred remote flush
+    return r;
 }
