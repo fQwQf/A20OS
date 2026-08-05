@@ -6,10 +6,8 @@
 
 A20OS 的分发物是**源代码**（本仓库，含 git submodule）。所有镜像（`fat32.img`、`ext4.img`、`extra.img`、ISO 等）均为**由本仓库源码与submodule 源码构建出来的构建产物**，不作为独立的二进制分发包对外分发。因此：
 
-- GPL/LGPL 组件（git、vim、gcc、binutils、FFmpeg、Breeze 等）以**源码形式**
-  随仓库的 `user/external/` submodule 提供，构建者在本地自行编译。
-- 构建产物如需分发给他人，应连同对应组件的源码获取说明一起提供
-  （各 GPL 组件的源码即其 submodule）。
+- GPL/LGPL 组件（git、vim、gcc、binutils、FFmpeg、Breeze 等）以**源码形式** 随仓库的 `user/external/` submodule 提供，构建者在本地自行编译。
+- 构建产物如需分发给他人，应连同对应组件的源码获取说明一起提供 （各 GPL 组件的源码即其 submodule）。
 
 ## 2. 内核与自研代码
 
@@ -61,8 +59,7 @@ A20OS 的分发物是**源代码**（本仓库，含 git submodule）。所有�
 | FFmpeg | LGPL-2.1-or-later | `user/external/ffmpeg` | 独立可执行文件 |
 | Breeze | GPL-2.0 / LGPL | `user/external/breeze` | 资源/图标 |
 
-> 若将上述任一构建产物（extra.img 等）分发给第三方，请按对应 GPL/LGPL 条款
-> 随附其源码（即 `user/external/` 下对应 submodule）与许可证文本。
+> 若将上述任一构建产物（extra.img 等）分发给第三方，请按对应 GPL/LGPL 条款随附其源码（即 `user/external/` 下对应 submodule）与许可证文本。
 
 ## 6. 设计参考与对照系统
 

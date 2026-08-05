@@ -35,10 +35,8 @@ A default stop action enters `PROC_STOPPED` only in`proc_sched_stop_current()`. 
 `proc_sched_resume_stopped()` is the only resumption path:
 
 - `SIGCONT` resumes and records one continued event;
-- a fatal signal resumes without a continued event so it can terminate at the
-  next signal boundary;
-- a task-exit request resumes without a continued event so the safe-boundary
-  exit check can run.
+- a fatal signal resumes without a continued event so it can terminate at the next signal boundary;
+- a task-exit request resumes without a continued event so the safe-boundary exit check can run.
 
 Stop and continue events wake parent waiters, honor `SA_NOCLDSTOP`, and arereported once through `WUNTRACED`/`WCONTINUED` unless `WNOWAIT` is requested.`SIGCONT` is a default-ignore delivery action after its unconditional resumeside effect; it no longer falls through to default termination.
 
@@ -51,8 +49,7 @@ Stop and continue events wake parent waiters, honor `SA_NOCLDSTOP`, and arerepor
 3. leave an uninterruptible wait asleep until its resource event;
 4. explicitly resume a STOPPED target;
 5. let normal wait-entry and timer cleanup finish on the target;
-6. execute `proc_exit()` from `proc_check_exit_pending()` at a syscall, trap,
-   or resumed execution boundary.
+6. execute `proc_exit()` from `proc_check_exit_pending()` at a syscall, trap, or resumed execution boundary.
 
 There is no fallback that directly changes a BLOCKED task to READY.  If anevent or timeout already won the Park token, `exit_pending` remains observableat the next safe boundary.
 
@@ -60,10 +57,8 @@ There is no fallback that directly changes a BLOCKED task to READY.  If anevent 
 
 `proc_stress` verifies:
 
-- a stopped child reports once, remains stopped after an ordinary signal,
-  resumes only on `SIGCONT`, then delivers the pending ordinary signal;
-- `WCONTINUED` reports the explicit resume and `SIGKILL` terminates a stopped
-  child;
+- a stopped child reports once, remains stopped after an ordinary signal, resumes only on `SIGCONT`, then delivers the pending ordinary signal;
+- `WCONTINUED` reports the explicit resume and `SIGKILL` terminates a stopped child;
 - repeated blocked-signal to `sigsuspend` handoffs cannot lose a wake;
 - an unblocked signal interrupts eventfd read, while a blocked signal does not.
 

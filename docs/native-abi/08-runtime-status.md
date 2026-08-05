@@ -107,9 +107,7 @@ Linux ABI 侧已有完整 PT_INTERP 加载，mlibc 的 rtld 现成，native 侧�
 
 ### 7. 仍存在的差距（未实现）
 
-> 2026-08 更新：VMO 已迁入核心 MM 层（`kernel/mm/vmo.c`、`kernel/include/mm/vmo.h`），
-> VMAR 改为核心 `mm_mmap_vmo`/`mm_munmap`/`mm_mprotect` 的薄包装（`kernel/abi/native/vmar.c`），
-> 因此核心 fault 路径不再依赖任何 ABI 头文件，两套 ABI 也不互相包装依赖。
+> 2026-08 更新：VMO 已迁入核心 MM 层（`kernel/mm/vmo.c`、`kernel/include/mm/vmo.h`），VMAR 改为核心 `mm_mmap_vmo`/`mm_munmap`/`mm_mprotect` 的薄包装（`kernel/abi/native/vmar.c`），因此核心 fault 路径不再依赖任何 ABI 头文件，两套 ABI 也不互相包装依赖。
 
 - file/socket/pipe 的 `READABLE`/`WRITABLE`/`ERROR`/`CONNECTION` 事件源尚未接入 VFS/网络栈（event queue 目前只对 channel、timer、task 退出产生事件）。
 - `event_watch_fs` 仍是目录级 watch 的壳，不支持路径过滤、不产生 FS 事件。

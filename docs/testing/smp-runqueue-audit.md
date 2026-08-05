@@ -11,8 +11,7 @@ This document closes PROC.md step 7 without changing the scheduler's existingpri
 Cross-CPU migration uses `sched_runq_requeue_locked()`:
 
 1. acquire `proc_lock`;
-2. acquire the source and destination runqueue locks in ascending CPU-number
-   order;
+2. acquire the source and destination runqueue locks in ascending CPU-number order;
 3. unlink the task from the source queue and publish `on_rq = 0`;
 4. change `cpu_id`;
 5. link the task to the destination queue and publish `on_rq = 1`;
@@ -56,8 +55,7 @@ This only decides whether to request a safe-point reschedule. Queue selection,FI
 `/proc/a20/task_lifetime` exposes:
 
 - `runqueue_migrations`;
-- request, priority-request, IPI sent/acknowledged, consumed, and pending
-  counters;
+- request, priority-request, IPI sent/acknowledged, consumed, and pending counters;
 - `scheduler_violations`.
 
 `sched_stress` creates a remote CPU RT hog, queues a lower RT task behind it,then atomically migrates that queued task to the parent CPU. It verifies:

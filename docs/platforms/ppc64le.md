@@ -14,22 +14,16 @@ QEMU 目标使用 pSeries 固件提供的虚拟终端、RTAS、PCI 配置访问�
 
 已完成并可在干净提交上复现：
 
-- 启动与 Radix MMU 正常：`PAGE_OFFSET` 调整为根索引 256 的高半映射，
-  `arch_current_cpu_id()` 在 pSeries guest 中不再读 PIR（会触发 ProgramException），`BRINGUP` smoke 通过且 RTAS poweroff 干净退出。
+- 启动与 Radix MMU 正常：`PAGE_OFFSET` 调整为根索引 256 的高半映射， `arch_current_cpu_id()` 在 pSeries guest 中不再读 PIR（会触发 Program Exception），`BRINGUP` smoke 通过且 RTAS poweroff 干净退出。
 - 完整用户态（musl + 125 个命令 + init + mksh）已构建进 dev 镜像。
-- 板级 `enumerate_devices` 直接调用 RTAS PCI/virtio 探测；virtio-blk 挂载
-  fat32 到 `/bin`，`/bin/init` ELF 可加载，用户任务（pid 2）可创建。
-- 修复了 ISI 取指页错误不保存故障地址的问题：指令页故障的 tval 应为
-  SRR0 而不是 DAR，否则 demand paging 永远映射不了入口页。
-- **`mksh` 交互 shell 已跑通**：真实 O3 init/mksh 可启动，shell 能执行内建
-  `echo`、`ls` 与外部 `/bin/echo`（`fork` + `execve` + COW + `wait` +`SIGCHLD` 全链路）；`#` prompt、输入回显、父进程信号返回和阻塞读均正常。
-- **native ABI libc（liba20c）已移植并在 QEMU 中运行**：`native-libc-ppc64le`
-  `PASS`（字符串/malloc/time/printf 全通过），`native-hello-ppc64le` 与`native-mm-ppc64le` 也通过。crt0 补上 ELFv2 TOC 初始化（`_start` 先设 r2为 `.TOC.` 基址，native ABI loader 保证 r12=入口地址）；liba20c 的`printf` vararg 读取改为经 `va_list *` 推进，修复 `%d` 后 `%s` 等混合宽度格式错位（该 bug 影响所有架构，ppc64le 的 -O0 构建使其最先暴露）。
+- 板级 `enumerate_devices` 直接调用 RTAS PCI/virtio 探测；virtio-blk 挂载 fat32 到 `/bin`，`/bin/init` ELF 可加载，用户任务（pid 2）可创建。
+- 修复了 ISI 取指页错误不保存故障地址的问题：指令页故障的 tval 应为 SRR0 而不是 DAR，否则 demand paging 永远映射不了入口页。
+- **`mksh` 交互 shell 已跑通**：真实 O3 init/mksh 可启动，shell 能执行内建 `echo`、`ls` 与外部 `/bin/echo`（`fork` + `execve` + COW + `wait` + `SIGCHLD` 全链路）；`#` prompt、输入回显、父进程信号返回和阻塞读均正常。
+- **native ABI libc（liba20c）已移植并在 QEMU 中运行**：`native-libc-ppc64le` `PASS`（字符串/malloc/time/printf 全通过），`native-hello-ppc64le` 与 `native-mm-ppc64le` 也通过。crt0 补上 ELFv2 TOC 初始化（`_start` 先设 r2 为 `.TOC.` 基址，native ABI loader 保证 r12=入口地址）；liba20c 的 `printf` vararg 读取改为经 `va_list *` 推进，修复 `%d` 后 `%s` 等混合 宽度格式错位（该 bug 影响所有架构，ppc64le 的 -O0 构建使其最先暴露）。
 
 ## 已知边界与阻塞
 
-- **用户态 shell 已跑通**（`mksh` 交互 + `fork/exec` 外部命令），关键
-  PPC64LE 架构修复如下：
+- **用户态 shell 已跑通**（`mksh` 交互 + `fork/exec` 外部命令），关键 PPC64LE 架构修复如下：
   1. **低向量布局**：`0x300/0x380/0x400/0x480` Book3S 槽只有 0x80 字节，
      完整异常体不再直接覆盖；改为 4 字节绝对跳转 stub，完整 DSI/DSEG/ISI
      trampoline 复制到 scratch 页内的 `0x1100/0x1200/0x1300`。旧版把完整
@@ -87,9 +81,6 @@ QEMU 目标使用 pSeries 固件提供的虚拟终端、RTAS、PCI 配置访问�
       是本移植低向量布局错误（完整向量覆盖 0x300-0x4ff 窄槽），相关
       `trap_bridge.c`/`trap.S` 恢复逻辑已删除。musl mallocng/GCC 误编译的
       调查报告也已过期，`mksh` 现可完整运行。
-- NOMMU 不支持，SMP 平台启动和远程 TLB shootdown 尚未加入已验证矩阵；
-  构建系统默认拒绝该架构的 NOMMU 配置，SMP 实验必须显式设置`ALLOW_UNVERIFIED_SMP=1`。
-- native ABI 其余子系统测试尚未全绿（均与 libc 移植无关，属内核逻辑/功能
-  缺口）：`native-handle-ppc64le` 在 `dup-write-denied` 处失败（dup 降级后的句柄写入未按预期被拒）；`native-futex-ppc64le` 报 `did not returnWOULDBLOCK`；`native-signal-ppc64le` 在 worker 线程的 `signal_check`检查点触发 SIGSEGV（native 线程/信号路径）。
-- mksh 交互启动时仍打印 `can't find controlling tty: Not a directory`：TTY
-  ioctl 已可工作、prompt/回显/作业执行不受影响，但 `tty_init_fd()` 打开`/dev/tty` 的完整 controlling-tty 语义（`TIOCSCTTY`/前台进程组）尚未实现，完整 job control 属于后续工作。
+- NOMMU 不支持，SMP 平台启动和远程 TLB shootdown 尚未加入已验证矩阵； 构建系统默认拒绝该架构的 NOMMU 配置，SMP 实验必须显式设置 `ALLOW_UNVERIFIED_SMP=1`。
+- native ABI 其余子系统测试尚未全绿（均与 libc 移植无关，属内核逻辑/功能 缺口）：`native-handle-ppc64le` 在 `dup-write-denied` 处失败（dup 降级后的 句柄写入未按预期被拒）；`native-futex-ppc64le` 报 `did not return WOULDBLOCK`；`native-signal-ppc64le` 在 worker 线程的 `signal_check` 检查点触发 SIGSEGV（native 线程/信号路径）。
+- mksh 交互启动时仍打印 `can't find controlling tty: Not a directory`：TTY ioctl 已可工作、prompt/回显/作业执行不受影响，但 `tty_init_fd()` 打开 `/dev/tty` 的完整 controlling-tty 语义（`TIOCSCTTY`/前台进程组）尚未 实现，完整 job control 属于后续工作。

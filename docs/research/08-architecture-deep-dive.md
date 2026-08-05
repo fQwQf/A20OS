@@ -2,9 +2,7 @@
 
 > 本文档是 `03-implementation-plan.md` 的深度补充。基于对内核现有数据结构的分析（`task_t`, `vnode_t`, `vfile_t`, `mm_struct_t`, `vm_area_t`, `spinlock_t`, `wait_queue_t`, `refcount_t`），定义 Native ABI 对象到内核结构的具体映射、各子系统的实现架构、以及关键路径的锁序协议。
 
-> **实现更新：** 本文保留 Native ABI 的研究映射和证明背景；其中早期
-> wait-queue 伪代码已由 tokenized Park/Wake 取代。当前阻塞、唤醒和 task
-> 引用协议见 [进程、调度与阻塞协议](../process-scheduler.md)。
+> **实现更新：** 本文保留 Native ABI 的研究映射和证明背景；其中早期wait-queue 伪代码已由 tokenized Park/Wake 取代。当前阻塞、唤醒和 task引用协议见 [进程、调度与阻塞协议](../process-scheduler.md)。
 
 ---
 
@@ -672,14 +670,11 @@ int64_t native_sys_channel_recv(a20_msg_recv_args_t *args) {
 ### 5.3 Spawn 的完整步骤
 
 ```
-1. 预验证（持有 ht->lock）
-   ├── 验证 image handle（FILE + READ）├── 验证 root_dir handle（DIR + READ）├── 验证 cwd_dir handle（DIR + READ）├── 验证 event_queue handle（EVENTQ + READ）或创建默认的├── 验证 stdio handles（FILE + READ/WRITE）└── 验证 handles[] 中的每个 handle（TRANSFER 权限）
+1. 预验证（持有 ht->lock） ├── 验证 image handle（FILE + READ） ├── 验证 root_dir handle（DIR + READ） ├── 验证 cwd_dir handle（DIR + READ） ├── 验证 event_queue handle（EVENTQ + READ）或创建默认的 ├── 验证 stdio handles（FILE + READ/WRITE） └── 验证 handles[] 中的每个 handle（TRANSFER 权限）
 
-2. 创建新 task
-   ├── proc_alloc_user_image() — 分配 task_t, mm_struct, pgdir├── elf_load_from_vfile() — 加载 ELF segments├── 创建新 handle table├── 复制 handles[] 到新 HT（增加 refcount）├── 添加初始 handles（self, root, cwd, stdio, eq）├── 构造 a20_start_info_t，写入新进程的用户栈顶├── 设置 abi_mode = TASK_ABI_NATIVE└── proc_make_ready() — 加入就绪队列
+2. 创建新 task ├── proc_alloc_user_image() — 分配 task_t, mm_struct, pgdir ├── elf_load_from_vfile() — 加载 ELF segments ├── 创建新 handle table ├── 复制 handles[] 到新 HT（增加 refcount） ├── 添加初始 handles（self, root, cwd, stdio, eq） ├── 构造 a20_start_info_t，写入新进程的用户栈顶 ├── 设置 abi_mode = TASK_ABI_NATIVE └── proc_make_ready() — 加入就绪队列
 
-3. 在父进程 HT 中分配 task handle
-   └── rights = {WAIT, SIGNAL, CONTROL}
+3. 在父进程 HT 中分配 task handle └── rights = {WAIT, SIGNAL, CONTROL}
 ```
 
 ---
@@ -711,8 +706,7 @@ typedef struct a20_shm {
 ```
 1. 验证 [addr, addr+len) 在当前 AS 中
 2. 分配 a20_shm_t
-3. 对 addr 到 addr+len 的每个页：
-   ├── 查找页表获取物理地址 paddr├── 增加 physical frame 的引用计数（防止被回收）└── 记录 paddr 到 shm->pages[]
+3. 对 addr 到 addr+len 的每个页： ├── 查找页表获取物理地址 paddr ├── 增加 physical frame 的引用计数（防止被回收） └── 记录 paddr 到 shm->pages[]
 4. 创建 handle 指向 shm 对象
 5. 返回 handle 给用户
 ```
@@ -724,8 +718,7 @@ typedef struct a20_shm {
 2. 计算有效保护：effective_prot = prot & translate(rights)
 3. 在目标地址空间中找到空闲区域
 4. 创建 vm_area_t，标记为 VM_SHARED | VM_FILE
-5. 对每个页：
-   └── pt_map(pgdir, vaddr, shm->pages[i], effective_prot → pte_flags)
+5. 对每个页： └── pt_map(pgdir, vaddr, shm->pages[i], effective_prot → pte_flags)
 6. 不使用 CoW——共享内存的写操作直接反映到物理页
 ```
 
@@ -1098,13 +1091,10 @@ void a20_timer_destroy(a20_timer_t *timer) {
 ### 12.5 与调度器交互
 
 `wait_queue_wake_one` 在 IRQ 上下文中被调用时的行为：
-- 在 wait-queue 锁内摘除 entry，并把 task 引用和 `wait_seq` 转移到局部
-  wake queue；
+- 在 wait-queue 锁内摘除 entry，并把 task 引用和 `wait_seq` 转移到局部 wake queue；
 - 释放对象/wait-queue 锁后验证 Park token 并发布 READY/runqueue 状态；
-- **不立即调度**，而是以 release 语义设置目标 CPU 的持久
-  `need_resched`，必要时发送 IPI；
-- IPI handler 只确认通知；trap/syscall/timer 返回或显式 `sched()` 安全点
-  消费请求。
+- **不立即调度**，而是以 release 语义设置目标 CPU 的持久 `need_resched`，必要时发送 IPI；
+- IPI handler 只确认通知；trap/syscall/timer 返回或显式 `sched()` 安全点 消费请求。
 
 事件 ring 更新在对象锁内原子完成，scheduler wake 则刻意位于对象锁外。这避免了 IRQ/设备私有锁反向嵌套 `proc_lock`，同时由 `wait_seq` 保证事件不会错配到下一次等待。
 

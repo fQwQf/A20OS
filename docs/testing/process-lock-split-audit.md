@@ -35,12 +35,9 @@ It never acquires `proc_lock`. The caller acquires `proc_lock` only after therun
 
 The split preserves these linearization points:
 
-- enqueue, removal, policy requeue and migration still use
-  `proc_lock -> runqueue lock`;
-- local pick transfers the runqueue-owned task reference to dispatch ownership
-  under the local runqueue lock;
-- unpick uses `proc_lock -> runqueue lock` and transfers that same reference
-  back without a put/get gap;
+- enqueue, removal, policy requeue and migration still use `proc_lock -> runqueue lock`;
+- local pick transfers the runqueue-owned task reference to dispatch ownership under the local runqueue lock;
+- unpick uses `proc_lock -> runqueue lock` and transfers that same reference back without a put/get gap;
 - switch publication and switch completion remain under `proc_lock`;
 - Park, wake, timeout, exit, parent/wait and reap semantics are unchanged.
 
