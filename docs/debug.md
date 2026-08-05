@@ -104,3 +104,49 @@ git submodule update --init --recursive
 - 发布构建使用 `-O3`，可能内联或优化变量，导致 GDB 中变量值与源码不一致。
 - QEMU 的 `-s` 监听所有网络接口，不要在不可信网络中使用。
 - 崩溃时先保存 `.kernel-build/smoke/` 或终端日志，再重新编译，避免覆盖现场。
+
+## 内核调试接口（proc_debug_*）
+
+`kernel/proc/debug.c` 提供与 ABI 无关的内核调试接口（观察者-被观察者模型）：
+`proc_debug_traceme/attach/detach/resume/singlestep/kill`、寄存器文件读写、
+地址空间 PEEK/POKE、siginfo 快照、PT_DEBUG_EVENT_EXEC/EXIT 事件停止，
+以及 syscall 边界停止（`proc_debug_syscall_entry/exit`）。
+
+Linux ABI 的 `ptrace(2)` 是这些接口的薄包装（`kernel/abi/linux/sys_ptrace.c`），
+请求号与 `struct user_regs_struct` 的转换全部在 ABI 层完成；内核内部层不
+依赖任何 Linux 常量。未来 Native ABI 的调试对象可映射到同一接口面。
+
+停止语义（对应 task 状态机）：
+- 被观察任务在信号投递边界进入 ptrace 停止（`proc_sched_stop_for_debug`，
+  `proc/sched.c` 持有状态转换），观察者可用不带 `WUNTRACED` 的 `wait4` 报告；
+- 停止期间寄存器快照在 `ptrace_saved_ctx`，`PTRACE_SETREGS` 等修改在恢复时
+  折回陷阱上下文；syscall 入口停止在恢复时由架构层回卷 EPC 重新执行；
+- `PTRACE_CONT` 带信号恢复时通过一次性 `ptrace_deliver_sig` 标记避免二次停止。
+
+已实现（Linux ABI）：TRACEME/ATTACH/DETACH/CONT/SYSCALL/SINGLESTEP(x86_64)、
+GETREGS/SETREGS/GETFPREGS/SETFPREGS/GETREGSET(NT_PRSTATUS, NT_FPREGSET)、
+PEEKDATA/POKEDATA/PEEKUSER/POKEUSER、GETSIGINFO/SETSIGINFO、SETOPTIONS
+(TRACESYSGOOD/TRACEEXEC/TRACEEXIT/EXITKILL)、GETEVENTMSG、KILL。
+
+未实现：PTRACE_SEIZE/INTERRUPT、TRACEFORK/CLONE 事件、SECCOMP、riscv64
+单步（与 Linux 一致，gdb 回退断点步进）。
+
+## kallsyms 符号化回溯
+
+内核构建采用两遍链接：第一遍产出 `kernel-nosyms.elf`，
+`tools/gen_kallsyms.py`（纯 stdlib ELF 解析）提取 `.text` 范围内的符号生成
+紧凑符号表（`kernel/core/kallsyms.c`，`core/kallsyms.h` 声明 API），第二遍
+把符号表对象重新链接进最终镜像。由于符号表落在 `.rodata`（在 `.text` 之后），
+两遍的 `.text` 地址一致，表项精确。
+
+`kallsyms_print()` 把地址解析为 `name+0xN`，已接入 `kernel/core/trap.c` 的
+内核 oops 回溯输出。python3 不可用时符号表为空，`kernel/core/kallsyms.c`
+的 weak 定义保证内核仍可链接，回溯退化为裸地址。
+
+## 已知基核问题（与调试接口无关）
+
+fork + 按需分页的路径存在偶发（对某些二进制尺寸近乎确定）的物理页复用竞态：
+子进程文本页可能在停止期间被回收复用，表现为子进程文本被写入栈类数据后
+SIGSEGV。`user/cmds/core/ptrace_smoke.c` 因此在 poke 与恢复之间加入短延时
+规避该竞态窗口；根因在页分配/引用计数层，与 ptrace 实现无关（A20 团队正在
+修复同类 0x63636363 问题）。
