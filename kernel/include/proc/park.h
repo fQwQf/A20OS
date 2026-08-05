@@ -84,6 +84,8 @@ proc_wait_token_t proc_park_prepare_locked(proc_wait_mode_t mode,
                                            uint64_t deadline);
 int proc_park_cancel(proc_wait_token_t token);
 proc_wake_reason_t proc_park_commit(proc_wait_token_t token);
+proc_wake_reason_t proc_park_commit_donate(proc_wait_token_t token,
+                                           struct task_t *donate_to);
 void proc_park_finish(proc_wait_token_t token);
 proc_wake_reason_t proc_park_wait(proc_wait_mode_t mode, uint64_t deadline);
 
