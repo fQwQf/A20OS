@@ -2,7 +2,7 @@
 
 > 本文档对 A20OS Native ABI 进行系统化的形式化理论分析。以 Plotkin 的结构化操作语义（SOS）为框架，建立 handle/capability 系统的操作语义，给出安全性、活性、并发性和信息流控制的形式化证明，并分析 channel IPC 的消息序性质与 capability 撤销的完备性。
 
-> **证明边界（2026-07）**：本文结论针对 02 定义的 53-syscall 形式化核心模型。当前内核实现为 93 个 syscall；除已明确给出精化映射的 handle/channel/event/VMO 路径外，不能把本文结论自动外推为对全部现行 C 实现的机器验证。
+> **证明边界（2026-07）**：本文结论针对 02 定义的 53-syscall 形式化核心模型。当前内核实现为 109 个 syscall；除已明确给出精化映射的 handle/channel/event/VMO 路径外，不能把本文结论自动外推为对全部现行 C 实现的机器验证。
 
 ---
 
