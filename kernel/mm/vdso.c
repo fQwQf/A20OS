@@ -13,7 +13,9 @@
  * clock is set; monotonic time needs no updates because both the kernel
  * and the vDSO read the same free-running time CSR.
  */
-#ifdef CONFIG_RISCV64
+#include "core/arch.h"
+
+#ifdef ARCH_HAS_VDSO
 
 #include "core/types.h"
 #include "core/string.h"
@@ -185,4 +187,4 @@ int vdso_fork_map(mm_struct_t *child_mm)
     return vdso_map_mm(child_mm);
 }
 
-#endif /* CONFIG_RISCV64 */
+#endif /* ARCH_HAS_VDSO */

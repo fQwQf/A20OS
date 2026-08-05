@@ -59,6 +59,9 @@ static inline void arch_tlb_flush_page(uint64_t addr) {
     (void)addr;
     __asm__ __volatile("invtlb 0, $zero, $zero" ::: "memory");
 }
+static inline void arch_tlb_flush_page_local(uint64_t addr) {
+    arch_tlb_flush_page(addr);
+}
 
 /* Task pointer lives in SAVE1 (CSR 0x31).
  * SAVE0 (0x30) is reserved for kernel sp during user↔kernel traps.
