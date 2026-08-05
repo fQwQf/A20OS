@@ -32,9 +32,8 @@
 #include "core/trap.h"
 #include "sys/usercopy.h"
 #ifdef CONFIG_ABI_NATIVE
-#include "abi/native/startup.h"
-#include "abi/native/rights.h"
-#include "abi/native/types.h"
+#include "ipc/ipc.h"
+#include "ipc/start_info.h"
 
 struct a20_ht_internal;
 struct a20_ht_internal *a20_ht_create(void);

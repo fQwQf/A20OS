@@ -22,8 +22,7 @@
 #include "fs/block_cache.h"
 #include "drivers/block/block_dev.h"
 #include "fs/mount_setup.h"
-#include "abi/native/types.h"
-#include "abi/native/ipc_internal.h"
+#include "ipc/ipc.h"
 #include "proc/proc.h"
 #include "ipc/objstats.h"
 

@@ -15,7 +15,7 @@
 #include "drivers/core/driver_register.h"
 #include "drivers/input/virtio_input.h"
 #include "mm/slab.h"
-#include "abi/linux/errno.h"
+#include "core/errno.h"
 
 #define USB_HID_REPORT_MAX  64U
 #define USB_HID_EVENTS      64U

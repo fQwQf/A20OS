@@ -24,7 +24,7 @@
 #include "drivers/core/driver_core.h"
 #include "drivers/core/driver_register.h"
 #include "mm/slab.h"
-#include "abi/linux/errno.h"
+#include "core/errno.h"
 
 #define USB_MSC_IO_CHUNK        4096U
 #define USB_MSC_CMD_TIMEOUT_TICKS (TICKS_PER_SEC * 5)

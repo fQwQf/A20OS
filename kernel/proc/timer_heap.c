@@ -7,10 +7,9 @@
 #include "core/string.h"
 #include "proc/signal.h"
 #ifdef CONFIG_ABI_LINUX
-#include "abi/linux/syscall_impl.h"
 #endif
 #ifdef CONFIG_ABI_NATIVE
-#include "abi/native/ipc_internal.h"
+#include "ipc/ipc.h"
 #endif
 
 /*

@@ -14,9 +14,9 @@
 #include "core/lock.h"
 #include "core/sync.h"
 #include "core/timer.h"
-#include "abi/linux/errno.h"
-#include "abi/linux/input.h"
-#include "abi/linux/poll.h"
+#include "core/errno.h"
+#include "core/input.h"
+#include "core/poll.h"
 #include "sys/usercopy.h"
 #include "drivers/block/virtio_blk.h"
 
@@ -583,7 +583,11 @@ static int virtio_input_init_transport(device_t *dev,
     
     if (vt->irq >= 0 && vt->irq < (int)sizeof(g_input_irq_registered) &&
         !g_input_irq_registered[vt->irq]) {
-        if (request_irq((uint32_t)vt->irq, virtio_input_irq, 0, NULL) != 0) {
+        /* PCI transports share INTx lines: the global handler drains every
+         * input instance, so one registration per line is enough, but the
+         * line must accept other devices' handlers too. */
+        unsigned long irq_flags = vt->shared_irq ? IRQF_SHARED : 0;
+        if (request_irq((uint32_t)vt->irq, virtio_input_irq, irq_flags, NULL) != 0) {
             kinfo("[INPUT] Failed to register IRQ\n");
             goto fail;
         }

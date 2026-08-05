@@ -47,6 +47,33 @@ svcman 崩溃自愈）的设计与实施路线见
 
 两层 ABI 严格隔离。`kernel/abi/linux/` 和 `kernel/abi/native/` 都把用户调用翻译成同一组内核内部 API；核心模块不依赖任何 ABI 的用户结构体。
 
+### 分层原则（内部实现 ↔ ABI 薄包装）
+
+内核内部实现（`kernel/ipc`、`kernel/mm`、`kernel/proc`、`kernel/drivers`、
+`kernel/include/core`）必须**独立且自包含**：自持类型、常量和 API，暴露给
+ABI 层调用；ABI 层（`kernel/abi/linux`、`kernel/abi/native`）只是内部实现的
+薄包装，负责把用户态 syscall 线格式翻译成内部调用。方向永远单向：
+
+```
+用户态 ── syscall 线格式 ──> ABI 层（薄包装）── 内部 API ──> 内部实现
+```
+
+具体落地：
+
+- 内部 IPC 子系统（对象模型、Channel、EventQ、句柄表、启动信息）的头文件
+  位于 `kernel/include/ipc/`（`ipc.h`、`handle_table.h`、`start_info.h`），
+  不包含任何 `abi/` 内容；`kernel/include/abi/native/*` 里曾属于内部的部分
+  现在只是再导出（shim）。
+- Linux ABI 的线格式常量（errno、fcntl、mman、poll、signal、stat、ioctl、
+  input）定义在 `kernel/include/core/*.h`，`kernel/include/abi/linux/*.h`
+  再导出——内部代码只 include `core/`。
+- 例外：syscall 分派（`kernel/syscall/syscall.c`）与 arch 胶水
+  （`kernel/arch/*/abi/`、`syscall_hook.h`）本身是 ABI 边界的一部分，
+  有权感知 ABI。
+
+这一原则的收益：内部实现（尤其 IPC/MM/调度）保持 ABI 无关，任何 ABI
+（包括 Linux ABI）都能直接包装内部机制而受益，无需复制实现。
+
 ### 具体示例
 
 **打开文件**
