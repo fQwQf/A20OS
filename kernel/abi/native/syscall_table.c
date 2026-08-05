@@ -113,6 +113,10 @@ int64_t sys_a20_system_random(const a20_syscall_args_t *args);
 int64_t sys_a20_system_reboot(const a20_syscall_args_t *args);
 int64_t sys_a20_futex_wait(const a20_syscall_args_t *args);
 int64_t sys_a20_futex_wake(const a20_syscall_args_t *args);
+int64_t sys_a20_device_map_mmio(const a20_syscall_args_t *args);
+int64_t sys_a20_device_irq_listen(const a20_syscall_args_t *args);
+int64_t sys_a20_device_irq_ack(const a20_syscall_args_t *args);
+int64_t sys_a20_device_irq_unlisten(const a20_syscall_args_t *args);
 
 /* Generate handler stubs from .def */
 #define A20_NATIVE_SYSCALL(name, ...) \
