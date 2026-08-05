@@ -13,7 +13,7 @@
 #include "core/string.h"
 #include "cg/cgroup.h"
 #if defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)
-#include "abi/native/handle_table.h"
+#include "ipc/handle_table.h"
 #endif
 
 #ifndef CONFIG_MCU

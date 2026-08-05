@@ -9,10 +9,14 @@
 
 #include <stdint.h>
 
+/* The object model, handle table and IPC subsystem are internal
+ * (kernel/include/ipc/); this ABI header only adds the syscall wire
+ * structures on top. */
+#include "ipc/ipc.h"
+#include "ipc/handle_table.h"
+
 /* ---- Fundamental types ---- */
 
-typedef uint32_t a20_handle_t;     /* Process-local handle index */
-typedef uint64_t a20_rights_t;     /* 14-bit capability rights bitmask */
 typedef uint64_t a20_flags_t;      /* Operation flag bitmask */
 typedef int64_t  a20_status_t;     /* Return status: >= 0 success, < 0 error */
 typedef uint64_t a20_time_ns_t;    /* Nanosecond timestamp */
@@ -20,7 +24,6 @@ typedef uint64_t a20_off_t;        /* File offset */
 typedef uint64_t a20_size_t;       /* Size */
 typedef uint64_t a20_vaddr_t;      /* Virtual address */
 
-#define A20_HANDLE_NULL  ((a20_handle_t)0xFFFFFFFF)
 #define A20_NATIVE_FD_HANDLE_BASE 64u
 
 /* ---- ABI header convention ---- */
@@ -30,74 +33,6 @@ typedef struct a20_abi_header {
     uint32_t version;
 } a20_abi_header_t;
 
-/* ---- Object types ---- */
-
-typedef enum a20_object_type {
-    A20_OBJ_INVALID          = 0,
-    A20_OBJ_TASK             = 1,
-    A20_OBJ_THREAD           = 2,
-    A20_OBJ_FILE             = 3,
-    A20_OBJ_DIRECTORY        = 4,
-    A20_OBJ_SOCKET           = 5,
-    A20_OBJ_PIPE_ENDPOINT    = 6,
-    A20_OBJ_CHANNEL_ENDPOINT = 7,
-    A20_OBJ_EVENT_QUEUE      = 8,
-    A20_OBJ_TIMER            = 9,
-    A20_OBJ_MEMORY           = 10,  /* Shared memory (shm) */
-    A20_OBJ_DEVICE           = 11,
-    A20_OBJ_NAMESPACE        = 12,
-    A20_OBJ_DEBUG            = 13,
-} a20_object_type_t;
-
-/* ---- Temporal capability flags ---- */
-
-#define A20_TEMPORAL_EXPIRY_ABSOLUTE  (1u << 0)  /* Use absolute expiry tick */
-#define A20_TEMPORAL_OP_COUNT         (1u << 1)  /* Use operation count limit */
-#define A20_TEMPORAL_AUTO_CLOSE       (1u << 2)  /* Auto-close on expiry */
-
-/* ---- Handle states (docs/native-abi/03-handle.md §3.1) ---- */
-
-typedef enum a20_handle_state {
-    A20_HS_FREE      = 0,
-    A20_HS_ACTIVE    = 1,
-    A20_HS_EXPIRED   = 2,
-    A20_HS_CLOSING   = 3,
-} a20_handle_state_t;
-
-/* ---- Handle entry (kernel-internal, exposed for struct definition) ---- */
-
-typedef struct a20_handle_entry {
-    void           *object;        /* Pointer to kernel object */
-    uint16_t        type;          /* a20_object_type_t */
-    uint16_t        _pad;
-    a20_rights_t    rights;        /* Declared rights bitmask */
-    uint64_t        expiry_tick;   /* Absolute expiry (kernel ticks), 0 = none */
-    uint32_t        remaining_ops; /* Remaining ops; only meaningful when
-                                    * A20_TEMPORAL_OP_COUNT is set — then
-                                    * 0 = exhausted (rights revoked). With the
-                                    * flag clear the field is ignored (unlimited). */
-    uint32_t        temporal_flags;/* A20_TEMPORAL_* flags */
-    uint8_t         security_label;/* L=0, M=1, H=2 (Bell-LaPadula) */
-    uint8_t         state;         /* a20_handle_state_t */
-    uint8_t         _pad2[6];
-} a20_handle_entry_t;
-
-/* ---- Handle table (kernel-internal) ---- */
-
-#define A20_HT_INITIAL_CAP    256
-#define A20_HT_MAX_CAP        65536
-#define A20_HT_DEFAULT_QUOTA  4096   /* per-task native-handle quota (M2) */
-#define A20_HT_GROWTH_FACTOR  2
-
-typedef struct a20_handle_table {
-    a20_handle_entry_t *entries;
-    uint32_t            capacity;
-    uint32_t            count;
-    uint32_t            free_hint;
-    /* lock omitted here — included in kernel-internal header */
-    uint64_t           *free_bitmap;
-    uint32_t            bitmap_size;
-} a20_handle_table_t;
 
 /* ---- ABI info structure ---- */
 
@@ -606,31 +541,7 @@ typedef struct a20_event_watch_args {
     uint64_t       user_data;
 } a20_event_watch_args_t;
 
-typedef struct a20_pending_event {
-    a20_handle_t   source;
-    uint32_t       type;
-    uint64_t       events;
-    uint64_t       user_data;
-    uint64_t       data0, data1, data2;
-} a20_pending_event_t;
 
-/* ---- Observable event types (docs/native-abi/05-ipc.md §3.3) ----
- * Event masks are bitsets: mask bit (1ull << A20_EVENT_*) selects the event.
- * a20_pending_event_t.type carries the event index, .events the bitmask. */
-
-#define A20_EVENT_READABLE        0u   /* file/socket/pipe: data readable   */
-#define A20_EVENT_WRITABLE        1u   /* file/socket/pipe: space writable  */
-#define A20_EVENT_ERROR           2u   /* file/socket: I/O error            */
-#define A20_EVENT_CLOSED          3u   /* object closed                     */
-#define A20_EVENT_CONNECTION      4u   /* socket: new connection arrived    */
-#define A20_EVENT_ACCEPT_READY    5u   /* socket: accept would not block    */
-#define A20_EVENT_EXPIRED         6u   /* timer: expiry fired               */
-#define A20_EVENT_EXITED          7u   /* task/thread: exited               */
-#define A20_EVENT_MESSAGE_READY   8u   /* channel: message available        */
-#define A20_EVENT_PEER_CLOSED     9u   /* channel: peer endpoint closed     */
-#define A20_EVENT_SIGNALED       10u   /* device: irq/signaled (udriver)    */
-
-#define A20_EVENT_MASK(ev)        (1ull << (ev))
 
 typedef struct a20_event_wait_args {
     uint32_t       size;
@@ -657,33 +568,6 @@ typedef struct a20_event_watch_fs_args {
 } a20_event_watch_fs_args_t;
 
 /* ---- Channel structures ---- */
-
-#define A20_CH_MAX_DATA    65536
-#define A20_CH_MAX_HANDLES 8
-
-typedef struct a20_channel_type {
-    uint32_t version;
-    uint32_t send_handle_types;
-    uint32_t recv_handle_types;
-    uint32_t max_data_size;
-    uint32_t max_handles;
-    uint32_t flags;
-} a20_channel_type_t;
-
-#define A20_CHAN_TYPE_ORDERED (1u << 0)
-#define A20_CHAN_TYPE_STRICT  (1u << 1)
-
-/* Channel type bit definitions (aligned with a20_object_type_t) */
-#define A20_CHAN_TYPE_FILE     (1u << A20_OBJ_FILE)
-#define A20_CHAN_TYPE_SOCKET   (1u << A20_OBJ_SOCKET)
-#define A20_CHAN_TYPE_CHANNEL  (1u << A20_OBJ_CHANNEL_ENDPOINT)
-#define A20_CHAN_TYPE_PIPE     (1u << A20_OBJ_PIPE_ENDPOINT)
-#define A20_CHAN_TYPE_EVENTQ   (1u << A20_OBJ_EVENT_QUEUE)
-#define A20_CHAN_TYPE_TIMER    (1u << A20_OBJ_TIMER)
-#define A20_CHAN_TYPE_SHM      (1u << A20_OBJ_MEMORY)
-#define A20_CHAN_TYPE_TASK     (1u << A20_OBJ_TASK)
-#define A20_CHAN_TYPE_NS       (1u << A20_OBJ_NAMESPACE)
-#define A20_CHAN_TYPE_ANY      0xFFFFFFFF
 
 #define A20_NS_FILESYSTEM 0
 #define A20_NS_NETWORK    1
@@ -789,7 +673,6 @@ typedef struct a20_device_vmo_phys_args {
 
 /* ---- Message flags (channel_send / channel_recv) ---- */
 
-#define A20_MSG_NONBLOCK   (1u << 0)  /* fail with WOULD_BLOCK instead of sleeping */
 
 /* ---- Network structures ---- */
 
@@ -903,7 +786,6 @@ typedef struct a20_handle_poll_args {
  * 语义与 Zircon zx_futex_wait/zx_futex_wake 对齐：
  * 原子地比较 *addr == expected，相等则睡眠，否则立即返回 A20_ERR_WOULD_BLOCK。 */
 
-#define A20_TIMEOUT_INFINITE  ((uint64_t)-1)  /* futex_wait 无限等待 */
 
 typedef struct a20_futex_wait_args {
     uint32_t       size;

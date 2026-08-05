@@ -18,7 +18,7 @@
 #include "drivers/core/driver_hwapi.h"
 #include "drivers/core/driver_register.h"
 #include "mm/mm.h"
-#include "abi/linux/errno.h"
+#include "core/errno.h"
 
 #define XHCI_VENDOR_INTEL             0x8086U
 #define XHCI_DEVICE_PANTHER_POINT     0x1e31U
@@ -883,7 +883,10 @@ static const device_id_t xhci_ids[] = {
 static driver_t xhci_driver = {
     .name = "xhci-hcd",
     .id_table = xhci_ids,
-    .bus = NULL,
+    /* This is a PCI HCD driver: restrict matching to the PCI bus.  With
+     * .bus = NULL the wildcard id_table also matches virtio-mmio devices,
+     * and xhci_pci_match() then dereferences a non-PCI plat_data. */
+    .bus = &pci_bus,
     .match = xhci_pci_match,
     .probe = xhci_probe,
     .remove = xhci_remove,
