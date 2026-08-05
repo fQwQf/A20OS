@@ -12,7 +12,6 @@
 #include "cg/cgroup.h"
 #include "cg/cgroup_impl.h"
 #ifdef CONFIG_ABI_NATIVE
-#include "abi/native/ipc_internal.h"
 #endif
 
 typedef struct __attribute__((aligned(64))) proc_runq {

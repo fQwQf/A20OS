@@ -19,9 +19,7 @@
 #include "core/sync.h"
 #include "mm/slab.h"
 #include "sys/usercopy.h"
-#include "abi/native/ipc_internal.h"
-#include "abi/native/errno.h"
-#include "abi/native/rights.h"
+#include "ipc/ipc.h"
 #include "proc/proc.h"
 #include "ipc/objstats.h"
 

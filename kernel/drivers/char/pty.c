@@ -1,4 +1,4 @@
-#include "abi/linux/poll.h"
+#include "core/poll.h"
 #include "core/defs.h"
 #include "core/string.h"
 #include "core/stdio.h"

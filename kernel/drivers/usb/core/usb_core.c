@@ -16,7 +16,7 @@
 #include "drivers/core/driver_hwapi.h"
 #include "drivers/core/driver_register.h"
 #include "mm/slab.h"
-#include "abi/linux/errno.h"
+#include "core/errno.h"
 
 #define USB_CTRL_BUF_SZ 512
 

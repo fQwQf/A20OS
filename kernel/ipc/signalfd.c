@@ -10,8 +10,8 @@
 #include "proc/proc.h"
 #include "proc/proc_internal.h"
 #include "proc/signal.h"
-#include "abi/linux/errno.h"
-#include "abi/linux/poll.h"
+#include "core/errno.h"
+#include "core/poll.h"
 
 /*
  * struct signalfd_siginfo, Linux layout (128 bytes).  Userspace normally
