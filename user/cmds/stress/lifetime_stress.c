@@ -154,7 +154,6 @@ static int compare_stats(const lifetime_stats_t *before,
     CHECK_FIELD(task_objects);
     CHECK_FIELD(task_refs);
     CHECK_FIELD(listed_tasks);
-    CHECK_FIELD(listed_refs);
     CHECK_FIELD(pid_entries);
     CHECK_FIELD(wait_entries);
     CHECK_FIELD(wake_entries);
@@ -176,7 +175,6 @@ static int ownership_stats_equal(const lifetime_stats_t *a,
     SAME_FIELD(task_objects);
     SAME_FIELD(task_refs);
     SAME_FIELD(listed_tasks);
-    SAME_FIELD(listed_refs);
     SAME_FIELD(pid_entries);
     SAME_FIELD(wait_entries);
     SAME_FIELD(wake_entries);
@@ -190,11 +188,14 @@ static int ownership_stats_equal(const lifetime_stats_t *a,
 }
 
 /*
- * SMP context-switch ownership references are intentionally transferred in
- * short, lock-protected phases.  A single procfs read can observe one of those
- * phases even when no reference leaks.  Require two consecutive equal samples
- * for the initial baseline, then wait for cleanup to return to that baseline.
- * Monotonic error counters are still rejected by read_stats immediately.
+ * SMP scheduler references move between listed user tasks and unlisted idle
+ * tasks as runqueue ownership is transferred to dispatch/current CPU slots.
+ * Therefore listed_refs is a useful point-in-time diagnostic, but not a stable
+ * cross-time baseline.  task_refs is the authoritative global ownership count;
+ * listed_tasks and pid_entries prove that all published children were reaped.
+ * Require two consecutive equal samples for those stable fields, then wait for
+ * cleanup to return to that baseline.  Monotonic error counters are still
+ * rejected by read_stats immediately.
  */
 static int read_stable_stats(lifetime_stats_t *stats)
 {
