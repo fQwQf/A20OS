@@ -627,6 +627,7 @@ typedef struct a20_pending_event {
 #define A20_EVENT_EXITED          7u   /* task/thread: exited               */
 #define A20_EVENT_MESSAGE_READY   8u   /* channel: message available        */
 #define A20_EVENT_PEER_CLOSED     9u   /* channel: peer endpoint closed     */
+#define A20_EVENT_SIGNALED       10u   /* device: irq/signaled (udriver)    */
 
 #define A20_EVENT_MASK(ev)        (1ull << (ev))
 
@@ -754,6 +755,26 @@ typedef struct a20_channel_call_args {
     uint32_t       out_reply_len;         /* out: reply bytes */
     uint32_t       out_reply_handles;     /* out: reply handle count */
 } a20_channel_call_args_t;
+
+/* ---- User-space driver (udriver) structures ---- */
+
+typedef struct a20_device_map_mmio_args {
+    uint32_t       size;
+    uint32_t       version;
+    uint32_t       prot;            /* bit0 = read, bit1 = write */
+    uint32_t       _pad;
+    uint64_t       phys_base;       /* must be page-aligned and whitelisted */
+    uint64_t       length;
+    uint64_t       out_addr;
+} a20_device_map_mmio_args_t;
+
+typedef struct a20_device_irq_listen_args {
+    uint32_t       size;
+    uint32_t       version;
+    uint32_t       irq;
+    a20_handle_t   queue;           /* event queue receiving SIGNALED */
+    uint64_t       user_data;       /* echoed back as event data0 */
+} a20_device_irq_listen_args_t;
 
 /* ---- Message flags (channel_send / channel_recv) ---- */
 

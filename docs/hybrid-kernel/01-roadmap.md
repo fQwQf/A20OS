@@ -11,7 +11,7 @@
 | 2 | svcman 服务监管者 + 崩溃自愈演示 | 完成（riscv64） |
 | 3 | 共享 VMO 环形队列 uapi 协议 + 数据面基准 | 完成（riscv64） |
 | 3B | Linux ABI 透明桥接：pipe over VMO 环 + vDSO | vDSO 完成（riscv64），pipe 环待做 |
-| 4 | 低速驱动外迁试点（用户态驱动框架） | 未开始 |
+| 4 | 低速驱动外迁试点（用户态驱动框架） | 完成（riscv64，goldfish RTC） |
 | 5 | 块/网驱动外迁评估（按基准数据决策） | 未开始 |
 
 ## 阶段 1：`channel_call` 融合 RPC 快路径
@@ -184,7 +184,7 @@ pipe 吞吐、`clock_gettime` 延迟），中位数不允许回归；既有
 3. **pipe over VMO 环（待做）**、AF_UNIX over Channel（待做）：
    按原顺序排在 vDSO 之后实施。
 
-## 阶段 4：低速驱动外迁试点（规划要点）
+## 阶段 4：低速驱动外迁试点
 
 - 内核侧新增"驱动授权"：把指定 MMIO 物理区间包装为 DEVICE handle
   （带 MAP right）+ 把 IRQ 等待暴露为 EventQ 事件源。
@@ -192,6 +192,35 @@ pipe 吞吐、`clock_gettime` 延迟），中位数不允许回归；既有
   devfs 节点由内核代理转发到服务 channel。
 - 验收：功能等价（现有读 RTC/输入测例全过）+ 杀死驱动服务后系统存活、
   服务重启后设备恢复 + I/O 延迟回归 < 5%。
+
+**结果（已达成，riscv64）**
+
+- 内核机制（`kernel/drivers/core/udriver.c` + 0x0C00 号段 4 个 syscall）：
+  - `device_map_mmio`：把**白名单**内的设备物理窗口以 PFNMAP 映射进
+    用户任务（窗口表按板静态注册，qemu-virt-riscv64 注册 goldfish RTC
+    0x101000/4KiB；任务无法映射任意内存或其他设备）。
+  - `device_irq_listen`：把物理 IRQ 绑定到 EventQ——内核 thunk 先在
+    irqchip 屏蔽该线（电平中断防风暴）再投递 `A20_EVENT_SIGNALED`，
+    用户处理完后 `device_irq_ack` 重新武装（VFIO/UIO 电平协议）。
+  - `device_irq_unlisten` + `udriver_task_cleanup`：任务退出时在
+    **EXITED 事件发出之前**释放 IRQ 注册（否则监管者重启新驱动会
+    撞上旧注册——排障实录见下）。
+- 试点：`user/svc/rtcd.c` 独占 goldfish RTC（内核原本就只有合成
+  /dev/rtc，无硬件驱动冲突）。功能：MMIO 读纳秒时钟、`A`+ms 一次性
+  闹钟（IRQ 11 → EventQ 异步回复）、`C` 崩溃演示。
+- e2e（`user/tests/test_native_rtcd.c`，监管者视角）：
+  `rtc_sec` 读回正确日期、闹钟实测 100ms、崩溃 exit_code=42 检测、
+  重启后 RPC 恢复——`smoke-native-rtcd` 通过。
+- 排障实录：①`mm_find_gap(mm, 0, ...)` 的 hint=0 语义会返回 0（应传
+  `mm->mmap_base`）；②EXITED 事件先于 reap 时的资源清理发出，监管
+  者重启撞旧 IRQ 注册 → `udriver_task_cleanup` 前移到事件发出前；
+  ③服务端「先排空再等待」——watch 注册前到达的请求不会产生新的
+  MESSAGE_READY 事件，event-first 等待会丢（重启竞态必现）。
+- 与设计的差异：devfs 代理转发（/dev/rtc → 服务）未做——试点证明的
+  是全部内核机制（MMIO 授权、IRQ 交付、崩溃隔离与重启），devfs 代理
+  属集成层，列为后续。
+- 回归：七项 native smoke + `smoke-clock-vdso` + `smoke-mm-stress` +
+  `smoke-vfs-stress` 全绿。
 
 ## 阶段 5：按数据决策
 
