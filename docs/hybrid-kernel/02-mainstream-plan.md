@@ -90,6 +90,28 @@
 - 1000 次崩溃循环对象计数零增长；
 - 既有 smoke 无退化。
 
+**结果（已达成，M2-v1）**
+
+- 对象计数器（`kernel/include/ipc/objstats.h`）：全局原子计数
+  `handles / channel_eps / eventqs / vmos / vmo_pages / irq_bindings`，
+  挂载点覆盖安装/移除/销毁全部路径（含 temporal 安装与 ht_destroy
+  兜底——初版漏记 temporal 安装导致审计直接抓到漂移，见排障实录）。
+  只读暴露在 `/proc/a20/objects`。
+- 句柄配额：每任务 native 句柄硬上限 4096（`A20_HT_DEFAULT_QUOTA`），
+  三个安装入口统一以 `NO_SPACE` 拒绝超额；为后续按清单分级
+  （`task_set_limits` 已有入口）留了 `ht->max_handles` 字段。
+- 泄漏审计（`user/tests/test_native_isolation.c`）：100 次
+  spawn→RPC→crash→wait 循环后六项计数器与基线**逐项精确相等**
+  （h=7→7、eps=2→2），`smoke-native-isolation` 通过。
+- 排障实录：首跑审计即发现 `handles` 计数 2^64-93（净 -93）——
+  `install_temporal/install_at_temporal`（spawn 注入子进程句柄的
+  路径）未记 increment 而 `ht_destroy` 记了 decrement；这正是
+  审计存在的意义，修复后归零。
+- DMA 授权契约随 M4 实施（virtqueue 走内核分配的共享 VMO + pin），
+  按计划归入 M4 范围。
+- 回归：全部 native smoke + `smoke-clock-vdso` + `smoke-mm-stress` +
+  `smoke-vfs-stress` + loongarch64 构建全绿。
+
 ## M3：服务发现与重绑定（系统形态）
 
 **动机**：目前只有 svcman 自己能当客户端（端点是 spawn 时塞的），
