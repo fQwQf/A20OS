@@ -1,36 +1,70 @@
-/* Userspace helpers for the netd service (Native ABI). */
+/* Userspace helpers for the netd service (Native ABI + liba20c-free). */
 #include "liba20rt/a20_types.h"
 #include "liba20rt/a20_syscall.h"
 #include "liba20rt/a20_clock.h"
 #include "liba20rt/a20_system.h"
+#include "liba20rt/a20_fs.h"
+#include "liba20rt/a20_sdk.h"
+#include "lwip/arch.h"
+#include "liba20c/include/stdarg.h"
 
-/* Minimal printf for diagnostics (freestanding; liba20c is not linked). */
-static void nd_putc(char c)
-{
-    char buf[1] = { c };
-    (void)buf;
-    /* stdout handle is installed by the service wrapper; see netd.c. */
-}
+static a20_handle_t g_out = A20_HANDLE_NULL;
+
+void a20_netd_set_out(a20_handle_t h) { g_out = h; }
 
 void a20_netd_printf(const char *fmt, ...)
 {
-    (void)fmt;
+    char buf[256];
+    uint32_t n = 0;
+    va_list ap;
+    va_start(ap, fmt);
+    for (const char *p = fmt; *p && n < sizeof(buf) - 1; p++) {
+        if (*p == '%' && p[1]) {
+            p++;
+            if (*p == 's') {
+                const char *s = va_arg(ap, const char *);
+                while (*s && n < sizeof(buf) - 1) buf[n++] = *s++;
+            } else if (*p == 'd' || *p == 'u') {
+                uint64_t v = *p == 'u' ? va_arg(ap, unsigned) :
+                                          (uint64_t)va_arg(ap, int);
+                char t[24]; int ti = 24;
+                if (!v) t[--ti] = '0';
+                while (v) { t[--ti] = (char)('0' + v % 10); v /= 10; }
+                while (ti < 24 && n < sizeof(buf) - 1) buf[n++] = t[ti++];
+            } else if (*p == 'x') {
+                uint64_t v = va_arg(ap, unsigned);
+                char t[24]; int ti = 24;
+                if (!v) t[--ti] = '0';
+                while (v) { t[--ti] = "0123456789abcdef"[v & 15]; v >>= 4; }
+                while (ti < 24 && n < sizeof(buf) - 1) buf[n++] = t[ti++];
+            } else if (*p == '%') {
+                buf[n++] = '%';
+            } else {
+                buf[n++] = '%'; buf[n++] = *p;
+            }
+        } else {
+            buf[n++] = *p;
+        }
+    }
+    va_end(ap);
+    buf[n] = 0;
+    if (g_out != A20_HANDLE_NULL)
+        a20_hdl_write_buf(g_out, buf, n, (void *)0);
 }
 
 uint64_t a20_netd_random_u64(void)
 {
     uint64_t v = 0;
-    int64_t r = a20_syscall6(A20_SYS_system_random, (uint64_t)(uintptr_t)&v, 0, 0, 0, 0, 0);
+    int64_t r = a20_syscall6(A20_SYS_system_random, (uint64_t)(uintptr_t)&v,
+                             0, 0, 0, 0, 0);
     if (r >= 0)
         return v;
-    /* Fallback: mixed time + frame pointer noise. */
     uint64_t t = 0;
     a20_clock_get(A20_CLOCK_MONOTONIC, &t);
     return t ^ (uint64_t)(uintptr_t)&v;
 }
 
 /* NO_SYS single-threaded service loop: protection is a no-op. */
-#include "lwip/arch.h"
 sys_prot_t sys_arch_protect(void) { return 0; }
 void sys_arch_unprotect(sys_prot_t p) { (void)p; }
 

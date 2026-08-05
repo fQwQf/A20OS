@@ -141,6 +141,9 @@
 #define A20_SYS_device_block_attach 0x0C05
 #define A20_SYS_device_block_complete 0x0C06
 
+/* Network daemon (0x0D00) */
+#define A20_SYS_netd_attach        0x0D00
+
 #define A20_NATIVE_SYSCALL_COUNT  109
 
 #endif

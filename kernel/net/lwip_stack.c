@@ -1,4 +1,5 @@
 #include "net/lwip_stack.h"
+#include "net/netd_proto.h"
 #include "net/socket_internal.h"
 #include "net/net_config.h"
 #include "core/timer.h"
@@ -49,6 +50,32 @@
 static int g_lwip_ready;
 static spinlock_t g_lwip_lock = SPINLOCK_INIT;
 #define A20_NET_MAX_DEVS 4
+
+/*
+ * RX progress hint.  The virtio-net IRQ top-half raises this flag before
+ * draining a netif under g_lwip_lock; a20_lwip_poll_locked() consumes it.
+ * kernel_progress_poll() skips the scheduler hot-path drain (and the
+ * g_lwip_lock acquisition) while no device has work pending, turning the
+ * per-context-switch compatibility poll into an event-driven bottom-half.
+ * Platforms whose transport has no IRQ line must keep draining unconditionally
+ * (see virtio_net_poll_rx_all()); they are tracked through the driver.
+ */
+static volatile unsigned g_lwip_rx_pending;
+
+int a20_lwip_rx_pending_any(void)
+{
+    return __atomic_load_n(&g_lwip_rx_pending, __ATOMIC_ACQUIRE) != 0;
+}
+
+void a20_lwip_signal_rx_pending(void)
+{
+    __atomic_store_n(&g_lwip_rx_pending, 1, __ATOMIC_RELEASE);
+}
+
+static void a20_lwip_clear_rx_pending(void)
+{
+    __atomic_store_n(&g_lwip_rx_pending, 0, __ATOMIC_RELEASE);
+}
 
 static struct netif g_netifs[A20_NET_MAX_DEVS];
 static struct netif g_loopif;
@@ -267,6 +294,11 @@ static void a20_lwip_process_netif_rx_tx_locked(struct netif *n)
             LINK_STATS_INC(link.drop);
             continue;
         }
+        if (netd_enabled()) {
+            netd_rx_frame(st->rx_frame, (uint32_t)len);
+            pbuf_free(p);
+            continue;
+        }
         pbuf_take(p, st->rx_frame, (u16_t)len);
         if (n->input(p, n) != ERR_OK) {
             pbuf_free(p);
@@ -274,6 +306,15 @@ static void a20_lwip_process_netif_rx_tx_locked(struct netif *n)
         }
     }
     netif_poll(n);
+    /* Frame plane: drain netd's TX ring into the NIC. */
+    if (netd_enabled()) {
+        for (;;) {
+            int tlen = (int)netd_tx_frame(st->tx_frame, sizeof(st->tx_frame));
+            if (tlen <= 0)
+                break;
+            st->ops->send(st->dev, st->tx_frame, (size_t)tlen);
+        }
+    }
 }
 
 /*
@@ -285,6 +326,8 @@ void a20_lwip_process_netif_irq_locked(int net_idx)
 {
     if (!g_lwip_ready)
         return;
+
+    a20_lwip_signal_rx_pending();
 
     for (int i = 0; i < A20_NET_MAX_DEVS; i++) {
         a20_lwip_netif_state_t *st = &g_netif_state[i];
@@ -320,6 +363,7 @@ void a20_lwip_poll_locked(void) {
             netif_poll(n);
         }
     }
+    a20_lwip_clear_rx_pending();
 }
 
 void a20_lwip_poll(void) {
