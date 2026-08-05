@@ -176,7 +176,8 @@ NATIVE_RTCDD_BIN       := $(NATIVE_BUILD_DIR)/rtcd-$(NATIVE_TAG)
 NATIVE_REGISTRY_BIN    := $(NATIVE_BUILD_DIR)/native-registry-$(NATIVE_TAG)
 NATIVE_SVCMGR_BIN      := $(NATIVE_BUILD_DIR)/svcmgr-$(NATIVE_TAG)
 NATIVE_ISOLATION_BIN   := $(NATIVE_BUILD_DIR)/native-isolation-$(NATIVE_TAG)
-NATIVE_OUTPUTS         := $(NATIVE_HELLO_BIN) $(NATIVE_HANDLE_BIN) $(NATIVE_LIBC_BIN) $(NATIVE_FUTEX_BIN) $(NATIVE_MM_BIN) $(NATIVE_SIGNAL_BIN) $(NATIVE_IPC_BIN) $(NATIVE_SVCMAN_BIN) $(NATIVE_ECHOD_BIN) $(NATIVE_SHMRING_BIN) $(NATIVE_SHMRINGD_BIN) $(NATIVE_CHAND_BIN) $(NATIVE_RTCD_BIN) $(NATIVE_RTCDD_BIN) $(NATIVE_REGISTRY_BIN) $(NATIVE_SVCMGR_BIN) $(NATIVE_ISOLATION_BIN)
+NATIVE_UBDD_BIN        := $(NATIVE_BUILD_DIR)/ubd-$(NATIVE_TAG)
+NATIVE_OUTPUTS         := $(NATIVE_HELLO_BIN) $(NATIVE_HANDLE_BIN) $(NATIVE_LIBC_BIN) $(NATIVE_FUTEX_BIN) $(NATIVE_MM_BIN) $(NATIVE_SIGNAL_BIN) $(NATIVE_IPC_BIN) $(NATIVE_SVCMAN_BIN) $(NATIVE_ECHOD_BIN) $(NATIVE_SHMRING_BIN) $(NATIVE_SHMRINGD_BIN) $(NATIVE_CHAND_BIN) $(NATIVE_RTCD_BIN) $(NATIVE_RTCDD_BIN) $(NATIVE_REGISTRY_BIN) $(NATIVE_SVCMGR_BIN) $(NATIVE_ISOLATION_BIN) $(NATIVE_UBDD_BIN)
 NATIVE_BUILD_STAMP     := $(NATIVE_BUILD_DIR)/.native-build-id
 comma := ,
 NET_HOSTFWD ?= hostfwd=tcp::5555-:5555,hostfwd=udp::5555-:5555
@@ -707,6 +708,7 @@ VBOX_AARCH64_LOAD_ADDRESS ?= 0x08080000ULL
 		native-rtcd-arch native-rtcd-rv smoke-native-rtcd \
 		native-registry-arch native-registry-rv smoke-native-registry \
 		native-isolation-arch native-isolation-rv smoke-native-isolation \
+		native-ubd-arch native-ubd-rv smoke-native-ubd \
 		smoke-clock-vdso \
 		native-test-rv native-test-la native-test-aarch64 native-test-x86_64 native-test-arm32 native-test-rv32 native-test-ppc64le native-test native-test-all \
 		native-minimal-rv native-minimal-la native-minimal \
@@ -2416,6 +2418,7 @@ $(NATIVE_BUILD_STAMP): $(USER_BUILD_STAMP) force_native_build
 	     [ ! -x "$(NATIVE_CHAND_BIN)" ] || [ ! -x "$(NATIVE_ECHOD_BIN)" ] || \
 	     [ ! -x "$(NATIVE_REGISTRY_BIN)" ] || [ ! -x "$(NATIVE_SVCMGR_BIN)" ] || \
 	     [ ! -x "$(NATIVE_ISOLATION_BIN)" ] || \
+	     [ ! -x "$(NATIVE_UBDD_BIN)" ] || \
 	     [ ! -x "$(NATIVE_RTCD_BIN)" ] || [ ! -x "$(NATIVE_RTCDD_BIN)" ]; then \
 		need_build=1; \
 	elif find user/liba20rt user/liba20c user/tests -type f -newer "$@" \
@@ -3431,6 +3434,55 @@ native-isolation-arch: $(NATIVE_ISOLATION_BIN)
 native-isolation-rv:
 	$(MAKE) ARCH=riscv64 NOMMU=$(NOMMU) native-isolation-arch
 
+$(NATIVE_UBDD_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) user/svc/ubd.c user/svc/ubd_proto.h \
+		user/liba20rt/a20-generic.ld user/liba20rt/crt0_a20.h user/liba20rt/a20_syscall.h
+	$(call NATIVE_SVC_RECIPE,$(NATIVE_CC),$(NATIVE_CFLAGS),$(NATIVE_CRT0),user/svc/ubd.c,$@)
+
+native-ubd-arch: $(NATIVE_UBDD_BIN)
+
+native-ubd-rv:
+	$(MAKE) ARCH=riscv64 NOMMU=$(NOMMU) native-ubd-arch
+
+UBD_SCRATCH_IMG := $(BUILD_DIR)/ubd-scratch.img
+UBD_SCRATCH_BIG := $(BUILD_DIR)/ubd-big.bin
+
+$(UBD_SCRATCH_BIG): FORCE
+	@rm -f $@; \
+	dd if=/dev/zero of=$@ bs=1M count=4 2>/dev/null
+
+$(UBD_SCRATCH_IMG): $(UBD_SCRATCH_BIG)
+	@rm -f $@; \
+	dd if=/dev/zero of=$@ bs=1M count=64 2>/dev/null; \
+	$(MKFS_FAT) -F 32 $@; \
+	printf 'A20OS-UBD-MARKER' | dd of=$@ bs=1 seek=4096 conv=notrunc 2>/dev/null; \
+	mcopy -o -i $@ $(UBD_SCRATCH_BIG) ::/big.bin
+
+smoke-native-ubd:
+	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 $(UBD_SCRATCH_IMG)
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/native-ubd-riscv64.log"; \
+	status=0; \
+	{ sleep $(SMOKE_INPUT_DELAY); printf '/bin/ubd_fs_test\npoweroff\n'; } | \
+	$(TIMEOUT) 120s qemu-system-riscv64 \
+		-machine virt -m 1G -nographic -smp 1 -bios default \
+		-global virtio-mmio.force-legacy=false \
+		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-both-dev/fat32.img,if=none,format=raw,id=x0 \
+		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+		-drive file=$(UBD_SCRATCH_IMG),if=none,format=raw,id=xubd \
+		-device virtio-blk-device,drive=xubd,bus=virtio-mmio-bus.3 \
+		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		-kernel .kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf \
+		> "$$log" 2>&1 || status=$$?; \
+	if grep -q 'UBD_FS: PASS' "$$log" && grep -q 'System is going down for power-off NOW' "$$log"; then \
+		echo "smoke-native-ubd: PASS; log saved to $$log"; \
+	else \
+		echo "smoke-native-ubd: failed with status $$status; tail of $$log:"; \
+		tail -n 80 "$$log"; \
+		exit 1; \
+	fi
+
 smoke-native-isolation:
 	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
@@ -3831,7 +3883,7 @@ define RUN_QEMU_RV
 		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
 		$(EVAL_NETDEV_RV) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
 		-drive 'file=$(EVAL_DIR)/sdcard-rv.img,if=none,format=raw,id=x1' \
-		-device virtio-blk-device,drive=x1,bus=virtio-mmio-bus.1 \
+		-device virtio-blk-device,drive=x1,bus=virtio-mmio-bus.3 \
 		-no-reboot \
 	2>&1 | tee $(EVAL_LOGS)/serial-rv.txt || true
 endef

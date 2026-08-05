@@ -111,11 +111,20 @@ pfn_t vmo_get_page(struct vmo *vmo, uint32_t index)
 }
 
 /*
- * Demand-fault page source with cgroup accounting: materializes page @index
- * and charges the new frame to @cg.  Returns 0 with *out set, or -ENOMEM if
+ * Demand-fault page source with cgroup accounting: materializes page @index * and charges the new frame to @cg.  Returns 0 with *out set, or -ENOMEM if
  * the charge or frame allocation fails.  The charge is recorded per-VMO and
  * released on destroy.
  */
+pfn_t vmo_peek_page(struct vmo *vmo, uint32_t index)
+{
+    if (!vmo || index >= vmo->page_count)
+        return PFN_NONE;
+    spin_lock(&vmo->lock);
+    pfn_t pfn = vmo->pages[index];
+    spin_unlock(&vmo->lock);
+    return pfn;
+}
+
 int vmo_get_page_charged(struct vmo *vmo, uint32_t index,
                          struct cg_node *cg, pfn_t *out)
 {

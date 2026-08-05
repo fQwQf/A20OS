@@ -74,6 +74,10 @@ void virtio_mmio_enumerate(uintptr_t base, int max_slots, int irq_base) {
     uintptr_t slot_size = arch_virtio_mmio_slot_size();
     for (int slot = 0; slot < max_slots; slot++) {
         uintptr_t slot_base = base + (unsigned long)slot * slot_size;
+        /* Slots owned by user-space drivers are left untouched. */
+        extern int udriver_mmio_user_owned(uint64_t phys);
+        if (udriver_mmio_user_owned((uint64_t)(slot_base - PAGE_OFFSET)))
+            continue;
         uint32_t magic   = readl((const volatile void *)slot_base);
         uint32_t version = readl((const volatile void *)(slot_base + 0x004));
         uint32_t dev_id  = readl((const volatile void *)(slot_base + 0x008));

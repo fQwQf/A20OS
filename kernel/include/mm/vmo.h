@@ -51,6 +51,10 @@ void        vmo_release(struct vmo *vmo);
 pfn_t       vmo_get_page(struct vmo *vmo, uint32_t index);
 int64_t     vmo_resize(struct vmo *vmo, uint64_t new_size);
 
+/* Non-materializing page lookup (M4 DMA contract): returns the canonical
+ * frame for @index or PFN_NONE when not yet allocated. */
+pfn_t       vmo_peek_page(struct vmo *vmo, uint32_t index);
+
 /* Like vmo_get_page, but charges the frame to @cg on first materialization.
  * Returns 0 on success (pfn in *out), -ENOMEM on charge/alloc failure. */
 int         vmo_get_page_charged(struct vmo *vmo, uint32_t index,
