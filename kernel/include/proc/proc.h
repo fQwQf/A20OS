@@ -225,6 +225,8 @@ typedef struct task_t {
     int       dynamic_alloc;
     void     *scratch_buf;
     size_t    scratch_size;
+    void     *a20_ht;   /* Native ABI handle table (separate from scratch_buf,
+                         * which is reused by Linux ABI I/O buffers) */
 
     trap_context_t sig_saved_ctx;
     uint64_t       sig_blocked;

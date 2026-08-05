@@ -138,6 +138,7 @@ static void user_trap_handler(trap_context_t *ctx) {
         if (code == CAUSE_LOAD_PAGE_FAULT || code == CAUSE_STORE_PAGE_FAULT || code == CAUSE_INSN_PAGE_FAULT) {
             if (code == CAUSE_STORE_PAGE_FAULT) {
                 if (handle_cow_fault(cur, stval) == 0) {
+                    arch_tlb_flush_page(stval); /* publish remote PTE change */
                     signal_deliver_user(ctx);
                     return;
                 }
@@ -151,6 +152,7 @@ static void user_trap_handler(trap_context_t *ctx) {
                 return;
             }
             if (handle_demand_fault(cur, stval) == 0) {
+                arch_tlb_flush_page(stval); /* publish remote PTE change */
                 signal_deliver_user(ctx);
                 return;
             }
@@ -170,6 +172,9 @@ static void user_trap_handler(trap_context_t *ctx) {
                   cur ? cur->pid : -1, (unsigned long)code,
                   (unsigned long)sepc, (unsigned long)stval,
                    cur ? (int)cur->abi_mode : -1);
+            if (arch_is_kernel_address((void *)stval))
+                printf("SIGSEGV: !!! user fault on KERNEL address stval=0x%lx (kernel page leak)\n",
+                       (unsigned long)stval);
             arch_dump_trap_ring();
             if (have_user_insn)
                 kerr("  insn@sepc=0x%08x\n", user_insn);
