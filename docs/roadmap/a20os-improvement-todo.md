@@ -92,8 +92,8 @@
 
 - [ ] 在块设备和网络设备能够发出完成信号的位置，用事件驱动 wakeup 替换 scheduler/idle 轮询进展。
   - 证据：`docs/project/external-dependencies.md` 描述了基于轮询的 lwIP 进展；`kernel/drivers/block/virtio_blk.c` 记录了未来 interrupt wake 路径。
-  - 设计：`docs/drivers/lock-order.md`（驱动锁契约）、`docs/net/network-lock-contract.md`（deferred bottom-half 规则）；用户决策：deferred bottom-half / workqueue。
   - 完成条件：块设备和网络进展在正常运行中不再依赖通用 hot-path 轮询。
+  - 进展（2026-08）：`IRQF_SHARED` handler 链已落地；x86_64 q35 PCI INTx 经 IOAPIC 路由（GSI 20-23，路由即屏蔽、注册解掩，i440fx 保持轮询）；NVMe/AHCI/E1000/VirtIO-SCSI/VirtIO-GPU/VirtIO-SND 完成 IRQ hybrid 化（有界预轮询 + park，注册失败回退轮询）；virtio-blk/net 注册失败不再假 IRQ 化。剩余：xHCI、StarFive/LS2K GMAC、DW SDIO、HDA period IRQ、scheduler/idle 兼容轮询桥（`kernel/core/progress.c`）以及 VirtualBox i440fx/ARM 的 PCI 中断路由。
 - [ ] 降低 `g_lwip_lock` 竞争，并为所有 socket 路径记录锁安全入口点。
   - 证据：`kernel/net/lwip_stack.c` 用全局锁串行化 lwIP 核心状态；`kernel/include/core/lock.h` 限制 lwIP 锁下的调用。
   - 设计：`docs/net/network-lock-contract.md`。

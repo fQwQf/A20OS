@@ -22,16 +22,7 @@ Native ABI 提供两个互补的 IPC 原语：
 Channel 是**双向端对端**的消息管道。创建时产生两个 endpoint handle，分别给通信双方。
 
 ```text
-进程 A                          进程 B
-  │                               │
-  channel_create()                │
-  → ep0_handle, ep1_handle        │
-  │                               │
-  channel_send(ep0, data, handles) │
-  ─────────────────────────────────→ channel_recv(ep1, ...)
-  │                               │
-  ←───────────────────────────────── channel_send(ep1, response)
-  channel_recv(ep0, ...)          │
+进程 A                          进程 B│                               │channel_create()                │→ ep0_handle, ep1_handle        ││                               │channel_send(ep0, data, handles) │─────────────────────────────────→ channel_recv(ep1, ...)│                               │←───────────────────────────────── channel_send(ep1, response)channel_recv(ep0, ...)          │
 ```
 
 ### 2.2 数据结构
@@ -70,8 +61,7 @@ typedef struct a20_channel_ep {
 Channel 可以选择性地声明类型签名，内核在 send/recv 时强制执行类型约束。
 
 ```c
-// 通道类型签名
-typedef struct a20_channel_type {
+// 通道类型签名typedef struct a20_channel_type {
     uint32_t version;            // 结构体版本
     uint32_t send_handle_types;  // bitmask: 可发送的 handle 类型
     uint32_t recv_handle_types;  // bitmask: 可接收的 handle 类型
@@ -145,19 +135,9 @@ int64_t channel_send(a20_msg_send_args_t *args);
 **两阶段锁分离设计**：发送方和接收方的 handle table 不同时加锁。
 
 ```text
-阶段 1：预验证（锁发送方 HT）
-  1.1 lookup channel handle → 验证 WRITE 权限
-  1.2 对每个要传递的 handle：lookup → 验证 TRANSFER 权限
-  1.3 对每个 handle：refcount_inc（原子操作）
-  1.4 构造 a20_ch_message（拷贝数据，记录 handle 对象信息）
-  1.5 解锁发送方 HT
+阶段 1：预验证（锁发送方 HT）1.1 lookup channel handle → 验证 WRITE 权限1.2 对每个要传递的 handle：lookup → 验证 TRANSFER 权限1.3 对每个 handle：refcount_inc（原子操作）1.4 构造 a20_ch_message（拷贝数据，记录 handle 对象信息）1.5 解锁发送方 HT
 
-阶段 2：投递（锁接收方 peer endpoint）
-  2.1 spin_lock(&peer->lock)
-  2.2 检查 peer_closed、队列满等条件
-  2.3 将消息追加到 peer->msg_queue
-  2.4 wake_one(&peer->waiters)（唤醒等待的接收线程）
-  2.5 解锁 peer
+阶段 2：投递（锁接收方 peer endpoint）2.1 spin_lock(&peer->lock)2.2 检查 peer_closed、队列满等条件2.3 将消息追加到 peer->msg_queue2.4 wake_one(&peer->waiters)（唤醒等待的接收线程）2.5 解锁 peer
 ```
 
 **错误处理**：
@@ -190,16 +170,9 @@ int64_t channel_recv(a20_msg_recv_args_t *args);
 如果接收方的 handle table 满了，消息中的 handle 只能部分投递。这触发 partial delivery：
 
 ```text
-状态：
-  IDLE → 正常
-  PARTIAL → 消息已取出，部分 handle 已投递，等待剩余空间
-  ROLLED_BACK → 投递失败，消息回滚
+状态：IDLE → 正常PARTIAL → 消息已取出，部分 handle 已投递，等待剩余空间ROLLED_BACK → 投递失败，消息回滚
 
-转换：
-  IDLE → recv 开始
-  如果所有 handle 投递成功 → IDLE（消息完成）
-  如果部分 handle 投递失败 → PARTIAL
-  PARTIAL → 重试投递 / 超时 → ROLLED_BACK（释放所有 handle 引用）
+转换：IDLE → recv 开始如果所有 handle 投递成功 → IDLE（消息完成）如果部分 handle 投递失败 → PARTIALPARTIAL → 重试投递 / 超时 → ROLLED_BACK（释放所有 handle 引用）
 ```
 
 **实现决策（已落地）**：不使用部分投递。`reserve-many → dequeue → commit` 保证接收方 HT 空间不足时整个 recv 返回 `NO_SPACE`，消息留在队列中；commit 对已预留槽位不再失败。
@@ -238,20 +211,7 @@ $$\rho_{recv} = \rho_{send} \cap \rho_{transfer}$$
 Event Queue 是 Native ABI 的统一等待机制。所有可观察对象的事件都通过 event queue 汇聚。
 
 ```text
-┌──────────────────────────────────────────────────┐
-│                 Event Queue                       │
-│                                                   │
-│  watch list:                                      │
-│    [file_h, READABLE | WRITABLE]                  │
-│    [timer_h, EXPIRED]                             │
-│    [task_h, EXITED]                               │
-│    [channel_h, MESSAGE_READY]                     │
-│                                                   │
-│  pending ring:                                    │
-│    [event(file, READABLE), event(timer, EXPIRED)] │
-│                                                   │
-│  waiters: [thread_1 (blocked in event_wait)]      │
-└──────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────┐│                 Event Queue                       ││                                                   ││  watch list:                                      ││    [file_h, READABLE | WRITABLE]                  ││    [timer_h, EXPIRED]                             ││    [task_h, EXITED]                               ││    [channel_h, MESSAGE_READY]                     ││                                                   ││  pending ring:                                    ││    [event(file, READABLE), event(timer, EXPIRED)] ││                                                   ││  waiters: [thread_1 (blocked in event_wait)]      │└──────────────────────────────────────────────────┘
 ```
 
 ### 3.2 数据结构

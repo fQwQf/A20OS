@@ -68,12 +68,7 @@ typedef struct a20_net_config {
 除命令行外，内核通过 `/proc/net/config` 暴露运行时配置：
 
 ```text
-ip=10.0.2.15
-netmask=255.255.255.0
-gateway=10.0.2.2
-dns0=10.0.2.3
-dhcp=1
-hostname=a20os
+ip=10.0.2.15netmask=255.255.255.0gateway=10.0.2.2dns0=10.0.2.3dhcp=1hostname=a20os
 ```
 
 该文件只读，并反映当前生效配置。如果启用 DHCP，租约变化时这些值会更新。

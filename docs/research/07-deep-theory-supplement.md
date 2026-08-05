@@ -161,8 +161,7 @@ $\sigma'$ 的构造是原子的一步 SOS 转移：
 
 类似地，CH-SEND 传递 $k$ 个 handles：
 
-**预验证**：
-$$\forall h_i.\ HT_p(h_i) = (o_i, \rho_i) \land Transfer \in \rho_i \land |q_{peer}| + |data| \leq C_{max}$$
+**预验证**：$$\forall h_i.\ HT_p(h_i) = (o_i, \rho_i) \land Transfer \in \rho_i \land |q_{peer}| + |data| \leq C_{max}$$
 
 **提交**：
 - 一次性追加 $(data, \{(o_i, \rho_i)\})$ 到 $q_{peer}$
@@ -586,17 +585,13 @@ $$refcount_a(o) = |\{(p, n) \mid entries_p[n].object = o \land entries_p[n].obje
 
 **定义 8.2（精化不变式）** $RI(\sigma_c, \sigma_a)$ 成立当且仅当 $\sigma_a = abs(\sigma_c)$ 且以下条件满足：
 
-**RI-1（Handle 表对应）**：
-$$\forall p, n.\ HT_a^p(n) = (o, \rho) \iff entries_p[n].object = o \land entries_p[n].rights = \rho \land o \neq \text{NULL}$$
+**RI-1（Handle 表对应）**：$$\forall p, n.\ HT_a^p(n) = (o, \rho) \iff entries_p[n].object = o \land entries_p[n].rights = \rho \land o \neq \text{NULL}$$
 
-**RI-2（引用计数对应）**：
-$$\forall o.\ refcount_a(o) = |\{(p, n) \mid entries_p[n].object = o\}|$$
+**RI-2（引用计数对应）**：$$\forall o.\ refcount_a(o) = |\{(p, n) \mid entries_p[n].object = o\}|$$
 
-**RI-3（对象状态对应）**：
-$$\forall o.\ Obj_a(o) = \text{appropriate\_state\_extractor}(o)$$
+**RI-3（对象状态对应）**：$$\forall o.\ Obj_a(o) = \text{appropriate\_state\_extractor}(o)$$
 
-**RI-4（Bitmap 一致性）**：约定 bit=1 表示槽位已占用（used），bit=0 表示空闲（free）。
-$$\forall p, n.\ \text{free\_bitmap}_p[n/64] \land (1 \ll (n\%64)) \neq 0 \iff entries_p[n].object \neq \text{NULL}$$
+**RI-4（Bitmap 一致性）**：约定 bit=1 表示槽位已占用（used），bit=0 表示空闲（free）。$$\forall p, n.\ \text{free\_bitmap}_p[n/64] \land (1 \ll (n\%64)) \neq 0 \iff entries_p[n].object \neq \text{NULL}$$
 
 ### 8.4 Handle Table 操作的完整精化证明
 
@@ -604,8 +599,7 @@ $$\forall p, n.\ \text{free\_bitmap}_p[n/64] \land (1 \ll (n\%64)) \neq 0 \iff e
 
 #### 8.4.1 handle_close 的精化
 
-**抽象规则（H-CLOSE）**：
-$$\frac{HT_p(n) = (o, \rho) \quad refcount(o) = 1}{\langle handle\_close_p(n), \sigma \rangle \longrightarrow \langle ok(0), \sigma[HT_p \setminus n, Obj \setminus o] \rangle}$$
+**抽象规则（H-CLOSE）**：$$\frac{HT_p(n) = (o, \rho) \quad refcount(o) = 1}{\langle handle\_close_p(n), \sigma \rangle \longrightarrow \langle ok(0), \sigma[HT_p \setminus n, Obj \setminus o] \rangle}$$
 
 **具体实现**（基于 08 §2.3 的 `a20_handle_table_close`）：
 
@@ -651,8 +645,7 @@ $\square$
 
 #### 8.4.2 handle_dup 的精化
 
-**抽象规则（H-DUP）**：
-$$\frac{HT_p(s) = (o, \rho_s) \quad \rho_{req} \subseteq \rho_s \quad n_{fresh} \notin dom(HT_p)}{\langle handle\_dup_p(s, \rho_{req}), \sigma \rangle \longrightarrow \langle ok(n_{fresh}), \sigma[HT_p(n_{fresh}) \mapsto (o, \rho_{req})] \rangle}$$
+**抽象规则（H-DUP）**：$$\frac{HT_p(s) = (o, \rho_s) \quad \rho_{req} \subseteq \rho_s \quad n_{fresh} \notin dom(HT_p)}{\langle handle\_dup_p(s, \rho_{req}), \sigma \rangle \longrightarrow \langle ok(n_{fresh}), \sigma[HT_p(n_{fresh}) \mapsto (o, \rho_{req})] \rangle}$$
 
 **具体实现**（基于 08 §2.3 的 `ht_alloc_slot` + 写入）：
 
@@ -760,26 +753,14 @@ int64_t a20_handle_lookup(ht, h, expected_type, required_rights, out) {
 
 #### 8.4.4 channel_send（带 handle transfer）的精化
 
-**抽象规则（CH-SEND）**：
-$$\frac{HT_p(n) = (o_{ch}, \rho) \quad W \in \rho \quad |q_{peer}| + |data| \leq C_{max} \quad \forall h_i.\ HT_p(h_i) = (o_i, \rho_i) \land Transfer \in \rho_i}{\langle send_p(n, data, handles), \sigma \rangle \longrightarrow \langle ok(0), \sigma' \rangle}$$
+**抽象规则（CH-SEND）**：$$\frac{HT_p(n) = (o_{ch}, \rho) \quad W \in \rho \quad |q_{peer}| + |data| \leq C_{max} \quad \forall h_i.\ HT_p(h_i) = (o_i, \rho_i) \land Transfer \in \rho_i}{\langle send_p(n, data, handles), \sigma \rangle \longrightarrow \langle ok(0), \sigma' \rangle}$$
 
 **具体实现**（08 §4.3，简化关键路径）：
 
 ```c
-// 预验证阶段（持有 ht->lock）
-spin_lock(&ht->lock);
-  verify channel handle: type == CHANNEL, W ∈ rights
-  for each passed handle h_i:
+// 预验证阶段（持有 ht->lock）spin_lock(&ht->lock);verify channel handle: type == CHANNEL, W ∈ rightsfor each passed handle h_i:
     verify h_i exists, Transfer ∈ rights
-  construct message with {data, handle_infos[]}
-// 提交阶段（持有 ht->lock + peer->lock）
-spin_lock(&peer->lock);
-  verify peer->total_data + data_len ≤ C_MAX
-  for each passed handle: object_refcount_inc(handle_i.object)
-  enqueue_message(peer, msg)
-  wake_one(&peer->waiters)
-spin_unlock(&peer->lock);
-spin_unlock(&ht->lock);
+  construct message with {data, handle_infos[]}// 提交阶段（持有 ht->lock + peer->lock）spin_lock(&peer->lock);verify peer->total_data + data_len ≤ C_MAXfor each passed handle: object_refcount_inc(handle_i.object)enqueue_message(peer, msg)wake_one(&peer->waiters)spin_unlock(&peer->lock);spin_unlock(&ht->lock);
 ```
 
 **精化论证**：
@@ -1073,14 +1054,12 @@ SOS 的数学模型中 $\sigma \to \sigma'$ 是全局瞬时转移，但 C 实现
 **约定 M1（Spinlock 保证序）**：A20OS 的 `spinlock_t` 实现保证：
 
 ```c
-// spin_lock：
-void spin_lock(spinlock_t *lk) {
+// spin_lock：void spin_lock(spinlock_t *lk) {
     while (__atomic_test_and_set(&lk->locked, __ATOMIC_ACQUIRE))
         ;  // 自旋
 }
 
-// spin_unlock：
-void spin_unlock(spinlock_t *lk) {
+// spin_unlock：void spin_unlock(spinlock_t *lk) {
     __atomic_clear(&lk->locked, __ATOMIC_RELEASE);
 }
 ```
@@ -1117,13 +1096,11 @@ $$\forall \text{shared write } w \text{ in CS}_p. \ \forall \text{shared read } 
 A20OS 中的 `refcount_t` 操作使用 `__atomic_add_fetch` / `__atomic_sub_fetch`：
 
 ```c
-// refcount_inc：
-static inline void refcount_inc(refcount_t *rc) {
+// refcount_inc：static inline void refcount_inc(refcount_t *rc) {
     __atomic_add_fetch(&rc->count, 1, __ATOMIC_RELAXED);
 }
 
-// refcount_dec_and_test：
-static inline bool refcount_dec_and_test(refcount_t *rc) {
+// refcount_dec_and_test：static inline bool refcount_dec_and_test(refcount_t *rc) {
     return __atomic_sub_fetch(&rc->count, 1, __ATOMIC_ACQ_REL) == 0;
 }
 ```

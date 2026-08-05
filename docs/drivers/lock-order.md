@@ -8,33 +8,30 @@
 
 | 驱动 | 文件 | 私有锁 |
 |--------|------|--------------|
-| virtio-blk | `kernel/drivers/block/virtio_blk.c` | `inst->lock` |
-| virtio-net | `kernel/drivers/net/virtio_net.c` | `net->lock` |
-| UART | `kernel/drivers/char/uart.c` | `rx_lock` |
-| PTY | `kernel/drivers/char/pty.c` | `g_pty_alloc_lock`、每个 pair 的 `lock` |
-| loop | `kernel/drivers/block/loop.c` | `g_loop[i].lock` |
+| virtio-blk | `kernel/drivers/block/virtio_blk.c` | `inst->lock`（spinlock） |
+| virtio-net | `kernel/drivers/net/virtio_net.c` | `net->lock`（spinlock） |
+| UART | `kernel/drivers/char/uart.c` | `rx_lock`（spinlock） |
+| PTY | `kernel/drivers/char/pty.c` | `g_pty_alloc_lock`、每个 pair 的 `lock`（spinlock） |
+| loop | `kernel/drivers/block/loop.c` | `g_loop[i].lock`（spinlock） |
 | DW SDIO | `kernel/drivers/block/dw_sdio.c` | 无 |
 | StarFive GMAC | `kernel/drivers/net/starfive_gmac.c` | 无 |
 | Loongson-2K GMAC | `kernel/drivers/net/ls2k_gmac.c` | 无 |
-| AHCI | `kernel/drivers/block/ahci.c` | `port->lock` |
-| VirtIO-SCSI | `kernel/drivers/block/virtio_scsi.c` | `dev->lock` |
-| E1000 | `kernel/drivers/net/e1000.c` | `nic->lock` |
-| VMSVGA/SVGAv3 | `kernel/drivers/gpu/vmsvga.c` | `svga->lock` |
-| VirtIO input | `kernel/drivers/input/virtio_input.c` | `inst->lock` |
-| xHCI HID | `kernel/drivers/input/xhci_hid.c` | `xhci->lock` |
+| AHCI | `kernel/drivers/block/ahci.c` | `port->lock`（mutex） |
+| VirtIO-SCSI | `kernel/drivers/block/virtio_scsi.c` | `dev->lock`（mutex） |
+| NVMe | `kernel/drivers/block/nvme.c` | `ctrl->io_lock`（mutex） |
+| E1000 | `kernel/drivers/net/e1000.c` | `nic->lock`（spinlock） |
+| VMSVGA/SVGAv3 | `kernel/drivers/gpu/vmsvga.c` | `svga->lock`（spinlock） |
+| VirtIO-GPU | `kernel/drivers/gpu/virtio_gpu.c` | `inst->command_lock`（mutex） |
+| VirtIO-SND | `kernel/drivers/audio/virtio_snd.c` | `snd->lock`（mutex） |
+| VirtIO input | `kernel/drivers/input/virtio_input.c` | `inst->lock`（spinlock） |
+| xHCI HID | `kernel/drivers/input/xhci_hid.c` | `xhci->lock`（spinlock） |
 
 ## 全局顺序摘要
 
 `kernel/include/core/lock.h` 中的全局顺序为：
 
 ```text
-cg_node.lock -> proc_lock -> runq_lock -> pfa.lock
-proc_lock -> runq_lock
-proc_lock -> files_struct.lock -> VFS global-file/vnode locks
-proc_lock -> mm_struct.lock
-proc_lock -> a20_handle_table.lock
-driver registry/IRQ locks -> device-private locks
-g_lwip_lock -> virtio-net nonblocking send/recv paths only
+cg_node.lock -> proc_lock -> runq_lock -> pfa.lockproc_lock -> runq_lockproc_lock -> files_struct.lock -> VFS global-file/vnode locksproc_lock -> mm_struct.lockproc_lock -> a20_handle_table.lockdriver registry/IRQ locks -> device-private locksg_lwip_lock -> virtio-net nonblocking send/recv paths only
 ```
 
 对驱动而言，这意味着：
@@ -64,8 +61,7 @@ g_lwip_lock -> virtio-net nonblocking send/recv paths only
 
 - 提交、完成轮询和请求分配都在 `inst->lock` 下运行。
 - 完成路径在 `inst->lock` 下通过 `wait_queue_collect_all()` 把 task 引用和
-  `wait_seq` 转移到局部 wake queue；释放 `inst->lock` 后才调用
-  `proc_wake_q_flush()` 进入 scheduler。
+  `wait_seq` 转移到局部 wake queue；释放 `inst->lock` 后才调用`proc_wake_q_flush()` 进入 scheduler。
 - 当没有可用 slot 时，`virtio_blk_rw()` 在 yield CPU 前释放锁。
 - 不要在 `inst->lock` 下调用 VFS、`kmalloc` 或阻塞式 scheduler 函数。
 
@@ -210,19 +206,44 @@ g_lwip_lock -> virtio-net nonblocking send/recv paths only
 
 ### AHCI
 
-**锁：** `ahci_port_t.lock`（`port->lock`），保护单端口 command slot、command table 和共享 transfer buffer。
+**锁：** `ahci_port_t.lock`（`port->lock`），可睡眠 mutex，串行化单端口 command slot、command table 和共享 transfer buffer。
 
-**局部顺序：** 无。类 read/write 获取该锁后串行完成分块 I/O。
+**局部顺序：** 无。类 read/write 持有该 mutex 完成分块 I/O；命令完成等待在持锁状态下按标准完成模型 park 在 `port->waiters` 上。IRQ top-half 不获取该 mutex——它只记录 `port->last_is`、清 PxIS 并 collect waiters（wait queue 内部自锁）。
 
-**已知限制：** 当前实现会在锁内轮询命令完成，最长可达硬件超时。这不适合作为新驱动范例；IRQ/completion 化时必须只在锁内发布和回收 slot，在无锁状态等待完成。
+**规则：**
+
+- IRQ handler 不得在 IRQ 上下文获取 `port->lock`（mutex 不可在 IRQ 中使用）；这正是完成状态经 `last_is` 移交而不是由 handler 推进 ring 的原因。
+- 持 mutex park 是允许的，因为竞争者只会阻塞在同一 mutex 上，而唤醒来自不持锁的 top-half。
 
 ### VirtIO-SCSI
 
-**锁：** `virtio_scsi_dev_t.lock`（`dev->lock`），保护 request queue descriptor、avail/used index、共享 request/response 和单命令 buffer。
+**锁：** `virtio_scsi_dev_t.lock`（`dev->lock`），可睡眠 mutex，保护 request queue descriptor、avail/used index、共享 request/response 和单命令 buffer。
 
-**局部顺序：** 无。当前每控制器只有一个同步 in-flight 命令。
+**局部顺序：** 无。当前每控制器只有一个同步 in-flight 命令；命令等待在持锁状态下 park 在 `dev->waiters` 上，IRQ top-half 只 collect waiters，不获取该 mutex。
 
-**已知限制：** VirtIO GPU controlq 当前用实例 mutex 串行化，在 mutex 内轮询完成但不关闭中断。请求/响应位于实例 DMA staging。未来多队列/异步实现必须改为 per-request 状态与 completion；禁止退回自旋锁内长等待或栈 DMA。
+### NVMe
+
+**锁：** `nvme_controller_t.io_lock`（`ctrl->io_lock`），可睡眠 mutex，串行化 I/O queue 的提交与完成消费。
+
+**局部顺序：** 无。提交者独占 `cq_head`/`cq_db`；等待在持锁状态下 park 在 `q->waiters` 上（admin queue 仅在 probe 期使用，保持有界轮询）。IRQ top-half 只 collect admin/io 两个 wait queue，不触碰 queue 状态，也不获取 `io_lock`。
+
+**规则：**
+
+- `ctrl->failed` 用原子操作读写，允许 handler 外的路径在不持锁时观察设备致命状态。
+
+### VirtIO-GPU
+
+**锁：** `virtio_gpu_inst_t.command_lock`（`inst->command_lock`），可睡眠 mutex，串行化 controlq 的单条 in-flight 命令链。
+
+**局部顺序：** 无。flush 等待在持锁状态下 park 在 `inst->waiters` 上（boot 早期无 `proc_current()` 或 IRQ 未注册时保持有界 poll/yield）。IRQ top-half 只 ack ISR 并 collect waiters，不获取该 mutex。
+
+**已知限制：** controlq 单命令链意味着显示 flush 是全局串行的；未来多队列/异步实现必须改为 per-request 状态与 completion，禁止退回自旋锁内长等待或栈 DMA。
+
+### VirtIO-SND
+
+**锁：** `virtio_snd_dev_t.lock`（`snd->lock`），可睡眠 mutex，串行化 PCM 命令、staging 和 stream 状态机。
+
+**局部顺序：** 无。所有完成等待经 `virtio_snd_wait_step()`：有 IRQ 且存在当前任务时 park 在 `snd->waiters` 上（20 ms 有界块保持 generation 中断响应），否则 yield/relax。IRQ top-half 只 ack 并 collect waiters，不获取 `snd->lock`——这保证了持锁睡眠的 issuer 与 handler 之间没有锁序环。
 
 ### E1000
 
@@ -240,9 +261,7 @@ g_lwip_lock -> virtio-net nonblocking send/recv paths only
 
 **锁：** 每实例 `virtio_input_inst_t.lock`，保护 event virtqueue、用户事件 ring 和 waiter。
 
-**局部顺序：** 无。IRQ/poll 路径在锁内 drain 有界队列并 collect 一个带
-token 的 waiter，释放实例锁后 flush wake queue；阻塞 read 使用 Park/Wake
-协议并在调度前释放锁。
+**局部顺序：** 无。IRQ/poll 路径在锁内 drain 有界队列并 collect 一个带token 的 waiter，释放实例锁后 flush wake queue；阻塞 read 使用 Park/Wake协议并在调度前释放锁。
 
 ### xHCI HID
 
@@ -253,11 +272,12 @@ token 的 waiter，释放实例锁后 flush wake queue；阻塞 read 使用 Park
 ## 跨驱动规则
 
 1. **禁止反向顺序。** 如果必须在持有驱动锁时获取全局锁，需要在本文档中把它记录为局部顺序。未记录的嵌套就是 bug。
-2. **禁止在 spinlock 下阻塞。** 任何可能阻塞的路径都必须先释放所有 spinlock。
+2. **禁止在 spinlock 下阻塞。** 任何可能阻塞的路径都必须先释放所有 spinlock。需要跨命令等待保持串行化时，使用可睡眠 `mutex_t` 而不是 spinlock，并按 [标准完成模型](runtime-contracts.md#标准完成模型irq-hybrid) park。
 3. **除非已记录，否则禁止在驱动锁下执行 VFS 和分配。** 唯一已记录的例外是：
    - `PTY` 分配在 `g_pty_alloc_lock` 下执行 `kmalloc`。
    驱动完成路径若需要唤醒任务，只能在驱动锁内 collect，在解锁后 flush。
-4. **新的设备锁** 必须符合全局顺序（`driver registry/IRQ locks -> device-private locks`），或在使用前向本文档增加局部顺序条目。
+4. **IRQ top-half 不获取实例 mutex。** IRQ 上下文只能使用内部自锁的 `wait_queue_t` 移交唤醒；handler 不得推进提交者拥有的 ring 状态（AHCI 的 `last_is` 移交是已记录的模式）。这保证了"持 mutex park"不会形成锁序环。
+5. **新的设备锁** 必须符合全局顺序（`driver registry/IRQ locks -> device-private locks`），或在使用前向本文档增加局部顺序条目。
 
 > 不要这样做
 > 在设备锁下调用 `kmalloc`、VFS 或 scheduler；在 spinlock 里轮询硬件直到超时；临时发明一种“先拿设备锁，再拿 proc_lock”的嵌套。这些都会在 `make check-concurrency-foundation` 或 SMP smoke 测试里变成死锁或数据竞争。新增锁顺序前请先跑过 [测试门禁](../testing/testing-gates.md)。
