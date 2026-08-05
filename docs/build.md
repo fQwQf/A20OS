@@ -7,8 +7,7 @@
 项目根目录提供 `Dockerfile`，可一键构建全架构交叉编译环境：
 
 ```bash
-docker build -t a20os-buildenv .
-docker run -it --rm -v $(pwd):/workspace -w /workspace a20os-buildenv bash
+docker build -t a20os-buildenv .docker run -it --rm -v $(pwd):/workspace -w /workspace a20os-buildenv bash
 ```
 
 ## 最常用的构建与运行命令
@@ -76,8 +75,7 @@ make run-gui-riscv64 QEMU_GUI_AUDIO_DEVICE=virtio
 启动后可在终端直接验证 PCM 输出：
 
 ```bash
-audioplay --tone 440
-audioplay music.wav
+audioplay --tone 440audioplay music.wav
 ```
 
 WAV 输入必须是 48 kHz、双声道、S16_LE PCM；原始 PCM 使用 `audioplay --raw file.pcm`。播放器通过 `GET_CAPS` 自动寻找 PCM 设备，不假定具体驱动或动态编号。PCM 客户端可使用 `A20_AUDIO_IOCTL_DRAIN` 等待已提交音频播放完毕，关闭设备时也会自动 drain。宿主使用 PipeWire 而不提供 PulseAudio 兼容服务时，可执行 `make run-gui-x86_64 QEMU_GUI_AUDIO_DRIVER=pipewire`。

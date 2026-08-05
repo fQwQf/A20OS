@@ -29,8 +29,7 @@ sudo apt-get install gcc binutils grub-common grub-pc-bin xorriso mtools
 构建：
 
 ```sh
-make ARCH=x86_64 ABI=both kernel-only -j4
-make vbox-iso-x86_64
+make ARCH=x86_64 ABI=both kernel-only -j4make vbox-iso-x86_64
 ```
 
 第二条命令会递归用 `ARCH=x86_64 ABI=both BRINGUP=0` 执行完整 `dev-build`，再由 `tools/mk_grub_iso.sh` 生成：
@@ -60,9 +59,7 @@ make vbox-iso-x86_64
 VirtualBox 的 VMSVGA 向 guest 暴露 VMware SVGA II PCI 设备 `15ad:0405`。成功路径应依次出现：
 
 ```text
-[BUS] pci ... id=15ad:0405 ...
-[GPU] ... ready ...
-[DRIVER] device ... bound to driver 'vmsvga'
+[BUS] pci ... id=15ad:0405 ...[GPU] ... ready ...[DRIVER] device ... bound to driver 'vmsvga'
 ```
 
 用户态随后通过 `/dev/fb0` 获取模式和映射 framebuffer。黑屏时先检查 PCI 枚举和驱动 ready 日志，再检查 VMSVGA 选择；不要只通过桌面是否启动判断 probe。VBoxVGA/VBoxSVGA 是不同协议，当前驱动不保证支持。
@@ -74,12 +71,9 @@ VirtualBox 的 VMSVGA 向 guest 暴露 VMware SVGA II PCI 设备 `15ad:0405`。�
 完整 `dev-build` 会在同一构建目录生成 `fat32.img` 和 `ext4.img`。先复制一份测试镜像，避免对唯一数据做写测试。然后转换成新 VDI：
 
 ```sh
-VBoxManage convertfromraw \
-  .kernel-build/x86_64-qemu-virt-x86_64-both-dev/fat32.img \
-  a20os-fat32-test.vdi --format VDI
+VBoxManage convertfromraw \.kernel-build/x86_64-qemu-virt-x86_64-both-dev/fat32.img \a20os-fat32-test.vdi --format VDI
 
-VBoxManage storageattach "A20OS" --storagectl "SATA" \
-  --port 0 --device 0 --type hdd --medium a20os-fat32-test.vdi
+VBoxManage storageattach "A20OS" --storagectl "SATA" \--port 0 --device 0 --type hdd --medium a20os-fat32-test.vdi
 ```
 
 控制器名可能不是 `SATA`；用以下命令查实际名称后替换：
@@ -106,9 +100,7 @@ VM 网络适配器选择 `Intel PRO/1000 MT Desktop (82540EM)`。A20OS 应枚举
 最小证据：
 
 ```text
-[BUS] pci ... id=8086:100e ...
-[E1000] ready: mac=... link=up
-[LWIP] ... attached ...
+[BUS] pci ... id=8086:100e ...[E1000] ready: mac=... link=up[LWIP] ... attached ...
 ```
 
 只有 E1000 ready、没有 lwIP attach 时检查 class 注册和网络配置；没有 E1000 ready 时检查 PCI ID/BAR。网络测试至少包括收发、无包 poll、ring wrap、队列满和最大帧。当前 E1000 只实现 82540EM，不能用宽泛 Intel 网卡 ID 表假定其他型号兼容。
@@ -148,17 +140,7 @@ PS/2 键盘鼠标用于确认 VM 基础交互，但不能证明目标 input clas
 ## 验收记录模板
 
 ```text
-VirtualBox version:
-Host architecture:
-A20OS commit/diff:
-Build command:
-ISO path and checksum:
-VM graphics/storage/network/input configuration:
-Enumerated PCI ID and BARs:
-Bound driver and ready line:
-Class consumer line:
-I/O performed and result:
-Known untested features:
+VirtualBox version:Host architecture:A20OS commit/diff:Build command:ISO path and checksum:VM graphics/storage/network/input configuration:Enumerated PCI ID and BARs:Bound driver and ready line:Class consumer line:I/O performed and result:Known untested features:
 ```
 
 完整提交清单和跨平台构建矩阵见 [构建、测试与提交](../drivers/testing-and-submission.md)。

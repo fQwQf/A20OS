@@ -153,8 +153,7 @@ Linux ABI 的 syscall 路径为 `syscall_dispatch → linux_syscall_lookup → s
 **新增数据结构**：
 
 ```c
-// 通道类型签名
-typedef struct a20_channel_type {
+// 通道类型签名typedef struct a20_channel_type {
     uint32_t version;            // 结构体版本化（遵循 ABI 演进规则）
     uint32_t send_handle_types;  // bitmask: 可发送的 handle 类型
     uint32_t recv_handle_types;  // bitmask: 可接收的 handle 类型
@@ -640,9 +639,7 @@ $U$ 只能操作 socket 类型对象，最多 30 秒，最多 1000 次操作。�
 
 **定义 7.2（委托链时态衰减）** 设委托链 $P = A_0 \xrightarrow{d_1} A_1 \xrightarrow{d_2} \cdots \xrightarrow{d_n} A_n$，其中 $d_i$ 是第 $i$ 步的委托操作。定义链的有效时态参数：
 
-$$E_{chain}(P) = \min_{i=0}^{n} expiry(h_{A_i})$$
-$$N_{chain}(P) = \min_{i=0}^{n} remaining\_ops(h_{A_i})$$
-$$\rho_{chain}(P) = \bigcap_{i=0}^{n} rights(h_{A_i})$$
+$$E_{chain}(P) = \min_{i=0}^{n} expiry(h_{A_i})$$$$N_{chain}(P) = \min_{i=0}^{n} remaining\_ops(h_{A_i})$$$$\rho_{chain}(P) = \bigcap_{i=0}^{n} rights(h_{A_i})$$
 
 **定理 7.2（委托链能力耗散）** 委托链终端 $A_n$ 的有效权限随链长度 $n$ 单调不增：
 
@@ -745,15 +742,7 @@ $$\text{Safe}_{combined}(\sigma) = \text{TemporalSafe}(\sigma) \wedge \text{Type
 不可信组件 $U$ 被隔离在沙箱进程中（§4 P5 Fork-Sandbox），通过类型化通道与主进程通信，所有 handle 具有时态约束：
 
 ```
-主进程 P
-  │  task_spawn(U, H_inject={channel_ep, timer})
-  │  channel 类型 T: send={socket}, recv={}, max_data=4KB
-  │  时态: expiry=30s, ops=1000
-  v
-沙箱进程 U
-  ├── h0: channel endpoint (rights={W}, expiry=30s, ops=1000)
-  ├── h1: timer (rights={Stat,Control}, expiry=30s)
-  └── 无其他 handle
+主进程 P│  task_spawn(U, H_inject={channel_ep, timer})│  channel 类型 T: send={socket}, recv={}, max_data=4KB│  时态: expiry=30s, ops=1000v沙箱进程 U├── h0: channel endpoint (rights={W}, expiry=30s, ops=1000)├── h1: timer (rights={Stat,Control}, expiry=30s)└── 无其他 handle
 ```
 
 **形式化保证**（由定理 7.1 + 定理 4.2 + 定理 3.1 联合给出）：
@@ -832,21 +821,13 @@ $$\alpha = \frac{|\{(p_i, c_j) \mid p_i \text{ 使用 Native ABI 且 } c_j \text
 ```
 攻击者 A ──channel(c1)──> Deputy D ──channel(c2)──> 资源服务 R
 
-c1 的类型约束: send={}, recv={file}        (D 只能从 A 接收 file handle)
-c2 的类型约束: send={file}, recv={file}    (D 只能向 R 发送/接收 file handle)
+c1 的类型约束: send={}, recv={file}        (D 只能从 A 接收 file handle)c2 的类型约束: send={file}, recv={file}    (D 只能向 R 发送/接收 file handle)
 
-D 的 handle table:
-  h0: channel c1 endpoint (rights={R,W}, type constraint enforced)
-  h1: channel c2 endpoint (rights={R,W}, type constraint enforced)
-  h2: file F (rights={R}, expiry=300s, ops=50)
+D 的 handle table:h0: channel c1 endpoint (rights={R,W}, type constraint enforced)h1: channel c2 endpoint (rights={R,W}, type constraint enforced)h2: file F (rights={R}, expiry=300s, ops=50)
 
-A 试图让 D 传递 task handle 给 R:
-  A → c1.send(task_handle) → CH-TYPED-SEND-ERR: τ(task) ∉ c1.recv_handle_types
-  → 拒绝。攻击失败。
+A 试图让 D 传递 task handle 给 R:A → c1.send(task_handle) → CH-TYPED-SEND-ERR: τ(task) ∉ c1.recv_handle_types→ 拒绝。攻击失败。
 
-A 试图让 D 读取 shm 并通过 c2 发送:
-  D 没有 shm handle → handle_lookup 失败
-  → 拒绝。攻击失败。
+A 试图让 D 读取 shm 并通过 c2 发送:D 没有 shm handle → handle_lookup 失败→ 拒绝。攻击失败。
 ```
 
 **定理 8.3（多类型通道的 confused deputy 防御）** 设 deputy $D$ 通过类型为 $T_1$ 的 channel $c_1$ 与攻击者 $A$ 通信，通过类型为 $T_2$ 的 channel $c_2$ 与资源 $R$ 通信。如果 $T_1.recv\_handle\_types \cap T_2.send\_handle\_types = \emptyset$（$D$ 从 $A$ 可接收的类型和 $D$ 向 $R$ 可发送的类型不相交），则 $A$ 无法通过 $D$ 将任何 handle 传递给 $R$。

@@ -14,10 +14,7 @@ make debug-riscv64
 在另一个终端启动 GDB：
 
 ```bash
-gdb-multiarch .kernel-build/riscv64-qemu-virt-riscv64-linux-bringup/kernel.elf
-(gdb) target remote :1234
-(gdb) break panic
-(gdb) continue
+gdb-multiarch .kernel-build/riscv64-qemu-virt-riscv64-linux-bringup/kernel.elf(gdb) target remote :1234(gdb) break panic(gdb) continue
 ```
 
 - 默认使用端口 `1234`。
@@ -26,11 +23,7 @@ gdb-multiarch .kernel-build/riscv64-qemu-virt-riscv64-linux-bringup/kernel.elf
 常用 GDB 命令：
 
 ```text
-(gdb) info registers          # 查看寄存器
-(gdb) bt                        # 尝试回溯
-(gdb) x/i $pc                   # 反汇编当前 PC
-(gdb) x/32i $pc-32              # 查看崩溃附近指令
-(gdb) print *task               # 查看任务结构体（若符号可用）
+(gdb) info registers          # 查看寄存器(gdb) bt                        # 尝试回溯(gdb) x/i $pc                   # 反汇编当前 PC(gdb) x/32i $pc-32              # 查看崩溃附近指令(gdb) print *task               # 查看任务结构体（若符号可用）
 ```
 
 ## 串口日志与 panic 输出
