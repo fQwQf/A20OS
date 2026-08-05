@@ -1,6 +1,8 @@
 #ifndef _MOUNT_SETUP_H
 #define _MOUNT_SETUP_H
 
+#include "drivers/block/block_dev.h"
+
 /*
  * Block-device mount strategy, split out of kernel/main.c.
  *
@@ -16,6 +18,7 @@
 
 #ifndef BRINGUP
 void mount_block_devices(void);
+int try_mount(block_dev_t *dev, const char *mnt, const char *fstype);
 #endif
 
 #endif /* _MOUNT_SETUP_H */

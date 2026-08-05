@@ -16,9 +16,11 @@
 #include "abi/native/errno.h"
 #include "abi/native/rights.h"
 #include "abi/native/syscall_entry.h"
+#include "abi/native/vmo.h"
 #include "sys_validate.h"
 #include "abi/native/ipc_internal.h"
 #include "drivers/core/udriver.h"
+#include "mm/frame.h"
 
 #define A20_ARG(n) (args->arg[(n)])
 
@@ -29,6 +31,9 @@ extern int64_t a20_handle_lookup_ref_internal(struct a20_ht_internal *ht,
                                                a20_rights_t required_rights,
                                                a20_handle_entry_t *out);
 extern void a20_object_release(void *object, uint16_t type);
+extern void a20_object_ref(void *object, uint16_t type);
+extern int64_t a20_handle_install(struct a20_ht_internal *ht, void *object,
+                                  uint16_t type, a20_rights_t rights);
 
 int64_t sys_a20_device_map_mmio(const a20_syscall_args_t *args)
 {
@@ -106,4 +111,115 @@ int64_t sys_a20_device_irq_unlisten(const a20_syscall_args_t *args)
     if (udriver_irq_unlisten(irq) < 0)
         return -A20_ERR_BAD_HANDLE;
     return A20_OK;
+}
+
+/*
+ * sys_a20_device_vmo_phys — DMA contract (M4): a user driver never
+ * supplies raw physical addresses; it allocates a VMO through the normal
+ * memory syscalls, materializes the pages, and asks the kernel for their
+ * physical addresses here.  VMO pages are never paged out, which provides
+ * the pin guarantee for DMA descriptors.
+ */int64_t sys_a20_device_vmo_phys(const a20_syscall_args_t *args)
+{
+    a20_device_vmo_phys_args_t *uargs =
+        (a20_device_vmo_phys_args_t *)A20_ARG(0);
+    if (!uargs) return -A20_ERR_FAULT;
+
+    a20_device_vmo_phys_args_t kargs;
+    A20_VALIDATE_AND_COPY(uargs, kargs);
+
+    task_t *cur = proc_current();
+    struct a20_ht_internal *ht = task_get_a20_ht(cur);
+    if (!ht) return -A20_ERR_BAD_HANDLE;
+
+    a20_handle_entry_t entry;
+    int64_t r = a20_handle_lookup_ref_internal(ht, kargs.vmo,
+                                               A20_OBJ_MEMORY,
+                                               A20_RIGHT_STAT, &entry);
+    if (r < 0) return r;
+
+    struct vmo *v = (struct vmo *)entry.object;
+    uint32_t n = v->page_count;
+    if (n > kargs.max_pages)
+        n = kargs.max_pages;
+    for (uint32_t i = 0; i < n; i++) {
+        pfn_t pfn = vmo_peek_page(v, i);
+        uint64_t pa = (pfn == PFN_NONE) ? 0 : (uint64_t)pfn_to_phys(pfn);
+        if (copy_to_user((void *)(kargs.out_paddrs +
+                                  (uint64_t)i * sizeof(uint64_t)),
+                         &pa, sizeof(pa)) < 0) {
+            a20_object_release(entry.object, entry.type);
+            return -A20_ERR_FAULT;
+        }
+    }
+    kargs.out_count = n;
+    a20_object_release(entry.object, entry.type);
+    if (a20_copy_struct_to_user(uargs, &kargs, sizeof(kargs)) < 0)
+        return -A20_ERR_FAULT;
+    return A20_OK;
+}
+
+typedef struct a20_device_block_attach_args {
+    uint32_t       size;
+    uint32_t       version;
+    a20_handle_t   ring_vmo;      /* one-page MEMORY handle */
+    uint32_t       _pad;
+    uint64_t       capacity;      /* sectors */
+    uint64_t       out_doorbell;  /* out: channel endpoint handle */
+} a20_device_block_attach_args_t;
+
+extern int udisk_attach(struct vmo *vmo, uint64_t capacity,
+                        a20_channel_ep_t **out_doorbell, int owner_pid);
+
+int64_t sys_a20_device_block_attach(const a20_syscall_args_t *args)
+{
+    a20_device_block_attach_args_t *uargs =
+        (a20_device_block_attach_args_t *)A20_ARG(0);
+    if (!uargs) return -A20_ERR_FAULT;
+
+    a20_device_block_attach_args_t kargs;
+    A20_VALIDATE_AND_COPY(uargs, kargs);
+
+    task_t *cur = proc_current();
+    struct a20_ht_internal *ht = task_get_a20_ht(cur);
+    if (!ht) return -A20_ERR_BAD_HANDLE;
+
+    a20_handle_entry_t entry;
+    int64_t r = a20_handle_lookup_ref_internal(ht, kargs.ring_vmo,
+                                               A20_OBJ_MEMORY,
+                                               A20_RIGHT_READ | A20_RIGHT_WRITE,
+                                               &entry);
+    if (r < 0) return r;
+    struct vmo *vmo = (struct vmo *)entry.object;
+
+    a20_channel_ep_t *ubd_ep = NULL;
+    r = udisk_attach(vmo, kargs.capacity, &ubd_ep, cur->pid);
+    a20_object_release(entry.object, entry.type);
+    if (r < 0 || !ubd_ep)
+        return -A20_ERR_ACCESS;
+
+    /* Hand the driver its doorbell endpoint (a new handle + ref). */
+    a20_object_ref(ubd_ep, A20_OBJ_CHANNEL_ENDPOINT);
+    int64_t h = a20_handle_install(ht, ubd_ep, A20_OBJ_CHANNEL_ENDPOINT,
+                                   A20_RIGHT_READ | A20_RIGHT_WRITE);
+    if (h < 0) {
+        a20_object_release(ubd_ep, A20_OBJ_CHANNEL_ENDPOINT);
+        return h;
+    }
+    kargs.out_doorbell = (uint64_t)h;
+    if (a20_copy_struct_to_user(uargs, &kargs, sizeof(kargs)) < 0)
+        return -A20_ERR_FAULT;
+    return A20_OK;
+}
+
+extern int udisk_complete(int pid, uint32_t n_done);
+
+int64_t sys_a20_device_block_complete(const a20_syscall_args_t *args)
+{
+    uint32_t n_done = (uint32_t)A20_ARG(0);
+    task_t *cur = proc_current();
+    if (!cur)
+        return -A20_ERR_BAD_HANDLE;
+    return udisk_complete(cur->pid, n_done) < 0
+        ? -A20_ERR_BAD_HANDLE : A20_OK;
 }
