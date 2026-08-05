@@ -2,6 +2,31 @@
 
 本文档记录 A20OS 当前的工程瓶颈和剩余改进工作。它基于当前代码和文档，而不是未来设计意图。
 
+## P0：混合内核改造（Native ABI 本体化）
+
+改造定位、边界原则与阶段验收标准见
+[../hybrid-kernel/03-refactor-plan.md](../hybrid-kernel/03-refactor-plan.md)。
+本节只跟踪各阶段的工程完成度。
+
+- [x] 阶段一：核心原语契约化（句柄 rights 代数、channel 背压、EventQ 语义、VMO 生命周期）。
+  - 证据：`user/tests/test_native_contract.c` 全分区通过；副产品：修复
+    `CHANNEL_ENDPOINT`/`EVENT_QUEUE` 类型掩码缺 STAT 导致句柄不可 query 的
+    ABI 缺陷（`kernel/abi/native/handle_table.c`）。
+  - 验证：`make smoke-native-contract`（riscv64 PASS）；loongarch64 构建通过。
+  - 备注：验证期间发现 main HEAD（a7eb6d2）存在与本阶段无关的线程/阻塞
+    路径挂起回归（见 `docs/hybrid-kernel/STATUS.md` 基线回归观察），既有
+    线程类 native smoke 的回归验证在其收敛前受阻。
+- [ ] 阶段二：Native ABI SMP 正确性收口（native-shmring SMP=2/8 偶发破坏）。
+  - 证据：`docs/hybrid-kernel/STATUS.md` 已知边界；诊断挂载点 `frame_trace_dump_pfn`、`[VMO-PAGE]`。
+  - 完成条件：`smoke-native-shmring` SMP=2/8 连续 20 轮零失败。
+- [ ] 阶段三：驱动双态部署框架 + IOMMU/DMA 真隔离。
+  - 证据：udriver 接口现状 `kernel/abi/native/sys_native_device.c`；DMA 信任模型见 STATUS 已知边界。
+  - 完成条件：同一驱动源码双态部署通过同一契约测试；未授权 DMA 被 IOMMU 硬件拒绝。
+- [ ] 阶段四：服务接口 IDL 化（替换 `user/svc/*_proto.h` 手写协议）。
+  - 完成条件：svcmgr/registry 协议由 IDL 生成；手写 proto 头退出活跃树。
+- [ ] 阶段五：Linux 人格层在 Native 原语上重建（starnix 式对照）。
+  - 完成条件：选定测例集在直通实现与人格层实现下同通过，语义 diff 与性能对照归档。
+
 ## P0：并发与 SMP 就绪
 
 - [x] 建立 tokenized Park/Wake，消除“检查条件后、真正睡眠前”的丢失唤醒窗口。
