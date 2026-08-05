@@ -39,6 +39,16 @@ typeset -i total=0
 
 lifetime_snapshot() {
     typeset label=$1
+    if [[ -w /proc/sys/vm/drop_caches ]]; then
+        sync || {
+            print "[BUILDSTORM-PROBE][LIFETIME][$label] sync failed"
+            return 1
+        }
+        print 3 >/proc/sys/vm/drop_caches || {
+            print "[BUILDSTORM-PROBE][LIFETIME][$label] drop_caches failed"
+            return 1
+        }
+    fi
     print "[BUILDSTORM-PROBE][LIFETIME][$label] begin"
     if [[ -r /proc/a20/task_lifetime ]]; then
         cat /proc/a20/task_lifetime
