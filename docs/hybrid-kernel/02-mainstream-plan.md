@@ -116,6 +116,30 @@
   完成时间 RPC；rtcd 崩溃后客户端自动重绑并再次成功；
 - 清单驱动启动：echod、rtcd 由同一份清单拉起。
 
+**结果（已达成，M3-v1）**
+
+- 内核（`kernel/abi/native/registry.c`）：启动时创建全局注册 channel
+  对；客户端点随每个 native 任务的 `start_info.service_registry`
+  下发（exec 与 `task_spawn` 两路都安装）；服务端点由监管者经
+  `registry_claim`（syscall `0x0A03`）认领，持有者死亡时在 EXITED
+  事件发出前自动释放认领（`a20_registry_task_exit`，与 udriver
+  清理同点）。
+- `user/svc/svcmgr.c`：认领注册表 + 清单拉起 rtcd + 应答 LOOKUP
+  （按名回复状态 + 句柄传递服务端点）+ EXITED 监控重启换端点。
+- `user/tests/test_native_registry.c`：**非监管者子孙**的独立进程，
+  用 start_info 里的注册端点按名解析 rtcd → 时间 RPC → 令其崩溃
+  → 轮询重新解析（监管者重启并换端点）→ RPC 恢复——
+  `smoke-native-registry` 通过。
+- 排障实录：注册表代码放在 `kernel/abi/native/`（linux-only 构建不
+  编译该目录），而 main.c/exit.c 常编译——链接断裂；调用点加
+  `CONFIG_ABI_NATIVE || CONFIG_ABI_BOTH` 守卫修复。
+- 已知限制（诚实记录）：注册表当前分发的是服务的**同一个**客户端
+  点，多客户端并发会共享请求队列（回复可能错配）——主流做法
+  （Fuchsia）是注册表/服务为每个客户端建新端点对并代理转发，
+  列为 M3-v2；声明式清单目前只有 rtcd 一项。
+- 回归：全部 native smoke + `smoke-clock-vdso` + `smoke-mm-stress` +
+  `smoke-vfs-stress` + ABI=linux 构建全绿。
+
 ## M4：virtio-blk 用户态驱动（最硬的验证）
 
 **动机**：这是"主流水平"的试金石——一个真实吞吐设备驱动运行在

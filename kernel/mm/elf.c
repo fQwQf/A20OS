@@ -1309,7 +1309,8 @@ vaddr_t elf_setup_stack_a20(vaddr_t stack_top, int argc, char *const argv[],
                             uint32_t stdin_h, uint32_t stdout_h,
                             uint32_t stderr_h, uint32_t self_task_h,
                             uint32_t root_h, uint32_t cwd_h,
-                            uint32_t inherited_fd_limit)
+                            uint32_t inherited_fd_limit,
+                            uint32_t registry_h)
 {
     if (argc < 0 || argc > MAX_ARG_STRINGS)
         return 0;
@@ -1378,6 +1379,7 @@ vaddr_t elf_setup_stack_a20(vaddr_t stack_top, int argc, char *const argv[],
         si.self_task = self_task_h;
         si.root_dir = root_h;
         si.cwd_dir = cwd_h;
+        si.service_registry = registry_h;
         si.page_size = PAGE_SIZE;
         if (stack_copy(pgdir, sp_va, &si, sizeof(si), &stack_bottom) < 0)
             return 0;
