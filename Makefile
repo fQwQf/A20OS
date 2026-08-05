@@ -640,6 +640,28 @@ endif
 # Object files
 KERNEL_OBJ = $(patsubst $(KERNEL_DIR)/%.c,$(BUILD_DIR)/%.o,$(KERNEL_SRC))
 
+# vDSO user image (riscv64): built out-of-tree of ASM_SRC on purpose, it is
+# user code linked with its own script.  The vdso.elf FILE is embedded
+# verbatim: p_offset == p_vaddr makes file layout == memory layout, ELF
+# header included (objcopy -O binary would strip the header and break
+# musl's vDSO parser).
+VDSO_CC   ?= $(RISCV_GNU_CC)
+VDSO_SRC_DIR := $(KERNEL_DIR)/vdso/$(ARCH)
+VDSO_ELF  := $(BUILD_DIR)/vdso/vdso.elf
+VDSO_BLOB := $(BUILD_DIR)/vdso/vdso_blob.o
+ifeq ($(ARCH),riscv64)
+KERNEL_OBJ += $(VDSO_BLOB)
+endif
+
+$(VDSO_ELF): $(VDSO_SRC_DIR)/vdso.S $(VDSO_SRC_DIR)/vdso.ld
+	@mkdir -p $(dir $@)
+	$(VDSO_CC) -nostdlib -nostartfiles -shared -Wl,--build-id=none \
+	    -Wl,--hash-style=sysv -T $(VDSO_SRC_DIR)/vdso.ld -o $@ $<
+
+$(VDSO_BLOB): $(VDSO_ELF)
+	cd $(BUILD_DIR)/vdso && $(OBJCOPY) -I binary -O elf64-littleriscv \
+	    -B riscv:rv64 vdso.elf vdso_blob.o
+
 # ASM sources
 ASM_SRC = $(shell find $(KERNEL_DIR)/arch/$(ARCH) -type f -name '*.S' | sort)
 ASM_OBJ = $(patsubst $(KERNEL_DIR)/%.S,$(BUILD_DIR)/%.o,$(ASM_SRC))
@@ -677,6 +699,7 @@ VBOX_AARCH64_LOAD_ADDRESS ?= 0x08080000ULL
 		native-ipc-arch native-ipc-rv native-ipc-la smoke-native-ipc \
 		native-svc-arch native-svc-rv smoke-native-svc \
 		native-shmring-arch native-shmring-rv smoke-native-shmring \
+		smoke-clock-vdso \
 		native-test-rv native-test-la native-test-aarch64 native-test-x86_64 native-test-arm32 native-test-rv32 native-test-ppc64le native-test native-test-all \
 		native-minimal-rv native-minimal-la native-minimal \
 		native-handle-test-rv native-handle-test-la native-handle-test-aarch64 native-handle-test-x86_64 native-handle-test-arm32 native-handle-test-rv32 native-handle-test-ppc64le native-handle-test native-handle-test-all \
@@ -3381,6 +3404,29 @@ smoke-native-shmring:
 		echo "smoke-native-shmring: PASS; log saved to $$log"; \
 	else \
 		echo "smoke-native-shmring: failed with status $$status; tail of $$log:"; \
+		tail -n 80 "$$log"; \
+		exit 1; \
+	fi
+
+smoke-clock-vdso:
+	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/clock-vdso-riscv64.log"; \
+	status=0; \
+	{ sleep $(SMOKE_INPUT_DELAY); printf '/bin/clock_bench\npoweroff\n'; } | \
+	$(TIMEOUT) 60s qemu-system-riscv64 \
+		-machine virt -m 1G -nographic -smp 1 -bios default \
+		-global virtio-mmio.force-legacy=false \
+		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-both-dev/fat32.img,if=none,format=raw,id=x0 \
+		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		-kernel .kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf \
+		> "$$log" 2>&1 || status=$$?; \
+	if grep -q 'CLOCK_BENCH: PASS' "$$log" && grep -q 'System is going down for power-off NOW' "$$log"; then \
+		echo "smoke-clock-vdso: PASS; log saved to $$log"; \
+	else \
+		echo "smoke-clock-vdso: failed with status $$status; tail of $$log:"; \
 		tail -n 80 "$$log"; \
 		exit 1; \
 	fi
