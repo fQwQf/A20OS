@@ -333,7 +333,16 @@ proc_wake_reason_t proc_park_commit_donate(proc_wait_token_t token,
     task->state = PROC_BLOCKED;
 
     unsigned cur_cpu = cpu_current_id();
-    int can_donate = donate_to && donate_to != task &&
+    int can_donate =
+#if CONFIG_NR_CPUS > 1
+        /* The donated task is switched to without a runqueue selection and
+         * without the IPI/reschedule bookkeeping the SMP scheduler requires
+         * (kernel/proc/current.c: PER_CPU_CURRENT_VALIDATION).  The donation
+         * fast path is therefore UP-only; SMP always takes the verified
+         * normal park/wake path. */
+        0 &&
+#endif
+        donate_to && donate_to != task &&
         donate_to->park_state == PROC_PARK_PARKED &&
         donate_to->state == PROC_BLOCKED &&
         !donate_to->on_cpu && !donate_to->on_rq &&

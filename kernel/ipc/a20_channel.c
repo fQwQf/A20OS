@@ -411,7 +411,8 @@ int64_t a20_channel_recv_begin_donate(a20_channel_ep_t *ep, uint32_t flags,
     if (flags & ~A20_MSG_NONBLOCK) return -A20_ERR_INVALID_ARGUMENT;
 
     refcount_inc(&ep->refcount);
-    int donate = 1;
+    /* Donation is UP-only (proc_park_commit_donate is a no-op on SMP). */
+    int donate = (CONFIG_NR_CPUS == 1) ? 1 : 0;
 
     for (;;) {
         spin_lock(&ep->lock);
