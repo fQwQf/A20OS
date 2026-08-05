@@ -34,8 +34,7 @@ static const device_id_t ids[] = {
 probe 首先：
 
 ```c
-int ret = pci_enable_and_assign_bars(dev);
-if (ret < 0)
+int ret = pci_enable_and_assign_bars(dev);if (ret < 0)
     return ret;
 resource_t *regs = pci_get_bar_resource(dev, 0);
 ```
@@ -65,8 +64,7 @@ static driver_t my_driver = {
 完整生命周期示例：
 
 ```c
-/* 1. 注册驱动 */
-static driver_t my_pci_driver = {
+/* 1. 注册驱动 */static driver_t my_pci_driver = {
     .name       = "my-pci-device",
     .bus        = &pci_bus,
     .id_table   = my_ids,
@@ -74,12 +72,9 @@ static driver_t my_pci_driver = {
     .remove     = my_pci_remove,
     .class_type = DEV_CLASS_BLOCK,
     .class_ops  = &my_ops,
-};
-DRIVER_REGISTER(my_pci_driver);
+};DRIVER_REGISTER(my_pci_driver);
 
-/* 2. probe：启用 BAR、初始化 transport、注册类 */
-static int my_pci_probe(device_t *dev)
-{
+/* 2. probe：启用 BAR、初始化 transport、注册类 */static int my_pci_probe(device_t *dev){
     my_pci_dev_t *d = kzalloc(sizeof(*d));
     if (!d) return -ENOMEM;
 
@@ -101,9 +96,7 @@ fail:
     return -ENODEV;
 }
 
-/* 3. remove：停止 I/O、释放资源 */
-static int my_pci_remove(device_t *dev)
-{
+/* 3. remove：停止 I/O、释放资源 */static int my_pci_remove(device_t *dev){
     my_pci_dev_t *d = dev->drv_priv;
     stop_queues(d);
     kfree(d);
@@ -117,9 +110,10 @@ PCI 协议驱动只能依赖以下公共输入：
 
 - `device_t`、`matched_id` 与 `pci_class_code()` 提供身份；
 - `pci_enable_and_assign_bars()` 与 `pci_get_bar_resource()` 提供可访问 MMIO；
+- `pci_intx_irq()` 提供平台路由后的 INTx 中断标识（-1 表示平台无路由，驱动进入轮询降级）；
 - `read*/write*` 提供有序寄存器访问；
 - `dma_alloc_coherent_aligned()` 返回 CPU 地址和设备 DMA handle，`dma_sync_for_*()` 转移可见性；
-- `request_irq/free_irq` 提供中断能力，或由驱动明确记录轮询模式。
+- `request_irq/free_irq` 提供中断能力。PCI 配置空间 0x3C 的 IRQ Line 寄存器不是可用中断标识，禁止据此注册。
 
 驱动不得包含架构私有 `platform.h`，不得自行加 `PAGE_OFFSET`，也不得假定 DMA handle 等于 CPU 指针。平台若缺少 PCI 枚举、BAR 窗口分配或正确 DMA/cache hook，应在平台层补齐；不能用 `CONFIG_<ARCH>` 把通用协议代码隐藏起来。
 
@@ -144,12 +138,11 @@ NVMe controller 启用前必须由 `CAP.CSS` 声明 NVM command set，并由 `CA
 modern PCI 初始化：
 
 ```c
-virtio_transport_t vt;
-if (pci_virtio_transport_init(dev, VIRTIO_ID_SCSI, &vt) < 0)
+virtio_transport_t vt;if (pci_virtio_transport_init(dev, VIRTIO_ID_SCSI, &vt) < 0)
     return -ENODEV;
 ```
 
-helper 要求 capability list 中存在 common cfg、notify cfg、device cfg 和有效 notify multiplier。当前 PCI transport 设置 `irq = -1`，采用轮询。
+helper 要求 capability list 中存在 common cfg、notify cfg、device cfg 和有效 notify multiplier。PCI transport 通过 `arch_pci_intx_irq()` 解析 INTx 中断并填入 `transport->irq`（平台无路由时为 -1，驱动保持轮询），同时置 `transport->shared_irq = 1`：驱动注册 handler 时必须据此携带 `IRQF_SHARED`，注册失败必须显式回退轮询（`vt->irq = -1`）并保持设备中断屏蔽。完整范式见 [运行时契约 — 标准完成模型](runtime-contracts.md#标准完成模型irq-hybrid)。
 
 ## VirtIO feature 协商
 
@@ -160,8 +153,7 @@ helper 要求 capability list 中存在 common cfg、notify cfg、device cfg 和
 典型协商流程：
 
 ```c
-static int virtio_negotiate(virtio_transport_t *vt)
-{
+static int virtio_negotiate(virtio_transport_t *vt){
     vt->write32(vt, VIRTIO_MMIO_STATUS, 0);
     vt->write32(vt, VIRTIO_MMIO_STATUS,
                  VIRTIO_CONFIG_S_ACKNOWLEDGE | VIRTIO_CONFIG_S_DRIVER);
@@ -196,8 +188,7 @@ descriptor 包含 DMA 地址、长度、flags 和 next。设备可读 descriptor
 VirtIO-SCSI data-in 的链顺序是 request -> response -> data-in；VirtualBox 会在首个 writable descriptor 处分割 outbound/inbound，因此不能把 data-in 放到 response 前。
 
 ```c
-/* 构造一次请求：desc[0] 设备可读，desc[1] 设备可写 */
-static int submit_request(vq_t *vq, void *out, size_t out_len,
+/* 构造一次请求：desc[0] 设备可读，desc[1] 设备可写 */static int submit_request(vq_t *vq, void *out, size_t out_len,
                           void *in, size_t in_len)
 {
     uint16_t head = vq->free_head;
