@@ -226,6 +226,7 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval) {
 #endif
 
     if (t->mm->stack_top != 0) {
+
         uint64_t stack_size_limit = t->limits.stack ? t->limits.stack : USER_STACK_MAX_SIZE;
         if (stack_size_limit > USER_STACK_MAX_SIZE)
             stack_size_limit = USER_STACK_MAX_SIZE;
@@ -277,6 +278,7 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval) {
 
     vm_area_t *vma = mm_find_vma(t->mm, page_va);
     if (vma) {
+
         if (pte && (*pte & PTE_V)) return -1;
         if (!mm_pte_flags_allow_access(vma->pte_flags)) return -1;
 
@@ -363,6 +365,7 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval) {
                 return -ENOMEM;
             if (r != 0 || vpfn == PFN_NONE)
                 return -1;
+
 
             if (pt_map(t->mm->pgdir, page_va, pfn_to_phys(vpfn),
                        vma->pte_flags) < 0)
