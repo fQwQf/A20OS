@@ -162,6 +162,7 @@ tcp_input(struct pbuf *p, struct netif *inp)
     u16_t chksum = ip_chksum_pseudo(p, IP_PROTO_TCP, p->tot_len,
                                     ip_current_src_addr(), ip_current_dest_addr());
     if (chksum != 0) {
+
       LWIP_DEBUGF(TCP_INPUT_DEBUG, ("tcp_input: packet discarded due to failing checksum 0x%04"X16_F"\n",
                                     chksum));
       tcp_debug_print(tcphdr);
@@ -178,6 +179,7 @@ tcp_input(struct pbuf *p, struct netif *inp)
     TCP_STATS_INC(tcp.lenerr);
     goto dropped;
   }
+
 
   /* Move the payload pointer in the pbuf so that it points to the
      TCP data instead of the TCP header. */
@@ -1155,6 +1157,7 @@ tcp_receive(struct tcp_pcb *pcb)
 {
   s16_t m;
   u32_t right_wnd_edge;
+
 
   LWIP_ASSERT("tcp_receive: invalid pcb", pcb != NULL);
   LWIP_ASSERT("tcp_receive: wrong state", pcb->state >= ESTABLISHED);
