@@ -514,10 +514,7 @@ static int exec_install_process(task_t *t,
                                  const char *abs_path,
                                  const kstat_t *st)
 {
-    /* ---- 1. Close file descriptors with FD_CLOEXEC ---- */
-    fdtable_close_on_exec(t);
-
-    /* ---- 2. Build user stack (Linux or Native ABI) ---- */
+    /* ---- 1. Build user stack (Linux or Native ABI) ---- */
     uint64_t sp;
     vaddr_t native_start_info = 0;
 #ifdef CONFIG_ABI_NATIVE
@@ -559,7 +556,7 @@ static int exec_install_process(task_t *t,
     t->abi_mode = 0;
 #endif
 
-    /* ---- 3. Create new mm BEFORE detaching old ---- */
+    /* ---- 2. Create new mm BEFORE detaching old ---- */
     mm_struct_t *new_mm = kcalloc(1, sizeof(mm_struct_t));
     if (!new_mm)
         return -ENOMEM;
@@ -595,7 +592,22 @@ static int exec_install_process(task_t *t,
     /* Map architecture-specific signal return trampoline page. */
     arch_setup_signal_trampoline(new_mm);
 
-    /* ---- 4. Atomically swap mm ---- */
+    /*
+     * Linux exec is a thread-group operation.  A pthread shares its fdtable
+     * with every sibling, so applying FD_CLOEXEC to that table would close
+     * epoll/eventfd descriptors out from under still-running workers.  Make
+     * the caller's table private first, request sibling exit while their old
+     * mm/files references remain valid, and mutate only the private table.
+     */
+    int fd_err = fdtable_unshare(t);
+    if (fd_err < 0) {
+        kfree(new_mm);
+        return fd_err;
+    }
+    proc_exec_terminate_siblings(t);
+    fdtable_close_on_exec(t);
+
+    /* ---- 3. Atomically swap mm ---- */
     uint64_t mm_swap_flags = spin_lock_irqsave(&proc_lock);
     mm_struct_t *old_mm    = t->mm;
     pt_root_t   *old_pgdir = t->pgdir;
@@ -609,10 +621,10 @@ static int exec_install_process(task_t *t,
     const char *base = strrchr(t->exec_path, '/');
     proc_set_name(t, base ? base + 1 : t->exec_path);
 
-    /* ---- 5. Reset signal handlers (POSIX exec semantics) ---- */
+    /* ---- 4. Reset signal handlers (POSIX exec semantics) ---- */
     signal_exec_reset(t);
 
-    /* ---- 6. Set up trap context for return to user ---- */
+    /* ---- 5. Set up trap context for return to user ---- */
     uint64_t saved_kernel_sp = (uint64_t)(uintptr_t)t->kstack_base + KERNEL_STACK_SIZE;
 
     if (!t->trap_ctx) {
@@ -654,13 +666,13 @@ static int exec_install_process(task_t *t,
         TRAP_CTX_STATUS(trap) = arch_user_initial_status();
     }
 
-    /* ---- 7. Apply SUID/SGID credentials ---- */
+    /* ---- 6. Apply SUID/SGID credentials ---- */
     t->exec_load_addr = info->load_addr;
     t->exec_load_size = info->load_size;
     if (st)
         proc_apply_exec_creds(t, st);
 
-    /* ---- 8. Switch page tables, destroy old address space ---- */
+    /* ---- 7. Switch page tables, destroy old address space ---- */
     arch_write_addr_space_token(arch_make_addr_space_token(info->pgdir));
     arch_tlb_flush();
 

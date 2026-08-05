@@ -335,6 +335,7 @@ int      proc_alloc_user_image(uintptr_t entry, vaddr_t sp, pt_root_t *pgdir,
 void     proc_free_pid(int pid);
 void     proc_exit(int exit_code) NORETURN;
 void     proc_exit_group(int exit_code) NORETURN;
+void     proc_exec_terminate_siblings(task_t *self);
 void     proc_force_exit(task_t *t, int exit_code);
 void     proc_check_exit_pending(void);
 int      proc_wait4(int pid, int *status, int options);

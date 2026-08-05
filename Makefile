@@ -1554,7 +1554,8 @@ smoke-proc-stress:
 		> "$$log" 2>&1 || status=$$?; \
 	if grep -q 'PROC_STRESS: PASS' "$$log" && \
 	   grep -q 'PROC_STRESS: signal-stop-exit PASS' "$$log" && \
-	   grep -q 'PROC_STRESS: signal-mask-park PASS' "$$log"; then \
+	   grep -q 'PROC_STRESS: signal-mask-park PASS' "$$log" && \
+	   grep -q 'PROC_STRESS: thread-exec-cloexec PASS' "$$log"; then \
 		echo "smoke-proc-stress: PASS; log saved to $$log"; \
 	else \
 		echo "smoke-proc-stress: failed with status $$status; tail of $$log:"; \
