@@ -61,6 +61,7 @@ void proc_sched_note_zombie(void);
 task_t *proc_current_on_cpu(unsigned cpu);
 int proc_task_is_current_any_cpu(task_t *task);
 int proc_sched_resume_stopped(task_t *task, int report_continued);
+int proc_sched_stop_for_debug(task_t *task, int sig);
 void proc_wake_child_waiters_locked(task_t *parent);
 void proc_switch_complete(void);
 

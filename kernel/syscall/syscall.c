@@ -10,6 +10,7 @@
 #include "core/klog.h"
 #include "core/timer.h"
 #include "proc/signal.h"
+#include "proc/debug.h"
 #include "sys/syscall.h"
 #include "sys/usercopy.h"
 
@@ -107,6 +108,16 @@ int64_t syscall_dispatch(trap_context_t *ctx)
     arch_syscall_adjust_args(&args);
     num = args.nr;
 
+    /*
+     * PT_DEBUG_SYSCALL_STOPS: a tracee resumed in syscall-stop mode stops
+     * before the syscall executes (entry stop; on resume the arch layer
+     * rewinds the saved EPC so the syscall runs) and again after it
+     * completes (exit stop, result visible in the registers).  The ptrace
+     * syscall itself is never stopped to avoid observer recursion.
+     */
+    if (num != SYS_ptrace)
+        proc_debug_syscall_entry(ctx);
+
     int64_t ret = -ENOSYS;
     int context_restored = 0;
     const linux_syscall_entry_t *entry = linux_syscall_lookup(args.nr);
@@ -138,6 +149,8 @@ int64_t syscall_dispatch(trap_context_t *ctx)
         context_restored = 0;
     }
     syscall_profile_record(num, start_time, syscall_profile_now());
+    if (num != SYS_ptrace)
+        proc_debug_syscall_exit(ctx);
     proc_check_exit_pending();
     signal_deliver_user(ctx);
     proc_check_exit_pending();

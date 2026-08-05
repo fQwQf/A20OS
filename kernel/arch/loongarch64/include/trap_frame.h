@@ -2,6 +2,7 @@
 #define _ARCH_LOONGARCH64_TRAP_H
 
 #include "core/types.h"
+#include "proc/debug_regs.h"
 #include "page_table.h"
 #include "platform.h"
 
@@ -213,6 +214,50 @@ static inline void arch_signal_restore_frame_extra(trap_context_t *ctx,
     }
     ctx->fcc = extra->lsx.fcc;
     ctx->fcsr = extra->lsx.fcsr;
+}
+
+/* ---- debugging interface (kernel/proc/debug.c) ---- */
+
+/* `syscall` is 4 bytes; rewind so a syscall-entry-stop resume re-executes. */
+static inline void arch_ptrace_rewind_syscall(trap_context_t *ctx) {
+    TRAP_CTX_EPC(ctx) -= 4;
+}
+
+/* No single-step support yet. */
+static inline void arch_ptrace_set_step(trap_context_t *ctx) {
+    (void)ctx;
+}
+
+/* Export into the generic register file; the ABI wrapper reorders into the
+ * Linux struct user_pt_regs layout. */
+static inline void arch_ptrace_export_regs(const trap_context_t *ctx,
+                                           proc_debug_regs_t *out) {
+    for (int i = 0; i < 32; i++)
+        out->regs[i] = ctx->regs[i];
+    out->pc = ctx->era;
+    out->sp = ctx->regs[3];
+    out->status = ctx->prmd;
+    out->orig_syscall = ctx->regs[11];
+    for (int i = 0; i < 32; i++) {
+        out->fp[2 * i]     = ctx->vr[i][0];
+        out->fp[2 * i + 1] = ctx->vr[i][1];
+    }
+    out->fcsr = ctx->fcsr;
+}
+
+static inline void arch_ptrace_import_regs(trap_context_t *ctx,
+                                           const proc_debug_regs_t *in) {
+    for (int i = 0; i < 32; i++)
+        ctx->regs[i] = in->regs[i];
+    ctx->era = in->pc;
+    ctx->regs[3] = in->sp;
+    ctx->prmd = in->status;
+    ctx->regs[11] = in->orig_syscall;
+    for (int i = 0; i < 32; i++) {
+        ctx->vr[i][0] = in->fp[2 * i];
+        ctx->vr[i][1] = in->fp[2 * i + 1];
+    }
+    ctx->fcsr = in->fcsr;
 }
 
 #endif
