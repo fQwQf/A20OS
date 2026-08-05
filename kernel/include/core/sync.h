@@ -42,6 +42,7 @@ bool wait_queue_link(wait_queue_t *q, wait_queue_entry_t *entry,
 void wait_queue_unlink(wait_queue_t *q, wait_queue_entry_t *entry);
 unsigned wait_queue_wake_one(wait_queue_t *q, uintptr_t key,
                              proc_wake_reason_t reason);
+struct task_t *wait_queue_peek_key(wait_queue_t *q, uintptr_t key);
 unsigned wait_queue_wake_all(wait_queue_t *q, uintptr_t key,
                              proc_wake_reason_t reason);
 unsigned wait_queue_collect_one(wait_queue_t *q, uintptr_t key,
