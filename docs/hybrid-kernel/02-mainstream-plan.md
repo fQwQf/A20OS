@@ -188,6 +188,43 @@
 - 崩溃重启后挂载点恢复、在飞写不损坏；
 - `smoke-vfs-stress` 对内核驱动的既有结果不回归。
 
+**结果（已达成，主流混合形态）**
+
+- **内核块代理**（`kernel/drivers/block/udisk.c`）：页缓存与文件系统
+  留在内核，通过普通 `block_dev_t`/bcache 接口消费本设备——FAT32
+  直接挂载到 `/ubd`（attach 后由内核线程 `try_mount`，避免挂载探测
+  在 attach syscall 内与驱动形成死锁）。块请求经**一页共享内存环**
+  转发给用户驱动，每个条目携带内核缓冲区的物理地址；完成由
+  `device_block_complete(n)` syscall 唤醒停驻的内核等待者。
+- **零拷贝数据面**：virtio DMA 直接写/读内核页缓存页的物理地址
+  （`data_pa = va_to_pa(buf)`），**没有任何数据字节穿过环或 channel**；
+  多扇区请求由驱动拆成 ≤32 扇区的描述符链（单链不能超过 virtqueue
+  深度）。驱动永不接触数据，只编排描述符。
+- **用户驱动**（`user/svc/ubd.c`）：MMIO 映射（udriver 授权）+ IRQ→
+  EventQ + 共享环服务循环；doorbell 消息必须真正被接收（不接收会让
+  64 条后的内核 `channel_send` 阻塞，实测死锁）。
+- 设备独占：virtio-mmio slot 3 在 udriver 表中标记 user-owned，内核
+  enumerate 跳过（slot 1/2 留给既有 vfs-stress 的 ext4/isofs，避免
+  抢占现有测试）。
+- 实测（TCG、smp=1，`ubd_fs_test`，4 MiB FAT32 文件 5 次读）：
+  冷读（首次，经用户驱动 + 页缓存填充）2442 ms = **1 MiB/s**；热读
+  （页缓存命中）3–13 ms = 292–1226 MiB/s。**页缓存完全吸收了用户
+  驱动路径**——这正是"页缓存留内核"的主流收益；冷读的 1 MiB/s 是
+  TCG 下每请求 doorbell+park+IRQ+双 32 扇区 virtio 链的代价。
+- 排障实录：①attach 内同步挂载与驱动形成互等死锁→内核线程挂载；
+  ②`pcache_entry_t` 的 `data[4096]` 内嵌于 kmalloc 结构——`va_to_pa`
+  对直接映射字节精确，非问题；③多扇区读驱动只传 1 扇区→FAT 目录
+  读返回垃圾，改多扇区描述符链；④槽位复用 `id%16` 无流控→旧请求
+  被覆盖，改 `in_flight` 计数上限；⑤doorbell channel 不接收→64 条
+  后内核阻塞死锁，改收件排空。
+- 与既有测试的冲突：udriver 曾占用 virtio slot 1，而 smoke-vfs-stress
+  的 ext4 也在 slot 1——移到 slot 3 后两者并存。
+- 回归：13 项 smoke（含 `smoke-native-ubd`、`smoke-vfs-stress`）全绿；
+  ABI=linux、loongarch64 构建通过。
+- 诚实边界：内核态 virtio-blk 冷读对照数据未做（需要一块同容量
+  内核驱动的基准盘，列入 M5 测量）；崩溃恢复（驱动死亡→代理标记
+  失败→重启重挂载）已设计未验证。
+
 ## M5：双架构对齐与真实测量
 
 - loongarch64：vDSO 移植（`rdtime.d`/`stable counter` + la64 vdso.S

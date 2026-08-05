@@ -22,11 +22,16 @@ typedef struct {
     uint64_t    base;
     uint64_t    size;
     const char *name;
+    uint8_t     user_owned;  /* kernel probe must skip this device */
 } udriver_mmio_window_t;
 
 static const udriver_mmio_window_t g_mmio_windows[] = {
 #ifdef CONFIG_BOARD_QEMU_VIRT_RISCV64
-    { 0x101000, 0x1000, "goldfish-rtc" },
+    { 0x101000, 0x1000, "goldfish-rtc", 1 },
+    /* virtio-mmio slot 3: reserved for the user-space virtio-blk pilot
+     * (docs/hybrid-kernel/02-mainstream-plan.md M4).  The kernel's
+     * virtio_mmio_enumerate() skips user-owned slots. */
+    { 0x10004000, 0x1000, "virtio-blk-user", 1 },
 #endif
 };
 
@@ -47,6 +52,18 @@ static int udriver_mmio_allowed(uint64_t phys, uint64_t size)
         if (phys >= wb && phys + size <= we)
             return 1;
     }
+    return 0;
+}
+
+/* Board device enumeration consults this before binding a kernel driver
+ * to a device that belongs to a user-space driver. */
+int udriver_mmio_user_owned(uint64_t phys)
+{
+    for (unsigned i = 0; i < UDRIVER_MMIO_WINDOWS_NR; i++)
+        if (g_mmio_windows[i].user_owned &&
+            phys >= g_mmio_windows[i].base &&
+            phys < g_mmio_windows[i].base + g_mmio_windows[i].size)
+            return 1;
     return 0;
 }
 
