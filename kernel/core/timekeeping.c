@@ -2,6 +2,7 @@
 #include "core/defs.h"
 #include "core/timer.h"
 #include "core/lock.h"
+#include "mm/vdso.h"
 #include "build_time.h"
 
 static uint64_t g_boot_ticks;
@@ -18,6 +19,14 @@ static void ticks_to_timespec(uint64_t ticks, uint64_t ts[2]) {
 void timekeeping_init(void) {
     g_boot_ticks = timer_get_ticks();
     timekeeping_set_realtime(A20_BUILD_UNIX_TIME, 0);
+}
+
+/* The vDSO image/vvar need the frame allocator, so they are set up after
+ * mm_init rather than here (kernel/main.c call order). */
+void timekeeping_vdso_init(void) {
+    vdso_init(g_boot_ticks, TICKS_PER_SEC);
+    vdso_sync_realtime(g_realtime_base_sec, g_realtime_base_nsec,
+                       g_realtime_base_ticks);
 }
 
 void timekeeping_get_monotonic(uint64_t ts[2]) {
@@ -51,5 +60,8 @@ int timekeeping_set_realtime(uint64_t sec, uint64_t nsec) {
     g_realtime_base_sec = sec;
     g_realtime_base_nsec = nsec;
     spin_unlock_irqrestore(&g_timekeeping_lock, flags);
+    /* Keep the vDSO realtime anchor in sync (seqlock on the reader side);
+     * pass the recorded tick so both paths agree bit for bit. */
+    vdso_sync_realtime(sec, nsec, g_realtime_base_ticks);
     return 0;
 }
