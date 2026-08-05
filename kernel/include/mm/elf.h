@@ -167,9 +167,12 @@ int elf_load_from_buf(const void *buf, size_t len, elf_load_info_t *info);
 int elf_check_header(const Elf64_Ehdr *eh);
 
 /* Build initial user stack with argc/argv/envp/auxv.
+ * vdso_ehdr, when nonzero, is published as AT_SYSINFO_EHDR (mm/vdso.h);
+ * the caller must have mapped the vDSO image at that address.
  * Returns new sp value. */
 vaddr_t elf_setup_stack(vaddr_t stack_top, int argc, char *const argv[],
-                        char *const envp[], const elf_load_info_t *info);
+                        char *const envp[], const elf_load_info_t *info,
+                        vaddr_t vdso_ehdr);
 
 #ifdef CONFIG_ABI_NATIVE
 vaddr_t elf_setup_stack_a20(vaddr_t stack_top, int argc, char *const argv[],

@@ -1,6 +1,7 @@
 #include "mm/vm.h"
 #include "mm/vm_internal.h"
 #include "mm/mm.h"
+#include "mm/vdso.h"
 #include "mm/frame.h"
 #include "mm/slab.h"
 #include "mm/vmo.h"
@@ -363,6 +364,14 @@ mm_struct_t *mm_fork(mm_struct_t *parent) {
                                 parent->stack_top, 0) < 0) {
             goto fail_locked;
         }
+    }
+
+    /* vDSO/vvar VMAs are VM_DONTFORK (skipped by the clone loops above);
+     * re-map the global frames explicitly so the child's AT_SYSINFO_EHDR
+     * stays valid (mm/vdso.h). */
+    if (parent->has_vdso) {
+        if (vdso_fork_map(child) < 0)
+            goto fail_locked;
     }
     spin_unlock_irqrestore(&parent->lock, parent_flags);
 

@@ -23,6 +23,7 @@
 #include "fs/vfs/path.h"
 #include "mm/elf.h"
 #include "mm/mm.h"
+#include "mm/vdso.h"
 #include "mm/vm.h"
 #include "core/consts.h"
 #include "core/klog.h"
@@ -514,9 +515,16 @@ static int exec_install_process(task_t *t,
     } else
 #endif
     {
+        vaddr_t ehdr = vdso_auxv_ehdr();
         sp = elf_setup_stack(info->stack_top, bprm->argc,
                               (char *const *)bprm->args,
-                              (char *const *)bprm->envs, info);
+                              (char *const *)bprm->envs, info, ehdr);
+        /* t->mm still points at the OLD address space here; the new one
+         * exists only as info->pgdir/info->mmap until step 3.  Map the
+         * vDSO into the image being built so AT_SYSINFO_EHDR is backed. */
+        if (sp != 0 && ehdr != 0 &&
+            vdso_map_image(info->pgdir, &info->mmap) < 0)
+            return -ENOMEM;
     }
     if (sp == 0)
         return -ENOMEM;
@@ -543,6 +551,7 @@ static int exec_install_process(task_t *t,
     spin_init(&new_mm->lock);
     refcount_set(&new_mm->refcount, 1);
     new_mm->mmap       = info->mmap;
+    new_mm->has_vdso   = vdso_auxv_ehdr() != 0;
 
 #ifdef CONFIG_NOMMU
     /* Transfer NOMMU segment allocation tracking into the new mm.
