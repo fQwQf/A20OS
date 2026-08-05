@@ -3411,6 +3411,71 @@ $(NATIVE_RTCDD_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) 
 
 native-rtcd-arch: $(NATIVE_RTCD_BIN) $(NATIVE_RTCDD_BIN)
 
+
+# ---- netd: userspace lwIP service (hybrid-kernel netstack migration) ----
+LWIP_SRC_DIR := $(KERNEL_DIR)/external/lwip/src
+NETD_LWIP_SRC := \
+	$(LWIP_SRC_DIR)/core/init.c \
+	$(LWIP_SRC_DIR)/core/def.c \
+	$(LWIP_SRC_DIR)/core/dns.c \
+	$(LWIP_SRC_DIR)/core/inet_chksum.c \
+	$(LWIP_SRC_DIR)/core/ip.c \
+	$(LWIP_SRC_DIR)/core/mem.c \
+	$(LWIP_SRC_DIR)/core/memp.c \
+	$(LWIP_SRC_DIR)/core/netif.c \
+	$(LWIP_SRC_DIR)/core/pbuf.c \
+	$(LWIP_SRC_DIR)/core/raw.c \
+	$(LWIP_SRC_DIR)/core/stats.c \
+	$(LWIP_SRC_DIR)/core/sys.c \
+	$(LWIP_SRC_DIR)/core/tcp.c \
+	$(LWIP_SRC_DIR)/core/tcp_in.c \
+	$(LWIP_SRC_DIR)/core/tcp_out.c \
+	$(LWIP_SRC_DIR)/core/timeouts.c \
+	$(LWIP_SRC_DIR)/core/udp.c \
+	$(LWIP_SRC_DIR)/core/ipv4/acd.c \
+	$(LWIP_SRC_DIR)/core/ipv4/autoip.c \
+	$(LWIP_SRC_DIR)/core/ipv4/dhcp.c \
+	$(LWIP_SRC_DIR)/core/ipv4/etharp.c \
+	$(LWIP_SRC_DIR)/core/ipv4/icmp.c \
+	$(LWIP_SRC_DIR)/core/ipv4/igmp.c \
+	$(LWIP_SRC_DIR)/core/ipv4/ip4.c \
+	$(LWIP_SRC_DIR)/core/ipv4/ip4_addr.c \
+	$(LWIP_SRC_DIR)/core/ipv4/ip4_frag.c \
+	$(LWIP_SRC_DIR)/core/ipv6/dhcp6.c \
+	$(LWIP_SRC_DIR)/core/ipv6/ethip6.c \
+	$(LWIP_SRC_DIR)/core/ipv6/icmp6.c \
+	$(LWIP_SRC_DIR)/core/ipv6/inet6.c \
+	$(LWIP_SRC_DIR)/core/ipv6/ip6.c \
+	$(LWIP_SRC_DIR)/core/ipv6/ip6_addr.c \
+	$(LWIP_SRC_DIR)/core/ipv6/ip6_frag.c \
+	$(LWIP_SRC_DIR)/core/ipv6/mld6.c \
+	$(LWIP_SRC_DIR)/core/ipv6/nd6.c \
+	$(LWIP_SRC_DIR)/netif/ethernet.c
+
+NETD_EXTRA_CFLAGS := -Iuser/net/lwip -Iuser/net/lwip/lwip \
+	-I$(LWIP_SRC_DIR)/include -I$(LWIP_SRC_DIR)/include/ipv4 \
+	-I$(LWIP_SRC_DIR)/include/ipv6 -Iuser/liba20rt
+
+NATIVE_NETD_BIN := $(NATIVE_BUILD_DIR)/netd-$(NATIVE_TAG)
+$(NATIVE_NETD_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) \
+		user/svc/netd.c user/net/lwip/netd_util.c user/net/lwip/lwipopts.h user/net/lwip/lwip/arch/cc.h user/net/lwip/lwip/arch/sys_arch.h $(NETD_LWIP_SRC)
+	@mkdir -p $(dir $@)
+	$(NATIVE_CC) -ffreestanding -nostdlib -static \
+	    $(NATIVE_CFLAGS) $(NETD_EXTRA_CFLAGS) -Iuser -Iuser/liba20c/include \
+	    -T$(NATIVE_LD) \
+	    $(NATIVE_CRT0) \
+	    $(NATIVE_SDK_SRC) \
+	    $(NATIVE_COMPILER_RT_SRC) \
+	    $(NATIVE_ARCH_SRC) \
+	    user/svc/netd.c user/net/lwip/netd_util.c \
+	    $(NETD_LWIP_SRC) \
+	    -o $@
+
+native-netd-arch: $(NATIVE_NETD_BIN)
+
+native-netd-rv:
+	$(MAKE) ARCH=riscv64 NOMMU=$(NOMMU) native-netd-arch
+
 native-rtcd-rv:
 	$(MAKE) ARCH=riscv64 NOMMU=$(NOMMU) native-rtcd-arch
 
