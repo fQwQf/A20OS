@@ -138,8 +138,11 @@ a20_channel_ep_t *a20_channel_create(uint32_t msg_cap, const a20_channel_type_t 
 /*
  * ch_try_enqueue — one non-blocking enqueue attempt.
  * Returns 1 on success, 0 when the peer queue is full, < 0 on error.
+ * defer_wake skips the RECV wait-queue wake (channel_call donation path);
+ * the caller then owns delivering the wake or a direct handoff.
  */
-static int ch_try_enqueue(a20_channel_ep_t *ep, a20_ch_message_t *msg)
+static int ch_try_enqueue(a20_channel_ep_t *ep, a20_ch_message_t *msg,
+                          int defer_wake)
 {
     spin_lock(&g_ch_lock);
     a20_channel_ep_t *peer = ep->peer;
@@ -166,16 +169,18 @@ static int ch_try_enqueue(a20_channel_ep_t *ep, a20_ch_message_t *msg)
     peer->msg_count++;
     peer->total_data += msg->data_len;
 
-    wait_queue_wake_one(&peer->waiters, A20_CH_WAIT_RECV, PROC_WAKE_EVENT);
+    if (!defer_wake)
+        wait_queue_wake_one(&peer->waiters, A20_CH_WAIT_RECV, PROC_WAKE_EVENT);
     a20_event_notify(peer, A20_OBJ_CHANNEL_ENDPOINT,
                      A20_EVENT_MESSAGE_READY, 0, 0);
     spin_unlock(&peer->lock);
     return 1;
 }
 
-int64_t a20_channel_send(a20_channel_ep_t *ep, const void *data, uint32_t data_len,
-                         a20_ch_handle_info_t *handles, uint32_t handle_count,
-                         struct a20_ht_internal *sender_ht, uint32_t flags)
+int64_t a20_channel_send_dwc(a20_channel_ep_t *ep, const void *data, uint32_t data_len,
+                             a20_ch_handle_info_t *handles, uint32_t handle_count,
+                             struct a20_ht_internal *sender_ht, uint32_t flags,
+                             int defer_wake)
 {
     (void)sender_ht;
     if (!ep) return -A20_ERR_BAD_HANDLE;
@@ -219,7 +224,7 @@ int64_t a20_channel_send(a20_channel_ep_t *ep, const void *data, uint32_t data_l
     }
 
     for (;;) {
-        int r = ch_try_enqueue(ep, msg);
+        int r = ch_try_enqueue(ep, msg, defer_wake);
         if (r > 0) { result = A20_OK; goto out; }
         if (r < 0) { ch_msg_free(msg, 1); result = r; goto out; }
         if (flags & A20_MSG_NONBLOCK) {
@@ -280,6 +285,14 @@ int64_t a20_channel_send(a20_channel_ep_t *ep, const void *data, uint32_t data_l
 out:
     a20_channel_ep_release(ep);
     return result;
+}
+
+int64_t a20_channel_send(a20_channel_ep_t *ep, const void *data, uint32_t data_len,
+                         a20_ch_handle_info_t *handles, uint32_t handle_count,
+                         struct a20_ht_internal *sender_ht, uint32_t flags)
+{
+    return a20_channel_send_dwc(ep, data, data_len, handles, handle_count,
+                                sender_ht, flags, 0);
 }
 
 /*
@@ -378,6 +391,122 @@ void a20_channel_recv_abort(a20_channel_ep_t *ep)
 {
     spin_unlock(&ep->lock);
     a20_channel_ep_release(ep);
+}
+
+/*
+ * a20_channel_recv_begin_donate — recv_begin with time-slice donation
+ * (docs/hybrid-kernel/02-mainstream-plan.md M1): when the caller must
+ * block for a reply and the peer has a task parked on RECV, the first
+ * wait hands the CPU directly to that task instead of queueing in the
+ * runqueue.  Later iterations (and all ineligible cases) use the normal
+ * park path, so behavior is identical under races.
+ */
+int64_t a20_channel_recv_begin_donate(a20_channel_ep_t *ep, uint32_t flags,
+                                      uint32_t *out_msg_data_len,
+                                      uint32_t *out_msg_handles)
+{
+    if (!ep) return -A20_ERR_BAD_HANDLE;
+    if (flags & ~A20_MSG_NONBLOCK) return -A20_ERR_INVALID_ARGUMENT;
+
+    refcount_inc(&ep->refcount);
+    int donate = 1;
+
+    for (;;) {
+        spin_lock(&ep->lock);
+        if (ep->msg_count > 0) {
+            a20_ch_message_t *msg = ep->msg_head;
+            if (msg->handle_count > 0) {
+                a20_ch_handle_info_t *hbuf =
+                    (a20_ch_handle_info_t *)(msg->data + msg->data_len);
+                int tr = ch_check_recv_types(ep->chan_type, hbuf,
+                                             msg->handle_count);
+                if (tr < 0) {
+                    ep->msg_head = msg->next;
+                    if (!ep->msg_head) ep->msg_tail = NULL;
+                    ep->msg_count--;
+                    ep->total_data -= msg->data_len;
+                    wait_queue_wake_one(&ep->waiters, A20_CH_WAIT_SEND,
+                                        PROC_WAKE_EVENT);
+                    spin_unlock(&ep->lock);
+                    ch_msg_free(msg, 1);
+                    a20_channel_ep_release(ep);
+                    return tr;
+                }
+            }
+            if (out_msg_data_len)
+                *out_msg_data_len = msg->data_len;
+            if (out_msg_handles)
+                *out_msg_handles = msg->handle_count;
+            return A20_OK; /* ep->lock held */
+        }
+        if (ep->peer_closed) {
+            spin_unlock(&ep->lock);
+            a20_channel_ep_release(ep);
+            return -A20_ERR_CANCELED;
+        }
+        if (flags & A20_MSG_NONBLOCK) {
+            spin_unlock(&ep->lock);
+            a20_channel_ep_release(ep);
+            return -A20_ERR_WOULD_BLOCK;
+        }
+        spin_unlock(&ep->lock);
+
+        proc_wait_token_t token = proc_park_prepare(PROC_WAIT_INTERRUPTIBLE, 0);
+        if (!token.task) {
+            a20_channel_ep_release(ep);
+            return -A20_ERR_WOULD_BLOCK;
+        }
+
+        wait_queue_entry_t entry = {0};
+        spin_lock(&ep->lock);
+        if (ep->msg_count == 0 && !ep->peer_closed) {
+            bool linked = wait_queue_link(&ep->waiters, &entry, token,
+                                          A20_CH_WAIT_RECV);
+            spin_unlock(&ep->lock);
+            proc_wake_reason_t reason;
+            if (linked) {
+                task_t *target = NULL;
+                if (donate) {
+                    spin_lock(&g_ch_lock);
+                    a20_channel_ep_t *peer = ep->peer;
+                    if (peer && !peer->peer_closed)
+                        target = wait_queue_peek_key(&peer->waiters,
+                                                     A20_CH_WAIT_RECV);
+                    spin_unlock(&g_ch_lock);
+                    donate = 0;
+                }
+                if (target) {
+                    reason = proc_park_commit_donate(token, target);
+                    proc_put(target);
+                } else {
+                    /* Donation impossible (server running, remote CPU, or
+                     * already woken): deliver the wake deferred by the
+                     * channel_call send stage, then park normally. */
+                    spin_lock(&g_ch_lock);
+                    a20_channel_ep_t *peer = ep->peer;
+                    if (peer && !peer->peer_closed)
+                        wait_queue_wake_one(&peer->waiters,
+                                            A20_CH_WAIT_RECV,
+                                            PROC_WAKE_EVENT);
+                    spin_unlock(&g_ch_lock);
+                    reason = proc_park_commit(token);
+                }
+            } else {
+                (void)proc_park_cancel(token);
+                reason = PROC_WAKE_CANCEL;
+            }
+            wait_queue_unlink(&ep->waiters, &entry);
+            proc_park_finish(token);
+            if (proc_wake_reason_is_task_interrupt(reason)) {
+                a20_channel_ep_release(ep);
+                return -A20_ERR_INTERRUPTED;
+            }
+            continue;
+        }
+        spin_unlock(&ep->lock);
+        (void)proc_park_cancel(token);
+        proc_park_finish(token);
+    }
 }
 
 /*
