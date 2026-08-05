@@ -17,8 +17,7 @@ A20OS 内置 NTFS 读/写文件系统（`kernel/fs/diskfs/ntfs.c`）。实现依
 
 ## 设计要点
 
-- **帧/页面所有权**：与核心 MM 的 VMO/page-cache 语义一致，文件数据通过 `vnode->ops->readpage/writepage`
-  接入 page cache，与其它块文件系统（fat32/ext4）同一路径。
+- **帧/页面所有权**：与核心 MM 的 VMO/page-cache 语义一致，文件数据通过 `vnode->ops->readpage/writepage` 接入 page cache，与其它块文件系统（fat32/ext4）同一路径。
 - **簇分配器**：`$Bitmap`（MFT 记录 6）首适应分配/释放，写入后回写位图。
 - **USA fixup**：MFT 记录与 INDX 块读写均做更新序列数组修复。
 - **run list**：解析支持稀疏 run；写入时按相对 LCN 增量编码。

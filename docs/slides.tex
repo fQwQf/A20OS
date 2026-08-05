@@ -838,13 +838,13 @@ a20_channel_call(&args, &reply);
                     \item Huge-page demotion / COW
                     \item OOM reclaim 安全策略
                     \item vim / git / gcc / fastfetch 移植与静态构建
-                    \item 块/网络 I/O 事件驱动：LoongArch PCI INTx IRQ 接线、块 hybrid poll$\to$park、网络 RX pending 标志取代调度热路径轮询
                 \end{itemize}
             \end{block}
         \end{column}
         \begin{column}{0.48\textwidth}
             \begin{alertblock}{Remaining P1/P2}
                 \begin{itemize}
+                    \item 块/网络设备完全事件驱动唤醒
                     \item \code{g\_lwip\_lock} 竞争优化
                     \item VFS 边界语义持续收紧
                     \item 更多 LTP 风格压力测试
@@ -860,12 +860,12 @@ a20_channel_call(&args, &reply);
 \begin{frame}
     \frametitle{下一步工作}
     \begin{enumerate}
-        \item \high{I/O 事件驱动深化}：双架构 8 核下继续削减轮询残余、合并连续块请求
+        \item \high{I/O 完全事件驱动}：替换块/网络设备中的兼容轮询路径
         \item \high{网络栈深化}：扩展 socket 并发测试，降低 lwIP 全局锁竞争
         \item \high{VFS 语义收紧}：完整 \code{renameat2}、\code{statx}、xattr 等边界行为
         \item \high{测试强化}：将静态文档门禁转化为可执行的行为测试
         \item \high{架构探索}：在 \code{riir} 分支继续 Rust 重写实验（研究性质）
-    \end{enumerate} 
+    \end{enumerate}
     \vspace{0.5em}
     \begin{block}{核心追求}
         在保证 Linux 生态兼容的前提下，构建更安全、更高性能、更可维护的下一代内核底座。
