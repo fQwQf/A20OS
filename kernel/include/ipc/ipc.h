@@ -303,4 +303,10 @@ void a20_eventq_on_object_destroy(void *object, uint16_t object_type);
 /* Native timer backend (drives timer object expiries). */
 void a20_timer_tick(void);
 
+/* Channel state helpers for poll/backpressure consumers (Linux ABI
+ * socket bridge uses these). */
+int  a20_channel_readable(a20_channel_ep_t *ep);   /* msg pending or peer closed */
+int  a20_channel_writable(a20_channel_ep_t *ep);   /* enqueue would not block */
+int  a20_channel_peer_closed(a20_channel_ep_t *ep);
+
 #endif /* _IPC_IPC_H */
