@@ -18,7 +18,7 @@
 
 /* Unmap paths: munmap and brk shrink. */
 
-int mm_munmap(mm_struct_t *mm, vaddr_t addr, size_t len) {
+int mm_munmap_locked(mm_struct_t *mm, vaddr_t addr, size_t len) {
     if (!mm || !mm->pgdir) return -EINVAL;
     if (addr & (PAGE_SIZE - 1)) return -EINVAL;
     len = ROUND_UP(len, PAGE_SIZE);
@@ -124,8 +124,7 @@ int mm_munmap(mm_struct_t *mm, vaddr_t addr, size_t len) {
             if (vma->prev) vma->prev->next = vma->next;
             else mm->mmap = vma->next;
             if (vma->next) vma->next->prev = vma->prev;
-            vma_release(vma);
-            kfree(vma);
+            mm_vma_defer(mm, vma);
         } else if (addr <= vma->start) {
             // 从开头部分删除
             vma->file_offset += clip_end - vma->start;
@@ -135,7 +134,7 @@ int mm_munmap(mm_struct_t *mm, vaddr_t addr, size_t len) {
             vma->end = clip_start;
         } else {
             // 从中间删除，需要拆分成两个 VMA
-            vm_area_t *tail = kcalloc(1, sizeof(vm_area_t));
+            vm_area_t *tail = kcalloc_atomic(1, sizeof(vm_area_t));
             if (!tail) return -ENOMEM;
             *tail = *vma;
             tail->start = clip_end;
@@ -154,11 +153,10 @@ int mm_munmap(mm_struct_t *mm, vaddr_t addr, size_t len) {
         }
         vma = next;
     }
-    arch_tlb_flush();  // 刷新 TLB
     return 0;
 }
 
-vaddr_t mm_brk(mm_struct_t *mm, vaddr_t newbrk) {
+vaddr_t mm_brk_locked(mm_struct_t *mm, vaddr_t newbrk) {
     if (!mm || !mm->pgdir) return 0;
     if (newbrk == 0) return mm->brk;
     if (newbrk < mm->start_brk || newbrk > USER_VA_LIMIT)
@@ -216,8 +214,6 @@ vaddr_t mm_brk(mm_struct_t *mm, vaddr_t newbrk) {
                 va += PAGE_SIZE;
             }
         }
-        if (new_brk_page < old_brk_page)
-            arch_tlb_flush();  // 刷新 TLB
     }
     /*
      * brk pages are installed lazily by handle_demand_fault().  They still
@@ -228,7 +224,7 @@ vaddr_t mm_brk(mm_struct_t *mm, vaddr_t newbrk) {
         vaddr_t map_start = ROUND_UP(mm->brk, PAGE_SIZE);
         vaddr_t map_end = ROUND_UP(newbrk, PAGE_SIZE);
         if (map_end > map_start) {
-            vm_area_t *vma = kcalloc(1, sizeof(*vma));
+            vm_area_t *vma = kcalloc_atomic(1, sizeof(*vma));
             if (!vma)
                 return mm->brk;
             vma->start = map_start;
@@ -243,4 +239,25 @@ vaddr_t mm_brk(mm_struct_t *mm, vaddr_t newbrk) {
     mm->brk = newbrk;
     return mm->brk;
 #endif
+}
+
+int mm_munmap(mm_struct_t *mm, vaddr_t addr, size_t len) {
+    if (!mm) return -EINVAL;
+    uint64_t flags = spin_lock_irqsave(&mm->lock);
+    int r = mm_munmap_locked(mm, addr, len);
+    spin_unlock_irqrestore(&mm->lock, flags);
+    mm_vma_flush_deferred(mm);
+    arch_tlb_flush();  // deferred: cannot flush remote TLBs under mm->lock
+    return r;
+}
+
+vaddr_t mm_brk(mm_struct_t *mm, vaddr_t newbrk)
+{
+    if (!mm) return 0;
+    uint64_t flags = spin_lock_irqsave(&mm->lock);
+    vaddr_t r = mm_brk_locked(mm, newbrk);
+    spin_unlock_irqrestore(&mm->lock, flags);
+    mm_vma_flush_deferred(mm);
+    arch_tlb_flush();  /* brk shrink released frames: remote flush */
+    return r;
 }

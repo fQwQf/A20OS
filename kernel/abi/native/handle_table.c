@@ -255,6 +255,14 @@ void a20_ht_destroy(struct a20_ht_internal *ht)
 {
     if (!ht) return;
 
+    extern void a20_channel_trace_dump(void);
+    extern void a20_channel_trace(uint32_t op, uint32_t len, void *p1,
+                                  void *p2, uint32_t meta);
+    a20_channel_trace(9, 0, ht, ht->entries, 0);
+    printf("[HT-DESTROY] ht=%p entries=%p bitmap=%p cap=%u refs=%d pid=%d\n",
+           (void *)ht, (void *)ht->entries, (void *)ht->free_bitmap,
+           ht->capacity, (int)ht->refcount.value, proc_current() ? proc_current()->pid : -1);
+
     uint64_t rflags = spin_lock_irqsave(&g_a20_ht_registry_lock);
     struct a20_ht_internal **pp = &g_a20_ht_registry;
     while (*pp) {
@@ -612,18 +620,18 @@ int64_t a20_handle_commit_reserved_temporal(struct a20_ht_internal *ht,
 struct a20_ht_internal *task_get_a20_ht(task_t *t)
 {
     return t ? (struct a20_ht_internal *)
-        __atomic_load_n(&t->scratch_buf, __ATOMIC_ACQUIRE) : NULL;
+        __atomic_load_n(&t->a20_ht, __ATOMIC_ACQUIRE) : NULL;
 }
 
 /* Obtain a stable table reference for another task. The registry lock
- * serializes against a20_ht_destroy() between loading scratch_buf and
+ * serializes against a20_ht_destroy() between loading a20_ht and
  * incrementing the table refcount. */
 struct a20_ht_internal *task_get_a20_ht_ref(task_t *t)
 {
     if (!t) return NULL;
     uint64_t flags = spin_lock_irqsave(&g_a20_ht_registry_lock);
     struct a20_ht_internal *ht = (struct a20_ht_internal *)
-        __atomic_load_n(&t->scratch_buf, __ATOMIC_ACQUIRE);
+        __atomic_load_n(&t->a20_ht, __ATOMIC_ACQUIRE);
     if (ht && !refcount_inc_not_zero(&ht->refcount))
         ht = NULL;
     spin_unlock_irqrestore(&g_a20_ht_registry_lock, flags);

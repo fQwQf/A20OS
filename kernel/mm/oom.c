@@ -71,7 +71,7 @@ static int swap_out_victim_pages(int target_pages)
 
     mm_struct_t *mm = victim->mm;
     int reclaimed = 0;
-    uint64_t flags = spin_lock_irqsave(&mm->lock);
+    uint64_t flags = spin_lock(&mm->lock);
 
     /* TODO: install a busy swap PTE and drop mm->lock before block I/O. */
     for (vm_area_t *vma = mm->mmap;
@@ -114,7 +114,7 @@ static int swap_out_victim_pages(int target_pages)
             }
 
             *pte = swp_entry_to_pte(entry);
-            arch_tlb_flush_page(va);
+            arch_tlb_flush_page_local(va);
             frame_put(pfn);
             cg_mem_uncharge(victim->cgroup, 1);
             mm->rss = mm->rss ? mm->rss - 1 : 0;
@@ -125,7 +125,7 @@ static int swap_out_victim_pages(int target_pages)
         }
     }
 
-    spin_unlock_irqrestore(&mm->lock, flags);
+    spin_unlock(&mm->lock);
     proc_put(victim);
     return reclaimed;
 }

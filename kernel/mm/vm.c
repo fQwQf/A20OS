@@ -79,7 +79,7 @@ int mm_demote_huge_page(mm_struct_t *mm, vaddr_t addr) {
         if (r < 0)
             return r;
     }
-    arch_tlb_flush();
+    arch_tlb_flush_page_local(base);  /* callers flush remotely after unlock */
     return 0;
 }
 
@@ -181,6 +181,7 @@ void mm_destroy(mm_struct_t *mm) {
     if (!refcount_dec_and_test(&mm->refcount)) return;
 
     // 释放所有 VMA 及其物理页面
+    mm_vma_flush_deferred(mm);
     vm_area_t *vma = mm->mmap;
     while (vma) {
         free_vma_pages(mm, vma);
@@ -201,6 +202,10 @@ void mm_destroy(mm_struct_t *mm) {
 #endif
 
     if (mm->pgdir) pt_destroy_user(mm->pgdir);
+    /* Frames are back in the buddy; flush every CPU's stale translations
+     * (including remote harts) so a reused frame cannot be reached through a
+     * residual TLB entry from this address space. */
+    arch_tlb_flush();
     kfree(mm);
 }
 
@@ -248,7 +253,7 @@ mm_struct_t *mm_fork(mm_struct_t *parent) {
 
     vm_area_t *vma_pool = NULL;
     size_t vma_capacity = 0;
-    uint64_t parent_flags;
+    uint64_t parent_flags = 0;
     for (;;) {
         parent_flags = spin_lock_irqsave(&parent->lock);
         size_t needed = 0;

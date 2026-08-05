@@ -37,6 +37,7 @@
 
 struct a20_ht_internal;
 struct a20_ht_internal *a20_ht_create(void);
+void a20_ht_put_ref(struct a20_ht_internal *ht);
 int64_t a20_handle_install(struct a20_ht_internal *ht, void *object,
                            uint16_t type, a20_rights_t rights);
 #endif
@@ -405,7 +406,13 @@ static uint64_t exec_setup_native_abi(task_t *t,
                                        vaddr_t *start_info_out)
 {
     struct a20_ht_internal *ht = a20_ht_create();
-    if (ht) __atomic_store_n(&t->scratch_buf, ht, __ATOMIC_RELEASE);
+    if (ht) {
+        /* Release the pre-exec table (if any) before installing the new one;
+         * exec replaces the whole address space and capability set. */
+        void *old = __atomic_exchange_n(&t->a20_ht, ht, __ATOMIC_ACQ_REL);
+        if (old)
+            a20_ht_put_ref((struct a20_ht_internal *)old);
+    }
 
     uint32_t stdin_h = 0xFFFFFFFF, stdout_h = 0xFFFFFFFF, stderr_h = 0xFFFFFFFF;
     if (ht) {
@@ -526,6 +533,16 @@ static int exec_install_process(task_t *t,
         sp = elf_setup_stack(info->stack_top, bprm->argc,
                               (char *const *)bprm->args,
                               (char *const *)bprm->envs, info, ehdr);
+#ifdef CONFIG_ABI_NATIVE
+        /* Exec from a Native program into a Linux ABI program: the old
+         * handle table is process-local and must be released here. */
+        if (t->abi_mode == 1) {
+            void *old = __atomic_exchange_n(&t->a20_ht, NULL,
+                                            __ATOMIC_ACQ_REL);
+            if (old)
+                a20_ht_put_ref((struct a20_ht_internal *)old);
+        }
+#endif
         /* t->mm still points at the OLD address space here; the new one
          * exists only as info->pgdir/info->mmap until step 3.  Map the
          * vDSO into the image being built so AT_SYSINFO_EHDR is backed. */

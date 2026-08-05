@@ -54,7 +54,7 @@ int a20_prepare_start_info(task_t *task, const char *init_path,
 
     struct a20_ht_internal *ht = a20_ht_create();
     if (!ht) return -1;
-    __atomic_store_n(&task->scratch_buf, ht, __ATOMIC_RELEASE);
+    __atomic_store_n(&task->a20_ht, ht, __ATOMIC_RELEASE);
 
     a20_start_info_t info;
     memset(&info, 0, sizeof(info));
