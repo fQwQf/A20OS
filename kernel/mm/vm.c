@@ -201,11 +201,11 @@ void mm_destroy(mm_struct_t *mm) {
     mm->num_nommu_allocs = 0;
 #endif
 
-    if (mm->pgdir) pt_destroy_user(mm->pgdir);
-    /* Frames are back in the buddy; flush every CPU's stale translations
-     * (including remote harts) so a reused frame cannot be reached through a
-     * residual TLB entry from this address space. */
+    /* Flush every CPU's stale translations BEFORE the frames return to the
+     * buddy: another CPU could otherwise allocate a frame during teardown and
+     * be reached through a residual TLB entry of this address space. */
     arch_tlb_flush();
+    if (mm->pgdir) pt_destroy_user(mm->pgdir);
     kfree(mm);
 }
 
