@@ -633,8 +633,8 @@ int64_t sys_a20_channel_call(const a20_syscall_args_t *args)
         goto out_data;
     }
 
-    r = a20_channel_send(ep, kdata, kargs.data_len,
-                         hinfos, actual_hcount, ht, kargs.flags);
+    r = a20_channel_send_dwc(ep, kdata, kargs.data_len,
+                             hinfos, actual_hcount, ht, kargs.flags, 1);
 
 out_handles:
     for (uint32_t i = 0; i < actual_hcount; i++)
@@ -646,7 +646,8 @@ out_data:
     /* ---- Reply stage (mirrors sys_a20_channel_recv) ---- */
     uint32_t msg_data_len = 0;
     uint32_t msg_handles = 0;
-    r = a20_channel_recv_begin(ep, kargs.flags, &msg_data_len, &msg_handles);
+    r = a20_channel_recv_begin_donate(ep, kargs.flags, &msg_data_len,
+                                      &msg_handles);
     if (r < 0) goto out_ep;
 
     if ((msg_data_len > 0 && (!kargs.reply_buf ||

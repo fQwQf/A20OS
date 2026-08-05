@@ -101,6 +101,15 @@ static uint64_t now_ns(void)
     return t;
 }
 
+/* Helper for the decomposition benchmark: yield until told to stop. */
+void ipc_yield_worker(uint64_t arg)
+{
+    volatile uint32_t *go = (volatile uint32_t *)(uintptr_t)arg;
+    while (__atomic_load_n(go, __ATOMIC_ACQUIRE))
+        a20_thread_yield();
+    a20_thread_exit(0);
+}
+
 int main(int argc, char **argv, char **envp)
 {
     (void)argc; (void)argv; (void)envp;
@@ -231,6 +240,58 @@ int main(int argc, char **argv, char **envp)
         put_str(" x100_ratio=");
         put_u64(fused_ns * 100 / (legacy_ns ? legacy_ns : 1));
         put("\n", 1);
+    }
+
+    /* 6. Cost decomposition for M1 (direct-switch design input):
+     *   solo: 2 traps + enqueue/dequeue, 0 context switches
+     *   yield: 2 context switches, 0 traps
+     *   ping-pong ≈ 4 traps + 2 switches (from bench above)
+     */
+    {
+        a20_channel_pair_t solo;
+        if (a20_channel_create(&solo) != A20_OK)
+            return fail(21, "solo channel failed");
+        uint64_t t0 = now_ns();
+        for (uint32_t i = 0; i < BENCH_ITERS; i++) {
+            uint32_t l = MSG_LEN, h = 0;
+            if (a20_channel_send(solo.endpoints[0], req, MSG_LEN, 0, 0) < 0)
+                return fail(22, "solo send failed");
+            if (a20_channel_recv(solo.endpoints[1], rep, &l, 0, &h) < 0)
+                return fail(23, "solo recv failed");
+        }
+        uint64_t t1 = now_ns();
+
+        /* yield ping-pong with the bench server thread (it exited after
+         * BENCH_ITERS*2; spawn a fresh one that just yields). */
+        uint64_t stack2;
+        volatile uint32_t go = 1;
+        if (a20_vm_alloc_pages(16, 3, &stack2) != A20_OK)
+            return fail(24, "yield stack failed");
+        extern void ipc_yield_worker(uint64_t arg);
+        a20_thread_create_args_t tc = {0};
+        tc.entry = (uint64_t)ipc_yield_worker;
+        tc.arg = (uint64_t)(uintptr_t)&go;
+        tc.stack_base = (stack2 + 16 * 4096) & ~15ULL;
+        tc.stack_size = 16 * 4096;
+        tc.tls_base = 0;
+        if (a20_thread_create(&tc) < 0)
+            return fail(25, "yield thread failed");
+        uint64_t t2 = now_ns();
+        for (uint32_t i = 0; i < BENCH_ITERS; i++)
+            a20_thread_yield();
+        uint64_t t3 = now_ns();
+        go = 0;
+        a20_thread_yield();
+
+        uint64_t solo_ns = t1 - t0;
+        uint64_t yield_ns = t3 - t2;
+        put_str("NATIVE_IPC: decomp solo_2trap_ns=");
+        put_u64(solo_ns / BENCH_ITERS);
+        put_str(" yield_ns=");
+        put_u64(yield_ns / BENCH_ITERS);
+        put("\n", 1);
+        a20_hdl_close(solo.endpoints[0]);
+        a20_hdl_close(solo.endpoints[1]);
     }
 
     a20_hdl_close(pair.endpoints[0]);

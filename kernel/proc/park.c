@@ -7,6 +7,7 @@
 #include "core/cpu.h"
 #include "core/klog.h"
 #include "core/panic.h"
+#include "core/timer.h"
 
 static proc_wait_token_t
 proc_wait_token_none(proc_park_prepare_error_t prepare_error)
@@ -290,6 +291,89 @@ void proc_park_finish(proc_wait_token_t token)
 #endif
     }
     spin_unlock_irqrestore(&proc_lock, flags);
+}
+
+/*
+ * proc_park_commit_donate — time-slice donation for synchronous IPC
+ * (docs/hybrid-kernel/02-mainstream-plan.md M1).
+ *
+ * Identical to proc_park_commit up to marking the caller BLOCKED, but
+ * instead of a full runqueue sched() it hands the CPU directly to
+ * @donate_to when the target is fully parked on this CPU (the classic
+ * L4 direct switch: the server works on the donor's behalf).  All
+ * ineligible cases fall back to the normal sched() path, so this is
+ * always safe: donation depth is implicitly one because the donor is
+ * BLOCKED (not runnable) until the target or the normal scheduler runs
+ * it again.
+ */
+proc_wake_reason_t proc_park_commit_donate(proc_wait_token_t token,
+                                           task_t *donate_to)
+{
+    task_t *task = token.task;
+    if (!task || !token.seq)
+        return PROC_WAKE_CANCEL;
+
+    uint64_t flags = spin_lock_irqsave(&proc_lock);
+    if (task != proc_current() || task->wait_seq != token.seq) {
+        spin_unlock_irqrestore(&proc_lock, flags);
+        return PROC_WAKE_CANCEL;
+    }
+
+    if (task->park_state == PROC_PARK_WOKEN) {
+        proc_wake_reason_t reason = task->wake_reason;
+        spin_unlock_irqrestore(&proc_lock, flags);
+        return reason;
+    }
+    if (task->park_state != PROC_PARK_PREPARING) {
+        spin_unlock_irqrestore(&proc_lock, flags);
+        return PROC_WAKE_CANCEL;
+    }
+
+    task->park_state = PROC_PARK_PARKED;
+    task->state = PROC_BLOCKED;
+
+    unsigned cur_cpu = cpu_current_id();
+    int can_donate = donate_to && donate_to != task &&
+        donate_to->park_state == PROC_PARK_PARKED &&
+        donate_to->state == PROC_BLOCKED &&
+        !donate_to->on_cpu && !donate_to->on_rq &&
+        !donate_to->dispatching &&
+        donate_to->cpu_id == cur_cpu;
+
+    if (!can_donate) {
+        proc_sched_assert_task_locked(task);
+        spin_unlock_irqrestore(&proc_lock, flags);
+        sched();
+        goto out_reason;
+    }
+
+    /* Manual wake mirroring proc_try_wake_locked_common's PARKED branch,
+     * then hand over the CPU with a dispatch reference as if the target
+     * had been picked from the runqueue. */
+    {
+        uint64_t now = timer_get_ticks();
+        proc_wait_timer_cancel_locked(donate_to, donate_to->wait_seq);
+        donate_to->park_state = PROC_PARK_WOKEN;
+        donate_to->wake_reason = PROC_WAKE_EVENT;
+        donate_to->wait_deadline = 0;
+        donate_to->wake_time = 0;
+        donate_to->state = PROC_READY;
+        if (donate_to->sched_level > 0)
+            donate_to->sched_level--;
+        donate_to->exec_start = now;
+        donate_to->eevdf_last_account = now;
+        proc_get(donate_to); /* dispatch ref, consumed by context_switch */
+        donate_to->dispatching = 1;
+        spin_unlock_irqrestore(&proc_lock, flags);
+        context_switch(donate_to);
+    }
+
+out_reason:
+    flags = spin_lock_irqsave(&proc_lock);
+    proc_wake_reason_t reason =
+        task->wait_seq == token.seq ? task->wake_reason : PROC_WAKE_CANCEL;
+    spin_unlock_irqrestore(&proc_lock, flags);
+    return reason;
 }
 
 proc_wake_reason_t proc_park_wait(proc_wait_mode_t mode, uint64_t deadline)
