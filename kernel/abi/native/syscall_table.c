@@ -121,6 +121,7 @@ int64_t sys_a20_device_irq_unlisten(const a20_syscall_args_t *args);
 int64_t sys_a20_device_vmo_phys(const a20_syscall_args_t *args);
 int64_t sys_a20_device_block_attach(const a20_syscall_args_t *args);
 int64_t sys_a20_device_block_complete(const a20_syscall_args_t *args);
+int64_t sys_a20_netd_attach(const a20_syscall_args_t *args);
 
 /* Generate handler stubs from .def */
 #define A20_NATIVE_SYSCALL(name, ...) \

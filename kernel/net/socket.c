@@ -15,6 +15,7 @@
 #include "drivers/net/virtio_net.h"
 #include "drivers/core/driver_core.h"
 #include "net/lwip_stack.h"
+#include "net/netd_proto.h"
 
 spinlock_t g_net_lock = SPINLOCK_INIT;
 static obj_cache_t g_net_socket_cache = OBJ_CACHE_INIT("net_socket", net_socket_t, 128);
@@ -157,6 +158,7 @@ void net_init(void) {
     net_socket_registry_init();
     /* Bus enumeration and driver core own transport discovery.  Network init
      * only consumes DEV_CLASS_NET; it must never run a second arch scanner. */
+    netd_ring_init();
     a20_lwip_init();
     printf("[NET] socket layer initialized\n");
 }
