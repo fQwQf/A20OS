@@ -73,29 +73,43 @@ typedef struct {
 } ext4_vcache_ent_t;
 
 static ext4_vcache_ent_t g_ext4_vcache[EXT4_VCACHE_MAX];
+static spinlock_t g_ext4_vcache_lock = SPINLOCK_INIT;
 
 vnode_t *ext4_vnode_cache_lookup(ext4_sb_info_t *sb, uint32_t ino) {
+    uint64_t flags = spin_lock_irqsave(&g_ext4_vcache_lock);
     for (int i = 0; i < EXT4_VCACHE_MAX; i++) {
         if (g_ext4_vcache[i].vn && g_ext4_vcache[i].sb == sb &&
-            g_ext4_vcache[i].ino == ino)
-            return g_ext4_vcache[i].vn;
+            g_ext4_vcache[i].ino == ino) {
+            vnode_t *vn = g_ext4_vcache[i].vn;
+            /* Pair the cache lookup with its caller reference while the
+             * entry is protected.  Cache pruning can therefore never turn
+             * a successful lookup into a stale pointer. */
+            vnode_get(vn);
+            spin_unlock_irqrestore(&g_ext4_vcache_lock, flags);
+            return vn;
+        }
     }
+    spin_unlock_irqrestore(&g_ext4_vcache_lock, flags);
     return NULL;
 }
 
 void ext4_vnode_cache_insert(ext4_sb_info_t *sb, uint32_t ino, vnode_t *vn) {
+    uint64_t flags = spin_lock_irqsave(&g_ext4_vcache_lock);
     for (int i = 0; i < EXT4_VCACHE_MAX; i++) {
         if (!g_ext4_vcache[i].vn) {
             vnode_get(vn);
             g_ext4_vcache[i].sb = sb;
             g_ext4_vcache[i].ino = ino;
             g_ext4_vcache[i].vn = vn;
+            spin_unlock_irqrestore(&g_ext4_vcache_lock, flags);
             return;
         }
     }
+    spin_unlock_irqrestore(&g_ext4_vcache_lock, flags);
 }
 
 vnode_t *ext4_vnode_cache_remove(ext4_sb_info_t *sb, uint32_t ino) {
+    uint64_t flags = spin_lock_irqsave(&g_ext4_vcache_lock);
     for (int i = 0; i < EXT4_VCACHE_MAX; i++) {
         if (g_ext4_vcache[i].vn && g_ext4_vcache[i].sb == sb &&
             g_ext4_vcache[i].ino == ino) {
@@ -103,10 +117,42 @@ vnode_t *ext4_vnode_cache_remove(ext4_sb_info_t *sb, uint32_t ino) {
             g_ext4_vcache[i].sb = NULL;
             g_ext4_vcache[i].ino = 0;
             g_ext4_vcache[i].vn = NULL;
+            spin_unlock_irqrestore(&g_ext4_vcache_lock, flags);
             return vn;
         }
     }
+    spin_unlock_irqrestore(&g_ext4_vcache_lock, flags);
     return NULL;
+}
+
+void ext4_vnode_cache_prune_all(void)
+{
+    vnode_t *held[64];
+    int held_count;
+
+    /* A child vnode owns a parent reference, so reclaim cache-only leaves in
+     * repeated passes.  Releasing one layer can make its parent cache-only on
+     * the next pass.  Vnodes with an open file, mapping, path-walk, dcache, or
+     * mount reference remain untouched. */
+    do {
+        held_count = 0;
+        uint64_t flags = spin_lock_irqsave(&g_ext4_vcache_lock);
+        for (int i = 0; i < EXT4_VCACHE_MAX && held_count < 64; i++) {
+            vnode_t *vn = g_ext4_vcache[i].vn;
+            if (vn && vnode_ref_read(vn) == 1) {
+                held[held_count++] = vn;
+                g_ext4_vcache[i].sb = NULL;
+                g_ext4_vcache[i].ino = 0;
+                g_ext4_vcache[i].vn = NULL;
+            }
+        }
+        spin_unlock_irqrestore(&g_ext4_vcache_lock, flags);
+
+        /* release() can free memory and take the ext4 metadata mutex; never
+         * invoke it while holding the short cache spinlock. */
+        for (int i = 0; i < held_count; i++)
+            vnode_put(held[i]);
+    } while (held_count != 0);
 }
 
 /* ================================================================
@@ -1042,10 +1088,8 @@ vnode_t *ext4_make_vnode(ext4_sb_info_t *sb, uint32_t ino, uint32_t sz,
      * while the vnode is alive (the on-disk inode size lags behind until
      * writeback), so a cache hit must not overwrite it. */
     vnode_t *cached = ext4_vnode_cache_lookup(sb, ino);
-    if (cached) {
-        vnode_get(cached);
+    if (cached)
         return cached;
-    }
 
     vnode_t *vn = (vnode_t *)kmalloc(sizeof(vnode_t));
     if (!vn) return NULL;
@@ -1073,7 +1117,10 @@ vnode_t *ext4_make_vnode(ext4_sb_info_t *sb, uint32_t ino, uint32_t sz,
     vn->ops       = &g_ext4_vnode_ops;
 
     ext4_vnode_priv_t *fp = (ext4_vnode_priv_t *)kmalloc(sizeof(ext4_vnode_priv_t));
-    if (!fp) { kfree(vn); return NULL; }
+    if (!fp) {
+        vnode_put(vn);
+        return NULL;
+    }
     fp->sb        = sb;
     fp->inode_num = ino;
     fp->file_size = sz;
@@ -1228,6 +1275,7 @@ void ext4_unmount(vnode_t *root) {
     vnode_t *held[EXT4_VCACHE_MAX];
     int held_count = 0;
     mutex_lock(&esi->metadata_lock);
+    uint64_t cache_flags = spin_lock_irqsave(&g_ext4_vcache_lock);
     for (int i = 0; i < EXT4_VCACHE_MAX; i++) {
         if (g_ext4_vcache[i].vn && g_ext4_vcache[i].sb == esi) {
             held[held_count++] = g_ext4_vcache[i].vn;
@@ -1236,6 +1284,7 @@ void ext4_unmount(vnode_t *root) {
             g_ext4_vcache[i].vn = NULL;
         }
     }
+    spin_unlock_irqrestore(&g_ext4_vcache_lock, cache_flags);
     mutex_unlock(&esi->metadata_lock);
     for (int i = 0; i < held_count; i++)
         vnode_put(held[i]);
@@ -1251,4 +1300,3 @@ void ext4_unmount(vnode_t *root) {
 /* ================================================================
  * VFS open hook: create vfile for an ext4 vnode
  * ================================================================ */
-

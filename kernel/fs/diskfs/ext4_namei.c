@@ -632,6 +632,8 @@ int ext4_vn_rename_unlocked(vnode_t *old_dir, const char *old_name,
         vnode_get(new_dir);
         moved->parent = new_dir;
     }
+    if (moved)
+        vnode_put(moved);
     return 0;
 }
 

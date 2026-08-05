@@ -38,6 +38,7 @@ ext4_inode_t *ext4_fctx_inode(ext4_fctx_t *fc) ;
 void ext4_fctx_inode_dirty(ext4_fctx_t *fc) ;
 uint64_t ext4_block_map_cached(ext4_fctx_t *fc, ext4_inode_t *inode,
                                        uint32_t lblk) ;
+/* Returns a caller-owned vnode reference on a cache hit. */
 vnode_t *ext4_vnode_cache_lookup(ext4_sb_info_t *sb, uint32_t ino) ;
 void ext4_vnode_cache_insert(ext4_sb_info_t *sb, uint32_t ino, vnode_t *vn) ;
 vnode_t *ext4_vnode_cache_remove(ext4_sb_info_t *sb, uint32_t ino) ;
