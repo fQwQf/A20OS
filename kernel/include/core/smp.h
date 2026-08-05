@@ -21,6 +21,7 @@ typedef struct smp_cpu_desc {
 
 typedef enum smp_ipi_reason {
     SMP_IPI_RESCHEDULE = 0,
+    SMP_IPI_TLB_FLUSH = 1,
 } smp_ipi_reason_t;
 
 typedef struct smp_platform_ops {

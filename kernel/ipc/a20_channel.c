@@ -21,12 +21,52 @@
 #include "sys/usercopy.h"
 #include "ipc/ipc.h"
 #include "proc/proc.h"
+#include "core/panic.h"
+#include "core/timer.h"
 #include "ipc/objstats.h"
 
 extern void a20_object_ref(void *object, uint16_t type);
 extern void a20_object_release(void *object, uint16_t type);
 
 static spinlock_t g_ch_lock = SPINLOCK_INIT;
+
+/* ---- crash trace ring (diagnostics) ---- */
+#define CH_TRACE_ENTRIES 64
+struct ch_trace_ent {
+    uint64_t tick;
+    int      pid;
+    uint32_t op;      /* 1=alloc 2=enqueue 3=send-ok 4=send-fail 5=recv-begin
+                       6=recv-finish 7=recv-fail 8=free 9=ht-destroy */
+    uint32_t len;
+    void    *p1;      /* msg or ht */
+    void    *p2;      /* kdata or entries */
+    uint32_t meta;
+};
+static struct ch_trace_ent g_ch_trace[CH_TRACE_ENTRIES];
+static uint32_t g_ch_trace_idx;
+void a20_channel_trace(uint32_t op, uint32_t len, void *p1, void *p2, uint32_t meta)
+{
+    uint32_t i = __atomic_fetch_add(&g_ch_trace_idx, 1, __ATOMIC_RELAXED) %
+                 CH_TRACE_ENTRIES;
+    g_ch_trace[i].tick = timer_get_ticks();
+    g_ch_trace[i].pid  = proc_current() ? proc_current()->pid : -1;
+    g_ch_trace[i].op   = op;
+    g_ch_trace[i].len  = len;
+    g_ch_trace[i].p1   = p1;
+    g_ch_trace[i].p2   = p2;
+    g_ch_trace[i].meta = meta;
+}
+void a20_channel_trace_dump(void)
+{
+    uint32_t n = g_ch_trace_idx;
+    uint32_t start = n > CH_TRACE_ENTRIES ? n - CH_TRACE_ENTRIES : 0;
+    for (uint32_t i = start; i < n; i++) {
+        struct ch_trace_ent *e = &g_ch_trace[i % CH_TRACE_ENTRIES];
+        printf("[CHTRACE] tick=%lu pid=%d op=%u len=%u p1=%p p2=%p meta=%u\n",
+               (unsigned long)e->tick, e->pid, e->op, e->len,
+               e->p1, e->p2, e->meta);
+    }
+}
 
 static a20_ch_message_t *ch_msg_alloc(const void *data, uint32_t data_len,
                                       a20_ch_handle_info_t *handles,
@@ -56,12 +96,18 @@ static a20_ch_message_t *ch_msg_alloc(const void *data, uint32_t data_len,
 static void ch_msg_free(a20_ch_message_t *msg, int release_refs)
 {
     if (!msg) return;
-    if (release_refs && msg->handle_count > 0) {
+    a20_channel_trace(8, release_refs, msg, NULL, 0);
+    if (msg->data_len == 0xDEADBEEF) {
+        printf("[CH-MSG-DOUBLE-FREE] msg=%p release_refs=%d cpu=%u\n",
+               (void *)msg, release_refs, cpu_current_id());
+        panic("channel message double free");
+    }    if (release_refs && msg->handle_count > 0) {
         a20_ch_handle_info_t *hbuf =
             (a20_ch_handle_info_t *)(msg->data + msg->data_len);
         for (uint32_t i = 0; i < msg->handle_count; i++)
             a20_object_release(hbuf[i].object, hbuf[i].type);
     }
+    msg->data_len = 0xDEADBEEF;
     kfree(msg);
 }
 
@@ -222,11 +268,11 @@ int64_t a20_channel_send_dwc(a20_channel_ep_t *ep, const void *data, uint32_t da
         result = -A20_ERR_NO_MEMORY;
         goto out;
     }
-
+    a20_channel_trace(1, data_len, msg, NULL, handle_count);
     for (;;) {
         int r = ch_try_enqueue(ep, msg, defer_wake);
-        if (r > 0) { result = A20_OK; goto out; }
-        if (r < 0) { ch_msg_free(msg, 1); result = r; goto out; }
+        if (r > 0) { a20_channel_trace(3, data_len, msg, NULL, r); result = A20_OK; goto out; }
+        if (r < 0) { a20_channel_trace(4, data_len, msg, NULL, (uint32_t)-r); ch_msg_free(msg, 1); result = r; goto out; }
         if (flags & A20_MSG_NONBLOCK) {
             ch_msg_free(msg, 1);
             result = -A20_ERR_WOULD_BLOCK;
@@ -340,6 +386,7 @@ int64_t a20_channel_recv_begin(a20_channel_ep_t *ep, uint32_t flags,
                 *out_msg_data_len = msg->data_len;
             if (out_msg_handles)
                 *out_msg_handles = msg->handle_count;
+            a20_channel_trace(5, msg->data_len, msg, NULL, ep->msg_count);
             return A20_OK; /* ep->lock held */
         }
         if (ep->peer_closed) {
@@ -429,8 +476,7 @@ int64_t a20_channel_recv_begin_donate(a20_channel_ep_t *ep, uint32_t flags,
                     wait_queue_wake_one(&ep->waiters, A20_CH_WAIT_SEND,
                                         PROC_WAKE_EVENT);
                     spin_unlock(&ep->lock);
-                    ch_msg_free(msg, 1);
-                    a20_channel_ep_release(ep);
+                    ch_msg_free(msg, 1);                    a20_channel_ep_release(ep);
                     return tr;
                 }
             }
@@ -438,6 +484,7 @@ int64_t a20_channel_recv_begin_donate(a20_channel_ep_t *ep, uint32_t flags,
                 *out_msg_data_len = msg->data_len;
             if (out_msg_handles)
                 *out_msg_handles = msg->handle_count;
+            a20_channel_trace(5, msg->data_len, msg, NULL, ep->msg_count);
             return A20_OK; /* ep->lock held */
         }
         if (ep->peer_closed) {
@@ -572,6 +619,7 @@ int64_t a20_channel_recv_finish(a20_channel_ep_t *ep, void *data, uint32_t *data
     }
     if (handle_count) *handle_count = hc;
 
+    a20_channel_trace(6, out_len, msg, data, hc);
     ch_msg_free(msg, 0); /* handle refs transfer to the receiver */
     a20_channel_ep_release(ep); /* drop the recv_begin reference */
     return A20_OK;

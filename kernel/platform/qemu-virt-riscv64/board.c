@@ -77,37 +77,65 @@ static void rv64_smp_send_ipi(const smp_cpu_desc_t *cpu,
     sbi_send_ipi(1UL, cpu->hw_id);
 }
 
+/* IPI-based remote TLB flush.  The initiating CPU sets the target's pending
+ * bit, sends an IPI, and spins on the per-target generation counter; the soft
+ * IRQ handler on the target performs sfence.vma and bumps its generation.
+ * This replaces SBI REMOTE SFENCE.VMA, which is not reliably emulated by
+ * QEMU TCG for remote harts.  The caller must not hold a spinlock with
+ * interrupts disabled (remote-flush calls are deferred until after unlock). */
+static _Atomic uint32_t rv64_tlb_pending[CONFIG_NR_CPUS];
+static _Atomic uint32_t rv64_tlb_gen[CONFIG_NR_CPUS];
+
 static int rv64_smp_remote_tlb_flush(uint32_t pending, uint64_t addr,
                                      uint64_t size) {
-    while (pending) {
-        uint64_t base = ~(uint64_t)0;
-        for (unsigned cpu = 0; cpu < CONFIG_NR_CPUS; cpu++) {
-            if (pending & (1U << cpu)) {
-                uint64_t hw_id;
-                if (!smp_logical_to_hw(cpu, &hw_id) && hw_id < base)
-                    base = hw_id;
-            }
-        }
-        if (base == ~(uint64_t)0)
-            return -1;
+    (void)addr;
+    (void)size;
+    uint32_t self = 1U << arch_current_cpu_id();
+    pending &= ~self;
+    if (!pending)
+        return 0;
 
-        uint64_t hart_mask = 0;
-        uint32_t sent = 0;
-        for (unsigned cpu = 0; cpu < CONFIG_NR_CPUS; cpu++) {
-            uint64_t hw_id;
-            if (!(pending & (1U << cpu)) ||
-                smp_logical_to_hw(cpu, &hw_id) < 0 ||
-                hw_id < base || hw_id - base >= 64)
-                continue;
-            hart_mask |= 1ULL << (hw_id - base);
-            sent |= 1U << cpu;
-        }
-        if (!hart_mask ||
-            sbi_remote_sfence_vma(hart_mask, base, addr, size) < 0)
-            return -1;
-        pending &= ~sent;
+    for (unsigned cpu = 0; cpu < CONFIG_NR_CPUS; cpu++) {
+        if (!(pending & (1U << cpu)))
+            continue;
+        uint64_t hw_id;
+        if (smp_logical_to_hw(cpu, &hw_id) < 0)
+            continue;
+        __atomic_fetch_add(&rv64_tlb_gen[cpu], 1, __ATOMIC_ACQ_REL);
+        __atomic_store_n(&rv64_tlb_pending[cpu], 1, __ATOMIC_RELEASE);
+        sbi_send_ipi(1UL, hw_id);
     }
+
+    /*
+     * Wait with interrupts enabled: the targets must service the soft IRQ
+     * (sfence + ack).  If we are inside a trap with IRQs off, they may be
+     * waiting on us for their own flush; enabling interrupts here lets us
+     * service those IPIs and breaks the ABBA cycle.
+     */
+    int irqs_were_off = !arch_irqs_enabled();
+    if (irqs_were_off)
+        arch_local_irq_enable();
+    for (unsigned cpu = 0; cpu < CONFIG_NR_CPUS; cpu++) {
+        if (!(pending & (1U << cpu)))
+            continue;
+        while (__atomic_load_n(&rv64_tlb_pending[cpu], __ATOMIC_ACQUIRE))
+            arch_cpu_relax();
+    }
+    if (irqs_were_off)
+        arch_local_irq_disable();
     return 0;
+}
+
+/* Called from the soft-IRQ handler: execute sfence.vma and clear the pending
+ * bit so the initiator can proceed.  Must be IRQ-safe and lock-free. */
+void rv64_ipi_tlb_flush_handler(void)
+{
+    unsigned cpu = arch_current_cpu_id();
+    if (cpu >= CONFIG_NR_CPUS)
+        return;
+    if (__atomic_exchange_n(&rv64_tlb_pending[cpu], 0, __ATOMIC_ACQ_REL)) {
+        __asm__ __volatile__("sfence.vma" ::: "memory");
+    }
 }
 
 static void rv64_smp_secondary_init(const smp_cpu_desc_t *cpu) {
