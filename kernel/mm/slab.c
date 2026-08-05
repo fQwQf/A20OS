@@ -402,9 +402,11 @@ void kfree(void *ptr) {
                    (unsigned long)dbg_pfn, cpu_current_id());
         extern void a20_channel_trace_dump(void);
         extern void frame_trace_dump_pfn(pfn_t pfn);
-        extern uint32_t rv64_tlb_flush_stats(uint32_t *serviced);
+        extern uint32_t rv64_tlb_flush_stats(uint32_t *serviced)
+            __attribute__((weak));
         uint32_t tlb_svc = 0;
-        uint32_t tlb_calls = rv64_tlb_flush_stats(&tlb_svc);
+        uint32_t tlb_calls = rv64_tlb_flush_stats
+            ? rv64_tlb_flush_stats(&tlb_svc) : 0;
         printf("[SLAB BUG]   tlb_flush_calls=%u tlb_ipi_serviced=%u\n",
                (unsigned)tlb_calls, (unsigned)tlb_svc);
         a20_channel_trace_dump();
