@@ -65,6 +65,9 @@ static inline void arch_tlb_flush(void) {
 static inline void arch_tlb_flush_page(uint64_t addr) {
     __asm__ __volatile__("invlpg (%0)" :: "r"(addr) : "memory");
 }
+static inline void arch_tlb_flush_page_local(uint64_t addr) {
+    arch_tlb_flush_page(addr);
+}
 
 static inline void arch_set_task_pointer(void *task) {
     /* Use %gs base for task pointer on x86_64 */

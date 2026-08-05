@@ -61,6 +61,9 @@ static inline void arch_tlb_flush(void) {
 static inline void arch_tlb_flush_page(uint64_t addr) {
     __asm__ __volatile__("sfence.vma %0, zero" :: "r"((uint32_t)addr) : "memory");
 }
+static inline void arch_tlb_flush_page_local(uint64_t addr) {
+    arch_tlb_flush_page(addr);
+}
 
 static inline void arch_set_task_pointer(void *task) {
     __asm__ __volatile__("mv tp, %0" :: "r"(task));
