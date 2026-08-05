@@ -181,12 +181,22 @@ int net_unix_socket_connect(net_socket_t *s, const void *addr, size_t addrlen)
         child->connected = 1;
         child->peer = s;
         s->peer = child;
+        /* Channel bridge (internal IPC): one channel pair per connection,
+         * plain data flows through it; SCM_RIGHTS messages fall back to
+         * the legacy queue exactly as for socketpair. */
+        a20_channel_ep_t *cep = a20_channel_create(0, NULL);
+        if (cep) {
+            s->ch_ep = cep;
+            child->ch_ep = cep->peer;
+        }
         memcpy(child->local, listener->local, listener->local_len);
         child->local_len = listener->local_len;
         memcpy(child->peer_addr, s->local, s->local_len);
         child->peer_len = s->local_len;
         int qr = net_accept_queue_push_locked(listener, child);
         if (qr < 0) {
+            if (s->ch_ep) { a20_channel_ep_release(s->ch_ep); s->ch_ep = NULL; }
+            if (child->ch_ep) { a20_channel_ep_release(child->ch_ep); child->ch_ep = NULL; }
             s->connected = 0;
             s->peer = NULL;
             net_socket_free(child);
