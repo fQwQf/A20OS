@@ -45,17 +45,19 @@ static uint32_t ring_read(netd_frame_ring_t *r, uint8_t *out, uint32_t max)
 
 static void ring_write(netd_frame_ring_t *r, const uint8_t *data, uint32_t len)
 {
-    uint32_t tail = __atomic_load_n(&r->tail, __ATOMIC_ACQUIRE);
     uint32_t head = __atomic_load_n(&r->head, __ATOMIC_RELAXED);
-    if (tail - head >= NETD_RING_SLOTS)
+    uint32_t tail = __atomic_load_n(&r->tail, __ATOMIC_ACQUIRE);
+    if (head - tail >= NETD_RING_SLOTS)
         return; /* full: drop (NIC will retransmit) */
-    uint32_t idx = tail & r->slot_mask;
+    uint32_t idx = head & r->slot_mask;
     uint32_t off = idx * (4 + NETD_MAX_FRAME);
     *(uint32_t *)(r->data + off) = len;
     uint32_t i;
     for (i = 0; i < len; i++)
         r->data[off + 4 + i] = data[i];
-    __atomic_store_n(&r->head, tail + 1, __ATOMIC_RELEASE);
+    __atomic_store_n(&r->head, head + 1, __ATOMIC_RELEASE);
+    uint32_t rb = __atomic_load_n(&r->head, __ATOMIC_ACQUIRE);
+
 }
 
 static err_t netd_linkoutput(struct netif *netif, struct pbuf *p)
@@ -71,7 +73,11 @@ static err_t netd_linkoutput(struct netif *netif, struct pbuf *p)
             frame[len + i] = ((const uint8_t *)q->payload)[i];
         len += q->len;
     }
-    ring_write(&g_rings->tx, frame, len);
+    /* TX goes through a syscall: shared-memory writes from userspace are
+     * not reliably visible to the kernel with the current VMO mapping
+     * semantics, so netd hands the frame to the kernel to enqueue. */
+    a20_syscall6(A20_SYS_netd_tx_send, (uint64_t)frame, (uint64_t)len,
+                 0, 0, 0, 0);
     return ERR_OK;
 }
 
@@ -92,21 +98,29 @@ static err_t netd_netif_init(struct netif *netif)
     return ERR_OK;
 }
 
-static void netd_rx_drain(void)
+void netd_rx_drain(void)
 {
     uint8_t frame[NETD_MAX_FRAME];
     for (;;) {
         uint32_t len = ring_read(&g_rings->rx, frame, sizeof(frame));
         if (!len)
             break;
+
+
+
         struct pbuf *p = pbuf_alloc(PBUF_RAW, (u16_t)len, PBUF_POOL);
-        if (!p)
+        if (!p) {
+
             continue;
+        }
         uint32_t i;
         for (i = 0; i < len; i++)
             ((uint8_t *)p->payload)[i] = frame[i];
-        if (g_netif.input(p, &g_netif) != ERR_OK)
+        err_t ir = g_netif.input(p, &g_netif);
+        if (ir != ERR_OK) {
+
             pbuf_free(p);
+        }
     }
 }
 
@@ -118,15 +132,33 @@ int main(int argc, char **argv, char **envp)
     if (rh < 0)
         return 2;
     uint64_t base = 0;
-    if (a20_vm_map((a20_handle_t)rh, NETD_VMO_PAGES * 4096, 0,
-                   A20_PROT_READ | A20_PROT_WRITE, &base) < 0)
+    /* Map well below the mmap arena (0x60000000) so the ring pages never
+     * collide with the stack/anon VMAs that own that region. */
+    a20_vm_map_args_t margs;
+    __builtin_memset(&margs, 0, sizeof(margs));
+    margs.size      = sizeof(margs);
+    margs.version   = 1;
+    margs.source    = (a20_handle_t)rh;
+    margs.addr_hint = 0x10000000;
+    margs.length    = NETD_VMO_PAGES * 4096;
+    margs.offset    = 0;
+    margs.prot      = A20_PROT_READ | A20_PROT_WRITE;
+    a20_status_t mr = a20_syscall6(A20_SYS_vm_map, (uint64_t)&margs,
+                                   0, 0, 0, 0, 0);
+    if (mr < 0)
         return 2;
+    base = margs.out_addr;
     a20_hdl_close((a20_handle_t)rh);
     extern void a20_netd_set_out(a20_handle_t h);
     a20_start_info_t *si = a20_get_start_info();
     a20_netd_set_out(si ? si->stdout_handle : A20_HANDLE_NULL);
 
     g_rings = (netd_rings_t *)(uintptr_t)base;
+
+    a20_netd_printf("netd: sizeof_ring=%d tx_off=%d base_hi=%d\n",
+                    (unsigned int)sizeof(netd_frame_ring_t),
+                    (unsigned int)((uintptr_t)&g_rings->tx - (uintptr_t)base),
+                    (unsigned int)((uintptr_t)base >> 32));
     g_rings->rx.slot_mask = NETD_RING_SLOTS - 1;
     g_rings->tx.slot_mask = NETD_RING_SLOTS - 1;
     __atomic_store_n(&g_rings->tx.head, 0, __ATOMIC_RELAXED);
@@ -142,6 +174,11 @@ int main(int argc, char **argv, char **envp)
                    netif_input))
         return 3;
     netif_set_default(&g_netif);
+    netif_set_up(&g_netif);
+
+    extern int netd_sock_init(void);
+    extern void netd_sock_run(void);
+    netd_sock_init();
 
     a20_netd_printf("netd: up ip=10.0.2.15\n");
 
@@ -163,10 +200,5 @@ int main(int argc, char **argv, char **envp)
                         (unsigned)g_rings->rx.head, (unsigned)g_rings->rx.tail);
     }
 
-    for (;;) {
-        netd_rx_drain();
-        sys_check_timeouts();
-        netif_poll(&g_netif);
-        a20_thread_yield();
-    }
+    netd_sock_run();
 }
