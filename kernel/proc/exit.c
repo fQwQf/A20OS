@@ -423,6 +423,43 @@ void proc_force_exit(task_t *t, int exit_code)
         (void)proc_sched_resume_stopped(t, 0);
 }
 
+void proc_exec_terminate_siblings(task_t *self)
+{
+    if (!self)
+        return;
+
+    int self_tgid = proc_task_tgid(self);
+    int pids[128];
+    int pid_count;
+
+    do {
+        pid_count = 0;
+        uint64_t flags = spin_lock_irqsave(&proc_lock);
+        for (task_t *t = proc_first_task_locked(); t;
+             t = proc_next_task_locked(t)) {
+            if (t == self || t->state == PROC_UNUSED ||
+                t->state == PROC_ZOMBIE)
+                continue;
+            if (proc_task_tgid(t) != self_tgid)
+                continue;
+            if (__atomic_load_n(&t->exit_pending, __ATOMIC_ACQUIRE))
+                continue;
+            if (pid_count == (int)(sizeof(pids) / sizeof(pids[0])))
+                break;
+            pids[pid_count++] = t->pid;
+        }
+        spin_unlock_irqrestore(&proc_lock, flags);
+
+        for (int i = 0; i < pid_count; i++) {
+            task_t *sibling = proc_find_get(pids[i]);
+            if (sibling) {
+                proc_force_exit(sibling, -SIGKILL);
+                proc_put(sibling);
+            }
+        }
+    } while (pid_count == (int)(sizeof(pids) / sizeof(pids[0])));
+}
+
 void proc_exit_group(int exit_code)
 {
     task_t *self = proc_current();
