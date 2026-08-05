@@ -1,148 +1,102 @@
-# A20OS 混合内核改造设计
+# A20OS 混合内核：已建成架构
 
-本文档是 A20OS 从"吸收微内核理念的宏内核"演进为真正混合内核的设计总纲。
-配套实施路线见 [01-roadmap.md](01-roadmap.md)。整体架构介绍见
-[../OS-Design.md](../OS-Design.md)。
+本文档描述混合内核**当前已实现的形态**（截至 2026-08-05，commit
+`4e0110f`）。分阶段的实施记录与验收数据见
+[01-roadmap.md](01-roadmap.md)；进一步微内核化计划见
+[02-mainstream-plan.md](02-mainstream-plan.md)。
 
-## 1. 目标与原则
-
-把"崩溃代价高、性能不敏感"的子系统迁入受 capability 约束的用户态服务，
-同时让性能关键路径保持内核态函数调用。三条硬原则：
-
-1. **不牺牲性能**：任何外迁必须给出迁移前后基准对比；热路径（调度、缺页、
-   VFS、页缓存、TCP 数据面）永远留在内核。
-2. **不另起炉灶**：复用现有 Native ABI 的 handle/rights、Channel、EventQ、
-   VMO/VMAR 机制，只做增量扩展。
-3. **故障可恢复**：用户态服务崩溃 = 服务重启，不是整机 panic。
-
-## 2. 现有底座（已具备，无需重建）
-
-代码审计确认以下微内核基础设施已经存在并可用：
-
-| 机制 | 位置 | 说明 |
-|------|------|------|
-| 统一句柄表 + 14 位 rights | `kernel/abi/native/handle_table.c` | 句柄项内联存储对象指针、类型、rights、时态约束 |
-| 类型化对象生命周期 | `kernel/ipc/a20_object.c` | `a20_object_ref/release` 按类型分发 |
-| Channel（含句柄传递） | `kernel/ipc/a20_channel.c` | Zircon 风格；`ρ_recv = ρ_send ∩ ρ_transfer` |
-| EventQ（统一等待） | `kernel/ipc/a20_event.c` | watch 任意对象；`A20_EVENT_EXITED` 已由 `kernel/proc/exit.c:363` 在任务退出时发出 |
-| VMO 跨进程共享 | `kernel/mm/vmo.c` + `vm_share`/channel 传递 | 引用计数的规范页帧持有者 |
-| 命名空间 | `kernel/abi/native/sys_native_security.c` | `ns_create/ns_apply` |
-| 原生任务派生 | `kernel/abi/native/sys_core.c` `sys_a20_task_spawn` | 一次调用装载 ELF + 传递初始句柄 |
-| 用户态 SDK | `user/liba20rt/` | channel/event/mem/handle 的内联封装 |
-| SPSC 无锁环（内核内） | `kernel/include/abi/native/ring_spsc.h` | 当前无调用方，可作为共享环参考 |
-
-## 3. 目标架构：三层
+## 1. 架构形态
 
 ```
 ┌────────────────────────────────────────────────────┐
-│ 用户态服务层（可崩溃、可重启、可独立审计）              │
-│  netd(协议栈)  blkd(块驱动)  inputd  fsd(具体格式)    │
-│  每个服务 = 普通 native 任务 + 显式授予的 handle       │
+│ 用户态服务层（已实现，可崩溃、可重启）                  │
+│  svcman(监管)  echod  rtcd(RTC驱动)  shmringd/chand   │
 ├────────────────────────────────────────────────────┤
 │ 混合内核层（性能关键路径，保持内核态）                  │
 │  EEVDF 调度 / MM(VMO·VMAR·缺页) / VFS 核心 / 页缓存   │
-│  Channel·EventQ IPC / 驱动框架·中断分发·DMA 授权       │
+│  Channel·EventQ IPC / 驱动框架·中断分发·MMIO 授权     │
 ├────────────────────────────────────────────────────┤
-│ 核心可信基（nano-kernel 化方向）                       │
-│  陷陷入口 / 上下文切换 / 句柄表 / 对象生命周期           │
+│ 兼容层                                               │
+│  Linux ABI(223 syscall) + vDSO 快路径                 │
 └────────────────────────────────────────────────────┘
 ```
 
-### 3.1 什么留内核，什么迁出去
+判定规则（不变）：每秒调用 > 10k 次或延迟敏感 < 10µs 的路径留内核；
+崩溃频繁、协议解析类的迁出。调度器、MM/缺页、VFS 核心、dentry/inode/
+页缓存、TCP 数据面**确认留内核**。
 
-判定规则：**每秒调用 > 10k 次、或延迟敏感 < 10µs 的路径留内核**；崩溃频繁、
-逻辑复杂、协议解析类的迁出。先加 tracepoint 实测，再决定边界。
+## 2. 已建成的子系统
 
-| 留内核 | 迁用户态 |
-|--------|----------|
-| 调度器、MM/缺页、VFS 核心、dentry/inode/页缓存 | 具体 FS 格式实现（可选 FUSE-like 服务） |
-| 中断分发桩、DMA 缓冲授权 | 驱动业务逻辑（MMIO 映射授权到服务进程） |
-| socket 系统调用代理层 | lwIP 协议栈（netd 进程） |
-| Channel/EventQ/句柄表 | 服务注册、健康监控、策略（svcman） |
+### 2.1 对象与能力（Native ABI 底座，先于本项目存在）
 
-### 3.2 驱动外迁模型
+统一句柄表 + 14 位 rights + 时态约束 + BLP 标签
+（`kernel/abi/native/handle_table.c`）；类型化对象生命周期
+（`kernel/ipc/a20_object.c`）；Channel 含句柄传递
+（`ρ_recv = ρ_send ∩ ρ_transfer`）；EventQ 统一等待（含
+`A20_EVENT_EXITED` 任务退出、`A20_EVENT_SIGNALED` 设备信号）。
 
-- 内核保留：中断注册/分发（`request_irq` 已有）、`dma_alloc_coherent` 物理页
-  分配、MMIO 物理页映射授权（以带 `A20_RIGHT_MAP` 的 handle 授给驱动进程，
-  `/dev/fb0` mmap 已是此模式的先例）。
-- 数据面：内核与驱动服务共享一块 VMO，里面放请求/完成环（SPSC/MPSC），
-  生产消费用 acquire/release 原子序，**正常路径零系统调用**；只有队列
-  空/满时才通过 EventQ 或 futex 唤醒。virtio 分割环本来就是跨信任域设计，
-  语义直接借用。
-- 控制面：走 Channel RPC（见 §4.1 的 `channel_call` 快路径）。
-- 可重启：驱动进程只持有 handle 不持有内核指针，崩溃后内核随句柄表销毁
-  自动回收全部对象引用；svcman 重新拉起并 replay 注册流程。
+### 2.2 IPC 快路径（阶段 1）
 
-## 4. 性能机制（"不牺牲性能"的具体手段）
+`channel_call`（syscall `0x0508`，`kernel/abi/native/sys_native_ipc.c`）：
+一次陷入完成请求发送 + 回复等待，单次句柄查找（READ|WRITE）+ 单次
+参数校验；服务端唤醒走 `proc_try_wake` 的 priority-preempt 路径
+（两个 ABI 共享）。SDK：`a20_channel_call[_flags]`。
 
-### 4.1 `channel_call`：融合 RPC 快路径（本项目新增）
+### 2.3 服务监管（阶段 2）
 
-微内核 IPC 的经典开销是"两次陷入 + 两次调度"。现有
-`a20_channel_send` + `a20_channel_recv` 的 RPC 往返 = 2 次 syscall 陷入 +
-2 次句柄查找 + 2 次 park/wake。改造：
+`user/svc/svcman.c`：`task_spawn` v2（stdio 继承）+ `target_slot`
+固定槽位传递服务端点（服务以编译期常量命名自己的端点）；EventQ
+监控 `A20_EVENT_EXITED`（`ev.data0` = 退出码）；指数退避重启 =
+新建 channel 对 + 重新 spawn。演示：两轮崩溃→自愈。
 
-- **融合陷入**：一次 `channel_call` 完成 send + 阻塞等回复，RPC 往返陷入
-  次数从 4（call 双方各 2 次）降为 2。
-- **单次句柄查找**：send 与 recv 阶段共享同一次 `A20_RIGHT_WRITE|READ`
-  查找结果。
-- **唤醒捐赠**：投递消息时若对端正阻塞在 RECV 等待队列上，走
-  `proc_try_wake` 的 priority-preempt 路径（`kernel/proc/park.c` 已有），
-  让服务端立即抢占当前 CPU，等效于 L4 的 time-slice donation，避免
-  服务端在 runqueue 里排队。
+### 2.4 共享内存数据面（阶段 3）
 
-### 4.2 共享 VMO 环形队列（批量数据面）
+`user/liba20rt/a20_shmring.h`：SPSC 字节环，全相对偏移（跨进程
+不同虚拟地址可用），acquire/release 游标，Dekker 门铃（futex 以
+物理页为 key，跨进程有效）。非满非空路径零 syscall。16 MiB 跨进程
+完整性验证，TCG 上与 channel 传输持平。
 
-- 控制消息（< 64B）走 Channel；批量数据一律走共享 VMO + 无锁环。
-- 环协议做成 user/kernel 共用的 uapi 头（acquire/release 语义，SPSC 起步），
-  参考 `ring_spsc.h` 但改为**相对偏移**而非内核指针，使同一 VMO 在两个
-  进程的不同虚拟地址都可用。
-- 唤醒合并：生产者只在"消费者可能睡着"时置 doorbell（EventQ 事件），
-  消费者睡前复査一次环——类 futex 的"先查后睡"协议。
+### 2.5 Linux ABI 透明获益（阶段 3B）
 
-### 4.3 其他
+- **vDSO**（riscv64）：`kernel/vdso/riscv64/vdso.S` 提供
+  `__vdso_clock_gettime/gettimeofday/getcpu`；exec 时映射固定 VA
+  （代码 RX `0x3FFC0000` + vvar RO `0x3FFC2000`）+ auxv
+  `AT_SYSINFO_EHDR`；vvar 与内核 timekeeping 读同一个 `time` CSR，
+  realtime 锚点与 syscall 路径位级一致（seqlock 保护）；fork 显式
+  重映射；musl 程序零改动，实测 4.3×。
+- **唤醒捐赠**：pipe/AF_UNIX/futex/channel 的 wake 全部经
+  `proc_try_wake` priority-preempt，两个 ABI 自动共享。
 
-- 只读高频查询（时钟、cpu 数、uptime）走只读共享页，不进内核。
-- 服务间 handle 传递全部走 Channel 的既有 TRANSFER 语义，零拷贝授权。
+### 2.6 用户态驱动框架（阶段 4）
 
-## 5. 稳定性机制（"微内核优雅"的落地）
+`kernel/drivers/core/udriver.c` + syscall `0x0C00–0x0C03`：
 
-1. **svcman 服务监管者**（用户态）：按静态清单拉起服务；用 EventQ watch
-   每个服务任务的 `A20_EVENT_EXITED`；崩溃后指数退避重启；重启时通过
-   `task_spawn` 的 handles 数组把新的服务端 Channel 端点交回给客户端
-   注册表。
-2. **崩溃隔离**：服务只能通过显式 handle 访问资源；Channel 值语义天然
-   免疫指针注入；BLP 标签与时态句柄（`handle_table.c` 已有）限制横向移动。
-3. **资源回收**：服务死亡 → 句柄表销毁 → `a20_object_release` 按类型回收
-   VMO/端点/订阅，无内核泄漏。
-4. **健康检查**：svcman 周期性 `channel_call` ping；超时未响应判定僵死
-   并强杀重启（`task_kill` + `A20_RIGHT_SIGNAL`）。
+- `device_map_mmio`：白名单设备物理窗口 → PFNMAP 用户映射
+  （qemu-virt-riscv64 注册 goldfish RTC 0x101000/4KiB）。
+- `device_irq_listen/ack/unlisten`：IRQ → EventQ，VFIO/UIO 电平协议
+  （内核 thunk 先在 irqchip 屏蔽，投递 `A20_EVENT_SIGNALED`，用户
+  确认后重新武装）。
+- `udriver_task_cleanup`：任务退出时在 EXITED 事件发出**之前**释放
+  IRQ 注册，监管者可立即重启设备驱动。
 
-## 6. 与现有体系的兼容
+试点 `user/svc/rtcd.c`：goldfish RTC 整体用户态化（纳秒时钟读取、
+一次性闹钟 IRQ、崩溃演示）；`user/tests/test_native_rtcd.c` 验证
+时间 RPC、100ms 闹钟往返、崩溃检测与重启恢复。
 
-- Linux ABI 完全不动；全部新机制在 Native ABI 侧增量。
-- 现有 93 个 native syscall 不改语义；新增 syscall 走空闲号段。
-- 每个阶段提供独立 smoke 目标（见 01-roadmap.md 验收表），任一阶段
-  可独立回退。
+## 3. 稳定性不变式（已实现）
 
-## 7. Linux ABI 程序的透明获益路径
+1. 用户态服务只持有显式授予的 handle；Channel 值语义免疫指针注入。
+2. 服务死亡 → 句柄表销毁 → 类型化对象回收（VMO/端点/订阅/IRQ 注册）。
+3. 监管者用 EXITED + 退出码检测崩溃，退避后重启并重建服务端点。
+4. 热路径（调度/缺页/VFS/页缓存）零额外跳转。
 
-原则：Linux ABI 的 API 形状（223 个 syscall）不变，把**底下的实现**
-换到混合内核的快路径上，原生 musl 程序零改动受益。
+## 4. 性能现状（QEMU TCG 实测）
 
-1. **pipe → 共享 VMO 环**（`kernel/fs/pipe.c`）：数据面改为 VMO-backed
-   SPSC 环 + doorbell 合并唤醒；大块 write/read 从双拷贝降为单拷贝。
-   管道是 shell 管线的热路径，收益面最大。
-2. **AF_UNIX SOCK_STREAM → Channel**（`kernel/net/socket_unix.c`）：
-   unix socket 是 Linux 本地 RPC 的标准传输（DBus/Wayland/容器运行时）。
-   SCM_RIGHTS 与 Channel 句柄传递同构，语义可完整保留。
-3. **vDSO**：exec 时装载 vDSO 页并在 auxv 填 `AT_SYSINFO_EHDR`，
-   `clock_gettime/gettimeofday/getcpu` 绕过陷入。musl 的
-   `clock_gettime` 检测到 vDSO 即自动使用，静态链接程序同样受益。
-4. **唤醒捐赠**：pipe/socket/futex 的 wake 统一走 `proc_try_wake` 的
-   priority-preempt 路径（`kernel/proc/park.c`），对该路径的优化
-   两个 ABI 自动共享。
+| 指标 | 数值 | 结论 |
+|------|------|------|
+| `clock_gettime`（musl） | 2457 ns vs syscall 10637 ns | vDSO 4.3× |
+| RPC 往返（32B ping-pong） | ~80 µs | 上下文切换主导，融合收益被淹没 |
+| 16 MiB 跨进程传输 | ring ≈ channel（39–42 MiB/s 级） | 持平，ring 陷入少两个数量级 |
 
-边界说明：POSIX 单次 `read()` 必然伴随一次陷入，"融合 RPC"的 syscall
-形态在 POSIX 中不存在（Linux 的对应答案是 io_uring，工程量大，列为
-远期候选）。因此 Linux ABI 的收益形式是**底下变快**而非**调用变少**，
-vDSO 除外。
+**已知性能瓶颈**：RPC 往返成本 = 2 次上下文切换（无直接切换/时间片
+捐赠）。这是阶段 M1 的目标。
