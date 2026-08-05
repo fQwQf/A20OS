@@ -594,6 +594,33 @@ int64_t a20_channel_recv(a20_channel_ep_t *ep, void *data, uint32_t *data_len,
     return a20_channel_recv_finish(ep, data, data_len, handles, handle_count);
 }
 
+int a20_channel_readable(a20_channel_ep_t *ep)
+{
+    if (!ep) return 0;
+    spin_lock(&ep->lock);
+    int r = ep->msg_count > 0 || ep->peer_closed;
+    spin_unlock(&ep->lock);
+    return r;
+}
+
+int a20_channel_writable(a20_channel_ep_t *ep)
+{
+    if (!ep) return 0;
+    spin_lock(&ep->lock);
+    int r = !ep->peer_closed && ep->msg_count < ep->msg_cap;
+    spin_unlock(&ep->lock);
+    return r;
+}
+
+int a20_channel_peer_closed(a20_channel_ep_t *ep)
+{
+    if (!ep) return 0;
+    spin_lock(&ep->lock);
+    int r = ep->peer_closed;
+    spin_unlock(&ep->lock);
+    return r;
+}
+
 void a20_channel_ep_release(a20_channel_ep_t *ep)
 {
     if (!ep) return;
