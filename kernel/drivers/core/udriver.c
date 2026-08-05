@@ -12,8 +12,7 @@
 #include "mm/slab.h"
 #include "drivers/core/driver_hwapi.h"
 #include "drivers/core/udriver.h"
-#include "abi/native/types.h"
-#include "abi/native/ipc_internal.h"
+#include "ipc/ipc.h"
 #include "ipc/objstats.h"
 
 /* ---- Whitelisted user-mappable MMIO windows ---- */

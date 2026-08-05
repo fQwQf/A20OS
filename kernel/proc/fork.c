@@ -10,7 +10,7 @@
 #include "mm/vm.h"
 #include "sys/usercopy.h"
 #if defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)
-#include "abi/native/handle_table.h"
+#include "ipc/handle_table.h"
 #endif
 
 static int proc_copy_to_task_user(task_t *task, void *dst, const void *src, size_t n)

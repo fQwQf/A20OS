@@ -24,7 +24,7 @@
 #include "proc/signal.h"
 #include "mm/frame.h"
 #ifdef CONFIG_ABI_NATIVE
-#include "abi/native/startup.h"
+#include "ipc/start_info.h"
 #endif
 
 /* musl struct pthread is ~300-400 bytes; 512 gives headroom */
