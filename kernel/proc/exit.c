@@ -8,6 +8,10 @@
 #include "drivers/core/udriver.h"
 #include "fs/fdtable.h"
 #include "fs/vfs.h"
+
+#if defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)
+extern void a20_registry_task_exit(int pid);
+#endif
 #include "mm/frame.h"
 #include "mm/mm.h"
 #include "mm/vm.h"
@@ -363,6 +367,9 @@ void proc_exit(int exit_code)
      * event fires, so a supervisor reacting to that event can immediately
      * re-register the device (reap-time cleanup would race the respawn). */
     udriver_task_cleanup(t->pid);
+#if defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)
+    a20_registry_task_exit(t->pid);
+#endif
 
     /* Native ABI task handles store the pid as the object pointer, so the
      * watch key must be pid-as-pointer (docs/native-abi/05-ipc.md §3.3). */

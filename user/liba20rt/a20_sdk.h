@@ -18,6 +18,7 @@
 #include "a20_sync.h"
 #include "a20_net.h"
 #include "a20_device.h"
+#include "a20_registry.h"
 #include "a20_system.h"
 
 /* Pure utility functions (no syscall dependency) */
