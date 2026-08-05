@@ -121,3 +121,7 @@ A20_NATIVE_SYSCALL(device_block_attach, sys_a20_device_block_attach(args))
 A20_NATIVE_SYSCALL(device_block_complete, sys_a20_device_block_complete(args))
 
 A20_NATIVE_SYSCALL(netd_attach, sys_a20_netd_attach(args))
+
+A20_NATIVE_SYSCALL(netd_sock_register, sys_a20_netd_sock_register(args))
+
+A20_NATIVE_SYSCALL(netd_tx_send, sys_a20_netd_tx_send(args))
