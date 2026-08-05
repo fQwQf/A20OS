@@ -2,12 +2,7 @@
 
 > 本索引文档描述 A20OS Native ABI 研究笔记的文档结构、依赖关系、贡献声明和推荐阅读顺序。
 
-> **范围说明：** `docs/research/` 保存研究假设、形式化模型和实现演进记录，
-> 其中的伪代码不作为当前内核并发协议。当前 task 生命周期、wait queue、
-> Park/Wake、timeout、信号和 SMP 调度实现以
-> [进程、调度与阻塞协议](../process-scheduler.md)、
-> [EEVDF 调度器设计](../eevdf-scheduler.md)、`kernel/include/proc/`
-> 及 `docs/testing/*-audit.md` 为准。
+> **范围说明：** `docs/research/` 保存研究假设、形式化模型和实现演进记录，其中的伪代码不作为当前内核并发协议。当前 task 生命周期、wait queue、Park/Wake、timeout、信号和 SMP 调度实现以[进程、调度与阻塞协议](../process-scheduler.md)、[EEVDF 调度器设计](../eevdf-scheduler.md)、`kernel/include/proc/`及 `docs/testing/*-audit.md` 为准。
 
 ---
 

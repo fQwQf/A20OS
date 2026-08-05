@@ -56,8 +56,7 @@ make ARCH=aarch64 BOARD=virtualbox-aarch64 ABI=both kernel-only -j4make ARCH=aar
 | 必需 BAR/MMIO/IRQ 缺失 | 返回 `-ENODEV`，无 ready/私有指针 |
 | DMA 第 N 次分配失败 | 前 N-1 次全部释放 |
 | feature/version 不支持 | 设备 FAILED/复位，无 queue 泄漏 |
-| request_irq 失败 | 显式降级为轮询且设备级中断保持屏蔽；不允许实例保持“看似 IRQ 驱动”的状态 |
-| IRQ 已注册 | 启动日志或调试计数证实中断真实触发；共享线场景两个设备都完成 I/O；remove 后 probe 能重新注册 |
+| request_irq 失败 | 若支持轮询则明确降级，否则 probe 失败并清理 |
 | 健康检查超时 | `-ETIMEDOUT`，设备停止后才释放 DMA |
 | 成功 | `drv_priv`、class、容量/MAC/模式均有效 |
 

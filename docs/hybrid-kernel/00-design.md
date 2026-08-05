@@ -30,21 +30,16 @@
 
 ### 2.5 Linux ABI 透明获益（阶段 3B）
 
-- **vDSO**（riscv64）：`kernel/vdso/riscv64/vdso.S` 提供
-  `__vdso_clock_gettime/gettimeofday/getcpu`；exec 时映射固定 VA（代码 RX `0x3FFC0000` + vvar RO `0x3FFC2000`）+ auxv`AT_SYSINFO_EHDR`；vvar 与内核 timekeeping 读同一个 `time` CSR，realtime 锚点与 syscall 路径位级一致（seqlock 保护）；fork 显式重映射；musl 程序零改动，实测 4.3×。
-- **唤醒捐赠**：pipe/AF_UNIX/futex/channel 的 wake 全部经
-  `proc_try_wake` priority-preempt，两个 ABI 自动共享。
+- **vDSO**（riscv64）：`kernel/vdso/riscv64/vdso.S` 提供 `__vdso_clock_gettime/gettimeofday/getcpu`；exec 时映射固定 VA （代码 RX `0x3FFC0000` + vvar RO `0x3FFC2000`）+ auxv `AT_SYSINFO_EHDR`；vvar 与内核 timekeeping 读同一个 `time` CSR， realtime 锚点与 syscall 路径位级一致（seqlock 保护）；fork 显式 重映射；musl 程序零改动，实测 4.3×。
+- **唤醒捐赠**：pipe/AF_UNIX/futex/channel 的 wake 全部经 `proc_try_wake` priority-preempt，两个 ABI 自动共享。
 
 ### 2.6 用户态驱动框架（阶段 4）
 
 `kernel/drivers/core/udriver.c` + syscall `0x0C00–0x0C03`：
 
-- `device_map_mmio`：白名单设备物理窗口 → PFNMAP 用户映射
-  （qemu-virt-riscv64 注册 goldfish RTC 0x101000/4KiB）。
-- `device_irq_listen/ack/unlisten`：IRQ → EventQ，VFIO/UIO 电平协议
-  （内核 thunk 先在 irqchip 屏蔽，投递 `A20_EVENT_SIGNALED`，用户确认后重新武装）。
-- `udriver_task_cleanup`：任务退出时在 EXITED 事件发出**之前**释放
-  IRQ 注册，监管者可立即重启设备驱动。
+- `device_map_mmio`：白名单设备物理窗口 → PFNMAP 用户映射 （qemu-virt-riscv64 注册 goldfish RTC 0x101000/4KiB）。
+- `device_irq_listen/ack/unlisten`：IRQ → EventQ，VFIO/UIO 电平协议 （内核 thunk 先在 irqchip 屏蔽，投递 `A20_EVENT_SIGNALED`，用户 确认后重新武装）。
+- `udriver_task_cleanup`：任务退出时在 EXITED 事件发出**之前**释放 IRQ 注册，监管者可立即重启设备驱动。
 
 试点 `user/svc/rtcd.c`：goldfish RTC 整体用户态化（纳秒时钟读取、一次性闹钟 IRQ、崩溃演示）；`user/tests/test_native_rtcd.c` 验证时间 RPC、100ms 闹钟往返、崩溃检测与重启恢复。
 
