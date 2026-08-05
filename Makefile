@@ -718,7 +718,8 @@ VBOX_AARCH64_LOAD_ADDRESS ?= 0x08080000ULL
 		final-eval-rv-cagent final-eval-la-cagent \
 		final-eval-rv-buildstorm final-eval-la-buildstorm \
 		final-probe-rv-buildstorm-1c final-probe-rv-buildstorm-8c \
-		final-probe-la-buildstorm-1c final-probe-la-buildstorm-8c
+		final-probe-la-buildstorm-1c final-probe-la-buildstorm-8c \
+		final-stage6-rv-buildstorm-j1 final-stage6-la-buildstorm-j1
 
 FORCE:
 
@@ -3999,11 +4000,12 @@ eval-check: eval-check-rv eval-check-la
 FINAL_EVAL_IMAGE_DIR ?= contest/2026OSImage-Pub
 FINAL_EVAL_STATE_DIR ?= .eval-state/2026
 FINAL_EVAL_TIMEOUT ?=
+BUILDSTORM_STAGE6_QEMU_TIMEOUT_SECONDS ?= 28800
 
 define RUN_FINAL_EVAL
 	FINAL_EVAL_IMAGE_DIR="$(FINAL_EVAL_IMAGE_DIR)" \
 	FINAL_EVAL_STATE_DIR="$(FINAL_EVAL_STATE_DIR)" \
-	$(if $(strip $(FINAL_EVAL_TIMEOUT)),FINAL_EVAL_TIMEOUT="$(FINAL_EVAL_TIMEOUT)") \
+	$(if $(strip $(5)),FINAL_EVAL_TIMEOUT="$(strip $(5))",$(if $(strip $(FINAL_EVAL_TIMEOUT)),FINAL_EVAL_TIMEOUT="$(FINAL_EVAL_TIMEOUT)")) \
 	bash ./tools/run_final_eval.sh $(1) $(2) $(3) $(4)
 endef
 
@@ -4048,3 +4050,9 @@ final-stage5-rv-buildstorm:
 
 final-stage5-la-buildstorm:
 	$(call RUN_FINAL_EVAL,loongarch64,buildstorm-probe,8,stage5-official-minibuild)
+
+final-stage6-rv-buildstorm-j1:
+	$(call RUN_FINAL_EVAL,riscv64,buildstorm-probe,8,stage6-tg-xtask-j1,$(BUILDSTORM_STAGE6_QEMU_TIMEOUT_SECONDS))
+
+final-stage6-la-buildstorm-j1:
+	$(call RUN_FINAL_EVAL,loongarch64,buildstorm-probe,8,stage6-tg-xtask-j1,$(BUILDSTORM_STAGE6_QEMU_TIMEOUT_SECONDS))

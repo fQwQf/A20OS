@@ -65,6 +65,7 @@ run_case() {
 
     case "$name" in
     stage2-*-100|stage3-*-100|stage4-*|stage5-*) case_timeout=900 ;;
+    stage6-tg-xtask-j1) case_timeout=27000 ;;
     esac
 
     (( total++ ))
@@ -272,6 +273,52 @@ probe_stage5_official_minibuild() {
     rm -rf "$base" || return
 }
 
+probe_stage6_tg_xtask_j1() {
+    typeset base=/work/tgoskits
+    typeset output=/work/a20-stage6-tg-xtask-j1.stdout-stderr.log
+    typeset rc_file=/work/.a20-stage6-tg-xtask-j1.rc
+    typeset artifact="$base/target/debug/tg-xtask"
+    typeset -i rc=1
+    typeset -i bytes=0
+
+    cd "$base" || {
+        print "BUILDSTORM_STAGE6_TG_XTASK missing-workspace path=$base"
+        return 1
+    }
+
+    # Every final-eval run has a new qcow2 overlay.  Removing target here also
+    # prevents pre-existing files in the published image from turning this
+    # cold correctness probe into an incremental build.
+    rm -rf "$base/target" "$output" "$rc_file" || return
+    unset RUSTC LD_LIBRARY_PATH CARGO_BUILD_JOBS CARGO_TARGET_DIR
+
+    print "BUILDSTORM_STAGE6_TG_XTASK begin arch=$arch jobs=1"
+    print "BUILDSTORM_STAGE6_TG_XTASK command=cargo build -p tg-xtask --jobs 1"
+    {
+        cargo build -p tg-xtask --jobs 1
+        print $? >"$rc_file"
+    } 2>&1 | /usr/bin/tee "$output"
+
+    if [[ -r "$rc_file" ]]; then
+        read rc <"$rc_file"
+    fi
+    rm -f "$rc_file"
+    print "BUILDSTORM_STAGE6_TG_XTASK result arch=$arch jobs=1 rc=$rc output=$output"
+    (( rc == 0 )) || return $rc
+
+    if [[ ! -f "$artifact" || ! -x "$artifact" ]]; then
+        print "BUILDSTORM_STAGE6_TG_XTASK artifact=$artifact missing-or-not-executable"
+        return 1
+    fi
+    bytes=$(/usr/bin/wc -c <"$artifact") || return
+    (( bytes > 0 )) || {
+        print "BUILDSTORM_STAGE6_TG_XTASK artifact=$artifact empty"
+        return 1
+    }
+    print "BUILDSTORM_STAGE6_TG_XTASK artifact=$artifact bytes=$bytes executable=yes"
+    print "BUILDSTORM_STAGE6_TG_XTASK ok arch=$arch jobs=1"
+}
+
 run_named_case() {
     case "$1" in
     static-elf) probe_static_elf ;;
@@ -294,6 +341,7 @@ run_named_case() {
     cargo-minibuild-default) probe_cargo_minibuild_default ;;
     stage4-cargo-minibuild) probe_stage4_cargo_minibuild ;;
     stage5-official-minibuild) probe_stage5_official_minibuild ;;
+    stage6-tg-xtask-j1) probe_stage6_tg_xtask_j1 ;;
     *)
         print "[BUILDSTORM-PROBE][FATAL] unknown case: $1"
         return 2
