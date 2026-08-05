@@ -44,7 +44,7 @@ void mm_sync_shared_dirty_for_vnode(vnode_t *vn)
         if (t->state == PROC_UNUSED || !t->mm)
             continue;
         mm_struct_t *mm = t->mm;
-        uint64_t mm_flags = spin_lock_irqsave(&mm->lock);
+        spin_lock(&mm->lock);
         for (vm_area_t *vma = mm->mmap; vma; vma = vma->next) {
             if (!(vma->vm_flags & VM_SHARED) || !(vma->vm_flags & VM_FILE))
                 continue;
@@ -70,12 +70,13 @@ void mm_sync_shared_dirty_for_vnode(vnode_t *vn)
                 }
             }
         }
-        spin_unlock_irqrestore(&mm->lock, mm_flags);
+        spin_unlock(&mm->lock);
     }
     spin_unlock_irqrestore(&proc_lock, proc_flags);
 }
 
-vaddr_t mm_mmap(mm_struct_t *mm, vaddr_t addr, size_t len, int prot, int flags) {
+vaddr_t mm_mmap_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
+                         int prot, int flags) {
     if ((flags & (MAP_FIXED | MAP_FIXED_NOREPLACE)) && (addr & (PAGE_SIZE - 1)))
         return (uint64_t)-EINVAL;
     len = ROUND_UP(len, PAGE_SIZE);
@@ -98,7 +99,7 @@ vaddr_t mm_mmap(mm_struct_t *mm, vaddr_t addr, size_t len, int prot, int flags) 
 
     // 处理 MAP_FIXED 标志
     if ((flags & MAP_FIXED) && addr != 0) {
-        mm_munmap(mm, addr, len);
+        mm_munmap_locked(mm, addr, len);
     } else if (addr != 0) {
         vm_area_t *existing = mm_find_vma(mm, addr);
         if (existing && existing->start < addr + len && existing->end > addr)
@@ -122,7 +123,7 @@ vaddr_t mm_mmap(mm_struct_t *mm, vaddr_t addr, size_t len, int prot, int flags) 
 #endif
 
     // 创建新的 VMA
-    vm_area_t *vma = kcalloc(1, sizeof(vm_area_t));
+    vm_area_t *vma = kcalloc_atomic(1, sizeof(vm_area_t));
     if (!vma) {
 #ifdef CONFIG_NOMMU
         kfree(nommu_raw);
@@ -154,8 +155,9 @@ vaddr_t mm_mmap(mm_struct_t *mm, vaddr_t addr, size_t len, int prot, int flags) 
     return addr;
 }
 
-vaddr_t mm_mmap_file(mm_struct_t *mm, vaddr_t addr, size_t len,
-                      int prot, int flags, int file_fd, uint64_t file_offset)
+vaddr_t mm_mmap_file_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
+                              int prot, int flags, int file_fd,
+                              uint64_t file_offset)
 {
     if (file_fd < 0 || (file_offset & (PAGE_SIZE - 1)))
         return (uint64_t)-EINVAL;
@@ -181,7 +183,7 @@ vaddr_t mm_mmap_file(mm_struct_t *mm, vaddr_t addr, size_t len,
     }
 
     if ((flags & MAP_FIXED) && addr != 0) {
-        mm_munmap(mm, addr, len);
+        mm_munmap_locked(mm, addr, len);
     } else if (addr != 0) {
         vm_area_t *existing = mm_find_vma(mm, addr);
         if (existing && existing->start < addr + len && existing->end > addr)
@@ -214,7 +216,7 @@ vaddr_t mm_mmap_file(mm_struct_t *mm, vaddr_t addr, size_t len,
     if (flags & MAP_SHARED) vmf |= VM_SHARED;
     if (flags & MAP_HUGETLB) vmf |= VM_HUGEPAGE;
 
-    vm_area_t *vma = kcalloc(1, sizeof(vm_area_t));
+    vm_area_t *vma = kcalloc_atomic(1, sizeof(vm_area_t));
     if (!vma) {
 #ifdef CONFIG_NOMMU
         kfree(nommu_raw);
@@ -262,8 +264,9 @@ vaddr_t mm_mmap_file(mm_struct_t *mm, vaddr_t addr, size_t len,
     return addr;
 }
 
-vaddr_t mm_mmap_vmo(mm_struct_t *mm, vaddr_t addr, size_t len,
-                    int prot, int flags, struct vmo *vmo, uint64_t vmo_offset)
+vaddr_t mm_mmap_vmo_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
+                              int prot, int flags, struct vmo *vmo,
+                              uint64_t vmo_offset)
 {
     if (!mm || !vmo)
         return (uint64_t)-EINVAL;
@@ -287,7 +290,7 @@ vaddr_t mm_mmap_vmo(mm_struct_t *mm, vaddr_t addr, size_t len,
     }
 
     if ((flags & MAP_FIXED) && addr != 0) {
-        mm_munmap(mm, addr, len);
+        mm_munmap_locked(mm, addr, len);
     } else if (addr != 0) {
         vm_area_t *existing = mm_find_vma(mm, addr);
         if (existing && existing->start < addr + len && existing->end > addr)
@@ -311,7 +314,7 @@ vaddr_t mm_mmap_vmo(mm_struct_t *mm, vaddr_t addr, size_t len,
     if (prot & 4) vmf |= VM_EXEC;
     if (flags & MAP_SHARED) vmf |= VM_SHARED;
 
-    vm_area_t *vma = kcalloc(1, sizeof(vm_area_t));
+    vm_area_t *vma = kcalloc_atomic(1, sizeof(vm_area_t));
     if (!vma)
         return (uint64_t)-ENOMEM;
     vma->start       = addr;
@@ -326,4 +329,38 @@ vaddr_t mm_mmap_vmo(mm_struct_t *mm, vaddr_t addr, size_t len,
     mm_insert_vma(mm, vma);
     mm->total_vm += len / PAGE_SIZE;
     return addr;
+}
+
+vaddr_t mm_mmap(mm_struct_t *mm, vaddr_t addr, size_t len, int prot, int flags)
+{
+    if (!mm) return (uint64_t)-EINVAL;
+    uint64_t flags_l = spin_lock_irqsave(&mm->lock);
+    vaddr_t r = mm_mmap_locked(mm, addr, len, prot, flags);
+    spin_unlock_irqrestore(&mm->lock, flags_l);
+    mm_vma_flush_deferred(mm);
+    return r;
+}
+
+vaddr_t mm_mmap_file(mm_struct_t *mm, vaddr_t addr, size_t len,
+                     int prot, int flags, int file_fd, uint64_t file_offset)
+{
+    if (!mm) return (uint64_t)-EINVAL;
+    uint64_t flags_l = spin_lock_irqsave(&mm->lock);
+    vaddr_t r = mm_mmap_file_locked(mm, addr, len, prot, flags, file_fd,
+                                    file_offset);
+    spin_unlock_irqrestore(&mm->lock, flags_l);
+    mm_vma_flush_deferred(mm);
+    return r;
+}
+
+vaddr_t mm_mmap_vmo(mm_struct_t *mm, vaddr_t addr, size_t len,
+                    int prot, int flags, struct vmo *vmo, uint64_t vmo_offset)
+{
+    if (!mm) return (uint64_t)-EINVAL;
+    uint64_t flags_l = spin_lock_irqsave(&mm->lock);
+    vaddr_t r = mm_mmap_vmo_locked(mm, addr, len, prot, flags, vmo,
+                                   vmo_offset);
+    spin_unlock_irqrestore(&mm->lock, flags_l);
+    mm_vma_flush_deferred(mm);
+    return r;
 }

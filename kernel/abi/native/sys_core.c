@@ -342,7 +342,7 @@ int64_t sys_a20_task_exit(const a20_syscall_args_t *args)
     struct a20_ht_internal *ht = task_get_a20_ht(cur);
     if (ht) {
         struct a20_ht_internal *owned = (struct a20_ht_internal *)
-            __atomic_exchange_n(&cur->scratch_buf, NULL, __ATOMIC_ACQ_REL);
+            __atomic_exchange_n(&cur->a20_ht, NULL, __ATOMIC_ACQ_REL);
         if (owned) a20_ht_put_ref(owned);
     }
 
@@ -462,7 +462,7 @@ int64_t sys_a20_task_spawn(const a20_syscall_args_t *args)
         proc_put(new_task);
         return -A20_ERR_NO_MEMORY;
     }
-    __atomic_store_n(&new_task->scratch_buf, new_ht, __ATOMIC_RELEASE);
+    __atomic_store_n(&new_task->a20_ht, new_ht, __ATOMIC_RELEASE);
 
     a20_handle_entry_t root_entry;
     a20_handle_t child_root_h = A20_HANDLE_NULL;
