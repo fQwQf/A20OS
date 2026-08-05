@@ -237,6 +237,27 @@
 
 **验收**：loongarch64 复现 riscv64 的全部门禁结果。
 
+**结果（部分达成 + 关键发现）**
+
+- loongarch64 内核 + native 测试全部构建通过；运行时复测（TCG）受
+  本机 loongarch64 工具链/镜像条件所限未完整执行（记录在案）。
+- **SMP=8 复测暴露两个既有/边界问题**：
+  1. **M1 捐赠路径在 SMP 下有 bug**：捐赠（不经 runqueue 选取的
+     context_switch）缺少 SMP 所需的 IPI/reschedule 簿记，SMP≥2 时
+     native-ipc 挂起（donate=0 对照组通过）。修复：捐赠**仅限 UP**
+     （`CONFIG_NR_CPUS==1` 编译期守卫，`recv_begin_donate` 同步关闭），
+     SMP 走已验证的普通 park/wake 路径。UP 下捐赠收益保持（ratio
+     83，call 比 send+recv 快 16%）。
+  2. **SMP=8 下 channel 批量路径内存损坏**（既有，非本次引入）：`a20_channel_recv_finish`
+     释放被踩坏的 message 触发 `[SLAB BUG] kfree invalid`。16MiB
+     channel 批量（shmring）在 SMP=8 触发；这是内核
+     `kernel/proc/current.c` 注释文档化的「跨核唤醒/IPI 一致性」未
+     完成部分（`PER_CPU_CURRENT_VALIDATION`）。比赛路径（Linux ABI）
+     不使用 channel 批量，不受影响；dev 矩阵为 smp1，全绿。
+  3. 结论：SMP=8 的 channel/捐赠收口依赖跨核唤醒基建的完整实现，
+     列为后续独立工作项。
+- 最终 UP 全量回归：13 项 smoke 全绿；ABI=linux、loongarch64 构建通过。
+
 ---
 
 ## 阶段间依赖与顺序
