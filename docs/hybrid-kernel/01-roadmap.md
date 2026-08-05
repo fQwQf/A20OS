@@ -1,6 +1,6 @@
 # 混合内核改造实施路线
 
-设计总纲见 [00-design.md](00-design.md)。每个阶段有独立验收标准，
+已建成架构见 [00-design.md](00-design.md)；下一步计划见 [02-mainstream-plan.md](02-mainstream-plan.md)。每个阶段有独立验收标准，
 达到后才进入下一阶段；每阶段完成后更新本文档状态列。
 
 ## 状态总览
