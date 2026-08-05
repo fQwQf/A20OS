@@ -21,16 +21,11 @@ This audit is the acceptance record for `PROC.md` step 3.5. It covers theownersh
 ## Static audit
 
 - No kernel call site uses a bare `proc_find()`.
-- `proc_find_get()` call sites in process, signal, procfs, VFS, cgroup, OOM,
-  device, Linux ABI, and native ABI paths were checked for a matching`proc_put()` on success and error exits. `sys_sched` lookup helpers transferthe returned reference to their syscall caller, which releases it.
-- Every task pointer stored across a lock boundary by PID, runqueue, current
-  CPU, wait queue, futex waiter, wake batch, or timeout heap owns or receives areference.
-- `on_rq`, `dispatching`, and `on_cpu` are mutually exclusive. The runqueue
-  reference is transferred, not reacquired, at `on_rq -> dispatching`;current-slot ownership is released only after switch completion.
-- Final resource destruction is reachable only from the last `proc_put()` and
-  requires both a dynamic task and `destroy_started`.
-- A duplicate destroy, failed live-task get, reference underflow, or final put
-  of a live/static task increments a monotonic diagnostic error before theunsafe path is stopped.
+- `proc_find_get()` call sites in process, signal, procfs, VFS, cgroup, OOM, device, Linux ABI, and native ABI paths were checked for a matching `proc_put()` on success and error exits. `sys_sched` lookup helpers transfer the returned reference to their syscall caller, which releases it.
+- Every task pointer stored across a lock boundary by PID, runqueue, current CPU, wait queue, futex waiter, wake batch, or timeout heap owns or receives a reference.
+- `on_rq`, `dispatching`, and `on_cpu` are mutually exclusive. The runqueue reference is transferred, not reacquired, at `on_rq -> dispatching`; current-slot ownership is released only after switch completion.
+- Final resource destruction is reachable only from the last `proc_put()` and requires both a dynamic task and `destroy_started`.
+- A duplicate destroy, failed live-task get, reference underflow, or final put of a live/static task increments a monotonic diagnostic error before the unsafe path is stopped.
 
 `make check-task-lifetime-boundary` protects the static markers and the ban onbare PID lookup. `make check-proc-step35-local` runs the dual-architecturedebug/release smoke and race matrix; `make check-proc-step35` additionallyruns both formal CAgent evaluations.
 

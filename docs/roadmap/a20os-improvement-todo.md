@@ -92,8 +92,8 @@
 
 - [ ] 在块设备和网络设备能够发出完成信号的位置，用事件驱动 wakeup 替换 scheduler/idle 轮询进展。
   - 证据：`docs/project/external-dependencies.md` 描述了基于轮询的 lwIP 进展；`kernel/drivers/block/virtio_blk.c` 记录了未来 interrupt wake 路径。
+  - 设计：`docs/drivers/lock-order.md`（驱动锁契约）、`docs/net/network-lock-contract.md`（deferred bottom-half 规则）；用户决策：deferred bottom-half / workqueue。
   - 完成条件：块设备和网络进展在正常运行中不再依赖通用 hot-path 轮询。
-  - 进展（2026-08）：`IRQF_SHARED` handler 链已落地；x86_64 q35 PCI INTx 经 IOAPIC 路由（GSI 20-23，路由即屏蔽、注册解掩，i440fx 保持轮询）；NVMe/AHCI/E1000/VirtIO-SCSI/VirtIO-GPU/VirtIO-SND 完成 IRQ hybrid 化（有界预轮询 + park，注册失败回退轮询）；virtio-blk/net 注册失败不再假 IRQ 化。剩余：xHCI、StarFive/LS2K GMAC、DW SDIO、HDA period IRQ、scheduler/idle 兼容轮询桥（`kernel/core/progress.c`）以及 VirtualBox i440fx/ARM 的 PCI 中断路由。
 - [ ] 降低 `g_lwip_lock` 竞争，并为所有 socket 路径记录锁安全入口点。
   - 证据：`kernel/net/lwip_stack.c` 用全局锁串行化 lwIP 核心状态；`kernel/include/core/lock.h` 限制 lwIP 锁下的调用。
   - 设计：`docs/net/network-lock-contract.md`。
@@ -187,13 +187,8 @@
 
 ## 验证环境说明
 
-- 文档不再固化某一台 host 的工具缺失状态。工具链和 QEMU 可用性由对应
-  build/smoke 目标在运行时报告。
-- Proc/Sched 的当前累计静态门禁是 `make check-doc-test-gates`；双架构
-  debug/release、1 核/8 核运行矩阵是 `make check-proc-step8-local`。
-- 需要同时验证正式比赛 workload 时运行 `make check-proc-step8`，它会追加
-  RISC-V64 与 LoongArch64 正式 CAgent。
-- 项目 Python 命令统一通过 conda 环境 `a20os`；正式入口负责记录 QEMU
-  命令、镜像哈希、退出状态、timeout、guest CPU 与 judge 状态。
-- NOMMU 支持集合由构建入口和 `smoke-arch-mmu-matrix` 验证，不以本文中的
-  历史成功列表代替当前运行结果。
+- 文档不再固化某一台 host 的工具缺失状态。工具链和 QEMU 可用性由对应 build/smoke 目标在运行时报告。
+- Proc/Sched 的当前累计静态门禁是 `make check-doc-test-gates`；双架构 debug/release、1 核/8 核运行矩阵是 `make check-proc-step8-local`。
+- 需要同时验证正式比赛 workload 时运行 `make check-proc-step8`，它会追加 RISC-V64 与 LoongArch64 正式 CAgent。
+- 项目 Python 命令统一通过 conda 环境 `a20os`；正式入口负责记录 QEMU 命令、镜像哈希、退出状态、timeout、guest CPU 与 judge 状态。
+- NOMMU 支持集合由构建入口和 `smoke-arch-mmu-matrix` 验证，不以本文中的 历史成功列表代替当前运行结果。

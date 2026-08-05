@@ -110,10 +110,9 @@ PCI 协议驱动只能依赖以下公共输入：
 
 - `device_t`、`matched_id` 与 `pci_class_code()` 提供身份；
 - `pci_enable_and_assign_bars()` 与 `pci_get_bar_resource()` 提供可访问 MMIO；
-- `pci_intx_irq()` 提供平台路由后的 INTx 中断标识（-1 表示平台无路由，驱动进入轮询降级）；
 - `read*/write*` 提供有序寄存器访问；
 - `dma_alloc_coherent_aligned()` 返回 CPU 地址和设备 DMA handle，`dma_sync_for_*()` 转移可见性；
-- `request_irq/free_irq` 提供中断能力。PCI 配置空间 0x3C 的 IRQ Line 寄存器不是可用中断标识，禁止据此注册。
+- `request_irq/free_irq` 提供中断能力，或由驱动明确记录轮询模式。
 
 驱动不得包含架构私有 `platform.h`，不得自行加 `PAGE_OFFSET`，也不得假定 DMA handle 等于 CPU 指针。平台若缺少 PCI 枚举、BAR 窗口分配或正确 DMA/cache hook，应在平台层补齐；不能用 `CONFIG_<ARCH>` 把通用协议代码隐藏起来。
 
@@ -142,7 +141,7 @@ virtio_transport_t vt;if (pci_virtio_transport_init(dev, VIRTIO_ID_SCSI, &vt) < 
     return -ENODEV;
 ```
 
-helper 要求 capability list 中存在 common cfg、notify cfg、device cfg 和有效 notify multiplier。PCI transport 通过 `arch_pci_intx_irq()` 解析 INTx 中断并填入 `transport->irq`（平台无路由时为 -1，驱动保持轮询），同时置 `transport->shared_irq = 1`：驱动注册 handler 时必须据此携带 `IRQF_SHARED`，注册失败必须显式回退轮询（`vt->irq = -1`）并保持设备中断屏蔽。完整范式见 [运行时契约 — 标准完成模型](runtime-contracts.md#标准完成模型irq-hybrid)。
+helper 要求 capability list 中存在 common cfg、notify cfg、device cfg 和有效 notify multiplier。当前 PCI transport 设置 `irq = -1`，采用轮询。
 
 ## VirtIO feature 协商
 

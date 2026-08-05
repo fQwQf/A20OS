@@ -99,8 +99,7 @@ typedef struct proc_runq {
 窃取规则刻意保守：
 
 - 只窃取 EEVDF（普通）任务；RT 任务由唤醒路径刻意放置，不挪走；
-- 只有远端 `nr_running >= 2` 才窃取（远端有富余），不把单一刻意放置的任务
-  拔走；
+- 只有远端 `nr_running >= 2` 才窃取（远端有富余），不把单一刻意放置的任务 拔走；
 - 校验被窃任务的 `cpus_allowed` 包含本地 CPU（尊重 affinity）；
 - 窃取从远端移除后把 runqueue 引用直接转交本地 dispatch，无 put/get 间隙。
 
@@ -128,26 +127,19 @@ cat /proc/a20/sched_base_slice      # 10echo 2 > /proc/a20/sched_base_slice # �
 
 ## 8. 验证
 
-- **nice 权重真实生效**：同窗内 `nice -20` 获得约 100000 倍的 CPU（vs
-  `nice 19`），符合加权比例共享。
+- **nice 权重真实生效**：同窗内 `nice -20` 获得约 100000 倍的 CPU（vs `nice 19`），符合加权比例共享。
 - **负载均衡**：8 个忙任务分布在全部 8 核（busy_cores=8），此前堆在一核。
-- **8 核压力**：`sched_stress` 的 `smp-runqueue` 与 `lock-split` 全 PASS，
-  空闲窃取以 `runqueue_migrations` 计数正常触发。
-- **全量门禁**：双架构（riscv64/loongarch64）构建与启动、5 架构构建、
-  全部 21 个 `check-doc-test-gates` 通过；procfs/sched/futex/proc/mm/vfs压力测试全绿。
+- **8 核压力**：`sched_stress` 的 `smp-runqueue` 与 `lock-split` 全 PASS， 空闲窃取以 `runqueue_migrations` 计数正常触发。
+- **全量门禁**：双架构（riscv64/loongarch64）构建与启动、5 架构构建、 全部 21 个 `check-doc-test-gates` 通过；procfs/sched/futex/proc/mm/vfs 压力测试全绿。
 - **时间片旋钮**：2ms/50ms 下系统稳定。
 
 ## 9. 已知限制与后续工作
 
-- `vtime` 资格门控在极端的 nice 差距下（如 nice 19 对 nice -20）会让轻权重
-  任务获得极少量 CPU；这是加权比例共享的正确行为，但可按需引入最小粒度保证。
+- `vtime` 资格门控在极端的 nice 差距下（如 nice 19 对 nice -20）会让轻权重 任务获得极少量 CPU；这是加权比例共享的正确行为，但可按需引入最小粒度 保证。
 - 窃取只发生在本地队列空时；可扩展为周期性 push/pull 平衡。
-- RT 级 0 的优先级线性扫描在 RT 任务极多时才需要优化（当前数量小，开销
-  可忽略）。
-- 时间片是全局旋钮；可扩展为 per-task（sched_attr）粒度以精确表达单任务
-  延迟需求。
-- 窃取/迁移后任务在目标 CPU 重新以自身 vruntime 定义 `vtime`，个别边界
-  情况下可能"逃逸"资格限制，后续可加迁移时 lag 保留。
+- RT 级 0 的优先级线性扫描在 RT 任务极多时才需要优化（当前数量小，开销 可忽略）。
+- 时间片是全局旋钮；可扩展为 per-task（sched_attr）粒度以精确表达单任务 延迟需求。
+- 窃取/迁移后任务在目标 CPU 重新以自身 vruntime 定义 `vtime`，个别边界 情况下可能"逃逸"资格限制，后续可加迁移时 lag 保留。
 
 ## 10. 相关源码
 

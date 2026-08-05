@@ -12,7 +12,7 @@
    - [总线与平台](bus-and-platform.md)：platform device、板级资源和 MMIO/IRQ。
    - [PCI 与 VirtIO](pci-and-virtio.md)：PCI ID、BAR、ECAM、VirtIO transport。
 4. [设备类](device-classes.md)：各类操作、单位、返回值和阻塞语义。
-5. [运行时契约](runtime-contracts.md) + [锁顺序](lock-order.md)：IRQ、标准完成模型、DMA、屏障、并发。
+5. [运行时契约](runtime-contracts.md) + [锁顺序](lock-order.md)：IRQ、DMA、屏障、并发。
 6. [用户接口与 devfs](userspace-and-devfs.md)：从 class 到 `/dev`；显示设备另读 [Display/Framebuffer](display.md)，音频设备另读 [音频子系统](audio.md)。
 7. [构建、测试与提交](testing-and-submission.md)：编译矩阵、失败清理和提交证据。
 
@@ -25,7 +25,7 @@
 | [device-classes](device-classes.md) | 功能类的接口约定 |
 | [bus-and-platform](bus-and-platform.md) | 平台与总线枚举 |
 | [pci-and-virtio](pci-and-virtio.md) | PCI/VirtIO 接入 |
-| [runtime-contracts](runtime-contracts.md) | MMIO、IRQ、DMA、标准完成模型、锁、超时 |
+| [runtime-contracts](runtime-contracts.md) | MMIO、IRQ、DMA、锁、超时 |
 | [lock-order](lock-order.md) | 锁的嵌套规则 |
 | [userspace-and-devfs](userspace-and-devfs.md) | `/dev` 与 class 桥接 |
 | [display](display.md) | framebuffer 与 GPU 驱动 |
