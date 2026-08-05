@@ -94,6 +94,7 @@ void kernel_main(void) {
     printf("[INIT] Timekeeping initialized\n");
     mm_init();
     printf("[INIT] Memory initialized\n");
+    timekeeping_vdso_init();
 #ifdef CONFIG_SWAP
     swap_init();
 #endif
@@ -316,7 +317,9 @@ void init_kthread(void) {
      * process crashes silently before ever reaching main().
      */
     char *init_argv[] = { (char *)init_path, NULL };
-    uint64_t user_sp = elf_setup_stack(info.stack_top, 1, init_argv, NULL, &info);
+    /* pid 2 keeps the syscall time path (no vDSO); everything it execs
+     * gets the vDSO through the regular exec path (proc/exec.c). */
+    uint64_t user_sp = elf_setup_stack(info.stack_top, 1, init_argv, NULL, &info, 0);
     if (user_sp == 0) {
         panic("init: elf_setup_stack failed");
     }

@@ -10,7 +10,7 @@
 | 1 | `channel_call` 融合 RPC 快路径（内核 + SDK + 基准） | 完成（riscv64） |
 | 2 | svcman 服务监管者 + 崩溃自愈演示 | 完成（riscv64） |
 | 3 | 共享 VMO 环形队列 uapi 协议 + 数据面基准 | 完成（riscv64） |
-| 3B | Linux ABI 透明桥接：pipe over VMO 环 + vDSO | 未开始 |
+| 3B | Linux ABI 透明桥接：pipe over VMO 环 + vDSO | vDSO 完成（riscv64），pipe 环待做 |
 | 4 | 低速驱动外迁试点（用户态驱动框架） | 未开始 |
 | 5 | 块/网驱动外迁评估（按基准数据决策） | 未开始 |
 
@@ -148,6 +148,41 @@
 **统一验收**：每条改动前后跑同一组 Linux ABI 基准（`socket_stress`、
 pipe 吞吐、`clock_gettime` 延迟），中位数不允许回归；既有
 `smoke-native-*` 与 Linux ABI smoke 全绿。
+
+**结果（部分达成）**
+
+1. **唤醒捐赠核对（完成）**：pipe/AF_UNIX/futex/channel 的 wake 全部
+   汇入 `wait_queue_wake_*` → `proc_wake_q_flush` →
+   `proc_try_wake_locked_common`（`kernel/proc/park.c`），其中的
+   priority-preempt 分支（唤醒优先级更高任务时向目标 CPU 发
+   priority resched）对两个 ABI 自动生效。无遗漏点，无需改动。
+2. **vDSO（完成，riscv64）**：
+   - 用户映像 `kernel/vdso/riscv64/vdso.S`（`__vdso_clock_gettime`/
+     `__vdso_gettimeofday`/`__vdso_getcpu`，不支持时回退 `ecall`），
+     自定义 `vdso.ld` 使 `p_offset == p_vaddr`；内核**嵌入 .elf 文件
+     本身**（`objcopy -O binary` 会剥掉 ELF 头让 musl 解析器踩野指针，
+     mksh 启动即崩——排障实录见下）。
+   - exec 时映射到固定 VA（代码 RX `0x3FFC0000`，数据 RO
+     `0x3FFC2000`）+ auxv 填 `AT_SYSINFO_EHDR`；VMA 为
+     `VM_PFNMAP|VM_DONTFORK`，fork 时经 `vdso_fork_map` 显式重映射。
+   - vvar 数据页与内核 timekeeping 读同一个 `time` CSR：mult 精确
+     （10MHz 时 = 100<<32），realtime 锚点与 syscall 路径共用同一个
+     tick 值（位级一致），seqlock 保护；`scounteren.TM` 在每核
+     `timer_init` 打开。
+   - 实测（TCG）：musl `clock_gettime` 2457 ns/次 vs raw syscall
+     10637 ns/次，**4.3× 加速**；双路径差 < 11µs（同一调用间隔
+     量级）；`-smp 4` 启动正常；`smoke-clock-vdso` 门禁
+     （`user/cmds/core/clock_bench.c`，musl 路径 vs raw syscall
+     对照 + 单调性 + 交叉校验）通过。
+   - 排障实录：①`vdso_init` 最初挂在 `timekeeping_init`（帧分配器
+     未就绪，`pfa_alloc_page` 空链表 deref）→ 移到 `mm_init` 后的
+     `timekeeping_vdso_init`；②exec 步骤 2 的 `t->mm` 仍是旧地址
+     空间 → 改为直接映射 `info->pgdir`/`info->mmap`；③realtime 锚
+     tick 两次读取在 TCG 上差出毫秒级 → 改传同一个 tick。
+   - `smoke-native-*` 六项 + `smoke-mm-stress`/`smoke-vfs-stress`
+     全部无退化。
+3. **pipe over VMO 环（待做）**、AF_UNIX over Channel（待做）：
+   按原顺序排在 vDSO 之后实施。
 
 ## 阶段 4：低速驱动外迁试点（规划要点）
 

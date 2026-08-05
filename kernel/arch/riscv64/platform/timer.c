@@ -9,6 +9,12 @@ static uint64_t timer_freq;
 void timer_init(void) {
     timer_freq = ARCH_TIMER_FREQ;
     timer_set_interval(TICKS_PER_SEC / 100);
+    /* Allow U-mode to read the time CSR directly; the vDSO time path
+     * (kernel/mm/vdso.c) depends on this on every hart. */
+    uint64_t scounteren;
+    __asm__ volatile("csrr %0, scounteren" : "=r"(scounteren));
+    scounteren |= 0x2; /* TM */
+    __asm__ volatile("csrw scounteren, %0" :: "r"(scounteren));
     timer_enable();
 }
 
