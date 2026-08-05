@@ -10,16 +10,11 @@ The task's Park deadline uses `wait_deadline` and `wake_time`. POSIX`alarm`/`ITI
 
 ## Linearization and stale events
 
-- A task may own at most one heap index. Registering a second entry for the
-  same task is rejected; registration never cancels an existing token.
-- Event, signal, exit, cancellation, and timeout removal serialize under
-  `proc_lock`.
-- Expiry removes the heap entry first, then calls
-  `proc_try_wake_locked(task, wait_seq, PROC_WAKE_TIMEOUT)`. A late expirytherefore cannot mutate a later `wait_seq`.
-- The timer callback touches neither object locks nor stack-resident wait
-  entries. Object wait queues are unlinked by the resumed waiter.
-- Expired Park deadlines are woken directly through the scheduler state
-  machine. They do not pass through a bounded wake array, so there is no`READY`-without-runqueue overflow case.
+- A task may own at most one heap index. Registering a second entry for the same task is rejected; registration never cancels an existing token.
+- Event, signal, exit, cancellation, and timeout removal serialize under `proc_lock`.
+- Expiry removes the heap entry first, then calls `proc_try_wake_locked(task, wait_seq, PROC_WAKE_TIMEOUT)`. A late expiry therefore cannot mutate a later `wait_seq`.
+- The timer callback touches neither object locks nor stack-resident wait entries. Object wait queues are unlinked by the resumed waiter.
+- Expired Park deadlines are woken directly through the scheduler state machine. They do not pass through a bounded wake array, so there is no `READY`-without-runqueue overflow case.
 
 ## Capacity failure
 

@@ -27,16 +27,11 @@ All normal wait-queue entries, futex waiters, wake-batch entries, and timeouthea
 
 The following paths are intentionally visible to the static gate:
 
-1. `proc_task_alloc_storage()` initializes a newly allocated, unpublished task
-   as `PROC_BLOCKED`.  It has no active Park token and becomes runnable only atone of the whitelisted task-publication call sites.
-2. `proc_park_commit()` is the only live-task path that writes
-   `PROC_BLOCKED`.
-3. `proc_make_ready()` remains for new task publication, current-task yield,
-   and cgroup unthrottle.  Its Park branch delegates to`proc_try_wake_locked(task, wait_seq, EVENT)`, so it cannot bypass a livetoken.
-4. Signal, stop, and exit paths no longer appear in this whitelist.  They use
-   mode-checked Park wake reasons or the explicit STOPPED resumption helper,as recorded in `docs/testing/signal-exit-audit.md`.
-5. Linux `poll`, `select`, and `epoll` currently use bounded periodic
-   `proc_park_wait()` deadlines and rescan persistent readiness after everyquantum.  They store no asynchronous task pointer and cannot losecorrectness, but they are not yet event-driven multi-object subscriptions.This bounded compatibility wrapper is accepted for step 4 and retained asperformance/latency debt, not represented as a completed VFS poll-hookdesign.
+1. `proc_task_alloc_storage()` initializes a newly allocated, unpublished task as `PROC_BLOCKED`.  It has no active Park token and becomes runnable only at one of the whitelisted task-publication call sites.
+2. `proc_park_commit()` is the only live-task path that writes `PROC_BLOCKED`.
+3. `proc_make_ready()` remains for new task publication, current-task yield, and cgroup unthrottle.  Its Park branch delegates to `proc_try_wake_locked(task, wait_seq, EVENT)`, so it cannot bypass a live token.
+4. Signal, stop, and exit paths no longer appear in this whitelist.  They use mode-checked Park wake reasons or the explicit STOPPED resumption helper, as recorded in `docs/testing/signal-exit-audit.md`.
+5. Linux `poll`, `select`, and `epoll` currently use bounded periodic `proc_park_wait()` deadlines and rescan persistent readiness after every quantum.  They store no asynchronous task pointer and cannot lose correctness, but they are not yet event-driven multi-object subscriptions. This bounded compatibility wrapper is accepted for step 4 and retained as performance/latency debt, not represented as a completed VFS poll-hook design.
 
 There is no remaining `proc_block_until()` call or implementation.  No moduleoutside task initialization and the scheduler writes `on_rq`, `cpu_id`,`rq_next`, or `rq_prev`.
 
