@@ -1,4 +1,5 @@
 #include "net/socket_internal.h"
+#include "net/netd_sock_proxy.h"
 #include "ipc/ipc.h"
 #include "net/lwip_stack.h"
 #include "core/consts.h"
@@ -183,6 +184,8 @@ int net_socket_close_file(vfile_t *vf) {
     ktrace_net("[NET] close: dom=%d type=%d listen=%d tcp=%p peer=%p closed=%d\n",
                s->domain, s->type, s->listening, (void *)s->tcp,
                (void *)s->peer, s->closed);
+    if (s->netd_id >= 0)
+        netd_socket_close(s->netd_id);
     net_inet_socket_destroy(s);
     if (s->ch_ep) {
         a20_channel_ep_release(s->ch_ep);

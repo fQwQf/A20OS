@@ -3458,7 +3458,7 @@ NETD_EXTRA_CFLAGS := -Iuser/net/lwip -Iuser/net/lwip/lwip -Iuser/liba20c/include
 
 NATIVE_NETD_BIN := $(NATIVE_BUILD_DIR)/netd-$(NATIVE_TAG)
 $(NATIVE_NETD_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) \
-		user/svc/netd.c user/net/lwip/netd_util.c user/net/lwip/lwipopts.h user/net/lwip/lwip/arch/cc.h user/net/lwip/lwip/arch/sys_arch.h $(NETD_LWIP_SRC)
+		user/svc/netd.c user/svc/netd_sock.c user/net/lwip/netd_util.c user/net/lwip/lwipopts.h user/net/lwip/lwip/arch/cc.h user/net/lwip/lwip/arch/sys_arch.h $(NETD_LWIP_SRC)
 	@mkdir -p $(dir $@)
 	$(NATIVE_CC) -ffreestanding -nostdlib -static \
 	    $(NATIVE_CFLAGS) $(NETD_EXTRA_CFLAGS) -Iuser -Iuser/liba20c/include \
@@ -3467,7 +3467,7 @@ $(NATIVE_NETD_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $
 	    $(NATIVE_SDK_SRC) \
 	    $(NATIVE_COMPILER_RT_SRC) \
 	    $(NATIVE_ARCH_SRC) \
-	    user/svc/netd.c user/net/lwip/netd_util.c \
+	    user/svc/netd.c user/svc/netd_sock.c user/net/lwip/netd_util.c \
 	    $(NETD_LWIP_SRC) \
 	    -o $@
 

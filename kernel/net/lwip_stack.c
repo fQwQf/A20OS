@@ -295,6 +295,7 @@ static void a20_lwip_process_netif_rx_tx_locked(struct netif *n)
             continue;
         }
         if (netd_enabled()) {
+
             netd_rx_frame(st->rx_frame, (uint32_t)len);
             pbuf_free(p);
             continue;
