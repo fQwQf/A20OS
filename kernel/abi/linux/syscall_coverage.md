@@ -178,6 +178,7 @@ because it has an entry in `syscall_table.def`.
 | `execve` | process | `partial` | `smoke-proc-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `execveat` | process | `partial` | `smoke-proc-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `wait4` | process | `partial` | `smoke-proc-stress` | implemented subset; Linux edge semantics remain documented gaps |
+| `ptrace` | process/debug | `partial` | `smoke-ptrace` | kernel-internal debug interface (proc_debug_*); TRACEME/ATTACH/DETACH/CONT/SYSCALL/SINGLESTEP(x86_64), GETREGS/SETREGS, PEEK/POKE, GETSIGINFO, SETOPTIONS, GETREGSET; PTRACE_SEIZE/TRACECLONE/interrupt-style ops not implemented |
 | `sched_yield` | scheduler | `partial` | `smoke-proc-stress` | policy/priority/affinity compatibility is bounded by current scheduler state |
 | `sched_get_priority_max` | scheduler | `partial` | `smoke-proc-stress` | policy/priority/affinity compatibility is bounded by current scheduler state |
 | `sched_get_priority_min` | scheduler | `partial` | `smoke-proc-stress` | policy/priority/affinity compatibility is bounded by current scheduler state |
