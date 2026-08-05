@@ -192,6 +192,12 @@ static int ch_try_enqueue(a20_channel_ep_t *ep, a20_ch_message_t *msg,
 {
     spin_lock(&g_ch_lock);
     a20_channel_ep_t *peer = ep->peer;
+    /* Take a peer reference so a concurrent ep_release() cannot free the
+     * endpoint (and its queue) while we enqueue into it.  The park path in
+     * a20_channel_send_dwc() does the same; without this, enqueue could
+     * write into freed memory after the peer's final release. */
+    if (peer && !refcount_inc_not_zero(&peer->refcount))
+        peer = NULL;
     if (peer)
         spin_lock(&peer->lock);
     spin_unlock(&g_ch_lock);
@@ -200,10 +206,12 @@ static int ch_try_enqueue(a20_channel_ep_t *ep, a20_ch_message_t *msg,
         return -A20_ERR_CANCELED;
     if (peer->peer_closed) {
         spin_unlock(&peer->lock);
+        a20_channel_ep_release(peer);
         return -A20_ERR_CANCELED;
     }
     if (peer->msg_count >= peer->msg_cap) {
         spin_unlock(&peer->lock);
+        a20_channel_ep_release(peer);
         return 0;
     }
 
@@ -220,6 +228,7 @@ static int ch_try_enqueue(a20_channel_ep_t *ep, a20_ch_message_t *msg,
     a20_event_notify(peer, A20_OBJ_CHANNEL_ENDPOINT,
                      A20_EVENT_MESSAGE_READY, 0, 0);
     spin_unlock(&peer->lock);
+    a20_channel_ep_release(peer);
     return 1;
 }
 

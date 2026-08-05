@@ -4,6 +4,46 @@
 #include "core/string.h"
 #include "core/stdio.h"
 #include "mm/oom.h"
+struct task_t;
+extern struct task_t *proc_current(void);
+extern int proc_task_pid(const void *task);
+#include "core/arch.h"
+#include "core/timer.h"
+
+/* Release trace (diagnostics): last N frame releases with caller info. */
+#define FRAME_TRACE_ENTRIES 128
+struct frame_trace_ent {
+    uint64_t tick;
+    pfn_t    pfn;
+    uintptr_t ra;
+    int      pid;
+};
+static struct frame_trace_ent g_frame_trace[FRAME_TRACE_ENTRIES];
+static uint32_t g_frame_trace_idx;
+
+static void frame_trace(pfn_t pfn)
+{
+    uint32_t i = __atomic_fetch_add(&g_frame_trace_idx, 1, __ATOMIC_RELAXED) %
+                 FRAME_TRACE_ENTRIES;
+    g_frame_trace[i].tick = timer_get_ticks();
+    g_frame_trace[i].pfn  = pfn;
+    g_frame_trace[i].ra   = (uintptr_t)__builtin_return_address(2);
+    g_frame_trace[i].pid  = proc_current() ? proc_task_pid(proc_current()) : -1;
+}
+
+void frame_trace_dump_pfn(pfn_t pfn)
+{
+    printf("[FRAME-TRACE] releases of pfn=%lu:\n", (unsigned long)pfn);
+    uint32_t n = g_frame_trace_idx;
+    uint32_t start = n > FRAME_TRACE_ENTRIES ? n - FRAME_TRACE_ENTRIES : 0;
+    for (uint32_t i = start; i < n; i++) {
+        struct frame_trace_ent *e = &g_frame_trace[i % FRAME_TRACE_ENTRIES];
+        if (e->pfn != pfn)
+            continue;
+        printf("  tick=%lu ra=0x%lx pid=%d\n",
+               (unsigned long)e->tick, (unsigned long)e->ra, e->pid);
+    }
+}
 
 
 pfa_t pfa;
@@ -46,6 +86,41 @@ static void fl_push(pfn_t pfn, int order) {
         meta_of(m->next)->prev = pfn;
     pfa.free_lists[order].head = pfn;
     pfa.free_lists[order].count++;
+}
+
+/* Push a block, splitting it whenever any interior frame is still
+ * referenced: a dirty block must never re-enter the buddy list or its
+ * in-use pages would be handed out again (double allocation). */
+static void fl_push_clean(pfn_t pfn, int order)
+{
+    if (order == 0) {
+        if (pfa.meta[pfn].refcount > 0 ||
+            pfa.meta[pfn].flags == FRAME_F_ALLOC)
+            return;
+        pfa.meta[pfn].flags    = FRAME_F_FREE;
+        pfa.meta[pfn].refcount = 0;
+        pfa.meta[pfn].order    = 0;
+        pfa.meta[pfn].prev     = PFN_NONE;
+        pfa.meta[pfn].next     = PFN_NONE;
+        fl_push(pfn, 0);
+        return;
+    }
+    int used = 0;
+    for (pfn_t i = pfn; i < pfn + (1u << order); i++) {
+        if (pfa.meta[i].refcount > 0) { used = 1; break; }
+    }
+    if (!used) {
+        pfa.meta[pfn].flags    = FRAME_F_FREE;
+        pfa.meta[pfn].refcount = 0;
+        pfa.meta[pfn].order    = (uint8_t)order;
+        pfa.meta[pfn].prev     = PFN_NONE;
+        pfa.meta[pfn].next     = PFN_NONE;
+        fl_push(pfn, order);
+        return;
+    }
+    pfn_t half = 1u << (order - 1);
+    fl_push_clean(pfn, order - 1);
+    fl_push_clean(pfn + half, order - 1);
 }
 
 static void fl_remove(pfn_t pfn, int order) {
@@ -190,6 +265,19 @@ static pfn_t pfa_alloc_from_buddy(int order)
     while (o > order) {
         o--;
         pfn_t buddy = blk ^ (1u << o);
+        /* The buddy half must be entirely free; if any interior frame is
+         * still allocated the block was corrupt when it entered the list. */
+        for (pfn_t i = buddy; i < buddy + (1u << o); i++) {
+            if (pfa.meta[i].flags == FRAME_F_ALLOC ||
+                pfa.meta[i].refcount > 0) {
+                printf("[PFA DIRTY-SPLIT] blk=%lu order=%d buddy=%lu sub=%lu flags=0x%x refcount=%u order_meta=%d cpu=%u\n",
+                       (unsigned long)blk, o, (unsigned long)buddy,
+                       (unsigned long)i, pfa.meta[i].flags,
+                       pfa.meta[i].refcount, (int)pfa.meta[i].order,
+                       cpu_current_id());
+                panic("pfa: dirty split block");
+            }
+        }
         pfa.meta[buddy].flags = FRAME_F_FREE;
         pfa.meta[buddy].refcount = 0;
         pfa.meta[buddy].order = (uint8_t)o;
@@ -300,7 +388,7 @@ void pfa_free(pfn_t pfn, int order) {
         pfa.meta[i].next     = PFN_NONE;
     }
 
-    fl_push(pfn, actual_order);
+    fl_push_clean(pfn, actual_order);
     spin_unlock_irqrestore(&pfa.lock, flags);
 }
 
@@ -320,6 +408,7 @@ void frame_put(pfn_t pfn) {
     if (!pfn_valid(pfn)) return;
     uint64_t flags = spin_lock_irqsave(&pfa.lock);
     if (pfa.meta[pfn].refcount > 0 && --pfa.meta[pfn].refcount == 0) {
+        frame_trace(pfn);
         /* refcount 归零，直接在此释放（内联 pfa_free 核心逻辑），
          * 避免先解锁再调 pfa_free 的竞态窗口 */
         int actual_order = (int)pfa.meta[pfn].order;
@@ -363,7 +452,7 @@ void frame_put(pfn_t pfn) {
             pfa.meta[i].prev     = PFN_NONE;
             pfa.meta[i].next     = PFN_NONE;
         }
-        fl_push(pfn, actual_order);
+        fl_push_clean(pfn, actual_order);
         spin_unlock_irqrestore(&pfa.lock, flags);
         return;
     }

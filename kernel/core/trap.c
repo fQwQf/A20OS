@@ -7,6 +7,7 @@
 #include "mm/mm.h"
 #include "mm/fault.h"
 #include "mm/vm.h"
+#include "mm/frame.h"
 #include "core/stdio.h"
 #include "core/panic.h"
 #include "core/defs.h"
@@ -73,6 +74,33 @@ static void dump_fault_pte(task_t *task, vaddr_t va) {
         for (vm_area_t *v = task->mm->mmap; v && nvma < 10; v = v->next, nvma++)
             kerr("    [%d] [0x%lx,0x%lx)\n", nvma,
                  (unsigned long)v->start, (unsigned long)v->end);
+    }
+    /* Physical-frame overlap diagnosis: dump the frame of the faulting VA
+     * (and the stack frame) next to every VM_VMO mapping's frames.  If a
+     * user stack frame collides with a VMO frame, ring writes are corrupting
+     * the stack. */
+    {
+        mm_leaf_info_t leaf;
+        if (mm_query_leaf(task->mm->pgdir, va & ~(PAGE_SIZE - 1), &leaf) == 0) {
+            kerr("  [PFN] fault va=0x%lx -> pa=0x%lx pfn=%lu\n",
+                 (unsigned long)(va & ~(PAGE_SIZE - 1)),
+                 (unsigned long)leaf.pa,
+                 (unsigned long)(leaf.pa >> 12));
+            if (leaf.pa) {
+                uint32_t *content = (uint32_t *)(leaf.pa + PAGE_OFFSET);
+                kerr("  [CONTENT] va=0x%lx first=0x%08x\n",
+                     (unsigned long)(va & ~(PAGE_SIZE - 1)),
+                     (unsigned int)*content);
+            }
+        }
+        for (vm_area_t *v = task->mm->mmap; v; v = v->next) {
+            if (!(v->vm_flags & VM_VMO) || !v->vmo)
+                continue;
+            if (mm_query_leaf(task->mm->pgdir, v->start, &leaf) == 0)
+                kerr("  [PFN] vmo va=0x%lx -> pa=0x%lx pfn=%lu\n",
+                     (unsigned long)v->start, (unsigned long)leaf.pa,
+                     (unsigned long)(leaf.pa >> 12));
+        }
     }
 }
 
@@ -239,6 +267,18 @@ static void user_trap_handler(trap_context_t *ctx) {
                 return;
             kerr("User Illegal Instruction: pid=%d sepc=0x%lx stval=0x%lx\n",
                  cur ? cur->pid : -1, sepc, stval);
+            if (cur && cur->mm) {
+                mm_leaf_info_t leaf;
+                extern void frame_trace_dump_pfn(pfn_t pfn);
+                if (mm_query_leaf(cur->mm->pgdir, sepc & ~(PAGE_SIZE - 1),
+                                  &leaf) == 0 && leaf.pa) {
+                    uint32_t *content = (uint32_t *)(leaf.pa + PAGE_OFFSET);
+                    kerr("  [CONTENT] sepc=0x%lx pa=0x%lx first=0x%08x\n",
+                         (unsigned long)sepc, (unsigned long)leaf.pa,
+                         (unsigned int)*content);
+                    frame_trace_dump_pfn((pfn_t)(leaf.pa >> 12));
+                }
+            }
             if (have_user_insn)
                 kerr("  insn@sepc=0x%08x\n", user_insn);
             dump_trap_context(ctx);
