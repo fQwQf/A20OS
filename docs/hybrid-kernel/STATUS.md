@@ -27,7 +27,7 @@
 | virtio-blk 用户态驱动（零拷贝 DMA） | 已实现 | FAT32 挂载 `/ubd`，`smoke-native-ubd` |
 | 驱动崩溃恢复（在飞请求失败传导 + 重挂载） | 已实现 | `ubd_recover` |
 | Linux ABI 透明获益（vDSO、唤醒快路径、AF_UNIX 桥接） | 已实现 | `smoke-clock-vdso` + unix 测试 |
-| netd 帧面外迁（lwIP 用户态 + 内核↔netd 帧环） | 框架已实现（socket 代理待做） | bootarg `netd=1` 下 netd 启动、ARP 帧经 TX 环到 NIC |
+| netd 帧面 + socket 代理（lwIP 用户态 + 帧环 + RPC 代理） | 握手/accept 链路已通；recv 数据面待续 | `netd=1` 下 bind/listen/accept RPC、ARP、TCP SYN-ACK 验证 |
 
 ## 正确性状态（SMP）
 
@@ -43,7 +43,7 @@
 
 - **时间片捐赠仅限 UP**：SMP 捐赠依赖跨核唤醒/IPI 簿记（`PER_CPU_CURRENT_VALIDATION`），未完成前不开放；
 - **Native ABI 偶发破坏（已知问题，低优先级）**：SMP=2/8 下 `native-shmring`（跨进程共享 VMO + channel 大块批量）仍有约 30% 概率的偶发内存破坏（页表/页表项交互方向）。**Native ABI 当前不常用**（比赛与日常路径均为 Linux ABI），且 Linux ABI 同负载下实测稳定（`mm_stress` SMP=2 连跑 15 轮零崩溃，`smoke-vfs/futex/sched/abi-linux` 全绿），因此暂不作为优先修复项。若重新启用 Native ABI 作为主要运行时，需先收敛此问题（诊断挂载点：`frame_trace_dump_pfn`、`[VMO-PAGE]`、`[PFA DIRTY-SPLIT]`、`[LOCK-STALL]`）；
-- **网络协议栈**：lwIP 已可编译为用户态 netd 服务，内核↔netd 帧环（RX/TX）已打通（bootarg `netd=1` 激活；未激活时内核 lwIP 行为不变）；**socket 代理**（Linux socket syscall → netd RPC）与 netd 的 TCP/UDP 服务循环是后续工作；
+- **网络协议栈**：lwIP 已编译为用户态 netd 服务（bootarg `netd=1` 激活；未激活时内核 lwIP 行为不变）。帧环（RX/TX）与 socket 代理 RPC（create/bind/listen/accept/connect/send/recv/close/poll/getsockname/setsockopt）已实现；QEMU hostfwd 验证了完整代理链路与 TCP 握手（SYN-ACK 出帧面、accept 回调触发）。**剩余**：数据段在 lwIP 侧被丢弃（子连接 PCB 在 accept 后从 active 列表消失，`lookup pcb=0`），recv 数据回传未通——根因锁定在 tcp_process 的 accept/abort 路径，待续；
 - **loongarch64**：内核与 native 测试均构建通过，运行时复测受工具链/镜像条件所限未完整执行；
 - **性能数据**全部来自 QEMU TCG 模拟器，真实硬件基准待测；
 - **IOMMU/DMA 安全**：DMA 契约是"内核分配 + pin + 物理地址上报"的信任模型，无硬件 IOMMU 强制。
