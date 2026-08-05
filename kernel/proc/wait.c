@@ -103,12 +103,16 @@ int proc_wait4(int pid, int *status, int options)
                 proc_put(reap_child);
                 return child_pid;
             }
-            if ((options & WUNTRACED) && cstate == PROC_STOPPED &&
-                child->stop_report_pending) {
+            if (cstate == PROC_STOPPED && child->stop_report_pending &&
+                ((options & WUNTRACED) || child->ptrace_stop_active)) {
                 int sig = __atomic_load_n(&child->exit_code, __ATOMIC_ACQUIRE);
                 int child_pid = child->pid;
                 if (status) {
-                    *status = (sig << 8) | 0x7F;
+                    if (child->ptrace_event)
+                        *status = (child->ptrace_event << 16) |
+                                  (SIGTRAP << 8) | 0x7F;
+                    else
+                        *status = (sig << 8) | 0x7F;
                 }
                 if (!(options & WNOWAIT))
                     child->stop_report_pending = 0;
