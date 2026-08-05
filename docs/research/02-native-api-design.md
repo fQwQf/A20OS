@@ -140,9 +140,7 @@ Zircon 大部分 syscall 直接传参数，只有少数用结构体。但 Zircon
 **选择：Event Queue（统一等待机制）**
 
 ```
-event_queue_create()  → 创建事件队列 handle
-event_watch(queue, target, events, user_data) → 注册关注
-event_wait(queue, ..., timeout) → 等待事件
+event_queue_create()  → 创建事件队列 handleevent_watch(queue, target, events, user_data) → 注册关注event_wait(queue, ..., timeout) → 等待事件
 ```
 
 **替代方案比较**：
@@ -201,20 +199,7 @@ task_spawn({
 ### 4.1 Syscall 编号方案（扩展 DESIGN.md）
 
 ```
-Range         Category            Status
-─────────────────────────────────────────────
-0x0000-0x00FF  Core / ABI         Stable
-0x0100-0x01FF  Handle             Stable
-0x0200-0x02FF  Task / Thread      Stable
-0x0300-0x03FF  Memory             Stable
-0x0400-0x04FF  Path / Filesystem  Stable
-0x0500-0x05FF  Event / IPC        Stable
-0x0600-0x06FF  Network            Stable
-0x0700-0x07FF  Time               Stable
-0x0800-0x08FF  Security           Stable
-0x0900-0x09FF  Debug / Trace      Stable
-0x0A00-0x0FFF  Reserved           —
-0x1000-0x1FFF  Experimental       Unstable
+Range         Category            Status─────────────────────────────────────────────0x0000-0x00FF  Core / ABI         Stable0x0100-0x01FF  Handle             Stable0x0200-0x02FF  Task / Thread      Stable0x0300-0x03FF  Memory             Stable0x0400-0x04FF  Path / Filesystem  Stable0x0500-0x05FF  Event / IPC        Stable0x0600-0x06FF  Network            Stable0x0700-0x07FF  Time               Stable0x0800-0x08FF  Security           Stable0x0900-0x09FF  Debug / Trace      Stable0x0A00-0x0FFF  Reserved           —0x1000-0x1FFF  Experimental       Unstable
 ```
 
 ### 4.2 完整 Syscall 列表
@@ -349,8 +334,7 @@ Range         Category            Status
 Channel 是 Native ABI 的核心 IPC 机制，设计参考 Zircon Channel 但简化。
 
 ```c
-// 创建双向通道，返回两个 endpoint handle
-typedef struct a20_channel_create_args {
+// 创建双向通道，返回两个 endpoint handletypedef struct a20_channel_create_args {
     uint32_t size;
     uint32_t version;
     uint32_t flags;
@@ -394,8 +378,7 @@ Process A                              Process B
 Native ABI 的路径操作使用基于 handle 的相对路径：
 
 ```c
-// 以 dir_handle 为根解析 path
-int64_t path_open({
+// 以 dir_handle 为根解析 pathint64_t path_open({
     .dir = root_dir_handle,    // 基准目录
     .path = "etc/config.txt",  // 相对路径
     .flags = A20_PATH_OPEN_FOLLOW,  // 跟随符号链接
@@ -416,23 +399,7 @@ int64_t path_open({
 ### 6.1 分层架构
 
 ```
-┌─────────────────────────────────────────────┐
-│             POSIX Application               │
-│         (uses open/read/write/pid)          │
-├─────────────────────────────────────────────┤
-│           POSIX Shim (liba20posix)          │
-│  fd ↔ handle mapping, pid ↔ task handle    │
-│  errno emulation, signal emulation          │
-├─────────────────────────────────────────────┤
-│            liba20c (C library)              │
-│   malloc, printf, string, stdio            │
-├─────────────────────────────────────────────┤
-│           liba20rt (runtime)                │
-│   syscall wrappers, startup code           │
-├─────────────────────────────────────────────┤
-│              Kernel (Native ABI)            │
-│         handle/capability based             │
-└─────────────────────────────────────────────┘
+┌─────────────────────────────────────────────┐│             POSIX Application               ││         (uses open/read/write/pid)          │├─────────────────────────────────────────────┤│           POSIX Shim (liba20posix)          ││  fd ↔ handle mapping, pid ↔ task handle    ││  errno emulation, signal emulation          │├─────────────────────────────────────────────┤│            liba20c (C library)              ││   malloc, printf, string, stdio            │├─────────────────────────────────────────────┤│           liba20rt (runtime)                ││   syscall wrappers, startup code           │├─────────────────────────────────────────────┤│              Kernel (Native ABI)            ││         handle/capability based             │└─────────────────────────────────────────────┘
 ```
 
 ### 6.2 关键映射
@@ -473,64 +440,29 @@ int64_t path_open({
 ### 7.1 三层设计
 
 ```
-┌───────────────────────────────────────┐
-│  liba20posix (可选 POSIX 兼容层)       │
-│  - open/close/read/write (fd based)   │
-│  - getpid/kill/waitpid                │
-│  - signal stubs                       │
-│  - dirent, stat                       │
-├───────────────────────────────────────┤
-│  liba20c (最小 C 库)                   │
-│  - malloc/free (基于 vm_alloc)        │
-│  - printf/snprintf                    │
-│  - string (memcpy, strlen, ...)       │
-│  - stdio (FILE* → handle buffering)   │
-│  - time (clock_gettime, ...)          │
-│  - thread (pthread minimal subset)    │
-│  - errno (thread-local)               │
-├───────────────────────────────────────┤
-│  liba20rt (系统运行时)                  │
-│  - _start 入口点                       │
-│  - syscall wrappers (inline asm)      │
-│  - TLS 设置                            │
-│  - handle table 管理                   │
-└───────────────────────────────────────┘
+┌───────────────────────────────────────┐│  liba20posix (可选 POSIX 兼容层)       ││  - open/close/read/write (fd based)   ││  - getpid/kill/waitpid                ││  - signal stubs                       ││  - dirent, stat                       │├───────────────────────────────────────┤│  liba20c (最小 C 库)                   ││  - malloc/free (基于 vm_alloc)        ││  - printf/snprintf                    ││  - string (memcpy, strlen, ...)       ││  - stdio (FILE* → handle buffering)   ││  - time (clock_gettime, ...)          ││  - thread (pthread minimal subset)    ││  - errno (thread-local)               │├───────────────────────────────────────┤│  liba20rt (系统运行时)                  ││  - _start 入口点                       ││  - syscall wrappers (inline asm)      ││  - TLS 设置                            ││  - handle table 管理                   │└───────────────────────────────────────┘
 ```
 
 ### 7.2 liba20rt 设计
 
 ```c
-// liba20rt/start.S — 程序入口点
-// 内核将 a20_start_info_t 放在约定位置
-// _start 初始化 TLS、handle table、argc/argv，然后调用 main()
+// liba20rt/start.S — 程序入口点// 内核将 a20_start_info_t 放在约定位置// _start 初始化 TLS、handle table、argc/argv，然后调用 main()
 
-// liba20rt/syscall.h — syscall wrapper
-static inline int64_t a20_syscall0(uint64_t nr);
-static inline int64_t a20_syscall1(uint64_t nr, uint64_t a0);
-static inline int64_t a20_syscall2(uint64_t nr, uint64_t a0, uint64_t a1);
-static inline int64_t a20_syscall3(uint64_t nr, uint64_t a0, uint64_t a1, uint64_t a2);
+// liba20rt/syscall.h — syscall wrapperstatic inline int64_t a20_syscall0(uint64_t nr);static inline int64_t a20_syscall1(uint64_t nr, uint64_t a0);static inline int64_t a20_syscall2(uint64_t nr, uint64_t a0, uint64_t a1);static inline int64_t a20_syscall3(uint64_t nr, uint64_t a0, uint64_t a1, uint64_t a2);
 
-// liba20rt/handle_table.h — handle 管理
-// 维护进程的 handle 表（简单数组或 bitmap）
-int64_t a20_handle_slot_alloc(void);
-void a20_handle_slot_free(uint32_t slot);
+// liba20rt/handle_table.h — handle 管理// 维护进程的 handle 表（简单数组或 bitmap）int64_t a20_handle_slot_alloc(void);void a20_handle_slot_free(uint32_t slot);
 ```
 
 ### 7.3 liba20c 设计
 
 **内存分配器**：
 ```c
-// 基于 vm_alloc 的 sbrk 替代
-// 大块分配用 vm_alloc
-// 小块用 slab/arena 分配器
-void *malloc(size_t size);
-void free(void *ptr);
+// 基于 vm_alloc 的 sbrk 替代// 大块分配用 vm_alloc// 小块用 slab/arena 分配器void *malloc(size_t size);void free(void *ptr);
 ```
 
 **stdio 实现**：
 ```c
-// FILE 结构体包装 handle
-typedef struct A20_FILE {
+// FILE 结构体包装 handletypedef struct A20_FILE {
     a20_handle_t handle;
     int flags;            // O_RDONLY etc
     uint8_t *buffer;      // 用户态缓冲
@@ -539,10 +471,7 @@ typedef struct A20_FILE {
     // ...
 } A20_FILE;
 
-// stdin/stdout/stderr 从 a20_start_info 的 handles 初始化
-extern FILE *stdin;
-extern FILE *stdout;
-extern FILE *stderr;
+// stdin/stdout/stderr 从 a20_start_info 的 handles 初始化extern FILE *stdin;extern FILE *stdout;extern FILE *stderr;
 ```
 
 ### 7.4 liba20posix 设计
@@ -557,8 +486,7 @@ static struct {
     bool used;
 } a20_fd_table[A20_MAX_FDS];
 
-// POSIX fd 操作映射
-int open(const char *path, int flags, ...) {
+// POSIX fd 操作映射int open(const char *path, int flags, ...) {
     a20_path_open_args_t args = { ... };
     int64_t rc = path_open(&args);
     if (rc < 0) { errno = -rc; return -1; }
@@ -666,14 +594,7 @@ $$VMAR = ([base, base + len), prot, mappings)$$
 **VMAR 层次结构**：每个进程有一个根 VMAR（对应整个用户地址空间），子 VMAR 从中分配。这与 Zircon 的 VMAR 树结构一致，但 A20OS 简化为两层（根 VMAR + 映射区域）。
 
 ```
-Process Address Space (root VMAR)
-├── [0x0000_0000_0000, 0x0000_0100_0000) — unmapped (null page guard)
-├── [0x0000_0100_0000, ...) — text segment (R+X)
-├── [...] — data segment (R+W)
-├── [...] — heap (R+W, growable via vm_alloc)
-├── [...] — mmap regions (R+W, from vm_map)
-├── [...] — shared memory (from vm_share + vm_map)
-└── [0x7fff_xxxx_xxxx, ...) — stack (R+W, fixed size)
+Process Address Space (root VMAR)├── [0x0000_0000_0000, 0x0000_0100_0000) — unmapped (null page guard)├── [0x0000_0100_0000, ...) — text segment (R+X)├── [...] — data segment (R+W)├── [...] — heap (R+W, growable via vm_alloc)├── [...] — mmap regions (R+W, from vm_map)├── [...] — shared memory (from vm_share + vm_map)└── [0x7fff_xxxx_xxxx, ...) — stack (R+W, fixed size)
 ```
 
 **关键不变式**：
@@ -687,12 +608,7 @@ Process Address Space (root VMAR)
 A20OS 的 6 个内存 syscall 可以通过 VMO/VMAR 模型统一理解：
 
 ```
-vm_alloc(size) → 创建匿名 VMO + 自动映射到当前 VMAR
-vm_map(handle, addr, ...) → 将已有 VMO (handle) 映射到 VMAR
-vm_unmap(addr, len) → 解除 VMAR 中的映射
-vm_protect(addr, len, prot) → 修改 VMAR 中已有映射的保护属性
-vm_share(addr, len, ...) → 将 VMAR 中已有区域导出为 VMO handle
-vm_flush(addr, len, flags) → 刷新 VMAR 中映射的缓存状态
+vm_alloc(size) → 创建匿名 VMO + 自动映射到当前 VMARvm_map(handle, addr, ...) → 将已有 VMO (handle) 映射到 VMARvm_unmap(addr, len) → 解除 VMAR 中的映射vm_protect(addr, len, prot) → 修改 VMAR 中已有映射的保护属性vm_share(addr, len, ...) → 将 VMAR 中已有区域导出为 VMO handlevm_flush(addr, len, flags) → 刷新 VMAR 中映射的缓存状态
 ```
 
 **与 POSIX mmap 的对比**：
@@ -718,9 +634,7 @@ Handle 从创建到销毁经历以下状态：
                      ┌─────────────────────────────────┐
                      │                                 │
                      ▼                                 │
-  ┌──────┐    ┌──────────┐    ┌───────────┐    ┌──────┴──┐
-  │ Free │───→│ Active   │───→│ Transient │───→│ Closing │
-  └──────┘    └──────┬───┘    └───────────┘    └─────────┘
+  ┌──────┐    ┌──────────┐    ┌───────────┐    ┌──────┴──┐│ Free │───→│ Active   │───→│ Transient │───→│ Closing │└──────┘    └──────┬───┘    └───────────┘    └─────────┘
      ▲              │               │                │
      │              │               │                ▼
      │              ▼               │         ┌──────────┐

@@ -34,8 +34,7 @@ typedef struct block_dev_ops {
 典型生命周期：
 
 ```c
-/* 1. 注册：启动段把驱动挂到总线 */
-static driver_t my_blk_driver = {
+/* 1. 注册：启动段把驱动挂到总线 */static driver_t my_blk_driver = {
     .name       = "my-blk",
     .bus        = &pci_bus,
     .id_table   = my_ids,
@@ -43,12 +42,9 @@ static driver_t my_blk_driver = {
     .remove     = my_blk_remove,
     .class_type = DEV_CLASS_BLOCK,
     .class_ops  = &my_blk_ops,
-};
-DRIVER_REGISTER(my_blk_driver);
+};DRIVER_REGISTER(my_blk_driver);
 
-/* 2. probe：绑定设备并初始化 */
-static int my_blk_probe(device_t *dev)
-{
+/* 2. probe：绑定设备并初始化 */static int my_blk_probe(device_t *dev){
     my_blk_t *b = kzalloc(sizeof(*b));
     if (!b) return -ENOMEM;
 
@@ -60,8 +56,7 @@ static int my_blk_probe(device_t *dev)
     return 0;
 }
 
-/* 3. open/use：文件系统通过 class_ops 发 I/O */
-static int my_blk_read(device_t *dev, uint64_t lba,
+/* 3. open/use：文件系统通过 class_ops 发 I/O */static int my_blk_read(device_t *dev, uint64_t lba,
                        void *buf, size_t sectors)
 {
     my_blk_t *b = dev->drv_priv;
@@ -71,9 +66,7 @@ static int my_blk_read(device_t *dev, uint64_t lba,
     return 0;
 }
 
-/* 4. close 由 VFS 层管理；remove 释放硬件 */
-static int my_blk_remove(device_t *dev)
-{
+/* 4. close 由 VFS 层管理；remove 释放硬件 */static int my_blk_remove(device_t *dev){
     my_blk_t *b = dev->drv_priv;
     stop_queue(b);
     kfree(b);
@@ -109,8 +102,7 @@ typedef struct net_dev_ops {
 典型生命周期：
 
 ```c
-/* 1. 注册 */
-static driver_t my_net_driver = {
+/* 1. 注册 */static driver_t my_net_driver = {
     .name       = "my-net",
     .bus        = &pci_bus,
     .id_table   = my_ids,
@@ -118,12 +110,9 @@ static driver_t my_net_driver = {
     .remove     = my_net_remove,
     .class_type = DEV_CLASS_NET,
     .class_ops  = &my_net_ops,
-};
-DRIVER_REGISTER(my_net_driver);
+};DRIVER_REGISTER(my_net_driver);
 
-/* 2. probe：初始化硬件和队列 */
-static int my_net_probe(device_t *dev)
-{
+/* 2. probe：初始化硬件和队列 */static int my_net_probe(device_t *dev){
     my_net_t *n = kzalloc(sizeof(*n));
     if (!n) return -ENOMEM;
 
@@ -135,33 +124,26 @@ static int my_net_probe(device_t *dev)
     return 0;
 }
 
-/* 3. open：lwIP 启动网卡时调用 */
-static int my_net_open(device_t *dev)
-{
+/* 3. open：lwIP 启动网卡时调用 */static int my_net_open(device_t *dev){
     my_net_t *n = dev->drv_priv;
     enable_rx(n);
     return 0;
 }
 
-/* 4. send/recv/poll：数据面 */
-static int my_net_send(device_t *dev, const void *pkt, size_t len)
-{
+/* 4. send/recv/poll：数据面 */static int my_net_send(device_t *dev, const void *pkt, size_t len){
     my_net_t *n = dev->drv_priv;
     if (len > 1500) return -EINVAL;
     if (!tx_slot_free(n)) return -EAGAIN;
     return post_packet(n, pkt, len);
 }
 
-/* 5. stop/remove：停数据面并释放 */
-static int my_net_stop(device_t *dev)
-{
+/* 5. stop/remove：停数据面并释放 */static int my_net_stop(device_t *dev){
     my_net_t *n = dev->drv_priv;
     disable_rx_tx(n);
     return 0;
 }
 
-static int my_net_remove(device_t *dev)
-{
+static int my_net_remove(device_t *dev){
     my_net_t *n = dev->drv_priv;
     my_net_stop(dev);
     free_rings(n);
@@ -190,8 +172,7 @@ typedef struct char_dev_ops {
 典型生命周期：
 
 ```c
-/* 1. 注册 */
-static driver_t my_uart_driver = {
+/* 1. 注册 */static driver_t my_uart_driver = {
     .name       = "my-uart",
     .bus        = &platform_bus,
     .id_table   = my_ids,
@@ -199,12 +180,9 @@ static driver_t my_uart_driver = {
     .remove     = my_uart_remove,
     .class_type = DEV_CLASS_CHAR,
     .class_ops  = &my_uart_ops,
-};
-DRIVER_REGISTER(my_uart_driver);
+};DRIVER_REGISTER(my_uart_driver);
 
-/* 2. probe：初始化硬件 */
-static int my_uart_probe(device_t *dev)
-{
+/* 2. probe：初始化硬件 */static int my_uart_probe(device_t *dev){
     my_uart_t *u = kzalloc(sizeof(*u));
     if (!u) return -ENOMEM;
 
@@ -213,9 +191,7 @@ static int my_uart_probe(device_t *dev)
     return 0;
 }
 
-/* 3. read/write：字节流 */
-static int my_uart_read(device_t *dev, void *buf, size_t count)
-{
+/* 3. read/write：字节流 */static int my_uart_read(device_t *dev, void *buf, size_t count){
     my_uart_t *u = dev->drv_priv;
     size_t n = min(count, rx_ready(u));
     if (n == 0) return -EAGAIN;
@@ -223,9 +199,7 @@ static int my_uart_read(device_t *dev, void *buf, size_t count)
     return (int)n;
 }
 
-/* 4. remove：关中断、释放 */
-static int my_uart_remove(device_t *dev)
-{
+/* 4. remove：关中断、释放 */static int my_uart_remove(device_t *dev){
     my_uart_t *u = dev->drv_priv;
     disable_uart_irq(u);
     kfree(u);
@@ -268,8 +242,7 @@ struct input_event {
 典型生命周期：
 
 ```c
-/* 1. 注册 */
-static driver_t my_hid_driver = {
+/* 1. 注册 */static driver_t my_hid_driver = {
     .name       = "my-hid",
     .bus        = &pci_bus,
     .id_table   = my_ids,
@@ -277,12 +250,9 @@ static driver_t my_hid_driver = {
     .remove     = my_hid_remove,
     .class_type = DEV_CLASS_INPUT,
     .class_ops  = &my_hid_ops,
-};
-DRIVER_REGISTER(my_hid_driver);
+};DRIVER_REGISTER(my_hid_driver);
 
-/* 2. probe：初始化并创建事件 ring */
-static int my_hid_probe(device_t *dev)
-{
+/* 2. probe：初始化并创建事件 ring */static int my_hid_probe(device_t *dev){
     my_hid_t *h = kzalloc(sizeof(*h));
     if (!h) return -ENOMEM;
 
@@ -296,9 +266,7 @@ static int my_hid_probe(device_t *dev)
     return 0;
 }
 
-/* 3. 中断：合成事件并推入 ring */
-static void my_hid_irq(device_t *dev)
-{
+/* 3. 中断：合成事件并推入 ring */static void my_hid_irq(device_t *dev){
     my_hid_t *h = dev->drv_priv;
     struct input_event ev;
 
@@ -313,9 +281,7 @@ static void my_hid_irq(device_t *dev)
     push_event(h, &ev);
 }
 
-/* 4. read/poll：暴露给用户聚合器 */
-static int my_hid_read(device_t *dev, void *buf, size_t count)
-{
+/* 4. read/poll：暴露给用户聚合器 */static int my_hid_read(device_t *dev, void *buf, size_t count){
     my_hid_t *h = dev->drv_priv;
     if (count < sizeof(struct input_event))
         return -EINVAL;
@@ -324,9 +290,7 @@ static int my_hid_read(device_t *dev, void *buf, size_t count)
     return ring_pop(h->ring, buf, sizeof(struct input_event));
 }
 
-/* 5. remove：停止中断、释放 ring */
-static int my_hid_remove(device_t *dev)
-{
+/* 5. remove：停止中断、释放 ring */static int my_hid_remove(device_t *dev){
     my_hid_t *h = dev->drv_priv;
     disable_hid(h);
     ring_free(h->ring);
@@ -354,8 +318,7 @@ Display 驱动成功 probe 后调用 `gpu_device_register(dev)`；remove 前调�
 典型生命周期：
 
 ```c
-/* 1. 注册 */
-static driver_t my_gpu_driver = {
+/* 1. 注册 */static driver_t my_gpu_driver = {
     .name       = "my-gpu",
     .bus        = &pci_bus,
     .id_table   = my_ids,
@@ -363,12 +326,9 @@ static driver_t my_gpu_driver = {
     .remove     = my_gpu_remove,
     .class_type = DEV_CLASS_DISPLAY,
     .class_ops  = &my_gpu_ops,
-};
-DRIVER_REGISTER(my_gpu_driver);
+};DRIVER_REGISTER(my_gpu_driver);
 
-/* 2. probe：分配 framebuffer 并注册 display */
-static int my_gpu_probe(device_t *dev)
-{
+/* 2. probe：分配 framebuffer 并注册 display */static int my_gpu_probe(device_t *dev){
     my_gpu_t *g = kzalloc(sizeof(*g));
     if (!g) return -ENOMEM;
 
@@ -387,9 +347,7 @@ static int my_gpu_probe(device_t *dev)
     return 0;
 }
 
-/* 3. 使用：用户映射 framebuffer 后写像素 */
-static int my_gpu_get_fb(device_t *dev, uintptr_t *paddr, size_t *size)
-{
+/* 3. 使用：用户映射 framebuffer 后写像素 */static int my_gpu_get_fb(device_t *dev, uintptr_t *paddr, size_t *size){
     my_gpu_t *g = dev->drv_priv;
     *paddr = g->fb_paddr;
     *size  = g->fb_size;
@@ -408,9 +366,7 @@ static int my_gpu_flush(device_t *dev, uint32_t x, uint32_t y,
     return 0;
 }
 
-/* 4. remove：注销 display、释放显存 */
-static int my_gpu_remove(device_t *dev)
-{
+/* 4. remove：注销 display、释放显存 */static int my_gpu_remove(device_t *dev){
     my_gpu_t *g = dev->drv_priv;
     gpu_device_unregister(dev);
     free_framebuffer(g->fb);

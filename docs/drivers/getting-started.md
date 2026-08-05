@@ -19,15 +19,7 @@ make ARCH=aarch64 BOARD=qemu-virt-aarch64 ABI=both kernel-only -j4
 ### 需要认识的目录
 
 ```text
-kernel/drivers/core/                 核心对象、注册、硬件访问 API
-kernel/include/drivers/bus/          PCI 等总线公共声明
-kernel/include/drivers/<class>/      各功能类公共声明
-kernel/drivers/bus/                  总线枚举和 transport
-kernel/drivers/block|net|gpu|input/  通用功能驱动
-kernel/platform/<board>/             板级地址、固件发现和固定设备
-kernel/include/core/errno.h          内核负 errno
-kernel/include/core/lock.h           spinlock API
-kernel/include/mm/slab.h             kmalloc/kfree
+kernel/drivers/core/                 核心对象、注册、硬件访问 APIkernel/include/drivers/bus/          PCI 等总线公共声明kernel/include/drivers/<class>/      各功能类公共声明kernel/drivers/bus/                  总线枚举和 transportkernel/drivers/block|net|gpu|input/  通用功能驱动kernel/platform/<board>/             板级地址、固件发现和固定设备kernel/include/core/errno.h          内核负 errnokernel/include/core/lock.h           spinlock APIkernel/include/mm/slab.h             kmalloc/kfree
 ```
 
 核心模型头在 `kernel/drivers/core/`，包含写法是 `#include "drivers/core/driver_core.h"`。不要复制同名结构到驱动私有头。
@@ -51,14 +43,7 @@ VirtualBox PCI 设备可从串口的 `[BUS] pci` 和 BAR 行取得身份与资�
 ## 3. 数据路径
 
 ```text
-板级代码/总线发现硬件
-  -> 创建并注册 device_t
-  -> bus.match 对照 driver.id_table
-  -> driver.probe 初始化一个实例
-  -> driver.class_ops 发布统一功能
-  -> VFS、lwIP、块层、input 或 framebuffer 调用 class_ops
-  -> class op 从 dev->drv_priv 找到实例并访问硬件
-  -> device_unregister/driver_unregister 调用 remove
+板级代码/总线发现硬件-> 创建并注册 device_t-> bus.match 对照 driver.id_table-> driver.probe 初始化一个实例-> driver.class_ops 发布统一功能-> VFS、lwIP、块层、input 或 framebuffer 调用 class_ops-> class op 从 dev->drv_priv 找到实例并访问硬件-> device_unregister/driver_unregister 调用 remove
 ```
 
 枚举器描述“机器上有什么”，驱动描述“怎样操作这种硬件”，class 描述“内核消费者怎样使用”。通用驱动不写板级物理地址，平台代码不复制设备协议。
@@ -90,7 +75,10 @@ PCI 开发者直接跳到下一节。固定设备开发者还要完成 [总线�
 #include "core/errno.h"
 #include "core/lock.h"
 #include "core/string.h"
+#include "core/sync.h"    /* wait_queue_t、mutex_t */
+#include "core/timer.h"   /* timer_get_ticks、MS_TO_TICKS/US_TO_TICKS */
 #include "mm/slab.h"
+#include "proc/proc.h"    /* park/wake 协议 */
 ```
 
 驱动不直接包含 `kernel/arch/` 或某块板的头。x86 port I/O 等真正架构限定协议是例外，但应把架构操作封装成小型 HAL，而不是让完整功能驱动散布架构条件。
@@ -100,6 +88,8 @@ PCI 开发者直接跳到下一节。固定设备开发者还要完成 [总线�
 ```c
 #define ACME_REG_STATUS       0x0000U
 #define ACME_REG_CONTROL      0x0004U
+#define ACME_REG_INT_STATUS   0x0008U
+#define ACME_REG_INT_ENABLE   0x000cU
 #define ACME_CONTROL_ENABLE   (1U << 0)
 #define ACME_STATUS_READY     (1U << 0)
 #define ACME_MIN_BAR0_SIZE    0x1000U
@@ -111,6 +101,7 @@ typedef struct {
     uint64_t ring_dma;
     void *ring;
     size_t ring_size;
+    wait_queue_t waiters; /* IRQ top-half 唤醒的完成等待者，内部自锁 */
     int irq;
     int irq_registered;
     int ready;
@@ -118,29 +109,36 @@ typedef struct {
 } acme_priv_t;
 ```
 
-所有会因设备实例不同而变化的状态都放在 `drv_priv` 指向的对象中。禁止用一组无保护的全局 queue index 支撑多个设备。若当前内存限制只能支持一个静态实例，probe 必须拒绝第二个实例，并在 [实现状态](implementation-status.md) 记录限制；优先使用 `kcalloc(1, sizeof(*p))` 创建实例。
+所有会因设备实例不同而变化的状态都放在 `drv_priv` 指向的对象中。禁止用一组无保护的全局 queue index 支撑多个设备。若当前内存限制只能支持一个静态实例，probe 必须拒绝第二个实例，并在 [实现状态](implementation-status.md) 记录限制；优先使用 `kcalloc(1, sizeof(*p))` 创建实例。等待命令完成时使用 `wait_queue_t` + park（见第 9 节和 [标准完成模型](runtime-contracts.md#标准完成模型irq-hybrid)），不要 busy-poll 到硬件超时。
 
 寄存器 helper 明确使用 MMIO API：
 
 ```c
-static uint32_t acme_read(acme_priv_t *p, uint32_t reg)
-{
+static uint32_t acme_read(acme_priv_t *p, uint32_t reg){
     return readl((const volatile void *)(p->regs + reg));
 }
 
-static void acme_write(acme_priv_t *p, uint32_t reg, uint32_t value)
-{
+static void acme_write(acme_priv_t *p, uint32_t reg, uint32_t value){
     writel(value, (volatile void *)(p->regs + reg));
 }
 
-static int acme_irq(int irq, void *priv)
-{
+static int acme_irq(int irq, void *priv){
     acme_priv_t *p = priv;
     if (!p)
         return 0;
-    /* 读取状态确认中断属于本设备，清 W1C 位，只推进有界数量的完成项。 */
+    /* top-half：确认中断属于本设备，清中断源，唤醒等待者后立即返回。
+     * 不触碰提交者拥有的 ring 状态；共享线上无 pending 时直接返回。 */
+    uint32_t is = acme_read(p, ACME_REG_INT_STATUS);
+    if (!is)
+        return 0;
+    acme_write(p, ACME_REG_INT_STATUS, is);
+    proc_wake_q_t wake_q;
+    proc_wake_q_init(&wake_q);
+    (void)wait_queue_collect_all(&p->waiters, 0, PROC_WAKE_EVENT,
+                                 &wake_q, NULL);
+    (void)proc_wake_q_flush(&wake_q);
     (void)irq;
-    return 1;
+    return 0;
 }
 ```
 
@@ -164,8 +162,7 @@ static const device_id_t acme_ids[] = {
 实现目标类前，先阅读 [设备类接口](device-classes.md) 中该类操作的单位和返回值。网络类的核心操作如下：
 
 ```c
-static int acme_send(device_t *dev, const void *packet, size_t length)
-{
+static int acme_send(device_t *dev, const void *packet, size_t length){
     acme_priv_t *p = dev ? dev->drv_priv : NULL;
     if (!p || !p->ready || p->removing)
         return -ENODEV;
@@ -179,8 +176,7 @@ static int acme_send(device_t *dev, const void *packet, size_t length)
     return (int)length;
 }
 
-static int acme_recv(device_t *dev, void *buffer, size_t capacity)
-{
+static int acme_recv(device_t *dev, void *buffer, size_t capacity){
     acme_priv_t *p = dev ? dev->drv_priv : NULL;
     if (!p || !p->ready || p->removing)
         return -ENODEV;
@@ -190,8 +186,7 @@ static int acme_recv(device_t *dev, void *buffer, size_t capacity)
     return 0;
 }
 
-static const uint8_t *acme_mac(device_t *dev)
-{
+static const uint8_t *acme_mac(device_t *dev){
     acme_priv_t *p = dev ? dev->drv_priv : NULL;
     return p && p->ready && !p->removing ? p->mac : NULL;
 }
@@ -210,12 +205,10 @@ static const net_dev_ops_t acme_ops = {
 probe 把“匹配的硬件”变成“完全可用的类实例”。任何中途失败都必须恢复为未绑定状态，且设备不能继续 DMA。下面的控制流可直接作为结构模板：
 
 ```c
-static int acme_probe(device_t *dev)
-{
+static int acme_probe(device_t *dev){
     int ret;
     acme_priv_t *p = NULL;
     resource_t *bar0;
-    resource_t *irq;
 
     if (!dev || !dev->matched_id)
         return -EINVAL;
@@ -233,6 +226,7 @@ static int acme_probe(device_t *dev)
     if (!p)
         return -ENOMEM;
     spin_init(&p->lock);
+    wait_queue_init(&p->waiters);
     p->regs = (uintptr_t)bar0->start;
     p->irq = -1;
 
@@ -251,27 +245,34 @@ static int acme_probe(device_t *dev)
     }
     /* 验证 ring_dma 满足设备地址位宽和对齐，再写 DMA 寄存器。 */
 
-    irq = device_get_resource(dev, RES_IRQ, 0);
-    if (!irq) {
-        ret = -ENODEV; /* 本模板没有轮询进展函数，因此 IRQ 是必需资源。 */
-        goto fail_dma;
+    /* IRQ 解析：PCI 用 pci_intx_irq()（平台路由后的标识）；MMIO/平台
+     * 设备用 RES_IRQ 资源。PCI 配置空间的 IRQ Line 寄存器不是可用
+     * 标识，禁止注册。解析失败（-1）进入轮询降级。 */
+    p->irq = pci_intx_irq(dev);
+    if (p->irq >= 0) {
+        /* PCI INTx 可共享，必须带 IRQF_SHARED。注册失败显式降级：
+         * 实例不得保持“看似 IRQ 驱动”的状态。 */
+        ret = request_irq((uint32_t)p->irq, acme_irq, IRQF_SHARED, p);
+        if (ret == 0) {
+            p->irq_registered = 1;
+        } else {
+            p->irq = -1;
+            ret = 0;
+        }
     }
-    p->irq = (int)irq->start;
-    ret = request_irq((uint32_t)p->irq, acme_irq, 0, p);
-    if (ret < 0)
-        goto fail_dma;
-    p->irq_registered = 1;
 
-    /* 清 pending 状态，启动 RX/TX，最后才发布实例。 */
+    /* 清 pending 状态，启动 RX/TX，最后才发布实例。设备级中断使能
+     * 只在 handler 注册成功后打开；轮询降级时保持屏蔽。 */
+    if (p->irq_registered)
+        acme_write(p, ACME_REG_INT_ENABLE, 0xffffffffU);
     acme_write(p, ACME_REG_CONTROL, ACME_CONTROL_ENABLE);
     dev->drv_priv = p;
     p->ready = 1;
     return 0;
 
-fail_dma:
-    /* 此处硬件尚未启动；若已经启动，必须先停 DMA/复位。 */
-    dma_free_coherent(p->ring, p->ring_size, p->ring_dma);
 fail_priv:
+    /* IRQ 注册失败是降级而非回滚；一旦注册成功，后续失败必须先
+     * 屏蔽设备中断，再 free_irq，最后释放 DMA 和实例内存。 */
     kfree(p);
     return ret;
 }
@@ -281,15 +282,14 @@ fail_priv:
 
 `pci_enable_and_assign_bars()` 当前没有配对的 disable helper，因此它之前的失败无需由功能驱动释放 BAR；驱动自己取得的 DMA、IRQ、类 registry 和普通内存必须全部回滚。
 
-本模板把 IRQ 作为必需资源。若硬件或平台没有可用 IRQ，必须实现 `.poll` 作为明确的数据面进展入口，并保证每次调用工作量有界；不能既没有 IRQ 也没有 poll 却让 probe 成功。轮询命令的完成等待仍要有超时。
+命令完成等待遵循 [标准完成模型](runtime-contracts.md#标准完成模型irq-hybrid)：有界预轮询窗口后 park 在 `p->waiters` 上（有界 park 块，link 后重查），IRQ top-half 唤醒；平台无中断路由时退化到有界轮询，且必须在 [实现状态](implementation-status.md) 记录适用平台与解除轮询的条件。无 IRQ 又无 `.poll` 进展入口的设备不得让 probe 成功。
 
  注意：probe 中如果先设置 `dev->drv_priv = p` 再启动设备，或者先释放资源再 `goto` 到错误标签，remove 或失败回滚会访问未初始化或已释放的内存。保持“取得资源 → 失败则逆序释放 → 成功最后才发布 ready/drv_priv”的顺序。
 
 ## 10. 实现 remove
 
 ```c
-static int acme_remove(device_t *dev)
-{
+static int acme_remove(device_t *dev){
     acme_priv_t *p = dev ? dev->drv_priv : NULL;
     if (!p)
         return 0;
@@ -299,7 +299,9 @@ static int acme_remove(device_t *dev)
     p->ready = 0;
     spin_unlock_irqrestore(&p->lock, flags);
 
-    /* 屏蔽设备 IRQ，停止队列并等待 DMA 有界结束。 */
+    /* 先屏蔽设备中断（或复位设备），再 free_irq，最后释放 DMA。
+     * free_irq 返回时在途 handler 已退出，之后才能释放实例内存。 */
+    acme_write(p, ACME_REG_INT_ENABLE, 0);
     acme_write(p, ACME_REG_CONTROL, 0);
     if (p->irq_registered)
         free_irq((uint32_t)p->irq, p);
@@ -350,21 +352,13 @@ probe 成功不等于用户可见：
 先做静态门禁：
 
 ```sh
-git diff --check
-make check-driver-core-model
-make check-doc-drift
-make ARCH=<arch> BOARD=<board> ABI=both kernel-only -j4
+git diff --checkmake check-driver-core-modelmake check-doc-driftmake ARCH=<arch> BOARD=<board> ABI=both kernel-only -j4
 ```
 
 启动后按顺序寻找日志：
 
 ```text
-[DRIVER] registered driver 'acme-net' (class=3)
-[BUS] pci ... id=1234:5678 ...
-[DRIVER] registered device 'pci-...'
-[ACME] ready: ...
-[DRIVER] device 'pci-...' bound to driver 'acme-net'
-[LWIP] ... attached ...
+[DRIVER] registered driver 'acme-net' (class=3)[BUS] pci ... id=1234:5678 ...[DRIVER] registered device 'pci-...'[ACME] ready: ...[DRIVER] device 'pci-...' bound to driver 'acme-net'[LWIP] ... attached ...
 ```
 
 没有 driver 注册日志：检查源文件是否进入构建、`DRIVER_REGISTER` 和链接段。没有 PCI 行：检查 VM/固件/ECAM，而不是 probe。看到 PCI 行但 probe 未调用：检查 bus 指针、ID 和 subsystem 通配。probe 超时：检查 BAR 号/长度、地址是否已是内核 VA、访问宽度、reset 顺序。probe 成功但无功能：检查 class 类型、ops 返回值和消费者桥。
@@ -381,6 +375,8 @@ make ARCH=<arch> BOARD=<board> ABI=both kernel-only -j4
 6. 调用 remove 时，新 I/O 返回 `-ENODEV`，IRQ/DMA 不再访问旧内存。
 7. remove 后重新 probe，静态槽、默认 registry 和 IRQ 能再次使用。
 8. 目标平台和至少一个共享基础设施回归平台构建成功。
+9. IRQ 路径必须证实中断真实触发（启动日志计数或调试观察），而不是只有预轮询窗口掩盖了永远不到来的中断；共享线场景下两个设备都要完成 I/O。
+10. request_irq 失败的注入路径：实例必须显式降级为轮询且设备中断保持屏蔽，不能 park 在不会到来的中断上。
 
 测试向量和提交证据格式见 [../testing/testing-gates.md](../testing/testing-gates.md)。
 
@@ -392,7 +388,7 @@ make ARCH=<arch> BOARD=<board> ABI=both kernel-only -j4
 | 固定地址设备、新板或新总线 | [总线与平台](bus-and-platform.md) |
 | class 操作该返回什么 | [设备类接口](device-classes.md) |
 | BAR、VirtIO feature/queue | [PCI 与 VirtIO](pci-and-virtio.md) |
-| cache、DMA、IRQ、屏障、等待 | [运行时契约](runtime-contracts.md) |
+| cache、DMA、IRQ、屏障、标准完成模型 | [运行时契约](runtime-contracts.md) |
 | 锁可以怎样嵌套 | [锁顺序](lock-order.md) |
 | framebuffer 映射和刷新 | [Display/Framebuffer](display.md) |
 | VirtualBox 的真实发现链和设备 | [VirtualBox 驱动栈](../platforms/virtualbox.md) |

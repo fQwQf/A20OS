@@ -82,15 +82,7 @@ typedef struct a20_start_info {
 ### 2.1 三层结构
 
 ```
-┌──────────────────────────────────────────┐
-│         POSIX shim（可选）                  │  musl 上层代码 + 语义桥接
-├──────────────────────────────────────────┤
-│           liba20c                        │  最小 C 库：malloc, stdio, string, time
-├──────────────────────────────────────────┤
-│           liba20rt                       │  syscall wrapper, 启动代码, handle I/O
-├──────────────────────────────────────────┤
-│          kernel                          │  Native ABI syscall 接口
-└──────────────────────────────────────────┘
+┌──────────────────────────────────────────┐│         POSIX shim（可选）                  │  musl 上层代码 + 语义桥接├──────────────────────────────────────────┤│           liba20c                        │  最小 C 库：malloc, stdio, string, time├──────────────────────────────────────────┤│           liba20rt                       │  syscall wrapper, 启动代码, handle I/O├──────────────────────────────────────────┤│          kernel                          │  Native ABI syscall 接口└──────────────────────────────────────────┘
 ```
 
 **两种实现路径**（均已实现）：
@@ -151,8 +143,7 @@ _start:
 ```c
 /* a20_syscall.h — syscall 发射层 */
 
-/* 通用 syscall 入口（6 参数） */
-static inline int64_t a20_syscall6(uint32_t nr,
+/* 通用 syscall 入口（6 参数） */static inline int64_t a20_syscall6(uint32_t nr,
     uint64_t a0, uint64_t a1, uint64_t a2,
     uint64_t a3, uint64_t a4, uint64_t a5)
 {
@@ -177,8 +168,7 @@ static inline int64_t a20_syscall6(uint32_t nr,
 #define a20_task_exit(code) \
     a20_syscall6(0x0200, (uint64_t)(int32_t)(code), 0, 0, 0, 0, 0)
 
-/* 复杂 syscall（传结构体指针） */
-static inline int64_t a20_handle_read(struct a20_io_args *args) {
+/* 复杂 syscall（传结构体指针） */static inline int64_t a20_handle_read(struct a20_io_args *args) {
     return a20_syscall6(0x0401, (uint64_t)args, 0, 0, 0, 0, 0);
 }
 ```
@@ -201,14 +191,7 @@ static inline int64_t a20_handle_read(struct a20_io_args *args) {
 将 POSIX API 映射到 native handle 模型：
 
 ```text
-open(path, flags)     → path_open + fd_table_insert
-read(fd, buf, n)      → handle_read(fd_table[fd], ...)
-write(fd, buf, n)     → handle_write(fd_table[fd], ...)
-close(fd)             → handle_close(fd_table[fd]) + fd_table_remove
-pipe(fds)             → channel_create + fd_table_insert ×2
-socket(domain, type)  → net_socket + fd_table_insert
-fork()                → 不支持（返回 ENOSYS）
-execve(path, ...)     → 不支持（返回 ENOSYS）
+open(path, flags)     → path_open + fd_table_insertread(fd, buf, n)      → handle_read(fd_table[fd], ...)write(fd, buf, n)     → handle_write(fd_table[fd], ...)close(fd)             → handle_close(fd_table[fd]) + fd_table_removepipe(fds)             → channel_create + fd_table_insert ×2socket(domain, type)  → net_socket + fd_table_insertfork()                → 不支持（返回 ENOSYS）execve(path, ...)     → 不支持（返回 ENOSYS）
 ```
 
 **明确不支持**的 POSIX 操作（Phase 2 可通过 musl 移植逐步支持）：
@@ -241,17 +224,13 @@ struct a20_fd_entry {
     uint32_t      fd_flags;     /* FD_CLOEXEC 等 */
 };
 
-static struct a20_fd_entry *__fd_table;
-static int __fd_table_size;      /* 当前容量 */
-static int __fd_table_used;      /* 已用数量 */
-static spinlock_t __fd_lock;     /* 用户态自旋锁（多线程保护） */
+static struct a20_fd_entry *__fd_table;static int __fd_table_size;      /* 当前容量 */static int __fd_table_used;      /* 已用数量 */static spinlock_t __fd_lock;     /* 用户态自旋锁（多线程保护） */
 ```
 
 ### 3.2 初始化
 
 ```c
-/* __libc_init 中调用 */
-void __fd_table_init(const a20_start_info_t *si) {
+/* __libc_init 中调用 */void __fd_table_init(const a20_start_info_t *si) {
     __fd_table = __bare_alloc(A20_FD_INIT_SIZE * sizeof(struct a20_fd_entry));
     __fd_table_size = A20_FD_INIT_SIZE;
     memset(__fd_table, 0, ...);
@@ -271,8 +250,7 @@ void __fd_table_init(const a20_start_info_t *si) {
 ### 3.3 fd 操作函数
 
 ```c
-/* 分配新 fd（线性扫描找空闲槽位） */
-int __fd_alloc(a20_handle_t handle, uint32_t flags) {
+/* 分配新 fd（线性扫描找空闲槽位） */int __fd_alloc(a20_handle_t handle, uint32_t flags) {
     spin_lock(&__fd_lock);
     for (int i = 0; i < __fd_table_size; i++) {
         if (__fd_table[i].handle == A20_HANDLE_NULL) {
@@ -289,15 +267,13 @@ int __fd_alloc(a20_handle_t handle, uint32_t flags) {
     return -1;
 }
 
-/* fd → handle 查询 */
-a20_handle_t __fd_to_handle(int fd) {
+/* fd → handle 查询 */a20_handle_t __fd_to_handle(int fd) {
     if (fd < 0 || fd >= __fd_table_size)
         return A20_HANDLE_NULL;
     return __fd_table[fd].handle;
 }
 
-/* POSIX read() 的实现 */
-ssize_t read(int fd, void *buf, size_t count) {
+/* POSIX read() 的实现 */ssize_t read(int fd, void *buf, size_t count) {
     a20_handle_t h = __fd_to_handle(fd);
     if (h == A20_HANDLE_NULL) { errno = EBADF; return -1; }
 
@@ -313,8 +289,7 @@ ssize_t read(int fd, void *buf, size_t count) {
     return (ssize_t)args.out_count;
 }
 
-/* POSIX open() 的实现 */
-int open(const char *path, int flags, ...) {
+/* POSIX open() 的实现 */int open(const char *path, int flags, ...) {
     struct a20_path_open_args args = {
         .size = sizeof(args), .version = 1,
         .dir = __cwd_handle,   /* libc 维护的 cwd dir handle */
@@ -361,29 +336,7 @@ musl 的 `arch/<arch>/syscall.h` 是唯一的 syscall 发射点。替换这一�
 ### 4.2 musl 代码结构分析
 
 ```text
-musl/
-├── arch/
-│   ├── aarch64/
-│   │   ├── syscall.h         ← 定义 __syscall 宏（SVC #0 指令）
-│   │   ├── crt_arch.h        ← crt0 汇编
-│   │   ├── pthread_arch.h    ← 线程指针（tp 寄存器）
-│   │   └── atomic.h          ← 原子操作（LDXR/STXR）
-│   └── ...
-├── src/
-│   ├── internal/
-│   │   ├── syscallops.h      ← 高层 syscall 封装（__sys_open 等）
-│   │   └── libc.h            ← 内部数据结构
-│   ├── fd/                   ← 文件描述符操作
-│   │   ├── open.c            ← open() → __sys_openat(SYS_openat, ...)
-│   │   ├── read.c            ← read() → __syscall_cp(SYS_read, ...)
-│   │   └── ...
-│   ├── thread/               ← pthread 实现
-│   ├── signal/               ← 信号实现
-│   ├── network/              ← socket 实现
-│   ├── stdio/                ← FILE* 实现
-│   └── ...                   ← string, stdlib, math, etc.
-├── include/                  ← 公共头文件
-└── tools/                    ← 构建工具
+musl/├── arch/│   ├── aarch64/│   │   ├── syscall.h         ← 定义 __syscall 宏（SVC #0 指令）│   │   ├── crt_arch.h        ← crt0 汇编│   │   ├── pthread_arch.h    ← 线程指针（tp 寄存器）│   │   └── atomic.h          ← 原子操作（LDXR/STXR）│   └── ...├── src/│   ├── internal/│   │   ├── syscallops.h      ← 高层 syscall 封装（__sys_open 等）│   │   └── libc.h            ← 内部数据结构│   ├── fd/                   ← 文件描述符操作│   │   ├── open.c            ← open() → __sys_openat(SYS_openat, ...)│   │   ├── read.c            ← read() → __syscall_cp(SYS_read, ...)│   │   └── ...│   ├── thread/               ← pthread 实现│   ├── signal/               ← 信号实现│   ├── network/              ← socket 实现│   ├── stdio/                ← FILE* 实现│   └── ...                   ← string, stdlib, math, etc.├── include/                  ← 公共头文件└── tools/                    ← 构建工具
 ```
 
 **关键发现**：musl 的 `src/fd/open.c` 调用 `__sys_openat`，后者展开为 `__syscall(SYS_openat, ...)`。`SYS_openat` 是 Linux syscall 编号。替换为 `a20_path_open` 就是替换一个宏。
@@ -393,13 +346,7 @@ musl/
 #### 6.3.1 新增 `arch/a20/`（~600 行）
 
 ```text
-arch/a20/
-├── syscall.h              ← A20 syscall 发射宏（~80 行）
-├── crt_arch.h             ← A20 启动汇编（~40 行）
-├── pthread_arch.h         ← TLS 指针约定（~20 行，复用 aarch64）
-├── atomic.h               ← 原子操作（~100 行，复用 aarch64）
-├── reloc.h                ← 重定位（~30 行，复用 aarch64）
-└── bits/
+arch/a20/├── syscall.h              ← A20 syscall 发射宏（~80 行）├── crt_arch.h             ← A20 启动汇编（~40 行）├── pthread_arch.h         ← TLS 指针约定（~20 行，复用 aarch64）├── atomic.h               ← 原子操作（~100 行，复用 aarch64）├── reloc.h                ← 重定位（~30 行，复用 aarch64）└── bits/
     └── syscall.h          ← A20 syscall 编号定义（~300 行）
 ```
 
@@ -422,17 +369,14 @@ arch/a20/
 #define __NR_a20_handle_write      0x0402
 /* ... 全部 93 个 */
 
-/* A20 使用相同的 SVC #0 指令，但 x8 放 A20 编号 */
-static inline long __syscall0(long nr)
-{
+/* A20 使用相同的 SVC #0 指令，但 x8 放 A20 编号 */static inline long __syscall0(long nr){
     register long x8 __asm__("x8") = nr;
     register long x0 __asm__("x0");
     __asm__ volatile("svc #0" : "=r"(x0) : "r"(x8) : "memory");
     return x0;
 }
 
-static inline long __syscall1(long nr, long a0)
-{
+static inline long __syscall1(long nr, long a0){
     register long x8 __asm__("x8") = nr;
     register long x0 __asm__("x0") = a0;
     __asm__ volatile("svc #0" : "=r"(x0) : "r"(x8), "0"(x0) : "memory");
@@ -453,9 +397,7 @@ static inline long __syscall1(long nr, long a0)
 
 /* ===== 文件 I/O ===== */
 
-/* musl 调用 __sys_openat(dirfd, path, flags, mode) */
-long __sys_openat(int dirfd, const char *path, int flags, int mode)
-{
+/* musl 调用 __sys_openat(dirfd, path, flags, mode) */long __sys_openat(int dirfd, const char *path, int flags, int mode){
     struct a20_path_open_args args = {
         .size = sizeof(args), .version = 1,
         .dir = __fd_to_handle(dirfd),
@@ -469,10 +411,7 @@ long __sys_openat(int dirfd, const char *path, int flags, int mode)
     return __fd_alloc(args.out_handle, flags);
 }
 
-/* musl 调用 __syscall_cp(SYS_read, fd, buf, count) */
-/* 需要在 __syscall 宏中做拦截 */
-long __a20_read(int fd, void *buf, size_t count)
-{
+/* musl 调用 __syscall_cp(SYS_read, fd, buf, count) *//* 需要在 __syscall 宏中做拦截 */long __a20_read(int fd, void *buf, size_t count){
     a20_handle_t h = __fd_to_handle(fd);
     struct a20_iovec iov = { (uint64_t)buf, count };
     struct a20_io_args args = {
@@ -524,8 +463,7 @@ long __sys_rt_sigprocmask(int how, ...) {
     return 0;
 }
 
-/* kill 映射到 channel 通知或 event 投递 */
-long __sys_kill(int pid, int sig) {
+/* kill 映射到 channel 通知或 event 投递 */long __sys_kill(int pid, int sig) {
     /* 通过 task_kill 发送信号编号作为 reason */
     a20_handle_t task = __pid_to_handle(pid);
     return __syscall2(__NR_a20_task_kill, task, sig);
@@ -540,8 +478,7 @@ long __sys_kill(int pid, int sig) {
 /* musl 的 crt0 会调用 __libc_start_main。
  * 我们替换入口点，从 a20_start_info 初始化 */
 
-void __a20_start(const struct a20_start_info *si)
-{
+void __a20_start(const struct a20_start_info *si){
     /* 1. 保存 start_info 指针 */
     __a20_start_info = si;
 
@@ -578,8 +515,7 @@ void __a20_start(const struct a20_start_info *si)
 **阶段 1：不支持 fork，只支持 posix_spawn**
 
 ```c
-/* src/process/a20_fork.c */
-pid_t fork(void) {
+/* src/process/a20_fork.c */pid_t fork(void) {
     errno = ENOSYS;
     return -1;
 }
@@ -589,8 +525,7 @@ pid_t vfork(void) {
     return -1;
 }
 
-/* src/process/a20_posix_spawn.c */
-int posix_spawn(pid_t *pid, const char *path,
+/* src/process/a20_posix_spawn.c */int posix_spawn(pid_t *pid, const char *path,
                 const posix_spawn_file_actions_t *fa,
                 const posix_spawnattr_t *attr,
                 char *const argv[], char *const envp[])
@@ -638,9 +573,7 @@ int posix_spawn(pid_t *pid, const char *path,
 **阶段 2（可选）：fork 模拟**
 
 ```c
-/* src/process/a20_fork_emul.c — 高级 fork 模拟 */
-pid_t fork(void)
-{
+/* src/process/a20_fork_emul.c — 高级 fork 模拟 */pid_t fork(void){
     /*
      * A20 的 task_spawn 是原子创建+加载。
      * 模拟 fork 需要：
@@ -675,8 +608,7 @@ musl 内部使用信号做以下事情：
 ```c
 /* src/signal/a20_signal.c */
 
-/* 桩函数——让 musl 编译通过，但不真正实现信号投递 */
-int __sigaction(int sig, const struct sigaction *sa,
+/* 桩函数——让 musl 编译通过，但不真正实现信号投递 */int __sigaction(int sig, const struct sigaction *sa,
                 struct sigaction *old, size_t masksize)
 {
     /* 保存用户注册的 handler（用于 kill/sigqueue 模拟） */
@@ -695,15 +627,13 @@ int raise(int sig) {
     return 0;
 }
 
-/* kill 通过 channel 或 event 投递信号通知 */
-int kill(pid_t pid, int sig) {
+/* kill 通过 channel 或 event 投递信号通知 */int kill(pid_t pid, int sig) {
     /* 方案 A：通过 task_kill 发送 sig 作为 reason */
     a20_handle_t task = __pid_to_handle(pid);
     return a20_task_kill(task, sig);
 }
 
-/* pthread_cancel 不再基于信号 */
-void __pthread_cancel_handler(struct __pthread *t) {
+/* pthread_cancel 不再基于信号 */void __pthread_cancel_handler(struct __pthread *t) {
     /* 直接设置取消标志位，线程在取消点检查 */
     a_thread->cancel = 1;
     /* 如果线程在 event_wait 中，通过 event_cancel 唤醒 */
@@ -765,8 +695,7 @@ int pthread_create(pthread_t *res, const pthread_attr_t *attr,
     return 0;
 }
 
-/* 线程入口——包装用户函数 */
-static void __pthread_entry(void *arg) {
+/* 线程入口——包装用户函数 */static void __pthread_entry(void *arg) {
     struct __pthread *t = arg;
     void *result = t->entry(t->arg);
     __pthread_set_result(t, result);
@@ -800,8 +729,7 @@ Linux 的 `pthread_mutex` 底层用 `futex` 系统调用做等待/唤醒。A20 �
  * 用 event_queue 做阻塞等待。
  */
 
-/* mutex 内部结构 */
-struct a20_mutex_internal {
+/* mutex 内部结构 */struct a20_mutex_internal {
     _Atomic uint32_t state;      /* 0=unlocked, 1=locked, 2=contended */
     uint32_t type;               /* PTHREAD_MUTEX_NORMAL/RECURSIVE/... */
     uint32_t owner;              /* 持有者 thread id */
@@ -920,39 +848,20 @@ clang --target=aarch64-unknown-a20elf \
 aarch64-a20-gcc -static -o hello hello.c
 
 # 方式 3：直接用 musl 的构建系统
-cd musl && ./configure --target=aarch64-a20 --prefix=/opt/a20-sysroot
-make && make install
+cd musl && ./configure --target=aarch64-a20 --prefix=/opt/a20-sysrootmake && make install
 ```
 
 ### 5.3 sysroot 结构
 
 ```text
-/opt/a20-sysroot/
-├── include/
-│   ├── a20/                    ← A20 Native ABI 头文件
-│   │   ├── types.h             ← a20_handle_t, a20_rights_t, ...
-│   │   ├── syscall.h           ← syscall 编号 + wrapper
-│   │   ├── rights.h            ← 权限位定义
-│   │   ├── errno.h             ← A20 错误码
-│   │   └── startup.h           ← a20_start_info_t
-│   ├── sys/                    ← POSIX 头文件（来自 musl）
-│   ├── stdio.h                 ← ISO C 头文件（来自 musl）
-│   └── ...
-├── lib/
-│   ├── crt0.o                  ← A20 启动代码
-│   ├── crtbegin.o / crtend.o   ← GCC 构造/析构
-│   ├── libc.a                  ← musl-a20 静态库
-│   └── liba20rt.a              ← A20 syscall wrappers
-├── a20.ld                      ← A20 ELF linker script
-└── etc/
+/opt/a20-sysroot/├── include/│   ├── a20/                    ← A20 Native ABI 头文件│   │   ├── types.h             ← a20_handle_t, a20_rights_t, ...│   │   ├── syscall.h           ← syscall 编号 + wrapper│   │   ├── rights.h            ← 权限位定义│   │   ├── errno.h             ← A20 错误码│   │   └── startup.h           ← a20_start_info_t│   ├── sys/                    ← POSIX 头文件（来自 musl）│   ├── stdio.h                 ← ISO C 头文件（来自 musl）│   └── ...├── lib/│   ├── crt0.o                  ← A20 启动代码│   ├── crtbegin.o / crtend.o   ← GCC 构造/析构│   ├── libc.a                  ← musl-a20 静态库│   └── liba20rt.a              ← A20 syscall wrappers├── a20.ld                      ← A20 ELF linker script└── etc/
     └── a20-abi-version         ← ABI 版本检查
 ```
 
 ### 5.4 linker script 关键段
 
 ```ld
-/* a20.ld — A20 Native ELF linker script */
-ENTRY(_start)
+/* a20.ld — A20 Native ELF linker script */ENTRY(_start)
 
 SECTIONS {
     . = 0x400000 + SIZEOF_HEADERS;
@@ -1060,14 +969,7 @@ int main(int argc, char *argv[]) {
 ### 关键依赖关系
 
 ```text
-Phase 0 ──→ Phase 1 ──→ Phase 2 ──→ Phase 3
-  │            │            │            │
-  │            │            │            └── 内核: A20_SPAWN_FORK_SELF
-  │            │            │            └── 内核: 异步信号投递
-  │            │            ✅ 已完成    └── 待实现
-  │            ✅ 已完成    └── 内核: 全部 93 个 syscall ✅
-  ✅ 已完成    └── 内核: ~15 个基础 syscall ✅
-  └── 内核: 启动协议 + abi_info + handle_close + vm_alloc ✅
+Phase 0 ──→ Phase 1 ──→ Phase 2 ──→ Phase 3│            │            │            ││            │            │            └── 内核: A20_SPAWN_FORK_SELF│            │            │            └── 内核: 异步信号投递│            │            ✅ 已完成    └── 待实现│            ✅ 已完成    └── 内核: 全部 93 个 syscall ✅✅ 已完成    └── 内核: ~15 个基础 syscall ✅└── 内核: 启动协议 + abi_info + handle_close + vm_alloc ✅
           + handle_write + path_open + task_exit ✅
 ```
 

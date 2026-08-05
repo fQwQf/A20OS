@@ -1,47 +1,30 @@
 # PPC64LE 平台状态
 
-PPC64LE 当前由 QEMU pSeries（`qemu-virt-ppc64le`）提供受支持的 MMU
-运行目标。启动入口切换到 64 位 little-endian 模式，使用 PowerPC Radix
-页表；用户地址空间保留低半根页表，内核高半映射通过每个进程共享的根项
-继承。异常入口同时覆盖用户态系统调用、用户缺页和内核态 timer/device
-中断，地址空间切换使用 pSeries process table 的 PID 1。
+PPC64LE 当前由 QEMU pSeries（`qemu-virt-ppc64le`）提供受支持的 MMU运行目标。启动入口切换到 64 位 little-endian 模式，使用 PowerPC Radix页表；用户地址空间保留低半根页表，内核高半映射通过每个进程共享的根项继承。异常入口同时覆盖用户态系统调用、用户缺页和内核态 timer/device中断，地址空间切换使用 pSeries process table 的 PID 1。
 
 ## 构建与运行
 
 ```sh
-make ARCH=ppc64le BOARD=qemu-virt-ppc64le ABI=linux BRINGUP=1 kernel-only
-make ARCH=ppc64le BOARD=qemu-virt-ppc64le run
-make check-ppc64le-bringup
-make check-ppc64le-user
-make ARCH=ppc64le NOMMU=0 native-programs   # native ABI 测试程序
-make ARCH=ppc64le ABI=both BRINGUP=0 dev-build   # 完整 dev 镜像（含 native-*）
+make ARCH=ppc64le BOARD=qemu-virt-ppc64le ABI=linux BRINGUP=1 kernel-onlymake ARCH=ppc64le BOARD=qemu-virt-ppc64le runmake check-ppc64le-bringupmake check-ppc64le-usermake ARCH=ppc64le NOMMU=0 native-programs   # native ABI 测试程序make ARCH=ppc64le ABI=both BRINGUP=0 dev-build   # 完整 dev 镜像（含 native-*）
 ```
 
-QEMU 目标使用 pSeries 固件提供的虚拟终端、RTAS、PCI 配置访问和 TCE
-DMA 窗口。`poweroff` 和 `reboot` 通过 RTAS token 请求固件动作；virtio
-块设备和网络设备通过 pSeries PCI transport 探测。
+QEMU 目标使用 pSeries 固件提供的虚拟终端、RTAS、PCI 配置访问和 TCEDMA 窗口。`poweroff` 和 `reboot` 通过 RTAS token 请求固件动作；virtio块设备和网络设备通过 pSeries PCI transport 探测。
 
 ## 当前进展（2026-08-04）
 
 已完成并可在干净提交上复现：
 
 - 启动与 Radix MMU 正常：`PAGE_OFFSET` 调整为根索引 256 的高半映射，
-  `arch_current_cpu_id()` 在 pSeries guest 中不再读 PIR（会触发 Program
-  Exception），`BRINGUP` smoke 通过且 RTAS poweroff 干净退出。
+  `arch_current_cpu_id()` 在 pSeries guest 中不再读 PIR（会触发 ProgramException），`BRINGUP` smoke 通过且 RTAS poweroff 干净退出。
 - 完整用户态（musl + 125 个命令 + init + mksh）已构建进 dev 镜像。
 - 板级 `enumerate_devices` 直接调用 RTAS PCI/virtio 探测；virtio-blk 挂载
   fat32 到 `/bin`，`/bin/init` ELF 可加载，用户任务（pid 2）可创建。
 - 修复了 ISI 取指页错误不保存故障地址的问题：指令页故障的 tval 应为
   SRR0 而不是 DAR，否则 demand paging 永远映射不了入口页。
 - **`mksh` 交互 shell 已跑通**：真实 O3 init/mksh 可启动，shell 能执行内建
-  `echo`、`ls` 与外部 `/bin/echo`（`fork` + `execve` + COW + `wait` +
-  `SIGCHLD` 全链路）；`#` prompt、输入回显、父进程信号返回和阻塞读均正常。
+  `echo`、`ls` 与外部 `/bin/echo`（`fork` + `execve` + COW + `wait` +`SIGCHLD` 全链路）；`#` prompt、输入回显、父进程信号返回和阻塞读均正常。
 - **native ABI libc（liba20c）已移植并在 QEMU 中运行**：`native-libc-ppc64le`
-  `PASS`（字符串/malloc/time/printf 全通过），`native-hello-ppc64le` 与
-  `native-mm-ppc64le` 也通过。crt0 补上 ELFv2 TOC 初始化（`_start` 先设 r2
-  为 `.TOC.` 基址，native ABI loader 保证 r12=入口地址）；liba20c 的
-  `printf` vararg 读取改为经 `va_list *` 推进，修复 `%d` 后 `%s` 等混合
-  宽度格式错位（该 bug 影响所有架构，ppc64le 的 -O0 构建使其最先暴露）。
+  `PASS`（字符串/malloc/time/printf 全通过），`native-hello-ppc64le` 与`native-mm-ppc64le` 也通过。crt0 补上 ELFv2 TOC 初始化（`_start` 先设 r2为 `.TOC.` 基址，native ABI loader 保证 r12=入口地址）；liba20c 的`printf` vararg 读取改为经 `va_list *` 推进，修复 `%d` 后 `%s` 等混合宽度格式错位（该 bug 影响所有架构，ppc64le 的 -O0 构建使其最先暴露）。
 
 ## 已知边界与阻塞
 
@@ -105,14 +88,8 @@ DMA 窗口。`poweroff` 和 `reboot` 通过 RTAS token 请求固件动作；virt
       `trap_bridge.c`/`trap.S` 恢复逻辑已删除。musl mallocng/GCC 误编译的
       调查报告也已过期，`mksh` 现可完整运行。
 - NOMMU 不支持，SMP 平台启动和远程 TLB shootdown 尚未加入已验证矩阵；
-  构建系统默认拒绝该架构的 NOMMU 配置，SMP 实验必须显式设置
-  `ALLOW_UNVERIFIED_SMP=1`。
+  构建系统默认拒绝该架构的 NOMMU 配置，SMP 实验必须显式设置`ALLOW_UNVERIFIED_SMP=1`。
 - native ABI 其余子系统测试尚未全绿（均与 libc 移植无关，属内核逻辑/功能
-  缺口）：`native-handle-ppc64le` 在 `dup-write-denied` 处失败（dup 降级后的
-  句柄写入未按预期被拒）；`native-futex-ppc64le` 报 `did not return
-  WOULDBLOCK`；`native-signal-ppc64le` 在 worker 线程的 `signal_check`
-  检查点触发 SIGSEGV（native 线程/信号路径）。
+  缺口）：`native-handle-ppc64le` 在 `dup-write-denied` 处失败（dup 降级后的句柄写入未按预期被拒）；`native-futex-ppc64le` 报 `did not returnWOULDBLOCK`；`native-signal-ppc64le` 在 worker 线程的 `signal_check`检查点触发 SIGSEGV（native 线程/信号路径）。
 - mksh 交互启动时仍打印 `can't find controlling tty: Not a directory`：TTY
-  ioctl 已可工作、prompt/回显/作业执行不受影响，但 `tty_init_fd()` 打开
-  `/dev/tty` 的完整 controlling-tty 语义（`TIOCSCTTY`/前台进程组）尚未
-  实现，完整 job control 属于后续工作。
+  ioctl 已可工作、prompt/回显/作业执行不受影响，但 `tty_init_fd()` 打开`/dev/tty` 的完整 controlling-tty 语义（`TIOCSCTTY`/前台进程组）尚未实现，完整 job control 属于后续工作。

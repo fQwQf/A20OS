@@ -16,8 +16,7 @@ if (gpu_device_register(dev) < 0)
 典型生命周期：
 
 ```c
-/* 1. 注册驱动 */
-static driver_t my_gpu_driver = {
+/* 1. 注册驱动 */static driver_t my_gpu_driver = {
     .name       = "my-gpu",
     .bus        = &pci_bus,
     .id_table   = my_ids,
@@ -25,12 +24,9 @@ static driver_t my_gpu_driver = {
     .remove     = my_gpu_remove,
     .class_type = DEV_CLASS_DISPLAY,
     .class_ops  = &my_gpu_ops,
-};
-DRIVER_REGISTER(my_gpu_driver);
+};DRIVER_REGISTER(my_gpu_driver);
 
-/* 2. probe：初始化硬件、分配 framebuffer、注册 display */
-static int my_gpu_probe(device_t *dev)
-{
+/* 2. probe：初始化硬件、分配 framebuffer、注册 display */static int my_gpu_probe(device_t *dev){
     my_gpu_t *g = kzalloc(sizeof(*g));
     if (!g) return -ENOMEM;
 
@@ -52,9 +48,7 @@ fail:
     return -ENODEV;
 }
 
-/* 3. 使用：用户 mmap 后写像素 */
-static int my_gpu_get_info(device_t *dev, uint32_t *w, uint32_t *h, uint32_t *bpp)
-{
+/* 3. 使用：用户 mmap 后写像素 */static int my_gpu_get_info(device_t *dev, uint32_t *w, uint32_t *h, uint32_t *bpp){
     my_gpu_t *g = dev->drv_priv;
     *w   = g->width;
     *h   = g->height;
@@ -62,8 +56,7 @@ static int my_gpu_get_info(device_t *dev, uint32_t *w, uint32_t *h, uint32_t *bp
     return 0;
 }
 
-static int my_gpu_get_fb(device_t *dev, uintptr_t *paddr, size_t *size)
-{
+static int my_gpu_get_fb(device_t *dev, uintptr_t *paddr, size_t *size){
     my_gpu_t *g = dev->drv_priv;
     *paddr = g->fb_paddr;
     *size  = g->fb_size;
@@ -82,9 +75,7 @@ static int my_gpu_flush(device_t *dev, uint32_t x, uint32_t y,
     return 0;
 }
 
-/* 4. remove：先注销，再释放资源 */
-static int my_gpu_remove(device_t *dev)
-{
+/* 4. remove：先注销，再释放资源 */static int my_gpu_remove(device_t *dev){
     my_gpu_t *g = dev->drv_priv;
     gpu_device_unregister(dev);
     stop_scanout(g);

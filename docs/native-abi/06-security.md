@@ -197,18 +197,15 @@ $$\mathcal{L} = \{L, M, H\}, \quad L \sqsubseteq M \sqsubseteq H$$
 
 每个对象携带安全标签 $\ell \in \mathcal{L}$。Handle 操作遵循 Bell-LaPadula 规则：
 
-**简单安全性（No Read Up）**：
-$$read(p, o) \implies \ell(p) \geq \ell(o)$$
+**简单安全性（No Read Up）**：$$read(p, o) \implies \ell(p) \geq \ell(o)$$
 
 > **内核执行**：`handle_read`、`channel_recv` 在 `a20_handle_lookup_internal` 之后检查 `ht->security_label >= entry.security_label`。违反时返回 `A20_ERR_ACCESS`。
 
-**星属性（No Write Down）**：
-$$write(p, o) \implies \ell(p) \leq \ell(o)$$
+**星属性（No Write Down）**：$$write(p, o) \implies \ell(p) \leq \ell(o)$$
 
 > **内核执行**：`handle_write`、`channel_send`、`handle_transfer` 检查 `ht->security_label <= entry.security_label`。违反时返回 `A20_ERR_ACCESS`。`vm_share` 在共享 VMO 给目标 task 时检查目标标签不低于 VMO 标签。
 
-**Transfer 规则**：
-$$transfer(p_1 \to p_2, o) \implies \ell(p_1) \leq \ell(p_2) \text{ 或 } \ell(o) = L$$
+**Transfer 规则**：$$transfer(p_1 \to p_2, o) \implies \ell(p_1) \leq \ell(p_2) \text{ 或 } \ell(o) = L$$
 
 ### 5.3 $\mathcal{L}$-Noninterference
 
@@ -310,11 +307,9 @@ Handle 过期后有两种行为：
 ### 7.2 Namespace 操作
 
 ```c
-/* 创建命名空间 */
-int64_t ns_create(uint32_t ns_type, a20_flags_t flags, a20_handle_t *out);
+/* 创建命名空间 */int64_t ns_create(uint32_t ns_type, a20_flags_t flags, a20_handle_t *out);
 
-/* 应用命名空间到目标 task */
-int64_t ns_apply(a20_handle_t ns, a20_handle_t target);
+/* 应用命名空间到目标 task */int64_t ns_apply(a20_handle_t ns, a20_handle_t target);
 ```
 
 `ns_apply` 需要 target handle 的 `ADMIN` 权限。Namespace 是 handle，可以传递和降级。
@@ -330,10 +325,7 @@ int64_t ns_apply(a20_handle_t ns, a20_handle_t target);
 ### 8.1 调试接口
 
 ```c
-int64_t debug_attach(a20_handle_t task);    /* 需要 ADMIN 权限 */
-int64_t debug_read_regs(a20_handle_t thread, a20_regs_t *out);
-int64_t debug_write_regs(a20_handle_t thread, const a20_regs_t *in);
-int64_t debug_map_memory(a20_handle_t task, a20_handle_t *out);
+int64_t debug_attach(a20_handle_t task);    /* 需要 ADMIN 权限 */int64_t debug_read_regs(a20_handle_t thread, a20_regs_t *out);int64_t debug_write_regs(a20_handle_t thread, const a20_regs_t *in);int64_t debug_map_memory(a20_handle_t task, a20_handle_t *out);
 ```
 
 调试能力通过 handle rights 控制。只有持有 task 的 `ADMIN` 权限的进程才能附加调试器。

@@ -39,14 +39,14 @@ QEMU x86_64 与 RISC-V64 GUI 的 VirtIO GPU、键盘和鼠标分别由 `make smo
 
 | 驱动 | 类 | 状态与限制 |
 |---|---|---|
-| virtio-blk | BLOCK | 类接口；remove 停止设备并释放已注册 IRQ；有限静态实例 |
-| virtio-net | NET | 多实例、IRQ/轮询和类接口；remove 释放 IRQ 并复位 transport |
-| virtio-input | INPUT | 类接口、PCI/MMIO、多实例槽和 remove；由 `/dev/event0` 聚合 |
-| virtio-gpu | DISPLAY | class registry、framebuffer 页释放和 transport reset；单实例、同步 controlq |
-| VirtIO-SCSI | BLOCK | VirtualBox ARM 已验证，remove 复位/释放槽；只支持 target/LUN 0、READ/WRITE(10)、512B sector、轮询 |
-| AHCI | BLOCK | VirtualBox x86_64；单 controller/单 port/单 slot、LBA48、轮询；probe 回滚和 remove 释放 DMA/IRQ |
-| NVMe | BLOCK | 架构无关 PCI class 驱动；x86_64 与 LoongArch64 构建，LoongArch QEMU 已验证 BAR、CAP、admin/I/O queue、Identify，以及跨 8 KiB bounce chunk 的写入/flush/读回比较；要求 NVM command set 和兼容 4 KiB memory page，首个活动 namespace、轮询、每 controller 只发布一个 namespace |
-| E1000 | NET | VirtualBox 82540EM，轮询 ring，已加 stop/remove；静态单实例 |
+| virtio-blk | BLOCK | 类接口；remove 停止设备并释放已注册 IRQ；有限静态实例；IRQ 注册失败自动回退纯轮询 |
+| virtio-net | NET | 多实例、IRQ/轮询和类接口；remove 释放 IRQ 并复位 transport；IRQ 注册失败自动回退纯轮询 |
+| virtio-input | INPUT | 类接口、PCI/MMIO、多实例槽和 remove；由 `/dev/event0` 聚合；PCI 传输按 IRQF_SHARED 注册 |
+| virtio-gpu | DISPLAY | class registry、framebuffer 页释放和 transport reset；单实例、同步 controlq；有 IRQ 时运行态 flush 改为 park 等待，无 IRQ 保持有界轮询 |
+| VirtIO-SCSI | BLOCK | VirtualBox ARM 已验证，remove 复位/释放槽；只支持 target/LUN 0、READ/WRITE(10)、512B sector；有 IRQ 时 hybrid 预轮询 + park，无 IRQ 保持有界轮询 |
+| AHCI | BLOCK | VirtualBox x86_64；单 controller/单 port/单 slot、LBA48；有 IRQ 时 PxIE/GHC.IE 才使能并 park 等待完成（handler 记录 last_is 保留 TFES），无 IRQ 保持轮询；probe 回滚和 remove 释放 DMA/IRQ |
+| NVMe | BLOCK | 架构无关 PCI class 驱动；x86_64 与 LoongArch64 构建，LoongArch QEMU 已验证 BAR、CAP、admin/I/O queue、Identify，以及跨 8 KiB bounce chunk 的写入/flush/读回比较；要求 NVM command set 和兼容 4 KiB memory page，首个活动 namespace、每 controller 只发布一个 namespace；平台可路由 INTx 时 I/O CQ 以 IEN 创建并 park 等待完成（hybrid 预轮询），否则保持轮询 |
+| E1000 | NET | VirtualBox 82540EM；平台可路由 INTx 时使能 IMS（TXDW/LSC/RXO/RXT0）并经 lwIP IRQ 入口排水 RX，否则保持轮询 ring；已加 stop/remove；静态单实例 |
 | VMSVGA/SVGAv3 | DISPLAY | VirtualBox x86_64/ARM，BAR offset/pitch 边界和 class registry，已加 remove；静态单实例 |
 | xHCI HID | INPUT | VBox ARM keyboard/mouse/tablet，class、轮询和 controller stop/remove；只匹配 `8086:1e31`，静态单 controller |
 | USB Storage (BOT) | BLOCK | `kernel/drivers/usb/class/usb_storage.c`：xHCI bulk 传输 + Bulk-Only Transport（CBW/CSW）+ SCSI READ(10)/WRITE(10)/READ_CAPACITY(10)。QEMU x86_64 `qemu-xhci + usb-storage` 已验证，挂载为 `/dev/diskN` 并可直接 mount FAT32。只支持单 LUN、512/2048/4096 扇区、每命令 4 KiB 数据块 |
@@ -54,6 +54,7 @@ QEMU x86_64 与 RISC-V64 GUI 的 VirtIO GPU、键盘和鼠标分别由 `make smo
 | PS/2 | x86 板级服务 | 提供基础键鼠控制器服务；可复用输入设备使用 `DEV_CLASS_INPUT` |
 | PC Speaker | AUDIO | x86 platform device，动态 `/dev/audioN`；支持 19 Hz–20 kHz 有界 tone/stop ABI，不冒充 PCM |
 | Intel HDA | AUDIO | 架构无关 PCI class 驱动；x86_64 与 LoongArch64 QEMU 已完成 BDL DMA smoke，x86_64 已完成用户态 tone 到 QEMU WAV 验证，RISC-V64 已完成完整 Wayland/FFmpeg/PulseAudio 播放；三个 `run-gui` 目标连接宿主音频；支持 48 kHz 双声道 S16_LE、环形 DMA、stop/drain、完整 remove 和用户态 WAV/raw/tone 播放器 |
+| virtio-snd | AUDIO | PCI/MMIO、单 stream 48000 Hz S16_LE；有 IRQ 时等待路径 park（20 ms 有界块），无 IRQ 保持 yield 轮询；remove 复位并释放 IRQ |
 | STM32 SDIO | BLOCK | 统一类 + MCU bridge；板级 bus 仍用名称匹配 |
 | STM32 简单外设 | 允许例外 | 板级轮询轻量 API，不强制统一对象；扩展到多实例/用户 ABI 时必须迁移 |
 | StarFive/LS2K GMAC、DW SDIO | 有条件 | 单实例轮询并依赖外部串行化，SMP/IRQ 化前必须增加实例锁 |

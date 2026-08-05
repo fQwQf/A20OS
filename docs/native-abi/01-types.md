@@ -9,14 +9,7 @@
 Native ABI 固定使用小端（little-endian）、补码整数（two's complement）、显式宽度类型（explicit-width types）。
 
 ```c
-typedef uint32_t a20_handle_t;     /* 进程本地 handle 编号 */
-typedef uint64_t a20_rights_t;     /* 14 位权限位域 */
-typedef uint64_t a20_flags_t;      /* 操作标志位 */
-typedef int64_t  a20_status_t;     /* 返回状态（>= 0 成功，< 0 错误） */
-typedef uint64_t a20_time_ns_t;    /* 纳秒时间戳 */
-typedef uint64_t a20_off_t;        /* 文件偏移量 */
-typedef uint64_t a20_size_t;       /* 大小 */
-typedef uint64_t a20_vaddr_t;      /* 虚拟地址 */
+typedef uint32_t a20_handle_t;     /* 进程本地 handle 编号 */typedef uint64_t a20_rights_t;     /* 14 位权限位域 */typedef uint64_t a20_flags_t;      /* 操作标志位 */typedef int64_t  a20_status_t;     /* 返回状态（>= 0 成功，< 0 错误） */typedef uint64_t a20_time_ns_t;    /* 纳秒时间戳 */typedef uint64_t a20_off_t;        /* 文件偏移量 */typedef uint64_t a20_size_t;       /* 大小 */typedef uint64_t a20_vaddr_t;      /* 虚拟地址 */
 ```
 
 指针大小由 `a20_abi_info.pointer_bits` 指示。64 位架构上 native ABI 首选 64 位用户指针。若未来支持 32 位用户态，应视为单独 ABI profile。

@@ -29,8 +29,7 @@ UEFI loader、PCI discovery、VirtIO-SCSI 和 SVGAv3 probe 已在 VirtualBox ARM
 安装 AArch64 交叉编译器和 `mtools`。Debian/Ubuntu：
 
 ```bash
-sudo apt install gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu mtools parted
-make vbox-image-aarch64
+sudo apt install gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu mtools partedmake vbox-image-aarch64
 ```
 
 输出图形镜像：
@@ -48,10 +47,7 @@ make vbox-image-aarch64
 为能同时输入和输出，把 UART1 配置成 TCP server，而不是文件。文件模式只能记录输出，不能接收键盘输入。VM 关机后，在 Windows PowerShell 里执行：
 
 ```powershell
-$vm = "A20"
-& "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe" modifyvm $vm `
-  --uart1 0x03f8 4 `
-  --uartmode1 tcpserver 5555
+$vm = "A20"& "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe" modifyvm $vm `--uart1 0x03f8 4 `--uartmode1 tcpserver 5555
 ```
 
 启动 VM，然后用 `telnet 127.0.0.1 5555` 或 PuTTY Raw/TCP 连接。第一次启动保持串口连接：日志会报告 ACPI MCFG window、PCI 设备、VirtIO-SCSI 容量和文件系统挂载结果。
@@ -61,10 +57,7 @@ $vm = "A20"
 更新镜像后，必须重新生成并替换 VM 挂载的 VDI。直接转换旧 raw 镜像不会得到新的 GPT partition。不要对已经挂载或正在使用的 VDI 执行 `convertfromraw`；每次用新的输出文件名，避免 VirtualBox 保留旧的 medium UUID：
 
 ```powershell
-$raw = "C:\Users\super\Downloads\a20os-vbox-aarch64.img"
-$vdi = "C:\Users\super\Downloads\a20os-vbox-aarch64-20260717.vdi"
-& "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe" convertfromraw `
-  $raw $vdi --format VDI
+$raw = "C:\Users\super\Downloads\a20os-vbox-aarch64.img"$vdi = "C:\Users\super\Downloads\a20os-vbox-aarch64-20260717.vdi"& "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe" convertfromraw `$raw $vdi --format VDI
 ```
 
 > 注意：每次生成新镜像后都要用新的输出文件名执行 `convertfromraw`。不要对当前已经挂载到 VM 的 VDI 再次转换，也不要让 VirtualBox 继续保留旧的 medium UUID。
@@ -78,10 +71,7 @@ VirtualBox ARM 默认使用 VirtIO-SCSI 控制器。除非你的 VirtualBox 版�
 保持 VM 的 Intel PRO/1000 MT Desktop 适配器接在 NAT 上，并转发宿主端口到客户机 TCP 2323。VM 关机时执行：
 
 ```powershell
-& "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe" modifyvm $vm `
-  --nic1 nat `
-  --nictype1 82540EM `
-  --natpf1 "a20-telnet,tcp,127.0.0.1,2323,,2323"
+& "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe" modifyvm $vm `--nic1 nat `--nictype1 82540EM `--natpf1 "a20-telnet,tcp,127.0.0.1,2323,,2323"
 ```
 
 串口出现 `[telnetd] listening on port 2323` 后，用 `telnet 127.0.0.1 2323` 或 PuTTY Raw/TCP 连接。该服务无认证，因此只转发到 loopback。
@@ -115,11 +105,7 @@ make vbox-text-image-aarch64
 保持 VirtualBox 显示控制器选择 VMSVGA。SVGAv3 使用显式 update command，成功的图形 probe 会在串口报告 `[GPU] SVGAv3 ready`。红、绿、蓝、白四条 bar 是驱动 scanout 自测，不是 desktop。它们会在用户态报告以下全部信息后被替换：
 
 ```text
-[init] desktop queued: pid=2
-[desktop] entered main
-Framebuffer mapped: va=0x30000000 size=3145728 stride=4096
-[desktop] framebuffer ready
-Mission Control initialized, entering loop...
+[init] desktop queued: pid=2[desktop] entered mainFramebuffer mapped: va=0x30000000 size=3145728 stride=4096[desktop] framebuffer readyMission Control initialized, entering loop...
 ```
 
 图形镜像用普通 `fork`/`exec` 启动 desktop。它不会用 `vfork` 挂起 PID 1，因为 VirtualBox ARM timer fallback 是协作式的。发布新子进程后，协作 clone 路径会主动 yield 一次，让子进程无需等待 VirtualBox ARM 不提供的中断即可进入 `exec`。
@@ -131,10 +117,7 @@ Mission Control initialized, entering loop...
 用 `VBoxManage` 把磁盘挂到 ARM VM 选中的控制器。VirtualBox 7.2 通常创建 `VirtioSCSI` 控制器，Windows PowerShell 示例：
 
 ```powershell
-& "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe" storageattach "A20OS ARM64" `
-  --storagectl "VirtioSCSI" `
-  --port 0 --device 0 --type hdd `
-  --medium "C:\Users\super\Downloads\a20os-vbox-aarch64-gpt.vdi"
+& "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe" storageattach "A20OS ARM64" `--storagectl "VirtioSCSI" `--port 0 --device 0 --type hdd `--medium "C:\Users\super\Downloads\a20os-vbox-aarch64-gpt.vdi"
 ```
 
 如果控制器名不同，用下面命令查看实际名称并替换：
@@ -176,8 +159,7 @@ PCI transport 当前使用轮询；在 ACPI interrupt controller 解析完成前
 loader 可以独立在 QEMU AAVMF 上测试。在 QEMU RAM 地址构建 QEMU board：
 
 ```bash
-make ARCH=aarch64 BOARD=qemu-virt-aarch64 BRINGUP=1 kernel-only
-make ARCH=aarch64 BOARD=qemu-virt-aarch64 BRINGUP=1 \
+make ARCH=aarch64 BOARD=qemu-virt-aarch64 BRINGUP=1 kernel-onlymake ARCH=aarch64 BOARD=qemu-virt-aarch64 BRINGUP=1 \
     VBOX_AARCH64_LOAD_ADDRESS=0x40080000ULL \
     .kernel-build/aarch64-qemu-virt-aarch64-both-bringup/a20os-vbox-aarch64.img
 ```
@@ -204,17 +186,7 @@ make ARCH=aarch64 BOARD=qemu-virt-aarch64 BRINGUP=1 \
 ## 验收记录模板
 
 ```text
-VirtualBox version:
-Host architecture:
-A20OS commit/diff:
-Build command:
-Image path and checksum:
-VM graphics/storage/network/input configuration:
-Enumerated PCI ID and BARs:
-Bound driver and ready line:
-Class consumer line:
-I/O performed and result:
-Known untested features:
+VirtualBox version:Host architecture:A20OS commit/diff:Build command:Image path and checksum:VM graphics/storage/network/input configuration:Enumerated PCI ID and BARs:Bound driver and ready line:Class consumer line:I/O performed and result:Known untested features:
 ```
 
 完整提交清单和跨平台构建矩阵见 [构建、测试与提交](../drivers/testing-and-submission.md)。

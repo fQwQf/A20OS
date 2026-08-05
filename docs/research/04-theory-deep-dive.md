@@ -20,10 +20,7 @@ $$\mathcal{R}ights = 2^{\{R, W, X, Stat, Seek, Dup, Transfer, Map, Wait, Connect
 
 对于类型 $\tau \in \mathcal{T}$，定义其合法权限集 $Legal(\tau) \subseteq \mathcal{R}ights$：
 
-$$Legal(file) = \{R, W, Stat, Seek, Dup, Transfer, Map, Control\}$$
-$$Legal(task) = \{Wait, Signal, Dup, Transfer, Control, Admin\}$$
-$$Legal(eventq) = \{R, Dup, Transfer, Control\}$$
-$$Legal(channel) = \{R, W, Dup, Transfer\}$$
+$$Legal(file) = \{R, W, Stat, Seek, Dup, Transfer, Map, Control\}$$$$Legal(task) = \{Wait, Signal, Dup, Transfer, Control, Admin\}$$$$Legal(eventq) = \{R, Dup, Transfer, Control\}$$$$Legal(channel) = \{R, W, Dup, Transfer\}$$
 
 **定义 1.3（Handle 表项）** 进程 $p$ 的 handle 表是有限偏函数：
 
@@ -287,22 +284,17 @@ $$\forall e = event(o_t, type, data). \ type \in mask(o_t, q) \implies \begin{ca
 
 定义系统状态 $\sigma$ 的安全不变式集合 $\mathcal{I}$：
 
-**I1（Handle 权限合法性）**：
-$$\forall p, n. \ HT_p(n) = (o, \rho) \implies \rho \subseteq Legal(\tau(o))$$
+**I1（Handle 权限合法性）**：$$\forall p, n. \ HT_p(n) = (o, \rho) \implies \rho \subseteq Legal(\tau(o))$$
 
-**I2（权限子集传递）**：
-$$\forall p, n. \ HT_p(n) = (o, \rho) \implies \rho \subseteq \rho_{granted}(o, p)$$
+**I2（权限子集传递）**：$$\forall p, n. \ HT_p(n) = (o, \rho) \implies \rho \subseteq \rho_{granted}(o, p)$$
 
 其中 $\rho_{granted}(o, p)$ 是 $p$ 历史上被授予的对 $o$ 的最大权限。
 
-**I3（引用计数一致性）**：
-$$\forall o \in dom(Obj). \ refcount(o, \sigma) = |\{(p, n) \mid HT_p(n) = (o, \rho)\}|$$
+**I3（引用计数一致性）**：$$\forall o \in dom(Obj). \ refcount(o, \sigma) = |\{(p, n) \mid HT_p(n) = (o, \rho)\}|$$
 
-**I4（对象活性）**：
-$$\forall o. \ o \in dom(Obj) \iff refcount(o, \sigma) > 0$$
+**I4（对象活性）**：$$\forall o. \ o \in dom(Obj) \iff refcount(o, \sigma) > 0$$
 
-**I5（类型安全）**：
-$$\forall op, h. \ HT_p(h) = (o, \rho) \land op \text{ requires } \tau' \implies \tau(o) \in compat(op)$$
+**I5（类型安全）**：$$\forall op, h. \ HT_p(h) = (o, \rho) \land op \text{ requires } \tau' \implies \tau(o) \in compat(op)$$
 
 ### 3.2 不变式保持证明
 
@@ -621,8 +613,7 @@ $\sigma'$ 中：
 
 $$effective\_prot = prot_{map} \cap translate(rights(h))$$
 
-其中 $translate: \mathcal{R}ights \to Prot$ 定义为：
-$$translate(\rho) = \{R \mapsto PROT\_READ, W \mapsto PROT\_WRITE, X \mapsto PROT\_EXEC\} \cap \rho$$
+其中 $translate: \mathcal{R}ights \to Prot$ 定义为：$$translate(\rho) = \{R \mapsto PROT\_READ, W \mapsto PROT\_WRITE, X \mapsto PROT\_EXEC\} \cap \rho$$
 
 *证明*：vm_map 规则要求 $Map \in rights(h)$。映射时 effective protection 取 handle 权限和显式 prot 参数的交集，保证即使显式请求了更高权限，也受限于 handle 授予的权限。$\square$
 
@@ -920,18 +911,15 @@ $$\forall i \in [1, |S_m|]. \ f_i \in S_n \land type_i^{S_m} = type_i^{S_n} \lan
 
 **演进规则**：
 
-**规则 E-APPEND**（追加字段）：
-$$\frac{S_n = (f_1, \ldots, f_n) \quad f_{n+1} \text{ is new}}{S_{n+1} = (f_1, \ldots, f_n, f_{n+1})}$$
+**规则 E-APPEND**（追加字段）：$$\frac{S_n = (f_1, \ldots, f_n) \quad f_{n+1} \text{ is new}}{S_{n+1} = (f_1, \ldots, f_n, f_{n+1})}$$
 
 此操作保持所有 $S_m$（$m \leq n$）的兼容性。
 
-**规则 E-DEPRECATE**（弃用字段）：
-$$\frac{f_i \in S_n}{f_i \text{ marked deprecated in } S_{n+1} \text{, must be zero}}$$
+**规则 E-DEPRECATE**（弃用字段）：$$\frac{f_i \in S_n}{f_i \text{ marked deprecated in } S_{n+1} \text{, must be zero}}$$
 
 弃用字段保留偏移和类型，用户传入非零值返回 `INVALID_ARGUMENT`。
 
-**规则 E-RESERVED**（保留位检查）：
-$$\frac{flags \in S_n \quad reserved\_bits = \{b \mid b > max\_defined\_bit\}}{\forall u. \ u[reserved\_bits] \neq 0 \implies error}$$
+**规则 E-RESERVED**（保留位检查）：$$\frac{flags \in S_n \quad reserved\_bits = \{b \mid b > max\_defined\_bit\}}{\forall u. \ u[reserved\_bits] \neq 0 \implies error}$$
 
 **定理 10.1（ABI 兼容性保持）** 若内核从版本 $v_k$ 演进到 $v_{k+1}$ 仅使用 E-APPEND、E-DEPRECATE、E-RESERVED 规则，则所有为 $v_k$ 编译的用户程序在 $v_{k+1}$ 上正确运行。
 
