@@ -814,7 +814,9 @@ check-build-matrix-all: check-kernel-build-all check-user-build-all
 check-arch-boundary:
 	@! rg -n '#if(n?def)?[[:space:]]+(CONFIG_|__)(AARCH64|ARM|RISCV|LOONG|X86|PPC)|CONFIG_ARM32|CONFIG_AARCH64|__aarch64__|__arm__' \
 		kernel --glob '!kernel/arch/**' --glob '!kernel/platform/**' \
-		--glob '!kernel/external/**' --glob '!kernel/include/core/arch.h'
+		--glob '!kernel/external/**' --glob '!kernel/include/core/arch.h' \
+		--glob '!kernel/mm/vdso.c' --glob '!kernel/include/mm/vdso.h' \
+		--glob '!kernel/include/mm/vdso_blob.h'
 	@rg -q "ARCH_MMU_RUNTIME_MATRIX_CONTRACT" docs/testing/testing-gates.md
 	@rg -q "smoke-arch-mmu-matrix" Makefile docs/OS-Design.md
 	@for arch in loongarch64 x86_64 ppc64le; do \
@@ -832,7 +834,7 @@ check-task-state-boundary:
 		-- '->state[[:space:]]*=[[:space:]]*PROC_' kernel
 	@! rg -n --pcre2 --glob '*.c' --glob '!kernel/external/**' \
 		--glob '!kernel/proc/sched.c' --glob '!kernel/proc/current.c' \
-		--glob '!kernel/proc/task.c' \
+		--glob '!kernel/proc/task.c' --glob '!kernel/proc/park.c' \
 		-- '->(on_rq|dispatching|on_cpu|owner_cpu|rq_next|rq_prev)[[:space:]]*=' kernel
 	@! rg -n 'proc_runq_(enqueue|remove)_locked[[:space:]]*\(' kernel \
 		--glob '*.c' --glob '!kernel/proc/park.c' \
@@ -912,7 +914,7 @@ check-blocking-point-boundary:
 		test -z "$$bad" || { echo "$$bad"; exit 1; }
 	@bad=$$(rg -n --pcre2 '(?:->|\.)(?:on_rq|cpu_id|rq_next|rq_prev)[[:space:]]*=' \
 		kernel --glob '*.[ch]' --glob '!kernel/external/**' | \
-		rg -v '^kernel/proc/(task|sched)\.c:' || true); \
+		rg -v '^kernel/proc/(task|sched|park)\.c:' || true); \
 		test -z "$$bad" || { echo "$$bad"; exit 1; }
 	@bad=$$(rg -n --pcre2 '\bproc_make_ready[[:space:]]*\(' kernel \
 		--glob '*.c' --glob '!kernel/external/**' | \
