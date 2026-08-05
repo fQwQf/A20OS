@@ -338,6 +338,14 @@ int64_t handle_query(a20_handle_t handle, a20_handle_info_t *out);
 
 只读操作。返回对象类型、状态、权限和调试 hint。需要 `STAT` 权限。
 
+**类型合法权限掩码与 STAT（2026-08 修订）**：`handle_query` 依赖 STAT，
+因此所有"用户可观察自身属性"的对象类型的类型合法掩码（`a20_type_rights[]`）
+都必须包含 STAT。此前 `CHANNEL_ENDPOINT` 与 `EVENT_QUEUE` 的掩码缺少 STAT
+（EVENT_QUEUE 安装时请求了 STAT 但被掩码静默剥离），导致端点/队列句柄
+无法 query。已修复：两类掩码均含 STAT，channel 端点创建时安装
+`READ|WRITE|STAT|DUP|TRANSFER`。该一致性由 `user/tests/test_native_contract.c`
+的 `ralg` 分区固化（`make smoke-native-contract`）。
+
 ---
 
 ## 5. 并发协议
