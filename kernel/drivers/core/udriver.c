@@ -29,11 +29,18 @@ static const udriver_mmio_window_t g_mmio_windows[] = {
 #endif
 };
 
+#ifdef CONFIG_BOARD_QEMU_VIRT_RISCV64
+#define UDRIVER_MMIO_WINDOWS_NR \
+    (sizeof(g_mmio_windows) / sizeof(g_mmio_windows[0]))
+#else
+#define UDRIVER_MMIO_WINDOWS_NR 0
+#endif
+
 static int udriver_mmio_allowed(uint64_t phys, uint64_t size)
 {
     if (size == 0 || phys + size < phys)
         return 0;
-    for (unsigned i = 0; i < sizeof(g_mmio_windows) / sizeof(g_mmio_windows[0]); i++) {
+    for (unsigned i = 0; i < UDRIVER_MMIO_WINDOWS_NR; i++) {
         uint64_t wb = g_mmio_windows[i].base;
         uint64_t we = wb + g_mmio_windows[i].size;
         if (phys >= wb && phys + size <= we)
