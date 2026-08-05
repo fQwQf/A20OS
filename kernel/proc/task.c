@@ -3,6 +3,7 @@
 #include "proc/lifetime.h"
 #include "proc/signal.h"
 #include "bpf/bpf.h"
+#include "drivers/core/udriver.h"
 #include "fs/fdtable.h"
 #include "fs/vfs.h"
 #include "mm/mm.h"
@@ -249,6 +250,9 @@ static void proc_task_release_resources(task_t *t)
         cg_detach_task(t->cgroup, t->pid);
         t->cgroup = NULL;
     }
+
+    /* Release user-space driver IRQ registrations owned by this task. */
+    udriver_task_cleanup(t->pid);
 
     vfs_release_process_locks(t->pid);
     fdtable_close_all(t);
