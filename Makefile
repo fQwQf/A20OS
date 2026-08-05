@@ -166,6 +166,7 @@ NATIVE_FUTEX_BIN       := $(NATIVE_BUILD_DIR)/native-futex-$(NATIVE_TAG)
 NATIVE_MM_BIN          := $(NATIVE_BUILD_DIR)/native-mm-$(NATIVE_TAG)
 NATIVE_SIGNAL_BIN      := $(NATIVE_BUILD_DIR)/native-signal-$(NATIVE_TAG)
 NATIVE_IPC_BIN         := $(NATIVE_BUILD_DIR)/native-ipc-$(NATIVE_TAG)
+NATIVE_CONTRACT_BIN    := $(NATIVE_BUILD_DIR)/native-contract-$(NATIVE_TAG)
 NATIVE_SVCMAN_BIN      := $(NATIVE_BUILD_DIR)/svcman-$(NATIVE_TAG)
 NATIVE_ECHOD_BIN       := $(NATIVE_BUILD_DIR)/svc-echod-$(NATIVE_TAG)
 NATIVE_SHMRING_BIN     := $(NATIVE_BUILD_DIR)/native-shmring-$(NATIVE_TAG)
@@ -177,7 +178,7 @@ NATIVE_REGISTRY_BIN    := $(NATIVE_BUILD_DIR)/native-registry-$(NATIVE_TAG)
 NATIVE_SVCMGR_BIN      := $(NATIVE_BUILD_DIR)/svcmgr-$(NATIVE_TAG)
 NATIVE_ISOLATION_BIN   := $(NATIVE_BUILD_DIR)/native-isolation-$(NATIVE_TAG)
 NATIVE_UBDD_BIN        := $(NATIVE_BUILD_DIR)/ubd-$(NATIVE_TAG)
-NATIVE_OUTPUTS         := $(NATIVE_HELLO_BIN) $(NATIVE_HANDLE_BIN) $(NATIVE_LIBC_BIN) $(NATIVE_FUTEX_BIN) $(NATIVE_MM_BIN) $(NATIVE_SIGNAL_BIN) $(NATIVE_IPC_BIN) $(NATIVE_SVCMAN_BIN) $(NATIVE_ECHOD_BIN) $(NATIVE_SHMRING_BIN) $(NATIVE_SHMRINGD_BIN) $(NATIVE_CHAND_BIN) $(NATIVE_RTCD_BIN) $(NATIVE_RTCDD_BIN) $(NATIVE_REGISTRY_BIN) $(NATIVE_SVCMGR_BIN) $(NATIVE_ISOLATION_BIN) $(NATIVE_UBDD_BIN) $(NATIVE_NETD_BIN)
+NATIVE_OUTPUTS         := $(NATIVE_HELLO_BIN) $(NATIVE_HANDLE_BIN) $(NATIVE_LIBC_BIN) $(NATIVE_FUTEX_BIN) $(NATIVE_MM_BIN) $(NATIVE_SIGNAL_BIN) $(NATIVE_IPC_BIN) $(NATIVE_CONTRACT_BIN) $(NATIVE_SVCMAN_BIN) $(NATIVE_ECHOD_BIN) $(NATIVE_SHMRING_BIN) $(NATIVE_SHMRINGD_BIN) $(NATIVE_CHAND_BIN) $(NATIVE_RTCD_BIN) $(NATIVE_RTCDD_BIN) $(NATIVE_REGISTRY_BIN) $(NATIVE_SVCMGR_BIN) $(NATIVE_ISOLATION_BIN) $(NATIVE_UBDD_BIN) $(NATIVE_NETD_BIN)
 NATIVE_BUILD_STAMP     := $(NATIVE_BUILD_DIR)/.native-build-id
 comma := ,
 NET_HOSTFWD ?= hostfwd=tcp::5555-:5555,hostfwd=udp::5555-:5555
@@ -703,6 +704,7 @@ VBOX_AARCH64_LOAD_ADDRESS ?= 0x08080000ULL
 		native-test-arch native-handle-test-arch native-libc-arch native-programs \
 	native-futex-arch native-futex-rv smoke-native-futex mlibc-sysroot mlibc-hello-rv smoke-mlibc \
 		native-ipc-arch native-ipc-rv native-ipc-la smoke-native-ipc \
+		native-contract-arch native-contract-rv native-contract-la smoke-native-contract \
 		native-svc-arch native-svc-rv smoke-native-svc \
 		native-shmring-arch native-shmring-rv smoke-native-shmring \
 		native-rtcd-arch native-rtcd-rv smoke-native-rtcd \
@@ -2415,7 +2417,8 @@ $(NATIVE_BUILD_STAMP): $(USER_BUILD_STAMP) force_native_build
 	elif [ ! -x "$(NATIVE_HELLO_BIN)" ] || [ ! -x "$(NATIVE_HANDLE_BIN)" ] || \
 	     [ ! -x "$(NATIVE_LIBC_BIN)" ] || [ ! -x "$(NATIVE_FUTEX_BIN)" ] || \
 	     [ ! -x "$(NATIVE_MM_BIN)" ] || [ ! -x "$(NATIVE_SIGNAL_BIN)" ] || \
-	     [ ! -x "$(NATIVE_IPC_BIN)" ] || [ ! -x "$(NATIVE_SVCMAN_BIN)" ] || \
+	     [ ! -x "$(NATIVE_IPC_BIN)" ] || [ ! -x "$(NATIVE_CONTRACT_BIN)" ] || \
+	     [ ! -x "$(NATIVE_SVCMAN_BIN)" ] || \
 	     [ ! -x "$(NATIVE_SHMRING_BIN)" ] || [ ! -x "$(NATIVE_SHMRINGD_BIN)" ] || \
 	     [ ! -x "$(NATIVE_CHAND_BIN)" ] || [ ! -x "$(NATIVE_ECHOD_BIN)" ] || \
 	     [ ! -x "$(NATIVE_REGISTRY_BIN)" ] || [ ! -x "$(NATIVE_SVCMGR_BIN)" ] || \
@@ -3356,6 +3359,33 @@ native-ipc-rv:
 native-ipc-la:
 	$(MAKE) ARCH=loongarch64 NOMMU=$(NOMMU) native-ipc-arch
 
+define NATIVE_CONTRACT_RECIPE
+@mkdir -p $(dir $(4))
+$(1) -ffreestanding -nostdlib -static \
+    $(2) \
+    -Iuser -Iuser/liba20rt \
+    -T$(NATIVE_LD) \
+    $(3) \
+    $(NATIVE_SDK_SRC) \
+    $(NATIVE_COMPILER_RT_SRC) \
+    $(NATIVE_ARCH_SRC) \
+    user/tests/test_native_contract.c \
+    $(NATIVE_LIBS) \
+    -o $(4)
+endef
+
+$(NATIVE_CONTRACT_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) user/tests/test_native_contract.c \
+		user/liba20rt/a20-generic.ld user/liba20rt/crt0_a20.h user/liba20rt/a20_syscall.h user/liba20rt/a20_channel.h user/liba20rt/a20_event.h user/liba20rt/a20_mem.h user/liba20rt/a20_handle.h
+	$(call NATIVE_CONTRACT_RECIPE,$(NATIVE_CC),$(NATIVE_CFLAGS),$(NATIVE_CRT0),$@)
+
+native-contract-arch: $(NATIVE_CONTRACT_BIN)
+
+native-contract-rv:
+	$(MAKE) ARCH=riscv64 NOMMU=$(NOMMU) native-contract-arch
+
+native-contract-la:
+	$(MAKE) ARCH=loongarch64 NOMMU=$(NOMMU) native-contract-arch
+
 define NATIVE_SVC_RECIPE
 @mkdir -p $(dir $(5))
 $(1) -ffreestanding -nostdlib -static \
@@ -3684,6 +3714,31 @@ smoke-native-svc:
 		echo "smoke-native-svc: PASS; log saved to $$log"; \
 	else \
 		echo "smoke-native-svc: failed with status $$status; tail of $$log:"; \
+		tail -n 80 "$$log"; \
+		exit 1; \
+	fi
+
+smoke-native-contract:
+	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/native-contract-riscv64.log"; \
+	status=0; \
+	{ sleep $(SMOKE_INPUT_DELAY); printf '/bin/native-contract-rv\npoweroff\n'; } | \
+	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
+		-machine virt -m 1G -nographic -smp 1 -bios default \
+		-global virtio-mmio.force-legacy=false \
+		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-both-dev/fat32.img,if=none,format=raw,id=x0 \
+		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		-kernel .kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf \
+		> "$$log" 2>&1 || status=$$?; \
+	if grep -q 'ralg ok' "$$log" && grep -q 'bp ok' "$$log" && \
+	   grep -q 'evqc ok' "$$log" && grep -q 'vmol ok' "$$log" && \
+	   grep -q 'System is going down for power-off NOW' "$$log"; then \
+		echo "smoke-native-contract: PASS; log saved to $$log"; \
+	else \
+		echo "smoke-native-contract: failed with status $$status; tail of $$log:"; \
 		tail -n 80 "$$log"; \
 		exit 1; \
 	fi
