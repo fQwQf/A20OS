@@ -99,6 +99,9 @@ static inline void arch_tlb_flush_page(uint64_t addr) {
     (void)addr;
     arch_tlb_flush();
 }
+static inline void arch_tlb_flush_page_local(uint64_t addr) {
+    arch_tlb_flush_page(addr);
+}
 
 static inline void arch_set_task_pointer(void *task) {
     __asm__ __volatile__("msr tpidr_el1, %0" :: "r"(task));
