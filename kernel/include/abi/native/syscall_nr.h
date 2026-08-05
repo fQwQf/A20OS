@@ -126,6 +126,7 @@
 #define A20_SYS_system_info       0x0A00
 #define A20_SYS_system_random     0x0A01
 #define A20_SYS_system_reboot     0x0A02
+#define A20_SYS_registry_claim    0x0A03
 
 /* Sync (0x0B00) */
 #define A20_SYS_futex_wait        0x0B00
@@ -137,6 +138,6 @@
 #define A20_SYS_device_irq_ack    0x0C02
 #define A20_SYS_device_irq_unlisten 0x0C03
 
-#define A20_NATIVE_SYSCALL_COUNT  105
+#define A20_NATIVE_SYSCALL_COUNT  106
 
 #endif

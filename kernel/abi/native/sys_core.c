@@ -631,11 +631,19 @@ int64_t sys_a20_task_spawn(const a20_syscall_args_t *args)
 
     a20_handle_t child_self_task = (child_self_h >= 0) ? (a20_handle_t)child_self_h : 0;
 
+    /* Well-known service registry client endpoint (M3). */
+    a20_handle_t child_registry = 0;
+    {
+        extern int64_t a20_registry_install_client(struct a20_ht_internal *ht);
+        int64_t rh = a20_registry_install_client(new_ht);
+        if (rh >= 0) child_registry = (a20_handle_t)rh;
+    }
+
     uint64_t sp = elf_setup_stack_a20(info.stack_top, argc, argv_buf, envp_buf,
                                       &info, child_stdio[0], child_stdio[1],
                                       child_stdio[2], child_self_task,
                                       child_root_h, child_cwd_h,
-                                      child_fd_limit);
+                                      child_fd_limit, child_registry);
     if (sp == 0) {
         proc_force_exit(new_task, 1);
         proc_make_ready(new_task);
