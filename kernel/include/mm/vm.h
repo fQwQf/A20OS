@@ -110,6 +110,8 @@ typedef struct mm_struct {
     size_t     rss;
     size_t     locked_vm;
     uint32_t   def_flags;
+    uint8_t    has_vdso;   /* vDSO/vvar fixed mappings present (mm/vdso.h) */
+    uint8_t    _pad_vdso[3];
     refcount_t refcount;
 #ifdef CONFIG_NOMMU
     void      *nommu_allocs[NOMMU_ALLOC_MAX];
