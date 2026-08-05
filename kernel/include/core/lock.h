@@ -5,6 +5,7 @@
 #include "core/defs.h"
 #include "core/klog.h"
 #include "core/cpu.h"
+#include "core/timer.h"
 
 #if CONFIG_DEBUG_LOCKS
 #include "proc/proc.h"
@@ -77,20 +78,27 @@ static inline void spin_set_debug(spinlock_t *lock, const char *name, void *cont
 
 static inline void spin_lock_at(spinlock_t *lock, uintptr_t caller_ra) {
     uint64_t spins = 0;
+    uint64_t stall_start = timer_get_ticks();
+    uint64_t next_report = MS_TO_TICKS(5000);
     struct task_t *cur = proc_current();
     uintptr_t waiter_ra = caller_ra ? caller_ra
                                     : (uintptr_t)__builtin_return_address(0);
     while (__atomic_exchange_n(&lock->locked, 1, __ATOMIC_ACQUIRE)) {
         while (__atomic_load_n(&lock->locked, __ATOMIC_RELAXED)) {
             if ((++spins & ((1UL << 20) - 1)) == 0) {
-                struct task_t *owner = (struct task_t *)lock->owner;
-                printf("[LOCK-STALL] cpu=%u lock=%p name=%s waiter=%d owner=%d owner_ra=0x%lx waiter_ra=0x%lx spins=%lu\n",
-                       cpu_current_id(), (void *)lock,
-                       lock->name ? lock->name : "?",
-                       cur ? proc_task_pid(cur) : -1,
-                       owner ? proc_task_pid(owner) : -1,
-                       (unsigned long)lock->owner_ra,
-                       (unsigned long)waiter_ra, spins);
+                uint64_t elapsed = timer_get_ticks() - stall_start;
+                if (elapsed >= next_report) {
+                    struct task_t *owner = (struct task_t *)lock->owner;
+                    printf("[LOCK-STALL] cpu=%u lock=%p name=%s waiter=%d owner=%d owner_ra=0x%lx waiter_ra=0x%lx spins=%lu elapsed_ms=%lu\n",
+                           cpu_current_id(), (void *)lock,
+                           lock->name ? lock->name : "?",
+                           cur ? proc_task_pid(cur) : -1,
+                           owner ? proc_task_pid(owner) : -1,
+                           (unsigned long)lock->owner_ra,
+                           (unsigned long)waiter_ra, spins,
+                           (unsigned long)(elapsed * 1000 / TICKS_PER_SEC));
+                    next_report = elapsed + MS_TO_TICKS(5000);
+                }
             }
             arch_cpu_relax();
         }

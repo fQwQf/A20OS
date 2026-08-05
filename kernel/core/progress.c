@@ -1,5 +1,6 @@
 #include "core/progress.h"
 
+#include "core/cpu.h"
 #include "net/lwip_stack.h"
 #include "net/net_config.h"
 #include "net/socket_internal.h"
@@ -23,11 +24,21 @@ void kernel_progress_poll(kernel_progress_reason_t reason)
 {
     (void)reason;
     virtio_blk_poll_all();
-    virtio_net_poll_rx_all();
+    /*
+     * NO_SYS lwIP has one global core lock.  Letting every idle CPU poll it
+     * turns an otherwise idle SMP guest into a permanent lock convoy.  CPU 0
+     * owns compatibility RX polling; device IRQs still make progress on the
+     * CPU that receives them.
+     */
+    if (cpu_current_id() == 0)
+        virtio_net_poll_rx_all();
 }
 
 void kernel_progress_timer_tick(void)
 {
+    /* One timer owner is sufficient for the global NO_SYS timeout wheel. */
+    if (cpu_current_id() != 0)
+        return;
     uint64_t flags = a20_lwip_lock();
     sys_check_timeouts();
     a20_net_config_sync_from_lwip();
