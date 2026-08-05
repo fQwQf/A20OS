@@ -15,14 +15,7 @@ MCU profile 只编译 `BOARD_DRIVER_DIR` 和选中的平台，新增文件要检
 ## 最小静态验证
 
 ```sh
-git diff --check
-make check-driver-core-model
-make check-doc-drift
-make smoke-driver-lifecycle
-make smoke-hda
-make smoke-audio-userspace
-make PYTHON='conda run -n a20os python' smoke-virtio-sound
-make smoke-pci-portability
+git diff --checkmake check-driver-core-modelmake check-doc-driftmake smoke-driver-lifecyclemake smoke-hdamake smoke-audio-userspacemake PYTHON='conda run -n a20os python' smoke-virtio-soundmake smoke-pci-portability
 ```
 
 `smoke-driver-lifecycle` 用 RISC-V64 bringup 配置和 `CONFIG_DRIVER_LIFECYCLE_TEST=y` 启动合成 bus/device，验证注册、probe 失败解绑、class 发布、unregister 下线、陈旧引用返回 `-ENODEV` 和重新 probe；宿主需要能运行仓库配置的 QEMU。只改平台私有轻量设备时可以不跑它，但修改 driver core、bus 或生命周期代码时必须跑。
@@ -38,8 +31,7 @@ make smoke-pci-portability
 检查源中没有板级硬编码泄漏：
 
 ```sh
-rg -n "0x[0-9a-fA-F]{8}" kernel/drivers/<class>/my_driver.c
-rg -n "CONFIG_BOARD_" kernel/drivers/<class>/my_driver.c
+rg -n "0x[0-9a-fA-F]{8}" kernel/drivers/<class>/my_driver.crg -n "CONFIG_BOARD_" kernel/drivers/<class>/my_driver.c
 ```
 
 常量可能是协议寄存器或 ID，需要逐项解释，不是机械删除。
@@ -49,11 +41,7 @@ rg -n "CONFIG_BOARD_" kernel/drivers/<class>/my_driver.c
 至少构建驱动目标平台和一个共享基础设施回归平台：
 
 ```sh
-make ARCH=aarch64 BOARD=virtualbox-aarch64 ABI=both kernel-only -j4
-make ARCH=aarch64 BOARD=qemu-virt-aarch64 ABI=both kernel-only -j4
-make ARCH=x86_64 ABI=both kernel-only -j4
-make ARCH=arm32 BOARD=qemu-virt-arm32 ABI=both kernel-only -j4
-make check-stm32f103
+make ARCH=aarch64 BOARD=virtualbox-aarch64 ABI=both kernel-only -j4make ARCH=aarch64 BOARD=qemu-virt-aarch64 ABI=both kernel-only -j4make ARCH=x86_64 ABI=both kernel-only -j4make ARCH=arm32 BOARD=qemu-virt-arm32 ABI=both kernel-only -j4make check-stm32f103
 ```
 
 跨架构结论分三级记录：只编译通过；设备枚举并绑定；实际 DMA/I/O 完成。只有第三级可以写“运行验证”。某架构的 board 没有 PCI enumerator 时，HDA/NVMe 编译成功只能计入第一级。
@@ -68,7 +56,8 @@ make check-stm32f103
 | 必需 BAR/MMIO/IRQ 缺失 | 返回 `-ENODEV`，无 ready/私有指针 |
 | DMA 第 N 次分配失败 | 前 N-1 次全部释放 |
 | feature/version 不支持 | 设备 FAILED/复位，无 queue 泄漏 |
-| request_irq 失败 | 若支持轮询则明确降级，否则 probe 失败并清理 |
+| request_irq 失败 | 显式降级为轮询且设备级中断保持屏蔽；不允许实例保持“看似 IRQ 驱动”的状态 |
+| IRQ 已注册 | 启动日志或调试计数证实中断真实触发；共享线场景两个设备都完成 I/O；remove 后 probe 能重新注册 |
 | 健康检查超时 | `-ETIMEDOUT`，设备停止后才释放 DMA |
 | 成功 | `drv_priv`、class、容量/MAC/模式均有效 |
 
@@ -79,11 +68,7 @@ make check-stm32f103
 QEMU GUI 路径必须跑：
 
 ```sh
-make smoke-qemu-gui-x86_64 SMOKE_TIMEOUT=60
-make smoke-qemu-gui-riscv64 SMOKE_TIMEOUT=90
-make smoke-qemu-gui-aarch64 SMOKE_TIMEOUT=90
-make smoke-qemu-gui-arm32 SMOKE_TIMEOUT=90
-make smoke-qemu-gui-loongarch64 SMOKE_TIMEOUT=90
+make smoke-qemu-gui-x86_64 SMOKE_TIMEOUT=60make smoke-qemu-gui-riscv64 SMOKE_TIMEOUT=90make smoke-qemu-gui-aarch64 SMOKE_TIMEOUT=90make smoke-qemu-gui-arm32 SMOKE_TIMEOUT=90make smoke-qemu-gui-loongarch64 SMOKE_TIMEOUT=90
 ```
 
 这些门禁不依赖宿主图形会话。它们覆盖 PCI 和 VirtIO-MMIO transport，以及 32/64 位用户态，以 headless display 启动 GUI rootfs，要求 VirtIO GPU、两个 VirtIO input 实例和用户态 desktop 全部就绪；通过 QMP 抓取实际 scanout 并拒绝纯黑/空 framebuffer；最后注入按键并要求客户机产生 input event。日志和 PPM 截图保存在 `.kernel-build/smoke/qemu-gui-x86_64/`。因此“能链接”或“串口能启动”不能替代此项验证。完整门禁说明见 [testing/testing-gates.md](../testing/testing-gates.md)。
@@ -105,9 +90,7 @@ display：模式信息、pitch、全屏和边界矩形 flush、映射重叠拒�
 提交说明应附从枚举到消费的连续日志，例如：
 
 ```text
-[BUS] pci ... id=8086:100e ...
-[E1000] ready: mac=... link=up
-[LWIP] netif en0 attached to ...
+[BUS] pci ... id=8086:100e ...[E1000] ready: mac=... link=up[LWIP] netif en0 attached to ...
 ```
 
 日志要包含构建命令、平台/VM 设备配置、成功 I/O，以及已知未验证能力。不要只附截图；串口文本更适合评审和回归比较。

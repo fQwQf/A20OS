@@ -33,8 +33,7 @@ struct a20_vm_alloc_args args = {
     .version = 1,
     .length = req_size,
     .prot = A20_PROT_READ | A20_PROT_WRITE,
-};
-int64_t r = a20_vm_alloc(&args);
+};int64_t r = a20_vm_alloc(&args);
 ```
 
 迁移后，`smoke-native-libc` 目标已跑通，裸参数数组调用已不存在于 `user/liba20c/*.c`。

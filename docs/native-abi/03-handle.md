@@ -105,8 +105,7 @@ typedef struct a20_handle_table {
 ### 2.4 关键操作
 
 ```c
-/* 分配空闲槽位：O(n/64) worst case */
-static int ht_alloc_slot(a20_handle_table_t *ht) {
+/* 分配空闲槽位：O(n/64) worst case */static int ht_alloc_slot(a20_handle_table_t *ht) {
     for (uint32_t i = ht->free_hint / 64; i < ht->bitmap_size; i++) {
         uint64_t word = ht->free_bitmap[i];
         if (word != UINT64_MAX) {
@@ -122,8 +121,7 @@ static int ht_alloc_slot(a20_handle_table_t *ht) {
     return -1;  /* 需要扩容 */
 }
 
-/* Handle lookup：O(1)，检查有效权限 ρ_eff */
-int64_t a20_handle_lookup(a20_handle_table_t *ht, a20_handle_t h,
+/* Handle lookup：O(1)，检查有效权限 ρ_eff */int64_t a20_handle_lookup(a20_handle_table_t *ht, a20_handle_t h,
                           uint16_t expected_type, a20_rights_t required_rights,
                           a20_handle_entry_t *out) {
     if (h >= ht->capacity) return -A20_ERR_BAD_HANDLE;
@@ -143,8 +141,7 @@ int64_t a20_handle_lookup(a20_handle_table_t *ht, a20_handle_t h,
     return A20_OK;
 }
 
-/* 计算有效权限 ρ_eff(h, t) */
-static inline a20_rights_t a20_effective_rights(const a20_handle_entry_t *e) {
+/* 计算有效权限 ρ_eff(h, t) */static inline a20_rights_t a20_effective_rights(const a20_handle_entry_t *e) {
     /* 检查时间过期 */
     if (e->expiry_tick > 0 && a20_current_tick() >= e->expiry_tick)
         return 0;  /* 已过期，有效权限为空 */
@@ -212,7 +209,7 @@ Sweeper 与正常操作的竞争通过同一把 `ht->lock` 串行化，保证过
 | 3 | `A20_HANDLE_CTRL_GET_TEMPORAL` | arg0 = `a20_handle_temporal_args_t*` | 查询当前时态参数 |
 | 4 | `A20_HANDLE_CTRL_SET_LABEL` | arg0 = 新标签（0/1/2） | 上调 handle 条目的 Bell-LaPadula 标签（仅可上调） |
 
-用户态 ABI 中 `expiry_ns` 以 `CLOCK_MONOTONIC` 纳秒表示（0 = 无过期）；内核条目内部以 tick 存储。`remaining_ops` 仅在 `A20_TEMPORAL_OP_COUNT` 置位时有意义，此时 **0 表示已耗尽**（$ho_{eff} = \emptyset$）；flag 未置位时该字段被忽略（即"无限"由 flag 缺省表达，而非特殊值 0）。
+用户态 ABI 中 `expiry_ns` 以 `CLOCK_MONOTONIC` 纳秒表示（0 = 无过期）；内核条目内部以 tick 存储。`remaining_ops` 仅在 `A20_TEMPORAL_OP_COUNT` 置位时有意义，此时 **0 表示已耗尽**（$ho_{eff} = \emptyset$）；flag 未置位时该字段被忽略（即"无限"由 flag 缺省表达，而非特殊值 0）。
 
 Channel 传递、dup、replace、spawn 转移、`vm_share` 都继承源 handle 的时态参数与安全标签——任何路径都不能刷新约束（§6.4 不可刷新性的完整实现）。
 
@@ -283,15 +280,9 @@ Handle 在其生命周期中经历以下状态：
 当对象的引用计数降至 0 时，触发 `object_destroy`。这可能导致级联销毁：
 
 ```text
-task_destroy
-  ├── 遍历 handle_table，close 所有 handle
-  │   ├── channel endpoint close → 通知对端 peer_closed
-  │   ├── event queue close → 清理 watch list + 反向索引
-  │   └── shm close → 解除映射
-  └── 释放 task 结构
+task_destroy├── 遍历 handle_table，close 所有 handle│   ├── channel endpoint close → 通知对端 peer_closed│   ├── event queue close → 清理 watch list + 反向索引│   └── shm close → 解除映射└── 释放 task 结构
 
-最大级联深度：2
-  task → handle → channel message 中的 handle 引用
+最大级联深度：2task → handle → channel message 中的 handle 引用
 ```
 
 ---
