@@ -19,7 +19,7 @@ int  vma_ref_file(vm_area_t *vma);
 int  vma_ref_fork(vm_area_t *vma);
 int  vma_ref_aux(vm_area_t *vma);
 vm_area_t *vma_split(vm_area_t *vma, vaddr_t split);
-vm_area_t *vma_try_merge(vm_area_t *vma);
+vm_area_t *vma_try_merge(mm_struct_t *mm, vm_area_t *vma);
 
 void free_vma_pages(mm_struct_t *mm, vm_area_t *vma);
 

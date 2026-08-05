@@ -401,7 +401,14 @@ void kfree(void *ptr) {
             printf("[SLAB BUG]   pfn=%lu invalid cpu=%u\n",
                    (unsigned long)dbg_pfn, cpu_current_id());
         extern void a20_channel_trace_dump(void);
+        extern void frame_trace_dump_pfn(pfn_t pfn);
+        extern uint32_t rv64_tlb_flush_stats(uint32_t *serviced);
+        uint32_t tlb_svc = 0;
+        uint32_t tlb_calls = rv64_tlb_flush_stats(&tlb_svc);
+        printf("[SLAB BUG]   tlb_flush_calls=%u tlb_ipi_serviced=%u\n",
+               (unsigned)tlb_calls, (unsigned)tlb_svc);
         a20_channel_trace_dump();
+        frame_trace_dump_pfn(dbg_pfn);
         panic("kfree: invalid pointer");
     }
 
