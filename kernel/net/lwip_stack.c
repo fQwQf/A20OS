@@ -230,6 +230,7 @@ void a20_lwip_init(void) {
 
     a20_net_config_init();
     spin_init(&g_lwip_lock);
+    spin_set_debug(&g_lwip_lock, "lwip", NULL);
     lwip_init();
     a20_lwip_register_netifs();
     /* Add loopback after physical links.  lwIP prepends netifs to its list;
