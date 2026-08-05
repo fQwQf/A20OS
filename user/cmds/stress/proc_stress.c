@@ -1,9 +1,14 @@
 #include <errno.h>
+#include <fcntl.h>
 #include <poll.h>
+#include <pthread.h>
+#include <sched.h>
 #include <signal.h>
 #include <spawn.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <sys/epoll.h>
 #include <sys/eventfd.h>
 #include <sys/mman.h>
 #include <sys/syscall.h>
@@ -27,6 +32,9 @@ extern char **environ;
 
 static volatile sig_atomic_t signal_seen;
 static int signal_pipe_fd = -1;
+static volatile int exec_worker_started;
+static int exec_worker_epoll_fd = -1;
+static int exec_worker_report_fd = -1;
 
 static int fail(const char *what)
 {
@@ -180,6 +188,103 @@ static int scenario_exec_low_user_argv(void)
     int result = wait_exit(pid, 0, "wait-low-exec-argv");
     munmap(page, 4096);
     return result;
+}
+
+static void *exec_cloexec_worker(void *unused)
+{
+    (void)unused;
+    struct epoll_event event;
+    __atomic_store_n(&exec_worker_started, 1, __ATOMIC_RELEASE);
+    for (;;) {
+        int result = epoll_wait(exec_worker_epoll_fd, &event, 1, -1);
+        if (result < 0 && errno == EINTR)
+            continue;
+        if (result < 0 && errno == EBADF)
+            (void)write(exec_worker_report_fd, "b", 1);
+        else
+            (void)write(exec_worker_report_fd, "u", 1);
+        return NULL;
+    }
+}
+
+static int verify_thread_exec_cloexec(int argc, char **argv)
+{
+    if (argc != 3)
+        return 1;
+    char *end = NULL;
+    long fd = strtol(argv[2], &end, 10);
+    if (!end || *end != '\0' || fd < 0)
+        return 1;
+    errno = 0;
+    return fcntl((int)fd, F_GETFD) == -1 && errno == EBADF ? 0 : 1;
+}
+
+static int scenario_thread_exec_cloexec(void)
+{
+    int report[2];
+    if (pipe(report) < 0)
+        return fail("thread-exec-pipe");
+
+    pid_t pid = fork();
+    if (pid < 0)
+        return fail("thread-exec-fork");
+    if (pid == 0) {
+        close(report[0]);
+        exec_worker_report_fd = report[1];
+        exec_worker_epoll_fd = epoll_create1(EPOLL_CLOEXEC);
+        if (exec_worker_epoll_fd < 0) {
+            (void)write(report[1], "e", 1);
+            _exit(2);
+        }
+
+        pthread_t worker;
+        int thread_error = pthread_create(&worker, NULL,
+                                          exec_cloexec_worker, NULL);
+        if (thread_error != 0) {
+            (void)write(report[1], "t", 1);
+            _exit(3);
+        }
+        while (!__atomic_load_n(&exec_worker_started, __ATOMIC_ACQUIRE))
+            sched_yield();
+
+        char fd_arg[24];
+        snprintf(fd_arg, sizeof(fd_arg), "%d", exec_worker_epoll_fd);
+        char *exec_argv[] = {
+            "proc_stress", "--verify-thread-exec-cloexec", fd_arg, NULL,
+        };
+        char *envp[] = {"PATH=/bin", NULL};
+        execve("/bin/proc_stress", exec_argv, envp);
+        (void)write(report[1], "x", 1);
+        _exit(127);
+    }
+
+    close(report[1]);
+    if (wait_exit(pid, 0, "thread-exec-wait") != 0) {
+        close(report[0]);
+        return 1;
+    }
+
+    struct pollfd pfd = {
+        .fd = report[0],
+        .events = POLLIN | POLLHUP,
+    };
+    int poll_result;
+    do {
+        poll_result = poll(&pfd, 1, 2000);
+    } while (poll_result < 0 && errno == EINTR);
+    if (poll_result <= 0) {
+        close(report[0]);
+        return fail("thread-exec-worker-exit");
+    }
+
+    char byte = 0;
+    ssize_t count = read(report[0], &byte, 1);
+    close(report[0]);
+    if (count != 0) {
+        errno = count < 0 ? errno : EIO;
+        return fail("thread-exec-shared-cloexec");
+    }
+    return 0;
 }
 
 static int scenario_spawn_missing(void)
@@ -525,6 +630,8 @@ int main(int argc, char **argv)
         return verify_large_exec_args(argc, argv);
     if (argc > 1 && strcmp(argv[1], "--verify-low-exec-args") == 0)
         return argc == 3 && strcmp(argv[2], "low-user-argv-ok") == 0 ? 0 : 1;
+    if (argc > 1 && strcmp(argv[1], "--verify-thread-exec-cloexec") == 0)
+        return verify_thread_exec_cloexec(argc, argv);
 
     printf("PROC_STRESS: start\n");
     if (scenario_fork_wait_yield() != 0)
@@ -536,6 +643,9 @@ int main(int argc, char **argv)
     if (scenario_exec_low_user_argv() != 0)
         return 1;
     printf("PROC_STRESS: low-user-argv PASS\n");
+    if (scenario_thread_exec_cloexec() != 0)
+        return 1;
+    printf("PROC_STRESS: thread-exec-cloexec PASS\n");
     if (scenario_spawn_missing() != 0)
         return 1;
     if (scenario_sleep_signal() != 0)
