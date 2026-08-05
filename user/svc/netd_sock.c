@@ -154,6 +154,11 @@ static err_t tcp_cb_accept(void *arg, struct tcp_pcb *newpcb, err_t err)
 
     if (!ls || err != ERR_OK)
         return ERR_ABRT;
+    /* lwIP invokes the accept callback while the connection is still in
+     * SYN_RCVD (tcp_process), using the listener's callback arg; guard
+     * against re-entry through a non-listening socket. */
+    if (!ls->listening || ls->closed)
+        return ERR_OK;
     int id = sock_alloc();
     if (id < 0)
         return ERR_MEM;
