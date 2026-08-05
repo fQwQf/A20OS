@@ -1,6 +1,6 @@
 # A20OS Native ABI 实现方案
 
-> **历史计划说明（2026-07）**：本文记录从 53-syscall 设计走向首个实现的原始方案，文件路径、分派伪代码、阶段状态和 LOC 估算不再代表当前仓库。当前实现为 93 个 syscall，按 `task->abi_mode` 分派；typed channel、时态控制/sweeper、阻塞 IPC、对象级联释放和 VMO source 映射状态见 `docs/native-abi/08-runtime-status.md`。本文伪代码不得作为现行并发或 ABI 契约。
+> **历史计划说明（2026-07）**：本文记录从 53-syscall 设计走向首个实现的原始方案，文件路径、分派伪代码、阶段状态和 LOC 估算不再代表当前仓库。当前实现为 109 个 syscall，按 `task->abi_mode` 分派；typed channel、时态控制/sweeper、阻塞 IPC、对象级联释放和 VMO source 映射状态见 `docs/native-abi/08-runtime-status.md`。本文伪代码不得作为现行并发或 ABI 契约。
 
 > 本文为 A20OS Native ABI 理论研究的第三部分。基于 [01-posix-limitations.md](01-posix-limitations.md) 的问题分析和 [02-native-api-design.md](02-native-api-design.md) 的 API 设计，给出具体的实现方案，包括组件划分、文件组织、libc 设计和分阶段实施路线。
 
