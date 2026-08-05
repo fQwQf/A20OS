@@ -5,10 +5,7 @@
 ## 分层边界
 
 ```text
-kernel/platform/<board>/       板级事实：RAM、固定地址、ACPI/FDT、时钟、引脚
-kernel/drivers/bus/             总线协议：扫描、匹配、BAR/slot、子设备
-kernel/drivers/<class>/         可复用功能驱动：只消费 resource/plat_data
-kernel/include/drivers/         跨模块公共接口
+kernel/platform/<board>/       板级事实：RAM、固定地址、ACPI/FDT、时钟、引脚kernel/drivers/bus/             总线协议：扫描、匹配、BAR/slot、子设备kernel/drivers/<class>/         可复用功能驱动：只消费 resource/plat_datakernel/include/drivers/         跨模块公共接口
 ```
 
 可复用驱动不得包含某块板的寄存器地址、GIC 编号或引脚号。平台代码不得复制 AHCI、E1000、VirtIO、VMSVGA 等设备协议。

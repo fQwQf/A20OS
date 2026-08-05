@@ -42,8 +42,7 @@
 ### 2.2 完整理解（3-4 小时）
 
 ```
-01 (问题分析)
-  → 02 (API 设计)
+01 (问题分析)→ 02 (API 设计)
     → 03 (实现方案)
       → 04 (形式化理论)
         → 07 (理论补充：精化证明、并发 trace)
@@ -67,21 +66,7 @@
 ## 3. 文档依赖图
 
 ```
-01 (POSIX 局限性)
- │
- ├──→ 02 (Native API 设计) ──→ 03 (实现方案)
- │         │                        │
- │         └─────→ 04 (形式化理论) ←─┘
- │                   │      │
- │         ┌─────────┘      └──────────┐
- │         ↓                            ↓
- │    07 (理论补充)              08 (架构深度)
- │         │                            │
- │         └──────────┬─────────────────┘
- │                    ↓
- │              09 (创新方向：混合信任/类型化通道/时态能力/委托模式)
- │                    │
- └────────────→ 05 (评估框架)
+01 (POSIX 局限性)│├──→ 02 (Native API 设计) ──→ 03 (实现方案)│         │                        ││         └─────→ 04 (形式化理论) ←─┘│                   │      ││         ┌─────────┘      └──────────┐│         ↓                            ↓│    07 (理论补充)              08 (架构深度)│         │                            ││         └──────────┬─────────────────┘│                    ↓│              09 (创新方向：混合信任/类型化通道/时态能力/委托模式)│                    │└────────────→ 05 (评估框架)
                      │
                      ↓
                 06 (贡献定位)
@@ -239,20 +224,9 @@
 设计规范位于 `docs/native-abi/`，实现位于 `kernel/abi/native/`、`kernel/ipc/` 和 `kernel/mm/`：
 
 ```text
-docs/native-abi/
-  00-overview.md        顶层概述、设计原则、文档索引
-  01-types.md           基础类型、ABI 头约定、syscall 参数结构体
-  02-errors.md          错误码、返回约定
-  03-handle.md          13 种对象、handle table、时态能力、93 syscall 列表
-  04-memory.md          VMO/VMAR 模型与当前 source 映射语义
-  05-ipc.md             Typed Channel、阻塞 Channel、Event Queue
-  06-security.md        Rights、标签、transfer、时态权限模型
-  07-startup.md         启动协议、libc 分层设计
-  08-runtime-status.md  当前实现状态与剩余差距
+docs/native-abi/00-overview.md        顶层概述、设计原则、文档索引01-types.md           基础类型、ABI 头约定、syscall 参数结构体02-errors.md          错误码、返回约定03-handle.md          13 种对象、handle table、时态能力、93 syscall 列表04-memory.md          VMO/VMAR 模型与当前 source 映射语义05-ipc.md             Typed Channel、阻塞 Channel、Event Queue06-security.md        Rights、标签、transfer、时态权限模型07-startup.md         启动协议、libc 分层设计08-runtime-status.md  当前实现状态与剩余差距
 
-kernel/abi/native/      syscall 分派、handle table、各子系统入口
-kernel/ipc/             channel、event queue、对象生命周期
-kernel/mm/              VMO/VMAR
+kernel/abi/native/      syscall 分派、handle table、各子系统入口kernel/ipc/             channel、event queue、对象生命周期kernel/mm/              VMO/VMAR
 ```
 
 本文档体系中的 01-08 号研究笔记在设计规范基础上进行：

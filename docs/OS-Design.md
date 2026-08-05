@@ -11,9 +11,9 @@ A20OS 是为 2026 年全国大学生计算机系统能力大赛（操作系统�
 A20OS 是一个内核、两套用户接口：
 
 * **Linux ABI**（`kernel/abi/linux/`）：223 个系统调用，可直接运行 git、vim、fastfetch、mksh 等静态链接 musl 程序，无需重新编译。
-* **Native ABI**（`kernel/abi/native/`）：90 个系统调用，基于 handle、capability 和显式内存对象，是面向 A20OS 新程序的现代接口。
+* **Native ABI**（`kernel/abi/native/`）：109 个系统调用，基于 handle、capability 和显式内存对象，是面向 A20OS 新程序的现代接口。
 
-内核总代码约 12.5 万行，分布在 533 个源文件中。核心代码位于 `kernel/`；第三方代码（musl、lwIP、git、vim 等）隔离在 `user/external/` 和 `kernel/external/`。
+内核代码位于 `kernel/`，约 18 万行（含头文件），分布在 800 余个源文件中；第三方代码（musl、lwIP、git、vim 等）隔离在 `user/external/` 和 `kernel/external/`。
 
 ---
 
@@ -32,9 +32,7 @@ A20OS 在运行空间上更像宏内核：
 
 为什么这样组合？内核内部路径因为函数调用而保持快速，而用户可见资源仍然受 capability 检查约束。这样兼顾了宏内核的性能和微内核的对象纪律。
 
-进一步的混合内核改造（用户态服务化、驱动外迁、`channel_call` 融合 RPC 快路径、
-svcman 崩溃自愈）的设计与实施路线见
-[docs/hybrid-kernel/00-design.md](hybrid-kernel/00-design.md)。
+进一步的混合内核改造（用户态服务化、驱动外迁、`channel_call` 融合 RPC 快路径、svcman 崩溃自愈）的设计与实施路线见[docs/hybrid-kernel/00-design.md](hybrid-kernel/00-design.md)。
 
 ---
 
@@ -43,16 +41,13 @@ svcman 崩溃自愈）的设计与实施路线见
 | ABI | 系统调用数 | 路径 | 使用场景 |
 |-----|-----------|------|---------|
 | Linux ABI | 223 | `kernel/abi/linux/` | 运行现有 musl 程序，无需改动。 |
-| Native ABI | 90 | `kernel/abi/native/` | 编写面向 A20OS 的新程序，使用 handle/capability 接口。 |
+| Native ABI | 109 | `kernel/abi/native/` | 编写面向 A20OS 的新程序，使用 handle/capability 接口。 |
 
 两层 ABI 严格隔离。`kernel/abi/linux/` 和 `kernel/abi/native/` 都把用户调用翻译成同一组内核内部 API；核心模块不依赖任何 ABI 的用户结构体。
 
 ### 分层原则（内部实现 ↔ ABI 薄包装）
 
-内核内部实现（`kernel/ipc`、`kernel/mm`、`kernel/proc`、`kernel/drivers`、
-`kernel/include/core`）必须**独立且自包含**：自持类型、常量和 API，暴露给
-ABI 层调用；ABI 层（`kernel/abi/linux`、`kernel/abi/native`）只是内部实现的
-薄包装，负责把用户态 syscall 线格式翻译成内部调用。方向永远单向：
+内核内部实现（`kernel/ipc`、`kernel/mm`、`kernel/proc`、`kernel/drivers`、`kernel/include/core`）必须**独立且自包含**：自持类型、常量和 API，暴露给ABI 层调用；ABI 层（`kernel/abi/linux`、`kernel/abi/native`）只是内部实现的薄包装，负责把用户态 syscall 线格式翻译成内部调用。方向永远单向：
 
 ```
 用户态 ── syscall 线格式 ──> ABI 层（薄包装）── 内部 API ──> 内部实现
@@ -61,18 +56,13 @@ ABI 层调用；ABI 层（`kernel/abi/linux`、`kernel/abi/native`）只是内�
 具体落地：
 
 - 内部 IPC 子系统（对象模型、Channel、EventQ、句柄表、启动信息）的头文件
-  位于 `kernel/include/ipc/`（`ipc.h`、`handle_table.h`、`start_info.h`），
-  不包含任何 `abi/` 内容；`kernel/include/abi/native/*` 里曾属于内部的部分
-  现在只是再导出（shim）。
+  位于 `kernel/include/ipc/`（`ipc.h`、`handle_table.h`、`start_info.h`），不包含任何 `abi/` 内容；`kernel/include/abi/native/*` 里曾属于内部的部分现在只是再导出（shim）。
 - Linux ABI 的线格式常量（errno、fcntl、mman、poll、signal、stat、ioctl、
-  input）定义在 `kernel/include/core/*.h`，`kernel/include/abi/linux/*.h`
-  再导出——内部代码只 include `core/`。
+  input）定义在 `kernel/include/core/*.h`，`kernel/include/abi/linux/*.h`再导出——内部代码只 include `core/`。
 - 例外：syscall 分派（`kernel/syscall/syscall.c`）与 arch 胶水
-  （`kernel/arch/*/abi/`、`syscall_hook.h`）本身是 ABI 边界的一部分，
-  有权感知 ABI。
+  （`kernel/arch/*/abi/`、`syscall_hook.h`）本身是 ABI 边界的一部分，有权感知 ABI。
 
-这一原则的收益：内部实现（尤其 IPC/MM/调度）保持 ABI 无关，任何 ABI
-（包括 Linux ABI）都能直接包装内部机制而受益，无需复制实现。
+这一原则的收益：内部实现（尤其 IPC/MM/调度）保持 ABI 无关，任何 ABI（包括 Linux ABI）都能直接包装内部机制而受益，无需复制实现。
 
 ### 具体示例
 
@@ -102,8 +92,7 @@ Native ABI 的完整规范见 [docs/native-abi/00-overview.md](native-abi/00-ove
 
 ## 支持的平台
 
-A20OS 面向五种 64 位架构构建，另外保留 ARM32、RISC-V32 和 ARMv7-M 的
-bring-up 构建入口：
+A20OS 面向五种 64 位架构构建，另外保留 ARM32、RISC-V32 和 ARMv7-M 的bring-up 构建入口：
 
 * **RISC-V 64**：QEMU `qemu-virt-riscv64` 和 StarFive VisionFive 2 开发板
 * **ARM64**：QEMU `qemu-virt-aarch64`
@@ -111,22 +100,15 @@ bring-up 构建入口：
 * **LoongArch 64**：QEMU `qemu-virt-loongarch64` 和龙芯 LS2K1000 开发板
 * **PPC64LE**：QEMU `qemu-virt-ppc64le`（pSeries 固件）
 
-PPC64LE 当前使用 Radix MMU，按 QEMU pSeries 单核路径验收；SMP 和 NOMMU
-尚未列入该架构的已验证能力。NOMMU 支持集合为 `arm32`、`aarch64`、`riscv32`
-和 `riscv64`，顶层构建会拒绝其他架构的 NOMMU 组合。
+PPC64LE 当前使用 Radix MMU，按 QEMU pSeries 单核路径验收；SMP 和 NOMMU尚未列入该架构的已验证能力。NOMMU 支持集合为 `arm32`、`aarch64`、`riscv32`和 `riscv64`，顶层构建会拒绝其他架构的 NOMMU 组合。
 
 典型构建命令：
 
 ```bash
-make ARCH=riscv64 BOARD=qemu-virt-riscv64 run
-make ARCH=aarch64 BOARD=qemu-virt-aarch64 run
-make ARCH=x86_64 BOARD=qemu-virt-x86_64 run
-make ARCH=loongarch64 BOARD=qemu-virt-loongarch64 run
-make ARCH=ppc64le BOARD=qemu-virt-ppc64le run
+make ARCH=riscv64 BOARD=qemu-virt-riscv64 runmake ARCH=aarch64 BOARD=qemu-virt-aarch64 runmake ARCH=x86_64 BOARD=qemu-virt-x86_64 runmake ARCH=loongarch64 BOARD=qemu-virt-loongarch64 runmake ARCH=ppc64le BOARD=qemu-virt-ppc64le run
 ```
 
-`make check-kernel-build` 验证默认构建矩阵；PPC64LE 的独立入口是
-`make check-ppc64le-bringup` 和 `make check-ppc64le-user`。
+`make check-kernel-build` 验证默认构建矩阵；PPC64LE 的独立入口是`make check-ppc64le-bringup` 和 `make check-ppc64le-user`。
 
 ---
 
@@ -145,69 +127,33 @@ make ARCH=ppc64le BOARD=qemu-virt-ppc64le run
 
 ### 进程调度与 SMP（`kernel/proc/`）
 
-调度器使用 per-CPU 运行队列。级 0 承载实时任务（`SCHED_FIFO`/`SCHED_RR`，
-优先级 1..99）；普通任务使用 **EEVDF（最早资格虚拟截止时间优先）**：每个
-任务按权重累加虚拟运行时间（`vruntime += dt * NICE0 / weight`），runqueue
-跟踪随总权重推进的系统虚拟时间 `vtime`，只有 `vruntime <= vtime`（未超用
-公平份额）的任务有资格被选中，其中 `deadline = vruntime + 虚拟时间片` 最早
-者先跑。因此 nice/weight 真实控制 CPU 份额，短时间片任务获得低延迟，且
-不需要老化的启发式。affinity 同时受 online CPU 与 cgroup cpuset 限制，CPU
-quota 由 `kernel/proc/cg_cpu.c` 执行。
+调度器使用 per-CPU 运行队列。级 0 承载实时任务（`SCHED_FIFO`/`SCHED_RR`，优先级 1..99）；普通任务使用 **EEVDF（最早资格虚拟截止时间优先）**：每个任务按权重累加虚拟运行时间（`vruntime += dt * NICE0 / weight`），runqueue跟踪随总权重推进的系统虚拟时间 `vtime`，只有 `vruntime <= vtime`（未超用公平份额）的任务有资格被选中，其中 `deadline = vruntime + 虚拟时间片` 最早者先跑。因此 nice/weight 真实控制 CPU 份额，短时间片任务获得低延迟，且不需要老化的启发式。affinity 同时受 online CPU 与 cgroup cpuset 限制，CPUquota 由 `kernel/proc/cg_cpu.c` 执行。
 
-“任务状态”和“CPU 所有权”是两个不同维度。`PROC_READY` 任务可能仍在
-runqueue，也可能已经被本地 CPU 选中：
+“任务状态”和“CPU 所有权”是两个不同维度。`PROC_READY` 任务可能仍在runqueue，也可能已经被本地 CPU 选中：
 
 ```text
 on_rq -> dispatching -> on_cpu -> unowned
 ```
 
-本地 picker 只持有本 CPU 的 runqueue 锁，原子完成
-`on_rq -> dispatching`；释放队列锁后，调度器才获取 `proc_lock` 发布
-context switch。本地队列为空时，picker 会非阻塞地尝试从其他 CPU 窃取
-EEVDF 任务（远端有富余、尊重 affinity），使空闲核吸收突发负载，避免
-8 核失衡。旧任务的 `on_cpu` 跨底层切换保持有效，直到新任务在自己的
-内核栈上完成 switch cleanup。迁移同时获取源、目标 runqueue 锁，固定按 CPU
-编号升序。
+本地 picker 只持有本 CPU 的 runqueue 锁，原子完成`on_rq -> dispatching`；释放队列锁后，调度器才获取 `proc_lock` 发布context switch。本地队列为空时，picker 会非阻塞地尝试从其他 CPU 窃取EEVDF 任务（远端有富余、尊重 affinity），使空闲核吸收突发负载，避免8 核失衡。旧任务的 `on_cpu` 跨底层切换保持有效，直到新任务在自己的内核栈上完成 switch cleanup。迁移同时获取源、目标 runqueue 锁，固定按 CPU编号升序。
 
-远程入队通过 per-CPU 持久 `need_resched` 请求抢占。IPI 只通知目标 CPU，
-不会在任意中断上下文直接切换；请求在 trap/syscall/timer 返回或显式调度
-安全点消费。
+远程入队通过 per-CPU 持久 `need_resched` 请求抢占。IPI 只通知目标 CPU，不会在任意中断上下文直接切换；请求在 trap/syscall/timer 返回或显式调度安全点消费。
 
-所有对象等待使用 tokenized Park/Wake。waiter 先生成 `(task, wait_seq)`
-token，在对象锁内重查条件并 link，释放对象锁后才 commit；waker 在对象锁内
-只把 task 引用和 token 转移到 wake queue，释放对象锁后再进入 scheduler。
-因此提前到达的事件、旧 timeout 和重复 wake 都不能唤醒后续等待。
+所有对象等待使用 tokenized Park/Wake。waiter 先生成 `(task, wait_seq)`token，在对象锁内重查条件并 link，释放对象锁后才 commit；waker 在对象锁内只把 task 引用和 token 转移到 wake queue，释放对象锁后再进入 scheduler。因此提前到达的事件、旧 timeout 和重复 wake 都不能唤醒后续等待。
 
-带 deadline 的 Park 注册到持有 task 引用的最小堆；cancel 与 expiry 只有一方
-负责摘除和释放。信号状态由独立 `signal_state.lock` 保护；
-`INTERRUPTIBLE`、`KILLABLE`、`UNINTERRUPTIBLE` 对普通信号、致命信号和退出
-使用不同的唤醒规则。`PROC_STOPPED` 是独立 job-control 状态，不借用 Park。
+带 deadline 的 Park 注册到持有 task 引用的最小堆；cancel 与 expiry 只有一方负责摘除和释放。信号状态由独立 `signal_state.lock` 保护；`INTERRUPTIBLE`、`KILLABLE`、`UNINTERRUPTIBLE` 对普通信号、致命信号和退出使用不同的唤醒规则。`PROC_STOPPED` 是独立 job-control 状态，不借用 Park。
 
 锁遵循严格的部分顺序，记录在 `kernel/include/core/lock.h`：
 
 ```text
-cg_node.lock -> proc_lock -> runq_lock -> pfa.lock
-proc_lock -> signal_state.lock
-proc_lock -> files_struct.lock -> VFS global-file/vnode locks
-proc_lock -> mm_struct.lock
-proc_lock -> a20_handle_table.lock
-driver registry/IRQ locks -> device-private locks
-g_lwip_lock -> g_net_lock
+cg_node.lock -> proc_lock -> runq_lock -> pfa.lockproc_lock -> signal_state.lockproc_lock -> files_struct.lock -> VFS global-file/vnode locksproc_lock -> mm_struct.lockproc_lock -> a20_handle_table.lockdriver registry/IRQ locks -> device-private locksg_lwip_lock -> g_net_lock
 ```
 
-核心规则：持有自旋锁时禁止阻塞；持有 `runq_lock` 时禁止获取
-`proc_lock`；对象/设备锁内只 collect waiter，实际 wake 在释放对象锁后
-flush；持有设备或 lwIP 锁时，除非被调用方明确声明非阻塞，否则禁止调用
-VFS、内存分配或调度路径。
+核心规则：持有自旋锁时禁止阻塞；持有 `runq_lock` 时禁止获取`proc_lock`；对象/设备锁内只 collect waiter，实际 wake 在释放对象锁后flush；持有设备或 lwIP 锁时，除非被调用方明确声明非阻塞，否则禁止调用VFS、内存分配或调度路径。
 
-Linux ABI 的 Futex 实现在 `kernel/abi/linux/sys_futex.c`，支持 wait、wake、
-requeue 和私有/共享键。Futex waiter 同样保存 task 引用和 `wait_seq`，wait
-入队前在 `mm->lock -> futex lock` 下做不缺页的用户值二次检查。Native 程序
-使用 `event_wait` 替代。
+Linux ABI 的 Futex 实现在 `kernel/abi/linux/sys_futex.c`，支持 wait、wake、requeue 和私有/共享键。Futex waiter 同样保存 task 引用和 `wait_seq`，wait入队前在 `mm->lock -> futex lock` 下做不缺页的用户值二次检查。Native 程序使用 `event_wait` 替代。
 
-完整状态机、所有权表和验证入口见
-[进程、调度与阻塞协议](process-scheduler.md)；公平/延迟选择策略、资格门控、
-空闲窃取和时间片旋钮见 [EEVDF 调度器设计](eevdf-scheduler.md)。
+完整状态机、所有权表和验证入口见[进程、调度与阻塞协议](process-scheduler.md)；公平/延迟选择策略、资格门控、空闲窃取和时间片旋钮见 [EEVDF 调度器设计](eevdf-scheduler.md)。
 
 ### 文件系统与 VFS（`kernel/fs/`）
 
@@ -263,8 +209,7 @@ virtio-net 驱动位于 `kernel/drivers/net/virtio_net.c`，每个实例持有 `
 内置驱动通过 `DRIVER_REGISTER` 宏放入 `.driver_init` 链接器段；板级配置通过 `BOARD_REGISTER` 放入 `.board_init` 段。启动顺序为：
 
 ```text
-arch_early_init() -> board->early_init() -> driver_core_init()
-  -> board->enumerate_devices() -> driver_probe_all() -> subsystem_init()
+arch_early_init() -> board->early_init() -> driver_core_init()-> board->enumerate_devices() -> driver_probe_all() -> subsystem_init()
 ```
 
 当前驱动包括 virtio-blk、virtio-net、UART、PTY、loop。各驱动私有锁顺序记录在 [docs/drivers/lock-order.md](drivers/lock-order.md)。
@@ -282,44 +227,29 @@ Channel 传递 handle 时，接收方权限为 `receiver_rights = sender_rights 
 
 ## 设计速查
 
-**哪些代码运行在内核空间？**  
-驱动、网络栈、文件系统、内存管理和调度器都在同一个特权地址空间内运行。
+**哪些代码运行在内核空间？**驱动、网络栈、文件系统、内存管理和调度器都在同一个特权地址空间内运行。
 
-**用户空间能看到什么隔离？**  
-每个用户资源都是带 rights 的 handle，内核在每次操作时校验 handle 及其权限。内存只能通过 VMO/VMAR 共享或映射。
+**用户空间能看到什么隔离？**每个用户资源都是带 rights 的 handle，内核在每次操作时校验 handle 及其权限。内存只能通过 VMO/VMAR 共享或映射。
 
-**什么时候用 Linux ABI？**  
-需要直接运行现有 musl 程序（git、vim、fastfetch、mksh）而不重新编译时。
+**什么时候用 Linux ABI？**需要直接运行现有 musl 程序（git、vim、fastfetch、mksh）而不重新编译时。
 
-**什么时候用 Native ABI？**  
-编写面向 A20OS 的新程序，需要更小、基于 capability 的接口时。
+**什么时候用 Native ABI？**编写面向 A20OS 的新程序，需要更小、基于 capability 的接口时。
 
-**两套 ABI 各有多少系统调用？**  
-Linux ABI：223 个；Native ABI：90 个。
+**两套 ABI 各有多少系统调用？**Linux ABI：223 个；Native ABI：109 个。
 
-**支持哪些架构？**  
-RISC-V 64、ARM64、x86_64、LoongArch 64。物理板：VisionFive 2（RISC-V）和龙芯 LS2K1000（LoongArch）。
+**支持哪些架构？**RISC-V 64、ARM64、x86_64、LoongArch 64。物理板：VisionFive 2（RISC-V）和龙芯 LS2K1000（LoongArch）。
 
-**SMP 并发如何保证安全？**  
-通过文档化的锁顺序、per-CPU 运行队列、显式
-`on_rq/dispatching/on_cpu` 所有权、带序号 Park/Wake、异步 task 引用和持久
-抢占请求。`make check-concurrency-foundation` 检查基础契约；
-`make check-proc-step8-local` 执行双架构 1 核/8 核累计压力矩阵。
+**SMP 并发如何保证安全？**通过文档化的锁顺序、per-CPU 运行队列、显式`on_rq/dispatching/on_cpu` 所有权、带序号 Park/Wake、异步 task 引用和持久抢占请求。`make check-concurrency-foundation` 检查基础契约；`make check-proc-step8-local` 执行双架构 1 核/8 核累计压力矩阵。
 
-**内存共享怎么工作？**  
-先用 `vm_create_object` 创建 VMO，再用 `vm_map` 把它映射到一个或多个 VMAR。最终生效的保护位是请求保护、handle rights 和 VMAR 标志三者的交集。
+**内存共享怎么工作？**先用 `vm_create_object` 创建 VMO，再用 `vm_map` 把它映射到一个或多个 VMAR。最终生效的保护位是请求保护、handle rights 和 VMAR 标志三者的交集。
 
-**Native IPC 如何替代信号？**  
-进程间通知通过 Channel 消息，等待通过 EventQ，子进程终止通过 `task_wait`。Linux 兼容层在这些原语之上模拟 POSIX 信号语义。
+**Native IPC 如何替代信号？**进程间通知通过 Channel 消息，等待通过 EventQ，子进程终止通过 `task_wait`。Linux 兼容层在这些原语之上模拟 POSIX 信号语义。
 
-**网络如何配置？**  
-完全通过内核命令行：`a20.ip`、`a20.netmask`、`a20.gateway`、`a20.dns`、`a20.dhcp`、`a20.hostname`。没有编译期默认值。
+**网络如何配置？**完全通过内核命令行：`a20.ip`、`a20.netmask`、`a20.gateway`、`a20.dns`、`a20.dhcp`、`a20.hostname`。没有编译期默认值。
 
-**如何为特定板子构建运行？**  
-`make ARCH=<arch> BOARD=<board> run`。用 `make check-kernel-build` 构建全部四种 QEMU 架构。
+**如何为特定板子构建运行？**`make ARCH=<arch> BOARD=<board> run`。用 `make check-kernel-build` 构建全部四种 QEMU 架构。
 
-**Native ABI 完整规范在哪里？**  
-[docs/native-abi/00-overview.md](native-abi/00-overview.md)。
+**Native ABI 完整规范在哪里？**[docs/native-abi/00-overview.md](native-abi/00-overview.md)。
 
 ---
 

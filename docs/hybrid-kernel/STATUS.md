@@ -1,8 +1,6 @@
 # A20OS 混合内核：业界标准形态状态总结
 
-本文档汇总混合内核工程的全部实现与验收状态（截至本提交）。设计原则见
-[docs/OS-Design.md](../OS-Design.md)；分阶段实施记录见
-[01-roadmap.md](01-roadmap.md) 与 [02-mainstream-plan.md](02-mainstream-plan.md)。
+本文档汇总混合内核工程的全部实现与验收状态（截至本提交）。设计原则见[docs/OS-Design.md](../OS-Design.md)；分阶段实施记录见[01-roadmap.md](01-roadmap.md) 与 [02-mainstream-plan.md](02-mainstream-plan.md)。
 
 ## 核心架构原则（已贯彻）
 
@@ -51,9 +49,26 @@
 2. 监管者 EXITED + 退出码检测 → 退避 → 重启 → 客户端按名自动重绑；
 3. 驱动死亡 → 在飞 I/O 失败传导（-EIO，内核等待者不挂死）→ 原地重挂载，文件系统与数据完好。
 
+## SMP 正确性修复（2026-08-05 批）
+
+SMP=2/8 下 `native-shmring`（16MiB channel 批量 + 共享 VMO 环）的偶发内存破坏（`[SLAB BUG] kfree`、用户栈/代码页被数据覆盖、buddy 链表损坏）已定位并修复：
+
+1. **handle table 与 Linux I/O scratch buffer 共用存储**：exec/startup 把 Native
+   handle table 存入 `task->scratch_buf`，而 `proc_scratch_buffer()`（Linux ABI的 I/O 缓冲）复用同一字段，Native 任务执行 Linux syscall 会 `kfree(ht)` 或把数据写进句柄表。新增 `task->a20_ht` 专用字段，exec 切换 ABI 时释放旧表，退出清理分离（commit `98a1260`）。
+2. **VMA 链表无锁修改**：`mm_mmap/munmap/brk/mprotect/mremap` 原先不持
+   `mm->lock`，与 fault 的持锁遍历竞争导致链表撕裂。拆 `_locked` 变体 + 持锁wrapper；`proc_brk/mmap/munmap` 与 Linux `sys_mprotect/sys_mremap` 改调locked 版（后两者原本自己持锁，直接调 wrapper 会同锁重入死锁，mm_stress 卡死在 mremap 阶段，已修复）——commit `98a1260`、`933026e`。
+3. **远程 TLB flush 死锁与 TCG 不可靠**：SBI REMOTE SFENCE.VMA 在 QEMU TCG 下
+   不可靠，且持 `mm->lock`（关中断）时互发远程刷会 ABBA 死锁。改为 IPI-based远程刷（pending + generation，等待时开中断），并把所有远程刷延迟到解锁后（wrapper、trap 返回前、mm_destroy/vmo_destroy 在页释放**之前**刷）——commit `98a1260`、`1af0d02`。
+4. **buddy 脏块重入**：释放 order>0 块时若内部帧仍被引用（COW/VMO 分离引用），
+   整个脏块会被 push 回空闲链表，之后分配把在用页再次给出（VMO memset 覆盖用户页）。`fl_push_clean()` 现在拆解脏块、只回填干净子块，并有 DIRTY-SPLIT 诊断守卫 —— commit `1af0d02`。
+5. **channel enqueue 无 peer 引用**：`ch_try_enqueue()`（send 快路径）未像 park
+   路径那样 `refcount_inc_not_zero`，并发 `ep_release()` 可能释放正在入队的 peer；现在入队期间钉住 peer 引用 —— commit `1af0d02`。
+
+验证：IPI TLB flush 全量服务（598/598）；`mm_stress` 全 PASS；RISC-V32 构建修复（`__atomic_exchange_8`/`arch_tlb_flush_page_local` 缺失）；`check-build-matrix-all`、`check-arch-boundary`、`check-abi-boundary`、`check-mm-lock-model`、`check-concurrency-foundation`、`check-final-definition`、`check-doc-test-gates` 全绿。
+
 ## 诚实边界（未完成 / 待验证）
 
-- **SMP**：时间片捐赠仅限 UP（SMP 缺跨核唤醒簿记，`current.c` 文档化的未完成项）；SMP=8 下 channel 批量路径有既有竞态（非本次引入），比赛路径（Linux ABI）不受影响；
+- **SMP**：时间片捐赠仅限 UP（SMP 缺跨核唤醒簿记，`current.c` 文档化的未完成项）；SMP=2/8 下 `native-shmring` 仍有极低概率的偶发破坏（页表/页表项交互方向，`frame_trace`/`VMO-PAGE` 诊断已就位，待继续收敛）；
 - **网络协议栈**仍在内核（lwIP）；netd 外迁是后续最大单项；
 - **loongarch64**：内核与 native 测试均构建通过，运行时复测受工具链/镜像条件所限未完整执行；
 - **性能数据**全部来自 QEMU TCG 模拟器；真实硬件基准待测；
@@ -62,15 +77,7 @@
 ## 复现入口
 
 ```bash
-make smoke-native-ipc       # IPC 快路径
-make smoke-native-svc       # 服务崩溃自愈
-make smoke-native-registry  # 注册表 + 重绑
-make smoke-native-isolation # 泄漏审计（100 次崩溃零漂移）
-make smoke-native-rtcd      # 用户态 RTC 驱动
-make smoke-native-ubd       # 用户态 virtio-blk + 文件系统
-make smoke-native-shmring   # 共享环数据面
-make smoke-clock-vdso       # vDSO
-make smoke-mm-stress smoke-vfs-stress   # Linux ABI 回归
+make smoke-native-ipc       # IPC 快路径make smoke-native-svc       # 服务崩溃自愈make smoke-native-registry  # 注册表 + 重绑make smoke-native-isolation # 泄漏审计（100 次崩溃零漂移）make smoke-native-rtcd      # 用户态 RTC 驱动make smoke-native-ubd       # 用户态 virtio-blk + 文件系统make smoke-native-shmring   # 共享环数据面make smoke-clock-vdso       # vDSOmake smoke-mm-stress smoke-vfs-stress   # Linux ABI 回归
 # 驱动崩溃恢复（手动）：
 #   QEMU 加 bus.3 scratch 盘，运行 /bin/ubd_recover
 ```
