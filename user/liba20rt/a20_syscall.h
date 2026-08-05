@@ -235,5 +235,9 @@ static inline int64_t a20_syscall6(uint64_t nr, uint64_t a0, uint64_t a1,
 /* ===== Sync (0x0B00) ===== */
 #define A20_SYS_futex_wait        0x0B00
 #define A20_SYS_futex_wake        0x0B01
+#define A20_SYS_device_map_mmio   0x0C00
+#define A20_SYS_device_irq_listen 0x0C01
+#define A20_SYS_device_irq_ack    0x0C02
+#define A20_SYS_device_irq_unlisten 0x0C03
 
 #endif
