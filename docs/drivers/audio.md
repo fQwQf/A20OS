@@ -74,11 +74,7 @@ RISC-V64 的 HDA 运行依赖 `kernel/arch/riscv64/platform/pci_host.c` 提供 E
 ## 验证
 
 ```bash
-make smoke-hda
-make smoke-audio-userspace
-make PYTHON='conda run -n a20os python' smoke-virtio-sound
-make run-gui-riscv64 GUI_MEDIA=/path/to/video.mp4
-make run-gui-riscv64 QEMU_GUI_AUDIO_DEVICE=virtio
+make smoke-hdamake smoke-audio-userspacemake PYTHON='conda run -n a20os python' smoke-virtio-soundmake run-gui-riscv64 GUI_MEDIA=/path/to/video.mp4make run-gui-riscv64 QEMU_GUI_AUDIO_DEVICE=virtio
 ```
 
 `smoke-hda` 验证 codec topology、driver binding 和 BDL DMA。`smoke-audio-userspace` 播放五秒 tone，通过 QEMU WAV backend 检查 HDA 的帧数、非静音、采样连续性，并要求一次 stream start、零 underrun。`smoke-virtio-sound` 在同样的用户态负载下只挂载 `virtio-sound-pci`，验证协议发现、control/TX queue、DRAIN/RELEASE 和 WAV 输出。

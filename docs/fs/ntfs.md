@@ -29,8 +29,7 @@ A20OS 内置 NTFS 读/写文件系统（`kernel/fs/diskfs/ntfs.c`）。实现依
 mount -t ntfs /dev/vda2 /mnt
 ```
 
-在 `vfs_mount_bc` 中注册为 `ntfs`（`FS_TYPE_NTFS`）。无设备探测时的自动挂载回退顺序
-为 `ext4 → vfat`，NTFS 需显式指定 `-t ntfs`。
+在 `vfs_mount_bc` 中注册为 `ntfs`（`FS_TYPE_NTFS`）。无设备探测时的自动挂载回退顺序为 `ext4 → vfat`，NTFS 需显式指定 `-t ntfs`。
 
 ## 限制
 

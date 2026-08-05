@@ -2,12 +2,7 @@
 
 `BLOCKING_POINT_PROTOCOL_AUDIT`
 
-This is the acceptance record for `PROC.md` step 4.  A blocking operation is
-closed only when its persistent condition, condition lock, Park token,
-asynchronous task reference, one-shot wake winner, and resume cleanup are all
-identifiable.  Signal/stop/exit policy is closed by
-`docs/testing/signal-exit-audit.md`; timeout-heap capacity remains the
-separately scoped work of step 6.
+This is the acceptance record for `PROC.md` step 4.  A blocking operation isclosed only when its persistent condition, condition lock, Park token,asynchronous task reference, one-shot wake winner, and resume cleanup are allidentifiable.  Signal/stop/exit policy is closed by`docs/testing/signal-exit-audit.md`; timeout-heap capacity remains theseparately scoped work of step 6.
 
 ## Audited blocking families
 
@@ -26,52 +21,27 @@ separately scoped work of step 6.
 | virtio-blk | request completion and in-flight state under `virtio_blk_instance.lock` | Each request owns a wait queue; IRQ/poll completion persists `done`, detaches waiters under the device lock, and flushes after unlock.  Deadline and event share one token. |
 | UART and input | RX/event ring state under `rx_lock` or device instance lock | The IRQ path persists input before collecting tokenized wait entries.  Waiters register before the locked ring rescan, then unlink and finish on event/signal/cancel. |
 
-All normal wait-queue entries, futex waiters, wake-batch entries, and timeout
-heap entries contain both an owned task reference and the Park sequence.  A
-waker first detaches or transfers that reference, drops the condition lock,
-attempts the one-shot sequence transition, and releases the reference exactly
-once.
+All normal wait-queue entries, futex waiters, wake-batch entries, and timeoutheap entries contain both an owned task reference and the Park sequence.  Awaker first detaches or transfers that reference, drops the condition lock,attempts the one-shot sequence transition, and releases the reference exactlyonce.
 
 ## Explicit compatibility whitelist
 
 The following paths are intentionally visible to the static gate:
 
 1. `proc_task_alloc_storage()` initializes a newly allocated, unpublished task
-   as `PROC_BLOCKED`.  It has no active Park token and becomes runnable only at
-   one of the whitelisted task-publication call sites.
+   as `PROC_BLOCKED`.  It has no active Park token and becomes runnable only atone of the whitelisted task-publication call sites.
 2. `proc_park_commit()` is the only live-task path that writes
    `PROC_BLOCKED`.
 3. `proc_make_ready()` remains for new task publication, current-task yield,
-   and cgroup unthrottle.  Its Park branch delegates to
-   `proc_try_wake_locked(task, wait_seq, EVENT)`, so it cannot bypass a live
-   token.
+   and cgroup unthrottle.  Its Park branch delegates to`proc_try_wake_locked(task, wait_seq, EVENT)`, so it cannot bypass a livetoken.
 4. Signal, stop, and exit paths no longer appear in this whitelist.  They use
-   mode-checked Park wake reasons or the explicit STOPPED resumption helper,
-   as recorded in `docs/testing/signal-exit-audit.md`.
+   mode-checked Park wake reasons or the explicit STOPPED resumption helper,as recorded in `docs/testing/signal-exit-audit.md`.
 5. Linux `poll`, `select`, and `epoll` currently use bounded periodic
-   `proc_park_wait()` deadlines and rescan persistent readiness after every
-   quantum.  They store no asynchronous task pointer and cannot lose
-   correctness, but they are not yet event-driven multi-object subscriptions.
-   This bounded compatibility wrapper is accepted for step 4 and retained as
-   performance/latency debt, not represented as a completed VFS poll-hook
-   design.
+   `proc_park_wait()` deadlines and rescan persistent readiness after everyquantum.  They store no asynchronous task pointer and cannot losecorrectness, but they are not yet event-driven multi-object subscriptions.This bounded compatibility wrapper is accepted for step 4 and retained asperformance/latency debt, not represented as a completed VFS poll-hookdesign.
 
-There is no remaining `proc_block_until()` call or implementation.  No module
-outside task initialization and the scheduler writes `on_rq`, `cpu_id`,
-`rq_next`, or `rq_prev`.
+There is no remaining `proc_block_until()` call or implementation.  No moduleoutside task initialization and the scheduler writes `on_rq`, `cpu_id`,`rq_next`, or `rq_prev`.
 
 ## Regression and gate coverage
 
-`futex_stress` runs an unrelated-futex wake storm while a different futex must
-reach its deadline.  This rejects the removed global wake-generation shortcut,
-which could report a spurious successful wait.  `proc_stress` repeatedly
-auto-reaps `vfork` children while the parent is blocked on the child-embedded
-completion.  `lifetime_stress` also runs scheduler, futex, process, I/O-event,
-VFS, and socket stress before verifying that task, PID, wait, wake, timeout,
-and reference counts return to baseline.
+`futex_stress` runs an unrelated-futex wake storm while a different futex mustreach its deadline.  This rejects the removed global wake-generation shortcut,which could report a spurious successful wait.  `proc_stress` repeatedlyauto-reaps `vfork` children while the parent is blocked on the child-embeddedcompletion.  `lifetime_stress` also runs scheduler, futex, process, I/O-event,VFS, and socket stress before verifying that task, PID, wait, wake, timeout,and reference counts return to baseline.
 
-`make check-blocking-point-boundary` enforces the old-API ban, direct-state and
-runqueue-field boundaries, the finite `proc_make_ready()` whitelist, tokenized
-asynchronous wait structures, and the targeted regression markers.
-`make check-proc-step4-local` adds the dual-architecture debug/release runtime
-matrix; `make check-proc-step4` additionally runs both formal CAgent entries.
+`make check-blocking-point-boundary` enforces the old-API ban, direct-state andrunqueue-field boundaries, the finite `proc_make_ready()` whitelist, tokenizedasynchronous wait structures, and the targeted regression markers.`make check-proc-step4-local` adds the dual-architecture debug/release runtimematrix; `make check-proc-step4` additionally runs both formal CAgent entries.
