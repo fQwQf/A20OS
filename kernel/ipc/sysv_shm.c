@@ -296,8 +296,11 @@ uint64_t sysv_shm_at(int shmid, uint64_t shmaddr, int shmflg)
     vma->pte_flags = flags;
     vma->file_fd = -1;
     vma->sysv_shmid = shmid;
+    uint64_t mm_flags = spin_lock_irqsave(&t->mm->lock);
     mm_insert_vma(t->mm, vma);
     t->mm->total_vm += npages;
+    spin_unlock_irqrestore(&t->mm->lock, mm_flags);
+    mm_vma_flush_deferred(t->mm);
 
     return addr;
 }

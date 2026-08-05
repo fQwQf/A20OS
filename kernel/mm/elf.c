@@ -103,8 +103,11 @@ static int elf_add_vma(mm_struct_t *mm, vaddr_t start, vaddr_t end,
     vma->vm_flags  = vm_flags;
     vma->pte_flags = pte_flags;
     vma->file_fd   = -1;
+    uint64_t flags = spin_lock_irqsave(&mm->lock);
     mm_insert_vma(mm, vma);
     mm->total_vm += (end - start) / PAGE_SIZE;
+    spin_unlock_irqrestore(&mm->lock, flags);
+    mm_vma_flush_deferred(mm);
     return 0;
 }
 

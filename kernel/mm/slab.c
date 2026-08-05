@@ -55,6 +55,17 @@ typedef struct big_alloc_hdr {
 _Static_assert(sizeof(big_alloc_hdr_t) == 16,
                "large kmalloc results must retain 16-byte alignment");
 
+#define BIG_CANARY 0xCAFEBABEUL
+
+// 检查 big-alloc 块是否被越界写（canary 位于块尾）。返回 0 = 完好。
+static int big_alloc_canary_ok(const big_alloc_hdr_t *hdr)
+{
+    uint64_t *canary = (uint64_t *)((const uint8_t *)(hdr + 1) +
+                                    (((size_t)1 << hdr->order) * PAGE_SIZE -
+                                     sizeof(big_alloc_hdr_t) - 8));
+    return *canary == BIG_CANARY;
+}
+
 // Slab 缓存结构
 typedef struct {
     size_t         obj_size;
@@ -246,24 +257,26 @@ static __attribute__((unused)) void slab_validate_sp(slab_page_t *sp, const char
 }
 
 // 分配指定大小的内存（Slab 分配器）
-void *kmalloc(size_t size) {
+void *kmalloc_flags(size_t size, int can_reclaim) {
     if (size == 0) return NULL;
 
     if (size >= SLAB_MAX_OBJ) {
         int order = 0;
-        size_t need = ROUND_UP(size + sizeof(big_alloc_hdr_t), PAGE_SIZE);
+        size_t need = ROUND_UP(size + sizeof(big_alloc_hdr_t) + 8, PAGE_SIZE);
         while ((1u << order) * PAGE_SIZE < need) order++;
         if (order > MAX_ORDER) return NULL;
-        pfn_t pfn = pfa_alloc(order);
-        if (pfn == PFN_NONE) {
-            oom_try_reclaim();
+        pfn_t pfn = pfa_alloc_flags(order, can_reclaim);
+        if (pfn == PFN_NONE)
             return NULL;
-        }
         big_alloc_hdr_t *hdr = (big_alloc_hdr_t *)pfn_to_virt(pfn);
         hdr->magic = BIG_MAGIC;
         hdr->order = (uint16_t)order;
         hdr->_pad  = 0;
         hdr->reserved = 0;
+        uint64_t *canary = (uint64_t *)((uint8_t *)(hdr + 1) +
+                                        ((size_t)1 << order) * PAGE_SIZE -
+                                        sizeof(big_alloc_hdr_t) - 8);
+        *canary = BIG_CANARY;
         return (void *)(hdr + 1);
     }
 
@@ -289,7 +302,8 @@ void *kmalloc(size_t size) {
             sp = slab_grow(idx);
             if (!sp) {
                 spin_unlock_irqrestore(&c->lock, irq_flags);
-                oom_try_reclaim();
+                if (can_reclaim)
+                    oom_try_reclaim();
                 return NULL;
             }
         }
@@ -360,6 +374,13 @@ void kfree(void *ptr) {
             pfa.meta[pfn].flags == FRAME_F_ALLOC &&
             pfa.meta[pfn].refcount > 0 &&
             (uintptr_t)bhdr % PAGE_SIZE == 0) {
+            if (!big_alloc_canary_ok(bhdr)) {
+                printf("[SLAB BUG] kfree(%p): big-alloc canary clobbered order=%u ra=0x%lx\n",
+                       ptr, (unsigned)order, (unsigned long)caller_ra);
+                extern void a20_channel_trace_dump(void);
+                a20_channel_trace_dump();
+                panic("kfree: big-alloc canary overwritten");
+            }
             pfa_free(pfn, order);
             return;
         }
@@ -368,8 +389,19 @@ void kfree(void *ptr) {
     int is_slab = slab_page_valid(sp);
 
     if (!is_slab) {
+        pfn_t dbg_pfn = virt_to_pfn(bhdr);
         printf("[SLAB BUG] kfree(%p): invalid non-slab pointer hdr=%p magic=0x%x order=%u ra=0x%lx\n",
                ptr, (void *)bhdr, bhdr->magic, bhdr->order, (unsigned long)caller_ra);
+        if (pfn_valid(dbg_pfn))
+        printf("[SLAB BUG]   pfn=%lu flags=0x%x refcount=%u order_meta=%d cpu=%u\n",
+               (unsigned long)dbg_pfn, pfa.meta[dbg_pfn].flags,
+               pfa.meta[dbg_pfn].refcount, pfa.meta[dbg_pfn].order,
+               cpu_current_id());
+        else
+            printf("[SLAB BUG]   pfn=%lu invalid cpu=%u\n",
+                   (unsigned long)dbg_pfn, cpu_current_id());
+        extern void a20_channel_trace_dump(void);
+        a20_channel_trace_dump();
         panic("kfree: invalid pointer");
     }
 
@@ -462,6 +494,9 @@ void *krealloc(void *ptr, size_t new_size) {
 }
 
 // 分配并清零内存
+void *kmalloc(size_t size) { return kmalloc_flags(size, 1); }
+void *kmalloc_atomic(size_t size) { return kmalloc_flags(size, 0); }
+
 void *kcalloc(size_t nmemb, size_t size) {
     size_t total;
     if (__builtin_mul_overflow(nmemb, size, &total)) return NULL;
@@ -517,4 +552,12 @@ size_t slab_reclaim_spare(void)
         spin_unlock_irqrestore(&c->lock, flags);
     }
     return freed * PAGE_SIZE;
+}
+
+void *kcalloc_atomic(size_t nmemb, size_t size) {
+    size_t total;
+    if (__builtin_mul_overflow(nmemb, size, &total)) return NULL;
+    void *p = kmalloc_atomic(total);
+    if (p) memset(p, 0, total);
+    return p;
 }
