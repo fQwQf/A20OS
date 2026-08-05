@@ -44,7 +44,7 @@
 ## 已知边界
 
 - **时间片捐赠仅限 UP**：SMP 捐赠依赖跨核唤醒/IPI 簿记（`PER_CPU_CURRENT_VALIDATION`），未完成前不开放；
-- **Native ABI 偶发破坏（P0 阻塞项，改造阶段二）**：SMP=2/8 下 `native-shmring`（跨进程共享 VMO + channel 大块批量）仍有约 30% 概率的偶发内存破坏（页表/页表项交互方向）。Linux ABI 同负载下实测稳定（`mm_stress` SMP=2 连跑 15 轮零崩溃，`smoke-vfs/futex/sched/abi-linux` 全绿）。按 [03-refactor-plan.md](03-refactor-plan.md) 的定位，Native ABI 是架构研究本体，此问题必须在阶段二收敛后才能支撑后续阶段（诊断挂载点：`frame_trace_dump_pfn`、`[VMO-PAGE]`、`[PFA DIRTY-SPLIT]`、`[LOCK-STALL]`）；
+- **Native ABI SMP 破坏（已收敛，2026-08-06 复验）**：此前 SMP=2/8 下 `native-shmring` 约 30% 概率的偶发内存破坏，经 M5 修复（`98a1260`、`1af0d02`：buddy 脏块拆分、页释放 TLB 顺序、peer 引用）后，在本分支复验为 **SMP=2 连续 20 轮 + SMP=8 连续 20 轮零失败、零挂起**（复现脚本：循环 QEMU 注入 `/bin/native-shmring-rv`，smp=2/8，日志归档于 `.kernel-build/smoke/shmring-smp{2,8}/`）。残余信号：`vmo_dirty_frames`（buddy 复用未清零帧，VMO 侧 memset 兜底，合法行为）已从串口 printf 降级为 `/proc/a20/objects` 累计计数器，不再干扰用户输出解析；阶段三起若需恢复帧级追踪，可在此计数器非零增长时重新挂 `frame_trace_dump_pfn`；
 - **网络协议栈**：lwIP 已编译为用户态 netd 服务（bootarg `netd=1` 激活；未激活时内核 lwIP 行为不变）。帧环（RX/TX）与 socket 代理 RPC（create/bind/listen/accept/connect/send/recv/close/poll/getsockname/setsockopt）已实现；QEMU hostfwd 验证了完整代理链路与 TCP 握手（SYN-ACK 出帧面、accept 回调触发）。**剩余**：数据段在 lwIP 侧被丢弃（子连接 PCB 在 accept 后从 active 列表消失，`lookup pcb=0`），recv 数据回传未通——根因锁定在 tcp_process 的 accept/abort 路径，待续；
 - **loongarch64**：内核与 native 测试均构建通过，运行时复测受工具链/镜像条件所限未完整执行；
 - **性能数据**全部来自 QEMU TCG 模拟器，真实硬件基准待测；
@@ -64,10 +64,15 @@
   超时；单线程路径（`smoke-native-contract` 全四分区）完整通过。已用
   stash 对照实验证明与本分支的 STAT 改动无关。阻塞中的原生回归验证
   （handle/ipc/svc 等）在此问题收敛前无法执行；
-- **[VMO-PAGE] 诊断命中**：契约测试运行期间观察到 `[VMO-PAGE] new pfn ...
-  had content`（buddy 返回脏帧，VMO 侧已 memset 兜底，用户可见行为正确）。
-  该信号与阶段二调查对象同源，契约测试已把"新 VMO 页读零"固化为
-  用户态契约（`vmol-zero`）。
+- **[VMO-PAGE] 诊断（已处理）**：契约测试与 shmring 复验期间观察到
+  `[VMO-PAGE] new pfn ... had content`（buddy 返回未清零复用帧，VMO 侧
+  memset 兜底，用户可见行为正确）。已降级为 `/proc/a20/objects` 的
+  `vmo_dirty_frames` 累计计数器，消除串口输出交错；契约测试已把
+  "新 VMO 页读零"固化为用户态契约（`vmol-zero`）；
+- **mm_stress 45 秒门禁预算不足（HEAD 观察）**：`smoke-mm-stress`
+  （SMOKE_TIMEOUT_MM_ST=45s）在 TCG 下于 `evict-mmap` 段超时，同一镜像
+  以 180s 预算完整 PASS。非本分支改动引入（本分支 MM 改动仅为
+  printf→计数器降级，严格更快），门禁预算需按当前 TCG 耗时重校。
 
 ## 复现入口
 

@@ -572,13 +572,15 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
             "eventqs: %lu\n"
             "vmos: %lu\n"
             "vmo_pages: %lu\n"
-            "irq_bindings: %lu\n",
+            "irq_bindings: %lu\n"
+            "vmo_dirty_frames: %lu\n",
             (unsigned long)__atomic_load_n(&g_a20_objstats.handles, __ATOMIC_RELAXED),
             (unsigned long)__atomic_load_n(&g_a20_objstats.channel_eps, __ATOMIC_RELAXED),
             (unsigned long)__atomic_load_n(&g_a20_objstats.eventqs, __ATOMIC_RELAXED),
             (unsigned long)__atomic_load_n(&g_a20_objstats.vmos, __ATOMIC_RELAXED),
             (unsigned long)__atomic_load_n(&g_a20_objstats.vmo_pages, __ATOMIC_RELAXED),
-            (unsigned long)__atomic_load_n(&g_a20_objstats.irq_bindings, __ATOMIC_RELAXED));
+            (unsigned long)__atomic_load_n(&g_a20_objstats.irq_bindings, __ATOMIC_RELAXED),
+            (unsigned long)__atomic_load_n(&g_a20_objstats.vmo_dirty_frames, __ATOMIC_RELAXED));
         break;
     case PF_A20_DRIVER_LIFECYCLE:
         buf[0] = '\0';
