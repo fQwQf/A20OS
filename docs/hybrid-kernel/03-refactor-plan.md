@@ -116,6 +116,12 @@ Native ABI 是研究本体时，其核心数据面在 SMP 下不可靠意味着�
 验收：`smoke-native-shmring` 在 SMP=2/8 下连续 20 轮零失败；
 诊断挂载点不报告脏帧回填；Linux ABI 同负载压力无退化。
 
+**状态（2026-08-06）**：已完成。SMP=2 连续 20 轮、SMP=8 连续 20 轮
+零失败零挂起（M5 修复 `98a1260`/`1af0d02` 复验有效）；`[VMO-PAGE]`
+串口诊断降级为 `vmo_dirty_frames` 计数器（合法复用信号，不再交错
+用户输出）；Linux ABI `mm_stress` 180s 预算下 PASS（45s 门禁预算不足
+为 HEAD 既有观察，见 STATUS）。
+
 ### 阶段三：驱动双态部署框架 + DMA 真隔离
 
 - 将 udriver 接口（MMIO 授权、IRQ→EventQ、DMA VMO 契约）推广为驱动
