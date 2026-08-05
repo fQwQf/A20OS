@@ -43,6 +43,29 @@
   无优先级反转卡死（看门狗任务兜底）。
 - 既有全部 smoke 无退化。
 
+**结果（已达成，M1-v1 出站半程直接切换）**
+
+- 实现：`proc_park_commit_donate`（`kernel/proc/park.c`）在
+  `proc_park_commit` 的 BLOCKED 标记之后，若目标任务完全 PARKED 且同
+  CPU，则手动唤醒并以 dispatch 引用直接 `context_switch`——绕过
+  runqueue 插入与选取。捐赠深度隐式为 1（捐赠者已 BLOCKED 不可再
+  运行），跨 CPU/未停驻等一切不满足条件时回退普通 `sched()`。
+- 关键设计修正：send 阶段的唤醒必须**延迟**（`a20_channel_send_dwc`
+  defer_wake），否则服务端在捐赠检查前已被常规 wake 改状态；捐赠
+  不可行时由 `a20_channel_recv_begin_donate` 补发延迟唤醒，语义与
+  原路径完全一致（含 typed-channel 头部检查）。
+- 实测（TCG、smp=1，2000 次 ping-pong，3 轮中位数）：
+  legacy send+recv 79583/78675/81206 ns/RT，channel_call+捐赠
+  66536/66816/68385 ns/RT，比值 **83–84（RPC 提升 ~16–17%）**；
+  smp=4 复测 82。捐赠前 channel_call 对比 legacy 为 102–104。
+  成本分解：陷入 ~9µs/次、上下文切换 ~18–21µs/次，直接切换消去
+  一次切换中的 runqueue/wake 簿记部分（实测 ~13µs）。
+- 回归：`smoke-native-{ipc,svc,shmring,rtcd,mm,futex,signal}`、
+  `smoke-clock-vdso`、`smoke-mm-stress`、`smoke-sched-stress`、
+  `smoke-vfs-stress` 全绿；loongarch64 内核构建通过。
+- 待做：回半程直接切换（服务端回复时对称切回）；多核并发 RPC
+  压力下捐赠率统计；bootarg `ipc.donate=0` 对照开关。
+
 ## M2：服务资源硬隔离（稳定性地基）
 
 **动机**：主流混合内核的服务崩溃不能带走资源、也不能耗尽资源。

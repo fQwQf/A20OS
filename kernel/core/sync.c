@@ -84,6 +84,24 @@ unsigned wait_queue_wake_one(wait_queue_t *q, uintptr_t key,
     return proc_wake_q_flush(&wake_q);
 }
 
+/*
+ * wait_queue_peek_key — return (with a live reference) the task of the
+ * first entry matching @key, without unlinking it.  Used by the IPC
+ * donation path (docs/hybrid-kernel/02-mainstream-plan.md M1), which
+ * re-validates the target's park state under proc_lock before switching.
+ */
+task_t *wait_queue_peek_key(wait_queue_t *q, uintptr_t key) {
+    if (!q)
+        return NULL;
+    uint64_t flags = spin_lock_irqsave(&q->lock);
+    wait_queue_entry_t *entry = q->head;
+    while (entry && key && entry->key != key)
+        entry = entry->next;
+    task_t *task = entry ? proc_get(entry->task) : NULL;
+    spin_unlock_irqrestore(&q->lock, flags);
+    return task;
+}
+
 unsigned wait_queue_wake_all(wait_queue_t *q, uintptr_t key,
                              proc_wake_reason_t reason) {
     unsigned woke = 0;
