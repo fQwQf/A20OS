@@ -143,6 +143,8 @@
 
 /* Network daemon (0x0D00) */
 #define A20_SYS_netd_attach        0x0D00
+#define A20_SYS_netd_sock_register  0x0D01
+#define A20_SYS_netd_tx_send       0x0D02
 
 #define A20_NATIVE_SYSCALL_COUNT  109
 
