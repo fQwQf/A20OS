@@ -460,6 +460,14 @@ static uint64_t exec_setup_native_abi(task_t *t,
         }
     }
 
+    /* Well-known service registry client endpoint (M3). */
+    uint32_t registry_h = 0;
+    if (ht) {
+        extern int64_t a20_registry_install_client(struct a20_ht_internal *ht);
+        int64_t h = a20_registry_install_client(ht);
+        if (h >= 0) registry_h = (uint32_t)h;
+    }
+
     if (info->interp_base) {
         return elf_setup_stack_a20_dynamic(
             info->stack_top, argc, k_argv, k_envp, info,
@@ -471,7 +479,7 @@ static uint64_t exec_setup_native_abi(task_t *t,
     return elf_setup_stack_a20(info->stack_top, argc,
                                k_argv, k_envp, info,
                                stdin_h, stdout_h, stderr_h, self_h,
-                               root_h, cwd_h, 0);
+                               root_h, cwd_h, 0, registry_h);
 }
 #endif /* CONFIG_ABI_NATIVE */
 
