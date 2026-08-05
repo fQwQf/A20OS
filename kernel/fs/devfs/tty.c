@@ -7,7 +7,7 @@
 #include "core/sync.h"
 #include "proc/proc.h"
 #include "sys/usercopy.h"
-#include "abi/linux/ioctl.h"
+#include "core/ioctl.h"
 
 extern void uart_putc(char c);
 extern int  uart_getc(void);

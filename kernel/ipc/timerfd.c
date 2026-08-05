@@ -1,6 +1,6 @@
 #include "ipc/timerfd.h"
 
-#include "abi/linux/poll.h"
+#include "core/poll.h"
 #include "core/consts.h"
 #include "core/lock.h"
 #include "core/sync.h"
