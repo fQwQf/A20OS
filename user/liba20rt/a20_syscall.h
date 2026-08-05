@@ -239,5 +239,6 @@ static inline int64_t a20_syscall6(uint64_t nr, uint64_t a0, uint64_t a1,
 #define A20_SYS_device_irq_listen 0x0C01
 #define A20_SYS_device_irq_ack    0x0C02
 #define A20_SYS_device_irq_unlisten 0x0C03
+#define A20_SYS_registry_claim    0x0A03
 
 #endif

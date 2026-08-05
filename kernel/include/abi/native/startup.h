@@ -31,6 +31,12 @@ typedef struct a20_start_info {
 
     uint64_t page_size;
     uint64_t user_clock_freq;
+
+    /* Well-known service-registry client endpoint
+     * (docs/hybrid-kernel/02-mainstream-plan.md M3); A20_HANDLE_NULL when
+     * the registry is unavailable. */
+    a20_handle_t service_registry;
+    uint32_t _pad_registry;
 } a20_start_info_t;
 
 #endif
