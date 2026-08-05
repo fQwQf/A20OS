@@ -526,4 +526,4 @@ L0 (IRQ) < L1 (handle table) < L2 (内核对象) < L3 (调度器) < L4 (mm)
 | 0x0B00 | `futex_wait` | `int64_t futex_wait(a20_futex_wait_args_t *args)` | futex 等待（复用内核 futex 核心，见 01-types.md §22） |
 | 0x0B01 | `futex_wake` | `int64_t futex_wake(a20_futex_wake_args_t *args)` | futex 唤醒 |
 
-**总计：93 个 syscall。**
+**总计：109 个 syscall。**
