@@ -32,7 +32,7 @@ A20OS 在运行空间上更像宏内核：
 
 为什么这样组合？内核内部路径因为函数调用而保持快速，而用户可见资源仍然受 capability 检查约束。这样兼顾了宏内核的性能和微内核的对象纪律。
 
-进一步的混合内核改造（用户态服务化、驱动外迁、`channel_call` 融合 RPC 快路径、svcman 崩溃自愈）的设计与实施路线见[docs/hybrid-kernel/00-design.md](hybrid-kernel/00-design.md)。
+混合内核的当前设计形态（用户态服务化、驱动外迁、`channel_call` 融合 RPC 快路径、svcman 崩溃自愈）见[docs/hybrid-kernel/00-design.md](hybrid-kernel/00-design.md)，机制语义见[01-mechanisms.md](hybrid-kernel/01-mechanisms.md)。
 
 ---
 
