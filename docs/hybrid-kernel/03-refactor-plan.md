@@ -134,6 +134,14 @@ Native ABI 是研究本体时，其核心数据面在 SMP 下不可靠意味着�
 验收：同一份驱动源码以内核态和用户态两种部署通过同一套功能契约测试；
 无 IOMMU 授权窗口的 DMA 访问被硬件拒绝（可观测的 fault 事件）。
 
+**状态（2026-08-06）**：框架骨架落地，见
+[04-dual-placement.md](04-dual-placement.md)。环境层
+（`drivers/dual/drv_env.h`）与首个共享设备协议层
+（`drivers/dual/goldfish_rtc.h`）生效；goldfish RTC 同一协议源码
+已在两种部署下运行：内核壳 boot probe 输出真实设备时间，用户壳
+`smoke-native-rtcd` PASS。IOMMU、DMA ops、所有权仲裁与第二个样板
+（候选 virtio-input）未开始。
+
 ### 阶段四：服务接口 IDL 化
 
 现有 svc 协议（`svc_proto.h`、`shmring_proto.h`、`ubd_proto.h`）是

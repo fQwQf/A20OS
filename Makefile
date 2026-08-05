@@ -3435,9 +3435,25 @@ $(NATIVE_RTCD_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $
 		user/liba20rt/a20-generic.ld user/liba20rt/crt0_a20.h user/liba20rt/a20_syscall.h user/liba20rt/a20_device.h
 	$(call NATIVE_SVC_RECIPE,$(NATIVE_CC),$(NATIVE_CFLAGS),$(NATIVE_CRT0),user/tests/test_native_rtcd.c,$@)
 
+define NATIVE_RTCD_RECIPE
+@mkdir -p $(dir $(5))
+$(1) -ffreestanding -nostdlib -static \
+    $(2) \
+    -Iuser -Iuser/liba20rt -Ikernel/include \
+    -T$(NATIVE_LD) \
+    $(3) \
+    $(NATIVE_SDK_SRC) \
+    $(NATIVE_COMPILER_RT_SRC) \
+    $(NATIVE_ARCH_SRC) \
+    $(4) \
+    $(NATIVE_LIBS) \
+    -o $(5)
+endef
+
 $(NATIVE_RTCDD_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) user/svc/rtcd.c user/svc/rtcd_proto.h \
-		user/liba20rt/a20-generic.ld user/liba20rt/crt0_a20.h user/liba20rt/a20_syscall.h user/liba20rt/a20_device.h
-	$(call NATIVE_SVC_RECIPE,$(NATIVE_CC),$(NATIVE_CFLAGS),$(NATIVE_CRT0),user/svc/rtcd.c,$@)
+		user/liba20rt/a20-generic.ld user/liba20rt/crt0_a20.h user/liba20rt/a20_syscall.h \
+		kernel/include/drivers/dual/drv_env.h kernel/include/drivers/dual/goldfish_rtc.h
+	$(call NATIVE_RTCD_RECIPE,$(NATIVE_CC),$(NATIVE_CFLAGS),$(NATIVE_CRT0),user/svc/rtcd.c,$@)
 
 native-rtcd-arch: $(NATIVE_RTCD_BIN) $(NATIVE_RTCDD_BIN)
 

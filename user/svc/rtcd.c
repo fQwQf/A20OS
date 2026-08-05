@@ -1,11 +1,19 @@
 /*
- * rtcd — user-space goldfish-RTC driver service (hybrid-kernel phase 4).
+ * rtcd — user-space goldfish-RTC driver service (hybrid-kernel phase 4,
+ * dual-placement user shell).
  *
  * Owns the QEMU virt goldfish RTC entirely from user space: the kernel
  * only mapped the whitelisted MMIO window and routes IRQ 11 to this
  * task's event queue.  Requests arrive on the service channel endpoint
  * (installed at A20_RTCD_EP_SLOT by the supervisor).
+ *
+ * The device register protocol is shared verbatim with the kernel
+ * placement (kernel/drivers/char/goldfish_rtc_kdrv.c) through
+ * kernel/include/drivers/dual/goldfish_rtc.h — only the shell differs
+ * (this main loop + EventQ vs kernel init/ISR).
  */
+#define DRV_ENV_USER 1
+#include "drivers/dual/goldfish_rtc.h"
 #include "liba20rt/a20_sdk.h"
 #include "liba20rt/crt0_a20.h"
 #include "../svc/rtcd_proto.h"
@@ -13,23 +21,16 @@
 #define IRQ_TAG 0x52435449ULL /* "RTCI" — event user_data for the irq */
 #define CH_TAG  0x52435443ULL /* "RTCC" — event user_data for the channel */
 
-static volatile uint32_t *g_rtc;
+static uint64_t g_rtc;
 
 static uint64_t rtc_read_ns(void)
 {
-    uint32_t lo, hi;
-    do {
-        hi = g_rtc[RTC_TIME_HIGH / 4];
-        lo = g_rtc[RTC_TIME_LOW / 4];
-    } while (hi != g_rtc[RTC_TIME_HIGH / 4]);
-    return ((uint64_t)hi << 32) | lo;
+    return grtc_read_ns(g_rtc);
 }
 
 static void rtc_set_alarm_ns(uint64_t ns)
 {
-    g_rtc[RTC_ALARM_HIGH / 4] = (uint32_t)(ns >> 32);
-    g_rtc[RTC_ALARM_LOW / 4] = (uint32_t)ns;
-    g_rtc[RTC_IRQ_ENABLE / 4] = 1;
+    grtc_set_alarm_ns(g_rtc, ns);
 }
 
 /* Returns 1 = handled one message, 0 = queue empty, 42 = crash request,
@@ -80,14 +81,13 @@ int main(int argc, char **argv, char **envp)
 #define RTCD_LOG(msg) a20_hdl_write_buf(out, msg, sizeof(msg) - 1, (void *)0)
     RTCD_LOG("rtcd: start\n");
 
-    uint64_t rtc_va = 0;
-    if (a20_device_map_mmio(GOLDFISH_RTC_BASE, GOLDFISH_RTC_SIZE,
-                            3 /* RW */, &rtc_va) != A20_OK) {
+    uint64_t rtc_va = grtc_map();
+    if (!rtc_va) {
         RTCD_LOG("rtcd: map_mmio failed\n");
         return 2;
     }
     RTCD_LOG("rtcd: mmio mapped\n");
-    g_rtc = (volatile uint32_t *)(uintptr_t)rtc_va;
+    g_rtc = rtc_va;
 
     a20_handle_t eq;
     if (a20_event_queue_create(&eq) != A20_OK)
@@ -126,7 +126,7 @@ int main(int argc, char **argv, char **envp)
 
         if (ev.user_data == IRQ_TAG) {
             /* Alarm fired: clear the device IRQ, report, re-arm the line. */
-            g_rtc[RTC_CLEAR_ALARM / 4] = 0;
+            grtc_clear_alarm(g_rtc);
             if (alarm_pending) {
                 uint64_t ns = rtc_read_ns();
                 a20_channel_send(ep, &ns, sizeof(ns), 0, 0);
