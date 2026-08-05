@@ -1,6 +1,6 @@
 # 混合内核：能力与边界清单
 
-本文档以清单形式说明 A20OS 混合内核**当前具备的能力**与**已知边界**。设计总览见 [00-design.md](00-design.md)，机制语义见 [01-mechanisms.md](01-mechanisms.md)，演进方向见 [02-mainstream-plan.md](02-mainstream-plan.md)，**当前生效的改造路线见 [03-refactor-plan.md](03-refactor-plan.md)**（Native ABI 为研究本体、数据面/控制面分离、可移动边界）。
+本文档以清单形式说明 A20OS 混合内核**当前具备的能力**与**已知边界**。设计总览见 [00-design.md](00-design.md)，机制语义见 [01-mechanisms.md](01-mechanisms.md)，演进方向见 [02-mainstream-plan.md](02-mainstream-plan.md)，**当前生效的改造路线见 [03-refactor-plan.md](03-refactor-plan.md)**（Native ABI 为研究本体、数据面/控制面分离、可移动边界），双态部署驱动框架见 [04-dual-placement.md](04-dual-placement.md)。
 
 ## 核心架构原则（已贯彻）
 
@@ -30,6 +30,7 @@
 | netd 帧面 + socket 代理（lwIP 用户态 + 帧环 + RPC 代理） | host→guest 与 guest→host TCP echo 数据面已通 | `netd=1` 下 hostfwd echo（`HOST_GOT b'netd-sock-echo' len=14`）与 `NETD_SOCK_TEST: PASS` |
 | 核心原语契约测试（rights 代数 / 背压 / EventQ / VMO 生命周期） | 已实现（改造阶段一） | `smoke-native-contract`，`test_native_contract.c` 四分区 |
 | 句柄类型掩码 STAT 一致性（端点/队列可 query） | 已实现（阶段一副产品） | `handle_table.c` 类型掩码 + `ralg` 分区 |
+| 双态部署驱动框架骨架（drv_env + 共享协议层） | 骨架已实现（改造阶段三起步） | goldfish RTC 同源码双态：内核壳 boot probe + `smoke-native-rtcd`，见 [04-dual-placement.md](04-dual-placement.md) |
 
 ## 正确性状态（SMP）
 
