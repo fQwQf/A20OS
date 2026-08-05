@@ -111,6 +111,7 @@ int64_t sys_a20_debug_map_memory(const a20_syscall_args_t *args);
 int64_t sys_a20_system_info(const a20_syscall_args_t *args);
 int64_t sys_a20_system_random(const a20_syscall_args_t *args);
 int64_t sys_a20_system_reboot(const a20_syscall_args_t *args);
+int64_t sys_a20_registry_claim(const a20_syscall_args_t *args);
 int64_t sys_a20_futex_wait(const a20_syscall_args_t *args);
 int64_t sys_a20_futex_wake(const a20_syscall_args_t *args);
 int64_t sys_a20_device_map_mmio(const a20_syscall_args_t *args);

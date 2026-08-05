@@ -74,6 +74,9 @@ static void bringup_smoke_test(void) {
 #endif
 
 void kernel_main(void) {
+#if defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)
+    extern void a20_registry_init(void);
+#endif
     printf("\n");
     printf("======================================\n");
     printf("    A20OS Kernel \n");
@@ -137,6 +140,10 @@ void kernel_main(void) {
 
     proc_init();
     printf("[INIT] Process manager initialized\n");
+#if defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)
+    a20_registry_init();
+    printf("[INIT] Service registry initialized\n");
+#endif
     smp_init();
     smp_boot_secondaries();
     arch_unmap_boot_identity();
