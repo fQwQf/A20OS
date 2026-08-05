@@ -1,4 +1,5 @@
 #include "net/socket_internal.h"
+#include "ipc/ipc.h"
 #include "sys/bpf.h"
 #include "core/klog.h"
 #include "core/string.h"
@@ -642,6 +643,27 @@ int net_poll_events(int gfd, short events)
         return -ENOTSOCK;
     short revents = 0;
     uint64_t irq = spin_lock_irqsave(&g_net_lock);
+    if (s->ch_ep) {
+        int ch_rd = a20_channel_readable(s->ch_ep) || s->ch_len > 0;
+        int ch_wr = a20_channel_writable(s->ch_ep);
+        int ch_pc = a20_channel_peer_closed(s->ch_ep);
+        if (s->peer_closed || ch_pc)
+            revents |= POLLHUP;
+        if ((events & POLLIN) &&
+            (s->rx_head || ch_rd || s->closed || s->peer_closed || ch_pc ||
+             s->shut_rd))
+            revents |= POLLIN;
+        if ((events & POLLOUT) && !s->closed && !s->shut_wr) {
+            if (s->peer_closed || ch_pc)
+                revents |= POLLERR;
+            else if (s->type == SOCK_STREAM && s->connected && !s->peer)
+                revents |= POLLERR;
+            else if (ch_wr || s->rx_count < NET_MAX_QUEUE)
+                revents |= POLLOUT;
+        }
+        spin_unlock_irqrestore(&g_net_lock, irq);
+        return revents;
+    }
     if (s->peer_closed)
         revents |= POLLHUP;
     else if (s->closed || (s->shut_rd && s->shut_wr))

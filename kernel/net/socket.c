@@ -1,11 +1,12 @@
 #include "net/socket.h"
 #include "net/socket_internal.h"
+#include "mm/slab.h"
+#include "ipc/ipc.h"
 #include "fs/vfs.h"
 #include "mm/mm.h"
 #include "mm/objcache.h"
 #include "proc/proc.h"
 #include "proc/signal.h"
-#include "core/klog.h"
 #include "core/string.h"
 #include "core/stdio.h"
 #include "core/consts.h"
@@ -32,6 +33,10 @@ net_socket_t *net_socket_alloc(void) {
 }
 
 void net_socket_free(net_socket_t *s) {
+    if (s && s->ch_buf) {
+        kfree(s->ch_buf);
+        s->ch_buf = NULL;
+    }
     obj_cache_free(&g_net_socket_cache, s);
 }
 
@@ -262,6 +267,16 @@ int net_socketpair_create(int domain, int type, int protocol, int out_gfd[2]) {
     }
     net_socket_t *sa = net_socket_from_file(a);
     net_socket_t *sb = net_socket_from_file(b);
+    if (type == SOCK_STREAM || type == SOCK_SEQPACKET) {
+        /* Channel-backed data plane (internal IPC bridge): plain data
+         * flows through a channel pair; SCM_RIGHTS falls back to the
+         * legacy queue. */
+        a20_channel_ep_t *ep0 = a20_channel_create(0, NULL);
+        if (ep0) {
+            sa->ch_ep = ep0;
+            sb->ch_ep = ep0->peer;
+        }
+    }
     uint64_t flags = spin_lock_irqsave(&g_net_lock);
     sa->peer = sb;
     sb->peer = sa;
@@ -525,6 +540,97 @@ int net_recvfrom_meta(int gfd, void *buf, size_t len, int flags,
         return net_alg_socket_recv(s, buf, len);
     int dontwait = (flags & MSG_DONTWAIT) != 0;
     uint64_t start = timer_get_ticks();
+    if (s->ch_ep && !(flags & MSG_PEEK)) {
+        /* Channel-backed path: plain data lives on the internal channel,
+         * SCM_RIGHTS messages on the legacy queue.  Drain legacy first so
+         * fd-carrying messages keep their delivery order. */
+        for (;;) {
+            a20_lwip_poll();
+            int r = -EAGAIN;
+            uint64_t irq = spin_lock_irqsave(&g_net_lock);
+            if (s->rx_head) {
+                r = net_dequeue_msg_locked_meta(s, buf, len, addr, addrlen, meta);
+                /* Stream coalescing: drain further legacy messages in the
+                 * same recv (keeps SCM_RIGHTS fd coalescing semantics). */
+                if (r >= 0 && s->type == SOCK_STREAM) {
+                    size_t total = (size_t)r;
+                    while (total < len && s->rx_head) {
+                        int nr = net_dequeue_msg_locked_meta(
+                            s, (char *)buf + total, len - total, NULL, NULL,
+                            meta);
+                        if (nr <= 0)
+                            break;
+                        total += (size_t)nr;
+                    }
+                    r = (int)total;
+                }
+            }
+            if (r == -EAGAIN && s->ch_ep)
+                r = unix_ch_recv(s, buf, len);
+            if (r >= 0) {
+                proc_wake_q_t wq;
+                proc_wake_q_init(&wq);
+                (void)wait_queue_collect_one(&s->write_waitq, 0,
+                                             PROC_WAKE_EVENT, &wq);
+                spin_unlock_irqrestore(&g_net_lock, irq);
+                (void)proc_wake_q_flush(&wq);
+                return r;
+            }
+            if (r != -EAGAIN) {
+                spin_unlock_irqrestore(&g_net_lock, irq);
+                return r;
+            }
+            task_t *cur = proc_current();
+            if (!cur) {
+                spin_unlock_irqrestore(&g_net_lock, irq);
+                return -EAGAIN;
+            }
+            if (net_task_has_unblocked_signal(cur)) {
+                spin_unlock_irqrestore(&g_net_lock, irq);
+                return -ERESTARTSYS;
+            }
+            if (net_socket_wait_expired(s, start, 0)) {
+                spin_unlock_irqrestore(&g_net_lock, irq);
+                return -EAGAIN;
+            }
+            if (s->nonblock || dontwait || s->closed || s->peer_closed ||
+                s->shut_rd) {
+                spin_unlock_irqrestore(&g_net_lock, irq);
+                return (s->closed || s->peer_closed || s->shut_rd) ? 0 : -EAGAIN;
+            }
+            uint64_t deadline = s->recv_timeout_ticks ?
+                                start + s->recv_timeout_ticks : 0;
+            spin_unlock_irqrestore(&g_net_lock, irq);
+            proc_wait_token_t token =
+                proc_park_prepare(PROC_WAIT_INTERRUPTIBLE, deadline);
+            if (!token.task)
+                return -EAGAIN;
+            wait_queue_entry_t entry = {0};
+            irq = spin_lock_irqsave(&g_net_lock);
+            /* Re-check before linking: a send between the empty check and
+             * the park would otherwise wake nobody and we would sleep
+             * forever (classic lost-wakeup; the legacy loop does the same). */
+            if (s->rx_head || a20_channel_readable(s->ch_ep)) {
+                spin_unlock_irqrestore(&g_net_lock, irq);
+                (void)proc_park_cancel(token);
+                proc_park_finish(token);
+                continue;
+            }
+            bool linked = wait_queue_link(&s->read_waitq, &entry, token, 0);
+            spin_unlock_irqrestore(&g_net_lock, irq);
+            proc_wake_reason_t reason;
+            if (linked)
+                reason = proc_park_commit(token);
+            else {
+                (void)proc_park_cancel(token);
+                reason = PROC_WAKE_CANCEL;
+            }
+            wait_queue_unlink(&s->read_waitq, &entry);
+            proc_park_finish(token);
+            if (proc_wake_reason_is_task_interrupt(reason))
+                return -EINTR;
+        }
+    }
     for (;;) {
         a20_lwip_poll();
         proc_wake_q_t wake_q;
