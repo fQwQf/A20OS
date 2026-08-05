@@ -143,6 +143,29 @@ int mm_range_overlaps(mm_struct_t *mm, vaddr_t start, vaddr_t len,
     return 0;
 }
 
+// Defer vma_release()/kfree() until mm->lock is dropped: release may run
+// block I/O (vfs_close -> page cache writeback) which must not sleep while
+// the mm lock is held.
+void mm_vma_defer(mm_struct_t *mm, vm_area_t *vma)
+{
+    if (!mm || !vma) return;
+    vma->next = mm->deferred_vma;
+    mm->deferred_vma = vma;
+}
+
+void mm_vma_flush_deferred(mm_struct_t *mm)
+{
+    if (!mm) return;
+    vm_area_t *v = mm->deferred_vma;
+    mm->deferred_vma = NULL;
+    while (v) {
+        vm_area_t *next = v->next;
+        vma_release(v);
+        kfree(v);
+        v = next;
+    }
+}
+
 // 插入一个 VMA 到链表中，并尝试合并相邻的相同权限区域
 void mm_insert_vma(mm_struct_t *mm, vm_area_t *newv) {
     vm_area_t **pp = &mm->mmap;
@@ -162,8 +185,7 @@ void mm_insert_vma(mm_struct_t *mm, vm_area_t *newv) {
         newv->end = nxt->end;
         newv->next = nxt->next;
         if (nxt->next) nxt->next->prev = newv;
-        vma_release(nxt);
-        kfree(nxt);
+        mm_vma_defer(mm, nxt);
     }
     // 尝试与前一个 VMA 合并
     if (vma_can_merge(newv->prev, newv)) {
@@ -171,8 +193,7 @@ void mm_insert_vma(mm_struct_t *mm, vm_area_t *newv) {
         prv->end = newv->end;
         prv->next = newv->next;
         if (newv->next) newv->next->prev = prv;
-        vma_release(newv);
-        kfree(newv);
+        mm_vma_defer(mm, newv);
     }
 }
 
@@ -181,7 +202,7 @@ int mm_split_vma_at(mm_struct_t *mm, vaddr_t addr) {
     if (!v || addr <= v->start || addr >= v->end)
         return 0;
 
-    vm_area_t *tail = kcalloc(1, sizeof(vm_area_t));
+    vm_area_t *tail = kcalloc_atomic(1, sizeof(vm_area_t));
     if (!tail)
         return -ENOMEM;
 
@@ -207,7 +228,7 @@ vm_area_t *vma_split(vm_area_t *vma, vaddr_t split) {
     if (!vma) return NULL;
     if (split <= vma->start || split >= vma->end) return vma;
 
-    vm_area_t *tail = kcalloc(1, sizeof(vm_area_t));
+    vm_area_t *tail = kcalloc_atomic(1, sizeof(vm_area_t));
     if (!tail) return NULL;
 
     *tail = *vma;
@@ -226,7 +247,7 @@ vm_area_t *vma_split(vm_area_t *vma, vaddr_t split) {
     return tail;
 }
 
-vm_area_t *vma_try_merge(vm_area_t *vma) {
+vm_area_t *vma_try_merge(mm_struct_t *mm, vm_area_t *vma) {
     if (!vma) return NULL;
 
     if (vma_can_merge(vma->prev, vma)) {
@@ -234,8 +255,7 @@ vm_area_t *vma_try_merge(vm_area_t *vma) {
         prev->end = vma->end;
         prev->next = vma->next;
         if (vma->next) vma->next->prev = prev;
-        vma_release(vma);
-        kfree(vma);
+        mm_vma_defer(mm, vma);
         vma = prev;
     }
 
@@ -244,8 +264,7 @@ vm_area_t *vma_try_merge(vm_area_t *vma) {
         vma->end = next->end;
         vma->next = next->next;
         if (next->next) next->next->prev = vma;
-        vma_release(next);
-        kfree(next);
+        mm_vma_defer(mm, next);
     }
     return vma;
 }

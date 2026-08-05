@@ -43,6 +43,16 @@ static inline void arch_tlb_flush_page(uint64_t addr) {
     riscv64_remote_tlb_flush(addr, PAGE_SIZE);
 #endif
 }
+/* Local-only page flush: safe while holding a spinlock (IRQs off).  The
+ * caller must publish the remote flush after dropping the lock, or the
+ * trap-return path must do it (see trap.c fault completion). */
+static inline void arch_tlb_flush_page_local(uint64_t addr) {
+    __asm__ __volatile__("sfence.vma %0, zero" :: "r"(addr) : "memory");
+}
+/* Local-only full flush. */
+static inline void arch_tlb_flush_local(void) {
+    __asm__ __volatile__("sfence.vma" ::: "memory");
+}
 
 static inline void arch_set_task_pointer(void *task) {
     __asm__ __volatile__("mv tp, %0" :: "r"(task));

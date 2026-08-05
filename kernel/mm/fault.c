@@ -73,7 +73,7 @@ int mm_shared_file_fault(mm_struct_t *mm, vm_area_t *vma, uint64_t page_va,
     }
 
     mm->rss++;
-    arch_tlb_flush_page(page_va);
+    arch_tlb_flush_page_local(page_va);
     return 0;
 }
 
@@ -116,7 +116,7 @@ static int handle_cow_fault_locked(task_t *t, uint64_t stval) {
                 return -1;
             memset(pfn_to_virt(new_pfn), 0, leaf_size);
             *pte = arch_pte_leaf(pfn_to_phys(new_pfn), flags);
-            arch_tlb_flush_page(stval);
+            arch_tlb_flush_page_local(stval);
             return 0;
         }
         if (rc > 1) {
@@ -136,14 +136,14 @@ static int handle_cow_fault_locked(task_t *t, uint64_t stval) {
              * 0x63636363 损坏），TLB fill 走查过期 PTE 时读取到损坏内容。
              * 先更新 PTE 再 frame_put，确保 PTE 不再引用旧页后才释放。 */
             *pte = arch_pte_leaf(pfn_to_phys(new_pfn), flags);
-            arch_tlb_flush_page(stval);
+            arch_tlb_flush_page_local(stval);
 
             frame_put(old_pfn);
             return 0;
         } else {
             *pte = arch_pte_leaf(old_pa, flags);
             spin_unlock_irqrestore(&pfa.lock, pfa_flags);
-            arch_tlb_flush_page(stval);
+            arch_tlb_flush_page_local(stval);
             return 0;
         }
         return 0;
@@ -154,7 +154,7 @@ static int handle_cow_fault_locked(task_t *t, uint64_t stval) {
                                   PTE_G | PTE_A | PTE_MAT1 |
                                   PTE_LEAF | PTE_COW)) | PTE_D;
         *pte = arch_pte_leaf(arch_pte_addr(*pte), flags);
-        arch_tlb_flush_page(stval);
+        arch_tlb_flush_page_local(stval);
         return 0;
     }
 
@@ -220,7 +220,7 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval) {
         swap_free(entry);
         cg_mem_swap_uncharge(t, 1);
         t->mm->rss++;
-        arch_tlb_flush_page(stval);
+        arch_tlb_flush_page_local(stval);
         return 0;
     }
 #endif
@@ -251,7 +251,7 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval) {
             if (page_va < t->mm->stack_bottom)
                 t->mm->stack_bottom = page_va;
             t->mm->rss++;
-            arch_tlb_flush_page(stval);
+            arch_tlb_flush_page_local(stval);
             return 0;
         }
     }
@@ -271,7 +271,7 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval) {
         if (r < 0) { cg_mem_uncharge(t->cgroup, 1); frame_put(pfn); return -1; }
 
         t->mm->rss++;
-        arch_tlb_flush_page(stval);
+        arch_tlb_flush_page_local(stval);
         return 0;
     }
 
@@ -346,7 +346,7 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval) {
             }
 
             t->mm->rss++;
-            arch_tlb_flush_page(stval);
+            arch_tlb_flush_page_local(stval);
             return 0;
         }
 
@@ -369,7 +369,7 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval) {
                 return -1;
 
             t->mm->rss++;
-            arch_tlb_flush_page(stval);
+            arch_tlb_flush_page_local(stval);
             return 0;
         }
 
@@ -390,7 +390,7 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval) {
                                          vma->pte_flags);
                     if (hr == 0) {
                         t->mm->rss += PMD_PAGE_COUNT;
-                        arch_tlb_flush_page(stval);
+                        arch_tlb_flush_page_local(stval);
                         return 0;
                     }
                     cg_mem_uncharge(t->cgroup, PMD_PAGE_COUNT);
@@ -412,7 +412,7 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval) {
         if (r < 0) { cg_mem_uncharge(t->cgroup, 1); frame_put(pfn); return -1; }
 
         t->mm->rss++;
-        arch_tlb_flush_page(stval);
+        arch_tlb_flush_page_local(stval);
         return 0;
     }
 
@@ -484,7 +484,7 @@ static int handle_file_fault(task_t *t, uint64_t page_va, int file_fd,
     }
 
     mm_struct_t *mm = t->mm;
-    uint64_t mm_flags = spin_lock_irqsave(&mm->lock);
+    spin_lock(&mm->lock);
     vm_area_t *vma = mm_find_vma(mm, page_va);
     vfile_t *current_vf = vma && (vma->vm_flags & VM_FILE) &&
                           vma->file_fd >= 0
@@ -507,20 +507,22 @@ static int handle_file_fault(task_t *t, uint64_t page_va, int file_fd,
          * non-present translation, so redundant success needs the same
          * synchronization as a newly installed PTE.
          */
-        arch_tlb_flush_page(page_va);
+        arch_tlb_flush_page_local(page_va);
         result = 0;
     } else if (mapping_valid &&
                pt_map(mm->pgdir, page_va, pfn_to_phys(candidate),
                       vma->pte_flags) == 0) {
         mm->rss++;
-        arch_tlb_flush_page(page_va);
+        arch_tlb_flush_page_local(page_va);
         result = 0;
         candidate = PFN_NONE;
         if (shared)
             pcp = NULL; /* The mapping retains the page-cache pin. */
     }
-    spin_unlock_irqrestore(&mm->lock, mm_flags);
+    spin_unlock(&mm->lock);
 
+    if (result == 0)
+        arch_tlb_flush_page(page_va);  /* remote publish once lock is dropped */
     if (candidate != PFN_NONE && !shared)
         frame_put(candidate);
     if (pcp)
@@ -540,9 +542,9 @@ int handle_cow_fault(task_t *t, uint64_t stval)
     if (!t || !t->mm)
         return -1;
     mm_struct_t *mm = t->mm;
-    uint64_t flags = spin_lock_irqsave(&mm->lock);
+    spin_lock(&mm->lock);
     int r = handle_cow_fault_locked(t, stval);
-    spin_unlock_irqrestore(&mm->lock, flags);
+    spin_unlock(&mm->lock);
     return r;
 #endif
 }
@@ -557,13 +559,13 @@ int handle_demand_fault(task_t *t, uint64_t stval)
 
     mm_struct_t *mm = t->mm;
     uint64_t page_va = stval & ~(PAGE_SIZE - 1);
-    uint64_t flags = spin_lock_irqsave(&mm->lock);
+    spin_lock(&mm->lock);
     pte_t *pte = pt_lookup_leaf(mm->pgdir, page_va, NULL, NULL, NULL);
 #ifdef CONFIG_SWAP
     if (pte && pte_is_swap(*pte)) {
         /* Swap I/O cannot run under the IRQ-disabling mm spinlock.  A future
          * busy swap PTE will close the remaining duplicate-swapin race. */
-        spin_unlock_irqrestore(&mm->lock, flags);
+        spin_unlock(&mm->lock);
         int r = handle_demand_fault_locked(t, stval);
         if (r == -ENOMEM) {
             cg_mem_oom_kill(t->cgroup);
@@ -573,20 +575,20 @@ int handle_demand_fault(task_t *t, uint64_t stval)
     }
 #endif
     if (pte && (*pte & PTE_V)) {
-        spin_unlock_irqrestore(&mm->lock, flags);
+        spin_unlock(&mm->lock);
         return -1;
     }
     vm_area_t *vma = mm_find_vma(mm, page_va);
     if (vma && (vma->vm_flags & VM_FILE) && vma->file_fd >= 0) {
         if (!mm_pte_flags_allow_access(vma->pte_flags)) {
-            spin_unlock_irqrestore(&mm->lock, flags);
+            spin_unlock(&mm->lock);
             return -1;
         }
         int file_fd = vma->file_fd;
         int shared = (vma->vm_flags & VM_SHARED) != 0;
         uint64_t file_pos = vma->file_offset + (page_va - vma->start);
         vfile_t *vf = vfs_get_file_ref(file_fd);
-        spin_unlock_irqrestore(&mm->lock, flags);
+        spin_unlock(&mm->lock);
         if (!vf || !vf->vnode) {
             if (vf)
                 vfs_put_file_ref(file_fd, vf);
@@ -596,7 +598,7 @@ int handle_demand_fault(task_t *t, uint64_t stval)
     }
 
     int r = handle_demand_fault_locked(t, stval);
-    spin_unlock_irqrestore(&mm->lock, flags);
+    spin_unlock(&mm->lock);
     if (r == -ENOMEM) {
         cg_mem_oom_kill(t->cgroup);
         return -1;
@@ -618,7 +620,7 @@ int handle_present_page_fault(task_t *t, uint64_t stval,
         return -1;
 
     mm_struct_t *mm = t->mm;
-    uint64_t flags = spin_lock_irqsave(&mm->lock);
+    spin_lock(&mm->lock);
     pte_t *pte = pt_lookup_leaf(mm->pgdir, stval, NULL, NULL, NULL);
     int allowed = pte && (*pte & PTE_V) && arch_pte_is_leaf(*pte) &&
                   (*pte & PTE_U);
@@ -637,7 +639,7 @@ int handle_present_page_fault(task_t *t, uint64_t stval,
      */
     if (allowed && pte)
         *pte |= PTE_A;
-    spin_unlock_irqrestore(&mm->lock, flags);
+    spin_unlock(&mm->lock);
 
     if (!allowed)
         return -1;

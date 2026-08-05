@@ -129,12 +129,12 @@ int64_t fbdev_linux_mmap(uint64_t addr, size_t len, int prot, int flags,
     if (prot & PROT_WRITE) ptef |= PTE_W | PTE_D | PTE_R;
     if (prot & PROT_EXEC) ptef |= PTE_X;
 
-    uint64_t lock_flags = spin_lock_irqsave(&mm->lock);
+    spin_lock(&mm->lock);
 
     if ((flags & MAP_FIXED_NOREPLACE) && addr != 0) {
         for (vm_area_t *vma = mm->mmap; vma; vma = vma->next) {
             if (vma->start < addr + len && vma->end > addr) {
-                spin_unlock_irqrestore(&mm->lock, lock_flags);
+                spin_unlock(&mm->lock);
                 return -EEXIST;
             }
             if (vma->start >= addr + len)
@@ -152,7 +152,7 @@ int64_t fbdev_linux_mmap(uint64_t addr, size_t len, int prot, int flags,
     if (addr == 0)
         addr = mm_find_gap(mm, MMAP_BASE_ADDR, len);
     if (addr == 0 || addr + len < addr || addr + len > USER_VA_LIMIT) {
-        spin_unlock_irqrestore(&mm->lock, lock_flags);
+        spin_unlock(&mm->lock);
         return -ENOMEM;
     }
 
@@ -167,7 +167,7 @@ int64_t fbdev_linux_mmap(uint64_t addr, size_t len, int prot, int flags,
             mapped -= PAGE_SIZE;
             pt_unmap(mm->pgdir, addr + mapped);
         }
-        spin_unlock_irqrestore(&mm->lock, lock_flags);
+        spin_unlock(&mm->lock);
         arch_tlb_flush();
         return r;
     }
@@ -178,7 +178,7 @@ int64_t fbdev_linux_mmap(uint64_t addr, size_t len, int prot, int flags,
             mapped -= PAGE_SIZE;
             pt_unmap(mm->pgdir, addr + mapped);
         }
-        spin_unlock_irqrestore(&mm->lock, lock_flags);
+        spin_unlock(&mm->lock);
         arch_tlb_flush();
         return -ENOMEM;
     }
@@ -195,7 +195,8 @@ int64_t fbdev_linux_mmap(uint64_t addr, size_t len, int prot, int flags,
     mm->rss += len / PAGE_SIZE;
 
     arch_tlb_flush();
-    spin_unlock_irqrestore(&mm->lock, lock_flags);
+    spin_unlock(&mm->lock);
+    mm_vma_flush_deferred(mm);
     return (int64_t)addr;
 #endif
 }
@@ -299,10 +300,10 @@ static int fb_ioctl(vfile_t *vf, unsigned long req, void *arg) {
                 va >= USER_VA_LIMIT || fb_size > USER_VA_LIMIT - va)
                 return -EINVAL;
 
-            uint64_t lock_flags = spin_lock_irqsave(&curr->mm->lock);
+            spin_lock(&curr->mm->lock);
             for (vm_area_t *vma = curr->mm->mmap; vma; vma = vma->next) {
                 if (vma->start < va + fb_size && vma->end > va) {
-                    spin_unlock_irqrestore(&curr->mm->lock, lock_flags);
+                    spin_unlock(&curr->mm->lock);
                     return -EEXIST;
                 }
                 if (vma->start >= va + fb_size)
@@ -310,7 +311,7 @@ static int fb_ioctl(vfile_t *vf, unsigned long req, void *arg) {
             }
             for (size_t off = 0; off < fb_size; off += PAGE_SIZE) {
                 if (pt_translate(curr->mm->pgdir, va + off) != 0) {
-                    spin_unlock_irqrestore(&curr->mm->lock, lock_flags);
+                    spin_unlock(&curr->mm->lock);
                     return -EEXIST;
                 }
             }
@@ -336,7 +337,7 @@ static int fb_ioctl(vfile_t *vf, unsigned long req, void *arg) {
                     mapped -= PAGE_SIZE;
                     pt_unmap(curr->mm->pgdir, va + mapped);
                 }
-                spin_unlock_irqrestore(&curr->mm->lock, lock_flags);
+                spin_unlock(&curr->mm->lock);
                 arch_tlb_flush();
                 return r;
             }
@@ -347,7 +348,7 @@ static int fb_ioctl(vfile_t *vf, unsigned long req, void *arg) {
                     mapped -= PAGE_SIZE;
                     pt_unmap(curr->mm->pgdir, va + mapped);
                 }
-                spin_unlock_irqrestore(&curr->mm->lock, lock_flags);
+                spin_unlock(&curr->mm->lock);
                 arch_tlb_flush();
                 return -ENOMEM;
             }
@@ -362,7 +363,8 @@ static int fb_ioctl(vfile_t *vf, unsigned long req, void *arg) {
             curr->mm->rss += fb_size / PAGE_SIZE;
 
             arch_tlb_flush();
-            spin_unlock_irqrestore(&curr->mm->lock, lock_flags);
+            spin_unlock(&curr->mm->lock);
+            mm_vma_flush_deferred(curr->mm);
             return 0;
 #endif
         }

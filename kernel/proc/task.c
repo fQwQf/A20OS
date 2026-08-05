@@ -272,17 +272,19 @@ static void proc_task_release_resources(task_t *t)
     }
     void *scratch = __atomic_exchange_n(&t->scratch_buf, NULL, __ATOMIC_ACQ_REL);
     if (scratch) {
-#if defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)
-        if (t->abi_mode == 1) {
-            /* Native handle table: shared by the thread group, refcounted. */
-            a20_ht_put_ref((struct a20_ht_internal *)scratch);
-        } else
-#endif
-        {
-            kfree(scratch);
-        }
+        kfree(scratch);
         t->scratch_size = 0;
     }
+#if defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)
+    {
+        /* Native handle table: separate field, shared by the thread group,
+         * refcounted.  It must never share storage with scratch_buf, which
+         * proc_scratch_buffer() may kfree()/reuse for Linux ABI I/O. */
+        void *ht = __atomic_exchange_n(&t->a20_ht, NULL, __ATOMIC_ACQ_REL);
+        if (ht)
+            a20_ht_put_ref((struct a20_ht_internal *)ht);
+    }
+#endif
 
 #ifdef CONFIG_NOMMU
     /* Free any pending vfork snapshots (in case process is killed before

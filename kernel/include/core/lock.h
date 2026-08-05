@@ -4,10 +4,15 @@
 #include "core/types.h"
 #include "core/defs.h"
 #include "core/klog.h"
+#include "core/cpu.h"
 
 #if CONFIG_DEBUG_LOCKS
 #include "proc/proc.h"
 #endif
+
+struct task_t;
+extern struct task_t *proc_current(void);
+extern int proc_task_pid(const void *task);
 
 /*
  * Global lock order contract (outermost -> innermost).
@@ -47,73 +52,51 @@
 
 typedef struct spinlock {
     volatile int locked;
-#if CONFIG_DEBUG_LOCKS
-    void *owner;
+    void *owner;        /* task_t * while held (always tracked) */
     uintptr_t owner_ra;
-    const char *name;
+    const char *name;   /* debug name, NULL unless spin_set_debug() */
     void *container;
-#endif
 } spinlock_t;
 
-#if CONFIG_DEBUG_LOCKS
 #define SPINLOCK_INIT { 0, NULL, 0, NULL, NULL }
-#else
-#define SPINLOCK_INIT { 0 }
-#endif
 
 static inline void spin_init(spinlock_t *lock) {
     lock->locked = 0;
-#if CONFIG_DEBUG_LOCKS
     lock->owner = NULL;
     lock->owner_ra = 0;
     lock->name = NULL;
     lock->container = NULL;
-#endif
 }
 
 static inline void spin_set_debug(spinlock_t *lock, const char *name, void *container) {
-#if CONFIG_DEBUG_LOCKS
     if (!lock)
         return;
     lock->name = name;
     lock->container = container;
-#else
-    (void)lock;
-    (void)name;
-    (void)container;
-#endif
 }
 
 static inline void spin_lock_at(spinlock_t *lock, uintptr_t caller_ra) {
-#if CONFIG_DEBUG_LOCKS
     uint64_t spins = 0;
-    task_t *cur = proc_current();
-    uintptr_t waiter_ra = caller_ra ? caller_ra : (uintptr_t)__builtin_return_address(0);
-#else
-    (void)caller_ra;
-#endif
+    struct task_t *cur = proc_current();
+    uintptr_t waiter_ra = caller_ra ? caller_ra
+                                    : (uintptr_t)__builtin_return_address(0);
     while (__atomic_exchange_n(&lock->locked, 1, __ATOMIC_ACQUIRE)) {
         while (__atomic_load_n(&lock->locked, __ATOMIC_RELAXED)) {
-#if CONFIG_DEBUG_LOCKS
-            if ((++spins & ((1UL << 24) - 1)) == 0) {
-                task_t *owner = (task_t *)lock->owner;
-                printf("[LOCK] spin wait: lock=%p name=%s container=%p waiter=%p/%d owner=%p/%d owner_ra=0x%lx waiter_ra=0x%lx spins=%lu\n",
-                       (void *)lock,
+            if ((++spins & ((1UL << 20) - 1)) == 0) {
+                struct task_t *owner = (struct task_t *)lock->owner;
+                printf("[LOCK-STALL] cpu=%u lock=%p name=%s waiter=%d owner=%d owner_ra=0x%lx waiter_ra=0x%lx spins=%lu\n",
+                       cpu_current_id(), (void *)lock,
                        lock->name ? lock->name : "?",
-                       lock->container,
-                       (void *)cur, cur ? cur->pid : -1,
-                       (void *)owner, owner ? owner->pid : -1,
+                       cur ? proc_task_pid(cur) : -1,
+                       owner ? proc_task_pid(owner) : -1,
                        (unsigned long)lock->owner_ra,
                        (unsigned long)waiter_ra, spins);
             }
-#endif
             arch_cpu_relax();
         }
     }
-#if CONFIG_DEBUG_LOCKS
     lock->owner = cur;
     lock->owner_ra = waiter_ra;
-#endif
 }
 
 static inline void spin_lock(spinlock_t *lock) {
@@ -121,10 +104,8 @@ static inline void spin_lock(spinlock_t *lock) {
 }
 
 static inline void spin_unlock(spinlock_t *lock) {
-#if CONFIG_DEBUG_LOCKS
     lock->owner = NULL;
     lock->owner_ra = 0;
-#endif
     __atomic_store_n(&lock->locked, 0, __ATOMIC_RELEASE);
 }
 

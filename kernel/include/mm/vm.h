@@ -100,6 +100,7 @@ typedef struct vm_area {
 typedef struct mm_struct {
     spinlock_t lock;
     vm_area_t *mmap;
+    vm_area_t *deferred_vma;  /* freed after mm->lock is dropped */
     pt_root_t *pgdir;
     vaddr_t    brk;
     vaddr_t    start_brk;
@@ -127,6 +128,10 @@ void         mm_destroy(mm_struct_t *mm);
 mm_struct_t *mm_fork(mm_struct_t *parent_mm);
 
 vm_area_t *mm_find_vma(mm_struct_t *mm, vaddr_t addr);
+void mm_vma_defer(mm_struct_t *mm, vm_area_t *vma);
+void mm_vma_flush_deferred(mm_struct_t *mm);
+vm_area_t *vma_try_merge(mm_struct_t *mm, vm_area_t *vma);
+
 vaddr_t    mm_find_gap(mm_struct_t *mm, vaddr_t hint, size_t len);
 void       mm_insert_vma(mm_struct_t *mm, vm_area_t *newv);
 int        mm_split_vma_at(mm_struct_t *mm, vaddr_t addr);
@@ -138,6 +143,22 @@ void mm_track_nommu_alloc(mm_struct_t *mm, void *ptr, size_t size, uint8_t type)
 void mm_untrack_nommu_alloc(mm_struct_t *mm, void *ptr);
 #endif
 
+/* Locked variants: caller must hold mm->lock.  Used by the public wrappers
+ * and by internal call chains (mremap etc.) that already hold the lock. */
+vaddr_t mm_mmap_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
+                       int prot, int flags);
+vaddr_t mm_mmap_file_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
+                            int prot, int flags, int file_fd,
+                            uint64_t file_offset);
+vaddr_t mm_mmap_vmo_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
+                           int prot, int flags, struct vmo *vmo,
+                           uint64_t vmo_offset);
+int mm_munmap_locked(mm_struct_t *mm, vaddr_t addr, size_t len);
+vaddr_t mm_brk_locked(mm_struct_t *mm, vaddr_t newbrk);
+int mm_mprotect_locked(mm_struct_t *mm, vaddr_t addr, size_t len, int prot);
+int mm_mremap_locked(mm_struct_t *mm, vaddr_t old_addr, size_t old_size,
+                     size_t new_size, int flags, vaddr_t new_addr,
+                     vaddr_t *out_addr);
 vaddr_t mm_mmap(mm_struct_t *mm, vaddr_t addr, size_t len,
                 int prot, int flags);
 vaddr_t mm_mmap_file(mm_struct_t *mm, vaddr_t addr, size_t len,

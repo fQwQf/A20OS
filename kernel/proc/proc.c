@@ -564,10 +564,10 @@ vaddr_t proc_brk(vaddr_t newbrk) {
         return brk;
     }
 
-    // mm_brk 内部已经处理了 newbrk < start_brk 的情况（返回旧 brk）
-    // 同时也处理了分配失败的情况
-    vaddr_t brk = mm_brk(t->mm, newbrk);
+    // mm_brk_locked: the caller already holds mm->lock
+    vaddr_t brk = mm_brk_locked(t->mm, newbrk);
     spin_unlock_irqrestore(&t->mm->lock, lock_flags);
+    mm_vma_flush_deferred(t->mm);
     return brk;
 }
 
@@ -582,16 +582,18 @@ vaddr_t proc_mmap(vaddr_t addr, size_t len, int prot, int flags, int fd, long of
     uint64_t lock_flags = spin_lock_irqsave(&t->mm->lock);
     vaddr_t ret;
     if ((flags & MAP_ANONYMOUS) || fd < 0)
-        ret = mm_mmap(t->mm, addr, len, prot, flags);
+        ret = mm_mmap_locked(t->mm, addr, len, prot, flags);
     else {
         if (off < 0 || ((uint64_t)off & (PAGE_SIZE - 1))) {
             spin_unlock_irqrestore(&t->mm->lock, lock_flags);
             return (uint64_t)-EINVAL;
         }
 
-        ret = mm_mmap_file(t->mm, addr, len, prot, flags, fd, (uint64_t)off);
+        ret = mm_mmap_file_locked(t->mm, addr, len, prot, flags, fd,
+                                  (uint64_t)off);
     }
     spin_unlock_irqrestore(&t->mm->lock, lock_flags);
+    mm_vma_flush_deferred(t->mm);
     return ret;
 }
 
@@ -600,8 +602,10 @@ int proc_munmap(vaddr_t addr, size_t len) {
     task_t *t = proc_current();
     if (!t || !t->mm) return -1;
     uint64_t lock_flags = spin_lock_irqsave(&t->mm->lock);
-    int ret = mm_munmap(t->mm, addr, len);
+    int ret = mm_munmap_locked(t->mm, addr, len);
     spin_unlock_irqrestore(&t->mm->lock, lock_flags);
+    mm_vma_flush_deferred(t->mm);
+    arch_tlb_flush();  // deferred remote flush
     return ret;
 }
 

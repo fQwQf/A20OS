@@ -18,7 +18,8 @@
 
 /* mprotect: permission changes on an existing address range. */
 
-int mm_mprotect(mm_struct_t *mm, vaddr_t addr, size_t len, int prot) {
+int mm_mprotect_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
+                           int prot) {
     if (!mm || !mm->pgdir) return -EINVAL;
     if (prot & ~(PROT_READ | PROT_WRITE | PROT_EXEC)) return -EINVAL;
     if (addr & (PAGE_SIZE - 1)) return -EINVAL;
@@ -106,13 +107,23 @@ int mm_mprotect(mm_struct_t *mm, vaddr_t addr, size_t len, int prot) {
         v->pte_flags = mm_pte_flags_apply_prot(v->pte_flags, ptef);
         v->vm_flags  = (v->vm_flags & ~(uint64_t)(VM_READ | VM_WRITE | VM_EXEC)) |
                        vm_prot;
-        v = vma_try_merge(v);
+        v = vma_try_merge(mm, v);
         touched = 1;
         v = v ? v->next : next;
     }
 
-    if (touched)
-        arch_tlb_flush();  // 刷新 TLB
+    (void)touched;
 #endif
     return 0;
+}
+
+int mm_mprotect(mm_struct_t *mm, vaddr_t addr, size_t len, int prot)
+{
+    if (!mm) return -EINVAL;
+    uint64_t flags = spin_lock_irqsave(&mm->lock);
+    int r = mm_mprotect_locked(mm, addr, len, prot);
+    spin_unlock_irqrestore(&mm->lock, flags);
+    mm_vma_flush_deferred(mm);
+    arch_tlb_flush();  // deferred remote flush
+    return r;
 }
