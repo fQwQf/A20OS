@@ -772,8 +772,7 @@ $$trace_l(step^*(\sigma_0, actions)) = trace_l(step^*(\sigma_0, actions \setminu
 *证明*：设 $H$ 为高标签进程集合，$L$ 为低标签进程集合（$label(p_H) = H, label(p_L) = L$）。
 
 **信息不能从 H 流向 L**：
-1. H 进程不能直接读 L 对象（需要 $label(H) \sqsupseteq label(o_L)$，但 $H \not\sqsubseteq L$）。
-   — 但这不成立！$H \sqsupseteq L$，所以 H 可以读 L 的对象。这是正确的——高级可以读低级。
+1. H 进程不能直接读 L 对象（需要 $label(H) \sqsupseteq label(o_L)$，但 $H \not\sqsubseteq L$）。 — 但这不成立！$H \sqsupseteq L$，所以 H 可以读 L 的对象。这是正确的——高级可以读低级。
 2. H 进程不能写 L 对象（需要 $label(o_L) \sqsupseteq label(H)$，但 $L \not\sqsupseteq H$）。$\checkmark$
 3. H 进程通过 channel 传递 handle 给 L 进程：传递不改变对象标签。L 进程接收后获得 $label(o) = H$ 的对象。但 L 进程读取该对象需要 $label(L) \sqsupseteq label(o_H) = H$，即 $L \sqsupseteq H$，矛盾。因此 L 进程无法读取从 H 传来的高标签对象的**内容**。
 

@@ -68,8 +68,7 @@ A20OS 是自主编写的操作系统，但站在了许多优秀开源项目与�
 | [Microsoft Windows NT](https://learn.microsoft.com/en-us/windows/win32/sysinfo/kernel-objects) | 内核对象 / handle 统一资源模型：以句柄 + 安全权能管理所有内核对象，消灭各类资源的调用差异 | Native ABI 的 handle/capability 体系 |
 | [Zircon (Fuchsia)](https://fuchsia.dev/fuchsia-src/concepts/kernel) | Channel handle transfer 语义、futex 定位、ABI 版本管理对照 | Native ABI 的 Channel/Event 队列与 futex |
 
-> 注意：Zircon、Windows NT 既是设计参考，也是研究文档中的**对照分析对象**（见下节），两者视角不同：
-> "参考"指启发了设计，"对照"指作为比较基线分析优劣。
+> 注意：Zircon、Windows NT 既是设计参考，也是研究文档中的**对照分析对象**（见下节），两者视角不同："参考"指启发了设计，"对照"指作为比较基线分析优劣。
 
 ---
 
@@ -87,8 +86,7 @@ A20OS 是自主编写的操作系统，但站在了许多优秀开源项目与�
 | S3K | 能力系统对照 |
 | [Mach](https://en.wikipedia.org/wiki/Mach_(kernel)) | 微内核 IPC 对照 |
 
-> 与 §2「实现参考」不同，本节项目**没有影响 A20OS 的代码实现**，仅在研究文档中作为
-> 学术比较基线出现，不构成"参考实现"或"借鉴"。
+> 与 §2「实现参考」不同，本节项目**没有影响 A20OS 的代码实现**，仅在研究文档中作为学术比较基线出现，不构成"参考实现"或"借鉴"。
 
 ---
 
