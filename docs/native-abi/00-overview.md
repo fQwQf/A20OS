@@ -26,8 +26,7 @@ typedef uint32_t a20_handle_t;
 
 **为什么采用 handle？**
 
-> 我看 Windows NT 搞得不错，内核对象极大丰富，各类资源的调用差异基本消灭，面向对象，安全权能机制也受重视，如果再加上开源，Windows NT 就是我们理想中的操作系统内核。  
-> ——fQwQf
+> 我看 Windows NT 搞得不错，内核对象极大丰富，各类资源的调用差异基本消灭，面向对象，安全权能机制也受重视，如果再加上开源，Windows NT 就是我们理想中的操作系统内核。  ——fQwQf
 
 13 种对象类型（详见 [handle.md](03-handle.md)）：
 

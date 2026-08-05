@@ -55,12 +55,9 @@ A20OS 在运行空间上更像宏内核：
 
 具体落地：
 
-- 内部 IPC 子系统（对象模型、Channel、EventQ、句柄表、启动信息）的头文件
-  位于 `kernel/include/ipc/`（`ipc.h`、`handle_table.h`、`start_info.h`），不包含任何 `abi/` 内容；`kernel/include/abi/native/*` 里曾属于内部的部分现在只是再导出（shim）。
-- Linux ABI 的线格式常量（errno、fcntl、mman、poll、signal、stat、ioctl、
-  input）定义在 `kernel/include/core/*.h`，`kernel/include/abi/linux/*.h`再导出——内部代码只 include `core/`。
-- 例外：syscall 分派（`kernel/syscall/syscall.c`）与 arch 胶水
-  （`kernel/arch/*/abi/`、`syscall_hook.h`）本身是 ABI 边界的一部分，有权感知 ABI。
+- 内部 IPC 子系统（对象模型、Channel、EventQ、句柄表、启动信息）的头文件 位于 `kernel/include/ipc/`（`ipc.h`、`handle_table.h`、`start_info.h`）， 不包含任何 `abi/` 内容；`kernel/include/abi/native/*` 里曾属于内部的部分 现在只是再导出（shim）。
+- Linux ABI 的线格式常量（errno、fcntl、mman、poll、signal、stat、ioctl、 input）定义在 `kernel/include/core/*.h`，`kernel/include/abi/linux/*.h` 再导出——内部代码只 include `core/`。
+- 例外：syscall 分派（`kernel/syscall/syscall.c`）与 arch 胶水 （`kernel/arch/*/abi/`、`syscall_hook.h`）本身是 ABI 边界的一部分， 有权感知 ABI。
 
 这一原则的收益：内部实现（尤其 IPC/MM/调度）保持 ABI 无关，任何 ABI（包括 Linux ABI）都能直接包装内部机制而受益，无需复制实现。
 
@@ -227,29 +224,29 @@ Channel 传递 handle 时，接收方权限为 `receiver_rights = sender_rights 
 
 ## 设计速查
 
-**哪些代码运行在内核空间？**驱动、网络栈、文件系统、内存管理和调度器都在同一个特权地址空间内运行。
+**哪些代码运行在内核空间？**  驱动、网络栈、文件系统、内存管理和调度器都在同一个特权地址空间内运行。
 
-**用户空间能看到什么隔离？**每个用户资源都是带 rights 的 handle，内核在每次操作时校验 handle 及其权限。内存只能通过 VMO/VMAR 共享或映射。
+**用户空间能看到什么隔离？**  每个用户资源都是带 rights 的 handle，内核在每次操作时校验 handle 及其权限。内存只能通过 VMO/VMAR 共享或映射。
 
-**什么时候用 Linux ABI？**需要直接运行现有 musl 程序（git、vim、fastfetch、mksh）而不重新编译时。
+**什么时候用 Linux ABI？**  需要直接运行现有 musl 程序（git、vim、fastfetch、mksh）而不重新编译时。
 
-**什么时候用 Native ABI？**编写面向 A20OS 的新程序，需要更小、基于 capability 的接口时。
+**什么时候用 Native ABI？**  编写面向 A20OS 的新程序，需要更小、基于 capability 的接口时。
 
-**两套 ABI 各有多少系统调用？**Linux ABI：223 个；Native ABI：109 个。
+**两套 ABI 各有多少系统调用？**  Linux ABI：223 个；Native ABI：109 个。
 
-**支持哪些架构？**RISC-V 64、ARM64、x86_64、LoongArch 64。物理板：VisionFive 2（RISC-V）和龙芯 LS2K1000（LoongArch）。
+**支持哪些架构？**  RISC-V 64、ARM64、x86_64、LoongArch 64。物理板：VisionFive 2（RISC-V）和龙芯 LS2K1000（LoongArch）。
 
-**SMP 并发如何保证安全？**通过文档化的锁顺序、per-CPU 运行队列、显式`on_rq/dispatching/on_cpu` 所有权、带序号 Park/Wake、异步 task 引用和持久抢占请求。`make check-concurrency-foundation` 检查基础契约；`make check-proc-step8-local` 执行双架构 1 核/8 核累计压力矩阵。
+**SMP 并发如何保证安全？**  通过文档化的锁顺序、per-CPU 运行队列、显式`on_rq/dispatching/on_cpu` 所有权、带序号 Park/Wake、异步 task 引用和持久抢占请求。`make check-concurrency-foundation` 检查基础契约；`make check-proc-step8-local` 执行双架构 1 核/8 核累计压力矩阵。
 
-**内存共享怎么工作？**先用 `vm_create_object` 创建 VMO，再用 `vm_map` 把它映射到一个或多个 VMAR。最终生效的保护位是请求保护、handle rights 和 VMAR 标志三者的交集。
+**内存共享怎么工作？**  先用 `vm_create_object` 创建 VMO，再用 `vm_map` 把它映射到一个或多个 VMAR。最终生效的保护位是请求保护、handle rights 和 VMAR 标志三者的交集。
 
-**Native IPC 如何替代信号？**进程间通知通过 Channel 消息，等待通过 EventQ，子进程终止通过 `task_wait`。Linux 兼容层在这些原语之上模拟 POSIX 信号语义。
+**Native IPC 如何替代信号？**  进程间通知通过 Channel 消息，等待通过 EventQ，子进程终止通过 `task_wait`。Linux 兼容层在这些原语之上模拟 POSIX 信号语义。
 
-**网络如何配置？**完全通过内核命令行：`a20.ip`、`a20.netmask`、`a20.gateway`、`a20.dns`、`a20.dhcp`、`a20.hostname`。没有编译期默认值。
+**网络如何配置？**  完全通过内核命令行：`a20.ip`、`a20.netmask`、`a20.gateway`、`a20.dns`、`a20.dhcp`、`a20.hostname`。没有编译期默认值。
 
-**如何为特定板子构建运行？**`make ARCH=<arch> BOARD=<board> run`。用 `make check-kernel-build` 构建全部四种 QEMU 架构。
+**如何为特定板子构建运行？**  `make ARCH=<arch> BOARD=<board> run`。用 `make check-kernel-build` 构建全部四种 QEMU 架构。
 
-**Native ABI 完整规范在哪里？**[docs/native-abi/00-overview.md](native-abi/00-overview.md)。
+**Native ABI 完整规范在哪里？**  [docs/native-abi/00-overview.md](native-abi/00-overview.md)。
 
 ---
 
