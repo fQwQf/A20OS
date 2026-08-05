@@ -233,7 +233,7 @@ kernel/abi/native/      syscall 分派、handle table、各子系统入口kernel
 5. **架构详述**（08）：设计中隐含的实现决策的显式分析
 6. **评估与贡献**（05+06）：如何验证和定位工作
 
-设计规范已整合研究发现，并以当前实现为准更新：13 种对象类型、93 个 syscall、typed channel 强制、时态控制入口与 deadline-driven sweeper、阻塞 channel/event_wait、reserve-then-dequeue 无部分投递、对象级联释放、VMO source 映射。研究笔记中的形式化证明仍以 53 个核心 syscall 模型为主，因此“设计已证明”与“93 个实现入口全部被证明”必须明确区分。
+设计规范已整合研究发现，并以当前实现为准更新：13 种对象类型、109 个 syscall、typed channel 强制、时态控制入口与 deadline-driven sweeper、阻塞 channel/event_wait、reserve-then-dequeue 无部分投递、对象级联释放、VMO source 映射。研究笔记中的形式化证明仍以 53 个核心 syscall 模型为主，因此“设计已证明”与“109 个实现入口全部被证明”必须明确区分。
 
 ---
 
@@ -247,7 +247,7 @@ kernel/abi/native/      syscall 分派、handle table、各子系统入口kernel
 6. **无锁数据结构未分析**：若未来引入无锁优化（如 event queue ring buffer），需补充 RELAXED 操作的内存序论证（07 §9.8.5）
 7. **时态能力开销未评估**：时态字段增加了 handle entry 大小（+16 bytes）；控制入口与 deadline-driven sweeper 已接入并通过 smoke，但扫描开销仍需实测
 8. **类型化通道的静态分析未工具化**：内核创建/send/recv 强制已接入并通过 smoke；推论 2.2.1 承诺的静态能力流分析仍未实现
-9. **形式化覆盖与实现存在边界**：07 的 trace 归纳穷举覆盖 53 个核心 syscall；当前实现为 93 个，新增的 futex、xattr、扩展网络/调度/系统调用尚未逐项加入 SOS 规则与 error-path 精化矩阵
+9. **形式化覆盖与实现存在边界**：07 的 trace 归纳穷举覆盖 53 个核心 syscall；当前实现为 109 个，新增的 futex、xattr、扩展网络/调度/系统调用尚未逐项加入 SOS 规则与 error-path 精化矩阵
 10. **事件源覆盖不完整**：channel、timer、task 退出已产生事件；file/socket/pipe 的 READABLE/WRITABLE/ERROR 以及 `event_watch_fs` 路径事件尚未接入
 
 ---
