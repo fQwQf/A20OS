@@ -5,6 +5,7 @@
 #include "core/cpu.h"
 #include "core/klog.h"
 #include "core/stdio.h"
+#include "drivers/core/udriver.h"
 #include "fs/fdtable.h"
 #include "fs/vfs.h"
 #include "mm/frame.h"
@@ -357,6 +358,11 @@ void proc_exit(int exit_code)
 
     if (vfork_completed)
         complete(&t->vfork_done);
+
+    /* Release user-space driver IRQ registrations BEFORE the EXITED
+     * event fires, so a supervisor reacting to that event can immediately
+     * re-register the device (reap-time cleanup would race the respawn). */
+    udriver_task_cleanup(t->pid);
 
     /* Native ABI task handles store the pid as the object pointer, so the
      * watch key must be pid-as-pointer (docs/native-abi/05-ipc.md §3.3). */
