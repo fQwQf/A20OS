@@ -1180,9 +1180,11 @@ int elf_load(int fd, const char *path, elf_load_info_t *info) {
 #define AT_SECURE   23
 #define AT_RANDOM   25
 #define AT_HWCAP2   26
+#define AT_SYSINFO_EHDR 33
 
 vaddr_t elf_setup_stack(vaddr_t stack_top, int argc, char *const argv[],
-                        char *const envp[], const elf_load_info_t *info) {
+                        char *const envp[], const elf_load_info_t *info,
+                        vaddr_t vdso_ehdr) {
     if (argc < 0 || argc > MAX_ARG_STRINGS)
         return 0;
 
@@ -1261,6 +1263,7 @@ vaddr_t elf_setup_stack(vaddr_t stack_top, int argc, char *const argv[],
         { AT_SECURE, 0               },
         { AT_RANDOM, (uintptr_t)random_va       },
         { AT_HWCAP2, 0               },
+        { AT_SYSINFO_EHDR, (uintptr_t)vdso_ehdr },
         { AT_NULL,   0               },
     };
     int naux = (int)(sizeof(auxv) / sizeof(auxv[0]));
@@ -1403,7 +1406,9 @@ vaddr_t elf_setup_stack_a20_dynamic(vaddr_t stack_top, int argc,
         return 0;
 
     vaddr_t si_va = stack_top - sizeof(a20_start_info_t);
-    vaddr_t sp_va = elf_setup_stack(si_va, argc, argv, envp, info);
+    /* Native-dynamic tasks keep the syscall path for now: no vDSO is
+     * mapped for them, so AT_SYSINFO_EHDR must be 0 (musl falls back). */
+    vaddr_t sp_va = elf_setup_stack(si_va, argc, argv, envp, info, 0);
     if (!sp_va)
         return 0;
 
