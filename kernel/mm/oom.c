@@ -127,6 +127,8 @@ static int swap_out_victim_pages(int target_pages)
 
     spin_unlock(&mm->lock);
     proc_put(victim);
+    if (reclaimed > 0)
+        arch_tlb_flush();  /* frames went back to the buddy: remote flush */
     return reclaimed;
 }
 #else

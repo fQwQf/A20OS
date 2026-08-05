@@ -85,6 +85,15 @@ static void rv64_smp_send_ipi(const smp_cpu_desc_t *cpu,
  * interrupts disabled (remote-flush calls are deferred until after unlock). */
 static _Atomic uint32_t rv64_tlb_pending[CONFIG_NR_CPUS];
 static _Atomic uint32_t rv64_tlb_gen[CONFIG_NR_CPUS];
+static _Atomic uint32_t rv64_tlb_ipi_serviced;
+static _Atomic uint32_t rv64_tlb_flush_calls;
+
+uint32_t rv64_tlb_flush_stats(uint32_t *serviced)
+{
+    if (serviced)
+        *serviced = __atomic_load_n(&rv64_tlb_ipi_serviced, __ATOMIC_RELAXED);
+    return __atomic_load_n(&rv64_tlb_flush_calls, __ATOMIC_RELAXED);
+}
 
 static int rv64_smp_remote_tlb_flush(uint32_t pending, uint64_t addr,
                                      uint64_t size) {
@@ -94,6 +103,7 @@ static int rv64_smp_remote_tlb_flush(uint32_t pending, uint64_t addr,
     pending &= ~self;
     if (!pending)
         return 0;
+    __atomic_fetch_add(&rv64_tlb_flush_calls, 1, __ATOMIC_RELAXED);
 
     for (unsigned cpu = 0; cpu < CONFIG_NR_CPUS; cpu++) {
         if (!(pending & (1U << cpu)))
@@ -135,6 +145,7 @@ void rv64_ipi_tlb_flush_handler(void)
         return;
     if (__atomic_exchange_n(&rv64_tlb_pending[cpu], 0, __ATOMIC_ACQ_REL)) {
         __asm__ __volatile__("sfence.vma" ::: "memory");
+        __atomic_fetch_add(&rv64_tlb_ipi_serviced, 1, __ATOMIC_RELAXED);
     }
 }
 
