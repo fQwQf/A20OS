@@ -16,9 +16,13 @@
   - 备注：验证期间发现 main HEAD（a7eb6d2）存在与本阶段无关的线程/阻塞
     路径挂起回归（见 `docs/hybrid-kernel/STATUS.md` 基线回归观察），既有
     线程类 native smoke 的回归验证在其收敛前受阻。
-- [ ] 阶段二：Native ABI SMP 正确性收口（native-shmring SMP=2/8 偶发破坏）。
-  - 证据：`docs/hybrid-kernel/STATUS.md` 已知边界；诊断挂载点 `frame_trace_dump_pfn`、`[VMO-PAGE]`。
-  - 完成条件：`smoke-native-shmring` SMP=2/8 连续 20 轮零失败。
+- [x] 阶段二：Native ABI SMP 正确性收口（native-shmring SMP=2/8 偶发破坏）。
+  - 证据：SMP=2 连续 20 轮 + SMP=8 连续 20 轮零失败零挂起（2026-08-06，
+    日志 `.kernel-build/smoke/shmring-smp{2,8}/`）；M5 修复 `98a1260`/
+    `1af0d02` 复验有效，破坏不可复现。
+  - 副产品：`[VMO-PAGE]` 串口诊断降级为 `/proc/a20/objects` 的
+    `vmo_dirty_frames` 计数器（合法复用，消除输出交错）；记录 HEAD 的
+    mm_stress 45s 门禁预算不足观察。
 - [ ] 阶段三：驱动双态部署框架 + IOMMU/DMA 真隔离。
   - 证据：udriver 接口现状 `kernel/abi/native/sys_native_device.c`；DMA 信任模型见 STATUS 已知边界。
   - 完成条件：同一驱动源码双态部署通过同一契约测试；未授权 DMA 被 IOMMU 硬件拒绝。
