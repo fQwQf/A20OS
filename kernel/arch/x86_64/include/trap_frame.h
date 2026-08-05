@@ -2,6 +2,7 @@
 #define _ARCH_X86_64_TRAP_H
 
 #include "core/types.h"
+#include "proc/debug_regs.h"
 #include "page_table.h"
 #include "platform.h"
 
@@ -290,6 +291,70 @@ static inline void arch_signal_restore_frame_extra(trap_context_t *ctx,
                                                    const void *extra) {
     (void)ctx;
     (void)extra;
+}
+
+/* ---- debugging interface (kernel/proc/debug.c) ---- */
+
+/* The `syscall` instruction is 2 bytes; a syscall-entry-stop resume must
+ * re-execute it. */
+static inline void arch_ptrace_rewind_syscall(trap_context_t *ctx) {
+    TRAP_CTX_EPC(ctx) -= 2;
+}
+
+/* PTRACE_SINGLESTEP: set the trap flag; the resulting #DB is delivered as
+ * SIGTRAP (see trap.S: vec 1 maps to CAUSE_BREAKPOINT), and the delivery
+ * path clears TF before the stop so the step is one-shot. */
+#define X86_64_RFLAGS_TF (1UL << 8)
+static inline void arch_ptrace_set_step(trap_context_t *ctx) {
+    ctx->rflags |= X86_64_RFLAGS_TF;
+}
+
+/* Export into the generic register file; the ABI wrapper reorders into the
+ * Linux struct user_regs_struct layout. */
+static inline void arch_ptrace_export_regs(const trap_context_t *ctx,
+                                           proc_debug_regs_t *out) {
+    out->regs[0]  = ctx->rax;
+    out->regs[1]  = ctx->rbx;
+    out->regs[2]  = ctx->rcx;
+    out->regs[3]  = ctx->rdx;
+    out->regs[4]  = ctx->rsi;
+    out->regs[5]  = ctx->rdi;
+    out->regs[6]  = ctx->rbp;
+    out->regs[7]  = ctx->rsp;
+    out->regs[8]  = ctx->r8;
+    out->regs[9]  = ctx->r9;
+    out->regs[10] = ctx->r10;
+    out->regs[11] = ctx->r11;
+    out->regs[12] = ctx->r12;
+    out->regs[13] = ctx->r13;
+    out->regs[14] = ctx->r14;
+    out->regs[15] = ctx->r15;
+    out->pc = ctx->rip;
+    out->sp = ctx->rsp;
+    out->status = ctx->rflags;
+    out->orig_syscall = ctx->rax;
+}
+
+static inline void arch_ptrace_import_regs(trap_context_t *ctx,
+                                           const proc_debug_regs_t *in) {
+    ctx->rax = in->regs[0];
+    ctx->rbx = in->regs[1];
+    ctx->rcx = in->regs[2];
+    ctx->rdx = in->regs[3];
+    ctx->rsi = in->regs[4];
+    ctx->rdi = in->regs[5];
+    ctx->rbp = in->regs[6];
+    ctx->rsp = in->regs[7];
+    ctx->r8  = in->regs[8];
+    ctx->r9  = in->regs[9];
+    ctx->r10 = in->regs[10];
+    ctx->r11 = in->regs[11];
+    ctx->r12 = in->regs[12];
+    ctx->r13 = in->regs[13];
+    ctx->r14 = in->regs[14];
+    ctx->r15 = in->regs[15];
+    ctx->rip = in->pc;
+    ctx->rflags = in->status;
 }
 
 #endif
