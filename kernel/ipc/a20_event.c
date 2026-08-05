@@ -10,6 +10,7 @@
 #include "abi/native/ipc_internal.h"
 #include "abi/native/errno.h"
 #include "proc/proc.h"
+#include "ipc/objstats.h"
 
 #define A20_EVQ_HASH_BITS  8
 #define A20_EVQ_HASH_SIZE  (1u << A20_EVQ_HASH_BITS)
@@ -83,6 +84,7 @@ a20_eventq_t *a20_eventq_create(uint32_t capacity_hint)
     eq->ring = kmalloc(eq->ring_cap * sizeof(a20_pending_event_t));
     if (!eq->ring) { kfree(eq); return NULL; }
     memset(eq->ring, 0, eq->ring_cap * sizeof(a20_pending_event_t));
+    a20_objstat_add(&g_a20_objstats.eventqs, 1);
     return eq;
 }
 
@@ -261,6 +263,7 @@ void a20_eventq_release(a20_eventq_t *eq)
 {
     if (!eq) return;
     if (!refcount_dec_and_test(&eq->refcount)) return;
+    a20_objstat_add(&g_a20_objstats.eventqs, -1);
 
     /* Remove watches that use this queue as their target before tearing down
      * the queue-owned watch list. */
