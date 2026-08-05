@@ -94,3 +94,4 @@ extern uint64_t a20_netd_random_u64(void);
 #define LWIP_RAND()                     ((u32_t)a20_netd_random_u64())
 
 #endif /* A20_LWIPOPTS_H */
+

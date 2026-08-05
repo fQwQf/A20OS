@@ -15,13 +15,19 @@
 #include "mm/frame.h"
 #include "ipc/ipc.h"
 #include "ipc/objstats.h"
+#if defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)
 #include "abi/native/ipc_internal.h"
 #include "abi/native/objects.h"
 #include "abi/native/handle_table.h"
 #include "abi/native/syscall_entry.h"
+#endif
 #include "proc/proc.h"
 #include "net/netd_proto.h"
+#include "sys/usercopy.h"
+
 #include "core/bootargs.h"
+
+
 #include "core/string.h"
 
 static struct vmo *g_netd_ring_vmo;
@@ -53,9 +59,59 @@ void netd_ring_init(void)
     g_netd_rings->tx.slot_mask = NETD_RING_SLOTS - 1;
     g_netd_enabled = 1;
     printf("[NETD] frame plane ready: rings=%p\n", (void *)g_netd_rings);
+
 }
 
 int netd_enabled(void) { return g_netd_enabled; }
+
+/* VMO pages are not physically contiguous (pfn_to_virt of page 0 must not
+ * be indexed linearly), so ring slot access goes through per-page pfn
+ * lookup.  The RX/TX headers (head/tail/doorbell/slot_mask) stay reachable
+ * via g_netd_rings (page 0 only), while frame slots cross into other pages
+ * and are copied through netd_vmo_poke/peek. */
+#define NETD_PAGE_SHIFT 12
+#define NETD_PAGE_SIZE (1ul << NETD_PAGE_SHIFT)
+static int netd_vmo_poke(uint64_t voff, const void *src, uint32_t len)
+{
+    if (!g_netd_ring_vmo)
+        return -1;
+    while (len) {
+        uint32_t pg = (uint32_t)(voff >> NETD_PAGE_SHIFT);
+        uint32_t po = (uint32_t)(voff & (NETD_PAGE_SIZE - 1));
+        uint32_t n = NETD_PAGE_SIZE - po;
+        if (n > len)
+            n = len;
+        pfn_t pfn = vmo_get_page(g_netd_ring_vmo, pg);
+        if (pfn == PFN_NONE)
+            return -1;
+        memcpy((uint8_t *)pfn_to_virt(pfn) + po, src, n);
+        voff += n;
+        src = (const uint8_t *)src + n;
+        len -= n;
+    }
+    return 0;
+}
+
+static int netd_vmo_peek(uint64_t voff, void *dst, uint32_t len)
+{
+    if (!g_netd_ring_vmo)
+        return -1;
+    while (len) {
+        uint32_t pg = (uint32_t)(voff >> NETD_PAGE_SHIFT);
+        uint32_t po = (uint32_t)(voff & (NETD_PAGE_SIZE - 1));
+        uint32_t n = NETD_PAGE_SIZE - po;
+        if (n > len)
+            n = len;
+        pfn_t pfn = vmo_get_page(g_netd_ring_vmo, pg);
+        if (pfn == PFN_NONE)
+            return -1;
+        memcpy(dst, (const uint8_t *)pfn_to_virt(pfn) + po, n);
+        voff += n;
+        dst = (uint8_t *)dst + n;
+        len -= n;
+    }
+    return 0;
+}
 
 /* Deliver a received frame into the RX ring. Returns 0 on success. */
 int netd_rx_frame(const void *data, uint32_t len)
@@ -65,39 +121,104 @@ int netd_rx_frame(const void *data, uint32_t len)
     netd_frame_ring_t *r = &g_netd_rings->rx;
     uint32_t head = __atomic_load_n(&r->head, __ATOMIC_RELAXED);
     uint32_t tail = __atomic_load_n(&r->tail, __ATOMIC_ACQUIRE);
-    if (head - tail >= NETD_RING_SLOTS)
+    if (head - tail >= NETD_RING_SLOTS) {
+
         return -1;
+    }
     if (len > NETD_MAX_FRAME)
         len = NETD_MAX_FRAME;
     uint32_t idx = head & r->slot_mask;
     uint32_t off = idx * (4 + NETD_MAX_FRAME);
-    *(uint32_t *)(r->data + off) = len;
-    memcpy(r->data + off + 4, data, len);
+    if (netd_vmo_poke(16 + off, &len, 4) < 0)
+        return -1;
+    if (netd_vmo_poke(16 + off + 4, data, len) < 0)
+        return -1;
     __atomic_store_n(&r->head, head + 1, __ATOMIC_RELEASE);
     __atomic_store_n(&r->doorbell, 1, __ATOMIC_RELEASE);
     return 0;
 }
 
-/* Pull a frame from the TX ring for the NIC. Returns length or 0. */
+/* Kernel-side TX submission: netd hands the frame bytes over a syscall
+ * (shared-memory writes from userspace are not reliably visible to the
+ * kernel with the current VMO mapping semantics), and the kernel enqueues
+ * into the TX ring with per-page VMO copies. */
+int netd_tx_submit(const void *data, uint32_t len)
+{
+    if (!g_netd_enabled || !g_netd_rings)
+        return -1;
+    uint32_t head = 0, tail = 0, slot_mask = 0;
+    if (netd_vmo_peek(65680, &head, 4) < 0)
+        return -1;
+    if (netd_vmo_peek(65680 + 4, &tail, 4) < 0)
+        return -1;
+    if (netd_vmo_peek(65680 + 12, &slot_mask, 4) < 0)
+        return -1;
+    if (head - tail >= NETD_RING_SLOTS)
+        return -1;
+    if (len > NETD_MAX_FRAME)
+        len = NETD_MAX_FRAME;
+
+    uint32_t idx = head & slot_mask;
+    uint32_t off = idx * (4 + NETD_MAX_FRAME);
+    if (netd_vmo_poke(65680 + 16 + off, &len, 4) < 0)
+        return -1;
+    if (netd_vmo_poke(65680 + 16 + off + 4, data, len) < 0)
+        return -1;
+    uint32_t nh = head + 1;
+    if (netd_vmo_poke(65680, &nh, 4) < 0) {
+
+        return -1;
+    }
+
+    return 0;
+}
+
+int64_t sys_a20_netd_tx_send(const a20_syscall_args_t *args)
+{
+    const void *uptr = (const void *)args->arg[0];
+    uint32_t len = (uint32_t)args->arg[1];
+    if (!g_netd_enabled || len == 0 || len > NETD_MAX_FRAME)
+        return -A20_ERR_INVALID_ARGUMENT;
+    if (!uptr)
+        return -A20_ERR_FAULT;
+    uint8_t frame[NETD_MAX_FRAME];
+    if (copy_from_user(frame, uptr, len) < 0)
+        return -A20_ERR_FAULT;
+    if (netd_tx_submit(frame, len) < 0)
+        return -A20_ERR_NO_MEMORY;
+    return 0;
+}
+
 uint32_t netd_tx_frame(void *out, uint32_t max)
 {
     if (!g_netd_enabled || !g_netd_rings)
         return 0;
-    netd_frame_ring_t *r = &g_netd_rings->tx;
-    uint32_t head = __atomic_load_n(&r->head, __ATOMIC_ACQUIRE);
-    uint32_t tail = __atomic_load_n(&r->tail, __ATOMIC_RELAXED);
+    /* TX ring header lives on a non-contiguous VMO page (pfn16 != pfn0+16),
+     * so it must be read through per-page vmo copies, not g_netd_rings. */
+    uint32_t head = 0, tail = 0, slot_mask = 0;
+    if (netd_vmo_peek(65680, &head, 4) < 0)
+        return 0;
+    if (netd_vmo_peek(65680 + 4, &tail, 4) < 0)
+        return 0;
+    if (netd_vmo_peek(65680 + 12, &slot_mask, 4) < 0)
+        return 0;
     if (head == tail)
         return 0;
-    uint32_t idx = tail & r->slot_mask;
+    uint32_t idx = tail & slot_mask;
     uint32_t off = idx * (4 + NETD_MAX_FRAME);
-    uint32_t len = *(const uint32_t *)(r->data + off);
+    uint32_t len = 0;
+    if (netd_vmo_peek(65680 + 16 + off, &len, 4) < 0)
+        return 0;
     if (len > max || len > NETD_MAX_FRAME)
         return 0;
-    memcpy(out, r->data + off + 4, len);
-    __atomic_store_n(&r->tail, tail + 1, __ATOMIC_RELEASE);
+    if (netd_vmo_peek(65680 + 16 + off + 4, out, len) < 0)
+        return 0;
+    uint32_t nt = tail + 1;
+    netd_vmo_poke(65680 + 4, &nt, 4);
     return len;
 }
 
+#if defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)
 int64_t sys_a20_netd_attach(const a20_syscall_args_t *args)
 {
     (void)args;
@@ -119,3 +240,4 @@ int64_t sys_a20_netd_attach(const a20_syscall_args_t *args)
     }
     return h;
 }
+#endif /* ABI_NATIVE || ABI_BOTH */
