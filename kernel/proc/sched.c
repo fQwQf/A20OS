@@ -798,54 +798,40 @@ void proc_sched_assert_task_locked(task_t *t)
 #endif
 }
 
-unsigned proc_sched_task_runq_memberships_locked(task_t *t)
+void proc_sched_task_snapshot_locked(task_t *t,
+                                     proc_sched_task_snapshot_t *snapshot)
 {
+    if (!snapshot)
+        return;
+    memset(snapshot, 0, sizeof(*snapshot));
     if (!t)
-        return 0;
+        return;
 
     uint64_t rq_flags[CONFIG_NR_CPUS];
     for (unsigned cpu = 0; cpu < CONFIG_NR_CPUS; cpu++)
         rq_flags[cpu] = RUNQ_LOCK_IRQ(cpu);
 
-    unsigned memberships = 0;
     for (unsigned cpu = 0; cpu < CONFIG_NR_CPUS; cpu++) {
         proc_runq_t *rq = &sched_runq[cpu];
         for (int level = 0; level < SCHED_LEVELS; level++) {
             for (task_t *it = rq->head[level]; it; it = it->rq_next) {
-                if (it == t)
-                    memberships++;
+                if (it == t) {
+                    snapshot->memberships++;
+                    if (cpu < 64)
+                        snapshot->cpu_mask |= 1ULL << cpu;
+                }
             }
         }
     }
+    snapshot->on_rq = t->on_rq;
+    snapshot->dispatching = t->dispatching;
+    snapshot->on_cpu = t->on_cpu;
+    snapshot->state = t->state;
+    snapshot->owner_cpu = t->owner_cpu;
+    snapshot->cpu_id = t->cpu_id;
 
     for (unsigned cpu = CONFIG_NR_CPUS; cpu > 0; cpu--)
         RUNQ_UNLOCK_IRQ(cpu - 1, rq_flags[cpu - 1]);
-    return memberships;
-}
-
-uint64_t proc_sched_task_runq_cpu_mask_locked(task_t *t)
-{
-    if (!t)
-        return 0;
-
-    uint64_t rq_flags[CONFIG_NR_CPUS];
-    for (unsigned cpu = 0; cpu < CONFIG_NR_CPUS; cpu++)
-        rq_flags[cpu] = RUNQ_LOCK_IRQ(cpu);
-
-    uint64_t mask = 0;
-    for (unsigned cpu = 0; cpu < CONFIG_NR_CPUS && cpu < 64; cpu++) {
-        proc_runq_t *rq = &sched_runq[cpu];
-        for (int level = 0; level < SCHED_LEVELS; level++) {
-            for (task_t *it = rq->head[level]; it; it = it->rq_next) {
-                if (it == t)
-                    mask |= 1ULL << cpu;
-            }
-        }
-    }
-
-    for (unsigned cpu = CONFIG_NR_CPUS; cpu > 0; cpu--)
-        RUNQ_UNLOCK_IRQ(cpu - 1, rq_flags[cpu - 1]);
-    return mask;
 }
 
 void proc_make_ready(task_t *t)

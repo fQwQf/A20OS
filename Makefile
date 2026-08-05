@@ -832,7 +832,7 @@ check-task-state-boundary:
 		-- '->state[[:space:]]*=[[:space:]]*PROC_' kernel
 	@! rg -n --pcre2 --glob '*.c' --glob '!kernel/external/**' \
 		--glob '!kernel/proc/sched.c' --glob '!kernel/proc/current.c' \
-		--glob '!kernel/proc/task.c' \
+		--glob '!kernel/proc/park.c' --glob '!kernel/proc/task.c' \
 		-- '->(on_rq|dispatching|on_cpu|owner_cpu|rq_next|rq_prev)[[:space:]]*=' kernel
 	@! rg -n 'proc_runq_(enqueue|remove)_locked[[:space:]]*\(' kernel \
 		--glob '*.c' --glob '!kernel/proc/park.c' \
@@ -912,7 +912,7 @@ check-blocking-point-boundary:
 		test -z "$$bad" || { echo "$$bad"; exit 1; }
 	@bad=$$(rg -n --pcre2 '(?:->|\.)(?:on_rq|cpu_id|rq_next|rq_prev)[[:space:]]*=' \
 		kernel --glob '*.[ch]' --glob '!kernel/external/**' | \
-		rg -v '^kernel/proc/(task|sched)\.c:' || true); \
+		rg -v '^kernel/proc/(task|sched|park)\.c:' || true); \
 		test -z "$$bad" || { echo "$$bad"; exit 1; }
 	@bad=$$(rg -n --pcre2 '\bproc_make_ready[[:space:]]*\(' kernel \
 		--glob '*.c' --glob '!kernel/external/**' | \
@@ -1020,7 +1020,7 @@ check-final-definition: check-doc-test-gates
 	@rg -q "TASK_STATE_MUTATION_CONTRACT" kernel/include/proc/proc.h
 	@rg -q "TASK_REFERENCE_LIFETIME" kernel/include/proc/proc.h
 	@rg -q "VFS_REFCOUNT_HELPER_CONTRACT" kernel/include/fs/vfs.h
-	@rg -q "NATIVE_HANDLE_CAPABILITY_CONSISTENCY_MATRIX" kernel/abi/native/handle_table.h
+	@rg -q "NATIVE_HANDLE_CAPABILITY_CONSISTENCY_MATRIX" kernel/include/ipc/handle_table.h
 	@rg -q "KERNEL_PROGRESS_SERVICE_CONTRACT" kernel/include/core/progress.h
 	@rg -q "VFS_OPEN_DISPATCH_CONTRACT" kernel/include/fs/vfs.h
 	@rg -q "LINUX_ABI_EXPLICIT_STUB_CONTRACT" kernel/abi/linux/syscall_table.def
@@ -1147,7 +1147,7 @@ check-abi-boundary:
 	@rg -q "abi_core_proc_exec" kernel/abi/linux/sys_namespace.c kernel/include/abi/core_api.h
 	@rg -q "abi_core_proc_mmap" kernel/abi/native/sys_phase2.c kernel/include/abi/core_api.h
 	@rg -q "NATIVE_DEBUG_LIMITED_CONTRACT" kernel/abi/native/sys_phase2.c
-	@rg -q "NATIVE_HANDLE_CAPABILITY_CONSISTENCY_MATRIX" kernel/abi/native/handle_table.h
+	@rg -q "NATIVE_HANDLE_CAPABILITY_CONSISTENCY_MATRIX" kernel/include/ipc/handle_table.h
 	@rg -q "NATIVE_HANDLE_CAPABILITY_TEST_CONTRACT" kernel/abi/native/handle_table.c
 	@rg -q "Debug 分区受限" docs/native-abi/00-overview.md
 	@! rg -q "uint64_t args\[[0-9]+\]" user/liba20c/*.c

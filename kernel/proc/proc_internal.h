@@ -99,8 +99,18 @@ void proc_sched_tick(int from_user);
 int proc_sched_safe_point(void);
 void proc_sched_stop_current(int exit_code);
 void proc_sched_assert_task_locked(task_t *t);
-unsigned proc_sched_task_runq_memberships_locked(task_t *t);
-uint64_t proc_sched_task_runq_cpu_mask_locked(task_t *t);
+typedef struct proc_sched_task_snapshot {
+    unsigned memberships;
+    uint64_t cpu_mask;
+    int on_rq;
+    int dispatching;
+    int on_cpu;
+    int state;
+    unsigned owner_cpu;
+    unsigned cpu_id;
+} proc_sched_task_snapshot_t;
+void proc_sched_task_snapshot_locked(task_t *t,
+                                     proc_sched_task_snapshot_t *snapshot);
 int proc_sched_should_preempt_locked(task_t *t, unsigned cpu);
 unsigned proc_current_owner_memberships_locked(task_t *t);
 unsigned proc_current_slot_count_locked(void);
