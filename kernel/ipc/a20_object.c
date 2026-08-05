@@ -12,10 +12,9 @@
 #include "core/refcount.h"
 #include "mm/slab.h"
 #include "fs/vfs.h"
-#include "abi/native/types.h"
-#include "abi/native/ipc_internal.h"
-#include "abi/native/vmo.h"
-#include "abi/native/objects.h"
+#include "ipc/ipc.h"
+#include "ipc/handle_table.h"
+#include "mm/vmo.h"
 #include "ipc/objstats.h"
 
 a20_objstats_t g_a20_objstats;

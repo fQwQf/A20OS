@@ -1,42 +1,15 @@
 /*
- * A20OS Native ABI — Startup info structure (kernel→user contract).
- * Design reference: docs/native-abi/07-startup.md §1
+ * A20OS Native ABI — startup info re-export.
+ * The kernel side of a20_start_info_t lives internally
+ * (kernel/include/ipc/start_info.h).
  */
 #ifndef _ABI_NATIVE_STARTUP_H
 #define _ABI_NATIVE_STARTUP_H
 
-#include "abi/native/types.h"
+#include "proc/proc.h"
+#include "ipc/start_info.h"
 
-typedef struct a20_start_info {
-    uint32_t size;
-    uint32_t version;
-
-    uint32_t argc;
-    uint32_t envc;
-    uint32_t auxc;
-    uint32_t reserved0; /* Native spawn fd mapping limit; zero for normal exec */
-
-    uint64_t argv;
-    uint64_t envp;
-    uint64_t auxv;
-
-    a20_handle_t root_dir;
-    a20_handle_t cwd_dir;
-    a20_handle_t stdin_handle;
-    a20_handle_t stdout_handle;
-    a20_handle_t stderr_handle;
-    a20_handle_t self_task;
-    a20_handle_t main_thread;
-    a20_handle_t default_event_queue;
-
-    uint64_t page_size;
-    uint64_t user_clock_freq;
-
-    /* Well-known service-registry client endpoint
-     * (docs/hybrid-kernel/02-mainstream-plan.md M3); A20_HANDLE_NULL when
-     * the registry is unavailable. */
-    a20_handle_t service_registry;
-    uint32_t _pad_registry;
-} a20_start_info_t;
+int a20_prepare_start_info(task_t *task, const char *init_path,
+                           uint64_t stack_top, uint64_t *out_sp);
 
 #endif
