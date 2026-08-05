@@ -50,6 +50,21 @@ typedef struct a20_handle_entry {
 
 struct a20_ht_internal;
 
+/*
+ * Native handle lifetime invariants:
+ * - ACTIVE entries are usable only when the type, rights, temporal limits,
+ *   and security label admit the requested operation.
+ * - CLOSING and EXPIRED entries reject new lookups; FREE entries own no object
+ *   reference.
+ * - install/dup/transfer may preserve or reduce rights and temporal limits,
+ *   but must never make a capability more permissive.
+ * - NATIVE_HANDLE_CAPABILITY_CONSISTENCY_MATRIX: static gates require evidence
+ *   for rights downgrade, temporal rights, security labels, close/dup/transfer,
+ *   and partial delivery before this model can be marked complete.
+ * - The table lock protects entry allocation, state transitions, operation
+ *   count consumption, the free bitmap, and count/free_hint.
+ */
+
 /* ---- Handle table lifecycle ---- */
 
 struct a20_ht_internal *a20_ht_create(void);
