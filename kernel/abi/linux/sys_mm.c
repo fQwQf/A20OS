@@ -112,8 +112,10 @@ int64_t sys_mprotect(uint64_t addr, size_t len, int prot) {
     task_t *t = proc_current();
     if (!t || !t->mm) return -EINVAL;
     uint64_t mm_flags = linux_mm_lock(t);
-    int ret = mm_mprotect(t->mm, addr, len, prot);
+    int ret = mm_mprotect_locked(t->mm, addr, len, prot);
     linux_mm_unlock(t, mm_flags);
+    mm_vma_flush_deferred(t->mm);
+    arch_tlb_flush();
     return ret;
 }
 
@@ -300,8 +302,11 @@ int64_t sys_mremap(uint64_t old_addr, size_t old_size, size_t new_size, int flag
     if (!t || !t->mm) return -EINVAL;
     vaddr_t out = 0;
     uint64_t mm_flags = linux_mm_lock(t);
-    int r = mm_mremap(t->mm, old_addr, old_size, new_size, flags, new_addr, &out);
+    int r = mm_mremap_locked(t->mm, old_addr, old_size, new_size, flags,
+                             new_addr, &out);
     linux_mm_unlock(t, mm_flags);
+    mm_vma_flush_deferred(t->mm);
+    arch_tlb_flush();
     return r < 0 ? r : (int64_t)out;
 }
 
