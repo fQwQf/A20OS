@@ -13,6 +13,7 @@
 #include "core/defs.h"
 #include "core/consts.h"
 #include "core/klog.h"
+#include "core/kallsyms.h"
 
 __attribute__((weak)) void arch_dump_trap_ring(void) {}
 
@@ -43,11 +44,15 @@ static void dump_trap_context(trap_context_t *ctx) {
 
 static void dump_kernel_backtrace(trap_context_t *ctx, vaddr_t pc, int max_frames) {
     kerr("  backtrace:\n");
-    kerr("    [%d] pc=0x%lx\n", 0, (unsigned long)pc);
+    kerr("    [%d] pc=", 0);
+    kallsyms_print(pc);
+    kerr("\n");
     struct backtrace_frame frames[16];
     int n = arch_unwind_frames(TRAP_CTX_FP(ctx), frames, max_frames > 16 ? 16 : max_frames);
     for (int i = 0; i < n; i++) {
-        kerr("    [%d] pc=0x%lx\n", i + 1, (unsigned long)frames[i].pc);
+        kerr("    [%d] pc=", i + 1);
+        kallsyms_print(frames[i].pc);
+        kerr("\n");
     }
 }
 
@@ -286,6 +291,12 @@ static void user_trap_handler(trap_context_t *ctx) {
         } else if (code == CAUSE_BREAKPOINT) {
             printf("SIGTRAP: pid=%d sepc=0x%lx stval=0x%lx\n",
                   cur ? cur->pid : -1, (unsigned long)sepc, (unsigned long)stval);
+#if defined(CONFIG_X86_64)
+            /* Single-step #DB (vec 1 maps here): clear TF in the saved
+             * context so the step is one-shot; the traced stop reports the
+             * SIGTRAP and the resume continues without re-trapping. */
+            ctx->rflags &= ~(1UL << 8);
+#endif
             if (deliver_user_sync_signal(ctx, SIGTRAP, -SIGTRAP))
                 return;
             proc_exit_group(-SIGTRAP);

@@ -59,34 +59,16 @@
 - **网络协议栈**：lwIP 已编译为用户态 netd 服务（bootarg `netd=1` 激活；未激活时内核 lwIP 行为不变）。帧环（RX/TX）与 socket 代理 RPC（create/bind/listen/accept/connect/send/recv/close/poll/getsockname/setsockopt）已实现；QEMU hostfwd 验证了完整代理链路与 TCP 握手（SYN-ACK 出帧面、accept 回调触发）。**剩余**：数据段在 lwIP 侧被丢弃（子连接 PCB 在 accept 后从 active 列表消失，`lookup pcb=0`），recv 数据回传未通——根因锁定在 tcp_process 的 accept/abort 路径，待续；
 - **loongarch64**：内核与 native 测试均构建通过，运行时复测受工具链/镜像条件所限未完整执行；
 - **性能数据**全部来自 QEMU TCG 模拟器，真实硬件基准待测；
-- **IOMMU/DMA 安全**：DMA 隔离已升级为真实 IOMMU 硬件强制——DDT(1LVL)、
-  CQ/FQ 使能，devid 0 配置 SV39 翻译域并经 TR_REQ 验证（已映射 IOVA
-  精确翻译、未映射 IOVA 被硬件拒绝 fault=1/cause=13），devid 1 保持
-  passthrough。fault 队列消费与 per-device 页表动态映射为后续工作。
+- **IOMMU/DMA 安全**：DMA 隔离已升级为真实 IOMMU 硬件强制——DDT(1LVL)、 CQ/FQ 使能，devid 0 配置 SV39 翻译域并经 TR_REQ 验证（已映射 IOVA 精确翻译、未映射 IOVA 被硬件拒绝 fault=1/cause=13），devid 1 保持 passthrough。fault 队列消费与 per-device 页表动态映射为后续工作。
 
 ## 基线回归观察（2026-08-06，分支 hybrid-kernel-refactor 记录）
 
 以下为在干净 main HEAD（a7eb6d2）上观察到的问题，**不是**本分支改动引入：
 
-- **HEAD 构建破损**：`virtio_input.c` 引用 `virtio_transport_t.shared_irq`、
-  loongarch64 缺少 `arch_tlb_flush_page_local`，两者均为进行中的 IRQ/驱动
-  重构的半成品（主工作区未提交修改包含对应完整实现）。本分支以单行 shim
-  补齐（`virtio_transport.h` 增字段、la64 `cpu.h` 增 local flush 包装），
-  与进行中重构同形，合并时应自然消解；
-- **HEAD 线程/阻塞路径挂起（riscv64）**：所有使用 `a20_thread_create` 的
-  native smoke（handle 的 `bch` 分区起、ipc、svc 等）在 SMP=1 下挂起至
-  超时；单线程路径（`smoke-native-contract` 全四分区）完整通过。已用
-  stash 对照实验证明与本分支的 STAT 改动无关。阻塞中的原生回归验证
-  （handle/ipc/svc 等）在此问题收敛前无法执行；
-- **[VMO-PAGE] 诊断（已处理）**：契约测试与 shmring 复验期间观察到
-  `[VMO-PAGE] new pfn ... had content`（buddy 返回未清零复用帧，VMO 侧
-  memset 兜底，用户可见行为正确）。已降级为 `/proc/a20/objects` 的
-  `vmo_dirty_frames` 累计计数器，消除串口输出交错；契约测试已把
-  "新 VMO 页读零"固化为用户态契约（`vmol-zero`）；
-- **mm_stress 45 秒门禁预算不足（HEAD 观察）**：`smoke-mm-stress`
-  （SMOKE_TIMEOUT_MM_ST=45s）在 TCG 下于 `evict-mmap` 段超时，同一镜像
-  以 180s 预算完整 PASS。非本分支改动引入（本分支 MM 改动仅为
-  printf→计数器降级，严格更快），门禁预算需按当前 TCG 耗时重校。
+- **HEAD 构建破损**：`virtio_input.c` 引用 `virtio_transport_t.shared_irq`、 loongarch64 缺少 `arch_tlb_flush_page_local`，两者均为进行中的 IRQ/驱动 重构的半成品（主工作区未提交修改包含对应完整实现）。本分支以单行 shim 补齐（`virtio_transport.h` 增字段、la64 `cpu.h` 增 local flush 包装）， 与进行中重构同形，合并时应自然消解；
+- **HEAD 线程/阻塞路径挂起（riscv64）**：所有使用 `a20_thread_create` 的 native smoke（handle 的 `bch` 分区起、ipc、svc 等）在 SMP=1 下挂起至 超时；单线程路径（`smoke-native-contract` 全四分区）完整通过。已用 stash 对照实验证明与本分支的 STAT 改动无关。阻塞中的原生回归验证 （handle/ipc/svc 等）在此问题收敛前无法执行；
+- **[VMO-PAGE] 诊断（已处理）**：契约测试与 shmring 复验期间观察到 `[VMO-PAGE] new pfn ... had content`（buddy 返回未清零复用帧，VMO 侧 memset 兜底，用户可见行为正确）。已降级为 `/proc/a20/objects` 的 `vmo_dirty_frames` 累计计数器，消除串口输出交错；契约测试已把 "新 VMO 页读零"固化为用户态契约（`vmol-zero`）；
+- **mm_stress 45 秒门禁预算不足（HEAD 观察）**：`smoke-mm-stress` （SMOKE_TIMEOUT_MM_ST=45s）在 TCG 下于 `evict-mmap` 段超时，同一镜像 以 180s 预算完整 PASS。非本分支改动引入（本分支 MM 改动仅为 printf→计数器降级，严格更快），门禁预算需按当前 TCG 耗时重校。
 
 ## 复现入口
 
