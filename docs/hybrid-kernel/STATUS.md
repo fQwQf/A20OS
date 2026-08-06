@@ -27,7 +27,7 @@
 | virtio-blk 用户态驱动（零拷贝 DMA） | 已实现 | FAT32 挂载 `/ubd`，`smoke-native-ubd` |
 | 驱动崩溃恢复（在飞请求失败传导 + 重挂载） | 已实现 | `ubd_recover` |
 | Linux ABI 透明获益（vDSO、唤醒快路径、AF_UNIX 桥接） | 已实现 | `smoke-clock-vdso` + unix 测试 |
-| netd 帧面 + socket 代理（lwIP 用户态 + 帧环 + RPC 代理） | 握手/accept 链路已通；recv 数据面待续 | `netd=1` 下 bind/listen/accept RPC、ARP、TCP SYN-ACK 验证 |
+| netd 帧面 + socket 代理（lwIP 用户态 + 帧环 + RPC 代理） | host→guest 与 guest→host TCP echo 数据面已通 | `netd=1` 下 hostfwd echo（`HOST_GOT b'netd-sock-echo' len=14`）与 `NETD_SOCK_TEST: PASS` |
 
 ## 正确性状态（SMP）
 
