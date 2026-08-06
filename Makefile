@@ -726,6 +726,7 @@ VBOX_AARCH64_LOAD_ADDRESS ?= 0x08080000ULL
 		final-probe-la-buildstorm-1c final-probe-la-buildstorm-8c \
 		final-stage6-rv-ext4-dir-tail final-stage6-la-ext4-dir-tail \
 		final-stage6-rv-helper final-stage6-la-helper \
+		final-stage7-rv-shebang final-stage7-la-shebang \
 		final-stage7-rv-1c-j1 final-stage7-la-1c-j1 \
 		final-stage7-rv-8c-j1 final-stage7-la-8c-j1 \
 		final-stage7-rv-8c-j2 final-stage7-la-8c-j2 \
@@ -1566,6 +1567,7 @@ smoke-proc-stress:
 		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
 		> "$$log" 2>&1 || status=$$?; \
 	if grep -q 'PROC_STRESS: PASS' "$$log" && \
+	   grep -q 'PROC_STRESS: shebang-exec PASS' "$$log" && \
 	   grep -q 'PROC_STRESS: signal-stop-exit PASS' "$$log" && \
 	   grep -q 'PROC_STRESS: signal-mask-park PASS' "$$log" && \
 	   grep -q 'PROC_STRESS: thread-exec-cloexec PASS' "$$log"; then \
@@ -4073,6 +4075,12 @@ final-stage6-rv-helper:
 
 final-stage6-la-helper:
 	$(call RUN_FINAL_EVAL,loongarch64,buildstorm-probe,8,stage6-precompiled-helper)
+
+final-stage7-rv-shebang:
+	$(call RUN_FINAL_EVAL,riscv64,buildstorm-probe,1,stage7-shebang-exec,900)
+
+final-stage7-la-shebang:
+	$(call RUN_FINAL_EVAL,loongarch64,buildstorm-probe,1,stage7-shebang-exec,900)
 
 final-stage7-rv-1c-j1:
 	$(call RUN_FINAL_EVAL,riscv64,buildstorm-probe,1,stage7-full-j1,28800)

@@ -111,6 +111,35 @@ static int scenario_exec_wait(void)
     return wait_exit(pid, 0, "wait-exec");
 }
 
+static int scenario_shebang_exec(void)
+{
+    static const char path[] = "/tmp/a20-proc-shebang.sh";
+    static const char script[] = "#!/bin/sh\nexit 37\n";
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0755);
+    if (fd < 0)
+        return fail("shebang-open");
+    if (write(fd, script, sizeof(script) - 1) != (ssize_t)(sizeof(script) - 1) ||
+        close(fd) != 0) {
+        unlink(path);
+        return fail("shebang-write");
+    }
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        unlink(path);
+        return fail("shebang-fork");
+    }
+    if (pid == 0) {
+        char *script_argv[] = {(char *)path, NULL};
+        char *envp[] = {"PATH=/bin", NULL};
+        execve(path, script_argv, envp);
+        _exit(127);
+    }
+    int result = wait_exit(pid, 37, "shebang-wait");
+    unlink(path);
+    return result;
+}
+
 static int verify_large_exec_args(int argc, char **argv)
 {
     if (argc != 98)
@@ -638,6 +667,9 @@ int main(int argc, char **argv)
         return 1;
     if (scenario_exec_wait() != 0)
         return 1;
+    if (scenario_shebang_exec() != 0)
+        return 1;
+    printf("PROC_STRESS: shebang-exec PASS\n");
     if (scenario_exec_large_args() != 0)
         return 1;
     if (scenario_exec_low_user_argv() != 0)

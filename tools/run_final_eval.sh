@@ -266,9 +266,12 @@ if [[ "$group" == buildstorm-probe ]]; then
         ::/a20-probe/cwd-probe
     mcopy -o -i "$run_fat32" "$host_probe_dir/exec-pages-probe" \
         ::/a20-probe/exec-pages-probe
+    mcopy -o -i "$run_fat32" "$host_probe_dir/shebang-probe" \
+        ::/a20-probe/shebang-probe
     mcopy -o -i "$run_fat32" "$host_probe_dir/liba20probe.so" \
         ::/a20-probe/liba20probe.so
-    for probe_name in cwd-probe exec-pages-probe liba20probe.so; do
+    for probe_name in cwd-probe exec-pages-probe shebang-probe \
+        liba20probe.so; do
         if ! mtype -i "$run_fat32" "::/a20-probe/$probe_name" >/dev/null; then
             echo "[final-eval] failed to install $probe_name" >&2
             exit 1
@@ -364,6 +367,7 @@ fi
         echo "probe_case=${probe_case:-all}"
         echo "probe_cwd_sha256=$(sha256sum "$host_probe_dir/cwd-probe" | awk '{print $1}')"
         echo "probe_exec_pages_sha256=$(sha256sum "$host_probe_dir/exec-pages-probe" | awk '{print $1}')"
+        echo "probe_shebang_exec_sha256=$(sha256sum "$host_probe_dir/shebang-probe" | awk '{print $1}')"
         echo "probe_dso_sha256=$(sha256sum "$host_probe_dir/liba20probe.so" | awk '{print $1}')"
         echo "probe_process_models=static-elf,single-process,cargo-j1,cargo-default"
     fi

@@ -388,6 +388,10 @@ probe_stage6_precompiled_helper() {
     print "BUILDSTORM_STAGE6_PRECOMPILED_HELPER ok"
 }
 
+probe_stage7_shebang_exec() {
+    /a20-probe/shebang-probe
+}
+
 stage7_helper_snapshot() {
     typeset label=$1
     typeset helper=$2
@@ -583,6 +587,7 @@ run_named_case() {
     stage5-official-minibuild) probe_stage5_official_minibuild ;;
     stage6-ext4-dir-tail) probe_stage6_ext4_dir_tail ;;
     stage6-precompiled-helper) probe_stage6_precompiled_helper ;;
+    stage7-shebang-exec) probe_stage7_shebang_exec ;;
     stage7-full-j1|stage7-full-j2|stage7-full-j4|stage7-full-j8|stage7-full-default)
         probe_stage7_full_build "$1"
         ;;
