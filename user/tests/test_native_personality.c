@@ -40,9 +40,8 @@ int main(int argc, char **argv, char **envp)
     a20_start_info_t *si = a20_get_start_info();
     out = si ? si->stdout_handle : A20_HANDLE_NULL;
 
-    a20_personality_pipe_t pipe = {
-        A20_HANDLE_NULL, A20_HANDLE_NULL, A20_HANDLE_NULL
-    };
+    a20_personality_pipe_t pipe = {0};
+    pipe.read_end = pipe.write_end = pipe.wait_queue = A20_HANDLE_NULL;
     if (a20_personality_pipe_create(&pipe) != A20_OK)
         return fail("create");
 
@@ -58,16 +57,24 @@ int main(int argc, char **argv, char **envp)
         return fail("event-kind");
 
     char buf[64] = {0};
-    uint32_t len = sizeof(buf);
+    uint32_t len = 6;
     a20_status_t rr = a20_personality_pipe_read(&pipe, buf, &len);
     if (rr < 0) {
         report_status("read_status", rr);
         return fail("read");
     }
-    if (rr != (a20_status_t)(sizeof(msg) - 1))
+    if (rr != A20_OK) {
+        report_status("read_status", rr);
         return fail("read-count");
-    if (len != sizeof(msg) - 1 || a20_memcmp(buf, msg, len) != 0)
-        return fail("payload");
+    }
+    if (len != 6 || a20_memcmp(buf, msg, len) != 0)
+        return fail("partial-payload");
+    len = sizeof(buf);
+    if (a20_personality_pipe_read(&pipe, buf, &len) < 0)
+        return fail("read-rest");
+    if (len != sizeof(msg) - 1 - 6 ||
+        a20_memcmp(buf, msg + 6, len) != 0)
+        return fail("rest-payload");
 
     a20_personality_pipe_close(&pipe);
     if (out != A20_HANDLE_NULL)
