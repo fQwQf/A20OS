@@ -64,7 +64,7 @@ run_case() {
     typeset -i case_timeout=180
 
     case "$name" in
-    stage2-*-100|stage3-*-100|stage4-*|stage5-*|stage6-ext4-dir-tail) case_timeout=900 ;;
+    stage2-*-100|stage3-*-100|stage4-*|stage5-*|stage6-*) case_timeout=900 ;;
     esac
 
     (( total++ ))
@@ -306,6 +306,87 @@ probe_stage6_ext4_dir_tail() {
     rm -rf "$base" || return
 }
 
+stage6_helper_snapshot() {
+    typeset label=$1
+    typeset helper=$2
+    typeset mode=missing
+    typeset bytes=0
+    typeset executable=no
+
+    if [[ -f $helper ]]; then
+        mode=$(/usr/bin/stat -c '%a' "$helper" 2>/dev/null) || return
+        bytes=$(/usr/bin/wc -c <"$helper") || return
+        [[ -x $helper ]] && executable=yes
+    fi
+
+    print "STAGE6_META tg_xtask_${label}_path=$helper"
+    print "STAGE6_META tg_xtask_${label}_mode=$mode"
+    print "STAGE6_META tg_xtask_${label}_bytes=$bytes"
+    print "STAGE6_META tg_xtask_${label}_executable=$executable"
+
+    [[ -f $helper && $bytes -gt 0 && $executable == yes ]]
+}
+
+probe_stage6_precompiled_helper() {
+    typeset worktree=/work/tgoskits
+    typeset helper="$worktree/target/debug/tg-xtask"
+    typeset output=/work/a20-stage6-precompiled-helper.out
+    typeset axtgt=
+    typeset t0=
+    typeset t1=
+    typeset elapsed=0
+    typeset -i rc=1
+
+    case "$arch" in
+    riscv64) axtgt=riscv64gc-unknown-linux-musl ;;
+    loongarch64) axtgt=loongarch64-unknown-linux-musl ;;
+    *) return 2 ;;
+    esac
+
+    cd "$worktree" || return
+    print "STAGE6_META tg_xtask_timing_scope=untimed_helper_check"
+    stage6_helper_snapshot before "$helper" || return
+
+    typeset component=
+    for component in .fingerprint deps build; do
+        if [[ -d "$worktree/target/debug/$component" ]]; then
+            print "STAGE6_META tg_xtask_cache_${component#.}=present"
+        else
+            print "STAGE6_META tg_xtask_cache_${component#.}=missing"
+            return 1
+        fi
+    done
+
+    rm -rf -- "$worktree/target/$axtgt" || return
+    if [[ -e "$worktree/target/$axtgt" ]]; then
+        print "STAGE6_META tg_xtask_target_cleanup=failed"
+        return 1
+    fi
+    print "STAGE6_META tg_xtask_target_cleanup=$worktree/target/$axtgt"
+
+    rm -f -- "$output" || return
+    unset RUSTC LD_LIBRARY_PATH CARGO_BUILD_JOBS
+    t0=$(/usr/bin/cut -d' ' -f1 /proc/uptime 2>/dev/null) || return
+    cargo build -p tg-xtask >"$output" 2>&1
+    rc=$?
+    t1=$(/usr/bin/cut -d' ' -f1 /proc/uptime 2>/dev/null) || return
+    elapsed=$(/usr/bin/awk \
+        "BEGIN{printf \"%.2f\", (\"$t1\"+0)-(\"$t0\"+0)}" \
+        2>/dev/null)
+    [[ -n $elapsed ]] || elapsed=0
+
+    print -- "----- stage6 precompiled tg-xtask stdout/stderr begin -----"
+    cat "$output"
+    print -- "----- stage6 precompiled tg-xtask stdout/stderr end -----"
+    print "STAGE6_META tg_xtask_build_output=$output"
+    print "STAGE6_META tg_xtask_build_rc=$rc"
+    print "STAGE6_META tg_xtask_build_elapsed_s=$elapsed"
+    (( rc == 0 )) || return $rc
+
+    stage6_helper_snapshot after "$helper" || return
+    print "BUILDSTORM_STAGE6_PRECOMPILED_HELPER ok"
+}
+
 run_named_case() {
     case "$1" in
     static-elf) probe_static_elf ;;
@@ -329,6 +410,7 @@ run_named_case() {
     stage4-cargo-minibuild) probe_stage4_cargo_minibuild ;;
     stage5-official-minibuild) probe_stage5_official_minibuild ;;
     stage6-ext4-dir-tail) probe_stage6_ext4_dir_tail ;;
+    stage6-precompiled-helper) probe_stage6_precompiled_helper ;;
     *)
         print "[BUILDSTORM-PROBE][FATAL] unknown case: $1"
         return 2
