@@ -173,6 +173,7 @@ int netd_tx_submit(const void *data, uint32_t len)
     return 0;
 }
 
+#if defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)
 int64_t sys_a20_netd_tx_send(const a20_syscall_args_t *args)
 {
     const void *uptr = (const void *)args->arg[0];
@@ -188,6 +189,7 @@ int64_t sys_a20_netd_tx_send(const a20_syscall_args_t *args)
         return -A20_ERR_NO_MEMORY;
     return 0;
 }
+#endif /* ABI_NATIVE || ABI_BOTH */
 
 uint32_t netd_tx_frame(void *out, uint32_t max)
 {
