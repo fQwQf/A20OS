@@ -907,7 +907,7 @@ void _start(const a20_start_info_t *si) {
 
 工作项：
 - [x] syscall 发射宏（`a20_syscall6`）
-- [x] 全部 111 个 syscall 编号定义
+- [x] 全部 112 个 syscall 编号定义
 - [x] crt0 启动汇编（aarch64）
 - [x] 简单测试：write stdout + exit
 
@@ -968,7 +968,7 @@ int main(int argc, char *argv[]) {
 ### 关键依赖关系
 
 ```text
-Phase 0 ──→ Phase 1 ──→ Phase 2 ──→ Phase 3│            │            │            ││            │            │            └── 内核: A20_SPAWN_FORK_SELF│            │            │            └── 内核: 异步信号投递│            │            ✅ 已完成    └── 待实现│            ✅ 已完成    └── 内核: 全部 111 个 syscall ✅✅ 已完成    └── 内核: ~15 个基础 syscall ✅└── 内核: 启动协议 + abi_info + handle_close + vm_alloc ✅
+Phase 0 ──→ Phase 1 ──→ Phase 2 ──→ Phase 3│            │            │            ││            │            │            └── 内核: A20_SPAWN_FORK_SELF│            │            │            └── 内核: 异步信号投递│            │            ✅ 已完成    └── 待实现│            ✅ 已完成    └── 内核: 全部 112 个 syscall ✅✅ 已完成    └── 内核: ~15 个基础 syscall ✅└── 内核: 启动协议 + abi_info + handle_close + vm_alloc ✅
           + handle_write + path_open + task_exit ✅
 ```
 
