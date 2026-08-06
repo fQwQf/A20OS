@@ -17,6 +17,9 @@ typedef struct a20_personality_pipe {
     a20_handle_t read_end;
     a20_handle_t write_end;
     a20_handle_t wait_queue;
+    uint8_t pending[A20_CH_MAX_DATA];
+    uint32_t pending_off;
+    uint32_t pending_len;
 } a20_personality_pipe_t;
 
 static inline a20_status_t a20_personality_pipe_create(
@@ -30,6 +33,8 @@ static inline a20_status_t a20_personality_pipe_create(
         return r;
     pipe->write_end = pair.endpoints[0];
     pipe->read_end = pair.endpoints[1];
+    pipe->pending_off = 0;
+    pipe->pending_len = 0;
     r = a20_event_queue_create(&pipe->wait_queue);
     if (r < 0) {
         a20_hdl_close(pipe->read_end);
@@ -52,7 +57,17 @@ static inline a20_status_t a20_personality_pipe_write(
 {
     if (!pipe)
         return -A20_ERR_FAULT;
-    return a20_channel_send(pipe->write_end, data, len, NULL, 0);
+    const uint8_t *p = (const uint8_t *)data;
+    uint32_t left = len;
+    while (left) {
+        uint32_t n = left > A20_CH_MAX_DATA ? A20_CH_MAX_DATA : left;
+        a20_status_t r = a20_channel_send(pipe->write_end, p, n, NULL, 0);
+        if (r < 0)
+            return r;
+        p += n;
+        left -= n;
+    }
+    return A20_OK;
 }
 
 static inline a20_status_t a20_personality_pipe_read(
@@ -60,8 +75,25 @@ static inline a20_status_t a20_personality_pipe_read(
 {
     if (!pipe || !len)
         return -A20_ERR_FAULT;
-    uint32_t handles = 0;
-    return a20_channel_recv(pipe->read_end, data, len, NULL, &handles);
+    if (*len == 0)
+        return A20_OK;
+    if (pipe->pending_off == pipe->pending_len) {
+        pipe->pending_off = 0;
+        pipe->pending_len = A20_CH_MAX_DATA;
+        uint32_t handles = 0;
+        a20_status_t r = a20_channel_recv(pipe->read_end, pipe->pending,
+                                           &pipe->pending_len, NULL, &handles);
+        if (r < 0) {
+            pipe->pending_len = 0;
+            return r;
+        }
+    }
+    uint32_t available = pipe->pending_len - pipe->pending_off;
+    uint32_t n = *len < available ? *len : available;
+    a20_memcpy(data, &pipe->pending[pipe->pending_off], n);
+    pipe->pending_off += n;
+    *len = n;
+    return A20_OK;
 }
 
 static inline a20_status_t a20_personality_pipe_wait_readable(
@@ -69,6 +101,15 @@ static inline a20_status_t a20_personality_pipe_wait_readable(
 {
     if (!pipe)
         return -A20_ERR_FAULT;
+    if (pipe->pending_off < pipe->pending_len) {
+        if (event) {
+            a20_memset(event, 0, sizeof(*event));
+            event->source = pipe->read_end;
+            event->type = A20_EVENT_MESSAGE_READY;
+            event->events = A20_EVENT_MASK(A20_EVENT_MESSAGE_READY);
+        }
+        return 1;
+    }
     return a20_event_wait(pipe->wait_queue, timeout, event);
 }
 
@@ -83,6 +124,7 @@ static inline void a20_personality_pipe_close(a20_personality_pipe_t *pipe)
     if (pipe->wait_queue != A20_HANDLE_NULL)
         a20_hdl_close(pipe->wait_queue);
     pipe->read_end = pipe->write_end = pipe->wait_queue = A20_HANDLE_NULL;
+    pipe->pending_off = pipe->pending_len = 0;
 }
 
 #endif
