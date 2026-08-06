@@ -12,10 +12,13 @@
 #include "core/stdio.h"
 #include "core/string.h"
 #include "core/sync.h"
+#include "core/timer.h"
 #include "mm/slab.h"
+#include "proc/proc.h"
 
 #define NVME_REG_CAP   0x00U
 #define NVME_REG_INTMS 0x0cU
+#define NVME_REG_INTMC 0x10U
 #define NVME_REG_CC    0x14U
 #define NVME_REG_CSTS  0x1cU
 #define NVME_REG_AQA   0x24U
@@ -47,6 +50,20 @@
 #define NVME_IO_DEPTH    64U
 #define NVME_DMA_BYTES   (2U * PAGE_SIZE)
 #define NVME_COMMAND_TIMEOUT_MS 5000U
+#define NVME_COMMAND_TIMEOUT_TICKS MS_TO_TICKS(NVME_COMMAND_TIMEOUT_MS)
+/* Hybrid completion window: TCG completions usually land well within a
+ * millisecond.  Polling the CQ for that bounded window avoids the IRQ
+ * round-trip and the park/commit context switch; a longer wait parks the
+ * task so it never busy-spins for the full timeout. */
+#define NVME_HYBRID_PRE_POLL_US 800U
+/* Bounded park chunk: a missed wake (shared line, lost edge) must degrade
+ * to a re-check, not to a full command-timeout stall. */
+#define NVME_PARK_CHUNK_MS 50U
+/* CREATE_CQ cdw11: bit0 = physically contiguous, bit1 = interrupts
+ * enabled; the interrupt vector (bits 31:16) stays 0, the single
+ * pin-based IV this driver uses. */
+#define NVME_CQ_CDW11_PC     0x1U
+#define NVME_CQ_CDW11_IEN    0x2U
 
 typedef struct __attribute__((packed)) nvme_sqe {
     uint32_t cdw0;
@@ -88,6 +105,9 @@ typedef struct nvme_queue {
     uint16_t cq_head;
     uint16_t next_cid;
     uint8_t phase;
+    /* Parked submitters woken by the completion IRQ; internally locked,
+     * so the IRQ top-half may collect without holding any driver lock. */
+    wait_queue_t waiters;
 } nvme_queue_t;
 
 typedef struct nvme_controller {
@@ -105,6 +125,8 @@ typedef struct nvme_controller {
     uint64_t bounce_dma;
     mutex_t io_lock;
     volatile int failed;
+    int irq;
+    int irq_registered;
 } nvme_controller_t;
 
 static inline volatile void *nvme_reg(nvme_controller_t *ctrl, uint32_t off)
@@ -162,6 +184,7 @@ static int nvme_queue_alloc(nvme_controller_t *ctrl, nvme_queue_t *q,
         return -ENOMEM;
     q->depth = depth;
     q->phase = 1;
+    wait_queue_init(&q->waiters);
     uintptr_t db = ctrl->regs + NVME_REG_DBS;
     q->sq_db = (volatile uint32_t *)(db + (2U * qid) * ctrl->stride);
     q->cq_db = (volatile uint32_t *)(db + (2U * qid + 1U) * ctrl->stride);
@@ -177,6 +200,59 @@ static void nvme_queue_free(nvme_queue_t *q)
     memset(q, 0, sizeof(*q));
 }
 
+/* NVME_COMPLETION_MODEL:
+ * - The submitter owns cq_head/cq_db exclusively; the IRQ handler never
+ *   touches queue state, it only wakes parked submitters.
+ * - nvme_cq_consume() returns -EAGAIN when the CQ has no new entry, 0 on a
+ *   successful completion, and -EIO on a failed or mismatched one. */
+static int nvme_cq_consume(nvme_controller_t *ctrl, nvme_queue_t *q,
+                           uint16_t expect_cid, uint32_t *result)
+{
+    nvme_cqe_t *cqe = &q->cq[q->cq_head];
+    dma_sync_for_cpu(cqe, sizeof(*cqe));
+    if ((cqe->status & 1U) != q->phase)
+        return -EAGAIN;
+    uint16_t status = (uint16_t)(cqe->status >> 1);
+    uint16_t completed = cqe->cid;
+    if (result)
+        *result = cqe->result;
+    q->cq_head++;
+    if (q->cq_head == q->depth) {
+        q->cq_head = 0;
+        q->phase ^= 1U;
+    }
+    writel(q->cq_head, q->cq_db);
+    if (completed != expect_cid) {
+        __atomic_store_n(&ctrl->failed, 1, __ATOMIC_RELEASE);
+        return -EIO;
+    }
+    return status ? -EIO : 0;
+}
+
+/* NVME_IRQ_MODEL:
+ * - The controller runs with a single pin-based interrupt vector (IV0)
+ *   shared by both queues.  The pin is level-triggered: it stays asserted
+ *   until every completion queue is drained, so a wake racing the
+ *   submitter's link is re-delivered by the hardware and cannot be lost.
+ * - The handler is a pure top-half: it collects parked waiters on both
+ *   queues and returns; each woken submitter re-checks its own CQ.  A
+ *   spurious or shared-line invocation degrades to one no-op wake. */
+static int nvme_irq_handler(int irq, void *priv)
+{
+    (void)irq;
+    nvme_controller_t *ctrl = (nvme_controller_t *)priv;
+    if (!ctrl)
+        return 0;
+    proc_wake_q_t wake_q;
+    proc_wake_q_init(&wake_q);
+    (void)wait_queue_collect_all(&ctrl->io.waiters, 0, PROC_WAKE_EVENT,
+                                 &wake_q, NULL);
+    (void)wait_queue_collect_all(&ctrl->admin.waiters, 0, PROC_WAKE_EVENT,
+                                 &wake_q, NULL);
+    (void)proc_wake_q_flush(&wake_q);
+    return 0;
+}
+
 static int nvme_submit(nvme_controller_t *ctrl, nvme_queue_t *q,
                        const nvme_sqe_t *request,
                        uint32_t *result)
@@ -190,28 +266,49 @@ static int nvme_submit(nvme_controller_t *ctrl, nvme_queue_t *q,
     q->sq_tail = (uint16_t)((tail + 1U) % q->depth);
     writel(q->sq_tail, q->sq_db);
 
-    for (unsigned ms = 0; ms < NVME_COMMAND_TIMEOUT_MS; ms++) {
-        nvme_cqe_t *cqe = &q->cq[q->cq_head];
-        dma_sync_for_cpu(cqe, sizeof(*cqe));
-        if ((cqe->status & 1U) != q->phase) {
+    uint64_t start = timer_get_ticks();
+    uint64_t deadline = start + NVME_COMMAND_TIMEOUT_TICKS;
+    uint64_t pre_poll_until = start + US_TO_TICKS(NVME_HYBRID_PRE_POLL_US);
+    int use_irq = ctrl->irq_registered && q == &ctrl->io;
+
+    for (;;) {
+        int ret = nvme_cq_consume(ctrl, q, cid, result);
+        if (ret != -EAGAIN)
+            return ret;
+        if (!use_irq) {
+            if (timer_get_ticks() >= deadline)
+                break;
             udelay(1000);
             continue;
         }
-        uint16_t status = (uint16_t)(cqe->status >> 1);
-        uint16_t completed = cqe->cid;
-        if (result)
-            *result = cqe->result;
-        q->cq_head++;
-        if (q->cq_head == q->depth) {
-            q->cq_head = 0;
-            q->phase ^= 1U;
+        uint64_t now = timer_get_ticks();
+        if (now >= deadline)
+            break;
+        if (now < pre_poll_until) {
+            udelay(20);
+            continue;
         }
-        writel(q->cq_head, q->cq_db);
-        if (completed != cid) {
-            __atomic_store_n(&ctrl->failed, 1, __ATOMIC_RELEASE);
-            return -EIO;
+        /* Park until the completion IRQ fires; the bounded chunk turns a
+         * hypothetical missed wake into a re-check instead of a stall. */
+        uint64_t chunk = now + MS_TO_TICKS(NVME_PARK_CHUNK_MS);
+        if (chunk > deadline)
+            chunk = deadline;
+        proc_wait_token_t token =
+            proc_park_prepare(PROC_WAIT_UNINTERRUPTIBLE, chunk);
+        wait_queue_entry_t entry = {0};
+        wait_queue_link(&q->waiters, &entry, token, 0);
+        /* Re-check after linking: a completion that landed between the
+         * consume above and the link makes the sleep unnecessary. */
+        ret = nvme_cq_consume(ctrl, q, cid, result);
+        if (ret != -EAGAIN) {
+            wait_queue_unlink(&q->waiters, &entry);
+            (void)proc_park_cancel(token);
+            proc_park_finish(token);
+            return ret;
         }
-        return status ? -EIO : 0;
+        (void)proc_park_commit(token);
+        wait_queue_unlink(&q->waiters, &entry);
+        proc_park_finish(token);
     }
     __atomic_store_n(&ctrl->failed, 1, __ATOMIC_RELEASE);
     return -ETIMEDOUT;
@@ -404,6 +501,13 @@ static void nvme_release(nvme_controller_t *ctrl)
 {
     if (!ctrl)
         return;
+    if (ctrl->irq_registered) {
+        /* Mask every vector before releasing the handler so a completion
+         * racing the remove cannot wake a freed controller's waiters. */
+        writel(0xffffffffU, nvme_reg(ctrl, NVME_REG_INTMS));
+        free_irq((uint32_t)ctrl->irq, ctrl);
+        ctrl->irq_registered = 0;
+    }
     if (ctrl->regs) {
         writel(0, nvme_reg(ctrl, NVME_REG_CC));
         (void)nvme_wait_ready(ctrl, 0);
@@ -485,8 +589,13 @@ static int nvme_probe(device_t *dev)
         goto fail;
     if (nvme_queue_alloc(ctrl, &ctrl->io, 1, io_depth) < 0)
         goto fail;
+    /* Resolve the INTx line before CREATE_CQ so the queue is created with
+     * interrupts enabled only when the platform can actually route one. */
+    int irq = pci_intx_irq(dev);
+    uint32_t cq_cdw11 = NVME_CQ_CDW11_PC |
+                        (irq >= 0 ? NVME_CQ_CDW11_IEN : 0U);
     if (nvme_admin(ctrl, NVME_ADMIN_CREATE_CQ, 0, ctrl->io.cq_dma,
-                   ((uint32_t)(io_depth - 1U) << 16) | 1U, 1U, NULL) < 0 ||
+                   ((uint32_t)(io_depth - 1U) << 16) | 1U, cq_cdw11, NULL) < 0 ||
         nvme_admin(ctrl, NVME_ADMIN_CREATE_SQ, 0, ctrl->io.sq_dma,
                    ((uint32_t)(io_depth - 1U) << 16) | 1U,
                    (1U << 16) | 1U, NULL) < 0)
@@ -502,10 +611,22 @@ static int nvme_probe(device_t *dev)
     if (nvme_io_smoke_test(dev, ctrl) < 0)
         goto fail;
 #endif
+    if (irq >= 0) {
+        if (request_irq((uint32_t)irq, nvme_irq_handler, IRQF_SHARED,
+                        ctrl) == 0) {
+            ctrl->irq = irq;
+            ctrl->irq_registered = 1;
+            /* Unmask IV0 only after the handler is in place. */
+            writel(1U, nvme_reg(ctrl, NVME_REG_INTMC));
+        } else {
+            kinfo("[NVME] %s: IRQ %d registration failed; using polling\n",
+                  dev->name, irq);
+        }
+    }
     dev->drv_priv = ctrl;
-    kinfo("[NVME] %s ns%u: %lu sectors, sector=%u\n", dev->name,
+    kinfo("[NVME] %s ns%u: %lu sectors, sector=%u irq=%d\n", dev->name,
           ctrl->namespace_id, (unsigned long)ctrl->capacity,
-          ctrl->sector_size);
+          ctrl->sector_size, ctrl->irq_registered ? ctrl->irq : -1);
     return 0;
 
 fail:

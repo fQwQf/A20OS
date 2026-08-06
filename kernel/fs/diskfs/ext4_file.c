@@ -79,17 +79,34 @@ int ext4_fread(vfile_t *vf, char *buf, size_t count) {
         size_t foff = fc->file_off + done;
         uint32_t lblk = (uint32_t)(foff / bs);
         uint32_t loff = (uint32_t)(foff % bs);
-        size_t chunk = bs - loff;
-        if (chunk > count - done) chunk = count - done;
 
         uint64_t phys = ext4_block_map_cached(fc, inode, lblk);
         if (!phys) {
+            size_t chunk = bs - loff;
+            if (chunk > count - done) chunk = count - done;
             memset(buf + done, 0, chunk);
-        } else {
-            int r = bcache_read_bytes(fc->sb->bc, phys * bs + loff, buf + done, chunk);
-            if (r < 0) break;
+            done += chunk;
+            continue;
         }
-        done += chunk;
+
+        /* Extend the read over a run of physically contiguous logical blocks
+         * so one bcache_read_bytes() call spans multiple pages and is served
+         * by a single (batched) device request instead of one per block. */
+        uint32_t run_lblk = lblk;
+        uint32_t max_lblk = (uint32_t)((foff + (count - done) + bs - 1) / bs);
+        while (run_lblk + 1 < max_lblk) {
+            uint64_t np = ext4_block_map_cached(fc, inode, run_lblk + 1);
+            if (np != phys + (run_lblk + 1 - lblk))
+                break;
+            run_lblk++;
+        }
+
+        size_t run_bytes = (size_t)(run_lblk - lblk + 1) * bs - loff;
+        if (run_bytes > count - done) run_bytes = count - done;
+        int r = bcache_read_bytes(fc->sb->bc, phys * bs + loff,
+                                  buf + done, run_bytes);
+        if (r < 0) break;
+        done += run_bytes;
     }
 
     fc->file_off += done;
