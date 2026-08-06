@@ -20,7 +20,7 @@
 | VirtIO-SCSI | `kernel/drivers/block/virtio_scsi.c` | `dev->lock` |
 | E1000 | `kernel/drivers/net/e1000.c` | `nic->lock` |
 | VMSVGA/SVGAv3 | `kernel/drivers/gpu/vmsvga.c` | `svga->lock` |
-| VirtIO input | `kernel/drivers/input/virtio_input.c` | `inst->lock` |
+| VirtIO input | `kernel/drvmod/examples/vinput.c (inst->lock 在模块内)` | `inst->lock` |
 | xHCI HID | `kernel/drivers/input/xhci_hid.c` | `xhci->lock` |
 
 ## 全局顺序摘要

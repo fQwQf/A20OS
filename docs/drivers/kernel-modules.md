@@ -28,6 +28,7 @@ A20OS 现在同时支持三种驱动路径：
 - 日志与分配器：`klog_write/klog_level`、`kmalloc/kfree/kcalloc`。模块内日志建议走 `drv_log`：`klog_level` 是外部变量，经 GOT 加载（loongarch64 的 GOT 支持已实现，但模块日志用纯 CALL36 更稳）。
 - DMA 增强：`dma_alloc_coherent_aligned/free_coherent_aligned`、`dma_sync_for_cpu/device`。
 - ACPI 发现（x86_64）：`firmware_acpi_tpm2`。
+- 输入 mux 唤醒与 virtio PCI 传输：`input_mux_wake`、`pci_virtio_transport_init`、`arch_current_cpu_id`。
 - 基础字符串/内存函数：`strncpy`、`memset`、`memcpy`、`memcmp`、`strcmp`、`strlen`、`strstr`，以及自旋锁内联用到的 `proc_current`/`proc_task_pid`/`printf`。
 
 模块不得直接引用普通内核符号。未解析符号、未知重定位、非法 ELF 类型、越界的 section/symbol/strtab/relocation 都会在加载前拒绝，不会修改内核页表或堆。
@@ -124,7 +125,8 @@ match=0x101000:0x100
 |---|---|---|
 | `goldfish_rtc.c` → `rtc.drv` | riscv64/aarch64/loongarch64 | goldfish RTC，QEMU virt 启动即绑定 |
 | `pc_spkr.c` → `pc-spkr.drv` | x86_64 | PC speaker，统一驱动核心桥接注册 AUDIO 类 |
-| `vinput_probe.c` → `vinput-probe.drv` | riscv64/aarch64 | virtio-input 内核探针（双驻留共享代码的模块部署），挂键盘时输出设备身份 |
+| `vinput_probe.c` → `vinput-probe.drv` | riscv64/aarch64 | virtio-input 内核只读探针（双驻留共享代码的模块部署），挂键盘时输出设备身份 |
+| `vinput.c` → `vinput.drv` | 四架构 | virtio-input 完整驱动（状态迁移 + 事件 virtqueue + IRQ + input class 设备）；事件经 mux 的 `/dev/event0` 投递；slot 5 双驻留样本保持 user-owned 归 uinputd |
 | `ps2.c` → `ps2.drv` | x86_64 | PS/2 键鼠控制器，初始化 + 双向量 ISR 注册；键盘字符经 `uart_receive_char` 进控制台 |
 | `nvme.c` → `nvme.drv` | x86_64/loongarch64 | 架构无关 PCI 类 block 驱动（标准 `driver_t` 注册）；`DRVMOD_SMOKE=1` 构建携带与内建版本相同的 capability/I/O smoke 测试，`smoke-pci-portability` 在 loongarch64 上验证 |
 | `tpm.c` → `tpm.drv` | x86_64 | TPM 2.0 TIS/FIFO 驱动，经 `firmware_acpi_tpm2` 做 ACPI 发现；无 TPM 时 probe 优雅返回 |
@@ -149,13 +151,14 @@ make ARCH=riscv64 ABI=both smoke-dual-input          # vinput-probe.drv + 用户
 
 | 驱动 | 原内建位置 | 模块 | 架构 | 状态 |
 |---|---|---|---|---|
-| goldfish RTC | `kernel/drivers/char/goldfish_rtc_kdrv.c`（已删除） | `kernel/drvmod/examples/goldfish_rtc.c` | riscv64/aarch64/loongarch64 | 已迁移；QEMU virt 启动即绑定 |
-| PC speaker | `kernel/drivers/audio/pc_speaker.c`（已删除） | `kernel/drvmod/examples/pc_spkr.c` | x86_64 | 已迁移；统一驱动核心桥接注册 AUDIO 类并绑定 platform 设备 |
-| virtio-input 内核探针 | `kernel/drivers/input/virtio_input_kprobe.c`（已删除） | `kernel/drvmod/examples/vinput_probe.c` | riscv64/aarch64 | 已迁移；`smoke-dual-input` 验证与用户态 uinputd 读到同一设备身份 |
-| PS/2 键鼠控制器 | `kernel/drivers/input/ps2.c`（已删除） | `kernel/drvmod/examples/ps2.c` | x86_64 | 已迁移；arch IRQ 分发经 hwapi 投递到模块 ISR，`smoke-drvmod-x86_64` 验证初始化与双向量注册 |
-| NVMe | `kernel/drivers/block/nvme.c`（已删除） | `kernel/drvmod/examples/nvme.c` | x86_64/loongarch64 | 已迁移；PCI 类标准驱动，`smoke-pci-portability`（loongarch64 dev 镜像 + `DRVMOD_SMOKE=1`）验证绑定与 NVME_CAP/IO_SMOKE |
-| TPM 2.0 | `kernel/drivers/security/tpm.c`（已删除） | `kernel/drvmod/examples/tpm.c` | x86_64 | 已迁移；ACPI TPM2 发现 + TIS FIFO，无设备时优雅失败 |
-| Intel HDA | `kernel/drivers/audio/hda.c`+`hda_codec.c`（已删除） | `kernel/drvmod/examples/hda.c` | 四架构 | 已迁移；PCI 类 audio 驱动，`smoke-hda` 验证流 smoke + 绑定 |
+| goldfish RTC | `kernel/drvmod/examples/goldfish_rtc.c`（已删除） | `kernel/drvmod/examples/goldfish_rtc.c` | riscv64/aarch64/loongarch64 | 已迁移；QEMU virt 启动即绑定 |
+| PC speaker | `kernel/drvmod/examples/pc_spkr.c`（已删除） | `kernel/drvmod/examples/pc_spkr.c` | x86_64 | 已迁移；统一驱动核心桥接注册 AUDIO 类并绑定 platform 设备 |
+| virtio-input 内核探针 | `kernel/drvmod/examples/vinput_probe.c`（已删除） | `kernel/drvmod/examples/vinput_probe.c` | riscv64/aarch64 | 已迁移；`smoke-dual-input` 验证与用户态 uinputd 读到同一设备身份 |
+| virtio-input 完整驱动 | `kernel/drvmod/examples/vinput.c`（已删除） | `kernel/drvmod/examples/vinput.c` | 四架构 | 已迁移；`/dev/event0` 的 devfs mux 服务拆分至 `kernel/drivers/input/input_mux.c`（class 设备消费 + EVIOCG* ioctl 面），模块 ISR 经 `input_mux_wake` 唤醒 mux；riscv64 MMIO 与 x86_64 PCI 路径 QEMU 实测事件流（`[INPUT] event type=...` + EV_SYN） |
+| PS/2 键鼠控制器 | `kernel/drvmod/examples/ps2.c`（已删除） | `kernel/drvmod/examples/ps2.c` | x86_64 | 已迁移；arch IRQ 分发经 hwapi 投递到模块 ISR，`smoke-drvmod-x86_64` 验证初始化与双向量注册 |
+| NVMe | `kernel/drvmod/examples/nvme.c`（已删除） | `kernel/drvmod/examples/nvme.c` | x86_64/loongarch64 | 已迁移；PCI 类标准驱动，`smoke-pci-portability`（loongarch64 dev 镜像 + `DRVMOD_SMOKE=1`）验证绑定与 NVME_CAP/IO_SMOKE |
+| TPM 2.0 | `kernel/drvmod/examples/tpm.c`（已删除） | `kernel/drvmod/examples/tpm.c` | x86_64 | 已迁移；ACPI TPM2 发现 + TIS FIFO，无设备时优雅失败 |
+| Intel HDA | `kernel/drvmod/examples/hda.c`+`hda_codec.c`（已删除） | `kernel/drvmod/examples/hda.c` | 四架构 | 已迁移；PCI 类 audio 驱动，`smoke-hda` 验证流 smoke + 绑定 |
 
 **无法迁移（启动顺序约束）**：这些驱动在模块加载（`init_kthread`）之前就必须工作，不能改为后期加载：
 
@@ -167,7 +170,7 @@ make ARCH=riscv64 ABI=both smoke-dual-input          # vinput-probe.drv + 用户
 **当前不可迁移（框架 API 缺口）**：这些驱动依赖框架尚未导出的能力，迁移前必须先收敛依赖：
 
 - DMA/PCI BAR/class ops：NVMe、AHCI、HDA、E1000、virtio-blk/net/scsi、vmsvga、virtio-gpu —— 需要框架新增 DMA 对象、PCI BAR 访问与 block/net/display/audio class 操作导出。
-- VirtIO 队列：virtio-input 的完整事件投递 —— 需要 virtq 进入共享层并作为框架 API（当前共享层只覆盖配置空间与只读探针）。
+- 板级服务（GMAC/SDIO 的单实例轮询）。
 - ACPI/板级发现：TPM（ACPI TPM2 表）、GMAC/SDIO（板级单实例轮询）。
 - 完整事件投递的输入路径（virtio-input event queue）与板级服务（GMAC/SDIO 的单实例轮询）——需要对应子系统 API 进入框架导出。
 
