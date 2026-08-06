@@ -26,6 +26,7 @@ typedef struct netd_sock_ch {
     a20_channel_ep_t *kernel_ep;
     int               used;
     int               netd_id;
+    int               child_of;   /* accepted-child mapping onto listener channel */
 } netd_sock_ch_t;
 
 static netd_sock_ch_t g_sock_ch[NETD_SOCK_POOL];
@@ -59,6 +60,7 @@ int64_t sys_a20_netd_sock_register(const a20_syscall_args_t *args)
         g_sock_ch[slot].used = 1;
         g_sock_ch[slot].kernel_ep = ep0;
         g_sock_ch[slot].netd_id = -1;
+        g_sock_ch[slot].child_of = 0;
     }
     spin_unlock_irqrestore(&g_sock_pool_lock, flags);
     if (slot < 0) {
@@ -97,6 +99,41 @@ static netd_sock_ch_t *netd_sock_find(int netd_id)
     uint64_t flags = spin_lock_irqsave(&g_sock_pool_lock);
     for (int i = 0; i < NETD_SOCK_POOL; i++) {
         if (g_sock_ch[i].used && g_sock_ch[i].netd_id == netd_id) {
+            spin_unlock_irqrestore(&g_sock_pool_lock, flags);
+            return &g_sock_ch[i];
+        }
+    }
+    spin_unlock_irqrestore(&g_sock_pool_lock, flags);
+    return NULL;
+}
+
+static void netd_sock_release_ch_by_id(int netd_id)
+{
+    uint64_t flags = spin_lock_irqsave(&g_sock_pool_lock);
+    for (int i = 0; i < NETD_SOCK_POOL; i++) {
+        if (g_sock_ch[i].used && g_sock_ch[i].netd_id == netd_id) {
+            if (g_sock_ch[i].child_of) {
+                /* borrowed listener channel: just vacate the mapping slot */
+                g_sock_ch[i].kernel_ep = NULL;
+                g_sock_ch[i].used = 0;
+                g_sock_ch[i].child_of = 0;
+            }
+            g_sock_ch[i].netd_id = -1;
+            break;
+        }
+    }
+    spin_unlock_irqrestore(&g_sock_pool_lock, flags);
+}
+
+static netd_sock_ch_t *netd_sock_child_ch(int netd_id, netd_sock_ch_t *listener)
+{
+    uint64_t flags = spin_lock_irqsave(&g_sock_pool_lock);
+    for (int i = 0; i < NETD_SOCK_POOL; i++) {
+        if (!g_sock_ch[i].used) {
+            g_sock_ch[i].used = 1;
+            g_sock_ch[i].kernel_ep = listener->kernel_ep;
+            g_sock_ch[i].netd_id = netd_id;
+            g_sock_ch[i].child_of = 1;
             spin_unlock_irqrestore(&g_sock_pool_lock, flags);
             return &g_sock_ch[i];
         }
@@ -240,6 +277,13 @@ int netd_socket_accept(int netd_id, void *sockaddr, uint32_t *addrlen,
 
     if (r < 0)
         return r;
+    /* Child RPCs ride the listener's channel: allocate a mapping slot
+     * (netd_id -> listener channel) without creating a new channel. */
+    netd_sock_ch_t *cch = netd_sock_child_ch(h.id, ch);
+    if (!cch) {
+        netd_sock_release_ch_by_id(h.id);
+        return -EMFILE;
+    }
     *new_netd_id = h.id;
     return 0;
 }
@@ -264,14 +308,18 @@ ssize_t netd_socket_send(int netd_id, const void *buf, size_t len, int flags,
     kfree(req);
     if (r < 0)
         return r;
-    return (ssize_t)h.len;
+    if (h.status < 0)
+        return (ssize_t)h.status;
+    return (ssize_t)len;
 }
 
 ssize_t netd_socket_recv(int netd_id, void *buf, size_t len, int flags,
                          void *src, uint32_t *src_len)
 {
     netd_sock_ch_t *ch = netd_sock_find(netd_id);
-    if (!ch) return -EBADF;
+    if (!ch) {
+        return -EBADF;
+    }
     uint32_t want = (uint32_t)(len > NETD_SOCK_MAX_DATA ? NETD_SOCK_MAX_DATA : len);
     netd_sock_recv_resp_t *resp = (netd_sock_recv_resp_t *)kmalloc(
         sizeof(netd_sock_recv_resp_t) + want);
