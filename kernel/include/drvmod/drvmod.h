@@ -32,6 +32,7 @@
 #include "core/types.h"
 
 #define DRV_MOD_MAX_SIZE       (256 * 1024)
+#define DRV_MOD_BUF_ORDER      6 /* 64 pages >= 256 KiB read buffer */
 #define DRV_MOD_MAX_NAME       64
 #define DRV_MOD_MAX_MATCHES    16
 
