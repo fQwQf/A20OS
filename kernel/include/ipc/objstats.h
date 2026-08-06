@@ -16,6 +16,8 @@ typedef struct a20_objstats {
     _Atomic uint64_t vmos;
     _Atomic uint64_t vmo_pages;    /* materialized VMO frames */
     _Atomic uint64_t irq_bindings;
+    /* Cumulative (never decrease); not part of the leak baseline. */
+    _Atomic uint64_t vmo_dirty_frames; /* VMO pages whose fresh frame held stale data */
 } a20_objstats_t;
 
 extern a20_objstats_t g_a20_objstats;

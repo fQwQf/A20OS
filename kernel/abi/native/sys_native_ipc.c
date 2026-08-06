@@ -239,7 +239,7 @@ int64_t sys_a20_channel_create(const a20_syscall_args_t *args)
         return -A20_ERR_BAD_HANDLE;
     }
 
-    a20_rights_t rights = A20_RIGHT_READ | A20_RIGHT_WRITE |
+    a20_rights_t rights = A20_RIGHT_READ | A20_RIGHT_WRITE | A20_RIGHT_STAT |
                           A20_RIGHT_DUP | A20_RIGHT_TRANSFER;
     int64_t h0 = a20_handle_install(ht, ep0, A20_OBJ_CHANNEL_ENDPOINT, rights);
     int64_t h1 = (h0 >= 0)
