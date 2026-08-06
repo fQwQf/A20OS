@@ -117,15 +117,25 @@ static a20_status_t spawn_rtcd(a20_handle_t *out_ep, a20_handle_t *out_task)
 /* 'T' RPC: returns 0 with *sec_out set on success. */
 static int rtcd_time_rpc(a20_handle_t ep, uint64_t *sec_out)
 {
-    uint8_t req = RTCD_REQ_TIME;
-    uint64_t rep[2];
+    a20_idl_envelope_t req = {
+        A20_SERVICES_IDL_VERSION, RTCD_REQ_TIME,
+        sizeof(a20_idl_envelope_t)
+    };
+    uint8_t rep[sizeof(a20_idl_envelope_t) + sizeof(a20_idl_rtcd_time_response_t)];
     uint32_t rep_len = sizeof(rep);
     uint32_t rep_h = 0;
-    a20_status_t st = a20_channel_call(ep, &req, 1, 0, 0,
+    a20_status_t st = a20_channel_call(ep, &req, sizeof(req), 0, 0,
                                        rep, &rep_len, 0, &rep_h);
     if (st < 0 || rep_len != sizeof(rep))
         return -1;
-    *sec_out = rep[0];
+    a20_idl_envelope_t env;
+    a20_memcpy(&env, rep, sizeof(env));
+    if (env.version != A20_SERVICES_IDL_VERSION || env.type != RTCD_REPLY_TIME ||
+        env.size != rep_len)
+        return -1;
+    a20_idl_rtcd_time_response_t body;
+    a20_memcpy(&body, rep + sizeof(env), sizeof(body));
+    *sec_out = body.seconds;
     return 0;
 }
 
@@ -160,18 +170,28 @@ int main(int argc, char **argv, char **envp)
         return fail(5, "rtc seconds implausible");
 
     /* 2. Alarm IRQ: async reply must arrive after ~100 ms. */
-    uint8_t areq[1 + sizeof(a20_idl_rtcd_alarm_request_t)] = {0};
-    areq[0] = RTCD_REQ_ALARM;
+    uint8_t areq[sizeof(a20_idl_envelope_t) + sizeof(a20_idl_rtcd_alarm_request_t)] = {0};
+    a20_idl_envelope_t aenv = {
+        A20_SERVICES_IDL_VERSION, RTCD_REQ_ALARM, sizeof(areq)
+    };
+    a20_memcpy(areq, &aenv, sizeof(aenv));
     a20_idl_rtcd_alarm_request_t alarm = { .milliseconds = 100 };
-    a20_memcpy(&areq[1], &alarm, sizeof(alarm));
+    a20_memcpy(&areq[sizeof(aenv)], &alarm, sizeof(alarm));
     uint64_t t0 = now_ns();
     if (a20_channel_send(ep, areq, sizeof(areq), 0, 0) != A20_OK)
         return fail(6, "alarm request failed");
-    uint64_t ans;
+    uint8_t ans[sizeof(a20_idl_envelope_t) + sizeof(a20_idl_rtcd_time_response_t)];
     uint32_t alen = sizeof(ans);
     uint32_t ah = 0;
-    if (a20_channel_recv(ep, &ans, &alen, 0, &ah) < 0 || alen != sizeof(ans))
+    if (a20_channel_recv(ep, ans, &alen, 0, &ah) < 0 || alen != sizeof(ans))
         return fail(7, "alarm reply not received");
+    {
+        a20_idl_envelope_t aenv;
+        a20_memcpy(&aenv, ans, sizeof(aenv));
+        if (aenv.version != A20_SERVICES_IDL_VERSION ||
+            aenv.type != RTCD_REPLY_ALARM || aenv.size != alen)
+            return fail(7, "alarm reply envelope invalid");
+    }
     uint64_t elapsed = now_ns() - t0;
     put_str("NATIVE_RTCD: alarm_ms=");
     put_u64(elapsed / 1000000);
@@ -180,8 +200,10 @@ int main(int argc, char **argv, char **envp)
         return fail(8, "alarm timing out of bounds");
 
     /* 3. Crash self-heal: kill the driver, watch EXITED, respawn, re-RPC. */
-    uint8_t creq = RTCD_REQ_CRASH;
-    if (a20_channel_send(ep, &creq, 1, 0, 0) != A20_OK)
+    a20_idl_envelope_t creq = {
+        A20_SERVICES_IDL_VERSION, RTCD_REQ_CRASH, sizeof(creq)
+    };
+    if (a20_channel_send(ep, &creq, sizeof(creq), 0, 0) != A20_OK)
         return fail(9, "crash request failed");
     {
         a20_event_t ev;
