@@ -146,6 +146,8 @@ typedef struct {
 #define R_LARCH_B26         66
 #define R_LARCH_PCALA_HI20  71
 #define R_LARCH_PCALA_LO12  72
+#define R_LARCH_GOT_PC_HI20 75
+#define R_LARCH_GOT_PC_LO12 76
 #define R_LARCH_32_PCREL    99
 #define R_LARCH_RELAX       100
 #define R_LARCH_64_PCREL    109
@@ -354,7 +356,8 @@ static uint32_t drvmod_apply_reloc(uint32_t machine, uint8_t *shadow,
                                    uint32_t sec_load_off, uint32_t sec_size,
                                    const uintptr_t *hi_targets,
                                    uint32_t ntargets,
-                                   const uint32_t *veneer_off)
+                                   const uint32_t *veneer_off,
+                                   const uint32_t *got_off)
 {
     for (uint32_t i = 0; i < nrela; i++) {
         elf_rela_t *r = &rela[i];
@@ -636,10 +639,12 @@ static uint32_t drvmod_apply_reloc(uint32_t machine, uint8_t *shadow,
                          (unsigned long)off);
                     return 0xFFFFFFFFU;
                 }
-                /* beqz/bnez/bgez family: offs[15:0] at bits [25:10]. */
+                /* beqz/bnez/bgez family and beq/bne (16-bit form):
+                 * offs[15:0] at bits [25:10]; rd[4:0] must be preserved
+                 * (beq/bne encode a second register there). */
                 uint32_t insn = *(uint32_t *)(shadow + sec_load_off + r->r_offset);
                 *(uint32_t *)(shadow + sec_load_off + r->r_offset) =
-                    (insn & 0xFC0003E0) |
+                    (insn & 0xFC0003FF) |
                     ((((uint32_t)off >> 2) & 0xFFFF) << 10);
                 break;
             }
@@ -692,12 +697,44 @@ static uint32_t drvmod_apply_reloc(uint32_t machine, uint8_t *shadow,
                 }
                 break;
             }
+            case R_LARCH_GOT_PC_HI20: {
+                if (!got_off || !got_off[i]) {
+                    printf("[DRVMOD] loongarch GOT without slot (0x%lx)\n",
+                           (unsigned long)r->r_offset);
+                    return 0xFFFFFFFFU;
+                }
+                uintptr_t got = load_base + got_off[i];
+                *(uint64_t *)(shadow + got_off[i]) = S + r->r_addend;
+                uint32_t hi = ((uint32_t)(got >> 12) -
+                               (uint32_t)(P >> 12)) & 0xFFFFF;
+                uint32_t insn = *(uint32_t *)(shadow + sec_load_off + r->r_offset);
+                *(uint32_t *)(shadow + sec_load_off + r->r_offset) =
+                    (insn & 0xFE00001F) | (hi << 5);
+                break;
+            }
+            case R_LARCH_GOT_PC_LO12: {
+                if (!got_off || !got_off[i]) {
+                    printf("[DRVMOD] loongarch GOT without slot (0x%lx)\n",
+                           (unsigned long)r->r_offset);
+                    return 0xFFFFFFFFU;
+                }
+                uintptr_t got = load_base + got_off[i];
+                uint32_t imm = (uint32_t)((got & 0xFFF) >> 3);
+                uint32_t insn = *(uint32_t *)(shadow + sec_load_off + r->r_offset);
+                *(uint32_t *)(shadow + sec_load_off + r->r_offset) =
+                    (insn & 0xFFC003FF) | (imm << 10);
+                break;
+            }
             case R_LARCH_PCALA_HI20: {
                 uint32_t insn = *(uint32_t *)(shadow + sec_load_off + r->r_offset);
                 uint32_t imm;
                 if ((insn >> 25) == 0x0D) {
-                    /* pcalau12i: page-relative.  hi = page(S) - page(P). */
-                    imm = ((uint32_t)(S >> 12) - (uint32_t)(P >> 12)) & 0xFFFFF;
+                    /* pcalau12i: page-relative, and addi.d's imm12 is
+                     * sign-extended, so low-12 >= 0x800 carries into hi. */
+                    uint32_t lo = (uint32_t)(S + r->r_addend) & 0xFFF;
+                    imm = ((uint32_t)((S + r->r_addend) >> 12) -
+                           (uint32_t)(P >> 12) + (lo >= 0x800 ? 1U : 0U)) &
+                          0xFFFFF;
                 } else {
                     /* pcaddi: byte-relative, rounded. */
                     int64_t off = (int64_t)(S + r->r_addend - P);
@@ -719,8 +756,10 @@ static uint32_t drvmod_apply_reloc(uint32_t machine, uint8_t *shadow,
                     : 0;
                 uint32_t imm;
                 if ((prev >> 25) == 0x0D) {
-                    /* pcalau12i pair: lo = low 12 bits of the target. */
-                    imm = (uint32_t)(S + r->r_addend) & 0xFFF;
+                    /* pcalau12i pair: lo = low 12 bits of the target as a
+                     * sign-extended 12-bit immediate. */
+                    uint32_t raw = (uint32_t)(S + r->r_addend) & 0xFFF;
+                    imm = (raw >= 0x800 ? raw - 0x1000 : raw) & 0xFFF;
                 } else {
                     /* pcaddi pair: lo = byte displacement from the pcaddi
                      * (4 bytes before this addi.d). */
@@ -760,17 +799,26 @@ int drvmod_load(int fd, const char *name)
     if (slot < 0)
         return -ENOSPC;
 
-    char *buf = kmalloc(DRV_MOD_MAX_SIZE);
-    if (!buf) {
-        printf("[DRVMOD] %s: kmalloc buf failed\n", name);
+    /* Read buffer from the frame pool, not kmalloc: on some machines
+     * (loongarch64) a kmalloc'd slab for 256 KiB draws from the same
+     * buddy blocks the module's pfa_alloc later hands out, so the module
+     * image can land on top of this buffer; kfree(buf) would then return
+     * the module's own pages to the allocator and the next module (or any
+     * DMA) overwrites the first one's GOT/rodata. */
+    pfn_t buf_pfn = pfa_alloc(DRV_MOD_BUF_ORDER);
+    printf("[DRVMOD] %s: buf phys=0x%lx order=%d\n", name,
+           (unsigned long)pfn_to_phys(buf_pfn), DRV_MOD_BUF_ORDER);
+    if (buf_pfn == PFN_NONE) {
+        printf("[DRVMOD] %s: pfa_alloc buf failed\n", name);
         return -ENOMEM;
     }
+    char *buf = (char *)(PAGE_OFFSET + pfn_to_phys(buf_pfn));
 
     size_t got = 0;
     while (got < DRV_MOD_MAX_SIZE) {
         int64_t n = vfs_read(fd, buf + got, DRV_MOD_MAX_SIZE - got);
         if (n < 0) {
-            kfree(buf);
+            drvmod_free_pages(buf_pfn, DRV_MOD_BUF_ORDER);
             return (int)n;
         }
         if (n == 0)
@@ -778,7 +826,7 @@ int drvmod_load(int fd, const char *name)
         got += (size_t)n;
     }
     if (got < sizeof(elf_ehdr_t)) {
-        kfree(buf);
+        drvmod_free_pages(buf_pfn, DRV_MOD_BUF_ORDER);
         return -ENOEXEC;
     }
 
@@ -788,7 +836,7 @@ int drvmod_load(int fd, const char *name)
     if (memcmp(eh->e_ident, "\x7f" "ELF", 4) != 0 ||
         eh->e_ident[4] != ELFCLASS64 || eh->e_ident[5] != ELFDATA2LSB ||
         eh->e_type != 1 /* ET_REL */ || eh->e_version != 1) {
-        kfree(buf);
+        drvmod_free_pages(buf_pfn, DRV_MOD_BUF_ORDER);
         return -ENOEXEC;
     }
     uint32_t machine = eh->e_machine;
@@ -800,12 +848,12 @@ int drvmod_load(int fd, const char *name)
         break;
     default:
         kerr("[DRVMOD] %s: unsupported machine %u\n", name, machine);
-        kfree(buf);
+        drvmod_free_pages(buf_pfn, DRV_MOD_BUF_ORDER);
         return -ENOEXEC;
     }
     if (eh->e_shnum == 0 || eh->e_shnum >= SHN_XINDEX) {
         /* Extended section numbering is not supported. */
-        kfree(buf);
+        drvmod_free_pages(buf_pfn, DRV_MOD_BUF_ORDER);
         return -ENOEXEC;
     }
 
@@ -813,18 +861,18 @@ int drvmod_load(int fd, const char *name)
     if (eh->e_shentsize != sizeof(elf_shdr_t) ||
         !drvmod_range_ok64(eh->e_shoff,
                            (uint64_t)nshdrs * sizeof(elf_shdr_t), got)) {
-        kfree(buf);
+        drvmod_free_pages(buf_pfn, DRV_MOD_BUF_ORDER);
         return -ENOEXEC;
     }
     elf_shdr_t *shdrs = (elf_shdr_t *)(buf + eh->e_shoff);
 
     if (eh->e_shstrndx >= nshdrs) {
-        kfree(buf);
+        drvmod_free_pages(buf_pfn, DRV_MOD_BUF_ORDER);
         return -ENOEXEC;
     }
     elf_shdr_t *shstr_sh = &shdrs[eh->e_shstrndx];
     if (!drvmod_range_ok64(shstr_sh->sh_offset, shstr_sh->sh_size, got)) {
-        kfree(buf);
+        drvmod_free_pages(buf_pfn, DRV_MOD_BUF_ORDER);
         return -ENOEXEC;
     }
     const char *shstr = (const char *)(buf + shstr_sh->sh_offset);
@@ -838,7 +886,7 @@ int drvmod_load(int fd, const char *name)
         if (sh->sh_name >= shstr_size) {
             kerr("[DRVMOD] %s: bad section name offset %u\n", name,
                  sh->sh_name);
-            kfree(buf);
+            drvmod_free_pages(buf_pfn, DRV_MOD_BUF_ORDER);
             return -ENOEXEC;
         }
         switch (sh->sh_type) {
@@ -847,7 +895,7 @@ int drvmod_load(int fd, const char *name)
         case SHT_RELA:
             if (!drvmod_range_ok64(sh->sh_offset, sh->sh_size, got)) {
                 kerr("[DRVMOD] %s: section %u escapes file\n", name, i);
-                kfree(buf);
+                drvmod_free_pages(buf_pfn, DRV_MOD_BUF_ORDER);
                 return -ENOEXEC;
             }
             break;
@@ -879,12 +927,12 @@ int drvmod_load(int fd, const char *name)
         const char *n = shstr + sh->sh_name;
         if (strcmp(n, ".text") == 0) {
             if (sh->sh_type != SHT_PROGBITS) {
-                kfree(buf);
+                drvmod_free_pages(buf_pfn, DRV_MOD_BUF_ORDER);
                 return -ENOEXEC;
             }
             if (nmap >= DRV_MOD_MAX_PLACED) {
                 kerr("[DRVMOD] %s: too many loadable sections\n", name);
-                kfree(buf);
+                drvmod_free_pages(buf_pfn, DRV_MOD_BUF_ORDER);
                 return -ENOEXEC;
             }
             text_size = (uint32_t)sh->sh_size;
@@ -898,7 +946,7 @@ int drvmod_load(int fd, const char *name)
                    strcmp(n, ".sbss") == 0) {
             if (nmap >= DRV_MOD_MAX_PLACED) {
                 kerr("[DRVMOD] %s: too many loadable sections\n", name);
-                kfree(buf);
+                drvmod_free_pages(buf_pfn, DRV_MOD_BUF_ORDER);
                 return -ENOEXEC;
             }
             uint32_t align = (uint32_t)sh->sh_addralign;
@@ -913,7 +961,7 @@ int drvmod_load(int fd, const char *name)
         } else if (sh->sh_type == SHT_SYMTAB) {
             if (sh->sh_size % sizeof(elf_sym_t) != 0 ||
                 sh->sh_link >= nshdrs) {
-                kfree(buf);
+                drvmod_free_pages(buf_pfn, DRV_MOD_BUF_ORDER);
                 return -ENOEXEC;
             }
             syms = (elf_sym_t *)(buf + sh->sh_offset);
@@ -921,7 +969,7 @@ int drvmod_load(int fd, const char *name)
             elf_shdr_t *link_sh = &shdrs[sh->sh_link];
             if (!drvmod_range_ok64(link_sh->sh_offset, link_sh->sh_size,
                                    got)) {
-                kfree(buf);
+                drvmod_free_pages(buf_pfn, DRV_MOD_BUF_ORDER);
                 return -ENOEXEC;
             }
             strtab = (const char *)(buf + link_sh->sh_offset);
@@ -929,7 +977,7 @@ int drvmod_load(int fd, const char *name)
         } else if (sh->sh_type == SHT_RELA) {
             if (sh->sh_size % sizeof(elf_rela_t) != 0 ||
                 sh->sh_info >= nshdrs) {
-                kfree(buf);
+                drvmod_free_pages(buf_pfn, DRV_MOD_BUF_ORDER);
                 return -ENOEXEC;
             }
             if (strstr(n, ".text") != NULL) {
@@ -944,7 +992,7 @@ int drvmod_load(int fd, const char *name)
         }
     }
     if (text_size == 0 || !syms || !strtab) {
-        kfree(buf);
+        drvmod_free_pages(buf_pfn, DRV_MOD_BUF_ORDER);
         return -ENOEXEC;
     }
     if (drvmod_sec_lookup(secmap, nmap, rela_text_sec, &rela_text_off,
@@ -974,12 +1022,12 @@ int drvmod_load(int fd, const char *name)
         if (nveneers) {
             total_size = (total_size + 15) & ~15U;
             if (total_size + nveneers * 16U > DRV_MOD_MAX_SIZE) {
-                kfree(buf);
+                drvmod_free_pages(buf_pfn, DRV_MOD_BUF_ORDER);
                 return -ENOEXEC;
             }
             veneer_off = kmalloc(nrela_text * sizeof(uint32_t));
             if (!veneer_off) {
-                kfree(buf);
+                drvmod_free_pages(buf_pfn, DRV_MOD_BUF_ORDER);
                 return -ENOMEM;
             }
             memset(veneer_off, 0, nrela_text * sizeof(uint32_t));
@@ -997,23 +1045,80 @@ int drvmod_load(int fd, const char *name)
             total_size += nveneers * 16U;
         }
     }
+
+    /* LoongArch64: %got_pc_hi20/%got_pc_lo12 pairs (extern data, e.g.
+     * klog_level) load the symbol address through a module-local GOT.
+     * Allocate one 8-byte slot per pair at the module tail. */
+    uint32_t *got_off = NULL;
+    if (machine == EM_LOONGARCH && nrela_text) {
+        uint32_t ngot = 0;
+        for (uint32_t i = 0; i < nrela_text; i++)
+            if (ELF_R_TYPE(rela_text[i].r_info) == R_LARCH_GOT_PC_HI20)
+                ngot++;
+        if (ngot) {
+            total_size = (total_size + 7) & ~7U;
+            if (total_size + ngot * 8U > DRV_MOD_MAX_SIZE) {
+                drvmod_free_pages(buf_pfn, DRV_MOD_BUF_ORDER);
+                return -ENOEXEC;
+            }
+            got_off = kmalloc(nrela_text * sizeof(uint32_t));
+            if (!got_off) {
+                drvmod_free_pages(buf_pfn, DRV_MOD_BUF_ORDER);
+                return -ENOMEM;
+            }
+            memset(got_off, 0, nrela_text * sizeof(uint32_t));
+            uint32_t goff = total_size;
+            for (uint32_t i = 0; i < nrela_text; i++) {
+                if (ELF_R_TYPE(rela_text[i].r_info) == R_LARCH_GOT_PC_HI20) {
+                    got_off[i] = goff;
+                    goff += 8;
+                }
+            }
+            /* Pair every %got_pc_lo12 with the %got_pc_hi20 four bytes
+             * before it (the pcalau12i + ld.d sequence).  Look the HI20
+             * up by relocation offset: the list order is not guaranteed
+             * to match address order. */
+            for (uint32_t i = 0; i < nrela_text; i++) {
+                if (ELF_R_TYPE(rela_text[i].r_info) != R_LARCH_GOT_PC_LO12)
+                    continue;
+                for (uint32_t j = 0; j < nrela_text; j++) {
+                    if (ELF_R_TYPE(rela_text[j].r_info) == R_LARCH_GOT_PC_HI20 &&
+                        rela_text[j].r_offset == rela_text[i].r_offset - 4) {
+                        got_off[i] = got_off[j];
+                        break;
+                    }
+                }
+            }
+            total_size += ngot * 8U;
+        }
+    }
     total_size = (total_size + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
     if (total_size == 0 || total_size > DRV_MOD_MAX_SIZE) {
         if (veneer_off)
             kfree(veneer_off);
-        kfree(buf);
+        drvmod_free_pages(buf_pfn, DRV_MOD_BUF_ORDER);
         return -ENOEXEC;
     }
-
-    /* Shadow buffer in load layout. */
-    uint8_t *shadow = kmalloc(total_size);
-    if (!shadow) {
-        printf("[DRVMOD] %s: shadow kmalloc %u failed\n", name, total_size);
+    /* Shadow buffer in load layout.  Allocated from the frame pool (not
+     * kmalloc): kmalloc slabs draw from the same buddy list the module
+     * pages are taken from, so a kmalloc shadow can silently overlap the
+     * pfa_alloc'd module and freeing it later would release the module's
+     * own pages to the allocator. */
+    uint32_t npages = total_size / PAGE_SIZE;
+    uint32_t alloc_order = 0;
+    while ((1U << alloc_order) < npages)
+        alloc_order++;
+    pfn_t shadow_pfn = pfa_alloc((int)alloc_order);
+    if (shadow_pfn == PFN_NONE) {
+        printf("[DRVMOD] %s: shadow pfa_alloc %u failed\n", name,
+               total_size);
         if (veneer_off)
             kfree(veneer_off);
-        kfree(buf);
+        drvmod_free_pages(buf_pfn, DRV_MOD_BUF_ORDER);
         return -ENOMEM;
     }
+    uint8_t *shadow = (uint8_t *)(PAGE_OFFSET +
+                                  pfn_to_phys(shadow_pfn));
     memset(shadow, 0, total_size);
     if (veneer_off) {
         /* Pre-fill veneer code: ldr x16, [pc, #8]; br x16. */
@@ -1034,8 +1139,8 @@ int drvmod_load(int fd, const char *name)
             if (drvmod_sec_lookup(secmap, nmap, i, &off, &sec_size) < 0)
                 continue;
             if (!drvmod_range_ok32(off, sec_size, total_size)) {
-                kfree(shadow);
-                kfree(buf);
+                drvmod_free_pages(shadow_pfn, alloc_order);
+                drvmod_free_pages(buf_pfn, DRV_MOD_BUF_ORDER);
                 return -ENOEXEC;
             }
             memcpy(shadow + off, buf + sh->sh_offset, (size_t)sh->sh_size);
@@ -1045,14 +1150,10 @@ int drvmod_load(int fd, const char *name)
     /* Allocate physical pages first: relocations must be computed against
      * the FINAL load address (direct-map window: PAGE_OFFSET + PA), since
      * PC-relative displacements are relative to the runtime PC. */
-    uint32_t npages = total_size / PAGE_SIZE;
-    uint32_t alloc_order = 0;
-    while ((1U << alloc_order) < npages)
-        alloc_order++;
     pfn_t alloc_pfn = pfa_alloc((int)alloc_order);
     if (alloc_pfn == PFN_NONE) {
-        kfree(shadow);
-        kfree(buf);
+        drvmod_free_pages(shadow_pfn, alloc_order);
+        drvmod_free_pages(buf_pfn, DRV_MOD_BUF_ORDER);
         return -ENOMEM;
     }
     uintptr_t load_base = PAGE_OFFSET + pfn_to_phys(alloc_pfn);
@@ -1066,8 +1167,8 @@ int drvmod_load(int fd, const char *name)
         hi_targets = kmalloc(nslots * sizeof(uintptr_t));
         if (!hi_targets) {
             drvmod_free_pages(alloc_pfn, alloc_order);
-            kfree(shadow);
-            kfree(buf);
+            drvmod_free_pages(shadow_pfn, alloc_order);
+            drvmod_free_pages(buf_pfn, DRV_MOD_BUF_ORDER);
             return -ENOMEM;
         }
         memset(hi_targets, 0, nslots * sizeof(uintptr_t));
@@ -1089,14 +1190,16 @@ int drvmod_load(int fd, const char *name)
                            strtab, strtab_size, syms, nsyms,
                            rela_text, nrela_text, rela_text_off,
                            rela_text_size, hi_targets, nslots,
-                           veneer_off) == 0xFFFFFFFFU) {
+                           veneer_off, got_off) == 0xFFFFFFFFU) {
         if (hi_targets)
             kfree(hi_targets);
         if (veneer_off)
             kfree(veneer_off);
+        if (got_off)
+            kfree(got_off);
         drvmod_free_pages(alloc_pfn, alloc_order);
-        kfree(shadow);
-        kfree(buf);
+        drvmod_free_pages(shadow_pfn, alloc_order);
+        drvmod_free_pages(buf_pfn, DRV_MOD_BUF_ORDER);
         return -EINVAL;
     }
     if (nrela_data &&
@@ -1104,14 +1207,16 @@ int drvmod_load(int fd, const char *name)
                            strtab, strtab_size, syms, nsyms,
                            rela_data, nrela_data, rela_data_off,
                            rela_data_size, hi_targets, nslots,
-                           veneer_off) == 0xFFFFFFFFU) {
+                           veneer_off, got_off) == 0xFFFFFFFFU) {
         if (hi_targets)
             kfree(hi_targets);
         if (veneer_off)
             kfree(veneer_off);
+        if (got_off)
+            kfree(got_off);
         drvmod_free_pages(alloc_pfn, alloc_order);
-        kfree(shadow);
-        kfree(buf);
+        drvmod_free_pages(shadow_pfn, alloc_order);
+        drvmod_free_pages(buf_pfn, DRV_MOD_BUF_ORDER);
         return -EINVAL;
     }
     /* Resolve DriverEntry before installing pages: it must be a global
@@ -1141,8 +1246,10 @@ int drvmod_load(int fd, const char *name)
             kfree(hi_targets);
         if (veneer_off)
             kfree(veneer_off);
-        kfree(shadow);
-        kfree(buf);
+        if (got_off)
+            kfree(got_off);
+        drvmod_free_pages(shadow_pfn, alloc_order);
+        drvmod_free_pages(buf_pfn, DRV_MOD_BUF_ORDER);
         drvmod_free_pages(alloc_pfn, alloc_order);
         return -ENOENT;
     }
@@ -1151,11 +1258,13 @@ int drvmod_load(int fd, const char *name)
         kfree(hi_targets);
     if (veneer_off)
         kfree(veneer_off);
-    kfree(buf);
+    if (got_off)
+        kfree(got_off);
+    drvmod_free_pages(buf_pfn, DRV_MOD_BUF_ORDER);
 
     memcpy((void *)load_base, shadow, total_size);
     arch_flush_icache_range((void *)load_base, total_size);
-    kfree(shadow);
+    drvmod_free_pages(shadow_pfn, alloc_order);
 
     drv_module_t *m = &drv_modules[slot];
     memset(m, 0, sizeof(*m));
