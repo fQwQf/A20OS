@@ -183,13 +183,16 @@ comma := ,
 NET_HOSTFWD ?= hostfwd=tcp::5555-:5555,hostfwd=udp::5555-:5555
 NETDEV_USER = -netdev user,id=net$(if $(strip $(NET_HOSTFWD)),$(comma)$(NET_HOSTFWD),)
 SMOKE_TIMEOUT ?= 20s
-SMOKE_INPUT_DELAY ?= 2
+# TCG boot can take longer than two seconds after a full image rebuild.  Wait
+# until the interactive mksh has had time to print its prompt before injecting
+# smoke commands; PASS markers and clean poweroff still decide the result.
+SMOKE_INPUT_DELAY ?= 8
 # mm_stress drives ~8 MiB of ramfs page-cache eviction plus fork/mremap/huge
 # page coverage under TCG; it is the heaviest smoke and needs a longer budget.
 SMOKE_TIMEOUT_MM_ST ?= 45s
 SMOKE_LOG_DIR ?= .kernel-build/smoke
 STEP35_TIMEOUT ?= 300s
-STEP35_INPUT_DELAY ?= 3
+STEP35_INPUT_DELAY ?= 8
 STEP35_LOG_DIR ?= .eval-state/2026/logs
 WAIT_TIMER_HEAP_MAX ?=
 REQUIRE_TIMEOUT_CAPACITY ?= 0
