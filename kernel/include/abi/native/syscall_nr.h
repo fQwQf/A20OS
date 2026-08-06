@@ -149,12 +149,16 @@
 #define A20_SYS_device_block_attach 0x0C05
 #define A20_SYS_device_block_complete 0x0C06
 
-/* Network daemon (0x0D00) */
 #define A20_SYS_netd_attach        0x0D00
 #define A20_SYS_netd_sock_register  0x0D01
 #define A20_SYS_netd_tx_send       0x0D02
+/* Kernel extension points (0x0E00) */
+#define A20_SYS_ext_prog_load      0x0E00
+#define A20_SYS_ext_prog_attach    0x0E01
+#define A20_SYS_ext_prog_detach    0x0E02
+#define A20_SYS_ext_prog_release   0x0E03
+#define A20_SYS_ext_point_info     0x0E04
 
-#define A20_NATIVE_SYSCALL_COUNT  109
-#define A20_NATIVE_SYSCALL_COUNT  116
+#define A20_NATIVE_SYSCALL_COUNT  124
 
 #endif
