@@ -14,5 +14,7 @@ void a20_lwip_process_netif_irq_locked(int net_idx);
 uint64_t a20_lwip_lock(void);
 void a20_lwip_unlock(uint64_t flags);
 int  a20_lwip_format_status(char *buf, size_t bufsz);
+int  a20_lwip_rx_pending_any(void);
+void a20_lwip_signal_rx_pending(void);
 
 #endif /* _NET_LWIP_STACK_H */

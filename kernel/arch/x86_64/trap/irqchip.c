@@ -208,12 +208,80 @@ static void lapic_enable(void) {
     lapic_write(LAPIC_LVT_LINT1, LAPIC_LVT_MASKED);
 }
 
+static void ioapic_init(void) {
+    /* Mask every redirection entry before any device line is routed; the
+     * reset state of unused entries is not guaranteed and an unmasked
+     * stale entry would deliver spurious vectors once LAPIC is enabled. */
+    uint32_t ver = ioapic_read(0x01);
+    uint32_t max_entries = ((ver >> 16) & 0xFF) + 1;
+    for (uint32_t i = 0; i < max_entries; i++) {
+        ioapic_write(0x10U + i * 2U + 1U, 0);
+        ioapic_write(0x10U + i * 2U, 0x10000U);
+    }
+}
+
 void x86_64_route_pci_irq(uint32_t gsi, uint8_t vector) {
-    /* Q35 exposes virtio-pci through INTx.  Route its GSI to the vector used
-     * by the transport before the driver makes the queue available. */
+    /* PCI INTx is level-triggered and active-low.  Route the GSI to the
+     * vector with physical destination mode aimed at the BSP (APIC ID 0).
+     * The entry starts MASKED: only request_irq()'s auto-enable (the board
+     * irqchip enable hook) unmasks it, so a device whose handler failed to
+     * register can never hold a shared level line asserted with nobody
+     * clearing its interrupt source. */
     uint32_t low_reg = 0x10U + gsi * 2U;
     ioapic_write(low_reg + 1U, 0);
-    ioapic_write(low_reg, vector);
+    ioapic_write(low_reg, (uint32_t)vector | (1U << 13) | (1U << 15) |
+                          (1U << 16));
+}
+
+/* X86_64_PCI_INTX_MODEL:
+ * - QEMU q35 routes root-bus PCI INTx to GSI 20-23 with the swizzle
+ *   GSI = 20 + ((dev + pin - 1) & 3).  This was verified empirically by
+ *   routing the whole GSI 16-23 window and observing which vectors fire:
+ *   dev 2/3/4 pin A land on GSI 22/23/20 respectively (the i440fx-style
+ *   base of 16 does NOT match q35 hardware behavior).
+ * - Each routed GSI owns vector 0x40 + gsi so arch_handle_irq() can hand
+ *   the vector straight to driver_irq_dispatch() as the IRQ line id.
+ * - Only bus 0 is routed: devices behind a bridge need the bridge swizzle
+ *   and ACPI _PRT, which this platform does not parse; those transports
+ *   keep the polling fallback by receiving -1. */
+#define X86_64_PCI_VECTOR_BASE 0x40
+#define X86_64_PCI_GSI_BASE    20U
+
+int arch_pci_intx_irq(int bus, int dev, int func, int pin) {
+    (void)func;
+    if (bus != 0 || pin < 1 || pin > 4)
+        return -1;
+    /* The swizzle below is q35-only, verified empirically against QEMU
+     * (dev 2/3/4 pin A land on GSI 22/23/20).  i440fx routes PIRQ through
+     * SeaBIOS-programmed legacy IRQs instead, which cannot be resolved
+     * without ACPI _PRT and PIRQ link programming, so it keeps the
+     * polling fallback.  Identify the machine by its host bridge. */
+    static int host_bridge_ok = -1;
+    if (host_bridge_ok < 0) {
+        uint32_t id = readl((const volatile void *)
+                            (PCI_ECAM_BASE + 0U));
+        host_bridge_ok = (id == 0x29c08086U) ? 1 : 0;
+    }
+    if (!host_bridge_ok)
+        return -1;
+    uint32_t gsi = X86_64_PCI_GSI_BASE +
+                   (((uint32_t)dev + (uint32_t)pin - 1U) & 3U);
+    uint8_t vector = (uint8_t)(X86_64_PCI_VECTOR_BASE + gsi);
+    x86_64_route_pci_irq(gsi, vector);
+    return (int)vector;
+}
+
+void x86_64_pci_irq_set_masked(int vector, int masked) {
+    uint32_t gsi = (uint32_t)(vector - X86_64_PCI_VECTOR_BASE);
+    if (gsi < 16U || gsi > 23U)
+        return;
+    uint32_t low_reg = 0x10U + gsi * 2U;
+    uint32_t low = ioapic_read(low_reg);
+    if (masked)
+        low |= (1U << 16);
+    else
+        low &= ~(1U << 16);
+    ioapic_write(low_reg, low);
 }
 
 static int keyboard_irq_wrapper(int irq, void *priv) {
@@ -249,11 +317,15 @@ void trap_init(void) {
     uint64_t sfmask = RFLAGS_IF;
     __asm__ __volatile__("wrmsr" :: "c"((uint32_t)MSR_SFMASK), "a"((uint32_t)sfmask), "d"((uint32_t)(sfmask >> 32)));
 
-    if (cpu_current_id() == 0)
+    if (cpu_current_id() == 0) {
         pic_init();
+        ioapic_init();
+    }
     lapic_enable();
     if (cpu_current_id() == 0) {
-        request_irq(KEYBOARD_IRQ, keyboard_irq_wrapper, 0, NULL);
+        /* Register with IDT vector numbers: arch_handle_irq() dispatches
+         * vectors, not PIC line numbers. */
+        request_irq(IRQ_VECTOR_KEYBOARD, keyboard_irq_wrapper, 0, NULL);
         request_irq(PS2_MOUSE_IRQ_VECTOR, keyboard_irq_wrapper, 0, NULL);
     }
 }
@@ -267,7 +339,9 @@ void arch_handle_irq(uint64_t irq, int from_user) {
     } else if (irq == IRQ_VECTOR_TIMER) {
         handle_timer_irq(from_user);
     } else if (irq == IRQ_VECTOR_UART || irq == IRQ_VECTOR_KEYBOARD ||
-               irq == PS2_MOUSE_IRQ_VECTOR || irq == IRQ_VECTOR_PCI) {
+               irq == PS2_MOUSE_IRQ_VECTOR || irq == IRQ_VECTOR_PCI ||
+               (irq >= X86_64_PCI_VECTOR_BASE && irq < IRQ_VECTOR_RESCHEDULE)) {
+        /* PCI vectors double as driver IRQ line ids (see X86_64_PCI_INTX_MODEL). */
         driver_irq_dispatch((uint32_t)irq);
     }
     if (irq == IRQ_VECTOR_KEYBOARD || irq == IRQ_VECTOR_UART ||
