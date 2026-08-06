@@ -20,6 +20,23 @@ static uint64_t ts_ns(const struct timespec *t)
     return (uint64_t)t->tv_sec * 1000000000ull + (uint64_t)t->tv_nsec;
 }
 
+/* Exercise demand stack growth well beyond the 128 KiB initial mapping, then
+ * call the vDSO from the expanded stack.  The old fixed vDSO layout lived only
+ * about 256 KiB below the stack top and collided with real Rust workloads. */
+__attribute__((noinline)) static int stack_growth_vdso_probe(void)
+{
+    volatile unsigned char span[384 * 1024];
+    struct timespec ts;
+    unsigned int checksum = 0;
+
+    for (size_t i = 0; i < sizeof(span); i += 4096) {
+        span[i] = (unsigned char)(i / 4096);
+        checksum += span[i];
+    }
+    return clock_gettime(CLOCK_MONOTONIC, &ts) == 0 &&
+           ts.tv_sec >= 0 && checksum != 0;
+}
+
 int main(void)
 {
     printf("CLOCK_BENCH: auxv_ehdr=0x%lx\n", (unsigned long)getauxval(33));
@@ -57,13 +74,14 @@ int main(void)
 
     struct timeval tv;
     gettimeofday(&tv, 0);
+    int stack_growth_ok = stack_growth_vdso_probe();
 
-    printf("CLOCK_BENCH: libc_ns_per_call=%llu sys_ns_per_call=%llu diff_ns=%llu mono_ok=%d gtod_sec=%llu\n",
+    printf("CLOCK_BENCH: libc_ns_per_call=%llu sys_ns_per_call=%llu diff_ns=%llu mono_ok=%d stack_growth_ok=%d gtod_sec=%llu\n",
            (unsigned long long)(libc_ns / N),
            (unsigned long long)(sys_ns / N),
-           (unsigned long long)diff, mono_ok,
+           (unsigned long long)diff, mono_ok, stack_growth_ok,
            (unsigned long long)tv.tv_sec);
     printf("CLOCK_BENCH: %s\n",
-           (diff < 1000000000ull && mono_ok) ? "PASS" : "FAIL");
+           (diff < 1000000000ull && mono_ok && stack_growth_ok) ? "PASS" : "FAIL");
     return 0;
 }

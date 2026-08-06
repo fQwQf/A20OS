@@ -13,7 +13,9 @@
  * clock is set; monotonic time needs no updates because both the kernel
  * and the vDSO read the same free-running time CSR.
  */
-#ifdef CONFIG_RISCV64
+#include "core/arch.h"
+
+#ifdef ARCH_HAS_VDSO
 
 #include "core/types.h"
 #include "core/string.h"
@@ -28,7 +30,17 @@
 extern const uint8_t _binary_vdso_elf_start[];
 extern const uint8_t _binary_vdso_elf_end[];
 
-#define A20_VDSO_MAX_PAGES 4
+#define A20_USER_STACK_LIMIT_VA \
+    ((USER_STACK_TOP + PAGE_SIZE) - USER_STACK_MAX_SIZE)
+
+_Static_assert((A20_VDSO_VA & PAGE_OFFSET_MASK) == 0,
+               "vDSO address must be page aligned");
+_Static_assert((A20_VVAR_VA & PAGE_OFFSET_MASK) == 0,
+               "vvar address must be page aligned");
+_Static_assert(A20_VDSO_VA + A20_VDSO_MAX_PAGES * PAGE_SIZE <= A20_VVAR_VA,
+               "reserved vDSO image overlaps vvar");
+_Static_assert(A20_VVAR_VA + 2 * PAGE_SIZE <= A20_USER_STACK_LIMIT_VA,
+               "vvar must stay below the maximum user stack with a guard page");
 
 static pfn_t          g_vdso_pfn[A20_VDSO_MAX_PAGES];
 static uint32_t       g_vdso_pages;
@@ -185,4 +197,4 @@ int vdso_fork_map(mm_struct_t *child_mm)
     return vdso_map_mm(child_mm);
 }
 
-#endif /* CONFIG_RISCV64 */
+#endif /* ARCH_HAS_VDSO */

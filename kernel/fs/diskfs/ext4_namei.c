@@ -15,10 +15,35 @@
 
 /* ext4 namei: directory entries and vnode operations. */
 
+int ext4_dir_entry_check(const ext4_dir_entry_t *de, uint32_t off,
+                         uint32_t block_size, uint16_t *actual_len)
+{
+    if (off > block_size || block_size - off < 8)
+        return -EIO;
+    uint16_t rec_len = de->rec_len;
+    if (rec_len < 8 || (rec_len & 3U) || rec_len > block_size - off ||
+        de->name_len > rec_len - 8U)
+        return -EIO;
+    uint16_t actual = (uint16_t)((8U + de->name_len + 3U) & ~3U);
+    if (actual > rec_len)
+        return -EIO;
+    if (actual_len)
+        *actual_len = actual;
+    return 0;
+}
+
+static int ext4_dir_write_block(ext4_sb_info_t *sb, uint64_t physical,
+                                const void *block)
+{
+    return bcache_write_bytes(sb->bc, physical * sb->block_size, block,
+                              sb->block_size) < 0 ? -EIO : 0;
+}
+
 int ext4_dir_find(ext4_sb_info_t *sb, ext4_inode_t *di, uint64_t dsz,
                           const char *name, uint32_t *out_ino, uint8_t *out_ft) {
     uint32_t bs = sb->block_size, nb = (dsz + bs - 1) / bs;
     size_t nl = strlen(name);
+    if (nl > 255) return -ENAMETOOLONG;
     for (uint32_t b = 0; b < nb; b++) {
         uint64_t p = ext4_block_map(sb, di, b); if (!p) continue;
         char *blk = (char *)kmalloc(bs); if (!blk) return -ENOMEM;
@@ -26,7 +51,9 @@ int ext4_dir_find(ext4_sb_info_t *sb, ext4_inode_t *di, uint64_t dsz,
         uint32_t off = 0;
         while (off < bs) {
             ext4_dir_entry_t *de = (ext4_dir_entry_t *)(blk + off);
-            if (de->rec_len == 0) break;
+            if (ext4_dir_entry_check(de, off, bs, NULL) < 0) {
+                kfree(blk); return -EIO;
+            }
             if (de->inode && de->name_len == nl && memcmp(de->name, name, nl) == 0) {
                 if (out_ino) *out_ino = de->inode;
                 if (out_ft) *out_ft = de->file_type;
@@ -44,7 +71,10 @@ int ext4_dir_add(ext4_sb_info_t *sb, ext4_inode_t *di, uint64_t *dsz,
                          const char *name, uint32_t ino, uint8_t ft) {
     uint32_t bs = sb->block_size;
     size_t nl = strlen(name);
+    if (nl == 0) return -EINVAL;
+    if (nl > 255) return -ENAMETOOLONG;
     uint16_t need = (uint16_t)((8 + nl + 3) & ~3);
+    if (need > bs) return -ENAMETOOLONG;
     uint32_t nb = (*dsz + bs - 1) / bs;
 
     for (uint32_t b = 0; b < nb; b++) {
@@ -54,25 +84,37 @@ int ext4_dir_add(ext4_sb_info_t *sb, ext4_inode_t *di, uint64_t *dsz,
         uint32_t off = 0;
         while (off < bs) {
             ext4_dir_entry_t *de = (ext4_dir_entry_t *)(blk + off);
-            if (de->rec_len == 0) break;
-            uint16_t actual = (uint16_t)((8 + de->name_len + 3) & ~3);
+            uint16_t actual;
+            if (ext4_dir_entry_check(de, off, bs, &actual) < 0) {
+                kfree(blk); return -EIO;
+            }
             if (de->inode == 0 && de->rec_len >= need) {
+                uint16_t old = de->rec_len;
+                uint16_t left = old - need;
                 de->inode = ino; de->name_len = (uint8_t)nl; de->file_type = ft;
                 memcpy(de->name, name, nl);
-                if (de->rec_len > need) {
-                    uint16_t left = de->rec_len - need; de->rec_len = need;
+                /* A free tail is itself a directory entry and therefore
+                 * needs a complete eight-byte header.  A four-byte tail is
+                 * absorbed by the new entry instead of being overwritten. */
+                if (left >= 8) {
+                    de->rec_len = need;
                     ext4_dir_entry_t *nx = (ext4_dir_entry_t *)(blk + off + need);
                     nx->inode = 0; nx->rec_len = left; nx->name_len = 0; nx->file_type = 0;
+                } else {
+                    de->rec_len = old;
                 }
-                bcache_write_bytes(sb->bc, p * bs, blk, bs); kfree(blk); return 0;
+                int wr = ext4_dir_write_block(sb, p, blk);
+                kfree(blk); return wr;
             }
-            if (de->rec_len - actual >= need) {
+            uint16_t slack = de->rec_len - actual;
+            if (slack >= need) {
                 uint16_t old = de->rec_len; de->rec_len = actual;
                 ext4_dir_entry_t *nx = (ext4_dir_entry_t *)(blk + off + actual);
                 nx->inode = ino; nx->rec_len = old - actual;
                 nx->name_len = (uint8_t)nl; nx->file_type = ft;
                 memcpy(nx->name, name, nl);
-                bcache_write_bytes(sb->bc, p * bs, blk, bs); kfree(blk); return 0;
+                int wr = ext4_dir_write_block(sb, p, blk);
+                kfree(blk); return wr;
             }
             off += de->rec_len;
         }
@@ -86,12 +128,14 @@ int ext4_dir_add(ext4_sb_info_t *sb, ext4_inode_t *di, uint64_t *dsz,
     ext4_dir_entry_t *de = (ext4_dir_entry_t *)blk;
     de->inode = ino; de->name_len = (uint8_t)nl; de->file_type = ft;
     memcpy(de->name, name, nl);
-    if (need < bs) {
+    if (bs - need >= 8) {
         de->rec_len = need;
         ext4_dir_entry_t *tail = (ext4_dir_entry_t *)(blk + need);
         tail->inode = 0; tail->rec_len = (uint16_t)(bs - need); tail->name_len = 0;
     } else de->rec_len = (uint16_t)bs;
-    bcache_write_bytes(sb->bc, nb_blk * bs, blk, bs); kfree(blk);
+    int wr = ext4_dir_write_block(sb, nb_blk, blk);
+    kfree(blk);
+    if (wr < 0) return wr;
     *dsz += bs;
     return 0;
 }
@@ -101,6 +145,7 @@ int ext4_dir_remove(ext4_sb_info_t *sb, ext4_inode_t *di, uint64_t dsz,
                             const char *name) {
     uint32_t bs = sb->block_size, nb = (dsz + bs - 1) / bs;
     size_t nl = strlen(name);
+    if (nl > 255) return -ENAMETOOLONG;
     for (uint32_t b = 0; b < nb; b++) {
         uint64_t p = ext4_block_map(sb, di, b); if (!p) continue;
         char *blk = (char *)kmalloc(bs); if (!blk) return -ENOMEM;
@@ -108,11 +153,14 @@ int ext4_dir_remove(ext4_sb_info_t *sb, ext4_inode_t *di, uint64_t dsz,
         uint32_t off = 0, prev = 0; int hp = 0;
         while (off < bs) {
             ext4_dir_entry_t *de = (ext4_dir_entry_t *)(blk + off);
-            if (de->rec_len == 0) break;
+            if (ext4_dir_entry_check(de, off, bs, NULL) < 0) {
+                kfree(blk); return -EIO;
+            }
             if (de->inode && de->name_len == nl && memcmp(de->name, name, nl) == 0) {
                 if (hp) ((ext4_dir_entry_t *)(blk + prev))->rec_len += de->rec_len;
                 else de->inode = 0;
-                bcache_write_bytes(sb->bc, p * bs, blk, bs); kfree(blk); return 0;
+                int wr = ext4_dir_write_block(sb, p, blk);
+                kfree(blk); return wr;
             }
             prev = off; hp = 1; off += de->rec_len;
         }
@@ -126,6 +174,7 @@ int ext4_dir_update_entry(ext4_sb_info_t *sb, ext4_inode_t *di, uint64_t *dsz,
                                   const char *name, uint32_t ino, uint8_t ft) {
     uint32_t bs = sb->block_size;
     size_t nl = strlen(name);
+    if (nl > 255) return -ENAMETOOLONG;
     uint32_t nb = (*dsz + bs - 1) / bs;
     for (uint32_t b = 0; b < nb; b++) {
         uint64_t p = ext4_block_map(sb, di, b);
@@ -136,13 +185,15 @@ int ext4_dir_update_entry(ext4_sb_info_t *sb, ext4_inode_t *di, uint64_t *dsz,
         uint32_t off = 0;
         while (off < bs) {
             ext4_dir_entry_t *de = (ext4_dir_entry_t *)(blk + off);
-            if (de->rec_len == 0) break;
+            if (ext4_dir_entry_check(de, off, bs, NULL) < 0) {
+                kfree(blk); return -EIO;
+            }
             if (de->inode && de->name_len == nl && memcmp(de->name, name, nl) == 0) {
                 de->inode = ino;
                 de->file_type = ft;
-                bcache_write_bytes(sb->bc, p * bs, blk, bs);
+                int wr = ext4_dir_write_block(sb, p, blk);
                 kfree(blk);
-                return 0;
+                return wr;
             }
             off += de->rec_len;
         }
@@ -296,8 +347,12 @@ int ext4_vn_create_unlocked(vnode_t *dir, const char *name, int mode, vnode_t **
 
     /* Check if already exists */
     uint32_t existing_ino;
-    if (ext4_dir_find(p->sb, &di, ext4_inode_size(&di), name, &existing_ino, NULL) == 0)
+    int lookup = ext4_dir_find(p->sb, &di, ext4_inode_size(&di), name,
+                               &existing_ino, NULL);
+    if (lookup == 0)
         return -EEXIST;
+    if (lookup != -ENOENT)
+        return lookup;
 
     uint32_t new_ino = ext4_alloc_inode(p->sb);
     if (!new_ino) return -ENOSPC;
@@ -310,7 +365,10 @@ int ext4_vn_create_unlocked(vnode_t *dir, const char *name, int mode, vnode_t **
     ni.i_uid = cur ? (uint16_t)cur->cred.fsuid : 0;
     ni.i_gid = (di.i_mode & S_ISGID) ? di.i_gid : (cur ? (uint16_t)cur->cred.fsgid : 0);
     ni.i_links_count = 1;
-    ext4_write_inode(p->sb, new_ino, &ni);
+    if (ext4_write_inode(p->sb, new_ino, &ni) < 0) {
+        ext4_free_inode(p->sb, new_ino);
+        return -EIO;
+    }
 
     /* Add dir entry */
     uint64_t dsz = ext4_inode_size(&di);
@@ -322,7 +380,8 @@ int ext4_vn_create_unlocked(vnode_t *dir, const char *name, int mode, vnode_t **
 
     if (dsz != ext4_inode_size(&di)) {
         ext4_inode_set_size(&di, dsz);
-        ext4_write_inode(p->sb, p->inode_num, &di);
+        if (ext4_write_inode(p->sb, p->inode_num, &di) < 0)
+            return -EIO;
         p->file_size = dsz;
     }
 
@@ -342,8 +401,12 @@ int ext4_vn_mkdir_unlocked(vnode_t *dir, const char *name, int mode) {
     if (ext4_read_inode(p->sb, p->inode_num, &di) < 0) return -EIO;
 
     uint32_t existing_ino;
-    if (ext4_dir_find(p->sb, &di, ext4_inode_size(&di), name, &existing_ino, NULL) == 0)
+    int lookup = ext4_dir_find(p->sb, &di, ext4_inode_size(&di), name,
+                               &existing_ino, NULL);
+    if (lookup == 0)
         return -EEXIST;
+    if (lookup != -ENOENT)
+        return lookup;
 
     uint32_t new_ino = ext4_alloc_inode(p->sb);
     if (!new_ino) return -ENOSPC;
@@ -377,7 +440,11 @@ int ext4_vn_mkdir_unlocked(vnode_t *dir, const char *name, int mode) {
     ext.ee_start_lo = (uint32_t)(blk & 0xFFFFFFFF);
     memcpy(raw + sizeof(hdr), &ext, sizeof(ext));
 
-    ext4_write_inode(p->sb, new_ino, &ni);
+    if (ext4_write_inode(p->sb, new_ino, &ni) < 0) {
+        ext4_free_block(p->sb, blk);
+        ext4_free_inode(p->sb, new_ino);
+        return -EIO;
+    }
 
     /* Write "." and ".." entries in the new directory block */
     char *buf = (char *)kmalloc(p->sb->block_size);
@@ -400,8 +467,13 @@ int ext4_vn_mkdir_unlocked(vnode_t *dir, const char *name, int mode) {
     dotdot->rec_len = (uint16_t)(p->sb->block_size - 12);
     dotdot->name[0] = '.'; dotdot->name[1] = '.';
 
-    bcache_write_bytes(p->sb->bc, blk * p->sb->block_size, buf, p->sb->block_size);
+    int wr = ext4_dir_write_block(p->sb, blk, buf);
     kfree(buf);
+    if (wr < 0) {
+        ext4_free_block(p->sb, blk);
+        ext4_free_inode(p->sb, new_ino);
+        return wr;
+    }
 
     /* Add entry in parent directory */
     uint64_t dsz = ext4_inode_size(&di);
@@ -414,7 +486,8 @@ int ext4_vn_mkdir_unlocked(vnode_t *dir, const char *name, int mode) {
 
     if (dsz != ext4_inode_size(&di)) {
         ext4_inode_set_size(&di, dsz);
-        ext4_write_inode(p->sb, p->inode_num, &di);
+        if (ext4_write_inode(p->sb, p->inode_num, &di) < 0)
+            return -EIO;
         p->file_size = dsz;
     }
     return 0;
@@ -436,10 +509,14 @@ int ext4_vn_link_unlocked(vnode_t *dir, const char *name, vnode_t *target) {
     /* Linux refuses to hard-link across different mounts; same sb is enough
      * here, but also refuse to re-link to the very same directory entry. */
     uint32_t existing_ino;
-    if (ext4_dir_find(p->sb, &di, ext4_inode_size(&di), name, &existing_ino, NULL) == 0) {
+    int lookup = ext4_dir_find(p->sb, &di, ext4_inode_size(&di), name,
+                               &existing_ino, NULL);
+    if (lookup == 0) {
         if (existing_ino == tp->inode_num) return -EEXIST;
         return -EEXIST;
     }
+    if (lookup != -ENOENT)
+        return lookup;
 
     ext4_inode_t inode;
     if (ext4_read_inode(p->sb, tp->inode_num, &inode) < 0) return -EIO;
@@ -501,7 +578,9 @@ int ext4_dir_empty(ext4_sb_info_t *sb, ext4_inode_t *di, uint64_t dsz) {
         uint32_t off = 0;
         while (off < bs) {
             ext4_dir_entry_t *de = (ext4_dir_entry_t *)(blk + off);
-            if (de->rec_len == 0) break;
+            if (ext4_dir_entry_check(de, off, bs, NULL) < 0) {
+                kfree(blk); return -EIO;
+            }
             if (de->inode) {
                 if (de->name_len == 1 && de->name[0] == '.') { off += de->rec_len; continue; }
                 if (de->name_len == 2 && de->name[0] == '.' && de->name[1] == '.') { off += de->rec_len; continue; }
@@ -561,8 +640,11 @@ int ext4_vn_rename_unlocked(vnode_t *old_dir, const char *old_name,
 
     /* Find target */
     uint32_t tgt_ino = 0; uint8_t tgt_ft = 0;
-    int tgt_exists = (ext4_dir_find(np->sb, &ndi, ext4_inode_size(&ndi), new_name,
-                                    &tgt_ino, &tgt_ft) == 0);
+    int tgt_lookup = ext4_dir_find(np->sb, &ndi, ext4_inode_size(&ndi),
+                                   new_name, &tgt_ino, &tgt_ft);
+    if (tgt_lookup != 0 && tgt_lookup != -ENOENT)
+        return tgt_lookup;
+    int tgt_exists = tgt_lookup == 0;
 
     if (flags & RENAME_NOREPLACE) {
         if (tgt_exists) return -EEXIST;
@@ -632,6 +714,8 @@ int ext4_vn_rename_unlocked(vnode_t *old_dir, const char *old_name,
         vnode_get(new_dir);
         moved->parent = new_dir;
     }
+    if (moved)
+        vnode_put(moved);
     return 0;
 }
 
@@ -661,8 +745,12 @@ int ext4_vn_symlink_unlocked(vnode_t *dir, const char *name,
     if (ext4_read_inode(p->sb, p->inode_num, &di) < 0) return -EIO;
 
     uint32_t existing_ino;
-    if (ext4_dir_find(p->sb, &di, ext4_inode_size(&di), name, &existing_ino, NULL) == 0)
+    int lookup = ext4_dir_find(p->sb, &di, ext4_inode_size(&di), name,
+                               &existing_ino, NULL);
+    if (lookup == 0)
         return -EEXIST;
+    if (lookup != -ENOENT)
+        return lookup;
 
     size_t tlen = strlen(target);
     if (tlen > 60) return -ENAMETOOLONG; /* fast symlink only */

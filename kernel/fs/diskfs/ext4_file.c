@@ -290,8 +290,7 @@ int ext4_freaddir(vfile_t *vf, void *dirp, size_t count) {
         uint32_t off = start;
         while (off < bs) {
             ext4_dir_entry_t *de = (ext4_dir_entry_t *)(blk + off);
-            if (de->rec_len < 8 || de->rec_len > bs - off ||
-                (de->rec_len & 3) || de->name_len > de->rec_len - 8)
+            if (ext4_dir_entry_check(de, off, bs, NULL) < 0)
                 break;
             if (de->inode == 0) { off += de->rec_len; continue; }
 
@@ -371,4 +370,3 @@ vfile_ops_t g_ext4_fops = {
     .ioctl   = NULL,
     .close   = ext4_fclose,
 };
-
