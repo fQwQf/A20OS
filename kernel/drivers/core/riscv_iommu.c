@@ -41,6 +41,14 @@
 #define IOMMU_REG_FQT       0x0034u
 #define IOMMU_REG_CQCSR     0x0048u
 #define IOMMU_REG_FQCSR     0x004cu
+#define IOMMU_REG_TR_REQ_IOVA 0x0258u /* 64-bit */
+#define IOMMU_REG_TR_REQ_CTL  0x0260u /* 64-bit */
+#define IOMMU_REG_TR_RESPONSE 0x0268u /* 64-bit */
+
+#define IOMMU_TR_CTL_GO      (1ull << 0)
+#define IOMMU_TR_CTL_NW      (1ull << 3)
+#define IOMMU_TR_RESP_FAULT  (1ull << 0)
+#define IOMMU_TR_RESP_PPN    0x3ffffffffffc00ull
 
 #define IOMMU_DDTP_MODE_1LVL 2u
 #define IOMMU_DDTP_BUSY     (1u << 4)
@@ -54,6 +62,22 @@
 /* DDTE / DC formats. */
 #define DDTE_VALID          (1ull << 0)
 #define DC_TC_V             (1ull << 0)
+#define DC_FSC_MODE_SV39    8ull
+#define DC_FSC_MODE_SHIFT   60ull
+
+/* SV39 page-table entry bits. */
+#define PTE_V               (1ull << 0)
+#define PTE_R               (1ull << 1)
+#define PTE_W               (1ull << 2)
+#define PTE_X               (1ull << 3)
+#define PTE_U               (1ull << 4)
+#define PTE_A               (1ull << 6)
+#define PTE_D               (1ull << 7)
+#define PTE_PPN_SHIFT       10ull
+
+/* IOVA chosen for the translation-domain probe: 0x10000000. */
+#define IOMMU_PROBE_IOVA    0x10000000ull
+#define IOMMU_PROBE_BAD_IOVA 0x20000000ull
 
 #define IOMMU_CQ_LOGSZ       8u   /* 256 entries of 16 bytes in 4 KiB */
 #define IOMMU_FQ_LOGSZ       7u   /* 128 entries of 32 bytes in 4 KiB */
@@ -96,6 +120,99 @@ static uint64_t iommu_phys(uint64_t ppn_field)
     return (ppn_field >> IOMMU_PPN_SHIFT) << 12;
 }
 
+/*
+ * Install a translating device context (SV39, one mapped page) for
+ * devid 0 in the 1LVL DDT (32-byte base-format DC at offset 0) and
+ * verify the translation with the TR_REQ debug interface: the mapped
+ * IOVA must resolve to the expected physical page and an unmapped
+ * IOVA must fault — hardware-observable enforcement.
+ */
+static int riscv_iommu_verify_translation(uint64_t ddt_phys, uint64_t ddt_va)
+{
+    pfn_t root_pfn = pfa_alloc_page();
+    pfn_t l1_pfn = pfa_alloc_page();
+    pfn_t l0_pfn = pfa_alloc_page();
+    pfn_t data_pfn = pfa_alloc_page();
+    if (root_pfn == PFN_NONE || l1_pfn == PFN_NONE ||
+        l0_pfn == PFN_NONE || data_pfn == PFN_NONE)
+        return -1;
+
+    uint64_t *root = pfn_to_virt(root_pfn);
+    uint64_t *l1 = pfn_to_virt(l1_pfn);
+    uint64_t *l0 = pfn_to_virt(l0_pfn);
+    uint8_t *data = pfn_to_virt(data_pfn);
+    memset(root, 0, 4096);
+    memset(l1, 0, 4096);
+    memset(l0, 0, 4096);
+    memset(data, 0, 4096);
+
+    uint64_t root_phys = pfn_to_phys(root_pfn);
+    uint64_t l1_phys = pfn_to_phys(l1_pfn);
+    uint64_t l0_phys = pfn_to_phys(l0_pfn);
+    uint64_t data_phys = pfn_to_phys(data_pfn);
+
+    /* Map IOMMU_PROBE_IOVA (0x10000000) -> data page.
+     * SV39 vpn[2:0] = 0 / 0x80 / 0 for that IOVA. */
+    l0[0] = (data_phys >> 12) << PTE_PPN_SHIFT |
+            PTE_V | PTE_R | PTE_W | PTE_U | PTE_A | PTE_D;
+    l1[0x80] = (l0_phys >> 12) << PTE_PPN_SHIFT | PTE_V;
+    root[0] = (l1_phys >> 12) << PTE_PPN_SHIFT | PTE_V;
+    kinfo("[IOMMU] pt root@0x%lx l1@0x%lx l0@0x%lx data@0x%lx ptes: "
+          "r0=0x%08lx%08lx l1[0x80]=0x%08lx%08lx l0[0]=0x%08lx%08lx\n",
+          (unsigned long)root_phys, (unsigned long)l1_phys,
+          (unsigned long)l0_phys, (unsigned long)data_phys,
+          (unsigned long)(root[0] >> 32), (unsigned long)(uint32_t)root[0],
+          (unsigned long)(l1[0x80] >> 32), (unsigned long)(uint32_t)l1[0x80],
+          (unsigned long)(l0[0] >> 32), (unsigned long)(uint32_t)l0[0]);
+
+    /* Translating device context for devid 0 (SV39, no process context). */
+    uint64_t *dc = (uint64_t *)ddt_va;
+    dc[0] = DC_TC_V;                    /* tc: V=1, SXL=0, SBE=0 */
+    dc[1] = 0;                          /* iohgatp: BARE */
+    dc[2] = 0;                          /* ta */
+    dc[3] = (DC_FSC_MODE_SV39 << DC_FSC_MODE_SHIFT) | (root_phys >> 12);
+
+    /* TR_REQ: mapped IOVA must translate to data_phys (RO request).
+     * Note: Debian QEMU 10.0.11 stores PPN_DOWN(iova) & PPN_MASK in the
+     * response PPN field (its set_field is a plain bit-and), so compare
+     * the field against ppn_down & PPN_MASK. */
+    iommu_write64(IOMMU_REG_TR_REQ_IOVA, IOMMU_PROBE_IOVA);
+    iommu_write64(IOMMU_REG_TR_REQ_CTL,
+                  IOMMU_TR_CTL_GO | IOMMU_TR_CTL_NW);
+    uint64_t resp = iommu_read64(IOMMU_REG_TR_RESPONSE);
+    uint64_t expect_field = (data_phys >> 12) & IOMMU_TR_RESP_PPN;
+    uint64_t got_field = resp & IOMMU_TR_RESP_PPN;
+    kinfo("[IOMMU] TR_REQ mapped iova=0x%lx -> field=0x%08lx%08lx "
+          "(expected 0x%08lx%08lx) fault=%u raw=0x%08lx%08lx\n",
+          (unsigned long)IOMMU_PROBE_IOVA,
+          (unsigned long)(got_field >> 32), (unsigned long)(uint32_t)got_field,
+          (unsigned long)(expect_field >> 32), (unsigned long)(uint32_t)expect_field,
+          !!(resp & IOMMU_TR_RESP_FAULT),
+          (unsigned long)(resp >> 32), (unsigned long)(uint32_t)resp);
+    if ((resp & IOMMU_TR_RESP_FAULT) || got_field != expect_field) {
+        kerr("[IOMMU] TR_REQ mapped translation mismatch\n");
+        return -1;
+    }
+
+    /* TR_REQ: unmapped IOVA must be rejected by the hardware. */
+    iommu_write64(IOMMU_REG_TR_REQ_IOVA, IOMMU_PROBE_BAD_IOVA);
+    iommu_write64(IOMMU_REG_TR_REQ_CTL,
+                  IOMMU_TR_CTL_GO | IOMMU_TR_CTL_NW);
+    uint64_t resp2 = iommu_read64(IOMMU_REG_TR_RESPONSE);
+    kinfo("[IOMMU] TR_REQ unmapped iova=0x%lx -> fault=%u cause=%lu\n",
+          (unsigned long)IOMMU_PROBE_BAD_IOVA,
+          !!(resp2 & IOMMU_TR_RESP_FAULT),
+          (unsigned long)((resp2 >> 10) & 0xfff));
+    if (!(resp2 & IOMMU_TR_RESP_FAULT)) {
+        kerr("[IOMMU] TR_REQ unmapped IOVA was not rejected\n");
+        return -1;
+    }
+
+    kinfo("[IOMMU] translation domain verified (SV39, 1 page mapped, "
+          "unmapped rejected)\n");
+    return 0;
+}
+
 static int riscv_iommu_probe(device_t *dev)
 {
     if (!dev)
@@ -117,44 +234,34 @@ static int riscv_iommu_probe(device_t *dev)
           (unsigned long)(cap >> 32), (unsigned long)(uint32_t)cap,
           fctl, (unsigned)(cap & 0xff));
 
-    /* Allocate DDT, DC, CQ and FQ pages. */
+    /* Allocate DDT (doubles as the DC array in 1LVL mode), CQ, FQ. */
     pfn_t ddt_pfn = pfa_alloc_page();
-    pfn_t dc_pfn = pfa_alloc_page();
     pfn_t cq_pfn = pfa_alloc_page();
     pfn_t fq_pfn = pfa_alloc_page();
-    if (ddt_pfn == PFN_NONE || dc_pfn == PFN_NONE ||
-        cq_pfn == PFN_NONE || fq_pfn == PFN_NONE) {
+    if (ddt_pfn == PFN_NONE || cq_pfn == PFN_NONE || fq_pfn == PFN_NONE) {
         kerr("[IOMMU] page allocation failed\n");
         return -1;
     }
     void *ddt_va = pfn_to_virt(ddt_pfn);
-    void *dc_va = pfn_to_virt(dc_pfn);
     void *cq_va = pfn_to_virt(cq_pfn);
     void *fq_va = pfn_to_virt(fq_pfn);
     memset(ddt_va, 0, 4096);
-    memset(dc_va, 0, 4096);
     memset(cq_va, 0, 4096);
     memset(fq_va, 0, 4096);
 
-    uint64_t ddt_phys = (uint64_t)ddt_pfn << 12;
-    uint64_t dc_phys = (uint64_t)dc_pfn << 12;
-    uint64_t cq_phys = (uint64_t)cq_pfn << 12;
-    uint64_t fq_phys = (uint64_t)fq_pfn << 12;
+    uint64_t ddt_phys = pfn_to_phys(ddt_pfn);
+    uint64_t cq_phys = pfn_to_phys(cq_pfn);
+    uint64_t fq_phys = pfn_to_phys(fq_pfn);
 
-    /* Passthrough DCs for the leaf PCI devices (00:00.0, 00:01.0). */
-    for (int devid = 0; devid < 2; devid++) {
-        uint64_t *dc = (uint64_t *)((uint8_t *)dc_va + devid * 64);
-        dc[0] = DC_TC_V;              /* tc.V=1, stages BARE => passthrough */
-        dc[1] = 0;                    /* iohgatp */
-        dc[2] = 0;                    /* ta */
-        dc[3] = 0;                    /* fsc */
-        dc[4] = 0;                    /* msiptp */
-        dc[5] = 0;
-        dc[6] = 0;
-        dc[7] = 0;
-        uint64_t *ddte = (uint64_t *)ddt_va + devid;
-        *ddte = DDTE_VALID | ((dc_phys >> 12) << IOMMU_PPN_SHIFT);
-    }
+    /* 1LVL DDT: each 32-byte slot is a base-format Device Context.
+     * devid 1 (the IOMMU itself) gets a passthrough context (TC.V=1,
+     * both stages BARE); devid 0 is reprogrammed with a translating
+     * context by riscv_iommu_verify_translation(). */
+    uint64_t *dc1 = (uint64_t *)((uint8_t *)ddt_va + 32);
+    dc1[0] = DC_TC_V;   /* tc: V only */
+    dc1[1] = 0;         /* iohgatp: BARE */
+    dc1[2] = 0;         /* ta */
+    dc1[3] = 0;         /* fsc: BARE */
 
     /* Program the queues. */
     iommu_write64(IOMMU_REG_CQB,
@@ -190,9 +297,16 @@ static int riscv_iommu_probe(device_t *dev)
         return -1;
     }
 
-    kinfo("[IOMMU] hardware initialized: DDT@0x%lx DC@0x%lx CQ@0x%lx FQ@0x%lx\n",
-          (unsigned long)ddt_phys, (unsigned long)dc_phys,
+    kinfo("[IOMMU] hardware initialized: DDT@0x%lx CQ@0x%lx FQ@0x%lx\n",
+          (unsigned long)ddt_phys,
           (unsigned long)cq_phys, (unsigned long)fq_phys);
+
+    /* Per-domain translation: SV39 domain for devid 0, verified via TR_REQ. */
+    if (riscv_iommu_verify_translation(ddt_phys,
+                                       (uint64_t)(uintptr_t)ddt_va) != 0) {
+        kerr("[IOMMU] translation verification failed\n");
+        return -1;
+    }
     return 0;
 }
 

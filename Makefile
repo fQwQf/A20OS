@@ -1279,9 +1279,10 @@ smoke-iommu-discovery:
 		-kernel .kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf \
 		> "$$log" 2>&1 || status=$$?; \
 	if grep -q '\[IOMMU\] hardware initialized' "$$log" && \
-	   grep -q 'cqcsr=0x00010001' "$$log" && \
+	   grep -q 'translation domain verified' "$$log" && \
+	   grep -q 'unmapped iova=0x20000000 -> fault=1' "$$log" && \
 	   grep -q 'System is going down for power-off' "$$log"; then \
-		echo "smoke-iommu-discovery: PASS (hardware initialized); log saved to $$log"; \
+		echo "smoke-iommu-discovery: PASS (hardware initialized, translation verified); log saved to $$log"; \
 	else \
 		echo "smoke-iommu-discovery: failed with status $$status; tail of $$log:"; \
 		tail -n 80 "$$log"; exit 1; \
