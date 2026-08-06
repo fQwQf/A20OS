@@ -508,7 +508,8 @@ FF_LINUX_INC_riscv64 := -isystem /usr/include/riscv64-linux-gnu
 FF_LINUX_INC_loongarch64 := -isystem /usr/include/loongarch64-linux-gnu
 FF_LINUX_INC_aarch64 := -isystem /usr/include/aarch64-linux-gnu
 FF_LINUX_INC_x86_64 := -isystem /usr/include/x86_64-linux-gnu
-FF_LINUX_INC := $(FF_LINUX_INC_$(ARCH))
+FF_LINUX_INC := $(FF_LINUX_INC_$(ARCH)) \
+                -isystem $(shell $(CC) -print-file-name=include)
 
 FF_CFLAGS := $(filter-out -Wconversion,$(CFLAGS)) \
              -std=gnu23 \

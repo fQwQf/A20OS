@@ -55,8 +55,32 @@ static inline void drv_mmio_unmap(uint64_t va, uint64_t size)
         a20_vm_unmap(va, size);
 }
 
+#elif defined(DRV_ENV_DRVMOD)
+
+#include "drvmod/drvmod.h"
+
+/* Module placement: the window goes through the framework's validated
+ * mapping (drv_map_mmio) and is plain volatile memory thereafter.  The
+ * environment device is module-private (one per translation unit). */
+static drv_device_t drvmod_env_dev;
+
+static inline uint64_t drv_mmio_map(uint64_t phys, uint64_t size, uint32_t prot)
+{
+    (void)prot;
+    if (drv_map_mmio(&drvmod_env_dev, (uintptr_t)phys, (size_t)size) < 0)
+        return 0;
+    return (uint64_t)(uintptr_t)drvmod_env_dev.mmio_va;
+}
+
+static inline void drv_mmio_unmap(uint64_t va, uint64_t size)
+{
+    (void)va;
+    (void)size;
+    drv_unmap_mmio(&drvmod_env_dev);
+}
+
 #else
-#error "drv_env.h requires DRV_ENV_KERNEL or DRV_ENV_USER"
+#error "drv_env.h requires DRV_ENV_KERNEL, DRV_ENV_USER or DRV_ENV_DRVMOD"
 #endif
 
 /* Identical on both sides: a mapped window is plain volatile memory. */
@@ -183,6 +207,37 @@ static inline void drv_dma_free(drv_dma_t *d)
         return;
     a20_vm_unmap(d->va0, (uint64_t)d->npages * DRV_PAGE_SIZE);
     a20_hdl_close((a20_handle_t)d->cookie);
+    d->va0 = d->cookie = 0;
+    d->npages = 0;
+}
+
+#elif defined(DRV_ENV_DRVMOD)
+
+static inline int drv_dma_alloc(drv_dma_t *out, uint32_t npages)
+{
+    if (!out || npages == 0 || npages > 64)
+        return -1;
+    uint64_t handle = 0;
+    void *va = drv_dma_alloc_coherent((size_t)npages * DRV_PAGE_SIZE, &handle);
+    if (!va)
+        return -1;
+    uint64_t phys0 = (uint64_t)(uintptr_t)handle;
+    for (uint32_t i = 0; i < npages; i++)
+        out->phys[i] = phys0 + (uint64_t)i * DRV_PAGE_SIZE;
+    for (uint32_t i = npages; i < 64; i++)
+        out->phys[i] = 0;
+    out->va0 = (uint64_t)(uintptr_t)va;
+    out->cookie = handle;
+    out->npages = npages;
+    return 0;
+}
+
+static inline void drv_dma_free(drv_dma_t *d)
+{
+    if (!d || !d->va0)
+        return;
+    drv_dma_free_coherent((void *)(uintptr_t)d->va0,
+                 (size_t)d->npages * DRV_PAGE_SIZE, d->cookie);
     d->va0 = d->cookie = 0;
     d->npages = 0;
 }

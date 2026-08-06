@@ -1,18 +1,22 @@
 /*
- * PC speaker tone backend
+ * PC speaker tone backend — drvmod module (x86_64).
+ *
+ * Migrated from kernel/drivers/audio/pc_speaker.c: the same driver_t
+ * object is registered into the unified driver core through the framework
+ * bridge (drv_driver_register), so userspace still reaches it through the
+ * audio class (/dev/audioN).  Resource access is port I/O only
+ * (drv_in8/drv_out8); no MMIO or IRQ is used.
  */
-#ifdef CONFIG_PC_SPEAKER
 
-#include "drivers/audio/pc_speaker.h"
+#include "drvmod/drvmod.h"
+
 #include "drivers/audio/audio_core.h"
+#include "drivers/audio/pc_speaker.h"
 #include "drivers/bus/platform_bus.h"
-#include "drivers/core/driver_class.h"
-#include "drivers/core/driver_hwapi.h"
-#include "drivers/core/driver_register.h"
+#include "drivers/core/driver_core.h"
 #include "core/errno.h"
 #include "core/string.h"
 #include "core/lock.h"
-#include "mm/slab.h"
 
 #define PIT_INPUT_HZ 1193182U
 #define PC_SPEAKER_MIN_HZ ((PIT_INPUT_HZ + 0xffffU - 1U) / 0xffffU)
@@ -28,8 +32,8 @@ typedef struct pc_speaker {
 
 static void pc_speaker_stop_locked(pc_speaker_t *speaker)
 {
-    uint8_t value = ioport_read8(speaker->control);
-    ioport_write8(speaker->control, value & (uint8_t)~0x03U);
+    uint8_t value = drv_in8(speaker->control);
+    drv_out8(speaker->control, value & (uint8_t)~0x03U);
 }
 
 static int pc_speaker_tone(pc_speaker_t *speaker, uint32_t hz,
@@ -43,14 +47,14 @@ static int pc_speaker_tone(pc_speaker_t *speaker, uint32_t hz,
         return -EINVAL;
     uint64_t flags = spin_lock_irqsave(&speaker->lock);
     uint32_t generation = ++speaker->generation;
-    ioport_write8(speaker->pit_command, 0xb6U);
-    ioport_write8(speaker->pit_channel2, (uint8_t)divisor);
-    ioport_write8(speaker->pit_channel2, (uint8_t)(divisor >> 8));
-    uint8_t value = ioport_read8(speaker->control);
-    ioport_write8(speaker->control, value | 0x03U);
+    drv_out8(speaker->pit_command, 0xb6U);
+    drv_out8(speaker->pit_channel2, (uint8_t)divisor);
+    drv_out8(speaker->pit_channel2, (uint8_t)(divisor >> 8));
+    uint8_t value = drv_in8(speaker->control);
+    drv_out8(speaker->control, value | 0x03U);
     spin_unlock_irqrestore(&speaker->lock, flags);
     if (duration_ms) {
-        mdelay(duration_ms);
+        drv_mdelay(duration_ms);
         flags = spin_lock_irqsave(&speaker->lock);
         if (speaker->generation == generation)
             pc_speaker_stop_locked(speaker);
@@ -93,13 +97,14 @@ static int pc_speaker_tone_device(device_t *dev,
 
 static int pc_speaker_probe(device_t *dev)
 {
-    resource_t *pit = device_get_resource(dev, RES_IOPORT, 0);
-    resource_t *control = device_get_resource(dev, RES_IOPORT, 1);
+    resource_t *pit = (resource_t *)drv_device_get_resource(dev, RES_IOPORT, 0);
+    resource_t *control = (resource_t *)drv_device_get_resource(dev, RES_IOPORT, 1);
     if (!pit || !control || pit->end < pit->start + 1U)
         return -ENODEV;
-    pc_speaker_t *speaker = kcalloc(1, sizeof(*speaker));
+    pc_speaker_t *speaker = (pc_speaker_t *)drv_alloc(sizeof(*speaker));
     if (!speaker)
         return -ENOMEM;
+    memset(speaker, 0, sizeof(*speaker));
     speaker->pit_channel2 = (uint16_t)pit->start;
     speaker->pit_command = (uint16_t)(pit->start + 1U);
     speaker->control = (uint16_t)control->start;
@@ -117,7 +122,7 @@ static int pc_speaker_remove(device_t *dev)
         speaker->generation++;
         pc_speaker_stop_locked(speaker);
         spin_unlock_irqrestore(&speaker->lock, flags);
-        kfree(speaker);
+        drv_free(speaker);
         dev->drv_priv = NULL;
     }
     return 0;
@@ -150,6 +155,19 @@ static driver_t pc_speaker_driver = {
     .class_type = DEV_CLASS_AUDIO,
 };
 
-DRIVER_REGISTER(pc_speaker_driver);
+/* Pins the module against unload while the driver is registered in the
+ * unified driver core (the core keeps a pointer into module memory). */
+static drv_driver_t g_modinfo;
 
-#endif
+uintptr_t DriverEntry(drv_driver_t **out)
+{
+    int r = drv_driver_register(&pc_speaker_driver);
+    drv_log("[PC-SPKR] driver registered in core: %d\n", r);
+    if (out) {
+        if (r == 0)
+            *out = &g_modinfo;   /* module stays pinned */
+        else
+            *out = NULL;
+    }
+    return 0;
+}

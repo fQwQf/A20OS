@@ -1,8 +1,8 @@
 /*
  * A20OS Native ABI — Handle table implementation.
  * Design reference: docs/native-abi/03-handle.md §2
- * Design inspiration: Windows NT kernel objects / handle + rights model and
- * Zircon (Fuchsia) handle transfer semantics; see docs/ACKNOWLEDGMENTS.md §3.
+ * Design inspiration: unified kernel-object handles with a rights model and
+ * capability-transfer semantics; see docs/ACKNOWLEDGMENTS.md §3.
  * NATIVE_HANDLE_CAPABILITY_TEST_CONTRACT: lookup/install/remove paths are the
  * checked surface for rights downgrade, temporal limits, labels, close/dup/
  * transfer, and partial-delivery consistency gates.

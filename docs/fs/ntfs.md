@@ -34,4 +34,4 @@ mount -t ntfs /dev/vda2 /mnt
 
 - 不支持 `$ATTRIBUTE_LIST` 跨记录属性（大文件/碎片文件可能拒绝读取）。
 - 创建的文件分配在 MFT 空闲记录（首适应，从记录 12 起扫），不维护 `$MFT` 位图。
-- 时间戳未按 Windows FILETIME 转换（写 0，读时忽略）。
+- 时间戳未按 FILETIME 格式转换（写 0，读时忽略）。

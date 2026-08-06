@@ -8,7 +8,8 @@
  * (installed at A20_RTCD_EP_SLOT by the supervisor).
  *
  * The device register protocol is shared verbatim with the kernel
- * placement (kernel/drivers/char/goldfish_rtc_kdrv.c) through
+ * placement (the drvmod module kernel/drvmod/examples/goldfish_rtc.c,
+ * loaded at boot as /lib/drivers/rtc.drv) through
  * kernel/include/drivers/dual/goldfish_rtc.h — only the shell differs
  * (this main loop + EventQ vs kernel init/ISR).
  */
