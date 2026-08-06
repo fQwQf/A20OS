@@ -341,12 +341,7 @@ int64_t debug_write(a20_handle_t dbg, uint64_t addr, const void *buf, uint64_t l
 int64_t debug_map_memory(a20_handle_t dbg, uint64_t addr, uint64_t len, uint32_t prot); /* READ */
 ```
 
-调试能力通过 handle rights 控制。只有持有 task 的 `ADMIN` 权限的进程才能
-附加调试器（`debug_attach` 在 `proc_debug_attach` 中还会复核 uid/capability，
-纵深防御）。`A20_OBJ_DEBUG` 的合法权限为
-READ | WRITE | WAIT | SIGNAL | STAT | DUP | TRANSFER | CONTROL | ADMIN，
-持有者可自行用 `handle_replace` 收窄；`spawn`/`thread_create` 返回的
-task handle 自带 ADMIN（创建者对创建对象拥有管理权）。
+调试能力通过 handle rights 控制。只有持有 task 的 `ADMIN` 权限的进程才能附加调试器（`debug_attach` 在 `proc_debug_attach` 中还会复核 uid/capability，纵深防御）。`A20_OBJ_DEBUG` 的合法权限为 READ | WRITE | WAIT | SIGNAL | STAT | DUP | TRANSFER | CONTROL | ADMIN，持有者可自行用 `handle_replace` 收窄；`spawn`/`thread_create` 返回的 task handle 自带 ADMIN（创建者对创建对象拥有管理权）。
 
 > **实现范围（NATIVE_DEBUG_CONTRACT）**：Debug 分区为完整实现，与 Linux ABI
 > 的 ptrace(2) 共享同一内核状态机（`kernel/proc/debug.c` 的 `proc_debug_*`）。
