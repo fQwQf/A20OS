@@ -2428,7 +2428,7 @@ $(NATIVE_BUILD_STAMP): $(USER_BUILD_STAMP) force_native_build
 	     [ ! -x "$(NATIVE_UBDD_BIN)" ] || [ ! -x "$(NATIVE_UINPUTD_BIN)" ] || \
 	     [ ! -x "$(NATIVE_RTCD_BIN)" ] || [ ! -x "$(NATIVE_RTCDD_BIN)" ]; then \
 		need_build=1; \
-	elif find user/liba20rt user/liba20c user/tests -type f -newer "$@" \
+	elif find user/liba20rt user/liba20c user/tests user/svc kernel/include/drivers/dual -type f -newer "$@" \
 		-print -quit | grep -q .; then \
 		need_build=1; \
 	fi; \
@@ -3555,7 +3555,7 @@ $(NATIVE_UBDD_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $
 
 $(NATIVE_UINPUTD_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) user/svc/uinputd.c \
 		user/liba20rt/a20-generic.ld user/liba20rt/crt0_a20.h user/liba20rt/a20_syscall.h \
-		kernel/include/drivers/dual/drv_env.h kernel/include/drivers/dual/virtio_mmio.h kernel/include/drivers/dual/virtio_input.h
+		kernel/include/drivers/dual/drv_env.h kernel/include/drivers/dual/virtio_mmio.h kernel/include/drivers/dual/virtio_input.h kernel/include/drivers/dual/virtq.h
 	$(call NATIVE_RTCD_RECIPE,$(NATIVE_CC),$(NATIVE_CFLAGS),$(NATIVE_CRT0),user/svc/uinputd.c,$@)
 
 native-uinputd-arch: $(NATIVE_UINPUTD_BIN)
@@ -3587,7 +3587,10 @@ smoke-dual-input:
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/dual-input-riscv64.log"; \
+	monsock="$(SMOKE_LOG_DIR)/dual-input-monitor.sock"; \
+	rm -f "$$monsock"; \
 	status=0; \
+	{ sleep 8; python3 -c 'import socket,sys,time; s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1]); [(s.sendall(b"sendkey a\n"), time.sleep(1)) for _ in range(6)]; s.close()' "$$monsock" 2>/dev/null || true; } & \
 	{ sleep $(SMOKE_INPUT_DELAY); printf '/bin/uinputd-rv\npoweroff\n'; } | \
 	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
 		-machine virt -m 1G -nographic -smp 1 -bios default \
@@ -3596,10 +3599,13 @@ smoke-dual-input:
 		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
 		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
 		-device virtio-keyboard-device,bus=virtio-mmio-bus.5 \
+		-monitor unix:$$monsock,server,nowait \
 		-kernel .kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf \
 		> "$$log" 2>&1 || status=$$?; \
 	if grep -q 'UINPUT] kernel-placement probe: id=18 version=2 name=QEMU Virtio Keyboard' "$$log" && \
 	   grep -q 'UINPUTD: name=QEMU Virtio Keyboard' "$$log" && \
+	   grep -q 'UINPUTD: ready' "$$log" && \
+	   grep -q 'UINPUTD: ev type=1 code=30 value=1' "$$log" && \
 	   grep -q 'UINPUTD: PASS' "$$log" && \
 	   grep -q 'System is going down for power-off NOW' "$$log"; then \
 		echo "smoke-dual-input: PASS; log saved to $$log"; \

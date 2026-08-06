@@ -37,6 +37,37 @@ typedef struct virtio_input_event {
     uint32_t value;
 } virtio_input_event_t;
 
+/* Device init up to FEATURES_OK (reset -> negotiation).  Destructive:
+ * only the placement owning the device may run this.  Queues must be
+ * configured next, and vinput_driver_ok() only after that — per the
+ * virtio spec DRIVER_OK comes last, and QEMU may ignore QUEUE_READY
+ * writes made after it. */
+static inline int vinput_dev_init(uint64_t base)
+{
+    drv_mmio_write32(base, VMMIO_STATUS, 0);
+    drv_mmio_write32(base, VMMIO_STATUS, VIRTIO_STATUS_ACK);
+    drv_mmio_write32(base, VMMIO_STATUS,
+                     VIRTIO_STATUS_ACK | VIRTIO_STATUS_DRIVER);
+    /* accept no feature bits (event delivery needs none) */
+    drv_mmio_write32(base, VMMIO_DRV_FEATURES_SEL, 0);
+    drv_mmio_write32(base, VMMIO_DRV_FEATURES, 0);
+    drv_mmio_write32(base, VMMIO_DRV_FEATURES_SEL, 1);
+    drv_mmio_write32(base, VMMIO_DRV_FEATURES, 0);
+    uint32_t st = drv_mmio_read32(base, VMMIO_STATUS) | VIRTIO_STATUS_FEATURES_OK;
+    drv_mmio_write32(base, VMMIO_STATUS, st);
+    if (!(drv_mmio_read32(base, VMMIO_STATUS) & VIRTIO_STATUS_FEATURES_OK))
+        return -1;
+    return 0;
+}
+
+static inline void vinput_driver_ok(uint64_t base)
+{
+    uint32_t st = drv_mmio_read32(base, VMMIO_STATUS);
+    drv_mmio_write32(base, VMMIO_STATUS, st | VIRTIO_STATUS_DRIVER_OK);
+}
+
+#define EV_KEY 0x01u
+
 /* Read a config string (name/serial).  Returns length, 0 if absent.
  * Non-destructive: select/subsel writes only steer the config latch. */
 static inline uint32_t vinput_cfg_string(uint64_t base, uint8_t select,
