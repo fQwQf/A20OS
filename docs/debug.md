@@ -108,73 +108,46 @@ git submodule update --init --recursive
 ## 内核调试接口（proc_debug_*）
 
 `kernel/proc/debug.c` 提供与 ABI 无关的内核调试接口（观察者-被观察者模型）：
-`proc_debug_traceme/attach/detach/resume/singlestep/kill`、寄存器文件读写、
-地址空间 PEEK/POKE、siginfo 快照、PT_DEBUG_EVENT_EXEC/EXIT 事件停止，
-以及 syscall 边界停止（`proc_debug_syscall_entry/exit`）。
+`proc_debug_traceme/attach/detach/resume/singlestep/kill`、寄存器文件读写、地址空间 PEEK/POKE、siginfo 快照、PT_DEBUG_EVENT_EXEC/EXIT 事件停止，以及 syscall 边界停止（`proc_debug_syscall_entry/exit`）。
 
-Linux ABI 的 `ptrace(2)` 是这些接口的薄包装（`kernel/abi/linux/sys_ptrace.c`），
-请求号与 `struct user_regs_struct` 的转换全部在 ABI 层完成；内核内部层不
-依赖任何 Linux 常量。未来 Native ABI 的调试对象可映射到同一接口面。
+Linux ABI 的 `ptrace(2)` 是这些接口的薄包装（`kernel/abi/linux/sys_ptrace.c`），请求号与 `struct user_regs_struct` 的转换全部在 ABI 层完成；内核内部层不依赖任何 Linux 常量。未来 Native ABI 的调试对象可映射到同一接口面。
 
 停止语义（对应 task 状态机）：
-- 被观察任务在信号投递边界进入 ptrace 停止（`proc_sched_stop_for_debug`，
-  `proc/sched.c` 持有状态转换），观察者可用不带 `WUNTRACED` 的 `wait4` 报告；
-- 停止期间寄存器快照在 `ptrace_saved_ctx`，`PTRACE_SETREGS` 等修改在恢复时
-  折回陷阱上下文；syscall 入口停止在恢复时由架构层回卷 EPC 重新执行；
+- 被观察任务在信号投递边界进入 ptrace 停止（`proc_sched_stop_for_debug`， `proc/sched.c` 持有状态转换），观察者可用不带 `WUNTRACED` 的 `wait4` 报告；
+- 停止期间寄存器快照在 `ptrace_saved_ctx`，`PTRACE_SETREGS` 等修改在恢复时 折回陷阱上下文；syscall 入口停止在恢复时由架构层回卷 EPC 重新执行；
 - `PTRACE_CONT` 带信号恢复时通过一次性 `ptrace_deliver_sig` 标记避免二次停止。
 
-已实现（Linux ABI）：TRACEME/ATTACH/DETACH/CONT/SYSCALL/SINGLESTEP(x86_64)、
-GETREGS/SETREGS/GETFPREGS/SETFPREGS/GETREGSET(NT_PRSTATUS, NT_FPREGSET)、
-PEEKDATA/POKEDATA/PEEKUSER/POKEUSER、GETSIGINFO/SETSIGINFO、SETOPTIONS
-(TRACESYSGOOD/TRACEEXEC/TRACEEXIT/EXITKILL)、GETEVENTMSG、KILL。
+已实现（Linux ABI）：TRACEME/ATTACH/DETACH/CONT/SYSCALL/SINGLESTEP(x86_64)、 GETREGS/SETREGS/GETFPREGS/SETFPREGS/GETREGSET(NT_PRSTATUS, NT_FPREGSET)、 PEEKDATA/POKEDATA/PEEKUSER/POKEUSER、GETSIGINFO/SETSIGINFO、SETOPTIONS (TRACESYSGOOD/TRACEEXEC/TRACEEXIT/EXITKILL)、GETEVENTMSG、KILL。
 
-未实现：PTRACE_SEIZE/INTERRUPT、TRACEFORK/CLONE 事件、SECCOMP、riscv64
-单步（与 Linux 一致，gdb 回退断点步进）。
+未实现：PTRACE_SEIZE/INTERRUPT、TRACEFORK/CLONE 事件、SECCOMP、riscv64 单步（与 Linux 一致，gdb 回退断点步进）。
 
 ## kallsyms 符号化回溯
 
-内核构建采用两遍链接：第一遍产出 `kernel-nosyms.elf`，
-`tools/gen_kallsyms.py`（纯 stdlib ELF 解析）提取 `.text` 范围内的符号生成
-紧凑符号表（`kernel/core/kallsyms.c`，`core/kallsyms.h` 声明 API），第二遍
-把符号表对象重新链接进最终镜像。由于符号表落在 `.rodata`（在 `.text` 之后），
-两遍的 `.text` 地址一致，表项精确。
+内核构建采用两遍链接：第一遍产出 `kernel-nosyms.elf`， `tools/gen_kallsyms.py`（纯 stdlib ELF 解析）提取 `.text` 范围内的符号生成紧凑符号表（`kernel/core/kallsyms.c`，`core/kallsyms.h` 声明 API），第二遍把符号表对象重新链接进最终镜像。由于符号表落在 `.rodata`（在 `.text` 之后），两遍的 `.text` 地址一致，表项精确。
 
-`kallsyms_print()` 把地址解析为 `name+0xN`，已接入 `kernel/core/trap.c` 的
-内核 oops 回溯输出。python3 不可用时符号表为空，`kernel/core/kallsyms.c`
-的 weak 定义保证内核仍可链接，回溯退化为裸地址。
+`kallsyms_print()` 把地址解析为 `name+0xN`，已接入 `kernel/core/trap.c` 的内核 oops 回溯输出。python3 不可用时符号表为空，`kernel/core/kallsyms.c` 的 weak 定义保证内核仍可链接，回溯退化为裸地址。
 
 ## 已知基核问题（与调试接口无关）
 
 fork + 按需分页的路径存在偶发（对某些二进制尺寸近乎确定）的物理页复用竞态：
-子进程文本页可能在停止期间被回收复用，表现为子进程文本被写入栈类数据后
-SIGSEGV。`user/cmds/core/ptrace_smoke.c` 因此在 poke 与恢复之间加入短延时
-规避该竞态窗口；根因在页分配/引用计数层，与 ptrace 实现无关（A20 团队正在
-修复同类 0x63636363 问题）。
+子进程文本页可能在停止期间被回收复用，表现为子进程文本被写入栈类数据后 SIGSEGV。`user/cmds/core/ptrace_smoke.c` 因此在 poke 与恢复之间加入短延时规避该竞态窗口；根因在页分配/引用计数层，与 ptrace 实现无关（A20 团队正在修复同类 0x63636363 问题）。
 
 ## Native ABI 调试接口（Debug 0x0900）
 
-Native ABI 通过 `A20_OBJ_DEBUG` 会话对象暴露同样的内核调试状态机，
-syscall 包装在 `kernel/abi/native/sys_native_debug.c`，用户态 SDK 封装在
-`user/liba20rt/a20_debug.h`。与 Linux ABI 的差异：
+Native ABI 通过 `A20_OBJ_DEBUG` 会话对象暴露同样的内核调试状态机， syscall 包装在 `kernel/abi/native/sys_native_debug.c`，用户态 SDK 封装在 `user/liba20rt/a20_debug.h`。与 Linux ABI 的差异：
 
 - 会话是 handle（可收窄权限、随进程消亡自动释放），不是 pid；
-- `debug_wait` 同时报告停止事件与**退出事件**（目标变 zombie 时报告
-  EXIT 事件，消息为退出码），无需 TRACEEXIT 选项；
-- 无信号注入（native 无信号概念）；`debug_resume` 的 CONT/SYSCALL 模式
-  与内核 `PT_DEBUG_RESUME_*` 对应；
+- `debug_wait` 同时报告停止事件与**退出事件**（目标变 zombie 时报告 EXIT 事件，消息为退出码），无需 TRACEEXIT 选项；
+- 无信号注入（native 无信号概念）；`debug_resume` 的 CONT/SYSCALL 模式 与内核 `PT_DEBUG_RESUME_*` 对应；
 - `debug_traceme` 与 `debug_attach` 互斥（同 Linux）；
-- native 线程共享信号状态：进程级 SIGSTOP 会停住整个进程，因此调试器
-  应 attach 独立进程（`test_native_debug.c` 用 spawn 的子进程验证）。
+- native 线程共享信号状态：进程级 SIGSTOP 会停住整个进程，因此调试器 应 attach 独立进程（`test_native_debug.c` 用 spawn 的子进程验证）。
 
-权限（06-security.md §8.1）：READ/WRITE/WAIT/SIGNAL/CONTROL/ADMIN 对应
-各 debug 操作；spawn/thread_create 的 task handle 自带 ADMIN。
+权限（06-security.md §8.1）：READ/WRITE/WAIT/SIGNAL/CONTROL/ADMIN 对应各 debug 操作；spawn/thread_create 的 task handle 自带 ADMIN。
 
 验证：`smoke-native-debug`（riscv64 QEMU，`/bin/native-debug-rv`）。
 
 ## UBSan（未定义行为检测）
 
-开发构建（BRINGUP=0）默认启用 `-fsanitize=undefined`
-（`-fno-sanitize=alignment,bounds-strict`），运行时在 `kernel/core/ubsan.c`。
-任何未定义行为（移位越界、有符号溢出、数组越界等）在启动日志输出
-`UBSAN: <kind> at file:line` 后继续运行，便于 smoke 测试暴露隐性 bug。
+开发构建（BRINGUP=0）默认启用 `-fsanitize=undefined` （`-fno-sanitize=alignment,bounds-strict`），运行时在 `kernel/core/ubsan.c`。
+任何未定义行为（移位越界、有符号溢出、数组越界等）在启动日志输出 `UBSAN: <kind> at file:line` 后继续运行，便于 smoke 测试暴露隐性 bug。
 bringup/竞赛构建通过 `CONFIG_UBSAN=0` 关闭。
