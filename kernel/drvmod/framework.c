@@ -32,6 +32,9 @@
 #include "drivers/core/driver_hwapi.h"
 #include "drivers/bus/pci_bus.h"
 #include "drivers/char/uart.h"
+#include "core/sync.h"
+#include "core/timer.h"
+#include "proc/park.h"
 #include "mm/frame.h"
 #include "mm/mm.h"
 #include "mm/slab.h"
@@ -379,6 +382,38 @@ const struct drv_export drv_export_table[] = {
     { "pci_enable_and_assign_bars", (void *)pci_enable_and_assign_bars },
     /* console input path (PS/2 module) */
     { "uart_receive_char",   (void *)uart_receive_char },
+    /* scheduling / wait primitives used by module completion paths */
+    { "proc_park_prepare",   (void *)proc_park_prepare },
+    { "proc_park_commit",    (void *)proc_park_commit },
+    { "proc_park_cancel",    (void *)proc_park_cancel },
+    { "proc_park_finish",    (void *)proc_park_finish },
+    { "proc_wake_q_init",    (void *)proc_wake_q_init },
+    { "proc_wake_q_flush",   (void *)proc_wake_q_flush },
+    { "wait_queue_init",     (void *)wait_queue_init },
+    { "wait_queue_link",     (void *)wait_queue_link },
+    { "wait_queue_unlink",   (void *)wait_queue_unlink },
+    { "wait_queue_collect_one", (void *)wait_queue_collect_one },
+    { "wait_queue_collect_all", (void *)wait_queue_collect_all },
+    /* mutex + timer + log + allocator primitives */
+    { "mutex_init",          (void *)mutex_init },
+    { "mutex_lock",          (void *)mutex_lock },
+    { "mutex_unlock",        (void *)mutex_unlock },
+    { "timer_get_ticks",     (void *)timer_get_ticks },
+    { "klog_write",          (void *)klog_write },
+    { "klog_level",          (void *)&klog_level },
+    { "mdelay",              (void *)mdelay },
+    { "udelay",              (void *)udelay },
+    { "kmalloc",             (void *)kmalloc },
+    { "kfree",               (void *)kfree },
+    { "kcalloc",             (void *)kcalloc },
+    /* DMA enhancements (aligned coherent + cache sync) */
+    { "dma_alloc_coherent_aligned", (void *)dma_alloc_coherent_aligned },
+    { "dma_free_coherent_aligned",  (void *)dma_free_coherent_aligned },
+    { "dma_sync_for_cpu",    (void *)dma_sync_for_cpu },
+    { "dma_sync_for_device", (void *)dma_sync_for_device },
+#if defined(CONFIG_X86_64)
+    { "firmware_acpi_tpm2",  (void *)firmware_acpi_tpm2 },
+#endif
     /* lock / scheduler primitives used by inline spinlock helpers
      * (arch_irqs_enabled & friends are static inline and compile into
      * the module itself; only the extern calls below are exported) */
