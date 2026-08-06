@@ -149,8 +149,7 @@ typedef struct usb_hcd {
 
 - 枚举与端口轮询放在**每控制器内核线程**（如 `usb_hcd_kthread`）， 与现有 `xhci_hid` 的调用方轮询（`input` read/poll 里 poll）并存：
   - 枚举：控制器线程负责；
-  - HID 报告：保留现有"读时轮询"模型（低延迟、无中断依赖），
-    后续可选中断驱动。
+  - HID 报告：保留现有"读时轮询"模型（低延迟、无中断依赖）， 后续可选中断驱动。
 - URB 完成处理在 HCD 轮询上下文（控制器线程或 read/poll 路径）。
 - 锁序：`usb_device.lock → usb_interface.lock → ep->lock → hcd->lock`， 禁止反向。
 
