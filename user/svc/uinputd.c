@@ -56,12 +56,6 @@ int main(int argc, char **argv, char **envp)
     if (g_out == A20_HANDLE_NULL)
         return 1;
 
-    uint64_t base = drv_mmio_map(VINPUT_DUAL_PHYS, VINPUT_DUAL_SIZE, 3);
-    if (!base) {
-        log_str("UINPUTD: map failed\n");
-        return 2;
-    }
-
     /* Exclusive ownership: destructive init belongs to the claimant.
      * Auto-released at task death (crash-safe). */
     a20_status_t cr = a20_device_claim(VINPUT_DUAL_PHYS);
@@ -70,6 +64,12 @@ int main(int argc, char **argv, char **envp)
         return 10;
     }
     log_str("UINPUTD: claimed\n");
+
+    uint64_t base = drv_mmio_map(VINPUT_DUAL_PHYS, VINPUT_DUAL_SIZE, 3);
+    if (!base) {
+        log_str("UINPUTD: map failed\n");
+        return 2;
+    }
 
     vmmio_probe_t p;
     if (vmmio_probe(base, &p) != 0 || p.device_id != VIRTIO_INPUT_DEVICE_ID) {

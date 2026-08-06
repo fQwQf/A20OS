@@ -7,10 +7,11 @@
 `user/svc/a20_services_idl.h`，rtcd、svcman 和 ubd 的协议头只保留
 槽位/设备常量并 include 生成头。
 
-当前语法故意只覆盖版本化常量。下一步是增加 `message` 字段描述、
-大小/对齐规则和双端绑定生成；在此之前不得把手写结构体声称为完整 IDL。
+当前已支持版本化常量和固定宽度 `message` 字段；rtcd 的 alarm request
+与 time response 已由生成结构体描述，wire layout 保持不变。下一步是
+增加边界/版本协商和双端绑定生成；在此之前不得把它声称为完整 FIDL。
 
-当前迁移范围包括 rtcd、svcman 和 ubd 的请求常量；`make check-a20-idl`
+当前迁移范围包括 rtcd、svcman 和 ubd 的请求常量，以及 rtcd 的两种消息；`make check-a20-idl`
 会在 `a20os` conda 环境中重生成并比较活跃头。由于本机当前没有可用的
 `conda` 命令，该门禁需在配置好 `a20os` 的环境执行。
 
