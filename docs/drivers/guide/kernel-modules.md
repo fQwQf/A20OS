@@ -80,7 +80,7 @@ LoongArch64 注意：工具链对局部地址引用使用 `pcalau12i + addi.d`�
 
 1. 内核注册硬件设备资源：`drv_device_register()` 把 `bus/vendor/device` 身份、MMIO 范围、IRQ 放入框架设备表。
 2. `drvmod_load()` 读取并验证 ELF（文件级、section 级、symbol/strtab、relocation 偏移全量边界检查），建立 shadow 布局。
-3. 分配连续物理页，以最终运行地址（direct-map 窗口）计算重定位，在 shadow 上修补，校验 `DriverEntry` 位于 `.text`。
+3. 读缓冲与 shadow 均从 **frame 池**（`pfa_alloc`）分配，而非 kmalloc：kmalloc slab 与模块页在同一 buddy 上取页，重叠时 `kfree` 会把模块自己的页还给分配器，后续 DMA/其他模块分配会覆盖已加载模块的 GOT/rodata（loongarch64 实测踩过）。分配连续物理页，以最终运行地址（direct-map 窗口）计算重定位，在 shadow 上修补，校验 `DriverEntry` 位于 `.text`。
 4. 复制到 direct-map，执行 `fence.i`/ICache 同步。
 5. `drvmod_init_all()` 调用每个模块的 `DriverEntry`。
 6. `drvmod_bind_all()` 把每个模块的 `match[]` 表与框架设备表匹配，命中后调用 `probe(dev)`；probe 成功则设备绑定该模块。
@@ -167,12 +167,12 @@ make ARCH=riscv64 ABI=both smoke-dual-input          # vinput-probe.drv + 用户
 - virtio-net / net_init：网络初始化在 init_kthread 之前。
 - virtio-gpu、USB core、PCI bus、virtio-mmio bus：早期枚举。
 
-**当前不可迁移（框架 API 缺口）**：这些驱动依赖框架尚未导出的能力，迁移前必须先收敛依赖：
+**框架 API 现状**：DMA 对象（coherent/aligned/sync）、PCI BAR 访问（`pci_get_bar_resource`/`pci_enable_and_assign_bars`/`pci_intx_irq`/`pci_class_code`）、block/net/input/audio/display class 操作（统一核心桥接 + 头文件）、调度/等待原语（park/wait_queue/mutex）、`firmware_acpi_tpm2`、virtq（双驻留共享层）与 `input_mux_wake` 均为可导出 API；NVMe、TPM、HDA、virtio-input 完整事件投递（`vinput.drv` + `input_mux.c`）即以模块形式实现并受 smoke 门禁覆盖。
 
-- DMA/PCI BAR/class ops：NVMe、AHCI、HDA、E1000、virtio-blk/net/scsi、vmsvga、virtio-gpu —— 需要框架新增 DMA 对象、PCI BAR 访问与 block/net/display/audio class 操作导出。
-- 板级服务（GMAC/SDIO 的单实例轮询）。
-- ACPI/板级发现：TPM（ACPI TPM2 表）、GMAC/SDIO（板级单实例轮询）。
-- 完整事件投递的输入路径（virtio-input event queue）与板级服务（GMAC/SDIO 的单实例轮询）——需要对应子系统 API 进入框架导出。
+**剩余不可迁移（非框架缺口）**：
+- 根文件系统依赖：AHCI（VirtualBox x86 SATA 根盘）、virtio-scsi（VirtualBox ARM 根盘）——挂载发生在 `init_kthread`（模块加载点）之前，模块自身也从该文件系统读取；
+- 启动顺序：virtio-blk、virtio-net、virtio-gpu、USB core、PCI bus、virtio-mmio bus——初始化先于 `init_kthread`；
+- 平台可验证性：E1000、vmsvga（仅 VirtualBox 环境可验证）、GMAC/SDIO（StarFive/LS2K 板级单实例轮询，需实例锁，无 QEMU 环境）。
 
 迁移顺序（每步都必须有等价回归证据）：
 

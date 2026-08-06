@@ -2,7 +2,7 @@
 
 > 不要这样做：不要只以“出现桌面”或“shell 启动”作为驱动验收证据。必须保留从 `[BUS] pci` 到类消费者 mount、lwIP、framebuffer、input 的连续日志。
 
-这份手册说明如何在 VirtualBox ARM64 上制作镜像、配置虚拟机并收集从 ACPI/PCI 到类消费者的完整证据。通用驱动接口和平台规范见 [VirtualBox 驱动栈](virtualbox.md)，驱动开发流程见 [构建、测试与提交](../drivers/testing-and-submission.md)。
+这份手册说明如何在 VirtualBox ARM64 上制作镜像、配置虚拟机并收集从 ACPI/PCI 到类消费者的完整证据。通用驱动接口和平台规范见 [VirtualBox 驱动栈](virtualbox.md)，驱动开发流程见 [构建、测试与提交](../drivers/meta/testing-and-submission.md)。
 
 ## 当前支持状态
 
@@ -170,7 +170,7 @@ make ARCH=aarch64 BOARD=qemu-virt-aarch64 BRINGUP=1 kernel-onlymake ARCH=aarch64
 
 1. 先确认协议是否已有通用 PCI/VirtIO 驱动。
 2. 功能驱动不得包含 `CONFIG_BOARD_VIRTUALBOX_AARCH64` 或本平台的 GIC/PL011/ECAM 常量；这些事实属于 `kernel/platform/virtualbox-aarch64/`。
-3. 当前 PCI 中断路由不完整，暂时使用轮询的驱动必须有单次预算和双重超时，并在 [实现状态](../drivers/implementation-status.md) 记录解除轮询的条件。
+3. 当前 PCI 中断路由不完整，暂时使用轮询的驱动必须有单次预算和双重超时，并在 [实现状态](../drivers/meta/implementation-status.md) 记录解除轮询的条件。
 
 ## 常见故障
 
@@ -189,4 +189,4 @@ make ARCH=aarch64 BOARD=qemu-virt-aarch64 BRINGUP=1 kernel-onlymake ARCH=aarch64
 VirtualBox version:Host architecture:A20OS commit/diff:Build command:Image path and checksum:VM graphics/storage/network/input configuration:Enumerated PCI ID and BARs:Bound driver and ready line:Class consumer line:I/O performed and result:Known untested features:
 ```
 
-完整提交清单和跨平台构建矩阵见 [构建、测试与提交](../drivers/testing-and-submission.md)。
+完整提交清单和跨平台构建矩阵见 [构建、测试与提交](../drivers/meta/testing-and-submission.md)。
