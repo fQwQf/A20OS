@@ -1,5 +1,5 @@
 # lwIP source manifest. Update this single list when importing a new lwIP tree.
-LWIPDIR := $(KERNEL_DIR)/external/lwip/src
+LWIPDIR := user/external/lwip/src
 LWIP_SRC = \
     $(LWIPDIR)/core/init.c \
     $(LWIPDIR)/core/def.c \
