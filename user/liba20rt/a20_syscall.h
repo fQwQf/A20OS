@@ -226,6 +226,14 @@ static inline int64_t a20_syscall6(uint64_t nr, uint64_t a0, uint64_t a1,
 #define A20_SYS_debug_read_regs   0x0901
 #define A20_SYS_debug_write_regs  0x0902
 #define A20_SYS_debug_map_memory  0x0903
+#define A20_SYS_debug_traceme     0x0904
+#define A20_SYS_debug_wait        0x0905
+#define A20_SYS_debug_resume      0x0906
+#define A20_SYS_debug_detach      0x0907
+#define A20_SYS_debug_event       0x0908
+#define A20_SYS_debug_read        0x0909
+#define A20_SYS_debug_write       0x090A
+#define A20_SYS_debug_kill        0x090B
 
 /* ===== System (0x0A00) ===== */
 #define A20_SYS_system_info       0x0A00

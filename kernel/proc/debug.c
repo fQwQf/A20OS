@@ -393,14 +393,6 @@ int proc_debug_poke_word(int pid, uintptr_t addr, long data)
         /* Ptrace writes ignore PTE write permission (gdb inserts breakpoints
          * into read-only text).  A COW page must be broken first so the
          * shared frame is not corrupted. */
-        if (t->pid == 8) {
-            mm_leaf_info_t tli, sli;
-            if (mm_query_leaf(t->pgdir, 0x11000, &tli) && mm_query_leaf(t->pgdir, va, &sli))
-                printf("[DBG] poke pid=8 va=0x%lx pa=0x%lx text(0x11000)pa=0x%lx SAME=%d cow=%d\n",
-                       (unsigned long)va, (unsigned long)sli.pa,
-                       (unsigned long)tli.pa, sli.pa == tli.pa,
-                       !!(sli.flags & PTE_COW));
-        }
         if (mm_query_leaf(t->pgdir, va, &info) && (info.flags & PTE_U)) {
             if (info.flags & PTE_COW) {
                 if (handle_cow_fault(t, va) < 0) {
@@ -419,6 +411,85 @@ int proc_debug_poke_word(int pid, uintptr_t addr, long data)
     }
     proc_put(t);
     return ret;
+}
+
+/* ---- bulk address space access ---- */
+
+static long ptrace_copy_page(task_t *t, uintptr_t va, void *buf, size_t len,
+                             int write)
+{
+    mm_leaf_info_t info;
+    if (!mm_query_leaf(t->pgdir, (vaddr_t)va, &info) ||
+        !(info.flags & PTE_U))
+        return -EIO;
+
+    if (write && (info.flags & PTE_COW)) {
+        if (handle_cow_fault(t, (vaddr_t)va) < 0)
+            return -EIO;
+        if (!mm_query_leaf(t->pgdir, (vaddr_t)va, &info) ||
+            !(info.flags & PTE_U))
+            return -EIO;
+    }
+
+    void *kaddr = NULL;
+    size_t avail = 0;
+    if (!mm_query_leaf_kaddr(t->pgdir, (vaddr_t)va, &kaddr, &avail))
+        return -EIO;
+    if (avail > len)
+        avail = len;
+    if (write)
+        memcpy(kaddr, buf, avail);
+    else
+        memcpy(buf, kaddr, avail);
+    return (long)avail;
+}
+
+long proc_debug_read(int pid, uintptr_t addr, void *buf, size_t len)
+{
+    if (!buf)
+        return -EINVAL;
+    task_t *t = ptrace_tracee_get(pid, 1);
+    if (!t)
+        return -ESRCH;
+    long done = 0;
+    if (t->pgdir && addr < USER_VA_LIMIT) {
+        while (done < (long)len) {
+            uintptr_t va = addr + (uintptr_t)done;
+            if (va >= USER_VA_LIMIT)
+                break;
+            long n = ptrace_copy_page(t, va, (char *)buf + done,
+                                      len - (size_t)done, 0);
+            if (n < 0)
+                break;
+            done += n;
+        }
+    }
+    proc_put(t);
+    return done > 0 ? done : -EIO;
+}
+
+long proc_debug_write(int pid, uintptr_t addr, const void *buf, size_t len)
+{
+    if (!buf)
+        return -EINVAL;
+    task_t *t = ptrace_tracee_get(pid, 1);
+    if (!t)
+        return -ESRCH;
+    long done = 0;
+    if (t->pgdir && addr < USER_VA_LIMIT) {
+        while (done < (long)len) {
+            uintptr_t va = addr + (uintptr_t)done;
+            if (va >= USER_VA_LIMIT)
+                break;
+            long n = ptrace_copy_page(t, va, (char *)buf + done,
+                                      len - (size_t)done, 1);
+            if (n < 0)
+                break;
+            done += n;
+        }
+    }
+    proc_put(t);
+    return done > 0 ? done : -EIO;
 }
 
 /* ---- register file access ---- */

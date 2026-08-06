@@ -612,7 +612,7 @@ int64_t sys_a20_task_spawn(const a20_syscall_args_t *args)
                                           A20_OBJ_TASK,
                                           A20_RIGHT_WAIT | A20_RIGHT_SIGNAL |
                                           A20_RIGHT_STAT | A20_RIGHT_CONTROL | A20_RIGHT_DUP |
-                                          A20_RIGHT_TRANSFER);
+                                          A20_RIGHT_TRANSFER | A20_RIGHT_ADMIN);
     if (task_h < 0) {
         proc_force_exit(new_task, 1);
         proc_make_ready(new_task);

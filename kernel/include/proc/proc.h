@@ -255,6 +255,7 @@ typedef struct task_t {
     int            ptrace_siginfo_valid;
     int            ptrace_deliver_sig; /* one-shot no-re-stop signal */
     int            ptrace_ctx_valid;
+    int            ptrace_exit_reported; /* zombie exit reported to an observer */
     trap_context_t ptrace_saved_ctx; /* regs snapshot at stop time */
 
     ARCH_TASK_FIELDS
