@@ -80,6 +80,13 @@ int proc_debug_kill(int pid);
 int proc_debug_peek_word(int pid, uintptr_t addr, long *out);
 int proc_debug_poke_word(int pid, uintptr_t addr, long data);
 
+/* Bulk access to tracee address space (stopped tracee only).  Writes break
+ * COW pages first so shared frames are never corrupted, and ignore PTE write
+ * permission (debugger breakpoint insertion).  Returns bytes copied or a
+ * negative errno; a partially copied range stops at the first fault. */
+long proc_debug_read(int pid, uintptr_t addr, void *buf, size_t len);
+long proc_debug_write(int pid, uintptr_t addr, const void *buf, size_t len);
+
 /* Register file access (stopped tracee only). */
 int proc_debug_getregs(int pid, proc_debug_regs_t *out);
 int proc_debug_setregs(int pid, const proc_debug_regs_t *in);

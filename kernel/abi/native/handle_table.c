@@ -208,8 +208,11 @@ static const a20_rights_t a20_type_rights[A20_OBJ_DEBUG + 1] = {
                                  A20_RIGHT_TRANSFER | A20_RIGHT_CONTROL,
     [A20_OBJ_NAMESPACE]        = A20_RIGHT_STAT | A20_RIGHT_DUP | A20_RIGHT_TRANSFER |
                                  A20_RIGHT_CONTROL | A20_RIGHT_ADMIN,
-    [A20_OBJ_DEBUG]            = A20_RIGHT_STAT | A20_RIGHT_DUP | A20_RIGHT_TRANSFER |
-                                 A20_RIGHT_CONTROL | A20_RIGHT_ADMIN,
+    [A20_OBJ_DEBUG]            = A20_RIGHT_READ | A20_RIGHT_WRITE |
+                                 A20_RIGHT_WAIT | A20_RIGHT_SIGNAL |
+                                 A20_RIGHT_STAT | A20_RIGHT_DUP |
+                                 A20_RIGHT_TRANSFER | A20_RIGHT_CONTROL |
+                                 A20_RIGHT_ADMIN,
 };
 
 a20_rights_t a20_type_valid_rights(uint16_t type)
