@@ -281,16 +281,29 @@ static int exec_open_and_check(const char *path, kstat_t *st_out)
  */
 static int exec_try_script(int fd, exec_bprm_t *bprm)
 {
+    /* elf_load() probes the same open file description first and leaves its
+     * offset after the ELF header.  Shebang recognition must always start at
+     * byte zero; otherwise direct execve() of every script is misclassified
+     * as a non-script and returns ENOEXEC. */
+    int seek_result = vfs_lseek(fd, 0, SEEK_SET);
+    if (seek_result < 0)
+        return seek_result;
+
     char magic[2];
     int n = vfs_read(fd, magic, sizeof(magic));
-    vfs_lseek(fd, 0, SEEK_SET);
+    if (n < 0)
+        return n;
     if (n < 2 || magic[0] != '#' || magic[1] != '!')
         return 0;   /* not a script, caller should try ELF */
 
     /* Read the full first line (up to 256 bytes) */
     char buf[256];
+    seek_result = vfs_lseek(fd, 0, SEEK_SET);
+    if (seek_result < 0)
+        return seek_result;
     n = vfs_read(fd, buf, sizeof(buf) - 1);
-    vfs_lseek(fd, 0, SEEK_SET);
+    if (n < 0)
+        return n;
     if (n < 2)
         return -ENOEXEC;
 
