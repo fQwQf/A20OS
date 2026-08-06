@@ -2,7 +2,7 @@
 
 设备类把硬件细节和内核使用者隔开。子系统只看 `class_ops`，不看具体硬件。权威声明在 `kernel/drivers/core/driver_class.h`。
 
-驱动在 `driver_t.class_type` 里选择类，把完全匹配的 ops 指针放进 `class_ops`。类操作接收内核地址，不接收用户指针。想让用户态访问设备，还要走 devfs 固定节点适配器，详见 [用户接口与 devfs](userspace-and-devfs.md)。
+驱动在 `driver_t.class_type` 里选择类，把完全匹配的 ops 指针放进 `class_ops`。类操作接收内核地址，不接收用户指针。想让用户态访问设备，还要走 devfs 固定节点适配器，详见 [用户接口与 devfs](../classes/userspace-and-devfs.md)。
 
 ## 通用调用规则
 
@@ -167,7 +167,7 @@ typedef struct char_dev_ops {
 
 `read/write` 成功返回字节数。非阻塞无进展返回 `-EAGAIN`。`poll` 只观察 readiness，不得消费数据或睡眠。UART 硬件驱动只负责收发和中断，通用行规、前台进程组和 termios 应由 tty/devfs 层承担。
 
-当前 devfs 没有通用动态 char 节点注册 API，因此实现 class ops 不会自动生成 `/dev/<name>`。需要新节点时必须先扩展通用 devfs registry，不能在具体驱动里直接拼 VFS vnode。详见 [用户接口与 devfs](userspace-and-devfs.md)。
+当前 devfs 没有通用动态 char 节点注册 API，因此实现 class ops 不会自动生成 `/dev/<name>`。需要新节点时必须先扩展通用 devfs registry，不能在具体驱动里直接拼 VFS vnode。详见 [用户接口与 devfs](../classes/userspace-and-devfs.md)。
 
 典型生命周期：
 
@@ -301,6 +301,8 @@ struct input_event {
 
  不要这样做：当 ring 满时直接覆盖旧事件。这会让用户态看到乱序按键；应该记录丢弃计数，并通过 ioctl 或状态位暴露 overflow。
 
+ `/dev/event0` 是 transport-independent evdev mux（`kernel/drivers/input/input_mux.c`），消费所有 input class 设备并提供 EVIOCG* ioctl 面与等待语义；驱动模块 `vinput.drv`（`kernel/drvmod/examples/vinput.c`）是完整参考实现，ISR 入队后经 `input_mux_wake()` 唤醒 mux。详见 [输入子系统](../classes/input.md)。
+
 ## Display：`DEV_CLASS_DISPLAY`
 
 ```c
@@ -313,7 +315,7 @@ typedef struct gpu_dev_ops {
 } gpu_dev_ops_t;
 ```
 
-Display 驱动成功 probe 后调用 `gpu_device_register(dev)`；remove 前调用 `gpu_device_unregister(dev)`。首个成功注册的设备拥有 `/dev/fb0`。操作与映射规则详见 [Display/Framebuffer](display.md)。
+Display 驱动成功 probe 后调用 `gpu_device_register(dev)`；remove 前调用 `gpu_device_unregister(dev)`。首个成功注册的设备拥有 `/dev/fb0`。操作与映射规则详见 [Display/Framebuffer](../classes/display.md)。
 
 典型生命周期：
 
@@ -395,7 +397,7 @@ typedef struct audio_dev_ops {
 } audio_dev_ops_t;
 ```
 
-audio class 自动发布为 `/dev/audioN`。设备编号只表示绑定顺序，不表示能力；PC Speaker 可能先占用 `audio0`，因此客户端必须通过 `GET_CAPS` 区分 tone 与 PCM。`audio_core` 统一处理通用 ioctl 的 usercopy、capability/format 校验和 close 时的 drain/stop；具体驱动不能重复解释 UAPI。PCM write 返回实际接受的字节数，DRAIN、STOP、HDA ring 与 VirtIO queue 约束见 [音频子系统](audio.md)。
+audio class 自动发布为 `/dev/audioN`。设备编号只表示绑定顺序，不表示能力；PC Speaker 可能先占用 `audio0`，因此客户端必须通过 `GET_CAPS` 区分 tone 与 PCM。`audio_core` 统一处理通用 ioctl 的 usercopy、capability/format 校验和 close 时的 drain/stop；具体驱动不能重复解释 UAPI。PCM write 返回实际接受的字节数，DRAIN、STOP、HDA ring 与 VirtIO queue 约束见 [音频子系统](../classes/audio.md)。
 
 ## 新增设备类
 

@@ -38,7 +38,7 @@ AHCI driver 当前只管理首个可用 SATA port，使用 LBA48、512 字节扇
 3. 新 PCI 驱动使用 `pci_bus`、ID 表和 `pci_get_bar_resource`。
 4. 无可靠 IRQ 时可以先轮询，但 poll 必须有预算，数据面不得无限阻塞；文档记录解除轮询的条件。
 5. 在 ARM64 与 x86_64 都暴露相同硬件协议时，驱动不得包含 `CONFIG_BOARD_VIRTUALBOX_*`，架构差异留给 PCI HAL、DMA 和映射层。
-6. 更新本页设备矩阵、[实现状态](../drivers/implementation-status.md) 和目标平台运行文档。
+6. 更新本页设备矩阵、[实现状态](../drivers/meta/implementation-status.md) 和目标平台运行文档。
 
 ## 平台运行手册
 
