@@ -21,6 +21,7 @@
 #include "abi/native/ipc_internal.h"
 #include "drivers/core/udriver.h"
 #include "mm/frame.h"
+#include "ipc/objstats.h"
 
 #define A20_ARG(n) (args->arg[(n)])
 
@@ -252,5 +253,55 @@ int64_t sys_a20_device_release(const a20_syscall_args_t *args)
     if (r < 0)
         return -A20_ERR_PERM;        /* not the owner */
     return A20_OK;
+}
+
+/* Contiguous DMA heap (04-dual-placement.md): allocate order-N frames
+ * and hand them to the driver as a pre-materialized VMO, so the phys
+ * table from vmo_phys is guaranteed contiguous — closing the gap with
+ * the kernel drv_dma backend. */
+int64_t sys_a20_device_alloc_dma(const a20_syscall_args_t *args)
+{
+    uint64_t size = A20_ARG(0);
+    if (size == 0 || size > 64 * PAGE_SIZE)
+        return -A20_ERR_INVALID_ARGUMENT;
+    uint32_t npages = (uint32_t)((size + PAGE_SIZE - 1) / PAGE_SIZE);
+    unsigned order = 0;
+    while ((1u << order) < npages)
+        order++;
+
+    pfn_t pfn = pfa_alloc((int)order);
+    if (pfn == PFN_NONE)
+        return -A20_ERR_NO_MEMORY;
+
+    struct vmo *vmo = vmo_create(VMO_ANONYMOUS, (uint64_t)npages * PAGE_SIZE, 0);
+    if (!vmo) {
+        pfa_free(pfn, (int)order);
+        return -A20_ERR_NO_MEMORY;
+    }
+
+    /* Pre-materialize with the contiguous block; frames are zeroed so
+     * the device never reads stale kernel data. */
+    memset(pfn_to_virt(pfn), 0, (uint64_t)npages * PAGE_SIZE);
+    spin_lock(&vmo->lock);
+    for (uint32_t i = 0; i < npages; i++)
+        vmo->pages[i] = pfn + i;
+    vmo->phys_size = (uint64_t)npages * PAGE_SIZE;
+    a20_objstat_add(&g_a20_objstats.vmo_pages, npages);
+    spin_unlock(&vmo->lock);
+
+    task_t *cur = proc_current();
+    struct a20_ht_internal *ht = task_get_a20_ht(cur);
+    if (!ht) {
+        vmo_release(vmo);
+        return -A20_ERR_BAD_HANDLE;
+    }
+
+    int64_t h = a20_handle_install(ht, vmo, A20_OBJ_MEMORY,
+                                   A20_RIGHT_READ | A20_RIGHT_WRITE |
+                                   A20_RIGHT_MAP | A20_RIGHT_STAT | A20_RIGHT_DUP |
+                                   A20_RIGHT_TRANSFER | A20_RIGHT_CONTROL);
+    if (h < 0)
+        vmo_release(vmo);
+    return h;
 }
 
