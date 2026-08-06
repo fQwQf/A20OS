@@ -12,11 +12,17 @@ from pathlib import Path
 
 CONST = re.compile(r"^\s*const\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([^;]+);\s*$")
 VERSION = re.compile(r"^\s*interface\s+[A-Za-z_][A-Za-z0-9_]*\s+version\s+(\d+)\s*\{")
+MESSAGE = re.compile(r"^\s*message\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{\s*$")
+FIELD = re.compile(r"^\s*(u8|u16|u32|u64|i32|i64)\s+([A-Za-z_][A-Za-z0-9_]*);\s*$")
+TYPE = {"u8": "uint8_t", "u16": "uint16_t", "u32": "uint32_t",
+        "u64": "uint64_t", "i32": "int32_t", "i64": "int64_t"}
 
 
 def generate(source: Path) -> str:
     version = None
     constants = []
+    messages = []
+    current_message = None
     for line in source.read_text(encoding="ascii").splitlines():
         if line.lstrip().startswith("//") or not line.strip():
             continue
@@ -25,6 +31,20 @@ def generate(source: Path) -> str:
             if match:
                 version = int(match.group(1))
                 continue
+        if current_message is not None:
+            if line.strip() == "}":
+                messages.append(current_message)
+                current_message = None
+                continue
+            match = FIELD.match(line)
+            if not match:
+                raise SystemExit(f"{source}: malformed message field: {line}")
+            current_message[1].append((TYPE[match.group(1)], match.group(2)))
+            continue
+        match = MESSAGE.match(line)
+        if match:
+            current_message = [match.group(1), []]
+            continue
         match = CONST.match(line)
         if match:
             constants.append((match.group(1), match.group(2).strip()))
@@ -37,9 +57,15 @@ def generate(source: Path) -> str:
         "#ifndef _A20_SERVICES_IDL_H",
         "#define _A20_SERVICES_IDL_H",
         "",
+        '#include "a20_types.h"',
+        "",
         f"#define A20_SERVICES_IDL_VERSION {version}u",
     ]
     lines.extend(f"#define {name} ({value})" for name, value in constants)
+    for name, fields in messages:
+        lines.extend(["", "typedef struct {"])
+        lines.extend(f"    {ctype} {field};" for ctype, field in fields)
+        lines.append(f"}} a20_idl_{name.lower()}_t;")
     lines.extend(["", "#endif", ""])
     return "\n".join(lines)
 
