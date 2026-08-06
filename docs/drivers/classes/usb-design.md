@@ -4,7 +4,7 @@
 
 ## 1. 背景与目标
 
-A20OS 目前仅有一个窄用途驱动 `kernel/drivers/input/xhci_hid.c`（1165 行）：硬编码绑定 Intel 8086:1e31 XHCI 控制器，只解析 HID 1.11**boot protocol** 键盘/鼠标，轮询工作，单控制器单实例（静态 `g_xhci`）。它没有 USB 设备树、没有 URB 抽象、不支持存储设备、不支持热插拔。
+A20OS 目前仅有一个窄用途驱动 `kernel/drivers/input/xhci_hid.c`（1165 行）：硬编码绑定 Intel 8086:1e31 XHCI 控制器，只解析 HID 1.11**boot protocol** 键盘/鼠标，轮询工作，单控制器单实例（静态 `g_xhci`）。它没有 USB 设备树、没有 URB 抽象、不支持存储设备、不支持热插拔。它发布 input class 设备，事件经 `/dev/event0` mux（`kernel/drivers/input/input_mux.c`）与 virtio-input 等输入源聚合。
 
 目标：引入一个**通用 USB 子系统**，使任意 USB 宿主控制器上的 HID 与Mass Storage 设备通过统一模型工作，并接入现有输入/块设备类接口。
 

@@ -14,7 +14,7 @@ A20OS 是 freestanding C99 内核，没有宿主 libc。驱动只能调用内核
 make ARCH=aarch64 BOARD=qemu-virt-aarch64 ABI=both kernel-only -j4
 ```
 
-目标平台不是 AArch64 时替换 `ARCH` 和 `BOARD`。已有平台命令见 [构建、测试与提交](testing-and-submission.md)。在修改源码前，记录一份未修改时的成功构建日志，后续失败才能判断是不是驱动引入。
+目标平台不是 AArch64 时替换 `ARCH` 和 `BOARD`。已有平台命令见 [构建、测试与提交](../meta/testing-and-submission.md)。在修改源码前，记录一份未修改时的成功构建日志，后续失败才能判断是不是驱动引入。
 
 ### 需要认识的目录
 
@@ -103,7 +103,7 @@ typedef struct {
 } acme_priv_t;
 ```
 
-所有会因设备实例不同而变化的状态都放在 `drv_priv` 指向的对象中。禁止用一组无保护的全局 queue index 支撑多个设备。若当前内存限制只能支持一个静态实例，probe 必须拒绝第二个实例，并在 [实现状态](implementation-status.md) 记录限制；优先使用 `kcalloc(1, sizeof(*p))` 创建实例。
+所有会因设备实例不同而变化的状态都放在 `drv_priv` 指向的对象中。禁止用一组无保护的全局 queue index 支撑多个设备。若当前内存限制只能支持一个静态实例，probe 必须拒绝第二个实例，并在 [实现状态](../meta/implementation-status.md) 记录限制；优先使用 `kcalloc(1, sizeof(*p))` 创建实例。
 
 寄存器 helper 明确使用 MMIO API：
 
@@ -320,7 +320,7 @@ probe 成功不等于用户可见：
 | BLOCK | 文件系统适配器消费 class；驱动不发布私有 getter |
 | CHAR | 尚无通用动态 devfs 注册，不能在驱动里私建 vnode |
 
-需要新增用户 ABI 时参考 [用户接口与 devfs](userspace-and-devfs.md)。硬件驱动只实现 class，用户地址检查、节点命名和 ioctl 版本由通用适配层负责。
+需要新增用户 ABI 时参考 [用户接口与 devfs](../classes/userspace-and-devfs.md)。硬件驱动只实现 class，用户地址检查、节点命名和 ioctl 版本由通用适配层负责。
 
 ## 13. 第一次构建和启动
 
@@ -351,7 +351,7 @@ git diff --checkmake check-driver-core-modelmake check-doc-driftmake ARCH=<arch>
 7. remove 后重新 probe，静态槽、默认 registry 和 IRQ 能再次使用。
 8. 目标平台和至少一个共享基础设施回归平台构建成功。
 
-测试向量和提交证据格式见 [../testing/testing-gates.md](../testing/testing-gates.md)。
+测试向量和提交证据格式见 [../testing/testing-gates.md](../../testing/testing-gates.md)。
 
 ## 15. 下一步读什么
 
@@ -363,8 +363,8 @@ git diff --checkmake check-driver-core-modelmake check-doc-driftmake ARCH=<arch>
 | BAR、VirtIO feature/queue | [PCI 与 VirtIO](pci-and-virtio.md) |
 | cache、DMA、IRQ、屏障、等待 | [运行时契约](runtime-contracts.md) |
 | 锁可以怎样嵌套 | [锁顺序](lock-order.md) |
-| framebuffer 映射和刷新 | [Display/Framebuffer](display.md) |
-| VirtualBox 的真实发现链和设备 | [VirtualBox 驱动栈](../platforms/virtualbox.md) |
+| framebuffer 映射和刷新 | [Display/Framebuffer](../classes/display.md) |
+| VirtualBox 的真实发现链和设备 | [VirtualBox 驱动栈](../../platforms/virtualbox.md) |
 
 ## 16. 评审前的自检
 

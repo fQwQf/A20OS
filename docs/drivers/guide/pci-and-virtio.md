@@ -1,6 +1,6 @@
 # PCI 与 VirtIO 驱动开发
 
-本章讲 A20OS 的 PCI/PCIe 枚举、BAR 资源和 modern VirtIO transport。VirtualBox ARM64、VirtualBox x86_64 以及多种 QEMU/物理平台共享这些基础设施。平台相关运行细节见 [VirtualBox 驱动栈](../platforms/virtualbox.md)、[VirtualBox ARM64 运行手册](../platforms/virtualbox-aarch64.md) 和 [VirtualBox x86_64 运行手册](../platforms/virtualbox-x86_64.md)。
+本章讲 A20OS 的 PCI/PCIe 枚举、BAR 资源和 modern VirtIO transport。VirtualBox ARM64、VirtualBox x86_64 以及多种 QEMU/物理平台共享这些基础设施。平台相关运行细节见 [VirtualBox 驱动栈](../../platforms/virtualbox.md)、[VirtualBox ARM64 运行手册](../../platforms/virtualbox-aarch64.md) 和 [VirtualBox x86_64 运行手册](../../platforms/virtualbox-x86_64.md)。
 
 ## PCI 发现路径
 

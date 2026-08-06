@@ -251,3 +251,9 @@ DRIVER_REGISTER(example_driver);
 class 消费者只能通过 `device_find_by_class()` 或类适配层使用已绑定设备。禁止在 mount、network init、devfs open 或兼容 getter 中再次调用架构私有扫描器。
 
 尤其禁止“统一 PCI 枚举已完成，但 `arch_virtio_*_probe()` 又扫描 PCI 并重新分配 BAR”的双路径。重新写 BAR 会使已绑定驱动保存的 MMIO/notify 地址失效，表现为设备 status 归零、queue 停止。arch probe hook 只允许服务尚未接入 bus model 的平台；同一平台一旦由 bus model 枚举，该 hook 必须删除或不可达。
+
+## 模块化驱动注册
+
+可加载驱动模块（drvmod）复用同一套统一核心：模块的 `DriverEntry` 调用框架导出 `drv_driver_register(&driver_t)` 后，核心按与内建驱动相同的匹配/重探路径对已枚举设备执行 probe（`driver_register` 会同步重探现有未绑定设备），`class_ops`/`class_type` 照常发布 class 设备。
+
+模块化驱动的 `driver_t` 与内建完全同构（`bus`/`id_table`/`probe`/`remove`/`class_ops`/`class_type`），因此同一份驱动代码既可内建也可模块化；迁移时的差异仅在入口（`DriverEntry` + `drv_driver_register` 替代 `DRIVER_REGISTER`）与内核 API 依赖面（模块只能引用框架导出表，见 [可安装内核驱动](kernel-modules.md)）。参考实现：`nvme.drv`（PCI class）、`hda.drv`（PCI class）、`vinput.drv`（NULL-bus id_table 同时匹配 MMIO 与 PCI）。

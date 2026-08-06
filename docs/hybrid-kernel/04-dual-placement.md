@@ -44,7 +44,7 @@
 - `kernel/include/drivers/dual/goldfish_rtc.h`：goldfish RTC 寄存器 协议唯一源码（自此 rtcd_proto.h 不再持有寄存器定义）；
 - `kernel/include/drivers/dual/virtio_mmio.h` + `kernel/include/drivers/dual/virtio_input.h`：virtio-mmio 传输与virtio-input 设备协议唯一源码；
 - `kernel/include/drivers/dual/virtq.h`：共享 split-virtqueue 层 （单所有者破坏性初始化；全部环结构置于一个 DMA 页内）。
-  实现过程中修正两个真实 spec 缺陷：`QUEUE_READY` 偏移为 0x044 （非 0x03c）；DRIVER_OK 必须在队列建立之后（拆分为`vinput_dev_init` + `vinput_driver_ok`）；
+  注意两处 spec 细节：`QUEUE_READY` 偏移为 0x044（非 0x03c）；DRIVER_OK 必须在队列建立之后（协议层拆分为 `vinput_dev_init` + `vinput_driver_ok`）。
 - 内核壳 `kernel/drvmod/examples/goldfish_rtc.c`（rtc.drv）：drvmod 模块形式的 boot probe（qemu-virt-riscv64 下由 `init_kthread` 加载并自动绑定，日志 `[GOLDFISH-RTC] probe ok: epoch=<ns>`；原内建 `kernel/drivers/char/goldfish_rtc_kdrv.c` 已随 drvmod 迁移删除，见 `docs/drivers/kernel-modules.md`）；
 - 内核壳 `kernel/drvmod/examples/vinput_probe.c`（vinput-probe.drv）：drvmod 模块的 boot 只读 probe（无设备时静默），日志 `[UINPUT] kernel-placement probe:`；原内建 `kernel/drivers/input/virtio_input_kprobe.c` 已随 drvmod 迁移删除；
 - 内核完整驱动 `kernel/drvmod/examples/vinput.c`（vinput.drv，四架构）：状态迁移、事件 virtqueue 与 IRQ 以模块形式实现，发布 input class 设备；`/dev/event0` 的 devfs mux 服务在 `kernel/drivers/input/input_mux.c`，经 class 设备消费事件（`input_mux_wake` 供模块 ISR 唤醒等待者）。白名单 `user_owned=1` 的槽位（slot 5 双驻留样本）保持归用户壳 uinputd 独占，vinput.drv 绑定其余 virtio-input 设备；
@@ -53,15 +53,15 @@
 - **首个双态语义一致性验证**：`make smoke-dual-input` 挂 `virtio-keyboard-device,bus=virtio-mmio-bus.5`，同一共享协议源码在两种部署下读出相同设备身份（内核 `[UINPUT] ... name=QEMU Virtio Keyboard`，用户 `UINPUTD: name=QEMU Virtio Keyboard`）；
 - **首个功能态用户驱动**：uinputd 完成设备全权初始化（状态迁移、 特性协商）、基于 drv_dma 的事件 virtqueue、IRQ→EventQ 投递，smoke 经 QEMU monitor `sendkey` 注入按键并验证解码出`EV_KEY/KEY_A/press` 真实事件——DMA ops、virtq 层、IRQ 链路全部经真实数据流验证；
 - **DMA 契约修正**：`vmo_phys` 非物化（peek 语义，未触页报 pa=0）， drv_dma 用户后端必须先物化再翻译（memset 触页同时提供清零保证），该契约已写入 drv_env.h 注释——否则驱动会把物理页 0 交给设备；
-- **构建修复**：native 构建 stamp 的新旧检查此前不含 `user/svc` 与 共享头目录，导致 svc/共享头修改后镜像内二进制陈旧；已修；
+- **构建依赖**：native 构建 stamp 的依赖清单包含 `user/svc` 与共享头目录（svc/共享头修改会触发镜像内二进制重建）；
 - 构建：riscv64 与 loongarch64 内核均通过；rtcd/uinputd 用户壳以 `-Ikernel/include` 引入共享头（`NATIVE_RTCD_RECIPE`）。
 
 ## 明确的非目标与后续
 
 - 内核壳接入 timekeeping/alarm 子系统是后续工作；接入前必须先解决 设备所有权（udriver 窗口当前默认 user-owned，见`udriver_mmio_user_owned`），所有权仲裁本身是框架的一部分。
-  当前约定（已验证有效）：白名单 `user_owned=1` 的设备内核侧只做只读 probe，破坏性初始化与 virtqueue 归用户壳独占；动态`device_claim/release` 已实现并在 `smoke-dual-input` 两次启动中验证自动释放；user-owned 窗口的 MMIO 映射现在强制要求当前任务先 claim，rtcd/ubd/uinputd 已迁移；
+  约定：白名单 `user_owned=1` 的设备内核侧只做只读 probe，破坏性初始化与 virtqueue 归用户壳独占；动态`device_claim/release` 已实现并在 `smoke-dual-input` 两次启动中验证自动释放；user-owned 窗口的 MMIO 映射现在强制要求当前任务先 claim，rtcd/ubd/uinputd 已迁移；
 - IRQ ops 暂不进 drv_env（线程模型差异是本质的，见上）；
-- **IOMMU 已完成硬件初始化与 per-domain 翻译**：`riscv_iommu.c` 分配 BAR、读取 capability（version 16 / spec 1.0）、配置DDT(1LVL)/CQ/FQ 并使能；devid 0 配置 SV39 翻译域（3 级页表），经 TR_REQ 验证已映射 IOVA 精确翻译、未映射 IOVA 被硬件拒绝（fault=1, cause=13 RD_FAULT_S）；`smoke-iommu-discovery` 断言。
+- **IOMMU 硬件初始化与 per-domain 翻译**：`riscv_iommu.c` 分配 BAR、读取 capability（version 16 / spec 1.0）、配置DDT(1LVL)/CQ/FQ 并使能；devid 0 配置 SV39 翻译域（3 级页表），经 TR_REQ 验证已映射 IOVA 精确翻译、未映射 IOVA 被硬件拒绝（fault=1, cause=13 RD_FAULT_S）；`smoke-iommu-discovery` 断言。
   devid 1（IOMMU 自身）保持 passthrough DC；fault 队列消费与per-device 页表动态映射仍为后续工作；
 - virtio-input 事件面已在用户态跑通；内核壳接入 evdev/输入子系统 是后续工作；
 - virtio-blk 保持内核数据面 + ubd 用户态 scratch 的现状，不作为双态 候选（数据面跨边界两次的陷阱，见 03-refactor-plan）。
