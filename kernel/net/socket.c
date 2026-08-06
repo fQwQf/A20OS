@@ -25,7 +25,6 @@ static obj_cache_t g_net_socket_cache = OBJ_CACHE_INIT("net_socket", net_socket_
 net_socket_t *net_socket_alloc(void) {
     net_socket_t *s = (net_socket_t *)obj_cache_alloc_zero(&g_net_socket_cache);
     if (s) {
-        s->bpf_prog_fd = -1;
         s->ipv6_checksum_offset = -1;
         s->reg_idx = -1;
         wait_queue_init(&s->accept_waitq);
@@ -238,7 +237,6 @@ int net_socket_create(int domain, int type, int protocol) {
     s->type = base_type;
     s->protocol = protocol;
     s->nonblock = (type & SOCK_NONBLOCK) != 0;
-    s->bpf_prog_fd = -1;
     s->ipv6_checksum_offset = -1;
     s->netd_id = -1;
 

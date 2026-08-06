@@ -338,13 +338,7 @@ int64_t handle_query(a20_handle_t handle, a20_handle_info_t *out);
 
 只读操作。返回对象类型、状态、权限和调试 hint。需要 `STAT` 权限。
 
-**类型合法权限掩码与 STAT（2026-08 修订）**：`handle_query` 依赖 STAT，
-因此所有"用户可观察自身属性"的对象类型的类型合法掩码（`a20_type_rights[]`）
-都必须包含 STAT。此前 `CHANNEL_ENDPOINT` 与 `EVENT_QUEUE` 的掩码缺少 STAT
-（EVENT_QUEUE 安装时请求了 STAT 但被掩码静默剥离），导致端点/队列句柄
-无法 query。已修复：两类掩码均含 STAT，channel 端点创建时安装
-`READ|WRITE|STAT|DUP|TRANSFER`。该一致性由 `user/tests/test_native_contract.c`
-的 `ralg` 分区固化（`make smoke-native-contract`）。
+**类型合法权限掩码与 STAT（2026-08 修订）**：`handle_query` 依赖 STAT，因此所有"用户可观察自身属性"的对象类型的类型合法掩码（`a20_type_rights[]`）都必须包含 STAT。此前 `CHANNEL_ENDPOINT` 与 `EVENT_QUEUE` 的掩码缺少 STAT （EVENT_QUEUE 安装时请求了 STAT 但被掩码静默剥离），导致端点/队列句柄无法 query。已修复：两类掩码均含 STAT，channel 端点创建时安装`READ|WRITE|STAT|DUP|TRANSFER`。该一致性由 `user/tests/test_native_contract.c` 的 `ralg` 分区固化（`make smoke-native-contract`）。
 
 ---
 
@@ -512,12 +506,22 @@ L0 (IRQ) < L1 (handle table) < L2 (内核对象) < L3 (调度器) < L4 (mm)
 
 ### Debug (0x0900)
 
+调试会话对象（`A20_OBJ_DEBUG`）的操作，包装内核调试接口 `proc_debug_*` （`kernel/proc/debug.c`，ABI 无关）。权限映射见 [06-security.md](06-security.md) §8.1：READ=read/read_regs/map_memory，WRITE=write/write_regs，WAIT=wait/event，SIGNAL=kill，CONTROL=resume/detach，ADMIN=attach。
+
 | 编号 | 名称 | 签名 | 说明 |
 |------|------|------|------|
-| 0x0900 | `debug_attach` | `int64_t debug_attach(a20_handle_t task)` | 附加调试 |
-| 0x0901 | `debug_read_regs` | `int64_t debug_read_regs(a20_handle_t thread, a20_regs_t *out)` | 读寄存器 |
-| 0x0902 | `debug_write_regs` | `int64_t debug_write_regs(a20_handle_t thread, const a20_regs_t *in)` | 写寄存器 |
-| 0x0903 | `debug_map_memory` | `int64_t debug_map_memory(a20_handle_t task, a20_handle_t *out)` | 映射目标内存 |
+| 0x0900 | `debug_attach` | `int64_t debug_attach(a20_handle_t task)` | 附加调试（需要目标 task handle 的 ADMIN），返回 debug handle；目标在下个信号边界停止 |
+| 0x0901 | `debug_read_regs` | `int64_t debug_read_regs(a20_handle_t dbg, a20_regs_t *out)` | 读寄存器（目标须已停止） |
+| 0x0902 | `debug_write_regs` | `int64_t debug_write_regs(a20_handle_t dbg, const a20_regs_t *in)` | 写寄存器（目标须已停止） |
+| 0x0903 | `debug_map_memory` | `int64_t debug_map_memory(a20_handle_t dbg, uint64_t addr, uint64_t len, uint32_t prot)` | 映射目标内存到本进程匿名映射 |
+| 0x0904 | `debug_traceme` | `int64_t debug_traceme(void)` | 声明本任务可被父任务调试（与 attach 互斥） |
+| 0x0905 | `debug_wait` | `int64_t debug_wait(a20_handle_t dbg, uint64_t timeout_us, a20_debug_event_info_t *out)` | 阻塞等待停止/退出事件（0=非阻塞，A20_TIMEOUT_INFINITE=无限） |
+| 0x0906 | `debug_resume` | `int64_t debug_resume(a20_handle_t dbg, uint32_t mode)` | 恢复运行（CONT/SYSCALL） |
+| 0x0907 | `debug_detach` | `int64_t debug_detach(a20_handle_t dbg)` | 结束会话并恢复目标 |
+| 0x0908 | `debug_event` | `int64_t debug_event(a20_handle_t dbg, a20_debug_event_info_t *out)` | 非阻塞查询停止原因 |
+| 0x0909 | `debug_read` | `int64_t debug_read(a20_handle_t dbg, uint64_t addr, void *buf, uint64_t len)` | 读目标地址空间 |
+| 0x090A | `debug_write` | `int64_t debug_write(a20_handle_t dbg, uint64_t addr, const void *buf, uint64_t len)` | 写目标地址空间（忽略只读、先破 COW） |
+| 0x090B | `debug_kill` | `int64_t debug_kill(a20_handle_t dbg)` | 终止目标 |
 
 ### System (0x0A00)
 
@@ -534,4 +538,16 @@ L0 (IRQ) < L1 (handle table) < L2 (内核对象) < L3 (调度器) < L4 (mm)
 | 0x0B00 | `futex_wait` | `int64_t futex_wait(a20_futex_wait_args_t *args)` | futex 等待（复用内核 futex 核心，见 01-types.md §22） |
 | 0x0B01 | `futex_wake` | `int64_t futex_wake(a20_futex_wake_args_t *args)` | futex 唤醒 |
 
-**总计：112 个 syscall。**
+### Kernel extension (0x0E00)
+
+扩展程序对象（`A20_OBJ_EXT_PROG`），设计见 docs/extensions.md：加载经过线性扫描验证的受限字节码程序并附着到内核扩展点。
+
+| 编号 | 名称 | 签名 | 说明 |
+|------|------|------|------|
+| 0x0E00 | `ext_prog_load` | `int64_t ext_prog_load(const uint32_t *insns, uint32_t len)` | 验证并加载程序，返回 handle |
+| 0x0E01 | `ext_prog_attach` | `int64_t ext_prog_attach(a20_handle_t prog, uint32_t point)` | 附着到扩展点 |
+| 0x0E02 | `ext_prog_detach` | `int64_t ext_prog_detach(a20_handle_t prog, uint32_t point)` | 分离 |
+| 0x0E03 | `ext_prog_release` | `int64_t ext_prog_release(a20_handle_t prog)` | 分离并释放 |
+| 0x0E04 | `ext_point_info` | `int64_t ext_point_info(uint32_t point, a20_ext_point_info_t *out)` | 查询扩展点信息 |
+
+**总计：129 个 syscall。**
