@@ -97,7 +97,7 @@ if [[ "$verify_base" != 0 && "$verify_base" != 1 ]]; then
 fi
 
 required_commands=(
-    conda dd flock gzip mcopy mdel mtype qemu-img readlink sha256sum tee "$qemu"
+    conda dd flock gzip mcopy mdel mtype qemu-img readlink sha256sum stat tee "$qemu"
 )
 for command_name in "${required_commands[@]}"; do
     if ! command -v "$command_name" >/dev/null 2>&1; then
@@ -112,6 +112,16 @@ fi
 if [[ -n "$judge_name" && ! -r "$judge" ]]; then
     echo "[final-eval] missing official judge: $judge" >&2
     exit 1
+fi
+official_tests_repo=contest/testsuits-for-oskernel
+if [[ ! -d "$official_tests_repo/.git" ]]; then
+    echo "[final-eval] missing official tests repository: $official_tests_repo" >&2
+    exit 1
+fi
+official_tests_commit=$(git -C "$official_tests_repo" rev-parse --verify HEAD)
+official_tests_dirty=no
+if [[ -n $(git -C "$official_tests_repo" status --porcelain) ]]; then
+    official_tests_dirty=yes
 fi
 if ! conda run -n "$conda_env" python --version >/dev/null; then
     echo "[final-eval] conda environment '$conda_env' is unavailable" >&2
@@ -184,6 +194,11 @@ if [[ "$verify_base" == 1 ]]; then
     fi
 fi
 base_sha=$(tr -d '[:space:]' <"$base_sha_file")
+base_mode=$(stat -c '%a' "$base_image")
+if [[ "$base_mode" != 444 ]]; then
+    echo "[final-eval] cached base image is not read-only (mode=$base_mode): $base_image" >&2
+    exit 1
+fi
 flock -u 9
 
 build_args=(
@@ -329,8 +344,13 @@ fi
     echo "contest_mode_present=no"
     echo "official_image_archive=$image_gz"
     echo "official_image_archive_sha256=$image_gz_sha"
+    echo "official_tests_repo=$official_tests_repo"
+    echo "official_tests_commit=$official_tests_commit"
+    echo "official_tests_dirty=$official_tests_dirty"
     echo "official_image_base=$base_image"
     echo "official_image_sha256=$base_sha"
+    echo "official_image_base_mode=$base_mode"
+    echo "official_image_base_readonly=yes"
     echo "official_image_overlay=$overlay"
     echo "runtime_work_dir=$run_dir"
     echo "qemu_memory=8G"
@@ -413,6 +433,15 @@ if [[ "$group" == buildstorm-probe ]]; then
     if grep -q '^#### BUILDSTORM PROBE START ' "$serial_log"; then
         probe_phase=2
     fi
+fi
+
+if [[ "$group" == buildstorm-probe && \
+      "$probe_case" == stage6-precompiled-helper ]]; then
+    sed -nE \
+        's/^STAGE6_META ([a-z0-9_]+=[^[:space:]]+)$/\1/p' \
+        "$serial_log" >>"$metadata"
+    echo "tg_xtask_build_host_log=$probe_artifacts/stage6-precompiled-helper.log" \
+        >>"$metadata"
 fi
 
 if [[ "$group" != buildstorm-probe && "$judge_status" -eq 0 ]]; then
