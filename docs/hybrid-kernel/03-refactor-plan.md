@@ -153,8 +153,9 @@ ad-hoc 手写结构。服务数量增长前引入 IDL（FIDL 式）：接口可�
 验收：svcmgr/registry/健康探针协议由 IDL 生成；新旧协议互操作期有
 版本协商；手写 proto 头退出活跃树。
 
-**状态**：常量层已完成：`a20_services.idl`、生成器和生成头已接入
-rtcd/svc/ubd；message 字段、绑定生成和版本协商仍待完成。
+**状态**：常量层与固定宽度消息层已完成：`a20_services.idl`、生成器和
+生成头已接入 rtcd/svc/ubd，rtcd alarm/time payload 已由生成结构体描述；
+绑定生成和版本协商仍待完成。
 
 ### 阶段五：Linux 人格层重建（starnix 式）
 
