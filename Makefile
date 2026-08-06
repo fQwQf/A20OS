@@ -722,7 +722,8 @@ VBOX_AARCH64_LOAD_ADDRESS ?= 0x08080000ULL
 		release-eval-rv-parallel-build release-eval-la-parallel-build \
 		final-probe-rv-parallel-build-1c final-probe-rv-parallel-build-8c \
 		final-probe-la-parallel-build-1c final-probe-la-parallel-build-8c \
-		final-stage6-rv-ext4-dir-tail final-stage6-la-ext4-dir-tail
+		final-stage6-rv-ext4-dir-tail final-stage6-la-ext4-dir-tail \
+		final-stage6-rv-helper final-stage6-la-helper
 
 FORCE:
 
@@ -4058,3 +4059,9 @@ final-stage6-rv-ext4-dir-tail:
 
 final-stage6-la-ext4-dir-tail:
 	$(call RUN_RELEASE_EVAL,loongarch64,parallel-build-probe,8,stage6-ext4-dir-tail)
+
+final-stage6-rv-helper:
+	$(call RUN_RELEASE_EVAL,riscv64,parallel-build-probe,8,stage6-precompiled-helper)
+
+final-stage6-la-helper:
+	$(call RUN_RELEASE_EVAL,loongarch64,parallel-build-probe,8,stage6-precompiled-helper)
