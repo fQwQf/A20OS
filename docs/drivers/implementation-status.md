@@ -34,7 +34,7 @@ QEMU x86_64 与 RISC-V64 GUI 的 VirtIO GPU、键盘和鼠标分别由 `make smo
 | hwapi DMA | 基础可用 | coherent helper 返回物理 handle，sync 委托 arch cache hook；尚无 DMA mask/IOMMU/大对齐能力 |
 | class publication | 已扩展 | probe 成功自动建立带引用的 class device；remove 前先下线并排空在途调用 |
 | devfs/sysfs | 动态类视图 | char/block/audio 自动生成 `/dev/charN`、`diskN`、`audioN`；所有 class 动态暴露于 `/sys/class`；旧 display/input 聚合节点暂时保留 |
-| drvmod loader | 基础可用 | 四架构（riscv64/x86_64/aarch64/loongarch64）ELF `ET_REL`、框架符号白名单、全量 ELF 边界校验（section/symbol/strtab/relocation）、按 `e_machine` 选择重定位解码器（RISC-V CALL、x86-64 large 模型 ABS64、AArch64 CALL26+veneer、LoongArch CALL36/pcalau12i）、自动 match→probe 绑定、统一驱动核心桥接（模块可注册标准 `driver_t`）、drv_env 双驻留共享代码的模块后端（DRV_ENV_DRVMOD）；goldfish RTC（riscv64/aarch64/loongarch64）、PC speaker（x86_64）、virtio-input 内核探针（riscv64/aarch64/loongarch64）已迁移为模块；签名、运行时 unload 尚未完成 |
+| drvmod loader | 基础可用 | 四架构（riscv64/x86_64/aarch64/loongarch64）ELF `ET_REL`、框架符号白名单、全量 ELF 边界校验（section/symbol/strtab/relocation）、按 `e_machine` 选择重定位解码器（RISC-V CALL、x86-64 large 模型 ABS64、AArch64 CALL26+veneer、LoongArch CALL36/pcalau12i）、自动 match→probe 绑定、统一驱动核心桥接（模块可注册标准 `driver_t`）、drv_env 双驻留共享代码的模块后端（DRV_ENV_DRVMOD）；goldfish RTC（riscv64/aarch64/loongarch64）、PC speaker（x86_64）、virtio-input 内核探针（riscv64/aarch64）、PS/2 键鼠控制器（x86_64）已迁移为模块，PCI 类驱动访问器已导出；签名、运行时 unload 尚未完成 |
 
 ## drvmod 迁移矩阵
 
@@ -48,7 +48,8 @@ QEMU x86_64 与 RISC-V64 GUI 的 VirtIO GPU、键盘和鼠标分别由 `make smo
 | NVMe、AHCI、HDA、E1000、virtio-scsi、vmsvga、virtio-gpu | 待框架扩展 | 需要 DMA/PCI BAR/class ops 框架 API |
 | virtio-input 内核探针 | 已迁移 | 内建 `virtio_input_kprobe.c` 已删除；`vinput-probe.drv` 用 drv_env 模块后端复用双驻留共享协议，`smoke-dual-input` 验证与用户态 uinputd 读到同一设备身份 |
 | virtio-input 完整事件投递 | 待框架扩展 | 需要 virtq 进入共享层并作为框架 API |
-| PS/2、TPM、GMAC、SDIO | 待框架扩展 | PS/2 耦合 irqchip 路由与 devfs/proc；TPM 依赖 ACPI；GMAC/SDIO 为单实例轮询 |
+| NVMe、AHCI、HDA、E1000、virtio-scsi、vmsvga、virtio-gpu | 待迁移 | PCI 类驱动访问器已导出（`pci_class_code`/`pci_get_bar_resource`/`pci_intx_irq` 等），模块可注册 PCI `driver_t`；需要 DMA 对象与 block/net/display/audio class 操作继续收敛 |
+| TPM、GMAC、SDIO | 待框架扩展 | TPM 依赖 ACPI 发现；GMAC/SDIO 为单实例轮询 |
 
 迁移细节与顺序见 [kernel-modules.md](kernel-modules.md)。
 
@@ -68,7 +69,7 @@ QEMU x86_64 与 RISC-V64 GUI 的 VirtIO GPU、键盘和鼠标分别由 `make smo
 | xHCI HID | INPUT | VBox ARM keyboard/mouse/tablet，class、轮询和 controller stop/remove；只匹配 `8086:1e31`，静态单 controller |
 | USB Storage (BOT) | BLOCK | `kernel/drivers/usb/class/usb_storage.c`：xHCI bulk 传输 + Bulk-Only Transport（CBW/CSW）+ SCSI READ(10)/WRITE(10)/READ_CAPACITY(10)。QEMU x86_64 `qemu-xhci + usb-storage` 已验证，挂载为 `/dev/diskN` 并可直接 mount FAT32。只支持单 LUN、512/2048/4096 扇区、每命令 4 KiB 数据块 |
 | TPM 2.0 (TIS) | x86 安全 | `kernel/drivers/security/tpm.c`：ACPI TPM2 表发现 + TIS FIFO 状态机 + Startup/GetRandom。现代 x86_64 固件常见；无 swtpm 时未做运行时验证 |
-| PS/2 | x86 板级服务 | 提供基础键鼠控制器服务；可复用输入设备使用 `DEV_CLASS_INPUT` |
+| PS/2 | x86 板级服务 | drvmod 模块（`ps2.drv`，x86_64），初始化 + 双向量 ISR；键盘字符经 `uart_receive_char` 进控制台 |
 | PC Speaker | AUDIO | drvmod 模块（`pc-spkr.drv`，x86_64），动态 `/dev/audioN`；支持 19 Hz–20 kHz 有界 tone/stop ABI，不冒充 PCM |
 | Intel HDA | AUDIO | 架构无关 PCI class 驱动；x86_64 与 LoongArch64 QEMU 已完成 BDL DMA smoke，x86_64 已完成用户态 tone 到 QEMU WAV 验证，RISC-V64 已完成完整 Wayland/FFmpeg/PulseAudio 播放；三个 `run-gui` 目标连接宿主音频；支持 48 kHz 双声道 S16_LE、环形 DMA、stop/drain、完整 remove 和用户态 WAV/raw/tone 播放器 |
 | STM32 SDIO | BLOCK | 统一类 + MCU bridge；板级 bus 仍用名称匹配 |
