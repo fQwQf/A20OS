@@ -38,9 +38,13 @@
     多页连续 DMA heap、动态所有权 claim/release、内核壳接入输入
     子系统。
 - [ ] 阶段四：服务接口 IDL 化（替换 `user/svc/*_proto.h` 手写协议）。
-  - 完成条件：svcmgr/registry 协议由 IDL 生成；手写 proto 头退出活跃树。
+  - 已完成：常量层 IDL、生成器、rtcd/svc/ubd 迁移，`make check-a20-idl`。
+  - 完成条件：message 字段/绑定/版本协商由 IDL 生成；手写 proto 头退出活跃树。
 - [ ] 阶段五：Linux 人格层在 Native 原语上重建（starnix 式对照）。
-  - 完成条件：选定测例集在直通实现与人格层实现下同通过，语义 diff 与性能对照归档。
+  - 已完成起步：`a20_personality.h` 提供 pipe-shaped channel/EventQ facade，
+    `smoke-native-personality` 验证写入、MESSAGE_READY、读取和关闭。
+  - 完成条件：fd 表、byte-stream accumulator、mmap/VMO、socket 等关键
+    子集在直通实现与人格层实现下同通过，语义 diff 与性能对照归档。
 
 ## P0：并发与 SMP 就绪
 
