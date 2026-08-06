@@ -10,7 +10,6 @@
 #include "core/types.h"
 #include "core/timer.h"
 #include "abi/native/ipc_internal.h"
-#include "bpf/bpf.h"
 #include "cg/cgroup.h"
 #include "fs/file.h"
 #include "fs/locks.h"
@@ -38,7 +37,6 @@ void cg_mem_uncharge(struct cg_node *cg, size_t nr_pages) {
 }
 
 /* From kernel/proc/exit.c: BPF program references. */
-void bpf_release_process(int pid) { (void)pid; }
 
 /* From kernel/proc/exit.c: robust futex list. */
 void exit_robust_list(task_t *t) { (void)t; }

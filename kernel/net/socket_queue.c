@@ -1,7 +1,6 @@
 #include "net/socket_internal.h"
 #include "fs/file.h"
 #include "mm/objcache.h"
-#include "sys/bpf.h"
 #include "core/string.h"
 #include "core/timer.h"
 #include "proc/proc.h"
@@ -41,9 +40,6 @@ int net_enqueue_msg_locked_meta(net_socket_t *dst, const void *buf, size_t len,
         return -EMSGSIZE;
     if (dst->rx_count >= NET_MAX_QUEUE)
         return -EAGAIN;
-    if (dst->bpf_prog_fd >= 0)
-        bpf_run_socket_filter(dst->bpf_prog_fd);
-
     net_msg_t *m = net_msg_alloc();
     if (!m)
         return -EAGAIN;
