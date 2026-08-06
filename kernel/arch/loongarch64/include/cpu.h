@@ -228,11 +228,6 @@ static inline int arch_unwind_frames(uint64_t fp,
 }
 
 
-/* Local-only flush: safe while holding a spinlock (IRQs off).  Callers must
- * publish the remote flush after dropping the lock. */
-static inline void arch_tlb_flush_page_local(uint64_t addr) {
-    arch_tlb_flush_page(addr);
-}
 /* Local-only full flush. */
 static inline void arch_tlb_flush_local(void) {
     arch_tlb_flush();
