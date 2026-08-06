@@ -1276,7 +1276,7 @@ smoke-iommu-discovery:
 		-kernel .kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf \
 		> "$$log" 2>&1 || status=$$?; \
 	if grep -q '\[IOMMU\] riscv-iommu PCI present' "$$log" && \
-	   grep -q 'System is going down for power-off NOW' "$$log"; then \
+	   grep -q 'System is going down for power-off' "$$log"; then \
 		echo "smoke-iommu-discovery: PASS; log saved to $$log"; \
 	else \
 		echo "smoke-iommu-discovery: failed with status $$status; tail of $$log:"; \
@@ -3660,7 +3660,7 @@ smoke-dual-input:
 	   grep -q 'UINPUTD: ev type=1 code=30 value=1' "$$log" && \
 	   grep -q 'UINPUTD: claimed' "$$log" && \
 	   [ "$$(grep -c 'UINPUTD: PASS' "$$log")" = "2" ] && \
-	   grep -q 'System is going down for power-off NOW' "$$log"; then \
+	   grep -q 'System is going down for power-off' "$$log"; then \
 		echo "smoke-dual-input: PASS; log saved to $$log"; \
 	else \
 		echo "smoke-dual-input: failed with status $$status; tail of $$log:"; \
