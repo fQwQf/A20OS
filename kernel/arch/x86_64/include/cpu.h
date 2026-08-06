@@ -237,11 +237,6 @@ static inline void ioapic_write(uint32_t reg, uint32_t val) {
 }
 
 
-/* Local-only flush: safe while holding a spinlock (IRQs off).  Callers must
- * publish the remote flush after dropping the lock. */
-static inline void arch_tlb_flush_page_local(uint64_t addr) {
-    arch_tlb_flush_page(addr);
-}
 /* Local-only full flush. */
 static inline void arch_tlb_flush_local(void) {
     arch_tlb_flush();
