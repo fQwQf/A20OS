@@ -128,6 +128,7 @@ match=0x101000:0x100
 | `ps2.c` → `ps2.drv` | x86_64 | PS/2 键鼠控制器，初始化 + 双向量 ISR 注册；键盘字符经 `uart_receive_char` 进控制台 |
 | `nvme.c` → `nvme.drv` | x86_64/loongarch64 | 架构无关 PCI 类 block 驱动（标准 `driver_t` 注册）；`DRVMOD_SMOKE=1` 构建携带与内建版本相同的 capability/I/O smoke 测试，`smoke-pci-portability` 在 loongarch64 上验证 |
 | `tpm.c` → `tpm.drv` | x86_64 | TPM 2.0 TIS/FIFO 驱动，经 `firmware_acpi_tpm2` 做 ACPI 发现；无 TPM 时 probe 优雅返回 |
+| `hda.c`+`hda_codec.c` → `hda.drv` | 四架构 | 架构无关 PCI 类 audio 驱动（`hda_match` 按 `pci_class_code` 匹配）；`DRVMOD_SMOKE=1` 携带 in-probe 流 smoke（`HDA_STREAM_SMOKE`），`smoke-hda`（x86_64）与 `smoke-pci-portability`（loongarch64）验证 |
 
 验证命令：
 
@@ -154,6 +155,7 @@ make ARCH=riscv64 ABI=both smoke-dual-input          # vinput-probe.drv + 用户
 | PS/2 键鼠控制器 | `kernel/drivers/input/ps2.c`（已删除） | `kernel/drvmod/examples/ps2.c` | x86_64 | 已迁移；arch IRQ 分发经 hwapi 投递到模块 ISR，`smoke-drvmod-x86_64` 验证初始化与双向量注册 |
 | NVMe | `kernel/drivers/block/nvme.c`（已删除） | `kernel/drvmod/examples/nvme.c` | x86_64/loongarch64 | 已迁移；PCI 类标准驱动，`smoke-pci-portability`（loongarch64 dev 镜像 + `DRVMOD_SMOKE=1`）验证绑定与 NVME_CAP/IO_SMOKE |
 | TPM 2.0 | `kernel/drivers/security/tpm.c`（已删除） | `kernel/drvmod/examples/tpm.c` | x86_64 | 已迁移；ACPI TPM2 发现 + TIS FIFO，无设备时优雅失败 |
+| Intel HDA | `kernel/drivers/audio/hda.c`+`hda_codec.c`（已删除） | `kernel/drvmod/examples/hda.c` | 四架构 | 已迁移；PCI 类 audio 驱动，`smoke-hda` 验证流 smoke + 绑定 |
 
 **无法迁移（启动顺序约束）**：这些驱动在模块加载（`init_kthread`）之前就必须工作，不能改为后期加载：
 

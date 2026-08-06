@@ -384,6 +384,7 @@ const struct drv_export drv_export_table[] = {
     { "uart_receive_char",   (void *)uart_receive_char },
     /* scheduling / wait primitives used by module completion paths */
     { "proc_park_prepare",   (void *)proc_park_prepare },
+    { "proc_yield",          (void *)proc_yield },
     { "proc_park_commit",    (void *)proc_park_commit },
     { "proc_park_cancel",    (void *)proc_park_cancel },
     { "proc_park_finish",    (void *)proc_park_finish },
