@@ -164,6 +164,7 @@ NATIVE_HANDLE_BIN      := $(NATIVE_BUILD_DIR)/native-handle-$(NATIVE_TAG)
 NATIVE_LIBC_BIN        := $(NATIVE_BUILD_DIR)/native-libc-$(NATIVE_TAG)
 NATIVE_FUTEX_BIN       := $(NATIVE_BUILD_DIR)/native-futex-$(NATIVE_TAG)
 NATIVE_DEBUG_BIN       := $(NATIVE_BUILD_DIR)/native-debug-$(NATIVE_TAG)
+NATIVE_EXT_BIN          := $(NATIVE_BUILD_DIR)/native-ext-$(NATIVE_TAG)
 NATIVE_MM_BIN          := $(NATIVE_BUILD_DIR)/native-mm-$(NATIVE_TAG)
 NATIVE_SIGNAL_BIN      := $(NATIVE_BUILD_DIR)/native-signal-$(NATIVE_TAG)
 NATIVE_IPC_BIN         := $(NATIVE_BUILD_DIR)/native-ipc-$(NATIVE_TAG)
@@ -178,8 +179,7 @@ NATIVE_REGISTRY_BIN    := $(NATIVE_BUILD_DIR)/native-registry-$(NATIVE_TAG)
 NATIVE_SVCMGR_BIN      := $(NATIVE_BUILD_DIR)/svcmgr-$(NATIVE_TAG)
 NATIVE_ISOLATION_BIN   := $(NATIVE_BUILD_DIR)/native-isolation-$(NATIVE_TAG)
 NATIVE_UBDD_BIN        := $(NATIVE_BUILD_DIR)/ubd-$(NATIVE_TAG)
-NATIVE_OUTPUTS         := $(NATIVE_HELLO_BIN) $(NATIVE_HANDLE_BIN) $(NATIVE_LIBC_BIN) $(NATIVE_FUTEX_BIN) $(NATIVE_MM_BIN) $(NATIVE_SIGNAL_BIN) $(NATIVE_IPC_BIN) $(NATIVE_SVCMAN_BIN) $(NATIVE_ECHOD_BIN) $(NATIVE_SHMRING_BIN) $(NATIVE_SHMRINGD_BIN) $(NATIVE_CHAND_BIN) $(NATIVE_RTCD_BIN) $(NATIVE_RTCDD_BIN) $(NATIVE_REGISTRY_BIN) $(NATIVE_SVCMGR_BIN) $(NATIVE_ISOLATION_BIN) $(NATIVE_UBDD_BIN) $(NATIVE_NETD_BIN)
-NATIVE_OUTPUTS         := $(NATIVE_HELLO_BIN) $(NATIVE_HANDLE_BIN) $(NATIVE_LIBC_BIN) $(NATIVE_FUTEX_BIN) $(NATIVE_MM_BIN) $(NATIVE_SIGNAL_BIN) $(NATIVE_IPC_BIN) $(NATIVE_SVCMAN_BIN) $(NATIVE_ECHOD_BIN) $(NATIVE_SHMRING_BIN) $(NATIVE_SHMRINGD_BIN) $(NATIVE_CHAND_BIN) $(NATIVE_RTCD_BIN) $(NATIVE_RTCDD_BIN) $(NATIVE_REGISTRY_BIN) $(NATIVE_SVCMGR_BIN) $(NATIVE_ISOLATION_BIN) $(NATIVE_UBDD_BIN) $(NATIVE_DEBUG_BIN)
+NATIVE_OUTPUTS         := $(NATIVE_HELLO_BIN) $(NATIVE_HANDLE_BIN) $(NATIVE_LIBC_BIN) $(NATIVE_FUTEX_BIN) $(NATIVE_MM_BIN) $(NATIVE_SIGNAL_BIN) $(NATIVE_IPC_BIN) $(NATIVE_SVCMAN_BIN) $(NATIVE_ECHOD_BIN) $(NATIVE_SHMRING_BIN) $(NATIVE_SHMRINGD_BIN) $(NATIVE_CHAND_BIN) $(NATIVE_RTCD_BIN) $(NATIVE_RTCDD_BIN) $(NATIVE_REGISTRY_BIN) $(NATIVE_SVCMGR_BIN) $(NATIVE_ISOLATION_BIN) $(NATIVE_UBDD_BIN) $(NATIVE_NETD_BIN) $(NATIVE_DEBUG_BIN) $(NATIVE_EXT_BIN)
 NATIVE_BUILD_STAMP     := $(NATIVE_BUILD_DIR)/.native-build-id
 comma := ,
 NET_HOSTFWD ?= hostfwd=tcp::5555-:5555,hostfwd=udp::5555-:5555
@@ -416,6 +416,7 @@ endif
 endif
 
 # Compiler flags
+CONFIG_UBSAN ?= $(if $(filter 1,$(BRINGUP)),0,1)
 CFLAGS = -Wall -Wextra $(OPT) -ffreestanding -nostdlib \
          -fno-builtin -fno-common -std=gnu99 \
          -MMD -MP \
@@ -427,6 +428,13 @@ CFLAGS = -Wall -Wextra $(OPT) -ffreestanding -nostdlib \
          -DCONFIG_ABI_$(shell echo $(ABI) | tr a-z A-Z) \
           -DCONFIG_NR_CPUS=$(NR_CPUS) \
           -DCONFIG_BOARD_$(shell echo $(BOARD) | tr a-z A-Z | tr - _)
+ifeq ($(filter 1,$(CONFIG_UBSAN)),1)
+# Undefined Behavior Sanitizer: kernel/core/ubsan.c provides the handlers.
+# alignment/bounds-strict are excluded to match the packed-struct and
+# flexible-array idioms the kernel deliberately uses.
+CFLAGS += -fsanitize=undefined -fno-sanitize=alignment,bounds-strict \
+          -DCONFIG_UBSAN=1
+endif
 ifneq ($(strip $(WAIT_TIMER_HEAP_MAX)),)
 CFLAGS += -DCONFIG_WAIT_TIMER_HEAP_MAX=$(WAIT_TIMER_HEAP_MAX)
 endif
@@ -609,6 +617,7 @@ KERNEL_SRC = $(wildcard $(KERNEL_DIR)/*.c) \
              $(wildcard $(KERNEL_DIR)/ipc/*.c) \
              $(wildcard $(KERNEL_DIR)/net/*.c) \
              $(wildcard $(KERNEL_DIR)/bpf/*.c) \
+             $(wildcard $(KERNEL_DIR)/ext/*.c) \
              $(wildcard $(KERNEL_DIR)/drivers/core/*.c) \
              $(wildcard $(KERNEL_DIR)/drivers/bus/*.c) \
              $(wildcard $(KERNEL_DIR)/drivers/block/*.c) \
@@ -705,7 +714,7 @@ VBOX_AARCH64_LOAD_ADDRESS ?= 0x08080000ULL
 		qemu-disk-rv qemu-disk-la \
 		extra-img _extra-img extra-user-apps prepare-riscv64-glibc-sysroot force_extra_image_stamp run-riscv64-extra run-loongarch64-extra run-arm64-extra run-x86_64-extra run-arm32-extra run-riscv32-extra run-ppc64le-extra \
 		native-test-arch native-handle-test-arch native-libc-arch native-programs \
-	native-futex-arch native-futex-rv smoke-native-futex native-debug-test-arch native-debug-test-rv smoke-native-debug mlibc-sysroot mlibc-hello-rv smoke-mlibc \
+	native-futex-arch native-futex-rv smoke-native-futex native-debug-test-arch native-debug-test-rv smoke-native-debug native-ext-test-arch native-ext-test-rv smoke-native-ext mlibc-sysroot mlibc-hello-rv smoke-mlibc \
 		native-ipc-arch native-ipc-rv native-ipc-la smoke-native-ipc \
 		native-svc-arch native-svc-rv smoke-native-svc \
 		native-shmring-arch native-shmring-rv smoke-native-shmring \
@@ -3368,6 +3377,20 @@ $(NATIVE_DEBUG_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) 
 
 native-debug-test-arch: $(NATIVE_DEBUG_BIN)
 
+define NATIVE_EXT_RECIPE
+@mkdir -p $(dir $(4))
+$(1) -ffreestanding -nostdlib -static     $(2)     -Iuser -Iuser/liba20rt     -T$(NATIVE_LD)     $(3)     $(NATIVE_SDK_SRC)     $(NATIVE_COMPILER_RT_SRC)     $(NATIVE_ARCH_SRC)     user/tests/test_native_ext.c     $(NATIVE_LIBS)     -o $(4)
+endef
+
+$(NATIVE_EXT_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) user/tests/test_native_ext.c \
+		user/liba20rt/a20-generic.ld user/liba20rt/crt0_a20.h user/liba20rt/a20_syscall.h user/liba20rt/a20_ext.h
+	$(call NATIVE_EXT_RECIPE,$(NATIVE_CC),$(NATIVE_CFLAGS),$(NATIVE_CRT0),$@)
+
+native-ext-test-arch: $(NATIVE_EXT_BIN)
+
+native-ext-test-rv:
+	$(MAKE) ARCH=riscv64 NOMMU=$(NOMMU) native-ext-test-arch
+
 native-debug-test-rv:
 	$(MAKE) ARCH=riscv64 NOMMU=$(NOMMU) native-debug-test-arch
 
@@ -3866,6 +3889,29 @@ smoke-native-futex:
 		echo "smoke-native-futex: PASS; log saved to $$log"; \
 	else \
 		echo "smoke-native-futex: failed with status $$status; tail of $$log:"; \
+		tail -n 80 "$$log"; \
+		exit 1; \
+	fi
+
+smoke-native-ext:
+	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/native-ext-riscv64.log"; \
+	status=0; \
+	{ sleep $(SMOKE_INPUT_DELAY); printf '/bin/native-ext-rv\npoweroff\n'; } | \
+	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
+		-machine virt -m 1G -nographic -smp 1 -bios default \
+		-global virtio-mmio.force-legacy=false \
+		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-both-dev/fat32.img,if=none,format=raw,id=x0 \
+		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		-kernel .kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf \
+		> "$$log" 2>&1 || status=$$?; \
+	if grep -q 'NATIVE_EXT: PASS' "$$log" && grep -q 'System is going down for power-off NOW' "$$log"; then \
+		echo "smoke-native-ext: PASS; log saved to $$log"; \
+	else \
+		echo "smoke-native-ext: failed with status $$status; tail of $$log:"; \
 		tail -n 80 "$$log"; \
 		exit 1; \
 	fi
