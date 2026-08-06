@@ -338,6 +338,14 @@ int64_t handle_query(a20_handle_t handle, a20_handle_info_t *out);
 
 只读操作。返回对象类型、状态、权限和调试 hint。需要 `STAT` 权限。
 
+**类型合法权限掩码与 STAT（2026-08 修订）**：`handle_query` 依赖 STAT，
+因此所有"用户可观察自身属性"的对象类型的类型合法掩码（`a20_type_rights[]`）
+都必须包含 STAT。此前 `CHANNEL_ENDPOINT` 与 `EVENT_QUEUE` 的掩码缺少 STAT
+（EVENT_QUEUE 安装时请求了 STAT 但被掩码静默剥离），导致端点/队列句柄
+无法 query。已修复：两类掩码均含 STAT，channel 端点创建时安装
+`READ|WRITE|STAT|DUP|TRANSFER`。该一致性由 `user/tests/test_native_contract.c`
+的 `ralg` 分区固化（`make smoke-native-contract`）。
+
 ---
 
 ## 5. 并发协议
@@ -526,4 +534,4 @@ L0 (IRQ) < L1 (handle table) < L2 (内核对象) < L3 (调度器) < L4 (mm)
 | 0x0B00 | `futex_wait` | `int64_t futex_wait(a20_futex_wait_args_t *args)` | futex 等待（复用内核 futex 核心，见 01-types.md §22） |
 | 0x0B01 | `futex_wake` | `int64_t futex_wake(a20_futex_wake_args_t *args)` | futex 唤醒 |
 
-**总计：109 个 syscall。**
+**总计：112 个 syscall。**
