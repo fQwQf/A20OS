@@ -148,6 +148,9 @@
 #define A20_SYS_device_vmo_phys   0x0C04
 #define A20_SYS_device_block_attach 0x0C05
 #define A20_SYS_device_block_complete 0x0C06
+#define A20_SYS_device_claim      0x0C07
+#define A20_SYS_device_release    0x0C08
+#define A20_SYS_device_alloc_dma  0x0C09
 
 #define A20_SYS_netd_attach        0x0D00
 #define A20_SYS_netd_sock_register  0x0D01
@@ -159,6 +162,6 @@
 #define A20_SYS_ext_prog_release   0x0E03
 #define A20_SYS_ext_point_info     0x0E04
 
-#define A20_NATIVE_SYSCALL_COUNT  124
+#define A20_NATIVE_SYSCALL_COUNT  129
 
 #endif
