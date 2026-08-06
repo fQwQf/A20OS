@@ -19,7 +19,6 @@
 
 #define ECHOD_PATH   "/bin/svc-echod-rv"
 #define BACKOFF_MS   50
-#define REQ_LEN      8
 
 static a20_handle_t g_out = A20_HANDLE_NULL;
 static a20_handle_t g_root = A20_HANDLE_NULL;
@@ -127,22 +126,24 @@ static a20_status_t spawn_echod(a20_handle_t *out_ep, a20_handle_t *out_task)
 /* One RPC round trip; returns A20_OK when the reply echoes the request. */
 static a20_status_t echo_verify(a20_handle_t ep, uint32_t seq)
 {
-    uint8_t req[REQ_LEN];
-    for (uint32_t i = 0; i < REQ_LEN; i++)
-        req[i] = (uint8_t)('a' + ((seq + i) & 15));
-
-    uint8_t rep[REQ_LEN];
+    struct {
+        a20_idl_envelope_t env;
+        a20_idl_svcmgr_echo_t body;
+    } req = {
+        { A20_SERVICES_IDL_VERSION, SVCMGR_REQ_ECHO, sizeof(req) },
+        { seq },
+    };
+    uint8_t rep[sizeof(req)];
     uint32_t rep_len = sizeof(rep);
     uint32_t rep_hcnt = 0;
-    a20_status_t st = a20_channel_call(ep, req, REQ_LEN, 0, 0,
+    a20_status_t st = a20_channel_call(ep, &req, sizeof(req), 0, 0,
                                        rep, &rep_len, 0, &rep_hcnt);
     if (st < 0)
         return st;
-    if (rep_len != REQ_LEN)
+    if (rep_len != sizeof(req))
         return -1000;
-    for (uint32_t i = 0; i < REQ_LEN; i++)
-        if (rep[i] != req[i])
-            return -1001;
+    if (a20_memcmp(rep, &req, sizeof(req)) != 0)
+        return -1001;
     return A20_OK;
 }
 
@@ -176,8 +177,10 @@ int main(int argc, char **argv, char **envp)
 
     for (restarts = 1; restarts <= 2; restarts++) {
         /* Ask the service to crash; no reply is sent for this request. */
-        static const uint8_t crash_req[5] = { 'c', 'r', 'a', 's', 'h' };
-        if (a20_channel_send(ep, crash_req, 5, 0, 0) != A20_OK)
+        a20_idl_envelope_t crash_req = {
+            A20_SERVICES_IDL_VERSION, SVCMGR_REQ_CRASH, sizeof(crash_req)
+        };
+        if (a20_channel_send(ep, &crash_req, sizeof(crash_req), 0, 0) != A20_OK)
             return fail(5, "crash request failed");
 
         /* Wait for the EXITED event (bounded: 2 s). */
