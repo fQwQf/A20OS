@@ -719,7 +719,7 @@ VBOX_AARCH64_LOAD_ADDRESS ?= 0x08080000ULL
 		release-eval-rv-parallel-build release-eval-la-parallel-build \
 		final-probe-rv-parallel-build-1c final-probe-rv-parallel-build-8c \
 		final-probe-la-parallel-build-1c final-probe-la-parallel-build-8c \
-		final-stage6-rv-parallel-build-j1 final-stage6-la-parallel-build-j1
+		final-stage6-rv-ext4-dir-tail final-stage6-la-ext4-dir-tail
 
 FORCE:
 
@@ -4000,7 +4000,6 @@ eval-check: eval-check-rv eval-check-la
 RELEASE_EVAL_IMAGE_DIR ?= benchmark/2026OSImage-Pub
 RELEASE_EVAL_STATE_DIR ?= .kernel-build/smoke/2026
 RELEASE_EVAL_TIMEOUT ?=
-parallel-build_STAGE6_QEMU_TIMEOUT_SECONDS ?= 28800
 
 define RUN_RELEASE_EVAL
 	RELEASE_EVAL_IMAGE_DIR="$(RELEASE_EVAL_IMAGE_DIR)" \
@@ -4051,8 +4050,8 @@ final-stage5-rv-parallel-build:
 final-stage5-la-parallel-build:
 	$(call RUN_RELEASE_EVAL,loongarch64,parallel-build-probe,8,stage5-official-minibuild)
 
-final-stage6-rv-parallel-build-j1:
-	$(call RUN_RELEASE_EVAL,riscv64,parallel-build-probe,8,stage6-tg-xtask-j1,$(parallel-build_STAGE6_QEMU_TIMEOUT_SECONDS))
+final-stage6-rv-ext4-dir-tail:
+	$(call RUN_RELEASE_EVAL,riscv64,parallel-build-probe,8,stage6-ext4-dir-tail)
 
-final-stage6-la-parallel-build-j1:
-	$(call RUN_RELEASE_EVAL,loongarch64,parallel-build-probe,8,stage6-tg-xtask-j1,$(parallel-build_STAGE6_QEMU_TIMEOUT_SECONDS))
+final-stage6-la-ext4-dir-tail:
+	$(call RUN_RELEASE_EVAL,loongarch64,parallel-build-probe,8,stage6-ext4-dir-tail)
