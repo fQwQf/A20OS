@@ -62,12 +62,15 @@ typedef struct udisk_inst {
 } udisk_inst_t;
 
 static udisk_inst_t g_insts[UDISK_MAX_INST];
+#ifndef BRINGUP
 static int          g_udisk_mounted;
 static udisk_inst_t *g_mount_target;
+#endif
 
 static int udisk_read_sector(block_dev_t *dev, uint64_t lba, void *buf,
                              size_t count);
 
+#ifndef BRINGUP
 static void udisk_mount_kthread(void)
 {
     udisk_inst_t *u = g_mount_target;
@@ -84,6 +87,7 @@ static void udisk_mount_kthread(void)
     g_mount_target = NULL;
     proc_exit(0);
 }
+#endif
 
 static int udisk_rw(udisk_inst_t *u, uint64_t lba, void *buf, size_t count, int dir)
 {
@@ -258,6 +262,7 @@ int udisk_attach(struct vmo *vmo, uint64_t capacity,
     klog(KLOG_INFO, "udisk: attached pid=%d capacity=%lu\n", owner_pid,
          (unsigned long)capacity);
 
+#ifndef BRINGUP
     /* Auto-mount in a kernel thread so attach returns to the driver
      * immediately (mount probing blocks on reads the driver must serve). */
     if (!g_udisk_mounted && !g_mount_target) {
@@ -265,6 +270,7 @@ int udisk_attach(struct vmo *vmo, uint64_t capacity,
         if (proc_alloc(udisk_mount_kthread) < 0)
             g_mount_target = NULL;
     }
+#endif
 
     *out_doorbell = ubd_ep;
     return 0;
