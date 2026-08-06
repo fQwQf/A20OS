@@ -239,6 +239,7 @@ void proc_init(void) {
     proc_pid_init();
     proc_sched_runq_init();
     spin_init(&proc_lock);
+    spin_set_debug(&proc_lock, "proc", NULL);
 
     task_t *idle = &idle_tasks[0];
     proc_link_task_locked(idle);
