@@ -97,13 +97,18 @@
   设备所有权（udriver 窗口当前默认 user-owned，见
   `udriver_mmio_user_owned`），所有权仲裁本身是框架的一部分。
   当前约定（已验证有效）：白名单 `user_owned=1` 的设备内核侧只做
-  只读 probe，破坏性初始化与 virtqueue 归用户壳独占；动态
-  claim/release 仲裁待做；
+   只读 probe，破坏性初始化与 virtqueue 归用户壳独占；动态
+   `device_claim/release` 已实现并在 `smoke-dual-input` 两次启动中
+   验证自动释放；映射暂未强制要求 claim，以兼容旧 rtcd/ubd；
 - IRQ ops 暂不进 drv_env（线程模型差异是本质的，见上）；
-- DMA ops 已进 drv_env（信任模型，物化后翻译）；IOMMU 硬件强制
-  仍是独立工作项（QEMU 10.0 提供 `riscv-iommu-pci`，可作为实现
-  目标），完成后 drv_dma 的语义承诺才能从"内核担保"升级为
-  "硬件强制"；多页连续 DMA 仍需 DMA-heap；
+- DMA ops 已进 drv_env；连续 DMA heap 已实现为预物化连续 VMO，
+  `smoke-native-contract` 的 `dma` 分区验证物理地址连续与零填充；
+  IOMMU 硬件强制仍是独立工作项（QEMU 10.0 提供
+  `riscv-iommu-pci`，可作为实现目标），完成后 drv_dma 的语义承诺
+  才能从"内核担保"升级为"硬件强制"；
+- 已加入 PCI 发现骨架 `kernel/drivers/core/iommu/riscv_iommu.c`，
+  可识别 QEMU 的 `1b36:0014` 并记录 BAR；当前刻意不启用翻译，
+  DDT、命令队列、故障队列和失效协议仍待实现；
 - virtio-input 事件面已在用户态跑通；内核壳接入 evdev/输入子系统
   是后续工作；
 - virtio-blk 保持内核数据面 + ubd 用户态 scratch 的现状，不作为双态
