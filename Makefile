@@ -722,7 +722,8 @@ VBOX_AARCH64_LOAD_ADDRESS ?= 0x08080000ULL
 		final-eval-rv-buildstorm final-eval-la-buildstorm \
 		final-probe-rv-buildstorm-1c final-probe-rv-buildstorm-8c \
 		final-probe-la-buildstorm-1c final-probe-la-buildstorm-8c \
-		final-stage6-rv-ext4-dir-tail final-stage6-la-ext4-dir-tail
+		final-stage6-rv-ext4-dir-tail final-stage6-la-ext4-dir-tail \
+		final-stage6-rv-helper final-stage6-la-helper
 
 FORCE:
 
@@ -4058,3 +4059,9 @@ final-stage6-rv-ext4-dir-tail:
 
 final-stage6-la-ext4-dir-tail:
 	$(call RUN_FINAL_EVAL,loongarch64,buildstorm-probe,8,stage6-ext4-dir-tail)
+
+final-stage6-rv-helper:
+	$(call RUN_FINAL_EVAL,riscv64,buildstorm-probe,8,stage6-precompiled-helper)
+
+final-stage6-la-helper:
+	$(call RUN_FINAL_EVAL,loongarch64,buildstorm-probe,8,stage6-precompiled-helper)
