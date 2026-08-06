@@ -37,7 +37,7 @@ static void rtc_set_alarm_ns(uint64_t ns)
  * -1 = peer gone (clean shutdown). */
 static int handle_one(a20_handle_t ep, int *alarm_pending)
 {
-    uint8_t buf[16];
+    uint8_t buf[64];
     uint32_t blen = sizeof(buf);
     uint32_t hcnt = 0;
     a20_status_t st = a20_channel_recv_flags(ep, buf, &blen, 0, &hcnt,
@@ -46,23 +46,35 @@ static int handle_one(a20_handle_t ep, int *alarm_pending)
         return 0;
     if (st < 0)
         return -1;
-    if (blen < 1)
+    if (blen < sizeof(a20_idl_envelope_t))
         return 1;
 
-    switch (buf[0]) {
+    a20_idl_envelope_t env;
+    a20_memcpy(&env, buf, sizeof(env));
+    if (env.version != A20_SERVICES_IDL_VERSION || env.size != blen)
+        return 1;
+
+    switch (env.type) {
     case RTCD_REQ_TIME: {
         uint64_t ns = rtc_read_ns();
-        a20_idl_rtcd_time_response_t rep = {
+        struct {
+            a20_idl_envelope_t env;
+            a20_idl_rtcd_time_response_t body;
+        } rep = {
+            { A20_SERVICES_IDL_VERSION, RTCD_REPLY_TIME,
+              sizeof(a20_idl_envelope_t) + sizeof(a20_idl_rtcd_time_response_t) },
+            {
             ns / 1000000000ULL, ns % 1000000000ULL
+            }
         };
         a20_channel_send(ep, &rep, sizeof(rep), 0, 0);
         return 1;
     }
     case RTCD_REQ_ALARM: {
-        if (blen < 1 + sizeof(a20_idl_rtcd_alarm_request_t))
+        if (blen != sizeof(a20_idl_envelope_t) + sizeof(a20_idl_rtcd_alarm_request_t))
             return 1;
         a20_idl_rtcd_alarm_request_t req;
-        a20_memcpy(&req, &buf[1], sizeof(req));
+        a20_memcpy(&req, &buf[sizeof(a20_idl_envelope_t)], sizeof(req));
         uint32_t ms = req.milliseconds;
         rtc_set_alarm_ns(rtc_read_ns() + (uint64_t)ms * 1000000ULL);
         *alarm_pending = 1; /* async reply is sent when the IRQ fires */
@@ -136,7 +148,15 @@ int main(int argc, char **argv, char **envp)
             grtc_clear_alarm(g_rtc);
             if (alarm_pending) {
                 uint64_t ns = rtc_read_ns();
-                a20_channel_send(ep, &ns, sizeof(ns), 0, 0);
+                struct {
+                    a20_idl_envelope_t env;
+                    a20_idl_rtcd_time_response_t body;
+                } rep = {
+                    { A20_SERVICES_IDL_VERSION, RTCD_REPLY_ALARM,
+                      sizeof(a20_idl_envelope_t) + sizeof(a20_idl_rtcd_time_response_t) },
+                    { ns / 1000000000ULL, ns % 1000000000ULL }
+                };
+                a20_channel_send(ep, &rep, sizeof(rep), 0, 0);
                 alarm_pending = 0;
             }
             a20_device_irq_ack(GOLDFISH_RTC_IRQ);
