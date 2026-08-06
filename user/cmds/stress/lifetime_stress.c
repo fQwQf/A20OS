@@ -154,7 +154,6 @@ static int compare_stats(const lifetime_stats_t *before,
     CHECK_FIELD(task_objects);
     CHECK_FIELD(task_refs);
     CHECK_FIELD(listed_tasks);
-    CHECK_FIELD(listed_refs);
     CHECK_FIELD(pid_entries);
     CHECK_FIELD(wait_entries);
     CHECK_FIELD(wake_entries);
@@ -167,6 +166,68 @@ static int compare_stats(const lifetime_stats_t *before,
     if (after->lifetime_errors != 0)
         return fail("post-stress-lifetime-errors");
     return 0;
+}
+
+static int ownership_stats_equal(const lifetime_stats_t *a,
+                                 const lifetime_stats_t *b)
+{
+#define SAME_FIELD(field) do { if (a->field != b->field) return 0; } while (0)
+    SAME_FIELD(task_objects);
+    SAME_FIELD(task_refs);
+    SAME_FIELD(listed_tasks);
+    SAME_FIELD(pid_entries);
+    SAME_FIELD(wait_entries);
+    SAME_FIELD(wake_entries);
+    SAME_FIELD(timeout_entries);
+    SAME_FIELD(timeout_capacity);
+    SAME_FIELD(timeout_duplicate_rejections);
+    SAME_FIELD(timeout_stale_expirations);
+    SAME_FIELD(timeout_heap_violations);
+#undef SAME_FIELD
+    return 1;
+}
+
+/*
+ * SMP scheduler references move between listed user tasks and unlisted idle
+ * tasks as runqueue ownership is transferred to dispatch/current CPU slots.
+ * Therefore listed_refs is a useful point-in-time diagnostic, but not a stable
+ * cross-time baseline.  task_refs is the authoritative global ownership count;
+ * listed_tasks and pid_entries prove that all published children were reaped.
+ * Require two consecutive equal samples for those stable fields, then wait for
+ * cleanup to return to that baseline.  Monotonic error counters are still
+ * rejected by read_stats immediately.
+ */
+static int read_stable_stats(lifetime_stats_t *stats)
+{
+    lifetime_stats_t previous;
+    if (read_stats(&previous) != 0)
+        return 1;
+    for (int attempt = 0; attempt < 64; attempt++) {
+        settle();
+        lifetime_stats_t current;
+        if (read_stats(&current) != 0)
+            return 1;
+        if (ownership_stats_equal(&previous, &current)) {
+            *stats = current;
+            return 0;
+        }
+        previous = current;
+    }
+    printf("LIFETIME_STRESS: FAIL unstable initial baseline\n");
+    return 1;
+}
+
+static int wait_for_baseline(const lifetime_stats_t *baseline,
+                             lifetime_stats_t *last)
+{
+    for (int attempt = 0; attempt < 64; attempt++) {
+        settle();
+        if (read_stats(last) != 0)
+            return 1;
+        if (ownership_stats_equal(baseline, last))
+            return 0;
+    }
+    return compare_stats(baseline, last);
 }
 
 static int wait_any_exit(pid_t pid, const char *what)
@@ -530,7 +591,7 @@ int main(void)
     printf("LIFETIME_STRESS: start\n");
     settle();
     lifetime_stats_t before;
-    if (read_stats(&before) != 0)
+    if (read_stable_stats(&before) != 0)
         return 1;
 
     for (size_t i = 0; i < sizeof(existing) / sizeof(existing[0]); i++) {
@@ -549,11 +610,8 @@ int main(void)
     if (timeout_capacity_boundaries(&before) != 0)
         return 1;
 
-    settle();
     lifetime_stats_t after;
-    if (read_stats(&after) != 0)
-        return 1;
-    if (compare_stats(&before, &after) != 0)
+    if (wait_for_baseline(&before, &after) != 0)
         return 1;
 
     printf("LIFETIME_STRESS: PASS\n");

@@ -60,6 +60,7 @@ static inline void arch_irq_enable(void) { arch_local_irq_enable(); }
 static inline int arch_local_irq_enabled(void) { return arch_irqs_enabled(); }
 static inline void arch_tlb_flush(void) { arch_mb(); }
 static inline void arch_tlb_flush_page(uint64_t addr) { (void)addr; arch_mb(); }
+static inline void arch_tlb_flush_page_local(uint64_t addr) { arch_tlb_flush_page(addr); }
 
 static inline void arch_set_task_pointer(void *task) { armv7m_task_pointer = task; }
 static inline void *arch_get_task_pointer(void) { return armv7m_task_pointer; }
