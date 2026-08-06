@@ -32,6 +32,7 @@
 #include "drivers/core/driver_hwapi.h"
 #include "drivers/bus/pci_bus.h"
 #include "drivers/char/uart.h"
+extern void input_mux_wake(void);
 #include "core/sync.h"
 #include "core/timer.h"
 #include "proc/park.h"
@@ -385,6 +386,7 @@ const struct drv_export drv_export_table[] = {
     /* scheduling / wait primitives used by module completion paths */
     { "proc_park_prepare",   (void *)proc_park_prepare },
     { "proc_yield",          (void *)proc_yield },
+    { "arch_current_cpu_id", (void *)arch_current_cpu_id },
     { "proc_park_commit",    (void *)proc_park_commit },
     { "proc_park_cancel",    (void *)proc_park_cancel },
     { "proc_park_finish",    (void *)proc_park_finish },
@@ -412,6 +414,10 @@ const struct drv_export drv_export_table[] = {
     { "dma_free_coherent_aligned",  (void *)dma_free_coherent_aligned },
     { "dma_sync_for_cpu",    (void *)dma_sync_for_cpu },
     { "dma_sync_for_device", (void *)dma_sync_for_device },
+    /* input mux wake path (vinput module ISRs) */
+    { "input_mux_wake",      (void *)input_mux_wake },
+    /* virtio PCI transport setup (vinput module PCI path) */
+    { "pci_virtio_transport_init", (void *)pci_virtio_transport_init },
 #if defined(CONFIG_X86_64)
     { "firmware_acpi_tpm2",  (void *)firmware_acpi_tpm2 },
 #endif
