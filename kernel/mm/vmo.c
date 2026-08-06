@@ -109,11 +109,9 @@ pfn_t vmo_get_page(struct vmo *vmo, uint32_t index)
     void *va = pfn_to_virt(pfn);
     uint32_t *probe = (uint32_t *)va;
     if (*probe != 0 || probe[1] != 0) {
-        printf("[VMO-PAGE] vmo=%p idx=%u new pfn=%lu had content 0x%08x/0x%08x\n",
-               (void *)vmo, index, (unsigned long)pfn, (unsigned)*probe,
-               (unsigned)probe[1]);
-        extern void frame_trace_dump_pfn(pfn_t pfn);
-        frame_trace_dump_pfn(pfn);
+        /* Benign since the buddy does not zero on free; counted so the
+         * signal survives without interleaving into user serial output. */
+        a20_objstat_add(&g_a20_objstats.vmo_dirty_frames, 1);
     }
     memset(va, 0, PAGE_SIZE);
     vmo->pages[index] = pfn;
@@ -167,11 +165,8 @@ int vmo_get_page_charged(struct vmo *vmo, uint32_t index,
     void *va = pfn_to_virt(pfn);
     uint32_t *probe = (uint32_t *)va;
     if (*probe != 0 || probe[1] != 0) {
-        printf("[VMO-PAGE] vmo=%p idx=%u new pfn=%lu had content 0x%08x/0x%08x\n",
-               (void *)vmo, index, (unsigned long)pfn, (unsigned)*probe,
-               (unsigned)probe[1]);
-        extern void frame_trace_dump_pfn(pfn_t pfn);
-        frame_trace_dump_pfn(pfn);
+        /* See vmo_get_page: legal reuse, counted not printed. */
+        a20_objstat_add(&g_a20_objstats.vmo_dirty_frames, 1);
     }
     memset(va, 0, PAGE_SIZE);
     vmo->pages[index] = pfn;
