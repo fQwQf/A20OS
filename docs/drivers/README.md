@@ -7,7 +7,8 @@
 ## 推荐阅读顺序
 
 1. [从零开发第一个驱动](getting-started.md)：从 PCI 网卡模板入手，走通创建、注册、构建和调试。
-2. [核心模型](core-model.md)：`device_t`、`driver_t`、`bus_type_t` 和完整的 probe/remove 模板。
+2. [可安装内核驱动](kernel-modules.md)：可加载内核模块、DriverStore 和当前边界。
+3. [核心模型](core-model.md)：`device_t`、`driver_t`、`bus_type_t` 和完整的 probe/remove 模板。
 3. 根据总线继续读：
    - [总线与平台](bus-and-platform.md)：platform device、板级资源和 MMIO/IRQ。
    - [PCI 与 VirtIO](pci-and-virtio.md)：PCI ID、BAR、ECAM、VirtIO transport。
@@ -21,6 +22,7 @@
 | 文档 | 说明 |
 |---|---|
 | [getting-started](getting-started.md) | 第一个驱动的完整流程 |
+| [kernel-modules](kernel-modules.md) | 可安装内核模块、框架 API 与 DriverStore |
 | [core-model](core-model.md) | 核心对象与生命周期 |
 | [device-classes](device-classes.md) | 功能类的接口约定 |
 | [bus-and-platform](bus-and-platform.md) | 平台与总线枚举 |
