@@ -107,7 +107,9 @@ echo "BUILDSTORM_STAGE7_MATRIX official_tests_commit=$official_tests_commit"
 echo "BUILDSTORM_STAGE7_MATRIX cache=$FINAL_EVAL_IMAGE_CACHE_DIR work=$FINAL_EVAL_WORK_DIR"
 started_at=$(date +%s)
 
-exact_lifetime_fields='^(task_objects|task_refs|listed_tasks|listed_refs|pid_entries|runqueue_entries|dispatching_tasks|cpu_owned_tasks|wait_entries|wake_entries|timeout_entries|open_fds|vfile_objects|page_cache_dirty|page_cache_pinned|zombies|lifetime_errors):'
+lifetime_field_names='task_objects task_refs listed_tasks listed_refs pid_entries runqueue_entries dispatching_tasks cpu_owned_tasks wait_entries wake_entries timeout_entries open_fds vfile_objects vnode_objects page_cache_dirty page_cache_pinned zombies lifetime_errors'
+lifetime_fields='^(task_objects|task_refs|listed_tasks|listed_refs|pid_entries|runqueue_entries|dispatching_tasks|cpu_owned_tasks|wait_entries|wake_entries|timeout_entries|open_fds|vfile_objects|vnode_objects|page_cache_dirty|page_cache_pinned|zombies|lifetime_errors):'
+zero_after_fields='page_cache_dirty page_cache_pinned zombies lifetime_errors'
 
 metadata_value() {
     local key=$1
@@ -117,39 +119,54 @@ metadata_value() {
 
 audit_lifetime() {
     local log=$1
-    local before after lifetime_lines vnode_before vnode_after
-    before=$(mktemp)
-    after=$(mktemp)
+    local lifetime_lines
     lifetime_lines=$(mktemp)
-    rg "$exact_lifetime_fields" "$log" >"$lifetime_lines"
-    awk -F': ' '
-        !seen[$1]++ {
-            order[++count] = $1
-            printf "%s: %lu\n", $1, $2 + 0
+    rg "$lifetime_fields" "$log" >"$lifetime_lines"
+    if ! awk -F': ' \
+        -v required="$lifetime_field_names" \
+        -v zero_after="$zero_after_fields" '
+        BEGIN {
+            required_count = split(required, required_fields, " ")
+            zero_count = split(zero_after, zero_fields, " ")
+            for (i = 1; i <= zero_count; i++)
+                must_be_zero[zero_fields[i]] = 1
         }
-    ' "$lifetime_lines" >"$before"
-    awk -F': ' '
-        !seen[$1]++ { order[++count] = $1 }
-        { value[$1] = $2 + 0 }
+        {
+            count[$1]++
+            if (count[$1] == 1)
+                before[$1] = $2 + 0
+            after[$1] = $2 + 0
+        }
         END {
-            for (i = 1; i <= count; i++)
-                printf "%s: %lu\n", order[i], value[order[i]]
+            failed = 0
+            for (i = 1; i <= required_count; i++) {
+                field = required_fields[i]
+                if (count[field] < 2) {
+                    printf "missing lifetime snapshots field=%s count=%u\n", \
+                        field, count[field] > "/dev/stderr"
+                    failed = 1
+                    continue
+                }
+                if (after[field] > before[field]) {
+                    printf "lifetime resource growth field=%s before=%u after=%u\n", \
+                        field, before[field], after[field] > "/dev/stderr"
+                    failed = 1
+                }
+                if (must_be_zero[field] && after[field] != 0) {
+                    printf "nonzero terminal lifetime field=%s after=%u\n", \
+                        field, after[field] > "/dev/stderr"
+                    failed = 1
+                }
+            }
+            exit failed
         }
-    ' "$lifetime_lines" >"$after"
+    ' "$lifetime_lines"; then
+        echo "BUILDSTORM_STAGE7_MATRIX resource-baseline-invalid log=$log" >&2
+        rm -f "$lifetime_lines"
+        return 1
+    fi
     rm -f "$lifetime_lines"
-    if ! cmp -s "$before" "$after"; then
-        echo "BUILDSTORM_STAGE7_MATRIX resource-baseline-mismatch log=$log" >&2
-        diff -u "$before" "$after" >&2 || true
-        rm -f "$before" "$after"
-        return 1
-    fi
-    rm -f "$before" "$after"
-    vnode_before=$(awk '/^vnode_objects:/{print $2; exit}' "$log")
-    vnode_after=$(awk '/^vnode_objects:/{value=$2} END{print value}' "$log")
-    if (( vnode_after > vnode_before )); then
-        echo "BUILDSTORM_STAGE7_MATRIX vnode-growth before=$vnode_before after=$vnode_after log=$log" >&2
-        return 1
-    fi
+    echo "BUILDSTORM_STAGE7_MATRIX resource-baseline-ok log=$log"
 }
 
 run_one() {
