@@ -46,7 +46,7 @@ make ARCH=aarch64 BOARD=virtualbox-aarch64 ABI=both kernel-only -j4make ARCH=aar
 
 跨架构结论分三级记录：只编译通过；设备枚举并绑定；实际 DMA/I/O 完成。只有第三级可以写“运行验证”。某架构的 board 没有 PCI enumerator 时，HDA/NVMe 编译成功只能计入第一级。
 
-不相关架构可按改动范围缩减，但修改 driver core、class、PCI、VirtIO 或 hwapi 时应扩大矩阵。本地门禁入口见 [testing/testing-gates.md](../testing/testing-gates.md)。
+不相关架构可按改动范围缩减，但修改 driver core、class、PCI、VirtIO 或 hwapi 时应扩大矩阵。本地门禁入口见 [testing/testing-gates.md](../../testing/testing-gates.md)。
 
 ## probe 测试表
 
@@ -70,7 +70,7 @@ QEMU GUI 路径必须跑：
 make smoke-qemu-gui-x86_64 SMOKE_TIMEOUT=60make smoke-qemu-gui-riscv64 SMOKE_TIMEOUT=90make smoke-qemu-gui-aarch64 SMOKE_TIMEOUT=90make smoke-qemu-gui-arm32 SMOKE_TIMEOUT=90make smoke-qemu-gui-loongarch64 SMOKE_TIMEOUT=90
 ```
 
-这些门禁不依赖宿主图形会话。它们覆盖 PCI 和 VirtIO-MMIO transport，以及 32/64 位用户态，以 headless display 启动 GUI rootfs，要求 VirtIO GPU、两个 VirtIO input 实例和用户态 desktop 全部就绪；通过 QMP 抓取实际 scanout 并拒绝纯黑/空 framebuffer；最后注入按键并要求客户机产生 input event。日志和 PPM 截图保存在 `.kernel-build/smoke/qemu-gui-x86_64/`。因此“能链接”或“串口能启动”不能替代此项验证。完整门禁说明见 [testing/testing-gates.md](../testing/testing-gates.md)。
+这些门禁不依赖宿主图形会话。它们覆盖 PCI 和 VirtIO-MMIO transport，以及 32/64 位用户态，以 headless display 启动 GUI rootfs，要求 VirtIO GPU、两个 VirtIO input 实例和用户态 desktop 全部就绪；通过 QMP 抓取实际 scanout 并拒绝纯黑/空 framebuffer；最后注入按键并要求客户机产生 input event。日志和 PPM 截图保存在 `.kernel-build/smoke/qemu-gui-x86_64/`。因此“能链接”或“串口能启动”不能替代此项验证。完整门禁说明见 [testing/testing-gates.md](../../testing/testing-gates.md)。
 
 block：首尾 LBA、越界、零长度、跨内部 chunk、读后写回、flush、错误恢复。不要在装有唯一数据的镜像上做破坏性测试。
 
@@ -99,7 +99,7 @@ display：模式信息、pitch、全屏和边界矩形 flush、映射重叠拒�
 | 失败门禁 | 先检查什么 | 下一步 |
 |---|---|---|
 | `git diff --check` 报错 | 行尾空格、tab 混用、文件尾空行 | 修复并重新 `git diff --check` |
-| `make check-driver-core-model` | driver core 头文件、ID 表、class ops 是否匹配规范 | 对照 [drivers/core-model.md](core-model.md) 和 `kernel/include/drivers/` 修正 |
+| `make check-driver-core-model` | driver core 头文件、ID 表、class ops 是否匹配规范 | 对照 [drivers/core-model.md](../guide/core-model.md) 和 `kernel/include/drivers/` 修正 |
 | `make check-doc-drift` | 文档与代码中同名常量、命令或矩阵不一致 | 同步文档和实现，确保命令矩阵和真实 Makefile 目标一致 |
 | `make smoke-driver-lifecycle` 失败 | 合成 bus/device 注册、probe 失败清理、unregister 路径 | 加 `CONFIG_DRIVER_LIFECYCLE_TEST=y` 日志，确认失败点是否释放资源 |
 | 构建矩阵中某一架构失败 | 是否用了 `#ifdef CONFIG_BOARD_` 或架构私有头 | 把板级常量移到 platform，把可跨架构代码改成通用 PCI/MMIO |
@@ -113,7 +113,7 @@ display：模式信息、pitch、全屏和边界矩形 flush、映射重叠拒�
 
 - [ ] ID、资源大小、DMA 地址宽度来自硬件手册并已验证。
 - [ ] 驱动不依赖板级地址或架构私有 include。
-- [ ] class 返回值符合 [device-classes.md](device-classes.md)。
+- [ ] class 返回值符合 [device-classes.md](../guide/device-classes.md)。
 - [ ] probe 每个失败点有逆序清理，remove 可重复。
 - [ ] IRQ、DMA、barrier、cache ownership 正确。
 - [ ] 多实例状态不错误地放在单全局对象；若暂限单实例已记录。
