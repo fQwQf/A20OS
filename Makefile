@@ -3797,6 +3797,7 @@ smoke-native-contract:
 		> "$$log" 2>&1 || status=$$?; \
 	if grep -q 'ralg ok' "$$log" && grep -q 'bp ok' "$$log" && \
 	   grep -q 'evqc ok' "$$log" && grep -q 'vmol ok' "$$log" && \
+	   grep -q 'dma ok' "$$log" && \
 	   grep -q 'System is going down for power-off NOW' "$$log"; then \
 		echo "smoke-native-contract: PASS; log saved to $$log"; \
 	else \
