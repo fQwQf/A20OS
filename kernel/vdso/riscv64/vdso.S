@@ -3,14 +3,16 @@
  *
  * Linked at vaddr 0 with file offsets == virtual offsets so that the raw
  * binary doubles as the in-memory image; musl computes the load bias from
- * PT_LOAD itself.  The vvar page address is absolute and must match
- * A20_VVAR_VA in kernel/include/mm/vdso.h.
+ * PT_LOAD itself.  The absolute vvar address comes from the same shared
+ * layout header used by the kernel mapper.
  *
  * Time math: ns = base_ns + ((rdtime - base_cyc) * mult) >> 32, where
  * mult = (1e9 << 32) / timebase_freq.  The product is 128-bit wide
  * (mulhu/mul) and the seqlock retries while the kernel updates the anchor.
  */
-    .equ VVAR_ADDR,  0x3FFC2000
+#include "mm/vdso_layout.h"
+
+    .equ VVAR_ADDR,  A20_VVAR_VA
     .equ VVAR_SEQ,   0
     .equ VVAR_MULT,  8
     .equ VVAR_BOOT,  16
