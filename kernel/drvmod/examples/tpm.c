@@ -1,31 +1,27 @@
 /*
- * A20OS — TPM 2.0 driver (TIS / FIFO interface).
+ * TPM 2.0 driver (TIS / FIFO) — drvmod module (x86_64).
  *
- * Detects a TPM via the ACPI TPM2 table (start method 6 = TIS FIFO) or a
- * legacy 0xFED40000 probe, and implements the minimal TIS FIFO state machine
- * plus the TPM2 command layer (Startup, GetCapability, GetRandom, PCR_Read).
- * Modern x86_64 firmware ships with a TPM 2.0, so this driver makes the
- * device available even though A20OS has no full security subsystem yet.
- *
- * The TIS register map and TPM2 command framing are defined by the TCG PC
- * Client Platform TPM Profile (TIS) / TPM 2.0 spec.  The FIFO state machine
- * (locality, burst count, COMMAND_READY/GO/DATA_AVAIL) follows the approach
- * of ViudiraTech/Uinxed-Kernel (Apache-2.0); this implementation is
- * rewritten for A20OS.  See docs/ACKNOWLEDGMENTS.md.
+ * Migrated from kernel/drivers/security/tpm.c (removed).  The TIS FIFO
+ * state machine and TPM2 command framing are unchanged; the module binds
+ * the kernel-registered "tpm" fixed device and discovers the TPM through
+ * the ACPI TPM2 table (firmware_acpi_tpm2).  With no TPM attached the
+ * probe returns -ENODEV and the module stays idle.
  */
-#ifdef CONFIG_TPM
 
-#include "drivers/bus/platform_bus.h"
-#include "drivers/core/driver_class.h"
-#include "drivers/core/driver_core.h"
-#include "drivers/core/driver_hwapi.h"
-#include "drivers/core/driver_register.h"
-#include "core/defs.h"
+#include "drvmod/drvmod.h"
+
 #include "core/klog.h"
 #include "core/string.h"
 #include "core/timer.h"
-#include "mm/mm.h"
-#include "arch/x86_64/include/firmware.h"
+#include "core/lock.h"
+#include "core/types.h"
+#include "core/defs.h"
+#include "drivers/core/driver_hwapi.h"
+
+#if defined(CONFIG_X86_64)
+extern uint64_t firmware_acpi_tpm2(void);
+#endif
+
 
 /* ------------------------------------------------------------------ */
 /* TIS register map (locality 0)                                       */
@@ -320,28 +316,38 @@ static int tpm_tis_init(uintptr_t base, uint64_t phys) {
     return 0;
 }
 
-static int tpm_probe(device_t *dev) {
+
+
+
+
+
+
+
+static int tpm_probe(drv_device_t *dev)
+{
     (void)dev;
+#if defined(CONFIG_X86_64)
     uint64_t tpm_phys = firmware_acpi_tpm2();
     if (!tpm_phys)
         return -ENODEV;
     return tpm_tis_init(PAGE_OFFSET + (uintptr_t)tpm_phys, tpm_phys);
+#else
+    return -EOPNOTSUPP;
+#endif
 }
 
-static const device_id_t tpm_ids[] = {
-    { .vendor = 0, .device = 0,
-      .subvendor = VENDOR_ANY, .subdevice = DEVICE_ANY },
-    { 0 },
-};
+static drv_driver_t g_modinfo;
 
-static driver_t tpm_driver = {
-    .name = "tpm",
-    .id_table = tpm_ids,
-    .bus = NULL,
-    .probe = tpm_probe,
-    .class_type = DEV_CLASS_NONE,
-};
-
-DRIVER_REGISTER(tpm_driver);
-
-#endif /* CONFIG_TPM */
+uintptr_t DriverEntry(drv_driver_t **out)
+{
+    g_modinfo.name = "tpm";
+    g_modinfo.match_count = 1;
+    g_modinfo.match[0].bus = 0;               /* fixed/system */
+    g_modinfo.match[0].vendor = 0x54504D00UL; /* "TPM\0" */
+    g_modinfo.match[0].device = 0;
+    g_modinfo.probe = tpm_probe;
+    g_modinfo.remove = NULL;
+    if (out)
+        *out = &g_modinfo;
+    return 0;
+}
