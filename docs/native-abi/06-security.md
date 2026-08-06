@@ -103,7 +103,8 @@ $$\forall i.\ \rho_i(handle) \subseteq \rho_{i-1}(handle)$$
 | shm | R, W, Map, Stat, Dup, Transfer, Control | 共享内存 |
 | device | R, W, Map, Stat, Seek, Dup, Transfer, Control | 设备操作 |
 | ns | Stat, Dup, Transfer, Control, Admin | 命名空间 |
-| debug | Stat, Dup, Transfer, Control, Admin | 调试 |
+| debug | Read, Write, Wait, Signal, Stat, Dup, Transfer, Control, Admin | 调试会话 |
+| ext_prog | Read, Dup, Transfer, Control | 内核扩展程序 |
 
 ### 3.2 操作-权限映射
 
@@ -325,12 +326,33 @@ Handle 过期后有两种行为：
 ### 8.1 调试接口
 
 ```c
-int64_t debug_attach(a20_handle_t task);    /* 需要 ADMIN 权限 */int64_t debug_read_regs(a20_handle_t thread, a20_regs_t *out);int64_t debug_write_regs(a20_handle_t thread, const a20_regs_t *in);int64_t debug_map_memory(a20_handle_t task, a20_handle_t *out);
+/* 会话对象：A20_OBJ_DEBUG，object = 目标 pid */
+int64_t debug_attach(a20_handle_t task);              /* ADMIN on task handle */
+int64_t debug_traceme(void);                          /* 子任务声明可被调试 */
+int64_t debug_wait(a20_handle_t dbg, uint64_t timeout_us, a20_debug_event_info_t *out);  /* WAIT */
+int64_t debug_event(a20_handle_t dbg, a20_debug_event_info_t *out);                      /* WAIT */
+int64_t debug_resume(a20_handle_t dbg, uint32_t mode);                                   /* CONTROL */
+int64_t debug_detach(a20_handle_t dbg);               /* CONTROL */
+int64_t debug_kill(a20_handle_t dbg);                 /* SIGNAL */
+int64_t debug_read_regs(a20_handle_t dbg, a20_regs_t *out);        /* READ */
+int64_t debug_write_regs(a20_handle_t dbg, const a20_regs_t *in);  /* WRITE */
+int64_t debug_read(a20_handle_t dbg, uint64_t addr, void *buf, uint64_t len);   /* READ */
+int64_t debug_write(a20_handle_t dbg, uint64_t addr, const void *buf, uint64_t len); /* WRITE */
+int64_t debug_map_memory(a20_handle_t dbg, uint64_t addr, uint64_t len, uint32_t prot); /* READ */
 ```
 
-调试能力通过 handle rights 控制。只有持有 task 的 `ADMIN` 权限的进程才能附加调试器。
+调试能力通过 handle rights 控制。只有持有 task 的 `ADMIN` 权限的进程才能
+附加调试器（`debug_attach` 在 `proc_debug_attach` 中还会复核 uid/capability，
+纵深防御）。`A20_OBJ_DEBUG` 的合法权限为
+READ | WRITE | WAIT | SIGNAL | STAT | DUP | TRANSFER | CONTROL | ADMIN，
+持有者可自行用 `handle_replace` 收窄；`spawn`/`thread_create` 返回的
+task handle 自带 ADMIN（创建者对创建对象拥有管理权）。
 
-> **当前实现范围（NATIVE_DEBUG_LIMITED_CONTRACT）**：`debug_attach`、`debug_read_regs`、`debug_write_regs` 和 `debug_map_memory` 仅提供有限的兼容性辅助，用于读取/修改目标线程的寄存器以及将目标 task 的内存映射到当前地址空间。它们**不**实现完整的 stop/resume、单步执行、断点/观察点、watchpoint 或 ptrace 风格的调试语义。完整的调试器控制（如断点、单步、信号注入）在当前 Native ABI 中属于明确 scope-out 的功能，未来如需支持需重新设计安全边界。
+> **实现范围（NATIVE_DEBUG_CONTRACT）**：Debug 分区为完整实现，与 Linux ABI
+> 的 ptrace(2) 共享同一内核状态机（`kernel/proc/debug.c` 的 `proc_debug_*`）。
+> 停止/恢复、寄存器与地址空间访问、exec/exit 事件、syscall 边界停止均可用。
+> 已知边界：无硬件单步（riscv64，与 Linux 一致）、无 TRACEFORK/CLONE 事件、
+> 无 seccomp 集成；`debug_traceme` 与 `debug_attach` 互斥（同 Linux）。
 
 ### 8.2 Handle 查询审计
 

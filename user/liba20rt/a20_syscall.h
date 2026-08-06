@@ -253,6 +253,11 @@ static inline int64_t a20_syscall6(uint64_t nr, uint64_t a0, uint64_t a1,
 #define A20_SYS_netd_attach        0x0D00
 #define A20_SYS_netd_sock_register  0x0D01
 #define A20_SYS_netd_tx_send       0x0D02
+#define A20_SYS_ext_prog_load      0x0E00
+#define A20_SYS_ext_prog_attach    0x0E01
+#define A20_SYS_ext_prog_detach    0x0E02
+#define A20_SYS_ext_prog_release   0x0E03
+#define A20_SYS_ext_point_info     0x0E04
 #define A20_SYS_registry_claim    0x0A03
 
 #endif
