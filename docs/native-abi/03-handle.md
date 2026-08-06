@@ -338,6 +338,8 @@ int64_t handle_query(a20_handle_t handle, a20_handle_info_t *out);
 
 只读操作。返回对象类型、状态、权限和调试 hint。需要 `STAT` 权限。
 
+**类型合法权限掩码与 STAT（2026-08 修订）**：`handle_query` 依赖 STAT，因此所有"用户可观察自身属性"的对象类型的类型合法掩码（`a20_type_rights[]`）都必须包含 STAT。此前 `CHANNEL_ENDPOINT` 与 `EVENT_QUEUE` 的掩码缺少 STAT （EVENT_QUEUE 安装时请求了 STAT 但被掩码静默剥离），导致端点/队列句柄无法 query。已修复：两类掩码均含 STAT，channel 端点创建时安装`READ|WRITE|STAT|DUP|TRANSFER`。该一致性由 `user/tests/test_native_contract.c` 的 `ralg` 分区固化（`make smoke-native-contract`）。
+
 ---
 
 ## 5. 并发协议
@@ -504,10 +506,7 @@ L0 (IRQ) < L1 (handle table) < L2 (内核对象) < L3 (调度器) < L4 (mm)
 
 ### Debug (0x0900)
 
-调试会话对象（`A20_OBJ_DEBUG`）的操作，包装内核调试接口 `proc_debug_*`
-（`kernel/proc/debug.c`，ABI 无关）。权限映射见 [06-security.md](06-security.md)
-§8.1：READ=read/read_regs/map_memory，WRITE=write/write_regs，
-WAIT=wait/event，SIGNAL=kill，CONTROL=resume/detach，ADMIN=attach。
+调试会话对象（`A20_OBJ_DEBUG`）的操作，包装内核调试接口 `proc_debug_*` （`kernel/proc/debug.c`，ABI 无关）。权限映射见 [06-security.md](06-security.md) §8.1：READ=read/read_regs/map_memory，WRITE=write/write_regs，WAIT=wait/event，SIGNAL=kill，CONTROL=resume/detach，ADMIN=attach。
 
 | 编号 | 名称 | 签名 | 说明 |
 |------|------|------|------|
@@ -541,8 +540,7 @@ WAIT=wait/event，SIGNAL=kill，CONTROL=resume/detach，ADMIN=attach。
 
 ### Kernel extension (0x0E00)
 
-扩展程序对象（`A20_OBJ_EXT_PROG`），设计见 docs/extensions.md：
-加载经过线性扫描验证的受限字节码程序并附着到内核扩展点。
+扩展程序对象（`A20_OBJ_EXT_PROG`），设计见 docs/extensions.md：加载经过线性扫描验证的受限字节码程序并附着到内核扩展点。
 
 | 编号 | 名称 | 签名 | 说明 |
 |------|------|------|------|
@@ -552,4 +550,4 @@ WAIT=wait/event，SIGNAL=kill，CONTROL=resume/detach，ADMIN=attach。
 | 0x0E03 | `ext_prog_release` | `int64_t ext_prog_release(a20_handle_t prog)` | 分离并释放 |
 | 0x0E04 | `ext_point_info` | `int64_t ext_point_info(uint32_t point, a20_ext_point_info_t *out)` | 查询扩展点信息 |
 
-**总计：124 个 syscall。**
+**总计：129 个 syscall。**
