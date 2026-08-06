@@ -139,8 +139,9 @@ Native ABI 是研究本体时，其核心数据面在 SMP 下不可靠意味着�
 （`drivers/dual/drv_env.h`）与首个共享设备协议层
 （`drivers/dual/goldfish_rtc.h`）生效；goldfish RTC 同一协议源码
 已在两种部署下运行：内核壳 boot probe 输出真实设备时间，用户壳
-`smoke-native-rtcd` PASS。IOMMU、DMA ops、所有权仲裁与第二个样板
-（候选 virtio-input）未开始。
+`smoke-native-rtcd` PASS。DMA ops、连续 DMA heap、所有权仲裁、第二个样板
+和功能态 virtqueue 已完成；IOMMU 当前为 discovery-only 骨架，
+`smoke-iommu-discovery` 可识别 QEMU `riscv-iommu-pci`，翻译尚未启用。
 
 ### 阶段四：服务接口 IDL 化
 
@@ -152,6 +153,9 @@ ad-hoc 手写结构。服务数量增长前引入 IDL（FIDL 式）：接口可�
 验收：svcmgr/registry/健康探针协议由 IDL 生成；新旧协议互操作期有
 版本协商；手写 proto 头退出活跃树。
 
+**状态**：常量层已完成：`a20_services.idl`、生成器和生成头已接入
+rtcd/svc/ubd；message 字段、绑定生成和版本协商仍待完成。
+
 ### 阶段五：Linux 人格层重建（starnix 式）
 
 在 Native 原语上重建 Linux ABI 的关键子集（fd 表→句柄表、mmap→VMO/
@@ -160,6 +164,9 @@ VMAR、pipe/AF_UNIX→channel、epoll→EventQ、futex→原生 futex），与�
 
 验收：选定测例集（CAgent 功能项为自然候选）在两种实现下同通过；
 性能数据记录中位数与异常值；差异清单公开为维护中的兼容性文档。
+
+**状态**：完整人格层未开始；当前仅记录 Native pipe 子集的下一步 PoC，
+不把 Linux ABI 直通实现冒充为人格层。
 
 ## 验证纪律
 
