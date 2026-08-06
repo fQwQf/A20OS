@@ -77,14 +77,22 @@ void kernel_main(void) {
 #if defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)
     extern void a20_registry_init(void);
 #endif
+    extern void kep_syscall_filter_init(void);
     printf("\n");
     printf("======================================\n");
     printf("    A20OS Kernel \n");
     printf("======================================\n");
     printf("Initializing system...\n");
 
+#if defined(CONFIG_UBSAN) && CONFIG_UBSAN
+    extern void ubsan_selftest(void);
+    ubsan_selftest();
+#endif
+
     trap_init();
     printf("[INIT] Trap initialized\n");
+    kep_syscall_filter_init();
+    printf("[INIT] Kernel extension points initialized\n");
     if (current_board && current_board->early_init) {
         current_board->early_init();
         printf("[INIT] Board early init done\n");
