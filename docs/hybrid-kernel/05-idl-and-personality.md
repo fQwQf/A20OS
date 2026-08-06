@@ -2,26 +2,42 @@
 
 ## IDL 当前状态
 
-服务协议常量已经从手写 proto 头迁移到
-`user/svc/a20_services.idl`。`tools/a20idl.py` 生成
-`user/svc/a20_services_idl.h`，rtcd、svcman 和 ubd 的协议头只保留
-槽位/设备常量并 include 生成头。
+服务协议已从手写 proto 头迁移到 `user/svc/a20_services.idl`。
+`tools/a20idl.py` 生成 `user/svc/a20_services_idl.h`，rtcd、svcman 和
+ubd 的协议头只保留槽位/设备常量并 include 生成头。
 
-当前已支持版本化常量和固定宽度 `message` 字段；rtcd 的 alarm request
-与 time response 已由生成结构体描述，wire layout 保持不变。下一步是
-增加边界/版本协商和双端绑定生成；在此之前不得把它声称为完整 FIDL。
+已实现：
 
-当前迁移范围包括 rtcd、svcman 和 ubd 的请求常量，以及 rtcd 的两种消息；`make check-a20-idl`
-会在 `a20os` conda 环境中重生成并比较活跃头。由于本机当前没有可用的
-`conda` 命令，该门禁需在配置好 `a20os` 的环境执行。
+- 版本化常量与固定宽度 `message` 字段（生成结构体，wire layout 保持）；
+- **版本化请求/响应信封**：所有服务消息携带 `{version, type, size}`
+  信封；rtcd 使用独立响应类型（`RTCD_REPLY_TIME/ALARM`），服务端
+  校验 version/size；`smoke-native-rtcd` 双向验证；
+- **svcmgr/echod 协议 IDL 化**：`SVCMGR_REQ_ECHO/CRASH` 版本化消息
+  替换裸 echo 与魔法字符串，echod 校验版本并忽略畸形消息而非误
+  崩溃；`smoke-native-svc` PASS；
+- `make check-a20-idl` 在 `a20os` conda 环境中重生成并比较活跃头
+  （本机无 conda 时需在配置好 `a20os` 的环境执行）。
 
-## Linux 人格层第一块
+registry 为内核 syscall 接口（0x0A03），不属于 channel 协议，不在
+IDL 范围。剩余：双端绑定代码生成与动态版本协商。
 
-Linux ABI 的完整人格层仍未完成；它要求把 fd、pipe、mmap、epoll、futex
-和 socket 语义建立在 Native 对象上，并与当前内核直通实现做语义 diff。
-当前 pipe facade 已有 byte-stream accumulator：大写入分块、部分读取
-保留剩余字节、已有 pending 数据的 readiness 不依赖再次 EventQ 边沿。
-后续顺序是接入 fd 表和 mmap/VMO，再对关闭、背压和 socket 做两种实现对照。
+## Linux 人格层
 
-本文档不把现有 Linux ABI 称为已完成的 starnix 实现。Native ABI 仍是
-系统本体，Linux 兼容层仍是后续人格负载。
+在 Native 原语上重建的 Linux 风格接口，两阶段已实现：
+
+1. `a20_personality.h` — channel-backed pipe facade：跨消息字节流
+   （NONBLOCK drain 拼接）、部分读取保留剩余、level 触发的就绪
+   （pending 数据保持可读直到耗尽）；
+2. `a20_linux.h` — 对象翻译层：fd 表（open/close/dup/read/write）、
+   匿名 mmap、pipe、socketpair、futex（ETIMEDOUT 映射）、epoll 风格
+   wait-many（共享 EventQ）；`smoke-native-linux` 六分区 PASS。
+
+**语义对照**：`user/cmds/core/pipe_ref.c` 用真实 Linux pipe(2) 执行
+与 native 实现相同的序列（部分读、跨消息字节流、level 就绪），
+`smoke-native-personality` 要求两个实现输出完全一致的 `PIPE_REF`
+行——native 与 Linux ABI 语义对照成立。
+
+剩余：fd 表 byte-stream 语义的完整覆盖、epoll level 触发通用化、
+更大测例集（CAgent 功能项）的语义 diff 与性能对照。本文档不把
+现有 Linux ABI 直通实现称为已完成的 starnix 人格层；Native ABI
+仍是系统本体，完整人格负载是后续工作。
