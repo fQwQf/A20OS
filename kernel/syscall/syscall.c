@@ -87,6 +87,14 @@ int64_t syscall_dispatch(trap_context_t *ctx)
 
         TRAP_CTX_SET_RET(ctx, ret);
         syscall_profile_record(num, start_time, syscall_profile_now());
+        /*
+         * Native tasks use checkpoint-style signal delivery for their own
+         * signal API, but core kernel signals (SIGSTOP from a debugger
+         * attach, SIGKILL, ptrace delivery) queue through the shared signal
+         * state and must reach the delivery boundary here, exactly like the
+         * Linux ABI path below.
+         */
+        signal_deliver_user(ctx);
         return ret;
     }
 #endif
