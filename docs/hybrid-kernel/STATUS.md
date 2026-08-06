@@ -32,6 +32,7 @@
 | 句柄类型掩码 STAT 一致性（端点/队列可 query） | 已实现（阶段一副产品） | `handle_table.c` 类型掩码 + `ralg` 分区 |
 | 双态部署驱动框架骨架（drv_env + 共享协议层） | 骨架已实现（改造阶段三起步） | goldfish RTC 同源码双态：内核壳 boot probe + `smoke-native-rtcd`，见 [04-dual-placement.md](04-dual-placement.md) |
 | 双态语义一致性验证（virtio-input 第二样板） | 已实现 | `smoke-dual-input`：同一共享协议在两种部署下读出相同设备身份；DMA ops 已进 drv_env（信任模型） |
+| 功能态用户驱动（virtio-input 事件面） | 已实现 | `smoke-dual-input`：全权初始化 + 共享 virtq + IRQ→EventQ，monitor `sendkey` 注入验证真实按键事件解码 |
 
 ## 正确性状态（SMP）
 
