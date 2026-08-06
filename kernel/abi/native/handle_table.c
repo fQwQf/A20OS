@@ -1,8 +1,8 @@
 /*
  * A20OS Native ABI — Handle table implementation.
  * Design reference: docs/native-abi/03-handle.md §2
- * Design inspiration: Windows NT kernel objects / handle + rights model and
- * Zircon (Fuchsia) handle transfer semantics; see docs/ACKNOWLEDGMENTS.md §3.
+ * Design inspiration: unified kernel-object handles with a rights model and
+ * capability-transfer semantics; see docs/ACKNOWLEDGMENTS.md §3.
  * NATIVE_HANDLE_CAPABILITY_TEST_CONTRACT: lookup/install/remove paths are the
  * checked surface for rights downgrade, temporal limits, labels, close/dup/
  * transfer, and partial-delivery consistency gates.
@@ -177,7 +177,7 @@ static int ht_grow(struct a20_ht_internal *ht)
     return 0;
 }
 
-static const a20_rights_t a20_type_rights[A20_OBJ_DEBUG + 1] = {
+static const a20_rights_t a20_type_rights[A20_OBJ_EXT_PROG + 1] = {
     [A20_OBJ_INVALID]          = 0,
     [A20_OBJ_TASK]             = A20_RIGHT_WAIT | A20_RIGHT_SIGNAL | A20_RIGHT_STAT |
                                  A20_RIGHT_DUP | A20_RIGHT_TRANSFER | A20_RIGHT_CONTROL |
@@ -208,13 +208,18 @@ static const a20_rights_t a20_type_rights[A20_OBJ_DEBUG + 1] = {
                                  A20_RIGHT_TRANSFER | A20_RIGHT_CONTROL,
     [A20_OBJ_NAMESPACE]        = A20_RIGHT_STAT | A20_RIGHT_DUP | A20_RIGHT_TRANSFER |
                                  A20_RIGHT_CONTROL | A20_RIGHT_ADMIN,
-    [A20_OBJ_DEBUG]            = A20_RIGHT_STAT | A20_RIGHT_DUP | A20_RIGHT_TRANSFER |
-                                 A20_RIGHT_CONTROL | A20_RIGHT_ADMIN,
+    [A20_OBJ_DEBUG]            = A20_RIGHT_READ | A20_RIGHT_WRITE |
+                                 A20_RIGHT_WAIT | A20_RIGHT_SIGNAL |
+                                 A20_RIGHT_STAT | A20_RIGHT_DUP |
+                                 A20_RIGHT_TRANSFER | A20_RIGHT_CONTROL |
+                                 A20_RIGHT_ADMIN,
+    [A20_OBJ_EXT_PROG]         = A20_RIGHT_READ | A20_RIGHT_DUP |
+                                 A20_RIGHT_TRANSFER | A20_RIGHT_CONTROL,
 };
 
 a20_rights_t a20_type_valid_rights(uint16_t type)
 {
-    if (type > A20_OBJ_DEBUG) return 0;
+    if (type > A20_OBJ_EXT_PROG) return 0;
     return a20_type_rights[type];
 }
 

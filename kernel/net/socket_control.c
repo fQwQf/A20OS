@@ -1,7 +1,6 @@
 #include "net/socket_internal.h"
 #include "net/netd_sock_proxy.h"
 #include "ipc/ipc.h"
-#include "sys/bpf.h"
 #include "core/klog.h"
 #include "core/string.h"
 #include "net/lwip_stack.h"
@@ -444,14 +443,9 @@ int net_setsockopt(int gfd, int level, int optname, const void *optval, size_t o
         }
     }
     if (level == SOL_SOCKET && optname == SO_ATTACH_BPF) {
-        if (!optval || optlen < sizeof(int))
-            return -EINVAL;
-        int prog_fd;
-        memcpy(&prog_fd, optval, sizeof(prog_fd));
-        if (!bpf_prog_is_loaded(prog_fd))
-            return -EBADF;
-        s->bpf_prog_fd = prog_fd;
-        return 0;
+        /* Socket filters are not wired to a KEP extension point yet; the
+         * net-packet extension point is the planned home for them. */
+        return -EOPNOTSUPP;
     }
     if (level == SOL_SOCKET && optname == SO_RCVTIMEO) {
         if (!optval || optlen < sizeof(long) * 2)

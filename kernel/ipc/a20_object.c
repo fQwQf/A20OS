@@ -16,6 +16,7 @@
 #include "ipc/handle_table.h"
 #include "mm/vmo.h"
 #include "ipc/objstats.h"
+#include "ext/kep.h"
 
 a20_objstats_t g_a20_objstats;
 
@@ -96,6 +97,11 @@ void a20_object_release(void *object, uint16_t type)
             a20_eventq_on_object_destroy(object, A20_OBJ_NAMESPACE);
             kfree(object);
         }
+        break;
+    case A20_OBJ_EXT_PROG:
+        /* Dropping the last handle releases the extension program; the
+         * kernel drops its references on detach / owner exit. */
+        (void)kep_prog_release((int)(intptr_t)object);
         break;
     default:
         break;

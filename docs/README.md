@@ -15,7 +15,7 @@
 - [OS-Design.md](OS-Design.md)：总体架构、双重 ABI 与模块组织
 - [process-scheduler.md](process-scheduler.md)：当前进程状态、CPU 所有权、 Park/Wake、timeout、信号与 SMP 调度协议
 - [testing/testing-gates.md](testing/testing-gates.md)：本地 smoke 测试与门禁检查
-- [drivers/getting-started.md](drivers/getting-started.md)：从第一个驱动开始理解内核接入方式
+- [drivers/getting-started.md](drivers/guide/getting-started.md)：从第一个驱动开始理解内核接入方式
 - [roadmap/a20os-improvement-todo.md](roadmap/a20os-improvement-todo.md)：当前公认需要改进的地方和切入方向
 
 ## 驱动开发
@@ -23,11 +23,11 @@
 如果你要添加或维护某个设备驱动：
 
 - [drivers/README.md](drivers/README.md)：驱动开发手册总入口
-- [drivers/core-model.md](drivers/core-model.md)：device、driver 与 bus 的核心模型
-- [drivers/runtime-contracts.md](drivers/runtime-contracts.md)：MMIO、IRQ、DMA 与锁的运行时契约
-- [drivers/pci-and-virtio.md](drivers/pci-and-virtio.md)：PCI 与 VirtIO 设备的接入方法
-- [drivers/display.md](drivers/display.md)：Framebuffer 与显示设备
-- [drivers/audio.md](drivers/audio.md)：通用音频 UAPI、HDA、virtio-sound 与 PC Speaker
+- [drivers/core-model.md](drivers/guide/core-model.md)：device、driver 与 bus 的核心模型
+- [drivers/runtime-contracts.md](drivers/guide/runtime-contracts.md)：MMIO、IRQ、DMA 与锁的运行时契约
+- [drivers/pci-and-virtio.md](drivers/guide/pci-and-virtio.md)：PCI 与 VirtIO 设备的接入方法
+- [drivers/display.md](drivers/classes/display.md)：Framebuffer 与显示设备
+- [drivers/audio.md](drivers/classes/audio.md)：通用音频 UAPI、HDA、virtio-sound 与 PC Speaker
 
 ## 平台移植与运行
 

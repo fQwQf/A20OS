@@ -84,7 +84,6 @@ int net_alg_socket_accept(net_socket_t *s, size_t *addrlen, int flags)
     child->domain = AF_ALG;
     child->type = s->type;
     child->protocol = s->protocol;
-    child->bpf_prog_fd = -1;
     child->nonblock = (flags & SOCK_NONBLOCK) != 0;
     child->bound = 1;
     child->connected = 1;

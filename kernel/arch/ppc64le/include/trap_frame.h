@@ -2,6 +2,7 @@
 #define _ARCH_PPC64LE_TRAP_H
 
 #include "core/types.h"
+#include "proc/debug_regs.h"
 #include "page_table.h"
 #include "platform.h"
 #include "asm/ppc64-regs.h"
@@ -210,4 +211,22 @@ static inline void arch_signal_restore_frame_extra(trap_context_t *ctx,
     (void)extra;
 }
 
+
+/* ---- debugging interface (kernel/proc/debug.c) ---- */
+static inline void arch_ptrace_rewind_syscall(trap_context_t *ctx) {
+    (void)ctx;
+}
+static inline void arch_ptrace_set_step(trap_context_t *ctx) {
+    (void)ctx;
+}
+static inline void arch_ptrace_export_regs(const trap_context_t *ctx,
+                                           proc_debug_regs_t *out) {
+    (void)ctx;
+    (void)out;
+}
+static inline void arch_ptrace_import_regs(trap_context_t *ctx,
+                                           const proc_debug_regs_t *in) {
+    (void)ctx;
+    (void)in;
+}
 #endif

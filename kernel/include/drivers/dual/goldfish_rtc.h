@@ -3,8 +3,9 @@
  *
  * Single source for the register map and register-level protocol of the
  * QEMU virt goldfish RTC (hw/rtc/goldfish_rtc.c, Linux goldfish driver).
- * Both the kernel-mode driver (kernel/drivers/char/goldfish_rtc_kdrv.c)
- * and the user-space driver (user/svc/rtcd.c) are built on this header;
+ * Both the kernel-mode driver (the drvmod module
+ * kernel/drvmod/examples/goldfish_rtc.c) and the user-space driver
+ * (user/svc/rtcd.c) are built on this header;
  * placement comes from drv_env.h (DRV_ENV_KERNEL / DRV_ENV_USER).
  */
 #ifndef _DRIVERS_DUAL_GOLDFISH_RTC_H
