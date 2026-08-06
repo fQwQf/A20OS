@@ -365,6 +365,7 @@ proc_wake_reason_t proc_park_commit_donate(proc_wait_token_t token,
         donate_to->eevdf_last_account = now;
         proc_get(donate_to); /* dispatch ref, consumed by context_switch */
         donate_to->dispatching = 1;
+        donate_to->owner_cpu = cur_cpu;
         spin_unlock_irqrestore(&proc_lock, flags);
         context_switch(donate_to);
     }

@@ -12,6 +12,8 @@
 #include "fs/fdtable.h"
 #include "fs/block_cache.h"
 #include "fs/page_cache.h"
+#include "fs/ext4.h"
+#include "fs/vfs/dcache.h"
 #include "proc/proc.h"
 #include "proc/proc_internal.h"
 #include "proc/lifetime.h"
@@ -686,9 +688,28 @@ static int procfs_fwrite(vfile_t *vf, const char *buf, size_t count) {
             return -EINVAL;
         return (int)count;
     }
+    if (p->type == PF_SYS_VM_DROP_CACHES) {
+        char tmp[32];
+        size_t n = count < sizeof(tmp) - 1 ? count : sizeof(tmp) - 1;
+        memcpy(tmp, buf, n);
+        tmp[n] = '\0';
+        int value = atoi(tmp);
+        if (value < 1 || value > 3)
+            return -EINVAL;
+
+        /* Match Linux's interface: bit 0 drops clean page-cache mappings;
+         * bit 1 drops dentry/inode caches.  Dirty or pinned pages stay live,
+         * and callers must sync first when they need a quiescent snapshot. */
+        if (value & 1)
+            page_cache_drop_clean();
+        if (value & 2) {
+            vfs_dcache_invalidate_all();
+            ext4_vnode_cache_prune_all();
+        }
+        return (int)count;
+    }
     if (p->type == PF_SYS_KERNEL_CORE_PATTERN ||
         p->type == PF_SYS_KERNEL_IO_URING_DISABLED ||
-        p->type == PF_SYS_VM_DROP_CACHES ||
         p->type == PF_SYS_FS_INOTIFY_MAX_QUEUED_EVENTS ||
         p->type == PF_SYS_FS_INOTIFY_MAX_USER_INSTANCES) {
         return (int)count;

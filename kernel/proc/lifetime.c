@@ -178,35 +178,36 @@ void proc_lifetime_snapshot(proc_lifetime_stats_t *stats)
             stats->state_violations++;
         if (t->state == PROC_ZOMBIE)
             stats->zombies++;
-        if (t->dispatching)
+        proc_sched_task_snapshot_t sched;
+        proc_sched_task_snapshot_locked(t, &sched);
+        if (sched.dispatching)
             stats->dispatching_tasks++;
 
-        unsigned memberships = proc_sched_task_runq_memberships_locked(t);
-        uint64_t runqueue_cpu_mask =
-            proc_sched_task_runq_cpu_mask_locked(t);
         unsigned cpu_memberships =
             proc_current_owner_memberships_locked(t);
-        stats->runqueue_entries += memberships;
-        if (memberships != (unsigned)!!t->on_rq)
+        stats->runqueue_entries += sched.memberships;
+        if (sched.memberships != (unsigned)!!sched.on_rq)
             stats->state_violations++;
-        if (t->on_rq &&
-            (t->cpu_id >= 64 ||
-             runqueue_cpu_mask != (1ULL << t->cpu_id)))
+        if (sched.on_rq &&
+            (sched.cpu_id >= 64 ||
+             sched.cpu_mask != (1ULL << sched.cpu_id)))
             stats->state_violations++;
-        if ((!!t->on_rq + !!t->dispatching + !!t->on_cpu) > 1)
+        if ((!!sched.on_rq + !!sched.dispatching + !!sched.on_cpu) > 1)
             stats->state_violations++;
-        if (t->on_rq && t->state != PROC_READY)
+        if (sched.on_rq && sched.state != PROC_READY)
             stats->state_violations++;
-        if (t->dispatching &&
-            (t->state != PROC_READY || t->owner_cpu >= CONFIG_NR_CPUS))
+        if (sched.dispatching &&
+            (sched.state != PROC_READY ||
+             sched.owner_cpu >= CONFIG_NR_CPUS))
             stats->state_violations++;
-        if (t->on_cpu &&
-            (t->state != PROC_RUNNING || t->owner_cpu >= CONFIG_NR_CPUS))
+        if (sched.on_cpu &&
+            (sched.state != PROC_RUNNING ||
+             sched.owner_cpu >= CONFIG_NR_CPUS))
             stats->state_violations++;
-        if (!!(t->dispatching || t->on_cpu) !=
-            (t->owner_cpu != PROC_CPU_NONE))
+        if (!!(sched.dispatching || sched.on_cpu) !=
+            (sched.owner_cpu != PROC_CPU_NONE))
             stats->state_violations++;
-        if (cpu_memberships != (unsigned)!!t->on_cpu)
+        if (cpu_memberships != (unsigned)!!sched.on_cpu)
             stats->state_violations++;
         if (t->destroy_started)
             stats->state_violations++;

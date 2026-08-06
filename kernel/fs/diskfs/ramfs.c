@@ -46,6 +46,12 @@ typedef struct {
 static ramfs_inode_t g_inode_table[RAMFS_MAX_INODES];
 static int g_next_inum = 1;
 static int g_ramfs_ready = 0;
+/*
+ * Directory entries and the shared inode table form one metadata graph.
+ * Individual inode data_lock instances protect regular-file contents only;
+ * they cannot serialize allocation or updates spanning a parent and child.
+ */
+static mutex_t g_ramfs_meta_lock = MUTEX_INIT;
 
 static vnode_ops_t g_ramfs_vnode_ops;
 static vfile_ops_t g_ramfs_fops;
@@ -261,6 +267,19 @@ static ramfs_inode_t *ramfs_find_in_dir(ramfs_inode_t *dir, const char *name) {
     return NULL;
 }
 
+static void ramfs_remove_dir_entry_locked(ramfs_inode_t *dir,
+                                          const char *name, int inum) {
+    ramfs_dir_entry_t *entries = ramfs_dir_entries(dir);
+    int count = ramfs_dir_entry_count(dir);
+    for (int i = 0; i < count; i++) {
+        if (entries[i].inum == inum && entries[i].name[0] != '\0' &&
+            strcmp(entries[i].name, name) == 0) {
+            entries[i].name[0] = '\0';
+            return;
+        }
+    }
+}
+
 static int ramfs_inode_lookup(ramfs_inode_t *dir, const char *name, ramfs_inode_t **out) {
     if (!dir || dir->type != FT_DIRECTORY) return -ENOTDIR;
     ramfs_inode_t *found = ramfs_find_in_dir(dir, name);
@@ -310,13 +329,14 @@ static void ramfs_init_storage(void) {
     printf("[RAMFS] Initialized, root inode 0\n");
 }
 
-static ramfs_inode_t *ramfs_get_root(void) {
+/* g_ramfs_meta_lock must be held by the following metadata helpers. */
+static ramfs_inode_t *ramfs_get_root_locked(void) {
     if (!g_ramfs_ready)
         ramfs_init_storage();
     return &g_inode_table[0];
 }
 
-static vnode_t *ramfs_make_vnode(mount_t *mnt, ramfs_inode_t *inode) {
+static vnode_t *ramfs_make_vnode_locked(mount_t *mnt, ramfs_inode_t *inode) {
     if (!inode) return NULL;
 
     vnode_t *vn = (vnode_t *)kmalloc(sizeof(vnode_t));
@@ -344,10 +364,15 @@ static vnode_t *ramfs_make_vnode(mount_t *mnt, ramfs_inode_t *inode) {
 static int ramfs_vnode_lookup(vnode_t *dir, const char *name, vnode_t **out) {
     ramfs_inode_t *dinode = (ramfs_inode_t *)dir->fs_data;
     ramfs_inode_t *found = NULL;
+    mutex_lock(&g_ramfs_meta_lock);
     int r = ramfs_inode_lookup(dinode, name, &found);
-    if (r < 0) return r;
+    if (r < 0) {
+        mutex_unlock(&g_ramfs_meta_lock);
+        return r;
+    }
 
-    *out = ramfs_make_vnode(dir->mnt, found);
+    *out = ramfs_make_vnode_locked(dir->mnt, found);
+    mutex_unlock(&g_ramfs_meta_lock);
     if (*out) {
         (*out)->parent = dir;
         vnode_get(dir);
@@ -357,6 +382,7 @@ static int ramfs_vnode_lookup(vnode_t *dir, const char *name, vnode_t **out) {
 
 static int ramfs_vnode_stat(vnode_t *vn, kstat_t *st) {
     ramfs_inode_t *inode = (ramfs_inode_t *)vn->fs_data;
+    mutex_lock(&g_ramfs_meta_lock);
     memset(st, 0, sizeof(*st));
     st->st_ino = inode->inum;
     st->st_mode = inode->mode;
@@ -364,11 +390,16 @@ static int ramfs_vnode_stat(vnode_t *vn, kstat_t *st) {
     st->st_gid = inode->gid;
     st->st_size = inode->size;
     st->st_nlink = inode->nlink > 0 ? (uint32_t)inode->nlink : 1;
+    mutex_unlock(&g_ramfs_meta_lock);
     return 0;
 }
 
-static int ramfs_vnode_mkdir(vnode_t *dir, const char *name, int mode) {
+static int ramfs_vnode_mkdir_locked(vnode_t *dir, const char *name, int mode) {
     ramfs_inode_t *dinode = (ramfs_inode_t *)dir->fs_data;
+    if (!dinode || dinode->type != FT_DIRECTORY)
+        return -ENOTDIR;
+    if (ramfs_find_in_dir(dinode, name))
+        return -EEXIST;
     ramfs_inode_t *child = ramfs_alloc_inode(FT_DIRECTORY);
     if (!child) return -ENOMEM;
     child->mode = S_IFDIR | (mode & 07777);
@@ -397,8 +428,20 @@ static int ramfs_vnode_mkdir(vnode_t *dir, const char *name, int mode) {
     return 0;
 }
 
-static int ramfs_vnode_create(vnode_t *dir, const char *name, int mode, vnode_t **out) {
+static int ramfs_vnode_mkdir(vnode_t *dir, const char *name, int mode) {
+    mutex_lock(&g_ramfs_meta_lock);
+    int r = ramfs_vnode_mkdir_locked(dir, name, mode);
+    mutex_unlock(&g_ramfs_meta_lock);
+    return r;
+}
+
+static int ramfs_vnode_create_locked(vnode_t *dir, const char *name, int mode,
+                                     vnode_t **out) {
     ramfs_inode_t *dinode = (ramfs_inode_t *)dir->fs_data;
+    if (!dinode || dinode->type != FT_DIRECTORY)
+        return -ENOTDIR;
+    if (ramfs_find_in_dir(dinode, name))
+        return -EEXIST;
     ramfs_inode_t *child = ramfs_alloc_inode(FT_REGULAR);
     if (!child) return -ENOMEM;
     if (mode & S_IFMT) {
@@ -422,8 +465,9 @@ static int ramfs_vnode_create(vnode_t *dir, const char *name, int mode, vnode_t 
         ramfs_free_inode(child);
         return r;
     }
-    *out = ramfs_make_vnode(dir->mnt, child);
+    *out = ramfs_make_vnode_locked(dir->mnt, child);
     if (!*out) {
+        ramfs_remove_dir_entry_locked(dinode, name, child->inum);
         ramfs_free_inode(child);
         return -ENOMEM;
     }
@@ -434,17 +478,27 @@ static int ramfs_vnode_create(vnode_t *dir, const char *name, int mode, vnode_t 
     return 0;
 }
 
+static int ramfs_vnode_create(vnode_t *dir, const char *name, int mode,
+                              vnode_t **out) {
+    mutex_lock(&g_ramfs_meta_lock);
+    int r = ramfs_vnode_create_locked(dir, name, mode, out);
+    mutex_unlock(&g_ramfs_meta_lock);
+    return r;
+}
+
 static void ramfs_vnode_release(vnode_t *vn) {
     ramfs_inode_t *inode = vn ? (ramfs_inode_t *)vn->fs_data : NULL;
     vnode_put(vn->parent);
+    mutex_lock(&g_ramfs_meta_lock);
     if (inode && inode->ref_count > 1) {
         inode->ref_count--;
         ramfs_maybe_free_unlinked_inode(inode);
     }
+    mutex_unlock(&g_ramfs_meta_lock);
     kfree(vn);
 }
 
-static int ramfs_vnode_unlink(vnode_t *dir, const char *name) {
+static int ramfs_vnode_unlink_locked(vnode_t *dir, const char *name) {
     ramfs_inode_t *dinode = (ramfs_inode_t *)dir->fs_data;
     ramfs_dir_entry_t *entries = (ramfs_dir_entry_t *)dinode->data;
     int n_entries = dinode->size / sizeof(ramfs_dir_entry_t);
@@ -463,20 +517,34 @@ static int ramfs_vnode_unlink(vnode_t *dir, const char *name) {
     return -ENOENT;
 }
 
+static int ramfs_vnode_unlink(vnode_t *dir, const char *name) {
+    mutex_lock(&g_ramfs_meta_lock);
+    int r = ramfs_vnode_unlink_locked(dir, name);
+    mutex_unlock(&g_ramfs_meta_lock);
+    return r;
+}
+
 static int ramfs_vnode_readlink(vnode_t *vn, char *buf, size_t sz) {
     ramfs_inode_t *inode = (ramfs_inode_t *)vn->fs_data;
-    if (inode->type != FT_SYMLINK) return -EINVAL;
+    mutex_lock(&g_ramfs_meta_lock);
+    if (inode->type != FT_SYMLINK) {
+        mutex_unlock(&g_ramfs_meta_lock);
+        return -EINVAL;
+    }
 
     size_t len = inode->size;
     if (len >= sz) len = sz - 1;
     if (len > 0 && inode->data) memcpy(buf, inode->data, len);
     buf[len] = '\0';
+    mutex_unlock(&g_ramfs_meta_lock);
     return (int)len;
 }
 
-static int ramfs_vnode_symlink(vnode_t *dir, const char *name, const char *target) {
+static int ramfs_vnode_symlink_locked(vnode_t *dir, const char *name,
+                                      const char *target) {
     ramfs_inode_t *dinode = (ramfs_inode_t *)dir->fs_data;
     if (dinode->type != FT_DIRECTORY) return -ENOTDIR;
+    if (ramfs_find_in_dir(dinode, name)) return -EEXIST;
 
     ramfs_inode_t *child = ramfs_alloc_inode(FT_SYMLINK);
     if (!child) return -ENOMEM;
@@ -501,7 +569,16 @@ static int ramfs_vnode_symlink(vnode_t *dir, const char *name, const char *targe
     return 0;
 }
 
-static int ramfs_vnode_link(vnode_t *dir, const char *name, vnode_t *target) {
+static int ramfs_vnode_symlink(vnode_t *dir, const char *name,
+                               const char *target) {
+    mutex_lock(&g_ramfs_meta_lock);
+    int r = ramfs_vnode_symlink_locked(dir, name, target);
+    mutex_unlock(&g_ramfs_meta_lock);
+    return r;
+}
+
+static int ramfs_vnode_link_locked(vnode_t *dir, const char *name,
+                                   vnode_t *target) {
     ramfs_inode_t *dinode = (ramfs_inode_t *)dir->fs_data;
     ramfs_inode_t *inode = target ? (ramfs_inode_t *)target->fs_data : NULL;
     if (!dinode || dinode->type != FT_DIRECTORY) return -ENOTDIR;
@@ -513,9 +590,16 @@ static int ramfs_vnode_link(vnode_t *dir, const char *name, vnode_t *target) {
     return r;
 }
 
-static int ramfs_vnode_rename(vnode_t *old_dir, const char *old_name,
-                              vnode_t *new_dir, const char *new_name,
-                              unsigned int flags) {
+static int ramfs_vnode_link(vnode_t *dir, const char *name, vnode_t *target) {
+    mutex_lock(&g_ramfs_meta_lock);
+    int r = ramfs_vnode_link_locked(dir, name, target);
+    mutex_unlock(&g_ramfs_meta_lock);
+    return r;
+}
+
+static int ramfs_vnode_rename_locked(vnode_t *old_dir, const char *old_name,
+                                     vnode_t *new_dir, const char *new_name,
+                                     unsigned int flags) {
     ramfs_inode_t *old_dinode = (ramfs_inode_t *)old_dir->fs_data;
     ramfs_inode_t *new_dinode = (ramfs_inode_t *)new_dir->fs_data;
     if (old_dinode->type != FT_DIRECTORY || new_dinode->type != FT_DIRECTORY)
@@ -631,7 +715,17 @@ static int ramfs_vnode_rename(vnode_t *old_dir, const char *old_name,
     return 0;
 }
 
-static int ramfs_vnode_rmdir(vnode_t *dir, const char *name) {
+static int ramfs_vnode_rename(vnode_t *old_dir, const char *old_name,
+                              vnode_t *new_dir, const char *new_name,
+                              unsigned int flags) {
+    mutex_lock(&g_ramfs_meta_lock);
+    int r = ramfs_vnode_rename_locked(old_dir, old_name, new_dir, new_name,
+                                      flags);
+    mutex_unlock(&g_ramfs_meta_lock);
+    return r;
+}
+
+static int ramfs_vnode_rmdir_locked(vnode_t *dir, const char *name) {
     ramfs_inode_t *dinode = (ramfs_inode_t *)dir->fs_data;
     ramfs_dir_entry_t *entries = (ramfs_dir_entry_t *)dinode->data;
     int n_entries = dinode->size / sizeof(ramfs_dir_entry_t);
@@ -660,15 +754,25 @@ static int ramfs_vnode_rmdir(vnode_t *dir, const char *name) {
     return -ENOENT;
 }
 
+static int ramfs_vnode_rmdir(vnode_t *dir, const char *name) {
+    mutex_lock(&g_ramfs_meta_lock);
+    int r = ramfs_vnode_rmdir_locked(dir, name);
+    mutex_unlock(&g_ramfs_meta_lock);
+    return r;
+}
+
 static int ramfs_vnode_chmod(vnode_t *vn, int mode) {
     ramfs_inode_t *inode = (ramfs_inode_t *)vn->fs_data;
+    mutex_lock(&g_ramfs_meta_lock);
     inode->mode = (inode->mode & S_IFMT) | (mode & 07777);
     vn->mode = inode->mode;
+    mutex_unlock(&g_ramfs_meta_lock);
     return 0;
 }
 
 static int ramfs_vnode_chown(vnode_t *vn, int uid, int gid) {
     ramfs_inode_t *inode = (ramfs_inode_t *)vn->fs_data;
+    mutex_lock(&g_ramfs_meta_lock);
     if (uid != -1) inode->uid = (uint32_t)uid;
     if (gid != -1) inode->gid = (uint32_t)gid;
     if (uid != -1 || gid != -1) {
@@ -681,6 +785,7 @@ static int ramfs_vnode_chown(vnode_t *vn, int uid, int gid) {
     vn->uid = inode->uid;
     vn->gid = inode->gid;
     vn->mode = inode->mode;
+    mutex_unlock(&g_ramfs_meta_lock);
     return 0;
 }
 
@@ -955,6 +1060,7 @@ static int ramfs_freaddir(vfile_t *vf, void *dirp, size_t count) {
     ramfs_inode_t *inode = (ramfs_inode_t *)vf->vnode->fs_data;
     if (inode->type != FT_DIRECTORY) return -ENOTDIR;
 
+    mutex_lock(&g_ramfs_meta_lock);
     ramfs_dir_entry_t *entries = (ramfs_dir_entry_t *)inode->data;
     int n_entries = inode->size / sizeof(ramfs_dir_entry_t);
     char *out = (char *)dirp;
@@ -985,6 +1091,7 @@ static int ramfs_freaddir(vfile_t *vf, void *dirp, size_t count) {
         idx++;
         vf->offset += sizeof(ramfs_dir_entry_t);
     }
+    mutex_unlock(&g_ramfs_meta_lock);
     return (int)total;
 }
 
@@ -1012,26 +1119,38 @@ static vfile_ops_t g_ramfs_fops = {
 };
 
 vnode_t *ramfs_mount(mount_t *mnt) {
-    return ramfs_make_vnode(mnt, ramfs_get_root());
+    mutex_lock(&g_ramfs_meta_lock);
+    vnode_t *root = ramfs_make_vnode_locked(mnt, ramfs_get_root_locked());
+    mutex_unlock(&g_ramfs_meta_lock);
+    return root;
 }
 
 vnode_t *ramfs_mount_empty(mount_t *mnt) {
-    ramfs_get_root();
+    mutex_lock(&g_ramfs_meta_lock);
+    ramfs_get_root_locked();
     ramfs_inode_t *root = ramfs_alloc_inode(FT_DIRECTORY);
-    if (!root) return NULL;
+    if (!root) {
+        mutex_unlock(&g_ramfs_meta_lock);
+        return NULL;
+    }
     root->nlink = 2;
     root->mode = S_IFDIR | 0777;
     root->capacity = RAMFS_MAX_DIR_ENTRIES * sizeof(ramfs_dir_entry_t);
     root->data = kmalloc(root->capacity);
     if (!root->data) {
         memset(root, 0, sizeof(*root));
+        mutex_unlock(&g_ramfs_meta_lock);
         return NULL;
     }
     memset(root->data, 0, root->capacity);
     root->parent = root;
     ramfs_add_dir_entry(root, ".", root->inum);
     ramfs_add_dir_entry(root, "..", root->inum);
-    return ramfs_make_vnode(mnt, root);
+    vnode_t *vn = ramfs_make_vnode_locked(mnt, root);
+    if (!vn)
+        ramfs_free_inode(root);
+    mutex_unlock(&g_ramfs_meta_lock);
+    return vn;
 }
 
 static vfile_t *ramfs_open_vnode(vnode_t *vn, int flags) {
