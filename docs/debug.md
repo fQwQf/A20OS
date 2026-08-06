@@ -150,3 +150,31 @@ fork + 按需分页的路径存在偶发（对某些二进制尺寸近乎确定�
 SIGSEGV。`user/cmds/core/ptrace_smoke.c` 因此在 poke 与恢复之间加入短延时
 规避该竞态窗口；根因在页分配/引用计数层，与 ptrace 实现无关（A20 团队正在
 修复同类 0x63636363 问题）。
+
+## Native ABI 调试接口（Debug 0x0900）
+
+Native ABI 通过 `A20_OBJ_DEBUG` 会话对象暴露同样的内核调试状态机，
+syscall 包装在 `kernel/abi/native/sys_native_debug.c`，用户态 SDK 封装在
+`user/liba20rt/a20_debug.h`。与 Linux ABI 的差异：
+
+- 会话是 handle（可收窄权限、随进程消亡自动释放），不是 pid；
+- `debug_wait` 同时报告停止事件与**退出事件**（目标变 zombie 时报告
+  EXIT 事件，消息为退出码），无需 TRACEEXIT 选项；
+- 无信号注入（native 无信号概念）；`debug_resume` 的 CONT/SYSCALL 模式
+  与内核 `PT_DEBUG_RESUME_*` 对应；
+- `debug_traceme` 与 `debug_attach` 互斥（同 Linux）；
+- native 线程共享信号状态：进程级 SIGSTOP 会停住整个进程，因此调试器
+  应 attach 独立进程（`test_native_debug.c` 用 spawn 的子进程验证）。
+
+权限（06-security.md §8.1）：READ/WRITE/WAIT/SIGNAL/CONTROL/ADMIN 对应
+各 debug 操作；spawn/thread_create 的 task handle 自带 ADMIN。
+
+验证：`smoke-native-debug`（riscv64 QEMU，`/bin/native-debug-rv`）。
+
+## UBSan（未定义行为检测）
+
+开发构建（BRINGUP=0）默认启用 `-fsanitize=undefined`
+（`-fno-sanitize=alignment,bounds-strict`），运行时在 `kernel/core/ubsan.c`。
+任何未定义行为（移位越界、有符号溢出、数组越界等）在启动日志输出
+`UBSAN: <kind> at file:line` 后继续运行，便于 smoke 测试暴露隐性 bug。
+bringup/竞赛构建通过 `CONFIG_UBSAN=0` 关闭。

@@ -117,6 +117,13 @@ int64_t sys_a20_debug_event(const a20_syscall_args_t *args);
 int64_t sys_a20_debug_read(const a20_syscall_args_t *args);
 int64_t sys_a20_debug_write(const a20_syscall_args_t *args);
 int64_t sys_a20_debug_kill(const a20_syscall_args_t *args);
+
+/* Kernel extension points (0x0D00) — sys_native_ext.c */
+int64_t sys_a20_ext_prog_load(const a20_syscall_args_t *args);
+int64_t sys_a20_ext_prog_attach(const a20_syscall_args_t *args);
+int64_t sys_a20_ext_prog_detach(const a20_syscall_args_t *args);
+int64_t sys_a20_ext_prog_release(const a20_syscall_args_t *args);
+int64_t sys_a20_ext_point_info(const a20_syscall_args_t *args);
 int64_t sys_a20_system_info(const a20_syscall_args_t *args);
 int64_t sys_a20_system_random(const a20_syscall_args_t *args);
 int64_t sys_a20_system_reboot(const a20_syscall_args_t *args);

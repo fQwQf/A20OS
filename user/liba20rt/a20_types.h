@@ -1049,6 +1049,15 @@ typedef struct a20_debug_event_info {
     uint64_t       event_msg;   /* event payload (e.g. exit code) */
 } a20_debug_event_info_t;
 
+/* Kernel extension point info (kernel/include/abi/native/types.h). */
+typedef struct a20_ext_point_info {
+    uint32_t       size;        /* sizeof(a20_ext_point_info_t) */
+    uint32_t       version;     /* 1 */
+    uint32_t       id;
+    uint32_t       nwords;      /* context size in 64-bit words */
+    char           name[32];
+} a20_ext_point_info_t;
+
 /* ========================================================================
  * Sync structures (kernel/include/abi/native/types.h)
  * ======================================================================== */
