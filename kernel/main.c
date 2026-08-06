@@ -2,6 +2,7 @@
 #include "core/bootargs.h"
 #include "drivers/char/uart.h"
 #include "drivers/char/goldfish_rtc_kdrv.h"
+#include "drivers/input/virtio_input_kprobe.h"
 #include "mm/mm.h"
 #include "mm/elf.h"
 #include "mm/vm.h"
@@ -121,6 +122,9 @@ void kernel_main(void) {
     /* Dual-placement driver skeleton (docs/hybrid-kernel/04-dual-placement.md):
      * kernel placement of the shared goldfish RTC driver. */
     goldfish_rtc_kdrv_probe();
+    /* Read-only kernel placement probe of the dual-placement virtio-input
+     * slot; silent unless a keyboard device is attached (smoke-dual-input). */
+    virtio_input_kprobe();
 #endif
     usb_core_scan();
     printf("[INIT] USB devices scanned\n");

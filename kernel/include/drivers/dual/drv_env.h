@@ -70,4 +70,137 @@ static inline void drv_mmio_write32(uint64_t base, uint32_t off, uint32_t val)
     *(volatile uint32_t *)(uintptr_t)(base + off) = val;
 }
 
+static inline uint8_t drv_mmio_read8(uint64_t base, uint32_t off)
+{
+    return *(volatile uint8_t *)(uintptr_t)(base + off);
+}
+
+static inline void drv_mmio_write8(uint64_t base, uint32_t off, uint8_t val)
+{
+    *(volatile uint8_t *)(uintptr_t)(base + off) = val;
+}
+
+/* ---- DMA buffers (page-granular; trust model until IOMMU lands) ----
+ *
+ * Identical contract on both sides: allocate @npages of DMA-capable
+ * memory, query each page's device-visible physical address.  Caveats
+ * that keep this honest:
+ *  - kernel placement hands out physically contiguous frames; user
+ *    placement gets a VMO whose pages may be non-contiguous, so
+ *    protocols requiring multi-page contiguous DMA must stay
+ *    single-page until the DMA-heap/IOMMU work (04-dual-placement.md);
+ *  - without IOMMU there is no hardware enforcement: user placement
+ *    is protected only by the udriver contract (kernel allocates,
+ *    pins and translates); do not widen what the op promises.
+ */
+#define DRV_PAGE_SIZE 4096u
+typedef struct drv_dma {
+    uint64_t va0;                 /* VA of page 0 */
+    uint64_t cookie;              /* kernel: base pfn; user: VMO handle */
+    uint32_t npages;
+    uint32_t _pad;
+    uint64_t phys[64];            /* per-page device-visible address */
+} drv_dma_t;
+
+#if defined(DRV_ENV_KERNEL)
+
+#include "mm/frame.h"
+
+static inline int drv_dma_alloc(drv_dma_t *out, uint32_t npages)
+{
+    if (!out || npages == 0 || npages > 64)
+        return -1;
+    unsigned order = 0;
+    while ((1u << order) < npages)
+        order++;
+    pfn_t pfn = pfa_alloc((int)order);
+    if (pfn == PFN_NONE)
+        return -1;
+    void *va = pfn_to_virt(pfn);
+    extern void *memset(void *, int, size_t);
+    memset(va, 0, (uint64_t)npages * DRV_PAGE_SIZE);
+    uint64_t pa = (uint64_t)pfn * DRV_PAGE_SIZE;
+    for (uint32_t i = 0; i < npages; i++)
+        out->phys[i] = pa + (uint64_t)i * DRV_PAGE_SIZE;
+    for (uint32_t i = npages; i < 64; i++)
+        out->phys[i] = 0;
+    out->va0 = (uint64_t)(uintptr_t)va;
+    out->cookie = (uint64_t)pfn;
+    out->npages = npages;
+    return 0;
+}
+
+static inline void drv_dma_free(drv_dma_t *d)
+{
+    if (!d || !d->va0)
+        return;
+    unsigned order = 0;
+    while ((1u << order) < d->npages)
+        order++;
+    pfa_free((pfn_t)d->cookie, (int)order);
+    d->va0 = d->cookie = 0;
+    d->npages = 0;
+}
+
+#elif defined(DRV_ENV_USER)
+
+static inline int drv_dma_alloc(drv_dma_t *out, uint32_t npages)
+{
+    if (!out || npages == 0 || npages > 64)
+        return -1;
+    a20_status_t r = a20_vm_create_object((uint64_t)npages * DRV_PAGE_SIZE, 0);
+    if (r < 0)
+        return -1;
+    a20_handle_t vmo = (a20_handle_t)r;
+    uint64_t va = 0;
+    if (a20_status_is_err(a20_vm_map(vmo, (uint64_t)npages * DRV_PAGE_SIZE, 0,
+                                     A20_PROT_READ | A20_PROT_WRITE, &va))) {
+        a20_hdl_close(vmo);
+        return -1;
+    }
+    /* Kernel pins and translates the whole buffer (udriver DMA contract). */
+    uint64_t paddrs[64];
+    uint32_t count = 0;
+    if (a20_device_vmo_phys(vmo, paddrs, npages, &count) != A20_OK ||
+        count != npages) {
+        a20_vm_unmap(va, (uint64_t)npages * DRV_PAGE_SIZE);
+        a20_hdl_close(vmo);
+        return -1;
+    }
+    for (uint32_t i = 0; i < npages; i++)
+        out->phys[i] = paddrs[i];
+    for (uint32_t i = npages; i < 64; i++)
+        out->phys[i] = 0;
+    out->va0 = va;
+    out->cookie = (uint64_t)vmo;
+    out->npages = npages;
+    return 0;
+}
+
+static inline void drv_dma_free(drv_dma_t *d)
+{
+    if (!d || !d->va0)
+        return;
+    a20_vm_unmap(d->va0, (uint64_t)d->npages * DRV_PAGE_SIZE);
+    a20_hdl_close((a20_handle_t)d->cookie);
+    d->va0 = d->cookie = 0;
+    d->npages = 0;
+}
+
+#endif
+
+static inline uint64_t drv_dma_phys(const drv_dma_t *d, uint32_t page)
+{
+    if (!d || page >= d->npages)
+        return 0;
+    return d->phys[page];
+}
+
+static inline uint64_t drv_dma_va(const drv_dma_t *d, uint32_t page)
+{
+    if (!d || page >= d->npages)
+        return 0;
+    return d->va0 + (uint64_t)page * DRV_PAGE_SIZE;
+}
+
 #endif
