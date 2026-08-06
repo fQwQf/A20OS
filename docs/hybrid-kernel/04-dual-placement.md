@@ -45,8 +45,9 @@
 - `kernel/include/drivers/dual/virtio_mmio.h` + `kernel/include/drivers/dual/virtio_input.h`：virtio-mmio 传输与virtio-input 设备协议唯一源码；
 - `kernel/include/drivers/dual/virtq.h`：共享 split-virtqueue 层 （单所有者破坏性初始化；全部环结构置于一个 DMA 页内）。
   实现过程中修正两个真实 spec 缺陷：`QUEUE_READY` 偏移为 0x044 （非 0x03c）；DRIVER_OK 必须在队列建立之后（拆分为`vinput_dev_init` + `vinput_driver_ok`）；
-- 内核壳 `kernel/drvmod/examples/goldfish_rtc.c`：drvmod 模块形式的 boot probe（qemu-virt-riscv64 下由 `init_kthread` 加载并自动绑定，日志 `[GOLDFISH-RTC] probe ok: epoch=<ns>`；原内建壳`kernel/drivers/char/goldfish_rtc_kdrv.c` 已随 drvmod 迁移删除，见 `docs/drivers/kernel-modules.md`）；
-- 内核壳 `kernel/drvmod/examples/vinput_probe.c`：drvmod 模块的 boot 只读 probe（无设备时静默），日志 `[UINPUT] kernel-placement probe:`；原内建壳 `kernel/drivers/input/virtio_input_kprobe.c` 已随 drvmod 迁移删除；
+- 内核壳 `kernel/drvmod/examples/goldfish_rtc.c`（rtc.drv）：drvmod 模块形式的 boot probe（qemu-virt-riscv64 下由 `init_kthread` 加载并自动绑定，日志 `[GOLDFISH-RTC] probe ok: epoch=<ns>`；原内建 `kernel/drivers/char/goldfish_rtc_kdrv.c` 已随 drvmod 迁移删除，见 `docs/drivers/kernel-modules.md`）；
+- 内核壳 `kernel/drvmod/examples/vinput_probe.c`（vinput-probe.drv）：drvmod 模块的 boot 只读 probe（无设备时静默），日志 `[UINPUT] kernel-placement probe:`；原内建 `kernel/drivers/input/virtio_input_kprobe.c` 已随 drvmod 迁移删除；
+- 内核完整驱动 `kernel/drvmod/examples/vinput.c`（vinput.drv，四架构）：状态迁移、事件 virtqueue 与 IRQ 以模块形式实现，发布 input class 设备；`/dev/event0` 的 devfs mux 服务在 `kernel/drivers/input/input_mux.c`，经 class 设备消费事件（`input_mux_wake` 供模块 ISR 唤醒等待者）。白名单 `user_owned=1` 的槽位（slot 5 双驻留样本）保持归用户壳 uinputd 独占，vinput.drv 绑定其余 virtio-input 设备；
 - 用户壳 `user/svc/rtcd.c`：已重构到共享协议层， `make smoke-native-rtcd` PASS；
 - 用户壳 `user/svc/uinputd.c`：virtio-input 用户态 probe；
 - **首个双态语义一致性验证**：`make smoke-dual-input` 挂 `virtio-keyboard-device,bus=virtio-mmio-bus.5`，同一共享协议源码在两种部署下读出相同设备身份（内核 `[UINPUT] ... name=QEMU Virtio Keyboard`，用户 `UINPUTD: name=QEMU Virtio Keyboard`）；
