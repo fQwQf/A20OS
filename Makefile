@@ -180,7 +180,8 @@ NATIVE_ISOLATION_BIN   := $(NATIVE_BUILD_DIR)/native-isolation-$(NATIVE_TAG)
 NATIVE_UBDD_BIN        := $(NATIVE_BUILD_DIR)/ubd-$(NATIVE_TAG)
 NATIVE_UINPUTD_BIN     := $(NATIVE_BUILD_DIR)/uinputd-$(NATIVE_TAG)
 NATIVE_PERSONALITY_BIN  := $(NATIVE_BUILD_DIR)/native-personality-$(NATIVE_TAG)
-NATIVE_OUTPUTS         := $(NATIVE_HELLO_BIN) $(NATIVE_HANDLE_BIN) $(NATIVE_LIBC_BIN) $(NATIVE_FUTEX_BIN) $(NATIVE_MM_BIN) $(NATIVE_SIGNAL_BIN) $(NATIVE_IPC_BIN) $(NATIVE_CONTRACT_BIN) $(NATIVE_SVCMAN_BIN) $(NATIVE_ECHOD_BIN) $(NATIVE_SHMRING_BIN) $(NATIVE_SHMRINGD_BIN) $(NATIVE_CHAND_BIN) $(NATIVE_RTCD_BIN) $(NATIVE_RTCDD_BIN) $(NATIVE_REGISTRY_BIN) $(NATIVE_SVCMGR_BIN) $(NATIVE_ISOLATION_BIN) $(NATIVE_UBDD_BIN) $(NATIVE_UINPUTD_BIN) $(NATIVE_PERSONALITY_BIN) $(NATIVE_NETD_BIN)
+NATIVE_LINUX_BIN        := $(NATIVE_BUILD_DIR)/native-linux-$(NATIVE_TAG)
+NATIVE_OUTPUTS         := $(NATIVE_HELLO_BIN) $(NATIVE_HANDLE_BIN) $(NATIVE_LIBC_BIN) $(NATIVE_FUTEX_BIN) $(NATIVE_MM_BIN) $(NATIVE_SIGNAL_BIN) $(NATIVE_IPC_BIN) $(NATIVE_CONTRACT_BIN) $(NATIVE_SVCMAN_BIN) $(NATIVE_ECHOD_BIN) $(NATIVE_SHMRING_BIN) $(NATIVE_SHMRINGD_BIN) $(NATIVE_CHAND_BIN) $(NATIVE_RTCD_BIN) $(NATIVE_RTCDD_BIN) $(NATIVE_REGISTRY_BIN) $(NATIVE_SVCMGR_BIN) $(NATIVE_ISOLATION_BIN) $(NATIVE_UBDD_BIN) $(NATIVE_UINPUTD_BIN) $(NATIVE_PERSONALITY_BIN) $(NATIVE_LINUX_BIN) $(NATIVE_NETD_BIN)
 NATIVE_BUILD_STAMP     := $(NATIVE_BUILD_DIR)/.native-build-id
 comma := ,
 NET_HOSTFWD ?= hostfwd=tcp::5555-:5555,hostfwd=udp::5555-:5555
@@ -708,6 +709,8 @@ VBOX_AARCH64_LOAD_ADDRESS ?= 0x08080000ULL
 		native-ipc-arch native-ipc-rv native-ipc-la smoke-native-ipc \
 		native-contract-arch native-contract-rv native-contract-la smoke-native-contract \
 		native-uinputd-arch native-uinputd-rv smoke-dual-input \
+		native-personality-arch native-personality-rv smoke-native-personality \
+		native-linux-arch native-linux-rv smoke-native-linux \
 		check-a20-idl \
 		smoke-iommu-discovery \
 		native-svc-arch native-svc-rv smoke-native-svc \
@@ -2461,6 +2464,7 @@ $(NATIVE_BUILD_STAMP): $(USER_BUILD_STAMP) force_native_build
 	     [ ! -x "$(NATIVE_ISOLATION_BIN)" ] || \
 	     [ ! -x "$(NATIVE_UBDD_BIN)" ] || [ ! -x "$(NATIVE_UINPUTD_BIN)" ] || \
 	     [ ! -x "$(NATIVE_PERSONALITY_BIN)" ] || \
+	     [ ! -x "$(NATIVE_LINUX_BIN)" ] || \
 	     [ ! -x "$(NATIVE_RTCD_BIN)" ] || [ ! -x "$(NATIVE_RTCDD_BIN)" ]; then \
 		need_build=1; \
 	elif find user/liba20rt user/liba20c user/tests user/svc kernel/include/drivers/dual -type f -newer "$@" \
@@ -3615,6 +3619,23 @@ native-personality-arch: $(NATIVE_PERSONALITY_BIN)
 native-personality-rv:
 	$(MAKE) ARCH=riscv64 NOMMU=$(NOMMU) native-personality-arch
 
+define NATIVE_LINUX_RECIPE
+@mkdir -p $(dir $(4))
+$(1) -ffreestanding -nostdlib -static \
+    $(2) -Iuser -Iuser/liba20rt -T$(NATIVE_LD) \
+    $(3) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) \
+    user/tests/test_native_linux.c $(NATIVE_LIBS) -o $(4)
+endef
+
+$(NATIVE_LINUX_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) \
+		user/tests/test_native_linux.c user/liba20rt/a20_linux.h user/liba20rt/a20_personality.h
+	$(call NATIVE_LINUX_RECIPE,$(NATIVE_CC),$(NATIVE_CFLAGS),$(NATIVE_CRT0),$@)
+
+native-linux-arch: $(NATIVE_LINUX_BIN)
+
+native-linux-rv:
+	$(MAKE) ARCH=riscv64 NOMMU=$(NOMMU) native-linux-arch
+
 native-ubd-arch: $(NATIVE_UBDD_BIN)
 
 native-ubd-rv:
@@ -3878,6 +3899,32 @@ smoke-native-personality:
 		echo "smoke-native-personality: PASS; log saved to $$log"; \
 	else \
 		echo "smoke-native-personality: failed with status $$status; tail of $$log:"; \
+		tail -n 80 "$$log"; exit 1; \
+	fi
+
+smoke-native-linux:
+	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/native-linux-riscv64.log"; \
+	status=0; \
+	{ sleep $(SMOKE_INPUT_DELAY); printf '/bin/native-linux-rv\npoweroff\n'; } | \
+	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
+		-machine virt -m 1G -nographic -smp 1 -bios default \
+		-global virtio-mmio.force-legacy=false \
+		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-both-dev/fat32.img,if=none,format=raw,id=x0 \
+		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		-kernel .kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf \
+		> "$$log" 2>&1 || status=$$?; \
+	if grep -q 'linux fd ok' "$$log" && grep -q 'linux mmap ok' "$$log" && \
+	   grep -q 'linux pipe ok' "$$log" && grep -q 'linux sockpair ok' "$$log" && \
+	   grep -q 'linux futex ok' "$$log" && grep -q 'linux epoll ok' "$$log" && \
+	   grep -q 'NATIVE_LINUX: PASS' "$$log" && \
+	   grep -q 'System is going down for power-off' "$$log"; then \
+		echo "smoke-native-linux: PASS; log saved to $$log"; \
+	else \
+		echo "smoke-native-linux: failed with status $$status; tail of $$log:"; \
 		tail -n 80 "$$log"; exit 1; \
 	fi
 
