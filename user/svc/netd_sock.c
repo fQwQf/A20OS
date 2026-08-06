@@ -50,7 +50,8 @@
 typedef struct netd_sock {
     int used;
     int type;                  /* SOCK_STREAM / SOCK_DGRAM */
-    a20_handle_t ep;           /* RPC channel endpoint */
+    a20_handle_t ep;           /* RPC channel endpoint (NULL for children) */
+    a20_handle_t rpc_ep;       /* channel used for replies (children: listener's) */
     struct tcp_pcb *tcp;
     struct udp_pcb *udp;
     int listening;
@@ -89,7 +90,7 @@ static netd_sock_t *sock_by_id(int id)
 static int sock_alloc(void)
 {
     for (int i = 0; i < NETD_SOCK_POOL; i++) {
-        if (!g_socks[i].used) {
+        if (!g_socks[i].used && g_socks[i].ep == A20_HANDLE_NULL) {
             g_socks[i].used = 1;
             g_socks[i].type = 0;
             g_socks[i].tcp = NULL;
@@ -103,6 +104,7 @@ static int sock_alloc(void)
             g_socks[i].accept_pending = 0;
             g_socks[i].aq_n = 0;
             g_socks[i].aq_head = 0;
+            g_socks[i].rpc_ep = A20_HANDLE_NULL;
             return i;
         }
     }
@@ -120,7 +122,8 @@ static void send_reply(netd_sock_t *s, const netd_sock_hdr_t *h,
     rh->len = paylen;
     if (paylen)
         __builtin_memcpy(msg + sizeof(*h), payload, paylen);
-    a20_channel_send(s->ep, msg, sizeof(*h) + paylen, 0, 0);
+    a20_channel_send(s->rpc_ep ? s->rpc_ep : s->ep, msg,
+                     sizeof(*h) + paylen, 0, 0);
 }
 
 /* ---- TCP callbacks ---- */
@@ -164,7 +167,8 @@ static err_t tcp_cb_accept(void *arg, struct tcp_pcb *newpcb, err_t err)
         return ERR_MEM;
     netd_sock_t *s = &g_socks[id];
     s->type = SOCK_STREAM;
-    s->ep = ls->ep; /* share the listener's RPC channel? No: reply ids disambiguate */
+    s->ep = A20_HANDLE_NULL; /* child RPC rides the listener's channel (h->id) */
+    s->rpc_ep = ls->ep;      /* replies go out on the listener's channel */
     s->tcp = newpcb;
     s->connected = 1;
     tcp_arg(newpcb, s);
@@ -177,17 +181,17 @@ static err_t tcp_cb_accept(void *arg, struct tcp_pcb *newpcb, err_t err)
     ip4_addr_t *rip4 = ip_2_ip4(&newpcb->remote_ip);
     __builtin_memcpy(s->peer.addr, rip4, 4);
 
-    if (ls->aq_n < NETD_SOCK_MAX_ACCEPT) {
-        ls->aq[(ls->aq_head + ls->aq_n) % NETD_SOCK_MAX_ACCEPT] = s;
-        ls->aq_n++;
-    }
     if (ls->accept_pending) {
+        /* hand the connection straight to the blocked ACCEPT */
         ls->accept_pending = 0;
         netd_sock_hdr_t h;
         __builtin_memset(&h, 0, sizeof(h));
         h.op = NETD_SOCK_OP_ACCEPT;
         h.id = (int32_t)id;
         send_reply(ls, &h, &s->peer, sizeof(s->peer));
+    } else if (ls->aq_n < NETD_SOCK_MAX_ACCEPT) {
+        ls->aq[(ls->aq_head + ls->aq_n) % NETD_SOCK_MAX_ACCEPT] = s;
+        ls->aq_n++;
     }
     return ERR_OK;
 }
@@ -263,6 +267,7 @@ static int op_create(netd_sock_t *s, const netd_sock_hdr_t *h,
 
     const netd_sock_create_req_t *req = (const netd_sock_create_req_t *)payload;
     s->type = req->type & 0xf;
+    s->used = 1;
     netd_sock_hdr_t resp;
     __builtin_memset(&resp, 0, sizeof(resp));
     resp.op = NETD_SOCK_OP_CREATE;
@@ -573,7 +578,7 @@ void netd_sock_run(void)
         /* Drain ready RPC channels. */
         for (int i = 0; i < NETD_SOCK_POOL; i++) {
             netd_sock_t *s = &g_socks[i];
-            if (!s->used || s->closed)
+            if (s->ep == A20_HANDLE_NULL || s->closed)
                 continue;
             uint32_t dlen = NETD_SOCK_MAX_DATA + 64;
             uint8_t msg[NETD_SOCK_MAX_DATA + 64];
@@ -624,15 +629,24 @@ void netd_sock_run(void)
 int netd_sock_init(void)
 {
     int n = 0;
+    /* Register only half the pool as RPC channel slots; the remaining
+     * slots (ep == A20_HANDLE_NULL) back accepted child sockets. */
     for (int i = 0; i < NETD_SOCK_POOL; i++) {
+        g_socks[i].used = 0;
+        g_socks[i].ep = A20_HANDLE_NULL;
+        g_socks[i].rpc_ep = A20_HANDLE_NULL;
+        g_socks[i].type = 0;
+    }
+    for (int i = 0; i < NETD_SOCK_POOL / 2; i++) {
 
         int64_t h = a20_syscall6(A20_SYS_netd_sock_register, 0, 0, 0, 0, 0, 0);
         if (h < 0) {
 
             break;
         }
-        g_socks[i].used = 1;
+        g_socks[i].used = 0;
         g_socks[i].ep = (a20_handle_t)h;
+        g_socks[i].rpc_ep = (a20_handle_t)h;
         g_socks[i].type = 0;
         n++;
     }
