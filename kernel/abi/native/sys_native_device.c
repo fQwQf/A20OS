@@ -48,6 +48,12 @@ int64_t sys_a20_device_map_mmio(const a20_syscall_args_t *args)
     task_t *cur = proc_current();
     if (!cur || !cur->mm) return -A20_ERR_BAD_HANDLE;
 
+    extern int udriver_mmio_user_owned(uint64_t phys);
+    extern int udriver_claim_owner(uint64_t phys);
+    if (udriver_mmio_user_owned(kargs.phys_base) &&
+        udriver_claim_owner(kargs.phys_base) != cur->pid)
+        return -A20_ERR_ACCESS;
+
     uint64_t va = 0;
     if (udriver_map_mmio(cur->mm, kargs.phys_base, kargs.length,
                          kargs.prot, &va) < 0)
@@ -304,4 +310,3 @@ int64_t sys_a20_device_alloc_dma(const a20_syscall_args_t *args)
         vmo_release(vmo);
     return h;
 }
-
