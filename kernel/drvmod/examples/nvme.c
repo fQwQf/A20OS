@@ -1,12 +1,18 @@
 /*
- * A20OS NVMe PCI driver
+ * NVMe PCI block driver — drvmod module (arch-independent PCI class).
+ *
+ * Migrated from kernel/drivers/block/nvme.c (removed).  The module
+ * registers the standard PCI class driver through the framework bridge;
+ * with DRVMOD_SMOKE=1 the build also carries the in-probe capability and
+ * I/O smoke tests (same CONFIG_NVME_SMOKE_TEST code as the built-in).
  */
-#include "drivers/block/nvme.h"
+
+#include "drvmod/drvmod.h"
+
 #include "drivers/bus/pci_bus.h"
 #include "drivers/core/driver_class.h"
 #include "drivers/core/driver_core.h"
 #include "drivers/core/driver_hwapi.h"
-#include "drivers/core/driver_register.h"
 #include "core/consts.h"
 #include "core/errno.h"
 #include "core/stdio.h"
@@ -15,6 +21,12 @@
 #include "core/timer.h"
 #include "mm/slab.h"
 #include "proc/proc.h"
+
+/* Module logging goes through drv_log (a plain function call): the
+ * klog_level extern would force a GOT relocation in the module, and the
+ * GOT load pattern is not yet safe on loongarch64. */
+#define kinfo(...) drv_log(__VA_ARGS__)
+#define kerr(...) drv_log(__VA_ARGS__)
 
 #define NVME_REG_CAP   0x00U
 #define NVME_REG_INTMS 0x0cU
@@ -605,6 +617,7 @@ static int nvme_probe(device_t *dev)
                                                  &ctrl->identify_dma);
     ctrl->bounce = dma_alloc_coherent_aligned(NVME_DMA_BYTES, PAGE_SIZE,
                                                &ctrl->bounce_dma);
+
     if (!ctrl->identify || !ctrl->bounce || nvme_identify(ctrl) < 0)
         goto fail;
 #ifdef CONFIG_NVME_SMOKE_TEST
@@ -674,4 +687,19 @@ static driver_t nvme_driver = {
     .class_type = DEV_CLASS_BLOCK,
 };
 
-DRIVER_REGISTER(nvme_driver);
+
+/* Pins the module while the driver is registered in the unified core. */
+static drv_driver_t g_modinfo;
+
+uintptr_t DriverEntry(drv_driver_t **out)
+{
+    int r = drv_driver_register(&nvme_driver);
+    drv_log("[NVME] driver registered in core: %d\n", r);
+    if (out) {
+        if (r == 0)
+            *out = &g_modinfo;
+        else
+            *out = NULL;
+    }
+    return 0;
+}

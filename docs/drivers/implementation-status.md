@@ -34,7 +34,7 @@ QEMU x86_64 与 RISC-V64 GUI 的 VirtIO GPU、键盘和鼠标分别由 `make smo
 | hwapi DMA | 基础可用 | coherent helper 返回物理 handle，sync 委托 arch cache hook；尚无 DMA mask/IOMMU/大对齐能力 |
 | class publication | 已扩展 | probe 成功自动建立带引用的 class device；remove 前先下线并排空在途调用 |
 | devfs/sysfs | 动态类视图 | char/block/audio 自动生成 `/dev/charN`、`diskN`、`audioN`；所有 class 动态暴露于 `/sys/class`；旧 display/input 聚合节点暂时保留 |
-| drvmod loader | 基础可用 | 四架构（riscv64/x86_64/aarch64/loongarch64）ELF `ET_REL`、框架符号白名单、全量 ELF 边界校验（section/symbol/strtab/relocation）、按 `e_machine` 选择重定位解码器（RISC-V CALL、x86-64 large 模型 ABS64、AArch64 CALL26+veneer、LoongArch CALL36/pcalau12i）、自动 match→probe 绑定、统一驱动核心桥接（模块可注册标准 `driver_t`）、drv_env 双驻留共享代码的模块后端（DRV_ENV_DRVMOD）；goldfish RTC（riscv64/aarch64/loongarch64）、PC speaker（x86_64）、virtio-input 内核探针（riscv64/aarch64）、PS/2 键鼠控制器（x86_64）已迁移为模块，PCI 类驱动访问器已导出；签名、运行时 unload 尚未完成 |
+| drvmod loader | 基础可用 | 四架构（riscv64/x86_64/aarch64/loongarch64）ELF `ET_REL`、框架符号白名单、全量 ELF 边界校验（section/symbol/strtab/relocation）、按 `e_machine` 选择重定位解码器（RISC-V CALL、x86-64 large 模型 ABS64、AArch64 CALL26+veneer、LoongArch CALL36/pcalau12i）、自动 match→probe 绑定、统一驱动核心桥接（模块可注册标准 `driver_t`）、drv_env 双驻留共享代码的模块后端（DRV_ENV_DRVMOD）；goldfish RTC（riscv64/aarch64/loongarch64）、PC speaker（x86_64）、virtio-input 内核探针（riscv64/aarch64）、PS/2 键鼠控制器（x86_64）、NVMe（x86_64/loongarch64）、TPM 2.0（x86_64）已迁移为模块；PCI 类驱动访问器、DMA 增强（aligned/sync）、调度/等待原语与 ACPI TPM2 发现均已导出；签名、运行时 unload 尚未完成 |
 
 ## drvmod 迁移矩阵
 
@@ -48,7 +48,7 @@ QEMU x86_64 与 RISC-V64 GUI 的 VirtIO GPU、键盘和鼠标分别由 `make smo
 | NVMe、AHCI、HDA、E1000、virtio-scsi、vmsvga、virtio-gpu | 待框架扩展 | 需要 DMA/PCI BAR/class ops 框架 API |
 | virtio-input 内核探针 | 已迁移 | 内建 `virtio_input_kprobe.c` 已删除；`vinput-probe.drv` 用 drv_env 模块后端复用双驻留共享协议，`smoke-dual-input` 验证与用户态 uinputd 读到同一设备身份 |
 | virtio-input 完整事件投递 | 待框架扩展 | 需要 virtq 进入共享层并作为框架 API |
-| NVMe、AHCI、HDA、E1000、virtio-scsi、vmsvga、virtio-gpu | 待迁移 | PCI 类驱动访问器已导出（`pci_class_code`/`pci_get_bar_resource`/`pci_intx_irq` 等），模块可注册 PCI `driver_t`；需要 DMA 对象与 block/net/display/audio class 操作继续收敛 |
+| HDA、AHCI、E1000、virtio-scsi、vmsvga、virtio-gpu | 待迁移 | NVMe 已作为 PCI 类模块迁移（模板）；HDA 走 ACPI 编解码器、AHCI 是 VirtualBox 根盘依赖（保持内建）、E1000/vmsvga 仅 VirtualBox 可验证、virtio-scsi 可跟进 |
 | TPM、GMAC、SDIO | 待框架扩展 | TPM 依赖 ACPI 发现；GMAC/SDIO 为单实例轮询 |
 
 迁移细节与顺序见 [kernel-modules.md](kernel-modules.md)。
