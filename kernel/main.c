@@ -26,9 +26,6 @@ void riscv_iommu_early_probe(void);
 #endif
 #include "drivers/gpu/virtio_gpu.h"
 #include "drivers/input/virtio_input.h"
-#ifdef CONFIG_PS2_INPUT
-#include "drivers/input/ps2.h"
-#endif
 #include "fs/block_cache.h"
 #include "core/klog.h"
 #include "proc/signal.h"
@@ -138,12 +135,8 @@ void kernel_main(void) {
 #endif
     usb_core_scan();
     printf("[INIT] USB devices scanned\n");
-#ifdef CONFIG_PS2_INPUT
-    if (ps2_input_init() != 0)
-        printf("[INIT] PS/2 input controller unavailable\n");
-    else
-        printf("[INIT] PS/2 input initialized\n");
-#endif
+    /* PS/2 controller (x86_64) is owned by the ps2.drv drvmod module;
+     * the built-in init was removed by the drvmod migration. */
 #ifdef CONFIG_DRIVER_LIFECYCLE_TEST
     driver_lifecycle_test_run();
 #endif
@@ -234,6 +227,16 @@ void init_kthread(void) {
      * automatic binding pass (kernel/drvmod/).  Modules staged by
      * `drvctl install` are therefore activated on the next boot. */
     {
+#if defined(CONFIG_X86_64)
+        static drv_device_t g_ps2_dev = { 0 };
+        strncpy(g_ps2_dev.name, "ps2", sizeof(g_ps2_dev.name) - 1);
+        g_ps2_dev.bus = 0;                    /* fixed/system */
+        g_ps2_dev.vendor = 0x50533200UL;      /* "PS2" */
+        g_ps2_dev.device = 0;
+        g_ps2_dev.irq = IRQ_VECTOR_KEYBOARD;
+        drv_device_register(&g_ps2_dev);
+#endif
+
         static drv_device_t g_grtc_dev = { 0 };
         strncpy(g_grtc_dev.name, "goldfish-rtc", sizeof(g_grtc_dev.name) - 1);
         g_grtc_dev.bus = 3;                       /* mmio */
