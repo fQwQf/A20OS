@@ -20,7 +20,7 @@ A20OS 的分发物是**源代码**（本仓库，含 git submodule）。所有�
 
 | 组件 | 许可证 | 位置 | 说明 |
 |------|--------|------|------|
-| lwIP | BSD-3-Clause | `kernel/external/lwip` | 网络协议栈，`NO_SYS=1` 模式集成；保留上游 COPYING |
+| lwIP | BSD-3-Clause | `user/external/lwip` | 网络协议栈，`NO_SYS=1` 模式集成；保留上游 COPYING |
 
 ## 4. 用户态构建依赖（构建时引入，源码随 submodule）
 
