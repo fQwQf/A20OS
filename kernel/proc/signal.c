@@ -8,6 +8,7 @@
 #include "proc/signal.h"
 #include "proc/proc.h"
 #include "proc/proc_internal.h"
+#include "proc/debug.h"
 #include "mm/mm.h"
 #include "mm/vm.h"
 #include "core/string.h"
@@ -300,6 +301,24 @@ int signal_send_thread_user(int tid, int signum) {
     build_siginfo_code(&si, signum, proc_current(), SI_TKILL);
     int ret = signal_queue_task(t, signum, &si, sizeof(si), 1);
     proc_put(t);
+    return ret;
+}
+
+int signal_task_get_pending_info(void *task, int signum, void *out,
+                                 size_t size)
+{
+    task_t *t = (task_t *)task;
+    if (!t || !t->signals || !out || signum < 1 || signum >= NSIG)
+        return -EINVAL;
+    signal_state_t *ss = (signal_state_t *)t->signals;
+    uint64_t flags = spin_lock_irqsave(&ss->lock);
+    int ret = -ENOENT;
+    if (ss->pending_has_info[signum]) {
+        size_t n = size < SIGNAL_INFO_SIZE ? size : SIGNAL_INFO_SIZE;
+        memcpy(out, ss->pending_info[signum], n);
+        ret = 0;
+    }
+    spin_unlock_irqrestore(&ss->lock, flags);
     return ret;
 }
 
@@ -618,6 +637,25 @@ void signal_deliver_user(trap_context_t *ctx) {
             }
             spin_unlock_irqrestore(&ss->lock, flags);
             continue;
+        }
+
+        /*
+         * PTRACE_DELIVERY_BOUNDARY: a traced task intercepts every
+         * deliverable signal (except SIGKILL) as a ptrace signal-stop
+         * instead of delivering it.  The tracer either suppresses it
+         * (resume with sig 0) or re-queues it (resume with sig N); a
+         * resume-with-signal consumes the one-shot ptrace_deliver_sig
+         * marker here so delivery proceeds without a second stop.
+         */
+        if (proc_debug_is_traced(t) && sig != SIGKILL) {
+            if (t->ptrace_deliver_sig == sig) {
+                t->ptrace_deliver_sig = 0;
+            } else {
+                signal_clear_pending_locked(t, ss, sig);
+                spin_unlock_irqrestore(&ss->lock, flags);
+                (void)proc_debug_signal_stop(sig);
+                continue;
+            }
         }
 
         if (action.sa_handler == SIG_DFL) {

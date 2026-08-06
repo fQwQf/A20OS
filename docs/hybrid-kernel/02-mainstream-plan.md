@@ -1,6 +1,6 @@
 # 混合内核演进方向
 
-本文档说明 A20OS 混合内核与主流混合内核（Windows NT / Fuchsia / macOS XNU）对齐的**结构性能力差距**、候选设计方向与已做出的设计决策。当前形态见 [00-design.md](00-design.md)，机制细节见 [01-mechanisms.md](01-mechanisms.md)。
+本文档说明 A20OS 混合内核与主流混合内核（Fuchsia / macOS XNU 等）对齐的**结构性能力差距**、候选设计方向与已做出的设计决策。当前形态见 [00-design.md](00-design.md)，机制细节见 [01-mechanisms.md](01-mechanisms.md)。
 
 ## 目标能力
 
@@ -59,7 +59,7 @@ virtio-blk 是"主流水平"的试金石：一个真实吞吐设备驱动运行�
 设计要点（复用已有机制）：
 
 - MMIO 白名单授权 + virtqueue 描述符放在内核分配的共享 VMO（DMA 契约）+ IRQ→EventQ；
-- **内核块代理**（性能关键决策）：devfs 与页缓存留在内核，块请求经共享环转发给用户驱动——页缓存命中时零 IPC，未命中才进驱动；这与 Windows 存储栈/Fuchsia 块层一致；
+- **内核块代理**（性能关键决策）：devfs 与页缓存留在内核，块请求经共享环转发给用户驱动——页缓存命中时零 IPC，未命中才进驱动；这与 Fuchsia 块层等主流设计一致；
 - 崩溃恢复：驱动死亡时内核代理把在飞请求标记失败并唤醒等待者，svcman 重启驱动后重挂载。
 
 **当前状态**：virtio-blk 用户态驱动（udisk）已实现——页缓存/文件系统留在内核，块请求经一页共享环转发，virtio DMA 直写内核页缓存物理地址（数据字节不穿过环或 channel）；驱动死亡 → 在飞请求 `-EIO` → 原地重挂载已实现。冷读性能受 TCG 下 doorbell+park+IRQ 代价限制（~1 MiB/s），热读由页缓存吸收（百 MiB/s 级）。

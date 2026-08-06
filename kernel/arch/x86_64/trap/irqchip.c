@@ -5,7 +5,6 @@
 #include "proc/proc.h"
 #include "core/timer.h"
 #include "drivers/char/uart.h"
-#include "drivers/input/ps2.h"
 #include "drivers/core/driver_hwapi.h"
 #include "core/progress.h"
 #include "platform.h"
@@ -178,7 +177,6 @@ static void idt_init(void) {
 
 void x86_64_poll_console_input(void) {
     uart_handle_irq();
-    ps2_input_handle_irq();
 }
 
 static void pic_init(void) {
@@ -284,13 +282,6 @@ void x86_64_pci_irq_set_masked(int vector, int masked) {
     ioapic_write(low_reg, low);
 }
 
-static int keyboard_irq_wrapper(int irq, void *priv) {
-    (void)irq;
-    (void)priv;
-    ps2_input_handle_irq();
-    return 0;
-}
-
 void trap_init(void) {
     gdt_init();
     idt_init();
@@ -323,10 +314,9 @@ void trap_init(void) {
     }
     lapic_enable();
     if (cpu_current_id() == 0) {
-        /* Register with IDT vector numbers: arch_handle_irq() dispatches
-         * vectors, not PIC line numbers. */
-        request_irq(IRQ_VECTOR_KEYBOARD, keyboard_irq_wrapper, 0, NULL);
-        request_irq(PS2_MOUSE_IRQ_VECTOR, keyboard_irq_wrapper, 0, NULL);
+        /* Keyboard/mouse vectors are owned by the PS/2 drvmod module:
+         * arch_handle_irq() hands them to driver_irq_dispatch(), and the
+         * module registers its ISRs through the framework (request_irq). */
     }
 }
 

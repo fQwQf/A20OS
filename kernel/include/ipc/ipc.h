@@ -38,6 +38,7 @@ typedef enum a20_object_type {
     A20_OBJ_DEVICE           = 11,
     A20_OBJ_NAMESPACE        = 12,
     A20_OBJ_DEBUG            = 13,
+    A20_OBJ_EXT_PROG         = 14,
 } a20_object_type_t;
 
 /* 14 capability rights bits (docs/native-abi/06-security.md §1) */

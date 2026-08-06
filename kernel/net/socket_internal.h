@@ -153,7 +153,6 @@ typedef struct net_socket {
     int ipv6_recv_2292_rthdr;
     int ipv6_recv_2292_hopopts;
     int ipv6_recv_2292_dstopts;
-    int bpf_prog_fd;
     uint8_t alg_last[NET_MAX_STREAM_PAYLOAD];
     size_t alg_last_len;
     char alg_type[16];

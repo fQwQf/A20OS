@@ -1,8 +1,6 @@
 #include "core/stdio.h"
 #include "core/bootargs.h"
 #include "drivers/char/uart.h"
-#include "drivers/char/goldfish_rtc_kdrv.h"
-#include "drivers/input/virtio_input_kprobe.h"
 void riscv_iommu_early_probe(void);
 #include "mm/mm.h"
 #include "mm/elf.h"
@@ -28,15 +26,13 @@ void riscv_iommu_early_probe(void);
 #endif
 #include "drivers/gpu/virtio_gpu.h"
 #include "drivers/input/virtio_input.h"
-#ifdef CONFIG_PS2_INPUT
-#include "drivers/input/ps2.h"
-#endif
 #include "fs/block_cache.h"
 #include "core/klog.h"
 #include "proc/signal.h"
 #include "drivers/block/loop.h"
 #include "net/socket.h"
 #include "drivers/core/driver_core.h"
+#include "drvmod/drvmod.h"
 #include "drivers/usb/usb.h"
 #include "drivers/usb/usb_storage.h"
 #ifdef CONFIG_SWAP
@@ -80,14 +76,22 @@ void kernel_main(void) {
 #if defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)
     extern void a20_registry_init(void);
 #endif
+    extern void kep_syscall_filter_init(void);
     printf("\n");
     printf("======================================\n");
     printf("    A20OS Kernel \n");
     printf("======================================\n");
     printf("Initializing system...\n");
 
+#if defined(CONFIG_UBSAN) && CONFIG_UBSAN
+    extern void ubsan_selftest(void);
+    ubsan_selftest();
+#endif
+
     trap_init();
     printf("[INIT] Trap initialized\n");
+    kep_syscall_filter_init();
+    printf("[INIT] Kernel extension points initialized\n");
     if (current_board && current_board->early_init) {
         current_board->early_init();
         printf("[INIT] Board early init done\n");
@@ -124,20 +128,15 @@ void kernel_main(void) {
     printf("[INIT] Drivers probed\n");
 #ifdef CONFIG_BOARD_QEMU_VIRT_RISCV64
     /* Dual-placement driver skeleton (docs/hybrid-kernel/04-dual-placement.md):
-     * kernel placement of the shared goldfish RTC driver. */
-    goldfish_rtc_kdrv_probe();
-    /* Read-only kernel placement probe of the dual-placement virtio-input
-     * slot; silent unless a keyboard device is attached (smoke-dual-input). */
-    virtio_input_kprobe();
+     * the kernel placements of the shared goldfish RTC and virtio-input
+     * drivers are drvmod modules (/lib/drivers/rtc.drv, vinput-probe.drv)
+     * loaded and bound in init_kthread below; the built-in probes were
+     * removed by the drvmod migration. */
 #endif
     usb_core_scan();
     printf("[INIT] USB devices scanned\n");
-#ifdef CONFIG_PS2_INPUT
-    if (ps2_input_init() != 0)
-        printf("[INIT] PS/2 input controller unavailable\n");
-    else
-        printf("[INIT] PS/2 input initialized\n");
-#endif
+    /* PS/2 controller (x86_64) is owned by the ps2.drv drvmod module;
+     * the built-in init was removed by the drvmod migration. */
 #ifdef CONFIG_DRIVER_LIFECYCLE_TEST
     driver_lifecycle_test_run();
 #endif
@@ -221,6 +220,107 @@ void kernel_main(void) {
 void init_kthread(void) {
     task_t *cur = proc_current();
     printf("[INIT] init_kthread started (pid=%d)\n", cur ? cur->pid : 0);
+
+    /* Driver modules (drvmod): register the hardware devices the modules
+     * may bind to, then scan the DriverStore (/bin/lib/drivers, i.e. the
+     * FAT32 /lib/drivers) for *.drv modules, load them and run the
+     * automatic binding pass (kernel/drvmod/).  Modules staged by
+     * `drvctl install` are therefore activated on the next boot. */
+    {
+#if defined(CONFIG_X86_64)
+        static drv_device_t g_tpm_dev = { 0 };
+        strncpy(g_tpm_dev.name, "tpm", sizeof(g_tpm_dev.name) - 1);
+        g_tpm_dev.bus = 0;                    /* fixed/system */
+        g_tpm_dev.vendor = 0x54504D00UL;      /* "TPM\0" */
+        g_tpm_dev.device = 0;
+        g_tpm_dev.irq = -1;
+        drv_device_register(&g_tpm_dev);
+
+        static drv_device_t g_ps2_dev = { 0 };
+        strncpy(g_ps2_dev.name, "ps2", sizeof(g_ps2_dev.name) - 1);
+        g_ps2_dev.bus = 0;                    /* fixed/system */
+        g_ps2_dev.vendor = 0x50533200UL;      /* "PS2" */
+        g_ps2_dev.device = 0;
+        g_ps2_dev.irq = IRQ_VECTOR_KEYBOARD;
+        drv_device_register(&g_ps2_dev);
+#endif
+
+        static drv_device_t g_grtc_dev = { 0 };
+        strncpy(g_grtc_dev.name, "goldfish-rtc", sizeof(g_grtc_dev.name) - 1);
+        g_grtc_dev.bus = 3;                       /* mmio */
+        g_grtc_dev.vendor = 0x101000UL;
+        g_grtc_dev.device = 0;
+        g_grtc_dev.mmio_phys = 0x101000UL;
+        g_grtc_dev.mmio_size = 0x100UL;
+        g_grtc_dev.irq = -1;
+        drv_device_register(&g_grtc_dev);
+
+        /* virtio-input slot 5 (dual-placement kernel probe module).  The
+         * virtio-mmio slot base differs per board: aarch64 slots are 0x200
+         * apart (0x0A000000 base), riscv64 slots are 0x1000 apart
+         * (0x10001000 base).  LoongArch64 has no virtio-mmio bus (devices
+         * arrive over PCI) so no slot device is registered there. */
+#if defined(CONFIG_BOARD_QEMU_VIRT_AARCH64)
+        static drv_device_t g_vinput_dev = { 0 };
+        strncpy(g_vinput_dev.name, "virtio-input-slot5",
+                sizeof(g_vinput_dev.name) - 1);
+        g_vinput_dev.bus = 3;
+        g_vinput_dev.vendor = 0x0A000A00UL;
+        g_vinput_dev.device = 0;
+        g_vinput_dev.irq = -1;
+        drv_device_register(&g_vinput_dev);
+#elif defined(CONFIG_BOARD_QEMU_VIRT_RISCV64)
+        static drv_device_t g_vinput_dev = { 0 };
+        strncpy(g_vinput_dev.name, "virtio-input-slot5",
+                sizeof(g_vinput_dev.name) - 1);
+        g_vinput_dev.bus = 3;
+        g_vinput_dev.vendor = 0x10006000UL;
+        g_vinput_dev.device = 0;
+        g_vinput_dev.irq = -1;
+        drv_device_register(&g_vinput_dev);
+#endif
+
+        static const char store[] = "/bin/lib/drivers";
+        int dfd = vfs_open(store, O_RDONLY, 0);
+        if (dfd < 0) {
+            printf("[INIT] driver store %s not found: %d\n", store, dfd);
+        } else {
+            char dents[512];
+            for (;;) {
+                int n = vfs_getdents64(dfd, dents, sizeof(dents));
+                if (n <= 0)
+                    break;
+                for (int off = 0; off + (int)offsetof(vfs_dirent64_t,
+                                                      d_name) < n; ) {
+                    vfs_dirent64_t *de = (vfs_dirent64_t *)(dents + off);
+                    if (de->d_reclen < offsetof(vfs_dirent64_t, d_name) ||
+                        off + de->d_reclen > n)
+                        break;
+                    const char *nm = de->d_name;
+                    size_t nlen = strlen(nm);
+                    if (nlen > 4 && strcmp(nm + nlen - 4, ".drv") == 0) {
+                        char path[128];
+                        snprintf(path, sizeof(path), "%s/%s", store, nm);
+                        int mfd = vfs_open(path, O_RDONLY, 0);
+                        if (mfd < 0) {
+                            printf("[INIT] driver module %s not found\n",
+                                   path);
+                        } else {
+                            int mid = drvmod_load(mfd, nm);
+                            vfs_close(mfd);
+                            if (mid < 0)
+                                printf("[INIT] driver module %s load "
+                                       "failed: %d\n", nm, mid);
+                        }
+                    }
+                    off += de->d_reclen;
+                }
+            }
+            vfs_close(dfd);
+        }
+        drvmod_init_all();
+        drvmod_bind_all();
+    }
 
     const char *init_path = "/bin/init";
     printf("[INIT] opening %s...\n", init_path);

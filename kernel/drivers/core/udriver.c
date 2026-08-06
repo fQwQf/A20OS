@@ -34,7 +34,7 @@ static const udriver_mmio_window_t g_mmio_windows[] = {
     /* virtio-mmio slot 5: dual-placement virtio-input sample
      * (docs/hybrid-kernel/04-dual-placement.md).  User-owned so the
      * in-tree kernel driver never binds; the kernel placement probe
-     * (virtio_input_kprobe) is read-only and does not bind either. */
+     * (the vinput-probe module) is read-only and does not bind either. */
     { 0x10006000, 0x1000, "virtio-input-dual", 1 },
 #endif
 };
@@ -122,7 +122,7 @@ fail:
  * A user task may exclusively claim a whitelisted user-owned window.
  * Claims are per-window, idempotent for the owner, and auto-released
  * when the owner dies (udriver_task_cleanup).  Kernel-side read-only
- * probes (e.g. virtio_input_kprobe) do not claim; destructive init
+ * probes (e.g. vinput-probe) do not claim; destructive init
  * belongs to the claimant.  Mapping is not yet gated on claiming
  * (rtcd/ubd predate claims); exclusivity is enforced between claimants.
  */
