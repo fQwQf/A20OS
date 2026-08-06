@@ -2,7 +2,7 @@
 
 > 不要这样做：不要同时变更多个设备控制器。先用上表中的已知组合拿到基线，再一次只替换一个目标设备，否则无法判断失败来自启动、总线还是功能驱动。
 
-这份手册说明如何在 x86_64 VirtualBox 中配置 A20OS 并逐项验证驱动。它是 [VirtualBox 驱动栈](virtualbox.md) 的运行入口；通用驱动接口和提交流程见 [构建、测试与提交](../drivers/testing-and-submission.md)。
+这份手册说明如何在 x86_64 VirtualBox 中配置 A20OS 并逐项验证驱动。它是 [VirtualBox 驱动栈](virtualbox.md) 的运行入口；通用驱动接口和提交流程见 [构建、测试与提交](../drivers/meta/testing-and-submission.md)。
 
 ## 支持矩阵
 
@@ -13,7 +13,7 @@
 | 磁盘 | Intel AHCI `8086:2922/2829` | `block/ahci.c` | 首个可用 port、LBA48、512B sector、单 slot |
 | 网络 | E1000 82540EM `8086:100e` | `net/e1000.c` + lwIP | 静态单实例、轮询 ring |
 | 网络 | VirtIO network | `net/virtio_net.c` | 设备类型/transport 必须与当前 ID 表匹配 |
-| 输入 | PS/2 键盘鼠标 | `input/ps2.c` | x86 板级控制器服务 |
+| 输入 | PS/2 键盘鼠标 | `drvmod` 模块 `ps2.drv` | x86 板级控制器服务 |
 | 输入 | 可选 VirtIO input | `input/virtio_input.c` | 通过 `/dev/event0` 聚合 |
 
 E1000 使用 `DEV_CLASS_NET`，通用输入节点是 `/dev/event0`。PS/2 只提供 x86 平台基础输入；新增可复用输入设备使用 `DEV_CLASS_INPUT`。
@@ -64,7 +64,7 @@ VirtualBox 的 VMSVGA 向 guest 暴露 VMware SVGA II PCI 设备 `15ad:0405`。�
 
 用户态随后通过 `/dev/fb0` 获取模式和映射 framebuffer。黑屏时先检查 PCI 枚举和驱动 ready 日志，再检查 VMSVGA 选择；不要只通过桌面是否启动判断 probe。VBoxVGA/VBoxSVGA 是不同协议，当前驱动不保证支持。
 
-驱动支持的边界、BAR 选择、可见 backing 和 flush 语义见 [Display/Framebuffer](../drivers/display.md)。
+驱动支持的边界、BAR 选择、可见 backing 和 flush 语义见 [Display/Framebuffer](../drivers/classes/display.md)。
 
 ## 磁盘准备与 AHCI 验证
 
@@ -107,7 +107,7 @@ VM 网络适配器选择 `Intel PRO/1000 MT Desktop (82540EM)`。A20OS 应枚举
 
 ### VirtIO network
 
-把 adapter type 改为 VirtIO 后重新启动，记录 VirtualBox 实际提供的 PCI ID 和 VirtIO capability。当前驱动要求其 ID 表、modern/legacy transport 和协商 feature 全部匹配。出现 `incomplete capabilities` 时检查 VirtualBox 控制器模式；出现 feature rejection 时检查驱动是否接受了未实现能力。详细队列规则见 [PCI 与 VirtIO](../drivers/pci-and-virtio.md)。
+把 adapter type 改为 VirtIO 后重新启动，记录 VirtualBox 实际提供的 PCI ID 和 VirtIO capability。当前驱动要求其 ID 表、modern/legacy transport 和协商 feature 全部匹配。出现 `incomplete capabilities` 时检查 VirtualBox 控制器模式；出现 feature rejection 时检查驱动是否接受了未实现能力。详细队列规则见 [PCI 与 VirtIO](../drivers/guide/pci-and-virtio.md)。
 
 ## 输入验证
 
@@ -122,7 +122,7 @@ PS/2 键盘鼠标用于确认 VM 基础交互，但不能证明目标 input clas
 3. 将功能驱动放在通用 class 目录，使用 `pci_bus` 和 ID 表，不增加 VirtualBox 板名条件。
 4. 先构建 `kernel-only`，再制作 ISO；每次确认 VM 挂载的是新 ISO/磁盘。
 5. 分别保留“设备不存在”“设备存在但 ID 不匹配”“成功 probe”“成功 I/O”的日志。
-6. 更新 [VirtualBox 驱动栈](virtualbox.md) 的矩阵和 [实现状态](../drivers/implementation-status.md) 中的限制。
+6. 更新 [VirtualBox 驱动栈](virtualbox.md) 的矩阵和 [实现状态](../drivers/meta/implementation-status.md) 中的限制。
 
 ## 常见故障
 
@@ -143,4 +143,4 @@ PS/2 键盘鼠标用于确认 VM 基础交互，但不能证明目标 input clas
 VirtualBox version:Host architecture:A20OS commit/diff:Build command:ISO path and checksum:VM graphics/storage/network/input configuration:Enumerated PCI ID and BARs:Bound driver and ready line:Class consumer line:I/O performed and result:Known untested features:
 ```
 
-完整提交清单和跨平台构建矩阵见 [构建、测试与提交](../drivers/testing-and-submission.md)。
+完整提交清单和跨平台构建矩阵见 [构建、测试与提交](../drivers/meta/testing-and-submission.md)。

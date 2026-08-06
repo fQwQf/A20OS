@@ -1,4 +1,5 @@
 #include "proc/proc_internal.h"
+#include "proc/debug.h"
 
 #include "core/cpu.h"
 #include "core/klog.h"
@@ -947,6 +948,58 @@ void proc_sched_stop_current(int exit_code)
         proc_put(notify_parent);
     }
     sched();
+}
+
+/*
+ * Debug-stop transition (kernel/proc/debug.c ptrace semantics), tracee
+ * context.  Same STOPPED publication as proc_sched_stop_current() but the
+ * caller first publishes the observer-visible fields (ptrace_stop_active
+ * etc.), so wait4 can report the stop even without WUNTRACED, and the
+ * stop is cleared again on resume.  Returns 0 after resume, -EINTR if a
+ * fatal signal or an inconsistent state raced the stop.
+ */
+int proc_sched_stop_for_debug(task_t *t, int sig)
+{
+    if (!t || t == proc_idle_task())
+        return -EINTR;
+
+    task_t *notify_parent = NULL;
+    uint64_t flags = spin_lock_irqsave(&proc_lock);
+    if (__atomic_load_n(&t->exit_pending, __ATOMIC_ACQUIRE) ||
+        signal_task_has_fatal(t) ||
+        signal_task_continue_pending(t) ||
+        (t->state != PROC_RUNNING && t->state != PROC_READY)) {
+        spin_unlock_irqrestore(&proc_lock, flags);
+        return -EINTR;
+    }
+    t->exit_code = sig;
+    t->stop_report_pending = 1;
+    t->continue_report_pending = 0;
+    t->ptrace_stop_active = 1;
+    t->state = PROC_STOPPED;
+    task_t *parent = t->parent;
+    if (parent && parent->state != PROC_UNUSED &&
+        parent->state != PROC_ZOMBIE) {
+        proc_wake_child_waiters_locked(parent);
+        if (!signal_task_sigchld_no_cldstop(parent))
+            notify_parent = proc_get(parent);
+    }
+    proc_sched_assert_task_locked(t);
+    spin_unlock_irqrestore(&proc_lock, flags);
+
+    if (notify_parent) {
+        (void)signal_send(notify_parent->pid, SIGCHLD);
+        proc_put(notify_parent);
+    }
+
+    sched();
+
+    uint64_t f2 = spin_lock_irqsave(&proc_lock);
+    t->ptrace_stop_active = 0;
+    t->ptrace_stop_kind = PT_DEBUG_STOP_NONE;
+    t->ptrace_event = 0;
+    spin_unlock_irqrestore(&proc_lock, f2);
+    return 0;
 }
 
 int proc_sched_resume_stopped(task_t *t, int report_continued)
