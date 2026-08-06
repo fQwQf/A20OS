@@ -1,14 +1,22 @@
-#ifdef CONFIG_PS2_INPUT
+/*
+ * PS/2 keyboard/mouse controller — drvmod module (x86_64).
+ *
+ * Migrated from kernel/drivers/input/ps2.c (removed): the x86 PS/2
+ * controller is initialized and serviced by a loadable module.  The arch
+ * IRQ dispatch routes the keyboard/mouse vectors through the hwapi table
+ * (driver_irq_dispatch), so the module's framework ISR registrations own
+ * both vectors once the built-in wrapper is gone.  Console characters
+ * still reach the shell through uart_receive_char().  The built-in's
+ * devfs read path was already unused (VirtIO owns /dev/event0), so the
+ * module keeps only the ring and the IRQ service path.
+ */
 
-#include "drivers/input/ps2.h"
+#include "drvmod/drvmod.h"
+
 #include "drivers/input/virtio_input.h"
 #include "drivers/char/uart.h"
-#include "drivers/core/driver_hwapi.h"
-#include "fs/devfs.h"
-#include "proc/proc.h"
-#include "core/cpu.h"
+#include "proc/park.h"
 #include "core/lock.h"
-#include "core/sync.h"
 #include "core/string.h"
 #include "core/errno.h"
 
@@ -22,12 +30,14 @@
 
 #define PS2_RING_SIZE       256
 
+#define IRQ_VECTOR_KEYBOARD  0x21
+#define PS2_MOUSE_IRQ_VECTOR 0x2c
+
 typedef struct {
     struct input_event ring[PS2_RING_SIZE];
     uint32_t head;
     uint32_t tail;
     spinlock_t lock;
-    wait_queue_t waiters;
     uint8_t initialized;
     uint8_t extended;
     uint8_t pause_bytes;
@@ -36,6 +46,8 @@ typedef struct {
     uint8_t mouse_packet[3];
     uint8_t mouse_count;
     uint8_t mouse_buttons;
+    drv_device_t kbd_dev;
+    drv_device_t mouse_dev;
 } ps2_input_t;
 
 static ps2_input_t g_ps2;
@@ -76,55 +88,14 @@ static const char ps2_shift_keymap[128] = {
     [0x34] = '>', [0x35] = '?', [0x39] = ' ',
 };
 
-static int ps2_wait_input_clear(void) {
-    for (int i = 0; i < 100000; i++) {
-        if (!(inb(PS2_STATUS_PORT) & PS2_STATUS_INPUT))
-            return 0;
-    }
-    return -1;
+static void ps2_flush_output(void)
+{
+    while (drv_in8(PS2_STATUS_PORT) & PS2_STATUS_OUTPUT)
+        (void)drv_in8(PS2_DATA_PORT);
 }
 
-static int ps2_wait_output_full(void) {
-    for (int i = 0; i < 100000; i++) {
-        if (inb(PS2_STATUS_PORT) & PS2_STATUS_OUTPUT)
-            return 0;
-    }
-    return -1;
-}
-
-static int ps2_write_cmd(uint8_t command) {
-    if (ps2_wait_input_clear() != 0)
-        return -1;
-    outb(PS2_CMD_PORT, command);
-    return 0;
-}
-
-static int ps2_write_data(uint8_t data) {
-    if (ps2_wait_input_clear() != 0)
-        return -1;
-    outb(PS2_DATA_PORT, data);
-    return 0;
-}
-
-static int ps2_read_data(uint8_t *data) {
-    if (ps2_wait_output_full() != 0)
-        return -1;
-    *data = inb(PS2_DATA_PORT);
-    return 0;
-}
-
-static int ps2_write_mouse(uint8_t data) {
-    return ps2_write_cmd(0xd4) || ps2_write_data(data);
-}
-
-static void ps2_flush_output(void) {
-    while (inb(PS2_STATUS_PORT) & PS2_STATUS_OUTPUT)
-        (void)inb(PS2_DATA_PORT);
-}
-
-static void ps2_push_event(uint16_t type, uint16_t code, int32_t value) {
-    proc_wake_q_t wake_q;
-    proc_wake_q_init(&wake_q);
+static void ps2_push_event(uint16_t type, uint16_t code, int32_t value)
+{
     uint64_t flags = spin_lock_irqsave(&g_ps2.lock);
     uint32_t next = (g_ps2.head + 1) % PS2_RING_SIZE;
     if (next != g_ps2.tail) {
@@ -135,14 +106,12 @@ static void ps2_push_event(uint16_t type, uint16_t code, int32_t value) {
         event->code = code;
         event->value = value;
         g_ps2.head = next;
-        (void)wait_queue_collect_one(&g_ps2.waiters, 0,
-                                     PROC_WAKE_EVENT, &wake_q);
     }
     spin_unlock_irqrestore(&g_ps2.lock, flags);
-    (void)proc_wake_q_flush(&wake_q);
 }
 
-static uint16_t ps2_extended_keycode(uint8_t scancode) {
+static uint16_t ps2_extended_keycode(uint8_t scancode)
+{
     switch (scancode) {
     case 0x1c: return 96;  /* KEY_KPENTER */
     case 0x1d: return 97;  /* KEY_RIGHTCTRL */
@@ -162,7 +131,8 @@ static uint16_t ps2_extended_keycode(uint8_t scancode) {
     }
 }
 
-static void ps2_handle_keyboard_byte(uint8_t byte) {
+static void ps2_handle_keyboard_byte(uint8_t byte)
+{
     if (g_ps2.pause_bytes) {
         g_ps2.pause_bytes--;
         return;
@@ -198,7 +168,8 @@ static void ps2_handle_keyboard_byte(uint8_t byte) {
     }
 }
 
-static void ps2_handle_mouse_byte(uint8_t byte) {
+static void ps2_handle_mouse_byte(uint8_t byte)
+{
     if (g_ps2.mouse_count == 0 && !(byte & 0x08))
         return;
     g_ps2.mouse_packet[g_ps2.mouse_count++] = byte;
@@ -230,10 +201,11 @@ static void ps2_handle_mouse_byte(uint8_t byte) {
     g_ps2.mouse_buttons = buttons;
 }
 
-void ps2_input_handle_irq(void) {
-    while (inb(PS2_STATUS_PORT) & PS2_STATUS_OUTPUT) {
-        uint8_t status = inb(PS2_STATUS_PORT);
-        uint8_t byte = inb(PS2_DATA_PORT);
+static void ps2_handle_irq(void)
+{
+    while (drv_in8(PS2_STATUS_PORT) & PS2_STATUS_OUTPUT) {
+        uint8_t status = drv_in8(PS2_STATUS_PORT);
+        uint8_t byte = drv_in8(PS2_DATA_PORT);
         if (!g_ps2.initialized)
             continue;
         if (status & PS2_STATUS_AUX)
@@ -243,79 +215,84 @@ void ps2_input_handle_irq(void) {
     }
 }
 
-static int ps2_input_read(vfile_t *vf, char *buf, size_t count) {
-    if (count < sizeof(struct input_event))
-        return -EINVAL;
+static void ps2_isr(void *ctx)
+{
+    (void)ctx;
+    ps2_handle_irq();
+}
 
-    for (;;) {
-        uint64_t flags = spin_lock_irqsave(&g_ps2.lock);
-        if (g_ps2.head != g_ps2.tail) {
-            size_t copied = 0;
-            while (g_ps2.head != g_ps2.tail &&
-                   copied + sizeof(struct input_event) <= count) {
-                memcpy(buf + copied, &g_ps2.ring[g_ps2.tail],
-                       sizeof(struct input_event));
-                g_ps2.tail = (g_ps2.tail + 1) % PS2_RING_SIZE;
-                copied += sizeof(struct input_event);
-            }
-            spin_unlock_irqrestore(&g_ps2.lock, flags);
-            return (int)copied;
+static int ps2_write_cmd(uint8_t cmd)
+{
+    int tries = 10000;
+    while (tries-- > 0) {
+        if (!(drv_in8(PS2_STATUS_PORT) & PS2_STATUS_INPUT)) {
+            drv_out8(PS2_CMD_PORT, cmd);
+            return 0;
         }
-        if (vf->flags & O_NONBLOCK) {
-            spin_unlock_irqrestore(&g_ps2.lock, flags);
-            return -EAGAIN;
-        }
-        spin_unlock_irqrestore(&g_ps2.lock, flags);
-        proc_wait_token_t token =
-            proc_park_prepare(PROC_WAIT_INTERRUPTIBLE, 0);
-        if (!token.task)
-            return -EAGAIN;
-
-        wait_queue_entry_t entry = {0};
-        flags = spin_lock_irqsave(&g_ps2.lock);
-        if (g_ps2.head != g_ps2.tail) {
-            spin_unlock_irqrestore(&g_ps2.lock, flags);
-            (void)proc_park_cancel(token);
-            proc_park_finish(token);
-            continue;
-        }
-        bool linked = wait_queue_link(&g_ps2.waiters, &entry, token, 0);
-        spin_unlock_irqrestore(&g_ps2.lock, flags);
-        proc_wake_reason_t reason;
-        if (linked)
-            reason = proc_park_commit(token);
-        else {
-            (void)proc_park_cancel(token);
-            reason = PROC_WAKE_CANCEL;
-        }
-        wait_queue_unlink(&g_ps2.waiters, &entry);
-        proc_park_finish(token);
-        if (proc_wake_reason_is_task_interrupt(reason))
-            return -ERESTARTSYS;
+        drv_udelay(20);
     }
+    return -1;
 }
 
-static int ps2_input_ioctl(vfile_t *vf, unsigned long req, void *arg) {
-    (void)vf;
-    (void)req;
-    (void)arg;
-    return -ENOSYS;
+static int ps2_write_data(uint8_t data)
+{
+    int tries = 10000;
+    while (tries-- > 0) {
+        if (!(drv_in8(PS2_STATUS_PORT) & PS2_STATUS_INPUT)) {
+            drv_out8(PS2_DATA_PORT, data);
+            return 0;
+        }
+        drv_udelay(20);
+    }
+    return -1;
 }
 
-/* VirtIO owns /dev/event0 when present.  Keep PS/2's operations private so
- * the two input transports can be linked into the same x86_64 image. */
-static vfile_ops_t g_devfs_ps2_input_ops __attribute__((unused)) = {
-    .read = ps2_input_read,
-    .ioctl = ps2_input_ioctl,
-};
+static int ps2_write_mouse(uint8_t data)
+{
+    int tries = 10000;
+    while (tries-- > 0) {
+        if (!(drv_in8(PS2_STATUS_PORT) & PS2_STATUS_INPUT)) {
+            drv_out8(PS2_CMD_PORT, 0xd4);
+            drv_udelay(20);
+            drv_out8(PS2_DATA_PORT, data);
+            return 0;
+        }
+        drv_udelay(20);
+    }
+    return -1;
+}
 
-int ps2_input_init(void) {
+static int ps2_read_data(uint8_t *out)
+{
+    int tries = 10000;
+    while (tries-- > 0) {
+        if (drv_in8(PS2_STATUS_PORT) & PS2_STATUS_OUTPUT) {
+            *out = drv_in8(PS2_DATA_PORT);
+            return 0;
+        }
+        drv_udelay(20);
+    }
+    return -1;
+}
+
+static int ps2_wait_input_clear(void)
+{
+    int tries = 10000;
+    while (tries-- > 0) {
+        if (!(drv_in8(PS2_STATUS_PORT) & PS2_STATUS_INPUT))
+            return 0;
+        drv_udelay(20);
+    }
+    return -1;
+}
+
+static int ps2_init_hw(void)
+{
     uint8_t config;
     uint8_t response;
 
     memset(&g_ps2, 0, sizeof(g_ps2));
     spin_init(&g_ps2.lock);
-    wait_queue_init(&g_ps2.waiters);
 
     if (ps2_write_cmd(0xad) || ps2_write_cmd(0xa7))
         return -1;
@@ -359,4 +336,34 @@ int ps2_input_init(void) {
     return 0;
 }
 
-#endif /* CONFIG_PS2_INPUT */
+static int ps2_probe(drv_device_t *dev)
+{
+    (void)dev;
+    if (ps2_init_hw() != 0)
+        return -1;
+    g_ps2.kbd_dev.irq = IRQ_VECTOR_KEYBOARD;
+    if (drv_register_isr(&g_ps2.kbd_dev, ps2_isr, NULL) < 0)
+        return -1;
+    g_ps2.mouse_dev.irq = PS2_MOUSE_IRQ_VECTOR;
+    if (drv_register_isr(&g_ps2.mouse_dev, ps2_isr, NULL) < 0)
+        return -1;
+    drv_log("[PS2] module init ok (kbd irq=%d mouse irq=%d)\n",
+            IRQ_VECTOR_KEYBOARD, PS2_MOUSE_IRQ_VECTOR);
+    return 0;
+}
+
+static drv_driver_t g_modinfo;
+
+uintptr_t DriverEntry(drv_driver_t **out)
+{
+    g_modinfo.name = "ps2";
+    g_modinfo.match_count = 1;
+    g_modinfo.match[0].bus = 0;               /* fixed/system */
+    g_modinfo.match[0].vendor = 0x50533200UL; /* "PS2" */
+    g_modinfo.match[0].device = 0;
+    g_modinfo.probe = ps2_probe;
+    g_modinfo.remove = NULL;
+    if (out)
+        *out = &g_modinfo;
+    return 0;
+}

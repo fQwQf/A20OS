@@ -13,7 +13,7 @@
 | 磁盘 | Intel AHCI `8086:2922/2829` | `block/ahci.c` | 首个可用 port、LBA48、512B sector、单 slot |
 | 网络 | E1000 82540EM `8086:100e` | `net/e1000.c` + lwIP | 静态单实例、轮询 ring |
 | 网络 | VirtIO network | `net/virtio_net.c` | 设备类型/transport 必须与当前 ID 表匹配 |
-| 输入 | PS/2 键盘鼠标 | `input/ps2.c` | x86 板级控制器服务 |
+| 输入 | PS/2 键盘鼠标 | `drvmod` 模块 `ps2.drv` | x86 板级控制器服务 |
 | 输入 | 可选 VirtIO input | `input/virtio_input.c` | 通过 `/dev/event0` 聚合 |
 
 E1000 使用 `DEV_CLASS_NET`，通用输入节点是 `/dev/event0`。PS/2 只提供 x86 平台基础输入；新增可复用输入设备使用 `DEV_CLASS_INPUT`。
