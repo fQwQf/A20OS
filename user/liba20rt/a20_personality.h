@@ -77,22 +77,35 @@ static inline a20_status_t a20_personality_pipe_read(
         return -A20_ERR_FAULT;
     if (*len == 0)
         return A20_OK;
-    if (pipe->pending_off == pipe->pending_len) {
-        pipe->pending_off = 0;
-        pipe->pending_len = A20_CH_MAX_DATA;
-        uint32_t handles = 0;
-        a20_status_t r = a20_channel_recv(pipe->read_end, pipe->pending,
-                                           &pipe->pending_len, NULL, &handles);
-        if (r < 0) {
-            pipe->pending_len = 0;
-            return r;
+    uint8_t *dst = (uint8_t *)data;
+    uint32_t want = *len;
+    uint32_t got = 0;
+    for (;;) {
+        if (pipe->pending_off == pipe->pending_len) {
+            pipe->pending_off = 0;
+            pipe->pending_len = A20_CH_MAX_DATA;
+            uint32_t handles = 0;
+            a20_status_t r = a20_channel_recv_flags(
+                pipe->read_end, pipe->pending, &pipe->pending_len,
+                NULL, &handles, A20_MSG_NONBLOCK);
+            if (r == -A20_ERR_WOULD_BLOCK) {
+                pipe->pending_len = 0;
+                break; /* no more queued messages */
+            }
+            if (r < 0) {
+                pipe->pending_len = 0;
+                return (got > 0) ? A20_OK : r;
+            }
         }
+        uint32_t available = pipe->pending_len - pipe->pending_off;
+        uint32_t n = want - got < available ? want - got : available;
+        a20_memcpy(dst + got, &pipe->pending[pipe->pending_off], n);
+        pipe->pending_off += n;
+        got += n;
+        if (got == want)
+            break;
     }
-    uint32_t available = pipe->pending_len - pipe->pending_off;
-    uint32_t n = *len < available ? *len : available;
-    a20_memcpy(data, &pipe->pending[pipe->pending_off], n);
-    pipe->pending_off += n;
-    *len = n;
+    *len = got;
     return A20_OK;
 }
 
