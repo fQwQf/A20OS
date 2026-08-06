@@ -228,6 +228,14 @@ void init_kthread(void) {
      * `drvctl install` are therefore activated on the next boot. */
     {
 #if defined(CONFIG_X86_64)
+        static drv_device_t g_tpm_dev = { 0 };
+        strncpy(g_tpm_dev.name, "tpm", sizeof(g_tpm_dev.name) - 1);
+        g_tpm_dev.bus = 0;                    /* fixed/system */
+        g_tpm_dev.vendor = 0x54504D00UL;      /* "TPM\0" */
+        g_tpm_dev.device = 0;
+        g_tpm_dev.irq = -1;
+        drv_device_register(&g_tpm_dev);
+
         static drv_device_t g_ps2_dev = { 0 };
         strncpy(g_ps2_dev.name, "ps2", sizeof(g_ps2_dev.name) - 1);
         g_ps2_dev.bus = 0;                    /* fixed/system */
