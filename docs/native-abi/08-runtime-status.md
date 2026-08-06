@@ -7,7 +7,7 @@
 | 组件 | 路径 | 状态 | 说明 |
 |------|------|------|------|
 | Linux ABI 兼容层 | `kernel/abi/linux/` | 活跃 | 当前主用户态运行时接口。系统启动后实际运行的用户态程序基于 Linux ABI。 |
-| Native ABI 内核入口 | `kernel/abi/native/` | 已实现 | 109 个 syscall 入口已完成（`syscall_table.def` 109 条），覆盖 core、handle、task、memory、path、ipc、net、time、security、debug、system info、sync 等分区。 |
+| Native ABI 内核入口 | `kernel/abi/native/` | 已实现 | 112 个 syscall 入口已完成（`syscall_table.def` 112 条），覆盖 core、handle、task、memory、path、ipc、net、time、security、debug、system info、sync 等分区。 |
 | Typed channel | `kernel/ipc/a20_channel.c` | 已接入 | `channel_create` 接受 `a20_channel_type_t` 类型签名（每端点一份拷贝），send/recv 路径强制执行 handle 类型 bitmask 与 `max_data_size`/`max_handles` 上限，违例返回 `TYPE_MISMATCH`。 |
 | 时态能力 | `kernel/abi/native/handle_table.c` | 已接入 | `handle_control` 提供 `SET_TEMPORAL`/`GET_TEMPORAL`/`SET_LABEL` 入口（仅可增强不可减弱）；sweeper 以 deadline 驱动周期运行（约 100ms），`AUTO_CLOSE` 过期自动回收；channel 传递保留时态约束与安全标签（不可刷新）。 |
 | 阻塞 IPC | `kernel/ipc/a20_channel.c`、`kernel/ipc/a20_event.c` | 已实现 | `channel_send`（队列满）/`channel_recv`（队列空）/`event_wait`（无事件）默认阻塞，`A20_MSG_NONBLOCK`/`timeout_ns=0` 为非阻塞；`event_wait` 支持相对超时与多事件返回，基于 tokenized Park/Wake（见 `docs/process-scheduler.md`）。 |

@@ -119,6 +119,9 @@ A20_NATIVE_SYSCALL(device_irq_unlisten, sys_a20_device_irq_unlisten(args))
 A20_NATIVE_SYSCALL(device_vmo_phys,   sys_a20_device_vmo_phys(args))
 A20_NATIVE_SYSCALL(device_block_attach, sys_a20_device_block_attach(args))
 A20_NATIVE_SYSCALL(device_block_complete, sys_a20_device_block_complete(args))
+A20_NATIVE_SYSCALL(device_claim,      sys_a20_device_claim(args))
+A20_NATIVE_SYSCALL(device_release,    sys_a20_device_release(args))
+A20_NATIVE_SYSCALL(device_alloc_dma,  sys_a20_device_alloc_dma(args))
 
 A20_NATIVE_SYSCALL(netd_attach, sys_a20_netd_attach(args))
 
