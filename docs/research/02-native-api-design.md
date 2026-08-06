@@ -1,6 +1,6 @@
 # A20OS Native API 设计
 
-> **基线说明（2026-07）**：本文定义的是 53 个 syscall 的形式化核心设计，继续作为 04/07 证明的模型边界。当前实现已扩展为 109 个 syscall；新增入口、实际结构体布局与运行时状态以 `docs/native-abi/01-types.md`、`03-handle.md`、`08-runtime-status.md` 和 `kernel/abi/native/syscall_table.def` 为准。本文中的 53 不应解释为当前分发表总数。
+> **基线说明（2026-07）**：本文定义的是 53 个 syscall 的形式化核心设计，继续作为 04/07 证明的模型边界。当前实现已扩展为 111 个 syscall；新增入口、实际结构体布局与运行时状态以 `docs/native-abi/01-types.md`、`03-handle.md`、`08-runtime-status.md` 和 `kernel/abi/native/syscall_table.def` 为准。本文中的 53 不应解释为当前分发表总数。
 
 > 本文为 A20OS Native ABI 理论研究的第二部分。基于 [01-posix-limitations.md](01-posix-limitations.md) 中的 POSIX 问题分析和现有替代方案研究，针对 A20OS 项目特点设计具体的 Native API。
 
