@@ -9,6 +9,8 @@
 
 extern void trap_entry_la64(void);
 extern void loongarch64_smp_handle_ipi(int from_user);
+extern void la64_handle_device_irq(void);
+extern void la64_eiointc_pic_init(void);
 
 static void handle_timer_irq(int from_user) {
     __asm__ __volatile__("csrwr %0, 0x44" :: "r"(1UL) : "memory");
@@ -31,6 +33,10 @@ void trap_init(void) {
     __asm__ __volatile__("csrrd %0, 0x4" : "=r"(ecfg));
     ecfg |= (1UL << 12) | (1UL << 11) | (1UL << 2);
     __asm__ __volatile__("csrwr %0, 0x4" :: "r"(ecfg));
+
+    /* Unmask the PCH-PIC PCI INTx lines and enable the EIOINTC inputs so the
+     * QEMU virt I/O interrupt controllers can deliver device IRQs on HWI0. */
+    la64_eiointc_pic_init();
 }
 
 void arch_handle_irq(uint64_t irq, int from_user) {
@@ -44,8 +50,9 @@ void arch_handle_irq(uint64_t irq, int from_user) {
         return;
     }
 
-    if (irq == IRQ_S_EXT)
-        driver_irq_dispatch((uint32_t)irq);
+    if (irq == IRQ_S_EXT) {
+        la64_handle_device_irq();
+    }
 }
 
 #endif
