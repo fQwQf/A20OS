@@ -12,11 +12,14 @@
 static void x86_64_irqchip_init(void) {}
 
 static void x86_64_irqchip_enable(uint32_t irq) {
-    (void)irq;
+    /* Routed PCI vectors arrive masked; request_irq()'s auto-enable is the
+     * only unmask path, which keeps source-less lines silent.  PIC-side
+     * lines (keyboard/uart/mouse) are unmasked statically in pic_init. */
+    x86_64_pci_irq_set_masked((int)irq, 0);
 }
 
 static void x86_64_irqchip_disable(uint32_t irq) {
-    (void)irq;
+    x86_64_pci_irq_set_masked((int)irq, 1);
 }
 
 static uint32_t x86_64_irqchip_ack(void) {
