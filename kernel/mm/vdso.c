@@ -30,7 +30,17 @@
 extern const uint8_t _binary_vdso_elf_start[];
 extern const uint8_t _binary_vdso_elf_end[];
 
-#define A20_VDSO_MAX_PAGES 4
+#define A20_USER_STACK_LIMIT_VA \
+    ((USER_STACK_TOP + PAGE_SIZE) - USER_STACK_MAX_SIZE)
+
+_Static_assert((A20_VDSO_VA & PAGE_OFFSET_MASK) == 0,
+               "vDSO address must be page aligned");
+_Static_assert((A20_VVAR_VA & PAGE_OFFSET_MASK) == 0,
+               "vvar address must be page aligned");
+_Static_assert(A20_VDSO_VA + A20_VDSO_MAX_PAGES * PAGE_SIZE <= A20_VVAR_VA,
+               "reserved vDSO image overlaps vvar");
+_Static_assert(A20_VVAR_VA + 2 * PAGE_SIZE <= A20_USER_STACK_LIMIT_VA,
+               "vvar must stay below the maximum user stack with a guard page");
 
 static pfn_t          g_vdso_pfn[A20_VDSO_MAX_PAGES];
 static uint32_t       g_vdso_pages;
