@@ -76,7 +76,52 @@ int main(int argc, char **argv, char **envp)
         a20_memcmp(buf, msg + 6, len) != 0)
         return fail("rest-payload");
 
+    /* Byte-stream across messages: two writes drained by partial reads. */
+    const char seg1[] = "hello ";
+    const char seg2[] = "world";
+    if (a20_status_is_err(a20_personality_pipe_write(&pipe, seg1, 6)) ||
+        a20_status_is_err(a20_personality_pipe_write(&pipe, seg2, 5)))
+        return fail("seg-write");
+    char joined[16];
+    uint32_t jlen = 6;
+    if (a20_status_is_err(a20_personality_pipe_read(&pipe, joined, &jlen)) ||
+        jlen != 6 || a20_memcmp(joined, "hello ", 6) != 0)
+        return fail("seg-partial");
+    jlen = sizeof(joined);
+    if (a20_status_is_err(a20_personality_pipe_read(&pipe, joined, &jlen)) ||
+        jlen != 5 || a20_memcmp(joined, "world", 5) != 0)
+        return fail("seg-rest");
+
+    /* Level-triggered readiness: data stays ready until fully drained. */
+    a20_time_t tzero = { .secs = 0, .nsecs = 0 };
+    while (a20_event_wait(pipe.wait_queue, tzero, &ev) == 1)
+        ; /* drain stale edge events from earlier writes */
+    const char lev[] = "level";
+    if (a20_status_is_err(a20_personality_pipe_write(&pipe, lev, 5)))
+        return fail("lev-write");
+    if (a20_personality_pipe_wait_readable(&pipe, timeout, &ev) != 1)
+        return fail("lev-ready1");
+    char lbuf[8];
+    uint32_t llen = 2;
+    if (a20_status_is_err(a20_personality_pipe_read(&pipe, lbuf, &llen)) ||
+        llen != 2)
+        return fail("lev-partial");
+    if (a20_personality_pipe_wait_readable(&pipe, timeout, &ev) != 1)
+        return fail("lev-ready2");
+    llen = sizeof(lbuf);
+    if (a20_status_is_err(a20_personality_pipe_read(&pipe, lbuf, &llen)) ||
+        llen != 3)
+        return fail("lev-drain");
+    a20_time_t tshort = { .secs = 0, .nsecs = 30 * 1000 * 1000 };
+    if (a20_personality_pipe_wait_readable(&pipe, tshort, &ev) !=
+        -A20_ERR_TIMED_OUT)
+        return fail("lev-empty");
+
     a20_personality_pipe_close(&pipe);
+    if (out != A20_HANDLE_NULL)
+        a20_hdl_write_buf(out,
+            "PIPE_REF: partial=6 rest=5 joined=hello world level=ok\n",
+            58, NULL);
     if (out != A20_HANDLE_NULL)
         a20_hdl_write_buf(out, "NATIVE_PERSONALITY: PASS\n", 25, NULL);
     return 0;
