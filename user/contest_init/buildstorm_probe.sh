@@ -64,8 +64,7 @@ run_case() {
     typeset -i case_timeout=180
 
     case "$name" in
-    stage2-*-100|stage3-*-100|stage4-*|stage5-*) case_timeout=900 ;;
-    stage6-tg-xtask-j1) case_timeout=27000 ;;
+    stage2-*-100|stage3-*-100|stage4-*|stage5-*|stage6-ext4-dir-tail) case_timeout=900 ;;
     esac
 
     (( total++ ))
@@ -273,50 +272,38 @@ probe_stage5_official_minibuild() {
     rm -rf "$base" || return
 }
 
-probe_stage6_tg_xtask_j1() {
-    typeset base=/work/tgoskits
-    typeset output=/work/a20-stage6-tg-xtask-j1.stdout-stderr.log
-    typeset rc_file=/work/.a20-stage6-tg-xtask-j1.rc
-    typeset artifact="$base/target/debug/tg-xtask"
-    typeset -i rc=1
-    typeset -i bytes=0
+probe_stage6_ext4_dir_tail() {
+    typeset base=/work/a20-stage6-ext4-dir-tail
+    typeset name=
+    typeset -i index=0
 
-    cd "$base" || {
-        print "BUILDSTORM_STAGE6_TG_XTASK missing-workspace path=$base"
-        return 1
-    }
+    rm -rf "$base"
+    mkdir "$base" || return
 
-    # Every final-eval run has a new qcow2 overlay.  Removing target here also
-    # prevents pre-existing files in the published image from turning this
-    # cold correctness probe into an incremental build.
-    rm -rf "$base/target" "$output" "$rc_file" || return
-    unset RUSTC LD_LIBRARY_PATH CARGO_BUILD_JOBS CARGO_TARGET_DIR
+    # Four-character names occupy 12-byte ext4 directory records.  A fresh
+    # second block holds one record followed by a free record; 340 further
+    # insertions leave only four bytes at the block tail.  The next mkdir must
+    # either be placed in a new block or fail explicitly, never report success
+    # while leaving an unreachable inode.
+    while (( index < 680 )); do
+        name=$(printf 'f%03d' "$index")
+        : >"$base/$name" || return
+        if (( index % 100 == 99 )); then
+            print "BUILDSTORM_STAGE6_EXT4_DIR_TAIL progress=$((index + 1))/680"
+        fi
+        (( index++ ))
+    done
 
-    print "BUILDSTORM_STAGE6_TG_XTASK begin arch=$arch jobs=1"
-    print "BUILDSTORM_STAGE6_TG_XTASK command=cargo build -p tg-xtask --jobs 1"
-    {
-        cargo build -p tg-xtask --jobs 1
-        print $? >"$rc_file"
-    } 2>&1 | /usr/bin/tee "$output"
-
-    if [[ -r "$rc_file" ]]; then
-        read rc <"$rc_file"
-    fi
-    rm -f "$rc_file"
-    print "BUILDSTORM_STAGE6_TG_XTASK result arch=$arch jobs=1 rc=$rc output=$output"
-    (( rc == 0 )) || return $rc
-
-    if [[ ! -f "$artifact" || ! -x "$artifact" ]]; then
-        print "BUILDSTORM_STAGE6_TG_XTASK artifact=$artifact missing-or-not-executable"
+    mkdir "$base/f680" || return
+    if [[ ! -d "$base/f680" ]]; then
+        print "BUILDSTORM_STAGE6_EXT4_DIR_TAIL lookup-missing name=f680"
         return 1
     fi
-    bytes=$(/usr/bin/wc -c <"$artifact") || return
-    (( bytes > 0 )) || {
-        print "BUILDSTORM_STAGE6_TG_XTASK artifact=$artifact empty"
-        return 1
-    }
-    print "BUILDSTORM_STAGE6_TG_XTASK artifact=$artifact bytes=$bytes executable=yes"
-    print "BUILDSTORM_STAGE6_TG_XTASK ok arch=$arch jobs=1"
+    print invoked >"$base/f680/invoked.timestamp" || return
+    /usr/bin/stat "$base/f680/invoked.timestamp" || return
+    sync || return
+    print "BUILDSTORM_STAGE6_EXT4_DIR_TAIL ok entries=681"
+    rm -rf "$base" || return
 }
 
 run_named_case() {
@@ -341,7 +328,7 @@ run_named_case() {
     cargo-minibuild-default) probe_cargo_minibuild_default ;;
     stage4-cargo-minibuild) probe_stage4_cargo_minibuild ;;
     stage5-official-minibuild) probe_stage5_official_minibuild ;;
-    stage6-tg-xtask-j1) probe_stage6_tg_xtask_j1 ;;
+    stage6-ext4-dir-tail) probe_stage6_ext4_dir_tail ;;
     *)
         print "[BUILDSTORM-PROBE][FATAL] unknown case: $1"
         return 2
