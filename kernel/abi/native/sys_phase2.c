@@ -63,8 +63,12 @@ extern int64_t sys_a20_path_open(const a20_syscall_args_t *args);
 extern int copy_path_from_user(char *dst, const char *uptr, uint32_t len);
 extern void resolve_path(const char *in, char *out);
 
-/* NATIVE_DEBUG_LIMITED_CONTRACT: Debug (0x0900) — limited compatibility
- * implementations without full stop/resume/watchpoint behavior. */
+/* NATIVE_DEBUG_LIMITED_CONTRACT: the historical Debug (0x0900) partition
+ * was a limited compatibility implementation without stop/resume semantics.
+ * It has been replaced by full stop/resume support in
+ * kernel/abi/native/sys_native_debug.c, which wraps the ABI-agnostic
+ * kernel debugging interface (proc_debug_*, kernel/proc/debug.c).  This
+ * contract marker documents the migration; no stub remains. */
 
 /* ABI_CORE_API_CONTRACT: Native Phase 2 syscalls delegate to abi_core_proc_exec
  * and abi_core_proc_mmap where a Linux ABI equivalent exists. */
@@ -126,11 +130,13 @@ int64_t sys_a20_thread_create(const a20_syscall_args_t *args)
     if (pid < 0) return -A20_ERR_NO_MEMORY;
 
     /* Thread handles currently use A20_OBJ_TASK so task_wait/task_kill apply;
-     * see docs/native-abi/08-runtime-status.md (THREAD type is reserved). */
+     * see docs/native-abi/08-runtime-status.md (THREAD type is reserved).
+     * ADMIN is granted because the creator owns the thread (debug_attach
+     * requires it, docs/native-abi/06-security.md §8.1). */
     int64_t h = a20_handle_install(ht, (void *)(uintptr_t)pid, A20_OBJ_TASK,
                                     A20_RIGHT_WAIT | A20_RIGHT_SIGNAL |
                                     A20_RIGHT_STAT | A20_RIGHT_CONTROL | A20_RIGHT_DUP |
-                                    A20_RIGHT_TRANSFER);
+                                    A20_RIGHT_TRANSFER | A20_RIGHT_ADMIN);
     if (h < 0) return h;
 
     kargs.out_thread = (a20_handle_t)h;

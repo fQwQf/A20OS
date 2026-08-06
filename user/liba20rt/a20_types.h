@@ -1029,6 +1029,26 @@ typedef struct a20_regs {
     uint64_t       sr;
 } a20_regs_t;
 
+/* Stop kinds reported by debug_wait / debug_event. */
+#define A20_DEBUG_STOP_SIGNAL        1
+#define A20_DEBUG_STOP_EVENT         2
+#define A20_DEBUG_STOP_SYSCALL_ENTRY 3
+#define A20_DEBUG_STOP_SYSCALL_EXIT  4
+#define A20_DEBUG_EVENT_EXEC         4
+#define A20_DEBUG_EVENT_EXIT         6
+#define A20_DEBUG_RESUME_CONT        0
+#define A20_DEBUG_RESUME_SYSCALL     1
+
+typedef struct a20_debug_event_info {
+    uint32_t       size;        /* sizeof(a20_debug_event_info_t) */
+    uint32_t       version;     /* 1 */
+    uint32_t       kind;        /* A20_DEBUG_STOP_* */
+    uint32_t       sig;         /* stop signal (0 when kind != SIGNAL) */
+    uint32_t       event;       /* A20_DEBUG_EVENT_* (0 when kind != EVENT) */
+    uint32_t       reserved;
+    uint64_t       event_msg;   /* event payload (e.g. exit code) */
+} a20_debug_event_info_t;
+
 /* ========================================================================
  * Sync structures (kernel/include/abi/native/types.h)
  * ======================================================================== */
