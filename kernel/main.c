@@ -1,6 +1,9 @@
 #include "core/stdio.h"
 #include "core/bootargs.h"
 #include "drivers/char/uart.h"
+#include "drivers/char/goldfish_rtc_kdrv.h"
+#include "drivers/input/virtio_input_kprobe.h"
+void riscv_iommu_early_probe(void);
 #include "mm/mm.h"
 #include "mm/elf.h"
 #include "mm/vm.h"
@@ -114,8 +117,19 @@ void kernel_main(void) {
         printf("[INIT] Board devices enumerated (%s)\n",
                current_board->name ? current_board->name : "unknown");
     }
+#ifdef CONFIG_BOARD_QEMU_VIRT_RISCV64
+    riscv_iommu_early_probe();
+#endif
     driver_probe_all();
     printf("[INIT] Drivers probed\n");
+#ifdef CONFIG_BOARD_QEMU_VIRT_RISCV64
+    /* Dual-placement driver skeleton (docs/hybrid-kernel/04-dual-placement.md):
+     * kernel placement of the shared goldfish RTC driver. */
+    goldfish_rtc_kdrv_probe();
+    /* Read-only kernel placement probe of the dual-placement virtio-input
+     * slot; silent unless a keyboard device is attached (smoke-dual-input). */
+    virtio_input_kprobe();
+#endif
     usb_core_scan();
     printf("[INIT] USB devices scanned\n");
 #ifdef CONFIG_PS2_INPUT
