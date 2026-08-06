@@ -160,7 +160,10 @@ int main(int argc, char **argv, char **envp)
         return fail(5, "rtc seconds implausible");
 
     /* 2. Alarm IRQ: async reply must arrive after ~100 ms. */
-    uint8_t areq[5] = { RTCD_REQ_ALARM, 100, 0, 0, 0 };
+    uint8_t areq[1 + sizeof(a20_idl_rtcd_alarm_request_t)] = {0};
+    areq[0] = RTCD_REQ_ALARM;
+    a20_idl_rtcd_alarm_request_t alarm = { .milliseconds = 100 };
+    a20_memcpy(&areq[1], &alarm, sizeof(alarm));
     uint64_t t0 = now_ns();
     if (a20_channel_send(ep, areq, sizeof(areq), 0, 0) != A20_OK)
         return fail(6, "alarm request failed");
