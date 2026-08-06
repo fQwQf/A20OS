@@ -115,6 +115,11 @@ isr_common:
     movq  208(%rsp), %rax       /* vec */
     cmpq  $0x80, %rax
     je    2f                    /* int $0x80 syscall */
+    cmpq  $1, %rax
+    jne   1f
+    movq  $3, %rax              /* #DB (single-step TF) -> CAUSE_BREAKPOINT */
+    jmp   2f
+1:
     cmpq  $32, %rax
     jb    2f
     btsq  $63, %rax             /* Set CAUSE_INTR_MASK for IRQs */

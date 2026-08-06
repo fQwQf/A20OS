@@ -10,6 +10,8 @@
 #include "core/klog.h"
 #include "core/timer.h"
 #include "proc/signal.h"
+#include "proc/debug.h"
+#include "ext/kep.h"
 #include "sys/syscall.h"
 #include "sys/usercopy.h"
 
@@ -58,6 +60,32 @@ int64_t syscall_dispatch(trap_context_t *ctx)
     uint64_t num = TRAP_CTX_SYSCALL_NUM(ctx);
     uint64_t start_time = syscall_profile_now();
 
+    /*
+     * KEP syscall filter: attached programs may deny or kill the caller
+     * before any ABI handling runs.  A denied syscall returns -EACCES
+     * (Linux) / -A20_ERR_ACCESS (Native).
+     */
+    {
+        uint64_t args[KEP_SCF_ARGS] = {
+            TRAP_CTX_ARG0(ctx), TRAP_CTX_ARG1(ctx), TRAP_CTX_ARG2(ctx),
+            TRAP_CTX_ARG3(ctx), TRAP_CTX_ARG4(ctx), TRAP_CTX_ARG5(ctx),
+        };
+        task_t *cur = proc_current();
+        int abi = (cur && cur->abi_mode) ? 1 : 0;
+        int verdict = kep_syscall_filter_check(num, args, abi);
+        if (verdict == KEP_SCF_KILL) {
+            proc_exit_group(-SIGKILL);
+        } else if (verdict != KEP_SCF_ALLOW) {
+#if defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)
+            int64_t denied = abi ? -A20_ERR_ACCESS : -EACCES;
+#else
+            int64_t denied = -EACCES;
+#endif
+            TRAP_CTX_SET_RET(ctx, denied);
+            return denied;
+        }
+    }
+
 #if defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)
     task_t *cur_task = proc_current();
     int is_native = cur_task && cur_task->abi_mode;
@@ -86,6 +114,14 @@ int64_t syscall_dispatch(trap_context_t *ctx)
 
         TRAP_CTX_SET_RET(ctx, ret);
         syscall_profile_record(num, start_time, syscall_profile_now());
+        /*
+         * Native tasks use checkpoint-style signal delivery for their own
+         * signal API, but core kernel signals (SIGSTOP from a debugger
+         * attach, SIGKILL, ptrace delivery) queue through the shared signal
+         * state and must reach the delivery boundary here, exactly like the
+         * Linux ABI path below.
+         */
+        signal_deliver_user(ctx);
         return ret;
     }
 #endif
@@ -106,6 +142,16 @@ int64_t syscall_dispatch(trap_context_t *ctx)
 
     arch_syscall_adjust_args(&args);
     num = args.nr;
+
+    /*
+     * PT_DEBUG_SYSCALL_STOPS: a tracee resumed in syscall-stop mode stops
+     * before the syscall executes (entry stop; on resume the arch layer
+     * rewinds the saved EPC so the syscall runs) and again after it
+     * completes (exit stop, result visible in the registers).  The ptrace
+     * syscall itself is never stopped to avoid observer recursion.
+     */
+    if (num != SYS_ptrace)
+        proc_debug_syscall_entry(ctx);
 
     int64_t ret = -ENOSYS;
     int context_restored = 0;
@@ -138,6 +184,8 @@ int64_t syscall_dispatch(trap_context_t *ctx)
         context_restored = 0;
     }
     syscall_profile_record(num, start_time, syscall_profile_now());
+    if (num != SYS_ptrace)
+        proc_debug_syscall_exit(ctx);
     proc_check_exit_pending();
     signal_deliver_user(ctx);
     proc_check_exit_pending();
