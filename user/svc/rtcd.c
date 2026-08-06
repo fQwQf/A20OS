@@ -52,15 +52,18 @@ static int handle_one(a20_handle_t ep, int *alarm_pending)
     switch (buf[0]) {
     case RTCD_REQ_TIME: {
         uint64_t ns = rtc_read_ns();
-        uint64_t rep[2] = { ns / 1000000000ULL, ns % 1000000000ULL };
-        a20_channel_send(ep, rep, sizeof(rep), 0, 0);
+        a20_idl_rtcd_time_response_t rep = {
+            ns / 1000000000ULL, ns % 1000000000ULL
+        };
+        a20_channel_send(ep, &rep, sizeof(rep), 0, 0);
         return 1;
     }
     case RTCD_REQ_ALARM: {
-        if (blen < 5)
+        if (blen < 1 + sizeof(a20_idl_rtcd_alarm_request_t))
             return 1;
-        uint32_t ms = (uint32_t)buf[1] | ((uint32_t)buf[2] << 8) |
-                      ((uint32_t)buf[3] << 16) | ((uint32_t)buf[4] << 24);
+        a20_idl_rtcd_alarm_request_t req;
+        a20_memcpy(&req, &buf[1], sizeof(req));
+        uint32_t ms = req.milliseconds;
         rtc_set_alarm_ns(rtc_read_ns() + (uint64_t)ms * 1000000ULL);
         *alarm_pending = 1; /* async reply is sent when the IRQ fires */
         return 1;
@@ -81,6 +84,10 @@ int main(int argc, char **argv, char **envp)
 #define RTCD_LOG(msg) a20_hdl_write_buf(out, msg, sizeof(msg) - 1, (void *)0)
     RTCD_LOG("rtcd: start\n");
 
+    if (a20_device_claim(GOLDFISH_RTC_BASE) != A20_OK) {
+        RTCD_LOG("rtcd: claim failed\n");
+        return 2;
+    }
     uint64_t rtc_va = grtc_map();
     if (!rtc_va) {
         RTCD_LOG("rtcd: map_mmio failed\n");
