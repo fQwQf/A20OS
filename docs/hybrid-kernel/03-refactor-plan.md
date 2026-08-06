@@ -140,8 +140,11 @@ Native ABI 是研究本体时，其核心数据面在 SMP 下不可靠意味着�
 （`drivers/dual/goldfish_rtc.h`）生效；goldfish RTC 同一协议源码
 已在两种部署下运行：内核壳 boot probe 输出真实设备时间，用户壳
 `smoke-native-rtcd` PASS。DMA ops、连续 DMA heap、所有权仲裁、第二个样板
-和功能态 virtqueue 已完成；IOMMU 当前为 discovery-only 骨架，
-`smoke-iommu-discovery` 可识别 QEMU `riscv-iommu-pci`，翻译尚未启用。
+和功能态 virtqueue 已完成。**IOMMU 已完成真实硬件初始化**：BAR 分配、
+capability 读取（version 16 / spec 1.0）、DDT/DC/CQ/FQ 编程、使能、
+CQON/FQON 与 DDTP 完成验证，`smoke-iommu-discovery` 断言寄存器状态；
+当前为 PCI 叶子设备配置 passthrough DC，per-domain IOVA 翻译因缺少
+独立 PCI DMA 消费者（根盘为 virtio-mmio）而留作后续。
 
 ### 阶段四：服务接口 IDL 化
 
@@ -154,8 +157,11 @@ ad-hoc 手写结构。服务数量增长前引入 IDL（FIDL 式）：接口可�
 版本协商；手写 proto 头退出活跃树。
 
 **状态**：常量层与固定宽度消息层已完成：`a20_services.idl`、生成器和
-生成头已接入 rtcd/svc/ubd，rtcd alarm/time payload 已由生成结构体描述；
-绑定生成和版本协商仍待完成。
+生成头已接入 rtcd/svc/ubd，rtcd alarm/time payload 已由生成结构体描述。
+**版本化请求/响应信封已完成**：请求与响应使用独立 wire type
+（RTCD_REPLY_TIME/REPLY_ALARM），服务端校验 version/size，测试端双向
+验证；`smoke-native-rtcd` PASS。剩余：svcmgr/registry 协议迁移与
+动态版本协商。
 
 ### 阶段五：Linux 人格层重建（starnix 式）
 
@@ -166,8 +172,13 @@ VMAR、pipe/AF_UNIX→channel、epoll→EventQ、futex→原生 futex），与�
 验收：选定测例集（CAgent 功能项为自然候选）在两种实现下同通过；
 性能数据记录中位数与异常值；差异清单公开为维护中的兼容性文档。
 
-**状态**：完整人格层未开始；当前仅记录 Native pipe 子集的下一步 PoC，
-不把 Linux ABI 直通实现冒充为人格层。
+**状态**：人格层第二块已完成——`a20_linux.h` 在 Native 原语上提供
+Linux 风格 facade：fd 表（open/close/dup/read/write over handle 槽位）、
+匿名 mmap（vm_alloc/vm_unmap）、pipe（channel-backed byte stream）、
+socketpair（Native net）、futex（wait/wake + ETIMEDOUT 映射）、
+epoll 风格 wait-many（共享 EventQ）。`smoke-native-linux` 六分区
+PASS。完整人格层（byte-stream fd 语义、多路复用的 level 触发、
+与直通实现的语义 diff/性能对照）仍待完成，不把直通实现冒充为人格层。
 
 ## 验证纪律
 
