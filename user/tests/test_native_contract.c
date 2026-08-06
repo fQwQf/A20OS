@@ -453,6 +453,38 @@ static int vmo_lifecycle(void)
     return 0;
 }
 
+static int dma_heap_contiguous(void)
+{
+    a20_status_t create = a20_device_alloc_dma(4 * 4096);
+    if (create < 0)
+        return fail("dma-create");
+    a20_handle_t dma = (a20_handle_t)create;
+
+    uint64_t addr = 0;
+    if (a20_status_is_err(a20_vm_map(dma, 4 * 4096, 0,
+                                     A20_PROT_READ | A20_PROT_WRITE, &addr)))
+        return fail("dma-map");
+
+    uint64_t phys[4] = {0};
+    uint32_t count = 0;
+    if (a20_device_vmo_phys(dma, phys, 4, &count) != A20_OK || count != 4)
+        return fail("dma-phys");
+    for (uint32_t i = 1; i < count; i++)
+        if (phys[i] != phys[0] + (uint64_t)i * 4096)
+            return fail("dma-not-contiguous");
+
+    volatile uint8_t *p = (volatile uint8_t *)(uintptr_t)addr;
+    if (p[0] != 0 || p[4095] != 0 || p[4096] != 0 || p[3 * 4096] != 0)
+        return fail("dma-not-zero");
+    p[0] = 0xA5;
+    p[3 * 4096] = 0x5A;
+    if (a20_vm_unmap(addr, 4 * 4096) != A20_OK)
+        return fail("dma-unmap");
+    if (a20_hdl_close(dma) != A20_OK)
+        return fail("dma-close");
+    return 0;
+}
+
 int main(int argc, char **argv, char **envp)
 {
     (void)argc;
@@ -480,6 +512,10 @@ int main(int argc, char **argv, char **envp)
     if (vmo_lifecycle() != 0)
         return 1;
     note("vmol ok\n", 8);
+
+    if (dma_heap_contiguous() != 0)
+        return 1;
+    note("dma ok\n", 7);
 
     note("NATIVE_CONTRACT: PASS\n", 20);
     return 0;
