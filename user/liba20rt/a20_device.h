@@ -115,4 +115,10 @@ static inline a20_status_t a20_device_release(uint64_t phys_base)
     return a20_syscall6(A20_SYS_device_release, phys_base, 0, 0, 0, 0, 0);
 }
 
+/* Return a pre-materialized, physically contiguous MEMORY handle. */
+static inline a20_status_t a20_device_alloc_dma(uint64_t size)
+{
+    return a20_syscall6(A20_SYS_device_alloc_dma, size, 0, 0, 0, 0, 0);
+}
+
 #endif
