@@ -31,6 +31,11 @@ static const udriver_mmio_window_t g_mmio_windows[] = {
      * (docs/hybrid-kernel/02-mainstream-plan.md M4).  The kernel's
      * virtio_mmio_enumerate() skips user-owned slots. */
     { 0x10004000, 0x1000, "virtio-blk-user", 1 },
+    /* virtio-mmio slot 5: dual-placement virtio-input sample
+     * (docs/hybrid-kernel/04-dual-placement.md).  User-owned so the
+     * in-tree kernel driver never binds; the kernel placement probe
+     * (virtio_input_kprobe) is read-only and does not bind either. */
+    { 0x10006000, 0x1000, "virtio-input-dual", 1 },
 #endif
 };
 

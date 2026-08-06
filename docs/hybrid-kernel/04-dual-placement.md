@@ -52,16 +52,29 @@
 
 ## 当前骨架状态（2026-08-06）
 
-- `kernel/include/drivers/dual/drv_env.h`：环境层定义，两个后端；
+- `kernel/include/drivers/dual/drv_env.h`：环境层定义，两个后端。
+  ops 集已扩展为 MMIO 映射、8/32 位寄存器读写、**DMA 缓冲分配**
+  （页粒度；信任模型，物理地址表在分配时固定。已知限制：用户态
+  VMO 页可能不连续，多页连续 DMA 协议暂限单页，待 DMA-heap/IOMMU）；
 - `kernel/include/drivers/dual/goldfish_rtc.h`：goldfish RTC 寄存器
   协议唯一源码（自此 rtcd_proto.h 不再持有寄存器定义）；
+- `kernel/include/drivers/dual/virtio_mmio.h` +
+  `kernel/include/drivers/dual/virtio_input.h`：virtio-mmio 传输与
+  virtio-input 设备协议唯一源码；
 - 内核壳 `kernel/drivers/char/goldfish_rtc_kdrv.c`：boot probe
   （qemu-virt-riscv64 下 `kernel_main` 调用，日志
   `[GRTC] kernel-placement probe: now=<ns>`）；
+- 内核壳 `kernel/drivers/input/virtio_input_kprobe.c`：boot 只读
+  probe（无设备时静默），日志 `[UINPUT] kernel-placement probe:`；
 - 用户壳 `user/svc/rtcd.c`：已重构到共享协议层，
-  `make smoke-native-rtcd` PASS（时间请求、alarm、IRQ→EventQ、
-  崩溃自愈路径不变）；
-- 构建：riscv64 与 loongarch64 内核均通过；rtcd 用户壳以
+  `make smoke-native-rtcd` PASS；
+- 用户壳 `user/svc/uinputd.c`：virtio-input 用户态 probe；
+- **首个双态语义一致性验证**：`make smoke-dual-input` 挂
+  `virtio-keyboard-device,bus=virtio-mmio-bus.5`，同一共享协议源码
+  在两种部署下读出相同设备身份（内核 `[UINPUT] ... name=QEMU Virtio
+  Keyboard`，用户 `UINPUTD: name=QEMU Virtio Keyboard`），两架构
+  内核构建通过；
+- 构建：riscv64 与 loongarch64 内核均通过；rtcd/uinputd 用户壳以
   `-Ikernel/include` 引入共享头（`NATIVE_RTCD_RECIPE`）。
 
 ## 明确的非目标与后续
@@ -70,8 +83,9 @@
   设备所有权（udriver 窗口当前默认 user-owned，见
   `udriver_mmio_user_owned`），所有权仲裁本身是框架的一部分；
 - IRQ ops 暂不进 drv_env（线程模型差异是本质的，见上）；
-- DMA ops 等待 IOMMU；
-- 第二个双态样板候选：virtio-input（数据面低频、协议简单、
-  可验证语义一致性）；virtio-blk 保持内核数据面 + ubd 用户态
-  scratch 的现状，不作为双态候选（数据面跨边界两次的陷阱，
-  见 03-refactor-plan）。
+- DMA ops 已进 drv_env（信任模型）；IOMMU 硬件强制仍是独立工作项，
+  完成后 drv_dma 的语义承诺才能从"内核担保"升级为"硬件强制"；
+- virtio-input 的 virtqueue 事件面（破坏性初始化，单所有者）待所有权
+  仲裁后进入共享层；
+- virtio-blk 保持内核数据面 + ubd 用户态 scratch 的现状，不作为双态
+  候选（数据面跨边界两次的陷阱，见 03-refactor-plan）。

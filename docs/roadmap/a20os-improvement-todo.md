@@ -26,10 +26,13 @@
 - [ ] 阶段三：驱动双态部署框架 + IOMMU/DMA 真隔离。
   - 证据：骨架已落地（`kernel/include/drivers/dual/`，设计文档
     `docs/hybrid-kernel/04-dual-placement.md`）；goldfish RTC 同源码
-    双态运行（内核壳 boot probe + 用户壳 `smoke-native-rtcd` PASS）。
+    双态运行（内核壳 boot probe + 用户壳 `smoke-native-rtcd` PASS）；
+    virtio-input 第二样板完成，`smoke-dual-input` 验证两种部署读出
+    相同设备身份；DMA ops 已进 drv_env（页粒度，信任模型）。
   - 完成条件：同一驱动源码双态部署通过同一契约测试；未授权 DMA 被
-    IOMMU 硬件拒绝。待办：DMA ops + IOMMU、设备所有权仲裁、第二个
-    样板（候选 virtio-input）、双态语义一致性测试。
+    IOMMU 硬件拒绝。待办：IOMMU 硬件强制 + 多页连续 DMA heap、
+    设备所有权仲裁（virtqueue 事件面进入共享层的前提）、双态
+    一致性测试从 probe 扩展到功能面。
 - [ ] 阶段四：服务接口 IDL 化（替换 `user/svc/*_proto.h` 手写协议）。
   - 完成条件：svcmgr/registry 协议由 IDL 生成；手写 proto 头退出活跃树。
 - [ ] 阶段五：Linux 人格层在 Native 原语上重建（starnix 式对照）。
