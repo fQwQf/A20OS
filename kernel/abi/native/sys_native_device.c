@@ -223,3 +223,34 @@ int64_t sys_a20_device_block_complete(const a20_syscall_args_t *args)
     return udisk_complete(cur->pid, n_done) < 0
         ? -A20_ERR_BAD_HANDLE : A20_OK;
 }
+
+int64_t sys_a20_device_claim(const a20_syscall_args_t *args)
+{
+    uint64_t phys = A20_ARG(0);
+    task_t *cur = proc_current();
+    if (!cur)
+        return -A20_ERR_BAD_HANDLE;
+    extern int udriver_claim(uint64_t phys, int pid);
+    int r = udriver_claim(phys, cur->pid);
+    if (r == -2)
+        return -A20_ERR_ACCESS;      /* not a user-claimable window */
+    if (r < 0)
+        return -A20_ERR_BUSY;        /* claimed by another task */
+    return A20_OK;
+}
+
+int64_t sys_a20_device_release(const a20_syscall_args_t *args)
+{
+    uint64_t phys = A20_ARG(0);
+    task_t *cur = proc_current();
+    if (!cur)
+        return -A20_ERR_BAD_HANDLE;
+    extern int udriver_release(uint64_t phys, int pid);
+    int r = udriver_release(phys, cur->pid);
+    if (r == -2)
+        return -A20_ERR_ACCESS;
+    if (r < 0)
+        return -A20_ERR_PERM;        /* not the owner */
+    return A20_OK;
+}
+

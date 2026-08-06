@@ -3590,8 +3590,8 @@ smoke-dual-input:
 	monsock="$(SMOKE_LOG_DIR)/dual-input-monitor.sock"; \
 	rm -f "$$monsock"; \
 	status=0; \
-	{ sleep 8; python3 -c 'import socket,sys,time; s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1]); [(s.sendall(b"sendkey a\n"), time.sleep(1)) for _ in range(6)]; s.close()' "$$monsock" 2>/dev/null || true; } & \
-	{ sleep $(SMOKE_INPUT_DELAY); printf '/bin/uinputd-rv\npoweroff\n'; } | \
+	{ sleep 8; python3 -c 'import socket,sys,time; s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1]); [(s.sendall(b"sendkey a\n"), time.sleep(1)) for _ in range(12)]; s.close()' "$$monsock" 2>/dev/null || true; } & \
+	{ sleep $(SMOKE_INPUT_DELAY); printf '/bin/uinputd-rv\n/bin/uinputd-rv\npoweroff\n'; } | \
 	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
 		-machine virt -m 1G -nographic -smp 1 -bios default \
 		-global virtio-mmio.force-legacy=false \
@@ -3606,7 +3606,8 @@ smoke-dual-input:
 	   grep -q 'UINPUTD: name=QEMU Virtio Keyboard' "$$log" && \
 	   grep -q 'UINPUTD: ready' "$$log" && \
 	   grep -q 'UINPUTD: ev type=1 code=30 value=1' "$$log" && \
-	   grep -q 'UINPUTD: PASS' "$$log" && \
+	   grep -q 'UINPUTD: claimed' "$$log" && \
+	   [ "$$(grep -c 'UINPUTD: PASS' "$$log")" = "2" ] && \
 	   grep -q 'System is going down for power-off NOW' "$$log"; then \
 		echo "smoke-dual-input: PASS; log saved to $$log"; \
 	else \

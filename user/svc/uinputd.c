@@ -62,6 +62,15 @@ int main(int argc, char **argv, char **envp)
         return 2;
     }
 
+    /* Exclusive ownership: destructive init belongs to the claimant.
+     * Auto-released at task death (crash-safe). */
+    a20_status_t cr = a20_device_claim(VINPUT_DUAL_PHYS);
+    if (cr != A20_OK) {
+        log_str("UINPUTD: claim failed\n");
+        return 10;
+    }
+    log_str("UINPUTD: claimed\n");
+
     vmmio_probe_t p;
     if (vmmio_probe(base, &p) != 0 || p.device_id != VIRTIO_INPUT_DEVICE_ID) {
         log_str("UINPUTD: no input device\n");
