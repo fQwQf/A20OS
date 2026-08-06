@@ -662,9 +662,11 @@ ifeq ($(ARCH),riscv64)
 KERNEL_OBJ += $(VDSO_BLOB)
 endif
 
-$(VDSO_ELF): $(VDSO_SRC_DIR)/vdso.S $(VDSO_SRC_DIR)/vdso.ld
+$(VDSO_ELF): $(VDSO_SRC_DIR)/vdso.S $(VDSO_SRC_DIR)/vdso.ld \
+             $(INCLUDE_DIR)/mm/vdso_layout.h
 	@mkdir -p $(dir $@)
-	$(VDSO_CC) -nostdlib -nostartfiles -shared -Wl,--build-id=none \
+	$(VDSO_CC) -I$(INCLUDE_DIR) -nostdlib -nostartfiles -shared \
+	    -Wl,--build-id=none \
 	    -Wl,--hash-style=sysv -T $(VDSO_SRC_DIR)/vdso.ld -o $@ $<
 
 $(VDSO_BLOB): $(VDSO_ELF)
