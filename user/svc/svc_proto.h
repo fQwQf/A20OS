@@ -12,6 +12,7 @@
 #define _A20_SVC_PROTO_H
 
 #include "a20_types.h"
+#include "a20_services_idl.h"
 
 #define A20_SVC_ENDPOINT_SLOT   (A20_NATIVE_FD_HANDLE_BASE + 40u)
 #define A20_SVC_ENDPOINT_HANDLE ((a20_handle_t)A20_SVC_ENDPOINT_SLOT)
@@ -20,6 +21,4 @@
  *  - payload "crash" (5 bytes): service exits with code 42 (self-heal demo)
  *  - anything else:             service echoes the payload back
  */
-#define A20_SVC_CRASH_CODE 42
-
 #endif

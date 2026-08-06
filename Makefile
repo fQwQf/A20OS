@@ -166,6 +166,7 @@ NATIVE_FUTEX_BIN       := $(NATIVE_BUILD_DIR)/native-futex-$(NATIVE_TAG)
 NATIVE_MM_BIN          := $(NATIVE_BUILD_DIR)/native-mm-$(NATIVE_TAG)
 NATIVE_SIGNAL_BIN      := $(NATIVE_BUILD_DIR)/native-signal-$(NATIVE_TAG)
 NATIVE_IPC_BIN         := $(NATIVE_BUILD_DIR)/native-ipc-$(NATIVE_TAG)
+NATIVE_CONTRACT_BIN    := $(NATIVE_BUILD_DIR)/native-contract-$(NATIVE_TAG)
 NATIVE_SVCMAN_BIN      := $(NATIVE_BUILD_DIR)/svcman-$(NATIVE_TAG)
 NATIVE_ECHOD_BIN       := $(NATIVE_BUILD_DIR)/svc-echod-$(NATIVE_TAG)
 NATIVE_SHMRING_BIN     := $(NATIVE_BUILD_DIR)/native-shmring-$(NATIVE_TAG)
@@ -177,7 +178,10 @@ NATIVE_REGISTRY_BIN    := $(NATIVE_BUILD_DIR)/native-registry-$(NATIVE_TAG)
 NATIVE_SVCMGR_BIN      := $(NATIVE_BUILD_DIR)/svcmgr-$(NATIVE_TAG)
 NATIVE_ISOLATION_BIN   := $(NATIVE_BUILD_DIR)/native-isolation-$(NATIVE_TAG)
 NATIVE_UBDD_BIN        := $(NATIVE_BUILD_DIR)/ubd-$(NATIVE_TAG)
-NATIVE_OUTPUTS         := $(NATIVE_HELLO_BIN) $(NATIVE_HANDLE_BIN) $(NATIVE_LIBC_BIN) $(NATIVE_FUTEX_BIN) $(NATIVE_MM_BIN) $(NATIVE_SIGNAL_BIN) $(NATIVE_IPC_BIN) $(NATIVE_SVCMAN_BIN) $(NATIVE_ECHOD_BIN) $(NATIVE_SHMRING_BIN) $(NATIVE_SHMRINGD_BIN) $(NATIVE_CHAND_BIN) $(NATIVE_RTCD_BIN) $(NATIVE_RTCDD_BIN) $(NATIVE_REGISTRY_BIN) $(NATIVE_SVCMGR_BIN) $(NATIVE_ISOLATION_BIN) $(NATIVE_UBDD_BIN) $(NATIVE_NETD_BIN)
+NATIVE_UINPUTD_BIN     := $(NATIVE_BUILD_DIR)/uinputd-$(NATIVE_TAG)
+NATIVE_PERSONALITY_BIN  := $(NATIVE_BUILD_DIR)/native-personality-$(NATIVE_TAG)
+NATIVE_LINUX_BIN        := $(NATIVE_BUILD_DIR)/native-linux-$(NATIVE_TAG)
+NATIVE_OUTPUTS         := $(NATIVE_HELLO_BIN) $(NATIVE_HANDLE_BIN) $(NATIVE_LIBC_BIN) $(NATIVE_FUTEX_BIN) $(NATIVE_MM_BIN) $(NATIVE_SIGNAL_BIN) $(NATIVE_IPC_BIN) $(NATIVE_CONTRACT_BIN) $(NATIVE_SVCMAN_BIN) $(NATIVE_ECHOD_BIN) $(NATIVE_SHMRING_BIN) $(NATIVE_SHMRINGD_BIN) $(NATIVE_CHAND_BIN) $(NATIVE_RTCD_BIN) $(NATIVE_RTCDD_BIN) $(NATIVE_REGISTRY_BIN) $(NATIVE_SVCMGR_BIN) $(NATIVE_ISOLATION_BIN) $(NATIVE_UBDD_BIN) $(NATIVE_UINPUTD_BIN) $(NATIVE_PERSONALITY_BIN) $(NATIVE_LINUX_BIN) $(NATIVE_NETD_BIN)
 NATIVE_BUILD_STAMP     := $(NATIVE_BUILD_DIR)/.native-build-id
 comma := ,
 NET_HOSTFWD ?= hostfwd=tcp::5555-:5555,hostfwd=udp::5555-:5555
@@ -705,6 +709,12 @@ VBOX_AARCH64_LOAD_ADDRESS ?= 0x08080000ULL
 		native-test-arch native-handle-test-arch native-libc-arch native-programs \
 	native-futex-arch native-futex-rv smoke-native-futex mlibc-sysroot mlibc-hello-rv smoke-mlibc \
 		native-ipc-arch native-ipc-rv native-ipc-la smoke-native-ipc \
+		native-contract-arch native-contract-rv native-contract-la smoke-native-contract \
+		native-uinputd-arch native-uinputd-rv smoke-dual-input \
+		native-personality-arch native-personality-rv smoke-native-personality \
+		native-linux-arch native-linux-rv smoke-native-linux \
+		check-a20-idl \
+		smoke-iommu-discovery \
 		native-svc-arch native-svc-rv smoke-native-svc \
 		native-shmring-arch native-shmring-rv smoke-native-shmring \
 		native-rtcd-arch native-rtcd-rv smoke-native-rtcd \
@@ -1245,6 +1255,39 @@ smoke-riscv64:
 		echo "smoke-riscv64: QEMU failed with status $$status; tail of $$log:"; \
 		tail -n 40 "$$log"; \
 		exit "$$status"; \
+	fi
+
+check-a20-idl:
+	@tmp="$$(mktemp)"; \
+	trap 'rm -f "$$tmp"' EXIT; \
+	conda run -n a20os python tools/a20idl.py user/svc/a20_services.idl "$$tmp"; \
+	cmp -s "$$tmp" user/svc/a20_services_idl.h || { \
+		echo "check-a20-idl: generated header is stale"; exit 1; }; \
+	echo "check-a20-idl: PASS"
+
+smoke-iommu-discovery:
+	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/iommu-discovery-riscv64.log"; \
+	status=0; \
+	{ sleep $(SMOKE_INPUT_DELAY); printf 'poweroff\n'; } | \
+	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
+		-machine virt -m 1G -nographic -smp 1 -bios default \
+		-global virtio-mmio.force-legacy=false \
+		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-both-dev/fat32.img,if=none,format=raw,id=x0 \
+		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+		-device riscv-iommu-pci,bus=pcie.0 \
+		-kernel .kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf \
+		> "$$log" 2>&1 || status=$$?; \
+	if grep -q '\[IOMMU\] hardware initialized' "$$log" && \
+	   grep -q 'translation domain verified' "$$log" && \
+	   grep -q 'unmapped iova=0x20000000 -> fault=1' "$$log" && \
+	   grep -q 'System is going down for power-off' "$$log"; then \
+		echo "smoke-iommu-discovery: PASS (hardware initialized, translation verified); log saved to $$log"; \
+	else \
+		echo "smoke-iommu-discovery: failed with status $$status; tail of $$log:"; \
+		tail -n 80 "$$log"; exit 1; \
 	fi
 
 smoke-loongarch64:
@@ -2417,15 +2460,18 @@ $(NATIVE_BUILD_STAMP): $(USER_BUILD_STAMP) force_native_build
 	elif [ ! -x "$(NATIVE_HELLO_BIN)" ] || [ ! -x "$(NATIVE_HANDLE_BIN)" ] || \
 	     [ ! -x "$(NATIVE_LIBC_BIN)" ] || [ ! -x "$(NATIVE_FUTEX_BIN)" ] || \
 	     [ ! -x "$(NATIVE_MM_BIN)" ] || [ ! -x "$(NATIVE_SIGNAL_BIN)" ] || \
-	     [ ! -x "$(NATIVE_IPC_BIN)" ] || [ ! -x "$(NATIVE_SVCMAN_BIN)" ] || \
+	     [ ! -x "$(NATIVE_IPC_BIN)" ] || [ ! -x "$(NATIVE_CONTRACT_BIN)" ] || \
+	     [ ! -x "$(NATIVE_SVCMAN_BIN)" ] || \
 	     [ ! -x "$(NATIVE_SHMRING_BIN)" ] || [ ! -x "$(NATIVE_SHMRINGD_BIN)" ] || \
 	     [ ! -x "$(NATIVE_CHAND_BIN)" ] || [ ! -x "$(NATIVE_ECHOD_BIN)" ] || \
 	     [ ! -x "$(NATIVE_REGISTRY_BIN)" ] || [ ! -x "$(NATIVE_SVCMGR_BIN)" ] || \
 	     [ ! -x "$(NATIVE_ISOLATION_BIN)" ] || \
-	     [ ! -x "$(NATIVE_UBDD_BIN)" ] || \
+	     [ ! -x "$(NATIVE_UBDD_BIN)" ] || [ ! -x "$(NATIVE_UINPUTD_BIN)" ] || \
+	     [ ! -x "$(NATIVE_PERSONALITY_BIN)" ] || \
+	     [ ! -x "$(NATIVE_LINUX_BIN)" ] || \
 	     [ ! -x "$(NATIVE_RTCD_BIN)" ] || [ ! -x "$(NATIVE_RTCDD_BIN)" ]; then \
 		need_build=1; \
-	elif find user/liba20rt user/liba20c user/tests -type f -newer "$@" \
+	elif find user/liba20rt user/liba20c user/tests user/svc kernel/include/drivers/dual -type f -newer "$@" \
 		-print -quit | grep -q .; then \
 		need_build=1; \
 	fi; \
@@ -3364,6 +3410,33 @@ native-ipc-rv:
 native-ipc-la:
 	$(MAKE) ARCH=loongarch64 NOMMU=$(NOMMU) native-ipc-arch
 
+define NATIVE_CONTRACT_RECIPE
+@mkdir -p $(dir $(4))
+$(1) -ffreestanding -nostdlib -static \
+    $(2) \
+    -Iuser -Iuser/liba20rt \
+    -T$(NATIVE_LD) \
+    $(3) \
+    $(NATIVE_SDK_SRC) \
+    $(NATIVE_COMPILER_RT_SRC) \
+    $(NATIVE_ARCH_SRC) \
+    user/tests/test_native_contract.c \
+    $(NATIVE_LIBS) \
+    -o $(4)
+endef
+
+$(NATIVE_CONTRACT_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) user/tests/test_native_contract.c \
+		user/liba20rt/a20-generic.ld user/liba20rt/crt0_a20.h user/liba20rt/a20_syscall.h user/liba20rt/a20_channel.h user/liba20rt/a20_event.h user/liba20rt/a20_mem.h user/liba20rt/a20_handle.h
+	$(call NATIVE_CONTRACT_RECIPE,$(NATIVE_CC),$(NATIVE_CFLAGS),$(NATIVE_CRT0),$@)
+
+native-contract-arch: $(NATIVE_CONTRACT_BIN)
+
+native-contract-rv:
+	$(MAKE) ARCH=riscv64 NOMMU=$(NOMMU) native-contract-arch
+
+native-contract-la:
+	$(MAKE) ARCH=loongarch64 NOMMU=$(NOMMU) native-contract-arch
+
 define NATIVE_SVC_RECIPE
 @mkdir -p $(dir $(5))
 $(1) -ffreestanding -nostdlib -static \
@@ -3413,9 +3486,25 @@ $(NATIVE_RTCD_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $
 		user/liba20rt/a20-generic.ld user/liba20rt/crt0_a20.h user/liba20rt/a20_syscall.h user/liba20rt/a20_device.h
 	$(call NATIVE_SVC_RECIPE,$(NATIVE_CC),$(NATIVE_CFLAGS),$(NATIVE_CRT0),user/tests/test_native_rtcd.c,$@)
 
+define NATIVE_RTCD_RECIPE
+@mkdir -p $(dir $(5))
+$(1) -ffreestanding -nostdlib -static \
+    $(2) \
+    -Iuser -Iuser/liba20rt -Ikernel/include \
+    -T$(NATIVE_LD) \
+    $(3) \
+    $(NATIVE_SDK_SRC) \
+    $(NATIVE_COMPILER_RT_SRC) \
+    $(NATIVE_ARCH_SRC) \
+    $(4) \
+    $(NATIVE_LIBS) \
+    -o $(5)
+endef
+
 $(NATIVE_RTCDD_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) user/svc/rtcd.c user/svc/rtcd_proto.h \
-		user/liba20rt/a20-generic.ld user/liba20rt/crt0_a20.h user/liba20rt/a20_syscall.h user/liba20rt/a20_device.h
-	$(call NATIVE_SVC_RECIPE,$(NATIVE_CC),$(NATIVE_CFLAGS),$(NATIVE_CRT0),user/svc/rtcd.c,$@)
+		user/liba20rt/a20-generic.ld user/liba20rt/crt0_a20.h user/liba20rt/a20_syscall.h \
+		kernel/include/drivers/dual/drv_env.h kernel/include/drivers/dual/goldfish_rtc.h
+	$(call NATIVE_RTCD_RECIPE,$(NATIVE_CC),$(NATIVE_CFLAGS),$(NATIVE_CRT0),user/svc/rtcd.c,$@)
 
 native-rtcd-arch: $(NATIVE_RTCD_BIN) $(NATIVE_RTCDD_BIN)
 
@@ -3513,6 +3602,50 @@ $(NATIVE_UBDD_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $
 		user/liba20rt/a20-generic.ld user/liba20rt/crt0_a20.h user/liba20rt/a20_syscall.h
 	$(call NATIVE_SVC_RECIPE,$(NATIVE_CC),$(NATIVE_CFLAGS),$(NATIVE_CRT0),user/svc/ubd.c,$@)
 
+$(NATIVE_UINPUTD_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) user/svc/uinputd.c \
+		user/liba20rt/a20-generic.ld user/liba20rt/crt0_a20.h user/liba20rt/a20_syscall.h \
+		kernel/include/drivers/dual/drv_env.h kernel/include/drivers/dual/virtio_mmio.h kernel/include/drivers/dual/virtio_input.h kernel/include/drivers/dual/virtq.h
+	$(call NATIVE_RTCD_RECIPE,$(NATIVE_CC),$(NATIVE_CFLAGS),$(NATIVE_CRT0),user/svc/uinputd.c,$@)
+
+native-uinputd-arch: $(NATIVE_UINPUTD_BIN)
+
+native-uinputd-rv:
+	$(MAKE) ARCH=riscv64 NOMMU=$(NOMMU) native-uinputd-arch
+
+define NATIVE_PERSONALITY_RECIPE
+@mkdir -p $(dir $(4))
+$(1) -ffreestanding -nostdlib -static \
+    $(2) -Iuser -Iuser/liba20rt -T$(NATIVE_LD) \
+    $(3) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) \
+    user/tests/test_native_personality.c $(NATIVE_LIBS) -o $(4)
+endef
+
+$(NATIVE_PERSONALITY_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) \
+		user/tests/test_native_personality.c user/liba20rt/a20_personality.h
+	$(call NATIVE_PERSONALITY_RECIPE,$(NATIVE_CC),$(NATIVE_CFLAGS),$(NATIVE_CRT0),$@)
+
+native-personality-arch: $(NATIVE_PERSONALITY_BIN)
+
+native-personality-rv:
+	$(MAKE) ARCH=riscv64 NOMMU=$(NOMMU) native-personality-arch
+
+define NATIVE_LINUX_RECIPE
+@mkdir -p $(dir $(4))
+$(1) -ffreestanding -nostdlib -static \
+    $(2) -Iuser -Iuser/liba20rt -T$(NATIVE_LD) \
+    $(3) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) \
+    user/tests/test_native_linux.c $(NATIVE_LIBS) -o $(4)
+endef
+
+$(NATIVE_LINUX_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) \
+		user/tests/test_native_linux.c user/liba20rt/a20_linux.h user/liba20rt/a20_personality.h
+	$(call NATIVE_LINUX_RECIPE,$(NATIVE_CC),$(NATIVE_CFLAGS),$(NATIVE_CRT0),$@)
+
+native-linux-arch: $(NATIVE_LINUX_BIN)
+
+native-linux-rv:
+	$(MAKE) ARCH=riscv64 NOMMU=$(NOMMU) native-linux-arch
+
 native-ubd-arch: $(NATIVE_UBDD_BIN)
 
 native-ubd-rv:
@@ -3531,6 +3664,40 @@ $(UBD_SCRATCH_IMG): $(UBD_SCRATCH_BIG)
 	$(MKFS_FAT) -F 32 $@; \
 	printf 'A20OS-UBD-MARKER' | dd of=$@ bs=1 seek=4096 conv=notrunc 2>/dev/null; \
 	mcopy -o -i $@ $(UBD_SCRATCH_BIG) ::/big.bin
+
+smoke-dual-input:
+	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/dual-input-riscv64.log"; \
+	monsock="$(SMOKE_LOG_DIR)/dual-input-monitor.sock"; \
+	rm -f "$$monsock"; \
+	status=0; \
+	{ sleep 8; python3 -c 'import socket,sys,time; s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1]); [(s.sendall(b"sendkey a\n"), time.sleep(1)) for _ in range(12)]; s.close()' "$$monsock" 2>/dev/null || true; } & \
+	{ sleep $(SMOKE_INPUT_DELAY); printf '/bin/uinputd-rv\n/bin/uinputd-rv\npoweroff\n'; } | \
+	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
+		-machine virt -m 1G -nographic -smp 1 -bios default \
+		-global virtio-mmio.force-legacy=false \
+		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-both-dev/fat32.img,if=none,format=raw,id=x0 \
+		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		-device virtio-keyboard-device,bus=virtio-mmio-bus.5 \
+		-monitor unix:$$monsock,server,nowait \
+		-kernel .kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf \
+		> "$$log" 2>&1 || status=$$?; \
+	if grep -q 'UINPUT] kernel-placement probe: id=18 version=2 name=QEMU Virtio Keyboard' "$$log" && \
+	   grep -q 'UINPUTD: name=QEMU Virtio Keyboard' "$$log" && \
+	   grep -q 'UINPUTD: ready' "$$log" && \
+	   grep -q 'UINPUTD: ev type=1 code=30 value=1' "$$log" && \
+	   grep -q 'UINPUTD: claimed' "$$log" && \
+	   [ "$$(grep -c 'UINPUTD: PASS' "$$log")" = "2" ] && \
+	   grep -q 'System is going down for power-off' "$$log"; then \
+		echo "smoke-dual-input: PASS; log saved to $$log"; \
+	else \
+		echo "smoke-dual-input: failed with status $$status; tail of $$log:"; \
+		tail -n 80 "$$log"; \
+		exit 1; \
+	fi
 
 smoke-native-ubd:
 	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
@@ -3694,6 +3861,82 @@ smoke-native-svc:
 		echo "smoke-native-svc: failed with status $$status; tail of $$log:"; \
 		tail -n 80 "$$log"; \
 		exit 1; \
+	fi
+
+smoke-native-contract:
+	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/native-contract-riscv64.log"; \
+	status=0; \
+	{ sleep $(SMOKE_INPUT_DELAY); printf '/bin/native-contract-rv\npoweroff\n'; } | \
+	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
+		-machine virt -m 1G -nographic -smp 1 -bios default \
+		-global virtio-mmio.force-legacy=false \
+		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-both-dev/fat32.img,if=none,format=raw,id=x0 \
+		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		-kernel .kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf \
+		> "$$log" 2>&1 || status=$$?; \
+	if grep -q 'ralg ok' "$$log" && grep -q 'bp ok' "$$log" && \
+	   grep -q 'evqc ok' "$$log" && grep -q 'vmol ok' "$$log" && \
+	   grep -q 'dma ok' "$$log" && \
+	   grep -q 'System is going down for power-off NOW' "$$log"; then \
+		echo "smoke-native-contract: PASS; log saved to $$log"; \
+	else \
+		echo "smoke-native-contract: failed with status $$status; tail of $$log:"; \
+		tail -n 80 "$$log"; \
+		exit 1; \
+	fi
+
+smoke-native-personality:
+	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/native-personality-riscv64.log"; \
+	status=0; \
+	{ sleep $(SMOKE_INPUT_DELAY); printf '/bin/native-personality-rv\n/bin/pipe_ref\npoweroff\n'; } | \
+	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
+		-machine virt -m 1G -nographic -smp 1 -bios default \
+		-global virtio-mmio.force-legacy=false \
+		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-both-dev/fat32.img,if=none,format=raw,id=x0 \
+		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		-kernel .kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf \
+		> "$$log" 2>&1 || status=$$?; \
+	if grep -q 'NATIVE_PERSONALITY: PASS' "$$log" && \
+	   [ "$$(grep -c 'PIPE_REF: partial=6 rest=5 joined=hello world level=ok' "$$log")" = "2" ] && \
+	   grep -q 'System is going down for power-off' "$$log"; then \
+		echo "smoke-native-personality: PASS (native + Linux ABI reference agree); log saved to $$log"; \
+	else \
+		echo "smoke-native-personality: failed with status $$status; tail of $$log:"; \
+		tail -n 80 "$$log"; exit 1; \
+	fi
+
+smoke-native-linux:
+	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/native-linux-riscv64.log"; \
+	status=0; \
+	{ sleep $(SMOKE_INPUT_DELAY); printf '/bin/native-linux-rv\npoweroff\n'; } | \
+	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
+		-machine virt -m 1G -nographic -smp 1 -bios default \
+		-global virtio-mmio.force-legacy=false \
+		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-both-dev/fat32.img,if=none,format=raw,id=x0 \
+		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		-kernel .kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf \
+		> "$$log" 2>&1 || status=$$?; \
+	if grep -q 'linux fd ok' "$$log" && grep -q 'linux mmap ok' "$$log" && \
+	   grep -q 'linux pipe ok' "$$log" && grep -q 'linux sockpair ok' "$$log" && \
+	   grep -q 'linux futex ok' "$$log" && grep -q 'linux epoll ok' "$$log" && \
+	   grep -q 'NATIVE_LINUX: PASS' "$$log" && \
+	   grep -q 'System is going down for power-off' "$$log"; then \
+		echo "smoke-native-linux: PASS; log saved to $$log"; \
+	else \
+		echo "smoke-native-linux: failed with status $$status; tail of $$log:"; \
+		tail -n 80 "$$log"; exit 1; \
 	fi
 
 smoke-native-ipc:

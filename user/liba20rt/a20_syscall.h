@@ -242,6 +242,9 @@ static inline int64_t a20_syscall6(uint64_t nr, uint64_t a0, uint64_t a1,
 #define A20_SYS_device_vmo_phys   0x0C04
 #define A20_SYS_device_block_attach 0x0C05
 #define A20_SYS_device_block_complete 0x0C06
+#define A20_SYS_device_claim      0x0C07
+#define A20_SYS_device_release    0x0C08
+#define A20_SYS_device_alloc_dma  0x0C09
 #define A20_SYS_netd_attach        0x0D00
 #define A20_SYS_netd_sock_register  0x0D01
 #define A20_SYS_netd_tx_send       0x0D02

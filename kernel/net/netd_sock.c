@@ -37,6 +37,7 @@ static int netd_sock_mode(void)
     return netd_enabled();
 }
 
+#if defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)
 int64_t sys_a20_netd_sock_register(const a20_syscall_args_t *args)
 {
     (void)args;
@@ -77,6 +78,7 @@ int64_t sys_a20_netd_sock_register(const a20_syscall_args_t *args)
     }
     return h;
 }
+#endif /* ABI_NATIVE || ABI_BOTH */
 
 static netd_sock_ch_t *netd_sock_alloc_ch(void)
 {
