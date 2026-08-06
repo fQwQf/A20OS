@@ -30,4 +30,11 @@ typedef struct {
     uint64_t nanoseconds;
 } a20_idl_rtcd_time_response_t;
 
+typedef struct {
+    uint32_t seq;
+} a20_idl_svcmgr_echo_t;
+
+#define SVCMGR_REQ_ECHO (0x21)
+#define SVCMGR_REQ_CRASH (0x22)
+
 #endif

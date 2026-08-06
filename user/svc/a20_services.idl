@@ -21,4 +21,9 @@ interface a20_services version 1 {
     u64 seconds;
     u64 nanoseconds;
   }
+  message SVCMGR_ECHO {
+    u32 seq;
+  }
+  const SVCMGR_REQ_ECHO = 0x21;
+  const SVCMGR_REQ_CRASH = 0x22;
 }

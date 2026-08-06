@@ -3887,7 +3887,7 @@ smoke-native-personality:
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/native-personality-riscv64.log"; \
 	status=0; \
-	{ sleep $(SMOKE_INPUT_DELAY); printf '/bin/native-personality-rv\npoweroff\n'; } | \
+	{ sleep $(SMOKE_INPUT_DELAY); printf '/bin/native-personality-rv\n/bin/pipe_ref\npoweroff\n'; } | \
 	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
 		-machine virt -m 1G -nographic -smp 1 -bios default \
 		-global virtio-mmio.force-legacy=false \
@@ -3897,8 +3897,9 @@ smoke-native-personality:
 		-kernel .kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf \
 		> "$$log" 2>&1 || status=$$?; \
 	if grep -q 'NATIVE_PERSONALITY: PASS' "$$log" && \
-	   grep -q 'System is going down for power-off NOW' "$$log"; then \
-		echo "smoke-native-personality: PASS; log saved to $$log"; \
+	   [ "$$(grep -c 'PIPE_REF: partial=6 rest=5 joined=hello world level=ok' "$$log")" = "2" ] && \
+	   grep -q 'System is going down for power-off' "$$log"; then \
+		echo "smoke-native-personality: PASS (native + Linux ABI reference agree); log saved to $$log"; \
 	else \
 		echo "smoke-native-personality: failed with status $$status; tail of $$log:"; \
 		tail -n 80 "$$log"; exit 1; \
