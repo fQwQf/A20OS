@@ -1278,9 +1278,10 @@ smoke-iommu-discovery:
 		-device riscv-iommu-pci,bus=pcie.0 \
 		-kernel .kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf \
 		> "$$log" 2>&1 || status=$$?; \
-	if grep -q '\[IOMMU\] riscv-iommu PCI present' "$$log" && \
+	if grep -q '\[IOMMU\] hardware initialized' "$$log" && \
+	   grep -q 'cqcsr=0x00010001' "$$log" && \
 	   grep -q 'System is going down for power-off' "$$log"; then \
-		echo "smoke-iommu-discovery: PASS; log saved to $$log"; \
+		echo "smoke-iommu-discovery: PASS (hardware initialized); log saved to $$log"; \
 	else \
 		echo "smoke-iommu-discovery: failed with status $$status; tail of $$log:"; \
 		tail -n 80 "$$log"; exit 1; \
