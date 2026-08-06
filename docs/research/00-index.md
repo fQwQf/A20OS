@@ -233,7 +233,7 @@ kernel/abi/native/      syscall 分派、handle table、各子系统入口kernel
 5. **架构详述**（08）：设计中隐含的实现决策的显式分析
 6. **评估与贡献**（05+06）：如何验证和定位工作
 
-设计规范已整合研究发现，并以当前实现为准更新：13 种对象类型、111 个 syscall、typed channel 强制、时态控制入口与 deadline-driven sweeper、阻塞 channel/event_wait、reserve-then-dequeue 无部分投递、对象级联释放、VMO source 映射。研究笔记中的形式化证明仍以 53 个核心 syscall 模型为主，因此“设计已证明”与“111 个实现入口全部被证明”必须明确区分。
+设计规范已整合研究发现，并以当前实现为准更新：13 种对象类型、112 个 syscall、typed channel 强制、时态控制入口与 deadline-driven sweeper、阻塞 channel/event_wait、reserve-then-dequeue 无部分投递、对象级联释放、VMO source 映射。研究笔记中的形式化证明仍以 53 个核心 syscall 模型为主，因此“设计已证明”与“112 个实现入口全部被证明”必须明确区分。
 
 ---
 
