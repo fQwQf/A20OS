@@ -30,6 +30,8 @@
 #include "proc/proc.h"
 #include "drivers/core/driver_core.h"
 #include "drivers/core/driver_hwapi.h"
+#include "drivers/bus/pci_bus.h"
+#include "drivers/char/uart.h"
 #include "mm/frame.h"
 #include "mm/mm.h"
 #include "mm/slab.h"
@@ -365,7 +367,18 @@ const struct drv_export drv_export_table[] = {
     { "drv_device_unregister_core", drv_device_unregister_core },
     { "drv_device_get_resource", drv_device_get_resource },
     { "drv_driver_probe_all", drv_driver_probe_all },
+    { "device_find_by_class",  (void *)device_find_by_class },
     { "platform_bus",        &platform_bus },
+    /* PCI class-driver accessors (device_t-based; modules bind through
+     * drv_driver_register with bus = &pci_bus) */
+    { "pci_bus",             &pci_bus },
+    { "pci_class_code",      (void *)pci_class_code },
+    { "pci_device_id",       (void *)pci_device_id },
+    { "pci_get_bar_resource", (void *)pci_get_bar_resource },
+    { "pci_intx_irq",        (void *)pci_intx_irq },
+    { "pci_enable_and_assign_bars", (void *)pci_enable_and_assign_bars },
+    /* console input path (PS/2 module) */
+    { "uart_receive_char",   (void *)uart_receive_char },
     /* lock / scheduler primitives used by inline spinlock helpers
      * (arch_irqs_enabled & friends are static inline and compile into
      * the module itself; only the extern calls below are exported) */
