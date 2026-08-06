@@ -33,6 +33,11 @@
 | 双态部署驱动框架骨架（drv_env + 共享协议层） | 骨架已实现（改造阶段三起步） | goldfish RTC 同源码双态：内核壳 boot probe + `smoke-native-rtcd`，见 [04-dual-placement.md](04-dual-placement.md) |
 | 双态语义一致性验证（virtio-input 第二样板） | 已实现 | `smoke-dual-input`：同一共享协议在两种部署下读出相同设备身份；DMA ops 已进 drv_env（信任模型） |
 | 功能态用户驱动（virtio-input 事件面） | 已实现 | `smoke-dual-input`：全权初始化 + 共享 virtq + IRQ→EventQ，monitor `sendkey` 注入验证真实按键事件解码 |
+| 连续 DMA heap | 已实现 | `device_alloc_dma` 预物化连续 VMO，`test_native_contract` 的 `dma` 分区验证连续物理地址与零填充 |
+| 动态设备所有权 | 已实现 | `device_claim/release`，uinputd 两次启动验证自动释放 |
+| IOMMU PCI 发现 | 骨架已实现 | `smoke-iommu-discovery` 识别 QEMU `riscv-iommu-pci`；翻译尚未启用 |
+| 服务协议 IDL 常量层 | 已实现（阶段四起步） | `a20_services.idl` + `tools/a20idl.py` + `make check-a20-idl` |
+| Linux pipe 人格层 PoC | 已实现（阶段五起步） | `smoke-native-personality`：channel/EventQ 的 pipe-shaped facade |
 
 ## 正确性状态（SMP）
 

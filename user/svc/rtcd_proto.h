@@ -10,6 +10,7 @@
 #define _A20_RTCD_PROTO_H
 
 #include "a20_types.h"
+#include "a20_services_idl.h"
 
 #define A20_RTCD_EP_SLOT    (A20_NATIVE_FD_HANDLE_BASE + 43u)
 #define A20_RTCD_EP_HANDLE  ((a20_handle_t)A20_RTCD_EP_SLOT)
@@ -25,8 +26,4 @@
  *   'A' + u32  -> arm a one-shot alarm in <ms>; async reply { u64 sec }
  *   'C'        -> exit(42) (crash self-heal demo, mirrors echod)
  */
-#define RTCD_REQ_TIME    'T'
-#define RTCD_REQ_ALARM   'A'
-#define RTCD_REQ_CRASH   'C'
-
 #endif

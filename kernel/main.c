@@ -3,6 +3,7 @@
 #include "drivers/char/uart.h"
 #include "drivers/char/goldfish_rtc_kdrv.h"
 #include "drivers/input/virtio_input_kprobe.h"
+void riscv_iommu_early_probe(void);
 #include "mm/mm.h"
 #include "mm/elf.h"
 #include "mm/vm.h"
@@ -116,6 +117,9 @@ void kernel_main(void) {
         printf("[INIT] Board devices enumerated (%s)\n",
                current_board->name ? current_board->name : "unknown");
     }
+#ifdef CONFIG_BOARD_QEMU_VIRT_RISCV64
+    riscv_iommu_early_probe();
+#endif
     driver_probe_all();
     printf("[INIT] Drivers probed\n");
 #ifdef CONFIG_BOARD_QEMU_VIRT_RISCV64
