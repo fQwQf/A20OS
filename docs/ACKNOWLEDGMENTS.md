@@ -18,7 +18,7 @@ A20OS 是自主编写的操作系统，但站在了许多优秀开源项目与�
 |------|------|--------|------|
 | [musl](https://musl.libc.org/) | Linux ABI 用户态 libc | MIT | `user/external/musl` |
 | [mlibc](https://github.com/managarm/mlibc) | Native ABI libc 基础 | MIT | `user/external/mlibc` |
-| [lwIP](https://savannah.nongnu.org/projects/lwip/) | 内核网络协议栈（`NO_SYS=1`） | BSD-3-Clause | `kernel/external/lwip` |
+| [lwIP](https://savannah.nongnu.org/projects/lwip/) | 内核网络协议栈（`NO_SYS=1`） | BSD-3-Clause | `user/external/lwip` |
 | [mksh](http://www.mirbsd.org/mksh.htm) | 默认 shell | MirBSD License | `user/external/mksh-cvs2git` |
 | [sbase](https://core.suckless.org/sbase/) | 基础工具（`ls`、`cat` 等） | MIT | `user/external/sbase` |
 | [tlse](https://github.com/eduardsui/tlse) | wget 的 TLS 实现 | MIT | `user/external/tlse` |

@@ -418,7 +418,7 @@ CFLAGS = -Wall -Wextra $(OPT) -ffreestanding -nostdlib \
          -fno-builtin -fno-common -std=gnu99 \
          -MMD -MP \
          -I$(ARCH_INCLUDE_DIR) -I$(INCLUDE_DIR) -I$(KERNEL_DIR) -I$(KERNEL_DIR)/net/lwip_port \
-         -I$(KERNEL_DIR)/external/lwip/src/include \
+         -Iuser/external/lwip/src/include \
          -I$(BOARD_INCLUDE_DIR) -I$(BUILD_DIR)/generated $(ARCH_CFLAGS) \
          -D$(shell echo $(ARCH) | tr a-z A-Z) \
          -DCONFIG_$(shell echo $(ARCH) | tr a-z A-Z) \
@@ -640,11 +640,13 @@ ROOTFS_OVERLAY_HDR   = kernel/include/fs/rootfs_overlay.h
 ROOTFS_OVERLAY_FILES := $(shell find $(ROOTFS_OVERLAY_DIR) -type f 2>/dev/null)
 KERNEL_SRC += $(ROOTFS_OVERLAY_SRC)
 
-include $(KERNEL_DIR)/external/lwip/sources.mk
+include user/external/lwip/sources.mk
 endif
 
 # Object files
-KERNEL_OBJ = $(patsubst $(KERNEL_DIR)/%.c,$(BUILD_DIR)/%.o,$(KERNEL_SRC))
+LWIP_KERNEL_SRC := $(filter user/external/lwip/src/%.c,$(KERNEL_SRC))
+KERNEL_OBJ = $(patsubst $(KERNEL_DIR)/%.c,$(BUILD_DIR)/%.o,$(filter-out user/%,$(KERNEL_SRC))) \
+             $(patsubst user/external/lwip/src/%.c,$(BUILD_DIR)/external/lwip/src/%.o,$(LWIP_KERNEL_SRC))
 
 # vDSO user image (riscv64): built out-of-tree of ASM_SRC on purpose, it is
 # user code linked with its own script.  The vdso.elf FILE is embedded
@@ -1204,10 +1206,10 @@ check-driver-core-model: smoke-driver-lifecycle
 	@echo "check-driver-core-model: PASS"
 
 check-external-dependency-boundary:
-	@rg -q "include kernel/external/lwip/sources.mk" Makefile
+	@rg -q "include user/external/lwip/sources.mk" Makefile
 	@rg -q "EXTERNAL_LWIP_SOURCE_MANIFEST" docs/project/external-dependencies.md
-	@rg -q "LWIP_SRC" kernel/external/lwip/sources.mk
-	@rg -q "core/timeouts.c" kernel/external/lwip/sources.mk
+	@rg -q "LWIP_SRC" user/external/lwip/sources.mk
+	@rg -q "core/timeouts.c" user/external/lwip/sources.mk
 	@rg -q "EXTERNAL_LWIP_CONFIG_CONTRACT" docs/project/external-dependencies.md
 	@rg -q "NO_SYS=1" docs/project/external-dependencies.md
 	@rg -q "g_lwip_lock" docs/project/external-dependencies.md kernel/net/lwip_stack.c
@@ -2609,6 +2611,12 @@ $(BUILD_DIR)/%.o: $(KERNEL_DIR)/%.c | Makefile $(BUILD_TIME_HDR)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
 
+# lwIP moved into the user tree (user/external/lwip); kernel still compiles
+# the shared sources, objects land under $(BUILD_DIR)/external/lwip as before.
+$(BUILD_DIR)/external/lwip/src/%.o: user/external/lwip/src/%.c | Makefile $(BUILD_TIME_HDR)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -c $< -o $@
+
 $(BUILD_DIR)/drivers/stm32f1/bluetooth.o: $(STM32_BT_CONFIG_HDR)
 $(BUILD_DIR)/drivers/stm32f1/wifi.o: $(STM32_WIFI_CONFIG_HDR)
 
@@ -3413,7 +3421,7 @@ native-rtcd-arch: $(NATIVE_RTCD_BIN) $(NATIVE_RTCDD_BIN)
 
 
 # ---- netd: userspace lwIP service (hybrid-kernel netstack migration) ----
-LWIP_SRC_DIR := $(KERNEL_DIR)/external/lwip/src
+LWIP_SRC_DIR := user/external/lwip/src
 NETD_LWIP_SRC := \
 	$(LWIP_SRC_DIR)/core/init.c \
 	$(LWIP_SRC_DIR)/core/def.c \
