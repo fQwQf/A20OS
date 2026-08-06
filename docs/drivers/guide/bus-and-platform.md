@@ -71,11 +71,11 @@ static void my_enumerate_devices(void) {
 
 ## STM32F103 例外
 
-STM32F103 的 SDIO 是持久块设备，已使用 `DEV_CLASS_BLOCK`。显示、触摸、UART、Wi-Fi/蓝牙由 `stm32_peripherals_service()` 轮询，属于 MCU profile 的板级服务模型。LED、背光、风扇、蜂鸣器、DHT11、光敏传感器和按键可保留轻量 API；但不得在 IRQ 中执行长延时协议。需要多实例、通用 `/dev`、热插拔或跨板复用时必须转换为本章的 device/driver 模型。STM32F103 移植细节见 [STM32F103 移植](../platforms/stm32f103-port.md)。
+STM32F103 的 SDIO 是持久块设备，已使用 `DEV_CLASS_BLOCK`。显示、触摸、UART、Wi-Fi/蓝牙由 `stm32_peripherals_service()` 轮询，属于 MCU profile 的板级服务模型。LED、背光、风扇、蜂鸣器、DHT11、光敏传感器和按键可保留轻量 API；但不得在 IRQ 中执行长延时协议。需要多实例、通用 `/dev`、热插拔或跨板复用时必须转换为本章的 device/driver 模型。STM32F103 移植细节见 [STM32F103 移植](../../platforms/stm32f103-port.md)。
 
 ## 移植新平台的步骤
 
-完整的架构/platform 边界、SMP hooks 和验收要求见[平台移植指南](../platforms/porting-guide.md)。
+完整的架构/platform 边界、SMP hooks 和验收要求见[平台移植指南](../../platforms/porting-guide.md)。
 
 1. 创建 `kernel/platform/<board>/` 和平台头，定义 RAM、启动地址、早期 MMIO 映射。
 2. 提供链接脚本，包含 `.driver_init` 的 start/end 与 `KEEP`。
@@ -85,4 +85,4 @@ STM32F103 的 SDIO 是持久块设备，已使用 `DEV_CLASS_BLOCK`。显示、�
 6. 先构建 `kernel-only`，再验证串口日志中的 driver core、总线和设备绑定。
 7. 最后才接用户镜像、网络和 GUI，避免把文件系统/桌面问题误判为平台驱动问题。
 
-> 注意不要把板的寄存器地址、GIC 编号或引脚号直接写进可复用驱动。不要在 IRQ handler 或持有自旋锁时调用 `udelay/mdelay`。不要给 MMIO 地址无条件加 `PAGE_OFFSET`，也不要把 MMIO BAR 当成普通 RAM 传给 `va_to_pa()`。可复用驱动只消费 `resource_t` 和 `plat_data`；VirtualBox 相关内容见 [VirtualBox](../platforms/virtualbox.md)。
+> 注意不要把板的寄存器地址、GIC 编号或引脚号直接写进可复用驱动。不要在 IRQ handler 或持有自旋锁时调用 `udelay/mdelay`。不要给 MMIO 地址无条件加 `PAGE_OFFSET`，也不要把 MMIO BAR 当成普通 RAM 传给 `va_to_pa()`。可复用驱动只消费 `resource_t` 和 `plat_data`；VirtualBox 相关内容见 [VirtualBox](../../platforms/virtualbox.md)。
