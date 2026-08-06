@@ -50,12 +50,13 @@
 契约测试应能分别以 `-DDRV_ENV_KERNEL` 与 `-DDRV_ENV_USER` 构建
 并给出同结果——双态语义一致本身是测试资产，不是文档承诺。
 
-## 当前骨架状态（2026-08-06）
+## 当前实现状态（2026-08-06）
 
 - `kernel/include/drivers/dual/drv_env.h`：环境层定义，两个后端。
-  ops 集已扩展为 MMIO 映射、8/32 位寄存器读写、**DMA 缓冲分配**
-  （页粒度；信任模型，物理地址表在分配时固定。已知限制：用户态
-  VMO 页可能不连续，多页连续 DMA 协议暂限单页，待 DMA-heap/IOMMU）；
+  ops 集为 MMIO 映射、8/32 位寄存器读写、**DMA 缓冲分配**
+  （页粒度，物理地址表在分配时固定）；用户态连续 DMA 由
+  `device_alloc_dma`（预物化连续 VMO）提供，`smoke-native-contract`
+  的 `dma` 分区验证物理连续与零填充；
 - `kernel/include/drivers/dual/goldfish_rtc.h`：goldfish RTC 寄存器
   协议唯一源码（自此 rtcd_proto.h 不再持有寄存器定义）；
 - `kernel/include/drivers/dual/virtio_mmio.h` +
@@ -102,14 +103,13 @@
    验证自动释放；user-owned 窗口的 MMIO 映射现在强制要求当前任务
    先 claim，rtcd/ubd/uinputd 已迁移；
 - IRQ ops 暂不进 drv_env（线程模型差异是本质的，见上）；
-- DMA ops 已进 drv_env；连续 DMA heap 已实现为预物化连续 VMO，
-  `smoke-native-contract` 的 `dma` 分区验证物理地址连续与零填充；
-  IOMMU 硬件强制仍是独立工作项（QEMU 10.0 提供
-  `riscv-iommu-pci`，可作为实现目标），完成后 drv_dma 的语义承诺
-  才能从"内核担保"升级为"硬件强制"；
-- 已加入 PCI 发现骨架 `kernel/drivers/core/iommu/riscv_iommu.c`，
-  可识别 QEMU 的 `1b36:0014` 并记录 BAR；当前刻意不启用翻译，
-  DDT、命令队列、故障队列和失效协议仍待实现；
+- **IOMMU 已完成硬件初始化与 per-domain 翻译**：`riscv_iommu.c`
+  分配 BAR、读取 capability（version 16 / spec 1.0）、配置
+  DDT(1LVL)/CQ/FQ 并使能；devid 0 配置 SV39 翻译域（3 级页表），
+  经 TR_REQ 验证已映射 IOVA 精确翻译、未映射 IOVA 被硬件拒绝
+  （fault=1, cause=13 RD_FAULT_S）；`smoke-iommu-discovery` 断言。
+  devid 1（IOMMU 自身）保持 passthrough DC；fault 队列消费与
+  per-device 页表动态映射仍为后续工作；
 - virtio-input 事件面已在用户态跑通；内核壳接入 evdev/输入子系统
   是后续工作；
 - virtio-blk 保持内核数据面 + ubd 用户态 scratch 的现状，不作为双态

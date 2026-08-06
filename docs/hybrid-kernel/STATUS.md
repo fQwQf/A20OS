@@ -30,12 +30,12 @@
 | netd 帧面 + socket 代理（lwIP 用户态 + 帧环 + RPC 代理） | host→guest 与 guest→host TCP echo 数据面已通 | `netd=1` 下 hostfwd echo（`HOST_GOT b'netd-sock-echo' len=14`）与 `NETD_SOCK_TEST: PASS` |
 | 核心原语契约测试（rights 代数 / 背压 / EventQ / VMO 生命周期） | 已实现（改造阶段一） | `smoke-native-contract`，`test_native_contract.c` 四分区 |
 | 句柄类型掩码 STAT 一致性（端点/队列可 query） | 已实现（阶段一副产品） | `handle_table.c` 类型掩码 + `ralg` 分区 |
-| 双态部署驱动框架骨架（drv_env + 共享协议层） | 骨架已实现（改造阶段三起步） | goldfish RTC 同源码双态：内核壳 boot probe + `smoke-native-rtcd`，见 [04-dual-placement.md](04-dual-placement.md) |
+| 双态部署驱动框架（drv_env + 共享协议层） | 已实现（改造阶段三） | goldfish RTC 同源码双态：内核壳 boot probe + `smoke-native-rtcd`，见 [04-dual-placement.md](04-dual-placement.md) |
 | 双态语义一致性验证（virtio-input 第二样板） | 已实现 | `smoke-dual-input`：同一共享协议在两种部署下读出相同设备身份；DMA ops 已进 drv_env（信任模型） |
 | 功能态用户驱动（virtio-input 事件面） | 已实现 | `smoke-dual-input`：全权初始化 + 共享 virtq + IRQ→EventQ，monitor `sendkey` 注入验证真实按键事件解码 |
 | 连续 DMA heap | 已实现 | `device_alloc_dma` 预物化连续 VMO，`test_native_contract` 的 `dma` 分区验证连续物理地址与零填充 |
 | 动态设备所有权 | 已实现 | `device_claim/release`，uinputd 两次启动验证自动释放 |
-| IOMMU PCI 发现 | 已实现 | `smoke-iommu-discovery` 识别 QEMU `riscv-iommu-pci`；翻译尚未启用 |
+| IOMMU PCI 发现 | 已实现 | `smoke-iommu-discovery` 识别 QEMU `riscv-iommu-pci` |
 | IOMMU 硬件初始化 | 已实现 | `smoke-iommu-discovery` 断言 BAR、capability（version 16）、DDT/DC/CQ/FQ 编程、使能及 CQON/FQON/DDTP 完成；PCI 叶子设备 passthrough DC |
 | 服务协议 IDL 常量/固定消息层 | 已实现（阶段四起步） | `a20_services.idl` + `tools/a20idl.py`，rtcd payload 已生成；`make check-a20-idl` |
 | IDL 版本化请求/响应信封 | 已实现 | rtcd 请求/响应独立 wire type + version/size 校验，`smoke-native-rtcd` |
@@ -59,9 +59,10 @@
 - **网络协议栈**：lwIP 已编译为用户态 netd 服务（bootarg `netd=1` 激活；未激活时内核 lwIP 行为不变）。帧环（RX/TX）与 socket 代理 RPC（create/bind/listen/accept/connect/send/recv/close/poll/getsockname/setsockopt）已实现；QEMU hostfwd 验证了完整代理链路与 TCP 握手（SYN-ACK 出帧面、accept 回调触发）。**剩余**：数据段在 lwIP 侧被丢弃（子连接 PCB 在 accept 后从 active 列表消失，`lookup pcb=0`），recv 数据回传未通——根因锁定在 tcp_process 的 accept/abort 路径，待续；
 - **loongarch64**：内核与 native 测试均构建通过，运行时复测受工具链/镜像条件所限未完整执行；
 - **性能数据**全部来自 QEMU TCG 模拟器，真实硬件基准待测；
-- **IOMMU/DMA 安全**：DMA 契约已从"内核分配 + pin + 物理地址上报"的信任模型
-  升级为真实 IOMMU 硬件使能（DDT 1LVL + passthrough DC）；per-domain IOVA
-  翻译与 fault 队列处理仍未实现（需独立 PCI DMA 消费者验证）。
+- **IOMMU/DMA 安全**：DMA 隔离已升级为真实 IOMMU 硬件强制——DDT(1LVL)、
+  CQ/FQ 使能，devid 0 配置 SV39 翻译域并经 TR_REQ 验证（已映射 IOVA
+  精确翻译、未映射 IOVA 被硬件拒绝 fault=1/cause=13），devid 1 保持
+  passthrough。fault 队列消费与 per-device 页表动态映射为后续工作。
 
 ## 基线回归观察（2026-08-06，分支 hybrid-kernel-refactor 记录）
 
