@@ -1149,9 +1149,10 @@ vnode_t *ext4_mount(bcache_t *bc) {
     }
 
     /* ---- fail-closed feature gate ----
-     * This driver understands extents, 64-bit block counts, flex_bg and
-     * linear directory scans, but cannot safely read journal-required,
-     * meta_bg, bigalloc, inline-data, casefold, encryption or MMP
+     * This driver understands extents, 64-bit block counts, flex_bg,
+     * linear directory scans and the narrow checksummed JBD2 recovery path
+     * implemented in ext4_journal.c.  It cannot safely read meta_bg,
+     * bigalloc, inline-data, casefold, encryption or MMP
      * filesystems.  Refuse to mount instead of silently misreading the
      * image (mirrors how Linux rejects unknown incompatible features with a
      * clear error).
@@ -1170,10 +1171,8 @@ vnode_t *ext4_mount(bcache_t *bc) {
                                                 EXT4_FEATURE_INCOMPAT_EXTENTS |
                                                 EXT4_FEATURE_INCOMPAT_64BIT |
                                                 EXT4_FEATURE_INCOMPAT_FLEX_BG |
-                                                EXT4_FEATURE_INCOMPAT_CSUM_SEED);
-        /* RECOVER means a journal exists and needs replay; without jbd2 we
-         * cannot trust metadata, so it is treated as unsupported too. */
-        unsupported_incompat |= ino & EXT4_FEATURE_INCOMPAT_RECOVER;
+                                                EXT4_FEATURE_INCOMPAT_CSUM_SEED |
+                                                EXT4_FEATURE_INCOMPAT_RECOVER);
         if (unsupported_incompat) {
             printf("[EXT4] Unsupported incompat features: 0x%x "
                    "(unsupported: 0x%x)\n", ino, unsupported_incompat);
@@ -1239,6 +1238,24 @@ vnode_t *ext4_mount(bcache_t *bc) {
         kfree(esi->group_descs);
         kfree(esi);
         return NULL;
+    }
+
+    if (sb.s_feature_incompat & EXT4_FEATURE_INCOMPAT_RECOVER) {
+        if (ext4_journal_recover(esi, &sb) < 0) {
+            printf("[EXT4] Refusing mount after journal recovery failure\n");
+            kfree(esi->group_descs);
+            kfree(esi);
+            return NULL;
+        }
+        /* Journal replay can replace the primary group descriptor table.
+         * Refresh the in-memory copy before allocation or inode lookup. */
+        memset(esi->group_descs, 0, gd_total);
+        if (bcache_read_bytes(bc, gd_start, esi->group_descs, gd_total) < 0) {
+            printf("[EXT4] Failed to refresh group descriptors after recovery\n");
+            kfree(esi->group_descs);
+            kfree(esi);
+            return NULL;
+        }
     }
 
     printf("[EXT4] Mounted: block_size=%u groups=%u inode_size=%u inodes/group=%u\n",

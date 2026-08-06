@@ -404,6 +404,17 @@ else
     judge_status=0
 fi
 set -e
+
+probe_phase=
+if [[ "$group" == buildstorm-probe ]]; then
+    # Phase 1 means the guest reached probe selection; phase 2 means the
+    # selected case actually started inside the official rootfs chroot.
+    probe_phase=1
+    if grep -q '^#### BUILDSTORM PROBE START ' "$serial_log"; then
+        probe_phase=2
+    fi
+fi
+
 if [[ "$group" != buildstorm-probe && "$judge_status" -eq 0 ]]; then
     set +e
     conda run -n "$conda_env" python -m json.tool \
@@ -422,7 +433,7 @@ fi
     echo "guest_cores=$guest_cores"
     echo "guest_cores_source=$guest_cores_source"
     if [[ "$group" == buildstorm-probe ]]; then
-        echo "probe_phase=1"
+        echo "probe_phase=$probe_phase"
         echo "probe_artifacts=$probe_artifacts"
         echo "probe_results=$probe_artifacts/results.txt"
         echo "judge=not-run"

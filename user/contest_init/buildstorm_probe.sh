@@ -1,6 +1,6 @@
 #!/bin/mksh
 #
-# BuildStorm stage-1 diagnostic probe.
+# BuildStorm staged diagnostic probe.
 #
 # This script runs inside the untouched published rootfs through the same
 # chroot boundary as the official final-round scripts.  It deliberately does
