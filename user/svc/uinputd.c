@@ -3,7 +3,7 @@
  * (docs/hybrid-kernel/04-dual-placement.md).
  *
  * Same shared protocol source as the kernel probe
- * (kernel/drivers/input/virtio_input_kprobe.c).  This shell owns the
+ * (kernel/drvmod/examples/vinput_probe.c).  This shell owns the
  * device at runtime: full init (status/negotiation), event virtqueue
  * over a drv_dma buffer, IRQ -> EventQ delivery.  It prints each
  * EV_KEY press and exits PASS on the first one (smoke-dual-input
