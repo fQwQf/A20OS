@@ -1,18 +1,22 @@
 /*
- * A20OS kernel extension programs (KEP) — verifier, interpreter, registry.
+ * A20OS kernel extension programs (KEP) — eBPF verifier, interpreter,
+ * registry.
  *
  * See kernel/include/ext/kep.h for the design contract.  This file owns:
- *  - the 32-bit instruction encoding;
- *  - the linear-scan verifier (forward jumps only, context-bound memory,
- *    in-range register and offset fields, program must end with EXIT);
- *  - the interpreter (fixed instruction budget, no loops by construction);
+ *  - the verifier for the standard Linux eBPF instruction encoding
+ *    (bpf_insn_t), using the KEP safety model: strictly forward jumps
+ *    (structural termination), memory access limited to the extension
+ *    point context window through R1 with constant offsets, bounded
+ *    instruction count, program must end with EXIT;
+ *  - the interpreter (fixed instruction budget, no loops by
+ *    construction);
  *  - the extension-point registry and attach/detach lifetime rules.
  *
- * Program lifetime: kep_prog_load() returns a process-local fd; the fd
+ * Program lifetime: kep_prog_load() returns a kernel-owned id; the owner
  * holds one reference.  kep_prog_attach() takes an additional reference
  * held by each extension point that runs the program.  The kernel drops
- * its references when the owning process dies (fd table cleanup) or on
- * detach, whichever comes last.
+ * its references when the owning process dies or on detach, whichever
+ * comes last.
  */
 
 #include "ext/kep.h"
@@ -20,36 +24,9 @@
 #include "core/klog.h"
 #include "core/string.h"
 #include "mm/slab.h"
+#include "fs/fdtable.h"
 #include "proc/proc.h"
 #include "sys/usercopy.h"
-
-/* ---- instruction encoding (32-bit) ----
- * bits 31-28 opcode | 27-24 rd | 23-20 rs | 19-16 aux | 15-0 imm/off
- */
-#define KEP_OP_MASK   0xF0000000U
-#define KEP_OP_SHIFT  28
-#define KEP_RD_MASK   0x0F000000U
-#define KEP_RD_SHIFT  24
-#define KEP_RS_MASK   0x00F00000U
-#define KEP_RS_SHIFT  20
-#define KEP_AUX_MASK  0x000F0000U
-#define KEP_AUX_SHIFT 16
-#define KEP_IMM_MASK  0x0000FFFFU
-
-enum {
-    KEP_OP_MOVI = 0, KEP_OP_MOV, KEP_OP_LDC, KEP_OP_STC,
-    KEP_OP_ALU,  KEP_OP_ADDI, KEP_OP_ANDI, KEP_OP_ORI,
-    KEP_OP_XORI, KEP_OP_SHLI, KEP_OP_SHRI, KEP_OP_JMP,
-    KEP_OP_JCC,  KEP_OP_EXIT,
-};
-
-enum {
-    KEP_ALU_ADD = 0, KEP_ALU_SUB, KEP_ALU_AND, KEP_ALU_OR,
-    KEP_ALU_XOR, KEP_ALU_SHL, KEP_ALU_SHR, KEP_ALU_NEG,
-};
-
-enum { KEP_CC_EQ = 0, KEP_CC_NE, KEP_CC_LT, KEP_CC_LE, KEP_CC_GT, KEP_CC_GE };
-#define KEP_CC_SIGNED 8
 
 #define KEP_MAX_PROGS 64
 #define KEP_MAX_POINTS 16
@@ -58,9 +35,10 @@ typedef struct kep_prog {
     int used;
     int id;               /* stable kernel-owned id (1-based) */
     int owner_pid;
-    uint32_t insns[KEP_MAX_PROG_INSNS];
+    int owner_fd;         /* Linux ABI fd alias, -1 when unused */
+    bpf_insn_t insns[KEP_MAX_PROG_INSNS];
     uint32_t ninsns;
-    uint32_t nwords;      /* required context size (max LDC/STC offset) */
+    uint32_t max_ctx_off; /* highest context byte offset touched + 8 */
     int refs;             /* owner reference + one per attachment */
 } kep_prog_t;
 
@@ -71,15 +49,8 @@ static spinlock_t kep_registry_lock = SPINLOCK_INIT;
 
 /* ---- verifier ---- */
 
-static int kep_insn_field(uint32_t insn, uint32_t mask, unsigned shift,
-                          unsigned width)
-{
-    unsigned v = (insn & mask) >> shift;
-    return v < (1U << width);
-}
-
-static int kep_verify(const uint32_t *insns, uint32_t ninsns,
-                      uint32_t *nwords_out)
+static int kep_verify(const bpf_insn_t *insns, uint32_t ninsns,
+                      uint32_t *max_off_out)
 {
     if (!insns || ninsns == 0 || ninsns > KEP_MAX_PROG_INSNS)
         return -EINVAL;
@@ -87,149 +58,223 @@ static int kep_verify(const uint32_t *insns, uint32_t ninsns,
     uint32_t max_off = 0;
 
     for (uint32_t pc = 0; pc < ninsns; pc++) {
-        uint32_t insn = insns[pc];
-        unsigned op = (insn & KEP_OP_MASK) >> KEP_OP_SHIFT;
-        unsigned rd = (insn & KEP_RD_MASK) >> KEP_RD_SHIFT;
-        unsigned rs = (insn & KEP_RS_MASK) >> KEP_RS_SHIFT;
-        unsigned aux = (insn & KEP_AUX_MASK) >> KEP_AUX_SHIFT;
-        uint32_t imm = insn & KEP_IMM_MASK;
+        const bpf_insn_t *insn = &insns[pc];
+        uint8_t code = insn->code;
+        unsigned cls = BPF_CLASS(code);
+        unsigned dst = insn->dst_reg;
+        unsigned src = insn->src_reg;
+        int16_t off = insn->off;
+        int32_t imm = insn->imm;
 
-        switch (op) {
-        case KEP_OP_MOVI:
-        case KEP_OP_ADDI:
-        case KEP_OP_ANDI:
-        case KEP_OP_ORI:
-        case KEP_OP_XORI:
-        case KEP_OP_SHLI:
-        case KEP_OP_SHRI:
-            if (rd >= KEP_REGS) return -EINVAL;
+        switch (cls) {
+        case BPF_LD:
+            /* LD_IMM64 (double instruction): BPF_LD|BPF_DW|BPF_IMM. */
+            if (BPF_SIZE(code) != BPF_DW || BPF_MODE(code) != BPF_IMM ||
+                dst > 10) {
+                /* absolute/indirect packet loads are not supported */
+                if (BPF_MODE(code) == BPF_ABS || BPF_MODE(code) == BPF_IND)
+                    return -EOPNOTSUPP;
+                return -EINVAL;
+            }
+            if (pc + 1 >= ninsns)
+                return -EINVAL; /* imm64 needs the second half */
+            pc++;
             break;
-        case KEP_OP_MOV:
-        case KEP_OP_ALU:
-            if (rd >= KEP_REGS || rs >= KEP_REGS) return -EINVAL;
-            if (op == KEP_OP_ALU && aux > KEP_ALU_NEG) return -EINVAL;
+        case BPF_LDX:
+            /* Memory read: only R1 (ctx) with DW size and constant
+             * non-negative offset within the context window. */
+            if (src != BPF_REG_CTX || dst > 10 || BPF_SIZE(code) != BPF_DW ||
+                BPF_MODE(code) != BPF_MEM || off < 0 ||
+                (uint32_t)off + 8 > KEP_MAX_CONTEXT_BYTES)
+                return -EINVAL;
+            if ((uint32_t)off + 8 > max_off)
+                max_off = (uint32_t)off + 8;
             break;
-        case KEP_OP_LDC:
-            /* imm = context word offset; reads 8 bytes at words[imm]. */
-            if (rd >= KEP_REGS) return -EINVAL;
-            if (imm > KEP_MAX_CONTEXT_WORDS - 1) return -EINVAL;
-            if (imm + 1 > max_off) max_off = imm + 1;
+        case BPF_ST:
+        case BPF_STX:
+            /* Memory write: same context-window discipline. */
+            if (BPF_SIZE(code) != BPF_DW || BPF_MODE(code) != BPF_MEM ||
+                off < 0 || (uint32_t)off + 8 > KEP_MAX_CONTEXT_BYTES)
+                return -EINVAL;
+            if (cls == BPF_STX && dst != BPF_REG_CTX)
+                return -EINVAL; /* only ctx-target stores */
+            if (cls == BPF_ST && src != BPF_K)
+                return -EINVAL;
+            if ((uint32_t)off + 8 > max_off)
+                max_off = (uint32_t)off + 8;
             break;
-        case KEP_OP_STC:
-            if (rs >= KEP_REGS) return -EINVAL;
-            if (imm > KEP_MAX_CONTEXT_WORDS - 1) return -EINVAL;
-            if (imm + 1 > max_off) max_off = imm + 1;
+        case BPF_ALU:
+        case BPF_ALU64: {
+            unsigned op = BPF_OP(code);
+            if (op > BPF_ARSH || (op == BPF_NEG && BPF_SRC(code) != BPF_K) ||
+                dst > 10 || (BPF_SRC(code) == BPF_X && src > 10))
+                return -EINVAL;
             break;
-        case KEP_OP_JMP:
-            /* Forward only: target = pc + 1 + imm; imm is unsigned, so a
-             * target of pc+1 (fall-through) is the minimum. */
-            if (pc + 1 + imm >= ninsns) return -EINVAL;
+        }
+        case BPF_JMP:
+        case BPF_JMP32: {
+            unsigned op = BPF_OP(code);
+            if (op == BPF_CALL)
+                return -EOPNOTSUPP; /* no helper calls yet */
+            if (op == BPF_EXIT)
+                break; /* EXIT may appear mid-program (branch target) */
+            if (op > BPF_JSLE || dst > 10 ||
+                (BPF_SRC(code) == BPF_X && src > 10))
+                return -EINVAL;
+            /* Strictly forward jumps: off must be positive. */
+            if (off <= 0)
+                return -EINVAL;
+            if (pc + 1 + (uint32_t)off >= ninsns)
+                return -EINVAL;
             break;
-        case KEP_OP_JCC:
-            if (rd >= KEP_REGS || rs >= KEP_REGS) return -EINVAL;
-            if ((aux & ~KEP_CC_SIGNED) > KEP_CC_GE) return -EINVAL;
-            if (pc + 1 + imm >= ninsns) return -EINVAL;
-            break;
-        case KEP_OP_EXIT:
-            /* EXIT terminates; it may appear at any position, but the
-             * program must end with one so execution can never fall off
-             * the end. */
-            break;
+        }
         default:
             return -EINVAL;
         }
     }
 
-    if ((insns[ninsns - 1] & KEP_OP_MASK) != (KEP_OP_EXIT << KEP_OP_SHIFT))
+    /* The program must end with EXIT so execution can never fall off the
+     * end; unreachable code after a mid-program EXIT is allowed (it may be
+     * a forward jump target). */
+    if (BPF_CLASS(insns[ninsns - 1].code) != BPF_JMP ||
+        BPF_OP(insns[ninsns - 1].code) != BPF_EXIT)
         return -EINVAL;
     if (max_off == 0)
         return -EINVAL; /* useless program: never touches the context */
-    if (nwords_out)
-        *nwords_out = max_off;
+    if (max_off_out)
+        *max_off_out = max_off;
     return 0;
 }
 
 /* ---- interpreter ---- */
 
+static uint64_t bpf_reg_read(const uint64_t *regs, unsigned reg)
+{
+    return regs[reg & 0xf];
+}
+
+static void bpf_reg_write(uint64_t *regs, unsigned reg, uint64_t val)
+{
+    regs[reg & 0xf] = val;
+}
+
 static uint32_t kep_exec(const kep_prog_t *p, kep_ctx_t *ctx)
 {
     uint64_t regs[KEP_REGS] = {0};
+    regs[BPF_REG_CTX] = (uint64_t)(uintptr_t)ctx->words;
     uint32_t pc = 0;
     uint32_t steps = 0;
 
-    while (steps++ < KEP_MAX_PROG_INSNS * 4) {
-        uint32_t insn = p->insns[pc];
-        unsigned op = (insn & KEP_OP_MASK) >> KEP_OP_SHIFT;
-        unsigned rd = (insn & KEP_RD_MASK) >> KEP_RD_SHIFT;
-        unsigned rs = (insn & KEP_RS_MASK) >> KEP_RS_SHIFT;
-        unsigned aux = (insn & KEP_AUX_MASK) >> KEP_AUX_SHIFT;
-        uint32_t imm = insn & KEP_IMM_MASK;
-        int64_t simm = (int64_t)(int32_t)(imm << 16) >> 16;
+    while (steps++ < KEP_MAX_PROG_INSNS * 8) {
+        const bpf_insn_t *insn = &p->insns[pc];
+        uint8_t code = insn->code;
+        unsigned cls = BPF_CLASS(code);
+        unsigned dst = insn->dst_reg & 0xf;
+        unsigned src = insn->src_reg & 0xf;
+        int16_t off = insn->off;
+        int32_t imm = insn->imm;
 
-        switch (op) {
-        case KEP_OP_MOVI: regs[rd] = (uint64_t)simm; pc++; break;
-        case KEP_OP_MOV:  regs[rd] = regs[rs]; pc++; break;
-        case KEP_OP_LDC:
-            regs[rd] = (imm < ctx->nwords) ? ctx->words[imm] : 0;
-            pc++;
-            break;
-        case KEP_OP_STC:
-            if (imm < ctx->nwords)
-                ctx->words[imm] = regs[rs];
-            pc++;
-            break;
-        case KEP_OP_ALU:
-            switch (aux) {
-            case KEP_ALU_ADD: regs[rd] += regs[rs]; break;
-            case KEP_ALU_SUB: regs[rd] -= regs[rs]; break;
-            case KEP_ALU_AND: regs[rd] &= regs[rs]; break;
-            case KEP_ALU_OR:  regs[rd] |= regs[rs]; break;
-            case KEP_ALU_XOR: regs[rd] ^= regs[rs]; break;
-            case KEP_ALU_SHL: regs[rd] <<= regs[rs] & 63; break;
-            case KEP_ALU_SHR: regs[rd] >>= regs[rs] & 63; break;
-            case KEP_ALU_NEG: regs[rd] = ~regs[rd] + 1; break;
+        switch (cls) {
+        case BPF_LD: {
+            uint64_t v = (uint64_t)(uint32_t)imm;
+            if (BPF_MODE(code) == BPF_IMM && BPF_SIZE(code) == BPF_DW) {
+                uint64_t hi = (uint64_t)(uint32_t)p->insns[pc + 1].imm;
+                v = (uint32_t)v | (hi << 32);
+                pc += 2;
+            } else {
+                pc++;
             }
-            pc++;
-            break;
-        case KEP_OP_ADDI: regs[rd] += (uint64_t)simm; pc++; break;
-        case KEP_OP_ANDI: regs[rd] &= imm; pc++; break;
-        case KEP_OP_ORI:  regs[rd] |= imm; pc++; break;
-        case KEP_OP_XORI: regs[rd] ^= imm; pc++; break;
-        case KEP_OP_SHLI: regs[rd] <<= imm & 63; pc++; break;
-        case KEP_OP_SHRI: regs[rd] >>= imm & 63; pc++; break;
-        case KEP_OP_JMP:  pc += 1 + imm; break;
-        case KEP_OP_JCC: {
-            uint64_t a = regs[rd], b = regs[rs];
-            int taken = 0;
-            switch (aux & ~KEP_CC_SIGNED) {
-            case KEP_CC_EQ: taken = a == b; break;
-            case KEP_CC_NE: taken = a != b; break;
-            case KEP_CC_LT:
-                taken = (aux & KEP_CC_SIGNED) ?
-                        (int64_t)a < (int64_t)b : a < b;
-                break;
-            case KEP_CC_LE:
-                taken = (aux & KEP_CC_SIGNED) ?
-                        (int64_t)a <= (int64_t)b : a <= b;
-                break;
-            case KEP_CC_GT:
-                taken = (aux & KEP_CC_SIGNED) ?
-                        (int64_t)a > (int64_t)b : a > b;
-                break;
-            case KEP_CC_GE:
-                taken = (aux & KEP_CC_SIGNED) ?
-                        (int64_t)a >= (int64_t)b : a >= b;
-                break;
-            }
-            pc += taken ? 1 + imm : 1;
+            bpf_reg_write(regs, dst, v);
             break;
         }
-        case KEP_OP_EXIT:
+        case BPF_LDX: {
+            uint64_t v = 0;
+            if (off >= 0 && (uint32_t)off + 8 <= ctx->nwords * 8)
+                v = *(uint64_t *)((char *)ctx->words + off);
+            bpf_reg_write(regs, dst, v);
+            pc++;
+            break;
+        }
+        case BPF_ST: {
+            uint64_t v = (uint64_t)(uint32_t)imm;
+            if (BPF_SRC(code) == BPF_X)
+                v = bpf_reg_read(regs, src);
+            if (off >= 0 && (uint32_t)off + 8 <= ctx->nwords * 8)
+                *(uint64_t *)((char *)ctx->words + off) = v;
+            pc++;
+            break;
+        }
+        case BPF_STX:
+            if (dst == BPF_REG_CTX && off >= 0 &&
+                (uint32_t)off + 8 <= ctx->nwords * 8)
+                *(uint64_t *)((char *)ctx->words + off) =
+                    bpf_reg_read(regs, src);
+            pc++;
+            break;
+        case BPF_ALU:
+        case BPF_ALU64: {
+            uint64_t a = bpf_reg_read(regs, dst);
+            uint64_t b = BPF_SRC(code) == BPF_X ?
+                         bpf_reg_read(regs, src) :
+                         (uint64_t)(uint32_t)imm;
+            uint64_t r = a;
+            switch (BPF_OP(code)) {
+            case BPF_ADD: r = a + b; break;
+            case BPF_SUB: r = a - b; break;
+            case BPF_MUL: r = a * b; break;
+            case BPF_DIV: r = b ? a / b : 0; break;
+            case BPF_OR:  r = a | b; break;
+            case BPF_AND: r = a & b; break;
+            case BPF_LSH: r = a << (b & 63); break;
+            case BPF_RSH: r = a >> (b & 63); break;
+            case BPF_NEG: r = ~a + 1; break;
+            case BPF_MOD: r = b ? a % b : 0; break;
+            case BPF_XOR: r = a ^ b; break;
+            case BPF_MOV: r = b; break;
+            case BPF_ARSH: r = (int64_t)a >> (b & 63); break;
+            }
+            if (cls == BPF_ALU)
+                r = (uint32_t)r; /* 32-bit ops zero-extend */
+            bpf_reg_write(regs, dst, r);
+            pc++;
+            break;
+        }
+        case BPF_JMP:
+        case BPF_JMP32: {
+            unsigned op = BPF_OP(code);
+            if (op == BPF_EXIT)
+                return (uint32_t)bpf_reg_read(regs, 0);
+            uint64_t a = bpf_reg_read(regs, dst);
+            uint64_t b = BPF_SRC(code) == BPF_X ?
+                         bpf_reg_read(regs, src) :
+                         (uint64_t)(uint32_t)imm;
+            if (cls == BPF_JMP32) {
+                a = (uint32_t)a;
+                b = (uint32_t)b;
+            }
+            int taken = 0;
+            switch (op) {
+            case BPF_JA:   taken = 1; break;
+            case BPF_JEQ:  taken = a == b; break;
+            case BPF_JGT:  taken = a > b; break;
+            case BPF_JGE:  taken = a >= b; break;
+            case BPF_JSET: taken = (a & b) != 0; break;
+            case BPF_JNE:  taken = a != b; break;
+            case BPF_JSGT: taken = (int64_t)a > (int64_t)b; break;
+            case BPF_JSGE: taken = (int64_t)a >= (int64_t)b; break;
+            case BPF_JLT:  taken = a < b; break;
+            case BPF_JLE:  taken = a <= b; break;
+            case BPF_JSLT: taken = (int64_t)a < (int64_t)b; break;
+            case BPF_JSLE: taken = (int64_t)a <= (int64_t)b; break;
+            }
+            pc += taken ? 1 + (uint32_t)off : 1;
+            break;
+        }
         default:
-            return (uint32_t)regs[0];
+            return 0; /* unreachable by construction */
         }
     }
-    return 0; /* budget exhausted: treat as allow, verifier excludes loops */
+    return 0; /* budget exhausted: verifier excludes loops */
 }
 
 /* ---- registry ---- */
@@ -289,20 +334,20 @@ int kep_point_query(uint32_t point_id, char *name, size_t name_len,
 
 /* ---- program management ---- */
 
-int kep_prog_load(const uint32_t *instr, uint32_t len)
+int kep_prog_load(const bpf_insn_t *insns, uint32_t len)
 {
     task_t *cur = proc_current();
-    if (!cur || !instr)
+    if (!cur || !insns)
         return -EINVAL;
 
-    uint32_t kbuf[KEP_MAX_PROG_INSNS];
+    bpf_insn_t kbuf[KEP_MAX_PROG_INSNS];
     if (len > KEP_MAX_PROG_INSNS)
         return -E2BIG;
-    if (copy_from_user(kbuf, instr, len * sizeof(uint32_t)) < 0)
+    if (copy_from_user(kbuf, insns, len * sizeof(bpf_insn_t)) < 0)
         return -EFAULT;
 
-    uint32_t nwords = 0;
-    int vr = kep_verify(kbuf, len, &nwords);
+    uint32_t max_off = 0;
+    int vr = kep_verify(kbuf, len, &max_off);
     if (vr < 0)
         return vr;
 
@@ -320,19 +365,20 @@ int kep_prog_load(const uint32_t *instr, uint32_t len)
     }
     kep_prog_t *p = &kep_progs[slot];
     memset(p, 0, sizeof(*p));
-    memcpy(p->insns, kbuf, len * sizeof(uint32_t));
+    memcpy(p->insns, kbuf, len * sizeof(bpf_insn_t));
     p->ninsns = len;
-    p->nwords = nwords;
+    p->max_ctx_off = max_off;
     p->used = 1;
     p->id = kep_next_id++;
     if (kep_next_id <= 0)
         kep_next_id = 1;
     p->owner_pid = cur->pid;
+    p->owner_fd = -1;
     p->refs = 1;
     spin_unlock_irqrestore(&kep_registry_lock, flags);
 
-    kdebug("[KEP] pid %d loaded prog %d (%u insns, %u ctx words)\n",
-           cur->pid, p->id, len, nwords);
+    kdebug("[KEP] pid %d loaded prog %d (%u insns, ctx %u bytes)\n",
+           cur->pid, p->id, len, max_off);
     return p->id;
 }
 
@@ -371,7 +417,7 @@ int kep_prog_attach(int prog_id, uint32_t point_id)
 
     uint64_t flags = spin_lock_irqsave(&kep_registry_lock);
     kep_point_t *pt = kep_point_find(point_id);
-    if (!pt || pt->nwords < p->nwords) {
+    if (!pt || pt->nwords * 8 < p->max_ctx_off) {
         spin_unlock_irqrestore(&kep_registry_lock, flags);
         return -EINVAL;
     }
@@ -413,6 +459,77 @@ int kep_prog_detach(int prog_id, uint32_t point_id)
     }
     spin_unlock_irqrestore(&kep_registry_lock, flags);
     return 0;
+}
+
+int kep_prog_set_fd(int prog_id, int fd)
+{
+    uint64_t flags = spin_lock_irqsave(&kep_registry_lock);
+    kep_prog_t *p = kep_prog_by_id(prog_id);
+    if (!p) {
+        spin_unlock_irqrestore(&kep_registry_lock, flags);
+        return -ENOENT;
+    }
+    if (p->owner_pid != (proc_current() ? proc_current()->pid : -1)) {
+        spin_unlock_irqrestore(&kep_registry_lock, flags);
+        return -EPERM;
+    }
+    p->owner_fd = fd;
+    spin_unlock_irqrestore(&kep_registry_lock, flags);
+    return 0;
+}
+
+int kep_prog_find_by_fd(int fd)
+{
+    task_t *cur = proc_current();
+    if (!cur || fd < 0)
+        return -ENOENT;
+    uint64_t flags = spin_lock_irqsave(&kep_registry_lock);
+    for (int i = 0; i < KEP_MAX_PROGS; i++) {
+        kep_prog_t *p = &kep_progs[i];
+        if (p->used && p->owner_pid == cur->pid && p->owner_fd == fd) {
+            spin_unlock_irqrestore(&kep_registry_lock, flags);
+            return p->id;
+        }
+    }
+    spin_unlock_irqrestore(&kep_registry_lock, flags);
+    return -ENOENT;
+}
+
+/* Drop programs whose fd alias was closed by the owner (Linux ABI). */
+void kep_sweep_fds(void)
+{
+    task_t *cur = proc_current();
+    if (!cur)
+        return;
+    uint64_t flags = spin_lock_irqsave(&kep_registry_lock);
+    for (int i = 0; i < KEP_MAX_PROGS; i++) {
+        kep_prog_t *p = &kep_progs[i];
+        if (!p->used || p->owner_pid != cur->pid || p->owner_fd < 0)
+            continue;
+        if (!fdtable_get_current(p->owner_fd)) {
+            /* The fd is gone; detach everywhere and drop the owner ref. */
+            for (int j = 0; j < KEP_MAX_POINTS; j++) {
+                kep_point_t *pt = kep_points[j];
+                if (!pt)
+                    continue;
+                kep_attached_t **pp = &pt->attached;
+                while (*pp) {
+                    kep_attached_t *a = *pp;
+                    if (a->prog == p) {
+                        *pp = a->next;
+                        kfree(a);
+                        p->refs--;
+                    } else {
+                        pp = &a->next;
+                    }
+                }
+            }
+            p->owner_fd = -1;
+            if (p->refs <= 0)
+                p->used = 0;
+        }
+    }
+    spin_unlock_irqrestore(&kep_registry_lock, flags);
 }
 
 int kep_prog_release(int prog_id)

@@ -20,24 +20,24 @@ A20OS 的动态内核扩展机制。与 Linux LKM（可加载内核模块）有�
 - **终止性 = 结构性保证**：所有跳转严格向前（imm 无符号），验证器
   线性扫描确认，解释器另有指令预算兜底。
 
-## 指令集（32 位定长）
+## 指令集（标准 eBPF 编码）
 
-`op<<28 | rd<<24 | rs<<20 | aux<<16 | imm16`
+KEP 程序使用 Linux eBPF 指令编码（`struct bpf_insn` 布局，8 字节/条，
+寄存器 R0..R10，R10 为帧指针），因此**同一份程序字节码**可以通过
+Native ABI（ext_prog_load）或 Linux ABI（bpf(2) BPF_PROG_LOAD）加载。
+支持的指令族：
 
-| op | 助记符 | 语义 |
-|---|---|---|
-| 0 | MOVI rd, imm16 | 立即数（符号扩展） |
-| 1 | MOV rd, rs | 寄存器拷贝 |
-| 2 | LDC rd, off16 | 从上下文窗口读一个字 |
-| 3 | STC off16, rs | 写上下文窗口 |
-| 4 | ALU rd, rs, aux | add/sub/and/or/xor/shl/shr/neg |
-| 5-10 | ADDI/ANDI/ORI/XORI/SHLI/SHRI | 立即数算术 |
-| 11 | JMP off16 | 相对跳转（仅向前） |
-| 12 | JCC rd, rs, cc, off16 | 条件跳转（EQ..GE，aux bit3 有符号） |
-| 13 | EXIT | 返回 R0（作为判定值） |
+- `LD_IMM64`（双指令）、`MOV64/MOV32`（reg/imm）
+- `ALU64/ALU32`：add/sub/mul/div/or/and/lsh/rsh/neg/mod/xor/arsh
+- `JMP/JMP32`：ja/jeq/jne/jgt/jge/jlt/jle/jset/jsgt/jsge/jslt/jsle
+- `LDX_MEM/ST_MEM/STX_MEM`（仅 BPF_DW 大小）
+- `EXIT`
 
-8 个 64 位寄存器（R0..R7），R0 是返回值。程序 ≤ 256 条指令，
-上下文 ≤ 64 字。
+验证与执行模型是 **KEP 自己的**，不是 Linux eBPF 的仿制：
+- 跳转必须严格向前（无循环，结构性终止）——Linux eBPF 允许有界循环
+- 内存访问仅限扩展点上下文窗口，且必须经 R1 常量偏移——无 maps、
+  无 helper 调用、无任意内存
+- 无栈（R10 保留未用）
 
 ## 验证器
 
@@ -56,7 +56,9 @@ A20OS 的动态内核扩展机制。与 Linux LKM（可加载内核模块）有�
 附着程序在每次系统调用入口执行（两个 ABI 都生效），R0 判定：
 `0` 放行、`1` 拒绝（-EACCES / -A20_ERR_ACCESS）、`2` 终止调用者。
 
-## 接口（Native ABI 0x0D00）
+## 接口
+
+**Native ABI（0x0D00）**：
 
 - `ext_prog_load(insns, len) → handle`：验证并加载程序（A20_OBJ_EXT_PROG）
 - `ext_prog_attach(prog, point)` / `ext_prog_detach(prog, point)`
@@ -66,7 +68,14 @@ A20OS 的动态内核扩展机制。与 Linux LKM（可加载内核模块）有�
 程序所有权：加载进程持有；进程退出自动释放；handle 关闭（最后一个引用）
 触发释放。权限：READ=attach/detach，CONTROL=release。
 
+**Linux ABI（bpf(2)）**：`BPF_PROG_LOAD`/`BPF_PROG_ATTACH`/
+`BPF_PROG_DETACH` 是同一引擎的薄包装（`kernel/abi/linux/sys_bpf.c`）。
+程序 fd 为 memfd，KEP 登记 (owner, fd) 别名并在下次调用时清扫已关闭的
+fd。A20 适配：`BPF_PROG_ATTACH` 的 `target_fd` 携带扩展点 id（Linux 的
+attach 目标是 socket）。原占位 bpf 实现的 map 命令不再提供（-EOPNOTSUPP），
+`kernel/bpf/` 目录已删除；socket 的 SO_ATTACH_BPF 待网络包扩展点落地。
+
 ## 验证
 
-`smoke-native-ext`：加载/非法程序拒绝/attach 后 syscall 被拒/
-detach 恢复/release 全流程。
+`smoke-native-ext`（Native 全流程）与 `bpf_smoke`（Linux bpf(2) 加载/
+附着/拒绝/分离全流程）。
