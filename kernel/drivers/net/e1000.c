@@ -3,6 +3,7 @@
 #include "drivers/core/driver_core.h"
 #include "drivers/core/driver_hwapi.h"
 #include "drivers/core/driver_register.h"
+#include "net/lwip_stack.h"
 #include "core/defs.h"
 #include "core/klog.h"
 #include "core/lock.h"
@@ -20,6 +21,7 @@
 #define E1000_CTRL   0x0000U
 #define E1000_STATUS 0x0008U
 #define E1000_ICR    0x00C0U
+#define E1000_IMS    0x00D0U
 #define E1000_IMC    0x00D8U
 #define E1000_RCTL   0x0100U
 #define E1000_TCTL   0x0400U
@@ -50,6 +52,16 @@
 #define E1000_TXD_CMD_RS     (1U << 3)
 #define E1000_TXD_STAT_DD    (1U << 0)
 
+/* Interrupt causes enabled in IMS when a line is registered: TX descriptor
+ * write-back, link status change, RX overrun, and the RX timer.  ICR is
+ * read-to-clear, which is also the top-half acknowledge. */
+#define E1000_IMS_TXDW       (1U << 0)
+#define E1000_IMS_LSC        (1U << 2)
+#define E1000_IMS_RXO        (1U << 6)
+#define E1000_IMS_RXT0       (1U << 7)
+#define E1000_IMS_USED       (E1000_IMS_TXDW | E1000_IMS_LSC | \
+                              E1000_IMS_RXO | E1000_IMS_RXT0)
+
 #define E1000_RING_SIZE 64U
 #define E1000_BUF_SIZE  2048U
 
@@ -78,6 +90,8 @@ typedef struct {
     uint32_t rx_next;
     uint32_t tx_next;
     spinlock_t lock;
+    int irq;
+    int irq_registered;
     e1000_rx_desc_t rx[E1000_RING_SIZE] ALIGNED(16);
     e1000_tx_desc_t tx[E1000_RING_SIZE] ALIGNED(16);
     uint8_t rx_buf[E1000_RING_SIZE][E1000_BUF_SIZE] ALIGNED(16);
@@ -94,6 +108,42 @@ static inline uint32_t e1000_read(e1000_device_t *nic, uint32_t reg)
 static inline void e1000_write(e1000_device_t *nic, uint32_t reg, uint32_t value)
 {
     writel(value, (volatile void *)(nic->regs + reg));
+}
+
+/* E1000_IRQ_MODEL:
+ * - The top-half acknowledges by reading ICR (read-to-clear), resolves the
+ *   device's netif index, and runs the same bounded RX drain the virtio-net
+ *   IRQ path uses, under g_lwip_lock.  A shared line with no pending cause
+ *   costs one register read.
+ * - IMS is unmasked only after the handler is registered; without a handler
+ *   the device keeps its causes masked and the class .poll hook remains the
+ *   only progress path. */
+static int e1000_irq_handler(int irq, void *priv) {
+    (void)irq;
+    device_t *dev = (device_t *)priv;
+    e1000_device_t *nic = dev ? dev->drv_priv : NULL;
+    if (!nic)
+        return 0;
+    uint32_t icr = e1000_read(nic, E1000_ICR);
+    if (!icr)
+        return 0;
+    int net_idx = -1;
+    for (int i = 0; i < 8; i++) {
+        device_t *cur = device_find_by_class(DEV_CLASS_NET, i);
+        if (!cur)
+            break;
+        if (cur == dev) {
+            net_idx = i;
+            break;
+        }
+    }
+    uint64_t flags = a20_lwip_lock();
+    if (net_idx >= 0)
+        a20_lwip_process_netif_irq_locked(net_idx);
+    else
+        a20_lwip_signal_rx_pending();
+    a20_lwip_unlock(flags);
+    return 0;
 }
 
 static void e1000_poll(device_t *dev)
@@ -235,9 +285,23 @@ static int e1000_probe(device_t *dev)
                 E1000_RCTL_SECRC);
 
     dev->drv_priv = nic;
-    kinfo("[E1000] ready: mac=%02x:%02x:%02x:%02x:%02x:%02x link=%s\n",
+    int irq = pci_intx_irq(dev);
+    if (irq >= 0) {
+        if (request_irq((uint32_t)irq, e1000_irq_handler, IRQF_SHARED,
+                        dev) == 0) {
+            nic->irq = irq;
+            nic->irq_registered = 1;
+            /* Unmask device causes only with the handler in place. */
+            e1000_write(nic, E1000_IMS, E1000_IMS_USED);
+        } else {
+            kinfo("[E1000] IRQ %d registration failed; using polling\n",
+                  irq);
+        }
+    }
+    kinfo("[E1000] ready: mac=%02x:%02x:%02x:%02x:%02x:%02x link=%s irq=%d\n",
           nic->mac[0], nic->mac[1], nic->mac[2], nic->mac[3], nic->mac[4],
-          nic->mac[5], (e1000_read(nic, E1000_STATUS) & 2U) ? "up" : "down");
+          nic->mac[5], (e1000_read(nic, E1000_STATUS) & 2U) ? "up" : "down",
+          nic->irq_registered ? nic->irq : -1);
     return 0;
 }
 
@@ -246,7 +310,10 @@ static int e1000_remove(device_t *dev)
     e1000_device_t *nic = dev ? dev->drv_priv : NULL;
     if (!nic)
         return 0;
+    /* Mask device causes before releasing the handler. */
     e1000_write(nic, E1000_IMC, 0xFFFFFFFFU);
+    if (nic->irq_registered)
+        free_irq((uint32_t)nic->irq, dev);
     e1000_write(nic, E1000_RCTL, 0);
     e1000_write(nic, E1000_TCTL, 0);
     dev->drv_priv = NULL;

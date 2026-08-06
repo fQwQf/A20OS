@@ -10,8 +10,10 @@
 #include "core/klog.h"
 #include "core/lock.h"
 #include "core/string.h"
+#include "core/sync.h"
 #include "core/timer.h"
 #include "mm/mm.h"
+#include "proc/proc.h"
 
 #define VIRTIO_SCSI_QUEUE_SIZE 32
 #define VIRTIO_SCSI_REQUEST_QUEUE 2U
@@ -20,6 +22,11 @@
 #define VIRTIO_SCSI_SENSE_SIZE 96
 #define VIRTIO_SCSI_TIMEOUT_TICKS (TICKS_PER_SEC * 10)
 #define VIRTIO_SCSI_POLL_LIMIT    50000000U
+/* Hybrid completion window: bounded spin-poll before parking on the
+ * completion IRQ, mirroring the virtio-blk model. */
+#define VIRTIO_SCSI_HYBRID_PRE_POLL_US 800U
+/* Bounded park chunk: a hypothetical missed wake degrades to a re-check. */
+#define VIRTIO_SCSI_PARK_CHUNK_MS 50U
 
 #define SCSI_CMD_TEST_UNIT_READY 0x00U
 #define SCSI_CMD_INQUIRY         0x12U
@@ -62,7 +69,12 @@ typedef struct {
     virtio_scsi_resp_t resp ALIGNED(64);
     virtio_scsi_aux_queue_t control;
     virtio_scsi_aux_queue_t event;
-    spinlock_t lock;
+    /* Sleepable mutex: the IRQ top-half never takes it, and the command
+     * wait path parks while holding it. */
+    mutex_t lock;
+    /* Parked command waiters woken by the completion IRQ. */
+    wait_queue_t waiters;
+    int irq_registered;
     block_dev_t block;
     uint16_t last_used;
     uint64_t capacity;
@@ -123,9 +135,30 @@ static int virtio_scsi_setup_queues(virtio_scsi_dev_t *dev) {
     return 0;
 }
 
+/* VIRTIO_SCSI_IRQ_MODEL:
+ * - The top-half acknowledges the device interrupt (ISR read + ack write)
+ *   and wakes the parked command issuer; it never touches queue state —
+ *   the issuer owns last_used and the single outstanding request buffer.
+ * - A spurious or shared-line invocation degrades to one no-op wake. */
+static int virtio_scsi_irq_handler(int irq, void *priv) {
+    (void)irq;
+    virtio_scsi_dev_t *dev = (virtio_scsi_dev_t *)priv;
+    if (!dev)
+        return 0;
+    uint32_t isr = dev->vt.read32(&dev->vt, VIRTIO_MMIO_INTERRUPT_STATUS);
+    if (!dev->vt.legacy)
+        dev->vt.write32(&dev->vt, VIRTIO_MMIO_INTERRUPT_ACK, isr);
+    proc_wake_q_t wake_q;
+    proc_wake_q_init(&wake_q);
+    (void)wait_queue_collect_all(&dev->waiters, 0, PROC_WAKE_EVENT,
+                                 &wake_q, NULL);
+    (void)proc_wake_q_flush(&wake_q);
+    return 0;
+}
+
 static int virtio_scsi_command(virtio_scsi_dev_t *dev, const uint8_t *cdb,
-                                void *data, size_t bytes, int data_in) {
-    uint64_t flags = spin_lock_irqsave(&dev->lock);
+                                 void *data, size_t bytes, int data_in) {
+    mutex_lock(&dev->lock);
     memset(&dev->req, 0, sizeof(dev->req));
     memset(&dev->resp, 0, sizeof(dev->resp));
     memcpy(dev->req.cdb, cdb, VIRTIO_SCSI_CDB_SIZE);
@@ -185,19 +218,45 @@ static int virtio_scsi_command(virtio_scsi_dev_t *dev, const uint8_t *cdb,
     arch_dma_sync_for_device(&dev->used, sizeof(dev->used));
     dev->vt.write32(&dev->vt, VIRTIO_MMIO_QUEUE_NOTIFY, VIRTIO_SCSI_REQUEST_QUEUE);
 
-    uint64_t deadline = timer_get_ticks() + VIRTIO_SCSI_TIMEOUT_TICKS;
+    uint64_t start = timer_get_ticks();
+    uint64_t deadline = start + VIRTIO_SCSI_TIMEOUT_TICKS;
+    uint64_t pre_poll_until = start + US_TO_TICKS(VIRTIO_SCSI_HYBRID_PRE_POLL_US);
     uint32_t spins = VIRTIO_SCSI_POLL_LIMIT;
-    while (dev->used.idx == used_before) {
+    for (;;) {
         arch_dma_sync_for_cpu(&dev->used, sizeof(dev->used));
+        if (dev->used.idx != used_before)
+            break;
         /* VirtualBox's early ARM timer is a software fallback.  Bound the
          * poll even if it is not advancing yet, so a failed controller does
          * not freeze the whole boot permanently. */
         if (timer_get_ticks() >= deadline || --spins == 0) {
-            spin_unlock_irqrestore(&dev->lock, flags);
+            mutex_unlock(&dev->lock);
             kinfo("[VIRTIO-SCSI] request timeout\n");
             return -1;
         }
-        arch_cpu_relax();
+        if (!dev->irq_registered || timer_get_ticks() < pre_poll_until) {
+            arch_cpu_relax();
+            continue;
+        }
+        /* Park until the completion IRQ; the bounded chunk turns a
+         * hypothetical missed wake into a re-check instead of a stall. */
+        uint64_t chunk = timer_get_ticks() + MS_TO_TICKS(VIRTIO_SCSI_PARK_CHUNK_MS);
+        if (chunk > deadline)
+            chunk = deadline;
+        proc_wait_token_t token =
+            proc_park_prepare(PROC_WAIT_UNINTERRUPTIBLE, chunk);
+        wait_queue_entry_t entry = {0};
+        wait_queue_link(&dev->waiters, &entry, token, 0);
+        arch_dma_sync_for_cpu(&dev->used, sizeof(dev->used));
+        if (dev->used.idx != used_before) {
+            wait_queue_unlink(&dev->waiters, &entry);
+            (void)proc_park_cancel(token);
+            proc_park_finish(token);
+            break;
+        }
+        (void)proc_park_commit(token);
+        wait_queue_unlink(&dev->waiters, &entry);
+        proc_park_finish(token);
     }
     arch_dma_sync_for_cpu(&dev->resp, sizeof(dev->resp));
     if (bytes)
@@ -208,7 +267,7 @@ static int virtio_scsi_command(virtio_scsi_dev_t *dev, const uint8_t *cdb,
         kerr("[VIRTIO-SCSI] SCSI command %02x failed: response=%u status=%u sense=%u resid=%u\n",
              cdb[0], dev->resp.response, dev->resp.status, dev->resp.sense_len,
              dev->resp.resid);
-    spin_unlock_irqrestore(&dev->lock, flags);
+    mutex_unlock(&dev->lock);
     return ok ? 0 : -1;
 }
 
@@ -239,7 +298,9 @@ static int virtio_scsi_probe(device_t *pdev) {
         return -1;
     virtio_scsi_dev_t *dev = &g_scsi[g_scsi_count];
     memset(dev, 0, sizeof(*dev));
-    spin_init(&dev->lock);
+    dev->vt.irq = -1;
+    mutex_init(&dev->lock);
+    wait_queue_init(&dev->waiters);
     if (pci_virtio_transport_init(pdev, VIRTIO_ID_SCSI, &dev->vt) != 0) {
         kerr("[VIRTIO-SCSI] PCI transport initialization failed\n");
         return -1;
@@ -270,6 +331,18 @@ static int virtio_scsi_probe(device_t *pdev) {
     status |= VIRTIO_STATUS_DRIVER_OK;
     dev->vt.write32(&dev->vt, VIRTIO_MMIO_STATUS, status);
 
+    if (dev->vt.irq >= 0) {
+        unsigned long irq_flags = dev->vt.shared_irq ? IRQF_SHARED : 0;
+        if (request_irq((uint32_t)dev->vt.irq, virtio_scsi_irq_handler,
+                        irq_flags, dev) == 0) {
+            dev->irq_registered = 1;
+        } else {
+            /* Never park on an interrupt that will not arrive. */
+            kinfo("[VIRTIO-SCSI] IRQ %d registration failed; using polling\n",
+                  dev->vt.irq);
+            dev->vt.irq = -1;
+        }
+    }
     uint8_t cdb[VIRTIO_SCSI_CDB_SIZE] = { 0 };
     uint8_t capacity[8] ALIGNED(64) = { 0 };
     cdb[0] = SCSI_CMD_TEST_UNIT_READY;
@@ -301,8 +374,11 @@ static int virtio_scsi_remove(device_t *pdev) {
     if (!dev)
         return 0;
     dev->ready = 0;
+    /* Device reset stops all interrupt sources before the handler goes. */
     dev->vt.write32(&dev->vt, VIRTIO_MMIO_STATUS, 0);
     mb();
+    if (dev->irq_registered)
+        free_irq((uint32_t)dev->vt.irq, dev);
     pdev->drv_priv = NULL;
     while (g_scsi_count > 0 && !g_scsi[g_scsi_count - 1].ready)
         g_scsi_count--;

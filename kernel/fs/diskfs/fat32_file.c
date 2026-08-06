@@ -98,20 +98,34 @@ int fat32_fread(vfile_t *vf, char *buf, size_t count) {
     size_t off = fc->cluster_off;
     while (done < count && cluster < FAT32_CLUSTER_END) {
         size_t avail = sb->bytes_per_cluster - off;
-        size_t chunk = count - done;
-        if (chunk > avail) chunk = avail;
+        size_t run_limit = count - done;
+        if (run_limit > avail) run_limit = avail;
+
+        /* Extend the read over a run of physically contiguous clusters so one
+         * bcache_read_bytes() call spans multiple pages and is served by a
+         * single batched device request instead of one per cluster. */
+        uint32_t run_cluster = cluster;
+        uint32_t next = fat_read(sb, run_cluster);
+        while (next == run_cluster + 1 &&
+               run_limit + sb->bytes_per_cluster <= count - done) {
+            run_cluster = next;
+            run_limit += sb->bytes_per_cluster;
+            next = fat_read(sb, run_cluster);
+        }
 
         uint64_t base = cluster_byte_offset(sb, cluster) + off;
-        if (bcache_read_bytes(sb->bc, base, dst + done, chunk) < 0)
+        if (bcache_read_bytes(sb->bc, base, dst + done, run_limit) < 0)
             break;
 
-        done += chunk;
-        off += chunk;
-        if (off == sb->bytes_per_cluster) {
+        done += run_limit;
+        off += run_limit;
+        if (off >= sb->bytes_per_cluster) {
             off = 0;
-            cluster_index++;
             if (done < count)
-                cluster = fat_read(sb, cluster);
+                cluster = fat_read(sb, run_cluster);
+            else
+                cluster = run_cluster;
+            cluster_index = (fc->file_off + done) / sb->bytes_per_cluster;
         }
     }
 

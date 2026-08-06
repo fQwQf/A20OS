@@ -40,6 +40,9 @@ static inline int arch_ram_range(size_t idx, paddr_t *base, paddr_t *end) {
 #define IRQ_VECTOR_RESCHEDULE 0xF0
 
 void x86_64_route_pci_irq(uint32_t gsi, uint8_t vector);
+/* Mask/unmask the IOAPIC entry backing a routed PCI vector (0x40+gsi).
+ * Vectors outside the routed PCI window are ignored. */
+void x86_64_pci_irq_set_masked(int vector, int masked);
 void x86_64_set_trap_state(uint64_t cause, uint64_t epc, uint64_t tval);
 uint64_t x86_64_get_trap_cause(void);
 uint64_t x86_64_get_trap_epc(void);
