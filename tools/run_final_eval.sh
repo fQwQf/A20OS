@@ -76,6 +76,8 @@ fi
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 repo_root=$(cd "$script_dir/.." && pwd -P)
 cd "$repo_root"
+runner_start_time=$(date --iso-8601=seconds)
+runner_start_epoch=$(date +%s)
 
 image_dir=${FINAL_EVAL_IMAGE_DIR:-contest/2026OSImage-Pub}
 state_dir=${FINAL_EVAL_STATE_DIR:-.eval-state/2026}
@@ -97,7 +99,7 @@ if [[ "$verify_base" != 0 && "$verify_base" != 1 ]]; then
 fi
 
 required_commands=(
-    conda dd flock gzip mcopy mdel mtype qemu-img readlink sha256sum tee "$qemu"
+    conda dd flock gzip mcopy mdel mtype qemu-img readlink sha256sum stat tee "$qemu"
 )
 for command_name in "${required_commands[@]}"; do
     if ! command -v "$command_name" >/dev/null 2>&1; then
@@ -112,6 +114,16 @@ fi
 if [[ -n "$judge_name" && ! -r "$judge" ]]; then
     echo "[final-eval] missing official judge: $judge" >&2
     exit 1
+fi
+official_tests_repo=contest/testsuits-for-oskernel
+if [[ ! -d "$official_tests_repo/.git" ]]; then
+    echo "[final-eval] missing official tests repository: $official_tests_repo" >&2
+    exit 1
+fi
+official_tests_commit=$(git -C "$official_tests_repo" rev-parse --verify HEAD)
+official_tests_dirty=no
+if [[ -n $(git -C "$official_tests_repo" status --porcelain) ]]; then
+    official_tests_dirty=yes
 fi
 if ! conda run -n "$conda_env" python --version >/dev/null; then
     echo "[final-eval] conda environment '$conda_env' is unavailable" >&2
@@ -184,6 +196,11 @@ if [[ "$verify_base" == 1 ]]; then
     fi
 fi
 base_sha=$(tr -d '[:space:]' <"$base_sha_file")
+base_mode=$(stat -c '%a' "$base_image")
+if [[ "$base_mode" != 444 ]]; then
+    echo "[final-eval] cached base image is not read-only (mode=$base_mode): $base_image" >&2
+    exit 1
+fi
 flock -u 9
 
 build_args=(
@@ -249,9 +266,12 @@ if [[ "$group" == buildstorm-probe ]]; then
         ::/a20-probe/cwd-probe
     mcopy -o -i "$run_fat32" "$host_probe_dir/exec-pages-probe" \
         ::/a20-probe/exec-pages-probe
+    mcopy -o -i "$run_fat32" "$host_probe_dir/shebang-probe" \
+        ::/a20-probe/shebang-probe
     mcopy -o -i "$run_fat32" "$host_probe_dir/liba20probe.so" \
         ::/a20-probe/liba20probe.so
-    for probe_name in cwd-probe exec-pages-probe liba20probe.so; do
+    for probe_name in cwd-probe exec-pages-probe shebang-probe \
+        liba20probe.so; do
         if ! mtype -i "$run_fat32" "::/a20-probe/$probe_name" >/dev/null; then
             echo "[final-eval] failed to install $probe_name" >&2
             exit 1
@@ -329,8 +349,13 @@ fi
     echo "contest_mode_present=no"
     echo "official_image_archive=$image_gz"
     echo "official_image_archive_sha256=$image_gz_sha"
+    echo "official_tests_repo=$official_tests_repo"
+    echo "official_tests_commit=$official_tests_commit"
+    echo "official_tests_dirty=$official_tests_dirty"
     echo "official_image_base=$base_image"
     echo "official_image_sha256=$base_sha"
+    echo "official_image_base_mode=$base_mode"
+    echo "official_image_base_readonly=yes"
     echo "official_image_overlay=$overlay"
     echo "runtime_work_dir=$run_dir"
     echo "qemu_memory=8G"
@@ -342,6 +367,7 @@ fi
         echo "probe_case=${probe_case:-all}"
         echo "probe_cwd_sha256=$(sha256sum "$host_probe_dir/cwd-probe" | awk '{print $1}')"
         echo "probe_exec_pages_sha256=$(sha256sum "$host_probe_dir/exec-pages-probe" | awk '{print $1}')"
+        echo "probe_shebang_exec_sha256=$(sha256sum "$host_probe_dir/shebang-probe" | awk '{print $1}')"
         echo "probe_dso_sha256=$(sha256sum "$host_probe_dir/liba20probe.so" | awk '{print $1}')"
         echo "probe_process_models=static-elf,single-process,cargo-j1,cargo-default"
     fi
@@ -404,6 +430,35 @@ else
     judge_status=0
 fi
 set -e
+
+probe_phase=
+if [[ "$group" == buildstorm-probe ]]; then
+    # Phase 1 means the guest reached probe selection; phase 2 means the
+    # selected case actually started inside the official rootfs chroot.
+    probe_phase=1
+    if grep -q '^#### BUILDSTORM PROBE START ' "$serial_log"; then
+        probe_phase=2
+    fi
+fi
+
+if [[ "$group" == buildstorm-probe && \
+      "$probe_case" == stage6-precompiled-helper ]]; then
+    sed -nE \
+        's/^STAGE6_META ([a-z0-9_]+=[^[:space:]]+)$/\1/p' \
+        "$serial_log" >>"$metadata"
+    echo "tg_xtask_build_host_log=$probe_artifacts/stage6-precompiled-helper.log" \
+        >>"$metadata"
+fi
+
+if [[ "$group" == buildstorm-probe && \
+      "$probe_case" == stage7-full-* ]]; then
+    sed -nE \
+        's/^STAGE7_META ([a-z0-9_]+=[^[:space:]]+)$/\1/p' \
+        "$serial_log" >>"$metadata"
+    echo "stage7_build_host_log=$probe_artifacts/${probe_case}.log" \
+        >>"$metadata"
+fi
+
 if [[ "$group" != buildstorm-probe && "$judge_status" -eq 0 ]]; then
     set +e
     conda run -n "$conda_env" python -m json.tool \
@@ -415,6 +470,8 @@ if [[ "$group" != buildstorm-probe && "$judge_status" -eq 0 ]]; then
     fi
 fi
 
+runner_end_time=$(date --iso-8601=seconds)
+runner_wall_elapsed_s=$(( $(date +%s) - runner_start_epoch ))
 {
     echo "end_time=$end_time"
     echo "qemu_exit_status=$qemu_status"
@@ -422,7 +479,7 @@ fi
     echo "guest_cores=$guest_cores"
     echo "guest_cores_source=$guest_cores_source"
     if [[ "$group" == buildstorm-probe ]]; then
-        echo "probe_phase=1"
+        echo "probe_phase=$probe_phase"
         echo "probe_artifacts=$probe_artifacts"
         echo "probe_results=$probe_artifacts/results.txt"
         echo "judge=not-run"
@@ -434,6 +491,9 @@ fi
     echo "serial_log=$serial_log"
     echo "score_json=$score_json"
     echo "judge_stderr=$judge_stderr"
+    echo "runner_start_time=$runner_start_time"
+    echo "runner_end_time=$runner_end_time"
+    echo "runner_wall_elapsed_s=$runner_wall_elapsed_s"
 } >>"$metadata"
 
 if [[ "$group" != buildstorm-probe && "$judge_status" -ne 0 ]]; then
