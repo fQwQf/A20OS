@@ -20,7 +20,7 @@
 3. 如果改动了现有项的状态或限制，必须同步更新相关平台文档和 [drivers/testing-and-submission.md](testing-and-submission.md) 中的测试矩阵。
 4. 不要只改状态不改说明。新改动不得扩大已知边界，除非文档里已经解释了原因。
 
-QEMU x86_64 与 RISC-V64 GUI 的 VirtIO GPU、键盘和鼠标分别由 `make smoke-qemu-gui-{x86_64,riscv64,aarch64,arm32,loongarch64}` 做行为验证；测试检查非空 scanout，并向客户机注入真实按键事件。修改 driver core、IRQ、DMA、PCI/VirtIO transport、display、input、framebuffer 或 devfs 聚合路径时，该项是必跑回归测试。门禁入口见 [testing/testing-gates.md](../testing/testing-gates.md)。
+QEMU x86_64 与 RISC-V64 GUI 的 VirtIO GPU、键盘和鼠标分别由 `make smoke-qemu-gui-{x86_64,riscv64,aarch64,arm32,loongarch64}` 做行为验证；测试检查非空 scanout，并向客户机注入真实按键事件。修改 driver core、IRQ、DMA、PCI/VirtIO transport、display、input、framebuffer 或 devfs 聚合路径时，该项是必跑回归测试。门禁入口见 [testing/testing-gates.md](../../testing/testing-gates.md)。
 
 ## 核心与公共基础设施
 
@@ -45,13 +45,14 @@ QEMU x86_64 与 RISC-V64 GUI 的 VirtIO GPU、键盘和鼠标分别由 `make smo
 | UART | 不可迁移 | 启动早期串口，模块加载前必须可用 |
 | virtio-blk | 不可迁移 | 根文件系统挂载依赖它，模块自身从该文件系统读取 |
 | virtio-net、virtio-gpu、USB core、PCI bus、virtio-mmio bus | 不可迁移 | 初始化顺序在 `init_kthread`（模块加载点）之前 |
-| NVMe、AHCI、HDA、E1000、virtio-scsi、vmsvga、virtio-gpu | 待框架扩展 | 需要 DMA/PCI BAR/class ops 框架 API |
+| DMA/PCI BAR/class ops 框架 API | 已导出 | `drv_dma_alloc_coherent`/`dma_alloc_coherent_aligned`/`dma_sync_*`、`pci_get_bar_resource`/`pci_enable_and_assign_bars`/`pci_intx_irq`/`pci_class_code`/`pci_bus`、block/net/input/audio/display class 操作（统一核心桥接） |
 | virtio-input 内核探针 | 已迁移 | 内建 `virtio_input_kprobe.c` 已删除；`vinput-probe.drv` 用 drv_env 模块后端复用双驻留共享协议，`smoke-dual-input` 验证与用户态 uinputd 读到同一设备身份 |
-| virtio-input 完整事件投递 | 待框架扩展 | 需要 virtq 进入共享层并作为框架 API |
-| HDA、AHCI、E1000、virtio-scsi、vmsvga、virtio-gpu | 待迁移 | NVMe 已作为 PCI 类模块迁移（模板）；HDA 走 ACPI 编解码器、AHCI 是 VirtualBox 根盘依赖（保持内建）、E1000/vmsvga 仅 VirtualBox 可验证、virtio-scsi 可跟进 |
-| TPM、GMAC、SDIO | 待框架扩展 | TPM 依赖 ACPI 发现；GMAC/SDIO 为单实例轮询 |
+| virtio-input 完整事件投递 | 已迁移 | `vinput.drv` 模块（virtq + IRQ + input class），`/dev/event0` mux 拆分至 `kernel/drivers/input/input_mux.c`，`input_mux_wake` 导出；QEMU 实测事件流 |
+| AHCI、E1000、virtio-scsi、vmsvga、virtio-gpu | 不可迁移/待验证 | AHCI 与 virtio-scsi 是 VirtualBox x86/ARM 根盘依赖（挂载先于模块加载）；E1000/vmsvga 仅 VirtualBox 可验证；virtio-gpu 启动顺序依赖 framebuffer |
+| TPM 2.0 | 已迁移 | `tpm.drv`（x86_64）：`firmware_acpi_tpm2` 导出 + TIS FIFO，无设备优雅失败 |
+| GMAC、SDIO | 板级 | StarFive/LS2K 单实例轮询，需实例锁；无 QEMU 环境可验证（非框架缺口，platform bus 与 probe 机制已就绪） |
 
-迁移细节与顺序见 [kernel-modules.md](kernel-modules.md)。
+迁移细节与顺序见 [kernel-modules.md](../guide/kernel-modules.md)。
 
 ## 设备驱动
 
@@ -71,14 +72,14 @@ QEMU x86_64 与 RISC-V64 GUI 的 VirtIO GPU、键盘和鼠标分别由 `make smo
 | TPM 2.0 (TIS) | x86 安全 | `tpm.drv` 模块：ACPI TPM2 表发现 + TIS FIFO 状态机 + Startup/GetRandom；无 TPM 时 probe 优雅返回 |
 | PS/2 | x86 板级服务 | drvmod 模块（`ps2.drv`，x86_64），初始化 + 双向量 ISR；键盘字符经 `uart_receive_char` 进控制台 |
 | PC Speaker | AUDIO | drvmod 模块（`pc-spkr.drv`，x86_64），动态 `/dev/audioN`；支持 19 Hz–20 kHz 有界 tone/stop ABI，不冒充 PCM |
-| Intel HDA | AUDIO | 架构无关 PCI class 驱动；x86_64 与 LoongArch64 QEMU 已完成 BDL DMA smoke，x86_64 已完成用户态 tone 到 QEMU WAV 验证，RISC-V64 已完成完整 Wayland/FFmpeg/PulseAudio 播放；三个 `run-gui` 目标连接宿主音频；支持 48 kHz 双声道 S16_LE、环形 DMA、stop/drain、完整 remove 和用户态 WAV/raw/tone 播放器 |
+| Intel HDA | AUDIO | 架构无关 PCI class 驱动；x86_64 与 LoongArch64 QEMU 通过 BDL DMA smoke，x86_64 用户态 tone 到 QEMU WAV 验证，RISC-V64 已完成完整 Wayland/FFmpeg/PulseAudio 播放；三个 `run-gui` 目标连接宿主音频；支持 48 kHz 双声道 S16_LE、环形 DMA、stop/drain、完整 remove 和用户态 WAV/raw/tone 播放器 |
 | STM32 SDIO | BLOCK | 统一类 + MCU bridge；板级 bus 仍用名称匹配 |
 | STM32 简单外设 | 允许例外 | 板级轮询轻量 API，不强制统一对象；扩展到多实例/用户 ABI 时必须迁移 |
 | StarFive/LS2K GMAC、DW SDIO | 有条件 | 单实例轮询并依赖外部串行化，SMP/IRQ 化前必须增加实例锁 |
 
 ## VirtualBox 平台
 
-VirtualBox ARM64 源码位于 `kernel/platform/virtualbox-aarch64/`，通过 UEFI ACPI RSDP/MCFG 枚举 PCI。VirtIO-SCSI、E1000、SVGAv3、xHCI HID 已进入统一类模型。平台 GIC disable 已实现；generic timer trap 和 PCI interrupt routing 仍使数据面主要轮询。运行配置见 [VirtualBox ARM64 运行手册](../platforms/virtualbox-aarch64.md) 与 [VirtualBox x86_64 运行手册](../platforms/virtualbox-x86_64.md)，驱动架构见 [VirtualBox 驱动栈](../platforms/virtualbox.md)。
+VirtualBox ARM64 源码位于 `kernel/platform/virtualbox-aarch64/`，通过 UEFI ACPI RSDP/MCFG 枚举 PCI。VirtIO-SCSI、E1000、SVGAv3、xHCI HID 已进入统一类模型。平台 GIC disable 已实现；generic timer trap 和 PCI interrupt routing 仍使数据面主要轮询。运行配置见 [VirtualBox ARM64 运行手册](../../platforms/virtualbox-aarch64.md) 与 [VirtualBox x86_64 运行手册](../../platforms/virtualbox-x86_64.md)，驱动架构见 [VirtualBox 驱动栈](../../platforms/virtualbox.md)。
 
 VirtualBox x86_64 复用 x86_64 平台 PCI、AHCI、VMSVGA、PS/2/E1000/VirtIO 驱动，以 GRUB ISO 启动。
 

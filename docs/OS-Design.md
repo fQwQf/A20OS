@@ -209,7 +209,7 @@ virtio-net 驱动位于 `kernel/drivers/net/virtio_net.c`，每个实例持有 `
 arch_early_init() -> board->early_init() -> driver_core_init()-> board->enumerate_devices() -> driver_probe_all() -> subsystem_init()
 ```
 
-当前驱动包括 virtio-blk、virtio-net、UART、PTY、loop。各驱动私有锁顺序记录在 [docs/drivers/lock-order.md](drivers/lock-order.md)。
+当前驱动包括 virtio-blk、virtio-net、UART、PTY、loop。各驱动私有锁顺序记录在 [docs/drivers/lock-order.md](drivers/guide/lock-order.md)。
 
 ### IPC（`kernel/ipc/`）
 
@@ -254,7 +254,7 @@ Channel 传递 handle 时，接收方权限为 `receiver_rights = sender_rights 
 
 * **Native ABI 完整规范**：[docs/native-abi/00-overview.md](native-abi/00-overview.md)
 * **进程、调度与阻塞协议**：[docs/process-scheduler.md](process-scheduler.md)
-* **驱动锁顺序**：[docs/drivers/lock-order.md](drivers/lock-order.md)
+* **驱动锁顺序**：[docs/drivers/lock-order.md](drivers/guide/lock-order.md)
 * **构建与运行**：[README.md](../README.md)
 * **当前问题与路线图**：[docs/roadmap/a20os-improvement-todo.md](roadmap/a20os-improvement-todo.md)
 * **源码布局**：
