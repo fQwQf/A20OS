@@ -65,6 +65,7 @@ run_case() {
 
     case "$name" in
     stage2-*-100|stage3-*-100|stage4-*|stage5-*|stage6-*) case_timeout=900 ;;
+    stage7-*) case_timeout=28800 ;;
     esac
 
     (( total++ ))
@@ -387,6 +388,177 @@ probe_stage6_precompiled_helper() {
     print "BUILDSTORM_STAGE6_PRECOMPILED_HELPER ok"
 }
 
+stage7_helper_snapshot() {
+    typeset label=$1
+    typeset helper=$2
+    typeset mode=missing
+    typeset bytes=0
+    typeset executable=no
+
+    if [[ -f $helper ]]; then
+        mode=$(/usr/bin/stat -c '%a' "$helper" 2>/dev/null) || return
+        bytes=$(/usr/bin/wc -c <"$helper") || return
+        [[ -x $helper ]] && executable=yes
+    fi
+
+    print "STAGE7_META stage7_helper_${label}_path=$helper"
+    print "STAGE7_META stage7_helper_${label}_mode=$mode"
+    print "STAGE7_META stage7_helper_${label}_bytes=$bytes"
+    print "STAGE7_META stage7_helper_${label}_executable=$executable"
+
+    [[ -f $helper && $bytes -gt 0 && $executable == yes ]]
+}
+
+probe_stage7_full_build() {
+    typeset name=$1
+    typeset worktree=/work/tgoskits
+    typeset helper="$worktree/target/debug/tg-xtask"
+    typeset minibuild=/tmp/minibuild
+    typeset helper_output=
+    typeset compile_output=
+    typeset axarch=
+    typeset axtgt=
+    typeset jobs_label=
+    typeset artifact=
+    typeset artifact_sha=missing
+    typeset t0=
+    typeset t1=
+    typeset helper_elapsed=0
+    typeset compile_elapsed=0
+    typeset bytes=0
+    typeset -i jobs=0
+    typeset -i helper_rc=1
+    typeset -i compile_rc=1
+
+    case "$name" in
+    stage7-full-j1) jobs=1; jobs_label=1 ;;
+    stage7-full-j2) jobs=2; jobs_label=2 ;;
+    stage7-full-j4) jobs=4; jobs_label=4 ;;
+    stage7-full-j8) jobs=8; jobs_label=8 ;;
+    stage7-full-default) jobs=0; jobs_label=default ;;
+    *) return 2 ;;
+    esac
+    case "$arch" in
+    riscv64)
+        axarch=riscv64
+        axtgt=riscv64gc-unknown-linux-musl
+        ;;
+    loongarch64)
+        axarch=loongarch64
+        axtgt=loongarch64-unknown-linux-musl
+        ;;
+    *) return 2 ;;
+    esac
+
+    helper_output="/work/a20-${name}-helper.out"
+    compile_output="/work/a20-${name}-compile.out"
+    print "STAGE7_META stage7_case=$name"
+    print "STAGE7_META stage7_arch=$axarch"
+    print "STAGE7_META stage7_cargo_jobs=$jobs_label"
+    print "STAGE7_META stage7_guest_nproc=$(/usr/bin/nproc)"
+    print "STAGE7_META stage7_compile_command=cargo_xtask_arceos_build"
+
+    unset RUSTC LD_LIBRARY_PATH CARGO_BUILD_JOBS
+    /root/.cargo/bin/rustc --version || return
+    /root/.cargo/bin/cargo --version || return
+    print "BUILDSTORM_TOOLCHAIN ok"
+
+    rm -rf -- "$minibuild" || return
+    /root/.cargo/bin/cargo new --vcs none "$minibuild" || return
+    (cd "$minibuild" && /root/.cargo/bin/cargo build) || return
+    [[ "$("$minibuild/target/debug/minibuild")" == "Hello, world!" ]] || return
+    print "BUILDSTORM_MINIBUILD ok"
+    rm -rf -- "$minibuild" || return
+
+    cd "$worktree" || return
+    stage7_helper_snapshot before "$helper" || return
+    typeset component=
+    for component in .fingerprint deps build; do
+        if [[ -d "$worktree/target/debug/$component" ]]; then
+            print "STAGE7_META stage7_helper_cache_${component#.}=present"
+        else
+            print "STAGE7_META stage7_helper_cache_${component#.}=missing"
+            return 1
+        fi
+    done
+    rm -rf -- "$worktree/target/$axtgt" || return
+    if [[ -e "$worktree/target/$axtgt" ]]; then
+        print "STAGE7_META stage7_target_cleanup=failed"
+        return 1
+    fi
+    print "STAGE7_META stage7_target_cleanup=$worktree/target/$axtgt"
+
+    rm -f -- "$helper_output" "$compile_output" || return
+    t0=$(/usr/bin/cut -d' ' -f1 /proc/uptime 2>/dev/null) || return
+    /root/.cargo/bin/cargo build -p tg-xtask >"$helper_output" 2>&1
+    helper_rc=$?
+    t1=$(/usr/bin/cut -d' ' -f1 /proc/uptime 2>/dev/null) || return
+    helper_elapsed=$(/usr/bin/awk \
+        "BEGIN{printf \"%.2f\", (\"$t1\"+0)-(\"$t0\"+0)}" \
+        2>/dev/null)
+    [[ -n $helper_elapsed ]] || helper_elapsed=0
+    print -- "----- stage7 helper stdout/stderr begin -----"
+    cat "$helper_output"
+    print -- "----- stage7 helper stdout/stderr end -----"
+    print "STAGE7_META stage7_helper_output=$helper_output"
+    print "STAGE7_META stage7_helper_build_rc=$helper_rc"
+    print "STAGE7_META stage7_helper_elapsed_s=$helper_elapsed"
+    (( helper_rc == 0 )) || return $helper_rc
+    stage7_helper_snapshot after "$helper" || return
+
+    t0=$(/usr/bin/cut -d' ' -f1 /proc/uptime 2>/dev/null) || return
+    print "STAGE7_META stage7_compile_start_uptime_s=$t0"
+    if (( jobs > 0 )); then
+        CARGO_BUILD_JOBS=$jobs /usr/bin/timeout 14400 \
+            /root/.cargo/bin/cargo xtask arceos build \
+            -p arceos-helloworld --arch "$axarch" \
+            >"$compile_output" 2>&1
+    else
+        unset CARGO_BUILD_JOBS
+        /usr/bin/timeout 14400 /root/.cargo/bin/cargo xtask arceos build \
+            -p arceos-helloworld --arch "$axarch" \
+            >"$compile_output" 2>&1
+    fi
+    compile_rc=$?
+    t1=$(/usr/bin/cut -d' ' -f1 /proc/uptime 2>/dev/null) || return
+    compile_elapsed=$(/usr/bin/awk \
+        "BEGIN{printf \"%.2f\", (\"$t1\"+0)-(\"$t0\"+0)}" \
+        2>/dev/null)
+    [[ -n $compile_elapsed ]] || compile_elapsed=0
+    print -- "----- stage7 compile stdout/stderr begin -----"
+    cat "$compile_output"
+    print -- "----- stage7 compile stdout/stderr end -----"
+    print "STAGE7_META stage7_compile_output=$compile_output"
+    print "STAGE7_META stage7_compile_rc=$compile_rc"
+    print "STAGE7_META stage7_compile_end_uptime_s=$t1"
+    print "STAGE7_META stage7_compile_elapsed_s=$compile_elapsed"
+
+    /usr/bin/awk "BEGIN{exit !((\"$t1\"+0) >= (\"$t0\"+0))}" || {
+        print "STAGE7_META stage7_uptime_monotonic=no"
+        return 1
+    }
+    print "STAGE7_META stage7_uptime_monotonic=yes"
+
+    artifact=$(find "$worktree/target/$axtgt" -type f \
+        \( -name arceos-helloworld -o -name helloworld \) \
+        2>/dev/null | head -n 1)
+    if [[ -n $artifact && -f $artifact ]]; then
+        bytes=$(/usr/bin/wc -c <"$artifact") || return
+        artifact_sha=$(sha256sum "$artifact" | /usr/bin/awk '{print $1}') || return
+    fi
+    print "STAGE7_META stage7_artifact_path=${artifact:-missing}"
+    print "STAGE7_META stage7_artifact_bytes=$bytes"
+    print "STAGE7_META stage7_artifact_sha256=$artifact_sha"
+
+    if (( compile_rc != 0 || bytes < 500000 )); then
+        print "BUILDSTORM_COMPILE mode=stage7 ok=false rc=$compile_rc elapsed_s=$compile_elapsed cores=$(/usr/bin/nproc) jobs=$jobs_label bytes=$bytes arch=$axarch"
+        return 1
+    fi
+    sync || return
+    print "BUILDSTORM_COMPILE mode=stage7 ok=true elapsed_s=$compile_elapsed cores=$(/usr/bin/nproc) jobs=$jobs_label bytes=$bytes arch=$axarch"
+    print "BUILDSTORM_STAGE7_COMPILE ok"
+}
+
 run_named_case() {
     case "$1" in
     static-elf) probe_static_elf ;;
@@ -411,6 +583,9 @@ run_named_case() {
     stage5-official-minibuild) probe_stage5_official_minibuild ;;
     stage6-ext4-dir-tail) probe_stage6_ext4_dir_tail ;;
     stage6-precompiled-helper) probe_stage6_precompiled_helper ;;
+    stage7-full-j1|stage7-full-j2|stage7-full-j4|stage7-full-j8|stage7-full-default)
+        probe_stage7_full_build "$1"
+        ;;
     *)
         print "[BUILDSTORM-PROBE][FATAL] unknown case: $1"
         return 2

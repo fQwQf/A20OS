@@ -723,7 +723,13 @@ VBOX_AARCH64_LOAD_ADDRESS ?= 0x08080000ULL
 		final-probe-rv-buildstorm-1c final-probe-rv-buildstorm-8c \
 		final-probe-la-buildstorm-1c final-probe-la-buildstorm-8c \
 		final-stage6-rv-ext4-dir-tail final-stage6-la-ext4-dir-tail \
-		final-stage6-rv-helper final-stage6-la-helper
+		final-stage6-rv-helper final-stage6-la-helper \
+		final-stage7-rv-1c-j1 final-stage7-la-1c-j1 \
+		final-stage7-rv-8c-j1 final-stage7-la-8c-j1 \
+		final-stage7-rv-8c-j2 final-stage7-la-8c-j2 \
+		final-stage7-rv-8c-j4 final-stage7-la-8c-j4 \
+		final-stage7-rv-8c-j8 final-stage7-la-8c-j8 \
+		final-stage7-rv-8c-default final-stage7-la-8c-default
 
 FORCE:
 
@@ -4065,3 +4071,39 @@ final-stage6-rv-helper:
 
 final-stage6-la-helper:
 	$(call RUN_FINAL_EVAL,loongarch64,buildstorm-probe,8,stage6-precompiled-helper)
+
+final-stage7-rv-1c-j1:
+	$(call RUN_FINAL_EVAL,riscv64,buildstorm-probe,1,stage7-full-j1,28800)
+
+final-stage7-la-1c-j1:
+	$(call RUN_FINAL_EVAL,loongarch64,buildstorm-probe,1,stage7-full-j1,28800)
+
+final-stage7-rv-8c-j1:
+	$(call RUN_FINAL_EVAL,riscv64,buildstorm-probe,8,stage7-full-j1,28800)
+
+final-stage7-la-8c-j1:
+	$(call RUN_FINAL_EVAL,loongarch64,buildstorm-probe,8,stage7-full-j1,28800)
+
+final-stage7-rv-8c-j2:
+	$(call RUN_FINAL_EVAL,riscv64,buildstorm-probe,8,stage7-full-j2,28800)
+
+final-stage7-la-8c-j2:
+	$(call RUN_FINAL_EVAL,loongarch64,buildstorm-probe,8,stage7-full-j2,28800)
+
+final-stage7-rv-8c-j4:
+	$(call RUN_FINAL_EVAL,riscv64,buildstorm-probe,8,stage7-full-j4,28800)
+
+final-stage7-la-8c-j4:
+	$(call RUN_FINAL_EVAL,loongarch64,buildstorm-probe,8,stage7-full-j4,28800)
+
+final-stage7-rv-8c-j8:
+	$(call RUN_FINAL_EVAL,riscv64,buildstorm-probe,8,stage7-full-j8,28800)
+
+final-stage7-la-8c-j8:
+	$(call RUN_FINAL_EVAL,loongarch64,buildstorm-probe,8,stage7-full-j8,28800)
+
+final-stage7-rv-8c-default:
+	$(call RUN_FINAL_EVAL,riscv64,buildstorm-probe,8,stage7-full-default,3000)
+
+final-stage7-la-8c-default:
+	$(call RUN_FINAL_EVAL,loongarch64,buildstorm-probe,8,stage7-full-default,3000)

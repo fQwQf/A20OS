@@ -76,6 +76,8 @@ fi
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 repo_root=$(cd "$script_dir/.." && pwd -P)
 cd "$repo_root"
+runner_start_time=$(date --iso-8601=seconds)
+runner_start_epoch=$(date +%s)
 
 image_dir=${FINAL_EVAL_IMAGE_DIR:-contest/2026OSImage-Pub}
 state_dir=${FINAL_EVAL_STATE_DIR:-.eval-state/2026}
@@ -444,6 +446,15 @@ if [[ "$group" == buildstorm-probe && \
         >>"$metadata"
 fi
 
+if [[ "$group" == buildstorm-probe && \
+      "$probe_case" == stage7-full-* ]]; then
+    sed -nE \
+        's/^STAGE7_META ([a-z0-9_]+=[^[:space:]]+)$/\1/p' \
+        "$serial_log" >>"$metadata"
+    echo "stage7_build_host_log=$probe_artifacts/${probe_case}.log" \
+        >>"$metadata"
+fi
+
 if [[ "$group" != buildstorm-probe && "$judge_status" -eq 0 ]]; then
     set +e
     conda run -n "$conda_env" python -m json.tool \
@@ -455,6 +466,8 @@ if [[ "$group" != buildstorm-probe && "$judge_status" -eq 0 ]]; then
     fi
 fi
 
+runner_end_time=$(date --iso-8601=seconds)
+runner_wall_elapsed_s=$(( $(date +%s) - runner_start_epoch ))
 {
     echo "end_time=$end_time"
     echo "qemu_exit_status=$qemu_status"
@@ -474,6 +487,9 @@ fi
     echo "serial_log=$serial_log"
     echo "score_json=$score_json"
     echo "judge_stderr=$judge_stderr"
+    echo "runner_start_time=$runner_start_time"
+    echo "runner_end_time=$runner_end_time"
+    echo "runner_wall_elapsed_s=$runner_wall_elapsed_s"
 } >>"$metadata"
 
 if [[ "$group" != buildstorm-probe && "$judge_status" -ne 0 ]]; then
