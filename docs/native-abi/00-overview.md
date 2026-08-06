@@ -4,7 +4,7 @@
 
 ## 设计定位
 
-`abi/linux` 承担 Linux 用户态兼容职责，`abi/native` 面向原生用户态设计，不复制 POSIX 或 Linux syscall 编号。当前用户态主运行时是 Linux ABI 上的 musl 兼容层；Native ABI 在内核侧已实现 109 个 syscall 入口，用户态活跃组件是 `liba20rt`（Native SDK）和 `liba20c`（最小原生 C 库）。
+`abi/linux` 承担 Linux 用户态兼容职责，`abi/native` 面向原生用户态设计，不复制 POSIX 或 Linux syscall 编号。当前用户态主运行时是 Linux ABI 上的 musl 兼容层；Native ABI 在内核侧已实现 111 个 syscall 入口，用户态活跃组件是 `liba20rt`（Native SDK）和 `liba20c`（最小原生 C 库）。
 
 长期布局：
 
@@ -96,7 +96,7 @@ Native ABI syscall 编号按子系统分区：
 0x0000 - 0x00ff  core / abi / system0x0100 - 0x01ff  handle0x0200 - 0x02ff  task / thread0x0300 - 0x03ff  memory0x0400 - 0x04ff  path / filesystem0x0500 - 0x05ff  ipc / event0x0600 - 0x06ff  net0x0700 - 0x07ff  time0x0800 - 0x08ff  security / namespace0x0900 - 0x09ff  debug / trace0x0a00 - 0x0aff  system info / random / power0x0b00 - 0x0bff  sync (futex)0x0c00 - 0x0fff  reserved for future core extensions0x1000 - 0x1fff  experimental, not stable
 ```
 
-稳定 syscall 不允许随意改号。实验 syscall 只能在 `0x1000+` 范围内。完整的 109 个 syscall 编号表见 [handle.md](03-handle.md) §6。
+稳定 syscall 不允许随意改号。实验 syscall 只能在 `0x1000+` 范围内。完整的 111 个 syscall 编号表见 [handle.md](03-handle.md) §6。
 
 ## 文档索引
 
@@ -184,7 +184,7 @@ Native ABI 一旦稳定，需要遵守：
 ## 代码结构
 
 ```text
-kernel/abi/native/DESIGN.md            顶层设计参考syscall_table.c      syscall 分发表syscall_table.def    syscall 编号宏定义（109 条）sys_core.c           Phase 1 syscall 实现（17 个核心 syscall）sys_phase2.c         Phase 2 syscall 实现（扩展 syscall）handle_table.c       Handle table 实现（状态机 + 查找/安装/移除）startup.c            用户态启动协议a20_graceful.c       错误降级处理
+kernel/abi/native/DESIGN.md            顶层设计参考syscall_table.c      syscall 分发表syscall_table.def    syscall 编号宏定义（111 条）sys_core.c           Phase 1 syscall 实现（17 个核心 syscall）sys_phase2.c         Phase 2 syscall 实现（扩展 syscall）handle_table.c       Handle table 实现（状态机 + 查找/安装/移除）startup.c            用户态启动协议a20_graceful.c       错误降级处理
 
 kernel/ipc/a20_channel.c        Channel IPC 实现a20_event.c          Event Queue 实现
 
@@ -211,7 +211,7 @@ Native ABI 不应该：
 
 ## Syscall 完整性
 
-Native ABI 用 109 个 syscall 覆盖 Linux ABI 分发表当前定义的 254 个 syscall。关键统一机制包括：
+Native ABI 用 111 个 syscall 覆盖 Linux ABI 分发表当前定义的 254 个 syscall。关键统一机制包括：
 
 - `handle_set_meta`：一次调用修改 chmod/chown/utimes/truncate 等元数据。
 - `handle_transfer`：统一 splice/sendfile/copy_file_range/tee 的零拷贝语义。
@@ -225,9 +225,9 @@ Native ABI 用 109 个 syscall 覆盖 Linux ABI 分发表当前定义的 254 个
 
 已完成的阶段：
 
-- Phase 0：`liba20rt` 最小运行时（syscall 发射宏、109 个 syscall 编号、多架构 crt0、hello world 测试）。
+- Phase 0：`liba20rt` 最小运行时（syscall 发射宏、111 个 syscall 编号、多架构 crt0、hello world 测试）。
 - Phase 1：`liba20c` 最小 C 库（malloc、fd↔handle 映射、FILE*、errno、基础 POSIX open/read/write/close 包装）。
-- Phase 2：内核侧 109 个 syscall 扩展（task_spawn、thread_create、timer、channel、socket、VMO/VMAR 等）。
+- Phase 2：内核侧 111 个 syscall 扩展（task_spawn、thread_create、timer、channel、socket、VMO/VMAR 等）。
 
 剩余工作：
 
