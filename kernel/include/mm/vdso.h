@@ -14,12 +14,8 @@
 #ifndef _MM_VDSO_H
 #define _MM_VDSO_H
 
-#include "core/types.h"
-
-/* Fixed user virtual addresses (below the initial stack region, which
- * starts 32 pages under USER_STACK_TOP = 0x3FFFF000). */
-#define A20_VDSO_VA   0x3FFC0000UL
-#define A20_VVAR_VA   0x3FFC2000UL
+#include "core/arch.h"
+#include "mm/vdso_layout.h"
 
 /* Shared data page layout; offsets must match vdso.S. */
 typedef struct a20_vvar {
@@ -32,7 +28,7 @@ typedef struct a20_vvar {
     uint64_t rt_base_nsec;   /* realtime anchor: nanoseconds */
 } a20_vvar_t;
 
-#ifdef CONFIG_RISCV64
+#ifdef ARCH_HAS_VDSO
 
 struct mm_struct;
 struct vm_area;
@@ -44,7 +40,7 @@ int      vdso_exec_map(struct mm_struct *mm);
 int      vdso_fork_map(struct mm_struct *child_mm);
 vaddr_t  vdso_auxv_ehdr(void);
 
-#else /* !CONFIG_RISCV64 */
+#else /* !ARCH_HAS_VDSO */
 
 struct mm_struct;
 struct vm_area;

@@ -111,12 +111,8 @@ int64_t sys_munmap(uint64_t addr, size_t len) {
 int64_t sys_mprotect(uint64_t addr, size_t len, int prot) {
     task_t *t = proc_current();
     if (!t || !t->mm) return -EINVAL;
-    uint64_t mm_flags = linux_mm_lock(t);
-    int ret = mm_mprotect_locked(t->mm, addr, len, prot);
-    linux_mm_unlock(t, mm_flags);
-    mm_vma_flush_deferred(t->mm);
-    arch_tlb_flush();
-    return ret;
+    /* The public MM wrapper owns mm->lock and the deferred TLB flush. */
+    return mm_mprotect(t->mm, addr, len, prot);
 }
 
 int64_t sys_msync(uint64_t addr, size_t len, int flags) {
@@ -182,6 +178,7 @@ int64_t sys_madvise(uint64_t addr, size_t len, int advice) {
     }
 
     int64_t ret = 0;
+    int flush_tlb = 0;
     switch (advice) {
     case MADV_NORMAL:
     case MADV_RANDOM:
@@ -236,7 +233,10 @@ int64_t sys_madvise(uint64_t addr, size_t len, int advice) {
                 va += PAGE_SIZE;
             }
         }
-        arch_tlb_flush();
+        /* Remote CPUs may be spinning on mm->lock with interrupts disabled;
+         * a synchronous cross-CPU flush here would wait forever for their
+         * IPI acknowledgements.  Publish it after dropping mm->lock. */
+        flush_tlb = 1;
         break;
 #endif
     case MADV_DONTFORK:
@@ -278,6 +278,8 @@ int64_t sys_madvise(uint64_t addr, size_t len, int advice) {
     }
 out:
     linux_mm_unlock(t, mm_flags);
+    if (flush_tlb)
+        arch_tlb_flush();
     if (ret == 0 && (advice == MADV_POPULATE_READ || advice == MADV_POPULATE_WRITE)) {
         for (uint64_t va = start; va < end; va += PAGE_SIZE) {
             if (handle_demand_fault(t, va) < 0)
@@ -301,12 +303,8 @@ int64_t sys_mremap(uint64_t old_addr, size_t old_size, size_t new_size, int flag
     task_t *t = proc_current();
     if (!t || !t->mm) return -EINVAL;
     vaddr_t out = 0;
-    uint64_t mm_flags = linux_mm_lock(t);
-    int r = mm_mremap_locked(t->mm, old_addr, old_size, new_size, flags,
-                             new_addr, &out);
-    linux_mm_unlock(t, mm_flags);
-    mm_vma_flush_deferred(t->mm);
-    arch_tlb_flush();
+    /* The public MM wrapper owns mm->lock and the deferred TLB flush. */
+    int r = mm_mremap(t->mm, old_addr, old_size, new_size, flags, new_addr, &out);
     return r < 0 ? r : (int64_t)out;
 }
 
