@@ -61,6 +61,11 @@
 - `kernel/include/drivers/dual/virtio_mmio.h` +
   `kernel/include/drivers/dual/virtio_input.h`：virtio-mmio 传输与
   virtio-input 设备协议唯一源码；
+- `kernel/include/drivers/dual/virtq.h`：共享 split-virtqueue 层
+  （单所有者破坏性初始化；全部环结构置于一个 DMA 页内）。
+  实现过程中修正两个真实 spec 缺陷：`QUEUE_READY` 偏移为 0x044
+  （非 0x03c）；DRIVER_OK 必须在队列建立之后（拆分为
+  `vinput_dev_init` + `vinput_driver_ok`）；
 - 内核壳 `kernel/drivers/char/goldfish_rtc_kdrv.c`：boot probe
   （qemu-virt-riscv64 下 `kernel_main` 调用，日志
   `[GRTC] kernel-placement probe: now=<ns>`）；
@@ -72,8 +77,17 @@
 - **首个双态语义一致性验证**：`make smoke-dual-input` 挂
   `virtio-keyboard-device,bus=virtio-mmio-bus.5`，同一共享协议源码
   在两种部署下读出相同设备身份（内核 `[UINPUT] ... name=QEMU Virtio
-  Keyboard`，用户 `UINPUTD: name=QEMU Virtio Keyboard`），两架构
-  内核构建通过；
+  Keyboard`，用户 `UINPUTD: name=QEMU Virtio Keyboard`）；
+- **首个功能态用户驱动**：uinputd 完成设备全权初始化（状态迁移、
+  特性协商）、基于 drv_dma 的事件 virtqueue、IRQ→EventQ 投递，
+  smoke 经 QEMU monitor `sendkey` 注入按键并验证解码出
+  `EV_KEY/KEY_A/press` 真实事件——DMA ops、virtq 层、IRQ 链路全部
+  经真实数据流验证；
+- **DMA 契约修正**：`vmo_phys` 非物化（peek 语义，未触页报 pa=0），
+  drv_dma 用户后端必须先物化再翻译（memset 触页同时提供清零保证），
+  该契约已写入 drv_env.h 注释——否则驱动会把物理页 0 交给设备；
+- **构建修复**：native 构建 stamp 的新旧检查此前不含 `user/svc` 与
+  共享头目录，导致 svc/共享头修改后镜像内二进制陈旧；已修；
 - 构建：riscv64 与 loongarch64 内核均通过；rtcd/uinputd 用户壳以
   `-Ikernel/include` 引入共享头（`NATIVE_RTCD_RECIPE`）。
 
@@ -81,11 +95,16 @@
 
 - 内核壳接入 timekeeping/alarm 子系统是后续工作；接入前必须先解决
   设备所有权（udriver 窗口当前默认 user-owned，见
-  `udriver_mmio_user_owned`），所有权仲裁本身是框架的一部分；
+  `udriver_mmio_user_owned`），所有权仲裁本身是框架的一部分。
+  当前约定（已验证有效）：白名单 `user_owned=1` 的设备内核侧只做
+  只读 probe，破坏性初始化与 virtqueue 归用户壳独占；动态
+  claim/release 仲裁待做；
 - IRQ ops 暂不进 drv_env（线程模型差异是本质的，见上）；
-- DMA ops 已进 drv_env（信任模型）；IOMMU 硬件强制仍是独立工作项，
-  完成后 drv_dma 的语义承诺才能从"内核担保"升级为"硬件强制"；
-- virtio-input 的 virtqueue 事件面（破坏性初始化，单所有者）待所有权
-  仲裁后进入共享层；
+- DMA ops 已进 drv_env（信任模型，物化后翻译）；IOMMU 硬件强制
+  仍是独立工作项（QEMU 10.0 提供 `riscv-iommu-pci`，可作为实现
+  目标），完成后 drv_dma 的语义承诺才能从"内核担保"升级为
+  "硬件强制"；多页连续 DMA 仍需 DMA-heap；
+- virtio-input 事件面已在用户态跑通；内核壳接入 evdev/输入子系统
+  是后续工作；
 - virtio-blk 保持内核数据面 + ubd 用户态 scratch 的现状，不作为双态
   候选（数据面跨边界两次的陷阱，见 03-refactor-plan）。

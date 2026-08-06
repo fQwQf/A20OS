@@ -158,6 +158,10 @@ static inline int drv_dma_alloc(drv_dma_t *out, uint32_t npages)
         a20_hdl_close(vmo);
         return -1;
     }
+    /* Materialize before translation: vmo_phys is non-faulting
+     * (peek) and reports unmaterialized pages as pa=0; touching also
+     * gives the zero-fill guarantee the kernel backend has. */
+    a20_memset((void *)(uintptr_t)va, 0, (uint64_t)npages * DRV_PAGE_SIZE);
     /* Kernel pins and translates the whole buffer (udriver DMA contract). */
     uint64_t paddrs[64];
     uint32_t count = 0;

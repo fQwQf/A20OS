@@ -23,7 +23,8 @@
 #define VMMIO_QUEUE_SEL         0x030u
 #define VMMIO_QUEUE_NUM_MAX     0x034u
 #define VMMIO_QUEUE_NUM         0x038u
-#define VMMIO_QUEUE_READY       0x03cu
+#define VMMIO_QUEUE_PFN         0x040u  /* legacy only */
+#define VMMIO_QUEUE_READY       0x044u
 #define VMMIO_QUEUE_NOTIFY      0x050u
 #define VMMIO_INTR_STATUS       0x060u
 #define VMMIO_INTR_ACK          0x064u
