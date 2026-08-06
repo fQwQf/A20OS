@@ -2,6 +2,8 @@
 #ifndef _A20_SERVICES_IDL_H
 #define _A20_SERVICES_IDL_H
 
+#include "a20_types.h"
+
 #define A20_SERVICES_IDL_VERSION 1u
 #define A20_SVC_CRASH_CODE (42)
 #define RTCD_REQ_TIME (0x54)
@@ -10,5 +12,14 @@
 #define UBD_REQ_READ (0x52)
 #define UBD_REQ_WRITE (0x57)
 #define UBD_REQ_CRASH (0x43)
+
+typedef struct {
+    uint32_t milliseconds;
+} a20_idl_rtcd_alarm_request_t;
+
+typedef struct {
+    uint64_t seconds;
+    uint64_t nanoseconds;
+} a20_idl_rtcd_time_response_t;
 
 #endif

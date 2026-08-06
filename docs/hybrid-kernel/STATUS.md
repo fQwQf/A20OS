@@ -36,7 +36,7 @@
 | 连续 DMA heap | 已实现 | `device_alloc_dma` 预物化连续 VMO，`test_native_contract` 的 `dma` 分区验证连续物理地址与零填充 |
 | 动态设备所有权 | 已实现 | `device_claim/release`，uinputd 两次启动验证自动释放 |
 | IOMMU PCI 发现 | 骨架已实现 | `smoke-iommu-discovery` 识别 QEMU `riscv-iommu-pci`；翻译尚未启用 |
-| 服务协议 IDL 常量层 | 已实现（阶段四起步） | `a20_services.idl` + `tools/a20idl.py` + `make check-a20-idl` |
+| 服务协议 IDL 常量/固定消息层 | 已实现（阶段四起步） | `a20_services.idl` + `tools/a20idl.py`，rtcd payload 已生成；`make check-a20-idl` |
 | Linux pipe 人格层 PoC | 已实现（阶段五起步） | `smoke-native-personality`：channel/EventQ 的 pipe-shaped facade |
 
 ## 正确性状态（SMP）

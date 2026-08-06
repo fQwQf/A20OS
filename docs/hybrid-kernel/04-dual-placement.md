@@ -99,7 +99,8 @@
   当前约定（已验证有效）：白名单 `user_owned=1` 的设备内核侧只做
    只读 probe，破坏性初始化与 virtqueue 归用户壳独占；动态
    `device_claim/release` 已实现并在 `smoke-dual-input` 两次启动中
-   验证自动释放；映射暂未强制要求 claim，以兼容旧 rtcd/ubd；
+   验证自动释放；user-owned 窗口的 MMIO 映射现在强制要求当前任务
+   先 claim，rtcd/ubd/uinputd 已迁移；
 - IRQ ops 暂不进 drv_env（线程模型差异是本质的，见上）；
 - DMA ops 已进 drv_env；连续 DMA heap 已实现为预物化连续 VMO，
   `smoke-native-contract` 的 `dma` 分区验证物理地址连续与零填充；
