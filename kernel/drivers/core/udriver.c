@@ -117,6 +117,73 @@ fail:
     return -1;
 }
 
+/* ---- Device ownership claims (docs/hybrid-kernel/04-dual-placement.md) ----
+ *
+ * A user task may exclusively claim a whitelisted user-owned window.
+ * Claims are per-window, idempotent for the owner, and auto-released
+ * when the owner dies (udriver_task_cleanup).  Kernel-side read-only
+ * probes (e.g. virtio_input_kprobe) do not claim; destructive init
+ * belongs to the claimant.  Mapping is not yet gated on claiming
+ * (rtcd/ubd predate claims); exclusivity is enforced between claimants.
+ */
+#define UDRIVER_CLAIM_MAX 8
+
+static spinlock_t g_udr_lock = SPINLOCK_INIT;
+static int g_window_claim_pid[UDRIVER_CLAIM_MAX]; /* 0 = unclaimed */
+
+static int udriver_window_index(uint64_t phys)
+{
+    for (unsigned i = 0; i < UDRIVER_MMIO_WINDOWS_NR && i < UDRIVER_CLAIM_MAX; i++)
+        if (g_mmio_windows[i].user_owned &&
+            phys >= g_mmio_windows[i].base &&
+            phys < g_mmio_windows[i].base + g_mmio_windows[i].size)
+            return (int)i;
+    return -1;
+}
+
+int udriver_claim(uint64_t phys, int pid)
+{
+    int idx = udriver_window_index(phys);
+    if (idx < 0)
+        return -2; /* not a user-claimable window */
+    uint64_t flags = spin_lock_irqsave(&g_udr_lock);
+    int r = 0;
+    if (g_window_claim_pid[idx] == 0 || g_window_claim_pid[idx] == pid)
+        g_window_claim_pid[idx] = pid;
+    else
+        r = -1; /* claimed by another task */
+    spin_unlock_irqrestore(&g_udr_lock, flags);
+    return r;
+}
+
+int udriver_release(uint64_t phys, int pid)
+{
+    int idx = udriver_window_index(phys);
+    if (idx < 0)
+        return -2;
+    uint64_t flags = spin_lock_irqsave(&g_udr_lock);
+    int r = 0;
+    if (g_window_claim_pid[idx] == pid)
+        g_window_claim_pid[idx] = 0;
+    else
+        r = -1;
+    spin_unlock_irqrestore(&g_udr_lock, flags);
+    return r;
+}
+
+/* Owner pid of the window containing @phys, 0 if unclaimed, -1 if not
+ * a user-claimable window.  For kernel probes and diagnostics. */
+int udriver_claim_owner(uint64_t phys)
+{
+    int idx = udriver_window_index(phys);
+    if (idx < 0)
+        return -1;
+    uint64_t flags = spin_lock_irqsave(&g_udr_lock);
+    int owner = g_window_claim_pid[idx];
+    spin_unlock_irqrestore(&g_udr_lock, flags);
+    return owner;
+}
+
 /* ---- IRQ → event queue delivery ---- */
 
 #define UDRIVER_IRQ_MAX 8
@@ -129,7 +196,6 @@ typedef struct {
     uint8_t          active;
 } udriver_irq_entry_t;
 
-static spinlock_t          g_udr_lock = SPINLOCK_INIT;
 static udriver_irq_entry_t g_udr_irq[UDRIVER_IRQ_MAX];
 
 static int udriver_irq_thunk(int irq, void *priv)
@@ -231,6 +297,9 @@ void udriver_task_cleanup(int pid)
     unsigned n = 0;
 
     uint64_t flags = spin_lock_irqsave(&g_udr_lock);
+    for (unsigned i = 0; i < UDRIVER_CLAIM_MAX; i++)
+        if (g_window_claim_pid[i] == pid)
+            g_window_claim_pid[i] = 0;
     for (unsigned i = 0; i < UDRIVER_IRQ_MAX; i++) {
         if (g_udr_irq[i].active && g_udr_irq[i].owner_pid == pid) {
             g_udr_irq[i].active = 0;
