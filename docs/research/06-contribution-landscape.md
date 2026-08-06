@@ -202,7 +202,7 @@ jsix 证明了 handle-based ABI 在教学内核中的可行性。A20OS 在此基
 **问题描述**：现有的 capability-based 系统（seL4, Zircon）要么过于复杂无法在教学内核中实现，要么缺乏形式化安全保证。教学/竞赛内核需要一个**简单到可实现、但安全到可证明**的 capability 模型。
 
 **A20OS 的回答**：
-- 13 种类型、14 种权限、53 个形式化核心 syscall——保持可证明的核心边界；当前工程实现为 111 个入口
+- 13 种类型、14 种权限、53 个形式化核心 syscall——保持可证明的核心边界；当前工程实现为 112 个入口
 - SOS 操作语义 + 不变式证明——可以在论文中完整呈现
 - 不追求 seL4 级别的机器检验证明——但在逻辑上等价于更简单的不变式证明
 
@@ -293,7 +293,7 @@ jsix 证明了 handle-based ABI 在教学内核中的可行性。A20OS 在此基
 3. 在 send/recv 路径中增加类型 bitmask 检查（09 §2.3）
 4. 提出 5 种委托模式并证明组合安全性（09 §4.4）
 
-**结果**：当前实现为 111 个 syscall、13 种对象类型的 Native ABI，配合独立的 Linux ABI；48 个纸笔定理/引理覆盖 53 个形式化核心 syscall。typed channel、时态控制入口/sweeper、阻塞 IPC、无部分投递与对象级联释放已接入并有 smoke 覆盖，新增 56 个工程 syscall 的形式化覆盖仍待补齐。
+**结果**：当前实现为 112 个 syscall、13 种对象类型的 Native ABI，配合独立的 Linux ABI；48 个纸笔定理/引理覆盖 53 个形式化核心 syscall。typed channel、时态控制入口/sweeper、阻塞 IPC、无部分投递与对象级联释放已接入并有 smoke 覆盖，新增 56 个工程 syscall 的形式化覆盖仍待补齐。
 
 ### 6.3 论文可能的标题候选
 
@@ -337,7 +337,7 @@ jsix 证明了 handle-based ABI 在教学内核中的可行性。A20OS 在此基
 
 ### 7.2 中期（3-6 个月）
 
-1. **形式化覆盖扩展**：把 111 个实现入口中安全相关的新增 syscall 纳入 SOS/error-path 精化；对纯查询/调试入口明确排除理由
+1. **形式化覆盖扩展**：把 112 个实现入口中安全相关的新增 syscall 纳入 SOS/error-path 精化；对纯查询/调试入口明确排除理由
 2. **POSIX shim (liba20posix)**：实现基本兼容层；`fork()` 明确返回 ENOSYS，不以隐式地址空间复制冒充等价语义
 3. **宏基准测试**：运行 spawn-based 的完整应用（cp、ls、httpd 等），不使用依赖 fork 的 `make -j` 作为 shim 已支持的证据
 4. **TLA+ 模型检验**：优先验证 handle table、channel reserve-then-dequeue 与 Park/Wake 活性（§10.1）
