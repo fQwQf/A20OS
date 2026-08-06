@@ -9,9 +9,17 @@
 #define RTCD_REQ_TIME (0x54)
 #define RTCD_REQ_ALARM (0x41)
 #define RTCD_REQ_CRASH (0x43)
+#define RTCD_REPLY_TIME (0x61)
+#define RTCD_REPLY_ALARM (0x62)
 #define UBD_REQ_READ (0x52)
 #define UBD_REQ_WRITE (0x57)
 #define UBD_REQ_CRASH (0x43)
+
+typedef struct {
+    uint16_t version;
+    uint16_t type;
+    uint32_t size;
+} a20_idl_envelope_t;
 
 typedef struct {
     uint32_t milliseconds;

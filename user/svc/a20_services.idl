@@ -1,9 +1,16 @@
 // Shared Native service constants. Version changes require protocol review.
 interface a20_services version 1 {
+  message ENVELOPE {
+    u16 version;
+    u16 type;
+    u32 size;
+  }
   const A20_SVC_CRASH_CODE = 42;
   const RTCD_REQ_TIME = 0x54;
   const RTCD_REQ_ALARM = 0x41;
   const RTCD_REQ_CRASH = 0x43;
+  const RTCD_REPLY_TIME = 0x61;
+  const RTCD_REPLY_ALARM = 0x62;
   const UBD_REQ_READ = 0x52;
   const UBD_REQ_WRITE = 0x57;
   const UBD_REQ_CRASH = 0x43;
