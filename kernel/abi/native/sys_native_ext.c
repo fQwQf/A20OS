@@ -43,7 +43,7 @@ static int64_t a20_ext_prog_id(struct a20_ht_internal *ht, a20_handle_t h,
 
 int64_t sys_a20_ext_prog_load(const a20_syscall_args_t *args)
 {
-    const uint32_t *instr = (const uint32_t *)A20_ARG(0);
+    const bpf_insn_t *instr = (const bpf_insn_t *)A20_ARG(0);
     uint32_t len = (uint32_t)A20_ARG(1);
 
     task_t *cur = proc_current();
