@@ -78,7 +78,7 @@ loongarch64 需要 vDSO 移植（`rdtime.d`/stable counter）、udriver 窗口�
 
 ## 诚实边界
 
-- **网络协议栈**仍在内核（lwIP）；netd 外迁是后续最大单项；
+- **网络协议栈**保持内核态（lwIP，源码 `kernel/external/lwip`）；用户态 netd 外迁尝试已放弃（recv 数据面未通且进程未被拉起），TCP/IP 按主流设计留在内核；
 - **loongarch64**：构建通过，运行时验证未完整执行；
 - **性能数据**全部来自 QEMU TCG 模拟器，真实硬件基准待测；
 - **IOMMU/DMA 安全**：DMA 契约是"内核分配 + pin + 物理地址上报"的信任模型，无硬件 IOMMU 强制。
