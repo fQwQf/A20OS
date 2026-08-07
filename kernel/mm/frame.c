@@ -48,6 +48,50 @@ static void fl_push(pfn_t pfn, int order) {
     pfa.free_lists[order].count++;
 }
 
+/*
+ * Never publish a buddy block that still contains independently referenced
+ * frames.  Huge-page demotion/COW and other split ownership paths can leave
+ * live interior PFNs after the block head reaches zero references.  Putting
+ * the whole block on a free list would let a later allocation overwrite those
+ * live pages.  Split recursively and publish only completely unused pieces.
+ */
+static void fl_push_clean(pfn_t pfn, int order)
+{
+    if (order == 0) {
+        if (pfa.meta[pfn].refcount > 0 ||
+            pfa.meta[pfn].flags == FRAME_F_ALLOC)
+            return;
+        pfa.meta[pfn].flags = FRAME_F_FREE;
+        pfa.meta[pfn].refcount = 0;
+        pfa.meta[pfn].order = 0;
+        pfa.meta[pfn].prev = PFN_NONE;
+        pfa.meta[pfn].next = PFN_NONE;
+        fl_push(pfn, 0);
+        return;
+    }
+
+    int used = 0;
+    for (pfn_t i = pfn; i < pfn + (1u << order); i++) {
+        if (pfa.meta[i].refcount > 0) {
+            used = 1;
+            break;
+        }
+    }
+    if (!used) {
+        pfa.meta[pfn].flags = FRAME_F_FREE;
+        pfa.meta[pfn].refcount = 0;
+        pfa.meta[pfn].order = (uint8_t)order;
+        pfa.meta[pfn].prev = PFN_NONE;
+        pfa.meta[pfn].next = PFN_NONE;
+        fl_push(pfn, order);
+        return;
+    }
+
+    pfn_t half = 1u << (order - 1);
+    fl_push_clean(pfn, order - 1);
+    fl_push_clean(pfn + half, order - 1);
+}
+
 static void fl_remove(pfn_t pfn, int order) {
     frame_meta_t *m = meta_of(pfn);
     if (m->prev != PFN_NONE) {
@@ -190,6 +234,18 @@ static pfn_t pfa_alloc_from_buddy(int order)
     while (o > order) {
         o--;
         pfn_t buddy = blk ^ (1u << o);
+        for (pfn_t i = buddy; i < buddy + (1u << o); i++) {
+            if (pfa.meta[i].flags == FRAME_F_ALLOC ||
+                pfa.meta[i].refcount > 0) {
+                printf("[PFA DIRTY-SPLIT] blk=%lu order=%d buddy=%lu "
+                       "sub=%lu flags=0x%x refcount=%u order_meta=%d cpu=%u\n",
+                       (unsigned long)blk, o, (unsigned long)buddy,
+                       (unsigned long)i, pfa.meta[i].flags,
+                       pfa.meta[i].refcount, (int)pfa.meta[i].order,
+                       cpu_current_id());
+                panic("pfa: dirty split block");
+            }
+        }
         pfa.meta[buddy].flags = FRAME_F_FREE;
         pfa.meta[buddy].refcount = 0;
         pfa.meta[buddy].order = (uint8_t)o;
@@ -300,7 +356,7 @@ void pfa_free(pfn_t pfn, int order) {
         pfa.meta[i].next     = PFN_NONE;
     }
 
-    fl_push(pfn, actual_order);
+    fl_push_clean(pfn, actual_order);
     spin_unlock_irqrestore(&pfa.lock, flags);
 }
 
@@ -363,7 +419,7 @@ void frame_put(pfn_t pfn) {
             pfa.meta[i].prev     = PFN_NONE;
             pfa.meta[i].next     = PFN_NONE;
         }
-        fl_push(pfn, actual_order);
+        fl_push_clean(pfn, actual_order);
         spin_unlock_irqrestore(&pfa.lock, flags);
         return;
     }

@@ -1,6 +1,8 @@
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
+#include <pthread.h>
+#include <sched.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -14,6 +16,71 @@ static int fail(const char *what)
 {
     printf("MM_STRESS: FAIL %s errno=%d\n", what, errno);
     return 1;
+}
+
+#define VMA_RACE_WORKERS 8
+#define VMA_RACE_ROUNDS 256
+
+static volatile int vma_race_ready;
+static volatile int vma_race_start;
+
+static void *vma_deferred_race_worker(void *arg)
+{
+    (void)arg;
+    __atomic_add_fetch(&vma_race_ready, 1, __ATOMIC_RELEASE);
+    while (!__atomic_load_n(&vma_race_start, __ATOMIC_ACQUIRE))
+        sched_yield();
+
+    for (int round = 0; round < VMA_RACE_ROUNDS; round++) {
+        char *mem = mmap(NULL, 3 * 4096, PROT_READ | PROT_WRITE,
+                         MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (mem == MAP_FAILED)
+            return (void *)(intptr_t)1;
+
+        /* Splitting the middle page and restoring the original protection
+         * merges the three adjacent VMAs again.  The discarded split nodes
+         * exercise the per-mm deferred release list. */
+        if (mprotect(mem + 4096, 4096, PROT_READ) < 0 ||
+            mprotect(mem, 3 * 4096, PROT_READ | PROT_WRITE) < 0 ||
+            munmap(mem, 3 * 4096) < 0)
+            return (void *)(intptr_t)1;
+    }
+    return NULL;
+}
+
+static int concurrent_vma_deferred_flush(void)
+{
+    pthread_t workers[VMA_RACE_WORKERS];
+    vma_race_ready = 0;
+    vma_race_start = 0;
+
+    int created = 0;
+    for (; created < VMA_RACE_WORKERS; created++) {
+        int r = pthread_create(&workers[created], NULL,
+                               vma_deferred_race_worker, NULL);
+        if (r != 0) {
+            __atomic_store_n(&vma_race_start, 1, __ATOMIC_RELEASE);
+            for (int i = 0; i < created; i++)
+                pthread_join(workers[i], NULL);
+            errno = r;
+            return fail("vma-race-pthread-create");
+        }
+    }
+
+    while (__atomic_load_n(&vma_race_ready, __ATOMIC_ACQUIRE) !=
+           VMA_RACE_WORKERS)
+        sched_yield();
+    __atomic_store_n(&vma_race_start, 1, __ATOMIC_RELEASE);
+
+    for (int i = 0; i < VMA_RACE_WORKERS; i++) {
+        void *result = NULL;
+        int r = pthread_join(workers[i], &result);
+        if (r != 0 || result != NULL) {
+            errno = r;
+            return fail("vma-race-worker");
+        }
+    }
+    return 0;
 }
 
 static unsigned long read_page_cache_pinned(void)
@@ -101,7 +168,10 @@ static int shared_file_writeback(void)
         unlink(path);
         return fail("shared-munmap");
     }
-    if (read_page_cache_pinned() != base_pins) {
+    unsigned long final_pins = read_page_cache_pinned();
+    if (final_pins != base_pins) {
+        printf("MM_STRESS: shared pins base=%lu final=%lu\n",
+               base_pins, final_pins);
         close(fd);
         unlink(path);
         return fail("shared-pinned-leak");
@@ -1324,9 +1394,21 @@ static int huge_page_mprotect(void)
     return 0;
 }
 
-int main(void)
+int main(int argc, char **argv)
 {
+    if (argc == 2 && strcmp(argv[1], "--vma-race-only") == 0) {
+        printf("MM_VMA_RACE: start workers=%d rounds=%d\n",
+               VMA_RACE_WORKERS, VMA_RACE_ROUNDS);
+        if (concurrent_vma_deferred_flush() != 0)
+            return 1;
+        printf("MM_VMA_RACE: PASS\n");
+        return 0;
+    }
+
     printf("MM_STRESS: start\n");
+    printf("MM_STRESS: vma-deferred-race start\n");
+    if (concurrent_vma_deferred_flush() != 0)
+        return 1;
     printf("MM_STRESS: anon start\n");
     if (anonymous_fault_and_unmap() != 0)
         return 1;

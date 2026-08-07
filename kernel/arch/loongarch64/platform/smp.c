@@ -3,6 +3,7 @@
 #include "core/smp.h"
 #include "core/cpu.h"
 #include "core/defs.h"
+#include "core/panic.h"
 #include "proc/proc.h"
 
 #define IOCSR_IPI_STATUS       0x1000
@@ -14,7 +15,11 @@
 
 #define IPI_BOOT_VECTOR        0
 #define IPI_RESCHEDULE_VECTOR  1
+#define IPI_TLB_FLUSH_VECTOR   2
 #define IPI_RESCHEDULE         (1U << IPI_RESCHEDULE_VECTOR)
+#define IPI_TLB_FLUSH          (1U << IPI_TLB_FLUSH_VECTOR)
+
+extern void loongarch64_ipi_tlb_flush_handler(void);
 static inline uint32_t iocsr_read32(uint32_t reg)
 {
     uint32_t value;
@@ -51,6 +56,21 @@ uint64_t arch_smp_boot_hw_id(void)
     return arch_current_cpu_id();
 }
 
+void loongarch64_remote_tlb_flush(uint64_t addr, uint64_t size)
+{
+#ifdef CONFIG_SMP
+    uint32_t pending = smp_online_cpu_mask();
+    unsigned current = arch_current_cpu_id();
+    if (current < 32)
+        pending &= ~(1U << current);
+    if (pending && smp_remote_tlb_flush(pending, addr, size) < 0)
+        panic("LoongArch remote TLB flush failed");
+#else
+    (void)addr;
+    (void)size;
+#endif
+}
+
 uintptr_t arch_smp_secondary_entry_pa(void)
 {
     extern char _start[];
@@ -71,6 +91,8 @@ void loongarch64_smp_handle_ipi(int from_user)
 
     if (action & IPI_RESCHEDULE)
         proc_sched_handle_reschedule_ipi();
+    if (action & IPI_TLB_FLUSH)
+        loongarch64_ipi_tlb_flush_handler();
     (void)from_user;
 }
 

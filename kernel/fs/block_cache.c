@@ -6,6 +6,35 @@
 static bcache_t *g_bcache_list[8];
 static int g_bcache_count;
 
+/*
+ * Cache entry references are acquired while bc->lock is held, but released
+ * after the caller has finished copying data and therefore outside that
+ * lock.  Both sides must still use atomic operations: a plain ref++ racing
+ * with the final atomic decrement can lose the decrement and permanently pin
+ * the entry.  A sustained parallel workload would eventually pin the whole
+ * page pool and surface the resulting allocation failure as ext4 -EIO.
+ */
+static inline int cache_ref_read(const int *ref)
+{
+    return __atomic_load_n(ref, __ATOMIC_ACQUIRE);
+}
+
+static inline void cache_ref_get(int *ref)
+{
+    __atomic_fetch_add(ref, 1, __ATOMIC_ACQUIRE);
+}
+
+static inline void cache_ref_put(int *ref)
+{
+    int current = __atomic_load_n(ref, __ATOMIC_ACQUIRE);
+    while (current > 0) {
+        if (__atomic_compare_exchange_n(ref, &current, current - 1, 0,
+                                        __ATOMIC_RELEASE,
+                                        __ATOMIC_ACQUIRE))
+            return;
+    }
+}
+
 // 从 LRU 链表中移除一个条目
 static void lru_remove(bcache_entry_t *e) {
     e->prev->next = e->next;
@@ -229,7 +258,7 @@ static bcache_entry_t *bcache_find(bcache_t *bc, uint64_t lba) {
 static bcache_entry_t *bcache_evict(bcache_t *bc) {
     bcache_entry_t *e = bc->lru_tail.prev;  // 从最久未使用的开始
     while (e != &bc->lru_head) {
-        if (e->ref == 0) {  // 只能驱逐引用计数为 0 的块
+        if (cache_ref_read(&e->ref) == 0) {  // 只能驱逐引用计数为 0 的块
             lru_remove(e);
             if (e->valid)
                 bcache_hash_remove(bc, e);
@@ -247,7 +276,7 @@ bcache_entry_t *bcache_get(bcache_t *bc, uint64_t lba) {
     bcache_entry_t *e = bcache_find(bc, lba);
     if (e) {
         // 命中缓存，增加引用计数并移到 LRU 头部
-        e->ref++;
+        cache_ref_get(&e->ref);
         lru_remove(e);
         lru_insert_front(bc, e);
         spin_unlock_irqrestore(&bc->lock, flags);
@@ -308,7 +337,7 @@ bcache_entry_t *bcache_get(bcache_t *bc, uint64_t lba) {
         e->ref = 0;
         e->lba = (uint64_t)-1;
         lru_insert_front(bc, e);
-        dup->ref++;
+        cache_ref_get(&dup->ref);
         lru_remove(dup);
         lru_insert_front(bc, dup);
         spin_unlock_irqrestore(&bc->lock, flags);
@@ -328,8 +357,7 @@ bcache_entry_t *bcache_get(bcache_t *bc, uint64_t lba) {
 // 释放块引用（减少引用计数）
 void bcache_release(bcache_entry_t *e) {
     if (!e) return;
-    if (__atomic_load_n(&e->ref, __ATOMIC_RELAXED) > 0)
-        __atomic_fetch_sub(&e->ref, 1, __ATOMIC_RELEASE);
+    cache_ref_put(&e->ref);
 }
 
 // 标记块为脏（数据已修改，需要写回磁盘）
@@ -437,7 +465,7 @@ static int pcache_flush_page(bcache_t *bc, pcache_entry_t *e) {
 static pcache_entry_t *pcache_evict_locked(bcache_t *bc) {
     pcache_entry_t *e = bc->page_lru_tail.prev;
     while (e != &bc->page_lru_head) {
-        if (e->ref == 0) {
+        if (cache_ref_read(&e->ref) == 0) {
             page_lru_remove(e);
             if (e->valid)
                 pcache_hash_remove(bc, e);
@@ -453,7 +481,7 @@ static pcache_entry_t *pcache_get(bcache_t *bc, uint64_t page_no, int skip_read)
     uint64_t flags = spin_lock_irqsave(&bc->lock);
     pcache_entry_t *e = pcache_find(bc, page_no);
     if (e) {
-        e->ref++;
+        cache_ref_get(&e->ref);
         page_lru_remove(e);
         page_lru_insert_front(bc, e);
         spin_unlock_irqrestore(&bc->lock, flags);
@@ -462,7 +490,31 @@ static pcache_entry_t *pcache_get(bcache_t *bc, uint64_t page_no, int skip_read)
 
     e = pcache_evict_locked(bc);
     if (!e) {
+        size_t valid = 0;
+        size_t dirty = 0;
+        size_t referenced = 0;
+        uint64_t total_refs = 0;
+        int max_refs = 0;
+        for (int i = 0; i < bc->page_pool_size; i++) {
+            pcache_entry_t *page = &bc->page_pool[i];
+            int refs = cache_ref_read(&page->ref);
+            if (page->valid)
+                valid++;
+            if (page->valid && page->dirty)
+                dirty++;
+            if (refs > 0) {
+                referenced++;
+                total_refs += (uint64_t)refs;
+                if (refs > max_refs)
+                    max_refs = refs;
+            }
+        }
         spin_unlock_irqrestore(&bc->lock, flags);
+        printf("[BCACHE] no evictable page page=%lu valid=%lu dirty=%lu "
+               "referenced=%lu total_refs=%lu max_refs=%d\n",
+               (unsigned long)page_no, (unsigned long)valid,
+               (unsigned long)dirty, (unsigned long)referenced,
+               (unsigned long)total_refs, max_refs);
         return NULL;
     }
 
@@ -514,7 +566,7 @@ static pcache_entry_t *pcache_get(bcache_t *bc, uint64_t page_no, int skip_read)
         e->page_no = (uint64_t)-1;
         e->valid = 0;
         page_lru_insert_front(bc, e);
-        dup->ref++;
+        cache_ref_get(&dup->ref);
         page_lru_remove(dup);
         page_lru_insert_front(bc, dup);
         spin_unlock_irqrestore(&bc->lock, flags);
@@ -533,8 +585,7 @@ static pcache_entry_t *pcache_get(bcache_t *bc, uint64_t page_no, int skip_read)
 
 static void pcache_release(pcache_entry_t *e) {
     if (!e) return;
-    if (__atomic_load_n(&e->ref, __ATOMIC_RELAXED) > 0)
-        __atomic_fetch_sub(&e->ref, 1, __ATOMIC_RELEASE);
+    cache_ref_put(&e->ref);
 }
 
 // 读取字节数据（可能跨多个块）

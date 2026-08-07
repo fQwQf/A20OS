@@ -120,10 +120,10 @@ int mm_mprotect_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
 int mm_mprotect(mm_struct_t *mm, vaddr_t addr, size_t len, int prot)
 {
     if (!mm) return -EINVAL;
+    mm_tlb_invalidate_begin(mm);
     uint64_t flags = spin_lock_irqsave(&mm->lock);
     int r = mm_mprotect_locked(mm, addr, len, prot);
     spin_unlock_irqrestore(&mm->lock, flags);
-    mm_vma_flush_deferred(mm);
-    arch_tlb_flush();  // deferred remote flush
+    mm_tlb_invalidate_finish(mm);
     return r;
 }

@@ -156,8 +156,20 @@ void mm_vma_defer(mm_struct_t *mm, vm_area_t *vma)
 void mm_vma_flush_deferred(mm_struct_t *mm)
 {
     if (!mm) return;
+
+    /*
+     * Writers append to deferred_vma while holding mm->lock, but callers must
+     * drop that lock before releasing the backing resources.  Detach the
+     * complete list under the same lock so two threads sharing an mm cannot
+     * both observe and free the same VMA chain.  The detached list is private
+     * to this flusher; potentially sleeping vma_release() work remains outside
+     * the spinlock.
+     */
+    uint64_t flags = spin_lock_irqsave(&mm->lock);
     vm_area_t *v = mm->deferred_vma;
     mm->deferred_vma = NULL;
+    spin_unlock_irqrestore(&mm->lock, flags);
+
     while (v) {
         vm_area_t *next = v->next;
         vma_release(v);
