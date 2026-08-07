@@ -727,6 +727,8 @@ VBOX_AARCH64_LOAD_ADDRESS ?= 0x08080000ULL
 		final-stage6-rv-ext4-dir-tail final-stage6-la-ext4-dir-tail \
 		final-stage6-rv-helper final-stage6-la-helper \
 		final-stage7-rv-shebang final-stage7-la-shebang \
+		final-stage7-rv-rustc-j8 final-stage7-la-rustc-j8 \
+		final-stage7-rv-rustc-llvm-j8 final-stage7-la-rustc-llvm-j8 \
 		final-stage7-rv-1c-j1 final-stage7-la-1c-j1 \
 		final-stage7-rv-8c-j1 final-stage7-la-8c-j1 \
 		final-stage7-rv-8c-j2 final-stage7-la-8c-j2 \
@@ -4018,7 +4020,7 @@ RELEASE_EVAL_TIMEOUT ?=
 define RUN_RELEASE_EVAL
 	RELEASE_EVAL_IMAGE_DIR="$(RELEASE_EVAL_IMAGE_DIR)" \
 	RELEASE_EVAL_STATE_DIR="$(RELEASE_EVAL_STATE_DIR)" \
-	$(if $(strip $(5)),RELEASE_EVAL_TIMEOUT="$(strip $(5))",$(if $(strip $(RELEASE_EVAL_TIMEOUT)),RELEASE_EVAL_TIMEOUT="$(RELEASE_EVAL_TIMEOUT)")) \
+	$(if $(strip $(RELEASE_EVAL_TIMEOUT)),RELEASE_EVAL_TIMEOUT="$(RELEASE_EVAL_TIMEOUT)",$(if $(strip $(5)),RELEASE_EVAL_TIMEOUT="$(strip $(5))")) \
 	bash ./tools/run_release_eval.sh $(1) $(2) $(3) $(4)
 endef
 
@@ -4081,6 +4083,18 @@ final-stage7-rv-shebang:
 
 final-stage7-la-shebang:
 	$(call RUN_RELEASE_EVAL,loongarch64,parallel-build-probe,1,stage7-shebang-exec,900)
+
+final-stage7-rv-rustc-j8:
+	$(call RUN_RELEASE_EVAL,riscv64,parallel-build-probe,8,stage7-rustc-j8,3600)
+
+final-stage7-la-rustc-j8:
+	$(call RUN_RELEASE_EVAL,loongarch64,parallel-build-probe,8,stage7-rustc-j8,3600)
+
+final-stage7-rv-rustc-llvm-j8:
+	$(call RUN_RELEASE_EVAL,riscv64,parallel-build-probe,8,stage7-rustc-llvm-j8,3600)
+
+final-stage7-la-rustc-llvm-j8:
+	$(call RUN_RELEASE_EVAL,loongarch64,parallel-build-probe,8,stage7-rustc-llvm-j8,3600)
 
 final-stage7-rv-1c-j1:
 	$(call RUN_RELEASE_EVAL,riscv64,parallel-build-probe,1,stage7-full-j1,28800)

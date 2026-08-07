@@ -19,6 +19,100 @@
 #ifdef CONFIG_NOMMU
 #endif
 
+enum {
+    MM_TLB_HOLD_FRAME = 1,
+    MM_TLB_HOLD_PAGE = 2,
+};
+
+void mm_tlb_invalidate_begin(mm_struct_t *mm)
+{
+    if (mm)
+        mutex_lock(&mm->tlb_lock);
+}
+
+static int mm_tlb_queue_hold(mm_struct_t *mm, pfn_t frame,
+                             page_cache_page_t *page, uint8_t kind)
+{
+    if (!mm)
+        return -EINVAL;
+    mm_tlb_hold_t *hold = kcalloc_atomic(1, sizeof(*hold));
+    if (!hold)
+        return -ENOMEM;
+
+    hold->frame = frame;
+    hold->page = page;
+    hold->kind = kind;
+
+    if (kind == MM_TLB_HOLD_FRAME) {
+        if (!pfn_valid(frame)) {
+            kfree(hold);
+            return -EINVAL;
+        }
+        frame_get(frame);
+    } else if (kind == MM_TLB_HOLD_PAGE) {
+        if (!page || !page->vnode) {
+            kfree(hold);
+            return -EINVAL;
+        }
+        page_cache_page_t *pinned = page_cache_get(page->vnode,
+                                                    page->index, 0);
+        if (pinned != page) {
+            if (pinned)
+                page_cache_put(pinned);
+            kfree(hold);
+            return -EINVAL;
+        }
+    } else {
+        kfree(hold);
+        return -EINVAL;
+    }
+
+    /* The caller owns mm->lock (or the final mm reference in mm_destroy). */
+    hold->next = mm->tlb_holds;
+    mm->tlb_holds = hold;
+    return 0;
+}
+
+int mm_tlb_hold_frame(mm_struct_t *mm, pfn_t pfn)
+{
+    return mm_tlb_queue_hold(mm, pfn, NULL, MM_TLB_HOLD_FRAME);
+}
+
+int mm_tlb_hold_page(mm_struct_t *mm, page_cache_page_t *page)
+{
+    return mm_tlb_queue_hold(mm, PFN_NONE, page, MM_TLB_HOLD_PAGE);
+}
+
+void mm_tlb_invalidate_finish(mm_struct_t *mm)
+{
+    if (!mm)
+        return;
+
+    /* Publish all preceding PTE clears before any old backing object can be
+     * returned to the page cache or buddy allocator. */
+    arch_tlb_flush();
+
+    uint64_t flags = spin_lock_irqsave(&mm->lock);
+    mm_tlb_hold_t *hold = mm->tlb_holds;
+    mm->tlb_holds = NULL;
+    spin_unlock_irqrestore(&mm->lock, flags);
+
+    while (hold) {
+        mm_tlb_hold_t *next = hold->next;
+        if (hold->kind == MM_TLB_HOLD_FRAME)
+            frame_put(hold->frame);
+        else if (hold->kind == MM_TLB_HOLD_PAGE)
+            page_cache_put(hold->page);
+        kfree(hold);
+        hold = next;
+    }
+
+    /* VMA release may drop the final VMO or page-cache owner and therefore
+     * belongs after the same shootdown boundary. */
+    mm_vma_flush_deferred(mm);
+    mutex_unlock(&mm->tlb_lock);
+}
+
 /*
  * MM_VMA_PTE_AUDIT:
  * - VMA write paths live in mm_mmap(), mm_mmap_file(), mm_munmap(),
@@ -48,6 +142,8 @@ int mm_demote_huge_page(mm_struct_t *mm, vaddr_t addr) {
     pte_t flags = arch_pte_flags(*pte);
     pfn_t old_pfn = phys_to_pfn(old_pa);
     if (!pfn_valid(old_pfn))
+        return -ENOMEM;
+    if (mm_tlb_hold_frame(mm, old_pfn) < 0)
         return -ENOMEM;
 
     pfn_t pages[PMD_PAGE_COUNT];
@@ -162,6 +258,8 @@ mm_struct_t *mm_create(void) {
     mm->def_flags  = 0;
     spin_init(&mm->lock);
     spin_set_debug(&mm->lock, "mm", mm);
+    mutex_init(&mm->tlb_lock);
+    mm->tlb_holds = NULL;
     refcount_set(&mm->refcount, 1);
     ktrace_mm("[MMDBG] mm=%p lock=%p\n", (void *)mm, (void *)&mm->lock);
     return mm;
@@ -179,6 +277,12 @@ mm_struct_t *mm_get(mm_struct_t *mm) {
 void mm_destroy(mm_struct_t *mm) {
     if (!mm) return;
     if (!refcount_dec_and_test(&mm->refcount)) return;
+
+    /* No task owns the final mm reference, but remote CPUs can still retain
+     * translations from an earlier timeslice.  Clear those before the direct
+     * free_vma_pages() drops ordinary leaf references. */
+    mm_tlb_invalidate_begin(mm);
+    arch_tlb_flush();
 
     // 释放所有 VMA 及其物理页面
     mm_vma_flush_deferred(mm);
@@ -201,11 +305,9 @@ void mm_destroy(mm_struct_t *mm) {
     mm->num_nommu_allocs = 0;
 #endif
 
+    /* Drain any huge-page demotion holds before page-table frames are freed. */
+    mm_tlb_invalidate_finish(mm);
     if (mm->pgdir) pt_destroy_user(mm->pgdir);
-    /* Frames are back in the buddy; flush every CPU's stale translations
-     * (including remote harts) so a reused frame cannot be reached through a
-     * residual TLB entry from this address space. */
-    arch_tlb_flush();
     kfree(mm);
 }
 
@@ -294,6 +396,8 @@ mm_struct_t *mm_fork(mm_struct_t *parent) {
     *child = *parent;
     spin_init(&child->lock);
     spin_set_debug(&child->lock, "mm", child);
+    mutex_init(&child->tlb_lock);
+    child->tlb_holds = NULL;
     refcount_set(&child->refcount, 1);
     child->rss = 0;
     child->total_vm = 0;

@@ -405,32 +405,58 @@ void kfree(void *ptr) {
         panic("kfree: invalid pointer");
     }
 
+    int idx = sp->cache_idx;
+    slab_cache_t *c = &caches[idx];
+    uint64_t irq_flags = spin_lock_irqsave(&c->lock);
+
+    /*
+     * Every check that participates in the free-list/bitmap state machine must
+     * happen under the cache lock.  In particular, checking alloc_bits before
+     * taking the lock lets two CPUs freeing the same object both observe the
+     * bit set.  They then insert the object twice (normally as a self-loop),
+     * and the corruption is only detected by a later kmalloc().
+     *
+     * Revalidate the page as well: the initial validation above is needed to
+     * select the cache lock, but a stale duplicate free can race the final
+     * release of an otherwise empty slab.
+     */
+    if (!slab_page_valid(sp) || sp->cache_idx != idx) {
+        uint8_t actual_idx = sp->cache_idx;
+        spin_unlock_irqrestore(&c->lock, irq_flags);
+        printf("[SLAB BUG] kfree(%p): stale slab page sp=%p cache_idx=%u expected=%d ra=0x%lx\n",
+               ptr, (void *)sp, actual_idx, idx, (unsigned long)caller_ra);
+        panic("kfree: stale slab page");
+    }
     if (offset < SLAB_HDR_SIZE) {
+        uint8_t cache_idx = sp->cache_idx;
+        spin_unlock_irqrestore(&c->lock, irq_flags);
         printf("[SLAB BUG] kfree(%p): pointer points into slab header sp=%p offset=%lu cache_idx=%u ra=0x%lx\n",
-               ptr, (void *)sp, (unsigned long)offset, sp->cache_idx, (unsigned long)caller_ra);
+               ptr, (void *)sp, (unsigned long)offset, cache_idx, (unsigned long)caller_ra);
         panic("kfree: pointer inside slab header");
     }
 
     /* sanity check: ptr must be aligned to obj_size and within the page */
-    size_t obj_size = slab_sizes[sp->cache_idx];
+    size_t obj_size = slab_sizes[idx];
     if ((offset - SLAB_HDR_SIZE) % obj_size != 0 || offset >= PAGE_SIZE) {
-        printf("[SLAB BUG] kfree(%p) bad offset=%lu sp=%p cache_idx=%u obj_size=%lu\n",
-               ptr, (unsigned long)offset, (void *)sp, sp->cache_idx, (unsigned long)obj_size);
+        uint8_t cache_idx = sp->cache_idx;
+        spin_unlock_irqrestore(&c->lock, irq_flags);
+        printf("[SLAB BUG] kfree(%p) bad offset=%lu sp=%p cache_idx=%u obj_size=%lu ra=0x%lx\n",
+               ptr, (unsigned long)offset, (void *)sp, cache_idx,
+               (unsigned long)obj_size, (unsigned long)caller_ra);
         panic("kfree: corrupted slab pointer");
     }
     uint16_t obj_idx = (uint16_t)((offset - SLAB_HDR_SIZE) / obj_size);
     if (!slab_bit_test(sp, obj_idx)) {
+        uint8_t cache_idx = sp->cache_idx;
+        uint8_t state = sp->state;
+        spin_unlock_irqrestore(&c->lock, irq_flags);
         printf("[SLAB BUG] kfree(%p): object not allocated sp=%p cache_idx=%u obj_idx=%u state=%u ra=0x%lx\n",
-               ptr, (void *)sp, sp->cache_idx, (unsigned)obj_idx,
-               (unsigned)sp->state, (unsigned long)caller_ra);
+               ptr, (void *)sp, cache_idx, (unsigned)obj_idx,
+               (unsigned)state, (unsigned long)caller_ra);
         panic("kfree: stale or double free");
     }
 
     // slab_validate_sp(sp, "kfree-pre", obj_size);
-
-    int idx = sp->cache_idx;
-    slab_cache_t *c = &caches[idx];
-    uint64_t irq_flags = spin_lock_irqsave(&c->lock);
 
     // 将对象放回空闲链表（必须在锁内，防止并发 kfree 破坏链表）
     slab_bit_clear(sp, obj_idx);
