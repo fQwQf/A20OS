@@ -22,6 +22,7 @@ static void wait_queue_entry_clear(wait_queue_entry_t *entry)
     entry->wait_seq = 0;
     entry->flags = 0;
     entry->key = 0;
+    entry->priv = NULL;
     entry->linked = false;
 }
 
@@ -51,6 +52,31 @@ bool wait_queue_link(wait_queue_t *q, wait_queue_entry_t *entry,
     entry->linked = true;
     proc_lifetime_note_wait_add();
     spin_unlock_irqrestore(&q->lock, flags);
+    return true;
+}
+
+bool wait_queue_link_locked(wait_queue_t *q, wait_queue_entry_t *entry,
+                            proc_wait_token_t token, uintptr_t key) {
+    if (!q || !entry || !token.task || !token.seq)
+        return false;
+    task_t *task = proc_get(token.task);
+    if (!task)
+        return false;
+    if (entry->linked) {
+        proc_put(task);
+        return false;
+    }
+    entry->task = task;
+    entry->wait_seq = token.seq;
+    entry->flags = 0;
+    entry->key = key;
+    entry->next = q->head;
+    entry->prev = NULL;
+    if (q->head)
+        q->head->prev = entry;
+    q->head = entry;
+    entry->linked = true;
+    proc_lifetime_note_wait_add();
     return true;
 }
 
@@ -190,6 +216,168 @@ unsigned wait_queue_collect_all(wait_queue_t *q, uintptr_t key,
     if (complete)
         *complete = drained;
     return collected;
+}
+
+unsigned wait_queue_collect_matching(wait_queue_t *q,
+                                     wait_queue_match_fn match, void *arg,
+                                     unsigned limit,
+                                     proc_wake_reason_t reason,
+                                     proc_wake_q_t *wake_q,
+                                     bool *complete)
+{
+    if (complete)
+        *complete = false;
+    if (!q || !wake_q || !match || limit == 0)
+        return 0;
+
+    unsigned collected = 0;
+    bool drained = true;
+    uint64_t flags = spin_lock_irqsave(&q->lock);
+    wait_queue_entry_t *entry = q->head;
+    while (entry) {
+        wait_queue_entry_t *next = entry->next;
+        if (match(entry, arg)) {
+            if (!proc_wake_q_add(wake_q, entry->task, entry->wait_seq,
+                                 reason)) {
+                drained = false;
+                break;
+            }
+            proc_lifetime_note_wait_to_wake();
+            wait_queue_detach_locked(q, entry);
+            collected++;
+            if (collected >= limit) {
+                drained = false;
+                break;
+            }
+        }
+        entry = next;
+    }
+    spin_unlock_irqrestore(&q->lock, flags);
+    if (complete)
+        *complete = drained;
+    return collected;
+}
+
+unsigned wait_queue_requeue_matching(wait_queue_t *q_from, wait_queue_t *q_to,
+                                     wait_queue_match_fn match, void *arg,
+                                     unsigned limit,
+                                     wait_queue_rekey_fn rekey,
+                                     void *rekey_arg)
+{
+    if (!q_from || !q_to || !match || limit == 0)
+        return 0;
+
+    if (q_from == q_to) {
+        unsigned n = 0;
+        uint64_t flags = spin_lock_irqsave(&q_from->lock);
+        for (wait_queue_entry_t *entry = q_from->head;
+             entry && n < limit; entry = entry->next) {
+            if (match(entry, arg))
+                n++;
+        }
+        spin_unlock_irqrestore(&q_from->lock, flags);
+        return n;
+    }
+
+    /*
+     * Take both queue locks in address order (the queues live in one array
+     * in the futex case) so a pair of REQUEUEs cannot deadlock; the caller
+     * guarantees both queues are already the same hash family.
+     */
+    wait_queue_t *first = q_from < q_to ? q_from : q_to;
+    wait_queue_t *second = q_from < q_to ? q_to : q_from;
+
+    wait_queue_entry_t *moved[PROC_WAKE_Q_CAPACITY];
+    unsigned n = 0;
+
+    uint64_t f1 = spin_lock_irqsave(&first->lock);
+    uint64_t f2 = spin_lock_irqsave(&second->lock);
+
+    wait_queue_entry_t **pp = &q_from->head;
+    while (*pp && n < limit) {
+        wait_queue_entry_t *entry = *pp;
+        if (!match(entry, arg)) {
+            pp = &entry->next;
+            continue;
+        }
+        *pp = entry->next;
+        if (entry->next)
+            entry->next->prev = entry->prev;
+        moved[n++] = entry;
+    }
+
+    for (unsigned i = 0; i < n; i++) {
+        wait_queue_entry_t *entry = moved[i];
+        if (rekey)
+            rekey(entry, rekey_arg);
+        entry->prev = NULL;
+        entry->next = q_to->head;
+        if (q_to->head)
+            q_to->head->prev = entry;
+        q_to->head = entry;
+    }
+
+    spin_unlock_irqrestore(&second->lock, f2);
+    spin_unlock_irqrestore(&first->lock, f1);
+    return n;
+}
+
+unsigned wait_queue_purge_task(wait_queue_t *q, struct task_t *task)
+{
+    if (!q || !task)
+        return 0;
+
+    task_t *removed[PROC_WAKE_Q_CAPACITY];
+    unsigned n = 0;
+
+    uint64_t flags = spin_lock_irqsave(&q->lock);
+    wait_queue_entry_t **pp = &q->head;
+    while (*pp) {
+        wait_queue_entry_t *entry = *pp;
+        if (entry->task != task) {
+            pp = &entry->next;
+            continue;
+        }
+        removed[n] = entry->task;
+        *pp = entry->next;
+        if (entry->next)
+            entry->next->prev = entry->prev;
+        wait_queue_entry_clear(entry);
+        proc_lifetime_note_wait_remove();
+        n++;
+        if (n >= PROC_WAKE_Q_CAPACITY)
+            break;
+    }
+    spin_unlock_irqrestore(&q->lock, flags);
+
+    for (unsigned i = 0; i < n; i++)
+        proc_put(removed[i]);
+    return n;
+}
+
+unsigned wait_queue_purge_task_locked(wait_queue_t *q, struct task_t *task)
+{
+    if (!q || !task)
+        return 0;
+
+    unsigned n = 0;
+    wait_queue_entry_t **pp = &q->head;
+    while (*pp) {
+        wait_queue_entry_t *entry = *pp;
+        if (entry->task != task) {
+            pp = &entry->next;
+            continue;
+        }
+        *pp = entry->next;
+        if (entry->next)
+            entry->next->prev = entry->prev;
+        task_t *t = entry->task;
+        wait_queue_entry_clear(entry);
+        proc_lifetime_note_wait_remove();
+        proc_put(t);
+        n++;
+    }
+    return n;
 }
 
 void mutex_init(mutex_t *m) {
