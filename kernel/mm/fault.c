@@ -12,6 +12,7 @@
 #include "core/consts.h"
 #include "core/defs.h"
 #include "core/lock.h"
+#include "core/panic.h"
 #include "core/string.h"
 #include "cg/cgroup.h"
 #include "mm/swap.h"
@@ -77,12 +78,16 @@ int mm_shared_file_fault(mm_struct_t *mm, vm_area_t *vma, uint64_t page_va,
     return 0;
 }
 
-static int handle_cow_fault_locked(task_t *t, uint64_t stval) {
+static int handle_cow_fault_locked(task_t *t, uint64_t stval,
+                                   pfn_t *old_pfn_out) {
 #ifdef CONFIG_NOMMU
     (void)t;
     (void)stval;
+    (void)old_pfn_out;
     return -1;
 #else
+    if (old_pfn_out)
+        *old_pfn_out = PFN_NONE;
     if (!t->mm || !t->mm->pgdir) return -1;
 
     vaddr_t leaf_base = 0;
@@ -111,13 +116,10 @@ static int handle_cow_fault_locked(task_t *t, uint64_t stval) {
         uint16_t rc = pfa.meta[old_pfn].refcount;
         if (rc == 0) {
             spin_unlock_irqrestore(&pfa.lock, pfa_flags);
-            new_pfn = pfa_alloc(order);
-            if (new_pfn == PFN_NONE)
-                return -1;
-            memset(pfn_to_virt(new_pfn), 0, leaf_size);
-            *pte = arch_pte_leaf(pfn_to_phys(new_pfn), flags);
-            arch_tlb_flush_page_local(stval);
-            return 0;
+            printf("[COW ZERO-REF] pid=%d va=0x%lx pfn=%lu order=%d\n",
+                   t->pid, (unsigned long)stval, (unsigned long)old_pfn,
+                   order);
+            panic("COW leaf references a free frame");
         }
         if (rc > 1) {
             spin_unlock_irqrestore(&pfa.lock, pfa_flags);
@@ -138,7 +140,11 @@ static int handle_cow_fault_locked(task_t *t, uint64_t stval) {
             *pte = arch_pte_leaf(pfn_to_phys(new_pfn), flags);
             arch_tlb_flush_page_local(stval);
 
-            frame_put(old_pfn);
+            /* Release only after the wrapper has completed the remote TLB
+             * shootdown.  Otherwise a stale translation can write into this
+             * frame after the buddy has already reused it. */
+            if (old_pfn_out)
+                *old_pfn_out = old_pfn;
             return 0;
         } else {
             *pte = arch_pte_leaf(old_pa, flags);
@@ -521,8 +527,6 @@ static int handle_file_fault(task_t *t, uint64_t page_va, int file_fd,
     }
     spin_unlock(&mm->lock);
 
-    if (result == 0)
-        arch_tlb_flush_page(page_va);  /* remote publish once lock is dropped */
     if (candidate != PFN_NONE && !shared)
         frame_put(candidate);
     if (pcp)
@@ -537,14 +541,19 @@ static int handle_file_fault(task_t *t, uint64_t page_va, int file_fd,
 int handle_cow_fault(task_t *t, uint64_t stval)
 {
 #ifdef CONFIG_NOMMU
-    return handle_cow_fault_locked(t, stval);
+    return handle_cow_fault_locked(t, stval, NULL);
 #else
     if (!t || !t->mm)
         return -1;
     mm_struct_t *mm = t->mm;
+    pfn_t old_pfn = PFN_NONE;
     spin_lock(&mm->lock);
-    int r = handle_cow_fault_locked(t, stval);
+    int r = handle_cow_fault_locked(t, stval, &old_pfn);
     spin_unlock(&mm->lock);
+    if (r == 0)
+        arch_tlb_flush_page(stval);
+    if (old_pfn != PFN_NONE)
+        frame_put(old_pfn);
     return r;
 #endif
 }
@@ -644,7 +653,7 @@ int handle_present_page_fault(task_t *t, uint64_t stval,
     if (!allowed)
         return -1;
 
-    arch_tlb_flush();
+    arch_tlb_flush_page_local(stval);
     return 0;
 #endif
 }
