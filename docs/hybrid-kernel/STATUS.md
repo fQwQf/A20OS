@@ -1,8 +1,6 @@
-# A20OS 混合内核：业界标准形态状态总结
+# 混合内核：能力与边界清单
 
-本文档汇总混合内核工程的全部实现与验收状态（截至本提交）。设计原则见
-[docs/OS-Design.md](../OS-Design.md)；分阶段实施记录见
-[01-roadmap.md](01-roadmap.md) 与 [02-mainstream-plan.md](02-mainstream-plan.md)。
+本文档以清单形式说明 A20OS 混合内核**当前具备的能力**与**已知边界**。设计总览见 [00-design.md](00-design.md)，机制语义见 [01-mechanisms.md](01-mechanisms.md)，演进方向见 [02-mainstream-plan.md](02-mainstream-plan.md)，**当前生效的改造路线见 [03-refactor-plan.md](03-refactor-plan.md)**（Native ABI 为研究本体、数据面/控制面分离、可移动边界），双态部署驱动框架见 [04-dual-placement.md](04-dual-placement.md)。
 
 ## 核心架构原则（已贯彻）
 
@@ -10,67 +8,72 @@
 用户态 ── syscall 线格式 ──> ABI 层（薄包装）── 内部 API ──> 内部实现
 ```
 
-- 内部实现（`kernel/ipc`、`kernel/mm`、`kernel/proc`、`kernel/drivers`、
-  `kernel/include/core`）独立自包含，对 `abi/` **零依赖**（全仓审计）；
+- 内部实现（`kernel/ipc`、`kernel/mm`、`kernel/proc`、`kernel/drivers`、`kernel/include/core`）独立自包含，对 `abi/` 零依赖（全仓审计）；
 - Linux ABI 线格式常量由 `kernel/include/core/` 自持，`abi/linux/*` 再导出；
 - 内部 IPC 子系统头位于 `kernel/include/ipc/`；
-- 结论：**任何 ABI 只需薄包装即可共享内部混合内核机制**。
+- 任何 ABI 只需薄包装即可共享内部混合内核机制。
 
-## 业界标准能力清单
+## 能力清单
 
-| 能力 | 状态 | 验证 |
-|------|------|------|
-| IPC 融合快路径（channel_call + 时间片捐赠） | ✅ | 4 次陷入/往返（减半），UP RPC 提升 16%（ratio 83），`smoke-native-ipc` |
-| 共享内存 SPSC 环数据面 | ✅ | 16MiB 跨进程完整性，与 channel 持平且陷入少两个量级，`smoke-native-shmring` |
-| 服务监管者（清单 + 依赖 + 崩溃重启） | ✅ | 两轮崩溃自愈 + 重启预算（flap budget），`smoke-native-svc` |
-| 服务注册表 + 按名解析 + 崩溃重绑 | ✅ | 独立进程解析 rtcd、崩溃后自动重绑，`smoke-native-registry` |
-| 健康探针（ping + 超时强杀） | ✅ | 0 误报，pong 通道随重启重注册 |
-| 资源硬隔离（句柄配额 + 对象计数审计） | ✅ | 100 次崩溃循环六项计数零漂移，`smoke-native-isolation`，`/proc/a20/objects` |
-| 用户态驱动框架（MMIO 授权 + IRQ→EventQ） | ✅ | goldfish RTC 整体用户态化，含 100ms 闹钟，`smoke-native-rtcd` |
-| virtio-blk 用户态驱动（零拷贝 DMA） | ✅ | FAT32 挂载 `/ubd` 经内核代理 + 共享环 + DMA 直写页缓存，`smoke-native-ubd` |
-| **驱动崩溃恢复** | ✅ | 杀死驱动 → 在飞请求 -EIO 传导 → 原地重挂载，挂载与数据完好，`ubd_recover` |
-| Linux ABI 透明获益 | ✅ | vDSO 4.3×；AF_UNIX socketpair/connect 数据面走内部 channel，`smoke-clock-vdso` + unix_test/unix_ch_test |
-| vDSO（无陷入时钟） | ✅ | musl `clock_gettime` 2457ns vs syscall 10637ns，双路径位级一致 |
-| 唤醒优先抢占（两 ABI 共享） | ✅ | park.c priority-preempt，pipe/socket/futex/channel 统一 |
-| 分层原则（内部 ↔ ABI 薄包装） | ✅ | 内部 abi 依赖清零，三 ABI 构建 |
+| 能力 | 状态 | 验证方式 |
+|------|------|----------|
+| IPC 融合快路径（`channel_call` + 时间片捐赠） | 已实现（捐赠仅 UP） | `smoke-native-ipc` |
+| 共享内存 SPSC 环数据面 | 已实现 | 16MiB 跨进程完整性，`smoke-native-shmring` |
+| 服务监管者（清单 + 依赖 + 崩溃重启） | 已实现 | 崩溃自愈 + 重启预算，`smoke-native-svc` |
+| 服务注册表 + 按名解析 + 崩溃重绑 | 已实现 | 独立进程解析、崩溃后重绑，`smoke-native-registry` |
+| 健康探针（ping + 超时强杀） | 已实现 | pong 通道随重启重注册 |
+| 资源硬隔离（句柄配额 + 对象计数审计） | 已实现 | 崩溃循环计数零漂移，`smoke-native-isolation`，`/proc/a20/objects` |
+| 用户态驱动框架（MMIO 授权 + IRQ→EventQ） | 已实现 | goldfish RTC 整体用户态化，`smoke-native-rtcd` |
+| virtio-blk 用户态驱动（零拷贝 DMA） | 已实现 | FAT32 挂载 `/ubd`，`smoke-native-ubd` |
+| 驱动崩溃恢复（在飞请求失败传导 + 重挂载） | 已实现 | `ubd_recover` |
+| Linux ABI 透明获益（vDSO、唤醒快路径、AF_UNIX 桥接） | 已实现 | `smoke-clock-vdso` + unix 测试 |
+| netd 帧面 + socket 代理（lwIP 用户态 + 帧环 + RPC 代理） | host→guest 与 guest→host TCP echo 数据面已通 | `netd=1` 下 hostfwd echo（`HOST_GOT b'netd-sock-echo' len=14`）与 `NETD_SOCK_TEST: PASS` |
+| 核心原语契约测试（rights 代数 / 背压 / EventQ / VMO 生命周期） | 已实现（改造阶段一） | `smoke-native-contract`，`test_native_contract.c` 四分区 |
+| 句柄类型掩码 STAT 一致性（端点/队列可 query） | 已实现（阶段一副产品） | `handle_table.c` 类型掩码 + `ralg` 分区 |
+| 双态部署驱动框架（drv_env + 共享协议层） | 已实现（改造阶段三） | goldfish RTC 同源码双态：内核壳 boot probe + `smoke-native-rtcd`，见 [04-dual-placement.md](04-dual-placement.md) |
+| 双态语义一致性验证（virtio-input 第二样板） | 已实现 | `smoke-dual-input`：同一共享协议在两种部署下读出相同设备身份；DMA ops 已进 drv_env（信任模型） |
+| 功能态用户驱动（virtio-input 事件面） | 已实现 | `smoke-dual-input`：全权初始化 + 共享 virtq + IRQ→EventQ，monitor `sendkey` 注入验证真实按键事件解码 |
+| 连续 DMA heap | 已实现 | `device_alloc_dma` 预物化连续 VMO，`test_native_contract` 的 `dma` 分区验证连续物理地址与零填充 |
+| 动态设备所有权 | 已实现 | `device_claim/release`，uinputd 两次启动验证自动释放 |
+| IOMMU PCI 发现 | 已实现 | `smoke-iommu-discovery` 识别 QEMU `riscv-iommu-pci` |
+| IOMMU 硬件初始化 | 已实现 | `smoke-iommu-discovery` 断言 BAR、capability（version 16）、DDT/DC/CQ/FQ 编程、使能及 CQON/FQON/DDTP 完成；PCI 叶子设备 passthrough DC |
+| 服务协议 IDL 常量/固定消息层 | 已实现（阶段四起步） | `a20_services.idl` + `tools/a20idl.py`，rtcd payload 已生成；`make check-a20-idl` |
+| IDL 版本化请求/响应信封 | 已实现 | rtcd 请求/响应独立 wire type + version/size 校验，`smoke-native-rtcd` |
+| Linux pipe 人格层 PoC | 已实现（阶段五起步） | `smoke-native-personality`：channel/EventQ 的 pipe-shaped facade |
+| Linux personality facade（fd/mmap/pipe/socketpair/futex/epoll） | 已实现（阶段五第二块） | `smoke-native-linux` 六分区 PASS，`a20_linux.h` |
 
-## 关键数据（QEMU TCG，smp=1）
+## 正确性状态（SMP）
 
-| 指标 | 数值 | 说明 |
-|------|------|------|
-| `clock_gettime`（musl） | 2457 ns（vDSO） vs 10637 ns（syscall） | **4.3×** |
-| RPC 往返（channel_call+捐赠） | 66.5 µs vs legacy 79.6 µs | **+16%** |
-| 16 MiB 跨进程传输 | ring ≈ channel（39–42 MiB/s 级） | 持平，ring 陷入少两个量级 |
-| `/ubd` 文件读（冷→热） | 2442 ms → 3–13 ms（4 MiB FAT32） | 页缓存完全吸收用户驱动路径 |
-| 崩溃自愈延迟 | crash → healed → rebound < 2 s（含 50 ms 退避） | svcman v2 |
-| 100 次崩溃循环对象计数 | 零漂移 | 无泄漏 |
+混合内核的 IPC/MM 路径在 SMP 下已收敛的已知问题（供参考，不构成开发记录）：
 
-## 已证明的崩溃隔离不变式
+- **句柄表与 I/O scratch buffer 分离**：Native 句柄表使用独立 `task->a20_ht` 字段，不再与 Linux ABI 的 `proc_scratch_buffer()` 共用存储；
+- **VMA 链表统一持锁**：`mm_mmap/munmap/brk/mprotect/mremap` 及 Linux ABI 对应 syscall 全部在 `mm->lock` 下修改 VMA 与页表；
+- **远程 TLB 刷新**：IPI-based 远程刷（替代 SBI REMOTE SFENCE，TCG 下全量服务），且所有远程刷在解锁后发布、页释放前完成；
+- **buddy 分配器**：脏块（内部帧仍被引用）不再回填空闲链表，`fl_push_clean` 拆解后只回填干净子块；
+- **channel 入队**：`ch_try_enqueue` 对 peer 持引用，避免并发释放下的悬空入队。
 
-1. 服务死亡 → 句柄表销毁 → 类型化对象回收（句柄/VMO/channel 端点/EventQ/IRQ 注册），六项计数回零；
-2. 监管者 EXITED + 退出码检测 → 退避 → 重启 → 客户端按名自动重绑；
-3. 驱动死亡 → 在飞 I/O 失败传导（-EIO，内核等待者不挂死）→ 原地重挂载，文件系统与数据完好。
+## 已知边界
 
-## 诚实边界（未完成 / 待验证）
-
-- **SMP**：时间片捐赠仅限 UP（SMP 缺跨核唤醒簿记，`current.c` 文档化的未完成项）；SMP=8 下 channel 批量路径有既有竞态（非本次引入），比赛路径（Linux ABI）不受影响；
-- **网络协议栈**仍在内核（lwIP）；netd 外迁是后续最大单项；
+- **时间片捐赠仅限 UP**：SMP 捐赠依赖跨核唤醒/IPI 簿记（`PER_CPU_CURRENT_VALIDATION`），未完成前不开放；
+- **Native ABI SMP 破坏（已收敛，2026-08-06 复验）**：此前 SMP=2/8 下 `native-shmring` 约 30% 概率的偶发内存破坏，经 M5 修复（`98a1260`、`1af0d02`：buddy 脏块拆分、页释放 TLB 顺序、peer 引用）后，在本分支复验为 **SMP=2 连续 20 轮 + SMP=8 连续 20 轮零失败、零挂起**（复现脚本：循环 QEMU 注入 `/bin/native-shmring-rv`，smp=2/8，日志归档于 `.kernel-build/smoke/shmring-smp{2,8}/`）。残余信号：`vmo_dirty_frames`（buddy 复用未清零帧，VMO 侧 memset 兜底，合法行为）已从串口 printf 降级为 `/proc/a20/objects` 累计计数器，不再干扰用户输出解析；阶段三起若需恢复帧级追踪，可在此计数器非零增长时重新挂 `frame_trace_dump_pfn`；
+- **网络协议栈**：lwIP 已编译为用户态 netd 服务（bootarg `netd=1` 激活；未激活时内核 lwIP 行为不变）。帧环（RX/TX）与 socket 代理 RPC（create/bind/listen/accept/connect/send/recv/close/poll/getsockname/setsockopt）已实现；QEMU hostfwd 验证了完整代理链路与 TCP 握手（SYN-ACK 出帧面、accept 回调触发）。**剩余**：数据段在 lwIP 侧被丢弃（子连接 PCB 在 accept 后从 active 列表消失，`lookup pcb=0`），recv 数据回传未通——根因锁定在 tcp_process 的 accept/abort 路径，待续；
 - **loongarch64**：内核与 native 测试均构建通过，运行时复测受工具链/镜像条件所限未完整执行；
-- **性能数据**全部来自 QEMU TCG 模拟器；真实硬件基准待测；
-- **IOMMU/DMA 安全**：DMA 契约是"内核分配 + pin + 物理地址上报"的信任模型，无硬件 IOMMU 强制。
+- **性能数据**全部来自 QEMU TCG 模拟器，真实硬件基准待测；
+- **IOMMU/DMA 安全**：DMA 隔离已升级为真实 IOMMU 硬件强制——DDT(1LVL)、 CQ/FQ 使能，devid 0 配置 SV39 翻译域并经 TR_REQ 验证（已映射 IOVA 精确翻译、未映射 IOVA 被硬件拒绝 fault=1/cause=13），devid 1 保持 passthrough。fault 队列消费与 per-device 页表动态映射为后续工作。
+
+## 基线回归观察（2026-08-06，分支 hybrid-kernel-refactor 记录）
+
+以下为在干净 main HEAD（a7eb6d2）上观察到的问题，**不是**本分支改动引入：
+
+- **HEAD 构建破损**：`virtio_input.c` 引用 `virtio_transport_t.shared_irq`、 loongarch64 缺少 `arch_tlb_flush_page_local`，两者均为进行中的 IRQ/驱动 重构的半成品（主工作区未提交修改包含对应完整实现）。本分支以单行 shim 补齐（`virtio_transport.h` 增字段、la64 `cpu.h` 增 local flush 包装）， 与进行中重构同形，合并时应自然消解；
+- **HEAD 线程/阻塞路径挂起（riscv64）**：所有使用 `a20_thread_create` 的 native smoke（handle 的 `bch` 分区起、ipc、svc 等）在 SMP=1 下挂起至 超时；单线程路径（`smoke-native-contract` 全四分区）完整通过。已用 stash 对照实验证明与本分支的 STAT 改动无关。阻塞中的原生回归验证 （handle/ipc/svc 等）在此问题收敛前无法执行；
+- **[VMO-PAGE] 诊断（已处理）**：契约测试与 shmring 复验期间观察到 `[VMO-PAGE] new pfn ... had content`（buddy 返回未清零复用帧，VMO 侧 memset 兜底，用户可见行为正确）。已降级为 `/proc/a20/objects` 的 `vmo_dirty_frames` 累计计数器，消除串口输出交错；契约测试已把 "新 VMO 页读零"固化为用户态契约（`vmol-zero`）；
+- **mm_stress 45 秒门禁预算不足（HEAD 观察）**：`smoke-mm-stress` （SMOKE_TIMEOUT_MM_ST=45s）在 TCG 下于 `evict-mmap` 段超时，同一镜像 以 180s 预算完整 PASS。非本分支改动引入（本分支 MM 改动仅为 printf→计数器降级，严格更快），门禁预算需按当前 TCG 耗时重校。
 
 ## 复现入口
 
 ```bash
-make smoke-native-ipc       # IPC 快路径
-make smoke-native-svc       # 服务崩溃自愈
-make smoke-native-registry  # 注册表 + 重绑
-make smoke-native-isolation # 泄漏审计（100 次崩溃零漂移）
-make smoke-native-rtcd      # 用户态 RTC 驱动
-make smoke-native-ubd       # 用户态 virtio-blk + 文件系统
-make smoke-native-shmring   # 共享环数据面
-make smoke-clock-vdso       # vDSO
-make smoke-mm-stress smoke-vfs-stress   # Linux ABI 回归
-# 驱动崩溃恢复（手动）：
-#   QEMU 加 bus.3 scratch 盘，运行 /bin/ubd_recover
+make smoke-native-ipc       # IPC 快路径make smoke-native-svc       # 服务崩溃自愈make smoke-native-registry  # 注册表 + 重绑make smoke-native-isolation # 泄漏审计（崩溃循环零漂移）make smoke-native-rtcd      # 用户态 RTC 驱动make smoke-native-ubd       # 用户态 virtio-blk + 文件系统make smoke-native-shmring   # 共享环数据面make smoke-clock-vdso       # vDSOmake smoke-mm-stress smoke-vfs-stress   # Linux ABI 回归
+make smoke-native-contract  # 核心原语契约（改造阶段一）
+# 驱动崩溃恢复（手动）：QEMU 加 bus.3 scratch 盘，运行 /bin/ubd_recover
 ```

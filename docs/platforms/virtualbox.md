@@ -7,14 +7,7 @@
 ## ARM64 发现链
 
 ```text
-UEFI BOOTAA64.EFI
- -> loader 传递 ACPI RSDP，装载 kernel at 0x08080000
- -> virtualbox-aarch64 early page tables / PL011 / GICv3
- -> board enumerate: RSDP -> XSDT/RSDT -> MCFG
- -> pci_enumerate(ECAM)
- -> PCI device_register
- -> VirtIO-SCSI / E1000 / VMSVGA / xHCI HID probe
- -> block/net/display/input class consumers
+UEFI BOOTAA64.EFI-> loader 传递 ACPI RSDP，装载 kernel at 0x08080000-> virtualbox-aarch64 early page tables / PL011 / GICv3-> board enumerate: RSDP -> XSDT/RSDT -> MCFG-> pci_enumerate(ECAM)-> PCI device_register-> VirtIO-SCSI / E1000 / VMSVGA / xHCI HID probe-> block/net/display/input class consumers
 ```
 
 平台源码位于 `kernel/platform/virtualbox-aarch64/`。物理 RAM 为 `0x08000000..0x28000000`，kernel entry 为 `0x08080000`；PL011、GICD/GICR 和 PCI windows 在早期页表中映射。ECAM 物理地址由 MCFG 提供，驱动看到的是加 `PAGE_OFFSET` 的内核地址。
@@ -45,7 +38,7 @@ AHCI driver 当前只管理首个可用 SATA port，使用 LBA48、512 字节扇
 3. 新 PCI 驱动使用 `pci_bus`、ID 表和 `pci_get_bar_resource`。
 4. 无可靠 IRQ 时可以先轮询，但 poll 必须有预算，数据面不得无限阻塞；文档记录解除轮询的条件。
 5. 在 ARM64 与 x86_64 都暴露相同硬件协议时，驱动不得包含 `CONFIG_BOARD_VIRTUALBOX_*`，架构差异留给 PCI HAL、DMA 和映射层。
-6. 更新本页设备矩阵、[实现状态](../drivers/implementation-status.md) 和目标平台运行文档。
+6. 更新本页设备矩阵、[实现状态](../drivers/meta/implementation-status.md) 和目标平台运行文档。
 
 ## 平台运行手册
 
@@ -61,15 +54,13 @@ AHCI driver 当前只管理首个可用 SATA port，使用 LBA48、512 字节扇
 ARM64 kernel：
 
 ```sh
-make ARCH=aarch64 BOARD=virtualbox-aarch64 ABI=both kernel-only
-make vbox-image-aarch64
+make ARCH=aarch64 BOARD=virtualbox-aarch64 ABI=both kernel-onlymake vbox-image-aarch64
 ```
 
 x86_64：
 
 ```sh
-make ARCH=x86_64 ABI=both kernel-only
-make vbox-iso-x86_64
+make ARCH=x86_64 ABI=both kernel-onlymake vbox-iso-x86_64
 ```
 
 硬件日志至少应包含 ACPI MCFG/ECAM、目标 PCI ID、BAR、driver ready、对应类消费者（mount/lwIP/framebuffer/input）的成功信息。不能只以桌面出现或 shell 启动作为驱动成功证据，因为兼容设备或恢复路径可能掩盖目标驱动未绑定。

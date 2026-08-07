@@ -109,6 +109,10 @@ void  driver_irq_dispatch(uint32_t irq);
 
 #define IRQF_TRIGGER_RISING  0x01
 #define IRQF_TRIGGER_FALLING 0x02
+/* Both the existing registration and the new request must carry IRQF_SHARED
+ * for a line to accept additional handlers; dispatch invokes every handler
+ * on the line and free_irq() matches priv against primary and shared
+ * handlers alike. */
 #define IRQF_SHARED          0x04
 #define IRQF_NO_AUTO_ENABLE  0x08
 

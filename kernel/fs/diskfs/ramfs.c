@@ -11,6 +11,13 @@
 #define RAMFS_MAX_INODES       4096
 #define RAMFS_MAX_DIR_ENTRIES   256
 
+/* Regular files are stored as a growable array of fixed-size chunks so file
+ * size is bounded only by available memory, not by the largest single
+ * contiguous allocation (the buddy allocator's MAX_ORDER).  Directories,
+ * symlinks and FIFOs stay in the small contiguous `data` buffer. */
+#define RAMFS_CHUNK_SHIFT  12
+#define RAMFS_CHUNK_SIZE   (1UL << RAMFS_CHUNK_SHIFT)
+
 typedef struct ramfs_inode {
     int inum;
     int type;
@@ -19,6 +26,8 @@ typedef struct ramfs_inode {
     size_t size;
     char *data;
     size_t capacity;
+    char **chunks;
+    size_t num_chunks;
     struct ramfs_inode *parent;
     uint32_t mode;
     uint32_t uid;
@@ -47,6 +56,104 @@ static mutex_t g_ramfs_meta_lock = MUTEX_INIT;
 static vnode_ops_t g_ramfs_vnode_ops;
 static vfile_ops_t g_ramfs_fops;
 static vfile_t *ramfs_open_vnode(vnode_t *vn, int flags);
+
+/* Grow the chunk pointer array so at least `needed` bytes are addressable.
+ * The pointer array (not the data) is what gets reallocated, so growth never
+ * needs one large contiguous block. */
+static int ramfs_grow_chunks(ramfs_inode_t *inode, size_t needed)
+{
+    size_t need_nc = (needed + RAMFS_CHUNK_SIZE - 1) >> RAMFS_CHUNK_SHIFT;
+    if (need_nc <= inode->num_chunks)
+        return 0;
+    size_t new_nc = inode->num_chunks ? inode->num_chunks : 1;
+    while (new_nc < need_nc)
+        new_nc <<= 1;
+    char **na = (char **)kmalloc(new_nc * sizeof(char *));
+    if (!na)
+        return -ENOMEM;
+    if (inode->chunks) {
+        memcpy(na, inode->chunks, inode->num_chunks * sizeof(char *));
+        kfree(inode->chunks);
+    }
+    memset(na + inode->num_chunks, 0,
+           (new_nc - inode->num_chunks) * sizeof(char *));
+    inode->chunks = na;
+    inode->num_chunks = new_nc;
+    return 0;
+}
+
+/* Write len bytes at off, allocating chunks on demand.  Holes between
+ * existing chunks and the write are zero-filled. */
+static int ramfs_pwrite(ramfs_inode_t *inode, const char *src,
+                        size_t off, size_t len)
+{
+    while (len > 0) {
+        size_t ci = off >> RAMFS_CHUNK_SHIFT;
+        size_t co = off & (RAMFS_CHUNK_SIZE - 1);
+        size_t n = RAMFS_CHUNK_SIZE - co;
+        if (n > len)
+            n = len;
+        if (!inode->chunks[ci]) {
+            inode->chunks[ci] = (char *)kmalloc(RAMFS_CHUNK_SIZE);
+            if (!inode->chunks[ci])
+                return -ENOMEM;
+            memset(inode->chunks[ci], 0, RAMFS_CHUNK_SIZE);
+        }
+        memcpy(inode->chunks[ci] + co, src, n);
+        src += n;
+        off += n;
+        len -= n;
+    }
+    return 0;
+}
+
+/* Copy len bytes from off into dst; unallocated chunk slots read as zeros. */
+static void ramfs_pread(ramfs_inode_t *inode, char *dst,
+                        size_t off, size_t len)
+{
+    while (len > 0) {
+        size_t ci = off >> RAMFS_CHUNK_SHIFT;
+        size_t co = off & (RAMFS_CHUNK_SIZE - 1);
+        size_t n = RAMFS_CHUNK_SIZE - co;
+        if (n > len)
+            n = len;
+        if (ci < inode->num_chunks && inode->chunks[ci])
+            memcpy(dst, inode->chunks[ci] + co, n);
+        else
+            memset(dst, 0, n);
+        dst += n;
+        off += n;
+        len -= n;
+    }
+}
+
+/* Zero [off, off+len) in an already-grown regular file. */
+static void ramfs_pzero(ramfs_inode_t *inode, size_t off, size_t len)
+{
+    while (len > 0) {
+        size_t ci = off >> RAMFS_CHUNK_SHIFT;
+        size_t co = off & (RAMFS_CHUNK_SIZE - 1);
+        size_t n = RAMFS_CHUNK_SIZE - co;
+        if (n > len)
+            n = len;
+        if (ci < inode->num_chunks && inode->chunks[ci])
+            memset(inode->chunks[ci] + co, 0, n);
+        off += n;
+        len -= n;
+    }
+}
+
+static void ramfs_free_chunks(ramfs_inode_t *inode)
+{
+    if (!inode->chunks)
+        return;
+    for (size_t i = 0; i < inode->num_chunks; i++)
+        if (inode->chunks[i])
+            kfree(inode->chunks[i]);
+    kfree(inode->chunks);
+    inode->chunks = NULL;
+    inode->num_chunks = 0;
+}
 
 static ramfs_inode_t *ramfs_find_inode_by_inum(int inum) {
     for (int i = 0; i < RAMFS_MAX_INODES; i++) {
@@ -81,6 +188,7 @@ static ramfs_inode_t *ramfs_alloc_inode(int type) {
 static void ramfs_free_inode(ramfs_inode_t *inode) {
     if (!inode || inode == &g_inode_table[0])
         return;
+    ramfs_free_chunks(inode);
     if (inode->data)
         kfree(inode->data);
     memset(inode, 0, sizeof(*inode));
@@ -212,12 +320,8 @@ static void ramfs_init_storage(void) {
     ramfs_inode_t *f = ramfs_alloc_inode(FT_REGULAR);
     if (f) {
         f->parent = root;
-        f->capacity = tlen + 64;
-        f->data = kmalloc(f->capacity);
-        if (f->data) {
-            memcpy(f->data, text, tlen);
+        if (ramfs_grow_chunks(f, tlen) == 0 && ramfs_pwrite(f, text, 0, tlen) == 0)
             f->size = tlen;
-        }
         ramfs_add_dir_entry(root, "hello.txt", f->inum);
     }
 
@@ -349,12 +453,12 @@ static int ramfs_vnode_create_locked(vnode_t *dir, const char *name, int mode,
         child->gid = dinode->gid;
 
     child->parent = dinode;
-    child->capacity = 4096;
-    child->data = kmalloc(child->capacity);
-    if (!child->data) {
-        child->ref_count = 0;
-        return -ENOMEM;
-    }
+    /* Regular files allocate chunk storage lazily on first write, so file
+     * size is not limited by the largest single contiguous allocation. */
+    child->capacity = 0;
+    child->data = NULL;
+    child->chunks = NULL;
+    child->num_chunks = 0;
 
     int r = ramfs_add_dir_entry(dinode, name, child->inum);
     if (r < 0) {
@@ -692,7 +796,25 @@ static int ramfs_vnode_truncate(vnode_t *vn, size_t size) {
 
     mutex_lock(&inode->data_lock);
 
-    if (size > inode->capacity) {
+    if (inode->type == FT_REGULAR) {
+        if (size > inode->size) {
+            int r = ramfs_grow_chunks(inode, size);
+            if (r < 0) {
+                mutex_unlock(&inode->data_lock);
+                return r;
+            }
+            ramfs_pzero(inode, inode->size, size - inode->size);
+        } else if (size < inode->size) {
+            size_t keep_nc = (size + RAMFS_CHUNK_SIZE - 1) >>
+                             RAMFS_CHUNK_SHIFT;
+            for (size_t i = keep_nc; i < inode->num_chunks; i++) {
+                if (inode->chunks[i]) {
+                    kfree(inode->chunks[i]);
+                    inode->chunks[i] = NULL;
+                }
+            }
+        }
+    } else if (size > inode->capacity) {
         size_t new_cap = size * 2;
         char *new_data = (char *)kmalloc(new_cap);
         if (!new_data) {
@@ -760,6 +882,13 @@ static int ramfs_vnode_writepage(vnode_t *vn, uint64_t index,
     size_t n = inode->size - (size_t)off;
     if (n > len)
         n = len;
+    if (inode->type == FT_REGULAR) {
+        int r = ramfs_grow_chunks(inode, off + n);
+        if (r == 0)
+            r = ramfs_pwrite(inode, data, off, n);
+        mutex_unlock(&inode->data_lock);
+        return r;
+    }
     if (off + n > inode->capacity) {
         mutex_unlock(&inode->data_lock);
         return -EIO;
@@ -781,15 +910,22 @@ static int ramfs_vnode_readpage(vnode_t *vn, uint64_t index,
     mutex_lock(&inode->data_lock);
     memset(data, 0, len);
     uint64_t off = index * PAGE_SIZE;
-    if (off >= inode->size || off >= inode->capacity || !inode->data) {
+    if (off >= inode->size) {
         mutex_unlock(&inode->data_lock);
         return 0;
     }
     size_t n = inode->size - (size_t)off;
-    if (n > inode->capacity - (size_t)off)
-        n = inode->capacity - (size_t)off;
     if (n > len)
         n = len;
+    if (inode->type == FT_REGULAR) {
+        ramfs_pread(inode, data, off, n);
+        mutex_unlock(&inode->data_lock);
+        return (int)n;
+    }
+    if (off + n > inode->capacity || !inode->data) {
+        mutex_unlock(&inode->data_lock);
+        return (int)n;
+    }
     memcpy(data, inode->data + off, n);
     mutex_unlock(&inode->data_lock);
     return (int)n;
@@ -835,15 +971,19 @@ static int ramfs_fread(vfile_t *vf, char *buf, size_t count) {
     size_t avail = inode->size - vf->offset;
     size_t n = count < avail ? count : avail;
     if (n > 0) {
-        size_t copied = 0;
-        if (vf->offset < inode->capacity && inode->data) {
-            size_t in_mem = inode->capacity - vf->offset;
-            if (in_mem > n) in_mem = n;
-            memcpy(buf, inode->data + vf->offset, in_mem);
-            copied = in_mem;
+        if (inode->type == FT_REGULAR) {
+            ramfs_pread(inode, buf, vf->offset, n);
+        } else {
+            size_t copied = 0;
+            if (vf->offset < inode->capacity && inode->data) {
+                size_t in_mem = inode->capacity - vf->offset;
+                if (in_mem > n) in_mem = n;
+                memcpy(buf, inode->data + vf->offset, in_mem);
+                copied = in_mem;
+            }
+            if (copied < n)
+                memset(buf + copied, 0, n - copied);
         }
-        if (copied < n)
-            memset(buf + copied, 0, n - copied);
         vf->offset += n;
     }
     mutex_unlock(&inode->data_lock);
@@ -857,31 +997,40 @@ static int ramfs_fwrite(vfile_t *vf, const char *buf, size_t count) {
     mutex_lock(&inode->data_lock);
 
     size_t needed = vf->offset + count;
-    if (needed > inode->capacity) {
-        size_t new_cap = needed * 2;
-        char *new_data = (char *)kmalloc(new_cap);
-        if (!new_data) {
-            new_cap = needed;
-            new_data = (char *)kmalloc(new_cap);
+    if (inode->type == FT_REGULAR) {
+        int r = ramfs_grow_chunks(inode, needed);
+        if (r == 0)
+            r = ramfs_pwrite(inode, buf, vf->offset, count);
+        if (r < 0) {
+            mutex_unlock(&inode->data_lock);
+            return r;
+        }
+    } else {
+        if (needed > inode->capacity) {
+            size_t new_cap = needed * 2;
+            char *new_data = (char *)kmalloc(new_cap);
             if (!new_data) {
-                mutex_unlock(&inode->data_lock);
-                return -ENOMEM;
+                new_cap = needed;
+                new_data = (char *)kmalloc(new_cap);
+                if (!new_data) {
+                    mutex_unlock(&inode->data_lock);
+                    return -ENOMEM;
+                }
             }
+            if (inode->data) {
+                size_t copy_len = inode->size < inode->capacity ? inode->size : inode->capacity;
+                if (copy_len > 0) memcpy(new_data, inode->data, copy_len);
+                kfree(inode->data);
+            }
+            size_t zero_start = inode->size < inode->capacity ? inode->size : inode->capacity;
+            if (new_cap > zero_start) {
+                memset(new_data + zero_start, 0, new_cap - zero_start);
+            }
+            inode->data = new_data;
+            inode->capacity = new_cap;
         }
-        if (inode->data) {
-            size_t copy_len = inode->size < inode->capacity ? inode->size : inode->capacity;
-            if (copy_len > 0) memcpy(new_data, inode->data, copy_len);
-            kfree(inode->data);
-        }
-        size_t zero_start = inode->size < inode->capacity ? inode->size : inode->capacity;
-        if (new_cap > zero_start) {
-            memset(new_data + zero_start, 0, new_cap - zero_start);
-        }
-        inode->data = new_data;
-        inode->capacity = new_cap;
+        memcpy(inode->data + vf->offset, buf, count);
     }
-
-    memcpy(inode->data + vf->offset, buf, count);
     vf->offset += count;
     if (vf->offset > inode->size) {
         inode->size = vf->offset;

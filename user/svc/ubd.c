@@ -296,6 +296,10 @@ int main(int argc, char **argv, char **envp)
 #define UBD_LOG(msg) a20_hdl_write_buf(out, msg, sizeof(msg) - 1, (void *)0)
     UBD_LOG("ubd: start\n");
 
+    if (a20_device_claim(UBD_MMIO_BASE) != A20_OK) {
+        UBD_LOG("ubd: claim failed\n");
+        return 2;
+    }
     uint64_t mmio_va = 0;
     if (a20_device_map_mmio(UBD_MMIO_BASE, UBD_MMIO_SIZE, 3, &mmio_va) != A20_OK) {
         UBD_LOG("ubd: mmio map failed\n");

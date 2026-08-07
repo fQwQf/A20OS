@@ -14,6 +14,7 @@
 #include "core/defs.h"
 #include "core/consts.h"
 #include "core/klog.h"
+#include "core/kallsyms.h"
 
 __attribute__((weak)) void arch_dump_trap_ring(void) {}
 
@@ -55,11 +56,15 @@ static void dump_trap_context(trap_context_t *ctx) {
 
 static void dump_kernel_backtrace(trap_context_t *ctx, vaddr_t pc, int max_frames) {
     kerr("  backtrace:\n");
-    kerr("    [%d] pc=0x%lx\n", 0, (unsigned long)pc);
+    kerr("    [%d] pc=", 0);
+    kallsyms_print(pc);
+    kerr("\n");
     struct backtrace_frame frames[16];
     int n = arch_unwind_frames(TRAP_CTX_FP(ctx), frames, max_frames > 16 ? 16 : max_frames);
     for (int i = 0; i < n; i++) {
-        kerr("    [%d] pc=0x%lx\n", i + 1, (unsigned long)frames[i].pc);
+        kerr("    [%d] pc=", i + 1);
+        kallsyms_print(frames[i].pc);
+        kerr("\n");
     }
 }
 
@@ -123,6 +128,33 @@ static void dump_fault_pte(task_t *task, vaddr_t va) {
         for (vm_area_t *v = task->mm->mmap; v && nvma < 10; v = v->next, nvma++)
             kerr("    [%d] [0x%lx,0x%lx)\n", nvma,
                  (unsigned long)v->start, (unsigned long)v->end);
+    }
+    /* Physical-frame overlap diagnosis: dump the frame of the faulting VA
+     * (and the stack frame) next to every VM_VMO mapping's frames.  If a
+     * user stack frame collides with a VMO frame, ring writes are corrupting
+     * the stack. */
+    {
+        mm_leaf_info_t leaf;
+        if (mm_query_leaf(task->mm->pgdir, va & ~(PAGE_SIZE - 1), &leaf) == 0) {
+            kerr("  [PFN] fault va=0x%lx -> pa=0x%lx pfn=%lu\n",
+                 (unsigned long)(va & ~(PAGE_SIZE - 1)),
+                 (unsigned long)leaf.pa,
+                 (unsigned long)(leaf.pa >> 12));
+            if (leaf.pa) {
+                uint32_t *content = (uint32_t *)(leaf.pa + PAGE_OFFSET);
+                kerr("  [CONTENT] va=0x%lx first=0x%08x\n",
+                     (unsigned long)(va & ~(PAGE_SIZE - 1)),
+                     (unsigned int)*content);
+            }
+        }
+        for (vm_area_t *v = task->mm->mmap; v; v = v->next) {
+            if (!(v->vm_flags & VM_VMO) || !v->vmo)
+                continue;
+            if (mm_query_leaf(task->mm->pgdir, v->start, &leaf) == 0)
+                kerr("  [PFN] vmo va=0x%lx -> pa=0x%lx pfn=%lu\n",
+                     (unsigned long)v->start, (unsigned long)leaf.pa,
+                     (unsigned long)(leaf.pa >> 12));
+        }
     }
 }
 
@@ -306,6 +338,18 @@ static void user_trap_handler(trap_context_t *ctx) {
                 return;
             kerr("User Illegal Instruction: pid=%d sepc=0x%lx stval=0x%lx\n",
                  cur ? cur->pid : -1, sepc, stval);
+            if (cur && cur->mm) {
+                mm_leaf_info_t leaf;
+                extern void frame_trace_dump_pfn(pfn_t pfn);
+                if (mm_query_leaf(cur->mm->pgdir, sepc & ~(PAGE_SIZE - 1),
+                                  &leaf) == 0 && leaf.pa) {
+                    uint32_t *content = (uint32_t *)(leaf.pa + PAGE_OFFSET);
+                    kerr("  [CONTENT] sepc=0x%lx pa=0x%lx first=0x%08x\n",
+                         (unsigned long)sepc, (unsigned long)leaf.pa,
+                         (unsigned int)*content);
+                    frame_trace_dump_pfn((pfn_t)(leaf.pa >> 12));
+                }
+            }
             if (have_user_insn)
                 kerr("  insn@sepc=0x%08x\n", user_insn);
             dump_trap_context(ctx);
@@ -313,6 +357,12 @@ static void user_trap_handler(trap_context_t *ctx) {
         } else if (code == CAUSE_BREAKPOINT) {
             printf("SIGTRAP: pid=%d sepc=0x%lx stval=0x%lx\n",
                   cur ? cur->pid : -1, (unsigned long)sepc, (unsigned long)stval);
+#if defined(CONFIG_X86_64)
+            /* Single-step #DB (vec 1 maps here): clear TF in the saved
+             * context so the step is one-shot; the traced stop reports the
+             * SIGTRAP and the resume continues without re-trapping. */
+            ctx->rflags &= ~(1UL << 8);
+#endif
             if (deliver_user_sync_signal(ctx, SIGTRAP, -SIGTRAP))
                 return;
             proc_exit_group(-SIGTRAP);

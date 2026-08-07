@@ -176,7 +176,6 @@ int net_unix_socket_connect(net_socket_t *s, const void *addr, size_t addrlen)
         child->domain = AF_UNIX;
         child->type = SOCK_STREAM;
         child->protocol = s->protocol;
-        child->bpf_prog_fd = -1;
         child->bound = 1;
         child->connected = 1;
         child->peer = s;

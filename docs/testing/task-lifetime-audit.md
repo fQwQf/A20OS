@@ -2,10 +2,7 @@
 
 `TASK_LIFETIME_OWNERSHIP_AUDIT`
 
-This audit is the acceptance record for `PROC.md` step 3.5. It covers the
-ownership model introduced by the Park/Wake, CPU ownership, and task lifetime
-changes. The diagnostic surface is read-only at
-`/proc/a20/task_lifetime`; it does not alter scheduling decisions.
+This audit is the acceptance record for `PROC.md` step 3.5. It covers theownership model introduced by the Park/Wake, CPU ownership, and task lifetimechanges. The diagnostic surface is read-only at`/proc/a20/task_lifetime`; it does not alter scheduling decisions.
 
 ## Ownership transfer table
 
@@ -24,39 +21,21 @@ changes. The diagnostic surface is read-only at
 ## Static audit
 
 - No kernel call site uses a bare `proc_find()`.
-- `proc_find_get()` call sites in process, signal, procfs, VFS, cgroup, OOM,
-  device, Linux ABI, and native ABI paths were checked for a matching
-  `proc_put()` on success and error exits. `sys_sched` lookup helpers transfer
-  the returned reference to their syscall caller, which releases it.
-- Every task pointer stored across a lock boundary by PID, runqueue, current
-  CPU, wait queue, futex waiter, wake batch, or timeout heap owns or receives a
-  reference.
-- `on_rq`, `dispatching`, and `on_cpu` are mutually exclusive. The runqueue
-  reference is transferred, not reacquired, at `on_rq -> dispatching`;
-  current-slot ownership is released only after switch completion.
-- Final resource destruction is reachable only from the last `proc_put()` and
-  requires both a dynamic task and `destroy_started`.
-- A duplicate destroy, failed live-task get, reference underflow, or final put
-  of a live/static task increments a monotonic diagnostic error before the
-  unsafe path is stopped.
+- `proc_find_get()` call sites in process, signal, procfs, VFS, cgroup, OOM, device, Linux ABI, and native ABI paths were checked for a matching `proc_put()` on success and error exits. `sys_sched` lookup helpers transfer the returned reference to their syscall caller, which releases it.
+- Every task pointer stored across a lock boundary by PID, runqueue, current CPU, wait queue, futex waiter, wake batch, or timeout heap owns or receives a reference.
+- `on_rq`, `dispatching`, and `on_cpu` are mutually exclusive. The runqueue reference is transferred, not reacquired, at `on_rq -> dispatching`; current-slot ownership is released only after switch completion.
+- Final resource destruction is reachable only from the last `proc_put()` and requires both a dynamic task and `destroy_started`.
+- A duplicate destroy, failed live-task get, reference underflow, or final put of a live/static task increments a monotonic diagnostic error before the unsafe path is stopped.
 
-`make check-task-lifetime-boundary` protects the static markers and the ban on
-bare PID lookup. `make check-proc-step35-local` runs the dual-architecture
-debug/release smoke and race matrix; `make check-proc-step35` additionally
-runs both formal CAgent evaluations.
+`make check-task-lifetime-boundary` protects the static markers and the ban onbare PID lookup. `make check-proc-step35-local` runs the dual-architecturedebug/release smoke and race matrix; `make check-proc-step35` additionallyruns both formal CAgent evaluations.
 
 ## Runtime closure criteria
 
-`lifetime_stress` runs the scheduler, futex, process, I/O-event, and VFS stress
-programs, followed by repeated batches of:
+`lifetime_stress` runs the scheduler, futex, process, I/O-event, and VFS stressprograms, followed by repeated batches of:
 
 - `fork/exit/wait4`;
 - `signal/exit`;
 - timeout/exit;
 - futex wake/exit.
 
-It samples the diagnostic surface before and after the run and requires task
-objects, total references, listed tasks/references, PID entries, wait entries,
-wake entries, and timeout entries to return to the same baseline. It also
-requires `lifetime_errors: 0`. The host-side target additionally requires every
-stress PASS marker, a zero QEMU status, and the normal power-off marker.
+It samples the diagnostic surface before and after the run and requires taskobjects, total references, listed tasks/references, PID entries, wait entries,wake entries, and timeout entries to return to the same baseline. It alsorequires `lifetime_errors: 0`. The host-side target additionally requires everystress PASS marker, a zero QEMU status, and the normal power-off marker.

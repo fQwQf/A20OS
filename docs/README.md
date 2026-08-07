@@ -4,7 +4,7 @@
 
 ---
 
-这里汇集了 A20OS 的设计与开发文档。我们是武汉大学 A20 战队的参赛内核，正在尝试把宏内核的执行效率和微内核的抽象能力放在同一个内核里：用 Linux ABI 兼容现有生态，同时用 Native ABI 探索面向能力、句柄与事件的新接口。
+这里汇集了 A20OS 的设计与开发文档。A20OS 是武汉大学 A20 战队开发的**混合内核**：性能关键路径（调度、MM、VFS、页缓存）留在内核态，服务监管与低速设备驱动以可崩溃、可重启的用户态服务运行；Linux ABI（223 个 syscall）兼容现有 musl 生态，Native ABI（109 个 syscall）探索面向能力、句柄与事件的新接口。混合内核的设计参考见 [hybrid-kernel/00-design.md](hybrid-kernel/00-design.md)。
 
 如果你刚接触项目，不知道自己该看什么，下面四条路径应该能帮到你。
 
@@ -13,10 +13,9 @@
 如果你准备第一次看代码、改 bug 或者提交补丁：
 
 - [OS-Design.md](OS-Design.md)：总体架构、双重 ABI 与模块组织
-- [process-scheduler.md](process-scheduler.md)：当前进程状态、CPU 所有权、
-  Park/Wake、timeout、信号与 SMP 调度协议
+- [process-scheduler.md](process-scheduler.md)：当前进程状态、CPU 所有权、 Park/Wake、timeout、信号与 SMP 调度协议
 - [testing/testing-gates.md](testing/testing-gates.md)：本地 smoke 测试与门禁检查
-- [drivers/getting-started.md](drivers/getting-started.md)：从第一个驱动开始理解内核接入方式
+- [drivers/getting-started.md](drivers/guide/getting-started.md)：从第一个驱动开始理解内核接入方式
 - [roadmap/a20os-improvement-todo.md](roadmap/a20os-improvement-todo.md)：当前公认需要改进的地方和切入方向
 
 ## 驱动开发
@@ -24,11 +23,11 @@
 如果你要添加或维护某个设备驱动：
 
 - [drivers/README.md](drivers/README.md)：驱动开发手册总入口
-- [drivers/core-model.md](drivers/core-model.md)：device、driver 与 bus 的核心模型
-- [drivers/runtime-contracts.md](drivers/runtime-contracts.md)：MMIO、IRQ、DMA 与锁的运行时契约
-- [drivers/pci-and-virtio.md](drivers/pci-and-virtio.md)：PCI 与 VirtIO 设备的接入方法
-- [drivers/display.md](drivers/display.md)：Framebuffer 与显示设备
-- [drivers/audio.md](drivers/audio.md)：通用音频 UAPI、HDA、virtio-sound 与 PC Speaker
+- [drivers/core-model.md](drivers/guide/core-model.md)：device、driver 与 bus 的核心模型
+- [drivers/runtime-contracts.md](drivers/guide/runtime-contracts.md)：MMIO、IRQ、DMA 与锁的运行时契约
+- [drivers/pci-and-virtio.md](drivers/guide/pci-and-virtio.md)：PCI 与 VirtIO 设备的接入方法
+- [drivers/display.md](drivers/classes/display.md)：Framebuffer 与显示设备
+- [drivers/audio.md](drivers/classes/audio.md)：通用音频 UAPI、HDA、virtio-sound 与 PC Speaker
 
 ## 平台移植与运行
 
@@ -40,8 +39,11 @@
 
 如果你想深入 Native ABI 或具体内核子系统：
 
-- [process-scheduler.md](process-scheduler.md)：进程生命周期、per-CPU
-  runqueue、持久抢占和阻塞协议
+- [hybrid-kernel/00-design.md](hybrid-kernel/00-design.md)：混合内核设计参考（架构形态与分层原则）
+- [hybrid-kernel/01-mechanisms.md](hybrid-kernel/01-mechanisms.md)：混合内核核心机制语义与契约（channel_call、svcman、共享环、用户态驱动、vDSO）
+- [hybrid-kernel/02-mainstream-plan.md](hybrid-kernel/02-mainstream-plan.md)：与主流混合内核的差距与演进方向
+- [hybrid-kernel/STATUS.md](hybrid-kernel/STATUS.md)：能力与边界清单
+- [process-scheduler.md](process-scheduler.md)：进程生命周期、per-CPU runqueue、持久抢占和阻塞协议
 - [native-abi/00-overview.md](native-abi/00-overview.md)：Native ABI 设计概览
 - [native-abi/01-types.md](native-abi/01-types.md)：基础类型与 syscall 参数结构
 - [native-abi/03-handle.md](native-abi/03-handle.md)：句柄模型与对象类型
