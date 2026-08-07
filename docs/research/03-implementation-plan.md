@@ -1,6 +1,6 @@
 # A20OS Native ABI 实现方案
 
-> **历史计划说明（2026-07）**：本文记录从 53-syscall 设计走向首个实现的原始方案，文件路径、分派伪代码、阶段状态和 LOC 估算不再代表当前仓库。当前实现为 93 个 syscall，按 `task->abi_mode` 分派；typed channel、时态控制/sweeper、阻塞 IPC、对象级联释放和 VMO source 映射状态见 `docs/native-abi/08-runtime-status.md`。本文伪代码不得作为现行并发或 ABI 契约。
+> **历史计划说明（2026-07）**：本文记录从 53-syscall 设计走向首个实现的原始方案，文件路径、分派伪代码、阶段状态和 LOC 估算不再代表当前仓库。当前实现为 112 个 syscall，按 `task->abi_mode` 分派；typed channel、时态控制/sweeper、阻塞 IPC、对象级联释放和 VMO source 映射状态见 `docs/native-abi/08-runtime-status.md`。本文伪代码不得作为现行并发或 ABI 契约。
 
 > 本文为 A20OS Native ABI 理论研究的第三部分。基于 [01-posix-limitations.md](01-posix-limitations.md) 的问题分析和 [02-native-api-design.md](02-native-api-design.md) 的 API 设计，给出具体的实现方案，包括组件划分、文件组织、libc 设计和分阶段实施路线。
 
@@ -22,70 +22,7 @@
 ### 1.1 顶层目录结构
 
 ```
-oskernel2025-a20/
-├── kernel/              # 内核主体
-│   ├── abi/             # ABI 层（用户态接口）
-│   │   ├── linux/       # Linux 兼容 ABI（当前主 ABI）
-│   │   └── native/      # A20 Native ABI（本文档目标）
-│   ├── arch/            # 架构相关代码
-│   │   ├── aarch64/
-│   │   ├── loongarch64/
-│   │   └── riscv64/
-│   ├── bpf/             # BPF 支持
-│   ├── core/            # 核心工具（klog, printf, trap, sync, timekeeping）
-│   ├── drv/             # 驱动
-│   ├── external/        # 外部依赖
-│   ├── fs/              # 文件系统
-│   │   ├── vfs.c        # VFS 核心
-│   │   ├── file.c       # 文件操作
-│   │   ├── fdtable.c    # fd 表管理
-│   │   ├── ext4.c       # ext4 文件系统
-│   │   ├── fat32.c      # FAT32 文件系统
-│   │   ├── pipe.c       # 管道
-│   │   ├── ramfs.c      # 内存文件系统
-│   │   ├── devfs.c      # 设备文件系统
-│   │   ├── procfs.c     # proc 文件系统
-│   │   └── ...
-│   ├── include/         # 内核头文件
-│   │   ├── abi/         # ABI 相关头文件
-│   │   │   ├── current.h        # ABI 选择器（CONFIG_ABI_LINUX）
-│   │   │   ├── syscall_entry.h  # Syscall 入口选择器
-│   │   │   └── linux/           # Linux ABI 头文件
-│   │   ├── core/
-│   │   ├── fs/
-│   │   ├── mm/
-│   │   ├── net/
-│   │   ├── proc/
-│   │   └── sys/
-│   ├── ipc/             # IPC 子系统
-│   ├── main.c           # 内核入口
-│   ├── mm/              # 内存管理
-│   │   ├── mm.c         # 内存管理核心
-│   │   ├── vm.c         # 虚拟内存
-│   │   ├── elf.c        # ELF 加载
-│   │   ├── frame.c      # 物理帧管理
-│   │   └── ...
-│   ├── net/             # 网络栈
-│   ├── proc/            # 进程管理
-│   │   ├── proc.c       # 进程核心
-│   │   ├── fork.c       # fork 实现
-│   │   ├── exec.c       # exec 实现
-│   │   ├── signal.c     # 信号处理
-│   │   ├── sched.c      # 调度器
-│   │   └── ...
-│   └── syscall/         # 系统调用分派
-│       ├── syscall.c    # 主分派器
-│       ├── syscall_common.c
-│       └── syscall_internal.h
-├── user/                # 用户态
-│   ├── cmds/            # 命令行工具
-│   ├── lib/             # 用户态库
-│   ├── shell/           # Shell
-│   ├── external/        # 外部用户态软件（musl, gcc, vim 等）
-│   └── Makefile
-├── docs/                # 文档
-├── Makefile             # 顶层构建
-└── .kernel-build/       # 构建产物
+oskernel2025-a20/├── kernel/              # 内核主体│   ├── abi/             # ABI 层（用户态接口）│   │   ├── linux/       # Linux 兼容 ABI（当前主 ABI）│   │   └── native/      # A20 Native ABI（本文档目标）│   ├── arch/            # 架构相关代码│   │   ├── aarch64/│   │   ├── loongarch64/│   │   └── riscv64/│   ├── bpf/             # BPF 支持│   ├── core/            # 核心工具（klog, printf, trap, sync, timekeeping）│   ├── drv/             # 驱动│   ├── external/        # 外部依赖│   ├── fs/              # 文件系统│   │   ├── vfs.c        # VFS 核心│   │   ├── file.c       # 文件操作│   │   ├── fdtable.c    # fd 表管理│   │   ├── ext4.c       # ext4 文件系统│   │   ├── fat32.c      # FAT32 文件系统│   │   ├── pipe.c       # 管道│   │   ├── ramfs.c      # 内存文件系统│   │   ├── devfs.c      # 设备文件系统│   │   ├── procfs.c     # proc 文件系统│   │   └── ...│   ├── include/         # 内核头文件│   │   ├── abi/         # ABI 相关头文件│   │   │   ├── current.h        # ABI 选择器（CONFIG_ABI_LINUX）│   │   │   ├── syscall_entry.h  # Syscall 入口选择器│   │   │   └── linux/           # Linux ABI 头文件│   │   ├── core/│   │   ├── fs/│   │   ├── mm/│   │   ├── net/│   │   ├── proc/│   │   └── sys/│   ├── ipc/             # IPC 子系统│   ├── main.c           # 内核入口│   ├── mm/              # 内存管理│   │   ├── mm.c         # 内存管理核心│   │   ├── vm.c         # 虚拟内存│   │   ├── elf.c        # ELF 加载│   │   ├── frame.c      # 物理帧管理│   │   └── ...│   ├── net/             # 网络栈│   ├── proc/            # 进程管理│   │   ├── proc.c       # 进程核心│   │   ├── fork.c       # fork 实现│   │   ├── exec.c       # exec 实现│   │   ├── signal.c     # 信号处理│   │   ├── sched.c      # 调度器│   │   └── ...│   └── syscall/         # 系统调用分派│       ├── syscall.c    # 主分派器│       ├── syscall_common.c│       └── syscall_internal.h├── user/                # 用户态│   ├── cmds/            # 命令行工具│   ├── lib/             # 用户态库│   ├── shell/           # Shell│   ├── external/        # 外部用户态软件（musl, gcc, vim 等）│   └── Makefile├── docs/                # 文档├── Makefile             # 顶层构建└── .kernel-build/       # 构建产物
 ```
 
 ### 1.2 当前 Syscall 路径
@@ -185,11 +122,9 @@ Handle table 是 Native ABI 的基础。每个 task 拥有一个 handle table。
 
 #include "core/types.h"
 
-typedef uint32_t a20_handle_t;
-typedef uint64_t a20_rights_t;
+typedef uint32_t a20_handle_t;typedef uint64_t a20_rights_t;
 
-// Handle 对象类型
-typedef enum a20_object_type {
+// Handle 对象类型typedef enum a20_object_type {
     A20_OBJ_INVALID = 0,
     A20_OBJ_TASK,
     A20_OBJ_THREAD,
@@ -206,18 +141,13 @@ typedef enum a20_object_type {
     A20_OBJ_DEBUG,
 } a20_object_type_t;
 
-// Handle 条目（进程 handle table 中的一个槽位）
-// 注意：handle entry 不持有自己的引用计数。引用计数是对象的属性
-// （refcount(o) = 指向 o 的 handle 数量），不是 handle 的属性。
-// 每个条目要么被占用（object != NULL），要么空闲（object == NULL）。
-typedef struct a20_handle_entry {
+// Handle 条目（进程 handle table 中的一个槽位）// 注意：handle entry 不持有自己的引用计数。引用计数是对象的属性// （refcount(o) = 指向 o 的 handle 数量），不是 handle 的属性。// 每个条目要么被占用（object != NULL），要么空闲（object == NULL）。typedef struct a20_handle_entry {
     void             *object;      // 指向内核对象的指针（NULL = 空闲槽位）
     a20_object_type_t type;        // 对象类型
     a20_rights_t      rights;      // 该 handle 的权限
 } a20_handle_entry_t;
 
-// Handle Table（每个 task 一个）
-typedef struct a20_handle_table {
+// Handle Table（每个 task 一个）typedef struct a20_handle_table {
     a20_handle_entry_t *entries;   // 动态数组
     uint32_t            capacity;  // 表容量
     uint32_t            next_slot; // 下一个可用槽位提示
@@ -226,23 +156,18 @@ typedef struct a20_handle_table {
     uint32_t            bitmap_size; // bitmap 的 uint64 元素数
 } a20_handle_table_t;
 
-// 创建/销毁 handle table
-a20_handle_table_t *a20_handle_table_create(uint32_t capacity);
-void a20_handle_table_destroy(a20_handle_table_t *table);
+// 创建/销毁 handle tablea20_handle_table_t *a20_handle_table_create(uint32_t capacity);void a20_handle_table_destroy(a20_handle_table_t *table);
 
-// Handle 操作
-int64_t a20_handle_alloc(a20_handle_table_t *table, void *object,
+// Handle 操作int64_t a20_handle_alloc(a20_handle_table_t *table, void *object,
                          a20_object_type_t type, a20_rights_t rights,
                          a20_handle_t *out);
 int64_t a20_handle_lookup(a20_handle_table_t *table, a20_handle_t handle,
                           a20_object_type_t expected_type, a20_rights_t required_rights,
                           a20_handle_entry_t *out);
-int64_t a20_handle_close(a20_handle_table_t *table, a20_handle_t handle);
-int64_t a20_handle_dup(a20_handle_table_t *table, a20_handle_t src,
+int64_t a20_handle_close(a20_handle_table_t *table, a20_handle_t handle);int64_t a20_handle_dup(a20_handle_table_t *table, a20_handle_t src,
                        a20_rights_t new_rights, a20_handle_t *out);
 
-// 在 task_t 中嵌入 handle_table 指针
-// task->native_handle_table = a20_handle_table_create(256);
+// 在 task_t 中嵌入 handle_table 指针// task->native_handle_table = a20_handle_table_create(256);
 
 #endif /* _CORE_HANDLE_H */
 ```
@@ -259,55 +184,21 @@ int64_t a20_handle_dup(a20_handle_table_t *table, a20_handle_t src,
 参考 Linux ABI 的模式：
 
 ```c
-// kernel/abi/native/syscall_table.def
-// 格式：NATIVE_SYSCALL(编号, 名称, 恢复上下文, 实现调用)
+// kernel/abi/native/syscall_table.def// 格式：NATIVE_SYSCALL(编号, 名称, 恢复上下文, 实现调用)
 
-NATIVE_SYSCALL(0x0000, abi_info,         0, native_sys_abi_info(&args))
-NATIVE_SYSCALL(0x0100, handle_close,     0, native_sys_handle_close(&args))
-NATIVE_SYSCALL(0x0101, handle_dup,       0, native_sys_handle_dup(&args))
-NATIVE_SYSCALL(0x0102, handle_query,     0, native_sys_handle_query(&args))
-NATIVE_SYSCALL(0x0200, task_exit,        1, native_sys_task_exit(&args))
-NATIVE_SYSCALL(0x0201, task_spawn,       0, native_sys_task_spawn(&args))
-NATIVE_SYSCALL(0x0300, vm_alloc,         0, native_sys_vm_alloc(&args))
-NATIVE_SYSCALL(0x0301, vm_unmap,         0, native_sys_vm_unmap(&args))
-NATIVE_SYSCALL(0x0400, path_open,        0, native_sys_path_open(&args))
-NATIVE_SYSCALL(0x0401, handle_read,      0, native_sys_handle_read(&args))
-NATIVE_SYSCALL(0x0402, handle_write,     0, native_sys_handle_write(&args))
-NATIVE_SYSCALL(0x0500, event_queue_create, 0, native_sys_event_queue_create(&args))
-NATIVE_SYSCALL(0x0501, event_watch,      0, native_sys_event_watch(&args))
-NATIVE_SYSCALL(0x0502, event_wait,       0, native_sys_event_wait(&args))
-NATIVE_SYSCALL(0x0700, clock_get,        0, native_sys_clock_get(&args))
+NATIVE_SYSCALL(0x0000, abi_info,         0, native_sys_abi_info(&args))NATIVE_SYSCALL(0x0100, handle_close,     0, native_sys_handle_close(&args))NATIVE_SYSCALL(0x0101, handle_dup,       0, native_sys_handle_dup(&args))NATIVE_SYSCALL(0x0102, handle_query,     0, native_sys_handle_query(&args))NATIVE_SYSCALL(0x0200, task_exit,        1, native_sys_task_exit(&args))NATIVE_SYSCALL(0x0201, task_spawn,       0, native_sys_task_spawn(&args))NATIVE_SYSCALL(0x0300, vm_alloc,         0, native_sys_vm_alloc(&args))NATIVE_SYSCALL(0x0301, vm_unmap,         0, native_sys_vm_unmap(&args))NATIVE_SYSCALL(0x0400, path_open,        0, native_sys_path_open(&args))NATIVE_SYSCALL(0x0401, handle_read,      0, native_sys_handle_read(&args))NATIVE_SYSCALL(0x0402, handle_write,     0, native_sys_handle_write(&args))NATIVE_SYSCALL(0x0500, event_queue_create, 0, native_sys_event_queue_create(&args))NATIVE_SYSCALL(0x0501, event_watch,      0, native_sys_event_watch(&args))NATIVE_SYSCALL(0x0502, event_wait,       0, native_sys_event_wait(&args))NATIVE_SYSCALL(0x0700, clock_get,        0, native_sys_clock_get(&args))
 ```
 
 #### 2.2.3 Native Syscall 实现文件
 
 ```
-kernel/abi/native/
-├── DESIGN.md              # 已有：设计文档
-├── syscall_table.c        # 新增：syscall 表构建和查找
-├── syscall_table.def      # 新增：syscall 定义宏
-├── syscall_impl.h         # 新增：实现函数声明
-├── sys_core.c             # 新增：abi_info, feature_test
-├── sys_handle.c           # 新增：handle_close, handle_dup, handle_query
-├── sys_task.c             # 新增：task_spawn, task_exit, task_wait, thread_create
-├── sys_memory.c           # 新增：vm_alloc, vm_map, vm_unmap, vm_protect, vm_share
-├── sys_path.c             # 新增：path_open, handle_read, handle_write, handle_stat
-├── sys_event.c            # 新增：event_queue_create, event_watch, event_wait
-├── sys_net.c              # 新增：net_socket, net_bind, net_connect, net_accept
-├── sys_time.c             # 新增：clock_get, timer_create, timer_set
-└── sys_security.c         # 新增：ns_create, ns_apply
+kernel/abi/native/├── DESIGN.md              # 已有：设计文档├── syscall_table.c        # 新增：syscall 表构建和查找├── syscall_table.def      # 新增：syscall 定义宏├── syscall_impl.h         # 新增：实现函数声明├── sys_core.c             # 新增：abi_info, feature_test├── sys_handle.c           # 新增：handle_close, handle_dup, handle_query├── sys_task.c             # 新增：task_spawn, task_exit, task_wait, thread_create├── sys_memory.c           # 新增：vm_alloc, vm_map, vm_unmap, vm_protect, vm_share├── sys_path.c             # 新增：path_open, handle_read, handle_write, handle_stat├── sys_event.c            # 新增：event_queue_create, event_watch, event_wait├── sys_net.c              # 新增：net_socket, net_bind, net_connect, net_accept├── sys_time.c             # 新增：clock_get, timer_create, timer_set└── sys_security.c         # 新增：ns_create, ns_apply
 ```
 
 #### 2.2.4 Native ABI 头文件
 
 ```
-kernel/include/abi/native/
-├── types.h        # a20_handle_t, a20_rights_t, a20_status_t 等
-├── errno.h        # A20_ERR_* 错误码
-├── rights.h       # A20_RIGHT_* 权限位定义
-├── syscall_nr.h   # Syscall 编号宏
-├── syscall_entry.h # Native syscall 入口结构
-└── startup.h      # a20_start_info_t 定义
+kernel/include/abi/native/├── types.h        # a20_handle_t, a20_rights_t, a20_status_t 等├── errno.h        # A20_ERR_* 错误码├── rights.h       # A20_RIGHT_* 权限位定义├── syscall_nr.h   # Syscall 编号宏├── syscall_entry.h # Native syscall 入口结构└── startup.h      # a20_start_info_t 定义
 ```
 
 ### 2.3 Syscall 分派策略
@@ -317,8 +208,7 @@ kernel/include/abi/native/
 ```c
 // kernel/syscall/syscall.c（修改后）
 
-int64_t syscall_dispatch(trap_context_t *ctx)
-{
+int64_t syscall_dispatch(trap_context_t *ctx){
     uint64_t num = TRAP_CTX_SYSCALL_NUM(ctx);
 
     // Native ABI 的 syscall 编号在 0x0000-0x1FFF 范围
@@ -344,8 +234,7 @@ int64_t syscall_dispatch(trap_context_t *ctx)
 **或者更好的方式**——通过 task 标记区分：
 
 ```c
-int64_t syscall_dispatch(trap_context_t *ctx)
-{
+int64_t syscall_dispatch(trap_context_t *ctx){
     uint64_t num = TRAP_CTX_SYSCALL_NUM(ctx);
     task_t *cur = proc_current();
 
@@ -379,8 +268,7 @@ int64_t syscall_dispatch(trap_context_t *ctx)
 ### 3.1 task_t 扩展
 
 ```c
-// 在 task_t 中添加：
-typedef struct task {
+// 在 task_t 中添加：typedef struct task {
     // ... 现有字段 ...
 
     // Native ABI 支持
@@ -440,16 +328,7 @@ ABI_NATIVE_SRCS = $(wildcard kernel/abi/native/sys_*.c)
 # Handle 子系统（Native ABI 需要）
 CORE_HANDLE_SRCS = kernel/core/handle.c
 
-ifeq ($(ABI),linux)
-  CFLAGS += -DCONFIG_ABI_LINUX
-  ABI_SRCS = $(ABI_LINUX_SRCS)
-else ifeq ($(ABI),native)
-  CFLAGS += -DCONFIG_ABI_NATIVE
-  ABI_SRCS = $(ABI_NATIVE_SRCS) $(CORE_HANDLE_SRCS)
-else ifeq ($(ABI),both)
-  CFLAGS += -DCONFIG_ABI_LINUX -DCONFIG_ABI_BOTH
-  ABI_SRCS = $(ABI_LINUX_SRCS) $(ABI_NATIVE_SRCS) $(CORE_HANDLE_SRCS)
-endif
+ifeq ($(ABI),linux)CFLAGS += -DCONFIG_ABI_LINUXABI_SRCS = $(ABI_LINUX_SRCS)else ifeq ($(ABI),native)CFLAGS += -DCONFIG_ABI_NATIVEABI_SRCS = $(ABI_NATIVE_SRCS) $(CORE_HANDLE_SRCS)else ifeq ($(ABI),both)CFLAGS += -DCONFIG_ABI_LINUX -DCONFIG_ABI_BOTHABI_SRCS = $(ABI_LINUX_SRCS) $(ABI_NATIVE_SRCS) $(CORE_HANDLE_SRCS)endif
 ```
 
 ### 4.3 abi/current.h 修改
@@ -483,84 +362,7 @@ endif
 ### 5.1 目录结构
 
 ```
-user/
-├── lib/
-│   ├── a20rt/           # Native 系统运行时
-│   │   ├── include/
-│   │   │   └── a20/
-│   │   │       ├── syscall.h     # syscall wrapper（inline asm）
-│   │   │       ├── types.h       # a20_handle_t 等
-│   │   │       ├── rights.h      # A20_RIGHT_* 宏
-│   │   │       ├── errno.h       # A20_ERR_* 宏
-│   │   │       ├── startup.h     # a20_start_info_t
-│   │   │       └── abi.h         # abi_info() 等查询函数
-│   │   ├── src/
-│   │   │   ├── start.S           # _start 入口点
-│   │   │   ├── syscall.S         # syscall 指令封装（各架构）
-│   │   │   ├── crt0.c            # C 运行时初始化
-│   │   │   ├── handle.c          # handle table 用户态缓存
-│   │   │   └── tls.c             # TLS 设置
-│   │   └── Makefile
-│   │
-│   ├── a20c/            # Native C 库
-│   │   ├── include/
-│   │   │   ├── a20/
-│   │   │   │   └── handle.h      # handle 操作高级 API
-│   │   │   ├── stdio.h
-│   │   │   ├── stdlib.h
-│   │   │   ├── string.h
-│   │   │   ├── time.h
-│   │   │   ├── malloc.h
-│   │   │   └── ...
-│   │   ├── src/
-│   │   │   ├── stdio/
-│   │   │   │   ├── fopen.c       # FILE* → handle 映射
-│   │   │   │   ├── fread.c
-│   │   │   │   ├── fwrite.c
-│   │   │   │   ├── printf.c
-│   │   │   │   └── fflush.c
-│   │   │   ├── stdlib/
-│   │   │   │   ├── malloc.c      # 基于 vm_alloc 的分配器
-│   │   │   │   ├── exit.c
-│   │   │   │   └── getenv.c
-│   │   │   ├── string/
-│   │   │   │   ├── memcpy.c
-│   │   │   │   ├── strlen.c
-│   │   │   │   └── ...
-│   │   │   └── time/
-│   │   │       └── clock.c
-│   │   └── Makefile
-│   │
-│   └── a20posix/        # POSIX 兼容层（可选）
-│       ├── include/
-│       │   ├── unistd.h
-│       │   ├── fcntl.h
-│       │   ├── signal.h
-│       │   ├── sys/
-│       │   │   ├── types.h
-│       │   │   ├── stat.h
-│       │   │   ├── mmap.h
-│       │   │   └── socket.h
-│       │   └── ...
-│       ├── src/
-│       │   ├── fd_table.c         # fd ↔ handle 映射
-│       │   ├── unistd.c           # open/close/read/write 映射
-│       │   ├── fcntl.c
-│       │   ├── signal.c           # 信号模拟
-│       │   ├── stat.c
-│       │   ├── mmap.c
-│       │   ├── socket.c
-│       │   ├── dirent.c
-│       │   ├── fork.c             # 返回 ENOSYS 或用 spawn 模拟
-│       │   ├── exec.c             # 用 task_spawn 模拟
-│       │   └── errno.c            # 错误码转换
-│       └── Makefile
-│
-├── cmds/
-│   ├── native-init/      # Native ABI 初始化程序
-│   │   ├── main.c        # 最小 init：写 stdout，退出
-│   │   └── Makefile
-│   └── ...
+user/├── lib/│   ├── a20rt/           # Native 系统运行时│   │   ├── include/│   │   │   └── a20/│   │   │       ├── syscall.h     # syscall wrapper（inline asm）│   │   │       ├── types.h       # a20_handle_t 等│   │   │       ├── rights.h      # A20_RIGHT_* 宏│   │   │       ├── errno.h       # A20_ERR_* 宏│   │   │       ├── startup.h     # a20_start_info_t│   │   │       └── abi.h         # abi_info() 等查询函数│   │   ├── src/│   │   │   ├── start.S           # _start 入口点│   │   │   ├── syscall.S         # syscall 指令封装（各架构）│   │   │   ├── crt0.c            # C 运行时初始化│   │   │   ├── handle.c          # handle table 用户态缓存│   │   │   └── tls.c             # TLS 设置│   │   └── Makefile│   ││   ├── a20c/            # Native C 库│   │   ├── include/│   │   │   ├── a20/│   │   │   │   └── handle.h      # handle 操作高级 API│   │   │   ├── stdio.h│   │   │   ├── stdlib.h│   │   │   ├── string.h│   │   │   ├── time.h│   │   │   ├── malloc.h│   │   │   └── ...│   │   ├── src/│   │   │   ├── stdio/│   │   │   │   ├── fopen.c       # FILE* → handle 映射│   │   │   │   ├── fread.c│   │   │   │   ├── fwrite.c│   │   │   │   ├── printf.c│   │   │   │   └── fflush.c│   │   │   ├── stdlib/│   │   │   │   ├── malloc.c      # 基于 vm_alloc 的分配器│   │   │   │   ├── exit.c│   │   │   │   └── getenv.c│   │   │   ├── string/│   │   │   │   ├── memcpy.c│   │   │   │   ├── strlen.c│   │   │   │   └── ...│   │   │   └── time/│   │   │       └── clock.c│   │   └── Makefile│   ││   └── a20posix/        # POSIX 兼容层（可选）│       ├── include/│       │   ├── unistd.h│       │   ├── fcntl.h│       │   ├── signal.h│       │   ├── sys/│       │   │   ├── types.h│       │   │   ├── stat.h│       │   │   ├── mmap.h│       │   │   └── socket.h│       │   └── ...│       ├── src/│       │   ├── fd_table.c         # fd ↔ handle 映射│       │   ├── unistd.c           # open/close/read/write 映射│       │   ├── fcntl.c│       │   ├── signal.c           # 信号模拟│       │   ├── stat.c│       │   ├── mmap.c│       │   ├── socket.c│       │   ├── dirent.c│       │   ├── fork.c             # 返回 ENOSYS 或用 spawn 模拟│       │   ├── exec.c             # 用 task_spawn 模拟│       │   └── errno.c            # 错误码转换│       └── Makefile│├── cmds/│   ├── native-init/      # Native ABI 初始化程序│   │   ├── main.c        # 最小 init：写 stdout，退出│   │   └── Makefile│   └── ...
 ```
 
 ---
@@ -575,9 +377,7 @@ user/
 
 ```assembly
 # user/lib/a20rt/src/start.S（riscv64 示例）
-.section .text
-.global _start
-_start:
+.section .text.global _start_start:
     # a0 = a20_start_info_t 指针（由内核放在约定位置）
     # 设置栈指针
     # 设置 TLS
@@ -591,19 +391,14 @@ _start:
 ```c
 // user/lib/a20rt/include/a20/syscall.h
 
-// 架构相关的 syscall 指令封装
-// riscv64: ecall
-// aarch64: svc #0
-// loongarch64: syscall 0
+// 架构相关的 syscall 指令封装// riscv64: ecall// aarch64: svc #0// loongarch64: syscall 0
 
-static inline int64_t a20_syscall1(uint64_t nr, uint64_t a0)
-{
+static inline int64_t a20_syscall1(uint64_t nr, uint64_t a0){
     register uint64_t a7 __asm__("a7") = nr;
     register uint64_t _a0 __asm__("a0") = a0;
     __asm__ volatile("ecall" : "+r"(_a0) : "r"(a7) : "memory");
     return (int64_t)_a0;
-}
-// ... a20_syscall2, a20_syscall3, 等
+}// ... a20_syscall2, a20_syscall3, 等
 ```
 
 ### 6.2 liba20c — C 库
@@ -615,11 +410,9 @@ static inline int64_t a20_syscall1(uint64_t nr, uint64_t a0)
 ```c
 // user/lib/a20c/src/stdlib/malloc.c
 
-// 策略：大块用 vm_alloc，小块用内部 slab 分配器
-// 初始分配 4MB 堆区域，按需扩展
+// 策略：大块用 vm_alloc，小块用内部 slab 分配器// 初始分配 4MB 堆区域，按需扩展
 
-static void *heap_base;
-static size_t heap_size;
+static void *heap_base;static size_t heap_size;
 
 void *malloc(size_t size) {
     if (size >= PAGE_SIZE / 4) {
@@ -650,11 +443,7 @@ typedef struct A20_FILE {
     int error;
 } A20_FILE;
 
-// 全局 stdin/stdout/stderr 从 a20_start_info 初始化
-static A20_FILE _stdin_file, _stdout_file, _stderr_file;
-FILE *stdin = &_stdin_file;
-FILE *stdout = &_stdout_file;
-FILE *stderr = &_stderr_file;
+// 全局 stdin/stdout/stderr 从 a20_start_info 初始化static A20_FILE _stdin_file, _stdout_file, _stderr_file;FILE *stdin = &_stdin_file;FILE *stdout = &_stdout_file;FILE *stderr = &_stderr_file;
 
 void __a20c_init_stdio(const a20_start_info_t *info) {
     _stdin_file.handle = info->stdin_handle;
@@ -686,11 +475,9 @@ typedef struct {
     int posix_flags;   // POSIX open flags
 } posix_fd_entry_t;
 
-static posix_fd_entry_t posix_fd_table[POSIX_MAX_FDS];
-static spinlock_t fd_table_lock = SPINLOCK_INIT;
+static posix_fd_entry_t posix_fd_table[POSIX_MAX_FDS];static spinlock_t fd_table_lock = SPINLOCK_INIT;
 
-// 分配 fd 编号
-static int fd_alloc(void) {
+// 分配 fd 编号static int fd_alloc(void) {
     for (int i = 0; i < POSIX_MAX_FDS; i++) {
         if (posix_fd_table[i].handle == A20_HANDLE_INVALID) {
             posix_fd_table[i].handle = 0; // 标记占用
@@ -700,14 +487,12 @@ static int fd_alloc(void) {
     return -1; // EMFILE
 }
 
-// fd → handle 转换
-a20_handle_t fd_to_handle(int fd) {
+// fd → handle 转换a20_handle_t fd_to_handle(int fd) {
     if (fd < 0 || fd >= POSIX_MAX_FDS) return A20_HANDLE_INVALID;
     return posix_fd_table[fd].handle;
 }
 
-// handle → fd 注册
-int handle_to_fd(a20_handle_t handle, int flags) {
+// handle → fd 注册int handle_to_fd(a20_handle_t handle, int flags) {
     int fd = fd_alloc();
     if (fd < 0) return -1;
     posix_fd_table[fd].handle = handle;
@@ -791,8 +576,7 @@ pid_t getpid(void) {
     // Native ABI 不用 PID，由 libc 维护一个 task handle → pid 映射
 }
 
-// fork() 不支持
-pid_t fork(void) {
+// fork() 不支持pid_t fork(void) {
     errno = ENOSYS;
     return -1;
 }

@@ -75,10 +75,15 @@ static void udisk_mount_kthread(void)
 {
     udisk_inst_t *u = g_mount_target;
     /* Probe + mount.  Block reads park until the user driver services the
-     * ring, so no delay is needed here. */
+     * ring, so no delay is needed here.  BRINGUP builds have no block
+     * devices and mount_setup.h leaves try_mount undeclared. */
+#ifndef BRINGUP
     int r = try_mount(&u->bdev, "/ubd", "fat32");
     if (r == 0)
         g_udisk_mounted = 1;
+#else
+    (void)u;
+#endif
     g_mount_target = NULL;
     proc_exit(0);
 }

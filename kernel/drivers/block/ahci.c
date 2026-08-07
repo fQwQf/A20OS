@@ -10,6 +10,9 @@
 #include "core/stdio.h"
 #include "core/string.h"
 #include "core/errno.h"
+#include "core/sync.h"
+#include "core/timer.h"
+#include "proc/proc.h"
 
 #define AHCI_MAX_PORTS          32U
 #define AHCI_CMD_SLOTS          32U
@@ -51,6 +54,13 @@
 #define ATA_CMD_READ_DMA_EXT    0x25U
 #define ATA_CMD_WRITE_DMA_EXT   0x35U
 
+/* Hybrid completion window: TCG completions usually land within a
+ * millisecond; beyond it the submitter parks on the port wait queue
+ * instead of busy-polling PxCI for the whole command. */
+#define AHCI_HYBRID_PRE_POLL_US 800U
+/* Bounded park chunk: a hypothetical missed wake degrades to a re-check. */
+#define AHCI_PARK_CHUNK_MS      50U
+
 typedef struct __attribute__((packed)) ahci_cmd_header {
     uint16_t flags;
     uint16_t prdtl;
@@ -86,10 +96,21 @@ typedef struct __attribute__((aligned(1024))) ahci_port {
     ahci_cmd_table_t *tables;
     uint8_t *transfer;
     uint64_t capacity;
+    /* AHCI_IRQ_MODEL:
+     * - The IRQ top-half write-clears PxIS and records the bits it
+     *   consumed in last_is, because the waiter must still observe TFES
+     *   after the hardware status register has been acknowledged.
+     * - Parked submitters sleep on waiters; the handler collects them
+     *   after recording last_is.  Only slot 0 is ever in flight (the
+     *   port mutex serializes commands), so one status word suffices. */
+    volatile uint32_t last_is;
     volatile int irq_seen;
     int irq;
     int irq_registered;
-    spinlock_t lock;
+    wait_queue_t waiters;
+    /* Sleepable mutex: the IRQ handler never takes it, and the command
+     * wait path parks while holding it. */
+    mutex_t lock;
     block_dev_t block;
 } ahci_port_t;
 
@@ -177,30 +198,70 @@ static int ahci_submit(ahci_port_t *port, uint8_t command, uint64_t lba,
     dma_sync_for_device(port->cmd_list, 1024U);
     dma_sync_for_device(table, sizeof(*table));
     dma_sync_for_device(port->transfer, bytes);
+    port->last_is = 0;
+    port->irq_seen = 0;
     ahci_write(port, AHCI_PXIS, 0xFFFFFFFFU);
     ahci_write(port, AHCI_PXCI, 1U);
 
-    for (unsigned ms = 0; ms < AHCI_TIMEOUT_MS; ms++) {
-        uint32_t is = ahci_read(port, AHCI_PXIS);
+    uint64_t start = timer_get_ticks();
+    uint64_t deadline = start + MS_TO_TICKS(AHCI_TIMEOUT_MS);
+    uint64_t pre_poll_until = start + US_TO_TICKS(AHCI_HYBRID_PRE_POLL_US);
+
+    for (;;) {
+        uint32_t is = ahci_read(port, AHCI_PXIS) | port->last_is;
         if (is & AHCI_PXIS_TFES) {
-            ahci_write(port, AHCI_PXIS, is);
+            ahci_write(port, AHCI_PXIS, 0xFFFFFFFFU);
+            port->last_is = 0;
             return -1;
         }
         if ((ahci_read(port, AHCI_PXCI) & 1U) == 0) {
+            port->last_is = 0;
             dma_sync_for_cpu(port->transfer, bytes);
             return 0;
         }
-        udelay(1000);
+        if (!port->irq_registered) {
+            if (timer_get_ticks() >= deadline)
+                return -1;
+            udelay(1000);
+            continue;
+        }
+        uint64_t now = timer_get_ticks();
+        if (now >= deadline)
+            return -1;
+        if (now < pre_poll_until) {
+            udelay(20);
+            continue;
+        }
+        /* Park until the completion IRQ; the bounded chunk turns a
+         * hypothetical missed wake into a re-check instead of a stall. */
+        uint64_t chunk = now + MS_TO_TICKS(AHCI_PARK_CHUNK_MS);
+        if (chunk > deadline)
+            chunk = deadline;
+        proc_wait_token_t token =
+            proc_park_prepare(PROC_WAIT_UNINTERRUPTIBLE, chunk);
+        wait_queue_entry_t entry = {0};
+        wait_queue_link(&port->waiters, &entry, token, 0);
+        /* Re-check after linking so a completion that raced the link does
+         * not sleep. */
+        if ((ahci_read(port, AHCI_PXCI) & 1U) == 0 ||
+            (ahci_read(port, AHCI_PXIS) & AHCI_PXIS_TFES) ||
+            (port->last_is & AHCI_PXIS_TFES)) {
+            wait_queue_unlink(&port->waiters, &entry);
+            (void)proc_park_cancel(token);
+            proc_park_finish(token);
+            continue;
+        }
+        (void)proc_park_commit(token);
+        wait_queue_unlink(&port->waiters, &entry);
+        proc_park_finish(token);
     }
-    return -1;
 }
 
 static int ahci_rw(ahci_port_t *port, uint64_t lba, void *buf, size_t count,
                    int write) {
     if (!port || !buf || !count || lba >= port->capacity || count > port->capacity - lba)
         return -1;
-
-    uint64_t flags = spin_lock_irqsave(&port->lock);
+    mutex_lock(&port->lock);
     while (count) {
         size_t sectors = count > AHCI_TRANSFER_SECTORS ? AHCI_TRANSFER_SECTORS : count;
         size_t bytes = sectors * AHCI_SECTOR_SIZE;
@@ -208,7 +269,7 @@ static int ahci_rw(ahci_port_t *port, uint64_t lba, void *buf, size_t count,
             memcpy(port->transfer, buf, bytes);
         if (ahci_submit(port, write ? ATA_CMD_WRITE_DMA_EXT : ATA_CMD_READ_DMA_EXT,
                         lba, (uint16_t)sectors, write, port->transfer_dma, bytes) != 0) {
-            spin_unlock_irqrestore(&port->lock, flags);
+            mutex_unlock(&port->lock);
             return -1;
         }
         if (!write)
@@ -217,7 +278,7 @@ static int ahci_rw(ahci_port_t *port, uint64_t lba, void *buf, size_t count,
         count -= sectors;
         buf = (uint8_t *)buf + bytes;
     }
-    spin_unlock_irqrestore(&port->lock, flags);
+    mutex_unlock(&port->lock);
     return 0;
 }
 
@@ -240,10 +301,19 @@ static int ahci_irq_handler(int irq, void *priv) {
     ahci_port_t *port = (ahci_port_t *)priv;
     if (!port)
         return 0;
+    /* Top-half only: acknowledge and record the status bits, then wake the
+     * parked submitter, which re-checks PxCI/last_is itself.  Recording
+     * last_is before the write-clear keeps TFES observable to the waiter. */
     uint32_t is = ahci_read(port, AHCI_PXIS);
     if (is) {
+        port->last_is |= is;
         ahci_write(port, AHCI_PXIS, is);
         port->irq_seen = 1;
+        proc_wake_q_t wake_q;
+        proc_wake_q_init(&wake_q);
+        (void)wait_queue_collect_all(&port->waiters, 0, PROC_WAKE_EVENT,
+                                     &wake_q, NULL);
+        (void)proc_wake_q_flush(&wake_q);
     }
     return 0;
 }
@@ -278,7 +348,9 @@ static int ahci_probe(device_t *dev) {
     ahci_port_t *port = &g_ahci_port;
     memset(port, 0, sizeof(*port));
     port->regs = (uintptr_t)abar->start;
-    spin_init(&port->lock);
+    port->irq = -1;
+    mutex_init(&port->lock);
+    wait_queue_init(&port->waiters);
 
     uint32_t ghc = readl(ahci_reg(port->regs, AHCI_GHC));
     writel(ghc | AHCI_GHC_AE | AHCI_GHC_HR, ahci_reg(port->regs, AHCI_GHC));
@@ -289,7 +361,7 @@ static int ahci_probe(device_t *dev) {
         if (ms + 1U == AHCI_TIMEOUT_MS)
             return -ETIMEDOUT;
     }
-    writel(AHCI_GHC_AE | AHCI_GHC_IE, ahci_reg(port->regs, AHCI_GHC));
+    writel(AHCI_GHC_AE, ahci_reg(port->regs, AHCI_GHC));
 
     uint32_t pi = readl(ahci_reg(port->regs, AHCI_PI));
     unsigned ports = 0;
@@ -332,21 +404,29 @@ static int ahci_probe(device_t *dev) {
     ahci_write(port, AHCI_PXFB, (uint32_t)port->rfis_dma);
     ahci_write(port, AHCI_PXFBU, (uint32_t)(port->rfis_dma >> 32));
     ahci_write(port, AHCI_PXIS, 0xFFFFFFFFU);
-    ahci_write(port, AHCI_PXIE, 0xFFFFFFFFU);
+    /* Port interrupts stay disabled until a handler is registered: the
+     * polling completion path reads PxCI/PxIS directly, and a device that
+     * asserts a shared level line without a handler would storm it. */
+    ahci_write(port, AHCI_PXIE, 0);
     if (ahci_start_port(port) != 0 || ahci_identify(port) != 0) {
         ret = -EIO;
         goto fail;
     }
 
-    resource_t *irq = device_get_resource(dev, RES_IRQ, 0);
-    port->irq = -1;
-    if (irq) {
-        port->irq = (int)irq->start;
-        if (request_irq((uint32_t)port->irq, ahci_irq_handler, 0, port) == 0)
+    int irq = pci_intx_irq(dev);
+    if (irq >= 0) {
+        if (request_irq((uint32_t)irq, ahci_irq_handler, IRQF_SHARED,
+                        port) == 0) {
+            port->irq = irq;
             port->irq_registered = 1;
-        else
-            printf("[AHCI] failed to register IRQ %lu; polling enabled\n",
-                   (unsigned long)irq->start);
+            /* Unmask device interrupts only with the handler in place. */
+            ahci_write(port, AHCI_PXIE, 0xFFFFFFFFU);
+            writel(AHCI_GHC_AE | AHCI_GHC_IE,
+                   ahci_reg(port->regs, AHCI_GHC));
+        } else {
+            printf("[AHCI] failed to register IRQ %d; polling enabled\n",
+                   irq);
+        }
     }
 
     port->block.read_sector = ahci_block_read;
@@ -375,10 +455,12 @@ static int ahci_remove(device_t *dev) {
     if (!port)
         return 0;
     g_ahci_ready = 0;
+    /* Mask device interrupts before releasing the handler so a completion
+     * racing the remove cannot wake a torn-down port. */
+    ahci_write(port, AHCI_PXIE, 0);
     if (port->irq_registered)
         free_irq((uint32_t)port->irq, port);
     (void)ahci_stop_port(port);
-    ahci_write(port, AHCI_PXIE, 0);
     if (port->transfer) dma_free_coherent(port->transfer, AHCI_TRANSFER_BYTES, port->transfer_dma);
     if (port->tables) dma_free_coherent(port->tables, AHCI_CMD_SLOTS * sizeof(*port->tables), port->tables_dma);
     if (port->rfis) dma_free_coherent(port->rfis, 256U, port->rfis_dma);

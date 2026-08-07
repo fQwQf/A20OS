@@ -11,59 +11,26 @@
 操作系统用户态接口的设计可分解为以下正交维度：
 
 ```
-维度 1：资源标识模型
-  ├── 异构标识符（POSIX: fd/pid/tid/sid/shmid/timerid/...）
-  ├── 统一文件抽象（Plan 9: 一切皆文件）
-  ├── 统一 handle 抽象（Zircon/A20: handle + rights）
-  └── 纯能力引用（seL4: CNode capability 引用）
+维度 1：资源标识模型├── 异构标识符（POSIX: fd/pid/tid/sid/shmid/timerid/...）├── 统一文件抽象（Plan 9: 一切皆文件）├── 统一 handle 抽象（Zircon/A20: handle + rights）└── 纯能力引用（seL4: CNode capability 引用）
 
-维度 2：权限模型
-  ├── 无权限（DOS, 早期 Unix）
-  ├── 粗粒度 ACL（POSIX: uid/gid/mode bits）
-  ├── 细粒度 RBAC（SELinux, AppArmor）
-  ├── 对象能力（seL4, EROS, A20: capability rights）
-  └── 硬件能力（CHERI: capability hardware tags）
+维度 2：权限模型├── 无权限（DOS, 早期 Unix）├── 粗粒度 ACL（POSIX: uid/gid/mode bits）├── 细粒度 RBAC（SELinux, AppArmor）├── 对象能力（seL4, EROS, A20: capability rights）└── 硬件能力（CHERI: capability hardware tags）
 
-维度 3：进程创建
-  ├── fork（Unix: 地址空间复制 + COW）
-  ├── fork + exec（Unix 组合）
-  ├── posix_spawn（受限参数化 fork+exec）
-  ├── 分解式创建（seL4: 5+ 步骤, Zircon: create+start）
-  └── 显式 spawn（A20: 单步 + handle 注入）
+维度 3：进程创建├── fork（Unix: 地址空间复制 + COW）├── fork + exec（Unix 组合）├── posix_spawn（受限参数化 fork+exec）├── 分解式创建（seL4: 5+ 步骤, Zircon: create+start）└── 显式 spawn（A20: 单步 + handle 注入）
 
-维度 4：事件/等待模型
-  ├── select/poll（O(n) 扫描，fd only）
-  ├── epoll/kqueue（O(ready)，fd + 部分扩展）
-  ├── io_uring（环形缓冲，任意操作）
-  ├── 统一 port wait（Zircon: zx_port_wait）
-  └── 统一 event queue（A20: event_wait on any handle）
+维度 4：事件/等待模型├── select/poll（O(n) 扫描，fd only）├── epoll/kqueue（O(ready)，fd + 部分扩展）├── io_uring（环形缓冲，任意操作）├── 统一 port wait（Zircon: zx_port_wait）└── 统一 event queue（A20: event_wait on any handle）
 
-维度 5：ABI 演进
-  ├── 事实固定（Linux: syscall 不可变，新 syscall 编号）
-  ├── vDSO 版本化（Zircon: vdso 版本协商）
-  ├── 结构体版本化（A20: {size, version} + 追加规则）
-  └── 协议版本化（9P: version handshake）
+维度 5：ABI 演进├── 事实固定（Linux: syscall 不可变，新 syscall 编号）├── vDSO 版本化（Zircon: vdso 版本协商）├── 结构体版本化（A20: {size, version} + 追加规则）└── 协议版本化（9P: version handshake）
 
-维度 6：POSIX 兼容策略
-  ├── 原生 POSIX（Linux, FreeBSD）
-  ├── POSIX 子集兼容（Redox, Fuchsia: libfdio）
-  ├── POSIX 兼容层（A20: liba20posix 用户态 shim）
-  ├── 不兼容（seL4, NOVA）
-  └── 绕过（Exokernel, Unikernel）
+维度 6：POSIX 兼容策略├── 原生 POSIX（Linux, FreeBSD）├── POSIX 子集兼容（Redox, Fuchsia: libfdio）├── POSIX 兼容层（A20: liba20posix 用户态 shim）├── 不兼容（seL4, NOVA）└── 绕过（Exokernel, Unikernel）
 ```
 
 ### 1.2 A20OS 在设计空间中的位置
 
 ```
               资源标识    权限模型      进程创建      事件模型     ABI演进     POSIX兼容
-POSIX         异构        粗粒度ACL     fork          select/poll  事实固定     原生
-Plan 9        文件抽象    粗粒度ACL     fork+rfork    无(select)   协议版本化   不兼容
-seL4          纯能力      对象能力      分解式(5+步)  无(轮询)     无           不兼容
-Zircon        handle      对象能力      两步(create+  port_wait   vDSO版本化   兼容层(libfdio)
+POSIX         异构        粗粒度ACL     fork          select/poll  事实固定     原生Plan 9        文件抽象    粗粒度ACL     fork+rfork    无(select)   协议版本化   不兼容seL4          纯能力      对象能力      分解式(5+步)  无(轮询)     无           不兼容Zircon        handle      对象能力      两步(create+  port_wait   vDSO版本化   兼容层(libfdio)
                                        start)
-Redox         文件抽象    粗粒度+部分   fork(exec)    epoll-like   无           子集兼容
-Capsicum      fd          fd能力        fork+exec     epoll        无           扩展POSIX
-io_uring      fd          无            fork+exec     io_uring     无           原生
+Redox         文件抽象    粗粒度+部分   fork(exec)    epoll-like   无           子集兼容Capsicum      fd          fd能力        fork+exec     epoll        无           扩展POSIXio_uring      fd          无            fork+exec     io_uring     无           原生
 
 A20OS Native  handle      对象能力      spawn(单步)   event_queue  结构体版本化  兼容层(shim)
               ↓           ↓             ↓             ↓            ↓            ↓
@@ -235,7 +202,7 @@ jsix 证明了 handle-based ABI 在教学内核中的可行性。A20OS 在此基
 **问题描述**：现有的 capability-based 系统（seL4, Zircon）要么过于复杂无法在教学内核中实现，要么缺乏形式化安全保证。教学/竞赛内核需要一个**简单到可实现、但安全到可证明**的 capability 模型。
 
 **A20OS 的回答**：
-- 13 种类型、14 种权限、53 个形式化核心 syscall——保持可证明的核心边界；当前工程实现为 93 个入口
+- 13 种类型、14 种权限、53 个形式化核心 syscall——保持可证明的核心边界；当前工程实现为 112 个入口
 - SOS 操作语义 + 不变式证明——可以在论文中完整呈现
 - 不追求 seL4 级别的机器检验证明——但在逻辑上等价于更简单的不变式证明
 
@@ -326,7 +293,7 @@ jsix 证明了 handle-based ABI 在教学内核中的可行性。A20OS 在此基
 3. 在 send/recv 路径中增加类型 bitmask 检查（09 §2.3）
 4. 提出 5 种委托模式并证明组合安全性（09 §4.4）
 
-**结果**：当前实现为 93 个 syscall、13 种对象类型的 Native ABI，配合独立的 Linux ABI；48 个纸笔定理/引理覆盖 53 个形式化核心 syscall。typed channel、时态控制入口/sweeper、阻塞 IPC、无部分投递与对象级联释放已接入并有 smoke 覆盖，新增 40 个工程 syscall 的形式化覆盖仍待补齐。
+**结果**：当前实现为 112 个 syscall、13 种对象类型的 Native ABI，配合独立的 Linux ABI；48 个纸笔定理/引理覆盖 53 个形式化核心 syscall。typed channel、时态控制入口/sweeper、阻塞 IPC、无部分投递与对象级联释放已接入并有 smoke 覆盖，新增 56 个工程 syscall 的形式化覆盖仍待补齐。
 
 ### 6.3 论文可能的标题候选
 
@@ -370,7 +337,7 @@ jsix 证明了 handle-based ABI 在教学内核中的可行性。A20OS 在此基
 
 ### 7.2 中期（3-6 个月）
 
-1. **形式化覆盖扩展**：把 93 个实现入口中安全相关的新增 syscall 纳入 SOS/error-path 精化；对纯查询/调试入口明确排除理由
+1. **形式化覆盖扩展**：把 112 个实现入口中安全相关的新增 syscall 纳入 SOS/error-path 精化；对纯查询/调试入口明确排除理由
 2. **POSIX shim (liba20posix)**：实现基本兼容层；`fork()` 明确返回 ENOSYS，不以隐式地址空间复制冒充等价语义
 3. **宏基准测试**：运行 spawn-based 的完整应用（cp、ls、httpd 等），不使用依赖 fork 的 `make -j` 作为 shim 已支持的证据
 4. **TLA+ 模型检验**：优先验证 handle table、channel reserve-then-dequeue 与 Park/Wake 活性（§10.1）
@@ -389,11 +356,7 @@ jsix 证明了 handle-based ABI 在教学内核中的可行性。A20OS 在此基
 本文档（06-contribution-landscape.md）与 04、05 号文档构成完整的研究笔记体系：
 
 ```
-04-theory-deep-dive.md    （核心理论）
-  ├── SOS 操作语义
-  ├── 安全/活性/并发性证明
-  ├── 信息流能力边界（定理 9.5）
-  └── 内存模型、信息流控制
+04-theory-deep-dive.md    （核心理论）├── SOS 操作语义├── 安全/活性/并发性证明├── 信息流能力边界（定理 9.5）└── 内存模型、信息流控制
            │
            ├── 贡献声称 ←── 06-contribution-landscape.md（本文档）
            │   ├── C1' 时态能力演算
