@@ -102,4 +102,23 @@ static inline a20_status_t a20_device_block_complete(uint32_t n_done)
     return a20_syscall6(A20_SYS_device_block_complete, n_done, 0, 0, 0, 0, 0);
 }
 
+/* Exclusive ownership claim on a whitelisted user-owned device window
+ * (docs/hybrid-kernel/04-dual-placement.md).  Claims are auto-released
+ * at task death; a second claimant gets -A20_ERR_BUSY. */
+static inline a20_status_t a20_device_claim(uint64_t phys_base)
+{
+    return a20_syscall6(A20_SYS_device_claim, phys_base, 0, 0, 0, 0, 0);
+}
+
+static inline a20_status_t a20_device_release(uint64_t phys_base)
+{
+    return a20_syscall6(A20_SYS_device_release, phys_base, 0, 0, 0, 0, 0);
+}
+
+/* Return a pre-materialized, physically contiguous MEMORY handle. */
+static inline a20_status_t a20_device_alloc_dma(uint64_t size)
+{
+    return a20_syscall6(A20_SYS_device_alloc_dma, size, 0, 0, 0, 0, 0);
+}
+
 #endif

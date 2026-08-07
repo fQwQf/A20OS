@@ -198,11 +198,36 @@ void proc_sleep_until(uint64_t wake_time) {
 
 // idle 进程的主循环，系统无任务时运行
 void idle_loop(void) {
+    uint64_t last_activity = timer_get_ticks();
+    uint64_t last_warn = 0;
     while (1) {
         arch_local_irq_enable();
         kernel_progress_run_bottom_halves();
         sched();
         cpu_relax();
+        /* Hang diagnostic: if no non-idle task has run for a while, dump. */
+        uint64_t now = timer_get_ticks();
+        task_t *cur = proc_current();
+        if (cur && cur != proc_idle_task())
+            last_activity = now;
+        if (now - last_activity > 3 * TICKS_PER_SEC &&
+            now - last_warn > 2 * TICKS_PER_SEC) {
+            last_warn = now;
+            printf("[HANG] cpu=%u no progress for %lu ticks; tasks:\n",
+                   cpu_current_id(),
+                   (unsigned long)(now - last_activity));
+            uint64_t flags = spin_lock_irqsave(&proc_lock);
+            for (task_t *t = proc_first_task_locked(); t;
+                 t = proc_next_task_locked(t)) {
+                if (t->state == PROC_UNUSED) continue;
+                printf("  pid=%d name=%s state=%d on_cpu=%d on_rq=%d cpu=%u park=%d\n",
+                       t->pid, t->name, (int)t->state, t->on_cpu, t->on_rq,
+                       t->owner_cpu, (int)t->park_state);
+            }
+            spin_unlock_irqrestore(&proc_lock, flags);
+            extern void a20_channel_trace_dump(void);
+            a20_channel_trace_dump();
+        }
     }
 }
 

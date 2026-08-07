@@ -2,12 +2,7 @@
 
 > 本索引文档描述 A20OS Native ABI 研究笔记的文档结构、依赖关系、贡献声明和推荐阅读顺序。
 
-> **范围说明：** `docs/research/` 保存研究假设、形式化模型和实现演进记录，
-> 其中的伪代码不作为当前内核并发协议。当前 task 生命周期、wait queue、
-> Park/Wake、timeout、信号和 SMP 调度实现以
-> [进程、调度与阻塞协议](../process-scheduler.md)、
-> [EEVDF 调度器设计](../eevdf-scheduler.md)、`kernel/include/proc/`
-> 及 `docs/testing/*-audit.md` 为准。
+> **范围说明：** `docs/research/` 保存研究假设、形式化模型和实现演进记录，其中的伪代码不作为当前内核并发协议。当前 task 生命周期、wait queue、Park/Wake、timeout、信号和 SMP 调度实现以[进程、调度与阻塞协议](../process-scheduler.md)、[EEVDF 调度器设计](../eevdf-scheduler.md)、`kernel/include/proc/`及 `docs/testing/*-audit.md` 为准。
 
 ---
 
@@ -42,8 +37,7 @@
 ### 2.2 完整理解（3-4 小时）
 
 ```
-01 (问题分析)
-  → 02 (API 设计)
+01 (问题分析)→ 02 (API 设计)
     → 03 (实现方案)
       → 04 (形式化理论)
         → 07 (理论补充：精化证明、并发 trace)
@@ -67,21 +61,7 @@
 ## 3. 文档依赖图
 
 ```
-01 (POSIX 局限性)
- │
- ├──→ 02 (Native API 设计) ──→ 03 (实现方案)
- │         │                        │
- │         └─────→ 04 (形式化理论) ←─┘
- │                   │      │
- │         ┌─────────┘      └──────────┐
- │         ↓                            ↓
- │    07 (理论补充)              08 (架构深度)
- │         │                            │
- │         └──────────┬─────────────────┘
- │                    ↓
- │              09 (创新方向：混合信任/类型化通道/时态能力/委托模式)
- │                    │
- └────────────→ 05 (评估框架)
+01 (POSIX 局限性)│├──→ 02 (Native API 设计) ──→ 03 (实现方案)│         │                        ││         └─────→ 04 (形式化理论) ←─┘│                   │      ││         ┌─────────┘      └──────────┐│         ↓                            ↓│    07 (理论补充)              08 (架构深度)│         │                            ││         └──────────┬─────────────────┘│                    ↓│              09 (创新方向：混合信任/类型化通道/时态能力/委托模式)│                    │└────────────→ 05 (评估框架)
                      │
                      ↓
                 06 (贡献定位)
@@ -239,20 +219,9 @@
 设计规范位于 `docs/native-abi/`，实现位于 `kernel/abi/native/`、`kernel/ipc/` 和 `kernel/mm/`：
 
 ```text
-docs/native-abi/
-  00-overview.md        顶层概述、设计原则、文档索引
-  01-types.md           基础类型、ABI 头约定、syscall 参数结构体
-  02-errors.md          错误码、返回约定
-  03-handle.md          13 种对象、handle table、时态能力、93 syscall 列表
-  04-memory.md          VMO/VMAR 模型与当前 source 映射语义
-  05-ipc.md             Typed Channel、阻塞 Channel、Event Queue
-  06-security.md        Rights、标签、transfer、时态权限模型
-  07-startup.md         启动协议、libc 分层设计
-  08-runtime-status.md  当前实现状态与剩余差距
+docs/native-abi/00-overview.md        顶层概述、设计原则、文档索引01-types.md           基础类型、ABI 头约定、syscall 参数结构体02-errors.md          错误码、返回约定03-handle.md          13 种对象、handle table、时态能力、93 syscall 列表04-memory.md          VMO/VMAR 模型与当前 source 映射语义05-ipc.md             Typed Channel、阻塞 Channel、Event Queue06-security.md        Rights、标签、transfer、时态权限模型07-startup.md         启动协议、libc 分层设计08-runtime-status.md  当前实现状态与剩余差距
 
-kernel/abi/native/      syscall 分派、handle table、各子系统入口
-kernel/ipc/             channel、event queue、对象生命周期
-kernel/mm/              VMO/VMAR
+kernel/abi/native/      syscall 分派、handle table、各子系统入口kernel/ipc/             channel、event queue、对象生命周期kernel/mm/              VMO/VMAR
 ```
 
 本文档体系中的 01-08 号研究笔记在设计规范基础上进行：
@@ -264,7 +233,7 @@ kernel/mm/              VMO/VMAR
 5. **架构详述**（08）：设计中隐含的实现决策的显式分析
 6. **评估与贡献**（05+06）：如何验证和定位工作
 
-设计规范已整合研究发现，并以当前实现为准更新：13 种对象类型、93 个 syscall、typed channel 强制、时态控制入口与 deadline-driven sweeper、阻塞 channel/event_wait、reserve-then-dequeue 无部分投递、对象级联释放、VMO source 映射。研究笔记中的形式化证明仍以 53 个核心 syscall 模型为主，因此“设计已证明”与“93 个实现入口全部被证明”必须明确区分。
+设计规范已整合研究发现，并以当前实现为准更新：13 种对象类型、112 个 syscall、typed channel 强制、时态控制入口与 deadline-driven sweeper、阻塞 channel/event_wait、reserve-then-dequeue 无部分投递、对象级联释放、VMO source 映射。研究笔记中的形式化证明仍以 53 个核心 syscall 模型为主，因此“设计已证明”与“112 个实现入口全部被证明”必须明确区分。
 
 ---
 
@@ -278,7 +247,7 @@ kernel/mm/              VMO/VMAR
 6. **无锁数据结构未分析**：若未来引入无锁优化（如 event queue ring buffer），需补充 RELAXED 操作的内存序论证（07 §9.8.5）
 7. **时态能力开销未评估**：时态字段增加了 handle entry 大小（+16 bytes）；控制入口与 deadline-driven sweeper 已接入并通过 smoke，但扫描开销仍需实测
 8. **类型化通道的静态分析未工具化**：内核创建/send/recv 强制已接入并通过 smoke；推论 2.2.1 承诺的静态能力流分析仍未实现
-9. **形式化覆盖与实现存在边界**：07 的 trace 归纳穷举覆盖 53 个核心 syscall；当前实现为 93 个，新增的 futex、xattr、扩展网络/调度/系统调用尚未逐项加入 SOS 规则与 error-path 精化矩阵
+9. **形式化覆盖与实现存在边界**：07 的 trace 归纳穷举覆盖 53 个核心 syscall；当前实现为 111 个，新增的 futex、xattr、扩展网络/调度/系统调用尚未逐项加入 SOS 规则与 error-path 精化矩阵
 10. **事件源覆盖不完整**：channel、timer、task 退出已产生事件；file/socket/pipe 的 READABLE/WRITABLE/ERROR 以及 `event_watch_fs` 路径事件尚未接入
 
 ---

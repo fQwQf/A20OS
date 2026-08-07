@@ -31,9 +31,8 @@
 # A20OS
 
 **高性能、高兼容性的混合内核操作系统**
- 
-[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](#)
-[![Architecture](https://img.shields.io/badge/Arch-RISC--V%20%7C%20ARM64%20%7C%20x86__64%20%7C%20LoongArch%20%7C%20PPC64LE-orange.svg)](#)
+
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](#) [![Architecture](https://img.shields.io/badge/Arch-RISC--V%20%7C%20ARM64%20%7C%20x86__64%20%7C%20LoongArch%20%7C%20PPC64LE-orange.svg)](#)
 
 </div>
 

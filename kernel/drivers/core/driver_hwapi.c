@@ -16,6 +16,25 @@ static unsigned long irq_flags[256];
 static unsigned int irq_active[256];
 static spinlock_t irq_table_lock = SPINLOCK_INIT;
 
+/* IRQ_SHARED_CHAIN_MODEL:
+ * - A line whose primary registration and the new request both carry
+ *   IRQF_SHARED accepts additional handlers on a singly linked chain.
+ * - Nodes are allocated before taking irq_table_lock so no allocation
+ *   happens inside the spinlock; unlink runs under the lock, and the
+ *   freed node is only released after irq_active[irq] drains, so a
+ *   dispatch that already snapshotted the chain head finishes its walk
+ *   before any node memory is reused.
+ * - Dispatch invokes the primary handler first, then every chain node,
+ *   because a level-triggered shared line stays asserted until ALL
+ *   devices on it have cleared their interrupt source. */
+typedef struct irq_shared_node {
+    irq_handler_t handler;
+    void *priv;
+    struct irq_shared_node *next;
+} irq_shared_node_t;
+
+static irq_shared_node_t *irq_shared_chain[256];
+
 uint8_t ioport_read8(uint16_t port)
 {
 #ifdef CONFIG_IOPORT
@@ -43,15 +62,47 @@ int request_irq(uint32_t irq, irq_handler_t handler,
                 unsigned long flags, void *priv) {
     if (irq >= 256 || !handler)
         return -EINVAL;
+
+    /* Allocate the shared-chain node outside the spinlock; it is released
+     * below when the fast path does not need it. */
+    irq_shared_node_t *node = NULL;
+    if (flags & IRQF_SHARED) {
+        extern void *kmalloc(size_t);
+        node = (irq_shared_node_t *)kmalloc(sizeof(*node));
+        if (!node)
+            return -ENOMEM;
+    }
+
     uint64_t lock_flags = spin_lock_irqsave(&irq_table_lock);
     if (irq_handlers[irq]) {
+        int shareable = (irq_flags[irq] & IRQF_SHARED) &&
+                        (flags & IRQF_SHARED);
+        if (!shareable) {
+            spin_unlock_irqrestore(&irq_table_lock, lock_flags);
+            extern void kfree(void *);
+            if (node)
+                kfree(node);
+            return -EBUSY;
+        }
+        node->handler = handler;
+        node->priv    = priv;
+        node->next    = NULL;
+        irq_shared_node_t **tail = &irq_shared_chain[irq];
+        while (*tail)
+            tail = &(*tail)->next;
+        *tail = node;
         spin_unlock_irqrestore(&irq_table_lock, lock_flags);
-        return -EBUSY;
+        return 0;
     }
     irq_handlers[irq] = handler;
     irq_priv[irq]     = priv;
     irq_flags[irq]    = flags;
     spin_unlock_irqrestore(&irq_table_lock, lock_flags);
+
+    if (node) {
+        extern void kfree(void *);
+        kfree(node);
+    }
 
     if (!(flags & IRQF_NO_AUTO_ENABLE))
         irq_enable(irq);
@@ -62,15 +113,39 @@ int request_irq(uint32_t irq, irq_handler_t handler,
 void free_irq(uint32_t irq, void *priv) {
     if (irq >= 256)
         return;
+    extern void kfree(void *);
+    irq_shared_node_t *dead = NULL;
     uint64_t lock_flags = spin_lock_irqsave(&irq_table_lock);
-    if (!irq_handlers[irq] || irq_priv[irq] != priv) {
-        spin_unlock_irqrestore(&irq_table_lock, lock_flags);
-        return;
+    if (irq_handlers[irq] && irq_priv[irq] == priv) {
+        irq_disable(irq);
+        irq_handlers[irq] = NULL;
+        irq_priv[irq]     = NULL;
+        irq_flags[irq]    = 0;
+        /* Promote the first shared handler to the primary slot so the
+         * remaining devices on the line keep working. */
+        irq_shared_node_t *head = irq_shared_chain[irq];
+        if (head) {
+            irq_shared_chain[irq] = head->next;
+            irq_handlers[irq] = head->handler;
+            irq_priv[irq]     = head->priv;
+            irq_flags[irq]    = IRQF_SHARED;
+            irq_enable(irq);
+            dead = head;
+        }
+    } else {
+        irq_shared_node_t **link = &irq_shared_chain[irq];
+        while (*link && (*link)->priv != priv)
+            link = &(*link)->next;
+        if (!*link) {
+            spin_unlock_irqrestore(&irq_table_lock, lock_flags);
+            return;
+        }
+        irq_shared_node_t *node = *link;
+        *link = node->next;
+        dead = node;
+        if (!irq_handlers[irq] && !irq_shared_chain[irq])
+            irq_disable(irq);
     }
-    irq_disable(irq);
-    irq_handlers[irq] = NULL;
-    irq_priv[irq]     = NULL;
-    irq_flags[irq]    = 0;
     spin_unlock_irqrestore(&irq_table_lock, lock_flags);
 
     /* A handler that took its snapshot before the table entry was cleared may
@@ -78,6 +153,8 @@ void free_irq(uint32_t irq, void *priv) {
      * private state until that invocation has returned. */
     while (__atomic_load_n(&irq_active[irq], __ATOMIC_ACQUIRE) != 0)
         __asm__ volatile("" ::: "memory");
+    if (dead)
+        kfree(dead);
 }
 
 void irq_enable(uint32_t irq) {
@@ -111,6 +188,7 @@ void driver_irq_dispatch(uint32_t irq) {
     uint64_t lock_flags = spin_lock_irqsave(&irq_table_lock);
     irq_handler_t handler = irq_handlers[irq];
     void *priv = irq_priv[irq];
+    irq_shared_node_t *shared = irq_shared_chain[irq];
     if (!handler) {
         spin_unlock_irqrestore(&irq_table_lock, lock_flags);
         if (current_board && current_board->irqchip &&
@@ -126,6 +204,14 @@ void driver_irq_dispatch(uint32_t irq) {
         current_board->irqchip->ack();
 
     handler((int)irq, priv);
+    /* Shared handlers: free_irq() unlinks under the table lock and only
+     * releases node memory after irq_active[irq] drains, so this lockless
+     * walk either sees a node or a stale-but-still-valid one. */
+    while (shared) {
+        irq_shared_node_t *next = shared->next;
+        shared->handler((int)irq, shared->priv);
+        shared = next;
+    }
     __atomic_sub_fetch(&irq_active[irq], 1, __ATOMIC_RELEASE);
 
     if (current_board && current_board->irqchip &&

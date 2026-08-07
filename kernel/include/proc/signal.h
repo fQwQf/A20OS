@@ -89,6 +89,13 @@ int  signal_send_user(int pid, int signum);
 int  signal_send_info(int pid, int signum, const void *info, size_t info_size);
 int  signal_send_thread(int tid, int signum);
 int  signal_send_thread_user(int tid, int signum);
+
+/* Copy the siginfo queued for `signum` into `out` (ptrace GETSIGINFO
+ * snapshot).  Returns 0 and fills `out` when the pending signal carries
+ * queued info, -ENOENT otherwise. */
+int signal_task_get_pending_info(void *task, int signum, void *out,
+                                 size_t size);
+
 int  signal_task_has_unblocked(void *task);
 int  signal_task_has_fatal(void *task);
 int  signal_task_should_restart(void *task);

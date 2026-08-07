@@ -2,7 +2,6 @@
 #include "proc/proc_internal.h"
 #include "proc/lifetime.h"
 #include "proc/signal.h"
-#include "bpf/bpf.h"
 #include "drivers/core/udriver.h"
 #include "fs/fdtable.h"
 #include "fs/vfs.h"
@@ -256,7 +255,6 @@ static void proc_task_release_resources(task_t *t)
 
     vfs_release_process_locks(t->pid);
     fdtable_close_all(t);
-    bpf_release_process(t->pid);
 
     if (t->mm) {
         mm_destroy(t->mm);

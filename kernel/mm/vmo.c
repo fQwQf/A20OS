@@ -56,6 +56,11 @@ static void vmo_destroy(struct vmo *vmo)
     a20_objstat_add(&g_a20_objstats.vmo_pages,
                     -(int64_t)(vmo->phys_size / PAGE_SIZE));
     if (vmo->pages) {
+        int any = 0;
+        for (uint32_t i = 0; i < vmo->page_count; i++)
+            if (vmo->pages[i] != PFN_NONE) { any = 1; break; }
+        if (any)
+            arch_tlb_flush();  /* BEFORE frames return to the buddy */
         for (uint32_t i = 0; i < vmo->page_count; i++) {
             if (vmo->pages[i] != PFN_NONE)
                 pfa_free_page(vmo->pages[i]);
@@ -102,6 +107,12 @@ pfn_t vmo_get_page(struct vmo *vmo, uint32_t index)
     }
 
     void *va = pfn_to_virt(pfn);
+    uint32_t *probe = (uint32_t *)va;
+    if (*probe != 0 || probe[1] != 0) {
+        /* Benign since the buddy does not zero on free; counted so the
+         * signal survives without interleaving into user serial output. */
+        a20_objstat_add(&g_a20_objstats.vmo_dirty_frames, 1);
+    }
     memset(va, 0, PAGE_SIZE);
     vmo->pages[index] = pfn;
     vmo->phys_size += PAGE_SIZE;
@@ -152,6 +163,11 @@ int vmo_get_page_charged(struct vmo *vmo, uint32_t index,
     }
 
     void *va = pfn_to_virt(pfn);
+    uint32_t *probe = (uint32_t *)va;
+    if (*probe != 0 || probe[1] != 0) {
+        /* See vmo_get_page: legal reuse, counted not printed. */
+        a20_objstat_add(&g_a20_objstats.vmo_dirty_frames, 1);
+    }
     memset(va, 0, PAGE_SIZE);
     vmo->pages[index] = pfn;
     vmo->phys_size += PAGE_SIZE;
@@ -174,6 +190,7 @@ int64_t vmo_resize(struct vmo *vmo, uint64_t new_size)
     spin_lock(&vmo->lock);
 
     if (new_np <= vmo->page_count) {
+        int freed = 0;
         for (uint32_t i = new_np; i < vmo->page_count; i++) {
             if (vmo->pages[i] != PFN_NONE) {
                 pfa_free_page(vmo->pages[i]);
@@ -181,6 +198,7 @@ int64_t vmo_resize(struct vmo *vmo, uint64_t new_size)
                 a20_objstat_add(&g_a20_objstats.vmo_pages, -1);
                 if (vmo->charge_cg && vmo->charged_pages)
                     vmo->charged_pages--;
+                freed = 1;
             }
         }
         if (vmo->charge_cg && vmo->charged_pages == 0)
@@ -188,6 +206,8 @@ int64_t vmo_resize(struct vmo *vmo, uint64_t new_size)
         vmo->size = new_size;
         vmo->page_count = new_np;
         spin_unlock(&vmo->lock);
+        if (freed)
+            arch_tlb_flush();
         return 0;
     }
 

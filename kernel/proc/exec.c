@@ -18,6 +18,7 @@
 #include "proc/proc.h"
 #include "proc/proc_internal.h"
 #include "proc/signal.h"
+#include "proc/debug.h"
 #include "fs/fdtable.h"
 #include "fs/vfs.h"
 #include "fs/vfs/path.h"
@@ -708,6 +709,23 @@ static int exec_install_process(task_t *t,
 }
 
 /* ================================================================== */
+/*
+ * PT_DEBUG_EXEC_STOP: a traced task stops right after a successful exec.
+ * PTRACE_TRACEME children always stop here (classic SIGTRAP exec stop, which
+ * is how a tracer learns the tracee's new image); with the TRACEEXEC option
+ * the stop is reported as a PTRACE_EVENT_EXEC watch event instead.  The
+ * stop runs in tracee context and blocks until the tracer resumes the task.
+ */
+static void exec_trace_stop(task_t *t)
+{
+    if (!t || !proc_debug_is_traced(t))
+        return;
+    if (t->ptrace_flags & PT_DEBUG_FLAG_TRACEEXEC)
+        (void)proc_debug_event_stop(SIGTRAP, PT_DEBUG_EVENT_EXEC, 0);
+    else if (t->ptrace_flags & PT_DEBUG_FLAG_TRACEME)
+        (void)proc_debug_signal_stop(SIGTRAP);
+}
+
 /*  proc_exec — public API                                            */
 /* ================================================================== */
 
@@ -831,6 +849,8 @@ int proc_exec(const char *path, char *const argv[], char *const envp[])
                                       exec_stat_ok ? &exec_st : NULL);
             bprm_free_strings(&bprm);
             kfree(bprm.path);
+            if (r == 0)
+                exec_trace_stop(t);
             return r;
         }
 

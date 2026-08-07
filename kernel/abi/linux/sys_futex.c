@@ -6,16 +6,32 @@
 #include "core/lock.h"
 #include "mm/frame.h"
 
-#define FUTEX_WAITERS_MAX 1024
+/*
+ * A20OS Linux ABI futex — hash-bucket waiter management.
+ *
+ * Waiters are heap-allocated nodes chained on per-bucket lists.  The bucket
+ * lock replaces the former single global futex lock, so independent futex
+ * words in different buckets never serialize; there is no fixed waiter
+ * ceiling (the old implementation was limited to a static 1024-slot array).
+ *
+ * Locking: mm->lock -> bucket lock (kept from the previous design), and for
+ * operations touching two futex words the two buckets are locked in address
+ * (bucket index) order, so REQUEUE/WAKE_OP cannot deadlock across buckets.
+ * proc_try_wake() is always called after dropping the bucket locks, using
+ * wait_seq to reject stale wakeups.
+ */
+
+#define FUTEX_BUCKETS      64
+#define FUTEX_WAKE_BATCH   64
 
 typedef struct futex_waiter {
-    int active;
     uintptr_t vkey;
     uintptr_t pkey;
     mm_struct_t *mm;
     uint32_t bitset;
     task_t *task;
     uint64_t wait_seq;
+    struct futex_waiter *next;
 } futex_waiter_t;
 
 typedef struct futex_wake_token {
@@ -23,8 +39,25 @@ typedef struct futex_wake_token {
     uint64_t wait_seq;
 } futex_wake_token_t;
 
-static spinlock_t g_futex_lock = SPINLOCK_INIT;
-static futex_waiter_t g_futex_waiters[FUTEX_WAITERS_MAX];
+static spinlock_t g_futex_bucket_locks[FUTEX_BUCKETS] = {
+    [0 ... (FUTEX_BUCKETS - 1)] = SPINLOCK_INIT
+};
+static futex_waiter_t *g_futex_buckets[FUTEX_BUCKETS];
+
+/*
+ * Hash on the virtual address only, not the mm pointer: fork-inherited
+ * MAP_SHARED mappings keep the same virtual address in parent and child, so
+ * cross-process shared futexes land in the same bucket (the pkey match in
+ * futex_waiter_matches then disambiguates within the bucket).  Shared
+ * mappings at different virtual addresses in two processes are a documented
+ * limitation (same as a virtual-address futex key).
+ */
+static unsigned futex_bucket_index(uintptr_t vkey)
+{
+    uint64_t h = (uint64_t)vkey * 0xC2B2AE3D27D4EB4FULL;
+    h ^= h >> 33;
+    return (unsigned)(h & (FUTEX_BUCKETS - 1));
+}
 
 static int futex_timeout_ticks(void *timeout, int absolute, int realtime,
                                uint64_t *ticks_out)
@@ -63,29 +96,41 @@ static int futex_timeout_ticks(void *timeout, int absolute, int realtime,
     return 0;
 }
 
-/* Remove a waiter and transfer its task reference to the caller. */
-static task_t *futex_waiter_take_slot(futex_waiter_t *w)
+/* Unlink a waiter node (bucket lock held) and transfer its task reference
+ * to the caller; the node is freed. */
+static task_t *futex_waiter_unlink(futex_waiter_t **head, futex_waiter_t *w)
 {
-    task_t *task = w->active ? w->task : NULL;
-    if (w->active)
+    task_t *task = w->task;
+    if (task)
         proc_lifetime_note_wait_remove();
-    w->active = 0;
-    w->task = NULL;
-    w->wait_seq = 0;
-    w->vkey = 0;
-    w->pkey = 0;
-    w->mm = NULL;
-    w->bitset = 0;
+    if (*head == w)
+        *head = w->next;
+    else {
+        futex_waiter_t *p = *head;
+        while (p && p->next != w)
+            p = p->next;
+        if (p)
+            p->next = w->next;
+    }
+    kfree(w);
     return task;
 }
 
-static void futex_waiter_clear_task(task_t *task)
+/* Drop stale waiter nodes of `task` from one bucket (bucket lock held).
+ * The park protocol guarantees a task parks on at most one wait at a time,
+ * so clearing the current bucket is sufficient and keeps the bucket lock
+ * nesting single-level. */
+static void futex_waiter_clear_task_in_bucket(futex_waiter_t **head,
+                                              task_t *task)
 {
-    if (!task) return;
-    for (int i = 0; i < FUTEX_WAITERS_MAX; i++) {
-        if (g_futex_waiters[i].active && g_futex_waiters[i].task == task) {
-            task_t *old = futex_waiter_take_slot(&g_futex_waiters[i]);
+    futex_waiter_t **pp = head;
+    while (*pp) {
+        futex_waiter_t *w = *pp;
+        if (w->task == task) {
+            task_t *old = futex_waiter_unlink(pp, w);
             proc_put(old);
+        } else {
+            pp = &w->next;
         }
     }
 }
@@ -103,8 +148,9 @@ static uintptr_t futex_phys_key(int *uaddr)
  *
  * The first copy_from_user() below may fault the page in.  The actual
  * wait-side linearization point is this non-faulting load while mm->lock and
- * g_futex_lock are both held: munmap cannot invalidate the translation, and
- * a matching FUTEX_WAKE cannot inspect the bucket until the waiter is linked.
+ * the bucket lock are both held: munmap cannot invalidate the translation,
+ * and a matching FUTEX_WAKE cannot inspect the bucket until the waiter is
+ * linked.
  */
 static int futex_user_load_locked(task_t *task, int *uaddr, int *value,
                                   uintptr_t *pkey)
@@ -137,7 +183,7 @@ static int futex_user_load_locked(task_t *task, int *uaddr, int *value,
 static int futex_waiter_matches(const futex_waiter_t *w, mm_struct_t *mm,
                                 uintptr_t vkey, uintptr_t pkey)
 {
-    if (!w->active)
+    if (!w)
         return 0;
     if (w->task && (w->task->state == PROC_UNUSED || w->task->state == PROC_ZOMBIE))
         return 0;
@@ -148,32 +194,97 @@ static int futex_waiter_matches(const futex_waiter_t *w, mm_struct_t *mm,
     return 0;
 }
 
-static int futex_waiter_alloc(uintptr_t vkey, uintptr_t pkey, mm_struct_t *mm,
-                              uint32_t bitset, proc_wait_token_t token)
+/* Allocate a waiter node, link it into the caller's bucket (bucket lock
+ * held), and take a task reference. */
+static futex_waiter_t *futex_waiter_alloc(unsigned bucket, uintptr_t vkey,
+                                          uintptr_t pkey, mm_struct_t *mm,
+                                          uint32_t bitset,
+                                          proc_wait_token_t token)
 {
-    futex_waiter_clear_task(token.task);
-    for (int i = 0; i < FUTEX_WAITERS_MAX; i++) {
-        if (!g_futex_waiters[i].active) {
-            task_t *task = proc_get(token.task);
-            if (!task)
-                return -ESRCH;
-            g_futex_waiters[i].active = 1;
-            g_futex_waiters[i].vkey = vkey;
-            g_futex_waiters[i].pkey = pkey;
-            g_futex_waiters[i].mm = mm;
-            g_futex_waiters[i].bitset = bitset;
-            g_futex_waiters[i].task = task;
-            g_futex_waiters[i].wait_seq = token.seq;
-            proc_lifetime_note_wait_add();
-            return i;
-        }
+    futex_waiter_t *w = kmalloc(sizeof(*w));
+    if (!w)
+        return NULL;
+    task_t *task = proc_get(token.task);
+    if (!task) {
+        kfree(w);
+        return NULL;
     }
-    return -ENOMEM;
+    futex_waiter_clear_task_in_bucket(&g_futex_buckets[bucket], task);
+    w->vkey = vkey;
+    w->pkey = pkey;
+    w->mm = mm;
+    w->bitset = bitset;
+    w->task = task;
+    w->wait_seq = token.seq;
+    w->next = g_futex_buckets[bucket];
+    g_futex_buckets[bucket] = w;
+    proc_lifetime_note_wait_add();
+    return w;
 }
 
-/* g_futex_lock protects waiter publication/removal; proc_try_wake() is always
- * called after dropping it, using wait_seq to reject stale wakeups.
- * ticks == 0 waits indefinitely. */
+/* Collect up to FUTEX_WAKE_BATCH matching waiters from one bucket (bucket
+ * lock held), returning the count collected. */
+static int futex_bucket_collect_wake(futex_waiter_t **head, mm_struct_t *mm,
+                                     uintptr_t vkey, uintptr_t pkey,
+                                     uint32_t bitset, int limit,
+                                     futex_wake_token_t *list)
+{
+    int n = 0;
+    futex_waiter_t **pp = head;
+    while (*pp && n < limit) {
+        futex_waiter_t *w = *pp;
+        if (!futex_waiter_matches(w, mm, vkey, pkey) ||
+            !(w->bitset & bitset)) {
+            pp = &w->next;
+            continue;
+        }
+        uint64_t wait_seq = w->wait_seq;
+        task_t *task = futex_waiter_unlink(pp, w);
+        if (task) {
+            list[n].task = task;
+            list[n].wait_seq = wait_seq;
+            n++;
+        }
+    }
+    return n;
+}
+
+static void futex_wake_batch(futex_wake_token_t *list, int n)
+{
+    for (int i = 0; i < n; i++) {
+        (void)proc_try_wake(list[i].task, list[i].wait_seq, PROC_WAKE_EVENT);
+        proc_put(list[i].task);
+    }
+}
+
+/* Bucket lock held: requeue up to requeue_nr matching waiters from bucket1
+ * to bucket2 (both already locked, b1 != b2).  Returns the count moved. */
+static int futex_bucket_requeue_to(futex_waiter_t **head1,
+                                   futex_waiter_t **head2,
+                                   mm_struct_t *mm, uintptr_t vkey1,
+                                   uintptr_t pkey1, uintptr_t vkey2,
+                                   uintptr_t pkey2, int requeue_nr)
+{
+    int moved = 0;
+    futex_waiter_t **pp = head1;
+    while (*pp && moved < requeue_nr) {
+        futex_waiter_t *w = *pp;
+        if (!futex_waiter_matches(w, mm, vkey1, pkey1)) {
+            pp = &w->next;
+            continue;
+        }
+        *pp = w->next;
+        w->vkey = vkey2;
+        w->pkey = pkey2;
+        w->mm = mm;
+        w->next = *head2;
+        *head2 = w;
+        moved++;
+    }
+    return moved;
+}
+
+/* ticks == 0 waits indefinitely. */
 static int futex_wait_ticks(int *uaddr, int expected, uint64_t ticks, uint32_t bitset)
 {
     if (!uaddr) return -EFAULT;
@@ -196,45 +307,52 @@ static int futex_wait_ticks(int *uaddr, int expected, uint64_t ticks, uint32_t b
     if (!token.task)
         return -EAGAIN;
 
+    unsigned bucket = futex_bucket_index(vkey);
+    spinlock_t *bl = &g_futex_bucket_locks[bucket];
     uint64_t mm_flags = spin_lock_irqsave(&t->mm->lock);
-    uint64_t flags = spin_lock_irqsave(&g_futex_lock);
+    uint64_t flags = spin_lock_irqsave(bl);
     int load_ret = futex_user_load_locked(t, uaddr, &uval, &pkey);
     if (load_ret < 0 || uval != expected) {
-        spin_unlock_irqrestore(&g_futex_lock, flags);
+        spin_unlock_irqrestore(bl, flags);
         spin_unlock_irqrestore(&t->mm->lock, mm_flags);
         (void)proc_park_cancel(token);
         proc_park_finish(token);
         return load_ret < 0 ? load_ret : -EAGAIN;
     }
     if (signal_task_has_unblocked(t)) {
-        spin_unlock_irqrestore(&g_futex_lock, flags);
+        spin_unlock_irqrestore(bl, flags);
         spin_unlock_irqrestore(&t->mm->lock, mm_flags);
         (void)proc_park_cancel(token);
         proc_park_finish(token);
         return -ERESTARTSYS;
     }
-    int slot = futex_waiter_alloc(vkey, pkey, t->mm, bitset, token);
-    if (slot < 0) {
-        spin_unlock_irqrestore(&g_futex_lock, flags);
+    futex_waiter_t *w = futex_waiter_alloc(bucket, vkey, pkey, t->mm,
+                                           bitset, token);
+    if (!w) {
+        spin_unlock_irqrestore(bl, flags);
         spin_unlock_irqrestore(&t->mm->lock, mm_flags);
         (void)proc_park_cancel(token);
         proc_park_finish(token);
-        return slot;
+        return -ENOMEM;
     }
-    spin_unlock_irqrestore(&g_futex_lock, flags);
+    spin_unlock_irqrestore(bl, flags);
     spin_unlock_irqrestore(&t->mm->lock, mm_flags);
 
     proc_wake_reason_t reason = proc_park_commit(token);
     proc_park_finish(token);
 
-    flags = spin_lock_irqsave(&g_futex_lock);
+    flags = spin_lock_irqsave(bl);
     task_t *waiter_ref = NULL;
-    if (slot >= 0 && slot < FUTEX_WAITERS_MAX) {
-        futex_waiter_t *w = &g_futex_waiters[slot];
-        if (w->active && w->task == t && w->wait_seq == token.seq)
-            waiter_ref = futex_waiter_take_slot(w);
+    futex_waiter_t **pp = &g_futex_buckets[bucket];
+    while (*pp) {
+        futex_waiter_t *n = *pp;
+        if (n->task == t && n->wait_seq == token.seq) {
+            waiter_ref = futex_waiter_unlink(pp, n);
+            break;
+        }
+        pp = &n->next;
     }
-    spin_unlock_irqrestore(&g_futex_lock, flags);
+    spin_unlock_irqrestore(bl, flags);
     proc_put(waiter_ref);
 
     if (proc_wake_reason_is_task_interrupt(reason) ||
@@ -284,27 +402,22 @@ static int futex_wake_on(int *uaddr, int nr, uint32_t bitset)
     uintptr_t vkey = (uintptr_t)uaddr;
     uintptr_t pkey = futex_phys_key(uaddr);
     mm_struct_t *mm = cur ? cur->mm : NULL;
-    futex_wake_token_t wake_list[FUTEX_WAITERS_MAX];
-    int wake_count = 0;
-    uint64_t flags = spin_lock_irqsave(&g_futex_lock);
-    for (int i = 0; i < FUTEX_WAITERS_MAX && wake_count < nr; i++) {
-        futex_waiter_t *w = &g_futex_waiters[i];
-        if (!futex_waiter_matches(w, mm, vkey, pkey) || !(w->bitset & bitset))
-            continue;
-        uint64_t wait_seq = w->wait_seq;
-        task_t *task = futex_waiter_take_slot(w);
-        if (task) {
-            wake_list[wake_count].task = task;
-            wake_list[wake_count].wait_seq = wait_seq;
-            wake_count++;
-        }
-    }
-    spin_unlock_irqrestore(&g_futex_lock, flags);
+    spinlock_t *bl = &g_futex_bucket_locks[futex_bucket_index(vkey)];
+
     int woke = 0;
-    for (int i = 0; i < wake_count; i++) {
-        woke += proc_try_wake(wake_list[i].task, wake_list[i].wait_seq,
-                              PROC_WAKE_EVENT) ? 1 : 0;
-        proc_put(wake_list[i].task);
+    futex_wake_token_t batch[FUTEX_WAKE_BATCH];
+    while (woke < nr) {
+        int want = nr - woke;
+        if (want > FUTEX_WAKE_BATCH) want = FUTEX_WAKE_BATCH;
+        int got = 0;
+        uint64_t flags = spin_lock_irqsave(bl);
+        got = futex_bucket_collect_wake(&g_futex_buckets[futex_bucket_index(vkey)],
+                                        mm, vkey, pkey, bitset, want, batch);
+        spin_unlock_irqrestore(bl, flags);
+        if (got == 0)
+            break;
+        futex_wake_batch(batch, got);
+        woke += got;
     }
     return woke;
 }
@@ -325,43 +438,60 @@ static int futex_requeue(int *uaddr, int wake_nr, int requeue_nr, int *uaddr2,
         if (uval != cmpval) return -EAGAIN;
     }
 
-    int done = 0;
-    int moved = 0;
-    futex_wake_token_t wake_list[FUTEX_WAITERS_MAX];
-    int wake_count = 0;
+    task_t *cur = proc_current();
+    mm_struct_t *mm = cur ? cur->mm : NULL;
     uintptr_t vkey1 = (uintptr_t)uaddr;
     uintptr_t pkey1 = futex_phys_key(uaddr);
     uintptr_t vkey2 = (uintptr_t)uaddr2;
     uintptr_t pkey2 = futex_phys_key(uaddr2);
-    task_t *cur = proc_current();
-    mm_struct_t *mm = cur ? cur->mm : NULL;
-    uint64_t flags = spin_lock_irqsave(&g_futex_lock);
-    for (int i = 0; i < FUTEX_WAITERS_MAX && done < wake_nr; i++) {
-        futex_waiter_t *w = &g_futex_waiters[i];
-        if (!futex_waiter_matches(w, mm, vkey1, pkey1)) continue;
-        uint64_t wait_seq = w->wait_seq;
-        task_t *task = futex_waiter_take_slot(w);
-        if (task) {
-            wake_list[wake_count].task = task;
-            wake_list[wake_count].wait_seq = wait_seq;
-            wake_count++;
-            done++;
+    unsigned b1 = futex_bucket_index(vkey1);
+    unsigned b2 = futex_bucket_index(vkey2);
+    unsigned lo = b1 < b2 ? b1 : b2;
+    unsigned hi = b1 < b2 ? b2 : b1;
+
+    int done = 0;
+    int moved = 0;
+    futex_wake_token_t batch[FUTEX_WAKE_BATCH];
+    spinlock_t *lo_lock = &g_futex_bucket_locks[lo];
+    spinlock_t *hi_lock = &g_futex_bucket_locks[hi];
+
+    if (lo != hi)
+        (void)spin_lock_irqsave(hi_lock);
+    uint64_t flags = spin_lock_irqsave(lo_lock);
+
+    /* Wake phase on bucket1. */
+    while (done < wake_nr) {
+        int want = wake_nr - done;
+        if (want > FUTEX_WAKE_BATCH) want = FUTEX_WAKE_BATCH;
+        int got = futex_bucket_collect_wake(&g_futex_buckets[b1], mm, vkey1,
+                                            pkey1, FUTEX_BITSET_MATCH_ANY,
+                                            want, batch);
+        if (got == 0)
+            break;
+        futex_wake_batch(batch, got);
+        done += got;
+    }
+
+    /* Requeue phase: remaining bucket1 matches move to bucket2. */
+    if (requeue_nr > 0) {
+        if (b1 == b2) {
+            /* Same word: count matches but nothing to move. */
+            futex_waiter_t *w = g_futex_buckets[b1];
+            while (w && moved < requeue_nr) {
+                if (futex_waiter_matches(w, mm, vkey1, pkey1))
+                    moved++;
+                w = w->next;
+            }
+        } else {
+            moved = futex_bucket_requeue_to(&g_futex_buckets[b1],
+                                            &g_futex_buckets[b2],
+                                            mm, vkey1, pkey1, vkey2, pkey2,
+                                            requeue_nr);
         }
     }
-    for (int i = 0; i < FUTEX_WAITERS_MAX && moved < requeue_nr; i++) {
-        futex_waiter_t *w = &g_futex_waiters[i];
-        if (!futex_waiter_matches(w, mm, vkey1, pkey1)) continue;
-        w->vkey = vkey2;
-        w->pkey = pkey2;
-        w->mm = mm;
-        moved++;
-    }
-    spin_unlock_irqrestore(&g_futex_lock, flags);
-    for (int i = 0; i < wake_count; i++) {
-        (void)proc_try_wake(wake_list[i].task, wake_list[i].wait_seq,
-                            PROC_WAKE_EVENT);
-        proc_put(wake_list[i].task);
-    }
+    spin_unlock_irqrestore(lo_lock, flags);
+    if (lo != hi)
+        spin_unlock_irqrestore(hi_lock, flags);
     return done + moved;
 }
 
@@ -422,49 +552,51 @@ static int futex_wake_op(int *uaddr, int wake_nr, int wake2_nr,
     uintptr_t pkey1 = futex_phys_key(uaddr);
     uintptr_t vkey2 = (uintptr_t)uaddr2;
     uintptr_t pkey2 = futex_phys_key(uaddr2);
-    futex_wake_token_t wake_list[FUTEX_WAITERS_MAX];
-    int wake_count = 0;
-    int woke = 0;
+    unsigned b1 = futex_bucket_index(vkey1);
+    unsigned b2 = futex_bucket_index(vkey2);
+    unsigned lo = b1 < b2 ? b1 : b2;
+    unsigned hi = b1 < b2 ? b2 : b1;
+    spinlock_t *lo_lock = &g_futex_bucket_locks[lo];
+    spinlock_t *hi_lock = &g_futex_bucket_locks[hi];
 
-    uint64_t flags = spin_lock_irqsave(&g_futex_lock);
-    for (int i = 0; i < FUTEX_WAITERS_MAX && woke < wake_nr; i++) {
-        futex_waiter_t *w = &g_futex_waiters[i];
-        if (!futex_waiter_matches(w, mm, vkey1, pkey1))
-            continue;
-        uint64_t wait_seq = w->wait_seq;
-        task_t *task = futex_waiter_take_slot(w);
-        if (task) {
-            wake_list[wake_count].task = task;
-            wake_list[wake_count].wait_seq = wait_seq;
-            wake_count++;
-            woke++;
-        }
+    int woke = 0;
+    futex_wake_token_t batch[FUTEX_WAKE_BATCH];
+
+    if (lo != hi)
+        (void)spin_lock_irqsave(hi_lock);
+    uint64_t flags = spin_lock_irqsave(lo_lock);
+
+    while (woke < wake_nr) {
+        int want = wake_nr - woke;
+        if (want > FUTEX_WAKE_BATCH) want = FUTEX_WAKE_BATCH;
+        int got = futex_bucket_collect_wake(&g_futex_buckets[b1], mm, vkey1,
+                                            pkey1, FUTEX_BITSET_MATCH_ANY,
+                                            want, batch);
+        if (got == 0)
+            break;
+        futex_wake_batch(batch, got);
+        woke += got;
     }
 
     if (futex_wake_op_cmp(oldval, cmp, cmparg)) {
         int woke2 = 0;
-        for (int i = 0; i < FUTEX_WAITERS_MAX && woke2 < wake2_nr; i++) {
-            futex_waiter_t *w = &g_futex_waiters[i];
-            if (!futex_waiter_matches(w, mm, vkey2, pkey2))
-                continue;
-            uint64_t wait_seq = w->wait_seq;
-            task_t *task = futex_waiter_take_slot(w);
-            if (task) {
-                wake_list[wake_count].task = task;
-                wake_list[wake_count].wait_seq = wait_seq;
-                wake_count++;
-                woke++;
-                woke2++;
-            }
+        while (woke2 < wake2_nr) {
+            int want = wake2_nr - woke2;
+            if (want > FUTEX_WAKE_BATCH) want = FUTEX_WAKE_BATCH;
+            int got = futex_bucket_collect_wake(&g_futex_buckets[b2], mm,
+                                                vkey2, pkey2,
+                                                FUTEX_BITSET_MATCH_ANY,
+                                                want, batch);
+            if (got == 0)
+                break;
+            futex_wake_batch(batch, got);
+            woke += got;
+            woke2 += got;
         }
     }
-    spin_unlock_irqrestore(&g_futex_lock, flags);
-
-    for (int i = 0; i < wake_count; i++) {
-        (void)proc_try_wake(wake_list[i].task, wake_list[i].wait_seq,
-                            PROC_WAKE_EVENT);
-        proc_put(wake_list[i].task);
-    }
+    spin_unlock_irqrestore(lo_lock, flags);
+    if (lo != hi)
+        spin_unlock_irqrestore(hi_lock, flags);
     return woke;
 }
 

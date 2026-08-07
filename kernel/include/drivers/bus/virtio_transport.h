@@ -30,6 +30,13 @@ typedef struct virtio_transport {
 
     /* Platform IRQ line for this device, or -1 if not IRQ-driven. */
     int      irq;
+
+    /* 1 when the IRQ is a shareable PCI INTx line: the driver must pass
+     * IRQF_SHARED at registration so several functions on one GSI can
+     * coexist, and must keep device-level interrupts disabled when the
+     * registration failed (a source without a handler would hold the
+     * shared level line asserted forever). */
+    int      shared_irq;
 } virtio_transport_t;
 
 /* Probe for the next virtio-blk device.

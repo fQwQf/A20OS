@@ -12,22 +12,7 @@ Native ABI 将匿名内存、文件映射和共享内存统一到两个核心抽
 - **VMAR (Virtual Memory Address Region)**：进程地址空间中的一段连续虚拟地址范围。VMO 通过 vm_map 操作映射到 VMAR 中。
 
 ```text
-进程地址空间 (VMAR)
-┌──────────────────────────────────────────────────┐
-│ 0x0000_0000_0000                                 │
-│  ... (不可映射)                                   │
-│ 0x0001_0000_0000  ┌──────────────┐               │
-│                    │ VMAR: code   │ ← VMO: ELF    │
-│ 0x0001_0001_0000  └──────────────┘               │
-│                    ┌──────────────┐               │
-│                    │ VMAR: heap   │ ← VMO: anon   │
-│                    └──────────────┘               │
-│  ...                                              │
-│ 0x7fff_0000_0000  ┌──────────────┐               │
-│                    │ VMAR: stack  │ ← VMO: anon   │
-│ 0x8000_0000_0000  └──────────────┘               │
-│  ... (内核空间)                                   │
-└──────────────────────────────────────────────────┘
+进程地址空间 (VMAR)┌──────────────────────────────────────────────────┐│ 0x0000_0000_0000                                 ││  ... (不可映射)                                   ││ 0x0001_0000_0000  ┌──────────────┐               ││                    │ VMAR: code   │ ← VMO: ELF    ││ 0x0001_0001_0000  └──────────────┘               ││                    ┌──────────────┐               ││                    │ VMAR: heap   │ ← VMO: anon   ││                    └──────────────┘               ││  ...                                              ││ 0x7fff_0000_0000  ┌──────────────┐               ││                    │ VMAR: stack  │ ← VMO: anon   ││ 0x8000_0000_0000  └──────────────┘               ││  ... (内核空间)                                   │└──────────────────────────────────────────────────┘
 ```
 
 ### 1.1 与 POSIX mmap 的区别
@@ -220,17 +205,7 @@ int64_t vm_flush(uint64_t addr, uint64_t length, uint32_t flags);
 ## 5. 共享内存流程
 
 ```text
-进程 A                         进程 B
-  │                              │
-  vm_alloc → addr_A              │
-  │                              │
-  vm_share(addr_A) → shm_handle │
-  │                              │
-  channel_send(shm_handle) ──────→ channel_recv → shm_handle_B
-  │                              │
-  │                              │ vm_map(shm_handle_B) → addr_B
-  │                              │
-  [读写 addr_A] ←── 共享内存 ──→ [读写 addr_B]
+进程 A                         进程 B│                              │vm_alloc → addr_A              ││                              │vm_share(addr_A) → shm_handle ││                              │channel_send(shm_handle) ──────→ channel_recv → shm_handle_B│                              ││                              │ vm_map(shm_handle_B) → addr_B│                              │[读写 addr_A] ←── 共享内存 ──→ [读写 addr_B]
 ```
 
 权限传递：`vm_share` 的 `rights` 参数限制接收方权限。如果 rights 只有 READ，接收方映射后只能读取。
@@ -242,13 +217,7 @@ int64_t vm_flush(uint64_t addr, uint64_t length, uint32_t flags);
 ### 6.1 映射到现有 mm_struct
 
 ```c
-// VMAR 对应 mm_struct 中的 vm_area
-// VMO 对应 vm_area 的后端存储
-//
-// Linux ABI: vm_area → vfile (通过 vm_file)
-// Native ABI: VMAR → VMO (通过 a20_vmar.vmo)
-//
-// 两者共享同一套页表和 TLB 刷新机制
+// VMAR 对应 mm_struct 中的 vm_area// VMO 对应 vm_area 的后端存储//// Linux ABI: vm_area → vfile (通过 vm_file)// Native ABI: VMAR → VMO (通过 a20_vmar.vmo)//// 两者共享同一套页表和 TLB 刷新机制
 ```
 
 ### 6.2 缺页处理

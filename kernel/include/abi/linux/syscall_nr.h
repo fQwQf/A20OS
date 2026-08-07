@@ -84,6 +84,7 @@
 #define SYS_clock_nanosleep 115
 #define SYS_sched_yield    124
 #define SYS_sched_setparam 118
+#define SYS_ptrace        117
 #define SYS_sched_setscheduler 119
 #define SYS_sched_getscheduler 120
 #define SYS_sched_getparam 121

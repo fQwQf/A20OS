@@ -4,6 +4,46 @@
 #include "core/string.h"
 #include "core/stdio.h"
 #include "mm/oom.h"
+struct task_t;
+extern struct task_t *proc_current(void);
+extern int proc_task_pid(const void *task);
+#include "core/arch.h"
+#include "core/timer.h"
+
+/* Release trace (diagnostics): last N frame releases with caller info. */
+#define FRAME_TRACE_ENTRIES 128
+struct frame_trace_ent {
+    uint64_t tick;
+    pfn_t    pfn;
+    uintptr_t ra;
+    int      pid;
+};
+static struct frame_trace_ent g_frame_trace[FRAME_TRACE_ENTRIES];
+static uint32_t g_frame_trace_idx;
+
+static void frame_trace(pfn_t pfn)
+{
+    uint32_t i = __atomic_fetch_add(&g_frame_trace_idx, 1, __ATOMIC_RELAXED) %
+                 FRAME_TRACE_ENTRIES;
+    g_frame_trace[i].tick = timer_get_ticks();
+    g_frame_trace[i].pfn  = pfn;
+    g_frame_trace[i].ra   = (uintptr_t)__builtin_return_address(2);
+    g_frame_trace[i].pid  = proc_current() ? proc_task_pid(proc_current()) : -1;
+}
+
+void frame_trace_dump_pfn(pfn_t pfn)
+{
+    printf("[FRAME-TRACE] releases of pfn=%lu:\n", (unsigned long)pfn);
+    uint32_t n = g_frame_trace_idx;
+    uint32_t start = n > FRAME_TRACE_ENTRIES ? n - FRAME_TRACE_ENTRIES : 0;
+    for (uint32_t i = start; i < n; i++) {
+        struct frame_trace_ent *e = &g_frame_trace[i % FRAME_TRACE_ENTRIES];
+        if (e->pfn != pfn)
+            continue;
+        printf("  tick=%lu ra=0x%lx pid=%d\n",
+               (unsigned long)e->tick, (unsigned long)e->ra, e->pid);
+    }
+}
 
 
 pfa_t pfa;
@@ -234,6 +274,8 @@ static pfn_t pfa_alloc_from_buddy(int order)
     while (o > order) {
         o--;
         pfn_t buddy = blk ^ (1u << o);
+        /* The buddy half must be entirely free; if any interior frame is
+         * still allocated the block was corrupt when it entered the list. */
         for (pfn_t i = buddy; i < buddy + (1u << o); i++) {
             if (pfa.meta[i].flags == FRAME_F_ALLOC ||
                 pfa.meta[i].refcount > 0) {
@@ -376,6 +418,7 @@ void frame_put(pfn_t pfn) {
     if (!pfn_valid(pfn)) return;
     uint64_t flags = spin_lock_irqsave(&pfa.lock);
     if (pfa.meta[pfn].refcount > 0 && --pfa.meta[pfn].refcount == 0) {
+        frame_trace(pfn);
         /* refcount 归零，直接在此释放（内联 pfa_free 核心逻辑），
          * 避免先解锁再调 pfa_free 的竞态窗口 */
         int actual_order = (int)pfa.meta[pfn].order;

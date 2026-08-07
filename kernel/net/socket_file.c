@@ -1,4 +1,5 @@
 #include "net/socket_internal.h"
+#include "net/netd_sock_proxy.h"
 #include "ipc/ipc.h"
 #include "net/lwip_stack.h"
 #include "core/consts.h"
@@ -15,6 +16,8 @@ static int net_vfile_read(vfile_t *vf, char *buf, size_t count) {
     net_socket_t *s = vf ? (net_socket_t *)vf->priv : NULL;
     if (!s)
         return -ENOTSOCK;
+    if (s->netd_id >= 0)
+        return (int)netd_socket_recv(s->netd_id, buf, count, 0, NULL, NULL);
     if (s->domain == AF_ALG)
         return net_alg_socket_recv(s, buf, count);
     uint64_t start = timer_get_ticks();
@@ -110,6 +113,8 @@ static int net_vfile_write(vfile_t *vf, const char *buf, size_t count) {
     net_socket_t *s = vf ? (net_socket_t *)vf->priv : NULL;
     if (!s)
         return -ENOTSOCK;
+    if (s->netd_id >= 0)
+        return (int)netd_socket_send(s->netd_id, buf, count, 0, NULL, 0);
     if (count > NET_MAX_PAYLOAD && s->type != SOCK_STREAM)
         return -EMSGSIZE;
     if (s->domain == AF_ALG)
@@ -183,6 +188,8 @@ int net_socket_close_file(vfile_t *vf) {
     ktrace_net("[NET] close: dom=%d type=%d listen=%d tcp=%p peer=%p closed=%d\n",
                s->domain, s->type, s->listening, (void *)s->tcp,
                (void *)s->peer, s->closed);
+    if (s->netd_id >= 0)
+        netd_socket_close(s->netd_id);
     net_inet_socket_destroy(s);
     if (s->ch_ep) {
         a20_channel_ep_release(s->ch_ep);

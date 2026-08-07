@@ -104,10 +104,26 @@ int64_t sys_a20_ns_create(const a20_syscall_args_t *args);
 int64_t sys_a20_ns_apply(const a20_syscall_args_t *args);
 int64_t sys_a20_security_get_context(const a20_syscall_args_t *args);
 int64_t sys_a20_security_set_context(const a20_syscall_args_t *args);
+/* Debug (0x0900) — sys_native_debug.c, wraps proc_debug_* */
 int64_t sys_a20_debug_attach(const a20_syscall_args_t *args);
 int64_t sys_a20_debug_read_regs(const a20_syscall_args_t *args);
 int64_t sys_a20_debug_write_regs(const a20_syscall_args_t *args);
 int64_t sys_a20_debug_map_memory(const a20_syscall_args_t *args);
+int64_t sys_a20_debug_traceme(const a20_syscall_args_t *args);
+int64_t sys_a20_debug_wait(const a20_syscall_args_t *args);
+int64_t sys_a20_debug_resume(const a20_syscall_args_t *args);
+int64_t sys_a20_debug_detach(const a20_syscall_args_t *args);
+int64_t sys_a20_debug_event(const a20_syscall_args_t *args);
+int64_t sys_a20_debug_read(const a20_syscall_args_t *args);
+int64_t sys_a20_debug_write(const a20_syscall_args_t *args);
+int64_t sys_a20_debug_kill(const a20_syscall_args_t *args);
+
+/* Kernel extension points (0x0D00) — sys_native_ext.c */
+int64_t sys_a20_ext_prog_load(const a20_syscall_args_t *args);
+int64_t sys_a20_ext_prog_attach(const a20_syscall_args_t *args);
+int64_t sys_a20_ext_prog_detach(const a20_syscall_args_t *args);
+int64_t sys_a20_ext_prog_release(const a20_syscall_args_t *args);
+int64_t sys_a20_ext_point_info(const a20_syscall_args_t *args);
 int64_t sys_a20_system_info(const a20_syscall_args_t *args);
 int64_t sys_a20_system_random(const a20_syscall_args_t *args);
 int64_t sys_a20_system_reboot(const a20_syscall_args_t *args);
@@ -121,6 +137,12 @@ int64_t sys_a20_device_irq_unlisten(const a20_syscall_args_t *args);
 int64_t sys_a20_device_vmo_phys(const a20_syscall_args_t *args);
 int64_t sys_a20_device_block_attach(const a20_syscall_args_t *args);
 int64_t sys_a20_device_block_complete(const a20_syscall_args_t *args);
+int64_t sys_a20_device_claim(const a20_syscall_args_t *args);
+int64_t sys_a20_device_release(const a20_syscall_args_t *args);
+int64_t sys_a20_device_alloc_dma(const a20_syscall_args_t *args);
+int64_t sys_a20_netd_attach(const a20_syscall_args_t *args);
+int64_t sys_a20_netd_sock_register(const a20_syscall_args_t *args);
+int64_t sys_a20_netd_tx_send(const a20_syscall_args_t *args);
 
 /* Generate handler stubs from .def */
 #define A20_NATIVE_SYSCALL(name, ...) \

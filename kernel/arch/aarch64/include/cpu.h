@@ -255,4 +255,9 @@ static inline int arch_unwind_frames(uint64_t fp,
     return n;
 }
 
+
+/* Local-only full flush. */
+static inline void arch_tlb_flush_local(void) {
+    arch_tlb_flush();
+}
 #endif

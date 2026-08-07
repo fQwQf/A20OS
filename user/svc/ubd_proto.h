@@ -7,6 +7,7 @@
 #define _A20_UBD_PROTO_H
 
 #include "a20_types.h"
+#include "a20_services_idl.h"
 
 #define A20_UBD_EP_SLOT   (A20_NATIVE_FD_HANDLE_BASE + 44u)
 #define A20_UBD_EP_HANDLE ((a20_handle_t)A20_UBD_EP_SLOT)
@@ -25,8 +26,4 @@
  *   'W' + u64 sector + 512B   -> reply { i64 status }
  *   'C'                       -> exit(42) (crash)
  */
-#define UBD_REQ_READ      'R'
-#define UBD_REQ_WRITE     'W'
-#define UBD_REQ_CRASH     'C'
-
 #endif
