@@ -152,9 +152,6 @@
 #define A20_SYS_device_release    0x0C08
 #define A20_SYS_device_alloc_dma  0x0C09
 
-#define A20_SYS_netd_attach        0x0D00
-#define A20_SYS_netd_sock_register  0x0D01
-#define A20_SYS_netd_tx_send       0x0D02
 /* Kernel extension points (0x0E00) */
 #define A20_SYS_ext_prog_load      0x0E00
 #define A20_SYS_ext_prog_attach    0x0E01

@@ -259,3 +259,7 @@ LINUX_SYSCALL(finit_module, 0, -ENOSYS)
 LINUX_SYSCALL(userfaultfd, 0, -ENOSYS)
 LINUX_SYSCALL(perf_event_open, 0, -ENOSYS)
 LINUX_SYSCALL(arch_prctl, 0, sys_arch_prctl((int)A(0), A(1)))
+
+/* A20OS extensions: channel IPC bridge (sys_a20_bridge.c) */
+LINUX_SYSCALL(a20_channel_pair, 0, sys_a20_channel_pair(args))
+LINUX_SYSCALL(a20_registry_client, 0, sys_a20_registry_client_fd(args))
