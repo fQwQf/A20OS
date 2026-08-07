@@ -1,5 +1,4 @@
 #include "net/lwip_stack.h"
-#include "net/netd_proto.h"
 #include "net/socket_internal.h"
 #include "net/net_config.h"
 #include "core/timer.h"
@@ -295,12 +294,6 @@ static void a20_lwip_process_netif_rx_tx_locked(struct netif *n)
             LINK_STATS_INC(link.drop);
             continue;
         }
-        if (netd_enabled()) {
-
-            netd_rx_frame(st->rx_frame, (uint32_t)len);
-            pbuf_free(p);
-            continue;
-        }
         pbuf_take(p, st->rx_frame, (u16_t)len);
         if (n->input(p, n) != ERR_OK) {
             pbuf_free(p);
@@ -308,15 +301,6 @@ static void a20_lwip_process_netif_rx_tx_locked(struct netif *n)
         }
     }
     netif_poll(n);
-    /* Frame plane: drain netd's TX ring into the NIC. */
-    if (netd_enabled()) {
-        for (;;) {
-            int tlen = (int)netd_tx_frame(st->tx_frame, sizeof(st->tx_frame));
-            if (tlen <= 0)
-                break;
-            st->ops->send(st->dev, st->tx_frame, (size_t)tlen);
-        }
-    }
 }
 
 /*

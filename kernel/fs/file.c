@@ -6,6 +6,7 @@
 #include "core/sync.h"
 #include "core/string.h"
 #include "mm/objcache.h"
+#include "ipc/objstats.h"
 
 #define GFILE_MAX VFS_MAX_OPEN
 #define GFILE_WORDS ((GFILE_MAX + 63) / 64)
@@ -103,6 +104,7 @@ vfile_t *vfile_alloc(void)
     vfile_t *vf = (vfile_t *)obj_cache_alloc_zero(&g_vfile_cache);
     if (vf) {
         __atomic_fetch_add(&g_vfile_live, 1, __ATOMIC_RELAXED);
+        a20_objstat_add(&g_a20_objstats.vfiles, 1);
         mutex_init(&vf->offset_lock);
         vf->lease = F_UNLCK;
     }
@@ -111,8 +113,10 @@ vfile_t *vfile_alloc(void)
 
 void vfile_free(vfile_t *vf)
 {
-    if (vf)
+    if (vf) {
         __atomic_fetch_sub(&g_vfile_live, 1, __ATOMIC_RELAXED);
+        a20_objstat_add(&g_a20_objstats.vfiles, -1);
+    }
     obj_cache_free(&g_vfile_cache, vf);
 }
 
