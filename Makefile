@@ -183,7 +183,7 @@ NATIVE_UBDD_BIN        := $(NATIVE_BUILD_DIR)/ubd-$(NATIVE_TAG)
 NATIVE_UINPUTD_BIN     := $(NATIVE_BUILD_DIR)/uinputd-$(NATIVE_TAG)
 NATIVE_PERSONALITY_BIN  := $(NATIVE_BUILD_DIR)/native-personality-$(NATIVE_TAG)
 NATIVE_LINUX_BIN        := $(NATIVE_BUILD_DIR)/native-linux-$(NATIVE_TAG)
-NATIVE_OUTPUTS         := $(NATIVE_HELLO_BIN) $(NATIVE_HANDLE_BIN) $(NATIVE_LIBC_BIN) $(NATIVE_FUTEX_BIN) $(NATIVE_MM_BIN) $(NATIVE_SIGNAL_BIN) $(NATIVE_IPC_BIN) $(NATIVE_CONTRACT_BIN) $(NATIVE_SVCMAN_BIN) $(NATIVE_ECHOD_BIN) $(NATIVE_SHMRING_BIN) $(NATIVE_SHMRINGD_BIN) $(NATIVE_CHAND_BIN) $(NATIVE_RTCD_BIN) $(NATIVE_RTCDD_BIN) $(NATIVE_REGISTRY_BIN) $(NATIVE_SVCMGR_BIN) $(NATIVE_ISOLATION_BIN) $(NATIVE_UBDD_BIN) $(NATIVE_UINPUTD_BIN) $(NATIVE_PERSONALITY_BIN) $(NATIVE_LINUX_BIN) $(NATIVE_NETD_BIN) $(NATIVE_DEBUG_BIN) $(NATIVE_EXT_BIN)
+NATIVE_OUTPUTS         := $(NATIVE_HELLO_BIN) $(NATIVE_HANDLE_BIN) $(NATIVE_LIBC_BIN) $(NATIVE_FUTEX_BIN) $(NATIVE_MM_BIN) $(NATIVE_SIGNAL_BIN) $(NATIVE_IPC_BIN) $(NATIVE_CONTRACT_BIN) $(NATIVE_SVCMAN_BIN) $(NATIVE_ECHOD_BIN) $(NATIVE_SHMRING_BIN) $(NATIVE_SHMRINGD_BIN) $(NATIVE_CHAND_BIN) $(NATIVE_RTCD_BIN) $(NATIVE_RTCDD_BIN) $(NATIVE_REGISTRY_BIN) $(NATIVE_SVCMGR_BIN) $(NATIVE_ISOLATION_BIN) $(NATIVE_UBDD_BIN) $(NATIVE_UINPUTD_BIN) $(NATIVE_PERSONALITY_BIN) $(NATIVE_LINUX_BIN) $(NATIVE_DEBUG_BIN) $(NATIVE_EXT_BIN)
 NATIVE_BUILD_STAMP     := $(NATIVE_BUILD_DIR)/.native-build-id
 comma := ,
 NET_HOSTFWD ?= hostfwd=tcp::5555-:5555,hostfwd=udp::5555-:5555
@@ -428,7 +428,7 @@ CFLAGS = -Wall -Wextra $(OPT) -ffreestanding -nostdlib \
          -fno-builtin -fno-common -std=gnu99 \
          -MMD -MP \
          -I$(ARCH_INCLUDE_DIR) -I$(INCLUDE_DIR) -I$(KERNEL_DIR) -I$(KERNEL_DIR)/net/lwip_port \
-         -Iuser/external/lwip/src/include \
+         -I$(KERNEL_DIR)/external/lwip/src/include \
          -I$(BOARD_INCLUDE_DIR) -I$(BUILD_DIR)/generated $(ARCH_CFLAGS) \
          -D$(shell echo $(ARCH) | tr a-z A-Z) \
          -DCONFIG_$(shell echo $(ARCH) | tr a-z A-Z) \
@@ -659,13 +659,13 @@ ROOTFS_OVERLAY_HDR   = kernel/include/fs/rootfs_overlay.h
 ROOTFS_OVERLAY_FILES := $(shell find $(ROOTFS_OVERLAY_DIR) -type f 2>/dev/null)
 KERNEL_SRC += $(ROOTFS_OVERLAY_SRC)
 
-include user/external/lwip/sources.mk
+include $(KERNEL_DIR)/external/lwip/sources.mk
 endif
 
 # Object files
-LWIP_KERNEL_SRC := $(filter user/external/lwip/src/%.c,$(KERNEL_SRC))
-KERNEL_OBJ = $(patsubst $(KERNEL_DIR)/%.c,$(BUILD_DIR)/%.o,$(filter-out user/%,$(KERNEL_SRC))) \
-             $(patsubst user/external/lwip/src/%.c,$(BUILD_DIR)/external/lwip/src/%.o,$(LWIP_KERNEL_SRC))
+LWIP_KERNEL_SRC := $(filter $(KERNEL_DIR)/external/lwip/src/%.c,$(KERNEL_SRC))
+KERNEL_OBJ = $(patsubst $(KERNEL_DIR)/%.c,$(BUILD_DIR)/%.o,$(filter-out user/% $(KERNEL_DIR)/external/lwip/%,$(KERNEL_SRC))) \
+             $(patsubst $(KERNEL_DIR)/external/lwip/src/%.c,$(BUILD_DIR)/external/lwip/src/%.o,$(LWIP_KERNEL_SRC))
 
 # vDSO user image (riscv64): built out-of-tree of ASM_SRC on purpose, it is
 # user code linked with its own script.  The vdso.elf FILE is embedded
@@ -683,7 +683,8 @@ endif
 $(VDSO_ELF): $(VDSO_SRC_DIR)/vdso.S $(VDSO_SRC_DIR)/vdso.ld
 	@mkdir -p $(dir $@)
 	$(VDSO_CC) -nostdlib -nostartfiles -shared -Wl,--build-id=none \
-	    -Wl,--hash-style=sysv -T $(VDSO_SRC_DIR)/vdso.ld -o $@ $<
+	    -Wl,--hash-style=sysv -Ikernel/include \
+	    -T $(VDSO_SRC_DIR)/vdso.ld -o $@ $<
 
 $(VDSO_BLOB): $(VDSO_ELF)
 	cd $(BUILD_DIR)/vdso && $(OBJCOPY) -I binary -O elf64-littleriscv \
@@ -714,7 +715,7 @@ VBOX_AARCH64_LOAD_ADDRESS ?= 0x08080000ULL
 		check-arch-boundary check-task-state-boundary \
 		check-riscv64-bringup check-loongarch64-bringup check-aarch64-bringup check-x86_64-bringup check-arm32-bringup check-riscv32-bringup check-ppc64le-bringup \
 		check-riscv64-user check-loongarch64-user check-aarch64-user check-x86_64-user check-arm32-user check-riscv32-user check-ppc64le-user \
-		smoke-riscv64 smoke-loongarch64 smoke-aarch64 smoke-x86_64 smoke-qemu-gui-x86_64 smoke-qemu-gui-riscv64 smoke-qemu-gui-aarch64 smoke-qemu-gui-arm32 smoke-qemu-gui-loongarch64 smoke-arm32 smoke-riscv32 smoke-ppc64le smoke-abi-linux smoke-ptrace smoke-network-suite smoke-proc-a20 smoke-proc-stress smoke-procfs-stress smoke-mm-stress smoke-vfs-stress smoke-vfs-edge smoke-sched-stress smoke-futex-stress smoke-socket-stress smoke-driver-lifecycle smoke-drvmod smoke-drvmod-riscv64 smoke-drvmod-x86_64 smoke-drvmod-aarch64 smoke-drvmod-loongarch64 smoke-hda smoke-audio-userspace smoke-virtio-sound smoke-pci-portability smoke-native-handle smoke-native-libc smoke-native-futex smoke-io-event smoke-signalfd-stress smoke-evdev-stress smoke-scm-stress \
+		smoke-riscv64 smoke-loongarch64 smoke-aarch64 smoke-x86_64 smoke-qemu-gui-x86_64 smoke-qemu-gui-riscv64 smoke-qemu-gui-aarch64 smoke-qemu-gui-arm32 smoke-qemu-gui-loongarch64 smoke-arm32 smoke-riscv32 smoke-ppc64le smoke-abi-linux smoke-a20-channel smoke-ptrace smoke-network-suite smoke-proc-a20 smoke-proc-stress smoke-procfs-stress smoke-mm-stress smoke-vfs-stress smoke-vfs-edge smoke-sched-stress smoke-futex-stress smoke-socket-stress smoke-driver-lifecycle smoke-drvmod smoke-drvmod-riscv64 smoke-drvmod-x86_64 smoke-drvmod-aarch64 smoke-drvmod-loongarch64 smoke-hda smoke-audio-userspace smoke-virtio-sound smoke-pci-portability smoke-native-handle smoke-native-libc smoke-native-futex smoke-io-event smoke-signalfd-stress smoke-evdev-stress smoke-scm-stress \
 		smoke-arch-mmu-matrix \
 		FORCE regen-rootfs-overlay \
 		user_apps fs_img kernel-only dev-build contest-rv contest-la \
@@ -957,7 +958,8 @@ check-blocking-point-boundary:
 		rg -v '^kernel/(proc/(fork|proc|sched|cg_cpu)\.c|abi/native/sys_core\.c):' || true); \
 		test -z "$$bad" || { echo "$$bad"; exit 1; }
 	@rg -Uq 'typedef struct wait_queue_entry[^{]*\{[^}]*task[^}]*wait_seq' kernel/include/core/sync.h
-	@rg -Uq 'typedef struct futex_waiter[^{]*\{[^}]*task[^}]*wait_seq' kernel/abi/linux/sys_futex.c
+	@rg -q "wait_queue_entry_t entry" kernel/abi/linux/sys_futex.c
+	@! rg -n "typedef struct futex_waiter" kernel/abi/linux/sys_futex.c
 	@rg -Uq 'typedef struct wait_timer[^{]*\{[^}]*task[^}]*wait_seq' kernel/proc/timer_heap.c
 	@rg -Uq 'typedef struct proc_wake_q_item[^{]*\{[^}]*task[^}]*seq' kernel/include/proc/park.h
 	@rg -q "FUTEX_STRESS: unrelated-wake-isolation PASS" user/cmds/stress/futex_stress.c
@@ -1241,10 +1243,10 @@ check-driver-core-model: smoke-driver-lifecycle
 	@echo "check-driver-core-model: PASS"
 
 check-external-dependency-boundary:
-	@rg -q "include user/external/lwip/sources.mk" Makefile
+	@rg -qF 'include $$(KERNEL_DIR)/external/lwip/sources.mk' Makefile
 	@rg -q "EXTERNAL_LWIP_SOURCE_MANIFEST" docs/project/external-dependencies.md
-	@rg -q "LWIP_SRC" user/external/lwip/sources.mk
-	@rg -q "core/timeouts.c" user/external/lwip/sources.mk
+	@rg -q "LWIP_SRC" kernel/external/lwip/sources.mk
+	@rg -q "core/timeouts.c" kernel/external/lwip/sources.mk
 	@rg -q "EXTERNAL_LWIP_CONFIG_CONTRACT" docs/project/external-dependencies.md
 	@rg -q "NO_SYS=1" docs/project/external-dependencies.md
 	@rg -q "g_lwip_lock" docs/project/external-dependencies.md kernel/net/lwip_stack.c
@@ -1552,11 +1554,38 @@ smoke-abi-linux:
 			echo "smoke-abi-linux: timeout without PASS; tail of $$log:"; \
 			tail -n 80 "$$log"; \
 			exit 1; \
-		else \
-			echo "smoke-abi-linux: failed with status $$status; tail of $$log:"; \
-			tail -n 80 "$$log"; \
-			exit "$$status"; \
-		fi
+	else \
+		echo "smoke-abi-linux: failed with status $$status; tail of $$log:"; \
+		tail -n 80 "$$log"; \
+		exit "$$status"; \
+	fi
+
+smoke-a20-channel:
+	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/a20-channel-riscv64.log"; \
+	status=0; \
+	{ sleep $(SMOKE_INPUT_DELAY); printf 'a20_channel_test\npoweroff\n'; } | \
+	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
+		-machine virt -m 1G -nographic -smp 1 -bios default \
+		-global virtio-mmio.force-legacy=false \
+		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-both-dev/fat32.img,if=none,format=raw,id=x0 \
+		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		-kernel .kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf \
+		> "$$log" 2>&1 || status=$$?; \
+	if grep -q 'A20_CHANNEL: PASS' "$$log"; then \
+		echo "smoke-a20-channel: PASS; log saved to $$log"; \
+	elif [ "$$status" -eq 124 ]; then \
+		echo "smoke-a20-channel: timeout without PASS; tail of $$log:"; \
+		tail -n 80 "$$log"; \
+		exit 1; \
+	else \
+		echo "smoke-a20-channel: failed with status $$status; tail of $$log:"; \
+		tail -n 80 "$$log"; \
+		exit "$$status"; \
+	fi
 
 smoke-ptrace:
 	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
@@ -2753,9 +2782,9 @@ $(BUILD_DIR)/%.o: $(KERNEL_DIR)/%.c | Makefile $(BUILD_TIME_HDR)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-# lwIP moved into the user tree (user/external/lwip); kernel still compiles
+# lwIP lives under the kernel tree (kernel/external/lwip); the kernel compiles
 # the shared sources, objects land under $(BUILD_DIR)/external/lwip as before.
-$(BUILD_DIR)/external/lwip/src/%.o: user/external/lwip/src/%.c | Makefile $(BUILD_TIME_HDR)
+$(BUILD_DIR)/external/lwip/src/%.o: $(KERNEL_DIR)/external/lwip/src/%.c | Makefile $(BUILD_TIME_HDR)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
 
@@ -3812,69 +3841,9 @@ $(NATIVE_RTCDD_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) 
 native-rtcd-arch: $(NATIVE_RTCD_BIN) $(NATIVE_RTCDD_BIN)
 
 
-# ---- netd: userspace lwIP service (hybrid-kernel netstack migration) ----
-LWIP_SRC_DIR := user/external/lwip/src
-NETD_LWIP_SRC := \
-	$(LWIP_SRC_DIR)/core/init.c \
-	$(LWIP_SRC_DIR)/core/def.c \
-	$(LWIP_SRC_DIR)/core/dns.c \
-	$(LWIP_SRC_DIR)/core/inet_chksum.c \
-	$(LWIP_SRC_DIR)/core/ip.c \
-	$(LWIP_SRC_DIR)/core/mem.c \
-	$(LWIP_SRC_DIR)/core/memp.c \
-	$(LWIP_SRC_DIR)/core/netif.c \
-	$(LWIP_SRC_DIR)/core/pbuf.c \
-	$(LWIP_SRC_DIR)/core/raw.c \
-	$(LWIP_SRC_DIR)/core/stats.c \
-	$(LWIP_SRC_DIR)/core/sys.c \
-	$(LWIP_SRC_DIR)/core/tcp.c \
-	$(LWIP_SRC_DIR)/core/tcp_in.c \
-	$(LWIP_SRC_DIR)/core/tcp_out.c \
-	$(LWIP_SRC_DIR)/core/timeouts.c \
-	$(LWIP_SRC_DIR)/core/udp.c \
-	$(LWIP_SRC_DIR)/core/ipv4/acd.c \
-	$(LWIP_SRC_DIR)/core/ipv4/autoip.c \
-	$(LWIP_SRC_DIR)/core/ipv4/dhcp.c \
-	$(LWIP_SRC_DIR)/core/ipv4/etharp.c \
-	$(LWIP_SRC_DIR)/core/ipv4/icmp.c \
-	$(LWIP_SRC_DIR)/core/ipv4/igmp.c \
-	$(LWIP_SRC_DIR)/core/ipv4/ip4.c \
-	$(LWIP_SRC_DIR)/core/ipv4/ip4_addr.c \
-	$(LWIP_SRC_DIR)/core/ipv4/ip4_frag.c \
-	$(LWIP_SRC_DIR)/core/ipv6/dhcp6.c \
-	$(LWIP_SRC_DIR)/core/ipv6/ethip6.c \
-	$(LWIP_SRC_DIR)/core/ipv6/icmp6.c \
-	$(LWIP_SRC_DIR)/core/ipv6/inet6.c \
-	$(LWIP_SRC_DIR)/core/ipv6/ip6.c \
-	$(LWIP_SRC_DIR)/core/ipv6/ip6_addr.c \
-	$(LWIP_SRC_DIR)/core/ipv6/ip6_frag.c \
-	$(LWIP_SRC_DIR)/core/ipv6/mld6.c \
-	$(LWIP_SRC_DIR)/core/ipv6/nd6.c \
-	$(LWIP_SRC_DIR)/netif/ethernet.c
-
-NETD_EXTRA_CFLAGS := -Iuser/net/lwip -Iuser/net/lwip/lwip -Iuser/liba20c/include -Iuser \
-	-I$(LWIP_SRC_DIR)/include -I$(LWIP_SRC_DIR)/include/ipv4 \
-	-I$(LWIP_SRC_DIR)/include/ipv6 -Iuser/liba20rt
-
-NATIVE_NETD_BIN := $(NATIVE_BUILD_DIR)/netd-$(NATIVE_TAG)
-$(NATIVE_NETD_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) \
-		user/svc/netd.c user/svc/netd_sock.c user/net/lwip/netd_util.c user/net/lwip/lwipopts.h user/net/lwip/lwip/arch/cc.h user/net/lwip/lwip/arch/sys_arch.h $(NETD_LWIP_SRC)
-	@mkdir -p $(dir $@)
-	$(NATIVE_CC) -ffreestanding -nostdlib -static \
-	    $(NATIVE_CFLAGS) $(NETD_EXTRA_CFLAGS) -Iuser -Iuser/liba20c/include \
-	    -T$(NATIVE_LD) \
-	    $(NATIVE_CRT0) \
-	    $(NATIVE_SDK_SRC) \
-	    $(NATIVE_COMPILER_RT_SRC) \
-	    $(NATIVE_ARCH_SRC) \
-	    user/svc/netd.c user/svc/netd_sock.c user/net/lwip/netd_util.c \
-	    $(NETD_LWIP_SRC) \
-	    -o $@
-
-native-netd-arch: $(NATIVE_NETD_BIN)
-
-native-netd-rv:
-	$(MAKE) ARCH=riscv64 NOMMU=$(NOMMU) native-netd-arch
+# ---- netd: userspace lwIP service (removed).
+# The TCP/IP stack lives in the kernel (kernel/external/lwip + kernel/net);
+# the user-space netd frame-ring/socket-proxy plane was abandoned.
 
 native-rtcd-rv:
 	$(MAKE) ARCH=riscv64 NOMMU=$(NOMMU) native-rtcd-arch
