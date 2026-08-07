@@ -56,7 +56,7 @@ int64_t a20_vmar_map(struct vmo *vmo, uint64_t vmo_offset, uint64_t length,
     if (!cur || !cur->mm) return -A20_ERR_BAD_HANDLE;
 
     uint64_t addr = mm_mmap_vmo(cur->mm, hint, length, a20_prot_to_mmap(prot),
-                                MAP_ANONYMOUS | MAP_PRIVATE, vmo, vmo_offset);
+                                MAP_ANONYMOUS | MAP_SHARED, vmo, vmo_offset);
     if ((int64_t)addr < 0) {
         int err = (int)(int64_t)addr;
         if (err == -EINVAL)

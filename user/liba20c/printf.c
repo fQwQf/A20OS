@@ -195,6 +195,12 @@ int vsnprintf(char *buf, size_t size, const char *fmt, va_list ap)
     int pos = 0;
     if (size > 0) buf[0] = '\0';
 
+    /* Work on a copy: where va_list is an array type (x86_64), the
+     * function parameter has decayed to a pointer and &ap no longer has
+     * type va_list *, which get_signed/get_unsigned require. */
+    va_list aq;
+    __builtin_va_copy(aq, ap);
+
     while (*fmt) {
         if (*fmt != '%') {
             outc(*fmt, buf, size, &pos);
@@ -216,7 +222,7 @@ int vsnprintf(char *buf, size_t size, const char *fmt, va_list ap)
 
         int width = 0;
         if (*fmt == '*') {
-            width = va_arg(ap, int);
+            width = va_arg(aq, int);
             fmt++;
         } else if (is_digit(*fmt)) {
             width = parse_num(&fmt);
@@ -226,7 +232,7 @@ int vsnprintf(char *buf, size_t size, const char *fmt, va_list ap)
         if (*fmt == '.') {
             fmt++;
             if (*fmt == '*') {
-                prec = va_arg(ap, int);
+                prec = va_arg(aq, int);
                 fmt++;
             } else if (is_digit(*fmt)) {
                 prec = parse_num(&fmt);
@@ -262,39 +268,39 @@ int vsnprintf(char *buf, size_t size, const char *fmt, va_list ap)
         switch (spec) {
         case 'd':
         case 'i': {
-            int64_t v = get_signed(&ap, len);
+            int64_t v = get_signed(&aq, len);
             fmt_int(buf, size, &pos, v, width, prec, left, zero, plus, space);
             break;
         }
         case 'u': {
-            uint64_t v = get_unsigned(&ap, len);
+            uint64_t v = get_unsigned(&aq, len);
             fmt_uint(buf, size, &pos, v, 10, 0, 0, width, prec, left, zero);
             break;
         }
         case 'o': {
-            uint64_t v = get_unsigned(&ap, len);
+            uint64_t v = get_unsigned(&aq, len);
             fmt_uint(buf, size, &pos, v, 8, 0, alt, width, prec, left, zero);
             break;
         }
         case 'x':
         case 'X': {
-            uint64_t v = get_unsigned(&ap, len);
+            uint64_t v = get_unsigned(&aq, len);
             fmt_uint(buf, size, &pos, v, 16, spec == 'X', alt,
                      width, prec, left, zero);
             break;
         }
         case 'p': {
-            uint64_t v = (uint64_t)(uintptr_t)va_arg(ap, void *);
+            uint64_t v = (uint64_t)(uintptr_t)va_arg(aq, void *);
             fmt_uint(buf, size, &pos, v, 16, 0, 1, width, prec, left, zero);
             break;
         }
         case 's': {
-            const char *s = va_arg(ap, const char *);
+            const char *s = va_arg(aq, const char *);
             fmt_str(buf, size, &pos, s, width, prec, left);
             break;
         }
         case 'c': {
-            char c = (char)va_arg(ap, int);
+            char c = (char)va_arg(aq, int);
             fmt_char(buf, size, &pos, c, width, left);
             break;
         }
@@ -314,6 +320,7 @@ int vsnprintf(char *buf, size_t size, const char *fmt, va_list ap)
         if ((size_t)pos < size) buf[pos] = '\0';
         else buf[size - 1] = '\0';
     }
+    __builtin_va_end(aq);
     return pos;
 }
 

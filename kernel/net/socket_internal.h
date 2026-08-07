@@ -110,6 +110,7 @@ typedef struct net_socket {
     uint8_t peer_addr[NET_SOCKADDR_MAX];
     size_t peer_len;
     struct net_socket *peer;
+    int netd_id;   /* -1 = in-kernel lwIP socket; >=0 = netd-proxied */
     /* AF_UNIX socketpair channel-backed data plane (internal IPC bridge):
      * plain data flows through the channel; SCM_RIGHTS messages fall back
      * to the legacy queue (rx_head).  ch_buf holds a stream leftover. */
@@ -152,7 +153,6 @@ typedef struct net_socket {
     int ipv6_recv_2292_rthdr;
     int ipv6_recv_2292_hopopts;
     int ipv6_recv_2292_dstopts;
-    int bpf_prog_fd;
     uint8_t alg_last[NET_MAX_STREAM_PAYLOAD];
     size_t alg_last_len;
     char alg_type[16];
