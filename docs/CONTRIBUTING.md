@@ -5,9 +5,7 @@
 ## 1. fork 与分支
 
 ```bash
-git clone <你的 fork>
-cd oskernel2025-a20
-git checkout -b fix/<简短描述>
+git clone <你的 fork>cd oskernel2025-a20git checkout -b fix/<简短描述>
 # 或 feature/<子系统>-<描述>
 ```
 
@@ -39,12 +37,7 @@ make check-doc-test-gates
 如果修改了具体子系统，再运行对应门禁：
 
 ```bash
-make check-mm-lock-model        # 内存管理
-make check-vfs-abstraction      # 文件系统
-make check-abi-boundary         # ABI 边界
-make check-driver-core-model    # 驱动
-make check-io-progress-model    # I/O 进展
-make check-concurrency-foundation # 并发
+make check-mm-lock-model        # 内存管理make check-vfs-abstraction      # 文件系统make check-abi-boundary         # ABI 边界make check-driver-core-model    # 驱动make check-io-progress-model    # I/O 进展make check-concurrency-foundation # 并发
 ```
 
 ## 4. 提交信息风格
@@ -61,8 +54,7 @@ make check-concurrency-foundation # 并发
 ```text
 fs: add refcnt helper for vnode lifecycle
 
-Replace direct ref_count manipulation in ramfs/ext4 with
-vfile_ref_init / vfile_get / vfile_put_ref_only.
+Replace direct ref_count manipulation in ramfs/ext4 withvfile_ref_init / vfile_get / vfile_put_ref_only.
 
 Verified with:
 - make check-vfs-abstraction

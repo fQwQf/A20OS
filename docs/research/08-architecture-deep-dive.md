@@ -2,9 +2,7 @@
 
 > 本文档是 `03-implementation-plan.md` 的深度补充。基于对内核现有数据结构的分析（`task_t`, `vnode_t`, `vfile_t`, `mm_struct_t`, `vm_area_t`, `spinlock_t`, `wait_queue_t`, `refcount_t`），定义 Native ABI 对象到内核结构的具体映射、各子系统的实现架构、以及关键路径的锁序协议。
 
-> **实现更新：** 本文保留 Native ABI 的研究映射和证明背景；其中早期
-> wait-queue 伪代码已由 tokenized Park/Wake 取代。当前阻塞、唤醒和 task
-> 引用协议见 [进程、调度与阻塞协议](../process-scheduler.md)。
+> **实现更新：** 本文保留 Native ABI 的研究映射和证明背景；其中早期wait-queue 伪代码已由 tokenized Park/Wake 取代。当前阻塞、唤醒和 task引用协议见 [进程、调度与阻塞协议](../process-scheduler.md)。
 
 ---
 
@@ -85,8 +83,7 @@ Free slot 查找在纯数组上是 O(n) 扫描。Bitmap 将其优化为 O(n/64) 
 ### 2.3 Handle 操作实现
 
 ```c
-// handle 分配：O(n/64) worst case, O(1) amortized
-static int ht_alloc_slot(a20_handle_table_t *ht) {
+// handle 分配：O(n/64) worst case, O(1) amortizedstatic int ht_alloc_slot(a20_handle_table_t *ht) {
     // 从 free_hint 开始扫描 free_bitmap
     for (uint32_t i = ht->free_hint / 64; i < ht->bitmap_size; i++) {
         uint64_t word = ht->free_bitmap[i];
@@ -103,8 +100,7 @@ static int ht_alloc_slot(a20_handle_table_t *ht) {
     return -1;  // 需要扩容
 }
 
-// handle lookup：O(1)
-int64_t a20_handle_lookup(a20_handle_table_t *ht, a20_handle_t h,
+// handle lookup：O(1)int64_t a20_handle_lookup(a20_handle_table_t *ht, a20_handle_t h,
                           uint16_t expected_type, a20_rights_t required_rights,
                           a20_handle_entry_t *out) {
     if (h >= ht->capacity) return -A20_ERR_BAD_HANDLE;
@@ -136,8 +132,7 @@ int64_t a20_handle_lookup(a20_handle_table_t *ht, a20_handle_t h,
 ### 2.5 与 task_t 的集成
 
 ```c
-// 在 task_t 中添加：
-typedef struct task_t {
+// 在 task_t 中添加：typedef struct task_t {
     // ... 现有字段 ...
 
     // Native ABI 支持
@@ -201,24 +196,18 @@ typedef struct a20_eventq {
 
 **Q2：wake-up 机制？**
 
-事件追加到 pending ring 后，通知路径先释放 eventq/hash 对象锁，再调用
-`wait_queue_wake_one(&eq->waiters, 0, PROC_WAKE_EVENT)`。wait queue entry
-保存带引用的 task 和 `wait_seq`，因此延迟 wake 不能命中后续等待。
+事件追加到 pending ring 后，通知路径先释放 eventq/hash 对象锁，再调用`wait_queue_wake_one(&eq->waiters, 0, PROC_WAKE_EVENT)`。wait queue entry保存带引用的 task 和 `wait_seq`，因此延迟 wake 不能命中后续等待。
 
 若多个线程等待同一 event queue（合法但罕见），一次 wake_one 只唤醒一个。其余线程在后续事件到达时被唤醒。
 
 **Q3：与调度器的交互？**
 
-`wait_queue_wake_one` 先从对象队列 collect `(task, wait_seq, reason)`，再在
-对象锁外 flush。`proc_try_wake()` 只有在 token 仍匹配时才完成
-`PARKED -> WOKEN` 和 runqueue 发布；远程 CPU 通过持久
-`need_resched`/IPI 通知在安全点消费调度请求。
+`wait_queue_wake_one` 先从对象队列 collect `(task, wait_seq, reason)`，再在对象锁外 flush。`proc_try_wake()` 只有在 token 仍匹配时才完成`PARKED -> WOKEN` 和 runqueue 发布；远程 CPU 通过持久`need_resched`/IPI 通知在安全点消费调度请求。
 
 ### 3.3 事件分发机制
 
 ```c
-// 内核中任何产生事件的地方调用：
-void a20_event_notify(void *target_object, uint16_t target_type,
+// 内核中任何产生事件的地方调用：void a20_event_notify(void *target_object, uint16_t target_type,
                       uint32_t event_type, uint64_t data0, uint64_t data1) {
     // 遍历所有 event queue，找到 watch 了 target_object 的
     // （优化：全局 hash table：object → [watch_entry]）
@@ -285,8 +274,7 @@ void a20_eventq_destroy(a20_eventq_t *eq) {
 **被监控对象销毁时的清理**：
 
 ```c
-// 在 object_destroy 中调用：
-void a20_eventq_on_object_destroy(void *object) {
+// 在 object_destroy 中调用：void a20_eventq_on_object_destroy(void *object) {
     // 查找全局反向索引中 watch 了 object 的所有 entry
     a20_watch_entry_list_t *list = object_watches_lookup(object);
     if (!list) return;
@@ -318,8 +306,7 @@ void a20_eventq_on_object_destroy(void *object) {
 **策略**：在 `refcount_dec_and_test` 返回 true（最后一个引用）时，延迟 cleanup 到锁释放之后。使用引用计数的特性：一旦 refcount 降至 0，无其他线程能访问该 eventq（因为没有 handle 指向它），因此不需要持锁保护 eventq 的内部状态。
 
 ```c
-// 在 handle_close 中：
-if (last_ref) {
+// 在 handle_close 中：if (last_ref) {
     // 此时已无其他线程持有 eq 的 handle
     // 可以安全地在不持 eq->lock 的情况下清理
     spin_unlock(&ht->lock);   // 先释放 HT lock
@@ -528,8 +515,7 @@ channel_recv 的两阶段分离（§4.4）引入了一个正确性间隙：步�
 #### 实现
 
 ```c
-// channel endpoint 新增字段：
-typedef struct a20_channel_ep {
+// channel endpoint 新增字段：typedef struct a20_channel_ep {
     // ... 现有字段 ...
 
     // Partial delivery 状态
@@ -623,8 +609,7 @@ int64_t native_sys_channel_recv(a20_msg_recv_args_t *args) {
 #### 退出时的清理
 
 ```c
-// 在 task_exit 中，对每个 channel endpoint handle：
-void a20_channel_ep_cleanup(a20_channel_ep_t *ep) {
+// 在 task_exit 中，对每个 channel endpoint handle：void a20_channel_ep_cleanup(a20_channel_ep_t *ep) {
     spin_lock(&ep->lock);
     if (ep->pending_msg) {
         // 释放 pending 消息中的 handle 引用
@@ -649,8 +634,7 @@ void a20_channel_ep_cleanup(a20_channel_ep_t *ep) {
 **需要新增的 API**：
 
 ```c
-// 在 mm/elf.h 中新增：
-int elf_load_from_vfile(vfile_t *vf, uint64_t *entry_out,
+// 在 mm/elf.h 中新增：int elf_load_from_vfile(vfile_t *vf, uint64_t *entry_out,
                          mm_struct_t *mm, uint64_t *stack_top);
 ```
 
@@ -664,8 +648,7 @@ int elf_load_from_vfile(vfile_t *vf, uint64_t *entry_out,
 ### 5.2 a20_start_info_t 的构造
 
 ```c
-// 在 task_spawn 实现中：
-void native_setup_start_info(task_t *new_task, a20_start_info_t *info,
+// 在 task_spawn 实现中：void native_setup_start_info(task_t *new_task, a20_start_info_t *info,
                               a20_handle_t root, a20_handle_t cwd,
                               a20_handle_t stdio[3], a20_handle_t self) {
     info->size = sizeof(a20_start_info_t);
@@ -687,26 +670,11 @@ void native_setup_start_info(task_t *new_task, a20_start_info_t *info,
 ### 5.3 Spawn 的完整步骤
 
 ```
-1. 预验证（持有 ht->lock）
-   ├── 验证 image handle（FILE + READ）
-   ├── 验证 root_dir handle（DIR + READ）
-   ├── 验证 cwd_dir handle（DIR + READ）
-   ├── 验证 event_queue handle（EVENTQ + READ）或创建默认的
-   ├── 验证 stdio handles（FILE + READ/WRITE）
-   └── 验证 handles[] 中的每个 handle（TRANSFER 权限）
+1. 预验证（持有 ht->lock） ├── 验证 image handle（FILE + READ） ├── 验证 root_dir handle（DIR + READ） ├── 验证 cwd_dir handle（DIR + READ） ├── 验证 event_queue handle（EVENTQ + READ）或创建默认的 ├── 验证 stdio handles（FILE + READ/WRITE） └── 验证 handles[] 中的每个 handle（TRANSFER 权限）
 
-2. 创建新 task
-   ├── proc_alloc_user_image() — 分配 task_t, mm_struct, pgdir
-   ├── elf_load_from_vfile() — 加载 ELF segments
-   ├── 创建新 handle table
-   ├── 复制 handles[] 到新 HT（增加 refcount）
-   ├── 添加初始 handles（self, root, cwd, stdio, eq）
-   ├── 构造 a20_start_info_t，写入新进程的用户栈顶
-   ├── 设置 abi_mode = TASK_ABI_NATIVE
-   └── proc_make_ready() — 加入就绪队列
+2. 创建新 task ├── proc_alloc_user_image() — 分配 task_t, mm_struct, pgdir ├── elf_load_from_vfile() — 加载 ELF segments ├── 创建新 handle table ├── 复制 handles[] 到新 HT（增加 refcount） ├── 添加初始 handles（self, root, cwd, stdio, eq） ├── 构造 a20_start_info_t，写入新进程的用户栈顶 ├── 设置 abi_mode = TASK_ABI_NATIVE └── proc_make_ready() — 加入就绪队列
 
-3. 在父进程 HT 中分配 task handle
-   └── rights = {WAIT, SIGNAL, CONTROL}
+3. 在父进程 HT 中分配 task handle └── rights = {WAIT, SIGNAL, CONTROL}
 ```
 
 ---
@@ -738,10 +706,7 @@ typedef struct a20_shm {
 ```
 1. 验证 [addr, addr+len) 在当前 AS 中
 2. 分配 a20_shm_t
-3. 对 addr 到 addr+len 的每个页：
-   ├── 查找页表获取物理地址 paddr
-   ├── 增加 physical frame 的引用计数（防止被回收）
-   └── 记录 paddr 到 shm->pages[]
+3. 对 addr 到 addr+len 的每个页： ├── 查找页表获取物理地址 paddr ├── 增加 physical frame 的引用计数（防止被回收） └── 记录 paddr 到 shm->pages[]
 4. 创建 handle 指向 shm 对象
 5. 返回 handle 给用户
 ```
@@ -753,8 +718,7 @@ typedef struct a20_shm {
 2. 计算有效保护：effective_prot = prot & translate(rights)
 3. 在目标地址空间中找到空闲区域
 4. 创建 vm_area_t，标记为 VM_SHARED | VM_FILE
-5. 对每个页：
-   └── pt_map(pgdir, vaddr, shm->pages[i], effective_prot → pte_flags)
+5. 对每个页： └── pt_map(pgdir, vaddr, shm->pages[i], effective_prot → pte_flags)
 6. 不使用 CoW——共享内存的写操作直接反映到物理页
 ```
 
@@ -801,9 +765,7 @@ int64_t syscall_dispatch(trap_context_t *ctx) {
 
 typedef int64_t (*native_syscall_handler_t)(trap_context_t *ctx);
 
-// 编号 → handler 的查找表
-// 使用稀疏数组（4096 个条目，大部分为 NULL）
-static native_syscall_handler_t native_syscall_table[0x1000];
+// 编号 → handler 的查找表// 使用稀疏数组（4096 个条目，大部分为 NULL）static native_syscall_handler_t native_syscall_table[0x1000];
 
 int64_t native_syscall_dispatch(uint64_t num, trap_context_t *ctx) {
     if (num >= 0x1000) {
@@ -879,30 +841,13 @@ int64_t native_syscall_dispatch(uint64_t num, trap_context_t *ctx) {
 ## 10. 实现优先级与依赖图
 
 ```
-Phase 0（基础设施，无依赖）:
-  ├── handle_table.c + handle.h          ← 所有其他模块的基础
-  ├── task_t 扩展（abi_mode, handle_table）
-  ├── syscall_dispatch 双 ABI 支持
-  └── sys_core.c (abi_info)
+Phase 0（基础设施，无依赖）:├── handle_table.c + handle.h          ← 所有其他模块的基础├── task_t 扩展（abi_mode, handle_table）├── syscall_dispatch 双 ABI 支持└── sys_core.c (abi_info)
 
-Phase 1（最小可运行，依赖 Phase 0）:
-  ├── sys_handle.c (close, dup, query)   ← 依赖 handle_table
-  ├── sys_task.c (exit)                  ← 依赖 proc_exit
-  ├── sys_memory.c (alloc, unmap)        ← 依赖 mm_mmap
-  ├── sys_path.c (open, read, write)     ← 依赖 vfs, handle_table
-  ├── sys_time.c (clock_get)             ← 无额外依赖
-  └── sys_event.c (queue_create 基础)    ← 依赖 handle_table, wait_queue
+Phase 1（最小可运行，依赖 Phase 0）:├── sys_handle.c (close, dup, query)   ← 依赖 handle_table├── sys_task.c (exit)                  ← 依赖 proc_exit├── sys_memory.c (alloc, unmap)        ← 依赖 mm_mmap├── sys_path.c (open, read, write)     ← 依赖 vfs, handle_table├── sys_time.c (clock_get)             ← 无额外依赖└── sys_event.c (queue_create 基础)    ← 依赖 handle_table, wait_queue
 
-Phase 2（IPC + 进程创建，依赖 Phase 1）:
-  ├── sys_event.c (watch, wait)          ← 依赖 eventq, scheduler
-  ├── sys_event.c (channel_create/send/recv) ← 依赖 channel, handle transfer
-  ├── sys_task.c (spawn)                 ← 依赖 elf_load, channel
-  └── sys_memory.c (vm_map, vm_share)    ← 依赖 shm, vfile handle
+Phase 2（IPC + 进程创建，依赖 Phase 1）:├── sys_event.c (watch, wait)          ← 依赖 eventq, scheduler├── sys_event.c (channel_create/send/recv) ← 依赖 channel, handle transfer├── sys_task.c (spawn)                 ← 依赖 elf_load, channel└── sys_memory.c (vm_map, vm_share)    ← 依赖 shm, vfile handle
 
-Phase 3（网络 + 安全，依赖 Phase 2）:
-   ├── sys_net.c (全部)                   ← 依赖 socket, handle_table
-   ├── sys_time.c (timer)                 ← 依赖 timer, eventq
-   └── sys_security.c (ns)                ← 依赖 proc, handle_table
+Phase 3（网络 + 安全，依赖 Phase 2）:├── sys_net.c (全部)                   ← 依赖 socket, handle_table├── sys_time.c (timer)                 ← 依赖 timer, eventq└── sys_security.c (ns)                ← 依赖 proc, handle_table
 ```
 
 ---
@@ -1080,8 +1025,7 @@ void a20_timer_destroy(a20_timer_t *timer) {
 ### 12.3 安全的 IRQ 事件分发
 
 ```c
-// 在中断/软中断上下文中调用
-void a20_event_notify_irq(void *target_object, uint16_t target_type,
+// 在中断/软中断上下文中调用void a20_event_notify_irq(void *target_object, uint16_t target_type,
                            uint32_t event_type, uint64_t data0, uint64_t data1) {
     // 遍历全局反向索引，找到 watch 了 target_object 的 event queue
     // （全局索引查询需要 spin_lock_irqsave）
@@ -1147,17 +1091,12 @@ void a20_event_notify_irq(void *target_object, uint16_t target_type,
 ### 12.5 与调度器交互
 
 `wait_queue_wake_one` 在 IRQ 上下文中被调用时的行为：
-- 在 wait-queue 锁内摘除 entry，并把 task 引用和 `wait_seq` 转移到局部
-  wake queue；
+- 在 wait-queue 锁内摘除 entry，并把 task 引用和 `wait_seq` 转移到局部 wake queue；
 - 释放对象/wait-queue 锁后验证 Park token 并发布 READY/runqueue 状态；
-- **不立即调度**，而是以 release 语义设置目标 CPU 的持久
-  `need_resched`，必要时发送 IPI；
-- IPI handler 只确认通知；trap/syscall/timer 返回或显式 `sched()` 安全点
-  消费请求。
+- **不立即调度**，而是以 release 语义设置目标 CPU 的持久 `need_resched`，必要时发送 IPI；
+- IPI handler 只确认通知；trap/syscall/timer 返回或显式 `sched()` 安全点 消费请求。
 
-事件 ring 更新在对象锁内原子完成，scheduler wake 则刻意位于对象锁外。
-这避免了 IRQ/设备私有锁反向嵌套 `proc_lock`，同时由 `wait_seq` 保证事件不会
-错配到下一次等待。
+事件 ring 更新在对象锁内原子完成，scheduler wake 则刻意位于对象锁外。这避免了 IRQ/设备私有锁反向嵌套 `proc_lock`，同时由 `wait_seq` 保证事件不会错配到下一次等待。
 
 ---
 

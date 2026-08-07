@@ -2,6 +2,7 @@
 #define _ARCH_RISCV64_TRAP_H
 
 #include "core/types.h"
+#include "proc/debug_regs.h"
 #include "page_table.h"
 #include "platform.h"
 
@@ -168,6 +169,50 @@ static inline void arch_signal_restore_frame_extra(trap_context_t *ctx,
                                                    const void *extra) {
     (void)ctx;
     (void)extra;
+}
+
+/* ---- debugging interface (kernel/proc/debug.c) ---- */
+
+/* Rewind the saved EPC past the ecall so a syscall-entry-stop resume
+ * re-executes the syscall. */
+static inline void arch_ptrace_rewind_syscall(trap_context_t *ctx) {
+    TRAP_CTX_EPC(ctx) -= 4;
+}
+
+/* RISC-V has no architectural single-step without the debug module;
+ * PTRACE_SINGLESTEP is unsupported (matches Linux). */
+static inline void arch_ptrace_set_step(trap_context_t *ctx) {
+    (void)ctx;
+}
+
+/* Export the trap context into the generic register file.  The Linux ABI
+ * user_regs_struct for riscv64 is pc + 31 GPRs; expose x[1..31] in regs[0..]
+ * with pc in regs[] in the same order as the ABI wrapper expects.  We place
+ * x[0] in regs[0] and pc in the pc field; the ABI wrapper reorders. */
+static inline void arch_ptrace_export_regs(const trap_context_t *ctx,
+                                           proc_debug_regs_t *out) {
+    for (int i = 0; i < 32; i++)
+        out->regs[i] = ctx->x[i];
+    out->pc = ctx->sepc;
+    out->sp = ctx->x[2];
+    out->status = ctx->sstatus;
+    out->orig_syscall = ctx->x[17];
+    for (int i = 0; i < 32; i++)
+        out->fp[i] = ctx->f[i];
+    out->fcsr = ctx->fcsr;
+}
+
+static inline void arch_ptrace_import_regs(trap_context_t *ctx,
+                                           const proc_debug_regs_t *in) {
+    for (int i = 0; i < 32; i++)
+        ctx->x[i] = in->regs[i];
+    ctx->sepc = in->pc;
+    ctx->x[2] = in->sp;
+    ctx->sstatus = in->status;
+    ctx->x[17] = in->orig_syscall;
+    for (int i = 0; i < 32; i++)
+        ctx->f[i] = in->fp[i];
+    ctx->fcsr = in->fcsr;
 }
 
 #endif

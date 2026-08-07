@@ -2,6 +2,7 @@
 #define _ARCH_AARCH64_TRAP_H
 
 #include "core/types.h"
+#include "proc/debug_regs.h"
 #include "page_table.h"
 #include "platform.h"
 
@@ -244,6 +245,45 @@ static inline void arch_signal_restore_frame_extra(trap_context_t *ctx,
                                                    const void *extra) {
     (void)ctx;
     (void)extra;
+}
+
+/* ---- debugging interface (kernel/proc/debug.c) ---- */
+
+/* `svc` is 4 bytes; rewind so a syscall-entry-stop resume re-executes it. */
+static inline void arch_ptrace_rewind_syscall(trap_context_t *ctx) {
+    TRAP_CTX_EPC(ctx) -= 4;
+}
+
+/* MDSCR_EL1.SS software single step is not enabled for traced tasks yet;
+ * PTRACE_SINGLESTEP is unsupported. */
+static inline void arch_ptrace_set_step(trap_context_t *ctx) {
+    (void)ctx;
+}
+
+/* Export into the generic register file; the ABI wrapper reorders into the
+ * Linux struct user_pt_regs layout. */
+static inline void arch_ptrace_export_regs(const trap_context_t *ctx,
+                                           proc_debug_regs_t *out) {
+    for (int i = 0; i < 31; i++)
+        out->regs[i] = ctx->x[i];
+    out->sp = ctx->sp;
+    out->pc = ctx->elr;
+    out->status = ctx->spsr;
+    out->orig_syscall = ctx->x[8];
+    for (int i = 0; i < 64; i++)
+        out->fp[i] = ctx->v[i];
+}
+
+static inline void arch_ptrace_import_regs(trap_context_t *ctx,
+                                           const proc_debug_regs_t *in) {
+    for (int i = 0; i < 31; i++)
+        ctx->x[i] = in->regs[i];
+    ctx->sp = in->sp;
+    ctx->elr = in->pc;
+    ctx->spsr = in->status;
+    ctx->x[8] = in->orig_syscall;
+    for (int i = 0; i < 64; i++)
+        ctx->v[i] = in->fp[i];
 }
 
 #endif
