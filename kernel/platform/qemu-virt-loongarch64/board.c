@@ -2,11 +2,14 @@
 
 #include "drivers/core/driver_core.h"
 #include "core/arch.h"
+#include "core/panic.h"
 #include "core/smp.h"
+#include "core/stdio.h"
 #include "core/timer.h"
 
 #define IPI_BOOT_VECTOR       0
 #define IPI_RESCHEDULE_VECTOR 1
+#define IPI_TLB_FLUSH_VECTOR  2
 #define IOCSR_MBUF_SEND       0x1048
 #define IOCSR_SEND_BLOCKING   (1UL << 31)
 #define IOCSR_SEND_CPU_SHIFT  16
@@ -88,6 +91,86 @@ static void la64_smp_send(const smp_cpu_desc_t *cpu,
                                  IPI_RESCHEDULE_VECTOR);
 }
 
+/*
+ * LoongArch has no broadcast TLB invalidation in this configuration. Keep a
+ * per-target generation, send an IOCSR IPI, and do not let the caller
+ * release or reuse page-table-backed frames until every online CPU has
+ * acknowledged a local invtlb.
+ */
+static _Atomic uint32_t la64_tlb_request[CONFIG_NR_CPUS];
+static _Atomic uint32_t la64_tlb_ack[CONFIG_NR_CPUS];
+
+static int la64_smp_remote_tlb_flush(uint32_t pending, uint64_t addr,
+                                     uint64_t size)
+{
+    (void)addr;
+    (void)size;
+    uint32_t expected[CONFIG_NR_CPUS] = {0};
+    unsigned self = arch_current_cpu_id();
+    if (self < 32)
+        pending &= ~(1U << self);
+    if (!pending)
+        return 0;
+
+    for (unsigned cpu = 0; cpu < CONFIG_NR_CPUS; cpu++) {
+        if (!(pending & (1U << cpu)))
+            continue;
+        uint64_t hw_id;
+        if (smp_logical_to_hw(cpu, &hw_id) < 0)
+            continue;
+        expected[cpu] = __atomic_add_fetch(&la64_tlb_request[cpu], 1,
+                                           __ATOMIC_ACQ_REL);
+        loongarch64_smp_send_ipi((unsigned)hw_id, IPI_TLB_FLUSH_VECTOR);
+    }
+
+    /* Concurrent shootdowns can target one another. Service incoming IPIs
+     * while waiting so two CPUs cannot deadlock with interrupts disabled. */
+    int irqs_were_off = !arch_irqs_enabled();
+    if (irqs_were_off)
+        arch_local_irq_enable();
+    for (unsigned cpu = 0; cpu < CONFIG_NR_CPUS; cpu++) {
+        if (!(pending & (1U << cpu)))
+            continue;
+        uint64_t wait_start = timer_get_ticks();
+        while ((int32_t)(__atomic_load_n(&la64_tlb_ack[cpu],
+                                         __ATOMIC_ACQUIRE) -
+                         expected[cpu]) < 0) {
+            if (timer_get_ticks() - wait_start > 5UL * ARCH_TIMER_FREQ) {
+                printf("[LA64 TLB] timeout self=%u target=%u expected=%u "
+                       "request=%u ack=%u online=0x%x\n",
+                       self, cpu, expected[cpu],
+                       __atomic_load_n(&la64_tlb_request[cpu],
+                                       __ATOMIC_ACQUIRE),
+                       __atomic_load_n(&la64_tlb_ack[cpu],
+                                       __ATOMIC_ACQUIRE),
+                       smp_online_cpu_mask());
+                panic("LoongArch remote TLB shootdown timed out");
+            }
+            arch_cpu_relax();
+        }
+    }
+    if (irqs_were_off)
+        arch_local_irq_disable();
+    return 0;
+}
+
+void loongarch64_ipi_tlb_flush_handler(void)
+{
+    unsigned cpu = arch_current_cpu_id();
+    if (cpu >= CONFIG_NR_CPUS)
+        return;
+    for (;;) {
+        uint32_t request = __atomic_load_n(&la64_tlb_request[cpu],
+                                           __ATOMIC_ACQUIRE);
+        uint32_t ack = __atomic_load_n(&la64_tlb_ack[cpu],
+                                       __ATOMIC_RELAXED);
+        if (ack == request)
+            break;
+        __asm__ __volatile__("invtlb 0, $zero, $zero" ::: "memory");
+        __atomic_store_n(&la64_tlb_ack[cpu], request, __ATOMIC_RELEASE);
+    }
+}
+
 static void la64_smp_secondary(const smp_cpu_desc_t *cpu) {
     (void)cpu;
     loongarch64_smp_local_init();
@@ -97,6 +180,7 @@ static const smp_platform_ops_t la64_smp_ops = {
     .discover = la64_smp_discover,
     .start = la64_smp_start,
     .send_ipi = la64_smp_send,
+    .remote_tlb_flush = la64_smp_remote_tlb_flush,
     .secondary_init = la64_smp_secondary,
 };
 
