@@ -731,7 +731,6 @@ static int net_inet_connect_stream(net_socket_t *s, const void *addr, size_t add
         child->domain = listener->domain;
         child->type = SOCK_STREAM;
         child->protocol = s->protocol;
-        child->bpf_prog_fd = -1;
         child->bound = 1;
         child->connected = 1;
         memcpy(child->local, listener->local, listener->local_len);

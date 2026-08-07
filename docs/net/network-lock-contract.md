@@ -109,9 +109,7 @@ callback 只能执行轻量、有界工作：
 - 记录需要由 bottom-half 处理的事件；不得在 callback 中直接进入 scheduler。
 - 释放传入 pbuf。
 
-所有重工作，包括内存分配、队列插入、大块数据复制和 waiter wake，都必须
-推迟到底半部。bottom-half 在对象锁内 collect 带 `wait_seq` 的 wait entry，
-释放对象锁后 flush wake queue。
+所有重工作，包括内存分配、队列插入、大块数据复制和 waiter wake，都必须推迟到底半部。bottom-half 在对象锁内 collect 带 `wait_seq` 的 wait entry，释放对象锁后 flush wake queue。
 
 ## Deferred Bottom-Half 设计
 

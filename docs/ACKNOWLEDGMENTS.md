@@ -1,7 +1,6 @@
 # ACKNOWLEDGMENTS
 
-A20OS 是自主编写的操作系统，但站在了许多优秀开源项目与公开标准的肩膀上。
-本文档集中记录：
+A20OS 是自主编写的操作系统，但站在了许多优秀开源项目与公开标准的肩膀上。本文档集中记录：
 
 - **直接集成 / 构建的第三方项目**（`user/external/`、`kernel/external/`）：它们保留了各自的许可证，作为外部依赖被引入、编译并链接；
 - **作为实现参考（inspired-by）的项目**：A20OS 借鉴了其设计思路或实现流程，但代码是为 A20OS 自己的 VFS / 块设备 / 驱动模型重写的；
@@ -19,7 +18,7 @@ A20OS 是自主编写的操作系统，但站在了许多优秀开源项目与�
 |------|------|--------|------|
 | [musl](https://musl.libc.org/) | Linux ABI 用户态 libc | MIT | `user/external/musl` |
 | [mlibc](https://github.com/managarm/mlibc) | Native ABI libc 基础 | MIT | `user/external/mlibc` |
-| [lwIP](https://savannah.nongnu.org/projects/lwip/) | 内核网络协议栈（`NO_SYS=1`） | BSD-3-Clause | `kernel/external/lwip` |
+| [lwIP](https://savannah.nongnu.org/projects/lwip/) | 内核网络协议栈（`NO_SYS=1`） | BSD-3-Clause | `user/external/lwip` |
 | [mksh](http://www.mirbsd.org/mksh.htm) | 默认 shell | MirBSD License | `user/external/mksh-cvs2git` |
 | [sbase](https://core.suckless.org/sbase/) | 基础工具（`ls`、`cat` 等） | MIT | `user/external/sbase` |
 | [tlse](https://github.com/eduardsui/tlse) | wget 的 TLS 实现 | MIT | `user/external/tlse` |
@@ -49,8 +48,7 @@ A20OS 是自主编写的操作系统，但站在了许多优秀开源项目与�
 
 ## 2. 作为实现参考（inspired-by）的项目
 
-这些项目的代码没有直接进入 A20OS 源码树，但其**设计思路、算法或实现流程**被借鉴。
-A20OS 的相关实现是为自身架构重写的，并尽量遵守参考项目的许可证要求（本文档即属"注明修改"）。
+这些项目的代码没有直接进入 A20OS 源码树，但其**设计思路、算法或实现流程**被借鉴。A20OS 的相关实现是为自身架构重写的，并尽量遵守参考项目的许可证要求（本文档即属"注明修改"）。
 
 | 参考项目 | 许可证 | 借鉴内容 | A20OS 中的对应方面 |
 |----------|--------|----------|--------------------|
@@ -63,24 +61,20 @@ A20OS 的相关实现是为自身架构重写的，并尽量遵守参考项目�
 
 ## 3. 设计思路参考（design inspiration）
 
-以下系统的**设计思路**启发了 A20OS 的架构，尤其是 Native ABI 与安全模型；
-A20OS 没有使用它们的代码，也没有参考（有可能不可能）其源码，但设计文档中明确引用了其机制作为对照。
+以下系统的**设计思路**启发了 A20OS 的架构，尤其是 Native ABI 与安全模型；A20OS 没有使用它们的代码，也没有参考（有可能不可能）其源码，但设计文档中明确引用了其机制作为对照。
 
 | 参考系统 | 启发内容 | A20OS 中的对应方面 |
 |----------|----------|--------------------|
 | [Microsoft Windows NT](https://learn.microsoft.com/en-us/windows/win32/sysinfo/kernel-objects) | 内核对象 / handle 统一资源模型：以句柄 + 安全权能管理所有内核对象，消灭各类资源的调用差异 | Native ABI 的 handle/capability 体系 |
 | [Zircon (Fuchsia)](https://fuchsia.dev/fuchsia-src/concepts/kernel) | Channel handle transfer 语义、futex 定位、ABI 版本管理对照 | Native ABI 的 Channel/Event 队列与 futex |
 
-> 注意：Zircon、Windows NT 既是设计参考，也是研究文档中的**对照分析对象**（见下节），两者视角不同：
-> "参考"指启发了设计，"对照"指作为比较基线分析优劣。
+> 注意：Zircon、Windows NT 既是设计参考，也是研究文档中的**对照分析对象**（见下节），两者视角不同："参考"指启发了设计，"对照"指作为比较基线分析优劣。
 
 ---
 
 ## 4. 研究对照系统（analysis objects）
 
-`docs/research/` 系列文档在论证 A20OS 的设计时，将以下系统作为**对比/分析对象**——
-它们不是 A20OS 的代码或设计来源，而是用于评估 A20OS 特性（时态能力、混合信任边界、
-内核层 session type、ABI 版本化、委托模式等）的学术基线。
+`docs/research/` 系列文档在论证 A20OS 的设计时，将以下系统作为**对比/分析对象**——它们不是 A20OS 的代码或设计来源，而是用于评估 A20OS 特性（时态能力、混合信任边界、内核层 session type、ABI 版本化、委托模式等）的学术基线。
 
 | 系统 | 对照内容 |
 |------|----------|
@@ -92,8 +86,7 @@ A20OS 没有使用它们的代码，也没有参考（有可能不可能）其�
 | S3K | 能力系统对照 |
 | [Mach](https://en.wikipedia.org/wiki/Mach_(kernel)) | 微内核 IPC 对照 |
 
-> 与 §2「实现参考」不同，本节项目**没有影响 A20OS 的代码实现**，仅在研究文档中作为
-> 学术比较基线出现，不构成"参考实现"或"借鉴"。
+> 与 §2「实现参考」不同，本节项目**没有影响 A20OS 的代码实现**，仅在研究文档中作为学术比较基线出现，不构成"参考实现"或"借鉴"。
 
 ---
 
