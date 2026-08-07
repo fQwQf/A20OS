@@ -15,6 +15,11 @@ uint32_t pci_device_id(const device_t *dev);
  * resources are compacted in device->res, so display drivers must not assume
  * that BAR2 is the second resource when BAR0 is a 64-bit BAR. */
 resource_t *pci_get_bar_resource(device_t *dev, unsigned int bar);
+/* Resolve the INTx interrupt line for an enumerated PCI function through
+ * arch_pci_intx_irq(), or -1 when the platform has no routing for it.
+ * Drivers must keep their polling fallback for the -1 case and must NOT
+ * treat the legacy IRQ Line register as a usable interrupt identifier. */
+int pci_intx_irq(const device_t *dev);
 void pci_enumerate(uintptr_t ecam_base, int bus_start, int bus_end);
 
 /* Create a VirtIO 1.0 (modern PCI) transport for an enumerated PCI function.

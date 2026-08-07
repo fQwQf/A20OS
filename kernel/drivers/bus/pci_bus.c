@@ -84,6 +84,20 @@ uint32_t pci_device_id(const device_t *dev) {
     return ((uint32_t)info->vendor << 16) | info->device;
 }
 
+/* Resolve the INTx interrupt line for an enumerated PCI function through the
+ * platform routing hook (arch_pci_intx_irq).  Returns -1 when the function
+ * has no interrupt pin or the platform provides no routing for it; callers
+ * must keep their completion-polling fallback in that case. */
+int pci_intx_irq(const device_t *dev) {
+    const pci_dev_info_t *info = dev ? (const pci_dev_info_t *)dev->plat_data : NULL;
+    if (!info)
+        return -1;
+    uint8_t pin = (uint8_t)(pci_ecam_read(info->bus, info->dev, info->func, 0x3C) >> 8) & 0x7U;
+    if (!pin)
+        return -1;
+    return arch_pci_intx_irq(info->bus, info->dev, info->func, (int)pin);
+}
+
 #ifdef CONFIG_PCI_MMIO_ALLOC
 static uintptr_t g_pci_mmio_alloc;
 #endif
@@ -383,6 +397,17 @@ static void pci_virtio_write32(virtio_transport_t *transport, uint32_t off,
     }
 }
 
+/* Weak default: platforms without wired PCI INTx routing return -1 and the
+ * virtio transports keep completion polling.  Overridden by loongarch64. */
+int __attribute__((weak)) arch_pci_intx_irq(int bus, int dev, int func, int pin)
+{
+    (void)bus;
+    (void)dev;
+    (void)func;
+    (void)pin;
+    return -1;
+}
+
 int pci_virtio_transport_init(device_t *dev, int type,
                               virtio_transport_t *transport) {
     pci_dev_info_t *info = dev ? (pci_dev_info_t *)dev->plat_data : NULL;
@@ -446,7 +471,9 @@ int pci_virtio_transport_init(device_t *dev, int type,
     transport->write32 = pci_virtio_write32;
     transport->priv = &g_pci_virtio[g_pci_virtio_count++];
     transport->legacy = 0;
-    transport->irq = -1; /* Polling is reliable until VBox MSI/INTx routing is described. */
+    transport->shared_irq = 1;
+    transport->irq = arch_pci_intx_irq(info->bus, info->dev, info->func,
+                                       pci_read8(info, 0x3D) & 0x7U);
     kinfo("[VIRTIO-PCI] %s: common=0x%lx notify=0x%lx isr=0x%lx config=0x%lx mult=%u\n",
           dev->name, (unsigned long)candidate.common,
           (unsigned long)candidate.notify, (unsigned long)candidate.isr,

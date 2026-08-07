@@ -1,7 +1,8 @@
 #include "proc/proc.h"
 #include "proc/proc_internal.h"
 #include "proc/signal.h"
-#include "bpf/bpf.h"
+#include "proc/debug.h"
+#include "ext/kep.h"
 #include "core/cpu.h"
 #include "core/klog.h"
 #include "core/stdio.h"
@@ -328,11 +329,23 @@ void proc_exit(int exit_code)
 #endif
 
     vfs_release_process_locks(t->pid);
-    bpf_release_process(t->pid);
+    kep_release_process(t->pid);
 
     ktrace_exit("[EXIT] pid=%d: closing fds and releasing mm ref\n", t->pid);
     fdtable_close_all(t);
     proc_release_exiting_mm(t);
+
+    /*
+     * PT_DEBUG_EXIT_STOP: a traced task with the TRACEEXIT option reports a
+     * PTRACE_EVENT_EXIT stop before becoming a zombie; the tracer reads the
+     * exit code from the event message and resumes the task to complete the
+     * exit.  SIGKILL exits are never stopped (kill -9 must always work).
+     */
+    if (proc_debug_is_traced(t) &&
+        (t->ptrace_flags & PT_DEBUG_FLAG_TRACEEXIT) &&
+        exit_code != -SIGKILL)
+        (void)proc_debug_event_stop(SIGTRAP, PT_DEBUG_EVENT_EXIT,
+                                    (uint64_t)(uintptr_t)exit_code);
 
     uint64_t flags = spin_lock_irqsave(&proc_lock);
     proc_runq_remove_locked(t);
@@ -382,6 +395,10 @@ void proc_exit(int exit_code)
     task_t *init_reaper = auto_reap ? NULL : proc_find_get(1);
     proc_reparent_children(t, init_reaper);
     proc_put(init_reaper);
+
+    /* Detach tracees observing the dying task; EXITKILL tracees are
+     * terminated, stopped tracees are resumed. */
+    proc_debug_tracer_exiting(t);
 
     if (notify_parent_pid > 0)
         signal_send(notify_parent_pid, t->exit_signal);

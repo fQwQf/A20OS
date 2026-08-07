@@ -12,6 +12,7 @@
 #include "core/lock.h"
 #include "core/errno.h"
 #include "core/sync.h"
+#include "core/timer.h"
 #include "proc/proc.h"
 
 #include "mm/mm.h"
@@ -28,6 +29,10 @@ typedef struct {
     virtq_used_t       used ALIGNED(64);
     
     mutex_t            command_lock ALIGNED(64);
+    /* Parked controlq issuers woken by the completion IRQ; internally
+     * locked so the IRQ top-half may collect without command_lock. */
+    wait_queue_t       waiters;
+    int                irq_registered;
     int                slot;
     
     uint32_t           width;
@@ -56,6 +61,27 @@ static void virtio_gpu_mmio_write32(virtio_transport_t *t, uint32_t off, uint32_
 
 static uint32_t virtio_gpu_mmio_read32(virtio_transport_t *t, uint32_t off) {
     return readl((const volatile void *)((uintptr_t)t->priv + off));
+}
+
+/* VIRTIO_GPU_IRQ_MODEL:
+ * - The top-half acknowledges the device interrupt and wakes the parked
+ *   controlq issuer; it never touches queue state — the issuer owns
+ *   last_used and the single in-flight command chain.
+ * - A spurious or shared-line invocation degrades to one no-op wake. */
+static int virtio_gpu_irq_handler(int irq, void *priv) {
+    (void)irq;
+    virtio_gpu_inst_t *inst = (virtio_gpu_inst_t *)priv;
+    if (!inst)
+        return 0;
+    uint32_t isr = inst->vt.read32(&inst->vt, VIRTIO_MMIO_INTERRUPT_STATUS);
+    if (!inst->vt.legacy && isr)
+        inst->vt.write32(&inst->vt, VIRTIO_MMIO_INTERRUPT_ACK, isr);
+    proc_wake_q_t wake_q;
+    proc_wake_q_init(&wake_q);
+    (void)wait_queue_collect_all(&inst->waiters, 0, PROC_WAKE_EVENT,
+                                 &wake_q, NULL);
+    (void)proc_wake_q_flush(&wake_q);
+    return 0;
 }
 
 static int virtio_gpu_send_cmd(virtio_gpu_inst_t *inst, void *req, size_t req_len, void *resp, size_t resp_len) {
@@ -128,9 +154,36 @@ static int virtio_gpu_send_cmd(virtio_gpu_inst_t *inst, void *req, size_t req_le
         arch_cpu_relax();
         /* Boot-time probe has no current task and must remain a bounded poll.
          * Runtime flushes yield periodically so the host backend and kernel
-         * progress paths are not starved by a full-vCPU busy loop. */
-        if ((spins & 0xffffU) == 0 && proc_current())
-            proc_yield();
+         * progress paths are not starved by a full-vCPU busy loop; with a
+         * registered IRQ the flush instead parks until the completion
+         * interrupt (bounded chunks guard against a missed wake). */
+        if ((spins & 0xffffU) == 0 && proc_current()) {
+            if (inst->irq_registered && deadline) {
+                uint64_t now = clock_get_ticks();
+                if (now < deadline) {
+                    uint64_t chunk = now + MS_TO_TICKS(20);
+                    if (chunk > deadline)
+                        chunk = deadline;
+                    proc_wait_token_t token =
+                        proc_park_prepare(PROC_WAIT_UNINTERRUPTIBLE, chunk);
+                    wait_queue_entry_t entry = {0};
+                    wait_queue_link(&inst->waiters, &entry, token, 0);
+                    arch_dma_sync_for_cpu((void *)used, sizeof(*used));
+                    if (used->idx != used_before) {
+                        wait_queue_unlink(&inst->waiters, &entry);
+                        (void)proc_park_cancel(token);
+                        proc_park_finish(token);
+                        completed = 1;
+                        break;
+                    }
+                    (void)proc_park_commit(token);
+                    wait_queue_unlink(&inst->waiters, &entry);
+                    proc_park_finish(token);
+                }
+            } else {
+                proc_yield();
+            }
+        }
     }
     
     if (!completed) {
@@ -331,7 +384,22 @@ static int virtio_gpu_init_transport(device_t *dev, const virtio_transport_t *tr
     status |= VIRTIO_STATUS_DRIVER_OK;
     vt->write32(vt, VIRTIO_MMIO_STATUS, status);
     mb();
-    
+
+    wait_queue_init(&inst->waiters);
+    if (vt->irq >= 0) {
+        unsigned long irq_flags = vt->shared_irq ? IRQF_SHARED : 0;
+        if (request_irq((uint32_t)vt->irq, virtio_gpu_irq_handler,
+                        irq_flags, inst) == 0) {
+            inst->irq_registered = 1;
+        } else {
+            /* Never park on an interrupt that will not arrive; the bounded
+             * poll/yield path remains the completion model. */
+            kinfo("[GPU] IRQ %d registration failed; using polling\n",
+                  vt->irq);
+            vt->irq = -1;
+        }
+    }
+
     inst->width = 1024;
     inst->height = 768;
     inst->bpp = 32;
@@ -417,6 +485,10 @@ static int virtio_gpu_init_transport(device_t *dev, const virtio_transport_t *tr
 fail:
     vt->write32(vt, VIRTIO_MMIO_STATUS,
                 vt->read32(vt, VIRTIO_MMIO_STATUS) | VIRTIO_STATUS_FAILED);
+    if (inst->irq_registered) {
+        inst->irq_registered = 0;
+        free_irq((uint32_t)vt->irq, inst);
+    }
     if (fb_pfn != PFN_NONE)
         pfa_free(fb_pfn, order);
     memset(inst, 0, sizeof(*inst));
@@ -442,6 +514,9 @@ static int virtio_gpu_probe(device_t *dev) {
         .legacy = 0,
         .irq = -1,
     };
+    resource_t *mmio_irq = device_get_resource(dev, RES_IRQ, 0);
+    if (mmio_irq)
+        vt.irq = (int)mmio_irq->start;
     return virtio_gpu_init_transport(dev, &vt);
 }
 
@@ -450,8 +525,11 @@ static int virtio_gpu_remove(device_t *dev) {
     if (!inst)
         return 0;
 
+    /* Device reset stops all interrupt sources before the handler goes. */
     inst->vt.write32(&inst->vt, VIRTIO_MMIO_STATUS, 0);
     mb();
+    if (inst->irq_registered)
+        free_irq((uint32_t)inst->vt.irq, inst);
     gpu_device_unregister(dev);
     if (inst->fb_phys)
         pfa_free(phys_to_pfn(inst->fb_phys), inst->fb_order);

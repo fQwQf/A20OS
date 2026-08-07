@@ -22,8 +22,7 @@ make stm32f103-bringup
 输出：
 
 ```text
-.kernel-build/armv7m-both-bringup-nommu-stm32f103-f64k-r20k/kernel.elf
-.kernel-build/armv7m-both-bringup-nommu-stm32f103-f64k-r20k/kernel.bin
+.kernel-build/armv7m-both-bringup-nommu-stm32f103-f64k-r20k/kernel.elf.kernel-build/armv7m-both-bringup-nommu-stm32f103-f64k-r20k/kernel.bin
 ```
 
 二进制链接到 flash 地址 `0x08000000`。用 OpenOCD、ST-Link 或其他 STM32 编程器烧写。USART1 用 PA9/PA10，115200 8N1。通用 bring-up 目标使用 8 MHz HSI 时钟。
@@ -82,11 +81,7 @@ PB5 分配给 Xuanwu 板的 ULN2003 电机输入，由 TIM3_CH2 通过 partial r
 3.5 英寸面板搭载 XPT2046 兼容电阻触摸屏：
 
 ```text
-PB1 = T_CLK
-PB2 = T_DOUT
-PF9 = T_DIN
-PF10 = T_PEN
-PF11 = T_CS
+PB1 = T_CLKPB2 = T_DOUTPF9 = T_DINPF10 = T_PENPF11 = T_CS
 ```
 
 触摸每 20 ms 采样一次，带 trimmed sampling、噪声剔除、平滑和可配置轴校准。XPT2046 没有可读 device ID，所以空闲面板和缺失面板都无害地表现为 armed interface，直到 `T_PEN` 被拉低。
@@ -94,10 +89,7 @@ PF11 = T_CS
 四个黄色按键在触摸不可用时也可用。vendor 映射：
 
 ```text
-PA0  active-high
-PE4  active-low
-PE3  active-low
-PE2  active-low
+PA0  active-highPE4  active-lowPE3  active-lowPE2  active-low
 ```
 
 它们每 20 ms 采样并做 debounce，对应上、左、下、右事件（顺序为 `PA0`、`PE2`、`PE3`、`PE4`）。左右键在 `STATUS`、`MEM`、`TF`、`BT`、`INPUT TEST` 页面间切换；上下键选择状态行；右键打开选中的 memory、storage、Bluetooth 或 input 行。在 input 页，上键移动可见测试光标，下键清除画布。
@@ -160,16 +152,7 @@ ESP8266 是 ESP8266EX，1 MiB Flash，官方 Nano AT v1.7.4.0（SDK v3.0.4），
 USART1 在 115200 8N1 提供交互式 bring-up 提示：
 
 ```text
-uart
-perf
-sd retry
-bt
-bt probe
-bt at AT
-bt at AT+ROLE?
-bt at AT+NAME?
-bt at AT+PSWD?
-bt at AT+UART?
+uartperfsd retrybtbt probebt at ATbt at AT+ROLE?bt at AT+NAME?bt at AT+PSWD?bt at AT+UART?
 ```
 
 每次自动或手动 AT 交换都会打印 USART3 波特率、KEY 模式、转义命令、转义原始回复、字节数和硬件错误数。`reply=<none>` 表示 PB11 没有 UART 字节；反复出现带错误的 `\xNN` 数据说明波特、接线或信号质量有问题；可读的 `ERROR` 表示模块存在但不支持该 AT 方言。`uart` 命令打印两个端口的实测外设时钟、请求和实际波特、BRR、接收中断状态和累计硬件错误。蓝牙初始化后，USART3 应报告 `initialized=1`、`requested=38400`、`rx-irq=1`；非零错误计数直接说明 PB11 在翻转，但接收到的帧格式错误。

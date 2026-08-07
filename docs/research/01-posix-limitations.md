@@ -105,8 +105,7 @@ $$\text{deliver}(sig, p): pending_p \leftarrow pending_p \setminus \{sig\}; \tex
 `ioctl()` 和 `fcntl()` 是 POSIX 中最臭名昭著的接口：
 
 ```
-int ioctl(int fd, unsigned long request, ...);
-int fcntl(int fd, int cmd, ... /* arg */);
+int ioctl(int fd, unsigned long request, ...);int fcntl(int fd, int cmd, ... /* arg */);
 ```
 
 **问题**：

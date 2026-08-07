@@ -239,4 +239,9 @@ static inline void ioapic_write(uint32_t reg, uint32_t val) {
     *(volatile uint32_t *)(IOAPIC_BASE + 0x10) = val;
 }
 
+
+/* Local-only full flush. */
+static inline void arch_tlb_flush_local(void) {
+    arch_tlb_flush();
+}
 #endif

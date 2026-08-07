@@ -201,7 +201,7 @@ static int proc_clone_impl(uint64_t flags, vaddr_t stack, int *ptid, vaddr_t tls
      */
 #if defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)
     if ((flags & CLONE_THREAD) && parent && parent->abi_mode == 1 &&
-        parent->scratch_buf) {
+        parent->a20_ht) {
         __atomic_store_n(
             &t->a20_ht,
             a20_ht_get_ref((struct a20_ht_internal *)parent->a20_ht),
