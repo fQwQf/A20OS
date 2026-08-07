@@ -118,7 +118,6 @@ int net_accept(int gfd, void *addr, size_t *addrlen, int flags)
         }
         return net_socket_install_file(ns, flags & SOCK_NONBLOCK ? SOCK_NONBLOCK : 0);
     }
-        return -ENOTSOCK;
     if (s->domain == AF_ALG)
         return net_alg_socket_accept(s, addrlen, flags);
     if ((s->type != SOCK_STREAM && !(s->domain == AF_UNIX && s->type == SOCK_SEQPACKET)) ||

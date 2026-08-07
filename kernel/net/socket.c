@@ -26,6 +26,7 @@ net_socket_t *net_socket_alloc(void) {
     net_socket_t *s = (net_socket_t *)obj_cache_alloc_zero(&g_net_socket_cache);
     if (s) {
         s->ipv6_checksum_offset = -1;
+        s->netd_id = -1;
         s->reg_idx = -1;
         wait_queue_init(&s->accept_waitq);
         wait_queue_init(&s->read_waitq);
