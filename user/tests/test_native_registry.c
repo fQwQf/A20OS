@@ -33,6 +33,12 @@ static void put_u64(uint64_t v)
     put(buf + i, (uint32_t)(24 - i));
 }
 
+static void put_i64(int64_t v)
+{
+    if (v < 0) { put("-", 1); put_u64((uint64_t)(-v)); }
+    else put_u64((uint64_t)v);
+}
+
 static int fail(int code, const char *msg)
 {
     put_str("NATIVE_REGISTRY: FAIL ");
@@ -72,8 +78,14 @@ static int rtcd_time_rpc(a20_handle_t ep, uint64_t *sec_out)
     uint32_t rep_h = 0;
     a20_status_t st = a20_channel_call(ep, &req, 1, 0, 0,
                                        rep, &rep_len, 0, &rep_h);
-    if (st < 0 || rep_len != sizeof(rep))
+    if (st < 0 || rep_len != sizeof(rep)) {
+        put_str("rtcd_time_rpc fail st=");
+        put_i64(st);
+        put_str(" rep_len=");
+        put_i64((int64_t)rep_len);
+        put("\n", 1);
         return -1;
+    }
     *sec_out = rep[0];
     return 0;
 }
@@ -108,18 +120,29 @@ int main(int argc, char **argv, char **envp)
     a20_hdl_close(rtcd);
 
     /* 3. Re-resolve: the supervisor respawns and re-registers; retry with
-     *    backoff until the fresh endpoint appears. */
+     *    backoff until the fresh endpoint appears.  A successful lookup may
+     *    still hand out the just-released old endpoint (the supervisor
+     *    updates its table asynchronously), so a CANCELED RPC re-resolves
+     *    and retries — this is the documented rebind protocol. */
     a20_handle_t rtcd2 = A20_HANDLE_NULL;
-    int found = 0;
-    for (int i = 0; i < 100; i++) {
-        if (reg_lookup(reg, "rtcd", &rtcd2) == A20_OK) { found = 1; break; }
+    uint64_t sec2 = 0;
+    int rebound = 0;
+    for (int i = 0; i < 100 && !rebound; i++) {
+        if (reg_lookup(reg, "rtcd", &rtcd2) != A20_OK) {
+            a20_time_t bo = { .secs = 0, .nsecs = 20 * 1000 * 1000 };
+            a20_thread_sleep(bo);
+            continue;
+        }
+        if (rtcd_time_rpc(rtcd2, &sec2) == 0 && sec2 != 0) {
+            rebound = 1;
+            break;
+        }
+        a20_hdl_close(rtcd2);
+        rtcd2 = A20_HANDLE_NULL;
         a20_time_t bo = { .secs = 0, .nsecs = 20 * 1000 * 1000 };
         a20_thread_sleep(bo);
     }
-    if (!found)
-        return fail(5, "re-lookup after crash failed");
-    uint64_t sec2 = 0;
-    if (rtcd_time_rpc(rtcd2, &sec2) != 0 || sec2 == 0)
+    if (!rebound)
         return fail(6, "post-rebind RPC failed");
     put_str("NATIVE_REGISTRY: rebound rtc_sec=");
     put_u64(sec2);

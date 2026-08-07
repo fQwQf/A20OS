@@ -13,6 +13,8 @@
 #include "core/lock.h"
 #include "core/stdio.h"
 #include "core/string.h"
+#include "core/sync.h"
+#include "core/timer.h"
 #include "mm/slab.h"
 #include "proc/proc.h"
 
@@ -80,6 +82,10 @@ typedef struct virtio_snd_dev {
     int broken;
     volatile uint32_t generation;
     mutex_t lock;
+    /* Parked waiters woken by the completion IRQ; internally locked so
+     * the IRQ top-half may collect without taking snd->lock. */
+    wait_queue_t waiters;
+    int irq_registered;
     struct virtio_snd_dev *quarantine_next;
 } virtio_snd_dev_t;
 
@@ -157,12 +163,48 @@ static void virtio_snd_ack_interrupt(virtio_snd_dev_t *snd)
         snd->vt.write32(&snd->vt, VIRTIO_MMIO_INTERRUPT_ACK, status);
 }
 
-static void virtio_snd_wait_step(void)
+/* VIRTIO_SND_IRQ_MODEL:
+ * - The top-half acknowledges the device interrupt and wakes every parked
+ *   waiter; it never takes snd->lock (a mutex the sleeping issuer may
+ *   hold) and never touches queue state — woken tasks reap their own
+ *   queues.  A spurious or shared-line invocation degrades to a no-op
+ *   wake. */
+static int virtio_snd_irq_handler(int irq, void *priv)
 {
-    if (proc_current())
-        proc_yield();
-    else
+    (void)irq;
+    virtio_snd_dev_t *snd = (virtio_snd_dev_t *)priv;
+    if (!snd)
+        return 0;
+    virtio_snd_ack_interrupt(snd);
+    proc_wake_q_t wake_q;
+    proc_wake_q_init(&wake_q);
+    (void)wait_queue_collect_all(&snd->waiters, 0, PROC_WAKE_EVENT,
+                                 &wake_q, NULL);
+    (void)proc_wake_q_flush(&wake_q);
+    return 0;
+}
+
+static void virtio_snd_wait_step(virtio_snd_dev_t *snd)
+{
+    if (!proc_current()) {
         arch_cpu_relax();
+        return;
+    }
+    if (!snd->irq_registered) {
+        proc_yield();
+        return;
+    }
+    /* Park until the completion IRQ; the bounded chunk turns a missed
+     * wake into a re-check and keeps generation-change interruption
+     * responsive. */
+    proc_wait_token_t token =
+        proc_park_prepare(PROC_WAIT_UNINTERRUPTIBLE,
+                          clock_get_ticks() + MS_TO_TICKS(20));
+    wait_queue_entry_t entry = {0};
+    wait_queue_link(&snd->waiters, &entry, token, 0);
+    (void)proc_park_commit(token);
+    wait_queue_unlink(&snd->waiters, &entry);
+    proc_park_finish(token);
 }
 
 static int virtio_snd_wait_used(virtio_snd_dev_t *snd,
@@ -184,7 +226,7 @@ static int virtio_snd_wait_used(virtio_snd_dev_t *snd,
             snd->broken = 1;
             return -ETIMEDOUT;
         }
-        virtio_snd_wait_step();
+        virtio_snd_wait_step(snd);
     }
 }
 
@@ -481,7 +523,7 @@ static int virtio_snd_wait_tx_slot(virtio_snd_dev_t *snd,
             snd->broken = 1;
             return -ETIMEDOUT;
         }
-        virtio_snd_wait_step();
+        virtio_snd_wait_step(snd);
     }
 }
 
@@ -615,7 +657,7 @@ static int virtio_snd_wait_all_tx(virtio_snd_dev_t *snd,
             snd->broken = 1;
             return -ETIMEDOUT;
         }
-        virtio_snd_wait_step();
+        virtio_snd_wait_step(snd);
     }
     return snd->tx_error;
 }
@@ -883,6 +925,22 @@ static int virtio_snd_init_transport(device_t *dev,
     status |= VIRTIO_STATUS_DRIVER_OK;
     snd->vt.write32(&snd->vt, VIRTIO_MMIO_STATUS, status);
     mb();
+
+    wait_queue_init(&snd->waiters);
+    if (snd->vt.irq >= 0) {
+        unsigned long irq_flags = snd->vt.shared_irq ? IRQF_SHARED : 0;
+        if (request_irq((uint32_t)snd->vt.irq, virtio_snd_irq_handler,
+                        irq_flags, snd) == 0) {
+            snd->irq_registered = 1;
+        } else {
+            /* Never park on an interrupt that will not arrive; the
+             * yield/poll step remains the completion model. */
+            kinfo("[VIRTIO-SND] IRQ %d registration failed; using polling\n",
+                  snd->vt.irq);
+            snd->vt.irq = -1;
+        }
+    }
+
     snd->vt.write32(&snd->vt, VIRTIO_MMIO_QUEUE_NOTIFY,
                     VIRTIO_SND_QUEUE_EVENT);
     mb();
@@ -902,9 +960,13 @@ fail:
     mb();
     if (virtio_snd_reset(snd) < 0) {
         kerr("[VIRTIO-SND] reset timeout; retaining live DMA\n");
+        if (snd->irq_registered)
+            free_irq((uint32_t)snd->vt.irq, snd);
         virtio_snd_quarantine(snd);
         return -EIO;
     }
+    if (snd->irq_registered)
+        free_irq((uint32_t)snd->vt.irq, snd);
 fail_nodev:
     virtio_snd_free_dma(snd);
     kfree(snd);
@@ -931,6 +993,9 @@ static int virtio_snd_probe(device_t *dev)
         .legacy = 0,
         .irq = -1,
     };
+    resource_t *mmio_irq = device_get_resource(dev, RES_IRQ, 0);
+    if (mmio_irq)
+        transport.irq = (int)mmio_irq->start;
     return virtio_snd_init_transport(dev, &transport);
 }
 
@@ -949,10 +1014,14 @@ static int virtio_snd_remove(device_t *dev)
     if (virtio_snd_reset(snd) < 0) {
         kerr("[VIRTIO-SND] %s reset timeout; retaining live DMA\n",
              dev->name);
+        if (snd->irq_registered)
+            free_irq((uint32_t)snd->vt.irq, snd);
         virtio_snd_quarantine(snd);
         dev->drv_priv = NULL;
         return -EIO;
     }
+    if (snd->irq_registered)
+        free_irq((uint32_t)snd->vt.irq, snd);
     dev->drv_priv = NULL;
     virtio_snd_free_dma(snd);
     kfree(snd);

@@ -121,6 +121,14 @@
 #define A20_SYS_debug_read_regs   0x0901
 #define A20_SYS_debug_write_regs  0x0902
 #define A20_SYS_debug_map_memory  0x0903
+#define A20_SYS_debug_traceme     0x0904
+#define A20_SYS_debug_wait        0x0905
+#define A20_SYS_debug_resume      0x0906
+#define A20_SYS_debug_detach      0x0907
+#define A20_SYS_debug_event       0x0908
+#define A20_SYS_debug_read        0x0909
+#define A20_SYS_debug_write       0x090A
+#define A20_SYS_debug_kill        0x090B
 
 /* System (0x0A00) */
 #define A20_SYS_system_info       0x0A00
@@ -140,7 +148,20 @@
 #define A20_SYS_device_vmo_phys   0x0C04
 #define A20_SYS_device_block_attach 0x0C05
 #define A20_SYS_device_block_complete 0x0C06
+#define A20_SYS_device_claim      0x0C07
+#define A20_SYS_device_release    0x0C08
+#define A20_SYS_device_alloc_dma  0x0C09
 
-#define A20_NATIVE_SYSCALL_COUNT  109
+#define A20_SYS_netd_attach        0x0D00
+#define A20_SYS_netd_sock_register  0x0D01
+#define A20_SYS_netd_tx_send       0x0D02
+/* Kernel extension points (0x0E00) */
+#define A20_SYS_ext_prog_load      0x0E00
+#define A20_SYS_ext_prog_attach    0x0E01
+#define A20_SYS_ext_prog_detach    0x0E02
+#define A20_SYS_ext_prog_release   0x0E03
+#define A20_SYS_ext_point_info     0x0E04
+
+#define A20_NATIVE_SYSCALL_COUNT  129
 
 #endif

@@ -7,6 +7,7 @@
 #include "drivers/core/driver_hwapi.h"
 #include "drivers/core/driver_register.h"
 #include "net/lwip_stack.h"
+#include "net/netd_proto.h"
 #include "mm/mm.h"
 #include "core/stdio.h"
 #include "core/string.h"
@@ -470,12 +471,36 @@ void virtio_net_poll_all(void) {
 
 /*
  * virtio_net_poll_rx_all:
- * Fallback RX progress path for PCI virtio on platforms where the device IRQ
- * line is not wired or not configured (e.g. x86_64/loongarch64 QEMU without
- * MSI-X).  Runs under g_lwip_lock and drains RX descriptors into lwIP input.
- * This is the compatibility bridge called from kernel_progress_poll().
+ * Fallback RX progress path for transports that cannot raise a device IRQ
+ * (e.g. PCI virtio on platforms without MSI/INTx routing), and an event-driven
+ * bottom-half for IRQ-capable transports.
+ *
+ * - IRQ-capable: the IRQ top-half raises the lwIP RX pending flag, so the
+ *   scheduler/idle hook only drains (acquiring g_lwip_lock) when a device
+ *   actually signalled work.  With no network traffic the hot path acquires
+ *   no lock at all.
+ * - Poll-only: at least one live instance has no IRQ line, so every
+ *   kernel_progress_poll() must keep draining unconditionally or its RX would
+ *   never progress.
  */
 void virtio_net_poll_rx_all(void) {
+    int poll_only = 0;
+    for (int i = 0; i < g_nnet; i++) {
+        if (g_net[i].valid && !g_net[i].irq_registered) {
+            poll_only = 1;
+            break;
+        }
+    }
+    /* Frame-plane mode: drain netd's TX ring even without inbound traffic. */
+    if (netd_enabled()) {
+        uint64_t flags = a20_lwip_lock();
+        a20_lwip_poll_locked();
+        a20_lwip_unlock(flags);
+        return;
+    }
+    if (!poll_only && !a20_lwip_rx_pending_any())
+        return;
+
     uint64_t flags = a20_lwip_lock();
     a20_lwip_poll_locked();
     a20_lwip_unlock(flags);
@@ -522,6 +547,7 @@ static int virtio_net_driver_probe(device_t *dev) {
     int idx = g_nnet;
     virtio_net_inst_t *net = &g_net[idx];
     memset(net, 0, sizeof(*net));
+    net->vt.irq = -1;
 
     if (dev->bus == &pci_bus) {
         if (pci_virtio_transport_init(dev, 1, &net->vt) != 0)
@@ -535,6 +561,9 @@ static int virtio_net_driver_probe(device_t *dev) {
         net->vt.read32  = virtio_net_mmio_read32;
         net->vt.write32 = virtio_net_mmio_write32;
         net->vt.priv    = (void *)(uintptr_t)mmio_res->start;
+        resource_t *mmio_irq = device_get_resource(dev, RES_IRQ, 0);
+        if (mmio_irq)
+            net->vt.irq = (int)mmio_irq->start;
     }
     net->slot       = idx;
     net->legacy     = (net->vt.read32(&net->vt, VIRTIO_MMIO_VERSION) == 1);
@@ -556,11 +585,22 @@ static int virtio_net_driver_probe(device_t *dev) {
 
     resource_t *irq_res = device_get_resource(dev, RES_IRQ, 0);
     if (net->vt.irq >= 0) {
-        if (request_irq((uint32_t)net->vt.irq, virtio_net_irq_handler, 0, net) == 0) {
+        unsigned long irq_flags = net->vt.shared_irq ? IRQF_SHARED : 0;
+        if (request_irq((uint32_t)net->vt.irq, virtio_net_irq_handler,
+                        irq_flags, net) == 0) {
             net->irq = net->vt.irq;
             net->irq_registered = 1;
-        } else
-            kinfo("[VIRTIO-NET] Failed to register transport IRQ for '%s'\n", dev->name);
+        } else {
+            kinfo("[VIRTIO-NET] Failed to register transport IRQ for '%s'; using polling\n",
+                  dev->name);
+            net->vt.irq = -1;
+        }
+    } else if (dev->bus == &pci_bus) {
+        /* PCI transports resolve their vector through arch_pci_intx_irq()
+         * during transport init; irq < 0 means the platform has no INTx
+         * routing and RX/TX stay on the gated polling path.  The legacy
+         * IRQ Line register resource is NOT a usable vector on PCI. */
+        kinfo("[VIRTIO-NET] PCI transport using completion polling\n");
     } else if (irq_res) {
         if (request_irq((uint32_t)irq_res->start, virtio_net_irq_handler, 0, net) == 0) {
             net->irq = (int)irq_res->start;
@@ -573,9 +613,8 @@ static int virtio_net_driver_probe(device_t *dev) {
     }
 
     g_nnet++;
-    kinfo("[VIRTIO-NET] Probed device '%s' (irq=%lu)\n",
-          dev->name,
-          irq_res ? (unsigned long)irq_res->start : 0);
+    kinfo("[VIRTIO-NET] Probed device '%s' (irq=%d)\n",
+          dev->name, net->irq_registered ? net->irq : -1);
     return 0;
 }
 
@@ -615,7 +654,9 @@ static const device_id_t virtio_net_ids[] = {
     /* VirtIO-MMIO bus matching uses the transport device type as device ID. */
     { .vendor = 0, .device = 1,
       .subvendor = VENDOR_ANY, .subdevice = DEVICE_ANY },
-    { .vendor = 0x1AF4, .device = 0x1001,
+    /* QEMU transitional virtio-net-pci presents the legacy net ID 0x1000
+     * with modern capabilities; the transitional block ID is 0x1001. */
+    { .vendor = 0x1AF4, .device = 0x1000,
       .subvendor = VENDOR_ANY, .subdevice = DEVICE_ANY },
     { .vendor = 0x1AF4, .device = 0x1041,
       .subvendor = VENDOR_ANY, .subdevice = DEVICE_ANY },
