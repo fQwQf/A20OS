@@ -4,7 +4,7 @@
 
 ## 1. 背景与目标
 
-A20OS 目前仅有一个窄用途驱动 `kernel/drivers/input/xhci_hid.c`（1165 行）：硬编码绑定 Intel 8086:1e31 XHCI 控制器，只解析 HID 1.11**boot protocol** 键盘/鼠标，轮询工作，单控制器单实例（静态 `g_xhci`）。它没有 USB 设备树、没有 URB 抽象、不支持存储设备、不支持热插拔。它发布 input class 设备，事件经 `/dev/event0` mux（`kernel/drivers/input/input_mux.c`）与 virtio-input 等输入源聚合。
+A20OS 最初的 USB 驱动是窄用途的 `kernel/drivers/input/xhci_hid.c`（1165 行）：硬编码绑定 Intel 8086:1e31 XHCI 控制器，只解析 HID 1.11**boot protocol** 键盘/鼠标，轮询工作，单控制器单实例（静态 `g_xhci`）。它没有 USB 设备树、没有 URB 抽象、不支持存储设备、不支持热插拔。该文件已随通用 USB 子系统落地而移除，HID 事件面迁入 `kernel/drivers/usb/class/usb_hid.c`（经 `/dev/event0` mux `kernel/drivers/input/input_mux.c` 与 virtio-input 等输入源聚合）。
 
 目标：引入一个**通用 USB 子系统**，使任意 USB 宿主控制器上的 HID 与Mass Storage 设备通过统一模型工作，并接入现有输入/块设备类接口。
 
@@ -17,7 +17,7 @@ A20OS 目前仅有一个窄用途驱动 `kernel/drivers/input/xhci_hid.c`（1165
 | PCI 枚举 | `kernel/drivers/bus/pci_bus.c` | 宿主控制器可作为 PCI 设备绑定 |
 | 输入类接口 | `input_dev_ops_t`（read/ioctl/poll）+ `DEV_CLASS_INPUT` | HID 接入点，已存在 |
 | 块类接口 | `block_dev_ops_t`（read/write/flush/capacity/sector_size）+ `DEV_CLASS_BLOCK` | MSC 接入点，已存在 |
-| XHCI 底层 | `xhci_hid.c` | MMIO、TRB/事件环、输入/输出上下文、命令与控制传输、端口枚举、轮询——全部已有，只是与 HID 解析耦合 |
+| XHCI 底层 | 历史 `xhci_hid.c`（已移除） | MMIO、TRB/事件环、输入/输出上下文、命令与控制传输、端口枚举、轮询——重构为 `kernel/drivers/usb/host/xhci.c` 的 `usb_hcd_t` |
 | 内核线程 | `init_kthread` 等 | 可承载枚举/轮询工作 |
 
 **结论**：A20OS 的驱动模型已经预见了热插拔总线，输入/块类接口开箱可用。移植通用 USB **不需要改动现有驱动模型**，但**需要新增三个东西**：
@@ -184,6 +184,8 @@ typedef struct usb_hcd {
 - 新建 `usb/class/hid.c`：boot 键盘/鼠标 → `input_dev_ops_t`。
 - QEMU `usb-kbd/usb-tablet` 通过；现有 xhci_hid 行为不回归。
 - 预计：~2500–3500 行（重构 + 新增）。
+
+> **现状**：Phase 1 与 Phase 2 已实现——`kernel/drivers/usb/host/xhci.c`、`kernel/drivers/usb/core/usb_core.c`、`kernel/drivers/usb/class/usb_hid.c`、`kernel/drivers/usb/class/usb_storage.c` 均已落地，`xhci_hid.c` 已删除；drvmod 侧 `xhci.c`/`usb_hid.c`/`usb_storage.c` 以模块形式提供（`smoke-usb-x86`）。
 
 **Phase 2——BOT 存储**
 - `usb/class/storage.c`：BOT + SCSI 子集 → `block_dev_ops_t`。

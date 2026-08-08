@@ -2,7 +2,7 @@
 
 > 本文档对 A20OS Native ABI 进行系统化的形式化理论分析。以 Plotkin 的结构化操作语义（SOS）为框架，建立 handle/capability 系统的操作语义，给出安全性、活性、并发性和信息流控制的形式化证明，并分析 channel IPC 的消息序性质与 capability 撤销的完备性。
 
-> **证明边界（2026-07）**：本文结论针对 02 定义的 53-syscall 形式化核心模型。当前内核实现为 112 个 syscall；除已明确给出精化映射的 handle/channel/event/VMO 路径外，不能把本文结论自动外推为对全部现行 C 实现的机器验证。
+> **证明边界（2026-07）**：本文结论针对 02 定义的 53-syscall 形式化核心模型。当前内核实现为 126 个 syscall；除已明确给出精化映射的 handle/channel/event/VMO 路径外，不能把本文结论自动外推为对全部现行 C 实现的机器验证。
 
 ---
 
@@ -980,7 +980,7 @@ Capability-as-data:
 
 ### 11.3 A20OS 的独特定位
 
-**Insight 1：最小充分 capability 计算**。A20OS 的 13 种对象类型 × 14 种权限位构成了一个"最小充分"的能力系统——足以表达最小权限原则和 confused deputy 防御，但远比 seL4 的 CNode 图或 Zircon 的 ~30 种 rights 简单。
+**Insight 1：最小充分 capability 计算**。A20OS 的 14 种对象类型 × 14 种权限位构成了一个"最小充分"的能力系统——足以表达最小权限原则和 confused deputy 防御，但远比 seL4 的 CNode 图或 Zircon 的 ~30 种 rights 简单。
 
 **Insight 2：双 ABI 形式化隔离**。现有工作要么完全替代 POSIX（seL4, Zircon），要么在 POSIX 内嵌入 capability（Capsicum）。A20OS 首次提出并形式化证明了两套 ABI 的模块级隔离条件（定理 9.1）。
 

@@ -21,7 +21,7 @@
 | E1000 | `kernel/drivers/net/e1000.c` | `nic->lock` |
 | VMSVGA/SVGAv3 | `kernel/drivers/gpu/vmsvga.c` | `svga->lock` |
 | VirtIO input | `kernel/drvmod/examples/vinput.c (inst->lock 在模块内)` | `inst->lock` |
-| xHCI HID | `kernel/drivers/input/xhci_hid.c` | `xhci->lock` |
+| xHCI | `kernel/drivers/usb/host/xhci.c`（模块 `xhci.a20drv`） | `xhci->lock` |
 
 ## 全局顺序摘要
 
@@ -212,7 +212,7 @@ cg_node.lock -> proc_lock -> runq_lock -> pfa.lockproc_lock -> runq_lockproc_loc
 
 **局部顺序：** 无。当前每控制器只有一个同步 in-flight 命令。
 
-**已知限制：** VirtIO GPU controlq 当前用实例 mutex 串行化，在 mutex 内轮询完成但不关闭中断。请求/响应位于实例 DMA staging。未来多队列/异步实现必须改为 per-request 状态与 completion；禁止退回自旋锁内长等待或栈 DMA。
+**已知限制：** 每控制器当前只有一个同步 in-flight 命令，且使用混合完成窗口——先在锁内短时自旋轮询（`VIRTIO_SCSI_HYBRID_PRE_POLL_US`），随后 park 等待（IRQ 注册失败时回退纯轮询）。睡眠锁 `dev->lock` 不被 IRQ top-half 持有，因此轮询窗口不会阻塞中断路径。未来多队列实现必须改为 per-request 状态与 completion。
 
 ### E1000
 
@@ -232,11 +232,11 @@ cg_node.lock -> proc_lock -> runq_lock -> pfa.lockproc_lock -> runq_lockproc_loc
 
 **局部顺序：** 无。IRQ/poll 路径在锁内 drain 有界队列并 collect 一个带token 的 waiter，释放实例锁后 flush wake queue；阻塞 read 使用 Park/Wake协议并在调度前释放锁。
 
-### xHCI HID
+### xHCI
 
-**锁：** `xhci_controller_t.lock`，保护 command/event/endpoint ring、HID report 状态和聚合 input ring。
+**锁：** `xhci_controller_t.lock`（`kernel/drivers/usb/host/xhci.c`，模块 `xhci.a20drv`），保护 command/event/endpoint ring 和端口状态。
 
-**局部顺序：** 无。当前 class read/poll 在锁内推进轮询；不得从该路径调用 VFS、分配或调度。
+**局部顺序：** 无。驱动核心/URB 完成路径在锁内 drain 有界队列并 collect waiter，解锁后 flush；不得从该路径调用 VFS、分配或调度。HID/存储等 class 驱动不得在类锁内反向获取 xHCI 锁。
 
 ## 跨驱动规则
 
