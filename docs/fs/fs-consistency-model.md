@@ -37,35 +37,35 @@
 
 ### 3.1 FAT32（`kernel/fs/diskfs/fat32.c`）
 
-FAT32 从 virtio-blk block cache 挂载。superblock 由 `fat32_sb_t.lock` 保护。per-inode metadata（mode、uid、gid）保存在按 cluster number 索引的全局 RAM 表 `g_fat32_meta` 中（`fat32.c:295`）。
+FAT32 从 virtio-blk block cache 挂载。superblock 由 `fat32_sb_t.lock` 保护。per-inode metadata（mode、uid、gid）保存在按 cluster number 索引的全局 RAM 表 `g_fat32_meta` 中（`fat32.c`）。
 
 | Op | Support | Errno | 说明 / 代码引用 |
 |----|---------|-------|------------------------|
-| lookup | Y | — | `fat32_lookup`（`fat32.c:321`）。支持 `.` 和 `..`。大小写不敏感的 8.3 + LFN。 |
-| create | Y | — | `fat32_vn_create`（`fat32.c:467`）。分配一个 cluster，写入 8.3 short entry。 |
-| mkdir | Y | — | `fat32_vn_mkdir`（`fat32.c:381`）。创建 `.`/`..` entry。 |
-| unlink | Y | — | `fat32_vn_unlink`（`fat32.c:535`）。释放 cluster chain。目录返回 `-EISDIR`。 |
-| rmdir | Y | — | `fat32_vn_rmdir`（`fat32.c:708`）。检查 `fat32_dir_is_empty`（统计 active entry > 2）。 |
-| rename | Y | — | `fat32_vn_rename`（`fat32.c:959`）。创建新目录项并删除旧项；移动目录时改写其 `..` entry。支持 `RENAME_NOREPLACE`；替换目标。 |
+| lookup | Y | — | `fat32_lookup`（`fat32_vn.c`）。支持 `.` 和 `..`。大小写不敏感的 8.3 + LFN。 |
+| create | Y | — | `fat32_vn_create`（`fat32_vn.c`）。分配一个 cluster，写入 8.3 short entry。 |
+| mkdir | Y | — | `fat32_vn_mkdir`（`fat32_vn.c`）。创建 `.`/`..` entry。 |
+| unlink | Y | — | `fat32_vn_unlink`（`fat32_vn.c`）。释放 cluster chain。目录返回 `-EISDIR`。 |
+| rmdir | Y | — | `fat32_vn_rmdir`（`fat32_vn.c`）。检查 `fat32_dir_is_empty`（统计 active entry > 2）。 |
+| rename | Y | — | `fat32_vn_rename`（`fat32_vn.c`）。创建新目录项并删除旧项；移动目录时改写其 `..` entry。支持 `RENAME_NOREPLACE`；替换目标。 |
 | link | N | `-ENOSYS` | `g_fat32_vnode_ops` 中没有 `.link` op。`vfs_link` 返回 `-ENOSYS`（`vfs.c:822`）。 |
 | symlink | N | `-ENOSYS` | 没有 `.symlink`/`.readlink` ops。`vfs_symlink` 返回 `-ENOSYS`（`vfs.c:861`）。 |
 | readlink | N | `-EINVAL` | symlink vnode 不可能存在；`vfs_readlinkat` 返回 `-EINVAL`（`vfs.c:771`）。 |
-| stat | Y | — | `fat32_stat`（`fat32.c:357`）。`st_nlink` 硬编码为 1。`st_blocks` 按 512 向上取整。 |
-| truncate | Y | — | `fat32_vn_truncate`（`fat32.c:574`）。size 0 会重新分配单个 cluster。 |
-| chmod | Y | — | `fat32_vn_chmod`（`fat32.c:655`）。只存储在 RAM meta table 中。 |
-| chown | Y | — | `fat32_vn_chown`（`fat32.c:669`）。只存储在 RAM meta table 中；清除 suid/sgid bit。 |
-| read/write/lseek | Y | — | `g_fat32_fops`（`fat32.c:1149`）。每次 open 有一个带 cluster cache 的 `fat32_fctx_t`。 |
-| readdir | Y | — | `fat32_freaddir`（`fat32.c:1046`）。返回 `DT_DIR`/`DT_REG`；无 `DT_LNK`。 |
+| stat | Y | — | `fat32_stat`（`fat32_vn.c`）。`st_nlink` 硬编码为 1。`st_blocks` 按 512 向上取整。 |
+| truncate | Y | — | `fat32_vn_truncate`（`fat32_vn.c`）。size 0 会重新分配单个 cluster。 |
+| chmod | Y | — | `fat32_vn_chmod`（`fat32_vn.c`）。只存储在 RAM meta table 中。 |
+| chown | Y | — | `fat32_vn_chown`（`fat32_vn.c`）。只存储在 RAM meta table 中；清除 suid/sgid bit。 |
+| read/write/lseek | Y | — | `g_fat32_fops`（`fat32_file.c`）。每次 open 有一个带 cluster cache 的 `fat32_fctx_t`。 |
+| readdir | Y | — | `fat32_freaddir`（`fat32_file.c`）。返回 `DT_DIR`/`DT_REG`；无 `DT_LNK`。 |
 | ioctl | N | `-ENOTTY` | `.ioctl` 为 `NULL`；`vfs_ioctl` 落到 `-ENOTTY`。 |
 | fsync | partial | — | `vfs_fsync` 同步 block cache（`vfs/file.c:232`），但 FAT32 没有显式 inode log。 |
 | xattr | N | `-EOPNOTSUPP` | 无后端 hook；`sys_xattr_*` 拒绝非 reg/dir/lnk，随后落到 RAM 表；该表只在已挂载 vnode 生命周期内存在。 |
 
 **FAT32 顺序保证**
 
-- 整个文件系统由 `sb->lock` 串行化（`fat32.c:271`）。
+- 整个文件系统由 `sb->lock` 串行化（`fat32.c`）。
 - 目录项更新和 FAT 更新之间不是原子的；如果在释放 cluster 后、标记目录项删除前崩溃，可能泄漏 cluster。
-- 文件大小只在 close 时写回目录项（`fat32_fclose`，`fat32.c:1105`）。close 前断电会丢失 size。
-- block cache 是 write-back；`vfs_fsync` 和 unmount（`fat32_unmount`，`fat32.c:1218`）会调用 `bcache_sync`。
+- 文件大小只在 close 时写回目录项（`fat32_fclose`，`fat32_file.c`）。close 前断电会丢失 size。
+- block cache 是 write-back；`vfs_fsync` 和 unmount（`fat32_unmount`，`fat32.c`）会调用 `bcache_sync`。
 
 **FAT32 ABI 缺口**
 
@@ -77,42 +77,42 @@ FAT32 从 virtio-blk block cache 挂载。superblock 由 `fat32_sb_t.lock` 保�
 
 ### 3.2 ext4（`kernel/fs/diskfs/ext4.c`）
 
-ext4 从 block cache 挂载，并使用短生命周期 vnode 模型：每次 lookup 都创建新的 vnode，refcount 到零时释放（`ext4.c:67`）。inode cache hook 是 stub（`ext4.c:75`）。
+ext4 从 block cache 挂载，并使用短生命周期 vnode 模型：每次 lookup 都创建新的 vnode，refcount 到零时释放（`ext4.c`）。inode cache hook 是 stub（`ext4.c`）。
 
 | Op | Support | Errno | 说明 / 代码引用 |
 |----|---------|-------|------------------------|
-| lookup | Y | — | `ext4_lookup`（`ext4.c:731`）。支持 `.`/`..`。 |
-| create | Y | — | `ext4_vn_create`（`ext4.c:802`）。分配 inode，写入目录项。 |
-| mkdir | Y | — | `ext4_vn_mkdir`（`ext4.c:848`）。为 `.`/`..` 分配一个 block。 |
-| unlink | Y | — | `ext4_vn_unlink`（`ext4.c:934`）。目录以 `-EISDIR` 拒绝。 |
-| rmdir | Y | — | `ext4_vn_rmdir`（`ext4.c:971`）。检查除 `.`/`..` 外为空。 |
-| rename | Y | — | `ext4_vn_rename`（`ext4.c:1150`）。替换现有目标，不支持 exchange。 |
-| link | Y | — | `ext4_vn_link`（`ext4.c:1377`）。递增 `i_links_count`；拒绝目录；失败时回滚。 |
-| symlink | Y | — | `ext4_vn_symlink`（`ext4.c:1206`）。只支持 fast symlink（target <= 60 bytes）。 |
-| readlink | Y | — | `ext4_readlink`（`ext4.c:1190`）。从 `i_block` 读取最多 60 字节。 |
-| stat | Y | — | `ext4_stat`（`ext4.c:846`）。`st_nlink` 来自 `i_links_count`。 |
-| truncate | Y | — | `ext4_vn_truncate`（`ext4.c:1249`）。零大小截断全部 block；非零大小释放 EOF 之后的 block（collect-rebuild / 间接块裁剪）。支持 64 位文件大小（`i_size_high`）。 |
-| chmod | Y | — | `ext4_vn_chmod`（`ext4.c:1111`）。将 `i_mode` 写到磁盘。 |
-| chown | Y | — | `ext4_vn_chown`（`ext4.c:1121`）。写入 `i_uid`/`i_gid`；清除 suid/sgid。 |
-| read/write/lseek | Y | — | `g_ext4_fops`（`ext4.c:1394`）。 |
-| readdir | Y | — | `ext4_freaddir`（`ext4.c:1332`）。返回 `DT_DIR`/`DT_REG`/`DT_LNK`。 |
+| lookup | Y | — | `ext4_lookup`（`ext4_namei.c`）。支持 `.`/`..`。 |
+| create | Y | — | `ext4_vn_create`（`ext4_namei.c`）。分配 inode，写入目录项。 |
+| mkdir | Y | — | `ext4_vn_mkdir`（`ext4_namei.c`）。为 `.`/`..` 分配一个 block。 |
+| unlink | Y | — | `ext4_vn_unlink`（`ext4_namei.c`）。目录以 `-EISDIR` 拒绝。 |
+| rmdir | Y | — | `ext4_vn_rmdir`（`ext4_namei.c`）。检查除 `.`/`..` 外为空。 |
+| rename | Y | — | `ext4_vn_rename`（`ext4_namei.c`）。替换现有目标，不支持 exchange。 |
+| link | Y | — | `ext4_vn_link`（`ext4_namei.c`）。递增 `i_links_count`；拒绝目录；失败时回滚。 |
+| symlink | Y | — | `ext4_vn_symlink`（`ext4_namei.c`）。只支持 fast symlink（target <= 60 bytes）。 |
+| readlink | Y | — | `ext4_readlink`（`ext4_namei.c`）。从 `i_block` 读取最多 60 字节。 |
+| stat | Y | — | `ext4_stat`（`ext4_namei.c`）。`st_nlink` 来自 `i_links_count`。 |
+| truncate | Y | — | `ext4_vn_truncate`（`ext4.c`）。零大小截断全部 block；非零大小释放 EOF 之后的 block（collect-rebuild / 间接块裁剪）。支持 64 位文件大小（`i_size_high`）。 |
+| chmod | Y | — | `ext4_vn_chmod`（`ext4_namei.c`）。将 `i_mode` 写到磁盘。 |
+| chown | Y | — | `ext4_vn_chown`（`ext4_namei.c`）。写入 `i_uid`/`i_gid`；清除 suid/sgid。 |
+| read/write/lseek | Y | — | `g_ext4_fops`（`ext4_file.c`）。 |
+| readdir | Y | — | `ext4_freaddir`（`ext4_file.c`）。返回 `DT_DIR`/`DT_REG`/`DT_LNK`。 |
 | ioctl | N | `-ENOTTY` | `.ioctl` 为 `NULL`。 |
 | fsync | partial | — | 同步 block cache；未使用 journal，因此 metadata 和 data 没有顺序保证。 |
 | xattr | N | `-EOPNOTSUPP` | 无后端 hook。 |
 
 **ext4 顺序保证**
 
-- inode allocation、block allocation 和目录项写入在 `sb->alloc_lock` 下执行（`ext4.c:166`、`ext4.c:188`、`ext4.c:205`），但没有 journal 或 ordered writeback。
-- `ext4_vn_rename`（`ext4.c:991`）会移除目标、加入新 entry，再移除旧 entry。崩溃后可能两个 entry 都存在，也可能都不存在。
+- inode allocation、block allocation 和目录项写入在 `sb->alloc_lock` 下执行（`ext4.c`、`ext4.c`、`ext4.c`），但没有 journal 或 ordered writeback。
+- `ext4_vn_rename`（`ext4_namei.c`）会移除目标、加入新 entry，再移除旧 entry。崩溃后可能两个 entry 都存在，也可能都不存在。
 - `vfs_fsync` 会对 mount 的 block cache 调用 `bcache_sync`（`vfs/file.c:232`）。
 
 **ext4 ABI 缺口**
 
-- 只支持 fast symlink；更长 target 返回 `-ENAMETOOLONG`（`ext4.c:1219`）。
+- 只支持 fast symlink；更长 target 返回 `-ENAMETOOLONG`（`ext4.c`）。
 - hard link 已实现；`st_nlink` 来自 `i_links_count`（unlink 递减，link 递增）。
-- 没有 journaling；metadata 更新跨多个 block 时不是原子的。
+- 挂载时对带 journal 的镜像执行 **JBD2 recovery**（`EXT4_FEATURE_INCOMPAT_RECOVER` 已在 `unsupported_incompat` 中显式排除，`ext4_journal_recover` 在挂载时运行），recovery 失败则 fail closed 拒绝挂载。
 - 没有 xattr。
-- mount 时做 fail-closed feature 检查：不支持的 incompat 特性（journal/recover、meta_bg、bigalloc、inline_data、casefold、encryption、MMP）会拒绝挂载，而不是静默误读镜像。
+- mount 时做 fail-closed feature 检查：不支持的 incompat 特性（meta_bg、bigalloc、inline_data、casefold、encryption、MMP）会拒绝挂载，而不是静默误读镜像。
 
 ### 3.3 NTFS（`kernel/fs/diskfs/ntfs.c`）
 
@@ -120,17 +120,17 @@ NTFS 从 block cache 挂载，直接解析 MFT（master file table）记录，�
 
 | Op | Support | Errno | 说明 / 代码引用 |
 |----|---------|-------|------------------------|
-| lookup | Y | — | `ntfs_lookup`（`ntfs.c:1294`）。通过 `ntfs_read_directory` 枚举 `$I30` 索引。 |
+| lookup | Y | — | `ntfs_lookup`（`ntfs_namei.c`）。通过 `ntfs_read_directory` 枚举 `$I30` 索引。 |
 | create | Y | — | `ntfs_vn_create`。构建 FILE record（`$STANDARD_INFORMATION`/`$FILE_NAME`/`$DATA`）并插入父目录索引。 |
 | mkdir | Y | — | 创建带 `$INDEX_ROOT` 的空目录 record。 |
-| unlink | Y | — | `ntfs_vn_unlink`（`ntfs.c:1534`）。从索引移除，释放数据 cluster 与 MFT record。 |
-| rmdir | Y | — | `ntfs_vn_rmdir`（`ntfs.c:1568`）。目录必须为空。 |
+| unlink | Y | — | `ntfs_vn_unlink`（`ntfs_namei.c`）。从索引移除，释放数据 cluster 与 MFT record。 |
+| rmdir | Y | — | `ntfs_vn_rmdir`（`ntfs_namei.c`）。目录必须为空。 |
 | rename | Y | — | `ntfs_vn_rename`。移除旧索引项，改写子 record 的 `$FILE_NAME`（新 parent ref + 新 name），插入新索引项；失败回滚。 |
 | link | N | `-ENOSYS` | 无 `.link` op。 |
 | symlink | N | `-ENOSYS` | 无 `.symlink`/`.readlink` ops。 |
-| stat | Y | — | `ntfs_stat`（`ntfs.c:1325`）。`st_nlink` 为 1。 |
-| statfs | Y | — | `ntfs_statfs`（`ntfs.c:1341`）。`f_bfree` 是估算值（total/2）。 |
-| truncate | Y | — | `ntfs_vn_truncate`（`ntfs.c:1676`）。resident 数据就地收缩，或裁剪非 resident run。 |
+| stat | Y | — | `ntfs_stat`（`ntfs_namei.c`）。`st_nlink` 为 1。 |
+| statfs | Y | — | `ntfs_statfs`（`ntfs_namei.c`）。`f_bfree` 是估算值（total/2）。 |
+| truncate | Y | — | `ntfs_vn_truncate`（`ntfs.c`）。resident 数据就地收缩，或裁剪非 resident run。 |
 | read/write/lseek | Y | — | `g_ntfs_fops`。支持 resident 与 non-resident（runlist 编码）数据。 |
 | readdir | Y | — | `ntfs_freaddir`。从 `$I30` 索引枚举。 |
 | ioctl | N | `-ENOTTY` | 无 `.ioctl` op。 |
@@ -140,7 +140,7 @@ NTFS 从 block cache 挂载，直接解析 MFT（master file table）记录，�
 - 所有 mutation 在 `ntfs_lock` 下串行化。
 - rename 在改写 `$FILE_NAME` 后、插入新索引项前，若失败会恢复旧索引项，避免名字丢失。
 - 无 `$LogFile`/`$MFTMirr` 处理；崩溃一致性不保证。
-- 压缩/加密属性被拒绝（`ntfs.c:441`）；`$ATTRIBUTE_LIST`（跨 record 属性）不支持。
+- 压缩/加密属性被拒绝（`ntfs.c`）；`$ATTRIBUTE_LIST`（跨 record 属性）不支持。
 
 **NTFS ABI 缺口**
 
@@ -180,21 +180,21 @@ ISO9660 是只读 CD-ROM 文件系统，从 block cache 挂载。在逻辑块 16
 ramfs 是 root filesystem，也是 `/dev/shm` 和显式 `tmpfs`/`ramfs` mount 的后端。它使用单个全局 inode table，每个目录有固定的 `RAMFS_MAX_INODES`（4096）和 `RAMFS_MAX_DIR_ENTRIES`（256）上限。
 | Op | Support | Errno | 说明 / 代码引用 |
 |----|---------|-------|------------------------|
-| lookup | Y | — | `ramfs_vnode_lookup`（`ramfs.c:220`）。 |
-| create | Y | — | `ramfs_vnode_create`（`ramfs.c:276`）。 |
-| mkdir | Y | — | `ramfs_vnode_mkdir`（`ramfs.c:246`）。 |
-| unlink | Y | — | `ramfs_vnode_unlink`（`ramfs.c:323`）。递减 `nlink`，可能释放。 |
-| rmdir | Y | — | `ramfs_vnode_rmdir`（`ramfs.c:436`）。empty 检查统计 active entry > 2。 |
-| rename | Y | — | `ramfs_vnode_rename`（`ramfs.c:392`）。仅同一 mount（由 VFS 强制）。 |
-| link | Y | — | `ramfs_vnode_link`（`ramfs.c:380`）。拒绝目录。 |
-| symlink | Y | — | `ramfs_vnode_symlink`（`ramfs.c:353`）。 |
-| readlink | Y | — | `ramfs_vnode_readlink`（`ramfs.c:342`）。 |
-| stat | Y | — | `ramfs_vnode_stat`（`ramfs.c:234`）。`st_nlink` 来自 inode。 |
-| truncate | Y | — | `ramfs_vnode_truncate`（`ramfs.c:489`）。 |
-| chmod | Y | — | `ramfs_vnode_chmod`（`ramfs.c:465`）。 |
-| chown | Y | — | `ramfs_vnode_chown`（`ramfs.c:472`）。 |
-| read/write/lseek | Y | — | `g_ramfs_fops`（`ramfs.c:692`）。 |
-| readdir | Y | — | `ramfs_freaddir`（`ramfs.c:650`）。 |
+| lookup | Y | — | `ramfs_vnode_lookup`（`ramfs.c`）。 |
+| create | Y | — | `ramfs_vnode_create`（`ramfs.c`）。 |
+| mkdir | Y | — | `ramfs_vnode_mkdir`（`ramfs.c`）。 |
+| unlink | Y | — | `ramfs_vnode_unlink`（`ramfs.c`）。递减 `nlink`，可能释放。 |
+| rmdir | Y | — | `ramfs_vnode_rmdir`（`ramfs.c`）。empty 检查统计 active entry > 2。 |
+| rename | Y | — | `ramfs_vnode_rename`（`ramfs.c`）。仅同一 mount（由 VFS 强制）。 |
+| link | Y | — | `ramfs_vnode_link`（`ramfs.c`）。拒绝目录。 |
+| symlink | Y | — | `ramfs_vnode_symlink`（`ramfs.c`）。 |
+| readlink | Y | — | `ramfs_vnode_readlink`（`ramfs.c`）。 |
+| stat | Y | — | `ramfs_vnode_stat`（`ramfs.c`）。`st_nlink` 来自 inode。 |
+| truncate | Y | — | `ramfs_vnode_truncate`（`ramfs.c`）。 |
+| chmod | Y | — | `ramfs_vnode_chmod`（`ramfs.c`）。 |
+| chown | Y | — | `ramfs_vnode_chown`（`ramfs.c`）。 |
+| read/write/lseek | Y | — | `g_ramfs_fops`（`ramfs.c`）。 |
+| readdir | Y | — | `ramfs_freaddir`（`ramfs.c`）。 |
 | ioctl | N | `-ENOTTY` | 无 `.ioctl` op。 |
 | fsync | Y（no-op） | — | `vfs_fsync` 同步 block cache；ramfs 没有 block cache，因此实际为 no-op。 |
 | xattr | partial | — | 存储在全局 RAM 表（`kernel/fs/xattr.c`），重启后丢失。 |
@@ -202,22 +202,22 @@ ramfs 是 root filesystem，也是 `/dev/shm` 和显式 `tmpfs`/`ramfs` mount �
 **ramfs 顺序保证**
 
 - 所有 ramfs 操作都是内存内操作，并由大内核隐式单线程路径串行化（无 per-inode lock）。
-- `ramfs_vnode_link` 正确递增 `nlink`（`ramfs.c:388`）。
-- `ramfs_vnode_unlink` 递减 `nlink`，并在 `nlink == 0 && ref_count <= 1` 时释放 inode（`ramfs.c:76`）。
+- `ramfs_vnode_link` 正确递增 `nlink`（`ramfs.c`）。
+- `ramfs_vnode_unlink` 递减 `nlink`，并在 `nlink == 0 && ref_count <= 1` 时释放 inode（`ramfs.c`）。
 
 **ramfs ABI 缺口**
 
-- 每目录 entry 上限为 256（`ramfs.c:11`）。
-- 总 inode 上限为 4096（`ramfs.c:10`）。
+- 每目录 entry 上限为 256（`ramfs.c`）。
+- 总 inode 上限为 4096（`ramfs.c`）。
 - 没有持久化；xattr 也只是全局 RAM 状态。
 
 ### 3.4 devfs（`kernel/fs/devfs/devfs.c`）
 
-devfs 是合成设备树。它没有可变目录内容；entry 在编译期固定于 `g_nodes`（`devfs.c:71`）。
+devfs 是合成设备树。`g_nodes` 是编译期静态节点（`devfs.c:71`），但 **class 设备（char/block/net/input/display/audio）由驱动核心动态发布**：`class_device_get_nth` 按序生成 `/dev/charN`、`diskN`、`audioN` 等（`devfs.c:656-668`，`dynamic` 节点）。
 
 | Op | Support | Errno | 说明 / 代码引用 |
 |----|---------|-------|------------------------|
-| lookup | Y | — | `devfs_lookup`（`devfs.c:511`）。只支持 root、`misc/` 和 `pts/` 目录。 |
+| lookup | Y | — | `devfs_lookup`（`devfs.c:511`）。支持 root、`misc/`、`pts/` 目录与动态 class 节点。 |
 | create | N | `-ENOSYS` | 无 `.create` op；带 `O_CREAT` 的 `vfs_open` 返回 `-ENOSYS`（`vfs.c:95`）。 |
 | mkdir | N | `-ENOTDIR` | 无 `.mkdir` op；`vfs_mkdir` 返回 `-ENOTDIR`（`vfs.c:223`）。 |
 | unlink | N | `-ENOTDIR` | 无 `.unlink` op；`vfs_unlink` 返回 `-ENOTDIR`（`vfs.c:277`）。 |
@@ -239,7 +239,7 @@ devfs 是合成设备树。它没有可变目录内容；entry 在编译期固�
 
 - 不能创建、删除或 rename 设备节点。
 - 不支持 `chmod`/`chown`。
-- `/dev` 内容硬编码；未实现 uevent 驱动的节点创建。
+- class 设备的节点名由驱动核心按 `class_device_get_nth` 生成（`/dev/charN` 等），节点内容由驱动 probe 决定；uevent 驱动的动态命名尚未实现。
 
 ### 3.5 procfs（`kernel/fs/procfs/procfs.c`）
 
@@ -270,7 +270,7 @@ procfs 是完全合成的文件系统。entry 在 `lookup` 和 `open` 时生成�
 
 ### 3.6 sysfs（`kernel/fs/sysfs.c`）
 
-sysfs 是最小合成树。当前只暴露 `/sys/block/loopN/{dev,size,uevent}`。
+sysfs 是最小合成树。当前暴露 `/sys/block/loopN/{dev,size,uevent}` 与 `/sys/class/drm/card0/...`（`sysfs.c` 头注释与 `SF_DRM` 查找/枚举路径）。
 
 | Op | Support | Errno | 说明 / 代码引用 |
 |----|---------|-------|------------------------|
@@ -288,7 +288,7 @@ sysfs 是最小合成树。当前只暴露 `/sys/block/loopN/{dev,size,uevent}`�
 
 **sysfs ABI 缺口**
 
-- 只暴露 loop block device。
+- 只暴露 loop block device 与 DRM card0 两处有限视图，其余 class/block 设备未枚举。
 - 没有 writable attribute，也没有 uevent write。
 
 ### 3.7 pipe（`kernel/fs/pipe.c`）
@@ -375,15 +375,15 @@ anonfd 是把匿名 vfile 安装到当前 fd table 的 helper。它不是文件�
 
 | 领域 | 当前行为 | 期望的 Linux 行为 |
 |------|------------------|-------------------------|
-| openat2 resolve flag | 被忽略；按 `openat` 处理（`sys_proc.c:483`） | 必须遵守 `RESOLVE_*` |
-| renameat2 flag | 被拒绝（`sys_path.c:33`） | 支持 `RENAME_NOREPLACE`、`RENAME_EXCHANGE`、`RENAME_WHITEOUT` |
-| statx | 只有 basic stats（`sys_path.c:287`） | 遵守 `mask`、`AT_STATX_*`、`STATX_*` |
+| openat2 resolve flag | 已实现：`RESOLVE_NO_SYMLINKS/BENEATH/IN_ROOT/NO_MAGICLINKS/NO_XDEV/NO_TRAILING_SYMLINKS` 经 `vfs_openat2` 生效（`sys_proc.c:552`） | 必须遵守 `RESOLVE_*` |
+| renameat2 flag | 已支持 `RENAME_NOREPLACE`、`RENAME_EXCHANGE`（`sys_path.c:40`），其余 flag 拒绝 | 支持 `RENAME_WHITEOUT` 等 |
+| statx | 遵守 `mask`，含 `STATX_BTIME`（`sys_path.c:358`） | 完整遵守 `AT_STATX_*`/`STATX_*` |
 | fchmodat2 | 带 flags 分发到 `sys_fchmodat`（`syscall_table.def:74`） | 独立 syscall，完整处理 `AT_*` flag |
 | xattr | 只有全局 RAM 表 | 具备 namespace 检查的后端持久化 xattr |
-| Symlink loop limit | 8（`path_resolution.c:89`） | Linux 使用 40（`MAX_SYMLINKS`） |
+| Symlink loop limit | 40（`MAX_SYMLINKS`，`vfs.h:22`） | Linux 使用 40（`MAX_SYMLINKS`） |
 | Mount-point `..` | 留在 mount root 内 | 跨到 parent mount |
-| chroot | 设置 `root_path`，但 resolution 忽略它（`sys_namespace.c:26`） | resolution 必须受 `root_path` 约束 |
-| faccessat2 flag | 支持 `AT_EACCESS`/`AT_SYMLINK_NOFOLLOW`/`AT_EMPTY_PATH` | 同时严格校验不支持的 bit |
+| chroot | 已实现：`root_path` 在路径解析中生效（`vfs_path_normalize_absolute_with_root`，`path_resolution.c`） | resolution 必须受 `root_path` 约束 |
+| faccessat2 flag | 支持 `AT_EACCESS`/`AT_SYMLINK_NOFOLLOW`/`AT_EMPTY_PATH`，未支持 bit 返回 `-EINVAL`（`vfs_stat.c:165`） | 同时严格校验不支持的 bit |
 
 ## 6. 测试影响
 

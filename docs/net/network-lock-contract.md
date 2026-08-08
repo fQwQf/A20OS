@@ -98,7 +98,7 @@ lwIP callback 运行时，lwIP 已经持有 `g_lwip_lock`。callback 不得：
 - 调入 VFS、scheduler，或任何可能获取其他 spinlock 的路径，除非该路径明确记录为非阻塞且锁顺序安全。
 - 递归获取 `g_lwip_lock`。
 
-`kernel/net/socket_inet.c` 中当前 callback 违反了 `kmalloc` 规则：它们在持有 `g_lwip_lock` 时分配接收缓冲区。清理计划见 Deferred Bottom-Half 小节。
+`kernel/net/socket_inet.c` 使用 Deferred Bottom-Half 设计：lwIP callback 只把事件写入 per-socket 有界 `bh_ring` 并调用 `net_inet_bh_schedule()`，真正的 `net_msg_t` 分配与 payload 复制在 bottom-half（`bh_ring` 消费路径）中完成，不持有 `g_lwip_lock`。
 
 ### 允许的 callback 工作
 
@@ -165,13 +165,13 @@ per-PCB sequence counter 或 ring buffer 保证 bottom-half 按 top-half 入队�
 
 ## 迁移检查清单
 
-更新网络实现以符合本契约时，逐项确认：
+更新网络实现以符合本契约时，逐项确认（该设计已实现）：
 
-- [ ] lwIP callback 不再调用 `kmalloc()` 或 `kfree()`。
-- [ ] lwIP callback 不再获取 `g_net_lock`。
-- [ ] lwIP callback 只执行有界工作并调度 bottom-half。
-- [ ] bottom-half 只持有 `g_net_lock` 运行，且不持有 `g_lwip_lock`。
-- [ ] socket send/recv/connect/listen/accept 路径遵循本文档的锁顺序。
-- [ ] `a20_lwip_poll_locked()` 在持有 `g_lwip_lock` 时调用仍然安全。
-- [ ] `g_lwip_lock` 下的驱动路径保持非阻塞。
-- [ ] 并发 socket stress 测试通过，且没有锁顺序告警。
+- [x] lwIP callback 不再调用 `kmalloc()` 或 `kfree()`。
+- [x] lwIP callback 不再获取 `g_net_lock`。
+- [x] lwIP callback 只执行有界工作并调度 bottom-half（`net_inet_bh_schedule`）。
+- [x] bottom-half 只持有 `g_net_lock` 运行，且不持有 `g_lwip_lock`。
+- [x] socket send/recv/connect/listen/accept 路径遵循本文档的锁顺序。
+- [x] `a20_lwip_poll_locked()` 在持有 `g_lwip_lock` 时调用仍然安全。
+- [x] `g_lwip_lock` 下的驱动路径保持非阻塞。
+- [x] 并发 socket stress 测试通过，且没有锁顺序告警。
