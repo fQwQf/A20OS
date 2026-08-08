@@ -5,9 +5,12 @@
 #include "core/consts.h"
 #include "core/refcount.h"
 #include "core/lock.h"
+#include "core/sync.h"
+#include "mm/frame.h"
 
 struct vmo;
 struct vnode;
+struct page_cache_page;
 
 #define VM_READ      (1UL << 0)
 #define VM_WRITE     (1UL << 1)
@@ -52,6 +55,13 @@ typedef struct vm_area {
     struct vm_area *prev;
     struct vm_area *next;
 } vm_area_t;
+
+typedef struct mm_tlb_hold {
+    struct mm_tlb_hold *next;
+    pfn_t frame;
+    struct page_cache_page *page;
+    uint8_t kind;
+} mm_tlb_hold_t;
 
 /*
  * mm_struct lifetime and address-space invariants:
@@ -99,8 +109,16 @@ typedef struct vm_area {
  */
 typedef struct mm_struct {
     spinlock_t lock;
+    /*
+     * Serializes PTE invalidation through the remote shootdown and deferred
+     * reference-drop phase.  A spinlock cannot cover that interval: remote
+     * CPUs can be spinning on mm->lock with interrupts disabled and must be
+     * allowed to leave that critical section before servicing the TLB IPI.
+     */
+    mutex_t tlb_lock;
     vm_area_t *mmap;
     vm_area_t *deferred_vma;  /* freed after mm->lock is dropped */
+    mm_tlb_hold_t *tlb_holds; /* released only after remote TLB shootdown */
     pt_root_t *pgdir;
     vaddr_t    brk;
     vaddr_t    start_brk;
@@ -172,6 +190,17 @@ int     mm_mremap(mm_struct_t *mm, vaddr_t old_addr, size_t old_size,
                   size_t new_size, int flags, vaddr_t new_addr,
                   vaddr_t *out_addr);
 int     mm_demote_huge_page(mm_struct_t *mm, vaddr_t addr);
+
+/*
+ * TLB invalidation transaction.  Public mapping writers take tlb_lock before
+ * mm->lock, clear/replace PTEs while holding mm->lock, then call finish after
+ * dropping mm->lock.  A frame/page hold keeps the old backing object alive
+ * until every online CPU has acknowledged the invalidation.
+ */
+void mm_tlb_invalidate_begin(mm_struct_t *mm);
+void mm_tlb_invalidate_finish(mm_struct_t *mm);
+int  mm_tlb_hold_frame(mm_struct_t *mm, pfn_t pfn);
+int  mm_tlb_hold_page(mm_struct_t *mm, struct page_cache_page *page);
 
 pte_t mm_prot_to_pte_flags(int prot);
 int   mm_pte_flags_to_prot(pte_t pte_flags);

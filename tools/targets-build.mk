@@ -57,7 +57,7 @@ check-arch-boundary:
 		--glob '!kernel/mm/vdso.c' --glob '!kernel/include/mm/vdso.h' \
 		--glob '!kernel/include/mm/vdso_blob.h'
 	@rg -q "ARCH_MMU_RUNTIME_MATRIX_CONTRACT" docs/testing/testing-gates.md
-	@rg -q "smoke-arch-mmu-matrix" Makefile docs/OS-Design.md
+	@rg -q "smoke-arch-mmu-matrix" tools/targets-smoke.mk docs/OS-Design.md
 	@for arch in loongarch64 x86_64 ppc64le; do \
 		if $(MAKE) -s ARCH=$$arch NOMMU=1 kernel-only >/dev/null 2>&1; then \
 			echo "check-arch-boundary: unsupported NOMMU build accepted for $$arch"; \
@@ -109,11 +109,11 @@ check-smp-platform-boundary:
 
 check-abi-smoke-gate:
 	@rg -q "ABI_SMOKE_GATE_CONTRACT" docs/testing/testing-gates.md
-	@rg -q "syscall_smoke" Makefile
-	@rg -q "smoke-abi-linux" Makefile
-	@rg -q "native-minimal" Makefile
-	@rg -q "native-test" Makefile
-	@rg -q "test_liba20c" user/tests/test_liba20c.c Makefile
+	@rg -q "syscall_smoke" tools/targets-smoke.mk
+	@rg -q "smoke-abi-linux" tools/targets-smoke.mk
+	@rg -q "native-minimal" tools/targets-native.mk
+	@rg -q "native-test" tools/targets-native.mk
+	@rg -q "test_liba20c" user/tests/test_liba20c.c tools/targets-native.mk
 	@echo "check-abi-smoke-gate: PASS"
 
 check-doc-drift:
@@ -333,4 +333,3 @@ check-io-progress-model:
 	@! rg -q "virtio_blk_poll_all" kernel/proc/sched.c kernel/proc/proc.c
 	@! rg -q "a20_lwip_poll" kernel/proc/sched.c kernel/proc/proc.c
 	@echo "check-io-progress-model: PASS"
-
