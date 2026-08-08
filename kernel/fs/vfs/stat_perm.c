@@ -1,13 +1,18 @@
 #include "fs/vfs/stat_perm.h"
+#include "core/lock.h"
+#include "core/perf.h"
 #include "core/string.h"
 #include "core/timekeeping.h"
 
 #define VFS_TIME_META_MAX 8192
+#define VFS_TIME_META_HASH_SIZE 2048
 #define LINUX_UTIME_NOW  0x3fffffffULL
 #define LINUX_UTIME_OMIT 0x3ffffffeULL
 
 typedef struct {
     int used;
+    int hash_next;
+    int free_next;
     void *mnt;
     uint64_t ino;
     uint64_t atime;
@@ -19,6 +24,88 @@ typedef struct {
 } vfs_time_meta_t;
 
 static vfs_time_meta_t g_time_meta[VFS_TIME_META_MAX];
+static int g_time_meta_hash[VFS_TIME_META_HASH_SIZE];
+static int g_time_meta_free;
+static int g_time_meta_initialized;
+static spinlock_t g_time_meta_lock = SPINLOCK_INIT;
+
+static unsigned vfs_time_meta_hash(void *mnt, uint64_t ino)
+{
+    uintptr_t key = (uintptr_t)mnt >> 4;
+    key ^= (uintptr_t)ino ^ (uintptr_t)(ino >> 32);
+    return (unsigned)key & (VFS_TIME_META_HASH_SIZE - 1);
+}
+
+static void vfs_time_meta_init_locked(void)
+{
+    if (g_time_meta_initialized)
+        return;
+    for (int i = 0; i < VFS_TIME_META_HASH_SIZE; i++)
+        g_time_meta_hash[i] = -1;
+    for (int i = 0; i < VFS_TIME_META_MAX; i++) {
+        g_time_meta[i].free_next = i + 1;
+        g_time_meta[i].hash_next = -1;
+    }
+    g_time_meta[VFS_TIME_META_MAX - 1].free_next = -1;
+    g_time_meta_free = 0;
+    g_time_meta_initialized = 1;
+}
+
+static int vfs_time_meta_counted(const mount_t *mnt)
+{
+    return !mnt || mnt->type != FS_TYPE_PROCFS;
+}
+
+static int vfs_time_meta_find_locked(void *mnt, uint64_t ino, int counted)
+{
+    unsigned bucket = vfs_time_meta_hash(mnt, ino);
+    uint64_t probes = 0;
+    if (counted)
+        a20_perf_count(A20_PERF_VFS_TIME_META_CALLS);
+    for (int i = g_time_meta_hash[bucket]; i >= 0;
+         i = g_time_meta[i].hash_next) {
+        probes++;
+        if (g_time_meta[i].mnt == mnt && g_time_meta[i].ino == ino) {
+            if (counted)
+                a20_perf_add(A20_PERF_VFS_TIME_META_PROBES, probes);
+            return i;
+        }
+    }
+    if (counted)
+        a20_perf_add(A20_PERF_VFS_TIME_META_PROBES, probes);
+    return -1;
+}
+
+static int vfs_time_meta_get_locked(vnode_t *vn)
+{
+    int slot = vfs_time_meta_find_locked(vn->mnt, vn->ino,
+                                         vfs_time_meta_counted(vn->mnt));
+    if (slot >= 0)
+        return slot;
+    if (g_time_meta_free < 0)
+        return -1;
+
+    slot = g_time_meta_free;
+    g_time_meta_free = g_time_meta[slot].free_next;
+    memset(&g_time_meta[slot], 0, sizeof(g_time_meta[slot]));
+    g_time_meta[slot].used = 1;
+    g_time_meta[slot].mnt = vn->mnt;
+    g_time_meta[slot].ino = vn->ino;
+    unsigned bucket = vfs_time_meta_hash(vn->mnt, vn->ino);
+    g_time_meta[slot].hash_next = g_time_meta_hash[bucket];
+    g_time_meta[slot].free_next = -1;
+    g_time_meta_hash[bucket] = slot;
+    return slot;
+}
+
+static void vfs_time_meta_free_locked(int slot, int *link)
+{
+    *link = g_time_meta[slot].hash_next;
+    memset(&g_time_meta[slot], 0, sizeof(g_time_meta[slot]));
+    g_time_meta[slot].hash_next = -1;
+    g_time_meta[slot].free_next = g_time_meta_free;
+    g_time_meta_free = slot;
+}
 
 void fill_char_kstat(kstat_t *st)
 {
@@ -173,18 +260,20 @@ int vfs_vnode_stat(vnode_t *vn, kstat_t *st)
         st->st_size = vn->size;
         st->st_nlink = 1;
     }
-    for (int i = 0; i < VFS_TIME_META_MAX; i++) {
-        if (g_time_meta[i].used && g_time_meta[i].mnt == vn->mnt &&
-            g_time_meta[i].ino == vn->ino) {
-            st->st_atime = g_time_meta[i].atime;
-            st->st_atime_nsec = g_time_meta[i].atime_nsec;
-            st->st_mtime = g_time_meta[i].mtime;
-            st->st_mtime_nsec = g_time_meta[i].mtime_nsec;
-            st->st_ctime = g_time_meta[i].ctime;
-            st->st_ctime_nsec = g_time_meta[i].ctime_nsec;
-            break;
-        }
+    uint64_t flags = spin_lock_irqsave(&g_time_meta_lock);
+    vfs_time_meta_init_locked();
+    int slot = vfs_time_meta_find_locked(vn->mnt, vn->ino,
+                                         vfs_time_meta_counted(vn->mnt));
+    if (slot >= 0) {
+        vfs_time_meta_t tm = g_time_meta[slot];
+        st->st_atime = tm.atime;
+        st->st_atime_nsec = tm.atime_nsec;
+        st->st_mtime = tm.mtime;
+        st->st_mtime_nsec = tm.mtime_nsec;
+        st->st_ctime = tm.ctime;
+        st->st_ctime_nsec = tm.ctime_nsec;
     }
+    spin_unlock_irqrestore(&g_time_meta_lock, flags);
     if (st->st_atime == 0 && st->st_mtime == 0 && st->st_ctime == 0) {
         uint64_t now[2];
         timekeeping_get_realtime(now);
@@ -241,47 +330,77 @@ int vfs_sticky_may_remove(vnode_t *dir, vnode_t *victim)
     return -EPERM;
 }
 
-static vfs_time_meta_t *vfs_time_meta_for(vnode_t *vn)
+void vfs_drop_time_meta_identity(mount_t *mnt, uint64_t ino)
 {
-    if (!vn)
-        return NULL;
-    for (int i = 0; i < VFS_TIME_META_MAX; i++) {
-        if (g_time_meta[i].used && g_time_meta[i].mnt == vn->mnt &&
-            g_time_meta[i].ino == vn->ino)
-            return &g_time_meta[i];
-    }
-    for (int i = 0; i < VFS_TIME_META_MAX; i++) {
-        if (!g_time_meta[i].used) {
-            memset(&g_time_meta[i], 0, sizeof(g_time_meta[i]));
-            g_time_meta[i].used = 1;
-            g_time_meta[i].mnt = vn->mnt;
-            g_time_meta[i].ino = vn->ino;
-            return &g_time_meta[i];
+    uint64_t flags = spin_lock_irqsave(&g_time_meta_lock);
+    vfs_time_meta_init_locked();
+    unsigned bucket = vfs_time_meta_hash(mnt, ino);
+    int *link = &g_time_meta_hash[bucket];
+    uint64_t probes = 0;
+    int counted = vfs_time_meta_counted(mnt);
+    if (counted)
+        a20_perf_count(A20_PERF_VFS_TIME_META_CALLS);
+    while (*link >= 0) {
+        probes++;
+        int slot = *link;
+        if (g_time_meta[slot].mnt == mnt &&
+            g_time_meta[slot].ino == ino) {
+            vfs_time_meta_free_locked(slot, link);
+            break;
         }
+        link = &g_time_meta[slot].hash_next;
     }
-    return NULL;
+    if (counted)
+        a20_perf_add(A20_PERF_VFS_TIME_META_PROBES, probes);
+    spin_unlock_irqrestore(&g_time_meta_lock, flags);
 }
 
 void vfs_drop_time_meta(vnode_t *vn)
 {
-    if (!vn)
+    if (vn)
+        vfs_drop_time_meta_identity(vn->mnt, vn->ino);
+}
+
+void vfs_drop_time_meta_mount(mount_t *mnt)
+{
+    if (!mnt)
         return;
-    for (int i = 0; i < VFS_TIME_META_MAX; i++) {
-        if (g_time_meta[i].used && g_time_meta[i].mnt == vn->mnt &&
-            g_time_meta[i].ino == vn->ino) {
-            memset(&g_time_meta[i], 0, sizeof(g_time_meta[i]));
-            return;
+    uint64_t flags = spin_lock_irqsave(&g_time_meta_lock);
+    vfs_time_meta_init_locked();
+    uint64_t probes = 0;
+    int counted = vfs_time_meta_counted(mnt);
+    if (counted)
+        a20_perf_count(A20_PERF_VFS_TIME_META_CALLS);
+    for (int bucket = 0; bucket < VFS_TIME_META_HASH_SIZE; bucket++) {
+        int *link = &g_time_meta_hash[bucket];
+        while (*link >= 0) {
+            probes++;
+            int slot = *link;
+            if (g_time_meta[slot].mnt == mnt)
+                vfs_time_meta_free_locked(slot, link);
+            else
+                link = &g_time_meta[slot].hash_next;
         }
     }
+    if (counted)
+        a20_perf_add(A20_PERF_VFS_TIME_META_PROBES, probes);
+    spin_unlock_irqrestore(&g_time_meta_lock, flags);
 }
 
 void vfs_touch_mtime(vnode_t *vn)
 {
-    vfs_time_meta_t *tm = vfs_time_meta_for(vn);
-    if (!tm)
+    if (!vn)
         return;
     uint64_t now[2];
     timekeeping_get_realtime(now);
+    uint64_t flags = spin_lock_irqsave(&g_time_meta_lock);
+    vfs_time_meta_init_locked();
+    int slot = vfs_time_meta_get_locked(vn);
+    if (slot < 0) {
+        spin_unlock_irqrestore(&g_time_meta_lock, flags);
+        return;
+    }
+    vfs_time_meta_t *tm = &g_time_meta[slot];
     if (tm->atime == 0 && tm->atime_nsec == 0) {
         tm->atime = now[0];
         tm->atime_nsec = now[1];
@@ -290,13 +409,13 @@ void vfs_touch_mtime(vnode_t *vn)
     tm->mtime_nsec = now[1];
     tm->ctime = now[0];
     tm->ctime_nsec = now[1];
+    spin_unlock_irqrestore(&g_time_meta_lock, flags);
 }
 
 int vfs_set_times(vnode_t *vn, const uint64_t times[4])
 {
-    vfs_time_meta_t *tm = vfs_time_meta_for(vn);
-    if (!tm)
-        return -ENOSPC;
+    if (!vn)
+        return -EINVAL;
 
     uint64_t now[2];
     timekeeping_get_realtime(now);
@@ -338,11 +457,20 @@ int vfs_set_times(vnode_t *vn, const uint64_t times[4])
     if (atime_nsec >= 1000000000ULL || mtime_nsec >= 1000000000ULL)
         return -EINVAL;
 
+    uint64_t flags = spin_lock_irqsave(&g_time_meta_lock);
+    vfs_time_meta_init_locked();
+    int slot = vfs_time_meta_get_locked(vn);
+    if (slot < 0) {
+        spin_unlock_irqrestore(&g_time_meta_lock, flags);
+        return -ENOSPC;
+    }
+    vfs_time_meta_t *tm = &g_time_meta[slot];
     tm->atime = atime;
     tm->atime_nsec = atime_nsec;
     tm->mtime = mtime;
     tm->mtime_nsec = mtime_nsec;
     tm->ctime = now[0];
     tm->ctime_nsec = now[1];
+    spin_unlock_irqrestore(&g_time_meta_lock, flags);
     return 0;
 }

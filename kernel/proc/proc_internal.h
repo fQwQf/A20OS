@@ -78,7 +78,7 @@ void proc_pid_register(task_t *t);
 void proc_pid_unregister(task_t *t);
 int proc_pid_next_value(void);
 
-void proc_task_init_common(task_t *t, task_t *parent);
+void proc_task_init_common(task_t *t, task_t *parent, uint64_t clone_flags);
 task_t *proc_task_alloc_storage(void);
 void proc_task_init_idle_state(task_t *t, unsigned cpu);
 void proc_task_first_entry(void) NORETURN;
@@ -98,6 +98,7 @@ void proc_sched_request_current(void);
 void proc_sched_handle_reschedule_ipi(void);
 void proc_sched_tick(int from_user);
 int proc_sched_safe_point(void);
+int proc_sched_idle_prepare(void);
 void proc_sched_stop_current(int exit_code);
 void proc_sched_assert_task_locked(task_t *t);
 typedef struct proc_sched_task_snapshot {

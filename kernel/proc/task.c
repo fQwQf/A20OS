@@ -76,7 +76,7 @@ void *proc_scratch_buffer(size_t size)
     return buf;
 }
 
-void proc_task_init_common(task_t *t, task_t *parent)
+void proc_task_init_common(task_t *t, task_t *parent, uint64_t clone_flags)
 {
     int parent_pgid = parent ? parent->pgid : 0;
     int parent_sid = parent ? parent->sid : 0;
@@ -203,7 +203,9 @@ void proc_task_init_common(task_t *t, task_t *parent)
     }
 
 #ifndef CONFIG_MCU
-    if (parent)
+    if (parent && (clone_flags & (CLONE_FILES | CLONE_THREAD)))
+        fdtable_share(t, parent);
+    else if (parent)
         fdtable_copy(t, parent);
     else
         fdtable_init(t);

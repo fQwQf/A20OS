@@ -21,6 +21,7 @@
 #include "mm/frame.h"
 #include "mm/vm.h"
 #include "core/cpu.h"
+#include "core/perf.h"
 #include "core/trap.h"
 #include "core/stdio.h"
 #include "core/string.h"
@@ -206,7 +207,18 @@ void idle_loop(void) {
         arch_local_irq_enable();
         kernel_progress_run_bottom_halves();
         sched();
+#if ARCH_HAS_SAFE_IDLE_WAIT
+        arch_local_irq_disable();
+        a20_perf_count(A20_PERF_IDLE_WAIT_ATTEMPTS);
+        if (proc_sched_idle_prepare()) {
+            a20_perf_count(A20_PERF_IDLE_WAIT_ENTRIES);
+            arch_idle_wait();
+            a20_perf_count(A20_PERF_IDLE_WAIT_WAKE_RETURNS);
+        }
+        arch_local_irq_enable();
+#else
         cpu_relax();
+#endif
 #if CONFIG_DEBUG_SCHED_STATE
         /* Hang diagnostic: if no non-idle task has run for a while, dump. */
         uint64_t now = timer_get_ticks();
@@ -396,7 +408,7 @@ int proc_alloc(void (*entry)(void)) {
         proc_destroy_task(t);
         return -EAGAIN;
     }
-    proc_task_init_common(t, proc_current());
+    proc_task_init_common(t, proc_current(), 0);
     proc_pid_register(t);
 #ifndef CONFIG_MCU
     fdtable_close_all(t);
@@ -452,7 +464,7 @@ int proc_alloc_user_image(uintptr_t entry, vaddr_t sp, pt_root_t *pgdir,
         proc_destroy_task(t);
         return -EAGAIN;
     }
-    proc_task_init_common(t, proc_current());
+    proc_task_init_common(t, proc_current(), 0);
     proc_pid_register(t);
     t->entry = entry;
     t->pgdir = pgdir;

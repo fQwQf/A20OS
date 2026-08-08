@@ -13,6 +13,7 @@
 long copy_from_user(void *dst, const void *src, size_t n);
 long copy_to_user(void *dst, const void *src, size_t n);
 long user_strncpy(char *dst, const char *src, size_t max);
+long user_strnlen(const char *src, size_t max);
 int  user_buffer_segment(const void *user, size_t len, int write,
                          void **kaddr, size_t *chunk);
 

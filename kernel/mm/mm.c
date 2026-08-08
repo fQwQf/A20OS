@@ -681,3 +681,25 @@ long user_strncpy(char *dst, const char *src, size_t max) {
     dst[i] = '\0';
     return (long)i;
 }
+
+long user_strnlen(const char *src, size_t max) {
+    task_t *t = proc_current();
+    if (!t || !t->mm) return -EFAULT;
+    if (max == 0) return 0;
+    size_t i = 0;
+    while (i < max) {
+        uint64_t va = (uint64_t)(src + i);
+        if (!user_range_ok(va, 1)) return -EFAULT;
+        void *kaddr;
+        size_t chunk;
+        if (user_resolve_leaf(t, va, 0, &kaddr, &chunk) < 0)
+            return -EFAULT;
+        if (chunk > max - i) chunk = max - i;
+        const char *page = (const char *)kaddr;
+        for (size_t j = 0; j < chunk; j++) {
+            if (page[j] == '\0') return (long)(i + j);
+        }
+        i += chunk;
+    }
+    return (long)max;
+}

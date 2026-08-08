@@ -36,6 +36,8 @@ static volatile int exec_worker_started;
 static int exec_worker_epoll_fd = -1;
 static int exec_worker_report_fd = -1;
 
+#define EXEC_ARG_STRLEN_LIMIT (128U * 1024U)
+
 static int fail(const char *what)
 {
     printf("PROC_STRESS: FAIL %s errno=%d\n", what, errno);
@@ -217,6 +219,56 @@ static int scenario_exec_low_user_argv(void)
     int result = wait_exit(pid, 0, "wait-low-exec-argv");
     munmap(page, 4096);
     return result;
+}
+
+static int expect_exec_arg_error(char *arg, int expected, const char *what)
+{
+    char *argv[] = {arg, NULL};
+    char *envp[] = {"PATH=/bin", NULL};
+    errno = 0;
+    if (execve("/bin/true", argv, envp) != -1) {
+        errno = EIO;
+        return fail(what);
+    }
+    if (errno != expected)
+        return fail(what);
+    return 0;
+}
+
+static int scenario_exec_arg_string_boundary(void)
+{
+    const size_t page_size = 4096;
+    const size_t map_size = EXEC_ARG_STRLEN_LIMIT + page_size;
+    char *map = mmap(NULL, map_size, PROT_READ | PROT_WRITE,
+                     MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (map == MAP_FAILED)
+        return fail("exec-arg-boundary-mmap");
+    if (mprotect(map + EXEC_ARG_STRLEN_LIMIT, page_size, PROT_NONE) < 0) {
+        munmap(map, map_size);
+        return fail("exec-arg-boundary-mprotect");
+    }
+
+    /* Exactly MAX_ARG_STRLEN - 1 readable non-NUL bytes must be E2BIG;
+     * the kernel must not probe the guard byte immediately after them. */
+    char *at_limit = map + 1;
+    memset(at_limit, 'A', EXEC_ARG_STRLEN_LIMIT - 1);
+    if (expect_exec_arg_error(at_limit, E2BIG,
+                              "exec-arg-boundary-e2big") != 0) {
+        munmap(map, map_size);
+        return 1;
+    }
+
+    /* Moving the same unterminated string forward makes the guard page fall
+     * inside the accepted scan window, which must remain EFAULT. */
+    char *before_limit = map + page_size;
+    if (expect_exec_arg_error(before_limit, EFAULT,
+                              "exec-arg-boundary-efault") != 0) {
+        munmap(map, map_size);
+        return 1;
+    }
+
+    munmap(map, map_size);
+    return 0;
 }
 
 static void *exec_cloexec_worker(void *unused)
@@ -675,6 +727,9 @@ int main(int argc, char **argv)
     if (scenario_exec_low_user_argv() != 0)
         return 1;
     printf("PROC_STRESS: low-user-argv PASS\n");
+    if (scenario_exec_arg_string_boundary() != 0)
+        return 1;
+    printf("PROC_STRESS: exec-arg-boundary PASS\n");
     if (scenario_thread_exec_cloexec() != 0)
         return 1;
     printf("PROC_STRESS: thread-exec-cloexec PASS\n");

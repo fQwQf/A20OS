@@ -186,8 +186,9 @@ static __attribute__((unused)) int mm_move_mapping_pages(mm_struct_t *mm, vaddr_
             return r;
         }
 
-        if (!dontunmap)
-            pt_unmap_leaf(mm->pgdir, src_va, NULL, NULL, NULL, NULL);
+        if (!dontunmap &&
+            pt_unmap_leaf(mm->pgdir, src_va, NULL, NULL, NULL, NULL) == 0)
+            mm_tlb_note_change(mm, base, leaf_size);
         if (shared_file) {
             if (!dontunmap)
                 page_cache_put(pcp);
@@ -197,7 +198,6 @@ static __attribute__((unused)) int mm_move_mapping_pages(mm_struct_t *mm, vaddr_
         }
         off += leaf_size;
     }
-    arch_tlb_flush_page_local(old_addr);  /* wrapper flushes remotely */
     return 0;
 }
 

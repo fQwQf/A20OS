@@ -116,6 +116,11 @@ typedef struct mm_struct {
      * allowed to leave that critical section before servicing the TLB IPI.
      */
     mutex_t tlb_lock;
+    uint32_t active_cpus;    /* CPUs whose hardware context currently uses mm */
+    uint8_t tlb_pending;     /* transaction cleared/replaced at least one PTE */
+    uint8_t _pad_tlb[3];
+    vaddr_t tlb_start;
+    vaddr_t tlb_end;
     vm_area_t *mmap;
     vm_area_t *deferred_vma;  /* freed after mm->lock is dropped */
     mm_tlb_hold_t *tlb_holds; /* released only after remote TLB shootdown */
@@ -199,8 +204,11 @@ int     mm_demote_huge_page(mm_struct_t *mm, vaddr_t addr);
  */
 void mm_tlb_invalidate_begin(mm_struct_t *mm);
 void mm_tlb_invalidate_finish(mm_struct_t *mm);
+void mm_tlb_note_change(mm_struct_t *mm, vaddr_t addr, size_t size);
 int  mm_tlb_hold_frame(mm_struct_t *mm, pfn_t pfn);
 int  mm_tlb_hold_page(mm_struct_t *mm, struct page_cache_page *page);
+void mm_context_enter(mm_struct_t *mm, unsigned cpu);
+void mm_context_leave(mm_struct_t *mm, unsigned cpu);
 
 pte_t mm_prot_to_pte_flags(int prot);
 int   mm_pte_flags_to_prot(pte_t pte_flags);
