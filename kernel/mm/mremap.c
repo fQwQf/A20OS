@@ -346,11 +346,11 @@ int mm_mremap(mm_struct_t *mm, vaddr_t old_addr, size_t old_size,
               vaddr_t *out_addr)
 {
     if (!mm) return -EINVAL;
+    mm_tlb_invalidate_begin(mm);
     uint64_t flags_l = spin_lock_irqsave(&mm->lock);
     int r = mm_mremap_locked(mm, old_addr, old_size, new_size, flags,
                              new_addr, out_addr);
     spin_unlock_irqrestore(&mm->lock, flags_l);
-    mm_vma_flush_deferred(mm);
-    arch_tlb_flush();  // deferred remote flush
+    mm_tlb_invalidate_finish(mm);
     return r;
 }

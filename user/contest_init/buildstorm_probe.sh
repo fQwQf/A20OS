@@ -392,6 +392,118 @@ probe_stage7_shebang_exec() {
     /a20-probe/shebang-probe
 }
 
+probe_stage7_parallel_rustc() {
+    typeset base=/tmp/a20-stage7-rustc-j8
+    typeset source="$base/hello.rs"
+    typeset pids=
+    typeset -i round=1
+    typeset -i worker=1
+    typeset -i rc=0
+
+    rm -rf -- "$base" || return
+    mkdir -p "$base" || return
+    print 'fn main() { println!("stage7 rustc parallel probe"); }' >"$source" || return
+    print "STAGE7_RUSTC_META cores=$(/usr/bin/nproc) workers=8 rounds=4"
+
+    while (( round <= 4 )); do
+        pids=
+        worker=1
+        while (( worker <= 8 )); do
+            LD_LIBRARY_PATH="$toolchain/lib" "$toolchain/bin/rustc" \
+                "$source" -o "$base/hello-$round-$worker" \
+                >"$base/rustc-$round-$worker.log" 2>&1 &
+            pids="$pids $!"
+            (( worker++ ))
+        done
+
+        worker=1
+        for pid in $pids; do
+            wait "$pid" || {
+                print "STAGE7_RUSTC_FAIL round=$round worker=$worker rc=$?"
+                rc=1
+            }
+            (( worker++ ))
+        done
+        if (( rc != 0 )); then
+            cat "$base"/rustc-*.log
+            return $rc
+        fi
+
+        worker=1
+        while (( worker <= 8 )); do
+            "$base/hello-$round-$worker" >/dev/null || return
+            (( worker++ ))
+        done
+        rm -f -- "$base"/hello-* "$base"/rustc-*.log || return
+        print "BUILDSTORM_STAGE7_RUSTC_J8 progress=$round/4"
+        (( round++ ))
+    done
+
+    print "BUILDSTORM_STAGE7_RUSTC_J8 ok compiles=32"
+    rm -rf -- "$base" || return
+}
+
+probe_stage7_parallel_llvm() {
+    typeset base=/tmp/a20-stage7-rustc-llvm-j8
+    typeset source="$base/heavy.rs"
+    typeset pids=
+    typeset -i i=0
+    typeset -i round=1
+    typeset -i worker=1
+    typeset -i rc=0
+
+    rm -rf -- "$base" || return
+    mkdir -p "$base" || return
+    {
+        print '#![allow(dead_code)]'
+        i=0
+        while (( i < 3000 )); do
+            print "#[inline(never)] fn f$i(mut x: u64) -> u64 { for j in 0..32 { x = x.rotate_left(((j + $i) & 63) as u32) ^ x.wrapping_mul(0x9e3779b97f4a7c15); } x }"
+            (( i++ ))
+        done
+        print 'fn main() { let mut x = 1u64;'
+        i=0
+        while (( i < 3000 )); do
+            print "x = f$i(x);"
+            (( i++ ))
+        done
+        print 'println!("{}", x); }'
+    } >"$source" || return
+    print "STAGE7_LLVM_META cores=$(/usr/bin/nproc) workers=8 rounds=2 functions=3000 codegen_units=16 bytes=$(wc -c <"$source")"
+
+    while (( round <= 2 )); do
+        pids=
+        worker=1
+        while (( worker <= 8 )); do
+            LD_LIBRARY_PATH="$toolchain/lib" "$toolchain/bin/rustc" \
+                -C opt-level=3 -C codegen-units=16 "$source" \
+                -o "$base/heavy-$round-$worker" \
+                >"$base/rustc-$round-$worker.log" 2>&1 &
+            pids="$pids $!"
+            (( worker++ ))
+        done
+
+        worker=1
+        for pid in $pids; do
+            wait "$pid" || {
+                print "STAGE7_LLVM_FAIL round=$round worker=$worker rc=$?"
+                rc=1
+            }
+            (( worker++ ))
+        done
+        if (( rc != 0 )); then
+            cat "$base"/rustc-*.log
+            return $rc
+        fi
+        rm -f -- "$base"/heavy-* "$base"/rustc-*.log || return
+        print "BUILDSTORM_STAGE7_LLVM_J8 progress=$round/2"
+        (( round++ ))
+    done
+
+    print "BUILDSTORM_STAGE7_LLVM_J8 ok compiles=16"
+    rm -rf -- "$base" || return
+}
+
 stage7_helper_snapshot() {
     typeset label=$1
     typeset helper=$2
@@ -588,6 +700,8 @@ run_named_case() {
     stage6-ext4-dir-tail) probe_stage6_ext4_dir_tail ;;
     stage6-precompiled-helper) probe_stage6_precompiled_helper ;;
     stage7-shebang-exec) probe_stage7_shebang_exec ;;
+    stage7-rustc-j8) probe_stage7_parallel_rustc ;;
+    stage7-rustc-llvm-j8) probe_stage7_parallel_llvm ;;
     stage7-full-j1|stage7-full-j2|stage7-full-j4|stage7-full-j8|stage7-full-default)
         probe_stage7_full_build "$1"
         ;;
