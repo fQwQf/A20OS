@@ -23,6 +23,7 @@
 #include "core/random.h"
 #include "proc/signal.h"
 #include "mm/frame.h"
+#include "drivers/driver_descriptor.h"
 #ifdef CONFIG_ABI_NATIVE
 #include "ipc/start_info.h"
 #endif
@@ -75,6 +76,59 @@ static uint64_t elf_aslr_bias(void) {
     uint64_t r = random_u64();
     uint64_t bits = (r ^ (r >> 29) ^ (r >> 47)) & ((1UL << ASLR_BITS) - 1);
     return bits << 16;
+}
+
+static int elf_path_has_driver_suffix(const char *path)
+{
+    size_t len = path ? strlen(path) : 0;
+    return len >= 7 && strcmp(path + len - 7, ".a20drv") == 0;
+}
+
+static int elf_validate_user_driver(int fd, const Elf64_Ehdr *eh)
+{
+    if (eh->e_shentsize != sizeof(Elf64_Shdr) || !eh->e_shnum ||
+        eh->e_shnum > 128 || eh->e_shstrndx >= eh->e_shnum)
+        return -ENOEXEC;
+
+    Elf64_Shdr shdrs[128];
+    size_t shdr_bytes = (size_t)eh->e_shnum * sizeof(Elf64_Shdr);
+    if (vfs_pread(fd, (char *)shdrs, shdr_bytes, eh->e_shoff) !=
+        (int)shdr_bytes)
+        return -ENOEXEC;
+
+    Elf64_Shdr *shstr = &shdrs[eh->e_shstrndx];
+    if (!shstr->sh_size || shstr->sh_size > 4096)
+        return -ENOEXEC;
+    char names[4096];
+    if (vfs_pread(fd, names, shstr->sh_size, shstr->sh_offset) !=
+        (int)shstr->sh_size)
+        return -ENOEXEC;
+
+    for (uint16_t i = 0; i < eh->e_shnum; i++) {
+        Elf64_Shdr *sh = &shdrs[i];
+        if (sh->sh_name >= shstr->sh_size)
+            continue;
+        const char *section_name = names + sh->sh_name;
+        size_t name_left = shstr->sh_size - sh->sh_name;
+        size_t name_len = 0;
+        while (name_len < name_left && section_name[name_len])
+            name_len++;
+        if (name_len == name_left || name_len != 7 ||
+            memcmp(section_name, ".a20drv", 7) != 0)
+            continue;
+        a20_driver_descriptor_t desc;
+        if (sh->sh_size != sizeof(desc) ||
+            vfs_pread(fd, (char *)&desc, sizeof(desc), sh->sh_offset) !=
+                (int)sizeof(desc))
+            return -ENOEXEC;
+        return desc.magic == A20_DRIVER_DESCRIPTOR_MAGIC &&
+               desc.version == A20_DRIVER_DESCRIPTOR_VERSION &&
+               desc.placement == A20_DRIVER_PLACEMENT_USER_SERVICE &&
+               desc.type >= A20_DRIVER_TYPE_RTC &&
+               desc.type <= A20_DRIVER_TYPE_SECURITY && desc.name[0] ?
+               0 : -ENOEXEC;
+    }
+    return -ENOEXEC;
 }
 
 static int elf_machine_supported(uint16_t machine, int elf_class) {
@@ -1147,6 +1201,11 @@ int elf_load(int fd, const char *path, elf_load_info_t *info) {
             printf("[ELF] header check failed: r=%d class=%d data=%d type=%d\n",
                    r, eh->e_ident[4], eh->e_ident[5], eh->e_type);
             return r;
+        }
+        if (elf_path_has_driver_suffix(path)) {
+            r = elf_validate_user_driver(fd, eh);
+            if (r < 0)
+                return r;
         }
         return elf_load64(fd, eh, path, info);
     }

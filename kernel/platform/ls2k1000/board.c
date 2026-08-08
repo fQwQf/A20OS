@@ -7,6 +7,8 @@
  */
 
 #include "drivers/core/driver_core.h"
+#include "drivers/bus/platform_bus.h"
+#include "drivers/net/ls2k_gmac.h"
 #include "core/arch.h"
 #include "core/timer.h"
 
@@ -79,8 +81,8 @@ extern void pci_enumerate(uintptr_t ecam_base, int bus_start, int bus_end);
 #define LS2K_GMAC_SIZE      0x10000UL
 
 static void ls2k_enumerate_devices(void) {
-    extern int device_register(device_t *dev);
-    static device_t gmac_dev;
+    extern int platform_device_register(platform_device_t *pdev);
+    static platform_device_t gmac_dev;
     static resource_t gmac_res[2];
 
     gmac_res[0].type  = RES_MMIO;
@@ -88,12 +90,13 @@ static void ls2k_enumerate_devices(void) {
     gmac_res[0].end   = LS2K_GMAC_BASE + LS2K_GMAC_SIZE - 1;
     gmac_res[0].flags = IORESOURCE_MMIO_32BIT;
 
-    gmac_dev.name       = "ls2k-gmac";
-    gmac_dev.bus        = NULL;
-    gmac_dev.res        = gmac_res;
-    gmac_dev.res_count  = 1;
-    gmac_dev.state      = DEV_STATE_UNINIT;
-    device_register(&gmac_dev);
+    gmac_dev.dev.name       = "ls2k-gmac";
+    gmac_dev.dev.res        = gmac_res;
+    gmac_dev.dev.res_count  = 1;
+    gmac_dev.dev.state      = DEV_STATE_UNINIT;
+    gmac_dev.id.vendor      = LS2K_GMAC_PLATFORM_VENDOR;
+    gmac_dev.id.device      = LS2K_GMAC_PLATFORM_DEVICE;
+    platform_device_register(&gmac_dev);
 
     pci_enumerate(LS2K_PCIE_ECAM_BASE, LS2K_PCIE_BUS_START, LS2K_PCIE_BUS_END);
 }

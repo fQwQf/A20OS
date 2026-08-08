@@ -25,12 +25,14 @@
 #include "core/klog.h"
 #include "core/string.h"
 #include "core/stdio.h"
+#include "core/panic.h"
 #include "core/lock.h"
 #include "core/cpu.h"
 #include "proc/proc.h"
 #include "drivers/core/driver_core.h"
 #include "drivers/core/driver_hwapi.h"
 #include "drivers/bus/pci_bus.h"
+#include "drivers/bus/virtio_transport.h"
 #include "drivers/char/uart.h"
 extern void input_mux_wake(void);
 #include "core/sync.h"
@@ -39,22 +41,31 @@ extern void input_mux_wake(void);
 #include "mm/frame.h"
 #include "mm/mm.h"
 #include "mm/slab.h"
+#include "drivers/gpu/gpu_core.h"
+#include "drivers/usb/usb.h"
+#include "net/lwip_stack.h"
 
-#define DRV_MAX_DEVICES 64
 #define DRV_MAX_IRQ_VECTOR 255   /* hwapi IRQ line limit (0..255) */
 #define DRV_MAX_ISRS 64
 
 typedef struct drv_isr_entry {
     int used;
-    drv_device_t *dev;
-    drv_isr_fn isr;
+    uint32_t irq;
+    void (*isr)(void *ctx);
     void *ctx;
 } drv_isr_entry_t;
 
+/* Per-device MMIO mapping cache for drv_map_mmio/drv_read32/drv_write32.
+ * Keyed by the unified device_t the module bound to. */
+typedef struct drv_mmio_entry {
+    void *dev;
+    uintptr_t va;
+    uint64_t size;
+} drv_mmio_entry_t;
+
 static spinlock_t drv_framework_lock = SPINLOCK_INIT;
 static drv_isr_entry_t drv_isr_table[DRV_MAX_ISRS];
-static drv_device_t *drv_dev_table[DRV_MAX_DEVICES];
-static int drv_dev_count;
+static drv_mmio_entry_t drv_mmio_cache[8];
 
 /* ---- allocation ---- */
 
@@ -81,60 +92,72 @@ void drv_log(const char *fmt, ...)
 
 /* ---- MMIO ---- */
 
-int drv_map_mmio(drv_device_t *dev, uintptr_t phys, size_t size)
+static drv_mmio_entry_t *drv_mmio_find(void *dev)
+{
+    for (int i = 0; i < (int)(sizeof(drv_mmio_cache) / sizeof(drv_mmio_cache[0])); i++)
+        if (drv_mmio_cache[i].dev == dev)
+            return &drv_mmio_cache[i];
+    return NULL;
+}
+
+uintptr_t drv_map_mmio(void *dev, uintptr_t phys, size_t size)
 {
     if (!dev || size == 0 || size > 64 * 1024 * 1024)
-        return -EINVAL;
-    if (dev->mmio_va)
-        return -EEXIST;
-#if defined(CONFIG_RISCV64)
-    /* QEMU virt: RAM and MMIO below 2 GiB, mapped at PAGE_OFFSET+phys. */
-    if (phys + size < phys || phys + size > 0x80000000ULL)
-        return -ERANGE;
-#elif defined(CONFIG_X86_64)
-    /* Direct map covers RAM and the low-4 GiB PC I/O window. */
-    if (phys + size < phys || phys + size > 0x100000000ULL)
-        return -ERANGE;
-#elif defined(CONFIG_AARCH64)
-    /* virt: two 1 GiB L1 blocks (low MMIO + RAM) at PAGE_OFFSET+phys. */
-    if (phys + size < phys || phys + size > 0x80000000ULL)
-        return -ERANGE;
-#elif defined(CONFIG_LOONGARCH64)
-    /* Identity-mapped (PAGE_OFFSET == 0): VA == PA. */
-    if (phys + size < phys || phys + size > 0x100000000ULL)
-        return -ERANGE;
-#else
-    (void)phys;
-    (void)size;
-    return -EOPNOTSUPP;
-#endif
-    dev->mmio_phys = phys;
-    dev->mmio_size = size;
-    dev->mmio_va = (void *)(PAGE_OFFSET + phys);
+        return 0;
+    if (drv_mmio_find(dev))
+        return 0;
+    /* The arch hook validates the range against the platform's direct-map
+     * window (implemented in kernel/arch/<arch>/platform/arch_hooks.c). */
+    if (!arch_drv_mmio_window_ok(phys, size))
+        return 0;
+    uint64_t flags = spin_lock_irqsave(&drv_framework_lock);
+    for (int i = 0; i < (int)(sizeof(drv_mmio_cache) / sizeof(drv_mmio_cache[0])); i++) {
+        if (!drv_mmio_cache[i].dev) {
+            drv_mmio_cache[i].dev = dev;
+            drv_mmio_cache[i].va = PAGE_OFFSET + phys;
+            drv_mmio_cache[i].size = size;
+            uintptr_t va = drv_mmio_cache[i].va;
+            spin_unlock_irqrestore(&drv_framework_lock, flags);
+            return va;
+        }
+    }
+    spin_unlock_irqrestore(&drv_framework_lock, flags);
     return 0;
 }
 
-void drv_unmap_mmio(drv_device_t *dev)
+void drv_unmap_mmio(void *dev)
 {
     if (!dev)
         return;
-    dev->mmio_va = NULL;
-    dev->mmio_phys = 0;
-    dev->mmio_size = 0;
+    uint64_t flags = spin_lock_irqsave(&drv_framework_lock);
+    drv_mmio_entry_t *e = drv_mmio_find(dev);
+    if (e)
+        memset(e, 0, sizeof(*e));
+    spin_unlock_irqrestore(&drv_framework_lock, flags);
 }
 
-uint32_t drv_read32(drv_device_t *dev, uintptr_t off)
+uint32_t drv_read32(void *dev, uintptr_t off)
 {
-    if (!dev || !dev->mmio_va || off + 4 > dev->mmio_size)
+    if (!dev)
         return 0;
-    return *(volatile uint32_t *)((char *)dev->mmio_va + off);
+    uint64_t flags = spin_lock_irqsave(&drv_framework_lock);
+    drv_mmio_entry_t *e = drv_mmio_find(dev);
+    uint32_t v = 0;
+    if (e && e->va && off + 4 <= e->size)
+        v = *(volatile uint32_t *)((char *)e->va + off);
+    spin_unlock_irqrestore(&drv_framework_lock, flags);
+    return v;
 }
 
-void drv_write32(drv_device_t *dev, uintptr_t off, uint32_t val)
+void drv_write32(void *dev, uintptr_t off, uint32_t val)
 {
-    if (!dev || !dev->mmio_va || off + 4 > dev->mmio_size)
+    if (!dev)
         return;
-    *(volatile uint32_t *)((char *)dev->mmio_va + off) = val;
+    uint64_t flags = spin_lock_irqsave(&drv_framework_lock);
+    drv_mmio_entry_t *e = drv_mmio_find(dev);
+    if (e && e->va && off + 4 <= e->size)
+        *(volatile uint32_t *)((char *)e->va + off) = val;
+    spin_unlock_irqrestore(&drv_framework_lock, flags);
 }
 
 /* ---- port-mapped I/O (x86) ---- */
@@ -173,41 +196,42 @@ static int drv_isr_trampoline(int irq, void *priv)
     return 1;
 }
 
-int drv_register_isr(drv_device_t *dev, drv_isr_fn isr, void *ctx)
+int drv_register_isr(uint32_t irq, void (*isr)(void *ctx), void *ctx)
 {
-    if (!dev || !isr || dev->irq < 0)
+    if (!isr || irq == 0)
         return -EINVAL;
-    if (dev->irq > DRV_MAX_IRQ_VECTOR) {
-        kerr("[DRV] %s: irq %d out of range\n",
-             dev->name ? dev->name : "?", dev->irq);
+    if (irq > DRV_MAX_IRQ_VECTOR) {
+        kerr("[DRV] irq %u out of range\n", irq);
         return -ERANGE;
     }
     uint64_t flags = spin_lock_irqsave(&drv_framework_lock);
     for (int i = 0; i < DRV_MAX_ISRS; i++) {
+        if (drv_isr_table[i].used && drv_isr_table[i].irq == irq) {
+            spin_unlock_irqrestore(&drv_framework_lock, flags);
+            return -EBUSY;
+        }
         if (!drv_isr_table[i].used) {
             drv_isr_table[i].used = 1;
-            drv_isr_table[i].dev = dev;
+            drv_isr_table[i].irq = irq;
             drv_isr_table[i].isr = isr;
             drv_isr_table[i].ctx = ctx;
             spin_unlock_irqrestore(&drv_framework_lock, flags);
-            return request_irq((uint32_t)dev->irq, drv_isr_trampoline, 0,
-                               &drv_isr_table[i]);
+            return request_irq(irq, drv_isr_trampoline, 0, &drv_isr_table[i]);
         }
     }
     spin_unlock_irqrestore(&drv_framework_lock, flags);
     return -ENOSPC;
 }
 
-void drv_unregister_isr(drv_device_t *dev)
+void drv_unregister_isr(uint32_t irq, void *ctx)
 {
-    if (!dev)
-        return;
+    (void)ctx;
     uint64_t flags = spin_lock_irqsave(&drv_framework_lock);
     for (int i = 0; i < DRV_MAX_ISRS; i++) {
-        if (drv_isr_table[i].used && drv_isr_table[i].dev == dev) {
+        if (drv_isr_table[i].used && drv_isr_table[i].irq == irq) {
             drv_isr_table[i].used = 0;
             spin_unlock_irqrestore(&drv_framework_lock, flags);
-            free_irq((uint32_t)dev->irq, &drv_isr_table[i]);
+            free_irq(irq, &drv_isr_table[i]);
             return;
         }
     }
@@ -231,67 +255,6 @@ uint64_t drv_clock_ticks(void)
     return clock_get_ticks();
 }
 
-/* ---- device table (used by the drvmod binding pass) ---- */
-
-int drv_device_register(drv_device_t *dev)
-{
-    if (!dev || !dev->name[0])
-        return -EINVAL;
-    if (dev->irq > DRV_MAX_IRQ_VECTOR) {
-        kerr("[DRV] %s: irq %d out of range\n", dev->name, dev->irq);
-        return -ERANGE;
-    }
-    uint64_t flags = spin_lock_irqsave(&drv_framework_lock);
-    for (int i = 0; i < drv_dev_count; i++) {
-        if (drv_dev_table[i] == dev) {
-            spin_unlock_irqrestore(&drv_framework_lock, flags);
-            return 0;   /* already registered */
-        }
-    }
-    if (drv_dev_count >= DRV_MAX_DEVICES) {
-        spin_unlock_irqrestore(&drv_framework_lock, flags);
-        return -ENOSPC;
-    }
-    drv_dev_table[drv_dev_count++] = dev;
-    spin_unlock_irqrestore(&drv_framework_lock, flags);
-    kdebug("[DRV] device '%s' registered (bus=%u vendor=0x%x irq=%d)\n",
-           dev->name, dev->bus, dev->vendor, dev->irq);
-    return 0;
-}
-
-void drv_device_unregister(drv_device_t *dev)
-{
-    if (!dev)
-        return;
-    uint64_t flags = spin_lock_irqsave(&drv_framework_lock);
-    for (int i = 0; i < drv_dev_count; i++) {
-        if (drv_dev_table[i] == dev) {
-            drv_dev_table[i] = drv_dev_table[drv_dev_count - 1];
-            drv_dev_count--;
-            break;
-        }
-    }
-    spin_unlock_irqrestore(&drv_framework_lock, flags);
-}
-
-int drv_framework_device_count(void)
-{
-    uint64_t flags = spin_lock_irqsave(&drv_framework_lock);
-    int n = drv_dev_count;
-    spin_unlock_irqrestore(&drv_framework_lock, flags);
-    return n;
-}
-
-drv_device_t *drv_framework_device_at(int idx)
-{
-    if (idx < 0 || idx >= drv_dev_count)
-        return NULL;
-    uint64_t flags = spin_lock_irqsave(&drv_framework_lock);
-    drv_device_t *d = drv_dev_table[idx];
-    spin_unlock_irqrestore(&drv_framework_lock, flags);
-    return d;
-}
-
 /* ---- unified driver core bridge ---- */
 
 int drv_driver_register(void *drv)
@@ -302,16 +265,6 @@ int drv_driver_register(void *drv)
 int drv_driver_unregister(void *drv)
 {
     return driver_unregister((driver_t *)drv);
-}
-
-int drv_device_register_core(void *dev)
-{
-    return device_register((device_t *)dev);
-}
-
-void drv_device_unregister_core(void *dev)
-{
-    device_unregister((device_t *)dev);
 }
 
 void *drv_device_get_resource(void *dev, int type, int index)
@@ -362,15 +315,12 @@ const struct drv_export drv_export_table[] = {
     { "drv_udelay",          drv_udelay },
     { "drv_mdelay",          drv_mdelay },
     { "drv_clock_ticks",     drv_clock_ticks },
-    { "drv_device_register", drv_device_register },
-    { "drv_device_unregister", drv_device_unregister },
     /* unified driver core bridge */
     { "drv_driver_register", drv_driver_register },
     { "drv_driver_unregister", drv_driver_unregister },
-    { "drv_device_register_core", drv_device_register_core },
-    { "drv_device_unregister_core", drv_device_unregister_core },
     { "drv_device_get_resource", drv_device_get_resource },
     { "drv_driver_probe_all", drv_driver_probe_all },
+    { "device_get_resource",  (void *)device_get_resource },
     { "device_find_by_class",  (void *)device_find_by_class },
     { "platform_bus",        &platform_bus },
     /* PCI class-driver accessors (device_t-based; modules bind through
@@ -402,6 +352,8 @@ const struct drv_export drv_export_table[] = {
     { "mutex_lock",          (void *)mutex_lock },
     { "mutex_unlock",        (void *)mutex_unlock },
     { "timer_get_ticks",     (void *)timer_get_ticks },
+    { "clock_ticks_per_sec", (void *)clock_ticks_per_sec },
+    { "clock_get_ticks",     (void *)clock_get_ticks },
     { "klog_write",          (void *)klog_write },
     { "klog_level",          (void *)&klog_level },
     { "mdelay",              (void *)mdelay },
@@ -427,6 +379,9 @@ const struct drv_export drv_export_table[] = {
     { "proc_current",        (void *)proc_current },
     { "proc_task_pid",       (void *)proc_task_pid },
     { "printf",              (void *)printf },
+    { "panic",               (void *)panic },
+    { "arch_virtio_blk_probe", (void *)arch_virtio_blk_probe },
+    { "arch_virtio_net_probe", (void *)arch_virtio_net_probe },
 #if defined(CONFIG_X86_64)
     { "x86_64_apic_to_cpu",  (void *)x86_64_apic_to_cpu },
 #endif
@@ -437,6 +392,26 @@ const struct drv_export drv_export_table[] = {
     { "free_irq",            (void *)free_irq },
     { "irq_enable",          (void *)irq_enable },
     { "irq_disable",         (void *)irq_disable },
+    /* frame allocator passthroughs (virtio-gpu framebuffer pages) */
+    { "pfa",                 (void *)&pfa },
+    { "pfa_alloc",           (void *)pfa_alloc },
+    { "pfa_free",            (void *)pfa_free },
+    /* GPU class registry (virtio-gpu / vmsvga) */
+    { "gpu_device_register",   (void *)gpu_device_register },
+    { "gpu_device_unregister", (void *)gpu_device_unregister },
+    { "gpu_device_get_default", (void *)gpu_device_get_default },
+    /* USB core bridge (xhci / usb-hid / usb-storage) */
+    { "usb_core_register_hcd",   (void *)usb_core_register_hcd },
+    { "usb_core_unregister_hcd", (void *)usb_core_unregister_hcd },
+    { "usb_control_msg",         (void *)usb_control_msg },
+    { "usb_submit_urb",          (void *)usb_submit_urb },
+    /* in-kernel lwIP bridge (virtio-net) */
+    { "a20_lwip_lock",                 (void *)a20_lwip_lock },
+    { "a20_lwip_unlock",               (void *)a20_lwip_unlock },
+    { "a20_lwip_poll_locked",          (void *)a20_lwip_poll_locked },
+    { "a20_lwip_process_netif_irq_locked", (void *)a20_lwip_process_netif_irq_locked },
+    { "a20_lwip_rx_pending_any",       (void *)a20_lwip_rx_pending_any },
+    { "a20_lwip_signal_rx_pending",    (void *)a20_lwip_signal_rx_pending },
 };
 const unsigned drv_export_count =
     sizeof(drv_export_table) / sizeof(drv_export_table[0]);
