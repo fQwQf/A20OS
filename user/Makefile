@@ -104,7 +104,9 @@ TLSE_NOMMU_CFLAGS := -mgeneral-regs-only
 endif
 endif
 
-CC := $(CROSS_COMPILE)gcc
+CCACHE ?= $(shell command -v ccache 2>/dev/null)
+CCACHE_PREFIX := $(if $(CCACHE),$(CCACHE) ,)
+CC := $(CCACHE_PREFIX)$(CROSS_COMPILE)gcc
 LD := $(CROSS_COMPILE)ld
 OBJCOPY := $(CROSS_COMPILE)objcopy
 AR := $(CROSS_COMPILE)ar
@@ -122,11 +124,11 @@ LDFLAGS := -static -nostdlib -Wl,--build-id=none -Wl,-Ttext-segment=0x10000 $(AR
 ifeq ($(NOMMU),1)
 ifeq ($(ARCH),riscv64)
 CROSS_COMPILE := riscv64-linux-gnu-
-CC := $(CROSS_COMPILE)gcc
+CC := $(CCACHE_PREFIX)$(CROSS_COMPILE)gcc
 endif
 ifeq ($(ARCH),riscv32)
 CROSS_COMPILE := riscv64-linux-gnu-
-CC := $(CROSS_COMPILE)gcc
+CC := $(CCACHE_PREFIX)$(CROSS_COMPILE)gcc
 LD := $(CROSS_COMPILE)ld
 OBJCOPY := $(CROSS_COMPILE)objcopy
 AR := $(CROSS_COMPILE)ar
