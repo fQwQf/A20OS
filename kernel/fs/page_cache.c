@@ -4,6 +4,7 @@
 #include "core/consts.h"
 #include "core/defs.h"
 #include "core/lock.h"
+#include "core/perf.h"
 #include "core/string.h"
 
 static spinlock_t g_page_cache_lock = SPINLOCK_INIT;
@@ -11,7 +12,14 @@ static page_cache_page_t *g_pages;
 static page_cache_page_t g_lru_head;
 static page_cache_page_t g_lru_tail;
 static page_cache_page_t *g_hash[PAGE_CACHE_HASH_BUCKETS];
+static page_cache_page_t *g_dirty_pages;
 static int g_initialized;
+
+static inline void page_cache_account_scan(size_t entries)
+{
+    a20_perf_count(A20_PERF_PAGE_CACHE_SCAN_CALLS);
+    a20_perf_add(A20_PERF_PAGE_CACHE_SCAN_ENTRIES, entries);
+}
 
 static unsigned page_cache_hash_key(vnode_t *vn, uint64_t index)
 {
@@ -47,31 +55,110 @@ static void hash_remove(page_cache_page_t *page)
 {
     unsigned idx = page_cache_hash_key(page->vnode, page->index);
     page_cache_page_t **pp = &g_hash[idx];
+    size_t visited = 0;
     while (*pp) {
+        visited++;
         if (*pp == page) {
             *pp = page->hnext;
             page->hnext = NULL;
+            page_cache_account_scan(visited);
             return;
         }
         pp = &(*pp)->hnext;
     }
+    page_cache_account_scan(visited);
     page->hnext = NULL;
 }
 
 static page_cache_page_t *find_locked(vnode_t *vn, uint64_t index)
 {
+    size_t visited = 0;
     for (page_cache_page_t *p = g_hash[page_cache_hash_key(vn, index)];
          p; p = p->hnext) {
-        if (p->valid && p->vnode == vn && p->index == index)
+        visited++;
+        if (p->valid && p->vnode == vn && p->index == index) {
+            page_cache_account_scan(visited);
             return p;
+        }
     }
+    page_cache_account_scan(visited);
     return NULL;
+}
+
+static void mapping_insert_locked(page_cache_page_t *page)
+{
+    vnode_t *vn = page->vnode;
+    page->mapping_prev = NULL;
+    page->mapping_next = vn->cache_pages;
+    if (vn->cache_pages)
+        vn->cache_pages->mapping_prev = page;
+    vn->cache_pages = page;
+}
+
+static void mapping_remove_locked(page_cache_page_t *page)
+{
+    vnode_t *vn = page->vnode;
+    if (page->mapping_prev)
+        page->mapping_prev->mapping_next = page->mapping_next;
+    else if (vn)
+        vn->cache_pages = page->mapping_next;
+    if (page->mapping_next)
+        page->mapping_next->mapping_prev = page->mapping_prev;
+    page->mapping_prev = NULL;
+    page->mapping_next = NULL;
+}
+
+static void dirty_insert_locked(page_cache_page_t *page)
+{
+    if (page->dirty || !page->vnode)
+        return;
+    vnode_t *vn = page->vnode;
+    page->dirty_prev = NULL;
+    page->dirty_next = vn->cache_dirty_pages;
+    if (vn->cache_dirty_pages)
+        vn->cache_dirty_pages->dirty_prev = page;
+    vn->cache_dirty_pages = page;
+
+    page->global_dirty_prev = NULL;
+    page->global_dirty_next = g_dirty_pages;
+    if (g_dirty_pages)
+        g_dirty_pages->global_dirty_prev = page;
+    g_dirty_pages = page;
+    page->dirty = 1;
+}
+
+static void dirty_remove_locked(page_cache_page_t *page)
+{
+    if (!page->dirty)
+        return;
+    vnode_t *vn = page->vnode;
+    if (page->dirty_prev)
+        page->dirty_prev->dirty_next = page->dirty_next;
+    else if (vn)
+        vn->cache_dirty_pages = page->dirty_next;
+    if (page->dirty_next)
+        page->dirty_next->dirty_prev = page->dirty_prev;
+
+    if (page->global_dirty_prev)
+        page->global_dirty_prev->global_dirty_next = page->global_dirty_next;
+    else
+        g_dirty_pages = page->global_dirty_next;
+    if (page->global_dirty_next)
+        page->global_dirty_next->global_dirty_prev = page->global_dirty_prev;
+
+    page->dirty_prev = NULL;
+    page->dirty_next = NULL;
+    page->global_dirty_prev = NULL;
+    page->global_dirty_next = NULL;
+    page->dirty = 0;
 }
 
 static vnode_t *detach_mapping_deferred_locked(page_cache_page_t *page)
 {
     if (!page->valid)
         return NULL;
+    dirty_remove_locked(page);
+    mapping_remove_locked(page);
     hash_remove(page);
     vnode_t *vn = page->vnode;
     page->vnode = NULL;
@@ -84,28 +171,25 @@ static vnode_t *detach_mapping_deferred_locked(page_cache_page_t *page)
     return vn;
 }
 
-static void detach_mapping_locked(page_cache_page_t *page)
-{
-    vnode_t *vn = detach_mapping_deferred_locked(page);
-    if (vn)
-        vnode_put(vn);
-}
-
-static page_cache_page_t *evict_locked(void)
+static page_cache_page_t *evict_locked(vnode_t **deferred_put)
 {
     page_cache_page_t *page = g_lru_tail.prev;
+    size_t visited = 0;
     while (page != &g_lru_head) {
+        visited++;
         if (refcount_read(&page->ref_count) == 0 && !page->dirty &&
             pfn_valid(page->pfn) && pfa.meta[page->pfn].refcount <= 1) {
             if (page->valid)
-                detach_mapping_locked(page);
+                *deferred_put = detach_mapping_deferred_locked(page);
             refcount_set(&page->ref_count, 1);
             lru_remove(page);
             lru_insert_front(page);
+            page_cache_account_scan(visited);
             return page;
         }
         page = page->prev;
     }
+    page_cache_account_scan(visited);
     return NULL;
 }
 
@@ -157,7 +241,8 @@ page_cache_page_t *page_cache_get(vnode_t *vn, uint64_t index, int create)
         return NULL;
     }
 
-    page = evict_locked();
+    vnode_t *deferred_put = NULL;
+    page = evict_locked(&deferred_put);
     if (!page) {
         spin_unlock_irqrestore(&g_page_cache_lock, flags);
         return NULL;
@@ -172,7 +257,10 @@ page_cache_page_t *page_cache_get(vnode_t *vn, uint64_t index, int create)
     memset(page->data, 0, PAGE_SIZE);
     vnode_get(vn);
     hash_insert(page);
+    mapping_insert_locked(page);
     spin_unlock_irqrestore(&g_page_cache_lock, flags);
+    if (deferred_put)
+        vnode_put(deferred_put);
     return page;
 }
 
@@ -197,22 +285,25 @@ void page_cache_mark_uptodate(page_cache_page_t *page)
 
 void page_cache_mark_dirty(page_cache_page_t *page)
 {
-    if (page) {
-        /*
-         * Dirty data is necessarily authoritative. This matters for a page
-         * dirtied through MAP_SHARED after an earlier invalidation: read()
-         * must not refill it from the backing store and destroy mmap writes.
-         */
+    if (!page)
+        return;
+    uint64_t flags = spin_lock_irqsave(&g_page_cache_lock);
+    if (page->valid) {
+        /* Dirty data is authoritative even after an earlier invalidation. */
         __atomic_store_n(&page->uptodate, 1, __ATOMIC_RELEASE);
         __atomic_add_fetch(&page->dirty_gen, 1, __ATOMIC_RELEASE);
-        __atomic_store_n(&page->dirty, 1, __ATOMIC_RELEASE);
+        dirty_insert_locked(page);
     }
+    spin_unlock_irqrestore(&g_page_cache_lock, flags);
 }
 
 void page_cache_mark_clean(page_cache_page_t *page)
 {
-    if (page)
-        __atomic_store_n(&page->dirty, 0, __ATOMIC_RELEASE);
+    if (!page)
+        return;
+    uint64_t flags = spin_lock_irqsave(&g_page_cache_lock);
+    dirty_remove_locked(page);
+    spin_unlock_irqrestore(&g_page_cache_lock, flags);
 }
 
 int page_cache_is_uptodate(page_cache_page_t *page)
@@ -365,16 +456,12 @@ int page_cache_read_vfile(vfile_t *vf, char *buf, size_t count)
 
 static page_cache_page_t *find_dirty_locked(vnode_t *vn)
 {
-    for (int i = 0; i < PAGE_CACHE_MAX_PAGES; i++) {
-        page_cache_page_t *page = &g_pages[i];
-        if (!page->valid || !page->dirty)
-            continue;
-        if (vn && page->vnode != vn)
-            continue;
-        refcount_inc(&page->ref_count);
-        return page;
-    }
-    return NULL;
+    page_cache_page_t *page = vn ? vn->cache_dirty_pages : g_dirty_pages;
+    page_cache_account_scan(page ? 1 : 0);
+    if (!page)
+        return NULL;
+    refcount_inc(&page->ref_count);
+    return page;
 }
 
 static int page_cache_writeback_common(vnode_t *vn,
@@ -416,7 +503,7 @@ static int page_cache_writeback_common(vnode_t *vn,
         if (r >= 0 && page->valid && page->vnode == page_vn &&
             page->index == index &&
             __atomic_load_n(&page->dirty_gen, __ATOMIC_ACQUIRE) == dirty_gen)
-            page->dirty = 0;
+            dirty_remove_locked(page);
         spin_unlock_irqrestore(&g_page_cache_lock, flags);
 
         page_cache_put(page);
@@ -443,13 +530,20 @@ void page_cache_invalidate(vnode_t *vn)
     if (!g_initialized || !vn)
         return;
     uint64_t flags = spin_lock_irqsave(&g_page_cache_lock);
-    for (int i = 0; i < PAGE_CACHE_MAX_PAGES; i++) {
-        page_cache_page_t *page = &g_pages[i];
-        if (page->valid && page->vnode == vn &&
-            refcount_read(&page->ref_count) == 0)
-            detach_mapping_locked(page);
+    size_t detached = 0;
+    size_t visited = 0;
+    for (page_cache_page_t *page = vn->cache_pages, *next; page; page = next) {
+        visited++;
+        next = page->mapping_next;
+        if (refcount_read(&page->ref_count) == 0) {
+            detach_mapping_deferred_locked(page);
+            detached++;
+        }
     }
+    page_cache_account_scan(visited);
     spin_unlock_irqrestore(&g_page_cache_lock, flags);
+    for (size_t i = 0; i < detached; i++)
+        vnode_put(vn);
 }
 
 void page_cache_invalidate_range(vnode_t *vn, uint64_t start_byte,
@@ -460,16 +554,22 @@ void page_cache_invalidate_range(vnode_t *vn, uint64_t start_byte,
     uint64_t first_idx = start_byte / PAGE_SIZE;
     uint64_t last_idx  = (end_byte - 1) / PAGE_SIZE;
     uint64_t flags = spin_lock_irqsave(&g_page_cache_lock);
-    for (int i = 0; i < PAGE_CACHE_MAX_PAGES; i++) {
-        page_cache_page_t *page = &g_pages[i];
-        if (!page->valid || page->vnode != vn)
-            continue;
+    size_t detached = 0;
+    size_t visited = 0;
+    for (page_cache_page_t *page = vn->cache_pages, *next; page; page = next) {
+        visited++;
+        next = page->mapping_next;
         if (page->index < first_idx || page->index > last_idx)
             continue;
-        if (refcount_read(&page->ref_count) == 0)
-            detach_mapping_locked(page);
+        if (refcount_read(&page->ref_count) == 0) {
+            detach_mapping_deferred_locked(page);
+            detached++;
+        }
     }
+    page_cache_account_scan(visited);
     spin_unlock_irqrestore(&g_page_cache_lock, flags);
+    for (size_t i = 0; i < detached; i++)
+        vnode_put(vn);
 }
 
 void page_cache_invalidate_uptodate_range(vnode_t *vn, uint64_t start_byte,
@@ -480,20 +580,25 @@ void page_cache_invalidate_uptodate_range(vnode_t *vn, uint64_t start_byte,
     uint64_t first_idx = start_byte / PAGE_SIZE;
     uint64_t last_idx  = (end_byte - 1) / PAGE_SIZE;
     uint64_t flags = spin_lock_irqsave(&g_page_cache_lock);
-    for (int i = 0; i < PAGE_CACHE_MAX_PAGES; i++) {
-        page_cache_page_t *page = &g_pages[i];
-        if (!page->valid || page->vnode != vn)
-            continue;
+    size_t detached = 0;
+    size_t visited = 0;
+    for (page_cache_page_t *page = vn->cache_pages, *next; page; page = next) {
+        visited++;
+        next = page->mapping_next;
         if (page->index < first_idx || page->index > last_idx)
             continue;
         if (refcount_read(&page->ref_count) == 0) {
-            detach_mapping_locked(page);
+            detach_mapping_deferred_locked(page);
+            detached++;
         } else {
             page->invalidate_gen++;
             __atomic_store_n(&page->uptodate, 0, __ATOMIC_RELEASE);
         }
     }
+    page_cache_account_scan(visited);
     spin_unlock_irqrestore(&g_page_cache_lock, flags);
+    for (size_t i = 0; i < detached; i++)
+        vnode_put(vn);
 }
 
 void page_cache_truncate(vnode_t *vn, uint64_t new_size)
@@ -503,13 +608,17 @@ void page_cache_truncate(vnode_t *vn, uint64_t new_size)
     uint64_t eof_index = new_size / PAGE_SIZE;
     size_t eof_offset = new_size % PAGE_SIZE;
     uint64_t flags = spin_lock_irqsave(&g_page_cache_lock);
-    for (int i = 0; i < PAGE_CACHE_MAX_PAGES; i++) {
-        page_cache_page_t *page = &g_pages[i];
-        if (!page->valid || page->vnode != vn || page->index < eof_index)
+    size_t detached = 0;
+    size_t visited = 0;
+    for (page_cache_page_t *page = vn->cache_pages, *next; page; page = next) {
+        visited++;
+        next = page->mapping_next;
+        if (page->index < eof_index)
             continue;
         int partial_eof_page = eof_offset && page->index == eof_index;
         if (refcount_read(&page->ref_count) == 0) {
-            detach_mapping_locked(page);
+            detach_mapping_deferred_locked(page);
+            detached++;
         } else if (partial_eof_page) {
             memset((char *)page->data + eof_offset, 0,
                    PAGE_SIZE - eof_offset);
@@ -524,10 +633,13 @@ void page_cache_truncate(vnode_t *vn, uint64_t new_size)
             memset(page->data, 0, PAGE_SIZE);
             page->invalidate_gen++;
             __atomic_store_n(&page->uptodate, 0, __ATOMIC_RELEASE);
-            __atomic_store_n(&page->dirty, 0, __ATOMIC_RELEASE);
+            dirty_remove_locked(page);
         }
     }
+    page_cache_account_scan(visited);
     spin_unlock_irqrestore(&g_page_cache_lock, flags);
+    for (size_t i = 0; i < detached; i++)
+        vnode_put(vn);
 }
 
 size_t page_cache_drop_clean(void)
@@ -536,6 +648,7 @@ size_t page_cache_drop_clean(void)
         return 0;
 
     size_t dropped = 0;
+    size_t visited = 0;
     int cursor = 0;
     while (cursor < PAGE_CACHE_MAX_PAGES) {
         vnode_t *held[64];
@@ -543,6 +656,7 @@ size_t page_cache_drop_clean(void)
         uint64_t flags = spin_lock_irqsave(&g_page_cache_lock);
         while (cursor < PAGE_CACHE_MAX_PAGES && held_count < 64) {
             page_cache_page_t *page = &g_pages[cursor++];
+            visited++;
             if (!page->valid || page->dirty ||
                 refcount_read(&page->ref_count) != 0 ||
                 !pfn_valid(page->pfn) ||
@@ -561,6 +675,7 @@ size_t page_cache_drop_clean(void)
         for (int i = 0; i < held_count; i++)
             vnode_put(held[i]);
     }
+    page_cache_account_scan(visited);
     return dropped;
 }
 

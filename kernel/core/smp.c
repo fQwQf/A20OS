@@ -218,6 +218,12 @@ int smp_remote_tlb_flush(uint32_t logical_mask, uint64_t addr, uint64_t size)
                                  addr, size);
 }
 
+int smp_remote_tlb_flush_supported(void)
+{
+    const smp_platform_ops_t *ops = platform_ops();
+    return ops && ops->remote_tlb_flush;
+}
+
 void smp_secondary_init(unsigned cpu_id)
 {
     const smp_platform_ops_t *ops = platform_ops();

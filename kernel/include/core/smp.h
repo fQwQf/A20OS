@@ -40,6 +40,7 @@ typedef struct smp_platform_ops {
 /* Send a reschedule IPI to an online logical CPU. */
 void smp_send_reschedule(unsigned cpu);
 int smp_remote_tlb_flush(uint32_t logical_mask, uint64_t addr, uint64_t size);
+int smp_remote_tlb_flush_supported(void);
 
 /* Discover topology after proc_init(). */
 void smp_init(void);

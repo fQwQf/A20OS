@@ -7,6 +7,7 @@
 #include "fs/vfs/dcache.h"
 #include "fs/vfs/mount.h"
 #include "fs/vfs/file.h"
+#include "fs/vfs/stat_perm.h"
 #include "fs/file.h"
 #include "fs/block_cache.h"
 #include "fs/page_cache.h"
@@ -352,6 +353,7 @@ int vfs_umount(const char *path) {
 
         if (strcmp(mnt_norm, norm_path) == 0) {
             vfs_dcache_invalidate_all();
+            vfs_drop_time_meta_mount(mnt);
             vnode_t *root = mnt->root;
             if (mnt->type == FS_TYPE_FAT32) {
                 fat32_unmount(root);

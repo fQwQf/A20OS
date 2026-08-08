@@ -9,6 +9,8 @@ static inline void arch_mb(void)  { __asm__ __volatile__("dbar 0" ::: "memory");
 static inline void arch_rmb(void) { __asm__ __volatile__("dbar 0" ::: "memory"); }
 static inline void arch_wmb(void) { __asm__ __volatile__("dbar 0" ::: "memory"); }
 static inline void arch_wfi(void) { __asm__ __volatile__("idle 0"); }
+#define ARCH_HAS_SAFE_IDLE_WAIT 1
+void arch_idle_wait(void);
 static inline void arch_cpu_relax(void) { __asm__ __volatile__("nop"); }
 static inline void arch_fence_i(void) { 
     __asm__ __volatile__(

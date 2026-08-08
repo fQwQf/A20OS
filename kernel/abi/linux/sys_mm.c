@@ -236,6 +236,7 @@ int64_t sys_madvise(uint64_t addr, size_t len, int advice) {
             }
             paddr_t pa = 0;
             if (pt_unmap_leaf(t->mm->pgdir, va, &pa, &base, &size, NULL) == 0) {
+                mm_tlb_note_change(t->mm, base, size);
                 if (pa) {
                     if (shared_file) {
                         page_cache_put(held_pcp);

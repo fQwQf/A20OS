@@ -45,8 +45,9 @@ vnode_t *ext4_vnode_cache_remove(ext4_sb_info_t *sb, uint32_t ino) ;
 int ext4_read_inode(ext4_sb_info_t *sb, uint32_t ino, ext4_inode_t *out) ;
 int ext4_write_inode(ext4_sb_info_t *sb, uint32_t ino, ext4_inode_t *inp) ;
 void ext4_writeback_gd(ext4_sb_info_t *sb, uint32_t group) ;
-int ext4_bitmap_alloc(ext4_sb_info_t *sb, uint64_t bm_blk, uint32_t max) ;
-void ext4_bitmap_free(ext4_sb_info_t *sb, uint64_t bm_blk, uint32_t bit) ;
+int ext4_bitmap_alloc(ext4_sb_info_t *sb, uint64_t bm_blk, uint32_t max,
+                      uint32_t start) ;
+int ext4_bitmap_free(ext4_sb_info_t *sb, uint64_t bm_blk, uint32_t bit) ;
 uint64_t ext4_alloc_block(ext4_sb_info_t *sb) ;
 void ext4_free_block(ext4_sb_info_t *sb, uint64_t phys) ;
 uint32_t ext4_alloc_inode(ext4_sb_info_t *sb) ;
@@ -84,9 +85,10 @@ int ext4_dir_remove(ext4_sb_info_t *sb, ext4_inode_t *di, uint64_t dsz,
                             const char *name) ;
 int ext4_dir_update_entry(ext4_sb_info_t *sb, ext4_inode_t *di, uint64_t *dsz,
                                   const char *name, uint32_t ino, uint8_t ft) ;
-int ext4_inode_remove(ext4_sb_info_t *sb, uint32_t dir_ino __attribute__((unused)),
-                              ext4_inode_t *di, const char *name, uint32_t ino,
-                              vnode_t **deferred_put) ;
+int ext4_inode_remove(ext4_sb_info_t *sb, mount_t *mnt,
+                               uint32_t dir_ino __attribute__((unused)),
+                               ext4_inode_t *di, const char *name, uint32_t ino,
+                               vnode_t **deferred_put) ;
 int ext4_lookup_unlocked(vnode_t *dir, const char *name, vnode_t **out) ;
 int ext4_stat(vnode_t *vn, kstat_t *st) ;
 void ext4_release_vn(vnode_t *vn) ;

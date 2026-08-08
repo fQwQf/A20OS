@@ -95,6 +95,13 @@ static inline int arch_pt_level_entries(int level)
 # define ARCH_SCHED_SWITCH(task) do { (void)(task); } while (0)
 #endif
 
+/* A safe idle wait is entered with local IRQs disabled and returns with them
+ * still disabled. Architectures opt in only when their wakeup protocol closes
+ * the interrupt-enable-to-sleep lost-wakeup window. */
+#ifndef ARCH_HAS_SAFE_IDLE_WAIT
+# define ARCH_HAS_SAFE_IDLE_WAIT 0
+#endif
+
 #ifndef ARCH_IDLE_CONTEXT_STATIC
 # define ARCH_IDLE_CONTEXT_STATIC(name, count)
 # define ARCH_IDLE_STACK(contexts, cpu) kmalloc(KERNEL_STACK_SIZE)

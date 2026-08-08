@@ -1,5 +1,6 @@
 #include "fs/fat32.h"
 #include "fs/fat32_internal.h"
+#include "fs/vfs/stat_perm.h"
 #include "fs/file.h"
 #include "fs/vfs.h"
 #include "fs/block_cache.h"
@@ -76,6 +77,8 @@ void fat32_release_vn(vnode_t *vn) {
         fat32_sb_t *sb = p->sb;
         p->unlinked = 0;
         fat32_lock(sb);
+        vfs_drop_time_meta_identity(vn->mnt, vn->ino);
+        fat32_drop_meta(sb, vn->ino);
         fat32_free_cluster_chain(sb, p->first_cluster);
         fat32_unlock(sb);
     }
@@ -228,6 +231,8 @@ int fat32_vn_unlink(vnode_t *dir, const char *name) {
         return 0;
     }
 
+    vfs_drop_time_meta_identity(dir->mnt, (uint64_t)cluster);
+    fat32_drop_meta(sb, (uint64_t)cluster);
     fat32_free_cluster_chain(sb, cluster);
     fat32_unlock(p->sb);
     return 0;
@@ -382,6 +387,8 @@ int fat32_vn_rmdir(vnode_t *dir, const char *name) {
         return 0;
     }
 
+    vfs_drop_time_meta_identity(dir->mnt, (uint64_t)cluster);
+    fat32_drop_meta(sb, (uint64_t)cluster);
     fat32_free_cluster_chain(sb, cluster);
     fat32_unlock(p->sb);
     return 0;
@@ -471,6 +478,9 @@ int fat32_vn_rename(vnode_t *old_dir, const char *old_name,
                 vp->unlinked = 1;
             vnode_put(tvictim);
         } else {
+            vfs_drop_time_meta_identity(new_dir->mnt,
+                                        (uint64_t)tgt_cluster);
+            fat32_drop_meta(sb, (uint64_t)tgt_cluster);
             fat32_free_cluster_chain(sb, tgt_cluster);
         }
     }

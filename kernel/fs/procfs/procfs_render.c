@@ -15,6 +15,7 @@
 #include "mm/oom.h"
 #include "mm/swap.h"
 #include "core/timer.h"
+#include "core/perf.h"
 #include "core/string.h"
 #include "core/stdio.h"
 #include "core/version.h"
@@ -565,6 +566,8 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
     }
     case PF_A20_TASK_LIFETIME:
         return (int)proc_lifetime_format(buf, bufsz);
+    case PF_A20_PERF:
+        return (int)a20_perf_format(buf, bufsz);
     case PF_A20_OBJECTS:
         snprintf(buf, bufsz,
             "handles: %lu\n"
@@ -891,5 +894,4 @@ int generate_pid_fdinfo(int pid, int fd, char *buf, size_t bufsz)
     vfs_put_file_ref(gfd, target);
     return len < 0 ? 0 : len;
 }
-
 

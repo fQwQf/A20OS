@@ -242,6 +242,16 @@ fat32_meta_t *fat32_get_meta(fat32_sb_t *sb, uint64_t ino, int is_dir, int creat
     return NULL;
 }
 
+void fat32_drop_meta(fat32_sb_t *sb, uint64_t ino) {
+    for (int i = 0; i < FAT32_META_MAX; i++) {
+        if (g_fat32_meta[i].used && g_fat32_meta[i].sb == sb &&
+            g_fat32_meta[i].ino == ino) {
+            memset(&g_fat32_meta[i], 0, sizeof(g_fat32_meta[i]));
+            return;
+        }
+    }
+}
+
 vnode_t *fat32_make_vnode(fat32_sb_t *sb, uint32_t cluster,
                                   size_t size, int is_dir, vnode_t *parent,
                                   uint64_t ino);
@@ -447,4 +457,3 @@ void fat32_unmount(vnode_t *root) {
  * VFS open hook: create vfile for a fat32 vnode
  * Called by vfs.c when opening files on a FAT32 mount
  * ============================================================ */
-

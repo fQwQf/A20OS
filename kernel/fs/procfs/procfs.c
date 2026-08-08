@@ -111,6 +111,7 @@ static pf_type_t name_to_type(const char *name, int *out_pid) {
     if (strcmp(name, "page_cache") == 0) return PF_A20_PAGE_CACHE;
     if (strcmp(name, "oom") == 0) return PF_A20_OOM;
     if (strcmp(name, "task_lifetime") == 0) return PF_A20_TASK_LIFETIME;
+    if (strcmp(name, "perf") == 0) return PF_A20_PERF;
     if (strcmp(name, "driver_lifecycle") == 0) return PF_A20_DRIVER_LIFECYCLE;
     if (strcmp(name, "objects") == 0) return PF_A20_OBJECTS;
     if (strcmp(name, "cmdline") == 0) return PF_CMDLINE;
@@ -341,6 +342,9 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
                strcmp(name, "task_lifetime") == 0) {
         child = new_entry(name, PF_A20_TASK_LIFETIME, 0);
         type = PF_A20_TASK_LIFETIME;
+    } else if (dp && dp->type == PF_A20 && strcmp(name, "perf") == 0) {
+        child = new_entry(name, PF_A20_PERF, 0);
+        type = PF_A20_PERF;
     } else if (dp && dp->type == PF_A20 && strcmp(name, "driver_lifecycle") == 0) {
         child = new_entry(name, PF_A20_DRIVER_LIFECYCLE, 0);
         type = PF_A20_DRIVER_LIFECYCLE;
@@ -845,7 +849,7 @@ static int procfs_freaddir(vfile_t *vf, void *dirp, size_t count) {
         ".", "..", "max_queued_events", "max_user_instances", NULL
     };
     static const char *a20_entries[] = {
-        ".", "..", "bcache", "page_cache", "oom", "task_lifetime",
+        ".", "..", "bcache", "page_cache", "oom", "task_lifetime", "perf",
         "driver_lifecycle", "objects", NULL
     };
     static const char *ns_entries[] = {

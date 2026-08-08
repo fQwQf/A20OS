@@ -179,41 +179,53 @@ static int exec_copy_args(char *const *src, char **out, int *out_count,
         if (!ptr)
             break;
 
-        out[count] = kmalloc(MAX_ARG_STRLEN);
+        /* Match the old user_strncpy(..., MAX_ARG_STRLEN) boundary: inspect
+         * at most MAX_ARG_STRLEN - 1 source bytes, then report E2BIG without
+         * probing the first rejected byte. */
+        long measured = user_strnlen(ptr, MAX_ARG_STRLEN - 1);
+        if (measured < 0) {
+            for (int i = 0; i < count; i++) { kfree(out[i]); out[i] = NULL; }
+            return (int)measured;
+        }
+        if ((size_t)measured >= MAX_ARG_STRLEN - 1) {
+            for (int i = 0; i < count; i++) { kfree(out[i]); out[i] = NULL; }
+            return -E2BIG;
+        }
+        size_t len = (size_t)measured + 1;
+        if (*arg_bytes + len > max_bytes ||
+            *arg_bytes + len > (t ? t->limits.stack / 4 : MAX_ARG_BYTES)) {
+            for (int i = 0; i < count; i++) { kfree(out[i]); out[i] = NULL; }
+            return -E2BIG;
+        }
+
+        out[count] = kmalloc(len);
         if (!out[count]) {
             for (int i = 0; i < count; i++) { kfree(out[i]); out[i] = NULL; }
             return -ENOMEM;
         }
 
-        size_t len;
-        long copied = user_strncpy(out[count], ptr, MAX_ARG_STRLEN);
-        if (copied < 0) {
+        if (copy_from_user(out[count], ptr, len) < 0) {
             kfree(out[count]); out[count] = NULL;
             for (int i = 0; i < count; i++) { kfree(out[i]); out[i] = NULL; }
-            return (int)copied;
+            return -EFAULT;
         }
-        if ((size_t)copied >= MAX_ARG_STRLEN - 1) {
+        if (out[count][len - 1] != '\0') {
             kfree(out[count]); out[count] = NULL;
             for (int i = 0; i < count; i++) { kfree(out[i]); out[i] = NULL; }
-            return -E2BIG;
+            return -EFAULT;
         }
-        len = (size_t)copied + 1;
 
         *arg_bytes += len;
-        if (*arg_bytes > max_bytes ||
-            *arg_bytes > (t ? t->limits.stack / 4 : MAX_ARG_BYTES)) {
-            kfree(out[count]); out[count] = NULL;
-            for (int i = 0; i < count; i++) { kfree(out[i]); out[i] = NULL; }
-            return -E2BIG;
-        }
         count++;
     }
 
     /* Check for overflow: if the array has more than MAX_ARG_STRINGS entries */
     if (count == MAX_ARG_STRINGS) {
         char *extra;
-        if (copy_from_user(&extra, &src[count], sizeof(char *)) < 0)
-            extra = NULL;
+        if (copy_from_user(&extra, &src[count], sizeof(char *)) < 0) {
+            for (int i = 0; i < count; i++) { kfree(out[i]); out[i] = NULL; }
+            return -EFAULT;
+        }
         if (extra) {
             for (int i = 0; i < count; i++) { kfree(out[i]); out[i] = NULL; }
             return -E2BIG;
@@ -689,8 +701,12 @@ static int exec_install_process(task_t *t,
         proc_apply_exec_creds(t, st);
 
     /* ---- 7. Switch page tables, destroy old address space ---- */
+    unsigned cpu = cpu_current_id();
+    mm_context_enter(new_mm, cpu);
     arch_write_addr_space_token(arch_make_addr_space_token(info->pgdir));
-    arch_tlb_flush();
+    arch_tlb_flush_local();
+    if (old_mm && old_mm != new_mm)
+        mm_context_leave(old_mm, cpu);
 
     if (old_mm) {
         mm_destroy(old_mm);

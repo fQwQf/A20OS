@@ -64,14 +64,17 @@ static int swap_out_victim_pages(int target_pages)
     task_t *victim = proc_find_get(victim_pid);
     if (!victim)
         return 0;
-    if (!victim->mm || !victim->mm->pgdir) {
+    mm_struct_t *mm = proc_task_get_mm(victim);
+    if (!mm || !mm->pgdir) {
+        if (mm)
+            mm_destroy(mm);
         proc_put(victim);
         return 0;
     }
 
-    mm_struct_t *mm = victim->mm;
     int reclaimed = 0;
-    uint64_t flags = spin_lock(&mm->lock);
+    mm_tlb_invalidate_begin(mm);
+    uint64_t flags = spin_lock_irqsave(&mm->lock);
 
     /* TODO: install a busy swap PTE and drop mm->lock before block I/O. */
     for (vm_area_t *vma = mm->mmap;
@@ -112,9 +115,14 @@ static int swap_out_victim_pages(int target_pages)
                 swap_free(entry);
                 continue;
             }
+            if (mm_tlb_hold_frame(mm, pfn) < 0) {
+                cg_mem_swap_uncharge(victim, 1);
+                swap_free(entry);
+                continue;
+            }
 
             *pte = swp_entry_to_pte(entry);
-            arch_tlb_flush_page_local(va);
+            mm_tlb_note_change(mm, va, PAGE_SIZE);
             frame_put(pfn);
             cg_mem_uncharge(victim->cgroup, 1);
             mm->rss = mm->rss ? mm->rss - 1 : 0;
@@ -125,10 +133,10 @@ static int swap_out_victim_pages(int target_pages)
         }
     }
 
-    spin_unlock(&mm->lock);
+    spin_unlock_irqrestore(&mm->lock, flags);
+    mm_tlb_invalidate_finish(mm);
+    mm_destroy(mm);
     proc_put(victim);
-    if (reclaimed > 0)
-        arch_tlb_flush();  /* frames went back to the buddy: remote flush */
     return reclaimed;
 }
 #else

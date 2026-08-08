@@ -298,6 +298,8 @@ int64_t sys_a20_vm_advise(const a20_syscall_args_t *args)
 
 #ifndef CONFIG_NOMMU
     if (advice == 4 /* MADV_DONTNEED */ || advice == 8 /* MADV_FREE */) {
+        mm_tlb_invalidate_begin(cur->mm);
+        uint64_t mm_flags = spin_lock_irqsave(&cur->mm->lock);
         for (uint64_t va = addr; va < end; ) {
             int level = 0;
             vaddr_t base = 0;
@@ -310,14 +312,26 @@ int64_t sys_a20_vm_advise(const a20_syscall_args_t *args)
                  * frame_put() them.  Drop the PTE and let the VMO keep the
                  * canonical frame. */
                 paddr_t dummy = 0;
-                pt_unmap_leaf(cur->mm->pgdir, va, &dummy, &base, &leaf_size, NULL);
-                cur->mm->rss = (cur->mm->rss > leaf_size / 4096)
-                                   ? cur->mm->rss - leaf_size / 4096 : 0;
-                va = base + leaf_size;
+                if (pt_unmap_leaf(cur->mm->pgdir, va, &dummy, &base,
+                                  &leaf_size, NULL) == 0) {
+                    mm_tlb_note_change(cur->mm, base, leaf_size);
+                    cur->mm->rss = (cur->mm->rss > leaf_size / 4096)
+                                       ? cur->mm->rss - leaf_size / 4096 : 0;
+                    va = base + leaf_size;
+                    continue;
+                }
+                va += 4096;
                 continue;
             }
             paddr_t pa = 0;
+            pfn_t held = phys_to_pfn(arch_pte_addr(*pte));
+            if (!pfn_valid(held) || mm_tlb_hold_frame(cur->mm, held) < 0) {
+                spin_unlock_irqrestore(&cur->mm->lock, mm_flags);
+                mm_tlb_invalidate_finish(cur->mm);
+                return -A20_ERR_NO_MEMORY;
+            }
             if (pt_unmap_leaf(cur->mm->pgdir, va, &pa, &base, &leaf_size, NULL) == 0) {
+                mm_tlb_note_change(cur->mm, base, leaf_size);
                 if (pa) {
                     frame_put(phys_to_pfn(pa));
                     size_t pages = leaf_size / 4096;
@@ -328,7 +342,8 @@ int64_t sys_a20_vm_advise(const a20_syscall_args_t *args)
                 va += 4096;
             }
         }
-        arch_tlb_flush();
+        spin_unlock_irqrestore(&cur->mm->lock, mm_flags);
+        mm_tlb_invalidate_finish(cur->mm);
     }
 #endif
     return A20_OK;

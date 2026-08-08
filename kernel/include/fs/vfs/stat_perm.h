@@ -21,5 +21,7 @@ int vfs_sticky_may_remove(vnode_t *dir, vnode_t *victim);
 void vfs_touch_mtime(vnode_t *vn);
 int vfs_set_times(vnode_t *vn, const uint64_t times[4]);
 void vfs_drop_time_meta(vnode_t *vn);
+void vfs_drop_time_meta_identity(mount_t *mnt, uint64_t ino);
+void vfs_drop_time_meta_mount(mount_t *mnt);
 
 #endif /* _FS_VFS_STAT_PERM_H */

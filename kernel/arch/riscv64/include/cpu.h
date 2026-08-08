@@ -9,6 +9,13 @@ static inline void arch_mb(void)  { __asm__ __volatile__("fence iorw,iorw" ::: "
 static inline void arch_rmb(void) { __asm__ __volatile__("fence ir,ir" ::: "memory"); }
 static inline void arch_wmb(void) { __asm__ __volatile__("fence ow,ow" ::: "memory"); }
 static inline void arch_wfi(void) { __asm__ __volatile__("wfi"); }
+#define ARCH_HAS_SAFE_IDLE_WAIT 1
+static inline void arch_idle_wait(void) {
+    /* RISC-V permits WFI with SSTATUS.SIE clear. A locally enabled pending
+     * interrupt still resumes the hart, and is taken after the caller unmasks
+     * SIE, so there is no enable-before-WFI race. */
+    __asm__ __volatile__("wfi" ::: "memory");
+}
 static inline void arch_cpu_relax(void) { __asm__ __volatile__("nop"); }
 static inline void arch_fence_i(void) { __asm__ __volatile__("fence.i" ::: "memory"); }
 static inline void arch_flush_icache_range(const void *addr, size_t size) { (void)addr; (void)size; arch_fence_i(); }

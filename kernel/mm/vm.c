@@ -15,6 +15,8 @@
 #include "core/string.h"
 #include "core/panic.h"
 #include "core/klog.h"
+#include "core/perf.h"
+#include "core/smp.h"
 
 #ifdef CONFIG_NOMMU
 #endif
@@ -26,8 +28,48 @@ enum {
 
 void mm_tlb_invalidate_begin(mm_struct_t *mm)
 {
-    if (mm)
+    if (mm) {
+        a20_perf_count(A20_PERF_MM_TLB_TRANSACTIONS);
         mutex_lock(&mm->tlb_lock);
+        mm->tlb_pending = 0;
+        mm->tlb_start = 0;
+        mm->tlb_end = 0;
+    }
+}
+
+void mm_tlb_note_change(mm_struct_t *mm, vaddr_t addr, size_t size)
+{
+    if (!mm || size == 0)
+        return;
+    vaddr_t end = addr + size;
+    if (end < addr)
+        end = ~(vaddr_t)0;
+    if (!mm->tlb_pending) {
+        mm->tlb_start = addr;
+        mm->tlb_end = end;
+        mm->tlb_pending = 1;
+    } else {
+        if (addr < mm->tlb_start)
+            mm->tlb_start = addr;
+        if (end > mm->tlb_end)
+            mm->tlb_end = end;
+    }
+}
+
+void mm_context_enter(mm_struct_t *mm, unsigned cpu)
+{
+    if (mm && cpu < 32) {
+        __atomic_fetch_or(&mm->active_cpus, 1U << cpu, __ATOMIC_ACQ_REL);
+        /* The active bit must be globally visible before the architecture can
+         * install this mm's page-table token. */
+        arch_mb();
+    }
+}
+
+void mm_context_leave(mm_struct_t *mm, unsigned cpu)
+{
+    if (mm && cpu < 32)
+        __atomic_fetch_and(&mm->active_cpus, ~(1U << cpu), __ATOMIC_RELEASE);
 }
 
 static int mm_tlb_queue_hold(mm_struct_t *mm, pfn_t frame,
@@ -88,9 +130,44 @@ void mm_tlb_invalidate_finish(mm_struct_t *mm)
     if (!mm)
         return;
 
-    /* Publish all preceding PTE clears before any old backing object can be
-     * returned to the page cache or buddy allocator. */
-    arch_tlb_flush();
+    int transaction_flushed = 0;
+
+    if (mm->tlb_pending && smp_remote_tlb_flush_supported()) {
+        /* Publish PTE changes before sampling active CPUs. A CPU which enters
+         * after this snapshot flushes locally while switching page tables. */
+        arch_mb();
+        uint32_t targets =
+            __atomic_load_n(&mm->active_cpus, __ATOMIC_ACQUIRE) &
+            smp_online_cpu_mask();
+        unsigned current = cpu_current_id();
+        uint64_t start = mm->tlb_start;
+        uint64_t size = mm->tlb_end - mm->tlb_start;
+        if (current < 32 && (targets & (1U << current))) {
+            if (size == PAGE_SIZE)
+                arch_tlb_flush_page_local(start);
+            else
+                arch_tlb_flush_local();
+            transaction_flushed = 1;
+            targets &= ~(1U << current);
+        }
+        if (targets) {
+            transaction_flushed = 1;
+            a20_perf_add(A20_PERF_MM_TLB_REMOTE_CPUS,
+                         (uint64_t)__builtin_popcount(targets));
+            if (smp_remote_tlb_flush(targets, start, size) < 0)
+                panic("mm: targeted remote TLB flush failed");
+        }
+    } else if (mm->tlb_pending) {
+        /* Keep the pre-Batch-B behavior on architectures or boards without
+         * synchronous targeted shootdown support. */
+        arch_tlb_flush();
+        transaction_flushed = 1;
+    }
+
+    /* Count one transaction if it requested any local, global, or remote
+     * shootdown. This is not a count of every architecture-local flush. */
+    if (transaction_flushed)
+        a20_perf_count(A20_PERF_MM_TLB_TRANSACTION_FLUSHES);
 
     uint64_t flags = spin_lock_irqsave(&mm->lock);
     mm_tlb_hold_t *hold = mm->tlb_holds;
@@ -110,6 +187,7 @@ void mm_tlb_invalidate_finish(mm_struct_t *mm)
     /* VMA release may drop the final VMO or page-cache owner and therefore
      * belongs after the same shootdown boundary. */
     mm_vma_flush_deferred(mm);
+    mm->tlb_pending = 0;
     mutex_unlock(&mm->tlb_lock);
 }
 
@@ -167,6 +245,7 @@ int mm_demote_huge_page(mm_struct_t *mm, vaddr_t addr) {
             frame_put(pages[i]);
         return -EINVAL;
     }
+    mm_tlb_note_change(mm, base, size);
     frame_put(old_pfn);
 
     for (size_t i = 0; i < PMD_PAGE_COUNT; i++) {
@@ -260,6 +339,7 @@ mm_struct_t *mm_create(void) {
     spin_set_debug(&mm->lock, "mm", mm);
     mutex_init(&mm->tlb_lock);
     mm->tlb_holds = NULL;
+    mm->active_cpus = 0;
     refcount_set(&mm->refcount, 1);
     ktrace_mm("[MMDBG] mm=%p lock=%p\n", (void *)mm, (void *)&mm->lock);
     return mm;
@@ -282,6 +362,8 @@ void mm_destroy(mm_struct_t *mm) {
      * translations from an earlier timeslice.  Clear those before the direct
      * free_vma_pages() drops ordinary leaf references. */
     mm_tlb_invalidate_begin(mm);
+    /* The final mm cannot be entered again. Flush stale translations before
+     * free_vma_pages() or deferred VMA release can return backing storage. */
     arch_tlb_flush();
 
     // 释放所有 VMA 及其物理页面
@@ -357,6 +439,7 @@ mm_struct_t *mm_fork(mm_struct_t *parent) {
     size_t vma_capacity = 0;
     uint64_t parent_flags = 0;
     for (;;) {
+        mm_tlb_invalidate_begin(parent);
         parent_flags = spin_lock_irqsave(&parent->lock);
         size_t needed = 0;
         for (vm_area_t *pv = parent->mmap; pv; pv = pv->next) {
@@ -373,6 +456,7 @@ mm_struct_t *mm_fork(mm_struct_t *parent) {
                     kfree(vma_pool);
                     vma_pool = node;
                 }
+                mm_tlb_invalidate_finish(parent);
                 pt_destroy_user(child_pgdir);
                 kfree(child);
                 return NULL;
@@ -391,6 +475,7 @@ mm_struct_t *mm_fork(mm_struct_t *parent) {
         if (needed <= vma_capacity)
             break;
         spin_unlock_irqrestore(&parent->lock, parent_flags);
+        mm_tlb_invalidate_finish(parent);
     }
 
     *child = *parent;
@@ -413,6 +498,10 @@ mm_struct_t *mm_fork(mm_struct_t *parent) {
      */
     child->deferred_vma = NULL;
     child->tlb_holds = NULL;
+    child->active_cpus = 0;
+    child->tlb_pending = 0;
+    child->tlb_start = 0;
+    child->tlb_end = 0;
     refcount_set(&child->refcount, 1);
     child->rss = 0;
     child->total_vm = 0;
@@ -505,10 +594,11 @@ mm_struct_t *mm_fork(mm_struct_t *parent) {
         vma_pool = next;
     }
 
-    arch_tlb_flush();
+    mm_tlb_invalidate_finish(parent);
     return child;
 fail_locked:
     spin_unlock_irqrestore(&parent->lock, parent_flags);
+    mm_tlb_invalidate_finish(parent);
     while (vma_pool) {
         vm_area_t *next = vma_pool->next;
         kfree(vma_pool);

@@ -106,6 +106,7 @@ int mm_munmap_locked(mm_struct_t *mm, vaddr_t addr, size_t len) {
             }
             paddr_t pa = 0;
             if (pt_unmap_leaf(mm->pgdir, va, &pa, &base, &size, &level) == 0) {
+                mm_tlb_note_change(mm, base, size);
                 if (pa) {
                     pfn_t pfn = phys_to_pfn(pa);
                     if (shared_file_vma && vma->file_vnode) {
@@ -225,6 +226,7 @@ vaddr_t mm_brk_locked(mm_struct_t *mm, vaddr_t newbrk) {
                 return mm->brk;
             paddr_t pa = 0;
             if (pt_unmap_leaf(mm->pgdir, va, &pa, &base, &size, NULL) == 0) {
+                mm_tlb_note_change(mm, base, size);
                 if (pa) {
                     frame_put(phys_to_pfn(pa));
                     size_t pages = size / PAGE_SIZE;
