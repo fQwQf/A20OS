@@ -71,7 +71,7 @@ run_lane() {
         make "$target"
         log=$(ls -1t \
             "$state_dir"/logs/"${arch}-buildstorm-probe-8c-stage5-official-minibuild-"*.log |
-            head -n 1)
+            sed -n '1p')
         metadata=${log/\/logs\//\/metadata\/}
         metadata=${metadata%.log}.txt
 
@@ -125,13 +125,18 @@ run_lane() {
 }
 
 pids=()
+labels=()
 for arch in riscv64 loongarch64; do
     run_lane "$arch" &
     pids+=("$!")
+    labels+=("$arch")
 done
 failures=0
-for pid in "${pids[@]}"; do
-    if ! wait "$pid"; then
+for index in "${!pids[@]}"; do
+    status=0
+    wait "${pids[index]}" || status=$?
+    echo "BUILDSTORM_STAGE5_MATRIX lane-status label=${labels[index]} pid=${pids[index]} status=$status"
+    if (( status != 0 )); then
         failures=$((failures + 1))
     fi
 done
