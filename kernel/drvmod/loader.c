@@ -6,7 +6,8 @@
  * framework export table ONLY (symbol whitelist).  Supported machines and
  * the relocation sets emitted by their DRVMOD_CFLAGS (see Makefile):
  *
- *   riscv64     R_RISCV_*      (medany, -fno-pic)
+ *   riscv64     R_RISCV_*      (medany, -fno-pic; external calls use
+ *                               loader veneers when outside +/-2 GiB)
  *   x86_64      R_X86_64_*     (large model: ABS64 for externals, no
  *                               PC32/PLT32 range limit)
  *   aarch64     R_AARCH64_*    (BL range is ±128 MiB; kernel text and the
@@ -425,8 +426,34 @@ static uint32_t drvmod_apply_reloc(uint32_t machine, uint8_t *shadow,
             case R_RISCV_CALL:
                 /* auipc + jalr pair: S - P split into hi20/lo12. */
                 {
-                    int32_t off = (int32_t)(S - P);
-                    uint32_t hi = (uint32_t)((off + 0x800) >> 12) & 0xFFFFF;
+                    int64_t off64 = (int64_t)(S + r->r_addend - P);
+                    if (off64 < -0x80000000LL || off64 > 0x7fffffffLL) {
+                        /* medany CALL only covers a signed 32-bit PC-relative
+                         * displacement.  With an 8 GiB direct map the buddy
+                         * allocator may place a module farther from kernel
+                         * text, so tail-call through a module-local veneer:
+                         *
+                         *   auipc t0, 0; ld t0, 16(t0); jalr zero, 0(t0)
+                         *   nop; .quad S
+                         */
+                        if (!veneer_off || veneer_off[i] == 0) {
+                            printf("[DRVMOD] riscv64 call out of range (0x%lx)\n",
+                                   (unsigned long)off64);
+                            return 0xFFFFFFFFU;
+                        }
+                        uintptr_t veneer = load_base + veneer_off[i];
+                        off64 = (int64_t)(veneer - P);
+                        if (off64 < -0x80000000LL || off64 > 0x7fffffffLL) {
+                            printf("[DRVMOD] riscv64 veneer out of range (0x%lx)\n",
+                                   (unsigned long)off64);
+                            return 0xFFFFFFFFU;
+                        }
+                        *(uint64_t *)(shadow + veneer_off[i] + 16) =
+                            S + r->r_addend;
+                    }
+                    int32_t off = (int32_t)off64;
+                    uint32_t hi =
+                        (uint32_t)((off64 + 0x800LL) >> 12) & 0xFFFFF;
                     uint32_t lo = (uint32_t)off & 0xFFF;
                     uint32_t *auipc = (uint32_t *)(shadow + sec_load_off + r->r_offset);
                     *auipc = (*auipc & 0xFFF) | ((hi & 0xFFFFF) << 12);
@@ -1057,15 +1084,21 @@ int drvmod_load(int fd, const char *name)
         }
     }
 
-    /* AArch64: out-of-range external CALL26/JUMP26 need a veneer at the
-     * module tail (ldr x16, [pc, #8]; br x16; .quad S, 16 bytes each).
-     * Count them first so the shadow layout can reserve the area. */
+    /* AArch64 and RISC-V external calls may need a veneer at the module
+     * tail.  Reserve one for every external call relocation before the
+     * final load address is known; relocation only uses it when the direct
+     * displacement is out of range. */
     uint32_t *veneer_off = NULL;
     uint32_t nveneers = 0;
-    if (machine == EM_AARCH64 && nrela_text) {
+    uint32_t veneer_size = machine == EM_RISCV ? 24U : 16U;
+    uint32_t veneer_align = machine == EM_RISCV ? 8U : 16U;
+    if ((machine == EM_AARCH64 || machine == EM_RISCV) && nrela_text) {
         for (uint32_t i = 0; i < nrela_text; i++) {
             uint32_t type = ELF_R_TYPE(rela_text[i].r_info);
-            if (type != R_AARCH64_CALL26 && type != R_AARCH64_JUMP26)
+            int is_call = machine == EM_AARCH64
+                ? (type == R_AARCH64_CALL26 || type == R_AARCH64_JUMP26)
+                : (type == R_RISCV_CALL || type == R_RISCV_CALL_PLT);
+            if (!is_call)
                 continue;
             uint32_t symidx = ELF_R_SYM(rela_text[i].r_info);
             if (symidx >= nsyms)
@@ -1075,8 +1108,8 @@ int drvmod_load(int fd, const char *name)
             nveneers++;
         }
         if (nveneers) {
-            total_size = (total_size + 15) & ~15U;
-            if (total_size + nveneers * 16U > DRV_MOD_MAX_SIZE) {
+            total_size = (total_size + veneer_align - 1) & ~(veneer_align - 1);
+            if (total_size + nveneers * veneer_size > DRV_MOD_MAX_SIZE) {
                 drvmod_free_pages(buf_pfn, DRV_MOD_BUF_ORDER);
                 return -ENOEXEC;
             }
@@ -1089,15 +1122,18 @@ int drvmod_load(int fd, const char *name)
             uint32_t voff = total_size;
             for (uint32_t i = 0; i < nrela_text; i++) {
                 uint32_t type = ELF_R_TYPE(rela_text[i].r_info);
-                if (type != R_AARCH64_CALL26 && type != R_AARCH64_JUMP26)
+                int is_call = machine == EM_AARCH64
+                    ? (type == R_AARCH64_CALL26 || type == R_AARCH64_JUMP26)
+                    : (type == R_RISCV_CALL || type == R_RISCV_CALL_PLT);
+                if (!is_call)
                     continue;
                 uint32_t symidx = ELF_R_SYM(rela_text[i].r_info);
                 if (symidx >= nsyms || syms[symidx].st_shndx != 0)
                     continue;
                 veneer_off[i] = voff;
-                voff += 16;
+                voff += veneer_size;
             }
-            total_size += nveneers * 16U;
+            total_size += nveneers * veneer_size;
         }
     }
 
@@ -1177,12 +1213,21 @@ int drvmod_load(int fd, const char *name)
                                   pfn_to_phys(shadow_pfn));
     memset(shadow, 0, total_size);
     if (veneer_off) {
-        /* Pre-fill veneer code: ldr x16, [pc, #8]; br x16. */
         for (uint32_t i = 0; i < nrela_text; i++) {
             if (!veneer_off[i])
                 continue;
-            *(uint32_t *)(shadow + veneer_off[i]) = 0x58000050U;
-            *(uint32_t *)(shadow + veneer_off[i] + 4) = 0xD61F0200U;
+            if (machine == EM_AARCH64) {
+                /* ldr x16, [pc, #8]; br x16; .quad target */
+                *(uint32_t *)(shadow + veneer_off[i]) = 0x58000050U;
+                *(uint32_t *)(shadow + veneer_off[i] + 4) = 0xD61F0200U;
+            } else {
+                /* auipc t0, 0; ld t0, 16(t0); jalr zero, 0(t0); nop;
+                 * .quad target */
+                *(uint32_t *)(shadow + veneer_off[i]) = 0x00000297U;
+                *(uint32_t *)(shadow + veneer_off[i] + 4) = 0x0102B283U;
+                *(uint32_t *)(shadow + veneer_off[i] + 8) = 0x00028067U;
+                *(uint32_t *)(shadow + veneer_off[i] + 12) = 0x00000013U;
+            }
         }
     }
     for (uint32_t i = 0; i < nshdrs; i++) {

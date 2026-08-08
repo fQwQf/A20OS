@@ -195,7 +195,7 @@ FINAL_EVAL_TIMEOUT ?=
 define RUN_FINAL_EVAL
 	FINAL_EVAL_IMAGE_DIR="$(FINAL_EVAL_IMAGE_DIR)" \
 	FINAL_EVAL_STATE_DIR="$(FINAL_EVAL_STATE_DIR)" \
-	$(if $(strip $(5)),FINAL_EVAL_TIMEOUT="$(strip $(5))",$(if $(strip $(FINAL_EVAL_TIMEOUT)),FINAL_EVAL_TIMEOUT="$(FINAL_EVAL_TIMEOUT)")) \
+	$(if $(strip $(FINAL_EVAL_TIMEOUT)),FINAL_EVAL_TIMEOUT="$(FINAL_EVAL_TIMEOUT)",$(if $(strip $(5)),FINAL_EVAL_TIMEOUT="$(strip $(5))")) \
 	bash ./tools/run_final_eval.sh $(1) $(2) $(3) $(4)
 endef
 
@@ -258,6 +258,18 @@ final-stage7-rv-shebang:
 
 final-stage7-la-shebang:
 	$(call RUN_FINAL_EVAL,loongarch64,buildstorm-probe,1,stage7-shebang-exec,900)
+
+final-stage7-rv-rustc-j8:
+	$(call RUN_FINAL_EVAL,riscv64,buildstorm-probe,8,stage7-rustc-j8,3600)
+
+final-stage7-la-rustc-j8:
+	$(call RUN_FINAL_EVAL,loongarch64,buildstorm-probe,8,stage7-rustc-j8,3600)
+
+final-stage7-rv-rustc-llvm-j8:
+	$(call RUN_FINAL_EVAL,riscv64,buildstorm-probe,8,stage7-rustc-llvm-j8,3600)
+
+final-stage7-la-rustc-llvm-j8:
+	$(call RUN_FINAL_EVAL,loongarch64,buildstorm-probe,8,stage7-rustc-llvm-j8,3600)
 
 final-stage7-rv-1c-j1:
 	$(call RUN_FINAL_EVAL,riscv64,buildstorm-probe,1,stage7-full-j1,28800)

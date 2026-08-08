@@ -22,11 +22,6 @@
 #define VIRTIO_BLK_WAIT_TIMEOUT_TICKS (TICKS_PER_SEC * 10)
 #define VIRTIO_BLK_MAX_RETRIES        3
 #define VIRTIO_BLK_RESET_SPINS        1000000U
-/* Hybrid completion window: virtio completions under TCG usually land within
- * a few hundred microseconds.  Polling the used ring for that bounded window
- * avoids an IRQ round-trip and a full park/commit context switch; a longer
- * wait still parks the task so it never busy-spins indefinitely. */
-#define VIRTIO_BLK_HYBRID_PRE_POLL_US 800
 
 typedef struct {
     int                in_use;
@@ -56,17 +51,26 @@ typedef struct {
     spinlock_t         lock;
     int                slot;
     int                in_flight;
-    int                irq_registered;
 } virtio_blk_inst_t;
 
 static virtio_blk_inst_t g_insts[VIRTIO_MAX_DEVS];
 static int g_ninst = 0;
 
-static int virtio_blk_irq_handler(int irq, void *priv);
-
 static int virtio_blk_init_instance(virtio_blk_inst_t *inst) {
     virtio_transport_t *vt = &inst->vt;
     int idx = inst->slot;
+
+    /*
+     * The IRQ-driven completion path introduced after the stage-7 baseline
+     * can lose queue ownership under sustained parallel block I/O.  QEMU then
+     * reports "Virtqueue size exceeded", the request times out, and executable
+     * mappings are populated with invalid data.  Keep virtio-blk on the
+     * previously verified polling completion model until IRQ queue ownership
+     * has an independent stress proof.  Other virtio devices may still use
+     * the transport's routed IRQ.
+     */
+    vt->irq = -1;
+    vt->shared_irq = 0;
 
     inst->blk.valid = 0;
     spin_init(&inst->lock);
@@ -181,22 +185,6 @@ static int virtio_blk_init_instance(virtio_blk_inst_t *inst) {
     inst->blk_dev.priv        = inst;
     inst->blk_dev.read_sector = NULL;
     inst->blk_dev.write_sector = NULL;
-
-    if (vt->irq >= 0) {
-        unsigned long irq_flags = vt->shared_irq ? IRQF_SHARED : 0;
-        if (request_irq((uint32_t)vt->irq, virtio_blk_irq_handler,
-                        irq_flags, inst) == 0) {
-            inst->irq_registered = 1;
-        } else {
-            /* A failed registration (e.g. a shared-line conflict) must not
-             * leave the instance looking IRQ-driven: the wait path would
-             * park on a completion interrupt that never arrives.  Force the
-             * poll-only model instead. */
-            printf("[VIRTIO%d] Failed to register IRQ %d; using polling\n",
-                   idx, vt->irq);
-            vt->irq = -1;
-        }
-    }
 
     return 0;
 }
@@ -401,8 +389,6 @@ static int virtio_blk_wait_req(virtio_blk_inst_t *inst, virtio_blk_req_t *req,
                                uint64_t lba) {
     task_t *cur = proc_current();
     uint64_t deadline = timer_get_ticks() + VIRTIO_BLK_WAIT_TIMEOUT_TICKS;
-    uint64_t pre_poll_until =
-        timer_get_ticks() + US_TO_TICKS(VIRTIO_BLK_HYBRID_PRE_POLL_US);
 
     for (;;) {
         proc_wake_q_t wake_q;
@@ -449,21 +435,6 @@ static int virtio_blk_wait_req(virtio_blk_inst_t *inst, virtio_blk_req_t *req,
          * scheduler pass to notice the completion.
          */
         if (inst->vt.irq < 0) {
-            spin_unlock_irqrestore(&inst->lock, flags);
-            (void)proc_wake_q_flush(&wake_q);
-            virtio_blk_poll_inst(inst);
-            cpu_relax();
-            continue;
-        }
-
-        /*
-         * Hybrid completion: spend a bounded window polling the used ring
-         * before parking.  A device whose completion latency fits inside the
-         * window is acknowledged here, skipping the IRQ round-trip and the
-         * park/commit context switch entirely.  Once the window expires the
-         * task parks and relies on the IRQ completion path below.
-         */
-        if (cur && timer_get_ticks() < pre_poll_until) {
             spin_unlock_irqrestore(&inst->lock, flags);
             (void)proc_wake_q_flush(&wake_q);
             virtio_blk_poll_inst(inst);
@@ -608,35 +579,6 @@ int virtio_blk_ready(int idx) {
     return g_insts[idx].blk.valid;
 }
 
-/*
- * VIRTIO_BLK_IRQ_MODEL:
- * - The device raises an IRQ when a request completes.
- * - The handler runs under inst->lock, drains the used ring, records
- *   req->done/result, and flushes detached waiters after dropping inst->lock.
- * - This is the same completion path used by the old polling routine, now
- *   driven by the device IRQ instead of scheduler hot-path polling.
- */
-static int virtio_blk_irq_handler(int irq, void *priv) {
-    (void)irq;
-    virtio_blk_inst_t *inst = (virtio_blk_inst_t *)priv;
-    if (!inst || !inst->blk.valid)
-        return 0;
-
-    /* Acknowledge the device interrupt.  For legacy MMIO a read of the ISR
-     * register is sufficient; for modern MMIO and PCI we also write the ack. */
-    uint32_t isr = inst->vt.read32(&inst->vt, VIRTIO_MMIO_INTERRUPT_STATUS);
-    if (!inst->blk.legacy)
-        inst->vt.write32(&inst->vt, VIRTIO_MMIO_INTERRUPT_ACK, isr);
-
-    proc_wake_q_t wake_q;
-    proc_wake_q_init(&wake_q);
-    uint64_t flags = spin_lock_irqsave(&inst->lock);
-    virtio_blk_complete_used_locked(inst, &wake_q);
-    spin_unlock_irqrestore(&inst->lock, flags);
-    (void)proc_wake_q_flush(&wake_q);
-    return 0;
-}
-
 static uint32_t virtio_blk_mmio_read32(virtio_transport_t *t, uint32_t off) {
     return readl((const volatile void *)((uintptr_t)t->priv + off));
 }
@@ -695,31 +637,11 @@ static int virtio_blk_driver_probe(device_t *dev) {
         return ret;
     }
 
-    resource_t *irq_res = device_get_resource(dev, RES_IRQ, 0);
-    if (inst->irq_registered) {
-        /* IRQ-driven completion was set up by init_instance. */
-    } else if (dev->bus == &pci_bus) {
-        /* PCI transports resolve their vector through arch_pci_intx_irq()
-         * during transport init; if that left irq < 0 (or registration
-         * failed) the completion path stays in polling mode.  The legacy
-         * IRQ Line register resource is NOT a usable vector and must not
-         * be registered here. */
-        kinfo("[VIRTIO-BLK] PCI transport using completion polling\n");
-    } else if (irq_res) {
-        if (request_irq((uint32_t)irq_res->start, virtio_blk_irq_handler, 0, inst) == 0) {
-            inst->vt.irq = (int)irq_res->start;
-            inst->irq_registered = 1;
-        } else
-            kinfo("[VIRTIO-BLK] Failed to register IRQ %lu for '%s'\n",
-                  (unsigned long)irq_res->start, dev->name);
-    } else {
-        kinfo("[VIRTIO-BLK] No IRQ resource for device '%s'\n", dev->name);
-    }
+    kinfo("[VIRTIO-BLK] %s using completion polling\n", dev->name);
 
     g_ninst++;
     kinfo("[VIRTIO-BLK] Probed device '%s' (legacy=%d irq=%d)\n",
-          dev->name, inst->vt.legacy,
-          inst->irq_registered ? inst->vt.irq : -1);
+          dev->name, inst->vt.legacy, inst->vt.irq);
     return 0;
 }
 
@@ -769,9 +691,6 @@ static int virtio_blk_driver_remove(device_t *dev) {
     virtio_blk_inst_t *inst = dev ? dev->drv_priv : NULL;
     if (!inst)
         return 0;
-    if (inst->irq_registered && inst->vt.irq >= 0)
-        free_irq((uint32_t)inst->vt.irq, inst);
-    inst->irq_registered = 0;
     inst->blk.valid = 0;
     inst->vt.write32(&inst->vt, VIRTIO_MMIO_STATUS, 0);
     mb();

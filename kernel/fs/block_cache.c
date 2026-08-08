@@ -6,6 +6,35 @@
 static bcache_t *g_bcache_list[8];
 static int g_bcache_count;
 
+/*
+ * Cache entry references are acquired while bc->lock is held, but released
+ * after the caller has finished copying data and therefore outside that
+ * lock.  Both sides must still use atomic operations: a plain ref++ racing
+ * with the final atomic decrement can lose the decrement and permanently pin
+ * the entry.  A sustained parallel workload would eventually pin the whole
+ * page pool and surface the resulting allocation failure as ext4 -EIO.
+ */
+static inline int cache_ref_read(const int *ref)
+{
+    return __atomic_load_n(ref, __ATOMIC_ACQUIRE);
+}
+
+static inline void cache_ref_get(int *ref)
+{
+    __atomic_fetch_add(ref, 1, __ATOMIC_ACQUIRE);
+}
+
+static inline void cache_ref_put(int *ref)
+{
+    int current = __atomic_load_n(ref, __ATOMIC_ACQUIRE);
+    while (current > 0) {
+        if (__atomic_compare_exchange_n(ref, &current, current - 1, 0,
+                                        __ATOMIC_RELEASE,
+                                        __ATOMIC_ACQUIRE))
+            return;
+    }
+}
+
 // 从 LRU 链表中移除一个条目
 static void lru_remove(bcache_entry_t *e) {
     e->prev->next = e->next;
@@ -229,7 +258,7 @@ static bcache_entry_t *bcache_find(bcache_t *bc, uint64_t lba) {
 static bcache_entry_t *bcache_evict(bcache_t *bc) {
     bcache_entry_t *e = bc->lru_tail.prev;  // 从最久未使用的开始
     while (e != &bc->lru_head) {
-        if (e->ref == 0) {  // 只能驱逐引用计数为 0 的块
+        if (cache_ref_read(&e->ref) == 0) {  // 只能驱逐引用计数为 0 的块
             lru_remove(e);
             if (e->valid)
                 bcache_hash_remove(bc, e);
@@ -247,7 +276,7 @@ bcache_entry_t *bcache_get(bcache_t *bc, uint64_t lba) {
     bcache_entry_t *e = bcache_find(bc, lba);
     if (e) {
         // 命中缓存，增加引用计数并移到 LRU 头部
-        e->ref++;
+        cache_ref_get(&e->ref);
         lru_remove(e);
         lru_insert_front(bc, e);
         spin_unlock_irqrestore(&bc->lock, flags);
@@ -308,7 +337,7 @@ bcache_entry_t *bcache_get(bcache_t *bc, uint64_t lba) {
         e->ref = 0;
         e->lba = (uint64_t)-1;
         lru_insert_front(bc, e);
-        dup->ref++;
+        cache_ref_get(&dup->ref);
         lru_remove(dup);
         lru_insert_front(bc, dup);
         spin_unlock_irqrestore(&bc->lock, flags);
@@ -328,8 +357,7 @@ bcache_entry_t *bcache_get(bcache_t *bc, uint64_t lba) {
 // 释放块引用（减少引用计数）
 void bcache_release(bcache_entry_t *e) {
     if (!e) return;
-    if (__atomic_load_n(&e->ref, __ATOMIC_RELAXED) > 0)
-        __atomic_fetch_sub(&e->ref, 1, __ATOMIC_RELEASE);
+    cache_ref_put(&e->ref);
 }
 
 // 标记块为脏（数据已修改，需要写回磁盘）
@@ -437,7 +465,7 @@ static int pcache_flush_page(bcache_t *bc, pcache_entry_t *e) {
 static pcache_entry_t *pcache_evict_locked(bcache_t *bc) {
     pcache_entry_t *e = bc->page_lru_tail.prev;
     while (e != &bc->page_lru_head) {
-        if (e->ref == 0) {
+        if (cache_ref_read(&e->ref) == 0) {
             page_lru_remove(e);
             if (e->valid)
                 pcache_hash_remove(bc, e);
@@ -453,7 +481,7 @@ static pcache_entry_t *pcache_get(bcache_t *bc, uint64_t page_no, int skip_read)
     uint64_t flags = spin_lock_irqsave(&bc->lock);
     pcache_entry_t *e = pcache_find(bc, page_no);
     if (e) {
-        e->ref++;
+        cache_ref_get(&e->ref);
         page_lru_remove(e);
         page_lru_insert_front(bc, e);
         spin_unlock_irqrestore(&bc->lock, flags);
@@ -462,7 +490,31 @@ static pcache_entry_t *pcache_get(bcache_t *bc, uint64_t page_no, int skip_read)
 
     e = pcache_evict_locked(bc);
     if (!e) {
+        size_t valid = 0;
+        size_t dirty = 0;
+        size_t referenced = 0;
+        uint64_t total_refs = 0;
+        int max_refs = 0;
+        for (int i = 0; i < bc->page_pool_size; i++) {
+            pcache_entry_t *page = &bc->page_pool[i];
+            int refs = cache_ref_read(&page->ref);
+            if (page->valid)
+                valid++;
+            if (page->valid && page->dirty)
+                dirty++;
+            if (refs > 0) {
+                referenced++;
+                total_refs += (uint64_t)refs;
+                if (refs > max_refs)
+                    max_refs = refs;
+            }
+        }
         spin_unlock_irqrestore(&bc->lock, flags);
+        printf("[BCACHE] no evictable page page=%lu valid=%lu dirty=%lu "
+               "referenced=%lu total_refs=%lu max_refs=%d\n",
+               (unsigned long)page_no, (unsigned long)valid,
+               (unsigned long)dirty, (unsigned long)referenced,
+               (unsigned long)total_refs, max_refs);
         return NULL;
     }
 
@@ -514,7 +566,7 @@ static pcache_entry_t *pcache_get(bcache_t *bc, uint64_t page_no, int skip_read)
         e->page_no = (uint64_t)-1;
         e->valid = 0;
         page_lru_insert_front(bc, e);
-        dup->ref++;
+        cache_ref_get(&dup->ref);
         page_lru_remove(dup);
         page_lru_insert_front(bc, dup);
         spin_unlock_irqrestore(&bc->lock, flags);
@@ -533,133 +585,7 @@ static pcache_entry_t *pcache_get(bcache_t *bc, uint64_t page_no, int skip_read)
 
 static void pcache_release(pcache_entry_t *e) {
     if (!e) return;
-    if (__atomic_load_n(&e->ref, __ATOMIC_RELAXED) > 0)
-        __atomic_fetch_sub(&e->ref, 1, __ATOMIC_RELEASE);
-}
-
-/* Max pages filled by one multi-sector device read.  A run longer than this
- * is processed in chunks; each chunk is one virtio request instead of N. */
-#define PCACHE_BATCH_MAX_PAGES 8
-
-/*
- * Fill a contiguous run of cold pages [p0, p0+npages) with a single
- * multi-sector device read.  Returns 0 when all pages are present in the
- * cache afterwards (entries valid, ref 0); returns -1 to let the caller fall
- * back to per-page reads.  Mirrors pcache_get()'s eviction, writeback and
- * duplicate-race handling, but batches the device I/O.
- */
-static int pcache_fill_batch(bcache_t *bc, uint64_t p0, int npages,
-                             char *tmp)
-{
-    if (!bc || npages < 2 || npages > PCACHE_BATCH_MAX_PAGES || !bc->dev ||
-        !tmp)
-        return -1;
-
-    uint64_t flags = spin_lock_irqsave(&bc->lock);
-    /* Only batch a fully cold run; partially-cached reads use the per-page
-     * path which hits the resident pages and fills the rest. */
-    for (int i = 0; i < npages; i++) {
-        if (pcache_find(bc, p0 + i)) {
-            spin_unlock_irqrestore(&bc->lock, flags);
-            return -1;
-        }
-    }
-
-    pcache_entry_t *e[PCACHE_BATCH_MAX_PAGES];
-    uint64_t old_page[PCACHE_BATCH_MAX_PAGES];
-    int old_valid[PCACHE_BATCH_MAX_PAGES];
-    int old_dirty[PCACHE_BATCH_MAX_PAGES];
-    for (int i = 0; i < npages; i++) {
-        e[i] = pcache_evict_locked(bc);
-        if (!e[i]) {
-            for (int j = 0; j < i; j++) {
-                e[j]->ref = 0;
-                e[j]->valid = old_valid[j];
-                if (old_valid[j]) {
-                    pcache_hash_insert(bc, e[j]);
-                } else {
-                    e[j]->page_no = (uint64_t)-1;
-                }
-                page_lru_insert_front(bc, e[j]);
-            }
-            spin_unlock_irqrestore(&bc->lock, flags);
-            return -1;
-        }
-        old_valid[i] = e[i]->valid;
-        old_page[i] = e[i]->page_no;
-        old_dirty[i] = e[i]->dirty && e[i]->valid;
-        e[i]->valid = 0;
-    }
-    spin_unlock_irqrestore(&bc->lock, flags);
-
-    /* Write back displaced dirty pages.  On failure restore every displaced
-     * entry to its pre-eviction state so no dirty data is lost, and let the
-     * caller fall back to per-page I/O. */
-    for (int i = 0; i < npages; i++) {
-        if (old_dirty[i]) {
-            uint64_t old_lba =
-                (old_page[i] * PCACHE_PAGE_SIZE) / BCACHE_BLOCK_SIZE;
-            if (bc->dev->write_sector(bc->dev, old_lba, e[i]->data,
-                                      PCACHE_PAGE_SIZE / BCACHE_BLOCK_SIZE) < 0) {
-                flags = spin_lock_irqsave(&bc->lock);
-                for (int j = 0; j < npages; j++) {
-                    e[j]->ref = 0;
-                    e[j]->valid = old_valid[j];
-                    if (old_valid[j]) {
-                        e[j]->page_no = old_page[j];
-                        pcache_hash_insert(bc, e[j]);
-                    } else {
-                        e[j]->page_no = (uint64_t)-1;
-                    }
-                    page_lru_insert_front(bc, e[j]);
-                }
-                spin_unlock_irqrestore(&bc->lock, flags);
-                return -1;
-            }
-        }
-    }
-
-    uint64_t lba0 = (p0 * PCACHE_PAGE_SIZE) / BCACHE_BLOCK_SIZE;
-    if (bc->dev->read_sector(bc->dev, lba0, tmp,
-                             (size_t)npages * PCACHE_PAGE_SIZE /
-                                 BCACHE_BLOCK_SIZE) < 0) {
-        flags = spin_lock_irqsave(&bc->lock);
-        for (int i = 0; i < npages; i++) {
-            bcache_set_page_dirty_locked(bc, e[i], 0);
-            e[i]->ref = 0;
-            e[i]->valid = 0;
-            e[i]->page_no = (uint64_t)-1;
-            page_lru_insert_front(bc, e[i]);
-        }
-        spin_unlock_irqrestore(&bc->lock, flags);
-        return -1;
-    }
-    for (int i = 0; i < npages; i++)
-        memcpy(e[i]->data, tmp + (size_t)i * PCACHE_PAGE_SIZE,
-               PCACHE_PAGE_SIZE);
-
-    flags = spin_lock_irqsave(&bc->lock);
-    for (int i = 0; i < npages; i++) {
-        pcache_entry_t *dup = pcache_find(bc, p0 + i);
-        bcache_set_page_dirty_locked(bc, e[i], 0);
-        e[i]->dirty_gen = 0;
-        if (dup) {
-            e[i]->ref = 0;
-            e[i]->valid = 0;
-            e[i]->page_no = (uint64_t)-1;
-            page_lru_insert_front(bc, e[i]);
-        } else {
-            e[i]->page_no = p0 + i;
-            e[i]->valid = 1;
-            e[i]->dirty = 0;
-            e[i]->dirty_gen = 0;
-            e[i]->ref = 0;
-            pcache_hash_insert(bc, e[i]);
-            page_lru_insert_front(bc, e[i]);
-        }
-    }
-    spin_unlock_irqrestore(&bc->lock, flags);
-    return 0;
+    cache_ref_put(&e->ref);
 }
 
 // 读取字节数据（可能跨多个块）
@@ -672,26 +598,6 @@ int bcache_read_bytes(bcache_t *bc, uint64_t byte_off, void *buf, size_t len) {
     uint64_t first_page = byte_off / PCACHE_PAGE_SIZE;
     uint64_t last_page  = (byte_off + len - 1) / PCACHE_PAGE_SIZE;
     int sequential = (last_page - first_page + 1) >= 2;
-
-    /* Batch a cold, contiguous multi-page read into one device request per
-     * PCACHE_BATCH_MAX_PAGES chunk, so a sequential read of N pages issues
-     * ceil(N/8) virtio I/Os instead of N.  The scratch buffer is allocated
-     * once per call and reused across chunks.  If a chunk is not fully cold
-     * the per-page loop below fills the rest. */
-    if (sequential && bc->dev) {
-        char *tmp = (char *)kmalloc(PCACHE_BATCH_MAX_PAGES * PCACHE_PAGE_SIZE);
-        uint64_t p = first_page;
-        while (p <= last_page) {
-            int n = (int)(last_page - p + 1);
-            if (n > PCACHE_BATCH_MAX_PAGES)
-                n = PCACHE_BATCH_MAX_PAGES;
-            if (pcache_fill_batch(bc, p, n, tmp) != 0)
-                break;
-            p += n;
-        }
-        if (tmp)
-            kfree(tmp);
-    }
 
     while (len > 0) {
         uint64_t page_no = byte_off / PCACHE_PAGE_SIZE;
