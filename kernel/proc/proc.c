@@ -553,6 +553,11 @@ int proc_alloc_user_image(uintptr_t entry, vaddr_t sp, pt_root_t *pgdir,
     return t->pid;
 }
 
+void proc_publish_deferred_task(task_t *task)
+{
+    proc_make_ready(task);
+}
+
 int proc_alloc_user(uintptr_t entry, vaddr_t sp, pt_root_t *pgdir) {
     return proc_alloc_user_image(entry, sp, pgdir, NULL, 0, sp, 0, 0
 #ifdef CONFIG_NOMMU
