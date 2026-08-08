@@ -6,8 +6,8 @@
  * framework export table ONLY (symbol whitelist).  Supported machines and
  * the relocation sets emitted by their DRVMOD_CFLAGS (see Makefile):
  *
- *   riscv64     R_RISCV_*      (medany, -fno-pic; external calls use
- *                               loader veneers when outside +/-2 GiB)
+ *   riscv64     R_RISCV_*      (PIC medany; external calls use loader
+ *                               veneers and external data uses a local GOT)
  *   x86_64      R_X86_64_*     (large model: ABS64 for externals, no
  *                               PC32/PLT32 range limit)
  *   aarch64     R_AARCH64_*    (BL range is ±128 MiB; kernel text and the
@@ -94,6 +94,8 @@ typedef struct {
 #define SHT_SYMTAB 2
 #define SHT_NOBITS 8
 #define SHT_RELA   4
+#define SHF_ALLOC     0x2
+#define SHF_EXECINSTR 0x4
 
 /* ---- relocation type numbers ---- */
 
@@ -108,6 +110,7 @@ typedef struct {
 #define R_RISCV_JAL           17
 #define R_RISCV_CALL          18
 #define R_RISCV_CALL_PLT      19
+#define R_RISCV_GOT_HI20      20
 #define R_RISCV_PCREL_HI20    23
 #define R_RISCV_PCREL_LO12_I  24
 #define R_RISCV_PCREL_LO12_S  25
@@ -313,12 +316,13 @@ static void drvmod_prescan_pcrel(elf_rela_t *rela, uint32_t nrela,
                                   uintptr_t load_base,
                                   drvmod_secmap_t *map, uint32_t nmap,
                                   uint32_t sec_load_off, uint32_t sec_size,
-                                  uintptr_t *hi_targets, uint32_t ntargets)
+                                  uintptr_t *hi_targets, uint32_t ntargets,
+                                  const uint32_t *got_off)
 {
     for (uint32_t i = 0; i < nrela; i++) {
         elf_rela_t *r = &rela[i];
         uint32_t type = ELF_R_TYPE(r->r_info);
-        if (type != R_RISCV_PCREL_HI20)
+        if (type != R_RISCV_PCREL_HI20 && type != R_RISCV_GOT_HI20)
             continue;
         if (!drvmod_range_ok32((uint32_t)r->r_offset, 4, sec_size))
             continue;
@@ -329,9 +333,16 @@ static void drvmod_prescan_pcrel(elf_rela_t *rela, uint32_t nrela,
         if (drvmod_sym_addr(&syms[symidx], strtab, strtab_size, map, nmap,
                             load_base, &S) < 0)
             continue;
+        if (type == R_RISCV_GOT_HI20) {
+            if (!got_off || !got_off[i])
+                continue;
+            S = load_base + got_off[i];
+        } else {
+            S += r->r_addend;
+        }
         uint32_t load_off = sec_load_off + (uint32_t)r->r_offset;
-        if (load_off < ntargets * 8)
-            hi_targets[load_off / 8] = S;
+        if (load_off < ntargets * 4)
+            hi_targets[load_off / 4] = S;
     }
 }
 
@@ -472,21 +483,59 @@ static uint32_t drvmod_apply_reloc(uint32_t machine, uint8_t *shadow,
             }
             case R_RISCV_PCREL_HI20: {
                 uint32_t insn = *(uint32_t *)(shadow + sec_load_off + r->r_offset);
-                int32_t addend = (int32_t)((insn >> 12) & 0xFFFFF);
-                int32_t off = (int32_t)(S - P + addend);
-                uint32_t hi = (uint32_t)((off + 0x800) >> 12) & 0xFFFFF;
+                int64_t off = (int64_t)(S + r->r_addend - P);
+                if (off < -0x80000000LL || off > 0x7fffffffLL) {
+                    printf("[DRVMOD] riscv64 PCREL_HI20 out of range (0x%lx)\n",
+                           (unsigned long)off);
+                    return 0xFFFFFFFFU;
+                }
+                uint32_t hi = (uint32_t)((off + 0x800LL) >> 12) & 0xFFFFF;
+                *(uint32_t *)(shadow + sec_load_off + r->r_offset) =
+                    (insn & 0xFFF) | (hi << 12);
+                break;
+            }
+            case R_RISCV_GOT_HI20: {
+                if (r->r_addend != 0) {
+                    printf("[DRVMOD] riscv64 GOT_HI20 nonzero addend\n");
+                    return 0xFFFFFFFFU;
+                }
+                if (!got_off || !got_off[i]) {
+                    printf("[DRVMOD] riscv64 GOT without slot (0x%lx)\n",
+                           (unsigned long)r->r_offset);
+                    return 0xFFFFFFFFU;
+                }
+                uintptr_t got = load_base + got_off[i];
+                *(uint64_t *)(shadow + got_off[i]) = S;
+                int64_t off = (int64_t)(got - P);
+                if (off < -0x80000000LL || off > 0x7fffffffLL) {
+                    printf("[DRVMOD] riscv64 GOT out of range (0x%lx)\n",
+                           (unsigned long)off);
+                    return 0xFFFFFFFFU;
+                }
+                uint32_t insn = *(uint32_t *)(shadow + sec_load_off +
+                                              r->r_offset);
+                uint32_t hi = (uint32_t)((off + 0x800LL) >> 12) & 0xFFFFF;
                 *(uint32_t *)(shadow + sec_load_off + r->r_offset) =
                     (insn & 0xFFF) | (hi << 12);
                 break;
             }
             case R_RISCV_PCREL_LO12_I:
             case R_RISCV_PCREL_LO12_S: {
+                if (r->r_addend != 0) {
+                    printf("[DRVMOD] riscv64 PCREL_LO12 nonzero addend\n");
+                    return 0xFFFFFFFFU;
+                }
                 /* The target is recorded by the prescan for the HI20
                  * instruction this LO12 references (symbol st_value). */
                 uintptr_t hi_off = (uintptr_t)S - load_base;
                 uintptr_t target = 0;
-                if (hi_targets && (hi_off / 8) < ntargets)
-                    target = hi_targets[hi_off / 8];
+                if (hi_targets && (hi_off / 4) < ntargets)
+                    target = hi_targets[hi_off / 4];
+                if (!target) {
+                    printf("[DRVMOD] riscv64 PCREL_LO12 without HI20 (0x%lx)\n",
+                           (unsigned long)r->r_offset);
+                    return 0xFFFFFFFFU;
+                }
                 uintptr_t p_hi = load_base + hi_off;
                 int32_t off = (int32_t)(target - p_hi);
                 if (type == R_RISCV_PCREL_LO12_I) {
@@ -983,7 +1032,6 @@ int drvmod_load(int fd, const char *name)
     uint32_t nrela_sets = 0;
     elf_rela_t *rela_text = NULL;
     uint32_t nrela_text = 0;
-    uint32_t rela_text_sec = 0;
     uint32_t rela_text_off = 0, rela_text_size = 0;
     drvmod_secmap_t secmap[DRV_MOD_MAX_PLACED];
     uint32_t nmap = 0;
@@ -1009,10 +1057,12 @@ int drvmod_load(int fd, const char *name)
             secmap[nmap].size = (uint32_t)sh->sh_size;
             nmap++;
             total_size = text_size;
-        } else if (strcmp(n, ".data") == 0 || strcmp(n, ".rodata") == 0 ||
-                   strcmp(n, ".sdata") == 0 || strcmp(n, ".bss") == 0 ||
-                   strcmp(n, ".sbss") == 0 || strcmp(n, ".ldata") == 0 ||
-                   strcmp(n, ".lbss") == 0) {
+        } else if ((sh->sh_flags & SHF_ALLOC) &&
+                   !(sh->sh_flags & SHF_EXECINSTR) &&
+                   (sh->sh_type == SHT_PROGBITS ||
+                    sh->sh_type == SHT_NOBITS) &&
+                   strcmp(n, ".a20drv") != 0 &&
+                   strcmp(n, ".eh_frame") != 0) {
             if (nmap >= DRV_MOD_MAX_PLACED) {
                 kerr("[DRVMOD] %s: too many loadable sections\n", name);
                 drvmod_free_pages(buf_pfn, DRV_MOD_BUF_ORDER);
@@ -1075,9 +1125,14 @@ int drvmod_load(int fd, const char *name)
             continue;
         const char *tn = shstr + shdrs[tidx].sh_name;
         if (strcmp(tn, ".text") == 0) {
+            if (rela_text) {
+                kerr("[DRVMOD] %s: multiple .text relocation sections\n",
+                     name);
+                drvmod_free_pages(buf_pfn, DRV_MOD_BUF_ORDER);
+                return -ENOEXEC;
+            }
             rela_text = rela_sets[i].rela;
             nrela_text = rela_sets[i].nrela;
-            rela_text_sec = tidx;
             if (drvmod_sec_lookup(secmap, nmap, tidx, &rela_text_off,
                                   &rela_text_size) < 0)
                 rela_text_off = rela_text_size = 0;
@@ -1137,30 +1192,36 @@ int drvmod_load(int fd, const char *name)
         }
     }
 
-    /* LoongArch64: %got_pc_hi20/%got_pc_lo12 pairs (extern data, e.g.
-     * klog_level) load the symbol address through a module-local GOT.
-     * Allocate one 8-byte slot per pair at the module tail. */
+    /* RISC-V and LoongArch64 external data references load the symbol address
+     * through a module-local GOT. Allocate one 8-byte slot per HI relocation
+     * at the module tail. */
     uint32_t *got_off = NULL;
-    if (machine == EM_LOONGARCH && nrela_text) {
+    if ((machine == EM_RISCV || machine == EM_LOONGARCH) && nrela_text) {
         uint32_t ngot = 0;
+        uint32_t got_hi_type = machine == EM_RISCV
+            ? R_RISCV_GOT_HI20 : R_LARCH_GOT_PC_HI20;
         for (uint32_t i = 0; i < nrela_text; i++)
-            if (ELF_R_TYPE(rela_text[i].r_info) == R_LARCH_GOT_PC_HI20)
+            if (ELF_R_TYPE(rela_text[i].r_info) == got_hi_type)
                 ngot++;
         if (ngot) {
             total_size = (total_size + 7) & ~7U;
             if (total_size + ngot * 8U > DRV_MOD_MAX_SIZE) {
+                if (veneer_off)
+                    kfree(veneer_off);
                 drvmod_free_pages(buf_pfn, DRV_MOD_BUF_ORDER);
                 return -ENOEXEC;
             }
             got_off = kmalloc(nrela_text * sizeof(uint32_t));
             if (!got_off) {
+                if (veneer_off)
+                    kfree(veneer_off);
                 drvmod_free_pages(buf_pfn, DRV_MOD_BUF_ORDER);
                 return -ENOMEM;
             }
             memset(got_off, 0, nrela_text * sizeof(uint32_t));
             uint32_t goff = total_size;
             for (uint32_t i = 0; i < nrela_text; i++) {
-                if (ELF_R_TYPE(rela_text[i].r_info) == R_LARCH_GOT_PC_HI20) {
+                if (ELF_R_TYPE(rela_text[i].r_info) == got_hi_type) {
                     got_off[i] = goff;
                     goff += 8;
                 }
@@ -1169,14 +1230,16 @@ int drvmod_load(int fd, const char *name)
              * before it (the pcalau12i + ld.d sequence).  Look the HI20
              * up by relocation offset: the list order is not guaranteed
              * to match address order. */
-            for (uint32_t i = 0; i < nrela_text; i++) {
-                if (ELF_R_TYPE(rela_text[i].r_info) != R_LARCH_GOT_PC_LO12)
-                    continue;
-                for (uint32_t j = 0; j < nrela_text; j++) {
-                    if (ELF_R_TYPE(rela_text[j].r_info) == R_LARCH_GOT_PC_HI20 &&
-                        rela_text[j].r_offset == rela_text[i].r_offset - 4) {
-                        got_off[i] = got_off[j];
-                        break;
+            if (machine == EM_LOONGARCH) {
+                for (uint32_t i = 0; i < nrela_text; i++) {
+                    if (ELF_R_TYPE(rela_text[i].r_info) != R_LARCH_GOT_PC_LO12)
+                        continue;
+                    for (uint32_t j = 0; j < nrela_text; j++) {
+                        if (ELF_R_TYPE(rela_text[j].r_info) == R_LARCH_GOT_PC_HI20 &&
+                            rela_text[j].r_offset == rela_text[i].r_offset - 4) {
+                            got_off[i] = got_off[j];
+                            break;
+                        }
                     }
                 }
             }
@@ -1188,6 +1251,8 @@ int drvmod_load(int fd, const char *name)
         kerr("[DRVMOD] %s: bad total_size %u\n", name, total_size);
         if (veneer_off)
             kfree(veneer_off);
+        if (got_off)
+            kfree(got_off);
         drvmod_free_pages(buf_pfn, DRV_MOD_BUF_ORDER);
         return -ENOEXEC;
     }
@@ -1206,6 +1271,8 @@ int drvmod_load(int fd, const char *name)
                total_size);
         if (veneer_off)
             kfree(veneer_off);
+        if (got_off)
+            kfree(got_off);
         drvmod_free_pages(buf_pfn, DRV_MOD_BUF_ORDER);
         return -ENOMEM;
     }
@@ -1232,15 +1299,15 @@ int drvmod_load(int fd, const char *name)
     }
     for (uint32_t i = 0; i < nshdrs; i++) {
         elf_shdr_t *sh = &shdrs[i];
-        const char *n = shstr + sh->sh_name;
-        if (sh->sh_type == SHT_PROGBITS &&
-            (strcmp(n, ".text") == 0 || strcmp(n, ".data") == 0 ||
-             strcmp(n, ".rodata") == 0 || strcmp(n, ".sdata") == 0 ||
-             strcmp(n, ".ldata") == 0)) {
+        if (sh->sh_type == SHT_PROGBITS) {
             uint32_t off, sec_size;
             if (drvmod_sec_lookup(secmap, nmap, i, &off, &sec_size) < 0)
                 continue;
             if (!drvmod_range_ok32(off, sec_size, total_size)) {
+                if (veneer_off)
+                    kfree(veneer_off);
+                if (got_off)
+                    kfree(got_off);
                 drvmod_free_pages(shadow_pfn, alloc_order);
                 drvmod_free_pages(buf_pfn, DRV_MOD_BUF_ORDER);
                 return -ENOEXEC;
@@ -1254,6 +1321,10 @@ int drvmod_load(int fd, const char *name)
      * PC-relative displacements are relative to the runtime PC. */
     pfn_t alloc_pfn = pfa_alloc((int)alloc_order);
     if (alloc_pfn == PFN_NONE) {
+        if (veneer_off)
+            kfree(veneer_off);
+        if (got_off)
+            kfree(got_off);
         drvmod_free_pages(shadow_pfn, alloc_order);
         drvmod_free_pages(buf_pfn, DRV_MOD_BUF_ORDER);
         return -ENOMEM;
@@ -1265,9 +1336,13 @@ int drvmod_load(int fd, const char *name)
     uint32_t nslots = 0;
     uintptr_t *hi_targets = NULL;
     if (machine == EM_RISCV) {
-        nslots = total_size / 8 + 1;
+        nslots = total_size / 4 + 1;
         hi_targets = kmalloc(nslots * sizeof(uintptr_t));
         if (!hi_targets) {
+            if (veneer_off)
+                kfree(veneer_off);
+            if (got_off)
+                kfree(got_off);
             drvmod_free_pages(alloc_pfn, alloc_order);
             drvmod_free_pages(shadow_pfn, alloc_order);
             drvmod_free_pages(buf_pfn, DRV_MOD_BUF_ORDER);
@@ -1282,7 +1357,8 @@ int drvmod_load(int fd, const char *name)
             drvmod_prescan_pcrel(rela_sets[i].rela, rela_sets[i].nrela,
                                  syms, nsyms, strtab, strtab_size,
                                  load_base, secmap, nmap, off, size,
-                                 hi_targets, nslots);
+                                 hi_targets, nslots,
+                                 rela_sets[i].rela == rela_text ? got_off : NULL);
         }
     }
 
@@ -1296,7 +1372,9 @@ int drvmod_load(int fd, const char *name)
                                strtab, strtab_size, syms, nsyms,
                                rela_sets[i].rela, rela_sets[i].nrela,
                                off, size, hi_targets, nslots,
-                               veneer_off, got_off) == 0xFFFFFFFFU) {
+                               rela_sets[i].rela == rela_text ? veneer_off : NULL,
+                               rela_sets[i].rela == rela_text ? got_off : NULL) ==
+            0xFFFFFFFFU) {
             if (hi_targets)
                 kfree(hi_targets);
             if (veneer_off)
