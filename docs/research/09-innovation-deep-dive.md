@@ -563,11 +563,11 @@ $task\_kill(A, B)$ 执行时：
 
 | 属性 | seL4 trace 归纳 | Zircon | A20OS 旧 | A20OS 新 |
 |------|----------------|--------|----------|----------|
-| 单操作安全性 | ✅ Isabelle | ❌ 无证明 | ✅ SOS | ✅ SOS |
-| 委托模式分类 | ❌ | ❌ | ❌ | ✅ 5 种模式 |
-| 模式组合安全 | ❌ | ❌ | ❌ | ✅ 定理 4.2 |
-| 权限衰减上界 | 隐含 | 隐含 | ✅ 定理 3.2 | ✅ 定理 4.1（序列级） |
-| 可回收性分析 | ❌ | ❌ | ❌ | ✅ 定理 4.3 |
+| 单操作安全性 | 是（Isabelle） | 否（无证明） | 是（SOS） | 是（SOS） |
+| 委托模式分类 | 否 | 否 | 否 | 是（5 种模式） |
+| 模式组合安全 | 否 | 否 | 否 | 是（定理 4.2） |
+| 权限衰减上界 | 隐含 | 隐含 | 是（定理 3.2） | 是（定理 4.1，序列级） |
+| 可回收性分析 | 否 | 否 | 否 | 是（定理 4.3） |
 
 ---
 
@@ -729,13 +729,13 @@ $$\text{Safe}_{combined}(\sigma) = \text{TemporalSafe}(\sigma) \wedge \text{Type
 
 | 方案 | 能限制操作类型？ | 能限制时间？ | 能限制次数？ | 形式化保证？ | 内核强制？ |
 |------|--------------|-----------|-----------|-----------|----------|
-| seccomp-bpf | ✅（syscall 级） | ❌ | ❌ | ❌ | ✅ |
-| Landlock | ✅（路径级） | ❌ | ❌ | ❌ | ✅ |
-| AppArmor/SELinux | ✅（策略级） | ❌ | ❌ | ❌ | ✅ |
-| Capability (seL4) | ✅（对象级） | ❌ | ❌ | ✅ Isabelle | ✅ |
-| Capability (Zircon) | ✅（handle 级） | ❌ | ❌ | ❌ | ✅ |
-| Container | ✅（namespace） | ❌ | ❌ | ❌ | ✅ |
-| **A20OS 组合** | **✅（对象级+类型级）** | **✅（expiry_tick）** | **✅（remaining_ops）** | **✅ SOS 证明** | **✅** |
+| seccomp-bpf | 是（syscall 级） | 否 | 否 | 否 | 是 |
+| Landlock | 是（路径级） | 否 | 否 | 否 | 是 |
+| AppArmor/SELinux | 是（策略级） | 否 | 否 | 否 | 是 |
+| Capability (seL4) | 是（对象级） | 否 | 否 | 是（Isabelle） | 是 |
+| Capability (Zircon) | 是（handle 级） | 否 | 否 | 否 | 是 |
+| Container | 是（namespace） | 否 | 否 | 否 | 是 |
+| **A20OS 组合** | **是（对象级+类型级）** | **是（expiry_tick）** | **是（remaining_ops）** | **是（SOS 证明）** | **是** |
 
 **A20OS 的供应链防御模型**：
 
