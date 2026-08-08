@@ -72,9 +72,10 @@ typedef struct a20_idl_envelope_t {   // message ENVELOPE
 ### 1.6 扩展流程（新增一个服务协议）
 
 1. 在 `user/svc/a20_services.idl` 增加 `const` 与 `message`，必要时 bump `version`；
-2. 运行 `make check-a20-idl`（在 `a20os` conda 环境中重生成并比对活跃头，本机无 conda 时在配置好 `a20os` 的环境执行）；
-3. 服务端（rtcd/svcmgr/ubd 等）与客户端按新生成头收发，字段布局由 `typedef struct a20_idl_*_t` 保证一致；
-4. 服务端信封校验保持 version/size 检查，防止旧客户端错配。
+2. 服务端（rtcd/svcmgr/ubd 等）与客户端按新生成头收发，字段布局由 `typedef struct a20_idl_*_t` 保证一致；
+3. 服务端信封校验保持 version/size 检查，防止旧客户端错配。
+
+生成头 `user/svc/a20_services_idl.h` 是构建期自动生成的（`tools/targets-native.mk` 的 `$(A20_SERVICES_IDL_HDR)` 规则，`A20_IDL_PYTHON` 可覆盖，默认 `conda run -n a20os python`），并被 `.gitignore` 排除、不进入 Git 跟踪；`rtcd_proto.h`/`svc_proto.h`/`ubd_proto.h` 依赖它，任何消费这些头的 native 目标都会自动触发生成。`make check-a20-idl` 重新生成并与当前工作树头比对，防止手工改动生成头。
 
 ### 1.7 当前 IDL 覆盖与边界
 
@@ -84,14 +85,14 @@ typedef struct a20_idl_envelope_t {   // message ENVELOPE
 
 ## 2. 实现状态（与 `make check-a20-idl` 对应）
 
-服务协议已从手写 proto 头迁移到 `user/svc/a20_services.idl`。`tools/a20idl.py` 生成 `user/svc/a20_services_idl.h`，rtcd、svcmgr 和 ubd 的协议头只保留槽位/设备常量并 include 生成头。
+服务协议已从手写 proto 头迁移到 `user/svc/a20_services.idl`。`tools/a20idl.py` 在构建期生成 `user/svc/a20_services_idl.h`（见 1.6），rtcd、svcmgr 和 ubd 的协议头只保留槽位/设备常量并 include 生成头。
 
 已实现：
 
 - 版本化常量与固定宽度 `message` 字段（生成结构体，wire layout 保持）；
 - 版本化请求/响应信封（见 1.4）；`smoke-native-rtcd` 双向验证；
 - svcmgr/echod 协议 IDL 化（`SVCMGR_REQ_ECHO/CRASH` 版本化消息替换裸 echo 与魔法字符串），echod 校验版本并忽略畸形消息而非误崩溃；`smoke-native-svc` PASS；
-- `make check-a20-idl` 重生成并比较活跃头。
+- `make check-a20-idl` 重生成并与当前工作树生成头比较。
 
 ## 3. Linux 人格层
 
