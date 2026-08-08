@@ -14,6 +14,13 @@
 #include "drivers/dual/virtq.h"
 #include "liba20rt/a20_sdk.h"
 #include "liba20rt/crt0_a20.h"
+#include "drivers/driver_descriptor.h"
+
+A20_DRIVER_DESCRIPTOR(A20_DRIVER_PLACEMENT_USER_SERVICE,
+                      A20_DRIVER_TYPE_INPUT, "virtio-input-user", A20_DRIVER_ABI, A20_DRIVER_RES_MMIO | A20_DRIVER_RES_IRQ | A20_DRIVER_RES_DMA,
+                      0, 1,
+                      A20_DRIVER_MATCH(A20_DRIVER_BUS_MMIO,
+                                           0x10006000UL, 0));
 
 #define VINPUT_DUAL_PHYS 0x10006000ULL
 #define VINPUT_DUAL_SIZE 0x1000ULL
