@@ -98,7 +98,11 @@ int mm_mprotect_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
                     if (pfn_valid(pfn))
                         arch_flush_icache_range(pfn_to_virt(pfn), PAGE_SIZE);
                 }
-                *pte = arch_pte_leaf(arch_pte_addr(*pte), flags);
+                pte_t replacement = arch_pte_leaf(arch_pte_addr(*pte), flags);
+                if (replacement != *pte) {
+                    *pte = replacement;
+                    mm_tlb_note_change(mm, base, size);
+                }
                 va = base + size;
             } else {
                 va += PAGE_SIZE;

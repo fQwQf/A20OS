@@ -139,7 +139,7 @@ static int proc_clone_impl(uint64_t flags, vaddr_t stack, int *ptid, vaddr_t tls
         return -EAGAIN;
     }
     int child_pid = t->pid;
-    proc_task_init_common(t, parent);
+    proc_task_init_common(t, parent, flags);
     t->abi_mode = parent ? parent->abi_mode : 0;
     if (parent && parent->sched_reset_on_fork) {
         if (parent->sched_policy == SCHED_FIFO || parent->sched_policy == SCHED_RR) {
@@ -172,15 +172,6 @@ static int proc_clone_impl(uint64_t flags, vaddr_t stack, int *ptid, vaddr_t tls
 
     t->exec_load_addr = parent->exec_load_addr;
     t->exec_load_size = parent->exec_load_size;
-
-    /*
-     * Share fd table when CLONE_FILES or CLONE_THREAD is set.
-     * Linux pthreads always pass CLONE_FILES, but some callers
-     * only set CLONE_THREAD.  Both must share the same fd table.
-     */
-    if ((flags & (CLONE_FILES | CLONE_THREAD)) && parent && parent->files) {
-        fdtable_share(t, parent);
-    }
 
     /*
      * Share signal handlers when CLONE_SIGHAND or CLONE_THREAD is set.

@@ -10,6 +10,7 @@
 #include "core/progress.h"
 #include "core/panic.h"
 #include "proc/signal.h"
+#include "mm/vm.h"
 #include "cg/cgroup.h"
 #include "cg/cgroup_impl.h"
 #ifdef CONFIG_ABI_NATIVE
@@ -670,6 +671,29 @@ static void sched_consume_resched(unsigned cpu)
                             __ATOMIC_ACQ_REL))
         __atomic_fetch_add(&sched_cpu[cpu].consumed, 1,
                            __ATOMIC_RELAXED);
+}
+
+/* Called only by the local idle task with IRQs disabled. The runqueue lock
+ * closes the check-to-sleep window against remote enqueue: an enqueue after
+ * this snapshot must send a reschedule IPI before the target can remain idle.
+ */
+int proc_sched_idle_prepare(void)
+{
+    unsigned cpu = cpu_current_id();
+    if (cpu >= CONFIG_NR_CPUS || arch_irqs_enabled())
+        return 0;
+
+    uint64_t rf = RUNQ_LOCK_IRQ(cpu);
+    int idle = sched_runq[cpu].bitmap == 0 &&
+               __atomic_load_n(&sched_runq[cpu].nr_running,
+                               __ATOMIC_ACQUIRE) == 0 &&
+               !__atomic_load_n(&sched_cpu[cpu].need_resched,
+                                __ATOMIC_ACQUIRE);
+    RUNQ_UNLOCK_IRQ(cpu, rf);
+
+    if (idle && proc_sched_timers_due(timer_get_ticks()))
+        idle = 0;
+    return idle;
 }
 
 void proc_sched_diag_snapshot(proc_sched_diag_t *diag)
@@ -1404,6 +1428,7 @@ void context_switch(task_t *next) {
      * never an unowned dequeue gap.
      */
     int had_dispatch_ref = next->dispatching;
+    mm_context_enter(next->mm, cpu);
     task_t *old = proc_set_current(next);
     next->state  = PROC_RUNNING;
     next->on_rq  = 0;

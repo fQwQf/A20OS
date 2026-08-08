@@ -5,6 +5,7 @@
 #include "fs/anonfd.h"
 #include "fs/file.h"
 #include "fs/vfs.h"
+#include "fs/vfs/stat_perm.h"
 #include "mm/slab.h"
 
 typedef struct {
@@ -144,7 +145,10 @@ static int memfd_file_readpage(vnode_t *vn, uint64_t index,
 
 static void memfd_file_release(vnode_t *vn)
 {
-    if (vn) kfree(vn);
+    if (vn) {
+        vfs_drop_time_meta(vn);
+        kfree(vn);
+    }
 }
 
 static vfile_ops_t g_memfile_fops = {

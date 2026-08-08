@@ -7,6 +7,7 @@
 #include "core/sync.h"
 #include "fs/block_cache.h"
 #include "fs/file.h"
+#include "fs/vfs/stat_perm.h"
 #include "mm/slab.h"
 #include "proc/proc.h"
 #include "sys/usercopy.h"
@@ -381,6 +382,7 @@ int ntfs_vn_unlink(vnode_t *dir, const char *name)
             for (uint32_t i = 0; i < vp->run_count; i++)
                 ntfs_free_clusters(fp->sb, vp->runs[i].lcn, vp->runs[i].length);
         }
+        vfs_drop_time_meta_identity(dir->mnt, vp->mft_index);
         ntfs_free_mft_record(fp->sb, vp->mft_index);
     }
     vnode_put(victim);
@@ -420,8 +422,10 @@ int ntfs_vn_rmdir(vnode_t *dir, const char *name)
     }
 
     int r = ntfs_index_remove(fp, name);
-    if (r == 0)
+    if (r == 0) {
+        vfs_drop_time_meta_identity(dir->mnt, vp->mft_index);
         ntfs_free_mft_record(fp->sb, vp->mft_index);
+    }
     vnode_put(victim);
     ntfs_unlock(fp->sb);
     return r;
@@ -521,6 +525,7 @@ int ntfs_vn_rename(vnode_t *old_dir, const char *old_name,
         ntfs_vnode_priv_t *tp = (ntfs_vnode_priv_t *)tgt->fs_data;
         ntfs_index_remove(nfp, new_name);
         if (tp->is_dir || (!tp->data_resident && tp->runs)) {
+            vfs_drop_time_meta_identity(new_dir->mnt, tp->mft_index);
             ntfs_free_mft_record(ofp->sb, tp->mft_index);
         }
     }

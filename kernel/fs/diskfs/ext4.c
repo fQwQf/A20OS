@@ -10,6 +10,7 @@
 #include "core/consts.h"
 #include "core/defs.h"
 #include "core/klog.h"
+#include "core/perf.h"
 #include "core/timekeeping.h"
 
 /* ---- 64-bit inode size accessors ----
@@ -194,58 +195,188 @@ void ext4_writeback_gd(ext4_sb_info_t *sb, uint32_t group) {
     bcache_write_bytes(sb->bc, off, &sb->group_descs[group], n);
 }
 
-int ext4_bitmap_alloc(ext4_sb_info_t *sb, uint64_t bm_blk, uint32_t max) {
-    char *buf = (char *)kmalloc(sb->block_size);
+static int ext4_read_group_descs(ext4_sb_info_t *sb)
+{
+    memset(sb->group_descs, 0,
+           (size_t)sb->groups_count * sizeof(ext4_group_desc_t));
+    uint32_t n = sb->desc_size < sizeof(ext4_group_desc_t) ?
+                 sb->desc_size : sizeof(ext4_group_desc_t);
+    for (uint32_t g = 0; g < sb->groups_count; g++) {
+        uint64_t off = sb->block_group_desc_table_byte +
+                       (uint64_t)g * sb->desc_size;
+        if (bcache_read_bytes(sb->bc, off, &sb->group_descs[g], n) < 0)
+            return -EIO;
+    }
+    return 0;
+}
+
+static uint32_t ext4_bg_free_blocks(const ext4_group_desc_t *gd)
+{
+    return (uint32_t)gd->bg_free_blocks_count_lo |
+           ((uint32_t)gd->bg_free_blocks_count_hi << 16);
+}
+
+static uint32_t ext4_bg_free_inodes(const ext4_group_desc_t *gd)
+{
+    return (uint32_t)gd->bg_free_inodes_count_lo |
+           ((uint32_t)gd->bg_free_inodes_count_hi << 16);
+}
+
+static void ext4_bg_set_free_blocks(ext4_group_desc_t *gd, uint32_t count)
+{
+    gd->bg_free_blocks_count_lo = (uint16_t)count;
+    gd->bg_free_blocks_count_hi = (uint16_t)(count >> 16);
+}
+
+static void ext4_bg_set_free_inodes(ext4_group_desc_t *gd, uint32_t count)
+{
+    gd->bg_free_inodes_count_lo = (uint16_t)count;
+    gd->bg_free_inodes_count_hi = (uint16_t)(count >> 16);
+}
+
+int ext4_bitmap_alloc(ext4_sb_info_t *sb, uint64_t bm_blk, uint32_t max,
+                      uint32_t start) {
+    if (!sb || !max || bm_blk >= sb->blocks_count)
+        return -1;
+    uint32_t bitmap_bits = sb->block_size * 8;
+    if (max > bitmap_bits)
+        return -1;
+    start %= max;
+
+    uint8_t *buf = (uint8_t *)kmalloc(sb->block_size);
     if (!buf) return -1;
     if (bcache_read_bytes(sb->bc, bm_blk * sb->block_size, buf, sb->block_size) < 0)
         { kfree(buf); return -1; }
-    for (uint32_t i = 0; i < max; i++) {
-        if (!(buf[i / 8] & (1 << (i % 8)))) {
-            buf[i / 8] |= (1 << (i % 8));
-            bcache_write_bytes(sb->bc, bm_blk * sb->block_size, buf, sb->block_size);
-            kfree(buf); return (int)i;
+    for (uint32_t n = 0; n < max; n++) {
+        uint32_t bit = start + n;
+        if (bit >= max)
+            bit -= max;
+        if (!(buf[bit / 8] & (1U << (bit % 8)))) {
+            buf[bit / 8] |= (1U << (bit % 8));
+            if (bcache_write_bytes(sb->bc, bm_blk * sb->block_size,
+                                   buf, sb->block_size) < 0) {
+                a20_perf_add(A20_PERF_EXT4_BITMAP_PROBES, n + 1);
+                kfree(buf);
+                return -1;
+            }
+            a20_perf_add(A20_PERF_EXT4_BITMAP_PROBES, n + 1);
+            kfree(buf); return (int)bit;
         }
     }
+    a20_perf_add(A20_PERF_EXT4_BITMAP_PROBES, max);
     kfree(buf); return -1;
 }
 
-void ext4_bitmap_free(ext4_sb_info_t *sb, uint64_t bm_blk, uint32_t bit) {
-    char *buf = (char *)kmalloc(sb->block_size);
-    if (!buf) return;
+int ext4_bitmap_free(ext4_sb_info_t *sb, uint64_t bm_blk, uint32_t bit) {
+    if (!sb || bm_blk >= sb->blocks_count ||
+        bit >= sb->block_size * 8)
+        return -EINVAL;
+    uint8_t *buf = (uint8_t *)kmalloc(sb->block_size);
+    if (!buf) return -ENOMEM;
     if (bcache_read_bytes(sb->bc, bm_blk * sb->block_size, buf, sb->block_size) < 0)
-        { kfree(buf); return; }
-    buf[bit / 8] &= ~(1 << (bit % 8));
-    bcache_write_bytes(sb->bc, bm_blk * sb->block_size, buf, sb->block_size);
+        { kfree(buf); return -EIO; }
+    if (!(buf[bit / 8] & (1U << (bit % 8)))) {
+        kfree(buf);
+        return -EINVAL;
+    }
+    buf[bit / 8] &= ~(1U << (bit % 8));
+    int r = bcache_write_bytes(sb->bc, bm_blk * sb->block_size,
+                               buf, sb->block_size);
     kfree(buf);
+    return r < 0 ? -EIO : 0;
 }
 
-/* 修复：将 kmalloc 移到 mutex 外部，避免在持有锁时可能睡眠。
- * 原代码在 alloc_lock 内调用 kmalloc，而 kmalloc 可能触发调度器
- * （例如需要扩展堆时），导致其他等待 alloc_lock 的进程被阻塞，
- * 造成优先级反转甚至死锁。 */
+static uint32_t ext4_group_block_count(ext4_sb_info_t *sb, uint32_t group)
+{
+    uint64_t first = (uint64_t)sb->first_data_block +
+                     (uint64_t)group * sb->blocks_per_group;
+    if (first >= sb->blocks_count)
+        return 0;
+    uint64_t remaining = sb->blocks_count - first;
+    return remaining < sb->blocks_per_group ? (uint32_t)remaining :
+                                              sb->blocks_per_group;
+}
+
+static uint32_t ext4_group_inode_count(ext4_sb_info_t *sb, uint32_t group)
+{
+    uint64_t first = (uint64_t)group * sb->inodes_per_group;
+    if (first >= sb->inodes_count)
+        return 0;
+    uint64_t remaining = sb->inodes_count - first;
+    return remaining < sb->inodes_per_group ? (uint32_t)remaining :
+                                              sb->inodes_per_group;
+}
+
+static int ext4_validate_group_counts(ext4_sb_info_t *sb)
+{
+    for (uint32_t g = 0; g < sb->groups_count; g++) {
+        uint32_t blocks = ext4_group_block_count(sb, g);
+        uint32_t inodes = ext4_group_inode_count(sb, g);
+        uint64_t block_bitmap =
+            (uint64_t)sb->group_descs[g].bg_block_bitmap_lo |
+            ((uint64_t)sb->group_descs[g].bg_block_bitmap_hi << 32);
+        uint64_t inode_bitmap =
+            (uint64_t)sb->group_descs[g].bg_inode_bitmap_lo |
+            ((uint64_t)sb->group_descs[g].bg_inode_bitmap_hi << 32);
+        uint64_t inode_table =
+            (uint64_t)sb->group_descs[g].bg_inode_table_lo |
+            ((uint64_t)sb->group_descs[g].bg_inode_table_hi << 32);
+        uint64_t inode_table_bytes = (uint64_t)inodes * sb->inode_size;
+        uint64_t inode_table_blocks =
+            (inode_table_bytes + sb->block_size - 1) / sb->block_size;
+        if (!blocks || !inodes ||
+            block_bitmap < sb->first_data_block ||
+            inode_bitmap < sb->first_data_block ||
+            block_bitmap >= sb->blocks_count ||
+            inode_bitmap >= sb->blocks_count ||
+            inode_table < sb->first_data_block ||
+            inode_table >= sb->blocks_count ||
+            !inode_table_blocks ||
+            inode_table_blocks > sb->blocks_count - inode_table ||
+            ext4_bg_free_blocks(&sb->group_descs[g]) > blocks ||
+            ext4_bg_free_inodes(&sb->group_descs[g]) > inodes)
+            return -EINVAL;
+    }
+    return 0;
+}
+
 uint64_t ext4_alloc_block(ext4_sb_info_t *sb) {
-    /* 预分配清零缓冲区（在获取锁之前，允许睡眠） */
+    /* Allocate the zeroing buffer before taking the allocator mutex. */
     char *zero_buf = (char *)kmalloc(sb->block_size);
     if (zero_buf)
         memset(zero_buf, 0, sb->block_size);
 
     mutex_lock(&sb->alloc_lock);
-    for (uint32_t g = 0; g < sb->groups_count; g++) {
-        if (sb->group_descs[g].bg_free_blocks_count_lo == 0) continue;
+    uint64_t group_probes = 0;
+    for (uint32_t n = 0; n < sb->groups_count; n++) {
+        group_probes++;
+        uint32_t g = sb->block_group_rotor + n;
+        if (g >= sb->groups_count)
+            g -= sb->groups_count;
+        uint32_t free_blocks = ext4_bg_free_blocks(&sb->group_descs[g]);
+        if (free_blocks == 0) continue;
+        uint32_t valid = ext4_group_block_count(sb, g);
+        if (!valid)
+            continue;
         uint64_t bm = (uint64_t)sb->group_descs[g].bg_block_bitmap_lo |
                       ((uint64_t)sb->group_descs[g].bg_block_bitmap_hi << 32);
-        int bit = ext4_bitmap_alloc(sb, bm, sb->blocks_per_group);
+        int bit = ext4_bitmap_alloc(sb, bm, valid,
+                                    sb->block_alloc_hints[g]);
         if (bit < 0) continue;
-        sb->group_descs[g].bg_free_blocks_count_lo--;
+        sb->block_alloc_hints[g] = ((uint32_t)bit + 1) % valid;
+        sb->block_group_rotor = g;
+        ext4_bg_set_free_blocks(&sb->group_descs[g], free_blocks - 1);
         ext4_writeback_gd(sb, g);
         uint64_t phys = (uint64_t)sb->first_data_block +
                         (uint64_t)g * sb->blocks_per_group + bit;
+        a20_perf_add(A20_PERF_EXT4_GROUP_PROBES, group_probes);
         mutex_unlock(&sb->alloc_lock);
         if (zero_buf)
             bcache_write_bytes(sb->bc, phys * sb->block_size, zero_buf, sb->block_size);
         if (zero_buf) kfree(zero_buf);
         return phys;
     }
+    a20_perf_add(A20_PERF_EXT4_GROUP_PROBES, group_probes);
     mutex_unlock(&sb->alloc_lock);
     if (zero_buf) kfree(zero_buf);
     return 0;
@@ -253,6 +384,10 @@ uint64_t ext4_alloc_block(ext4_sb_info_t *sb) {
 
 void ext4_free_block(ext4_sb_info_t *sb, uint64_t phys) {
     mutex_lock(&sb->alloc_lock);
+    if (phys < sb->first_data_block || phys >= sb->blocks_count) {
+        mutex_unlock(&sb->alloc_lock);
+        return;
+    }
     uint32_t rel = (uint32_t)(phys - sb->first_data_block);
     uint32_t g = rel / sb->blocks_per_group;
     uint32_t bit = rel % sb->blocks_per_group;
@@ -260,44 +395,92 @@ void ext4_free_block(ext4_sb_info_t *sb, uint64_t phys) {
         mutex_unlock(&sb->alloc_lock);
         return;
     }
+    uint32_t valid = ext4_group_block_count(sb, g);
+    if (bit >= valid) {
+        mutex_unlock(&sb->alloc_lock);
+        return;
+    }
     uint64_t bm = (uint64_t)sb->group_descs[g].bg_block_bitmap_lo |
                   ((uint64_t)sb->group_descs[g].bg_block_bitmap_hi << 32);
-    ext4_bitmap_free(sb, bm, bit);
-    sb->group_descs[g].bg_free_blocks_count_lo++;
+    uint32_t free_blocks = ext4_bg_free_blocks(&sb->group_descs[g]);
+    if (free_blocks >= valid) {
+        mutex_unlock(&sb->alloc_lock);
+        return;
+    }
+    if (ext4_bitmap_free(sb, bm, bit) < 0) {
+        mutex_unlock(&sb->alloc_lock);
+        return;
+    }
+    if (sb->block_alloc_hints)
+        sb->block_alloc_hints[g] = bit;
+    ext4_bg_set_free_blocks(&sb->group_descs[g], free_blocks + 1);
     ext4_writeback_gd(sb, g);
     mutex_unlock(&sb->alloc_lock);
 }
 
 uint32_t ext4_alloc_inode(ext4_sb_info_t *sb) {
     mutex_lock(&sb->alloc_lock);
-    for (uint32_t g = 0; g < sb->groups_count; g++) {
-        if (sb->group_descs[g].bg_free_inodes_count_lo == 0) continue;
+    uint64_t group_probes = 0;
+    for (uint32_t n = 0; n < sb->groups_count; n++) {
+        group_probes++;
+        uint32_t g = sb->inode_group_rotor + n;
+        if (g >= sb->groups_count)
+            g -= sb->groups_count;
+        uint32_t free_inodes = ext4_bg_free_inodes(&sb->group_descs[g]);
+        if (free_inodes == 0) continue;
+        uint32_t valid = ext4_group_inode_count(sb, g);
+        if (!valid)
+            continue;
         uint64_t bm = (uint64_t)sb->group_descs[g].bg_inode_bitmap_lo |
                       ((uint64_t)sb->group_descs[g].bg_inode_bitmap_hi << 32);
-        int bit = ext4_bitmap_alloc(sb, bm, sb->inodes_per_group);
+        int bit = ext4_bitmap_alloc(sb, bm, valid,
+                                    sb->inode_alloc_hints[g]);
         if (bit < 0) continue;
-        sb->group_descs[g].bg_free_inodes_count_lo--;
+        sb->inode_alloc_hints[g] = ((uint32_t)bit + 1) % valid;
+        sb->inode_group_rotor = g;
+        ext4_bg_set_free_inodes(&sb->group_descs[g], free_inodes - 1);
         ext4_writeback_gd(sb, g);
         uint32_t ino = g * sb->inodes_per_group + bit + 1;
+        a20_perf_add(A20_PERF_EXT4_GROUP_PROBES, group_probes);
         mutex_unlock(&sb->alloc_lock);
         return ino;
     }
+    a20_perf_add(A20_PERF_EXT4_GROUP_PROBES, group_probes);
     mutex_unlock(&sb->alloc_lock);
     return 0;
 }
 
 void ext4_free_inode(ext4_sb_info_t *sb, uint32_t ino) {
     mutex_lock(&sb->alloc_lock);
+    if (!ino || ino > sb->inodes_count) {
+        mutex_unlock(&sb->alloc_lock);
+        return;
+    }
     uint32_t g = (ino - 1) / sb->inodes_per_group;
     uint32_t bit = (ino - 1) % sb->inodes_per_group;
     if (g >= sb->groups_count) {
         mutex_unlock(&sb->alloc_lock);
         return;
     }
+    uint32_t valid = ext4_group_inode_count(sb, g);
+    if (bit >= valid) {
+        mutex_unlock(&sb->alloc_lock);
+        return;
+    }
     uint64_t bm = (uint64_t)sb->group_descs[g].bg_inode_bitmap_lo |
                   ((uint64_t)sb->group_descs[g].bg_inode_bitmap_hi << 32);
-    ext4_bitmap_free(sb, bm, bit);
-    sb->group_descs[g].bg_free_inodes_count_lo++;
+    uint32_t free_inodes = ext4_bg_free_inodes(&sb->group_descs[g]);
+    if (free_inodes >= valid) {
+        mutex_unlock(&sb->alloc_lock);
+        return;
+    }
+    if (ext4_bitmap_free(sb, bm, bit) < 0) {
+        mutex_unlock(&sb->alloc_lock);
+        return;
+    }
+    if (sb->inode_alloc_hints)
+        sb->inode_alloc_hints[g] = bit;
+    ext4_bg_set_free_inodes(&sb->group_descs[g], free_inodes + 1);
     ext4_writeback_gd(sb, g);
     mutex_unlock(&sb->alloc_lock);
 }
@@ -1180,10 +1363,88 @@ vnode_t *ext4_mount(bcache_t *bc) {
         }
     }
 
-    uint32_t block_size = 1024 << sb.s_log_block_size;
+    if (sb.s_log_block_size > 6 || !sb.s_blocks_per_group ||
+        !sb.s_inodes_per_group || !sb.s_inodes_count) {
+        printf("[EXT4] Invalid superblock geometry\n");
+        return NULL;
+    }
+    uint32_t expected_first_data_block = sb.s_log_block_size == 0 ? 1 : 0;
+    if (sb.s_first_data_block != expected_first_data_block) {
+        printf("[EXT4] Invalid first data block for block size\n");
+        return NULL;
+    }
+    if (sb.s_log_cluster_size != sb.s_log_block_size) {
+        printf("[EXT4] Bigalloc cluster geometry is unsupported\n");
+        return NULL;
+    }
+
+    uint32_t block_size = 1024U << sb.s_log_block_size;
     uint32_t desc_size = 32;
     if (sb.s_rev_level == EXT4_DYNAMIC_REV && sb.s_desc_size >= 32)
         desc_size = sb.s_desc_size;
+
+    uint32_t inode_size = sb.s_rev_level == EXT4_DYNAMIC_REV ?
+                          sb.s_inode_size : EXT4_INODE_SIZE_STATIC;
+    if (inode_size < EXT4_INODE_SIZE_STATIC || inode_size > block_size ||
+        (inode_size & (inode_size - 1))) {
+        printf("[EXT4] Invalid inode size: %u\n", inode_size);
+        return NULL;
+    }
+    if ((sb.s_feature_incompat & EXT4_FEATURE_INCOMPAT_64BIT) &&
+        (sb.s_rev_level != EXT4_DYNAMIC_REV || sb.s_desc_size < 64)) {
+        printf("[EXT4] 64-bit filesystem requires 64-byte descriptors\n");
+        return NULL;
+    }
+    if (!(sb.s_feature_incompat & EXT4_FEATURE_INCOMPAT_64BIT) &&
+        (sb.s_blocks_count_hi || sb.s_r_blocks_count_hi)) {
+        printf("[EXT4] High block counts without 64-bit feature\n");
+        return NULL;
+    }
+
+    uint64_t blocks_count = (uint64_t)sb.s_blocks_count_lo |
+                            ((uint64_t)sb.s_blocks_count_hi << 32);
+    uint64_t reserved_blocks = (uint64_t)sb.s_r_blocks_count_lo |
+                               ((uint64_t)sb.s_r_blocks_count_hi << 32);
+    if (blocks_count <= sb.s_first_data_block || desc_size > block_size ||
+        (desc_size & 7) || reserved_blocks > blocks_count ||
+        sb.s_blocks_per_group > block_size * 8 ||
+        sb.s_inodes_per_group > block_size * 8 ||
+        (desc_size < sizeof(ext4_group_desc_t) &&
+         (sb.s_blocks_per_group > 0xffffU ||
+          sb.s_inodes_per_group > 0xffffU))) {
+        printf("[EXT4] Invalid block-group geometry\n");
+        return NULL;
+    }
+    uint64_t data_blocks = blocks_count - sb.s_first_data_block;
+    uint64_t groups64 = data_blocks / sb.s_blocks_per_group +
+                        (data_blocks % sb.s_blocks_per_group != 0);
+    uint64_t inode_groups = sb.s_inodes_count / sb.s_inodes_per_group +
+                            (sb.s_inodes_count % sb.s_inodes_per_group != 0);
+    if (!groups64 || groups64 > 0xffffffffULL || inode_groups != groups64) {
+        printf("[EXT4] Inconsistent block-group counts\n");
+        return NULL;
+    }
+    uint32_t groups = (uint32_t)groups64;
+
+    uint64_t gd_start = block_size == 1024 ? 2048ULL :
+                        ((uint64_t)sb.s_first_data_block + 1) * block_size;
+    if (blocks_count > ~0ULL / block_size) {
+        printf("[EXT4] Filesystem byte size overflows\n");
+        return NULL;
+    }
+    uint64_t fs_bytes = blocks_count * block_size;
+    uint64_t gd_bytes = groups64 * desc_size;
+    if (gd_start > fs_bytes || gd_bytes > fs_bytes - gd_start ||
+        groups64 > (uint64_t)((size_t)-1) / sizeof(ext4_group_desc_t)) {
+        printf("[EXT4] Group descriptor table exceeds filesystem\n");
+        return NULL;
+    }
+    if (bc->dev && bc->dev->capacity && bc->dev->sector_size &&
+        bc->dev->capacity <= ~0ULL / bc->dev->sector_size &&
+        fs_bytes > bc->dev->capacity * bc->dev->sector_size) {
+        printf("[EXT4] Filesystem exceeds block device capacity\n");
+        return NULL;
+    }
 
     ext4_sb_info_t *esi = (ext4_sb_info_t *)kmalloc(sizeof(ext4_sb_info_t));
     if (!esi) {
@@ -1196,20 +1457,12 @@ vnode_t *ext4_mount(bcache_t *bc) {
 
     esi->inodes_count = sb.s_inodes_count;
 
-    uint64_t blocks_count = (uint64_t)sb.s_blocks_count_lo |
-                            ((uint64_t)sb.s_blocks_count_hi << 32);
-    uint64_t reserved_blocks = (uint64_t)sb.s_r_blocks_count_lo |
-                               ((uint64_t)sb.s_r_blocks_count_hi << 32);
-    uint32_t groups =
-        (uint32_t)((blocks_count - sb.s_first_data_block +
-                    sb.s_blocks_per_group - 1) / sb.s_blocks_per_group);
-
     esi->blocks_count = blocks_count;
     esi->reserved_blocks_count = reserved_blocks;
     esi->block_size   = block_size;
     esi->blocks_per_group = sb.s_blocks_per_group;
     esi->inodes_per_group = sb.s_inodes_per_group;
-    esi->inode_size   = (sb.s_rev_level == EXT4_DYNAMIC_REV) ? sb.s_inode_size : 128;
+    esi->inode_size   = inode_size;
     esi->first_data_block = sb.s_first_data_block;
     esi->groups_count = groups;
     esi->addr_per_block = block_size / 4;
@@ -1218,22 +1471,16 @@ vnode_t *ext4_mount(bcache_t *bc) {
     esi->s_feature_ro_compat = sb.s_feature_ro_compat;
     esi->bc           = bc;
 
-    uint64_t gd_start;
-    if (block_size == 1024)
-        gd_start = 2048;
-    else
-        gd_start = (uint64_t)(sb.s_first_data_block + 1) * block_size;
     esi->block_group_desc_table_byte = gd_start;
 
-    size_t gd_total = (size_t)groups * desc_size;
+    size_t gd_total = (size_t)groups * sizeof(ext4_group_desc_t);
     esi->group_descs = (ext4_group_desc_t *)kmalloc(gd_total);
     if (!esi->group_descs) {
         printf("[EXT4] Failed to allocate group descriptors\n");
         kfree(esi);
         return NULL;
     }
-    memset(esi->group_descs, 0, gd_total);
-    if (bcache_read_bytes(bc, gd_start, esi->group_descs, gd_total) < 0) {
+    if (ext4_read_group_descs(esi) < 0) {
         printf("[EXT4] Failed to read group descriptors\n");
         kfree(esi->group_descs);
         kfree(esi);
@@ -1249,13 +1496,30 @@ vnode_t *ext4_mount(bcache_t *bc) {
         }
         /* Journal replay can replace the primary group descriptor table.
          * Refresh the in-memory copy before allocation or inode lookup. */
-        memset(esi->group_descs, 0, gd_total);
-        if (bcache_read_bytes(bc, gd_start, esi->group_descs, gd_total) < 0) {
+        if (ext4_read_group_descs(esi) < 0) {
             printf("[EXT4] Failed to refresh group descriptors after recovery\n");
             kfree(esi->group_descs);
             kfree(esi);
             return NULL;
         }
+    }
+
+    if (ext4_validate_group_counts(esi) < 0) {
+        printf("[EXT4] Invalid per-group free counts or bitmap bounds\n");
+        kfree(esi->group_descs);
+        kfree(esi);
+        return NULL;
+    }
+
+    esi->block_alloc_hints = (uint32_t *)kcalloc(groups, sizeof(uint32_t));
+    esi->inode_alloc_hints = (uint32_t *)kcalloc(groups, sizeof(uint32_t));
+    if (!esi->block_alloc_hints || !esi->inode_alloc_hints) {
+        printf("[EXT4] Failed to allocate allocator hints\n");
+        kfree(esi->block_alloc_hints);
+        kfree(esi->inode_alloc_hints);
+        kfree(esi->group_descs);
+        kfree(esi);
+        return NULL;
     }
 
     printf("[EXT4] Mounted: block_size=%u groups=%u inode_size=%u inodes/group=%u\n",
@@ -1264,6 +1528,8 @@ vnode_t *ext4_mount(bcache_t *bc) {
     ext4_inode_t root_inode;
     if (ext4_read_inode(esi, EXT4_ROOT_INO, &root_inode) < 0) {
         printf("[EXT4] Failed to read root inode\n");
+        kfree(esi->block_alloc_hints);
+        kfree(esi->inode_alloc_hints);
         kfree(esi->group_descs);
         kfree(esi);
         return NULL;
@@ -1272,6 +1538,8 @@ vnode_t *ext4_mount(bcache_t *bc) {
     vnode_t *root = ext4_make_vnode(esi, EXT4_ROOT_INO,
                                      ext4_inode_size(&root_inode), VFS_FT_DIR, NULL);
     if (!root) {
+        kfree(esi->block_alloc_hints);
+        kfree(esi->inode_alloc_hints);
         kfree(esi->group_descs);
         kfree(esi);
         return NULL;
@@ -1311,6 +1579,10 @@ void ext4_unmount(vnode_t *root) {
         kfree(esi->group_descs);
         esi->group_descs = NULL;
     }
+    kfree(esi->block_alloc_hints);
+    kfree(esi->inode_alloc_hints);
+    esi->block_alloc_hints = NULL;
+    esi->inode_alloc_hints = NULL;
     kfree(esi);
 }
 

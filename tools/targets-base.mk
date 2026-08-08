@@ -52,7 +52,9 @@
 		final-stage7-rv-8c-j2 final-stage7-la-8c-j2 \
 		final-stage7-rv-8c-j4 final-stage7-la-8c-j4 \
 		final-stage7-rv-8c-j8 final-stage7-la-8c-j8 \
-		final-stage7-rv-8c-default final-stage7-la-8c-default
+		final-stage7-rv-8c-default final-stage7-la-8c-default \
+		final-stage9-rv-1c-perf final-stage9-rv-8c-perf \
+		final-stage9-la-1c-perf final-stage9-la-8c-perf
 
 FORCE:
 
