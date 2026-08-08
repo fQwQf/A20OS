@@ -1,3 +1,21 @@
+# Native service IDL → C header. The header is generated from the IDL and
+# gitignored; any target that consumes rtcd/svc/ubd proto headers pulls this
+# rule in automatically (see the dependency rules below).
+A20_SERVICES_IDL_SRC := user/svc/a20_services.idl
+A20_SERVICES_IDL_GEN := tools/a20idl.py
+A20_SERVICES_IDL_HDR := user/svc/a20_services_idl.h
+A20_IDL_PYTHON      ?= conda run -n a20os python
+
+$(A20_SERVICES_IDL_HDR): $(A20_SERVICES_IDL_SRC) $(A20_SERVICES_IDL_GEN)
+	@mkdir -p $(dir $@)
+	$(A20_IDL_PYTHON) $(A20_SERVICES_IDL_GEN) $(A20_SERVICES_IDL_SRC) $@
+
+# Consumers: the three proto headers include the generated header, so make
+# them depend on it (targets that list these headers rebuild automatically).
+user/svc/rtcd_proto.h: $(A20_SERVICES_IDL_HDR)
+user/svc/svc_proto.h:  $(A20_SERVICES_IDL_HDR)
+user/svc/ubd_proto.h:  $(A20_SERVICES_IDL_HDR)
+
 NATIVE_TEST_DIR  := user/tests
 NATIVE_LD        := user/liba20rt/a20-generic.ld
 NATIVE_CRT0_RV   := user/liba20rt/crt0_rv64.S

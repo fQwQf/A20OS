@@ -19,10 +19,10 @@ smoke-riscv64:
 		exit "$$status"; \
 	fi
 
-check-a20-idl:
+check-a20-idl: user/svc/a20_services_idl.h
 	@tmp="$$(mktemp)"; \
 	trap 'rm -f "$$tmp"' EXIT; \
-	conda run -n a20os python tools/a20idl.py user/svc/a20_services.idl "$$tmp"; \
+	$(A20_IDL_PYTHON) tools/a20idl.py user/svc/a20_services.idl "$$tmp"; \
 	cmp -s "$$tmp" user/svc/a20_services_idl.h || { \
 		echo "check-a20-idl: generated header is stale"; exit 1; }; \
 	echo "check-a20-idl: PASS"

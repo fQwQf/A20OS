@@ -4,12 +4,13 @@
 
 ## 设计定位
 
-`abi/linux` 承担 Linux 用户态兼容职责，`abi/native` 面向原生用户态设计，不复制 POSIX 或 Linux syscall 编号。当前用户态主运行时是 Linux ABI 上的 musl 兼容层；Native ABI 在内核侧已实现 129 个 syscall 入口，用户态活跃组件是 `liba20rt`（Native SDK）和 `liba20c`（最小原生 C 库）。
+`abi/linux` 承担 Linux 用户态兼容职责，`abi/native` 面向原生用户态设计，不复制 POSIX 或 Linux syscall 编号。当前用户态主运行时是 Linux ABI 上的 musl 兼容层；Native ABI 在内核侧已实现 126 个 syscall 入口（`syscall_table.def` 登记），用户态活跃组件是 `liba20rt`（Native SDK）和 `liba20c`（最小原生 C 库）。
 
 长期布局：
 
 ```text
-kernel/abi/linux/    Linux-compatible ABI subset（当前主用户态运行时）kernel/abi/native/   A20OS native ABI（内核入口已实现，用户态 SDK 为 liba20rt + liba20c）
+kernel/abi/linux/    Linux-compatible ABI subset（当前主用户态运行时）
+kernel/abi/native/   A20OS native ABI（内核入口已实现，用户态 SDK 为 liba20rt + liba20c）
 ```
 
 Debug 分区（0x0900）实现完整的停止/恢复/观察语义：`debug_attach/traceme/detach/ resume`、`debug_wait/event` 停止报告（含退出事件）、`debug_read/write` 地址空间访问、寄存器读写，底层复用 ABI 无关的内核调试接口 `proc_debug_*` （`kernel/proc/debug.c`），与 Linux ABI 的 ptrace(2) 共享同一状态机。
@@ -29,7 +30,7 @@ typedef uint32_t a20_handle_t;
 
 > 我看 Windows NT 搞得不错，内核对象极大丰富，各类资源的调用差异基本消灭，面向对象，安全权能机制也受重视，如果再加上开源，Windows NT 就是我们理想中的操作系统内核。  ——fQwQf
 
-13 种对象类型（详见 [handle.md](03-handle.md)）：
+14 种对象类型（含 `ext_prog` 内核扩展程序，详见 [handle.md](03-handle.md)）：
 
 | 类型 | 说明 |
 |------|------|
@@ -42,10 +43,11 @@ typedef uint32_t a20_handle_t;
 | channel | IPC 通道端点 |
 | eventq | 事件队列 |
 | timer | 定时器 |
-| shm | 共享内存对象 |
+| memory | 共享内存对象（VMO） |
 | device | 设备 |
 | ns | 命名空间 |
 | debug | 调试对象 |
+| ext_prog | 内核扩展程序 |
 
 handle 是进程本地编号，不是全局对象 ID。不同进程中的同一个数字不代表同一个对象。
 
@@ -94,10 +96,24 @@ int64_t a20_abi_info(a20_abi_info_t *out);
 Native ABI syscall 编号按子系统分区：
 
 ```text
-0x0000 - 0x00ff  core / abi / system0x0100 - 0x01ff  handle0x0200 - 0x02ff  task / thread0x0300 - 0x03ff  memory0x0400 - 0x04ff  path / filesystem0x0500 - 0x05ff  ipc / event0x0600 - 0x06ff  net0x0700 - 0x07ff  time0x0800 - 0x08ff  security / namespace0x0900 - 0x09ff  debug / trace0x0a00 - 0x0aff  system info / random / power0x0b00 - 0x0bff  sync (futex)0x0c00 - 0x0fff  reserved for future core extensions0x1000 - 0x1fff  experimental, not stable
+0x0000 - 0x00ff  core / abi / system
+0x0100 - 0x01ff  handle
+0x0200 - 0x02ff  task / thread
+0x0300 - 0x03ff  memory
+0x0400 - 0x04ff  path / filesystem
+0x0500 - 0x05ff  ipc / event
+0x0600 - 0x06ff  net
+0x0700 - 0x07ff  time
+0x0800 - 0x08ff  security / namespace
+0x0900 - 0x09ff  debug / trace
+0x0a00 - 0x0aff  system info / random / power
+0x0b00 - 0x0bff  sync (futex)
+0x0c00 - 0x0cff  device / user-space drivers
+0x0e00 - 0x0eff  kernel extension points
+0x1000 - 0x1fff  experimental, not stable
 ```
 
-稳定 syscall 不允许随意改号。实验 syscall 只能在 `0x1000+` 范围内。完整的 129 个 syscall 编号表见 [handle.md](03-handle.md) §6。
+稳定 syscall 不允许随意改号。实验 syscall 只能在 `0x1000+` 范围内。完整的 syscall 编号表见 [handle.md](03-handle.md) §6。
 
 ## 文档索引
 
@@ -105,7 +121,7 @@ Native ABI syscall 编号按子系统分区：
 |------|------|
 | [types.md](01-types.md) | 基础类型定义、ABI 头约定、所有 syscall 参数结构体 |
 | [errors.md](02-errors.md) | 错误码定义、返回值约定、错误处理策略 |
-| [handle.md](03-handle.md) | Handle 生命周期状态机、handle table 规范、13 种对象类型映射 |
+| [handle.md](03-handle.md) | Handle 生命周期状态机、handle table 规范、14 种对象类型映射 |
 | [memory.md](04-memory.md) | VMO/VMAR 内存模型、内存操作语义、共享内存与映射 |
 | [ipc.md](05-ipc.md) | Channel IPC 协议、Event Queue 机制、partial delivery 状态机 |
 | [security.md](06-security.md) | Rights 代数、handle transfer 语义、安全标签格、capability 安全模型 |
@@ -172,30 +188,63 @@ Native ABI 一旦稳定，需要遵守：
 | 组件 | 文件 | 状态 | 说明 |
 |------|------|------|------|
 | Linux ABI | `kernel/abi/linux/` | 活跃 | 当前主用户态运行时接口 |
-| Native 核心 syscall | `kernel/abi/native/sys_core.c` | 已实现 | 17 个 Phase 1 syscall |
-| Native 扩展 syscall | `kernel/abi/native/sys_phase2.c` | 已实现 | 85 个扩展 syscall（Debug 0x0900 完整实现；Kernel extension 0x0D00 新增，见 docs/extensions.md） |
+| Native 核心 syscall | `kernel/abi/native/sys_core.c` | 已实现 | Phase 1 核心 syscall |
+| Native 扩展 syscall | `kernel/abi/native/sys_phase2.c` 等 | 已实现 | 全部 126 个 syscall 入口，覆盖 core/handle/task/memory/path/ipc/net/time/security/debug/system/sync/device/kernel-ext 分区；Kernel extension 为 0x0E00，见 docs/extensions.md |
 | Handle table | `kernel/abi/native/handle_table.c` | 已实现 | handle 状态机 + 查找/安装/移除 |
 | 启动协议 | `kernel/abi/native/startup.c` | 已实现 | 用户态 Native 启动 |
 | Channel IPC | `kernel/ipc/a20_channel.c` | 已实现 | Channel 消息传递 |
 | Event Queue | `kernel/ipc/a20_event.c` | 已实现 | 事件等待与通知 |
 | Native SDK | `user/liba20rt/` | 活跃 | syscall wrapper、启动代码、handle I/O |
-| 最小原生 C 库 | `user/liba20c/` | 活跃，存在技术债 | malloc/stdio/unistd 等仍使用裸参数数组调用 syscall，未统一使用版本化结构体 |
+| 最小原生 C 库 | `user/liba20c/` | 活跃 | malloc/stdio/unistd 等已迁移到版本化 ABI 结构体（见 [08-runtime-status.md](08-runtime-status.md) §1） |
 | 历史参考 | `user/archive/` | 不参与构建 | 旧版 musl 移植、coreutils、build_sysroot.sh 等 |
 
 ## 代码结构
 
 ```text
-kernel/abi/native/DESIGN.md            顶层设计参考syscall_table.c      syscall 分发表syscall_table.def    syscall 编号宏定义（129 条）sys_core.c           Phase 1 syscall 实现（17 个核心 syscall）sys_phase2.c         Phase 2 syscall 实现（扩展 syscall）sys_native_debug.c    Debug (0x0900) syscall（包装 proc_debug_*）handle_table.c       Handle table 实现（状态机 + 查找/安装/移除）startup.c            用户态启动协议a20_graceful.c       错误降级处理
+kernel/abi/native/syscall_table.c      syscall 分发表
+syscall_table.def                      syscall 编号宏定义（126 条）
+sys_core.c                             核心 syscall 实现
+sys_native_{handle,task,mm,fs,ipc,net,time,security,debug,system,sync,device,ext}.c  分区 syscall
+sys_native_debug.c                     Debug (0x0900) syscall（包装 proc_debug_*）
+handle_table.c                         Handle table 实现（状态机 + 查找/安装/移除）
+registry.c                             服务注册表（0x0A03）
+startup.c                              用户态启动协议
+a20_graceful.c                         错误降级处理
 
-kernel/ipc/a20_channel.c        Channel IPC 实现a20_event.c          Event Queue 实现
+kernel/ipc/a20_channel.c               Channel IPC 实现
+a20_event.c                            Event Queue 实现
+a20_object.c                           类型化对象引用计数与销毁
 
-kernel/include/abi/native/types.h              用户可见类型定义errno.h              错误码常量rights.h             权限位定义syscall_nr.h         syscall 编号常量syscall_entry.h      syscall 入口约定startup.h            启动信息结构vmo.h / vmar.h       VMO/VMAR 内存模型ipc_internal.h       Channel/Event 内部接口fastpath.h           Syscall 快速路径（inline handle/rights/iov/bitmap）ring_spsc.h          Lock-free SPSC ring bufferresource.h           资源限制常量和检查函数
+kernel/include/abi/native/types.h      用户可见类型定义
+errno.h                                错误码常量
+rights.h                               权限位定义
+syscall_nr.h                           syscall 编号常量
+syscall_entry.h                        syscall 入口约定
+startup.h                              启动信息结构
+vmo.h / vmar.h                         VMO/VMAR 内存模型
+ipc_internal.h                         Channel/Event 内部接口
+fastpath.h                             Syscall 快速路径（inline handle/rights/iov/bitmap）
+ring_spsc.h                            Lock-free SPSC ring buffer
+resource.h                             资源限制常量和检查函数
 
-user/liba20rt/         当前活跃的 Native SDKa20_types.h          ABI 类型定义（与 kernel/include/abi/native/types.h 对应）a20_syscall.h        syscall wrapper 和编号常量a20_handle.h / a20_fs.h / a20_task.h / ...  高层封装头a20_simple_io.c      简化 I/O 实现crt0_*.S             多架构启动汇编
+user/liba20rt/         当前活跃的 Native SDK
+a20_types.h            ABI 类型定义（与 kernel/include/abi/native/types.h 对应）
+a20_syscall.h          syscall wrapper 和编号常量
+a20_handle.h / a20_fs.h / a20_task.h / ...  高层封装头
+a20_simple_io.c        简化 I/O 实现
+crt0_*.S               多架构启动汇编
 
-user/liba20c/          最小原生 C 库malloc.c / stdio.c / unistd.c / string.c / ...include/             ISO C 头文件子集fdtable.c            fd↔handle 映射
+user/liba20c/          最小原生 C 库
+malloc.c / stdio.c / unistd.c / string.c / ...
+include/               ISO C 头文件子集
+fdtable.c              fd↔handle 映射
 
-user/archive/          历史参考代码，不参与构建a20coreutils/        旧版原生 coreutils 示例src/                 旧版 musl 桥接实现build_sysroot.sh     旧版 sysroot 脚本（引用路径已过期）arch/a20/            旧版 musl arch 适配头tests/               旧版测试程序
+user/archive/          历史参考代码，不参与构建
+a20coreutils/          旧版原生 coreutils 示例
+src/                   旧版 musl 桥接实现
+build_sysroot.sh       旧版 sysroot 脚本（引用路径已过期）
+arch/a20/              旧版 musl arch 适配头
+tests/                 旧版测试程序
 ```
 
 ## 明确不做的事
@@ -212,7 +261,7 @@ Native ABI 不应该：
 
 ## Syscall 完整性
 
-Native ABI 用 129 个 syscall 覆盖 Linux ABI 分发表当前定义的 254 个 syscall。关键统一机制包括：
+Native ABI 用 126 个 syscall（`syscall_table.def` 登记）以更紧凑的接口覆盖 Linux ABI 分发表当前定义的 258 个 syscall。关键统一机制包括：
 
 - `handle_set_meta`：一次调用修改 chmod/chown/utimes/truncate 等元数据。
 - `handle_transfer`：统一 splice/sendfile/copy_file_range/tee 的零拷贝语义。
@@ -226,15 +275,14 @@ Native ABI 用 129 个 syscall 覆盖 Linux ABI 分发表当前定义的 254 个
 
 已完成的阶段：
 
-- Phase 0：`liba20rt` 最小运行时（syscall 发射宏、129 个 syscall 编号、多架构 crt0、hello world 测试）。
+- Phase 0：`liba20rt` 最小运行时（syscall 发射宏、126 个 syscall 编号、多架构 crt0、hello world 测试）。
 - Phase 1：`liba20c` 最小 C 库（malloc、fd↔handle 映射、FILE*、errno、基础 POSIX open/read/write/close 包装）。
-- Phase 2：内核侧 129 个 syscall 扩展（task_spawn、thread_create、timer、channel、socket、VMO/VMAR 等）。
+- Phase 2：内核侧 126 个 syscall 扩展（task_spawn、thread_create、timer、channel、socket、VMO/VMAR 等）。
 
 剩余工作：
 
-- 修复 `liba20c` 中裸参数数组调用 syscall 的技术债，统一使用版本化 ABI 结构体。
 - 扩展原生测试覆盖，从示例程序逐步建立回归套件。
 - 按需实现 `A20_SPAWN_FORK_SELF` 与事件驱动信号模拟，以支持需要 fork 的复杂 POSIX 程序。
-- 设计 Native ABI 动态链接器。
+- 设计 Native ABI 动态链接器（工作量评估见 [08-runtime-status.md](08-runtime-status.md) §8a）。
 
 详细运行时状态与后续路线图见 [08-runtime-status.md](08-runtime-status.md)。

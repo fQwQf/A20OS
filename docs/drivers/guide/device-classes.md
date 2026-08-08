@@ -237,7 +237,7 @@ struct input_event {
 - 每实例维护 ring；满时不得覆盖尚未读取的数据，必须记录丢弃计数或通过类 ioctl 暴露可观察的 overflow 状态。
 - `/dev/event0` 聚合所有 `DEV_CLASS_INPUT`。新 input 驱动只需正确注册类，不要新增硬件私有 getter。
 
-参考实现：`vinput.a20drv`（drvmod 模块）、`xhci_hid.c`。PS/2 是 x86 板级控制器服务（drvmod 模块 `ps2.a20drv`），不属于可复用 input class；新驱动必须使用本类接口。
+参考实现：`vinput.a20drv`（drvmod 模块）、`kernel/drivers/usb/class/usb_hid.c`（xHCI 上的 USB HID）。PS/2 是 x86 板级控制器服务（drvmod 模块 `ps2.a20drv`），不属于可复用 input class；新驱动必须使用本类接口。
 
 典型生命周期：
 
