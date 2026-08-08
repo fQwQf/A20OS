@@ -237,7 +237,7 @@ struct input_event {
 - 每实例维护 ring；满时不得覆盖尚未读取的数据，必须记录丢弃计数或通过类 ioctl 暴露可观察的 overflow 状态。
 - `/dev/event0` 聚合所有 `DEV_CLASS_INPUT`。新 input 驱动只需正确注册类，不要新增硬件私有 getter。
 
-参考实现：`vinput.drv`（drvmod 模块）、`xhci_hid.c`。PS/2 是 x86 板级控制器服务（drvmod 模块 `ps2.drv`），不属于可复用 input class；新驱动必须使用本类接口。
+参考实现：`vinput.a20drv`（drvmod 模块）、`xhci_hid.c`。PS/2 是 x86 板级控制器服务（drvmod 模块 `ps2.a20drv`），不属于可复用 input class；新驱动必须使用本类接口。
 
 典型生命周期：
 
@@ -301,7 +301,7 @@ struct input_event {
 
  不要这样做：当 ring 满时直接覆盖旧事件。这会让用户态看到乱序按键；应该记录丢弃计数，并通过 ioctl 或状态位暴露 overflow。
 
- `/dev/event0` 是 transport-independent evdev mux（`kernel/drivers/input/input_mux.c`），消费所有 input class 设备并提供 EVIOCG* ioctl 面与等待语义；驱动模块 `vinput.drv`（`kernel/drvmod/examples/vinput.c`）是完整参考实现，ISR 入队后经 `input_mux_wake()` 唤醒 mux。详见 [输入子系统](../classes/input.md)。
+ `/dev/event0` 是 transport-independent evdev mux（`kernel/drivers/input/input_mux.c`），消费所有 input class 设备并提供 EVIOCG* ioctl 面与等待语义；驱动模块 `vinput.a20drv`（`kernel/drvmod/examples/vinput.c`）是完整参考实现，ISR 入队后经 `input_mux_wake()` 唤醒 mux。详见 [输入子系统](../classes/input.md)。
 
 ## Display：`DEV_CLASS_DISPLAY`
 

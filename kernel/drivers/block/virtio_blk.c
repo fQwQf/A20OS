@@ -780,12 +780,19 @@ static int virtio_blk_driver_remove(device_t *dev) {
     return 0;
 }
 
+static void virtio_blk_driver_progress(device_t *dev)
+{
+    (void)dev;
+    virtio_blk_poll_all();
+}
+
 static driver_t virtio_blk_driver = {
     .name       = "virtio-blk",
     .id_table   = virtio_blk_ids,
     .bus        = NULL,
     .probe      = virtio_blk_driver_probe,
     .remove     = virtio_blk_driver_remove,
+    .progress   = virtio_blk_driver_progress,
     .class_ops  = &virtio_blk_class_ops,
     .class_type = DEV_CLASS_BLOCK,
 };

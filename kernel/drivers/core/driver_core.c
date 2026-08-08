@@ -43,8 +43,18 @@ static int driver_matches_device(driver_t *drv, device_t *dev)
     if (dev->bus && dev->bus->match)
         match = dev->bus->match(dev, drv);
     else if (!dev->bus && !drv->bus)
-        match = 1;
+        /* A busless device has no bus identity to match against; it binds
+         * only when the driver explicitly accepts it via its match()
+         * callback.  There is deliberately no wildcard: a busless driver
+         * must never claim an unrelated board device by accident. */
+        match = drv->match ? drv->match(dev) : 0;
     if (match && drv->match && !drv->match(dev)) {
+        dev->matched_id = NULL;
+        match = 0;
+    }
+    /* One owner per device: a user-owned device accepts only read-only
+     * kernel probes; the owning user-service driver drives it. */
+    if (match && dev->user_owned && !drv->read_only_probe) {
         dev->matched_id = NULL;
         match = 0;
     }
@@ -388,4 +398,13 @@ void driver_probe_all(void) {
             probed++;
     }
     kinfo("[DRIVER] probe_all: %d devices probed\n", probed);
+}
+
+void driver_progress_class(uint32_t class_type)
+{
+    for (int i = 0; i < g_device_count; i++) {
+        device_t *dev = g_devices[i];
+        if (dev->drv && dev->drv->class_type == class_type && dev->drv->progress)
+            dev->drv->progress(dev);
+    }
 }

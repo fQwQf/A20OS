@@ -7,6 +7,7 @@
  * private lock and document it in docs/drivers/lock-order.md.
  */
 #include "drivers/block/dw_sdio.h"
+#include "drivers/bus/platform_bus.h"
 #include "drivers/core/driver_core.h"
 #include "drivers/core/driver_class.h"
 #include "drivers/core/driver_hwapi.h"
@@ -352,6 +353,9 @@ static int dw_sdio_driver_probe(device_t *dev) {
         return -1;
     }
 
+    /* The low-level transfer code tracks its state in g_sdio; mirror it
+     * into the driver instance so the class ops use a live base address. */
+    g_drv.sdio = g_sdio;
     dev->drv_priv = &g_drv;
     kinfo("[DW-SDIO] Probed '%s' at 0x%lx\n", dev->name, (unsigned long)res->start);
     return 0;
@@ -389,10 +393,16 @@ static block_dev_ops_t dw_sdio_block_ops = {
     .sector_size = dw_sdio_class_sector_size,
 };
 
+static const device_id_t dw_sdio_ids[] = {
+    { .vendor = DW_SDIO_PLATFORM_VENDOR, .device = DW_SDIO_PLATFORM_DEVICE,
+      .subvendor = VENDOR_ANY, .subdevice = DEVICE_ANY },
+    { 0 },
+};
+
 static driver_t dw_sdio_driver = {
     .name       = "dw-sdio",
-    .id_table   = NULL,
-    .bus        = NULL,
+    .id_table   = dw_sdio_ids,
+    .bus        = &platform_bus,
     .probe      = dw_sdio_driver_probe,
     .remove     = dw_sdio_driver_remove,
     .class_ops  = &dw_sdio_block_ops,

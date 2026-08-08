@@ -58,7 +58,7 @@ static a20_status_t spawn_rtcd(a20_handle_t *out_ep, a20_handle_t *out_task)
     if (st != A20_OK)
         return st;
 
-    static const char path[] = "/bin/rtcd-rv";
+    static const char path[] = "/bin/rtcd-rv.a20drv";
     a20_path_open_args_t oa;
     oa.size = sizeof(oa);
     oa.version = 1;

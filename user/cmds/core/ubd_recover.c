@@ -1,7 +1,7 @@
 /*
  * ubd_recover — user-space virtio-blk driver crash recovery (M4).
  *
- * The block service runs in a user process (ubd-rv) behind the kernel
+ * The block service runs in a user process (ubd-rv.a20drv) behind the kernel
  * block proxy; killing the driver must NOT kill the system, and after a
  * supervisor-style respawn the SAME block device (and its FAT32 mount at
  * /ubd) must keep serving I/O:
@@ -51,7 +51,7 @@ static pid_t spawn_driver(void)
 {
     pid_t pid = fork();
     if (pid == 0) {
-        execl("/bin/ubd-rv", "ubd-rv", (char *)0);
+        execl("/bin/ubd-rv.a20drv", "ubd-rv.a20drv", (char *)0);
         _exit(90);
     }
     return pid;

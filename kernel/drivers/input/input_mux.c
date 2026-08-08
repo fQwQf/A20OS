@@ -2,7 +2,7 @@
  * A20OS — input multiplexer (devfs service for /dev/event0).
  *
  * Split from kernel/drivers/input/virtio_input.c (removed): the input
- * DRIVERS now run as drvmod modules (vinput.drv) and publish input class
+ * DRIVERS now run as drvmod modules (vinput.a20drv) and publish input class
  * devices through the unified driver core; this file keeps the
  * transport-independent evdev service — the /dev/event0 vnode, the
  * EVIOCG* ioctl surface, the key/ABS state trackers and the read

@@ -1,22 +1,76 @@
 /*
- * drvctl - stage a signed A20 kernel-driver package in DriverStore.
+ * drvctl - manage A20 driver packages (.a20drv) in the DriverStore.
  *
- * This command deliberately does not load native code by itself. It verifies
- * the small line-oriented manifest, copies the module and manifest to the
- * persistent driver store, and leaves activation to the kernel boot/driver
- * manager. Runtime activation will be added with the native driver-control
- * ABI once device removal and process-wide page-table invalidation are wired.
+ * The .a20drv descriptor inside the package is the ONLY driver metadata
+ * (there is no sidecar manifest).  drvctl validates the descriptor, stages
+ * the package into the persistent DriverStore, and leaves activation to
+ * the kernel driver manager on the next boot (driver_manager_init).  The
+ * same descriptor is the metadata source for the kernel manager and for
+ * `drvctl list`.
  */
 
 #include <dirent.h>
+#include <elf.h>
 #include <fcntl.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
 
 #define DRIVER_STORE "/bin/lib/drivers/"
-#define MANIFEST_MAX 4096
 #define NAME_MAX_LEN 48
+
+#define A20_DRIVER_DESCRIPTOR_MAGIC   0x41323044U /* "A20D" */
+#define A20_DRIVER_DESCRIPTOR_VERSION 2U
+#define A20_DRIVER_MAX_MATCH 4
+
+/* Byte layout mirrors kernel/include/drivers/driver_descriptor.h
+ * (a20_driver_descriptor_t).  All fields are 4-byte aligned, so the C
+ * layout is identical to the kernel's. */
+typedef struct a20_driver_match_desc {
+    uint32_t bus;
+    uint32_t vendor;
+    uint32_t device;
+} a20_driver_match_desc_t;
+
+typedef struct a20_driver_desc {
+    uint32_t magic;
+    uint32_t version;
+    uint32_t placement;
+    uint32_t type;
+    char name[32];
+    uint32_t abi;
+    uint32_t resource_mask;
+    uint32_t reserved;
+    a20_driver_match_desc_t match[A20_DRIVER_MAX_MATCH];
+    uint32_t match_count;
+} a20_driver_desc_t;
+
+_Static_assert(sizeof(a20_driver_desc_t) == 112, "descriptor layout drift");
+
+static const char *placement_str(uint32_t p)
+{
+    switch (p) {
+    case 1: return "kernel-module";
+    case 2: return "user-service";
+    default: return "?";
+    }
+}
+
+static const char *type_str(uint32_t t)
+{
+    switch (t) {
+    case 1: return "rtc";
+    case 2: return "block";
+    case 3: return "input";
+    case 4: return "audio";
+    case 5: return "security";
+    case 6: return "net";
+    case 7: return "display";
+    case 8: return "usb";
+    default: return "?";
+    }
+}
 
 static int valid_name(const char *name)
 {
@@ -32,29 +86,67 @@ static int valid_name(const char *name)
     return 1;
 }
 
-static int read_manifest(const char *path, char *buf, size_t cap)
+static int read_descriptor(const char *path, a20_driver_desc_t *out)
 {
     int fd = open(path, O_RDONLY);
     if (fd < 0)
         return -1;
-    ssize_t n = read(fd, buf, cap - 1);
-    close(fd);
-    if (n <= 0 || (size_t)n >= cap - 1)
-        return -1;
-    buf[n] = '\0';
-    return 0;
-}
 
-static int has_key(const char *manifest, const char *key)
-{
-    size_t n = strlen(key);
-    const char *p = manifest;
-    while ((p = strstr(p, key)) != NULL) {
-        if ((p == manifest || p[-1] == '\n') && p[n] != '\0')
-            return 1;
-        p += n;
+    Elf64_Ehdr eh;
+    if (read(fd, &eh, sizeof(eh)) != (ssize_t)sizeof(eh)) {
+        close(fd);
+        return -1;
     }
-    return 0;
+    if (memcmp(eh.e_ident, ELFMAG, SELFMAG) != 0 ||
+        eh.e_ident[EI_CLASS] != ELFCLASS64 ||
+        eh.e_shentsize != sizeof(Elf64_Shdr) || eh.e_shnum == 0 ||
+        eh.e_shnum > 128 || eh.e_shstrndx >= eh.e_shnum) {
+        close(fd);
+        return -1;
+    }
+
+    Elf64_Shdr shdrs[128];
+    if (pread(fd, shdrs, sizeof(Elf64_Shdr) * eh.e_shnum, eh.e_shoff) !=
+        (ssize_t)(sizeof(Elf64_Shdr) * eh.e_shnum)) {
+        close(fd);
+        return -1;
+    }
+    Elf64_Shdr *shstr = &shdrs[eh.e_shstrndx];
+    if (shstr->sh_size == 0 || shstr->sh_size > 4096) {
+        close(fd);
+        return -1;
+    }
+    char names[4096];
+    if (pread(fd, names, shstr->sh_size, shstr->sh_offset) !=
+        (ssize_t)shstr->sh_size) {
+        close(fd);
+        return -1;
+    }
+
+    for (int i = 0; i < eh.e_shnum; i++) {
+        Elf64_Shdr *sh = &shdrs[i];
+        if (sh->sh_name >= shstr->sh_size)
+            continue;
+        if (strcmp(names + sh->sh_name, ".a20drv") != 0)
+            continue;
+        if (sh->sh_type != SHT_PROGBITS || sh->sh_size != sizeof(*out)) {
+            close(fd);
+            return -1;
+        }
+        if (pread(fd, out, sizeof(*out), sh->sh_offset) !=
+            (ssize_t)sizeof(*out)) {
+            close(fd);
+            return -1;
+        }
+        close(fd);
+        if (out->magic != A20_DRIVER_DESCRIPTOR_MAGIC ||
+            out->version != A20_DRIVER_DESCRIPTOR_VERSION ||
+            out->match_count > A20_DRIVER_MAX_MATCH || !out->name[0])
+            return -1;
+        return 0;
+    }
+    close(fd);
+    return -1;
 }
 
 static int copy_file(const char *src, const char *dst)
@@ -67,7 +159,6 @@ static int copy_file(const char *src, const char *dst)
         close(in);
         return -1;
     }
-
     char buf[4096];
     int result = 0;
     for (;;) {
@@ -87,50 +178,39 @@ static int copy_file(const char *src, const char *dst)
     return result;
 }
 
-static int store_path(char *out, size_t cap, const char *name,
-                      const char *suffix)
+static int store_path(char *out, size_t cap, const char *name)
 {
-    int n = snprintf(out, cap, "%s%s%s", DRIVER_STORE, name, suffix);
+    int n = snprintf(out, cap, "%s%s.a20drv", DRIVER_STORE, name);
     return n > 0 && (size_t)n < cap ? 0 : -1;
 }
 
-static int install_package(const char *module, const char *manifest,
-                           const char *name)
+static int install_package(const char *module, const char *name)
 {
-    char contents[MANIFEST_MAX];
-    char module_dst[128];
-    char manifest_dst[128];
-    if (!valid_name(name) || read_manifest(manifest, contents, sizeof(contents)) < 0)
+    char dst[128];
+    a20_driver_desc_t desc;
+    if (!valid_name(name))
         return 1;
-    if (!has_key(contents, "name=") || !has_key(contents, "module=") ||
-        !has_key(contents, "bus=") || !has_key(contents, "match="))
+    if (read_descriptor(module, &desc) < 0) {
+        fprintf(stderr, "drvctl: %s has no valid .a20drv descriptor\n",
+                module);
         return 2;
-    if (store_path(module_dst, sizeof(module_dst), name, ".drv") < 0 ||
-        store_path(manifest_dst, sizeof(manifest_dst), name, ".a20inf") < 0)
-        return 3;
-    if (copy_file(module, module_dst) < 0)
-        return 4;
-    if (copy_file(manifest, manifest_dst) < 0) {
-        unlink(module_dst);
-        return 5;
     }
-    printf("DRVCTL: staged %s and %s\n", module_dst, manifest_dst);
+    if (store_path(dst, sizeof(dst), name) < 0)
+        return 3;
+    if (copy_file(module, dst) < 0)
+        return 4;
+    printf("DRVCTL: staged %s (placement=%s type=%s)\n", dst,
+           placement_str(desc.placement), type_str(desc.type));
     printf("DRVCTL: activation pending next driver-manager pass\n");
     return 0;
 }
 
 static int remove_package(const char *name)
 {
-    char module[128];
-    char manifest[128];
-    if (!valid_name(name) || store_path(module, sizeof(module), name, ".drv") < 0 ||
-        store_path(manifest, sizeof(manifest), name, ".a20inf") < 0)
+    char dst[128];
+    if (!valid_name(name) || store_path(dst, sizeof(dst), name) < 0)
         return 1;
-    int result = 0;
-    if (unlink(module) < 0)
-        result = 1;
-    if (unlink(manifest) < 0)
-        result = 1;
+    int result = unlink(dst) < 0 ? 1 : 0;
     return result;
 }
 
@@ -142,8 +222,17 @@ static int list_packages(void)
     struct dirent *entry;
     while ((entry = readdir(dir)) != NULL) {
         size_t n = strlen(entry->d_name);
-        if (n > 4 && strcmp(entry->d_name + n - 4, ".drv") == 0)
-            puts(entry->d_name);
+        if (n <= 7 || strcmp(entry->d_name + n - 7, ".a20drv") != 0)
+            continue;
+        char path[128];
+        snprintf(path, sizeof(path), "%s%s", DRIVER_STORE, entry->d_name);
+        a20_driver_desc_t desc;
+        if (read_descriptor(path, &desc) == 0)
+            printf("%-40s placement=%s type=%s match=%u\n",
+                   entry->d_name, placement_str(desc.placement),
+                   type_str(desc.type), desc.match_count);
+        else
+            printf("%-40s <invalid descriptor>\n", entry->d_name);
     }
     closedir(dir);
     return 0;
@@ -155,10 +244,10 @@ int main(int argc, char **argv)
         return list_packages();
     if (argc == 3 && strcmp(argv[1], "remove") == 0)
         return remove_package(argv[2]);
-    if (argc == 5 && strcmp(argv[1], "install") == 0)
-        return install_package(argv[2], argv[3], argv[4]);
+    if (argc == 4 && strcmp(argv[1], "install") == 0)
+        return install_package(argv[2], argv[3]);
 
-    fprintf(stderr, "usage: drvctl install MODULE MANIFEST NAME\n");
+    fprintf(stderr, "usage: drvctl install MODULE NAME\n");
     fprintf(stderr, "       drvctl remove NAME\n");
     fprintf(stderr, "       drvctl list\n");
     return 2;

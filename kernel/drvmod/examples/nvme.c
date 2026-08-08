@@ -9,6 +9,12 @@
 
 #include "drvmod/drvmod.h"
 
+A20_DRIVER_DESCRIPTOR(A20_DRIVER_PLACEMENT_KERNEL_MODULE,
+                      A20_DRIVER_TYPE_BLOCK, "nvme", A20_DRIVER_ABI, A20_DRIVER_RES_MMIO | A20_DRIVER_RES_IRQ | A20_DRIVER_RES_DMA,
+                      0, 1,
+                      A20_DRIVER_MATCH(A20_DRIVER_BUS_PCI,
+                                           0xFFFFFFFFU, 0xFFFFFFFFU));
+
 #include "drivers/bus/pci_bus.h"
 #include "drivers/core/driver_class.h"
 #include "drivers/core/driver_core.h"
@@ -688,18 +694,9 @@ static driver_t nvme_driver = {
 };
 
 
-/* Pins the module while the driver is registered in the unified core. */
-static drv_driver_t g_modinfo;
-
-uintptr_t DriverEntry(drv_driver_t **out)
+uintptr_t DriverEntry(void)
 {
     int r = drv_driver_register(&nvme_driver);
     drv_log("[NVME] driver registered in core: %d\n", r);
-    if (out) {
-        if (r == 0)
-            *out = &g_modinfo;
-        else
-            *out = NULL;
-    }
-    return 0;
+    return r == 0 ? 0 : 1;
 }

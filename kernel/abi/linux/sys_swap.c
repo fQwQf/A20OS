@@ -1,6 +1,6 @@
 #include "syscall_impl.h"
 #include "core/errno.h"
-#include "drivers/block/virtio_blk.h"
+#include "fs/mount_setup.h"
 
 #ifdef CONFIG_SWAP
 
@@ -27,7 +27,7 @@ static block_dev_t *swap_path_to_block_dev(const char *path)
         if (*p != '\0')
             return NULL;
     }
-    return virtio_blk_get_dev(index);
+    return mount_setup_block_device(index);
 }
 
 long sys_swapon(const char *path, int flags)
