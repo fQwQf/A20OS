@@ -89,8 +89,8 @@ typedef struct a20_start_info {
 
 | 路径 | 适用场景 | 工作量 | POSIX 兼容性 | 状态 |
 |------|---------|--------|-------------|------|
-| 从零写 liba20c | Phase 0-1，验证最小程序 | ~985 行 | ISO C 子集 | ✅ 已完成 |
-| 移植 musl | Phase 2+，支持真实程序 | ~1500 行新代码 + musl | 完整 POSIX | ✅ 已完成 |
+| 从零写 liba20c | Phase 0-1，验证最小程序 | ~985 行 | ISO C 子集 | 已完成 |
+| 移植 musl | Phase 2+，支持真实程序 | ~1500 行新代码 + musl | 完整 POSIX | 已完成 |
 
 ### 2.2 liba20rt — 最小运行时
 
@@ -968,8 +968,8 @@ int main(int argc, char *argv[]) {
 ### 关键依赖关系
 
 ```text
-Phase 0 ──→ Phase 1 ──→ Phase 2 ──→ Phase 3│            │            │            ││            │            │            └── 内核: A20_SPAWN_FORK_SELF│            │            │            └── 内核: 异步信号投递│            │            ✅ 已完成    └── 待实现│            ✅ 已完成    └── 内核: 全部 129 个 syscall ✅✅ 已完成    └── 内核: ~15 个基础 syscall ✅└── 内核: 启动协议 + abi_info + handle_close + vm_alloc ✅
-          + handle_write + path_open + task_exit ✅
+Phase 0 ──→ Phase 1 ──→ Phase 2 ──→ Phase 3│            │            │            ││            │            │            └── 内核: A20_SPAWN_FORK_SELF│            │            │            └── 内核: 异步信号投递│            │            √ 已完成    └── 待实现│            √ 已完成    └── 内核: 全部 129 个 syscall √√ 已完成    └── 内核: ~15 个基础 syscall √└── 内核: 启动协议 + abi_info + handle_close + vm_alloc √
+          + handle_write + path_open + task_exit √
 ```
 
 每个 Phase 可以独立验证，不依赖后续 Phase 的内核功能。
