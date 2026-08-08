@@ -3,7 +3,9 @@
 #include "drivers/core/driver_core.h"
 #include "core/arch.h"
 #include "core/cpu.h"
+#include "core/panic.h"
 #include "core/smp.h"
+#include "core/stdio.h"
 #include "core/timer.h"
 #include "firmware.h"
 
@@ -77,14 +79,15 @@ static void rv64_smp_send_ipi(const smp_cpu_desc_t *cpu,
     sbi_send_ipi(1UL, cpu->hw_id);
 }
 
-/* IPI-based remote TLB flush.  The initiating CPU sets the target's pending
- * bit, sends an IPI, and spins on the per-target generation counter; the soft
- * IRQ handler on the target performs sfence.vma and bumps its generation.
+/* IPI-based remote TLB flush.  The initiating CPU advances the target's
+ * request generation, sends an IPI, and waits for the corresponding completed
+ * generation; the soft IRQ handler publishes that acknowledgement only after
+ * sfence.vma has retired.
  * This replaces SBI REMOTE SFENCE.VMA, which is not reliably emulated by
  * QEMU TCG for remote harts.  The caller must not hold a spinlock with
  * interrupts disabled (remote-flush calls are deferred until after unlock). */
-static _Atomic uint32_t rv64_tlb_pending[CONFIG_NR_CPUS];
-static _Atomic uint32_t rv64_tlb_gen[CONFIG_NR_CPUS];
+static _Atomic uint32_t rv64_tlb_request[CONFIG_NR_CPUS];
+static _Atomic uint32_t rv64_tlb_ack[CONFIG_NR_CPUS];
 static _Atomic uint32_t rv64_tlb_ipi_serviced;
 static _Atomic uint32_t rv64_tlb_flush_calls;
 
@@ -99,6 +102,7 @@ static int rv64_smp_remote_tlb_flush(uint32_t pending, uint64_t addr,
                                      uint64_t size) {
     (void)addr;
     (void)size;
+    uint32_t expected[CONFIG_NR_CPUS] = {0};
     uint32_t self = 1U << arch_current_cpu_id();
     pending &= ~self;
     if (!pending)
@@ -111,8 +115,8 @@ static int rv64_smp_remote_tlb_flush(uint32_t pending, uint64_t addr,
         uint64_t hw_id;
         if (smp_logical_to_hw(cpu, &hw_id) < 0)
             continue;
-        __atomic_fetch_add(&rv64_tlb_gen[cpu], 1, __ATOMIC_ACQ_REL);
-        __atomic_store_n(&rv64_tlb_pending[cpu], 1, __ATOMIC_RELEASE);
+        expected[cpu] = __atomic_add_fetch(&rv64_tlb_request[cpu], 1,
+                                           __ATOMIC_ACQ_REL);
         sbi_send_ipi(1UL, hw_id);
     }
 
@@ -128,23 +132,46 @@ static int rv64_smp_remote_tlb_flush(uint32_t pending, uint64_t addr,
     for (unsigned cpu = 0; cpu < CONFIG_NR_CPUS; cpu++) {
         if (!(pending & (1U << cpu)))
             continue;
-        while (__atomic_load_n(&rv64_tlb_pending[cpu], __ATOMIC_ACQUIRE))
+        uint64_t wait_start = timer_get_ticks();
+        while ((int32_t)(__atomic_load_n(&rv64_tlb_ack[cpu],
+                                         __ATOMIC_ACQUIRE) -
+                         expected[cpu]) < 0) {
+            if (timer_get_ticks() - wait_start > 5UL * ARCH_TIMER_FREQ) {
+                printf("[RV64 TLB] timeout self=%u target=%u expected=%u "
+                       "request=%u ack=%u online=0x%x\n",
+                       arch_current_cpu_id(), cpu, expected[cpu],
+                       __atomic_load_n(&rv64_tlb_request[cpu],
+                                       __ATOMIC_ACQUIRE),
+                       __atomic_load_n(&rv64_tlb_ack[cpu],
+                                       __ATOMIC_ACQUIRE),
+                       smp_online_cpu_mask());
+                panic("RISC-V remote TLB shootdown timed out");
+            }
             arch_cpu_relax();
+        }
     }
     if (irqs_were_off)
         arch_local_irq_disable();
     return 0;
 }
 
-/* Called from the soft-IRQ handler: execute sfence.vma and clear the pending
- * bit so the initiator can proceed.  Must be IRQ-safe and lock-free. */
+/* Called from the soft-IRQ handler.  A single interrupt may cover several
+ * coalesced requests.  Loop until the completed generation catches the latest
+ * request, and never acknowledge a generation before sfence.vma completes. */
 void rv64_ipi_tlb_flush_handler(void)
 {
     unsigned cpu = arch_current_cpu_id();
     if (cpu >= CONFIG_NR_CPUS)
         return;
-    if (__atomic_exchange_n(&rv64_tlb_pending[cpu], 0, __ATOMIC_ACQ_REL)) {
+    for (;;) {
+        uint32_t request = __atomic_load_n(&rv64_tlb_request[cpu],
+                                           __ATOMIC_ACQUIRE);
+        uint32_t ack = __atomic_load_n(&rv64_tlb_ack[cpu],
+                                       __ATOMIC_RELAXED);
+        if (ack == request)
+            break;
         __asm__ __volatile__("sfence.vma" ::: "memory");
+        __atomic_store_n(&rv64_tlb_ack[cpu], request, __ATOMIC_RELEASE);
         __atomic_fetch_add(&rv64_tlb_ipi_serviced, 1, __ATOMIC_RELAXED);
     }
 }

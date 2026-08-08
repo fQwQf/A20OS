@@ -20,9 +20,15 @@ static int fail(const char *what)
 
 #define VMA_RACE_WORKERS 8
 #define VMA_RACE_ROUNDS 256
+#define VMA_FORK_EXEC_WORKERS 4
+#define VMA_FORK_EXEC_ROUNDS 64
 
 static volatile int vma_race_ready;
 static volatile int vma_race_start;
+static volatile int vma_fork_exec_ready;
+static volatile int vma_fork_exec_start;
+static volatile int vma_fork_exec_stop;
+static volatile int vma_fork_exec_failed;
 
 static void *vma_deferred_race_worker(void *arg)
 {
@@ -81,6 +87,129 @@ static int concurrent_vma_deferred_flush(void)
         }
     }
     return 0;
+}
+
+/*
+ * Regression for MM_FORK_DEFERRED_STATE_REGRESSION_GUARD.  A VMA writer
+ * queues split/merge victims on mm->deferred_vma, drops mm->lock, and then
+ * reacquires the lock to detach the queue.  A fork running on another CPU can
+ * win that reacquisition race.  The child must clone only persistent address
+ * space state; inheriting the transient queue lets the parent free the nodes
+ * before the child destroys its pre-exec mm, causing a stale second free that
+ * can remove a live VMA from the freshly loaded executable.
+ */
+static void *vma_fork_exec_writer(void *arg)
+{
+    (void)arg;
+    __atomic_add_fetch(&vma_fork_exec_ready, 1, __ATOMIC_RELEASE);
+    while (!__atomic_load_n(&vma_fork_exec_start, __ATOMIC_ACQUIRE))
+        sched_yield();
+
+    while (!__atomic_load_n(&vma_fork_exec_stop, __ATOMIC_ACQUIRE)) {
+        char *mem = mmap(NULL, 4 * 4096, PROT_READ | PROT_WRITE,
+                         MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (mem == MAP_FAILED ||
+            mprotect(mem + 4096, 2 * 4096, PROT_READ) < 0 ||
+            mprotect(mem, 4 * 4096, PROT_READ | PROT_WRITE) < 0 ||
+            munmap(mem, 4 * 4096) < 0) {
+            if (mem != MAP_FAILED)
+                (void)munmap(mem, 4 * 4096);
+            __atomic_store_n(&vma_fork_exec_failed, 1, __ATOMIC_RELEASE);
+            __atomic_store_n(&vma_fork_exec_stop, 1, __ATOMIC_RELEASE);
+            return (void *)(intptr_t)1;
+        }
+    }
+    return NULL;
+}
+
+static int verify_vma_fork_exec_child(void)
+{
+    char *mem = mmap(NULL, 8 * 4096, PROT_READ | PROT_WRITE,
+                     MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (mem == MAP_FAILED)
+        return 1;
+    for (size_t i = 0; i < 8 * 4096; i += 4096)
+        mem[i] = (char)(i / 4096 + 1);
+    if (mprotect(mem + 2 * 4096, 4 * 4096, PROT_READ) < 0 ||
+        mprotect(mem, 8 * 4096, PROT_READ | PROT_WRITE) < 0) {
+        (void)munmap(mem, 8 * 4096);
+        return 1;
+    }
+    for (size_t i = 0; i < 8 * 4096; i += 4096) {
+        if (mem[i] != (char)(i / 4096 + 1)) {
+            (void)munmap(mem, 8 * 4096);
+            return 1;
+        }
+    }
+    return munmap(mem, 8 * 4096) == 0 ? 0 : 1;
+}
+
+static int concurrent_vma_fork_exec(void)
+{
+    pthread_t workers[VMA_FORK_EXEC_WORKERS];
+    vma_fork_exec_ready = 0;
+    vma_fork_exec_start = 0;
+    vma_fork_exec_stop = 0;
+    vma_fork_exec_failed = 0;
+
+    int created = 0;
+    for (; created < VMA_FORK_EXEC_WORKERS; created++) {
+        int r = pthread_create(&workers[created], NULL,
+                               vma_fork_exec_writer, NULL);
+        if (r != 0) {
+            __atomic_store_n(&vma_fork_exec_start, 1, __ATOMIC_RELEASE);
+            __atomic_store_n(&vma_fork_exec_stop, 1, __ATOMIC_RELEASE);
+            for (int i = 0; i < created; i++)
+                pthread_join(workers[i], NULL);
+            errno = r;
+            return fail("vma-fork-exec-pthread-create");
+        }
+    }
+
+    while (__atomic_load_n(&vma_fork_exec_ready, __ATOMIC_ACQUIRE) !=
+           VMA_FORK_EXEC_WORKERS)
+        sched_yield();
+    __atomic_store_n(&vma_fork_exec_start, 1, __ATOMIC_RELEASE);
+
+    int result = 0;
+    for (int round = 0; round < VMA_FORK_EXEC_ROUNDS; round++) {
+        if (__atomic_load_n(&vma_fork_exec_failed, __ATOMIC_ACQUIRE)) {
+            result = fail("vma-fork-exec-writer");
+            break;
+        }
+
+        pid_t pid = fork();
+        if (pid < 0) {
+            result = fail("vma-fork-exec-fork");
+            break;
+        }
+        if (pid == 0) {
+            char *child_argv[] = {
+                "mm_stress", "--verify-vma-fork-exec-child", NULL,
+            };
+            char *child_envp[] = {"PATH=/bin", NULL};
+            execve("/bin/mm_stress", child_argv, child_envp);
+            _exit(127);
+        }
+
+        int status = 0;
+        if (waitpid(pid, &status, 0) < 0 || !WIFEXITED(status) ||
+            WEXITSTATUS(status) != 0) {
+            result = fail("vma-fork-exec-child");
+            break;
+        }
+    }
+
+    __atomic_store_n(&vma_fork_exec_stop, 1, __ATOMIC_RELEASE);
+    for (int i = 0; i < created; i++) {
+        void *worker_result = NULL;
+        int r = pthread_join(workers[i], &worker_result);
+        if (r != 0 || worker_result != NULL) {
+            errno = r;
+            result = fail("vma-fork-exec-worker");
+        }
+    }
+    return result;
 }
 
 static unsigned long read_page_cache_pinned(void)
@@ -1396,6 +1525,19 @@ static int huge_page_mprotect(void)
 
 int main(int argc, char **argv)
 {
+    if (argc == 2 &&
+        strcmp(argv[1], "--verify-vma-fork-exec-child") == 0)
+        return verify_vma_fork_exec_child();
+
+    if (argc == 2 && strcmp(argv[1], "--vma-fork-exec-only") == 0) {
+        printf("MM_VMA_FORK_EXEC: start workers=%d rounds=%d\n",
+               VMA_FORK_EXEC_WORKERS, VMA_FORK_EXEC_ROUNDS);
+        if (concurrent_vma_fork_exec() != 0)
+            return 1;
+        printf("MM_VMA_FORK_EXEC: PASS\n");
+        return 0;
+    }
+
     if (argc == 2 && strcmp(argv[1], "--vma-race-only") == 0) {
         printf("MM_VMA_RACE: start workers=%d rounds=%d\n",
                VMA_RACE_WORKERS, VMA_RACE_ROUNDS);

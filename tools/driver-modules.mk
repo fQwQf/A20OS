@@ -9,7 +9,7 @@ ifeq ($(DRIVER_DEPLOYMENT),generic)
 DRVMOD_DIR := kernel/drvmod/examples
 ifeq ($(ARCH),riscv64)
 DRVMOD_GCC := $(CCACHE_PREFIX)$(RISCV_ELF_PREFIX)gcc
-DRVMOD_CFLAGS := -ffreestanding -nostdlib -mcmodel=medany -fno-pic -mno-relax \
+DRVMOD_CFLAGS := -ffreestanding -nostdlib -mcmodel=medany -fPIC -mno-relax \
                  -march=rv64g -mabi=lp64d -DCONFIG_RISCV64 -Ikernel/arch/riscv64/include -Ikernel/include -Ikernel
 DRVMOD_MODULES := rtc.a20drv virtio-blk.a20drv virtio-scsi.a20drv dw-sdio.a20drv virtio-net.a20drv virtio-gpu.a20drv virtio-snd.a20drv vinput-probe.a20drv vinput.a20drv hda.a20drv
 else ifeq ($(ARCH),x86_64)
@@ -32,6 +32,8 @@ else
 DRVMOD_MODULES :=
 endif
 DRVMOD_CFLAGS += -std=gnu99
+
+$(addprefix $(USER_BUILD_DIR)/,$(DRVMOD_MODULES)): tools/driver-modules.mk
 
 # Early DriverStore packages: linked into the kernel root ramfs and loaded
 # before the real root disk is mounted.  Every driver that can own the root
