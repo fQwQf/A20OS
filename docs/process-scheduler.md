@@ -72,7 +72,11 @@ IDLE -> PREPARING -> PARKED -> WOKEN -> IDLE
 主要顺序是：
 
 ```text
-cg_node.lock -> proc_lock -> runq.lock -> pfa.lockproc_lock -> signal_state.lockproc_lock -> files_struct.lock -> VFS locksproc_lock -> mm->lockproc_lock -> a20_handle_table.lock
+cg_node.lock -> proc_lock -> runq.lock -> pfa.lock
+proc_lock -> signal_state.lock
+proc_lock -> files_struct.lock -> VFS locks
+proc_lock -> mm->lock
+proc_lock -> a20_handle_table.lock
 ```
 
 本地 picker 是唯一重要例外：它只获取当前 CPU 的 `runq.lock`，完成`on_rq -> dispatching` 和引用转交后先释放队列锁，调用者随后才获取`proc_lock` 发布切换。任何路径都不得在持有 runqueue 锁时反向获取`proc_lock`。
@@ -195,7 +199,9 @@ PID lookup 必须使用 `proc_find_get()`，并以 `proc_put()` 配对。以下�
 静态与运行时入口：
 
 ```bash
-make check-doc-test-gatesmake check-proc-step8-localmake check-proc-step8
+make check-doc-test-gates
+make check-proc-step8-local
+make check-proc-step8
 ```
 
 `check-proc-step8-local` 运行双架构 debug/release、1 核/8 核累计压力矩阵；`check-proc-step8` 进一步运行双架构正式 CAgent。单项契约和故障定位见[testing/testing-gates.md](testing/testing-gates.md)，各阶段证明见`docs/testing/*-audit.md`。

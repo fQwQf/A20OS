@@ -142,7 +142,7 @@ drvctl list
 | `ps2.c` → `ps2.a20drv` | x86_64 | PS/2 键鼠控制器，初始化 + 双向量 ISR 注册；键盘字符经 `uart_receive_char` 进控制台 |
 | `nvme.c` → `nvme.a20drv` | x86_64/loongarch64 | 架构无关 PCI 类 block 驱动（标准 `driver_t` 注册）；`DRVMOD_SMOKE=1` 构建携带与内建版本相同的 capability/I/O smoke 测试，`smoke-pci-portability` 在 loongarch64 上验证 |
 | `tpm.c` → `tpm.a20drv` | x86_64 | TPM 2.0 TIS/FIFO 驱动，经 `firmware_acpi_tpm2` 做 ACPI 发现；无 TPM 时 probe 优雅返回 |
-| `hda.c`+`hda_codec.c` → `hda.a20drv` | 四架构 | 架构无关 PCI 类 audio 驱动（`hda_match` 按 `pci_class_code` 匹配）；`DRVMOD_SMOKE=1` 携带 in-probe 流 smoke（`HDA_STREAM_SMOKE`），`smoke-hda`（x86_64）与 `smoke-pci-portability`（loongarch64）验证 |
+| `hda.c` → `hda.a20drv` | 四架构 | 架构无关 PCI 类 audio 驱动（`hda_match` 按 `pci_class_code` 匹配）；`DRVMOD_SMOKE=1` 携带 in-probe 流 smoke（`HDA_STREAM_SMOKE`），`smoke-hda`（x86_64）与 `smoke-pci-portability`（loongarch64）验证；原 `hda_codec.c` 已并入本模块 |
 
 验证命令：
 
@@ -163,14 +163,14 @@ make ARCH=riscv64 ABI=both smoke-dual-input          # vinput-probe.a20drv + 用
 
 | 驱动 | 原内建位置 | 模块 | 架构 | 状态 |
 |---|---|---|---|---|
-| goldfish RTC | `kernel/drvmod/examples/goldfish_rtc.c`（已删除）| `kernel/drvmod/examples/goldfish_rtc.c` | riscv64/aarch64/loongarch64 | 已迁移；QEMU virt 启动即绑定 |
+| goldfish RTC | `kernel/drivers/char/goldfish_rtc_kdrv.c`（已删除）| `kernel/drvmod/examples/goldfish_rtc.c` | riscv64/aarch64/loongarch64 | 已迁移；QEMU virt 启动即绑定 |
 | PC speaker | `kernel/drvmod/examples/pc_spkr.c`（已删除）| `kernel/drvmod/examples/pc_spkr.c` | x86_64 | 已迁移；统一驱动核心桥接注册 AUDIO 类并绑定 platform 设备 |
-| virtio-input 内核探针 | `kernel/drvmod/examples/vinput_probe.c`（已删除）| `kernel/drvmod/examples/vinput_probe.c` | riscv64/aarch64 | 已迁移；`smoke-dual-input` 验证与用户态 uinputd 读到同一设备身份 |
-| virtio-input 完整驱动 | `kernel/drvmod/examples/vinput.c`（已删除）| `kernel/drvmod/examples/vinput.c` | 四架构 | 已迁移；`/dev/event0` 的 devfs mux 服务拆分至 `kernel/drivers/input/input_mux.c`（class 设备消费 + EVIOCG* ioctl 面），模块 ISR 经 `input_mux_wake` 唤醒 mux；riscv64 MMIO 与 x86_64 PCI 路径 QEMU 实测事件流（`[INPUT] event type=...` + EV_SYN）|
-| PS/2 键鼠控制器 | `kernel/drvmod/examples/ps2.c`（已删除）| `kernel/drvmod/examples/ps2.c` | x86_64 | 已迁移；arch IRQ 分发经 hwapi 投递到模块 ISR，`smoke-drvmod-x86_64` 验证初始化与双向量注册 |
-| NVMe | `kernel/drvmod/examples/nvme.c`（已删除）| `kernel/drvmod/examples/nvme.c` | x86_64/loongarch64 | 已迁移；PCI 类标准驱动，`smoke-pci-portability`（loongarch64 dev 镜像 + `DRVMOD_SMOKE=1`）验证绑定与 NVME_CAP/IO_SMOKE |
-| TPM 2.0 | `kernel/drvmod/examples/tpm.c`（已删除）| `kernel/drvmod/examples/tpm.c` | x86_64 | 已迁移；ACPI TPM2 发现 + TIS FIFO，无设备时优雅失败 |
-| Intel HDA | `kernel/drvmod/examples/hda.c`+`hda_codec.c`（已删除）| `kernel/drvmod/examples/hda.c` | 四架构 | 已迁移；PCI 类 audio 驱动，`smoke-hda` 验证流 smoke + 绑定 |
+| virtio-input 内核探针 | `kernel/drivers/input/virtio_input_kprobe.c`（已删除）| `kernel/drvmod/examples/vinput_probe.c` | riscv64/aarch64 | 已迁移；`smoke-dual-input` 验证与用户态 uinputd 读到同一设备身份 |
+| virtio-input 完整驱动 | `kernel/drivers/input/virtio_input.c`（已删除）| `kernel/drvmod/examples/vinput.c` | 四架构 | 已迁移；`/dev/event0` 的 devfs mux 服务拆分至 `kernel/drivers/input/input_mux.c`（class 设备消费 + EVIOCG* ioctl 面），模块 ISR 经 `input_mux_wake` 唤醒 mux；riscv64 MMIO 与 x86_64 PCI 路径 QEMU 实测事件流（`[INPUT] event type=...` + EV_SYN）|
+| PS/2 键鼠控制器 | `kernel/drivers/input/ps2.c`（已删除）| `kernel/drvmod/examples/ps2.c` | x86_64 | 已迁移；arch IRQ 分发经 hwapi 投递到模块 ISR，`smoke-drvmod-x86_64` 验证初始化与双向量注册 |
+| NVMe | `kernel/drivers/block/nvme.c`（已删除）| `kernel/drvmod/examples/nvme.c` | x86_64/loongarch64 | 已迁移；PCI 类标准驱动，`smoke-pci-portability`（loongarch64 dev 镜像 + `DRVMOD_SMOKE=1`）验证绑定与 NVME_CAP/IO_SMOKE |
+| TPM 2.0 | `kernel/drivers/security/tpm.c`（已删除）| `kernel/drvmod/examples/tpm.c` | x86_64 | 已迁移；ACPI TPM2 发现 + TIS FIFO，无设备时优雅失败 |
+| Intel HDA | `kernel/drivers/audio/hda_codec.c`（已删除）| `kernel/drvmod/examples/hda.c` | 四架构 | 已迁移；PCI 类 audio 驱动，`smoke-hda` 验证流 smoke + 绑定 |
 | virtio-blk | `kernel/drivers/block/virtio_blk.c`（generic 不再内建）| `kernel/drvmod/examples/virtio_blk.c` | 四架构（Early）| 已迁移；早期模块嵌入 `/boot/drivers`，根盘挂载前加载并绑定，解除 bootstrap 循环；generic 根挂载与 swap 统一走 block-class 查询 |
 | virtio-scsi | `kernel/drivers/block/virtio_scsi.c`（generic 不再内建）| `kernel/drvmod/examples/virtio_scsi.c` | 四架构（Early）| 已迁移；PCI 1af4:1048/1008，Early DriverStore |
 | AHCI | `kernel/drivers/block/ahci.c`（generic 不再内建）| `kernel/drvmod/examples/ahci.c` | x86_64（Early）| 已迁移；PCI 8086:2922/2829，Q35/VBox 根盘路径 |
