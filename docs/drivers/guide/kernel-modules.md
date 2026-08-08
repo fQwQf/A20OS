@@ -191,7 +191,7 @@ generic 不再保留任何内建设备驱动。根盘相关驱动（virtio-blk�
 
 **框架 API 现状**：DMA 对象（coherent/aligned/sync）、PCI BAR 访问（`pci_get_bar_resource`/`pci_enable_and_assign_bars`/`pci_intx_irq`/`pci_class_code`）、block/net/input/audio/display class 操作（统一核心桥接 + 头文件）、调度/等待原语（park/wait_queue/mutex）、`firmware_acpi_tpm2`、virtq（双驻留共享层）、`clock_ticks_per_sec` 与 `input_mux_wake` 均为可导出 API；NVMe、TPM、HDA、virtio-input 完整事件投递（`vinput.a20drv` + `input_mux.c`）即以模块形式实现并受 smoke 门禁覆盖。
 
-**其余设备包**：网络、显示、音频、USB、存储 transport 驱动现在与 RTC、输入、NVMe、TPM、HDA 一样由 `mk/driver-modules.mk` 生成 `.a20drv`；PCI/MMIO/platform bus、USB core、framebuffer 和各类 mux/class consumer 仍是内核框架服务。通用 profile 的完整驱动源账本见 `mk/driver-sources.mk` 的 `EMBEDDED_DEVICE_DRIVER_SRCS`（embedded 静态链接全集）。
+**其余设备包**：网络、显示、音频、USB、存储 transport 驱动现在与 RTC、输入、NVMe、TPM、HDA 一样由 `tools/driver-modules.mk` 生成 `.a20drv`；PCI/MMIO/platform bus、USB core、framebuffer 和各类 mux/class consumer 仍是内核框架服务。通用 profile 的完整驱动源账本见 `tools/driver-sources.mk` 的 `EMBEDDED_DEVICE_DRIVER_SRCS`（embedded 静态链接全集）。
 
 迁移顺序（每步都必须有等价回归证据）：
 
