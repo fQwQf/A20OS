@@ -183,6 +183,9 @@ int  driver_register(driver_t *drv);
 int  driver_unregister(driver_t *drv);
 int  device_register(device_t *dev);
 void device_unregister(device_t *dev);
+/* Publish a bus add/remove event through the normal device lifecycle.  Bus
+ * callbacks observe ADD after probe and REMOVE after remove has completed. */
+int  device_hotplug(device_t *dev, int event);
 int  bus_register(bus_type_t *bus);
 void bus_unregister(bus_type_t *bus);
 
