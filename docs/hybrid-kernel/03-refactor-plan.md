@@ -56,7 +56,7 @@
 
 每阶段有独立验收标准，前一阶段未达标不得进入下一阶段。
 
-### 阶段一：核心原语契约化（当前阶段）
+### 阶段一：核心原语契约化（已完成）
 
 Native ABI 成为研究本体的前提是其语义**显式、可测、防退化**。
 
@@ -87,7 +87,7 @@ Native ABI 是研究本体时，其核心数据面在 SMP 下不可靠意味着�
 验收：同一份驱动源码以内核态和用户态两种部署通过同一套功能契约测试；
 无 IOMMU 授权窗口的 DMA 访问被硬件拒绝（可观测的 fault 事件）。
 
-**状态（2026-08-06）**：框架骨架落地，见 [04-dual-placement.md](04-dual-placement.md)。环境层（`drivers/dual/drv_env.h`）与首个共享设备协议层（`drivers/dual/goldfish_rtc.h`）生效；goldfish RTC 同一协议源码已在两种部署下运行：内核壳 boot probe 输出真实设备时间，用户壳 `smoke-native-rtcd` PASS。DMA ops、连续 DMA heap、所有权仲裁、第二个样板和功能态 virtqueue 已完成。**IOMMU 已完成真实硬件初始化与 per-domain 翻译**：BAR 分配、capability 读取（version 16 / spec 1.0）、DDT(1LVL)/ CQ/FQ 编程与使能；devid 0 配置 SV39 翻译域（3 级页表），经 TR_REQ 验证：已映射 IOVA 精确翻译、未映射 IOVA 被硬件拒绝（fault=1, cause=13 RD_FAULT_S）。`smoke-iommu-discovery` 断言全部状态。
+**状态（2026-08-06）**：框架骨架落地，见 [04-dual-placement.md](04-dual-placement.md)。环境层（`kernel/include/drivers/dual/drv_env.h`）与首个共享设备协议层（`kernel/include/drivers/dual/goldfish_rtc.h`）生效；goldfish RTC 同一协议源码已在两种部署下运行：内核壳 boot probe 输出真实设备时间，用户壳 `smoke-native-rtcd` PASS。DMA ops、连续 DMA heap、所有权仲裁、第二个样板（virtio-input）和功能态 virtqueue 已完成。**IOMMU 已完成真实硬件初始化与 per-domain 翻译**：BAR 分配、capability 读取（version 16 / spec 1.0）、DDT(1LVL)/ CQ/FQ 编程与使能；devid 0 配置 SV39 翻译域（3 级页表），经 TR_REQ 验证：已映射 IOVA 精确翻译、未映射 IOVA 被硬件拒绝（fault=1, cause=13 RD_FAULT_S）。`smoke-iommu-discovery` 断言全部状态。剩余：fault 队列消费与 per-device 页表动态映射。
 
 ### 阶段四：服务接口 IDL 化
 
@@ -95,7 +95,7 @@ Native ABI 是研究本体时，其核心数据面在 SMP 下不可靠意味着�
 
 验收：svcmgr/registry/健康探针协议由 IDL 生成；新旧协议互操作期有版本协商；手写 proto 头退出活跃树。
 
-**状态**：常量层与固定宽度消息层已完成：`a20_services.idl`、生成器和生成头已接入 rtcd/svc/ubd。**版本化请求/响应信封已完成**：rtcd 请求/ 响应使用独立 wire type（RTCD_REPLY_TIME/ALARM）+ version/size 校验， `smoke-native-rtcd` PASS；**svcmgr/echod 协议已 IDL 化**（SVCMGR_REQ_ ECHO/CRASH 版本化消息替换裸 echo 与魔法字符串，服务端校验版本并拒绝畸形消息），`smoke-native-svc` PASS。registry 为内核 syscall 接口（0x0A03），不属于 channel 协议，不在 IDL 范围。
+**状态**：常量层与固定宽度消息层已完成：`a20_services.idl`、生成器（`tools/a20idl.py`）和生成头（`user/svc/a20_services_idl.h`）已接入 rtcd/svc/ubd，`make check-a20-idl` 在 `a20os` conda 环境中重生成并比对活跃头。**版本化请求/响应信封已完成**：rtcd 请求/响应使用独立 wire type（RTCD_REPLY_TIME/ALARM）+ version/size 校验，`smoke-native-rtcd` PASS；**svcmgr/echod 协议已 IDL 化**（SVCMGR_REQ_ECHO/CRASH 版本化消息替换裸 echo 与魔法字符串，服务端校验版本并拒绝畸形消息），`smoke-native-svc` PASS。registry 为内核 syscall 接口（0x0A03），不属于 channel 协议，不在 IDL 范围。语法与约束规范见 [05-idl-and-personality.md](05-idl-and-personality.md)。剩余：双端绑定代码生成与动态版本协商。
 
 ### 阶段五：Linux 人格层重建（starnix 式）
 
