@@ -68,6 +68,13 @@ typedef struct pci_dev_info {
     int      bar_resource[6];    /* PCI BAR -> device resource, -1 if I/O */
 } pci_dev_info_t;
 
+#define PCI_MAX_PUBLISHED_DEVICES 128
+static pci_dev_info_t g_pci_infos[PCI_MAX_PUBLISHED_DEVICES];
+static resource_t g_pci_resources[PCI_MAX_PUBLISHED_DEVICES][7];
+static char g_pci_names[PCI_MAX_PUBLISHED_DEVICES][32];
+static device_t g_pci_devs[PCI_MAX_PUBLISHED_DEVICES];
+static uint8_t g_pci_in_use[PCI_MAX_PUBLISHED_DEVICES];
+
 /* Keep the generic PCI layer useful to class drivers without making its
  * private enumeration record part of every driver ABI. */
 uint32_t pci_class_code(const device_t *dev) {
@@ -481,34 +488,52 @@ int pci_virtio_transport_init(device_t *dev, int type,
     return 0;
 }
 
-void pci_enumerate(uintptr_t ecam_base, int bus_start, int bus_end) {
-    g_pci_data.ecam_base = ecam_base;
-    g_pci_data.bus_start = bus_start;
-    g_pci_data.bus_end   = bus_end;
+static int pci_slot_for_bdf(int bus, int dev, int func)
+{
+    for (int i = 0; i < PCI_MAX_PUBLISHED_DEVICES; i++) {
+        if (g_pci_in_use[i] && g_pci_infos[i].bus == (uint8_t)bus &&
+            g_pci_infos[i].dev == (uint8_t)dev &&
+            g_pci_infos[i].func == (uint8_t)func)
+            return i;
+    }
+    for (int i = 0; i < PCI_MAX_PUBLISHED_DEVICES; i++)
+        if (!g_pci_in_use[i])
+            return i;
+    return -1;
+}
 
-#ifdef CONFIG_PCI_MMIO_ALLOC
-    arch_pci_host_init(ecam_base);
-#endif
+static void pci_scan_current(int remove_missing)
+{
+    uint8_t seen[PCI_MAX_PUBLISHED_DEVICES] = {0};
+    int found = 0;
 
-    bus_register(&pci_bus);
-
-    static pci_dev_info_t pci_infos[128];
-    /* Six MMIO BARs plus an INTx resource. */
-    static resource_t pci_resources[128][7];
-    static char pci_names[128][32];
-    int dev_idx = 0;
-
-    for (int bus = bus_start; bus < bus_end && dev_idx < 128; bus++) {
-        for (int dev = 0; dev < PCI_MAX_DEV && dev_idx < 128; dev++) {
-            for (int func = 0; func < PCI_MAX_FUNC && dev_idx < 128; func++) {
+    for (int bus = g_pci_data.bus_start;
+         bus < g_pci_data.bus_end && found < PCI_MAX_PUBLISHED_DEVICES; bus++) {
+        for (int dev = 0; dev < PCI_MAX_DEV && found < PCI_MAX_PUBLISHED_DEVICES; dev++) {
+            for (int func = 0; func < PCI_MAX_FUNC && found < PCI_MAX_PUBLISHED_DEVICES; func++) {
                 uint32_t id = pci_ecam_read(bus, dev, func, 0);
                 uint16_t vendor = (uint16_t)(id & 0xFFFF);
                 if (vendor == 0xFFFF)
                     continue;
 
                 uint16_t device_id = (uint16_t)((id >> 16) & 0xFFFF);
+                int slot = pci_slot_for_bdf(bus, dev, func);
+                if (slot < 0)
+                    continue;
+                if (g_pci_in_use[slot] &&
+                    (g_pci_infos[slot].vendor != vendor ||
+                     g_pci_infos[slot].device != device_id)) {
+                    device_hotplug(&g_pci_devs[slot], BUS_EVENT_REMOVE);
+                    g_pci_in_use[slot] = 0;
+                }
+                seen[slot] = 1;
+                if (g_pci_in_use[slot]) {
+                    found++;
+                    continue;
+                }
 
-                pci_dev_info_t *info = &pci_infos[dev_idx];
+                pci_dev_info_t *info = &g_pci_infos[slot];
+                memset(info, 0, sizeof(*info));
                 info->vendor = vendor;
                 info->device = device_id;
                 info->bus    = (uint8_t)bus;
@@ -533,22 +558,24 @@ void pci_enumerate(uintptr_t ecam_base, int bus_start, int bus_end) {
                     info->bar_resource[b] = -1;
                 }
 
-                resource_t *res = pci_resources[dev_idx];
-                memset(res, 0, sizeof(pci_resources[dev_idx]));
+                resource_t *res = g_pci_resources[slot];
+                memset(res, 0, sizeof(g_pci_resources[slot]));
 
-                snprintf(pci_names[dev_idx], sizeof(pci_names[dev_idx]),
-                         "pci-%04x:%04x-%d", vendor, device_id, dev_idx);
+                snprintf(g_pci_names[slot], sizeof(g_pci_names[slot]),
+                         "pci-%04x:%04x-%d", vendor, device_id, slot);
 
-                static device_t pci_devs[128];
-                device_t *pdev     = &pci_devs[dev_idx];
-                pdev->name          = pci_names[dev_idx];
+                device_t *pdev     = &g_pci_devs[slot];
+                memset(pdev, 0, sizeof(*pdev));
+                pdev->name          = g_pci_names[slot];
                 pdev->bus           = &pci_bus;
                 pdev->plat_data     = info;
                 pdev->res           = res;
                 pdev->res_count     = 0;
                 pdev->state         = DEV_STATE_UNINIT;
 
-                device_register(pdev);
+                if (device_hotplug(pdev, BUS_EVENT_ADD) < 0)
+                    continue;
+                g_pci_in_use[slot] = 1;
                 kinfo("[BUS] pci %02x:%02x.%x id=%04x:%04x sub=%04x:%04x class=%02x:%02x:%02x irq=%u\n",
                       bus, dev, func, vendor, device_id,
                       info->subvendor, info->subdevice,
@@ -560,11 +587,41 @@ void pci_enumerate(uintptr_t ecam_base, int bus_start, int bus_end) {
                         kinfo("[BUS]   BAR%d: phys=0x%lx\n", b,
                               (unsigned long)info->bar[b]);
                 }
-                dev_idx++;
+                found++;
+            }
+        }
+    }
+
+    if (remove_missing) {
+        for (int i = 0; i < PCI_MAX_PUBLISHED_DEVICES; i++) {
+            if (g_pci_in_use[i] && !seen[i]) {
+                device_hotplug(&g_pci_devs[i], BUS_EVENT_REMOVE);
+                g_pci_in_use[i] = 0;
             }
         }
     }
 
     kinfo("[BUS] pci: found %d devices (ecam=0x%lx, bus %d-%d)\n",
-          dev_idx, (unsigned long)ecam_base, bus_start, bus_end);
+          found, (unsigned long)g_pci_data.ecam_base, g_pci_data.bus_start,
+          g_pci_data.bus_end);
+}
+
+void pci_enumerate(uintptr_t ecam_base, int bus_start, int bus_end) {
+    g_pci_data.ecam_base = ecam_base;
+    g_pci_data.bus_start = bus_start;
+    g_pci_data.bus_end   = bus_end;
+
+#ifdef CONFIG_PCI_MMIO_ALLOC
+    arch_pci_host_init(ecam_base);
+#endif
+
+    bus_register(&pci_bus);
+    pci_scan_current(0);
+}
+
+void pci_rescan(void)
+{
+    if (!g_pci_data.ecam_base)
+        return;
+    pci_scan_current(1);
 }

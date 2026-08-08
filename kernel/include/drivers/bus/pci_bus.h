@@ -21,6 +21,9 @@ resource_t *pci_get_bar_resource(device_t *dev, unsigned int bar);
  * treat the legacy IRQ Line register as a usable interrupt identifier. */
 int pci_intx_irq(const device_t *dev);
 void pci_enumerate(uintptr_t ecam_base, int bus_start, int bus_end);
+/* Reconcile ECAM with the published PCI device set.  Call only from process
+ * context; additions probe immediately and vanished functions are removed. */
+void pci_rescan(void);
 
 /* Create a VirtIO 1.0 (modern PCI) transport for an enumerated PCI function.
  * type is the VirtIO device ID (1=net, 2=blk, 8=scsi, 16=gpu, 18=input,

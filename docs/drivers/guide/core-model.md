@@ -242,6 +242,8 @@ DRIVER_REGISTER(example_driver);
 
 注册函数会拒绝不完整对象（`-EINVAL`）和同一指针的重复注册（`-EEXIST`）。注册 driver/device 可能同步执行 `probe`，注销可能同步执行 `remove`，所以调用者在函数返回前必须保持对象及其资源有效。核心以可睡眠操作锁串行化注册、probe、remove 和注销；生命周期回调不得递归调用这些注册 API，也不得从中断上下文调用。registry spinlock 只保护数组元数据，不跨任何驱动回调。
 
+运行期发现或拔除设备时，bus/平台必须调用 `device_hotplug(dev, BUS_EVENT_ADD)` 或 `device_hotplug(dev, BUS_EVENT_REMOVE)`，不能绕过核心直接调用驱动回调。它把设备事件接入上述同一套注册、匹配、class offline 和 remove 路径；详情见[热插拔与即插即用](hotplug-and-pnp.md)。
+
 ## 唯一枚举所有权
 
 每个硬件 function 只能由一个 bus enumerator 创建并配置一次。路径是：
