@@ -85,20 +85,35 @@ int mm_munmap_locked(mm_struct_t *mm, vaddr_t addr, size_t len) {
                 if (dr < 0) return dr;
                 continue;
             }
+            page_cache_page_t *held_pcp = NULL;
+            pfn_t held_pfn = PFN_NONE;
+            if (*pte & PTE_V) {
+                held_pfn = phys_to_pfn(arch_pte_addr(*pte));
+                if (shared_file_vma && vma->file_vnode) {
+                    uint64_t idx = vma->file_offset + (va - vma->start);
+                    idx /= PAGE_SIZE;
+                    held_pcp = page_cache_get(vma->file_vnode, idx, 0);
+                    if (!held_pcp || mm_tlb_hold_page(mm, held_pcp) < 0) {
+                        if (held_pcp)
+                            page_cache_put(held_pcp);
+                        return -ENOMEM;
+                    }
+                } else if (!(vma->vm_flags & (VM_PFNMAP | VM_VMO))) {
+                    if (!pfn_valid(held_pfn) ||
+                        mm_tlb_hold_frame(mm, held_pfn) < 0)
+                        return -ENOMEM;
+                }
+            }
             paddr_t pa = 0;
             if (pt_unmap_leaf(mm->pgdir, va, &pa, &base, &size, &level) == 0) {
                 if (pa) {
                     pfn_t pfn = phys_to_pfn(pa);
                     if (shared_file_vma && vma->file_vnode) {
-                        for (vaddr_t off = 0; off < size; off += PAGE_SIZE) {
-                            uint64_t idx = vma->file_offset + (va + off - vma->start);
-                            idx /= PAGE_SIZE;
-                            page_cache_page_t *pcp = page_cache_get(vma->file_vnode, idx, 0);
-                            if (pcp) {
-                                page_cache_put(pcp);
-                                page_cache_put(pcp);
-                            }
-                        }
+                        /* Drop the temporary lookup and the mapping's pin.
+                         * mm_tlb_hold_page() retains the final reference until
+                         * every CPU has invalidated the old PTE. */
+                        page_cache_put(held_pcp);
+                        page_cache_put(held_pcp);
                     } else if (!(vma->vm_flags & (VM_PFNMAP | VM_VMO))) {
                         frame_put(pfn);
                     }
@@ -107,6 +122,8 @@ int mm_munmap_locked(mm_struct_t *mm, vaddr_t addr, size_t len) {
                 }
                 va = base + size;
             } else {
+                if (held_pcp)
+                    page_cache_put(held_pcp);
                 va += PAGE_SIZE;
             }
         }
@@ -202,6 +219,10 @@ vaddr_t mm_brk_locked(mm_struct_t *mm, vaddr_t newbrk) {
                     break;
                 continue;
             }
+            if ((*pte & PTE_V) &&
+                mm_tlb_hold_frame(mm,
+                                  phys_to_pfn(arch_pte_addr(*pte))) < 0)
+                return mm->brk;
             paddr_t pa = 0;
             if (pt_unmap_leaf(mm->pgdir, va, &pa, &base, &size, NULL) == 0) {
                 if (pa) {
@@ -243,21 +264,21 @@ vaddr_t mm_brk_locked(mm_struct_t *mm, vaddr_t newbrk) {
 
 int mm_munmap(mm_struct_t *mm, vaddr_t addr, size_t len) {
     if (!mm) return -EINVAL;
+    mm_tlb_invalidate_begin(mm);
     uint64_t flags = spin_lock_irqsave(&mm->lock);
     int r = mm_munmap_locked(mm, addr, len);
     spin_unlock_irqrestore(&mm->lock, flags);
-    mm_vma_flush_deferred(mm);
-    arch_tlb_flush();  // deferred: cannot flush remote TLBs under mm->lock
+    mm_tlb_invalidate_finish(mm);
     return r;
 }
 
 vaddr_t mm_brk(mm_struct_t *mm, vaddr_t newbrk)
 {
     if (!mm) return 0;
+    mm_tlb_invalidate_begin(mm);
     uint64_t flags = spin_lock_irqsave(&mm->lock);
     vaddr_t r = mm_brk_locked(mm, newbrk);
     spin_unlock_irqrestore(&mm->lock, flags);
-    mm_vma_flush_deferred(mm);
-    arch_tlb_flush();  /* brk shrink released frames: remote flush */
+    mm_tlb_invalidate_finish(mm);
     return r;
 }

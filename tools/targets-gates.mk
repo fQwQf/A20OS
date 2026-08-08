@@ -42,9 +42,9 @@ check-abi-boundary:
 	@rg -q "LINUX_ABI_BOUNDARY_CONTRACT" kernel/abi/linux/syscall_impl.h
 	@rg -q "LINUX_ABI_EXPLICIT_STUB_CONTRACT" kernel/abi/linux/syscall_table.def
 	@rg -q "LINUX_ABI_SCHED_STUB_BOUNDARY" kernel/abi/linux/sys_sched.c
-	@rg -q "smoke-sched-stress" Makefile
+	@rg -q "smoke-sched-stress" tools/targets-smoke.mk
 	@rg -q "SCHED_STRESS: PASS" user/cmds/stress/sched_stress.c
-	@rg -q "smoke-futex-stress" Makefile
+	@rg -q "smoke-futex-stress" tools/targets-smoke.mk
 	@rg -q "FUTEX_STRESS: PASS" user/cmds/stress/futex_stress.c
 	@rg -q "LINUX_ABI_BPF_STUB_BOUNDARY" kernel/abi/linux/sys_bpf.c
 	@rg -q "LINUX_ABI_NAMESPACE_STUB_BOUNDARY" kernel/abi/linux/sys_namespace.c
@@ -85,7 +85,7 @@ check-driver-core-model: smoke-driver-lifecycle
 	@rg -Fq "if (!size && bar_lo == 0)" kernel/drivers/bus/pci_bus.c
 	@rg -q "\.match = hda_match" kernel/drvmod/examples/hda.c
 	@rg -q "\.match = nvme_match" kernel/drvmod/examples/nvme.c
-	@rg -q "NVME_IO_SMOKE: PASS" kernel/drvmod/examples/nvme.c Makefile
+	@rg -q "NVME_IO_SMOKE: PASS" kernel/drvmod/examples/nvme.c tools/targets-steps.mk
 	@! rg -q "CONFIG_X86_64" kernel/drvmod/examples/hda.c kernel/drvmod/examples/nvme.c
 	@rg -q "drv_driver_register" kernel/drvmod/examples/pc_spkr.c
 	@rg -q "virtio_blk_driver_probe" kernel/drivers/block/virtio_blk.c
@@ -128,4 +128,3 @@ check-external-dependency-boundary:
 	@rg -q "TLS 1\.3" docs/project/external-dependencies.md
 	@! rg -n "^LWIP_SRC[[:space:]]*=" Makefile
 	@echo "check-external-dependency-boundary: PASS"
-

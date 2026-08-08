@@ -5,6 +5,9 @@
  */
 
 #include "abi/linux/ptrace_layout.h"
+#include "core/klog.h"
+#include "core/stdio.h"
+#include "core/trap.h"
 #include "proc/debug_regs.h"
 
 /* Identity-mapped (PAGE_OFFSET == 0): VA == PA, low-4 GiB window. */
@@ -13,6 +16,21 @@ int arch_drv_mmio_window_ok(uintptr_t phys, size_t size)
     if (size == 0)
         return 1;
     return phys + size > phys && phys + size <= 0x100000000ULL;
+}
+
+void arch_dump_trap_extra_context(const trap_context_t *ctx)
+{
+    if (!ctx)
+        return;
+    for (int i = 10; i < 30; i += 4)
+        kerr("  regs: r%d=0x%lx r%d=0x%lx r%d=0x%lx r%d=0x%lx\n",
+             i, (unsigned long)TRAP_CTX_REG(ctx, i),
+             i + 1, (unsigned long)TRAP_CTX_REG(ctx, i + 1),
+             i + 2, (unsigned long)TRAP_CTX_REG(ctx, i + 2),
+             i + 3, (unsigned long)TRAP_CTX_REG(ctx, i + 3));
+    kerr("  regs: r30=0x%lx r31=0x%lx\n",
+         (unsigned long)TRAP_CTX_REG(ctx, 30),
+         (unsigned long)TRAP_CTX_REG(ctx, 31));
 }
 
 /* struct user_pt_regs: regs[32]; orig_a0; csr_era; csr_badv; reserved[10]; */

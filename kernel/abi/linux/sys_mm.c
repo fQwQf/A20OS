@@ -168,17 +168,18 @@ int64_t sys_madvise(uint64_t addr, size_t len, int advice) {
     uint64_t end = ROUND_UP(addr + len, PAGE_SIZE);
     if (end < start) return -EINVAL;
 
+    mm_tlb_invalidate_begin(t->mm);
     uint64_t mm_flags = linux_mm_lock(t);
     for (uint64_t va = start; va < end; va += PAGE_SIZE) {
         vm_area_t *vma = mm_find_vma(t->mm, va);
         if (!vma || va >= vma->end) {
             linux_mm_unlock(t, mm_flags);
+            mm_tlb_invalidate_finish(t->mm);
             return -ENOMEM;
         }
     }
 
     int64_t ret = 0;
-    int flush_tlb = 0;
     switch (advice) {
     case MADV_NORMAL:
     case MADV_RANDOM:
@@ -211,18 +212,35 @@ int64_t sys_madvise(uint64_t addr, size_t len, int advice) {
             int shared_file = vma &&
                 (vma->vm_flags & (VM_FILE | VM_SHARED)) == (VM_FILE | VM_SHARED) &&
                 vma->file_vnode;
+            page_cache_page_t *held_pcp = NULL;
+            if (*pte & PTE_V) {
+                if (shared_file) {
+                    uint64_t idx = vma->file_offset + (va - vma->start);
+                    idx /= PAGE_SIZE;
+                    held_pcp = page_cache_get(vma->file_vnode, idx, 0);
+                    if (!held_pcp ||
+                        mm_tlb_hold_page(t->mm, held_pcp) < 0) {
+                        if (held_pcp)
+                            page_cache_put(held_pcp);
+                        ret = -ENOMEM;
+                        goto out;
+                    }
+                } else if (!(vma->vm_flags & (VM_PFNMAP | VM_VMO))) {
+                    pfn_t pfn = phys_to_pfn(arch_pte_addr(*pte));
+                    if (!pfn_valid(pfn) ||
+                        mm_tlb_hold_frame(t->mm, pfn) < 0) {
+                        ret = -ENOMEM;
+                        goto out;
+                    }
+                }
+            }
             paddr_t pa = 0;
             if (pt_unmap_leaf(t->mm->pgdir, va, &pa, &base, &size, NULL) == 0) {
                 if (pa) {
                     if (shared_file) {
-                        uint64_t idx = vma->file_offset + (va - vma->start);
-                        idx /= PAGE_SIZE;
-                        page_cache_page_t *pcp = page_cache_get(vma->file_vnode, idx, 0);
-                        if (pcp) {
-                            page_cache_put(pcp);
-                            page_cache_put(pcp);
-                        }
-                    } else {
+                        page_cache_put(held_pcp);
+                        page_cache_put(held_pcp);
+                    } else if (!(vma->vm_flags & (VM_PFNMAP | VM_VMO))) {
                         frame_put(phys_to_pfn(pa));
                     }
                     size_t pages = size / PAGE_SIZE;
@@ -230,13 +248,11 @@ int64_t sys_madvise(uint64_t addr, size_t len, int advice) {
                 }
                 va = base + size;
             } else {
+                if (held_pcp)
+                    page_cache_put(held_pcp);
                 va += PAGE_SIZE;
             }
         }
-        /* Remote CPUs may be spinning on mm->lock with interrupts disabled;
-         * a synchronous cross-CPU flush here would wait forever for their
-         * IPI acknowledgements.  Publish it after dropping mm->lock. */
-        flush_tlb = 1;
         break;
 #endif
     case MADV_DONTFORK:
@@ -278,8 +294,7 @@ int64_t sys_madvise(uint64_t addr, size_t len, int advice) {
     }
 out:
     linux_mm_unlock(t, mm_flags);
-    if (flush_tlb)
-        arch_tlb_flush();
+    mm_tlb_invalidate_finish(t->mm);
     if (ret == 0 && (advice == MADV_POPULATE_READ || advice == MADV_POPULATE_WRITE)) {
         for (uint64_t va = start; va < end; va += PAGE_SIZE) {
             if (handle_demand_fault(t, va) < 0)

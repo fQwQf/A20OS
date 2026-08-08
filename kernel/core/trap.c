@@ -5,9 +5,10 @@
 #include "core/timer.h"
 #include "drivers/char/uart.h"
 #include "mm/mm.h"
+#include "mm/frame.h"
 #include "mm/fault.h"
 #include "mm/vm.h"
-#include "mm/frame.h"
+#include "fs/vfs.h"
 #include "core/stdio.h"
 #include "core/panic.h"
 #include "core/defs.h"
@@ -16,6 +17,10 @@
 #include "core/kallsyms.h"
 
 __attribute__((weak)) void arch_dump_trap_ring(void) {}
+__attribute__((weak)) void arch_dump_trap_extra_context(const trap_context_t *ctx)
+{
+    (void)ctx;
+}
 
 static int fetch_user_insn(task_t *task, vaddr_t va, uint32_t *insn_out) {
     if (!task || !task->mm || !task->mm->pgdir || !insn_out)
@@ -40,6 +45,7 @@ static void dump_trap_context(trap_context_t *ctx) {
          (unsigned long)TRAP_CTX_ARG4(ctx),
          (unsigned long)TRAP_CTX_ARG5(ctx),
          (unsigned long)TRAP_CTX_SYSCALL_NUM(ctx));
+    arch_dump_trap_extra_context(ctx);
 }
 
 static void dump_kernel_backtrace(trap_context_t *ctx, vaddr_t pc, int max_frames) {
@@ -64,6 +70,36 @@ static void dump_fault_pte(task_t *task, vaddr_t va) {
     pte_t pte_value = 0;
     mm_debug_pte_value(task->mm->pgdir, va, &pte_slot, &pte_value);
     kerr("  pte=%p value=0x%lx\n", (void *)pte_slot, pte_value);
+    mm_leaf_info_t leaf;
+    if (mm_query_leaf(task->mm->pgdir, va, &leaf)) {
+        paddr_t page_pa = leaf.pa & ~(paddr_t)(PAGE_SIZE - 1);
+        pfn_t pfn = phys_to_pfn(page_pa);
+        if (pfn_valid(pfn)) {
+            uint16_t refs;
+            uint8_t frame_flags;
+            uint8_t order;
+            uint64_t frame_lock_flags = spin_lock_irqsave(&pfa.lock);
+            refs = pfa.meta[pfn].refcount;
+            frame_flags = pfa.meta[pfn].flags;
+            order = pfa.meta[pfn].order;
+            spin_unlock_irqrestore(&pfa.lock, frame_lock_flags);
+
+            const uint32_t *words = (const uint32_t *)pfn_to_virt(pfn);
+            kerr("  leaf: base=0x%lx pa=0x%lx pfn=%lu flags=0x%lx "
+                 "frame_flags=0x%x refs=%u order=%u\n",
+                 (unsigned long)leaf.base, (unsigned long)leaf.pa,
+                 (unsigned long)pfn, (unsigned long)leaf.flags,
+                 frame_flags, refs, order);
+            kerr("  page_words: %08x %08x %08x %08x\n",
+                 words[0], words[1], words[2], words[3]);
+            const uint64_t *at_va = (const uint64_t *)
+                ((const char *)pfn_to_virt(pfn) + (va & (PAGE_SIZE - 1)));
+            if ((va & (PAGE_SIZE - 1)) <= PAGE_SIZE - 4 * sizeof(uint64_t))
+                kerr("  va_words: %016lx %016lx %016lx %016lx\n",
+                     (unsigned long)at_va[0], (unsigned long)at_va[1],
+                     (unsigned long)at_va[2], (unsigned long)at_va[3]);
+        }
+    }
     kerr("  mm: brk=0x%lx start_brk=0x%lx stack=[0x%lx,0x%lx)\n",
          (unsigned long)task->mm->brk, (unsigned long)task->mm->start_brk,
          (unsigned long)task->mm->stack_bottom, (unsigned long)task->mm->stack_top);
@@ -72,6 +108,13 @@ static void dump_fault_pte(task_t *task, vaddr_t va) {
         kerr("  vma=[0x%lx,0x%lx) flags=0x%lx pte_flags=0x%lx file_fd=%d off=0x%lx\n",
              vma->start, vma->end, vma->vm_flags, vma->pte_flags,
              vma->file_fd, vma->file_offset);
+        if (vma->file_fd >= 0) {
+            vfile_t *vf = vfs_get_file_ref(vma->file_fd);
+            if (vf) {
+                kerr("  vma_file=%s\n", vf->path);
+                vfs_put_file_ref(vma->file_fd, vf);
+            }
+        }
     } else {
         kerr("  vma=<none> (mmap=%p, total_vm=%lu)\n",
              task->mm->mmap, (unsigned long)task->mm->total_vm);
@@ -171,7 +214,6 @@ static void user_trap_handler(trap_context_t *ctx) {
         if (code == CAUSE_LOAD_PAGE_FAULT || code == CAUSE_STORE_PAGE_FAULT || code == CAUSE_INSN_PAGE_FAULT) {
             if (code == CAUSE_STORE_PAGE_FAULT) {
                 if (handle_cow_fault(cur, stval) == 0) {
-                    arch_tlb_flush_page(stval); /* publish remote PTE change */
                     signal_deliver_user(ctx);
                     return;
                 }
@@ -185,7 +227,6 @@ static void user_trap_handler(trap_context_t *ctx) {
                 return;
             }
             if (handle_demand_fault(cur, stval) == 0) {
-                arch_tlb_flush_page(stval); /* publish remote PTE change */
                 signal_deliver_user(ctx);
                 return;
             }
@@ -212,7 +253,25 @@ static void user_trap_handler(trap_context_t *ctx) {
             if (have_user_insn)
                 kerr("  insn@sepc=0x%08x\n", user_insn);
             dump_trap_context(ctx);
+            kerr("  [FAULT-VA] stval=0x%lx\n", (unsigned long)stval);
             dump_fault_pte(cur, stval);
+            kerr("  [FAULT-PC] sepc=0x%lx\n", (unsigned long)sepc);
+            dump_fault_pte(cur, sepc);
+            if (TRAP_CTX_ARG0(ctx) != stval) {
+                kerr("  [FAULT-A0] a0=0x%lx\n",
+                     (unsigned long)TRAP_CTX_ARG0(ctx));
+                dump_fault_pte(cur, TRAP_CTX_ARG0(ctx));
+            }
+            if (TRAP_CTX_SP(ctx) != stval) {
+                kerr("  [FAULT-SP] sp=0x%lx\n",
+                     (unsigned long)TRAP_CTX_SP(ctx));
+                dump_fault_pte(cur, TRAP_CTX_SP(ctx));
+            }
+            if (TRAP_CTX_FP(ctx) && TRAP_CTX_FP(ctx) != stval) {
+                kerr("  [FAULT-FP] fp=0x%lx\n",
+                     (unsigned long)TRAP_CTX_FP(ctx));
+                dump_fault_pte(cur, TRAP_CTX_FP(ctx));
+            }
             if (deliver_user_sync_signal(ctx, SIGSEGV, -SIGSEGV))
                 return;
             proc_exit_group(-SIGSEGV);
@@ -268,6 +327,7 @@ static void user_trap_handler(trap_context_t *ctx) {
             if (have_user_insn)
                 printf(" insn=0x%08x", user_insn);
             printf("\n");
+            dump_fault_pte(cur, sepc);
             if (deliver_user_sync_signal(ctx, SIGILL, -SIGILL))
                 return;
             kerr("User Illegal Instruction: pid=%d sepc=0x%lx stval=0x%lx\n",

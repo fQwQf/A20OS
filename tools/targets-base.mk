@@ -45,6 +45,8 @@
 		final-stage6-rv-ext4-dir-tail final-stage6-la-ext4-dir-tail \
 		final-stage6-rv-helper final-stage6-la-helper \
 		final-stage7-rv-shebang final-stage7-la-shebang \
+		final-stage7-rv-rustc-j8 final-stage7-la-rustc-j8 \
+		final-stage7-rv-rustc-llvm-j8 final-stage7-la-rustc-llvm-j8 \
 		final-stage7-rv-1c-j1 final-stage7-la-1c-j1 \
 		final-stage7-rv-8c-j1 final-stage7-la-8c-j1 \
 		final-stage7-rv-8c-j2 final-stage7-la-8c-j2 \
@@ -69,4 +71,3 @@ regen-rootfs-overlay: tools/gen_rootfs_overlay.py $(ROOTFS_OVERLAY_FILES)
 
 $(ROOTFS_OVERLAY_SRC) $(ROOTFS_OVERLAY_HDR): tools/gen_rootfs_overlay.py $(ROOTFS_OVERLAY_FILES)
 	$(PYTHON) $< --out-c $(ROOTFS_OVERLAY_SRC) --out-h $(ROOTFS_OVERLAY_HDR) --root $(ROOTFS_OVERLAY_DIR)
-
