@@ -36,6 +36,12 @@ typedef struct page_cache_page {
     struct page_cache_page *prev;
     struct page_cache_page *next;
     struct page_cache_page *hnext;
+    struct page_cache_page *mapping_prev;
+    struct page_cache_page *mapping_next;
+    struct page_cache_page *dirty_prev;
+    struct page_cache_page *dirty_next;
+    struct page_cache_page *global_dirty_prev;
+    struct page_cache_page *global_dirty_next;
 } page_cache_page_t;
 
 typedef struct page_cache_stats {

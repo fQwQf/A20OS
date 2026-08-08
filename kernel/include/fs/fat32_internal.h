@@ -97,6 +97,7 @@ void fat32_free_cluster_chain(fat32_sb_t *sb, uint32_t cluster);
 int fat32_vn_writepage(vnode_t *vn, uint64_t index,
                               const void *data, size_t len);
 fat32_meta_t *fat32_get_meta(fat32_sb_t *sb, uint64_t ino, int is_dir, int create);
+void fat32_drop_meta(fat32_sb_t *sb, uint64_t ino);
 vnode_t *fat32_make_vnode(fat32_sb_t *sb, uint32_t cluster,
                                   size_t size, int is_dir, vnode_t *parent,
                                   uint64_t ino);

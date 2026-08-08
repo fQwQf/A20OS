@@ -28,6 +28,7 @@
 #include "core/panic.h"
 #include "core/lock.h"
 #include "core/cpu.h"
+#include "core/perf.h"
 #include "proc/proc.h"
 #include "drivers/core/driver_core.h"
 #include "drivers/core/driver_hwapi.h"
@@ -337,6 +338,8 @@ const struct drv_export drv_export_table[] = {
     { "proc_park_prepare",   (void *)proc_park_prepare },
     { "proc_yield",          (void *)proc_yield },
     { "arch_current_cpu_id", (void *)arch_current_cpu_id },
+    { "g_a20_perf_enabled", (void *)&g_a20_perf_enabled },
+    { "g_a20_perf_percpu", (void *)g_a20_perf_percpu },
     { "proc_park_commit",    (void *)proc_park_commit },
     { "proc_park_cancel",    (void *)proc_park_cancel },
     { "proc_park_finish",    (void *)proc_park_finish },

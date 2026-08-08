@@ -79,6 +79,18 @@ cd "$repo_root"
 runner_start_time=$(date --iso-8601=seconds)
 runner_start_epoch=$(date +%s)
 
+git_dirty_snapshot() {
+    local status status_line
+    status=$(git status --porcelain --untracked-files=normal) || return 1
+    while IFS= read -r status_line; do
+        case "$status_line" in
+        ""|"?? contest/"|"?? PROC.md") ;;
+        *) printf '%s\n' yes; return 0 ;;
+        esac
+    done <<<"$status"
+    printf '%s\n' no
+}
+
 image_dir=${FINAL_EVAL_IMAGE_DIR:-contest/2026OSImage-Pub}
 state_dir=${FINAL_EVAL_STATE_DIR:-.eval-state/2026}
 image_cache_dir=${FINAL_EVAL_IMAGE_CACHE_DIR:-$state_dir/images}
@@ -139,8 +151,17 @@ mkdir -p \
     "$state_dir/probes" \
     "$state_dir/locks"
 
+performance_lock="$state_dir/locks/stage9-performance-qemu.lock"
+performance_lock_mode=shared
+if [[ "$group" == buildstorm ||
+      ("$group" == buildstorm-probe &&
+       "$probe_case" == stage9-perf-feedback) ]]; then
+    performance_lock_mode=exclusive
+fi
+
 commit=$(git rev-parse --verify HEAD)
 short_commit=$(git rev-parse --short=12 HEAD)
+git_dirty_start=$(git_dirty_snapshot)
 timestamp=$(date -u +%Y%m%dT%H%M%SZ)
 run_nonce=$(date -u +%N)
 if [[ "$group" == buildstorm-probe ]]; then
@@ -268,9 +289,11 @@ if [[ "$group" == buildstorm-probe ]]; then
         ::/a20-probe/exec-pages-probe
     mcopy -o -i "$run_fat32" "$host_probe_dir/shebang-probe" \
         ::/a20-probe/shebang-probe
+    mcopy -o -i "$run_fat32" "$host_probe_dir/stage9-perf-probe" \
+        ::/a20-probe/stage9-perf-probe
     mcopy -o -i "$run_fat32" "$host_probe_dir/liba20probe.so" \
         ::/a20-probe/liba20probe.so
-    for probe_name in cwd-probe exec-pages-probe shebang-probe \
+    for probe_name in cwd-probe exec-pages-probe shebang-probe stage9-perf-probe \
         liba20probe.so; do
         if ! mtype -i "$run_fat32" "::/a20-probe/$probe_name" >/dev/null; then
             echo "[final-eval] failed to install $probe_name" >&2
@@ -325,15 +348,11 @@ python_version=$(conda run -n "$conda_env" python --version 2>&1)
 qemu_version=$("$qemu" --version | head -n 1)
 kernel_sha=$(sha256sum "$kernel" | awk '{print $1}')
 fat32_sha=$(sha256sum "$run_fat32" | awk '{print $1}')
-git_dirty=no
-if [[ -n $(git status --porcelain --untracked-files=no) ]]; then
-    git_dirty=yes
-fi
 
 {
     echo "run_id=$run_id"
     echo "git_commit=$commit"
-    echo "git_dirty=$git_dirty"
+    echo "git_dirty_start=$git_dirty_start"
     echo "architecture=$arch"
     echo "group=$group"
     echo "start_time=$start_time"
@@ -363,16 +382,26 @@ fi
     echo "qemu_accel=tcg,thread=multi"
     echo "qemu_timeout_s=$timeout_s"
     echo "qemu_command=$qemu_command_text"
+    echo "performance_lock=$performance_lock"
+    echo "performance_lock_mode=$performance_lock_mode"
     if [[ "$group" == buildstorm-probe ]]; then
         echo "probe_case=${probe_case:-all}"
         echo "probe_cwd_sha256=$(sha256sum "$host_probe_dir/cwd-probe" | awk '{print $1}')"
         echo "probe_exec_pages_sha256=$(sha256sum "$host_probe_dir/exec-pages-probe" | awk '{print $1}')"
         echo "probe_shebang_exec_sha256=$(sha256sum "$host_probe_dir/shebang-probe" | awk '{print $1}')"
+        echo "probe_stage9_perf_sha256=$(sha256sum "$host_probe_dir/stage9-perf-probe" | awk '{print $1}')"
         echo "probe_dso_sha256=$(sha256sum "$host_probe_dir/liba20probe.so" | awk '{print $1}')"
         echo "probe_process_models=static-elf,single-process,cargo-j1,cargo-default"
     fi
 } >"$metadata"
 
+exec 7>"$performance_lock"
+echo "[final-eval] waiting for $performance_lock_mode QEMU lock: $performance_lock"
+if [[ "$performance_lock_mode" == exclusive ]]; then
+    flock 7
+else
+    flock -s 7
+fi
 echo "[final-eval] run=$run_id timeout=${timeout_s}s"
 set +e
 conda run -n "$conda_env" --no-capture-output \
@@ -380,6 +409,7 @@ conda run -n "$conda_env" --no-capture-output \
     "${qemu_command[@]}" 2>&1 | tee "$serial_log"
 qemu_status=${PIPESTATUS[0]}
 set -e
+flock -u 7
 
 timed_out=no
 if [[ "$qemu_status" -eq 124 ]]; then
@@ -459,6 +489,15 @@ if [[ "$group" == buildstorm-probe && \
         >>"$metadata"
 fi
 
+if [[ "$group" == buildstorm-probe && \
+      "$probe_case" == stage9-perf-feedback ]]; then
+    sed -nE \
+        's/^STAGE9_META ([a-z0-9_]+=[^[:space:]]+)$/\1/p' \
+        "$serial_log" >>"$metadata"
+    echo "stage9_host_log=$probe_artifacts/stage9-perf-feedback.log" \
+        >>"$metadata"
+fi
+
 if [[ "$group" != buildstorm-probe && "$judge_status" -eq 0 ]]; then
     set +e
     conda run -n "$conda_env" python -m json.tool \
@@ -472,7 +511,14 @@ fi
 
 runner_end_time=$(date --iso-8601=seconds)
 runner_wall_elapsed_s=$(( $(date +%s) - runner_start_epoch ))
+git_dirty_end=$(git_dirty_snapshot)
+git_dirty=no
+if [[ "$git_dirty_start" == yes || "$git_dirty_end" == yes ]]; then
+    git_dirty=yes
+fi
 {
+    echo "git_dirty_end=$git_dirty_end"
+    echo "git_dirty=$git_dirty"
     echo "end_time=$end_time"
     echo "qemu_exit_status=$qemu_status"
     echo "qemu_timed_out=$timed_out"

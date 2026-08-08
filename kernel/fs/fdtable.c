@@ -10,6 +10,8 @@
 
 #define FDTABLE_WORDS ((MAX_FILES + 63) / 64)
 
+static int fdtable_ctz64(uint64_t bits);
+
 static files_struct_t *fdtable_alloc_files(void)
 {
     files_struct_t *files = kmalloc(sizeof(*files));
@@ -17,12 +19,9 @@ static files_struct_t *fdtable_alloc_files(void)
         panic("fdtable: no memory");
     spin_init(&files->lock);
     spin_set_debug(&files->lock, "files", files);
-    for (int i = 0; i < MAX_FILES; i++) {
-        files->fd[i] = -1;
-        files->cloexec[i] = 0;
-    }
-    for (int i = 0; i < FDTABLE_WORDS; i++)
-        files->open_mask[i] = 0;
+    memset(files->fd, 0xff, sizeof(files->fd));
+    memset(files->cloexec, 0, sizeof(files->cloexec));
+    memset(files->open_mask, 0, sizeof(files->open_mask));
     files->next_fd = 0;
     refcount_set(&files->refcount, 1);
     files->owners = 1;
@@ -63,13 +62,19 @@ static void fdtable_files_put(files_struct_t *files)
     int to_close[MAX_FILES];
     int close_count = 0;
     uint64_t flags = spin_lock_irqsave(&files->lock);
-    for (int i = 0; i < MAX_FILES; i++) {
-        if (files->fd[i] < 0)
-            continue;
-        to_close[close_count++] = files->fd[i];
-        files->fd[i] = -1;
-        files->cloexec[i] = 0;
-        fdtable_mask_clear(files, i);
+    for (int word = 0; word < FDTABLE_WORDS; word++) {
+        uint64_t open = files->open_mask[word];
+        while (open) {
+            int bit = fdtable_ctz64(open);
+            int fd = (word << 6) + bit;
+            open &= open - 1;
+            if (fd >= MAX_FILES)
+                break;
+            to_close[close_count++] = files->fd[fd];
+            files->fd[fd] = -1;
+            files->cloexec[fd] = 0;
+        }
+        files->open_mask[word] = 0;
     }
     spin_unlock_irqrestore(&files->lock, flags);
 
@@ -149,19 +154,6 @@ static void fdtable_note_free(files_struct_t *files, int fd)
         files->next_fd = fd;
 }
 
-static void fdtable_recompute_next(files_struct_t *files)
-{
-    if (!files)
-        return;
-    for (int i = 0; i < FDTABLE_WORDS; i++)
-        files->open_mask[i] = 0;
-    for (int fd = 0; fd < MAX_FILES; fd++) {
-        if (files->fd[fd] >= 0)
-            fdtable_mask_set(files, fd);
-    }
-    files->next_fd = fdtable_find_free(files, 0);
-}
-
 void fdtable_init(task_t *task)
 {
     if (!task)
@@ -205,14 +197,24 @@ void fdtable_copy(task_t *dst, const task_t *src)
         return;
     }
     uint64_t flags = spin_lock_irqsave(&src_files->lock);
-    for (int i = 0; i < MAX_FILES; i++) {
-        int gfd = src_files->fd[i];
-        dst_files->fd[i] = gfd;
-        dst_files->cloexec[i] = src_files->cloexec[i];
-        if (gfd >= 0 && fdtable_ref_gfd(gfd) < 0)
-            panic("fdtable_copy: live local fd %d has dead gfd %d", i, gfd);
+    memcpy(dst_files->open_mask, src_files->open_mask,
+           sizeof(dst_files->open_mask));
+    dst_files->next_fd = src_files->next_fd;
+    for (int word = 0; word < FDTABLE_WORDS; word++) {
+        uint64_t open = src_files->open_mask[word];
+        while (open) {
+            int bit = fdtable_ctz64(open);
+            int fd = (word << 6) + bit;
+            open &= open - 1;
+            if (fd >= MAX_FILES)
+                break;
+            int gfd = src_files->fd[fd];
+            dst_files->fd[fd] = gfd;
+            dst_files->cloexec[fd] = src_files->cloexec[fd];
+            if (gfd < 0 || fdtable_ref_gfd(gfd) < 0)
+                panic("fdtable_copy: open local fd %d has dead gfd %d", fd, gfd);
+        }
     }
-    fdtable_recompute_next(dst_files);
     spin_unlock_irqrestore(&src_files->lock, flags);
 }
 
@@ -247,24 +249,33 @@ int fdtable_unshare(task_t *task)
 
     files_struct_t *files = fdtable_alloc_files();
     uint64_t flags = spin_lock_irqsave(&old->lock);
-    for (int i = 0; i < MAX_FILES; i++) {
-        int gfd = old->fd[i];
-        files->fd[i] = gfd;
-        files->cloexec[i] = old->cloexec[i];
-        if (gfd >= 0) {
+    for (int word = 0; word < FDTABLE_WORDS; word++) {
+        uint64_t open = old->open_mask[word];
+        while (open) {
+            int bit = fdtable_ctz64(open);
+            int fd = (word << 6) + bit;
+            open &= open - 1;
+            if (fd >= MAX_FILES)
+                break;
+            int gfd = old->fd[fd];
+            if (gfd < 0) {
+                spin_unlock_irqrestore(&old->lock, flags);
+                fdtable_files_put(files);
+                return -EBADF;
+            }
+            files->fd[fd] = gfd;
+            files->cloexec[fd] = old->cloexec[fd];
             int r = fdtable_ref_gfd(gfd);
             if (r < 0) {
+                files->fd[fd] = -1;
                 spin_unlock_irqrestore(&old->lock, flags);
-                for (int j = 0; j < i; j++) {
-                    if (files->fd[j] >= 0)
-                        vfs_close(files->fd[j]);
-                }
-                kfree(files);
+                fdtable_files_put(files);
                 return r;
             }
+            fdtable_mask_set(files, fd);
         }
     }
-    fdtable_recompute_next(files);
+    files->next_fd = old->next_fd;
     spin_unlock_irqrestore(&old->lock, flags);
     uint64_t task_flags = spin_lock_irqsave(&proc_lock);
     task->files = files;
@@ -298,15 +309,22 @@ void fdtable_close_on_exec(task_t *task)
     uint64_t flags = spin_lock_irqsave(&files->lock);
     int to_close[MAX_FILES];
     int close_count = 0;
-    for (int i = 0; i < MAX_FILES; i++) {
-        if (files->cloexec[i] && files->fd[i] >= 0) {
-            to_close[close_count++] = files->fd[i];
-            files->fd[i] = -1;
-            fdtable_note_free(files, i);
+    for (int word = 0; word < FDTABLE_WORDS; word++) {
+        uint64_t open = files->open_mask[word];
+        while (open) {
+            int bit = fdtable_ctz64(open);
+            int fd = (word << 6) + bit;
+            open &= open - 1;
+            if (fd >= MAX_FILES)
+                break;
+            if (files->cloexec[fd]) {
+                to_close[close_count++] = files->fd[fd];
+                files->fd[fd] = -1;
+                files->cloexec[fd] = 0;
+                fdtable_note_free(files, fd);
+            }
         }
-        files->cloexec[i] = 0;
     }
-    fdtable_recompute_next(files);
     spin_unlock_irqrestore(&files->lock, flags);
     for (int i = 0; i < close_count; i++) {
         vfs_release_process_file_locks(to_close[i], task->pid);
