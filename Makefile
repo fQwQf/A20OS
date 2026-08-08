@@ -728,3 +728,11 @@ include tools/targets-native.mk
 include tools/targets-native-smoke.mk
 include tools/targets-mlibc.mk
 include tools/targets-eval.mk
+
+# ================================================================
+# Documentation
+# ================================================================
+# Build standard-reference.pdf from every tracked Markdown file under docs/. The generator validates all required tools and fonts and prints the platform-specific install commands if any is missing. See tools/gen_docs_pdf.sh for details.
+.PHONY: docs
+docs:
+	@bash tools/gen_docs_pdf.sh

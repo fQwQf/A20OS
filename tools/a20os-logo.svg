@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg"
+     viewBox="0 0 1260 840"
+     width="1260" height="840">
+  <title>20 Logo</title>
+  <desc>Vector recreation of the upper logo mark only, without the text below.</desc>
+
+  <!-- Black geometric mark -->
+  <path fill="#111111" d="
+    M 647 76
+    L 459 78
+    L 65 799
+    L 252 798
+    Z"/>
+
+  <path fill="#111111" d="
+    M 526 350
+    L 436 518
+    L 527 715
+    L 333 716
+    L 288 799
+    L 685 798
+    L 684 692
+    Z"/>
+
+  <!-- Red 2 -->
+  <path fill="#E21B16" d="
+    M 698 507
+    L 878 507
+    Q 922 507 922 551
+    L 922 638
+    Q 922 682 878 682
+    L 759 682
+    L 758 757
+    L 921 758
+    L 921 801
+    L 727 801
+    Q 716 801 716 790
+    L 714 661
+    Q 714 641 734 641
+    L 877 638
+    L 878 551
+    L 697 550
+    Z"/>
+
+  <!-- Red 0 -->
+  <path fill="#E21B16" fill-rule="evenodd" d="
+    M 946 507
+    L 1182 507
+    L 1182 801
+    L 944 801
+    L 944 514
+    Q 944 507 946 507
+    Z
+    M 990 551
+    L 1137 551
+    L 1137 757
+    L 989 757
+    L 989 551
+    Z"/>
+</svg>
