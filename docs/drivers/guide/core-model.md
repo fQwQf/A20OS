@@ -30,7 +30,14 @@ probe 成功后，核心自动创建一个 `class_device_t`。该对象负责稳
 绑定后的关系如下：
 
 ```text
-device_t                         driver_tname                             namebus ---------------------------> busdrv ---------------------------> driverdrv_priv ----> per-device state class_ops ----> typed ops tableplat_data ---> bus-owned datares[] ------> MMIO/IRQ/DMA/MEM resourcesmatched_id --> matched id_table entry
+device_t                         driver_t
+name                             name
+bus ---------------------------> bus
+drv ---------------------------> driver
+drv_priv ----> per-device state  class_ops ----> typed ops table
+plat_data ---> bus-owned data
+res[] ------> MMIO/IRQ/DMA/MEM resources
+matched_id --> matched id_table entry
 ```
 
 `plat_data` 属于总线或板级代码，驱动不得释放。`drv_priv` 属于驱动，probe 时创建或选定，remove 时清理。类操作只接收 `device_t *`，通过 `dev->drv_priv` 找到实例。remove 前核心先把 class device 标记为 offline，阻止新调用，并等待已经进入驱动的 class 调用退出；已打开的文件随后返回 `-ENODEV`。
