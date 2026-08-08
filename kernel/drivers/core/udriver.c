@@ -71,6 +71,26 @@ int udriver_mmio_user_owned(uint64_t phys)
     return 0;
 }
 
+/* Hardware presence probe for a user-claimable window.  virtio-mmio slots
+ * are identified by their magic register + device id; declared board
+ * devices (goldfish RTC) are always present on their board. */
+int udriver_window_present(uint64_t phys)
+{
+    for (unsigned i = 0; i < UDRIVER_MMIO_WINDOWS_NR; i++) {
+        if (phys >= g_mmio_windows[i].base &&
+            phys < g_mmio_windows[i].base + g_mmio_windows[i].size) {
+            if (strncmp(g_mmio_windows[i].name, "virtio-", 7) == 0) {
+                uintptr_t base = PAGE_OFFSET + g_mmio_windows[i].base;
+                uint32_t magic = readl((const volatile void *)base);
+                uint32_t dev_id = readl((const volatile void *)(base + 0x008));
+                return magic == 0x74726976U && dev_id != 0;
+            }
+            return 1;   /* declared board device (goldfish-rtc) */
+        }
+    }
+    return 0;
+}
+
 int udriver_map_mmio(mm_struct_t *mm, uint64_t phys, uint64_t size,
                      uint32_t prot, uint64_t *out_va)
 {

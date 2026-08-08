@@ -34,23 +34,24 @@ QEMU x86_64 与 RISC-V64 GUI 的 VirtIO GPU、键盘和鼠标分别由 `make smo
 | hwapi DMA | 基础可用 | coherent helper 返回物理 handle，sync 委托 arch cache hook；尚无 DMA mask/IOMMU/大对齐能力 |
 | class publication | 已扩展 | probe 成功自动建立带引用的 class device；remove 前先下线并排空在途调用 |
 | devfs/sysfs | 动态类视图 | char/block/audio 自动生成 `/dev/charN`、`diskN`、`audioN`；所有 class 动态暴露于 `/sys/class`；旧 display/input 聚合节点暂时保留 |
-| drvmod loader | 基础可用 | 四架构（riscv64/x86_64/aarch64/loongarch64）ELF `ET_REL`、框架符号白名单、全量 ELF 边界校验（section/symbol/strtab/relocation）、按 `e_machine` 选择重定位解码器（RISC-V CALL、x86-64 large 模型 ABS64、AArch64 CALL26+veneer、LoongArch CALL36/pcalau12i）、自动 match→probe 绑定、统一驱动核心桥接（模块可注册标准 `driver_t`）、drv_env 双驻留共享代码的模块后端（DRV_ENV_DRVMOD）；goldfish RTC（riscv64/aarch64/loongarch64）、PC speaker（x86_64）、virtio-input 内核探针（riscv64/aarch64）、virtio-input 完整驱动（四架构）、PS/2 键鼠控制器（x86_64）、NVMe（x86_64/loongarch64）、TPM 2.0（x86_64）、Intel HDA（四架构）已迁移为模块；PCI 类驱动访问器、DMA 增强（aligned/sync）、调度/等待原语与 ACPI TPM2 发现均已导出；签名、运行时 unload 尚未完成 |
+| drvmod loader | 基础可用 | 四架构（riscv64/x86_64/aarch64/loongarch64）ELF `ET_REL`、`.a20drv` 描述符校验（唯一元数据，覆盖 RTC..USB 全部类型）、框架符号白名单、全量 ELF 边界校验（section/symbol/strtab/relocation）、按 `e_machine` 选择重定位解码器（RISC-V CALL、x86-64 large 模型 ABS64/`.lbss`、AArch64 CALL26+veneer、LoongArch CALL36/pcalau12i）；模块与内建共用同一 `driver_t`（经 `drv_driver_register` 注册，核心 `device_t` 匹配/probe），不再有第二套 `drv_driver_t`/`drv_device_t`；统一驱动管理器（`driver_manager.c`）扫描 DriverStore、按描述符路由内核模块与用户服务，已 pinned 模块不会被重复执行 DriverEntry；drv_env 双驻留共享代码的模块后端（DRV_ENV_DRVMOD）；goldfish RTC、PC speaker、virtio-input 内核探针、virtio-input 完整驱动、PS/2 键鼠控制器、NVMe、TPM 2.0、Intel HDA、virtio-blk、virtio-scsi、AHCI、DW SDIO、E1000、VMSVGA、virtio-net、virtio-gpu、virtio-snd、xHCI、USB HID、USB storage 均已迁移为模块（generic 无内建设备驱动）；PCI 类驱动访问器、DMA 增强（aligned/sync）、调度/等待原语、`clock_ticks_per_sec` 与 ACPI TPM2 发现均已导出；签名、运行时 unload 尚未完成 |
 
 ## drvmod 迁移矩阵
 
 | 驱动 | 迁移状态 | 说明 |
 |---|---|---|
-| goldfish RTC | 已迁移 | 内建 `goldfish_rtc_kdrv.c` 已删除；`rtc.drv` 在 riscv64/aarch64/loongarch64 QEMU virt 上由 `smoke-drvmod-*` 验证绑定 |
-| PC speaker | 已迁移 | 内建 `pc_speaker.c` 已删除；`pc-spkr.drv`（x86_64）经统一驱动核心桥接注册 AUDIO 类并绑定 platform 设备 |
-| UART | 不可迁移 | 启动早期串口，模块加载前必须可用 |
-| virtio-blk | 不可迁移 | 根文件系统挂载依赖它，模块自身从该文件系统读取 |
-| virtio-net、virtio-gpu、USB core、PCI bus、virtio-mmio bus | 不可迁移 | 初始化顺序在 `init_kthread`（模块加载点）之前 |
-| DMA/PCI BAR/class ops 框架 API | 已导出 | `drv_dma_alloc_coherent`/`dma_alloc_coherent_aligned`/`dma_sync_*`、`pci_get_bar_resource`/`pci_enable_and_assign_bars`/`pci_intx_irq`/`pci_class_code`/`pci_bus`、block/net/input/audio/display class 操作（统一核心桥接） |
-| virtio-input 内核探针 | 已迁移 | 内建 `virtio_input_kprobe.c` 已删除；`vinput-probe.drv` 用 drv_env 模块后端复用双驻留共享协议，`smoke-dual-input` 验证与用户态 uinputd 读到同一设备身份 |
-| virtio-input 完整事件投递 | 已迁移 | `vinput.drv` 模块（virtq + IRQ + input class），`/dev/event0` mux 拆分至 `kernel/drivers/input/input_mux.c`，`input_mux_wake` 导出；QEMU 实测事件流 |
-| AHCI、E1000、virtio-scsi、vmsvga、virtio-gpu | 不可迁移/待验证 | AHCI 与 virtio-scsi 是 VirtualBox x86/ARM 根盘依赖（挂载先于模块加载）；E1000/vmsvga 仅 VirtualBox 可验证；virtio-gpu 启动顺序依赖 framebuffer |
-| TPM 2.0 | 已迁移 | `tpm.drv`（x86_64）：`firmware_acpi_tpm2` 导出 + TIS FIFO，无设备优雅失败 |
-| GMAC、SDIO | 板级 | StarFive/LS2K 单实例轮询，需实例锁；无 QEMU 环境可验证（非框架缺口，platform bus 与 probe 机制已就绪） |
+| goldfish RTC | 已迁移 | 内建 `goldfish_rtc_kdrv.c` 已删除；`rtc.a20drv` 在 riscv64/aarch64/loongarch64 QEMU virt 上由 `smoke-drvmod-*` 验证绑定 |
+| PC speaker | 已迁移 | 内建 `pc_speaker.c` 已删除；`pc-spkr.a20drv`（x86_64）经统一驱动核心桥接注册 AUDIO 类并绑定 platform 设备 |
+| UART | 内核服务 | 启动早期串口服务，模块加载前必须可用，不是可迁移设备包 |
+| virtio-blk | 已迁移 | 根文件系统挂载依赖它；`virtio-blk.a20drv` 已嵌入 Early DriverStore（root ramfs overlay），在挂载真实根盘前加载，解除 bootstrap 循环 |
+| PCI bus、virtio-mmio bus、USB core、framebuffer/gpu_core、audio_core、input_mux | 内核服务 | transport、class 聚合和设备节点服务，保持静态链接，不计入迁移账本 |
+| DMA/PCI BAR/class ops 框架 API | 已导出 | `drv_dma_alloc_coherent`/`dma_alloc_coherent_aligned`/`dma_sync_*`、`pci_get_bar_resource`/`pci_enable_and_assign_bars`/`pci_intx_irq`/`pci_class_code`/`pci_bus`、block/net/input/audio/display class 操作（统一核心桥接）|
+| virtio-input 内核探针 | 已迁移 | 内建 `virtio_input_kprobe.c` 已删除；`vinput-probe.a20drv` 用 drv_env 模块后端复用双驻留共享协议，`smoke-dual-input` 验证与用户态 uinputd 读到同一设备身份 |
+| virtio-input 完整事件投递 | 已迁移 | `vinput.a20drv` 模块（virtq + IRQ + input class），`/dev/event0` mux 拆分至 `kernel/drivers/input/input_mux.c`，`input_mux_wake` 导出；QEMU 实测事件流 |
+| AHCI、DW SDIO、virtio-scsi | 已迁移 | `ahci.a20drv`（x86_64 Early）、`dw-sdio.a20drv`（riscv64 Early）、`virtio-scsi.a20drv`（四架构 Early）经 Early DriverStore 在根盘挂载前加载，与 virtio-blk 一起解决根设备 bootstrap |
+| E1000、virtio-net、virtio-gpu、vmsvga、virtio-snd、xHCI、USB HID、USB storage | `.a20drv` | 设备实现由 generic DriverStore 提供；其 transport、framebuffer 和 class 服务仍由内核提供 |
+| TPM 2.0 | 已迁移 | `tpm.a20drv`（x86_64）：`firmware_acpi_tpm2` 导出 + TIS FIFO，无设备优雅失败 |
+| GMAC、SDIO | 板级 platform | StarFive/LS2K GMAC 与 DW SDIO 通过 `platform_bus` + `hardware_id` 注册绑定；无 QEMU 环境可验证（非框架缺口）|
 
 迁移细节与顺序见 [kernel-modules.md](../guide/kernel-modules.md)。
 
@@ -69,9 +70,9 @@ QEMU x86_64 与 RISC-V64 GUI 的 VirtIO GPU、键盘和鼠标分别由 `make smo
 | VMSVGA/SVGAv3 | DISPLAY | VirtualBox x86_64/ARM，BAR offset/pitch 边界和 class registry，已加 remove；静态单实例 |
 | xHCI HID | INPUT | VBox ARM keyboard/mouse/tablet，class、轮询和 controller stop/remove；只匹配 `8086:1e31`，静态单 controller |
 | USB Storage (BOT) | BLOCK | `kernel/drivers/usb/class/usb_storage.c`：xHCI bulk 传输 + Bulk-Only Transport（CBW/CSW）+ SCSI READ(10)/WRITE(10)/READ_CAPACITY(10)。QEMU x86_64 `qemu-xhci + usb-storage` 已验证，挂载为 `/dev/diskN` 并可直接 mount FAT32。只支持单 LUN、512/2048/4096 扇区、每命令 4 KiB 数据块 |
-| TPM 2.0 (TIS) | x86 安全 | `tpm.drv` 模块：ACPI TPM2 表发现 + TIS FIFO 状态机 + Startup/GetRandom；无 TPM 时 probe 优雅返回 |
-| PS/2 | x86 板级服务 | drvmod 模块（`ps2.drv`，x86_64），初始化 + 双向量 ISR；键盘字符经 `uart_receive_char` 进控制台 |
-| PC Speaker | AUDIO | drvmod 模块（`pc-spkr.drv`，x86_64），动态 `/dev/audioN`；支持 19 Hz–20 kHz 有界 tone/stop ABI，不冒充 PCM |
+| TPM 2.0 (TIS) | x86 安全 | `tpm.a20drv` 模块：ACPI TPM2 表发现 + TIS FIFO 状态机 + Startup/GetRandom；无 TPM 时 probe 优雅返回 |
+| PS/2 | x86 板级服务 | drvmod 模块（`ps2.a20drv`，x86_64），初始化 + 双向量 ISR；键盘字符经 `uart_receive_char` 进控制台 |
+| PC Speaker | AUDIO | drvmod 模块（`pc-spkr.a20drv`，x86_64），动态 `/dev/audioN`；支持 19 Hz–20 kHz 有界 tone/stop ABI，不冒充 PCM |
 | Intel HDA | AUDIO | 架构无关 PCI class 驱动；x86_64 与 LoongArch64 QEMU 通过 BDL DMA smoke，x86_64 用户态 tone 到 QEMU WAV 验证，RISC-V64 已完成完整 Wayland/FFmpeg/PulseAudio 播放；三个 `run-gui` 目标连接宿主音频；支持 48 kHz 双声道 S16_LE、环形 DMA、stop/drain、完整 remove 和用户态 WAV/raw/tone 播放器 |
 | STM32 SDIO | BLOCK | 统一类 + MCU bridge；板级 bus 仍用名称匹配 |
 | STM32 简单外设 | 允许例外 | 板级轮询轻量 API，不强制统一对象；扩展到多实例/用户 ABI 时必须迁移 |
@@ -104,3 +105,12 @@ QEMU RISC-V64 board 已提供 ECAM、PCI MMIO BAR 窗口和实际 HDA PCM DMA；
 已清理的兼容债务：`kernel_main` 不再直调 VirtIO GPU/input 初始化；block mount 和 network init 不再启动架构私有 VirtIO PCI 扫描。QEMU x86_64 现在只有统一 PCI bus 拥有 BAR 与 transport，VirtIO-MMIO 通过其 bus device ID 匹配 virtio-blk。不得恢复这些双初始化入口。
 
 > 注意：状态矩阵描述的是当前代码事实，不是未来计划。任何“扩大限制”或“降低状态”的改动都要同步更新平台文档和提交清单。
+
+## 已知的既有回归（与驱动部署无关，基线复现）
+
+以下两个问题在驱动部署重构**之前**的已提交基线（`3bfe64b`）上即可复现，不是本次改动引入，也不属于驱动部署范围；记录基线证据以免误归因：
+
+- **x86_64 用户态 pid=3 崩溃**：generic x86_64 启动可挂载 `/bin`、驱动全部绑定，但 mksh（pid 3）启动期在 `free_vma_pages → frame_put` 触发 `KERNEL PAGE FAULT`（`BADV=0x7fffff9xxxxx`，确定性复现），随后锁自旋。在 `3bfe64b` 干净基线（无任何驱动部署改动）上用同一 fat32 镜像复现相同故障类（`pid=3` + `0x7fffff9xxxxx`），证明为既有 mm/exec 问题；驱动重构只是让 x86 首次能到达用户态而暴露它。修复方向在 mm/vma 释放路径，不在驱动层。
+- **riscv64 `mm_stress` 在 evict 子测试挂起**：`smoke-mm-stress` 停在 `MM_STRESS: evict start`（9 MiB 文件写回/读回压力，45 s watchdog 超时）。同一 fat32 镜像 + `3bfe64b` 干净基线内核复现相同挂起；`2026-08-06` 的 `mm_stress` 日志为 PASS，回归在 `3bfe64b` 及其之前的已提交改动之间，与驱动部署改动无关。
+
+两者均为页缓存/写回或 exec 释放路径的既有缺陷，独立于 generic/embedded 驱动部署重构。修复时不得把这两个现象当作驱动部署的回归证据。

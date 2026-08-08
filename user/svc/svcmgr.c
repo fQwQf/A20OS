@@ -314,7 +314,7 @@ int main(int argc, char **argv, char **envp)
 
     /* Declarative manifest, spawn order = dependency order. */
     g_svcs[0].name = "rtcd";
-    g_svcs[0].path = "/bin/rtcd-rv";
+    g_svcs[0].path = "/bin/rtcd-rv.a20drv";
     g_svcs[0].ep_slot = A20_RTCD_EP_SLOT;
     g_svcs[0].ping_kind = 1;
     g_svcs[1].name = "echod";

@@ -4,10 +4,8 @@
 #include "fs/vfs.h"
 #include "fs/mount_setup.h"
 #include "fs/block_cache.h"
-#include "drivers/block/virtio_blk.h"
-#include "drivers/block/virtio_scsi.h"
-#include "drivers/block/ahci.h"
-#include "drivers/usb/usb_storage.h"
+#include "drivers/core/driver_core.h"
+#include "drivers/core/driver_class.h"
 
 /*
  * Block-device mount strategy, split out of kernel/main.c.
@@ -46,6 +44,48 @@ static int partition_write_sector(block_dev_t *block, uint64_t lba, const void *
         count > part->sectors - lba)
         return -1;
     return part->parent->write_sector(part->parent, part->first_lba + lba, buf, count);
+}
+
+typedef struct class_block_dev {
+    block_dev_t block;
+    device_t *dev;
+    const block_dev_ops_t *ops;
+} class_block_dev_t;
+
+static int class_block_read_sector(block_dev_t *block, uint64_t lba, void *buf,
+                                   size_t count)
+{
+    class_block_dev_t *class_block = (class_block_dev_t *)block->priv;
+    return class_block && class_block->ops && class_block->ops->read ?
+        class_block->ops->read(class_block->dev, lba, buf, count) : -1;
+}
+
+static int class_block_write_sector(block_dev_t *block, uint64_t lba, const void *buf,
+                                    size_t count)
+{
+    class_block_dev_t *class_block = (class_block_dev_t *)block->priv;
+    return class_block && class_block->ops && class_block->ops->write ?
+        class_block->ops->write(class_block->dev, lba, buf, count) : -1;
+}
+
+block_dev_t *mount_setup_block_device(int index)
+{
+    static class_block_dev_t class_blocks[16];
+    device_t *dev = device_find_by_class(DEV_CLASS_BLOCK, index);
+    if (!dev || !dev->drv || !dev->drv->class_ops || index < 0 || index >= 16)
+        return NULL;
+    const block_dev_ops_t *ops = (const block_dev_ops_t *)dev->drv->class_ops;
+    if (!ops->read || !ops->write || !ops->capacity || !ops->sector_size)
+        return NULL;
+    class_block_dev_t *class_block = &class_blocks[index];
+    class_block->dev = dev;
+    class_block->ops = ops;
+    class_block->block.read_sector = class_block_read_sector;
+    class_block->block.write_sector = class_block_write_sector;
+    class_block->block.capacity = ops->capacity(dev);
+    class_block->block.sector_size = ops->sector_size(dev);
+    class_block->block.priv = class_block;
+    return &class_block->block;
 }
 
 /* The VBox UEFI image is GPT-partitioned.  Expose its first partition to the
@@ -137,10 +177,10 @@ static void mount_final_root_pseudo_filesystems(void) {
 void mount_block_devices(void) {
     int bin_ok = 0, test_ok = 0;
 
-    for (int i = 0; i < 8; i++) {
-        block_dev_t *blk = virtio_blk_get_dev(i);
+    for (int i = 0; i < 16; i++) {
+        block_dev_t *blk = mount_setup_block_device(i);
         if (!blk)
-            break;
+            continue;
         if (!bin_ok && try_mount(blk, "/bin", "fat32") == 0) {
             bin_ok = 1;
             continue;
@@ -149,52 +189,14 @@ void mount_block_devices(void) {
             test_ok = 1;
             continue;
         }
-    }
-
-    /* VirtualBox ARM exposes its boot disk through a VirtIO-SCSI controller,
-     * not a VirtIO block function. The controller driver is bound during PCI
-     * enumeration, so mount any discovered LUNs alongside virtio-blk disks. */
-    for (int i = 0; i < 4; i++) {
-        block_dev_t *scsi = virtio_scsi_get_dev(i);
-        if (!scsi)
+        block_dev_t *partition = first_gpt_partition(blk);
+        if (!partition)
             continue;
-        block_dev_t *fsdev = first_gpt_partition(scsi);
-        if (!fsdev)
-            fsdev = scsi;
-        if (!bin_ok && try_mount(fsdev, "/bin", "fat32") == 0) {
+        if (!bin_ok && try_mount(partition, "/bin", "fat32") == 0) {
             bin_ok = 1;
             continue;
         }
-        if (!test_ok && try_mount(fsdev, "/test", "ext4") == 0)
-            test_ok = 1;
-    }
-
-    block_dev_t *ahci = NULL;
-#ifdef CONFIG_AHCI
-    ahci = ahci_get_dev(0);
-#endif
-    if (ahci) {
-        if (!bin_ok)
-            bin_ok = try_mount(ahci, "/bin", "fat32") == 0;
-        if (!test_ok)
-            test_ok = try_mount(ahci, "/test", "ext4") == 0;
-    }
-
-    /* USB mass-storage disks (U-disk / USB HDD).  These enumerate after the
-     * PCI/virtio buses and are scanned by usb_core_scan() from the scheduler
-     * context, so they are mounted last and only when a core disk is absent. */
-    for (int i = 0; i < 4; i++) {
-        block_dev_t *usb = usb_storage_get_dev(i);
-        if (!usb)
-            continue;
-        block_dev_t *fsdev = first_gpt_partition(usb);
-        if (!fsdev)
-            fsdev = usb;
-        if (!bin_ok && try_mount(fsdev, "/bin", "fat32") == 0) {
-            bin_ok = 1;
-            continue;
-        }
-        if (!test_ok && try_mount(fsdev, "/test", "ext4") == 0)
+        if (!test_ok && try_mount(partition, "/test", "ext4") == 0)
             test_ok = 1;
     }
 
@@ -205,4 +207,14 @@ void mount_block_devices(void) {
         mount_final_root_pseudo_filesystems();
     }
 }
+#else /* BRINGUP */
+
+/* No block devices exist in BRINGUP builds; keep the class lookup linkable
+ * for vfs_mount(/dev/vd*) and the swap path. */
+block_dev_t *mount_setup_block_device(int index)
+{
+    (void)index;
+    return NULL;
+}
+
 #endif /* BRINGUP */
