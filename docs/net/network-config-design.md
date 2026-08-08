@@ -50,7 +50,7 @@ typedef struct a20_net_config {
 } a20_net_config_t;
 ```
 
-存储位置是 `kernel/net/net_config.c`（新文件）。该结构体初始化为零，然后由命令行解析器填充。`kernel/net/lwip_stack.c` 中现有的 `a20_lwip_register_virtio_netifs()` 改为读取该结构体，不再使用硬编码 QEMU 地址。
+存储位置是 `kernel/net/net_config.c`。该结构体初始化为零，然后由命令行解析器填充。`kernel/net/lwip_stack.c` 中现有的 `a20_lwip_register_netifs()` 改为读取该结构体，不再使用硬编码 QEMU 地址。
 
 ## 回退行为
 
@@ -68,7 +68,12 @@ typedef struct a20_net_config {
 除命令行外，内核通过 `/proc/net/config` 暴露运行时配置：
 
 ```text
-ip=10.0.2.15netmask=255.255.255.0gateway=10.0.2.2dns0=10.0.2.3dhcp=1hostname=a20os
+ip=10.0.2.15
+netmask=255.255.255.0
+gateway=10.0.2.2
+dns0=10.0.2.3
+dhcp=1
+hostname=a20os
 ```
 
 该文件只读，并反映当前生效配置。如果启用 DHCP，租约变化时这些值会更新。
@@ -107,15 +112,15 @@ DHCP 作为 lwIP timeout 处理的一部分运行。它在更新 netif 地址和
 
 ## 迁移检查清单
 
-实现该设计时，逐项确认：
+实现该设计时，逐项确认（该设计已实现，`smoke-network-suite` 覆盖）：
 
-- [ ] `kernel/net/lwip_stack.c` 不再包含硬编码 QEMU 地址。
-- [ ] `a20_lwip_register_virtio_netifs()` 从 `a20_net_config` 读取配置。
-- [ ] 命令行解析器识别全部六个 `a20.*` 键。
-- [ ] `a20.dhcp=1` 触发 DHCP 并覆盖静态值。
-- [ ] `/proc/net/config` 暴露生效配置。
-- [ ] `user/cmds/wget.c` 从 `/proc/net/config` 读取 DNS。
-- [ ] `user/cmds/ping.c` 从 `/proc/net/config` 读取 DNS。
-- [ ] `user/cmds/udpsend.c` 能容忍未配置状态下的 `-ENETUNREACH`。
-- [ ] QEMU 启动脚本传入 `a20.ip=10.0.2.15 a20.netmask=255.255.255.0 a20.gateway=10.0.2.2 a20.dns=10.0.2.3 a20.hostname=a20os`，以保持现有 smoke 行为。
-- [ ] 网络 smoke 测试覆盖已配置和未配置两种启动路径。
+- [x] `kernel/net/lwip_stack.c` 不再包含硬编码 QEMU 地址。
+- [x] `a20_lwip_register_netifs()` 从 `a20_net_config` 读取配置。
+- [x] 命令行解析器识别全部六个 `a20.*` 键。
+- [x] `a20.dhcp=1` 触发 DHCP 并覆盖静态值。
+- [x] `/proc/net/config` 暴露生效配置。
+- [x] `user/cmds/wget.c` 从 `/proc/net/config` 读取 DNS。
+- [x] `user/cmds/ping.c` 从 `/proc/net/config` 读取 DNS。
+- [x] `user/cmds/udpsend.c` 能容忍未配置状态下的 `-ENETUNREACH`。
+- [x] QEMU 启动脚本传入 `a20.ip=10.0.2.15 a20.netmask=255.255.255.0 a20.gateway=10.0.2.2 a20.dns=10.0.2.3 a20.hostname=a20os`，以保持现有 smoke 行为。
+- [x] 网络 smoke 测试覆盖已配置和未配置两种启动路径。
