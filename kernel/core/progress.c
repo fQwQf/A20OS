@@ -5,6 +5,8 @@
 #include "net/net_config.h"
 #include "net/socket_internal.h"
 #include "drivers/core/driver_core.h"
+#include "drivers/core/driver_hwapi.h"
+#include "drivers/usb/usb.h"
 #include "lwip/timeouts.h"
 
 /* virtio-net is optional in generic and is supplied by a .a20drv package.
@@ -29,6 +31,9 @@ void kernel_progress_poll(kernel_progress_reason_t reason)
 {
     (void)reason;
     driver_progress_class(DEV_CLASS_BLOCK);
+    /* Registration and removal may call driver callbacks, so hotplug polling
+     * runs only from this scheduler/idle process-context bridge. */
+    usb_core_poll();
     /*
      * NO_SYS lwIP has one global core lock.  Letting every idle CPU poll it
      * turns an otherwise idle SMP guest into a permanent lock convoy.  CPU 0
