@@ -48,13 +48,13 @@
 
 `docs/native-abi/00-overview.md` 已定义了良好的骨架：
 
-- Handle 作为统一资源引用 ✓
-- Handle rights (capability) 系统 ✓
-- 版本化结构体参数 ✓
-- ABI 版本协商 ✓
-- Syscall 编号分区 ✓
-- 错误模型 ✓
-- 启动协议 ✓
+- Handle 作为统一资源引用 √
+- Handle rights (capability) 系统 √
+- 版本化结构体参数 √
+- ABI 版本协商 √
+- Syscall 编号分区 √
+- 错误模型 √
+- 启动协议 √
 
 本文档在此基础上，**补充以下内容**：
 
@@ -714,24 +714,24 @@ $$\text{dup\_valid}(h, \rho') \iff \rho' \subseteq HT_p(h).rights \land \rho' \s
 
 | 对象类型 | 合法操作 | 对应 Rights | 覆盖？ |
 |---------|---------|------------|--------|
-| file | 读取 | R | ✓ |
-| file | 写入 | W | ✓ |
-| file | 状态查询 | Stat | ✓ |
-| file | 随机访问 | Seek | ✓ |
-| file | 复制/传递 | Dup, Transfer | ✓ |
-| file | 内存映射 | Map | ✓ |
-| file | 控制（fsync, ftruncate） | Control | ✓ |
-| task | 等待退出 | Wait | ✓ |
-| task | 发信号 | Signal | ✓ |
-| task | 管理（设置优先级） | Admin | ✓ |
-| channel | 读（recv） | R | ✓ |
-| channel | 写（send） | W | ✓ |
-| channel | 传递 handle | Transfer（在 handles 上） | ✓ |
-| eventq | 读取事件 | R | ✓ |
-| eventq | 注册/注销 | Control | ✓ |
-| timer | 设置/取消 | Control | ✓ |
-| shm | 映射 | Map | ✓ |
-| shm | 读写 | R, W | ✓ |
+| file | 读取 | R | √ |
+| file | 写入 | W | √ |
+| file | 状态查询 | Stat | √ |
+| file | 随机访问 | Seek | √ |
+| file | 复制/传递 | Dup, Transfer | √ |
+| file | 内存映射 | Map | √ |
+| file | 控制（fsync, ftruncate） | Control | √ |
+| task | 等待退出 | Wait | √ |
+| task | 发信号 | Signal | √ |
+| task | 管理（设置优先级） | Admin | √ |
+| channel | 读（recv） | R | √ |
+| channel | 写（send） | W | √ |
+| channel | 传递 handle | Transfer（在 handles 上） | √ |
+| eventq | 读取事件 | R | √ |
+| eventq | 注册/注销 | Control | √ |
+| timer | 设置/取消 | Control | √ |
+| shm | 映射 | Map | √ |
+| shm | 读写 | R, W | √ |
 
 **结论**：14 个权限位覆盖了全部 13 种对象类型的所有合法操作。每种类型只有其合法权限位的子集有意义，其他位在 handle_dup 时被自动忽略（内核不设置非法位）。
 
