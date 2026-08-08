@@ -12,6 +12,11 @@
 /* Public API for FS layer */
 #define DW_SDIO_SECTOR_SIZE 512
 
+/* Platform identity contract: the board registers its SDIO controller as a
+ * platform device with these IDs; the driver binds through platform_bus. */
+#define DW_SDIO_PLATFORM_VENDOR 0x5F56U
+#define DW_SDIO_PLATFORM_DEVICE 1U
+
 int  dw_sdio_init_dev(uintptr_t base);
 int  dw_sdio_read_sector(uintptr_t base, uint64_t lba, void *buf, size_t count);
 int  dw_sdio_write_sector(uintptr_t base, uint64_t lba, const void *buf, size_t count);

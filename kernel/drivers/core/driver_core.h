@@ -13,6 +13,7 @@
 
 #include "core/types.h"
 #include "core/defs.h"
+#include "drivers/driver_descriptor.h"
 
 /* ============================================================
  * Forward declarations
@@ -92,6 +93,8 @@ typedef struct device {
     resource_t        *res;        /* resource array */
     int                res_count;
     int                state;      /* DEV_STATE_* */
+    int                user_owned; /* owned by a user-service driver; only
+                                    * read-only kernel probes may bind */
     struct class_device *class_dev; /* core-owned userspace publication */
 } device_t;
 
@@ -123,6 +126,7 @@ typedef struct driver {
     int  (*remove)(device_t *dev);
     int  (*suspend)(device_t *dev);   /* optional */
     int  (*resume)(device_t *dev);    /* optional */
+    void (*progress)(device_t *dev);  /* optional non-IRQ completion drain */
 
     /* subsystem interface */
     const void         *class_ops;    /* block_dev_ops_t*, net_dev_ops_t*, etc. */
@@ -130,6 +134,10 @@ typedef struct driver {
 
     /* module linkage (NULL = built-in) */
     void               *module;
+
+    /* read-only probe: may bind user-owned devices but must not claim or
+     * destructively initialize them (dual-placement kernel shell). */
+    int                 read_only_probe;
 } driver_t;
 
 /* ============================================================
@@ -175,6 +183,9 @@ int  driver_register(driver_t *drv);
 int  driver_unregister(driver_t *drv);
 int  device_register(device_t *dev);
 void device_unregister(device_t *dev);
+/* Publish a bus add/remove event through the normal device lifecycle.  Bus
+ * callbacks observe ADD after probe and REMOVE after remove has completed. */
+int  device_hotplug(device_t *dev, int event);
 int  bus_register(bus_type_t *bus);
 void bus_unregister(bus_type_t *bus);
 
@@ -189,6 +200,29 @@ device_t *device_find_by_class(uint32_t class_type, int index);
 
 /* probe all unbound devices against registered drivers */
 void driver_probe_all(void);
+void driver_progress_class(uint32_t class_type);
+
+/* ------------------------------------------------------------------ */
+/*  Unified driver manager                                             */
+/* ------------------------------------------------------------------ */
+
+/* Read the .a20drv descriptor section from an open ELF file. */
+int driver_descriptor_read(int fd, a20_driver_descriptor_t *out);
+
+/* Driver manager bootstrap: register module-owned devices, scan the
+ * DriverStore (/bin/lib/drivers) and activate every .a20drv package.
+ * Called once from init_kthread after the filesystem is available. */
+/* generic deployment activation is deliberately split around root mounting:
+ * early packages may provide the root device, while runtime activation may
+ * create user-service processes after proc_init(). */
+void driver_manager_early_init(void);
+void driver_manager_init(void);
+
+/* Activate a single driver package from the store (used by rescan). */
+int driver_manager_activate(const char *store_path);
+
+/* Spawn a user-service driver as a native user process. */
+int driver_manager_spawn_user(const char *path);
 
 /* ============================================================
  * Board configuration — one per board preset

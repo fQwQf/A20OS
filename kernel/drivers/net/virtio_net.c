@@ -7,7 +7,6 @@
 #include "drivers/core/driver_hwapi.h"
 #include "drivers/core/driver_register.h"
 #include "net/lwip_stack.h"
-#include "net/netd_proto.h"
 #include "mm/mm.h"
 #include "core/stdio.h"
 #include "core/string.h"
@@ -490,13 +489,6 @@ void virtio_net_poll_rx_all(void) {
             poll_only = 1;
             break;
         }
-    }
-    /* Frame-plane mode: drain netd's TX ring even without inbound traffic. */
-    if (netd_enabled()) {
-        uint64_t flags = a20_lwip_lock();
-        a20_lwip_poll_locked();
-        a20_lwip_unlock(flags);
-        return;
     }
     if (!poll_only && !a20_lwip_rx_pending_any())
         return;

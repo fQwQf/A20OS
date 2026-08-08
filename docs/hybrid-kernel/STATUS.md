@@ -27,7 +27,10 @@
 | virtio-blk 用户态驱动（零拷贝 DMA） | 已实现 | FAT32 挂载 `/ubd`，`smoke-native-ubd` |
 | 驱动崩溃恢复（在飞请求失败传导 + 重挂载） | 已实现 | `ubd_recover` |
 | Linux ABI 透明获益（vDSO、唤醒快路径、AF_UNIX 桥接） | 已实现 | `smoke-clock-vdso` + unix 测试 |
-| netd 帧面 + socket 代理（lwIP 用户态 + 帧环 + RPC 代理） | host→guest 与 guest→host TCP echo 数据面已通 | `netd=1` 下 hostfwd echo（`HOST_GOT b'netd-sock-echo' len=14`）与 `NETD_SOCK_TEST: PASS` |
+| TCP/IP 协议栈（内核态 lwIP 单一实现） | 已实现 | lwIP 源码位于 `kernel/external/lwip`，由内核 `kernel/net` 编译；`smoke-network-suite` |
+| 统一等待对象层（futex/EventQ/channel/pipe/socket/mutex 共用 `wait_queue_t`） | 已实现 | futex 迁移到共享 `wait_queue_t`（谓词匹配/requeue/purge），`smoke-futex-stress`、`smoke-sched-stress` |
+| Channel IPC 从 Linux ABI 消费（fd 表面） | 已实现 | `SYS_a20_channel_pair`/`SYS_a20_registry_client`：Linux 程序经 read/write 使用同一 channel 机制与服务注册表，`smoke-a20-channel` |
+| 统一对象计量（fd/vfile 纳入对象审计） | 已实现 | `/proc/a20/objects` 增加 `vfiles` 计数（fdtable + fd-backed handle 共享），崩溃循环零漂移审计覆盖两 ABI |
 | 核心原语契约测试（rights 代数 / 背压 / EventQ / VMO 生命周期） | 已实现（改造阶段一） | `smoke-native-contract`，`test_native_contract.c` 四分区 |
 | 句柄类型掩码 STAT 一致性（端点/队列可 query） | 已实现（阶段一副产品） | `handle_table.c` 类型掩码 + `ralg` 分区 |
 | 双态部署驱动框架（drv_env + 共享协议层） | 已实现（改造阶段三） | goldfish RTC 同源码双态：内核壳 boot probe + `smoke-native-rtcd`，见 [04-dual-placement.md](04-dual-placement.md) |
@@ -56,7 +59,7 @@
 
 - **时间片捐赠仅限 UP**：SMP 捐赠依赖跨核唤醒/IPI 簿记（`PER_CPU_CURRENT_VALIDATION`），未完成前不开放；
 - **Native ABI SMP 破坏（已收敛，2026-08-06 复验）**：此前 SMP=2/8 下 `native-shmring` 约 30% 概率的偶发内存破坏，经 M5 修复（`98a1260`、`1af0d02`：buddy 脏块拆分、页释放 TLB 顺序、peer 引用）后，在本分支复验为 **SMP=2 连续 20 轮 + SMP=8 连续 20 轮零失败、零挂起**（复现脚本：循环 QEMU 注入 `/bin/native-shmring-rv`，smp=2/8，日志归档于 `.kernel-build/smoke/shmring-smp{2,8}/`）。残余信号：`vmo_dirty_frames`（buddy 复用未清零帧，VMO 侧 memset 兜底，合法行为）已从串口 printf 降级为 `/proc/a20/objects` 累计计数器，不再干扰用户输出解析；阶段三起若需恢复帧级追踪，可在此计数器非零增长时重新挂 `frame_trace_dump_pfn`；
-- **网络协议栈**：lwIP 已编译为用户态 netd 服务（bootarg `netd=1` 激活；未激活时内核 lwIP 行为不变）。帧环（RX/TX）与 socket 代理 RPC（create/bind/listen/accept/connect/send/recv/close/poll/getsockname/setsockopt）已实现；QEMU hostfwd 验证了完整代理链路与 TCP 握手（SYN-ACK 出帧面、accept 回调触发）。**剩余**：数据段在 lwIP 侧被丢弃（子连接 PCB 在 accept 后从 active 列表消失，`lookup pcb=0`），recv 数据回传未通——根因锁定在 tcp_process 的 accept/abort 路径，待续；
+- **网络协议栈**：lwIP 作为内核态唯一实现（源码 `kernel/external/lwip`，由 `kernel/net` 编译）。此前的用户态 netd 服务（`user/svc/netd.c`、`kernel/net/netd_ring.c`、socket 代理）已整体移除：其 recv 数据段始终未通（子连接 PCB 在 accept 后消失），且 netd 进程并未被拉起，导致 AF_INET 被代理到一个不存在的进程。内核 lwIP 单一路径由 `smoke-network-suite` 验证（TCP/UDP 回环、DNS、ICMP、AF_UNIX 全通过）。
 - **loongarch64**：内核与 native 测试均构建通过，运行时复测受工具链/镜像条件所限未完整执行；
 - **性能数据**全部来自 QEMU TCG 模拟器，真实硬件基准待测；
 - **IOMMU/DMA 安全**：DMA 隔离已升级为真实 IOMMU 硬件强制——DDT(1LVL)、 CQ/FQ 使能，devid 0 配置 SV39 翻译域并经 TR_REQ 验证（已映射 IOVA 精确翻译、未映射 IOVA 被硬件拒绝 fault=1/cause=13），devid 1 保持 passthrough。fault 队列消费与 per-device 页表动态映射为后续工作。

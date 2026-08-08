@@ -28,6 +28,11 @@ struct a20_eventq;
 int  udriver_map_mmio(struct mm_struct *mm, uint64_t phys, uint64_t size,
                       uint32_t prot, uint64_t *out_va);
 int  udriver_mmio_user_owned(uint64_t phys);
+/* Whether a user-claimable window physically has a device behind it.
+ * virtio-mmio windows are probed by their magic register; declared board
+ * devices (goldfish RTC) count as present.  Used by the driver manager to
+ * decide whether to activate a user-service driver. */
+int  udriver_window_present(uint64_t phys);
 int  udriver_irq_listen(uint32_t irq, struct a20_eventq *queue,
                         uint64_t user_data, int owner_pid);
 int  udriver_irq_ack(uint32_t irq);

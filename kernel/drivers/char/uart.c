@@ -321,6 +321,17 @@ static int uart_driver_probe(device_t *dev) {
     return 0;
 }
 
+/* The UART is a board console service initialized by uart_init(); the
+ * driver_t only publishes a devfs char device when a board actually
+ * registers an UART device.  The match callback makes busless binding
+ * deterministic instead of grabbing arbitrary board devices. */
+static int uart_driver_match(device_t *dev) {
+    if (!dev || !dev->name)
+        return 0;
+    return strncmp(dev->name, "uart", 4) == 0 ||
+           strncmp(dev->name, "serial", 6) == 0;
+}
+
 static int uart_driver_remove(device_t *dev) {
     (void)dev;
     return 0;
@@ -330,6 +341,7 @@ static driver_t uart_driver = {
     .name       = "ns16550a-uart",
     .id_table   = NULL,
     .bus        = NULL,
+    .match      = uart_driver_match,
     .probe      = uart_driver_probe,
     .remove     = uart_driver_remove,
     .class_ops  = &uart_char_ops,

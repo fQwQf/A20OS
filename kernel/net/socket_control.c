@@ -1,5 +1,4 @@
 #include "net/socket_internal.h"
-#include "net/netd_sock_proxy.h"
 #include "ipc/ipc.h"
 #include "core/klog.h"
 #include "core/string.h"
@@ -38,8 +37,6 @@ int net_listen(int gfd, int backlog)
     net_socket_t *s = net_socket_from_file(gfd);
     if (!s)
         return -ENOTSOCK;
-    if (s->netd_id >= 0)
-        return netd_socket_listen(s->netd_id, backlog);
     if (s->domain == AF_ALG)
         return 0;
     if ((s->type != SOCK_STREAM && !(s->domain == AF_UNIX && s->type == SOCK_SEQPACKET)) ||
@@ -81,43 +78,6 @@ int net_accept(int gfd, void *addr, size_t *addrlen, int flags)
     net_socket_t *s = net_socket_from_file(gfd);
     if (!s)
         return -ENOTSOCK;
-    if (s->netd_id >= 0) {
-        uint32_t al = addrlen ? *addrlen : 0;
-        int new_netd = -1;
-        int r = netd_socket_accept(s->netd_id, addr, addrlen ? &al : NULL,
-                                   s->nonblock || (flags & SOCK_NONBLOCK),
-                                   &new_netd);
-        if (addrlen) *addrlen = al;
-        if (r < 0)
-            return r;
-        /* Build a kernel socket object bound to the netd connection. */
-        net_socket_t *ns = net_socket_alloc();
-        if (!ns) {
-            netd_socket_close(new_netd);
-            return -ENOMEM;
-        }
-        ns->domain = s->domain;
-        ns->type = s->type;
-        ns->protocol = s->protocol;
-        ns->netd_id = new_netd;
-        ns->connected = 1;
-        if (addr && addrlen && al >= sizeof(uint16_t)) {
-            uint16_t fam = *(const uint16_t *)addr;
-            if (fam == AF_INET && al >= 16) {
-                memcpy(ns->peer_addr, addr, 16);
-                ns->peer_len = 16;
-            }
-        }
-        uint64_t lk = spin_lock_irqsave(&g_net_lock);
-        int rr = net_register_socket_locked(ns);
-        spin_unlock_irqrestore(&g_net_lock, lk);
-        if (rr < 0) {
-            netd_socket_close(new_netd);
-            net_socket_free(ns);
-            return rr;
-        }
-        return net_socket_install_file(ns, flags & SOCK_NONBLOCK ? SOCK_NONBLOCK : 0);
-    }
     if (s->domain == AF_ALG)
         return net_alg_socket_accept(s, addrlen, flags);
     if ((s->type != SOCK_STREAM && !(s->domain == AF_UNIX && s->type == SOCK_SEQPACKET)) ||
@@ -247,13 +207,6 @@ int net_getsockname(int gfd, void *addr, size_t *addrlen)
     net_socket_t *s = net_socket_from_file(gfd);
     if (!s)
         return -ENOTSOCK;
-    if (s->netd_id >= 0) {
-        uint32_t al = addrlen ? *addrlen : 0;
-        int r = netd_socket_getsockname(s->netd_id, addr,
-                                        addrlen ? &al : NULL);
-        if (addrlen) *addrlen = al;
-        return r;
-    }
     if (!addr || !addrlen)
         return -EFAULT;
     uint64_t irq = spin_lock_irqsave(&g_net_lock);
@@ -271,13 +224,6 @@ int net_getpeername(int gfd, void *addr, size_t *addrlen)
     net_socket_t *s = net_socket_from_file(gfd);
     if (!s)
         return -ENOTSOCK;
-    if (s->netd_id >= 0) {
-        uint32_t al = addrlen ? *addrlen : 0;
-        int r = netd_socket_getpeername(s->netd_id, addr,
-                                        addrlen ? &al : NULL);
-        if (addrlen) *addrlen = al;
-        return r;
-    }
     if (!s->connected)
         return -ENOTCONN;
     size_t n = s->peer_len < *addrlen ? s->peer_len : *addrlen;
@@ -291,9 +237,6 @@ int net_setsockopt(int gfd, int level, int optname, const void *optval, size_t o
     net_socket_t *s = net_socket_from_file(gfd);
     if (!s)
         return -ENOTSOCK;
-    if (s->netd_id >= 0)
-        return netd_socket_setsockopt(s->netd_id, level, optname,
-                                      optval, (uint32_t)optlen);
     if (s->domain == AF_ALG && level == SOL_ALG && optname == ALG_SET_KEY) {
         if (strcmp(s->alg_type, "aead") == 0 &&
             strcmp(s->alg_name, "authenc(hmac(sha256),cbc(aes))") == 0 &&
@@ -692,15 +635,6 @@ int net_poll_events(int gfd, short events)
     net_socket_t *s = net_socket_from_file(gfd);
     if (!s)
         return -ENOTSOCK;
-    if (s->netd_id >= 0) {
-        uint32_t ready = (uint32_t)netd_socket_poll(s->netd_id,
-                                                    (uint32_t)events);
-        short rev = 0;
-        if (ready & 1u) rev |= POLLIN;
-        if (ready & 2u) rev |= POLLOUT;
-        if (ready & 4u) rev |= POLLERR;
-        return rev;
-    }
     short revents = 0;
     uint64_t irq = spin_lock_irqsave(&g_net_lock);
     if (s->ch_ep) {

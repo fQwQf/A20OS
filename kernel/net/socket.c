@@ -15,9 +15,6 @@
 #include "drivers/net/virtio_net.h"
 #include "drivers/core/driver_core.h"
 #include "net/lwip_stack.h"
-#include "net/netd_sock_proto.h"
-#include "net/netd_sock_proxy.h"
-#include "net/netd_proto.h"
 
 spinlock_t g_net_lock = SPINLOCK_INIT;
 static obj_cache_t g_net_socket_cache = OBJ_CACHE_INIT("net_socket", net_socket_t, 128);
@@ -26,7 +23,6 @@ net_socket_t *net_socket_alloc(void) {
     net_socket_t *s = (net_socket_t *)obj_cache_alloc_zero(&g_net_socket_cache);
     if (s) {
         s->ipv6_checksum_offset = -1;
-        s->netd_id = -1;
         s->reg_idx = -1;
         wait_queue_init(&s->accept_waitq);
         wait_queue_init(&s->read_waitq);
@@ -160,7 +156,6 @@ void net_init(void) {
     net_socket_registry_init();
     /* Bus enumeration and driver core own transport discovery.  Network init
      * only consumes DEV_CLASS_NET; it must never run a second arch scanner. */
-    netd_ring_init();
     a20_lwip_init();
     printf("[NET] socket layer initialized\n");
 }
@@ -239,19 +234,6 @@ int net_socket_create(int domain, int type, int protocol) {
     s->protocol = protocol;
     s->nonblock = (type & SOCK_NONBLOCK) != 0;
     s->ipv6_checksum_offset = -1;
-    s->netd_id = -1;
-
-    /* Frame plane active: AF_INET sockets are proxied to netd. */
-    if ((domain == AF_INET || domain == AF_INET6) && netd_enabled()) {
-        int netd_id = -1;
-        int nr = netd_socket_create(domain, base_type, protocol, &netd_id);
-        if (nr < 0) {
-            net_socket_free(s);
-            return nr;
-        }
-        s->netd_id = netd_id;
-        return net_socket_install_file(s, type);
-    }
 
     int init_r = net_inet_socket_init(s);
     if (init_r < 0) {
@@ -308,8 +290,6 @@ int net_socketpair_create(int domain, int type, int protocol, int out_gfd[2]) {
 int net_bind(int gfd, const void *addr, size_t addrlen) {
     net_socket_t *s = net_socket_from_file(gfd);
     if (!s) return -ENOTSOCK;
-    if (s->netd_id >= 0)
-        return netd_socket_bind(s->netd_id, addr, (uint32_t)addrlen);
     int family = sockaddr_family(addr, addrlen);
     if (family < 0) return family;
     int bind_family = family;
@@ -378,16 +358,6 @@ int net_connect(int gfd, const void *addr, size_t addrlen) {
     if (s->connected) return -EISCONN;
     if (s->domain == AF_UNIX)
         return net_unix_socket_connect(s, addr, addrlen);
-    if (s->netd_id >= 0) {
-        int r = netd_socket_connect(s->netd_id, addr, (uint32_t)addrlen,
-                                    s->nonblock);
-        if (r >= 0) {
-            s->connected = 1;
-            memcpy(s->peer_addr, addr, addrlen);
-            s->peer_len = addrlen;
-        }
-        return r;
-    }
 
     int family = sockaddr_family(addr, addrlen);
     if (family != s->domain) {
@@ -487,9 +457,6 @@ int net_sendto(int gfd, const void *buf, size_t len, int flags,
                const void *addr, size_t addrlen) {
     net_socket_t *s = (gfd >= 0) ? net_socket_from_file(gfd) : NULL;
     if (!s) return -ENOTSOCK;
-    if (s->netd_id >= 0)
-        return (int)netd_socket_send(s->netd_id, buf, len, flags,
-                                     addr, (uint32_t)addrlen);
     if (len > NET_MAX_PAYLOAD && s->type != SOCK_STREAM) return -EMSGSIZE;
     int dontwait = s->nonblock || ((flags & MSG_DONTWAIT) != 0);
     if (s->domain == AF_ALG)
@@ -568,14 +535,6 @@ int net_recvfrom_meta(int gfd, void *buf, size_t len, int flags,
                       void *addr, size_t *addrlen, net_recv_meta_t *meta) {
     net_socket_t *s = net_socket_from_file(gfd);
     if (!s) return -ENOTSOCK;
-    if (s->netd_id >= 0) {
-        uint32_t al = addrlen ? *addrlen : 0;
-        ssize_t r = netd_socket_recv(s->netd_id, buf, len, flags, addr,
-                                     addrlen ? &al : NULL);
-        if (addrlen) *addrlen = al;
-        if (meta) meta->scm_nfiles = 0;
-        return (int)r;
-    }
     if (s->domain == AF_ALG)
         return net_alg_socket_recv(s, buf, len);
     int dontwait = (flags & MSG_DONTWAIT) != 0;

@@ -263,4 +263,10 @@
 #define SYS_set_thread_area 1001
 #define SYS_poll            1002
 #define SYS_clock_gettime32 1023
+
+/* A20OS Linux-ABI extensions: channel IPC bridge (sys_a20_bridge.c).
+ * Numbers are above every real Linux syscall so they never collide with a
+ * musl-generated call; Linux programs use them through syscall(). */
+#define SYS_a20_channel_pair    900
+#define SYS_a20_registry_client 901
 #endif /* _ABI_LINUX_SYSCALL_NR_H */

@@ -12,6 +12,7 @@ typedef struct wait_queue_entry {
     uint64_t wait_seq;
     uint32_t flags;
     uintptr_t key;
+    void *priv;
     bool linked;
 } wait_queue_entry_t;
 
@@ -52,6 +53,51 @@ unsigned wait_queue_collect_all(wait_queue_t *q, uintptr_t key,
                                 proc_wake_reason_t reason,
                                 proc_wake_q_t *wake_q,
                                 bool *complete);
+
+/*
+ * Locked variants for waiters that already hold q->lock (e.g. a futex word
+ * that must link atomically with its value re-check).  The caller is
+ * responsible for the q->lock hold/release.
+ */
+bool wait_queue_link_locked(wait_queue_t *q, wait_queue_entry_t *entry,
+                            proc_wait_token_t token, uintptr_t key);
+unsigned wait_queue_purge_task_locked(wait_queue_t *q, struct task_t *task);
+
+/*
+ * Predicate-matched wait-queue operations.
+ *
+ * These extend the key-equality primitives above with arbitrary per-entry
+ * matching so that object-specific waiters (futex words, EventQ kinds, ...)
+ * build on the SAME wait-queue structure instead of reimplementing their own
+ * waiter lists.  wait_queue_entry_t::priv carries the object's match data
+ * and is owned by the waiter; it is never dereferenced by the generic layer.
+ */
+
+typedef bool (*wait_queue_match_fn)(const wait_queue_entry_t *entry,
+                                    void *arg);
+typedef void (*wait_queue_rekey_fn)(wait_queue_entry_t *entry, void *arg);
+
+/* Dequeue up to @limit matching entries into @wake_q (then flush). */
+unsigned wait_queue_collect_matching(wait_queue_t *q,
+                                     wait_queue_match_fn match, void *arg,
+                                     unsigned limit,
+                                     proc_wake_reason_t reason,
+                                     proc_wake_q_t *wake_q,
+                                     bool *complete);
+/*
+ * Move up to @limit matching entries from q_from to q_to, invoking @rekey on
+ * each moved entry so its key/priv can be rebound to the destination object.
+ * @rekey_arg is passed only to @rekey (the match predicate consumes @arg).
+ * q_from/q_to may be the same queue (counts matches only).  The two queue
+ * locks are taken in address order, preserving the wait_queue lock discipline.
+ */
+unsigned wait_queue_requeue_matching(wait_queue_t *q_from, wait_queue_t *q_to,
+                                     wait_queue_match_fn match, void *arg,
+                                     unsigned limit,
+                                     wait_queue_rekey_fn rekey,
+                                     void *rekey_arg);
+/* Remove every entry of @task from @q and release its queued reference. */
+unsigned wait_queue_purge_task(wait_queue_t *q, struct task_t *task);
 
 typedef struct mutex {
     spinlock_t lock;
