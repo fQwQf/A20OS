@@ -2,7 +2,7 @@
 #
 # generic contains only the irreducible boot substrate and kernel services:
 # the unified driver core, buses, and service layers.  Every discoverable
-# device driver is packaged by mk/driver-modules.mk as a .a20drv module and
+# device driver is packaged by tools/driver-modules.mk as a .a20drv module and
 # loaded from the Early or Runtime DriverStore.  There is deliberately no
 # built-in device driver list left: adding one must be a conscious bootstrap
 # exception, not a new wildcard hidden in the top-level Makefile.
@@ -26,7 +26,7 @@ GENERIC_KERNEL_SERVICE_SRCS := \
 
 # Complete device-driver set, statically linked only for the embedded
 # profile.  The generic profile builds each of these as a .a20drv package
-# (see mk/driver-modules.mk).
+# (see tools/driver-modules.mk).
 EMBEDDED_DEVICE_DRIVER_SRCS := \
     $(KERNEL_DIR)/drivers/block/ahci.c \
     $(KERNEL_DIR)/drivers/block/dw_sdio.c \
