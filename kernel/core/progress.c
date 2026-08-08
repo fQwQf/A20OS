@@ -4,9 +4,12 @@
 #include "net/lwip_stack.h"
 #include "net/net_config.h"
 #include "net/socket_internal.h"
-#include "drivers/block/virtio_blk.h"
-#include "drivers/net/virtio_net.h"
+#include "drivers/core/driver_core.h"
 #include "lwip/timeouts.h"
+
+/* virtio-net is optional in generic and is supplied by a .a20drv package.
+ * The progress service must not create a link-time dependency on it. */
+extern void virtio_net_poll_rx_all(void) __attribute__((weak));
 
 /*
  * IO_PROGRESS_SERVICE (event-driven model):
@@ -25,14 +28,14 @@
 void kernel_progress_poll(kernel_progress_reason_t reason)
 {
     (void)reason;
-    virtio_blk_poll_all();
+    driver_progress_class(DEV_CLASS_BLOCK);
     /*
      * NO_SYS lwIP has one global core lock.  Letting every idle CPU poll it
      * turns an otherwise idle SMP guest into a permanent lock convoy.  CPU 0
      * owns compatibility RX polling; device IRQs still make progress on the
      * CPU that receives them.
      */
-    if (cpu_current_id() == 0)
+    if (cpu_current_id() == 0 && virtio_net_poll_rx_all)
         virtio_net_poll_rx_all();
 }
 
@@ -53,7 +56,8 @@ void kernel_progress_timer_tick(void)
      * cannot stall even if a device IRQ is ever lost, while keeping the
      * per-context-switch scheduler hot path free of the lock.
      */
-    virtio_net_poll_rx_all();
+    if (virtio_net_poll_rx_all)
+        virtio_net_poll_rx_all();
 }
 
 void kernel_progress_run_bottom_halves(void)

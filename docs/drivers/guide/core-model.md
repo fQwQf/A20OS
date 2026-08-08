@@ -158,7 +158,7 @@ static int example_send(device_t *dev, const void *data, size_t len) {
     example_priv_t *p = dev ? dev->drv_priv : NULL;
     if (!p || !p->ready || !data || !len)
         return -EINVAL;
-    /* 提交成功必须返回 len，队列满返回 -EAGAIN。 */
+    /* 提交成功必须返回 len，队列满返回 -EAGAIN。*/
     return (int)len;
 }
 
@@ -166,7 +166,7 @@ static int example_recv(device_t *dev, void *data, size_t capacity) {
     example_priv_t *p = dev ? dev->drv_priv : NULL;
     if (!p || !p->ready || !data || !capacity)
         return -EINVAL;
-    return 0; /* 当前网络类约定：无包返回 0。 */
+    return 0; /* 当前网络类约定：无包返回 0。*/
 }
 
 static const uint8_t *example_mac(device_t *dev) {
@@ -256,4 +256,4 @@ class 消费者只能通过 `device_find_by_class()` 或类适配层使用已绑
 
 可加载驱动模块（drvmod）复用同一套统一核心：模块的 `DriverEntry` 调用框架导出 `drv_driver_register(&driver_t)` 后，核心按与内建驱动相同的匹配/重探路径对已枚举设备执行 probe（`driver_register` 会同步重探现有未绑定设备），`class_ops`/`class_type` 照常发布 class 设备。
 
-模块化驱动的 `driver_t` 与内建完全同构（`bus`/`id_table`/`probe`/`remove`/`class_ops`/`class_type`），因此同一份驱动代码既可内建也可模块化；迁移时的差异仅在入口（`DriverEntry` + `drv_driver_register` 替代 `DRIVER_REGISTER`）与内核 API 依赖面（模块只能引用框架导出表，见 [可安装内核驱动](kernel-modules.md)）。参考实现：`nvme.drv`（PCI class）、`hda.drv`（PCI class）、`vinput.drv`（NULL-bus id_table 同时匹配 MMIO 与 PCI）。
+模块化驱动的 `driver_t` 与内建完全同构（`bus`/`id_table`/`probe`/`remove`/`class_ops`/`class_type`），因此同一份驱动代码既可内建也可模块化；迁移时的差异仅在入口（`DriverEntry` + `drv_driver_register` 替代 `DRIVER_REGISTER`）与内核 API 依赖面（模块只能引用框架导出表，见 [可安装内核驱动](kernel-modules.md)）。参考实现：`nvme.a20drv`（PCI class）、`hda.a20drv`（PCI class）、`vinput.a20drv`（NULL-bus id_table 同时匹配 MMIO 与 PCI）。

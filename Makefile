@@ -61,6 +61,8 @@ STM32_XUANWU ?= 0
 else
 BOARD ?= qemu-virt-$(ARCH)
 endif
+
+include mk/driver-deployment.mk
 NOMMU ?= 0
 ifeq ($(NOMMU),1)
 CONFIG_SWAP := n
@@ -96,7 +98,10 @@ endif
 # Directories
 KERNEL_DIR = kernel
 INCLUDE_DIR = $(KERNEL_DIR)/include
-BUILD_VARIANT = $(ABI)-$(if $(filter 1,$(BRINGUP)),bringup,dev)$(if $(filter 1,$(NOMMU)),-nommu,)$(if $(filter-out 1,$(NR_CPUS)),-smp$(NR_CPUS),)$(if $(filter y,$(CONFIG_DRIVER_LIFECYCLE_TEST)),-driver-lifecycle,)$(if $(filter y,$(CONFIG_HDA_SMOKE_TEST)),-hda-smoke,)$(if $(filter y,$(CONFIG_NVME_SMOKE_TEST)),-nvme-smoke,)
+# Preserve established generic and STM32 output paths used by smoke, contest,
+# flash, and QEMU runners. Explicit embedded builds on non-MCU architectures
+# get their own suffix so they never share objects with generic.
+BUILD_VARIANT = $(ABI)-$(if $(filter 1,$(BRINGUP)),bringup,dev)$(if $(and $(filter embedded,$(DRIVER_DEPLOYMENT)),$(filter-out armv7m,$(ARCH))),-embedded,)$(if $(filter 1,$(NOMMU)),-nommu,)$(if $(filter-out 1,$(NR_CPUS)),-smp$(NR_CPUS),)$(if $(filter y,$(CONFIG_DRIVER_LIFECYCLE_TEST)),-driver-lifecycle,)$(if $(filter y,$(CONFIG_HDA_SMOKE_TEST)),-hda-smoke,)$(if $(filter y,$(CONFIG_NVME_SMOKE_TEST)),-nvme-smoke,)
 ifeq ($(ARCH),armv7m)
 BUILD_VARIANT := $(BUILD_VARIANT)-$(BOARD)-f$(STM32_FLASH_KB)k-r$(STM32_RAM_KB)k
 BUILD_VARIANT := $(BUILD_VARIANT)$(if $(filter 1,$(STM32_QEMU)),-qemu,)
@@ -175,12 +180,12 @@ NATIVE_SHMRING_BIN     := $(NATIVE_BUILD_DIR)/native-shmring-$(NATIVE_TAG)
 NATIVE_SHMRINGD_BIN    := $(NATIVE_BUILD_DIR)/shmringd-$(NATIVE_TAG)
 NATIVE_CHAND_BIN       := $(NATIVE_BUILD_DIR)/chand-$(NATIVE_TAG)
 NATIVE_RTCD_BIN        := $(NATIVE_BUILD_DIR)/native-rtcd-$(NATIVE_TAG)
-NATIVE_RTCDD_BIN       := $(NATIVE_BUILD_DIR)/rtcd-$(NATIVE_TAG)
+NATIVE_RTCDD_BIN       := $(NATIVE_BUILD_DIR)/rtcd-$(NATIVE_TAG).a20drv
 NATIVE_REGISTRY_BIN    := $(NATIVE_BUILD_DIR)/native-registry-$(NATIVE_TAG)
 NATIVE_SVCMGR_BIN      := $(NATIVE_BUILD_DIR)/svcmgr-$(NATIVE_TAG)
 NATIVE_ISOLATION_BIN   := $(NATIVE_BUILD_DIR)/native-isolation-$(NATIVE_TAG)
-NATIVE_UBDD_BIN        := $(NATIVE_BUILD_DIR)/ubd-$(NATIVE_TAG)
-NATIVE_UINPUTD_BIN     := $(NATIVE_BUILD_DIR)/uinputd-$(NATIVE_TAG)
+NATIVE_UBDD_BIN        := $(NATIVE_BUILD_DIR)/ubd-$(NATIVE_TAG).a20drv
+NATIVE_UINPUTD_BIN     := $(NATIVE_BUILD_DIR)/uinputd-$(NATIVE_TAG).a20drv
 NATIVE_PERSONALITY_BIN  := $(NATIVE_BUILD_DIR)/native-personality-$(NATIVE_TAG)
 NATIVE_LINUX_BIN        := $(NATIVE_BUILD_DIR)/native-linux-$(NATIVE_TAG)
 NATIVE_OUTPUTS         := $(NATIVE_HELLO_BIN) $(NATIVE_HANDLE_BIN) $(NATIVE_LIBC_BIN) $(NATIVE_FUTEX_BIN) $(NATIVE_MM_BIN) $(NATIVE_SIGNAL_BIN) $(NATIVE_IPC_BIN) $(NATIVE_CONTRACT_BIN) $(NATIVE_SVCMAN_BIN) $(NATIVE_ECHOD_BIN) $(NATIVE_SHMRING_BIN) $(NATIVE_SHMRINGD_BIN) $(NATIVE_CHAND_BIN) $(NATIVE_RTCD_BIN) $(NATIVE_RTCDD_BIN) $(NATIVE_REGISTRY_BIN) $(NATIVE_SVCMGR_BIN) $(NATIVE_ISOLATION_BIN) $(NATIVE_UBDD_BIN) $(NATIVE_UINPUTD_BIN) $(NATIVE_PERSONALITY_BIN) $(NATIVE_LINUX_BIN) $(NATIVE_DEBUG_BIN) $(NATIVE_EXT_BIN)
@@ -454,6 +459,7 @@ endif
 ifeq ($(BOARD),virtualbox-aarch64)
 CFLAGS += -DCONFIG_COOPERATIVE_BOOT
 endif
+CFLAGS += $(DRIVER_DEPLOYMENT_CPPFLAGS)
 
 # ------------------------------------------------------------------
 # Hardware/board features consumed by common code.
@@ -578,6 +584,10 @@ LDFLAGS += -Wl,--defsym=FLASH_LENGTH=$(STM32_FLASH_KB)K \
 endif
 
 # Source files
+# Driver ownership is kept outside this top-level file so deployment policy is
+# explicit and generic built-in exceptions remain reviewable.
+include mk/driver-sources.mk
+
 # ABI-specific source directories
 ifeq ($(ABI),both)
 ABI_SRCS = $(wildcard $(KERNEL_DIR)/abi/linux/*.c) \
@@ -626,16 +636,7 @@ KERNEL_SRC = $(wildcard $(KERNEL_DIR)/*.c) \
              $(wildcard $(KERNEL_DIR)/bpf/*.c) \
              $(wildcard $(KERNEL_DIR)/ext/*.c) \
              $(wildcard $(KERNEL_DIR)/drvmod/*.c) \
-             $(wildcard $(KERNEL_DIR)/drivers/core/*.c) \
-             $(wildcard $(KERNEL_DIR)/drivers/bus/*.c) \
-             $(wildcard $(KERNEL_DIR)/drivers/block/*.c) \
-             $(wildcard $(KERNEL_DIR)/drivers/char/*.c) \
-             $(wildcard $(KERNEL_DIR)/drivers/net/*.c) \
-             $(wildcard $(KERNEL_DIR)/drivers/gpu/*.c) \
-	             $(wildcard $(KERNEL_DIR)/drivers/audio/*.c) \
-	             $(wildcard $(KERNEL_DIR)/drivers/input/*.c) \
-	             $(wildcard $(KERNEL_DIR)/drivers/security/*.c) \
-	             $(wildcard $(KERNEL_DIR)/drivers/usb/*/*.c) \
+              $(DRIVER_KERNEL_SRCS) \
 	             $(wildcard $(BOARD_DRIVER_DIR)/*.c) \
 	             $(wildcard $(KERNEL_DIR)/platform/$(BOARD)/*.c) \
              $(ABI_SRCS) \
@@ -662,10 +663,13 @@ KERNEL_SRC += $(ROOTFS_OVERLAY_SRC)
 include $(KERNEL_DIR)/external/lwip/sources.mk
 endif
 
+include mk/driver-modules.mk
+
 # Object files
 LWIP_KERNEL_SRC := $(filter $(KERNEL_DIR)/external/lwip/src/%.c,$(KERNEL_SRC))
 KERNEL_OBJ = $(patsubst $(KERNEL_DIR)/%.c,$(BUILD_DIR)/%.o,$(filter-out user/% $(KERNEL_DIR)/external/lwip/%,$(KERNEL_SRC))) \
-             $(patsubst $(KERNEL_DIR)/external/lwip/src/%.c,$(BUILD_DIR)/external/lwip/src/%.o,$(LWIP_KERNEL_SRC))
+              $(patsubst $(KERNEL_DIR)/external/lwip/src/%.c,$(BUILD_DIR)/external/lwip/src/%.o,$(LWIP_KERNEL_SRC))
+KERNEL_OBJ += $(EARLY_DRIVER_BLOBS)
 
 # vDSO user image (riscv64): built out-of-tree of ASM_SRC on purpose, it is
 # user code linked with its own script.  The vdso.elf FILE is embedded
@@ -759,35 +763,14 @@ VBOX_AARCH64_LOAD_ADDRESS ?= 0x08080000ULL
 
 FORCE:
 
+print-driver-deployment:
+	@printf 'ARCH=%s BOARD=%s DRIVER_DEPLOYMENT=%s build_dir=%s modules=%s builtin_device_drivers=%s\n' \
+		'$(ARCH)' '$(BOARD)' '$(DRIVER_DEPLOYMENT)' '$(BUILD_DIR)' '$(words $(DRVMOD_MODULES))' \
+		'$(words $(EMBEDDED_DEVICE_DRIVER_SRCS))'
+
 $(BUILD_TIME_HDR):
 	@mkdir -p $(dir $@)
 	@printf '#ifndef A20_BUILD_UNIX_TIME\n#define A20_BUILD_UNIX_TIME %sULL\n#endif\n' "$$(date -u +%s)" > $@
-
-$(STM32_BT_CONFIG_HDR): FORCE
-	@mkdir -p $(dir $@)
-	@{ \
-		printf '%s\n' '#ifndef GENERATED_STM32_BLUETOOTH_CONFIG_H'; \
-		printf '%s\n' '#define GENERATED_STM32_BLUETOOTH_CONFIG_H'; \
-		printf '#define STM32_BLUETOOTH_DEVICE_NAME "%s"\n' '$(STM32_BT_NAME)'; \
-		printf '#define STM32_BLUETOOTH_PIN "%s"\n' '$(STM32_BT_PIN)'; \
-		printf '#define STM32_BLUETOOTH_SERVICE_UUID 0x%sU\n' '$(STM32_BT_UUID)'; \
-		printf '#define STM32_BLUETOOTH_SERVICE_UUID_TEXT "%s"\n' '$(STM32_BT_UUID)'; \
-		printf '#define STM32_BLUETOOTH_BAUD_RATE %sU\n' '$(STM32_BT_BAUD)'; \
-		printf '#define STM32_BLUETOOTH_BAUD_RATE_TEXT "%s"\n' '$(STM32_BT_BAUD)'; \
-		printf '%s\n' '#endif'; \
-	} > $@.tmp
-	@if cmp -s $@.tmp $@; then rm -f $@.tmp; else mv $@.tmp $@; fi
-
-$(STM32_WIFI_CONFIG_HDR): FORCE
-	@mkdir -p $(dir $@)
-	@{ \
-		printf '%s\n' '#ifndef GENERATED_STM32_WIFI_CONFIG_H'; \
-		printf '%s\n' '#define GENERATED_STM32_WIFI_CONFIG_H'; \
-		printf '#define STM32_WIFI_SSID "%s"\n' '$(STM32_WIFI_SSID)'; \
-		printf '#define STM32_WIFI_PASSWORD "%s"\n' '$(STM32_WIFI_PASSWORD)'; \
-		printf '%s\n' '#endif'; \
-	} > $@.tmp
-	@if cmp -s $@.tmp $@; then rm -f $@.tmp; else mv $@.tmp $@; fi
 
 regen-rootfs-overlay: tools/gen_rootfs_overlay.py $(ROOTFS_OVERLAY_FILES)
 	@mkdir -p $(dir $(ROOTFS_OVERLAY_SRC)) $(dir $(ROOTFS_OVERLAY_HDR))
@@ -2273,7 +2256,7 @@ smoke-driver-lifecycle:
 	fi
 
 smoke-hda:
-	rm -f $(USER_BUILD_DIR)/hda.drv
+	rm -f $(USER_BUILD_DIR)/hda.a20drv
 	$(MAKE) ARCH=x86_64 BOARD=qemu-virt-x86_64 ABI=both BRINGUP=0 \
 		CONFIG_HDA_SMOKE_TEST=y DRVMOD_SMOKE=1 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
@@ -2390,7 +2373,7 @@ smoke-virtio-sound:
 	fi
 
 smoke-pci-portability:
-	rm -f $(USER_BUILD_DIR)/nvme.drv
+	rm -f $(USER_BUILD_DIR)/nvme.a20drv
 	$(MAKE) ARCH=loongarch64 BOARD=qemu-virt-loongarch64 ABI=both BRINGUP=0 \
 		CONFIG_HDA_SMOKE_TEST=y DRVMOD_SMOKE=1 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
@@ -2576,6 +2559,9 @@ $(NATIVE_BUILD_STAMP): $(USER_BUILD_STAMP) force_native_build
 
 fs_img: $(FS_TEST_IMG)
 
+include mk/stm32.mk
+include mk/run-targets.mk
+
 $(FAT32_IMG): $(USER_BUILD_STAMP) $(NATIVE_BUILD_STAMP) \
 		user/contest_init/contest.sh \
 		user/contest_init/final_contest.sh \
@@ -2597,8 +2583,11 @@ $(FAT32_IMG): $(USER_BUILD_STAMP) $(NATIVE_BUILD_STAMP) \
 	-mmd -i $(FAT32_IMG) ::/etc >/dev/null 2>&1
 	-mmd -i $(FAT32_IMG) ::/lib >/dev/null 2>&1
 	-mmd -i $(FAT32_IMG) ::/lib/drivers >/dev/null 2>&1
-	@for m in $(DRVMOD_MODULES); do \
+	@for m in $(RUNTIME_DRVMOD_MODULES); do \
 		mcopy -o -i $(FAT32_IMG) $(USER_BUILD_DIR)/$$m ::/lib/drivers/$$m; \
+	done
+	@for u in $(DRIVER_STORE_USER_PACKAGES); do \
+		mcopy -o -i $(FAT32_IMG) $(USER_BUILD_DIR)/$$u ::/lib/drivers/$$u; \
 	done
 	-mmd -i $(FAT32_IMG) ::/musl >/dev/null 2>&1
 	-mmd -i $(FAT32_IMG) ::/musl/lib >/dev/null 2>&1
@@ -2788,9 +2777,6 @@ $(BUILD_DIR)/external/lwip/src/%.o: $(KERNEL_DIR)/external/lwip/src/%.c | Makefi
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(BUILD_DIR)/drivers/stm32f1/bluetooth.o: $(STM32_BT_CONFIG_HDR)
-$(BUILD_DIR)/drivers/stm32f1/wifi.o: $(STM32_WIFI_CONFIG_HDR)
-
 $(BUILD_DIR)/%.o: $(KERNEL_DIR)/%.S Makefile | $(BUILD_TIME_HDR)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
@@ -2807,206 +2793,6 @@ clean:
 
 kernel-only: $(KERNEL_BIN)
 	@echo "Kernel-only build complete: $(KERNEL_BIN)"
-
-stm32f103-bringup:
-	$(MAKE) ARCH=armv7m BOARD=stm32f103 PROFILE=mcu STM32_FLASH_KB=64 STM32_RAM_KB=20 kernel-only
-
-stm32f103-xuanwu:
-	$(MAKE) ARCH=armv7m BOARD=stm32f103 PROFILE=mcu STM32_FLASH_KB=512 STM32_RAM_KB=64 STM32_XUANWU=1 kernel-only
-
-check-stm32f103:
-	@! rg -n '0x400[0-9A-Fa-f]{5}|0xE000E[0-9A-Fa-f]{3}' \
-		$(KERNEL_DIR)/platform/stm32f103 --glob '*.[ch]' \
-		--glob '!board.c' --glob '!board_config.h'
-	@! rg -n 'CONFIG_ARMV7M' $(KERNEL_DIR) \
-		--glob '!kernel/arch/**' --glob '!kernel/platform/**' \
-		--glob '!kernel/external/**' --glob '!kernel/include/core/arch.h'
-	$(MAKE) stm32f103-xuanwu
-	@echo "check-stm32f103: PASS"
-
-flash-stm32f103-xuanwu: stm32f103-xuanwu
-	@command -v openocd >/dev/null 2>&1 || { \
-		echo "openocd not found; install OpenOCD or use STM32CubeProgrammer"; \
-		exit 1; \
-	}
-	openocd -f $(STM32_OPENOCD_INTERFACE) \
-		$(if $(STM32_CMSIS_DAP_SERIAL),-c "adapter serial $(STM32_CMSIS_DAP_SERIAL)") \
-		-c "transport select $(STM32_OPENOCD_TRANSPORT)" \
-		-c "adapter speed $(STM32_OPENOCD_ADAPTER_KHZ)" \
-		-f target/stm32f1x.cfg \
-		-c "init" \
-		-c "mww 0xE000EDF0 0xA05F0003" \
-		-c "sleep 50" \
-		-c "flash probe 0" \
-		-c "flash write_image erase $(STM32_XUANWU_ELF)" \
-		-c "verify_image $(STM32_XUANWU_ELF)" \
-		-c "set boot_sp [mrw 0x08000000]" \
-		-c "set boot_pc [mrw 0x08000004]" \
-		-c "reg msp \$$boot_sp" \
-		-c "reg psp 0" \
-		-c "reg control 0" \
-		-c "reg primask 0" \
-		-c "reg basepri 0" \
-		-c "reg faultmask 0" \
-		-c "reg pc \$$boot_pc" \
-		-c "resume" \
-		-c "shutdown"
-
-run-stm32f103-qemu:
-	$(MAKE) ARCH=armv7m BOARD=stm32f103 PROFILE=mcu STM32_FLASH_KB=128 STM32_RAM_KB=8 STM32_QEMU=1 kernel-only
-	qemu-system-arm -machine stm32vldiscovery -nographic \
-		-kernel .kernel-build/armv7m-both-bringup-nommu-stm32f103-f128k-r8k-qemu/kernel.bin
-
-# ----------------------------------------------------------------
-# Run targets (development mode)
-# ----------------------------------------------------------------
-
-run:
-	$(MAKE) ARCH=$(ARCH) BRINGUP=$(BRINGUP) _run_impl
-
-run-riscv64:
-	$(MAKE) ARCH=riscv64 BRINGUP=$(BRINGUP) _run_impl
-
-run-gui-riscv64 run-gui-rv:
-	$(MAKE) ARCH=riscv64 BRINGUP=$(BRINGUP) _run_gui_impl
-
-run-loongarch64:
-	$(MAKE) ARCH=loongarch64 BRINGUP=$(BRINGUP) _run_impl
-
-run-gui-loongarch64 run-gui-la:
-	$(MAKE) ARCH=loongarch64 BRINGUP=$(BRINGUP) _run_gui_impl
-
-run-arm64:
-	$(MAKE) ARCH=aarch64 BRINGUP=$(BRINGUP) _run_impl
-
-run-gui-arm64 run-gui-aarch64:
-	$(MAKE) ARCH=aarch64 BRINGUP=$(BRINGUP) _run_gui_impl
-
-run-x86_64:
-	$(MAKE) ARCH=x86_64 BRINGUP=$(BRINGUP) _run_impl
-
-run-gui-x86_64:
-	$(MAKE) ARCH=x86_64 BRINGUP=$(BRINGUP) _run_gui_impl
-
-vbox-iso-x86_64:
-	$(MAKE) ARCH=x86_64 ABI=both BRINGUP=0 _vbox_iso_x86_64_impl
-
-_vbox_iso_x86_64_impl: dev-build
-	tools/mk_grub_iso.sh $(KERNEL_ELF) $(BUILD_DIR)/a20os-x86_64.iso
-
-vbox-image-aarch64:
-	$(MAKE) ARCH=aarch64 BOARD=virtualbox-aarch64 ABI=both BRINGUP=0 _vbox_image_aarch64_impl
-
-vbox-text-image-aarch64:
-	$(MAKE) ARCH=aarch64 BOARD=virtualbox-aarch64 ABI=both BRINGUP=0 _vbox_text_image_aarch64_impl
-
-# The ARM VirtualBox target is a graphical machine by default.  Its kernel
-# runs the SVGAv3/VMSVGA driver and the image carries the GUI marker used by
-# /bin/init to start the desktop instead of the serial-only shell.
-vbox-gui-image-aarch64: vbox-image-aarch64
-	$(MAKE) ARCH=aarch64 BOARD=virtualbox-aarch64 ABI=both BRINGUP=0 _vbox_gui_image_aarch64_impl
-
-_vbox_image_aarch64_impl: $(VBOX_AARCH64_IMG)
-	@echo "VirtualBox ARM64 image ready: $(VBOX_AARCH64_IMG)"
-
-_vbox_text_image_aarch64_impl: $(VBOX_AARCH64_TEXT_IMG)
-	@echo "VirtualBox ARM64 text image ready: $(VBOX_AARCH64_TEXT_IMG)"
-
-_vbox_gui_image_aarch64_impl: $(VBOX_AARCH64_EFI) $(GUI_FAT32_IMG) tools/mk_uefi_fat_image.sh
-	tools/mk_uefi_fat_image.sh $(VBOX_AARCH64_EFI) $(BUILD_DIR)/a20os-vbox-aarch64-gui.img $(GUI_FAT32_IMG)
-	@echo "VirtualBox ARM64 GUI image ready: $(BUILD_DIR)/a20os-vbox-aarch64-gui.img"
-
-run-arm32:
-	$(MAKE) ARCH=arm32 BRINGUP=$(BRINGUP) _run_impl
-
-run-gui-arm32:
-	$(MAKE) ARCH=arm32 BRINGUP=$(BRINGUP) _run_gui_impl
-
-run-riscv32:
-	$(MAKE) ARCH=riscv32 BRINGUP=$(BRINGUP) _run_impl
-
-run-ppc64le:
-	$(MAKE) ARCH=ppc64le BRINGUP=$(BRINGUP) _run_impl
-
-run-nommu-riscv64:
-	$(MAKE) ARCH=riscv64 BRINGUP=$(BRINGUP) NOMMU=1 _run_impl
-
-run-nommu-loongarch64:
-	$(MAKE) ARCH=loongarch64 BRINGUP=$(BRINGUP) NOMMU=1 _run_impl
-
-run-nommu-aarch64:
-	$(MAKE) ARCH=aarch64 BRINGUP=$(BRINGUP) NOMMU=1 _run_impl
-
-run-nommu-arm64:
-	$(MAKE) ARCH=aarch64 BRINGUP=$(BRINGUP) NOMMU=1 _run_impl
-
-run-nommu-x86_64:
-	$(MAKE) ARCH=x86_64 BRINGUP=$(BRINGUP) NOMMU=1 _run_impl
-
-run-nommu-arm32:
-	$(MAKE) ARCH=arm32 BRINGUP=$(BRINGUP) NOMMU=1 _run_impl
-
-run-gui-nommu-arm32 run-nommu-gui-arm32:
-	$(MAKE) ARCH=arm32 BRINGUP=$(BRINGUP) NOMMU=1 _run_gui_impl
-
-run-nommu-riscv32:
-	$(MAKE) ARCH=riscv32 BRINGUP=$(BRINGUP) NOMMU=1 _run_impl
-
-_run_impl:
-ifeq ($(BRINGUP),1)
-	$(MAKE) ARCH=$(ARCH) BRINGUP=1 kernel-only
-else
-	$(MAKE) ARCH=$(ARCH) BRINGUP=$(BRINGUP) dev-build
-endif
-	@test -s $(KERNEL_ELF) || (echo "ERROR: kernel ELF missing or empty: $(KERNEL_ELF)" ; exit 1)
-	$(QEMU) $(QEMU_FLAGS) -kernel $(KERNEL_ELF)
-
-_run_gui_impl:
-ifeq ($(BRINGUP),1)
-	$(MAKE) ARCH=$(ARCH) BRINGUP=1 kernel-only
-else
-	$(MAKE) ARCH=$(ARCH) BRINGUP=$(BRINGUP) dev-build
-endif
-	$(MAKE) ARCH=$(ARCH) BRINGUP=$(BRINGUP) $(GUI_FAT32_IMG)
-	@test -s $(KERNEL_ELF) || (echo "ERROR: kernel ELF missing or empty: $(KERNEL_ELF)" ; exit 1)
-	$(QEMU) $(subst $(FAT32_IMG),$(GUI_FAT32_IMG),$(patsubst -nographic,-display $(QEMU_GUI_DISPLAY) $(QEMU_GUI_DEVICES) $(QEMU_GUI_AUDIO) -serial stdio,$(QEMU_FLAGS))) -kernel $(KERNEL_ELF)
-
-# --- Debug Targets ---
-
-debug-riscv64:
-	$(MAKE) ARCH=riscv64 BRINGUP=$(BRINGUP) _debug_impl
-
-debug-loongarch64:
-	$(MAKE) ARCH=loongarch64 BRINGUP=$(BRINGUP) _debug_impl
-
-debug-arm64:
-	$(MAKE) ARCH=aarch64 BRINGUP=$(BRINGUP) _debug_impl
-
-debug-x86_64:
-	$(MAKE) ARCH=x86_64 BRINGUP=$(BRINGUP) _debug_impl
-
-debug-arm32:
-	$(MAKE) ARCH=arm32 BRINGUP=$(BRINGUP) _debug_impl
-
-debug-riscv32:
-	$(MAKE) ARCH=riscv32 BRINGUP=$(BRINGUP) _debug_impl
-
-debug-ppc64le:
-	$(MAKE) ARCH=ppc64le BRINGUP=$(BRINGUP) _debug_impl
-
-_debug_impl:
-ifeq ($(BRINGUP),1)
-	$(MAKE) ARCH=$(ARCH) BRINGUP=1 OPT="-O0 -g -DDEBUG" kernel-only
-else
-	$(MAKE) ARCH=$(ARCH) BRINGUP=$(BRINGUP) OPT="-O0 -g -DDEBUG" dev-build
-endif
-	@echo "Waiting for GDB connection on port 1234..."
-	@echo "=========================================================="
-	@echo "Please run in another terminal:"
-	@echo "  gdb-multiarch $(KERNEL_ELF)"
-	@echo "  (gdb) target remote :1234"
-	@echo "=========================================================="
-	$(QEMU) $(QEMU_FLAGS) -kernel $(KERNEL_ELF) -S -s
 
 # ----------------------------------------------------------------
 # Extra packages (vim / git / gcc) on a separate ext4 disk
@@ -3434,175 +3220,6 @@ native-libc: $(DEFAULT_NATIVE_LIBC_TARGETS)
 
 native-libc-all: native-libc-rv native-libc-la native-libc-aarch64 native-libc-x86_64 native-libc-arm32 native-libc-rv32 native-libc-ppc64le
 
-# ---- driver modules (drvmod) ----
-# Built as ELF relocatables; the kernel loader links them against
-# the framework export table only.  Placed in the fat32 image root.
-# Code model per architecture is chosen so that external-call relocations
-# carry no (or a QEMU-sized) PC-relative range limit:
-#   riscv64:     medany, rv64g            (CALL ±2 GiB)
-#   x86_64:      large model              (ABS64 only, no range limit)
-#   aarch64:     large model              (BL ±128 MiB, direct map is close)
-#   loongarch64: normal model             (B26 ±128 MiB, identity map)
-DRVMOD_DIR      := kernel/drvmod/examples
-ifeq ($(ARCH),riscv64)
-DRVMOD_GCC      := $(RISCV_ELF_PREFIX)gcc
-DRVMOD_CFLAGS   := -ffreestanding -nostdlib -mcmodel=medany -fno-pic -mno-relax \
-                   -march=rv64g -mabi=lp64d -DCONFIG_RISCV64 -Ikernel/arch/riscv64/include -Ikernel/include -Ikernel
-DRVMOD_MODULES  := rtc.drv vinput-probe.drv vinput.drv hda.drv
-else ifeq ($(ARCH),x86_64)
-DRVMOD_GCC      := x86_64-linux-gnu-gcc
-DRVMOD_CFLAGS   := -ffreestanding -nostdlib -mno-red-zone -fno-pic -fno-pie \
-                   -mcmodel=large -DCONFIG_X86_64 -Ikernel/arch/x86_64/include -Ikernel/include -Ikernel
-DRVMOD_MODULES  := pc-spkr.drv ps2.drv tpm.drv nvme.drv hda.drv vinput.drv
-else ifeq ($(ARCH),aarch64)
-DRVMOD_GCC      := aarch64-linux-gnu-gcc
-DRVMOD_CFLAGS   := -ffreestanding -nostdlib -fno-pic -mcmodel=large \
-                   -DCONFIG_AARCH64 -DCONFIG_NR_CPUS=1 -Ikernel/arch/aarch64/include -Ikernel/include -Ikernel
-DRVMOD_MODULES  := rtc.drv vinput-probe.drv vinput.drv hda.drv
-else ifeq ($(ARCH),loongarch64)
-DRVMOD_GCC      := loongarch64-linux-gnu-gcc
-DRVMOD_CFLAGS   := -ffreestanding -nostdlib -fno-pic -mcmodel=medium \
-                   -DCONFIG_LOONGARCH64 -Ikernel/arch/loongarch64/include -Ikernel/include -Ikernel
-DRVMOD_MODULES  := rtc.drv nvme.drv hda.drv vinput.drv
-else
-DRVMOD_GCC      := $(RISCV_ELF_PREFIX)gcc
-DRVMOD_CFLAGS   := -ffreestanding -nostdlib -mcmodel=medany -fno-pic -mno-relax \
-                   -march=rv64g -mabi=lp64d -DCONFIG_RISCV64 -Ikernel/arch/riscv64/include -Ikernel/include -Ikernel
-DRVMOD_MODULES  :=
-endif
-
-$(USER_BUILD_DIR)/rtc.drv: $(DRVMOD_DIR)/goldfish_rtc.c kernel/include/drvmod/drvmod.h
-	@mkdir -p $(dir $@)
-	$(DRVMOD_GCC) $(DRVMOD_CFLAGS) -c $< -o $@
-
-$(USER_BUILD_DIR)/pc-spkr.drv: $(DRVMOD_DIR)/pc_spkr.c kernel/include/drvmod/drvmod.h
-	@mkdir -p $(dir $@)
-	$(DRVMOD_GCC) $(DRVMOD_CFLAGS) -c $< -o $@
-
-$(USER_BUILD_DIR)/vinput.drv: $(DRVMOD_DIR)/vinput.c \
-		kernel/include/drvmod/drvmod.h kernel/include/drivers/input/virtio_input.h \
-		kernel/include/drivers/dual/virtio_mmio.h
-	@mkdir -p $(dir $@)
-	$(DRVMOD_GCC) $(DRVMOD_CFLAGS) -c $< -o $@
-
-$(USER_BUILD_DIR)/hda.drv: $(DRVMOD_DIR)/hda.c kernel/include/drvmod/drvmod.h
-	@mkdir -p $(dir $@)
-	$(DRVMOD_GCC) $(DRVMOD_CFLAGS) $(if $(filter 1,$(DRVMOD_SMOKE)),-DCONFIG_HDA_SMOKE_TEST,) -c $< -o $@
-
-$(USER_BUILD_DIR)/nvme.drv: $(DRVMOD_DIR)/nvme.c kernel/include/drvmod/drvmod.h
-	@mkdir -p $(dir $@)
-	$(DRVMOD_GCC) $(DRVMOD_CFLAGS) $(if $(filter 1,$(DRVMOD_SMOKE)),-DCONFIG_NVME_SMOKE_TEST,) -c $< -o $@
-
-$(USER_BUILD_DIR)/tpm.drv: $(DRVMOD_DIR)/tpm.c kernel/include/drvmod/drvmod.h
-	@mkdir -p $(dir $@)
-	$(DRVMOD_GCC) $(DRVMOD_CFLAGS) -c $< -o $@
-
-$(USER_BUILD_DIR)/ps2.drv: $(DRVMOD_DIR)/ps2.c kernel/include/drvmod/drvmod.h
-	@mkdir -p $(dir $@)
-	$(DRVMOD_GCC) $(DRVMOD_CFLAGS) -c $< -o $@
-
-$(USER_BUILD_DIR)/vinput-probe.drv: $(DRVMOD_DIR)/vinput_probe.c \
-		kernel/include/drvmod/drvmod.h kernel/include/drivers/dual/drv_env.h \
-		kernel/include/drivers/dual/virtio_input.h kernel/include/drivers/dual/virtio_mmio.h
-	@mkdir -p $(dir $@)
-	$(DRVMOD_GCC) $(DRVMOD_CFLAGS) -c $< -o $@
-
-drvmod-examples: $(addprefix $(USER_BUILD_DIR)/,$(DRVMOD_MODULES))
-
-$(FAT32_IMG): drvmod-examples $(addprefix $(USER_BUILD_DIR)/,$(DRVMOD_MODULES))
-
-smoke-drvmod-riscv64:
-	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/drvmod-riscv64.log"; \
-	status=0; \
-	{ sleep $(SMOKE_INPUT_DELAY); printf 'drvctl list\nsyscall_smoke\npoweroff\n'; } | \
-	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
-		-machine virt -m 1G -nographic -smp 1 -bios default \
-		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-both-dev/fat32.img,if=none,format=raw,id=x0 \
-		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		-kernel .kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf \
-		> "$$log" 2>&1 || status=$$?; \
-	if grep -q '\[GOLDFISH-RTC\] probe ok' "$$log" && \
-	   grep -q 'SYSCALL_SMOKE: PASS' "$$log" && \
-	   grep -q 'rtc.drv' "$$log" && \
-	   grep -q 'System is going down for power-off' "$$log"; then \
-		echo "smoke-drvmod-riscv64: PASS (rtc.drv loaded and bound); log saved to $$log"; \
-	else \
-		echo "smoke-drvmod-riscv64: failed with status $$status; tail of $$log:"; \
-		tail -n 80 "$$log"; exit 1; \
-	fi
-
-smoke-drvmod-aarch64:
-	$(MAKE) ARCH=aarch64 ABI=both BRINGUP=0 dev-build
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/drvmod-aarch64.log"; \
-	status=0; \
-	{ sleep $(SMOKE_INPUT_DELAY); printf 'poweroff\n'; } | \
-	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-aarch64 \
-		-machine virt -cpu cortex-a57 -m 1G -nographic -smp 1 \
-		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/aarch64-qemu-virt-aarch64-both-dev/fat32.img,if=none,format=raw,id=x0 \
-		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		-kernel .kernel-build/aarch64-qemu-virt-aarch64-both-dev/kernel.elf \
-		> "$$log" 2>&1 || status=$$?; \
-	if grep -q '\[GOLDFISH-RTC\] probe ok' "$$log" && \
-	   grep -q 'System is going down for power-off' "$$log"; then \
-		echo "smoke-drvmod-aarch64: PASS (rtc.drv loaded and bound); log saved to $$log"; \
-	else \
-		echo "smoke-drvmod-aarch64: failed with status $$status; tail of $$log:"; \
-		tail -n 80 "$$log"; exit 1; \
-	fi
-
-smoke-drvmod-loongarch64:
-	$(MAKE) ARCH=loongarch64 ABI=both BRINGUP=0 dev-build
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/drvmod-loongarch64.log"; \
-	status=0; \
-	{ sleep $(SMOKE_INPUT_DELAY); printf 'poweroff\n'; } | \
-	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-loongarch64 \
-		-machine virt -m 1G -nographic -smp 1 \
-		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/loongarch64-qemu-virt-loongarch64-both-dev/fat32.img,if=none,format=raw,id=x0 \
-		-device virtio-blk-pci,drive=x0 \
-		-kernel .kernel-build/loongarch64-qemu-virt-loongarch64-both-dev/kernel.elf \
-		> "$$log" 2>&1 || status=$$?; \
-	if grep -q '\[GOLDFISH-RTC\] probe ok' "$$log" && \
-	   grep -q 'System is going down for power-off' "$$log"; then \
-		echo "smoke-drvmod-loongarch64: PASS (rtc.drv loaded and bound); log saved to $$log"; \
-	else \
-		echo "smoke-drvmod-loongarch64: failed with status $$status; tail of $$log:"; \
-		tail -n 80 "$$log"; exit 1; \
-	fi
-
-smoke-drvmod-x86_64:
-	$(MAKE) ARCH=x86_64 ABI=both BRINGUP=0 dev-build
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/drvmod-x86_64.log"; \
-	status=0; \
-	{ sleep $(SMOKE_INPUT_DELAY); printf 'drvctl list\npoweroff\n'; } | \
-	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-x86_64 \
-		-machine q35 -m 1G -nographic -smp 1 -no-reboot \
-		-drive file=.kernel-build/x86_64-qemu-virt-x86_64-both-dev/fat32.img,if=none,format=raw,id=x0 \
-		-device virtio-blk-pci,drive=x0 \
-		-kernel .kernel-build/x86_64-qemu-virt-x86_64-both-dev/kernel.elf \
-		> "$$log" 2>&1 || status=$$?; \
-	if grep -q '\[PC-SPKR\] driver registered in core: 0' "$$log" && \
-	   grep -q "device 'pc-speaker' bound to driver 'pc-speaker'" "$$log" && \
-	   grep -q '\[PS2\] module init ok' "$$log"; then \
-		echo "smoke-drvmod-x86_64: PASS (pc-spkr.drv + ps2.drv loaded, registered, bound); log saved to $$log"; \
-	else \
-		echo "smoke-drvmod-x86_64: failed with status $$status; tail of $$log:"; \
-		tail -n 80 "$$log"; exit 1; \
-	fi
-
-smoke-drvmod: smoke-drvmod-riscv64 smoke-drvmod-x86_64 smoke-drvmod-aarch64 smoke-drvmod-loongarch64
-
 native-programs: $(NATIVE_OUTPUTS)
 
 define NATIVE_FUTEX_RECIPE
@@ -3835,7 +3452,7 @@ endef
 
 $(NATIVE_RTCDD_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) user/svc/rtcd.c user/svc/rtcd_proto.h \
 		user/liba20rt/a20-generic.ld user/liba20rt/crt0_a20.h user/liba20rt/a20_syscall.h \
-		kernel/include/drivers/dual/drv_env.h kernel/include/drivers/dual/goldfish_rtc.h
+		kernel/include/drivers/driver_descriptor.h kernel/include/drivers/dual/drv_env.h kernel/include/drivers/dual/goldfish_rtc.h
 	$(call NATIVE_RTCD_RECIPE,$(NATIVE_CC),$(NATIVE_CFLAGS),$(NATIVE_CRT0),user/svc/rtcd.c,$@)
 
 native-rtcd-arch: $(NATIVE_RTCD_BIN) $(NATIVE_RTCDD_BIN)
@@ -3871,12 +3488,12 @@ native-isolation-rv:
 	$(MAKE) ARCH=riscv64 NOMMU=$(NOMMU) native-isolation-arch
 
 $(NATIVE_UBDD_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) user/svc/ubd.c user/svc/ubd_proto.h \
-		user/liba20rt/a20-generic.ld user/liba20rt/crt0_a20.h user/liba20rt/a20_syscall.h
-	$(call NATIVE_SVC_RECIPE,$(NATIVE_CC),$(NATIVE_CFLAGS),$(NATIVE_CRT0),user/svc/ubd.c,$@)
+		user/liba20rt/a20-generic.ld user/liba20rt/crt0_a20.h user/liba20rt/a20_syscall.h kernel/include/drivers/driver_descriptor.h
+	$(call NATIVE_RTCD_RECIPE,$(NATIVE_CC),$(NATIVE_CFLAGS),$(NATIVE_CRT0),user/svc/ubd.c,$@)
 
 $(NATIVE_UINPUTD_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) user/svc/uinputd.c \
 		user/liba20rt/a20-generic.ld user/liba20rt/crt0_a20.h user/liba20rt/a20_syscall.h \
-		kernel/include/drivers/dual/drv_env.h kernel/include/drivers/dual/virtio_mmio.h kernel/include/drivers/dual/virtio_input.h kernel/include/drivers/dual/virtq.h
+		kernel/include/drivers/driver_descriptor.h kernel/include/drivers/dual/drv_env.h kernel/include/drivers/dual/virtio_mmio.h kernel/include/drivers/dual/virtio_input.h kernel/include/drivers/dual/virtq.h
 	$(call NATIVE_RTCD_RECIPE,$(NATIVE_CC),$(NATIVE_CFLAGS),$(NATIVE_CRT0),user/svc/uinputd.c,$@)
 
 native-uinputd-arch: $(NATIVE_UINPUTD_BIN)
@@ -3946,7 +3563,7 @@ smoke-dual-input:
 	rm -f "$$monsock"; \
 	status=0; \
 	{ sleep 8; python3 -c 'import socket,sys,time; s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1]); [(s.sendall(b"sendkey a\n"), time.sleep(1)) for _ in range(24)]; s.close()' "$$monsock" 2>/dev/null || true; } & \
-	{ sleep $(SMOKE_INPUT_DELAY); printf '/bin/uinputd-rv\n/bin/uinputd-rv\npoweroff\n'; } | \
+	{ sleep $(SMOKE_INPUT_DELAY); printf 'poweroff\n'; } | \
 	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
 		-machine virt -m 1G -nographic -smp 1 -bios default \
 		-global virtio-mmio.force-legacy=false \
@@ -3962,7 +3579,7 @@ smoke-dual-input:
 	   grep -q 'UINPUTD: ready' "$$log" && \
 	   grep -q 'UINPUTD: ev type=1 code=30 value=1' "$$log" && \
 	   grep -q 'UINPUTD: claimed' "$$log" && \
-	   [ "$$(grep -c 'UINPUTD: PASS' "$$log")" = "2" ] && \
+	   grep -q 'UINPUTD: PASS' "$$log" && \
 	   grep -q 'System is going down for power-off' "$$log"; then \
 		echo "smoke-dual-input: PASS; log saved to $$log"; \
 	else \
