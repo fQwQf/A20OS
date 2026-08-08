@@ -62,7 +62,7 @@ else
 BOARD ?= qemu-virt-$(ARCH)
 endif
 
-include mk/driver-deployment.mk
+include tools/driver-deployment.mk
 NOMMU ?= 0
 ifeq ($(NOMMU),1)
 CONFIG_SWAP := n
@@ -588,7 +588,7 @@ endif
 # Source files
 # Driver ownership is kept outside this top-level file so deployment policy is
 # explicit and generic built-in exceptions remain reviewable.
-include mk/driver-sources.mk
+include tools/driver-sources.mk
 
 # ABI-specific source directories
 ifeq ($(ABI),both)
@@ -665,7 +665,7 @@ KERNEL_SRC += $(ROOTFS_OVERLAY_SRC)
 include $(KERNEL_DIR)/external/lwip/sources.mk
 endif
 
-include mk/driver-modules.mk
+include tools/driver-modules.mk
 
 # Object files
 LWIP_KERNEL_SRC := $(filter $(KERNEL_DIR)/external/lwip/src/%.c,$(KERNEL_SRC))
@@ -710,20 +710,20 @@ VBOX_AARCH64_TEXT_IMG = $(BUILD_DIR)/a20os-vbox-aarch64-text.img
 VBOX_AARCH64_LOAD_ADDRESS ?= 0x08080000ULL
 
 # ================================================================
-# Targets (split into mk/targets-*.mk)
+# Targets (split into tools/targets-*.mk)
 # ================================================================
 
-include mk/targets-base.mk
-include mk/targets-build.mk
-include mk/targets-gates.mk
-include mk/targets-smoke.mk
-include mk/targets-steps.mk
-include mk/targets-dev.mk
-include mk/stm32.mk
-include mk/run-targets.mk
-include mk/targets-images.mk
-include mk/targets-extra.mk
-include mk/targets-native.mk
-include mk/targets-native-smoke.mk
-include mk/targets-mlibc.mk
-include mk/targets-eval.mk
+include tools/targets-base.mk
+include tools/targets-build.mk
+include tools/targets-gates.mk
+include tools/targets-smoke.mk
+include tools/targets-steps.mk
+include tools/targets-dev.mk
+include tools/stm32.mk
+include tools/run-targets.mk
+include tools/targets-images.mk
+include tools/targets-extra.mk
+include tools/targets-native.mk
+include tools/targets-native-smoke.mk
+include tools/targets-mlibc.mk
+include tools/targets-eval.mk
