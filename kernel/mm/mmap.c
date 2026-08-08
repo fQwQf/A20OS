@@ -334,10 +334,11 @@ vaddr_t mm_mmap_vmo_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
 vaddr_t mm_mmap(mm_struct_t *mm, vaddr_t addr, size_t len, int prot, int flags)
 {
     if (!mm) return (uint64_t)-EINVAL;
+    mm_tlb_invalidate_begin(mm);
     uint64_t flags_l = spin_lock_irqsave(&mm->lock);
     vaddr_t r = mm_mmap_locked(mm, addr, len, prot, flags);
     spin_unlock_irqrestore(&mm->lock, flags_l);
-    mm_vma_flush_deferred(mm);
+    mm_tlb_invalidate_finish(mm);
     return r;
 }
 
@@ -345,11 +346,12 @@ vaddr_t mm_mmap_file(mm_struct_t *mm, vaddr_t addr, size_t len,
                      int prot, int flags, int file_fd, uint64_t file_offset)
 {
     if (!mm) return (uint64_t)-EINVAL;
+    mm_tlb_invalidate_begin(mm);
     uint64_t flags_l = spin_lock_irqsave(&mm->lock);
     vaddr_t r = mm_mmap_file_locked(mm, addr, len, prot, flags, file_fd,
                                     file_offset);
     spin_unlock_irqrestore(&mm->lock, flags_l);
-    mm_vma_flush_deferred(mm);
+    mm_tlb_invalidate_finish(mm);
     return r;
 }
 
@@ -357,10 +359,11 @@ vaddr_t mm_mmap_vmo(mm_struct_t *mm, vaddr_t addr, size_t len,
                     int prot, int flags, struct vmo *vmo, uint64_t vmo_offset)
 {
     if (!mm) return (uint64_t)-EINVAL;
+    mm_tlb_invalidate_begin(mm);
     uint64_t flags_l = spin_lock_irqsave(&mm->lock);
     vaddr_t r = mm_mmap_vmo_locked(mm, addr, len, prot, flags, vmo,
                                    vmo_offset);
     spin_unlock_irqrestore(&mm->lock, flags_l);
-    mm_vma_flush_deferred(mm);
+    mm_tlb_invalidate_finish(mm);
     return r;
 }

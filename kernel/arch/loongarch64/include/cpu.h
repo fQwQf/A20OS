@@ -2,6 +2,7 @@
 #define _ARCH_LOONGARCH64_CPU_H
 
 #include "core/types.h"
+#include "core/consts.h"
 #include "platform.h"
 
 static inline void arch_mb(void)  { __asm__ __volatile__("dbar 0" ::: "memory"); }
@@ -52,15 +53,29 @@ static inline int arch_irqs_enabled(void) {
     return !!(val & (1UL << 2));
 }
 
-static inline void arch_tlb_flush(void) {
+void loongarch64_remote_tlb_flush(uint64_t addr, uint64_t size);
+
+static inline void arch_tlb_flush_local(void) {
     __asm__ __volatile("invtlb 0, $zero, $zero" ::: "memory");
 }
-static inline void arch_tlb_flush_page(uint64_t addr) {
+static inline void arch_tlb_flush(void) {
+    arch_tlb_flush_local();
+#ifdef CONFIG_SMP
+    loongarch64_remote_tlb_flush(0, ~(uint64_t)0);
+#endif
+}
+static inline void arch_tlb_flush_page_local_impl(uint64_t addr) {
     (void)addr;
     __asm__ __volatile("invtlb 0, $zero, $zero" ::: "memory");
 }
+static inline void arch_tlb_flush_page(uint64_t addr) {
+    arch_tlb_flush_page_local_impl(addr);
+#ifdef CONFIG_SMP
+    loongarch64_remote_tlb_flush(addr, PAGE_SIZE);
+#endif
+}
 static inline void arch_tlb_flush_page_local(uint64_t addr) {
-    arch_tlb_flush_page(addr);
+    arch_tlb_flush_page_local_impl(addr);
 }
 
 /* Task pointer lives in SAVE1 (CSR 0x31).
@@ -230,9 +245,4 @@ static inline int arch_unwind_frames(uint64_t fp,
     return n;
 }
 
-
-/* Local-only full flush. */
-static inline void arch_tlb_flush_local(void) {
-    arch_tlb_flush();
-}
 #endif

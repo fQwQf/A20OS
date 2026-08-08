@@ -198,11 +198,51 @@ void proc_sleep_until(uint64_t wake_time) {
 
 // idle 进程的主循环，系统无任务时运行
 void idle_loop(void) {
+#if CONFIG_DEBUG_SCHED_STATE
+    uint64_t last_activity = timer_get_ticks();
+    uint64_t last_warn = 0;
+#endif
     while (1) {
         arch_local_irq_enable();
         kernel_progress_run_bottom_halves();
         sched();
         cpu_relax();
+#if CONFIG_DEBUG_SCHED_STATE
+        /* Hang diagnostic: if no non-idle task has run for a while, dump. */
+        uint64_t now = timer_get_ticks();
+        if (now - last_activity > 3 * TICKS_PER_SEC &&
+            now - last_warn > 2 * TICKS_PER_SEC) {
+            uint64_t flags = spin_lock_irqsave(&proc_lock);
+            int nonidle_running = 0;
+            for (task_t *t = proc_first_task_locked(); t;
+                 t = proc_next_task_locked(t)) {
+                if (t->pid != 0 && t->state == PROC_RUNNING && t->on_cpu) {
+                    nonidle_running = 1;
+                    break;
+                }
+            }
+            if (nonidle_running) {
+                spin_unlock_irqrestore(&proc_lock, flags);
+                last_activity = now;
+                continue;
+            }
+            last_warn = now;
+            printf("[HANG] cpu=%u no progress for %lu ticks; tasks:\n",
+                   cpu_current_id(),
+                   (unsigned long)(now - last_activity));
+            for (task_t *t = proc_first_task_locked(); t;
+                 t = proc_next_task_locked(t)) {
+                if (t->state == PROC_UNUSED)
+                    continue;
+                printf("  pid=%d name=%s state=%d on_cpu=%d on_rq=%d cpu=%u park=%d\n",
+                       t->pid, t->name, (int)t->state, t->on_cpu, t->on_rq,
+                       t->owner_cpu, (int)t->park_state);
+            }
+            spin_unlock_irqrestore(&proc_lock, flags);
+            extern void a20_channel_trace_dump(void);
+            a20_channel_trace_dump();
+        }
+#endif
     }
 }
 
@@ -455,6 +495,8 @@ int proc_alloc_user_image(uintptr_t entry, vaddr_t sp, pt_root_t *pgdir,
         mm->rss         = 0;
         spin_init(&mm->lock);
         spin_set_debug(&mm->lock, "mm", mm);
+        mutex_init(&mm->tlb_lock);
+        mm->tlb_holds = NULL;
         refcount_set(&mm->refcount, 1);
         mm->mmap        = mmap;
 #ifdef CONFIG_NOMMU
@@ -556,6 +598,8 @@ vaddr_t proc_brk(vaddr_t newbrk) {
     task_t *t = proc_current();
     if (!t || !t->mm) return 0; // 理论上不应发生
 
+    if (newbrk != 0)
+        mm_tlb_invalidate_begin(t->mm);
     uint64_t lock_flags = spin_lock_irqsave(&t->mm->lock);
 
     // 如果 newbrk 为 0，通常是 C 库在查询当前堆位置
@@ -568,7 +612,7 @@ vaddr_t proc_brk(vaddr_t newbrk) {
     // mm_brk_locked: the caller already holds mm->lock
     vaddr_t brk = mm_brk_locked(t->mm, newbrk);
     spin_unlock_irqrestore(&t->mm->lock, lock_flags);
-    mm_vma_flush_deferred(t->mm);
+    mm_tlb_invalidate_finish(t->mm);
     return brk;
 }
 
@@ -580,6 +624,7 @@ vaddr_t proc_mmap(vaddr_t addr, size_t len, int prot, int flags, int fd, long of
     size_t map_len = ROUND_UP(len, PAGE_SIZE);
     if (map_len == 0) return (uint64_t)-EINVAL;
 
+    mm_tlb_invalidate_begin(t->mm);
     uint64_t lock_flags = spin_lock_irqsave(&t->mm->lock);
     vaddr_t ret;
     if ((flags & MAP_ANONYMOUS) || fd < 0)
@@ -587,6 +632,7 @@ vaddr_t proc_mmap(vaddr_t addr, size_t len, int prot, int flags, int fd, long of
     else {
         if (off < 0 || ((uint64_t)off & (PAGE_SIZE - 1))) {
             spin_unlock_irqrestore(&t->mm->lock, lock_flags);
+            mm_tlb_invalidate_finish(t->mm);
             return (uint64_t)-EINVAL;
         }
 
@@ -594,7 +640,7 @@ vaddr_t proc_mmap(vaddr_t addr, size_t len, int prot, int flags, int fd, long of
                                   (uint64_t)off);
     }
     spin_unlock_irqrestore(&t->mm->lock, lock_flags);
-    mm_vma_flush_deferred(t->mm);
+    mm_tlb_invalidate_finish(t->mm);
     return ret;
 }
 
@@ -602,11 +648,11 @@ vaddr_t proc_mmap(vaddr_t addr, size_t len, int prot, int flags, int fd, long of
 int proc_munmap(vaddr_t addr, size_t len) {
     task_t *t = proc_current();
     if (!t || !t->mm) return -1;
+    mm_tlb_invalidate_begin(t->mm);
     uint64_t lock_flags = spin_lock_irqsave(&t->mm->lock);
     int ret = mm_munmap_locked(t->mm, addr, len);
     spin_unlock_irqrestore(&t->mm->lock, lock_flags);
-    mm_vma_flush_deferred(t->mm);
-    arch_tlb_flush();  // deferred remote flush
+    mm_tlb_invalidate_finish(t->mm);
     return ret;
 }
 

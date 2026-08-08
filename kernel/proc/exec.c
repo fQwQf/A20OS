@@ -585,6 +585,8 @@ static int exec_install_process(task_t *t,
     new_mm->rss        = 0;
     spin_init(&new_mm->lock);
     spin_set_debug(&new_mm->lock, "mm", new_mm);
+    mutex_init(&new_mm->tlb_lock);
+    new_mm->tlb_holds = NULL;
     refcount_set(&new_mm->refcount, 1);
     new_mm->mmap       = info->mmap;
     new_mm->has_vdso   = vdso_auxv_ehdr() != 0;
