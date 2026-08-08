@@ -201,6 +201,7 @@ SMOKE_INPUT_DELAY ?= 8
 # mm_stress drives ~8 MiB of ramfs page-cache eviction plus fork/mremap/huge
 # page coverage under TCG; it is the heaviest smoke and needs a longer budget.
 SMOKE_TIMEOUT_MM_ST ?= 45s
+SMOKE_TIMEOUT_MM_FORK_EXEC ?= 120s
 SMOKE_LOG_DIR ?= .kernel-build/smoke
 STEP35_TIMEOUT ?= 300s
 STEP35_INPUT_DELAY ?= 8

@@ -311,12 +311,15 @@ check-concurrency-foundation:
 	@$(MAKE) ARCH=$(ARCH) NR_CPUS=2 ALLOW_UNVERIFIED_SMP=1 BRINGUP=1 kernel-only >/dev/null
 	@echo "check-concurrency-foundation: PASS"
 
-check-mm-lock-model: smoke-mm-stress
+check-mm-lock-model: smoke-mm-stress smoke-mm-fork-exec-race
 	@rg -q "MM_LOCK_MODEL" kernel/include/mm/vm.h
 	@rg -q "MM_VMA_PTE_AUDIT" kernel/mm/vm.c
 	@rg -q "COW_FAULT_TLB_CONTRACT" kernel/mm/fault.c
 	@rg -q "DEMAND_FAULT_TLB_CONTRACT" kernel/mm/fault.c
 	@rg -q "MM_FORK_COW_REGRESSION_GUARD" kernel/mm/vm.c
+	@rg -q "MM_FORK_DEFERRED_STATE_REGRESSION_GUARD" kernel/mm/vm.c
+	@rg -q "child->deferred_vma = NULL;" kernel/mm/vm.c
+	@rg -q "MM_VMA_FORK_EXEC: PASS" user/cmds/stress/mm_stress.c
 	@rg -q "FILE_MMAP_PAGE_CACHE_CONTRACT" kernel/include/fs/page_cache.h
 	@rg -q "OOM_RECLAIM_LIFETIME_CONTRACT" kernel/include/mm/oom.h
 	@rg -q "MM_STRESS: PASS" user/cmds/stress/mm_stress.c
