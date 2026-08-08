@@ -6,7 +6,7 @@ A20OS 的输入路径分成三层：**设备驱动**（drvmod 模块，发布 in
 
 ```text
 virtio-input 设备 (MMIO slot / PCI 1af4:1052)
-        │  vinput.drv（drvmod 模块，四架构）
+        │  vinput.a20drv（drvmod 模块，四架构）
         │  状态迁移 + 事件 virtqueue + IRQ + input class 设备
         ▼
 input class 设备（DEV_CLASS_INPUT，统一核心发布）
@@ -22,7 +22,7 @@ input class 设备（DEV_CLASS_INPUT，统一核心发布）
 - 参考实现：`kernel/drvmod/examples/vinput.c`（驱动侧）、`kernel/drivers/input/input_mux.c`（mux 侧）、`user/svc/uinputd.c`（用户态双驻留侧）。
 - 唤醒：mux 读路径在 `g_input_waiters` 上 park；模块 ISR 入队事件后经框架导出 `input_mux_wake()` 唤醒。IRQ 掩码/不可用的平台由 mux 的轮询兜底（遍历 class 设备的 `poll` 钩子，模块的 poll 顺带 drain used ring）。
 
-## 驱动侧（vinput.drv）
+## 驱动侧（vinput.a20drv）
 
 `kernel/drvmod/examples/vinput.c` 是完整 virtio-input 驱动模板：
 
@@ -35,7 +35,7 @@ input class 设备（DEV_CLASS_INPUT，统一核心发布）
 
 ## 双驻留协调
 
-udriver 白名单（`kernel/drivers/core/udriver.c` 的 `g_mmio_windows`）把 virtio-mmio slot 5 标记为 user-owned；`virtio_mmio_enumerate()` 跳过该槽，vinput.drv 因此只绑定其余 virtio-input 设备。slot 5 的完整驱动归用户态 `uinputd`（user/svc/uinputd.c，共享协议 `kernel/include/drivers/dual/`），内核侧对它的只读身份探针是 `vinput-probe.drv`。详见 [04-dual-placement](../../hybrid-kernel/04-dual-placement.md)。
+udriver 白名单（`kernel/drivers/core/udriver.c` 的 `g_mmio_windows`）把 virtio-mmio slot 5 标记为 user-owned；`virtio_mmio_enumerate()` 跳过该槽，vinput.a20drv 因此只绑定其余 virtio-input 设备。slot 5 的完整驱动归用户态 `uinputd`（user/svc/uinputd.c，共享协议 `kernel/include/drivers/dual/`），内核侧对它的只读身份探针是 `vinput-probe.a20drv`。详见 [04-dual-placement](../../hybrid-kernel/04-dual-placement.md)。
 
 ## 用户接口
 
