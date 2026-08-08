@@ -256,6 +256,10 @@ typedef struct ext4_sb_info {
     uint32_t s_feature_ro_compat;
     uint64_t block_group_desc_table_byte;
     ext4_group_desc_t *group_descs;
+    uint32_t *block_alloc_hints;
+    uint32_t *inode_alloc_hints;
+    uint32_t block_group_rotor;
+    uint32_t inode_group_rotor;
     bcache_t *bc;
     mutex_t alloc_lock;
     mutex_t metadata_lock;

@@ -50,6 +50,7 @@ run_buildstorm_probe() {
     if [[ ! -x /bin/a20-probe/cwd-probe ||
           ! -x /bin/a20-probe/exec-pages-probe ||
           ! -x /bin/a20-probe/shebang-probe ||
+          ! -x /bin/a20-probe/stage9-perf-probe ||
           ! -f /bin/a20-probe/liba20probe.so ]]; then
         print "[FINAL-EVAL][ERROR] incomplete architecture probe payload"
         return 127
@@ -69,11 +70,13 @@ run_buildstorm_probe() {
     cp /bin/a20-probe/cwd-probe /test/a20-probe/cwd-probe || return
     cp /bin/a20-probe/exec-pages-probe /test/a20-probe/exec-pages-probe || return
     cp /bin/a20-probe/shebang-probe /test/a20-probe/shebang-probe || return
+    cp /bin/a20-probe/stage9-perf-probe /test/a20-probe/stage9-perf-probe || return
     cp /bin/a20-probe/liba20probe.so /test/a20-probe/liba20probe.so || return
     cp /bin/arch_context_stress /test/a20-context-stress || return
     chmod 755 /test/a20-eval-shell /test/a20-buildstorm-probe.sh \
         /test/a20-probe/cwd-probe /test/a20-probe/exec-pages-probe \
-        /test/a20-probe/shebang-probe /test/a20-context-stress
+        /test/a20-probe/shebang-probe /test/a20-probe/stage9-perf-probe \
+        /test/a20-context-stress
     chmod 644 /test/a20-probe/liba20probe.so
 
     print "#### A20OS 2026 FINAL EVAL START buildstorm-probe ####"

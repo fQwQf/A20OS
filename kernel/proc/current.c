@@ -1,6 +1,7 @@
 #include "proc/proc_internal.h"
 #include "core/cpu.h"
 #include "core/panic.h"
+#include "mm/vm.h"
 
 /*
  * Current task storage.
@@ -38,6 +39,9 @@ static int proc_switch_complete_locked(unsigned cpu)
 #endif
     old->on_cpu = 0;
     old->owner_cpu = PROC_CPU_NONE;
+    task_t *current = proc_current_on_cpu(cpu);
+    if (old->mm && (!current || old->mm != current->mm))
+        mm_context_leave(old->mm, cpu);
 
     /*
      * yield and Park/Wake may publish READY while the old task still owns this

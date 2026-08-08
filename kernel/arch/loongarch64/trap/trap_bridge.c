@@ -3,6 +3,8 @@
 
 extern void trap_handler(trap_context_t *ctx);
 extern void kernel_trap_handler(trap_context_t *ctx);
+extern char loongarch64_idle_region_start[];
+extern char loongarch64_idle_region_end[];
 
 /*
  * Route to the correct handler based on the privilege level at the time of
@@ -23,6 +25,11 @@ void trap_handler_la64(trap_context_t *ctx) {
     if (pplv != 0) {
         trap_handler(ctx);
     } else {
+        uintptr_t start = (uintptr_t)loongarch64_idle_region_start;
+        uintptr_t end = (uintptr_t)loongarch64_idle_region_end;
+        uint64_t cause = arch_read_cause();
+        if ((cause >> 63) && ctx->era >= start && ctx->era < end)
+            ctx->era = end;
         kernel_trap_handler(ctx);
     }
 }

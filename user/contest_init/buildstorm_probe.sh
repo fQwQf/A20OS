@@ -64,7 +64,7 @@ run_case() {
     typeset -i case_timeout=180
 
     case "$name" in
-    stage2-*-100|stage3-*-100|stage4-*|stage5-*|stage6-*) case_timeout=900 ;;
+    stage2-*-100|stage3-*-100|stage4-*|stage5-*|stage6-*|stage9-*) case_timeout=900 ;;
     stage7-*) case_timeout=28800 ;;
     esac
 
@@ -675,6 +675,13 @@ probe_stage7_full_build() {
     print "BUILDSTORM_STAGE7_COMPILE ok"
 }
 
+probe_stage9_feedback() {
+    print "STAGE9_META stage9_case=stage9-perf-feedback"
+    print "STAGE9_META stage9_guest_nproc=$(/usr/bin/nproc)"
+    print "STAGE9_META stage9_payload=/a20-probe/stage9-perf-probe"
+    /a20-probe/stage9-perf-probe
+}
+
 run_named_case() {
     case "$1" in
     static-elf) probe_static_elf ;;
@@ -702,6 +709,7 @@ run_named_case() {
     stage7-shebang-exec) probe_stage7_shebang_exec ;;
     stage7-rustc-j8) probe_stage7_parallel_rustc ;;
     stage7-rustc-llvm-j8) probe_stage7_parallel_llvm ;;
+    stage9-perf-feedback) probe_stage9_feedback ;;
     stage7-full-j1|stage7-full-j2|stage7-full-j4|stage7-full-j8|stage7-full-default)
         probe_stage7_full_build "$1"
         ;;
