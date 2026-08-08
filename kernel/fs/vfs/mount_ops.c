@@ -18,7 +18,7 @@
 #include "fs/ramfs.h"
 #include "fs/devfs.h"
 #include "fs/procfs.h"
-#include "drivers/block/virtio_blk.h"
+#include "fs/mount_setup.h"
 #include "proc/proc.h"
 #include "core/string.h"
 #include "core/stdio.h"
@@ -48,7 +48,7 @@ static int parse_block_dev(const char *dev, int *out_idx, int *out_part) {
 }
 
 static int mount_block_dev_idx(int dev_idx, const char *path, const char *fstype) {
-    block_dev_t *bdev = virtio_blk_get_dev(dev_idx);
+    block_dev_t *bdev = mount_setup_block_device(dev_idx);
     if (!bdev) return -ENODEV;
     bcache_t *bc = bcache_create(bdev);
     if (!bc) return -ENOMEM;
