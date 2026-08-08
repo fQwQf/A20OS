@@ -311,11 +311,12 @@ int vfs_open(const char *path, int flags, int mode) {
 
         int cmode = (mode & S_IFMT) | ((mode & 07777) & ~(cur ? cur->fs.umask : 022));
         int r = parent->ops->create(parent, fname, cmode, &vn);
-        if (r == 0)
+        if (r == 0) {
             inotify_vnode_event(parent, fname, IN_CREATE);
+            vfs_dcache_invalidate(parent, fname);
+        }
         vnode_put(parent);
         if (r < 0) { kdebug("[VFS] open '%s': create failed r=%d\n", resolved, r); return r; }
-        vfs_dcache_invalidate_all();
         vfs_touch_mtime(vn);
     } else {
         if ((flags & O_DIRECTORY) && vn->type != VFS_FT_DIR) {
@@ -487,9 +488,10 @@ int vfs_openat2(int dirfd, const char *path, int flags, int mode, uint64_t resol
 
             int cmode = (mode & S_IFMT) | ((mode & 07777) & ~(cur ? cur->fs.umask : 022));
             int cr = parent->ops->create(parent, fname, cmode, &vn);
+            if (cr == 0)
+                vfs_dcache_invalidate(parent, fname);
             vnode_put(parent);
             if (cr < 0) return cr;
-            vfs_dcache_invalidate_all();
             vfs_touch_mtime(vn);
         } else {
             return lookup_err ? lookup_err : -ENOENT;
@@ -634,11 +636,11 @@ int vfs_mkdir(const char *path, int mode) {
     }
     int cmode = (mode & 07777) & ~(cur ? cur->fs.umask : 022);
     int r = parent->ops->mkdir(parent, name, cmode);
-    if (r == 0)
+    if (r == 0) {
         inotify_vnode_event(parent, name, IN_CREATE | IN_ISDIR);
+        vfs_dcache_invalidate(parent, name);
+    }
     vnode_put(parent);
-    if (r == 0)
-        vfs_dcache_invalidate_all();
     return r;
 }
 
@@ -688,15 +690,13 @@ int vfs_unlink(const char *path) {
 
     int r = parent->ops->unlink(parent, name);
     if (r == 0) {
-        vfs_drop_time_meta(victim);
         inotify_vnode_event(parent, name, IN_DELETE);
         if (victim)
             inotify_vnode_event(victim, NULL, IN_DELETE_SELF);
+        vfs_dcache_invalidate(parent, name);
     }
     vnode_put(victim);
     vnode_put(parent);
-    if (r == 0)
-        vfs_dcache_invalidate_all();
     return r;
 }
 
@@ -788,7 +788,9 @@ int vfs_rename_flags(const char *old, const char *newpath, unsigned int flags) {
     }
 
     vnode_t *old_victim = NULL;
+    int old_is_dir = 0;
     if (old_dir->ops->lookup && old_dir->ops->lookup(old_dir, old_name, &old_victim) == 0 && old_victim) {
+        old_is_dir = old_victim->type == VFS_FT_DIR;
         int sr = vfs_sticky_may_remove(old_dir, old_victim);
         vnode_put(old_victim);
         if (sr < 0) {
@@ -819,10 +821,18 @@ int vfs_rename_flags(const char *old, const char *newpath, unsigned int flags) {
     if (r == 0) {
         inotify_vnode_event(old_dir, old_name, IN_MOVED_FROM);
         inotify_vnode_event(new_dir, new_name, IN_MOVED_TO);
-        if (new_victim && !(flags & RENAME_EXCHANGE))
-            vfs_drop_time_meta(new_victim);
-        vfs_dcache_invalidate(old_dir, old_name);
-        vfs_dcache_invalidate(new_dir, new_name);
+        int ramfs_dir_reparent = old_dir->mnt &&
+            old_dir->mnt->type == FS_TYPE_RAMFS &&
+            old_dir->ino != new_dir->ino &&
+            (old_is_dir || ((flags & RENAME_EXCHANGE) && new_victim &&
+                            new_victim->type == VFS_FT_DIR));
+        if (ramfs_dir_reparent) {
+            /* Descendant RAMFS vnodes retain parent pointers used by '..'. */
+            vfs_dcache_invalidate_all();
+        } else {
+            vfs_dcache_invalidate(old_dir, old_name);
+            vfs_dcache_invalidate(new_dir, new_name);
+        }
     }
     vnode_put(new_victim);
     vnode_put(old_dir);
@@ -880,15 +890,13 @@ int vfs_rmdir(const char *path) {
 
     int r = parent->ops->rmdir(parent, name);
     if (r == 0) {
-        vfs_drop_time_meta(victim);
         inotify_vnode_event(parent, name, IN_DELETE | IN_ISDIR);
         if (victim)
             inotify_vnode_event(victim, NULL, IN_DELETE_SELF);
+        vfs_dcache_invalidate(parent, name);
     }
     vnode_put(victim);
     vnode_put(parent);
-    if (r == 0)
-        vfs_dcache_invalidate_all();
     return r;
 }
 
@@ -1171,12 +1179,12 @@ int vfs_link(const char *oldpath, const char *newpath) {
         return -ENOSYS;
     }
     int r = parent->ops->link(parent, name, target);
-    if (r == 0)
+    if (r == 0) {
         inotify_vnode_event(parent, name, IN_CREATE);
+        vfs_dcache_invalidate(parent, name);
+    }
     vnode_put(parent);
     vnode_put(target);
-    if (r == 0)
-        vfs_dcache_invalidate_all();
     return r;
 }
 
@@ -1211,11 +1219,11 @@ int vfs_symlink(const char *target, const char *linkpath) {
         return -ENOSYS;
     }
     int r = parent->ops->symlink(parent, name, target);
-    if (r == 0)
+    if (r == 0) {
         inotify_vnode_event(parent, name, IN_CREATE);
+        vfs_dcache_invalidate(parent, name);
+    }
     vnode_put(parent);
-    if (r == 0)
-        vfs_dcache_invalidate_all();
     return r;
 }
 

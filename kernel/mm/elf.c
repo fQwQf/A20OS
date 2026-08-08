@@ -497,7 +497,7 @@ static int map_segment(mm_struct_t *mm, pt_root_t *pgdir,
         if (flags & PTE_X)
             arch_flush_icache_range(frame, PAGE_SIZE);
     }
-    arch_tlb_flush();
+    /* The exec image is not active on any CPU until exec_install_process(). */
     return elf_add_vma(mm, start, end, pte_to_vm_flags(flags), flags);
 #endif
 }
@@ -541,7 +541,6 @@ static int map_stack(mm_struct_t *mm, pt_root_t *pgdir, vaddr_t *stack_top_out) 
         if (r < 0) { frame_free(frame); return r; }
     }
     *stack_top_out = stack_top;
-    arch_tlb_flush();
     return elf_add_vma(mm, stack_bottom, stack_top,
                        VM_ANON | VM_READ | VM_WRITE | VM_STACK,
                        mm_user_stack_pte_flags());
@@ -614,7 +613,6 @@ static int setup_tls(mm_struct_t *mm, pt_root_t *pgdir,
 
     *tls_va_out = tls_va;
     *tls_tp_out = tcb_va;
-    arch_tlb_flush();
     return elf_add_vma(mm, tls_va,
                        tls_va + total_pages * PAGE_SIZE,
                        VM_ANON | VM_READ | VM_WRITE, pte_flags);
