@@ -99,7 +99,7 @@ cg_node.lock -> proc_lock -> runq_lock -> pfa.lockproc_lock -> runq_lockproc_loc
 
 - 普通 RX 处理只在 `rx_lock` 下触碰环形缓冲区和前台 PGID。
 - RX 唤醒在 `rx_lock` 下 collect wait entry，释放锁后 flush wake queue。
-- Ctrl-C 路径不持有 `rx_lock`；task dump、带引用 PID 查询和信号发送各自在 驱动锁外获取所需的进程锁。
+- Ctrl-C 路径不持有 `rx_lock`；task dump、带引用 PID 查询和信号发送各自在驱动锁外获取所需的进程锁。
 
 **规则：**
 
@@ -243,7 +243,7 @@ cg_node.lock -> proc_lock -> runq_lock -> pfa.lockproc_lock -> runq_lockproc_loc
 1. **禁止反向顺序。** 如果必须在持有驱动锁时获取全局锁，需要在本文档中把它记录为局部顺序。未记录的嵌套就是 bug。
 2. **禁止在 spinlock 下阻塞。** 任何可能阻塞的路径都必须先释放所有 spinlock。
 3. **除非已记录，否则禁止在驱动锁下执行 VFS 和分配。** 唯一已记录的例外是：
-   - `PTY` 分配在 `g_pty_alloc_lock` 下执行 `kmalloc`。 驱动完成路径若需要唤醒任务，只能在驱动锁内 collect，在解锁后 flush。
+   - `PTY` 分配在 `g_pty_alloc_lock` 下执行 `kmalloc`。驱动完成路径若需要唤醒任务，只能在驱动锁内 collect，在解锁后 flush。
 4. **新的设备锁** 必须符合全局顺序（`driver registry/IRQ locks -> device-private locks`），或在使用前向本文档增加局部顺序条目。
 
 > 不要这样做在设备锁下调用 `kmalloc`、VFS 或 scheduler；在 spinlock 里轮询硬件直到超时；临时发明一种“先拿设备锁，再拿 proc_lock”的嵌套。这些都会在 `make check-concurrency-foundation` 或 SMP smoke 测试里变成死锁或数据竞争。新增锁顺序前请先跑过 [测试门禁](../../testing/testing-gates.md)。

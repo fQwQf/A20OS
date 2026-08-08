@@ -90,6 +90,18 @@ make run-stm32f103-qemu
 * `MODE=release/debug`: 编译模式（默认 release 包含 O3 优化）
 * `NR_CPUS=N`: 开启多核并发模式（需要配置门禁开关）
 
+### 3. 编译缓存 (可选)
+构建系统对 ccache 提供透明的可选支持：若环境中安装了 [ccache](https://ccache.dev)，内核、用户态、原生测试、驱动包与 extra 包的编译都会自动经过 ccache 加速，重复构建同一参数的目标时显著缩短墙钟时间。
+```bash
+# 安装 ccache（Debian/Ubuntu）
+sudo apt install ccache
+```
+无需任何配置，检测到即自动生效；未安装时构建行为与之前完全一致，不影响任何功能或门禁。需要临时禁用时可显式传入空值覆盖：
+```bash
+make CCACHE= ...
+```
+注意：ccache 只加速宿主机上的本地迭代编译，不影响 BuildStorm 等竞赛评测在 guest 内对构建耗时的计量。
+
 ## 测试与质量保证
 作为一个严肃的底层项目，A20OS 建立了一套完备的测试门禁。开发者在提交代码前可通过 `Makefile` 目标进行本地校验：
 * **系统调用测试**：运行 `make smoke-riscv64`、`smoke-abi-linux` 等目标，验证内核基础能力。

@@ -17,6 +17,10 @@
 #include "core/kallsyms.h"
 
 __attribute__((weak)) void arch_dump_trap_ring(void) {}
+__attribute__((weak)) void arch_dump_trap_extra_context(const trap_context_t *ctx)
+{
+    (void)ctx;
+}
 
 static int fetch_user_insn(task_t *task, vaddr_t va, uint32_t *insn_out) {
     if (!task || !task->mm || !task->mm->pgdir || !insn_out)
@@ -41,17 +45,7 @@ static void dump_trap_context(trap_context_t *ctx) {
          (unsigned long)TRAP_CTX_ARG4(ctx),
          (unsigned long)TRAP_CTX_ARG5(ctx),
          (unsigned long)TRAP_CTX_SYSCALL_NUM(ctx));
-#ifdef CONFIG_LOONGARCH64
-    for (int i = 10; i < 30; i += 4)
-        kerr("  regs: r%d=0x%lx r%d=0x%lx r%d=0x%lx r%d=0x%lx\n",
-             i, (unsigned long)TRAP_CTX_REG(ctx, i),
-             i + 1, (unsigned long)TRAP_CTX_REG(ctx, i + 1),
-             i + 2, (unsigned long)TRAP_CTX_REG(ctx, i + 2),
-             i + 3, (unsigned long)TRAP_CTX_REG(ctx, i + 3));
-    kerr("  regs: r30=0x%lx r31=0x%lx\n",
-         (unsigned long)TRAP_CTX_REG(ctx, 30),
-         (unsigned long)TRAP_CTX_REG(ctx, 31));
-#endif
+    arch_dump_trap_extra_context(ctx);
 }
 
 static void dump_kernel_backtrace(trap_context_t *ctx, vaddr_t pc, int max_frames) {

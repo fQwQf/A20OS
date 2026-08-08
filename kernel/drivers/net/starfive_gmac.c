@@ -10,6 +10,7 @@
  * document it in docs/drivers/lock-order.md.
  */
 #include "drivers/net/starfive_gmac.h"
+#include "drivers/bus/platform_bus.h"
 #include "drivers/core/driver_core.h"
 #include "drivers/core/driver_class.h"
 #include "drivers/core/driver_hwapi.h"
@@ -432,6 +433,8 @@ static int starfive_gmac_driver_probe(device_t *dev) {
         return -1;
     }
 
+    /* Mirror the low-level global so the class ops see a live base. */
+    g_gmac_drv.gmac = g_gmac;
     dev->drv_priv = &g_gmac_drv;
     kinfo("[StarFive-GMAC] Probed '%s' at 0x%lx\n", dev->name, (unsigned long)res->start);
     return 0;
@@ -469,10 +472,16 @@ static net_dev_ops_t starfive_gmac_net_ops = {
     .poll = starfive_gmac_class_poll,
 };
 
+static const device_id_t starfive_gmac_ids[] = {
+    { .vendor = STARFIVE_GMAC_PLATFORM_VENDOR, .device = STARFIVE_GMAC_PLATFORM_DEVICE,
+      .subvendor = VENDOR_ANY, .subdevice = DEVICE_ANY },
+    { 0 },
+};
+
 static driver_t starfive_gmac_driver = {
     .name       = "starfive-gmac",
-    .id_table   = NULL,
-    .bus        = NULL,
+    .id_table   = starfive_gmac_ids,
+    .bus        = &platform_bus,
     .probe      = starfive_gmac_driver_probe,
     .remove     = starfive_gmac_driver_remove,
     .class_ops  = &starfive_gmac_net_ops,

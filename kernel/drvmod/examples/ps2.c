@@ -13,8 +13,16 @@
 
 #include "drvmod/drvmod.h"
 
+A20_DRIVER_DESCRIPTOR(A20_DRIVER_PLACEMENT_KERNEL_MODULE,
+                      A20_DRIVER_TYPE_INPUT, "ps2", A20_DRIVER_ABI, A20_DRIVER_RES_IOPORT | A20_DRIVER_RES_IRQ,
+                      0, 1,
+                      A20_DRIVER_MATCH(A20_DRIVER_BUS_FIXED,
+                                           0x50533200UL, 0));
+
 #include "drivers/input/virtio_input.h"
 #include "drivers/char/uart.h"
+#include "drivers/bus/platform_bus.h"
+#include "drivers/core/driver_core.h"
 #include "proc/park.h"
 #include "core/lock.h"
 #include "core/string.h"
@@ -46,8 +54,6 @@ typedef struct {
     uint8_t mouse_packet[3];
     uint8_t mouse_count;
     uint8_t mouse_buttons;
-    drv_device_t kbd_dev;
-    drv_device_t mouse_dev;
 } ps2_input_t;
 
 static ps2_input_t g_ps2;
@@ -336,34 +342,48 @@ static int ps2_init_hw(void)
     return 0;
 }
 
-static int ps2_probe(drv_device_t *dev)
+static int ps2_probe(device_t *dev)
 {
     (void)dev;
     if (ps2_init_hw() != 0)
-        return -1;
-    g_ps2.kbd_dev.irq = IRQ_VECTOR_KEYBOARD;
-    if (drv_register_isr(&g_ps2.kbd_dev, ps2_isr, NULL) < 0)
-        return -1;
-    g_ps2.mouse_dev.irq = PS2_MOUSE_IRQ_VECTOR;
-    if (drv_register_isr(&g_ps2.mouse_dev, ps2_isr, NULL) < 0)
-        return -1;
+        return -ENODEV;
+    if (drv_register_isr(IRQ_VECTOR_KEYBOARD, ps2_isr, NULL) < 0)
+        return -EIO;
+    if (drv_register_isr(PS2_MOUSE_IRQ_VECTOR, ps2_isr, NULL) < 0) {
+        drv_unregister_isr(IRQ_VECTOR_KEYBOARD, NULL);
+        return -EIO;
+    }
     drv_log("[PS2] module init ok (kbd irq=%d mouse irq=%d)\n",
             IRQ_VECTOR_KEYBOARD, PS2_MOUSE_IRQ_VECTOR);
     return 0;
 }
 
-static drv_driver_t g_modinfo;
-
-uintptr_t DriverEntry(drv_driver_t **out)
+static int ps2_remove(device_t *dev)
 {
-    g_modinfo.name = "ps2";
-    g_modinfo.match_count = 1;
-    g_modinfo.match[0].bus = 0;               /* fixed/system */
-    g_modinfo.match[0].vendor = 0x50533200UL; /* "PS2" */
-    g_modinfo.match[0].device = 0;
-    g_modinfo.probe = ps2_probe;
-    g_modinfo.remove = NULL;
-    if (out)
-        *out = &g_modinfo;
+    (void)dev;
+    drv_unregister_isr(IRQ_VECTOR_KEYBOARD, NULL);
+    drv_unregister_isr(PS2_MOUSE_IRQ_VECTOR, NULL);
     return 0;
+}
+
+static const device_id_t ps2_ids[] = {
+    { .vendor = 0x50533200UL, .device = 0,
+      .subvendor = VENDOR_ANY, .subdevice = DEVICE_ANY },
+    { 0 },
+};
+
+static driver_t ps2_driver = {
+    .name = "ps2",
+    .id_table = ps2_ids,
+    .bus = &platform_bus,
+    .probe = ps2_probe,
+    .remove = ps2_remove,
+    .class_type = DEV_CLASS_NONE,
+};
+
+uintptr_t DriverEntry(void)
+{
+    int r = drv_driver_register(&ps2_driver);
+    drv_log("[PS2] driver registered in core: %d\n", r);
+    return r == 0 ? 0 : 1;
 }
