@@ -422,9 +422,16 @@ void driver_probe_all(void) {
 
 void driver_progress_class(uint32_t class_type)
 {
+    /* DRIVER_PROGRESS_LIFECYCLE_SERIALIZATION: scheduler/idle progress runs
+     * on every CPU and must not race registry growth or device binding.  Never
+     * block from the scheduler bridge; the next poll retries after the
+     * lifecycle operation completes. */
+    if (!mutex_trylock(&g_driver_core_ops))
+        return;
     for (int i = 0; i < g_device_count; i++) {
         device_t *dev = g_devices[i];
         if (dev->drv && dev->drv->class_type == class_type && dev->drv->progress)
             dev->drv->progress(dev);
     }
+    mutex_unlock(&g_driver_core_ops);
 }

@@ -64,6 +64,8 @@ check-driver-core-model: smoke-driver-lifecycle
 	@rg -q "DRIVER_CORE_CONCURRENCY_MODEL" kernel/drivers/core/driver_core.c
 	@rg -q "spin_lock_irqsave\(&g_driver_core_lock\)" kernel/drivers/core/driver_core.c
 	@rg -q "mutex_lock\(&g_driver_core_ops\)" kernel/drivers/core/driver_core.c
+	@rg -q "DRIVER_PROGRESS_LIFECYCLE_SERIALIZATION" kernel/drivers/core/driver_core.c
+	@rg -q "mutex_trylock\(&g_driver_core_ops\)" kernel/drivers/core/driver_core.c
 	@rg -q -- "return -EEXIST" kernel/drivers/core/driver_core.c
 	@rg -q "DRIVER_CORE_DYNAMIC_LIMITS" kernel/drivers/core/driver_core.c
 	@rg -q "DRIVER_IRQ_TABLE_FIXED_LIMIT" kernel/drivers/core/driver_hwapi.c
