@@ -10,6 +10,7 @@
  * lock and document it in docs/drivers/lock-order.md.
  */
 #include "drivers/net/ls2k_gmac.h"
+#include "drivers/bus/platform_bus.h"
 #include "drivers/core/driver_core.h"
 #include "drivers/core/driver_class.h"
 #include "drivers/core/driver_hwapi.h"
@@ -326,6 +327,8 @@ static int ls2k_gmac_driver_probe(device_t *dev) {
         return -1;
     }
 
+    /* Mirror the low-level global so the class ops see a live base. */
+    g_ls2k_drv.gmac = g_ls2k_gmac;
     dev->drv_priv = &g_ls2k_drv;
     kinfo("[LS2K-GMAC] Probed '%s' at 0x%lx\n", dev->name, (unsigned long)res->start);
     return 0;
@@ -363,10 +366,16 @@ static net_dev_ops_t ls2k_gmac_net_ops = {
     .poll = ls2k_gmac_class_poll,
 };
 
+static const device_id_t ls2k_gmac_ids[] = {
+    { .vendor = LS2K_GMAC_PLATFORM_VENDOR, .device = LS2K_GMAC_PLATFORM_DEVICE,
+      .subvendor = VENDOR_ANY, .subdevice = DEVICE_ANY },
+    { 0 },
+};
+
 static driver_t ls2k_gmac_driver = {
     .name       = "ls2k-gmac",
-    .id_table   = NULL,
-    .bus        = NULL,
+    .id_table   = ls2k_gmac_ids,
+    .bus        = &platform_bus,
     .probe      = ls2k_gmac_driver_probe,
     .remove     = ls2k_gmac_driver_remove,
     .class_ops  = &ls2k_gmac_net_ops,

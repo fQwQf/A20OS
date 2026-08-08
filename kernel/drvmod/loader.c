@@ -48,7 +48,7 @@ typedef struct drv_module {
     char name[DRV_MOD_MAX_NAME];
     uintptr_t base;         /* load address */
     uintptr_t entry;        /* DriverEntry address */
-    drv_driver_t *driver;   /* filled by DriverEntry */
+    int pinned;             /* set after DriverEntry registers a driver */
     size_t total_size;
     pfn_t alloc_pfn;
     uint32_t alloc_order;
@@ -198,6 +198,7 @@ typedef struct drvmod_secmap {
 } drvmod_secmap_t;
 
 #define DRV_MOD_MAX_PLACED 8
+#define DRV_MOD_MAX_RELA_SETS 8
 
 static int drvmod_sec_lookup(const drvmod_secmap_t *map, uint32_t nmap,
                              uint32_t idx, uint32_t *load_off,
@@ -746,7 +747,9 @@ static uint32_t drvmod_apply_reloc(uint32_t machine, uint8_t *shadow,
                     return 0xFFFFFFFFU;
                 }
                 uintptr_t got = load_base + got_off[i];
-                uint32_t imm = (uint32_t)((got & 0xFFF) >> 3);
+                /* ld.d/ld.w displacements are unscaled byte offsets; the
+                 * immediate carries the full low 12 bits of the slot. */
+                uint32_t imm = (uint32_t)(got & 0xFFF);
                 uint32_t insn = *(uint32_t *)(shadow + sec_load_off + r->r_offset);
                 *(uint32_t *)(shadow + sec_load_off + r->r_offset) =
                     (insn & 0xFFC003FF) | (imm << 10);
@@ -832,6 +835,11 @@ int drvmod_load(int fd, const char *name)
      * image can land on top of this buffer; kfree(buf) would then return
      * the module's own pages to the allocator and the next module (or any
      * DMA) overwrites the first one's GOT/rodata. */
+    /* The caller may have read the descriptor (or anything else) first;
+     * always read the module image from the start. */
+    if (vfs_lseek(fd, 0, SEEK_SET) < 0)
+        return -EIO;
+
     pfn_t buf_pfn = pfa_alloc(DRV_MOD_BUF_ORDER);
     printf("[DRVMOD] %s: buf phys=0x%lx order=%d\n", name,
            (unsigned long)pfn_to_phys(buf_pfn), DRV_MOD_BUF_ORDER);
@@ -899,11 +907,13 @@ int drvmod_load(int fd, const char *name)
     }
     elf_shdr_t *shstr_sh = &shdrs[eh->e_shstrndx];
     if (!drvmod_range_ok64(shstr_sh->sh_offset, shstr_sh->sh_size, got)) {
+        kerr("[DRVMOD] %s: shstr escapes file\n", name);
         drvmod_free_pages(buf_pfn, DRV_MOD_BUF_ORDER);
         return -ENOEXEC;
     }
     const char *shstr = (const char *)(buf + shstr_sh->sh_offset);
     uint32_t shstr_size = (uint32_t)shstr_sh->sh_size;
+    const a20_driver_descriptor_t *descriptor = NULL;
 
     /* ---- per-section validity: every section we touch must be entirely
      * within the file buffer, and every name lookup inside the section
@@ -929,6 +939,27 @@ int drvmod_load(int fd, const char *name)
         default:
             break;
         }
+        if (strcmp(shstr + sh->sh_name, ".a20drv") == 0) {
+            if (sh->sh_type != SHT_PROGBITS ||
+                sh->sh_size != sizeof(*descriptor)) {
+                kerr("[DRVMOD] %s: bad .a20drv section type=%u size=%llu want=%lu\n",
+                     name, sh->sh_type, (unsigned long long)sh->sh_size,
+                     sizeof(*descriptor));
+                drvmod_free_pages(buf_pfn, DRV_MOD_BUF_ORDER);
+                return -ENOEXEC;
+            }
+            descriptor = (const a20_driver_descriptor_t *)(buf + sh->sh_offset);
+        }
+    }
+
+    if (!descriptor || descriptor->magic != A20_DRIVER_DESCRIPTOR_MAGIC ||
+        descriptor->version != A20_DRIVER_DESCRIPTOR_VERSION ||
+        descriptor->placement != A20_DRIVER_PLACEMENT_KERNEL_MODULE ||
+        descriptor->type < A20_DRIVER_TYPE_RTC ||
+        descriptor->type > A20_DRIVER_TYPE_USB || !descriptor->name[0]) {
+        kerr("[DRVMOD] %s: missing or invalid kernel driver descriptor\n", name);
+        drvmod_free_pages(buf_pfn, DRV_MOD_BUF_ORDER);
+        return -ENOEXEC;
     }
 
     /* Locate sections and compute the shadow layout. Every loadable section
@@ -940,11 +971,20 @@ int drvmod_load(int fd, const char *name)
     uint32_t nsyms = 0;
     const char *strtab = NULL;
     uint32_t strtab_size = 0;
-    elf_rela_t *rela_text = NULL, *rela_data = NULL;
-    uint32_t nrela_text = 0, nrela_data = 0;
-    uint32_t rela_text_sec = 0, rela_data_sec = 0;
-    uint32_t rela_text_off = 0, rela_data_off = 0;
-    uint32_t rela_text_size = 0, rela_data_size = 0;
+    /* Every RELA section is applied against its own target section (the
+     * .rela.text/.rela.data/.rela.rodata split must not be collapsed by
+     * substring matching: ".rodata" contains ".data"). */
+    typedef struct {
+        uint32_t target_sec;
+        elf_rela_t *rela;
+        uint32_t nrela;
+    } drvmod_rela_set_t;
+    drvmod_rela_set_t rela_sets[DRV_MOD_MAX_RELA_SETS];
+    uint32_t nrela_sets = 0;
+    elf_rela_t *rela_text = NULL;
+    uint32_t nrela_text = 0;
+    uint32_t rela_text_sec = 0;
+    uint32_t rela_text_off = 0, rela_text_size = 0;
     drvmod_secmap_t secmap[DRV_MOD_MAX_PLACED];
     uint32_t nmap = 0;
 
@@ -954,6 +994,7 @@ int drvmod_load(int fd, const char *name)
         const char *n = shstr + sh->sh_name;
         if (strcmp(n, ".text") == 0) {
             if (sh->sh_type != SHT_PROGBITS) {
+                kerr("[DRVMOD] %s: .text type=%u\n", name, sh->sh_type);
                 drvmod_free_pages(buf_pfn, DRV_MOD_BUF_ORDER);
                 return -ENOEXEC;
             }
@@ -970,7 +1011,8 @@ int drvmod_load(int fd, const char *name)
             total_size = text_size;
         } else if (strcmp(n, ".data") == 0 || strcmp(n, ".rodata") == 0 ||
                    strcmp(n, ".sdata") == 0 || strcmp(n, ".bss") == 0 ||
-                   strcmp(n, ".sbss") == 0) {
+                   strcmp(n, ".sbss") == 0 || strcmp(n, ".ldata") == 0 ||
+                   strcmp(n, ".lbss") == 0) {
             if (nmap >= DRV_MOD_MAX_PLACED) {
                 kerr("[DRVMOD] %s: too many loadable sections\n", name);
                 drvmod_free_pages(buf_pfn, DRV_MOD_BUF_ORDER);
@@ -988,6 +1030,8 @@ int drvmod_load(int fd, const char *name)
         } else if (sh->sh_type == SHT_SYMTAB) {
             if (sh->sh_size % sizeof(elf_sym_t) != 0 ||
                 sh->sh_link >= nshdrs) {
+                kerr("[DRVMOD] %s: bad symtab size=%llu link=%u\n", name,
+                     (unsigned long long)sh->sh_size, sh->sh_link);
                 drvmod_free_pages(buf_pfn, DRV_MOD_BUF_ORDER);
                 return -ENOEXEC;
             }
@@ -1004,30 +1048,41 @@ int drvmod_load(int fd, const char *name)
         } else if (sh->sh_type == SHT_RELA) {
             if (sh->sh_size % sizeof(elf_rela_t) != 0 ||
                 sh->sh_info >= nshdrs) {
+                kerr("[DRVMOD] %s: bad rela\n", name);
                 drvmod_free_pages(buf_pfn, DRV_MOD_BUF_ORDER);
                 return -ENOEXEC;
             }
-            if (strstr(n, ".text") != NULL) {
-                rela_text = (elf_rela_t *)(buf + sh->sh_offset);
-                nrela_text = (uint32_t)(sh->sh_size / sizeof(elf_rela_t));
-                rela_text_sec = sh->sh_info;
-            } else if (strstr(n, ".data") != NULL) {
-                rela_data = (elf_rela_t *)(buf + sh->sh_offset);
-                nrela_data = (uint32_t)(sh->sh_size / sizeof(elf_rela_t));
-                rela_data_sec = sh->sh_info;
+            if (nrela_sets >= DRV_MOD_MAX_RELA_SETS) {
+                kerr("[DRVMOD] %s: too many rela sections\n", name);
+                drvmod_free_pages(buf_pfn, DRV_MOD_BUF_ORDER);
+                return -ENOEXEC;
             }
+            rela_sets[nrela_sets].target_sec = sh->sh_info;
+            rela_sets[nrela_sets].rela =
+                (elf_rela_t *)(buf + sh->sh_offset);
+            rela_sets[nrela_sets].nrela =
+                (uint32_t)(sh->sh_size / sizeof(elf_rela_t));
+            nrela_sets++;
         }
     }
     if (text_size == 0 || !syms || !strtab) {
         drvmod_free_pages(buf_pfn, DRV_MOD_BUF_ORDER);
         return -ENOEXEC;
     }
-    if (drvmod_sec_lookup(secmap, nmap, rela_text_sec, &rela_text_off,
-                          &rela_text_size) < 0)
-        rela_text_off = rela_text_size = 0;
-    if (drvmod_sec_lookup(secmap, nmap, rela_data_sec, &rela_data_off,
-                          &rela_data_size) < 0)
-        rela_data_off = rela_data_size = 0;
+    for (uint32_t i = 0; i < nrela_sets; i++) {
+        uint32_t tidx = rela_sets[i].target_sec;
+        if (tidx >= nshdrs)
+            continue;
+        const char *tn = shstr + shdrs[tidx].sh_name;
+        if (strcmp(tn, ".text") == 0) {
+            rela_text = rela_sets[i].rela;
+            nrela_text = rela_sets[i].nrela;
+            rela_text_sec = tidx;
+            if (drvmod_sec_lookup(secmap, nmap, tidx, &rela_text_off,
+                                  &rela_text_size) < 0)
+                rela_text_off = rela_text_size = 0;
+        }
+    }
 
     /* AArch64 and RISC-V external calls may need a veneer at the module
      * tail.  Reserve one for every external call relocation before the
@@ -1130,6 +1185,7 @@ int drvmod_load(int fd, const char *name)
     }
     total_size = (total_size + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
     if (total_size == 0 || total_size > DRV_MOD_MAX_SIZE) {
+        kerr("[DRVMOD] %s: bad total_size %u\n", name, total_size);
         if (veneer_off)
             kfree(veneer_off);
         drvmod_free_pages(buf_pfn, DRV_MOD_BUF_ORDER);
@@ -1179,7 +1235,8 @@ int drvmod_load(int fd, const char *name)
         const char *n = shstr + sh->sh_name;
         if (sh->sh_type == SHT_PROGBITS &&
             (strcmp(n, ".text") == 0 || strcmp(n, ".data") == 0 ||
-             strcmp(n, ".rodata") == 0 || strcmp(n, ".sdata") == 0)) {
+             strcmp(n, ".rodata") == 0 || strcmp(n, ".sdata") == 0 ||
+             strcmp(n, ".ldata") == 0)) {
             uint32_t off, sec_size;
             if (drvmod_sec_lookup(secmap, nmap, i, &off, &sec_size) < 0)
                 continue;
@@ -1217,52 +1274,40 @@ int drvmod_load(int fd, const char *name)
             return -ENOMEM;
         }
         memset(hi_targets, 0, nslots * sizeof(uintptr_t));
-        if (nrela_text)
-            drvmod_prescan_pcrel(rela_text, nrela_text, syms, nsyms, strtab,
-                                 strtab_size, load_base, secmap, nmap,
-                                 rela_text_off, rela_text_size,
+        for (uint32_t i = 0; i < nrela_sets; i++) {
+            uint32_t off, size;
+            if (drvmod_sec_lookup(secmap, nmap, rela_sets[i].target_sec,
+                                  &off, &size) < 0)
+                continue;
+            drvmod_prescan_pcrel(rela_sets[i].rela, rela_sets[i].nrela,
+                                 syms, nsyms, strtab, strtab_size,
+                                 load_base, secmap, nmap, off, size,
                                  hi_targets, nslots);
-        if (nrela_data)
-            drvmod_prescan_pcrel(rela_data, nrela_data, syms, nsyms, strtab,
-                                 strtab_size, load_base, secmap, nmap,
-                                 rela_data_off, rela_data_size,
-                                 hi_targets, nslots);
+        }
     }
 
-    /* Apply relocations on the shadow. */
-    if (nrela_text &&
-        drvmod_apply_reloc(machine, shadow, load_base, secmap, nmap,
-                           strtab, strtab_size, syms, nsyms,
-                           rela_text, nrela_text, rela_text_off,
-                           rela_text_size, hi_targets, nslots,
-                           veneer_off, got_off) == 0xFFFFFFFFU) {
-        if (hi_targets)
-            kfree(hi_targets);
-        if (veneer_off)
-            kfree(veneer_off);
-        if (got_off)
-            kfree(got_off);
-        drvmod_free_pages(alloc_pfn, alloc_order);
-        drvmod_free_pages(shadow_pfn, alloc_order);
-        drvmod_free_pages(buf_pfn, DRV_MOD_BUF_ORDER);
-        return -EINVAL;
-    }
-    if (nrela_data &&
-        drvmod_apply_reloc(machine, shadow, load_base, secmap, nmap,
-                           strtab, strtab_size, syms, nsyms,
-                           rela_data, nrela_data, rela_data_off,
-                           rela_data_size, hi_targets, nslots,
-                           veneer_off, got_off) == 0xFFFFFFFFU) {
-        if (hi_targets)
-            kfree(hi_targets);
-        if (veneer_off)
-            kfree(veneer_off);
-        if (got_off)
-            kfree(got_off);
-        drvmod_free_pages(alloc_pfn, alloc_order);
-        drvmod_free_pages(shadow_pfn, alloc_order);
-        drvmod_free_pages(buf_pfn, DRV_MOD_BUF_ORDER);
-        return -EINVAL;
+    /* Apply relocations on the shadow, one pass per RELA section. */
+    for (uint32_t i = 0; i < nrela_sets; i++) {
+        uint32_t off, size;
+        if (drvmod_sec_lookup(secmap, nmap, rela_sets[i].target_sec,
+                              &off, &size) < 0)
+            continue;
+        if (drvmod_apply_reloc(machine, shadow, load_base, secmap, nmap,
+                               strtab, strtab_size, syms, nsyms,
+                               rela_sets[i].rela, rela_sets[i].nrela,
+                               off, size, hi_targets, nslots,
+                               veneer_off, got_off) == 0xFFFFFFFFU) {
+            if (hi_targets)
+                kfree(hi_targets);
+            if (veneer_off)
+                kfree(veneer_off);
+            if (got_off)
+                kfree(got_off);
+            drvmod_free_pages(alloc_pfn, alloc_order);
+            drvmod_free_pages(shadow_pfn, alloc_order);
+            drvmod_free_pages(buf_pfn, DRV_MOD_BUF_ORDER);
+            return -EINVAL;
+        }
     }
     /* Resolve DriverEntry before installing pages: it must be a global
      * symbol inside the placed .text section. */
@@ -1333,7 +1378,7 @@ int drvmod_unload(int id)
     if (id < 0 || id >= DRV_MOD_MAX_MODULES || !drv_modules[id].used)
         return -ENOENT;
     drv_module_t *m = &drv_modules[id];
-    if (m->driver)
+    if (m->pinned)
         return -EBUSY;
     kdebug("[DRVMOD] unload '%s'\n", m->name);
     drvmod_free_pages(m->alloc_pfn, m->alloc_order);
@@ -1341,65 +1386,29 @@ int drvmod_unload(int id)
     return 0;
 }
 
+/* Run DriverEntry for every loaded module.  Each module registers its
+ * unified driver_t with the driver core; binding happens through the core's
+ * normal match/probe path.  Modules that registered a driver are pinned.
+ * Pinned modules are skipped on later scans (e.g. the runtime DriverStore
+ * scan must not re-run an early module's DriverEntry). */
 void drvmod_init_all(void)
 {
     for (int i = 0; i < DRV_MOD_MAX_MODULES; i++) {
         drv_module_t *m = &drv_modules[i];
         if (!m->used)
             continue;
+        if (m->pinned)
+            continue;
         if (m->entry) {
-            uintptr_t (*DriverEntry)(drv_driver_t **) =
-                (uintptr_t (*)(drv_driver_t **))m->entry;
-            drv_driver_t *drv = NULL;
+            uintptr_t (*DriverEntry)(void) = (uintptr_t (*)(void))m->entry;
             arch_flush_icache_range((void *)m->base, m->total_size);
             arch_mb();
-            uintptr_t r = DriverEntry(&drv);
-            m->driver = r == 0 ? drv : NULL;
+            uintptr_t r = DriverEntry();
             if (r == 0) {
+                m->pinned = 1;
                 kdebug("[DRVMOD] '%s' DriverEntry ok\n", m->name);
             } else {
                 printf("[DRVMOD] '%s' DriverEntry failed\n", m->name);
-            }
-        }
-    }
-}
-
-/* ---- binding ---- */
-
-/* Framework device table (framework.c). */
-extern int drv_framework_device_count(void);
-extern drv_device_t *drv_framework_device_at(int idx);
-
-void drvmod_bind_all(void)
-{
-    for (int i = 0; i < DRV_MOD_MAX_MODULES; i++) {
-        drv_module_t *m = &drv_modules[i];
-        if (!m->used || !m->driver || !m->driver->probe)
-            continue;
-        int ndev = drv_framework_device_count();
-        for (int d = 0; d < ndev; d++) {
-            drv_device_t *dev = drv_framework_device_at(d);
-            if (!dev || dev->driver)
-                continue;
-            for (uint32_t j = 0; j < m->driver->match_count; j++) {
-                const drv_device_id_t *id = &m->driver->match[j];
-                if (id->bus != dev->bus)
-                    continue;
-                if (id->vendor != 0xFFFFFFFFU && id->vendor != dev->vendor)
-                    continue;
-                if (id->device != 0xFFFFFFFFU && id->device != dev->device)
-                    continue;
-                dev->driver = m->driver;
-                int r = m->driver->probe(dev);
-                if (r == 0) {
-                    m->driver = dev->driver;   /* keeps unload guard */
-                    kdebug("[DRVMOD] '%s' bound %s\n", m->name, dev->name);
-                } else {
-                    dev->driver = NULL;
-                    kdebug("[DRVMOD] '%s' probe %s failed: %d\n",
-                           m->name, dev->name, r);
-                }
-                break;
             }
         }
     }

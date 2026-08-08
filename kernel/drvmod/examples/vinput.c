@@ -16,6 +16,12 @@
 
 #define DRV_ENV_DRVMOD 1
 #include "drvmod/drvmod.h"
+
+A20_DRIVER_DESCRIPTOR(A20_DRIVER_PLACEMENT_KERNEL_MODULE,
+                      A20_DRIVER_TYPE_INPUT, "virtio-input", A20_DRIVER_ABI, A20_DRIVER_RES_MMIO | A20_DRIVER_RES_IRQ,
+                      0, 2,
+                      A20_DRIVER_MATCH(A20_DRIVER_BUS_MMIO, 0, 18),
+                      A20_DRIVER_MATCH(A20_DRIVER_BUS_PCI, 0x1AF4, 0x1052));
 #include "drivers/dual/virtio_mmio.h"
 #include "drivers/input/virtio_input.h"
 
@@ -462,18 +468,9 @@ static driver_t vinput_driver = {
     .class_type = DEV_CLASS_INPUT,
 };
 
-/* Pins the module while the driver is registered in the unified core. */
-static drv_driver_t g_modinfo;
-
-uintptr_t DriverEntry(drv_driver_t **out)
+uintptr_t DriverEntry(void)
 {
     int r = drv_driver_register(&vinput_driver);
     drv_log("[VINPUT] driver registered in core: %d\n", r);
-    if (out) {
-        if (r == 0)
-            *out = &g_modinfo;
-        else
-            *out = NULL;
-    }
-    return 0;
+    return r == 0 ? 0 : 1;
 }

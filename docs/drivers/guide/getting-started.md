@@ -120,7 +120,7 @@ static int acme_irq(int irq, void *priv){
     acme_priv_t *p = priv;
     if (!p)
         return 0;
-    /* 读取状态确认中断属于本设备，清 W1C 位，只推进有界数量的完成项。 */
+    /* 读取状态确认中断属于本设备，清 W1C 位，只推进有界数量的完成项。*/
     (void)irq;
     return 1;
 }
@@ -154,8 +154,8 @@ static int acme_send(device_t *dev, const void *packet, size_t length){
         return -EINVAL;
 
     uint64_t flags = spin_lock_irqsave(&p->lock);
-    /* 回收已完成项；队列满时解锁并返回 -EAGAIN。 */
-    /* 复制/同步 packet，填写 descriptor，屏障后写 doorbell。 */
+    /* 回收已完成项；队列满时解锁并返回 -EAGAIN。*/
+    /* 复制/同步 packet，填写 descriptor，屏障后写 doorbell。*/
     spin_unlock_irqrestore(&p->lock, flags);
     return (int)length;
 }
@@ -166,7 +166,7 @@ static int acme_recv(device_t *dev, void *buffer, size_t capacity){
         return -ENODEV;
     if (!buffer || capacity == 0)
         return -EINVAL;
-    /* 无完整帧返回 0；成功返回一帧字节数。 */
+    /* 无完整帧返回 0；成功返回一帧字节数。*/
     return 0;
 }
 
@@ -214,7 +214,7 @@ static int acme_probe(device_t *dev){
     p->regs = (uintptr_t)bar0->start;
     p->irq = -1;
 
-    /* 先复位并验证版本/能力；每个等待同时用 tick 和迭代上限。 */
+    /* 先复位并验证版本/能力；每个等待同时用 tick 和迭代上限。*/
     acme_write(p, ACME_REG_CONTROL, 0);
     if (acme_read(p, ACME_REG_STATUS) == 0xffffffffU) {
         ret = -ENODEV;
@@ -227,11 +227,11 @@ static int acme_probe(device_t *dev){
         ret = -ENOMEM;
         goto fail_priv;
     }
-    /* 验证 ring_dma 满足设备地址位宽和对齐，再写 DMA 寄存器。 */
+    /* 验证 ring_dma 满足设备地址位宽和对齐，再写 DMA 寄存器。*/
 
     irq = device_get_resource(dev, RES_IRQ, 0);
     if (!irq) {
-        ret = -ENODEV; /* 本模板没有轮询进展函数，因此 IRQ 是必需资源。 */
+        ret = -ENODEV; /* 本模板没有轮询进展函数，因此 IRQ 是必需资源。*/
         goto fail_dma;
     }
     p->irq = (int)irq->start;
@@ -240,14 +240,14 @@ static int acme_probe(device_t *dev){
         goto fail_dma;
     p->irq_registered = 1;
 
-    /* 清 pending 状态，启动 RX/TX，最后才发布实例。 */
+    /* 清 pending 状态，启动 RX/TX，最后才发布实例。*/
     acme_write(p, ACME_REG_CONTROL, ACME_CONTROL_ENABLE);
     dev->drv_priv = p;
     p->ready = 1;
     return 0;
 
 fail_dma:
-    /* 此处硬件尚未启动；若已经启动，必须先停 DMA/复位。 */
+    /* 此处硬件尚未启动；若已经启动，必须先停 DMA/复位。*/
     dma_free_coherent(p->ring, p->ring_size, p->ring_dma);
 fail_priv:
     kfree(p);
@@ -276,7 +276,7 @@ static int acme_remove(device_t *dev){
     p->ready = 0;
     spin_unlock_irqrestore(&p->lock, flags);
 
-    /* 屏蔽设备 IRQ，停止队列并等待 DMA 有界结束。 */
+    /* 屏蔽设备 IRQ，停止队列并等待 DMA 有界结束。*/
     acme_write(p, ACME_REG_CONTROL, 0);
     if (p->irq_registered)
         free_irq((uint32_t)p->irq, p);

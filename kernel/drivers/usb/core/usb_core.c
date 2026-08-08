@@ -15,6 +15,7 @@
 #include "drivers/core/driver_core.h"
 #include "drivers/core/driver_hwapi.h"
 #include "drivers/core/driver_register.h"
+#include "core/timer.h"
 #include "mm/slab.h"
 #include "core/errno.h"
 
@@ -82,13 +83,41 @@ static int usb_publish_interfaces(usb_device_t *udev)
         d->plat_data = iface;
         d->drv_priv = NULL;
 
-        if (device_register(d) < 0) {
+        if (device_hotplug(d, BUS_EVENT_ADD) < 0) {
             kfree(hwid);
             kfree(d);
             iface->device = NULL;
         }
     }
     return 0;
+}
+
+static void usb_disconnect_port(usb_hcd_t *hcd, unsigned port)
+{
+    if (!hcd || port == 0 || port > hcd->max_ports || !hcd->port_devices)
+        return;
+    usb_device_t *udev = hcd->port_devices[port - 1];
+    if (!udev)
+        return;
+
+    /* Remove class devices before their interface and endpoint storage. */
+    for (uint8_t i = 0; i < udev->iface_count; i++) {
+        usb_interface_t *iface = &udev->ifaces[i];
+        if (iface->device) {
+            device_hotplug(iface->device, BUS_EVENT_REMOVE);
+            kfree((void *)iface->device->hardware_id);
+            kfree(iface->device);
+            iface->device = NULL;
+        }
+        kfree(iface->eps);
+    }
+    if (hcd->ops && hcd->ops->abort_slot)
+        hcd->ops->abort_slot(hcd, udev->slot);
+    kfree(udev->ifaces);
+    kfree(udev);
+    hcd->port_devices[port - 1] = NULL;
+    hcd->port_state[port - 1] = 0;
+    kinfo("[USB] port %u disconnected\n", port);
 }
 
 /* ------------------------------------------------------------------ */
@@ -256,6 +285,21 @@ int usb_core_enumerate_port(usb_hcd_t *hcd, unsigned port)
         kfree(udev);
         return r;
     }
+    if (!hcd->port_devices || port == 0 || port > hcd->max_ports) {
+        for (uint8_t i = 0; i < udev->iface_count; i++) {
+            if (udev->ifaces[i].device) {
+                device_hotplug(udev->ifaces[i].device, BUS_EVENT_REMOVE);
+                kfree((void *)udev->ifaces[i].device->hardware_id);
+                kfree(udev->ifaces[i].device);
+            }
+            kfree(udev->ifaces[i].eps);
+        }
+        kfree(udev->ifaces);
+        kfree(udev);
+        return -EINVAL;
+    }
+    hcd->port_devices[port - 1] = udev;
+    hcd->port_state[port - 1] = 1;
     return 0;
 }
 
@@ -318,9 +362,21 @@ int usb_core_register_hcd(usb_hcd_t *hcd)
     hcd->port_state = kcalloc(hcd->max_ports ? hcd->max_ports : 1, 1);
     if (!hcd->port_state)
         return -ENOMEM;
+    hcd->port_devices = kcalloc(hcd->max_ports ? hcd->max_ports : 1,
+                                sizeof(*hcd->port_devices));
+    if (!hcd->port_devices) {
+        kfree(hcd->port_state);
+        hcd->port_state = NULL;
+        return -ENOMEM;
+    }
     int r = hcd->ops->start(hcd);
-    if (r)
+    if (r) {
+        kfree(hcd->port_devices);
+        kfree(hcd->port_state);
+        hcd->port_devices = NULL;
+        hcd->port_state = NULL;
         return r;
+    }
     if (g_hcd_count < USB_MAX_HCDS)
         g_hcds[g_hcd_count++] = hcd;
     return 0;
@@ -336,8 +392,10 @@ void usb_core_unregister_hcd(usb_hcd_t *hcd)
             break;
         }
     }
-    if (hcd->ops && hcd->ops->abort_slot)
-        hcd->ops->abort_slot(hcd, 0);
+    for (unsigned port = 1; port <= hcd->max_ports; port++)
+        usb_disconnect_port(hcd, port);
+    kfree(hcd->port_devices);
+    hcd->port_devices = NULL;
     kfree(hcd->port_state);
     hcd->port_state = NULL;
 }
@@ -352,18 +410,37 @@ void usb_core_scan(void)
 {
     for (int i = 0; i < g_hcd_count; i++) {
         usb_hcd_t *hcd = g_hcds[i];
+        if (hcd->ops->poll)
+            hcd->ops->poll(hcd);
         for (unsigned port = 1; port <= hcd->max_ports; port++) {
-            if (hcd->port_state && hcd->port_state[port - 1])
-                continue;
             /* Port connected?  Ask the HCD (MMIO read). */
-            if (!hcd->ops->port_connected || !hcd->ops->port_connected(hcd, port))
+            int connected = hcd->ops->port_connected &&
+                            hcd->ops->port_connected(hcd, port);
+            if (!connected) {
+                if (hcd->port_devices && hcd->port_devices[port - 1])
+                    usb_disconnect_port(hcd, port);
                 continue;
-            hcd->port_state[port - 1] = 1;
+            }
+            if (hcd->port_devices && hcd->port_devices[port - 1])
+                continue;
             int r = usb_core_enumerate_port(hcd, port);
             if (r)
                 kerr("[USB] port %u enumeration failed: %d\n", port, r);
         }
     }
+}
+
+void usb_core_poll(void)
+{
+    static uint64_t last_poll;
+    uint64_t now = timer_get_ticks();
+    uint64_t interval = clock_ticks_per_sec() / 4;
+    if (!interval)
+        interval = 1;
+    if (now - last_poll < interval)
+        return;
+    last_poll = now;
+    usb_core_scan();
 }
 
 void usb_core_init(void)
