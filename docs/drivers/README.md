@@ -1,6 +1,6 @@
 # A20OS 驱动文档
 
-如何为 A20OS 添加一个驱动：从读懂硬件手册，到实现可编译、可枚举、可绑定、能清理的驱动；以及当前哪些驱动已迁移为可加载模块、哪些受启动顺序/平台约束保持内建。
+如何为 A20OS 添加一个驱动：从读懂硬件手册，到实现可编译、可枚举、可绑定、能清理的驱动；以及 generic 的模块优先与 embedded 的全内建部署策略。
 
 通用实现位于 `kernel/drivers/`，板级适配位于 `kernel/platform/`，公共头文件位于 `kernel/include/drivers/`，可加载驱动模块位于 `kernel/drvmod/examples/`。
 
@@ -12,7 +12,9 @@
 |---|---|
 | [从零开发第一个驱动](guide/getting-started.md) | 从 PCI 网卡模板入手，走通创建、注册、构建和调试 |
 | [可安装内核驱动](guide/kernel-modules.md) | 可加载内核模块（drvmod）、框架导出 API、DriverStore 与迁移状态 |
+| [驱动部署 Profile](guide/deployment-profiles.md) | generic 模块优先、embedded 全内建、Early/Runtime DriverStore |
 | [核心设备与驱动模型](guide/core-model.md) | `device_t`、`driver_t`、`bus_type_t` 与 probe/remove 生命周期 |
+| [热插拔与即插即用](guide/hotplug-and-pnp.md) | USB/PCI 运行期发现、ADD/REMOVE 生命周期与驱动编写要求 |
 | [设备类接口](guide/device-classes.md) | 各类操作、单位、返回值和阻塞语义 |
 | [总线与平台](guide/bus-and-platform.md) | platform device、板级资源、MMIO/IRQ |
 | [PCI 与 VirtIO](guide/pci-and-virtio.md) | PCI ID、BAR、ECAM、VirtIO transport |
@@ -23,7 +25,7 @@
 
 | 文档 | 说明 |
 |---|---|
-| [输入子系统](classes/input.md) | `/dev/event0` mux、vinput.drv 模块、evdev ioctl 面、双驻留协调 |
+| [输入子系统](classes/input.md) | `/dev/event0` mux、vinput.a20drv 模块、evdev ioctl 面、双驻留协调 |
 | [Display/Framebuffer](classes/display.md) | framebuffer 与 GPU 驱动 |
 | [音频子系统](classes/audio.md) | 音频类、UAPI 与 Intel HDA PCM |
 | [USB 子系统设计](classes/usb-design.md) | USB 协议栈与 HID/存储类 |

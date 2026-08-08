@@ -306,6 +306,10 @@ int64_t sys_inotify_add_watch(int fd, const char *pathname, uint32_t mask);
 int64_t sys_inotify_rm_watch(int fd, int wd);
 int64_t sys_get_robust_list(int pid, void *head_ptr, size_t *len_ptr);
 
+/* A20OS extensions: channel IPC bridge (sys_a20_bridge.c). */
+int64_t sys_a20_channel_pair(const linux_syscall_args_t *args);
+int64_t sys_a20_registry_client_fd(const linux_syscall_args_t *args);
+
 #endif /* LINUX_SYSCALL_DECLARE_PROTOTYPES */
 
 #endif /* _LINUX_SYSCALL_IMPL_H */

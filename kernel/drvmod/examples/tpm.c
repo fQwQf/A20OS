@@ -10,12 +10,21 @@
 
 #include "drvmod/drvmod.h"
 
+A20_DRIVER_DESCRIPTOR(A20_DRIVER_PLACEMENT_KERNEL_MODULE,
+                      A20_DRIVER_TYPE_SECURITY, "tpm2-tis", A20_DRIVER_ABI, A20_DRIVER_RES_MMIO | A20_DRIVER_RES_IRQ,
+                      0, 1,
+                      A20_DRIVER_MATCH(A20_DRIVER_BUS_FIXED,
+                                           0x54504D00UL, 0));
+
 #include "core/klog.h"
 #include "core/string.h"
 #include "core/timer.h"
 #include "core/lock.h"
 #include "core/types.h"
 #include "core/defs.h"
+#include "core/errno.h"
+#include "drivers/core/driver_core.h"
+#include "drivers/bus/platform_bus.h"
 #include "drivers/core/driver_hwapi.h"
 
 #if defined(CONFIG_X86_64)
@@ -323,7 +332,7 @@ static int tpm_tis_init(uintptr_t base, uint64_t phys) {
 
 
 
-static int tpm_probe(drv_device_t *dev)
+static int tpm_probe(device_t *dev)
 {
     (void)dev;
 #if defined(CONFIG_X86_64)
@@ -336,18 +345,23 @@ static int tpm_probe(drv_device_t *dev)
 #endif
 }
 
-static drv_driver_t g_modinfo;
+static const device_id_t tpm_ids[] = {
+    { .vendor = 0x54504D00UL, .device = 0,
+      .subvendor = VENDOR_ANY, .subdevice = DEVICE_ANY },
+    { 0 },
+};
 
-uintptr_t DriverEntry(drv_driver_t **out)
+static driver_t tpm_driver = {
+    .name = "tpm2-tis",
+    .id_table = tpm_ids,
+    .bus = &platform_bus,
+    .probe = tpm_probe,
+    .class_type = DEV_CLASS_NONE,
+};
+
+uintptr_t DriverEntry(void)
 {
-    g_modinfo.name = "tpm";
-    g_modinfo.match_count = 1;
-    g_modinfo.match[0].bus = 0;               /* fixed/system */
-    g_modinfo.match[0].vendor = 0x54504D00UL; /* "TPM\0" */
-    g_modinfo.match[0].device = 0;
-    g_modinfo.probe = tpm_probe;
-    g_modinfo.remove = NULL;
-    if (out)
-        *out = &g_modinfo;
-    return 0;
+    int r = drv_driver_register(&tpm_driver);
+    drv_log("[TPM] driver registered in core: %d\n", r);
+    return r == 0 ? 0 : 1;
 }

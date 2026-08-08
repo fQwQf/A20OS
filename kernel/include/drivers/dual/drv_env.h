@@ -61,15 +61,13 @@ static inline void drv_mmio_unmap(uint64_t va, uint64_t size)
 
 /* Module placement: the window goes through the framework's validated
  * mapping (drv_map_mmio) and is plain volatile memory thereafter.  The
- * environment device is module-private (one per translation unit). */
-static drv_device_t drvmod_env_dev;
+ * environment device token is module-private (one per translation unit). */
+static char drvmod_env_dev;
 
 static inline uint64_t drv_mmio_map(uint64_t phys, uint64_t size, uint32_t prot)
 {
     (void)prot;
-    if (drv_map_mmio(&drvmod_env_dev, (uintptr_t)phys, (size_t)size) < 0)
-        return 0;
-    return (uint64_t)(uintptr_t)drvmod_env_dev.mmio_va;
+    return (uint64_t)drv_map_mmio(&drvmod_env_dev, (uintptr_t)phys, (size_t)size);
 }
 
 static inline void drv_mmio_unmap(uint64_t va, uint64_t size)
