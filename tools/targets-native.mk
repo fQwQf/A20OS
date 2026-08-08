@@ -22,7 +22,7 @@ NATIVE_CFLAGS_x86_64      := -m64 -mno-red-zone -fno-pic -fno-pie
 NATIVE_CFLAGS_arm32       := -march=armv7-a -marm -mfpu=vfpv3-d16 -mfloat-abi=hard -fno-pic -fno-builtin
 NATIVE_CFLAGS_riscv32     := -march=rv32imafdc -mabi=ilp32d -mcmodel=medany -fno-builtin
 NATIVE_CFLAGS_ppc64le     := -m64 -mcpu=power8 -mabi=elfv2 -fno-pic -mno-vsx -mno-altivec
-NATIVE_CFLAGS := $(NATIVE_CFLAGS_$(ARCH))
+NATIVE_CFLAGS := $(NATIVE_CFLAGS_$(ARCH)) -std=gnu99
 NATIVE_LIBS_arm32 := -Wl,--start-group -lgcc -Wl,--end-group
 NATIVE_LIBS := $(if $(NATIVE_LIBS_$(ARCH)),$(NATIVE_LIBS_$(ARCH)),-lgcc)
 NATIVE_ARCH_SRC_arm32 := user/liba20rt/a20_arm_rt.c
@@ -433,5 +433,4 @@ $(NATIVE_RTCDD_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) 
 	$(call NATIVE_RTCD_RECIPE,$(NATIVE_CC),$(NATIVE_CFLAGS),$(NATIVE_CRT0),user/svc/rtcd.c,$@)
 
 native-rtcd-arch: $(NATIVE_RTCD_BIN) $(NATIVE_RTCDD_BIN)
-
 
