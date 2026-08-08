@@ -1,5 +1,6 @@
 #include "fs/ext4.h"
 #include "fs/ext4_internal.h"
+#include "fs/vfs/stat_perm.h"
 #include "fs/file.h"
 #include "fs/vfs.h"
 #include "fs/block_cache.h"
@@ -203,9 +204,10 @@ int ext4_dir_update_entry(ext4_sb_info_t *sb, ext4_inode_t *di, uint64_t *dsz,
 }
 
 
-int ext4_inode_remove(ext4_sb_info_t *sb, uint32_t dir_ino __attribute__((unused)),
-                              ext4_inode_t *di, const char *name, uint32_t ino,
-                              vnode_t **deferred_put) {
+int ext4_inode_remove(ext4_sb_info_t *sb, mount_t *mnt,
+                               uint32_t dir_ino __attribute__((unused)),
+                               ext4_inode_t *di, const char *name, uint32_t ino,
+                               vnode_t **deferred_put) {
     int r = ext4_dir_remove(sb, di, ext4_inode_size(di), name);
     if (r < 0) return r;
 
@@ -240,6 +242,7 @@ int ext4_inode_remove(ext4_sb_info_t *sb, uint32_t dir_ino __attribute__((unused
     memset(&victim, 0, sizeof(victim));
     victim.i_dtime = 1;
     ext4_write_inode(sb, ino, &victim);
+    vfs_drop_time_meta_identity(mnt, ino);
     ext4_free_inode(sb, ino);
     return 0;
 }
@@ -329,6 +332,7 @@ void ext4_release_vn(vnode_t *vn) {
             victim.i_dtime = 1;
             ext4_write_inode(sb, p->inode_num, &victim);
         }
+        vfs_drop_time_meta_identity(vn->mnt, p->inode_num);
         ext4_free_inode(sb, p->inode_num);
         mutex_unlock(&sb->metadata_lock);
     }
@@ -565,7 +569,8 @@ int ext4_vn_unlink_unlocked(vnode_t *dir, const char *name, vnode_t **deferred_p
     if (r < 0) return r;
     if (ft == EXT4_FT_DIR) return -EISDIR;
 
-    return ext4_inode_remove(p->sb, p->inode_num, &di, name, child_ino, deferred_put);
+    return ext4_inode_remove(p->sb, dir->mnt, p->inode_num, &di, name,
+                             child_ino, deferred_put);
 }
 
 
@@ -611,7 +616,8 @@ int ext4_vn_rmdir_unlocked(vnode_t *dir, const char *name, vnode_t **deferred_pu
     r = ext4_dir_empty(p->sb, &cdi, ext4_inode_size(&cdi));
     if (r < 0) return r;
 
-    return ext4_inode_remove(p->sb, p->inode_num, &di, name, child_ino, deferred_put);
+    return ext4_inode_remove(p->sb, dir->mnt, p->inode_num, &di, name,
+                             child_ino, deferred_put);
 }
 
 
@@ -679,7 +685,8 @@ int ext4_vn_rename_unlocked(vnode_t *old_dir, const char *old_name,
 
     /* Check if target exists — if so, remove it */
     if (tgt_exists) {
-        r = ext4_inode_remove(np->sb, np->inode_num, &ndi, new_name, tgt_ino, deferred_put);
+        r = ext4_inode_remove(np->sb, new_dir->mnt, np->inode_num, &ndi,
+                              new_name, tgt_ino, deferred_put);
         if (r < 0) return r;
         /* Re-read ndi after modification */
         if (ext4_read_inode(np->sb, np->inode_num, &ndi) < 0) return -EIO;

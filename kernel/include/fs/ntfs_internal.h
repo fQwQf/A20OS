@@ -84,7 +84,6 @@ typedef struct ntfs_vnode_priv {
     uint64_t   mft_index;
     uint32_t   seq;
     int        is_dir;
-    int        unlinked;
     /* Cached $DATA location (regular files only). */
     int        data_resident;
     uint32_t   data_res_off;    /* offset within MFT record */

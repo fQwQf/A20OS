@@ -76,8 +76,10 @@ int mm_fork_clone_page(mm_struct_t *child, mm_struct_t *parent, vaddr_t va,
         return r;
     }
 
-    if (!shared && (*src & (PTE_W | PTE_COW)))
+    if (!shared && (*src & (PTE_W | PTE_COW))) {
         *src = arch_pte_leaf(pa, flags);
+        mm_tlb_note_change(parent, base, size);
+    }
     child->rss += size / PAGE_SIZE;
     return 0;
 }
@@ -155,8 +157,10 @@ int mm_fork_clone_leaf(mm_struct_t *child, mm_struct_t *parent,
         return r;
     }
 
-    if (!shared && (*src_pte & (PTE_W | PTE_COW)))
+    if (!shared && (*src_pte & (PTE_W | PTE_COW))) {
         *src_pte = arch_pte_leaf(pa, flags);
+        mm_tlb_note_change(parent, va, leaf_size);
+    }
     child->rss += vm_pt_level_size(level) / PAGE_SIZE;
     return 0;
 }

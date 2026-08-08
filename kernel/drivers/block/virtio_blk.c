@@ -12,6 +12,7 @@
 #include "core/defs.h"
 #include "core/consts.h"
 #include "core/lock.h"
+#include "core/perf.h"
 #include "core/sync.h"
 #include "core/timer.h"
 #include "proc/proc.h"
@@ -236,9 +237,12 @@ static void virtio_blk_complete_used_locked(virtio_blk_inst_t *inst,
     virtio_blk_t *blk = &inst->blk;
     virtq_used_t *used = blk->used;
 
+    a20_perf_count(A20_PERF_VIRTIO_BLK_USED_CHECKS);
     arch_dma_sync_for_cpu(&used->idx, sizeof(uint16_t));
     uint16_t used_idx = ((volatile virtq_used_t *)used)->idx;
+    uint64_t completions = 0;
     while (blk->last_used != used_idx) {
+        completions++;
         uint16_t ring_idx = blk->last_used % VIRTIO_QUEUE_SIZE;
         arch_dma_sync_for_cpu(&used->ring[ring_idx], sizeof(virtq_used_elem_t));
         uint16_t head = (uint16_t)used->ring[ring_idx].id;
@@ -257,13 +261,16 @@ static void virtio_blk_complete_used_locked(virtio_blk_inst_t *inst,
 
         blk->last_used++;
     }
+    a20_perf_add(A20_PERF_VIRTIO_BLK_COMPLETIONS, completions);
 }
 
 static void virtio_blk_poll_inst(virtio_blk_inst_t *inst) {
+    a20_perf_count(A20_PERF_VIRTIO_BLK_POLLS);
     if (!inst || !inst->blk.valid)
         return;
     if (__atomic_load_n(&inst->in_flight, __ATOMIC_ACQUIRE) <= 0)
         return;
+    a20_perf_count(A20_PERF_VIRTIO_BLK_ACTIVE_POLLS);
     proc_wake_q_t wake_q;
     proc_wake_q_init(&wake_q);
     /* LOCK_ORDER: acquire inst->lock (innermost) for completion polling. */

@@ -98,8 +98,18 @@ common_cflags=(
     "$output_dir/objects/shebang_exec_probe.o" \
     "$libc_copy"
 
+"$cc" "${common_cflags[@]}" -fPIE -c \
+    "$source_dir/stage9_perf_probe.c" \
+    -o "$output_dir/objects/stage9_perf_probe.o"
+"$cc" -nostdlib -pie -Wl,-z,now -Wl,--allow-shlib-undefined \
+    -Wl,--dynamic-linker="$dynamic_loader" \
+    -o "$output_dir/stage9-perf-probe" \
+    "$output_dir/objects/probe_start.o" \
+    "$output_dir/objects/stage9_perf_probe.o" \
+    "$libc_copy"
+
 chmod 0755 "$output_dir/cwd-probe" "$output_dir/exec-pages-probe" \
-    "$output_dir/shebang-probe"
+    "$output_dir/shebang-probe" "$output_dir/stage9-perf-probe"
 chmod 0644 "$output_dir/liba20probe.so"
 
 echo "[buildstorm-probe] built $arch probes in $output_dir"
