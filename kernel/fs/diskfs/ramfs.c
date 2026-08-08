@@ -1,6 +1,7 @@
 #include "fs/ramfs.h"
 #include "fs/file.h"
 #include "fs/rootfs_overlay.h"
+#include "fs/vfs/stat_perm.h"
 #include "mm/mm.h"
 #include "core/string.h"
 #include "core/stdio.h"
@@ -194,11 +195,14 @@ static void ramfs_free_inode(ramfs_inode_t *inode) {
     memset(inode, 0, sizeof(*inode));
 }
 
-static void ramfs_maybe_free_unlinked_inode(ramfs_inode_t *inode) {
+static void ramfs_maybe_free_unlinked_inode(mount_t *mnt,
+                                             ramfs_inode_t *inode) {
     if (!inode || inode == &g_inode_table[0])
         return;
-    if (inode->nlink == 0 && inode->ref_count <= 1)
+    if (inode->nlink == 0 && inode->ref_count <= 1) {
+        vfs_drop_time_meta_identity(mnt, (uint64_t)inode->inum);
         ramfs_free_inode(inode);
+    }
 }
 
 static ramfs_dir_entry_t *ramfs_dir_entries(ramfs_inode_t *dir) {
@@ -492,7 +496,7 @@ static void ramfs_vnode_release(vnode_t *vn) {
     mutex_lock(&g_ramfs_meta_lock);
     if (inode && inode->ref_count > 1) {
         inode->ref_count--;
-        ramfs_maybe_free_unlinked_inode(inode);
+        ramfs_maybe_free_unlinked_inode(vn->mnt, inode);
     }
     mutex_unlock(&g_ramfs_meta_lock);
     kfree(vn);
@@ -509,7 +513,7 @@ static int ramfs_vnode_unlink_locked(vnode_t *dir, const char *name) {
             ramfs_inode_t *victim = ramfs_find_inode_by_inum(entries[i].inum);
             if (victim && victim->nlink > 0) {
                 victim->nlink--;
-                ramfs_maybe_free_unlinked_inode(victim);
+                ramfs_maybe_free_unlinked_inode(dir->mnt, victim);
             }
             return 0;
         }
@@ -698,7 +702,7 @@ static int ramfs_vnode_rename_locked(vnode_t *old_dir, const char *old_name,
             new_dinode->nlink--;
         if (victim->nlink > 0)
             victim->nlink--;
-        ramfs_maybe_free_unlinked_inode(victim);
+        ramfs_maybe_free_unlinked_inode(new_dir->mnt, victim);
     }
 
     if (moved->type == FT_DIRECTORY) {
@@ -747,7 +751,7 @@ static int ramfs_vnode_rmdir_locked(vnode_t *dir, const char *name) {
             if (dinode->nlink > 0)
                 dinode->nlink--;
             child->nlink = 0;
-            ramfs_maybe_free_unlinked_inode(child);
+            ramfs_maybe_free_unlinked_inode(dir->mnt, child);
             return 0;
         }
     }

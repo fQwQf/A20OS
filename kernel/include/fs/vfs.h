@@ -60,6 +60,7 @@ struct vfile;
 struct vfs_ops;
 struct vnode_ops;
 struct mount;
+struct page_cache_page;
 
 struct bcache;
 struct block_dev;
@@ -190,6 +191,8 @@ typedef struct vnode {
     struct mount   *mnt;            /* which mount owns this */
     void           *fs_data;        /* fs-private data */
     vnode_ops_t    *ops;
+    struct page_cache_page *cache_pages;
+    struct page_cache_page *cache_dirty_pages;
 } vnode_t;
 
 /*

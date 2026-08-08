@@ -306,3 +306,15 @@ final-stage7-rv-8c-default:
 
 final-stage7-la-8c-default:
 	$(call RUN_FINAL_EVAL,loongarch64,buildstorm-probe,8,stage7-full-default,3000)
+
+final-stage9-rv-1c-perf:
+	$(call RUN_FINAL_EVAL,riscv64,buildstorm-probe,1,stage9-perf-feedback,1200)
+
+final-stage9-rv-8c-perf:
+	$(call RUN_FINAL_EVAL,riscv64,buildstorm-probe,8,stage9-perf-feedback,1200)
+
+final-stage9-la-1c-perf:
+	$(call RUN_FINAL_EVAL,loongarch64,buildstorm-probe,1,stage9-perf-feedback,1200)
+
+final-stage9-la-8c-perf:
+	$(call RUN_FINAL_EVAL,loongarch64,buildstorm-probe,8,stage9-perf-feedback,1200)

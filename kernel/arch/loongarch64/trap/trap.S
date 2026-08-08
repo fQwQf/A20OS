@@ -44,6 +44,26 @@
     .global __trap_from_user
     .global __return_to_user
     .global user_trap_return
+    .global arch_idle_wait
+    .global loongarch64_idle_region_start
+    .global loongarch64_idle_region_end
+
+/* Entered with CRMD.IE clear and returns with it clear. If an interrupt is
+ * recognized after IE is set but before idle executes, trap_bridge.c advances
+ * ERA to loongarch64_idle_region_end so ertn cannot execute a stale idle. */
+    .align 4
+arch_idle_wait:
+    csrrd   $t0, 0x0
+    ori     $t1, $t0, 0x4
+    csrwr   $t1, 0x0
+loongarch64_idle_region_start:
+    idle    0
+loongarch64_idle_region_end:
+    csrrd   $t0, 0x0
+    li.d    $t1, -5
+    and     $t0, $t0, $t1
+    csrwr   $t0, 0x0
+    jirl    $zero, $ra, 0
 
 /* ---- General exception entry ----
  * Dispatched to from CSR EENTRY (0xC).
