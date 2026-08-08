@@ -295,6 +295,26 @@ void device_unregister(device_t *dev) {
     mutex_unlock(&g_driver_core_ops);
 }
 
+int device_hotplug(device_t *dev, int event)
+{
+    if (!dev)
+        return -EINVAL;
+
+    if (event == BUS_EVENT_ADD) {
+        int ret = device_register(dev);
+        if (ret == 0 && dev->bus && dev->bus->hotplug)
+            dev->bus->hotplug(dev, BUS_EVENT_ADD);
+        return ret;
+    }
+    if (event == BUS_EVENT_REMOVE) {
+        device_unregister(dev);
+        if (dev->bus && dev->bus->hotplug)
+            dev->bus->hotplug(dev, BUS_EVENT_REMOVE);
+        return 0;
+    }
+    return -EINVAL;
+}
+
 int bus_register(bus_type_t *bus) {
     if (!bus || !bus->name)
         return -EINVAL;
