@@ -397,6 +397,21 @@ mm_struct_t *mm_fork(mm_struct_t *parent) {
     spin_init(&child->lock);
     spin_set_debug(&child->lock, "mm", child);
     mutex_init(&child->tlb_lock);
+    /*
+     * MM_FORK_DEFERRED_STATE_REGRESSION_GUARD:
+     *
+     * parent->deferred_vma is transient writer state, not address-space
+     * contents.  A concurrent mmap writer can have detached VMAs queued here
+     * after dropping parent->lock but before its TLB transaction flushes them.
+     * Copying that queue into the child leaves a stale pointer after the
+     * parent frees it.  If the slab object is then reused by the child's exec
+     * image, destroying the pre-exec child mm frees a live VMA from the new
+     * image and corrupts its mmap list.
+     *
+     * The child owns freshly cloned VMAs below, so it must start with no
+     * deferred release work, just as it starts with no inherited TLB holds.
+     */
+    child->deferred_vma = NULL;
     child->tlb_holds = NULL;
     refcount_set(&child->refcount, 1);
     child->rss = 0;

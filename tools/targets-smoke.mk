@@ -472,6 +472,29 @@ smoke-mm-stress:
 		exit 1; \
 	fi
 
+smoke-mm-fork-exec-race:
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 NR_CPUS=8 dev-build
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/mm-fork-exec-race-riscv64.log"; \
+	status=0; \
+	{ sleep $(SMOKE_INPUT_DELAY); printf 'mm_stress --vma-fork-exec-only\npoweroff\n'; } | \
+	$(TIMEOUT) $(SMOKE_TIMEOUT_MM_FORK_EXEC) qemu-system-riscv64 \
+		-machine virt -m 1G -nographic -smp 8 -bios default \
+		-global virtio-mmio.force-legacy=false \
+		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev-smp8/fat32.img,if=none,format=raw,id=x0 \
+		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev-smp8/kernel.elf \
+		> "$$log" 2>&1 || status=$$?; \
+	if grep -q 'MM_VMA_FORK_EXEC: PASS' "$$log"; then \
+		echo "smoke-mm-fork-exec-race: PASS; log saved to $$log"; \
+	else \
+		echo "smoke-mm-fork-exec-race: failed with status $$status; tail of $$log:"; \
+		tail -n 100 "$$log"; \
+		exit 1; \
+	fi
+
 smoke-vfs-stress:
 	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
 	$(MAKE) -s ARCH=riscv64 ABI=linux BRINGUP=0 .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/isofs.img
@@ -666,4 +689,3 @@ smoke-signalfd-stress:
 		tail -n 80 "$$log"; \
 		exit 1; \
 	fi
-
