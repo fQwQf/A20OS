@@ -59,6 +59,10 @@
 
 ## 用户态驱动契约
 
+用户态驱动文件统一命名为 `*.a20drv`（与内核模块同一制品格式），但仍是普通可执行 ELF，而不是内核模块。每个文件必须定义 `.a20drv` 描述段，声明 `placement=user-service`、设备类型、稳定驱动名和可拥有的设备身份；执行加载器会校验该段。`rtcd-<arch>.a20drv`、`ubd-<arch>.a20drv` 与 `uinputd-<arch>.a20drv` 是当前用户态驱动。
+
+统一驱动管理器（`kernel/drivers/core/driver_manager.c`）从 DriverStore `/bin/lib/drivers` 读取用户服务包的描述符，并在其设备真实存在时直接生成该用户进程（`driver_manager_spawn_user`）；描述符声明 `SUPERVISED` 的包（如 rtcd）生命周期归服务监督者 svcmgr，管理器只记录。每个设备只有一个 owner：用户拥有的窗口（`udriver_mmio_user_owned`）只允许内核 read-only 探针绑定。完整的跨权限域 `.a20drv` 格式见 [`kernel-modules.md`](../drivers/guide/kernel-modules.md)。
+
 `kernel/drivers/core/udriver.c` + syscall `0x0C00–0x0C06`：
 
 - **MMIO 授权**：`device_map_mmio` 只允许映射白名单内的设备物理窗口（窗口表按板静态注册），任务无法映射任意内存或其他设备；

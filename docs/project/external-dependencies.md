@@ -4,7 +4,7 @@
 
 ## lwIP
 
-- `EXTERNAL_LWIP_SOURCE_MANIFEST`：内核 lwIP 源文件清单位于 `user/external/lwip/sources.mk`；导入新的 lwIP 代码树时只更新这一份清单。
+- `EXTERNAL_LWIP_SOURCE_MANIFEST`：内核 lwIP 源文件清单位于 `kernel/external/lwip/sources.mk`；导入新的 lwIP 代码树时只更新这一份清单。
 - `EXTERNAL_LWIP_CONFIG_CONTRACT`：A20OS 通过 `kernel/net/lwip_stack.c` 以 `NO_SYS=1` 模式使用 lwIP，而不是使用 lwIP 自带的 socket API。
 - 内核 socket 层拥有 socket 文件，并在 `g_lwip_lock` 保护下转换为 lwIP TCP/UDP/RAW 原语。
 - 进展推进基于轮询：`sys_check_timeouts()`、virtio-net TX 完成、RX 投递和 `netif_poll()` 都通过 `a20_lwip_poll()` 与 `kernel_progress_poll()` 驱动。

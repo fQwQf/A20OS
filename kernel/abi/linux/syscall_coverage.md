@@ -298,6 +298,8 @@ because it has an entry in `syscall_table.def`.
 | `userfaultfd` | memory | `stub` | `smoke-mm-stress` | explicit -ENOSYS compatibility placeholder |
 | `perf_event_open` | perf | `stub` | `stub-review` | explicit -ENOSYS compatibility placeholder |
 | `arch_prctl` | arch | `stub` | `stub-review` | architecture-specific implementation; unsupported architectures return -ENOSYS |
+| `a20_channel_pair` | a20-ipc | `full` | `smoke-a20-channel` | A20OS extension: create a channel pair as fds (read/write per message); Linux ABI bridge to the unified channel IPC |
+| `a20_registry_client` | a20-ipc | `full` | `smoke-a20-channel` | A20OS extension: open the well-known service-registry client endpoint as an fd |
 <!-- LINUX_SYSCALL_COVERAGE_END -->
 
 ## Stub Decision Record

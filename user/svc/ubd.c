@@ -12,6 +12,13 @@
 #include "liba20rt/a20_sdk.h"
 #include "liba20rt/crt0_a20.h"
 #include "../svc/ubd_proto.h"
+#include "drivers/driver_descriptor.h"
+
+A20_DRIVER_DESCRIPTOR(A20_DRIVER_PLACEMENT_USER_SERVICE,
+                      A20_DRIVER_TYPE_BLOCK, "virtio-blk-user", A20_DRIVER_ABI, A20_DRIVER_RES_MMIO | A20_DRIVER_RES_IRQ | A20_DRIVER_RES_DMA,
+                      0, 1,
+                      A20_DRIVER_MATCH(A20_DRIVER_BUS_MMIO,
+                                           0x10004000UL, 0));
 
 #define IRQ_TAG 0x55424449ULL /* "UBDI" */
 #define CH_TAG  0x55424443ULL /* "UBDC" */

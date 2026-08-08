@@ -9,7 +9,7 @@
  *
  * The device register protocol is shared verbatim with the kernel
  * placement (the drvmod module kernel/drvmod/examples/goldfish_rtc.c,
- * loaded at boot as /lib/drivers/rtc.drv) through
+ * loaded at boot as /lib/drivers/rtc.a20drv) through
  * kernel/include/drivers/dual/goldfish_rtc.h — only the shell differs
  * (this main loop + EventQ vs kernel init/ISR).
  */
@@ -18,6 +18,13 @@
 #include "liba20rt/a20_sdk.h"
 #include "liba20rt/crt0_a20.h"
 #include "../svc/rtcd_proto.h"
+#include "drivers/driver_descriptor.h"
+
+A20_DRIVER_DESCRIPTOR(A20_DRIVER_PLACEMENT_USER_SERVICE,
+                      A20_DRIVER_TYPE_RTC, "goldfish-rtc", A20_DRIVER_ABI, A20_DRIVER_RES_MMIO | A20_DRIVER_RES_IRQ,
+                      A20_DRIVER_FLAG_SUPERVISED, 1,
+                      A20_DRIVER_MATCH(A20_DRIVER_BUS_MMIO,
+                                           0x101000UL, 0));
 
 #define IRQ_TAG 0x52435449ULL /* "RTCI" — event user_data for the irq */
 #define CH_TAG  0x52435443ULL /* "RTCC" — event user_data for the channel */

@@ -3,6 +3,11 @@
 
 #include "core/types.h"
 
+/* Platform identity contract: the LS2K1000 board registers its GMAC as a
+ * platform device with these IDs; the driver binds through platform_bus. */
+#define LS2K_GMAC_PLATFORM_VENDOR 0x1C00U
+#define LS2K_GMAC_PLATFORM_DEVICE 3U
+
 int  ls2k_gmac_init(uintptr_t base);
 int  ls2k_gmac_send(uintptr_t base, const void *pkt, size_t len);
 int  ls2k_gmac_recv(uintptr_t base, void *buf, size_t maxlen);
