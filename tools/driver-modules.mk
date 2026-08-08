@@ -31,6 +31,7 @@ DRVMOD_MODULES := rtc.a20drv virtio-blk.a20drv virtio-scsi.a20drv nvme.a20drv vi
 else
 DRVMOD_MODULES :=
 endif
+DRVMOD_CFLAGS += -std=gnu99
 
 # Early DriverStore packages: linked into the kernel root ramfs and loaded
 # before the real root disk is mounted.  Every driver that can own the root
