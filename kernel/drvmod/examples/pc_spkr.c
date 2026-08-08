@@ -9,9 +9,16 @@
  */
 
 #include "drvmod/drvmod.h"
+#include "drivers/audio/pc_speaker.h"
+
+A20_DRIVER_DESCRIPTOR(A20_DRIVER_PLACEMENT_KERNEL_MODULE,
+                      A20_DRIVER_TYPE_AUDIO, "pc-speaker", A20_DRIVER_ABI, A20_DRIVER_RES_IOPORT,
+                      0, 1,
+                      A20_DRIVER_MATCH(A20_DRIVER_BUS_FIXED,
+                                           A20_PLATFORM_VENDOR,
+                                           A20_DEVICE_PC_SPEAKER));
 
 #include "drivers/audio/audio_core.h"
-#include "drivers/audio/pc_speaker.h"
 #include "drivers/bus/platform_bus.h"
 #include "drivers/core/driver_core.h"
 #include "core/errno.h"
@@ -155,19 +162,9 @@ static driver_t pc_speaker_driver = {
     .class_type = DEV_CLASS_AUDIO,
 };
 
-/* Pins the module against unload while the driver is registered in the
- * unified driver core (the core keeps a pointer into module memory). */
-static drv_driver_t g_modinfo;
-
-uintptr_t DriverEntry(drv_driver_t **out)
+uintptr_t DriverEntry(void)
 {
     int r = drv_driver_register(&pc_speaker_driver);
     drv_log("[PC-SPKR] driver registered in core: %d\n", r);
-    if (out) {
-        if (r == 0)
-            *out = &g_modinfo;   /* module stays pinned */
-        else
-            *out = NULL;
-    }
-    return 0;
+    return r == 0 ? 0 : 1;
 }

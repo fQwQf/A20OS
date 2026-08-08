@@ -7,6 +7,9 @@
  */
 
 #include "drivers/core/driver_core.h"
+#include "drivers/bus/platform_bus.h"
+#include "drivers/block/dw_sdio.h"
+#include "drivers/net/starfive_gmac.h"
 #include "core/timer.h"
 
 /* VisionFive2 addresses */
@@ -98,8 +101,8 @@ static void vf2_reboot(void) {
 }
 
 static void vf2_enumerate_devices(void) {
-    extern int device_register(device_t *dev);
-    static device_t sdio_dev;
+    extern int platform_device_register(platform_device_t *pdev);
+    static platform_device_t sdio_dev;
     static resource_t sdio_res[2];
 
     sdio_res[0].type  = RES_MMIO;
@@ -107,14 +110,15 @@ static void vf2_enumerate_devices(void) {
     sdio_res[0].end   = VF2_SDIO_BASE + VF2_SDIO_SIZE - 1;
     sdio_res[0].flags = IORESOURCE_MMIO_32BIT;
 
-    sdio_dev.name       = "dw-sdio0";
-    sdio_dev.bus        = NULL;
-    sdio_dev.res        = sdio_res;
-    sdio_dev.res_count  = 1;
-    sdio_dev.state      = DEV_STATE_UNINIT;
-    device_register(&sdio_dev);
+    sdio_dev.dev.name       = "dw-sdio0";
+    sdio_dev.dev.res        = sdio_res;
+    sdio_dev.dev.res_count  = 1;
+    sdio_dev.dev.state      = DEV_STATE_UNINIT;
+    sdio_dev.id.vendor      = DW_SDIO_PLATFORM_VENDOR;
+    sdio_dev.id.device      = DW_SDIO_PLATFORM_DEVICE;
+    platform_device_register(&sdio_dev);
 
-    static device_t gmac_dev;
+    static platform_device_t gmac_dev;
     static resource_t gmac_res[2];
 
     gmac_res[0].type  = RES_MMIO;
@@ -122,12 +126,13 @@ static void vf2_enumerate_devices(void) {
     gmac_res[0].end   = VF2_GMAC_BASE + VF2_GMAC_SIZE - 1;
     gmac_res[0].flags = IORESOURCE_MMIO_32BIT;
 
-    gmac_dev.name       = "starfive-gmac";
-    gmac_dev.bus        = NULL;
-    gmac_dev.res        = gmac_res;
-    gmac_dev.res_count  = 1;
-    gmac_dev.state      = DEV_STATE_UNINIT;
-    device_register(&gmac_dev);
+    gmac_dev.dev.name       = "starfive-gmac";
+    gmac_dev.dev.res        = gmac_res;
+    gmac_dev.dev.res_count  = 1;
+    gmac_dev.dev.state      = DEV_STATE_UNINIT;
+    gmac_dev.id.vendor      = STARFIVE_GMAC_PLATFORM_VENDOR;
+    gmac_dev.id.device      = STARFIVE_GMAC_PLATFORM_DEVICE;
+    platform_device_register(&gmac_dev);
 }
 
 static const board_config_t visionfive2 = {
