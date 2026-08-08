@@ -208,6 +208,7 @@ typedef struct usb_hcd {
     struct device *hcd_dev;     /* host controller device_t */
     unsigned max_ports;
     uint8_t *port_state;        /* per-port enumeration state */
+    struct usb_device **port_devices; /* owned device for each physical port */
     void    *priv;              /* HCD private (xhci_controller_t *) */
 } usb_hcd_t;
 
@@ -224,6 +225,10 @@ void usb_core_unregister_hcd(usb_hcd_t *hcd);
  * driver_probe_all() so interface device_register() does not re-enter the
  * driver-core registration mutex. */
 void usb_core_scan(void);
+
+/* Process-context hotplug poll.  It is rate-limited internally and must not
+ * be called from an interrupt handler because add/remove invokes drivers. */
+void usb_core_poll(void);
 
 /* Synchronously enumerate one port (called by the HCD at probe and, in a
  * later phase, on hotplug detection). */
