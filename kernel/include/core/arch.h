@@ -47,6 +47,12 @@
 # error "No architecture defined. Set ARCH=riscv64, ARCH=riscv32, ARCH=loongarch64, ARCH=aarch64, ARCH=arm32, ARCH=armv7m, ARCH=ppc64le or ARCH=x86_64."
 #endif
 
+/* Keep the conservative global behavior on architectures without a
+ * local-only full TLB flush primitive. */
+#ifndef ARCH_HAS_LOCAL_TLB_FLUSH
+# define arch_tlb_flush_local() arch_tlb_flush()
+#endif
+
 /*
  * Optional architecture capabilities.  Architecture headers opt in by
  * defining the corresponding ARCH_* macro; shared scheduler/process code

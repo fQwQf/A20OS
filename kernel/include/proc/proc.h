@@ -348,9 +348,11 @@ int      proc_alloc_user_image(uintptr_t entry, vaddr_t sp, pt_root_t *pgdir,
                                vaddr_t tls_tp
 #ifdef CONFIG_NOMMU
                           , void **nommu_allocs, const size_t *nommu_alloc_sizes,
-                          const uint8_t *nommu_alloc_types, int num_nommu_allocs
+                           const uint8_t *nommu_alloc_types, int num_nommu_allocs
 #endif
                           , int defer_ready);
+/* Publish a fully initialized task created with defer_ready=1. */
+void     proc_publish_deferred_task(task_t *task);
 void     proc_free_pid(int pid);
 void     proc_exit(int exit_code) NORETURN;
 void     proc_exit_group(int exit_code) NORETURN;

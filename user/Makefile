@@ -177,8 +177,9 @@ endif
 CRT_END := $(MUSL_CRT)/crtn.o
 LIBC := $(MUSL_CRT)/libc.a $(LIBGCC)
 
-# ARM libgcc references libc symbols (e.g. raise), so allow circular resolution.
-ifeq ($(ARCH),arm32)
+# ARM libgcc references libc symbols (e.g. raise and __getauxval), so allow
+# circular resolution for both ARM ABIs.
+ifneq ($(filter arm32 aarch64,$(ARCH)),)
 LIBC := -Wl,--start-group $(MUSL_CRT)/libc.a $(LIBGCC) -Wl,--end-group
 endif
 
@@ -362,7 +363,7 @@ FF_LINUX_DETECT_SRCS := \
 	src/detection/gpu/gpu_linux.c \
 	src/detection/gpu/gpu_drm.c \
 	src/detection/gpu/gpu_pci.c \
-	src/detection/gpu/gpu_windows.c \
+	$(if $(filter x86_64 aarch64,$(ARCH)),src/detection/gpu/gpu_windows.c) \
 	src/detection/gpu/gpu_nvidia.c \
 	src/detection/gpu/gpu_mthreads.c \
 	src/detection/gtk_qt/gtk.c \

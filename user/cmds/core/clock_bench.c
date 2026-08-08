@@ -15,6 +15,10 @@
 #include <stdint.h>
 #include <sys/auxv.h>
 
+#ifndef SYS_clock_gettime
+#define SYS_clock_gettime SYS_clock_gettime64
+#endif
+
 static uint64_t ts_ns(const struct timespec *t)
 {
     return (uint64_t)t->tv_sec * 1000000000ull + (uint64_t)t->tv_nsec;

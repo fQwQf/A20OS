@@ -1,6 +1,8 @@
 #ifndef _ARCH_RISCV64_CPU_H
 #define _ARCH_RISCV64_CPU_H
 
+#define ARCH_HAS_LOCAL_TLB_FLUSH 1
+
 #include "core/types.h"
 #include "core/consts.h"
 #include "platform.h"
