@@ -36,6 +36,7 @@ kernel-la
 __pycache__/
 .env
 /slides.pdf
+/standard-reference.pdf
 /WHU-Beamer.sty
 /user/external/rust/dist/
 /user/external/riscv64-glibc-sysroot/
