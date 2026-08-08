@@ -2,7 +2,7 @@
  * ubd_fs_test — filesystem-level proof + throughput for the user-space
  * virtio-blk driver (M4, mainstream hybrid form).
  *
- * Spawns ubd-rv (which attaches its ring to the kernel block proxy and
+ * Spawns ubd-rv.a20drv (which attaches its ring to the kernel block proxy and
  * causes /ubd to be mounted as FAT32), then:
  *   1. verifies /ubd/big.bin exists (filesystem read through the driver);
  *   2. reads it 5x, reporting MB/s — the first read is cold (through the
@@ -32,20 +32,29 @@ static uint64_t now_ns(void)
 
 int main(void)
 {
-    /* 1. Spawn the user-space driver. */
-    pid_t pid = fork();
-    if (pid == 0) {
-        execl("/bin/ubd-rv", "ubd-rv", (char *)0);
-        _exit(90);
-    }
-
-    /* 2. Wait for the kernel to mount /ubd after the driver attaches. */
+    /* 1. The unified driver manager auto-spawns ubd when the user-reserved
+     *    virtio-blk slot is present (the driver's device).  If /ubd is not
+     *    mounted yet, fall back to spawning the driver on demand. */
     int mounted = 0;
     for (int i = 0; i < 500; i++) {
         struct stat st;
         if (stat(BIG_PATH, &st) == 0) { mounted = 1; break; }
         usleep(20000);
     }
+    if (!mounted) {
+        pid_t pid = fork();
+        if (pid == 0) {
+            execl("/bin/ubd-rv.a20drv", "ubd-rv.a20drv", (char *)0);
+            _exit(90);
+        }
+        for (int i = 0; i < 500; i++) {
+            struct stat st;
+            if (stat(BIG_PATH, &st) == 0) { mounted = 1; break; }
+            usleep(20000);
+        }
+    }
+
+    /* 2. /ubd must be mounted after the driver attaches. */
     if (!mounted) {
         printf("UBD_FS: FAIL /ubd/big.bin not visible\n");
         return 1;
