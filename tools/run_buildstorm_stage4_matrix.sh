@@ -67,7 +67,7 @@ run_lane() {
         make "$target"
         log=$(ls -1t \
             "$state_dir"/logs/"${arch}-buildstorm-probe-${cores}c-stage4-cargo-minibuild-"*.log |
-            head -n 1)
+            sed -n '1p')
         metadata=${log/\/logs\//\/metadata\/}
         metadata=${metadata%.log}.txt
 
@@ -91,21 +91,30 @@ run_lane() {
 }
 
 pids=()
+labels=()
 failures=0
 for lane in "riscv64 rv 1" "riscv64 rv 8" \
             "loongarch64 la 1" "loongarch64 la 8"; do
     read -r arch target_arch cores <<<"$lane"
     run_lane "$arch" "$target_arch" "$cores" &
     pids+=("$!")
+    labels+=("${arch}-${cores}c")
     if (( ${#pids[@]} >= parallelism )); then
-        if ! wait "${pids[0]}"; then
+        status=0
+        wait "${pids[0]}" || status=$?
+        echo "BUILDSTORM_STAGE4_MATRIX lane-status label=${labels[0]} pid=${pids[0]} status=$status"
+        if (( status != 0 )); then
             failures=$((failures + 1))
         fi
         pids=("${pids[@]:1}")
+        labels=("${labels[@]:1}")
     fi
 done
-for pid in "${pids[@]}"; do
-    if ! wait "$pid"; then
+for index in "${!pids[@]}"; do
+    status=0
+    wait "${pids[index]}" || status=$?
+    echo "BUILDSTORM_STAGE4_MATRIX lane-status label=${labels[index]} pid=${pids[index]} status=$status"
+    if (( status != 0 )); then
         failures=$((failures + 1))
     fi
 done
