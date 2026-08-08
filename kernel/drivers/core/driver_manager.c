@@ -278,7 +278,7 @@ int driver_manager_spawn_user(const char *path)
     struct a20_ht_internal *ht = manager_ht_create();
     if (!ht) {
         proc_force_exit(task, 1);
-        proc_make_ready(task);
+        proc_publish_deferred_task(task);
         proc_put(task);
         return -ENOMEM;
     }
@@ -356,7 +356,7 @@ int driver_manager_spawn_user(const char *path)
                                       registry_h);
     if (sp == 0) {
         proc_force_exit(task, 1);
-        proc_make_ready(task);
+        proc_publish_deferred_task(task);
         proc_put(task);
         return -EINVAL;
     }
@@ -365,7 +365,7 @@ int driver_manager_spawn_user(const char *path)
     TRAP_CTX_SP(trap) = sp;
     TRAP_CTX_SET_ARG0(trap, sp);
 
-    proc_make_ready(task);
+    proc_publish_deferred_task(task);
     proc_put(task);
     kinfo("[DRIVERMGR] spawned user-service driver '%s' pid=%d\n", path, pid);
     return pid;
