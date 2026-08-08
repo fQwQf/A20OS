@@ -50,7 +50,7 @@ KEP 程序使用 Linux eBPF 指令编码（`struct bpf_insn` 布局，8 字节/�
 
 ## 接口
 
-**Native ABI（0x0D00）**：
+**Native ABI（0x0E00）**：
 
 - `ext_prog_load(insns, len) → handle`：验证并加载程序（A20_OBJ_EXT_PROG）
 - `ext_prog_attach(prog, point)` / `ext_prog_detach(prog, point)`
