@@ -243,7 +243,7 @@ CROSS_PREFIX_ppc64le     := powerpc64le-linux-gnu-
 ARCH_CFLAGS_riscv64     := -march=rv64imafdc_zicsr_zifencei -mabi=lp64 -mcmodel=medany
 ARCH_CFLAGS_loongarch64 := -march=loongarch64 -mabi=lp64d -mcmodel=normal -fno-pic -static
 ARCH_CFLAGS_aarch64     := -march=armv8-a -mgeneral-regs-only -fno-pic -mcmodel=large -mno-outline-atomics
-ARCH_CFLAGS_x86_64      := -m64 -mcmodel=large -mno-red-zone -fno-pic -fno-pie -mgeneral-regs-only
+ARCH_CFLAGS_x86_64      := -m64 -mcmodel=large -mno-red-zone -fno-pic -fno-pie -mgeneral-regs-only -fno-omit-frame-pointer
 ARCH_CFLAGS_arm32       := -march=armv7-a -marm -mfpu=vfpv3-d16 -mfloat-abi=hard -fno-pic -static -mno-unaligned-access
 ARCH_CFLAGS_armv7m      := -mcpu=cortex-m3 -mthumb -mfloat-abi=soft -fno-pic -static \
                            -ffunction-sections -fdata-sections -fno-unwind-tables \
@@ -729,3 +729,11 @@ include tools/targets-native.mk
 include tools/targets-native-smoke.mk
 include tools/targets-mlibc.mk
 include tools/targets-eval.mk
+
+# ================================================================
+# Documentation
+# ================================================================
+# Build standard-reference.pdf from every tracked Markdown file under docs/. The generator validates all required tools and fonts and prints the platform-specific install commands if any is missing. See tools/gen_docs_pdf.sh for details.
+.PHONY: docs
+docs:
+	@bash tools/gen_docs_pdf.sh
