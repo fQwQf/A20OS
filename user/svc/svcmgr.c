@@ -62,7 +62,7 @@ typedef struct {
     const char  *name;
     const char  *path;
     uint32_t     ep_slot;
-    uint8_t      ping_kind;      /* 0 = echo-4B, 1 = rtcd 'T' */
+    uint8_t      ping_kind;      /* 0 = SVCMGR_REQ_ECHO, 1 = RTCD_REQ_TIME */
     uint8_t      state;
     a20_handle_t task;
     a20_handle_t client_ep;
@@ -258,16 +258,15 @@ static void svc_ping(svc_entry_t *se)
     }
 
     if (now - se->last_ok_ms > PING_PERIOD_MS) {
-        uint8_t req[16];
-        uint32_t rlen;
-        if (se->ping_kind == 1) {
-            req[0] = RTCD_REQ_TIME;
-            rlen = 1;
-        } else {
-            req[0] = 'p'; req[1] = 'i'; req[2] = 'n'; req[3] = 'g';
-            rlen = 4;
-        }
-        if (a20_channel_send(se->client_ep, req, rlen, 0, 0) == A20_OK) {
+        /* Services parse versioned IDL envelopes (a20_services.idl), not the
+         * legacy raw 'T'/'ping' bytes.  A bare envelope carrying the right
+         * request type is a valid health probe: rtcd answers RTCD_REQ_TIME
+         * with a time reply, echod echoes SVCMGR_REQ_ECHO back. */
+        a20_idl_envelope_t env;
+        env.version = A20_SERVICES_IDL_VERSION;
+        env.size = sizeof(env);
+        env.type = (se->ping_kind == 1) ? RTCD_REQ_TIME : SVCMGR_REQ_ECHO;
+        if (a20_channel_send(se->client_ep, &env, sizeof(env), 0, 0) == A20_OK) {
             se->state = SVC_PENDING_PING;
             se->ping_sent_ms = now;
         }
