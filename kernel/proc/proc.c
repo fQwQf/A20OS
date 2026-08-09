@@ -32,7 +32,6 @@
 #include "core/timer.h"
 #include "core/lock.h"
 #include "sys/futex.h"
-#include "core/progress.h"
 
 static task_t idle_tasks[CONFIG_NR_CPUS];
 static task_t *task_list_head;
@@ -205,7 +204,9 @@ void idle_loop(void) {
 #endif
     while (1) {
         arch_local_irq_enable();
-        kernel_progress_run_bottom_halves();
+        /* sched() drains bottom halves before selecting a task.  Calling the
+         * same hook here doubled per-device progress callbacks on every idle
+         * pass without opening an additional completion opportunity. */
         sched();
 #if ARCH_HAS_SAFE_IDLE_WAIT
         arch_local_irq_disable();
