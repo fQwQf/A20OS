@@ -2,6 +2,7 @@
 #include "mm/mm.h"
 #include "core/string.h"
 #include "core/stdio.h"
+#include "core/perf.h"
 
 static bcache_t *g_bcache_list[8];
 static int g_bcache_count;
@@ -152,7 +153,8 @@ bcache_t *bcache_create(block_dev_t *dev) {
     bc->dev = dev;  // 绑定底层块设备
     bc->pool_size = BCACHE_MAX_BLOCKS;
     spin_init(&bc->lock);
-    mutex_init(&bc->fill_lock);
+    for (int i = 0; i < PCACHE_FILL_LOCKS; i++)
+        mutex_init(&bc->fill_locks[i]);
     mutex_init(&bc->writeback_lock);
     bc->pool = (bcache_entry_t *)kmalloc(sizeof(bcache_entry_t) * bc->pool_size);
     if (!bc->pool) { kfree(bc); return NULL; }
@@ -516,17 +518,28 @@ static pcache_entry_t *pcache_get(bcache_t *bc, uint64_t page_no, int skip_read)
     }
 
     spin_unlock_irqrestore(&bc->lock, flags);
-    mutex_lock(&bc->fill_lock);
+
+    /* A single filesystem-wide fill lock made every cold page miss wait for
+     * the preceding synchronous disk read.  Hash by page number so only
+     * same-page (or same-shard) fills serialize; writeback_lock still protects
+     * eviction and write ordering. */
+    a20_perf_count(A20_PERF_PCACHE_FILL_MISSES);
+    mutex_t *fill_lock =
+        &bc->fill_locks[pcache_hash_key(page_no) & (PCACHE_FILL_LOCKS - 1)];
+    if (!mutex_trylock(fill_lock)) {
+        a20_perf_count(A20_PERF_PCACHE_FILL_CONTENDED);
+        mutex_lock(fill_lock);
+    }
     flags = spin_lock_irqsave(&bc->lock);
 
-    /* Another miss may have completed while this one waited for fill_lock. */
+    /* Another miss may have completed while this one waited for its shard. */
     e = pcache_find(bc, page_no);
     if (e) {
         cache_ref_get(&e->ref);
         page_lru_remove(e);
         page_lru_insert_front(bc, e);
         spin_unlock_irqrestore(&bc->lock, flags);
-        mutex_unlock(&bc->fill_lock);
+        mutex_unlock(fill_lock);
         return e;
     }
 
@@ -541,7 +554,7 @@ static pcache_entry_t *pcache_get(bcache_t *bc, uint64_t page_no, int skip_read)
         page_lru_insert_front(bc, e);
         spin_unlock_irqrestore(&bc->lock, flags);
         mutex_unlock(&bc->writeback_lock);
-        mutex_unlock(&bc->fill_lock);
+        mutex_unlock(fill_lock);
         return e;
     }
 
@@ -573,7 +586,7 @@ static pcache_entry_t *pcache_get(bcache_t *bc, uint64_t page_no, int skip_read)
                (unsigned long)dirty, (unsigned long)referenced,
                (unsigned long)total_refs, max_refs);
         mutex_unlock(&bc->writeback_lock);
-        mutex_unlock(&bc->fill_lock);
+        mutex_unlock(fill_lock);
         return NULL;
     }
 
@@ -595,7 +608,7 @@ static pcache_entry_t *pcache_get(bcache_t *bc, uint64_t page_no, int skip_read)
         page_lru_insert_front(bc, e);
         spin_unlock_irqrestore(&bc->lock, flags);
         mutex_unlock(&bc->writeback_lock);
-        mutex_unlock(&bc->fill_lock);
+        mutex_unlock(fill_lock);
         return NULL;
     }
     mutex_unlock(&bc->writeback_lock);
@@ -611,7 +624,7 @@ static pcache_entry_t *pcache_get(bcache_t *bc, uint64_t page_no, int skip_read)
             e->page_no = (uint64_t)-1;
             page_lru_insert_front(bc, e);
             spin_unlock_irqrestore(&bc->lock, flags);
-            mutex_unlock(&bc->fill_lock);
+            mutex_unlock(fill_lock);
             return NULL;
         }
     } else {
@@ -636,7 +649,7 @@ static pcache_entry_t *pcache_get(bcache_t *bc, uint64_t page_no, int skip_read)
         page_lru_remove(dup);
         page_lru_insert_front(bc, dup);
         spin_unlock_irqrestore(&bc->lock, flags);
-        mutex_unlock(&bc->fill_lock);
+        mutex_unlock(fill_lock);
         return dup;
     }
 
@@ -647,7 +660,7 @@ static pcache_entry_t *pcache_get(bcache_t *bc, uint64_t page_no, int skip_read)
     pcache_hash_insert(bc, e);
     page_lru_insert_front(bc, e);
     spin_unlock_irqrestore(&bc->lock, flags);
-    mutex_unlock(&bc->fill_lock);
+    mutex_unlock(fill_lock);
     return e;
 }
 

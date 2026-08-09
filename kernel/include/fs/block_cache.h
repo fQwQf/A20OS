@@ -12,6 +12,7 @@
 #define PCACHE_PAGE_SIZE    4096
 #define PCACHE_MAX_PAGES    1024
 #define PCACHE_HASH_BUCKETS 128
+#define PCACHE_FILL_LOCKS   64
 
 typedef struct bcache_entry {
     uint64_t    lba;
@@ -44,7 +45,9 @@ typedef struct bcache {
     size_t           dirty_blocks;
     size_t           dirty_pages;
     spinlock_t       lock;
-    mutex_t          fill_lock;
+    /* Same-page fills serialize on one shard while unrelated cache misses
+     * may issue block I/O concurrently. */
+    mutex_t          fill_locks[PCACHE_FILL_LOCKS];
     mutex_t          writeback_lock;
     bcache_entry_t   lru_head;
     bcache_entry_t   lru_tail;
