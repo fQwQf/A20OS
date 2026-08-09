@@ -147,6 +147,14 @@ static pf_type_t name_to_type(const char *name, int *out_pid) {
     if (strcmp(name, "fdinfo") == 0) return PF_PID_FDINFO;
     if (strcmp(name, "mountinfo") == 0) return PF_PID_MOUNTINFO;
     if (strcmp(name, "pagemap") == 0) return PF_PID_PAGEMAP;
+    if (strcmp(name, "boot_id") == 0) return PF_BOOT_ID;
+    if (strcmp(name, "cap_last_cap") == 0) return PF_CAP_LAST_CAP;
+    if (strcmp(name, "nr_open") == 0) return PF_NR_OPEN;
+    if (strcmp(name, "pressure") == 0) return PF_PRESSURE;
+    if (strcmp(name, "uid_map") == 0) return PF_UID_MAP;
+    if (strcmp(name, "gid_map") == 0) return PF_GID_MAP;
+    if (strcmp(name, "setgroups") == 0) return PF_SETGROUPS;
+    if (strcmp(name, "sysvipc") == 0) return PF_SYSVIPC;
     return PF_ROOT;
 }
 
@@ -167,6 +175,14 @@ static int procfs_root_file_type(pf_type_t type)
     case PF_SWAPS:
     case PF_INTERRUPTS:
     case PF_SYS_KERNEL_PIDMAP:
+    case PF_BOOT_ID:
+    case PF_CAP_LAST_CAP:
+    case PF_NR_OPEN:
+    case PF_PRESSURE:
+    case PF_UID_MAP:
+    case PF_GID_MAP:
+    case PF_SETGROUPS:
+    case PF_SYSVIPC:
         return 1;
     default:
         return 0;
@@ -299,6 +315,12 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
     } else if (dp && dp->type == PF_SYS_KERNEL && strcmp(name, "core_pattern") == 0) {
         child = new_entry(name, PF_SYS_KERNEL_CORE_PATTERN, 0);
         type = PF_SYS_KERNEL_CORE_PATTERN;
+    } else if (dp && dp->type == PF_SYS_KERNEL && strcmp(name, "hostname") == 0) {
+        child = new_entry(name, PF_SYS_KERNEL_HOSTNAME, 0);
+        type = PF_SYS_KERNEL_HOSTNAME;
+    } else if (dp && dp->type == PF_SYS_KERNEL && strcmp(name, "domainname") == 0) {
+        child = new_entry(name, PF_SYS_KERNEL_DOMAINNAME, 0);
+        type = PF_SYS_KERNEL_DOMAINNAME;
     } else if (dp && dp->type == PF_SYS_KERNEL && strcmp(name, "io_uring_disabled") == 0) {
         child = new_entry(name, PF_SYS_KERNEL_IO_URING_DISABLED, 0);
         type = PF_SYS_KERNEL_IO_URING_DISABLED;
@@ -655,6 +677,19 @@ static int procfs_fwrite(vfile_t *vf, const char *buf, size_t count) {
         tmp[n] = '\0';
         int value = atoi(tmp);
         int r = proc_set_pid_max(value);
+        return r < 0 ? r : (int)count;
+    }
+    if (p->type == PF_SYS_KERNEL_HOSTNAME ||
+        p->type == PF_SYS_KERNEL_DOMAINNAME) {
+        extern int linux_kernel_set_hostname(const char *name, size_t len);
+        extern int linux_kernel_set_domainname(const char *name, size_t len);
+        /* Strip a trailing newline from the written value. */
+        size_t n = count;
+        while (n > 0 && (buf[n - 1] == '\n' || buf[n - 1] == '\r'))
+            n--;
+        int r = p->type == PF_SYS_KERNEL_HOSTNAME
+                    ? linux_kernel_set_hostname(buf, n)
+                    : linux_kernel_set_domainname(buf, n);
         return r < 0 ? r : (int)count;
     }
     if (p->type == PF_A20_SCHED_BASE_SLICE) {
