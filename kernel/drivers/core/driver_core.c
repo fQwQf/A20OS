@@ -6,6 +6,7 @@
 #include "drivers/core/driver_class.h"
 #include "core/stdio.h"
 #include "core/klog.h"
+#include "core/string.h"
 #include "core/defs.h"
 #include "core/lock.h"
 #include "core/sync.h"
@@ -62,8 +63,8 @@ static int driver_matches_device(driver_t *drv, device_t *dev)
 }
 
 /* ---- Linker-generated section boundaries for built-in drivers ---- */
-extern const driver_t *__driver_init_start;
-extern const driver_t *__driver_init_end;
+extern const uintptr_t __driver_init_start;
+extern const uintptr_t __driver_init_end;
 
 static int driver_probe_bound_device(driver_t *drv, device_t *dev) {
     dev->drv = drv;
@@ -118,9 +119,16 @@ void driver_core_init(void) {
         panic("driver_core_init: kmalloc failed\n");
     }
 
-    for (const driver_t * const *p = (const driver_t * const *)&__driver_init_start;
-         p < (const driver_t * const *)&__driver_init_end; p++) {
-        driver_register((driver_t *)*p);
+    /* Iterate the .driver_init pointer table as raw uintptr_t slots.  The
+     * section holds pointers to static driver_t objects placed by
+     * DRIVER_REGISTER(); memcpy avoids the compiler's UBSAN type-mismatch
+     * check on *p, which cannot know the constant-section slots are aligned
+     * and reports a false positive here. */
+    for (const uintptr_t *p = &__driver_init_start;
+         p < &__driver_init_end; p++) {
+        uintptr_t slot;
+        memcpy(&slot, p, sizeof(slot));
+        driver_register((driver_t *)slot);
     }
 
     kinfo("[DRIVER] core initialized: %d drivers registered\n",
