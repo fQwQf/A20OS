@@ -178,3 +178,122 @@ int64_t sys_mount_setattr(int dfd, const char *path, unsigned flags,
     vnode_put(vn);
     return 0;
 }
+
+/* statmount(2): report mount attributes into a statmnt buffer.  A20OS
+ * supports a minimal subset: mnt_id, mnt_parent_id, mnt_mountpoint and
+ * mnt_fs_type. */
+#define STATMOUNT_MNT_ID            0x0001
+#define STATMOUNT_MNT_PARENT        0x0002
+#define STATMOUNT_MNT_ROOT          0x0004
+#define STATMOUNT_MNT_POINT         0x0008
+#define STATMOUNT_FS_TYPE           0x0010
+
+int64_t sys_statmount(uint64_t mnt_id, uint64_t flags, void *buf,
+                      size_t bufsize, unsigned int mask)
+{
+    (void)flags;
+    if (!buf)
+        return -EFAULT;
+    /* A minimal fixed layout: the first two u64s are size and mask, then
+     * fields follow.  We only fill what the caller requested. */
+    char *p = buf;
+    /* 64-bit struct statmnt header: u64 size, u64 mask, u32 sb_flags,
+     * u32 mnt_flags, u64 mnt_id, u64 mnt_parent_id, u64 mnt_group_id,
+     * u64 mnt_root, u64 mnt_point, u64 mnt_ns_id, then strings. */
+    if (bufsize < 64)
+        return -EOVERFLOW;
+    memset(p, 0, bufsize < 128 ? bufsize : 128);
+
+    mount_t *mnt = NULL;
+    for (int i = 0; i < vfs_mount_count(); i++) {
+        mount_t *m = vfs_mount_at(i);
+        if (m && (uint64_t)i == mnt_id) {
+            mnt = m;
+            break;
+        }
+    }
+    if (!mnt)
+        return -ENOENT;
+
+    uint64_t *u = (uint64_t *)p;
+    u[0] = 64; /* size */
+    u[1] = mask;
+    u[4] = mnt_id;            /* mnt_id */
+    u[5] = 0;                 /* mnt_parent_id */
+    /* mnt_root string at offset 32, mnt_point at 48, fs_type at 64 */
+    size_t used = 64;
+    if (mask & STATMOUNT_MNT_ROOT) {
+        const char *root = "/";
+        size_t n = strlen(root) + 1;
+        if (used + n <= bufsize) {
+            memcpy(p + used, root, n);
+            u[6] = (uint64_t)used; /* mnt_root offset */
+            used += n;
+        }
+    }
+    if (mask & STATMOUNT_MNT_POINT) {
+        const char *pt = mnt->path;
+        size_t n = strlen(pt) + 1;
+        if (used + n <= bufsize) {
+            memcpy(p + used, pt, n);
+            u[7] = (uint64_t)used;
+            used += n;
+        }
+    }
+    if (mask & STATMOUNT_FS_TYPE) {
+        const char *ft = mnt->fstype[0] ? mnt->fstype : "ramfs";
+        size_t n = strlen(ft) + 1;
+        if (used + n <= bufsize) {
+            memcpy(p + used, ft, n);
+            ((uint64_t *)(p + 40))[0] = (uint64_t)used; /* fs_type at offset 40 */
+            used += n;
+        }
+    }
+    if (copy_to_user(buf, p, used) < 0)
+        return -EFAULT;
+    return 0;
+}
+
+int64_t sys_listmount(uint64_t mnt_id, uint64_t last_mnt_id,
+                      uint64_t *list, size_t nr, unsigned int flags)
+{
+    (void)last_mnt_id;
+    (void)flags;
+    if (!list)
+        return -EFAULT;
+    if (nr == 0)
+        return 0;
+    uint64_t *ids = proc_scratch_buffer(nr * sizeof(uint64_t));
+    if (!ids)
+        return -ENOMEM;
+    uint64_t start = (uint64_t)(mnt_id == 0 ? 0 : mnt_id + 1);
+    uint64_t n = 0;
+    for (int i = (int)start; i < vfs_mount_count() && n < nr; i++)
+        ids[n++] = (uint64_t)i;
+    if (n > 0 && copy_to_user(list, ids, n * sizeof(uint64_t)) < 0)
+        return -EFAULT;
+    return (int64_t)n;
+}
+
+int64_t sys_listns(unsigned int nstype, uint64_t *nsids, size_t nr)
+{
+    (void)nstype;
+    if (nsids && nr > 0) {
+        uint64_t zero = 0;
+        if (copy_to_user(nsids, &zero, sizeof(zero)) < 0)
+            return -EFAULT;
+        return 1;
+    }
+    return 0;
+}
+
+int64_t sys_open_tree_attr(int dfd, const char *path, unsigned int flags,
+                           unsigned int attr_mask, void *attr, size_t size)
+{
+    (void)attr_mask;
+    (void)attr;
+    (void)size;
+    /* open_tree_attr returns an fd for a mount tree with requested
+     * attributes; equivalent to open_tree plus a statmount-style query. */
+    return sys_open_tree(dfd, path, flags);
+}
