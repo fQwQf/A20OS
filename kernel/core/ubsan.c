@@ -87,6 +87,13 @@ struct ubsan_alignment_assumption_data {
 
 /* ---- reporting ---- */
 
+/* Suppress the report text while the boot self-test runs: it deliberately
+ * trips one handler to prove the __ubsan_handle_* entry points are wired up,
+ * and the synthetic "[ERR] UBSAN: ..." line would read as a real fault.  The
+ * handler is still fully invoked (parameters parsed, paths walked), so a
+ * broken report path fails the self-test instead of printing a PASS. */
+static int g_ubsan_selftest;
+
 static void ubsan_report(const char *kind, const void *data)
 {
     const char *file = "?";
@@ -97,6 +104,8 @@ static void ubsan_report(const char *kind, const void *data)
         file = loc->file;
     if (loc)
         line = loc->line;
+    if (g_ubsan_selftest)
+        return;
     kerr("UBSAN: %s at %s:%u\n", kind, file, line);
 }
 
@@ -104,6 +113,8 @@ static void ubsan_report_type(const char *kind, const void *data,
                               struct ubsan_type_descriptor *td)
 {
     ubsan_report(kind, data);
+    if (g_ubsan_selftest)
+        return;
     if (td && td->name[0])
         kerr("UBSAN: type '%s'\n", td->name);
 }
@@ -240,9 +251,11 @@ void ubsan_selftest(void)
         .line = 1,
         .column = 1,
     };
-    kerr("UBSAN_SELFTEST: start\n");
+    kinfo("UBSAN_SELFTEST: start\n");
+    g_ubsan_selftest = 1;
     __ubsan_handle_shift_out_of_bounds(&loc, NULL, NULL);
-    kerr("UBSAN_SELFTEST: PASS\n");
+    g_ubsan_selftest = 0;
+    kinfo("UBSAN_SELFTEST: PASS\n");
 }
 
 #endif /* CONFIG_UBSAN */
