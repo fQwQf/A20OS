@@ -49,6 +49,11 @@ of Linux commands, flags, object types, or concurrency semantics.
 | io_uring | partial | kernel-memory SQ/CQ rings with synchronous NOP/READ/WRITE/FSYNC/CLOSE execution. |
 | landlock | partial | fd-backed rulesets with path-beneath rules enforced at vfs_open. |
 | rseq | partial | per-thread rseq registration; no CPU migration to abort. |
+| SysV/POSIX message queues | partial | msgget/msgsnd/msgrcv/msgctl (kernel/ipc/sysv_msg.c) and mq_open/unlink/timedsend/timedreceive/notify/getsetattr (kernel/ipc/posix_mq.c). |
+| ioprio / pkeys | partial | per-task I/O priority storage; 16-slot protection-key bitmap. |
+| LSM introspection | partial | lsm_get_self_attr/list_modules report Landlock; set_self_attr via landlock_restrict_self. |
+| statmount/listmount | partial | mount table introspection over the existing mount registry. |
+| RISC-V arch | partial | riscv_hwprobe reports IMA; riscv_flush_icache flushes the range. |
 
 ## Next Steps
 
@@ -248,6 +253,16 @@ of Linux commands, flags, object types, or concurrency semantics.
 | `semtimedop` | ipc | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
 | `semop` | ipc | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
 | `bpf` | bpf | `partial` | `smoke-abi-linux` | KEP-backed BPF_PROG_LOAD/ATTACH/DETACH only; no BPF maps; target_fd is an A20OS extension-point id |
+| `msgget` | ipc | `partial` | `smoke-syscall-ext` | SysV message queue create/open (kernel/ipc/sysv_msg.c) |
+| `msgsnd` | ipc | `partial` | `smoke-syscall-ext` | SysV message send with blocking and IPC_NOWAIT |
+| `msgrcv` | ipc | `partial` | `smoke-syscall-ext` | SysV message receive with type selection and MSG_NOERROR |
+| `msgctl` | ipc | `partial` | `smoke-syscall-ext` | SysV msg IPC_RMID/STAT/SET with 64-bit ds layout |
+| `mq_open` | ipc | `partial` | `smoke-syscall-ext` | POSIX mq open/create returning an fd (kernel/ipc/posix_mq.c) |
+| `mq_unlink` | ipc | `partial` | `smoke-syscall-ext` | POSIX mq unlink |
+| `mq_timedsend` | ipc | `partial` | `smoke-syscall-ext` | POSIX mq priority send with absolute timeout |
+| `mq_timedreceive` | ipc | `partial` | `smoke-syscall-ext` | POSIX mq priority receive with absolute timeout |
+| `mq_notify` | ipc | `partial` | `smoke-syscall-ext` | POSIX mq signal notification registration |
+| `mq_getsetattr` | ipc | `partial` | `smoke-syscall-ext` | POSIX mq attribute get/set (flags only) |
 | `clock_settime` | time | `partial` | `smoke-proc-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `clock_gettime` | time | `partial` | `smoke-proc-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `clock_gettime32` | time | `partial` | `smoke-proc-stress` | implemented subset; Linux edge semantics remain documented gaps |
@@ -266,7 +281,6 @@ of Linux commands, flags, object types, or concurrency semantics.
 | `gettimeofday` | time | `partial` | `smoke-proc-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `settimeofday` | time | `partial` | `smoke-proc-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `times` | time | `partial` | `smoke-proc-stress` | implemented subset; Linux edge semantics remain documented gaps |
-| `time` | time | `partial` | `smoke-proc-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `alarm` | time | `partial` | `smoke-proc-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `uname` | system | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
 | `sysinfo` | system | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
@@ -357,6 +371,34 @@ of Linux commands, flags, object types, or concurrency semantics.
 | `landlock_create_ruleset` | security | `partial` | `smoke-syscall-ext` | creates an fd-backed ruleset |
 | `landlock_add_rule` | security | `partial` | `smoke-syscall-ext` | adds path-beneath rules with access rights |
 | `landlock_restrict_self` | security | `partial` | `smoke-syscall-ext` | installs the ruleset; enforced at vfs_open |
+| `ioprio_set` | scheduler | `partial` | `smoke-syscall-ext` | validates and stores I/O priority per task |
+| `ioprio_get` | scheduler | `partial` | `smoke-syscall-ext` | returns the task I/O priority |
+| `pkey_alloc` | memory | `partial` | `smoke-mm-stress` | allocates a protection key slot per task |
+| `pkey_free` | memory | `partial` | `smoke-mm-stress` | frees a protection key slot |
+| `pkey_mprotect` | memory | `partial` | `smoke-mm-stress` | mprotect with a valid allocated pkey |
+| `mlock2` | memory | `partial` | `smoke-mm-stress` | mlock with flags (only 0 supported) |
+| `mseal` | memory | `partial` | `smoke-mm-stress` | accepts VMA sealing as a no-op (no seal tracking yet) |
+| `seccomp` | system | `partial` | `smoke-abi-linux` | no seccomp engine; reports unsupported rather than faking |
+| `kexec_load` | system | `partial` | `smoke-abi-linux` | refuses kexec (no image handoff support) |
+| `kexec_file_load` | system | `partial` | `smoke-abi-linux` | refuses kexec (no image handoff support) |
+| `nfsservctl` | system | `stub` | `smoke-abi-linux` | removed in Linux 4.19; returns -ENOSYS |
+| `map_shadow_stack` | arch | `partial` | `smoke-abi-linux` | no shadow-stack support on RISC-V; returns -ENOSYS |
+| `futex_wait` | futex | `partial` | `smoke-proc-stress` | split-out futex_wait with timespec timeout |
+| `futex_wake` | futex | `partial` | `smoke-proc-stress` | split-out futex_wake |
+| `rt_tgsigqueueinfo` | signals | `partial` | `smoke-proc-stress` | queue a signal to a specific thread of a tgid |
+| `riscv_hwprobe` | arch | `partial` | `smoke-abi-linux` | RISC-V hardware probing; reports IMA base behaviour |
+| `riscv_flush_icache` | arch | `partial` | `smoke-abi-linux` | RISC-V icache flush over a range |
+| `setxattrat` | path/fs | `partial` | `smoke-vfs-stress` | setxattr relative to a dirfd (Linux 6.x) |
+| `getxattrat` | path/fs | `partial` | `smoke-vfs-stress` | getxattr relative to a dirfd (Linux 6.x) |
+| `listxattrat` | path/fs | `partial` | `smoke-vfs-stress` | listxattr relative to a dirfd (Linux 6.x) |
+| `removexattrat` | path/fs | `partial` | `smoke-vfs-stress` | removexattr relative to a dirfd (Linux 6.x) |
+| `statmount` | path/fs | `partial` | `smoke-vfs-stress` | reports mount attributes into a statmnt buffer |
+| `listmount` | path/fs | `partial` | `smoke-vfs-stress` | lists mount ids in the mount table |
+| `listns` | namespaces | `partial` | `smoke-abi-linux` | reports the single kernel namespace id |
+| `open_tree_attr` | path/fs | `partial` | `smoke-vfs-stress` | open_tree with attribute query |
+| `lsm_get_self_attr` | security | `partial` | `smoke-syscall-ext` | reports Landlock restriction state |
+| `lsm_set_self_attr` | security | `partial` | `smoke-syscall-ext` | returns -EOPNOTSUPP (restrict via landlock_restrict_self) |
+| `lsm_list_modules` | security | `partial` | `smoke-syscall-ext` | lists capability + landlock modules |
 | `a20_channel_pair` | a20-ipc | `full` | `smoke-a20-channel` | A20OS extension: create a channel pair as fds (read/write per message); Linux ABI bridge to the unified channel IPC |
 | `a20_registry_client` | a20-ipc | `full` | `smoke-a20-channel` | A20OS extension: open the well-known service-registry client endpoint as an fd |
 <!-- LINUX_SYSCALL_COVERAGE_END -->
