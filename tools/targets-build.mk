@@ -1,17 +1,22 @@
 # ----------------------------------------------------------------
-# reference build. Linux produces both benchmark architectures; macOS builds
-# the supported RISC-V artifacts. Use all-architectures for the judge matrix.
+# release image build.  The release platform invokes `make all`
+# and then consumes kernel-rv, kernel-la, disk.img, and disk-la.img.  Keep the
+# external-root image builder available under an explicit target.
 # ----------------------------------------------------------------
 all:
+	$(MAKE) final-submit-rv
+	$(MAKE) final-submit-la
+	@echo "=== 2026 final image build complete ==="
+	@echo "  kernel-rv  kernel-la  disk.img  disk-la.img"
+
+final-all: all
+
+release-all:
 	@set -e; for target in $(DEFAULT_benchmark_TARGETS); do $(MAKE) $$target; done
-	@echo "=== reference build complete ==="
+	@echo "=== external-root reference build complete ==="
 	@echo "  built: $(DEFAULT_benchmark_TARGETS)"
 
-all-architectures:
-	$(MAKE) benchmark-rv
-	$(MAKE) benchmark-la
-	@echo "=== Full reference build complete ==="
-	@echo "  kernel-rv  kernel-la  disk.img  disk-la.img"
+all-architectures: all
 
 check-kernel-build: $(DEFAULT_KERNEL_CHECK_TARGETS)
 
