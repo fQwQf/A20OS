@@ -103,12 +103,14 @@ $(USER_BUILD_DIR)/vinput-probe.a20drv: $(DRVMOD_DIR)/vinput_probe.c \
 	$(DRVMOD_GCC) $(DRVMOD_CFLAGS) -c $< -o $@
 
 $(USER_BUILD_DIR)/virtio-blk.a20drv: $(DRVMOD_DIR)/virtio_blk.c \
-		kernel/drivers/block/virtio_blk.c kernel/include/drvmod/drvmod.h
+		kernel/drivers/block/virtio_blk.c kernel/include/drvmod/drvmod.h \
+		kernel/include/drivers/block/virtio_blk.h
 	@mkdir -p $(dir $@)
 	$(DRVMOD_GCC) $(DRVMOD_CFLAGS) -c $< -o $@
 
 $(USER_BUILD_DIR)/virtio-scsi.a20drv: $(DRVMOD_DIR)/virtio_scsi.c \
-		kernel/drivers/block/virtio_scsi.c kernel/include/drvmod/drvmod.h
+		kernel/drivers/block/virtio_scsi.c kernel/include/drvmod/drvmod.h \
+		kernel/include/drivers/block/virtio_blk.h
 	@mkdir -p $(dir $@)
 	$(DRVMOD_GCC) $(DRVMOD_CFLAGS) -c $< -o $@
 
@@ -122,11 +124,13 @@ $(USER_BUILD_DIR)/dw-sdio.a20drv: $(DRVMOD_DIR)/dw_sdio.c \
 	@mkdir -p $(dir $@)
 	$(DRVMOD_GCC) $(DRVMOD_CFLAGS) -c $< -o $@
 
-$(USER_BUILD_DIR)/virtio-net.a20drv: $(DRVMOD_DIR)/virtio_net.c kernel/drivers/net/virtio_net.c
+$(USER_BUILD_DIR)/virtio-net.a20drv: $(DRVMOD_DIR)/virtio_net.c \
+		kernel/drivers/net/virtio_net.c kernel/include/drivers/block/virtio_blk.h
 	@mkdir -p $(dir $@)
 	$(DRVMOD_GCC) $(DRVMOD_CFLAGS) -c $< -o $@
 
-$(USER_BUILD_DIR)/virtio-gpu.a20drv: $(DRVMOD_DIR)/virtio_gpu.c kernel/drivers/gpu/virtio_gpu.c
+$(USER_BUILD_DIR)/virtio-gpu.a20drv: $(DRVMOD_DIR)/virtio_gpu.c \
+		kernel/drivers/gpu/virtio_gpu.c kernel/include/drivers/block/virtio_blk.h
 	@mkdir -p $(dir $@)
 	$(DRVMOD_GCC) $(DRVMOD_CFLAGS) -c $< -o $@
 
@@ -134,7 +138,8 @@ $(USER_BUILD_DIR)/vmsvga.a20drv: $(DRVMOD_DIR)/vmsvga.c kernel/drivers/gpu/vmsvg
 	@mkdir -p $(dir $@)
 	$(DRVMOD_GCC) $(DRVMOD_CFLAGS) -c $< -o $@
 
-$(USER_BUILD_DIR)/virtio-snd.a20drv: $(DRVMOD_DIR)/virtio_snd.c kernel/drivers/audio/virtio_snd.c
+$(USER_BUILD_DIR)/virtio-snd.a20drv: $(DRVMOD_DIR)/virtio_snd.c \
+		kernel/drivers/audio/virtio_snd.c kernel/include/drivers/block/virtio_blk.h
 	@mkdir -p $(dir $@)
 	$(DRVMOD_GCC) $(DRVMOD_CFLAGS) -c $< -o $@
 

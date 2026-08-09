@@ -3,6 +3,7 @@
 
 #include "core/types.h"
 #include "core/lock.h"
+#include "core/sync.h"
 #include "drivers/block/block_dev.h"
 
 #define BCACHE_BLOCK_SIZE   512
@@ -43,6 +44,8 @@ typedef struct bcache {
     size_t           dirty_blocks;
     size_t           dirty_pages;
     spinlock_t       lock;
+    mutex_t          fill_lock;
+    mutex_t          writeback_lock;
     bcache_entry_t   lru_head;
     bcache_entry_t   lru_tail;
     pcache_entry_t   page_lru_head;
