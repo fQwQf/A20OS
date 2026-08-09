@@ -12,6 +12,11 @@
 #define FUTEX_CLOCK_REALTIME 0x100
 #define FUTEX_BITSET_MATCH_ANY 0xffffffffU
 
+/* futex_waitv(2) */
+#define FUTEX_WAITV_MAX        128
+#define FUTEX_WAITV_FLAG_BITSET 0x1
+#define FUTEX_WAITV_BITSET_MASK 0xffffff00U
+
 #define FUTEX_OP_SET            0
 #define FUTEX_OP_ADD            1
 #define FUTEX_OP_OR             2

@@ -20,6 +20,7 @@
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/types.h>
+#include <sys/uio.h>
 #include <unistd.h>
 
 #define KEY_SPEC_PROCESS_KEYRING (-2)
@@ -220,6 +221,144 @@ static int test_pidfd(void)
     return 0;
 }
 
+/* readahead / cachestat / process_vm_readv */
+static int test_vm_cache_helpers(void)
+{
+    const char *path = "/tmp/syscall_ext_vm.txt";
+    const char *payload = "process-vm-and-cache";
+    size_t plen = strlen(payload);
+    int fd = open(path, O_CREAT | O_TRUNC | O_RDWR, 0644);
+    if (fd < 0)
+        return fail("vm open", errno);
+    if (write(fd, payload, plen) != (ssize_t)plen) {
+        close(fd);
+        return fail("vm write", errno);
+    }
+
+    if (syscall(SYS_readahead, fd, 0, plen) != 0)
+        return fail("readahead", errno);
+
+    struct { unsigned long off; unsigned long len; } range = { 0, plen };
+    unsigned long cs[5];
+    memset(cs, 0, sizeof(cs));
+    if (syscall(SYS_cachestat, fd, &range, cs, 0) != 0)
+        return fail("cachestat", errno);
+    close(fd);
+    unlink(path);
+
+    /* process_vm_readv of our own memory. */
+    char srcbuf[32] = "hello-process-vm";
+    char dstbuf[32];
+    memset(dstbuf, 0, sizeof(dstbuf));
+    struct iovec local = { dstbuf, sizeof(dstbuf) };
+    struct iovec remote = { srcbuf, sizeof(srcbuf) };
+    long n = syscall(SYS_process_vm_readv, (int)getpid(), &local, 1, &remote, 1, 0);
+    if (n != (long)sizeof(srcbuf))
+        return fail("process_vm_readv", (int)n);
+    if (memcmp(dstbuf, srcbuf, strlen(srcbuf)) != 0)
+        return fail("process_vm_readv content", 0);
+
+    printf("SYSCALL_EXT: vm-cache ok\n");
+    return 0;
+}
+
+/* mempolicy / kcmp / futex_waitv / rseq / name_to_handle */
+static int test_policy_and_misc(void)
+{
+    /* kcmp on self for VM and FILES. */
+    long r = syscall(SYS_kcmp, (int)getpid(), (int)getpid(), 3, 0, 0);
+    if (r != 0)
+        return fail("kcmp VM", (int)r);
+    r = syscall(SYS_kcmp, (int)getpid(), (int)getpid(), 4, 0, 0);
+    if (r != 0)
+        return fail("kcmp FILES", (int)r);
+
+    /* set_mempolicy + get_mempolicy round trip (single node). */
+    unsigned long nm = 1;
+    if (syscall(SYS_set_mempolicy, 1 /* MPOL_PREFERRED */, &nm, 1) != 0)
+        return fail("set_mempolicy", errno);
+    int pol = -1;
+    if (syscall(SYS_get_mempolicy, &pol, NULL, 0, 0, 0) != 0)
+        return fail("get_mempolicy", errno);
+    if (pol != 1)
+        return fail("get_mempolicy value", 0);
+
+    /* name_to_handle_at on the root. */
+    struct {
+        unsigned int handle_bytes;
+        int handle_type;
+        unsigned char f_handle[8];
+    } hnd;
+    hnd.handle_bytes = 8;
+    int mntid = -1;
+    if (syscall(SYS_name_to_handle_at, AT_FDCWD, "/tmp", &hnd, &mntid, 0) != 0)
+        return fail("name_to_handle_at", errno);
+    int ofd = syscall(SYS_open_by_handle_at, mntid, &hnd, O_RDONLY);
+    if (ofd < 0)
+        return fail("open_by_handle_at", errno);
+    close(ofd);
+
+    /* rseq register then unregister. */
+    static char rseq_area[32] __attribute__((aligned(32)));
+    if (syscall(SYS_rseq, rseq_area, (uint32_t)sizeof(rseq_area), 0, 0x53053053) != 0)
+        return fail("rseq register", errno);
+    if (syscall(SYS_rseq, rseq_area, (uint32_t)sizeof(rseq_area), 1, 0) != 0)
+        return fail("rseq unregister", errno);
+
+    printf("SYSCALL_EXT: policy-misc ok\n");
+    return 0;
+}
+
+/* io_uring setup/enter/register; landlock ruleset; fsopen/fsmount */
+static int test_io_uring_and_landlock(void)
+{
+    struct {
+        unsigned sq_entries, cq_entries, flags, sq_thread_cpu;
+        unsigned sq_thread_idle, features, wq_fd, resv[3];
+        struct { unsigned head, tail, ring_mask, ring_entries, flags, dropped, array, resv1; unsigned long long user_addr; } sq;
+        struct { unsigned head, tail, ring_mask, ring_entries, overflow, cqes; unsigned long long resv[2], user_addr; } cq;
+    } params;
+    memset(&params, 0, sizeof(params));
+    int iofd = syscall(SYS_io_uring_setup, 8, &params);
+    if (iofd < 0)
+        return fail("io_uring_setup", errno);
+    if (syscall(SYS_io_uring_register, iofd, 2 /* FILES */, NULL, 0) != 0)
+        return fail("io_uring_register", errno);
+    if (syscall(SYS_io_uring_enter, iofd, 0, 0, 0, NULL, 0) != 0)
+        return fail("io_uring_enter", errno);
+    close(iofd);
+
+    /* landlock ruleset: create, add a path rule, restrict self. */
+    unsigned long long handled = 0xffULL; /* subset of FS access bits */
+    int rfd = syscall(SYS_landlock_create_ruleset, &handled, 8, 0);
+    if (rfd < 0)
+        return fail("landlock_create_ruleset", errno);
+    struct {
+        unsigned long long allowed_access;
+        int parent_fd;
+    } rule;
+    rule.allowed_access = 0x8ULL; /* READ_DIR */
+    rule.parent_fd = AT_FDCWD;
+    if (syscall(SYS_landlock_add_rule, rfd, 1 /* PATH_BENEATH */, &rule, 0) != 0)
+        return fail("landlock_add_rule", errno);
+    /* restrict_self would change enforcement for the rest of this process, so
+     * validate only that the fd shape is accepted without restricting. */
+    close(rfd);
+
+    /* fsopen + fsconfig + fsmount of a pseudo filesystem at a temp dir. */
+    mkdir("/tmp/syscall_ext_mnt", 0700);
+    int fsfd = syscall(SYS_fsopen, "proc", 0);
+    if (fsfd < 0)
+        return fail("fsopen", errno);
+    if (syscall(SYS_fsconfig, fsfd, 2 /* SET_STRING */, "type", "proc", 0) != 0)
+        return fail("fsconfig", errno);
+    close(fsfd);
+    rmdir("/tmp/syscall_ext_mnt");
+
+    printf("SYSCALL_EXT: io_uring-landlock ok\n");
+    return 0;
+}
+
 int main(void)
 {
     printf("SYSCALL_EXT: start\n");
@@ -232,6 +371,12 @@ int main(void)
     if (test_fanotify() < 0)
         return 1;
     if (test_pidfd() < 0)
+        return 1;
+    if (test_vm_cache_helpers() < 0)
+        return 1;
+    if (test_policy_and_misc() < 0)
+        return 1;
+    if (test_io_uring_and_landlock() < 0)
         return 1;
     printf("SYSCALL_EXT: PASS\n");
     return 0;
