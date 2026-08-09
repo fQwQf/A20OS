@@ -47,6 +47,13 @@ void klog_write(const char *fmt, ...) {
     uart_puts(msg);
 }
 
+/* Raw write used by /dev/kmsg: appends bytes verbatim to the ring. */
+void klog_write_raw(const char *buf, size_t len) {
+    klog_append(buf, len);
+    for (size_t i = 0; i < len; i++)
+        uart_putc(buf[i]);
+}
+
 int klog_read(char *buf, size_t size, size_t *pos) {
     uint64_t flags = spin_lock_irqsave(&klog_lock);
     if (!pos || *pos >= klog_used) {
