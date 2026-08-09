@@ -29,11 +29,11 @@
 | Linux ABI 透明获益（vDSO、唤醒快路径、AF_UNIX 桥接） | 已实现 | `smoke-clock-vdso` + unix 测试 |
 | TCP/IP 协议栈（内核态 lwIP 单一实现） | 已实现 | lwIP 源码位于 `kernel/external/lwip`，由内核 `kernel/net` 编译；`smoke-network-suite` |
 | 统一等待对象层（futex/EventQ/channel/pipe/socket/mutex 共用 `wait_queue_t`） | 已实现 | futex 迁移到共享 `wait_queue_t`（谓词匹配/requeue/purge），`smoke-futex-stress`、`smoke-sched-stress` |
-| Channel IPC 从 Linux ABI 消费（fd 表面） | 已实现 | `SYS_a20_channel_pair`/`SYS_a20_registry_client`：Linux 程序经 read/write 使用同一 channel 机制与服务注册表，`smoke-a20-channel` |
+| Channel IPC 从 Linux ABI 消费（fd 表面） | 已实现 | `SYS_a20_channel_pair`(900)/`SYS_a20_registry_client`(901)：Linux 程序经 read/write 使用同一 channel 机制与服务注册表，`smoke-a20-channel` |
 | 统一对象计量（fd/vfile 纳入对象审计） | 已实现 | `/proc/a20/objects` 增加 `vfiles` 计数（fdtable + fd-backed handle 共享），崩溃循环零漂移审计覆盖两 ABI |
 | 核心原语契约测试（rights 代数 / 背压 / EventQ / VMO 生命周期） | 已实现（改造阶段一） | `smoke-native-contract`，`test_native_contract.c` 四分区 |
 | 句柄类型掩码 STAT 一致性（端点/队列可 query） | 已实现（阶段一副产品） | `handle_table.c` 类型掩码 + `ralg` 分区 |
-| 双态部署驱动框架（drv_env + 共享协议层） | 已实现（改造阶段三） | goldfish RTC 同源码双态：内核壳 boot probe + `smoke-native-rtcd`，见 [04-dual-placement.md](04-dual-placement.md) |
+| 双态部署驱动框架（drv_env + 共享协议层） | 已实现（改造阶段三） | `kernel/include/drivers/dual/drv_env.h` 三后端（KERNEL/USER/DRVMOD），goldfish RTC 同源码双态：内核壳 boot probe + `smoke-native-rtcd`，见 [04-dual-placement.md](04-dual-placement.md) |
 | 双态语义一致性验证（virtio-input 第二样板） | 已实现 | `smoke-dual-input`：同一共享协议在两种部署下读出相同设备身份；DMA ops 已进 drv_env（信任模型） |
 | 功能态用户驱动（virtio-input 事件面） | 已实现 | `smoke-dual-input`：全权初始化 + 共享 virtq + IRQ→EventQ，monitor `sendkey` 注入验证真实按键事件解码 |
 | 连续 DMA heap | 已实现 | `device_alloc_dma` 预物化连续 VMO，`test_native_contract` 的 `dma` 分区验证连续物理地址与零填充 |
@@ -44,6 +44,9 @@
 | IDL 版本化请求/响应信封 | 已实现 | rtcd 请求/响应独立 wire type + version/size 校验，`smoke-native-rtcd` |
 | Linux pipe 人格层 PoC | 已实现（阶段五起步） | `smoke-native-personality`：channel/EventQ 的 pipe-shaped facade |
 | Linux personality facade（fd/mmap/pipe/socketpair/futex/epoll） | 已实现（阶段五第二块） | `smoke-native-linux` 六分区 PASS，`a20_linux.h` |
+| 统一驱动框架（`driver_t`/class 设备/DriverStore） | 已实现 | `kernel/drivers/core/driver_core.c` + `driver_manager.c`，`smoke-drvmod`、`smoke-evdev-stress` |
+| drvmod 内核模块装载 | 已实现 | `kernel/drvmod/loader.c` ET_REL + `.a20drv` 描述段 + veneer/GOT，`smoke-drvmod-*` |
+| fd-IPC 后端（channel_fd/eventfd/signalfd/timerfd/SysV shm/sem） | 已实现 | `kernel/ipc/*.c` 是 ABI 无关 vfile 后端，Linux `eventfd2/signalfd4/timerfd_*/sem*/shm*` 建立其上 |
 
 ## 正确性状态（SMP）
 
@@ -60,7 +63,7 @@
 - **时间片捐赠仅限 UP**：SMP 捐赠依赖跨核唤醒/IPI 簿记（`PER_CPU_CURRENT_VALIDATION`），未完成前不开放；
 - **Native ABI SMP 破坏（已收敛，2026-08-06 复验）**：此前 SMP=2/8 下 `native-shmring` 约 30% 概率的偶发内存破坏，经 M5 修复（`98a1260`、`1af0d02`：buddy 脏块拆分、页释放 TLB 顺序、peer 引用）后，在本分支复验为 **SMP=2 连续 20 轮 + SMP=8 连续 20 轮零失败、零挂起**（复现脚本：循环 QEMU 注入 `/bin/native-shmring-rv`，smp=2/8，日志归档于 `.kernel-build/smoke/shmring-smp{2,8}/`）。残余信号：`vmo_dirty_frames`（buddy 复用未清零帧，VMO 侧 memset 兜底，合法行为）已从串口 printf 降级为 `/proc/a20/objects` 累计计数器，不再干扰用户输出解析；阶段三起若需恢复帧级追踪，可在此计数器非零增长时重新挂 `frame_trace_dump_pfn`；
 - **网络协议栈**：lwIP 作为内核态唯一实现（源码 `kernel/external/lwip`，由 `kernel/net` 编译）。此前的用户态 netd 服务（`user/svc/netd.c`、`kernel/net/netd_ring.c`、socket 代理）已整体移除：其 recv 数据段始终未通（子连接 PCB 在 accept 后消失），且 netd 进程并未被拉起，导致 AF_INET 被代理到一个不存在的进程。内核 lwIP 单一路径由 `smoke-network-suite` 验证（TCP/UDP 回环、DNS、ICMP、AF_UNIX 全通过）。
-- **loongarch64**：内核与 native 测试均构建通过，运行时复测受工具链/镜像条件所限未完整执行；
+- **loongarch64**：内核与 native 测试均构建通过，运行时复测受工具链/镜像条件所限未像 riscv64 那样完整执行；
 - **性能数据**全部来自 QEMU TCG 模拟器，真实硬件基准待测；
 - **IOMMU/DMA 安全**：DMA 隔离已升级为真实 IOMMU 硬件强制——DDT(1LVL)、 CQ/FQ 使能，devid 0 配置 SV39 翻译域并经 TR_REQ 验证（已映射 IOVA 精确翻译、未映射 IOVA 被硬件拒绝 fault=1/cause=13），devid 1 保持 passthrough。fault 队列消费与 per-device 页表动态映射为后续工作。
 
@@ -76,7 +79,20 @@
 ## 复现入口
 
 ```bash
-make smoke-native-ipc       # IPC 快路径make smoke-native-svc       # 服务崩溃自愈make smoke-native-registry  # 注册表 + 重绑make smoke-native-isolation # 泄漏审计（崩溃循环零漂移）make smoke-native-rtcd      # 用户态 RTC 驱动make smoke-native-ubd       # 用户态 virtio-blk + 文件系统make smoke-native-shmring   # 共享环数据面make smoke-clock-vdso       # vDSOmake smoke-mm-stress smoke-vfs-stress   # Linux ABI 回归
-make smoke-native-contract  # 核心原语契约（改造阶段一）
+make smoke-native-ipc          # IPC 快路径
+make smoke-native-svc          # 服务崩溃自愈（svcman 最小演示）
+make smoke-native-registry     # 注册表 + 重绑（svcmgr）
+make smoke-native-isolation    # 泄漏审计（崩溃循环零漂移）
+make smoke-native-rtcd         # 用户态 RTC 驱动
+make smoke-native-ubd          # 用户态 virtio-blk + 文件系统
+make smoke-native-shmring      # 共享环数据面
+make smoke-native-contract     # 核心原语契约（改造阶段一）
+make smoke-native-linux        # Linux personality 六分区（阶段五）
+make smoke-native-personality  # 人格层语义对照（pipe_ref）
+make smoke-dual-input          # 双态部署语义一致 + 功能态用户驱动
+make smoke-iommu-discovery     # IOMMU 硬件初始化与 TR_REQ 验证
+make smoke-a20-channel         # Linux ABI 经 fd 消费 channel/registry
+make smoke-clock-vdso          # vDSO
+make smoke-mm-stress smoke-vfs-stress   # Linux ABI 回归
 # 驱动崩溃恢复（手动）：QEMU 加 bus.3 scratch 盘，运行 /bin/ubd_recover
 ```

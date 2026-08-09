@@ -100,7 +100,7 @@ $$\pi = \sigma_0 \xrightarrow{op_1} \sigma_1 \xrightarrow{op_2} \cdots \xrightar
 **类别 N：调试操作**（debug_attach, debug_read_regs, debug_write_regs）
 - 只读或修改寄存器状态，不修改 handle table。$\mathcal{I}$ 保持。
 
-**穷举性论证（形式化核心边界）**：以上 14 个类别（A-N）覆盖 02 文档定义的全部 53 个**形式化核心 syscall**。每个核心 syscall 属于且仅属于一个类别。新增 SOS 规则（H-REPLACE, H-CLOSE-MANY, T-THREAD-CREATE, O-DESTROY）已纳入相应类别，因此对该 53-syscall 子集的归纳 case analysis 是穷举的。当前内核分发表有 112 个入口；新增 56 个工程 syscall 尚未全部加入本分类，故本结论不得外推为“现行实现 112 个 syscall 已穷举证明”。
+**穷举性论证（形式化核心边界）**：以上 14 个类别（A-N）覆盖 02 文档定义的全部 53 个**形式化核心 syscall**。每个核心 syscall 属于且仅属于一个类别。新增 SOS 规则（H-REPLACE, H-CLOSE-MANY, T-THREAD-CREATE, O-DESTROY）已纳入相应类别，因此对该 53-syscall 子集的归纳 case analysis 是穷举的。当前内核分发表有 126 个入口；新增工程 syscall 尚未全部加入本分类，故本结论不得外推为“现行实现全部 syscall 已穷举证明”。
 
 由数学归纳，$\pi$ 是安全的。$\square$
 
@@ -531,7 +531,7 @@ $$V'(\sigma) = \sum_{p \in P_{alive}} (|dom(HT_p)| + 1)$$
 | ADMIN | task_kill (外部), debug_attach, ns_apply | 无法管理 |
 | SIGNAL | task_kill | 无法发送信号 |
 
-每种权限控制至少一个操作，且每个操作至少需要一个权限。14 种权限和 13 种对象类型构成最小充分集。
+每种权限控制至少一个操作，且每个操作至少需要一个权限。14 种权限和 14 种对象类型构成最小充分集。
 
 ---
 
@@ -861,15 +861,15 @@ SOS 规则中，error 路径的形式为 $\langle op, \sigma \rangle \longrighta
 
 以下方面**未被**上述论证完全覆盖：
 
-1. ~~**并发 interleaving 的精化**~~：✅ 已补充至 §9.7（并发精化映射）。引理 9.1-9.2 建立了 spinlock 临界区与 SOS 单步转移的对应。定理 9.3 证明了 $L_2 \sqsubseteq_{conc} L_1$。
+1. ~~**并发 interleaving 的精化**~~：√ 已补充至 §9.7（并发精化映射）。引理 9.1-9.2 建立了 spinlock 临界区与 SOS 单步转移的对应。定理 9.3 证明了 $L_2 \sqsubseteq_{conc} L_1$。
 
-2. ~~**内存模型的精化**~~：✅ 已补充至 §9.8（C 内存模型与 SOS 对应）。定理 9.4-9.5 在 spinlock acquire/release 和 atomic 操作语义下证明了内存序与 SOS 一致。
+2. ~~**内存模型的精化**~~：√ 已补充至 §9.8（C 内存模型与 SOS 对应）。定理 9.4-9.5 在 spinlock acquire/release 和 atomic 操作语义下证明了内存序与 SOS 一致。
 
-3. ~~**扩容操作的原子性**~~：✅ 已补充至 08 §13（ht_grow 精化论证）。定理 13.1 证明扩容保持 RI-1 到 RI-4。
+3. ~~**扩容操作的原子性**~~：√ 已补充至 08 §13（ht_grow 精化论证）。定理 13.1 证明扩容保持 RI-1 到 RI-4。
 
-4. ~~**error 路径的精化**~~：✅ 已补充至 §8.5.1。对 close/dup/lookup/send 的全部 error 路径进行系统化覆盖。定理 8.2 证明 error 路径返回值与 SOS 对应且状态不变。
+4. ~~**error 路径的精化**~~：√ 已补充至 §8.5.1。对 close/dup/lookup/send 的全部 error 路径进行系统化覆盖。定理 8.2 证明 error 路径返回值与 SOS 对应且状态不变。
 
-5. ~~**IRQ 上下文的精化**~~：✅ 已补充至 08 §12。定理 12.1 证明 IRQ 上下文中的安全性（无死锁、无睡眠、无 UAF）。
+5. ~~**IRQ 上下文的精化**~~：√ 已补充至 08 §12。定理 12.1 证明 IRQ 上下文中的安全性（无死锁、无睡眠、无 UAF）。
 
 6. **无锁数据结构的精化**：若未来引入无锁 ring buffer（如 event queue 优化），`RELAXED` 操作可能需要更精细的内存序分析。当前所有共享状态修改都在 spinlock 保护下（§9.8.5）。
 

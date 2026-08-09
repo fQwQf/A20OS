@@ -22,7 +22,16 @@ Native ABI 提供两个互补的 IPC 原语：
 Channel 是**双向端对端**的消息管道。创建时产生两个 endpoint handle，分别给通信双方。
 
 ```text
-进程 A                          进程 B│                               │channel_create()                │→ ep0_handle, ep1_handle        ││                               │channel_send(ep0, data, handles) │─────────────────────────────────→ channel_recv(ep1, ...)│                               │←───────────────────────────────── channel_send(ep1, response)channel_recv(ep0, ...)          │
+进程 A                          进程 B
+│                               │
+channel_create()                │
+→ ep0_handle, ep1_handle        │
+│                               │
+channel_send(ep0, data, handles)│
+─────────────────────────────────→ channel_recv(ep1, ...)
+│                               │
+←───────────────────────────────── channel_send(ep1, response)
+channel_recv(ep0, ...)          │
 ```
 
 ### 2.2 数据结构
@@ -170,12 +179,11 @@ int64_t channel_recv(a20_msg_recv_args_t *args);
 如果接收方的 handle table 满了，消息中的 handle 只能部分投递。这触发 partial delivery：
 
 ```text
-状态：IDLE → 正常PARTIAL → 消息已取出，部分 handle 已投递，等待剩余空间ROLLED_BACK → 投递失败，消息回滚
-
-转换：IDLE → recv 开始如果所有 handle 投递成功 → IDLE（消息完成）如果部分 handle 投递失败 → PARTIALPARTIAL → 重试投递 / 超时 → ROLLED_BACK（释放所有 handle 引用）
+正常：recv 开始 → 预留全部 handle 槽位 → 出队 → commit（消息完成）
+NO_SPACE：接收方 handle table 满 → 预留失败 → recv 返回 NO_SPACE，消息保持排队
 ```
 
-**实现决策（已落地）**：不使用部分投递。`reserve-many → dequeue → commit` 保证接收方 HT 空间不足时整个 recv 返回 `NO_SPACE`，消息留在队列中；commit 对已预留槽位不再失败。
+**实现决策（已落地）**：不使用部分投递。`reserve-many → dequeue → commit` 保证接收方 HT 空间不足时整个 recv 返回 `NO_SPACE`，消息留在队列中；commit 对已预留槽位不再失败。不存在 PARTIAL/ROLLED_BACK 中间态。
 
 ### 2.7 Handle Transfer 语义
 

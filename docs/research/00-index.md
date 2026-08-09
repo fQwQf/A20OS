@@ -219,9 +219,19 @@
 设计规范位于 `docs/native-abi/`，实现位于 `kernel/abi/native/`、`kernel/ipc/` 和 `kernel/mm/`：
 
 ```text
-docs/native-abi/00-overview.md        顶层概述、设计原则、文档索引01-types.md           基础类型、ABI 头约定、syscall 参数结构体02-errors.md          错误码、返回约定03-handle.md          13 种对象、handle table、时态能力、93 syscall 列表04-memory.md          VMO/VMAR 模型与当前 source 映射语义05-ipc.md             Typed Channel、阻塞 Channel、Event Queue06-security.md        Rights、标签、transfer、时态权限模型07-startup.md         启动协议、libc 分层设计08-runtime-status.md  当前实现状态与剩余差距
+docs/native-abi/00-overview.md        顶层概述、设计原则、文档索引
+01-types.md           基础类型、ABI 头约定、syscall 参数结构体
+02-errors.md          错误码、返回约定
+03-handle.md          14 种对象、handle table、时态能力、126 syscall 列表
+04-memory.md          VMO/VMAR 模型与当前 source 映射语义
+05-ipc.md             Typed Channel、阻塞 Channel、Event Queue
+06-security.md        Rights、标签、transfer、时态权限模型
+07-startup.md         启动协议、libc 分层设计
+08-runtime-status.md  当前实现状态与剩余差距
 
-kernel/abi/native/      syscall 分派、handle table、各子系统入口kernel/ipc/             channel、event queue、对象生命周期kernel/mm/              VMO/VMAR
+kernel/abi/native/      syscall 分派、handle table、各子系统入口
+kernel/ipc/             channel、event queue、对象生命周期
+kernel/mm/              VMO/VMAR
 ```
 
 本文档体系中的 01-08 号研究笔记在设计规范基础上进行：
@@ -233,7 +243,7 @@ kernel/abi/native/      syscall 分派、handle table、各子系统入口kernel
 5. **架构详述**（08）：设计中隐含的实现决策的显式分析
 6. **评估与贡献**（05+06）：如何验证和定位工作
 
-设计规范已整合研究发现，并以当前实现为准更新：13 种对象类型、112 个 syscall、typed channel 强制、时态控制入口与 deadline-driven sweeper、阻塞 channel/event_wait、reserve-then-dequeue 无部分投递、对象级联释放、VMO source 映射。研究笔记中的形式化证明仍以 53 个核心 syscall 模型为主，因此“设计已证明”与“112 个实现入口全部被证明”必须明确区分。
+设计规范已整合研究发现，并以当前实现为准更新：14 种对象类型、126 个 syscall、typed channel 强制、时态控制入口与 deadline-driven sweeper、阻塞 channel/event_wait、reserve-then-dequeue 无部分投递、对象级联释放、VMO source 映射。研究笔记中的形式化证明仍以 53 个核心 syscall 模型为主，因此“设计已证明”与“126 个实现入口全部被证明”必须明确区分。
 
 ---
 

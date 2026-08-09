@@ -2,6 +2,8 @@
 
 本文档记录 A20OS 在 P1 Wave 1 收紧 VFS Linux 边界语义时的设计决策。每项决策都映射到实现文件和验证它的测试门禁。本文基于 `kernel/fs/`、`kernel/abi/linux/` 下的当前代码，以及面向用户的压力测试套件 `user/cmds/vfs_stress.c`。
 
+> **实现状态**：本设计已全部落地。各章节的"当前状态"小节记录的是**设计时**的旧行为；当前行为与决策后的实现一致，由 `smoke-vfs-edge` 门禁验证。
+
 ## 1. 范围
 
 覆盖的 syscall 和 VFS 边界领域：
@@ -19,9 +21,9 @@
 
 ## 2. openat2：完整 Linux resolve flag 集合
 
-### 2.1 当前状态
+### 2.1 当前状态（设计时）
 
-`kernel/abi/linux/sys_proc.c:483` 中的 `sys_openat2` 会从用户 `struct open_how` 复制 `how->flags` 和 `how->mode`，但忽略 `how->resolve` 和 `how->size`。随后它调用 `sys_openat`，因此 `RESOLVE_*` flag 没有任何效果。
+`kernel/abi/linux/sys_proc.c` 的 `sys_openat2` 曾从用户 `struct open_how` 复制 `how->flags` 和 `how->mode`，但忽略 `how->resolve` 和 `how->size`，随后调用 `sys_openat`，因此 `RESOLVE_*` flag 没有任何效果。**现已实现**：`how->size` 被校验、未知 `resolve` bit 以 `-EINVAL` 拒绝、`RESOLVE_NO_SYMLINKS/BENEATH/IN_ROOT/NO_MAGICLINKS/NO_XDEV/NO_TRAILING_SYMLINKS` 经 `vfs_openat2` 生效（`sys_proc.c:552`）。
 
 ### 2.2 决策
 
@@ -40,7 +42,7 @@
 ### 2.3 实现映射
 
 - `kernel/abi/linux/sys_proc.c`：对 `sizeof(struct open_how)` 校验 `how->size`；用 `-EINVAL` 拒绝未知 `resolve` bit；将 resolve flag 传给 `vfs_openat2`。
-- `kernel/fs/vfs.c` / 新 `kernel/fs/vfs/open.c`：增加 `vfs_openat2(dirfd, path, flags, mode, resolve)`，构造 resolution context 并调用 resolver。
+- `kernel/fs/vfs.c`：`vfs_openat2(dirfd, path, flags, mode, resolve)` 构造 resolution context 并调用 resolver。
 - `kernel/fs/vfs/path_resolution.c`：扩展 `vnode_lookup_path`，使其接受 `resolve_flags` bitmask 和起始目录。增加 helper `vfs_path_walk_beneath`。
 - `kernel/fs/vfs/dcache.c`：~~增加 `vfs_dcache_lookup_cached`~~；由于当前 dentry cache 是优化层而不是权威 lookup 来源，`RESOLVE_CACHED` 以 `-EINVAL` 拒绝。
 - `kernel/include/fs/vfs.h`：增加 `RESOLVE_*` 常量和 `open_how` struct layout。
@@ -55,9 +57,9 @@
 
 ## 3. renameat2 flag
 
-### 3.1 当前状态
+### 3.1 当前状态（设计时）
 
-`kernel/abi/linux/sys_path.c:31` 中的 `sys_renameat2` 会用 `-EINVAL` 拒绝任何非零 `flags`，并调用 `vfs_rename` 执行不带 flag 的普通 rename。
+`kernel/abi/linux/sys_path.c` 的 `sys_renameat2` 曾用 `-EINVAL` 拒绝任何非零 `flags`。**现已实现**：`RENAME_NOREPLACE` 与 `RENAME_EXCHANGE` 被接受并经 `vfs_rename` 分发到后端（`sys_path.c:40`），`RENAME_WHITEOUT` 仍以 `-EINVAL` 拒绝。
 
 ### 3.2 决策
 
@@ -82,9 +84,9 @@
 
 ## 4. statx
 
-### 4.1 当前状态
+### 4.1 当前状态（设计时）
 
-`kernel/abi/linux/sys_path.c:287` 中的 `sys_statx` 校验部分 flag，默认 `mask` 为 `STATX_BASIC_STATS`，并填充固定字段集合。它不遵守 `AT_STATX_FORCE_SYNC` / `AT_STATX_DONT_SYNC`，不报告 `STATX_BTIME`，也忽略大部分请求的 `mask`。
+`kernel/abi/linux/sys_path.c` 的 `sys_statx` 曾默认 `mask` 为 `STATX_BASIC_STATS` 并填充固定字段集合，不遵守 sync type、不报告 `STATX_BTIME`、忽略大部分请求的 `mask`。**现已实现**：`mask` 被遵守（只填充请求字段、`stx_mask` 反映实际提供字段），`STATX_BTIME` 报告为与 `ctime` 相同（`sys_path.c:358`）。
 
 ### 4.2 决策
 
@@ -105,10 +107,10 @@
 
 ## 5. faccessat2 / fchmodat2
 
-### 5.1 当前状态
+### 5.1 当前状态（设计时）
 
-- `kernel/fs/vfs.c:527` 中的 `vfs_faccessat2` 处理 `AT_EACCESS`、`AT_SYMLINK_NOFOLLOW` 和 `AT_EMPTY_PATH`。
-- `kernel/abi/linux/sys_path.c:232` 中的 `sys_fchmodat` 处理 `AT_SYMLINK_NOFOLLOW` 和 `AT_EMPTY_PATH`，但在 legacy `fchmodat` 路径中忽略第四个参数。
+- `kernel/fs/vfs.c` 中的 `vfs_faccessat2` 处理 `AT_EACCESS`、`AT_SYMLINK_NOFOLLOW` 和 `AT_EMPTY_PATH`，并对未支持 bit 返回 `-EINVAL`（`vfs_stat.c:165`）。
+- `kernel/abi/linux/sys_path.c` 中的 `sys_fchmodat` 处理 `AT_SYMLINK_NOFOLLOW` 和 `AT_EMPTY_PATH`，但在 legacy `fchmodat` 路径中忽略第四个参数。
 - `fchmodat2` 在 `kernel/abi/linux/syscall_table.def:74` 中连到带 flags 参数的 `sys_fchmodat`。
 
 ### 5.2 决策
@@ -151,9 +153,9 @@ P1 保留全局 RAM xattr 表，但收紧 ABI 表面：
 
 ## 7. Symlink loop limit
 
-### 7.1 当前状态
+### 7.1 当前状态（设计时）
 
-`vnode_lookup_path` 递增 `symlink_depth`，当深度超过 8 时以 `-ELOOP` 失败（`kernel/fs/vfs/path_resolution.c:89`）。
+`vnode_lookup_path` 曾把 `symlink_depth` 上限硬编码为 8（`kernel/fs/vfs/path_resolution.c:89`）。**现已实现**：使用 `MAX_SYMLINKS`（40，`kernel/include/fs/vfs.h:22`），深度超过时以 `-ELOOP` 失败。
 
 ### 7.2 决策
 
@@ -167,9 +169,9 @@ P1 保留全局 RAM xattr 表，但收紧 ABI 表面：
 
 ## 8. Mount-point `..` crossing
 
-### 8.1 当前状态
+### 8.1 当前状态（设计时）
 
-`vnode_lookup_path` 通过跟随 `vnode->parent` 处理 `..`（`kernel/fs/vfs/path_resolution.c:52`）。如果 walk 位于 mount root，`vnode->parent` 要么指回自身（`fat32.c:1213`、`ext4.c:1536`），要么指向被挂载文件系统内部的 parent（`ramfs.c:165`、`ramfs.c:266`），因此 `..` 无法逃出 mount。
+`vnode_lookup_path` 通过跟随 `vnode->parent` 处理 `..`。此前 mount root 的 `vnode->parent` 要么指回自身，要么指向被挂载文件系统内部的 parent，因此 `..` 无法逃出 mount。**现已实现**：在 mount root 处解析 `..` 时切换到 mount point 的父目录（mount crossing），`RESOLVE_NO_XDEV` 阻止这种跨越。
 
 ### 8.2 决策
 
@@ -183,14 +185,14 @@ P1 保留全局 RAM xattr 表，但收紧 ABI 表面：
 
 - `kernel/fs/vfs/mount.c`：增加 `vfs_mount_parent(mount_t *mnt)`，返回覆盖 `mnt->path` 父路径的 mount。
 - `kernel/fs/vfs/path_resolution.c`：在 `vnode_lookup_path` 中跟随 `vnode->parent` 前，先检查 `cur` 是否是 mount root；如果是，切换到 parent mount 的 vnode 并继续。
-- `kernel/fs/vfs.h`：增加 mount-root 检测 helper。
+- `kernel/include/fs/vfs.h`：增加 mount-root 检测 helper。
 - `user/cmds/vfs_stress.c`：增加从 `/bin`（FAT32 mount）通过 `..` 回到 `/` 的测试。
 
 ## 9. chroot
 
-### 9.1 当前状态
+### 9.1 当前状态（设计时）
 
-`kernel/abi/linux/sys_namespace.c:26` 中的 `sys_chroot` 会校验目标为目录、检查 `CAP_SYS_CHROOT`、把路径存入 `cur->fs.root_path`，并把 `cwd` 重置为 `/`。但是 `vfs_resolve_at` 和 `vnode_lookup_path` 不读取 `root_path`，所以 `chroot` 对后续 path resolution 没有效果。
+`kernel/abi/linux/sys_namespace.c` 的 `sys_chroot` 曾校验目标为目录、检查 `CAP_SYS_CHROOT`、把路径存入 `cur->fs.root_path` 并重置 cwd，但 resolver 不读取 `root_path`。**现已实现**：`vfs_path_normalize_absolute_with_root` 在路径解析中约束 `root_path`（`kernel/fs/vfs/path_resolution.c`），chrooted 进程的绝对路径与 `..` 都无法逃出 chroot。
 
 ### 9.2 决策
 

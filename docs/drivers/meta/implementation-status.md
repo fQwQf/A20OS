@@ -30,7 +30,7 @@ QEMU x86_64 与 RISC-V64 GUI 的 VirtIO GPU、键盘和鼠标分别由 `make smo
 | PCI bus | 已扩展 | ECAM、ID/subsystem match、零值未分配 BAR sizing/assignment、BAR 编号查询、modern VirtIO capabilities；已设置 `matched_id` |
 | VirtIO-MMIO bus | 符合 | MMIO/IRQ 资源、type match、`matched_id`；静态最多 8 个设备 |
 | hwapi MMIO | 符合 | 宽度访问和 barrier；relaxed 版本需谨慎 |
-| hwapi IRQ | 明确边界 | 固定 256 线、每线一个 handler；表操作受锁保护，重复注册返回 `-EBUSY`；`free_irq` 校验 owner token 并等待在途 handler |
+| hwapi IRQ | 已扩展 | 固定 256 线；`IRQF_SHARED` 提供单链表 handler chain（首个注册必须是共享标志，后续共享 handler 追加）；非共享重复注册返回 `-EBUSY`；`free_irq` 校验 owner token 并等待在途 handler |
 | hwapi DMA | 基础可用 | coherent helper 返回物理 handle，sync 委托 arch cache hook；尚无 DMA mask/IOMMU/大对齐能力 |
 | class publication | 已扩展 | probe 成功自动建立带引用的 class device；remove 前先下线并排空在途调用 |
 | devfs/sysfs | 动态类视图 | char/block/audio 自动生成 `/dev/charN`、`diskN`、`audioN`；所有 class 动态暴露于 `/sys/class`；旧 display/input 聚合节点暂时保留 |
