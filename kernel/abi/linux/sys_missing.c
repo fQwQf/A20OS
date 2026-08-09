@@ -211,3 +211,114 @@ int64_t sys_rseq(void *rseq, uint32_t rseq_len, int flags, uint32_t sig)
     t->rseq_flags = (uint32_t)flags;
     return 0;
 }
+
+/* ---- ioprio / pkey (scheduler compat layer) ---- */
+#include "proc/sched_compat.h"
+
+int64_t sys_ioprio_set(int which, int who, int ioprio)
+{
+    return ioprio_set_task(proc_current(), which, who, ioprio);
+}
+
+int64_t sys_ioprio_get(int which, int who)
+{
+    return ioprio_get_task(proc_current(), which, who);
+}
+
+int64_t sys_pkey_alloc(unsigned flags, uint64_t init_access_rights)
+{
+    (void)init_access_rights;
+    return pkey_alloc(proc_current(), flags);
+}
+
+int64_t sys_pkey_free(int pkey)
+{
+    return pkey_free(proc_current(), pkey);
+}
+
+int64_t sys_pkey_mprotect(uint64_t addr, size_t len, int prot, int pkey)
+{
+    task_t *t = proc_current();
+    if (!t)
+        return -ESRCH;
+    if (!pkey_valid(t, pkey))
+        return -EINVAL;
+    return sys_mprotect(addr, len, prot);
+}
+
+int64_t sys_mlock2(uint64_t addr, size_t len, int flags)
+{
+    if (flags)
+        return -EINVAL;
+    return sys_mlock(addr, len);
+}
+
+int64_t sys_mseal(uint64_t addr, size_t len, unsigned flags)
+{
+    (void)addr;
+    (void)len;
+    (void)flags;
+    /* mseal seals a VMA against further modification.  A20OS does not track
+     * per-VMA seal state yet; accept the call as a no-op so probing tools
+     * work. */
+    return 0;
+}
+
+int64_t sys_seccomp(unsigned op, unsigned flags, const void *uargs)
+{
+    (void)uargs;
+    /* SECCOMP_SET_MODE_FILTER (1) with SECCOMP_FILTER_FLAG_LOG etc. is not
+     * supported.  Allow SECCOMP_SET_MODE_STRICT (0) which only forbids
+     * syscalls not in a minimal set -- A20OS has no seccomp engine, so report
+     * the op as unsupported rather than silently allow-disabling. */
+    (void)op;
+    (void)flags;
+    return -EINVAL;
+}
+
+int64_t sys_kexec_load(uint64_t entry, uint64_t nr_segments,
+                       const void *segments, uint64_t flags)
+{
+    (void)entry;
+    (void)nr_segments;
+    (void)segments;
+    (void)flags;
+    task_t *t = proc_current();
+    if (!t)
+        return -ESRCH;
+    if (!proc_has_cap(t, CAP_SYS_BOOT) && t->cred.euid != 0)
+        return -EPERM;
+    /* kexec reboots into a new kernel; A20OS does not support image
+     * handoff, so refuse rather than fake success. */
+    return -EINVAL;
+}
+
+int64_t sys_kexec_file_load(int kernel_fd, int initrd_fd,
+                            uint64_t cmdline_len, const void *cmdline,
+                            uint64_t flags)
+{
+    (void)kernel_fd;
+    (void)initrd_fd;
+    (void)cmdline_len;
+    (void)cmdline;
+    (void)flags;
+    return -EINVAL;
+}
+
+int64_t sys_nfsservctl(int cmd, const void *arg, void *res)
+{
+    (void)cmd;
+    (void)arg;
+    (void)res;
+    /* nfsservctl was removed in Linux 4.19; keep a predictable ENOSYS. */
+    return -ENOSYS;
+}
+
+int64_t sys_map_shadow_stack(uint64_t addr, uint64_t size, unsigned flags)
+{
+    (void)addr;
+    (void)size;
+    (void)flags;
+    /* shadow stacks are an x86 CET feature; RISC-V has no shadow-stack syscall. */
+    return -ENOSYS;
+}

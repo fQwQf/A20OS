@@ -644,3 +644,25 @@ int64_t sys_futex_requeue(int *uaddr, int *uaddr2, int nr_wake, int nr_requeue,
      * FUTEX_REQUEUE command. */
     return futex_requeue(uaddr, nr_wake, nr_requeue, uaddr2, 0, 0);
 }
+
+/* futex_wait(2) / futex_wake(2): the split-out syscalls (Linux 6.7+).
+ * Equivalent to the legacy FUTEX_WAIT/FUTEX_WAKE commands with a timespec
+ * timeout and a 32-bit clockid/flags argument. */
+struct linux_timespec64_fw2 {
+    int64_t tv_sec;
+    int64_t tv_nsec;
+};
+
+int64_t sys_futex_wait(void *uaddr, uint32_t val, const void *timeout,
+                       uint32_t flags)
+{
+    int realtime = (flags & 1) != 0; /* FUTEX_CLOCK_REALTIME */
+    return futex_wait_on((int *)uaddr, (int)val, (void *)timeout,
+                         FUTEX_BITSET_MATCH_ANY, 1, realtime);
+}
+
+int64_t sys_futex_wake(void *uaddr, uint32_t nr, uint32_t flags)
+{
+    (void)flags;
+    return futex_wake_on((int *)uaddr, (int)nr, FUTEX_BITSET_MATCH_ANY);
+}

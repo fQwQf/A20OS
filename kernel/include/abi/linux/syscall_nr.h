@@ -201,6 +201,16 @@
 #define SYS_semtimedop     192
 #define SYS_semop          193
 #define SYS_shmget         194
+#define SYS_msgget         186
+#define SYS_msgctl         187
+#define SYS_msgrcv         188
+#define SYS_msgsnd         189
+#define SYS_mq_open        180
+#define SYS_mq_unlink      181
+#define SYS_mq_timedsend   182
+#define SYS_mq_timedreceive 183
+#define SYS_mq_notify      184
+#define SYS_mq_getsetattr  185
 #define SYS_shmctl         195
 #define SYS_shmat          196
 #define SYS_shmdt          197
@@ -307,6 +317,47 @@
 #define SYS_set_mempolicy_home_node 450
 #define SYS_cachestat          451
 #define SYS_futex_requeue      456
+
+/* RISC-V 64-bit Linux syscall numbers for the second "finish the Linux ABI"
+ * batch: message queues, ioprio, pkeys, LSM/mount introspection and misc. */
+#define SYS_ioprio_set         30
+#define SYS_ioprio_get         31
+#define SYS_nfsservctl         42
+#define SYS_kexec_load         104
+#define SYS_mq_open            180
+#define SYS_mq_unlink          181
+#define SYS_mq_timedsend       182
+#define SYS_mq_timedreceive    183
+#define SYS_mq_notify          184
+#define SYS_mq_getsetattr      185
+#define SYS_msgget             186
+#define SYS_msgctl             187
+#define SYS_msgrcv             188
+#define SYS_msgsnd             189
+#define SYS_seccomp            277
+#define SYS_mlock2             284
+#define SYS_pkey_mprotect      288
+#define SYS_pkey_alloc         289
+#define SYS_pkey_free          290
+#define SYS_kexec_file_load    294
+#define SYS_map_shadow_stack   453
+#define SYS_futex_wake         454
+#define SYS_futex_wait         455
+#define SYS_statmount          457
+#define SYS_listmount          458
+#define SYS_lsm_get_self_attr  459
+#define SYS_lsm_set_self_attr  460
+#define SYS_lsm_list_modules   461
+#define SYS_mseal              462
+#define SYS_setxattrat         463
+#define SYS_getxattrat         464
+#define SYS_listxattrat        465
+#define SYS_removexattrat      466
+#define SYS_open_tree_attr     467
+#define SYS_listns             470
+#define SYS_rt_tgsigqueueinfo  240
+#define SYS_riscv_hwprobe      258
+#define SYS_riscv_flush_icache 259
 
 /* A20OS Linux-ABI extensions: channel IPC bridge (sys_a20_bridge.c).
  * Numbers are above every real Linux syscall so they never collide with a

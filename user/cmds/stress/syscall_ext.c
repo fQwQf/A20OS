@@ -13,6 +13,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <mqueue.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -359,6 +360,81 @@ static int test_io_uring_and_landlock(void)
     return 0;
 }
 
+/* SysV msg + POSIX mq + ioprio + pkey + LSM introspection */
+static int test_msg_and_compat(void)
+{
+    /* SysV message queue round trip. */
+    int msqid = syscall(SYS_msgget, 0x1234, 01000 | 0600); /* IPC_CREAT|0600 */
+    if (msqid < 0)
+        return fail("msgget", errno);
+    struct { long mtype; char mtext[32]; } msg;
+    msg.mtype = 42;
+    memcpy(msg.mtext, "sysv-msg-payload", 16);
+    if (syscall(SYS_msgsnd, msqid, &msg, 16, 0) != 0)
+        return fail("msgsnd", errno);
+    struct { long mtype; char mtext[32]; } rmsg;
+    memset(&rmsg, 0, sizeof(rmsg));
+    long got = syscall(SYS_msgrcv, msqid, &rmsg, sizeof(rmsg.mtext), 0, 0);
+    if (got < 0)
+        return fail("msgrcv", errno);
+    if (rmsg.mtype != 42 || memcmp(rmsg.mtext, "sysv-msg-payload", 16) != 0)
+        return fail("msgrcv content", 0);
+    if (syscall(SYS_msgctl, msqid, 0 /* IPC_RMID */, NULL) != 0)
+        return fail("msgctl", errno);
+
+    /* POSIX message queue round trip via libc mq_*. */
+    struct mq_attr attr;
+    memset(&attr, 0, sizeof(attr));
+    attr.mq_maxmsg = 8;
+    attr.mq_msgsize = 64;
+    mqd_t mqd = mq_open("/a20_test_mq", O_CREAT | O_RDWR | 0100 /* O_EXCL? no */, 0600, &attr);
+    if (mqd < 0) {
+        /* May already exist from a prior run; try without O_EXCL. */
+        mqd = mq_open("/a20_test_mq", O_CREAT | O_RDWR, 0600, &attr);
+    }
+    if (mqd < 0)
+        return fail("mq_open", errno);
+    if (mq_send(mqd, "posix-mq-payload", 16, 7) != 0)
+        return fail("mq_send", errno);
+    char mbuf[64];
+    unsigned prio = 0;
+    if (mq_receive(mqd, mbuf, sizeof(mbuf), &prio) != 16)
+        return fail("mq_receive", errno);
+    if (prio != 7 || memcmp(mbuf, "posix-mq-payload", 16) != 0)
+        return fail("mq_receive content", 0);
+    mq_close(mqd);
+    mq_unlink("/a20_test_mq");
+
+    /* ioprio set/get round trip. */
+    int iop = (2 << 13) | 4; /* IOPRIO_CLASS_BE(2), data 4 */
+    if (syscall(SYS_ioprio_set, 1 /* PROCESS */, 0, iop) != 0)
+        return fail("ioprio_set", errno);
+    if (syscall(SYS_ioprio_get, 1 /* PROCESS */, 0) != iop)
+        return fail("ioprio_get", errno);
+
+    /* pkey alloc/free. */
+    int pkey = syscall(SYS_pkey_alloc, 0, 0);
+    if (pkey < 0)
+        return fail("pkey_alloc", errno);
+    if (syscall(SYS_pkey_free, pkey) != 0)
+        return fail("pkey_free", errno);
+
+    /* lsm_list_modules. */
+    unsigned long long mods[4];
+    unsigned long long nmods = sizeof(mods);
+    if (syscall(SYS_lsm_list_modules, mods, &nmods, 0) < 0)
+        return fail("lsm_list_modules", errno);
+
+    /* rt_tgsigqueueinfo: sig 0 is rejected (Linux requires sig > 0). */
+    errno = 0;
+    if (syscall(SYS_rt_tgsigqueueinfo, (int)getpid(), (int)getpid(), 0, NULL) != -1 ||
+        errno != EINVAL)
+        return fail("rt_tgsigqueueinfo", errno);
+
+    printf("SYSCALL_EXT: msg-mq-compat ok\n");
+    return 0;
+}
+
 int main(void)
 {
     printf("SYSCALL_EXT: start\n");
@@ -377,6 +453,8 @@ int main(void)
     if (test_policy_and_misc() < 0)
         return 1;
     if (test_io_uring_and_landlock() < 0)
+        return 1;
+    if (test_msg_and_compat() < 0)
         return 1;
     printf("SYSCALL_EXT: PASS\n");
     return 0;
