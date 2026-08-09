@@ -702,3 +702,62 @@ void page_cache_get_stats(page_cache_stats_t *stats)
     }
     spin_unlock_irqrestore(&g_page_cache_lock, flags);
 }
+
+int page_cache_readahead(vfile_t *vf, uint64_t start_byte, size_t count)
+{
+    if (!vf || !vf->vnode)
+        return -EINVAL;
+    if (vf->vnode->type != VFS_FT_REGULAR)
+        return 0;
+    if (count == 0)
+        return 0;
+
+    size_t file_size = vf->vnode->size;
+    if (start_byte >= file_size)
+        return 0;
+    if (count > file_size - start_byte)
+        count = file_size - start_byte;
+
+    size_t done = 0;
+    while (done < count) {
+        uint64_t pos = start_byte + done;
+        uint64_t index = pos / PAGE_SIZE;
+        size_t page_off = (size_t)(pos % PAGE_SIZE);
+
+        page_cache_page_t *page = page_cache_get(vf->vnode, index, 1);
+        if (!page)
+            break;
+        if (!page_cache_is_uptodate(page)) {
+            int r = page_cache_fill_vfile_page(vf, page);
+            if (r < 0) {
+                page_cache_put(page);
+                break;
+            }
+        }
+        page_cache_put(page);
+        done += PAGE_SIZE - page_off;
+    }
+    return 0;
+}
+
+void page_cache_file_stats(vfile_t *vf, size_t *resident, size_t *dirty)
+{
+    if (resident)
+        *resident = 0;
+    if (dirty)
+        *dirty = 0;
+    if (!vf || !vf->vnode || !g_initialized)
+        return;
+
+    uint64_t flags = spin_lock_irqsave(&g_page_cache_lock);
+    for (int i = 0; i < PAGE_CACHE_MAX_PAGES; i++) {
+        page_cache_page_t *page = &g_pages[i];
+        if (!page->valid || page->vnode != vf->vnode)
+            continue;
+        if (resident)
+            *resident += PAGE_SIZE;
+        if (page->dirty && dirty)
+            *dirty += PAGE_SIZE;
+    }
+    spin_unlock_irqrestore(&g_page_cache_lock, flags);
+}

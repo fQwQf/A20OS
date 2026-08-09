@@ -75,6 +75,21 @@ mount_t *vfs_find_mount(const char *path)
     return best;
 }
 
+int vfs_move_mount(const char *from, const char *to)
+{
+    if (!from || !to)
+        return -EINVAL;
+    mount_t *mnt = vfs_find_mount(from);
+    if (!mnt)
+        return -ENOENT;
+    if (vfs_find_mount(to))
+        return -EBUSY;
+    strncpy(mnt->path, to, MAX_PATH_LEN - 1);
+    mnt->path[MAX_PATH_LEN - 1] = '\0';
+    return 0;
+}
+
+
 const char *vfs_strip_mount_prefix(const char *path, const mount_t *mnt)
 {
     size_t len = strlen(mnt->path);

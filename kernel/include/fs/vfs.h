@@ -298,6 +298,11 @@ int vfs_proc_fd_target(const char *path, struct task_t **task_out, int *fd_out);
 /* File operations */
 int      vfs_open(const char *path, int flags, int mode);
 int      vfs_close(int fd);
+
+/* Open an already-referenced vnode as a new vfile.  Takes ownership of the
+ * caller's @vn reference on success (like vfs_open's path resolution) and
+ * installs a global fd.  Returns the global fd or a negative errno. */
+int      vfs_open_vnode(struct vnode *vn, int flags);
 int      vfs_read(int fd, char *buf, size_t count);
 int      vfs_write(int fd, const char *buf, size_t count);
 int      vfs_read_file(vfile_t *vf, char *buf, size_t count);

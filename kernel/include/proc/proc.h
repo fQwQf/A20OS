@@ -271,6 +271,15 @@ typedef struct task_t {
      * keyring object, shared with children at fork and released at teardown. */
     void           *session_keyring;
 
+    /* Landlock LSM ruleset list (kernel/ipc/landlock.c), process-local. */
+    void           *landlock_rulesets;
+
+    /* Restartable sequences (rseq(2)): user-registered per-thread rseq area
+     * and signature.  0 when not registered. */
+    uintptr_t       rseq_area;
+    uint32_t        rseq_sig;
+    uint32_t        rseq_flags;
+
     /* Cgroup resource control */
     struct cg_node *cgroup;
     uint32_t        cpus_allowed;
