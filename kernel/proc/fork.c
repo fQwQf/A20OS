@@ -9,6 +9,7 @@
 #include "mm/mm.h"
 #include "mm/vm.h"
 #include "sys/usercopy.h"
+#include "ipc/keyring.h"
 #if defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)
 #include "ipc/handle_table.h"
 #endif
@@ -185,6 +186,9 @@ static int proc_clone_impl(uint64_t flags, vaddr_t stack, int *ptid, vaddr_t tls
         t->signals = parent->signals;
         refcount_inc(&((signal_state_t *)t->signals)->refcount);
     }
+
+    /* Share the session keyring with the parent (kernel/ipc/keyring.c). */
+    keyring_inherit(t, parent);
 
     /*
      * Native ABI: the handle table is process-local (docs/native-abi/03-handle.md

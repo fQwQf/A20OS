@@ -11,6 +11,7 @@
 #include "core/panic.h"
 #include "core/string.h"
 #include "cg/cgroup.h"
+#include "ipc/keyring.h"
 #if defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)
 #include "ipc/handle_table.h"
 #endif
@@ -263,6 +264,8 @@ static void proc_task_release_resources(task_t *t)
         t->mm = NULL;
     }
     t->pgdir = NULL;
+
+    keyring_release_task(t);
 
     if (t->signals) {
         signal_state_t *ss = (signal_state_t *)t->signals;
