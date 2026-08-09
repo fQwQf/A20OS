@@ -49,6 +49,7 @@ typedef struct proc_cred {
 #define CAP_SETGID           6
 #define CAP_SETUID           7
 #define CAP_SETPCAP          8
+#define CAP_SYS_MODULE       16
 #define CAP_SYS_CHROOT       18
 #define CAP_SYS_PTRACE       19
 #define CAP_SYS_ADMIN        21
@@ -265,6 +266,10 @@ typedef struct task_t {
     struct vmo *stack_vmo;
     struct vmo *heap_vmo;
     proc_ns_context_t ns_ctx;
+
+    /* Kernel keyring subsystem (kernel/ipc/keyring.c).  Owning reference to a
+     * keyring object, shared with children at fork and released at teardown. */
+    void           *session_keyring;
 
     /* Cgroup resource control */
     struct cg_node *cgroup;

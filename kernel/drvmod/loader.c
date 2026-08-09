@@ -1464,6 +1464,20 @@ int drvmod_unload(int id)
     return 0;
 }
 
+int drvmod_unload_by_name(const char *name)
+{
+    if (!name)
+        return -EINVAL;
+    for (int i = 0; i < DRV_MOD_MAX_MODULES; i++) {
+        drv_module_t *m = &drv_modules[i];
+        if (!m->used)
+            continue;
+        if (strcmp(m->name, name) == 0)
+            return drvmod_unload(i);
+    }
+    return -ENOENT;
+}
+
 /* Run DriverEntry for every loaded module.  Each module registers its
  * unified driver_t with the driver core; binding happens through the core's
  * normal match/probe path.  Modules that registered a driver are pinned.
