@@ -10,8 +10,8 @@ A20OS 是为 2026 年全国大学生计算机系统能力大赛（操作系统�
 
 A20OS 是一个内核、两套用户接口：
 
-* **Linux ABI**（`kernel/abi/linux/`）：223 个系统调用，可直接运行 git、vim、fastfetch、mksh 等静态链接 musl 程序，无需重新编译。
-* **Native ABI**（`kernel/abi/native/`）：109 个系统调用，基于 handle、capability 和显式内存对象，是面向 A20OS 新程序的现代接口。
+* **Linux ABI**（`kernel/abi/linux/`）：258 个系统调用（`syscall_table.def` 登记），可直接运行 git、vim、fastfetch、mksh 等静态链接 musl 程序，无需重新编译。
+* **Native ABI**（`kernel/abi/native/`）：126 个系统调用（`syscall_table.def` 登记），基于 handle、capability 和显式内存对象，是面向 A20OS 新程序的现代接口。
 
 内核代码位于 `kernel/`，约 18 万行（含头文件），分布在 800 余个源文件中；第三方代码（musl、lwIP、git、vim 等）隔离在 `user/external/` 和 `kernel/external/`。
 
@@ -32,7 +32,7 @@ A20OS 在运行空间上更像宏内核：
 
 为什么这样组合？内核内部路径因为函数调用而保持快速，而用户可见资源仍然受 capability 检查约束。这样兼顾了宏内核的性能和微内核的对象纪律。
 
-混合内核的当前设计形态（用户态服务化、驱动外迁、`channel_call` 融合 RPC 快路径、svcman 崩溃自愈）见[docs/hybrid-kernel/00-design.md](hybrid-kernel/00-design.md)，机制语义见[01-mechanisms.md](hybrid-kernel/01-mechanisms.md)。
+混合内核的当前设计形态（用户态服务化、驱动外迁、`channel_call` 融合 RPC 快路径、svcmgr 崩溃自愈）见[docs/hybrid-kernel/00-design.md](hybrid-kernel/00-design.md)，机制语义见[01-mechanisms.md](hybrid-kernel/01-mechanisms.md)。
 
 ---
 
@@ -40,8 +40,8 @@ A20OS 在运行空间上更像宏内核：
 
 | ABI | 系统调用数 | 路径 | 使用场景 |
 |-----|-----------|------|---------|
-| Linux ABI | 223 | `kernel/abi/linux/` | 运行现有 musl 程序，无需改动。 |
-| Native ABI | 109 | `kernel/abi/native/` | 编写面向 A20OS 的新程序，使用 handle/capability 接口。 |
+| Linux ABI | 258 | `kernel/abi/linux/` | 运行现有 musl 程序，无需改动。 |
+| Native ABI | 126 | `kernel/abi/native/` | 编写面向 A20OS 的新程序，使用 handle/capability 接口。 |
 
 两层 ABI 严格隔离。`kernel/abi/linux/` 和 `kernel/abi/native/` 都把用户调用翻译成同一组内核内部 API；核心模块不依赖任何 ABI 的用户结构体。
 
@@ -97,15 +97,19 @@ A20OS 面向五种 64 位架构构建，另外保留 ARM32、RISC-V32 和 ARMv7-
 * **LoongArch 64**：QEMU `qemu-virt-loongarch64` 和龙芯 LS2K1000 开发板
 * **PPC64LE**：QEMU `qemu-virt-ppc64le`（pSeries 固件）
 
-PPC64LE 当前使用 Radix MMU，按 QEMU pSeries 单核路径验收；SMP 和 NOMMU尚未列入该架构的已验证能力。NOMMU 支持集合为 `arm32`、`aarch64`、`riscv32`和 `riscv64`，顶层构建会拒绝其他架构的 NOMMU 组合。
+PPC64LE 当前使用 Radix MMU，按 QEMU pSeries 单核路径验收；SMP 和 NOMMU尚未列入该架构的已验证能力。NOMMU 支持集合为 `riscv64`、`riscv32`、`aarch64`、`arm32` 与 `armv7m`（`Makefile` 的 `NOMMU_SUPPORTED_ARCHES`），顶层构建会拒绝其他架构的 NOMMU 组合。
 
 典型构建命令：
 
 ```bash
-make ARCH=riscv64 BOARD=qemu-virt-riscv64 runmake ARCH=aarch64 BOARD=qemu-virt-aarch64 runmake ARCH=x86_64 BOARD=qemu-virt-x86_64 runmake ARCH=loongarch64 BOARD=qemu-virt-loongarch64 runmake ARCH=ppc64le BOARD=qemu-virt-ppc64le run
+make ARCH=riscv64 BOARD=qemu-virt-riscv64 run
+make ARCH=aarch64 BOARD=qemu-virt-aarch64 run
+make ARCH=x86_64 BOARD=qemu-virt-x86_64 run
+make ARCH=loongarch64 BOARD=qemu-virt-loongarch64 run
+make ARCH=ppc64le BOARD=qemu-virt-ppc64le run
 ```
 
-`make check-kernel-build` 验证默认构建矩阵；PPC64LE 的独立入口是`make check-ppc64le-bringup` 和 `make check-ppc64le-user`。
+`make check-kernel-build` 验证默认构建矩阵（riscv64、loongarch64、aarch64、x86_64、arm32、riscv32、ppc64le 共七种架构）；PPC64LE 的独立入口是`make check-ppc64le-bringup` 和 `make check-ppc64le-user`。
 
 ---
 
@@ -115,8 +119,8 @@ make ARCH=riscv64 BOARD=qemu-virt-riscv64 runmake ARCH=aarch64 BOARD=qemu-virt-a
 
 内存管理围绕两个核心抽象：
 
-* **VMO**（`kernel/mm/a20_vmo.c`）：物理页容器，可 resize、共享、按页 fault。
-* **VMAR**（`kernel/mm/a20_vmar.c`）：进程地址空间中的连续区域，维护自身的映射与保护规则。
+* **VMO**（`kernel/mm/vmo.c`）：物理页容器，可 resize、共享、按页 fault。
+* **VMAR**（`kernel/abi/native/vmar.c`）：进程地址空间中的连续区域，维护自身的映射与保护规则（`mm_mmap_vmo`/`mm_munmap`/`mm_mprotect` 的薄包装）。
 
 `mm_struct` 用一把 per-process 自旋锁保护 VMA。Fork 使用写时复制（COW）：`mm_fork_clone_present_level()` 建立只读 COW 映射，写操作触发缺页后内核分配新页并复制内容。`mm_demote_huge_page()` 在 fork 或 OOM 需要回收已映射的 2 MiB 大页时，将其拆分为 4 KiB 页，同时持有 `mm->lock` 避免并发缺页竞态。
 
@@ -143,7 +147,13 @@ on_rq -> dispatching -> on_cpu -> unowned
 锁遵循严格的部分顺序，记录在 `kernel/include/core/lock.h`：
 
 ```text
-cg_node.lock -> proc_lock -> runq_lock -> pfa.lockproc_lock -> signal_state.lockproc_lock -> files_struct.lock -> VFS global-file/vnode locksproc_lock -> mm_struct.lockproc_lock -> a20_handle_table.lockdriver registry/IRQ locks -> device-private locksg_lwip_lock -> g_net_lock
+cg_node.lock -> proc_lock -> runq_lock -> pfa.lock
+proc_lock -> signal_state.lock
+proc_lock -> files_struct.lock -> VFS global-file/vnode locks
+proc_lock -> mm_struct.lock
+proc_lock -> a20_handle_table.lock
+driver registry/IRQ locks -> device-private locks
+g_lwip_lock -> g_net_lock
 ```
 
 核心规则：持有自旋锁时禁止阻塞；持有 `runq_lock` 时禁止获取`proc_lock`；对象/设备锁内只 collect waiter，实际 wake 在释放对象锁后flush；持有设备或 lwIP 锁时，除非被调用方明确声明非阻塞，否则禁止调用VFS、内存分配或调度路径。
@@ -199,17 +209,17 @@ virtio-net 驱动位于 `kernel/drivers/net/virtio_net.c`，每个实例持有 `
 
 驱动模型分为三层：
 
-* **零开销 MMIO**：板级地址通过宏常量内联，`kernel/include/drivers/hwapi.h` 中的 `readl`/`writel` 编译为单条 load/store。
+* **零开销 MMIO**：板级地址通过宏常量内联，`kernel/drivers/core/driver_hwapi.h` 中的 `readl`/`writel` 编译为单条 load/store。
 * **统一 hwapi**：抽象 `request_irq`、`dma_alloc`、`clock_get_cycles` 等跨架构接口。
 * **类 ops vtable**：`block_dev_ops_t`、`net_dev_ops_t`、`char_dev_ops_t` 提供一次间接调用。
 
-内置驱动通过 `DRIVER_REGISTER` 宏放入 `.driver_init` 链接器段；板级配置通过 `BOARD_REGISTER` 放入 `.board_init` 段。启动顺序为：
+内置驱动通过 `DRIVER_REGISTER` 宏放入 `.driver_init` 链接器段；板级配置通过 `BOARD_REGISTER` 放入 `.board_init` 段。通用配置（generic）已无内建设备驱动——virtio-blk/net、HDA、xhci、ps2、tpm 等均已迁移为 `kernel/drvmod/examples/` 下的 drvmod 模块（见 [drivers/meta/implementation-status.md](drivers/meta/implementation-status.md)）。启动顺序为：
 
 ```text
 arch_early_init() -> board->early_init() -> driver_core_init()-> board->enumerate_devices() -> driver_probe_all() -> subsystem_init()
 ```
 
-当前驱动包括 virtio-blk、virtio-net、UART、PTY、loop。各驱动私有锁顺序记录在 [docs/drivers/lock-order.md](drivers/guide/lock-order.md)。
+各驱动私有锁顺序记录在 [docs/drivers/lock-order.md](drivers/guide/lock-order.md)。
 
 ### IPC（`kernel/ipc/`）
 
@@ -232,7 +242,7 @@ Channel 传递 handle 时，接收方权限为 `receiver_rights = sender_rights 
 
 **什么时候用 Native ABI？**  编写面向 A20OS 的新程序，需要更小、基于 capability 的接口时。
 
-**两套 ABI 各有多少系统调用？**  Linux ABI：223 个；Native ABI：109 个。
+**两套 ABI 各有多少系统调用？**  Linux ABI：258 个；Native ABI：126 个（均为 `syscall_table.def` 当前登记数）。
 
 **支持哪些架构？**  RISC-V 64、ARM64、x86_64、LoongArch 64。物理板：VisionFive 2（RISC-V）和龙芯 LS2K1000（LoongArch）。
 
