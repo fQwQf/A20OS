@@ -86,7 +86,7 @@ WAV 输入必须是 48 kHz、双声道、S16_LE PCM；原始 PCM 使用 `audiopl
 
 - `BRINGUP=1` 不生成文件系统镜像；`BRINGUP=0` 才会触发用户态和磁盘构建。
 - 默认 `NR_CPUS=1`。RISC-V 64、AArch64、LoongArch64 和 x86_64 的 QEMU virt 平台已验证 SMP，可直接设置 `NR_CPUS>1`；PPC64LE 当前仅验证 QEMU pSeries 单核路径。其他架构或板卡仍会被构建系统拒绝，除非显式设置 `ALLOW_UNVERIFIED_SMP=1`。
-- 决赛 `make all` 内部固定使用 `PROFILE=benchmark NR_CPUS=8`，不受默认单核开发配置影响；BuildStorm 设计与复现说明见 [BuildStorm-2026.md](BuildStorm-2026.md)。
+- 决赛 `make all` 内部固定使用 `PROFILE=benchmark NR_CPUS=8 DRIVER_DEPLOYMENT=embedded`，不受默认单核开发配置影响，并兼容评测命令默认的 legacy VirtIO-MMIO 块设备；BuildStorm 设计与复现说明见 [BuildStorm-2026.md](BuildStorm-2026.md)。
 - `ARCH=armv7m` 需要 `arm-none-eabi-gcc` 或 `clang` + `llvm-objcopy`。
 - 图形 QEMU 目标依赖宿主机显示能力；无图形环境请使用普通 `run-*` 目标。
 - 不要直接仿照 Makefile 外的 QEMU 参数手写启动命令，容易遗漏 `-bios default` 等关键选项。
