@@ -682,6 +682,82 @@ probe_stage9_feedback() {
     /a20-probe/stage9-perf-probe
 }
 
+probe_stage9_block_io_stress() {
+    typeset base=/work/a20-stage9-block-io
+    typeset pids=
+    typeset expected=
+    typeset expected_hash=
+    typeset actual=
+    typeset -i round=1
+    typeset -i worker=1
+    typeset -i rc=0
+
+    rm -rf -- "$base" || return
+    mkdir -p "$base" || return
+    print 'fn main() { println!("stage9 block io stress"); }' >"$base/hello.rs" || return
+    print "STAGE9_BLOCK_IO_META cores=$(/usr/bin/nproc) workers=8 rounds=4 mib_per_worker=16"
+
+    while (( round <= 4 )); do
+        pids=
+        worker=1
+        while (( worker <= 8 )); do
+            (
+                dd if=/dev/urandom of="$base/data-$worker" bs=65536 count=256 \
+                    conv=fsync status=none &&
+                    sha256sum "$base/data-$worker" >"$base/hash-$worker" &&
+                    LD_LIBRARY_PATH="$toolchain/lib" "$toolchain/bin/rustc" \
+                        "$base/hello.rs" -o "$base/hello-$worker" \
+                        >"$base/rustc-$worker.log" 2>&1 &&
+                    "$base/hello-$worker" >"$base/run-$worker.log"
+            ) &
+            pids="$pids $!"
+            (( worker++ ))
+        done
+
+        worker=1
+        for pid in $pids; do
+            wait "$pid" || {
+                print "STAGE9_BLOCK_IO_FAIL round=$round worker=$worker rc=$?"
+                rc=1
+            }
+            (( worker++ ))
+        done
+        (( rc == 0 )) || return $rc
+
+        expected=
+        worker=1
+        while (( worker <= 8 )); do
+            expected_hash=$(/usr/bin/awk '{print $1}' "$base/hash-$worker") || return
+            expected="$expected $expected_hash"
+            (( worker++ ))
+        done
+        sync || return
+        if [[ -w /proc/sys/vm/drop_caches ]]; then
+            print 3 >/proc/sys/vm/drop_caches || return
+        fi
+        worker=1
+        for expected_hash in $expected; do
+            actual=$(/usr/bin/sha256sum "$base/data-$worker") || return
+            actual=${actual%% *}
+            [[ $actual == "$expected_hash" ]] || {
+                print "STAGE9_BLOCK_IO_HASH_MISMATCH round=$round worker=$worker expected=$expected_hash actual=$actual"
+                return 1
+            }
+            (( worker++ ))
+        done
+        rm -f -- "$base"/data-* "$base"/hash-* "$base"/hello-* \
+            "$base"/rustc-* "$base"/run-* || return
+        print 'fn main() { println!("stage9 block io stress"); }' >"$base/hello.rs" || return
+        sync || return
+        print "STAGE9_BLOCK_IO progress=$round/4 verified=8"
+        (( round++ ))
+    done
+
+    rm -f -- "$base/hello.rs" || return
+    rmdir "$base" || return
+    print "STAGE9_BLOCK_IO ok"
+}
+
 run_named_case() {
     case "$1" in
     static-elf) probe_static_elf ;;
@@ -710,6 +786,7 @@ run_named_case() {
     stage7-rustc-j8) probe_stage7_parallel_rustc ;;
     stage7-rustc-llvm-j8) probe_stage7_parallel_llvm ;;
     stage9-perf-feedback) probe_stage9_feedback ;;
+    stage9-block-io-stress) probe_stage9_block_io_stress ;;
     stage7-full-j1|stage7-full-j2|stage7-full-j4|stage7-full-j8|stage7-full-default)
         probe_stage7_full_build "$1"
         ;;

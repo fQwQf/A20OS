@@ -240,6 +240,7 @@ static void virtio_blk_complete_used_locked(virtio_blk_inst_t *inst,
     a20_perf_count(A20_PERF_VIRTIO_BLK_USED_CHECKS);
     arch_dma_sync_for_cpu(&used->idx, sizeof(uint16_t));
     uint16_t used_idx = ((volatile virtq_used_t *)used)->idx;
+    rmb();
     uint64_t completions = 0;
     while (blk->last_used != used_idx) {
         completions++;
