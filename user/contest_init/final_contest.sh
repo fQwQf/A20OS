@@ -39,6 +39,28 @@ run_final_group() {
     return $rc
 }
 
+run_all_final_groups() {
+    typeset test_script=
+    typeset group=
+    typeset -i found=0
+    typeset -i failed=0
+
+    # The published image supplies /glibc/xxxxx_testcode.sh.  Run every group
+    # serially; the judge does not require a particular group order.
+    for test_script in /test/glibc/*_testcode.sh; do
+        [[ -f $test_script ]] || continue
+        found=1
+        group=${test_script##*/}
+        group=${group%_testcode.sh}
+        run_final_group "$group" || failed=1
+    done
+    if (( ! found )); then
+        print "[FINAL-EVAL][ERROR] no /test/glibc/*_testcode.sh found"
+        return 127
+    fi
+    return $failed
+}
+
 run_buildstorm_probe() {
     typeset chroot_bin=
     typeset probe_case=
@@ -107,6 +129,9 @@ IFS= read -r final_group </bin/etc/final-eval-group
 
 typeset -i final_failed=0
 case "$final_group" in
+all|auto)
+    run_all_final_groups || final_failed=1
+    ;;
 cagent)
     run_final_group cagent || final_failed=1
     ;;
