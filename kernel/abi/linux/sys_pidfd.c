@@ -3,6 +3,7 @@
 #include "fs/anonfd.h"
 #include "fs/fdtable.h"
 #include "fs/file.h"
+#include "fs/vfs.h"
 #include "mm/slab.h"
 
 typedef struct pidfd_file {
@@ -37,6 +38,79 @@ int linux_pidfd_create(int pid, int flags)
     vf->ops = &g_pidfd_ops;
     vf->priv = pf;
     return anonfd_install_vfile(vf, flags);
+}
+
+int64_t sys_pidfd_open(int pid, unsigned flags)
+{
+    if (pid <= 0)
+        return -EINVAL;
+
+    task_t *target = proc_find_get(pid);
+    if (!target)
+        return -ESRCH;
+    if (target->state == PROC_ZOMBIE) {
+        proc_put(target);
+        return -ESRCH;
+    }
+    proc_put(target);
+
+    task_t *self = proc_current();
+    if (self && !proc_has_cap(self, CAP_SYS_PTRACE) &&
+        !proc_task_may_access(self, target))
+        return -EPERM;
+
+    return linux_pidfd_create(pid, (int)flags);
+}
+
+int64_t sys_pidfd_getfd(int pidfd, int targetfd, unsigned flags)
+{
+    if (flags & ~O_CLOEXEC)
+        return -EINVAL;
+
+    int gfd = fdtable_get_current(pidfd);
+    if (gfd < 0)
+        return gfd;
+    vfile_t *vf = vfs_get_file_ref(gfd);
+    if (!vf)
+        return -EBADF;
+    if (vf->ops != &g_pidfd_ops || !vf->priv) {
+        vfs_put_file_ref(gfd, vf);
+        return -EBADF;
+    }
+    int pid = ((pidfd_file_t *)vf->priv)->pid;
+    vfs_put_file_ref(gfd, vf);
+
+    if (targetfd < 0)
+        return -EINVAL;
+
+    task_t *self = proc_current();
+    task_t *target = proc_find_get(pid);
+    if (!target)
+        return -ESRCH;
+    if (target->state == PROC_ZOMBIE) {
+        proc_put(target);
+        return -ESRCH;
+    }
+    if (self && !proc_has_cap(self, CAP_SYS_PTRACE) &&
+        !proc_task_may_access(self, target)) {
+        proc_put(target);
+        return -EPERM;
+    }
+
+    int target_gfd = fdtable_get(target, targetfd);
+    if (target_gfd < 0) {
+        proc_put(target);
+        return -EBADF;
+    }
+    vfile_t *target_file = vfs_get_file_ref(target_gfd);
+    if (!target_file) {
+        proc_put(target);
+        return -EBADF;
+    }
+    int r = fdtable_install_current(target_gfd, (int)flags);
+    vfs_put_file_ref(target_gfd, target_file);
+    proc_put(target);
+    return r;
 }
 
 int64_t sys_pidfd_send_signal(int pidfd, int sig, void *uinfo, unsigned flags)

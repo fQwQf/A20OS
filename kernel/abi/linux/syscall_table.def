@@ -36,6 +36,7 @@ LINUX_SYSCALL(ppoll, 0, sys_ppoll((void *)A(0), (int)A(1), (void *)A(2), (void *
 LINUX_SYSCALL(epoll_create1, 0, sys_epoll_create1((int)A(0)))
 LINUX_SYSCALL(epoll_ctl, 0, sys_epoll_ctl((int)A(0), (int)A(1), (int)A(2), (void *)A(3)))
 LINUX_SYSCALL(epoll_pwait, 0, sys_epoll_pwait((int)A(0), (void *)A(1), (int)A(2), (int)A(3), (const void *)A(4), (size_t)A(5)))
+LINUX_SYSCALL(epoll_pwait2, 0, sys_epoll_pwait2((int)A(0), (void *)A(1), (int)A(2), (const void *)A(3), (const void *)A(4), (size_t)A(5)))
 LINUX_SYSCALL(eventfd2, 0, sys_eventfd2((unsigned)A(0), (int)A(1)))
 LINUX_SYSCALL(timerfd_create, 0, sys_timerfd_create((int)A(0), (int)A(1)))
 LINUX_SYSCALL(timerfd_settime, 0, sys_timerfd_settime((int)A(0), (int)A(1), (const void *)A(2), (void *)A(3)))
@@ -161,6 +162,8 @@ LINUX_SYSCALL(sigprocmask, 0, sys_sigprocmask((int)A(0), (void *)A(1), (void *)A
 LINUX_SYSCALL(sigtimedwait, 0, sys_sigtimedwait((const uint64_t *)A(0), (void *)A(1), (const void *)A(2), (size_t)A(3)))
 LINUX_SYSCALL(rt_sigqueueinfo, 0, sys_rt_sigqueueinfo((int)A(0), (int)A(1), (void *)A(2)))
 LINUX_SYSCALL(pidfd_send_signal, 0, sys_pidfd_send_signal((int)A(0), (int)A(1), (void *)A(2), (unsigned)A(3)))
+LINUX_SYSCALL(pidfd_open, 0, sys_pidfd_open((int)A(0), (unsigned)A(1)))
+LINUX_SYSCALL(pidfd_getfd, 0, sys_pidfd_getfd((int)A(0), (int)A(1), (unsigned)A(2)))
 LINUX_SYSCALL(sigreturn, 1, sys_sigreturn(args->ctx))
 LINUX_SYSCALL(sigsuspend, 0, sys_sigsuspend((void *)A(0), (size_t)A(1)))
 LINUX_SYSCALL(sigaltstack, 0, sys_sigaltstack((void *)A(0), (void *)A(1)))
@@ -236,26 +239,28 @@ LINUX_SYSCALL(inotify_init, 0, sys_inotify_init((int)A(0)))
 LINUX_SYSCALL(inotify_add_watch, 0, sys_inotify_add_watch((int)A(0), (const char *)A(1), (uint32_t)A(2)))
 LINUX_SYSCALL(inotify_rm_watch, 0, sys_inotify_rm_watch((int)A(0), (int)A(1)))
 LINUX_SYSCALL(syncfs, 0, sys_syncfs((int)A(0)))
-/* LINUX_ABI_EXPLICIT_STUB_CONTRACT: entries below are deliberate Linux
- * compatibility placeholders. They return fixed -ENOSYS and are kept in the
- * generated coverage table until real subsystem support exists.
- * See kernel/abi/linux/syscall_coverage.md "Stub Decision Record" for
- * owner decisions on each placeholder. */
-LINUX_SYSCALL(fanotify_init, 0, -ENOSYS)
-LINUX_SYSCALL(fanotify_mark, 0, -ENOSYS)
+/* LINUX_ABI_EXPLICIT_STUB_CONTRACT: the entries below were originally
+ * deliberate Linux-compatibility placeholders returning fixed -ENOSYS.  Most
+ * are now real implementations (fanotify, acct, keyring, AIO, modules) backed
+ * by kernel subsystems; only userfaultfd and perf_event_open remain explicit
+ * -ENOSYS placeholders.  See kernel/abi/linux/syscall_coverage.md "Stub
+ * Decision Record" for the current owner decisions. */
+LINUX_SYSCALL(fanotify_init, 0, sys_fanotify_init((unsigned)A(0), (unsigned)A(1)))
+LINUX_SYSCALL(fanotify_mark, 0, sys_fanotify_mark((int)A(0), (unsigned)A(1), (uint64_t)A(2), (int)A(3), (const char *)A(4)))
 LINUX_SYSCALL(signalfd4, 0, sys_signalfd4((int)A(0), (const void *)A(1), (size_t)A(2), (int)A(3)))
-LINUX_SYSCALL(acct, 0, -ENOSYS)
-LINUX_SYSCALL(add_key, 0, -ENOSYS)
-LINUX_SYSCALL(request_key, 0, -ENOSYS)
-LINUX_SYSCALL(keyctl, 0, -ENOSYS)
-LINUX_SYSCALL(io_setup, 0, -ENOSYS)
-LINUX_SYSCALL(io_destroy, 0, -ENOSYS)
-LINUX_SYSCALL(io_submit, 0, -ENOSYS)
-LINUX_SYSCALL(io_getevents, 0, -ENOSYS)
-LINUX_SYSCALL(io_cancel, 0, -ENOSYS)
-LINUX_SYSCALL(init_module, 0, -ENOSYS)
-LINUX_SYSCALL(delete_module, 0, -ENOSYS)
-LINUX_SYSCALL(finit_module, 0, -ENOSYS)
+LINUX_SYSCALL(acct, 0, sys_acct((const char *)A(0)))
+LINUX_SYSCALL(add_key, 0, sys_add_key((const char *)A(0), (const char *)A(1), (const void *)A(2), (size_t)A(3), (int32_t)A(4)))
+LINUX_SYSCALL(request_key, 0, sys_request_key((const char *)A(0), (const char *)A(1), (const char *)A(2), (int32_t)A(3)))
+LINUX_SYSCALL(keyctl, 0, sys_keyctl((int)A(0), A(1), A(2), A(3), A(4)))
+LINUX_SYSCALL(io_setup, 0, sys_io_setup((unsigned)A(0), (void *)A(1)))
+LINUX_SYSCALL(io_destroy, 0, sys_io_destroy(A(0)))
+LINUX_SYSCALL(io_submit, 0, sys_io_submit(A(0), (long)A(1), (const void *)A(2)))
+LINUX_SYSCALL(io_getevents, 0, sys_io_getevents(A(0), (long)A(1), (long)A(2), (void *)A(3), (const void *)A(4)))
+LINUX_SYSCALL(io_pgetevents, 0, sys_io_pgetevents(A(0), (long)A(1), (long)A(2), (void *)A(3), (const void *)A(4), (const void *)A(5), (size_t)A(6)))
+LINUX_SYSCALL(io_cancel, 0, sys_io_cancel(A(0), (const void *)A(1), (void *)A(2)))
+LINUX_SYSCALL(init_module, 0, sys_init_module((const void *)A(0), (unsigned long)A(1), (const char *)A(2)))
+LINUX_SYSCALL(delete_module, 0, sys_delete_module((const char *)A(0), (unsigned)A(1)))
+LINUX_SYSCALL(finit_module, 0, sys_finit_module((int)A(0), (const char *)A(1), (int)A(2)))
 LINUX_SYSCALL(userfaultfd, 0, -ENOSYS)
 LINUX_SYSCALL(perf_event_open, 0, -ENOSYS)
 LINUX_SYSCALL(arch_prctl, 0, sys_arch_prctl((int)A(0), A(1)))

@@ -105,6 +105,9 @@
 #define SYS_sigsuspend     133
 #define SYS_rt_sigqueueinfo 138
 #define SYS_pidfd_send_signal 424
+#define SYS_pidfd_open        434
+#define SYS_pidfd_getfd       438
+#define SYS_epoll_pwait2      441
 #define SYS_setpriority    140
 #define SYS_getpriority    141
 #define SYS_setregid       143
@@ -254,6 +257,7 @@
 #define SYS_io_submit       2
 #define SYS_io_getevents    4
 #define SYS_io_cancel       3
+#define SYS_io_pgetevents   399
 #define SYS_init_module     105
 #define SYS_delete_module   106
 #define SYS_finit_module    273
