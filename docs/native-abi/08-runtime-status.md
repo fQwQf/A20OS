@@ -7,7 +7,7 @@
 | 组件 | 路径 | 状态 | 说明 |
 |------|------|------|------|
 | Linux ABI 兼容层 | `kernel/abi/linux/` | 活跃 | 当前主用户态运行时接口。系统启动后实际运行的用户态程序基于 Linux ABI。 |
-| Native ABI 内核入口 | `kernel/abi/native/` | 已实现 | 129 个 syscall 入口已完成（`syscall_table.def` 129 条），覆盖 core、handle、task、memory、path、ipc、net、time、security、debug、system info、sync 等分区。 |
+| Native ABI 内核入口 | `kernel/abi/native/` | 已实现 | 126 个 syscall 入口已完成（`syscall_table.def` 126 条），覆盖 core、handle、task、memory、path、ipc、net、time、security、debug、system info、sync、device、kernel-ext 等分区。 |
 | Typed channel | `kernel/ipc/a20_channel.c` | 已接入 | `channel_create` 接受 `a20_channel_type_t` 类型签名（每端点一份拷贝），send/recv 路径强制执行 handle 类型 bitmask 与 `max_data_size`/`max_handles` 上限，违例返回 `TYPE_MISMATCH`。 |
 | 时态能力 | `kernel/abi/native/handle_table.c` | 已接入 | `handle_control` 提供 `SET_TEMPORAL`/`GET_TEMPORAL`/`SET_LABEL` 入口（仅可增强不可减弱）；sweeper 以 deadline 驱动周期运行（约 100ms），`AUTO_CLOSE` 过期自动回收；channel 传递保留时态约束与安全标签（不可刷新）。 |
 | 阻塞 IPC | `kernel/ipc/a20_channel.c`、`kernel/ipc/a20_event.c` | 已实现 | `channel_send`（队列满）/`channel_recv`（队列空）/`event_wait`（无事件）默认阻塞，`A20_MSG_NONBLOCK`/`timeout_ns=0` 为非阻塞；`event_wait` 支持相对超时与多事件返回，基于 tokenized Park/Wake（见 `docs/process-scheduler.md`）。 |
@@ -17,7 +17,7 @@
 | 原生测试 | `user/tests/test_native_*.c`、`user/liba20c` 内部测试 | 少量存在 | `test_native_handle.c` 现覆盖 rights 降级、transfer、typed channel 强制、channel 阻塞收/发、event_wait 阻塞与 timer 事件、时态 op-count、时态过期 AUTO_CLOSE；另有 `test_native_futex.c`、`test_native_hello.c`、`test_native_minimal.c`、`test_liba20c.c`。不是历史上宣称的 4 套 118 cases host-mode 测试套件。 |
 | musl 移植目录 | `user/musl-port/` | 不存在 | 该目录未在当前仓库中创建。相关历史材料已移至 `user/archive/`。 |
 | 历史参考 | `user/archive/` | 不参与构建 | 包含旧版 musl 桥接、`a20coreutils`、`build_sysroot.sh`、`arch/a20/` 适配头等。这些代码仅供历史参考，路径和内容已过时，不进入当前构建。 |
-| Debug handle | `kernel/abi/native/` 0x0900 分区 | 有意受限 | 仅支持创建 debug handle、读取寄存器快照和映射目标内存。stop/resume/watchpoint、ptrace 级语义等尚未实现，也不会在需求明确前扩展。 |
+| Debug handle | `kernel/abi/native/` 0x0900 分区 | 完整实现 | 完整停止/恢复语义（`debug_attach/traceme/wait/event/resume/detach/read/write/read_regs/write_regs/kill`），与 Linux ABI ptrace 共享同一 `proc_debug_*` 状态机；已知边界：无硬件单步、无 TRACEFORK/CLONE 事件、无 seccomp 集成、无 watchpoint。 |
 
 ## 关键偏差说明
 
@@ -33,7 +33,8 @@ struct a20_vm_alloc_args args = {
     .version = 1,
     .length = req_size,
     .prot = A20_PROT_READ | A20_PROT_WRITE,
-};int64_t r = a20_vm_alloc(&args);
+};
+int64_t r = a20_vm_alloc(&args);
 ```
 
 迁移后，`smoke-native-libc` 目标已跑通，裸参数数组调用已不存在于 `user/liba20c/*.c`。
@@ -141,4 +142,4 @@ Linux ABI 侧已有完整 PT_INTERP 加载，mlibc 的 rtld 现成，native 侧�
 - 用户已确认：Linux ABI 继续作为主用户态接口，`abi/native` 保持为辅。
 - 用户已确认：`liba20c` 将更新为使用版本化 ABI 结构体。该代码变更不在本文档更新范围内，仅作为路线图记录。
 - 用户已确认：`user/archive/` 作为历史参考保留，不参与当前构建。
-- 用户已确认：Debug handle 保持 intentionally limited，不盲目扩展为完整 ptrace。
+- 用户已确认：Debug handle 保持受限调试接口（不盲目扩展为完整 ptrace）。当前 Debug 分区已实现完整停止/恢复语义（见能力清单），watchpoint 与 TRACEFORK/CLONE 事件不在扩展范围内。
