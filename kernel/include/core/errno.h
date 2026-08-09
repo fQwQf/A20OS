@@ -68,6 +68,8 @@
 #define EKEYREJECTED 129
 #define EOWNERDEAD   130
 #define ETIME        62
+#define EOVERFLOW    75
+#define ESTALE       116
 #define ERESTARTNOINTR 513
 
 #define ERESTARTSYS  512   /* restart syscall after signal delivery */

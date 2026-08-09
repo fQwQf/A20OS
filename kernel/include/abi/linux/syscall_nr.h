@@ -129,7 +129,8 @@
 #define SYS_gettimeofday   169
 #define SYS_settimeofday   170
 #define SYS_times          153
-#define SYS_time           235
+#define SYS_mbind          235
+#define SYS_time           201
 #define SYS_socket         198
 #define SYS_socketpair     199
 #define SYS_bind           200
@@ -267,6 +268,45 @@
 #define SYS_set_thread_area 1001
 #define SYS_poll            1002
 #define SYS_clock_gettime32 1023
+
+/* RISC-V 64-bit Linux syscall numbers for the syscalls completed in the
+ * "finish the Linux ABI" work.  Grouped by subsystem for readability. */
+#define SYS_restart_syscall    128
+#define SYS_lookup_dcookie     18
+#define SYS_quotactl           60
+#define SYS_readahead          213
+#define SYS_remap_file_pages   234
+#define SYS_mbind              235
+#define SYS_set_mempolicy      237
+#define SYS_migrate_pages      238
+#define SYS_move_pages         239
+#define SYS_name_to_handle_at  264
+#define SYS_open_by_handle_at  265
+#define SYS_kcmp               272
+#define SYS_process_vm_readv   270
+#define SYS_process_vm_writev  271
+#define SYS_rseq               293
+#define SYS_io_uring_setup     425
+#define SYS_io_uring_enter     426
+#define SYS_io_uring_register  427
+#define SYS_open_tree          428
+#define SYS_move_mount         429
+#define SYS_fsopen             430
+#define SYS_fsconfig           431
+#define SYS_fsmount            432
+#define SYS_fspick             433
+#define SYS_mount_setattr      442
+#define SYS_quotactl_fd        443
+#define SYS_landlock_create_ruleset 444
+#define SYS_landlock_add_rule  445
+#define SYS_landlock_restrict_self 446
+#define SYS_memfd_secret       447
+#define SYS_process_mrelease   448
+#define SYS_process_madvise    440
+#define SYS_futex_waitv        449
+#define SYS_set_mempolicy_home_node 450
+#define SYS_cachestat          451
+#define SYS_futex_requeue      456
 
 /* A20OS Linux-ABI extensions: channel IPC bridge (sys_a20_bridge.c).
  * Numbers are above every real Linux syscall so they never collide with a
