@@ -63,7 +63,7 @@ static void my_enumerate_devices(void) {
 
 ## IRQ controller 契约
 
-板级 irqchip 必须实现使能、禁用和 EOI。`driver_irq_dispatch()` 在架构入口已读取中断号后调用 handler，最后 EOI；handler 不自行调用 GIC EOI。`request_irq` 当前最多支持 IRQ 0..255，且每条线只有一个 handler 槽。`IRQF_SHARED` 标志尚未提供通用 handler 链；共享设备必须由一个聚合 handler 分发，VirtIO input 是现有实例。
+板级 irqchip 必须实现使能、禁用和 EOI。`driver_irq_dispatch()` 在架构入口已读取中断号后调用 handler，最后 EOI；handler 不自行调用 GIC EOI。`request_irq` 当前最多支持 IRQ 0..255。`IRQF_SHARED` 标志受支持：当现有 handler 与新增 handler 都以 `IRQF_SHARED` 注册时，按单链表 chain 依次分发（`kernel/drivers/core/driver_hwapi.c`）；否则同一条线上第二个注册返回 `-EBUSY`。
 
 ## Timer 契约
 
