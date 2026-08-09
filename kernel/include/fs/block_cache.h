@@ -10,8 +10,8 @@
 #define BCACHE_MAX_BLOCKS   1024
 #define BCACHE_HASH_BUCKETS 1024
 #define PCACHE_PAGE_SIZE    4096
-#define PCACHE_MAX_PAGES    1024
-#define PCACHE_HASH_BUCKETS 128
+#define PCACHE_MAX_PAGES    2000
+#define PCACHE_HASH_BUCKETS 512
 #define PCACHE_FILL_LOCKS   64
 
 typedef struct bcache_entry {
@@ -35,6 +35,13 @@ typedef struct pcache_entry {
     struct pcache_entry *prev, *next;
     struct pcache_entry *hnext;
 } pcache_entry_t;
+
+/* kmalloc's largest contiguous allocation is 8 MiB.  Keep the enlarged page
+ * pool in the same buddy order as the old 1024-entry pool, with room for the
+ * allocator header, so the optimization does not raise allocation pressure. */
+_Static_assert(sizeof(pcache_entry_t) * PCACHE_MAX_PAGES + 64 <=
+                   8U * 1024U * 1024U,
+               "block page cache exceeds kmalloc maximum order");
 
 typedef struct bcache {
     block_dev_t     *dev;

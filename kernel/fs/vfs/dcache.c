@@ -2,8 +2,8 @@
 #include "core/lock.h"
 #include "core/string.h"
 
-#define VFS_DCACHE_MAX 512
-#define VFS_DCACHE_HASH_BITS 7
+#define VFS_DCACHE_MAX 2048
+#define VFS_DCACHE_HASH_BITS 9
 #define VFS_DCACHE_HASH_SIZE (1U << VFS_DCACHE_HASH_BITS)
 #define VFS_DCACHE_HASH_MASK (VFS_DCACHE_HASH_SIZE - 1)
 

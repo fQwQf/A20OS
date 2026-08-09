@@ -66,20 +66,93 @@ uint64_t ext4_block_map_cached(ext4_fctx_t *fc, ext4_inode_t *inode,
  * reference to the caller, who must vnode_put it after dropping the lock.
  * ================================================================ */
 
-#define EXT4_VCACHE_MAX 512
+#define EXT4_VCACHE_MAX 4096
+#define EXT4_VCACHE_HASH_BITS 11
+#define EXT4_VCACHE_HASH_SIZE (1U << EXT4_VCACHE_HASH_BITS)
+#define EXT4_VCACHE_HASH_MASK (EXT4_VCACHE_HASH_SIZE - 1)
 typedef struct {
     ext4_sb_info_t *sb;
     uint32_t ino;
     vnode_t *vn;
+    int hash_next;
+    int hash_prev;
+    int free_next;
 } ext4_vcache_ent_t;
 
 static ext4_vcache_ent_t g_ext4_vcache[EXT4_VCACHE_MAX];
+static int g_ext4_vcache_hash[EXT4_VCACHE_HASH_SIZE];
+static int g_ext4_vcache_free_list;
+static int g_ext4_vcache_initialized;
 static spinlock_t g_ext4_vcache_lock = SPINLOCK_INIT;
+
+static uint32_t ext4_vcache_hash_key(ext4_sb_info_t *sb, uint32_t ino)
+{
+    uint64_t p = (uint64_t)(uintptr_t)sb >> 4;
+    uint32_t h = (uint32_t)p ^ (uint32_t)(p >> 32) ^ ino;
+    h ^= h >> 16;
+    h *= 0x7feb352dU;
+    h ^= h >> 15;
+    return h & EXT4_VCACHE_HASH_MASK;
+}
+
+static void ext4_vcache_init_locked(void)
+{
+    if (g_ext4_vcache_initialized)
+        return;
+    for (int i = 0; i < EXT4_VCACHE_MAX; i++) {
+        g_ext4_vcache[i].hash_next = -1;
+        g_ext4_vcache[i].hash_prev = -1;
+        g_ext4_vcache[i].free_next = i + 1;
+    }
+    g_ext4_vcache[EXT4_VCACHE_MAX - 1].free_next = -1;
+    for (int i = 0; i < (int)EXT4_VCACHE_HASH_SIZE; i++)
+        g_ext4_vcache_hash[i] = -1;
+    g_ext4_vcache_free_list = 0;
+    g_ext4_vcache_initialized = 1;
+}
+
+static void ext4_vcache_link_hash_locked(int slot, uint32_t hash)
+{
+    ext4_vcache_ent_t *e = &g_ext4_vcache[slot];
+    e->hash_next = g_ext4_vcache_hash[hash];
+    e->hash_prev = -1;
+    if (e->hash_next >= 0)
+        g_ext4_vcache[e->hash_next].hash_prev = slot;
+    g_ext4_vcache_hash[hash] = slot;
+}
+
+static void ext4_vcache_unlink_hash_locked(int slot)
+{
+    ext4_vcache_ent_t *e = &g_ext4_vcache[slot];
+    if (e->hash_prev >= 0)
+        g_ext4_vcache[e->hash_prev].hash_next = e->hash_next;
+    else
+        g_ext4_vcache_hash[ext4_vcache_hash_key(e->sb, e->ino)] =
+            e->hash_next;
+    if (e->hash_next >= 0)
+        g_ext4_vcache[e->hash_next].hash_prev = e->hash_prev;
+    e->hash_next = -1;
+    e->hash_prev = -1;
+}
+
+static void ext4_vcache_free_slot_locked(int slot)
+{
+    ext4_vcache_ent_t *e = &g_ext4_vcache[slot];
+    ext4_vcache_unlink_hash_locked(slot);
+    e->sb = NULL;
+    e->ino = 0;
+    e->vn = NULL;
+    e->free_next = g_ext4_vcache_free_list;
+    g_ext4_vcache_free_list = slot;
+}
 
 vnode_t *ext4_vnode_cache_lookup(ext4_sb_info_t *sb, uint32_t ino) {
     uint64_t flags = spin_lock_irqsave(&g_ext4_vcache_lock);
-    for (int i = 0; i < EXT4_VCACHE_MAX; i++) {
-        if (g_ext4_vcache[i].vn && g_ext4_vcache[i].sb == sb &&
+    ext4_vcache_init_locked();
+    uint32_t hash = ext4_vcache_hash_key(sb, ino);
+    for (int i = g_ext4_vcache_hash[hash]; i >= 0;
+         i = g_ext4_vcache[i].hash_next) {
+        if (g_ext4_vcache[i].sb == sb &&
             g_ext4_vcache[i].ino == ino) {
             vnode_t *vn = g_ext4_vcache[i].vn;
             /* Pair the cache lookup with its caller reference while the
@@ -96,28 +169,40 @@ vnode_t *ext4_vnode_cache_lookup(ext4_sb_info_t *sb, uint32_t ino) {
 
 void ext4_vnode_cache_insert(ext4_sb_info_t *sb, uint32_t ino, vnode_t *vn) {
     uint64_t flags = spin_lock_irqsave(&g_ext4_vcache_lock);
-    for (int i = 0; i < EXT4_VCACHE_MAX; i++) {
-        if (!g_ext4_vcache[i].vn) {
-            vnode_get(vn);
-            g_ext4_vcache[i].sb = sb;
-            g_ext4_vcache[i].ino = ino;
-            g_ext4_vcache[i].vn = vn;
+    ext4_vcache_init_locked();
+    uint32_t hash = ext4_vcache_hash_key(sb, ino);
+    for (int i = g_ext4_vcache_hash[hash]; i >= 0;
+         i = g_ext4_vcache[i].hash_next) {
+        if (g_ext4_vcache[i].sb == sb && g_ext4_vcache[i].ino == ino) {
             spin_unlock_irqrestore(&g_ext4_vcache_lock, flags);
             return;
         }
+    }
+    int slot = g_ext4_vcache_free_list;
+    if (slot >= 0) {
+        g_ext4_vcache_free_list = g_ext4_vcache[slot].free_next;
+        vnode_get(vn);
+        g_ext4_vcache[slot].sb = sb;
+        g_ext4_vcache[slot].ino = ino;
+        g_ext4_vcache[slot].vn = vn;
+        g_ext4_vcache[slot].free_next = -1;
+        ext4_vcache_link_hash_locked(slot, hash);
+        spin_unlock_irqrestore(&g_ext4_vcache_lock, flags);
+        return;
     }
     spin_unlock_irqrestore(&g_ext4_vcache_lock, flags);
 }
 
 vnode_t *ext4_vnode_cache_remove(ext4_sb_info_t *sb, uint32_t ino) {
     uint64_t flags = spin_lock_irqsave(&g_ext4_vcache_lock);
-    for (int i = 0; i < EXT4_VCACHE_MAX; i++) {
-        if (g_ext4_vcache[i].vn && g_ext4_vcache[i].sb == sb &&
+    ext4_vcache_init_locked();
+    uint32_t hash = ext4_vcache_hash_key(sb, ino);
+    for (int i = g_ext4_vcache_hash[hash]; i >= 0;
+         i = g_ext4_vcache[i].hash_next) {
+        if (g_ext4_vcache[i].sb == sb &&
             g_ext4_vcache[i].ino == ino) {
             vnode_t *vn = g_ext4_vcache[i].vn;
-            g_ext4_vcache[i].sb = NULL;
-            g_ext4_vcache[i].ino = 0;
-            g_ext4_vcache[i].vn = NULL;
+            ext4_vcache_free_slot_locked(i);
             spin_unlock_irqrestore(&g_ext4_vcache_lock, flags);
             return vn;
         }
@@ -138,13 +223,12 @@ void ext4_vnode_cache_prune_all(void)
     do {
         held_count = 0;
         uint64_t flags = spin_lock_irqsave(&g_ext4_vcache_lock);
+        ext4_vcache_init_locked();
         for (int i = 0; i < EXT4_VCACHE_MAX && held_count < 64; i++) {
             vnode_t *vn = g_ext4_vcache[i].vn;
             if (vn && vnode_ref_read(vn) == 1) {
                 held[held_count++] = vn;
-                g_ext4_vcache[i].sb = NULL;
-                g_ext4_vcache[i].ino = 0;
-                g_ext4_vcache[i].vn = NULL;
+                ext4_vcache_free_slot_locked(i);
             }
         }
         spin_unlock_irqrestore(&g_ext4_vcache_lock, flags);
@@ -1580,22 +1664,24 @@ void ext4_unmount(vnode_t *root) {
     /* Drop all cache-owned vnode references for this filesystem; survivors
      * (still-open files) stay alive on their remaining references and
      * unlinked inodes are reclaimed by release(). */
-    vnode_t *held[EXT4_VCACHE_MAX];
-    int held_count = 0;
-    mutex_lock(&esi->metadata_lock);
-    uint64_t cache_flags = spin_lock_irqsave(&g_ext4_vcache_lock);
-    for (int i = 0; i < EXT4_VCACHE_MAX; i++) {
-        if (g_ext4_vcache[i].vn && g_ext4_vcache[i].sb == esi) {
-            held[held_count++] = g_ext4_vcache[i].vn;
-            g_ext4_vcache[i].sb = NULL;
-            g_ext4_vcache[i].ino = 0;
-            g_ext4_vcache[i].vn = NULL;
+    vnode_t *held[64];
+    int held_count;
+    do {
+        held_count = 0;
+        mutex_lock(&esi->metadata_lock);
+        uint64_t cache_flags = spin_lock_irqsave(&g_ext4_vcache_lock);
+        ext4_vcache_init_locked();
+        for (int i = 0; i < EXT4_VCACHE_MAX && held_count < 64; i++) {
+            if (g_ext4_vcache[i].vn && g_ext4_vcache[i].sb == esi) {
+                held[held_count++] = g_ext4_vcache[i].vn;
+                ext4_vcache_free_slot_locked(i);
+            }
         }
-    }
-    spin_unlock_irqrestore(&g_ext4_vcache_lock, cache_flags);
-    mutex_unlock(&esi->metadata_lock);
-    for (int i = 0; i < held_count; i++)
-        vnode_put(held[i]);
+        spin_unlock_irqrestore(&g_ext4_vcache_lock, cache_flags);
+        mutex_unlock(&esi->metadata_lock);
+        for (int i = 0; i < held_count; i++)
+            vnode_put(held[i]);
+    } while (held_count != 0);
 
     if (root->ops && root->ops->release) root->ops->release(root);
     if (esi->group_descs) {
