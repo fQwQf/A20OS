@@ -10,5 +10,6 @@ int sysv_shm_control(int shmid, int cmd, void *buf);
 int sysv_shm_ref_attach(int shmid);
 void sysv_shm_unref_attach(int shmid);
 uint64_t sysv_shm_at(int shmid, uint64_t shmaddr, int shmflg);
+int sysv_shm_count(void);
 
 #endif /* _IPC_SYSV_SHM_H */

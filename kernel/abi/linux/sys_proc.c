@@ -389,30 +389,50 @@ int64_t sys_getsid(int pid) {
 static char g_hostname[65] = "A20OS";
 static char g_domainname[65] = "";
 
+/* Exposed for /proc/sys/kernel/hostname and domainname (procfs render). */
+const char *linux_kernel_hostname(void) { return g_hostname; }
+const char *linux_kernel_domainname(void) { return g_domainname; }
+
+/* Kernel-side setters used by /proc/sys/kernel writes.  @buf is a kernel
+ * buffer; returns 0 or a negative errno. */
+int linux_kernel_set_hostname(const char *buf, size_t len)
+{
+    if (!buf || len >= sizeof(g_hostname))
+        return -EINVAL;
+    memcpy(g_hostname, buf, len);
+    g_hostname[len] = '\0';
+    return 0;
+}
+
+int linux_kernel_set_domainname(const char *buf, size_t len)
+{
+    if (!buf || len >= sizeof(g_domainname))
+        return -EINVAL;
+    memcpy(g_domainname, buf, len);
+    g_domainname[len] = '\0';
+    return 0;
+}
+
 int64_t sys_sethostname(const char *name, size_t len) {
     if (!name) return -EFAULT;
-    if (len >= sizeof(g_hostname)) return -EINVAL;
     task_t *t = proc_current();
     if (!t || (t->cred.uid != 0 && t->cred.euid != 0))
         return -EPERM;
     char buf[65];
     if (user_strncpy(buf, name, sizeof(buf)) < 0) return -EFAULT;
     buf[len] = '\0';
-    memcpy(g_hostname, buf, len + 1);
-    return 0;
+    return linux_kernel_set_hostname(buf, len);
 }
 
 int64_t sys_setdomainname(const char *name, size_t len) {
     if (!name) return -EFAULT;
-    if (len >= sizeof(g_domainname)) return -EINVAL;
     task_t *t = proc_current();
     if (!t || (t->cred.uid != 0 && t->cred.euid != 0))
         return -EPERM;
     char buf[65];
     if (user_strncpy(buf, name, sizeof(buf)) < 0) return -EFAULT;
     buf[len] = '\0';
-    memcpy(g_domainname, buf, len + 1);
-    return 0;
+    return linux_kernel_set_domainname(buf, len);
 }
 
 static unsigned int g_personality;
