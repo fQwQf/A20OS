@@ -88,7 +88,7 @@ typedef struct {
     uint32_t len;
     uint16_t flags;
     uint16_t next;
-} __attribute__((packed)) virtq_desc_t;
+} virtq_desc_t;
 
 /* VirtIO available ring */
 typedef struct {
@@ -96,13 +96,13 @@ typedef struct {
     uint16_t idx;
     uint16_t ring[VIRTIO_QUEUE_SIZE];
     uint16_t used_event;
-} __attribute__((packed)) virtq_avail_t;
+} virtq_avail_t;
 
 /* VirtIO used ring element */
 typedef struct {
     uint32_t id;
     uint32_t len;
-} __attribute__((packed)) virtq_used_elem_t;
+} virtq_used_elem_t;
 
 /* VirtIO used ring */
 typedef struct {
@@ -110,14 +110,28 @@ typedef struct {
     uint16_t idx;
     virtq_used_elem_t ring[VIRTIO_QUEUE_SIZE];
     uint16_t avail_event;
-} __attribute__((packed)) virtq_used_t;
+} virtq_used_t;
 
 /* VirtIO block request header */
 typedef struct {
     uint32_t type;
     uint32_t reserved;
     uint64_t sector;
-} __attribute__((packed)) virtio_blk_req_hdr_t;
+} virtio_blk_req_hdr_t;
+
+_Static_assert(sizeof(virtq_desc_t) == 16, "virtqueue descriptor layout");
+_Static_assert(__builtin_offsetof(virtq_avail_t, idx) == 2,
+               "virtqueue available index layout");
+_Static_assert(__builtin_offsetof(virtq_avail_t, ring) == 4,
+               "virtqueue available ring layout");
+_Static_assert(__builtin_offsetof(virtq_used_t, idx) == 2,
+               "virtqueue used index layout");
+_Static_assert(__builtin_offsetof(virtq_used_t, ring) == 4,
+               "virtqueue used ring layout");
+_Static_assert(sizeof(virtq_used_elem_t) == 8,
+               "virtqueue used element layout");
+_Static_assert(sizeof(virtio_blk_req_hdr_t) == 16,
+               "virtio block request layout");
 
 /* ---- Driver state ---- */
 typedef struct virtio_blk {
