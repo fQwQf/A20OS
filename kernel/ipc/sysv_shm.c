@@ -390,3 +390,14 @@ int sysv_shm_control(int shmid, int cmd, void *buf)
     spin_unlock_irqrestore(&g_shm_lock, flags);
     return 0;
 }
+
+int sysv_shm_count(void)
+{
+    int n = 0;
+    uint64_t flags = spin_lock_irqsave(&g_shm_lock);
+    for (int i = 0; i < SYSV_SHM_MAX; i++)
+        if (g_shm[i].used)
+            n++;
+    spin_unlock_irqrestore(&g_shm_lock, flags);
+    return n;
+}
