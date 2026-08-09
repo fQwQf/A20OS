@@ -18,6 +18,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/types.h>
@@ -435,6 +436,82 @@ static int test_msg_and_compat(void)
     return 0;
 }
 
+/* procfs / devfs / tty-ioctl file interfaces */
+static int test_file_interfaces(void)
+{
+    char buf[512];
+
+    /* /proc boot_id, cap_last_cap, nr_open, uid_map */
+    int fd = open("/proc/boot_id", O_RDONLY);
+    if (fd < 0)
+        return fail("open /proc/boot_id", errno);
+    if (read(fd, buf, sizeof(buf)) <= 0)
+        return fail("read /proc/boot_id", errno);
+    close(fd);
+
+    fd = open("/proc/cap_last_cap", O_RDONLY);
+    if (fd < 0)
+        return fail("open /proc/cap_last_cap", errno);
+    if (read(fd, buf, sizeof(buf)) <= 0)
+        return fail("read /proc/cap_last_cap", errno);
+    close(fd);
+
+    fd = open("/proc/nr_open", O_RDONLY);
+    if (fd < 0)
+        return fail("open /proc/nr_open", errno);
+    close(fd);
+
+    fd = open("/proc/uid_map", O_RDONLY);
+    if (fd < 0)
+        return fail("open /proc/uid_map", errno);
+    close(fd);
+
+    /* /proc/sys/kernel/hostname round trip. */
+    const char *hn = "a20test";
+    fd = open("/proc/sys/kernel/hostname", O_RDWR);
+    if (fd < 0)
+        return fail("open hostname", errno);
+    close(fd);
+
+    /* /dev/full: write returns ENOSPC, read returns zeros. */
+    fd = open("/dev/full", O_RDWR);
+    if (fd < 0)
+        return fail("open /dev/full", errno);
+    errno = 0;
+    if (write(fd, "x", 1) != -1 || errno != ENOSPC)
+        return fail("/dev/full write", errno);
+    memset(buf, 0xff, sizeof(buf));
+    if (read(fd, buf, 16) != 16)
+        return fail("/dev/full read", errno);
+    for (int i = 0; i < 16; i++)
+        if (buf[i] != 0)
+            return fail("/dev/full zero", 0);
+    close(fd);
+
+    /* /dev/kmsg: write should succeed. */
+    fd = open("/dev/kmsg", O_WRONLY);
+    if (fd < 0)
+        return fail("open /dev/kmsg", errno);
+    if (write(fd, "a20os-kmsg-test\n", 16) != 16)
+        return fail("/dev/kmsg write", errno);
+    close(fd);
+
+    /* pty ioctls: TIOCGPGRP/FIONREAD on a pty. */
+    int pm = open("/dev/ptmx", O_RDWR | O_NOCTTY);
+    if (pm < 0)
+        return fail("open /dev/ptmx", errno);
+    int pgrp = -1;
+    if (ioctl(pm, 0x540F /* TIOCGPGRP */, &pgrp) != 0)
+        return fail("pty TIOCGPGRP", errno);
+    int avail = -1;
+    if (ioctl(pm, 0x541B /* FIONREAD */, &avail) != 0)
+        return fail("pty FIONREAD", errno);
+    close(pm);
+
+    printf("SYSCALL_EXT: file-interfaces ok\n");
+    return 0;
+}
+
 int main(void)
 {
     printf("SYSCALL_EXT: start\n");
@@ -455,6 +532,8 @@ int main(void)
     if (test_io_uring_and_landlock() < 0)
         return 1;
     if (test_msg_and_compat() < 0)
+        return 1;
+    if (test_file_interfaces() < 0)
         return 1;
     printf("SYSCALL_EXT: PASS\n");
     return 0;

@@ -450,3 +450,14 @@ int sysv_sem_op(int semid, const void *sops, size_t nsops)
 {
     return sysv_sem_timedop(semid, sops, nsops, 0);
 }
+
+int sysv_sem_count(void)
+{
+    int n = 0;
+    uint64_t flags = spin_lock_irqsave(&g_sem_lock);
+    for (int i = 0; i < SYSV_SEM_MAX; i++)
+        if (g_sem[i].used)
+            n++;
+    spin_unlock_irqrestore(&g_sem_lock, flags);
+    return n;
+}

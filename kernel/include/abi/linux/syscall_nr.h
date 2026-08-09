@@ -130,7 +130,6 @@
 #define SYS_settimeofday   170
 #define SYS_times          153
 #define SYS_mbind          235
-#define SYS_time           201
 #define SYS_socket         198
 #define SYS_socketpair     199
 #define SYS_bind           200
@@ -240,7 +239,7 @@
 #define SYS_setdomainname   162
 #define SYS_personality     92
 #define SYS_unshare         97
-#define SYS_setns           305
+#define SYS_setns           268
 #define SYS_rt_sigpending   136
 #define SYS_mlock           228
 #define SYS_munlock         229
@@ -255,7 +254,7 @@
 #define SYS_get_mempolicy   236
 
 /* Missing syscall numbers (RISC-V 64-bit Linux) */
-#define SYS_syncfs          306
+#define SYS_syncfs          267
 #define SYS_fanotify_init   262
 #define SYS_fanotify_mark   263
 #define SYS_signalfd4       74
@@ -268,7 +267,7 @@
 #define SYS_io_submit       2
 #define SYS_io_getevents    4
 #define SYS_io_cancel       3
-#define SYS_io_pgetevents   399
+#define SYS_io_pgetevents   292
 #define SYS_init_module     105
 #define SYS_delete_module   106
 #define SYS_finit_module    273

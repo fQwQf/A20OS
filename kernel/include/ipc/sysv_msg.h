@@ -30,4 +30,7 @@ long sysv_msg_recv(int msqid, void *msgp, size_t msgsz, int64_t msgtyp,
 /* msgctl(2).  @arg is a kernel buffer for IPC_STAT/IPC_SET, NULL otherwise. */
 int sysv_msg_control(int msqid, int cmd, void *arg);
 
+/* Number of live message queues (for /proc/sysvipc). */
+int sysv_msg_count(void);
+
 #endif /* _IPC_SYSV_MSG_H */

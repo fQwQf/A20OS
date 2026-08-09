@@ -5,6 +5,7 @@
 #include "core/consts.h"
 #include "core/lock.h"
 #include "core/sync.h"
+#include "core/ioctl.h"
 #include "fs/vfs.h"
 #include "fs/devfs.h"
 #include "fs/fdtable.h"
@@ -56,6 +57,7 @@ typedef struct {
     int         master_refs;
     int         slave_refs;
     uint16_t    ws_row, ws_col;
+    int         pgrp;           /* foreground process group (TIOCGPGRP/SPGRP) */
     int         master_nonblock;
     int         slave_nonblock;
     int         master_waiting;
@@ -437,6 +439,22 @@ int pty_master_ioctl(int idx, unsigned long req, void *arg) {
         spin_unlock_irqrestore(&g_ptys[idx].lock, flags);
         return 0;
     }
+    if (req == FIONREAD) {
+        int avail;
+        uint64_t flags = spin_lock_irqsave(&g_ptys[idx].lock);
+        avail = (int)g_ptys[idx].s2m_used;   /* bytes the master can read */
+        spin_unlock_irqrestore(&g_ptys[idx].lock, flags);
+        if (copy_to_user(arg, &avail, sizeof(avail)) < 0) return -EFAULT;
+        return 0;
+    }
+    if (req == TIOCINQ) {
+        int avail;
+        uint64_t flags = spin_lock_irqsave(&g_ptys[idx].lock);
+        avail = (int)g_ptys[idx].s2m_used;
+        spin_unlock_irqrestore(&g_ptys[idx].lock, flags);
+        if (copy_to_user(arg, &avail, sizeof(avail)) < 0) return -EFAULT;
+        return 0;
+    }
     return -ENOTTY;
 }
 
@@ -482,6 +500,58 @@ int pty_slave_ioctl(int idx, unsigned long req, void *arg) {
     }
     if (req == TIOCSCTTY) return 0;
     if (req == TIOCNOTTY) return 0;
+    if (req == TIOCGPGRP) {
+        int pgrp;
+        uint64_t flags = spin_lock_irqsave(&g_ptys[idx].lock);
+        pgrp = g_ptys[idx].pgrp ? g_ptys[idx].pgrp : 0;
+        spin_unlock_irqrestore(&g_ptys[idx].lock, flags);
+        if (copy_to_user(arg, &pgrp, sizeof(pgrp)) < 0) return -EFAULT;
+        return 0;
+    }
+    if (req == TIOCSPGRP) {
+        int pgrp;
+        if (copy_from_user(&pgrp, arg, sizeof(pgrp)) < 0) return -EFAULT;
+        uint64_t flags = spin_lock_irqsave(&g_ptys[idx].lock);
+        g_ptys[idx].pgrp = pgrp;
+        spin_unlock_irqrestore(&g_ptys[idx].lock, flags);
+        return 0;
+    }
+    if (req == TCFLSH) {
+        /* Flush input (0), output (1), or both (2) ring buffers. */
+        int mode = (int)(uintptr_t)arg;
+        uint64_t flags = spin_lock_irqsave(&g_ptys[idx].lock);
+        if (mode == 0 || mode == 2) {
+            g_ptys[idx].s2m_used = 0;
+            g_ptys[idx].s2m_head = g_ptys[idx].s2m_tail = 0;
+        }
+        if (mode == 1 || mode == 2) {
+            g_ptys[idx].m2s_used = 0;
+            g_ptys[idx].m2s_head = g_ptys[idx].m2s_tail = 0;
+        }
+        spin_unlock_irqrestore(&g_ptys[idx].lock, flags);
+        return 0;
+    }
+    if (req == TIOCOUTQ) {
+        int avail;
+        uint64_t flags = spin_lock_irqsave(&g_ptys[idx].lock);
+        avail = (int)g_ptys[idx].m2s_used;   /* bytes queued for the slave */
+        spin_unlock_irqrestore(&g_ptys[idx].lock, flags);
+        if (copy_to_user(arg, &avail, sizeof(avail)) < 0) return -EFAULT;
+        return 0;
+    }
+    if (req == TIOCSTI) {
+        /* Inject a single byte into the terminal input (simulate typing). */
+        char ch;
+        if (copy_from_user(&ch, arg, sizeof(ch)) < 0) return -EFAULT;
+        uint64_t flags = spin_lock_irqsave(&g_ptys[idx].lock);
+        size_t n = ring_write(g_ptys[idx].s2m_buf, PTY_BUF_SIZE,
+                              &g_ptys[idx].s2m_head, &g_ptys[idx].s2m_used,
+                              &ch, 1);
+        spin_unlock_irqrestore(&g_ptys[idx].lock, flags);
+        if (n > 0)
+            wait_queue_wake_all(&g_ptys[idx].master_readers, 0, PROC_WAKE_EVENT);
+        return n == 1 ? 0 : -EIO;
+    }
     if (req == FIONBIO) {
         int nb;
         if (copy_from_user(&nb, arg, sizeof(nb)) < 0) return -EFAULT;

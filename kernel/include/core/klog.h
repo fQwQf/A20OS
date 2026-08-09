@@ -12,6 +12,7 @@
 
 void klog_init(void);
 void klog_write(const char *fmt, ...);
+void klog_write_raw(const char *buf, size_t len);
 int  klog_read(char *buf, size_t size, size_t *pos);
 void klog_clear(void);
 size_t klog_len(void);

@@ -190,7 +190,6 @@
 #define X86_SYS_reboot          169
 #define X86_SYS_sethostname     170
 #define X86_SYS_setdomainname   171
-#define X86_SYS_time            201
 #define X86_SYS_futex           202
 #define X86_SYS_sched_setaffinity 203
 #define X86_SYS_sched_getaffinity 204
@@ -516,7 +515,7 @@ static inline uint32_t x86_syscall_to_kernel_nr(uint32_t x86_nr)
         /* 198 */ SYS_lremovexattr,
         /* 199 */ SYS_fremovexattr,
         /* 200 */ (uint16_t)-1,     /* tkill */
-        /* 201 */ SYS_time,
+        /* 201 */ (uint16_t)-1,     /* time: no generic handler (musl uses clock_gettime) */
         /* 202 */ SYS_futex,
         /* 203 */ SYS_sched_setaffinity,
         /* 204 */ SYS_sched_getaffinity,
