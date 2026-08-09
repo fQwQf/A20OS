@@ -515,6 +515,16 @@ smoke-native-handle:
 		exit 1; \
 	fi
 
+final-submit-rv:
+	@echo "--- Building RISC-V 64 (2026 final submission) ---"
+	$(MAKE) ARCH=riscv64 ABI=both MODE=release PROFILE=benchmark NR_CPUS=8 \
+		_final_submit_build KERNEL_OUT=kernel-rv DISK_OUT=disk.img
+
+final-submit-la:
+	@echo "--- Building LoongArch 64 (2026 final submission) ---"
+	$(MAKE) ARCH=loongarch64 ABI=both MODE=release PROFILE=benchmark NR_CPUS=8 \
+		_final_submit_build KERNEL_OUT=kernel-la DISK_OUT=disk-la.img
+
 contest-rv:
 	@echo "--- Building RISC-V 64 (contest) ---"
 	$(MAKE) ARCH=riscv64 _contest_build KERNEL_OUT=kernel-rv DISK_OUT=disk.img
@@ -557,3 +567,27 @@ _contest_disk: $(USER_BUILD_STAMP) \
 	mcopy -o -i $(DISK_OUT) user/contest_init/run_ltp_resume.sh ::/run_ltp_resume.sh
 	@printf 'auto\n' | mcopy -o -i $(DISK_OUT) - ::/etc/contest-mode
 
+_final_submit_build: $(KERNEL_ELF) $(USER_BUILD_STAMP)
+	$(MAKE) ARCH=$(ARCH) ABI=$(ABI) PROFILE=$(PROFILE) NR_CPUS=$(NR_CPUS) \
+		_final_submit_disk DISK_OUT=$(DISK_OUT)
+	cp $(KERNEL_ELF) $(KERNEL_OUT)
+	@echo "  -> $(KERNEL_OUT) + $(DISK_OUT)"
+
+_final_submit_disk: $(USER_BUILD_STAMP) user/contest_init/final_contest.sh
+	rm -f $(DISK_OUT)
+	$(MKFS_FAT) -C -F 32 $(DISK_OUT) 131072
+	@set -e; \
+	for f in $(USER_BUILD_DIR)/*; do \
+		[ -f "$$f" ] || continue; \
+		name=$$(basename "$$f"); \
+		mcopy -i $(DISK_OUT) "$$f" "::/$$name"; \
+	done
+	mcopy -o -i $(DISK_OUT) $(USER_BUILD_DIR)/mksh ::/sh
+	mcopy -o -i $(DISK_OUT) $(USER_BUILD_DIR)/mksh ::/bash
+	-mmd -i $(DISK_OUT) ::/etc >/dev/null 2>&1
+	-mmd -i $(DISK_OUT) ::/lib >/dev/null 2>&1
+	@[ -n "$(LIBGCC_S_ARCH)" ] && [ -f "$(LIBGCC_S_ARCH)" ] && \
+		mcopy -o -i $(DISK_OUT) "$(LIBGCC_S_ARCH)" ::/lib/libgcc_s.so.1 || true
+	@printf '%s\n' $(PROTOCOLS_LINES) | mcopy -o -i $(DISK_OUT) - ::/etc/protocols
+	mcopy -o -i $(DISK_OUT) user/contest_init/final_contest.sh ::/final_contest.sh
+	@printf 'all\n' | mcopy -o -i $(DISK_OUT) - ::/etc/final-eval-group

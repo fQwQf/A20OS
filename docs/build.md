@@ -24,8 +24,10 @@ docker build -t a20os-buildenv .docker run -it --rm -v $(pwd):/workspace -w /wor
 | `make ARCH=riscv64 BRINGUP=1 run` | 仅编译内核并在 QEMU 启动 | 内核 bring-up 测试 |
 | `make ARCH=riscv64 NOMMU=1 run` | 以 NOMMU 模式运行 | 测试 NOMMU 路径 |
 | `make debug-riscv64` | 用 `-O0 -g -DDEBUG` 编译并启动 QEMU 等待 GDB | 源码级调试 |
-| `make all` | 构建比赛默认架构产物 | 提交前完整编译 |
-| `make all-architectures` | 构建 RISC-V 与 LoongArch 比赛产物 | 全架构检查 |
+| `make all` | 构建 2026 决赛双架构提交产物：`kernel-rv`、`kernel-la`、`disk.img`、`disk-la.img` | 评测平台入口 |
+| `make final-all` / `make all-architectures` | `make all` 的显式别名 | 决赛提交前完整编译 |
+| `make preliminary-all` | 构建保留的初赛双架构入口与脚本 | 初赛回归检查 |
+| `make contest-rv` / `make contest-la` | 单独构建某架构的初赛产物 | 初赛定点复验 |
 | `make dev-build` | 生成内核、FAT32 和 ext4 镜像 | 需要完整用户态时 |
 | `make kernel-only` | 只生成内核 | 快速编译验证 |
 | `make stm32f103-bringup` | 生成 STM32F103 64 KiB Flash / 20 KiB SRAM 固件 | MCU 起步 |
@@ -84,6 +86,7 @@ WAV 输入必须是 48 kHz、双声道、S16_LE PCM；原始 PCM 使用 `audiopl
 
 - `BRINGUP=1` 不生成文件系统镜像；`BRINGUP=0` 才会触发用户态和磁盘构建。
 - 默认 `NR_CPUS=1`。RISC-V 64、AArch64、LoongArch64 和 x86_64 的 QEMU virt 平台已验证 SMP，可直接设置 `NR_CPUS>1`；PPC64LE 当前仅验证 QEMU pSeries 单核路径。其他架构或板卡仍会被构建系统拒绝，除非显式设置 `ALLOW_UNVERIFIED_SMP=1`。
+- 决赛 `make all` 内部固定使用 `PROFILE=benchmark NR_CPUS=8`，不受默认单核开发配置影响；BuildStorm 设计与复现说明见 [BuildStorm-2026.md](BuildStorm-2026.md)。
 - `ARCH=armv7m` 需要 `arm-none-eabi-gcc` 或 `clang` + `llvm-objcopy`。
 - 图形 QEMU 目标依赖宿主机显示能力；无图形环境请使用普通 `run-*` 目标。
 - 不要直接仿照 Makefile 外的 QEMU 参数手写启动命令，容易遗漏 `-bios default` 等关键选项。

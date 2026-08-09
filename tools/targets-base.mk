@@ -2,7 +2,7 @@
 # Targets
 # ================================================================
 
-.PHONY: all all-architectures clean run-riscv64 run-gui-riscv64 run-gui-rv run-loongarch64 run-gui-loongarch64 run-gui-la run-arm64 run-gui-arm64 run-gui-aarch64 run-x86_64 run-gui-x86_64 vbox-iso-x86_64 _vbox_iso_x86_64_impl vbox-image-aarch64 _vbox_image_aarch64_impl vbox-text-image-aarch64 _vbox_text_image_aarch64_impl run-arm32 run-gui-arm32 run-riscv32 run-ppc64le debug-riscv64 debug-loongarch64 debug-arm64 debug-x86_64 debug-arm32 debug-riscv32 debug-ppc64le \
+.PHONY: all final-all final-submit-rv final-submit-la preliminary-all all-architectures clean run-riscv64 run-gui-riscv64 run-gui-rv run-loongarch64 run-gui-loongarch64 run-gui-la run-arm64 run-gui-arm64 run-gui-aarch64 run-x86_64 run-gui-x86_64 vbox-iso-x86_64 _vbox_iso_x86_64_impl vbox-image-aarch64 _vbox_image_aarch64_impl vbox-text-image-aarch64 _vbox_text_image_aarch64_impl run-arm32 run-gui-arm32 run-riscv32 run-ppc64le debug-riscv64 debug-loongarch64 debug-arm64 debug-x86_64 debug-arm32 debug-riscv32 debug-ppc64le \
 		run-gui-nommu-arm32 run-nommu-gui-arm32 \
 		stm32f103-bringup stm32f103-xuanwu flash-stm32f103-xuanwu run-stm32f103-qemu \
 		check-stm32f103 \
