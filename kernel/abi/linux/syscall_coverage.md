@@ -42,6 +42,13 @@ of Linux commands, flags, object types, or concurrency semantics.
 | Linux AIO | partial | aio contexts with synchronous VFS execution of pread/pwrite/fsync/fdatasync. |
 | pidfd | partial | pidfd_open/pidfd_getfd/pidfd_send_signal with capability checks. |
 | driver modules | partial | init/finit/delete_module drive the A20OS drvmod ET_REL loader (privileged). |
+| cross-process memory | partial | process_vm_readv/writev, process_madvise, process_mrelease over the target page table. |
+| mempolicy/NUMA | partial | single-node policy validation/storage; no physical NUMA migration. |
+| file handles | partial | name_to_handle_at/open_by_handle_at over a kernel-side handle registry. |
+| new mount API | partial | fsopen/fsconfig/fsmount/fspick/open_tree/move_mount/mount_setattr on the existing mount table. |
+| io_uring | partial | kernel-memory SQ/CQ rings with synchronous NOP/READ/WRITE/FSYNC/CLOSE execution. |
+| landlock | partial | fd-backed rulesets with path-beneath rules enforced at vfs_open. |
+| rseq | partial | per-thread rseq registration; no CPU migration to abort. |
 
 ## Next Steps
 
@@ -314,6 +321,42 @@ of Linux commands, flags, object types, or concurrency semantics.
 | `userfaultfd` | memory | `stub` | `smoke-mm-stress` | explicit -ENOSYS compatibility placeholder |
 | `perf_event_open` | perf | `stub` | `stub-review` | explicit -ENOSYS compatibility placeholder |
 | `arch_prctl` | arch | `stub` | `stub-review` | architecture-specific implementation; unsupported architectures return -ENOSYS |
+| `restart_syscall` | system | `partial` | `smoke-syscall-ext` | returns -ERESTARTNOINTR when no restart is pending; covered by signal restart semantics |
+| `kcmp` | process | `partial` | `smoke-syscall-ext` | KCMP_FILE/VM/FILES/FS/SIGHAND/IO/SYSVSEM comparisons |
+| `readahead` | fd I/O | `partial` | `smoke-vfs-stress` | prefetches pages through the page cache (kernel/fs/page_cache.c) |
+| `cachestat` | fd I/O | `partial` | `smoke-vfs-stress` | reports resident/dirty cache bytes for a file |
+| `lookup_dcookie` | system | `partial` | `smoke-abi-linux` | returns a synthetic "/" cookie path; no cookie filesystems |
+| `quotactl` | system | `partial` | `smoke-abi-linux` | returns -EOPNOTSUPP (no quota subsystem) |
+| `quotactl_fd` | system | `partial` | `smoke-abi-linux` | returns -EOPNOTSUPP (no quota subsystem) |
+| `remap_file_pages` | memory | `partial` | `smoke-mm-stress` | accepts the deprecated op as a no-op; mmap/madvise cover the semantics |
+| `memfd_secret` | ipc | `partial` | `smoke-abi-linux` | falls back to a regular memfd (no secret-memory direct-map exclusion) |
+| `rseq` | process | `partial` | `smoke-proc-stress` | registers/unregisters the per-thread rseq area; no CPU migration to abort |
+| `process_vm_readv` | process | `partial` | `smoke-syscall-ext` | cross-process copy via kernel/mm/process_vm.c with capability checks |
+| `process_vm_writev` | process | `partial` | `smoke-syscall-ext` | cross-process copy via kernel/mm/process_vm.c with capability checks |
+| `process_madvise` | process | `partial` | `smoke-syscall-ext` | applies madvise hints to a target process's ranges |
+| `process_mrelease` | process | `partial` | `smoke-syscall-ext` | pidfd-targeted memory release; mm reaps automatically on exit |
+| `futex_waitv` | futex | `partial` | `smoke-proc-stress` | waits on an array of futexes; per-entry bitset flags supported |
+| `futex_requeue` | futex | `partial` | `smoke-proc-stress` | standalone FUTEX_REQUEUE-equivalent syscall |
+| `set_mempolicy` | memory | `partial` | `smoke-mm-stress` | single-NUMA-node policy storage; no physical NUMA migration |
+| `mbind` | memory | `partial` | `smoke-mm-stress` | validates and stores policy for a range; single-node no-op |
+| `migrate_pages` | memory | `partial` | `smoke-mm-stress` | single-node no-op |
+| `move_pages` | memory | `partial` | `smoke-mm-stress` | reports all pages on node 0 |
+| `set_mempolicy_home_node` | memory | `partial` | `smoke-mm-stress` | single-node no-op |
+| `name_to_handle_at` | path/fs | `partial` | `smoke-vfs-stress` | kernel-side opaque handle registry (kernel/fs/file_handle.c) |
+| `open_by_handle_at` | path/fs | `partial` | `smoke-vfs-stress` | reopens a handle's vnode through the registry |
+| `fsopen` | path/fs | `partial` | `smoke-vfs-stress` | creates a filesystem context fd |
+| `fsconfig` | path/fs | `partial` | `smoke-vfs-stress` | configures source/type/options on a context fd |
+| `fsmount` | path/fs | `partial` | `smoke-vfs-stress` | realizes the context as a mount through vfs_mount |
+| `fspick` | path/fs | `partial` | `smoke-vfs-stress` | returns a context fd bound to an existing mount |
+| `open_tree` | path/fs | `partial` | `smoke-vfs-stress` | returns an O_PATH-style fd for a vnode tree |
+| `move_mount` | path/fs | `partial` | `smoke-vfs-stress` | repoints a mount table entry to a new path |
+| `mount_setattr` | path/fs | `partial` | `smoke-vfs-stress` | validates the path; per-mount attribute changes not supported |
+| `io_uring_setup` | aio | `partial` | `smoke-syscall-ext` | kernel-memory SQ/CQ rings mapped into the caller (kernel/fs/io_uring.c) |
+| `io_uring_enter` | aio | `partial` | `smoke-syscall-ext` | executes SQEs synchronously through the VFS (NOP/READ/WRITE/FSYNC/CLOSE) |
+| `io_uring_register` | aio | `partial` | `smoke-syscall-ext` | accepts file and eventfd registration |
+| `landlock_create_ruleset` | security | `partial` | `smoke-syscall-ext` | creates an fd-backed ruleset |
+| `landlock_add_rule` | security | `partial` | `smoke-syscall-ext` | adds path-beneath rules with access rights |
+| `landlock_restrict_self` | security | `partial` | `smoke-syscall-ext` | installs the ruleset; enforced at vfs_open |
 | `a20_channel_pair` | a20-ipc | `full` | `smoke-a20-channel` | A20OS extension: create a channel pair as fds (read/write per message); Linux ABI bridge to the unified channel IPC |
 | `a20_registry_client` | a20-ipc | `full` | `smoke-a20-channel` | A20OS extension: open the well-known service-registry client endpoint as an fd |
 <!-- LINUX_SYSCALL_COVERAGE_END -->

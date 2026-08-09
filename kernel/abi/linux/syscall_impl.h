@@ -351,6 +351,83 @@ int64_t sys_init_module(const void *umod, unsigned long len,
 int64_t sys_finit_module(int fd, const char *uargs, int flags);
 int64_t sys_delete_module(const char *name_user, unsigned int flags);
 
+/* Small compatibility group (sys_missing.c). */
+int64_t sys_restart_syscall(void);
+int64_t sys_kcmp(int pid1, int pid2, int type, unsigned long idx1,
+                 unsigned long idx2);
+int64_t sys_readahead(int fd, long off, size_t count);
+int64_t sys_cachestat(int fd, const void *cstat_range, void *cstat,
+                      unsigned flags);
+int64_t sys_lookup_dcookie(uint64_t cookie, char *buf, size_t len);
+int64_t sys_quotactl(int cmd, const char *special, int id, void *addr);
+int64_t sys_quotactl_fd(int fd, int cmd, int id, void *addr);
+int64_t sys_remap_file_pages(uint64_t start, size_t size, int prot,
+                             uint64_t pgoff, int flags);
+int64_t sys_memfd_secret(unsigned flags);
+int64_t sys_rseq(void *rseq, uint32_t rseq_len, int flags, uint32_t sig);
+
+/* Cross-process memory (sys_process_vm.c). */
+int64_t sys_process_vm_readv(int pid, const void *lvec, unsigned long liovcnt,
+                             const void *rvec, unsigned long riovcnt,
+                             unsigned long flags);
+int64_t sys_process_vm_writev(int pid, const void *lvec, unsigned long liovcnt,
+                              const void *rvec, unsigned long riovcnt,
+                              unsigned long flags);
+int64_t sys_process_madvise(int pid, const void *iov, unsigned long iovcnt,
+                            int advice, unsigned long flags);
+int64_t sys_process_mrelease(int pidfd, unsigned flags);
+
+/* futex_waitv / futex_requeue (sys_futex.c). */
+int64_t sys_futex_waitv(const void *waiters, unsigned nr_futexes,
+                        unsigned flags, const void *timeout, uint64_t clockid);
+int64_t sys_futex_requeue(int *uaddr, int *uaddr2, int nr_wake,
+                          int nr_requeue, uint32_t flags);
+
+/* mempolicy family (sys_mempolicy.c). */
+int64_t sys_set_mempolicy(int mode, const unsigned long *nmask,
+                          unsigned long maxnode);
+int64_t sys_mbind(uint64_t addr, unsigned long len, int mode,
+                  const unsigned long *nmask, unsigned long maxnode,
+                  unsigned flags);
+int64_t sys_migrate_pages(int pid, unsigned long maxnode,
+                          const unsigned long *old_nodes,
+                          const unsigned long *new_nodes);
+int64_t sys_move_pages(int pid, unsigned long nr_pages, const void *pages,
+                       const int *nodes, int *status, int flags);
+int64_t sys_set_mempolicy_home_node(uint64_t addr, unsigned long len,
+                                    int home_node, unsigned long flags);
+
+/* File handles (sys_handle.c). */
+int64_t sys_name_to_handle_at(int dirfd, const char *pathname, void *handle,
+                              int *mnt_id, int flags);
+int64_t sys_open_by_handle_at(int mount_fd, void *handle, int flags);
+
+/* New mount API (sys_mount_api.c). */
+int64_t sys_fsopen(const char *fsname, unsigned flags);
+int64_t sys_fsconfig(int fs_fd, unsigned cmd, const char *key,
+                     const void *value, int aux);
+int64_t sys_fsmount(int fs_fd, unsigned flags, unsigned mnt_flags);
+int64_t sys_fspick(int dirfd, const char *path, unsigned flags);
+int64_t sys_open_tree(int dirfd, const char *path, unsigned flags);
+int64_t sys_move_mount(int from_dfd, const char *from_path, int to_dfd,
+                       const char *to_path, unsigned flags);
+int64_t sys_mount_setattr(int dfd, const char *path, unsigned flags,
+                          const void *attr, size_t size);
+
+/* io_uring (sys_io_uring.c). */
+int64_t sys_io_uring_setup(unsigned entries, void *params);
+int64_t sys_io_uring_enter(int fd, unsigned to_submit, unsigned min_complete,
+                           unsigned flags, const void *sig, size_t sigsz);
+int64_t sys_io_uring_register(int fd, unsigned opcode, const void *arg,
+                              unsigned nr_args);
+
+/* Landlock (sys_landlock.c). */
+int64_t sys_landlock_create_ruleset(const void *attr, size_t size,
+                                    unsigned flags);
+int64_t sys_landlock_add_rule(int ruleset_fd, int rule_type,
+                              const void *attr, unsigned flags);
+int64_t sys_landlock_restrict_self(int ruleset_fd, unsigned flags);
+
 #endif /* LINUX_SYSCALL_DECLARE_PROTOTYPES */
 
 #endif /* _LINUX_SYSCALL_IMPL_H */
