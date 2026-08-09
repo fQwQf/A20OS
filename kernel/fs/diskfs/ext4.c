@@ -247,23 +247,46 @@ int ext4_bitmap_alloc(ext4_sb_info_t *sb, uint64_t bm_blk, uint32_t max,
     if (!buf) return -1;
     if (bcache_read_bytes(sb->bc, bm_blk * sb->block_size, buf, sb->block_size) < 0)
         { kfree(buf); return -1; }
-    for (uint32_t n = 0; n < max; n++) {
-        uint32_t bit = start + n;
-        if (bit >= max)
-            bit -= max;
-        if (!(buf[bit / 8] & (1U << (bit % 8)))) {
+    uint32_t scanned = 0;
+    uint32_t bit = start;
+    uint64_t byte_loads = 0;
+    while (scanned < max) {
+        uint32_t remaining = max - scanned;
+        uint8_t byte = buf[bit / 8];
+        byte_loads++;
+
+        /* Preserve the exact cyclic first-fit order, but skip an aligned
+         * byte in one operation when all eight candidates are allocated. */
+        if ((bit & 7U) == 0 && remaining >= 8 && bit <= max - 8 &&
+            byte == 0xff) {
+            bit += 8;
+            scanned += 8;
+            if (bit == max)
+                bit = 0;
+            continue;
+        }
+
+        if (!(byte & (1U << (bit % 8)))) {
             buf[bit / 8] |= (1U << (bit % 8));
             if (bcache_write_bytes(sb->bc, bm_blk * sb->block_size,
                                    buf, sb->block_size) < 0) {
-                a20_perf_add(A20_PERF_EXT4_BITMAP_PROBES, n + 1);
+                a20_perf_add(A20_PERF_EXT4_BITMAP_PROBES, scanned + 1);
+                a20_perf_add(A20_PERF_EXT4_BITMAP_BYTE_LOADS, byte_loads);
                 kfree(buf);
                 return -1;
             }
-            a20_perf_add(A20_PERF_EXT4_BITMAP_PROBES, n + 1);
+            a20_perf_add(A20_PERF_EXT4_BITMAP_PROBES, scanned + 1);
+            a20_perf_add(A20_PERF_EXT4_BITMAP_BYTE_LOADS, byte_loads);
             kfree(buf); return (int)bit;
         }
+
+        bit++;
+        scanned++;
+        if (bit == max)
+            bit = 0;
     }
     a20_perf_add(A20_PERF_EXT4_BITMAP_PROBES, max);
+    a20_perf_add(A20_PERF_EXT4_BITMAP_BYTE_LOADS, byte_loads);
     kfree(buf); return -1;
 }
 

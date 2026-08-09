@@ -23,6 +23,8 @@
 #define VIRTIO_BLK_WAIT_TIMEOUT_TICKS (TICKS_PER_SEC * 10)
 #define VIRTIO_BLK_MAX_RETRIES        3
 #define VIRTIO_BLK_RESET_SPINS        1000000U
+#define VIRTIO_BLK_POLL_BACKOFF_MIN_SPINS 32U
+#define VIRTIO_BLK_POLL_BACKOFF_MAX_SPINS 512U
 
 typedef struct {
     int                in_use;
@@ -227,8 +229,9 @@ static virtio_blk_req_t *virtio_blk_find_req_locked(virtio_blk_inst_t *inst, uin
  *   inst->lock.
  * - Completion drains used-ring entries, records req->done/result, and
  *   detaches waiters into a deferred wake queue.
- * - kernel_progress_poll() may call virtio_blk_poll_all() as a compatibility
- *   bridge, but scheduler/idle code must not call this driver directly.
+ * - kernel_progress_poll() invokes the bound device's progress callback as a
+ *   compatibility bridge, but scheduler/idle code must not call this driver
+ *   directly.
  * - The target model is IRQ or bottom-half completion that invokes the same
  *   wake path without requiring scheduler hot-path polling.
  */
@@ -397,6 +400,7 @@ static int virtio_blk_wait_req(virtio_blk_inst_t *inst, virtio_blk_req_t *req,
                                uint64_t lba) {
     task_t *cur = proc_current();
     uint64_t deadline = timer_get_ticks() + VIRTIO_BLK_WAIT_TIMEOUT_TICKS;
+    unsigned poll_backoff = VIRTIO_BLK_POLL_BACKOFF_MIN_SPINS;
 
     for (;;) {
         proc_wake_q_t wake_q;
@@ -445,8 +449,16 @@ static int virtio_blk_wait_req(virtio_blk_inst_t *inst, virtio_blk_req_t *req,
         if (inst->vt.irq < 0) {
             spin_unlock_irqrestore(&inst->lock, flags);
             (void)proc_wake_q_flush(&wake_q);
-            virtio_blk_poll_inst(inst);
-            cpu_relax();
+            /* The used ring was already drained at the top of this iteration.
+             * Calling poll_inst() here repeated the same DMA sync and lock;
+             * immediately starting the next iteration instead made the guest
+             * hammer used->idx hundreds of times per completion.  A short,
+             * architecture-neutral backoff keeps latency bounded while giving
+             * the QEMU device thread time to publish the used entry. */
+            for (unsigned spin = 0; spin < poll_backoff; spin++)
+                cpu_relax();
+            if (poll_backoff < VIRTIO_BLK_POLL_BACKOFF_MAX_SPINS)
+                poll_backoff <<= 1;
             continue;
         }
 
@@ -709,8 +721,8 @@ static int virtio_blk_driver_remove(device_t *dev) {
 
 static void virtio_blk_driver_progress(device_t *dev)
 {
-    (void)dev;
-    virtio_blk_poll_all();
+    virtio_blk_inst_t *inst = dev ? (virtio_blk_inst_t *)dev->drv_priv : NULL;
+    virtio_blk_poll_inst(inst);
 }
 
 static driver_t virtio_blk_driver = {
