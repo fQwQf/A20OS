@@ -315,3 +315,29 @@ int64_t sys_rt_sigpending(void *set, size_t sigsetsize) {
     if (copy_to_user(set, &user_pending, sizeof(user_pending)) < 0) return -EFAULT;
     return 0;
 }
+
+/* rt_tgsigqueueinfo(2): queue a signal to a specific thread of a tgid. */
+int64_t sys_rt_tgsigqueueinfo(int tgid, int tid, int sig, void *uinfo)
+{
+    if (sig <= 0 || sig >= NSIG)
+        return -EINVAL;
+    if (!uinfo)
+        return -EFAULT;
+    task_t *self = proc_current();
+    task_t *target = proc_find_get(tid);
+    if (!target)
+        return -ESRCH;
+    if (target->tgid != tgid) {
+        proc_put(target);
+        return -ESRCH;
+    }
+    int perm = signal_send_permission(self, target);
+    proc_put(target);
+    if (perm < 0)
+        return perm;
+    uint8_t info[SIGNAL_INFO_SIZE];
+    if (copy_from_user(info, uinfo, sizeof(info)) < 0)
+        return -EFAULT;
+    *(int *)info = sig;
+    return signal_send_info(tid, sig, info, sizeof(info));
+}

@@ -428,6 +428,79 @@ int64_t sys_landlock_add_rule(int ruleset_fd, int rule_type,
                               const void *attr, unsigned flags);
 int64_t sys_landlock_restrict_self(int ruleset_fd, unsigned flags);
 
+/* SysV message queues (sys_memfd_shm.c). */
+int64_t sys_msgget(int key, int msgflg);
+int64_t sys_msgsnd(int msqid, const void *msgp, size_t msgsz, int msgflg);
+int64_t sys_msgrcv(int msqid, void *msgp, size_t msgsz, int64_t msgtyp,
+                   int msgflg);
+int64_t sys_msgctl(int msqid, int cmd, void *buf);
+
+/* POSIX message queues (sys_posix_mq.c). */
+int64_t sys_mq_open(const char *name, int oflag, int mode, const void *attr);
+int64_t sys_mq_unlink(const char *name);
+int64_t sys_mq_getsetattr(int mqdes, const void *newattr, void *oldattr);
+int64_t sys_mq_notify(int mqdes, const void *notification);
+int64_t sys_mq_timedsend(int mqdes, const char *msg_ptr, size_t msg_len,
+                         unsigned msg_prio, const void *abs_timeout);
+int64_t sys_mq_timedreceive(int mqdes, char *msg_ptr, size_t msg_len,
+                            unsigned *msg_prio, const void *abs_timeout);
+
+/* ioprio / pkey / misc compat (sys_missing.c, proc/sched_compat.c). */
+int64_t sys_ioprio_set(int which, int who, int ioprio);
+int64_t sys_ioprio_get(int which, int who);
+int64_t sys_pkey_alloc(unsigned flags, uint64_t init_access_rights);
+int64_t sys_pkey_free(int pkey);
+int64_t sys_pkey_mprotect(uint64_t addr, size_t len, int prot, int pkey);
+int64_t sys_mlock2(uint64_t addr, size_t len, int flags);
+int64_t sys_mseal(uint64_t addr, size_t len, unsigned flags);
+int64_t sys_seccomp(unsigned op, unsigned flags, const void *uargs);
+int64_t sys_kexec_load(uint64_t entry, uint64_t nr_segments,
+                       const void *segments, uint64_t flags);
+int64_t sys_kexec_file_load(int kernel_fd, int initrd_fd,
+                            uint64_t cmdline_len, const void *cmdline,
+                            uint64_t flags);
+int64_t sys_nfsservctl(int cmd, const void *arg, void *res);
+int64_t sys_map_shadow_stack(uint64_t addr, uint64_t size, unsigned flags);
+
+/* futex_wait / futex_wake split syscalls (sys_futex.c). */
+int64_t sys_futex_wait(void *uaddr, uint32_t val, const void *timeout,
+                       uint32_t flags);
+int64_t sys_futex_wake(void *uaddr, uint32_t nr, uint32_t flags);
+
+/* xattr-at variants (sys_xattr.c). */
+int64_t sys_setxattrat(int dirfd, const char *pathname, const char *name,
+                       const void *value, size_t size, int flags);
+int64_t sys_getxattrat(int dirfd, const char *pathname, const char *name,
+                       void *value, size_t size, int flags);
+int64_t sys_listxattrat(int dirfd, const char *pathname, char *list,
+                        size_t size, int flags);
+int64_t sys_removexattrat(int dirfd, const char *pathname, const char *name,
+                          int flags);
+
+/* RISC-V arch-specific (sys_arch_riscv.c). */
+int64_t sys_riscv_hwprobe(const void *pairs, size_t pair_count,
+                          size_t cpu_size, const void *cpus, unsigned flags);
+int64_t sys_riscv_flush_icache(uint64_t start, uint64_t end, uint64_t flags);
+
+/* rt_tgsigqueueinfo (sys_signal.c). */
+int64_t sys_rt_tgsigqueueinfo(int tgid, int tid, int sig, void *uinfo);
+
+/* statmount/listmount/listns/open_tree_attr (sys_mount_api.c). */
+int64_t sys_statmount(uint64_t mnt_id, uint64_t flags, void *buf,
+                      size_t bufsize, unsigned int mask);
+int64_t sys_listmount(uint64_t mnt_id, uint64_t last_mnt_id, uint64_t *list,
+                      size_t nr, unsigned int flags);
+int64_t sys_listns(unsigned int nstype, uint64_t *nsids, size_t nr);
+int64_t sys_open_tree_attr(int dfd, const char *path, unsigned int flags,
+                           unsigned int attr_mask, void *attr, size_t size);
+
+/* LSM introspection (sys_lsm.c). */
+int64_t sys_lsm_get_self_attr(unsigned int attr, void *ctx, size_t *size,
+                              unsigned int flags);
+int64_t sys_lsm_set_self_attr(unsigned int attr, const void *ctx, size_t size,
+                              unsigned int flags);
+int64_t sys_lsm_list_modules(uint64_t *ids, size_t *size, unsigned int flags);
+
 #endif /* LINUX_SYSCALL_DECLARE_PROTOTYPES */
 
 #endif /* _LINUX_SYSCALL_IMPL_H */

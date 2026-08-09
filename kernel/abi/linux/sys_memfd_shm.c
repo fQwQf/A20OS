@@ -4,6 +4,7 @@
 #include "fs/memfd.h"
 #include "ipc/sysv_shm.h"
 #include "ipc/sysv_sem.h"
+#include "ipc/sysv_msg.h"
 #include "core/timer.h"
 
 struct linux_timespec64 {
@@ -71,4 +72,25 @@ int64_t sys_semtimedop(int semid, const void *sops, size_t nsops, const void *ti
 int64_t sys_semop(int semid, const void *sops, size_t nsops)
 {
     return sysv_sem_op(semid, sops, nsops);
+}
+
+int64_t sys_msgget(int key, int msgflg)
+{
+    return sysv_msg_get(key, msgflg);
+}
+
+int64_t sys_msgsnd(int msqid, const void *msgp, size_t msgsz, int msgflg)
+{
+    return sysv_msg_send(msqid, msgp, msgsz, msgflg);
+}
+
+int64_t sys_msgrcv(int msqid, void *msgp, size_t msgsz, int64_t msgtyp,
+                   int msgflg)
+{
+    return sysv_msg_recv(msqid, msgp, msgsz, msgtyp, msgflg);
+}
+
+int64_t sys_msgctl(int msqid, int cmd, void *buf)
+{
+    return sysv_msg_control(msqid, cmd, buf);
 }

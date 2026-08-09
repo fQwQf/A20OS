@@ -235,3 +235,68 @@ int64_t sys_fremovexattr(int fd, const char *name)
     vfs_put_file_ref((int)gfd, vf);
     return r;
 }
+
+/* xattr-at variants (Linux 6.x): resolve a path relative to a dirfd then
+ * delegate to the path-based implementations.  AT_SYMLINK_NOFOLLOW selects
+ * the "l" (no-follow) behaviour. */
+static int xattr_at_resolve(int dirfd, const char *path, int nofollow,
+                            char *full, size_t sz)
+{
+    if (!path)
+        return -EFAULT;
+    char kpath[MAX_PATH_LEN];
+    if (user_strncpy(kpath, path, sizeof(kpath)) < 0)
+        return -EFAULT;
+    int r = syscall_path_at(dirfd, kpath, full, sz);
+    if (r < 0)
+        return r;
+    return 0;
+}
+
+int64_t sys_setxattrat(int dirfd, const char *pathname, const char *name,
+                       const void *value, size_t size, int flags)
+{
+    int nofollow = (flags & 0x100 /* AT_SYMLINK_NOFOLLOW */) != 0;
+    char full[MAX_PATH_LEN];
+    int r = xattr_at_resolve(dirfd, pathname, nofollow, full, sizeof(full));
+    if (r < 0)
+        return r;
+    return nofollow ? sys_lsetxattr(full, name, value, size, flags)
+                    : sys_setxattr(full, name, value, size, flags);
+}
+
+int64_t sys_getxattrat(int dirfd, const char *pathname, const char *name,
+                       void *value, size_t size, int flags)
+{
+    int nofollow = (flags & 0x100) != 0;
+    char full[MAX_PATH_LEN];
+    int r = xattr_at_resolve(dirfd, pathname, nofollow, full, sizeof(full));
+    if (r < 0)
+        return r;
+    return nofollow ? sys_lgetxattr(full, name, value, size)
+                    : sys_getxattr(full, name, value, size);
+}
+
+int64_t sys_listxattrat(int dirfd, const char *pathname, char *list,
+                        size_t size, int flags)
+{
+    int nofollow = (flags & 0x100) != 0;
+    char full[MAX_PATH_LEN];
+    int r = xattr_at_resolve(dirfd, pathname, nofollow, full, sizeof(full));
+    if (r < 0)
+        return r;
+    return nofollow ? sys_llistxattr(full, list, size)
+                    : sys_listxattr(full, list, size);
+}
+
+int64_t sys_removexattrat(int dirfd, const char *pathname, const char *name,
+                          int flags)
+{
+    int nofollow = (flags & 0x100) != 0;
+    char full[MAX_PATH_LEN];
+    int r = xattr_at_resolve(dirfd, pathname, nofollow, full, sizeof(full));
+    if (r < 0)
+        return r;
+    return nofollow ? sys_lremovexattr(full, name)
+                    : sys_removexattr(full, name);
+}
