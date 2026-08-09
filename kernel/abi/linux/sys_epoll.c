@@ -477,3 +477,28 @@ int64_t sys_epoll_pwait(int epfd, void *events, int maxevents,
 {
     return epoll_do_wait(epfd, events, maxevents, timeout, sigmask, sigsetsize);
 }
+
+struct linux_timespec64_epoll {
+    int64_t tv_sec;
+    int64_t tv_nsec;
+};
+
+int64_t sys_epoll_pwait2(int epfd, void *events, int maxevents,
+                         const void *timeout, const void *sigmask,
+                         size_t sigsetsize)
+{
+    int timeout_ms = -1;
+    if (timeout) {
+        struct linux_timespec64_epoll ts;
+        if (copy_from_user(&ts, timeout, sizeof(ts)) < 0)
+            return -EFAULT;
+        if (ts.tv_sec < 0 || ts.tv_nsec < 0 || ts.tv_nsec >= 1000000000LL)
+            return -EINVAL;
+        uint64_t total_ns = (uint64_t)ts.tv_sec * 1000000000ULL +
+                            (uint64_t)ts.tv_nsec;
+        uint64_t ms = total_ns / 1000000ULL;
+        timeout_ms = ms > (uint64_t)0x7fffffff ? 0x7fffffff : (int)ms;
+    }
+    return epoll_do_wait(epfd, events, maxevents, timeout_ms, sigmask,
+                         sigsetsize);
+}
