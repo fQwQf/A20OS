@@ -1,17 +1,22 @@
 # ----------------------------------------------------------------
-# Competition build. Linux produces both contest architectures; macOS builds
-# the supported RISC-V artifacts. Use all-architectures for the judge matrix.
+# Final-round submission build.  The evaluation platform invokes `make all`
+# and then consumes kernel-rv, kernel-la, disk.img, and disk-la.img.  Keep the
+# preliminary-round image builder available under an explicit target.
 # ----------------------------------------------------------------
 all:
+	$(MAKE) final-submit-rv
+	$(MAKE) final-submit-la
+	@echo "=== 2026 final submission build complete ==="
+	@echo "  kernel-rv  kernel-la  disk.img  disk-la.img"
+
+final-all: all
+
+preliminary-all:
 	@set -e; for target in $(DEFAULT_CONTEST_TARGETS); do $(MAKE) $$target; done
-	@echo "=== Competition build complete ==="
+	@echo "=== Preliminary-round competition build complete ==="
 	@echo "  built: $(DEFAULT_CONTEST_TARGETS)"
 
-all-architectures:
-	$(MAKE) contest-rv
-	$(MAKE) contest-la
-	@echo "=== Full competition build complete ==="
-	@echo "  kernel-rv  kernel-la  disk.img  disk-la.img"
+all-architectures: all
 
 check-kernel-build: $(DEFAULT_KERNEL_CHECK_TARGETS)
 
