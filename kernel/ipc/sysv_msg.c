@@ -435,3 +435,14 @@ int sysv_msg_control(int msqid, int cmd, void *arg)
     spin_unlock_irqrestore(&g_msg_lock, flags);
     return r;
 }
+
+int sysv_msg_count(void)
+{
+    int n = 0;
+    uint64_t flags = spin_lock_irqsave(&g_msg_lock);
+    for (int i = 0; i < SYSV_MSG_MAX; i++)
+        if (g_msg[i].used)
+            n++;
+    spin_unlock_irqrestore(&g_msg_lock, flags);
+    return n;
+}

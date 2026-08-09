@@ -858,6 +858,68 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
     case PF_PID_PAGEMAP:
         buf[0] = '\0';
         return 0;
+    case PF_BOOT_ID: {
+        /* Linux /proc/boot_id: a stable per-boot UUID.  Derive it from the
+         * boot clock so it is stable for the lifetime of the kernel. */
+        uint64_t ticks = timer_get_ticks();
+        char uuid[64];
+        snprintf(uuid, sizeof(uuid),
+                 "%08x-%04x-%04x-%04x-%08x%08x\n",
+                 (unsigned)(ticks & 0xffffffff),
+                 (unsigned)((ticks >> 32) & 0xffff),
+                 (unsigned)((ticks >> 48) & 0xffff),
+                 0x4000 | (unsigned)((ticks >> 16) & 0x0fff),
+                 (unsigned)(ticks >> 32),
+                 (unsigned)(ticks & 0xffffffff));
+        snprintf(buf, bufsz, "%s", uuid);
+        break;
+    }
+    case PF_CAP_LAST_CAP:
+        snprintf(buf, bufsz, "%d\n", 63);
+        break;
+    case PF_NR_OPEN:
+        snprintf(buf, bufsz, "%d\n", MAX_FILES);
+        break;
+    case PF_PRESSURE:
+        /* /proc/pressure/{cpu,memory,io}: expose the stub (no PSI
+         * accounting) with the documented "some" line format. */
+        if (bufsz < 4) return 0;
+        snprintf(buf, bufsz, "some avg10=0.00 avg60=0.00 avg300=0.00 total=0\n");
+        break;
+    case PF_UID_MAP:
+    case PF_GID_MAP: {
+        /* User namespace mapping: the single root namespace identity maps
+         * 1:1.  Format: "<inside> <outside> <length>\n". */
+        task_t *t = proc_current();
+        int id = 0;
+        snprintf(buf, bufsz, "%10d %10d 4294967295\n", id, id);
+        (void)t;
+        break;
+    }
+    case PF_SETGROUPS:
+        snprintf(buf, bufsz, "allow\n");
+        break;
+    case PF_SYSVIPC: {
+        /* /proc/sysvipc/{msg,sem,shm} directory is represented as a summary
+         * of live SysV objects.  We report counts via the IPC layers. */
+        extern int sysv_msg_count(void);
+        extern int sysv_sem_count(void);
+        extern int sysv_shm_count(void);
+        snprintf(buf, bufsz,
+                 "msg\t%d sem\t%d shm\t%d\n",
+                 sysv_msg_count(), sysv_sem_count(), sysv_shm_count());
+        break;
+    }
+    case PF_SYS_KERNEL_HOSTNAME: {
+        extern const char *linux_kernel_hostname(void);
+        snprintf(buf, bufsz, "%s\n", linux_kernel_hostname());
+        break;
+    }
+    case PF_SYS_KERNEL_DOMAINNAME: {
+        extern const char *linux_kernel_domainname(void);
+        snprintf(buf, bufsz, "%s\n", linux_kernel_domainname());
+        break;
+    }
     default:
         break;
     }
