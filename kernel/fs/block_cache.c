@@ -152,6 +152,8 @@ bcache_t *bcache_create(block_dev_t *dev) {
     bc->dev = dev;  // 绑定底层块设备
     bc->pool_size = BCACHE_MAX_BLOCKS;
     spin_init(&bc->lock);
+    mutex_init(&bc->fill_lock);
+    mutex_init(&bc->writeback_lock);
     bc->pool = (bcache_entry_t *)kmalloc(sizeof(bcache_entry_t) * bc->pool_size);
     if (!bc->pool) { kfree(bc); return NULL; }
     bc->page_pool_size = PCACHE_MAX_PAGES;
@@ -283,10 +285,26 @@ bcache_entry_t *bcache_get(bcache_t *bc, uint64_t lba) {
         return e;
     }
 
+    spin_unlock_irqrestore(&bc->lock, flags);
+    mutex_lock(&bc->writeback_lock);
+    flags = spin_lock_irqsave(&bc->lock);
+
+    /* A concurrent miss may have populated this LBA while we waited. */
+    e = bcache_find(bc, lba);
+    if (e) {
+        cache_ref_get(&e->ref);
+        lru_remove(e);
+        lru_insert_front(bc, e);
+        spin_unlock_irqrestore(&bc->lock, flags);
+        mutex_unlock(&bc->writeback_lock);
+        return e;
+    }
+
     // 缓存未命中，驱逐一个旧块
     e = bcache_evict(bc);
     if (!e) {
         spin_unlock_irqrestore(&bc->lock, flags);
+        mutex_unlock(&bc->writeback_lock);
         kdebug("[BCACHE] no evictable block lba=%lu\n", (unsigned long)lba);
         return NULL;
     }
@@ -296,7 +314,8 @@ bcache_entry_t *bcache_get(bcache_t *bc, uint64_t lba) {
     spin_unlock_irqrestore(&bc->lock, flags);
 
     if (old_dirty && bc->dev) {
-        if (bc->dev->write_sector(bc->dev, old_lba, e->data, 1) < 0) {
+        int write_ret = bc->dev->write_sector(bc->dev, old_lba, e->data, 1);
+        if (write_ret < 0) {
             kdebug("[BCACHE] writeback error lba=%lu\n", (unsigned long)old_lba);
             flags = spin_lock_irqsave(&bc->lock);
             e->ref = 0;
@@ -305,9 +324,11 @@ bcache_entry_t *bcache_get(bcache_t *bc, uint64_t lba) {
             bcache_hash_insert(bc, e);
             lru_insert_front(bc, e);
             spin_unlock_irqrestore(&bc->lock, flags);
+            mutex_unlock(&bc->writeback_lock);
             return NULL;
         }
     }
+    mutex_unlock(&bc->writeback_lock);
 
     // 从磁盘读取数据
     if (bc->dev) {
@@ -373,6 +394,11 @@ void bcache_sync(bcache_t *bc) {
     char tmp[BCACHE_BLOCK_SIZE];
     char *page_tmp = NULL;
 
+    /* Preserve write ordering for mutable metadata pages.  Without this,
+     * concurrent fsync and eviction can write an older bitmap snapshot after
+     * a newer one and make allocated blocks appear free again. */
+    mutex_lock(&bc->writeback_lock);
+
     for (int i = 0; i < bc->page_pool_size; i++) {
         uint64_t flags = spin_lock_irqsave(&bc->lock);
         if (bc->dirty_pages == 0) {
@@ -430,6 +456,7 @@ void bcache_sync(bcache_t *bc) {
             spin_unlock_irqrestore(&bc->lock, flags);
         }
     }
+    mutex_unlock(&bc->writeback_lock);
 }
 
 // 使缓存中的块失效（磁盘上的数据已改变）
@@ -488,6 +515,36 @@ static pcache_entry_t *pcache_get(bcache_t *bc, uint64_t page_no, int skip_read)
         return e;
     }
 
+    spin_unlock_irqrestore(&bc->lock, flags);
+    mutex_lock(&bc->fill_lock);
+    flags = spin_lock_irqsave(&bc->lock);
+
+    /* Another miss may have completed while this one waited for fill_lock. */
+    e = pcache_find(bc, page_no);
+    if (e) {
+        cache_ref_get(&e->ref);
+        page_lru_remove(e);
+        page_lru_insert_front(bc, e);
+        spin_unlock_irqrestore(&bc->lock, flags);
+        mutex_unlock(&bc->fill_lock);
+        return e;
+    }
+
+    spin_unlock_irqrestore(&bc->lock, flags);
+    mutex_lock(&bc->writeback_lock);
+    flags = spin_lock_irqsave(&bc->lock);
+
+    e = pcache_find(bc, page_no);
+    if (e) {
+        cache_ref_get(&e->ref);
+        page_lru_remove(e);
+        page_lru_insert_front(bc, e);
+        spin_unlock_irqrestore(&bc->lock, flags);
+        mutex_unlock(&bc->writeback_lock);
+        mutex_unlock(&bc->fill_lock);
+        return e;
+    }
+
     e = pcache_evict_locked(bc);
     if (!e) {
         size_t valid = 0;
@@ -515,6 +572,8 @@ static pcache_entry_t *pcache_get(bcache_t *bc, uint64_t page_no, int skip_read)
                (unsigned long)page_no, (unsigned long)valid,
                (unsigned long)dirty, (unsigned long)referenced,
                (unsigned long)total_refs, max_refs);
+        mutex_unlock(&bc->writeback_lock);
+        mutex_unlock(&bc->fill_lock);
         return NULL;
     }
 
@@ -523,7 +582,10 @@ static pcache_entry_t *pcache_get(bcache_t *bc, uint64_t page_no, int skip_read)
     e->valid = 0;
     spin_unlock_irqrestore(&bc->lock, flags);
 
-    if (old_dirty && pcache_flush_page(bc, e) < 0) {
+    int flush_ret = 0;
+    if (old_dirty)
+        flush_ret = pcache_flush_page(bc, e);
+    if (old_dirty && flush_ret < 0) {
         flags = spin_lock_irqsave(&bc->lock);
         e->page_no = old_page;
         e->valid = 1;
@@ -532,8 +594,11 @@ static pcache_entry_t *pcache_get(bcache_t *bc, uint64_t page_no, int skip_read)
         pcache_hash_insert(bc, e);
         page_lru_insert_front(bc, e);
         spin_unlock_irqrestore(&bc->lock, flags);
+        mutex_unlock(&bc->writeback_lock);
+        mutex_unlock(&bc->fill_lock);
         return NULL;
     }
+    mutex_unlock(&bc->writeback_lock);
 
     if (skip_read) {
         /* Caller is about to overwrite the whole page. */
@@ -546,6 +611,7 @@ static pcache_entry_t *pcache_get(bcache_t *bc, uint64_t page_no, int skip_read)
             e->page_no = (uint64_t)-1;
             page_lru_insert_front(bc, e);
             spin_unlock_irqrestore(&bc->lock, flags);
+            mutex_unlock(&bc->fill_lock);
             return NULL;
         }
     } else {
@@ -570,6 +636,7 @@ static pcache_entry_t *pcache_get(bcache_t *bc, uint64_t page_no, int skip_read)
         page_lru_remove(dup);
         page_lru_insert_front(bc, dup);
         spin_unlock_irqrestore(&bc->lock, flags);
+        mutex_unlock(&bc->fill_lock);
         return dup;
     }
 
@@ -580,6 +647,7 @@ static pcache_entry_t *pcache_get(bcache_t *bc, uint64_t page_no, int skip_read)
     pcache_hash_insert(bc, e);
     page_lru_insert_front(bc, e);
     spin_unlock_irqrestore(&bc->lock, flags);
+    mutex_unlock(&bc->fill_lock);
     return e;
 }
 
@@ -607,7 +675,9 @@ int bcache_read_bytes(bcache_t *bc, uint64_t byte_off, void *buf, size_t len) {
 
         pcache_entry_t *e = pcache_get(bc, page_no, 0);
         if (!e) return -1;
+        uint64_t flags = spin_lock_irqsave(&bc->lock);
         memcpy(dst, e->data + off, chunk);
+        spin_unlock_irqrestore(&bc->lock, flags);
         pcache_release(e);
 
         dst      += chunk;
@@ -636,11 +706,10 @@ int bcache_write_bytes(bcache_t *bc, uint64_t byte_off, const void *buf, size_t 
         size_t   chunk  = PCACHE_PAGE_SIZE - off;
         if (chunk > len) chunk = len;
 
-        int full_page_overwrite = (off == 0 && chunk == PCACHE_PAGE_SIZE);
-        pcache_entry_t *e = pcache_get(bc, page_no, full_page_overwrite);
+        pcache_entry_t *e = pcache_get(bc, page_no, 0);
         if (!e) return -1;
-        memcpy(e->data + off, src, chunk);
         uint64_t flags = spin_lock_irqsave(&bc->lock);
+        memcpy(e->data + off, src, chunk);
         bcache_set_page_dirty_locked(bc, e, 1);
         spin_unlock_irqrestore(&bc->lock, flags);
         pcache_release(e);
