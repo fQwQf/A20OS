@@ -6,6 +6,9 @@ A20OS 同时支持 RISC-V64 与 LoongArch64。决赛提交在项目根目录执�
 生成 ELF 格式的 `kernel-rv`、`kernel-la`，以及分别供两种架构启动使用的
 `disk.img`、`disk-la.img`。两个内核均按 8 vCPU 配置编译；辅助盘只包含 A20OS
 用户态和决赛串行 runner，官方 ext4 测试盘仍由评测机单独挂载。
+决赛内核固定使用 `DRIVER_DEPLOYMENT=embedded`，确保评测命令默认提供的 legacy
+VirtIO-MMIO 块设备能在 DriverStore 挂载前完成探测；普通开发构建仍保留 generic
+动态驱动部署方式。
 
 runner 启动后扫描官方测试盘 `/glibc/*_testcode.sh`，逐个进入官方根文件系统
 运行，不并行执行测试组。全部测试结束后执行 `sync` 并主动关机。初赛入口没有

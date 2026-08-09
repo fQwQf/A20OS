@@ -518,11 +518,13 @@ smoke-native-handle:
 final-submit-rv:
 	@echo "--- Building RISC-V 64 (2026 final submission) ---"
 	$(MAKE) ARCH=riscv64 ABI=both MODE=release PROFILE=benchmark NR_CPUS=8 \
+		DRIVER_DEPLOYMENT=embedded \
 		_final_submit_build KERNEL_OUT=kernel-rv DISK_OUT=disk.img
 
 final-submit-la:
 	@echo "--- Building LoongArch 64 (2026 final submission) ---"
 	$(MAKE) ARCH=loongarch64 ABI=both MODE=release PROFILE=benchmark NR_CPUS=8 \
+		DRIVER_DEPLOYMENT=embedded \
 		_final_submit_build KERNEL_OUT=kernel-la DISK_OUT=disk-la.img
 
 contest-rv:
