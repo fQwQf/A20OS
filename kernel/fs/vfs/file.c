@@ -251,3 +251,11 @@ int vfs_fsync(int fd)
     vfs_put_file_ref(fd, vf);
     return 0;
 }
+
+int vfs_fdatasync(int fd)
+{
+    /* A20OS has no separate data-metadata distinction in writeback: the
+     * data is written through the page cache before the block cache sync, so
+     * fdatasync is equivalent to fsync for supported filesystems. */
+    return vfs_fsync(fd);
+}

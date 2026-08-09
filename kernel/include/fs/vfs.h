@@ -308,6 +308,7 @@ int      vfs_getdents64(int fd, void *dirp, size_t count);
 int      vfs_ioctl(int fd, unsigned long req, void *arg);
 int      vfs_sync(void);
 int      vfs_fsync(int fd);
+int      vfs_fdatasync(int fd);
 int      vfs_poll_events(int fd, short events);
 
 /* Directory operations */

@@ -9,6 +9,7 @@
 #include "mm/swap.h"
 #include "fs/vfs.h"
 #include "fs/page_cache.h"
+#include "fs/aio.h"
 #include "ipc/sysv_shm.h"
 #include "proc/proc.h"
 #include "proc/proc_internal.h"
@@ -365,6 +366,10 @@ void mm_destroy(mm_struct_t *mm) {
     /* The final mm cannot be entered again. Flush stale translations before
      * free_vma_pages() or deferred VMA release can return backing storage. */
     arch_tlb_flush();
+
+    /* Reap Linux AIO contexts owned by this address space before the VMA
+     * list and page table are torn down. */
+    aio_context_reap_mm(mm);
 
     // 释放所有 VMA 及其物理页面
     mm_vma_flush_deferred(mm);
