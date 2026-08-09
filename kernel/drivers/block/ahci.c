@@ -138,8 +138,23 @@ static int ahci_wait_clear(ahci_port_t *port, uint32_t off, uint32_t mask) {
     return -1;
 }
 
+/* Probe-time port readiness: a real device clears BSY/DRQ within a few ms
+ * once PHY link is up, so a short bound is enough to tell it from a phantom
+ * port (QEMU reports DET=3 on unused ports with BSY never clearing).  The
+ * full AHCI_TIMEOUT_MS is still applied by ahci_submit() on real commands. */
+#define AHCI_PROBE_READY_MS  100U
+
 static int ahci_wait_ready(ahci_port_t *port) {
     for (unsigned ms = 0; ms < AHCI_TIMEOUT_MS; ms++) {
+        if ((ahci_read(port, AHCI_PXTFD) & (AHCI_PXTFD_BSY | AHCI_PXTFD_DRQ)) == 0)
+            return 0;
+        mdelay(1);
+    }
+    return -1;
+}
+
+static int ahci_wait_ready_short(ahci_port_t *port) {
+    for (unsigned ms = 0; ms < AHCI_PROBE_READY_MS; ms++) {
         if ((ahci_read(port, AHCI_PXTFD) & (AHCI_PXTFD_BSY | AHCI_PXTFD_DRQ)) == 0)
             return 0;
         mdelay(1);
@@ -320,7 +335,10 @@ static int ahci_irq_handler(int irq, void *priv) {
 
 static int ahci_port_present(ahci_port_t *port) {
     uint32_t ssts = ahci_read(port, AHCI_PXSSTS);
-    return (ssts & 0x0FU) == 3U && ahci_wait_ready(port) == 0;
+    /* DET==3 means PHY link is up, but QEMU reports that on unused ports too
+     * with BSY stuck set.  Bound the readiness wait to probe time so phantom
+     * ports do not stall boot for the full AHCI_TIMEOUT_MS. */
+    return (ssts & 0x0FU) == 3U && ahci_wait_ready_short(port) == 0;
 }
 
 static int ahci_identify(ahci_port_t *port) {

@@ -1,70 +1,70 @@
-# SMP runqueue and preemption audit
+# SMP 运行队列与抢占审计
 
 `SMP_RUNQUEUE_PREEMPT_AUDIT`
 
-This document closes PROC.md step 7 without changing the scheduler's existingpriority classes or architecture context layouts.
+本文档收口 PROC.md 第 7 步，而不改变调度器现有的优先级类或架构上下文布局。
 
-## Ownership and lock order
+## 所有权与锁顺序
 
-`proc_lock` remains the coarse scheduler/lifecycle serialization boundary forenqueue, migration, Park/Wake, switch publication and completion, exit andreap. Step 8 narrows one hot-path exception: local pick changes`on_rq -> dispatching` and publishes `owner_cpu` under only that CPU's runqueuelock, then releases it before switch publication acquires `proc_lock`.
+`proc_lock` 仍是入队、迁移、Park/Wake、切换发布与完成、退出与回收的粗粒度调度器/生命周期串行化边界。第 8 步收窄一个热路径例外：本地 pick 在仅该 CPU 的运行队列锁下改变 `on_rq -> dispatching` 并发布 `owner_cpu`，然后在切换发布获取 `proc_lock` 之前释放它。
 
-Cross-CPU migration uses `sched_runq_requeue_locked()`:
+跨 CPU 迁移使用 `sched_runq_requeue_locked()`：
 
-1. acquire `proc_lock`;
-2. acquire the source and destination runqueue locks in ascending CPU-number order;
-3. unlink the task from the source queue and publish `on_rq = 0`;
-4. change `cpu_id`;
-5. link the task to the destination queue and publish `on_rq = 1`;
-6. release runqueue locks in reverse order, then release `proc_lock`.
+1. 获取 `proc_lock`；
+2. 按 CPU 编号升序获取源与目标运行队列锁；
+3. 将任务从源队列解除链接并发布 `on_rq = 0`；
+4. 改变 `cpu_id`；
+5. 将任务链接到目标队列并发布 `on_rq = 1`；
+6. 逆序释放运行队列锁，然后释放 `proc_lock`。
 
-The runqueue-owned task reference is transferred through the operation. Thereis no put/get gap and no interval observable to a picker in which a READY taskis owned by neither queue. A same-CPU policy requeue follows the same`on_rq -> off-rq -> on_rq` rule while holding one runqueue lock.
+运行队列拥有的任务引用通过该操作转移。不存在 put/get 间隙，也不存在 picker 可观察到的 READY 任务不由任一队列拥有的间隔。同 CPU 策略重新排队在持有一个运行队列锁时遵循相同的 `on_rq -> off-rq -> on_rq` 规则。
 
-`cpu_id` is initialized only for unpublished/off-runqueue tasks. Once a task isqueued, it changes only in the protected off-runqueue interval above.
+`cpu_id` 只对未发布/不在运行队列上的任务初始化。任务一旦入队，它只在上面的受保护 off-rq 间隔内改变。
 
-## Persistent reschedule requests
+## 持久抢占请求
 
-Each CPU has cacheline-separated scheduler state containing a persistent`need_resched` flag and diagnostic counters. A request:
+每个 CPU 都有缓存行分隔的调度器状态，其中包含持久 `need_resched` 标志与诊断计数器。一个请求：
 
-- publishes `need_resched = 1` with release ordering;
-- sends at most one IPI while the flag remains pending;
-- never relies on the IPI itself as the stored scheduling decision.
+- 以释放排序发布 `need_resched = 1`；
+- 在标志保持待决期间最多发送一个 IPI；
+- 绝不依赖 IPI 本身作为存储的调度决策。
 
-The target IPI handler acknowledges the hardware notification and incrementsthe acknowledgement counter. It does not call `sched()`, `proc_yield()`, orchange task/runqueue ownership.
+目标 IPI 处理器确认硬件通知并递增确认计数器。它不调用 `sched()`、`proc_yield()`，也不改变任务/运行队列所有权。
 
-The pending flag is consumed only when `sched()` is entered from:
+待决标志只在 `sched()` 从以下入口进入时被消耗：
 
-- the common user trap/syscall return safe point;
-- a timer return which first publishes a timeslice request;
-- an explicit kernel scheduling point, including the idle loop.
+- 常见的用户 trap/syscall 返回安全点；
+- 首先发布时间片请求的定时器返回；
+- 显式内核调度点，包括空闲循环。
 
-If a new request races after consumption, the release-store leaves the flag setfor the next safe point. IPI acknowledgement never clears it.
+如果新请求在消耗之后竞态到达，释放存储会让标志为下一个安全点保持置位。IPI 确认从不清除它。
 
-## Wakeup and priority policy
+## 唤醒与优先级策略
 
-Every remote queued wake publishes a request for its target CPU. Local wakeupsrequest preemption only when the woken task outranks the current task:
+每个远程入队唤醒都为其目标 CPU 发布请求。本地唤醒只在被唤醒任务优于当前任务时才请求抢占：
 
-- an RT task outranks a non-RT task;
-- among RT tasks, the larger existing RT priority wins;
-- among non-RT tasks, the existing lower scheduler level wins;
-- any runnable task outranks idle.
+- RT 任务优于非 RT 任务；
+- 在 RT 任务中，更大的现有 RT 优先级获胜；
+- 在非 RT 任务中，更低的现有调度级别获胜；
+- 任何可运行任务都优于空闲。
 
-This only decides whether to request a safe-point reschedule. Queue selection,FIFO/RR behavior, aging, nice values, and the existing priority strategy areunchanged. At a safe point, a yielding task remains the CPU owner until switchcompletion. If it still strictly outranks the selected queued task, thescheduler reverses the unpublished `on_rq -> dispatching` transfer and retainsthe current task. Equal-priority tasks still switch, preserving yield andround-robin progress; a lower-priority task cannot run in the ownership gap.
+这只决定是否请求安全点重调度。队列选择、FIFO/RR 行为、老化、nice 值以及现有优先级策略不变。在安全点，让出任务在切换完成前保持 CPU 所有权。如果它仍然严格优于选中的排队任务，调度器会反转未发布的 `on_rq -> dispatching` 转移并保留当前任务。相等优先级任务仍会切换，保持让出与轮转进展；低优先级任务无法在所有权间隙中运行。
 
-## Diagnostics and regression
+## 诊断与回归
 
-`/proc/a20/task_lifetime` exposes:
+`/proc/a20/task_lifetime` 暴露：
 
-- `runqueue_migrations`;
-- request, priority-request, IPI sent/acknowledged, consumed, and pending counters;
-- `scheduler_violations`.
+- `runqueue_migrations`；
+- 请求、优先级请求、IPI 发送/确认、消耗与待决计数器；
+- `scheduler_violations`。
 
-`sched_stress` creates a remote CPU RT hog, queues a lower RT task behind it,then atomically migrates that queued task to the parent CPU. It verifies:
+`sched_stress` 创建远程 CPU 的 RT hog，在其后排队一个更低优先级的 RT 任务，然后将该排队任务原子迁移到父 CPU。它验证：
 
-- the task executes only on the destination CPU;
-- at least one cross-runqueue migration occurred;
-- remote requests caused IPI send and acknowledgement;
-- a higher-priority destination wake requested preemption;
-- a safe point consumed the request;
-- scheduler violations remain zero.
+- 任务只在目标 CPU 上执行；
+- 至少发生一次跨运行队列迁移；
+- 远程请求引起 IPI 发送与确认；
+- 更高优先级的目标唤醒请求了抢占；
+- 安全点消耗了请求；
+- 调度器违规保持为零。
 
-The test reports a one-CPU skip and runs the full protocol on the eight-CPUdebug/release matrix. The cumulative lifetime stress continues to check that atask occupies at most one runqueue/CPU and that all earlier Park/Wake, signal,timeout, process, VFS, socket, futex, and reference invariants remain green.
+该测试报告单 CPU 跳过，并在八 CPU 调试/发布矩阵上运行完整协议。累积的生命周期压力继续检查任务最多占用一个运行队列/CPU，并且所有更早的 Park/Wake、信号、超时、进程、VFS、socket、futex 与引用不变量保持绿色。

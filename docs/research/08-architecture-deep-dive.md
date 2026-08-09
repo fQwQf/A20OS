@@ -1016,11 +1016,11 @@ void a20_timer_destroy(a20_timer_t *timer) {
 
 | 操作 | IRQ 安全 | 原因 |
 |------|----------|------|
-| `spin_lock(&eq->lock)` | ❌ 不安全 | IRQ 可能中断当前持有 `eq->lock` 的线程，导致自旋死锁 |
-| `spin_lock_irqsave(&eq->lock, flags)` | ✅ 安全 | 禁用本地 CPU 中断，防止 IRQ 重入 |
-| `kfree(msg)` | ❌ 不安全 | `kfree` 可能涉及睡眠（如 slab 分配器的锁） |
-| `ring_buffer_enqueue(eq, event)` | ✅ 安全 | 纯内存写入 + 索引更新，无内存分配 |
-| `wait_queue_wake_one(&eq->waiters, 0, PROC_WAKE_EVENT)` | ✅ 安全 | collect token 后在锁外发布持久 reschedule 请求，不在 IRQ 中直接切换 |
+| `spin_lock(&eq->lock)` | × 不安全 | IRQ 可能中断当前持有 `eq->lock` 的线程，导致自旋死锁 |
+| `spin_lock_irqsave(&eq->lock, flags)` | √ 安全 | 禁用本地 CPU 中断，防止 IRQ 重入 |
+| `kfree(msg)` | × 不安全 | `kfree` 可能涉及睡眠（如 slab 分配器的锁） |
+| `ring_buffer_enqueue(eq, event)` | √ 安全 | 纯内存写入 + 索引更新，无内存分配 |
+| `wait_queue_wake_one(&eq->waiters, 0, PROC_WAKE_EVENT)` | √ 安全 | collect token 后在锁外发布持久 reschedule 请求，不在 IRQ 中直接切换 |
 
 ### 12.3 安全的 IRQ 事件分发
 

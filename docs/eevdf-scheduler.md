@@ -49,7 +49,8 @@ vruntime <= vtime
 每个任务有虚拟截止时间：
 
 ```text
-vslice   = base_slice * NICE0_LOAD / weightdeadline = vruntime + vslice
+vslice = base_slice * NICE0_LOAD / weight
+deadline = vruntime + vslice
 ```
 
 **选择规则：在所有有资格的任务里，选 `deadline` 最早的一个。** 短时间片的任务 `deadline` 更早，因此低延迟任务自然先跑；但资格门控保证它不能超出自己的加权份额。这正是 EEVDF 同时提供公平与延迟的关键。
@@ -108,7 +109,9 @@ typedef struct proc_runq {
 基础时间片可通过 `/proc/a20/sched_base_slice`（单位 ms，范围 1..1000）运行时调整，默认 10ms：
 
 ```sh
-cat /proc/a20/sched_base_slice      # 10echo 2 > /proc/a20/sched_base_slice # 低延迟（桌面）echo 50 > /proc/a20/sched_base_slice # 高吞吐/缓存友好（HPC 批处理）
+cat /proc/a20/sched_base_slice      # 10
+echo 2 > /proc/a20/sched_base_slice # 低延迟（桌面）
+echo 50 > /proc/a20/sched_base_slice # 高吞吐/缓存友好（HPC 批处理）
 ```
 
 短片 → 低延迟（EEVDF 让其 deadline 更早）；长片 → 减少抢占、缓存友好、吞吐更高。这与 Linux 的 `sched_base_slice_ns` 思路一致。

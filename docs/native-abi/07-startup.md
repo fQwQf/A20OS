@@ -89,8 +89,8 @@ typedef struct a20_start_info {
 
 | 路径 | 适用场景 | 工作量 | POSIX 兼容性 | 状态 |
 |------|---------|--------|-------------|------|
-| 从零写 liba20c | Phase 0-1，验证最小程序 | ~985 行 | ISO C 子集 | ✅ 已完成 |
-| 移植 musl | Phase 2+，支持真实程序 | ~1500 行新代码 + musl | 完整 POSIX | ✅ 已完成 |
+| 从零写 liba20c | Phase 0-1，验证最小程序 | ~985 行 | ISO C 子集 | 已完成 |
+| 移植 musl | Phase 2+，支持真实程序 | ~1500 行新代码 + musl | 完整 POSIX | 已完成 |
 
 ### 2.2 liba20rt — 最小运行时
 
@@ -367,9 +367,10 @@ arch/a20/├── syscall.h              ← A20 syscall 发射宏（~80 行）
 #define __NR_a20_path_open         0x0400
 #define __NR_a20_handle_read       0x0401
 #define __NR_a20_handle_write      0x0402
-/* ... 全部 129 个 */
+/* ... 全部 126 个（syscall_table.def） */
 
-/* A20 使用相同的 SVC #0 指令，但 x8 放 A20 编号 */static inline long __syscall0(long nr){
+/* A20 使用相同的 SVC #0 指令，但 x8 放 A20 编号 */
+static inline long __syscall0(long nr){
     register long x8 __asm__("x8") = nr;
     register long x0 __asm__("x0");
     __asm__ volatile("svc #0" : "=r"(x0) : "r"(x8) : "memory");
@@ -847,7 +848,7 @@ clang --target=aarch64-unknown-a20elf \
 aarch64-a20-gcc -static -o hello hello.c
 
 # 方式 3：直接用 musl 的构建系统
-cd musl && ./configure --target=aarch64-a20 --prefix=/opt/a20-sysrootmake && make install
+cd musl && ./configure --target=aarch64-a20 --prefix=/opt/a20-sysroot && make && make install
 ```
 
 ### 5.3 sysroot 结构
@@ -907,7 +908,7 @@ void _start(const a20_start_info_t *si) {
 
 工作项：
 - [x] syscall 发射宏（`a20_syscall6`）
-- [x] 全部 129 个 syscall 编号定义
+- [x] 全部 126 个 syscall 编号定义（`syscall_table.def`）
 - [x] crt0 启动汇编（aarch64）
 - [x] 简单测试：write stdout + exit
 
@@ -938,11 +939,11 @@ int main(int argc, char *argv[]) {
 - [x] errno 映射
 - [x] 测试：hello world + 文件读写 + malloc
 
-### Phase 2：musl 移植（已完成）
+### Phase 2：musl 移植（历史，代码已归档）
 
 **目标**：能让 busybox 或 dropbear 等真实程序运行。
 
-工作项：
+工作项（全部位于 `user/archive/`，不参与当前构建；详见 [08-runtime-status.md](08-runtime-status.md) §3）：
 - [x] `arch/a20/` 全套（atomic.h, reloc.h, config.a20, syscall.h）
 - [x] syscall 映射层（`a20_syscallops.c`，336 行）
 - [x] pthread → A20 thread 适配（`a20_pthread.c`，283 行）
@@ -951,7 +952,7 @@ int main(int argc, char *argv[]) {
 - [x] fork + posix_spawn via task_spawn（`a20_fork.c` + `a20_posix_spawn.c`）
 - [x] fd 表映射（`a20_fdtable.c`，313 行）
 - [x] sysroot 构建 + linker script（`build_sysroot.sh` + `a20.ld`）
-- [x] 集成测试通过（4 套 118 cases host-mode）
+- [x] 集成测试（历史上曾记录"4 套 118 cases host-mode"，该套件当前不存在，不得作为现行证据）
 
 ### Phase 3：POSIX 完整兼容（按需）
 
@@ -968,8 +969,15 @@ int main(int argc, char *argv[]) {
 ### 关键依赖关系
 
 ```text
-Phase 0 ──→ Phase 1 ──→ Phase 2 ──→ Phase 3│            │            │            ││            │            │            └── 内核: A20_SPAWN_FORK_SELF│            │            │            └── 内核: 异步信号投递│            │            ✅ 已完成    └── 待实现│            ✅ 已完成    └── 内核: 全部 129 个 syscall ✅✅ 已完成    └── 内核: ~15 个基础 syscall ✅└── 内核: 启动协议 + abi_info + handle_close + vm_alloc ✅
-          + handle_write + path_open + task_exit ✅
+Phase 0 ──→ Phase 1 ──→ Phase 2 ──→ Phase 3
+│            │            │            │
+│            │            │            └── 内核: A20_SPAWN_FORK_SELF
+│            │            │            └── 内核: 异步信号投递
+│            │            √ 已完成    └── 待实现
+│            √ 已完成    └── 内核: 全部 126 个 syscall √
+√ 已完成    └── 内核: ~15 个基础 syscall √
+└── 内核: 启动协议 + abi_info + handle_close + vm_alloc √
+          + handle_write + path_open + task_exit √
 ```
 
 每个 Phase 可以独立验证，不依赖后续 Phase 的内核功能。

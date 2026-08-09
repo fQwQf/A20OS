@@ -72,13 +72,23 @@ static a20_status_t reg_lookup(a20_handle_t reg, const char *name,
 
 static int rtcd_time_rpc(a20_handle_t ep, uint64_t *sec_out)
 {
-    uint8_t req = RTCD_REQ_TIME;
-    uint64_t rep[2];
+    /* rtcd parses versioned IDL envelopes (a20_services.idl), so the
+     * request must carry the 8-byte header, not the legacy raw 'T'. */
+    struct {
+        a20_idl_envelope_t env;
+    } req = {
+        { A20_SERVICES_IDL_VERSION, RTCD_REQ_TIME, sizeof(req) },
+    };
+    struct {
+        a20_idl_envelope_t env;
+        a20_idl_rtcd_time_response_t body;
+    } rep;
     uint32_t rep_len = sizeof(rep);
     uint32_t rep_h = 0;
-    a20_status_t st = a20_channel_call(ep, &req, 1, 0, 0,
-                                       rep, &rep_len, 0, &rep_h);
-    if (st < 0 || rep_len != sizeof(rep)) {
+    a20_status_t st = a20_channel_call(ep, &req, sizeof(req), 0, 0,
+                                       &rep, &rep_len, 0, &rep_h);
+    if (st < 0 || rep_len != sizeof(rep) ||
+        rep.env.type != RTCD_REPLY_TIME) {
         put_str("rtcd_time_rpc fail st=");
         put_i64(st);
         put_str(" rep_len=");
@@ -86,7 +96,7 @@ static int rtcd_time_rpc(a20_handle_t ep, uint64_t *sec_out)
         put("\n", 1);
         return -1;
     }
-    *sec_out = rep[0];
+    *sec_out = rep.body.seconds;
     return 0;
 }
 
@@ -114,8 +124,10 @@ int main(int argc, char **argv, char **envp)
     put("\n", 1);
 
     /* 2. Crash the service; the old endpoint dies with it. */
-    uint8_t creq = RTCD_REQ_CRASH;
-    if (a20_channel_send(rtcd, &creq, 1, 0, 0) != A20_OK)
+    a20_idl_envelope_t creq = {
+        A20_SERVICES_IDL_VERSION, RTCD_REQ_CRASH, sizeof(creq)
+    };
+    if (a20_channel_send(rtcd, &creq, sizeof(creq), 0, 0) != A20_OK)
         return fail(4, "crash request failed");
     a20_hdl_close(rtcd);
 

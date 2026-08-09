@@ -18,7 +18,7 @@
   - 证据：骨架已落地（`kernel/include/drivers/dual/`，设计文档 `docs/hybrid-kernel/04-dual-placement.md`）；goldfish RTC 同源码 双态运行（内核壳 boot probe + 用户壳 `smoke-native-rtcd` PASS）；
     virtio-input 第二样板完成：probe 级双态一致性 + 功能态用户驱动 （共享 virtq 层、DMA ops、IRQ→EventQ），`smoke-dual-input` 经 monitor sendkey 验证真实按键事件。
   - 过程中修复：`QUEUE_READY` 偏移（0x044）、DRIVER_OK 时序、 vmo_phys 非物化契约（drv_dma 先触页再翻译）、native 构建 stamp 不含 user/svc 与共享头的陈旧二进制问题。
-  - 完成条件：同一驱动源码双态部署通过同一契约测试；未授权 DMA 被 IOMMU 硬件拒绝。待办：IOMMU（QEMU 10.0 `riscv-iommu-pci`）+ 多页连续 DMA heap、动态所有权 claim/release、内核壳接入输入 子系统。
+  - 完成条件：同一驱动源码双态部署通过同一契约测试；未授权 DMA 被 IOMMU 硬件拒绝。IOMMU 已完成真实硬件初始化与 per-domain 翻译（`kernel/drivers/core/riscv_iommu.c`，`smoke-iommu-discovery` 断言）；多页连续 DMA heap、动态所有权 claim/release、内核壳接入输入子系统已随骨架完成。剩余：fault 队列消费与 per-device 页表动态映射。
 - [ ] 阶段四：服务接口 IDL 化（替换 `user/svc/*_proto.h` 手写协议）。
   - 已完成：常量与固定宽度消息 IDL、生成器、rtcd/svc/ubd 迁移， `make check-a20-idl`；rtcd alarm/time payload 使用生成结构体。
   - 完成条件：绑定/版本协商由 IDL 生成；手写 proto 头退出活跃树。
@@ -76,7 +76,7 @@
   - 证据：`kernel/abi/linux/syscall_coverage.md` 将 futex 标记为 partial；`kernel/abi/linux/sys_futex.c` 仍有不支持路径。
   - 完成条件：basic、requeue、private/shared、timeout 和 robust-list 场景都有覆盖。
 - [x] 决定哪些显式 `-ENOSYS` Linux syscall 占位符仍在范围外，哪些应该实现。
-  - 证据：`kernel/abi/linux/syscall_table.def` 包含 fanotify、signalfd、AIO、module、userfaultfd、perf 和 arch-prctl 占位符。
+  - 证据：`kernel/abi/linux/syscall_table.def` 包含 fanotify、AIO、module、userfaultfd、perf 等 `-ENOSYS` 占位符；`signalfd4`（`sys_signalfd4`）与 `arch_prctl`（`sys_arch_prctl`）已实现，不再是占位符。
   - 完成条件：每个占位符都有记录在案的 owner 决策：实现、保留 stub，或从声明的兼容范围中移除。
 
 ## P0：MM、Page Cache 与文件映射
@@ -137,7 +137,7 @@
   - 证据：`kernel/abi/native/sys_phase2.c` 包含广泛的 memory、IPC、security、debug 和 system 功能。
   - 完成条件：Native syscall 文件映射子系统边界，每个文件只拥有窄 syscall 范围。
 - [x] 完成 Native debug 语义，或明确缩小其范围。
-  - 证据：`kernel/abi/native/sys_phase2.c` 将 debug 调用记录为有限兼容实现，不具备完整 stop/resume/watchpoint 行为。
+  - 证据：`kernel/abi/native/sys_native_debug.c` 提供完整停止/恢复语义（attach/traceme/wait/event/resume/detach/read/write/read_regs/write_regs/kill），与 Linux ABI ptrace 共享同一 `proc_debug_*` 状态机；watchpoint 明确不在范围。
   - 完成条件：debug handle 行为要么完整实现并测试，要么在 Native ABI 文档中记录为有意受限。
 - [x] 完成 handle transfer、partial-delivery、temporal-rights 和 label consistency 测试。
   - 证据：`kernel/abi/native/handle_table.h` 和 `kernel/abi/native/handle_table.c` 引用了 partial-delivery 与 capability consistency 门禁。

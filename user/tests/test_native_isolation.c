@@ -200,15 +200,23 @@ int main(int argc, char **argv, char **envp)
         a20_handle_t ep, task;
         if (spawn_echod(&ep, &task) != A20_OK)
             return fail(2, "spawn failed");
-        /* Echo once so the service is definitely up, then crash it. */
-        uint8_t req[4] = { 'p', 'i', 'n', 'g' };
-        uint8_t rep[4];
+        /* Echo once so the service is definitely up, then crash it.
+         * echod parses versioned IDL envelopes (a20_services.idl), so the
+         * requests carry the 8-byte header, not the legacy raw bytes. */
+        struct {
+            a20_idl_envelope_t env;
+        } req = {
+            { A20_SERVICES_IDL_VERSION, SVCMGR_REQ_ECHO, sizeof(req) },
+        };
+        uint8_t rep[sizeof(req)];
         uint32_t rep_len = sizeof(rep);
         uint32_t rep_h = 0;
-        if (a20_channel_call(ep, req, 4, 0, 0, rep, &rep_len, 0, &rep_h) < 0)
+        if (a20_channel_call(ep, &req, sizeof(req), 0, 0, rep, &rep_len, 0, &rep_h) < 0)
             return fail(3, "echo RPC failed");
-        static const uint8_t crash_req[5] = { 'c', 'r', 'a', 's', 'h' };
-        if (a20_channel_send(ep, crash_req, 5, 0, 0) != A20_OK)
+        a20_idl_envelope_t crash_req = {
+            A20_SERVICES_IDL_VERSION, SVCMGR_REQ_CRASH, sizeof(crash_req)
+        };
+        if (a20_channel_send(ep, &crash_req, sizeof(crash_req), 0, 0) != A20_OK)
             return fail(4, "crash request failed");
 
         a20_task_status_t ts;
