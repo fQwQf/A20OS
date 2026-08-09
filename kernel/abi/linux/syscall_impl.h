@@ -310,6 +310,47 @@ int64_t sys_get_robust_list(int pid, void *head_ptr, size_t *len_ptr);
 int64_t sys_a20_channel_pair(const linux_syscall_args_t *args);
 int64_t sys_a20_registry_client_fd(const linux_syscall_args_t *args);
 
+/* Keyring (sys_keyring.c). */
+int64_t sys_add_key(const char *type, const char *description,
+                    const void *payload, size_t plen, int32_t ringid);
+int64_t sys_request_key(const char *type, const char *description,
+                        const char *callout_info, int32_t dest_ringid);
+int64_t sys_keyctl(int cmd, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5);
+
+/* fanotify (sys_fanotify.c). */
+int64_t sys_fanotify_init(unsigned flags, unsigned event_f_flags);
+int64_t sys_fanotify_mark(int fanotify_fd, unsigned flags, uint64_t mask,
+                          int dfd, const char *path);
+
+/* Process accounting (sys_acct.c). */
+int64_t sys_acct(const char *filename);
+
+/* Linux AIO (sys_aio.c). */
+int64_t sys_io_setup(unsigned nr_events, void *ctxp);
+int64_t sys_io_destroy(uint64_t ctx);
+int64_t sys_io_submit(uint64_t ctx, long nr, const void *iocbpp);
+int64_t sys_io_getevents(uint64_t ctx, long min_nr, long nr, void *events,
+                         const void *timeout);
+int64_t sys_io_pgetevents(uint64_t ctx, long min_nr, long nr, void *events,
+                          const void *timeout, const void *sigmask,
+                          size_t sigsetsize);
+int64_t sys_io_cancel(uint64_t ctx, const void *iocb, void *result);
+
+/* pidfd (sys_pidfd.c). */
+int64_t sys_pidfd_open(int pid, unsigned flags);
+int64_t sys_pidfd_getfd(int pidfd, int targetfd, unsigned flags);
+
+/* epoll_pwait2 (sys_epoll.c). */
+int64_t sys_epoll_pwait2(int epfd, void *events, int maxevents,
+                         const void *timeout, const void *sigmask,
+                         size_t sigsetsize);
+
+/* Kernel driver modules (sys_module.c). */
+int64_t sys_init_module(const void *umod, unsigned long len,
+                        const char *uargs);
+int64_t sys_finit_module(int fd, const char *uargs, int flags);
+int64_t sys_delete_module(const char *name_user, unsigned int flags);
+
 #endif /* LINUX_SYSCALL_DECLARE_PROTOTYPES */
 
 #endif /* _LINUX_SYSCALL_IMPL_H */
