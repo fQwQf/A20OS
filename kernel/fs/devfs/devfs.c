@@ -25,6 +25,8 @@ enum {
     DEVFS_NULL,
     DEVFS_ZERO,
     DEVFS_RANDOM,
+    DEVFS_FULL,
+    DEVFS_KMSG,
     DEVFS_TTY,
     DEVFS_RTC,
     DEVFS_LOOP,
@@ -68,6 +70,8 @@ static devfs_node_t g_nodes[] = {
     STATIC_NODE(DEVFS_RANDOM, "random", 0x108),
     STATIC_NODE(DEVFS_RANDOM, "urandom", 0x109),
     STATIC_NODE(DEVFS_NULL, "cpu_dma_latency", 0x10a),
+    STATIC_NODE(DEVFS_FULL, "full", 0x107),
+    STATIC_NODE(DEVFS_KMSG, "kmsg", 0x10b),
     STATIC_NODE(DEVFS_TTY, "tty", 0x500),
     STATIC_NODE(DEVFS_TTY, "console", 0x501),
     STATIC_NODE(DEVFS_TTY, "tty0", 0x400),
@@ -476,6 +480,55 @@ static vfile_ops_t g_devfs_zero_ops   = { .read = devfs_zero_read,  .write = dev
 static vfile_ops_t g_devfs_random_ops = { .read = devfs_random_read,.write = devfs_null_write,   .lseek = devfs_noop_lseek, .ioctl = devfs_ioctl };
 static vfile_ops_t g_devfs_rtc_ops    = { .read = devfs_null_read,  .write = devfs_null_write,   .lseek = devfs_noop_lseek, .ioctl = devfs_ioctl };
 
+/* /dev/full: reads return zero, writes return ENOSPC. */
+static int devfs_full_read(vfile_t *vf, char *buf, size_t count)
+{
+    (void)vf;
+    memset(buf, 0, count);
+    return (int)count;
+}
+
+static int devfs_full_write(vfile_t *vf, const char *buf, size_t count)
+{
+    (void)vf;
+    (void)buf;
+    (void)count;
+    return -ENOSPC;
+}
+
+static vfile_ops_t g_devfs_full_ops = { .read = devfs_full_read, .write = devfs_full_write, .lseek = devfs_noop_lseek, .ioctl = devfs_ioctl };
+
+/* /dev/kmsg: append to the kernel log ring.  Reads return the next pending
+ * log data; writes route to klog. */
+static size_t g_kmsg_pos;
+
+static int devfs_kmsg_read(vfile_t *vf, char *buf, size_t count)
+{
+    (void)vf;
+    size_t pos = 0;
+    /* Track a per-file read cursor across reads. */
+    size_t consumed = 0;
+    size_t cur = g_kmsg_pos;
+    int n;
+    while (consumed < count && (n = klog_read(buf + consumed,
+                                              count - consumed,
+                                              &cur)) > 0) {
+        consumed += (size_t)n;
+        pos = cur;
+    }
+    g_kmsg_pos = pos;
+    return (int)consumed;
+}
+
+static int devfs_kmsg_write(vfile_t *vf, const char *buf, size_t count)
+{
+    (void)vf;
+    klog_write_raw(buf, count);
+    return (int)count;
+}
+
+static vfile_ops_t g_devfs_kmsg_ops = { .read = devfs_kmsg_read, .write = devfs_kmsg_write, .lseek = devfs_noop_lseek, .ioctl = devfs_ioctl };
+
 static int devfs_class_read(vfile_t *vf, char *buf, size_t count)
 {
     class_device_t *cdev = vf ? (class_device_t *)vf->priv : NULL;
@@ -775,6 +828,8 @@ static vfile_t *devfs_open_vnode(vnode_t *vn, int flags) {
     case DEVFS_NULL: vf->ops = &g_devfs_null_ops; break;
     case DEVFS_ZERO: vf->ops = &g_devfs_zero_ops; break;
     case DEVFS_RANDOM: vf->ops = &g_devfs_random_ops; break;
+    case DEVFS_FULL: vf->ops = &g_devfs_full_ops; break;
+    case DEVFS_KMSG: vf->ops = &g_devfs_kmsg_ops; break;
     case DEVFS_TTY:  vf->ops = &g_devfs_tty_ops; break;
     case DEVFS_RTC:  vf->ops = &g_devfs_rtc_ops; break;
     case DEVFS_FB:   vf->ops = &g_devfs_fb_ops; break;

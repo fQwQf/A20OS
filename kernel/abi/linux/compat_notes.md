@@ -46,6 +46,13 @@ flag、对象类型或并发边界。
 - RISC-V 专用：`riscv_hwprobe` 报告 IMA 基础行为；`riscv_flush_icache` 刷新范围 icache；`rt_tgsigqueueinfo` 按 tid 投递。
 - `time(2)` 在 asm-generic 架构不存在（musl 用 clock_gettime），已从表移除；`SYS_time` 保留仅供 x86_64 架构表映射。
 
+## 文件化接口（/proc、/dev、ioctl）
+
+- `/proc` 新增：`boot_id`、`cap_last_cap`、`nr_open`、`pressure`、`uid_map`/`gid_map`/`setgroups`、`sysvipc`（汇总 msg/sem/shm 计数）、`/proc/sys/kernel/hostname` 与 `domainname`（可读可写，与 sethostname/setdomainname 共享存储）。
+- `/dev` 新增：`/dev/full`（读零写 ENOSPC）、`/dev/kmsg`（写追加内核日志环、读回日志；经 `klog_write_raw`/`klog_read`）。
+- tty/pty ioctl 补齐：`TIOCGPGRP`/`TIOCSPGRP`（前台进程组）、`TCFLSH`（刷输入/输出/双向）、`TIOCOUTQ`（输出队列字节数）、`TIOCSTI`（注入单字节输入）、`FIONREAD`/`TIOCINQ`（可读字节数）——pty master 与 slave 端均已支持。
+- 补充 `core/ioctl.h` 标准 tty ioctl 常量全集（TCSBRK/TCXONC/TIOCEXCL/TIOCM*/TIOCPKT/TIOCGETD 等）供后续驱动与用户态使用。
+
 ## 维护规则
 
 1. 新增 Linux syscall 实现必须登记到 `syscall_coverage.md`。
