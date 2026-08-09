@@ -8,11 +8,10 @@ A20OS 音频栈把设备发现、通用用户接口和具体硬件协议分开�
 - `kernel/include/drivers/audio/audio_core.h` 与 `kernel/drivers/audio/audio_core.c`：内核内部 `audio_dev_ops_t`、通用 ioctl 参数封送、capability/format 校验和 close 策略。
 - `kernel/drivers/core/driver_class.c`：audio class 编号与发布。
 - `kernel/fs/devfs/devfs.c`：`/dev/audioN` 的 read/write、ioctl 和 close 转发。
-- `kernel/drvmod/examples/hda.c (hda.a20drv)`：PCI Intel HDA controller、输出 stream 和 PCM DMA。
-- `kernel/drivers/audio/hda_codec.c`：HDA immediate command、codec topology 和输出路径配置。
+- `kernel/drvmod/examples/hda.c (hda.a20drv)`：PCI Intel HDA controller、输出 stream、PCM DMA 与 codec 拓扑（`hda_codec.c` 已并入该模块）。
 - `kernel/drivers/audio/virtio_snd.c`：VirtIO 1.2 sound control/event/TX/RX queue 与 PCM playback。
 - `kernel/drvmod/examples/pc_spkr.c (pc-spkr.a20drv)`：只支持 tone 的 x86 PC Speaker。
-- `user/cmds/audioplay.c`：WAV、raw PCM 和测试 tone 客户端。
+- `user/cmds/core/audioplay.c`：WAV、raw PCM 和测试 tone 客户端。
 - `user/wayland/player.c`：FFmpeg 解码、48 kHz 重采样和异步 PCM 输出。
 
 HDA 是架构无关的 PCI class 驱动，匹配 PCI class `04:03:00`。源码不得包含 CPU 架构门禁；平台负责提供 ECAM、可映射 BAR、DMA handle、cache 同步和必要的中断或轮询能力。

@@ -1,12 +1,12 @@
 # A20OS Native ABI：Handle 子系统设计
 
-> 本文档定义 Handle 的 13 种对象类型、生命周期状态机、handle table 数据结构和操作语义。权限模型见 [security.md](06-security.md)，类型定义见 [types.md](01-types.md)。
+> 本文档定义 Handle 的 14 种对象类型、生命周期状态机、handle table 数据结构和操作语义。权限模型见 [security.md](06-security.md)，类型定义见 [types.md](01-types.md)。
 
 ---
 
 ## 1. 对象类型
 
-A20OS Native ABI 定义 13 种对象类型。每种类型有特定的合法操作和权限集。
+A20OS Native ABI 定义 14 种对象类型。每种类型有特定的合法操作和权限集。
 
 ```c
 typedef enum a20_object_type {
@@ -24,6 +24,7 @@ typedef enum a20_object_type {
     A20_OBJ_DEVICE            = 11,
     A20_OBJ_NAMESPACE         = 12,
     A20_OBJ_DEBUG             = 13,
+    A20_OBJ_EXT_PROG          = 14,   /* 内核扩展程序 */
 } a20_object_type_t;
 ```
 
@@ -280,9 +281,14 @@ Handle 在其生命周期中经历以下状态：
 当对象的引用计数降至 0 时，触发 `object_destroy`。这可能导致级联销毁：
 
 ```text
-task_destroy├── 遍历 handle_table，close 所有 handle│   ├── channel endpoint close → 通知对端 peer_closed│   ├── event queue close → 清理 watch list + 反向索引│   └── shm close → 解除映射└── 释放 task 结构
+task_destroy
+├── 遍历 handle_table，close 所有 handle
+│   ├── channel endpoint close → 通知对端 peer_closed
+│   ├── event queue close → 清理 watch list + 反向索引
+│   └── memory close → 解除映射
+└── 释放 task 结构
 
-最大级联深度：2task → handle → channel message 中的 handle 引用
+最大级联深度：2 task → handle → channel message 中的 handle 引用
 ```
 
 ---
@@ -398,6 +404,7 @@ L0 (IRQ) < L1 (handle table) < L2 (内核对象) < L3 (调度器) < L4 (mm)
 | 0x0109 | `handle_xattr_get` | `int64_t handle_xattr_get(a20_handle_t h, const char *name, void *value, uint64_t size)` | 获取扩展属性 |
 | 0x010A | `handle_xattr_list` | `int64_t handle_xattr_list(a20_handle_t h, void *list, uint64_t size)` | 列出扩展属性名 |
 | 0x010B | `handle_xattr_remove` | `int64_t handle_xattr_remove(a20_handle_t h, const char *name)` | 删除扩展属性 |
+| 0x010C | `handle_poll` | `int64_t handle_poll(a20_handle_t h, uint32_t events, uint64_t timeout_ns)` | 非阻塞就绪查询（复用 `vfs_poll_events`，见 08-runtime-status.md §5a） |
 
 ### Task / Thread (0x0200)
 
@@ -418,6 +425,8 @@ L0 (IRQ) < L1 (handle table) < L2 (内核对象) < L3 (调度器) < L4 (mm)
 | 0x020C | `task_set_limits` | `int64_t task_set_limits(a20_handle_t task, a20_resource_limits_t *args)` | 设置聚合资源限制 |
 | 0x020D | `task_get_usage` | `int64_t task_get_usage(a20_handle_t task, a20_rusage_t *out)` | 查询资源使用量 |
 | 0x020E | `thread_get_cpu` | `int64_t thread_get_cpu(uint32_t *out)` | 查询当前线程所在 CPU |
+| 0x020F | `signal_check` | `int64_t signal_check(a20_signal_info_t *out)` | 检查点式信号模拟：查询挂起信号 |
+| 0x0210 | `signal_mask` | `int64_t signal_mask(uint64_t set, uint64_t *old)` | 检查点式信号模拟：设置/查询信号掩码 |
 
 ### Memory (0x0300)
 
@@ -455,6 +464,11 @@ L0 (IRQ) < L1 (handle table) < L2 (内核对象) < L3 (调度器) < L4 (mm)
 | 0x040E | `fs_mount` | `int64_t fs_mount(a20_fs_mount_args_t *args)` | 挂载文件系统 |
 | 0x040F | `fs_umount` | `int64_t fs_umount(const char *target, uint32_t target_len, uint32_t flags)` | 卸载文件系统 |
 | 0x0410 | `fs_sync` | `int64_t fs_sync(void)` | 同步文件系统到磁盘 |
+| 0x0411 | `path_unlink_at` | `int64_t path_unlink_at(a20_handle_t dir, const char *name, uint32_t len)` | 相对目录 handle 删除节点 |
+| 0x0412 | `path_rename_at` | `int64_t path_rename_at(a20_handle_t old_dir, const char *old_name, uint32_t old_len, a20_handle_t new_dir, const char *new_name, uint32_t new_len)` | 相对目录 handle 重命名 |
+| 0x0413 | `path_link_at` | `int64_t path_link_at(a20_handle_t dir, const char *name, uint32_t len, a20_handle_t target_dir, const char *target, uint32_t target_len)` | 相对目录 handle 创建硬链接 |
+| 0x0414 | `path_symlink_at` | `int64_t path_symlink_at(a20_handle_t dir, const char *name, uint32_t len, const char *target, uint32_t target_len)` | 相对目录 handle 创建符号链接 |
+| 0x0415 | `path_readlink_at` | `int64_t path_readlink_at(a20_handle_t dir, const char *name, uint32_t len, char *buf, uint64_t buf_len)` | 相对目录 handle 读取符号链接目标 |
 
 ### Event / IPC (0x0500)
 
@@ -468,6 +482,7 @@ L0 (IRQ) < L1 (handle table) < L2 (内核对象) < L3 (调度器) < L4 (mm)
 | 0x0505 | `channel_send` | `int64_t channel_send(a20_msg_send_args_t *args)` | 发送消息 |
 | 0x0506 | `channel_recv` | `int64_t channel_recv(a20_msg_recv_args_t *args)` | 接收消息 |
 | 0x0507 | `event_watch_fs` | `int64_t event_watch_fs(a20_handle_t dir, a20_handle_t queue, uint32_t mask, uint64_t user_data)` | 当前为目录普通 watch 占位；路径过滤/VFS 事件源未实现 |
+| 0x0508 | `channel_call` | `int64_t channel_call(a20_channel_call_args_t *args)` | 融合 RPC：一次陷入完成发送请求 + 等待回复 |
 
 ### Network (0x0600)
 
@@ -530,6 +545,7 @@ L0 (IRQ) < L1 (handle table) < L2 (内核对象) < L3 (调度器) < L4 (mm)
 | 0x0A00 | `system_info` | `int64_t system_info(a20_system_info_t *out)` | 系统信息（uname + sysinfo 统一） |
 | 0x0A01 | `system_random` | `int64_t system_random(void *buf, uint64_t len, uint32_t flags)` | 获取密码学安全随机字节 |
 | 0x0A02 | `system_reboot` | `int64_t system_reboot(uint32_t cmd, uint64_t arg)` | 重启/关机/电源控制 |
+| 0x0A03 | `registry_claim` | `int64_t registry_claim(a20_handle_t *out)` | 服务注册表：服务 claim 名字/端点，客户端按名解析（见 [../hybrid-kernel/01-mechanisms.md](../hybrid-kernel/01-mechanisms.md)） |
 
 ### Sync (0x0B00)
 
@@ -537,6 +553,23 @@ L0 (IRQ) < L1 (handle table) < L2 (内核对象) < L3 (调度器) < L4 (mm)
 |------|------|------|------|
 | 0x0B00 | `futex_wait` | `int64_t futex_wait(a20_futex_wait_args_t *args)` | futex 等待（复用内核 futex 核心，见 01-types.md §22） |
 | 0x0B01 | `futex_wake` | `int64_t futex_wake(a20_futex_wake_args_t *args)` | futex 唤醒 |
+
+### Device / user-space drivers (0x0C00)
+
+用户态驱动框架（`kernel/drivers/core/udriver.c`，syscall 处理在 `sys_native_device.c`）。语义见 [../hybrid-kernel/01-mechanisms.md](../hybrid-kernel/01-mechanisms.md) 的用户态驱动契约。
+
+| 编号 | 名称 | 签名 | 说明 |
+|------|------|------|------|
+| 0x0C00 | `device_map_mmio` | `int64_t device_map_mmio(a20_device_map_mmio_args_t *args)` | 映射白名单内的设备物理窗口（PFNMAP） |
+| 0x0C01 | `device_irq_listen` | `int64_t device_irq_listen(uint32_t irq, a20_handle_t queue, uint64_t user_data)` | 绑定物理 IRQ 到 EventQ（电平协议：先屏蔽再投递） |
+| 0x0C02 | `device_irq_ack` | `int64_t device_irq_ack(uint32_t irq)` | 重新武装 IRQ（`irq_enable`） |
+| 0x0C03 | `device_irq_unlisten` | `int64_t device_irq_unlisten(uint32_t irq)` | 解绑 IRQ 并释放队列引用 |
+| 0x0C04 | `device_vmo_phys` | `int64_t device_vmo_phys(a20_handle_t vmo, uint64_t *phys, uint64_t count)` | 查询 VMO 页物理地址（peek 语义，未物化页报 0） |
+| 0x0C05 | `device_block_attach` | `int64_t device_block_attach(a20_handle_t ring_vmo, uint64_t capacity, a20_handle_t *out_doorbell)` | 内核块代理：附着共享环，返回门铃 channel 端点 |
+| 0x0C06 | `device_block_complete` | `int64_t device_block_complete(uint32_t n_done)` | 通知内核块代理完成请求数 |
+| 0x0C07 | `device_claim` | `int64_t device_claim(uint64_t phys)` | 声明设备窗口所有权（user-owned 窗口映射前必须 claim） |
+| 0x0C08 | `device_release` | `int64_t device_release(uint64_t phys)` | 释放设备窗口所有权 |
+| 0x0C09 | `device_alloc_dma` | `int64_t device_alloc_dma(uint32_t npages, a20_handle_t *out)` | 分配预物化连续 DMA heap（上限 64 页，帧清零） |
 
 ### Kernel extension (0x0E00)
 
@@ -550,4 +583,4 @@ L0 (IRQ) < L1 (handle table) < L2 (内核对象) < L3 (调度器) < L4 (mm)
 | 0x0E03 | `ext_prog_release` | `int64_t ext_prog_release(a20_handle_t prog)` | 分离并释放 |
 | 0x0E04 | `ext_point_info` | `int64_t ext_point_info(uint32_t point, a20_ext_point_info_t *out)` | 查询扩展点信息 |
 
-**总计：129 个 syscall。**
+**总计：126 个 syscall（`syscall_table.def` 当前登记数）。**
