@@ -21,6 +21,7 @@ extern int fsync(int fd);
 extern void sync(void);
 extern int nanosleep(const struct probe_timespec *request,
                      struct probe_timespec *remaining);
+extern int clock_gettime(int clock_id, struct probe_timespec *time);
 extern void *mmap(void *address, size_t length, int protection, int flags,
                   int fd, off_t offset);
 extern int munmap(void *address, size_t length);
@@ -36,7 +37,8 @@ extern int munmap(void *address, size_t length);
 #define MAP_ANONYMOUS 0x20
 #define MAP_FAILED ((void *)-1)
 
-#define FILE_COUNT 96
+#define CLOCK_MONOTONIC 1
+#define FILE_COUNT 768
 #define IO_ROUNDS 64
 #define STAT_ROUNDS 128
 #define MMAP_ROUNDS 128
@@ -69,6 +71,18 @@ static int write_all(int fd, const void *buffer, size_t length)
 static void print_text(const char *text)
 {
     (void)write_all(1, text, text_length(text));
+}
+
+static void print_unsigned(unsigned long value)
+{
+    char digits[32];
+    size_t count = 0;
+    do {
+        digits[count++] = (char)('0' + value % 10);
+        value /= 10;
+    } while (value);
+    while (count)
+        (void)write_all(1, &digits[--count], 1);
 }
 
 static void make_file_path(unsigned index, char path[64])
@@ -279,6 +293,9 @@ typedef int (*subload_fn_t)(void);
 
 static int run_subload(const char *name, subload_fn_t fn)
 {
+    struct probe_timespec started = {0};
+    struct probe_timespec finished = {0};
+    (void)clock_gettime(CLOCK_MONOTONIC, &started);
     print_text("STAGE9_PERF_SUBLOAD start name=");
     print_text(name);
     print_text("\n");
@@ -286,6 +303,23 @@ static int run_subload(const char *name, subload_fn_t fn)
     print_text("STAGE9_PERF_SUBLOAD end name=");
     print_text(name);
     print_text(rc == 0 ? " rc=0\n" : " rc=1\n");
+    if (clock_gettime(CLOCK_MONOTONIC, &finished) == 0) {
+        unsigned long elapsed_ms =
+            (unsigned long)(finished.tv_sec - started.tv_sec) * 1000UL;
+        if (finished.tv_nsec >= started.tv_nsec)
+            elapsed_ms +=
+                (unsigned long)(finished.tv_nsec - started.tv_nsec) / 1000000UL;
+        else {
+            elapsed_ms -= 1000UL;
+            elapsed_ms += (unsigned long)(1000000000L + finished.tv_nsec -
+                                          started.tv_nsec) / 1000000UL;
+        }
+        print_text("STAGE9_PERF_TIMING name=");
+        print_text(name);
+        print_text(" elapsed_ms=");
+        print_unsigned(elapsed_ms);
+        print_text("\n");
+    }
     if (rc != 0)
         return rc;
     return checkpoint(name);
