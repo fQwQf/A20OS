@@ -178,7 +178,8 @@ CRT_END := $(MUSL_CRT)/crtn.o
 LIBC := $(MUSL_CRT)/libc.a $(LIBGCC)
 
 # ARM libgcc references libc symbols (e.g. raise), so allow circular resolution.
-ifeq ($(ARCH),arm32)
+# AArch64 libgcc's lse-init.o likewise pulls in __getauxval from libc.
+ifeq ($(filter arm32 aarch64,$(ARCH)),$(ARCH))
 LIBC := -Wl,--start-group $(MUSL_CRT)/libc.a $(LIBGCC) -Wl,--end-group
 endif
 
