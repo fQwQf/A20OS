@@ -11,6 +11,9 @@ static const char *const g_a20_perf_names[A20_PERF_COUNTER_COUNT] = {
     [A20_PERF_VFS_TIME_META_PROBES] = "vfs_time_meta_probes",
     [A20_PERF_EXT4_GROUP_PROBES] = "ext4_group_probes",
     [A20_PERF_EXT4_BITMAP_PROBES] = "ext4_bitmap_probes",
+    [A20_PERF_EXT4_BITMAP_BYTE_LOADS] = "ext4_bitmap_byte_loads",
+    [A20_PERF_PCACHE_FILL_MISSES] = "pcache_fill_misses",
+    [A20_PERF_PCACHE_FILL_CONTENDED] = "pcache_fill_contended",
     [A20_PERF_MM_TLB_TRANSACTIONS] = "mm_tlb_transactions",
     [A20_PERF_MM_TLB_TRANSACTION_FLUSHES] =
         "mm_tlb_transaction_flushes",
