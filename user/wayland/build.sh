@@ -731,7 +731,8 @@ fi
 
 if want xfce4-session && ! stamp xfce4-session; then
     echo "=== xfce4-session ==="
-    autotools_pkg xfce4-session "$USER_DIR/external/gui/xfce4-session"
+    autotools_pkg xfce4-session "$USER_DIR/external/gui/xfce4-session" \
+        --with-wayland-session-prefix="$SYSROOT"
     mark xfce4-session
 fi
 
