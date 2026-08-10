@@ -229,8 +229,10 @@ build_args=(
     BOARD="qemu-virt-$arch"
     ABI=both
     MODE=release
-    PROFILE=full
+    PROFILE=benchmark
     NR_CPUS="$guest_cpus"
+    DRIVER_DEPLOYMENT=embedded
+    FINAL_ROOT=1
     FAT32_IMAGE_MB=128
     PYTHON="conda run -n $conda_env python"
     dev-build
@@ -245,9 +247,9 @@ echo "[final-eval] building $arch kernel and FAT32 user image"
 make "${build_args[@]}"
 
 if [[ "$guest_cpus" == 1 ]]; then
-    build_dir=".kernel-build/${arch}-qemu-virt-${arch}-both-dev"
+    build_dir=".kernel-build/${arch}-qemu-virt-${arch}-both-dev-embedded-final-root"
 else
-    build_dir=".kernel-build/${arch}-qemu-virt-${arch}-both-dev-smp${guest_cpus}"
+    build_dir=".kernel-build/${arch}-qemu-virt-${arch}-both-dev-embedded-final-root-smp${guest_cpus}"
 fi
 kernel="$build_dir/kernel.elf"
 fat32="$build_dir/fat32.img"
@@ -320,9 +322,9 @@ if [[ "$arch" == riscv64 ]]; then
         "${common_qemu_args[@]}"
         -bios default
         -global virtio-mmio.force-legacy=false
-        -drive "file=$run_fat32,if=none,format=raw,id=x0"
+        -drive "file=$overlay,if=none,format=qcow2,id=x0"
         -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0
-        -drive "file=$overlay,if=none,format=qcow2,id=x1"
+        -drive "file=$run_fat32,if=none,format=raw,id=x1"
         -device virtio-blk-device,drive=x1,bus=virtio-mmio-bus.1
         -netdev user,id=net
         -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4
@@ -331,9 +333,9 @@ if [[ "$arch" == riscv64 ]]; then
 else
     qemu_args=(
         "${common_qemu_args[@]}"
-        -drive "file=$run_fat32,if=none,format=raw,id=x0"
+        -drive "file=$overlay,if=none,format=qcow2,id=x0"
         -device virtio-blk-pci,drive=x0
-        -drive "file=$overlay,if=none,format=qcow2,id=x1"
+        -drive "file=$run_fat32,if=none,format=raw,id=x1"
         -device virtio-blk-pci,drive=x1
         -netdev user,id=net
         -device virtio-net-pci,netdev=net
