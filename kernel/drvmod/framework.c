@@ -30,6 +30,7 @@
 #include "core/cpu.h"
 #include "core/perf.h"
 #include "proc/proc.h"
+#include "sys/usercopy.h"
 #include "drivers/core/driver_core.h"
 #include "drivers/core/driver_hwapi.h"
 #include "drivers/bus/pci_bus.h"
@@ -403,6 +404,9 @@ const struct drv_export drv_export_table[] = {
     { "gpu_device_register",   (void *)gpu_device_register },
     { "gpu_device_unregister", (void *)gpu_device_unregister },
     { "gpu_device_get_default", (void *)gpu_device_get_default },
+    /* user copy helpers (virtio-gpu 3D ioctl passthrough) */
+    { "copy_from_user",        (void *)copy_from_user },
+    { "copy_to_user",          (void *)copy_to_user },
     /* USB core bridge (xhci / usb-hid / usb-storage) */
     { "usb_core_register_hcd",   (void *)usb_core_register_hcd },
     { "usb_core_unregister_hcd", (void *)usb_core_unregister_hcd },
