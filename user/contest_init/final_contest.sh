@@ -39,19 +39,74 @@ run_final_group() {
     return $rc
 }
 
+report_final_path() {
+    typeset path=$1
+    typeset exists=no
+    typeset directory=no
+    typeset regular=no
+    typeset readable=no
+    typeset executable=no
+
+    [[ -e $path ]] && exists=yes
+    [[ -d $path ]] && directory=yes
+    [[ -f $path ]] && regular=yes
+    [[ -r $path ]] && readable=yes
+    [[ -x $path ]] && executable=yes
+    print "[FINAL-EVAL][PRECHECK] path=$path exists=$exists directory=$directory file=$regular readable=$readable executable=$executable"
+}
+
 run_all_final_groups() {
     typeset test_script=
     typeset group=
     typeset -i found=0
     typeset -i failed=0
+    typeset -i glob_count=0
 
-    # The published image supplies /glibc/xxxxx_testcode.sh.  Run every group
-    # serially; the judge does not require a particular group order.
+    # Preserve enough evidence to distinguish a missing/mis-mounted image,
+    # direct pathname lookup failure, and getdents/glob enumeration failure.
+    # Use only mksh builtins so diagnostics remain available even when the
+    # published rootfs cannot execute any helper binary.
+    report_final_path /test
+    report_final_path /test/glibc
+    report_final_path /test/glibc/cagent_testcode.sh
+    report_final_path /test/glibc/buildstorm_testcode.sh
+
     for test_script in /test/glibc/*_testcode.sh; do
         [[ -f $test_script ]] || continue
-        found=1
+        (( glob_count += 1 ))
+        print "[FINAL-EVAL][PRECHECK] glob-script=$test_script"
+    done
+    print "[FINAL-EVAL][PRECHECK] glob-count=$glob_count"
+
+    # The final currently defines these two score groups.  Resolve their
+    # stable paths directly before relying on directory enumeration: this is
+    # both a safe fallback for a getdents/glob-only failure and an opportunity
+    # to earn points while retaining diagnostics for the remaining scan.
+    for group in cagent buildstorm; do
+        test_script="/test/glibc/${group}_testcode.sh"
+        if [[ -f $test_script ]]; then
+            found=1
+            print "[FINAL-EVAL][PRECHECK] known-group=$group present=yes"
+            run_final_group "$group" || failed=1
+        else
+            print "[FINAL-EVAL][PRECHECK] known-group=$group present=no"
+        fi
+    done
+
+    # The published image supplies /glibc/xxxxx_testcode.sh.  Run every group
+    # serially; the judge does not require a particular group order.  Known
+    # groups were already run through direct lookup above, so skip duplicates.
+    for test_script in /test/glibc/*_testcode.sh; do
+        [[ -f $test_script ]] || continue
         group=${test_script##*/}
         group=${group%_testcode.sh}
+        case "$group" in
+        cagent|buildstorm)
+            continue
+            ;;
+        esac
+        found=1
+        print "[FINAL-EVAL][PRECHECK] extra-group=$group"
         run_final_group "$group" || failed=1
     done
     if (( ! found )); then
