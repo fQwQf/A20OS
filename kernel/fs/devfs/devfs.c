@@ -1,13 +1,12 @@
 #include "fs/devfs.h"
+#include "devfs_internal.h"
 #include "fs/file.h"
 #include "fs/tty.h"
 #include "mm/mm.h"
-#include "core/timekeeping.h"
 #include "core/string.h"
 #include "core/stdio.h"
 #include "core/consts.h"
 #include "core/defs.h"
-#include "core/random.h"
 #include "core/sync.h"
 #include "proc/proc.h"
 #include "drivers/core/driver_core.h"
@@ -17,33 +16,6 @@
 
 extern void uart_putc(char c);
 extern int  uart_getc(void);
-
-
-enum {
-    DEVFS_ROOT,
-    DEVFS_MISC,
-    DEVFS_NULL,
-    DEVFS_ZERO,
-    DEVFS_RANDOM,
-    DEVFS_FULL,
-    DEVFS_KMSG,
-    DEVFS_TTY,
-    DEVFS_RTC,
-    DEVFS_LOOP,
-    DEVFS_LOOP_CTRL,
-    DEVFS_PTMX,
-    DEVFS_PTS_DIR,
-    DEVFS_PTS,
-    DEVFS_SHM_DIR,
-    DEVFS_FB,
-    DEVFS_INPUT,
-    DEVFS_CLASS,
-    DEVFS_DRI_DIR,
-    DEVFS_DRM,
-    DEVFS_SND_DIR,
-    DEVFS_ALSA_CTL,
-    DEVFS_ALSA_PCM,
-};
 
 
 typedef struct {
@@ -114,27 +86,6 @@ static devfs_node_t g_nodes[] = {
 
 static vnode_t g_vnodes[sizeof(g_nodes) / sizeof(g_nodes[0])];
 
-static int devfs_null_read(vfile_t *vf, char *buf, size_t count) {
-    (void)vf; (void)buf; (void)count;
-    return 0;
-}
-
-static int devfs_null_write(vfile_t *vf, const char *buf, size_t count) {
-    (void)vf; (void)buf;
-    return (int)count;
-}
-
-static int devfs_zero_read(vfile_t *vf, char *buf, size_t count) {
-    (void)vf;
-    memset(buf, 0, count);
-    return (int)count;
-}
-
-static int devfs_random_read(vfile_t *vf, char *buf, size_t count) {
-    (void)vf;
-    random_fill(buf, count);
-    return (int)count;
-}
 
 static int devfs_dir_readdir(vfile_t *vf, void *dirp, size_t count) {
     static const struct {
@@ -265,135 +216,6 @@ static int devfs_dir_readdir(vfile_t *vf, void *dirp, size_t count) {
     return (int)total;
 }
 
-#define RTC_RD_TIME    0x80247009UL
-#define RTC_SET_TIME   0x4024700aUL
-#define RTC_IRQP_READ  0x8008700bUL
-#define RTC_EPOCH_READ 0x8008700dUL
-#define TCGETS         0x5401
-#define TCSETS         0x5402
-#define TCSETSW        0x5403
-#define TCSETSF        0x5404
-#define TIOCGWINSZ     0x5413
-
-typedef struct {
-    int32_t tm_sec;
-    int32_t tm_min;
-    int32_t tm_hour;
-    int32_t tm_mday;
-    int32_t tm_mon;
-    int32_t tm_year;
-    int32_t tm_wday;
-    int32_t tm_yday;
-    int32_t tm_isdst;
-} krtc_time_t;
-
-static int is_leap_year(int year) {
-    return (year % 4 == 0) && ((year % 100) != 0 || (year % 400) == 0);
-}
-
-static int rtc_time_to_unix_seconds(const krtc_time_t *rt, uint64_t *secs) {
-    static const int month_days[12] = { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
-    int year = rt->tm_year + 1900;
-    int month = rt->tm_mon + 1;
-    int hour = rt->tm_hour;
-    int min = rt->tm_min;
-    int sec = rt->tm_sec;
-    int mday = rt->tm_mday;
-    int mdays;
-    int64_t z;
-    int64_t era;
-    unsigned yoe;
-    unsigned doy;
-    unsigned doe;
-
-    if (year < 1970 || month < 1 || month > 12 || mday < 1 ||
-        hour < 0 || hour > 23 || min < 0 || min > 59 || sec < 0 || sec > 59)
-        return -EINVAL;
-
-    mdays = month_days[month - 1];
-    if (month == 2 && is_leap_year(year)) mdays = 29;
-    if (mday > mdays) return -EINVAL;
-
-    year -= month <= 2;
-    era = (year >= 0 ? year : year - 399) / 400;
-    yoe = (unsigned)(year - era * 400);
-    doy = (153U * (unsigned)(month + (month > 2 ? -3 : 9)) + 2U) / 5U + (unsigned)mday - 1U;
-    doe = yoe * 365U + yoe / 4U - yoe / 100U + doy;
-    z = era * 146097 + (int64_t)doe - 719468;
-    if (z < 0) return -EINVAL;
-
-    *secs = (uint64_t)z * 86400ULL + (uint64_t)hour * 3600ULL +
-            (uint64_t)min * 60ULL + (uint64_t)sec;
-    return 0;
-}
-
-static void unix_seconds_to_rtc_time(uint64_t secs, krtc_time_t *rt) {
-    static const int month_yday[2][12] = {
-        { 0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334 },
-        { 0, 31, 60, 91, 121, 152, 182, 213, 244, 274, 305, 335 },
-    };
-    uint64_t days = secs / 86400ULL;
-    uint64_t rem = secs % 86400ULL;
-    int64_t z = (int64_t)days + 719468;
-    int64_t era = (z >= 0 ? z : z - 146096) / 146097;
-    unsigned doe = (unsigned)(z - era * 146097);
-    unsigned yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    int year = (int)(yoe + era * 400);
-    unsigned doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    unsigned mp = (5 * doy + 2) / 153;
-    unsigned mday = doy - (153 * mp + 2) / 5 + 1;
-    unsigned month = mp + (mp < 10 ? 3 : (unsigned)-9);
-
-    year += (month <= 2);
-    memset(rt, 0, sizeof(*rt));
-    rt->tm_sec = (int32_t)(rem % 60ULL);
-    rem /= 60ULL;
-    rt->tm_min = (int32_t)(rem % 60ULL);
-    rem /= 60ULL;
-    rt->tm_hour = (int32_t)rem;
-    rt->tm_mday = (int32_t)mday;
-    rt->tm_mon = (int32_t)(month - 1);
-    rt->tm_year = (int32_t)(year - 1900);
-    rt->tm_wday = (int32_t)((days + 4ULL) % 7ULL);
-    rt->tm_yday = month_yday[is_leap_year(year)][month - 1] + (int)mday - 1;
-    rt->tm_isdst = 0;
-}
-
-static int devfs_rtc_ioctl(unsigned long req, void *arg) {
-    if ((req == RTC_RD_TIME || req == RTC_IRQP_READ || req == RTC_EPOCH_READ) && !arg)
-        return -EFAULT;
-
-    switch (req) {
-    case RTC_RD_TIME: {
-        krtc_time_t tm;
-        uint64_t ts[2];
-        timekeeping_get_realtime(ts);
-        unix_seconds_to_rtc_time(ts[0], &tm);
-        if (copy_to_user(arg, &tm, sizeof(tm)) < 0) return -EFAULT;
-        return 0;
-    }
-    case RTC_IRQP_READ: {
-        unsigned long irqp = 1;
-        if (copy_to_user(arg, &irqp, sizeof(irqp)) < 0) return -EFAULT;
-        return 0;
-    }
-    case RTC_EPOCH_READ: {
-        unsigned long epoch = 1900;
-        if (copy_to_user(arg, &epoch, sizeof(epoch)) < 0) return -EFAULT;
-        return 0;
-    }
-    case RTC_SET_TIME: {
-        krtc_time_t tm;
-        uint64_t secs;
-        if (copy_from_user(&tm, arg, sizeof(tm)) < 0) return -EFAULT;
-        if (rtc_time_to_unix_seconds(&tm, &secs) < 0) return -EINVAL;
-        return timekeeping_set_realtime(secs, 0);
-    }
-    default:
-        return -ENOTTY;
-    }
-}
-
 /* Linux console (VT/KD) ioctl numbers — asm-generic, same on all archs. */
 
 
@@ -440,7 +262,7 @@ static int devfs_loop_write(vfile_t *vf, const char *buf, size_t count) {
     return r;
 }
 
-static long devfs_noop_lseek(vfile_t *vf, long offset, int whence) {
+long devfs_noop_lseek(vfile_t *vf, long offset, int whence) {
     if (whence == SEEK_SET) vf->offset = (size_t)offset;
     else if (whence == SEEK_CUR) vf->offset += (size_t)offset;
     return (long)vf->offset;
@@ -507,59 +329,6 @@ static vfile_ops_t g_devfs_dir_ops    = { .read = devfs_null_read,  .readdir = d
 static vfile_ops_t g_devfs_stdin_ops  = { .read = tty_console_read, .write = tty_console_write, .ioctl = devfs_ioctl };
 static vfile_ops_t g_devfs_stdout_ops = { .read = devfs_null_read,  .write = tty_console_write, .ioctl = devfs_ioctl };
 static vfile_ops_t g_devfs_stderr_ops = { .read = devfs_null_read,  .write = tty_console_write, .ioctl = devfs_ioctl };
-static vfile_ops_t g_devfs_null_ops   = { .read = devfs_null_read,  .write = devfs_null_write,   .lseek = devfs_noop_lseek, .ioctl = devfs_ioctl };
-static vfile_ops_t g_devfs_zero_ops   = { .read = devfs_zero_read,  .write = devfs_null_write,   .lseek = devfs_noop_lseek, .ioctl = devfs_ioctl };
-static vfile_ops_t g_devfs_random_ops = { .read = devfs_random_read,.write = devfs_null_write,   .lseek = devfs_noop_lseek, .ioctl = devfs_ioctl };
-static vfile_ops_t g_devfs_rtc_ops    = { .read = devfs_null_read,  .write = devfs_null_write,   .lseek = devfs_noop_lseek, .ioctl = devfs_ioctl };
-
-/* /dev/full: reads return zero, writes return ENOSPC. */
-static int devfs_full_read(vfile_t *vf, char *buf, size_t count)
-{
-    (void)vf;
-    memset(buf, 0, count);
-    return (int)count;
-}
-
-static int devfs_full_write(vfile_t *vf, const char *buf, size_t count)
-{
-    (void)vf;
-    (void)buf;
-    (void)count;
-    return -ENOSPC;
-}
-
-static vfile_ops_t g_devfs_full_ops = { .read = devfs_full_read, .write = devfs_full_write, .lseek = devfs_noop_lseek, .ioctl = devfs_ioctl };
-
-/* /dev/kmsg: append to the kernel log ring.  Reads return the next pending
- * log data; writes route to klog. */
-static size_t g_kmsg_pos;
-
-static int devfs_kmsg_read(vfile_t *vf, char *buf, size_t count)
-{
-    (void)vf;
-    size_t pos = 0;
-    /* Track a per-file read cursor across reads. */
-    size_t consumed = 0;
-    size_t cur = g_kmsg_pos;
-    int n;
-    while (consumed < count && (n = klog_read(buf + consumed,
-                                              count - consumed,
-                                              &cur)) > 0) {
-        consumed += (size_t)n;
-        pos = cur;
-    }
-    g_kmsg_pos = pos;
-    return (int)consumed;
-}
-
-static int devfs_kmsg_write(vfile_t *vf, const char *buf, size_t count)
-{
-    (void)vf;
-    klog_write_raw(buf, count);
-    return (int)count;
-}
-
-static vfile_ops_t g_devfs_kmsg_ops = { .read = devfs_kmsg_read, .write = devfs_kmsg_write, .lseek = devfs_noop_lseek, .ioctl = devfs_ioctl };
 
 static int devfs_class_read(vfile_t *vf, char *buf, size_t count)
 {
