@@ -1,6 +1,6 @@
 # A20OS 混合内核：设计参考
 
-本文档描述 A20OS 混合内核的**当前设计形态**：为什么采用混合架构、内核与用户态服务的职责如何划分、以及各核心机制的语义与契约。机制细节与演进方向分别见 [01-mechanisms.md](01-mechanisms.md) 与 [02-mainstream-plan.md](02-mainstream-plan.md)。
+本文档描述 A20OS 混合内核的**当前设计形态**：为什么采用混合架构、内核与用户态服务的职责如何划分、以及各核心机制的语义与契约。内容已按 `e33c3219` 源码核对；当前提交没有匹配的完整干净双架构平台复验，最新完整平台证据属于 `f9732348`，且不能代替各 Native/驱动 smoke。机制细节与演进方向分别见 [01-mechanisms.md](01-mechanisms.md) 与 [02-mainstream-plan.md](02-mainstream-plan.md)。
 
 ## 设计定位
 
@@ -8,7 +8,7 @@ A20OS 同时提供两套用户接口：`abi/linux`（`kernel/abi/linux/syscall_t
 
 划分依据是一条判定规则：
 
-> 每秒调用超过约 10k 次或延迟敏感（< 10µs）的路径留在内核；崩溃频繁、协议解析类的工作迁出到用户态服务。
+> 经验启发：高频或延迟敏感路径优先留在内核；崩溃频繁、协议解析类工作优先迁到用户态服务。历史文档使用过“10k 次/秒、10µs”阈值，但当前没有通用实测证明它适用于所有设备，不能把它当作硬边界。
 
 按此规则，调度器、MM/缺页、VFS 核心、dentry/inode/页缓存、TCP 数据面**保留在内核**；服务监管、设备驱动（低速）、注册/命名等作为**用户态服务**运行。
 
@@ -31,7 +31,7 @@ A20OS 同时提供两套用户接口：`abi/linux`（`kernel/abi/linux/syscall_t
 ```
 
 - **用户态服务层**：以 Native ABI 编写的服务进程，通过 Channel/EventQ 与内核及其他服务通信。服务崩溃由 svcmgr 检测并重启，资源由内核按对象模型回收。
-- **混合内核层**：自包含的内部实现（`kernel/ipc`、`kernel/mm`、`kernel/proc`、`kernel/drivers`、`kernel/include/core`），对 `abi/` 零依赖；ABI 层只是把用户 syscall 线格式翻译成内部 API 的薄包装。
+- **混合内核层**：`kernel/ipc`、`kernel/mm`、`kernel/proc` 与 `kernel/include/core` 按自包含内部层组织，ABI 层原则上只把用户 syscall 线格式翻译成内部 API。当前 `kernel/drivers/core/driver_manager.c` 是明确例外：它直接包含 Native ABI 的类型和 rights 头来安装服务启动句柄，尚待改为 core-owned 类型/API。
 - **兼容层**：Linux ABI 与 vDSO，让未修改的 musl 程序直接受益于内核机制（唤醒快路径、时间读取等）。
 
 ## 核心机制总览
@@ -47,8 +47,8 @@ A20OS 同时提供两套用户接口：`abi/linux`（`kernel/abi/linux/syscall_t
 | 内核块代理（udisk） | `syscall 0x0C05/0x0C06` | 页缓存留内核，块请求经共享环转发给用户驱动 |
 | 统一驱动框架 | `kernel/drivers/core/driver_core.c` | `driver_t` 模块模型、class 设备、DriverStore 扫描 |
 | drvmod 模块加载 | `kernel/drvmod/loader.c` | ELF ET_REL 装载 + `.a20drv` 描述段 + DriverEntry |
-| 双态部署环境层 | `kernel/include/drivers/dual/drv_env.h` | 同一驱动源码按 `DRV_ENV_KERNEL/USER/DRVMOD` 编译 |
-| IOMMU 硬件隔离 | `kernel/drivers/core/riscv_iommu.c` | RISC-V IOMMU DDT/CQ/FQ 编程，devid 0 SV39 翻译域 |
+| 双态部署环境层 | `kernel/include/drivers/dual/drv_env.h` | 提供 `KERNEL/USER/DRVMOD` 三后端；当前样板实际使用 USER 与 DRVMOD，尚非完整同源双态驱动 |
+| IOMMU bring-up | `kernel/drivers/core/riscv_iommu.c` | RISC-V IOMMU DDT/CQ/FQ 初始化和 devid 0 静态 SV39 翻译探测；未接入动态 per-device DMA map/fault 消费 |
 | 对象统计与配额 | `/proc/a20/objects` | 七项实时对象计数 + 累计计数审计 + 句柄硬配额 |
 | vDSO | `kernel/vdso/riscv64/vdso.S` | `clock_gettime` 等零陷入读取 |
 
@@ -56,15 +56,15 @@ A20OS 同时提供两套用户接口：`abi/linux`（`kernel/abi/linux/syscall_t
 
 ## 设计原则
 
-### 内核内部实现自包含，ABI 只是薄包装
+### 内核内部实现自包含，ABI 薄包装是目标边界
 
-内部实现（IPC、MM、进程、驱动）自持类型、常量与 API；`abi/linux` 与 `abi/native` 只负责 syscall 线格式翻译。方向永远单向：
+目标架构要求 IPC、MM、进程和驱动内部实现自持类型、常量与 API，`abi/linux` 与 `abi/native` 只负责 syscall 线格式翻译。期望依赖方向单向：
 
 ```
 用户态 ── syscall 线格式 ──> ABI 层（薄包装）── 内部 API ──> 内部实现
 ```
 
-这保证任何新的 ABI 都可以复用同一套混合内核机制，也保证内部机制不因 ABI 差异而分叉。
+当前尚未完全达到该目标：`kernel/drivers/core/driver_manager.c` 直接依赖 `abi/native/types.h` 与 `abi/native/rights.h`。它为服务启动任务安装 Native 类型句柄，是已记录的分层债务；在改为 core-owned 对象类型/rights 或专用安装 API 前，不能把“内部实现对 ABI 零依赖”描述为现状。其余薄包装方向仍用于约束新代码，避免继续扩大该例外。
 
 ### 资源是类型化对象，生命周期显式
 
@@ -74,7 +74,7 @@ A20OS 同时提供两套用户接口：`abi/linux`（`kernel/abi/linux/syscall_t
 
 - **留内核**：调度、MM、VFS、页缓存、TCP 数据面——高频、延迟敏感、崩溃后果严重。
 - **迁用户态**：服务监管、设备驱动（低速）、协议/注册类——崩溃频繁、可重启、性能非关键。
-- **主存储数据面不外迁**：TCG 数据显示块/网驱动的 I/O 路径由多次上下文切换 + 数据拷贝构成，在现有调度成本下外迁必然劣化，故主存储 virtio-blk 数据面保留内核态；scratch 设备（udisk）仍可外迁演示（详见 [02-mainstream-plan.md](02-mainstream-plan.md) 的决策记录）。
+- **主存储数据面不外迁**：历史 TCG 样本显示块/网驱动的 I/O 路径由多次上下文切换 + 数据拷贝构成，在当时调度成本下外迁明显劣化，故主存储 virtio-blk 数据面保留内核态；scratch 设备（udisk）仍可外迁演示（详见 [02-mainstream-plan.md](02-mainstream-plan.md) 的决策记录）。该数据不是 `e33c3219` 的新测量。
 
 ## 已建成的子系统
 
@@ -102,11 +102,11 @@ SPSC 字节环（全相对偏移，跨进程不同虚拟地址可用；acquire/r
 
 ### 统一驱动框架与双态部署
 
-`kernel/drivers/core` 提供统一的 `driver_t` 模块模型：DriverStore（`/boot/drivers` 与 `/bin/lib/drivers`）扫描 `.a20drv` 描述段，`drvmod` 把内核态驱动模块装载为 ET_REL，class 设备（char/block/net/input/display/audio）统一注册与 devfs mux。`drv_env.h` 让同一份驱动源码按部署选择编译为内核模块或用户态进程（双态部署），见 [04-dual-placement.md](04-dual-placement.md)。
+`kernel/drivers/core` 提供统一的 `driver_t` 模块模型：DriverStore（`/boot/drivers` 与 `/bin/lib/drivers`）扫描 `.a20drv` 描述段，`drvmod` 把内核态驱动模块装载为 ET_REL，char/block/net/input/display/audio class 设备统一注册。devfs 的通用动态 class 节点目前只覆盖 char/block/audio；input/display 继续使用旧聚合节点，net 没有通用动态 devfs 节点。`drv_env.h` 提供三种环境后端；当前 virtio-input 的内核只读 probe 与用户驱动共享协议头，但完整内核驱动使用另一套实现，goldfish RTC 内核模块也仍复制寄存器常量。因此“完整同一驱动源码双态部署”仍是阶段目标，见 [04-dual-placement.md](04-dual-placement.md)。
 
 ### IOMMU 硬件 DMA 隔离
 
-`kernel/drivers/core/riscv_iommu.c` 完成 RISC-V IOMMU 的真实硬件初始化：DDT(1LVL)/CQ/FQ 编程与使能，devid 0 配置 SV39 翻译域并经 TR_REQ 验证（已映射 IOVA 精确翻译、未映射 IOVA 被硬件拒绝），devid 1 保持 passthrough。fault 队列消费与 per-device 动态映射为后续工作，见 `smoke-iommu-discovery`。
+`kernel/drivers/core/riscv_iommu.c` 完成 RISC-V IOMMU bring-up：DDT(1LVL)/CQ/FQ 编程与使能，devid 0 配置静态 SV39 翻译域并经 TR_REQ 验证已映射/未映射 IOVA，devid 1 保持 passthrough。该 probe 证明 QEMU IOMMU 翻译机制可用，不证明用户驱动 DMA 已按设备动态绑定隔离域；fault 队列消费与 per-device map/unmap 仍未实现。
 
 ### Linux ABI 透明获益
 

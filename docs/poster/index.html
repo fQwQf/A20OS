@@ -26,7 +26,7 @@
     </div>
   </div>
   <div class="header-meta">
-    <div class="header-fact"><b>4 + 2</b><span>架构支持</span></div>
+    <div class="header-fact"><b>7 + 1</b><span>hosted + MCU</span></div>
     <div class="header-fact"><b>2</b><span>套内核 ABI</span></div>
     <div class="header-fact license"><b>Apache-2.0</b></div>
   </div>
@@ -44,7 +44,7 @@
   <div class="spectrum-copy">
     <p class="spectrum-kicker">WHAT IS A20OS?</p>
     <h2>A20OS: 再一次，重新定义操作系统接口<sup class="source-ref">10</sup></h2>
-    <p class="spectrum-description">A20OS 是一个从零写起的多架构混合内核。驱动、网络栈、文件系统和内存管理都在内核空间运行，子系统之间直接调用；用户程序则通过带权限的 handle 使用文件、任务、设备等资源，内存和 IPC 分别由 VMO / VMAR、Channel / EventQ 负责。内核同时实现 Linux ABI 和自研 Native ABI：前者用来运行 musl 和现有程序，后者用于尝试不依赖 POSIX 习惯的新接口。目前系统已经具备进程、SMP、虚拟内存、VFS、socket、驱动框架、图形和音频，从 Cortex-M3 / NOMMU 运行到 Wayland 桌面均提供良好支持。</p>
+    <p class="spectrum-description">A20OS 是一个从零写起的多架构混合内核。调度、内存管理、网络栈、文件系统和关键设备路径位于内核态；驱动还可按 generic profile 以 <code>.a20drv</code> 内核模块部署，Native ABI 也提供用户态驱动服务。内核同时实现 Linux ABI 和自研 Native ABI：前者运行 musl 和现有程序，后者用带权限的 handle、VMO / VMAR、Channel / EventQ 探索新接口。仓库包含进程、SMP、虚拟内存、VFS、socket、驱动、图形和音频路径，以及 Cortex-M3 / NOMMU 与 Wayland 演示；不同目标的最新验证边界以仓库文档和同提交日志为准。</p>
     <div class="bridge">
       <div class="bridge-node">
         <b>64-bit Desktop</b>
@@ -82,10 +82,10 @@
         <span>Board / Bus</span><i>→</i><span>match</span><i>→</i><span>probe</span><i>→</i><span>Class Ops</span><i>→</i><span>/dev · /sys</span>
       </div>
       <div class="feature-copy">
-        <p><b>注册与发现：</b><code>DRIVER_REGISTER</code> 和 <code>BOARD_REGISTER</code> 通过链接器段注册；PCI、VirtIO-MMIO 和 platform bus 负责发现与匹配，hwapi 封装 MMIO、IRQ、DMA 与时钟。</p>
-        <p><b>类接口：</b>block、net、display、input、audio 使用各自的 class ops。probe 成功后，设备会自动发布到 devfs 和 sysfs，上层不必关心它来自哪条总线。</p>
+        <p><b>注册与发现：</b><code>DRIVER_REGISTER</code> 把 embedded 驱动放入链接器段；每次构建由 platform 提供唯一 <code>current_board</code>。PCI、VirtIO-MMIO 和 platform bus 负责发现与匹配，hwapi 封装 MMIO、IRQ、DMA 与时钟。</p>
+        <p><b>类接口：</b>char、block、net、display、input、audio 使用各自的 class ops。所有 class 发布 sysfs 视图；通用动态 devfs 节点当前只覆盖 char、block、audio，input/display 使用聚合节点。</p>
         <p><b>资源回收：</b>probe 失败时会解除已经建立的绑定；remove 会先停止新调用，再等待正在执行的调用结束，最后释放 DMA 和 IRQ。</p>
-        <p><b>跨架构情况：</b>NVMe 和 Intel HDA 代码没有按 CPU 架构分叉，同一实现已经在 x86_64、RISC-V64 和 LoongArch64 上运行测试过。</p>
+        <p><b>跨架构情况：</b>协议驱动通过公共 PCI/VirtIO 与 hwapi 接口复用；某个目标是否已运行通过，必须查看与对应提交匹配的架构日志，不能从源码无条件编译推定。</p>
       </div>
       <p class="driver-proof">这样的设计，使得板级代码主要负责 bus 和 hwapi，文件系统、网络和图形等子系统只使用 class contract，同一个协议驱动也更容易在不同架构之间复用。</p>
     </section>
@@ -99,7 +99,7 @@
 
     <section class="card native-status meme">
       <h2>头抬起。是的，您正在AAAAA!<sup class="source-ref">3</sup><span class="kick">STATUS</span></h2>
-      <p>Native ABI 是A20OS的独特创举，旨在克服posix的固有缺陷。目前已经实现 93 个 syscall 入口、13 类对象、handle table、启动协议、Channel 和 EventQ；用户态提供 liba20rt SDK、liba20c 最小 C 库、多架构 crt0 与原生示例程序。接下来还要完成动态链接器、更完整的回归套件，以及真实应用对两套 ABI 的同核评测。</p>
+      <p>Native ABI 用于探索 POSIX 之外的接口。目前分发表登记 126 个 syscall 入口，定义 14 类对象，并提供 handle table、启动协议、Channel 和 EventQ；用户态包含 liba20rt SDK、liba20c、mlibc sysdeps 与原生示例。登记入口不等于完整语义覆盖，动态链接、跨架构回归和两套 ABI 的同核对照仍需继续验证。</p>
     </section>
 
   </div>
@@ -107,11 +107,11 @@
 
     <section class="card native-rationale">
       <h2>重新编排，事事好安排。<sup class="source-ref">4</sup><span class="kick">WHY DUAL ABI</span></h2>
-      <p class="lead">A20 实现 Linux ABI 用来兼容已有软件，同时用作研究中的baseline；Native ABI 则用来尝试新的接口设计。两套 ABI 都由内核直接提供，彼此不相互依赖。</p>
+      <p class="lead">A20 实现 Linux ABI 用来兼容已有软件，同时用作研究中的 baseline；Native ABI 则用来尝试新的接口设计。两套 ABI 分别维护用户线格式，并复用共同的内核子系统；当前仍有少量已记录的跨层依赖债务。</p>
       <div class="why-list">
         <div class="why-row"><b>资源编号</b><p>文件、任务、定时器和 IPC 端点都使用进程本地 handle，不再分别维护 fd、pid、timerid 等编号体系。</p></div>
         <div class="why-row"><b>权限</b><p>每个 handle 自带 rights。权限只能减少，跨进程传递时取交集，因此授权范围可以被准确控制。</p></div>
-        <div class="why-row"><b>消息和等待</b><p>Channel 传递带类型的消息，EventQ 负责统一等待，减少 poll、signal、timerfd 等接口之间的重复。</p></div>
+        <div class="why-row"><b>消息和等待</b><p>Channel 传递带类型的消息；EventQ 已统一等待 channel、task、timer 和用户驱动 IRQ，file/socket/signal 事件接入仍是后续工作。</p></div>
         <div class="why-row"><b>进程和内存</b><p>VMO / VMAR 分开表示内存对象和映射；task_spawn 明确指定新任务获得的能力和初始 handle。</p></div>
         <div class="why-row"><b>ABI 扩展</b><p>参数结构包含 size 和 version，并预留 feature bits、稳定编号和实验区，方便以后增加功能。</p></div>
       </div>
@@ -137,9 +137,9 @@
 
     <section class="card architecture-detail">
       <h2>你的架构，总有A20很专业<sup class="source-ref">11</sup><span class="kick">ARCHITECTURE</span></h2>
-      <p class="lead">A20OS 的架构支持广泛。主要 QEMU 目标包括 RISC-V64、LoongArch64、AArch64、x86_64 和 PPC64LE；实机支持 VisionFive 2 与龙芯 LS2K1000 开发板以及 STM32F103。RISC-V32、ARM32 和 ARMv7-M 仍由独立 bring-up 门禁验证。</p>
+      <p class="lead">A20OS 的 hosted 构建矩阵包括 RISC-V64、LoongArch64、AArch64、x86_64、ARM32、RISC-V32 和 PPC64LE；另有独立 ARMv7-M MCU profile。平台源码还覆盖 VisionFive 2、龙芯 LS2K1000 与 STM32F103。构建支持、SMP 白名单和运行验证是不同层级。</p>
       <p>Linux ABI 用户态当前以 musl 为主，可以运行 git、vim、mksh、fastfetch、wget 以及 Weston / FFmpeg 等程序。</p>
-      <p>Native ABI 用户态除实验性的 liba20rt 和 liba20c 外，项目正在移植 mlibc 的 <code>sysdeps/a20</code>。RISC-V64 静态 libc 与基础 smoke 已经通过，覆盖 stdio、malloc、文件 I/O、线程互斥、pipe / poll、socketpair 和 posix_spawn；动态链接与更多架构仍在继续。</p>
+      <p>Native ABI 用户态包括 liba20rt、liba20c 与 mlibc 的 <code>sysdeps/a20</code>。仓库提供静态 libc 和专项 smoke 入口；动态链接、更多架构和当前提交是否通过须按运行状态文档与同提交日志判断。</p>
       <div class="arch">
         <div class="row">
           <div class="box"><b>Linux 用户态</b>musl · git · vim · mksh · Weston · FFmpeg</div>
@@ -147,8 +147,8 @@
         </div>
         <div class="arrow">▼</div>
         <div class="row">
-          <div class="box abi"><b>abi/linux</b>实现 223 个系统调用</div>
-          <div class="box abi"><b>abi/native</b>实现 93 个系统调用</div>
+          <div class="box abi"><b>abi/linux</b>登记 258 个入口（语义覆盖分级）</div>
+          <div class="box abi"><b>abi/native</b>登记 126 个入口</div>
         </div>
         <div class="arrow">▼</div>
         <div class="row">
@@ -156,7 +156,7 @@
         </div>
         <div class="arrow">▼</div>
         <div class="row">
-          <div class="box hal"><b>主要目标</b>riscv64 · loongarch64 · aarch64 · x86_64 · STM32F103 / NOMMU</div>
+          <div class="box hal"><b>构建矩阵</b>7 hosted 架构 · ARMv7-M / STM32F103 MCU</div>
         </div>
       </div>
     </section>
@@ -216,7 +216,7 @@
 
 <footer class="page">
   <span>AOSCC 2026 · A20OS · fQwQf</span>
-  <span>Apache-2.0（内核网络栈 lwIP 为 BSD） · 完整设计文档见仓库 docs/ </span>
+  <span>项目主体 Apache-2.0；第三方与来源未决部分见 THIRD_PARTY_NOTICES · 完整设计文档见仓库 docs/</span>
 </footer>
 
 </div>

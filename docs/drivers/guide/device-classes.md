@@ -2,11 +2,11 @@
 
 设备类把硬件细节和内核使用者隔开。子系统只看 `class_ops`，不看具体硬件。权威声明在 `kernel/drivers/core/driver_class.h`。
 
-驱动在 `driver_t.class_type` 里选择类，把完全匹配的 ops 指针放进 `class_ops`。类操作接收内核地址，不接收用户指针。想让用户态访问设备，还要走 devfs 固定节点适配器，详见 [用户接口与 devfs](../classes/userspace-and-devfs.md)。
+驱动在 `driver_t.class_type` 里选择类，把完全匹配的 ops 指针放进 `class_ops`。类操作接收内核地址，不接收用户指针。probe 成功后核心自动发布 class device；char、block、audio 分别得到动态 `/dev/charN`、`/dev/diskN`、`/dev/audioN`，所有类都进入 `/sys/class/<class>/`。display 与 input 仍由固定聚合节点提供专用 ABI，详见[用户接口与 devfs](../classes/userspace-and-devfs.md)。
 
 ## 通用调用规则
 
-每个入口必须检查 `dev`、`dev->drv_priv`、buffer 和长度。可能并发的入口必须在实例内同步。可选操作留 `NULL`；不要“返回成功但什么也不做”来假装支持。未知 ioctl 返回 `-ENOTTY`，硬件不支持的已知能力返回 `-EOPNOTSUPP`。
+每个入口必须检查 `dev`、`dev->drv_priv`、buffer 和长度。read/write 的 class buffer 是内核地址。可能并发的入口必须在实例内同步。可选操作留 `NULL`；不要“返回成功但什么也不做”来假装支持。未知 ioctl 返回 `-ENOTTY`，硬件不支持的已知能力返回 `-EOPNOTSUPP`。当前动态 devfs 只为内建 block ioctl 和 audio 通用 ioctl 完成 usercopy；自定义 block/char `ops->ioctl` 仍收到原始 `arg`，在增加通用封送前不得直接解引用它。
 
 `device_find_by_class(class, index)` 按注册顺序返回已绑定设备。调用者遇到 `NULL` 就停止枚举。设备类枚举只在设备生命周期内使用；调用者不能缓存裸 `device_t *` 跨越 remove。
 
@@ -34,7 +34,8 @@ typedef struct block_dev_ops {
 典型生命周期：
 
 ```c
-/* 1. 注册：启动段把驱动挂到总线 */static driver_t my_blk_driver = {
+/* 1. 注册：启动段把驱动挂到总线 */
+static driver_t my_blk_driver = {
     .name       = "my-blk",
     .bus        = &pci_bus,
     .id_table   = my_ids,
@@ -42,9 +43,11 @@ typedef struct block_dev_ops {
     .remove     = my_blk_remove,
     .class_type = DEV_CLASS_BLOCK,
     .class_ops  = &my_blk_ops,
-};DRIVER_REGISTER(my_blk_driver);
+};
+DRIVER_REGISTER(my_blk_driver);
 
-/* 2. probe：绑定设备并初始化 */static int my_blk_probe(device_t *dev){
+/* 2. probe：绑定设备并初始化 */
+static int my_blk_probe(device_t *dev){
     my_blk_t *b = kzalloc(sizeof(*b));
     if (!b) return -ENOMEM;
 
@@ -56,7 +59,8 @@ typedef struct block_dev_ops {
     return 0;
 }
 
-/* 3. open/use：文件系统通过 class_ops 发 I/O */static int my_blk_read(device_t *dev, uint64_t lba,
+/* 3. open/use：文件系统通过 class_ops 发 I/O */
+static int my_blk_read(device_t *dev, uint64_t lba,
                        void *buf, size_t sectors)
 {
     my_blk_t *b = dev->drv_priv;
@@ -66,7 +70,8 @@ typedef struct block_dev_ops {
     return 0;
 }
 
-/* 4. close 由 VFS 层管理；remove 释放硬件 */static int my_blk_remove(device_t *dev){
+/* 4. close 由 VFS 层管理；remove 释放硬件 */
+static int my_blk_remove(device_t *dev){
     my_blk_t *b = dev->drv_priv;
     stop_queue(b);
     kfree(b);
@@ -102,7 +107,8 @@ typedef struct net_dev_ops {
 典型生命周期：
 
 ```c
-/* 1. 注册 */static driver_t my_net_driver = {
+/* 1. 注册 */
+static driver_t my_net_driver = {
     .name       = "my-net",
     .bus        = &pci_bus,
     .id_table   = my_ids,
@@ -110,9 +116,11 @@ typedef struct net_dev_ops {
     .remove     = my_net_remove,
     .class_type = DEV_CLASS_NET,
     .class_ops  = &my_net_ops,
-};DRIVER_REGISTER(my_net_driver);
+};
+DRIVER_REGISTER(my_net_driver);
 
-/* 2. probe：初始化硬件和队列 */static int my_net_probe(device_t *dev){
+/* 2. probe：初始化硬件和队列 */
+static int my_net_probe(device_t *dev){
     my_net_t *n = kzalloc(sizeof(*n));
     if (!n) return -ENOMEM;
 
@@ -124,20 +132,23 @@ typedef struct net_dev_ops {
     return 0;
 }
 
-/* 3. open：lwIP 启动网卡时调用 */static int my_net_open(device_t *dev){
+/* 3. open：lwIP 启动网卡时调用 */
+static int my_net_open(device_t *dev){
     my_net_t *n = dev->drv_priv;
     enable_rx(n);
     return 0;
 }
 
-/* 4. send/recv/poll：数据面 */static int my_net_send(device_t *dev, const void *pkt, size_t len){
+/* 4. send/recv/poll：数据面 */
+static int my_net_send(device_t *dev, const void *pkt, size_t len){
     my_net_t *n = dev->drv_priv;
     if (len > 1500) return -EINVAL;
     if (!tx_slot_free(n)) return -EAGAIN;
     return post_packet(n, pkt, len);
 }
 
-/* 5. stop/remove：停数据面并释放 */static int my_net_stop(device_t *dev){
+/* 5. stop/remove：停数据面并释放 */
+static int my_net_stop(device_t *dev){
     my_net_t *n = dev->drv_priv;
     disable_rx_tx(n);
     return 0;
@@ -167,12 +178,13 @@ typedef struct char_dev_ops {
 
 `read/write` 成功返回字节数。非阻塞无进展返回 `-EAGAIN`。`poll` 只观察 readiness，不得消费数据或睡眠。UART 硬件驱动只负责收发和中断，通用行规、前台进程组和 termios 应由 tty/devfs 层承担。
 
-当前 devfs 没有通用动态 char 节点注册 API，因此实现 class ops 不会自动生成 `/dev/<name>`。需要新节点时必须先扩展通用 devfs registry，不能在具体驱动里直接拼 VFS vnode。详见 [用户接口与 devfs](../classes/userspace-and-devfs.md)。
+char class 会按发布顺序自动生成 `/dev/charN`，通用适配器转发 read/write/ioctl。当前没有让驱动自选节点名或安装私有 vnode 的注册 API；稳定的命名、权限或专用 ABI 仍应在通用 class/devfs 层设计，不能在具体驱动里直接拼 VFS vnode。详见[用户接口与 devfs](../classes/userspace-and-devfs.md)。
 
 典型生命周期：
 
 ```c
-/* 1. 注册 */static driver_t my_uart_driver = {
+/* 1. 注册 */
+static driver_t my_uart_driver = {
     .name       = "my-uart",
     .bus        = &platform_bus,
     .id_table   = my_ids,
@@ -180,9 +192,11 @@ typedef struct char_dev_ops {
     .remove     = my_uart_remove,
     .class_type = DEV_CLASS_CHAR,
     .class_ops  = &my_uart_ops,
-};DRIVER_REGISTER(my_uart_driver);
+};
+DRIVER_REGISTER(my_uart_driver);
 
-/* 2. probe：初始化硬件 */static int my_uart_probe(device_t *dev){
+/* 2. probe：初始化硬件 */
+static int my_uart_probe(device_t *dev){
     my_uart_t *u = kzalloc(sizeof(*u));
     if (!u) return -ENOMEM;
 
@@ -191,7 +205,8 @@ typedef struct char_dev_ops {
     return 0;
 }
 
-/* 3. read/write：字节流 */static int my_uart_read(device_t *dev, void *buf, size_t count){
+/* 3. read/write：字节流 */
+static int my_uart_read(device_t *dev, void *buf, size_t count){
     my_uart_t *u = dev->drv_priv;
     size_t n = min(count, rx_ready(u));
     if (n == 0) return -EAGAIN;
@@ -199,7 +214,8 @@ typedef struct char_dev_ops {
     return (int)n;
 }
 
-/* 4. remove：关中断、释放 */static int my_uart_remove(device_t *dev){
+/* 4. remove：关中断、释放 */
+static int my_uart_remove(device_t *dev){
     my_uart_t *u = dev->drv_priv;
     disable_uart_irq(u);
     kfree(u);
@@ -237,12 +253,13 @@ struct input_event {
 - 每实例维护 ring；满时不得覆盖尚未读取的数据，必须记录丢弃计数或通过类 ioctl 暴露可观察的 overflow 状态。
 - `/dev/event0` 聚合所有 `DEV_CLASS_INPUT`。新 input 驱动只需正确注册类，不要新增硬件私有 getter。
 
-参考实现：`vinput.a20drv`（drvmod 模块）、`kernel/drivers/usb/class/usb_hid.c`（xHCI 上的 USB HID）。PS/2 是 x86 板级控制器服务（drvmod 模块 `ps2.a20drv`），不属于可复用 input class；新驱动必须使用本类接口。
+参考实现：`vinput.a20drv`（drvmod 模块）和 USB HID 共享实现 `kernel/drivers/usb/class/usb_hid.c`（generic 包为 `usb-hid.a20drv`）。PS/2 是 x86 板级控制器服务（drvmod 模块 `ps2.a20drv`），不属于可复用 input class；新驱动必须使用本类接口。
 
 典型生命周期：
 
 ```c
-/* 1. 注册 */static driver_t my_hid_driver = {
+/* 1. 注册 */
+static driver_t my_hid_driver = {
     .name       = "my-hid",
     .bus        = &pci_bus,
     .id_table   = my_ids,
@@ -250,9 +267,11 @@ struct input_event {
     .remove     = my_hid_remove,
     .class_type = DEV_CLASS_INPUT,
     .class_ops  = &my_hid_ops,
-};DRIVER_REGISTER(my_hid_driver);
+};
+DRIVER_REGISTER(my_hid_driver);
 
-/* 2. probe：初始化并创建事件 ring */static int my_hid_probe(device_t *dev){
+/* 2. probe：初始化并创建事件 ring */
+static int my_hid_probe(device_t *dev){
     my_hid_t *h = kzalloc(sizeof(*h));
     if (!h) return -ENOMEM;
 
@@ -266,7 +285,8 @@ struct input_event {
     return 0;
 }
 
-/* 3. 中断：合成事件并推入 ring */static void my_hid_irq(device_t *dev){
+/* 3. 中断：合成事件并推入 ring */
+static void my_hid_irq(device_t *dev){
     my_hid_t *h = dev->drv_priv;
     struct input_event ev;
 
@@ -281,7 +301,8 @@ struct input_event {
     push_event(h, &ev);
 }
 
-/* 4. read/poll：暴露给用户聚合器 */static int my_hid_read(device_t *dev, void *buf, size_t count){
+/* 4. read/poll：暴露给用户聚合器 */
+static int my_hid_read(device_t *dev, void *buf, size_t count){
     my_hid_t *h = dev->drv_priv;
     if (count < sizeof(struct input_event))
         return -EINVAL;
@@ -290,7 +311,8 @@ struct input_event {
     return ring_pop(h->ring, buf, sizeof(struct input_event));
 }
 
-/* 5. remove：停止中断、释放 ring */static int my_hid_remove(device_t *dev){
+/* 5. remove：停止中断、释放 ring */
+static int my_hid_remove(device_t *dev){
     my_hid_t *h = dev->drv_priv;
     disable_hid(h);
     ring_free(h->ring);
@@ -320,7 +342,8 @@ Display 驱动成功 probe 后调用 `gpu_device_register(dev)`；remove 前调�
 典型生命周期：
 
 ```c
-/* 1. 注册 */static driver_t my_gpu_driver = {
+/* 1. 注册 */
+static driver_t my_gpu_driver = {
     .name       = "my-gpu",
     .bus        = &pci_bus,
     .id_table   = my_ids,
@@ -328,9 +351,11 @@ Display 驱动成功 probe 后调用 `gpu_device_register(dev)`；remove 前调�
     .remove     = my_gpu_remove,
     .class_type = DEV_CLASS_DISPLAY,
     .class_ops  = &my_gpu_ops,
-};DRIVER_REGISTER(my_gpu_driver);
+};
+DRIVER_REGISTER(my_gpu_driver);
 
-/* 2. probe：分配 framebuffer 并注册 display */static int my_gpu_probe(device_t *dev){
+/* 2. probe：分配 framebuffer 并注册 display */
+static int my_gpu_probe(device_t *dev){
     my_gpu_t *g = kzalloc(sizeof(*g));
     if (!g) return -ENOMEM;
 
@@ -349,7 +374,8 @@ Display 驱动成功 probe 后调用 `gpu_device_register(dev)`；remove 前调�
     return 0;
 }
 
-/* 3. 使用：用户映射 framebuffer 后写像素 */static int my_gpu_get_fb(device_t *dev, uintptr_t *paddr, size_t *size){
+/* 3. 使用：用户映射 framebuffer 后写像素 */
+static int my_gpu_get_fb(device_t *dev, uintptr_t *paddr, size_t *size){
     my_gpu_t *g = dev->drv_priv;
     *paddr = g->fb_paddr;
     *size  = g->fb_size;
@@ -368,7 +394,8 @@ static int my_gpu_flush(device_t *dev, uint32_t x, uint32_t y,
     return 0;
 }
 
-/* 4. remove：注销 display、释放显存 */static int my_gpu_remove(device_t *dev){
+/* 4. remove：注销 display、释放显存 */
+static int my_gpu_remove(device_t *dev){
     my_gpu_t *g = dev->drv_priv;
     gpu_device_unregister(dev);
     free_framebuffer(g->fb);

@@ -4,7 +4,7 @@ A20OS 现在同时支持三种驱动路径：
 
 | 路径 | 执行位置 | 适用范围 |
 |---|---|---|
-| `kernel/drivers/` | 内核镜像内 | 已接入统一 bus/class 模型的内建驱动 |
+| `kernel/drivers/` | generic 内核服务、embedded 静态驱动，或被模块包装复用 | 已接入统一 bus/class 模型的共享实现 |
 | `drvmod` (`*.a20drv`) | 内核态、内核 direct-map | 运行时可分发的原生驱动模块 |
 | 用户态驱动（`*.a20drv`）| 用户态 | 双驻留驱动（hybrid-kernel）的用户侧，见 `docs/hybrid-kernel/04-dual-placement.md` |
 
@@ -22,14 +22,14 @@ A20OS 现在同时支持三种驱动路径：
 - `flags`：生命周期所有权（`A20_DRIVER_FLAG_SUPERVISED` 表示用户态服务的 spawn/restart/健康由外部服务监督者如 svcmgr 拥有，内核管理器只记录）；
 - `match[]` / `match_count`：该驱动可拥有的设备身份（bus/vendor/device）。
 
-后缀不决定权限域：ELF 类型与 `placement` 共同决定加载器。内核 `drvmod_load()` 只接受 ELF64 `ET_REL` 且 `placement=kernel-module` 的文件；普通 ELF 执行加载器在执行以 `.a20drv` 结尾的文件时只接受 `placement=user-service` 的描述符。因此内核模块不能作为用户程序执行，用户态驱动也不能被映射进内核 direct-map。
+后缀不决定权限域：ELF 类型与 `placement` 共同决定加载器。内核 `drvmod_load()` 只接受 ELF64 `ET_REL` 且 `placement=kernel-module` 的文件；普通 ELF 执行加载器在执行以 `.a20drv` 结尾的文件时只接受 `placement=user-service` 的描述符。因此内核模块不能作为用户程序执行，用户态驱动也不能被映射进内核 direct-map。当前普通 ELF 校验器只接受 RTC、BLOCK、INPUT、AUDIO、SECURITY 五种 user-service type；描述符枚举中的 NET、DISPLAY、USB 可供内核模块使用，但用户服务在扩展 `elf_validate_user_driver()` 前会被拒绝。
 
 **统一驱动管理器**（`kernel/drivers/core/driver_manager.c`）是可选驱动发现与激活的唯一权威。`driver_manager_init()` 在启动期（`init_kthread`）：
 
 1. 注册模块/用户服务绑定的板级设备（goldfish-rtc、ps2、tpm、virtio-input-slot5 等）为统一 `platform_device_t`；
 2. 扫描 DriverStore `/bin/lib/drivers` 下所有 `.a20drv`，读取描述符；
 3. `kernel-module` 包：`drvmod_load` + `drvmod_init_all`，模块经 `drv_driver_register` 注册统一 `driver_t`，由驱动核心按 `device_t` 匹配并 probe；
-4. `user-service` 包：若 `flags` 带 `SUPERVISED` 只记录（svcmgr 负责生命周期）；否则当描述符匹配的 MMIO 窗口真实存在（`udriver_window_present` 探测）时，由 `driver_manager_spawn_user` 直接生成本地用户进程。
+4. `user-service` 包：Early 扫描一律延后；Runtime 扫描时，若 `flags` 带 `SUPERVISED` 只记录（svcmgr 负责生命周期），否则仅当描述符匹配的白名单 MMIO 窗口真实存在时调用 `driver_manager_spawn_user`。该自动生成路径要求内核启用 Native ABI，否则返回 `-EOPNOTSUPP`。
 
 每个物理设备只有一个 owner：`device_t.user_owned` 表示设备归用户态驱动所有，驱动核心只允许 `driver_t.read_only_probe` 的内核驱动绑定它（双驻留内核壳），完整初始化归用户驱动。
 
@@ -164,7 +164,7 @@ make ARCH=riscv64 ABI=both smoke-dual-input          # vinput-probe.a20drv + 用
 | 驱动 | 原内建位置 | 模块 | 架构 | 状态 |
 |---|---|---|---|---|
 | goldfish RTC | `kernel/drivers/char/goldfish_rtc_kdrv.c`（已删除）| `kernel/drvmod/examples/goldfish_rtc.c` | riscv64/aarch64/loongarch64 | 已迁移；QEMU virt 启动即绑定 |
-| PC speaker | `kernel/drvmod/examples/pc_spkr.c`（已删除）| `kernel/drvmod/examples/pc_spkr.c` | x86_64 | 已迁移；统一驱动核心桥接注册 AUDIO 类并绑定 platform 设备 |
+| PC speaker | `kernel/drivers/audio/pc_speaker.c`（已删除）| `kernel/drvmod/examples/pc_spkr.c` | x86_64 | 已迁移；统一驱动核心桥接注册 AUDIO 类并绑定 platform 设备 |
 | virtio-input 内核探针 | `kernel/drivers/input/virtio_input_kprobe.c`（已删除）| `kernel/drvmod/examples/vinput_probe.c` | riscv64/aarch64 | 已迁移；`smoke-dual-input` 验证与用户态 uinputd 读到同一设备身份 |
 | virtio-input 完整驱动 | `kernel/drivers/input/virtio_input.c`（已删除）| `kernel/drvmod/examples/vinput.c` | 四架构 | 已迁移；`/dev/event0` 的 devfs mux 服务拆分至 `kernel/drivers/input/input_mux.c`（class 设备消费 + EVIOCG* ioctl 面），模块 ISR 经 `input_mux_wake` 唤醒 mux；riscv64 MMIO 与 x86_64 PCI 路径 QEMU 实测事件流（`[INPUT] event type=...` + EV_SYN）|
 | PS/2 键鼠控制器 | `kernel/drivers/input/ps2.c`（已删除）| `kernel/drvmod/examples/ps2.c` | x86_64 | 已迁移；arch IRQ 分发经 hwapi 投递到模块 ISR，`smoke-drvmod-x86_64` 验证初始化与双向量注册 |
@@ -175,23 +175,23 @@ make ARCH=riscv64 ABI=both smoke-dual-input          # vinput-probe.a20drv + 用
 | virtio-scsi | `kernel/drivers/block/virtio_scsi.c`（generic 不再内建）| `kernel/drvmod/examples/virtio_scsi.c` | 四架构（Early）| 已迁移；PCI 1af4:1048/1008，Early DriverStore |
 | AHCI | `kernel/drivers/block/ahci.c`（generic 不再内建）| `kernel/drvmod/examples/ahci.c` | x86_64（Early）| 已迁移；PCI 8086:2922/2829，Q35/VBox 根盘路径 |
 | DW SDIO | `kernel/drivers/block/dw_sdio.c`（generic 不再内建）| `kernel/drvmod/examples/dw_sdio.c` | riscv64（Early）| 已迁移；platform bus + `hardware_id` 绑定 VF2 SDIO |
-| virtio-net | `kernel/drivers/net/virtio_net.c`（generic 不再内建）| `kernel/drvmod/examples/virtio_net.c` | 四架构 | 已迁移；lwIP 桥接符号导出，loongarch64 QEMU 实测绑定 |
+| virtio-net | `kernel/drivers/net/virtio_net.c`（generic 不再内建）| `kernel/drvmod/examples/virtio_net.c` | riscv64/aarch64/loongarch64 | 已迁移；lwIP 桥接符号导出，loongarch64 QEMU 实测绑定；x86_64 generic 清单当前未列出 |
 | E1000 | `kernel/drivers/net/e1000.c`（generic 不再内建）| `kernel/drvmod/examples/e1000.c` | x86_64 | 已迁移；PCI 8086:100e |
-| virtio-gpu | `kernel/drivers/gpu/virtio_gpu.c`（generic 不再内建）| `kernel/drvmod/examples/virtio_gpu.c` | 四架构 | 已迁移；GPU class registry + frame 导出 |
+| virtio-gpu | `kernel/drivers/gpu/virtio_gpu.c`（generic 不再内建）| `kernel/drvmod/examples/virtio_gpu.c` | riscv64/aarch64/loongarch64 | 已迁移；GPU class registry + frame 导出；x86_64 generic 清单当前未列出 |
 | VMSVGA | `kernel/drivers/gpu/vmsvga.c`（generic 不再内建）| `kernel/drvmod/examples/vmsvga.c` | x86_64 | 已迁移 |
-| virtio-snd | `kernel/drivers/audio/virtio_snd.c`（generic 不再内建）| `kernel/drvmod/examples/virtio_snd.c` | 四架构 | 已迁移 |
-| xHCI | `kernel/drivers/usb/host/xhci.c`（generic 不再内建）| `kernel/drvmod/examples/xhci.c` | 四架构 | 已迁移；USB core 桥接符号导出 |
-| USB HID | `kernel/drivers/usb/class/usb_hid.c`（generic 不再内建）| `kernel/drvmod/examples/usb_hid.c` | 四架构 | 已迁移 |
-| USB storage | `kernel/drivers/usb/class/usb_storage.c`（generic 不再内建）| `kernel/drvmod/examples/usb_storage.c` | 四架构 | 已迁移 |
+| virtio-snd | `kernel/drivers/audio/virtio_snd.c`（generic 不再内建）| `kernel/drvmod/examples/virtio_snd.c` | riscv64/aarch64/loongarch64 | 已迁移；x86_64 generic 清单当前未列出 |
+| xHCI | `kernel/drivers/usb/host/xhci.c`（generic 不再内建）| `kernel/drvmod/examples/xhci.c` | x86_64/aarch64/loongarch64 | 已迁移；USB core 桥接符号导出；riscv64 generic 清单当前未列出 |
+| USB HID | `kernel/drivers/usb/class/usb_hid.c`（generic 不再内建）| `kernel/drvmod/examples/usb_hid.c` | x86_64/aarch64/loongarch64 | 已迁移；riscv64 generic 清单当前未列出 |
+| USB storage | `kernel/drivers/usb/class/usb_storage.c`（generic 不再内建）| `kernel/drvmod/examples/usb_storage.c` | x86_64/aarch64/loongarch64 | 已迁移；riscv64 generic 清单当前未列出 |
 | StarFive/LS2K GMAC | embedded 静态 | 无（板级 platform 驱动）| 板级 | 通过 `platform_bus` + `hardware_id` 绑定，不再无总线通配匹配 |
 
 **当前迁移账本（启动顺序约束）**：只有真正的设备驱动进入 `.a20drv` 迁移表。`loop`、`udisk`、`pty`、`uart`、`framebuffer`/`gpu_core`、`audio_core`、`input_mux` 和 `usb_core` 是内核服务或 class 聚合层，继续静态链接，不应标为 “不可迁移设备驱动”。
 
-generic 不再保留任何内建设备驱动。根盘相关驱动（virtio-blk、virtio-scsi、AHCI、DW SDIO）以及 RTC 全部以 `.a20drv` 嵌入 Early DriverStore（`/boot/drivers`，root ramfs），在挂载真实根盘前加载；其余设备包从 Runtime DriverStore（`/bin/lib/drivers`）加载。板级设备（VF2 的 SDIO/GMAC、LS2K1000 的 GMAC）通过 `platform_bus` + `hardware_id` 注册，驱动按 platform id 绑定；总线无关设备没有通配匹配——无总线设备只有在驱动显式 `match()` 接受时才绑定，UART 串口服务即通过名称匹配发布 char 设备，不再抢占任意板级设备。
+generic 不再保留 `EMBEDDED_DEVICE_DRIVER_SRCS` 中的内建设备驱动。Early DriverStore 按架构生成：x86_64 包含 PC speaker、virtio-blk、virtio-scsi、AHCI；riscv64/aarch64/loongarch64 包含 RTC、virtio-blk、virtio-scsi，riscv64 另含 DW SDIO。其余被该架构 `DRVMOD_MODULES` 列出的包进入 Runtime DriverStore（`/bin/lib/drivers`）。VF2 与 LS2K1000 的 GMAC 虽通过 `platform_bus` + `hardware_id` 注册绑定，但当前没有 generic `.a20drv` 包，只能由 embedded 静态账本部署。总线无关设备没有通配匹配：无总线设备只有在驱动显式 `match()` 接受时才绑定，UART 串口服务即通过名称匹配发布 char 设备，不再抢占任意板级设备。
 
 **框架 API 现状**：DMA 对象（coherent/aligned/sync）、PCI BAR 访问（`pci_get_bar_resource`/`pci_enable_and_assign_bars`/`pci_intx_irq`/`pci_class_code`）、block/net/input/audio/display class 操作（统一核心桥接 + 头文件）、调度/等待原语（park/wait_queue/mutex）、`firmware_acpi_tpm2`、virtq（双驻留共享层）、`clock_ticks_per_sec` 与 `input_mux_wake` 均为可导出 API；NVMe、TPM、HDA、virtio-input 完整事件投递（`vinput.a20drv` + `input_mux.c`）即以模块形式实现并受 smoke 门禁覆盖。
 
-**其余设备包**：网络、显示、音频、USB、存储 transport 驱动现在与 RTC、输入、NVMe、TPM、HDA 一样由 `tools/driver-modules.mk` 生成 `.a20drv`；PCI/MMIO/platform bus、USB core、framebuffer 和各类 mux/class consumer 仍是内核框架服务。通用 profile 的完整驱动源账本见 `tools/driver-sources.mk` 的 `EMBEDDED_DEVICE_DRIVER_SRCS`（embedded 静态链接全集）。
+**其余设备包**：`tools/driver-modules.mk` 的每架构 `DRVMOD_MODULES` 是 generic 包的权威清单，不能从 `kernel/drvmod/examples/` 中存在某个包装文件推断所有架构都会部署它。PCI/MMIO/platform bus、USB core、framebuffer 和各类 mux/class consumer 仍是内核框架服务。`tools/driver-sources.mk` 的 `EMBEDDED_DEVICE_DRIVER_SRCS` 只表示 embedded 当前显式静态集合，不是 generic 模块清单或两种 profile 的能力并集。
 
 迁移顺序（每步都必须有等价回归证据）：
 
@@ -200,4 +200,4 @@ generic 不再保留任何内建设备驱动。根盘相关驱动（virtio-blk�
 3. 为 probe/remove 建立失败回滚和设备引用关系。
 4. 用一个真实设备 smoke 验证，再从内建源列表移除该驱动。
 
-因此 generic 不再保留任何内建设备驱动，迁移账本只区分内核服务与设备驱动；embedded 则静态链接完整驱动集。详见[驱动部署 Profile](deployment-profiles.md)。
+因此 generic 的内核只保留显式服务账本，设备能力取决于目标架构实际列出的包；embedded 只静态链接 `EMBEDDED_DEVICE_DRIVER_SRCS` 当前列出的共享驱动，不与 generic 模块清单自动保持能力对等。RTC、PC speaker、PS/2、NVMe、TPM、HDA、vinput 及 vinput-probe 等 module-only 实现当前不在 embedded 静态账本。详见[驱动部署 Profile](deployment-profiles.md)。

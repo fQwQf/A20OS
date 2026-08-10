@@ -2,7 +2,7 @@
 
 > 本索引文档描述 A20OS Native ABI 研究笔记的文档结构、依赖关系、贡献声明和推荐阅读顺序。
 
-> **范围说明：** `docs/research/` 保存研究假设、形式化模型和实现演进记录，其中的伪代码不作为当前内核并发协议。当前 task 生命周期、wait queue、Park/Wake、timeout、信号和 SMP 调度实现以[进程、调度与阻塞协议](../process-scheduler.md)、[EEVDF 调度器设计](../eevdf-scheduler.md)、`kernel/include/proc/`及 `docs/testing/*-audit.md` 为准。
+> **范围说明：** `docs/research/` 保存研究假设、形式化模型和实现演进记录，其中的伪代码、规模估算和阶段状态不作为当前内核契约。本文中的“当前实现”数字已按 `e33c3219` 复核；后续实现状态仍以 `kernel/`、`docs/native-abi/08-runtime-status.md`、[进程、调度与阻塞协议](../process-scheduler.md)、[EEVDF 调度器设计](../eevdf-scheduler.md)及 `docs/testing/*-audit.md` 为准。
 
 ---
 
@@ -11,7 +11,7 @@
 | 编号 | 文档 | 核心内容 | 行数 | 状态 |
 |------|------|---------|------|------|
 | 01 | [POSIX 设计局限性分析](01-posix-limitations.md) | POSIX 核心设计缺陷、TOCTOU 形式化、信号模型批判、io_uring 深度分析、替代方案综述 | ~500 | 已完成 |
-| 02 | [Native API 设计](02-native-api-design.md) | 53 个形式化核心 syscall 设计、handle/channel/event 模型、VMO/VMAR 内存模型、handle 生命周期、rights 代数、POSIX shim | ~900 | 已完成（实现已扩展到 93，见下文） |
+| 02 | [Native API 设计](02-native-api-design.md) | 53 个形式化核心 syscall 设计、handle/channel/event 模型、VMO/VMAR 内存模型、handle 生命周期、rights 代数、POSIX shim | ~900 | 已完成（实现已扩展到 126，见下文） |
 | 03 | [实现方案](03-implementation-plan.md) | 组件划分、数据结构、libc 设计、分阶段实施路线 | ~960 | 已完成 |
 | 04 | [形式化理论基础](04-theory-deep-dive.md) | SOS 操作语义、安全/活性/并发/IF 证明、LTL 活性框架、双 ABI 信息流能力边界、ABI 演进 | ~1050 | 已完成 |
 | 05 | [评估框架](05-evaluation-framework.md) | 测量方法论、统计方法、微基准、安全性测试、POSIX shim 开销、形式化验证方法 | ~760 | 已完成 |
@@ -19,8 +19,9 @@
 | 07 | [理论补充](07-deep-theory-supplement.md) | Trace 归纳、预验证-提交、refcount_inc 时序安全性、error 路径精化、并发精化映射、C 内存模型对应 | ~1100 | 已完成 |
 | 08 | [架构深度设计](08-architecture-deep-dive.md) | 对象映射、handle table 实现、eventq/channel 清理、object_destroy 路径、IRQ 安全、ht_grow/channel recv 精化 | ~1200 | 已完成 |
 | 09 | [创新方向深度分析](09-innovation-deep-dive.md) | 四个创新方向的形式化：混合信任能力边界、类型化通道协议、时态能力、委托模式组合安全；§7-§9 组合性分析、痛点驱动分析、攻击模型与防御映射 | ~980 | 已完成 |
+| 10 | [A20OS 与 Linux 实现及性能差异](10-a20-linux-implementation-performance-comparison.md) | `e33c3219` 源码审计、历史 BuildStorm 实测边界、Linux 对照与优化路线 | ~740 | 审计快照 |
 
-**总计约 7900+ 行研究笔记，48 个定理/引理。**
+**01-09 在本次审阅快照中共 7497 行；定理/引理仅按下文索引逐项列示，不给出未经独立复核的全局精确计数。10 是一手实现与性能审计文档；其 `.eval-state/2026/` 证据路径指向被 Git 忽略的本地工作区归档，干净 clone 中不会存在。**
 
 ---
 
@@ -55,16 +56,21 @@
 | **系统开发者** | 02 → 03 → 08 → 05 |
 | **安全研究者** | 04 §8 → 07 §9 → 05 §8-§10 → 06 §5 |
 | **论文审阅者** | 06 → 04 → 07 → 05 → 01 |
+| **实现/性能审计者** | 10 → 05 |
 
 ---
 
 ## 3. 文档依赖图
 
-```
-01 (POSIX 局限性)│├──→ 02 (Native API 设计) ──→ 03 (实现方案)│         │                        ││         └─────→ 04 (形式化理论) ←─┘│                   │      ││         ┌─────────┘      └──────────┐│         ↓                            ↓│    07 (理论补充)              08 (架构深度)│         │                            ││         └──────────┬─────────────────┘│                    ↓│              09 (创新方向：混合信任/类型化通道/时态能力/委托模式)│                    │└────────────→ 05 (评估框架)
-                     │
-                     ↓
-                06 (贡献定位)
+```text
+01 (POSIX 局限性)
+  └─> 02 (Native API 设计) ──> 03 (实现方案)
+         └───────────────> 04 (形式化理论)
+                                ├─> 07 (理论补充)
+                                └─> 08 (架构深度)
+                                      └─> 09 (创新方向)
+04 ────────────────────────────────> 05 (评估框架)
+04 + 05 + 09 ──────────────────────> 06 (贡献定位)
 ```
 
 **依赖关系**：
@@ -86,15 +92,15 @@
 
 **关键文档**：09 §3, security.md §6, handle.md §2.6
 
-**Insight**：现有内核能力系统（Zircon、seL4）的权限一旦授予就永久有效。A20OS 首次在内核层面形式化了时间受限的能力委托——OAuth 的过期机制是用户态构造，而 A20OS 的时态能力是内核强制的且具有形式化保证。时态单调性定理统一了 04 定理 3.2（显式权限递减）和时间/操作次数衰减，是时空统一的权限衰减结果。
+**Insight**：在当前调研覆盖的 Zircon、seL4 等材料中，能力权限没有 A20OS 所述的内核强制时间/次数衰减；OAuth 的过期机制则是用户态构造。据当前调研，A20OS 的时态能力形式化是候选差异点，尚需系统文献复核。时态单调性定理统一了 04 定理 3.2（显式权限递减）和时间/操作次数衰减，是时空统一的权限衰减结果。
 
 ### C2'：混合信任能力边界（Mixed-Trust Capability Boundary）
 
-**声明**：提出并证明信息流能力边界定理（04 定理 9.5）：即使 Linux ABI 和 Native ABI 通过 VFS 共享资源，Linux ABI 进程也无法推断 Native ABI handle 的权限状态。降级通道是精确的（04 定理 9.4）。
+**声明**：提出信息流能力边界定理（04 定理 9.5）：在明确排除 `sys_a20_bridge` 暴露的 Linux-A20 channel bridge 后，即使 Linux ABI 和 Native ABI 通过 VFS 共享资源，Linux ABI 进程也无法推断 Native ABI handle 的权限状态。降级通道是精确的（04 定理 9.4）。
 
 **关键文档**：04 §9.4-§9.5, 09 §1
 
-**Insight**：现有能力系统形式化（seL4、Capsicum、CHERI）都假设整个系统在同一套能力纪律下运行。A20OS 首次形式化了"当存在一个不遵守能力纪律的子系统时，能力理论的结论是否仍然成立"——答案是肯定的，且有精确的边界刻画。
+**Insight**：当前调研覆盖的 seL4、Capsicum、CHERI 形式化通常假设系统遵守相应能力纪律。A20OS 对混合信任边界给出纸笔模型和条件化结论；其新颖性尚需系统文献复核，且结论不覆盖显式 Linux-A20 channel bridge。
 
 ### C3：类型化通道协议（Typed Channel Protocol）
 
@@ -102,7 +108,7 @@
 
 **关键文档**：09 §2, ipc.md §2.3-§2.4
 
-**Insight**：内核层 session type 从未在 Zircon/seL4 中实现。Zircon 的 FIDL 在用户态做类型检查，seL4 的 Endpoint 无类型约束。A20OS 将类型检查下沉到内核 send/recv 路径，使得错误类型的 handle 传输在内核层面被拒绝。
+**Insight**：当前调研未在 Zircon/seL4 中发现等价的内核层 session-type 约束：Zircon 的 FIDL 在用户态做类型检查，seL4 的 Endpoint 无此类型约束。A20OS 将类型检查下沉到内核 send/recv 路径，使错误类型的 handle 传输在内核层面被拒绝；新颖性尚需系统文献复核。
 
 ### C4：运行时无关的 ABI 演进
 
@@ -118,13 +124,13 @@
 
 **关键文档**：09 §4
 
-**Insight**：委托模式分类法在内核能力系统中不存在先例。seL4 的 trace 归纳证明了单操作安全性，但没有对操作序列的模式做分类。A20OS 的 5 种模式覆盖了实践中最常见的委托场景，且组合安全证明保证了模式序列的安全性。
+**Insight**：当前调研未发现与此相同的内核能力委托模式分类；seL4 的 trace 归纳证明了单操作安全性，但本次查阅未见同样的操作序列模式分类。A20OS 的 5 种模式覆盖常见委托场景并给出纸笔组合安全论证，优先性仍需系统文献复核。
 
 ---
 
 ## 5. 定理索引
 
-以下列出跨文档引用的关键定理，方便交叉查找。共 48 个定理/引理。
+以下列出跨文档引用的关键定理，方便交叉查找。表项来自各文档独立编号，可能包含重述、推论和未机器检验的纸笔论证，因此不把表项数称为独立已证明定理总数。
 
 ### 5.1 基础理论（04, 07, 08）
 
@@ -189,7 +195,7 @@
 | 7.2 | 组合 | 委托链能力耗散 | O(1) 安全策略执行 |
 | 7.3 | 组合 | 跨 ABI 类型约束不可侵犯性 | 能力防火墙 |
 | 7.4 | 组合 | 四维度组合安全 | 四创新正交且独立可组合 |
-| 8.1 | 痛点 | 时态撤销 O(1) 摊还复杂度 | 空间换时间的撤销 trade-off |
+| 8.1 | 痛点 | 过期 lookup O(1)、整表 sweep/回收 O(H) | 周期扫描的时间空间 trade-off |
 | 8.2 | 痛点 | 部分覆盖下的安全保证 | 增量部署的形式化保证 |
 | 8.3 | 痛点 | 多类型通道 confused deputy 防御 | 可静态验证的配置规则 |
 
@@ -202,8 +208,8 @@
 | 参数 | 值 | 来源 |
 |------|-----|------|
 | 形式化核心 syscall | 53 | 02 §4.3、07 §1.2 |
-| 当前实现 syscall | 93 | `kernel/abi/native/syscall_table.def`、`docs/native-abi/03-handle.md` §6 |
-| 对象类型数 | 13 | 04 §1.1 |
+| 当前实现 syscall | 126 | `kernel/abi/native/syscall_table.def`、`docs/native-abi/03-handle.md` §6 |
+| 对象类型数 | 13（形式模型）/ 14（`e33c3219` 实现） | 04 §1.1、`docs/native-abi/03-handle.md` |
 | 权限位数 | 14 | 04 §1.2 |
 | Handle 表最大条目 | 65536 | 08 §2.1 |
 | 锁层级 | L0-L4（5 层） | 07 §4 |
@@ -234,7 +240,7 @@ kernel/ipc/             channel、event queue、对象生命周期
 kernel/mm/              VMO/VMAR
 ```
 
-本文档体系中的 01-08 号研究笔记在设计规范基础上进行：
+本文档体系中的 01-09 号研究笔记在设计规范基础上进行；10 号文档则是绑定到明确源码与评测提交的实现审计快照：
 
 1. **问题论证**（01）：为什么需要替代 POSIX
 2. **API 细化**（02）：补充 channel、event、VMO/VMAR 内存模型
@@ -257,7 +263,7 @@ kernel/mm/              VMO/VMAR
 6. **无锁数据结构未分析**：若未来引入无锁优化（如 event queue ring buffer），需补充 RELAXED 操作的内存序论证（07 §9.8.5）
 7. **时态能力开销未评估**：时态字段增加了 handle entry 大小（+16 bytes）；控制入口与 deadline-driven sweeper 已接入并通过 smoke，但扫描开销仍需实测
 8. **类型化通道的静态分析未工具化**：内核创建/send/recv 强制已接入并通过 smoke；推论 2.2.1 承诺的静态能力流分析仍未实现
-9. **形式化覆盖与实现存在边界**：07 的 trace 归纳穷举覆盖 53 个核心 syscall；当前实现为 111 个，新增的 futex、xattr、扩展网络/调度/系统调用尚未逐项加入 SOS 规则与 error-path 精化矩阵
+9. **形式化覆盖与实现存在边界**：07 的 trace 分类明确覆盖 43/53 个形式化核心 syscall，尚缺 `task_wait/task_kill/task_info`、4 个 path 操作、`event_wait` 和 `net_sendmsg/net_recvmsg`；当前实现为 126 个，新增入口也尚未逐项加入 SOS 规则与 error-path 精化矩阵
 10. **事件源覆盖不完整**：channel、timer、task 退出已产生事件；file/socket/pipe 的 READABLE/WRITABLE/ERROR 以及 `event_watch_fs` 路径事件尚未接入
 
 ---

@@ -5,7 +5,9 @@
 ## 1. fork 与分支
 
 ```bash
-git clone <你的 fork>cd oskernel2025-a20git checkout -b fix/<简短描述>
+git clone <你的 fork>
+cd oskernel2025-a20
+git checkout -b fix/<简短描述>
 # 或 feature/<子系统>-<描述>
 ```
 
@@ -16,7 +18,7 @@ git clone <你的 fork>cd oskernel2025-a20git checkout -b fix/<简短描述>
 先确认能编译并运行。详细命令见 [docs/build.md](build.md)。
 
 ```bash
-make ARCH=riscv64 run
+make ARCH=riscv64 BOARD=qemu-virt-riscv64 run
 ```
 
 ## 3. 通过测试门禁
@@ -27,17 +29,24 @@ make ARCH=riscv64 run
 # 构建矩阵
 make check-build-matrix
 
-# 基础 bring-up smoke
+# 基础 bring-up smoke；timeout 可接受，不验证 syscall
 make smoke-riscv64
 
-# 文档与门禁一致性
+# 广泛聚合门禁；包含构建和 QEMU runtime，可能耗时较长
 make check-doc-test-gates
 ```
+
+需要验证 Linux 系统调用时运行 `make smoke-abi-linux`；`smoke-riscv64` 只是 `BRINGUP=1` 启动检查。`check-doc-test-gates` 也不是快速的纯文档检查，请为其传递依赖中的构建和 QEMU smoke 预留时间。
 
 如果修改了具体子系统，再运行对应门禁：
 
 ```bash
-make check-mm-lock-model        # 内存管理make check-vfs-abstraction      # 文件系统make check-abi-boundary         # ABI 边界make check-driver-core-model    # 驱动make check-io-progress-model    # I/O 进展make check-concurrency-foundation # 并发
+make check-mm-lock-model          # 内存管理
+make check-vfs-abstraction        # 文件系统
+make check-abi-boundary           # ABI 边界
+make check-driver-core-model      # 驱动
+make check-io-progress-model      # I/O 进展
+make check-concurrency-foundation # 并发
 ```
 
 ## 4. 提交信息风格
@@ -54,7 +63,8 @@ make check-mm-lock-model        # 内存管理make check-vfs-abstraction      # 
 ```text
 fs: add refcnt helper for vnode lifecycle
 
-Replace direct ref_count manipulation in ramfs/ext4 withvfile_ref_init / vfile_get / vfile_put_ref_only.
+Replace direct ref_count manipulation in ramfs/ext4 with
+vfile_ref_init / vfile_get / vfile_put_ref_only.
 
 Verified with:
 - make check-vfs-abstraction
@@ -80,5 +90,5 @@ CI 通过后，维护者会进行代码审查。请根据评论修改，并确�
 ##  注意
 
 - 不要直接修改 `docs/testing/testing-gates.md` 或 `docs/project/external-dependencies.md` 中的契约字符串，除非你的改动确实触及这些契约。
-- 不要把 `ALLOW_UNVERIFIED_SMP=1` 作为默认门禁参数。已验证的 64 位 QEMU virt 平台不再需要该参数；其他平台仅可在专门处理 SMP 的变更中使用。
+- 不要把 `ALLOW_UNVERIFIED_SMP=1` 作为默认门禁参数。只有 RISC-V64、AArch64、LoongArch64 和 x86_64 的同名 QEMU virt 板在 `Makefile` 的 SMP 白名单中；其他平台仅可在专门处理 SMP bring-up 的变更中使用该开关。
 - 提交前请执行 `make clean` 再运行一次关键门禁，避免旧产物造成误判。
