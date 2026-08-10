@@ -128,6 +128,19 @@ exec $CXX -specs "$MUSL_SH/lib/musl-gcc.specs" $ARCH_CFLAGS "\$@"
 EOF
 chmod +x "$MUSL_CXX"
 
+# Prebuilt musl cross toolchain (musl.cc riscv64-linux-musl-cross).  The
+# specs-based wrapper above works for C but drops the libstdc++ include
+# path for C++; Mesa and the meson-built components use this self-contained
+# toolchain (bin/include/lib in its own sysroot) instead.
+MUSL_TOOLCHAIN=$BUILD/toolchain/$MUSL_TARGET-linux-musl-cross
+if [ -x "$MUSL_TOOLCHAIN/bin/$MUSL_TARGET-linux-musl-gcc" ]; then
+    MESON_CC="$MUSL_TOOLCHAIN/bin/$MUSL_TARGET-linux-musl-gcc"
+    MESON_CXX="$MUSL_TOOLCHAIN/bin/$MUSL_TARGET-linux-musl-g++"
+else
+    MESON_CC=$MUSL_GCC
+    MESON_CXX=$MUSL_CXX
+fi
+
 meson_cross_ini() {
     cat > "$B/meson-cross.ini" <<EOF
 [host_machine]
@@ -137,8 +150,8 @@ cpu = '$ARCH'
 endian = 'little'
 
 [binaries]
-c = '$MUSL_GCC'
-cpp = '$MUSL_CXX'
+c = '$MESON_CC'
+cpp = '$MESON_CXX'
 ar = '$AR'
 strip = '${CROSS}strip'
 pkgconfig = 'pkg-config'
