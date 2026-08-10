@@ -1,4 +1,5 @@
 #include "drivers/gpu/drm.h"
+#include "drivers/gpu/virtio_gpu.h"
 
 #include "core/errno.h"
 #include "core/string.h"
@@ -825,6 +826,16 @@ static int drm_ioctl(vfile_t *vf, unsigned long req, void *arg)
     case DRM_IOCTL_MODE_DESTROY_DUMB:
         return drm_mode_destroy_dumb(ctx, arg);
     default:
+        /* A20 virtio-gpu 3D passthrough: forward the request to the GPU
+         * driver's gpu_dev_ops_t.ioctl.  The per-open DRM context is not
+         * involved; the GPU driver owns the virgl context/resource id
+         * space and the controlq submission. */
+        if (req >= A20_GPU_IOCTL_BASE && req < A20_GPU_IOCTL_BASE + 16) {
+            gpu_dev_ops_t *ops = drm_gpu_ops();
+            if (!ops || !ops->ioctl)
+                return -ENODEV;
+            return ops->ioctl(drm_gpu_device(), req, arg);
+        }
         return -EINVAL;
     }
 }
