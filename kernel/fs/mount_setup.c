@@ -11,9 +11,9 @@
  * Block-device mount strategy, split out of kernel/main.c.
  *
  * Probes all virtio-blk / virtio-scsi / AHCI / USB-storage devices and
- * auto-detects filesystems:
- *   fat32 -> /bin   (our utilities: init, mksh, cmds, ...)
- *   ext4  -> /test  (judge sdcard or local sdcard image)
+ * auto-detects filesystems.  Normal and preliminary builds retain the legacy
+ * layout (FAT32 at /bin, EXT4 at /test).  Final submission builds instead use
+ * the judge's EXT4 image as / and keep A20OS bootstrap utilities at /a20.
  *
  * Works regardless of device ordering:
  *   Contest QEMU:  dev0=ext4(sdcard) dev1=fat32(disk.img)
@@ -145,25 +145,30 @@ int try_mount(block_dev_t *dev, const char *mnt, const char *fstype) {
 }
 
 static void mount_final_root_pseudo_filesystems(void) {
+#ifdef CONFIG_FINAL_EVAL_ROOT
+#define FINAL_ROOT_PATH(path) path
+#else
+#define FINAL_ROOT_PATH(path) "/test" path
+#endif
     struct {
         const char *path;
         const char *dev;
         const char *fstype;
     } mounts[] = {
-        { "/test/dev",     "none",  "devtmpfs" },
-        { "/test/dev/shm", "none",  "tmpfs" },
-        { "/test/proc",    "proc",  "proc" },
-        { "/test/sys",     "sysfs", "sysfs" },
+        { FINAL_ROOT_PATH("/dev"),     "none",  "devtmpfs" },
+        { FINAL_ROOT_PATH("/dev/shm"), "none",  "tmpfs" },
+        { FINAL_ROOT_PATH("/proc"),    "proc",  "proc" },
+        { FINAL_ROOT_PATH("/sys"),     "sysfs", "sysfs" },
     };
 
     /*
      * These directories already exist in the published Debian images.  The
      * mkdir calls also make the setup harmless for smaller local ext4 images.
      */
-    vfs_mkdir("/test/dev", 0755);
-    vfs_mkdir("/test/dev/shm", 01777);
-    vfs_mkdir("/test/proc", 0755);
-    vfs_mkdir("/test/sys", 0755);
+    vfs_mkdir(FINAL_ROOT_PATH("/dev"), 0755);
+    vfs_mkdir(FINAL_ROOT_PATH("/dev/shm"), 01777);
+    vfs_mkdir(FINAL_ROOT_PATH("/proc"), 0755);
+    vfs_mkdir(FINAL_ROOT_PATH("/sys"), 0755);
 
     for (size_t i = 0; i < sizeof(mounts) / sizeof(mounts[0]); i++) {
         int r = vfs_mount(mounts[i].dev, mounts[i].path,
@@ -172,37 +177,49 @@ static void mount_final_root_pseudo_filesystems(void) {
             printf("[INIT] WARNING: mount %s at %s failed: %d\n",
                    mounts[i].fstype, mounts[i].path, r);
     }
+#undef FINAL_ROOT_PATH
 }
 
 void mount_block_devices(void) {
-    int bin_ok = 0, test_ok = 0;
+#ifdef CONFIG_FINAL_EVAL_ROOT
+    const char *utilities_path = "/a20";
+    const char *official_path = "/";
+#else
+    const char *utilities_path = "/bin";
+    const char *official_path = "/test";
+#endif
+    int utilities_ok = 0, official_ok = 0;
 
     for (int i = 0; i < 16; i++) {
         block_dev_t *blk = mount_setup_block_device(i);
         if (!blk)
             continue;
-        if (!bin_ok && try_mount(blk, "/bin", "fat32") == 0) {
-            bin_ok = 1;
+        if (!utilities_ok && try_mount(blk, utilities_path, "fat32") == 0) {
+            utilities_ok = 1;
             continue;
         }
-        if (!test_ok && try_mount(blk, "/test", "ext4") == 0) {
-            test_ok = 1;
+        if (!official_ok && try_mount(blk, official_path, "ext4") == 0) {
+            official_ok = 1;
             continue;
         }
         block_dev_t *partition = first_gpt_partition(blk);
         if (!partition)
             continue;
-        if (!bin_ok && try_mount(partition, "/bin", "fat32") == 0) {
-            bin_ok = 1;
+        if (!utilities_ok &&
+            try_mount(partition, utilities_path, "fat32") == 0) {
+            utilities_ok = 1;
             continue;
         }
-        if (!test_ok && try_mount(partition, "/test", "ext4") == 0)
-            test_ok = 1;
+        if (!official_ok &&
+            try_mount(partition, official_path, "ext4") == 0)
+            official_ok = 1;
     }
 
-    if (!bin_ok)  printf("[INIT] WARNING: no FAT32 device for /bin\n");
-    if (!test_ok) {
-        printf("[INIT] no ext4 device for /test (ok without sdcard)\n");
+    if (!utilities_ok)
+        printf("[INIT] WARNING: no FAT32 device for %s\n", utilities_path);
+    if (!official_ok) {
+        printf("[INIT] no ext4 device for %s (ok without sdcard)\n",
+               official_path);
     } else {
         mount_final_root_pseudo_filesystems();
     }
