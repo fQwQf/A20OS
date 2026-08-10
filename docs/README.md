@@ -35,6 +35,7 @@
 - [drivers/guide/runtime-contracts.md](drivers/guide/runtime-contracts.md)：MMIO、IRQ、DMA 与锁的运行时契约
 - [drivers/guide/pci-and-virtio.md](drivers/guide/pci-and-virtio.md)：PCI 与 VirtIO 设备的接入方法
 - [drivers/classes/display.md](drivers/classes/display.md)：Framebuffer 与显示设备
+- [gpu/3d-graphics.md](gpu/3d-graphics.md)：virtio-gpu virgl 3D 图形加速栈
 - [drivers/classes/audio.md](drivers/classes/audio.md)：通用音频 UAPI、HDA、virtio-sound 与 PC Speaker
 
 ## 平台移植与运行

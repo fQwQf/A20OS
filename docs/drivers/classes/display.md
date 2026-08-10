@@ -1,6 +1,6 @@
 # Display 与 Framebuffer 驱动
 
-A20OS 当前 display 类只承诺 2D 扫描输出和 framebuffer，不承诺 3D render context、命令验证或 GPU 内存管理。类编号为 `DEV_CLASS_DISPLAY`，操作类型为 `gpu_dev_ops_t`。
+A20OS 的 display 类（`DEV_CLASS_DISPLAY`，`gpu_dev_ops_t`）包含两层：**2D 扫描输出与 framebuffer**（本文件主题），以及 **virtio-gpu 3D (virgl) 透传**（[3D 图形加速栈](../gpu/3d-graphics.md)）。2D 层只承诺扫描输出；3D 层通过 virtio-gpu 的 `SUBMIT_3D` 把 virgl 命令流转发到 host 端 GL 上下文。
 
 ## 驱动接入
 
@@ -128,6 +128,10 @@ FBIO_MAP_FB 映射要求用户地址页对齐、范围不溢出 `USER_VA_LIMIT`�
 当前模式固定 1024x768x32，controlq 使用实例 mutex 串行化同步命令；请求和响应先复制到实例内稳定 DMA staging，等待期间保持中断开启。不得把调用者栈对象直接写入 descriptor，也不得用 `spin_lock_irqsave` 包围设备完成等待。
 
 动态模式设置必须先实现 display info 查询和 prepare/commit/rollback，不能只部分实现 `FBIOPUT_VSCREENINFO`。
+
+### VirtIO GPU 3D (virgl)
+
+当 QEMU 以 `virtio-gpu-gl-*` 设备（带 `-display egl-headless` 等 OpenGL 后端）启动时，驱动协商 `VIRTIO_GPU_F_VIRGL`，并可通过 `A20_GPU_IOCTL_*` 把 virgl 命令流转发给 host 端 GL 上下文（`CTX_CREATE`/`RESOURCE_CREATE_3D`/`SUBMIT_3D`）。接口、实现与用户态对接见 [3D 图形加速栈](../gpu/3d-graphics.md)。2D-only 设备自动回退，`gpu3d_test` 会报告 `2D-only device, skipping 3D path`。
 
 ## VMSVGA/SVGAv3 范例
 
