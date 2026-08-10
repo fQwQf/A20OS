@@ -525,6 +525,61 @@ static int test_file_interfaces(void)
         close(f);
     }
 
+    /* fbdev standard ioctls on /dev/fb0. */
+    struct fb_bitfield { uint32_t offset, length, msb_right; };
+    struct fb_var_screeninfo {
+        uint32_t xres, yres, xres_virtual, yres_virtual, xoffset, yoffset;
+        uint32_t bits_per_pixel, grayscale;
+        struct fb_bitfield red, green, blue, transp;
+        uint32_t nonstd, activate, height, width, accel_flags;
+        uint32_t pixclock, left_margin, right_margin, upper_margin, lower_margin;
+        uint32_t hsync_len, vsync_len, sync, vmode, rotate, colorspace;
+        uint32_t reserved[4];
+    };
+    struct fb_fix_screeninfo {
+        char id[16]; unsigned long smem_start; uint32_t smem_len;
+        uint32_t type, type_aux, visual; uint16_t xpanstep, ypanstep, ywrapstep;
+        uint32_t line_length; unsigned long mmio_start; uint32_t mmio_len;
+        uint32_t accel; uint16_t capabilities, reserved2[2];
+    };
+    struct fb_cmap {
+        uint32_t start, len; uint16_t *red, *green, *blue, *transp;
+    };
+    int fbfd = open("/dev/fb0", O_RDWR);
+    if (fbfd >= 0) {
+        struct fb_var_screeninfo var;
+        memset(&var, 0, sizeof(var));
+        /* No GPU in the headless smoke VM: ENODEV is acceptable there, but a
+         * configured GPU must answer. */
+        if (ioctl(fbfd, 0x4600 /* FBIOGET_VSCREENINFO */, &var) != 0) {
+            int e = errno;
+            close(fbfd);
+            if (e == ENODEV || e == ENXIO)
+                goto fb_skipped;
+            return fail("fb FBIOGET_VSCREENINFO", e);
+        }
+        if (var.xres == 0 || var.yres == 0)
+            return fail("fb resolution", 0);
+        struct fb_fix_screeninfo fix;
+        memset(&fix, 0, sizeof(fix));
+        if (ioctl(fbfd, 0x4602 /* FBIOGET_FSCREENINFO */, &fix) != 0)
+            return fail("fb FBIOGET_FSCREENINFO", errno);
+        var.xoffset = 0; var.yoffset = 0;
+        if (ioctl(fbfd, 0x4606 /* FBIOPAN_DISPLAY */, &var) != 0)
+            return fail("fb FBIOPAN_DISPLAY", errno);
+        int blank = 0;
+        if (ioctl(fbfd, 0x4611 /* FBIOBLANK */, blank) != 0)
+            return fail("fb FBIOBLANK", errno);
+        struct fb_cmap cmap;
+        memset(&cmap, 0, sizeof(cmap));
+        if (ioctl(fbfd, 0x4604 /* FBIOGETCMAP */, &cmap) != 0) {
+            close(fbfd);
+            return fail("fb FBIOGETCMAP", errno);
+        }
+        close(fbfd);
+    }
+fb_skipped:
+
     printf("SYSCALL_EXT: file-interfaces ok\n");
     return 0;
 }
