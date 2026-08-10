@@ -57,6 +57,13 @@ flag、对象类型或并发边界。
 - `/proc/thread-self` 目录（与 `self` 同样解析到当前线程）。
 - `/proc/<pid>/` 补齐：`limits`、`wchan`、`stack`。
 
+## GPU / 帧缓冲接口
+
+- fbdev 补齐 Linux 标准 ioctl：`FBIOPAN_DISPLAY`（仅接受 (0,0)）、`FBIOBLANK`（接受 0/1 无操作）、`FBIOGETCMAP`/`FBIOPUTCMAP`（真彩帧缓冲返回/接受恒等调色板）。
+- 修复 `FBIO_FLUSH`（A20 扩展）与 Linux 标准 `FBIOGETCMAP` 共用 0x4604 的冲突：`FBIO_FLUSH` 移到 0x4609，0x4604 归回 `FBIOGETCMAP`；LVGL 用户态常量同步更新。
+- `/sys/class/drm/card0*` 与 `/sys/class/drm/card0-Virtual-1/{enabled,status,modes}` 提供 DRM 显示元数据。
+- 音频仍是 A20 原生 `a20_audio` ioctl（非 Linux ALSA SNDRV 标准）；完整 DRM/ALSA 接口集（na-kernel 的 drm_ioctl 全套）列为后续工作。
+
 ## 维护规则
 
 1. 新增 Linux syscall 实现必须登记到 `syscall_coverage.md`。
