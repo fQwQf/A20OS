@@ -1,5 +1,7 @@
 # 进程锁拆分与调度器热路径审计
 
+> **历史里程碑审计**：本文记录本地 picker 锁拆分时的实现和测量背景，早于当前 EEVDF 策略。当前 `proc_runq_pick_local()` 仍保持 runqueue-lock-only 所有权交接，但下文的“扫描和老化”是旧策略快照，不应解释为 HEAD 仍执行 MLFQ aging。
+
 `PROCESS_LOCK_SPLIT_AUDIT`
 
 本文档在 Park/Wake、任务生命周期、超时、SMP 迁移和持久抢占协议通过其双架构压力矩阵之后，收口 PROC.md 第 8 步。该改动被刻意限定在已测量的调度器热路径；它不会仅仅为了增加锁的数量而削弱生命周期串行化。

@@ -9,7 +9,9 @@
 寄存器访问必须按硬件规定宽度，不能把 8 位 W1C 寄存器用 32 位 read-modify-write。W1C/W0C、读清除、写入触发等副作用要在寄存器定义旁说明。轮询循环必须同时具备硬件条件和超时：
 
 ```c
-uint64_t deadline = clock_get_ticks() + clock_ticks_per_sec();uint32_t spins = 1000000;while (!(readl(status) & READY)) {
+uint64_t deadline = clock_get_ticks() + clock_ticks_per_sec();
+uint32_t spins = 1000000;
+while (!(readl(status) & READY)) {
     if (clock_get_ticks() >= deadline || --spins == 0)
         return -ETIMEDOUT;
     arch_cpu_relax();
@@ -33,10 +35,13 @@ observe completion-> dma_sync_for_cpu(used/descriptor)-> validate id and length-
 ## DMA API
 
 ```c
-void *dma_alloc_coherent(size_t size, uint64_t *dma_handle);void dma_free_coherent(void *vaddr, size_t size, uint64_t dma_handle);void dma_sync_for_device(void *vaddr, size_t size);void dma_sync_for_cpu(void *vaddr, size_t size);
+void *dma_alloc_coherent(size_t size, uint64_t *dma_handle);
+void dma_free_coherent(void *vaddr, size_t size, uint64_t dma_handle);
+void dma_sync_for_device(void *vaddr, size_t size);
+void dma_sync_for_cpu(void *vaddr, size_t size);
 ```
 
-`dma_alloc_coherent` 返回清零的 CPU 地址，并在 `dma_handle` 返回设备使用的物理/DMA 地址。释放时必须传回同一地址、大小和 handle。当前分配器基于 `kmalloc`，不接受设备 DMA mask、IOMMU domain 或显式大对齐；需要 32 位 DMA、页对齐或大连续区的设备必须在 probe 中验证 handle/对齐，必要时使用页分配器并记录限制。
+`dma_alloc_coherent` 返回清零的 CPU 地址，并在 `dma_handle` 返回设备使用的物理/DMA 地址。释放时必须传回同一地址、大小和 handle。基础版本基于 `kmalloc`；框架另提供 `dma_alloc_coherent_aligned`/`dma_free_coherent_aligned` 的页分配对齐版本。两者都没有设备 DMA mask 或 IOMMU domain 参数，需要 32 位 DMA 或其他设备地址限制时仍必须在 probe 中验证 handle 并记录限制。
 
 静态 ring/buffer 使用 `va_to_pa()` 生成 DMA 地址，并必须在各架构线性映射范围内。不得把栈上对象交给异步 DMA；同步命令也只有在确认完成后才能离开栈帧。设备超时后可能仍持有 buffer，必须先复位/停止设备，再复用或释放。
 
@@ -54,7 +59,7 @@ void free_irq(uint32_t irq, void *priv);
 
 handler 返回 `int`，当前 dispatch 不使用返回值。handler 必须：确认设备中断源；清硬件状态；完成有界 ring 推进；记录/唤醒后立即返回。不得分配、访问 VFS、睡眠或长时间轮询。ack/eoi 由核心/板级 irqchip 处理。
 
-当前限制：IRQ 表固定 256 项；每 IRQ 一个 handler；`IRQF_SHARED` 没有通用 handler 链；VirtualBox ARM 的 PCI 驱动目前多数采用轮询，直到 ACPI MSI/INTx 路由完整。
+当前限制：IRQ 表固定 256 项。`IRQF_SHARED` 已实现单链表 handler chain；首个注册和所有追加注册都必须带共享标志，否则重复注册返回 `-EBUSY`。VirtualBox ARM 的 PCI 驱动目前多数采用轮询，直到 ACPI MSI/INTx 路由完整。
 
 `priv` 同时是 handler 参数和 IRQ 所有权 token。`free_irq(irq, priv)` 的 `priv` 必须与 `request_irq` 完全相同；不匹配不会移除他人的 handler。成功释放会先从 dispatch 表摘除 handler、屏蔽中断线，并等待已取得快照的在途 handler 返回，因此随后才能释放 `priv` 指向的内存。不得从该 IRQ 自己的 handler 中调用 `free_irq`。
 
@@ -63,7 +68,9 @@ handler 返回 `int`，当前 dispatch 不使用返回值。handler 必须：确
 实例共享状态使用 `spinlock_t`。获取方式通常为：
 
 ```c
-uint64_t flags = spin_lock_irqsave(&priv->lock);/* 只做不会睡眠、不会分配的短操作 */spin_unlock_irqrestore(&priv->lock, flags);
+uint64_t flags = spin_lock_irqsave(&priv->lock);
+/* 只做不会睡眠、不会分配的短操作 */
+spin_unlock_irqrestore(&priv->lock, flags);
 ```
 
 全局顺序为 `driver registry/IRQ locks -> device-private locks`。driver core 不得持有 registry 锁调用生命周期回调。设备锁通常最内层；不得在其下调用 VFS、`kmalloc`、调度或长 busy wait。网络另有 `g_lwip_lock -> device lock`。现有例外与具体锁保护字段见 [锁顺序](lock-order.md)。
@@ -84,6 +91,6 @@ remove 必须先禁止新等待，再唤醒所有等待者并让其返回 `-ENOD
 
 ## 用户指针
 
-类驱动只处理内核 buffer。VFS/ABI 适配层负责 `copy_to_user/copy_from_user`。驱动 ioctl 不得直接解引用用户地址。所有结构长度、枚举值、位图范围、乘加溢出和映射边界必须在适配层验证。
+类驱动的 read/write 只处理内核 buffer。VFS/ABI 适配层负责 `copy_to_user/copy_from_user`。audio 通用 ioctl 和 block 的标准查询已在 devfs 封送，但自定义 block/char ioctl 当前仍会收到原始 `arg`；驱动不得直接解引用，应先扩展通用适配层。所有结构长度、枚举值、位图范围、乘加溢出和映射边界必须在适配层验证。
 
 违反这些契约通常会在 `make check-concurrency-foundation` 或 smoke 测试里暴露，详情见 [测试门禁](../../testing/testing-gates.md)。

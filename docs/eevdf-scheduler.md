@@ -1,6 +1,6 @@
 # EEVDF 调度器设计
 
-本文描述 `kernel/proc/sched.c` 当前实现的 EEVDF（Earliest Eligible VirtualDeadline First，最早资格虚拟截止时间优先）调度核心，及其在 SMP 负载均衡、资格门控、时间片旋钮方面的扩展。与[进程、调度与阻塞协议](process-scheduler.md) 互补：后者讲任务状态、CPU所有权与锁协议，本文讲公平/延迟的**选择策略**。
+本文描述 `kernel/proc/sched.c` 当前实现的 EEVDF（Earliest Eligible Virtual Deadline First，最早资格虚拟截止时间优先）调度核心，及其在 SMP 负载均衡、资格门控、虚拟 slice 旋钮方面的扩展。与 [进程、调度与阻塞协议](process-scheduler.md) 互补：后者讲任务状态、CPU 所有权与锁协议，本文讲公平/延迟的**选择策略**。
 
 ## 1. 背景与目标
 
@@ -30,19 +30,19 @@ vruntime += dt * NICE0_LOAD / weight
 
 ### 2.2 系统虚拟时间与资格
 
-每个 CPU 的 runqueue 维护系统虚拟时间 `vtime`，按可运行任务的总权重推进：
+每个 CPU 的 runqueue 维护系统虚拟时间 `vtime`。当前实现的分母是仍排队的 EEVDF 任务权重和，不包含正在运行的当前任务：
 
 ```text
-vtime += dt * NICE0_LOAD / total_weight
+vtime += dt * NICE0_LOAD / queued_eevdf_weight
 ```
 
-只有当队列里存在可运行的 EEVDF 任务时 `vtime` 才推进。任务 `t` 当且仅当满足以下条件时**有资格**（eligible）被选中：
+只有当队列里仍有 EEVDF 任务时 `vtime` 才推进。任务 `t` 满足以下条件时属于优先候选（eligible）：
 
 ```text
 vruntime <= vtime
 ```
 
-含义：`vruntime` 落后于系统虚拟时间的任务还没用满自己的公平份额（lag为正，欠账），可以运行；跑过头的任务（vruntime 领先）被排除在候选之外，从而不可能仅靠短时间片反复抢占。
+含义：`vruntime` 落后于系统虚拟时间的任务还没用满自己的公平份额（lag 为正，欠账），优先参与选择；跑过头的任务暂不进入 eligible 集合。当前实现另有进展保证：如果队列里没有任何 eligible 任务，picker 仍选择最早 deadline，而不是让 CPU 空转。
 
 ### 2.3 虚拟截止时间与选择规则
 
@@ -53,7 +53,7 @@ vslice = base_slice * NICE0_LOAD / weight
 deadline = vruntime + vslice
 ```
 
-**选择规则：在所有有资格的任务里，选 `deadline` 最早的一个。** 短时间片的任务 `deadline` 更早，因此低延迟任务自然先跑；但资格门控保证它不能超出自己的加权份额。这正是 EEVDF 同时提供公平与延迟的关键。
+**选择规则：队列已按 deadline 升序排列，picker 从头扫描并选择第一个 eligible 任务；若没有 eligible 任务，则以队首的最早 deadline 保证进展。** `vslice` 较小会形成更早 deadline，而资格门控和按权 vruntime 共同约束长期份额。
 
 ### 2.4 调度类层次
 
@@ -62,7 +62,7 @@ deadline = vruntime + vslice
 | RT（`SCHED_FIFO`/`SCHED_RR`） | 级 0 | 固定优先级 1..99，不记账 vruntime，永远先于 EEVDF 类 |
 | EEVDF（`SCHED_NORMAL`/`BATCH`/`IDLE`） | 级 1 | 按"最早资格虚拟截止时间"排序的链表 |
 
-级 0 由 bitmap 的最低位置位表示，因此 RT 恒优先于 EEVDF。
+runqueue bitmap 只选择非空的级 0 或级 1；级 0 内部再线性扫描，选择数值更高的 RT priority。因级 0 总在级 1 前处理，RT 恒优先于 EEVDF。
 
 ## 3. 记账与切换
 
@@ -86,12 +86,12 @@ typedef struct proc_runq {
     uint32_t bitmap;
     unsigned nr_running;
     uint64_t eevdf_vtime;         /* 系统虚拟时间 */
-    uint64_t eevdf_weight;        /* 可运行 EEVDF 任务权重和 */
+    uint64_t eevdf_weight;        /* 排队中的 EEVDF 任务权重和 */
     ...
 } proc_runq_t;
 ```
 
-插入 O(n)（按 deadline），取头 O(1)。选中后 `on_rq -> dispatching -> on_cpu`所有权交接与旧实现一致（见 process-scheduler.md §1.2），本地 picker 仍只持本 CPU 的 runqueue 锁，迁移仍按 CPU 编号升序加锁。
+插入 O(n)（按 deadline）；队首 eligible 时选择为 O(1)，否则 picker 线性扫描，最坏 O(n)。无 eligible 时也要先扫描完整列表，随后复用队首作为 fallback。选中后 `on_rq -> dispatching -> on_cpu`所有权交接与旧实现一致（见 process-scheduler.md §1.2），本地 picker 仍只持本 CPU 的 runqueue 锁，迁移仍按 CPU 编号升序加锁。
 
 ## 5. SMP 负载均衡：空闲窃取
 
@@ -104,17 +104,17 @@ typedef struct proc_runq {
 - 校验被窃任务的 `cpus_allowed` 包含本地 CPU（尊重 affinity）；
 - 窃取从远端移除后把 runqueue 引用直接转交本地 dispatch，无 put/get 间隙。
 
-## 6. 时间片旋钮（阶段 C）
+## 6. 虚拟 slice 旋钮
 
-基础时间片可通过 `/proc/a20/sched_base_slice`（单位 ms，范围 1..1000）运行时调整，默认 10ms：
+EEVDF 的 `base_slice` 可通过 `/proc/a20/sched_base_slice`（单位 ms，范围 1..1000）运行时调整，默认 10 ms：
 
 ```sh
 cat /proc/a20/sched_base_slice      # 10
-echo 2 > /proc/a20/sched_base_slice # 低延迟（桌面）
-echo 50 > /proc/a20/sched_base_slice # 高吞吐/缓存友好（HPC 批处理）
+echo 2 > /proc/a20/sched_base_slice  # 更小的虚拟 deadline slice
+echo 50 > /proc/a20/sched_base_slice # 更大的虚拟 deadline slice
 ```
 
-短片 → 低延迟（EEVDF 让其 deadline 更早）；长片 → 减少抢占、缓存友好、吞吐更高。这与 Linux 的 `sched_base_slice_ns` 思路一致。
+该值参与 `vslice` 和虚拟 deadline 计算，因此会改变普通任务的选择顺序。当前 `proc_sched_tick()` 的实际周期抢占阈值仍固定使用编译期 `EEVDF_BASE_SLICE`（10 ms），没有读取这个 proc 值；因此不能把调大该旋钮描述为“减少实际抢占”或把调小描述为已经改变硬时间片。若未来让 tick 读取运行时值，需要同时更新源码和测试。
 
 ## 7. 与旧 MLFQ 的差异
 
@@ -126,15 +126,17 @@ echo 50 > /proc/a20/sched_base_slice # 高吞吐/缓存友好（HPC 批处理）
 | 防饿死 | aging 计时器 | 资格门控 + deadline 排序 |
 | SMP 负载均衡 | 仅唤醒放置 | 唤醒放置 + 空闲窃取 |
 | RT | 级 0 与老化任务混排 | 级 0 专属，语义清晰 |
-| 时间片 | 固定 10ms | 可调旋钮 |
+| slice | 固定 10 ms | 虚拟 deadline slice 可调；tick 抢占仍为 10 ms |
 
-## 8. 验证
+## 8. 历史验证快照
 
-- **nice 权重真实生效**：同窗内 `nice -20` 获得约 100000 倍的 CPU（vs `nice 19`），符合加权比例共享。
+以下结果来自 EEVDF 引入期的历史验收记录（文档最初加入于 `97746002`），用于说明算法设计动机，不是本轮源码审计基线 `e33c3219` 的新测试结果。该基线尚无完全匹配的正式全流程测试；最新完整干净证据是较早的 `f9732348`。
+
+- **nice 历史观察**：旧记录声称同窗内 `nice -20` 相对 `nice 19` 获得约 100000 倍 CPU；当前权重表两端是 43020/88（约 489 倍），且本页没有绑定该数字的原始日志，因此不能把 100000 倍继续表述为理论比例或 HEAD 验证结果。
 - **负载均衡**：8 个忙任务分布在全部 8 核（busy_cores=8），此前堆在一核。
 - **8 核压力**：`sched_stress` 的 `smp-runqueue` 与 `lock-split` 全 PASS， 空闲窃取以 `runqueue_migrations` 计数正常触发。
-- **全量门禁**：双架构（riscv64/loongarch64）构建与启动、5 架构构建、 全部 21 个 `check-doc-test-gates` 通过；procfs/sched/futex/proc/mm/vfs 压力测试全绿。
-- **时间片旋钮**：2ms/50ms 下系统稳定。
+- **全量门禁**：历史记录包含双架构构建与启动、5 架构构建、`check-doc-test-gates` 聚合目标以及 procfs/sched/futex/proc/mm/vfs 压力测试。`check-doc-test-gates` 不只是文档检查；其依赖包含构建和 QEMU runtime smoke，范围较广且可能耗时较长。
+- **虚拟 slice 旋钮**：历史样本在 2 ms/50 ms 值下保持稳定；该结果不表示实际 tick 抢占周期随之变化。
 
 ## 9. 已知限制与后续工作
 

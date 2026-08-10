@@ -1,8 +1,8 @@
 # A20OS 驱动文档
 
-如何为 A20OS 添加一个驱动：从读懂硬件手册，到实现可编译、可枚举、可绑定、能清理的驱动；以及 generic 的模块优先与 embedded 的全内建部署策略。
+如何为 A20OS 添加一个驱动：从读懂硬件手册，到实现可编译、可枚举、可绑定、能清理的驱动；以及 generic 的架构模块清单与 embedded 的显式静态源码账本。
 
-通用实现位于 `kernel/drivers/`，板级适配位于 `kernel/platform/`，公共头文件位于 `kernel/include/drivers/`，可加载驱动模块位于 `kernel/drvmod/examples/`。
+通用实现位于 `kernel/drivers/`，板级适配位于 `kernel/platform/`，公共头文件位于 `kernel/include/drivers/`，可加载驱动模块包装位于 `kernel/drvmod/examples/`。full profile 不按类目录通配收集设备驱动：`tools/driver-sources.mk` 仍通配收集 `drivers/core/*.c` 与 `drivers/bus/*.c`，但 generic 内核服务和 embedded 设备实现采用显式源码账本；generic 的设备包则以 `tools/driver-modules.mk` 的每架构清单为准。
 
 ## 分类导航
 
@@ -12,7 +12,7 @@
 |---|---|
 | [从零开发第一个驱动](guide/getting-started.md) | 从 PCI 网卡模板入手，走通创建、注册、构建和调试 |
 | [可安装内核驱动](guide/kernel-modules.md) | 可加载内核模块（drvmod）、框架导出 API、DriverStore 与迁移状态 |
-| [驱动部署 Profile](guide/deployment-profiles.md) | generic 模块优先、embedded 全内建、Early/Runtime DriverStore |
+| [驱动部署 Profile](guide/deployment-profiles.md) | generic 架构模块清单、embedded 静态账本、Early/Runtime DriverStore |
 | [核心设备与驱动模型](guide/core-model.md) | `device_t`、`driver_t`、`bus_type_t` 与 probe/remove 生命周期 |
 | [热插拔与即插即用](guide/hotplug-and-pnp.md) | USB/PCI 运行期发现、ADD/REMOVE 生命周期与驱动编写要求 |
 | [设备类接口](guide/device-classes.md) | 各类操作、单位、返回值和阻塞语义 |

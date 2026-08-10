@@ -1,36 +1,38 @@
 # THIRD-PARTY NOTICES
 
-本文件集中声明 A20OS 分发包中涉及的第三方组件及其许可证，作为对[LICENSE](../LICENSE)（Apache-2.0）第 4(c)/4(d) 条的落实。许可证全文以各组件仓库内的 LICENSE/COPYING 文件为准；本文件仅作索引与再分发声明。
+本文件索引 A20OS 源码与构建产物可能包含的第三方组件。它不是法律意见，也不能替代针对实际分发物、精确源码 revision 和对应 LICENSE/COPYING 的核验。
 
 ## 1. 分发边界声明
 
-A20OS 的分发物是**源代码**（本仓库，含 git submodule）。所有镜像（`fat32.img`、`ext4.img`、`extra.img`、ISO 等）均为**由本仓库源码与submodule 源码构建出来的构建产物**，不作为独立的二进制分发包对外分发。因此：
+A20OS 仓库不能预先限定下游只分发源码。`fat32.img`、`ext4.img`、`extra.img`、ISO、独立可执行文件和共享库一旦提供给第三方，就是需要按其实际内容审查的二进制/资源分发物。因此：
 
-- GPL/LGPL 组件（git、vim、gcc、binutils、FFmpeg、Breeze 等）以**源码形式** 随仓库的 `user/external/` submodule 提供，构建者在本地自行编译。
-- 构建产物如需分发给他人，应连同对应组件的源码获取说明一起提供 （各 GPL 组件的源码即其 submodule）。
+- `kernel/external/lwip` 和 `user/external/{musl,mlibc,mksh-cvs2git,sbase,tlse}` 是普通 tracked tree；不能称为 submodule。
+- `.gitmodules` 登记外部项目的路径和 URL，超级项目的 gitlink 条目才固定具体 commit。超级项目只跟踪 gitlink，不等于把每个 submodule 的许可证全文作为普通文件跟踪；发布前必须在精确 commit 中核验许可证和 notices。
+- `user/external/rust` 与 `user/external/riscv64-glibc-sysroot` 的本地内容不在审计基线 `e33c3219` 中；若把由它们产生或取得的文件装入镜像，必须另行保留来源、版本和许可证材料。
+- 是否需要随附源码、书面 offer、notice、重链接材料或其他内容，取决于实际组件、链接方式和分发形式，不能由“源码可在工作区找到”一概替代。
 
 ## 2. 内核与自研代码
 
 | 组件 | 许可证 | 说明 |
 |------|--------|------|
-| A20OS 内核（`kernel/`） | Apache-2.0 | 自研；含对 Uinxed-Kernel (Apache-2.0)、RocketOS (MIT) 等的设计借鉴，详见 [ACKNOWLEDGMENTS.md](./ACKNOWLEDGMENTS.md) |
-| A20OS 用户态（`user/` 自研部分） | Apache-2.0 | liba20c、liba20rt、init、cmds、desktop 等 |
+| A20OS 项目代码 | 根目录 `LICENSE` 为 Apache-2.0；第三方/来源未决部分除外 | RocketOS-referencing 的 VFS、board 与 GMAC 文件来源和许可证尚未核实，见 [ACKNOWLEDGMENTS.md](./ACKNOWLEDGMENTS.md) |
+| A20OS 用户态中由本项目创作且不属于第三方树的部分 | 根目录 `LICENSE` 为 Apache-2.0；仍受逐文件来源审计约束 | liba20c、liba20rt、init、cmds、desktop 等；此行不覆盖 `user/external/` |
 
 ## 3. 内核集成的第三方代码
 
 | 组件 | 许可证 | 位置 | 说明 |
 |------|--------|------|------|
-| lwIP | BSD-3-Clause | `user/external/lwip` | 网络协议栈，`NO_SYS=1` 模式集成；保留上游 COPYING |
+| lwIP | BSD-3-Clause | `kernel/external/lwip` | 网络协议栈，`NO_SYS=1` 模式集成；跟踪上游 `COPYING` |
 
-## 4. 用户态构建依赖（构建时引入，源码随 submodule）
+## 4. 用户态构建依赖
 
 | 组件 | 许可证 | 位置 |
 |------|--------|------|
 | musl | MIT | `user/external/musl` |
 | mlibc | MIT | `user/external/mlibc` |
-| mksh | MirBSD License | `user/external/mksh-cvs2git` |
+| mksh | 逐文件混合：MirBSD/MirOS 条款；`strlcpy.c` 为 ISC；`mbsdcc.h`/`mbsdint.h` 为 CC0 OR MirOS；`expr.c` 含 Unicode notice | `user/external/mksh-cvs2git` |
 | sbase | MIT | `user/external/sbase` |
-| tlse | MIT（可选双许可） | `user/external/tlse` |
+| TLSe | BSD-2-Clause OR Unlicense | `user/external/tlse` |
 | LVGL | MIT | `user/external/lvgl` |
 | Weston | MIT | `user/external/weston` |
 | Wayland | MIT | `user/external/wayland` |
@@ -44,29 +46,29 @@ A20OS 的分发物是**源代码**（本仓库，含 git submodule）。所有�
 | fastfetch | MIT | `user/external/fastfetch` |
 | zlib | Zlib | `user/external/zlib` |
 | musl-cross-make | MIT | `user/external/musl-cross-make` |
-| Rust 工具链 | MIT/Apache-2.0 | `user/external/rust` |
+| Rust 工具链 | 必须按实际取得的分发核验 | `user/external/rust`（审计基线 `e33c3219` 未跟踪内容） |
 
-## 5. 独立用户态程序（extra 构建，源码随 submodule，产物不随 A20OS 分发）
+## 5. 用户态程序、静态链接与镜像
 
-以下组件以**独立可执行程序**形式由 `user/extra.mk` 构建（GPL/LGPL 组件的"独立且分离"原则适用；它们不链接进内核，也不与 musl 静态链接成单一二进制）：
+基础 `user/Makefile` 使用 `-static`（NOMMU 使用 `-static-pie`）并直接链接 musl CRT 与 `libc.a`；init、mksh、sbase 命令、wget/TLSe 和本地命令等因此包含静态 musl 链接。`user/extra.mk` 同样设置 `-static`，Vim、Git 及其辅助库也链接 musl CRT/`libc.a`。不能声称这些独立程序“不与 musl 静态链接”。Wayland 构建则同时产生共享库，FFmpeg 配置为 shared。
 
 | 组件 | 许可证 | 位置 | 备注 |
 |------|--------|------|------|
 | git | GPL-2.0-only | `user/external/git` | 独立可执行文件 |
 | vim | Vim License | `user/external/vim` | 独立可执行文件 |
-| gcc | GPL-3.0-with-GCC-exception | `user/external/`（gcc 源码） | 独立工具链 |
+| GCC | 应按实际取得源码的许可证与 GCC Runtime Library Exception 核验 | `user/external/gcc`（审计基线 `e33c3219` 未跟踪该目录） | `user/extra.mk` 仅在 `configure` 存在时启用可选工具链构建 |
 | binutils | GPL-3.0 / LGPL-3.0 | `user/external/binutils` | 独立工具链 |
-| FFmpeg | LGPL-2.1-or-later | `user/external/ffmpeg` | 独立可执行文件 |
-| Breeze | GPL-2.0 / LGPL | `user/external/breeze` | 资源/图标 |
+| FFmpeg | LGPL-2.1-or-later（以固定 revision 配置为准） | `user/external/ffmpeg` | `user/wayland/build.sh` 构建共享库，非 `user/extra.mk` 独立程序 |
+| Breeze | 多种 GPL/LGPL 版本，按资源文件核验 | `user/external/breeze` | 资源/图标 |
 
-> 若将上述任一构建产物（extra.img 等）分发给第三方，请按对应 GPL/LGPL 条款随附其源码（即 `user/external/` 下对应 submodule）与许可证文本。
+> 分发 `fat32.img`、`extra.img`、GUI 镜像或单个二进制前，应从镜像清单反推其中的精确程序、静态/动态依赖和 gitlink revision，再准备相应许可证、notice 与源码提供材料。不能假定所有来源都是 submodule，也不能假定只提供超级项目 URL 已满足各组件义务。
 
 ## 6. 设计参考与对照系统
 
-A20OS 借鉴/参照了以下项目的设计或将其作为研究对照，但**不使用其代码**；许可证声明见 [ACKNOWLEDGMENTS.md](./ACKNOWLEDGMENTS.md)。
+A20OS 文档或源码注释提到以下实现参考与研究对照。该分类本身不证明是否存在复制或派生；来源边界见 [ACKNOWLEDGMENTS.md](./ACKNOWLEDGMENTS.md)。
 
-- Uinxed-Kernel（Apache-2.0）
-- RocketOS（MIT）
+- Uinxed-Kernel（源码注释称 Apache-2.0，但未记录精确 revision）
+- RocketOS（许可证与代码来源未决；源码注释称 MIT，但缺精确 revision 或单独授权）
 - Windows NT / Zircon (Fuchsia)（设计启发）
 - seL4、Capsicum、CHERI、Redox、S3K、Mach（研究对照）
 

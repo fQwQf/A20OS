@@ -95,7 +95,7 @@ DRIVER_REGISTER(example_driver);
 
 宏把 `driver_t *` 放进 `.driver_init` 链接段。各架构/平台链接脚本以 `KEEP(*(.driver_init))` 保留它，`driver_core_init()` 启动时遍历并注册。不要手动从 `kernel_main` 调用 probe，也不要自行修改链接表。
 
-Makefile 对 full profile 使用 `kernel/drivers/<class>/*.c` 通配，所以放入已有类目录后通常不需要追加源文件。新增子目录或 MCU profile 文件必须显式更新 Makefile。
+Makefile 不通配收集 full profile 的设备驱动。新增源码必须进入 `tools/driver-sources.mk` 的适用显式账本；generic 包还必须在 `tools/driver-modules.mk` 增加模块包装规则和适用架构的 `DRVMOD_MODULES` 项。MCU 的 `BOARD_DRIVER_DIR` 仍按板目录通配，是独立例外。
 
 ## 生命周期的精确语义
 

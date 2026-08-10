@@ -1,5 +1,7 @@
 # STM32F103 移植与运行手册
 
+> **源码说明、硬件快照与计划混合页**：构建变量、目录和已接入的驱动 API 已按审计基线 `e33c3219` 核对；Xuanwu 外设、电气故障和板上行为来自较早硬件调试记录，不是该基线的重新验收结果；“下一步”明确是计划能力。`make check-stm32f103` 只执行架构边界静态检查并构建 Xuanwu 固件，不运行 QEMU 或物理板测试。自动 QEMU 和 OpenOCD launcher 当前都引用旧产物路径，不可作为运行或烧录入口。
+
 > 不要这样做：不要把板级常量或引脚定义藏进可复用的 `kernel/drivers/stm32f1/` 驱动里。可复用驱动应通过 board config 或 platform data 获取资源；引脚和时钟这些事实属于 `kernel/platform/stm32f103/`。
 
 STM32F103 是 ARMv7-M/Cortex-M3、无 MMU 的 bring-up profile。它复用 A20OS 的架构和 board 边界：
@@ -9,7 +11,7 @@ STM32F103 是 ARMv7-M/Cortex-M3、无 MMU 的 bring-up profile。它复用 A20OS
 - `kernel/platform/stm32f103`：clock/memory 配置、NVIC-facing board 操作、外部 IRQ 路由、board/device 组合。
 - `kernel/mcu`：小内存 kernel profile 和 allocator。
 
-MCU profile 链接通用调度器和一小部分 NOMMU/VFS，但不包含完整网络或 VM 子系统。STM32F103 通常只有 20 KiB SRAM 且无 MMU，所以这些设施需要嵌入式配置层，而不是只加新 CPU 和设备驱动。当前镜像已验证：reset/data/BSS 设置、UART 输出、IRQ 进入、1 kHz SysTick、抢占式任务调度、设备服务任务和动态分配。
+MCU profile 链接通用调度器和一小部分 NOMMU/VFS，但不包含完整网络或 VM 子系统。STM32F103 通常只有 20 KiB SRAM 且无 MMU，所以这些设施需要嵌入式配置层，而不是只加新 CPU 和设备驱动。源码实现 reset/data/BSS 设置、UART、IRQ、1 kHz SysTick、抢占式任务调度、设备服务任务和动态分配；实际板上行为需按“硬件 smoke test”重新验证。
 
 ## 构建固件
 
@@ -22,7 +24,8 @@ make stm32f103-bringup
 输出：
 
 ```text
-.kernel-build/armv7m-both-bringup-nommu-stm32f103-f64k-r20k/kernel.elf.kernel-build/armv7m-both-bringup-nommu-stm32f103-f64k-r20k/kernel.bin
+.kernel-build/armv7m-stm32f103-both-bringup-nommu-stm32f103-f64k-r20k/kernel.elf
+.kernel-build/armv7m-stm32f103-both-bringup-nommu-stm32f103-f64k-r20k/kernel.bin
 ```
 
 二进制链接到 flash 地址 `0x08000000`。用 OpenOCD、ST-Link 或其他 STM32 编程器烧写。USART1 用 PA9/PA10，115200 8N1。通用 bring-up 目标使用 8 MHz HSI 时钟。
@@ -33,7 +36,7 @@ make stm32f103-bringup
 make stm32f103-xuanwu
 ```
 
-同时构建无外设基线和完整 Xuanwu 镜像：
+运行架构边界检查并构建 Xuanwu 镜像：
 
 ```sh
 make check-stm32f103
@@ -42,23 +45,14 @@ make check-stm32f103
 输出：
 
 ```text
-.kernel-build/armv7m-both-bringup-nommu-stm32f103-f512k-r64k/kernel.bin
+.kernel-build/armv7m-stm32f103-both-bringup-nommu-stm32f103-f512k-r64k/kernel.bin
 ```
 
-接上 CMSIS-DAP probe 并安装 OpenOCD 后：
+审计基线中的 `STM32_XUANWU_ELF` 和 `run-stm32f103-qemu` 启动 recipe 仍引用加入 `BOARD` 之前的旧目录名，而通用 `BUILD_DIR` 已生成上面的新路径。因而 `stm32f103-xuanwu`/`check-stm32f103` 的构建产物路径以上述 `BUILD_DIR` 为准；`flash-stm32f103-xuanwu` 和 `run-stm32f103-qemu` 存在已知路径不一致，修复 Makefile 前不能把目标存在写成烧录或 QEMU 已通过。
 
-```sh
-make flash-stm32f103-xuanwu
-```
+`flash-stm32f103-xuanwu` recipe 的目标流程使用 `interface/cmsis-dap.cfg`、SWD 1 MHz，并允许通过 `STM32_OPENOCD_ADAPTER_KHZ` 和 `STM32_CMSIS_DAP_SERIAL` 选择速率和 probe。但 recipe 当前读取旧路径中的 ELF，因此不能直接使用。
 
-默认 OpenOCD interface 是 `interface/cmsis-dap.cfg`，用 SWD 1 MHz。可按需要覆盖：
-
-```sh
-make flash-stm32f103-xuanwu \
-    STM32_OPENOCD_ADAPTER_KHZ=400
-```
-
-PZ CMSIS-DAP firmware 不能可靠完成 OpenOCD 通用 `reset halt` 序列。Makefile 因此通过 Cortex-M Debug Halting Control and Status Register 停住，写入并校验 flash，再从 flash vector table 恢复 MSP 和 PC 后恢复运行。可用 `STM32_CMSIS_DAP_SERIAL=<serial>` 选择特定 probe。
+该 recipe 原本针对 PZ CMSIS-DAP firmware 无法可靠完成通用 `reset halt` 的情况：通过 Cortex-M Debug Halting Control and Status Register 停住，写入并校验 flash，再从 flash vector table 恢复 MSP 和 PC。修复路径前，如需手工烧录，必须显式选用上面实际 `BUILD_DIR` 中的 ELF，并独立验证工具和硬件；不能把当前 Make 目标记为通过。
 
 ## Xuanwu 时钟与 UART
 
@@ -74,14 +68,18 @@ PB5 分配给 Xuanwu 板的 ULN2003 电机输入，由 TIM3_CH2 通过 partial r
 
 ## TF 卡与 SDIO
 
-板载 TF 卡座使用 STM32 SDIO 引脚 `PC8-PC12` 和 `PD2`。驱动支持 SDSC 和 SDHC/SDXC 卡、1-bit fallback 和 4-bit 传输、单扇区读写、通用 `block_dev_t` 接口、FAT32 boot sector 检测、卷标报告、定期健康检查、移除处理和插入后自动重新 probe。MCU profile 不在进程可见命名空间里暴露这张卡。小型 board adapter 可以挂载 FAT32lite 用于校准和内核侧访问，同时 SDIO 驱动也发布通用 `block_dev_t` 接口。
+板载 TF 卡座使用 STM32 SDIO 引脚 `PC8-PC12` 和 `PD2`。驱动支持 SDSC 和 SDHC/SDXC 卡、1-bit fallback 和 4-bit 传输、单扇区读写、通用 `block_dev_t` 接口、FAT32 boot sector 检测和卷标报告。ready 状态每 2 秒检查一次；卡缺失或移除后，每 5 秒自动调用 recovery probe，因此重新插入无需串口命令。MCU profile 不在进程可见命名空间里暴露这张卡。小型 board adapter 可以挂载 FAT32lite 用于校准和内核侧访问，同时 SDIO 驱动也发布通用 `block_dev_t` 接口。
 
 ## 触摸与按键
 
 3.5 英寸面板搭载 XPT2046 兼容电阻触摸屏：
 
 ```text
-PB1 = T_CLKPB2 = T_DOUTPF9 = T_DINPF10 = T_PENPF11 = T_CS
+PB1  = T_CLK
+PB2  = T_DOUT
+PF9  = T_DIN
+PF10 = T_PEN
+PF11 = T_CS
 ```
 
 触摸每 20 ms 采样一次，带 trimmed sampling、噪声剔除、平滑和可配置轴校准。XPT2046 没有可读 device ID，所以空闲面板和缺失面板都无害地表现为 armed interface，直到 `T_PEN` 被拉低。
@@ -89,7 +87,10 @@ PB1 = T_CLKPB2 = T_DOUTPF9 = T_DINPF10 = T_PENPF11 = T_CS
 四个黄色按键在触摸不可用时也可用。vendor 映射：
 
 ```text
-PA0  active-highPE4  active-lowPE3  active-lowPE2  active-low
+PA0  active-high
+PE4  active-low
+PE3  active-low
+PE2  active-low
 ```
 
 它们每 20 ms 采样并做 debounce，对应上、左、下、右事件（顺序为 `PA0`、`PE2`、`PE3`、`PE4`）。左右键在 `STATUS`、`MEM`、`TF`、`BT`、`INPUT TEST` 页面间切换；上下键选择状态行；右键打开选中的 memory、storage、Bluetooth 或 input 行。在 input 页，上键移动可见测试光标，下键清除画布。
@@ -131,7 +132,7 @@ USART3 接收走中断驱动 ring buffer，按换行或 20 ms 空闲间隔分帧
 
 启用 USART3 前，驱动会先测试 PB11 是否跟随内部上拉/下拉。如果跟随，说明模块 TX 路径浮空，启动会报告 `rx=floating`。在 Xuanwu 上通常意味着 P10 的 `USART3_TX`/`W_TX` 和 `USART3_RX`/`W_RX` 跳线帽缺失或接反、模块插反或未供电。正常上电空闲模块会报告 `rx=driven-high`。
 
-完整 AT probe 不会自动重复，因为缺失模块可能阻塞外设服务任务数秒。改变接线或供电后用 `bt retry` 触发重新探测。
+完整 AT probe 不会自动重复，因为缺失模块可能阻塞外设服务任务数秒。源码有 Bluetooth reprobe helper，但当前没有调用点，也没有 USART1 命令解析器；改变接线或供电后需要重启，不能使用文档中曾列出的 `bt retry` 命令。
 
 ## USART 共享驱动
 
@@ -147,17 +148,11 @@ ESP8266 是 ESP8266EX，1 MiB Flash，官方 Nano AT v1.7.4.0（SDK v3.0.4），
 
 接口只有真实模块在电气上驱动 PB11 或回复 AT 命令后才显示 ready；`WAITING` 仍需要验证过的 slave 配置和成功的 reset。这区分了“模块存在但 AT 方言未知”和“模块缺失”，而不会声称未验证的配置。默认名 `KasaneTeto`，PIN `2233`，UUID `0x1101`，波特率 `38400`，可通过上述构建变量修改。
 
-## 交互式串口命令
+## USART1 接收边界
 
-USART1 在 115200 8N1 提供交互式 bring-up 提示：
+USART1 使用 115200 8N1；RXNE 中断只把收到的字节送入 `kernel/mcu/uart.c` 的接收 ring。当前源码没有消费文本行的交互式命令解析器，因此曾记录的 `uart`、`perf`、`sd retry` 和 `bt ...` 都不是已实现接口。驱动打印的启动/状态日志仍可用于观察波特率、BRR、字节数和硬件错误。
 
-```text
-uartperfsd retrybtbt probebt at ATbt at AT+ROLE?bt at AT+NAME?bt at AT+PSWD?bt at AT+UART?
-```
-
-每次自动或手动 AT 交换都会打印 USART3 波特率、KEY 模式、转义命令、转义原始回复、字节数和硬件错误数。`reply=<none>` 表示 PB11 没有 UART 字节；反复出现带错误的 `\xNN` 数据说明波特、接线或信号质量有问题；可读的 `ERROR` 表示模块存在但不支持该 AT 方言。`uart` 命令打印两个端口的实测外设时钟、请求和实际波特、BRR、接收中断状态和累计硬件错误。蓝牙初始化后，USART3 应报告 `initialized=1`、`requested=38400`、`rx-irq=1`；非零错误计数直接说明 PB11 在翻转，但接收到的帧格式错误。
-
-SysTick 从实时 RCC HCLK 推导 1 kHz reload，而不是假设复位默认的 8 MHz。`perf` 命令报告 HCLK/PCLK 值和实测外设服务循环、光感采样、手动蓝牙重试、SD 卡检查的最大耗时。可选 HC-05 和缺失 TF 卡的初始化只在显式 UART 命令时重试，避免命令超时周期性地冻结输入和显示更新。
+SysTick 从实时 RCC HCLK 推导 1 kHz reload，而不是假设复位默认的 8 MHz。TF 卡缺失时由外设服务任务每 5 秒自动重试；Bluetooth 和 WiFi reprobe helper 当前没有调用点。
 
 ## 调度器与任务
 
@@ -171,13 +166,9 @@ MCU profile 现在链接通用 A20OS 进程调度器。ARMv7-M `__switch` 保存
 
 STM32CubeProgrammer 也可以把二进制写到地址 `0x08000000`，或直接写 ELF。复位后 USART1 在 PA9 115200 8N1 打印输出；接收是 PA10。正常 flash 启动时保持 BOOT0 低电平。
 
-## QEMU smoke test
+## QEMU launcher 限制
 
-```sh
-make run-stm32f103-qemu
-```
-
-QEMU 的 `stm32vldiscovery` 模型有 128 KiB flash 和 8 KiB SRAM，所以该目标使用与物理 STM32F103C8 镜像不同的构建目录和内存布局。
+QEMU 的 `stm32vldiscovery` 模型有 128 KiB flash 和 8 KiB SRAM，所以 `run-stm32f103-qemu` 配置的实际构建目录是 `.kernel-build/armv7m-stm32f103-both-bringup-nommu-stm32f103-f128k-r8k-qemu/`。launcher recipe 仍引用旧目录；当前目标会先构建，但不能正确启动该产物，也不是有效 smoke 结果。
 
 ## 硬件 smoke test
 
@@ -199,10 +190,10 @@ QEMU 的 `stm32vldiscovery` 模型有 128 KiB flash 和 8 KiB SRAM，所以该�
 
 ## 驱动开发提示
 
-- 复现 bring-up：执行 `make stm32f103-bringup` 或 `make stm32f103-xuanwu`，然后烧写并观察 USART1 输出。
+- 复现 bring-up：执行 `make stm32f103-bringup` 或 `make stm32f103-xuanwu`，从实际 `BUILD_DIR` 选择产物，用独立烧录工具写入后观察 USART1 输出。
 - 扩展 STM32F1 驱动层：把 GPIO、EXTI、SPI、I2C、SPI-flash 控制器接口做成可复用驱动，不要在可复用驱动里硬编码 Xuanwu 引脚。
 - 新板级移植：提供 `kernel/platform/<board>/` 下的链接脚本、`BOARD_INCLUDE_DIR` 和 `BOARD_DRIVER_DIR`；板级常量留在 platform 代码。
-- 调试外设时先用 `uart` 和 `perf` 命令确认时钟和错误计数，再怀疑驱动逻辑。
+- 调试外设时使用启动和状态日志确认时钟与错误计数；当前没有 `uart` 或 `perf` 命令解析器。
 
 ## 下一步
 
