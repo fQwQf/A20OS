@@ -380,21 +380,14 @@ fi
 
 # -------------------------------------------- libdrm headers + stub pc
 if want libdrm && ! stamp libdrm; then
-    echo "=== libdrm headers ==="
-    SRC=$USER_DIR/external/gui/libdrm
-    mkdir -p "$SYSROOT/include/libdrm" "$SYSROOT/include/drm"
-    cp "$SRC/include/drm/"*.h "$SYSROOT/include/libdrm/" 2>/dev/null || true
-    cp "$SRC/include/drm/"*.h "$SYSROOT/include/drm/" 2>/dev/null || true
-    cat > "$SYSROOT/lib/pkgconfig/libdrm.pc" <<EOF
-prefix=$SYSROOT
-libdir=$SYSROOT/lib
-includedir=$SYSROOT/include
-Name: libdrm
-Description: libdrm headers stub for A20OS
-Version: 2.4.120
-Libs: -L\${libdir} -ldrm
-Cflags: -I\${includedir} -I\${includedir}/libdrm
-EOF
+    echo "=== libdrm ==="
+    meson_pkg libdrm "$USER_DIR/external/gui/libdrm" \
+        -Dtests=false -Dudev=false -Dinstall-test-programs=false \
+        -Dman-pages=disabled -Dvalgrind=disabled \
+        -Dintel=disabled -Dradeon=disabled -Damdgpu=disabled \
+        -Dnouveau=disabled -Dvmwgfx=disabled -Dexynos=disabled \
+        -Dtegra=disabled -Dfreedreno=disabled -Detnaviv=disabled \
+        -Dvc4=disabled -Domap=disabled
     mark libdrm
 fi
 
