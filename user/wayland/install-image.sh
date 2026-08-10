@@ -149,6 +149,15 @@ if [ -f "$SYSROOT/bin/xfce4-session" ]; then
         copy_file "$SYSROOT/share/dbus-1/session.conf" /share/dbus-1/session.conf
     fi
 fi
+
+if [ -x "$SYSROOT/bin/labwc" ]; then
+    echo "[image] labwc compositor (wlroots)"
+    copy_file "$SYSROOT/bin/labwc" /labwc
+    for lib in libwlroots-0.19.so libdisplay-info.so.5 libxml2.so.2 \
+               libseat.so.1; do
+        copy_file "$SYSROOT/lib/$lib" "/lib/$lib" 2>/dev/null || true
+    done
+fi
 fi
 
 echo "[image] weston libs + modules"
@@ -322,7 +331,19 @@ if [ -x /bin/dbus-daemon ]; then
     /bin/dbus-daemon --session --address="$DBUS_SESSION_BUS_ADDRESS" --nofork --print-address 2>/dev/null &
 fi
 
-# Start the compositor in the background and wait for the socket.
+# Start the compositor and the XFCE session.  labwc is the XFCE 4.20
+# reference compositor: it implements wlr-layer-shell etc. natively and
+# starts the session command (-s) after coming up.
+export WAYLAND_DISPLAY=wayland-0
+export GDK_BACKEND=wayland
+export GDK_GL=disable
+export NO_AT_BRIDGE=1
+if [ -x /bin/labwc ]; then
+    export XDG_CONFIG_HOME=/tmp/.config
+    mkdir -p /tmp/.config/labwc
+    exec /bin/labwc -s /bin/xfce4-session
+fi
+# Fallback: Weston (no wlr-layer-shell) for images without labwc.
 /bin/weston --backend=fbdev-backend.so --seat=seat1 --shell=desktop-shell.so &
 WESTON_PID=$!
 i=0
@@ -331,13 +352,6 @@ while [ $i -lt 300 ]; do
     i=$((i+1))
     /bin/sleep 0.1
 done
-
-export WAYLAND_DISPLAY=wayland-0
-export GDK_BACKEND=wayland
-export GDK_GL=disable
-export NO_AT_BRIDGE=1
-# xfce4-session connects to the already-running compositor as a Wayland
-# client; startxfce4 would try to spawn its own compositor (labwc).
 exec /bin/xfce4-session
 EOS
 copy_file /tmp/opencode/run-xfce-$$.sh /run-xfce.sh
