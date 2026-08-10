@@ -3,6 +3,7 @@
 #include "core/consts.h"
 #include "core/string.h"
 #include "fs/anonfd.h"
+#include "fs/fdtable.h"
 #include "fs/file.h"
 #include "fs/vfs.h"
 #include "fs/vfs/stat_perm.h"
@@ -194,4 +195,33 @@ int memfd_create_file(int flags)
     if (!(flags & 0x2U))
         vf->seals = F_SEAL_SEAL;
     return anonfd_install_vfile(vf, flags);
+}
+
+/* Replace the memfd contents with the given bytes (used by the DRM PRIME
+ * export path to snapshot a dumb buffer).  Returns 0 on success. */
+int memfd_set_contents(int fd, const void *data, size_t len)
+{
+    if (fd < 0 || !data)
+        return -EINVAL;
+    int gfd = fdtable_get_current(fd);
+    if (gfd < 0)
+        return gfd;
+    vfile_t *vf = vfs_get_file_ref(gfd);
+    if (!vf)
+        return -EBADF;
+    memfd_file_t *mf = vf ? vf->priv : NULL;
+    if (!mf) {
+        vfs_put_file_ref(gfd, vf);
+        return -EBADF;
+    }
+    mutex_lock(&mf->data_lock);
+    int r = memfd_file_grow(mf, len);
+    if (r == 0) {
+        memcpy(mf->data, data, len);
+        mf->size = len;
+        if (vf->vnode) vf->vnode->size = len;
+    }
+    mutex_unlock(&mf->data_lock);
+    vfs_put_file_ref(gfd, vf);
+    return r;
 }

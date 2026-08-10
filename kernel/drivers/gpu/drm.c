@@ -4,11 +4,14 @@
 #include "core/errno.h"
 #include "core/string.h"
 #include "core/stdio.h"
+#include "core/klog.h"
 #include "drivers/core/driver_class.h"
 #include "drivers/gpu/gpu_core.h"
 #include "fs/anonfd.h"
 #include "fs/file.h"
+#include "fs/memfd.h"
 #include "fs/vfs.h"
+#include "mm/frame.h"
 #include "mm/mm.h"
 #include "mm/slab.h"
 #include "mm/vm.h"
@@ -39,9 +42,25 @@ typedef struct drm_buffer {
 } drm_buffer_t;
 
 typedef struct drm_context {
-    drm_buffer_t buffers[DRM_MAX_BUFFERS];
     uint32_t next_handle;
+    uint32_t magic;
+    int is_master;
 } drm_context_t;
+
+/* DRM dumb buffers are global to the device, so a handle created by one open
+ * (the wlroots dumb allocator) is visible to another (the wlroots backend),
+ * matching Linux DRM semantics.  wlroots exports a dumb buffer via PRIME on
+ * one fd and imports it on another, then creates an FB and pages it in. */
+static drm_buffer_t g_buffers[DRM_MAX_BUFFERS];
+static int g_buffer_count;
+
+/* PRIME fd <-> GEM handle mapping.  The dumb allocator exports a buffer
+ * through one DRM open and the backend imports it through another, so the
+ * mapping must be global, not per-context. */
+#define DRM_PRIME_MAX 64
+static int g_prime_fd[DRM_PRIME_MAX];
+static uint32_t g_prime_handle[DRM_PRIME_MAX];
+static int g_prime_count;
 
 static struct device *drm_gpu_device(void)
 {
@@ -78,6 +97,10 @@ struct drm_get_cap {
 struct drm_gem_close {
     uint32_t handle;
     uint32_t pad;
+};
+
+struct drm_auth {
+    uint32_t magic;
 };
 
 struct drm_prime_handle {
@@ -168,6 +191,14 @@ struct drm_mode_get_property {
     uint32_t count_enum_blobs;
 };
 
+struct drm_mode_obj_get_properties {
+    uint64_t props_ptr;
+    uint64_t prop_values_ptr;
+    uint32_t count_props;
+    uint32_t obj_id;
+    uint32_t obj_type;
+};
+
 struct drm_mode_connector_set_property {
     uint64_t value;
     uint32_t prop_id;
@@ -182,6 +213,18 @@ struct drm_mode_fb_cmd {
     uint32_t bpp;
     uint32_t depth;
     uint32_t handle;
+};
+
+struct drm_mode_fb_cmd2 {
+    uint32_t fb_id;
+    uint32_t width;
+    uint32_t height;
+    uint32_t pixel_format;
+    uint32_t flags;
+    uint32_t handles[4];
+    uint32_t pitches[4];
+    uint32_t offsets[4];
+    uint64_t modifier[4];
 };
 
 struct drm_mode_crtc_page_flip {
@@ -254,17 +297,20 @@ struct drm_mode_atomic {
 
 static drm_buffer_t *drm_find_buffer(drm_context_t *ctx, uint32_t handle)
 {
-    for (int i = 0; i < DRM_MAX_BUFFERS; i++)
-        if (ctx->buffers[i].used && ctx->buffers[i].handle == handle)
-            return &ctx->buffers[i];
+    (void)ctx;
+    for (int i = 0; i < g_buffer_count; i++)
+        if (g_buffers[i].used && g_buffers[i].handle == handle)
+            return &g_buffers[i];
     return NULL;
 }
 
 static void drm_free_buffer(drm_context_t *ctx, drm_buffer_t *b)
 {
+    (void)ctx;
     if (b->vmo)
         vmo_release(b->vmo);
     memset(b, 0, sizeof(*b));
+    b->used = 0;
 }
 
 static void drm_mode_fill(struct drm_mode_modeinfo *m, uint32_t w, uint32_t h,
@@ -361,6 +407,41 @@ static int drm_get_cap(drm_context_t *ctx, void *arg)
     return copy_to_user(arg, &c, sizeof(c)) < 0 ? -EFAULT : 0;
 }
 
+static int drm_get_magic(drm_context_t *ctx, void *arg)
+{
+    struct drm_auth a;
+    if (copy_from_user(&a, arg, sizeof(a)) < 0)
+        return -EFAULT;
+    if (ctx->magic == 0)
+        ctx->magic = (uint32_t)ctx + 0xA20; /* arbitrary per-open magic */
+    a.magic = ctx->magic;
+    return copy_to_user(arg, &a, sizeof(a)) < 0 ? -EFAULT : 0;
+}
+
+static int drm_auth_magic(drm_context_t *ctx, void *arg)
+{
+    struct drm_auth a;
+    if (copy_from_user(&a, arg, sizeof(a)) < 0)
+        return -EFAULT;
+    if (!ctx->is_master)
+        return -EACCES;
+    return 0;
+}
+
+static int drm_set_master(drm_context_t *ctx, void *arg)
+{
+    (void)arg;
+    ctx->is_master = 1;
+    return 0;
+}
+
+static int drm_drop_master(drm_context_t *ctx, void *arg)
+{
+    (void)arg;
+    ctx->is_master = 0;
+    return 0;
+}
+
 static int drm_mode_getresources(drm_context_t *ctx, void *arg)
 {
     struct drm_mode_card_res res;
@@ -375,18 +456,18 @@ static int drm_mode_getresources(drm_context_t *ctx, void *arg)
     }
 
     int nfbs = 0;
-    for (int i = 0; i < DRM_MAX_BUFFERS; i++)
-        if (ctx->buffers[i].used)
+    for (int i = 0; i < g_buffer_count; i++)
+        if (g_buffers[i].used)
             nfbs++;
 
     uint32_t fbs[DRM_MAX_BUFFERS];
-    uint32_t crtcs[1] = { 0 };
-    uint32_t conns[1] = { 0 };
-    uint32_t encs[1] = { 0 };
+    uint32_t crtcs[1] = { 1 };
+    uint32_t conns[1] = { 1 };
+    uint32_t encs[1] = { 1 };
     int fi = 0;
-    for (int i = 0; i < DRM_MAX_BUFFERS; i++)
-        if (ctx->buffers[i].used)
-            fbs[fi++] = ctx->buffers[i].handle;
+    for (int i = 0; i < g_buffer_count; i++)
+        if (g_buffers[i].used)
+            fbs[fi++] = g_buffers[i].handle;
 
     res.count_fbs = (uint32_t)nfbs;
     res.count_crtcs = 1;
@@ -427,7 +508,7 @@ static int drm_mode_getcrtc(drm_context_t *ctx, void *arg)
         struct device *dev = drm_gpu_device();
         (void)ops->get_info(dev, &w, &h, &bpp);
     }
-    c.crtc_id = 0;
+    c.crtc_id = 1;
     c.mode_valid = 1;
     c.gamma_size = 0;
     drm_mode_fill(&c.mode, w, h, 60);
@@ -472,14 +553,14 @@ static int drm_mode_getconnector(drm_context_t *ctx, void *arg)
     struct drm_mode_modeinfo mode;
     drm_mode_fill(&mode, w, h, 60);
 
-    con.connector_id = 0;
+    con.connector_id = 1;
     con.connector_type = 15; /* DRM_MODE_CONNECTOR_VIRTUAL */
     con.connector_type_id = 1;
     con.connection = 1;      /* connected */
     con.mm_width = 0;
     con.mm_height = 0;
     con.subpixel = 0;
-    con.encoder_id = 0;
+    con.encoder_id = 1;
     con.count_modes = 1;
     con.count_props = 0;
     con.count_encoders = 1;
@@ -488,7 +569,7 @@ static int drm_mode_getconnector(drm_context_t *ctx, void *arg)
                                       &mode, sizeof(mode)) < 0)
         return -EFAULT;
     if (con.encoders_ptr && copy_to_user((void *)(uintptr_t)con.encoders_ptr,
-                                         &(uint32_t){ 0 }, sizeof(uint32_t)) < 0)
+                                         &(uint32_t){ 1 }, sizeof(uint32_t)) < 0)
         return -EFAULT;
     return copy_to_user(arg, &con, sizeof(con)) < 0 ? -EFAULT : 0;
 }
@@ -499,9 +580,9 @@ static int drm_mode_getencoder(drm_context_t *ctx, void *arg)
     struct drm_mode_get_encoder e;
     if (copy_from_user(&e, arg, sizeof(e)) < 0)
         return -EFAULT;
-    e.encoder_id = 0;
+    e.encoder_id = 1;
     e.encoder_type = 4; /* DRM_MODE_ENCODER_VIRTUAL */
-    e.crtc_id = 0;
+    e.crtc_id = 1;
     e.possible_crtcs = 1;
     e.possible_clones = 0;
     return copy_to_user(arg, &e, sizeof(e)) < 0 ? -EFAULT : 0;
@@ -513,8 +594,8 @@ static int drm_mode_getplane(drm_context_t *ctx, void *arg)
     struct drm_mode_get_plane p;
     if (copy_from_user(&p, arg, sizeof(p)) < 0)
         return -EFAULT;
-    p.plane_id = 0;
-    p.crtc_id = 0;
+    p.plane_id = 1;
+    p.crtc_id = 1;
     p.fb_id = 0;
     p.possible_crtcs = 1;
     p.gamma_size = 0;
@@ -534,7 +615,7 @@ static int drm_mode_getplaneres(drm_context_t *ctx, void *arg)
         return -EFAULT;
     r.count_planes = 1;
     if (r.plane_id_ptr && copy_to_user((void *)(uintptr_t)r.plane_id_ptr,
-                                       &(uint32_t){ 0 }, sizeof(uint32_t)) < 0)
+                                       &(uint32_t){ 1 }, sizeof(uint32_t)) < 0)
         return -EFAULT;
     return copy_to_user(arg, &r, sizeof(r)) < 0 ? -EFAULT : 0;
 }
@@ -568,6 +649,21 @@ static int drm_mode_addfb(drm_context_t *ctx, void *arg)
     fb.pitch = b->pitch;
     fb.bpp = b->bpp;
     fb.depth = 24;
+    return copy_to_user(arg, &fb, sizeof(fb)) < 0 ? -EFAULT : 0;
+}
+
+static int drm_mode_addfb2(drm_context_t *ctx, void *arg)
+{
+    struct drm_mode_fb_cmd2 fb;
+    if (copy_from_user(&fb, arg, sizeof(fb)) < 0)
+        return -EFAULT;
+    if (fb.handles[0] == 0)
+        return -EINVAL;
+    drm_buffer_t *b = drm_find_buffer(ctx, fb.handles[0]);
+    if (!b)
+        return -ENOENT;
+    fb.fb_id = b->handle;
+    fb.pitches[0] = b->pitch;
     return copy_to_user(arg, &fb, sizeof(fb)) < 0 ? -EFAULT : 0;
 }
 
@@ -633,6 +729,19 @@ static int drm_mode_setproperty(drm_context_t *ctx, void *arg)
     return 0;
 }
 
+static int drm_mode_obj_getproperties(drm_context_t *ctx, void *arg)
+{
+    (void)ctx;
+    struct drm_mode_obj_get_properties o;
+    if (copy_from_user(&o, arg, sizeof(o)) < 0)
+        return -EFAULT;
+    /* A20OS exposes no KMS object properties.  Report an empty set for any
+     * valid object id.  (wlroots queries per-object properties to build its
+     * atomic state; an empty set is valid for a minimal display.) */
+    o.count_props = 0;
+    return copy_to_user(arg, &o, sizeof(o)) < 0 ? -EFAULT : 0;
+}
+
 static int drm_mode_atomic(drm_context_t *ctx, void *arg)
 {
     (void)ctx;
@@ -658,7 +767,7 @@ static int drm_mode_create_dumb(drm_context_t *ctx, void *arg)
 
     int slot = -1;
     for (int i = 0; i < DRM_MAX_BUFFERS; i++) {
-        if (!ctx->buffers[i].used) {
+        if (!g_buffers[i].used) {
             slot = i;
             break;
         }
@@ -672,7 +781,7 @@ static int drm_mode_create_dumb(drm_context_t *ctx, void *arg)
     if (!vmo)
         return -ENOMEM;
 
-    drm_buffer_t *b = &ctx->buffers[slot];
+    drm_buffer_t *b = &g_buffers[slot];
     b->used = 1;
     b->handle = ctx->next_handle++;
     if (b->handle == 0)
@@ -682,6 +791,8 @@ static int drm_mode_create_dumb(drm_context_t *ctx, void *arg)
     b->pitch = pitch;
     b->bpp = d.bpp;
     b->vmo = vmo;
+    if (slot + 1 > g_buffer_count)
+        g_buffer_count = slot + 1;
     b->size = size;
 
     d.handle = b->handle;
@@ -698,18 +809,11 @@ static int drm_mode_map_dumb(drm_context_t *ctx, void *arg)
     drm_buffer_t *b = drm_find_buffer(ctx, m.handle);
     if (!b)
         return -ENOENT;
-    /* Map the VMO into the caller.  DRM returns a fake offset that mmap
-     * consumes; we reuse the VMO's user address directly by mapping now. */
-    task_t *t = proc_current();
-    if (!t || !t->mm)
-        return -EFAULT;
-    uint64_t addr = mm_mmap_vmo(t->mm, 0, (size_t)b->size,
-                                PROT_READ | PROT_WRITE,
-                                MAP_SHARED | MAP_ANONYMOUS,
-                                b->vmo, 0);
-    if (addr == 0)
-        return -ENOMEM;
-    m.offset = addr;
+    /* The Linux DRM ABI uses the fake offset handed back here as the
+     * argument of a later mmap(fd, ...) call.  Return a page-aligned fake
+     * offset derived from the handle; drm_linux_mmap() maps the buffer VMO
+     * when the process calls mmap on /dev/dri/card0 with that offset. */
+    m.offset = (uint64_t)b->handle * PAGE_SIZE;
     return copy_to_user(arg, &m, sizeof(m)) < 0 ? -EFAULT : 0;
 }
 
@@ -731,9 +835,71 @@ static int drm_gem_close(drm_context_t *ctx, void *arg)
     if (copy_from_user(&c, arg, sizeof(c)) < 0)
         return -EFAULT;
     drm_buffer_t *b = drm_find_buffer(ctx, c.handle);
-    if (b)
-        drm_free_buffer(ctx, b);
+    if (!b)
+        return -ENOENT;
+    /* Keep the dumb buffer alive; the handle owns the VMO and is dropped by
+     * DRM_IOCTL_MODE_DESTROY_DUMB.  GEM close is a no-op for our handles. */
     return 0;
+}
+
+static int drm_prime_handle_to_fd(drm_context_t *ctx, void *arg)
+{
+    struct drm_prime_handle p;
+    if (copy_from_user(&p, arg, sizeof(p)) < 0)
+        return -EFAULT;
+    drm_buffer_t *b = drm_find_buffer(ctx, p.handle);
+    if (!b)
+        return -ENOENT;
+
+    int mfd = memfd_create_file(p.flags & 0x2U ? O_CLOEXEC : 0);
+    if (mfd < 0)
+        return mfd;
+
+    void *snap = kmalloc(b->size);
+    if (!snap) {
+        vfs_close(mfd);
+        return -ENOMEM;
+    }
+    for (uint32_t i = 0; i < (b->size + PAGE_SIZE - 1) / PAGE_SIZE; i++) {
+        pfn_t pfn;
+        uint64_t dst = (uint64_t)i * PAGE_SIZE;
+        size_t n = PAGE_SIZE;
+        if (dst + n > b->size)
+            n = b->size - dst;
+        if (vmo_get_page_charged(b->vmo, i, NULL, &pfn) == 0)
+            memcpy((uint8_t *)snap + dst, pfn_to_virt(pfn), n);
+        else
+            memset((uint8_t *)snap + dst, 0, n);
+    }
+    int r = memfd_set_contents(mfd, snap, b->size);
+    kfree(snap);
+    if (r < 0) {
+        vfs_close(mfd);
+        return r;
+    }
+
+    if (g_prime_count < DRM_PRIME_MAX) {
+        g_prime_fd[g_prime_count] = mfd;
+        g_prime_handle[g_prime_count] = b->handle;
+        g_prime_count++;
+    }
+
+    p.fd = mfd;
+    return copy_to_user(arg, &p, sizeof(p)) < 0 ? -EFAULT : 0;
+}
+
+static int drm_prime_fd_to_handle(drm_context_t *ctx, void *arg)
+{
+    struct drm_prime_handle p;
+    if (copy_from_user(&p, arg, sizeof(p)) < 0)
+        return -EFAULT;
+    for (int i = 0; i < g_prime_count; i++) {
+        if (g_prime_fd[i] == p.fd) {
+            p.handle = g_prime_handle[i];
+            return copy_to_user(arg, &p, sizeof(p)) < 0 ? -EFAULT : 0;
+        }
+    }
+    return -ENOENT;
 }
 
 /* ---- vfile backend ---- */
@@ -765,9 +931,9 @@ static int drm_close(vfile_t *vf)
 {
     drm_context_t *ctx = vf ? vf->priv : NULL;
     if (ctx) {
-        for (int i = 0; i < DRM_MAX_BUFFERS; i++)
-            if (ctx->buffers[i].used)
-                drm_free_buffer(ctx, &ctx->buffers[i]);
+        /* Buffers are global; they are reclaimed by DESTROY_DUMB / GEM_CLOSE.
+         * Do not free them on close (a compositor may close the allocator fd
+         * while buffers are still referenced by the backend). */
         kfree(ctx);
         vf->priv = NULL;
     }
@@ -783,10 +949,22 @@ static int drm_ioctl(vfile_t *vf, unsigned long req, void *arg)
     switch (req) {
     case DRM_IOCTL_VERSION:
         return drm_version(ctx, arg);
+    case DRM_IOCTL_GET_MAGIC:
+        return drm_get_magic(ctx, arg);
+    case DRM_IOCTL_AUTH_MAGIC:
+        return drm_auth_magic(ctx, arg);
+    case DRM_IOCTL_SET_MASTER:
+        return drm_set_master(ctx, arg);
+    case DRM_IOCTL_DROP_MASTER:
+        return drm_drop_master(ctx, arg);
     case DRM_IOCTL_GET_CAP:
         return drm_get_cap(ctx, arg);
     case DRM_IOCTL_GEM_CLOSE:
         return drm_gem_close(ctx, arg);
+    case DRM_IOCTL_PRIME_HANDLE_TO_FD:
+        return drm_prime_handle_to_fd(ctx, arg);
+    case DRM_IOCTL_PRIME_FD_TO_HANDLE:
+        return drm_prime_fd_to_handle(ctx, arg);
     case DRM_IOCTL_MODE_GETRESOURCES:
         return drm_mode_getresources(ctx, arg);
     case DRM_IOCTL_MODE_GETCRTC:
@@ -805,6 +983,8 @@ static int drm_ioctl(vfile_t *vf, unsigned long req, void *arg)
         return drm_mode_getfb(ctx, arg);
     case DRM_IOCTL_MODE_ADDFB:
         return drm_mode_addfb(ctx, arg);
+    case DRM_IOCTL_MODE_ADDFB2:
+        return drm_mode_addfb2(ctx, arg);
     case DRM_IOCTL_MODE_RMFB:
         return drm_mode_rmfb(ctx, arg);
     case DRM_IOCTL_MODE_PAGE_FLIP:
@@ -817,6 +997,8 @@ static int drm_ioctl(vfile_t *vf, unsigned long req, void *arg)
         return drm_mode_getproperty(ctx, arg);
     case DRM_IOCTL_MODE_SETPROPERTY:
         return drm_mode_setproperty(ctx, arg);
+    case DRM_IOCTL_MODE_OBJ_GETPROPERTIES:
+        return drm_mode_obj_getproperties(ctx, arg);
     case DRM_IOCTL_MODE_ATOMIC:
         return drm_mode_atomic(ctx, arg);
     case DRM_IOCTL_MODE_CREATE_DUMB:
@@ -880,4 +1062,40 @@ void drm_device_bind(void)
     /* The DRM node is created lazily through devfs /dev/dri/card0; the GPU
      * driver discovery is handled by the driver core.  Nothing to do here
      * unless a hotplug event must create the node eagerly. */
+}
+
+int drm_is_drm_vfile(vfile_t *vf)
+{
+    return vf && vf->ops == &g_drm_ops;
+}
+
+int64_t drm_linux_mmap(vfile_t *vf, uint64_t addr, size_t len, int prot,
+                       int flags, uint64_t off)
+{
+    drm_context_t *ctx = vf ? vf->priv : NULL;
+    if (!ctx)
+        return -EBADF;
+
+    drm_buffer_t *b = drm_find_buffer(ctx, (uint32_t)(off / PAGE_SIZE));
+    if (!b)
+        return -ENOENT;
+
+    task_t *t = proc_current();
+    if (!t || !t->mm)
+        return -EFAULT;
+
+    size_t map_len = ROUND_UP(len, PAGE_SIZE);
+    if (map_len == 0) {
+        return -EINVAL;
+    }
+    if (map_len > b->size) {
+        return -EINVAL;
+    }
+
+    uint64_t map_addr = mm_mmap_vmo(t->mm, addr, map_len, prot, flags,
+                                    b->vmo, 0);
+    if (map_addr == 0 || (int64_t)map_addr < 0) {
+        return -ENOMEM;
+    }
+    return (int64_t)map_addr;
 }

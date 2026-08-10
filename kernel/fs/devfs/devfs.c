@@ -68,7 +68,7 @@ static devfs_node_t g_nodes[] = {
     STATIC_NODE(DEVFS_PTMX, "ptmx", 0x502),
     STATIC_NODE(DEVFS_PTS_DIR, "pts", 0),
     STATIC_NODE(DEVFS_DRI_DIR, "dri", 0),
-    STATIC_NODE(DEVFS_DRM, "card0", 0x8010),
+    STATIC_NODE(DEVFS_DRM, "card0", 0xe200),
     STATIC_NODE(DEVFS_SND_DIR, "snd", 0),
     STATIC_NODE(DEVFS_ALSA_CTL, "controlC0", 0x1400),
     STATIC_NODE(DEVFS_ALSA_PCM, "pcmC0D0p", 0x1401),

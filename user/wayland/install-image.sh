@@ -108,6 +108,7 @@ if [ -f "$SYSROOT/lib/libEGL.so.1.0.0" ]; then
     copy_file "$SYSROOT/lib/libGLESv2.so.2" /lib/libGLESv2.so.2
     copy_file "$SYSROOT/lib/libGLESv1_CM.so.1" /lib/libGLESv1_CM.so.1
     copy_file "$SYSROOT/lib/libgbm.so.1" /lib/libgbm.so.1
+    copy_file "$SYSROOT/lib/gbm/dri_gbm.so" /lib/gbm/dri_gbm.so
     copy_file "$SYSROOT/lib/libgallium-25.3.6.so" /lib/libgallium-25.3.6.so
     copy_file "$SYSROOT/lib/libstdc++.so.6" /lib/libstdc++.so.6
     copy_file "$SYSROOT/lib/libgcc_s.so.1" /lib/libgcc_s.so.1
@@ -341,6 +342,19 @@ export NO_AT_BRIDGE=1
 if [ -x /bin/labwc ]; then
     export XDG_CONFIG_HOME=/tmp/.config
     mkdir -p /tmp/.config/labwc
+    # labwc/wlroots: force the DRM backend.  The WAYLAND_DISPLAY above
+    # (needed by the XFCE clients) would otherwise make wlroots pick the
+    # wayland backend and fail.  A20OS exposes virtio-gpu as /dev/dri/card0.
+    export WLR_BACKENDS=drm
+    export WLR_RENDERER=pixman
+    export WLR_DRM_NO_ATOMIC=1
+    export WLR_NO_HARDWARE_CURSORS=1
+    export GBM_BACKENDS_PATH=/bin/lib/gbm
+    # A20OS has no udev; point wlroots at the virtio-gpu DRM node directly.
+    export WLR_DRM_DEVICES=/dev/dri/card0
+    # libseat builtin forks an embedded seatd server; without a VT subsystem
+    # A20OS cannot bind the seat to a VT, so create a non-VT-bound seat.
+    export SEATD_VTBOUND=0
     exec /bin/labwc -s /bin/xfce4-session
 fi
 # Fallback: Weston (no wlr-layer-shell) for images without labwc.
