@@ -9,6 +9,29 @@
 #define MSG_CMSG_CLOEXEC 0x40000000
 #endif
 
+#ifndef SCM_CREDENTIALS
+#define SCM_CREDENTIALS 0x02
+#endif
+#ifndef SO_PASSCRED
+#define SO_PASSCRED 16
+#endif
+#ifndef SO_PEERCRED
+#define SO_PEERCRED 17
+#endif
+
+#ifndef HAVE_STRUCT_UCRED
+#if defined(__GLIBC__) || defined(_GNU_SOURCE)
+#define HAVE_STRUCT_UCRED 1
+#endif
+#endif
+#ifndef HAVE_STRUCT_UCRED
+struct ucred {
+    int pid;
+    int uid;
+    int gid;
+};
+#endif
+
 static int fail(const char *what)
 {
     printf("SCM_STRESS: FAIL %s errno=%d\n", what, errno);
@@ -146,6 +169,60 @@ int main(void)
         errno != EOPNOTSUPP)
         return fail("INET SCM_RIGHTS must be EOPNOTSUPP");
     close(udp);
+
+    /* SCM_CREDENTIALS: with SO_PASSCRED the receiver must get the sender
+     * pid/uid/gid via SCM_CREDENTIALS cmsg; SO_PEERCRED must agree. */
+    int cv[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, cv) < 0)
+        return fail("socketpair cred");
+    int opt = 1;
+    if (setsockopt(cv[1], SOL_SOCKET, SO_PASSCRED, &opt, sizeof(opt)) < 0)
+        return fail("setsockopt SO_PASSCRED");
+    char msg[] = "cred";
+    struct iovec iov0 = { .iov_base = msg, .iov_len = sizeof(msg) };
+    struct msghdr smh;
+    memset(&smh, 0, sizeof(smh));
+    smh.msg_iov = &iov0;
+    smh.msg_iovlen = 1;
+    if (sendmsg(cv[0], &smh, 0) != (ssize_t)sizeof(msg))
+        return fail("sendmsg cred");
+
+    char cbuf2[CMSG_SPACE(sizeof(struct ucred))];
+    char rbuf[16];
+    struct iovec iov1 = { .iov_base = rbuf, .iov_len = sizeof(rbuf) };
+    struct msghdr rmh;
+    memset(&rmh, 0, sizeof(rmh));
+    rmh.msg_iov = &iov1;
+    rmh.msg_iovlen = 1;
+    rmh.msg_control = cbuf2;
+    rmh.msg_controllen = sizeof(cbuf2);
+    ssize_t cr = recvmsg(cv[1], &rmh, 0);
+    if (cr != (ssize_t)sizeof(msg))
+        return fail("recvmsg cred");
+    struct ucred peer;
+    int found_cred = 0;
+    for (struct cmsghdr *c = CMSG_FIRSTHDR(&rmh); c;
+         c = CMSG_NXTHDR(&rmh, c)) {
+        if (c->cmsg_level == SOL_SOCKET &&
+            c->cmsg_type == SCM_CREDENTIALS) {
+            memcpy(&peer, CMSG_DATA(c), sizeof(peer));
+            found_cred = 1;
+        }
+    }
+    if (!found_cred)
+        return fail("missing SCM_CREDENTIALS cmsg");
+    if (peer.pid <= 0 || peer.uid > 65535)
+        return fail("SCM_CREDENTIALS bogus values");
+
+    struct ucred pc;
+    socklen_t pcl = sizeof(pc);
+    if (getsockopt(cv[1], SOL_SOCKET, SO_PEERCRED, &pc, &pcl) < 0)
+        return fail("getsockopt SO_PEERCRED");
+    if (pc.pid != peer.pid || pc.uid != peer.uid || pc.gid != peer.gid)
+        return fail("SO_PEERCRED mismatch");
+
+    close(cv[0]);
+    close(cv[1]);
 
     close(rfd);
     close(f);

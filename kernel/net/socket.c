@@ -281,6 +281,17 @@ int net_socketpair_create(int domain, int type, int protocol, int out_gfd[2]) {
     sb->peer = sa;
     sa->connected = 1;
     sb->connected = 1;
+    /* SO_PEERCRED for socketpair: both ends belong to this task. */
+    {
+        task_t *cur = proc_current();
+        if (cur) {
+            int32_t pid = cur->pid;
+            int32_t uid = cur->cred.uid;
+            int32_t gid = cur->cred.gid;
+            sa->peer_pid = pid; sa->peer_uid = uid; sa->peer_gid = gid;
+            sb->peer_pid = pid; sb->peer_uid = uid; sb->peer_gid = gid;
+        }
+    }
     spin_unlock_irqrestore(&g_net_lock, flags);
     out_gfd[0] = a;
     out_gfd[1] = b;
@@ -567,6 +578,15 @@ int net_recvfrom_meta(int gfd, void *buf, size_t len, int flags,
             if (r == -EAGAIN && s->ch_ep)
                 r = unix_ch_recv(s, buf, len);
             if (r >= 0) {
+                /* Channel-backed delivery has no net_msg metadata; supply
+                 * SCM_CREDENTIALS from the latest sender record captured in
+                 * unix_ch_send when the receiver asked for it. */
+                if (meta && s->passcred && !meta->has_cred && s->ch_ep) {
+                    meta->has_cred = 1;
+                    meta->cred_pid = s->ch_cred_pid;
+                    meta->cred_uid = s->ch_cred_uid;
+                    meta->cred_gid = s->ch_cred_gid;
+                }
                 proc_wake_q_t wq;
                 proc_wake_q_init(&wq);
                 (void)wait_queue_collect_one(&s->write_waitq, 0,

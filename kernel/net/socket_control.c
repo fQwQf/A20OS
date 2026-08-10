@@ -431,6 +431,14 @@ int net_setsockopt(int gfd, int level, int optname, const void *optval, size_t o
         }
         return 0;
     }
+    if (level == SOL_SOCKET && optname == SO_PASSCRED) {
+        if (!optval || optlen < sizeof(int))
+            return -EINVAL;
+        int val;
+        memcpy(&val, optval, sizeof(val));
+        s->passcred = val != 0;
+        return 0;
+    }
     if (level == SOL_SOCKET)
         return 0;
     return -EOPNOTSUPP;
@@ -463,8 +471,23 @@ int net_getsockopt(int gfd, int level, int optname, void *optval, size_t *optlen
         val = s->reuseport;
     else if (level == SOL_SOCKET && optname == SO_KEEPALIVE)
         val = s->keepalive;
-    else if (level == SOL_SOCKET)
+    else if (level == SOL_SOCKET && optname == SO_PASSCRED)
+        val = s->passcred;
+    else if (level == SOL_SOCKET) {
+        if (optname == SO_PEERCRED) {
+            /* Linux struct ucred: { pid, uid, gid }. */
+            if (*optlen < 3 * sizeof(int32_t))
+                return -EINVAL;
+            int32_t cred[3];
+            cred[0] = s->peer_pid;
+            cred[1] = s->peer_uid;
+            cred[2] = s->peer_gid;
+            memcpy(optval, cred, sizeof(cred));
+            *optlen = sizeof(cred);
+            return 0;
+        }
         val = 0;
+    }
     else if (level == IPPROTO_TCP) {
         if (s->type != SOCK_STREAM)
             return -ENOPROTOOPT;

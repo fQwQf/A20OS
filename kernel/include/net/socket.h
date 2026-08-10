@@ -30,6 +30,7 @@ struct vfile;
 #define SOL_SOCKET   1
 #define SOL_NETLINK  270
 #define SCM_RIGHTS   1
+#define SCM_CREDENTIALS 2
 #define SOL_ALG      279
 #define NETLINK_SOCK_DIAG 4
 #define IPPROTO_IP   0
@@ -48,6 +49,8 @@ struct vfile;
 #define SO_KEEPALIVE 9
 #define SO_LINGER    13
 #define SO_REUSEPORT 15
+#define SO_PASSCRED  16
+#define SO_PEERCRED  17
 #define SO_ACCEPTCONN 30
 #define SO_PROTOCOL  38
 #define SO_DOMAIN    39
