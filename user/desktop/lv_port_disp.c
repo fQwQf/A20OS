@@ -71,7 +71,7 @@ struct a20os_fb_fix_screeninfo {
 #define A20OS_FBIOGET_VSCREENINFO 0x4600
 #define A20OS_FBIOGET_FSCREENINFO 0x4602
 #define A20OS_FBIO_MAP_FB         0x4603
-#define A20OS_FBIO_FLUSH          0x4604
+#define A20OS_FBIO_FLUSH          0x4609
 
 static int fb_fd = -1;
 static uint32_t fb_width = 1024;
