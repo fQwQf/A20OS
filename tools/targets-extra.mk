@@ -178,7 +178,10 @@ $(EXTRA_IMG): $(EXTRA_IMAGE_STAMP)
 
 # Helper: QEMU flags for the extra disk (appended conditionally)
 ifeq ($(ARCH), riscv64)
-EXTRA_QEMU_BLK = -drive file=$(EXTRA_IMG),if=none,format=raw,id=xextra -device virtio-blk-device,drive=xextra,bus=virtio-mmio-bus.5
+# Slot 5 is reserved for the user-space virtio-input placement and is skipped
+# by the kernel's VirtIO-MMIO enumerator.  Keep the extra disk on an otherwise
+# unused slot so it is discovered and mounted at /test during early boot.
+EXTRA_QEMU_BLK = -drive file=$(EXTRA_IMG),if=none,format=raw,id=xextra -device virtio-blk-device,drive=xextra,bus=virtio-mmio-bus.1
 else ifeq ($(ARCH), loongarch64)
 EXTRA_QEMU_BLK = -drive file=$(EXTRA_IMG),if=none,format=raw,id=xextra -device virtio-blk-pci,drive=xextra
 else ifeq ($(ARCH), aarch64)
@@ -224,4 +227,3 @@ _run_extra_impl:
 	fi
 	$(MAKE) ARCH=$(ARCH) EXTRA_IMG=$(EXTRA_IMG) extra-img
 	$(QEMU) $(QEMU_FLAGS_NO_SDCARD) $(EXTRA_QEMU_BLK) -kernel $(KERNEL_ELF)
-
