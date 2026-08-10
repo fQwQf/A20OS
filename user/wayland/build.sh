@@ -79,6 +79,7 @@ if [ ${#PHASES[@]} -eq 0 ]; then
             libevdev stubs libdrm libinput mesa glib dbus atk gdk-pixbuf \
             cairo pango gtk3 \
             libxfce4util libxfce4windowing xfconf libxfce4ui exo garcon \
+            gtk-layer-shell \
             xfce4-panel xfdesktop xfce4-session thunar \
             weston ffmpeg player)
 fi
@@ -230,6 +231,50 @@ meson_pkg() {
 autotools_pkg() {
     local name=$1 src=$2
     shift 2
+    # Minimal X11 header stubs: several XFCE components still include X11
+    # headers (session management, atoms) even on the Wayland build.
+    mkdir -p "$SYSROOT/include/X11/SM" "$SYSROOT/include/X11/ICE"
+    [ -f "$SYSROOT/include/X11/Xlib.h" ] || cat > "$SYSROOT/include/X11/Xlib.h" <<'XEOF'
+#ifndef _XLIB_H_
+#define _XLIB_H_
+typedef struct _XDisplay Display;
+#endif
+XEOF
+    [ -f "$SYSROOT/include/X11/Xutil.h" ] || cat > "$SYSROOT/include/X11/Xutil.h" <<'XEOF'
+#ifndef _XUTIL_H_
+#define _XUTIL_H_
+#endif
+XEOF
+    [ -f "$SYSROOT/include/X11/Xatom.h" ] || cat > "$SYSROOT/include/X11/Xatom.h" <<'XEOF'
+#ifndef _XATOM_H_
+#define _XATOM_H_
+#define XA_CARDINAL 6L
+#define XA_ATOM 4L
+#define XA_WINDOW 33L
+#endif
+XEOF
+    [ -f "$SYSROOT/include/X11/ICE/ICElib.h" ] || cat > "$SYSROOT/include/X11/ICE/ICElib.h" <<'XEOF'
+#ifndef _ICE_LIB_H_
+#define _ICE_LIB_H_
+typedef struct _IceConn *IceConn;
+#endif
+XEOF
+    [ -f "$SYSROOT/include/X11/SM/SMlib.h" ] || cat > "$SYSROOT/include/X11/SM/SMlib.h" <<'XEOF'
+#ifndef _SM_LIB_H_
+#define _SM_LIB_H_
+typedef struct _SmcConn *SmcConn;
+typedef struct _SmsConn *SmsConn;
+typedef enum {
+    SmRestartIfRunning = 0,
+    SmRestartAnyway = 1,
+    SmRestartImmediately = 2,
+    SmRestartNever = 3
+} SmRestartStyle;
+#define SmRestartStyleHint "SmRestartStyleHint"
+#define SmProgram          "Program"
+#define SmProcessID        "ProcessID"
+#endif
+XEOF
     if [ -x "$src/autogen.sh" ] && [ ! -x "$src/configure" ]; then
         (cd "$src" && NOCONFIGURE=1 ./autogen.sh >/dev/null 2>&1 || \
          cd "$src" && ./autogen.sh --noconfigure >/dev/null 2>&1)
@@ -249,6 +294,10 @@ autotools_pkg() {
         CPPFLAGS="-I$SYSROOT/include -I$SYSROOT/include/gtk-3.0 -I$SYSROOT/include/glib-2.0 -I$SYSROOT/lib/glib-2.0/include -I$SYSROOT/include/atk-1.0 -I$SYSROOT/include/pango-1.0 -I$SYSROOT/include/cairo -I$SYSROOT/include/libxfce4util" \
         LDFLAGS="-L$SYSROOT/lib -Wl,-rpath-link,$SYSROOT/lib" \
         PKG_CONFIG_LIBDIR="$SYSROOT/lib/pkgconfig" \
+        GLIB_COMPILE_RESOURCES=/usr/bin/glib-compile-resources \
+        GLIB_GENMARSHAL=/usr/bin/glib-genmarshal \
+        GLIB_MKENUMS=/usr/bin/glib-mkenums \
+        GDBUS_CODEGEN=/usr/bin/gdbus-codegen \
         "$@" 2>&1 | tail -5)
     env -u ARCH -u MAKEFLAGS make -C "$OB" -j"$(nproc)" 2>&1 | tail -3
     env -u ARCH -u MAKEFLAGS make -C "$OB" install 2>&1 | tail -3
@@ -655,6 +704,14 @@ if want garcon && ! stamp garcon; then
     mark garcon
 fi
 
+if want gtk-layer-shell && ! stamp gtk-layer-shell; then
+    echo "=== gtk-layer-shell ==="
+    meson_pkg gtk-layer-shell "$USER_DIR/external/gui/gtk-layer-shell" \
+        -Dexamples=false -Dtests=false -Dintrospection=false \
+        -Ddocs=false
+    mark gtk-layer-shell
+fi
+
 if want xfce4-panel && ! stamp xfce4-panel; then
     echo "=== xfce4-panel ==="
     autotools_pkg xfce4-panel "$USER_DIR/external/gui/xfce4-panel"
@@ -663,7 +720,12 @@ fi
 
 if want xfdesktop && ! stamp xfdesktop; then
     echo "=== xfdesktop ==="
-    autotools_pkg xfdesktop "$USER_DIR/external/gui/xfdesktop"
+    # Wayland build: skip the XSMP session-management option group (an X11
+    # feature; libxfce4ui's xfce-sm-client symbol is not exported here).
+    (cd "$USER_DIR/external/gui/xfdesktop" && \
+        sed -i 's|    g_application_add_option_group(G_APPLICATION(app), xfce_sm_client_get_option_group(argc, argv));|#ifndef A20_NO_X11_SESSION\n    g_application_add_option_group(G_APPLICATION(app), xfce_sm_client_get_option_group(argc, argv));\n#endif|' src/main.c 2>/dev/null || true)
+    autotools_pkg xfdesktop "$USER_DIR/external/gui/xfdesktop" \
+        CFLAGS="-O2 -DA20_NO_X11_SESSION"
     mark xfdesktop
 fi
 
@@ -675,7 +737,12 @@ fi
 
 if want thunar && ! stamp thunar; then
     echo "=== thunar ==="
-    autotools_pkg thunar "$USER_DIR/external/gui/thunar"
+    # Wayland build: thunar 4.20 still calls XDT_CHECK_LIBX11_REQUIRE;
+    # relax it to the optional check so the X11-less build configures.
+    (cd "$USER_DIR/external/gui/thunar" && \
+        sed -i 's|XDT_CHECK_LIBX11_REQUIRE()|XDT_CHECK_LIBX11()|' configure.ac 2>/dev/null || true)
+    autotools_pkg thunar "$USER_DIR/external/gui/thunar" \
+        --disable-wallpaper-plugin
     mark thunar
 fi
 
