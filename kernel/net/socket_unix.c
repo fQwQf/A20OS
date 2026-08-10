@@ -207,6 +207,20 @@ int net_unix_socket_connect(net_socket_t *s, const void *addr, size_t addrlen)
     } else {
         s->peer = listener;
     }
+    /* SO_PEERCRED: record the connecting task credentials on both ends. */
+    {
+        task_t *cur = proc_current();
+        if (cur) {
+            s->peer_pid = cur->pid;
+            s->peer_uid = cur->cred.uid;
+            s->peer_gid = cur->cred.gid;
+            if (s->peer && s->peer->connected) {
+                s->peer->peer_pid = cur->pid;
+                s->peer->peer_uid = cur->cred.uid;
+                s->peer->peer_gid = cur->cred.gid;
+            }
+        }
+    }
     spin_unlock_irqrestore(&g_net_lock, irq);
     (void)proc_wake_q_flush(&wake_q);
     return 0;
@@ -288,6 +302,14 @@ int unix_ch_send(net_socket_t *s, net_socket_t *dst, const void *buf, size_t len
 {
     /* a20_channel_send(ep) delivers to ep->peer, so the sender must send
      * on its OWN endpoint: its peer is the receiver's ch_ep. */
+    uint64_t irq = spin_lock_irqsave(&g_net_lock);
+    task_t *cur = proc_current();
+    if (cur) {
+        dst->ch_cred_pid = cur->pid;
+        dst->ch_cred_uid = cur->cred.uid;
+        dst->ch_cred_gid = cur->cred.gid;
+    }
+    spin_unlock_irqrestore(&g_net_lock, irq);
     const uint8_t *p = (const uint8_t *)buf;
     size_t left = len;
     size_t sent = 0;
