@@ -77,7 +77,10 @@ if [ ${#PHASES[@]} -eq 0 ]; then
     PHASES=(musl wayland-native libffi wayland protocols pixman \
             xkeyboard-config xkbcommon \
             libevdev stubs libdrm libinput mesa glib dbus atk gdk-pixbuf \
-            cairo pango gtk3 weston ffmpeg player)
+            cairo pango gtk3 \
+            libxfce4util libxfce4windowing xfconf libxfce4ui exo garcon \
+            xfce4-panel xfdesktop xfce4-session thunar \
+            weston ffmpeg player)
 fi
 
 want() {
@@ -217,6 +220,38 @@ meson_pkg() {
         "$@"
     ninja -C "$B/build-$name"
     ninja -C "$B/build-$name" install
+}
+
+# autotools_pkg <name> <srcdir> <configure args...>
+# Runs autogen (when the source is a git checkout) then cross-configures,
+# builds and installs an autotools component into the sysroot.  Builds
+# in-tree from a copy of the source so generated headers (xfconf-alias.h
+# etc.) are found by #include without VPATH headaches.
+autotools_pkg() {
+    local name=$1 src=$2
+    shift 2
+    if [ -x "$src/autogen.sh" ] && [ ! -x "$src/configure" ]; then
+        (cd "$src" && NOCONFIGURE=1 ./autogen.sh >/dev/null 2>&1 || \
+         cd "$src" && ./autogen.sh --noconfigure >/dev/null 2>&1)
+    fi
+    [ -x "$src/configure" ] || { echo "autotools_pkg: no configure for $name" >&2; return 1; }
+    local OB=$B/build-$name
+    rm -rf "$OB" && mkdir -p "$OB"
+    cp -a "$src"/. "$OB"/
+    (cd "$OB" && ./configure \
+        --host="$MUSL_TARGET-linux-musl" \
+        --prefix="$SYSROOT" --libdir="$SYSROOT/lib" \
+        --includedir="$SYSROOT/include" \
+        --disable-static --enable-shared \
+        --disable-doc --disable-docs --disable-gtk-doc \
+        --enable-maintainer-mode \
+        CC="$MESON_CC" CXX="$MESON_CXX" \
+        CPPFLAGS="-I$SYSROOT/include -I$SYSROOT/include/gtk-3.0 -I$SYSROOT/include/glib-2.0 -I$SYSROOT/lib/glib-2.0/include -I$SYSROOT/include/atk-1.0 -I$SYSROOT/include/pango-1.0 -I$SYSROOT/include/cairo -I$SYSROOT/include/libxfce4util" \
+        LDFLAGS="-L$SYSROOT/lib -Wl,-rpath-link,$SYSROOT/lib" \
+        PKG_CONFIG_LIBDIR="$SYSROOT/lib/pkgconfig" \
+        "$@" 2>&1 | tail -5)
+    env -u ARCH -u MAKEFLAGS make -C "$OB" -j"$(nproc)" 2>&1 | tail -3
+    env -u ARCH -u MAKEFLAGS make -C "$OB" install 2>&1 | tail -3
 }
 
 # ---------------------------------------------------------------- libffi
@@ -576,6 +611,72 @@ if want gtk3 && ! stamp gtk3; then
         -Dprint_backends=file -Dcolord=no \
         -Dlibepoxy:glx=no
     mark gtk3
+fi
+
+# ------------------------------------------------------------------ XFCE
+# libxfce4util and libxfce4windowing ship meson builds; the rest are
+# autotools (autogen'd in autotools_pkg).
+if want libxfce4util && ! stamp libxfce4util; then
+    echo "=== libxfce4util ==="
+    meson_pkg libxfce4util "$USER_DIR/external/gui/libxfce4util" \
+        -Dgtk-doc=false -Dintrospection=false -Dvala=disabled
+    mark libxfce4util
+fi
+
+if want libxfce4windowing && ! stamp libxfce4windowing; then
+    echo "=== libxfce4windowing ==="
+    meson_pkg libxfce4windowing "$USER_DIR/external/gui/libxfce4windowing" \
+        -Dgtk-doc=false -Dintrospection=false -Dtests=false \
+        -Dwayland=enabled -Dx11=disabled
+    mark libxfce4windowing
+fi
+
+if want xfconf && ! stamp xfconf; then
+    echo "=== xfconf ==="
+    autotools_pkg xfconf "$USER_DIR/external/gui/xfconf"
+    mark xfconf
+fi
+
+if want libxfce4ui && ! stamp libxfce4ui; then
+    echo "=== libxfce4ui ==="
+    autotools_pkg libxfce4ui "$USER_DIR/external/gui/libxfce4ui"
+    mark libxfce4ui
+fi
+
+if want exo && ! stamp exo; then
+    echo "=== exo ==="
+    autotools_pkg exo "$USER_DIR/external/gui/exo"
+    mark exo
+fi
+
+if want garcon && ! stamp garcon; then
+    echo "=== garcon ==="
+    autotools_pkg garcon "$USER_DIR/external/gui/garcon"
+    mark garcon
+fi
+
+if want xfce4-panel && ! stamp xfce4-panel; then
+    echo "=== xfce4-panel ==="
+    autotools_pkg xfce4-panel "$USER_DIR/external/gui/xfce4-panel"
+    mark xfce4-panel
+fi
+
+if want xfdesktop && ! stamp xfdesktop; then
+    echo "=== xfdesktop ==="
+    autotools_pkg xfdesktop "$USER_DIR/external/gui/xfdesktop"
+    mark xfdesktop
+fi
+
+if want xfce4-session && ! stamp xfce4-session; then
+    echo "=== xfce4-session ==="
+    autotools_pkg xfce4-session "$USER_DIR/external/gui/xfce4-session"
+    mark xfce4-session
+fi
+
+if want thunar && ! stamp thunar; then
+    echo "=== thunar ==="
+    autotools_pkg thunar "$USER_DIR/external/gui/thunar"
+    mark thunar
 fi
 
 # ---------------------------------------------------------------- weston
