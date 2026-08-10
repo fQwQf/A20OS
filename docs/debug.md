@@ -14,16 +14,23 @@ make debug-riscv64
 在另一个终端启动 GDB：
 
 ```bash
-gdb-multiarch .kernel-build/riscv64-qemu-virt-riscv64-linux-bringup/kernel.elf(gdb) target remote :1234(gdb) break panic(gdb) continue
+gdb-multiarch .kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf
+(gdb) target remote :1234
+(gdb) break panic
+(gdb) continue
 ```
 
 - 默认使用端口 `1234`。
-- 若 `BRINGUP=0`，ELF 路径为 `...-dev/kernel.elf`；若 `BRINGUP=1`，路径为 `...-bringup/kernel.elf`。
+- 默认 `ABI=both BRINGUP=0`，因此 RISC-V64 ELF 如上。若显式使用 `BRINGUP=1`，对应路径是 `.kernel-build/riscv64-qemu-virt-riscv64-both-bringup/kernel.elf`；其他 ABI、SMP、NOMMU 或 embedded 组合会改变 variant 后缀。
 
 常用 GDB 命令：
 
 ```text
-(gdb) info registers          # 查看寄存器(gdb) bt                        # 尝试回溯(gdb) x/i $pc                   # 反汇编当前 PC(gdb) x/32i $pc-32              # 查看崩溃附近指令(gdb) print *task               # 查看任务结构体（若符号可用）
+(gdb) info registers          # 查看寄存器
+(gdb) bt                      # 尝试回溯
+(gdb) x/i $pc                 # 反汇编当前 PC
+(gdb) x/32i $pc-32            # 查看崩溃附近指令
+(gdb) print *task             # 查看任务结构体（若符号可用）
 ```
 
 ## 串口日志与 panic 输出
@@ -34,7 +41,8 @@ A20OS 使用 UART 输出启动日志。panic 实现在 `kernel/core/panic.c` 中
 
 - 手动运行：`make run-*` 直接把串口输出打印到终端。
 - smoke 测试：日志保存在 `.kernel-build/smoke/<target>.log`。
-- 评测运行：日志保存在 `.eval-state/logs/serial-rv.txt` 和 `serial-la.txt`。
+- 旧 `make eval-rv/eval-la`：日志保存在 `.eval-state/logs/serial-rv.txt` 和 `serial-la.txt`。
+- 2026 决赛 `final-eval-*`：每次运行在 `.eval-state/2026/` 下生成带提交和时间戳的 `logs/`、`metadata/` 与 `scores/` 归档。
 - 崩溃时先看日志末尾的 `[PANIC]` 或 `========== KERNEL PANIC ==========` 行。
 
 ## 如何阅读一次崩溃
@@ -56,18 +64,19 @@ A20OS 使用 UART 输出启动日志。panic 实现在 `kernel/core/panic.c` 中
 sudo apt install dosfstools mtools e2fsprogs
 ```
 
-### 2. 设置 `NR_CPUS=2` 后构建失败
+### 2. 未验证平台设置 `NR_CPUS=2` 后构建失败
 
-**原因**：Makefile 默认阻止多核构建，避免未经验证的 SMP 路径进入产物。
+**原因**：Makefile 只允许 RISC-V64、AArch64、LoongArch64 和 x86_64 的同名 QEMU virt 板直接使用多核；其他平台默认拒绝未经验证的 SMP 产物。
 
 **解决**：
 
 ```bash
-# 正常开发保持单核
-make ARCH=riscv64 run
+# 已验证的 RISC-V64 QEMU SMP 不需要额外开关
+make ARCH=riscv64 BOARD=qemu-virt-riscv64 NR_CPUS=2 run
 
-# 仅在做明确 SMP 实验时打开
-make ARCH=riscv64 NR_CPUS=2 ALLOW_UNVERIFIED_SMP=1 BRINGUP=1 kernel-only
+# 未验证平台仅在明确 bring-up 实验中放行
+make ARCH=ppc64le BOARD=qemu-virt-ppc64le NR_CPUS=2 \
+    ALLOW_UNVERIFIED_SMP=1 BRINGUP=1 kernel-only
 ```
 
 ### 3. QEMU 启动后没有串口输出
@@ -76,17 +85,11 @@ make ARCH=riscv64 NR_CPUS=2 ALLOW_UNVERIFIED_SMP=1 BRINGUP=1 kernel-only
 
 **解决**：始终使用 `make run-*` 或 `make debug-*`，不要手写 QEMU 参数。
 
-### 4. `flash-stm32f103-xuanwu` 失败
+### 4. STM32 自动运行或烧录入口失败
 
-**原因**：OpenOCD 未安装、CMSIS-DAP 未连接，或接口配置不匹配。
+**当前已知原因**：`run-stm32f103-qemu` 和 `flash-stm32f103-xuanwu` 仍引用加入 `BOARD` 前的旧产物目录，与实际 `BUILD_DIR` 不一致。安装 QEMU/OpenOCD 或重新连接 CMSIS-DAP 不能修复这个 launcher 问题。
 
-**解决**：
-
-```bash
-sudo apt install openocd
-# 连接开发板后再执行
-make flash-stm32f103-xuanwu
-```
+**处理**：先只使用 `make stm32f103-bringup` 或 `make stm32f103-xuanwu` 构建固件，并按 [STM32F103 移植说明](platforms/stm32f103-port.md) 核对实际产物。修复 Makefile recipe 前，不要把自动运行或烧录目标作为通过证据。
 
 ### 5. 用户态编译失败
 
@@ -110,7 +113,7 @@ git submodule update --init --recursive
 `kernel/proc/debug.c` 提供与 ABI 无关的内核调试接口（观察者-被观察者模型）：
 `proc_debug_traceme/attach/detach/resume/singlestep/kill`、寄存器文件读写、地址空间 PEEK/POKE、siginfo 快照、PT_DEBUG_EVENT_EXEC/EXIT 事件停止，以及 syscall 边界停止（`proc_debug_syscall_entry/exit`）。
 
-Linux ABI 的 `ptrace(2)` 是这些接口的薄包装（`kernel/abi/linux/sys_ptrace.c`），请求号与 `struct user_regs_struct` 的转换全部在 ABI 层完成；内核内部层不依赖任何 Linux 常量。未来 Native ABI 的调试对象可映射到同一接口面。
+Linux ABI 的 `ptrace(2)` 是这些接口的薄包装（`kernel/abi/linux/sys_ptrace.c`），请求号与 `struct user_regs_struct` 的转换全部在 ABI 层完成；内核内部层不依赖任何 Linux 常量。Native ABI 的调试对象也映射到同一接口面，见下文。
 
 停止语义（对应 task 状态机）：
 - 被观察任务在信号投递边界进入 ptrace 停止（`proc_sched_stop_for_debug`， `proc/sched.c` 持有状态转换），观察者可用不带 `WUNTRACED` 的 `wait4` 报告；
@@ -127,10 +130,9 @@ Linux ABI 的 `ptrace(2)` 是这些接口的薄包装（`kernel/abi/linux/sys_pt
 
 `kallsyms_print()` 把地址解析为 `name+0xN`，已接入 `kernel/core/trap.c` 的内核 oops 回溯输出。python3 不可用时符号表为空，`kernel/core/kallsyms.c` 的 weak 定义保证内核仍可链接，回溯退化为裸地址。
 
-## 已知基核问题（与调试接口无关）
+## 历史兼容 workaround（不是 HEAD 验证结论）
 
-fork + 按需分页的路径存在偶发（对某些二进制尺寸近乎确定）的物理页复用竞态：
-子进程文本页可能在停止期间被回收复用，表现为子进程文本被写入栈类数据后 SIGSEGV。`user/cmds/core/ptrace_smoke.c` 因此在 poke 与恢复之间加入短延时规避该竞态窗口；根因在页分配/引用计数层，与 ptrace 实现无关（A20 团队正在修复同类 0x63636363 问题）。
+`user/cmds/core/ptrace_smoke.c` 仍在 poke 与恢复之间保留一个短 busy delay，注释把它归因于较早基线中的 page-cache/allocator 稳定窗口。这是测试源码中保留的历史 workaround，不足以证明本轮源码审计基线 `e33c3219` 仍存在同一缺陷；引用为当前 bug 前必须在 HEAD 上重新复现并归档日志。
 
 ## Native ABI 调试接口（Debug 0x0900）
 
@@ -142,7 +144,7 @@ Native ABI 通过 `A20_OBJ_DEBUG` 会话对象暴露同样的内核调试状态�
 - `debug_traceme` 与 `debug_attach` 互斥（同 Linux）；
 - native 线程共享信号状态：进程级 SIGSTOP 会停住整个进程，因此调试器 应 attach 独立进程（`test_native_debug.c` 用 spawn 的子进程验证）。
 
-权限（06-security.md §8.1）：READ/WRITE/WAIT/SIGNAL/CONTROL/ADMIN 对应各 debug 操作；spawn/thread_create 的 task handle 自带 ADMIN。
+权限（[Native ABI 安全模型](native-abi/06-security.md) §8.1）：READ/WRITE/WAIT/SIGNAL/CONTROL/ADMIN 对应各 debug 操作；spawn/thread_create 的 task handle 自带 ADMIN。
 
 验证：`smoke-native-debug`（riscv64 QEMU，`/bin/native-debug-rv`）。
 
@@ -150,6 +152,6 @@ Native ABI 通过 `A20_OBJ_DEBUG` 会话对象暴露同样的内核调试状态�
 
 开发构建（BRINGUP=0）默认启用 `-fsanitize=undefined` （`-fno-sanitize=alignment,bounds-strict`），运行时在 `kernel/core/ubsan.c`。
 任何未定义行为（移位越界、有符号溢出、数组越界等）在启动日志输出 `UBSAN: <kind> at file:line` 后继续运行，便于 smoke 测试暴露隐性 bug。
-bringup/竞赛构建通过 `CONFIG_UBSAN=0` 关闭。
+`BRINGUP=1` 默认通过 `CONFIG_UBSAN=0` 关闭；`BRINGUP=0` 的 dev 和决赛提交构建默认启用，除非调用方显式覆盖 `CONFIG_UBSAN=0`。
 
 启动时 `ubsan_selftest()` 输出两行 `UBSAN_SELFTEST: start / PASS`，是**预期的自检**（故意触发一次 handler 验证报告链路，报告文本在自检期间被抑制），不是真实错误；只有当日志出现 `UBSAN: <kind> at ...` 才是真正的未定义行为告警。

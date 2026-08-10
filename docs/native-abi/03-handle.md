@@ -1,18 +1,18 @@
 # A20OS Native ABI：Handle 子系统设计
 
-> 本文档定义 Handle 的 14 种对象类型、生命周期状态机、handle table 数据结构和操作语义。权限模型见 [security.md](06-security.md)，类型定义见 [types.md](01-types.md)。
+> 本文档定义 Handle 的 14 种对象类型、生命周期状态机、handle table 数据结构和操作语义，已按 `e33c3219` 的 `kernel/include/ipc/handle_table.h`、`handle_table.c` 与 `a20_object.c` 核对。权限模型见 [security.md](06-security.md)，类型定义见 [types.md](01-types.md)。
 
 ---
 
 ## 1. 对象类型
 
-A20OS Native ABI 定义 14 种对象类型。每种类型有特定的合法操作和权限集。
+A20OS Native ABI 保留 14 个对象类型编号。`A20_OBJ_THREAD` 当前只是保留编号；`thread_create` 安装并返回 `A20_OBJ_TASK` handle，其余已使用类型各有特定的合法操作和权限集。
 
 ```c
 typedef enum a20_object_type {
     A20_OBJ_INVALID           = 0,
     A20_OBJ_TASK              = 1,
-    A20_OBJ_THREAD            = 2,
+    A20_OBJ_THREAD            = 2,    /* reserved; not currently installed */
     A20_OBJ_FILE              = 3,
     A20_OBJ_DIRECTORY         = 4,
     A20_OBJ_SOCKET            = 5,
@@ -32,25 +32,26 @@ typedef enum a20_object_type {
 
 | Native 类型 | 内核结构体 | 引用计数机制 |
 |------------|-----------|-------------|
-| A20_OBJ_FILE | `vfile_t *` | `vfile_t.ref_count` |
-| A20_OBJ_DIRECTORY | `vfile_t *` (O_DIRECTORY) | `vfile_t.ref_count` |
-| A20_OBJ_SOCKET | 新增 `struct a20_socket` | `refcount_t` |
-| A20_OBJ_PIPE_ENDPOINT | `vfile_t *` (pipe 端) | `vfile_t.ref_count` |
+| A20_OBJ_FILE | global fd（整数编码在 `object`） | `vfs_ref_fd` / `vfs_close` |
+| A20_OBJ_DIRECTORY | global fd（O_DIRECTORY） | `vfs_ref_fd` / `vfs_close` |
+| A20_OBJ_SOCKET | global fd（`object=(void *)(uintptr_t)gfd`） | `vfs_ref_fd` / `vfs_close` |
+| A20_OBJ_PIPE_ENDPOINT | global fd（pipe 端） | `vfs_ref_fd` / `vfs_close` |
 | A20_OBJ_CHANNEL_ENDPOINT | 新增 `struct a20_channel_ep` | `refcount_t` |
 | A20_OBJ_EVENT_QUEUE | 新增 `struct a20_eventq` | `refcount_t` |
-| A20_OBJ_TIMER | 新增 `struct a20_timer` | `refcount_t` |
-| A20_OBJ_TASK | `task_t *` | 由 proc 管理生命周期 |
-| A20_OBJ_THREAD | `task_t *` (线程) | 同上 |
-| A20_OBJ_MEMORY | 新增 `struct a20_shm` | `refcount_t` |
-| A20_OBJ_DEVICE | `vfile_t *` (设备文件) | `vfile_t.ref_count` |
+| A20_OBJ_TIMER | timer slot 编号 `slot+1` | timer slot refcount |
+| A20_OBJ_TASK | 整数 pid | 操作时 `proc_find_get()`；handle 本身不持 task 引用 |
+| A20_OBJ_THREAD | 保留，当前不安装该类型 | `thread_create` 返回指向线程 pid 的 `A20_OBJ_TASK` handle |
+| A20_OBJ_MEMORY | `struct vmo *` | `vmo_ref` / `vmo_release` |
+| A20_OBJ_DEVICE | global fd | `vfs_ref_fd` / `vfs_close` |
 | A20_OBJ_NAMESPACE | 新增 `struct a20_namespace` | `refcount_t` |
-| A20_OBJ_DEBUG | 新增 `struct a20_debug` | `refcount_t` |
+| A20_OBJ_DEBUG | 整数目标 pid | 调试状态由 `proc_debug_*` 管理 |
+| A20_OBJ_EXT_PROG | 整数 KEP program id | `kep_prog_release` |
 
 ### 1.2 设计原则
 
-- **复用优先**：file、directory、device、pipe 都复用 `vfile_t`，避免为每种文件相关对象创建独立结构体。
+- **复用优先**：file、directory、device、pipe、socket 都以 global fd 间接引用 `vfile_t`，避免为每种文件相关对象创建独立 handle backing。
 - **独立对象独立分配**：channel、event queue、timer 等 VFS 无法表达的对象使用独立结构体。
-- **handle entry 的 object 字段是 `void *`**：统一持有不同类型对象的指针，通过 `type` 字段区分。
+- **handle entry 的 object 字段是 `void *`**：既可持对象指针，也可编码 global fd、pid、timer slot 或 KEP id；必须始终结合 `type` 解释。
 
 ---
 
@@ -72,6 +73,8 @@ typedef struct a20_handle_entry {
     uint64_t          expiry_tick;    /* 绝对过期时刻（kernel ticks），0 = 无时间过期 */
     uint32_t          remaining_ops;  /* OP_COUNT 置位时 0 = 已耗尽；未置位时忽略 */
     uint32_t          temporal_flags; /* 时态标志位 */
+    uint8_t           security_label; /* 0=L, 1=M, 2=H */
+    uint8_t           state;          /* FREE/ACTIVE/EXPIRED/CLOSING */
 } a20_handle_entry_t;
 
 // 时态标志位定义
@@ -87,6 +90,9 @@ typedef struct a20_handle_table {
     spinlock_t          lock;        /* 保护全部字段（L1 级） */
     uint64_t           *free_bitmap; /* 每个 bit: 1=已占用, 0=空闲 */
     uint32_t            bitmap_size; /* bitmap 的 uint64 元素数 */
+    uint32_t            max_handles; /* 当前 task hard quota */
+    uint8_t             security_label;
+    refcount_t          refcount;    /* 线程组共享 HT */
 } a20_handle_table_t;
 ```
 
@@ -106,7 +112,8 @@ typedef struct a20_handle_table {
 ### 2.4 关键操作
 
 ```c
-/* 分配空闲槽位：O(n/64) worst case */static int ht_alloc_slot(a20_handle_table_t *ht) {
+/* 分配空闲槽位：O(n/64) worst case */
+static int ht_alloc_slot(a20_handle_table_t *ht) {
     for (uint32_t i = ht->free_hint / 64; i < ht->bitmap_size; i++) {
         uint64_t word = ht->free_bitmap[i];
         if (word != UINT64_MAX) {
@@ -122,7 +129,8 @@ typedef struct a20_handle_table {
     return -1;  /* 需要扩容 */
 }
 
-/* Handle lookup：O(1)，检查有效权限 ρ_eff */int64_t a20_handle_lookup(a20_handle_table_t *ht, a20_handle_t h,
+/* Handle lookup：O(1)，检查有效权限 ρ_eff */
+int64_t a20_handle_lookup(a20_handle_table_t *ht, a20_handle_t h,
                           uint16_t expected_type, a20_rights_t required_rights,
                           a20_handle_entry_t *out) {
     if (h >= ht->capacity) return -A20_ERR_BAD_HANDLE;
@@ -142,7 +150,8 @@ typedef struct a20_handle_table {
     return A20_OK;
 }
 
-/* 计算有效权限 ρ_eff(h, t) */static inline a20_rights_t a20_effective_rights(const a20_handle_entry_t *e) {
+/* 计算有效权限 ρ_eff(h, t) */
+static inline a20_rights_t a20_effective_rights(const a20_handle_entry_t *e) {
     /* 检查时间过期 */
     if (e->expiry_tick > 0 && a20_current_tick() >= e->expiry_tick)
         return 0;  /* 已过期，有效权限为空 */
@@ -155,7 +164,7 @@ typedef struct a20_handle_table {
 
 ### 2.5 增长策略
 
-当 `count == capacity` 时，按 `A20_HT_GROWTH_FACTOR = 2` 倍扩容。扩容在持锁期间分配新数组、复制旧条目、释放旧数组。到达 `A20_HT_MAX_CAP` 时拒绝扩容。
+当 `count == capacity` 且未达到 task quota 时，按 `A20_HT_GROWTH_FACTOR = 2` 倍扩容。默认 `max_handles` quota 是 4096，绝对数组上限 `A20_HT_MAX_CAP` 是 65536；通常先由 quota 拒绝安装。
 
 ### 2.6 时态能力（Temporal Capabilities）
 
@@ -285,10 +294,10 @@ task_destroy
 ├── 遍历 handle_table，close 所有 handle
 │   ├── channel endpoint close → 通知对端 peer_closed
 │   ├── event queue close → 清理 watch list + 反向索引
-│   └── memory close → 解除映射
+│   └── memory close → 释放该 handle 的 VMO 引用；既有 VMA 自持引用并继续存活
 └── 释放 task 结构
 
-最大级联深度：2 task → handle → channel message 中的 handle 引用
+实现通过引用计数和锁外 release 限制递归持锁风险；文档不对任意对象图给出固定“最大级联深度”保证。
 ```
 
 ---
@@ -365,17 +374,16 @@ L0 (IRQ) < L1 (handle table) < L2 (内核对象) < L3 (调度器) < L4 (mm)
 
 ### 5.2 Handle Transfer 的锁序
 
-`channel_send` 传递 handle 时需要同时操作发送方的 HT 和接收方的 HT：
+`channel_send` 时接收方 task 尚不一定已知，因此不会操作接收方 HT：
 
 ```text
-1. 锁发送方 HT (L1)，验证 channel handle 和要传递的 handle
-2. 对每个要传递的 handle：refcount_inc（原子，不需要接收方 HT 锁）
-3. 解锁发送方 HT
-4. 锁接收方 HT，分配新槽位，写入 entries
-5. 解锁接收方 HT
+1. 在发送方 HT 中验证 channel 与待传 handle，并为消息取得对象引用
+2. 把对象、类型、rights、时态字段和标签放入 endpoint 消息队列
+3. `channel_recv` 在实际接收 task 的 HT 中执行 reserve-many
+4. 只有全部槽位预留成功后才出队并 commit；失败返回 `NO_SPACE`，消息保留
 ```
 
-两阶段锁分离：发送方和接收方的 HT 不同时加锁。通过 refcount_inc 在解锁前"保留"对象引用，确保接收方分配时对象仍有效。
+发送方和接收方 HT 不同时加锁；消息持有的对象引用跨越排队期，直到接收 commit 或消息被丢弃。
 
 ---
 
@@ -415,7 +423,7 @@ L0 (IRQ) < L1 (handle table) < L2 (内核对象) < L3 (调度器) < L4 (mm)
 | 0x0202 | `task_wait` | `int64_t task_wait(a20_handle_t task, a20_flags_t flags, a20_task_status_t *out)` | 等待 task 退出 |
 | 0x0203 | `task_kill` | `int64_t task_kill(a20_handle_t task, int32_t reason)` | 终止 task |
 | 0x0204 | `task_info` | `int64_t task_info(a20_handle_t task, a20_task_info_t *out)` | 查询 task 信息 |
-| 0x0205 | `thread_create` | `int64_t thread_create(a20_thread_create_args_t *args)` | 创建线程 |
+| 0x0205 | `thread_create` | `int64_t thread_create(a20_thread_create_args_t *args)` | 创建线程；当前返回 `A20_OBJ_TASK` handle，`A20_OBJ_THREAD` 保留未用 |
 | 0x0206 | `thread_exit` | `void thread_exit(int32_t code)` | 退出当前线程 |
 | 0x0207 | `thread_sleep` | `int64_t thread_sleep(a20_time_ns_t duration_ns)` | 线程睡眠指定纳秒数（相对当前时间） |
 | 0x0208 | `thread_yield` | `int64_t thread_yield(void)` | 主动让出 CPU |
