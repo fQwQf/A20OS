@@ -56,3 +56,24 @@
 [submodule "user/external/gui/mesa"]
 	path = user/external/gui/mesa
 	url = https://gitlab.freedesktop.org/mesa/mesa.git
+[submodule "user/external/gui/glib"]
+	path = user/external/gui/glib
+	url = //gitlab.gnome.org/GNOME/glib.git
+[submodule "user/external/gui/pango"]
+	path = user/external/gui/pango
+	url = //gitlab.gnome.org/GNOME/pango.git
+[submodule "user/external/gui/gdk-pixbuf"]
+	path = user/external/gui/gdk-pixbuf
+	url = //gitlab.gnome.org/GNOME/gdk-pixbuf.git
+[submodule "user/external/gui/gtk3"]
+	path = user/external/gui/gtk3
+	url = //gitlab.gnome.org/GNOME/gtk.git
+[submodule "user/external/gui/dbus"]
+	path = user/external/gui/dbus
+	url = //gitlab.freedesktop.org/dbus/dbus.git
+[submodule "user/external/gui/atk"]
+	path = user/external/gui/atk
+	url = https://gitlab.gnome.org/GNOME/atk.git
+[submodule "user/external/gui/cairo"]
+	path = user/external/gui/cairo
+	url = https://gitlab.freedesktop.org/cairo/cairo.git
