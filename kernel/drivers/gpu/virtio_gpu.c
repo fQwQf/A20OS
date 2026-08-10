@@ -45,11 +45,20 @@ typedef struct {
     uint16_t           desc_idx;
     uint16_t           last_used;
     int                valid;
+    int                virgl;   /* VIRTIO_GPU_F_VIRGL negotiated */
+    int                context_init; /* VIRTIO_GPU_F_CONTEXT_INIT negotiated */
     /* Device-owned staging.  Lifecycle and ioctl callers often provide stack
      * objects, which must never be exposed directly to DMA: after a timeout
      * the device may still access them after the caller returns. */
     uint8_t            command_req[VIRTIO_GPU_COMMAND_BYTES] ALIGNED(64);
     uint8_t            command_resp[VIRTIO_GPU_COMMAND_BYTES] ALIGNED(64);
+    /* Large 3D command staging: SUBMIT_3D and capset blobs exceed the
+     * fixed 128-byte command slot.  Guarded by command_lock; only one
+     * in-flight large command at a time. */
+    uint8_t           *big_req;
+    size_t             big_req_cap;
+    uint8_t           *big_resp;
+    size_t             big_resp_cap;
 } virtio_gpu_inst_t;
 
 static virtio_gpu_inst_t g_gpu_inst;
@@ -225,6 +234,171 @@ static int virtio_gpu_send_cmd(virtio_gpu_inst_t *inst, void *req, size_t req_le
     return 0;
 }
 
+/*
+ * Large-command variant of virtio_gpu_send_cmd for 3D paths whose payloads
+ * (GET_CAPSET, SUBMIT_3D) exceed the fixed 128-byte command slot.  Uses the
+ * driver-owned big_req/big_resp buffers (grown on demand, guarded by
+ * command_lock) so DMA never references caller stack objects.
+ */
+static int virtio_gpu_send_cmd_big(virtio_gpu_inst_t *inst, const void *req,
+                                   size_t req_len, void *resp, size_t resp_len)
+{
+    if (!inst || !req || !resp || req_len == 0)
+        return -EINVAL;
+
+    mutex_lock(&inst->command_lock);
+    if (req_len > inst->big_req_cap) {
+        uint8_t *nr = kmalloc(req_len);
+        if (!nr) { mutex_unlock(&inst->command_lock); return -ENOMEM; }
+        if (inst->big_req) kfree(inst->big_req);
+        inst->big_req = nr;
+        inst->big_req_cap = req_len;
+    }
+    if (resp_len > inst->big_resp_cap) {
+        uint8_t *nr = kmalloc(resp_len);
+        if (!nr) { mutex_unlock(&inst->command_lock); return -ENOMEM; }
+        if (inst->big_resp) kfree(inst->big_resp);
+        inst->big_resp = nr;
+        inst->big_resp_cap = resp_len;
+    }
+    memcpy(inst->big_req, req, req_len);
+    memset(inst->big_resp, 0, resp_len);
+
+    uint16_t slot = 0;
+    uint16_t resp_slot = 1;
+    inst->desc[slot].addr  = va_to_pa(inst->big_req);
+    inst->desc[slot].len   = (uint32_t)req_len;
+    inst->desc[slot].flags = VIRTQ_DESC_F_NEXT;
+    inst->desc[slot].next  = resp_slot;
+    inst->desc[resp_slot].addr  = va_to_pa(inst->big_resp);
+    inst->desc[resp_slot].len   = (uint32_t)resp_len;
+    inst->desc[resp_slot].flags = VIRTQ_DESC_F_WRITE;
+    inst->desc[resp_slot].next  = 0;
+    arch_dma_sync_for_device(inst->desc, sizeof(virtq_desc_t));
+    arch_dma_sync_for_device(inst->big_req, req_len);
+    arch_dma_sync_for_device(inst->big_resp, resp_len);
+
+    arch_dma_sync_for_cpu(&inst->used, sizeof(inst->used));
+    uint16_t used_before = ((volatile virtq_used_t *)&inst->used)->idx;
+
+    uint16_t avail_slot = inst->avail.idx % VIRTIO_GPU_QUEUE_SIZE;
+    inst->avail.ring[avail_slot] = slot;
+    wmb();
+    inst->avail.idx++;
+    wmb();
+    arch_dma_sync_for_device(&inst->avail, sizeof(inst->avail));
+    inst->vt.write32(&inst->vt, VIRTIO_MMIO_QUEUE_NOTIFY, 0);
+    mb();
+
+    volatile virtq_used_t *used = &inst->used;
+    uint64_t start = clock_get_ticks();
+    uint64_t frequency = clock_ticks_per_sec();
+    uint64_t deadline = (start && frequency) ? start + frequency : 0;
+    uint32_t spins = 100000000U;
+    int completed = 0;
+    while (spins--) {
+        arch_dma_sync_for_cpu((void *)used, sizeof(*used));
+        if (used->idx != used_before) { completed = 1; break; }
+        if (deadline && clock_get_ticks() >= deadline)
+            break;
+        arch_cpu_relax();
+        if ((spins & 0xffffU) == 0 && proc_current()) {
+            if (inst->irq_registered && deadline) {
+                uint64_t now = clock_get_ticks();
+                if (now < deadline) {
+                    uint64_t chunk = now + MS_TO_TICKS(20);
+                    if (chunk > deadline) chunk = deadline;
+                    proc_wait_token_t token =
+                        proc_park_prepare(PROC_WAIT_UNINTERRUPTIBLE, chunk);
+                    wait_queue_entry_t entry = {0};
+                    wait_queue_link(&inst->waiters, &entry, token, 0);
+                    arch_dma_sync_for_cpu((void *)used, sizeof(*used));
+                    if (used->idx != used_before) {
+                        wait_queue_unlink(&inst->waiters, &entry);
+                        (void)proc_park_cancel(token);
+                        proc_park_finish(token);
+                        completed = 1;
+                        break;
+                    }
+                    (void)proc_park_commit(token);
+                    wait_queue_unlink(&inst->waiters, &entry);
+                    proc_park_finish(token);
+                }
+            } else {
+                proc_yield();
+            }
+        }
+    }
+    if (!completed) {
+        mutex_unlock(&inst->command_lock);
+        return -1;
+    }
+    uint16_t ring_idx = (uint16_t)(used_before % VIRTIO_GPU_QUEUE_SIZE);
+    arch_dma_sync_for_cpu(inst->big_resp, resp_len);
+    if (used->ring[ring_idx].id != slot) {
+        mutex_unlock(&inst->command_lock);
+        return -1;
+    }
+    memcpy(resp, inst->big_resp, resp_len);
+    uint32_t isr = inst->vt.read32(&inst->vt, VIRTIO_MMIO_INTERRUPT_STATUS);
+    if (!inst->vt.legacy && isr)
+        inst->vt.write32(&inst->vt, VIRTIO_MMIO_INTERRUPT_ACK, isr);
+    inst->last_used = used->idx;
+    inst->desc_idx = 0;
+    mutex_unlock(&inst->command_lock);
+    return 0;
+}
+
+/* ---- virtio-gpu 3D helpers ------------------------------------------ */
+
+/* Query capset info by index (VIRTIO_GPU_CMD_GET_CAPSET_INFO).  Returns the
+ * capset id / version / size, or -1 if unavailable. */
+static int virtio_gpu_get_capset_info(virtio_gpu_inst_t *inst, uint32_t index,
+                                      uint32_t *id, uint32_t *max_version,
+                                      uint32_t *max_size)
+{
+    struct virtio_gpu_get_capset_info req ALIGNED(64);
+    struct virtio_gpu_resp_capset_info resp ALIGNED(64);
+    memset(&req, 0, sizeof(req));
+    memset(&resp, 0, sizeof(resp));
+    req.hdr.type = VIRTIO_GPU_CMD_GET_CAPSET_INFO;
+    req.capset_index = index;
+    if (virtio_gpu_send_cmd(inst, &req, sizeof(req), &resp, sizeof(resp)) < 0 ||
+        resp.hdr.type != VIRTIO_GPU_RESP_OK_CAPSET_INFO)
+        return -1;
+    *id = resp.capset_id;
+    *max_version = resp.capset_max_version;
+    *max_size = resp.capset_max_size;
+    return 0;
+}
+
+/* Fetch the raw capset blob (VIRTIO_GPU_CMD_GET_CAPSET) into buf. */
+static int virtio_gpu_get_capset(virtio_gpu_inst_t *inst, uint32_t index,
+                                 uint32_t version, void *buf, size_t bufsz)
+{
+    struct virtio_gpu_get_capset req ALIGNED(64);
+    uint8_t resp[sizeof(struct virtio_gpu_ctrl_hdr) + 4096] ALIGNED(64);
+    memset(&req, 0, sizeof(req));
+    req.hdr.type = VIRTIO_GPU_CMD_GET_CAPSET;
+    req.capset_index = index;
+    req.capset_version = version;
+    size_t rsz = sizeof(struct virtio_gpu_ctrl_hdr) + bufsz;
+    if (rsz > sizeof(resp))
+        rsz = sizeof(resp);
+    /* The capset blob follows the response header; use a larger response
+     * buffer than the fixed command slot can hold. */
+    if (virtio_gpu_send_cmd_big(inst, &req, sizeof(req), resp, rsz) < 0)
+        return -1;
+    struct virtio_gpu_resp_capset *cr = (struct virtio_gpu_resp_capset *)resp;
+    if (cr->hdr.type != VIRTIO_GPU_RESP_OK_CAPSET)
+        return -1;
+    size_t copy = rsz - sizeof(struct virtio_gpu_ctrl_hdr);
+    if (copy > bufsz)
+        copy = bufsz;
+    memcpy(buf, resp + sizeof(struct virtio_gpu_ctrl_hdr), copy);
+    return 0;
+}
+
 static int gpu_get_info(struct device *dev, uint32_t *width, uint32_t *height, uint32_t *bpp) {
     virtio_gpu_inst_t *inst = dev->drv_priv;
     *width = inst->width;
@@ -333,9 +507,18 @@ static int virtio_gpu_init_transport(device_t *dev, const virtio_transport_t *tr
     mb();
     
     vt->write32(vt, VIRTIO_MMIO_DEVICE_FEATURES_SEL, 0);
-    vt->read32(vt, VIRTIO_MMIO_DEVICE_FEATURES);
+    uint32_t features_lo = vt->read32(vt, VIRTIO_MMIO_DEVICE_FEATURES);
     vt->write32(vt, VIRTIO_MMIO_DRIVER_FEATURES_SEL, 0);
-    vt->write32(vt, VIRTIO_MMIO_DRIVER_FEATURES, 0);
+    /* Advertise the 2D display features plus virgl (3D) if the host offers
+     * it; the virtio-gpu-gl device enables VIRTIO_GPU_F_VIRGL. */
+    uint32_t driver_lo = 0;
+    if (features_lo & (1U << VIRTIO_GPU_F_VIRGL))
+        driver_lo |= (1U << VIRTIO_GPU_F_VIRGL);
+    if (features_lo & (1U << VIRTIO_GPU_F_EDID))
+        driver_lo |= (1U << VIRTIO_GPU_F_EDID);
+    vt->write32(vt, VIRTIO_MMIO_DRIVER_FEATURES, driver_lo);
+    inst->virgl = (features_lo & (1U << VIRTIO_GPU_F_VIRGL)) != 0;
+    inst->context_init = (features_lo & (1U << VIRTIO_GPU_F_CONTEXT_INIT)) != 0;
     
     vt->write32(vt, VIRTIO_MMIO_DEVICE_FEATURES_SEL, 1);
     uint32_t features_hi = vt->read32(vt, VIRTIO_MMIO_DEVICE_FEATURES);
@@ -478,6 +661,17 @@ static int virtio_gpu_init_transport(device_t *dev, const virtio_transport_t *tr
     inst->valid = 1;
     if (gpu_device_register(dev) < 0)
         goto fail;
+    if (inst->virgl) {
+        uint32_t cid = 0, cver = 0, csize = 0;
+        if (virtio_gpu_get_capset_info(inst, 0, &cid, &cver, &csize) == 0) {
+            kinfo("[GPU] virtio-gpu 3D (virgl): capset[0] id=%u ver=%u size=%u ctx_init=%d\n",
+                  cid, cver, csize, inst->context_init);
+        } else {
+            kinfo("[GPU] virtio-gpu 3D negotiated but capset query failed\n");
+        }
+    } else {
+        kinfo("[GPU] virtio-gpu 2D only (no VIRGL feature)\n");
+    }
     kinfo("[GPU] virtio-gpu ready: %dx%d (FB: %lu MB at 0x%lx)\n", 
           inst->width, inst->height, inst->fb_size/1024/1024, inst->fb_phys);
     return 0;
