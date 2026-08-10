@@ -41,6 +41,9 @@ typedef struct {
 
 extern const rootfs_overlay_entry_t g_rootfs_overlay[];
 extern const size_t g_rootfs_overlay_count;
+extern rootfs_overlay_entry_t g_rootfs_driver_overlay[];
+extern const size_t g_rootfs_driver_overlay_count;
+void rootfs_driver_overlay_init(void);
 
 #endif
 """,
