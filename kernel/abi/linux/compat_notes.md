@@ -64,6 +64,11 @@ flag、对象类型或并发边界。
 - `/sys/class/drm/card0*` 与 `/sys/class/drm/card0-Virtual-1/{enabled,status,modes}` 提供 DRM 显示元数据。
 - 音频仍是 A20 原生 `a20_audio` ioctl（非 Linux ALSA SNDRV 标准）；完整 DRM/ALSA 接口集（na-kernel 的 drm_ioctl 全套）列为后续工作。
 
+## GPU/音频子系统
+
+- **DRM/KMS**（新增 `kernel/drivers/gpu/drm.c`）：`/dev/dri/card0` 提供 Linux 标准 DRM ioctl 子集，映射到 `gpu_dev_ops_t`（virtio-gpu/vmsvga）：VERSION、GET_CAP、GEM_CLOSE、MODE_GETRESOURCES/GETCRTC/SETCRTC/GETCONNECTOR/GETENCODER/GETPLANE/GETPLANERESOURCES/GETFB/ADDFB/RMFB/PAGE_FLIP/DPMS/GETPROPERTY/SETPROPERTY/CREATE_DUMB/MAP_DUMB/DESTROY_DUMB/GETGAMMA/ATOMIC(test)。dumb buffer 用 VMO 支持 mmap。
+- **ALSA**（新增 `kernel/drivers/audio/alsa.c`）：`/dev/snd/controlC0`、`/dev/snd/pcmC0D0p`、`/dev/snd/pcmC0D0c` 提供 SNDRV_CTL_IOCTL_PVERSION/CARD_INFO/PCM_NEXT_DEVICE/PCM_INFO 与 SNDRV_PCM_IOCTL_HW_PARAMS/SW_PARAMS/STATUS/WRITEI_FRAMES/READI_FRAMES/PREPARE/START/DRAIN/DROP/PAUSE，映射到 `audio_dev_ops_t`（virtio-snd）。ioctl 路径支持；mmap 播放环列为后续工作。
+
 ## 维护规则
 
 1. 新增 Linux syscall 实现必须登记到 `syscall_coverage.md`。

@@ -20,7 +20,9 @@ GENERIC_KERNEL_SERVICE_SRCS := \
     $(KERNEL_DIR)/drivers/char/uart.c \
     $(KERNEL_DIR)/drivers/gpu/framebuffer.c \
     $(KERNEL_DIR)/drivers/gpu/gpu_core.c \
+    $(KERNEL_DIR)/drivers/gpu/drm.c \
     $(KERNEL_DIR)/drivers/audio/audio_core.c \
+    $(KERNEL_DIR)/drivers/audio/alsa.c \
     $(KERNEL_DIR)/drivers/input/input_mux.c \
     $(KERNEL_DIR)/drivers/usb/core/usb_core.c
 
