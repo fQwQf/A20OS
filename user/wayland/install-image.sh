@@ -101,6 +101,19 @@ if [ -f "$SYSROOT/lib/libcairo.so.2" ]; then
         "$SYSROOT/etc/fonts/fonts.conf" > "$FONTCONF_TMP"
     copy_file "$FONTCONF_TMP" /etc/fonts/fonts.conf
     rm -f "$FONTCONF_TMP"
+
+if [ -f "$SYSROOT/lib/libEGL.so.1.0.0" ]; then
+    echo "[image] mesa EGL/GLES + gbm"
+    copy_file "$SYSROOT/lib/libEGL.so.1" /lib/libEGL.so.1
+    copy_file "$SYSROOT/lib/libGLESv2.so.2" /lib/libGLESv2.so.2
+    copy_file "$SYSROOT/lib/libGLESv1_CM.so.1" /lib/libGLESv1_CM.so.1
+    copy_file "$SYSROOT/lib/libgbm.so.1" /lib/libgbm.so.1
+    copy_file "$SYSROOT/lib/libgallium-25.3.6.so" /lib/libgallium-25.3.6.so
+    copy_file "$SYSROOT/lib/libstdc++.so.6" /lib/libstdc++.so.6
+    copy_file "$SYSROOT/lib/libgcc_s.so.1" /lib/libgcc_s.so.1
+    copy_file "$SYSROOT/lib/libdrm.so.2" /lib/libdrm.so.2
+    copy_file "$SYSROOT/bin/egl_test" /egl_test
+fi
 fi
 
 echo "[image] weston libs + modules"

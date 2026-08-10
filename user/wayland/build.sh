@@ -437,6 +437,24 @@ if want mesa && ! stamp mesa; then
         -Dplatforms= -Dllvm=disabled -Dopengl=true \
         -Dgallium-extra-hud=false -Dtools= -Dbuild-tests=false \
         -Dshader-cache=disabled
+    # Mesa runtime deps that live in the prebuilt toolchain's lib dir:
+    # libstdc++ (musl-native) and libgcc_s, plus stripping the 96 MB
+    # libgallium megadriver down to a deployable size.
+    TC_LIB="$MUSL_TOOLCHAIN/$MUSL_TARGET-linux-musl/lib"
+    if [ -f "$TC_LIB/libstdc++.so.6.0.29" ]; then
+        cp "$TC_LIB/libstdc++.so.6.0.29" "$SYSROOT/lib/"
+        ln -sf libstdc++.so.6.0.29 "$SYSROOT/lib/libstdc++.so.6"
+    fi
+    if [ -f "$TC_LIB/libgcc_s.so.1" ]; then
+        cp "$TC_LIB/libgcc_s.so.1" "$SYSROOT/lib/"
+    fi
+    if [ -x "$MUSL_TOOLCHAIN/bin/$MUSL_TARGET-linux-musl-strip" ]; then
+        "$MUSL_TOOLCHAIN/bin/$MUSL_TARGET-linux-musl-strip" --strip-unneeded \
+            "$SYSROOT/lib/libgallium-"*.so \
+            "$SYSROOT/lib/libEGL.so."* "$SYSROOT/lib/libGLESv2.so."* \
+            "$SYSROOT/lib/libGLESv1_CM.so."* "$SYSROOT/lib/libgbm.so."* \
+            "$SYSROOT/lib/libstdc++.so.6.0.29" 2>/dev/null || true
+    fi
     mark mesa
 fi
 
@@ -535,6 +553,11 @@ if want player && ! stamp player; then
         -lwayland-client -lffi -lpthread -lm
     "$MUSL_GCC" -O2 -static "$USER_DIR/cmds/core/wayland-session.c" \
         -o "$SYSROOT/bin/wayland-session"
+    # EGL/GLES smoke client: links against the Mesa libs in the sysroot.
+    "$MESON_CC" -O2 -I"$SYSROOT/include" \
+        "$USER_DIR/cmds/core/egl_test.c" -o "$SYSROOT/bin/egl_test" \
+        -Wl,-rpath-link,"$SYSROOT/lib" -L"$SYSROOT/lib" \
+        -lEGL -lGLESv2 -lpthread -lm
     mark player
 fi
 
