@@ -375,6 +375,61 @@ static int fb_ioctl(vfile_t *vf, unsigned long req, void *arg) {
                 return r;
             return ops->flush(dev, 0, 0, w, h);
         }
+        case FBIOPAN_DISPLAY: {
+            /* Pan the display to a new x/y offset.  A20OS scanout is a fixed
+             * full-frame buffer, so only (0,0) is accepted. */
+            struct fb_var_screeninfo var;
+            if (copy_from_user(&var, arg, sizeof(var)) < 0)
+                return -EFAULT;
+            return (var.xoffset == 0 && var.yoffset == 0) ? 0 : -EINVAL;
+        }
+        case FBIOBLANK: {
+            /* No DPMS blanking primitive; accept 0 (unblank) and FB_BLANK_NORMAL
+             * as no-ops so standard fbdev userspace can probe blanking. */
+            int blank = (int)(uintptr_t)arg;
+            if (blank == 0 || blank == 1)
+                return 0;
+            return -EINVAL;
+        }
+        case FBIOGETCMAP: {
+            /* Truecolor framebuffer: the palette is not used.  Return the
+             * identity map for compatibility with tools that read it. */
+            if (!arg)
+                return -EFAULT;
+            struct fb_cmap cmap;
+            if (copy_from_user(&cmap, arg, sizeof(cmap)) < 0)
+                return -EFAULT;
+            if (cmap.len == 0)
+                return 0;
+            if (!cmap.red || !cmap.green || !cmap.blue)
+                return -EINVAL;
+            size_t bytes = (size_t)cmap.len * sizeof(uint16_t);
+            uint16_t scratch[256];
+            for (uint32_t i = 0; i < cmap.len && i < 256; i++) {
+                uint16_t v = (uint16_t)(((cmap.start + i) * 65535) / 255);
+                scratch[i] = v;
+            }
+            if (bytes > sizeof(scratch))
+                return -EINVAL;
+            if (copy_to_user(cmap.red, scratch, bytes) < 0 ||
+                copy_to_user(cmap.green, scratch, bytes) < 0 ||
+                copy_to_user(cmap.blue, scratch, bytes) < 0)
+                return -EFAULT;
+            return 0;
+        }
+        case FBIOPUTCMAP: {
+            /* Truecolor: accept and discard palette writes. */
+            if (!arg)
+                return -EFAULT;
+            struct fb_cmap cmap;
+            if (copy_from_user(&cmap, arg, sizeof(cmap)) < 0)
+                return -EFAULT;
+            if (cmap.start > 256 || cmap.len > 256 - cmap.start)
+                return -EINVAL;
+            if (cmap.len && (!cmap.red || !cmap.green || !cmap.blue))
+                return -EINVAL;
+            return 0;
+        }
         default:
             return -EINVAL;
     }

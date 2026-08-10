@@ -6,8 +6,12 @@
 #define FBIOGET_VSCREENINFO 0x4600
 #define FBIOPUT_VSCREENINFO 0x4601
 #define FBIOGET_FSCREENINFO 0x4602
+#define FBIOGETCMAP         0x4604 /* Linux standard */
+#define FBIOPUTCMAP         0x4605 /* Linux standard */
+#define FBIOPAN_DISPLAY     0x4606 /* Linux standard */
 #define FBIO_MAP_FB         0x4603 /* A20OS specific: maps fb to arg (vaddr) */
-#define FBIO_FLUSH          0x4604 /* A20OS specific: flushes fb */
+#define FBIO_FLUSH          0x4609 /* A20OS specific: flushes fb */
+#define FBIOBLANK           0x4611 /* Linux standard */
 
 #define FB_TYPE_PACKED_PIXELS      0
 #define FB_VISUAL_TRUECOLOR        2
@@ -85,5 +89,15 @@ struct fb_fix_screeninfo {
  */
 int64_t fbdev_linux_mmap(uint64_t addr, size_t len, int prot, int flags,
                          uint64_t off);
+
+/* Linux color map (FBIOGETCMAP/FBIOPUTCMAP). */
+struct fb_cmap {
+    uint32_t start;
+    uint32_t len;
+    uint16_t *red;
+    uint16_t *green;
+    uint16_t *blue;
+    uint16_t *transp;
+};
 
 #endif
