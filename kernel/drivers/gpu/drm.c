@@ -1,0 +1,872 @@
+#include "drivers/gpu/drm.h"
+
+#include "core/errno.h"
+#include "core/string.h"
+#include "core/stdio.h"
+#include "drivers/core/driver_class.h"
+#include "drivers/gpu/gpu_core.h"
+#include "fs/anonfd.h"
+#include "fs/file.h"
+#include "fs/vfs.h"
+#include "mm/mm.h"
+#include "mm/slab.h"
+#include "mm/vm.h"
+#include "mm/vmo.h"
+#include "proc/proc.h"
+#include "sys/usercopy.h"
+
+/*
+ * Minimal DRM/KMS backend.
+ *
+ * The DRM device is a vfile whose private data is a per-open context that
+ * holds a small dumb-buffer handle table.  KMS objects (CRTC 0, one plane,
+ * one connector, one encoder) describe the single GPU scanout obtained from
+ * gpu_dev_ops_t.  Dumb buffers are VMO-backed so userland can mmap them.
+ */
+
+#define DRM_MAX_BUFFERS 16
+
+typedef struct drm_buffer {
+    int used;
+    uint32_t handle;
+    uint32_t width;
+    uint32_t height;
+    uint32_t pitch;
+    uint32_t bpp;
+    struct vmo *vmo;
+    uint64_t size;
+} drm_buffer_t;
+
+typedef struct drm_context {
+    drm_buffer_t buffers[DRM_MAX_BUFFERS];
+    uint32_t next_handle;
+} drm_context_t;
+
+static struct device *drm_gpu_device(void)
+{
+    return gpu_device_get_default();
+}
+
+static gpu_dev_ops_t *drm_gpu_ops(void)
+{
+    struct device *dev = drm_gpu_device();
+    if (!dev || !dev->drv || !dev->drv->class_ops)
+        return NULL;
+    return (gpu_dev_ops_t *)dev->drv->class_ops;
+}
+
+/* ---- DRM wire structs (Linux ABI) ---- */
+
+struct drm_version {
+    int version_major;
+    int version_minor;
+    int version_patchlevel;
+    uint64_t name_len;
+    char *name;
+    uint64_t date_len;
+    char *date;
+    uint64_t desc_len;
+    char *desc;
+};
+
+struct drm_get_cap {
+    uint64_t capability;
+    uint64_t value;
+};
+
+struct drm_gem_close {
+    uint32_t handle;
+    uint32_t pad;
+};
+
+struct drm_prime_handle {
+    uint32_t handle;
+    uint32_t flags;
+    int32_t fd;
+};
+
+struct drm_mode_modeinfo {
+    uint32_t clock;
+    uint16_t hdisplay;
+    uint16_t hsync_start;
+    uint16_t hsync_end;
+    uint16_t htotal;
+    uint16_t hskew;
+    uint16_t vdisplay;
+    uint16_t vsync_start;
+    uint16_t vsync_end;
+    uint16_t vtotal;
+    uint16_t vscan;
+    uint32_t vrefresh;
+    uint32_t flags;
+    uint32_t type;
+    char name[32];
+};
+
+struct drm_mode_card_res {
+    uint64_t fb_id_ptr;
+    uint64_t crtc_id_ptr;
+    uint64_t connector_id_ptr;
+    uint64_t encoder_id_ptr;
+    uint32_t count_fbs;
+    uint32_t count_crtcs;
+    uint32_t count_connectors;
+    uint32_t count_encoders;
+    uint32_t min_width;
+    uint32_t max_width;
+    uint32_t min_height;
+    uint32_t max_height;
+};
+
+struct drm_mode_crtc {
+    uint64_t set_connectors_ptr;
+    uint32_t count_connectors;
+    uint32_t crtc_id;
+    uint32_t fb_id;
+    uint32_t x;
+    uint32_t y;
+    uint32_t gamma_size;
+    uint32_t mode_valid;
+    struct drm_mode_modeinfo mode;
+};
+
+struct drm_mode_get_encoder {
+    uint32_t encoder_id;
+    uint32_t encoder_type;
+    uint32_t crtc_id;
+    uint32_t possible_crtcs;
+    uint32_t possible_clones;
+};
+
+struct drm_mode_get_connector {
+    uint64_t encoders_ptr;
+    uint64_t modes_ptr;
+    uint64_t props_ptr;
+    uint64_t prop_values_ptr;
+    uint32_t count_modes;
+    uint32_t count_props;
+    uint32_t count_encoders;
+    uint32_t encoder_id;
+    uint32_t connector_id;
+    uint32_t connector_type;
+    uint32_t connector_type_id;
+    uint32_t connection;
+    uint32_t mm_width;
+    uint32_t mm_height;
+    uint32_t subpixel;
+    uint32_t pad;
+};
+
+struct drm_mode_get_property {
+    uint64_t values_ptr;
+    uint64_t enum_blob_ptr;
+    uint32_t prop_id;
+    uint32_t flags;
+    char name[32];
+    uint32_t count_values;
+    uint32_t count_enum_blobs;
+};
+
+struct drm_mode_connector_set_property {
+    uint64_t value;
+    uint32_t prop_id;
+    uint32_t connector_id;
+};
+
+struct drm_mode_fb_cmd {
+    uint32_t fb_id;
+    uint32_t width;
+    uint32_t height;
+    uint32_t pitch;
+    uint32_t bpp;
+    uint32_t depth;
+    uint32_t handle;
+};
+
+struct drm_mode_crtc_page_flip {
+    uint32_t crtc_id;
+    uint32_t fb_id;
+    uint32_t flags;
+    uint32_t reserved;
+    uint64_t user_data;
+};
+
+struct drm_mode_create_dumb {
+    uint32_t height;
+    uint32_t width;
+    uint32_t bpp;
+    uint32_t flags;
+    uint32_t handle;
+    uint32_t pitch;
+    uint64_t size;
+};
+
+struct drm_mode_map_dumb {
+    uint32_t handle;
+    uint32_t pad;
+    uint64_t offset;
+};
+
+struct drm_mode_destroy_dumb {
+    uint32_t handle;
+};
+
+struct drm_mode_get_plane_res {
+    uint64_t plane_id_ptr;
+    uint32_t count_planes;
+};
+
+struct drm_mode_get_plane {
+    uint32_t plane_id;
+    uint32_t crtc_id;
+    uint32_t fb_id;
+    uint32_t possible_crtcs;
+    uint32_t gamma_size;
+    uint32_t count_format_types;
+    uint64_t format_type_ptr;
+};
+
+struct drm_mode_crtc_lut {
+    uint32_t crtc_id;
+    uint32_t gamma_size;
+    uint64_t red;
+    uint64_t green;
+    uint64_t blue;
+};
+
+struct drm_mode_dpms {
+    uint32_t dpms;
+};
+
+struct drm_mode_atomic {
+    uint32_t flags;
+    uint32_t count_objs;
+    uint64_t objs_ptr;
+    uint64_t count_props_ptr;
+    uint64_t props_ptr;
+    uint64_t prop_values_ptr;
+    uint64_t reserved;
+    uint64_t user_data;
+};
+
+/* ---- helpers ---- */
+
+static drm_buffer_t *drm_find_buffer(drm_context_t *ctx, uint32_t handle)
+{
+    for (int i = 0; i < DRM_MAX_BUFFERS; i++)
+        if (ctx->buffers[i].used && ctx->buffers[i].handle == handle)
+            return &ctx->buffers[i];
+    return NULL;
+}
+
+static void drm_free_buffer(drm_context_t *ctx, drm_buffer_t *b)
+{
+    if (b->vmo)
+        vmo_release(b->vmo);
+    memset(b, 0, sizeof(*b));
+}
+
+static void drm_mode_fill(struct drm_mode_modeinfo *m, uint32_t w, uint32_t h,
+                          uint32_t vrefresh)
+{
+    memset(m, 0, sizeof(*m));
+    m->hdisplay = (uint16_t)w;
+    m->hsync_start = (uint16_t)w;
+    m->hsync_end = (uint16_t)w;
+    m->htotal = (uint16_t)(w + 160);
+    m->vdisplay = (uint16_t)h;
+    m->vsync_start = (uint16_t)h;
+    m->vsync_end = (uint16_t)h;
+    m->vtotal = (uint16_t)(h + 40);
+    m->clock = (uint32_t)((uint64_t)w * h * vrefresh / 1000);
+    m->vrefresh = vrefresh;
+    m->type = 0x40; /* DRM_MODE_TYPE_DRIVER */
+    strncpy(m->name, "a20", sizeof(m->name) - 1);
+}
+
+/* ---- ioctl handlers ---- */
+
+static int drm_version(drm_context_t *ctx, void *arg)
+{
+    (void)ctx;
+    struct drm_version v;
+    if (copy_from_user(&v, arg, sizeof(v)) < 0)
+        return -EFAULT;
+
+    const char *name = "a20drm";
+    const char *date = "20260810";
+    const char *desc = "A20OS minimal DRM";
+    size_t name_len = strlen(name);
+    size_t date_len = strlen(date);
+    size_t desc_len = strlen(desc);
+
+    if (v.name && v.name_len >= name_len &&
+        copy_to_user(v.name, name, name_len) < 0)
+        return -EFAULT;
+    if (v.date && v.date_len >= date_len &&
+        copy_to_user(v.date, date, date_len) < 0)
+        return -EFAULT;
+    if (v.desc && v.desc_len >= desc_len &&
+        copy_to_user(v.desc, desc, desc_len) < 0)
+        return -EFAULT;
+
+    v.version_major = 1;
+    v.version_minor = 0;
+    v.version_patchlevel = 0;
+    v.name_len = name_len;
+    v.date_len = date_len;
+    v.desc_len = desc_len;
+    return copy_to_user(arg, &v, sizeof(v)) < 0 ? -EFAULT : 0;
+}
+
+static int drm_get_cap(drm_context_t *ctx, void *arg)
+{
+    (void)ctx;
+    struct drm_get_cap c;
+    if (copy_from_user(&c, arg, sizeof(c)) < 0)
+        return -EFAULT;
+    switch (c.capability) {
+    case 0x1: /* DRM_CAP_DUMB_BUFFER */
+        c.value = 1;
+        break;
+    case 0x2: /* DRM_CAP_VBLANK_HIGH_CRTC */
+        c.value = 0;
+        break;
+    case 0x3: /* DRM_CAP_DUMB_PREFERRED_DEPTH */
+        c.value = 32;
+        break;
+    case 0x4: /* DRM_CAP_DUMB_PREFER_SHADOW */
+        c.value = 0;
+        break;
+    case 0x5: /* DRM_CAP_PRIME */
+        c.value = 0;
+        break;
+    case 0x6: /* DRM_CAP_TIMESTAMP_MONOTONIC */
+        c.value = 1;
+        break;
+    case 0x7: /* DRM_CAP_ASYNC_PAGE_FLIP */
+        c.value = 0;
+        break;
+    case 0x12: /* DRM_CAP_CRTC_IN_VBLANK_EVENT */
+        c.value = 1;
+        break;
+    case 0x13: /* DRM_CAP_SYNCOBJ */
+        c.value = 0;
+        break;
+    default:
+        c.value = 0;
+        break;
+    }
+    return copy_to_user(arg, &c, sizeof(c)) < 0 ? -EFAULT : 0;
+}
+
+static int drm_mode_getresources(drm_context_t *ctx, void *arg)
+{
+    struct drm_mode_card_res res;
+    if (copy_from_user(&res, arg, sizeof(res)) < 0)
+        return -EFAULT;
+
+    gpu_dev_ops_t *ops = drm_gpu_ops();
+    uint32_t w = 1024, h = 768, bpp = 32;
+    if (ops && ops->get_info) {
+        struct device *dev = drm_gpu_device();
+        (void)ops->get_info(dev, &w, &h, &bpp);
+    }
+
+    int nfbs = 0;
+    for (int i = 0; i < DRM_MAX_BUFFERS; i++)
+        if (ctx->buffers[i].used)
+            nfbs++;
+
+    uint32_t fbs[DRM_MAX_BUFFERS];
+    uint32_t crtcs[1] = { 0 };
+    uint32_t conns[1] = { 0 };
+    uint32_t encs[1] = { 0 };
+    int fi = 0;
+    for (int i = 0; i < DRM_MAX_BUFFERS; i++)
+        if (ctx->buffers[i].used)
+            fbs[fi++] = ctx->buffers[i].handle;
+
+    res.count_fbs = (uint32_t)nfbs;
+    res.count_crtcs = 1;
+    res.count_connectors = 1;
+    res.count_encoders = 1;
+    res.min_width = 16;
+    res.max_width = w;
+    res.min_height = 16;
+    res.max_height = h;
+
+    if (res.fb_id_ptr && nfbs > 0 &&
+        copy_to_user((void *)(uintptr_t)res.fb_id_ptr, fbs,
+                     (size_t)nfbs * sizeof(uint32_t)) < 0)
+        return -EFAULT;
+    if (res.crtc_id_ptr && copy_to_user((void *)(uintptr_t)res.crtc_id_ptr,
+                                        crtcs, sizeof(crtcs)) < 0)
+        return -EFAULT;
+    if (res.connector_id_ptr &&
+        copy_to_user((void *)(uintptr_t)res.connector_id_ptr, conns,
+                     sizeof(conns)) < 0)
+        return -EFAULT;
+    if (res.encoder_id_ptr && copy_to_user((void *)(uintptr_t)res.encoder_id_ptr,
+                                           encs, sizeof(encs)) < 0)
+        return -EFAULT;
+    return copy_to_user(arg, &res, sizeof(res)) < 0 ? -EFAULT : 0;
+}
+
+static int drm_mode_getcrtc(drm_context_t *ctx, void *arg)
+{
+    (void)ctx;
+    struct drm_mode_crtc c;
+    if (copy_from_user(&c, arg, sizeof(c)) < 0)
+        return -EFAULT;
+
+    gpu_dev_ops_t *ops = drm_gpu_ops();
+    uint32_t w = 1024, h = 768, bpp = 32;
+    if (ops && ops->get_info) {
+        struct device *dev = drm_gpu_device();
+        (void)ops->get_info(dev, &w, &h, &bpp);
+    }
+    c.crtc_id = 0;
+    c.mode_valid = 1;
+    c.gamma_size = 0;
+    drm_mode_fill(&c.mode, w, h, 60);
+    return copy_to_user(arg, &c, sizeof(c)) < 0 ? -EFAULT : 0;
+}
+
+static int drm_mode_setcrtc(drm_context_t *ctx, void *arg)
+{
+    struct drm_mode_crtc c;
+    if (copy_from_user(&c, arg, sizeof(c)) < 0)
+        return -EFAULT;
+    if (c.fb_id != 0) {
+        drm_buffer_t *b = drm_find_buffer(ctx, c.fb_id);
+        if (!b)
+            return -ENOENT;
+        /* Flip the scanout to this buffer: the GPU scanout is the primary
+         * framebuffer, so a real driver would reprogram CRTC.  We accept the
+         * request and flush the target buffer. */
+        gpu_dev_ops_t *ops = drm_gpu_ops();
+        if (ops && ops->flush) {
+            struct device *dev = drm_gpu_device();
+            (void)ops->flush(dev, 0, 0, b->width, b->height);
+        }
+    }
+    return 0;
+}
+
+static int drm_mode_getconnector(drm_context_t *ctx, void *arg)
+{
+    (void)ctx;
+    struct drm_mode_get_connector con;
+    if (copy_from_user(&con, arg, sizeof(con)) < 0)
+        return -EFAULT;
+
+    gpu_dev_ops_t *ops = drm_gpu_ops();
+    uint32_t w = 1024, h = 768, bpp = 32;
+    if (ops && ops->get_info) {
+        struct device *dev = drm_gpu_device();
+        (void)ops->get_info(dev, &w, &h, &bpp);
+    }
+
+    struct drm_mode_modeinfo mode;
+    drm_mode_fill(&mode, w, h, 60);
+
+    con.connector_id = 0;
+    con.connector_type = 15; /* DRM_MODE_CONNECTOR_VIRTUAL */
+    con.connector_type_id = 1;
+    con.connection = 1;      /* connected */
+    con.mm_width = 0;
+    con.mm_height = 0;
+    con.subpixel = 0;
+    con.encoder_id = 0;
+    con.count_modes = 1;
+    con.count_props = 0;
+    con.count_encoders = 1;
+
+    if (con.modes_ptr && copy_to_user((void *)(uintptr_t)con.modes_ptr,
+                                      &mode, sizeof(mode)) < 0)
+        return -EFAULT;
+    if (con.encoders_ptr && copy_to_user((void *)(uintptr_t)con.encoders_ptr,
+                                         &(uint32_t){ 0 }, sizeof(uint32_t)) < 0)
+        return -EFAULT;
+    return copy_to_user(arg, &con, sizeof(con)) < 0 ? -EFAULT : 0;
+}
+
+static int drm_mode_getencoder(drm_context_t *ctx, void *arg)
+{
+    (void)ctx;
+    struct drm_mode_get_encoder e;
+    if (copy_from_user(&e, arg, sizeof(e)) < 0)
+        return -EFAULT;
+    e.encoder_id = 0;
+    e.encoder_type = 4; /* DRM_MODE_ENCODER_VIRTUAL */
+    e.crtc_id = 0;
+    e.possible_crtcs = 1;
+    e.possible_clones = 0;
+    return copy_to_user(arg, &e, sizeof(e)) < 0 ? -EFAULT : 0;
+}
+
+static int drm_mode_getplane(drm_context_t *ctx, void *arg)
+{
+    (void)ctx;
+    struct drm_mode_get_plane p;
+    if (copy_from_user(&p, arg, sizeof(p)) < 0)
+        return -EFAULT;
+    p.plane_id = 0;
+    p.crtc_id = 0;
+    p.fb_id = 0;
+    p.possible_crtcs = 1;
+    p.gamma_size = 0;
+    p.count_format_types = 1;
+    uint32_t fmt = 0x34325258; /* DRM_FORMAT_XRGB8888 */
+    if (p.format_type_ptr && copy_to_user((void *)(uintptr_t)p.format_type_ptr,
+                                          &fmt, sizeof(fmt)) < 0)
+        return -EFAULT;
+    return copy_to_user(arg, &p, sizeof(p)) < 0 ? -EFAULT : 0;
+}
+
+static int drm_mode_getplaneres(drm_context_t *ctx, void *arg)
+{
+    (void)ctx;
+    struct drm_mode_get_plane_res r;
+    if (copy_from_user(&r, arg, sizeof(r)) < 0)
+        return -EFAULT;
+    r.count_planes = 1;
+    if (r.plane_id_ptr && copy_to_user((void *)(uintptr_t)r.plane_id_ptr,
+                                       &(uint32_t){ 0 }, sizeof(uint32_t)) < 0)
+        return -EFAULT;
+    return copy_to_user(arg, &r, sizeof(r)) < 0 ? -EFAULT : 0;
+}
+
+static int drm_mode_getfb(drm_context_t *ctx, void *arg)
+{
+    struct drm_mode_fb_cmd fb;
+    if (copy_from_user(&fb, arg, sizeof(fb)) < 0)
+        return -EFAULT;
+    drm_buffer_t *b = drm_find_buffer(ctx, fb.fb_id);
+    if (!b)
+        return -ENOENT;
+    fb.width = b->width;
+    fb.height = b->height;
+    fb.pitch = b->pitch;
+    fb.bpp = b->bpp;
+    fb.depth = 24;
+    fb.handle = b->handle;
+    return copy_to_user(arg, &fb, sizeof(fb)) < 0 ? -EFAULT : 0;
+}
+
+static int drm_mode_addfb(drm_context_t *ctx, void *arg)
+{
+    struct drm_mode_fb_cmd fb;
+    if (copy_from_user(&fb, arg, sizeof(fb)) < 0)
+        return -EFAULT;
+    drm_buffer_t *b = drm_find_buffer(ctx, fb.handle);
+    if (!b)
+        return -ENOENT;
+    fb.fb_id = b->handle;
+    fb.pitch = b->pitch;
+    fb.bpp = b->bpp;
+    fb.depth = 24;
+    return copy_to_user(arg, &fb, sizeof(fb)) < 0 ? -EFAULT : 0;
+}
+
+static int drm_mode_rmfb(drm_context_t *ctx, void *arg)
+{
+    uint32_t fb_id = 0;
+    if (copy_from_user(&fb_id, arg, sizeof(fb_id)) < 0)
+        return -EFAULT;
+    /* Keep the dumb buffer alive (the handle still owns it); just drop the
+     * framebuffer id association, which is the same id here. */
+    return 0;
+}
+
+static int drm_mode_pageflip(drm_context_t *ctx, void *arg)
+{
+    struct drm_mode_crtc_page_flip pf;
+    if (copy_from_user(&pf, arg, sizeof(pf)) < 0)
+        return -EFAULT;
+    drm_buffer_t *b = drm_find_buffer(ctx, pf.fb_id);
+    if (!b)
+        return -ENOENT;
+    gpu_dev_ops_t *ops = drm_gpu_ops();
+    if (ops && ops->flush) {
+        struct device *dev = drm_gpu_device();
+        (void)ops->flush(dev, 0, 0, b->width, b->height);
+    }
+    if (pf.flags & 0x1) /* DRM_MODE_PAGE_FLIP_EVENT */
+        return 0;
+    return 0;
+}
+
+static int drm_mode_dpms(drm_context_t *ctx, void *arg)
+{
+    (void)ctx;
+    struct drm_mode_dpms d;
+    if (copy_from_user(&d, arg, sizeof(d)) < 0)
+        return -EFAULT;
+    (void)d.dpms;
+    return 0;
+}
+
+static int drm_mode_getgamma(drm_context_t *ctx, void *arg)
+{
+    (void)ctx;
+    return 0;
+}
+
+static int drm_mode_getproperty(drm_context_t *ctx, void *arg)
+{
+    (void)ctx;
+    struct drm_mode_get_property p;
+    if (copy_from_user(&p, arg, sizeof(p)) < 0)
+        return -EFAULT;
+    /* Report no properties for now. */
+    p.count_values = 0;
+    p.count_enum_blobs = 0;
+    return copy_to_user(arg, &p, sizeof(p)) < 0 ? -EFAULT : 0;
+}
+
+static int drm_mode_setproperty(drm_context_t *ctx, void *arg)
+{
+    (void)ctx;
+    return 0;
+}
+
+static int drm_mode_atomic(drm_context_t *ctx, void *arg)
+{
+    (void)ctx;
+    struct drm_mode_atomic a;
+    if (copy_from_user(&a, arg, sizeof(a)) < 0)
+        return -EFAULT;
+    /* Accept test-only atomic commits (no-op) so atomic-capable userland
+     * can probe; reject real commits until a full atomic state exists. */
+    if (a.flags & 0x0100) /* DRM_MODE_ATOMIC_TEST_ONLY */
+        return 0;
+    return -EINVAL;
+}
+
+static int drm_mode_create_dumb(drm_context_t *ctx, void *arg)
+{
+    struct drm_mode_create_dumb d;
+    if (copy_from_user(&d, arg, sizeof(d)) < 0)
+        return -EFAULT;
+    if (d.width == 0 || d.height == 0 || d.bpp == 0)
+        return -EINVAL;
+    if (d.flags != 0)
+        return -EINVAL;
+
+    int slot = -1;
+    for (int i = 0; i < DRM_MAX_BUFFERS; i++) {
+        if (!ctx->buffers[i].used) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot < 0)
+        return -ENOMEM;
+
+    uint32_t pitch = ((d.width * d.bpp + 7) / 8 + 63) & ~63u;
+    uint64_t size = (uint64_t)pitch * d.height;
+    struct vmo *vmo = vmo_create(VMO_ANONYMOUS, size, 0);
+    if (!vmo)
+        return -ENOMEM;
+
+    drm_buffer_t *b = &ctx->buffers[slot];
+    b->used = 1;
+    b->handle = ctx->next_handle++;
+    if (b->handle == 0)
+        b->handle = ctx->next_handle++;
+    b->width = d.width;
+    b->height = d.height;
+    b->pitch = pitch;
+    b->bpp = d.bpp;
+    b->vmo = vmo;
+    b->size = size;
+
+    d.handle = b->handle;
+    d.pitch = pitch;
+    d.size = size;
+    return copy_to_user(arg, &d, sizeof(d)) < 0 ? -EFAULT : 0;
+}
+
+static int drm_mode_map_dumb(drm_context_t *ctx, void *arg)
+{
+    struct drm_mode_map_dumb m;
+    if (copy_from_user(&m, arg, sizeof(m)) < 0)
+        return -EFAULT;
+    drm_buffer_t *b = drm_find_buffer(ctx, m.handle);
+    if (!b)
+        return -ENOENT;
+    /* Map the VMO into the caller.  DRM returns a fake offset that mmap
+     * consumes; we reuse the VMO's user address directly by mapping now. */
+    task_t *t = proc_current();
+    if (!t || !t->mm)
+        return -EFAULT;
+    uint64_t addr = mm_mmap_vmo(t->mm, 0, (size_t)b->size,
+                                PROT_READ | PROT_WRITE,
+                                MAP_SHARED | MAP_ANONYMOUS,
+                                b->vmo, 0);
+    if (addr == 0)
+        return -ENOMEM;
+    m.offset = addr;
+    return copy_to_user(arg, &m, sizeof(m)) < 0 ? -EFAULT : 0;
+}
+
+static int drm_mode_destroy_dumb(drm_context_t *ctx, void *arg)
+{
+    struct drm_mode_destroy_dumb d;
+    if (copy_from_user(&d, arg, sizeof(d)) < 0)
+        return -EFAULT;
+    drm_buffer_t *b = drm_find_buffer(ctx, d.handle);
+    if (!b)
+        return -ENOENT;
+    drm_free_buffer(ctx, b);
+    return 0;
+}
+
+static int drm_gem_close(drm_context_t *ctx, void *arg)
+{
+    struct drm_gem_close c;
+    if (copy_from_user(&c, arg, sizeof(c)) < 0)
+        return -EFAULT;
+    drm_buffer_t *b = drm_find_buffer(ctx, c.handle);
+    if (b)
+        drm_free_buffer(ctx, b);
+    return 0;
+}
+
+/* ---- vfile backend ---- */
+
+static int drm_read(vfile_t *vf, char *buf, size_t count)
+{
+    (void)vf;
+    (void)buf;
+    (void)count;
+    return 0;
+}
+
+static int drm_write(vfile_t *vf, const char *buf, size_t count)
+{
+    (void)vf;
+    (void)buf;
+    return (int)count;
+}
+
+static long drm_lseek(vfile_t *vf, long offset, int whence)
+{
+    (void)vf;
+    (void)offset;
+    (void)whence;
+    return 0;
+}
+
+static int drm_close(vfile_t *vf)
+{
+    drm_context_t *ctx = vf ? vf->priv : NULL;
+    if (ctx) {
+        for (int i = 0; i < DRM_MAX_BUFFERS; i++)
+            if (ctx->buffers[i].used)
+                drm_free_buffer(ctx, &ctx->buffers[i]);
+        kfree(ctx);
+        vf->priv = NULL;
+    }
+    return 0;
+}
+
+static int drm_ioctl(vfile_t *vf, unsigned long req, void *arg)
+{
+    drm_context_t *ctx = vf ? vf->priv : NULL;
+    if (!ctx)
+        return -EBADF;
+
+    switch (req) {
+    case DRM_IOCTL_VERSION:
+        return drm_version(ctx, arg);
+    case DRM_IOCTL_GET_CAP:
+        return drm_get_cap(ctx, arg);
+    case DRM_IOCTL_GEM_CLOSE:
+        return drm_gem_close(ctx, arg);
+    case DRM_IOCTL_MODE_GETRESOURCES:
+        return drm_mode_getresources(ctx, arg);
+    case DRM_IOCTL_MODE_GETCRTC:
+        return drm_mode_getcrtc(ctx, arg);
+    case DRM_IOCTL_MODE_SETCRTC:
+        return drm_mode_setcrtc(ctx, arg);
+    case DRM_IOCTL_MODE_GETCONNECTOR:
+        return drm_mode_getconnector(ctx, arg);
+    case DRM_IOCTL_MODE_GETENCODER:
+        return drm_mode_getencoder(ctx, arg);
+    case DRM_IOCTL_MODE_GETPLANE:
+        return drm_mode_getplane(ctx, arg);
+    case DRM_IOCTL_MODE_GETPLANERESOURCES:
+        return drm_mode_getplaneres(ctx, arg);
+    case DRM_IOCTL_MODE_GETFB:
+        return drm_mode_getfb(ctx, arg);
+    case DRM_IOCTL_MODE_ADDFB:
+        return drm_mode_addfb(ctx, arg);
+    case DRM_IOCTL_MODE_RMFB:
+        return drm_mode_rmfb(ctx, arg);
+    case DRM_IOCTL_MODE_PAGE_FLIP:
+        return drm_mode_pageflip(ctx, arg);
+    case DRM_IOCTL_MODE_DPMS:
+        return drm_mode_dpms(ctx, arg);
+    case DRM_IOCTL_MODE_GETGAMMA:
+        return drm_mode_getgamma(ctx, arg);
+    case DRM_IOCTL_MODE_GETPROPERTY:
+        return drm_mode_getproperty(ctx, arg);
+    case DRM_IOCTL_MODE_SETPROPERTY:
+        return drm_mode_setproperty(ctx, arg);
+    case DRM_IOCTL_MODE_ATOMIC:
+        return drm_mode_atomic(ctx, arg);
+    case DRM_IOCTL_MODE_CREATE_DUMB:
+        return drm_mode_create_dumb(ctx, arg);
+    case DRM_IOCTL_MODE_MAP_DUMB:
+        return drm_mode_map_dumb(ctx, arg);
+    case DRM_IOCTL_MODE_DESTROY_DUMB:
+        return drm_mode_destroy_dumb(ctx, arg);
+    default:
+        return -EINVAL;
+    }
+}
+
+static vfile_ops_t g_drm_ops = {
+    .read = drm_read,
+    .write = drm_write,
+    .lseek = drm_lseek,
+    .ioctl = drm_ioctl,
+    .close = drm_close,
+};
+
+int drm_create_file(void)
+{
+    vfile_t *vf = drm_create_vfile();
+    if (!vf)
+        return -ENOMEM;
+    return anonfd_install_vfile(vf, 0);
+}
+
+/* Create a DRM vfile without installing it into the fd table (used by the
+ * /dev/dri/card0 devfs open path, which manages fd installation itself). */
+vfile_t *drm_create_vfile(void)
+{
+    drm_context_t *ctx = kcalloc(1, sizeof(*ctx));
+    vfile_t *vf = vfile_alloc();
+    if (!ctx || !vf) {
+        if (ctx) kfree(ctx);
+        if (vf) vfile_free(vf);
+        return NULL;
+    }
+    ctx->next_handle = 1;
+    vfile_ref_init(vf, 1);
+    vf->flags = O_RDWR;
+    vf->ops = &g_drm_ops;
+    vf->priv = ctx;
+    return vf;
+}
+
+void drm_device_bind(void)
+{
+    /* The DRM node is created lazily through devfs /dev/dri/card0; the GPU
+     * driver discovery is handled by the driver core.  Nothing to do here
+     * unless a hotplug event must create the node eagerly. */
+}
