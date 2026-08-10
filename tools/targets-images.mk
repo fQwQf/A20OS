@@ -48,10 +48,10 @@ $(WAYLAND_PLAYER_STAMP): user/wayland/build.sh user/wayland/player.c \
 		user/wayland/stub/udev.c user/wayland/stub/mtdev.c \
 		user/cmds/core/wayland-session.c \
 		$(WAYLAND_WESTON_PATCH) \
-		user/external/ffmpeg/configure kernel/include/uapi/a20/audio.h
+		user/external/libs/ffmpeg/configure kernel/include/uapi/a20/audio.h
 	@if [ ! -f $(WAYLAND_FFMPEG_STAMP) ] || \
 		[ user/wayland/build.sh -nt $(WAYLAND_FFMPEG_STAMP) ] || \
-		[ user/external/ffmpeg/configure -nt $(WAYLAND_FFMPEG_STAMP) ]; then \
+		[ user/external/libs/ffmpeg/configure -nt $(WAYLAND_FFMPEG_STAMP) ]; then \
 		rm -f $(WAYLAND_FFMPEG_STAMP); \
 	fi
 	@if [ ! -f $(WAYLAND_STUBS_STAMP) ] || \

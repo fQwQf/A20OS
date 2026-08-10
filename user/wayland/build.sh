@@ -156,7 +156,7 @@ PKG_ENV=(env "PKG_CONFIG_LIBDIR=$SYSROOT/lib/pkgconfig:$SYSROOT/share/pkgconfig"
 if want wayland-native && ! stamp wayland-native; then
     echo "=== wayland (native scanner) ==="
     rm -rf "$B/build-wayland-native"
-    meson setup "$B/build-wayland-native" "$USER_DIR/external/wayland" \
+    meson setup "$B/build-wayland-native" "$USER_DIR/external/gui/wayland" \
         --prefix="$HOST_TOOLS/wayland" \
         -Ddocumentation=false -Dtests=false -Ddtd_validation=false \
         --default-library=static
@@ -219,7 +219,7 @@ fi
 # ---------------------------------------------------------------- wayland
 if want wayland && ! stamp wayland; then
     echo "=== wayland (target) ==="
-    meson_pkg wayland "$USER_DIR/external/wayland" \
+    meson_pkg wayland "$USER_DIR/external/gui/wayland" \
         -Ddocumentation=false -Dtests=false -Ddtd_validation=false \
         -Dscanner=false
     mark wayland
@@ -228,7 +228,7 @@ fi
 # ------------------------------------------------------- wayland-protocols
 if want protocols && ! stamp protocols; then
     echo "=== wayland-protocols ==="
-    meson_pkg wayland-protocols "$USER_DIR/external/wayland-protocols" \
+    meson_pkg wayland-protocols "$USER_DIR/external/gui/wayland-protocols" \
         -Dtests=false
     mark protocols
 fi
@@ -236,7 +236,7 @@ fi
 # ---------------------------------------------------------------- pixman
 if want pixman && ! stamp pixman; then
     echo "=== pixman ==="
-    meson_pkg pixman "$USER_DIR/external/pixman" \
+    meson_pkg pixman "$USER_DIR/external/gui/pixman" \
         -Dtests=disabled -Ddemos=disabled -Dgtk=disabled \
         -Dlibpng=disabled -Dgnuplot=false -Dopenmp=disabled
     mark pixman
@@ -247,7 +247,7 @@ if want xkeyboard-config && ! stamp xkeyboard-config; then
     echo "=== xkeyboard-config (native data) ==="
     rm -rf "$USER_DIR/build/xkeyboard-config"
     meson setup "$USER_DIR/build/xkeyboard-config" \
-        "$USER_DIR/external/xkeyboard-config"
+        "$USER_DIR/external/gui/xkeyboard-config"
     ninja -C "$USER_DIR/build/xkeyboard-config"
     mark xkeyboard-config
 fi
@@ -255,7 +255,7 @@ fi
 # ------------------------------------------------------------ libxkbcommon
 if want xkbcommon && ! stamp xkbcommon; then
     echo "=== libxkbcommon ==="
-    meson_pkg libxkbcommon "$USER_DIR/external/libxkbcommon" \
+    meson_pkg libxkbcommon "$USER_DIR/external/gui/libxkbcommon" \
         -Denable-x11=false -Denable-wayland=false -Denable-tools=false \
         -Denable-docs=false -Denable-bash-completion=false \
         -Denable-xkbregistry=false \
@@ -277,7 +277,7 @@ if want libevdev && ! stamp libevdev; then
             cp "/usr/$MUSL_TARGET-linux-gnu/include/linux/$h" \
                "$SYSROOT/include/linux/"
     done
-    SRC=$USER_DIR/external/libevdev
+    SRC=$USER_DIR/external/gui/libevdev
     OB=$B/build-libevdev
     rm -rf "$OB" && mkdir -p "$OB"
     cat > "$OB/config.h" <<'EOF'
@@ -381,7 +381,7 @@ fi
 # -------------------------------------------- libdrm headers + stub pc
 if want libdrm && ! stamp libdrm; then
     echo "=== libdrm headers ==="
-    SRC=$USER_DIR/external/libdrm
+    SRC=$USER_DIR/external/gui/libdrm
     mkdir -p "$SYSROOT/include/libdrm" "$SYSROOT/include/drm"
     cp "$SRC/include/drm/"*.h "$SYSROOT/include/libdrm/" 2>/dev/null || true
     cp "$SRC/include/drm/"*.h "$SYSROOT/include/drm/" 2>/dev/null || true
@@ -401,7 +401,7 @@ fi
 # --------------------------------------------------------------- libinput
 if want libinput && ! stamp libinput; then
     echo "=== libinput ==="
-    meson_pkg libinput "$USER_DIR/external/libinput" \
+    meson_pkg libinput "$USER_DIR/external/gui/libinput" \
         -Dlibwacom=false -Ddebug-gui=false -Dtests=false \
         -Ddocumentation=false -Dinstall-tests=false \
         -Dzshcompletiondir=no
@@ -412,11 +412,11 @@ fi
 if want weston && ! stamp weston; then
     echo "=== weston ==="
     for p in "$WL_DIR/patches/weston-"*.patch; do
-        (cd "$USER_DIR/external/weston" && \
+        (cd "$USER_DIR/external/gui/weston" && \
             git apply --unidiff-zero --check "$p" 2>/dev/null && \
             git apply --unidiff-zero "$p") || true
     done
-    meson_pkg weston "$USER_DIR/external/weston" \
+    meson_pkg weston "$USER_DIR/external/gui/weston" \
         -Dbackend-drm=false -Dbackend-headless=false -Dbackend-rdp=false \
         -Dbackend-wayland=false -Dbackend-x11=false -Dbackend-fbdev=true \
         -Dbackend-default=fbdev \
@@ -435,7 +435,7 @@ fi
 # ---------------------------------------------------------------- ffmpeg
 if want ffmpeg && ! stamp ffmpeg; then
     echo "=== ffmpeg ==="
-    SRC=$USER_DIR/external/ffmpeg
+    SRC=$USER_DIR/external/libs/ffmpeg
     OB=$B/build-ffmpeg
     rm -rf "$OB" && mkdir -p "$OB"
     # FFmpeg 7.1 H.264 SEI shares its AOM film-grain object with HEVC.
@@ -471,7 +471,7 @@ if want player && ! stamp player; then
     XDG_XML=$SYSROOT/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml
     "$SCANNER" client-header "$XDG_XML" "$OB/xdg-shell-client-protocol.h"
     "$SCANNER" private-code "$XDG_XML" "$OB/xdg-shell-protocol.c"
-    DESKTOP_XML=$USER_DIR/external/weston/protocol/weston-desktop-shell.xml
+    DESKTOP_XML=$USER_DIR/external/gui/weston/protocol/weston-desktop-shell.xml
     "$SCANNER" client-header "$DESKTOP_XML" \
         "$OB/weston-desktop-shell-client-protocol.h"
     "$SCANNER" private-code "$DESKTOP_XML" \

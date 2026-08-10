@@ -60,10 +60,10 @@ $(EXTRA_IMAGE_STAMP): force_extra_image_stamp
 			[ ! -f "$$f" ] || find "$$f" -maxdepth 0 -printf 'stamp %f %s %T@\n'; \
 		done; \
 		if [ -n "$(filter vim,$(EXTRA_PACKAGES))" ]; then \
-			find user/external/vim/runtime -type f -printf 'vim-runtime %P %s %T@\n' 2>/dev/null || true; \
+			find user/external/apps/vim/runtime -type f -printf 'vim-runtime %P %s %T@\n' 2>/dev/null || true; \
 		fi; \
 		if [ -n "$(filter git,$(EXTRA_PACKAGES))" ]; then \
-			find user/external/git/templates/blt -type f -printf 'git-template %P %s %T@\n' 2>/dev/null || true; \
+			find user/external/apps/git/templates/blt -type f -printf 'git-template %P %s %T@\n' 2>/dev/null || true; \
 		fi; \
 		if [ "$(ARCH)" = riscv64 ] && [ -n "$(filter rust rustc cargo rustfmt,$(EXTRA_PACKAGES))" ]; then \
 			for dir in "$(RISCV_GLIBC_LIB_DIR)" "$(RISCV_GLIBC_LOCAL_LIB_DIR)"; do \
@@ -155,7 +155,7 @@ $(EXTRA_IMG): $(EXTRA_IMAGE_STAMP)
 		done; \
 	fi
 	@VIM_RT="$(EXTRA_STAGING_DIR)/share/vim/vim92"; \
-	VIM_SRC=user/external/vim/runtime; \
+	VIM_SRC=user/external/apps/vim/runtime; \
 	if [ -z "$(filter vim,$(EXTRA_PACKAGES))" ] || [ ! -d "$$VIM_SRC" ]; then exit 0; fi; \
 	mkdir -p "$$VIM_RT"; \
 	for f in defaults.vim filetype.vim ftoff.vim ftplugin.vim ftplugof.vim indent.vim indoff.vim; do \
@@ -165,7 +165,7 @@ $(EXTRA_IMG): $(EXTRA_IMAGE_STAMP)
 		mkdir -p "$$VIM_RT/$$d"; \
 		cp -a "$$VIM_SRC/$$d/." "$$VIM_RT/$$d/"; \
 	done
-	@GIT_TEMPLATE_SRC=user/external/git/templates/blt; \
+	@GIT_TEMPLATE_SRC=user/external/apps/git/templates/blt; \
 	GIT_TEMPLATE_DST="$(EXTRA_STAGING_DIR)/share/git-core/templates"; \
 	if [ -n "$(filter git,$(EXTRA_PACKAGES))" ] && [ -d "$$GIT_TEMPLATE_SRC" ]; then \
 		mkdir -p "$$GIT_TEMPLATE_DST"; \
@@ -221,7 +221,7 @@ run-ppc64le-extra:
 
 _run_extra_impl:
 	$(MAKE) ARCH=$(ARCH) BRINGUP=0 dev-build
-	@if [ -f user/external/fastfetch/src/fastfetch.c ]; then \
+	@if [ -f user/external/apps/fastfetch/src/fastfetch.c ]; then \
 		$(MAKE) -C user ARCH=$(ARCH) NOMMU=$(NOMMU) OPT="$(USER_OPT)" PROFILE=$(PROFILE) \
 			BUILD_DIR=build/$(USER_VARIANT) fastfetch; \
 	else \
