@@ -60,10 +60,14 @@ mount_t *vfs_find_mount(const char *path)
         size_t len = strlen(g_mounts[i].path);
         if (strncmp(path, g_mounts[i].path, len) == 0 &&
             (len == 1 || path[len] == '\0' || path[len] == '/') &&
-            len >= best_len) {
-            /* A later mount at the same path covers the earlier one.  Final
-             * evaluation uses this standard over-mount behavior to replace
-             * the bootstrap ramfs at / with the published EXT4 rootfs. */
+            (len > best_len
+#ifdef CONFIG_FINAL_EVAL_ROOT
+             /* Only final-evaluation kernels replace the bootstrap ramfs at
+              * /.  Preserve the original first-match behavior for every
+              * other build and for equal-length non-root mount points. */
+             || (len == 1 && best_len == 1)
+#endif
+            )) {
             best = &g_mounts[i];
             best_len = len;
         }
