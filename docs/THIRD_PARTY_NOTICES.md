@@ -33,19 +33,19 @@ A20OS 仓库不能预先限定下游只分发源码。`fat32.img`、`ext4.img`�
 | mksh | 逐文件混合：MirBSD/MirOS 条款；`strlcpy.c` 为 ISC；`mbsdcc.h`/`mbsdint.h` 为 CC0 OR MirOS；`expr.c` 含 Unicode notice | `user/external/mksh-cvs2git` |
 | sbase | MIT | `user/external/sbase` |
 | TLSe | BSD-2-Clause OR Unlicense | `user/external/tlse` |
-| LVGL | MIT | `user/external/lvgl` |
-| Weston | MIT | `user/external/weston` |
-| Wayland | MIT | `user/external/wayland` |
-| wayland-protocols | MIT | `user/external/wayland-protocols` |
-| pixman | MIT | `user/external/pixman` |
-| libxkbcommon | MIT/X11 | `user/external/libxkbcommon` |
-| libevdev | MIT | `user/external/libevdev` |
-| libinput | MIT | `user/external/libinput` |
-| xkeyboard-config | MIT | `user/external/xkeyboard-config` |
-| libdrm | MIT | `user/external/libdrm` |
-| fastfetch | MIT | `user/external/fastfetch` |
-| zlib | Zlib | `user/external/zlib` |
-| musl-cross-make | MIT | `user/external/musl-cross-make` |
+| LVGL | MIT | `user/external/gui/lvgl` |
+| Weston | MIT | `user/external/gui/weston` |
+| Wayland | MIT | `user/external/gui/wayland` |
+| wayland-protocols | MIT | `user/external/gui/wayland-protocols` |
+| pixman | MIT | `user/external/gui/pixman` |
+| libxkbcommon | MIT/X11 | `user/external/gui/libxkbcommon` |
+| libevdev | MIT | `user/external/gui/libevdev` |
+| libinput | MIT | `user/external/gui/libinput` |
+| xkeyboard-config | MIT | `user/external/gui/xkeyboard-config` |
+| libdrm | MIT | `user/external/gui/libdrm` |
+| fastfetch | MIT | `user/external/apps/fastfetch` |
+| zlib | Zlib | `user/external/libs/zlib` |
+| musl-cross-make | MIT | `user/external/toolchain/musl-cross-make` |
 | Rust 工具链 | 必须按实际取得的分发核验 | `user/external/rust`（审计基线 `e33c3219` 未跟踪内容） |
 
 ## 5. 用户态程序、静态链接与镜像
@@ -54,12 +54,12 @@ A20OS 仓库不能预先限定下游只分发源码。`fat32.img`、`ext4.img`�
 
 | 组件 | 许可证 | 位置 | 备注 |
 |------|--------|------|------|
-| git | GPL-2.0-only | `user/external/git` | 独立可执行文件 |
-| vim | Vim License | `user/external/vim` | 独立可执行文件 |
+| git | GPL-2.0-only | `user/external/apps/git` | 独立可执行文件 |
+| vim | Vim License | `user/external/apps/vim` | 独立可执行文件 |
 | GCC | 应按实际取得源码的许可证与 GCC Runtime Library Exception 核验 | `user/external/gcc`（审计基线 `e33c3219` 未跟踪该目录） | `user/extra.mk` 仅在 `configure` 存在时启用可选工具链构建 |
-| binutils | GPL-3.0 / LGPL-3.0 | `user/external/binutils` | 独立工具链 |
-| FFmpeg | LGPL-2.1-or-later（以固定 revision 配置为准） | `user/external/ffmpeg` | `user/wayland/build.sh` 构建共享库，非 `user/extra.mk` 独立程序 |
-| Breeze | 多种 GPL/LGPL 版本，按资源文件核验 | `user/external/breeze` | 资源/图标 |
+| binutils | GPL-3.0 / LGPL-3.0 | `user/external/toolchain/binutils` | 独立工具链 |
+| FFmpeg | LGPL-2.1-or-later（以固定 revision 配置为准） | `user/external/libs/ffmpeg` | `user/wayland/build.sh` 构建共享库，非 `user/extra.mk` 独立程序 |
+| Breeze | 多种 GPL/LGPL 版本，按资源文件核验 | `user/external/gui/breeze` | 资源/图标 |
 
 > 分发 `fat32.img`、`extra.img`、GUI 镜像或单个二进制前，应从镜像清单反推其中的精确程序、静态/动态依赖和 gitlink revision，再准备相应许可证、notice 与源码提供材料。不能假定所有来源都是 submodule，也不能假定只提供超级项目 URL 已满足各组件义务。
 
