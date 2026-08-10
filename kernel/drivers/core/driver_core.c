@@ -443,3 +443,24 @@ void driver_progress_class(uint32_t class_type)
     }
     mutex_unlock(&g_driver_core_ops);
 }
+
+/* Format the registered drivers for /proc/drivers (Linux format). */
+int driver_core_list_drivers(char *buf, size_t sz)
+{
+    if (!buf)
+        return -EINVAL;
+    size_t off = 0;
+    for (int i = 0; i < g_driver_count; i++) {
+        driver_t *drv = g_drivers[i];
+        if (!drv || !drv->name)
+            continue;
+        int n = snprintf(buf + off, sz > off ? sz - off : 0, "%s\n",
+                         drv->name);
+        if (n < 0)
+            break;
+        off += (size_t)n;
+        if (off >= sz)
+            break;
+    }
+    return (int)off;
+}

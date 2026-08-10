@@ -508,6 +508,23 @@ static int test_file_interfaces(void)
         return fail("pty FIONREAD", errno);
     close(pm);
 
+    /* Uinxed-style classic proc files. */
+    const char *classic[] = {
+        "/proc/devices", "/proc/partitions", "/proc/diskstats",
+        "/proc/modules", "/proc/misc", "/proc/iomem", "/proc/ioports",
+        "/proc/softirqs", "/proc/route", "/proc/arp", "/proc/tty",
+        "/proc/ldiscs", "/proc/drivers", "/proc/thread-self/stat",
+        "/proc/self/limits", "/proc/self/wchan", "/proc/self/stack",
+        "/proc/net/route", "/proc/net/arp", "/proc/net/dev", "/proc/net/tcp",
+        "/proc/net/udp", "/proc/net/unix",
+    };
+    for (size_t i = 0; i < sizeof(classic) / sizeof(classic[0]); i++) {
+        int f = open(classic[i], O_RDONLY);
+        if (f < 0)
+            return fail(classic[i], errno);
+        close(f);
+    }
+
     printf("SYSCALL_EXT: file-interfaces ok\n");
     return 0;
 }

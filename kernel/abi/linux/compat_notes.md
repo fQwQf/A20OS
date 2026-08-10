@@ -52,6 +52,10 @@ flag、对象类型或并发边界。
 - `/dev` 新增：`/dev/full`（读零写 ENOSPC）、`/dev/kmsg`（写追加内核日志环、读回日志；经 `klog_write_raw`/`klog_read`）。
 - tty/pty ioctl 补齐：`TIOCGPGRP`/`TIOCSPGRP`（前台进程组）、`TCFLSH`（刷输入/输出/双向）、`TIOCOUTQ`（输出队列字节数）、`TIOCSTI`（注入单字节输入）、`FIONREAD`/`TIOCINQ`（可读字节数）——pty master 与 slave 端均已支持。
 - 补充 `core/ioctl.h` 标准 tty ioctl 常量全集（TCSBRK/TCXONC/TIOCEXCL/TIOCM*/TIOCPKT/TIOCGETD 等）供后续驱动与用户态使用。
+- `/proc` 经典文件补齐（对照 Uinxed-Kernel）：`devices`、`partitions`、`diskstats`、`modules`（经 drvmod_list）、`misc`、`iomem`、`ioports`、`softirqs`、`route`/`arp`（同时挂在 `/proc` 与 `/proc/net/`）、`tty`、`ldiscs`、`drivers`（经 driver_core_list_drivers）。
+- `/proc/net/` 补齐：`route`、`arp`、`dev`、`tcp`、`udp`、`unix`。
+- `/proc/thread-self` 目录（与 `self` 同样解析到当前线程）。
+- `/proc/<pid>/` 补齐：`limits`、`wchan`、`stack`。
 
 ## 维护规则
 
