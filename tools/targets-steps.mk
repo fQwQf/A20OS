@@ -518,13 +518,13 @@ smoke-native-handle:
 final-submit-rv:
 	@echo "--- Building RISC-V 64 (2026 final submission) ---"
 	$(MAKE) ARCH=riscv64 ABI=both MODE=release PROFILE=benchmark NR_CPUS=8 \
-		DRIVER_DEPLOYMENT=embedded \
+		DRIVER_DEPLOYMENT=embedded EXTERNAL_ROOT=1 \
 		_final_submit_build KERNEL_OUT=kernel-rv DISK_OUT=disk.img
 
 final-submit-la:
 	@echo "--- Building LoongArch 64 (2026 final submission) ---"
 	$(MAKE) ARCH=loongarch64 ABI=both MODE=release PROFILE=benchmark NR_CPUS=8 \
-		DRIVER_DEPLOYMENT=embedded \
+		DRIVER_DEPLOYMENT=embedded EXTERNAL_ROOT=1 \
 		_final_submit_build KERNEL_OUT=kernel-la DISK_OUT=disk-la.img
 
 benchmark-rv:
@@ -571,7 +571,7 @@ _benchmark_disk: $(USER_BUILD_STAMP) \
 
 _final_submit_build: $(KERNEL_ELF) $(USER_BUILD_STAMP)
 	$(MAKE) ARCH=$(ARCH) ABI=$(ABI) PROFILE=$(PROFILE) NR_CPUS=$(NR_CPUS) \
-		_final_submit_disk DISK_OUT=$(DISK_OUT)
+		EXTERNAL_ROOT=$(EXTERNAL_ROOT) _final_submit_disk DISK_OUT=$(DISK_OUT)
 	cp $(KERNEL_ELF) $(KERNEL_OUT)
 	@echo "  -> $(KERNEL_OUT) + $(DISK_OUT)"
 

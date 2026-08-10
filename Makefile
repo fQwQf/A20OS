@@ -32,6 +32,7 @@ BRINGUP ?= 0
 OPT ?= -O3
 USER_OPT ?= $(OPT)
 NR_CPUS ?= 1
+EXTERNAL_ROOT ?= 0
 COOPERATIVE_BOOT ?= 0
 ALLOW_UNVERIFIED_SMP ?= 0
 SMP_VERIFIED_QEMU_ARCHES := riscv64 aarch64 loongarch64 x86_64
@@ -101,7 +102,7 @@ INCLUDE_DIR = $(KERNEL_DIR)/include
 # Preserve established generic and STM32 output paths used by smoke, benchmark,
 # flash, and QEMU runners. Explicit embedded builds on non-MCU architectures
 # get their own suffix so they never share objects with generic.
-BUILD_VARIANT = $(ABI)-$(if $(filter 1,$(BRINGUP)),bringup,dev)$(if $(and $(filter embedded,$(DRIVER_DEPLOYMENT)),$(filter-out armv7m,$(ARCH))),-embedded,)$(if $(filter 1,$(NOMMU)),-nommu,)$(if $(filter-out 1,$(NR_CPUS)),-smp$(NR_CPUS),)$(if $(filter y,$(CONFIG_DRIVER_LIFECYCLE_TEST)),-driver-lifecycle,)$(if $(filter y,$(CONFIG_HDA_SMOKE_TEST)),-hda-smoke,)$(if $(filter y,$(CONFIG_NVME_SMOKE_TEST)),-nvme-smoke,)
+BUILD_VARIANT = $(ABI)-$(if $(filter 1,$(BRINGUP)),bringup,dev)$(if $(and $(filter embedded,$(DRIVER_DEPLOYMENT)),$(filter-out armv7m,$(ARCH))),-embedded,)$(if $(filter 1,$(EXTERNAL_ROOT)),-final-root,)$(if $(filter 1,$(NOMMU)),-nommu,)$(if $(filter-out 1,$(NR_CPUS)),-smp$(NR_CPUS),)$(if $(filter y,$(CONFIG_DRIVER_LIFECYCLE_TEST)),-driver-lifecycle,)$(if $(filter y,$(CONFIG_HDA_SMOKE_TEST)),-hda-smoke,)$(if $(filter y,$(CONFIG_NVME_SMOKE_TEST)),-nvme-smoke,)
 ifeq ($(ARCH),armv7m)
 BUILD_VARIANT := $(BUILD_VARIANT)-$(BOARD)-f$(STM32_FLASH_KB)k-r$(STM32_RAM_KB)k
 BUILD_VARIANT := $(BUILD_VARIANT)$(if $(filter 1,$(STM32_QEMU)),-qemu,)
@@ -463,6 +464,9 @@ ifeq ($(BOARD),virtualbox-aarch64)
 CFLAGS += -DCONFIG_COOPERATIVE_BOOT
 endif
 CFLAGS += $(DRIVER_DEPLOYMENT_CPPFLAGS)
+ifeq ($(EXTERNAL_ROOT),1)
+CFLAGS += -DCONFIG_RELEASE_EVAL_ROOT
+endif
 
 # ------------------------------------------------------------------
 # Hardware/board features consumed by common code.
