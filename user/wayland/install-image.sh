@@ -114,6 +114,41 @@ if [ -f "$SYSROOT/lib/libEGL.so.1.0.0" ]; then
     copy_file "$SYSROOT/lib/libdrm.so.2" /lib/libdrm.so.2
     copy_file "$SYSROOT/bin/egl_test" /egl_test
 fi
+
+if [ -f "$SYSROOT/bin/xfce4-session" ]; then
+    echo "[image] XFCE desktop"
+    # GTK/glib shared libs
+    for lib in libglib-2.0.so.0 libgobject-2.0.so.0 libgio-2.0.so.0 \
+               libgthread-2.0.so.0 libgmodule-2.0.so.0 \
+               libatk-1.0.so.0 libgdk_pixbuf-2.0.so.0 libcairo.so.2 \
+               libcairo-gobject.so.2 libpango-1.0.so.0 libpangocairo-1.0.so.0 \
+               libpangoft2-1.0.so.0 libfribidi.so.0 libharfbuzz.so.0 \
+               libgtk-3.so.0 libgdk-3.so.0 libgailutil-3.so.0 \
+               libepoxy.so.0 libwayland-egl.so.1 \
+               libxfce4util.so.7 libxfce4windowing-0.so.0 libxfconf-0.so.3 \
+               libxfce4ui-2.so.0 libexo-2.so.0 libgarcon-1.so.0 \
+               libgarcon-gtk3-1.so.0 libgtk-layer-shell.so.0 \
+               libjpeg.so.8.2.2 libdbus-1.so.3; do
+        copy_file "$SYSROOT/lib/$lib" "/lib/$lib" 2>/dev/null || true
+    done
+    # XFCE binaries (FAT root is mounted at /bin in the guest)
+    for b in xfce4-session xfce4-session-logout xfce4-session-settings \
+             xfce4-panel xfdesktop xfdesktop-settings startxfce4 \
+             xfconf-query xfce4-about xfce4-popup-applicationsmenu \
+             xfce4-popup-windowmenu xfce4-popup-directorymenu; do
+        copy_file "$SYSROOT/bin/$b" "/$b" 2>/dev/null || true
+    done
+    # D-Bus daemon for the session bus
+    if [ -x "$SYSROOT/bin/dbus-daemon" ]; then
+        copy_file "$SYSROOT/bin/dbus-daemon" /dbus-daemon
+    fi
+    if [ -x "$SYSROOT/bin/dbus-launch" ]; then
+        copy_file "$SYSROOT/bin/dbus-launch" /dbus-launch
+    fi
+    if [ -f "$SYSROOT/share/dbus-1/session.conf" ]; then
+        copy_file "$SYSROOT/share/dbus-1/session.conf" /share/dbus-1/session.conf
+    fi
+fi
 fi
 
 echo "[image] weston libs + modules"
@@ -260,6 +295,52 @@ echo "run-desktop: weston-desktop-shell is not installed" >&2
 exit 1
 EOS
 copy_file /tmp/opencode/run-desktop-$$.sh /run-desktop.sh
+
+cat > /tmp/opencode/run-xfce-$$.sh <<'EOS'
+#!/bin/sh
+# XFCE Wayland session: session bus + compositor + XFCE session.
+export XDG_RUNTIME_DIR=/tmp
+export XKB_CONFIG_ROOT=/bin/usr/share/X11/xkb
+export XDG_CONFIG_DIRS=/bin/etc/xdg
+export LIBINPUT_QUIRKS_DIR=/bin/share/libinput
+export FONTCONFIG_FILE=/bin/etc/fonts/fonts.conf
+export WESTON_DATA_DIR=/bin/share/weston
+export XCURSOR_PATH=/bin/share/icons
+export XCURSOR_THEME=Breeze
+export SHELL=/bin/mksh
+unset WESTON_LIBINPUT_UDEV
+export WESTON_LIBINPUT_DEVICE=/dev/event0
+chmod 700 /tmp
+mkdir -p /tmp/fontconfig /tmp/dbus
+export WESTON_MODULE_MAP="fbdev-backend.so=/bin/lib/libweston-9/fbdev-backend.so;kiosk-shell.so=/bin/lib/weston/kiosk-shell.so;desktop-shell.so=/bin/lib/weston/desktop-shell.so;weston-desktop-shell=/bin/libexec/weston-desktop-shell;weston-keyboard=/bin/libexec/weston-keyboard"
+
+# Session bus first (xfconf and the panel need D-Bus).  Start dbus-daemon
+# directly with an explicit address; dbus-launch was built with host
+# absolute paths baked in.
+export DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/dbus-session
+if [ -x /bin/dbus-daemon ]; then
+    /bin/dbus-daemon --session --address="$DBUS_SESSION_BUS_ADDRESS" --nofork --print-address 2>/dev/null &
+fi
+
+# Start the compositor in the background and wait for the socket.
+/bin/weston --backend=fbdev-backend.so --seat=seat1 --shell=desktop-shell.so &
+WESTON_PID=$!
+i=0
+while [ $i -lt 300 ]; do
+    [ -S /tmp/wayland-0 ] && break
+    i=$((i+1))
+    /bin/sleep 0.1
+done
+
+export WAYLAND_DISPLAY=wayland-0
+export GDK_BACKEND=wayland
+export GDK_GL=disable
+export NO_AT_BRIDGE=1
+# xfce4-session connects to the already-running compositor as a Wayland
+# client; startxfce4 would try to spawn its own compositor (labwc).
+exec /bin/xfce4-session
+EOS
+copy_file /tmp/opencode/run-xfce-$$.sh /run-xfce.sh
 
 cat > /tmp/opencode/run-terminal-$$.sh <<'EOS'
 #!/bin/sh

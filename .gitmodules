@@ -110,3 +110,6 @@
 [submodule "user/external/gui/gtk-layer-shell"]
 	path = user/external/gui/gtk-layer-shell
 	url = https://github.com/wmww/gtk-layer-shell.git
+[submodule "user/external/gui/libseat"]
+	path = user/external/gui/libseat
+	url = https://github.com/kennylevinsen/seatd.git
