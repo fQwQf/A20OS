@@ -197,7 +197,7 @@ SBASE_DIR := external/sbase
 WGET_CMD_SRC := cmds/net/wget.c
 WGET_OBJ := $(OBJ_DIR)/cmds/net/wget.o
 WGET_CMD := $(BUILD_DIR)/wget
-LOCAL_CMD_SRCS := $(filter-out $(WGET_CMD_SRC),$(wildcard cmds/*/*.c))
+LOCAL_CMD_SRCS := $(filter-out $(WGET_CMD_SRC) cmds/core/egl_test.c,$(wildcard cmds/*/*.c))
 LOCAL_CMD_NAMES := $(basename $(notdir $(LOCAL_CMD_SRCS)))
 
 SBASE_ALL_BINS := basename cat chgrp chmod chown chroot cksum cmp comm cp cut date dd \
