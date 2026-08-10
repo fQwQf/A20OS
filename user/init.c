@@ -181,7 +181,14 @@ int main(void)
         printf("[init] starting desktop\n");
         desktop_pid = fork();
         if (desktop_pid == 0) {
-            if (access("/bin/run-desktop.sh", X_OK) == 0) {
+            if (access("/bin/run-xfce.sh", X_OK) == 0) {
+                /* run-xfce.sh starts the session bus + compositor and then
+                 * the XFCE desktop session (preferred when present). */
+                char *desktop_argv[] = {
+                    "mksh", "/bin/run-xfce.sh", NULL
+                };
+                execve("/bin/mksh", desktop_argv, envp);
+            } else if (access("/bin/run-desktop.sh", X_OK) == 0) {
                 /* run-desktop.sh execs weston directly (fbdev backend +
                  * desktop-shell).  It is the reliable GUI entry point; the
                  * wayland-session wrapper is kept as a fallback for images
