@@ -12,7 +12,7 @@ import tempfile
 from PIL import Image
 
 OUT = sys.argv[1]
-BREEZE_DIR = sys.argv[2] if len(sys.argv) > 2 else "external/breeze"
+BREEZE_DIR = sys.argv[2] if len(sys.argv) > 2 else "external/gui/breeze"
 SVG = os.path.join(BREEZE_DIR, "cursors", "Breeze", "src", "svg", "default.svg")
 HOTSPOT_X = 4
 HOTSPOT_Y = 4
@@ -20,7 +20,7 @@ HOTSPOT_Y = 4
 if not os.path.exists(SVG):
     print(f"error: Breeze cursor SVG not found: {SVG}", file=sys.stderr)
     print("Clone KDE Breeze or set BREEZE_DIR to the cursors source tree:", file=sys.stderr)
-    print("  git clone --depth 1 --filter=blob:none https://invent.kde.org/plasma/breeze.git external/breeze",
+    print("  git clone --depth 1 --filter=blob:none https://invent.kde.org/plasma/breeze.git external/gui/breeze",
           file=sys.stderr)
     sys.exit(1)
 
