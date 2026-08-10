@@ -1,27 +1,35 @@
 # 用户接口与 devfs
 
-A20OS 的 driver class 是内核内部接口。注册类设备不会自动生成任意 `/dev` 节点。一个 probe 成功的驱动仍可能没有用户可见入口，外部开发者必须理解这一点。
+A20OS 的 driver class 是内核内部接口，但 class publication 同时驱动动态 devfs/sysfs 视图。char、block、audio 自动生成通用节点；net、input、display 不自动生成同名动态 devfs 节点，分别由内核消费者或既有聚合 ABI 使用。
 
 ## 当前数据路径
 
 ```text
-userspace read/ioctl-> VFS vfile_ops-> devfs 固定节点适配器-> device_find_by_class() / class registry-> typed class_ops(device_t *, kernel buffer)-> drv_priv / hardware
+userspace read/ioctl
+  -> VFS vfile_ops
+  -> devfs 动态 class 节点或固定聚合节点
+  -> class_device_t 引用和 online 检查
+  -> typed class_ops(device_t *, kernel buffer)
+  -> drv_priv / hardware
 ```
 
-devfs 当前在 `kernel/fs/devfs/devfs.c` 的静态 `g_nodes[]` 中定义节点。通用固定节点包括 `/dev/fb0` 和 `/dev/event0`。display 使用 `gpu_device_get_default()`；input 适配器枚举 `DEV_CLASS_INPUT` 并聚合事件。
+`kernel/fs/devfs/devfs.c` 的 `g_nodes[]` 仍定义 `/dev/fb0`、`/dev/event0`、tty、loop 等固定服务节点。除此之外，根目录 lookup/readdir 会查询 class registry，为在线的 char、block、audio 实例动态构造 `/dev/charN`、`/dev/diskN`、`/dev/audioN`。打开文件持有 `class_device_t` 引用；remove 把它置为 offline 并排空在途调用，后续操作返回 `-ENODEV`。
+
+所有 class 还动态出现在 `/sys/class/{char,block,net,input,display,audio}/<name>/dev`；`dev` 内容是该 class device 的 major:minor。既有 `/sys/class/drm` 和 `/sys/block/loopN` 兼容视图独立保留。
 
 ## 用户 buffer 边界
 
-VFS/ABI 层负责用户地址检查和 `copy_to_user/copy_from_user`。class ops 接收内核 buffer，因此驱动不得调用用户 copy，也不得把 class buffer 当用户地址。ioctl 结构先在适配器中复制到内核栈/堆、验证，再调用 class op。
+read/write 的 VFS/ABI 路径负责用户地址检查和复制，class ops 接收内核 buffer。ioctl 尚未完全统一：dynamic block 的 `GET_CAPACITY`/`GET_SECTOR_SZ` 和 audio 通用 ioctl 在适配器中 usercopy；未知 block ioctl 与 char ioctl 当前把原始 `arg` 继续传给 class op。新增自定义 ioctl 不能假定该指针已验证，也不能在硬件驱动中直接解引用；应先补通用封送层。这个已知边界不改变 read/write 的内核 buffer 契约。
 
 ## 新节点怎么做
 
-当前没有稳定的 `devfs_register_device(name, dev, ops)` API。不要从硬件驱动直接修改 `g_nodes` 或持有 vnode。选择顺序应是：
+当前没有让硬件驱动自选任意节点名的 `devfs_register_device(name, dev, ops)` API。不要从硬件驱动直接修改 `g_nodes` 或持有 vnode。选择顺序应是：
 
-1. 若已有设备类和固定适配器，注册 class 即可，例如 input/display。
-2. 若是内核子系统消费者，例如 network，注册 class 后由 lwIP 消费，不需要 `/dev`。
-3. 若确实需要新通用用户接口，先设计 class 与 ABI，再在 devfs 增加与硬件无关的适配器。
-4. 单一厂商调试接口应优先放 debug/proc 通道，不要把不稳定寄存器操作发布为长期 ioctl ABI。
+1. char、block、audio 注册 class 后直接获得动态通用节点。
+2. input/display 注册 class 后由固定 `/dev/event0`、`/dev/fb0` 聚合或选择。
+3. 若是内核子系统消费者，例如 network，注册 class 后由 lwIP 消费，不需要 `/dev`。
+4. 若确实需要新通用用户接口，先设计 class 与 ABI，再在 devfs 增加与硬件无关的适配器。
+5. 单一厂商调试接口应优先放 debug/proc 通道，不要把不稳定寄存器操作发布为长期 ioctl ABI。
 
 新增 devfs ABI 必须规定节点命名、多实例编号、open 时如何绑定 `device_t`、权限、read/write 单位、阻塞、poll、ioctl 结构版本和 remove 后已打开 fd 的行为。
 
@@ -39,7 +47,7 @@ VFS/ABI 层负责用户地址检查和 `copy_to_user/copy_from_user`。class ops
 
 ## Block 与 network
 
-network 由 `lwip_stack.c` 枚举 `DEV_CLASS_NET`，没有网卡字符节点。文件系统适配器负责把 `DEV_CLASS_BLOCK` 接入挂载请求；驱动只实现 class ops，不创建挂载节点或私有 getter。
+network 由 `lwip_stack.c` 枚举 `DEV_CLASS_NET`，没有网卡字符节点。每个 block class 实例有动态 `/dev/diskN`，文件系统也可直接枚举 class 接入挂载请求；驱动只实现 class ops，不创建私有节点或 getter。
 
 ## ABI 设计检查
 

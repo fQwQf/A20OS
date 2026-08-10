@@ -19,7 +19,16 @@ make ARCH=aarch64 BOARD=qemu-virt-aarch64 ABI=both kernel-only -j4
 ### 需要认识的目录
 
 ```text
-kernel/drivers/core/                 核心对象、注册、硬件访问 APIkernel/include/drivers/bus/          PCI 等总线公共声明kernel/include/drivers/<class>/      各功能类公共声明kernel/drivers/bus/                  总线枚举和 transportkernel/drivers/block|net|gpu|input/  通用功能驱动kernel/platform/<board>/             板级地址、固件发现和固定设备kernel/include/core/errno.h          内核负 errnokernel/include/core/lock.h           spinlock APIkernel/include/mm/slab.h             kmalloc/kfree
+kernel/drivers/core/                 核心对象、注册、硬件访问 API
+kernel/include/drivers/bus/          PCI 等总线公共声明
+kernel/include/drivers/<class>/      各功能类公共声明
+kernel/drivers/bus/                  总线枚举和 transport
+kernel/drivers/block|net|gpu|input/  通用功能驱动实现
+kernel/drvmod/examples/              generic 模块包装和描述符
+kernel/platform/<board>/             板级地址、固件发现和固定设备
+kernel/include/core/errno.h          内核负 errno
+kernel/include/core/lock.h           spinlock API
+kernel/include/mm/slab.h             kmalloc/kfree
 ```
 
 核心模型头在 `kernel/drivers/core/`，包含写法是 `#include "drivers/core/driver_core.h"`。不要复制同名结构到驱动私有头。
@@ -43,7 +52,14 @@ VirtualBox PCI 设备可从串口的 `[BUS] pci` 和 BAR 行取得身份与资�
 ## 3. 数据路径
 
 ```text
-板级代码/总线发现硬件-> 创建并注册 device_t-> bus.match 对照 driver.id_table-> driver.probe 初始化一个实例-> driver.class_ops 发布统一功能-> VFS、lwIP、块层、input 或 framebuffer 调用 class_ops-> class op 从 dev->drv_priv 找到实例并访问硬件-> device_unregister/driver_unregister 调用 remove
+板级代码/总线发现硬件
+  -> 创建并注册 device_t
+  -> bus.match 对照 driver.id_table
+  -> driver.probe 初始化一个实例
+  -> driver.class_ops 发布统一功能
+  -> VFS、lwIP、块层、input 或 framebuffer 调用 class_ops
+  -> class op 从 dev->drv_priv 找到实例并访问硬件
+  -> device_unregister/driver_unregister 调用 remove
 ```
 
 枚举器描述“机器上有什么”，驱动描述“怎样操作这种硬件”，class 描述“内核消费者怎样使用”。通用驱动不写板级物理地址，平台代码不复制设备协议。
@@ -62,7 +78,7 @@ PCI 开发者直接跳到下一节。固定设备开发者还要完成 [总线�
 
 ## 5. 建立驱动源文件
 
-以网络设备 `acme-net` 为例，新建 `kernel/drivers/net/acme_net.c`。full profile 通过 Makefile 通配自动编译该文件。只被本文件使用的寄存器、descriptor 和私有状态都留在 `.c`；只有其他模块需要调用的接口才放到 `kernel/include/drivers/net/`。
+以网络设备 `acme-net` 为例，新建共享实现 `kernel/drivers/net/acme_net.c`。该文件不会仅因位于类目录中就自动编译：embedded 需要把它加入 `EMBEDDED_DEVICE_DRIVER_SRCS`；默认 generic 还需要在 `kernel/drvmod/examples/` 增加带 `.a20drv` 描述符的包装，在 `tools/driver-modules.mk` 增加构建规则，并只加入实际支持架构的 `DRVMOD_MODULES`。现有包装通过改写 `DRIVER_REGISTER` 后包含共享 `.c`，可作为模板。只被本实现使用的寄存器、descriptor 和私有状态都留在 `.c`；只有其他模块需要调用的接口才放到 `kernel/include/drivers/net/`。
 
 最小包含集合：
 
@@ -317,8 +333,8 @@ probe 成功不等于用户可见：
 | NET | lwIP 用 `device_find_by_class(DEV_CLASS_NET, n)` 枚举，无 `/dev` 节点 |
 | DISPLAY | probe 另调用 display registry，用户经 `/dev/fb0` 使用 |
 | INPUT | `/dev/event0` 聚合 `DEV_CLASS_INPUT` |
-| BLOCK | 文件系统适配器消费 class；驱动不发布私有 getter |
-| CHAR | 尚无通用动态 devfs 注册，不能在驱动里私建 vnode |
+| BLOCK | class 自动发布 `/dev/diskN`，文件系统也可直接消费 class；驱动不发布私有 getter |
+| CHAR | class 自动发布 `/dev/charN`；不要在驱动里私建 vnode |
 
 需要新增用户 ABI 时参考 [用户接口与 devfs](../classes/userspace-and-devfs.md)。硬件驱动只实现 class，用户地址检查、节点命名和 ioctl 版本由通用适配层负责。
 
@@ -327,13 +343,21 @@ probe 成功不等于用户可见：
 先做静态门禁：
 
 ```sh
-git diff --checkmake check-driver-core-modelmake check-doc-driftmake ARCH=<arch> BOARD=<board> ABI=both kernel-only -j4
+git diff --check
+make check-driver-core-model
+make check-doc-drift
+make ARCH=<arch> BOARD=<board> ABI=both kernel-only -j4
 ```
 
 启动后按顺序寻找日志：
 
 ```text
-[DRIVER] registered driver 'acme-net' (class=3)[BUS] pci ... id=1234:5678 ...[DRIVER] registered device 'pci-...'[ACME] ready: ...[DRIVER] device 'pci-...' bound to driver 'acme-net'[LWIP] ... attached ...
+[DRIVER] registered driver 'acme-net' (class=3)
+[BUS] pci ... id=1234:5678 ...
+[DRIVER] registered device 'pci-...'
+[ACME] ready: ...
+[DRIVER] device 'pci-...' bound to driver 'acme-net'
+[LWIP] ... attached ...
 ```
 
 没有 driver 注册日志：检查源文件是否进入构建、`DRIVER_REGISTER` 和链接段。没有 PCI 行：检查 VM/固件/ECAM，而不是 probe。看到 PCI 行但 probe 未调用：检查 bus 指针、ID 和 subsystem 通配。probe 超时：检查 BAR 号/长度、地址是否已是内核 VA、访问宽度、reset 顺序。probe 成功但无功能：检查 class 类型、ops 返回值和消费者桥。

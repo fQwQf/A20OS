@@ -1,6 +1,8 @@
 # POSIX 设计局限性与历史问题分析
 
 > 本文为 A20OS Native ABI 理论研究的第一部分，系统梳理 POSIX 标准的设计缺陷、历史遗留问题以及现有替代方案的进展与不足。
+>
+> **范围说明：** 本文是问题陈述与设计动机快照，不是对 `e33c3219` Linux ABI 覆盖度或 Native ABI 运行状态的清单。文中的替代接口、数量和性能描述用于研究比较；当前实现事实应以 `kernel/abi/`、`kernel/abi/linux/syscall_coverage.md` 和 `docs/native-abi/08-runtime-status.md` 为准。
 
 ## 目录
 
@@ -105,7 +107,8 @@ $$\text{deliver}(sig, p): pending_p \leftarrow pending_p \setminus \{sig\}; \tex
 `ioctl()` 和 `fcntl()` 是 POSIX 中最臭名昭著的接口：
 
 ```
-int ioctl(int fd, unsigned long request, ...);int fcntl(int fd, int cmd, ... /* arg */);
+int ioctl(int fd, unsigned long request, ...);
+int fcntl(int fd, int cmd, ... /* arg */);
 ```
 
 **问题**：

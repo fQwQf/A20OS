@@ -12,7 +12,7 @@ virtio-input 设备 (MMIO slot / PCI 1af4:1052)
 input class 设备（DEV_CLASS_INPUT，统一核心发布）
         │  input_read_class_devices() 经 input_dev_ops.read 消费
         ▼
-/ dev/event0 mux（kernel/drivers/input/input_mux.c）
+/dev/event0 mux（kernel/drivers/input/input_mux.c）
         │  EVIOCG* ioctl + evdev 状态跟踪（键/ABS）
         ▼
 用户空间（weston、evdev_stress、shell）

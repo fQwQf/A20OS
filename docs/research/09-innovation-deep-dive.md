@@ -1,6 +1,8 @@
 # A20OS Native ABI：创新方向深度分析
 
-> 本文档提出四个超越"简化 Zircon + 形式化证明"的创新方向，每个方向都对应一个现有工作中真正未解决的形式化问题。每个方向包含：问题定义、设计扩展、SOS 规则扩展、形式化定理与证明。
+> 本文档提出四个超越"简化 Zircon + 形式化证明"的候选研究方向；“未解决”仅指当前调研尚未找到等价工作，仍需系统文献复核。每个方向包含问题定义、设计扩展、SOS 规则扩展与纸笔论证。
+>
+> **范围说明：** 本文是从 53-syscall 基础模型出发的研究扩展快照。章节中的“新增”“当前”首先描述该模型的演进，不应覆盖 `e33c3219` 已实现的 typed channel、时态控制和 sweeper；当前接口与测试状态以 `docs/native-abi/05-ipc.md`、`06-security.md`、`08-runtime-status.md` 和源码为准。新颖性与证明均为纸笔论证，未经过机器检验或独立同行评审。
 
 ---
 
@@ -19,9 +21,9 @@
 
 04 §9 的双 ABI 隔离定理证明了**依赖层面的隔离**：如果两个 ABI 模块不互相调用、只依赖 core，则一个 ABI 的 bug 不影响另一个 ABI 的正确性。这是一个**模块依赖可达性**论证。
 
-但这不够。真正的问题是：当两个子系统共享核心资源（VFS 节点、物理页帧、网络 socket buffer）时，一个**能力无感知**的子系统（Linux ABI，使用 fd，无权限跟踪）能从共享资源中**推断**出多少关于**能力保护**子系统（Native ABI，handle + rights）的信息？
+但这不够。真正的问题是：当两个子系统共享核心资源时，一个能力无感知的 Linux ABI 子系统能推断多少 Native handle 信息？本节只建模 VFS 等共享资源，明确排除 `sys_a20_bridge` 暴露的 Linux-A20 channel bridge。
 
-这个问题在现有文献中未被形式化。所有现有能力系统形式化（seL4, Zircon informal, Capsicum, CHERI）都假设**整个系统在同一套能力纪律下运行**。当存在一个"不遵守能力纪律"的子系统时，能力理论的结论是否仍然成立？
+当前调研覆盖的 seL4、Zircon、Capsicum、CHERI 材料中尚未找到相同形式化，已查模型通常假设系统遵守相应能力纪律；这不是穷尽性结论，尚需系统文献复核。当存在一个“不遵守能力纪律”的子系统时，能力理论结论还能否成立？
 
 ### 1.2 能力可观测性
 
@@ -86,11 +88,11 @@ $p_l$ **不能**观察到的信息包括：
 
 ### 1.5 能力边界定理
 
-**定理 1.3（混合信任能力边界）** 设系统状态 $\sigma$ 满足安全不变式 $\mathcal{I}$（04 §3.1）。令 $H_{native}(\sigma)$ 为所有 Native ABI handle 的集合，$P_{linux}(\sigma)$ 为所有 Linux ABI 进程的集合。则：
+**定理 1.3（混合信任能力边界）** 设 $\sigma$ 满足 $\mathcal{I}$，且所讨论 Linux 进程的执行不经过 `sys_a20_bridge` 暴露的显式 channel bridge（$BridgeFree$）。令 $H_{native}(\sigma)$ 和 $P_{linux}(\sigma)$ 如下。则：
 
-$$\forall p_l \in P_{linux}, h_n \in H_{native}.\ \neg Obs(p_l, h_n, \sigma) \text{ 或 } (p_l, h_n) \text{ 构成精确降级通道}$$
+$$\forall p_l \in P_{linux},h_n \in H_{native}.\ BridgeFree(p_l,\sigma)\implies(\neg Obs(p_l,h_n,\sigma)\lor(p_l,h_n)\text{ 构成精确降级通道})$$
 
-即：Linux ABI 进程要么完全无法观测 Native ABI handle，要么只能通过**精确的共享资源降级通道**获取信息（且该信息不包含 handle 权限元数据）。
+即：在 $BridgeFree$ 前提下，Linux ABI 进程要么无法观测 Native handle，要么只能通过精确共享资源降级通道获取不含 handle 权限元数据的信息；该结论不覆盖显式 bridge。
 
 *证明*：
 
@@ -100,7 +102,7 @@ $$\forall p_l \in P_{linux}, h_n \in H_{native}.\ \neg Obs(p_l, h_n, \sigma) \te
 
 **情况 2：$h_n$ 指向的对象 $o$ 被 $p_l$ 通过 fd 访问。** 此时 $Obs_2(p_l, h_n, \sigma)$ 可能成立（$p_l$ 可以观察到 $o$ 的状态变化）。但由定理 1.2，这个降级通道是精确的：$p_l$ 只能获取 $o$ 的内容+元数据，不能获取 $h_n$ 的 rights、类型或其他 handle 的存在性。因此 $(p_l, h_n)$ 构成精确降级通道。$\checkmark$
 
-**情况 3：$h_n$ 指向的对象 $o$ 只被 Native ABI 进程访问。** $p_l$ 无法通过 VFS 接触 $o$。$p_l$ 的 fd table 不包含指向 $o$ 的条目。$p_l$ 无法通过 IPC 接触 $o$（Linux ABI 没有 channel 概念）。因此 $\neg Obs(p_l, h_n, \sigma)$。$\checkmark$
+**情况 3：$h_n$ 指向的对象 $o$ 只被 Native ABI 进程访问。** 在 $BridgeFree$ 前提下，$p_l$ 无法通过 VFS、fd table 或显式 channel bridge 接触 $o$，因此 $\neg Obs(p_l,h_n,\sigma)$。若允许 `sys_a20_bridge`，该 case 不成立。$\checkmark$
 
 所有情况得证。$\square$
 
@@ -113,7 +115,7 @@ $$\forall p_l \in P_{linux}, h_n \in H_{native}.\ \neg Obs(p_l, h_n, \sigma) \te
 | 定理 9.1（旧） | 模块依赖隔离 | "Linux ABI 代码不调用 Native ABI 函数" |
 | 定理 1.3（新） | 信息流能力边界 | "Linux ABI 进程无法推断 Native ABI handle 的权限状态" |
 
-定理 9.1 是**句法层面**的隔离（模块不互相 include）。定理 1.3 是**语义层面**的隔离（即使通过共享资源交互，能力信息也不泄露）。
+定理 9.1 是句法层面隔离。定理 1.3 在 $BridgeFree$ 条件和所建模共享资源内给出语义边界；它不描述 `sys_a20_bridge` 的有意跨 ABI 信息流。
 
 ### 1.7 跨 ABI 干扰自由
 
@@ -141,7 +143,7 @@ Linux ABI 的 syscall 路径为 `syscall_dispatch → linux_syscall_lookup → s
 
 ### 2.1 问题
 
-当前 channel 设计（与 Zircon 相同）是**无类型字节流 + 可选 handle 传输**。内核不强制执行通道上的消息类型约束。一个被攻破的进程可以向任何它有 `W` 权限的 channel 发送任意数据。
+基础 53-syscall 模型中的 channel（与 Zircon 相同）是**无类型字节流 + 可选 handle 传输**，当时的内核模型不强制消息类型约束。下文提出的 typed channel 后来已进入当前实现；这里保留未扩展模型作为问题起点。
 
 这意味着：
 - 协议违规只能在用户态检测（如 FIDL 解码器）
@@ -153,7 +155,8 @@ Linux ABI 的 syscall 路径为 `syscall_dispatch → linux_syscall_lookup → s
 **新增数据结构**：
 
 ```c
-// 通道类型签名typedef struct a20_channel_type {
+// 通道类型签名
+typedef struct a20_channel_type {
     uint32_t version;            // 结构体版本化（遵循 ABI 演进规则）
     uint32_t send_handle_types;  // bitmask: 可发送的 handle 类型
     uint32_t recv_handle_types;  // bitmask: 可接收的 handle 类型
@@ -289,7 +292,7 @@ typedef struct a20_channel_protocol {
 - **沙箱逃逸防护**：即使能力被意外泄露，过期后自动失效
 - **资源预算**：限制某个组件的总 I/O 操作次数
 
-现有内核能力系统都没有形式化的时间受限委托。Zircon/seL4 的能力一旦授予就永久有效。OAuth/X.509 有过期机制但那是用户态构造。
+当前调研未在 Zircon/seL4 中找到等价的内核强制时间受限委托形式化；OAuth/X.509 的过期机制是用户态构造。该新颖性判断尚需系统文献复核。
 
 ### 3.2 设计
 
@@ -742,7 +745,15 @@ $$\text{Safe}_{combined}(\sigma) = \text{TemporalSafe}(\sigma) \wedge \text{Type
 不可信组件 $U$ 被隔离在沙箱进程中（§4 P5 Fork-Sandbox），通过类型化通道与主进程通信，所有 handle 具有时态约束：
 
 ```
-主进程 P│  task_spawn(U, H_inject={channel_ep, timer})│  channel 类型 T: send={socket}, recv={}, max_data=4KB│  时态: expiry=30s, ops=1000v沙箱进程 U├── h0: channel endpoint (rights={W}, expiry=30s, ops=1000)├── h1: timer (rights={Stat,Control}, expiry=30s)└── 无其他 handle
+主进程 P
+│  task_spawn(U, H_inject={channel_ep, timer})
+│  channel 类型 T: send={socket}, recv={}, max_data=4KB
+│  时态: expiry=30s, ops=1000
+v
+沙箱进程 U
+├── h0: channel endpoint (rights={W}, expiry=30s, ops=1000)
+├── h1: timer (rights={Stat,Control}, expiry=30s)
+└── 无其他 handle
 ```
 
 **形式化保证**（由定理 7.1 + 定理 4.2 + 定理 3.1 联合给出）：
@@ -764,19 +775,19 @@ $$\text{Safe}_{combined}(\sigma) = \text{TemporalSafe}(\sigma) \wedge \text{Type
 | Zircon | 无通用撤销 | — | 只能关闭自己的 handle |
 | Capsicum | cap_enter 不可逆 | — | 无法退出 capability 模式 |
 | POSIX | close(fd) | $O(1)$ | 只关闭单个 fd |
-| **A20OS 时态撤销** | **自动过期** | **$O(1)$ amortized** | **无遍历，无锁竞争** |
+| **A20OS 时态过期** | **lookup 判失效 + 周期 sweep** | **lookup $O(1)$；整表 sweep/回收 $O(H)$** | **需要遍历 handle table 并获取相应锁** |
 
 **定义 8.1（撤销复杂度）** 设系统中有 $n$ 个 handle 指向同一对象 $o$ 的副本（通过 dup/delegation 传播）。撤销所有这些 handle 的计算复杂度为 $C_{revoke}(n)$。
 
-**定理 8.1（时态撤销的 O(1) 摊还复杂度）** 在 A20OS 的时态能力模型下，撤销一个对象的所有派生 handle 的计算成本为 $O(1)$（在 handle 创建时设置 expiry，过期由 sweeper 自动处理）。
+**定理 8.1（过期判定与回收复杂度）** 在 A20OS 时态能力模型下，单次 handle lookup 的过期判定为 $O(1)$；扫描容量为 $H$ 的 handle table 并回收所有到期条目为 $O(H)$，不能称整个撤销/回收为 $O(1)$。
 
 *证明*：
 
 **传统显式撤销**（seL4 风格）：需要遍历 CNode 树找到所有指向 $o$ 的 capability slot，逐个置空。树深度 $d$、每层扇出 $f$，复杂度 $O(d \times f)$。且需要获取每层的锁。
 
-**A20OS 时态撤销**：创建 handle 时设置 $expiry = t_0 + \Delta t$。不需要显式撤销。sweeper 扫描 handle table 时，检查 $current\_tick \geq expiry$ 并清零 $\rho_{eff}$。扫描复杂度为 $O(H)$（$H$ 是 handle table 大小），但这是**摊还**到所有 handle 上的——每个 handle 的过期检查是 $O(1)$。
+**A20OS 时态过期**：创建 handle 时设置 $expiry=t_0+\Delta t$。lookup 读取固定字段并比较 tick，判定为 $O(1)$；AUTO_CLOSE sweeper 仍须检查 table 条目并释放到期 slot，完整一轮为 $O(H)$。分摊到单条检查是 $O(1)$，不改变整表回收的 $O(H)$ 上界。
 
-**关键区别**：传统撤销是**按需**的（revocation request 触发遍历），时态撤销是**持续**的（sweeper 周期性扫描）。传统撤销的延迟取决于 $n$（副本数量），时态撤销的延迟取决于 sweeper 周期（与 $n$ 无关）。$\square$
+**关键区别**：传统撤销由请求触发派生关系遍历，时态过期由 lookup 和周期 sweeper 执行。失效可在下一次 lookup 以 $O(1)$ 发现；slot/refcount 回收延迟和工作量取决于 sweep 周期、表大小与到期条目数。$\square$
 
 **洞察**：时态撤销将撤销的主要决策成本从“撤销时刻”转移到 handle 创建/约束设置时——当前条目新增 `expiry_tick`（8B）、`remaining_ops`（4B）和 `temporal_flags`（4B），合计 **+16 bytes**，换来 lookup 时 $O(1)$ 的失效判定。AUTO_CLOSE 仍需 deadline-driven sweep 回收 slot，其系统总成本取决于活跃 handle table 数与扫描节奏，尚需按 05 的框架实测；因此不能把整个回收过程笼统声称为最坏情况 $O(1)$。
 
@@ -794,7 +805,7 @@ $$\alpha = \frac{|\{(p_i, c_j) \mid p_i \text{ 使用 Native ABI 且 } c_j \text
 
 1. **完全保证**（不依赖 $\alpha$）：对于任意两个 Native ABI 进程 $p_1, p_2$，如果它们之间的所有 channel 都有类型约束，则 $p_1$ 到 $p_2$ 的能力流满足定理 2.1（类型安全）
 
-2. **部分保证**（依赖 $\alpha$）：对于任意 Native ABI 进程 $p$ 和 Linux ABI 进程 $q$，$q$ 对 $p$ 的能力信息可观测性 $Obs(q, p, \sigma)$ 受定理 9.5（能力边界）约束，无论 $\alpha$ 多少
+2. **部分保证**（依赖 $\alpha$）：对于任意 Native 进程 $p$ 和满足 $BridgeFree$ 的 Linux 进程 $q$，$Obs(q,p,\sigma)$ 受定理 9.5 约束；经过 `sys_a20_bridge` 的执行不在此保证内
 
 3. **渐进保证**：增加 $\alpha$（将更多进程从 Linux ABI 迁移到 Native ABI，为更多 channel 添加类型约束）**单调增加**系统的安全保证集，**不会减少**已有保证
 
@@ -802,11 +813,11 @@ $$\alpha = \frac{|\{(p_i, c_j) \mid p_i \text{ 使用 Native ABI 且 } c_j \text
 
 1. 由定理 2.1（通道类型安全），类型化通道的安全性只依赖于发送方和接收方是否遵守 CH-TYPED-SEND 规则。这个规则是内核强制的，不依赖于其他进程的行为。因此即使其他进程不使用能力模型，$p_1$ 到 $p_2$ 之间的通道类型安全仍然成立。
 
-2. 由定理 9.5（混合信任能力边界），该定理的证明不假设任何其他进程使用能力模型。只要 Native ABI 进程 $p$ 的 handle table 由内核管理（不变式 $\mathcal{I}$），能力边界就成立。
+2. 由定理 9.5，在 Native handle table 受 $\mathcal{I}$ 管理且 Linux 执行满足 $BridgeFree$ 时，能力边界不要求其他进程使用能力模型；显式 bridge 必须另建模。
 
 3. 将进程从 Linux ABI 迁移到 Native ABI：新 Native 进程获得 handle table，受 $\mathcal{I}$ 约束。这不改变已有 Native 进程的 handle table，因此已有保证不变。为 channel 添加类型约束：这只会**收紧**而非放松能力传播，因此安全保证单调增加。$\square$
 
-**洞察**：A20OS 的安全保证具有**单调可组合性**——每增加一个安全机制（为进程启用 Native ABI、为 channel 添加类型约束、为 handle 添加时态约束），安全保证集合只增不减。这意味着**增量部署是安全的**——这是现有能力系统（seL4、Zircon）不能声称的。
+**洞察**：在本文模型和 $BridgeFree$ 条件内，每增加一个安全机制，已建模保证集合只增不减，因此支持条件化的增量部署。据当前调研尚未在 seL4/Zircon 材料中找到等价结论，但该差异仍需系统文献复核。
 
 **与增量形式化验证的关系**：这个结果在精神上类似于 CompCert 的"语义正确性保持"——CompCert 证明了编译优化保持程序语义。A20OS 证明了"安全增强保持已有安全性质"。
 
@@ -821,13 +832,21 @@ $$\alpha = \frac{|\{(p_i, c_j) \mid p_i \text{ 使用 Native ABI 且 } c_j \text
 ```
 攻击者 A ──channel(c1)──> Deputy D ──channel(c2)──> 资源服务 R
 
-c1 的类型约束: send={}, recv={file}        (D 只能从 A 接收 file handle)c2 的类型约束: send={file}, recv={file}    (D 只能向 R 发送/接收 file handle)
+c1 的类型约束: send={}, recv={file}        (D 只能从 A 接收 file handle)
+c2 的类型约束: send={file}, recv={file}    (D 只能向 R 发送/接收 file handle)
 
-D 的 handle table:h0: channel c1 endpoint (rights={R,W}, type constraint enforced)h1: channel c2 endpoint (rights={R,W}, type constraint enforced)h2: file F (rights={R}, expiry=300s, ops=50)
+D 的 handle table:
+h0: channel c1 endpoint (rights={R,W}, type constraint enforced)
+h1: channel c2 endpoint (rights={R,W}, type constraint enforced)
+h2: file F (rights={R}, expiry=300s, ops=50)
 
-A 试图让 D 传递 task handle 给 R:A → c1.send(task_handle) → CH-TYPED-SEND-ERR: τ(task) ∉ c1.recv_handle_types→ 拒绝。攻击失败。
+A 试图让 D 传递 task handle 给 R:
+A → c1.send(task_handle) → CH-TYPED-SEND-ERR: τ(task) ∉ c1.recv_handle_types
+→ 拒绝。攻击失败。
 
-A 试图让 D 读取 shm 并通过 c2 发送:D 没有 shm handle → handle_lookup 失败→ 拒绝。攻击失败。
+A 试图让 D 读取 shm 并通过 c2 发送:
+D 没有 shm handle → handle_lookup 失败
+→ 拒绝。攻击失败。
 ```
 
 **定理 8.3（多类型通道的 confused deputy 防御）** 设 deputy $D$ 通过类型为 $T_1$ 的 channel $c_1$ 与攻击者 $A$ 通信，通过类型为 $T_2$ 的 channel $c_2$ 与资源 $R$ 通信。如果 $T_1.recv\_handle\_types \cap T_2.send\_handle\_types = \emptyset$（$D$ 从 $A$ 可接收的类型和 $D$ 向 $R$ 可发送的类型不相交），则 $A$ 无法通过 $D$ 将任何 handle 传递给 $R$。
@@ -864,7 +883,7 @@ $A$ 通过 $c_1$ 传递给 $D$ 的 handle 类型 $\tau \in T_1.recv\_handle\_typ
 | $\mathcal{A}_1$ | 通过 IPC 传播恶意 handle | 通道类型过滤 | 09 定理 2.1 |
 | $\mathcal{A}_2$ | 进程间 confused deputy | 类型不相交配置 | 09 定理 8.3 |
 | $\mathcal{A}_2$ | 委托链权限扩散 | 委托耗散 | 09 定理 7.2 |
-| $\mathcal{A}_3$ | 推断 Native ABI 能力状态 | 能力边界 | 04 定理 9.5 |
+| $\mathcal{A}_3$ | 推断 Native ABI 能力状态（排除显式 bridge） | 能力边界 | 04 定理 9.5 |
 | $\mathcal{A}_3$ | 通过共享文件泄露能力元数据 | 降级精确性 | 04 定理 9.4 |
 | $\mathcal{A}_4$ | 共享资源侧信道 | 隐信道上界 | 04 定理 8.2 |
 | $\mathcal{A}_5$ | 破坏安全不变式 | （无保证，需要内核正确性） | — |
@@ -895,10 +914,10 @@ $$AS(S) = \sum_{p \in P} \sum_{h \in HT_p} |\rho_{eff}(h, t)| \times \frac{1}{1 
 **洞察 9.2（可静态验证的安全配置）**：给定系统配置（进程集、channel 类型约束、handle 时态参数），以下性质可**在运行前**通过多项式时间算法验证：
 1. confused deputy 不可能性（检查 channel 类型交集）
 2. 委托链权限衰减上界（沿委托链取权限和过期时间最小值）
-3. 跨 ABI 信息泄露不可能性（检查 VFS 共享节点集合）
-4. 资源回收完备性（检查 refcount 和 handle table 一致性）
+3. $BridgeFree$ 条件下的跨 ABI 信息边界（检查 VFS 共享节点集合）
+4. 资源回收完备性（检查 refcount 与 HT、queued/pending message ownership 一致性）
 
-**洞察 9.3（安全保证的单调可组合性）**：每增加一个安全机制，安全保证集合只增不减。这使得**增量部署是安全的**——可以先在关键路径上启用类型化通道，再逐步为 handle 添加时态约束，每步都有形式化保证。
+**洞察 9.3（安全保证的单调可组合性）**：在本文模型和 $BridgeFree$ 条件内，每增加一个安全机制，已建模保证集合只增不减；可以先启用类型化通道，再逐步添加时态约束。显式 bridge 或模型外共享路径需要单独证明。
 
 ### §1-§4 基础创新定理（13 个）
 
@@ -926,11 +945,11 @@ $$AS(S) = \sum_{p \in P} \sum_{h \in HT_p} |\rho_{eff}(h, t)| \times \frac{1}{1 
 | 7.2 | 组合 | 委托链能力耗散 | 安全性 | O(1) 安全策略执行 |
 | 7.3 | 组合 | 跨 ABI 类型约束不可侵犯性 | 安全性 | 能力防火墙 |
 | 7.4 | 组合 | 四维度组合安全 | 安全性（核心） | 四创新正交且独立可组合 |
-| 8.1 | 痛点 | 时态撤销 O(1) 摊还复杂度 | 复杂度 | 空间换时间的撤销 trade-off |
+| 8.1 | 痛点 | 过期 lookup O(1)、整表 sweep/回收 O(H) | 复杂度 | 周期扫描的时间空间 trade-off |
 | 8.2 | 痛点 | 部分覆盖下的安全保证 | 安全性 | 增量部署的形式化保证 |
 | 8.3 | 痛点 | 多类型通道 confused deputy 防御 | 安全性 | 可静态验证的配置规则 |
 
-**总计**：基础 13 + 组合/痛点 7 + 原有 28 = **48 个定理/引理**。
+**计数边界**：本页两张表分别列出 13 和 7 个编号项；“原有 28”未在本页逐项复核，且跨文档存在重述/推论，因此不再给出全局独立定理精确总数。全部论证均未机器检验。
 
 ---
 
@@ -944,18 +963,18 @@ $$AS(S) = \sum_{p \in P} \sum_{h \in HT_p} |\rho_{eff}(h, t)| \times \frac{1}{1 
 | 能力过期 | 无 | **内核强制的时间受限委托** |
 | 双 ABI 隔离 | 无 | **信息流+能力边界定理** |
 | 委托模式推理 | 无 | **5 种模式的组合安全证明** |
-| 形式化 | 无 | **48 个定理/引理** |
+| 形式化 | 无 | **纸笔定理/引理目录，未机器检验** |
 
 ### 6.2 核心差异总结
 
-A20OS 不再是"Zircon but smaller + proofs"。它是：
+A20OS 的候选差异如下；均据当前调研整理，尚需系统文献复核，不能表述为已确认的唯一性：
 
-1. **唯一形式化了混合信任能力边界的系统**（方向 1）
-2. **唯一在内核 IPC 层强制执行类型化通信协议的系统**（方向 2）
-3. **唯一有内核级时态能力形式化过期保证的系统**（方向 3）
-4. **唯一对能力委托模式做组合安全证明的系统**（方向 4）
-5. **唯一证明安全保证单调可组合、支持增量部署的能力系统**（定理 7.4 + 8.2）
-6. **唯一给出能力撤销 O(1) 摊还复杂度形式化分析的系统**（定理 8.1）
+1. **带显式 bridge 排除条件的混合信任能力边界纸笔模型**（方向 1）
+2. **在内核 IPC 层强制执行类型化通信协议**（方向 2）
+3. **内核级时态能力的形式化过期条件**（方向 3）
+4. **能力委托模式的组合安全论证**（方向 4）
+5. **模型内安全保证单调可组合与增量部署条件**（定理 7.4 + 8.2）
+6. **区分 $O(1)$ lookup 判定与 $O(H)$ sweep/回收的复杂度分析**（定理 8.1）
 
 ---
 

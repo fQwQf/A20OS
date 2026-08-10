@@ -1,6 +1,6 @@
 # 混合内核演进方向
 
-本文档说明 A20OS 混合内核与主流混合内核（Fuchsia / macOS XNU 等）对齐的**结构性能力差距**、候选设计方向与已做出的设计决策。当前形态见 [00-design.md](00-design.md)，机制细节见 [01-mechanisms.md](01-mechanisms.md)。
+本文档说明 A20OS 混合内核与主流混合内核（Fuchsia / macOS XNU 等）对齐的**结构性能力差距**、候选设计方向与已做出的设计决策。内容已按 `e33c3219` 源码核对；“目标能力”不是当前完成声明。当前形态见 [00-design.md](00-design.md)，机制细节见 [01-mechanisms.md](01-mechanisms.md)。
 
 ## 目标能力
 
@@ -18,7 +18,7 @@
 
 ### 1. IPC 直接切换与时间片捐赠
 
-同步 RPC 的往返成本主要由两次上下文切换的 runqueue 排队构成（TCG 下 ~80µs 量级）。L4 的结论：同步 IPC 应把调用者的剩余时间片直接捐给被调者，跳过两次调度排队。
+同步 RPC 的往返成本主要由两次上下文切换的 runqueue 排队构成；历史 TCG 样本约为 80µs 量级，本次未在 `e33c3219` 重测。L4 的结论：同步 IPC 应把调用者的剩余时间片直接捐给被调者，跳过两次调度排队。
 
 设计要点：
 
@@ -62,23 +62,23 @@ virtio-blk 是"主流水平"的试金石：一个真实吞吐设备驱动运行�
 - **内核块代理**（性能关键决策）：devfs 与页缓存留在内核，块请求经共享环转发给用户驱动——页缓存命中时零 IPC，未命中才进驱动；这与 Fuchsia 块层等主流设计一致；
 - 崩溃恢复：驱动死亡时内核代理把在飞请求标记失败并唤醒等待者，svcmgr 重启驱动后重挂载。
 
-**当前状态**：virtio-blk 用户态驱动（udisk）已实现——页缓存/文件系统留在内核，块请求经一页共享环转发，virtio DMA 直写内核页缓存物理地址（数据字节不穿过环或 channel）；驱动死亡 → 在飞请求 `-EIO` → 原地重挂载已实现。冷读性能受 TCG 下 doorbell+park+IRQ 代价限制（~1 MiB/s），热读由页缓存吸收（百 MiB/s 级）。**注意**：主存储 virtio-blk 数据面仍保留内核态（`kernel/drivers/block/virtio_blk.c`，polling 完成模型），udisk 面向 scratch 盘，两者并存；详见"已做出的设计决策"。
+**当前状态**：virtio-blk 用户态驱动（udisk）已实现——页缓存/文件系统留在内核，块请求经一页共享环转发，virtio DMA 直写内核页缓存物理地址（数据字节不穿过环或 channel）；驱动死亡 → 在飞请求 `-EIO` → 原地重挂载已实现。历史 TCG 样本中冷读约 1 MiB/s、热读为百 MiB/s 级；这些数字未在 `e33c3219` 重测。**注意**：主存储 virtio-blk 数据面仍保留内核态（`kernel/drivers/block/virtio_blk.c`，polling 完成模型），udisk 面向 scratch 盘，两者并存；详见"已做出的设计决策"。
 
 ### 5. 双架构与真实测量
 
-loongarch64 需要 vDSO 移植（`rdtime.d`/stable counter）、udriver 窗口注册（FDT 读取）与全部 smoke 的运行时验证；性能结论应来自多轮运行中位数而非单次。
+loongarch64 仍需要 vDSO 移植（`rdtime.d`/stable counter）和 Native/hybrid smoke 的系统化运行矩阵；性能结论应来自明确标注提交和环境的有效样本。
 
-**当前状态**：loongarch64 内核与 native 测试均构建通过；运行时验证受 QEMU 镜像/工具链条件所限未像 riscv64 那样完整执行（loongarch64 vDSO 移植仍为后续工作）；性能数据全部来自 QEMU TCG。
+**当前状态**：`f9732348` 曾完成 RISC-V64/LoongArch64 整体平台流程，但这不覆盖所有 Native/hybrid smoke，也不能外推到 `e33c3219`。当前多个 Native、mlibc、dual-placement smoke 仍硬编码 RISC-V64；loongarch64 vDSO 仍未实现。性能数据全部来自 QEMU TCG。
 
 ## 已做出的设计决策
 
 - **主存储数据面不外迁，scratch 设备外迁**：TCG 数据显示块/网驱动的 I/O 路径是多次上下文切换 + 数据拷贝的长链路，在现有调度成本下外迁必然劣化。因此主存储 virtio-blk 数据面保持内核态（`kernel/drivers/block/virtio_blk.c`，polling 完成模型），仅 scratch 盘走用户态 udisk（`user/svc/ubd.c`），两者并存。该决策应在使用优先级捐赠/直接切换降低切换成本后重估。
-- **页缓存与文件系统留内核**：udisk 形态是"页缓存留内核 + 块请求进用户驱动"，与主流存储栈一致；实测页缓存命中路径完全吸收用户驱动开销。
+- **页缓存与文件系统留内核**：udisk 形态是"页缓存留内核 + 块请求进用户驱动"，与主流存储栈一致；历史 TCG 样本显示页缓存命中路径吸收了用户驱动开销，本次未重测。
 - **捐赠仅限 UP**：SMP 捐赠需要跨核唤醒/IPI 簿记的完整实现（`PER_CPU_CURRENT_VALIDATION`），在完成前不开放。
 
 ## 诚实边界
 
 - **网络协议栈**保持内核态（lwIP，源码 `kernel/external/lwip`）；用户态 netd 外迁尝试已放弃（recv 数据面未通且进程未被拉起），TCP/IP 按主流设计留在内核；
-- **loongarch64**：构建通过，运行时验证未像 riscv64 那样完整执行；
+- **loongarch64**：有 `f9732348` 的整体平台运行证据，但 Native/hybrid 专项运行覆盖明显少于 RISC-V64，当前 `e33c3219` 也无匹配完整复验；
 - **性能数据**全部来自 QEMU TCG 模拟器，真实硬件基准待测；
-- **IOMMU/DMA 安全**：RISC-V 侧的 DMA 隔离已升级为真实 IOMMU 硬件强制（DDT/CQ/FQ 使能、devid 0 SV39 翻译域、TR_REQ 验证），见 [00-design.md](00-design.md) 与 `smoke-iommu-discovery`；fault 队列消费与 per-device 页表动态映射仍为后续工作。无 IOMMU 的架构（aarch64/loongarch64/x86）仍依赖"内核分配 + pin + 物理地址上报"的信任模型。
+- **IOMMU/DMA 安全**：RISC-V 侧已完成 DDT/CQ/FQ bring-up 和 devid 0 静态 SV39/TR_REQ 探测，但尚未把用户驱动的动态 DMA 分配接入 per-device map/unmap 与 fault 消费；不能称为完整硬件强制隔离。其他架构仍依赖“内核分配 + pin + 物理地址上报”的信任模型。

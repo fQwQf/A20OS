@@ -1,5 +1,7 @@
 # SMP 运行队列与抢占审计
 
+> **历史里程碑审计**：本文记录 EEVDF 替换旧级别策略之前的第 7/8 步 runqueue 与抢占协议收口。所有权、迁移和持久 `need_resched` 契约仍有参考价值；“老化”和旧普通任务优先级策略只属于当时快照，当前选择策略见 [EEVDF 调度器设计](../eevdf-scheduler.md)。
+
 `SMP_RUNQUEUE_PREEMPT_AUDIT`
 
 本文档收口 PROC.md 第 7 步，而不改变调度器现有的优先级类或架构上下文布局。

@@ -32,7 +32,7 @@
 
 **高性能、高兼容性的混合内核操作系统**
 
-[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](#) [![Architecture](https://img.shields.io/badge/Arch-RISC--V%20%7C%20ARM64%20%7C%20x86__64%20%7C%20LoongArch%20%7C%20PPC64LE-orange.svg)](#)
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](#) [![Architecture](https://img.shields.io/badge/Arch-RISC--V%20%7C%20ARM64%20%7C%20x86__64%20%7C%20LoongArch%20%7C%20PPC64LE%20%7C%20ARMv7-orange.svg)](#)
 
 </div>
 
@@ -60,9 +60,12 @@ A20OS 具备优秀的跨平台移植性，硬件抽象层 (HAL) 目前官方支�
 ```
 
 ### 2. 编译内核
-内核支持一键编译与启动，默认架构为 `riscv64`：
+
+根目录不带参数的 `make`/`make all` 是 2026 提交入口，而不是单架构开发构建。它构建 RISC-V64 与 LoongArch64 的 `PROFILE=benchmark`、8 核、embedded-driver 产物：`kernel-rv`、`kernel-la`、`disk.img`、`disk-la.img`。
+
+日常开发仍使用显式的 `ARCH`、`BOARD` 和 `run`：
 ```bash
-# 默认编译为 RISC-V 64 并在 QEMU 中运行
+# RISC-V 64 开发镜像并在 QEMU 中运行
 make ARCH=riscv64 BOARD=qemu-virt-riscv64 run
 
 # 构建其他架构 (例: aarch64)
@@ -87,8 +90,8 @@ make run-stm32f103-qemu
 ```
 
 *高级编译选项：*
-* `MODE=release/debug`: 编译模式（默认 release 包含 O3 优化）
-* `NR_CPUS=N`: 开启多核并发模式（需要配置门禁开关）
+* `OPT="-O3"` / `OPT="-O0 -g -DDEBUG"`：控制内核优化与调试选项；`MODE` 不控制当前编译参数
+* `NR_CPUS=N`：配置 CPU 数；已验证 QEMU SMP 子集可直接使用，其他板必须为明确的 bring-up 实验设置 `ALLOW_UNVERIFIED_SMP=1`
 
 ### 3. 编译缓存 (可选)
 构建系统对 ccache 提供透明的可选支持：若环境中安装了 [ccache](https://ccache.dev)，内核、用户态、原生测试、驱动包与 extra 包的编译都会自动经过 ccache 加速，重复构建同一参数的目标时显著缩短墙钟时间。
@@ -104,7 +107,8 @@ make CCACHE= ...
 
 ## 测试与质量保证
 作为一个严肃的底层项目，A20OS 建立了一套完备的测试门禁。开发者在提交代码前可通过 `Makefile` 目标进行本地校验：
-* **系统调用测试**：运行 `make smoke-riscv64`、`smoke-abi-linux` 等目标，验证内核基础能力。
+* **基础 bring-up**：`make smoke-riscv64` 只启动 `BRINGUP=1` 内核，并把 watchdog timeout 视为可接受结果；它不验证系统调用。
+* **系统调用测试**：运行 `make smoke-abi-linux`，在 QEMU 中验证 Linux ABI syscall smoke。
 * **高负载压力测试**：包含 `smoke-sched-stress`、`smoke-vfs-stress` 等并发压力校验，用于捕获隐蔽的死锁或崩溃。
 * **架构合规性验证**：例如 `make check-concurrency-foundation`，在编译期严格审查代码是否符合 SMP 锁模型契约。
 
@@ -124,14 +128,15 @@ make CCACHE= ...
 ```text
 ├── kernel/
 │   ├── abi/          # 双重 ABI 接口 (linux / native)
-│   ├── arch/         # 硬件架构相关的 HAL (aarch64, riscv64, etc.)
+│   ├── arch/         # 指令集机制 (trap, page table, context switch)
 │   ├── core/         # 核心基础设施 (锁, timekeeping, panic)
 │   ├── drivers/      # 混合设备驱动抽象与实现
 │   ├── fs/           # 模块化 VFS 框架与各文件系统实现
 │   ├── ipc/          # 高级通道通信 (Channels, Events, SysV)
-│   ├── mm/           # VMO/VMAR 内存管理, OOM, Page Cache
+│   ├── mm/           # 内存管理, Native VMO/VMAR, OOM, Page Cache
 │   ├── net/          # Socket 层与异步网络进度驱动
 │   └── proc/         # 任务调度与状态机
+├── kernel/platform/  # 板级内存、设备、IRQ、timer 与 SMP 启动
 ├── docs/             # 设计方案与技术专题说明文档
 
 └── Makefile          # 高度定制化跨平台构建脚本
@@ -141,5 +146,5 @@ make CCACHE= ...
 * 本项目主体代码使用 **Apache 2.0** 协议开源，详见 **[LICENSE](LICENSE)**。
 * 第三方组件的集中许可证声明见 **[docs/THIRD_PARTY_NOTICES.md](docs/THIRD_PARTY_NOTICES.md)**。
 * 项目集成、参考和借鉴的第三方项目与公开标准，以及对应的致谢，请参阅 **[docs/ACKNOWLEDGMENTS.md](docs/ACKNOWLEDGMENTS.md)**。
-* 镜像文件（`disk.img`、`extra.img` 等）均为由本仓库源码与 submodule 源码**构建出的构建产物**，不作为独立的二进制包分发；GPL/LGPL 组件的源码以 submodule 形式随仓库提供。
+* 镜像文件（`disk.img`、`extra.img` 等）是构建产物；其实际分发义务取决于镜像内组件、链接方式和精确版本。部分第三方源码是普通 tracked tree，部分是 submodule，不能用单一模式概括；发布前须按 [第三方声明](docs/THIRD_PARTY_NOTICES.md) 逐项核验。
 * 感谢系统软件的交流机会与测试环境。

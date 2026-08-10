@@ -1,6 +1,6 @@
 # A20OS Native ABI：IPC 与事件子系统设计
 
-> 本文档定义 Native ABI 的进程间通信机制，包括 Channel（消息通道）和 Event Queue（事件队列）的设计、数据结构、协议和实现架构。
+> 本文档定义 Native ABI 的进程间通信机制，包括 Channel（消息通道）和 Event Queue（事件队列）的设计、数据结构、协议和实现架构，已按 `e33c3219` 的 `kernel/ipc/a20_channel.c`、`a20_event.c` 与 Native syscall wrapper 核对。
 
 ---
 
@@ -9,7 +9,7 @@
 Native ABI 提供两个互补的 IPC 原语：
 
 - **Channel**：同步/异步消息传递，支持 handle 传递。用于 RPC、请求-响应、数据流。
-- **Event Queue**：统一事件等待机制。替代 epoll/signalfd/timerfd 的组合。用于 I/O 多路复用、定时器等待、进程退出通知。
+- **Event Queue**：目标是成为统一事件等待机制并替代 epoll/signalfd/timerfd 的组合。当前已接入 channel、timer、task 退出和用户态驱动 IRQ；file/socket/pipe readiness 与 signal 事件生产者尚未接入，因此现在不能称为 epoll/signalfd 的完整替代。
 
 两者都基于 handle：创建后返回 handle，操作通过 handle 进行，权限通过 rights 控制。
 
@@ -70,7 +70,8 @@ typedef struct a20_channel_ep {
 Channel 可以选择性地声明类型签名，内核在 send/recv 时强制执行类型约束。
 
 ```c
-// 通道类型签名typedef struct a20_channel_type {
+// 通道类型签名
+typedef struct a20_channel_type {
     uint32_t version;            // 结构体版本
     uint32_t send_handle_types;  // bitmask: 可发送的 handle 类型
     uint32_t recv_handle_types;  // bitmask: 可接收的 handle 类型
@@ -128,7 +129,7 @@ int64_t channel_create(a20_channel_create_args_t *args);
 1. 分配两个 `a20_channel_ep_t`，互相指向对方（peer）
 2. 如果 `type != NULL`，将类型签名分别复制到两个 endpoint 的内嵌存储（避免共享生命周期问题）
 3. 在调用者的 handle table 中分配两个 handle
-4. 每个 handle 获得 READ | WRITE | DUP | TRANSFER 权限
+4. 每个 handle 获得 READ | WRITE | STAT | DUP | TRANSFER 权限
 5. 返回两个 endpoint handle
 
 **向后兼容**：`type == NULL` 时行为与无类型约束的 channel 完全一致。
@@ -144,9 +145,19 @@ int64_t channel_send(a20_msg_send_args_t *args);
 **两阶段锁分离设计**：发送方和接收方的 handle table 不同时加锁。
 
 ```text
-阶段 1：预验证（锁发送方 HT）1.1 lookup channel handle → 验证 WRITE 权限1.2 对每个要传递的 handle：lookup → 验证 TRANSFER 权限1.3 对每个 handle：refcount_inc（原子操作）1.4 构造 a20_ch_message（拷贝数据，记录 handle 对象信息）1.5 解锁发送方 HT
+阶段 1：预验证（锁发送方 HT）
+1.1 lookup channel handle → 验证 WRITE 权限
+1.2 对每个要传递的 handle：lookup → 验证 TRANSFER 权限
+1.3 对每个 handle：refcount_inc（原子操作）
+1.4 构造 a20_ch_message（拷贝数据，记录 handle 对象信息）
+1.5 解锁发送方 HT
 
-阶段 2：投递（锁接收方 peer endpoint）2.1 spin_lock(&peer->lock)2.2 检查 peer_closed、队列满等条件2.3 将消息追加到 peer->msg_queue2.4 wake_one(&peer->waiters)（唤醒等待的接收线程）2.5 解锁 peer
+阶段 2：投递（锁接收方 peer endpoint）
+2.1 spin_lock(&peer->lock)
+2.2 检查 peer_closed、队列满等条件
+2.3 将消息追加到 peer->msg_queue
+2.4 wake_one(&peer->waiters)（唤醒等待的接收线程）
+2.5 解锁 peer
 ```
 
 **错误处理**：
@@ -176,7 +187,7 @@ int64_t channel_recv(a20_msg_recv_args_t *args);
 
 ### 2.6 Partial Delivery 状态机
 
-如果接收方的 handle table 满了，消息中的 handle 只能部分投递。这触发 partial delivery：
+接收方 handle table 空间不足时，当前实现禁止部分投递：
 
 ```text
 正常：recv 开始 → 预留全部 handle 槽位 → 出队 → commit（消息完成）
@@ -216,11 +227,22 @@ $$\rho_{recv} = \rho_{send} \cap \rho_{transfer}$$
 
 ### 3.1 模型
 
-Event Queue 是 Native ABI 的统一等待机制。所有可观察对象的事件都通过 event queue 汇聚。
+Event Queue 是 Native ABI 的统一等待机制目标。当前只有已接入生产者的事件会汇聚到队列；“所有可观察对象”是目标状态，不是现状。
 
 ```text
-┌──────────────────────────────────────────────────┐│                 Event Queue                       ││                                                   ││  watch list:                                      ││    [file_h, READABLE | WRITABLE]                  ││    [timer_h, EXPIRED]                             ││    [task_h, EXITED]                               ││    [channel_h, MESSAGE_READY]                     ││                                                   ││  pending ring:                                    ││    [event(file, READABLE), event(timer, EXPIRED)] ││                                                   ││  waiters: [thread_1 (blocked in event_wait)]      │└──────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────┐
+│ Event Queue                                  │
+│ watch list:                                  │
+│   [timer_h, EXPIRED]                         │
+│   [task_h, EXITED]                           │
+│   [channel_h, MESSAGE_READY | PEER_CLOSED]   │
+│   [device_irq, SIGNALED]                     │
+│ pending ring: [events from connected sources]│
+│ waiters: [thread blocked in event_wait]      │
+└──────────────────────────────────────────────┘
 ```
+
+file/socket/pipe readiness 与 signal delivery 尚不在当前生产者集合中。
 
 ### 3.2 数据结构
 
@@ -272,8 +294,9 @@ typedef struct a20_eventq {
 | 7 | `A20_EVENT_EXITED` | task/thread | 任务退出 | task 已接入 |
 | 8 | `A20_EVENT_MESSAGE_READY` | channel | 有消息可接收 | 已接入 |
 | 9 | `A20_EVENT_PEER_CLOSED` | channel | 对端关闭 | 已接入 |
+| 10 | `A20_EVENT_SIGNALED` | device | 用户态驱动 IRQ 已屏蔽并待确认 | 已接入 |
 
-事件掩码使用 `A20_EVENT_MASK(index) = 1ull << index`。当前可实际观测的是 channel、timer 与 task 退出；file/socket/pipe 和文件系统路径事件仍是后续接入项。
+事件掩码使用 `A20_EVENT_MASK(index) = 1ull << index`。当前可实际观测的是 channel、timer、task 退出与用户态驱动 IRQ；file/socket/pipe readiness、signal delivery 和文件系统路径事件仍是后续接入项。
 
 ### 3.4 操作
 
@@ -348,14 +371,9 @@ $$e_1 \text{ produced before } e_2 \implies e_1 \text{ dequeued before } e_2$$
 
 跨对象的顺序不保证。
 
-### 3.7 事件不丢失保证
+### 3.7 Ring 满时的行为
 
-如果 ring buffer 满了，新事件的处理策略：
-
-1. **唤醒策略（推荐）**：立即唤醒消费者线程。如果消费者来不及处理，事件在对象内部排队（不是在 eventq 中）。下次 event_wait 时重新检查对象状态。
-2. **丢弃策略（不推荐）**：丢弃新事件。仅用于 debug 场景。
-
-推荐唤醒策略：不丢失事件，但可能增加延迟。
+当前 `a20_event_notify()` 在 ring 满时保留已排队的旧事件、丢弃本次新事件，并仍唤醒一个 waiter。EventQ 不会自动重新查询 target 的电平状态，因此不能宣称一般的“事件不丢失”保证；需要电平语义的调用方必须依赖对象自身状态或后续通知。
 
 ---
 
@@ -415,13 +433,13 @@ void a20_eventq_on_object_destroy(void *object, uint16_t object_type) {
 
 ## 5. 与 POSIX 的对比
 
-| POSIX 机制 | Native ABI 替代 | 优势 |
-|-----------|----------------|------|
-| `pipe()` | `channel_create()` | channel 支持 handle 传递，pipe 不支持 |
-| `SCM_RIGHTS` (sendmsg) | `channel_send(handles)` | 显式权限降级，不需要辅助数据 |
-| `epoll_create/ctl/wait` | `event_queue_create/watch/wait` | 统一 handle 等待，不限于 fd |
-| `signalfd` | `event_watch(task, EXITED)` | 信号模型被事件模型替代 |
-| `timerfd` | `event_watch(timer, EXPIRED)` | timer 是 handle，直接可 watch |
-| `eventfd` | 不需要 | channel 可以发送零字节消息作为信号 |
+| POSIX 机制 | Native ABI 对应设计 | 当前状态与边界 |
+|-----------|-------------------|----------------|
+| `pipe()` | `channel_create()` | channel 已支持消息与 handle 传递，但不是 POSIX 字节流的无差别替代 |
+| `SCM_RIGHTS` (sendmsg) | `channel_send(handles)` | 已实现显式权限降级，不需要辅助数据 |
+| `epoll_create/ctl/wait` | `event_queue_create/watch/wait` | 替代目标；file/socket/pipe readiness 生产者未接入，当前不能承担通用 fd 多路复用 |
+| `signalfd` | EventQ signal event | 替代目标；当前没有 signal 生产者，`task EXITED` 只表示任务生命周期事件，不等同 signalfd |
+| `timerfd` | `event_watch(timer, EXPIRED)` | timer handle 与到期事件已接入 |
+| `eventfd` | channel 信号消息 | channel 可发送零字节消息，但语义不等同 Linux eventfd 计数器 |
 | SysV msgget/msgsnd/msgrcv | channel | 无全局 key，权限通过 handle 控制 |
 | POSIX mq_open/mq_send/mq_recv | channel | 无需文件系统路径，handle 即标识 |

@@ -1,6 +1,6 @@
 # A20OS Native ABI：错误码与返回约定
 
-> 本文档定义 A20OS Native ABI 的错误码、返回值约定和错误处理策略。
+> 本文档定义 A20OS Native ABI 的错误码、返回值约定和错误处理策略，已按 `e33c3219` 的 `errno.h`、handle-table quota 与活跃 mlibc 映射核对。
 
 ---
 
@@ -68,7 +68,7 @@ Native ABI 的错误码不要求等于 Linux errno。兼容层可以在 libc 或
 | 错误码 | 触发场景 |
 |--------|---------|
 | `A20_ERR_BAD_HANDLE` | handle 编号超出范围、已关闭、或 entry 为空 |
-| `A20_ERR_NO_SPACE` | handle table 达到上限（65536） |
+| `A20_ERR_NO_SPACE` | handle table 达到当前 task 配额（默认 4096，可配置但绝对容量上限为 65536），或接收消息时无法一次预留全部 handle |
 
 ### 3.3 参数类
 
@@ -85,7 +85,7 @@ Native ABI 的错误码不要求等于 Linux errno。兼容层可以在 libc 或
 | `A20_ERR_NO_MEMORY` | 内核内存分配失败 |
 | `A20_ERR_NO_ENTRY` | 文件/目录不存在 |
 | `A20_ERR_EXISTS` | 创建文件但已存在 |
-| `A20_ERR_BUSY` | channel 满、锁竞争等 |
+| `A20_ERR_BUSY` | 对象处于显式 busy 状态；channel 满在阻塞模式等待、在 nonblock 模式返回 `WOULD_BLOCK`，普通锁竞争不会直接暴露为该错误 |
 
 ### 3.5 I/O 类
 
@@ -110,9 +110,9 @@ Native ABI 的错误码不要求等于 Linux errno。兼容层可以在 libc 或
 
 ### 4.1 原子性保证
 
-如果 syscall 返回错误，内核状态必须等同于该 syscall 从未发生。这是 native ABI 的基本不变式。
+对声明为原子的管理操作，返回错误后应保持可重试且不留下半安装对象；这是一项目标契约，不能泛化到所有 I/O syscall。
 
-例外：`A20_ERR_INTERRUPTED` 和 `A20_ERR_TIMED_OUT` 可能表示操作部分完成。此时应通过 `out_count` 等输出字段判断实际完成的操作量。
+I/O、批量操作以及 `A20_ERR_INTERRUPTED`/`A20_ERR_TIMED_OUT` 可能部分完成，应通过 `out_count` 等输出字段判断；各 syscall 的具体提交点以对应子系统文档和实现为准。
 
 ### 4.2 与 POSIX errno 的映射
 

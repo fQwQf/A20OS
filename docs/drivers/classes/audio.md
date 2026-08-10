@@ -9,7 +9,7 @@ A20OS 音频栈把设备发现、通用用户接口和具体硬件协议分开�
 - `kernel/drivers/core/driver_class.c`：audio class 编号与发布。
 - `kernel/fs/devfs/devfs.c`：`/dev/audioN` 的 read/write、ioctl 和 close 转发。
 - `kernel/drvmod/examples/hda.c (hda.a20drv)`：PCI Intel HDA controller、输出 stream、PCM DMA 与 codec 拓扑（`hda_codec.c` 已并入该模块）。
-- `kernel/drivers/audio/virtio_snd.c`：VirtIO 1.2 sound control/event/TX/RX queue 与 PCM playback。
+- `kernel/drivers/audio/virtio_snd.c`：VirtIO 1.2 sound 共享实现；generic 由 `kernel/drvmod/examples/virtio_snd.c` 包装为 `virtio-snd.a20drv`，embedded 静态链接。
 - `kernel/drvmod/examples/pc_spkr.c (pc-spkr.a20drv)`：只支持 tone 的 x86 PC Speaker。
 - `user/cmds/core/audioplay.c`：WAV、raw PCM 和测试 tone 客户端。
 - `user/wayland/player.c`：FFmpeg 解码、48 kHz 重采样和异步 PCM 输出。
@@ -73,7 +73,11 @@ RISC-V64 的 HDA 运行依赖 `kernel/arch/riscv64/platform/pci_host.c` 提供 E
 ## 验证
 
 ```bash
-make smoke-hdamake smoke-audio-userspacemake PYTHON='conda run -n a20os python' smoke-virtio-soundmake run-gui-riscv64 GUI_MEDIA=/path/to/video.mp4make run-gui-riscv64 QEMU_GUI_AUDIO_DEVICE=virtio
+make smoke-hda
+make smoke-audio-userspace
+make PYTHON='conda run -n a20os python' smoke-virtio-sound
+make run-gui-riscv64 GUI_MEDIA=/path/to/video.mp4
+make run-gui-riscv64 QEMU_GUI_AUDIO_DEVICE=virtio
 ```
 
 `smoke-hda` 验证 codec topology、driver binding 和 BDL DMA。`smoke-audio-userspace` 播放五秒 tone，通过 QEMU WAV backend 检查 HDA 的帧数、非静音、采样连续性，并要求一次 stream start、零 underrun。`smoke-virtio-sound` 在同样的用户态负载下只挂载 `virtio-sound-pci`，验证协议发现、control/TX queue、DRAIN/RELEASE 和 WAV 输出。
