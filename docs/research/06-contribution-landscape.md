@@ -1,6 +1,8 @@
 # A20OS Native ABI：贡献定位与设计空间分析
 
 > 本文档系统化地分析 A20OS Native ABI 在操作系统接口设计研究中的贡献定位。内容包括：设计空间的维度映射、与现有工作的精确对比、新贡献的明确声称、对声称的威胁分析，以及面向 OSDI/SOSP 审稿人的定位声明。
+>
+> **范围说明：** 本文是研究定位与论证快照，不是经过同行评审的新颖性结论。形式化核心仍是 53 个 syscall，`e33c3219` 的 Native 分发表为 126 个入口；实现覆盖、纸笔证明和机器验证必须分别陈述。当前运行状态以 `docs/native-abi/08-runtime-status.md` 和源码为准。
 
 ---
 
@@ -11,26 +13,59 @@
 操作系统用户态接口的设计可分解为以下正交维度：
 
 ```
-维度 1：资源标识模型├── 异构标识符（POSIX: fd/pid/tid/sid/shmid/timerid/...）├── 统一文件抽象（Plan 9: 一切皆文件）├── 统一 handle 抽象（Zircon/A20: handle + rights）└── 纯能力引用（seL4: CNode capability 引用）
+维度 1：资源标识模型
+├── 异构标识符（POSIX: fd/pid/tid/sid/shmid/timerid/...）
+├── 统一文件抽象（Plan 9: 一切皆文件）
+├── 统一 handle 抽象（Zircon/A20: handle + rights）
+└── 纯能力引用（seL4: CNode capability 引用）
 
-维度 2：权限模型├── 无权限（DOS, 早期 Unix）├── 粗粒度 ACL（POSIX: uid/gid/mode bits）├── 细粒度 RBAC（SELinux, AppArmor）├── 对象能力（seL4, EROS, A20: capability rights）└── 硬件能力（CHERI: capability hardware tags）
+维度 2：权限模型
+├── 无权限（DOS, 早期 Unix）
+├── 粗粒度 ACL（POSIX: uid/gid/mode bits）
+├── 细粒度 RBAC（SELinux, AppArmor）
+├── 对象能力（seL4, EROS, A20: capability rights）
+└── 硬件能力（CHERI: capability hardware tags）
 
-维度 3：进程创建├── fork（Unix: 地址空间复制 + COW）├── fork + exec（Unix 组合）├── posix_spawn（受限参数化 fork+exec）├── 分解式创建（seL4: 5+ 步骤, Zircon: create+start）└── 显式 spawn（A20: 单步 + handle 注入）
+维度 3：进程创建
+├── fork（Unix: 地址空间复制 + COW）
+├── fork + exec（Unix 组合）
+├── posix_spawn（受限参数化 fork+exec）
+├── 分解式创建（seL4: 5+ 步骤, Zircon: create+start）
+└── 显式 spawn（A20: 单步 + handle 注入）
 
-维度 4：事件/等待模型├── select/poll（O(n) 扫描，fd only）├── epoll/kqueue（O(ready)，fd + 部分扩展）├── io_uring（环形缓冲，任意操作）├── 统一 port wait（Zircon: zx_port_wait）└── 统一 event queue（A20: event_wait on any handle）
+维度 4：事件/等待模型
+├── select/poll（O(n) 扫描，fd only）
+├── epoll/kqueue（O(ready)，fd + 部分扩展）
+├── io_uring（环形缓冲，任意操作）
+├── 统一 port wait（Zircon: zx_port_wait）
+└── 统一 event queue（A20: event_wait on any handle）
 
-维度 5：ABI 演进├── 事实固定（Linux: syscall 不可变，新 syscall 编号）├── vDSO 版本化（Zircon: vdso 版本协商）├── 结构体版本化（A20: {size, version} + 追加规则）└── 协议版本化（9P: version handshake）
+维度 5：ABI 演进
+├── 事实固定（Linux: syscall 不可变，新 syscall 编号）
+├── vDSO 版本化（Zircon: vdso 版本协商）
+├── 结构体版本化（A20: {size, version} + 追加规则）
+└── 协议版本化（9P: version handshake）
 
-维度 6：POSIX 兼容策略├── 原生 POSIX（Linux, FreeBSD）├── POSIX 子集兼容（Redox, Fuchsia: libfdio）├── POSIX 兼容层（A20: liba20posix 用户态 shim）├── 不兼容（seL4, NOVA）└── 绕过（Exokernel, Unikernel）
+维度 6：POSIX 兼容策略
+├── 原生 POSIX（Linux, FreeBSD）
+├── POSIX 子集兼容（Redox, Fuchsia: libfdio）
+├── POSIX 兼容层（A20: liba20posix 用户态 shim）
+├── 不兼容（seL4, NOVA）
+└── 绕过（Exokernel, Unikernel）
 ```
 
 ### 1.2 A20OS 在设计空间中的位置
 
 ```
               资源标识    权限模型      进程创建      事件模型     ABI演进     POSIX兼容
-POSIX         异构        粗粒度ACL     fork          select/poll  事实固定     原生Plan 9        文件抽象    粗粒度ACL     fork+rfork    无(select)   协议版本化   不兼容seL4          纯能力      对象能力      分解式(5+步)  无(轮询)     无           不兼容Zircon        handle      对象能力      两步(create+  port_wait   vDSO版本化   兼容层(libfdio)
-                                       start)
-Redox         文件抽象    粗粒度+部分   fork(exec)    epoll-like   无           子集兼容Capsicum      fd          fd能力        fork+exec     epoll        无           扩展POSIXio_uring      fd          无            fork+exec     io_uring     无           原生
+ POSIX         异构        粗粒度ACL     fork          select/poll  事实固定     原生
+ Plan 9        文件抽象    粗粒度ACL     fork+rfork    无(select)   协议版本化   不兼容
+ seL4          纯能力      对象能力      分解式(5+步)  无(轮询)     无           不兼容
+ Zircon        handle      对象能力      两步(create+  port_wait   vDSO版本化   兼容层(libfdio)
+                                        start)
+ Redox         文件抽象    粗粒度+部分   fork(exec)    epoll-like   无           子集兼容
+ Capsicum      fd          fd能力        fork+exec     epoll        无           扩展POSIX
+ io_uring      fd          无            fork+exec     io_uring     无           原生
 
 A20OS Native  handle      对象能力      spawn(单步)   event_queue  结构体版本化  兼容层(shim)
               ↓           ↓             ↓             ↓            ↓            ↓
@@ -52,7 +87,7 @@ A20OS Native  handle      对象能力      spawn(单步)   event_queue  结构�
 - OAuth 2.0 的 token 过期是用户态协议，内核不参与执行
 - S3K (KTH 2024) 将"时间"引入 RTOS 的分区保护，但没有形式化能力过期语义
 - Zylos/Capability Leasing (2026) 提出能力租约概念，但无内核级形式化证明
-- **A20OS 是首个在内核层面形式化时态能力并证明安全性保持的系统**
+- **据当前调研，这是候选差异点；“首个”结论尚需系统文献复核**
 
 **安全性论证**：
 - 定理 3.1（时态单调递减）：$\rho_{eff}$ 随时间单调不增，严格包含原定理 3.2
@@ -61,13 +96,13 @@ A20OS Native  handle      对象能力      spawn(单步)   event_queue  结构�
 
 ### 贡献 C2'：混合信任能力边界（Mixed-Trust Capability Boundary）
 
-**声称**：A20OS 首次形式化了"当系统同时包含能力感知（Native ABI）和能力无感知（Linux ABI）子系统时，能力安全性质是否仍然成立"——答案是肯定的，且边界可精确刻画。
+**声称**：A20OS 形式化讨论“系统同时包含能力感知（Native ABI）和能力无感知（Linux ABI）子系统时，能力安全性质是否仍然成立”，并在排除 `sys_a20_bridge` 显式跨 ABI channel bridge 的前提下刻画边界。
 
 **新颖性论证**：
 - seL4、Zircon、Capsicum、CHERI 的形式化都假设**整个系统在同一套能力纪律下运行**
-- 没有任何现有工作形式化了"混合信任"场景下的能力边界
+- 当前调研覆盖的工作中尚未发现相同的"混合信任"能力边界模型，仍需扩大文献复核
 - A20OS 的双 ABI 设计天然提供了一个"能力感知 vs 能力无感知"的实验环境
-- **这是唯一形式化了混合信任能力边界的系统**
+- **据当前调研，这是候选贡献而非已确认的唯一性结论**
 
 **安全性论证**：
 - 定理 1.1（直接不可观测性）：Linux ABI 进程无法直接观察 Native ABI handle
@@ -82,8 +117,8 @@ A20OS Native  handle      对象能力      spawn(单步)   event_queue  结构�
 **新颖性论证**：
 - Zircon channel 是无类型字节流，类型检查在用户态 FIDL 解码器完成
 - seL4 endpoint 无类型约束
-- Session types (Wadler/Honda) 是语言层面的理论，从未在内核 IPC 中实现
-- **A20OS 是唯一在内核层实现 session-type 式类型约束的系统**
+- Session types (Wadler/Honda) 是语言层面的理论；当前调研未发现同样的内核 IPC 实现
+- **据当前调研，这是候选差异点，唯一性尚需系统文献复核**
 
 **安全性论证**：
 - 定理 2.1：所有通过类型化通道的消息都满足类型约束（归纳证明）
@@ -108,7 +143,7 @@ A20OS Native  handle      对象能力      spawn(单步)   event_queue  结构�
 **新颖性论证**：
 - seL4 的 trace 归纳证明了单操作安全性，但没有对操作序列的模式做分类
 - Zircon 无委托模式分析
-- **A20OS 首次对内核能力委托模式做分类和组合安全证明**
+- **据当前调研尚未发现相同分类，但优先性仍需系统文献复核**
 
 **安全性论证**：
 - 引理 4.1-4.5：每种模式保持 $\mathcal{I}$
@@ -126,23 +161,23 @@ Zircon 是 A20OS 最直接的前驱工作。两者的核心模型高度相似（
 
 | 属性 | Zircon | A20OS | 差异的意义 |
 |------|--------|-------|-----------|
-| 总 syscall 数 | ~150 | 53（形式化核心）/ 93（当前实现） | 核心模型保持可管理，实现按工程需求扩展 |
-| 对象类型 | ~25 | 13 | A20OS 合并了可合并的类型 |
+| 总 syscall 数 | ~150 | 53（形式化核心）/ 126（当前实现） | 核心模型保持可管理，实现按工程需求扩展 |
+| 对象类型 | ~25 | 13（形式模型）/ 14（当前实现） | A20OS 模型合并类型，工程实现已扩展 |
 | Rights 位数 | ~30 | 14 | A20OS 使用更少的通用权限 |
 | 进程创建 | create + start (两步) | spawn (单步) | A20OS 简化常见路径 |
 | 事件模型 | zx_port_wait | event_queue + event_wait | 语义等价 |
-| Channel | zx_channel_write/read | msg_send/recv | 语义等价 |
-| **通道类型** | **无** | **a20_channel_type_t（内核强制）** | **A20OS 首创内核层类型约束** |
-| **时态能力** | **无** | **expiry_tick + remaining_ops** | **A20OS 首创内核级过期** |
+| Channel | zx_channel_write/read，默认消费 transferred handles | msg_send/recv，发送方保留 handles | 都是消息 channel，但 handle ownership 语义有意不同 |
+| **通道类型** | **无** | **a20_channel_type_t（内核强制）** | **据当前调研的候选差异，待系统复核** |
+| **时态能力** | **无** | **expiry_tick + remaining_ops** | **据当前调研的候选差异，待系统复核** |
 | ABI 版本管理 | vDSO | 结构体版本化 | A20OS 不需运行时支持 |
 | POSIX 兼容 | libfdio (用户态) | liba20posix (用户态) + Linux ABI (内核) | A20OS 有内核级双 ABI |
 | **双 ABI 隔离** | **无** | **信息流能力边界定理（9.5）** | **A20OS 有形式化证明** |
-| **委托模式分析** | **无** | **5 种模式 + 组合安全证明** | **A20OS 首创模式分类法** |
-| 形式化证明 | 无 | 48 个纸笔定理/引理 (SOS) | A20OS 提供了形式化，但尚未机器检验 |
+| **委托模式分析** | **无** | **5 种模式 + 组合安全论证** | **据当前调研的候选差异，待系统复核** |
+| 形式化证明 | 无 | 纸笔定理/引理目录 (SOS) | 表项含重述且尚未机器检验，不报独立定理总数 |
 | 代码复杂度 | ~200K LOC | 目标 < 5K LOC | A20OS 面向教学 |
 | 生产使用 | Google 产品 | 教学内核 | 不同的验证标准 |
 
-**核心差异总结**：A20OS 不再是"简化的 Zircon"。它在四个维度上做出了原创贡献：
+**核心差异总结**：作为本次研究定位快照，A20OS 在四个维度上提出候选贡献；新颖性均尚需系统文献复核：
 1. 类型化通道（内核层 session type，Zircon 无）
 2. 时态能力（内核级过期 + 形式化保证，Zircon 无）
 3. 混合信任能力边界（信息流 + 能力理论，Zircon 无）
@@ -202,7 +237,7 @@ jsix 证明了 handle-based ABI 在教学内核中的可行性。A20OS 在此基
 **问题描述**：现有的 capability-based 系统（seL4, Zircon）要么过于复杂无法在教学内核中实现，要么缺乏形式化安全保证。教学/测试内核需要一个**简单到可实现、但安全到可证明**的 capability 模型。
 
 **A20OS 的回答**：
-- 14 种类型、14 种权限、53 个形式化核心 syscall——保持可证明的核心边界；当前工程实现为 126 个入口
+- 13 种形式模型对象、14 种权限、53 个目标核心 syscall；当前 trace 分类明确覆盖 43 个，工程实现则为 14 种对象、126 个入口
 - SOS 操作语义 + 不变式证明——可以在论文中完整呈现
 - 不追求 seL4 级别的机器检验证明——但在逻辑上等价于更简单的不变式证明
 
@@ -273,13 +308,13 @@ jsix 证明了 handle-based ABI 在教学内核中的可行性。A20OS 在此基
 
 ### 6.1 一句话定位
 
-> A20OS Native ABI 提出了四个原创贡献：内核级时态能力演算、混合信任能力边界形式化、类型化通道协议和委托模式组合安全；在教学内核中实现了可运行的 93-syscall capability ABI，并以 48 个纸笔定理/引理覆盖其中 53 个形式化核心 syscall。实现覆盖、纸笔证明与机器验证必须分别声明。
+> A20OS Native ABI 提出四项待系统文献复核的研究贡献候选：内核级时态能力演算、带 `sys_a20_bridge` 排除条件的混合信任边界、类型化通道协议和委托模式组合安全；教学内核实现有 126 个 Native 入口，而当前 trace 分类只明确覆盖 53 核心模型中的 43 个。实现、纸笔论证与机器验证必须分别声明。
 
 ### 6.2 面向审稿人的核心论述
 
 **问题**：内核能力系统存在三个未解决的形式化缺口：(1) 能力没有时间受限委托；(2) 混合能力信任下安全性质是否成立未被分析；(3) IPC 通道的类型约束和委托模式的组合安全性缺少形式化。
 
-**Gap**：现有工作存在两极化——seL4 安全但不可实现，Zircon 功能完整但无形式化证明。所有现有能力系统形式化都假设系统整体在同一套能力纪律下运行。内核 IPC 没有类型约束。
+**Gap**：当前调研显示 seL4 强调机器验证、Zircon 强调完整系统功能；已查能力形式化通常假设相应能力纪律，已查内核 IPC 也未见与本文相同的类型约束。上述范围不是穷尽性文献综述，尚需系统复核。
 
 **Insight**：
 1. 时态能力可在内核层面实现且安全性质可证明（C1'）
@@ -293,7 +328,7 @@ jsix 证明了 handle-based ABI 在教学内核中的可行性。A20OS 在此基
 3. 在 send/recv 路径中增加类型 bitmask 检查（09 §2.3）
 4. 提出 5 种委托模式并证明组合安全性（09 §4.4）
 
-**结果**：当前实现为 126 个 syscall、14 种对象类型的 Native ABI，配合独立的 Linux ABI；48 个纸笔定理/引理覆盖 53 个形式化核心 syscall。typed channel、时态控制入口/sweeper、阻塞 IPC、无部分投递与对象级联释放已接入并有 smoke 覆盖，新增工程 syscall 的形式化覆盖仍待补齐。
+**结果**：`e33c3219` 实现为 126 个 syscall、14 种对象类型的 Native ABI，配合 Linux ABI；纸笔模型以 53 个核心 syscall 为目标，但 trace 分类只明确覆盖 43 个。typed channel、时态控制/sweeper、阻塞 IPC、无部分投递与对象级联释放已有实现和 smoke，剩余核心操作及新增工程 syscall 的形式化覆盖待补。
 
 ### 6.3 论文可能的标题候选
 
@@ -356,7 +391,11 @@ jsix 证明了 handle-based ABI 在教学内核中的可行性。A20OS 在此基
 本文档（06-contribution-landscape.md）与 04、05 号文档构成完整的研究笔记体系：
 
 ```
-04-theory-deep-dive.md    （核心理论）├── SOS 操作语义├── 安全/活性/并发性证明├── 信息流能力边界（定理 9.5）└── 内存模型、信息流控制
+04-theory-deep-dive.md    （核心理论）
+├── SOS 操作语义
+├── 安全/活性/并发性证明
+├── 信息流能力边界（定理 9.5）
+└── 内存模型、信息流控制
            │
            ├── 贡献声称 ←── 06-contribution-landscape.md（本文档）
            │   ├── C1' 时态能力演算

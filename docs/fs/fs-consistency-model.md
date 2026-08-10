@@ -1,6 +1,6 @@
 # A20OS 文件系统一致性模型
 
-本文档记录 A20OS P1 中各后端的能力、一致性和 Linux ABI 行为矩阵。每条声明都基于 `kernel/fs/` 下的当前实现和 `kernel/fs/vfs.c` 中的 VFS wrapper。它是 Wave 1 实现以及后续测试门禁的设计契约。
+本文档记录 A20OS P1 中各后端的能力、一致性和 Linux ABI 行为矩阵。内容已按 `e33c3219` 的 `kernel/fs/` 与 VFS wrapper 做源码核对；“支持”表示当前代码路径存在，不等于每个后端、架构和崩溃场景都已有运行时测试。当前提交没有匹配的完整干净双架构平台复验。
 
 ## 1. 范围
 
@@ -28,10 +28,17 @@
 | 列 | 含义 |
 |--------|---------|
 | **Op** | VFS vnode 操作或高层 syscall 行为 |
-| **Support** | `Y` = 已实现并被测试覆盖，`N` = 返回明确 errno，`-` = 不适用 |
+| **Support** | 只描述当前代码路径，不编码测试结论；具体取值见下表 |
 | **Errno** | 不支持或错误路径返回的 errno（来自代码，不是意图） |
 | **Ordering / Atomicity** | 当前代码实际提供的保证 |
 | **Linux ABI gap** | 测试必须编码的 Linux 差异 |
+
+| Support 值 | 含义 |
+|---|---|
+| `Y` | 对应实现路径存在；不表示已在任一架构、后端组合或崩溃场景运行验证 |
+| `partial` | 只实现操作的子集，或实现带有说明栏列出的功能/持久化限制 |
+| `N` | 当前不支持；`Errno` 栏记录实际拒绝结果 |
+| `-` | 对该后端或对象不适用 |
 
 ## 3. 各后端矩阵
 
@@ -47,9 +54,9 @@ FAT32 从 virtio-blk block cache 挂载。superblock 由 `fat32_sb_t.lock` 保�
 | unlink | Y | — | `fat32_vn_unlink`（`fat32_vn.c`）。释放 cluster chain。目录返回 `-EISDIR`。 |
 | rmdir | Y | — | `fat32_vn_rmdir`（`fat32_vn.c`）。检查 `fat32_dir_is_empty`（统计 active entry > 2）。 |
 | rename | Y | — | `fat32_vn_rename`（`fat32_vn.c`）。创建新目录项并删除旧项；移动目录时改写其 `..` entry。支持 `RENAME_NOREPLACE`；替换目标。 |
-| link | N | `-ENOSYS` | `g_fat32_vnode_ops` 中没有 `.link` op。`vfs_link` 返回 `-ENOSYS`（`vfs.c:822`）。 |
-| symlink | N | `-ENOSYS` | 没有 `.symlink`/`.readlink` ops。`vfs_symlink` 返回 `-ENOSYS`（`vfs.c:861`）。 |
-| readlink | N | `-EINVAL` | symlink vnode 不可能存在；`vfs_readlinkat` 返回 `-EINVAL`（`vfs.c:771`）。 |
+| link | N | `-ENOSYS` | `g_fat32_vnode_ops` 中没有 `.link` op。`vfs_link` 返回 `-ENOSYS`（`kernel/fs/vfs.c`）。 |
+| symlink | N | `-ENOSYS` | 没有 `.symlink`/`.readlink` ops。`vfs_symlink` 返回 `-ENOSYS`（`kernel/fs/vfs.c`）。 |
+| readlink | N | `-EINVAL` | symlink vnode 不可能存在；`vfs_readlinkat` 返回 `-EINVAL`（`kernel/fs/vfs.c`）。 |
 | stat | Y | — | `fat32_stat`（`fat32_vn.c`）。`st_nlink` 硬编码为 1。`st_blocks` 按 512 向上取整。 |
 | truncate | Y | — | `fat32_vn_truncate`（`fat32_vn.c`）。size 0 会重新分配单个 cluster。 |
 | chmod | Y | — | `fat32_vn_chmod`（`fat32_vn.c`）。只存储在 RAM meta table 中。 |
@@ -57,13 +64,13 @@ FAT32 从 virtio-blk block cache 挂载。superblock 由 `fat32_sb_t.lock` 保�
 | read/write/lseek | Y | — | `g_fat32_fops`（`fat32_file.c`）。每次 open 有一个带 cluster cache 的 `fat32_fctx_t`。 |
 | readdir | Y | — | `fat32_freaddir`（`fat32_file.c`）。返回 `DT_DIR`/`DT_REG`；无 `DT_LNK`。 |
 | ioctl | N | `-ENOTTY` | `.ioctl` 为 `NULL`；`vfs_ioctl` 落到 `-ENOTTY`。 |
-| fsync | partial | — | `vfs_fsync` 同步 block cache（`vfs/file.c:232`），但 FAT32 没有显式 inode log。 |
-| xattr | N | `-EOPNOTSUPP` | 无后端 hook；`sys_xattr_*` 拒绝非 reg/dir/lnk，随后落到 RAM 表；该表只在已挂载 vnode 生命周期内存在。 |
+| fsync | partial | — | `vfs_fsync` 同步共享脏映射、vnode page cache 和 mount block cache（`kernel/fs/vfs/file.c`），但 FAT32 没有显式 inode log。 |
+| xattr | partial | — | 无 FAT32 后端 hook；reg/dir 的值由全局 `(mnt, ino)` RAM 表提供，unmount/reboot 后丢失。 |
 
 **FAT32 顺序保证**
 
 - 整个文件系统由 `sb->lock` 串行化（`fat32.c`）。
-- 目录项更新和 FAT 更新之间不是原子的；如果在释放 cluster 后、标记目录项删除前崩溃，可能泄漏 cluster。
+- 目录项更新和 FAT 更新之间不是原子的。unlink 先把目录项标记为删除，再立即释放 cluster chain，或在 vnode 仍被引用时把释放推迟到最后一个引用消失；如果在目录项删除后、chain 释放前崩溃，已不可达的 cluster 可能泄漏。
 - 文件大小只在 close 时写回目录项（`fat32_fclose`，`fat32_file.c`）。close 前断电会丢失 size。
 - block cache 是 write-back；`vfs_fsync` 和 unmount（`fat32_unmount`，`fat32.c`）会调用 `bcache_sync`。
 
@@ -71,13 +78,13 @@ FAT32 从 virtio-blk block cache 挂载。superblock 由 `fat32_sb_t.lock` 保�
 
 - 没有 hard link 或 symbolic link（rename 已实现）。
 - 文件 ownership/mode 是易失的（只存在 RAM）。
-- 没有 atime/mtime/ctime 持久化；timestamp 在 `vfs_vnode_stat` 中回退为当前时间（`vfs/stat_perm.c:188`）。
+- 没有 atime/mtime/ctime 持久化；没有对应 RAM time-meta 时，`vfs_vnode_stat` 回退为当前时间（`kernel/fs/vfs/stat_perm.c`）。
 - `st_nlink` 总是 1。
 - 没有 xattr 持久化。
 
 ### 3.2 ext4（`kernel/fs/diskfs/ext4.c`）
 
-ext4 从 block cache 挂载，并使用短生命周期 vnode 模型：每次 lookup 都创建新的 vnode，refcount 到零时释放（`ext4.c`）。inode cache hook 是 stub（`ext4.c`）。
+ext4 从 block cache 挂载，并使用强引用 vnode cache：同一 `(superblock, inode)` 在 cache 中只有一个 live vnode，cache 自身持有引用，lookup 命中时为调用者再取引用。unlink/rmdir/rename-remove 会先把 victim 移出 cache 并标记 unlinked，最后一个外部引用释放后才回收 inode 数据；cache prune 与 unmount 负责释放仍由 cache 独占的引用。
 
 | Op | Support | Errno | 说明 / 代码引用 |
 |----|---------|-------|------------------------|
@@ -86,7 +93,7 @@ ext4 从 block cache 挂载，并使用短生命周期 vnode 模型：每次 loo
 | mkdir | Y | — | `ext4_vn_mkdir`（`ext4_namei.c`）。为 `.`/`..` 分配一个 block。 |
 | unlink | Y | — | `ext4_vn_unlink`（`ext4_namei.c`）。目录以 `-EISDIR` 拒绝。 |
 | rmdir | Y | — | `ext4_vn_rmdir`（`ext4_namei.c`）。检查除 `.`/`..` 外为空。 |
-| rename | Y | — | `ext4_vn_rename`（`ext4_namei.c`）。替换现有目标，不支持 exchange。 |
+| rename | Y | — | `ext4_vn_rename`（`ext4_namei.c`）。支持普通替换、`RENAME_NOREPLACE` 与 `RENAME_EXCHANGE`。 |
 | link | Y | — | `ext4_vn_link`（`ext4_namei.c`）。递增 `i_links_count`；拒绝目录；失败时回滚。 |
 | symlink | Y | — | `ext4_vn_symlink`（`ext4_namei.c`）。只支持 fast symlink（target <= 60 bytes）。 |
 | readlink | Y | — | `ext4_readlink`（`ext4_namei.c`）。从 `i_block` 读取最多 60 字节。 |
@@ -97,14 +104,14 @@ ext4 从 block cache 挂载，并使用短生命周期 vnode 模型：每次 loo
 | read/write/lseek | Y | — | `g_ext4_fops`（`ext4_file.c`）。 |
 | readdir | Y | — | `ext4_freaddir`（`ext4_file.c`）。返回 `DT_DIR`/`DT_REG`/`DT_LNK`。 |
 | ioctl | N | `-ENOTTY` | `.ioctl` 为 `NULL`。 |
-| fsync | partial | — | 同步 block cache；未使用 journal，因此 metadata 和 data 没有顺序保证。 |
-| xattr | N | `-EOPNOTSUPP` | 无后端 hook。 |
+| fsync | partial | — | 同步 block cache；运行时 mutation 不写 JBD2 journal，因此 metadata 和 data 没有 ext4 ordered/journal 保证。 |
+| xattr | partial | — | 无 ext4 xattr 后端 hook；reg/dir/lnk 的值只进入全局 RAM 表。 |
 
 **ext4 顺序保证**
 
-- inode allocation、block allocation 和目录项写入在 `sb->alloc_lock` 下执行（`ext4.c`、`ext4.c`、`ext4.c`），但没有 journal 或 ordered writeback。
-- `ext4_vn_rename`（`ext4_namei.c`）会移除目标、加入新 entry，再移除旧 entry。崩溃后可能两个 entry 都存在，也可能都不存在。
-- `vfs_fsync` 会对 mount 的 block cache 调用 `bcache_sync`（`vfs/file.c:232`）。
+- inode/block allocation 由 `alloc_lock` 保护，namespace mutation 由 `metadata_lock` 串行；运行时没有 journal transaction 或 ordered writeback。
+- 普通 `ext4_vn_rename` 通过一组目录项更新完成，`RENAME_EXCHANGE` 交换两侧 inode；这些运行时更新不受 journal transaction 保护，断电原子性不等同 Linux ext4。
+- `vfs_fsync` 会先同步共享脏映射和 vnode page cache，再对 mount 的 block cache 调用 `bcache_sync`（`kernel/fs/vfs/file.c`）。
 
 **ext4 ABI 缺口**
 
@@ -155,18 +162,18 @@ ISO9660 是只读 CD-ROM 文件系统，从 block cache 挂载。在逻辑块 16
 
 | Op | Support | Errno | 说明 / 代码引用 |
 |----|---------|-------|------------------------|
-| lookup | Y | — | `isofs_lookup`（`isofs.c:196`）。名字转小写、去 `;1` 版本。 |
-| create/mkdir/unlink/rmdir/rename/link/symlink | N | `-EROFS` | 只读挂载；VFS 在 `vfs_vnode_permission` 对 `W_OK` 返回 `-EROFS`（`stat_perm.c:207`）。 |
-| stat | Y | — | `isofs_stat`（`isofs.c:222`）。`st_blksize=2048`。 |
-| statfs | Y | — | `isofs_statfs`（`isofs.c:232`）。`f_type=0x9660`。 |
-| read/lseek | Y | — | `g_isofs_fops`（`isofs.c:312`）。单 extent 读取。 |
-| readdir | Y | — | `isofs_freaddir`（`isofs.c:297`）。返回 `DT_DIR`/`DT_REG`。 |
+| lookup | Y | — | `isofs_lookup`。名字转小写、去 `;1` 版本。 |
+| create/mkdir/unlink/rmdir/rename/link/symlink | N | `-EROFS` | 只读挂载；VFS 在 `vfs_vnode_permission` 对 `W_OK` 返回 `-EROFS`。 |
+| stat | Y | — | `isofs_stat`。`st_blksize=2048`。 |
+| statfs | Y | — | `isofs_statfs`。`f_type=0x9660`。 |
+| read/lseek | Y | — | `g_isofs_fops`。只读取 walker 最终选中的单个 extent，不聚合 multi-extent 记录。 |
+| readdir | Y | — | `isofs_freaddir`。返回 `DT_DIR`/`DT_REG`；multi-extent 名字只由最终未置 continuation flag 的记录暴露。 |
 | ioctl | N | `-ENOTTY` | 无 `.ioctl` op。 |
 
 **ISO9660 顺序保证**
 
 - 目录记录可跨块边界（`isofs_read_dirent` 处理跨块组装）。
-- multi-extent（`0x80`）延续记录被跳过；超过首 extent 的读取会返回垃圾数据（与 Uinxed 相同限制）。
+- multi-extent walker 跳过所有设置 `0x80` continuation flag 的记录，并把最后一个未设置该 flag 的记录当作普通文件条目。因此当前实际暴露的是最终 extent，而不是首 extent；前面的 extent 不可见，也没有聚合读取，不能描述为“读首 extent 后返回垃圾”。
 - 名字总是转成小写（ISO 原为大写 8.3 风格）；`;1` 版本号被剥离。
 
 **ISO9660 ABI 缺口**
@@ -201,7 +208,7 @@ ramfs 是 root filesystem，也是 `/dev/shm` 和显式 `tmpfs`/`ramfs` mount �
 
 **ramfs 顺序保证**
 
-- 所有 ramfs 操作都是内存内操作，并由大内核隐式单线程路径串行化（无 per-inode lock）。
+- namespace/inode metadata 由全局 `g_ramfs_meta_lock` 串行，regular-file 内容由每 inode 的 `data_lock` 保护；这不是“隐式单线程、无 per-inode lock”模型。
 - `ramfs_vnode_link` 正确递增 `nlink`（`ramfs.c`）。
 - `ramfs_vnode_unlink` 递减 `nlink`，并在 `nlink == 0 && ref_count <= 1` 时释放 inode（`ramfs.c`）。
 
@@ -211,119 +218,119 @@ ramfs 是 root filesystem，也是 `/dev/shm` 和显式 `tmpfs`/`ramfs` mount �
 - 总 inode 上限为 4096（`ramfs.c`）。
 - 没有持久化；xattr 也只是全局 RAM 状态。
 
-### 3.4 devfs（`kernel/fs/devfs/devfs.c`）
+### 3.6 devfs（`kernel/fs/devfs/devfs.c`）
 
-devfs 是合成设备树。`g_nodes` 是编译期静态节点（`devfs.c:71`），但 **class 设备（char/block/net/input/display/audio）由驱动核心动态发布**：`class_device_get_nth` 按序生成 `/dev/charN`、`diskN`、`audioN` 等（`devfs.c:656-668`，`dynamic` 节点）。
+devfs 是合成设备树。`g_nodes` 提供编译期静态节点；驱动核心虽注册 char/block/net/input/display/audio 六类 class 设备，但通用动态 devfs 节点只为 char/block/audio 生成 `/dev/charN`、`diskN`、`audioN`。input/display 继续通过静态 `/dev/event0` 与 `/dev/fb0` 聚合节点消费，net 没有通用动态 devfs 节点。
 
 | Op | Support | Errno | 说明 / 代码引用 |
 |----|---------|-------|------------------------|
-| lookup | Y | — | `devfs_lookup`（`devfs.c:511`）。支持 root、`misc/`、`pts/` 目录与动态 class 节点。 |
-| create | N | `-ENOSYS` | 无 `.create` op；带 `O_CREAT` 的 `vfs_open` 返回 `-ENOSYS`（`vfs.c:95`）。 |
-| mkdir | N | `-ENOTDIR` | 无 `.mkdir` op；`vfs_mkdir` 返回 `-ENOTDIR`（`vfs.c:223`）。 |
-| unlink | N | `-ENOTDIR` | 无 `.unlink` op；`vfs_unlink` 返回 `-ENOTDIR`（`vfs.c:277`）。 |
-| rmdir | N | `-ENOSYS` | 无 `.rmdir` op；`vfs_rmdir` 返回 `-ENOSYS`（`vfs.c:415`）。 |
+| lookup | Y | — | `devfs_lookup`。支持 root、`misc/`、`pts/` 目录与 char/block/audio 动态 class 节点。 |
+| create | N | `-ENOSYS` | 无 `.create` op；带 `O_CREAT` 的 `vfs_open` 返回 `-ENOSYS`。 |
+| mkdir | N | `-ENOTDIR` | 无 `.mkdir` op；`vfs_mkdir` 返回 `-ENOTDIR`。 |
+| unlink | N | `-ENOTDIR` | 无 `.unlink` op；`vfs_unlink` 返回 `-ENOTDIR`。 |
+| rmdir | N | `-ENOSYS` | 无 `.rmdir` op；`vfs_rmdir` 返回 `-ENOSYS`。 |
 | rename | N | `-ENOSYS` | 无 `.rename` op。 |
 | link | N | `-ENOSYS` | 无 `.link` op。 |
 | symlink | N | `-ENOSYS` | 无 `.symlink` op。 |
-| stat | Y | — | `devfs_stat`（`devfs.c:551`）。报告 `S_IFCHR`/`S_IFBLK`/`S_IFDIR`。 |
-| chmod/chown | N | `-EPERM` | 无 `.chmod`/`.chown` ops；`vfs_chmod_vnode` 返回 `-EPERM`（`vfs.c:586`）。 |
-| open | Y | — | `devfs_open_vnode`（`devfs.c:585`）。分发到 per-device `vfile_ops_t`。 |
-| read/write/ioctl | Y | — | per-kind `vfile_ops_t` 表（`devfs.c:492`）。 |
-| readdir | Y | — | `devfs_dir_readdir`（`devfs.c:176`）。 |
+| stat | Y | — | `devfs_stat`。报告 `S_IFCHR`/`S_IFBLK`/`S_IFDIR`。 |
+| chmod/chown | N | `-EPERM` | 无 `.chmod`/`.chown` ops；`vfs_chmod_vnode` 返回 `-EPERM`。 |
+| open | Y | — | `devfs_open_vnode`。分发到 per-device `vfile_ops_t`。 |
+| read/write/ioctl | Y | — | per-kind `vfile_ops_t` 表。 |
+| readdir | Y | — | `devfs_dir_readdir`。 |
 
 **devfs 顺序保证**
 
-- `vfs_init` 后 devfs node 是静态的；除 per-device 状态（TTY、loop、PTY）外没有并发可变状态。
+- 内建 `g_nodes` 是静态表；char/block/audio class device 会通过 `class_device_get_nth/get_by_name` 动态枚举和引用，节点释放时归还 class-device 引用。不能把整个 devfs 描述为 init 后静态不变，也不能把该动态节点机制外推到 net/input/display。
 
 **devfs ABI 缺口**
 
 - 不能创建、删除或 rename 设备节点。
 - 不支持 `chmod`/`chown`。
-- class 设备的节点名由驱动核心按 `class_device_get_nth` 生成（`/dev/charN` 等），节点内容由驱动 probe 决定；uevent 驱动的动态命名尚未实现。
+- char/block/audio class 设备的节点名由驱动核心按 `class_device_get_nth` 生成（`/dev/charN` 等），节点内容由驱动 probe 决定；net/input/display 不走该通用 devnode 路径，uevent 驱动的动态命名尚未实现。
 
-### 3.5 procfs（`kernel/fs/procfs/procfs.c`）
+### 3.7 procfs（`kernel/fs/procfs/procfs.c`）
 
 procfs 是完全合成的文件系统。entry 在 `lookup` 和 `open` 时生成。没有后端 mutation 操作。
 
 | Op | Support | Errno | 说明 / 代码引用 |
 |----|---------|-------|------------------------|
-| lookup | Y | — | `procfs_lookup`（`procfs.c:896`）。数字 PID 和静态 entry。 |
-| create/mkdir/unlink/rmdir/rename/link/symlink | N | `-ENOSYS`/`-ENOTDIR` | `g_procfs_vnode_ops` 只定义 `lookup`、`stat`、`open`、`release`（`procfs.c:1038`）。 |
-| stat | Y | — | `procfs_stat`（`procfs.c:1001`）。 |
-| open | Y | — | `procfs_open_vnode`（`procfs.c:1322`）。分配 `procfs_priv_t` snapshot。 |
-| read | Y | — | `procfs_fread`（`procfs.c:1046`）。 |
-| write | partial | `-EINVAL` | 只有特定 tunable 接受写入（`procfs_fwrite`，`procfs.c:1086`）。 |
-| lseek | Y | — | `procfs_flseek`（`procfs.c:1146`）。 |
-| readdir | Y | — | `procfs_freaddir`（`procfs.c:1162`）。 |
+| lookup | Y | — | `procfs_lookup`（`kernel/fs/procfs/procfs.c`）。数字 PID 和静态 entry。 |
+| create/mkdir/unlink/rmdir/rename/link/symlink | N | `-ENOSYS`/`-ENOTDIR` | `g_procfs_vnode_ops` 只定义 `lookup`、`readlink`、`stat`、`open`、`release`（`kernel/fs/procfs/procfs.c`）。 |
+| stat | Y | — | `procfs_stat`（`kernel/fs/procfs/procfs.c`）。 |
+| open | Y | — | `procfs_open_vnode`（`kernel/fs/procfs/procfs.c`）。分配 `procfs_priv_t` snapshot。 |
+| read | Y | — | `procfs_fread`（`kernel/fs/procfs/procfs.c`）。 |
+| write | partial | `-EINVAL` | 只有特定 tunable 接受写入（`procfs_fwrite`，`kernel/fs/procfs/procfs.c`）。 |
+| lseek | Y | — | `procfs_flseek`（`kernel/fs/procfs/procfs.c`）。 |
+| readdir | Y | — | `procfs_freaddir`（`kernel/fs/procfs/procfs.c`）。 |
 | chmod/chown | N | `-EPERM` | 无后端 hook。 |
 
 **procfs 顺序保证**
 
 - 内容在 `open` 时生成并缓存在 `procfs_priv_t` 中；并发 process 状态变化不会在 open 后反映出来。
-- 部分可写 tunable（`oom_score_adj`、`pid_max`、`pipe-max-size`）除整数写入周围的全局 spinlock 外没有其他同步。
+- 可写 tunable 的同步策略不统一：`pid_max` 经 `proc_set_pid_max` 更新，`oom_score_adj` 和 `pipe-max-size` 则直接更新对应字段或全局值。
 
 **procfs ABI 缺口**
 
 - 许多 `/proc/<pid>` 文件只是占位符，返回空内容或静态内容。
-- `/proc/self/exe` 和 `/proc/<pid>/exe`/`cwd` 在 `vfs_readlinkat` 中作为特殊情况处理（`vfs.c:694`），不是真正的 symlink。
+- `/proc/self/exe` 和 `/proc/<pid>/exe`/`cwd` 在 `vfs_readlinkat` 中作为特殊情况处理（`kernel/fs/vfs.c`），不是真正的 symlink。
 - 不允许文件 mutation。
 
-### 3.6 sysfs（`kernel/fs/sysfs.c`）
+### 3.8 sysfs（`kernel/fs/sysfs.c`）
 
-sysfs 是最小合成树。当前暴露 `/sys/block/loopN/{dev,size,uevent}` 与 `/sys/class/drm/card0/...`（`sysfs.c` 头注释与 `SF_DRM` 查找/枚举路径）。
+sysfs 是合成树。除 `/sys/block/loopN/{dev,size,uevent}` 与 `/sys/class/drm/card0/...` 外，当前还按驱动核心的 class registry 动态暴露 `/sys/class/{char,block,net,input,display,audio}/<device>/dev`。
 
 | Op | Support | Errno | 说明 / 代码引用 |
 |----|---------|-------|------------------------|
-| lookup | Y | — | `sysfs_lookup`（`sysfs.c:91`）。 |
-| create/mkdir/unlink/rmdir/rename/link/symlink | N | `-ENOSYS`/`-ENOTDIR` | `g_sysfs_vnode_ops` 只定义 `lookup`、`stat`、`open`、`release`（`sysfs.c:191`）。 |
-| stat | Y | — | `sysfs_stat`（`sysfs.c:170`）。 |
-| open/read/lseek/readdir | Y | — | `g_sysfs_fops`（`sysfs.c:298`）。 |
+| lookup | Y | — | `sysfs_lookup`（`kernel/fs/sysfs.c`）。 |
+| create/mkdir/unlink/rmdir/rename/link/symlink | N | `-ENOSYS`/`-ENOTDIR` | `g_sysfs_vnode_ops` 只定义 `lookup`、`stat`、`open`、`release`（`kernel/fs/sysfs.c`）。 |
+| stat | Y | — | `sysfs_stat`（`kernel/fs/sysfs.c`）。 |
+| open/read/lseek/readdir | Y | — | `g_sysfs_fops`（`kernel/fs/sysfs.c`）。 |
 | write | N | `-EINVAL` | 未注册 `.write`。 |
 | chmod/chown | N | `-EPERM` | 无后端 hook。 |
 
 **sysfs 顺序保证**
 
-- 内容在 `open` 时从静态常量生成。
-- 不支持并发 mutation。
+- 内容在 lookup/open/readdir 时由静态视图和动态 class-device registry 合成；动态节点持有 class-device 引用。
+- sysfs 本身不提供用户 mutation op，但底层 class registry 可随驱动 bind/remove 改变。
 
 **sysfs ABI 缺口**
 
-- 只暴露 loop block device 与 DRM card0 两处有限视图，其余 class/block 设备未枚举。
+- 视图仍远小于 Linux sysfs；动态 class 只提供设备名与 `dev` 等最小属性，不是完整 kobject/uevent 层级。
 - 没有 writable attribute，也没有 uevent write。
 
-### 3.7 pipe（`kernel/fs/pipe.c`）
+### 3.9 pipe（`kernel/fs/pipe.c`）
 
 pipe 不是挂载文件系统。它创建一对共享 `pipe_buf_t` 环形缓冲区的 `vfile_t` 对象。
 
 | Op | Support | Errno | 说明 / 代码引用 |
 |----|---------|-------|------------------------|
-| create (pipe2) | Y | — | `pipe_create`（`pipe.c:354`）。分配环形缓冲区和两个全局 fd。 |
-| read | Y | — | `pipe_read`（`pipe.c:70`）。除非 `O_NONBLOCK`，否则阻塞。 |
-| write | Y | — | `pipe_write`（`pipe.c:108`）。<= `PIPE_BUF` 的写入具备原子性；更大写入可能交错。 |
-| poll | Y | — | `pipe_poll_events`（`pipe.c:313`）。 |
-| set_size | Y | — | `pipe_set_size`（`pipe.c:346`），在 `vfs_fcntl` 中受 `CAP_SYS_RESOURCE` 限制。 |
+| create (pipe2) | Y | — | `pipe_create`（`kernel/fs/pipe.c`）。分配环形缓冲区和两个全局 fd。 |
+| read | Y | — | `pipe_read`（`kernel/fs/pipe.c`）。除非 `O_NONBLOCK`，否则阻塞。 |
+| write | Y | — | `pipe_write`（`kernel/fs/pipe.c`）。不超过 `PIPE_BUF_SIZE`（4096）字节的写入具备原子性；更大写入可能交错。 |
+| poll | Y | — | `pipe_poll_events`（`kernel/fs/pipe.c`）。 |
+| set_size | Y | — | `pipe_set_size`（`kernel/fs/pipe.c`），在 `vfs_fcntl` 中受 `CAP_SYS_RESOURCE` 限制。 |
 | lseek | N | `-ESPIPE` | 无 `.lseek` op；`vfs_lseek` 返回 `-ESPIPE`。 |
 
 **pipe 顺序保证**
 
-- `PIPE_BUF` 字节或更少的写入相互之间是原子的（`pipe.c:126`）；复制整个 chunk 时持有 spinlock。
-- 大于 `PIPE_BUF` 的写入会被拆分，可能与其他 writer 交错。
-- `read`/`write` 在 wait queue 上阻塞，并唤醒所有 reader/writer（`pipe.c:27`）。
-- 关闭最后一个 reader 会向 writer 发送 `SIGPIPE`/`EPIPE`（`pipe.c:115`、`pipe.c:129`）。
+- `PIPE_BUF_SIZE`（4096）字节或更少的写入相互之间是原子的（`kernel/fs/pipe.c`）；复制整个 chunk 时持有 spinlock。
+- 大于 `PIPE_BUF_SIZE` 的写入会被拆分，可能与其他 writer 交错。
+- `read`/`write` 在 wait queue 上阻塞，并通过 `pipe_wake_readers`/`pipe_wake_writers` 唤醒所有对应 waiter（`kernel/fs/pipe.c`）。
+- 关闭最后一个 reader 会唤醒 writer；后续或已阻塞的 write 检测到该状态后向当前 task 发送 `SIGPIPE` 并返回 `-EPIPE`（`kernel/fs/pipe.c`）。
 
 **pipe ABI 缺口**
 
-- `PIPE_BUF` 值定义于 `core/consts.h`；需要验证它在所有架构上都匹配 Linux ABI 对 4096 的预期。
-- `F_SETPIPE_SZ` 对非特权 task 的容量限制硬编码为 1 MiB（`vfs.c:1069`）。
+- 内核 `PIPE_BUF_SIZE` 定义于 `kernel/include/core/consts.h`，值为 4096，与 Linux ABI 的 `PIPE_BUF` 预期一致。
+- `F_SETPIPE_SZ` 对非特权 task 的容量限制硬编码为 1 MiB（`kernel/fs/vfs.c`）。
 
-### 3.8 anonfd（`kernel/fs/anonfd.c`）
+### 3.10 anonfd（`kernel/fs/anonfd.c`）
 
 anonfd 是把匿名 vfile 安装到当前 fd table 的 helper。它不是文件系统，没有 path 语义。
 
 | Op | Support | Errno | 说明 / 代码引用 |
 |----|---------|-------|------------------------|
-| install | Y | — | `anonfd_install_vfile`（`anonfd.c:17`）。 |
-| close | Y | — | 通过 `anonfd_free_priv_close` 释放 `vf->priv`（`anonfd.c:8`）。 |
+| install | Y | — | `anonfd_install_vfile`（`kernel/fs/anonfd.c`）。 |
+| close | Y | — | 通过 `anonfd_free_priv_close` 释放 `vf->priv`（`kernel/fs/anonfd.c`）。 |
 
 **anonfd 顺序保证**
 
@@ -337,37 +344,37 @@ anonfd 是把匿名 vfile 安装到当前 fd table 的 helper。它不是文件�
 
 ### 4.1 Permission 模型
 
-- `vfs_vnode_permission` 使用当前 task 的 `fsuid`/`fsgid` 调用 `vfs_mode_has_perm_ids`（`vfs/stat_perm.c:72`、`vfs/stat_perm.c:201`）。
-- `CAP_DAC_OVERRIDE` 绕过 read/write，但仍拒绝对没有 execute bit 的 regular file 执行（`vfs/stat_perm.c:80`）。
-- 不带 `AT_EACCESS` 的 `access()` / `faccessat()` 使用 real uid/gid，且不使用 capability（`vfs_mode_has_perm_ids_nocap`，`vfs/stat_perm.c:114`）。
-- `vfs_chmod_vnode` 要求所有权或 `CAP_FOWNER`（`vfs.c:575`）。
-- `vfs_chown_vnode` 要求 `CAP_CHOWN` 或满足受限 ownership 规则（`vfs.c:621`）。
-- sticky-bit 删除检查在 `vfs_sticky_may_remove` 中应用（`vfs/stat_perm.c:221`）。
+- `vfs_vnode_permission` 使用当前 task 的 `fsuid`/`fsgid` 调用 `vfs_mode_has_perm_ids`（`kernel/fs/vfs/stat_perm.c`）。
+- `CAP_DAC_OVERRIDE` 绕过 read/write，但仍拒绝对没有 execute bit 的 regular file 执行（`kernel/fs/vfs/stat_perm.c`）。
+- 不带 `AT_EACCESS` 的 `access()` / `faccessat()` 使用 real uid/gid，且不使用 capability（`vfs_mode_has_perm_ids_nocap`，`kernel/fs/vfs/stat_perm.c`）。
+- `vfs_chmod_vnode` 要求所有权或 `CAP_FOWNER`（`kernel/fs/vfs_stat.c`）。
+- `vfs_chown_vnode` 要求 `CAP_CHOWN` 或满足受限 ownership 规则（`kernel/fs/vfs_stat.c`）。
+- sticky-bit 删除检查在 `vfs_sticky_may_remove` 中应用（`kernel/fs/vfs/stat_perm.c`）。
 
 ### 4.2 Path resolution
 
-- `vnode_lookup_path` 在 mount root 内解析绝对路径（`path_resolution.c:27`）。
-- walk 期间会跟随 symlink，硬编码深度限制为 8（`path_resolution.c:89`）。
-- `..` 通过跟随 `vnode->parent` 解析（`path_resolution.c:52`）。它**不会**跨越 mount point；从 mount root 向外 walk `..` 会留在 mount root 内。
-- 名称长度 >= `MAX_NAME_LEN` 返回 `-ENAMETOOLONG`（`path_resolution.c:60`）。
-- `vfs_resolve_no_follow_final` 解析父目录，并在不跟随最终 component 的情况下 lookup 它（`vfs.c:437`）。
+- `vnode_lookup_path` 按当前 task 的 `root_path`、起始 dirfd 与 resolve context 解析路径。
+- walk 期间按 flag 跟随 symlink，深度限制为 `MAX_SYMLINKS`（40）。
+- mount root 的 `..` 通过 mount 表回到覆盖点的父目录；`RESOLVE_NO_XDEV` 会拒绝该跨越，chroot/`IN_ROOT` 边界仍优先约束逃逸。
+- 名称长度 >= `MAX_NAME_LEN` 返回 `-ENAMETOOLONG`（`kernel/fs/vfs/path_resolution.c`）。
+- `vfs_resolve_no_follow_final` 解析父目录，并在不跟随最终 component 的情况下 lookup 它（`kernel/fs/vfs.c`）。
 
 ### 4.3 Mount 操作
 
-- `vfs_mount` 支持 `tmpfs`/`ramfs`、`cgroup`/`cgroup2`，以及 `fat32`/`vfat`/`ext4` 的块设备 mount（`vfs/mount_ops.c:47`）。
-- 当 fstype 为空时，`vfs_mount_bc` 先尝试 `ext4`，再尝试 `vfat`（`vfs/mount_ops.c:134`）。
-- `vfs_umount` 按 normalized path 匹配，并调用 `fat32_unmount` 或 `ext4_unmount`（`vfs/mount_ops.c:210`）。
-- `vfs_rename` 用 `-EXDEV` 拒绝 cross-mount rename（`vfs.c:328`）。
+- `vfs_mount` 支持 `tmpfs`/`ramfs`、`cgroup`/`cgroup2`、`proc`、`sysfs`、`devtmpfs`/`devfs`，以及 `fat32`/`vfat`/`ext4`/`ntfs`/`isofs`/`iso9660` 的块设备 mount（`kernel/fs/vfs/mount_ops.c`）。
+- 当块设备 mount 的 fstype 为空时，`mount_block_dev_idx` 先尝试 `ext4`，再尝试 `vfat`（`kernel/fs/vfs/mount_ops.c`）。
+- `vfs_umount` 按 normalized path 匹配；FAT32、ext4、NTFS 和 ISO9660 会调用各自的 unmount helper，然后移除 mount（`kernel/fs/vfs/mount_ops.c`）。
+- `vfs_rename_flags` 用 `-EXDEV` 拒绝 cross-mount rename（`kernel/fs/vfs.c`）。
 
 ### 4.4 Dcache
 
-- 正向 lookup 会缓存在 `vfs_dcache_lookup`/`vfs_dcache_insert` 中（`kernel/fs/vfs/dcache.c`）。
-- create、unlink、rmdir、rename、link、symlink、mount 和 umount 后会调用 `vfs_dcache_invalidate_all`。除了 rename 中的 `vfs_dcache_invalidate(old_dir, old_name)` 和 `vfs_dcache_invalidate(new_dir, new_name)`（`vfs.c:378`），没有细粒度 per-directory invalidation。
+- dcache 只对 ramfs、FAT32、ext4 启用；它是 512 项 lookup 优化层，不是权威 namespace，也不能实现 `RESOLVE_CACHED`。
+- create、unlink、rmdir、rename、link、symlink 等路径多数按 `(parent, name)` 定点失效；mount/umount、部分全局状态变更和无法安全定点的情况仍调用 `vfs_dcache_invalidate_all`。
 
 ### 4.5 xattr
 
-- xattr 存储在按 `(mnt, ino)` 索引的 1024 项全局 RAM 表 `g_xattrs` 中（`kernel/fs/xattr.c:17`）。
-- 遵守 `XATTR_CREATE` 和 `XATTR_REPLACE` flag（`xattr.c:55`）。
+- xattr 存储在按 `(mnt, ino)` 索引的 1024 项全局 RAM 表 `g_xattrs` 中（`kernel/fs/xattr.c`）。
+- 遵守 `XATTR_CREATE` 和 `XATTR_REPLACE` flag（`kernel/fs/xattr.c`）。
 - name 限制为 `XATTR_NAME_MAX_LOCAL`；value 限制为 `XATTR_VALUE_MAX_LOCAL`。
 - 没有后端特定 xattr hook；FAT32/ext4 的值不会写入磁盘，并会在 unmount/reboot 后丢失。
 
@@ -375,15 +382,15 @@ anonfd 是把匿名 vfile 安装到当前 fd table 的 helper。它不是文件�
 
 | 领域 | 当前行为 | 期望的 Linux 行为 |
 |------|------------------|-------------------------|
-| openat2 resolve flag | 已实现：`RESOLVE_NO_SYMLINKS/BENEATH/IN_ROOT/NO_MAGICLINKS/NO_XDEV/NO_TRAILING_SYMLINKS` 经 `vfs_openat2` 生效（`sys_proc.c:552`） | 必须遵守 `RESOLVE_*` |
-| renameat2 flag | 已支持 `RENAME_NOREPLACE`、`RENAME_EXCHANGE`（`sys_path.c:40`），其余 flag 拒绝 | 支持 `RENAME_WHITEOUT` 等 |
-| statx | 遵守 `mask`，含 `STATX_BTIME`（`sys_path.c:358`） | 完整遵守 `AT_STATX_*`/`STATX_*` |
-| fchmodat2 | 带 flags 分发到 `sys_fchmodat`（`syscall_table.def:74`） | 独立 syscall，完整处理 `AT_*` flag |
+| openat2 resolve flag | `NO_XDEV`/`NO_SYMLINKS`/`BENEATH`/`IN_ROOT` 有实现；`NO_MAGICLINKS` 被接受但未执行检查；`RESOLVE_CACHED` 未实现；A20OS 自定义 `NO_TRAILING=0x20` 与 Linux `CACHED=0x20` 冲突 | Linux 编号和可扩展 `open_how` size 语义 |
+| renameat2 flag | VFS 接受 `NOREPLACE/EXCHANGE`；ramfs/ext4 支持两者，FAT32/NTFS 只支持 `NOREPLACE`，whiteout 不支持 | 后端一致支持与 overlay whiteout |
+| statx | 不是 requested-only：实现总把 `STATX_BASIC_STATS` 加入 `stx_mask` 并返回基础元数据，再按请求追加 `STATX_BTIME` 等可选字段；支持 sync type 子集 | 完整遵守 `AT_STATX_*`/`STATX_*` 及字段可用性语义 |
+| fchmodat2 | 带 flags 分发到 `sys_fchmodat`（`kernel/abi/linux/syscall_table.def`） | 独立 syscall，完整处理 `AT_*` flag |
 | xattr | 只有全局 RAM 表 | 具备 namespace 检查的后端持久化 xattr |
-| Symlink loop limit | 40（`MAX_SYMLINKS`，`vfs.h:22`） | Linux 使用 40（`MAX_SYMLINKS`） |
-| Mount-point `..` | 留在 mount root 内 | 跨到 parent mount |
+| Symlink loop limit | 40（`MAX_SYMLINKS`，`kernel/include/fs/vfs.h`） | Linux 使用 40（`MAX_SYMLINKS`） |
+| Mount-point `..` | 已跨到 parent mount，并受 `NO_XDEV`/root 边界约束 | 仍需更多嵌套 mount/chroot 组合覆盖 |
 | chroot | 已实现：`root_path` 在路径解析中生效（`vfs_path_normalize_absolute_with_root`，`path_resolution.c`） | resolution 必须受 `root_path` 约束 |
-| faccessat2 flag | 支持 `AT_EACCESS`/`AT_SYMLINK_NOFOLLOW`/`AT_EMPTY_PATH`，未支持 bit 返回 `-EINVAL`（`vfs_stat.c:165`） | 同时严格校验不支持的 bit |
+| faccessat2 flag | 支持 `AT_EACCESS`/`AT_SYMLINK_NOFOLLOW`/`AT_EMPTY_PATH`，未支持 bit 返回 `-EINVAL`（`kernel/fs/vfs_stat.c`） | 同时严格校验不支持的 bit |
 
 ## 6. 测试影响
 

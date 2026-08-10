@@ -6,17 +6,26 @@
 
 ## 把驱动接到构建里
 
-full profile 自动包含 `kernel/drivers/core|bus|block|char|net|gpu|audio|input/*.c`。把源文件放到已有类目录即可。公共声明放 `kernel/include/drivers/<class>/`；只在一个驱动内部共享的寄存器和私有结构放驱动私有头，不要进入公共 include 树。
+full profile 不会通配包含类目录中的设备驱动。`tools/driver-sources.mk` 的 `DRIVER_CORE_SRCS` 仍通配 `drivers/core/*.c` 与 `drivers/bus/*.c`，但 `GENERIC_KERNEL_SERVICE_SRCS` 和 `EMBEDDED_DEVICE_DRIVER_SRCS` 是显式列表；`tools/driver-modules.mk` 也按架构显式列出 generic 的 `.a20drv` 包。新增设备驱动必须更新适用的源码账本、模块包装/规则和架构包清单，不能仅把文件放进 `kernel/drivers/<class>/`。公共声明放 `kernel/include/drivers/<class>/`；只在一个驱动内部共享的寄存器和私有结构放驱动私有头，不要进入公共 include 树。
 
 MCU profile 只编译 `BOARD_DRIVER_DIR` 和选中的平台，新增文件要检查 Makefile 的 profile 分支。新平台还需要平台链接脚本和 `BOARD_INCLUDE_DIR`。
 
 `#ifdef CONFIG_<ARCH>` 只应包围真正架构限定的 I/O（例如 x86 port I/O）。可跨架构的 PCI/MMIO 驱动不要按板名条件编译。
 
-## 最小静态验证
+## 基础门禁
 
 ```sh
-git diff --checkmake check-driver-core-modelmake check-doc-driftmake smoke-driver-lifecyclemake smoke-hdamake smoke-audio-userspacemake PYTHON='conda run -n a20os python' smoke-virtio-soundmake smoke-pci-portability
+git diff --check
+make check-driver-core-model
+make check-doc-drift
+make smoke-driver-lifecycle
+make smoke-hda
+make smoke-audio-userspace
+make PYTHON='conda run -n a20os python' smoke-virtio-sound
+make smoke-pci-portability
 ```
+
+这些命令不全是静态检查：`check-driver-core-model` 依赖 `smoke-driver-lifecycle`，其余 `smoke-*` 也会构建并启动 QEMU。按改动范围和宿主能力执行，并在提交证据中明确未运行项。
 
 `smoke-driver-lifecycle` 用 RISC-V64 bringup 配置和 `CONFIG_DRIVER_LIFECYCLE_TEST=y` 启动合成 bus/device，验证注册、probe 失败解绑、class 发布、unregister 下线、陈旧引用返回 `-ENODEV` 和重新 probe；宿主需要能运行仓库配置的 QEMU。只改平台私有轻量设备时可以不跑它，但修改 driver core、bus 或生命周期代码时必须跑。
 
@@ -31,7 +40,8 @@ git diff --checkmake check-driver-core-modelmake check-doc-driftmake smoke-drive
 检查源中没有板级硬编码泄漏：
 
 ```sh
-rg -n "0x[0-9a-fA-F]{8}" kernel/drivers/<class>/my_driver.crg -n "CONFIG_BOARD_" kernel/drivers/<class>/my_driver.c
+rg -n "0x[0-9a-fA-F]{8}" kernel/drivers/<class>/my_driver.c
+rg -n "CONFIG_BOARD_" kernel/drivers/<class>/my_driver.c
 ```
 
 常量可能是协议寄存器或 ID，需要逐项解释，不是机械删除。
@@ -41,7 +51,11 @@ rg -n "0x[0-9a-fA-F]{8}" kernel/drivers/<class>/my_driver.crg -n "CONFIG_BOARD_"
 至少构建驱动目标平台和一个共享基础设施回归平台：
 
 ```sh
-make ARCH=aarch64 BOARD=virtualbox-aarch64 ABI=both kernel-only -j4make ARCH=aarch64 BOARD=qemu-virt-aarch64 ABI=both kernel-only -j4make ARCH=x86_64 ABI=both kernel-only -j4make ARCH=arm32 BOARD=qemu-virt-arm32 ABI=both kernel-only -j4make check-stm32f103
+make ARCH=aarch64 BOARD=virtualbox-aarch64 ABI=both kernel-only -j4
+make ARCH=aarch64 BOARD=qemu-virt-aarch64 ABI=both kernel-only -j4
+make ARCH=x86_64 ABI=both kernel-only -j4
+make ARCH=arm32 BOARD=qemu-virt-arm32 ABI=both kernel-only -j4
+make check-stm32f103
 ```
 
 跨架构结论分三级记录：只编译通过；设备枚举并绑定；实际 DMA/I/O 完成。只有第三级可以写“运行验证”。某架构的 board 没有 PCI enumerator 时，HDA/NVMe 编译成功只能计入第一级。
@@ -64,13 +78,17 @@ make ARCH=aarch64 BOARD=virtualbox-aarch64 ABI=both kernel-only -j4make ARCH=aar
 
 ## I/O 测试
 
-QEMU GUI 路径必须跑：
+QEMU GUI 目标当前状态：
 
-```sh
-make smoke-qemu-gui-x86_64 SMOKE_TIMEOUT=60make smoke-qemu-gui-riscv64 SMOKE_TIMEOUT=90make smoke-qemu-gui-aarch64 SMOKE_TIMEOUT=90make smoke-qemu-gui-arm32 SMOKE_TIMEOUT=90make smoke-qemu-gui-loongarch64 SMOKE_TIMEOUT=90
-```
+| 目标 | 当前使用边界 |
+|---|---|
+| `smoke-qemu-gui-x86_64` | 已知门禁/部署缺陷：默认 generic 模块集合包含 `vinput.a20drv`，但不包含脚本要求的 `virtio-gpu.a20drv`，不能按默认配置满足断言；修复前不作为强制门禁或通过项 |
+| `smoke-qemu-gui-arm32` | 已知门禁/部署缺陷：arm32 默认 generic 模块集合为空，不能提供脚本要求的 VirtIO GPU/input；修复前不作为强制门禁或通过项 |
+| `smoke-qemu-gui-riscv64` | 模块清单包含 VirtIO GPU/input，可按改动范围运行；没有匹配日志时只能记为未验证，不能从目标存在推导通过 |
+| `smoke-qemu-gui-aarch64` | 模块清单包含 VirtIO GPU/input，可按改动范围运行；没有匹配日志时只能记为未验证，不能从目标存在推导通过 |
+| `smoke-qemu-gui-loongarch64` | 模块清单包含 VirtIO GPU/input，可按改动范围运行；没有匹配日志时只能记为未验证，不能从目标存在推导通过 |
 
-这些门禁不依赖宿主图形会话。它们覆盖 PCI 和 VirtIO-MMIO transport，以及 32/64 位用户态，以 headless display 启动 GUI rootfs，要求 VirtIO GPU、两个 VirtIO input 实例和用户态 desktop 全部就绪；通过 QMP 抓取实际 scanout 并拒绝纯黑/空 framebuffer；最后注入按键并要求客户机产生 input event。日志和 PPM 截图保存在 `.kernel-build/smoke/qemu-gui-x86_64/`。因此“能链接”或“串口能启动”不能替代此项验证。完整门禁说明见 [testing/testing-gates.md](../../testing/testing-gates.md)。
+脚本本身不依赖宿主图形会话。它以 headless display 启动 GUI rootfs，要求 VirtIO GPU、两个 VirtIO input 实例和用户态 desktop 全部就绪；通过 QMP 抓取实际 scanout 并拒绝纯黑/空 framebuffer；最后注入按键并要求客户机产生 input event。对模块清单满足前置条件的目标，可使用对应的 `make smoke-qemu-gui-<arch> SMOKE_TIMEOUT=<seconds>` 并保存该架构的串口日志和 PPM；“能链接”或“串口能启动”不能替代行为结果。完整门禁说明见 [testing/testing-gates.md](../../testing/testing-gates.md)。
 
 block：首尾 LBA、越界、零长度、跨内部 chunk、读后写回、flush、错误恢复。不要在装有唯一数据的镜像上做破坏性测试。
 
@@ -82,14 +100,16 @@ display：模式信息、pitch、全屏和边界矩形 flush、映射重叠拒�
 
 ## 并发与清理
 
-审查每一个共享字段由哪把锁保护，并更新 `lock-order.md`。确认任何 spinlock 区间内没有 `kmalloc`、VFS、`sched`、`mdelay` 或长轮询。触发 remove 时先禁止新 I/O，再处理 IRQ/waiter/DMA。运行 probe-remove-probe，确保静态槽和全局默认项可以复用。
+审查每一个共享字段由哪把锁保护，并更新 `lock-order.md`。新增代码不得在 spinlock 区间内执行 `kmalloc`、VFS、`sched`、`mdelay` 或长轮询；现有 PTY 锁内分配/释放、USB storage 锁内同步轮询以及 HID completion 锁覆盖缺口已在该文档列为待修限制，不能因已有先例而复制。触发 remove 时先禁止新 I/O，再处理 IRQ/waiter/DMA。运行 probe-remove-probe，确保静态槽和全局默认项可以复用。
 
 ## 日志证据
 
 提交说明应附从枚举到消费的连续日志，例如：
 
 ```text
-[BUS] pci ... id=8086:100e ...[E1000] ready: mac=... link=up[LWIP] netif en0 attached to ...
+[BUS] pci ... id=8086:100e ...
+[E1000] ready: mac=... link=up
+[LWIP] netif en0 attached to ...
 ```
 
 日志要包含构建命令、平台/VM 设备配置、成功 I/O，以及已知未验证能力。不要只附截图；串口文本更适合评审和回归比较。
@@ -103,7 +123,7 @@ display：模式信息、pitch、全屏和边界矩形 flush、映射重叠拒�
 | `make check-doc-drift` | 文档与代码中同名常量、命令或矩阵不一致 | 同步文档和实现，确保命令矩阵和真实 Makefile 目标一致 |
 | `make smoke-driver-lifecycle` 失败 | 合成 bus/device 注册、probe 失败清理、unregister 路径 | 加 `CONFIG_DRIVER_LIFECYCLE_TEST=y` 日志，确认失败点是否释放资源 |
 | 构建矩阵中某一架构失败 | 是否用了 `#ifdef CONFIG_BOARD_` 或架构私有头 | 把板级常量移到 platform，把可跨架构代码改成通用 PCI/MMIO |
-| `make smoke-qemu-gui-*` 失败 | QMP 截图是否全黑、input 事件是否注入成功 | 先跑对应 `kernel-only` 构建，确认 PCI/VirtIO 枚举和 class 绑定 |
+| `make smoke-qemu-gui-*` 失败 | 先确认目标架构的 generic 模块集合是否实际包含 VirtIO GPU/input；x86_64 与 arm32 有上述已知部署缺陷 | 模块齐全时再检查 QMP 截图、input 注入、PCI/VirtIO 枚举和 class 绑定；不得放宽断言制造通过 |
 | 块/网络/input/display I/O 失败 | 是否用了唯一数据镜像、是否满足类接口语义 | 用可丢弃镜像复跑，按设备类规范逐个检查返回值 |
 | 硬件验收失败 | 串口日志是否包含从 `[BUS] pci` 到类消费者的完整链路 | 不要只以“桌面黑了”或“shell 出来了”作结论 |
 

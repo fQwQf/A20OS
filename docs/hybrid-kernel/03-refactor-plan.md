@@ -1,6 +1,6 @@
 # 混合内核改造计划：以 Native ABI 为本体的架构演进
 
-本文档记录 A20OS 混合内核的**改造方向与实施路线**。与描述当前形态的 [00-design.md](00-design.md)、与主流对齐分析的 [02-mainstream-plan.md](02-mainstream-plan.md) 不同，本文档回答的问题是：
+本文档记录 A20OS 混合内核的**改造方向与实施路线**，并把历史阶段证据与 `e33c3219` 当前源码状态分开。当前提交没有匹配的完整干净双架构复验。与描述当前形态的 [00-design.md](00-design.md)、与主流对齐分析的 [02-mainstream-plan.md](02-mainstream-plan.md) 不同，本文档回答的问题是：
 **沿着已确立的研发定位，架构应该往哪里改、按什么顺序改、每一步如何验收。**
 
 ## 定位前提
@@ -34,7 +34,7 @@
 | 核心受信驱动（virtio-blk/net、启动中断控制器） | 内核 | 内核 | 启动路径与数据面关键 |
 | 多样性/第三方驱动（USB 外设、GPU、WiFi、传感器、RTC） | 用户态 | 仅 RTC/scratch 盘 | 多设备通用性的核心：种类爆炸的驱动不可能全内核化 |
 | 服务监管、组件管理、命名/注册 | 用户态 | 用户态（已实现） | 纯控制面 |
-| DMA 隔离 | IOMMU 强制 | 信任模型（无硬件强制） | 用户态驱动"真隔离"的前提，见阶段三 |
+| DMA 隔离 | 动态 per-device IOMMU 强制 | RISC-V 静态 bring-up/TR_REQ 探测；用户 DMA 仍是信任模型 | 用户态驱动“真隔离”的前提，见阶段三 |
 
 ## 可移动边界：同一源码，双态部署
 
@@ -62,9 +62,9 @@ Native ABI 成为研究本体的前提是其语义**显式、可测、防退化*
 
 范围：句柄 rights 代数（dup 只收缩、类型合法掩码收敛、channel 传递交集 `ρ_recv = ρ_send ∩ ρ_transfer`）、channel 背压与关闭语义（满→WOULD_BLOCK/ 阻塞唤醒、peer 关闭→CANCELED、FIFO 序）、EventQ 语义（重复 watch=更新、超时分级、ring 满丢弃但保唤醒）、VMO 生命周期（句柄关闭后映射存活、懒物化、对象计数回归基线）。
 
-验收：`user/tests/test_native_contract.c` 全分区通过， `make smoke-native-contract` 在 riscv64 通过；loongarch64 构建通过（运行时验证受镜像条件限制时须记录）。契约文档同步更新到 [../native-abi/](../native-abi/)。
+验收标准：`user/tests/test_native_contract.c` 全分区通过，`make smoke-native-contract` 在 riscv64 通过；loongarch64 构建通过（运行时验证受镜像条件限制时须记录）。契约文档同步更新到 [../native-abi/](../native-abi/)。
 
-**状态（2026-08-06）**：已完成。四分区（ralg/bp/evqc/vmol）在 riscv64 通过，loongarch64 构建通过；阶段副产品：修复 `CHANNEL_ENDPOINT`/`EVENT_QUEUE` 类型掩码缺 STAT 的 ABI 缺陷。验证期间观察到 main HEAD 存在与本阶段无关的线程/阻塞路径挂起回归（详见 [STATUS.md](STATUS.md) 基线回归观察），阶段二依赖的线程类 smoke 回归需待其收敛。
+**历史状态（2026-08-06）**：四分区（ralg/bp/evqc/vmol）曾在 riscv64 通过，loongarch64 构建通过；阶段副产品修复了 `CHANNEL_ENDPOINT`/`EVENT_QUEUE` 类型掩码缺 STAT。该记录不是 `e33c3219` 的当前运行证据。
 
 ### 阶段二：Native ABI SMP 正确性收口
 
@@ -76,7 +76,7 @@ Native ABI 是研究本体时，其核心数据面在 SMP 下不可靠意味着�
 验收：`smoke-native-shmring` 在 SMP=2/8 下连续 20 轮零失败；
 诊断挂载点不报告脏帧回填；Linux ABI 同负载压力无退化。
 
-**状态（2026-08-06）**：已完成。SMP=2 连续 20 轮、SMP=8 连续 20 轮零失败零挂起（M5 修复 `98a1260`/`1af0d02` 复验有效）；`[VMO-PAGE]` 串口诊断降级为 `vmo_dirty_frames` 计数器（合法复用信号，不再交错用户输出）；Linux ABI `mm_stress` 180s 预算下 PASS（45s 门禁预算不足为 HEAD 既有观察，见 STATUS）。
+**历史状态（2026-08-06）**：指定分支上 SMP=2/8 各连续 20 轮曾零失败零挂起（M5 修复 `98a1260`/`1af0d02`）；`[VMO-PAGE]` 串口诊断降级为 `vmo_dirty_frames`。这些结果是历史防退化证据，不是当前提交的重跑结果。
 
 ### 阶段三：驱动双态部署框架 + DMA 真隔离
 
@@ -87,7 +87,7 @@ Native ABI 是研究本体时，其核心数据面在 SMP 下不可靠意味着�
 验收：同一份驱动源码以内核态和用户态两种部署通过同一套功能契约测试；
 无 IOMMU 授权窗口的 DMA 访问被硬件拒绝（可观测的 fault 事件）。
 
-**状态（2026-08-06）**：框架骨架落地，见 [04-dual-placement.md](04-dual-placement.md)。环境层（`kernel/include/drivers/dual/drv_env.h`）与首个共享设备协议层（`kernel/include/drivers/dual/goldfish_rtc.h`）生效；goldfish RTC 同一协议源码已在两种部署下运行：内核壳 boot probe 输出真实设备时间，用户壳 `smoke-native-rtcd` PASS。DMA ops、连续 DMA heap、所有权仲裁、第二个样板（virtio-input）和功能态 virtqueue 已完成。**IOMMU 已完成真实硬件初始化与 per-domain 翻译**：BAR 分配、capability 读取（version 16 / spec 1.0）、DDT(1LVL)/ CQ/FQ 编程与使能；devid 0 配置 SV39 翻译域（3 级页表），经 TR_REQ 验证：已映射 IOVA 精确翻译、未映射 IOVA 被硬件拒绝（fault=1, cause=13 RD_FAULT_S）。`smoke-iommu-discovery` 断言全部状态。剩余：fault 队列消费与 per-device 页表动态映射。
+**当前源码状态**：框架骨架落地，见 [04-dual-placement.md](04-dual-placement.md)。`drv_env.h` 有 USER/DRVMOD/KERNEL 三后端，但活跃样板使用 USER 与 DRVMOD；virtio-input 的只读内核 probe 与用户驱动共享协议头，完整内核驱动仍是另一套实现；goldfish RTC 内核模块仍复制寄存器常量。DMA ops、连续 DMA heap和所有权 claim/release 已存在。RISC-V IOMMU 已完成 DDT/CQ/FQ bring-up 和 devid 0 静态 TR_REQ 翻译探测，但 fault 消费、动态 per-device 页表以及用户 DMA 接线未完成。因此阶段三的“完整同源双态 + 未授权 DMA 被设备实际拒绝”验收仍未完成。
 
 ### 阶段四：服务接口 IDL 化
 
@@ -95,7 +95,7 @@ Native ABI 是研究本体时，其核心数据面在 SMP 下不可靠意味着�
 
 验收：svcmgr/registry/健康探针协议由 IDL 生成；新旧协议互操作期有版本协商；手写 proto 头退出活跃树。
 
-**状态**：常量层与固定宽度消息层已完成：`a20_services.idl`、生成器（`tools/a20idl.py`）和生成头（`user/svc/a20_services_idl.h`）已接入 rtcd/svc/ubd，`make check-a20-idl` 在 `a20os` conda 环境中重生成并比对活跃头。**版本化请求/响应信封已完成**：rtcd 请求/响应使用独立 wire type（RTCD_REPLY_TIME/ALARM）+ version/size 校验，`smoke-native-rtcd` PASS；**svcmgr/echod 协议已 IDL 化**（SVCMGR_REQ_ECHO/CRASH 版本化消息替换裸 echo 与魔法字符串，服务端校验版本并拒绝畸形消息），`smoke-native-svc` PASS。registry 为内核 syscall 接口（0x0A03），不属于 channel 协议，不在 IDL 范围。语法与约束规范见 [05-idl-and-personality.md](05-idl-and-personality.md)。剩余：双端绑定代码生成与动态版本协商。
+**当前源码状态**：`a20_services.idl`、`tools/a20idl.py` 和 ignored 的构建生成头已接入。rtcd 与 svcmgr/echod 使用 version/size envelope；ubd 只消费生成常量，其块数据面仍是共享环协议。`rtcd_proto.h`、`svc_proto.h`、`ubd_proto.h` 仍是活跃 wrapper，尚未“退出活跃树”。`make check-a20-idl` 是重生成比对入口，但本次文档审计未运行它。剩余双端 binding、动态版本协商和手写 wrapper 收口。
 
 ### 阶段五：Linux 人格层重建（starnix 式）
 

@@ -1,6 +1,8 @@
 # A20OS Native ABI：理论深度补充
 
 > 本文档是 `04-theory-deep-dive.md` 的补充，解决其中识别的理论缺口：完整 trace induction 证明、compound operation 的失败/回滚语义、handle table 溢出、跨进程锁序证明、活性证明的 variant function、以及 linearizability 论证。
+>
+> **证明边界：** 本文以 53-syscall 形式化核心为目标，但下述 trace 分类只明确覆盖 43 个操作，不能称为穷举证明；精化论证也不构成对 `e33c3219` 全部 126 个 Native 入口或当前 C 内存布局的机器证明。当前锁序、Park/Wake 和对象生命周期协议以实现及 `docs/native-abi/08-runtime-status.md` 为准。
 
 ---
 
@@ -18,7 +20,7 @@ $$\pi = \sigma_0 \xrightarrow{op_1} \sigma_1 \xrightarrow{op_2} \cdots \xrightar
 
 ### 1.2 安全性定理的完整证明
 
-**定理 1.1（Trace Safety）** 对任意从满足 $\mathcal{I}$ 的初始状态出发的 trace $\pi$，$\pi$ 是安全的。
+**定理 1.1（Trace Safety，已分类子集）** 对任意从满足 $\mathcal{I}$ 的初始状态出发、且仅包含下述 43 个已分类操作的 trace $\pi$，$\pi$ 是安全的。
 
 *完整证明（trace induction）*：
 
@@ -32,7 +34,7 @@ $$\pi = \sigma_0 \xrightarrow{op_1} \sigma_1 \xrightarrow{op_2} \cdots \xrightar
 
 **归纳步**：假设 $\sigma_k$ 满足 $\mathcal{I}$，证明对任意合法操作 $op_{k+1}$，$\sigma_{k+1}$ 满足 $\mathcal{I}$。
 
-对 $op_{k+1}$ 进行穷举分类。A20OS Native ABI 的全部操作可归入以下类别：
+对 $op_{k+1}$ 按当前已覆盖集合分类。以下类别不是 53 个核心操作的穷举：
 
 **类别 A：只读操作**（handle_query, clock_get, abi_info, feature_test）
 - 不修改 $\sigma$（$\sigma_{k+1} = \sigma_k$），$\mathcal{I}$ 平凡保持。
@@ -100,9 +102,9 @@ $$\pi = \sigma_0 \xrightarrow{op_1} \sigma_1 \xrightarrow{op_2} \cdots \xrightar
 **类别 N：调试操作**（debug_attach, debug_read_regs, debug_write_regs）
 - 只读或修改寄存器状态，不修改 handle table。$\mathcal{I}$ 保持。
 
-**穷举性论证（形式化核心边界）**：以上 14 个类别（A-N）覆盖 02 文档定义的全部 53 个**形式化核心 syscall**。每个核心 syscall 属于且仅属于一个类别。新增 SOS 规则（H-REPLACE, H-CLOSE-MANY, T-THREAD-CREATE, O-DESTROY）已纳入相应类别，因此对该 53-syscall 子集的归纳 case analysis 是穷举的。当前内核分发表有 126 个入口；新增工程 syscall 尚未全部加入本分类，故本结论不得外推为“现行实现全部 syscall 已穷举证明”。
+**覆盖审计（形式化核心边界）**：A-N 当前明确列出 43/53 个核心 syscall，遗漏 10 个：`task_wait`、`task_kill`、`task_info`；`handle_stat`、`path_unlink`、`path_rename`、`path_readdir`；`event_wait`；`net_sendmsg`、`net_recvmsg`。在补齐其状态修改、失败路径和不变式保持 case 前，本节只能证明已分类子集，不能声称 53 个核心操作穷举，更不能外推到 126 个实现入口。
 
-由数学归纳，$\pi$ 是安全的。$\square$
+由数学归纳，仅对上述已分类子集，$\pi$ 是安全的。$\square$
 
 ---
 
@@ -531,7 +533,7 @@ $$V'(\sigma) = \sum_{p \in P_{alive}} (|dom(HT_p)| + 1)$$
 | ADMIN | task_kill (外部), debug_attach, ns_apply | 无法管理 |
 | SIGNAL | task_kill | 无法发送信号 |
 
-每种权限控制至少一个操作，且每个操作至少需要一个权限。14 种权限和 14 种对象类型构成最小充分集。
+每种权限控制至少一个操作，且每个已列操作至少需要一个权限。形式模型是 14 种权限和 13 种对象类型；`e33c3219` 实现已有 14 种对象，故“最小充分”只是在模型边界内的候选结论。
 
 ---
 
@@ -579,7 +581,7 @@ $$Obj_a(o) = \begin{cases} \text{vfile\_state}(o) & \text{if } o \text{ is a } v
 
 **引用计数映射**：
 
-$$refcount_a(o) = |\{(p, n) \mid entries_p[n].object = o \land entries_p[n].object \neq \text{NULL}\}|$$
+$$refcount_a(o)=|\{(p,n)\mid entries_p[n].object=o\}|+|\{(c,m,i)\mid m\in queued_c\cup pending_c\land m.handles_i.object=o\}|$$
 
 ### 8.3 精化不变式
 
@@ -587,7 +589,7 @@ $$refcount_a(o) = |\{(p, n) \mid entries_p[n].object = o \land entries_p[n].obje
 
 **RI-1（Handle 表对应）**：$$\forall p, n.\ HT_a^p(n) = (o, \rho) \iff entries_p[n].object = o \land entries_p[n].rights = \rho \land o \neq \text{NULL}$$
 
-**RI-2（引用计数对应）**：$$\forall o.\ refcount_a(o) = |\{(p, n) \mid entries_p[n].object = o\}|$$
+**RI-2（引用计数对应）**：$$\forall o.\ refcount_c(o)=|\{(p,n)\mid entries_p[n].object=o\}|+|\{(c,m,i)\mid m\in queued_c\cup pending_c\land m.handles_i.object=o\}|$$
 
 **RI-3（对象状态对应）**：$$\forall o.\ Obj_a(o) = \text{appropriate\_state\_extractor}(o)$$
 
@@ -606,9 +608,15 @@ $$refcount_a(o) = |\{(p, n) \mid entries_p[n].object = o \land entries_p[n].obje
 ```c
 int64_t a20_handle_close(a20_handle_table_t *ht, a20_handle_t h) {
     spin_lock(&ht->lock);                          // L1
-    if (h >= ht->capacity) { spin_unlock; return -BAD_HANDLE; }
+    if (h >= ht->capacity) {
+        spin_unlock;
+        return -BAD_HANDLE;
+    }
     a20_handle_entry_t *e = &ht->entries[h];
-    if (e->object == NULL) { spin_unlock; return -BAD_HANDLE; }
+    if (e->object == NULL) {
+        spin_unlock;
+        return -BAD_HANDLE;
+    }
     void *obj = e->object;
     e->object = NULL;                               // 清空条目
     e->type = A20_OBJ_INVALID;
@@ -635,7 +643,7 @@ int64_t a20_handle_close(a20_handle_table_t *ht, a20_handle_t h) {
 
 3. **RI 保持**：
    - **RI-1**：`e->object = NULL` 后，$HT_a^p(n)$ 变为 undefined（与 $HT_p \setminus n$ 一致）。$\checkmark$
-   - **RI-2**：移除一个条目使得 $refcount_a(o)$ 减少 1；`refcount_dec_and_test` 使具体 refcount 也减少 1。$\checkmark$
+   - **RI-2**：移除一个 HT 条目使 owned-reference 总数减少 1；消息引用集合不变，`refcount_dec_and_test` 使具体 refcount 同步减少 1。$\checkmark$
    - **RI-3**：若非最后一个引用，对象状态不变。若是最后一个，对象被销毁，从 $Obj_a$ 中移除。$\checkmark$
    - **RI-4**：`free_bitmap` 清位与条目清空同步。$\checkmark$
 
@@ -654,19 +662,34 @@ int64_t a20_handle_dup(a20_handle_table_t *ht, a20_handle_t src,
                        a20_rights_t req_rights, a20_handle_t *out) {
     spin_lock(&ht->lock);                           // L1
     // 验证源 handle
-    if (src >= ht->capacity) { spin_unlock; return -BAD_HANDLE; }
+    if (src >= ht->capacity) {
+        spin_unlock;
+        return -BAD_HANDLE;
+    }
     a20_handle_entry_t *e = &ht->entries[src];
-    if (e->object == NULL) { spin_unlock; return -BAD_HANDLE; }
-    if ((e->rights & req_rights) != req_rights) { spin_unlock; return -ACCESS; }
+    if (e->object == NULL) {
+        spin_unlock;
+        return -BAD_HANDLE;
+    }
+    if ((e->rights & req_rights) != req_rights) {
+        spin_unlock;
+        return -ACCESS;
+    }
 
     // 分配新槽位
     int slot = ht_alloc_slot(ht);                   // O(n/64) bitmap 扫描
     if (slot < 0) {
         // 尝试扩容
-        if (ht->capacity >= A20_HT_MAX_CAP) { spin_unlock; return -NO_SPACE; }
+        if (ht->capacity >= A20_HT_MAX_CAP) {
+            spin_unlock;
+            return -NO_SPACE;
+        }
         ht_grow(ht);                                // 2x 扩容
         slot = ht_alloc_slot(ht);
-        if (slot < 0) { spin_unlock; return -NO_SPACE; }
+        if (slot < 0) {
+            spin_unlock;
+            return -NO_SPACE;
+        }
     }
 
     // 写入新条目并增加引用计数（必须在临界区内，见下文引理 R1）
@@ -696,7 +719,7 @@ int64_t a20_handle_dup(a20_handle_table_t *ht, a20_handle_t src,
 
 3. **RI 保持**：
    - **RI-1**：新条目 $(o, \rho_{req})$ 与 $HT_a^p(n_{fresh}) = (o, \rho_{req})$ 一致。$\checkmark$
-   - **RI-2**：新增条目增加 $refcount_a(o)$ by 1；`refcount_inc` 增加具体 refcount by 1。$\checkmark$
+   - **RI-2**：新增 HT 条目使 owned-reference 总数增加 1；`refcount_inc` 增加具体 refcount by 1。$\checkmark$
    - **RI-3**：对象内部状态不变。$\checkmark$
    - **RI-4**：`ht_alloc_slot` 设置 bitmap 位，与条目写入一致。$\checkmark$
 
@@ -758,9 +781,22 @@ int64_t a20_handle_lookup(ht, h, expected_type, required_rights, out) {
 **具体实现**（08 §4.3，简化关键路径）：
 
 ```c
-// 预验证阶段（持有 ht->lock）spin_lock(&ht->lock);verify channel handle: type == CHANNEL, W ∈ rightsfor each passed handle h_i:
+// 预验证阶段（持有 ht->lock）
+spin_lock(&ht->lock);
+verify channel handle: type == CHANNEL, W ∈ rights
+for each passed handle h_i:
     verify h_i exists, Transfer ∈ rights
-  construct message with {data, handle_infos[]}// 提交阶段（持有 ht->lock + peer->lock）spin_lock(&peer->lock);verify peer->total_data + data_len ≤ C_MAXfor each passed handle: object_refcount_inc(handle_i.object)enqueue_message(peer, msg)wake_one(&peer->waiters)spin_unlock(&peer->lock);spin_unlock(&ht->lock);
+construct message with {data, handle_infos[]}
+
+// 提交阶段（持有 ht->lock + peer->lock）
+spin_lock(&peer->lock);
+verify peer->total_data + data_len ≤ C_MAX
+for each passed handle:
+    object_refcount_inc(handle_i.object)
+enqueue_message(peer, msg)
+wake_one(&peer->waiters)
+spin_unlock(&peer->lock);
+spin_unlock(&ht->lock);
 ```
 
 **精化论证**：
@@ -776,8 +812,8 @@ int64_t a20_handle_lookup(ht, h, expected_type, required_rights, out) {
    - 发送方 handle table **不变** → 共享语义
 
 3. **RI 保持**：
-   - **RI-1**：发送方 HT 不变。接收方此时尚未分配条目（消息在 peer 队列中），$HT_a$ 不变。$\checkmark$
-   - **RI-2**：refcount 增加 k，与具体 `refcount_inc` × k 一致。$\checkmark$
+   - **RI-1**：发送方 HT 不变，接收方尚无条目；抽象队列新增带 $k$ 个 owned references 的完整消息。$\checkmark$
+   - **RI-2**：抽象 queued-message reference 数和具体 `refcount` 都增加 $k$；不是以尚不存在的接收方条目解释该增量。$\checkmark$
    - **RI-3**：peer 队列追加消息，channel 状态正确更新。$\checkmark$
 
 $\square$
@@ -1054,12 +1090,14 @@ SOS 的数学模型中 $\sigma \to \sigma'$ 是全局瞬时转移，但 C 实现
 **约定 M1（Spinlock 保证序）**：A20OS 的 `spinlock_t` 实现保证：
 
 ```c
-// spin_lock：void spin_lock(spinlock_t *lk) {
+// spin_lock：
+void spin_lock(spinlock_t *lk) {
     while (__atomic_test_and_set(&lk->locked, __ATOMIC_ACQUIRE))
         ;  // 自旋
 }
 
-// spin_unlock：void spin_unlock(spinlock_t *lk) {
+// spin_unlock：
+void spin_unlock(spinlock_t *lk) {
     __atomic_clear(&lk->locked, __ATOMIC_RELEASE);
 }
 ```
@@ -1096,11 +1134,13 @@ $$\forall \text{shared write } w \text{ in CS}_p. \ \forall \text{shared read } 
 A20OS 中的 `refcount_t` 操作使用 `__atomic_add_fetch` / `__atomic_sub_fetch`：
 
 ```c
-// refcount_inc：static inline void refcount_inc(refcount_t *rc) {
+// refcount_inc：
+static inline void refcount_inc(refcount_t *rc) {
     __atomic_add_fetch(&rc->count, 1, __ATOMIC_RELAXED);
 }
 
-// refcount_dec_and_test：static inline bool refcount_dec_and_test(refcount_t *rc) {
+// refcount_dec_and_test：
+static inline bool refcount_dec_and_test(refcount_t *rc) {
     return __atomic_sub_fetch(&rc->count, 1, __ATOMIC_ACQ_REL) == 0;
 }
 ```

@@ -1,6 +1,6 @@
 # A20OS Native ABI：安全模型设计
 
-> 本文档定义 Native ABI 的 capability 安全模型，包括 14 个权限位的代数结构、handle transfer 语义、安全标签格和权限降级不变式。
+> 本文档定义 Native ABI 的 capability 安全模型，包括 14 个权限位的代数结构、handle transfer 语义、安全标签格和权限降级不变式。内容已按 `e33c3219` 源码核对；数学段落中标为“目标性质”的内容不等同于仓库已有机器验证或全路径信息流证明。
 
 ---
 
@@ -74,12 +74,14 @@ $$\forall i.\ \rho_i(handle) \subseteq \rho_{i-1}(handle)$$
 
 ### 2.3 Confused Deputy 不可行性
 
-**定理**：在 A20OS 的 handle 系统中，confused deputy 攻击不可行。
+**目标性质**：handle 不可伪造和 rights 单调收缩能减少 confused-deputy 攻击面，但不能一般性证明 confused deputy 不可行；服务若错误地代表低权限调用者使用自己的高权限 handle，仍可能成为 deputy。
 
-证明：假设进程 A 试图通过进程 B 访问 A 不应有权限的资源 R。B 持有 R 的 handle，权限为 $\rho_B$。A 请求 B 操作 R。B 执行操作时，使用的是 B 自己的 handle 权限 $\rho_B$。A 无法：
+handle 层能保证 A 无法：
 1. 增加 B handle 的权限（降级单调性）
 2. 伪造指向 R 的 handle（handle 是进程本地编号，无法跨进程伪造）
-3. 通过 transfer 获得 R 的 handle（$\rho_{recv} \subseteq \rho_B$，但 A 从未持有 R 的 handle）
+3. 通过 transfer 获得超过 B 显式传递上限的 rights。
+
+服务协议仍必须认证请求方并按最小权限选择操作；handle 代数本身不验证 B 的授权决策。
 
 ---
 
@@ -93,12 +95,12 @@ $$\forall i.\ \rho_i(handle) \subseteq \rho_{i-1}(handle)$$
 |------|---------|------|
 | task | Wait, Signal, Stat, Dup, Transfer, Control, Admin | 进程操作 |
 | thread | Stat, Dup, Transfer, Control | 线程操作 |
-| file | R, W, Stat, Seek, Dup, Transfer, Map, Control | 文件 I/O |
+| file | R, W, Exec, Stat, Seek, Dup, Transfer, Map, Control | 文件 I/O |
 | dir | R, Stat, Dup, Transfer, Control | 目录操作 |
 | socket | R, W, Stat, Dup, Transfer, Connect, Accept, Control | 网络操作 |
 | pipe | R, W, Stat, Dup, Transfer | 管道 I/O |
-| channel | R, W, Dup, Transfer | 消息传递 |
-| eventq | R, Dup, Transfer, Control | 事件队列 |
+| channel | R, W, Stat, Dup, Transfer | 消息传递 |
+| eventq | R, Stat, Dup, Transfer, Control | 事件队列 |
 | timer | Stat, Dup, Transfer, Control | 定时器 |
 | shm | R, W, Map, Stat, Dup, Transfer, Control | 共享内存 |
 | device | R, W, Map, Stat, Seek, Dup, Transfer, Control | 设备操作 |
@@ -110,8 +112,8 @@ $$\forall i.\ \rho_i(handle) \subseteq \rho_{i-1}(handle)$$
 
 | 操作 | 所需权限 | 适用类型 |
 |------|---------|---------|
-| handle_read | R | file, dir, pipe, socket, shm |
-| handle_write | W | file, pipe, socket, shm |
+| handle_read | R | file, dir, pipe, socket, device（当前 global-fd 后端；MEMORY 不支持直接 read） |
+| handle_write | W | file, pipe, socket, device（当前 global-fd 后端；MEMORY 不支持直接 write） |
 | handle_stat | Stat | all |
 | handle_control | Control | all |
 | handle_dup | Dup | all |
@@ -210,7 +212,7 @@ $$\mathcal{L} = \{L, M, H\}, \quad L \sqsubseteq M \sqsubseteq H$$
 
 ### 5.3 $\mathcal{L}$-Noninterference
 
-**定理**：如果系统初始状态满足标签约束，且所有操作遵循传播规则，则高标签进程的行为不影响低标签进程的观察。
+**目标性质**：如果所有可观察路径都执行标签传播规则，可建立高标签行为不影响低标签观察的 noninterference 性质。当前内核在 handle read/write、channel、transfer、vm_share 等选定路径执行检查，但尚无覆盖所有对象、共享内存映射、namespace、调试和侧信道的完整证明，因此下式是设计目标而非已验收定理。
 
 形式化：对任意两个初始状态 $\sigma_0, \sigma_0'$，如果它们在低标签部分相同（$L$-equivalent），则经过任意操作序列后仍 $L$-equivalent。
 
@@ -296,7 +298,7 @@ Handle 过期后有两种行为：
 
 ## 7. 命名空间隔离
 
-### 7.1 Namespace 类型
+### 7.1 Namespace 类型与当前边界
 
 | 类型 | 说明 | 隔离内容 |
 |------|------|---------|
@@ -308,12 +310,16 @@ Handle 过期后有两种行为：
 ### 7.2 Namespace 操作
 
 ```c
-/* 创建命名空间 */int64_t ns_create(uint32_t ns_type, a20_flags_t flags, a20_handle_t *out);
+/* 创建命名空间 */
+int64_t ns_create(uint32_t ns_type, a20_flags_t flags, a20_handle_t *out);
 
-/* 应用命名空间到目标 task */int64_t ns_apply(a20_handle_t ns, a20_handle_t target);
+/* 应用命名空间到目标 task */
+int64_t ns_apply(a20_handle_t ns, a20_handle_t target);
 ```
 
-`ns_apply` 需要 target handle 的 `ADMIN` 权限。Namespace 是 handle，可以传递和降级。
+`ns_apply` 需要 namespace handle 的 `ADMIN` 和 target task handle 的 `CONTROL`。Namespace 是 handle，可以传递和降级。
+
+当前 `ns_create/ns_apply` 会创建对象并写入 target 的 `root_path`/`ns_ctx` 字段。文件系统 root 已接入路径解析；network/PID/device 字段是否形成完整隔离取决于各子系统消费点，不能仅凭对象和字段存在宣称完整 namespace 隔离。
 
 ### 7.3 Spawn 中的 Namespace
 
@@ -360,9 +366,9 @@ int64_t debug_map_memory(a20_handle_t dbg, uint64_t addr, uint64_t len, uint32_t
 | 特性 | A20OS | Zircon | seL4 | Capsicum |
 |------|-------|--------|------|----------|
 | 权限模型 | 14 位 rights | ~30 种 rights | CNode cap types | fd capabilities |
-| 对象类型 | 13 | ~25 | ~15 | N/A (fd-based) |
+| 对象类型 | 14 | ~25 | ~15 | N/A (fd-based) |
 | 权限降级 | dup 子集 + transfer 交集 | zx_handle_duplicate | CNode mint | cap_enter |
-| 形式化证明 | SOS 操作语义 | 无 | Isabelle/HOL | 无 |
+| 形式化证明 | 文档中的纸笔 SOS 模型（未机器验证） | 无 | Isabelle/HOL | 无 |
 | Handle 传递 | channel 共享语义 | channel 移动语义 | IPC endpoint | SCM_RIGHTS |
 | 信息流控制 | $\mathcal{L}$-noninterference | 无 | 信息流策略 | 无 |
 | 双 ABI 隔离 | 信息流能力边界定理 | 无 | 无 | 在 POSIX 内 |

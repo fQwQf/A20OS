@@ -42,14 +42,20 @@ static const smp_platform_ops_t board_smp_ops = {
 `secondary_init` 只初始化当前 CPU 的板级控制器状态，例如 GIC CPU interface、PLIC context 或 IOCSR IPI enable。共享 lifecycle 的顺序是：
 
 ```text
-proc_init_secondaryplatform secondary_inittrap_inittimer_initpublish onlineenable local IRQidle_loop
+proc_init_secondary
+-> platform secondary_init
+-> trap_init
+-> timer_init
+-> publish online
+-> enable local IRQ
+-> idle_loop
 ```
 
 不支持 secondary 启动的平台不要提供伪造的空 `smp_platform_ops`。保持 `.smp = NULL`，即使内核以 `NR_CPUS>1` 构建也会明确退化为 BSP-only。
 
 ## 中断与定时器
 
-板级 irqchip 负责设备 IRQ 的 enable、disable、ack 和 eoi。调度 IPI 只通过 `smp_platform_ops.send_ipi`，不属于设备 irqchip 操作表。硬件协议可复用时，应抽取到 `kernel/drivers/irqchip/`，board 只提供基址、IRQ 和 affinity 数据。
+板级 irqchip 负责设备 IRQ 的 enable、disable、ack 和 eoi。调度 IPI 只通过 `smp_platform_ops.send_ipi`，不属于设备 irqchip 操作表。硬件协议可复用时，应放到 `kernel/drivers/` 下清晰命名的可复用子目录，board 只提供基址、IRQ 和 affinity 数据；当前树没有预建的 `kernel/drivers/irqchip/` 目录，不要把规划路径写成现有路径。
 
 每个 secondary 都必须有可用的本地 timer。`timer_get_ticks()` 在 CPU 迁移前后必须单调，频率必须与 `ARCH_TIMER_FREQ` 契约一致；不同 CPU 的本地 timer 配置不能只依赖 BSP 的一次性寄存器初始化。
 
@@ -70,7 +76,12 @@ proc_init_secondaryplatform secondary_inittrap_inittimer_initpublish onlineenabl
 示例命令：
 
 ```sh
-make ARCH=<arch> BOARD=<board> ABI=both BRINGUP=1 NR_CPUS=1 kernel-onlymake ARCH=<arch> BOARD=<board> ABI=linux BRINGUP=0 NR_CPUS=8 dev-buildmake check-smp-platform-boundarymake check-arch-boundarymake check-concurrency-foundation
+make ARCH=<arch> BOARD=<board> ABI=both BRINGUP=1 NR_CPUS=1 kernel-only
+make ARCH=<arch> BOARD=<board> ABI=linux BRINGUP=0 NR_CPUS=2 \
+    ALLOW_UNVERIFIED_SMP=1 dev-build
+make check-smp-platform-boundary
+make check-arch-boundary
+make check-concurrency-foundation
 ```
 
 新平台在完成运行时多核验证前，需要显式设置 `ALLOW_UNVERIFIED_SMP=1`。不要仅凭成功链接就把平台加入已验证列表。
@@ -80,5 +91,9 @@ make ARCH=<arch> BOARD=<board> ABI=both BRINGUP=1 NR_CPUS=1 kernel-onlymake ARCH
 平台文档至少记录 QEMU 或硬件型号、固件版本、CPU 数、启动日志、worker CPU 分布、压力测试结果和已知限制。多核验收应包含如下证据，而不只是 configured 数量：
 
 ```text
-[SMP] 8/8 configured CPUs onlineSMP_BENCH workers=8 ... status=PASSSMP_BENCH cpus 0:1 1:1 2:1 3:1 4:1 5:1 6:1 7:1SCHED_STRESS: PASSPROC_STRESS: PASS
+[SMP] 8/8 configured CPUs online
+SMP_BENCH workers=8 ... status=PASS
+SMP_BENCH cpus 0:1 1:1 2:1 3:1 4:1 5:1 6:1 7:1
+SCHED_STRESS: PASS
+PROC_STRESS: PASS
 ```
