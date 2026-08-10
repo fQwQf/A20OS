@@ -104,7 +104,8 @@ int main(void)
     int external_benchmark =
         (access("/bin/etc/benchmark-mode", F_OK) == 0);
     int final_benchmark =
-        (access("/bin/etc/release-eval-group", F_OK) == 0);
+        (access("/a20/etc/release-eval-group", F_OK) == 0 ||
+         access("/bin/etc/release-eval-group", F_OK) == 0);
 
     if (external_benchmark && final_benchmark) {
         printf("[init] conflicting benchmark entry markers\n");
@@ -114,9 +115,9 @@ int main(void)
     }
 
     /*
-     * release images are complete root filesystems.  Their dynamic
-     * loader and libraries become available after the static chroot helper
-     * enters /test, so copying those files into the RAMFS only delays entry.
+     * release images are mounted directly at /.  Their dynamic loader and
+     * libraries are already available there, so copying those files into the
+     * bootstrap environment only delays entry.
      * Keep the original setup for interactive and legacy benchmark images.
      */
     if (!final_benchmark)
@@ -126,7 +127,11 @@ int main(void)
     xmkdir("/tmp/sysinfo");
     write_file("/tmp/sysinfo/model", "A20OS Virtual Machine\n", 0644);
 
-    char path_val[512] = "/bin";
+    char path_val[512];
+    if (final_benchmark)
+        strcpy(path_val, "/bin:/usr/bin:/sbin:/usr/sbin:/glibc:/a20");
+    else
+        strcpy(path_val, "/bin");
     static const char *path_dirs[] = {
         "/usr/bin", "/test", "/test/bin", "/test/glibc", "/test/musl",
 #if defined(__loongarch64)
@@ -153,17 +158,26 @@ int main(void)
         append_if_dir(ld_val, sizeof(ld_val), *p);
     if (!ld_val[0]) strcpy(ld_val, "/lib:/bin/lib");
 
-    char path_env[576], ld_env[320];
+    const char *shell_path = final_benchmark ? "/a20/mksh" : "/bin/mksh";
+    char path_env[576], ld_env[320], shell_env[64];
     snprintf(path_env, sizeof(path_env), "PATH=%s", path_val);
     snprintf(ld_env, sizeof(ld_env), "LD_LIBRARY_PATH=%s", ld_val);
+    snprintf(shell_env, sizeof(shell_env), "SHELL=%s", shell_path);
 
-    char *envp[] = {path_env, ld_env, "HOME=/", "SHELL=/bin/mksh", "TERM=vt100", NULL};
+    char *legacy_envp[] = {
+        path_env, ld_env, "HOME=/", shell_env, "TERM=vt100", NULL
+    };
+    char *final_envp[] = {
+        path_env, "HOME=/", shell_env, "TERM=vt100", NULL
+    };
+    char **envp = final_benchmark ? final_envp : legacy_envp;
 
     /* The GUI image carries both locations.  Keep the root marker as a
      * fallback for 32-bit ports whose early VFS path walk cannot yet resolve
      * the marker through the /bin mount prefix reliably. */
-    if (access("/bin/etc/a20-gui", F_OK) == 0 ||
-        access("/bin/a20-gui", F_OK) == 0) {
+    if (!final_benchmark &&
+        (access("/bin/etc/a20-gui", F_OK) == 0 ||
+         access("/bin/a20-gui", F_OK) == 0)) {
         printf("[init] starting desktop\n");
         desktop_pid = fork();
         if (desktop_pid == 0) {
@@ -190,18 +204,20 @@ int main(void)
         }
     }
 
-    telnet_pid = fork();
-    if (telnet_pid == 0) {
-        char *telnet_argv[] = { "telnetd", "2323", NULL };
-        execve("/bin/telnetd", telnet_argv, envp);
-        _exit(127);
-    }
-    if (telnet_pid < 0) {
-        perror("fork telnetd");
-        telnet_pid = 0;
+    if (!final_benchmark) {
+        telnet_pid = fork();
+        if (telnet_pid == 0) {
+            char *telnet_argv[] = { "telnetd", "2323", NULL };
+            execve("/bin/telnetd", telnet_argv, envp);
+            _exit(127);
+        }
+        if (telnet_pid < 0) {
+            perror("fork telnetd");
+            telnet_pid = 0;
+        }
     }
 
-    char *script = final_benchmark ? "/bin/final_benchmark.sh" :
+    char *script = final_benchmark ? "/a20/final_benchmark.sh" :
                    external_benchmark ? "/bin/benchmark.sh" : NULL;
     char *argv[] = {"mksh", script, NULL};
 
@@ -209,7 +225,7 @@ int main(void)
     shell_pid = fork();
     if (shell_pid == 0) {
         printf("[init] fork=0, calling execve mksh\n");
-        execve("/bin/mksh", argv, envp);
+        execve(shell_path, argv, envp);
         perror("execve mksh");
         _exit(127);
     }
@@ -220,7 +236,7 @@ int main(void)
              * process with the shell so the system still reaches an
              * interactive prompt. */
             printf("[init] errno=EINVAL, calling execve mksh\n");
-            execve("/bin/mksh", argv, envp);
+            execve(shell_path, argv, envp);
             perror("execve mksh");
         } else {
             perror("fork");
