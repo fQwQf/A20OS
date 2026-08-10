@@ -76,7 +76,8 @@ if [ ${#PHASES[@]} -eq 0 ]; then
     WANT_ALL=1
     PHASES=(musl wayland-native libffi wayland protocols pixman \
             xkeyboard-config xkbcommon \
-            libevdev stubs libdrm libinput mesa weston ffmpeg player)
+            libevdev stubs libdrm libinput mesa glib dbus atk gdk-pixbuf \
+            cairo pango gtk3 weston ffmpeg player)
 fi
 
 want() {
@@ -155,6 +156,11 @@ cpp = '$MESON_CXX'
 ar = '$AR'
 strip = '${CROSS}strip'
 pkgconfig = 'pkg-config'
+glib-compile-resources = '/usr/bin/glib-compile-resources'
+glib-mkenums = '/usr/bin/glib-mkenums'
+glib-genmarshal = '/usr/bin/glib-genmarshal'
+glib-compile-schemas = '/usr/bin/glib-compile-schemas'
+gdbus-codegen = '/usr/bin/gdbus-codegen'
 
 [properties]
 needs_exe_wrapper = true
@@ -162,7 +168,9 @@ pkg_config_libdir = ['$SYSROOT/lib/pkgconfig', '$SYSROOT/share/pkgconfig']
 
 [built-in options]
 c_args = ['-O2', '-D_GNU_SOURCE', '-fPIC', '-I$SYSROOT/include', '-I$SYSROOT/include/libdrm']
-c_link_args = ['-fPIC', '-L$SYSROOT/lib']
+c_link_args = ['-fPIC', '-L$SYSROOT/lib', '-Wl,-rpath-link,$SYSROOT/lib']
+cpp_args = ['-O2', '-D_GNU_SOURCE', '-fPIC', '-I$SYSROOT/include', '-I$SYSROOT/include/libdrm']
+cpp_link_args = ['-fPIC', '-L$SYSROOT/lib', '-Wl,-rpath-link,$SYSROOT/lib']
 default_library = 'both'
 EOF
 }
@@ -456,6 +464,118 @@ if want mesa && ! stamp mesa; then
             "$SYSROOT/lib/libstdc++.so.6.0.29" 2>/dev/null || true
     fi
     mark mesa
+fi
+
+# ------------------------------------------------------------------ glib
+if want glib && ! stamp glib; then
+    echo "=== glib ==="
+    # glib 2.84 needs a gvdb with gvdb_table_n_children and the tests /
+    # build-tools options; the pinned gvdb.wrap revision predates that.
+    GVDB_DIR="$USER_DIR/external/gui/glib/subprojects/gvdb"
+    if [ -d "$GVDB_DIR/.git" ]; then
+        (cd "$GVDB_DIR" && git stash -q 2>/dev/null; \
+         git checkout -q c6f2359 2>/dev/null || true; \
+         rm -f meson.options; \
+         grep -q "build-tools" meson_options.txt 2>/dev/null || \
+             echo "option('build-tools', type : 'boolean', value : false)" >> meson_options.txt)
+    fi
+    meson_pkg glib "$USER_DIR/external/gui/glib" \
+        -Dtests=false -Dinstalled_tests=false -Dglib_assert=false \
+        -Dglib_checks=false -Dlibmount=disabled -Dlibelf=disabled \
+        -Dman=false -Ddocumentation=false -Ddtrace=false
+    mark glib
+fi
+
+# ------------------------------------------------------------------ dbus
+if want dbus && ! stamp dbus; then
+    echo "=== dbus (cmake) ==="
+    OB=$B/build-dbus
+    rm -rf "$OB" && mkdir -p "$OB"
+    (cd "$OB" && cmake "$USER_DIR/external/gui/dbus" \
+        -DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR="$CPU_FAMILY" \
+        -DCMAKE_C_COMPILER="$MESON_CC" -DCMAKE_CXX_COMPILER="$MESON_CXX" \
+        -DCMAKE_INSTALL_PREFIX="$SYSROOT" -DCMAKE_PREFIX_PATH="$SYSROOT" \
+        -DEXPAT_INCLUDE_DIR="$SYSROOT/include" \
+        -DEXPAT_LIBRARY="$SYSROOT/lib/libexpat.so" \
+        -DDBUS_BUILD_TESTS=OFF -DDBUS_BUILD_X11=OFF \
+        -DENABLE_SYSTEMD=OFF -DENABLE_LAUNCHD=OFF \
+        -DDBUS_SESSION_SOCKET_DIR=/tmp \
+        -DCMAKE_C_FLAGS="-I$SYSROOT/include" > /dev/null)
+    # dbus 1.14 cmake leaks a -lsystemd into every link even with
+    # ENABLE_SYSTEMD=OFF; strip it so the toolchain does not need systemd.
+    find "$OB" -name "link.txt" -exec sed -i 's/ -lsystemd//g' {} \;
+    cmake --build "$OB" --target dbus-daemon dbus-1 dbus-send \
+        dbus-run-session dbus-uuidgen -j"$(nproc)" 2>&1 | tail -3
+    cmake --install "$OB" 2>/dev/null || true
+    cp -r "$USER_DIR/external/gui/dbus"/dbus/*.h "$SYSROOT/include/dbus/" 2>/dev/null || true
+    mkdir -p "$SYSROOT/lib/pkgconfig"
+    cat > "$SYSROOT/lib/pkgconfig/dbus-1.pc" <<EOF
+prefix=$SYSROOT
+exec_prefix=\${prefix}
+libdir=\${exec_prefix}/lib
+includedir=\${prefix}/include
+Name: dbus
+Description: D-Bus message bus
+Version: 1.14.10
+Libs: -L\${libdir} -ldbus-1
+Cflags: -I\${includedir}/dbus-1.0 -I\${libdir}/dbus-1.0/include
+EOF
+    mark dbus
+fi
+
+# ------------------------------------------------------------------ atk
+if want atk && ! stamp atk; then
+    echo "=== atk ==="
+    meson_pkg atk "$USER_DIR/external/gui/atk" \
+        -Dintrospection=false -Ddocs=false
+    mark atk
+fi
+
+# ------------------------------------------------------------------ gdk-pixbuf
+if want gdk-pixbuf && ! stamp gdk-pixbuf; then
+    echo "=== gdk-pixbuf ==="
+    meson_pkg gdk-pixbuf "$USER_DIR/external/gui/gdk-pixbuf" \
+        -Dtests=false -Dinstalled_tests=false -Dgtk_doc=false \
+        -Dintrospection=disabled -Dman=false -Dbuiltin_loaders=png \
+        -Drelocatable=true -Dgio_sniffing=false -Djpeg=false \
+        -Dtiff=false -Dgif=false
+    mark gdk-pixbuf
+fi
+
+# ------------------------------------------------------------------ cairo
+if want cairo && ! stamp cairo; then
+    echo "=== cairo ==="
+    meson_pkg cairo "$USER_DIR/external/gui/cairo" \
+        -Dfontconfig=enabled -Dfreetype=enabled -Dpng=enabled \
+        -Dzlib=enabled -Dxlib=disabled -Dxlib-xcb=disabled \
+        -Dxcb=disabled -Dquartz=disabled -Ddwrite=disabled \
+        -Dtee=disabled
+    mark cairo
+fi
+
+# ------------------------------------------------------------------ pango
+if want pango && ! stamp pango; then
+    echo "=== pango ==="
+    meson_pkg pango "$USER_DIR/external/gui/pango" \
+        -Dbuild-testsuite=false -Dbuild-examples=false \
+        -Ddocumentation=false -Dgtk_doc=false -Dintrospection=disabled \
+        -Dcairo=enabled -Dfreetype=enabled -Dfontconfig=enabled
+    mark pango
+fi
+
+# ------------------------------------------------------------------ gtk3
+if want gtk3 && ! stamp gtk3; then
+    echo "=== gtk3 ==="
+    meson_pkg gtk3 "$USER_DIR/external/gui/gtk3" \
+        -Dgtk_doc=false -Dman=false -Dtests=false -Dinstalled_tests=false \
+        -Ddemos=false -Dexamples=false \
+        -Dintrospection=false \
+        -Dx11_backend=false -Dwayland_backend=true \
+        -Dbroadway_backend=false -Dquartz_backend=false \
+        -Dwin32_backend=false -Dcloudproviders=false \
+        -Dprint_backends=file -Dcolord=no \
+        -Dlibepoxy:glx=no
+    mark gtk3
 fi
 
 # ---------------------------------------------------------------- weston
