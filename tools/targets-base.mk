@@ -12,7 +12,7 @@
 		check-riscv64-user check-loongarch64-user check-aarch64-user check-x86_64-user check-arm32-user check-riscv32-user check-ppc64le-user \
 		smoke-riscv64 smoke-loongarch64 smoke-aarch64 smoke-x86_64 smoke-qemu-gui-x86_64 smoke-qemu-gui-riscv64 smoke-qemu-gui-aarch64 smoke-qemu-gui-arm32 smoke-qemu-gui-loongarch64 smoke-arm32 smoke-riscv32 smoke-ppc64le smoke-abi-linux smoke-a20-channel smoke-ptrace smoke-network-suite smoke-proc-a20 smoke-proc-stress smoke-procfs-stress smoke-mm-stress smoke-mm-fork-exec-race smoke-vfs-stress smoke-vfs-edge smoke-sched-stress smoke-futex-stress smoke-socket-stress smoke-driver-lifecycle smoke-drvmod smoke-drvmod-riscv64 smoke-drvmod-x86_64 smoke-drvmod-aarch64 smoke-drvmod-loongarch64 smoke-hda smoke-audio-userspace smoke-virtio-sound smoke-pci-portability smoke-native-handle smoke-native-libc smoke-native-futex smoke-io-event smoke-signalfd-stress smoke-evdev-stress smoke-scm-stress \
 		smoke-arch-mmu-matrix \
-		FORCE regen-rootfs-overlay \
+		FORCE regen-rootfs-overlay check-rootfs-overlay-generator \
 		user_apps fs_img kernel-only dev-build contest-rv contest-la \
 		eval-dev-build-rv eval-dev-build-la \
 		qemu-disk-rv qemu-disk-la \
@@ -71,5 +71,17 @@ regen-rootfs-overlay: tools/gen_rootfs_overlay.py $(ROOTFS_OVERLAY_FILES)
 	@mkdir -p $(dir $(ROOTFS_OVERLAY_SRC)) $(dir $(ROOTFS_OVERLAY_HDR))
 	$(PYTHON) $< --out-c $(ROOTFS_OVERLAY_SRC) --out-h $(ROOTFS_OVERLAY_HDR) --root $(ROOTFS_OVERLAY_DIR)
 
-$(ROOTFS_OVERLAY_SRC) $(ROOTFS_OVERLAY_HDR): tools/gen_rootfs_overlay.py $(ROOTFS_OVERLAY_FILES)
-	$(PYTHON) $< --out-c $(ROOTFS_OVERLAY_SRC) --out-h $(ROOTFS_OVERLAY_HDR) --root $(ROOTFS_OVERLAY_DIR)
+# These generated files are checked in so contest builds do not depend on Python.
+# Regenerate them explicitly: checkout mtimes are not a reliable dependency order.
+check-rootfs-overlay-generator:
+	@tmp_dir="$$(mktemp -d)"; \
+	trap 'rm -rf "$$tmp_dir"' EXIT; \
+	$(PYTHON) tools/gen_rootfs_overlay.py \
+		--out-c "$$tmp_dir/rootfs_overlay.c" \
+		--out-h "$$tmp_dir/rootfs_overlay.h" \
+		--root $(ROOTFS_OVERLAY_DIR); \
+	if ! cmp -s "$$tmp_dir/rootfs_overlay.h" $(ROOTFS_OVERLAY_HDR); then \
+		echo "rootfs overlay header is out of sync with its generator" >&2; \
+		diff -u $(ROOTFS_OVERLAY_HDR) "$$tmp_dir/rootfs_overlay.h"; \
+		exit 1; \
+	fi
