@@ -252,7 +252,7 @@ TLSE_CFLAGS := $(TLSE_BASE_CFLAGS) $(TLSE_OPT) $(TLSE_ARCH_CFLAGS) $(TLSE_NOMMU_
 LOCAL_CMD_OBJS := $(patsubst cmds/%.c,$(OBJ_DIR)/cmds/%.o,$(LOCAL_CMD_SRCS))
 LOCAL_CMDS := $(addprefix $(BUILD_DIR)/,$(LOCAL_CMD_NAMES))
 
-FF_DIR := external/fastfetch
+FF_DIR := external/apps/fastfetch
 FF_GEN := $(OBJ_DIR)/fastfetch/gen
 FF_MAIN := $(FF_DIR)/src/fastfetch.c
 FF_MAIN_OBJ := $(OBJ_DIR)/fastfetch/main.o
@@ -654,7 +654,7 @@ $(WGET_CMD): $(WGET_OBJ) $(TLSE_OBJ) | build_dir musl_prepare
 	@mkdir -p $(dir $@)
 	$(CC) $(LDFLAGS) -o $@ $(CRT_START) $(WGET_OBJ) $(TLSE_OBJ) $(CRT_END) $(LIBC)
 
-LVGL_DIR := external/lvgl
+LVGL_DIR := external/gui/lvgl
 LVGL_SRCS := $(shell find $(LVGL_DIR)/src -type f -name '*.c')
 LVGL_OBJS := $(patsubst $(LVGL_DIR)/%.c,$(OBJ_DIR)/lvgl/%.o,$(LVGL_SRCS))
 LVGL_CFLAGS := $(CFLAGS) -I$(LVGL_DIR) -Iexternal -Idesktop -DLV_CONF_INCLUDE_SIMPLE
@@ -669,7 +669,7 @@ desktop/desktop_files.c desktop/desktop_network.c desktop/desktop_system.c
 DESKTOP_OBJS := $(patsubst desktop/%.c,$(OBJ_DIR)/desktop/%.o,$(DESKTOP_SRCS))
 
 desktop/desktop_cursor_breeze.c: desktop/gen_breeze_cursor.py
-	$(PYTHON) $< $@ external/breeze
+	$(PYTHON) $< $@ external/gui/breeze
 
 $(OBJ_DIR)/lvgl/%.o: $(LVGL_DIR)/%.c desktop/lv_conf.h | build_dir musl_prepare
 	@mkdir -p $(dir $@)

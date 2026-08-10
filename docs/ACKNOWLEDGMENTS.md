@@ -22,25 +22,25 @@ A20OS 使用并参考了许多开源项目与公开标准。本文档集中记�
 | [mksh](http://www.mirbsd.org/mksh.htm) | 默认 shell | 逐文件混合：MirBSD/MirOS 条款、ISC、CC0 OR MirOS，并含 Unicode notice | `user/external/mksh-cvs2git` |
 | [sbase](https://core.suckless.org/sbase/) | 基础工具（`ls`、`cat` 等） | MIT | `user/external/sbase` |
 | [TLSe](https://github.com/eduardsui/tlse) | wget 的 TLS 实现 | BSD-2-Clause OR Unlicense | `user/external/tlse` |
-| [LVGL](https://lvgl.io/) | 桌面 GUI 框架 | MIT | `user/external/lvgl` |
-| [Weston](https://gitlab.freedesktop.org/wayland/weston) | Wayland compositor | MIT | `user/external/weston` |
-| [Wayland](https://gitlab.freedesktop.org/wayland/wayland) | Wayland 协议库 | MIT | `user/external/wayland` |
-| [wayland-protocols](https://gitlab.freedesktop.org/wayland/wayland-protocols) | Wayland 协议扩展 | MIT | `user/external/wayland-protocols` |
-| [pixman](https://gitlab.freedesktop.org/pixman/pixman) | 像素合成 | MIT | `user/external/pixman` |
-| [libxkbcommon](https://github.com/xkbcommon/libxkbcommon) | 键盘布局 | MIT/X11 | `user/external/libxkbcommon` |
-| [libevdev](https://gitlab.freedesktop.org/libevdev/libevdev) | evdev 事件库 | MIT | `user/external/libevdev` |
-| [libinput](https://gitlab.freedesktop.org/libinput/libinput) | 输入设备库 | MIT | `user/external/libinput` |
-| [xkeyboard-config](https://gitlab.freedesktop.org/xkeyboard-config/xkeyboard-config) | XKB 数据 | MIT | `user/external/xkeyboard-config` |
-| [libdrm](https://gitlab.freedesktop.org/mesa/drm) | DRM 用户态库 | MIT | `user/external/libdrm` |
-| [fastfetch](https://github.com/fastfetch-cli/fastfetch) | 系统信息工具 | MIT | `user/external/fastfetch` |
-| [vim](https://github.com/vim/vim) | 编辑器 | Vim License | `user/external/vim` |
-| [git](https://github.com/git/git) | 版本控制 | GPL-2.0-only；部分文件使用 GPLv2 兼容的其他许可证 | `user/external/git` |
-| [FFmpeg](https://github.com/FFmpeg/FFmpeg) | 媒体编解码 | 默认 LGPL-2.1-or-later；仍须按固定 revision、配置和文件核验 | `user/external/ffmpeg` |
-| [binutils](https://www.gnu.org/software/binutils/) | 二进制工具 | GPL-3.0-or-later / LGPL-3.0-or-later 等，按组件文件核验 | `user/external/binutils` |
+| [LVGL](https://lvgl.io/) | 桌面 GUI 框架 | MIT | `user/external/gui/lvgl` |
+| [Weston](https://gitlab.freedesktop.org/wayland/weston) | Wayland compositor | MIT | `user/external/gui/weston` |
+| [Wayland](https://gitlab.freedesktop.org/wayland/wayland) | Wayland 协议库 | MIT | `user/external/gui/wayland` |
+| [wayland-protocols](https://gitlab.freedesktop.org/wayland/wayland-protocols) | Wayland 协议扩展 | MIT | `user/external/gui/wayland-protocols` |
+| [pixman](https://gitlab.freedesktop.org/pixman/pixman) | 像素合成 | MIT | `user/external/gui/pixman` |
+| [libxkbcommon](https://github.com/xkbcommon/libxkbcommon) | 键盘布局 | MIT/X11 | `user/external/gui/libxkbcommon` |
+| [libevdev](https://gitlab.freedesktop.org/libevdev/libevdev) | evdev 事件库 | MIT | `user/external/gui/libevdev` |
+| [libinput](https://gitlab.freedesktop.org/libinput/libinput) | 输入设备库 | MIT | `user/external/gui/libinput` |
+| [xkeyboard-config](https://gitlab.freedesktop.org/xkeyboard-config/xkeyboard-config) | XKB 数据 | MIT | `user/external/gui/xkeyboard-config` |
+| [libdrm](https://gitlab.freedesktop.org/mesa/drm) | DRM 用户态库 | MIT | `user/external/gui/libdrm` |
+| [fastfetch](https://github.com/fastfetch-cli/fastfetch) | 系统信息工具 | MIT | `user/external/apps/fastfetch` |
+| [vim](https://github.com/vim/vim) | 编辑器 | Vim License | `user/external/apps/vim` |
+| [git](https://github.com/git/git) | 版本控制 | GPL-2.0-only；部分文件使用 GPLv2 兼容的其他许可证 | `user/external/apps/git` |
+| [FFmpeg](https://github.com/FFmpeg/FFmpeg) | 媒体编解码 | 默认 LGPL-2.1-or-later；仍须按固定 revision、配置和文件核验 | `user/external/libs/ffmpeg` |
+| [binutils](https://www.gnu.org/software/binutils/) | 二进制工具 | GPL-3.0-or-later / LGPL-3.0-or-later 等，按组件文件核验 | `user/external/toolchain/binutils` |
 | [Rust 工具链](https://www.rust-lang.org/) | Rust 用户态编译 | 由实际取得的工具链分发确定 | `user/external/rust`（审计基线 `e33c3219` 未跟踪该工具链内容） |
-| [musl-cross-make](https://github.com/richfelker/musl-cross-make) | 交叉编译工具链构建 | MIT | `user/external/musl-cross-make` |
-| [zlib](https://github.com/madler/zlib) | 压缩库 | Zlib | `user/external/zlib` |
-| [Breeze](https://invent.kde.org/plasma/breeze) | 桌面图标/主题资源 | 多种 GPL/LGPL 版本，按资源文件核验 | `user/external/breeze` |
+| [musl-cross-make](https://github.com/richfelker/musl-cross-make) | 交叉编译工具链构建 | MIT | `user/external/toolchain/musl-cross-make` |
+| [zlib](https://github.com/madler/zlib) | 压缩库 | Zlib | `user/external/libs/zlib` |
+| [Breeze](https://invent.kde.org/plasma/breeze) | 桌面图标/主题资源 | 多种 GPL/LGPL 版本，按资源文件核验 | `user/external/gui/breeze` |
 
 > 说明：`git`、`vim`、`binutils`、`ffmpeg` 等项目以独立用户态程序的形式构建，作为 Linux ABI 兼容性的验证负载；它们不参与内核核心的构建。
 
