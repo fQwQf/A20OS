@@ -29,17 +29,17 @@ A20OS 以 `NO_SYS=1` 模式运行 lwIP。一个全局 spinlock `g_lwip_lock` 串
 - 保护 `g_sockets[]`、每个 socket 的字段、消息队列、accept 队列、临时端口分配和 socket waiter。
 - 必须用 `spin_lock_irqsave(&g_net_lock)` 获取。
 
-### 全局顺序
+### 全局顺序与当前更严格规则
 
-网络路径的锁顺序是：
+`kernel/include/core/lock.h` 给出的全局允许顺序上界是：
 
 ```text
 g_lwip_lock -> g_net_lock
 ```
 
-`g_lwip_lock` 永远是外层锁。lwIP callback 在隐式持有 `g_lwip_lock` 的上下文中运行，然后可以获取 `g_net_lock`。任何路径都不能先持有 `g_net_lock` 再获取 `g_lwip_lock`。
+当前网络实现采用更严格的契约：`g_lwip_lock` 与 `g_net_lock` **不得同时持有**。箭头只表示若将来确有经审查的嵌套，反向顺序永远禁止；它不是对 callback 获取 `g_net_lock` 的许可。
 
-该顺序与 `kernel/include/core/lock.h` 一致；该文件记录了 `g_lwip_lock -> virtio-net nonblocking send/recv paths only`。
+lwIP callback 在隐式持有 `g_lwip_lock` 的上下文中运行，只能向 per-socket 原子 `bh_ring` 写事件并设置 pending flag。`a20_lwip_poll()` 先释放 `g_lwip_lock`，再调用只持有 `g_net_lock` 的 `net_inet_bottom_half_process_all()`。驱动数据面是另一条允许顺序：`g_lwip_lock -> virtio-net/E1000 nonblocking device lock`，驱动锁下不得回调 lwIP。
 
 ## 锁安全的 Socket 入口点
 
@@ -47,7 +47,7 @@ g_lwip_lock -> g_net_lock
 
 ### Socket 创建与销毁
 
-`net_inet_socket_init()` 和 `net_inet_socket_destroy()` 必须在整个执行期间持有 `g_lwip_lock`。它们创建或移除 lwIP PCB、设置 callback 并配置 TCP 选项。除非正在注册 socket，否则不需要访问 `g_net_lock`；socket 注册发生在 PCB 设置完成之后。
+`net_inet_socket_init()` 和 `net_inet_socket_destroy()` 在创建、配置或移除 lwIP PCB 时只持有 `g_lwip_lock`，不同时访问 socket registry。registry 与 socket 字段由调用方在独立的 `g_net_lock` 临界区处理。
 
 ### Bind
 
@@ -59,7 +59,7 @@ Stream connect 分为三个阶段：
 
 1. 本地目标解析。如果目的地址是本地地址，该路径在搜索 listener 表并构造配对 socket 时持有 `g_net_lock`。此时不持有 `g_lwip_lock`。
 2. 远端 TCP connect。地址解析后，路径获取 `g_lwip_lock`，带 connected callback 调用 `tcp_connect()`，然后释放 `g_lwip_lock`。
-3. 阻塞等待。调用者释放所有锁，并通过 `net_block_on_socket_locked()` 在 `g_net_lock` 上阻塞。connected callback 通过 `g_net_lock` 唤醒 waiter。
+3. 阻塞等待。调用者释放所有锁，并通过 `net_block_on_socket_locked()` 在 `g_net_lock` 上阻塞。connected callback 只向 `bh_ring` 发布事件；随后不持有 `g_lwip_lock` 的 bottom-half 获取 `g_net_lock`、更新状态并在解锁后唤醒 waiter。
 
 UDP 和 RAW connect 遵循与 bind 相同的模式：在锁外解析，然后只在调用 `udp_connect()` 或 `raw_connect()` 时获取 `g_lwip_lock`。
 
@@ -75,11 +75,7 @@ send 路径对本地 socket 和远端 socket 行为不同。
 
 对本地 UDP loopback 或已连接本地 socket，路径在将数据入队到目标 socket 时持有 `g_net_lock`。如果目标队列已满且调用是阻塞的，它会释放 `g_net_lock`、阻塞并重试。
 
-对远端 UDP、RAW 或 TCP send，路径必须：
-
-1. 如果需要临时 bind，在持有 `g_net_lock` 时确保 socket 已绑定。
-2. 获取 `g_lwip_lock`。
-3. 分配 pbuf、复制数据、调用 `udp_sendto()`/`udp_send()`/`tcp_write()` 加 `tcp_output()`，然后释放 `g_lwip_lock`。
+对远端 UDP、RAW 或 TCP send，socket 地址/本地队列状态和 lwIP PCB 操作分成互不重叠的临界区。调用 `pbuf_alloc()`、`udp_sendto()`/`udp_send()`、`tcp_sndbuf()`、`tcp_write()` 或 `tcp_output()` 时持有 `g_lwip_lock`，不得同时持有 `g_net_lock`。需要更新本地 socket 状态或等待队列时先释放 lwIP 锁，再进入 `g_net_lock` 临界区。
 
 `net_inet_send_tcp()` 在每轮之间不持有任何锁地轮询 lwIP 进展，然后只在调用 `tcp_sndbuf()`、`tcp_write()` 和 `tcp_output()` 时获取 `g_lwip_lock`。
 
@@ -111,13 +107,13 @@ callback 只能执行轻量、有界工作：
 
 所有重工作，包括内存分配、队列插入、大块数据复制和 waiter wake，都必须推迟到底半部。bottom-half 在对象锁内 collect 带 `wait_seq` 的 wait entry，释放对象锁后 flush wake queue。
 
-## Deferred Bottom-Half 设计
+## Deferred Bottom-Half 实现
 
-P1 I/O wakeup 决策是为网络完成处理使用 deferred bottom-half / workqueue。本节定义 bottom-half 必须如何与 `g_lwip_lock` 和 `g_net_lock` 交互。
+当前 bottom-half 不是独立 workqueue 线程。`a20_lwip_poll()` 在完成 lwIP progress 并释放 `g_lwip_lock` 后同步调用它；per-socket 定点入口也遵循同样的单锁规则。
 
 ### Bottom-half 职责
 
-网络 bottom-half 执行目前直接在 lwIP callback 中完成的工作：
+网络 bottom-half 执行 callback 不能完成的工作：
 
 - 分配 `net_msg_t` 项并复制 payload 数据。
 - 将接收消息入队到 socket 接收队列。
@@ -126,15 +122,15 @@ P1 I/O wakeup 决策是为网络完成处理使用 deferred bottom-half / workqu
 
 ### Top-half / bottom-half 拆分
 
-lwIP callback 变成最小 top-half：
+lwIP callback 是 producer：
 
 1. 检查 pbuf 并确定目标 socket。
-2. 如果有可用的预分配 per-PCB staging buffer，将 pbuf 复制进去。
-3. 在无锁 per-PCB ring 或 atomic flag 中记录事件类型和少量元数据。
+2. 把 pbuf 数据和元数据复制进固定大小的 per-socket `bh_ring` 项。
+3. 原子提交 ring head 并设置 pending flag。
 4. 调度 bottom-half。
 5. 释放 pbuf 并返回。
 
-bottom-half 稍后在 workqueue 上下文中运行：
+`a20_lwip_poll()` 解锁后运行 bottom-half：
 
 1. 获取 `g_net_lock`。
 2. 处理该 socket 的所有 pending event。
@@ -144,23 +140,23 @@ bottom-half 稍后在 workqueue 上下文中运行：
 
 ### 锁交互
 
-bottom-half 绝不能持有 `g_lwip_lock`。它只在持有 `g_net_lock` 时运行。这样保持了全局顺序：top-half 在 `g_lwip_lock` 下运行且不获取 `g_net_lock`，bottom-half 在 `g_net_lock` 下运行且不获取 `g_lwip_lock`。
+bottom-half 绝不能持有 `g_lwip_lock`。它在 `g_net_lock` 下把 staged event 转成 `net_msg_t`、更新 socket 状态，并把 waiter 收集到局部 wake queue；释放 `g_net_lock` 后才 flush wake queue。producer 与 consumer 用原子 head/tail 传递，不靠同时持有两把锁。
 
-如果 bottom-half 需要调用 lwIP，例如更新 TCP window 或关闭 PCB，它必须释放 `g_net_lock`，获取 `g_lwip_lock`，执行 lwIP 调用，释放 `g_lwip_lock`，再重新获取 `g_net_lock`。它不能同时持有两个锁。
+当前 bottom-half 不调用 lwIP。recv 消费 TCP 数据后，调用方先释放 `g_net_lock`，再由 `net_tcp_recved()` 单独获取 `g_lwip_lock`。未来增加其他 PCB 操作也必须保持这种分段方式，不能同时持有两把锁。
 
 ### top-half 与 bottom-half 之间的顺序
 
-per-PCB sequence counter 或 ring buffer 保证 bottom-half 按 top-half 入队顺序看到事件。top-half 可能在中断上下文中运行，因此 ring 的生产者侧必须是中断安全的。消费者侧只在 workqueue 上下文中运行。
+per-socket `bh_ring` 的原子 head/tail 保证 bottom-half 按 callback 入队顺序看到事件。producer 在持有 `g_lwip_lock` 且本地 IRQ 已关闭的上下文运行；consumer 在后续 poll 的 `g_net_lock` 临界区运行。
 
 ## lwIP 锁下的 kmalloc 规则
 
-`kernel/include/core/lock.h` 禁止在持有 device 或 lwIP 锁时执行内存分配，除非 callee 被记录为非阻塞。当前网络代码在 lwIP callback 内部分配内存，违反该规则。
+`kernel/include/core/lock.h` 禁止在持有 device 或 lwIP 锁时执行内存分配，除非 callee 被记录为非阻塞。旧 callback 路径曾在该上下文分配 `net_msg_t`；当前实现已改为固定 `bh_ring`，不能把已修复问题描述为现状。
 
-修正后的规则：
+当前规则：
 
 - 持有 `g_lwip_lock` 时不得调用 `kmalloc()`、`kfree()`、`net_msg_alloc()` 或任何 slab allocator 函数。
-- 在 socket 创建时预分配 per-PCB staging buffer，使 top-half 无需分配即可复制 pbuf 数据。
-- 将所有 `net_msg_t` 分配和 payload 复制移动到底半部；bottom-half 运行时不持有 `g_lwip_lock`。
+- 每个 `net_socket_t` 内嵌固定 16 项 `bh_ring`，callback 无需从内核 slab 分配 staging 项。
+- 将 `net_msg_t` 的 objcache 分配和 socket 队列插入移动到底半部；bottom-half 运行时不持有 `g_lwip_lock`。
 - 如果某条代码路径在概念上处于 lwIP 临界区内但必须分配，先释放 `g_lwip_lock`，分配后重新获取。只有当本地 PCB 状态不需要在释放期间保持稳定时，这样做才安全。
 
 ## 迁移检查清单

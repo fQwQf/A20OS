@@ -4,6 +4,8 @@
 
 `TEST_FIRST_ARCHITECTURE_MATRIX`：每个架构债务领域在 TODO 条目可以勾选完成前，都必须有一个可重复执行的门禁。
 
+本页按源码审计基线 `e33c3219` 描述存在的目标和目标应检查的契约，不把“目标存在”写成“该基线已通过”。该提交没有与源码完全匹配的一套正式全流程结果；最新完整、干净的正式评测证据属于 `f9732348`。后续提交必须重新运行相应目标，不能继承该结果。
+
 | 领域 | 门禁 |
 | --- | --- |
 | 并发基础 | `make check-concurrency-foundation` |
@@ -21,17 +23,18 @@
 | 外部依赖 | `make check-external-dependency-boundary` |
 | 架构边界 | `make check-arch-boundary` |
 | SMP 平台边界 | `make check-smp-platform-boundary` |
-| 信号、停止与退出边界 | `make check-signal-exit-boundary` |
 
-`BUILD_MATRIX_GATE_CONTRACT`：默认 hosted 构建覆盖 `riscv64`、`loongarch64`、`aarch64`、`x86_64`、`arm32`、`riscv32` 和 `ppc64le`；用户态构建通过 `make check-user-build` 覆盖同一组可用用户态架构。ARMv7-M 由独立 STM32 bring-up 目标验证。
+`BUILD_MATRIX_GATE_CONTRACT`：完整 hosted 构建集合是 `riscv64`、`loongarch64`、`aarch64`、`x86_64`、`arm32`、`riscv32` 和 `ppc64le`。Linux 上 `make check-build-matrix` 使用这七项，macOS 的默认集合只含 RISC-V64；需要与主机无关的显式七架构集合时使用 `make check-build-matrix-all`。ARMv7-M 由独立 STM32 build/check 目标覆盖，不属于 hosted 用户态矩阵。
 
-`ARCH_MMU_RUNTIME_MATRIX_CONTRACT`：当前 NOMMU 支持集合明确限定为 `arm32`、`aarch64`、`riscv64`、`riscv32`；其他架构在构建入口即被拒绝，不再形成可链接但不可运行的伪配置。`make smoke-arch-mmu-matrix` 在 QEMU 中覆盖这四个架构的 MMU 与 NOMMU 八种有效组合。每个组合必须进入交互式 shell，分别执行 shell builtin 与外部程序，并通过用户态 `poweroff` 正常关机。架构差异通过 `kernel/arch/<arch>/` 提供的 hook/capability 表达；`make check-arch-boundary` 禁止通用内核代码直接按具体架构条件编译。
+`ARCH_MMU_RUNTIME_MATRIX_CONTRACT`：`NOMMU_SUPPORTED_ARCHES` 的构建集合是 `arm32`、`aarch64`、`riscv64`、`riscv32`、`armv7m`。`make smoke-arch-mmu-matrix` 的 hosted runtime 集合只包含前四个架构的 MMU 与 NOMMU 八种组合；ARMv7-M 由 STM32 MCU 目标单独处理。LoongArch64、x86_64、PPC64LE 的 NOMMU 配置在构建入口被拒绝。每个 hosted runtime 组合应进入交互式 shell，执行 shell builtin 与外部程序，并通过用户态 `poweroff` 正常关机。架构差异通过 `kernel/arch/<arch>/` 提供的 hook/capability 表达；`make check-arch-boundary` 禁止通用内核代码直接按具体架构条件编译。
 
 `SMP_PLATFORM_BOUNDARY_CONTRACT`：`kernel/core/smp.c` 统一管理逻辑 CPU 拓扑、online 状态、启动等待和 IPI 分派；`kernel/platform/<board>/` 提供 CPU 发现、启动、IPI 和本地控制器 hooks；`kernel/arch/<arch>/platform/smp.c` 只保留 secondary 入口与架构机制，不得按具体 board 编译平台策略。
 
-`ABI_SMOKE_GATE_CONTRACT`：Linux ABI smoke 通过 `smoke-abi-linux` 运行 `syscall_smoke` 和用户态命令；Native ABI 覆盖包括 `native-minimal`、`native-test`、`user/tests/test_liba20c.c`，以及用于 handle dup/transfer 的 `make smoke-native-handle` 运行时覆盖。
+`ABI_SMOKE_GATE_CONTRACT`：Linux ABI smoke 通过 `smoke-abi-linux` 运行 `syscall_smoke` 和用户态命令；Native ABI 的 `native-minimal`、`native-test` 和 `native-libc` 是构建检查，其中 `native-libc` 编译 `user/tests/test_liba20c.c`。用于 handle dup/transfer 的 `make smoke-native-handle` 才是 QEMU 运行时覆盖。
 
 `DOC_DRIFT_KEYWORD_GATE`：`stub`、`partial`、`TODO`、`Future`、`not yet`、`for simplicity` 等漂移关键词只有在绑定到明确的覆盖表、TODO 条目或门禁契约时才允许出现。`kernel/external/` 和 `user/external/` 下导入的第三方代码树不参与该门禁。
+
+`make check-doc-test-gates` 是广泛的聚合门禁，不是快速的纯文档检查。其依赖包含内核构建以及 MM、VFS、驱动生命周期等 QEMU runtime smoke，可能运行较长时间。
 
 ## 运行手册
 
@@ -68,7 +71,7 @@
 ### ABI 边界
 - **How to run**: `make check-abi-boundary`
 - **What it checks**: 重新生成 Linux syscall 覆盖表；检查 `LINUX_ABI_BOUNDARY_CONTRACT`、`LINUX_ABI_EXPLICIT_STUB_CONTRACT`、`NATIVE_HANDLE_CAPABILITY_CONSISTENCY_MATRIX`、`NATIVE_DEBUG_LIMITED_CONTRACT` 等静态契约；确认 `docs/native-abi/00-overview.md` 仍包含 `Debug 分区受限`。
-- **When it fails**: 运行 `python3 tools/gen_linux_syscall_coverage.py` 看是否生成失败；检查 `kernel/abi/linux/syscall_impl.h`、`kernel/abi/linux/syscall_table.def`、`kernel/abi/native/handle_table.h`、`kernel/abi/native/sys_phase2.c` 中契约字符串；确认 `00-overview.md` 的 `Debug 分区受限` 说明未删除。
+- **When it fails**: 运行 `conda run -n a20os python tools/gen_linux_syscall_coverage.py` 看是否生成失败；检查 `kernel/abi/linux/syscall_impl.h`、`kernel/abi/linux/syscall_table.def`、`kernel/include/ipc/handle_table.h`、`kernel/abi/native/sys_phase2.c` 中契约字符串；确认 `00-overview.md` 的 `Debug 分区受限` 说明未删除。
 
 ### 驱动核心
 - **How to run**: `make check-driver-core-model`
@@ -77,8 +80,8 @@
 
 ### 外部依赖边界
 - **How to run**: `make check-external-dependency-boundary`
-- **What it checks**: 检查 `include user/external/lwip/sources.mk` 是否在 Makefile 中；`docs/project/external-dependencies.md` 是否包含 `EXTERNAL_LWIP_SOURCE_MANIFEST`、`EXTERNAL_LWIP_CONFIG_CONTRACT`、`EXTERNAL_USERLAND_UPGRADE_CHECKLIST`、`EXTERNAL_STATIC_LINK_REBUILD_CONTRACT`、`EXTERNAL_TLSE_WGET_LIMITS` 等；确认 `Makefile` 中没有直接定义 `LWIP_SRC`。
-- **When it fails**: 检查 `Makefile` 的 lwIP 包含语句；补充或恢复 `docs/project/external-dependencies.md` 中的对应契约标题；确认 `user/external/lwip/sources.mk` 包含 `LWIP_SRC` 与 `core/timeouts.c`。
+- **What it checks**: 检查 `include $(KERNEL_DIR)/external/lwip/sources.mk` 是否在 Makefile 中；`docs/project/external-dependencies.md` 是否包含 `EXTERNAL_LWIP_SOURCE_MANIFEST`、`EXTERNAL_LWIP_CONFIG_CONTRACT`、`EXTERNAL_USERLAND_UPGRADE_CHECKLIST`、`EXTERNAL_STATIC_LINK_REBUILD_CONTRACT`、`EXTERNAL_TLSE_WGET_LIMITS` 等；确认 `Makefile` 中没有直接定义 `LWIP_SRC`。
+- **When it fails**: 检查 `Makefile` 的 lwIP 包含语句；补充或恢复 `docs/project/external-dependencies.md` 中的对应契约标题；确认 `kernel/external/lwip/sources.mk` 包含 `LWIP_SRC` 与 `core/timeouts.c`。
 
 ### 架构边界
 - **How to run**: `make check-arch-boundary`
@@ -87,18 +90,20 @@
 
 ### 构建矩阵
 - **How to run**: `make check-build-matrix`
-- **What it checks**: 运行默认 hosted 架构的内核 bringup 构建与用户态构建；确认 `BUILD_MATRIX_GATE_CONTRACT` 字符串仍存在于本文档。
+- **What it checks**: `check-build-matrix` 运行当前主机的默认内核 bring-up 与用户态集合；`check-build-matrix-all` 显式运行七个 hosted 架构。两者都确认 `BUILD_MATRIX_GATE_CONTRACT` 字符串仍存在于本文档。
 - **When it fails**: 修复对应架构的 `check-<arch>-bringup` 或 `check-<arch>-user` 错误；确保 `BUILD_MATRIX_GATE_CONTRACT` 仍存在于本文档。
 
 ### 架构 / MMU 运行矩阵
 - **How to run**: `make smoke-arch-mmu-matrix`
-- **What it checks**: 在 QEMU 中运行 `arm32`、`aarch64`、`riscv64`、`riscv32` 的 MMU 与 NOMMU 组合，验证 shell 内置命令、外部程序及 `poweroff` 正常关机。
+- **What it checks**: 目标声明在 QEMU 中运行 `arm32`、`aarch64`、`riscv64`、`riscv32` 的 MMU 与 NOMMU 组合，验证 shell 内置命令、外部程序及 `poweroff` 正常关机；它不覆盖 `armv7m` MCU NOMMU。
 - **When it fails**: 查看 `.kernel-build/smoke/<arch>[-nommu]-shell.log` 中是否缺少 `A20_MATRIX_<variant>_OK`、`A20_EXTERNAL_OK` 或 `System is going down for power-off NOW`；先修复对应架构的 bringup 或 NOMMU 路径。
 
 ### Linux ABI smoke
 - **How to run**: `make smoke-abi-linux`
 - **What it checks**: 构建 `riscv64 ABI=linux BRINGUP=0` 的镜像，在 QEMU 中运行 `syscall_smoke` 与 `poweroff`，确认串口日志出现 `SYSCALL_SMOKE: PASS`。
-- **When it fails**: 检查 `.kernel-build/smoke/abi-linux-riscv64.log` 中是否因 `SYSCALL_SMOKE: PASS` 未出现而超时；修复 `user/cmds/syscall_smoke.c` 或 Linux ABI 实现。
+- **When it fails**: 检查 `.kernel-build/smoke/abi-linux-riscv64.log` 中是否因 `SYSCALL_SMOKE: PASS` 未出现而超时；修复 `user/cmds/core/syscall_smoke.c` 或 Linux ABI 实现。
+
+`make smoke-riscv64` 是独立的 `BRINGUP=1` 启动检查。它把 watchdog timeout 当作可接受结果，不运行用户态或 syscall smoke，不能替代 `smoke-abi-linux`。
 
 ### 信号、停止与退出
 - **How to run**: `make check-signal-exit-boundary`；完整步骤五本地矩阵运行 `make check-proc-step5-local`。
@@ -126,8 +131,8 @@
 - **When it fails**: 从失败日志中的首个 invariant、引用计数或 lock warning 开始定位；后续 timeout 往往只是首个所有权错误的结果。
 
 ### Native ABI 测试
-- **How to run**: `make native-minimal` 或 `make native-test` 生成并运行原生测试；`make smoke-native-handle` 在 QEMU 中运行 handle dup/transfer 覆盖。`user/tests/test_liba20c.c` 是 liba20c 内部测试源文件，随 `native-test` 或用户态构建编译。
-- **What it checks**: `native-minimal` 生成最小原生可执行文件；`native-test` 运行原生测试；`smoke-native-handle` 启动 `/bin/native-handle-rv` 并验证正常关机。
+- **How to run**: `make native-minimal`、`make native-test` 和 `make native-libc` 只构建对应原生程序；`make smoke-native-handle` 才在 QEMU 中运行 handle dup/transfer 覆盖。`user/tests/test_liba20c.c` 由 `native-libc` 编译。
+- **What it checks**: `native-minimal` 与 `native-test` 检查编译和链接，目标名不表示执行；`native-libc` 构建 liba20c 测试程序；`smoke-native-handle` 启动 `/bin/native-handle-rv` 并验证正常关机。
 - **When it fails**: 检查 `user/liba20rt/` 与 `user/liba20c/` 的编译错误；确认 `native-handle-rv` 已生成并放入 fat32 镜像；查看 `.kernel-build/smoke/native-handle-riscv64.log`。
 
 ### 文档漂移关键词
