@@ -2,7 +2,7 @@
 
 > 本文档对 A20OS Native ABI 进行系统化的形式化理论分析。以 Plotkin 的结构化操作语义（SOS）为框架，建立 handle/capability 系统的操作语义，给出安全性、活性、并发性和信息流控制的形式化证明，并分析 channel IPC 的消息序性质与 capability 撤销的完备性。
 
-> **证明边界（2026-07）**：本文结论针对 02 定义的 53-syscall 形式化核心模型。当前内核实现为 126 个 syscall；除已明确给出精化映射的 handle/channel/event/VMO 路径外，不能把本文结论自动外推为对全部现行 C 实现的机器验证。
+> **证明边界（2026-07）**：本文以 02 定义的 53-syscall 形式化核心为目标边界，但 07 的 trace 分类审计只明确覆盖其中 43 个，另有 10 个操作待补；当前内核实现为 126 个 syscall。除已明确给出精化映射的路径外，不能把本文结论外推为对全部核心操作或现行 C 实现的机器验证。
 
 ---
 
@@ -40,9 +40,9 @@ $$\sigma = (P, \{HT_p\}_{p \in P}, Obj, Mem)$$
 - $Obj: \mathcal{O} \rightharpoonup State$ 是对象状态映射
 - $Mem: \mathbb{N}_{64} \times P \rightharpoonup \{Prot\}$ 是虚拟内存映射
 
-**定义 1.5（引用计数）** 对象 $o$ 的引用计数定义为：
+**定义 1.5（引用计数）** $Queued/Pending$ 是 $Obj$ 中 channel 的排队/投递中消息所有权集合；对象 $o$ 的引用计数定义为：
 
-$$refcount(o, \sigma) = |\{(p, n) \mid HT_p(n) = (o, \rho) \text{ for some } \rho\}|$$
+$$refcount(o, \sigma) = |\{(p,n) \mid HT_p(n)=(o,\rho)\}| + |\{(c,m,i) \mid m \in Queued(c,\sigma) \cup Pending(c,\sigma) \land m.handles_i.object=o\}|$$
 
 ### 1.2 类型兼容性矩阵
 
@@ -191,7 +191,7 @@ $$\frac{refcount(o, \sigma) = 0 \quad o \in dom(Obj)}{\langle destroy(o), \sigma
 **级联效应**：task 的 O-DESTROY 会关闭其全部 handles，可能触发其他对象的 refcount 归零，形成级联销毁链。由 07 §5.2 的引用计数归零定理，此链在有限步内终止。
 
 **不变式保持**：
-- I3：$refcount(o) = 0$ 与 $|\{(p, n) \mid HT_p(n) = (o, \_)\}| = 0$ 一致（无 handle 指向 $o$）。
+- I3：$refcount(o) = 0$ 与“无 HT 条目且无 queued/pending 消息引用指向 $o$”一致。
 - I4：$o \notin dom(Obj) \iff refcount(o) = 0$ 保持（O-DESTROY 同时移除两者）。$\checkmark$
 
 ### 2.5 I/O 操作语义
@@ -214,7 +214,7 @@ $$\frac{HT_p(n) = (o_{ch}, \rho) \quad W \in \rho \quad |q_{peer}| + |data| \leq
 
 其中 $\sigma'$ 中：
 - $q_{peer}$ 追加消息 $(data, \{(o_i, \rho_i)\})$
-- **不**从发送方 handle 表移除 $h_i$（双方共享引用，refcount 增加）
+- **不**从发送方 handle 表移除 $h_i$；新增引用由 queued 消息持有，`refcount` 在 send 时增加
 
 $$\frac{HT_p(n) = (o_{ch}, \rho) \quad W \in \rho \quad |q_{peer}| + |data| > C_{max}}{\langle send_p(n, data, \_), \sigma \rangle \longrightarrow \langle err(WOULD\_BLOCK), \sigma \rangle}$$
 
@@ -222,7 +222,7 @@ $$\frac{HT_p(n) = (o_{ch}, \rho) \quad W \in \rho \quad |q_{peer}| + |data| > C_
 
 $$\frac{HT_p(n) = (o_{ch}, \rho) \quad R \in \rho \quad q_{local} = [(d_1, H_1), \ldots, (d_k, H_k)] \quad k \geq 1}{\langle recv_p(n, cap), \sigma \rangle \longrightarrow \langle ok(d_1, H_1'), \sigma' \rangle}$$
 
-其中 $H_1' = \{(n_j, (o_j, \rho_j)) \mid (o_j, \rho_j) \in H_1\}$，即接收方在 handle 表中分配新编号，获得与发送方传递的相同权限。
+其中 $H_1' = \{(n_j, (o_j, \rho_j)) \mid (o_j, \rho_j) \in H_1\}$。recv 将 queued/pending 消息拥有的引用转交给接收方新条目，总 `refcount` 不变；send 时不存在接收方条目。
 
 **定理 2.1（Channel 消息序）** Channel 保证 FIFO 顺序：若消息 $m_1$ 在 $m_2$ 之前被 send 到同一端点，则 recv 端先取出 $m_1$。
 
@@ -290,7 +290,7 @@ $$\forall e = event(o_t, type, data). \ type \in mask(o_t, q) \implies \begin{ca
 
 其中 $\rho_{granted}(o, p)$ 是 $p$ 历史上被授予的对 $o$ 的最大权限。
 
-**I3（引用计数一致性）**：$$\forall o \in dom(Obj). \ refcount(o, \sigma) = |\{(p, n) \mid HT_p(n) = (o, \rho)\}|$$
+**I3（引用计数一致性）**：$$\forall o \in dom(Obj).\ refcount(o,\sigma)=|\{(p,n)\mid HT_p(n)=(o,\rho)\}|+|\{(c,m,i)\mid m\in Queued(c,\sigma)\cup Pending(c,\sigma)\land m.handles_i.object=o\}|$$
 
 **I4（对象活性）**：$$\forall o. \ o \in dom(Obj) \iff refcount(o, \sigma) > 0$$
 
@@ -298,7 +298,7 @@ $$\forall e = event(o_t, type, data). \ type \in mask(o_t, q) \implies \begin{ca
 
 ### 3.2 不变式保持证明
 
-**定理 3.1（安全性）** 若 $\sigma$ 满足 $\mathcal{I}$，则对任意合法操作 $op$，$\sigma' = step(op, \sigma)$ 也满足 $\mathcal{I}$。
+**定理 3.1（安全性，已论证操作范围）** 若 $\sigma$ 满足 $\mathcal{I}$，则对下文已逐项给出规则和保持论证的合法操作 $op$，$\sigma' = step(op, \sigma)$ 也满足 $\mathcal{I}$；完整 53 操作穷举仍受文首边界限制。
 
 *证明策略*：对每个操作规则，逐条验证 $\mathcal{I}$ 在操作前后保持。
 
@@ -314,12 +314,12 @@ $$\forall e = event(o_t, type, data). \ type \in mask(o_t, q) \implies \begin{ca
 - **I4 保持**：若 $refcount$ 降至 0，同时移除 $o$ 从 $Obj$，保持等价。
 - **其余不变式**：仅删除条目，不违反任何正向条件。
 
-**对 CH-SEND + Handle Transfer**：
-- **I1 保持**：接收方获得 $(o_i, \rho_i)$，其中 $\rho_i \subseteq \rho'_i \subseteq Legal(\tau(o_i))$（发送方原权限合法 + 传递性）。
-- **I2 保持**：接收方获得的 $\rho_i$ 不超过发送方持有的 $\rho'_i$。
-- **I3 保持**：发送方不移除 handle（refcount 不减），接收方新增条目，$refcount$ 增加 1。
-- **I4 保持**：对象未被释放。
-- **I5 保持**：类型不变。
+**对 CH-SEND + CH-RECV Handle Transfer**：
+- **I1/I2 保持**：消息保存的 $(o_i,\rho_i)$ 来自发送方合法权限子集，recv 只能按该权限安装。
+- **CH-SEND 的 I3**：发送方 HT 不变，queued 消息新增一个 owned reference，`refcount` 同步增加 1；此时没有接收方条目。
+- **CH-RECV 的 I3**：queued/pending owned reference 减少 1，接收方 HT reference 增加 1，`refcount` 净变化为 0。
+- **失败/清理的 I3**：未安装消息保持 pending ownership；消息被丢弃或 endpoint 销毁时才 `refcount_dec`。
+- **I4/I5 保持**：消息持有引用期间对象存活，类型不变。
 
 **对 T-SPAWN 规则**：
 - **I1 保持**：新进程的每个 handle 权限由 $\rho_i \subseteq \rho'_i \subseteq Legal(\tau(o_i))$ 保证。
@@ -395,13 +395,13 @@ $$\forall \rho' \subseteq C_p(o, t+1) \setminus C_p(o, t). \ \exists q, n_q. \ H
 
 ### 4.2 引用计数活性
 
-**定理 4.3（无引用泄漏）** 若所有存活进程正常关闭 handles（通过 handle_close），则不存在引用计数 $> 0$ 但无持有者可达的"孤儿对象"。
+**定理 4.3（无引用泄漏）** 若所有存活进程正常关闭 handles，且 channel 队列/pending 消息随 endpoint 关闭被清理，则不存在引用计数 $> 0$ 但无所有者可达的"孤儿对象"。
 
 *证明*：引用计数在以下情况下改变：
-- **增加**：handle_dup（+1）、spawn（+1/handle）、channel transfer（+1/handle）
-- **减少**：handle_close（-1）、task_exit（批量 -1，关闭所有 handles）
+- **增加**：handle_dup（+1）、spawn（+1/handle）、CH-SEND 为 queued 消息取得引用（+1/handle）
+- **减少/转交**：handle_close/task_exit 减少 HT 引用；成功 CH-RECV 把消息引用转成交付的 HT 引用而不改变总数；消息清理才减少引用
 
-每种增加都有对应的减少路径。handle_close 将 $refcount$ 减少 1；task_exit 关闭进程全部 handles。若所有进程正常退出，所有 handles 被关闭，所有 $refcount$ 归零。$\square$
+每个 HT 或消息所有权都有对应关闭、交付或清理路径。若进程退出并关闭 endpoints，endpoint cleanup 会释放 queued/pending 消息引用；因此在这些前提下所有 owned references 最终归零。$\square$
 
 ### 4.3 公平性
 
@@ -487,9 +487,9 @@ $$\Phi_{sched} \implies \mathbf{G}(blocked(A, ep_0) \land msg\_ready(ep_0) \impl
 
 **性质 L3（引用回收性）**：
 
-$$\mathbf{G}(alive(o) \land \neg \exists p.\ p \text{ 持有 } o \text{ 的 handle} \implies \mathbf{F}(\neg alive(o)))$$
+$$\mathbf{G}(alive(o) \land \neg \exists p.\ p \text{ 持有 } o \text{ 的 handle} \land MsgRefs(o)=0 \implies \mathbf{F}(\neg alive(o)))$$
 
-即若对象 $o$ 的引用计数 > 0 但没有进程持有其 handle，则 $o$ 最终被回收。在 A20OS 的正确实现中此前提不成立（I3 保证 refcount 与 handle 数一致），因此此性质平凡成立。但若存在实现 bug 导致引用泄漏（refcount > 0 但无 handle），此性质提供了检测条件。$\square$
+即若对象 $o$ 的引用计数 > 0，但既无进程 HT 引用也无 queued/pending 消息引用，则它是泄漏候选。I3 把两类合法所有权都纳入计数；不能再由“无接收方条目”推断 send 后引用应立即消失。$\square$
 
 **性质 L4（系统终止性）**：
 
@@ -533,14 +533,14 @@ $$\frac{\langle op_p, \sigma \rangle \longrightarrow \langle res, \sigma' \rangl
 
 ### 5.3 Channel 传输的原子性
 
-**定理 5.3（Handle Transfer 原子性）** 通过 channel 传递 handles 的操作是原子的：不存在接收方能访问 transferred handle 但原持有者仍能访问的中间状态，也不存在反过来的中间状态。
+**定理 5.3（Handle Transfer 原子性）** 通过 channel 传递 handles 时，发送方条目保持不变；消息 owned references 要么完整留在 queued/pending 状态，要么由一次成功 recv 完整转为接收方条目，不出现部分安装。
 
 *精确分析*：实际上，A20OS 的 channel transfer 语义是**共享语义**（非移动语义）：
 
 - send 后，发送方**保留**原 handle（refcount 增加）
 - recv 后，接收方**新增** handle 条目
 
-因此不存在"转移中间态"问题——两个进程在 recv 完成后同时持有指向同一对象的 handles。这与 seL4 的 Endpoint cap transfer 和 Zircon 的 Channel handle transfer 语义一致。
+因此 recv 完成后两个进程同时持有指向同一对象的 handles。该共享语义是 A20OS 的设计选择；Zircon channel transfer 默认消费发送方 handles，不能视为相同语义。
 
 *原子性保证*：recv 操作要么完整完成（接收方 handle 表更新完毕、refcount 正确），要么不发生。不存在部分完成的中间状态。$\square$
 
@@ -635,13 +635,13 @@ Capability 撤销是指：使某个对象对特定进程或所有进程不可访
 
 **定义 7.1（直接撤销）** 进程 $p$ 关闭 handle $h$，释放 $p$ 对 $o$ 的访问。
 
-**定义 7.2（传递撤销）** 当对象 $o$ 的最后一个引用被关闭，$o$ 被销毁。所有指向 $o$ 的 handle（若存在悬挂引用）变为无效。
+**定义 7.2（传递撤销）** 当对象 $o$ 的最后一个 HT 或 queued/pending 消息引用被释放，$o$ 被销毁。
 
 **定理 7.1（引用计数驱动的撤销完备性）** 对任意对象 $o$，当且仅当 $refcount(o) = 0$ 时，$o$ 被完全撤销（从系统中移除）。
 
 *证明*：
-- **充分性**：$refcount(o) = 0 \implies$ 无进程持有指向 $o$ 的 handle $\implies$ 无进程可访问 $o$。由 H-CLOSE 规则，当最后一个引用关闭时，$o$ 从 $Obj$ 中移除。
-- **必要性**：若 $refcount(o) > 0$，存在某进程持有 $o$ 的 handle，该进程可通过 handle 操作访问 $o$。因此 $o$ 未被完全撤销。$\square$
+- **充分性**：$refcount(o)=0$ 意味着无 HT 或 queued/pending 消息引用；最后一个所有者释放引用时，$o$ 从 $Obj$ 中移除。
+- **必要性**：若 $refcount(o)>0$，至少存在 HT 或消息所有权。消息引用可能尚不能被接收方访问，但仍要求对象保持存活，因此对象尚未完全回收。$\square$
 
 ### 7.2 子树撤销
 
@@ -661,7 +661,7 @@ Capability 撤销是指：使某个对象对特定进程或所有进程不可访
 2. 对每个被关闭的 handle，$refcount$ 减少 1
 3. 若某对象 $o$ 的 $refcount$ 降至 0，释放 $o$
 
-由定理 7.1，此过程保证 $T$ 的所有直接引用被释放。但注意：$T$ 通过 channel 传递给其他进程的 handles 不受影响——这些 handles 现在由接收方持有。$\square$
+由定理 7.1，此过程保证 $T$ 的直接引用被释放。但通过 channel 传出的引用不受影响：它们由接收方 HT 或 queued/pending 消息持有，并在后续 close、recv 转交或 endpoint cleanup 时处理。$\square$
 
 ### 7.3 与 seL4 CSpace 撤销的对比
 
@@ -878,9 +878,9 @@ $$Obs_{cross}(\sigma) = \{(p, h) \mid abi(p) \neq abi(holder(h)) \wedge Obs(p, h
 
 #### 9.4.5 混合信任能力边界定理
 
-**定理 9.5（混合信任能力边界）** 设系统状态 $\sigma$ 满足安全不变式 $\mathcal{I}$。令 $H_{native}(\sigma)$ 为所有 Native ABI handle 的集合，$P_{linux}(\sigma)$ 为所有 Linux ABI 进程的集合。则：
+**定理 9.5（混合信任能力边界）** 设 $\sigma$ 满足 $\mathcal{I}$，且对所讨论的 Linux 进程 $p_l$，执行不经过 `sys_a20_bridge` 暴露的显式 Linux-A20 channel bridge（记为 $BridgeFree(p_l,\sigma)$）。令 $H_{native}(\sigma)$ 和 $P_{linux}(\sigma)$ 如上。则：
 
-$$\forall p_l \in P_{linux}, h_n \in H_{native}.\ \neg Obs(p_l, h_n, \sigma) \text{ 或 } (p_l, h_n) \text{ 构成精确降级通道}$$
+$$\forall p_l \in P_{linux}, h_n \in H_{native}.\ BridgeFree(p_l,\sigma) \implies (\neg Obs(p_l,h_n,\sigma) \lor (p_l,h_n)\text{ 构成精确降级通道})$$
 
 *证明*：对任意 $p_l \in P_{linux}$ 和 $h_n \in H_{native}$，分情况：
 
@@ -888,9 +888,9 @@ $$\forall p_l \in P_{linux}, h_n \in H_{native}.\ \neg Obs(p_l, h_n, \sigma) \te
 
 **情况 2：$h_n$ 指向的对象被 $p_l$ 通过 fd 访问。** $Obs_2$ 可能成立。但由定理 9.4，降级通道是精确的——$p_l$ 只能获取 $o$ 的内容+元数据，不能获取 $h_n$ 的 rights、类型或其他 handle 存在性。因此 $(p_l, h_n)$ 构成精确降级通道。
 
-**情况 3：$h_n$ 指向的对象只被 Native ABI 进程访问。** $p_l$ 无法通过 VFS 接触该对象，无法通过 IPC 接触（Linux ABI 没有 channel 概念）。$\neg Obs$。$\square$
+**情况 3：$h_n$ 指向的对象只被 Native ABI 进程访问。** 在 $BridgeFree$ 前提下，$p_l$ 无法通过 VFS 或显式 bridge 接触该对象，故 $\neg Obs$。若允许 `sys_a20_bridge`，本情况及定理结论均不适用。$\square$
 
-**与定理 9.1 的关系**：定理 9.1 是**句法层面**的隔离（模块不互相 include）。定理 9.5 是**语义层面**的隔离（即使通过共享资源交互，能力信息也不泄露）。定理 9.5 严格强于定理 9.1。
+**与定理 9.1 的关系**：定理 9.1 是句法层面的隔离；定理 9.5 在 $BridgeFree$ 和显式共享资源模型下给出更强的语义边界，但不覆盖 `sys_a20_bridge` 的有意跨 ABI 通道。
 
 #### 9.4.6 跨 ABI 性能隔离
 
@@ -980,9 +980,9 @@ Capability-as-data:
 
 ### 11.3 A20OS 的独特定位
 
-**Insight 1：最小充分 capability 计算**。A20OS 的 14 种对象类型 × 14 种权限位构成了一个"最小充分"的能力系统——足以表达最小权限原则和 confused deputy 防御，但远比 seL4 的 CNode 图或 Zircon 的 ~30 种 rights 简单。
+**Insight 1：最小充分 capability 计算**。形式模型的 13 种对象类型 × 14 种权限位构成候选"最小充分"核心；`e33c3219` 工程实现已有 14 种对象类型，因此该计算只属于模型边界，仍需按实现操作矩阵复核。
 
-**Insight 2：双 ABI 形式化隔离**。现有工作要么完全替代 POSIX（seL4, Zircon），要么在 POSIX 内嵌入 capability（Capsicum）。A20OS 首次提出并形式化证明了两套 ABI 的模块级隔离条件（定理 9.1）。
+**Insight 2：双 ABI 形式化隔离**。当前调研中的 seL4/Zircon 替代 POSIX，Capsicum 在 POSIX 内嵌入 capability；A20OS 给出两套 ABI 的模块级隔离条件（定理 9.1），其优先性尚需系统文献复核。
 
 **Insight 3：统一 event queue 的可证明性质**。kqueue 和 epoll 分别在 BSD 和 Linux 中实现了部分统一，但 A20OS 的 event queue 是基于 handle 系统的完全统一，且其不丢失性质（定理 2.3）和终止性（定理 4.1）可被形式化证明。
 

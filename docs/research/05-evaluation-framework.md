@@ -1,6 +1,8 @@
 # A20OS Native ABI：评估实验框架设计
 
 > 本文档设计一套系统化的评估框架，用于量化验证 A20OS Native ABI 的设计目标。评估涵盖：syscall 路径性能（微基准测试）、真实工作负载性能（宏基准测试）、POSIX 兼容层开销、代码复杂度与实现质量、安全性属性的形式化验证方法。
+>
+> **范围说明：** 本文是实验设计快照，不是 `e33c3219` 的实测报告。阈值、预期延迟、样本量和命令均是待验证方案；未填结果不得解释为当前性能结论。现有正式性能样本及其可比性边界见一手审计文档 [A20OS 与 Linux 实现及性能差异](10-a20-linux-implementation-performance-comparison.md)；该文列出的 `.eval-state/2026/` 路径是被 Git 忽略的本地工作区证据归档，干净 clone 不包含这些文件。
 
 ---
 
@@ -121,15 +123,29 @@ $$t = \frac{\bar{x}_A - \bar{x}_B}{\sqrt{\frac{s_A^2}{n_A} + \frac{s_B^2}{n_B}}}
 按以下顺序执行实验，每组实验间重新启动系统以确保干净状态：
 
 ```
-Phase 1: 微基准（无外部依赖）1.1 Syscall 路径延迟（§2.1）1.2 Handle table 可扩展性（§2.2）1.3 权限检查开销（§2.3）
+Phase 1: 微基准（无外部依赖）
+1.1 Syscall 路径延迟（§2.1）
+1.2 Handle table 可扩展性（§2.2）
+1.3 权限检查开销（§2.3）
 
-Phase 2: IPC 与事件基准2.1 Channel 吞吐-延迟（§3.1）2.2 Event queue 吞吐（§3.2）2.3 Spawn 延迟分解（§3.3）
+Phase 2: IPC 与事件基准
+2.1 Channel 吞吐-延迟（§3.1）
+2.2 Event queue 吞吐（§3.2）
+2.3 Spawn 延迟分解（§3.3）
 
-Phase 3: 宏基准与应用3.1 I/O 密集工作负载（§4.1）3.2 IPC 密集工作负载（§4.2）3.3 POSIX shim 开销（§4.3）
+Phase 3: 宏基准与应用
+3.1 I/O 密集工作负载（§4.1）
+3.2 IPC 密集工作负载（§4.2）
+3.3 POSIX shim 开销（§4.3）
 
-Phase 4: 安全性验证4.1 不变式测试（§8.1）4.2 攻击面测试（§8.2）4.3 运行时不变式监测（§10.3）
+Phase 4: 安全性验证
+4.1 不变式测试（§8.1）
+4.2 攻击面测试（§8.2）
+4.3 运行时不变式监测（§10.3）
 
-Phase 5: 复杂度分析5.1 LOC 统计（§6.1）5.2 模块依赖分析（§6.2）
+Phase 5: 复杂度分析
+5.1 LOC 统计（§6.1）
+5.2 模块依赖分析（§6.2）
 ```
 
 每阶段预计耗时 1-2 天（含分析和报告撰写），总评估周期约 1-2 周。
@@ -145,7 +161,8 @@ Phase 5: 复杂度分析5.1 LOC 统计（§6.1）5.2 模块依赖分析（§6.2�
 **方法**：
 
 ```c
-// 测量框架伪代码for (int i = 0; i < ITERATIONS; i++) {
+// 测量框架伪代码
+for (int i = 0; i < ITERATIONS; i++) {
     uint64_t t0 = cycle_counter();
     int64_t result = syscall_under_test(args);
     uint64_t t1 = cycle_counter();
@@ -192,7 +209,11 @@ Phase 5: 复杂度分析5.1 LOC 统计（§6.1）5.2 模块依赖分析（§6.2�
 
 **报告格式**：
 ```
-N      | handle_dup (ns) | handle_close (ns) | handle_query (ns)10     | ...             | ...               | ...100    | ...             | ...               | ...1000   | ...             | ...               | ...10000  | ...             | ...               | ...
+N      | handle_dup (ns) | handle_close (ns) | handle_query (ns)
+10     | ...             | ...               | ...
+100    | ...             | ...               | ...
+1000   | ...             | ...               | ...
+10000  | ...             | ...               | ...
 ```
 
 ### 2.3 权限检查开销
@@ -201,7 +222,10 @@ N      | handle_dup (ns) | handle_close (ns) | handle_query (ns)10     | ...    
 
 **方法**：
 ```c
-// 测量有权限 vs 无权限的延迟差uint64_t t_with = measure(handle_read(handle_with_R, buf));uint64_t t_without = measure(handle_read(handle_without_R, buf));// 权限检查开销 ≈ t_without - t_with（排除 EAGAIN 等其他因素）
+// 测量有权限 vs 无权限的延迟差
+uint64_t t_with = measure(handle_read(handle_with_R, buf));
+uint64_t t_without = measure(handle_read(handle_without_R, buf));
+// 权限检查开销 ≈ t_without - t_with（排除 EAGAIN 等其他因素）
 ```
 
 **预期结果**：权限检查是位域的子集测试（$O(1)$），开销 < 10ns。
@@ -239,7 +263,11 @@ N      | handle_dup (ns) | handle_close (ns) | handle_query (ns)10     | ...    
 
 **可扩展性测试**：
 ```
-Timers | events/sec (A20) | events/sec (Linux epoll) | ratio1      | ...              | ...                       | ...10     | ...              | ...                       | ...100    | ...              | ...                       | ...1000   | ...              | ...                       | ...
+Timers | events/sec (A20) | events/sec (Linux epoll) | ratio
+1      | ...              | ...                       | ...
+10     | ...              | ...                       | ...
+100    | ...              | ...                       | ...
+1000   | ...              | ...                       | ...
 ```
 
 ### 3.3 多 Event Queue 场景
@@ -273,7 +301,11 @@ Timers | events/sec (A20) | events/sec (Linux epoll) | ratio1      | ...        
 
 **报告格式**：
 ```
-Size  | A20 Channel (MB/s) | Linux pipe (MB/s) | Linux usocket (MB/s) | io_uring (MB/s)1B    | ...                | ...               | ...                  | ...64B   | ...                | ...               | ...                  | ...4KB   | ...                | ...               | ...                  | ...64KB  | ...                | ...               | ...                  | ...
+Size  | A20 Channel (MB/s) | Linux pipe (MB/s) | Linux usocket (MB/s) | io_uring (MB/s)
+1B    | ...                | ...               | ...                  | ...
+64B   | ...                | ...               | ...                  | ...
+4KB   | ...                | ...               | ...                  | ...
+64KB  | ...                | ...               | ...                  | ...
 ```
 
 ### 4.2 Handle Transfer 开销
@@ -282,7 +314,11 @@ Size  | A20 Channel (MB/s) | Linux pipe (MB/s) | Linux usocket (MB/s) | io_uring
 
 **方法**：
 ```c
-// 测量纯数据 vs 数据 + handles 的延迟差uint64_t t_data = measure(send(ch, 1KB, 0_handles));uint64_t t_data_h1 = measure(send(ch, 1KB, 1_handle));uint64_t t_data_h8 = measure(send(ch, 1KB, 8_handles));// handle transfer 开销 = (t_data_hN - t_data) / N
+// 测量纯数据 vs 数据 + handles 的延迟差
+uint64_t t_data = measure(send(ch, 1KB, 0_handles));
+uint64_t t_data_h1 = measure(send(ch, 1KB, 1_handle));
+uint64_t t_data_h8 = measure(send(ch, 1KB, 8_handles));
+// handle transfer 开销 = (t_data_hN - t_data) / N
 ```
 
 **预期结果**：每 handle transfer 开销应 < 1μs（handle table 加锁 + 条目创建）。
@@ -310,9 +346,21 @@ Size  | A20 Channel (MB/s) | Linux pipe (MB/s) | Linux usocket (MB/s) | io_uring
 **方法**：
 
 ```c
-// A20OS Nativeuint64_t t0 = cycle_counter();task_spawn(minimal_image, minimal_args, [stdin, stdout, stderr]);// 等待子进程退出task_wait(child);uint64_t t1 = cycle_counter();
+// A20OS Native
+uint64_t t0 = cycle_counter();
+task_spawn(minimal_image, minimal_args, [stdin, stdout, stderr]);
+// 等待子进程退出
+task_wait(child);
+uint64_t t1 = cycle_counter();
 
-// Linuxuint64_t t0 = cycle_counter();pid_t pid = fork();if (pid == 0) { execve(minimal_image, ...); }waitpid(pid, ...);uint64_t t1 = cycle_counter();
+// Linux
+uint64_t t0 = cycle_counter();
+pid_t pid = fork();
+if (pid == 0) {
+    execve(minimal_image, ...);
+}
+waitpid(pid, ...);
+uint64_t t1 = cycle_counter();
 ```
 
 **度量**：
@@ -336,7 +384,10 @@ Size  | A20 Channel (MB/s) | Linux pipe (MB/s) | Linux usocket (MB/s) | io_uring
 
 **方法**：
 ```c
-// 全权限 spawntask_spawn(image, args, handles_with_full_rights);// 最小权限 spawn（每个 handle 只保留 R）task_spawn(image, args, handles_with_R_only);
+// 全权限 spawn
+task_spawn(image, args, handles_with_full_rights);
+// 最小权限 spawn（每个 handle 只保留 R）
+task_spawn(image, args, handles_with_R_only);
 ```
 
 **预期结果**：权限降级是 O(1) 位掩码操作（每个 handle），额外开销可忽略（< 100ns per handle）。
@@ -354,7 +405,12 @@ Size  | A20 Channel (MB/s) | Linux pipe (MB/s) | Linux usocket (MB/s) | io_uring
 POSIX Application
       |
       v
-liba20posix (shim layer)open()   → path_open() + fd↔handle mappingread()   → handle_read()write()  → handle_write()fork()   → ENOSYS（Native ABI 明确不提供 fork 语义）epoll_wait() → event_wait()
+liba20posix (shim layer)
+open()       → path_open() + fd↔handle mapping
+read()       → handle_read()
+write()      → handle_write()
+fork()       → ENOSYS（Native ABI 明确不提供 fork 语义）
+epoll_wait() → event_wait()
       |
       v
 A20OS Native ABI
@@ -378,7 +434,11 @@ A20OS Native ABI
 
 **微基准**：逐个 POSIX 操作的开销差
 ```c
-// 直接 Native ABIt_native = measure(handle_read(handle, buf));// 通过 POSIX shimt_posix = measure(read(fd, buf));// shim overhead = t_posix - t_native
+// 直接 Native ABI
+t_native = measure(handle_read(handle, buf));
+// 通过 POSIX shim
+t_posix = measure(read(fd, buf));
+// shim overhead = t_posix - t_native
 ```
 
 **宏基准**：使用完整 POSIX 应用
@@ -390,7 +450,11 @@ A20OS Native ABI
 
 **报告格式**：
 ```
-Application | Native (s) | POSIX shim (s) | Overhead | Notescp 100MB    | ...        | ...            | X%       |ls -R /usr  | ...        | ...            | X%       |httpd 10k conn | ...     | ...            | X%       |make -j4    | ...        | ...            | X%       |
+Application    | Native (s) | POSIX shim (s) | Overhead | Notes
+cp 100MB       | ...        | ...            | X%       |
+ls -R /usr     | ...        | ...            | X%       |
+httpd 10k conn | ...        | ...            | X%       |
+make -j4       | ...        | ...            | X%       |
 ```
 
 **目标**：开销 < 10% 对大多数 I/O 密集型工作负载。
@@ -414,7 +478,10 @@ for (size_t size = 4096; size <= 64 * 1024 * 1024; size *= 2) {
 
 **方法**：
 ```c
-// 映射 1GB 文件，顺序读取handle = path_open(large_file, READ);addr = vm_map(handle, 0, 1GB, PROT_READ, MAP_SHARED);measure sequential_read(addr, 1GB);
+// 映射 1GB 文件，顺序读取
+handle = path_open(large_file, READ);
+addr = vm_map(handle, 0, 1GB, PROT_READ, MAP_SHARED);
+measure sequential_read(addr, 1GB);
 ```
 
 **对照**：Linux mmap + 顺序读。
@@ -423,7 +490,11 @@ for (size_t size = 4096; size <= 64 * 1024 * 1024; size *= 2) {
 
 **方法**：
 ```c
-// 进程 A 共享 1 页给进程 Baddr = vm_alloc(4096, PROT_RW);shm_handle = vm_share(addr, 4096, READ_ONLY);// 通过 channel 传 shm_handle 给 Bmsg_send(ch, empty_msg, [shm_handle]);
+// 进程 A 共享 1 页给进程 B
+addr = vm_alloc(4096, PROT_RW);
+shm_handle = vm_share(addr, 4096, READ_ONLY);
+// 通过 channel 传 shm_handle 给 B
+msg_send(ch, empty_msg, [shm_handle]);
 ```
 
 度量从 vm_share 到 B 成功 vm_map 的时间。
@@ -439,14 +510,15 @@ for (size_t size = 4096; size <= 64 * 1024 * 1024; size *= 2) {
 **方法**：在内核中插入运行时不变式检查断言，在每次操作后验证 $\mathcal{I}$（参见 04-theory-deep-dive.md §3.1）。
 
 ```c
-// 内核调试代码void invariant_check(system_state *sigma) {
+// 内核调试代码
+void invariant_check(system_state *sigma) {
     // I1: 权限合法性
     for_each_handle(h) {
         assert(h.rights ⊆ Legal(h.obj->type));
     }
     // I3: 引用计数一致性
     for_each_object(o) {
-        assert(refcount(o) == count_handles_pointing_to(o));
+        assert(refcount(o) == count_owned_refs(o)); // HT + queued/pending channel messages
     }
     // I4: 对象活性
     for_each_object(o) {
@@ -516,7 +588,15 @@ for (size_t size = 4096; size <= 64 * 1024 * 1024; size *= 2) {
 对 Native ABI 实现的每个子系统文件收集：
 
 ```
-模块        | 文件             | LOC | 函数数 | 平均圈复杂度sys_handle  | sys_handle.c     | ... | ...    | ...sys_task    | sys_task.c       | ... | ...    | ...sys_memory  | sys_memory.c     | ... | ...    | ...sys_path    | sys_path.c       | ... | ...    | ...sys_event   | sys_event.c      | ... | ...    | ...sys_net     | sys_net.c        | ... | ...    | ...sys_time    | sys_time.c       | ... | ...    | ...总计        |                  | ... | ...    | ...
+模块        | 文件             | LOC | 函数数 | 平均圈复杂度
+sys_handle  | sys_handle.c     | ... | ...    | ...
+sys_task    | sys_task.c       | ... | ...    | ...
+sys_memory  | sys_memory.c     | ... | ...    | ...
+sys_path    | sys_path.c       | ... | ...    | ...
+sys_event   | sys_event.c      | ... | ...    | ...
+sys_net     | sys_net.c        | ... | ...    | ...
+sys_time    | sys_time.c       | ... | ...    | ...
+总计        |                  | ... | ...    | ...
 ```
 
 **目标**：Native ABI 实现总 LOC < 5000（不含注释）。平均圈复杂度 < 10。
@@ -537,7 +617,11 @@ for (size_t size = 4096; size <= 64 * 1024 * 1024; size *= 2) {
 
 **验证属性**：
 ```
-PROPERTY 1: ∀σ. I1(σ) ∧ I2(σ) ∧ I3(σ) ∧ I4(σ)    // 安全不变式始终成立PROPERTY 2: ∀p, n. rights(p, n, σ') ⊆ rights(p, n, σ)  // 权限单调递减PROPERTY 3: event_wait eventually returns               // 活性PROPERTY 4: channel FIFO order preserved                  // 消息序PROPERTY 5: no dangling references after close            // 引用完整性
+PROPERTY 1: ∀σ. I1(σ) ∧ I2(σ) ∧ I3(σ) ∧ I4(σ)    // 安全不变式始终成立
+PROPERTY 2: ∀p, n. rights(p, n, σ') ⊆ rights(p, n, σ)  // 权限单调递减
+PROPERTY 3: event_wait eventually returns               // 活性
+PROPERTY 4: channel FIFO order preserved                  // 消息序
+PROPERTY 5: no dangling references after close            // 引用完整性
 ```
 
 **状态空间控制**：

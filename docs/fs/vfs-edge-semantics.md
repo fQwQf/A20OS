@@ -1,14 +1,14 @@
 # A20OS VFS 边界语义设计
 
-本文档记录 A20OS 在 P1 Wave 1 收紧 VFS Linux 边界语义时的设计决策。每项决策都映射到实现文件和验证它的测试门禁。本文基于 `kernel/fs/`、`kernel/abi/linux/` 下的当前代码，以及面向用户的压力测试套件 `user/cmds/vfs_stress.c`。
+本文档记录 A20OS 在 P1 Wave 1 收紧 VFS Linux 边界语义时的设计决策，并区分当前实现与未完成项。本文已按 `e33c3219` 的 `kernel/fs/`、`kernel/abi/linux/` 和 `user/cmds/stress/vfs_edge.c` 做源码核对；没有与该提交匹配的完整干净双架构平台复验，最新完整平台证据仍属于 `f9732348`，不能外推为当前提交的验证结果。
 
-> **实现状态**：本设计已全部落地。各章节的"当前状态"小节记录的是**设计时**的旧行为；当前行为与决策后的实现一致，由 `smoke-vfs-edge` 门禁验证。
+> **实现状态**：核心路径已有实现，但不是完整 Linux 兼容。`RESOLVE_NO_MAGICLINKS` 被接受但未执行检查，`RESOLVE_CACHED` 未实现，A20OS 自定义 `RESOLVE_NO_TRAILING_SYMLINKS` 与 Linux 的 bit 分配冲突，`renameat2` 能力取决于具体后端。`smoke-vfs-edge` 当前只在 RISC-V64、1 vCPU 上运行，覆盖选定场景，不是全 flag、全后端或双架构证明。
 
 ## 1. 范围
 
 覆盖的 syscall 和 VFS 边界领域：
 
-- `openat2`：完整 Linux `resolve` flag 集合
+- `openat2`：已实现的 `resolve` 子集及 A20OS 扩展
 - `renameat2` flag：`RENAME_NOREPLACE`、`RENAME_EXCHANGE`、`RENAME_WHITEOUT`
 - `statx`：mask 处理和 sync type
 - `faccessat2` / `fchmodat2`：`AT_*` flag 语义
@@ -17,53 +17,56 @@
 - Mount-point `..` crossing：正确逃出 mount root
 - `chroot`：让 path resolution 遵守 `task->fs.root_path`
 
-本轮不包含：实际代码变更的实现（本文档是 Wave 1 契约）；运行时文件系统初始化移除（Wave 2）；page-cache 与 mmap coherence（由 MM 改进循环覆盖）。
+本文覆盖当前边界实现及其遗留差距；不覆盖运行时文件系统初始化移除或 page-cache/mmap coherence。
 
-## 2. openat2：完整 Linux resolve flag 集合
+## 2. openat2：当前 resolve 子集
 
 ### 2.1 当前状态（设计时）
 
-`kernel/abi/linux/sys_proc.c` 的 `sys_openat2` 曾从用户 `struct open_how` 复制 `how->flags` 和 `how->mode`，但忽略 `how->resolve` 和 `how->size`，随后调用 `sys_openat`，因此 `RESOLVE_*` flag 没有任何效果。**现已实现**：`how->size` 被校验、未知 `resolve` bit 以 `-EINVAL` 拒绝、`RESOLVE_NO_SYMLINKS/BENEATH/IN_ROOT/NO_MAGICLINKS/NO_XDEV/NO_TRAILING_SYMLINKS` 经 `vfs_openat2` 生效（`sys_proc.c:552`）。
+`kernel/abi/linux/sys_proc.c` 的 `sys_openat2` 曾从用户 `struct open_how` 复制 `flags` 和 `mode`，但忽略 `resolve` 和 syscall 的 `size` 参数，随后调用 `sys_openat`，因此 `RESOLVE_*` flag 没有任何效果。**现已实现**：`size` 被校验、未知 `resolve` bit 以 `-EINVAL` 拒绝，`RESOLVE_NO_SYMLINKS/BENEATH/IN_ROOT/NO_XDEV/NO_TRAILING_SYMLINKS` 经 `vfs_openat2` 生效；`RESOLVE_NO_MAGICLINKS` 被 allowlist 接受，但 resolver 尚未执行对应检查（`kernel/abi/linux/sys_proc.c`、`kernel/fs/vfs.c`、`kernel/fs/vfs/path_resolution.c`）。
 
 ### 2.2 决策
 
-实现完整 Linux `openat2` resolve flag 集合：
+当前实现的 flag 表如下；其中最后两项不是 Linux-compatible 编号：
 
 | Flag | 语义 | 实现文件 |
 |------|-----------|---------------------|
 | `RESOLVE_NO_SYMLINKS` | 整个 walk 期间绝不跟随 symlink | `kernel/fs/vfs/path_resolution.c` |
 | `RESOLVE_BENEATH` | 拒绝 walk 到起始目录之上 | `kernel/fs/vfs/path_resolution.c` |
 | `RESOLVE_IN_ROOT` | 相对于起始目录解析绝对路径和 `..` | `kernel/fs/vfs/path_resolution.c` |
-| `RESOLVE_NO_MAGICLINKS` | 拒绝 procfs/sysfs 风格 magic link | `kernel/fs/vfs/path_resolution.c` |
+| `RESOLVE_NO_MAGICLINKS` | 预期拒绝 magic link；当前只被 syscall allowlist 接受，resolver 未执行检查 | `kernel/abi/linux/sys_proc.c`；实现缺口 |
 | `RESOLVE_NO_XDEV` | 拒绝跨越 mount point | `kernel/fs/vfs/path_resolution.c` |
-| `RESOLVE_CACHED` | 只使用缓存 lookup；dentry 未缓存则失败 | **范围外**，以 `-EINVAL` 拒绝 |
-| `RESOLVE_NO_TRAILING_SYMLINKS` | 不跟随最终 component 处的 symlink | 在 `vfs_open` / `vfs_fstatat` 中处理 |
+| `RESOLVE_CACHED` | 只使用缓存 lookup；dentry 未缓存则失败 | 未实现；A20OS 头中定义为 `0x40`，syscall allowlist 拒绝 |
+| `RESOLVE_NO_TRAILING_SYMLINKS` | A20OS 扩展：不跟随最终 component 处的 symlink | 定义为 `0x20`；不是 Linux `openat2` flag |
 
 ### 2.3 实现映射
 
-- `kernel/abi/linux/sys_proc.c`：对 `sizeof(struct open_how)` 校验 `how->size`；用 `-EINVAL` 拒绝未知 `resolve` bit；将 resolve flag 传给 `vfs_openat2`。
+- `kernel/abi/linux/sys_proc.c`：接受 24 到 A20OS `sizeof(struct open_how)`（88）字节；用 `-EINVAL` 拒绝未知或 `RESOLVE_CACHED` bit；将其余 resolve flag 传给 `vfs_openat2`。`RESOLVE_NO_MAGICLINKS` 虽被允许，但下游没有对应检查。函数中检查超长结构尾部是否为零的分支当前因前置 `size > sizeof(khow)` 拒绝而不可达。
 - `kernel/fs/vfs.c`：`vfs_openat2(dirfd, path, flags, mode, resolve)` 构造 resolution context 并调用 resolver。
-- `kernel/fs/vfs/path_resolution.c`：扩展 `vnode_lookup_path`，使其接受 `resolve_flags` bitmask 和起始目录。增加 helper `vfs_path_walk_beneath`。
+- `kernel/fs/vfs/path_resolution.c`：让 openat2 resolver 接受起始路径、root path 和 `resolve_flags`，并在 walk 中执行 beneath/root/mount 边界检查。
 - `kernel/fs/vfs/dcache.c`：~~增加 `vfs_dcache_lookup_cached`~~；由于当前 dentry cache 是优化层而不是权威 lookup 来源，`RESOLVE_CACHED` 以 `-EINVAL` 拒绝。
 - `kernel/include/fs/vfs.h`：增加 `RESOLVE_*` 常量和 `open_how` struct layout。
-- `kernel/include/abi/linux/fcntl.h`：在 ABI 边界镜像 Linux `RESOLVE_*` 值。
-- `user/cmds/vfs_stress.c`：增加 `openat2` resolve flag 测试。
+- `kernel/include/core/fcntl.h`：当前常量表；前五个值与 Linux 一致，`0x20/0x40` 两项不一致。
+- `user/cmds/stress/vfs_edge.c`：覆盖 `BENEATH` 和 `NO_SYMLINKS` 的选定场景。
 
 ### 2.4 ABI 说明
 
-- Linux `struct open_how` 是 `{ u64 flags; u64 mode; u64 resolve; u64 __padding[8]; }`。
-- A20OS 必须接受相同布局；`how->size` 必须至少 24 字节，且不超过 `sizeof(struct open_how)`。
-- 未知 `resolve` bit 返回 `-EINVAL`。
+- Linux 当前已知 `struct open_how` 前缀是 24 字节的 `{ u64 flags; u64 mode; u64 resolve; }`，并通过 syscall 的 `size` 参数做尾部扩展；A20OS 内部结构额外声明了 64 字节 padding。
+- A20OS 当前要求 `24 <= size <= 88`，并不接受 Linux 规则允许的更长全零扩展结构。
+- Linux `RESOLVE_CACHED` 是 `0x20`；A20OS 把 `0x20` 解释为自定义 `RESOLVE_NO_TRAILING_SYMLINKS`，把未实现的 `RESOLVE_CACHED` 定义为 `0x40`。这是当前明确的 ABI 不一致，不能称为完整 Linux flag 集合。
+- 未知或未允许的 `resolve` bit 返回 `-EINVAL`；`RESOLVE_NO_MAGICLINKS` 是已允许但当前无效果的例外。
 
 ## 3. renameat2 flag
 
 ### 3.1 当前状态（设计时）
 
-`kernel/abi/linux/sys_path.c` 的 `sys_renameat2` 曾用 `-EINVAL` 拒绝任何非零 `flags`。**现已实现**：`RENAME_NOREPLACE` 与 `RENAME_EXCHANGE` 被接受并经 `vfs_rename` 分发到后端（`sys_path.c:40`），`RENAME_WHITEOUT` 仍以 `-EINVAL` 拒绝。
+`kernel/abi/linux/sys_path.c` 的 `sys_renameat2` 曾用 `-EINVAL` 拒绝任何非零 `flags`。**现已实现**：`RENAME_NOREPLACE` 与 `RENAME_EXCHANGE` 被接受并经 `vfs_rename_flags` 分发到后端，`RENAME_WHITEOUT` 仍以 `-EINVAL` 拒绝。普通 same-path rename 由后端作为 no-op 成功；VFS 没有 same-path `-EINVAL` guard。
 
 ### 3.2 决策
 
 实现 `RENAME_NOREPLACE`、`RENAME_EXCHANGE`，并记录 `RENAME_WHITEOUT` 本轮范围外，因为 A20OS 没有 overlay/whiteout 文件系统支持。
+
+不带冲突 flag 的 source 与 target 为同一路径时返回成功。`RENAME_NOREPLACE` 仍按“目标已存在”规则处理，不能把普通 same-path no-op 扩展成所有 flag 组合都成功。
 
 | Flag | 支持 | 语义 | 实现文件 |
 |------|---------|-----------|---------------------|
@@ -74,44 +77,44 @@
 ### 3.3 实现映射
 
 - `kernel/abi/linux/sys_path.c`：校验 flag；允许 `RENAME_NOREPLACE | RENAME_EXCHANGE`；拒绝 `RENAME_WHITEOUT` 和不兼容组合。
-- `kernel/fs/vfs.c`：为 `vfs_rename` 增加 `flags` 参数。在委托给 `old_dir->ops->rename` 前检查 cross-mount（`-EXDEV`）、same target（`-EINVAL`）和 permission/sticky-bit 规则。
+- `kernel/fs/vfs.c`：由 `vfs_rename_flags` 校验并传递 flags；在委托给 `old_dir->ops->rename` 前检查 cross-mount（`-EXDEV`）和 permission/sticky-bit 规则。`vfs_rename` 保留为 flags 为 0 的 wrapper；没有 same-target `-EINVAL` 检查，普通 same-path no-op 由后端返回成功。
 - `kernel/fs/diskfs/ramfs.c`：在 `ramfs_vnode_rename` 中实现 `RENAME_NOREPLACE`（现有 lookup）和 `RENAME_EXCHANGE`。
 - `kernel/fs/diskfs/ext4.c`：扩展 `ext4_vn_rename`，处理 `RENAME_NOREPLACE` 和 `RENAME_EXCHANGE`。
-- `kernel/fs/diskfs/fat32.c`：保持 `.rename = NULL`；VFS 会继续对 FAT32 返回 `-ENOSYS`。
+- `kernel/fs/diskfs/fat32.c` / `fat32_vn.c`：已接入 rename，支持普通替换、跨目录移动与 `RENAME_NOREPLACE`；不支持 `RENAME_EXCHANGE`。
 - 后端 vnode ops 签名变更：`int (*rename)(vnode_t *old_dir, const char *old_name, vnode_t *new_dir, const char *new_name, unsigned int flags)`。
 - `kernel/include/fs/vfs.h`：更新 `rename` 函数指针类型并增加 `RENAME_*` 常量。
-- `user/cmds/vfs_stress.c`：增加 renameat2 flag 测试。
+- `user/cmds/stress/vfs_edge.c`：当前在 ramfs 上覆盖 `NOREPLACE` 与 `EXCHANGE`。
 
 ## 4. statx
 
 ### 4.1 当前状态（设计时）
 
-`kernel/abi/linux/sys_path.c` 的 `sys_statx` 曾默认 `mask` 为 `STATX_BASIC_STATS` 并填充固定字段集合，不遵守 sync type、不报告 `STATX_BTIME`、忽略大部分请求的 `mask`。**现已实现**：`mask` 被遵守（只填充请求字段、`stx_mask` 反映实际提供字段），`STATX_BTIME` 报告为与 `ctime` 相同（`sys_path.c:358`）。
+`kernel/abi/linux/sys_path.c` 的 `sys_statx` 曾默认 `mask` 为 `STATX_BASIC_STATS` 并填充固定字段集合，不遵守 sync type、不报告 `STATX_BTIME`、忽略大部分请求的 `mask`。当前实现不是 requested-only：它总把 `STATX_BASIC_STATS` 加入 `stx_mask` 并返回基础元数据，再按请求追加 `STATX_BTIME` 等可选字段；`STATX_BTIME` 的值与 `ctime` 相同。
 
 ### 4.2 决策
 
-- 遵守 `mask`：只填充调用者请求的字段；将 `stx_mask` 设为实际提供的字段。
-- 遵守 `AT_STATX_SYNC_TYPE`：`FORCE_SYNC` 刷新 page-cache writeback 并重新读取 inode metadata；`DONT_SYNC` 使用缓存值。
+- `mask` 采用“基础字段始终提供、可选字段按请求追加”的策略：`stx_mask` 总含 `STATX_BASIC_STATS`，而不是只回报调用者请求的 bit。
+- 遵守 `AT_STATX_SYNC_TYPE`：`FORCE_SYNC` 先执行 vnode page-cache writeback 再读取 metadata；`DONT_SYNC` 不触发该 writeback。
 - 将 `STATX_BTIME` 报告为与 `ctime` 相同（A20OS 不跟踪 birth time）。
 - 用 `-EINVAL` 拒绝未知 flag。
 
 ### 4.3 实现映射
 
 - `kernel/abi/linux/sys_path.c`：将 `mask` 和 sync type 传给 `vfs_statx`。
-- `kernel/fs/vfs.c`：增加 `vfs_statx(dirfd, path, flags, mask, buf)`。
-- `kernel/fs/vfs/stat_perm.c`：扩展 `vfs_vnode_stat` 以接受 sync hint，或增加 `vfs_vnode_statx`。
-- `kernel/fs/diskfs/fat32.c` / `kernel/fs/diskfs/ext4.c` / `kernel/fs/diskfs/ramfs.c`：后端 `stat` ops 已提供所有基础字段；增加 btime 报告。
+- `kernel/fs/vfs_stat.c`：`vfs_statx`/`vfs_fstatx` 处理 sync hint，并复用 `vfs_vnode_stat` 读取 metadata。
+- `kernel/fs/vfs/stat_perm.c`：`vfs_vnode_stat` 提供基础 stat 与 RAM time-meta 回退。
+- `kernel/abi/linux/sys_path.c`：组装 `struct statx`，总是报告基础字段，并在请求 `STATX_BTIME` 时复制 `ctime`。
 - `kernel/fs/page_cache.c`：为 `FORCE_SYNC` 提供 `page_cache_writeback_vnode` 调用。
 - `kernel/include/abi/linux/stat.h`：已经定义 `STATX_*` 和 `AT_STATX_*`。
-- `user/cmds/vfs_stress.c`：增加 statx mask 和 sync-type 测试。
+- `user/cmds/stress/vfs_edge.c`：覆盖 `FORCE_SYNC`/`DONT_SYNC` 与 size mask。
 
 ## 5. faccessat2 / fchmodat2
 
 ### 5.1 当前状态（设计时）
 
-- `kernel/fs/vfs.c` 中的 `vfs_faccessat2` 处理 `AT_EACCESS`、`AT_SYMLINK_NOFOLLOW` 和 `AT_EMPTY_PATH`，并对未支持 bit 返回 `-EINVAL`（`vfs_stat.c:165`）。
+- `kernel/fs/vfs_stat.c` 中的 `vfs_faccessat2` 处理 `AT_EACCESS`、`AT_SYMLINK_NOFOLLOW` 和 `AT_EMPTY_PATH`，并对未支持 bit 返回 `-EINVAL`。
 - `kernel/abi/linux/sys_path.c` 中的 `sys_fchmodat` 处理 `AT_SYMLINK_NOFOLLOW` 和 `AT_EMPTY_PATH`，但在 legacy `fchmodat` 路径中忽略第四个参数。
-- `fchmodat2` 在 `kernel/abi/linux/syscall_table.def:74` 中连到带 flags 参数的 `sys_fchmodat`。
+- `fchmodat2` 在 `kernel/abi/linux/syscall_table.def` 中连到带 flags 参数的 `sys_fchmodat`。
 
 ### 5.2 决策
 
@@ -120,10 +123,10 @@
 
 ### 5.3 实现映射
 
-- `kernel/fs/vfs.c`：收紧 `vfs_faccessat2` flag 校验。
-- `kernel/fs/vfs.c`：`vfs_chmodat` 已检查 flag；确保 `vfs_fchmodat2`（或带 flags 的 `fchmodat` 路径）从 syscall table 暴露。
+- `kernel/fs/vfs_stat.c`：收紧 `vfs_faccessat2` flag 校验。
+- `kernel/fs/vfs_stat.c`：`vfs_chmodat` 已检查 flag；确保带 flags 的 `fchmodat` 路径从 syscall table 暴露。
 - `kernel/abi/linux/sys_path.c`：让 `sys_fchmodat` 成为规范实现，并确保 `fchmodat2` 共享同一路径。
-- `user/cmds/vfs_stress.c`：增加 faccessat2 flag 和 fchmodat2 测试。
+- 当前 `vfs_edge.c` 没有专门的 faccessat2/fchmodat2 flag 场景；这是测试缺口。
 
 ## 6. xattr
 
@@ -132,30 +135,31 @@
 - xattr syscall 位于 `kernel/abi/linux/sys_xattr.c`。
 - 存储是 `kernel/fs/xattr.c` 中按 `(mnt, ino)` 索引的全局 RAM 表。
 - 没有后端特定 xattr hook；FAT32/ext4 不持久化值。
-- 未执行 namespace 校验（例如 `security.*`、`trusted.*`、`user.*`）。
+- `xattr_check_namespace()` 只接受 `user.`、`trusted.`、`security.`、`system.`；`trusted.`/`security.` 的 set/remove 要求 `CAP_SYS_ADMIN`。
+- syscall 表面只接受 reg/dir/lnk vnode，其他类型返回 `-EOPNOTSUPP`。
 
-### 6.2 决策
+### 6.2 已落地决策
 
-P1 保留全局 RAM xattr 表，但收紧 ABI 表面：
+P1 保留全局 RAM xattr 表，并收紧 ABI 表面：
 
 - 用 `-EINVAL` 拒绝没有 namespace 前缀（`user.`、`trusted.`、`security.`、`system.`）的名称。
 - 如果调用者缺少 `CAP_SYS_ADMIN`，拒绝 `security.*` 和 `trusted.*`。
-- 用 `-EOPNOTSUPP` 拒绝非 reg/dir/lnk vnode 上的 xattr（`sys_xattr.c:35` 已这样做）。
+- 用 `-EOPNOTSUPP` 拒绝非 reg/dir/lnk vnode 上的 xattr（`kernel/abi/linux/sys_xattr.c` 已这样做）。
 - 保持值只存在于 RAM；记录块文件系统的持久化缺口。
 
 ### 6.3 实现映射
 
-- `kernel/fs/xattr.c`：增加 `xattr_check_namespace` helper。
-- `kernel/abi/linux/sys_xattr.c`：存储前调用 namespace 检查。
-- `kernel/include/fs/xattr.h`：如未存在，定义 namespace 常量。
+- `kernel/fs/xattr.c`：`xattr_check_namespace` helper 与 capability 检查。
+- `kernel/abi/linux/sys_xattr.c`：通过 vnode xattr helper 执行 namespace 检查。
+- `kernel/include/fs/xattr.h`：namespace 常量。
 - `kernel/fs/diskfs/fat32.c` / `kernel/fs/diskfs/ext4.c`：记录本轮不增加后端 xattr hook。
-- `user/cmds/vfs_stress.c`：增加 xattr namespace 和 permission 测试。
+- `user/cmds/stress/vfs_edge.c`：覆盖 user/invalid/trusted namespace 的选定行为。
 
 ## 7. Symlink loop limit
 
 ### 7.1 当前状态（设计时）
 
-`vnode_lookup_path` 曾把 `symlink_depth` 上限硬编码为 8（`kernel/fs/vfs/path_resolution.c:89`）。**现已实现**：使用 `MAX_SYMLINKS`（40，`kernel/include/fs/vfs.h:22`），深度超过时以 `-ELOOP` 失败。
+`vnode_lookup_path` 曾把 `symlink_depth` 上限硬编码为 8（`kernel/fs/vfs/path_resolution.c`）。**现已实现**：使用 `MAX_SYMLINKS`（40，`kernel/include/fs/vfs.h`），深度超过时以 `-ELOOP` 失败。
 
 ### 7.2 决策
 
@@ -165,7 +169,7 @@ P1 保留全局 RAM xattr 表，但收紧 ABI 表面：
 
 - `kernel/fs/vfs/path_resolution.c`：用 `MAX_SYMLINKS` 替换硬编码 `8`。
 - `kernel/include/fs/vfs.h`：增加 `#define MAX_SYMLINKS 40`。
-- `user/cmds/vfs_stress.c`：增加 40-link chain 测试和 41-link `-ELOOP` 测试。
+- `user/cmds/stress/vfs_edge.c`：构造超过 40 层的 symlink chain 并检查 `ELOOP`。
 
 ## 8. Mount-point `..` crossing
 
@@ -186,7 +190,7 @@ P1 保留全局 RAM xattr 表，但收紧 ABI 表面：
 - `kernel/fs/vfs/mount.c`：增加 `vfs_mount_parent(mount_t *mnt)`，返回覆盖 `mnt->path` 父路径的 mount。
 - `kernel/fs/vfs/path_resolution.c`：在 `vnode_lookup_path` 中跟随 `vnode->parent` 前，先检查 `cur` 是否是 mount root；如果是，切换到 parent mount 的 vnode 并继续。
 - `kernel/include/fs/vfs.h`：增加 mount-root 检测 helper。
-- `user/cmds/vfs_stress.c`：增加从 `/bin`（FAT32 mount）通过 `..` 回到 `/` 的测试。
+- `user/cmds/stress/vfs_edge.c`：在 `/tmp` 挂载 ramfs，检查从 mount root 的 `..` 回到父 mount；当前没有 FAT32 嵌套 mount 专项。
 
 ## 9. chroot
 
@@ -205,11 +209,11 @@ P1 保留全局 RAM xattr 表，但收紧 ABI 表面：
 
 ### 9.3 实现映射
 
-- `kernel/fs/vfs/path_resolution.c`：增加 `vfs_resolve_rooted`，在 normalization 前将 `root_path` 与请求路径拼接。
-- `kernel/fs/vfs.c`：让 `vfs_resolve`、`vfs_resolve_at` 和 `vfs_resolve_no_follow_final` 使用当前 task 的 `root_path`。
-- `kernel/proc/exec.c`：确保 `proc_exec` 通过同一个 rooted resolver 解析可执行文件路径。
+- `kernel/fs/vfs/path_resolution.c`：通过 `vfs_path_normalize_absolute_with_root` 和 resolver 的 root context 约束绝对路径与 `..`。
+- `kernel/fs/vfs/path_resolution.c`：让 `vfs_resolve` 和 `vfs_resolve_at` 使用当前 task 的 `root_path`；`kernel/fs/vfs.c` 中的 `vfs_resolve_no_follow_final` 使用相同 root 约束。
+- `kernel/proc/exec.c`：`proc_exec` 在构造绝对 executable path 时应用 `root_path`，再调用 `vfs_path_normalize_absolute_with_root`。
 - `kernel/abi/linux/sys_namespace.c`：保留现有 `sys_chroot`；该处无需改动。
-- `user/cmds/vfs_stress.c`：增加 chroot escape 测试。
+- `user/cmds/stress/vfs_edge.c`：覆盖 chroot 后通过 `..` 访问外部 sibling 的拒绝行为。
 
 ## 10. 变更 / 扩展文件汇总
 
@@ -218,26 +222,28 @@ P1 保留全局 RAM xattr 表，但收紧 ABI 表面：
 | `kernel/abi/linux/sys_proc.c` | `openat2` 校验与分发 |
 | `kernel/abi/linux/sys_path.c` | `renameat2` flag、`statx` sync/mask、`fchmodat2` flag |
 | `kernel/abi/linux/sys_xattr.c` | namespace 和 capability 检查 |
-| `kernel/fs/vfs.c` | `vfs_rename` flag、`vfs_faccessat2` 校验、rooted resolution hook |
+| `kernel/fs/vfs.c` | `vfs_rename_flags`、rooted resolution hook |
+| `kernel/fs/vfs_stat.c` | `vfs_faccessat2` 与 `vfs_chmodat` flag 校验 |
 | `kernel/fs/vfs/path_resolution.c` | `RESOLVE_*`、`MAX_SYMLINKS`、mount `..` crossing、chroot root |
 | `kernel/fs/vfs/mount.c` | mount-parent lookup helper |
-| `kernel/fs/vfs/dcache.c` | `RESOLVE_CACHED` lookup helper |
-| `kernel/fs/vfs/stat_perm.c` | `vfs_vnode_statx` / sync hint |
+| `kernel/fs/vfs/dcache.c` | 普通 lookup 优化缓存；没有 `RESOLVE_CACHED` 权威查询接口 |
+| `kernel/fs/vfs/stat_perm.c` | `vfs_vnode_stat`、permission 与 RAM time-meta |
 | `kernel/fs/xattr.c` | namespace validation helper |
 | `kernel/fs/diskfs/ramfs.c` | `RENAME_NOREPLACE` / `RENAME_EXCHANGE` |
 | `kernel/fs/diskfs/ext4.c` | `RENAME_NOREPLACE` / `RENAME_EXCHANGE` |
-| `kernel/fs/diskfs/fat32.c` | 无 rename 变更（仍不支持） |
+| `kernel/fs/diskfs/fat32.c`、`fat32_vn.c` | 普通 rename 与 `RENAME_NOREPLACE`；不支持 exchange |
 | `kernel/include/fs/vfs.h` | 新常量和 vnode ops 签名 |
 | `kernel/include/abi/linux/fcntl.h` | `RESOLVE_*` 和 `RENAME_*` ABI 值 |
 | `kernel/include/abi/linux/stat.h` | 已定义 `STATX_*` |
 | `kernel/proc/exec.c` | executable 的 rooted path resolution |
-| `user/cmds/vfs_stress.c` | 新边界场景测试 |
+| `user/cmds/stress/vfs_edge.c` | 当前 RISC-V64 edge 场景 |
+| `user/cmds/stress/vfs_stress.c` | 较广 VFS 压力与基础行为场景 |
 
 ## 11. 测试门禁
 
 必须增加或扩展以下 smoke / stress 门禁：
 
-- `smoke-vfs-edge`：openat2 resolve flag、renameat2 flag、statx mask/sync、faccessat2/fchmodat2 flag、xattr namespace、symlink loop limit、mount `..` crossing、chroot。
+- `smoke-vfs-edge`：当前 RISC-V64 单核目标，覆盖 openat2 的 `BENEATH`/`NO_SYMLINKS`、ramfs renameat2、statx、xattr、symlink loop、mount `..` crossing、chroot 等选定场景；不覆盖 `RESOLVE_NO_MAGICLINKS`、`RESOLVE_CACHED`、全部 resolve flag、全部文件系统后端或其他架构。
 - 现有门禁（`smoke-abi-linux`、`check-vfs-abstraction`）必须保持通过。
 
 `smoke-vfs-fs-specific`（每后端 unsupported-op errno 矩阵）不属于 P1 范围；后端能力差异继续记录在 `docs/fs/fs-consistency-model.md`。

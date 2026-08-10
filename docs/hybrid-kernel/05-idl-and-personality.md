@@ -1,6 +1,6 @@
 # Native 服务 IDL 与 Linux 人格层
 
-本文档定义 A20OS Native 服务的 **IDL 语言规范**、当前实现状态，以及 Linux 人格层的两阶段实现。设计定位见 [00-design.md](00-design.md)，改造路线见 [03-refactor-plan.md](03-refactor-plan.md) 阶段四/五。
+本文档定义 A20OS Native 服务的 **IDL 语言规范**、当前实现状态，以及 Linux 人格层的两阶段实现，已按 `e33c3219` 的 IDL、生成器、协议 wrapper 和 personality 头核对。本次只做源码审计，未运行 `make check-a20-idl` 或 smoke。
 
 ## 1. IDL 语言规范
 
@@ -49,7 +49,7 @@ interface <名字> version <N> {
 
 ### 1.4 版本化请求/响应信封
 
-所有服务消息使用 `ENVELOPE` 协议：
+rtcd 与 svcmgr/echod 的 channel 消息使用 `ENVELOPE` 协议：
 
 ```
 typedef struct a20_idl_envelope_t {   // message ENVELOPE
@@ -79,19 +79,19 @@ typedef struct a20_idl_envelope_t {   // message ENVELOPE
 
 ### 1.7 当前 IDL 覆盖与边界
 
-- **已覆盖**：`a20_services.idl` version 1 定义 `ENVELOPE`、`RTCD_ALARM_REQUEST`、`RTCD_TIME_RESPONSE`、`SVCMGR_ECHO` 四个消息，以及 RTCD/UBD/SVCMGR 的请求/响应/崩溃常量；
+- **已覆盖**：`a20_services.idl` version 1 定义 `ENVELOPE`、`RTCD_ALARM_REQUEST`、`RTCD_TIME_RESPONSE`、`SVCMGR_ECHO` 四个消息，以及 RTCD/UBD/SVCMGR 常量；rtcd 与 svcmgr/echod 实际使用 envelope，ubd 只消费生成常量且块数据面走共享环；
 - **不在 IDL 范围**：registry 是内核 syscall 接口（`0x0A03`），不属于 channel 协议；
 - **剩余**：双端绑定代码生成与动态版本协商（生成器当前只产 C 头，不产收发 stubs）。
 
 ## 2. 实现状态（与 `make check-a20-idl` 对应）
 
-服务协议已从手写 proto 头迁移到 `user/svc/a20_services.idl`。`tools/a20idl.py` 在构建期生成 `user/svc/a20_services_idl.h`（见 1.6），rtcd、svcmgr 和 ubd 的协议头只保留槽位/设备常量并 include 生成头。
+常量与部分消息布局已迁移到 `user/svc/a20_services.idl`。`tools/a20idl.py` 在构建期生成 ignored 的 `user/svc/a20_services_idl.h`；`rtcd_proto.h`、`svc_proto.h` 和 `ubd_proto.h` 仍是活跃手写 wrapper，并未退出源码树。
 
 已实现：
 
 - 版本化常量与固定宽度 `message` 字段（生成结构体，wire layout 保持）；
 - 版本化请求/响应信封（见 1.4）；`smoke-native-rtcd` 双向验证；
-- svcmgr/echod 协议 IDL 化（`SVCMGR_REQ_ECHO/CRASH` 版本化消息替换裸 echo 与魔法字符串），echod 校验版本并忽略畸形消息而非误崩溃；`smoke-native-svc` PASS；
+- svcmgr/echod 协议 IDL 化（`SVCMGR_REQ_ECHO/CRASH` 版本化消息替换裸 echo 与魔法字符串），echod 校验版本并忽略畸形消息而非误崩溃；`smoke-native-svc` 是对应运行入口，本次未运行；
 - `make check-a20-idl` 重生成并与当前工作树生成头比较。
 
 ## 3. Linux 人格层
@@ -99,8 +99,8 @@ typedef struct a20_idl_envelope_t {   // message ENVELOPE
 在 Native 原语上重建的 Linux 风格接口，两阶段已实现：
 
 1. `a20_personality.h` — channel-backed pipe facade：跨消息字节流（NONBLOCK drain 拼接）、部分读取保留剩余、level 触发的就绪（pending 数据保持可读直到耗尽）；
-2. `a20_linux.h` — 对象翻译层：fd 表（open/close/dup/read/write，`A20_LINUX_FD_MAX=64`）、匿名 mmap、pipe、socketpair、futex（ETIMEDOUT 映射）、epoll 风格 wait-many（共享 EventQ）；`smoke-native-linux` 六分区 PASS。
+2. `a20_linux.h` — 对象翻译层：fd 表（open/close/dup/read/write，`A20_LINUX_FD_MAX=64`）、匿名 mmap、pipe、socketpair、futex（ETIMEDOUT 映射）、epoll 风格 wait-many（共享 EventQ）；`test_native_linux.c` 有六个分区，`smoke-native-linux` 是对应运行入口，本次未运行。
 
-**语义对照**：`user/cmds/core/pipe_ref.c` 用真实 Linux pipe(2) 执行与 native 实现相同的序列（部分读、跨消息字节流、level 就绪），`smoke-native-personality` 要求两个实现输出完全一致的 `PIPE_REF` 行——native 与 Linux ABI 语义对照成立。
+**语义对照**：`user/cmds/core/pipe_ref.c` 用真实 Linux pipe(2) 执行与 native 实现相同的序列（部分读、跨消息字节流、level 就绪），`smoke-native-personality` 要求两个实现输出完全一致的 `PIPE_REF` 行。源码具备该对照入口；本次未运行，不能把目标断言写成当前 PASS。
 
 剩余：fd 表 byte-stream 语义的完整覆盖、epoll level 触发通用化、更大测例集（CAgent 功能项）的语义 diff 与性能对照。本文档不把现有 Linux ABI 直通实现称为已完成的 starnix 人格层；Native ABI 仍是系统本体，完整人格负载是后续工作。

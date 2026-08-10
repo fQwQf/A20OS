@@ -1,6 +1,6 @@
 # A20OS 改进 TODO
 
-本文档记录 A20OS 当前的工程瓶颈和剩余改进工作。它基于当前代码和文档，而不是未来设计意图。
+本文档记录 A20OS 的工程瓶颈和剩余改进工作，已按 `e33c3219` 源码核对。checkbox 主要表示实现里程碑；运行证据另行标注，`[x]` 不表示该审计基线已重跑。`e33c3219` 没有匹配的完整干净双架构平台复验；最新完整平台证据属于 `f9732348`，不能外推到该审计基线。
 
 ## P0：混合内核改造（Native ABI 本体化）
 
@@ -8,19 +8,17 @@
 本节只跟踪各阶段的工程完成度。
 
 - [x] 阶段一：核心原语契约化（句柄 rights 代数、channel 背压、EventQ 语义、VMO 生命周期）。
-  - 证据：`user/tests/test_native_contract.c` 全分区通过；副产品：修复 `CHANNEL_ENDPOINT`/`EVENT_QUEUE` 类型掩码缺 STAT 导致句柄不可 query 的 ABI 缺陷（`kernel/abi/native/handle_table.c`）。
-  - 验证：`make smoke-native-contract`（riscv64 PASS）；loongarch64 构建通过。
-  - 备注：验证期间发现 main HEAD（a7eb6d2）存在与本阶段无关的线程/阻塞 路径挂起回归（见 `docs/hybrid-kernel/STATUS.md` 基线回归观察），既有 线程类 native smoke 的回归验证在其收敛前受阻。
+  - 源码证据：`user/tests/test_native_contract.c` 覆盖 rights、channel、EventQ 和 VMO 生命周期分区；`kernel/abi/native/handle_table.c` 的 `CHANNEL_ENDPOINT`/`EVENT_QUEUE` 类型掩码包含 STAT，handle query 可用。
+  - 历史验证：2026-08-06 的 `smoke-native-contract` 曾在 riscv64 PASS，loongarch64 构建通过；这不是 `e33c3219` 的当前运行结果。
 - [x] 阶段二：Native ABI SMP 正确性收口（native-shmring SMP=2/8 偶发破坏）。
-  - 证据：SMP=2 连续 20 轮 + SMP=8 连续 20 轮零失败零挂起（2026-08-06， 日志 `.kernel-build/smoke/shmring-smp{2,8}/`）；M5 修复 `98a1260`/ `1af0d02` 复验有效，破坏不可复现。
-  - 副产品：`[VMO-PAGE]` 串口诊断降级为 `/proc/a20/objects` 的 `vmo_dirty_frames` 计数器（合法复用，消除输出交错）；记录 HEAD 的 mm_stress 45s 门禁预算不足观察。
+  - 历史验证：SMP=2 连续 20 轮 + SMP=8 连续 20 轮零失败零挂起（2026-08-06，日志 `.kernel-build/smoke/shmring-smp{2,8}/`）；M5 修复 `98a1260`/`1af0d02` 在当时复验有效。该结果不是 `e33c3219` 的新运行。
+  - 副产品：`[VMO-PAGE]` 串口诊断降级为 `/proc/a20/objects` 的 `vmo_dirty_frames` 计数器（合法复用，消除输出交错）；当时还记录了 mm_stress 45s 门禁预算不足。
 - [ ] 阶段三：驱动双态部署框架 + IOMMU/DMA 真隔离。
-  - 证据：骨架已落地（`kernel/include/drivers/dual/`，设计文档 `docs/hybrid-kernel/04-dual-placement.md`）；goldfish RTC 同源码 双态运行（内核壳 boot probe + 用户壳 `smoke-native-rtcd` PASS）；
-    virtio-input 第二样板完成：probe 级双态一致性 + 功能态用户驱动 （共享 virtq 层、DMA ops、IRQ→EventQ），`smoke-dual-input` 经 monitor sendkey 验证真实按键事件。
+  - 已有骨架：`drv_env.h` 提供 KERNEL/USER/DRVMOD 三后端；virtio-input 的 DRVMOD 只读 probe 与 USER uinputd 共享配置协议头，USER 路径有 virtq/DMA/IRQ→EventQ；完整 DRVMOD 驱动仍使用独立实现。goldfish RTC DRVMOD probe 仍复制寄存器常量，不是同源双态。
   - 过程中修复：`QUEUE_READY` 偏移（0x044）、DRIVER_OK 时序、 vmo_phys 非物化契约（drv_dma 先触页再翻译）、native 构建 stamp 不含 user/svc 与共享头的陈旧二进制问题。
-  - 完成条件：同一驱动源码双态部署通过同一契约测试；未授权 DMA 被 IOMMU 硬件拒绝。IOMMU 已完成真实硬件初始化与 per-domain 翻译（`kernel/drivers/core/riscv_iommu.c`，`smoke-iommu-discovery` 断言）；多页连续 DMA heap、动态所有权 claim/release、内核壳接入输入子系统已随骨架完成。剩余：fault 队列消费与 per-device 页表动态映射。
+  - 完成条件：同一完整驱动源码双态部署通过同一契约测试；用户驱动 DMA 动态绑定 per-device IOMMU domain，未授权访问产生并消费 fault。当前只有 RISC-V IOMMU bring-up 与 devid 0 静态 TR_REQ 探测；仍缺动态 map/unmap、fault 消费和 drv_dma 接线。
 - [ ] 阶段四：服务接口 IDL 化（替换 `user/svc/*_proto.h` 手写协议）。
-  - 已完成：常量与固定宽度消息 IDL、生成器、rtcd/svc/ubd 迁移， `make check-a20-idl`；rtcd alarm/time payload 使用生成结构体。
+  - 已完成源码：常量与固定宽度消息 IDL、生成器；rtcd 和 svcmgr/echod 使用 envelope，ubd 使用生成常量。`rtcd_proto.h`/`svc_proto.h`/`ubd_proto.h` 仍是活跃 wrapper；本次未运行 `make check-a20-idl`。
   - 完成条件：绑定/版本协商由 IDL 生成；手写 proto 头退出活跃树。
 - [ ] 阶段五：Linux 人格层在 Native 原语上重建（starnix 式对照）。
   - 已完成起步：`a20_personality.h` 提供 pipe-shaped channel/EventQ facade， `smoke-native-personality` 验证写入、MESSAGE_READY、读取和关闭。
@@ -52,53 +50,53 @@
 - [x] 修复低地址用户 `execve` 参数在 identity-mapped 架构上的来源误判。
   - 证据：`proc_exec()` 始终按用户指针复制 `argv/envp`；
     `proc_stress` 在 `0x02000000` 构造参数数组。
-  - 验证：双架构 `PROC_STRESS: low-user-argv PASS` 和正式 CAgent 10/10。
-- [x] 将仍依赖单线程执行的 MM 路径改为在 VMA 和页表修改期间持有 `mm->lock`。
-  - 证据：`kernel/include/mm/vm.h` 说明部分路径仍依赖单线程执行或更窄的局部锁。
+  - 历史验证：`f9732348` 平台记录包含双架构 `PROC_STRESS: low-user-argv PASS` 和正式 CAgent 10/10；`e33c3219` 未重跑。
+- [ ] 将仍依赖单线程执行的 MM 路径改为在 VMA 和页表修改期间持有 `mm->lock`。
+  - 当前证据：`kernel/include/mm/vm.h` 仍明确说明部分路径依赖单线程执行或更窄的局部锁；现有 gate 包含 MM smoke/fork-exec race，但不等于所有列举竞争已覆盖。
   - 完成条件：`make check-mm-lock-model` 包含 concurrent mmap、munmap、fault、fork COW 和 exit teardown 的行为测试。
- - [x] 为 close/read/write、dup/close_range、rename/unlink/open、symlink loop 和 mount/unmount 增加运行时 VFS 并发压力测试。
-   - 证据：`kernel/fs/vfs.c` 在 VFS 并发 smoke 矩阵中将运行时扩展描述为未来工作。
-   - 完成条件：`make check-vfs-abstraction` 能在这些竞争回归时失败，而不仅仅检查文档标记是否存在。
+- [ ] 为 close/read/write、dup/close_range、rename/unlink/open、symlink loop 和 mount/unmount 增加运行时 VFS 并发压力测试。
+  - 当前证据：`kernel/fs/vfs.c` 仍把这些并发场景描述为未来 runtime expansion；`check-vfs-abstraction` 运行 `smoke-vfs-stress` 后还包含静态 marker 检查。
+  - 完成条件：`make check-vfs-abstraction` 能在这些竞争回归时失败，而不仅仅检查文档标记是否存在。
 - [x] 用 EEVDF 替换 8 级 MLFQ，作为普通任务的统一调度核心。
-  - 证据：`kernel/proc/sched.c` 实现加权 vruntime、系统虚拟时间资格门控、 虚拟截止时间选择、空闲窃取与时间片旋钮；`/proc/a20/sched_base_slice` 可运行时切换桌面/HPC；nice -20 相对 nice 19 获得约 10^5 倍 CPU， 8 个忙任务在 8 核上全核分布。
-  - 验证：`make check-doc-test-gates`、双架构 sched/futex/proc 压力、 riscv64 8 核 `sched_stress` smp-runqueue + lock-split PASS。
+  - 证据：`kernel/proc/sched.c` 实现加权 vruntime、系统虚拟时间资格门控、虚拟截止时间选择、空闲窃取与时间片旋钮；`/proc/a20/sched_base_slice` 可运行时切换桌面/HPC。当前 nice -20/19 权重为 43020/88，理论份额比约 489:1；运行时分布结论必须引用具体历史样本，不能写成当前测量。
+  - 历史验证：`f9732348` 平台记录包含 `check-doc-test-gates`、双架构 sched/futex/proc 压力和 riscv64 8 核 `sched_stress` smp-runqueue + lock-split PASS；`e33c3219` 未重跑。
   - 设计：`docs/eevdf-scheduler.md`。
 
 ## P0：Linux ABI 正确性
 
-- [x] 只有在 syscall 组 smoke 测试和边界测试存在后，才将 Linux syscall 区域从 `partial` 提升到 `full`。
-  - 证据：`kernel/abi/linux/syscall_coverage.md` 将 fd I/O、path、process lifecycle、signal、MM、futex、poll、socket 和 timer 标记为 partial。
+- [ ] 在 syscall 组 smoke 和边界测试齐备后，把满足条件的 Linux syscall 区域从 `partial` 提升到 `full`。
+  - 当前证据：`kernel/abi/linux/syscall_coverage.md` 仍将 fd I/O、path、process lifecycle、signal、MM、futex、poll、socket 和 timer 标记为 partial；当前没有区域完成 `full` 升级条件。
   - 完成条件：每个升级区域都在覆盖表条目旁列出对应测试。
-- [x] 用符合受支持 Linux 语义的行为替换 scheduler policy 和 affinity 近似实现。
-  - 证据：`kernel/abi/linux/syscall_coverage.md` 将 scheduler API 标记为兼容性近似。
+- [ ] 用符合受支持 Linux 语义的行为替换 scheduler policy 和 affinity 近似实现。
+  - 当前证据：`kernel/abi/linux/syscall_coverage.md` 仍将 scheduler 标为 partial，RT/deadline/cgroup/topology 语义有边界。
   - 完成条件：sched policy、priority、affinity 和 cgroup cpuset 行为被 LTP 风格测试覆盖。
-- [x] 完成高级 futex 操作和内存顺序边界语义。
-  - 证据：`kernel/abi/linux/syscall_coverage.md` 将 futex 标记为 partial；`kernel/abi/linux/sys_futex.c` 仍有不支持路径。
+- [ ] 完成高级 futex 操作和内存顺序边界语义。
+  - 当前证据：`kernel/abi/linux/syscall_coverage.md` 将 futex 标记为 partial；`kernel/abi/linux/sys_futex.c` 仍有不支持路径。
   - 完成条件：basic、requeue、private/shared、timeout 和 robust-list 场景都有覆盖。
-- [x] 决定哪些显式 `-ENOSYS` Linux syscall 占位符仍在范围外，哪些应该实现。
+- [ ] 决定哪些显式 `-ENOSYS` Linux syscall 占位符仍在范围外，哪些应该实现。
   - 证据：`kernel/abi/linux/syscall_table.def` 包含 fanotify、AIO、module、userfaultfd、perf 等 `-ENOSYS` 占位符；`signalfd4`（`sys_signalfd4`）与 `arch_prctl`（`sys_arch_prctl`）已实现，不再是占位符。
-  - 完成条件：每个占位符都有记录在案的 owner 决策：实现、保留 stub，或从声明的兼容范围中移除。
+  - 完成条件：每个占位符都有记录在案的 owner 决策：实现、保留 stub，或从声明的兼容范围中移除。当前覆盖表列出了占位符，但没有为每项完成 owner 决策。
 
 ## P0：MM、Page Cache 与文件映射
 
 - [x] 为 `MAP_SHARED` 文件映射增加 dirty-page/writeback owner。
-  - 证据：`kernel/include/mm/vm.h` 说明 `MAP_SHARED` writeback/truncate coherence 不完整。
+  - 源码证据：`kernel/include/mm/vm.h` 规定 shared file VMA 映射 canonical page-cache page并持 pin，dirty PTE 在 fsync/msync 前同步到 page cache；`user/cmds/stress/mm_stress.c` 覆盖 write/read、fsync、truncate、fork 和 remap 可见性。
   - 完成条件：shared mmap 写入按受支持语义在 read、fsync、truncate、fork 和 remap 路径中可见。
 - [x] 加强跨 file read/write、mmap fault、truncation 和 reclaim 的 page cache eviction 与 coherence 测试。
-  - 证据：`kernel/mm/fault.c` 和 `kernel/fs/page_cache.c` 暴露了当前 page-cache 限制和不支持路径。
+  - 源码证据：`user/cmds/stress/mm_stress.c` 的 shared-file coherence、`shared_file_eviction_pressure()` 和 `shared_file_eviction_with_mmap()` 在超过 cache 容量的压力下检查回读、mapped page 与 pin 回收。
   - 完成条件：page-cache 测试在内存压力下运行，并能捕获 stale data 或 use-after-free 回归。
-- [x] 验证 fork、mprotect、munmap 和 OOM reclaim 下的 huge-page demotion 与 COW 行为。
-  - 证据：`kernel/mm/vm.c` 实现 huge-page demotion 和 COW clone 路径；锁模型要求谨慎处理 TLB/refcount 顺序。
+- [x] 验证 fork、mprotect 和 munmap 下的 huge-page demotion 与 COW 行为。
+  - 源码证据：`user/cmds/stress/mm_stress.c` 覆盖 huge-page basic、fork COW、partial munmap demotion 和 mprotect demotion；核心锁模型规定 TLB/refcount 顺序。当前测试不包含 huge-page OOM reclaim，因此该项只表示已覆盖列出的 fork/mprotect/munmap 路径。
   - 完成条件：回归测试覆盖混合 huge/small 映射、write fault 和对 TLB flush 敏感的场景。
-- [x] 让 OOM reclaim 策略可观察、可测试。
-  - 证据：`kernel/include/mm/vm.h` 说明 reclaim 不得释放仍可从 task MM、page cache、VMO 或 Native handle 访问的 frame。
+- [ ] 让 OOM reclaim 策略可观察、可测试。
+  - 当前证据：`kernel/mm/oom.c` 维护 kill count、victim 和 free-page 统计，`kernel/include/mm/vm.h` 规定不可回收仍可达 frame；当前用户态 stress 没有触发并断言 safe kill/reclaim 的专用场景。
   - 完成条件：OOM 测试证明 safe kill/reclaim 行为，而不是只记录分配失败日志。
 
 ## P1：I/O 进展与网络
 
 - [ ] 在块设备和网络设备能够发出完成信号的位置，用事件驱动 wakeup 替换 scheduler/idle 轮询进展。
   - 证据：`docs/project/external-dependencies.md` 描述了基于轮询的 lwIP 进展；`kernel/drivers/block/virtio_blk.c` 记录了未来 interrupt wake 路径。
-  - 设计：`docs/drivers/lock-order.md`（驱动锁契约）、`docs/net/network-lock-contract.md`（deferred bottom-half 规则）；用户决策：deferred bottom-half / workqueue。
+  - 设计：`docs/drivers/guide/lock-order.md`（驱动锁契约）、`docs/net/network-lock-contract.md`（deferred bottom-half 规则）；用户决策：deferred bottom-half / workqueue。
   - 完成条件：块设备和网络进展在正常运行中不再依赖通用 hot-path 轮询。
 - [ ] 降低 `g_lwip_lock` 竞争，并为所有 socket 路径记录锁安全入口点。
   - 证据：`kernel/net/lwip_stack.c` 用全局锁串行化 lwIP 核心状态；`kernel/include/core/lock.h` 限制 lwIP 锁下的调用。
@@ -108,33 +106,32 @@
   - 证据：`docs/project/external-dependencies.md` 说明 `10.0.2.15`、`10.0.2.2` 和 `10.0.2.3` 只是开发默认值。
   - 设计：`docs/net/network-config-design.md`；用户决策：只使用命令行 / 运行时配置，不使用编译期板级默认值。
   - 完成条件：真实开发板或非 QEMU 后端无需硬编码 QEMU 假设即可配置 IP、gateway 和 DNS。
-- [ ] 将网络 smoke 覆盖扩展到 wget 成功以外。
-  - 证据：`docs/project/external-dependencies.md` 说明 TLSe/wget 不能证明存在完整现代 HTTPS 栈。
-  - 设计：`docs/net/network-config-design.md`；计划新增门禁 `smoke-network-suite`。
-  - 完成条件：DNS、UDP、TCP、ICMP、AF_UNIX、AF_ALG、timeout、partial I/O 和 error-path 测试都有独立门禁。
+- [ ] 扩展现有网络 smoke，使关键语义不依赖可跳过项并覆盖 partial I/O/error path。
+  - 当前证据：`smoke-network-suite` 已存在，RISC-V64 单核运行 `network_suite`；聚合 DNS、TCP/UDP/ICMP loopback、AF_UNIX、AF_ALG 和 timeout，其中 DNS/AF_ALG 可返回 77 跳过。
+  - 完成条件：现有场景稳定不可跳过，partial I/O 与 error-path 有独立断言，并增加其他架构运行入口。
 
 ## P1：VFS 与文件系统语义
 
 - [ ] 收紧 path resolution、symlink、permission、mount 和文件系统特定的 Linux 边界语义。
   - 证据：`kernel/abi/linux/syscall_coverage.md` 将 path 和 metadata 标记为 partial，并要求清理。
-  - 设计：`docs/fs/vfs-edge-semantics.md`、`docs/fs/fs-consistency-model.md`；用户决策：完整 Linux `openat2` resolve flag 集合。
-  - 完成条件：openat、renameat2、link/symlink、chmod/chown、statx、mount、umount 和 chroot 都有聚焦测试（新增到 `user/cmds/vfs_stress.c`），同时覆盖 openat2、xattr 和文件系统特定边界测试。
+  - 设计：`docs/fs/vfs-edge-semantics.md`、`docs/fs/fs-consistency-model.md`。当前并非完整 Linux `openat2`：`RESOLVE_CACHED` 未实现，A20OS 自定义 `NO_TRAILING=0x20` 与 Linux `CACHED=0x20` 冲突。
+  - 完成条件：openat、renameat2、link/symlink、chmod/chown、statx、mount、umount 和 chroot 都有聚焦测试（`user/cmds/stress/vfs_stress.c` / `vfs_edge.c`），同时覆盖 openat2、xattr 和文件系统特定边界测试。
 - [x] 将大型 VFS 实现重构为更小的 ownership、path、mount、fd 和 syscall-facing 单元。
-  - 证据：`kernel/fs/vfs.c` 是承载 path resolution、open/close、mount、init 和兼容行为的大型中心实现。
+  - 源码证据：path resolution、path、mount、file/vnode、dcache 和 stat/permission 已拆到 `kernel/fs/vfs/*.c`，并由 `kernel/include/fs/vfs/*.h` 提供窄接口；`kernel/fs/vfs.c` 仍保留 open/close、初始化及兼容入口，后续还可继续缩小。
   - 完成条件：每个单元都有窄 header 契约和子系统特定测试。
 - [ ] 尽可能从通用 VFS 路径中移除硬编码运行时文件系统初始化。
   - 证据：`kernel/fs/vfs.c` 在 VFS bringup 期间初始化默认虚拟文件和类似环境的内容。
   - 设计：`docs/fs/fs-consistency-model.md`（ramfs / rootfs 一致性模型）；用户决策：构建期 rootfs overlay / initramfs 风格用户态镜像构造。
   - 完成条件：策略文件迁移到 init/userland image 构造，或迁移到声明式启动文件系统 manifest。
-- [ ] 为 FAT32、ext4、ramfs、devfs、procfs、sysfs、pipe 和 anonfd 操作定义清晰的一致性模型。
-  - 证据：`kernel/fs/` 包含多个文件系统后端，且 Linux ABI 入口点标记为 partial。
+- [x] 为 FAT32、ext4、ramfs、devfs、procfs、sysfs、pipe 和 anonfd 操作定义清晰的一致性模型。
+  - 文档证据：`docs/fs/fs-consistency-model.md` 逐后端记录读写、namespace、缓存、持久化和不支持操作边界；这表示模型文档已建立，不表示 Linux path/metadata ABI 已达到 full。
   - 设计：`docs/fs/fs-consistency-model.md`；每后端 unsupported-op errno 矩阵不属于 P1 范围。
   - 完成条件：后端能力差异记录在 `docs/fs/fs-consistency-model.md`；P1 不要求专用 smoke 门禁。
 
 ## P1：Native ABI 完成度与可维护性
 
 - [x] 将过大的 Native phase-2 syscall 实现拆分为子系统所有的文件。
-  - 证据：`kernel/abi/native/sys_phase2.c` 包含广泛的 memory、IPC、security、debug 和 system 功能。
+  - 源码证据：Native syscall 已拆到 `sys_native_{handle,mm,ipc,security,debug,device,fs,net,sync,system,task,time,ext}.c` 等子系统文件；`sys_phase2.c` 只保留少量尚未迁出的兼容入口。
   - 完成条件：Native syscall 文件映射子系统边界，每个文件只拥有窄 syscall 范围。
 - [x] 完成 Native debug 语义，或明确缩小其范围。
   - 证据：`kernel/abi/native/sys_native_debug.c` 提供完整停止/恢复语义（attach/traceme/wait/event/resume/detach/read/write/read_regs/write_regs/kill），与 Linux ABI ptrace 共享同一 `proc_debug_*` 状态机；watchpoint 明确不在范围。
@@ -150,15 +147,15 @@
 ## P1：驱动与设备模型
 
 - [x] 用动态大小或具备容量检查且能报告结构化错误的 registry 替换固定大小 driver/device/bus registry。
-  - 证据：`kernel/drivers/core/driver_core.c` 为 bringup 使用有界静态 registry。
-  - 完成条件：registry exhaustion 被测试，且不会静默丢失 device 或 driver。
+  - 源码证据：`kernel/drivers/core/driver_core.c` 的 driver/device/bus registry 从初始容量开始，在锁保护下用 `krealloc` 扩容；扩容失败记录 capacity-exhausted 错误并返回失败，不再静默丢失注册项。
+  - 当前验证边界：源码已满足动态扩容与结构化失败要求，但未找到专用的 registry exhaustion 运行测试；该缺口归入 P2 行为门禁扩展。
 - [ ] 在把驱动模型视为通用模型前，增加 hotplug 和 remove-path 生命周期测试。
   - 证据：`kernel/drivers/core/driver_core.c` 有 probe/remove 路径，但模型主要面向内建 bringup。
-  - 设计：`docs/drivers/lock-order.md`；用户决策：面向用户的 `/proc/a20/driver_lifecycle` 触发器。
+  - 设计：`docs/drivers/guide/lock-order.md`；用户决策：面向用户的 `/proc/a20/driver_lifecycle` 触发器。
   - 完成条件：bind、probe failure、remove、re-probe 和资源清理都有测试。
 - [ ] 将设备特定锁顺序移动到驱动文档中，放在每个私有锁旁边。
   - 证据：`kernel/include/core/lock.h` 要求新锁符合全局顺序，或记录局部顺序。
-  - 设计：`docs/drivers/lock-order.md` 和已更新的 `kernel/include/core/lock.h` 注释（Wave 1 已完成）；inline `LOCK_ORDER:` 注释将在实现期间加入。
+  - 设计：`docs/drivers/guide/lock-order.md` 和已更新的 `kernel/include/core/lock.h` 注释（Wave 1 已完成）；inline `LOCK_ORDER:` 注释将在实现期间加入。
   - 完成条件：virtio-blk、virtio-net、UART、PTY、loop、SDIO 和平台 NIC 都记录各自私有锁规则。
 
 ## P2：测试门禁与工具
@@ -169,9 +166,9 @@
 - [ ] 在声明更广兼容性前，为每个 Linux ABI 覆盖区域增加 LTP 风格分组 smoke 测试。
   - 证据：`kernel/abi/linux/syscall_coverage.md` 说明每个 syscall 组在升级级别前都需要 smoke 测试。
   - 完成条件：覆盖表生成包含测试目标名称和 last-known status。
-- [ ] 将 Native ABI 测试扩展到最小进程启动和 libc smoke 以外。
-  - 证据：`docs/testing/testing-gates.md` 将 `native-minimal`、`native-test` 和 `user/tests/test_liba20c.c` 列为 Native 覆盖；`user/tests/test_native_handle.c` 现在覆盖 handle dup/transfer，并接入 `make smoke-native-handle`。
-  - 完成条件：Native handle、VMO/VMAR、channel、event queue、timer、task、debug 和 rights 测试在类似 CI 的目标中运行。
+- [ ] 将现有 Native ABI 测试聚合为多架构 CI-like 运行矩阵。
+  - 当前证据：源码已有 16 个 `test_native_*.c`，以及 liba20c/mlibc、service、personality smoke；不再只是 minimal/libc。问题是目标分散，且多数 QEMU smoke 固定为 RISC-V64。
+  - 完成条件：Native handle、VMO/VMAR、channel、event queue、timer、task、debug 和 rights 测试进入可枚举的多架构 CI-like 矩阵。
 - [ ] 增加 memory pressure、fork/exec churn、fd churn、filesystem churn、network churn 和 process reaping 压力测试。
   - 证据：当前 smoke 目标证明基本操作，但不能证明长时间稳定性或竞争行为。
   - 完成条件：stress 目标带有有界 timeout，并在失败时捕获内核日志。
@@ -179,7 +176,7 @@
 ## P2：仓库卫生与依赖边界
 
 - [x] 从活跃源码目录中移除或隔离 patch artifact 文件。
-  - 证据：`kernel/proc/fork.c.orig`、`kernel/proc/fork.c.rej` 和 `kernel/abi/linux/sys_futex.c.orig` 等文件出现在活跃树中。
+  - 当前证据：`kernel/` 下已没有 `*.orig`/`*.rej`；历史上的 `fork.c.orig`、`fork.c.rej` 和 `sys_futex.c.orig` 等 artifact 已退出活跃树。
   - 完成条件：活跃源码目录只包含构建输入、文档或有意跟踪的 fixture。
 - [ ] 除非测试明确是集成测试，否则不要把 vendored code 纳入第一方质量声明和测试。
   - 证据：`docs/project/external-dependencies.md` 将 lwIP、musl、sbase、mksh、TLSe 和 wget 的角色与 A20 集成工作区分开。
@@ -194,6 +191,7 @@
 ## 验证环境说明
 
 - 文档不再固化某一台 host 的工具缺失状态。工具链和 QEMU 可用性由对应 build/smoke 目标在运行时报告。
+- 审计源码提交为 `e33c3219`；最新完整干净双架构平台记录为 `f9732348`。两者之间有 6 个影响最终构建、内存映射、测试发现、root mount 和磁盘流的提交，因此该审计基线正式未验证。
 - Proc/Sched 的当前累计静态门禁是 `make check-doc-test-gates`；双架构 debug/release、1 核/8 核运行矩阵是 `make check-proc-step8-local`。
 - 需要同时验证正式比赛 workload 时运行 `make check-proc-step8`，它会追加 RISC-V64 与 LoongArch64 正式 CAgent。
 - 项目 Python 命令统一通过 conda 环境 `a20os`；正式入口负责记录 QEMU 命令、镜像哈希、退出状态、timeout、guest CPU 与 judge 状态。

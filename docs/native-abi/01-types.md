@@ -1,6 +1,6 @@
 # A20OS Native ABI：类型与结构体定义
 
-> 本文档定义 A20OS Native ABI 的所有用户可见类型和结构体。权限语义见 [security.md](06-security.md)，Handle 生命周期见 [handle.md](03-handle.md)。
+> 本文档记录 A20OS Native ABI 的用户可见类型和结构体。内容已按 `e33c3219` 的内核头与 `user/liba20rt/a20_types.h` 核对；带有“保留布局”或“目标语义”的结构不等于当前 syscall 已消费全部字段。权限语义见 [security.md](06-security.md)，Handle 生命周期见 [handle.md](03-handle.md)。
 
 ---
 
@@ -39,7 +39,7 @@ typedef struct a20_abi_header {
 1. 用户传入的 `size` 必须覆盖其所声明 `version` 的完整必需前缀；当前所有 version-1 结构体均要求 `size >= sizeof(struct)`，拒绝通过零填充补齐必需字段。
 2. 用户传入的 `size` 大于内核支持结构体大小时，内核只读取已知字段。
 3. 新字段只能追加并提高 `version`；旧 version 的最小 `size` 必须在该 version 引入时固定。
-4. flag 保留位必须为 0，否则返回 `A20_ERR_INVALID_ARGUMENT`。
+4. 目标规则是未知 flag 保留位必须为 0，否则返回 `A20_ERR_INVALID_ARGUMENT`。当前实现并不统一：futex、typed channel 等入口会拒绝未知位，`handle_dup`、`vm_map` 和部分 namespace/wait 路径仍忽略或保存相应字段。
 
 这些规则使 ABI 可以在不破坏旧程序的情况下扩展。内核通过 `size` 和 `version` 确定调用方使用的结构体版本。
 
@@ -65,6 +65,8 @@ typedef struct a20_abi_info {
 } a20_abi_info_t;
 ```
 
+当前 `abi_info` 填充版本、指针/页/handle 宽度以及 feature bits；`syscall_bitmap_addr` 和 `syscall_bitmap_size` 仍保持清零，调用方不能用这两个保留字段枚举 126 个登记入口。
+
 ---
 
 ## 4. Handle 操作结构体
@@ -76,7 +78,7 @@ typedef struct a20_handle_dup_args {
     uint32_t size;
     uint32_t version;
     a20_handle_t source;         /* 源 handle */
-    uint32_t flags;              /* 保留，必须为 0 */
+    uint32_t flags;              /* 保留；调用方应置 0，当前内核未校验 */
     a20_rights_t rights_mask;    /* 请求的权限子集 */
     a20_handle_t out_handle;     /* 输出：新 handle */
     uint32_t reserved;
@@ -243,6 +245,8 @@ typedef struct a20_vm_map_args {
 ```
 
 ### a20_vm_share_args_t — 内存共享导出
+
+该结构是保留的地址区间导出布局。当前 `vm_share` syscall 实际签名是 `(vmo_handle, target_task, rights)`，只复制已有 `A20_OBJ_MEMORY` handle；不会按 `addr/length` 反查并导出映射。
 
 ```c
 typedef struct a20_vm_share_args {
@@ -727,7 +731,7 @@ typedef struct a20_vm_object_args {
 } a20_vm_object_args_t;
 ```
 
-创建的内存对象可通过 `vm_map` 映射到地址空间，通过 `handle_dup` 或 channel 传递分享。命名、seal、hugetlb 与通过 metadata 调整 VMO 大小尚未实现。
+创建的内存对象可通过 `vm_map` 映射到地址空间，通过 `handle_dup`、`vm_share` 或 channel 传递分享。`flags` 当前作为 VMO options 保存，但命名、seal、hugetlb 和用户态 resize 控制入口尚未实现；不能把相应 flag 名称视为完整功能。
 
 ---
 
@@ -1029,7 +1033,7 @@ futex 是**用户地址上的同步原语，不是内核对象**，因此不分�
 设计说明：
 - 早期草案（startup.md §4.4.4）曾考虑用 event_queue 承担互斥等待，但 event_queue 缺少"投递事件到队列"的用户语义，且每个竞争锁都需要一个内核 handle，成本与语义都不合适。Sync 分区因此回归地址型 futex。
 - 快速路径（无竞争）与 Linux futex 一样快：纯用户态 CAS。
-- 慢路径通过 `futex_wait`/`futex_futex_wake` 进入内核，复用内核 futex 等待表。
+- 慢路径通过 `futex_wait`/`futex_wake` 进入内核，复用内核 futex 等待表。
 - 跨进程共享内存（`vm_share` 导出的 VMO）上的 futex 字同样有效：等待键同时匹配虚拟地址与物理页。
 
 ```c

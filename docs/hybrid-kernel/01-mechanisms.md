@@ -1,6 +1,6 @@
 # 混合内核核心机制参考
 
-本文档以描述性方式说明 A20OS 混合内核各核心机制的语义、契约与代码位置。设计总览见 [00-design.md](00-design.md)，演进方向见 [02-mainstream-plan.md](02-mainstream-plan.md)。
+本文档以描述性方式说明 A20OS 混合内核各核心机制的语义、契约与代码位置，已按 `e33c3219` 源码核对。存在 make 目标只表示可复现入口存在，不表示当前提交已运行通过；完整平台证据边界见 [STATUS.md](STATUS.md)。
 
 ## IPC：`channel_call` 融合 RPC
 
@@ -55,7 +55,7 @@
 - 全相对偏移布局（跨进程不同虚拟地址可用）；
 - acquire/release 游标（单调递增，差值为可用/已用字节）；
 - Dekker 门铃：`c_sleep`/`p_sleep` futex 字，以物理页为 key（`pt_translate`），跨进程有效；
-- 非满非空路径零 syscall；字宽拷贝（freestanding 构建无 memcpy，字节循环在模拟器上慢一个数量级）；
+- 非满非空路径零 syscall；字宽拷贝用于避免 freestanding 字节循环，后者在历史模拟器样本中明显更慢；本次未重新量化差值；
 - 容量为 2 的幂，数据区紧随 64 字节头部。
 
 ## 用户态驱动契约
@@ -93,11 +93,11 @@
 
 ## IOMMU 硬件 DMA 隔离
 
-`kernel/drivers/core/riscv_iommu.c` 实现 RISC-V IOMMU（QEMU `riscv-iommu-pci`）的真实硬件初始化：
+`kernel/drivers/core/riscv_iommu.c` 实现 RISC-V IOMMU（QEMU `riscv-iommu-pci`）的 bring-up 与静态翻译探测：
 
 - BAR/capability 解析（version 16，spec 1.0），分配 DDT(1LVL)/CQ/FQ 并编程使能（CQON/FQON/DDTP 完成）；
 - devid 1（IOMMU 自身）保持 passthrough DC；devid 0 配置 SV39 翻译域（3 级页表），经 TR_REQ 验证已映射 IOVA 精确翻译、未映射 IOVA 被硬件拒绝（fault=1, cause=13）；
-- fault 队列消费与 per-device 页表动态映射为后续工作；`smoke-iommu-discovery` 断言全部状态。
+- fault 队列消费与 per-device 页表动态映射为后续工作；因此当前不是端到端用户驱动 DMA 隔离框架。`smoke-iommu-discovery` 断言初始化和 TR_REQ 探测状态。
 
 ## 对象统计与配额
 

@@ -1,10 +1,14 @@
 # VirtualBox ARM64 运行与验收手册
 
+> **历史硬件快照 + 当前 runbook**：下表保留早期 VirtualBox ARM64 实机观察；审计基线 `e33c3219` 的源码仍提供对应 loader、board 和驱动路径，但本页没有该基线的新硬件日志。状态中的“已验证/已跑通”只属于该历史快照；对后续 HEAD 的结论必须按本页重新采集连续证据。
+
+> 审计基线 `e33c3219` 的 `vbox-*-image-aarch64` wrapper 不设置 `DRIVER_DEPLOYMENT`，因此默认 `generic` 镜像不包含 E1000 或 VMSVGA 驱动模块。下面的网络和 GUI 流程要求从命令行传入 `DRIVER_DEPLOYMENT=embedded`；递归 Make 会传播该命令行变量。这样只会把驱动编入镜像，不代表该基线已通过 VirtualBox 验收。
+
 > 不要这样做：不要只以“出现桌面”或“shell 启动”作为驱动验收证据。必须保留从 `[BUS] pci` 到类消费者 mount、lwIP、framebuffer、input 的连续日志。
 
 这份手册说明如何在 VirtualBox ARM64 上制作镜像、配置虚拟机并收集从 ACPI/PCI 到类消费者的完整证据。通用驱动接口和平台规范见 [VirtualBox 驱动栈](virtualbox.md)，驱动开发流程见 [构建、测试与提交](../drivers/meta/testing-and-submission.md)。
 
-## 当前支持状态
+## 源码状态与历史验证边界
 
 | 组件 | 状态 | 说明 |
 |---|---|---|
@@ -16,23 +20,32 @@
 | Timer | 软件 fallback | VirtualBox 在 EL1 trap 两个 ARM generic timer 接口；早期启动使用非抢占软件计数器。 |
 | ACPI/PCIe discovery | 已实现 | UEFI loader 传递 ACPI RSDP；board 解析 MCFG 并枚举 PCIe ECAM。 |
 | VirtIO-SCSI disk | 已目标验证 | VBox `1af4:1048` 控制器发现 boot LUN，挂载 GPT FAT32 partition 的 `/bin`。 |
-| Network | 已目标检测，持续验证 | VBox 暴露 Intel E1000 `8086:100e`；驱动已集成 lwIP 和 DHCP。 |
-| VMSVGA display | 已目标验证，桌面验证中 | SVGAv3 `15ad:0406` 在 VBox ARM 上被检测到；驱动使用设备报告的 framebuffer offset 和 pitch，VRAM 映射为 Device memory。 |
+| Network | 驱动已实现，历史目标检测 | VBox 暴露 Intel E1000 `8086:100e`；默认 generic 镜像不包含该驱动，网络验收需 embedded 构建。 |
+| VMSVGA display | 驱动已实现，历史目标验证 | SVGAv3 `15ad:0406` 曾在 VBox ARM 上被检测；默认 generic 镜像不包含该驱动，GUI 验收需 embedded 构建。 |
 | USB HID input | 已实现，需目标验证 | Intel `8086:1e31` xHCI controller 轮询；USB 键盘、鼠标、Tablet 事件进入 `/dev/event0`。 |
 | Serial recovery console | 已实现 | 磁盘或图形路径失败时仍可用。 |
-| Userspace and remote shell | 已实现 | MMU userspace 到达 musl `init`/`mksh`；`telnetd` 监听 TCP 2323。启动会打印 `/init` 大小、ELF entry 和 FNV-1a hash，用于识别 stale disk。 |
+| Userspace and remote shell | 已实现 | MMU userspace 到达 musl `init`/`mksh`；embedded E1000 路径可启动 TCP 2323 的 `telnetd`，默认 generic 镜像只能依赖串口 shell。启动会打印 `/init` 大小、ELF entry 和 FNV-1a hash，用于识别 stale disk。 |
 
-UEFI loader、PCI discovery、VirtIO-SCSI 和 SVGAv3 probe 已在 VirtualBox ARM64 上跑通。同一个 AArch64 MMU userspace 镜像也在 QEMU 上通过 `init`、`fork`/`exec` 和交互式 `mksh` 做回归测试。
+UEFI loader、PCI discovery、VirtIO-SCSI 和 SVGAv3 probe 曾在 VirtualBox ARM64 上跑通。同一个 AArch64 MMU userspace 镜像也曾在 QEMU 上通过 `init`、`fork`/`exec` 和交互式 `mksh` 做回归测试。这些历史结果不能外推到当前默认 generic 镜像。
 
 ## 构建镜像
 
 安装 AArch64 交叉编译器和 `mtools`。Debian/Ubuntu：
 
 ```bash
-sudo apt install gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu mtools partedmake vbox-image-aarch64
+sudo apt install gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu mtools parted
+make vbox-image-aarch64
 ```
 
-输出图形镜像：
+上面的默认 generic 镜像可用于串口、UEFI 和存储 bring-up，但不包含 E1000/VMSVGA。需要执行下文的网络或 GUI 流程时使用：
+
+```bash
+make DRIVER_DEPLOYMENT=embedded vbox-image-aarch64
+```
+
+embedded 变体位于 `.kernel-build/aarch64-virtualbox-aarch64-both-dev-embedded/`。构建成功只证明驱动已静态链接；仍需按本页保存 VirtualBox 目标日志。
+
+默认镜像输出：
 
 ```text
 .kernel-build/aarch64-virtualbox-aarch64-both-dev/a20os-vbox-aarch64.img
@@ -47,7 +60,10 @@ sudo apt install gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu mtools partedm
 为能同时输入和输出，把 UART1 配置成 TCP server，而不是文件。文件模式只能记录输出，不能接收键盘输入。VM 关机后，在 Windows PowerShell 里执行：
 
 ```powershell
-$vm = "A20"& "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe" modifyvm $vm `--uart1 0x03f8 4 `--uartmode1 tcpserver 5555
+$vm = "A20"
+& "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe" modifyvm $vm `
+  --uart1 0x03f8 4 `
+  --uartmode1 tcpserver 5555
 ```
 
 启动 VM，然后用 `telnet 127.0.0.1 5555` 或 PuTTY Raw/TCP 连接。第一次启动保持串口连接：日志会报告 ACPI MCFG window、PCI 设备、VirtIO-SCSI 容量和文件系统挂载结果。
@@ -57,7 +73,10 @@ $vm = "A20"& "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe" modifyvm $vm `-
 更新镜像后，必须重新生成并替换 VM 挂载的 VDI。直接转换旧 raw 镜像不会得到新的 GPT partition。不要对已经挂载或正在使用的 VDI 执行 `convertfromraw`；每次用新的输出文件名，避免 VirtualBox 保留旧的 medium UUID：
 
 ```powershell
-$raw = "C:\Users\super\Downloads\a20os-vbox-aarch64.img"$vdi = "C:\Users\super\Downloads\a20os-vbox-aarch64-20260717.vdi"& "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe" convertfromraw `$raw $vdi --format VDI
+$raw = "C:\Users\super\Downloads\a20os-vbox-aarch64.img"
+$vdi = "C:\Users\super\Downloads\a20os-vbox-aarch64-20260717.vdi"
+& "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe" convertfromraw `
+  $raw $vdi --format VDI
 ```
 
 > 注意：每次生成新镜像后都要用新的输出文件名执行 `convertfromraw`。不要对当前已经挂载到 VM 的 VDI 再次转换，也不要让 VirtualBox 继续保留旧的 medium UUID。
@@ -67,6 +86,8 @@ $raw = "C:\Users\super\Downloads\a20os-vbox-aarch64.img"$vdi = "C:\Users\super\D
 VirtualBox ARM 默认使用 VirtIO-SCSI 控制器。除非你的 VirtualBox 版本明确要求其他控制器，否则保持默认。
 
 ## 网络与远程 shell
+
+本节要求使用 `DRIVER_DEPLOYMENT=embedded` 构建的镜像；默认 generic 镜像没有 E1000，不能预期出现网络 ready 或 `telnetd` 日志。
 
 保持 VM 的 Intel PRO/1000 MT Desktop 适配器接在 NAT 上，并转发宿主端口到客户机 TCP 2323。VM 关机时执行：
 
@@ -81,16 +102,16 @@ VirtualBox ARM 默认使用 VirtIO-SCSI 控制器。除非你的 VirtualBox 版�
 显式构建图形镜像：
 
 ```bash
-make vbox-gui-image-aarch64
+make DRIVER_DEPLOYMENT=embedded vbox-gui-image-aarch64
 ```
 
 输出：
 
 ```text
-.kernel-build/aarch64-virtualbox-aarch64-both-dev/a20os-vbox-aarch64-gui.img
+.kernel-build/aarch64-virtualbox-aarch64-both-dev-embedded/a20os-vbox-aarch64-gui.img
 ```
 
-两个图形目标都包含 `/etc/a20-gui` 标记，并保留 UART1 串口 shell。文本-only 恢复盘用：
+embedded 图形镜像包含 `/etc/a20-gui` 标记，并保留 UART1 串口 shell。文本-only 恢复盘可继续使用默认 generic 构建：
 
 ```bash
 make vbox-text-image-aarch64
@@ -105,12 +126,16 @@ make vbox-text-image-aarch64
 保持 VirtualBox 显示控制器选择 VMSVGA。SVGAv3 使用显式 update command，成功的图形 probe 会在串口报告 `[GPU] SVGAv3 ready`。红、绿、蓝、白四条 bar 是驱动 scanout 自测，不是 desktop。它们会在用户态报告以下全部信息后被替换：
 
 ```text
-[init] desktop queued: pid=2[desktop] entered mainFramebuffer mapped: va=0x30000000 size=3145728 stride=4096[desktop] framebuffer readyMission Control initialized, entering loop...
+[init] desktop queued: pid=2
+[desktop] entered main
+Framebuffer mapped: va=0x30000000 size=3145728 stride=4096
+[desktop] framebuffer ready
+Mission Control initialized, entering loop...
 ```
 
 图形镜像用普通 `fork`/`exec` 启动 desktop。它不会用 `vfork` 挂起 PID 1，因为 VirtualBox ARM timer fallback 是协作式的。发布新子进程后，协作 clone 路径会主动 yield 一次，让子进程无需等待 VirtualBox ARM 不提供的中断即可进入 `exec`。
 
-镜像目标在打包前还会把 staged `/init` 与当前 MMU user build 做比较。这能拦截被打断/增量构建留在 FAT 里的 NOMMU `init`：那种二进制会把 `fork()` 改成 `vfork()`，日志里表现为 `clone begin: ... flags=0x4111`，然后 PID 1 永远等一个还没被调度到的子进程。当前图形 MMU 镜像报告 `flags=0x11`，随后是 `desktop queued` 和 `[desktop] entered main`。
+镜像目标在打包前还会把 staged `/init` 与当前 MMU user build 做比较。这能拦截被打断/增量构建留在 FAT 里的 NOMMU `init`。历史故障样本中的 NOMMU 二进制把 `fork()` 改成 `vfork()`，日志表现为 `clone begin: ... flags=0x4111`；历史修复样本报告 `flags=0x11`，随后是 `desktop queued` 和 `[desktop] entered main`。这些具体日志值是快照证据，不是 HEAD 预期输出断言。
 
 ## 附加磁盘到控制器
 
@@ -154,12 +179,13 @@ PCI transport 当前使用轮询；在 ACPI interrupt controller 解析完成前
 
 没有目标设备时，还要验证驱动不会误绑定。
 
-## 已验证的开发路径
+## 历史上验证过的开发路径
 
 loader 可以独立在 QEMU AAVMF 上测试。在 QEMU RAM 地址构建 QEMU board：
 
 ```bash
-make ARCH=aarch64 BOARD=qemu-virt-aarch64 BRINGUP=1 kernel-onlymake ARCH=aarch64 BOARD=qemu-virt-aarch64 BRINGUP=1 \
+make ARCH=aarch64 BOARD=qemu-virt-aarch64 BRINGUP=1 kernel-only
+make ARCH=aarch64 BOARD=qemu-virt-aarch64 BRINGUP=1 \
     VBOX_AARCH64_LOAD_ADDRESS=0x40080000ULL \
     .kernel-build/aarch64-qemu-virt-aarch64-both-bringup/a20os-vbox-aarch64.img
 ```
@@ -179,14 +205,24 @@ make ARCH=aarch64 BOARD=qemu-virt-aarch64 BRINGUP=1 kernel-onlymake ARCH=aarch64
 | 看不到 UEFI 消息 | 检查 EFI 启用、Secure Boot 关闭、镜像启动顺序第一。 |
 | UEFI 后无 kernel 串口输出 | 检查 PL011 地址和串口配置（文件 vs TCP server）。 |
 | 串口有日志但 `/bin/init` 不存在 | 检查 VirtIO-SCSI controller、磁盘附加和 FAT32 `/bin`。 |
-| 桌面不出现 | 先看 `[GPU] SVGAv3 ready` 和 framebuffer 日志，不要只依赖屏幕。 |
-| 网络不通 | 检查 E1000 ready、lwIP attach、NAT 和端口转发。 |
+| 桌面不出现 | 先确认镜像以 `DRIVER_DEPLOYMENT=embedded` 构建，再看 `[GPU] SVGAv3 ready` 和 framebuffer 日志。 |
+| 网络不通 | 先确认 embedded 构建，再检查 E1000 ready、lwIP attach、NAT 和端口转发。 |
 | 修改后行为不变 | 确认重新生成了镜像，VM 挂载的是新 VDI/UUID。 |
 
 ## 验收记录模板
 
 ```text
-VirtualBox version:Host architecture:A20OS commit/diff:Build command:Image path and checksum:VM graphics/storage/network/input configuration:Enumerated PCI ID and BARs:Bound driver and ready line:Class consumer line:I/O performed and result:Known untested features:
+VirtualBox version:
+Host architecture:
+A20OS commit/diff:
+Build command:
+Image path and checksum:
+VM graphics/storage/network/input configuration:
+Enumerated PCI ID and BARs:
+Bound driver and ready line:
+Class consumer line:
+I/O performed and result:
+Known untested features:
 ```
 
 完整提交清单和跨平台构建矩阵见 [构建、测试与提交](../drivers/meta/testing-and-submission.md)。
