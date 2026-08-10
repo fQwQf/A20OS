@@ -76,6 +76,12 @@ typedef struct net_msg {
      */
     int scm_nfiles;
     vfile_t *scm_files[NET_SCM_MAX_FDS];
+    /* SCM_CREDENTIALS: sender pid/uid/gid captured at enqueue time. */
+    uint8_t has_cred;
+    uint8_t __pad_cred[3];
+    int32_t cred_pid;
+    int32_t cred_uid;
+    int32_t cred_gid;
     uint8_t data[NET_MAX_PAYLOAD];
 } net_msg_t;
 
@@ -91,6 +97,12 @@ typedef struct net_recv_meta {
     uint8_t hoplimit;
     uint8_t tclass;
     uint16_t __pad_meta;
+    /* SCM_CREDENTIALS captured from the dequeued message. */
+    uint8_t has_cred;
+    uint8_t __pad_cred[3];
+    int32_t cred_pid;
+    int32_t cred_uid;
+    int32_t cred_gid;
 } net_recv_meta_t;
 
 typedef struct net_socket {
@@ -152,6 +164,15 @@ typedef struct net_socket {
     int ipv6_recv_2292_rthdr;
     int ipv6_recv_2292_hopopts;
     int ipv6_recv_2292_dstopts;
+    int passcred;   /* SO_PASSCRED: deliver SCM_CREDENTIALS on recvmsg */
+    int32_t peer_pid;   /* SO_PEERCRED: peer pid captured on connect/accept */
+    int32_t peer_uid;
+    int32_t peer_gid;
+    /* Channel-backed AF_UNIX: latest sender credentials for SCM_CREDENTIALS
+     * when the data plane bypasses the legacy net_msg queue. */
+    int32_t ch_cred_pid;
+    int32_t ch_cred_uid;
+    int32_t ch_cred_gid;
     uint8_t alg_last[NET_MAX_STREAM_PAYLOAD];
     size_t alg_last_len;
     char alg_type[16];
