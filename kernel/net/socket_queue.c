@@ -7,6 +7,22 @@
 
 static obj_cache_t g_net_msg_cache = OBJ_CACHE_INIT("net_msg", net_msg_t, 16);
 
+/*
+ * Capture the current task credentials for SCM_CREDENTIALS.  Called under
+ * g_net_lock while the sending socket is being serviced; proc_current() is
+ * safe there (it is a CPU-local read).
+ */
+static void net_capture_sender_cred(net_msg_t *m)
+{
+    task_t *cur = proc_current();
+    if (!cur)
+        return;
+    m->has_cred = 1;
+    m->cred_pid = cur->pid;
+    m->cred_uid = cur->cred.uid;
+    m->cred_gid = cur->cred.gid;
+}
+
 net_msg_t *net_msg_alloc(void)
 {
     return (net_msg_t *)obj_cache_alloc_zero(&g_net_msg_cache);
@@ -62,6 +78,7 @@ int net_enqueue_msg_locked_meta(net_socket_t *dst, const void *buf, size_t len,
         m->hoplimit = meta->hoplimit;
         m->tclass = meta->tclass;
     }
+    net_capture_sender_cred(m);
     if (dst->rx_tail)
         dst->rx_tail->next = m;
     else
@@ -240,6 +257,10 @@ int net_dequeue_msg_locked_meta(net_socket_t *s, void *buf, size_t len,
         memcpy(meta->pktinfo_addr, m->pktinfo_addr, sizeof(meta->pktinfo_addr));
         meta->hoplimit = m->hoplimit;
         meta->tclass = m->tclass;
+        meta->has_cred = m->has_cred;
+        meta->cred_pid = m->cred_pid;
+        meta->cred_uid = m->cred_uid;
+        meta->cred_gid = m->cred_gid;
         /* SCM_RIGHTS fds attach to the first byte of the message: they
          * are delivered exactly once, with the first dequeue.  Appends to
          * any fds already collected from earlier messages in the same

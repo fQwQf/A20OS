@@ -51,6 +51,10 @@ typedef struct {
     uint8_t pktinfo_addr[16];
     int hoplimit;
     int tclass;
+    int has_cred;
+    int32_t cred_pid;
+    int32_t cred_uid;
+    int32_t cred_gid;
 } socket_recv_meta_t;
 
 /*
@@ -122,6 +126,13 @@ static int parse_send_control(const socket_msghdr_t *mh, int *ttl, int *tclass)
             if (cmsg->cmsg_len < cmsg_len(sizeof(int)))
                 return -EINVAL;
             memcpy(tclass, cmsg_data_const(cmsg), sizeof(int));
+        } else if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_CREDENTIALS) {
+            /* SCM_CREDENTIALS on sendmsg is advisory on Linux; the kernel
+             * records the sending process credentials regardless.  Accept
+             * the cmsg (validate shape) but do not let a caller spoof the
+             * recorded pid/uid/gid. */
+            if (cmsg->cmsg_len < cmsg_len(3 * sizeof(int32_t)))
+                return -EINVAL;
         }
         cmsg = cmsg_nxthdr(mh, cmsg);
     }
@@ -265,6 +276,23 @@ static size_t build_recv_control(const socket_msghdr_t *mh,
         memcpy(cmsg_data(cmsg), &hoplimit, sizeof(hoplimit));
         used += need;
         out->has_2292_hoplimit = 1;
+    }
+
+    if (out->has_cred) {
+        /* Linux struct ucred: { pid, uid, gid }. */
+        size_t need = cmsg_space(3 * sizeof(int32_t));
+        if (used + need > mh->msg_controllen)
+            return used;
+        cmsg = (socket_cmsghdr_t *)(dst + used);
+        cmsg->cmsg_level = SOL_SOCKET;
+        cmsg->cmsg_type = SCM_CREDENTIALS;
+        cmsg->cmsg_len = (uint32_t)cmsg_len(3 * sizeof(int32_t));
+        int32_t cred[3];
+        cred[0] = meta->has_cred ? out->cred_pid : 0;
+        cred[1] = meta->has_cred ? out->cred_uid : 0;
+        cred[2] = meta->has_cred ? out->cred_gid : 0;
+        memcpy(cmsg_data(cmsg), cred, sizeof(cred));
+        used += need;
     }
 
     return used;
@@ -522,6 +550,8 @@ int64_t sys_recvmsg(int fd, void *msg, int flags)
             socket_recv_meta_t recv_meta = {0};
             size_t used = 0;
             int want_control = meta.scm_nfiles > 0;
+            if (sock && sock->passcred && meta.has_cred)
+                want_control = 1;
             if (sock && sock->domain == AF_INET6 &&
                 (sock->ipv6_recv_pktinfo || sock->ipv6_recv_hoplimit ||
                  sock->ipv6_recv_tclass || sock->ipv6_recv_2292_pktinfo ||
@@ -554,6 +584,12 @@ int64_t sys_recvmsg(int fd, void *msg, int flags)
                     recv_meta.hoplimit = meta.has_hoplimit ? meta.hoplimit : 0;
                 }
             }
+            if (sock && sock->passcred && meta.has_cred) {
+                recv_meta.has_cred = 1;
+                recv_meta.cred_pid = meta.cred_pid;
+                recv_meta.cred_uid = meta.cred_uid;
+                recv_meta.cred_gid = meta.cred_gid;
+            }
             uint8_t *cbuf = NULL;
             if (want_control) {
                 cbuf = (uint8_t *)kmalloc(mh.msg_controllen);
@@ -564,7 +600,7 @@ int64_t sys_recvmsg(int fd, void *msg, int flags)
                 }
                 if (recv_meta.has_pktinfo || recv_meta.has_hoplimit ||
                     recv_meta.has_tclass || recv_meta.has_2292_pktinfo ||
-                    recv_meta.has_2292_hoplimit) {
+                    recv_meta.has_2292_hoplimit || recv_meta.has_cred) {
                     socket_msghdr_t cmh = mh;
                     cmh.msg_control = cbuf;
                     cmh.msg_controllen = mh.msg_controllen;
