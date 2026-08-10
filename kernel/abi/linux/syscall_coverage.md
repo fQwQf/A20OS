@@ -13,6 +13,12 @@ because it has an entry in `syscall_table.def`.
 
 ## Current Summary
 
+`syscall_table.def` currently registers 258 dispatch entries, including two
+A20OS extensions. Registration is dispatch coverage, not a claim of semantic
+Linux completeness. Exactly 16 entries are direct, fixed `-ENOSYS`
+placeholders; registered non-placeholder calls may still support only a subset
+of Linux commands, flags, object types, or concurrency semantics.
+
 | Area | Level | Notes |
 | --- | --- | --- |
 | basic fd I/O | partial | read/write/pread/pwrite/iovec paths exist; concurrent close/lifetime rules need tightening. |
@@ -20,12 +26,12 @@ because it has an entry in `syscall_table.def`.
 | process lifecycle | partial | fork/clone/exec/wait/exit work for current userland; SMP/thread edge semantics remain limited. |
 | signals | partial | common delivery paths exist; Linux edge behavior is not complete. |
 | memory management | partial | brk/mmap/munmap/mprotect/mremap and COW exist; file mmap/page cache semantics need work. |
-| scheduler | stub | policy/priority/affinity APIs are compatibility approximations. |
+| scheduler | partial | APIs map onto the per-CPU EEVDF/SMP scheduler, but Linux policy/priority/affinity, RT, deadline, cgroup, and topology semantics remain bounded. |
 | futex | partial | basic operations exist; advanced futex operations are incomplete. |
 | poll/epoll/select | partial | fd readiness works for common objects; wait infrastructure should move to formal wait queues. |
 | eventfd/timerfd | partial | fd-backed wait objects exist; full Linux timer semantics are simplified. |
 | sockets | partial | AF_INET/AF_UNIX/AF_ALG subset exists via lwIP/socket layer; many protocol details are simplified. |
-| bpf | stub | minimal map/prog/socket-filter shim, not real eBPF. |
+| bpf | partial | KEP-backed program load/attach/detach only; no BPF maps, and attach targets are A20OS extension-point ids rather than Linux attach objects. |
 | namespaces | stub | compatibility return paths, no full namespace model. |
 | capabilities | stub | small capability model, not Linux security semantics. |
 | file advice/copy helpers | partial | implemented for common paths, many flags are approximations. |
@@ -225,7 +231,7 @@ because it has an entry in `syscall_table.def`.
 | `semctl` | ipc | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
 | `semtimedop` | ipc | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
 | `semop` | ipc | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
-| `bpf` | bpf | `partial` | `smoke-abi-linux` | map/prog shim only; no full verifier or eBPF runtime |
+| `bpf` | bpf | `partial` | `smoke-abi-linux` | KEP-backed BPF_PROG_LOAD/ATTACH/DETACH only; no BPF maps; target_fd is an A20OS extension-point id |
 | `clock_settime` | time | `partial` | `smoke-proc-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `clock_gettime` | time | `partial` | `smoke-proc-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `clock_gettime32` | time | `partial` | `smoke-proc-stress` | implemented subset; Linux edge semantics remain documented gaps |
@@ -304,7 +310,7 @@ because it has an entry in `syscall_table.def`.
 
 ## Stub Decision Record
 
-The following explicit `-ENOSYS` placeholders in `syscall_table.def` have been reviewed. Each entry documents the decision, rationale, and whether it is within the claimed compatibility scope.
+The following 16 explicit, fixed `-ENOSYS` placeholders in `syscall_table.def` have been reviewed. Each entry documents the decision, rationale, and whether it is within the claimed compatibility scope.
 
 | Syscall | Decision | Rationale | In Scope |
 | --- | --- | --- | --- |
@@ -324,6 +330,7 @@ The following explicit `-ENOSYS` placeholders in `syscall_table.def` have been r
 | `finit_module` | **keep stub** | Kernel module loading via fd; companion to `init_module`. | No |
 | `userfaultfd` | **keep stub** | Userspace page-fault handling; MM subsystem does not support this model. | No |
 | `perf_event_open` | **keep stub** | Performance monitoring counters; no PMC driver or perf subsystem. | No |
-| `arch_prctl` | **keep stub** | x86_64-specific arch prctl; kept in the generic table for cross-arch uniformity but always returns `-ENOSYS` on non-x86_64. | No |
 
-**Scope Note:** None of the above stubs are within the claimed Linux ABI compatibility scope. They are kept in the syscall table to provide predictable `-ENOSYS` behavior rather than missing-table crashes, which improves userland robustness. If future userland requires any of these, the decision should be revisited with a dedicated implementation plan and tests.
+`arch_prctl` is not one of these 16 direct placeholders. The x86_64 implementation supports `ARCH_SET_FS` and `ARCH_GET_FS`, while unsupported operations and the generic non-x86_64 fallback may return `-ENOSYS`; the generated table therefore keeps its conservative `stub` classification.
+
+**Scope Note:** None of the 16 fixed placeholders above are within the claimed Linux ABI compatibility scope. They are kept in the syscall table to provide predictable `-ENOSYS` behavior rather than missing-table crashes, which improves userland robustness. If future userland requires any of these, the decision should be revisited with a dedicated implementation plan and tests.

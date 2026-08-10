@@ -34,7 +34,8 @@ static const device_id_t ids[] = {
 probe 首先：
 
 ```c
-int ret = pci_enable_and_assign_bars(dev);if (ret < 0)
+int ret = pci_enable_and_assign_bars(dev);
+if (ret < 0)
     return ret;
 resource_t *regs = pci_get_bar_resource(dev, 0);
 ```
@@ -64,7 +65,8 @@ static driver_t my_driver = {
 完整生命周期示例：
 
 ```c
-/* 1. 注册驱动 */static driver_t my_pci_driver = {
+/* 1. 注册驱动 */
+static driver_t my_pci_driver = {
     .name       = "my-pci-device",
     .bus        = &pci_bus,
     .id_table   = my_ids,
@@ -72,9 +74,11 @@ static driver_t my_driver = {
     .remove     = my_pci_remove,
     .class_type = DEV_CLASS_BLOCK,
     .class_ops  = &my_ops,
-};DRIVER_REGISTER(my_pci_driver);
+};
+DRIVER_REGISTER(my_pci_driver);
 
-/* 2. probe：启用 BAR、初始化 transport、注册类 */static int my_pci_probe(device_t *dev){
+/* 2. probe：启用 BAR、初始化 transport、注册类 */
+static int my_pci_probe(device_t *dev){
     my_pci_dev_t *d = kzalloc(sizeof(*d));
     if (!d) return -ENOMEM;
 
@@ -96,7 +100,8 @@ fail:
     return -ENODEV;
 }
 
-/* 3. remove：停止 I/O、释放资源 */static int my_pci_remove(device_t *dev){
+/* 3. remove：停止 I/O、释放资源 */
+static int my_pci_remove(device_t *dev){
     my_pci_dev_t *d = dev->drv_priv;
     stop_queues(d);
     kfree(d);
@@ -137,7 +142,8 @@ NVMe controller 启用前必须由 `CAP.CSS` 声明 NVM command set，并由 `CA
 modern PCI 初始化：
 
 ```c
-virtio_transport_t vt;if (pci_virtio_transport_init(dev, VIRTIO_ID_SCSI, &vt) < 0)
+virtio_transport_t vt;
+if (pci_virtio_transport_init(dev, VIRTIO_ID_SCSI, &vt) < 0)
     return -ENODEV;
 ```
 
@@ -187,7 +193,8 @@ descriptor 包含 DMA 地址、长度、flags 和 next。设备可读 descriptor
 VirtIO-SCSI data-in 的链顺序是 request -> response -> data-in；VirtualBox 会在首个 writable descriptor 处分割 outbound/inbound，因此不能把 data-in 放到 response 前。
 
 ```c
-/* 构造一次请求：desc[0] 设备可读，desc[1] 设备可写 */static int submit_request(vq_t *vq, void *out, size_t out_len,
+/* 构造一次请求：desc[0] 设备可读，desc[1] 设备可写 */
+static int submit_request(vq_t *vq, void *out, size_t out_len,
                           void *in, size_t in_len)
 {
     uint16_t head = vq->free_head;
