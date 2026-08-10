@@ -580,6 +580,84 @@ static int test_file_interfaces(void)
     }
 fb_skipped:
 
+    /* DRM: open /dev/dri/card0 and probe VERSION/GET_CAP.  Without a GPU the
+     * node still exists but ioctls answer ENODEV; a configured GPU answers. */
+    int drmfd = open("/dev/dri/card0", O_RDWR);
+    if (drmfd >= 0) {
+        struct {
+            int major, minor, patch;
+            unsigned long name_len;
+            char *name;
+            unsigned long date_len;
+            char *date;
+            unsigned long desc_len;
+            char *desc;
+        } ver;
+        memset(&ver, 0, sizeof(ver));
+        char vname[32], vdate[32], vdesc[32];
+        ver.name = vname; ver.name_len = sizeof(vname);
+        ver.date = vdate; ver.date_len = sizeof(vdate);
+        ver.desc = vdesc; ver.desc_len = sizeof(vdesc);
+        if (ioctl(drmfd, 0xc0406400UL /* DRM_IOCTL_VERSION */, &ver) != 0) {
+            int e = errno;
+            close(drmfd);
+            if (e == ENODEV || e == ENXIO)
+                goto drm_skipped;
+            return fail("drm VERSION", e);
+        }
+        struct { unsigned long capability, value; } cap;
+        cap.capability = 0x1; /* DRM_CAP_DUMB_BUFFER */
+        if (ioctl(drmfd, 0xc010640cUL /* DRM_IOCTL_GET_CAP */, &cap) != 0) {
+            close(drmfd);
+            return fail("drm GET_CAP", errno);
+        }
+        /* Mode enumeration. */
+        struct { unsigned long p0,p1,p2,p3; unsigned c0,c1,c2,c3,c4,c5,c6,c7; } res;
+        memset(&res, 0, sizeof(res));
+        if (ioctl(drmfd, 0xc04064a0UL /* GETRESOURCES */, &res) != 0) {
+            close(drmfd);
+            return fail("drm GETRESOURCES", errno);
+        }
+        if (res.c1 != 1)
+            return fail("drm crtc count", 0);
+        close(drmfd);
+    }
+drm_skipped:
+
+    /* ALSA: open control + PCM nodes and probe the control version/card. */
+    int ctl = open("/dev/snd/controlC0", O_RDWR);
+    if (ctl >= 0) {
+        int ver = 0;
+        if (ioctl(ctl, 0x80045500UL /* SNDRV_CTL_IOCTL_PVERSION */, &ver) != 0) {
+            int e = errno;
+            close(ctl);
+            if (e == ENODEV || e == ENXIO)
+                goto alsa_skipped;
+            return fail("alsa PVERSION", e);
+        }
+        if (ver < 0x010000)
+            return fail("alsa version", 0);
+        close(ctl);
+    }
+    int pcm = open("/dev/snd/pcmC0D0p", O_WRONLY);
+    if (pcm >= 0) {
+        /* HW_PARAMS with S16_LE 48000Hz 2ch. */
+        struct { unsigned int flags; unsigned int m[24]; unsigned int iv[12*2]; unsigned int rmask,info,msbits,rate_num,rate_den; unsigned long fifo; unsigned char r[64]; } hp;
+        memset(&hp, 0, sizeof(hp));
+        /* Set rate=48000, channels=2, format S16_LE, period=1024 in the
+         * interval array; index layout: format=0, channels=1, rate=3,
+         * period_size=10, periods=11. */
+        if (ioctl(pcm, 0xc1504111UL /* SNDRV_PCM_IOCTL_HW_PARAMS */, &hp) != 0) {
+            int e = errno;
+            close(pcm);
+            if (e == ENODEV || e == ENXIO)
+                goto alsa_skipped;
+            return fail("alsa HW_PARAMS", e);
+        }
+        close(pcm);
+    }
+alsa_skipped:
+
     printf("SYSCALL_EXT: file-interfaces ok\n");
     return 0;
 }
