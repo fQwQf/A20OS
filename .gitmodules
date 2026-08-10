@@ -77,3 +77,33 @@
 [submodule "user/external/gui/cairo"]
 	path = user/external/gui/cairo
 	url = https://gitlab.freedesktop.org/cairo/cairo.git
+[submodule "user/external/gui/libxfce4util"]
+	path = user/external/gui/libxfce4util
+	url = //gitlab.xfce.org/xfce/libxfce4util.git
+[submodule "user/external/gui/libxfce4windowing"]
+	path = user/external/gui/libxfce4windowing
+	url = //gitlab.xfce.org/xfce/libxfce4windowing.git
+[submodule "user/external/gui/exo"]
+	path = user/external/gui/exo
+	url = //gitlab.xfce.org/xfce/exo.git
+[submodule "user/external/gui/libxfce4ui"]
+	path = user/external/gui/libxfce4ui
+	url = //gitlab.xfce.org/xfce/libxfce4ui.git
+[submodule "user/external/gui/xfconf"]
+	path = user/external/gui/xfconf
+	url = //gitlab.xfce.org/xfce/xfconf.git
+[submodule "user/external/gui/garcon"]
+	path = user/external/gui/garcon
+	url = //gitlab.xfce.org/xfce/garcon.git
+[submodule "user/external/gui/xfce4-panel"]
+	path = user/external/gui/xfce4-panel
+	url = //gitlab.xfce.org/xfce/xfce4-panel.git
+[submodule "user/external/gui/xfdesktop"]
+	path = user/external/gui/xfdesktop
+	url = //gitlab.xfce.org/xfce/xfdesktop.git
+[submodule "user/external/gui/xfce4-session"]
+	path = user/external/gui/xfce4-session
+	url = //gitlab.xfce.org/xfce/xfce4-session.git
+[submodule "user/external/gui/thunar"]
+	path = user/external/gui/thunar
+	url = //gitlab.xfce.org/xfce/thunar.git
