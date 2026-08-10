@@ -81,7 +81,7 @@ if [ ${#PHASES[@]} -eq 0 ]; then
             libxfce4util libxfce4windowing xfconf libxfce4ui exo garcon \
             gtk-layer-shell \
             xfce4-panel xfdesktop xfce4-session thunar \
-            weston ffmpeg player)
+            wlroots labwc weston ffmpeg player)
 fi
 
 want() {
@@ -710,6 +710,20 @@ if want gtk-layer-shell && ! stamp gtk-layer-shell; then
         -Dexamples=false -Dtests=false -Dintrospection=false \
         -Ddocs=false
     mark gtk-layer-shell
+fi
+
+# ------------------------------------------------------------------ wlroots
+if want wlroots && ! stamp wlroots; then
+    echo "=== wlroots ==="
+    "$WL_DIR/build-compositor.sh" "$ARCH" wlroots
+    mark wlroots
+fi
+
+# ------------------------------------------------------------------ labwc
+if want labwc && ! stamp labwc; then
+    echo "=== labwc ==="
+    "$WL_DIR/build-compositor.sh" "$ARCH" labwc
+    mark labwc
 fi
 
 if want xfce4-panel && ! stamp xfce4-panel; then

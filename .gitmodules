@@ -113,3 +113,12 @@
 [submodule "user/external/gui/libseat"]
 	path = user/external/gui/libseat
 	url = https://github.com/kennylevinsen/seatd.git
+[submodule "user/external/gui/wlroots"]
+	path = user/external/gui/wlroots
+	url = https://gitlab.freedesktop.org/wlroots/wlroots.git
+[submodule "user/external/gui/labwc"]
+	path = user/external/gui/labwc
+	url = https://github.com/labwc/labwc.git
+[submodule "user/external/gui/libdisplay-info"]
+	path = user/external/gui/libdisplay-info
+	url = https://gitlab.freedesktop.org/emersion/libdisplay-info.git
