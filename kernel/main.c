@@ -228,16 +228,20 @@ void init_kthread(void) {
     driver_manager_init();
 #endif
 
+#ifdef CONFIG_FINAL_EVAL_ROOT
+    const char *init_path = "/a20/init";
+#else
     const char *init_path = "/bin/init";
+#endif
     printf("[INIT] opening %s...\n", init_path);
     int fd = vfs_open(init_path, O_RDONLY, 0);
     if (fd < 0) {
-        printf("[INIT] Cannot open /bin/init: %d\n", fd);
+        printf("[INIT] Cannot open %s: %d\n", init_path, fd);
 
         init_path = "/init";
         fd = vfs_open(init_path, O_RDONLY, 0);
         if (fd < 0) {
-            panic("init: no init program found (tried /bin/init and /init)");
+            panic("init: no init program found");
         }
     }
 
