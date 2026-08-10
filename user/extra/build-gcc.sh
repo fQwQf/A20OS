@@ -15,8 +15,8 @@ INSTALL_DIR="$(cd "$4" && pwd)"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 USER_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-MCM="$USER_DIR/external/musl-cross-make/output"
-BINUTILS_SRC="$USER_DIR/external/binutils"
+MCM="$USER_DIR/external/toolchain/musl-cross-make/output"
+BINUTILS_SRC="$USER_DIR/external/toolchain/binutils"
 GCC_SRC="$USER_DIR/external/gcc"
 
 BUILD_TRIPLET="${BUILD_TRIPLET:-$(gcc -dumpmachine)}"
