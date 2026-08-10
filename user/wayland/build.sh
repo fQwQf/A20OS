@@ -76,7 +76,7 @@ if [ ${#PHASES[@]} -eq 0 ]; then
     WANT_ALL=1
     PHASES=(musl wayland-native libffi wayland protocols pixman \
             xkeyboard-config xkbcommon \
-            libevdev stubs libdrm libinput weston ffmpeg player)
+            libevdev stubs libdrm libinput mesa weston ffmpeg player)
 fi
 
 want() {
@@ -119,6 +119,15 @@ exec $CC -specs "$MUSL_SH/lib/musl-gcc.specs" $ARCH_CFLAGS "\$@"
 EOF
 chmod +x "$MUSL_GCC"
 
+# musl-g++ wrapper for C++ components (Mesa needs a C++ compiler).
+MUSL_CXX=$MUSL_SH/musl-g++-a20
+CXX=${CXX:-${CROSS}g++}
+cat > "$MUSL_CXX" <<EOF
+#!/bin/sh
+exec $CXX -specs "$MUSL_SH/lib/musl-gcc.specs" $ARCH_CFLAGS "\$@"
+EOF
+chmod +x "$MUSL_CXX"
+
 meson_cross_ini() {
     cat > "$B/meson-cross.ini" <<EOF
 [host_machine]
@@ -129,6 +138,7 @@ endian = 'little'
 
 [binaries]
 c = '$MUSL_GCC'
+cpp = '$MUSL_CXX'
 ar = '$AR'
 strip = '${CROSS}strip'
 pkgconfig = 'pkg-config'
@@ -399,6 +409,22 @@ if want libinput && ! stamp libinput; then
         -Ddocumentation=false -Dinstall-tests=false \
         -Dzshcompletiondir=no
     mark libinput
+fi
+
+# ------------------------------------------------------------------ mesa
+if want mesa && ! stamp mesa; then
+    echo "=== mesa (EGL/GLES + gbm + virgl/softpipe) ==="
+    export BISON_PKGDATADIR="$HOME/.local/rootfs/usr/share/bison"
+    export M4="$HOME/.local/rootfs/usr/bin/m4"
+    meson_pkg mesa "$USER_DIR/external/gui/mesa" \
+        -Dgallium-drivers=virgl,softpipe \
+        -Dvulkan-drivers= \
+        -Dglx=disabled -Dgbm=enabled -Degl=enabled \
+        -Dgles1=disabled -Dgles2=enabled \
+        -Dplatforms= -Dllvm=disabled -Dopengl=true \
+        -Dgallium-extra-hud=false -Dtools= -Dbuild-tests=false \
+        -Dshader-cache=disabled
+    mark mesa
 fi
 
 # ---------------------------------------------------------------- weston
