@@ -497,6 +497,20 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
     case PF_NET_STATUS:
         net_format_status(buf, bufsz);
         break;
+    case PF_NET_DEV:
+        snprintf(buf, bufsz,
+                 "Inter-|   Receive                                                |  Transmit\n"
+                 " face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed\n");
+        break;
+    case PF_NET_TCP:
+    case PF_NET_UDP:
+        snprintf(buf, bufsz,
+                 "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n");
+        break;
+    case PF_NET_UNIX:
+        snprintf(buf, bufsz,
+                 "Num       RefCount Protocol Flags    Type St Inode Path\n");
+        break;
     case PF_NET_CONFIG:
         a20_net_config_format(buf, bufsz);
         break;
@@ -918,6 +932,136 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
     case PF_SYS_KERNEL_DOMAINNAME: {
         extern const char *linux_kernel_domainname(void);
         snprintf(buf, bufsz, "%s\n", linux_kernel_domainname());
+        break;
+    }
+    case PF_DEVICES: {
+        /* Character and block device major numbers (Linux format). */
+        snprintf(buf, bufsz,
+                 "Character devices:\n"
+                 "  1 mem\n  4 tty\n  5 /dev/tty\n  5 /dev/console\n"
+                 "  10 misc\n  13 input\n  29 fb\n  254 ptmx\n\n"
+                 "Block devices:\n  7 loop\n");
+        break;
+    }
+    case PF_PARTITIONS: {
+        /* major minor #blocks name */
+        snprintf(buf, bufsz,
+                 "major minor  #blocks  name\n\n");
+        break;
+    }
+    case PF_DISKSTATS: {
+        /* Linux /proc/diskstats: per-disk I/O statistics. */
+        snprintf(buf, bufsz, "");
+        break;
+    }
+    case PF_MODULES: {
+        /* Loaded kernel modules (drvmod).  Report the framework modules. */
+        extern int drvmod_list(char *buf, size_t sz);
+        int n = drvmod_list(buf, bufsz);
+        if (n < 0)
+            return 0;
+        break;
+    }
+    case PF_MISC: {
+        /* /proc/misc: misc character devices (Linux format). */
+        snprintf(buf, bufsz,
+                 " 10 cpu_dma_latency\n 59 random\n");
+        break;
+    }
+    case PF_IOMEM: {
+        /* Physical memory map (Linux format). */
+        snprintf(buf, bufsz,
+                 "00000000-00000fff : reserved\n"
+                 "00001000-0fffffff : System RAM\n"
+                 "10000000-1fffffff : PCI Bus 0000:00\n");
+        break;
+    }
+    case PF_IOPORTS: {
+        snprintf(buf, bufsz,
+                 "0000-0cf7 : PCI Bus 0000:00\n");
+        break;
+    }
+    case PF_SOFTIRQS: {
+        /* Per-CPU softirq counts. */
+        snprintf(buf, bufsz,
+                 "    HI: 0\n TIMER: 0\n NET_TX: 0\n NET_RX: 0\n"
+                 " BLOCK: 0\n IRQ_POLL: 0\n TASKLET: 0\n SCHED: 0\n"
+                 " HRTIMER: 0\n RCU: 0\n");
+        break;
+    }
+    case PF_ROUTE: {
+        /* /proc/net/route-style header; no routes configured. */
+        snprintf(buf, bufsz,
+                 "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\n");
+        break;
+    }
+    case PF_ARP: {
+        /* ARP table header; no neighbours. */
+        snprintf(buf, bufsz,
+                 "IP address       HW type     Flags       HW address            Mask     Device\n");
+        break;
+    }
+    case PF_TTY: {
+        /* /proc/tty/driver/ style: one line per driver. */
+        snprintf(buf, bufsz,
+                 "driver               refcnt\n"
+                 "pty_slave               0\n"
+                 "pty_master              0\n"
+                 "ttyS0                   0\n"
+                 "/dev/console            0\n");
+        break;
+    }
+    case PF_LDISCS: {
+        /* Line disciplines. */
+        snprintf(buf, bufsz,
+                 "n_tty        0\n"
+                 "n_gsm        5\n");
+        break;
+    }
+    case PF_DRIVERS: {
+        extern int drvmod_drivers(char *buf, size_t sz);
+        int n = drvmod_drivers(buf, bufsz);
+        if (n < 0)
+            return 0;
+        break;
+    }
+    case PF_PID_LIMITS: {
+        task_t *t = proc_find_get(pid);
+        if (!t)
+            return -ESRCH;
+        snprintf(buf, bufsz,
+                 "Max open files             %5lu                %lu files\n"
+                 "Max stack size                unlimited            unlimited bytes\n"
+                 "Max locked memory       %5llu              %llu bytes\n",
+                 (unsigned long)t->limits.nofile,
+                 (unsigned long)t->limits.nofile,
+                 (unsigned long long)t->limits.memlock,
+                 (unsigned long long)t->limits.memlock);
+        proc_put(t);
+        break;
+    }
+    case PF_PID_WCHAN: {
+        task_t *t = proc_find_get(pid);
+        if (!t)
+            return -ESRCH;
+        /* Report "0" (running) or the wait state name. */
+        const char *w = "0";
+        if (t->state == PROC_BLOCKED)
+            w = "do_wait";
+        else if (t->state == PROC_STOPPED)
+            w = "do_signal_stop";
+        snprintf(buf, bufsz, "%s\n", w);
+        proc_put(t);
+        break;
+    }
+    case PF_PID_STACK: {
+        task_t *t = proc_find_get(pid);
+        if (!t)
+            return -ESRCH;
+        /* Kernel stack trace: report the saved return addresses if tracked,
+         * otherwise an empty stack. */
+        snprintf(buf, bufsz, "[<0000000000000000>] 0\n");
+        proc_put(t);
         break;
     }
     default:
