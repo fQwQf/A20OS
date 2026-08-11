@@ -2,6 +2,8 @@
 # The TCP/IP stack lives in the kernel (kernel/external/lwip + kernel/net);
 # the user-space netd frame-ring/socket-proxy plane was abandoned.
 
+.PHONY: smoke-native-mm smoke-native-signal
+
 native-rtcd-rv:
 	$(MAKE) ARCH=riscv64 NOMMU=$(NOMMU) native-rtcd-arch
 
@@ -102,7 +104,7 @@ smoke-dual-input:
 	monsock="$(SMOKE_LOG_DIR)/dual-input-monitor.sock"; \
 	rm -f "$$monsock"; \
 	status=0; \
-	{ sleep 8; python3 -c 'import socket,sys,time; s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1]); [(s.sendall(b"sendkey a\n"), time.sleep(1)) for _ in range(24)]; s.close()' "$$monsock" 2>/dev/null || true; } & \
+	{ sleep 8; $(PYTHON) -c 'import socket,sys,time; s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1]); [(s.sendall(b"sendkey a\n"), time.sleep(1)) for _ in range(24)]; s.close()' "$$monsock" 2>/dev/null || true; } & \
 	{ sleep $(SMOKE_INPUT_DELAY); printf 'poweroff\n'; } | \
 	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
 		-machine virt -m 1G -nographic -smp 1 -bios default \
@@ -505,4 +507,3 @@ smoke-native-debug:
 		tail -n 80 "$$log"; \
 		exit 1; \
 	fi
-
