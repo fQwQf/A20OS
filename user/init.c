@@ -115,9 +115,9 @@ int main(void)
     }
 
     /*
-     * Final-round images are mounted directly at /.  Their dynamic loader and
-     * libraries are already available there, so copying those files into the
-     * bootstrap environment only delays entry.
+     * Final-round builds retain the bootstrap ramfs as / and mount the
+     * published image at /mnt.  The final runner enters it with chroot(2), so
+     * the bootstrap init remains available when recovery or mounting fails.
      * Keep the original setup for interactive and legacy contest images.
      */
     if (!final_contest)
@@ -129,7 +129,7 @@ int main(void)
 
     char path_val[512];
     if (final_contest)
-        strcpy(path_val, "/bin:/usr/bin:/sbin:/usr/sbin:/glibc:/a20");
+        strcpy(path_val, "/a20");
     else
         strcpy(path_val, "/bin");
     static const char *path_dirs[] = {
