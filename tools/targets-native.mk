@@ -4,7 +4,9 @@
 A20_SERVICES_IDL_SRC := user/svc/a20_services.idl
 A20_SERVICES_IDL_GEN := tools/a20idl.py
 A20_SERVICES_IDL_HDR := user/svc/a20_services_idl.h
-A20_IDL_PYTHON      ?= conda run -n a20os python
+A20_IDL_PYTHON      ?= $(PYTHON)
+
+.PHONY: native-mm-arch native-mm-rv native-signal-arch native-signal-rv
 
 $(A20_SERVICES_IDL_HDR): $(A20_SERVICES_IDL_SRC) $(A20_SERVICES_IDL_GEN)
 	@mkdir -p $(dir $@)
@@ -451,4 +453,3 @@ $(NATIVE_RTCDD_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) 
 	$(call NATIVE_RTCD_RECIPE,$(NATIVE_CC),$(NATIVE_CFLAGS),$(NATIVE_CRT0),user/svc/rtcd.c,$@)
 
 native-rtcd-arch: $(NATIVE_RTCD_BIN) $(NATIVE_RTCDD_BIN)
-

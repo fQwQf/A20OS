@@ -1,7 +1,10 @@
 # ----------------------------------------------------------------
 # Local evaluation: make eval-rv / make eval-la / make eval
 # ----------------------------------------------------------------
-.PHONY: eval-check eval-check-rv eval-check-la
+.PHONY: eval-check eval-check-rv eval-check-la \
+	final-stage4-rv-buildstorm-1c final-stage4-rv-buildstorm-8c \
+	final-stage4-la-buildstorm-1c final-stage4-la-buildstorm-8c \
+	final-stage5-rv-buildstorm final-stage5-la-buildstorm
 
 EVAL_DIR   := .eval-state
 EVAL_LOGS  := $(EVAL_DIR)/logs
