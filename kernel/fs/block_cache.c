@@ -3,6 +3,7 @@
 #include "core/string.h"
 #include "core/stdio.h"
 #include "core/perf.h"
+#include "core/errno.h"
 
 static bcache_t *g_bcache_list[8];
 static int g_bcache_count;
@@ -392,14 +393,21 @@ void bcache_mark_dirty(bcache_entry_t *e) {
     e->dirty = 1;
 }
 
-// 同步所有脏块到磁盘（fsync 系统调用时使用）
-void bcache_sync(bcache_t *bc) {
-    if (!bc || !bc->dev) return;
+/*
+ * Flush every dirty cache entry and report whether the storage device
+ * accepted all writes.  Journal recovery must not claim success after a
+ * timed-out VirtIO request merely because older callers used a void sync
+ * interface.
+ */
+int bcache_sync_checked(bcache_t *bc) {
+    if (!bc || !bc->dev)
+        return -EINVAL;
     char tmp[BCACHE_BLOCK_SIZE];
     char *page_tmp = NULL;
     int page_indices[BCACHE_SYNC_BATCH_PAGES];
     uint64_t page_nos[BCACHE_SYNC_BATCH_PAGES];
     uint64_t page_gens[BCACHE_SYNC_BATCH_PAGES];
+    int first_error = 0;
 
     /* Preserve write ordering for mutable metadata pages.  Without this,
      * concurrent fsync and eviction can write an older bitmap snapshot after
@@ -421,6 +429,7 @@ void bcache_sync(bcache_t *bc) {
                                        BCACHE_SYNC_BATCH_PAGES);
         if (!page_tmp) {
             spin_unlock_irqrestore(&bc->lock, flags);
+            first_error = -ENOMEM;
             break;
         }
         page_indices[0] = i;
@@ -457,9 +466,10 @@ void bcache_sync(bcache_t *bc) {
 
         uint64_t lba =
             (page_nos[0] * PCACHE_PAGE_SIZE) / BCACHE_BLOCK_SIZE;
-        if (bc->dev->write_sector(bc->dev, lba, page_tmp,
-                                  (size_t)batch_pages * PCACHE_PAGE_SIZE /
-                                      BCACHE_BLOCK_SIZE) >= 0) {
+        int write_ret = bc->dev->write_sector(
+            bc->dev, lba, page_tmp,
+            (size_t)batch_pages * PCACHE_PAGE_SIZE / BCACHE_BLOCK_SIZE);
+        if (write_ret >= 0) {
             flags = spin_lock_irqsave(&bc->lock);
             for (int page = 0; page < batch_pages; page++) {
                 pcache_entry_t *entry =
@@ -469,6 +479,8 @@ void bcache_sync(bcache_t *bc) {
                     bcache_set_page_dirty_locked(bc, entry, 0);
             }
             spin_unlock_irqrestore(&bc->lock, flags);
+        } else if (!first_error) {
+            first_error = write_ret;
         }
         a20_perf_count(A20_PERF_PCACHE_WRITEBACK_IOS);
         a20_perf_add(A20_PERF_PCACHE_WRITEBACK_PAGES,
@@ -493,15 +505,24 @@ void bcache_sync(bcache_t *bc) {
         memcpy(tmp, bc->pool[i].data, BCACHE_BLOCK_SIZE);
         spin_unlock_irqrestore(&bc->lock, flags);
 
-        if (bc->dev->write_sector(bc->dev, lba, tmp, 1) >= 0) {
+        int write_ret = bc->dev->write_sector(bc->dev, lba, tmp, 1);
+        if (write_ret >= 0) {
             flags = spin_lock_irqsave(&bc->lock);
             if (bc->pool[i].valid && bc->pool[i].lba == lba &&
                 bc->pool[i].dirty_gen == dirty_gen)
                 bcache_set_block_dirty_locked(bc, &bc->pool[i], 0);
             spin_unlock_irqrestore(&bc->lock, flags);
+        } else if (!first_error) {
+            first_error = write_ret;
         }
     }
     mutex_unlock(&bc->writeback_lock);
+    return first_error;
+}
+
+// 兼容不需要向上传播错误的历史 fsync/unmount 调用点。
+void bcache_sync(bcache_t *bc) {
+    (void)bcache_sync_checked(bc);
 }
 
 // 使缓存中的块失效（磁盘上的数据已改变）

@@ -80,6 +80,7 @@ void      bcache_destroy(bcache_t *bc);
 bcache_entry_t *bcache_get(bcache_t *bc, uint64_t lba);
 void      bcache_release(bcache_entry_t *e);
 void      bcache_mark_dirty(bcache_entry_t *e);
+int       bcache_sync_checked(bcache_t *bc);
 void      bcache_sync(bcache_t *bc);
 void      bcache_invalidate(bcache_t *bc, uint64_t lba);
 

@@ -25,6 +25,11 @@
 #define VIRTIO_BLK_RESET_SPINS        1000000U
 #define VIRTIO_BLK_POLL_BACKOFF_MIN_SPINS 32U
 #define VIRTIO_BLK_POLL_BACKOFF_MAX_SPINS 512U
+#define VIRTIO_BLK_BOUNCE_BYTES           (64U * 1024U)
+#define VIRTIO_BLK_MAX_TRANSFER_SECTORS   \
+    (VIRTIO_BLK_BOUNCE_BYTES / VIRTIO_BLK_SECTOR_SIZE)
+#define VIRTIO_BLK_QUEUE_DMA_BYTES        (PAGE_SIZE * 3U)
+#define VIRTIO_BLK_REQUEST_DMA_BYTES      PAGE_SIZE
 
 typedef struct {
     int                in_use;
@@ -33,6 +38,8 @@ typedef struct {
     int                write;
     uint16_t           head;
     void              *buf;
+    void              *dma_buf;
+    uint64_t           dma_addr;
     size_t             bytes;
     wait_queue_t       waiters;
 } virtio_blk_req_t;
@@ -41,12 +48,12 @@ typedef struct {
     virtio_blk_t       blk;
     block_dev_t        blk_dev;
     virtio_transport_t vt;
-    virtq_desc_t       desc[VIRTIO_QUEUE_SIZE]  ALIGNED(16);
-    virtq_avail_t      avail                    ALIGNED(2);
-    virtq_used_t       used                     ALIGNED(4);
-    ALIGNED(4096) uint8_t legacy_vq[4096 * 3];
-    uint8_t            status[VIRTIO_QUEUE_SIZE];
-    virtio_blk_req_hdr_t req_hdr[VIRTIO_QUEUE_SIZE];
+    void              *queue_dma_mem;
+    uint64_t           queue_dma_addr;
+    void              *request_dma_mem;
+    uint64_t           request_dma_addr;
+    virtio_blk_req_hdr_t *req_hdr;
+    uint8_t           *status;
     virtio_blk_req_t   req[VIRTIO_BLK_REQ_SLOTS];
     /* LOCK_ORDER: inst->lock is innermost; no nesting under or over other locks.
      * Protects req[], descriptor/avail/used rings, in_flight, status[],
@@ -58,6 +65,76 @@ typedef struct {
 
 static virtio_blk_inst_t g_insts[VIRTIO_MAX_DEVS];
 static int g_ninst = 0;
+
+static void virtio_blk_free_dma(virtio_blk_inst_t *inst)
+{
+    for (int i = 0; i < VIRTIO_BLK_REQ_SLOTS; i++) {
+        if (!inst->req[i].dma_buf)
+            continue;
+        dma_free_coherent_aligned(inst->req[i].dma_buf,
+                                  VIRTIO_BLK_BOUNCE_BYTES,
+                                  inst->req[i].dma_addr);
+        inst->req[i].dma_buf = NULL;
+        inst->req[i].dma_addr = 0;
+    }
+    if (inst->request_dma_mem) {
+        dma_free_coherent_aligned(inst->request_dma_mem,
+                                  VIRTIO_BLK_REQUEST_DMA_BYTES,
+                                  inst->request_dma_addr);
+        inst->request_dma_mem = NULL;
+        inst->request_dma_addr = 0;
+        inst->req_hdr = NULL;
+        inst->status = NULL;
+    }
+    if (inst->queue_dma_mem) {
+        dma_free_coherent_aligned(inst->queue_dma_mem,
+                                  VIRTIO_BLK_QUEUE_DMA_BYTES,
+                                  inst->queue_dma_addr);
+        inst->queue_dma_mem = NULL;
+        inst->queue_dma_addr = 0;
+    }
+}
+
+/*
+ * Never expose an arbitrary kernel buffer as one VirtIO DMA segment.  Block
+ * cache pages and batched writeback buffers are not required to be physically
+ * contiguous even when their virtual addresses are contiguous.  Both peer kernels
+ * and ScintillaOS independently avoid this evaluator-sensitive assumption by
+ * using bounded, contiguous bounce storage.  Give every in-flight slot its
+ * own 64 KiB DMA buffer so concurrent filesystem requests cannot overwrite
+ * each other while the device still owns a descriptor chain.
+ */
+static int virtio_blk_alloc_dma(virtio_blk_inst_t *inst)
+{
+    inst->queue_dma_mem =
+        dma_alloc_coherent_aligned(VIRTIO_BLK_QUEUE_DMA_BYTES, PAGE_SIZE,
+                                   &inst->queue_dma_addr);
+    inst->request_dma_mem =
+        dma_alloc_coherent_aligned(VIRTIO_BLK_REQUEST_DMA_BYTES, PAGE_SIZE,
+                                   &inst->request_dma_addr);
+    if (!inst->queue_dma_mem || !inst->request_dma_mem)
+        goto fail;
+
+    inst->req_hdr = (virtio_blk_req_hdr_t *)inst->request_dma_mem;
+    inst->status = (uint8_t *)inst->request_dma_mem +
+                   sizeof(virtio_blk_req_hdr_t) * VIRTIO_QUEUE_SIZE;
+    if ((uintptr_t)(inst->status + VIRTIO_QUEUE_SIZE) >
+        (uintptr_t)inst->request_dma_mem + VIRTIO_BLK_REQUEST_DMA_BYTES)
+        goto fail;
+
+    for (int i = 0; i < VIRTIO_BLK_REQ_SLOTS; i++) {
+        inst->req[i].dma_buf =
+            dma_alloc_coherent_aligned(VIRTIO_BLK_BOUNCE_BYTES, PAGE_SIZE,
+                                       &inst->req[i].dma_addr);
+        if (!inst->req[i].dma_buf)
+            goto fail;
+    }
+    return 0;
+
+fail:
+    virtio_blk_free_dma(inst);
+    return -1;
+}
 
 static int virtio_blk_init_instance(virtio_blk_inst_t *inst) {
     virtio_transport_t *vt = &inst->vt;
@@ -77,7 +154,10 @@ static int virtio_blk_init_instance(virtio_blk_inst_t *inst) {
 
     inst->blk.valid = 0;
     spin_init(&inst->lock);
-    memset(inst->req, 0, sizeof(inst->req));
+    if (virtio_blk_alloc_dma(inst) != 0) {
+        printf("[VIRTIO%d] Failed to allocate contiguous DMA memory\n", idx);
+        return -1;
+    }
     inst->blk.legacy = vt->legacy;
 
     vt->write32(vt, VIRTIO_MMIO_STATUS, 0);
@@ -110,6 +190,7 @@ static int virtio_blk_init_instance(virtio_blk_inst_t *inst) {
         if (!(s & VIRTIO_STATUS_FEATURES_OK)) {
             printf("[VIRTIO%d] Device rejected features (hi=0x%x)\n",
                    idx, driver_hi);
+            virtio_blk_free_dma(inst);
             return -1;
         }
     }
@@ -118,38 +199,43 @@ static int virtio_blk_init_instance(virtio_blk_inst_t *inst) {
     uint32_t qmax = vt->read32(vt, VIRTIO_MMIO_QUEUE_NUM_MAX);
     if (qmax == 0 || qmax < VIRTIO_QUEUE_SIZE) {
         printf("[VIRTIO%d] Queue max too small: %d\n", idx, qmax);
+        virtio_blk_free_dma(inst);
         return -1;
     }
     vt->write32(vt, VIRTIO_MMIO_QUEUE_NUM, VIRTIO_QUEUE_SIZE);
 
-    memset(inst->desc,    0, sizeof(inst->desc));
-    memset(&inst->avail,  0, sizeof(inst->avail));
-    memset(&inst->used,   0, sizeof(inst->used));
-    memset(inst->status,  0, sizeof(inst->status));
-    memset(inst->req_hdr, 0, sizeof(inst->req_hdr));
+    memset(inst->queue_dma_mem, 0, VIRTIO_BLK_QUEUE_DMA_BYTES);
+    memset(inst->request_dma_mem, 0, VIRTIO_BLK_REQUEST_DMA_BYTES);
+    arch_dma_sync_for_device(inst->queue_dma_mem,
+                             VIRTIO_BLK_QUEUE_DMA_BYTES);
+    arch_dma_sync_for_device(inst->request_dma_mem,
+                             VIRTIO_BLK_REQUEST_DMA_BYTES);
 
     if (inst->blk.legacy) {
-        virtq_desc_t *l_desc  = (virtq_desc_t *)(uintptr_t)inst->legacy_vq;
-        virtq_avail_t *l_avail = (virtq_avail_t *)(uintptr_t)(inst->legacy_vq + VQ_SIZE * sizeof(virtq_desc_t));
-        virtq_used_t  *l_used  = (virtq_used_t  *)(uintptr_t)(inst->legacy_vq + 4096);
-
-        memcpy(l_desc, inst->desc, sizeof(inst->desc));
-        memcpy(l_avail, &inst->avail, sizeof(inst->avail));
-        memcpy(l_used, &inst->used, sizeof(inst->used));
+        uint8_t *queue = (uint8_t *)inst->queue_dma_mem;
+        virtq_desc_t *l_desc = (virtq_desc_t *)queue;
+        virtq_avail_t *l_avail =
+            (virtq_avail_t *)(queue + VQ_SIZE * sizeof(virtq_desc_t));
+        virtq_used_t *l_used = (virtq_used_t *)(queue + PAGE_SIZE);
 
         inst->blk.desc  = l_desc;
         inst->blk.avail = l_avail;
         inst->blk.used  = l_used;
 
-        uint64_t vq_pa = va_to_pa(inst->legacy_vq);
         vt->write32(vt, VIRTIO_MMIO_GUEST_PAGE_SIZE, 4096);
         mb();
-        vt->write32(vt, VIRTIO_MMIO_QUEUE_PFN, (uint32_t)(vq_pa / 4096));
+        vt->write32(vt, VIRTIO_MMIO_QUEUE_PFN,
+                    (uint32_t)(inst->queue_dma_addr / PAGE_SIZE));
         mb();
     } else {
-        uint64_t desc_pa  = va_to_pa(inst->desc);
-        uint64_t avail_pa = va_to_pa(&inst->avail);
-        uint64_t used_pa  = va_to_pa(&inst->used);
+        uint8_t *queue = (uint8_t *)inst->queue_dma_mem;
+        uint64_t desc_pa = inst->queue_dma_addr;
+        uint64_t avail_pa = inst->queue_dma_addr + PAGE_SIZE;
+        uint64_t used_pa = inst->queue_dma_addr + PAGE_SIZE * 2U;
+
+        inst->blk.desc = (virtq_desc_t *)queue;
+        inst->blk.avail = (virtq_avail_t *)(queue + PAGE_SIZE);
+        inst->blk.used = (virtq_used_t *)(queue + PAGE_SIZE * 2U);
 
         vt->write32(vt, VIRTIO_MMIO_QUEUE_DESC_LOW,   (uint32_t)(desc_pa));
         vt->write32(vt, VIRTIO_MMIO_QUEUE_DESC_HIGH,  (uint32_t)(desc_pa  >> 32));
@@ -170,11 +256,6 @@ static int virtio_blk_init_instance(virtio_blk_inst_t *inst) {
     uint64_t cap_hi = vt->read32(vt, VIRTIO_MMIO_CONFIG + 4);
     inst->blk.capacity = cap_lo | (cap_hi << 32);
 
-    if (!inst->blk.legacy) {
-        inst->blk.desc  = inst->desc;
-        inst->blk.avail = &inst->avail;
-        inst->blk.used  = &inst->used;
-    }
     inst->blk.desc_idx  = 0;
     inst->blk.last_used = 0;
     inst->blk.valid     = 1;
@@ -250,13 +331,23 @@ static void virtio_blk_complete_used_locked(virtio_blk_inst_t *inst,
         uint16_t ring_idx = blk->last_used % VIRTIO_QUEUE_SIZE;
         arch_dma_sync_for_cpu(&used->ring[ring_idx], sizeof(virtq_used_elem_t));
         uint16_t head = (uint16_t)used->ring[ring_idx].id;
+        uint32_t used_len = used->ring[ring_idx].len;
         virtio_blk_req_t *req = virtio_blk_find_req_locked(inst, head);
 
         if (req) {
             arch_dma_sync_for_cpu(&inst->status[head], 1);
             if (!req->write)
-                arch_dma_sync_for_cpu(req->buf, req->bytes);
-            req->result = (inst->status[head] == VIRTIO_BLK_S_OK) ? 0 : -1;
+                arch_dma_sync_for_cpu(req->dma_buf, req->bytes);
+            uint32_t expected_len = req->write ? 1U : (uint32_t)req->bytes + 1U;
+            req->result =
+                (inst->status[head] == VIRTIO_BLK_S_OK &&
+                 used_len >= expected_len) ? 0 : -1;
+            if (req->result < 0) {
+                printf("[VIRTIO%d] bad completion head=%u status=%u "
+                       "used_len=%u expected>=%u\n",
+                       inst->slot, head, inst->status[head], used_len,
+                       expected_len);
+            }
             req->done = 1;
             if (wake_q)
                 (void)wait_queue_collect_all(&req->waiters, 0,
@@ -296,7 +387,11 @@ static virtio_blk_req_t *virtio_blk_alloc_req_locked(virtio_blk_inst_t *inst,
     for (int i = 0; i < VIRTIO_BLK_REQ_SLOTS; i++) {
         if (!inst->req[i].in_use) {
             virtio_blk_req_t *req = &inst->req[i];
+            void *dma_buf = req->dma_buf;
+            uint64_t dma_addr = req->dma_addr;
             memset(req, 0, sizeof(*req));
+            req->dma_buf = dma_buf;
+            req->dma_addr = dma_addr;
             wait_queue_init(&req->waiters);
             req->in_use = 1;
             req->head = (uint16_t)(i * 3);
@@ -351,6 +446,9 @@ static int virtio_blk_submit_req(virtio_blk_inst_t *inst, virtio_blk_req_t *req,
     req->bytes = bytes;
     inst->in_flight++;
 
+    if (write)
+        memcpy(req->dma_buf, buf, bytes);
+
     inst->req_hdr[slot].type     = write ? VIRTIO_BLK_T_OUT : VIRTIO_BLK_T_IN;
     inst->req_hdr[slot].reserved = 0;
     inst->req_hdr[slot].sector   = lba;
@@ -360,36 +458,37 @@ static int virtio_blk_submit_req(virtio_blk_inst_t *inst, virtio_blk_req_t *req,
     virtq_desc_t *desc  = inst->blk.desc;
     virtq_avail_t *avail = inst->blk.avail;
 
-    desc[slot].addr  = va_to_pa(&inst->req_hdr[slot]);
+    desc[slot].addr  = inst->request_dma_addr +
+                       (uint64_t)slot * sizeof(virtio_blk_req_hdr_t);
     desc[slot].len   = sizeof(virtio_blk_req_hdr_t);
     desc[slot].flags = VIRTQ_DESC_F_NEXT;
     desc[slot].next  = slot + 1;
 
-    desc[slot + 1].addr  = va_to_pa(buf);
+    desc[slot + 1].addr  = req->dma_addr;
     desc[slot + 1].len   = (uint32_t)bytes;
     desc[slot + 1].flags = (write ? 0 : VIRTQ_DESC_F_WRITE) | VIRTQ_DESC_F_NEXT;
     desc[slot + 1].next  = slot + 2;
 
-    desc[slot + 2].addr  = va_to_pa(&inst->status[slot]);
+    desc[slot + 2].addr  = inst->request_dma_addr +
+                           sizeof(virtio_blk_req_hdr_t) * VIRTIO_QUEUE_SIZE +
+                           slot;
     desc[slot + 2].len   = 1;
     desc[slot + 2].flags = VIRTQ_DESC_F_WRITE;
     desc[slot + 2].next  = 0;
 
     uint16_t avail_slot = avail->idx % VIRTIO_QUEUE_SIZE;
     avail->ring[avail_slot] = slot;
-    wmb();
-    avail->idx++;
-    inst->blk.desc_idx++;
-    wmb();
-
-    arch_dma_sync_for_device(buf, bytes);
+    arch_dma_sync_for_device(req->dma_buf, bytes);
     arch_dma_sync_for_device(&inst->req_hdr[slot], sizeof(inst->req_hdr[slot]));
+    arch_dma_sync_for_device(&inst->status[slot], 1);
     arch_dma_sync_for_device(&desc[slot], sizeof(virtq_desc_t) * 3);
     arch_dma_sync_for_device(&avail->flags, sizeof(avail->flags));
     arch_dma_sync_for_device(&avail->ring[avail_slot], sizeof(uint16_t));
+    wmb();
+    avail->idx++;
+    inst->blk.desc_idx++;
     arch_dma_sync_for_device(&avail->idx, sizeof(uint16_t));
-    arch_dma_sync_for_device(&inst->blk.used->idx, sizeof(uint16_t));
-    arch_dma_sync_for_device(&inst->status[slot], 1);
+    wmb();
 
     vt->write32(vt, VIRTIO_MMIO_QUEUE_NOTIFY, 0);
     mb();
@@ -411,6 +510,8 @@ static int virtio_blk_wait_req(virtio_blk_inst_t *inst, virtio_blk_req_t *req,
             virtio_blk_complete_used_locked(inst, &wake_q);
         if (req->done) {
             int ret = req->result;
+            if (ret == 0 && !req->write)
+                memcpy(req->buf, req->dma_buf, req->bytes);
             req->in_use = 0;
             if (inst->in_flight > 0)
                 inst->in_flight--;
@@ -422,6 +523,8 @@ static int virtio_blk_wait_req(virtio_blk_inst_t *inst, virtio_blk_req_t *req,
             virtio_blk_complete_used_locked(inst, &wake_q);
             if (req->done) {
                 int ret = req->result;
+                if (ret == 0 && !req->write)
+                    memcpy(req->buf, req->dma_buf, req->bytes);
                 req->in_use = 0;
                 if (inst->in_flight > 0)
                     inst->in_flight--;
@@ -429,13 +532,28 @@ static int virtio_blk_wait_req(virtio_blk_inst_t *inst, virtio_blk_req_t *req,
                 (void)proc_wake_q_flush(&wake_q);
                 return ret;
             }
+            uint32_t dev_status =
+                inst->vt.read32(&inst->vt, VIRTIO_MMIO_STATUS);
+            uint16_t device_used =
+                ((volatile virtq_used_t *)inst->blk.used)->idx;
+            uint16_t driver_avail =
+                ((volatile virtq_avail_t *)inst->blk.avail)->idx;
+            uint16_t last_used = inst->blk.last_used;
+            int write = req->write;
+            size_t bytes = req->bytes;
+            uint64_t dma_addr = req->dma_addr;
+            uint16_t head = req->head;
             virtio_blk_fail_queue_locked(inst, &wake_q);
             spin_unlock_irqrestore(&inst->lock, flags);
             (void)proc_wake_q_flush(&wake_q);
 
-            uint32_t dev_status = inst->vt.read32(&inst->vt, VIRTIO_MMIO_STATUS);
-            printf("[VIRTIO%d] I/O timeout! lba=%lu dev_status=0x%x\n",
-                   inst->slot, (unsigned long)lba, dev_status);
+            printf("[VIRTIO%d] I/O timeout op=%s lba=%lu bytes=%lu "
+                   "head=%u dma=0x%lx status_before_reset=0x%x "
+                   "avail=%u used=%u last_used=%u\n",
+                   inst->slot, write ? "write" : "read",
+                   (unsigned long)lba, (unsigned long)bytes, head,
+                   (unsigned long)dma_addr, dev_status, driver_avail,
+                   device_used, last_used);
             printf("[VIRTIO%d] wait_req timeout lba=%lu pid=%d\n",
                    inst->slot, (unsigned long)lba, cur ? cur->pid : -1);
             continue;
@@ -503,6 +621,8 @@ static int virtio_blk_wait_req(virtio_blk_inst_t *inst, virtio_blk_req_t *req,
 
 static int virtio_blk_rw(int idx, uint64_t lba, void *buf, size_t sectors, int write) {
     if (idx < 0 || idx >= g_ninst) return -1;
+    if (!buf || sectors == 0 || sectors > VIRTIO_BLK_MAX_TRANSFER_SECTORS)
+        return -EINVAL;
     virtio_blk_inst_t *inst = &g_insts[idx];
     if (!inst->blk.valid) return -1;
 
@@ -564,11 +684,33 @@ static int virtio_blk_rw(int idx, uint64_t lba, void *buf, size_t sectors, int w
 }
 
 int virtio_blk_read(int idx, uint64_t lba, void *buf, size_t sectors) {
-    return virtio_blk_rw(idx, lba, buf, sectors, 0);
+    uint8_t *cursor = (uint8_t *)buf;
+    while (sectors) {
+        size_t chunk = sectors > VIRTIO_BLK_MAX_TRANSFER_SECTORS ?
+            VIRTIO_BLK_MAX_TRANSFER_SECTORS : sectors;
+        int ret = virtio_blk_rw(idx, lba, cursor, chunk, 0);
+        if (ret < 0)
+            return ret;
+        lba += chunk;
+        cursor += chunk * VIRTIO_BLK_SECTOR_SIZE;
+        sectors -= chunk;
+    }
+    return 0;
 }
 
 int virtio_blk_write(int idx, uint64_t lba, const void *buf, size_t sectors) {
-    return virtio_blk_rw(idx, lba, (void *)buf, sectors, 1);
+    const uint8_t *cursor = (const uint8_t *)buf;
+    while (sectors) {
+        size_t chunk = sectors > VIRTIO_BLK_MAX_TRANSFER_SECTORS ?
+            VIRTIO_BLK_MAX_TRANSFER_SECTORS : sectors;
+        int ret = virtio_blk_rw(idx, lba, (void *)cursor, chunk, 1);
+        if (ret < 0)
+            return ret;
+        lba += chunk;
+        cursor += chunk * VIRTIO_BLK_SECTOR_SIZE;
+        sectors -= chunk;
+    }
+    return 0;
 }
 
 uint64_t virtio_blk_capacity(int idx) {

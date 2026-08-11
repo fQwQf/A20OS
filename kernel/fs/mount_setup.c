@@ -12,8 +12,11 @@
  *
  * Probes all virtio-blk / virtio-scsi / AHCI / USB-storage devices and
  * auto-detects filesystems.  Normal and external-root builds retain the legacy
- * layout (FAT32 at /bin, EXT4 at /test).  Final image builds instead use
- * the judge's EXT4 image as / and keep A20OS bootstrap utilities at /a20.
+ * layout (FAT32 at /bin, EXT4 at /test).  Final image builds retain the
+ * bootstrap ramfs as /, mount A20OS utilities at /a20, and mount the judge's
+ * EXT4 image at /mnt.  The final userspace runner enters /mnt with chroot(2),
+ * so a failed or unfamiliar evaluator filesystem never removes init and the
+ * diagnostics needed to explain the failure.
  *
  * Works regardless of device ordering:
  *   benchmark QEMU:  dev0=ext4(sdcard) dev1=fat32(disk.img)
@@ -146,7 +149,7 @@ int try_mount(block_dev_t *dev, const char *mnt, const char *fstype) {
 
 static void mount_external_root_pseudo_filesystems(void) {
 #ifdef CONFIG_RELEASE_EVAL_ROOT
-#define EXTERNAL_ROOT_PATH(path) path
+#define EXTERNAL_ROOT_PATH(path) "/mnt" path
 #else
 #define EXTERNAL_ROOT_PATH(path) "/test" path
 #endif
@@ -159,6 +162,7 @@ static void mount_external_root_pseudo_filesystems(void) {
         { EXTERNAL_ROOT_PATH("/dev/shm"), "none",  "tmpfs" },
         { EXTERNAL_ROOT_PATH("/proc"),    "proc",  "proc" },
         { EXTERNAL_ROOT_PATH("/sys"),     "sysfs", "sysfs" },
+        { EXTERNAL_ROOT_PATH("/run"),     "none",  "tmpfs" },
     };
 
     /*
@@ -169,6 +173,8 @@ static void mount_external_root_pseudo_filesystems(void) {
     vfs_mkdir(EXTERNAL_ROOT_PATH("/dev/shm"), 01777);
     vfs_mkdir(EXTERNAL_ROOT_PATH("/proc"), 0755);
     vfs_mkdir(EXTERNAL_ROOT_PATH("/sys"), 0755);
+    vfs_mkdir(EXTERNAL_ROOT_PATH("/run"), 0755);
+    vfs_mkdir(EXTERNAL_ROOT_PATH("/tmp"), 01777);
 
     for (size_t i = 0; i < sizeof(mounts) / sizeof(mounts[0]); i++) {
         int r = vfs_mount(mounts[i].dev, mounts[i].path,
@@ -183,7 +189,7 @@ static void mount_external_root_pseudo_filesystems(void) {
 void mount_block_devices(void) {
 #ifdef CONFIG_RELEASE_EVAL_ROOT
     const char *utilities_path = "/a20";
-    const char *official_path = "/";
+    const char *official_path = "/mnt";
 #else
     const char *utilities_path = "/bin";
     const char *official_path = "/test";
