@@ -1,6 +1,6 @@
 # STM32F103 移植与运行手册
 
-> **源码说明、硬件快照与计划混合页**：构建变量、目录和已接入的驱动 API 已按审计基线 `e33c3219` 核对；Xuanwu 外设、电气故障和板上行为来自较早硬件调试记录，不是该基线的重新验收结果；“下一步”明确是计划能力。`make check-stm32f103` 只执行架构边界静态检查并构建 Xuanwu 固件，不运行 QEMU 或物理板测试。自动 QEMU 和 OpenOCD launcher 当前都引用旧产物路径，不可作为运行或烧录入口。
+> **源码说明、硬件快照与计划混合页**：构建变量、目录和已接入的驱动 API 已按审计基线 `e33c3219` 核对；Xuanwu 外设、电气故障和板上行为来自较早硬件调试记录，不是该基线的重新验收结果；“下一步”明确是计划能力。`make check-stm32f103` 只执行架构边界静态检查并构建 Xuanwu 固件，不运行 QEMU 或物理板测试。QEMU 和 OpenOCD launcher 已使用当前产物路径，但仍须在具备对应软件与硬件的环境中分别验证。
 
 > 不要这样做：不要把板级常量或引脚定义藏进可复用的 `kernel/drivers/stm32f1/` 驱动里。可复用驱动应通过 board config 或 platform data 获取资源；引脚和时钟这些事实属于 `kernel/platform/stm32f103/`。
 
@@ -48,11 +48,13 @@ make check-stm32f103
 .kernel-build/armv7m-stm32f103-both-bringup-nommu-stm32f103-f512k-r64k/kernel.bin
 ```
 
-审计基线中的 `STM32_XUANWU_ELF` 和 `run-stm32f103-qemu` 启动 recipe 仍引用加入 `BOARD` 之前的旧目录名，而通用 `BUILD_DIR` 已生成上面的新路径。因而 `stm32f103-xuanwu`/`check-stm32f103` 的构建产物路径以上述 `BUILD_DIR` 为准；`flash-stm32f103-xuanwu` 和 `run-stm32f103-qemu` 存在已知路径不一致，修复 Makefile 前不能把目标存在写成烧录或 QEMU 已通过。
+`STM32_XUANWU_ELF`、`flash-stm32f103-xuanwu` 和 `run-stm32f103-qemu`
+均使用包含 `BOARD` 的当前 `BUILD_DIR` 命名。目标存在和固件编译通过不等于 QEMU
+或实板已经验证；运行结论仍须来自具备对应环境的一次实际执行。
 
-`flash-stm32f103-xuanwu` recipe 的目标流程使用 `interface/cmsis-dap.cfg`、SWD 1 MHz，并允许通过 `STM32_OPENOCD_ADAPTER_KHZ` 和 `STM32_CMSIS_DAP_SERIAL` 选择速率和 probe。但 recipe 当前读取旧路径中的 ELF，因此不能直接使用。
+`flash-stm32f103-xuanwu` recipe 的目标流程使用 `interface/cmsis-dap.cfg`、SWD 1 MHz，并允许通过 `STM32_OPENOCD_ADAPTER_KHZ` 和 `STM32_CMSIS_DAP_SERIAL` 选择速率和 probe。recipe 会读取上述 Xuanwu `BUILD_DIR` 中的 ELF。
 
-该 recipe 原本针对 PZ CMSIS-DAP firmware 无法可靠完成通用 `reset halt` 的情况：通过 Cortex-M Debug Halting Control and Status Register 停住，写入并校验 flash，再从 flash vector table 恢复 MSP 和 PC。修复路径前，如需手工烧录，必须显式选用上面实际 `BUILD_DIR` 中的 ELF，并独立验证工具和硬件；不能把当前 Make 目标记为通过。
+该 recipe 原本针对 PZ CMSIS-DAP firmware 无法可靠完成通用 `reset halt` 的情况：通过 Cortex-M Debug Halting Control and Status Register 停住，写入并校验 flash，再从 flash vector table 恢复 MSP 和 PC。没有匹配的 probe 或实板时不能把固件编译结果记成烧录通过。
 
 ## Xuanwu 时钟与 UART
 
@@ -168,7 +170,7 @@ STM32CubeProgrammer 也可以把二进制写到地址 `0x08000000`，或直接�
 
 ## QEMU launcher 限制
 
-QEMU 的 `stm32vldiscovery` 模型有 128 KiB flash 和 8 KiB SRAM，所以 `run-stm32f103-qemu` 配置的实际构建目录是 `.kernel-build/armv7m-stm32f103-both-bringup-nommu-stm32f103-f128k-r8k-qemu/`。launcher recipe 仍引用旧目录；当前目标会先构建，但不能正确启动该产物，也不是有效 smoke 结果。
+QEMU 的 `stm32vldiscovery` 模型有 128 KiB flash 和 8 KiB SRAM，所以 `run-stm32f103-qemu` 配置的实际构建目录是 `.kernel-build/armv7m-stm32f103-both-bringup-nommu-stm32f103-f128k-r8k-qemu/`。launcher 从该目录加载 `kernel.bin`；有效 smoke 结论仍要求实际 QEMU 运行到预期串口标记。
 
 ## 硬件 smoke test
 

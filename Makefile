@@ -1,8 +1,11 @@
-# A20OS Makefile
+# A20OS top-level build
 
-# Parallel build
+# ================================================================
+# Host tools and platform defaults
+# ================================================================
+
 NPROC ?= $(or $(shell getconf _NPROCESSORS_ONLN 2>/dev/null),$(shell sysctl -n hw.logicalcpu 2>/dev/null),4)
-PYTHON ?= python3
+PYTHON ?= conda run -n a20os --no-capture-output python
 TIMEOUT ?= $(PYTHON) tools/run_with_timeout.py
 HOST_OS ?= $(shell uname -s 2>/dev/null)
 
@@ -16,15 +19,33 @@ DEFAULT_NATIVE_LIBC_TARGETS := native-libc-rv
 DEFAULT_EVAL_TARGETS := eval-rv
 else
 DEFAULT_benchmark_TARGETS := benchmark-rv benchmark-la
-DEFAULT_KERNEL_CHECK_TARGETS := check-riscv64-bringup check-loongarch64-bringup check-aarch64-bringup check-x86_64-bringup check-arm32-bringup check-riscv32-bringup check-ppc64le-bringup
-DEFAULT_USER_CHECK_TARGETS := check-riscv64-user check-loongarch64-user check-aarch64-user check-x86_64-user check-arm32-user check-riscv32-user check-ppc64le-user
-DEFAULT_NATIVE_TEST_TARGETS := native-test-rv native-test-la native-test-aarch64 native-test-x86_64 native-test-arm32 native-test-rv32 native-test-ppc64le
-DEFAULT_NATIVE_HANDLE_TARGETS := native-handle-test-rv native-handle-test-la native-handle-test-aarch64 native-handle-test-x86_64 native-handle-test-arm32 native-handle-test-rv32 native-handle-test-ppc64le
-DEFAULT_NATIVE_LIBC_TARGETS := native-libc-rv native-libc-la native-libc-aarch64 native-libc-x86_64 native-libc-arm32 native-libc-rv32 native-libc-ppc64le
+DEFAULT_KERNEL_CHECK_TARGETS := check-riscv64-bringup check-loongarch64-bringup \
+                                check-aarch64-bringup check-x86_64-bringup \
+                                check-arm32-bringup check-riscv32-bringup \
+                                check-ppc64le-bringup
+DEFAULT_USER_CHECK_TARGETS := check-riscv64-user check-loongarch64-user \
+                              check-aarch64-user check-x86_64-user \
+                              check-arm32-user check-riscv32-user \
+                              check-ppc64le-user
+DEFAULT_NATIVE_TEST_TARGETS := native-test-rv native-test-la \
+                               native-test-aarch64 native-test-x86_64 \
+                               native-test-arm32 native-test-rv32 \
+                               native-test-ppc64le
+DEFAULT_NATIVE_HANDLE_TARGETS := native-handle-test-rv native-handle-test-la \
+                                 native-handle-test-aarch64 native-handle-test-x86_64 \
+                                 native-handle-test-arm32 native-handle-test-rv32 \
+                                 native-handle-test-ppc64le
+DEFAULT_NATIVE_LIBC_TARGETS := native-libc-rv native-libc-la \
+                               native-libc-aarch64 native-libc-x86_64 \
+                               native-libc-arm32 native-libc-rv32 \
+                               native-libc-ppc64le
 DEFAULT_EVAL_TARGETS := eval-rv eval-la
 endif
 
-# Architecture selection
+# ================================================================
+# Build configuration
+# ================================================================
+
 ARCH ?= riscv64
 ABI ?= both
 MODE ?= release
@@ -38,6 +59,8 @@ ALLOW_UNVERIFIED_SMP ?= 0
 SMP_VERIFIED_QEMU_ARCHES := riscv64 aarch64 loongarch64 x86_64
 PROFILE ?= full
 CONFIG_SWAP ?= n
+
+# STM32-specific configuration. These values are inert for other boards.
 STM32_OPENOCD_INTERFACE ?= interface/cmsis-dap.cfg
 STM32_OPENOCD_TRANSPORT ?= swd
 STM32_OPENOCD_ADAPTER_KHZ ?= 1000
@@ -47,8 +70,10 @@ STM32_BT_PIN ?= 2233
 STM32_BT_UUID ?= 1101
 STM32_BT_BAUD ?= 38400
 STM32_QEMU ?= 0
-STM32_XUANWU_BUILD_DIR = .kernel-build/armv7m-both-bringup-nommu-stm32f103-f512k-r64k
+STM32_XUANWU_BUILD_DIR = .kernel-build/armv7m-stm32f103-both-bringup-nommu-stm32f103-f512k-r64k
 STM32_XUANWU_ELF = $(STM32_XUANWU_BUILD_DIR)/kernel.elf
+STM32_QEMU_BUILD_DIR = .kernel-build/armv7m-stm32f103-both-bringup-nommu-stm32f103-f128k-r8k-qemu
+STM32_QEMU_BIN = $(STM32_QEMU_BUILD_DIR)/kernel.bin
 STM32_WIFI_SSID ?=
 STM32_WIFI_PASSWORD ?=
 ifeq ($(ARCH),armv7m)
@@ -63,7 +88,9 @@ else
 BOARD ?= qemu-virt-$(ARCH)
 endif
 
+# Driver deployment depends on the selected architecture and board.
 include tools/driver-deployment.mk
+
 NOMMU ?= 0
 ifeq ($(NOMMU),1)
 CONFIG_SWAP := n
@@ -96,9 +123,13 @@ endif
 .DEFAULT_GOAL := all
 .DELETE_ON_ERROR:
 
-# Directories
+# ================================================================
+# Build paths and userspace artifacts
+# ================================================================
+
 KERNEL_DIR = kernel
 INCLUDE_DIR = $(KERNEL_DIR)/include
+
 # Preserve established generic and STM32 output paths used by smoke, benchmark,
 # flash, and QEMU runners. Explicit embedded builds on non-MCU architectures
 # get their own suffix so they never share objects with generic.
@@ -170,7 +201,7 @@ NATIVE_HANDLE_BIN      := $(NATIVE_BUILD_DIR)/native-handle-$(NATIVE_TAG)
 NATIVE_LIBC_BIN        := $(NATIVE_BUILD_DIR)/native-libc-$(NATIVE_TAG)
 NATIVE_FUTEX_BIN       := $(NATIVE_BUILD_DIR)/native-futex-$(NATIVE_TAG)
 NATIVE_DEBUG_BIN       := $(NATIVE_BUILD_DIR)/native-debug-$(NATIVE_TAG)
-NATIVE_EXT_BIN          := $(NATIVE_BUILD_DIR)/native-ext-$(NATIVE_TAG)
+NATIVE_EXT_BIN         := $(NATIVE_BUILD_DIR)/native-ext-$(NATIVE_TAG)
 NATIVE_MM_BIN          := $(NATIVE_BUILD_DIR)/native-mm-$(NATIVE_TAG)
 NATIVE_SIGNAL_BIN      := $(NATIVE_BUILD_DIR)/native-signal-$(NATIVE_TAG)
 NATIVE_IPC_BIN         := $(NATIVE_BUILD_DIR)/native-ipc-$(NATIVE_TAG)
@@ -187,10 +218,26 @@ NATIVE_SVCMGR_BIN      := $(NATIVE_BUILD_DIR)/svcmgr-$(NATIVE_TAG)
 NATIVE_ISOLATION_BIN   := $(NATIVE_BUILD_DIR)/native-isolation-$(NATIVE_TAG)
 NATIVE_UBDD_BIN        := $(NATIVE_BUILD_DIR)/ubd-$(NATIVE_TAG).a20drv
 NATIVE_UINPUTD_BIN     := $(NATIVE_BUILD_DIR)/uinputd-$(NATIVE_TAG).a20drv
-NATIVE_PERSONALITY_BIN  := $(NATIVE_BUILD_DIR)/native-personality-$(NATIVE_TAG)
-NATIVE_LINUX_BIN        := $(NATIVE_BUILD_DIR)/native-linux-$(NATIVE_TAG)
-NATIVE_OUTPUTS         := $(NATIVE_HELLO_BIN) $(NATIVE_HANDLE_BIN) $(NATIVE_LIBC_BIN) $(NATIVE_FUTEX_BIN) $(NATIVE_MM_BIN) $(NATIVE_SIGNAL_BIN) $(NATIVE_IPC_BIN) $(NATIVE_CONTRACT_BIN) $(NATIVE_SVCMAN_BIN) $(NATIVE_ECHOD_BIN) $(NATIVE_SHMRING_BIN) $(NATIVE_SHMRINGD_BIN) $(NATIVE_CHAND_BIN) $(NATIVE_RTCD_BIN) $(NATIVE_RTCDD_BIN) $(NATIVE_REGISTRY_BIN) $(NATIVE_SVCMGR_BIN) $(NATIVE_ISOLATION_BIN) $(NATIVE_UBDD_BIN) $(NATIVE_UINPUTD_BIN) $(NATIVE_PERSONALITY_BIN) $(NATIVE_LINUX_BIN) $(NATIVE_DEBUG_BIN) $(NATIVE_EXT_BIN)
+NATIVE_PERSONALITY_BIN := $(NATIVE_BUILD_DIR)/native-personality-$(NATIVE_TAG)
+NATIVE_LINUX_BIN       := $(NATIVE_BUILD_DIR)/native-linux-$(NATIVE_TAG)
+NATIVE_OUTPUTS         := $(NATIVE_HELLO_BIN) $(NATIVE_HANDLE_BIN) \
+                          $(NATIVE_LIBC_BIN) $(NATIVE_FUTEX_BIN) \
+                          $(NATIVE_MM_BIN) $(NATIVE_SIGNAL_BIN) \
+                          $(NATIVE_IPC_BIN) $(NATIVE_CONTRACT_BIN) \
+                          $(NATIVE_SVCMAN_BIN) $(NATIVE_ECHOD_BIN) \
+                          $(NATIVE_SHMRING_BIN) $(NATIVE_SHMRINGD_BIN) \
+                          $(NATIVE_CHAND_BIN) $(NATIVE_RTCD_BIN) \
+                          $(NATIVE_RTCDD_BIN) $(NATIVE_REGISTRY_BIN) \
+                          $(NATIVE_SVCMGR_BIN) $(NATIVE_ISOLATION_BIN) \
+                          $(NATIVE_UBDD_BIN) $(NATIVE_UINPUTD_BIN) \
+                          $(NATIVE_PERSONALITY_BIN) $(NATIVE_LINUX_BIN) \
+                          $(NATIVE_DEBUG_BIN) $(NATIVE_EXT_BIN)
 NATIVE_BUILD_STAMP     := $(NATIVE_BUILD_DIR)/.native-build-id
+
+# ================================================================
+# Runtime and smoke-test configuration
+# ================================================================
+
 comma := ,
 NET_HOSTFWD ?= hostfwd=tcp::5555-:5555,hostfwd=udp::5555-:5555
 NETDEV_USER = -netdev user,id=net$(if $(strip $(NET_HOSTFWD)),$(comma)$(NET_HOSTFWD),)
@@ -213,6 +260,7 @@ REQUIRE_SMP_RUNQUEUE ?= 0
 REQUIRE_LOCK_SPLIT ?= 0
 QEMU_MEMORY ?= 1G
 
+# Files installed into generated filesystem images.
 PROTOCOLS_LINES = \
     'hopopt 0 HOPOPT' \
     'icmp 1 ICMP' \
@@ -227,6 +275,10 @@ PROTOCOLS_LINES = \
     'ipv6-icmp 58 IPv6-ICMP' \
     'ipv6-nonxt 59 IPv6-NoNxt' \
     'ipv6-opts 60 IPv6-Opts'
+
+# ================================================================
+# Architecture toolchains and properties
+# ================================================================
 
 RISCV_ELF_PREFIX ?= $(if $(shell command -v riscv64-unknown-elf-gcc 2>/dev/null),riscv64-unknown-elf-,$(if $(shell command -v riscv64-elf-gcc 2>/dev/null),riscv64-elf-,riscv64-unknown-elf-))
 RISCV_ELF_RV32_MULTIDIR := $(shell if command -v $(RISCV_ELF_PREFIX)gcc >/dev/null 2>&1; then \
@@ -262,7 +314,6 @@ PHYS_BASE_x86_64      := 0x00200000
 PHYS_BASE_loongarch64 := 0x9000000000000000
 
 ifeq ($(NOMMU),1)
-CFLAGS += -DCONFIG_NOMMU
 LDFLAGS_NOMMU := -Wl,--defsym=VIRT_BASE=$(PHYS_BASE_$(ARCH))
 ARCH_CFLAGS_aarch64 += -mstrict-align
 endif
@@ -284,6 +335,10 @@ ARCH_LIBS_arm32       := $(shell $(CROSS_PREFIX_arm32)gcc $(ARCH_CFLAGS_arm32) -
 ARCH_LIBS_armv7m      :=
 ARCH_LIBS_riscv32     := $(shell $(CROSS_PREFIX_riscv32)gcc $(ARCH_CFLAGS_riscv32) -print-libgcc-file-name 2>/dev/null)
 ARCH_LIBS_ppc64le     :=
+
+# ================================================================
+# QEMU configuration
+# ================================================================
 
 QEMU_riscv64     := qemu-system-riscv64
 QEMU_loongarch64 := qemu-system-loongarch64
@@ -360,7 +415,10 @@ QEMU_GUI_DEVICES_DEFAULT := -device virtio-gpu-device \
                             -device virtio-keyboard-device \
                             -device virtio-mouse-device
 
-# Compiler and tools
+# ================================================================
+# Selected build tools and compiler flags
+# ================================================================
+
 CCACHE ?= $(shell command -v ccache 2>/dev/null)
 CCACHE_PREFIX := $(if $(CCACHE),$(CCACHE) ,)
 CROSS_PREFIX := $(CROSS_PREFIX_$(ARCH))
@@ -442,8 +500,8 @@ CFLAGS = -Wall -Wextra $(OPT) -ffreestanding -nostdlib \
          -D$(shell echo $(ARCH) | tr a-z A-Z) \
          -DCONFIG_$(shell echo $(ARCH) | tr a-z A-Z) \
          -DCONFIG_ABI_$(shell echo $(ABI) | tr a-z A-Z) \
-          -DCONFIG_NR_CPUS=$(NR_CPUS) \
-          -DCONFIG_BOARD_$(shell echo $(BOARD) | tr a-z A-Z | tr - _)
+         -DCONFIG_NR_CPUS=$(NR_CPUS) \
+         -DCONFIG_BOARD_$(shell echo $(BOARD) | tr a-z A-Z | tr - _)
 ifeq ($(filter 1,$(CONFIG_UBSAN)),1)
 # Undefined Behavior Sanitizer: kernel/core/ubsan.c provides the handlers.
 # alignment/bounds-strict are excluded to match the packed-struct and
@@ -590,7 +648,10 @@ LDFLAGS += -Wl,--defsym=FLASH_LENGTH=$(STM32_FLASH_KB)K \
            -Wl,--defsym=RAM_LENGTH=$(STM32_RAM_KB)K
 endif
 
-# Source files
+# ================================================================
+# Kernel sources and build graph
+# ================================================================
+
 # Driver ownership is kept outside this top-level file so deployment policy is
 # explicit and generic built-in exceptions remain reviewable.
 include tools/driver-sources.mk
@@ -604,7 +665,7 @@ ABI_SRCS = $(wildcard $(KERNEL_DIR)/abi/$(ABI)/*.c)
 endif
 
 ifeq ($(PROFILE),mcu)
-CFLAGS += -DCONFIG_MCU -DCONFIG_KLOG_BUF_SIZE=256
+CFLAGS += -Os -DCONFIG_MCU -DCONFIG_KLOG_BUF_SIZE=256
 KERNEL_SRC = $(KERNEL_DIR)/mcu/main.c \
              $(KERNEL_DIR)/mcu/uart.c \
              $(KERNEL_DIR)/mcu/heap.c \
@@ -616,6 +677,7 @@ KERNEL_SRC = $(KERNEL_DIR)/mcu/main.c \
              $(KERNEL_DIR)/core/klog.c \
              $(KERNEL_DIR)/core/timekeeping.c \
              $(KERNEL_DIR)/proc/sched.c \
+             $(KERNEL_DIR)/proc/park.c \
              $(KERNEL_DIR)/proc/timer_heap.c \
              $(KERNEL_DIR)/proc/current.c \
              $(KERNEL_DIR)/proc/pid.c \
@@ -624,12 +686,10 @@ KERNEL_SRC = $(KERNEL_DIR)/mcu/main.c \
              $(KERNEL_DIR)/proc/exit.c \
              $(KERNEL_DIR)/proc/signal.c \
              $(KERNEL_DIR)/proc/cg_cpu.c \
-              $(KERNEL_DIR)/mm/nommu.c \
-              $(KERNEL_DIR)/fs/fdtable.c \
-	             $(KERNEL_DIR)/fs/diskfs/fat32lite.c \
-	             $(KERNEL_DIR)/fs/vfs.c \
-	             $(wildcard $(BOARD_DRIVER_DIR)/*.c) \
-	             $(wildcard $(KERNEL_DIR)/platform/$(BOARD)/*.c) \
+             $(KERNEL_DIR)/mm/nommu.c \
+             $(KERNEL_DIR)/fs/diskfs/fat32lite.c \
+             $(wildcard $(BOARD_DRIVER_DIR)/*.c) \
+             $(wildcard $(KERNEL_DIR)/platform/$(BOARD)/*.c) \
              $(shell find $(KERNEL_DIR)/arch/$(ARCH) -type f -name '*.c' | sort)
 else
 KERNEL_SRC = $(wildcard $(KERNEL_DIR)/*.c) \
@@ -643,9 +703,9 @@ KERNEL_SRC = $(wildcard $(KERNEL_DIR)/*.c) \
              $(wildcard $(KERNEL_DIR)/bpf/*.c) \
              $(wildcard $(KERNEL_DIR)/ext/*.c) \
              $(wildcard $(KERNEL_DIR)/drvmod/*.c) \
-              $(DRIVER_KERNEL_SRCS) \
-	             $(wildcard $(BOARD_DRIVER_DIR)/*.c) \
-	             $(wildcard $(KERNEL_DIR)/platform/$(BOARD)/*.c) \
+             $(DRIVER_KERNEL_SRCS) \
+             $(wildcard $(BOARD_DRIVER_DIR)/*.c) \
+             $(wildcard $(KERNEL_DIR)/platform/$(BOARD)/*.c) \
              $(ABI_SRCS) \
              $(wildcard $(KERNEL_DIR)/syscall/*.c) \
              $(wildcard $(KERNEL_DIR)/shell/*.c) \
@@ -659,7 +719,7 @@ endif
 # Built-in rootfs overlay.
 #
 # The generated source/header are checked in intentionally so benchmark builds do
-# not depend on python3 being present on the judge. After editing
+# not depend on Python being present on the judge. After editing
 # user/rootfs_overlay/, regenerate them manually with `make regen-rootfs-overlay`.
 ROOTFS_OVERLAY_DIR   = user/rootfs_overlay
 ROOTFS_OVERLAY_SRC   = kernel/fs/rootfs_overlay.c
@@ -737,7 +797,9 @@ include tools/targets-eval.mk
 # ================================================================
 # Documentation
 # ================================================================
-# Build standard-reference.pdf from every tracked Markdown file under docs/. The generator validates all required tools and fonts and prints the platform-specific install commands if any is missing. See tools/gen_docs_pdf.sh for details.
+# Build standard-reference.pdf from every tracked Markdown file under docs/.
+# The generator validates required tools and fonts and reports platform-specific
+# installation commands when a dependency is missing.
 .PHONY: docs
 docs:
 	@bash tools/gen_docs_pdf.sh

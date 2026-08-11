@@ -15,6 +15,8 @@
 	step7-rv-release-8c step7-la-release-8c \
 	step8-rv-debug-1c step8-la-debug-1c \
 	step8-rv-release-8c step8-la-release-8c _step35_smoke
+.PHONY: _reset_obj _benchmark_build _benchmark_disk \
+	_final_submit_build _final_submit_disk smoke-usb-x86_64
 
 step35-rv-debug-1c:
 	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 NR_CPUS=1 \
@@ -389,7 +391,7 @@ smoke-audio-userspace:
 	   grep -q 'System is going down for power-off NOW' "$$log" && \
 	   ! grep -q 'audioplay: playback failed' "$$log" && \
 	   ! grep -qi 'panic' "$$log" && \
-	   python3 tools/check_wav_pcm.py --max-delta 1000 \
+	   $(PYTHON) tools/check_wav_pcm.py --max-delta 1000 \
 	       --min-frames 200000 "$$wav"; then \
 		echo "smoke-audio-userspace: PASS; log=$$log wav=$$wav"; \
 	else \

@@ -3,6 +3,13 @@
 # and then consumes kernel-rv, kernel-la, disk.img, and disk-la.img.  Keep the
 # external-root image builder available under an explicit target.
 # ----------------------------------------------------------------
+.PHONY: check-smp-platform-boundary check-io-progress-model
+
+# Several gates launch recursive builds that share the default RISC-V image.
+# Serialize the aggregate so `make -j check-doc-test-gates` cannot rebuild the
+# same FAT image concurrently from independent prerequisite branches.
+.NOTPARALLEL: check-doc-test-gates check-final-definition
+
 all:
 	$(MAKE) final-submit-rv
 	$(MAKE) final-submit-la

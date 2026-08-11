@@ -46,7 +46,7 @@ $(FAT32_IMG): $(USER_BUILD_STAMP) $(NATIVE_BUILD_STAMP) \
 $(WAYLAND_PLAYER_STAMP): user/wayland/build.sh user/wayland/player.c \
 		user/wayland/desktop-shell.c user/wayland/input-method.c \
 		user/wayland/stub/udev.c user/wayland/stub/mtdev.c \
-		user/cmds/wayland-session.c \
+		user/cmds/core/wayland-session.c \
 		$(WAYLAND_WESTON_PATCH) \
 		user/external/ffmpeg/configure kernel/include/uapi/a20/audio.h
 	@if [ ! -f $(WAYLAND_FFMPEG_STAMP) ] || \
@@ -98,6 +98,8 @@ $(GUI_FAT32_IMG): $(FAT32_IMG) $(GUI_WAYLAND_DEPS) $(GUI_MEDIA_STAMP)
 
 $(FS_TEST_IMG): $(FAT32_IMG)
 	cp $(FAT32_IMG) $(FS_TEST_IMG)
+
+.PHONY: ext4_img_only ext4_img
 
 ext4_img_only: $(EXT4_IMG)
 
@@ -176,7 +178,7 @@ $(VBOX_AARCH64_TEXT_IMG): $(VBOX_AARCH64_EFI) $(FAT32_IMG) tools/mk_uefi_fat_ima
 # extracts the .text symbols and emits a compact table object; pass 2
 # relinks all objects plus the table.  The table lands in .rodata after
 # .text, so .text symbol addresses are identical in both passes and the
-# generated table stays exact.  If python3 is unavailable the table is
+# generated table stays exact.  If the configured Python is unavailable the table is
 # skipped and the weak fallbacks in kernel/core/kallsyms.c keep the kernel
 # linkable.
 KALLSYMS_SRC      := $(BUILD_DIR)/kallsyms/kallsyms.c
@@ -192,7 +194,7 @@ $(KALLSYMS_SRC): $(KERNEL_NOSYMS_ELF) tools/gen_kallsyms.py
 	@if $(PYTHON) tools/gen_kallsyms.py $< $@; then \
 	    echo "  KALLSYMS $@"; \
 	else \
-	    echo "  KALLSYMS skipped (python3 unavailable)"; \
+	    echo "  KALLSYMS skipped (configured Python unavailable)"; \
 	    echo '/* empty */' > $@; \
 	fi
 
@@ -230,4 +232,3 @@ clean:
 
 kernel-only: $(KERNEL_BIN)
 	@echo "Kernel-only build complete: $(KERNEL_BIN)"
-
