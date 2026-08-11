@@ -159,6 +159,8 @@ $(USER_BUILD_DIR)/usb-storage.a20drv: $(DRVMOD_DIR)/usb_storage.c kernel/drivers
 	@mkdir -p $(dir $@)
 	$(DRVMOD_GCC) $(DRVMOD_CFLAGS) -c $< -o $@
 
+.PHONY: virtio-blk-module drvmod-examples
+
 virtio-blk-module: $(USER_BUILD_DIR)/virtio-blk.a20drv
 
 drvmod-examples: $(addprefix $(USER_BUILD_DIR)/,$(DRVMOD_MODULES))

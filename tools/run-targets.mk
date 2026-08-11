@@ -1,5 +1,11 @@
 # Development launch, VirtualBox image, and GDB entry points.
 
+.PHONY: run _run_impl _run_gui_impl _debug_impl \
+	vbox-gui-image-aarch64 _vbox_gui_image_aarch64_impl \
+	run-nommu-riscv64 run-nommu-loongarch64 \
+	run-nommu-aarch64 run-nommu-arm64 run-nommu-x86_64 \
+	run-nommu-arm32 run-nommu-riscv32
+
 run:
 	$(MAKE) ARCH=$(ARCH) BRINGUP=$(BRINGUP) _run_impl
 run-riscv64:
@@ -46,11 +52,11 @@ run-ppc64le:
 run-nommu-riscv64:
 	$(MAKE) ARCH=riscv64 BRINGUP=$(BRINGUP) NOMMU=1 _run_impl
 run-nommu-loongarch64:
-	$(MAKE) ARCH=loongarch64 BRINGUP=$(BRINGUP) NOMMU=1 _run_impl
+	@echo "run-nommu-loongarch64: skipped (LoongArch64 NOMMU is not supported)"
 run-nommu-aarch64 run-nommu-arm64:
 	$(MAKE) ARCH=aarch64 BRINGUP=$(BRINGUP) NOMMU=1 _run_impl
 run-nommu-x86_64:
-	$(MAKE) ARCH=x86_64 BRINGUP=$(BRINGUP) NOMMU=1 _run_impl
+	@echo "run-nommu-x86_64: skipped (x86_64 NOMMU is not supported)"
 run-nommu-arm32:
 	$(MAKE) ARCH=arm32 BRINGUP=$(BRINGUP) NOMMU=1 _run_impl
 run-gui-nommu-arm32 run-nommu-gui-arm32:

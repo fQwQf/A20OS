@@ -8,19 +8,43 @@
  */
 
 #include "core/types.h"
+#include "core/smp.h"
 #include "core/timer.h"
 #include "abi/native/ipc_internal.h"
 #include "cg/cgroup.h"
+#include "drivers/core/udriver.h"
+#include "ext/kep.h"
+#include "fs/fdtable.h"
 #include "fs/file.h"
 #include "fs/locks.h"
 #include "fs/vfs.h"
+#include "ipc/handle_table.h"
 #include "mm/frame.h"
 #include "mm/vm.h"
+#include "proc/debug.h"
 #include "proc/proc.h"
 #include "sys/futex.h"
 
 /* From kernel/proc/sched.c: event-driven network / block bottom halves. */
 void kernel_progress_run_bottom_halves(void) { }
+
+/* The MCU profile is deliberately single-core. */
+uint32_t smp_online_cpu_mask(void) { return 1U; }
+int smp_cpu_is_online(unsigned cpu) { return cpu == 0; }
+void smp_send_reschedule(unsigned cpu) { (void)cpu; }
+
+/* MCU tasks are kernel threads and never own a user address space. */
+void mm_context_enter(mm_struct_t *mm, unsigned cpu) {
+    (void)mm;
+    (void)cpu;
+}
+void mm_context_leave(mm_struct_t *mm, unsigned cpu) {
+    (void)mm;
+    (void)cpu;
+}
+
+/* Keep the shared scheduler's normal 10 ms EEVDF base slice. */
+int g_sched_base_slice_ms = 10;
 
 /* From kernel/core/timekeeping.c: architecture-independent timer tick. */
 void a20_timer_tick(void) { }
@@ -51,6 +75,25 @@ int futex_wake_user(int *uaddr, int nr) {
 /* From kernel/proc/exit.c: MM teardown for exec/exit. */
 void mm_destroy(mm_struct_t *mm) { (void)mm; }
 
+/* Rich-process subsystems are not present in the MCU profile. */
+void udriver_task_cleanup(int pid) { (void)pid; }
+void udisk_task_exit(int pid) { (void)pid; }
+void a20_registry_task_exit(int pid) { (void)pid; }
+void kep_release_process(int pid) { (void)pid; }
+void a20_ht_put_ref(struct a20_ht_internal *ht) { (void)ht; }
+void proc_debug_tracer_exiting(task_t *tracer) { (void)tracer; }
+int proc_debug_signal_stop(int sig) { (void)sig; return 0; }
+int proc_debug_event_stop(int sig, int event, uint64_t msg) {
+    (void)sig;
+    (void)event;
+    (void)msg;
+    return 0;
+}
+
+/* MCU kernel threads never initialize a descriptor table. */
+void fdtable_close_all(task_t *task) { (void)task; }
+void vfs_release_process_locks(int pid) { (void)pid; }
+
 /* From kernel/proc/exit.c: A20 event notifications. */
 void a20_event_notify(void *target_object, uint16_t target_type,
                       uint32_t event_type, uint64_t data0, uint64_t data1) {
@@ -59,6 +102,10 @@ void a20_event_notify(void *target_object, uint16_t target_type,
     (void)event_type;
     (void)data0;
     (void)data1;
+}
+void a20_eventq_on_object_destroy(void *object, uint16_t object_type) {
+    (void)object;
+    (void)object_type;
 }
 
 /* From kernel/fs/locks.c: advisory lock release. */
@@ -108,4 +155,15 @@ void __atomic_store_8(volatile void *ptr, uint64_t value, int memorder) {
     uint32_t flags = arch_irq_save();
     *p = value;
     arch_irq_restore(flags);
+}
+
+uint64_t __atomic_exchange_8(volatile void *ptr, uint64_t value,
+                             int memorder) {
+    (void)memorder;
+    volatile uint64_t *p = (volatile uint64_t *)ptr;
+    uint32_t flags = arch_irq_save();
+    uint64_t old = *p;
+    *p = value;
+    arch_irq_restore(flags);
+    return old;
 }
