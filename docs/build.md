@@ -33,13 +33,16 @@ docker run -it --rm -v "$(pwd):/workspace" -w /workspace a20os-buildenv bash
 | `make kernel-only` | 只生成内核 | 快速编译验证 |
 | `make stm32f103-bringup` | 生成 STM32F103 64 KiB Flash / 20 KiB SRAM 固件 | MCU 起步 |
 | `make stm32f103-xuanwu` | 生成玄武板 512 KiB Flash / 64 KiB SRAM 固件 | 普中玄武板 |
-| `make run-stm32f103-qemu` | 已知不可用：launcher 引用旧产物目录 | 修复 recipe 前不能作为 QEMU 验证 |
-| `make flash-stm32f103-xuanwu` | 已知不可用：launcher 引用旧产物目录 | 修复 recipe 前不能作为烧录验证 |
+| `make run-stm32f103-qemu` | 构建 128 KiB Flash / 8 KiB SRAM 固件并启动 `stm32vldiscovery` | 需要 `qemu-system-arm` |
+| `make flash-stm32f103-xuanwu` | 构建玄武板固件并通过 OpenOCD 烧录 | 需要 OpenOCD、CMSIS-DAP 和实板 |
 | `make -C user ARCH=riscv64` | 单独编译 RISC-V 用户态 | 只改用户程序 |
 | `make check-user-build` | 编译主机默认集合的 hosted 用户态（Linux 为七架构，macOS 为 RISC-V64） | 常规提交前检查 |
 | `make check-build-matrix-all` | 显式编译七个 hosted 架构的内核 bring-up 和用户态 | 完整跨架构构建检查 |
 
-STM32 的两个固件构建目标可用，但当前自动运行和烧录 launcher 与实际 `BUILD_DIR` 不一致。安装 QEMU 或 OpenOCD 不会修复该路径问题；准确产物路径见 [STM32F103 移植说明](platforms/stm32f103-port.md)。
+STM32 固件、QEMU 和烧录目标使用同一套 `BUILD_DIR` 命名。QEMU 运行和实板烧录
+仍分别依赖宿主机的 `qemu-system-arm`、OpenOCD 与实际调试硬件；缺少这些环境时可
+只运行 `make check-stm32f103` 验证编译。准确产物路径见
+[STM32F103 移植说明](platforms/stm32f103-port.md)。
 
 ## 发布与调试模式
 
