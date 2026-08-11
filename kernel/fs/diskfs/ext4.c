@@ -327,16 +327,15 @@ int ext4_bitmap_alloc(ext4_sb_info_t *sb, uint64_t bm_blk, uint32_t max,
         return -1;
     start %= max;
 
-    uint8_t *buf = (uint8_t *)kmalloc(sb->block_size);
-    if (!buf) return -1;
-    if (bcache_read_bytes(sb->bc, bm_blk * sb->block_size, buf, sb->block_size) < 0)
-        { kfree(buf); return -1; }
     uint32_t scanned = 0;
     uint32_t bit = start;
     uint64_t byte_loads = 0;
     while (scanned < max) {
         uint32_t remaining = max - scanned;
-        uint8_t byte = buf[bit / 8];
+        uint64_t byte_off = bm_blk * sb->block_size + bit / 8;
+        uint8_t byte = 0;
+        if (bcache_read_bytes(sb->bc, byte_off, &byte, sizeof(byte)) < 0)
+            return -1;
         byte_loads++;
 
         /* Preserve the exact cyclic first-fit order, but skip an aligned
@@ -351,17 +350,16 @@ int ext4_bitmap_alloc(ext4_sb_info_t *sb, uint64_t bm_blk, uint32_t max,
         }
 
         if (!(byte & (1U << (bit % 8)))) {
-            buf[bit / 8] |= (1U << (bit % 8));
-            if (bcache_write_bytes(sb->bc, bm_blk * sb->block_size,
-                                   buf, sb->block_size) < 0) {
+            byte |= (uint8_t)(1U << (bit % 8));
+            if (bcache_write_bytes(sb->bc, byte_off,
+                                   &byte, sizeof(byte)) < 0) {
                 a20_perf_add(A20_PERF_EXT4_BITMAP_PROBES, scanned + 1);
                 a20_perf_add(A20_PERF_EXT4_BITMAP_BYTE_LOADS, byte_loads);
-                kfree(buf);
                 return -1;
             }
             a20_perf_add(A20_PERF_EXT4_BITMAP_PROBES, scanned + 1);
             a20_perf_add(A20_PERF_EXT4_BITMAP_BYTE_LOADS, byte_loads);
-            kfree(buf); return (int)bit;
+            return (int)bit;
         }
 
         bit++;
@@ -371,25 +369,21 @@ int ext4_bitmap_alloc(ext4_sb_info_t *sb, uint64_t bm_blk, uint32_t max,
     }
     a20_perf_add(A20_PERF_EXT4_BITMAP_PROBES, max);
     a20_perf_add(A20_PERF_EXT4_BITMAP_BYTE_LOADS, byte_loads);
-    kfree(buf); return -1;
+    return -1;
 }
 
 int ext4_bitmap_free(ext4_sb_info_t *sb, uint64_t bm_blk, uint32_t bit) {
     if (!sb || bm_blk >= sb->blocks_count ||
         bit >= sb->block_size * 8)
         return -EINVAL;
-    uint8_t *buf = (uint8_t *)kmalloc(sb->block_size);
-    if (!buf) return -ENOMEM;
-    if (bcache_read_bytes(sb->bc, bm_blk * sb->block_size, buf, sb->block_size) < 0)
-        { kfree(buf); return -EIO; }
-    if (!(buf[bit / 8] & (1U << (bit % 8)))) {
-        kfree(buf);
+    uint64_t byte_off = bm_blk * sb->block_size + bit / 8;
+    uint8_t byte = 0;
+    if (bcache_read_bytes(sb->bc, byte_off, &byte, sizeof(byte)) < 0)
+        return -EIO;
+    if (!(byte & (1U << (bit % 8))))
         return -EINVAL;
-    }
-    buf[bit / 8] &= ~(1U << (bit % 8));
-    int r = bcache_write_bytes(sb->bc, bm_blk * sb->block_size,
-                               buf, sb->block_size);
-    kfree(buf);
+    byte &= (uint8_t)~(1U << (bit % 8));
+    int r = bcache_write_bytes(sb->bc, byte_off, &byte, sizeof(byte));
     return r < 0 ? -EIO : 0;
 }
 
