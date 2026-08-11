@@ -14,6 +14,12 @@ static const char *const g_a20_perf_names[A20_PERF_COUNTER_COUNT] = {
     [A20_PERF_EXT4_BITMAP_BYTE_LOADS] = "ext4_bitmap_byte_loads",
     [A20_PERF_PCACHE_FILL_MISSES] = "pcache_fill_misses",
     [A20_PERF_PCACHE_FILL_CONTENDED] = "pcache_fill_contended",
+    [A20_PERF_PCACHE_FULL_OVERWRITE_SKIPS] =
+        "pcache_full_overwrite_skips",
+    [A20_PERF_PCACHE_WRITEBACK_IOS] = "pcache_writeback_ios",
+    [A20_PERF_PCACHE_WRITEBACK_PAGES] = "pcache_writeback_pages",
+    [A20_PERF_VFS_PERMISSION_FASTPATHS] =
+        "vfs_permission_fastpaths",
     [A20_PERF_MM_TLB_TRANSACTIONS] = "mm_tlb_transactions",
     [A20_PERF_MM_TLB_TRANSACTION_FLUSHES] =
         "mm_tlb_transaction_flushes",
