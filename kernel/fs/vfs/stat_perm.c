@@ -289,14 +289,27 @@ int vfs_vnode_stat(vnode_t *vn, kstat_t *st)
 
 int vfs_vnode_permission(vnode_t *vn, int mask)
 {
-    kstat_t st;
-    int r = vfs_vnode_stat(vn, &st);
-    if (r < 0)
-        return r;
+    if (!vn)
+        return -EINVAL;
     /* A read-only mount rejects write/truncate access regardless of mode
      * or capability (Linux: -EROFS). */
     if ((mask & W_OK) && vn->mnt && (vn->mnt->flags & 1))
         return -EROFS;
+
+    /* Vnode factories load these permission attributes from the backing
+     * inode, and chmod/chown update both copies.  Permission checks do not
+     * need file size, link count, or timestamps, so avoid the much heavier
+     * filesystem stat path.  Keep a conservative fallback for synthetic
+     * vnodes which do not publish a mode. */
+    if (vn->mode) {
+        a20_perf_count(A20_PERF_VFS_PERMISSION_FASTPATHS);
+        return vfs_mode_has_perm(vn->mode, vn->uid, vn->gid, mask);
+    }
+
+    kstat_t st;
+    int r = vfs_vnode_stat(vn, &st);
+    if (r < 0)
+        return r;
     return vfs_mode_has_perm(st.st_mode, st.st_uid, st.st_gid, mask);
 }
 
@@ -305,6 +318,8 @@ int vfs_current_owns(vnode_t *vn)
     task_t *cur = proc_current();
     if (proc_has_cap(cur, CAP_FOWNER))
         return 1;
+    if (vn && vn->mode)
+        return cur && (uint32_t)cur->cred.fsuid == vn->uid;
     kstat_t st;
     if (vfs_vnode_stat(vn, &st) < 0)
         return 0;
@@ -317,14 +332,21 @@ int vfs_sticky_may_remove(vnode_t *dir, vnode_t *victim)
     if (!dir || !victim || proc_has_cap(cur, CAP_FOWNER))
         return 0;
 
+    uint32_t fsuid = cur ? (uint32_t)cur->cred.fsuid : 0;
+    if (dir->mode && victim->mode) {
+        if (!(dir->mode & S_ISVTX))
+            return 0;
+        if (fsuid == dir->uid || fsuid == victim->uid)
+            return 0;
+        return -EPERM;
+    }
+
     kstat_t dst;
     kstat_t vst;
     if (vfs_vnode_stat(dir, &dst) < 0 || !(dst.st_mode & S_ISVTX))
         return 0;
     if (vfs_vnode_stat(victim, &vst) < 0)
         return 0;
-
-    uint32_t fsuid = cur ? (uint32_t)cur->cred.fsuid : 0;
     if (fsuid == dst.st_uid || fsuid == vst.st_uid)
         return 0;
     return -EPERM;
