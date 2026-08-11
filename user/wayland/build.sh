@@ -501,7 +501,7 @@ if want player && ! stamp player; then
         "$WL_DIR/input-method.c" -o "$SYSROOT/bin/a20-input-method" \
         -Wl,-rpath-link,"$SYSROOT/lib" -L"$SYSROOT/lib" \
         -lwayland-client -lffi -lpthread -lm
-    "$MUSL_GCC" -O2 -static "$USER_DIR/cmds/wayland-session.c" \
+    "$MUSL_GCC" -O2 -static "$USER_DIR/cmds/core/wayland-session.c" \
         -o "$SYSROOT/bin/wayland-session"
     mark player
 fi
