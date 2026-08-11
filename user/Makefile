@@ -3,6 +3,7 @@ OPT ?= -O3
 PROFILE ?= full
 NPROC ?= $(or $(shell getconf _NPROCESSORS_ONLN 2>/dev/null),$(shell sysctl -n hw.logicalcpu 2>/dev/null),4)
 NOMMU ?= 0
+PYTHON ?= conda run -n a20os --no-capture-output python
 
 .DEFAULT_GOAL := all
 
@@ -668,7 +669,7 @@ desktop/desktop_files.c desktop/desktop_network.c desktop/desktop_system.c
 DESKTOP_OBJS := $(patsubst desktop/%.c,$(OBJ_DIR)/desktop/%.o,$(DESKTOP_SRCS))
 
 desktop/desktop_cursor_breeze.c: desktop/gen_breeze_cursor.py
-	python3 $< $@ external/breeze
+	$(PYTHON) $< $@ external/breeze
 
 $(OBJ_DIR)/lvgl/%.o: $(LVGL_DIR)/%.c desktop/lv_conf.h | build_dir musl_prepare
 	@mkdir -p $(dir $@)

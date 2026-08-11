@@ -76,4 +76,4 @@ flash-stm32f103-xuanwu: stm32f103-xuanwu
 run-stm32f103-qemu:
 	$(MAKE) ARCH=armv7m BOARD=stm32f103 PROFILE=mcu DRIVER_DEPLOYMENT=embedded STM32_FLASH_KB=128 STM32_RAM_KB=8 STM32_QEMU=1 kernel-only
 	qemu-system-arm -machine stm32vldiscovery -nographic \
-		-kernel .kernel-build/armv7m-both-bringup-nommu-stm32f103-f128k-r8k-qemu/kernel.bin
+		-kernel $(STM32_QEMU_BIN)

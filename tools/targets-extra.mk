@@ -2,7 +2,9 @@
 # Extra packages (vim / git / gcc) on a separate ext4 disk
 # ----------------------------------------------------------------
 
-extra-user-apps:
+.PHONY: _run_extra_impl
+
+extra-user-apps: $(USER_BUILD_STAMP)
 	$(MAKE) -f user/extra.mk ARCH=$(ARCH) OPT="$(OPT)" PACKAGES="$(EXTRA_PACKAGES)"
 
 # Debian/Ubuntu cross toolchains already provide a complete target sysroot and
@@ -206,16 +208,16 @@ run-arm64-extra:
 	$(MAKE) ARCH=aarch64 BRINGUP=0 PROFILE=benchmark _run_extra_impl
 
 run-x86_64-extra:
-	$(MAKE) ARCH=x86_64 BRINGUP=0 PROFILE=benchmark _run_extra_impl
+	@echo "run-x86_64-extra: skipped (extra packages are not supported on x86_64)"
 
 run-arm32-extra:
-	$(MAKE) ARCH=arm32 BRINGUP=0 PROFILE=benchmark _run_extra_impl
+	@echo "run-arm32-extra: skipped (extra packages are not supported on ARM32)"
 
 run-riscv32-extra:
-	$(MAKE) ARCH=riscv32 BRINGUP=0 PROFILE=benchmark _run_extra_impl
+	@echo "run-riscv32-extra: skipped (extra packages are not supported on RISC-V32)"
 
 run-ppc64le-extra:
-	$(MAKE) ARCH=ppc64le BRINGUP=0 PROFILE=benchmark _run_extra_impl
+	@echo "run-ppc64le-extra: skipped (extra packages are not supported on PPC64LE)"
 
 _run_extra_impl:
 	$(MAKE) ARCH=$(ARCH) BRINGUP=0 dev-build
