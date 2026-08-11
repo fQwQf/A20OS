@@ -548,7 +548,9 @@ int ext4_journal_recover(ext4_sb_info_t *fs, ext4_superblock_t *disk_sb)
         ret = jbd2_run_pass(&j, JBD2_PASS_REPLAY);
         if (ret < 0)
             goto out;
-        bcache_sync(fs->bc);
+        ret = bcache_sync_checked(fs->bc);
+        if (ret < 0)
+            goto out;
         printf("[EXT4/JBD2] replay complete transactions=%u blocks=%u "
                "revokes=%u hits=%u head=%u\n",
                j.end_sequence - j.sequence, j.replayed_blocks,
@@ -558,11 +560,15 @@ int ext4_journal_recover(ext4_sb_info_t *fs, ext4_superblock_t *disk_sb)
     ret = jbd2_mark_empty(&j);
     if (ret < 0)
         goto out;
-    bcache_sync(fs->bc);
+    ret = bcache_sync_checked(fs->bc);
+    if (ret < 0)
+        goto out;
     ret = ext4_clear_recover_feature(&j, disk_sb);
     if (ret < 0)
         goto out;
-    bcache_sync(fs->bc);
+    ret = bcache_sync_checked(fs->bc);
+    if (ret < 0)
+        goto out;
     printf("[EXT4/JBD2] journal marked empty and recover flag cleared\n");
 
 out:
