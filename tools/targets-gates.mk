@@ -2,8 +2,11 @@
 # shared headers with the host compiler and run on the build machine, so
 # format regressions are caught without booting the kernel.
 HOST_CC ?= gcc
+HOST_CFLAGS ?= -std=gnu99 -O2 -Wall -Wextra
 HOST_TESTS_SRC := $(wildcard tools/tests/*.c)
 HOST_TESTS_BIN := $(patsubst tools/tests/%.c,/tmp/a20-host-%,$(HOST_TESTS_SRC))
+
+.PHONY: host-tests check-vfs-abstraction
 
 host-tests: $(HOST_TESTS_BIN)
 	@for t in $(HOST_TESTS_BIN); do \
@@ -13,12 +16,12 @@ host-tests: $(HOST_TESTS_BIN)
 	@echo "host-tests: PASS"
 
 /tmp/a20-host-%: tools/tests/%.c
-	$(HOST_CC) -Ikernel/include -O2 -Wall -Wextra $< -o $@
+	$(HOST_CC) $(HOST_CFLAGS) -Ikernel/include $< -o $@
 
 # Minimal ISO9660 test image for the isofs driver (no mkisofs/xorriso needed).
 $(ISOFS_IMG): tools/mkisofs_test.c
 	@mkdir -p $(BUILD_DIR)
-	$(HOST_CC) -O2 -Wall -Wextra $< -o /tmp/a20-mkisofs
+	$(HOST_CC) $(HOST_CFLAGS) $< -o /tmp/a20-mkisofs
 	/tmp/a20-mkisofs $@
 
 check-vfs-abstraction: smoke-vfs-stress
