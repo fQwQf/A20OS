@@ -15,6 +15,10 @@ typedef enum a20_perf_counter {
     A20_PERF_EXT4_BITMAP_BYTE_LOADS,
     A20_PERF_PCACHE_FILL_MISSES,
     A20_PERF_PCACHE_FILL_CONTENDED,
+    A20_PERF_PCACHE_FULL_OVERWRITE_SKIPS,
+    A20_PERF_PCACHE_WRITEBACK_IOS,
+    A20_PERF_PCACHE_WRITEBACK_PAGES,
+    A20_PERF_VFS_PERMISSION_FASTPATHS,
     A20_PERF_MM_TLB_TRANSACTIONS,
     /* Invalidation transactions requesting a local, global, or remote
      * shootdown. Remote target CPUs are counted separately and exactly. */
