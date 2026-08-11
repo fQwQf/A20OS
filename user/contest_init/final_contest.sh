@@ -4,27 +4,51 @@
 #
 # This is deliberately separate from contest.sh, which remains the preliminary
 # contest entry point.  init selects this script only when
-# /a20/etc/final-eval-group is present.  The published EXT4 image is mounted
-# directly at /; /a20 is only the private bootstrap FAT image.
+# /a20/etc/final-eval-group is present.  A20OS keeps its bootstrap root alive,
+# mounts the published EXT4 image at /mnt, then chroots into it for each test.
+
+readonly FINAL_ROOT=/mnt
+readonly FINAL_CHROOT=/a20/chroot
+readonly FINAL_SHELL=/a20-eval-shell
+
+check_final_root() {
+    if [[ ! -d $FINAL_ROOT || ! -d $FINAL_ROOT/glibc ]]; then
+        print "[FINAL-EVAL][ERROR] published rootfs is not mounted at $FINAL_ROOT"
+        return 1
+    fi
+    if [[ ! -x $FINAL_CHROOT ]]; then
+        print "[FINAL-EVAL][ERROR] missing bootstrap chroot utility: $FINAL_CHROOT"
+        return 1
+    fi
+    if [[ ! -x /a20/mksh ]]; then
+        print "[FINAL-EVAL][ERROR] missing bootstrap shell: /a20/mksh"
+        return 1
+    fi
+    return 0
+}
+
+prepare_final_shell() {
+    cp /a20/mksh "$FINAL_ROOT$FINAL_SHELL" || return
+    chmod 755 "$FINAL_ROOT$FINAL_SHELL" || return
+}
 
 run_final_group() {
     typeset group=$1
     typeset script="/glibc/${group}_testcode.sh"
 
-    if [[ ! -f $script ]]; then
-        print "[FINAL-EVAL][ERROR] test script not found: $script"
+    check_final_root || return
+    prepare_final_shell || return
+    if [[ ! -f "$FINAL_ROOT$script" ]]; then
+        print "[FINAL-EVAL][ERROR] test script not found: $FINAL_ROOT$script"
         return 127
     fi
 
     print "#### A20OS 2026 FINAL EVAL START $group ####"
-    (
-        PATH=/root/.cargo/bin:/usr/local/bin:/usr/bin:/bin:/sbin:/usr/sbin:/glibc:/a20
-        export PATH
-        # Keep A20OS's already validated shell as the script interpreter.  The
-        # script and every binary it launches still see the published image as
-        # the real /; this only avoids making final entry depend on GNU bash.
-        cd /glibc && /a20/mksh "$script"
-    )
+    PATH=/root/.cargo/bin:/usr/local/bin:/usr/bin:/bin:/sbin:/usr/sbin \
+    HOME=/root SHELL="$FINAL_SHELL" LD_LIBRARY_PATH= \
+        "$FINAL_CHROOT" "$FINAL_ROOT" "$FINAL_SHELL" -c \
+        'cd /glibc && exec /a20-eval-shell "$1"' \
+        a20-eval-shell "$script"
     typeset -i rc=$?
     print "[FINAL-EVAL] $group runner exit=$rc"
     print "#### A20OS 2026 FINAL EVAL END $group ####"
@@ -58,12 +82,12 @@ run_all_final_groups() {
     # direct pathname lookup failure, and getdents/glob enumeration failure.
     # Use only mksh builtins so diagnostics remain available even when the
     # published rootfs cannot execute any helper binary.
-    report_final_path /
-    report_final_path /glibc
-    report_final_path /glibc/cagent_testcode.sh
-    report_final_path /glibc/buildstorm_testcode.sh
+    report_final_path "$FINAL_ROOT"
+    report_final_path "$FINAL_ROOT/glibc"
+    report_final_path "$FINAL_ROOT/glibc/cagent_testcode.sh"
+    report_final_path "$FINAL_ROOT/glibc/buildstorm_testcode.sh"
 
-    for test_script in /glibc/*_testcode.sh; do
+    for test_script in "$FINAL_ROOT"/glibc/*_testcode.sh; do
         [[ -f $test_script ]] || continue
         (( glob_count += 1 ))
         print "[FINAL-EVAL][PRECHECK] glob-script=$test_script"
@@ -75,7 +99,7 @@ run_all_final_groups() {
     # both a safe fallback for a getdents/glob-only failure and an opportunity
     # to earn points while retaining diagnostics for the remaining scan.
     for group in cagent buildstorm; do
-        test_script="/glibc/${group}_testcode.sh"
+        test_script="$FINAL_ROOT/glibc/${group}_testcode.sh"
         if [[ -f $test_script ]]; then
             found=1
             print "[FINAL-EVAL][PRECHECK] known-group=$group present=yes"
@@ -88,7 +112,7 @@ run_all_final_groups() {
     # The published image supplies /glibc/xxxxx_testcode.sh.  Run every group
     # serially; the judge does not require a particular group order.  Known
     # groups were already run through direct lookup above, so skip duplicates.
-    for test_script in /glibc/*_testcode.sh; do
+    for test_script in "$FINAL_ROOT"/glibc/*_testcode.sh; do
         [[ -f $test_script ]] || continue
         group=${test_script##*/}
         group=${group%_testcode.sh}
@@ -102,7 +126,7 @@ run_all_final_groups() {
         run_final_group "$group" || failed=1
     done
     if (( ! found )); then
-        print "[FINAL-EVAL][ERROR] no /glibc/*_testcode.sh found"
+        print "[FINAL-EVAL][ERROR] no $FINAL_ROOT/glibc/*_testcode.sh found"
         return 127
     fi
     return $failed
@@ -110,6 +134,8 @@ run_all_final_groups() {
 
 run_buildstorm_probe() {
     typeset probe_case=
+
+    check_final_root || return
 
     if [[ ! -f /a20/buildstorm_probe.sh ]]; then
         print "[FINAL-EVAL][ERROR] missing /a20/buildstorm_probe.sh"
@@ -124,20 +150,23 @@ run_buildstorm_probe() {
         return 127
     fi
 
-    cp /a20/mksh /a20-eval-shell || return
-    cp /a20/buildstorm_probe.sh /a20-buildstorm-probe.sh || return
-    mkdir -p /a20-probe || return
-    cp /a20/a20-probe/cwd-probe /a20-probe/cwd-probe || return
-    cp /a20/a20-probe/exec-pages-probe /a20-probe/exec-pages-probe || return
-    cp /a20/a20-probe/shebang-probe /a20-probe/shebang-probe || return
-    cp /a20/a20-probe/stage9-perf-probe /a20-probe/stage9-perf-probe || return
-    cp /a20/a20-probe/liba20probe.so /a20-probe/liba20probe.so || return
-    cp /a20/arch_context_stress /a20-context-stress || return
-    chmod 755 /a20-eval-shell /a20-buildstorm-probe.sh \
-        /a20-probe/cwd-probe /a20-probe/exec-pages-probe \
-        /a20-probe/shebang-probe /a20-probe/stage9-perf-probe \
-        /a20-context-stress
-    chmod 644 /a20-probe/liba20probe.so
+    prepare_final_shell || return
+    cp /a20/buildstorm_probe.sh "$FINAL_ROOT/a20-buildstorm-probe.sh" || return
+    mkdir -p "$FINAL_ROOT/a20-probe" || return
+    cp /a20/a20-probe/cwd-probe "$FINAL_ROOT/a20-probe/cwd-probe" || return
+    cp /a20/a20-probe/exec-pages-probe "$FINAL_ROOT/a20-probe/exec-pages-probe" || return
+    cp /a20/a20-probe/shebang-probe "$FINAL_ROOT/a20-probe/shebang-probe" || return
+    cp /a20/a20-probe/stage9-perf-probe "$FINAL_ROOT/a20-probe/stage9-perf-probe" || return
+    cp /a20/a20-probe/liba20probe.so "$FINAL_ROOT/a20-probe/liba20probe.so" || return
+    cp /a20/arch_context_stress "$FINAL_ROOT/a20-context-stress" || return
+    chmod 755 "$FINAL_ROOT/a20-eval-shell" \
+        "$FINAL_ROOT/a20-buildstorm-probe.sh" \
+        "$FINAL_ROOT/a20-probe/cwd-probe" \
+        "$FINAL_ROOT/a20-probe/exec-pages-probe" \
+        "$FINAL_ROOT/a20-probe/shebang-probe" \
+        "$FINAL_ROOT/a20-probe/stage9-perf-probe" \
+        "$FINAL_ROOT/a20-context-stress"
+    chmod 644 "$FINAL_ROOT/a20-probe/liba20probe.so"
 
     print "#### A20OS 2026 FINAL EVAL START buildstorm-probe ####"
     if [[ -f /a20/etc/final-eval-probe-case ]]; then
@@ -145,9 +174,11 @@ run_buildstorm_probe() {
     fi
     if [[ -n $probe_case ]]; then
         print "[FINAL-EVAL] selected buildstorm probe case=$probe_case"
-        /a20-eval-shell /a20-buildstorm-probe.sh --only "$probe_case"
+        "$FINAL_CHROOT" "$FINAL_ROOT" /a20-eval-shell \
+            /a20-buildstorm-probe.sh --only "$probe_case"
     else
-        /a20-eval-shell /a20-buildstorm-probe.sh
+        "$FINAL_CHROOT" "$FINAL_ROOT" /a20-eval-shell \
+            /a20-buildstorm-probe.sh
     fi
     typeset -i rc=$?
     print "[FINAL-EVAL] buildstorm-probe runner exit=$rc"
