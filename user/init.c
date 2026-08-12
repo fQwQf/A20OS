@@ -165,7 +165,21 @@ int main(void)
     snprintf(shell_env, sizeof(shell_env), "SHELL=%s", shell_path);
 
     char *legacy_envp[] = {
-        path_env, ld_env, "HOME=/", shell_env, "TERM=vt100", NULL
+        path_env, ld_env, "HOME=/", shell_env, "TERM=vt100",
+        "XDG_RUNTIME_DIR=/tmp", "WAYLAND_DISPLAY=wayland-0",
+        "XDG_CONFIG_DIRS=/bin/etc/xdg",
+        "XDG_CONFIG_HOME=/bin/etc/xdg",
+        "XDG_CURRENT_DESKTOP=XFCE", "XDG_SESSION_DESKTOP=xfce",
+        "GDK_BACKEND=wayland", "GDK_GL=disable",
+        "G_SLICE=always-malloc", "G_DEBUG=gc-friendly",
+        "XDG_SESSION_TYPE=wayland", "WLR_BACKENDS=drm",
+        "WLR_RENDERER=pixman", "WLR_DRM_NO_ATOMIC=1",
+        "WLR_NO_HARDWARE_CURSORS=1", "WLR_DRM_DEVICES=/dev/dri/card0",
+        "GBM_BACKENDS_PATH=/bin/lib/gbm", "SEATD_VTBOUND=0",
+        "WESTON_MODULE_MAP=fbdev-backend.so=/bin/lib/libweston-9/fbdev-backend.so;kiosk-shell.so=/bin/lib/weston/kiosk-shell.so;desktop-shell.so=/bin/lib/weston/desktop-shell.so;weston-desktop-shell=/bin/libexec/weston-desktop-shell;weston-keyboard=/bin/libexec/weston-keyboard",
+        "WESTON_LIBINPUT_DEVICE=/dev/event0",
+        "WESTON_LIBINPUT_UDEV=0",
+        "DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/dbus-session", NULL
     };
     char *final_envp[] = {
         path_env, "HOME=/", shell_env, "TERM=vt100", NULL
@@ -181,28 +195,24 @@ int main(void)
         printf("[init] starting desktop\n");
         desktop_pid = fork();
         if (desktop_pid == 0) {
-            if (access("/bin/run-xfce.sh", X_OK) == 0) {
-                /* run-xfce.sh starts the session bus + compositor and then
-                 * the XFCE desktop session (preferred when present). */
-                char *desktop_argv[] = {
-                    "mksh", "/bin/run-xfce.sh", NULL
-                };
-                execve("/bin/mksh", desktop_argv, envp);
-            } else if (access("/bin/run-desktop.sh", X_OK) == 0) {
-                /* run-desktop.sh execs weston directly (fbdev backend +
-                 * desktop-shell).  It is the reliable GUI entry point; the
-                 * wayland-session wrapper is kept as a fallback for images
-                 * that do not carry the script. */
+            if (access("/bin/run-xfce.sh", F_OK) == 0) {
+                /* Start the native launcher directly.  Keeping mksh out of
+                 * this path avoids its background/exec handling interfering
+                 * with the compositor and the session bus. */
+                char *desktop_argv[] = {"wayland-session", NULL};
+                execve("/bin/wayland-session", desktop_argv, envp);
+            } else if (access("/bin/run-desktop.sh", F_OK) == 0) {
+                /* Weston is a fallback for images without the XFCE stack. */
                 char *desktop_argv[] = {
                     "mksh", "/bin/run-desktop.sh", NULL
                 };
                 execve("/bin/mksh", desktop_argv, envp);
-            } else if (access("/bin/wayland-session", X_OK) == 0) {
-                char *desktop_argv[] = {"wayland-session", NULL};
-                execve("/bin/wayland-session", desktop_argv, envp);
-            } else {
+            } else if (access("/bin/desktop", F_OK) == 0) {
                 char *desktop_argv[] = {"desktop", NULL};
                 execve("/bin/desktop", desktop_argv, envp);
+            } else if (access("/bin/wayland-session", F_OK) == 0) {
+                char *desktop_argv[] = {"wayland-session", NULL};
+                execve("/bin/wayland-session", desktop_argv, envp);
             }
             perror("execve desktop");
             _exit(127);

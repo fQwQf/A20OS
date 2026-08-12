@@ -155,6 +155,7 @@ BUILD_TIME_HDR = $(BUILD_DIR)/generated/build_time.h
 STM32_BT_CONFIG_HDR = $(BUILD_DIR)/generated/stm32_bluetooth_config.h
 STM32_WIFI_CONFIG_HDR = $(BUILD_DIR)/generated/stm32_wifi_config.h
 FAT32_IMAGE_MB ?= 128
+GUI_FAT32_IMAGE_MB ?= 512
 EXT4_IMAGE_MB ?= 128
 EXTRA_IMAGE_MB ?= 1024
 WAYLAND_GUI_ARCHES := riscv64 loongarch64 aarch64 x86_64
