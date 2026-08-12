@@ -207,17 +207,36 @@ $(KERNEL_ELF): $(KERNEL_OBJ) $(ASM_OBJ) $(KALLSYMS_OBJ) $(KERNEL_NOSYMS_ELF) $(L
 	@mkdir -p $(dir $@)
 	$(CC) $(LDFLAGS) $(KERNEL_OBJ) $(ASM_OBJ) $(KALLSYMS_OBJ) $(ARCH_LIBS) -o $@
 
-$(BUILD_DIR)/%.o: $(KERNEL_DIR)/%.c | Makefile $(BUILD_TIME_HDR)
+# Kernel objects treat Makefile as an order-only prerequisite, so a change in
+# compiler flags (e.g. the CONFIG_UBSAN choice that PROFILE flips between
+# development and benchmark/final builds) leaves stale objects from a previous
+# invocation in place; the final link then fails with undefined
+# __ubsan_handle_* references.  Track a per-build-dir signature stamp: when the
+# flags change the stamp is touched and every kernel object is rebuilt with the
+# new flags, so build directories can never mix objects from two flag sets.
+BUILD_FLAGS_SIG := $(CC) $(CFLAGS) $(LDFLAGS)
+BUILD_FLAGS_STAMP := $(BUILD_DIR)/.build-flags
+
+$(BUILD_FLAGS_STAMP): FORCE
+	@mkdir -p $(dir $@)
+	@printf '%s\n' '$(BUILD_FLAGS_SIG)' > $@.tmp
+	@if test -f "$@" && cmp -s "$@" "$@.tmp"; then \
+		rm -f "$@.tmp"; \
+	else \
+		mv -f "$@.tmp" "$@"; \
+	fi
+
+$(BUILD_DIR)/%.o: $(KERNEL_DIR)/%.c $(BUILD_FLAGS_STAMP) | Makefile $(BUILD_TIME_HDR)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 # lwIP lives under the kernel tree (kernel/external/lwip); the kernel compiles
 # the shared sources, objects land under $(BUILD_DIR)/external/lwip as before.
-$(BUILD_DIR)/external/lwip/src/%.o: $(KERNEL_DIR)/external/lwip/src/%.c | Makefile $(BUILD_TIME_HDR)
+$(BUILD_DIR)/external/lwip/src/%.o: $(KERNEL_DIR)/external/lwip/src/%.c $(BUILD_FLAGS_STAMP) | Makefile $(BUILD_TIME_HDR)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(BUILD_DIR)/%.o: $(KERNEL_DIR)/%.S Makefile | $(BUILD_TIME_HDR)
+$(BUILD_DIR)/%.o: $(KERNEL_DIR)/%.S $(BUILD_FLAGS_STAMP) Makefile | $(BUILD_TIME_HDR)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
 

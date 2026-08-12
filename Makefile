@@ -5,7 +5,7 @@
 # ================================================================
 
 NPROC ?= $(or $(shell getconf _NPROCESSORS_ONLN 2>/dev/null),$(shell sysctl -n hw.logicalcpu 2>/dev/null),4)
-PYTHON ?= conda run -n a20os --no-capture-output python
+PYTHON ?= $(if $(shell command -v conda 2>/dev/null),conda run -n a20os --no-capture-output python,python3)
 TIMEOUT ?= $(PYTHON) tools/run_with_timeout.py
 HOST_OS ?= $(shell uname -s 2>/dev/null)
 
