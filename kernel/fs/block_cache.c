@@ -4,11 +4,25 @@
 #include "core/stdio.h"
 #include "core/perf.h"
 #include "core/errno.h"
+#include "core/timer.h"
 
 static bcache_t *g_bcache_list[8];
 static int g_bcache_count;
 
 #define BCACHE_SYNC_BATCH_PAGES 16
+
+/* Cooldown after a failed device write before flush is attempted again. */
+#define BCACHE_WRITE_QUARANTINE_TICKS (TICKS_PER_SEC * 30)
+
+static int bcache_write_quarantined(bcache_t *bc) {
+    return bc->write_quarantine_until &&
+           timer_get_ticks() < bc->write_quarantine_until;
+}
+
+static void bcache_note_write_error(bcache_t *bc) {
+    bc->write_quarantine_until =
+        timer_get_ticks() + BCACHE_WRITE_QUARANTINE_TICKS;
+}
 
 /*
  * Cache entry references are acquired while bc->lock is held, but released
@@ -263,9 +277,16 @@ static bcache_entry_t *bcache_find(bcache_t *bc, uint64_t lba) {
 
 // 驱逐一个块（LRU 淘汰算法：从尾部找最久未使用的块）
 static bcache_entry_t *bcache_evict(bcache_t *bc) {
+    int quarantined = bcache_write_quarantined(bc);
     bcache_entry_t *e = bc->lru_tail.prev;  // 从最久未使用的开始
     while (e != &bc->lru_head) {
         if (cache_ref_read(&e->ref) == 0) {  // 只能驱逐引用计数为 0 的块
+            /* While the device is known-wedged, prefer clean victims: a dirty
+             * victim would force a flush that can only time out again. */
+            if (quarantined && e->valid && e->dirty) {
+                e = e->prev;
+                continue;
+            }
             lru_remove(e);
             if (e->valid)
                 bcache_hash_remove(bc, e);
@@ -322,6 +343,7 @@ bcache_entry_t *bcache_get(bcache_t *bc, uint64_t lba) {
         int write_ret = bc->dev->write_sector(bc->dev, old_lba, e->data, 1);
         if (write_ret < 0) {
             kdebug("[BCACHE] writeback error lba=%lu\n", (unsigned long)old_lba);
+            bcache_note_write_error(bc);
             flags = spin_lock_irqsave(&bc->lock);
             e->ref = 0;
             bcache_set_block_dirty_locked(bc, e, 1);
@@ -402,6 +424,10 @@ void bcache_mark_dirty(bcache_entry_t *e) {
 int bcache_sync_checked(bcache_t *bc) {
     if (!bc || !bc->dev)
         return -EINVAL;
+    /* A recently failed write means the device is still wedged; fail fast
+     * instead of paying another driver-level timeout per dirty entry. */
+    if (bcache_write_quarantined(bc))
+        return -EIO;
     char tmp[BCACHE_BLOCK_SIZE];
     char *page_tmp = NULL;
     int page_indices[BCACHE_SYNC_BATCH_PAGES];
@@ -479,8 +505,16 @@ int bcache_sync_checked(bcache_t *bc) {
                     bcache_set_page_dirty_locked(bc, entry, 0);
             }
             spin_unlock_irqrestore(&bc->lock, flags);
-        } else if (!first_error) {
+        } else {
+            /* Abort early: the driver already exhausted its retry budget on
+             * this request, so flushing the remaining entries would only
+             * multiply the stall.  They stay dirty for the next sync. */
             first_error = write_ret;
+            bcache_note_write_error(bc);
+            a20_perf_count(A20_PERF_PCACHE_WRITEBACK_IOS);
+            a20_perf_add(A20_PERF_PCACHE_WRITEBACK_PAGES,
+                         (uint64_t)batch_pages);
+            break;
         }
         a20_perf_count(A20_PERF_PCACHE_WRITEBACK_IOS);
         a20_perf_add(A20_PERF_PCACHE_WRITEBACK_PAGES,
@@ -490,7 +524,7 @@ int bcache_sync_checked(bcache_t *bc) {
     if (page_tmp)
         kfree(page_tmp);
 
-    for (int i = 0; i < bc->pool_size; i++) {
+    for (int i = 0; !first_error && i < bc->pool_size; i++) {
         uint64_t flags = spin_lock_irqsave(&bc->lock);
         if (bc->dirty_blocks == 0) {
             spin_unlock_irqrestore(&bc->lock, flags);
@@ -512,8 +546,10 @@ int bcache_sync_checked(bcache_t *bc) {
                 bc->pool[i].dirty_gen == dirty_gen)
                 bcache_set_block_dirty_locked(bc, &bc->pool[i], 0);
             spin_unlock_irqrestore(&bc->lock, flags);
-        } else if (!first_error) {
+        } else {
             first_error = write_ret;
+            bcache_note_write_error(bc);
+            break;
         }
     }
     mutex_unlock(&bc->writeback_lock);
@@ -556,9 +592,16 @@ static int pcache_flush_page(bcache_t *bc, pcache_entry_t *e) {
 }
 
 static pcache_entry_t *pcache_evict_locked(bcache_t *bc) {
+    int quarantined = bcache_write_quarantined(bc);
     pcache_entry_t *e = bc->page_lru_tail.prev;
     while (e != &bc->page_lru_head) {
         if (cache_ref_read(&e->ref) == 0) {
+            /* Prefer clean victims while the device is known-wedged; a dirty
+             * victim would force a flush that can only time out again. */
+            if (quarantined && e->valid && e->dirty) {
+                e = e->prev;
+                continue;
+            }
             page_lru_remove(e);
             if (e->valid)
                 pcache_hash_remove(bc, e);
@@ -664,6 +707,7 @@ static pcache_entry_t *pcache_get(bcache_t *bc, uint64_t page_no,
     if (old_dirty)
         flush_ret = pcache_flush_page(bc, e);
     if (old_dirty && flush_ret < 0) {
+        bcache_note_write_error(bc);
         flags = spin_lock_irqsave(&bc->lock);
         e->page_no = old_page;
         e->valid = 1;
