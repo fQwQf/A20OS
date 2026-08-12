@@ -184,9 +184,12 @@ RISCV_GLIBC_LOCAL_LIB_DIR = $(RISCV_GLIBC_LOCAL_ROOT)/lib
 FEDORA_RISCV_RELEASE ?=
 USER_BUILD_ID = $(ARCH):$(NOMMU):$(USER_OPT):$(PROFILE)
 USER_BUILD_DESKTOP = $(if $(filter benchmark,$(PROFILE)),0,1)
-USER_BUILD_CHECK_DIRS = user/init.c user/cmds user/init_common user/desktop user/external/gui/lvgl \
+# $(wildcard) drops uninitialized git submodules (lvgl, fastfetch).  The
+# benchmark build must not fail when a tarball export or a non-recursive clone
+# leaves those directories absent entirely.
+USER_BUILD_CHECK_DIRS = $(wildcard user/init.c user/cmds user/init_common user/desktop user/external/gui/lvgl \
                         user/external/musl user/external/sbase user/external/mksh-cvs2git \
-                        user/external/tlse user/external/apps/fastfetch
+                        user/external/tlse user/external/apps/fastfetch)
 NATIVE_TAG_riscv64     := rv
 NATIVE_TAG_loongarch64 := la
 NATIVE_TAG_aarch64     := aarch64

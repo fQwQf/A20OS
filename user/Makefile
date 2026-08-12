@@ -655,7 +655,9 @@ $(WGET_CMD): $(WGET_OBJ) $(TLSE_OBJ) | build_dir musl_prepare
 	$(CC) $(LDFLAGS) -o $@ $(CRT_START) $(WGET_OBJ) $(TLSE_OBJ) $(CRT_END) $(LIBC)
 
 LVGL_DIR := external/gui/lvgl
-LVGL_SRCS := $(shell find $(LVGL_DIR)/src -type f -name '*.c')
+# The lvgl git submodule may be absent (non-recursive clone or tarball
+# export); keep the find silent and let BUILD_DESKTOP=0 builds proceed.
+LVGL_SRCS := $(shell find $(LVGL_DIR)/src -type f -name '*.c' 2>/dev/null)
 LVGL_OBJS := $(patsubst $(LVGL_DIR)/%.c,$(OBJ_DIR)/lvgl/%.o,$(LVGL_SRCS))
 LVGL_CFLAGS := $(CFLAGS) -I$(LVGL_DIR) -Iexternal -Idesktop -DLV_CONF_INCLUDE_SIMPLE
 ifeq ($(NOMMU),1)
