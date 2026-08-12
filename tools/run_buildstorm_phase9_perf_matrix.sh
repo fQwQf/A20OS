@@ -64,7 +64,8 @@ counters=(
 )
 subloads=(
     idle stat-open-close write-truncate-4k ext4-create-allocation
-    overwrite mmap-munmap sync-cleanup
+    overwrite mmap-munmap cpu-fixed-single cpu-fixed-parallel-8 syscall-getpid
+    fork-wait pipe-pingpong anon-fault file-fault sync-cleanup
 )
 lifetime_field_names='task_objects task_refs listed_tasks listed_refs pid_entries runqueue_entries dispatching_tasks cpu_owned_tasks wait_entries wake_entries timeout_entries open_fds vfile_objects vnode_objects page_cache_dirty page_cache_pinned zombies lifetime_errors'
 lifetime_fields='^(task_objects|task_refs|listed_tasks|listed_refs|pid_entries|runqueue_entries|dispatching_tasks|cpu_owned_tasks|wait_entries|wake_entries|timeout_entries|open_fds|vfile_objects|vnode_objects|page_cache_dirty|page_cache_pinned|zombies|lifetime_errors):'
@@ -106,7 +107,7 @@ audit_snapshots() {
 
     for counter in "${counters[@]}"; do
         count=$(rg -c "^${counter}: [0-9]+$" "$log")
-        if (( count != 8 )); then
+        if (( count != 15 )); then
             echo "BUILDSTORM_PHASE9_PERF_MATRIX counter-snapshot-count counter=$counter count=$count log=$log" >&2
             return 1
         fi
@@ -117,7 +118,7 @@ audit_snapshots() {
                 previous = $2 + 0
                 seen++
             }
-            END { if (seen != 8) exit 1 }
+            END { if (seen != 15) exit 1 }
         ' "$log"; then
             echo "BUILDSTORM_PHASE9_PERF_MATRIX counter-not-monotonic counter=$counter log=$log" >&2
             return 1
@@ -223,7 +224,7 @@ run_one() {
     metadata=${log/\/logs\//\/metadata\/}
     metadata=${metadata%.log}.txt
 
-    rg -q '^BUILDSTORM_STAGE9_PERF ok subloads=7 snapshots=8$' "$log"
+    rg -q '^BUILDSTORM_STAGE9_PERF ok subloads=14 snapshots=15$' "$log"
     rg -q '^\[BUILDSTORM-PROBE\] summary total=1 failures=0$' "$log"
     audit_snapshots "$log"
     audit_outer_lifetime "$log"
