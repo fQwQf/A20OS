@@ -105,6 +105,9 @@
 #define SYS_sigsuspend     133
 #define SYS_rt_sigqueueinfo 138
 #define SYS_pidfd_send_signal 424
+#define SYS_pidfd_open        434
+#define SYS_pidfd_getfd       438
+#define SYS_epoll_pwait2      441
 #define SYS_setpriority    140
 #define SYS_getpriority    141
 #define SYS_setregid       143
@@ -126,7 +129,7 @@
 #define SYS_gettimeofday   169
 #define SYS_settimeofday   170
 #define SYS_times          153
-#define SYS_time           235
+#define SYS_mbind          235
 #define SYS_socket         198
 #define SYS_socketpair     199
 #define SYS_bind           200
@@ -197,6 +200,16 @@
 #define SYS_semtimedop     192
 #define SYS_semop          193
 #define SYS_shmget         194
+#define SYS_msgget         186
+#define SYS_msgctl         187
+#define SYS_msgrcv         188
+#define SYS_msgsnd         189
+#define SYS_mq_open        180
+#define SYS_mq_unlink      181
+#define SYS_mq_timedsend   182
+#define SYS_mq_timedreceive 183
+#define SYS_mq_notify      184
+#define SYS_mq_getsetattr  185
 #define SYS_shmctl         195
 #define SYS_shmat          196
 #define SYS_shmdt          197
@@ -226,7 +239,7 @@
 #define SYS_setdomainname   162
 #define SYS_personality     92
 #define SYS_unshare         97
-#define SYS_setns           305
+#define SYS_setns           268
 #define SYS_rt_sigpending   136
 #define SYS_mlock           228
 #define SYS_munlock         229
@@ -241,7 +254,7 @@
 #define SYS_get_mempolicy   236
 
 /* Missing syscall numbers (RISC-V 64-bit Linux) */
-#define SYS_syncfs          306
+#define SYS_syncfs          267
 #define SYS_fanotify_init   262
 #define SYS_fanotify_mark   263
 #define SYS_signalfd4       74
@@ -254,6 +267,7 @@
 #define SYS_io_submit       2
 #define SYS_io_getevents    4
 #define SYS_io_cancel       3
+#define SYS_io_pgetevents   292
 #define SYS_init_module     105
 #define SYS_delete_module   106
 #define SYS_finit_module    273
@@ -263,6 +277,86 @@
 #define SYS_set_thread_area 1001
 #define SYS_poll            1002
 #define SYS_clock_gettime32 1023
+
+/* RISC-V 64-bit Linux syscall numbers for the syscalls completed in the
+ * "finish the Linux ABI" work.  Grouped by subsystem for readability. */
+#define SYS_restart_syscall    128
+#define SYS_lookup_dcookie     18
+#define SYS_quotactl           60
+#define SYS_readahead          213
+#define SYS_remap_file_pages   234
+#define SYS_mbind              235
+#define SYS_set_mempolicy      237
+#define SYS_migrate_pages      238
+#define SYS_move_pages         239
+#define SYS_name_to_handle_at  264
+#define SYS_open_by_handle_at  265
+#define SYS_kcmp               272
+#define SYS_process_vm_readv   270
+#define SYS_process_vm_writev  271
+#define SYS_rseq               293
+#define SYS_io_uring_setup     425
+#define SYS_io_uring_enter     426
+#define SYS_io_uring_register  427
+#define SYS_open_tree          428
+#define SYS_move_mount         429
+#define SYS_fsopen             430
+#define SYS_fsconfig           431
+#define SYS_fsmount            432
+#define SYS_fspick             433
+#define SYS_mount_setattr      442
+#define SYS_quotactl_fd        443
+#define SYS_landlock_create_ruleset 444
+#define SYS_landlock_add_rule  445
+#define SYS_landlock_restrict_self 446
+#define SYS_memfd_secret       447
+#define SYS_process_mrelease   448
+#define SYS_process_madvise    440
+#define SYS_futex_waitv        449
+#define SYS_set_mempolicy_home_node 450
+#define SYS_cachestat          451
+#define SYS_futex_requeue      456
+
+/* RISC-V 64-bit Linux syscall numbers for the second "finish the Linux ABI"
+ * batch: message queues, ioprio, pkeys, LSM/mount introspection and misc. */
+#define SYS_ioprio_set         30
+#define SYS_ioprio_get         31
+#define SYS_nfsservctl         42
+#define SYS_kexec_load         104
+#define SYS_mq_open            180
+#define SYS_mq_unlink          181
+#define SYS_mq_timedsend       182
+#define SYS_mq_timedreceive    183
+#define SYS_mq_notify          184
+#define SYS_mq_getsetattr      185
+#define SYS_msgget             186
+#define SYS_msgctl             187
+#define SYS_msgrcv             188
+#define SYS_msgsnd             189
+#define SYS_seccomp            277
+#define SYS_mlock2             284
+#define SYS_pkey_mprotect      288
+#define SYS_pkey_alloc         289
+#define SYS_pkey_free          290
+#define SYS_kexec_file_load    294
+#define SYS_map_shadow_stack   453
+#define SYS_futex_wake         454
+#define SYS_futex_wait         455
+#define SYS_statmount          457
+#define SYS_listmount          458
+#define SYS_lsm_get_self_attr  459
+#define SYS_lsm_set_self_attr  460
+#define SYS_lsm_list_modules   461
+#define SYS_mseal              462
+#define SYS_setxattrat         463
+#define SYS_getxattrat         464
+#define SYS_listxattrat        465
+#define SYS_removexattrat      466
+#define SYS_open_tree_attr     467
+#define SYS_listns             470
+#define SYS_rt_tgsigqueueinfo  240
+#define SYS_riscv_hwprobe      258
+#define SYS_riscv_flush_icache 259
 
 /* A20OS Linux-ABI extensions: channel IPC bridge (sys_a20_bridge.c).
  * Numbers are above every real Linux syscall so they never collide with a

@@ -556,15 +556,7 @@ int64_t sys_fsync(int fd) {
 int64_t sys_fdatasync(int fd) {
     int64_t gfd = fdtable_get_current(fd);
     if (gfd < 0) return gfd;
-    vfile_t *vf = vfs_get_file_ref((int)gfd);
-    if (!vf) return -EBADF;
-    vfs_put_file_ref((int)gfd, vf);
-    kstat_t st;
-    if (vfs_fstat((int)gfd, &st) < 0)
-        return -EINVAL;
-    if ((st.st_mode & S_IFMT) != S_IFREG)
-        return -EINVAL;
-    return vfs_fsync((int)gfd);
+    return vfs_fdatasync((int)gfd);
 }
 
 int64_t sys_sync_file_range(int fd, long offset, long nbytes, unsigned flags) {
@@ -702,7 +694,9 @@ int64_t sys_ppoll(void *fds, int nfds, void *tmo, void *sigmask) {
             if (copy_to_user(&pfds[i].revents, &pfd.revents, sizeof(short)) < 0)
                 PPOLL_RETURN(-EFAULT);
         }
-        if (ready > 0) PPOLL_RETURN(ready);
+        if (ready > 0) {
+            PPOLL_RETURN(ready);
+        }
         if (has_timeout && timeout_ticks == 0) PPOLL_RETURN(0);
         if (has_timeout && timer_get_ticks() >= deadline) PPOLL_RETURN(0);
         if (signal_task_has_unblocked(t)) PPOLL_SIGNAL_RETURN(-EINTR);
@@ -768,7 +762,9 @@ int64_t sys_poll(void *fds, int nfds, int timeout) {
             if (copy_to_user(&pfds[i].revents, &pfd.revents, sizeof(short)) < 0)
                 return -EFAULT;
         }
-        if (ready > 0) return ready;
+        if (ready > 0) {
+            return ready;
+        }
         if (has_timeout && timeout == 0) return 0;
         if (has_timeout && timer_get_ticks() >= deadline) return 0;
         if (signal_task_has_unblocked(t)) return -ERESTARTSYS;

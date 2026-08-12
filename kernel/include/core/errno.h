@@ -60,6 +60,18 @@
 #define ENOLCK       37
 #define ENXIO        6
 #define EFBIG        27
+#define ENOMSG       42
+#define EIDRM        43
+#define EDQUOT       122
+#define ENOKEY       126
+#define EKEYEXPIRED  127
+#define EKEYREVOKED  128
+#define EKEYREJECTED 129
+#define EOWNERDEAD   130
+#define ETIME        62
+#define EOVERFLOW    75
+#define ESTALE       116
+#define ERESTARTNOINTR 513
 
 #define ERESTARTSYS  512   /* restart syscall after signal delivery */
 

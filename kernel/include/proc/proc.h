@@ -49,10 +49,13 @@ typedef struct proc_cred {
 #define CAP_SETGID           6
 #define CAP_SETUID           7
 #define CAP_SETPCAP          8
+#define CAP_SYS_MODULE       16
 #define CAP_SYS_CHROOT       18
 #define CAP_SYS_PTRACE       19
+#define CAP_SYS_NICE         23
 #define CAP_SYS_ADMIN        21
 #define CAP_SYS_RESOURCE     24
+#define CAP_SYS_BOOT         22
 #define CAP_NET_RAW          13
 
 typedef struct proc_limits {
@@ -265,6 +268,24 @@ typedef struct task_t {
     struct vmo *stack_vmo;
     struct vmo *heap_vmo;
     proc_ns_context_t ns_ctx;
+
+    /* Kernel keyring subsystem (kernel/ipc/keyring.c).  Owning reference to a
+     * keyring object, shared with children at fork and released at teardown. */
+    void           *session_keyring;
+
+    /* Landlock LSM ruleset list (kernel/ipc/landlock.c), process-local. */
+    void           *landlock_rulesets;
+
+    /* Restartable sequences (rseq(2)): user-registered per-thread rseq area
+     * and signature.  0 when not registered. */
+    uintptr_t       rseq_area;
+    uint32_t        rseq_sig;
+    uint32_t        rseq_flags;
+
+    /* ioprio_get/ioprio_set(2): the encoded I/O priority (class<<13 | data). */
+    int             ioprio;
+    /* pkey_alloc/pkey_mprotect(2): allocated protection keys bitmap. */
+    uint32_t        pkey_bitset;
 
     /* Cgroup resource control */
     struct cg_node *cgroup;

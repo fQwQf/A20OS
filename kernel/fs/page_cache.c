@@ -34,7 +34,9 @@ static inline void page_cache_account_scan(size_t entries)
 
 static unsigned page_cache_hash_key(vnode_t *vn, uint64_t index)
 {
-    uintptr_t v = (uintptr_t)vn;
+    uintptr_t v = vn && vn->mnt
+        ? (uintptr_t)vn->mnt ^ (uintptr_t)vn->ino
+        : (uintptr_t)vn;
     return (unsigned)((v >> 4) ^ index ^ (index >> 32)) &
            (PAGE_CACHE_HASH_BUCKETS - 1);
 }
@@ -1110,9 +1112,6 @@ void page_cache_invalidate_uptodate_range(vnode_t *vn, uint64_t start_byte,
             detach_mapping_deferred_locked(page);
             free_insert_locked(page);
             detached++;
-        } else {
-            page->invalidate_gen++;
-            __atomic_store_n(&page->uptodate, 0, __ATOMIC_RELEASE);
         }
     }
     page_cache_account_scan(visited);
@@ -1136,14 +1135,21 @@ void page_cache_truncate(vnode_t *vn, uint64_t new_size)
         if (page->index < eof_index)
             continue;
         int partial_eof_page = eof_offset && page->index == eof_index;
-        if (refcount_read(&page->ref_count) == 0) {
-            detach_mapping_deferred_locked(page);
-            free_insert_locked(page);
-            detached++;
-        } else if (partial_eof_page) {
+        if (partial_eof_page &&
+            (page->dirty || page_cache_is_uptodate(page))) {
+            /* Buffered writes may be newer than storage.  Retain the prefix
+             * of the partial EOF page and discard only bytes beyond the new
+             * size; detaching an unpinned dirty page here would lose data that
+             * remains inside the truncated file. */
             memset((char *)page->data + eof_offset, 0,
                    PAGE_SIZE - eof_offset);
             page->invalidate_gen++;
+            if (page->dirty)
+                __atomic_add_fetch(&page->dirty_gen, 1, __ATOMIC_RELEASE);
+        } else if (refcount_read(&page->ref_count) == 0) {
+            detach_mapping_deferred_locked(page);
+            free_insert_locked(page);
+            detached++;
         } else {
             /*
              * Page is pinned by a concurrent reader/writer.  We cannot
@@ -1223,6 +1229,67 @@ void page_cache_get_stats(page_cache_stats_t *stats)
             stats->dirty++;
         if (refcount_read(&page->ref_count) > 0)
             stats->pinned++;
+    }
+    spin_unlock_irqrestore(&g_page_cache_lock, flags);
+}
+
+int page_cache_readahead(vfile_t *vf, uint64_t start_byte, size_t count)
+{
+    if (!vf || !vf->vnode)
+        return -EINVAL;
+    if (vf->vnode->type != VFS_FT_REGULAR)
+        return 0;
+    if (count == 0)
+        return 0;
+
+    size_t file_size = vf->vnode->size;
+    if (start_byte >= file_size)
+        return 0;
+    if (count > file_size - start_byte)
+        count = file_size - start_byte;
+
+    size_t done = 0;
+    while (done < count) {
+        uint64_t pos = start_byte + done;
+        uint64_t index = pos / PAGE_SIZE;
+        size_t page_off = (size_t)(pos % PAGE_SIZE);
+
+        page_cache_page_t *page = page_cache_get(vf->vnode, index, 1);
+        if (!page)
+            break;
+        if (!page_cache_is_uptodate(page)) {
+            int r = page_cache_fill_vfile_page(vf, page);
+            if (r < 0) {
+                page_cache_put(page);
+                break;
+            }
+        }
+        page_cache_put(page);
+        done += PAGE_SIZE - page_off;
+    }
+    return 0;
+}
+
+void page_cache_file_stats(vfile_t *vf, size_t *resident, size_t *dirty)
+{
+    if (resident)
+        *resident = 0;
+    if (dirty)
+        *dirty = 0;
+    if (!vf || !vf->vnode || !g_initialized)
+        return;
+
+    uint64_t flags = spin_lock_irqsave(&g_page_cache_lock);
+    for (size_t i = 0; i < g_allocated_pages; i++) {
+        page_cache_page_t *page = page_cache_page_at(i);
+        if (!page)
+            continue;
+        if (!page->valid || page->vnode != vf->vnode)
+            continue;
+        if (resident)
+            *resident += PAGE_SIZE;
+        if (page->dirty && dirty)
+            *dirty += PAGE_SIZE;
     }
     spin_unlock_irqrestore(&g_page_cache_lock, flags);
 }

@@ -73,6 +73,36 @@ static inline void arch_switch_addr_space_token(uint64_t token)
 }
 #endif
 
+/* Optional tagged-address-space lifecycle hooks. Architectures with ASIDs
+ * override these macros in their master arch header; all others keep the
+ * historical untagged address-space token and full-flush behavior. */
+#ifndef ARCH_MM_CONTEXT_ALLOC
+# define ARCH_MM_CONTEXT_ALLOC() 0U
+#endif
+#ifndef ARCH_MM_CONTEXT_RELEASE
+# define ARCH_MM_CONTEXT_RELEASE(context_id) do { (void)(context_id); } while (0)
+#endif
+#ifndef ARCH_MM_ADDRESS_SPACE_TOKEN
+# define ARCH_MM_ADDRESS_SPACE_TOKEN(pgdir, context_id) \
+    ((void)(context_id), arch_make_addr_space_token(pgdir))
+#endif
+
+static inline uint32_t arch_mm_context_alloc(void)
+{
+    return ARCH_MM_CONTEXT_ALLOC();
+}
+
+static inline void arch_mm_context_release(uint32_t context_id)
+{
+    ARCH_MM_CONTEXT_RELEASE(context_id);
+}
+
+static inline uint64_t arch_mm_address_space_token(void *pgdir,
+                                                    uint32_t context_id)
+{
+    return ARCH_MM_ADDRESS_SPACE_TOKEN(pgdir, context_id);
+}
+
 /*
  * Optional architecture capabilities.  Architecture headers opt in by
  * defining the corresponding ARCH_* macro; shared scheduler/process code

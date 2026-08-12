@@ -119,6 +119,7 @@ smoke-x86_64:
 smoke-qemu-gui-x86_64:
 	$(MAKE) ARCH=x86_64 BOARD=qemu-virt-x86_64 ABI=both BRINGUP=0 dev-build
 	$(MAKE) ARCH=x86_64 BOARD=qemu-virt-x86_64 ABI=both BRINGUP=0 \
+		GUI_FAT32_IMAGE_MB=$(GUI_FAT32_IMAGE_MB) \
 		.kernel-build/x86_64-qemu-virt-x86_64-both-dev/gui-fat32.img
 	$(PYTHON) tools/smoke_qemu_gui.py \
 		--arch x86_64 \
@@ -130,6 +131,7 @@ smoke-qemu-gui-x86_64:
 smoke-qemu-gui-riscv64:
 	$(MAKE) ARCH=riscv64 BOARD=qemu-virt-riscv64 ABI=both BRINGUP=0 dev-build
 	$(MAKE) ARCH=riscv64 BOARD=qemu-virt-riscv64 ABI=both BRINGUP=0 \
+		GUI_FAT32_IMAGE_MB=$(GUI_FAT32_IMAGE_MB) \
 		.kernel-build/riscv64-qemu-virt-riscv64-both-dev/gui-fat32.img
 	$(PYTHON) tools/smoke_qemu_gui.py \
 		--arch riscv64 \
@@ -142,6 +144,7 @@ smoke-qemu-gui-riscv64:
 smoke-qemu-gui-aarch64:
 	$(MAKE) ARCH=aarch64 BOARD=qemu-virt-aarch64 ABI=both BRINGUP=0 dev-build
 	$(MAKE) ARCH=aarch64 BOARD=qemu-virt-aarch64 ABI=both BRINGUP=0 \
+		GUI_FAT32_IMAGE_MB=$(GUI_FAT32_IMAGE_MB) \
 		.kernel-build/aarch64-qemu-virt-aarch64-both-dev/gui-fat32.img
 	$(PYTHON) tools/smoke_qemu_gui.py --arch aarch64 --qemu qemu-system-aarch64 \
 		--kernel .kernel-build/aarch64-qemu-virt-aarch64-both-dev/kernel.elf \
@@ -151,6 +154,7 @@ smoke-qemu-gui-aarch64:
 smoke-qemu-gui-arm32:
 	$(MAKE) ARCH=arm32 BOARD=qemu-virt-arm32 ABI=both BRINGUP=0 dev-build
 	$(MAKE) ARCH=arm32 BOARD=qemu-virt-arm32 ABI=both BRINGUP=0 \
+		GUI_FAT32_IMAGE_MB=$(GUI_FAT32_IMAGE_MB) \
 		.kernel-build/arm32-qemu-virt-arm32-both-dev/gui-fat32.img
 	$(PYTHON) tools/smoke_qemu_gui.py --arch arm32 --qemu qemu-system-arm \
 		--kernel .kernel-build/arm32-qemu-virt-arm32-both-dev/kernel.elf \
@@ -160,6 +164,7 @@ smoke-qemu-gui-arm32:
 smoke-qemu-gui-loongarch64:
 	$(MAKE) ARCH=loongarch64 BOARD=qemu-virt-loongarch64 ABI=both BRINGUP=0 dev-build
 	$(MAKE) ARCH=loongarch64 BOARD=qemu-virt-loongarch64 ABI=both BRINGUP=0 \
+		GUI_FAT32_IMAGE_MB=$(GUI_FAT32_IMAGE_MB) \
 		.kernel-build/loongarch64-qemu-virt-loongarch64-both-dev/gui-fat32.img
 	$(PYTHON) tools/smoke_qemu_gui.py --arch loongarch64 --qemu qemu-system-loongarch64 \
 		--kernel .kernel-build/loongarch64-qemu-virt-loongarch64-both-dev/kernel.elf \
@@ -479,8 +484,9 @@ smoke-mm-fork-exec-race:
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/mm-fork-exec-race-riscv64.log"; \
 	status=0; \
-	{ sleep $(SMOKE_INPUT_DELAY); printf 'mm_stress --vma-fork-exec-only\npoweroff\n'; } | \
-	$(TIMEOUT) $(SMOKE_TIMEOUT_MM_FORK_EXEC) qemu-system-riscv64 \
+	$(TIMEOUT) --expect 'mksh main starting!' --expect '# ' \
+		--send-line 'mm_stress --vma-fork-exec-only' --send-line 'poweroff' \
+		$(SMOKE_TIMEOUT_MM_FORK_EXEC) qemu-system-riscv64 \
 		-machine virt -m 1G -nographic -smp 8 -bios default \
 		-global virtio-mmio.force-legacy=false \
 		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev-smp8/fat32.img,if=none,format=raw,id=x0 \
@@ -503,8 +509,9 @@ smoke-vfs-stress:
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/vfs-stress-riscv64.log"; \
 	status=0; \
-	{ sleep $(SMOKE_INPUT_DELAY); printf 'vfs_stress\npoweroff\n'; } | \
-	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
+	$(TIMEOUT) --expect 'mksh main starting!' --expect '# ' \
+		--send-line 'vfs_stress' --send-line 'poweroff' \
+		$(SMOKE_TIMEOUT) qemu-system-riscv64 \
 		-machine virt -m 1G -nographic -smp 1 -bios default \
 		-global virtio-mmio.force-legacy=false \
 		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
@@ -576,9 +583,32 @@ smoke-io-event:
 		exit "$$status"; \
 	fi
 
+smoke-syscall-ext:
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/syscall-ext-riscv64.log"; \
+	status=0; \
+	{ sleep $(SMOKE_INPUT_DELAY); printf 'syscall_ext\npoweroff\n'; } | \
+	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
+		-machine virt -m 1G -nographic -smp 1 -bios default \
+		-global virtio-mmio.force-legacy=false \
+		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
+		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
+		> "$$log" 2>&1 || status=$$?; \
+	if grep -q 'SYSCALL_EXT: PASS' "$$log"; then \
+		echo "smoke-syscall-ext: PASS; log saved to $$log"; \
+	else \
+		echo "smoke-syscall-ext: failed with status $$status; tail of $$log:"; \
+		tail -n 80 "$$log"; \
+		exit 1; \
+	fi
+
 smoke-sched-stress:
 		$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
-	@mkdir -p $(SMOKE_LOG_DIR)
+		@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/sched-stress-riscv64.log"; \
 	status=0; \
@@ -591,6 +621,7 @@ smoke-sched-stress:
 		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
 		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
 		> "$$log" 2>&1 || status=$$?; \
+
 	if grep -q 'SCHED_STRESS: PASS' "$$log"; then \
 		echo "smoke-sched-stress: PASS; log saved to $$log"; \
 	else \

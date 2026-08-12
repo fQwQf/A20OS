@@ -92,4 +92,13 @@ void page_cache_truncate(vnode_t *vn, uint64_t new_size);
 size_t page_cache_drop_clean(void);
 void page_cache_get_stats(page_cache_stats_t *stats);
 
+/* Prefetch the page range [start_byte, start_byte + count) for @vf into the
+ * page cache.  Existing/uptodate pages are left alone; missing pages are
+ * filled.  Returns 0 on success or a negative errno.  Used by readahead(2). */
+int page_cache_readahead(vfile_t *vf, uint64_t start_byte, size_t count);
+
+/* Per-file cachestat: reports the number of resident, dirty and total bytes
+ * for @vf.  Used by cachestat(2) and statfs accounting. */
+void page_cache_file_stats(vfile_t *vf, size_t *resident, size_t *dirty);
+
 #endif /* _FS_PAGE_CACHE_H */

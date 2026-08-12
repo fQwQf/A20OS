@@ -22,6 +22,7 @@
 #include "fs/locks.h"
 #include "fs/page_cache.h"
 #include "fs/inotify.h"
+#include "ipc/landlock.h"
 #include "fs/pipe.h"
 #include "fs/ramfs.h"
 #include "fs/devfs.h"
@@ -232,12 +233,54 @@ static int vfs_proc_fd_open(const char *path, int flags)
     return opened_gfd;
 }
 
-int vfs_open(const char *path, int flags, int mode) {
-    /* Resolve cwd from current process */
+int vfs_open_vnode(struct vnode *vn, int flags)
+{
+    if (!vn || !vn->ops || !vn->ops->open) {
+        if (vn) vnode_put(vn);
+        return -ENXIO;
+    }
+    vfile_t *opened = vn->ops->open(vn, flags);
+    if (!opened) {
+        vnode_put(vn);
+        return -ENOMEM;
+    }
+    strncpy(opened->path, "handle", MAX_PATH_LEN - 1);
+    opened->path[MAX_PATH_LEN - 1] = '\0';
+    int gfd = vfs_alloc_fd(opened);
+    if (gfd < 0) {
+        vnode_t *ovn = opened->vnode;
+        if (opened->ops && opened->ops->close)
+            opened->ops->close(opened);
+        vfile_free(opened);
+        vnode_put(ovn);
+        vnode_put(vn);
+        return -EMFILE;
+    }
+    vnode_put(vn);
+    return gfd;
+}
+
+int vfs_open(const char *path, int flags, int mode) {    /* Resolve cwd from current process */
     task_t *cur = proc_current();
     if (cur)
         cur->vfs_open_errno = 0;
     const char *cwd = cur ? cur->fs.cwd : "/";
+
+    /* Landlock enforcement for restricted processes. */
+    {
+        uint64_t need = LANDLOCK_ACCESS_FS_READ_FILE;
+        if ((flags & O_WRONLY) || (flags & O_RDWR) || (flags & O_CREAT) ||
+            (flags & O_TRUNC))
+            need |= LANDLOCK_ACCESS_FS_WRITE_FILE;
+        if (mode & S_IFDIR)
+            need = LANDLOCK_ACCESS_FS_READ_DIR;
+        int lr = landlock_check_path(path, need);
+        if (lr < 0) {
+            if (cur)
+                cur->vfs_open_errno = -lr;
+            return lr;
+        }
+    }
 
     /* Check for special device files */
     char resolved[MAX_PATH_LEN];
@@ -488,10 +531,17 @@ int vfs_openat2(int dirfd, const char *path, int flags, int mode, uint64_t resol
 
             int cmode = (mode & S_IFMT) | ((mode & 07777) & ~(cur ? cur->fs.umask : 022));
             int cr = parent->ops->create(parent, fname, cmode, &vn);
-            if (cr == 0)
-                vfs_dcache_invalidate(parent, fname);
+            if (cr < 0) {
+                vnode_put(parent);
+                return cr;
+            }
+            vfs_dcache_invalidate(parent, fname);
+            vfs_dcache_insert(parent, fname, vn);
+            /* Keep the vnode returned by create canonical for subsequent
+             * opens.  Shared-memory users commonly open the same new inode
+             * once read-write and once read-only before unlinking it; making
+             * a second vnode would split cached size and mmap page state. */
             vnode_put(parent);
-            if (cr < 0) return cr;
             vfs_touch_mtime(vn);
         } else {
             return lookup_err ? lookup_err : -ENOENT;

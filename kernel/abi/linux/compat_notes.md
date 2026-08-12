@@ -23,6 +23,51 @@ flag、对象类型或并发边界。
 - VFS：已有很多路径和文件操作，但 mount namespace、symlink、权限、文件系统特定行为和并发语义仍不完整。
 - Sockets：AF_INET/AF_UNIX/AF_ALG 兼容面足够覆盖测试，但没有实现完整 Linux network stack 行为。
 - POSIX timers 和 timerfd：足够支撑常见等待场景，但 signal delivery 和 overrun 语义被简化。
+- Keyring：`kernel/ipc/keyring.c` 实现 add/request/keyctl 的核心命令与 session/user keyring，但没有 key type instantiator、`KEYCTL_*` 全部命令或完整 Linux 安全语义。
+- fanotify：基于共享 notify 后端（`kernel/fs/inotify.c`）实现 FAN_CLASS_NOTIF + FID；content/pre-content 类和 per-event fd 不在范围内。
+- acct(2)：写入 Linux v3 记账记录，但没有 BSD 风格的 `ac_btime` 高精度或完整字段集合。
+- Linux AIO：`kernel/fs/aio.c` 提供上下文与完成队列，但 pread/pwrite/fsync/fdatasync 在当前 VFS 上同步执行，不是后台异步 I/O；`io_cancel` 无法中止正在执行的 op。
+- Module syscall：`init_module/finit_module/delete_module` 驱动 A20OS 的 drvmod ET_REL 驱动加载器，加载的是 A20 驱动模块而非 Linux 内核模块，且要求 CAP_SYS_MODULE。
+- 跨进程内存：`process_vm_readv/writev` 直接走目标页表（`kernel/mm/process_vm.c`），`process_madvise` 复用 madvise 兼容语义，`process_mrelease` 依赖退出时自动回收。
+- mempolicy/NUMA：单 NUMA 节点，`set_mempolicy/mbind/migrate_pages/move_pages` 只做策略校验与存储，不移动物理页。
+- 文件句柄：`name_to_handle_at/open_by_handle_at` 基于内核句柄注册表（`kernel/fs/file_handle.c`），不是 filesystem export 操作。
+- 新 mount API：`fsopen/fsconfig/fsmount/fspick/open_tree/move_mount/mount_setattr` 建立在现有 mount 表之上；`mount_setattr` 不支持逐 mount 属性。
+- io_uring：SQ/CQ 环在内核内存（`kernel/fs/io_uring.c`）并映射进调用者；`io_uring_enter` 同步执行 NOP/READ/WRITE/FSYNC/CLOSE，没有真正的后台异步完成。
+- Landlock：fd-backed ruleset + path-beneath 规则，在 `vfs_open` 强制；没有完整 LSM 框架。
+- rseq：注册/注销每线程 rseq 区域；A20OS 不做跨 CPU 迁移，因此内核从不中止序列。
+- `restart_syscall` 返回 `-ERESTARTNOINTR`；`remap_file_pages` 是接受式 no-op；`memfd_secret` 退化为普通 memfd。
+- SysV 消息队列（`kernel/ipc/sysv_msg.c`）：固定 32 队列表，支持 msgget/msgsnd/msgrcv/msgctl，含阻塞 park/wake 与 IPC_NOWAIT/MSG_NOERROR。
+- POSIX 消息队列（`kernel/ipc/posix_mq.c`）：命名队列 + per-fd mqd，优先级 FIFO，绝对超时（timedsend/timedreceive），mq_notify 用信号投递。
+- ioprio/pkey：每任务 I/O 优先级与 16 槽保护键位图（`kernel/proc/sched_compat.c`），pkey_mprotect 等价 mprotect。
+- `mseal` 是接受式 no-op（无逐 VMA seal 跟踪）；`seccomp` 明确返回不支持而非假装过滤；kexec 明确拒绝。
+- `nfsservctl` 返回 -ENOSYS（Linux 4.19 已移除）；`map_shadow_stack` 在 RISC-V 返回 -ENOSYS。
+- LSM 自省：`lsm_get_self_attr`/`lsm_list_modules` 报告 Landlock；`lsm_set_self_attr` 由 `landlock_restrict_self` 覆盖。
+- `statmount`/`listmount`/`listns`/`open_tree_attr` 提供 mount 表自省，`setxattrat` 系列提供 dirfd 相对 xattr。
+- RISC-V 专用：`riscv_hwprobe` 报告 IMA 基础行为；`riscv_flush_icache` 刷新范围 icache；`rt_tgsigqueueinfo` 按 tid 投递。
+- `time(2)` 在 asm-generic 架构不存在（musl 用 clock_gettime），已从表移除；`SYS_time` 保留仅供 x86_64 架构表映射。
+
+## 文件化接口（/proc、/dev、ioctl）
+
+- `/proc` 新增：`boot_id`、`cap_last_cap`、`nr_open`、`pressure`、`uid_map`/`gid_map`/`setgroups`、`sysvipc`（汇总 msg/sem/shm 计数）、`/proc/sys/kernel/hostname` 与 `domainname`（可读可写，与 sethostname/setdomainname 共享存储）。
+- `/dev` 新增：`/dev/full`（读零写 ENOSPC）、`/dev/kmsg`（写追加内核日志环、读回日志；经 `klog_write_raw`/`klog_read`）。
+- tty/pty ioctl 补齐：`TIOCGPGRP`/`TIOCSPGRP`（前台进程组）、`TCFLSH`（刷输入/输出/双向）、`TIOCOUTQ`（输出队列字节数）、`TIOCSTI`（注入单字节输入）、`FIONREAD`/`TIOCINQ`（可读字节数）——pty master 与 slave 端均已支持。
+- 补充 `core/ioctl.h` 标准 tty ioctl 常量全集（TCSBRK/TCXONC/TIOCEXCL/TIOCM*/TIOCPKT/TIOCGETD 等）供后续驱动与用户态使用。
+- `/proc` 经典文件补齐（对照 Uinxed-Kernel）：`devices`、`partitions`、`diskstats`、`modules`（经 drvmod_list）、`misc`、`iomem`、`ioports`、`softirqs`、`route`/`arp`（同时挂在 `/proc` 与 `/proc/net/`）、`tty`、`ldiscs`、`drivers`（经 driver_core_list_drivers）。
+- `/proc/net/` 补齐：`route`、`arp`、`dev`、`tcp`、`udp`、`unix`。
+- `/proc/thread-self` 目录（与 `self` 同样解析到当前线程）。
+- `/proc/<pid>/` 补齐：`limits`、`wchan`、`stack`。
+
+## GPU / 帧缓冲接口
+
+- fbdev 补齐 Linux 标准 ioctl：`FBIOPAN_DISPLAY`（仅接受 (0,0)）、`FBIOBLANK`（接受 0/1 无操作）、`FBIOGETCMAP`/`FBIOPUTCMAP`（真彩帧缓冲返回/接受恒等调色板）。
+- 修复 `FBIO_FLUSH`（A20 扩展）与 Linux 标准 `FBIOGETCMAP` 共用 0x4604 的冲突：`FBIO_FLUSH` 移到 0x4609，0x4604 归回 `FBIOGETCMAP`；LVGL 用户态常量同步更新。
+- `/sys/class/drm/card0*` 与 `/sys/class/drm/card0-Virtual-1/{enabled,status,modes}` 提供 DRM 显示元数据。
+- 音频仍是 A20 原生 `a20_audio` ioctl（非 Linux ALSA SNDRV 标准）；完整 DRM/ALSA 接口集（na-kernel 的 drm_ioctl 全套）列为后续工作。
+
+## GPU/音频子系统
+
+- **DRM/KMS**（新增 `kernel/drivers/gpu/drm.c`）：`/dev/dri/card0` 提供 Linux 标准 DRM ioctl 子集，映射到 `gpu_dev_ops_t`（virtio-gpu/vmsvga）：VERSION、GET_CAP、GEM_CLOSE、MODE_GETRESOURCES/GETCRTC/SETCRTC/GETCONNECTOR/GETENCODER/GETPLANE/GETPLANERESOURCES/GETFB/ADDFB/RMFB/PAGE_FLIP/DPMS/GETPROPERTY/SETPROPERTY/CREATE_DUMB/MAP_DUMB/DESTROY_DUMB/GETGAMMA/ATOMIC(test)。dumb buffer 用 VMO 支持 mmap。
+- **ALSA**（新增 `kernel/drivers/audio/alsa.c`）：`/dev/snd/controlC0`、`/dev/snd/pcmC0D0p`、`/dev/snd/pcmC0D0c` 提供 SNDRV_CTL_IOCTL_PVERSION/CARD_INFO/PCM_NEXT_DEVICE/PCM_INFO 与 SNDRV_PCM_IOCTL_HW_PARAMS/SW_PARAMS/STATUS/WRITEI_FRAMES/READI_FRAMES/PREPARE/START/DRAIN/DROP/PAUSE，映射到 `audio_dev_ops_t`（virtio-snd）。ioctl 路径支持；mmap 播放环列为后续工作。
 
 ## 维护规则
 

@@ -147,6 +147,31 @@ static pf_type_t name_to_type(const char *name, int *out_pid) {
     if (strcmp(name, "fdinfo") == 0) return PF_PID_FDINFO;
     if (strcmp(name, "mountinfo") == 0) return PF_PID_MOUNTINFO;
     if (strcmp(name, "pagemap") == 0) return PF_PID_PAGEMAP;
+    if (strcmp(name, "boot_id") == 0) return PF_BOOT_ID;
+    if (strcmp(name, "cap_last_cap") == 0) return PF_CAP_LAST_CAP;
+    if (strcmp(name, "nr_open") == 0) return PF_NR_OPEN;
+    if (strcmp(name, "pressure") == 0) return PF_PRESSURE;
+    if (strcmp(name, "uid_map") == 0) return PF_UID_MAP;
+    if (strcmp(name, "gid_map") == 0) return PF_GID_MAP;
+    if (strcmp(name, "setgroups") == 0) return PF_SETGROUPS;
+    if (strcmp(name, "sysvipc") == 0) return PF_SYSVIPC;
+    if (strcmp(name, "devices") == 0) return PF_DEVICES;
+    if (strcmp(name, "partitions") == 0) return PF_PARTITIONS;
+    if (strcmp(name, "diskstats") == 0) return PF_DISKSTATS;
+    if (strcmp(name, "modules") == 0) return PF_MODULES;
+    if (strcmp(name, "misc") == 0) return PF_MISC;
+    if (strcmp(name, "iomem") == 0) return PF_IOMEM;
+    if (strcmp(name, "ioports") == 0) return PF_IOPORTS;
+    if (strcmp(name, "softirqs") == 0) return PF_SOFTIRQS;
+    if (strcmp(name, "route") == 0) return PF_ROUTE;
+    if (strcmp(name, "arp") == 0) return PF_ARP;
+    if (strcmp(name, "tty") == 0) return PF_TTY;
+    if (strcmp(name, "ldiscs") == 0) return PF_LDISCS;
+    if (strcmp(name, "drivers") == 0) return PF_DRIVERS;
+    if (strcmp(name, "thread-self") == 0) return PF_THREAD_SELF;
+    if (strcmp(name, "limits") == 0) return PF_PID_LIMITS;
+    if (strcmp(name, "wchan") == 0) return PF_PID_WCHAN;
+    if (strcmp(name, "stack") == 0) return PF_PID_STACK;
     return PF_ROOT;
 }
 
@@ -167,6 +192,27 @@ static int procfs_root_file_type(pf_type_t type)
     case PF_SWAPS:
     case PF_INTERRUPTS:
     case PF_SYS_KERNEL_PIDMAP:
+    case PF_BOOT_ID:
+    case PF_CAP_LAST_CAP:
+    case PF_NR_OPEN:
+    case PF_PRESSURE:
+    case PF_UID_MAP:
+    case PF_GID_MAP:
+    case PF_SETGROUPS:
+    case PF_SYSVIPC:
+    case PF_DEVICES:
+    case PF_PARTITIONS:
+    case PF_DISKSTATS:
+    case PF_MODULES:
+    case PF_MISC:
+    case PF_IOMEM:
+    case PF_IOPORTS:
+    case PF_SOFTIRQS:
+    case PF_ROUTE:
+    case PF_ARP:
+    case PF_TTY:
+    case PF_LDISCS:
+    case PF_DRIVERS:
         return 1;
     default:
         return 0;
@@ -299,6 +345,12 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
     } else if (dp && dp->type == PF_SYS_KERNEL && strcmp(name, "core_pattern") == 0) {
         child = new_entry(name, PF_SYS_KERNEL_CORE_PATTERN, 0);
         type = PF_SYS_KERNEL_CORE_PATTERN;
+    } else if (dp && dp->type == PF_SYS_KERNEL && strcmp(name, "hostname") == 0) {
+        child = new_entry(name, PF_SYS_KERNEL_HOSTNAME, 0);
+        type = PF_SYS_KERNEL_HOSTNAME;
+    } else if (dp && dp->type == PF_SYS_KERNEL && strcmp(name, "domainname") == 0) {
+        child = new_entry(name, PF_SYS_KERNEL_DOMAINNAME, 0);
+        type = PF_SYS_KERNEL_DOMAINNAME;
     } else if (dp && dp->type == PF_SYS_KERNEL && strcmp(name, "io_uring_disabled") == 0) {
         child = new_entry(name, PF_SYS_KERNEL_IO_URING_DISABLED, 0);
         type = PF_SYS_KERNEL_IO_URING_DISABLED;
@@ -326,6 +378,24 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
     } else if (dp && dp->type == PF_NET && strcmp(name, "config") == 0) {
         child = new_entry(name, PF_NET_CONFIG, 0);
         type = PF_NET_CONFIG;
+    } else if (dp && dp->type == PF_NET && strcmp(name, "route") == 0) {
+        child = new_entry(name, PF_ROUTE, 0);
+        type = PF_ROUTE;
+    } else if (dp && dp->type == PF_NET && strcmp(name, "arp") == 0) {
+        child = new_entry(name, PF_ARP, 0);
+        type = PF_ARP;
+    } else if (dp && dp->type == PF_NET && strcmp(name, "dev") == 0) {
+        child = new_entry(name, PF_NET_DEV, 0);
+        type = PF_NET_DEV;
+    } else if (dp && dp->type == PF_NET && strcmp(name, "tcp") == 0) {
+        child = new_entry(name, PF_NET_TCP, 0);
+        type = PF_NET_TCP;
+    } else if (dp && dp->type == PF_NET && strcmp(name, "udp") == 0) {
+        child = new_entry(name, PF_NET_UDP, 0);
+        type = PF_NET_UDP;
+    } else if (dp && dp->type == PF_NET && strcmp(name, "unix") == 0) {
+        child = new_entry(name, PF_NET_UNIX, 0);
+        type = PF_NET_UNIX;
     } else if (dp && dp->type == PF_ROOT && dp->pid == 0 && strcmp(name, "a20") == 0) {
         child = new_entry(name, PF_A20, 0);
         type = PF_A20;
@@ -421,7 +491,7 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
             return -ENOENT;
         child = new_entry(name, type, dp->pid);
     } else if (dp && dp->type == PF_ROOT && dp->pid == 0 &&
-               type == PF_SELF) {
+               (type == PF_SELF || type == PF_THREAD_SELF)) {
         child = new_entry(name, PF_ROOT, -1);
     } else if (dp && dp->type == PF_ROOT && dp->pid == 0 &&
                is_pid_str(name)) {
@@ -452,7 +522,9 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
             type == PF_PID_ENVIRON || type == PF_PID_IO ||
             type == PF_PID_LOGINUID || type == PF_PID_SESSIONID ||
             type == PF_PID_NS || type == PF_PID_FDINFO ||
-            type == PF_PID_MOUNTINFO || type == PF_PID_PAGEMAP) {
+            type == PF_PID_MOUNTINFO || type == PF_PID_PAGEMAP ||
+            type == PF_PID_LIMITS || type == PF_PID_WCHAN ||
+            type == PF_PID_STACK) {
             child = new_entry(name, type, dp->pid);
         } else {
             return -ENOENT;
@@ -472,6 +544,7 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
     vn->ino = (uint64_t)(uintptr_t)child;
     vn->type = fd_symlink ? VFS_FT_SYMLINK :
                ((type == PF_ROOT && is_pid_str(name)) || type == PF_SELF ||
+                type == PF_THREAD_SELF ||
                 type == PF_SYS || type == PF_SYS_FS || type == PF_SYS_KERNEL ||
                 type == PF_SYS_NET || type == PF_SYS_VM ||
                 type == PF_SYS_FS_INOTIFY || type == PF_NET ||
@@ -657,6 +730,19 @@ static int procfs_fwrite(vfile_t *vf, const char *buf, size_t count) {
         int r = proc_set_pid_max(value);
         return r < 0 ? r : (int)count;
     }
+    if (p->type == PF_SYS_KERNEL_HOSTNAME ||
+        p->type == PF_SYS_KERNEL_DOMAINNAME) {
+        extern int linux_kernel_set_hostname(const char *name, size_t len);
+        extern int linux_kernel_set_domainname(const char *name, size_t len);
+        /* Strip a trailing newline from the written value. */
+        size_t n = count;
+        while (n > 0 && (buf[n - 1] == '\n' || buf[n - 1] == '\r'))
+            n--;
+        int r = p->type == PF_SYS_KERNEL_HOSTNAME
+                    ? linux_kernel_set_hostname(buf, n)
+                    : linux_kernel_set_domainname(buf, n);
+        return r < 0 ? r : (int)count;
+    }
     if (p->type == PF_A20_SCHED_BASE_SLICE) {
         char tmp[32];
         size_t n = count < sizeof(tmp) - 1 ? count : sizeof(tmp) - 1;
@@ -817,14 +903,18 @@ static int procfs_fd_readdir(vfile_t *vf, procfs_priv_t *p,
 static int procfs_freaddir(vfile_t *vf, void *dirp, size_t count) {
     static const char *root_entries[] = {
         ".", "..", "meminfo", "version", "uptime", "cmdline",
-        "cpuinfo", "mounts", "self", "loadavg", "net", "config.gz",
-        "filesystems", "cgroups", "swaps", "interrupts", "pidmap", "sys", "a20", NULL
+        "cpuinfo", "mounts", "self", "thread-self", "loadavg", "net", "config.gz",
+        "filesystems", "cgroups", "swaps", "interrupts", "pidmap", "sys", "a20",
+        "boot_id", "cap_last_cap", "nr_open", "pressure", "uid_map", "gid_map",
+        "setgroups", "sysvipc", "devices", "partitions", "diskstats", "modules",
+        "misc", "iomem", "ioports", "softirqs", "route", "arp", "tty", "ldiscs",
+        "drivers", NULL
     };
     static const char *pid_entries[] = {
         ".", "..", "stat", "status", "statm", "maps", "smaps",
         "oom_score", "oom_score_adj", "cgroup", "cmdline", "comm", "exe", "cwd",
         "fd", "environ", "io", "loginuid", "sessionid", "ns", "fdinfo",
-        "mountinfo", "mounts", "pagemap", NULL
+        "mountinfo", "mounts", "pagemap", "limits", "wchan", "stack", NULL
     };
     static const char *sys_entries[] = {
         ".", "..", "fs", "kernel", "vm", "net", NULL
@@ -834,13 +924,14 @@ static int procfs_freaddir(vfile_t *vf, void *dirp, size_t count) {
     };
     static const char *sys_kernel_entries[] = {
         ".", "..", "osrelease", "pid_max", "pidmap", "tainted", "sched_autogroup_enabled",
-        "core_pattern", "io_uring_disabled", NULL
+        "core_pattern", "io_uring_disabled", "hostname", "domainname", NULL
     };
     static const char *sys_net_entries[] = {
         ".", "..", NULL
     };
     static const char *net_entries[] = {
-        ".", "..", "status", "config", NULL
+        ".", "..", "status", "config", "route", "arp", "dev", "tcp", "udp",
+        "unix", NULL
     };
     static const char *sys_vm_entries[] = {
         ".", "..", "drop_caches", NULL

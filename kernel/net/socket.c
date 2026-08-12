@@ -266,21 +266,22 @@ int net_socketpair_create(int domain, int type, int protocol, int out_gfd[2]) {
     }
     net_socket_t *sa = net_socket_from_file(a);
     net_socket_t *sb = net_socket_from_file(b);
-    if (type == SOCK_STREAM || type == SOCK_SEQPACKET) {
-        /* Channel-backed data plane (internal IPC bridge): plain data
-         * flows through a channel pair; SCM_RIGHTS falls back to the
-         * legacy queue. */
-        a20_channel_ep_t *ep0 = a20_channel_create(0, NULL);
-        if (ep0) {
-            sa->ch_ep = ep0;
-            sb->ch_ep = ep0->peer;
-        }
-    }
     uint64_t flags = spin_lock_irqsave(&g_net_lock);
     sa->peer = sb;
     sb->peer = sa;
     sa->connected = 1;
     sb->connected = 1;
+    /* SO_PEERCRED for socketpair: both ends belong to this task. */
+    {
+        task_t *cur = proc_current();
+        if (cur) {
+            int32_t pid = cur->pid;
+            int32_t uid = cur->cred.uid;
+            int32_t gid = cur->cred.gid;
+            sa->peer_pid = pid; sa->peer_uid = uid; sa->peer_gid = gid;
+            sb->peer_pid = pid; sb->peer_uid = uid; sb->peer_gid = gid;
+        }
+    }
     spin_unlock_irqrestore(&g_net_lock, flags);
     out_gfd[0] = a;
     out_gfd[1] = b;
@@ -531,15 +532,16 @@ int net_sendto(int gfd, const void *buf, size_t len, int flags,
     return (int)total;
 }
 
-int net_recvfrom_meta(int gfd, void *buf, size_t len, int flags,
-                      void *addr, size_t *addrlen, net_recv_meta_t *meta) {
-    net_socket_t *s = net_socket_from_file(gfd);
-    if (!s) return -ENOTSOCK;
+int net_recvfrom_socket_meta(net_socket_t *s, void *buf, size_t len, int flags,
+                             void *addr, size_t *addrlen,
+                             net_recv_meta_t *meta) {
+    if (!s)
+        return -ENOTSOCK;
     if (s->domain == AF_ALG)
         return net_alg_socket_recv(s, buf, len);
     int dontwait = (flags & MSG_DONTWAIT) != 0;
     uint64_t start = timer_get_ticks();
-    if (s->ch_ep && !(flags & MSG_PEEK)) {
+    if (s->ch_ep) {
         /* Channel-backed path: plain data lives on the internal channel,
          * SCM_RIGHTS messages on the legacy queue.  Drain legacy first so
          * fd-carrying messages keep their delivery order. */
@@ -548,10 +550,21 @@ int net_recvfrom_meta(int gfd, void *buf, size_t len, int flags,
             int r = -EAGAIN;
             uint64_t irq = spin_lock_irqsave(&g_net_lock);
             if (s->rx_head) {
-                r = net_dequeue_msg_locked_meta(s, buf, len, addr, addrlen, meta);
+                if (flags & MSG_PEEK) {
+                    net_msg_t *head = s->rx_head;
+                    size_t avail = head->len - head->off;
+                    size_t n = avail < len ? avail : len;
+                    if (n)
+                        memcpy(buf, head->data + head->off, n);
+                    r = (int)n;
+                } else {
+                    r = net_dequeue_msg_locked_meta(s, buf, len, addr,
+                                                    addrlen, meta);
+                }
                 /* Stream coalescing: drain further legacy messages in the
                  * same recv (keeps SCM_RIGHTS fd coalescing semantics). */
-                if (r >= 0 && s->type == SOCK_STREAM) {
+                if (r >= 0 && s->type == SOCK_STREAM &&
+                    !(flags & MSG_PEEK)) {
                     size_t total = (size_t)r;
                     while (total < len && s->rx_head) {
                         int nr = net_dequeue_msg_locked_meta(
@@ -565,8 +578,18 @@ int net_recvfrom_meta(int gfd, void *buf, size_t len, int flags,
                 }
             }
             if (r == -EAGAIN && s->ch_ep)
-                r = unix_ch_recv(s, buf, len);
+                r = (flags & MSG_PEEK) ? unix_ch_peek(s, buf, len) :
+                                         unix_ch_recv(s, buf, len);
             if (r >= 0) {
+                /* Channel-backed delivery has no net_msg metadata; supply
+                 * SCM_CREDENTIALS from the latest sender record captured in
+                 * unix_ch_send when the receiver asked for it. */
+                if (meta && s->passcred && !meta->has_cred && s->ch_ep) {
+                    meta->has_cred = 1;
+                    meta->cred_pid = s->ch_cred_pid;
+                    meta->cred_uid = s->ch_cred_uid;
+                    meta->cred_gid = s->ch_cred_gid;
+                }
                 proc_wake_q_t wq;
                 proc_wake_q_init(&wq);
                 (void)wait_queue_collect_one(&s->write_waitq, 0,
@@ -747,6 +770,12 @@ int net_recvfrom_meta(int gfd, void *buf, size_t len, int flags,
         if (reason == PROC_WAKE_TIMEOUT)
             return -EAGAIN;
     }
+}
+
+int net_recvfrom_meta(int gfd, void *buf, size_t len, int flags,
+                      void *addr, size_t *addrlen, net_recv_meta_t *meta) {
+    return net_recvfrom_socket_meta(net_socket_from_file(gfd), buf, len,
+                                    flags, addr, addrlen, meta);
 }
 
 int net_recvfrom(int gfd, void *buf, size_t len, int flags,

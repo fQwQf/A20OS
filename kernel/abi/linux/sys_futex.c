@@ -545,3 +545,124 @@ next:
 
     t->robust_list_head = 0;
 }
+
+/* ---- futex_waitv / futex_requeue (separate Linux syscalls) ---- */
+
+struct futex_waitv_entry {
+    uint64_t uaddr;
+    uint32_t val;
+    uint32_t flags;
+};
+
+int64_t sys_futex_waitv(const void *waiters, unsigned nr_futexes,
+                        unsigned flags, const void *timeout, uint64_t clockid)
+{
+    if (flags)
+        return -EINVAL;
+    if (nr_futexes == 0 || nr_futexes > 128)
+        return -EINVAL;
+    if (!waiters)
+        return -EFAULT;
+    (void)clockid;
+
+    struct futex_waitv_entry *ents =
+        proc_scratch_buffer(nr_futexes * sizeof(struct futex_waitv_entry));
+    if (!ents)
+        return -ENOMEM;
+    if (copy_from_user(ents, waiters,
+                       nr_futexes * sizeof(struct futex_waitv_entry)) < 0)
+        return -EFAULT;
+
+    /* Validate all addresses up front so a bad entry fails before sleeping. */
+    for (unsigned i = 0; i < nr_futexes; i++) {
+        if (!ents[i].uaddr)
+            return -EINVAL;
+        if (ents[i].flags & ~FUTEX_WAITV_FLAG_BITSET)
+            return -EINVAL;
+        int32_t v;
+        if (copy_from_user(&v, (const void *)(uintptr_t)ents[i].uaddr,
+                           sizeof(v)) < 0)
+            return -EFAULT;
+    }
+
+    /* Timeout. */
+    uint64_t ticks = 0;
+    if (timeout) {
+        struct linux_timespec64_fw {
+            int64_t tv_sec;
+            int64_t tv_nsec;
+        } ts;
+        if (copy_from_user(&ts, timeout, sizeof(ts)) < 0)
+            return -EFAULT;
+        if (ts.tv_sec < 0 || ts.tv_nsec < 0 || ts.tv_nsec >= 1000000000LL)
+            return -EINVAL;
+        uint64_t sec = (uint64_t)ts.tv_sec;
+        uint64_t nsec = (uint64_t)ts.tv_nsec;
+        uint64_t now = timer_get_ticks();
+        if (sec > (UINT64_MAX - now) / TICKS_PER_SEC)
+            ticks = UINT64_MAX - now;
+        else {
+            ticks = sec * TICKS_PER_SEC +
+                    (nsec * TICKS_PER_SEC + 999999999ULL) / 1000000000ULL;
+            if (!ticks) ticks = 1;
+        }
+    }
+
+    /* FUTEX_WAITV waits on the first entry whose value matches; it returns
+     * the index of the woken futex or -ETIMEDOUT.  With synchronous wait the
+     * per-entry semantics are approximated by waiting on the first matching
+     * entry and treating mismatches like Linux (skip to next). */
+    for (unsigned i = 0; i < nr_futexes; i++) {
+        int32_t v;
+        if (copy_from_user(&v, (const void *)(uintptr_t)ents[i].uaddr,
+                           sizeof(v)) < 0)
+            return -EFAULT;
+        if (v == (int32_t)ents[i].val) {
+            uint32_t bitset = FUTEX_BITSET_MATCH_ANY;
+            if (ents[i].flags & FUTEX_WAITV_FLAG_BITSET) {
+                bitset = ents[i].flags >> 8;
+                if (bitset == 0)
+                    return -EINVAL;
+            }
+            int r = futex_wait_ticks((int *)(uintptr_t)ents[i].uaddr,
+                                     (int32_t)ents[i].val, ticks, bitset);
+            if (r == -ETIMEDOUT)
+                return r;
+            if (r < 0)
+                return r;
+            return (int64_t)i;
+        }
+    }
+    return -EAGAIN;
+}
+
+int64_t sys_futex_requeue(int *uaddr, int *uaddr2, int nr_wake, int nr_requeue,
+                          uint32_t flags)
+{
+    (void)flags;
+    /* The standalone futex_requeue syscall is equivalent to the legacy
+     * FUTEX_REQUEUE command. */
+    return futex_requeue(uaddr, nr_wake, nr_requeue, uaddr2, 0, 0);
+}
+
+/* futex_wait(2) / futex_wake(2): the split-out syscalls (Linux 6.7+).
+ * Equivalent to the legacy FUTEX_WAIT/FUTEX_WAKE commands with a timespec
+ * timeout and a 32-bit clockid/flags argument. */
+struct linux_timespec64_fw2 {
+    int64_t tv_sec;
+    int64_t tv_nsec;
+};
+
+int64_t sys_futex_wait(void *uaddr, uint32_t val, const void *timeout,
+                       uint32_t flags)
+{
+    int realtime = (flags & 1) != 0; /* FUTEX_CLOCK_REALTIME */
+    return futex_wait_on((int *)uaddr, (int)val, (void *)timeout,
+                         FUTEX_BITSET_MATCH_ANY, 1, realtime);
+}
+
+int64_t sys_futex_wake(void *uaddr, uint32_t nr, uint32_t flags)
+{
+    (void)flags;
+    return futex_wake_on((int *)uaddr, (int)nr, FUTEX_BITSET_MATCH_ANY);
+}
