@@ -1,4 +1,5 @@
 #include "mm/fault.h"
+#include "mm/vm_internal.h"
 
 #include "proc/proc.h"
 #include "proc/signal.h"
@@ -12,6 +13,7 @@
 #include "core/consts.h"
 #include "core/defs.h"
 #include "core/lock.h"
+#include "core/perf.h"
 #include "core/panic.h"
 #include "core/string.h"
 #include "cg/cgroup.h"
@@ -79,15 +81,19 @@ int mm_shared_file_fault(mm_struct_t *mm, vm_area_t *vma, uint64_t page_va,
 }
 
 static int handle_cow_fault_locked(task_t *t, uint64_t stval,
-                                   pfn_t *old_pfn_out) {
+                                   pfn_t *old_pfn_out,
+                                   page_cache_page_t **old_page_out) {
 #ifdef CONFIG_NOMMU
     (void)t;
     (void)stval;
     (void)old_pfn_out;
+    (void)old_page_out;
     return -1;
 #else
     if (old_pfn_out)
         *old_pfn_out = PFN_NONE;
+    if (old_page_out)
+        *old_page_out = NULL;
     if (!t->mm || !t->mm->pgdir) return -1;
 
     vaddr_t leaf_base = 0;
@@ -111,6 +117,32 @@ static int handle_cow_fault_locked(task_t *t, uint64_t stval,
         uint64_t flags = (*pte & (PTE_R | PTE_X | PTE_U | PTE_A |
                                   PTE_G | PTE_MAT1 | PTE_LEAF)) |
                          PTE_W | PTE_D;
+
+        /* A private file page may still be the canonical page-cache frame.
+         * Its allocator refcount describes cache ownership, not the number of
+         * user mappings, so rc==1 must never make it writable in place. */
+        vm_area_t *vma = mm_find_vma(t->mm, leaf_base);
+        page_cache_page_t *cache_page =
+            leaf_size == PAGE_SIZE
+                ? mm_file_cache_mapping_get(vma, leaf_base, old_pfn)
+                : NULL;
+        if (cache_page && !(vma->vm_flags & VM_SHARED)) {
+            new_pfn = pfa_alloc_page();
+            if (new_pfn == PFN_NONE) {
+                page_cache_put(cache_page);
+                return -1;
+            }
+            memcpy(pfn_to_virt(new_pfn), pfn_to_virt(old_pfn), PAGE_SIZE);
+            *pte = arch_pte_leaf(pfn_to_phys(new_pfn), flags);
+            arch_tlb_flush_page_local(stval);
+            if (old_page_out)
+                *old_page_out = cache_page;
+            else
+                page_cache_put(cache_page);
+            return 0;
+        }
+        if (cache_page)
+            page_cache_put(cache_page);
 
         uint64_t pfa_flags = spin_lock_irqsave(&pfa.lock);
         uint16_t rc = pfa.meta[old_pfn].refcount;
@@ -182,7 +214,8 @@ static int handle_cow_fault_locked(task_t *t, uint64_t stval,
  *   read through the file into a private frame and therefore do not yet provide
  *   full MAP_SHARED dirty/writeback coherence.
  */
-static int handle_demand_fault_locked(task_t *t, uint64_t stval) {
+static int handle_demand_fault_locked(task_t *t, uint64_t stval,
+                                      enum mm_fault_access access) {
 #ifdef CONFIG_NOMMU
     (void)t;
     (void)stval;
@@ -278,6 +311,7 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval) {
         if (r < 0) { cg_mem_uncharge(t->cgroup, 1); frame_put(pfn); return -1; }
 
         t->mm->rss++;
+        a20_perf_count(A20_PERF_MM_ANON_FAULTS);
         arch_tlb_flush_page_local(stval);
         return 0;
     }
@@ -408,6 +442,62 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval) {
             }
         }
 
+        /* Like peer kernels, reserve a small forward window for private writable
+         * anonymous store faults.  Compiler allocators usually touch new
+         * arenas sequentially; installing four pages under one mm lock and
+         * one fault return avoids three traps and repeated page-table walks.
+         * Stack, shared, file, VMO and read-only mappings keep the single-page
+         * path so speculative allocation cannot change their semantics. */
+        if (access == MM_FAULT_ACCESS_WRITE &&
+            (vma->vm_flags & (VM_ANON | VM_WRITE)) ==
+                (VM_ANON | VM_WRITE) &&
+            !(vma->vm_flags & (VM_SHARED | VM_STACK | VM_FILE | VM_VMO))) {
+            enum { ANON_FAULT_AROUND_PAGES = 4 };
+            pfn_t pfns[ANON_FAULT_AROUND_PAGES];
+            size_t prepared = 0;
+            size_t mapped = 0;
+            uint64_t end = page_va +
+                           ANON_FAULT_AROUND_PAGES * PAGE_SIZE;
+            if (end < page_va || end > vma->end)
+                end = vma->end;
+
+            for (uint64_t va = page_va; va < end; va += PAGE_SIZE) {
+                pte_t *next = pt_lookup_leaf(t->mm->pgdir, va,
+                                             NULL, NULL, NULL);
+                if (next && (*next & PTE_V))
+                    break;
+                pfn_t candidate = pfa_alloc_page();
+                if (candidate == PFN_NONE)
+                    break;
+                if (cg_mem_charge(t->cgroup, 1) != 0) {
+                    frame_put(candidate);
+                    break;
+                }
+                memset(pfn_to_virt(candidate), 0, PAGE_SIZE);
+                pfns[prepared++] = candidate;
+            }
+
+            for (size_t i = 0; i < prepared; i++) {
+                uint64_t va = page_va + i * PAGE_SIZE;
+                if (pt_map(t->mm->pgdir, va, pfn_to_phys(pfns[i]),
+                           vma->pte_flags) < 0)
+                    break;
+                mapped++;
+            }
+            for (size_t i = mapped; i < prepared; i++) {
+                cg_mem_uncharge(t->cgroup, 1);
+                frame_put(pfns[i]);
+            }
+            if (mapped != 0) {
+                t->mm->rss += mapped;
+                a20_perf_count(A20_PERF_MM_ANON_FAULTS);
+                a20_perf_count(A20_PERF_MM_ANON_BATCH_WINDOWS);
+                a20_perf_add(A20_PERF_MM_ANON_BATCH_PAGES, mapped);
+                arch_tlb_flush_page_local(stval);
+                return 0;
+            }
+        }
+
         pfn_t pfn = pfa_alloc_page();
         if (pfn == PFN_NONE) return -1;
         if (cg_mem_charge(t->cgroup, 1) != 0) {
@@ -443,7 +533,8 @@ static uint64_t fault_file_size(vnode_t *vn)
 }
 
 static int handle_file_fault(task_t *t, uint64_t page_va, int file_fd,
-                             uint64_t file_pos, int shared, vfile_t *vf)
+                             uint64_t file_pos, uint64_t vma_end,
+                             int shared, int fault_around, vfile_t *vf)
 {
     if (file_pos >= fault_file_size(vf->vnode)) {
         signal_send(t->pid, SIGBUS);
@@ -455,53 +546,108 @@ static int handle_file_fault(task_t *t, uint64_t page_va, int file_fd,
         return -1;
     }
 
-    page_cache_page_t *pcp = page_cache_get(vf->vnode,
-                                             file_pos / PAGE_SIZE, 1);
-    if (!pcp) {
+    page_cache_page_t *window[PAGE_CACHE_FAULT_AROUND_PAGES] = {0};
+    size_t window_count = 1;
+    window[0] = page_cache_get(vf->vnode, file_pos / PAGE_SIZE, 1);
+    if (!window[0]) {
         vfs_put_file_ref(file_fd, vf);
         return -1;
     }
+
+    /* Read-only MAP_PRIVATE mappings can safely populate and install a small
+     * forward window.  Each installed PTE still receives its own anonymous
+     * copy, so a later mprotect()/write cannot modify the file cache. */
+    if (fault_around && vf->vnode->ops->readpages && vma_end > page_va) {
+        uint64_t vma_pages = (vma_end - page_va) / PAGE_SIZE;
+        uint64_t file_bytes = vf->vnode->size - file_pos;
+        uint64_t file_pages = (file_bytes + PAGE_SIZE - 1) / PAGE_SIZE;
+        uint64_t limit = vma_pages < file_pages ? vma_pages : file_pages;
+        if (limit > PAGE_CACHE_FAULT_AROUND_PAGES)
+            limit = PAGE_CACHE_FAULT_AROUND_PAGES;
+        for (uint64_t i = 1; i < limit; i++) {
+            page_cache_page_t *ahead = page_cache_get(
+                vf->vnode, file_pos / PAGE_SIZE + i, 1);
+            if (!ahead)
+                break;
+            window[window_count++] = ahead;
+        }
+    }
+
     int fill_r = 0;
-    if (!page_cache_is_uptodate(pcp))
-        fill_r = page_cache_fill_vfile_page(vf, pcp);
+    int needs_fill = 0;
+    for (size_t i = 0; i < window_count; i++) {
+        if (!page_cache_is_uptodate(window[i])) {
+            needs_fill = 1;
+            break;
+        }
+    }
+    if (needs_fill) {
+        if (window_count > 1)
+            fill_r = page_cache_fill_vfile_pages(vf, window, window_count);
+        else
+            fill_r = page_cache_fill_vfile_page(vf, window[0]);
+
+        /* Readahead is advisory.  A later-page error must not fail the
+         * hardware fault if the requested page was published successfully. */
+        if (fill_r < 0 && page_cache_is_uptodate(window[0]))
+            fill_r = 0;
+    }
     if (fill_r < 0) {
-        page_cache_put(pcp);
+        for (size_t i = 0; i < window_count; i++)
+            page_cache_put(window[i]);
         vfs_put_file_ref(file_fd, vf);
         return -1;
     }
     if (file_pos >= fault_file_size(vf->vnode)) {
         signal_send(t->pid, SIGBUS);
-        page_cache_put(pcp);
+        for (size_t i = 0; i < window_count; i++)
+            page_cache_put(window[i]);
         vfs_put_file_ref(file_fd, vf);
         return -1;
     }
 
-    pfn_t candidate = page_cache_pfn(pcp);
-    int charged = 0;
-    if (!pfn_valid(candidate)) {
-        page_cache_put(pcp);
-        vfs_put_file_ref(file_fd, vf);
-        return -1;
-    }
+    pfn_t candidates[PAGE_CACHE_FAULT_AROUND_PAGES];
+    unsigned char charged[PAGE_CACHE_FAULT_AROUND_PAGES] = {0};
+    for (size_t i = 0; i < PAGE_CACHE_FAULT_AROUND_PAGES; i++)
+        candidates[i] = PFN_NONE;
 
-    if (!shared) {
+    /* Read-only MAP_PRIVATE leaves can use the same canonical cache frame as
+     * MAP_SHARED.  A future mprotect(PROT_WRITE) marks such a leaf COW before
+     * exposing write permission, so no eager anonymous copy is required. */
+    int direct_private = !shared && fault_around;
+    size_t candidate_count = shared ? 1 : window_count;
+    for (size_t i = 0; i < candidate_count; i++) {
+        if (!page_cache_is_uptodate(window[i]) ||
+            !pfn_valid(page_cache_pfn(window[i]))) {
+            candidate_count = i;
+            break;
+        }
+        if (shared || direct_private) {
+            candidates[i] = page_cache_pfn(window[i]);
+            continue;
+        }
         if (cg_mem_charge(t->cgroup, 1) != 0) {
-            page_cache_put(pcp);
-            vfs_put_file_ref(file_fd, vf);
-            cg_mem_oom_kill(t->cgroup);
-            return -1;
+            candidate_count = i;
+            break;
         }
-        charged = 1;
-        candidate = pfa_alloc_page();
-        if (candidate == PFN_NONE) {
+        charged[i] = 1;
+        candidates[i] = pfa_alloc_page();
+        if (candidates[i] == PFN_NONE) {
             cg_mem_uncharge(t->cgroup, 1);
-            page_cache_put(pcp);
-            vfs_put_file_ref(file_fd, vf);
-            return -1;
+            charged[i] = 0;
+            candidate_count = i;
+            break;
         }
-        memcpy(pfn_to_virt(candidate), page_cache_data(pcp), PAGE_SIZE);
-        page_cache_put(pcp);
-        pcp = NULL;
+        memcpy(pfn_to_virt(candidates[i]), page_cache_data(window[i]),
+               PAGE_SIZE);
+    }
+
+    if (candidate_count == 0) {
+        for (size_t i = 0; i < window_count; i++)
+            page_cache_put(window[i]);
+        vfs_put_file_ref(file_fd, vf);
+        cg_mem_oom_kill(t->cgroup);
+        return -1;
     }
 
     mm_struct_t *mm = t->mm;
@@ -520,34 +666,55 @@ static int handle_file_fault(task_t *t, uint64_t page_va, int file_fd,
         vfs_put_file_ref(vma->file_fd, current_vf);
 
     int result = -1;
-    pte_t *pte = pt_lookup_leaf(mm->pgdir, page_va, NULL, NULL, NULL);
-    if (mapping_valid && pte && (*pte & PTE_V)) {
-        /*
-         * Another thread completed this file fault while we performed I/O
-         * without mm->lock. The faulting CPU may still cache the old
-         * non-present translation, so redundant success needs the same
-         * synchronization as a newly installed PTE.
-         */
-        arch_tlb_flush_page_local(page_va);
-        result = 0;
-    } else if (mapping_valid &&
-               pt_map(mm->pgdir, page_va, pfn_to_phys(candidate),
-                      vma->pte_flags) == 0) {
-        mm->rss++;
-        arch_tlb_flush_page_local(page_va);
-        result = 0;
-        candidate = PFN_NONE;
-        if (shared)
-            pcp = NULL; /* The mapping retains the page-cache pin. */
+    size_t installed = 0;
+    if (mapping_valid) {
+        size_t map_count = candidate_count;
+        if (shared || (vma->pte_flags & PTE_W) || !fault_around)
+            map_count = 1;
+        for (size_t i = 0; i < map_count; i++) {
+            uint64_t va = page_va + i * PAGE_SIZE;
+            uint64_t pos = file_pos + i * PAGE_SIZE;
+            if (va >= vma->end ||
+                vma->file_offset + (va - vma->start) != pos)
+                break;
+            pte_t *pte = pt_lookup_leaf(mm->pgdir, va, NULL, NULL, NULL);
+            if (pte && (*pte & PTE_V)) {
+                if (i == 0)
+                    result = 0;
+                continue;
+            }
+            uint64_t map_flags = vma->pte_flags;
+            if (direct_private)
+                map_flags &= ~(uint64_t)(PTE_W | PTE_D | PTE_COW);
+            if (pt_map(mm->pgdir, va, pfn_to_phys(candidates[i]),
+                       map_flags) < 0)
+                break;
+            mm->rss++;
+            installed++;
+            candidates[i] = PFN_NONE;
+            charged[i] = 0;
+            if (i == 0)
+                result = 0;
+            if (shared || direct_private)
+                window[i] = NULL; /* Mapping retains the page-cache pin. */
+        }
+        if (installed > 1)
+            arch_tlb_flush_local();
+        else if (installed == 1 || result == 0)
+            arch_tlb_flush_page_local(page_va);
     }
     spin_unlock(&mm->lock);
 
-    if (candidate != PFN_NONE && !shared)
-        frame_put(candidate);
-    if (pcp)
-        page_cache_put(pcp);
-    if (charged && candidate != PFN_NONE)
-        cg_mem_uncharge(t->cgroup, 1);
+    for (size_t i = 0; i < candidate_count; i++) {
+        if (candidates[i] != PFN_NONE && !shared && !direct_private)
+            frame_put(candidates[i]);
+        if (charged[i])
+            cg_mem_uncharge(t->cgroup, 1);
+    }
+    for (size_t i = 0; i < window_count; i++) {
+        if (window[i])
+            page_cache_put(window[i]);
+    }
     vfs_put_file_ref(file_fd, vf);
     return result;
 }
@@ -556,27 +723,42 @@ static int handle_file_fault(task_t *t, uint64_t page_va, int file_fd,
 int handle_cow_fault(task_t *t, uint64_t stval)
 {
 #ifdef CONFIG_NOMMU
-    return handle_cow_fault_locked(t, stval, NULL);
+    return handle_cow_fault_locked(t, stval, NULL, NULL);
 #else
     if (!t || !t->mm)
         return -1;
     mm_struct_t *mm = t->mm;
     pfn_t old_pfn = PFN_NONE;
+    page_cache_page_t *old_page = NULL;
     spin_lock(&mm->lock);
-    int r = handle_cow_fault_locked(t, stval, &old_pfn);
+    int r = handle_cow_fault_locked(t, stval, &old_pfn, &old_page);
     spin_unlock(&mm->lock);
-    if (r == 0)
+    if (r == 0) {
+        a20_perf_count(A20_PERF_MM_COW_FAULTS);
         arch_tlb_flush_page(stval);
+    }
     if (old_pfn != PFN_NONE)
         frame_put(old_pfn);
+    if (old_page) {
+        /* Drop the temporary lookup and the direct mapping's retained pin
+         * only after every CPU has discarded the old PTE. */
+        page_cache_put(old_page);
+        page_cache_put(old_page);
+    }
     return r;
 #endif
 }
 
 int handle_demand_fault(task_t *t, uint64_t stval)
 {
+    return handle_demand_fault_access(t, stval, MM_FAULT_ACCESS_READ);
+}
+
+int handle_demand_fault_access(task_t *t, uint64_t stval,
+                               enum mm_fault_access access)
+{
 #ifdef CONFIG_NOMMU
-    return handle_demand_fault_locked(t, stval);
+    return handle_demand_fault_locked(t, stval, access);
 #else
     if (!t || !t->mm || !t->mm->pgdir)
         return -1;
@@ -590,7 +772,7 @@ int handle_demand_fault(task_t *t, uint64_t stval)
         /* Swap I/O cannot run under the IRQ-disabling mm spinlock.  A future
          * busy swap PTE will close the remaining duplicate-swapin race. */
         spin_unlock(&mm->lock);
-        int r = handle_demand_fault_locked(t, stval);
+        int r = handle_demand_fault_locked(t, stval, access);
         if (r == -ENOMEM) {
             cg_mem_oom_kill(t->cgroup);
             return -1;
@@ -610,6 +792,14 @@ int handle_demand_fault(task_t *t, uint64_t stval)
         }
         int file_fd = vma->file_fd;
         int shared = (vma->vm_flags & VM_SHARED) != 0;
+        /* Keep executable private mappings on anonymous copies.  Mapping text
+         * directly from the page cache pins each newly faulted code page for
+         * the process lifetime and makes cache-lifetime accounting depend on
+         * which test function happened to execute last.  Read-only data VMAs
+         * retain the direct-cache and fault-around optimization. */
+        int fault_around = !shared &&
+                           !(vma->pte_flags & (PTE_W | PTE_X));
+        uint64_t vma_end = vma->end;
         uint64_t file_pos = vma->file_offset + (page_va - vma->start);
         vfile_t *vf = vfs_get_file_ref(file_fd);
         spin_unlock(&mm->lock);
@@ -618,15 +808,23 @@ int handle_demand_fault(task_t *t, uint64_t stval)
                 vfs_put_file_ref(file_fd, vf);
             return -1;
         }
-        return handle_file_fault(t, page_va, file_fd, file_pos, shared, vf);
+        int r = handle_file_fault(t, page_va, file_fd, file_pos, vma_end,
+                                  shared, fault_around, vf);
+        if (r == 0) {
+            a20_perf_count(A20_PERF_MM_DEMAND_FAULTS);
+            a20_perf_count(A20_PERF_MM_FILE_FAULTS);
+        }
+        return r;
     }
 
-    int r = handle_demand_fault_locked(t, stval);
+    int r = handle_demand_fault_locked(t, stval, access);
     spin_unlock(&mm->lock);
     if (r == -ENOMEM) {
         cg_mem_oom_kill(t->cgroup);
         return -1;
     }
+    if (r == 0)
+        a20_perf_count(A20_PERF_MM_DEMAND_FAULTS);
     return r;
 #endif
 }

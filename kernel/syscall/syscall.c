@@ -8,6 +8,7 @@
 #include "abi/current.h"
 #include "arch/syscall_hook.h"
 #include "core/klog.h"
+#include "core/perf.h"
 #include "core/timer.h"
 #include "proc/signal.h"
 #include "proc/debug.h"
@@ -16,20 +17,17 @@
 #include "sys/usercopy.h"
 
 syscall_prof_t sys_prof[SYSCALL_PROFILE_MAX];
-static uint64_t syscall_resched_counter;
 
 static inline uint64_t syscall_profile_now(void)
 {
-#if CONFIG_SYSCALL_PROFILE
-    return timer_get_ticks();
-#else
-    return 0;
-#endif
+    return __atomic_load_n(&g_a20_perf_enabled, __ATOMIC_RELAXED) ?
+        timer_get_ticks() : 0;
 }
 
 static inline void syscall_profile_record(uint64_t num, uint64_t start, uint64_t end)
 {
-#if CONFIG_SYSCALL_PROFILE
+    if (!__atomic_load_n(&g_a20_perf_enabled, __ATOMIC_RELAXED))
+        return;
     if (num >= SYSCALL_PROFILE_MAX)
         return;
 
@@ -37,11 +35,6 @@ static inline void syscall_profile_record(uint64_t num, uint64_t start, uint64_t
     syscall_prof_t *prof = &sys_prof[num];
     __atomic_fetch_add(&prof->count, 1, __ATOMIC_RELAXED);
     __atomic_fetch_add(&prof->cycles, elapsed, __ATOMIC_RELAXED);
-#else
-    (void)num;
-    (void)start;
-    (void)end;
-#endif
 }
 
 void syscall_profile_reset(void)
@@ -59,19 +52,19 @@ int64_t syscall_dispatch(trap_context_t *ctx)
 {
     uint64_t num = TRAP_CTX_SYSCALL_NUM(ctx);
     uint64_t start_time = syscall_profile_now();
+    task_t *cur_task = proc_current();
 
     /*
      * KEP syscall filter: attached programs may deny or kill the caller
      * before any ABI handling runs.  A denied syscall returns -EACCES
      * (Linux) / -A20_ERR_ACCESS (Native).
      */
-    {
+    if (__builtin_expect(kep_syscall_filter_active(), 0)) {
         uint64_t args[KEP_SCF_ARGS] = {
             TRAP_CTX_ARG0(ctx), TRAP_CTX_ARG1(ctx), TRAP_CTX_ARG2(ctx),
             TRAP_CTX_ARG3(ctx), TRAP_CTX_ARG4(ctx), TRAP_CTX_ARG5(ctx),
         };
-        task_t *cur = proc_current();
-        int abi = (cur && cur->abi_mode) ? 1 : 0;
+        int abi = (cur_task && cur_task->abi_mode) ? 1 : 0;
         int verdict = kep_syscall_filter_check(num, args, abi);
         if (verdict == KEP_SCF_KILL) {
             proc_exit_group(-SIGKILL);
@@ -87,7 +80,6 @@ int64_t syscall_dispatch(trap_context_t *ctx)
     }
 
 #if defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)
-    task_t *cur_task = proc_current();
     int is_native = cur_task && cur_task->abi_mode;
 
     if (is_native) {
@@ -150,7 +142,7 @@ int64_t syscall_dispatch(trap_context_t *ctx)
      * completes (exit stop, result visible in the registers).  The ptrace
      * syscall itself is never stopped to avoid observer recursion.
      */
-    if (num != SYS_ptrace)
+    if (num != SYS_ptrace && proc_debug_is_traced(cur_task))
         proc_debug_syscall_entry(ctx);
 
     int64_t ret = -ENOSYS;
@@ -160,6 +152,8 @@ int64_t syscall_dispatch(trap_context_t *ctx)
     if (entry) {
         ret = entry->handler(&args);
         context_restored = entry->restores_context;
+        if (context_restored)
+            ARCH_TRAP_FAST_RETURN_DISARM(ctx);
 
     } else {
         if (args.nr < 300)
@@ -184,17 +178,12 @@ int64_t syscall_dispatch(trap_context_t *ctx)
         context_restored = 0;
     }
     syscall_profile_record(num, start_time, syscall_profile_now());
-    if (num != SYS_ptrace)
+    if (num != SYS_ptrace && proc_debug_is_traced(cur_task))
         proc_debug_syscall_exit(ctx);
-    proc_check_exit_pending();
     signal_deliver_user(ctx);
-    proc_check_exit_pending();
-    if (!context_restored && proc_current() &&
-        arch_syscall_resched_allowed() &&
-        (__atomic_add_fetch(&syscall_resched_counter, 1,
-                            __ATOMIC_RELAXED) & 0x1f) == 0)
-        proc_sched_request_current();
-    proc_check_exit_pending();
+    /* Timer/IPI-driven reschedule requests are consumed by trap_handler's
+     * common safe point.  Forcing a new request every 32 syscalls created
+     * thousands of same-task scheduler round trips in syscall-heavy builds. */
     if (args.nr == SYS_sigsuspend)
         signal_task_restore_sigsuspend(proc_current());
     return ret;
