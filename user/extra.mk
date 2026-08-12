@@ -114,7 +114,7 @@ $(ZLIB_LIB): $(MUSL_CHECK_FILES) $(EXTRA_MAKEFILE) | musl_check
 	@echo "[EXTRA] Building zlib for $(ARCH)..."
 	cd $(ZLIB_BUILD) && \
 	  CHOST=$(CROSS_COMPILE:%-=%) \
-	  CC=$(CC) AR=$(AR) RANLIB=$(RANLIB) \
+	  'CC=$(CC)' 'AR=$(AR)' 'RANLIB=$(RANLIB)' \
 	  CFLAGS="$(ZLIB_CFLAGS)" \
 	  $(ZLIB_SRC)/configure --static
 	# Cross-link probes cannot use our bare-metal compiler command directly;
@@ -174,7 +174,7 @@ else
 	  ./configure \
 	    --srcdir=$(VIM_WORK_SRC) \
 	    --host=$(CROSS_COMPILE:%-=%) \
-	    CC=$(CC) \
+	    'CC=$(CC)' \
 	    CFLAGS="$(CFLAGS) -I$(VIM_WORK_SRC) -I$(EXTRA_DIR)" \
 	    LDFLAGS="$(LDFLAGS) -L$(dir $(TERMCAP_LIB))" \
 	    --disable-gui \
@@ -228,7 +228,7 @@ else
 	  VIMRUNTIMEDIR=/test/share/vim/vim92 \
 	  DESTDIR=$(VIM_BUILD)/install \
 	  srcdir=$(VIM_WORK_SRC) \
-	  CC=$(CC) \
+	  'CC=$(CC)' \
 	  CFLAGS="$(CFLAGS) -I$(VIM_WORK_SRC) -I$(EXTRA_DIR)" \
 	  LDFLAGS="$(LDFLAGS) -L$(dir $(TERMCAP_LIB)) $(CRT_START)" \
 	  LIBS="-ltermcap $(LIBC) $(CRT_END)"
@@ -261,8 +261,8 @@ else
 	$(MAKE) -C $(GIT_WORK_SRC) \
 	  prefix=/usr \
 	  template_dir=/test/share/git-core/templates \
-	  CC=$(CC) \
-	  AR=$(AR) \
+	  'CC=$(CC)' \
+	  'AR=$(AR)' \
 	  CFLAGS="$(CFLAGS) -I$(ZLIB_BUILD)/include" \
 	  LDFLAGS="$(LDFLAGS) $(CRT_START)" \
 	  EXTLIBS="$(ZLIB_LIB) $(LIBC) $(CRT_END)" \
