@@ -4,6 +4,7 @@
 #include "core/string.h"
 #include "core/timer.h"
 #include "proc/proc.h"
+#include "core/stdio.h"
 
 static obj_cache_t g_net_msg_cache = OBJ_CACHE_INIT("net_msg", net_msg_t, 16);
 

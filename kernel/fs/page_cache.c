@@ -23,7 +23,9 @@ static inline void page_cache_account_scan(size_t entries)
 
 static unsigned page_cache_hash_key(vnode_t *vn, uint64_t index)
 {
-    uintptr_t v = (uintptr_t)vn;
+    uintptr_t v = vn && vn->mnt
+        ? (uintptr_t)vn->mnt ^ (uintptr_t)vn->ino
+        : (uintptr_t)vn;
     return (unsigned)((v >> 4) ^ index ^ (index >> 32)) &
            (PAGE_CACHE_HASH_BUCKETS - 1);
 }
@@ -590,9 +592,6 @@ void page_cache_invalidate_uptodate_range(vnode_t *vn, uint64_t start_byte,
         if (refcount_read(&page->ref_count) == 0) {
             detach_mapping_deferred_locked(page);
             detached++;
-        } else {
-            page->invalidate_gen++;
-            __atomic_store_n(&page->uptodate, 0, __ATOMIC_RELEASE);
         }
     }
     page_cache_account_scan(visited);

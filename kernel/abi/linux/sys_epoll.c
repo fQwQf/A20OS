@@ -380,7 +380,6 @@ static int epoll_do_wait(int epfd, void *events, int maxevents,
             short poll_events = epoll_events_to_poll(ep->items[i].ev.events);
             int revents = vfs_poll_events((int)gfd, poll_events);
             if (revents <= 0) continue;
-
             epoll_event_t out_ev;
             out_ev.events = poll_events_to_epoll((short)revents,
                                                   ep->items[i].ev.events);

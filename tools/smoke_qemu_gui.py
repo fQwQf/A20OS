@@ -86,6 +86,8 @@ def main():
     parser.add_argument("--kernel", required=True)
     parser.add_argument("--disk", required=True)
     parser.add_argument("--timeout", type=float, default=60.0)
+    parser.add_argument("--settle", type=float, default=0.0,
+                        help="seconds to keep the session alive after first frame")
     parser.add_argument("--artifacts", default=".kernel-build/smoke/qemu-gui-x86_64")
     args = parser.parse_args()
 
@@ -148,9 +150,16 @@ def main():
 
             def drivers_ready():
                 log = read_log(log_path)
+                inputs_ready = (
+                    log.count("[INPUT] virtio-input ready") >= 2 or
+                    ("UINPUTD: ready" in log and
+                     "[INPUT] virtio-input ready" in log)
+                )
                 return ("[GPU] virtio-gpu ready:" in log and
-                        log.count("[INPUT] virtio-input ready") >= 2 and
+                        inputs_ready and
                         ("[desktop] framebuffer ready" in log or
+                         "AUTOSTART_DONE" in log or
+                         "xfce4-panel:" in log or
                          "Mission Control initialized, entering loop" in log or
                          "Desktop and terminal initialized, entering loop" in log))
 
@@ -165,6 +174,25 @@ def main():
                     return False
 
             wait_for(visible_scanout, 15, "non-blank framebuffer scanout")
+            if args.settle > 0:
+                time.sleep(args.settle)
+                # Exercise the same relative mouse path used by the GTK QEMU
+                # frontend.  A working desktop must redraw without a keypress.
+                try:
+                    qmp.execute("input-send-event", {
+                        "device": "default",
+                        "events": [
+                            {"type": "rel", "axis": "x", "value": 80},
+                            {"type": "rel", "axis": "y", "value": 40},
+                        ],
+                    })
+                except RuntimeError:
+                    # Older QEMU versions expose the equivalent HMP command.
+                    qmp.execute("human-monitor-command", {
+                        "command-line": "mouse_move 80 40",
+                    })
+                time.sleep(1.0)
+                qmp.execute("screendump", {"filename": shot_path})
             if "[GPU] send_cmd TIMEOUT" in read_log(log_path):
                 raise RuntimeError("virtio-gpu command timed out during desktop refresh")
 
