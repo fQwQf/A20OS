@@ -58,6 +58,11 @@ typedef struct bcache {
      * may issue block I/O concurrently. */
     mutex_t          fill_locks[PCACHE_FILL_LOCKS];
     rw_mutex_t       writeback_lock;
+    /* When a device write fails (after the driver's own retry budget), further
+     * flush attempts are suppressed until this tick deadline.  Dirty data
+     * stays in cache so reads and in-memory writes keep working while the
+     * device is wedged, and flush retries resume after the cooldown. */
+    uint64_t         write_quarantine_until;
     bcache_entry_t   lru_head;
     bcache_entry_t   lru_tail;
     pcache_entry_t   page_lru_head;
