@@ -1,5 +1,7 @@
 /* Minimal libudev stub for A20OS.  It exposes the framebuffer required by
- * Weston's fbdev backend while leaving input enumeration empty. */
+ * Weston's fbdev backend and the evdev multiplexer (/dev/input/event0) required
+ * by wlroots' libinput udev backend.  Hotplug is not supported; the device
+ * set is static. */
 
 #include "udev.h"
 #include <stdlib.h>
@@ -22,9 +24,22 @@ struct stub_udev_monitor {
 struct stub_udev_enumerate {
     int refs;
     int graphics;
+    int input;
 };
 
-static int g_graphics_entry;
+struct stub_udev_list_entry {
+    struct stub_udev_list_entry *next;
+    const char *name;
+};
+
+static struct stub_udev_list_entry g_entry_fb0 = {
+    .next = NULL,
+    .name = "/sys/class/graphics/fb0",
+};
+static struct stub_udev_list_entry g_entry_event0 = {
+    .next = NULL,
+    .name = "/sys/devices/virtual/input/event0",
+};
 
 static struct stub_udev_device *stub_device_new(const char *devnode)
 {
@@ -35,7 +50,7 @@ static struct stub_udev_device *stub_device_new(const char *devnode)
     if (devnode) {
         strncpy(d->devnode, devnode, sizeof(d->devnode) - 1);
     } else {
-        strcpy(d->devnode, "/dev/event0");
+        strcpy(d->devnode, "/dev/input/event0");
     }
     return d;
 }
@@ -51,8 +66,9 @@ struct udev_list_entry *udev_get_properties_list_entry(struct udev *udev) { (voi
 
 struct udev_device *udev_device_new_from_syspath(struct udev *udev, const char *syspath) {
     (void)udev;
-    return (struct udev_device *)stub_device_new(
-        syspath && strstr(syspath, "fb0") ? "/dev/fb0" : NULL);
+    if (syspath && strstr(syspath, "fb0"))
+        return (struct udev_device *)stub_device_new("/dev/fb0");
+    return (struct udev_device *)stub_device_new(NULL);
 }
 struct udev_device *udev_device_new_from_devnum(struct udev *udev, char type, dev_t devnum) { (void)udev; (void)type; (void)devnum; return (struct udev_device *)stub_device_new(NULL); }
 struct udev_device *udev_device_new_from_subsystem_sysname(struct udev *udev, const char *subsystem, const char *sysname) { (void)udev; (void)subsystem; (void)sysname; return NULL; }
@@ -72,10 +88,10 @@ struct udev_device *udev_device_unref(struct udev_device *udev_device) {
 struct udev *udev_device_get_udev(struct udev_device *udev_device) { (void)udev_device; return (struct udev *)&g_udev_dummy; }
 struct udev_device *udev_device_get_parent(struct udev_device *udev_device) { (void)udev_device; return NULL; }
 struct udev_device *udev_device_get_parent_with_subsystem_devtype(struct udev_device *udev_device, const char *subsystem, const char *devtype) { (void)udev_device; (void)subsystem; (void)devtype; return NULL; }
-const char *udev_device_get_devpath(struct udev_device *udev_device) { (void)udev_device; return "/virtual/event0"; }
+const char *udev_device_get_devpath(struct udev_device *udev_device) { (void)udev_device; return "/virtual/input/event0"; }
 const char *udev_device_get_subsystem(struct udev_device *udev_device) { (void)udev_device; return "input"; }
 const char *udev_device_get_devtype(struct udev_device *udev_device) { (void)udev_device; return NULL; }
-const char *udev_device_get_syspath(struct udev_device *udev_device) { (void)udev_device; return "/sys/devices/virtual/event0"; }
+const char *udev_device_get_syspath(struct udev_device *udev_device) { (void)udev_device; return "/sys/devices/virtual/input/event0"; }
 const char *udev_device_get_sysname(struct udev_device *udev_device) { (void)udev_device; return "event0"; }
 const char *udev_device_get_sysnum(struct udev_device *udev_device) { (void)udev_device; return "0"; }
 const char *udev_device_get_devnode(struct udev_device *udev_device) {
@@ -101,18 +117,21 @@ const char *udev_device_get_property_value(struct udev_device *udev_device, cons
         strcmp(key, "ID_INPUT_MOUSE") == 0)
         return "1";
     if (strcmp(key, "ID_SEAT") == 0)
-        return "seat1";
+        return "seat0";
     return NULL;
 }
 int udev_device_get_is_initialized(struct udev_device *udev_device) { (void)udev_device; return 1; }
 int udev_device_has_tag(struct udev_device *udev_device, const char *tag) { (void)udev_device; (void)tag; return 0; }
 int udev_device_set_sysattr_value(struct udev_device *udev_device, const char *sysattr, const char *value) { (void)udev_device; (void)sysattr; (void)value; return -1; }
 
-struct udev_list_entry *udev_list_entry_get_next(struct udev_list_entry *list_entry) { (void)list_entry; return NULL; }
+struct udev_list_entry *udev_list_entry_get_next(struct udev_list_entry *list_entry) {
+    struct stub_udev_list_entry *e = (struct stub_udev_list_entry *)list_entry;
+    return e ? (struct udev_list_entry *)e->next : NULL;
+}
 struct udev_list_entry *udev_list_entry_get_by_name(struct udev_list_entry *list_entry, const char *name) { (void)list_entry; (void)name; return NULL; }
 const char *udev_list_entry_get_name(struct udev_list_entry *list_entry) {
-    return list_entry == (struct udev_list_entry *)&g_graphics_entry
-        ? "/sys/class/graphics/fb0" : NULL;
+    struct stub_udev_list_entry *e = (struct stub_udev_list_entry *)list_entry;
+    return e ? e->name : NULL;
 }
 const char *udev_list_entry_get_value(struct udev_list_entry *list_entry) { (void)list_entry; return NULL; }
 
@@ -138,8 +157,12 @@ struct udev_enumerate *udev_enumerate_unref(struct udev_enumerate *udev_enumerat
 struct udev *udev_enumerate_get_udev(struct udev_enumerate *udev_enumerate) { (void)udev_enumerate; return NULL; }
 int udev_enumerate_add_match_subsystem(struct udev_enumerate *udev_enumerate, const char *subsystem) {
     struct stub_udev_enumerate *enumerate = (struct stub_udev_enumerate *)udev_enumerate;
-    if (enumerate)
-        enumerate->graphics = subsystem && strcmp(subsystem, "graphics") == 0;
+    if (enumerate) {
+        if (subsystem && strcmp(subsystem, "graphics") == 0)
+            enumerate->graphics = 1;
+        if (subsystem && strcmp(subsystem, "input") == 0)
+            enumerate->input = 1;
+    }
     return 0;
 }
 int udev_enumerate_add_nomatch_subsystem(struct udev_enumerate *udev_enumerate, const char *subsystem) { (void)udev_enumerate; (void)subsystem; return 0; }
@@ -155,8 +178,13 @@ int udev_enumerate_scan_devices(struct udev_enumerate *udev_enumerate) { (void)u
 int udev_enumerate_scan_subsystems(struct udev_enumerate *udev_enumerate) { (void)udev_enumerate; return 0; }
 struct udev_list_entry *udev_enumerate_get_list_entry(struct udev_enumerate *udev_enumerate) {
     struct stub_udev_enumerate *enumerate = (struct stub_udev_enumerate *)udev_enumerate;
-    return enumerate && enumerate->graphics
-        ? (struct udev_list_entry *)&g_graphics_entry : NULL;
+    if (!enumerate)
+        return NULL;
+    if (enumerate->graphics)
+        return (struct udev_list_entry *)&g_entry_fb0;
+    if (enumerate->input)
+        return (struct udev_list_entry *)&g_entry_event0;
+    return NULL;
 }
 
 struct udev_monitor *udev_monitor_new_from_netlink(struct udev *udev, const char *name) {
