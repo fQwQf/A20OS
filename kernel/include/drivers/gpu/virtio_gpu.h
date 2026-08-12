@@ -135,6 +135,22 @@ struct virtio_gpu_resource_attach_backing {
     uint32_t nr_entries;
 } __attribute__((packed));
 
+struct virtio_gpu_get_edid {
+    struct virtio_gpu_ctrl_hdr hdr;
+    uint32_t scanout;
+    uint32_t padding;
+} __attribute__((packed));
+
+#define VIRTIO_GPU_EDID_MAX_BYTES 1024
+
+struct virtio_gpu_resp_edid {
+    struct virtio_gpu_ctrl_hdr hdr;
+    uint32_t scanout;
+    uint32_t size;
+    uint32_t padding;
+    uint8_t edid[VIRTIO_GPU_EDID_MAX_BYTES];
+} __attribute__((packed));
+
 struct virtio_gpu_get_capset_info {
     struct virtio_gpu_ctrl_hdr hdr;
     uint32_t capset_index;

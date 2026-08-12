@@ -94,6 +94,33 @@ want() {
 stamp() { [ -f "$B/stamp/$1" ]; }
 mark() { mkdir -p "$B/stamp" && touch "$B/stamp/$1"; }
 
+# A20OS build-time submodule patches.  Patches live in the OS tree
+# ($WL_DIR/patches/<name>-*.patch) and are applied only for the duration of
+# the component build, then reversed, so submodule checkouts stay pristine.
+a20_patch_apply() {
+    local name=$1 p
+    for p in "$WL_DIR/patches/$name-"*.patch; do
+        [ -e "$p" ] || continue
+        git -C "$USER_DIR/external/gui/$name" apply "$p"
+    done
+}
+a20_patch_revert() {
+    local name=$1 p
+    for p in "$WL_DIR/patches/$name-"*.patch; do
+        [ -e "$p" ] || continue
+        git -C "$USER_DIR/external/gui/$name" apply -R "$p"
+    done
+}
+a20_patched_build() {
+    # a20_patched_build <submodule-name> <build command...>
+    local name=$1 rc=0
+    shift
+    a20_patch_apply "$name"
+    "$@" || rc=$?
+    a20_patch_revert "$name"
+    return $rc
+}
+
 MUSL_INC=(
     -isystem "$MUSL_SH/obj/include"
     -isystem "$MUSL_BASE/include"
@@ -673,10 +700,13 @@ if want libxfce4util && ! stamp libxfce4util; then
 fi
 
 if want libxfce4windowing && { ! stamp libxfce4windowing || \
-    [ "$USER_DIR/external/gui/libxfce4windowing/libxfce4windowing/xfw-workspace-group-wayland.c" -nt "$B/stamp/libxfce4windowing" ] || \
-    [ "$USER_DIR/external/gui/libxfce4windowing/libxfce4windowing/xfw-screen-wayland.c" -nt "$B/stamp/libxfce4windowing" ]; }; then
+    [ "$WL_DIR/patches/libxfce4windowing-a20.patch" -nt "$B/stamp/libxfce4windowing" ]; }; then
     echo "=== libxfce4windowing ==="
-    meson_pkg libxfce4windowing "$USER_DIR/external/gui/libxfce4windowing" \
+    # A20OS patch: do not bind ext_workspace_manager_v1 (protocol lifetime
+    # disagreement with the bundled wlroots); xfdesktop only needs the dummy
+    # workspace manager.  Applied at build time only.
+    a20_patched_build libxfce4windowing \
+        meson_pkg libxfce4windowing "$USER_DIR/external/gui/libxfce4windowing" \
         -Dgtk-doc=false -Dintrospection=false -Dtests=false \
         -Dwayland=enabled -Dx11=disabled
     mark libxfce4windowing
@@ -739,9 +769,9 @@ if want xfdesktop && { ! stamp xfdesktop || \
     echo "=== xfdesktop ==="
     # Wayland build: skip the XSMP session-management option group (an X11
     # feature; libxfce4ui's xfce-sm-client symbol is not exported here).
-    (cd "$USER_DIR/external/gui/xfdesktop" && \
-        sed -i 's|    g_application_add_option_group(G_APPLICATION(app), xfce_sm_client_get_option_group(argc, argv));|#ifndef A20_NO_X11_SESSION\n    g_application_add_option_group(G_APPLICATION(app), xfce_sm_client_get_option_group(argc, argv));\n#endif|' src/main.c 2>/dev/null || true)
-    autotools_pkg xfdesktop "$USER_DIR/external/gui/xfdesktop" \
+    # Applied at build time only, via patches/xfdesktop-a20.patch.
+    a20_patched_build xfdesktop \
+        autotools_pkg xfdesktop "$USER_DIR/external/gui/xfdesktop" \
         CFLAGS="-O2 -DA20_NO_X11_SESSION"
     mark xfdesktop
 fi
@@ -757,9 +787,9 @@ if want thunar && ! stamp thunar; then
     echo "=== thunar ==="
     # Wayland build: thunar 4.20 still calls XDT_CHECK_LIBX11_REQUIRE;
     # relax it to the optional check so the X11-less build configures.
-    (cd "$USER_DIR/external/gui/thunar" && \
-        sed -i 's|XDT_CHECK_LIBX11_REQUIRE()|XDT_CHECK_LIBX11()|' configure.ac 2>/dev/null || true)
-    autotools_pkg thunar "$USER_DIR/external/gui/thunar" \
+    # Applied at build time only, via patches/thunar-a20.patch.
+    a20_patched_build thunar \
+        autotools_pkg thunar "$USER_DIR/external/gui/thunar" \
         --disable-wallpaper-plugin
     mark thunar
 fi

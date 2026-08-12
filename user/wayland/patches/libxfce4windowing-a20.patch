@@ -1,0 +1,90 @@
+diff --git a/libxfce4windowing/xfw-screen-wayland.c b/libxfce4windowing/xfw-screen-wayland.c
+index 7593c22..422bc53 100644
+--- a/libxfce4windowing/xfw-screen-wayland.c
++++ b/libxfce4windowing/xfw-screen-wayland.c
+@@ -321,17 +321,15 @@ registry_global(void *data, struct wl_registry *registry, uint32_t id, const cha
+         wscreen->pending_seats = g_list_prepend(wscreen->pending_seats, seat);
+         add_async_roundtrip(wscreen);
+     } else if (strcmp(ext_workspace_manager_v1_interface.name, interface) == 0) {
+-        XfwScreen *screen = XFW_SCREEN(wscreen);
+-        if (xfw_screen_get_workspace_manager(screen) != NULL) {
+-            g_message("Already have a workspace manager, but got a new ext_workspace_manager_v1 global");
+-        } else {
+-            struct ext_workspace_manager_v1 *wl_workspace_manager = wl_registry_bind(registry,
+-                                                                                     id,
+-                                                                                     &ext_workspace_manager_v1_interface,
+-                                                                                     MIN((uint32_t)ext_workspace_manager_v1_interface.version, version));
+-            _xfw_screen_set_workspace_manager(screen, _xfw_workspace_manager_wayland_new(wscreen, wl_workspace_manager));
+-            add_async_roundtrip(wscreen);
+-        }
++        /*
++         * labwc advertises ext_workspace_manager_v1, but the version bundled
++         * with this image and the older libxfce4windowing implementation do
++         * not agree on the group object's lifetime.  xfdesktop only needs a
++         * stable current workspace, which the dummy manager supplies during
++         * screen construction.  Do not bind this optional protocol.
++         */
++        (void)id;
++        (void)version;
+     } else if (strcmp(wl_output_interface.name, interface) == 0) {
+         struct wl_output *output = wl_registry_bind(registry, id, &wl_output_interface, MIN(version, 4));
+         _xfw_monitor_manager_wayland_new_output(wscreen->monitor_manager, output);
+diff --git a/libxfce4windowing/xfw-workspace-group-wayland.c b/libxfce4windowing/xfw-workspace-group-wayland.c
+index a7701e9..6cafda8 100644
+--- a/libxfce4windowing/xfw-workspace-group-wayland.c
++++ b/libxfce4windowing/xfw-workspace-group-wayland.c
+@@ -42,6 +42,11 @@ enum {
+     N_SIGNALS,
+ };
+ 
++enum {
++    PROP0,
++    PROP_HANDLE,
++};
++
+ struct _XfwWorkspaceGroupWaylandPrivate {
+     XfwScreen *screen;
+     XfwWorkspaceManager *workspace_manager;
+@@ -86,6 +91,7 @@ static const struct ext_workspace_group_handle_v1_listener group_listener = {
+ };
+ 
+ G_DEFINE_TYPE_WITH_CODE(XfwWorkspaceGroupWayland, xfw_workspace_group_wayland, G_TYPE_OBJECT,
++                        G_ADD_PRIVATE(XfwWorkspaceGroupWayland)
+                         G_IMPLEMENT_INTERFACE(XFW_TYPE_WORKSPACE_GROUP,
+                                               xfw_workspace_group_wayland_workspace_group_init))
+ 
+@@ -105,6 +111,12 @@ xfw_workspace_group_wayland_class_init(XfwWorkspaceGroupWaylandClass *klass) {
+                                                    g_cclosure_marshal_VOID__VOID,
+                                                    G_TYPE_NONE, 0);
+ 
++    g_object_class_install_property(gklass,
++                                    PROP_HANDLE,
++                                    g_param_spec_pointer("handle",
++                                                         "handle",
++                                                         "handle",
++                                                         G_PARAM_READWRITE | G_PARAM_CONSTRUCT_ONLY));
+     _xfw_workspace_group_install_properties(gklass);
+ }
+ 
+@@ -124,6 +136,10 @@ xfw_workspace_group_wayland_set_property(GObject *obj, guint prop_id, const GVal
+     XfwWorkspaceGroupWayland *group = XFW_WORKSPACE_GROUP_WAYLAND(obj);
+ 
+     switch (prop_id) {
++        case PROP_HANDLE:
++            group->priv->handle = g_value_get_pointer(value);
++            break;
++
+         case WORKSPACE_GROUP_PROP_SCREEN:
+             group->priv->screen = g_value_get_object(value);
+             break;
+@@ -148,6 +164,10 @@ xfw_workspace_group_wayland_get_property(GObject *obj, guint prop_id, GValue *va
+     XfwWorkspaceGroupWayland *group = XFW_WORKSPACE_GROUP_WAYLAND(obj);
+ 
+     switch (prop_id) {
++        case PROP_HANDLE:
++            g_value_set_pointer(value, group->priv->handle);
++            break;
++
+         case WORKSPACE_GROUP_PROP_SCREEN:
+             g_value_set_object(value, group->priv->screen);
+             break;

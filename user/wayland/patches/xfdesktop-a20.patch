@@ -1,0 +1,14 @@
+diff --git a/src/main.c b/src/main.c
+index 9cb2436..3adfccf 100644
+--- a/src/main.c
++++ b/src/main.c
+@@ -59,7 +59,9 @@ main(int argc, char **argv)
+ #endif
+ 
+     app = xfdesktop_application_get();
++#ifndef A20_NO_X11_SESSION
+     g_application_add_option_group(G_APPLICATION(app), xfce_sm_client_get_option_group(argc, argv));
++#endif
+ 
+     ret = g_application_run(G_APPLICATION(app), argc, argv);
+ 
