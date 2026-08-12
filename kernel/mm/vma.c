@@ -10,6 +10,7 @@
 #include "core/string.h"
 #include "core/panic.h"
 #include "core/klog.h"
+#include "core/perf.h"
 
 /*
  * VMA list management: sorted non-overlapping vm_area_t chain plus the backing
@@ -111,12 +112,97 @@ int vma_ref_aux(vm_area_t *vma)
     return 0;
 }
 
+void mm_vma_index_invalidate(mm_struct_t *mm)
+{
+    if (!mm)
+        return;
+    mm->vma_index_state = 0;
+    mm->vma_index_count = 0;
+}
+
+static void mm_vma_index_rebuild(mm_struct_t *mm, size_t *steps)
+{
+    size_t count = 0;
+    for (vm_area_t *v = mm->mmap; v; v = v->next) {
+        if (steps)
+            (*steps)++;
+        if (count == MM_VMA_INDEX_CAPACITY) {
+            mm->vma_index_count = 0;
+            mm->vma_index_state = 2;
+            return;
+        }
+        mm->vma_index[count++] = v;
+    }
+    mm->vma_index_count = (uint16_t)count;
+    mm->vma_index_state = 1;
+}
+
 // 查找包含指定地址的 VMA
 vm_area_t *mm_find_vma(mm_struct_t *mm, vaddr_t addr) {
-    for (vm_area_t *v = mm->mmap; v; v = v->next) {
-        if (addr < v->end && addr >= v->start) return v;
-        if (v->start > addr) break;
+    size_t steps = 0;
+    a20_perf_count(A20_PERF_VMA_LOOKUPS);
+
+    if (mm->vma_index_state == 0)
+        mm_vma_index_rebuild(mm, &steps);
+
+    if (mm->vma_index_state == 1) {
+        size_t lo = 0;
+        size_t hi = mm->vma_index_count;
+        while (lo < hi) {
+            size_t mid = lo + (hi - lo) / 2;
+            steps++;
+            if (mm->vma_index[mid]->start <= addr)
+                lo = mid + 1;
+            else
+                hi = mid;
+        }
+        if (lo > 0) {
+            vm_area_t *v = mm->vma_index[lo - 1];
+            steps++;
+            if (addr < v->end) {
+                a20_perf_add(A20_PERF_VMA_LOOKUP_STEPS, steps);
+                return v;
+            }
+        }
+        a20_perf_add(A20_PERF_VMA_LOOKUP_STEPS, steps);
+        return NULL;
     }
+
+    /* Very unusual address spaces with more than 256 VMAs retain the proven
+     * linked-list behavior instead of allocating while mm->lock is held. */
+    for (vm_area_t *v = mm->mmap; v; v = v->next) {
+        steps++;
+        if (addr < v->end && addr >= v->start) {
+            a20_perf_add(A20_PERF_VMA_LOOKUP_STEPS, steps);
+            return v;
+        }
+        if (v->start > addr)
+            break;
+    }
+    a20_perf_add(A20_PERF_VMA_LOOKUP_STEPS, steps);
+    return NULL;
+}
+
+/*
+ * Return a temporary reference when a file VMA leaf is backed directly by
+ * the canonical page-cache page.  A private file mapping can contain both
+ * kinds of leaves: clean read-only cache pages and anonymous pages created by
+ * COW.  Comparing the PFN, rather than classifying the whole VMA, keeps
+ * fork/mprotect/mremap/teardown correct after only some pages were copied.
+ */
+page_cache_page_t *mm_file_cache_mapping_get(vm_area_t *vma, vaddr_t va,
+                                              pfn_t pfn)
+{
+    if (!vma || !(vma->vm_flags & VM_FILE) || !vma->file_vnode ||
+        va < vma->start || va >= vma->end || !pfn_valid(pfn))
+        return NULL;
+    uint64_t index = vma->file_offset + (va - vma->start);
+    index /= PAGE_SIZE;
+    page_cache_page_t *page = page_cache_get(vma->file_vnode, index, 0);
+    if (page && page_cache_pfn(page) == pfn)
+        return page;
+    if (page)
+        page_cache_put(page);
     return NULL;
 }
 
@@ -180,6 +266,7 @@ void mm_vma_flush_deferred(mm_struct_t *mm)
 
 // 插入一个 VMA 到链表中，并尝试合并相邻的相同权限区域
 void mm_insert_vma(mm_struct_t *mm, vm_area_t *newv) {
+    mm_vma_index_invalidate(mm);
     vm_area_t **pp = &mm->mmap;
     vm_area_t *prev = NULL;
     while (*pp && (*pp)->start < newv->start) {
@@ -226,6 +313,7 @@ int mm_split_vma_at(mm_struct_t *mm, vaddr_t addr) {
         kfree(tail);
         return fr;
     }
+    mm_vma_index_invalidate(mm);
     tail->prev = v;
     tail->next = v->next;
     if (tail->next)
@@ -261,6 +349,8 @@ vm_area_t *vma_split(vm_area_t *vma, vaddr_t split) {
 
 vm_area_t *vma_try_merge(mm_struct_t *mm, vm_area_t *vma) {
     if (!vma) return NULL;
+
+    mm_vma_index_invalidate(mm);
 
     if (vma_can_merge(vma->prev, vma)) {
         vm_area_t *prev = vma->prev;
@@ -320,26 +410,30 @@ void free_vma_pages(mm_struct_t *mm, vm_area_t *vma)
             }
         }
 
+        page_cache_page_t *mapped_page = NULL;
+        if (pte && (*pte & PTE_V)) {
+            pfn_t mapped_pfn = phys_to_pfn(arch_pte_addr(*pte));
+            mapped_page = mm_file_cache_mapping_get(vma, va, mapped_pfn);
+        }
+
         paddr_t pa = 0;
         base = 0;
         size = 0;
         if (pt_unmap_leaf(mm->pgdir, va, &pa, &base, &size, NULL) == 0) {
             if (pa) {
                 pfn_t pfn = phys_to_pfn(pa);
-                if (shared_file && vma->file_vnode) {
-                    uint64_t idx = vma->file_offset + (va - vma->start);
-                    idx /= PAGE_SIZE;
-                    page_cache_page_t *pcp = page_cache_get(vma->file_vnode, idx, 0);
-                    if (pcp) {
-                        page_cache_put(pcp);
-                        page_cache_put(pcp);
-                    }
+                if (mapped_page) {
+                    /* Temporary lookup plus the PTE's retained cache pin. */
+                    page_cache_put(mapped_page);
+                    page_cache_put(mapped_page);
                 } else if (!(vma->vm_flags & VM_PFNMAP)) {
                     frame_put(pfn);
                 }
             }
             va = base + size;
         } else {
+            if (mapped_page)
+                page_cache_put(mapped_page);
             va += PAGE_SIZE;
         }
     }
