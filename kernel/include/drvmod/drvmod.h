@@ -42,6 +42,9 @@ int drvmod_load(int fd, const char *name);
  * rejected until driver_unregister has been wired for them. */
 int drvmod_unload(int id);
 
+/* Unload the first loaded module whose name matches @name. */
+int drvmod_unload_by_name(const char *name);
+
 /* Run DriverEntry for every loaded module.  Each module registers its
  * unified driver_t with the driver core. */
 void drvmod_init_all(void);

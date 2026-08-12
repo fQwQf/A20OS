@@ -2,6 +2,7 @@
 #include "proc/proc_internal.h"
 #include "proc/signal.h"
 #include "proc/debug.h"
+#include "proc/acct.h"
 #include "ext/kep.h"
 #include "core/cpu.h"
 #include "core/klog.h"
@@ -330,6 +331,8 @@ void proc_exit(int exit_code)
 
     vfs_release_process_locks(t->pid);
     kep_release_process(t->pid);
+
+    acct_task_exit(t);
 
     ktrace_exit("[EXIT] pid=%d: closing fds and releasing mm ref\n", t->pid);
     fdtable_close_all(t);

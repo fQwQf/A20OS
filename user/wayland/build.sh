@@ -76,7 +76,12 @@ if [ ${#PHASES[@]} -eq 0 ]; then
     WANT_ALL=1
     PHASES=(musl wayland-native libffi wayland protocols pixman \
             xkeyboard-config xkbcommon \
-            libevdev stubs libdrm libinput weston ffmpeg player)
+            libevdev stubs libdrm libinput mesa glib dbus atk gdk-pixbuf \
+            cairo pango gtk3 \
+            libxfce4util libxfce4windowing xfconf libxfce4ui exo garcon \
+            gtk-layer-shell \
+            xfce4-panel xfdesktop xfce4-session thunar \
+            wlroots labwc weston ffmpeg player)
 fi
 
 want() {
@@ -119,6 +124,28 @@ exec $CC -specs "$MUSL_SH/lib/musl-gcc.specs" $ARCH_CFLAGS "\$@"
 EOF
 chmod +x "$MUSL_GCC"
 
+# musl-g++ wrapper for C++ components (Mesa needs a C++ compiler).
+MUSL_CXX=$MUSL_SH/musl-g++-a20
+CXX=${CXX:-${CROSS}g++}
+cat > "$MUSL_CXX" <<EOF
+#!/bin/sh
+exec $CXX -specs "$MUSL_SH/lib/musl-gcc.specs" $ARCH_CFLAGS "\$@"
+EOF
+chmod +x "$MUSL_CXX"
+
+# Prebuilt musl cross toolchain (musl.cc riscv64-linux-musl-cross).  The
+# specs-based wrapper above works for C but drops the libstdc++ include
+# path for C++; Mesa and the meson-built components use this self-contained
+# toolchain (bin/include/lib in its own sysroot) instead.
+MUSL_TOOLCHAIN=$BUILD/toolchain/$MUSL_TARGET-linux-musl-cross
+if [ -x "$MUSL_TOOLCHAIN/bin/$MUSL_TARGET-linux-musl-gcc" ]; then
+    MESON_CC="$MUSL_TOOLCHAIN/bin/$MUSL_TARGET-linux-musl-gcc"
+    MESON_CXX="$MUSL_TOOLCHAIN/bin/$MUSL_TARGET-linux-musl-g++"
+else
+    MESON_CC=$MUSL_GCC
+    MESON_CXX=$MUSL_CXX
+fi
+
 meson_cross_ini() {
     cat > "$B/meson-cross.ini" <<EOF
 [host_machine]
@@ -128,10 +155,16 @@ cpu = '$ARCH'
 endian = 'little'
 
 [binaries]
-c = '$MUSL_GCC'
+c = '$MESON_CC'
+cpp = '$MESON_CXX'
 ar = '$AR'
 strip = '${CROSS}strip'
 pkgconfig = 'pkg-config'
+glib-compile-resources = '/usr/bin/glib-compile-resources'
+glib-mkenums = '/usr/bin/glib-mkenums'
+glib-genmarshal = '/usr/bin/glib-genmarshal'
+glib-compile-schemas = '/usr/bin/glib-compile-schemas'
+gdbus-codegen = '/usr/bin/gdbus-codegen'
 
 [properties]
 needs_exe_wrapper = true
@@ -139,7 +172,9 @@ pkg_config_libdir = ['$SYSROOT/lib/pkgconfig', '$SYSROOT/share/pkgconfig']
 
 [built-in options]
 c_args = ['-O2', '-D_GNU_SOURCE', '-fPIC', '-I$SYSROOT/include', '-I$SYSROOT/include/libdrm']
-c_link_args = ['-fPIC', '-L$SYSROOT/lib']
+c_link_args = ['-fPIC', '-L$SYSROOT/lib', '-Wl,-rpath-link,$SYSROOT/lib']
+cpp_args = ['-O2', '-D_GNU_SOURCE', '-fPIC', '-I$SYSROOT/include', '-I$SYSROOT/include/libdrm']
+cpp_link_args = ['-fPIC', '-L$SYSROOT/lib', '-Wl,-rpath-link,$SYSROOT/lib']
 default_library = 'both'
 EOF
 }
@@ -156,7 +191,7 @@ PKG_ENV=(env "PKG_CONFIG_LIBDIR=$SYSROOT/lib/pkgconfig:$SYSROOT/share/pkgconfig"
 if want wayland-native && ! stamp wayland-native; then
     echo "=== wayland (native scanner) ==="
     rm -rf "$B/build-wayland-native"
-    meson setup "$B/build-wayland-native" "$USER_DIR/external/wayland" \
+    meson setup "$B/build-wayland-native" "$USER_DIR/external/gui/wayland" \
         --prefix="$HOST_TOOLS/wayland" \
         -Ddocumentation=false -Dtests=false -Ddtd_validation=false \
         --default-library=static
@@ -186,6 +221,86 @@ meson_pkg() {
         "$@"
     ninja -C "$B/build-$name"
     ninja -C "$B/build-$name" install
+}
+
+# autotools_pkg <name> <srcdir> <configure args...>
+# Runs autogen (when the source is a git checkout) then cross-configures,
+# builds and installs an autotools component into the sysroot.  Builds
+# in-tree from a copy of the source so generated headers (xfconf-alias.h
+# etc.) are found by #include without VPATH headaches.
+autotools_pkg() {
+    local name=$1 src=$2
+    shift 2
+    # Minimal X11 header stubs: several XFCE components still include X11
+    # headers (session management, atoms) even on the Wayland build.
+    mkdir -p "$SYSROOT/include/X11/SM" "$SYSROOT/include/X11/ICE"
+    [ -f "$SYSROOT/include/X11/Xlib.h" ] || cat > "$SYSROOT/include/X11/Xlib.h" <<'XEOF'
+#ifndef _XLIB_H_
+#define _XLIB_H_
+typedef struct _XDisplay Display;
+#endif
+XEOF
+    [ -f "$SYSROOT/include/X11/Xutil.h" ] || cat > "$SYSROOT/include/X11/Xutil.h" <<'XEOF'
+#ifndef _XUTIL_H_
+#define _XUTIL_H_
+#endif
+XEOF
+    [ -f "$SYSROOT/include/X11/Xatom.h" ] || cat > "$SYSROOT/include/X11/Xatom.h" <<'XEOF'
+#ifndef _XATOM_H_
+#define _XATOM_H_
+#define XA_CARDINAL 6L
+#define XA_ATOM 4L
+#define XA_WINDOW 33L
+#endif
+XEOF
+    [ -f "$SYSROOT/include/X11/ICE/ICElib.h" ] || cat > "$SYSROOT/include/X11/ICE/ICElib.h" <<'XEOF'
+#ifndef _ICE_LIB_H_
+#define _ICE_LIB_H_
+typedef struct _IceConn *IceConn;
+#endif
+XEOF
+    [ -f "$SYSROOT/include/X11/SM/SMlib.h" ] || cat > "$SYSROOT/include/X11/SM/SMlib.h" <<'XEOF'
+#ifndef _SM_LIB_H_
+#define _SM_LIB_H_
+typedef struct _SmcConn *SmcConn;
+typedef struct _SmsConn *SmsConn;
+typedef enum {
+    SmRestartIfRunning = 0,
+    SmRestartAnyway = 1,
+    SmRestartImmediately = 2,
+    SmRestartNever = 3
+} SmRestartStyle;
+#define SmRestartStyleHint "SmRestartStyleHint"
+#define SmProgram          "Program"
+#define SmProcessID        "ProcessID"
+#endif
+XEOF
+    if [ -x "$src/autogen.sh" ] && [ ! -x "$src/configure" ]; then
+        (cd "$src" && NOCONFIGURE=1 ./autogen.sh >/dev/null 2>&1 || \
+         cd "$src" && ./autogen.sh --noconfigure >/dev/null 2>&1)
+    fi
+    [ -x "$src/configure" ] || { echo "autotools_pkg: no configure for $name" >&2; return 1; }
+    local OB=$B/build-$name
+    rm -rf "$OB" && mkdir -p "$OB"
+    cp -a "$src"/. "$OB"/
+    (cd "$OB" && ./configure \
+        --host="$MUSL_TARGET-linux-musl" \
+        --prefix="$SYSROOT" --libdir="$SYSROOT/lib" \
+        --includedir="$SYSROOT/include" \
+        --disable-static --enable-shared \
+        --disable-doc --disable-docs --disable-gtk-doc \
+        --enable-maintainer-mode \
+        CC="$MESON_CC" CXX="$MESON_CXX" \
+        CPPFLAGS="-I$SYSROOT/include -I$SYSROOT/include/gtk-3.0 -I$SYSROOT/include/glib-2.0 -I$SYSROOT/lib/glib-2.0/include -I$SYSROOT/include/atk-1.0 -I$SYSROOT/include/pango-1.0 -I$SYSROOT/include/cairo -I$SYSROOT/include/libxfce4util" \
+        LDFLAGS="-L$SYSROOT/lib -Wl,-rpath-link,$SYSROOT/lib" \
+        PKG_CONFIG_LIBDIR="$SYSROOT/lib/pkgconfig" \
+        GLIB_COMPILE_RESOURCES=/usr/bin/glib-compile-resources \
+        GLIB_GENMARSHAL=/usr/bin/glib-genmarshal \
+        GLIB_MKENUMS=/usr/bin/glib-mkenums \
+        GDBUS_CODEGEN=/usr/bin/gdbus-codegen \
+        "$@" 2>&1 | tail -5)
+    env -u ARCH -u MAKEFLAGS make -C "$OB" -j"$(nproc)" 2>&1 | tail -3
+    env -u ARCH -u MAKEFLAGS make -C "$OB" install 2>&1 | tail -3
 }
 
 # ---------------------------------------------------------------- libffi
@@ -219,7 +334,7 @@ fi
 # ---------------------------------------------------------------- wayland
 if want wayland && ! stamp wayland; then
     echo "=== wayland (target) ==="
-    meson_pkg wayland "$USER_DIR/external/wayland" \
+    meson_pkg wayland "$USER_DIR/external/gui/wayland" \
         -Ddocumentation=false -Dtests=false -Ddtd_validation=false \
         -Dscanner=false
     mark wayland
@@ -228,7 +343,7 @@ fi
 # ------------------------------------------------------- wayland-protocols
 if want protocols && ! stamp protocols; then
     echo "=== wayland-protocols ==="
-    meson_pkg wayland-protocols "$USER_DIR/external/wayland-protocols" \
+    meson_pkg wayland-protocols "$USER_DIR/external/gui/wayland-protocols" \
         -Dtests=false
     mark protocols
 fi
@@ -236,7 +351,7 @@ fi
 # ---------------------------------------------------------------- pixman
 if want pixman && ! stamp pixman; then
     echo "=== pixman ==="
-    meson_pkg pixman "$USER_DIR/external/pixman" \
+    meson_pkg pixman "$USER_DIR/external/gui/pixman" \
         -Dtests=disabled -Ddemos=disabled -Dgtk=disabled \
         -Dlibpng=disabled -Dgnuplot=false -Dopenmp=disabled
     mark pixman
@@ -247,7 +362,7 @@ if want xkeyboard-config && ! stamp xkeyboard-config; then
     echo "=== xkeyboard-config (native data) ==="
     rm -rf "$USER_DIR/build/xkeyboard-config"
     meson setup "$USER_DIR/build/xkeyboard-config" \
-        "$USER_DIR/external/xkeyboard-config"
+        "$USER_DIR/external/gui/xkeyboard-config"
     ninja -C "$USER_DIR/build/xkeyboard-config"
     mark xkeyboard-config
 fi
@@ -255,7 +370,7 @@ fi
 # ------------------------------------------------------------ libxkbcommon
 if want xkbcommon && ! stamp xkbcommon; then
     echo "=== libxkbcommon ==="
-    meson_pkg libxkbcommon "$USER_DIR/external/libxkbcommon" \
+    meson_pkg libxkbcommon "$USER_DIR/external/gui/libxkbcommon" \
         -Denable-x11=false -Denable-wayland=false -Denable-tools=false \
         -Denable-docs=false -Denable-bash-completion=false \
         -Denable-xkbregistry=false \
@@ -277,7 +392,7 @@ if want libevdev && ! stamp libevdev; then
             cp "/usr/$MUSL_TARGET-linux-gnu/include/linux/$h" \
                "$SYSROOT/include/linux/"
     done
-    SRC=$USER_DIR/external/libevdev
+    SRC=$USER_DIR/external/gui/libevdev
     OB=$B/build-libevdev
     rm -rf "$OB" && mkdir -p "$OB"
     cat > "$OB/config.h" <<'EOF'
@@ -380,43 +495,284 @@ fi
 
 # -------------------------------------------- libdrm headers + stub pc
 if want libdrm && ! stamp libdrm; then
-    echo "=== libdrm headers ==="
-    SRC=$USER_DIR/external/libdrm
-    mkdir -p "$SYSROOT/include/libdrm" "$SYSROOT/include/drm"
-    cp "$SRC/include/drm/"*.h "$SYSROOT/include/libdrm/" 2>/dev/null || true
-    cp "$SRC/include/drm/"*.h "$SYSROOT/include/drm/" 2>/dev/null || true
-    cat > "$SYSROOT/lib/pkgconfig/libdrm.pc" <<EOF
-prefix=$SYSROOT
-libdir=$SYSROOT/lib
-includedir=$SYSROOT/include
-Name: libdrm
-Description: libdrm headers stub for A20OS
-Version: 2.4.120
-Libs: -L\${libdir} -ldrm
-Cflags: -I\${includedir} -I\${includedir}/libdrm
-EOF
+    echo "=== libdrm ==="
+    meson_pkg libdrm "$USER_DIR/external/gui/libdrm" \
+        -Dtests=false -Dudev=false -Dinstall-test-programs=false \
+        -Dman-pages=disabled -Dvalgrind=disabled \
+        -Dintel=disabled -Dradeon=disabled -Damdgpu=disabled \
+        -Dnouveau=disabled -Dvmwgfx=disabled -Dexynos=disabled \
+        -Dtegra=disabled -Dfreedreno=disabled -Detnaviv=disabled \
+        -Dvc4=disabled -Domap=disabled
     mark libdrm
 fi
 
 # --------------------------------------------------------------- libinput
 if want libinput && ! stamp libinput; then
     echo "=== libinput ==="
-    meson_pkg libinput "$USER_DIR/external/libinput" \
+    meson_pkg libinput "$USER_DIR/external/gui/libinput" \
         -Dlibwacom=false -Ddebug-gui=false -Dtests=false \
         -Ddocumentation=false -Dinstall-tests=false \
         -Dzshcompletiondir=no
     mark libinput
 fi
 
+# ------------------------------------------------------------------ mesa
+if want mesa && ! stamp mesa; then
+    echo "=== mesa (EGL/GLES + gbm + virgl/softpipe) ==="
+    export BISON_PKGDATADIR="$HOME/.local/rootfs/usr/share/bison"
+    export M4="$HOME/.local/rootfs/usr/bin/m4"
+    meson_pkg mesa "$USER_DIR/external/gui/mesa" \
+        -Dgallium-drivers=virgl,softpipe \
+        -Dvulkan-drivers= \
+        -Dglx=disabled -Dgbm=enabled -Degl=enabled \
+        -Dgles1=disabled -Dgles2=enabled \
+        -Dplatforms= -Dllvm=disabled -Dopengl=true \
+        -Dgallium-extra-hud=false -Dtools= -Dbuild-tests=false \
+        -Dshader-cache=disabled
+    # Mesa runtime deps that live in the prebuilt toolchain's lib dir:
+    # libstdc++ (musl-native) and libgcc_s, plus stripping the 96 MB
+    # libgallium megadriver down to a deployable size.
+    TC_LIB="$MUSL_TOOLCHAIN/$MUSL_TARGET-linux-musl/lib"
+    if [ -f "$TC_LIB/libstdc++.so.6.0.29" ]; then
+        cp "$TC_LIB/libstdc++.so.6.0.29" "$SYSROOT/lib/"
+        ln -sf libstdc++.so.6.0.29 "$SYSROOT/lib/libstdc++.so.6"
+    fi
+    if [ -f "$TC_LIB/libgcc_s.so.1" ]; then
+        cp "$TC_LIB/libgcc_s.so.1" "$SYSROOT/lib/"
+    fi
+    if [ -x "$MUSL_TOOLCHAIN/bin/$MUSL_TARGET-linux-musl-strip" ]; then
+        "$MUSL_TOOLCHAIN/bin/$MUSL_TARGET-linux-musl-strip" --strip-unneeded \
+            "$SYSROOT/lib/libgallium-"*.so \
+            "$SYSROOT/lib/libEGL.so."* "$SYSROOT/lib/libGLESv2.so."* \
+            "$SYSROOT/lib/libGLESv1_CM.so."* "$SYSROOT/lib/libgbm.so."* \
+            "$SYSROOT/lib/libstdc++.so.6.0.29" 2>/dev/null || true
+    fi
+    mark mesa
+fi
+
+# ------------------------------------------------------------------ glib
+if want glib && ! stamp glib; then
+    echo "=== glib ==="
+    # glib 2.84 needs a gvdb with gvdb_table_n_children and the tests /
+    # build-tools options; the pinned gvdb.wrap revision predates that.
+    GVDB_DIR="$USER_DIR/external/gui/glib/subprojects/gvdb"
+    if [ -d "$GVDB_DIR/.git" ]; then
+        (cd "$GVDB_DIR" && git stash -q 2>/dev/null; \
+         git checkout -q c6f2359 2>/dev/null || true; \
+         rm -f meson.options; \
+         grep -q "build-tools" meson_options.txt 2>/dev/null || \
+             echo "option('build-tools', type : 'boolean', value : false)" >> meson_options.txt)
+    fi
+    meson_pkg glib "$USER_DIR/external/gui/glib" \
+        -Dtests=false -Dinstalled_tests=false -Dglib_assert=false \
+        -Dglib_checks=false -Dlibmount=disabled -Dlibelf=disabled \
+        -Dman=false -Ddocumentation=false -Ddtrace=false
+    mark glib
+fi
+
+# ------------------------------------------------------------------ dbus
+if want dbus && ! stamp dbus; then
+    echo "=== dbus (cmake) ==="
+    OB=$B/build-dbus
+    rm -rf "$OB" && mkdir -p "$OB"
+    (cd "$OB" && cmake "$USER_DIR/external/gui/dbus" \
+        -DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR="$CPU_FAMILY" \
+        -DCMAKE_C_COMPILER="$MESON_CC" -DCMAKE_CXX_COMPILER="$MESON_CXX" \
+        -DCMAKE_INSTALL_PREFIX="$SYSROOT" -DCMAKE_PREFIX_PATH="$SYSROOT" \
+        -DEXPAT_INCLUDE_DIR="$SYSROOT/include" \
+        -DEXPAT_LIBRARY="$SYSROOT/lib/libexpat.so" \
+        -DDBUS_BUILD_TESTS=OFF -DDBUS_BUILD_X11=OFF \
+        -DENABLE_SYSTEMD=OFF -DENABLE_LAUNCHD=OFF \
+        -DDBUS_SESSION_SOCKET_DIR=/tmp \
+        -DCMAKE_C_FLAGS="-I$SYSROOT/include" > /dev/null)
+    # dbus 1.14 cmake leaks a -lsystemd into every link even with
+    # ENABLE_SYSTEMD=OFF; strip it so the toolchain does not need systemd.
+    find "$OB" -name "link.txt" -exec sed -i 's/ -lsystemd//g' {} \;
+    cmake --build "$OB" --target dbus-daemon dbus-1 dbus-send \
+        dbus-run-session dbus-uuidgen -j"$(nproc)" 2>&1 | tail -3
+    cmake --install "$OB" 2>/dev/null || true
+    cp -r "$USER_DIR/external/gui/dbus"/dbus/*.h "$SYSROOT/include/dbus/" 2>/dev/null || true
+    mkdir -p "$SYSROOT/lib/pkgconfig"
+    cat > "$SYSROOT/lib/pkgconfig/dbus-1.pc" <<EOF
+prefix=$SYSROOT
+exec_prefix=\${prefix}
+libdir=\${exec_prefix}/lib
+includedir=\${prefix}/include
+Name: dbus
+Description: D-Bus message bus
+Version: 1.14.10
+Libs: -L\${libdir} -ldbus-1
+Cflags: -I\${includedir}/dbus-1.0 -I\${libdir}/dbus-1.0/include
+EOF
+    mark dbus
+fi
+
+# ------------------------------------------------------------------ atk
+if want atk && ! stamp atk; then
+    echo "=== atk ==="
+    meson_pkg atk "$USER_DIR/external/gui/atk" \
+        -Dintrospection=false -Ddocs=false
+    mark atk
+fi
+
+# ------------------------------------------------------------------ gdk-pixbuf
+if want gdk-pixbuf && ! stamp gdk-pixbuf; then
+    echo "=== gdk-pixbuf ==="
+    meson_pkg gdk-pixbuf "$USER_DIR/external/gui/gdk-pixbuf" \
+        -Dtests=false -Dinstalled_tests=false -Dgtk_doc=false \
+        -Dintrospection=disabled -Dman=false -Dbuiltin_loaders=png \
+        -Drelocatable=true -Dgio_sniffing=false -Djpeg=false \
+        -Dtiff=false -Dgif=false
+    mark gdk-pixbuf
+fi
+
+# ------------------------------------------------------------------ cairo
+if want cairo && ! stamp cairo; then
+    echo "=== cairo ==="
+    meson_pkg cairo "$USER_DIR/external/gui/cairo" \
+        -Dfontconfig=enabled -Dfreetype=enabled -Dpng=enabled \
+        -Dzlib=enabled -Dxlib=disabled -Dxlib-xcb=disabled \
+        -Dxcb=disabled -Dquartz=disabled -Ddwrite=disabled \
+        -Dtee=disabled
+    mark cairo
+fi
+
+# ------------------------------------------------------------------ pango
+if want pango && ! stamp pango; then
+    echo "=== pango ==="
+    meson_pkg pango "$USER_DIR/external/gui/pango" \
+        -Dbuild-testsuite=false -Dbuild-examples=false \
+        -Ddocumentation=false -Dgtk_doc=false -Dintrospection=disabled \
+        -Dcairo=enabled -Dfreetype=enabled -Dfontconfig=enabled
+    mark pango
+fi
+
+# ------------------------------------------------------------------ gtk3
+if want gtk3 && ! stamp gtk3; then
+    echo "=== gtk3 ==="
+    meson_pkg gtk3 "$USER_DIR/external/gui/gtk3" \
+        -Dgtk_doc=false -Dman=false -Dtests=false -Dinstalled_tests=false \
+        -Ddemos=false -Dexamples=false \
+        -Dintrospection=false \
+        -Dx11_backend=false -Dwayland_backend=true \
+        -Dbroadway_backend=false -Dquartz_backend=false \
+        -Dwin32_backend=false -Dcloudproviders=false \
+        -Dprint_backends=file -Dcolord=no \
+        -Dlibepoxy:glx=no
+    mark gtk3
+fi
+
+# ------------------------------------------------------------------ XFCE
+# libxfce4util and libxfce4windowing ship meson builds; the rest are
+# autotools (autogen'd in autotools_pkg).
+if want libxfce4util && ! stamp libxfce4util; then
+    echo "=== libxfce4util ==="
+    meson_pkg libxfce4util "$USER_DIR/external/gui/libxfce4util" \
+        -Dgtk-doc=false -Dintrospection=false -Dvala=disabled
+    mark libxfce4util
+fi
+
+if want libxfce4windowing && { ! stamp libxfce4windowing || \
+    [ "$USER_DIR/external/gui/libxfce4windowing/libxfce4windowing/xfw-workspace-group-wayland.c" -nt "$B/stamp/libxfce4windowing" ] || \
+    [ "$USER_DIR/external/gui/libxfce4windowing/libxfce4windowing/xfw-screen-wayland.c" -nt "$B/stamp/libxfce4windowing" ]; }; then
+    echo "=== libxfce4windowing ==="
+    meson_pkg libxfce4windowing "$USER_DIR/external/gui/libxfce4windowing" \
+        -Dgtk-doc=false -Dintrospection=false -Dtests=false \
+        -Dwayland=enabled -Dx11=disabled
+    mark libxfce4windowing
+fi
+
+if want xfconf && ! stamp xfconf; then
+    echo "=== xfconf ==="
+    autotools_pkg xfconf "$USER_DIR/external/gui/xfconf"
+    mark xfconf
+fi
+
+if want libxfce4ui && ! stamp libxfce4ui; then
+    echo "=== libxfce4ui ==="
+    autotools_pkg libxfce4ui "$USER_DIR/external/gui/libxfce4ui"
+    mark libxfce4ui
+fi
+
+if want exo && ! stamp exo; then
+    echo "=== exo ==="
+    autotools_pkg exo "$USER_DIR/external/gui/exo"
+    mark exo
+fi
+
+if want garcon && ! stamp garcon; then
+    echo "=== garcon ==="
+    autotools_pkg garcon "$USER_DIR/external/gui/garcon"
+    mark garcon
+fi
+
+if want gtk-layer-shell && ! stamp gtk-layer-shell; then
+    echo "=== gtk-layer-shell ==="
+    meson_pkg gtk-layer-shell "$USER_DIR/external/gui/gtk-layer-shell" \
+        -Dexamples=false -Dtests=false -Dintrospection=false \
+        -Ddocs=false
+    mark gtk-layer-shell
+fi
+
+# ------------------------------------------------------------------ wlroots
+if want wlroots && ! stamp wlroots; then
+    echo "=== wlroots ==="
+    "$WL_DIR/build-compositor.sh" "$ARCH" wlroots
+    mark wlroots
+fi
+
+# ------------------------------------------------------------------ labwc
+if want labwc && ! stamp labwc; then
+    echo "=== labwc ==="
+    "$WL_DIR/build-compositor.sh" "$ARCH" labwc
+    mark labwc
+fi
+
+if want xfce4-panel && ! stamp xfce4-panel; then
+    echo "=== xfce4-panel ==="
+    autotools_pkg xfce4-panel "$USER_DIR/external/gui/xfce4-panel"
+    mark xfce4-panel
+fi
+
+if want xfdesktop && { ! stamp xfdesktop || \
+    [ "$B/stamp/libxfce4windowing" -nt "$B/stamp/xfdesktop" ]; }; then
+    echo "=== xfdesktop ==="
+    # Wayland build: skip the XSMP session-management option group (an X11
+    # feature; libxfce4ui's xfce-sm-client symbol is not exported here).
+    (cd "$USER_DIR/external/gui/xfdesktop" && \
+        sed -i 's|    g_application_add_option_group(G_APPLICATION(app), xfce_sm_client_get_option_group(argc, argv));|#ifndef A20_NO_X11_SESSION\n    g_application_add_option_group(G_APPLICATION(app), xfce_sm_client_get_option_group(argc, argv));\n#endif|' src/main.c 2>/dev/null || true)
+    autotools_pkg xfdesktop "$USER_DIR/external/gui/xfdesktop" \
+        CFLAGS="-O2 -DA20_NO_X11_SESSION"
+    mark xfdesktop
+fi
+
+if want xfce4-session && ! stamp xfce4-session; then
+    echo "=== xfce4-session ==="
+    autotools_pkg xfce4-session "$USER_DIR/external/gui/xfce4-session" \
+        --with-wayland-session-prefix="$SYSROOT"
+    mark xfce4-session
+fi
+
+if want thunar && ! stamp thunar; then
+    echo "=== thunar ==="
+    # Wayland build: thunar 4.20 still calls XDT_CHECK_LIBX11_REQUIRE;
+    # relax it to the optional check so the X11-less build configures.
+    (cd "$USER_DIR/external/gui/thunar" && \
+        sed -i 's|XDT_CHECK_LIBX11_REQUIRE()|XDT_CHECK_LIBX11()|' configure.ac 2>/dev/null || true)
+    autotools_pkg thunar "$USER_DIR/external/gui/thunar" \
+        --disable-wallpaper-plugin
+    mark thunar
+fi
+
 # ---------------------------------------------------------------- weston
 if want weston && ! stamp weston; then
     echo "=== weston ==="
     for p in "$WL_DIR/patches/weston-"*.patch; do
-        (cd "$USER_DIR/external/weston" && \
+        (cd "$USER_DIR/external/gui/weston" && \
             git apply --unidiff-zero --check "$p" 2>/dev/null && \
             git apply --unidiff-zero "$p") || true
     done
-    meson_pkg weston "$USER_DIR/external/weston" \
+    meson_pkg weston "$USER_DIR/external/gui/weston" \
         -Dbackend-drm=false -Dbackend-headless=false -Dbackend-rdp=false \
         -Dbackend-wayland=false -Dbackend-x11=false -Dbackend-fbdev=true \
         -Dbackend-default=fbdev \
@@ -435,7 +791,7 @@ fi
 # ---------------------------------------------------------------- ffmpeg
 if want ffmpeg && ! stamp ffmpeg; then
     echo "=== ffmpeg ==="
-    SRC=$USER_DIR/external/ffmpeg
+    SRC=$USER_DIR/external/libs/ffmpeg
     OB=$B/build-ffmpeg
     rm -rf "$OB" && mkdir -p "$OB"
     # FFmpeg 7.1 H.264 SEI shares its AOM film-grain object with HEVC.
@@ -471,7 +827,7 @@ if want player && ! stamp player; then
     XDG_XML=$SYSROOT/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml
     "$SCANNER" client-header "$XDG_XML" "$OB/xdg-shell-client-protocol.h"
     "$SCANNER" private-code "$XDG_XML" "$OB/xdg-shell-protocol.c"
-    DESKTOP_XML=$USER_DIR/external/weston/protocol/weston-desktop-shell.xml
+    DESKTOP_XML=$USER_DIR/external/gui/weston/protocol/weston-desktop-shell.xml
     "$SCANNER" client-header "$DESKTOP_XML" \
         "$OB/weston-desktop-shell-client-protocol.h"
     "$SCANNER" private-code "$DESKTOP_XML" \
@@ -503,6 +859,11 @@ if want player && ! stamp player; then
         -lwayland-client -lffi -lpthread -lm
     "$MUSL_GCC" -O2 -static "$USER_DIR/cmds/core/wayland-session.c" \
         -o "$SYSROOT/bin/wayland-session"
+    # EGL/GLES smoke client: links against the Mesa libs in the sysroot.
+    "$MESON_CC" -O2 -I"$SYSROOT/include" \
+        "$USER_DIR/cmds/core/egl_test.c" -o "$SYSROOT/bin/egl_test" \
+        -Wl,-rpath-link,"$SYSROOT/lib" -L"$SYSROOT/lib" \
+        -lEGL -lGLESv2 -lpthread -lm
     mark player
 fi
 

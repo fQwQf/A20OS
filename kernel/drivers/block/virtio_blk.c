@@ -21,7 +21,7 @@
 
 #define VQ_SIZE  VIRTIO_QUEUE_SIZE
 #define VIRTIO_BLK_REQ_SLOTS (VIRTIO_QUEUE_SIZE / 3)
-#define VIRTIO_BLK_WAIT_TIMEOUT_TICKS (TICKS_PER_SEC * 10)
+#define VIRTIO_BLK_WAIT_TIMEOUT_TICKS (TICKS_PER_SEC * 30)
 #define VIRTIO_BLK_MAX_RETRIES        3
 #define VIRTIO_BLK_RESET_SPINS        1000000U
 #define VIRTIO_BLK_POLL_BACKOFF_MIN_SPINS 32U
@@ -65,6 +65,7 @@ typedef struct {
     spinlock_t         lock;
     int                slot;
     int                in_flight;
+    int                irq_registered;
 } virtio_blk_inst_t;
 
 static virtio_blk_inst_t g_insts[VIRTIO_MAX_DEVS];
@@ -140,32 +141,32 @@ fail:
     return -1;
 }
 
-static int virtio_blk_init_instance(virtio_blk_inst_t *inst) {
+/*
+ * Device reset + feature negotiation + queue setup.  Runs on the DMA buffers
+ * allocated once by virtio_blk_alloc_dma(), so it can be called again after
+ * an I/O timeout to recover a wedged queue without reallocating memory.
+ * Callers either hold inst->lock or run before the instance is live.
+ *
+ * Completion model: PulseOS-style interrupt-driven completion is the default
+ * whenever the transport exposes an IRQ (registered in probe); polling via
+ * virtio_blk_poll_inst() remains as the fallback for IRQ-less transports.
+ */
+static int virtio_blk_device_init_locked(virtio_blk_inst_t *inst) {
     virtio_transport_t *vt = &inst->vt;
     int idx = inst->slot;
 
-    /*
-     * The IRQ-driven completion path introduced after the stage-7 baseline
-     * can lose queue ownership under sustained parallel block I/O.  QEMU then
-     * reports "Virtqueue size exceeded", the request times out, and executable
-     * mappings are populated with invalid data.  Keep virtio-blk on the
-     * previously verified polling completion model until IRQ queue ownership
-     * has an independent stress proof.  Other virtio devices may still use
-     * the transport's routed IRQ.
-     */
-    vt->irq = -1;
-    vt->shared_irq = 0;
-
-    inst->blk.valid = 0;
-    spin_init(&inst->lock);
-    if (virtio_blk_alloc_dma(inst) != 0) {
-        printf("[VIRTIO%d] Failed to allocate contiguous DMA memory\n", idx);
-        return -1;
-    }
-    inst->blk.legacy = vt->legacy;
+    inst->blk.valid  = 0;
+    inst->in_flight  = 0;
 
     vt->write32(vt, VIRTIO_MMIO_STATUS, 0);
     mb();
+    unsigned spins = VIRTIO_BLK_RESET_SPINS;
+    while (vt->read32(vt, VIRTIO_MMIO_STATUS) != 0 && --spins)
+        cpu_relax();
+    if (!spins) {
+        printf("[VIRTIO%d] device did not acknowledge reset\n", idx);
+        return -1;
+    }
 
     uint32_t status = VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER;
     vt->write32(vt, VIRTIO_MMIO_STATUS, status);
@@ -194,7 +195,6 @@ static int virtio_blk_init_instance(virtio_blk_inst_t *inst) {
         if (!(s & VIRTIO_STATUS_FEATURES_OK)) {
             printf("[VIRTIO%d] Device rejected features (hi=0x%x)\n",
                    idx, driver_hi);
-            virtio_blk_free_dma(inst);
             return -1;
         }
     }
@@ -203,7 +203,6 @@ static int virtio_blk_init_instance(virtio_blk_inst_t *inst) {
     uint32_t qmax = vt->read32(vt, VIRTIO_MMIO_QUEUE_NUM_MAX);
     if (qmax == 0 || qmax < VIRTIO_QUEUE_SIZE) {
         printf("[VIRTIO%d] Queue max too small: %d\n", idx, qmax);
-        virtio_blk_free_dma(inst);
         return -1;
     }
     vt->write32(vt, VIRTIO_MMIO_QUEUE_NUM, VIRTIO_QUEUE_SIZE);
@@ -263,6 +262,26 @@ static int virtio_blk_init_instance(virtio_blk_inst_t *inst) {
     inst->blk.desc_idx  = 0;
     inst->blk.last_used = 0;
     inst->blk.valid     = 1;
+    return 0;
+}
+
+static int virtio_blk_init_instance(virtio_blk_inst_t *inst) {
+    int idx = inst->slot;
+
+    inst->blk.legacy = inst->vt.legacy;
+    spin_init(&inst->lock);
+    if (virtio_blk_alloc_dma(inst) != 0) {
+        printf("[VIRTIO%d] Failed to allocate contiguous DMA memory\n", idx);
+        return -1;
+    }
+
+    uint64_t flags = spin_lock_irqsave(&inst->lock);
+    int ret = virtio_blk_device_init_locked(inst);
+    spin_unlock_irqrestore(&inst->lock, flags);
+    if (ret != 0) {
+        virtio_blk_free_dma(inst);
+        return ret;
+    }
 
     printf("[VIRTIO%d] Block device ready: capacity=%lu sectors (%lu MB)\n",
            idx, (unsigned long)inst->blk.capacity,
@@ -407,25 +426,18 @@ static virtio_blk_req_t *virtio_blk_alloc_req_locked(virtio_blk_inst_t *inst,
     return NULL;
 }
 
+/*
+ * Recover a wedged queue without permanently fencing off the block device.
+ * All in-flight requests are failed (-1) so their waiters return and retry
+ * through the virtio_blk_rw() retry loop; the device is then reset and
+ * re-initialised on the existing DMA buffers and becomes valid again.  Only
+ * a failed re-initialisation leaves inst->blk.valid cleared.
+ */
 static void virtio_blk_fail_queue_locked(virtio_blk_inst_t *inst,
                                          proc_wake_q_t *wake_q) {
     if (!inst->blk.valid)
         return;
 
-    /* Reset acknowledgement is the DMA ownership boundary.  Until the device
-     * reports status zero, every submitted descriptor and buffer remains live. */
-    inst->vt.write32(&inst->vt, VIRTIO_MMIO_STATUS, VIRTIO_STATUS_FAILED);
-    mb();
-    inst->vt.write32(&inst->vt, VIRTIO_MMIO_STATUS, 0);
-    mb();
-    unsigned spins = VIRTIO_BLK_RESET_SPINS;
-    while (inst->vt.read32(&inst->vt, VIRTIO_MMIO_STATUS) != 0 && --spins)
-        cpu_relax();
-    if (!spins)
-        panic("virtio-blk%d: device did not acknowledge queue reset",
-              inst->slot);
-
-    inst->blk.valid = 0;
     for (int i = 0; i < VIRTIO_BLK_REQ_SLOTS; i++) {
         virtio_blk_req_t *req = &inst->req[i];
         if (!req->in_use)
@@ -436,6 +448,38 @@ static void virtio_blk_fail_queue_locked(virtio_blk_inst_t *inst,
             (void)wait_queue_collect_all(&req->waiters, 0,
                                          PROC_WAKE_EXIT, wake_q, NULL);
     }
+
+    if (virtio_blk_device_init_locked(inst) != 0)
+        printf("[VIRTIO%d] queue recovery failed; device stays disabled\n",
+               inst->slot);
+    else
+        printf("[VIRTIO%d] queue recovered after reset\n", inst->slot);
+}
+
+/*
+ * PulseOS-style interrupt completion: acknowledge the ISR bits, drain the
+ * used ring under inst->lock and wake the parked waiters.  The exact same
+ * drain routine is used by the polling fallback, so both completion models
+ * share one ownership path.
+ */
+static int virtio_blk_irq_handler(int irq, void *priv) {
+    (void)irq;
+    virtio_blk_inst_t *inst = (virtio_blk_inst_t *)priv;
+    if (!inst)
+        return 0;
+    uint32_t isr = inst->vt.read32(&inst->vt, VIRTIO_MMIO_INTERRUPT_STATUS);
+    if (!isr)
+        return 0;
+    inst->vt.write32(&inst->vt, VIRTIO_MMIO_INTERRUPT_ACK, isr);
+
+    proc_wake_q_t wake_q;
+    proc_wake_q_init(&wake_q);
+    uint64_t flags = spin_lock_irqsave(&inst->lock);
+    if (inst->blk.valid)
+        virtio_blk_complete_used_locked(inst, &wake_q);
+    spin_unlock_irqrestore(&inst->lock, flags);
+    (void)proc_wake_q_flush(&wake_q);
+    return 0;
 }
 
 static int virtio_blk_submit_req(virtio_blk_inst_t *inst, virtio_blk_req_t *req,
@@ -685,17 +729,23 @@ static int virtio_blk_rw(int idx, uint64_t lba, void *buf, size_t sectors, int w
                 flags = spin_lock_irqsave(&inst->lock);
                 virtio_blk_complete_used_locked(inst, &wake_q);
                 virtio_blk_fail_queue_locked(inst, &wake_q);
+                int valid = inst->blk.valid;
                 spin_unlock_irqrestore(&inst->lock, flags);
                 (void)proc_wake_q_flush(&wake_q);
                 printf("[VIRTIO%d] descriptor allocation timed out; queue reset\n",
                        inst->slot);
-                return -1;
+                if (!valid)
+                    return -1;
+                break;
             }
             if (proc_current())
                 proc_yield();
             else
                 cpu_relax();
         }
+
+        if (!req)
+            continue;
 
         int ret = virtio_blk_wait_req(inst, req, lba);
         if (ret == 0)
@@ -833,7 +883,21 @@ static int virtio_blk_driver_probe(device_t *dev) {
         return ret;
     }
 
-    kinfo("[VIRTIO-BLK] %s using completion polling\n", dev->name);
+    if (inst->vt.irq >= 0) {
+        if (request_irq((uint32_t)inst->vt.irq, virtio_blk_irq_handler,
+                        0, inst) == 0) {
+            inst->irq_registered = 1;
+            kinfo("[VIRTIO-BLK] %s using IRQ %d completions\n",
+                  dev->name, inst->vt.irq);
+        } else {
+            kinfo("[VIRTIO-BLK] %s IRQ %d registration failed; "
+                  "falling back to completion polling\n",
+                  dev->name, inst->vt.irq);
+            inst->vt.irq = -1;
+        }
+    }
+    if (inst->vt.irq < 0)
+        kinfo("[VIRTIO-BLK] %s using completion polling\n", dev->name);
 
     g_ninst++;
     kinfo("[VIRTIO-BLK] Probed device '%s' (legacy=%d irq=%d)\n",
@@ -888,6 +952,10 @@ static int virtio_blk_driver_remove(device_t *dev) {
     if (!inst)
         return 0;
     inst->blk.valid = 0;
+    if (inst->irq_registered) {
+        free_irq((uint32_t)inst->vt.irq, inst);
+        inst->irq_registered = 0;
+    }
     inst->vt.write32(&inst->vt, VIRTIO_MMIO_STATUS, 0);
     mb();
     inst->in_flight = 0;

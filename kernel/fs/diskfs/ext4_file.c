@@ -488,8 +488,11 @@ int ext4_fclose(vfile_t *vf) {
     if (vf && vf->vnode && vf->vnode->fs_data) {
         ext4_vnode_priv_t *fp =
             (ext4_vnode_priv_t *)vf->vnode->fs_data;
-        if (fp->unlinked)
-            page_cache_invalidate(vf->vnode);
+        uint32_t previous = __atomic_fetch_sub(&fp->open_count, 1,
+                                               __ATOMIC_ACQ_REL);
+        if (previous == 1 &&
+            __atomic_load_n(&fp->unlinked, __ATOMIC_ACQUIRE))
+            page_cache_discard_unlinked(vf->vnode);
     }
     if (vf->priv) { kfree(vf->priv); vf->priv = NULL; }
     return 0;
@@ -528,6 +531,7 @@ vfile_t *ext4_open_vnode(vnode_t *vn, int flags) {
     vfile_ref_init(vf, 1);
     vf->ops       = &g_ext4_fops;
     vf->priv      = fc;
+    __atomic_fetch_add(&fp->open_count, 1, __ATOMIC_RELEASE);
     return vf;
 }
 

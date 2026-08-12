@@ -380,7 +380,6 @@ static int epoll_do_wait(int epfd, void *events, int maxevents,
             short poll_events = epoll_events_to_poll(ep->items[i].ev.events);
             int revents = vfs_poll_events((int)gfd, poll_events);
             if (revents <= 0) continue;
-
             epoll_event_t out_ev;
             out_ev.events = poll_events_to_epoll((short)revents,
                                                   ep->items[i].ev.events);
@@ -476,4 +475,29 @@ int64_t sys_epoll_pwait(int epfd, void *events, int maxevents,
                         int timeout, const void *sigmask, size_t sigsetsize)
 {
     return epoll_do_wait(epfd, events, maxevents, timeout, sigmask, sigsetsize);
+}
+
+struct linux_timespec64_epoll {
+    int64_t tv_sec;
+    int64_t tv_nsec;
+};
+
+int64_t sys_epoll_pwait2(int epfd, void *events, int maxevents,
+                         const void *timeout, const void *sigmask,
+                         size_t sigsetsize)
+{
+    int timeout_ms = -1;
+    if (timeout) {
+        struct linux_timespec64_epoll ts;
+        if (copy_from_user(&ts, timeout, sizeof(ts)) < 0)
+            return -EFAULT;
+        if (ts.tv_sec < 0 || ts.tv_nsec < 0 || ts.tv_nsec >= 1000000000LL)
+            return -EINVAL;
+        uint64_t total_ns = (uint64_t)ts.tv_sec * 1000000000ULL +
+                            (uint64_t)ts.tv_nsec;
+        uint64_t ms = total_ns / 1000000ULL;
+        timeout_ms = ms > (uint64_t)0x7fffffff ? 0x7fffffff : (int)ms;
+    }
+    return epoll_do_wait(epfd, events, maxevents, timeout_ms, sigmask,
+                         sigsetsize);
 }

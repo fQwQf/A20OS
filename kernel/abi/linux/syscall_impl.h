@@ -310,6 +310,197 @@ int64_t sys_get_robust_list(int pid, void *head_ptr, size_t *len_ptr);
 int64_t sys_a20_channel_pair(const linux_syscall_args_t *args);
 int64_t sys_a20_registry_client_fd(const linux_syscall_args_t *args);
 
+/* Keyring (sys_keyring.c). */
+int64_t sys_add_key(const char *type, const char *description,
+                    const void *payload, size_t plen, int32_t ringid);
+int64_t sys_request_key(const char *type, const char *description,
+                        const char *callout_info, int32_t dest_ringid);
+int64_t sys_keyctl(int cmd, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5);
+
+/* fanotify (sys_fanotify.c). */
+int64_t sys_fanotify_init(unsigned flags, unsigned event_f_flags);
+int64_t sys_fanotify_mark(int fanotify_fd, unsigned flags, uint64_t mask,
+                          int dfd, const char *path);
+
+/* Process accounting (sys_acct.c). */
+int64_t sys_acct(const char *filename);
+
+/* Linux AIO (sys_aio.c). */
+int64_t sys_io_setup(unsigned nr_events, void *ctxp);
+int64_t sys_io_destroy(uint64_t ctx);
+int64_t sys_io_submit(uint64_t ctx, long nr, const void *iocbpp);
+int64_t sys_io_getevents(uint64_t ctx, long min_nr, long nr, void *events,
+                         const void *timeout);
+int64_t sys_io_pgetevents(uint64_t ctx, long min_nr, long nr, void *events,
+                          const void *timeout, const void *sigmask,
+                          size_t sigsetsize);
+int64_t sys_io_cancel(uint64_t ctx, const void *iocb, void *result);
+
+/* pidfd (sys_pidfd.c). */
+int64_t sys_pidfd_open(int pid, unsigned flags);
+int64_t sys_pidfd_getfd(int pidfd, int targetfd, unsigned flags);
+
+/* epoll_pwait2 (sys_epoll.c). */
+int64_t sys_epoll_pwait2(int epfd, void *events, int maxevents,
+                         const void *timeout, const void *sigmask,
+                         size_t sigsetsize);
+
+/* Kernel driver modules (sys_module.c). */
+int64_t sys_init_module(const void *umod, unsigned long len,
+                        const char *uargs);
+int64_t sys_finit_module(int fd, const char *uargs, int flags);
+int64_t sys_delete_module(const char *name_user, unsigned int flags);
+
+/* Small compatibility group (sys_missing.c). */
+int64_t sys_restart_syscall(void);
+int64_t sys_kcmp(int pid1, int pid2, int type, unsigned long idx1,
+                 unsigned long idx2);
+int64_t sys_readahead(int fd, long off, size_t count);
+int64_t sys_cachestat(int fd, const void *cstat_range, void *cstat,
+                      unsigned flags);
+int64_t sys_lookup_dcookie(uint64_t cookie, char *buf, size_t len);
+int64_t sys_quotactl(int cmd, const char *special, int id, void *addr);
+int64_t sys_quotactl_fd(int fd, int cmd, int id, void *addr);
+int64_t sys_remap_file_pages(uint64_t start, size_t size, int prot,
+                             uint64_t pgoff, int flags);
+int64_t sys_memfd_secret(unsigned flags);
+int64_t sys_rseq(void *rseq, uint32_t rseq_len, int flags, uint32_t sig);
+
+/* Cross-process memory (sys_process_vm.c). */
+int64_t sys_process_vm_readv(int pid, const void *lvec, unsigned long liovcnt,
+                             const void *rvec, unsigned long riovcnt,
+                             unsigned long flags);
+int64_t sys_process_vm_writev(int pid, const void *lvec, unsigned long liovcnt,
+                              const void *rvec, unsigned long riovcnt,
+                              unsigned long flags);
+int64_t sys_process_madvise(int pid, const void *iov, unsigned long iovcnt,
+                            int advice, unsigned long flags);
+int64_t sys_process_mrelease(int pidfd, unsigned flags);
+
+/* futex_waitv / futex_requeue (sys_futex.c). */
+int64_t sys_futex_waitv(const void *waiters, unsigned nr_futexes,
+                        unsigned flags, const void *timeout, uint64_t clockid);
+int64_t sys_futex_requeue(int *uaddr, int *uaddr2, int nr_wake,
+                          int nr_requeue, uint32_t flags);
+
+/* mempolicy family (sys_mempolicy.c). */
+int64_t sys_set_mempolicy(int mode, const unsigned long *nmask,
+                          unsigned long maxnode);
+int64_t sys_mbind(uint64_t addr, unsigned long len, int mode,
+                  const unsigned long *nmask, unsigned long maxnode,
+                  unsigned flags);
+int64_t sys_migrate_pages(int pid, unsigned long maxnode,
+                          const unsigned long *old_nodes,
+                          const unsigned long *new_nodes);
+int64_t sys_move_pages(int pid, unsigned long nr_pages, const void *pages,
+                       const int *nodes, int *status, int flags);
+int64_t sys_set_mempolicy_home_node(uint64_t addr, unsigned long len,
+                                    int home_node, unsigned long flags);
+
+/* File handles (sys_handle.c). */
+int64_t sys_name_to_handle_at(int dirfd, const char *pathname, void *handle,
+                              int *mnt_id, int flags);
+int64_t sys_open_by_handle_at(int mount_fd, void *handle, int flags);
+
+/* New mount API (sys_mount_api.c). */
+int64_t sys_fsopen(const char *fsname, unsigned flags);
+int64_t sys_fsconfig(int fs_fd, unsigned cmd, const char *key,
+                     const void *value, int aux);
+int64_t sys_fsmount(int fs_fd, unsigned flags, unsigned mnt_flags);
+int64_t sys_fspick(int dirfd, const char *path, unsigned flags);
+int64_t sys_open_tree(int dirfd, const char *path, unsigned flags);
+int64_t sys_move_mount(int from_dfd, const char *from_path, int to_dfd,
+                       const char *to_path, unsigned flags);
+int64_t sys_mount_setattr(int dfd, const char *path, unsigned flags,
+                          const void *attr, size_t size);
+
+/* io_uring (sys_io_uring.c). */
+int64_t sys_io_uring_setup(unsigned entries, void *params);
+int64_t sys_io_uring_enter(int fd, unsigned to_submit, unsigned min_complete,
+                           unsigned flags, const void *sig, size_t sigsz);
+int64_t sys_io_uring_register(int fd, unsigned opcode, const void *arg,
+                              unsigned nr_args);
+
+/* Landlock (sys_landlock.c). */
+int64_t sys_landlock_create_ruleset(const void *attr, size_t size,
+                                    unsigned flags);
+int64_t sys_landlock_add_rule(int ruleset_fd, int rule_type,
+                              const void *attr, unsigned flags);
+int64_t sys_landlock_restrict_self(int ruleset_fd, unsigned flags);
+
+/* SysV message queues (sys_memfd_shm.c). */
+int64_t sys_msgget(int key, int msgflg);
+int64_t sys_msgsnd(int msqid, const void *msgp, size_t msgsz, int msgflg);
+int64_t sys_msgrcv(int msqid, void *msgp, size_t msgsz, int64_t msgtyp,
+                   int msgflg);
+int64_t sys_msgctl(int msqid, int cmd, void *buf);
+
+/* POSIX message queues (sys_posix_mq.c). */
+int64_t sys_mq_open(const char *name, int oflag, int mode, const void *attr);
+int64_t sys_mq_unlink(const char *name);
+int64_t sys_mq_getsetattr(int mqdes, const void *newattr, void *oldattr);
+int64_t sys_mq_notify(int mqdes, const void *notification);
+int64_t sys_mq_timedsend(int mqdes, const char *msg_ptr, size_t msg_len,
+                         unsigned msg_prio, const void *abs_timeout);
+int64_t sys_mq_timedreceive(int mqdes, char *msg_ptr, size_t msg_len,
+                            unsigned *msg_prio, const void *abs_timeout);
+
+/* ioprio / pkey / misc compat (sys_missing.c, proc/sched_compat.c). */
+int64_t sys_ioprio_set(int which, int who, int ioprio);
+int64_t sys_ioprio_get(int which, int who);
+int64_t sys_pkey_alloc(unsigned flags, uint64_t init_access_rights);
+int64_t sys_pkey_free(int pkey);
+int64_t sys_pkey_mprotect(uint64_t addr, size_t len, int prot, int pkey);
+int64_t sys_mlock2(uint64_t addr, size_t len, int flags);
+int64_t sys_mseal(uint64_t addr, size_t len, unsigned flags);
+int64_t sys_seccomp(unsigned op, unsigned flags, const void *uargs);
+int64_t sys_kexec_load(uint64_t entry, uint64_t nr_segments,
+                       const void *segments, uint64_t flags);
+int64_t sys_kexec_file_load(int kernel_fd, int initrd_fd,
+                            uint64_t cmdline_len, const void *cmdline,
+                            uint64_t flags);
+int64_t sys_nfsservctl(int cmd, const void *arg, void *res);
+int64_t sys_map_shadow_stack(uint64_t addr, uint64_t size, unsigned flags);
+
+/* futex_wait / futex_wake split syscalls (sys_futex.c). */
+int64_t sys_futex_wait(void *uaddr, uint32_t val, const void *timeout,
+                       uint32_t flags);
+int64_t sys_futex_wake(void *uaddr, uint32_t nr, uint32_t flags);
+
+/* xattr-at variants (sys_xattr.c). */
+int64_t sys_setxattrat(int dirfd, const char *pathname, const char *name,
+                       const void *value, size_t size, int flags);
+int64_t sys_getxattrat(int dirfd, const char *pathname, const char *name,
+                       void *value, size_t size, int flags);
+int64_t sys_listxattrat(int dirfd, const char *pathname, char *list,
+                        size_t size, int flags);
+int64_t sys_removexattrat(int dirfd, const char *pathname, const char *name,
+                          int flags);
+
+/* RISC-V arch-specific (sys_arch_riscv.c). */
+int64_t sys_riscv_hwprobe(const void *pairs, size_t pair_count,
+                          size_t cpu_size, const void *cpus, unsigned flags);
+int64_t sys_riscv_flush_icache(uint64_t start, uint64_t end, uint64_t flags);
+
+/* rt_tgsigqueueinfo (sys_signal.c). */
+int64_t sys_rt_tgsigqueueinfo(int tgid, int tid, int sig, void *uinfo);
+
+/* statmount/listmount/listns/open_tree_attr (sys_mount_api.c). */
+int64_t sys_statmount(uint64_t mnt_id, uint64_t flags, void *buf,
+                      size_t bufsize, unsigned int mask);
+int64_t sys_listmount(uint64_t mnt_id, uint64_t last_mnt_id, uint64_t *list,
+                      size_t nr, unsigned int flags);
+int64_t sys_listns(unsigned int nstype, uint64_t *nsids, size_t nr);
+int64_t sys_open_tree_attr(int dfd, const char *path, unsigned int flags,
+                           unsigned int attr_mask, void *attr, size_t size);
+
+/* LSM introspection (sys_lsm.c). */
+int64_t sys_lsm_get_self_attr(unsigned int attr, void *ctx, size_t *size,
+                              unsigned int flags);
+int64_t sys_lsm_set_self_attr(unsigned int attr, const void *ctx, size_t size,
+                              unsigned int flags);
+int64_t sys_lsm_list_modules(uint64_t *ids, size_t *size, unsigned int flags);
+
 #endif /* LINUX_SYSCALL_DECLARE_PROTOTYPES */
 
 #endif /* _LINUX_SYSCALL_IMPL_H */

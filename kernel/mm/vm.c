@@ -9,6 +9,7 @@
 #include "mm/swap.h"
 #include "fs/vfs.h"
 #include "fs/page_cache.h"
+#include "fs/aio.h"
 #include "ipc/sysv_shm.h"
 #include "proc/proc.h"
 #include "proc/proc_internal.h"
@@ -26,112 +27,11 @@ enum {
     MM_TLB_HOLD_PAGE = 2,
 };
 
-#ifdef CONFIG_RISCV64
-#define RISCV64_ASID_BITS 16U
-#define RISCV64_ASID_COUNT (1U << RISCV64_ASID_BITS)
-#define RISCV64_ASID_WORD_BITS 64U
-#define RISCV64_ASID_WORDS (RISCV64_ASID_COUNT / RISCV64_ASID_WORD_BITS)
-
-uint64_t riscv64_asid_mask;
-static mutex_t g_riscv64_asid_lock = MUTEX_INIT;
-static uint64_t g_riscv64_asid_live[RISCV64_ASID_WORDS];
-static uint64_t g_riscv64_asid_eligible[RISCV64_ASID_WORDS];
-static uint32_t g_riscv64_asid_cursor = 1;
-static uint8_t g_riscv64_asid_initialized;
-
-static void riscv64_asid_allocator_init_locked(void)
-{
-    if (g_riscv64_asid_initialized)
-        return;
-
-    uint64_t old_satp = arch_read_satp();
-    arch_write_satp(old_satp | (0xffffUL << 44));
-    uint64_t implemented = (arch_read_satp() >> 44) & 0xffffUL;
-    arch_write_satp(old_satp);
-    arch_tlb_flush_local();
-
-    riscv64_asid_mask = implemented;
-    if (implemented) {
-        for (uint32_t asid = 1; asid <= implemented; asid++)
-            g_riscv64_asid_eligible[asid / RISCV64_ASID_WORD_BITS] |=
-                1UL << (asid % RISCV64_ASID_WORD_BITS);
-    }
-    __atomic_store_n(&g_riscv64_asid_initialized, 1, __ATOMIC_RELEASE);
-    kinfo("[MM] RISC-V ASID mask=0x%lx bits=%u\n",
-          (unsigned long)implemented,
-          implemented ? (unsigned)__builtin_popcountll(implemented) : 0);
-}
-
-static uint32_t riscv64_asid_alloc(void)
-{
-    mutex_lock(&g_riscv64_asid_lock);
-    riscv64_asid_allocator_init_locked();
-    uint32_t max_asid = (uint32_t)riscv64_asid_mask;
-    if (!max_asid) {
-        mutex_unlock(&g_riscv64_asid_lock);
-        return 0;
-    }
-
-    for (unsigned pass = 0; pass < 2; pass++) {
-        for (uint32_t scanned = 0; scanned < max_asid; scanned++) {
-            uint32_t asid = g_riscv64_asid_cursor++;
-            if (g_riscv64_asid_cursor > max_asid)
-                g_riscv64_asid_cursor = 1;
-            uint64_t bit = 1UL << (asid % RISCV64_ASID_WORD_BITS);
-            uint32_t word = asid / RISCV64_ASID_WORD_BITS;
-            if (!(g_riscv64_asid_eligible[word] & bit))
-                continue;
-            g_riscv64_asid_eligible[word] &= ~bit;
-            g_riscv64_asid_live[word] |= bit;
-            mutex_unlock(&g_riscv64_asid_lock);
-            return asid;
-        }
-
-        /* Only ASIDs which were already free at this global-flush boundary
-         * become eligible. An ASID freed later remains quarantined until the
-         * next boundary, so stale translations can never alias a new mm. */
-        arch_tlb_flush();
-        for (uint32_t word = 0; word < RISCV64_ASID_WORDS; word++)
-            g_riscv64_asid_eligible[word] = ~g_riscv64_asid_live[word];
-        g_riscv64_asid_eligible[0] &= ~1UL;
-        if (max_asid != 0xffffU) {
-            for (uint32_t asid = max_asid + 1; asid < RISCV64_ASID_COUNT;
-                 asid++)
-                g_riscv64_asid_eligible[asid / RISCV64_ASID_WORD_BITS] &=
-                    ~(1UL << (asid % RISCV64_ASID_WORD_BITS));
-        }
-    }
-
-    mutex_unlock(&g_riscv64_asid_lock);
-    panic("RISC-V ASID space exhausted (%u concurrent address spaces)",
-          max_asid);
-}
-
-static void riscv64_asid_release(uint32_t asid)
-{
-    if (!asid)
-        return;
-    mutex_lock(&g_riscv64_asid_lock);
-    uint32_t word = asid / RISCV64_ASID_WORD_BITS;
-    uint64_t bit = 1UL << (asid % RISCV64_ASID_WORD_BITS);
-    if (!(g_riscv64_asid_live[word] & bit)) {
-        mutex_unlock(&g_riscv64_asid_lock);
-        panic("RISC-V ASID double release: %u", asid);
-    }
-    g_riscv64_asid_live[word] &= ~bit;
-    mutex_unlock(&g_riscv64_asid_lock);
-}
-#endif
-
 void mm_arch_context_init(mm_struct_t *mm)
 {
     if (!mm)
         return;
-#ifdef CONFIG_RISCV64
-    mm->arch_asid = riscv64_asid_alloc();
-#else
-    mm->arch_asid = 0;
-#endif
+    mm->arch_asid = arch_mm_context_alloc();
     mm->tlb_generation = 1;
     memset(mm->tlb_cpu_generation, 0, sizeof(mm->tlb_cpu_generation));
 }
@@ -140,11 +40,7 @@ uint64_t mm_address_space_token(const mm_struct_t *mm)
 {
     if (!mm || !mm->pgdir)
         return 0;
-#ifdef CONFIG_RISCV64
-    return arch_make_satp_asid(mm->pgdir, mm->arch_asid);
-#else
-    return arch_make_addr_space_token(mm->pgdir);
-#endif
+    return arch_mm_address_space_token(mm->pgdir, mm->arch_asid);
 }
 
 void mm_tlb_invalidate_begin(mm_struct_t *mm)
@@ -524,6 +420,10 @@ void mm_destroy(mm_struct_t *mm) {
     if (!mm->arch_asid)
         arch_tlb_flush();
 
+    /* Reap Linux AIO contexts owned by this address space before the VMA
+     * list and page table are torn down. */
+    aio_context_reap_mm(mm);
+
     // 释放所有 VMA 及其物理页面
     mm_vma_flush_deferred(mm);
     vm_area_t *vma = mm->mmap;
@@ -548,9 +448,7 @@ void mm_destroy(mm_struct_t *mm) {
     /* Drain any huge-page demotion holds before page-table frames are freed. */
     mm_tlb_invalidate_finish(mm);
     if (mm->pgdir) pt_destroy_user(mm->pgdir);
-#ifdef CONFIG_RISCV64
-    riscv64_asid_release(mm->arch_asid);
-#endif
+    arch_mm_context_release(mm->arch_asid);
     kfree(mm);
 }
 

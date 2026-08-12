@@ -76,6 +76,12 @@ typedef struct net_msg {
      */
     int scm_nfiles;
     vfile_t *scm_files[NET_SCM_MAX_FDS];
+    /* SCM_CREDENTIALS: sender pid/uid/gid captured at enqueue time. */
+    uint8_t has_cred;
+    uint8_t __pad_cred[3];
+    int32_t cred_pid;
+    int32_t cred_uid;
+    int32_t cred_gid;
     uint8_t data[NET_MAX_PAYLOAD];
 } net_msg_t;
 
@@ -91,6 +97,12 @@ typedef struct net_recv_meta {
     uint8_t hoplimit;
     uint8_t tclass;
     uint16_t __pad_meta;
+    /* SCM_CREDENTIALS captured from the dequeued message. */
+    uint8_t has_cred;
+    uint8_t __pad_cred[3];
+    int32_t cred_pid;
+    int32_t cred_uid;
+    int32_t cred_gid;
 } net_recv_meta_t;
 
 typedef struct net_socket {
@@ -152,6 +164,15 @@ typedef struct net_socket {
     int ipv6_recv_2292_rthdr;
     int ipv6_recv_2292_hopopts;
     int ipv6_recv_2292_dstopts;
+    int passcred;   /* SO_PASSCRED: deliver SCM_CREDENTIALS on recvmsg */
+    int32_t peer_pid;   /* SO_PEERCRED: peer pid captured on connect/accept */
+    int32_t peer_uid;
+    int32_t peer_gid;
+    /* Channel-backed AF_UNIX: latest sender credentials for SCM_CREDENTIALS
+     * when the data plane bypasses the legacy net_msg queue. */
+    int32_t ch_cred_pid;
+    int32_t ch_cred_uid;
+    int32_t ch_cred_gid;
     uint8_t alg_last[NET_MAX_STREAM_PAYLOAD];
     size_t alg_last_len;
     char alg_type[16];
@@ -235,6 +256,9 @@ int      net_dequeue_msg_locked_meta(net_socket_t *s, void *buf, size_t len,
                                      net_recv_meta_t *meta);
 int      net_recvfrom_meta(int gfd, void *buf, size_t len, int flags,
                            void *addr, size_t *addrlen, net_recv_meta_t *meta);
+int      net_recvfrom_socket_meta(net_socket_t *s, void *buf, size_t len,
+                                  int flags, void *addr, size_t *addrlen,
+                                  net_recv_meta_t *meta);
 int      net_accept_queue_push_locked(net_socket_t *listener,
                                       net_socket_t *child);
 net_socket_t *net_accept_queue_pop_locked(net_socket_t *listener);
@@ -297,4 +321,5 @@ void net_tcp_recved(net_socket_t *s, size_t len);
  * internal channel; SCM_RIGHTS messages fall back to the legacy queue.
  * Implemented in socket_unix.c, used by net/socket.c recv path. */
 int unix_ch_recv(net_socket_t *s, void *buf, size_t len);
+int unix_ch_peek(net_socket_t *s, void *buf, size_t len);
 int unix_ch_send(net_socket_t *s, net_socket_t *dst, const void *buf, size_t len);

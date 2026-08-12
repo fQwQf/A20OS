@@ -1,13 +1,12 @@
 #include "fs/devfs.h"
+#include "devfs_internal.h"
 #include "fs/file.h"
 #include "fs/tty.h"
 #include "mm/mm.h"
-#include "core/timekeeping.h"
 #include "core/string.h"
 #include "core/stdio.h"
 #include "core/consts.h"
 #include "core/defs.h"
-#include "core/random.h"
 #include "core/sync.h"
 #include "proc/proc.h"
 #include "drivers/core/driver_core.h"
@@ -17,26 +16,6 @@
 
 extern void uart_putc(char c);
 extern int  uart_getc(void);
-
-
-enum {
-    DEVFS_ROOT,
-    DEVFS_MISC,
-    DEVFS_NULL,
-    DEVFS_ZERO,
-    DEVFS_RANDOM,
-    DEVFS_TTY,
-    DEVFS_RTC,
-    DEVFS_LOOP,
-    DEVFS_LOOP_CTRL,
-    DEVFS_PTMX,
-    DEVFS_PTS_DIR,
-    DEVFS_PTS,
-    DEVFS_SHM_DIR,
-    DEVFS_FB,
-    DEVFS_INPUT,
-    DEVFS_CLASS,
-};
 
 
 typedef struct {
@@ -68,6 +47,8 @@ static devfs_node_t g_nodes[] = {
     STATIC_NODE(DEVFS_RANDOM, "random", 0x108),
     STATIC_NODE(DEVFS_RANDOM, "urandom", 0x109),
     STATIC_NODE(DEVFS_NULL, "cpu_dma_latency", 0x10a),
+    STATIC_NODE(DEVFS_FULL, "full", 0x107),
+    STATIC_NODE(DEVFS_KMSG, "kmsg", 0x10b),
     STATIC_NODE(DEVFS_TTY, "tty", 0x500),
     STATIC_NODE(DEVFS_TTY, "console", 0x501),
     STATIC_NODE(DEVFS_TTY, "tty0", 0x400),
@@ -86,6 +67,12 @@ static devfs_node_t g_nodes[] = {
     STATIC_NODE(DEVFS_LOOP_CTRL, "loop-control", 0x70c),
     STATIC_NODE(DEVFS_PTMX, "ptmx", 0x502),
     STATIC_NODE(DEVFS_PTS_DIR, "pts", 0),
+    STATIC_NODE(DEVFS_DRI_DIR, "dri", 0),
+    STATIC_NODE(DEVFS_DRM, "card0", 0xe200),
+    STATIC_NODE(DEVFS_SND_DIR, "snd", 0),
+    STATIC_NODE(DEVFS_ALSA_CTL, "controlC0", 0x1400),
+    STATIC_NODE(DEVFS_ALSA_PCM, "pcmC0D0p", 0x1401),
+    STATIC_NODE(DEVFS_ALSA_PCM, "pcmC0D0c", 0x1402),
     STATIC_NODE(DEVFS_PTS, "0", 0x8000),
     STATIC_NODE(DEVFS_PTS, "1", 0x8001),
     STATIC_NODE(DEVFS_PTS, "2", 0x8002),
@@ -99,27 +86,6 @@ static devfs_node_t g_nodes[] = {
 
 static vnode_t g_vnodes[sizeof(g_nodes) / sizeof(g_nodes[0])];
 
-static int devfs_null_read(vfile_t *vf, char *buf, size_t count) {
-    (void)vf; (void)buf; (void)count;
-    return 0;
-}
-
-static int devfs_null_write(vfile_t *vf, const char *buf, size_t count) {
-    (void)vf; (void)buf;
-    return (int)count;
-}
-
-static int devfs_zero_read(vfile_t *vf, char *buf, size_t count) {
-    (void)vf;
-    memset(buf, 0, count);
-    return (int)count;
-}
-
-static int devfs_random_read(vfile_t *vf, char *buf, size_t count) {
-    (void)vf;
-    random_fill(buf, count);
-    return (int)count;
-}
 
 static int devfs_dir_readdir(vfile_t *vf, void *dirp, size_t count) {
     static const struct {
@@ -139,6 +105,8 @@ static int devfs_dir_readdir(vfile_t *vf, void *dirp, size_t count) {
     { "loop-control", DT_CHR },
     { "ptmx", DT_CHR },
     { "pts", DT_DIR },
+        { "dri", DT_DIR },
+        { "snd", DT_DIR },
         { "shm", DT_DIR },
     };
     static const struct {
@@ -155,6 +123,19 @@ static int devfs_dir_readdir(vfile_t *vf, void *dirp, size_t count) {
         { "0", DT_CHR }, { "1", DT_CHR }, { "2", DT_CHR }, { "3", DT_CHR },
         { "4", DT_CHR }, { "5", DT_CHR }, { "6", DT_CHR }, { "7", DT_CHR },
     };
+    static const struct {
+        const char *name;
+        uint8_t type;
+    } dri_entries[] = {
+        { ".", DT_DIR }, { "..", DT_DIR }, { "card0", DT_CHR },
+    };
+    static const struct {
+        const char *name;
+        uint8_t type;
+    } snd_entries[] = {
+        { ".", DT_DIR }, { "..", DT_DIR },
+        { "controlC0", DT_CHR }, { "pcmC0D0p", DT_CHR }, { "pcmC0D0c", DT_CHR },
+    };
 
     int kind = (int)(intptr_t)vf->priv;
     const void *entries_void = NULL;
@@ -168,6 +149,12 @@ static int devfs_dir_readdir(vfile_t *vf, void *dirp, size_t count) {
     } else if (kind == DEVFS_PTS_DIR) {
         entries_void = pts_entries;
         nentries = sizeof(pts_entries) / sizeof(pts_entries[0]);
+    } else if (kind == DEVFS_DRI_DIR) {
+        entries_void = dri_entries;
+        nentries = sizeof(dri_entries) / sizeof(dri_entries[0]);
+    } else if (kind == DEVFS_SND_DIR) {
+        entries_void = snd_entries;
+        nentries = sizeof(snd_entries) / sizeof(snd_entries[0]);
     } else {
         return -ENOTDIR;
     }
@@ -229,135 +216,6 @@ static int devfs_dir_readdir(vfile_t *vf, void *dirp, size_t count) {
     return (int)total;
 }
 
-#define RTC_RD_TIME    0x80247009UL
-#define RTC_SET_TIME   0x4024700aUL
-#define RTC_IRQP_READ  0x8008700bUL
-#define RTC_EPOCH_READ 0x8008700dUL
-#define TCGETS         0x5401
-#define TCSETS         0x5402
-#define TCSETSW        0x5403
-#define TCSETSF        0x5404
-#define TIOCGWINSZ     0x5413
-
-typedef struct {
-    int32_t tm_sec;
-    int32_t tm_min;
-    int32_t tm_hour;
-    int32_t tm_mday;
-    int32_t tm_mon;
-    int32_t tm_year;
-    int32_t tm_wday;
-    int32_t tm_yday;
-    int32_t tm_isdst;
-} krtc_time_t;
-
-static int is_leap_year(int year) {
-    return (year % 4 == 0) && ((year % 100) != 0 || (year % 400) == 0);
-}
-
-static int rtc_time_to_unix_seconds(const krtc_time_t *rt, uint64_t *secs) {
-    static const int month_days[12] = { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
-    int year = rt->tm_year + 1900;
-    int month = rt->tm_mon + 1;
-    int hour = rt->tm_hour;
-    int min = rt->tm_min;
-    int sec = rt->tm_sec;
-    int mday = rt->tm_mday;
-    int mdays;
-    int64_t z;
-    int64_t era;
-    unsigned yoe;
-    unsigned doy;
-    unsigned doe;
-
-    if (year < 1970 || month < 1 || month > 12 || mday < 1 ||
-        hour < 0 || hour > 23 || min < 0 || min > 59 || sec < 0 || sec > 59)
-        return -EINVAL;
-
-    mdays = month_days[month - 1];
-    if (month == 2 && is_leap_year(year)) mdays = 29;
-    if (mday > mdays) return -EINVAL;
-
-    year -= month <= 2;
-    era = (year >= 0 ? year : year - 399) / 400;
-    yoe = (unsigned)(year - era * 400);
-    doy = (153U * (unsigned)(month + (month > 2 ? -3 : 9)) + 2U) / 5U + (unsigned)mday - 1U;
-    doe = yoe * 365U + yoe / 4U - yoe / 100U + doy;
-    z = era * 146097 + (int64_t)doe - 719468;
-    if (z < 0) return -EINVAL;
-
-    *secs = (uint64_t)z * 86400ULL + (uint64_t)hour * 3600ULL +
-            (uint64_t)min * 60ULL + (uint64_t)sec;
-    return 0;
-}
-
-static void unix_seconds_to_rtc_time(uint64_t secs, krtc_time_t *rt) {
-    static const int month_yday[2][12] = {
-        { 0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334 },
-        { 0, 31, 60, 91, 121, 152, 182, 213, 244, 274, 305, 335 },
-    };
-    uint64_t days = secs / 86400ULL;
-    uint64_t rem = secs % 86400ULL;
-    int64_t z = (int64_t)days + 719468;
-    int64_t era = (z >= 0 ? z : z - 146096) / 146097;
-    unsigned doe = (unsigned)(z - era * 146097);
-    unsigned yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    int year = (int)(yoe + era * 400);
-    unsigned doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    unsigned mp = (5 * doy + 2) / 153;
-    unsigned mday = doy - (153 * mp + 2) / 5 + 1;
-    unsigned month = mp + (mp < 10 ? 3 : (unsigned)-9);
-
-    year += (month <= 2);
-    memset(rt, 0, sizeof(*rt));
-    rt->tm_sec = (int32_t)(rem % 60ULL);
-    rem /= 60ULL;
-    rt->tm_min = (int32_t)(rem % 60ULL);
-    rem /= 60ULL;
-    rt->tm_hour = (int32_t)rem;
-    rt->tm_mday = (int32_t)mday;
-    rt->tm_mon = (int32_t)(month - 1);
-    rt->tm_year = (int32_t)(year - 1900);
-    rt->tm_wday = (int32_t)((days + 4ULL) % 7ULL);
-    rt->tm_yday = month_yday[is_leap_year(year)][month - 1] + (int)mday - 1;
-    rt->tm_isdst = 0;
-}
-
-static int devfs_rtc_ioctl(unsigned long req, void *arg) {
-    if ((req == RTC_RD_TIME || req == RTC_IRQP_READ || req == RTC_EPOCH_READ) && !arg)
-        return -EFAULT;
-
-    switch (req) {
-    case RTC_RD_TIME: {
-        krtc_time_t tm;
-        uint64_t ts[2];
-        timekeeping_get_realtime(ts);
-        unix_seconds_to_rtc_time(ts[0], &tm);
-        if (copy_to_user(arg, &tm, sizeof(tm)) < 0) return -EFAULT;
-        return 0;
-    }
-    case RTC_IRQP_READ: {
-        unsigned long irqp = 1;
-        if (copy_to_user(arg, &irqp, sizeof(irqp)) < 0) return -EFAULT;
-        return 0;
-    }
-    case RTC_EPOCH_READ: {
-        unsigned long epoch = 1900;
-        if (copy_to_user(arg, &epoch, sizeof(epoch)) < 0) return -EFAULT;
-        return 0;
-    }
-    case RTC_SET_TIME: {
-        krtc_time_t tm;
-        uint64_t secs;
-        if (copy_from_user(&tm, arg, sizeof(tm)) < 0) return -EFAULT;
-        if (rtc_time_to_unix_seconds(&tm, &secs) < 0) return -EINVAL;
-        return timekeeping_set_realtime(secs, 0);
-    }
-    default:
-        return -ENOTTY;
-    }
-}
-
 /* Linux console (VT/KD) ioctl numbers — asm-generic, same on all archs. */
 
 
@@ -404,7 +262,7 @@ static int devfs_loop_write(vfile_t *vf, const char *buf, size_t count) {
     return r;
 }
 
-static long devfs_noop_lseek(vfile_t *vf, long offset, int whence) {
+long devfs_noop_lseek(vfile_t *vf, long offset, int whence) {
     if (whence == SEEK_SET) vf->offset = (size_t)offset;
     else if (whence == SEEK_CUR) vf->offset += (size_t)offset;
     return (long)vf->offset;
@@ -471,10 +329,6 @@ static vfile_ops_t g_devfs_dir_ops    = { .read = devfs_null_read,  .readdir = d
 static vfile_ops_t g_devfs_stdin_ops  = { .read = tty_console_read, .write = tty_console_write, .ioctl = devfs_ioctl };
 static vfile_ops_t g_devfs_stdout_ops = { .read = devfs_null_read,  .write = tty_console_write, .ioctl = devfs_ioctl };
 static vfile_ops_t g_devfs_stderr_ops = { .read = devfs_null_read,  .write = tty_console_write, .ioctl = devfs_ioctl };
-static vfile_ops_t g_devfs_null_ops   = { .read = devfs_null_read,  .write = devfs_null_write,   .lseek = devfs_noop_lseek, .ioctl = devfs_ioctl };
-static vfile_ops_t g_devfs_zero_ops   = { .read = devfs_zero_read,  .write = devfs_null_write,   .lseek = devfs_noop_lseek, .ioctl = devfs_ioctl };
-static vfile_ops_t g_devfs_random_ops = { .read = devfs_random_read,.write = devfs_null_write,   .lseek = devfs_noop_lseek, .ioctl = devfs_ioctl };
-static vfile_ops_t g_devfs_rtc_ops    = { .read = devfs_null_read,  .write = devfs_null_write,   .lseek = devfs_noop_lseek, .ioctl = devfs_ioctl };
 
 static int devfs_class_read(vfile_t *vf, char *buf, size_t count)
 {
@@ -693,6 +547,22 @@ static int devfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
                 return 0;
             }
         }
+    } else if (node->kind == DEVFS_DRI_DIR) {
+        for (size_t i = 1; i < sizeof(g_nodes) / sizeof(g_nodes[0]); i++) {
+            if (g_nodes[i].kind == DEVFS_DRM && strcmp(name, g_nodes[i].name) == 0) {
+                *out = node_to_vnode(i);
+                return 0;
+            }
+        }
+    } else if (node->kind == DEVFS_SND_DIR) {
+        for (size_t i = 1; i < sizeof(g_nodes) / sizeof(g_nodes[0]); i++) {
+            if ((g_nodes[i].kind == DEVFS_ALSA_CTL ||
+                 g_nodes[i].kind == DEVFS_ALSA_PCM) &&
+                strcmp(name, g_nodes[i].name) == 0) {
+                *out = node_to_vnode(i);
+                return 0;
+            }
+        }
     }
     return -ENOENT;
 }
@@ -712,7 +582,8 @@ static int devfs_stat(vnode_t *vn, kstat_t *st) {
     if (!node || !st) return -EINVAL;
     memset(st, 0, sizeof(*st));
     if (node->kind == DEVFS_ROOT || node->kind == DEVFS_MISC ||
-        node->kind == DEVFS_SHM_DIR || node->kind == DEVFS_PTS_DIR) {
+        node->kind == DEVFS_SHM_DIR || node->kind == DEVFS_PTS_DIR ||
+        node->kind == DEVFS_DRI_DIR || node->kind == DEVFS_SND_DIR) {
         st->st_mode = S_IFDIR | 0555;
         st->st_uid = 0;
         st->st_gid = 0;
@@ -775,6 +646,8 @@ static vfile_t *devfs_open_vnode(vnode_t *vn, int flags) {
     case DEVFS_NULL: vf->ops = &g_devfs_null_ops; break;
     case DEVFS_ZERO: vf->ops = &g_devfs_zero_ops; break;
     case DEVFS_RANDOM: vf->ops = &g_devfs_random_ops; break;
+    case DEVFS_FULL: vf->ops = &g_devfs_full_ops; break;
+    case DEVFS_KMSG: vf->ops = &g_devfs_kmsg_ops; break;
     case DEVFS_TTY:  vf->ops = &g_devfs_tty_ops; break;
     case DEVFS_RTC:  vf->ops = &g_devfs_rtc_ops; break;
     case DEVFS_FB:   vf->ops = &g_devfs_fb_ops; break;
@@ -812,6 +685,57 @@ static vfile_t *devfs_open_vnode(vnode_t *vn, int flags) {
     case DEVFS_PTS_DIR:
         vf->ops = &g_devfs_dir_ops;
         break;
+    case DEVFS_DRI_DIR:
+        vf->ops = &g_devfs_dir_ops;
+        break;
+    case DEVFS_SND_DIR:
+        vf->ops = &g_devfs_dir_ops;
+        break;
+    case DEVFS_ALSA_CTL: {
+        extern struct vfile *alsa_control_create_vfile(void);
+        vfile_t *avf = alsa_control_create_vfile();
+        if (!avf) {
+            vnode_put(vf->vnode);
+            vfile_free(vf);
+            return NULL;
+        }
+        vnode_put(vf->vnode);
+        vfile_free(vf);
+        avf->vnode = vn;
+        vnode_get(vn);
+        return avf;
+    }
+    case DEVFS_ALSA_PCM: {
+        int playback = strcmp(node->name, "pcmC0D0c") != 0;
+        extern struct vfile *alsa_pcm_create_vfile(int playback);
+        vfile_t *avf = alsa_pcm_create_vfile(playback);
+        if (!avf) {
+            vnode_put(vf->vnode);
+            vfile_free(vf);
+            return NULL;
+        }
+        vnode_put(vf->vnode);
+        vfile_free(vf);
+        avf->vnode = vn;
+        vnode_get(vn);
+        return avf;
+    }
+    case DEVFS_DRM: {
+        /* Each open of /dev/dri/card0 creates a fresh DRM context. */
+        extern struct vfile *drm_create_vfile(void);
+        vfile_t *drm = drm_create_vfile();
+        if (!drm) {
+            vnode_put(vf->vnode);
+            vfile_free(vf);
+            return NULL;
+        }
+        /* Adopt the devfs vnode so stat/fstat on the fd works. */
+        vnode_put(vf->vnode);
+        vfile_free(vf);
+        drm->vnode = vn;
+        vnode_get(vn);
+        return drm;
+    }
     case DEVFS_PTS: {
         int pts_idx = (int)(node->rdev & 0xFF);
         int result = pty_slave_open(pts_idx);
@@ -885,14 +809,23 @@ vnode_t *devfs_mount(void) {
     g_stderr_file.priv = (void *)(intptr_t)DEVFS_TTY;
     pty_init();
     size_t pts_dir_idx = 0;
+    size_t dri_dir_idx = 0;
+    size_t snd_dir_idx = 0;
     for (size_t i = 0; i < sizeof(g_nodes) / sizeof(g_nodes[0]); i++) {
         if (g_nodes[i].kind == DEVFS_PTS_DIR) { pts_dir_idx = i; break; }
+    }
+    for (size_t i = 0; i < sizeof(g_nodes) / sizeof(g_nodes[0]); i++) {
+        if (g_nodes[i].kind == DEVFS_DRI_DIR) { dri_dir_idx = i; break; }
+    }
+    for (size_t i = 0; i < sizeof(g_nodes) / sizeof(g_nodes[0]); i++) {
+        if (g_nodes[i].kind == DEVFS_SND_DIR) { snd_dir_idx = i; break; }
     }
     for (size_t i = 0; i < sizeof(g_nodes) / sizeof(g_nodes[0]); i++) {
         memset(&g_vnodes[i], 0, sizeof(g_vnodes[i]));
         g_vnodes[i].ino = i + 1;
     g_vnodes[i].type = (g_nodes[i].kind == DEVFS_ROOT || g_nodes[i].kind == DEVFS_MISC
-                         || g_nodes[i].kind == DEVFS_SHM_DIR || g_nodes[i].kind == DEVFS_PTS_DIR)
+                         || g_nodes[i].kind == DEVFS_SHM_DIR || g_nodes[i].kind == DEVFS_PTS_DIR
+                         || g_nodes[i].kind == DEVFS_DRI_DIR || g_nodes[i].kind == DEVFS_SND_DIR)
                      ? VFS_FT_DIR : VFS_FT_REGULAR;
         g_vnodes[i].mode = (g_vnodes[i].type == VFS_FT_DIR) ? (S_IFDIR | 0555) : (S_IFCHR | 0666);
         vnode_ref_init(&g_vnodes[i], 1);
@@ -901,6 +834,10 @@ vnode_t *devfs_mount(void) {
             g_vnodes[i].parent = &g_vnodes[1];
         if (g_nodes[i].kind == DEVFS_PTS)
             g_vnodes[i].parent = &g_vnodes[pts_dir_idx];
+        if (g_nodes[i].kind == DEVFS_DRM)
+            g_vnodes[i].parent = &g_vnodes[dri_dir_idx];
+        if (g_nodes[i].kind == DEVFS_ALSA_CTL || g_nodes[i].kind == DEVFS_ALSA_PCM)
+            g_vnodes[i].parent = &g_vnodes[snd_dir_idx];
         g_vnodes[i].fs_data = &g_nodes[i];
         g_vnodes[i].ops = &g_devfs_ops;
     }

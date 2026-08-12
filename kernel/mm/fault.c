@@ -520,11 +520,23 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval,
 }
 
 #ifndef CONFIG_NOMMU
+static uint64_t fault_file_size(vnode_t *vn)
+{
+    if (vn && vn->ops && vn->ops->stat) {
+        kstat_t st;
+        if (vn->ops->stat(vn, &st) == 0) {
+            vn->size = st.st_size;
+            return st.st_size;
+        }
+    }
+    return vn ? vn->size : 0;
+}
+
 static int handle_file_fault(task_t *t, uint64_t page_va, int file_fd,
                              uint64_t file_pos, uint64_t vma_end,
                              int shared, int fault_around, vfile_t *vf)
 {
-    if (file_pos >= vf->vnode->size) {
+    if (file_pos >= fault_file_size(vf->vnode)) {
         signal_send(t->pid, SIGBUS);
         vfs_put_file_ref(file_fd, vf);
         return -1;
@@ -586,7 +598,7 @@ static int handle_file_fault(task_t *t, uint64_t page_va, int file_fd,
         vfs_put_file_ref(file_fd, vf);
         return -1;
     }
-    if (file_pos >= vf->vnode->size) {
+    if (file_pos >= fault_file_size(vf->vnode)) {
         signal_send(t->pid, SIGBUS);
         for (size_t i = 0; i < window_count; i++)
             page_cache_put(window[i]);
@@ -780,7 +792,13 @@ int handle_demand_fault_access(task_t *t, uint64_t stval,
         }
         int file_fd = vma->file_fd;
         int shared = (vma->vm_flags & VM_SHARED) != 0;
-        int fault_around = !shared && !(vma->pte_flags & PTE_W);
+        /* Keep executable private mappings on anonymous copies.  Mapping text
+         * directly from the page cache pins each newly faulted code page for
+         * the process lifetime and makes cache-lifetime accounting depend on
+         * which test function happened to execute last.  Read-only data VMAs
+         * retain the direct-cache and fault-around optimization. */
+        int fault_around = !shared &&
+                           !(vma->pte_flags & (PTE_W | PTE_X));
         uint64_t vma_end = vma->end;
         uint64_t file_pos = vma->file_offset + (page_va - vma->start);
         vfile_t *vf = vfs_get_file_ref(file_fd);

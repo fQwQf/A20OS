@@ -48,10 +48,10 @@ $(WAYLAND_PLAYER_STAMP): user/wayland/build.sh user/wayland/player.c \
 		user/wayland/stub/udev.c user/wayland/stub/mtdev.c \
 		user/cmds/core/wayland-session.c \
 		$(WAYLAND_WESTON_PATCH) \
-		user/external/ffmpeg/configure kernel/include/uapi/a20/audio.h
+		user/external/libs/ffmpeg/configure kernel/include/uapi/a20/audio.h
 	@if [ ! -f $(WAYLAND_FFMPEG_STAMP) ] || \
 		[ user/wayland/build.sh -nt $(WAYLAND_FFMPEG_STAMP) ] || \
-		[ user/external/ffmpeg/configure -nt $(WAYLAND_FFMPEG_STAMP) ]; then \
+		[ user/external/libs/ffmpeg/configure -nt $(WAYLAND_FFMPEG_STAMP) ]; then \
 		rm -f $(WAYLAND_FFMPEG_STAMP); \
 	fi
 	@if [ ! -f $(WAYLAND_STUBS_STAMP) ] || \
@@ -80,6 +80,7 @@ $(GUI_MEDIA_STAMP): FORCE
 	fi; \
 	trap - EXIT INT TERM
 
+$(GUI_FAT32_IMG): FAT32_IMAGE_MB = $(GUI_FAT32_IMAGE_MB)
 $(GUI_FAT32_IMG): $(FAT32_IMG) $(GUI_WAYLAND_DEPS) $(GUI_MEDIA_STAMP)
 	@set -e; \
 	lock="$(GUI_FAT32_IMG).lock"; \

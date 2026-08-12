@@ -155,6 +155,7 @@ BUILD_TIME_HDR = $(BUILD_DIR)/generated/build_time.h
 STM32_BT_CONFIG_HDR = $(BUILD_DIR)/generated/stm32_bluetooth_config.h
 STM32_WIFI_CONFIG_HDR = $(BUILD_DIR)/generated/stm32_wifi_config.h
 FAT32_IMAGE_MB ?= 128
+GUI_FAT32_IMAGE_MB ?= 512
 EXT4_IMAGE_MB ?= 128
 EXTRA_IMAGE_MB ?= 1024
 WAYLAND_GUI_ARCHES := riscv64 loongarch64 aarch64 x86_64
@@ -183,9 +184,12 @@ RISCV_GLIBC_LOCAL_LIB_DIR = $(RISCV_GLIBC_LOCAL_ROOT)/lib
 FEDORA_RISCV_RELEASE ?=
 USER_BUILD_ID = $(ARCH):$(NOMMU):$(USER_OPT):$(PROFILE)
 USER_BUILD_DESKTOP = $(if $(filter benchmark,$(PROFILE)),0,1)
-USER_BUILD_CHECK_DIRS = user/init.c user/cmds user/init_common user/desktop user/external/lvgl \
+# $(wildcard) drops uninitialized git submodules (lvgl, fastfetch).  The
+# contest build must not fail when a tarball export or a non-recursive clone
+# leaves those directories absent entirely.
+USER_BUILD_CHECK_DIRS = $(wildcard user/init.c user/cmds user/init_common user/desktop user/external/gui/lvgl \
                         user/external/musl user/external/sbase user/external/mksh-cvs2git \
-                        user/external/tlse user/external/fastfetch
+                        user/external/tlse user/external/apps/fastfetch)
 NATIVE_TAG_riscv64     := rv
 NATIVE_TAG_loongarch64 := la
 NATIVE_TAG_aarch64     := aarch64

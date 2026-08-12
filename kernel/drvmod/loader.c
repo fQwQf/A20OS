@@ -25,6 +25,7 @@
 #include "drvmod/drvmod.h"
 
 #include "core/klog.h"
+#include "core/stdio.h"
 #include "core/string.h"
 #include "core/panic.h"
 #include "fs/vfs.h"
@@ -782,8 +783,13 @@ static uint32_t drvmod_apply_reloc(uint32_t machine, uint8_t *shadow,
                 }
                 uintptr_t got = load_base + got_off[i];
                 *(uint64_t *)(shadow + got_off[i]) = S + r->r_addend;
+                /* ld.d's imm12 is sign-extended.  When the GOT slot's low
+                 * 12 bits are >= 0x800, carry into pcalau12i's page delta
+                 * so the paired load still addresses the same slot. */
+                uint32_t lo = (uint32_t)got & 0xFFF;
                 uint32_t hi = ((uint32_t)(got >> 12) -
-                               (uint32_t)(P >> 12)) & 0xFFFFF;
+                               (uint32_t)(P >> 12) +
+                               (lo >= 0x800 ? 1U : 0U)) & 0xFFFFF;
                 uint32_t insn = *(uint32_t *)(shadow + sec_load_off + r->r_offset);
                 *(uint32_t *)(shadow + sec_load_off + r->r_offset) =
                     (insn & 0xFE00001F) | (hi << 5);
@@ -1462,6 +1468,51 @@ int drvmod_unload(int id)
     drvmod_free_pages(m->alloc_pfn, m->alloc_order);
     memset(m, 0, sizeof(*m));
     return 0;
+}
+
+int drvmod_unload_by_name(const char *name)
+{
+    if (!name)
+        return -EINVAL;
+    for (int i = 0; i < DRV_MOD_MAX_MODULES; i++) {
+        drv_module_t *m = &drv_modules[i];
+        if (!m->used)
+            continue;
+        if (strcmp(m->name, name) == 0)
+            return drvmod_unload(i);
+    }
+    return -ENOENT;
+}
+
+/* Format loaded modules for /proc/modules (Linux format). */
+int drvmod_list(char *buf, size_t sz)
+{
+    if (!buf)
+        return -EINVAL;
+    size_t off = 0;
+    for (int i = 0; i < DRV_MOD_MAX_MODULES; i++) {
+        drv_module_t *m = &drv_modules[i];
+        if (!m->used)
+            continue;
+        int n = snprintf(buf + off, sz > off ? sz - off : 0,
+                         "%s %u 0 %d 0 Live 0x%lx\n",
+                         m->name, (unsigned)m->total_size,
+                         m->pinned ? 0 : -1,
+                         (unsigned long)m->base);
+        if (n < 0)
+            break;
+        off += (size_t)n;
+        if (off >= sz)
+            break;
+    }
+    return (int)off;
+}
+
+/* Format registered drivers for /proc/drivers. */
+int drvmod_drivers(char *buf, size_t sz)
+{
+    extern int driver_core_list_drivers(char *buf, size_t sz);
+    return driver_core_list_drivers(buf, sz);
 }
 
 /* Run DriverEntry for every loaded module.  Each module registers its

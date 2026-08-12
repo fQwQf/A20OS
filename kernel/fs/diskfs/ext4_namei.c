@@ -233,12 +233,13 @@ int ext4_inode_remove(ext4_sb_info_t *sb, mount_t *mnt,
     if (live) {
         ext4_vnode_priv_t *vp = (ext4_vnode_priv_t *)live->fs_data;
         if (vp)
-            vp->unlinked = 1;
-        /* The final link is gone, so unpinned dirty contents can never become
-         * visible filesystem data and must not consume BuildStorm writeback
-         * bandwidth.  Pinned pages (for example an outstanding mmap) remain
-         * attached until their owner releases them. */
-        page_cache_discard_unlinked(live);
+            __atomic_store_n(&vp->unlinked, 1, __ATOMIC_RELEASE);
+        /* The final link is gone, but open descriptors must retain dirty data
+         * until their last close.  With no open descriptor, discard unpinned
+         * pages so deleted temporary files do not consume writeback bandwidth;
+         * pinned pages (for example an mmap) remain attached. */
+        if (!vp || __atomic_load_n(&vp->open_count, __ATOMIC_ACQUIRE) == 0)
+            page_cache_discard_unlinked(live);
         if (deferred_put)
             *deferred_put = live;
         return 0;
