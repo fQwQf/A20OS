@@ -1589,12 +1589,16 @@ vnode_t *ext4_mount(bcache_t *bc) {
     }
 
     if (sb.s_feature_incompat & EXT4_FEATURE_INCOMPAT_RECOVER) {
-        if (ext4_journal_recover(esi, &sb) < 0) {
+        int jret = ext4_journal_recover(esi, &sb);
+        if (jret < 0) {
             printf("[EXT4] Refusing mount after journal recovery failure\n");
             kfree(esi->group_descs);
             kfree(esi);
             return NULL;
         }
+        if (jret == EXT4_JOURNAL_DEFERRED)
+            printf("[EXT4] Journal cleanup deferred; mounting with replayed "
+                   "metadata from cache (writes will retry in background)\n");
         /* Journal replay can replace the primary group descriptor table.
          * Refresh the in-memory copy before allocation or inode lookup. */
         if (ext4_read_group_descs(esi) < 0) {
