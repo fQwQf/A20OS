@@ -533,11 +533,13 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
         page_cache_get_stats(&pc);
         snprintf(buf, bufsz,
             "capacity: %lu\n"
+            "allocated: %lu\n"
             "bytes: %lu\n"
             "valid: %lu\n"
             "dirty: %lu\n"
             "pinned: %lu\n",
             (unsigned long)pc.capacity,
+            (unsigned long)pc.allocated,
             (unsigned long)pc.bytes,
             (unsigned long)pc.valid,
             (unsigned long)pc.dirty,
@@ -894,4 +896,3 @@ int generate_pid_fdinfo(int pid, int fd, char *buf, size_t bufsz)
     vfs_put_file_ref(gfd, target);
     return len < 0 ? 0 : len;
 }
-

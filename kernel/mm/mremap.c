@@ -100,27 +100,16 @@ static int mm_clone_shared_mapping(mm_struct_t *mm, vm_area_t *src_vma,
             return -ENOMEM;
         }
 
-        int shared_file = src_vma &&
-                          (src_vma->vm_flags & (VM_FILE | VM_SHARED)) == (VM_FILE | VM_SHARED) &&
-                          src_vma->file_vnode;
-        page_cache_page_t *pcp = NULL;
-        if (shared_file) {
-            uint64_t idx = src_vma->file_offset + (src_va - src_vma->start);
-            idx /= PAGE_SIZE;
-            pcp = page_cache_get(src_vma->file_vnode, idx, 0);
-            if (!pcp) {
-                mm_munmap_locked(mm, dst, len);
-                return -ENOMEM;
-            }
-        } else if (!shared_file) {
+        page_cache_page_t *pcp =
+            mm_file_cache_mapping_get(src_vma, src_va, pfn);
+        if (!pcp)
             frame_get(pfn);
-        }
         int r = (level > 0) ? pt_map_huge(mm->pgdir, dst + off, pa, arch_pte_flags(*src))
                             : pt_map(mm->pgdir, dst + off, pa, arch_pte_flags(*src));
         if (r < 0) {
-            if (shared_file && pcp) {
+            if (pcp) {
                 page_cache_put(pcp);
-            } else if (!shared_file) {
+            } else {
                 frame_put(pfn);
             }
             mm_munmap_locked(mm, dst, len);
@@ -162,23 +151,14 @@ static __attribute__((unused)) int mm_move_mapping_pages(mm_struct_t *mm, vaddr_
 
         uint64_t pte_flags = arch_pte_flags(*src);
         vm_area_t *src_vma = mm_find_vma(mm, src_va);
-        int shared_file = src_vma &&
-                          (src_vma->vm_flags & (VM_FILE | VM_SHARED)) == (VM_FILE | VM_SHARED) &&
-                          src_vma->file_vnode;
-        page_cache_page_t *pcp = NULL;
-        if (shared_file) {
-            uint64_t idx = src_vma->file_offset + (src_va - src_vma->start);
-            idx /= PAGE_SIZE;
-            pcp = page_cache_get(src_vma->file_vnode, idx, 0);
-            if (!pcp)
-                return -ENOMEM;
-        } else {
+        page_cache_page_t *pcp =
+            mm_file_cache_mapping_get(src_vma, src_va, pfn);
+        if (!pcp)
             frame_get(pfn);
-        }
         int r = (level > 0) ? pt_map_huge(mm->pgdir, dst + off, pa, pte_flags)
                             : pt_map(mm->pgdir, dst + off, pa, pte_flags);
         if (r < 0) {
-            if (shared_file) {
+            if (pcp) {
                 page_cache_put(pcp);
             } else {
                 frame_put(pfn);
@@ -189,7 +169,7 @@ static __attribute__((unused)) int mm_move_mapping_pages(mm_struct_t *mm, vaddr_
         if (!dontunmap &&
             pt_unmap_leaf(mm->pgdir, src_va, NULL, NULL, NULL, NULL) == 0)
             mm_tlb_note_change(mm, base, leaf_size);
-        if (shared_file) {
+        if (pcp) {
             if (!dontunmap)
                 page_cache_put(pcp);
         } else {
@@ -214,6 +194,7 @@ int mm_mremap_locked(mm_struct_t *mm, vaddr_t old_addr, size_t old_size,
         return -EINVAL;
     if ((flags & MREMAP_DONTUNMAP) && !(flags & MREMAP_MAYMOVE))
         return -EINVAL;
+    mm_vma_index_invalidate(mm);
 
     size_t old_len = ROUND_UP(old_size, PAGE_SIZE);
     size_t new_len = ROUND_UP(new_size, PAGE_SIZE);

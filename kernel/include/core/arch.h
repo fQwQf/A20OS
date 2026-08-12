@@ -53,6 +53,26 @@
 # define arch_tlb_flush_local() arch_tlb_flush()
 #endif
 
+/* Architectures without tagged TLBs retain the conservative full-flush
+ * behavior.  Tagged architectures override both hooks in their cpu header. */
+#ifndef ARCH_HAS_LOCAL_ASID_TLB_FLUSH
+static inline void arch_tlb_flush_asid_local(uint64_t asid)
+{
+    (void)asid;
+    arch_tlb_flush_local();
+}
+#endif
+
+#ifndef ARCH_HAS_ADDR_SPACE_SWITCH
+static inline void arch_switch_addr_space_token(uint64_t token)
+{
+    if (arch_read_addr_space_token() == token)
+        return;
+    arch_write_addr_space_token(token);
+    arch_tlb_flush_local();
+}
+#endif
+
 /*
  * Optional architecture capabilities.  Architecture headers opt in by
  * defining the corresponding ARCH_* macro; shared scheduler/process code
@@ -166,6 +186,13 @@ static inline int arch_syscall_resched_allowed(void)
     return 1;
 #endif
 }
+
+#ifndef ARCH_TRAP_FAST_RETURN_ARM
+# define ARCH_TRAP_FAST_RETURN_ARM(ctx) do { (void)(ctx); } while (0)
+#endif
+#ifndef ARCH_TRAP_FAST_RETURN_DISARM
+# define ARCH_TRAP_FAST_RETURN_DISARM(ctx) do { (void)(ctx); } while (0)
+#endif
 
 /* Arch name string (for uname, procfs, etc.) */
 #if defined(CONFIG_RISCV64)

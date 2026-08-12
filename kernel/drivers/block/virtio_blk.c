@@ -6,6 +6,7 @@
 #include "drivers/core/driver_hwapi.h"
 #include "drivers/core/driver_register.h"
 #include "mm/mm.h"
+#include "mm/frame.h"
 #include "core/string.h"
 #include "core/stdio.h"
 #include "core/panic.h"
@@ -24,10 +25,11 @@
 #define VIRTIO_BLK_MAX_RETRIES        3
 #define VIRTIO_BLK_RESET_SPINS        1000000U
 #define VIRTIO_BLK_POLL_BACKOFF_MIN_SPINS 32U
-#define VIRTIO_BLK_POLL_BACKOFF_MAX_SPINS 512U
+#define VIRTIO_BLK_POLL_BACKOFF_MAX_SPINS 32U
 #define VIRTIO_BLK_BOUNCE_BYTES           (64U * 1024U)
+#define VIRTIO_BLK_MAX_TRANSFER_BYTES     (1024U * 1024U)
 #define VIRTIO_BLK_MAX_TRANSFER_SECTORS   \
-    (VIRTIO_BLK_BOUNCE_BYTES / VIRTIO_BLK_SECTOR_SIZE)
+    (VIRTIO_BLK_MAX_TRANSFER_BYTES / VIRTIO_BLK_SECTOR_SIZE)
 #define VIRTIO_BLK_QUEUE_DMA_BYTES        (PAGE_SIZE * 3U)
 #define VIRTIO_BLK_REQUEST_DMA_BYTES      PAGE_SIZE
 
@@ -40,7 +42,9 @@ typedef struct {
     void              *buf;
     void              *dma_buf;
     uint64_t           dma_addr;
+    uint64_t           io_dma_addr;
     size_t             bytes;
+    int                direct_dma;
     wait_queue_t       waiters;
 } virtio_blk_req_t;
 
@@ -337,7 +341,9 @@ static void virtio_blk_complete_used_locked(virtio_blk_inst_t *inst,
         if (req) {
             arch_dma_sync_for_cpu(&inst->status[head], 1);
             if (!req->write)
-                arch_dma_sync_for_cpu(req->dma_buf, req->bytes);
+                arch_dma_sync_for_cpu(req->direct_dma ? req->buf
+                                                       : req->dma_buf,
+                                      req->bytes);
             uint32_t expected_len = req->write ? 1U : (uint32_t)req->bytes + 1U;
             req->result =
                 (inst->status[head] == VIRTIO_BLK_S_OK &&
@@ -439,6 +445,12 @@ static int virtio_blk_submit_req(virtio_blk_inst_t *inst, virtio_blk_req_t *req,
     virtio_transport_t *vt = &inst->vt;
     uint16_t slot = req->head;
 
+    paddr_t pa = va_to_pa(buf);
+    const pfa_range_t *range = pfa_range_for_pa(pa);
+    int direct_dma = range && bytes <= range->end - pa;
+    if (!direct_dma && bytes > VIRTIO_BLK_BOUNCE_BYTES)
+        return -EINVAL;
+
     req->done = 0;
     req->result = -1;
     req->write = write;
@@ -446,7 +458,24 @@ static int virtio_blk_submit_req(virtio_blk_inst_t *inst, virtio_blk_req_t *req,
     req->bytes = bytes;
     inst->in_flight++;
 
-    if (write)
+    /*
+     * Kernel buffers live in A20OS's linear direct map.  If this request is
+     * wholly inside one discovered RAM range, virtual contiguity therefore
+     * also guarantees physical contiguity and the synchronous caller keeps
+     * the storage live until completion.  Point VirtIO at that final buffer
+     * directly; retain the bounded coherent bounce slot for non-RAM ranges.
+     */
+    req->direct_dma = direct_dma;
+    req->io_dma_addr = req->direct_dma ? pa : req->dma_addr;
+    void *io_buf = req->direct_dma ? buf : req->dma_buf;
+    if (req->direct_dma) {
+        a20_perf_count(A20_PERF_VIRTIO_BLK_DIRECT_DMAS);
+    } else {
+        a20_perf_count(A20_PERF_VIRTIO_BLK_BOUNCE_DMAS);
+        a20_perf_add(A20_PERF_VIRTIO_BLK_BOUNCE_BYTES, bytes);
+    }
+
+    if (write && !req->direct_dma)
         memcpy(req->dma_buf, buf, bytes);
 
     inst->req_hdr[slot].type     = write ? VIRTIO_BLK_T_OUT : VIRTIO_BLK_T_IN;
@@ -464,7 +493,7 @@ static int virtio_blk_submit_req(virtio_blk_inst_t *inst, virtio_blk_req_t *req,
     desc[slot].flags = VIRTQ_DESC_F_NEXT;
     desc[slot].next  = slot + 1;
 
-    desc[slot + 1].addr  = req->dma_addr;
+    desc[slot + 1].addr  = req->io_dma_addr;
     desc[slot + 1].len   = (uint32_t)bytes;
     desc[slot + 1].flags = (write ? 0 : VIRTQ_DESC_F_WRITE) | VIRTQ_DESC_F_NEXT;
     desc[slot + 1].next  = slot + 2;
@@ -478,7 +507,7 @@ static int virtio_blk_submit_req(virtio_blk_inst_t *inst, virtio_blk_req_t *req,
 
     uint16_t avail_slot = avail->idx % VIRTIO_QUEUE_SIZE;
     avail->ring[avail_slot] = slot;
-    arch_dma_sync_for_device(req->dma_buf, bytes);
+    arch_dma_sync_for_device(io_buf, bytes);
     arch_dma_sync_for_device(&inst->req_hdr[slot], sizeof(inst->req_hdr[slot]));
     arch_dma_sync_for_device(&inst->status[slot], 1);
     arch_dma_sync_for_device(&desc[slot], sizeof(virtq_desc_t) * 3);
@@ -510,7 +539,7 @@ static int virtio_blk_wait_req(virtio_blk_inst_t *inst, virtio_blk_req_t *req,
             virtio_blk_complete_used_locked(inst, &wake_q);
         if (req->done) {
             int ret = req->result;
-            if (ret == 0 && !req->write)
+            if (ret == 0 && !req->write && !req->direct_dma)
                 memcpy(req->buf, req->dma_buf, req->bytes);
             req->in_use = 0;
             if (inst->in_flight > 0)
@@ -523,7 +552,7 @@ static int virtio_blk_wait_req(virtio_blk_inst_t *inst, virtio_blk_req_t *req,
             virtio_blk_complete_used_locked(inst, &wake_q);
             if (req->done) {
                 int ret = req->result;
-                if (ret == 0 && !req->write)
+                if (ret == 0 && !req->write && !req->direct_dma)
                     memcpy(req->buf, req->dma_buf, req->bytes);
                 req->in_use = 0;
                 if (inst->in_flight > 0)
@@ -541,7 +570,7 @@ static int virtio_blk_wait_req(virtio_blk_inst_t *inst, virtio_blk_req_t *req,
             uint16_t last_used = inst->blk.last_used;
             int write = req->write;
             size_t bytes = req->bytes;
-            uint64_t dma_addr = req->dma_addr;
+            uint64_t dma_addr = req->io_dma_addr;
             uint16_t head = req->head;
             virtio_blk_fail_queue_locked(inst, &wake_q);
             spin_unlock_irqrestore(&inst->lock, flags);
@@ -637,9 +666,14 @@ static int virtio_blk_rw(int idx, uint64_t lba, void *buf, size_t sectors, int w
             uint64_t flags = spin_lock_irqsave(&inst->lock);
             req = virtio_blk_alloc_req_locked(inst, &wake_q);
             if (req) {
-                virtio_blk_submit_req(inst, req, lba, buf, sectors, write);
+                int submit_ret = virtio_blk_submit_req(
+                    inst, req, lba, buf, sectors, write);
+                if (submit_ret < 0)
+                    req->in_use = 0;
                 spin_unlock_irqrestore(&inst->lock, flags);
                 (void)proc_wake_q_flush(&wake_q);
+                if (submit_ret < 0)
+                    return submit_ret;
                 break;
             }
             spin_unlock_irqrestore(&inst->lock, flags);

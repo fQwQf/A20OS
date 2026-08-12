@@ -13,6 +13,7 @@
 #define PCACHE_MAX_PAGES    2000
 #define PCACHE_HASH_BUCKETS 512
 #define PCACHE_FILL_LOCKS   64
+#define BCACHE_READ_BATCH_MAX_PAGES 16
 
 typedef struct bcache_entry {
     uint64_t    lba;
@@ -47,6 +48,7 @@ typedef struct bcache {
     block_dev_t     *dev;
     bcache_entry_t  *pool;
     pcache_entry_t  *page_pool;
+    char            *writeback_buffer;
     int              pool_size;
     int              page_pool_size;
     size_t           dirty_blocks;
@@ -55,7 +57,7 @@ typedef struct bcache {
     /* Same-page fills serialize on one shard while unrelated cache misses
      * may issue block I/O concurrently. */
     mutex_t          fill_locks[PCACHE_FILL_LOCKS];
-    mutex_t          writeback_lock;
+    rw_mutex_t       writeback_lock;
     bcache_entry_t   lru_head;
     bcache_entry_t   lru_tail;
     pcache_entry_t   page_lru_head;
@@ -85,6 +87,8 @@ void      bcache_sync(bcache_t *bc);
 void      bcache_invalidate(bcache_t *bc, uint64_t lba);
 
 int bcache_read_bytes(bcache_t *bc, uint64_t byte_off, void *buf, size_t len);
+int bcache_read_bytes_batch(bcache_t *bc, uint64_t byte_off, void *buf,
+                            size_t len);
 int bcache_write_bytes(bcache_t *bc, uint64_t byte_off, const void *buf, size_t len);
 void bcache_get_stats(bcache_stats_t *stats);
 

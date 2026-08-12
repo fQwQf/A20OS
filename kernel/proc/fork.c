@@ -235,7 +235,9 @@ static int proc_clone_impl(uint64_t flags, vaddr_t stack, int *ptid, vaddr_t tls
         trap_context_t *trap = (trap_context_t *)(ks_top - sizeof(trap_context_t));
         *trap = *parent->trap_ctx;
         TRAP_CTX_SET_RET(trap, 0);
-        TRAP_CTX_KScratch0(trap) = t->pgdir ? arch_make_addr_space_token(t->pgdir) : 0;
+        uint64_t child_as = t->mm ? mm_address_space_token(t->mm) :
+            (t->pgdir ? arch_make_addr_space_token(t->pgdir) : 0);
+        TRAP_CTX_KScratch0(trap) = child_as;
         trap->kernel_tp = (uint64_t)(uintptr_t)t;
         arch_trap_ctx_set_kernel_stack(trap, ks_top);
         t->trap_ctx = trap;
@@ -255,7 +257,7 @@ static int proc_clone_impl(uint64_t flags, vaddr_t stack, int *ptid, vaddr_t tls
         ctx->ra = (uint64_t)proc_task_first_entry;
         ctx->tp = (uint64_t)(uintptr_t)t;
         arch_task_context_set_user_tp(ctx, TRAP_CTX_TP(trap));
-        TASK_CTX_PAGE_TABLE(ctx) = t->pgdir ? arch_make_addr_space_token(t->pgdir) : 0;
+        TASK_CTX_PAGE_TABLE(ctx) = child_as;
         TASK_CTX_STATUS(ctx) = arch_task_user_resume_status();
         arch_task_context_set_initial_sp(ctx, trap, ks_top);
         t->kstack = (uint64_t)ctx;
