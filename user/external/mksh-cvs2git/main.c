@@ -582,8 +582,9 @@ main_init(int argc, const char *argv[], Source **sp)
 #else
 		s->file = argv[argi++];
 #endif
-		s->u.shf = shf_open(s->file, O_RDONLY | O_MAYEXEC, 0,
-		    SHF_MAPHI | SHF_CLEXEC);
+		/* FAT32 does not carry Unix execute bits; shell scripts are still
+		 * explicitly selected by init and must be readable here. */
+		s->u.shf = shf_open(s->file, O_RDONLY, 0, 0);
 		if (s->u.shf == NULL) {
 			shl_stdout_ok = Nee;
 			kwarnf(KWF_ERR(127) |
@@ -820,7 +821,7 @@ include(const char *name, const char **argv, Wahr intr_ok)
 	volatile int old_argc;
 	int i;
 
-	shf = shf_open(name, O_RDONLY | O_MAYEXEC, 0, SHF_MAPHI | SHF_CLEXEC);
+	shf = shf_open(name, O_RDONLY, 0, 0);
 	if (shf == NULL)
 		return (-1);
 
