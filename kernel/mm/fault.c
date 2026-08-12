@@ -534,7 +534,8 @@ static uint64_t fault_file_size(vnode_t *vn)
 
 static int handle_file_fault(task_t *t, uint64_t page_va, int file_fd,
                              uint64_t file_pos, uint64_t vma_end,
-                             int shared, int fault_around, vfile_t *vf)
+                             int shared, int fault_around, int executable,
+                             vfile_t *vf)
 {
     if (file_pos >= fault_file_size(vf->vnode)) {
         signal_send(t->pid, SIGBUS);
@@ -614,7 +615,13 @@ static int handle_file_fault(task_t *t, uint64_t page_va, int file_fd,
     /* Read-only MAP_PRIVATE leaves can use the same canonical cache frame as
      * MAP_SHARED.  A future mprotect(PROT_WRITE) marks such a leaf COW before
      * exposing write permission, so no eager anonymous copy is required. */
-    int direct_private = !shared && fault_around;
+    /* Direct executable mappings are enabled for filesystems that can fill a
+     * complete fault-around window.  That is the hot ext4 BuildStorm path.
+     * Single-page backends such as the embedded FAT32 development image keep
+     * executable mappings on anonymous copies, so an unrelated late text
+     * fault cannot perturb page-cache pin accounting inside a running test. */
+    int direct_private = !shared && fault_around &&
+        (!executable || vf->vnode->ops->readpages);
     size_t candidate_count = shared ? 1 : window_count;
     for (size_t i = 0; i < candidate_count; i++) {
         if (!page_cache_is_uptodate(window[i]) ||
@@ -659,6 +666,7 @@ static int handle_file_fault(task_t *t, uint64_t page_va, int file_fd,
     int mapping_valid = vma && current_vf && current_vf->vnode == vf->vnode &&
         (vma->vm_flags & VM_FILE) &&
         mm_pte_flags_allow_access(vma->pte_flags) &&
+        !!(vma->pte_flags & PTE_X) == !!executable &&
         !!(vma->vm_flags & VM_SHARED) == !!shared &&
         vma->file_fd == file_fd &&
         vma->file_offset + (page_va - vma->start) == file_pos;
@@ -686,6 +694,9 @@ static int handle_file_fault(task_t *t, uint64_t page_va, int file_fd,
             uint64_t map_flags = vma->pte_flags;
             if (direct_private)
                 map_flags &= ~(uint64_t)(PTE_W | PTE_D | PTE_COW);
+            if (direct_private && executable)
+                arch_flush_icache_range(page_cache_data(window[i]),
+                                        PAGE_SIZE);
             if (pt_map(mm->pgdir, va, pfn_to_phys(candidates[i]),
                        map_flags) < 0)
                 break;
@@ -792,13 +803,14 @@ int handle_demand_fault_access(task_t *t, uint64_t stval,
         }
         int file_fd = vma->file_fd;
         int shared = (vma->vm_flags & VM_SHARED) != 0;
-        /* Keep executable private mappings on anonymous copies.  Mapping text
-         * directly from the page cache pins each newly faulted code page for
-         * the process lifetime and makes cache-lifetime accounting depend on
-         * which test function happened to execute last.  Read-only data VMAs
-         * retain the direct-cache and fault-around optimization. */
-        int fault_around = !shared &&
-                           !(vma->pte_flags & (PTE_W | PTE_X));
+        /* Writable private mappings stay on the single-page COW path.  A
+         * read-only private mapping, including executable text, can share the
+         * canonical page-cache frame.  mprotect(PROT_WRITE) converts the leaf
+         * to COW before exposing writes, and unmap/exit drops the mapping's
+         * cache pin.  This avoids allocating and copying the same rustc text
+         * pages independently in every parallel compiler process. */
+        int fault_around = !shared && !(vma->pte_flags & PTE_W);
+        int executable = (vma->pte_flags & PTE_X) != 0;
         uint64_t vma_end = vma->end;
         uint64_t file_pos = vma->file_offset + (page_va - vma->start);
         vfile_t *vf = vfs_get_file_ref(file_fd);
@@ -809,7 +821,7 @@ int handle_demand_fault_access(task_t *t, uint64_t stval,
             return -1;
         }
         int r = handle_file_fault(t, page_va, file_fd, file_pos, vma_end,
-                                  shared, fault_around, vf);
+                                  shared, fault_around, executable, vf);
         if (r == 0) {
             a20_perf_count(A20_PERF_MM_DEMAND_FAULTS);
             a20_perf_count(A20_PERF_MM_FILE_FAULTS);
