@@ -119,6 +119,7 @@ smoke-x86_64:
 smoke-qemu-gui-x86_64:
 	$(MAKE) ARCH=x86_64 BOARD=qemu-virt-x86_64 ABI=both BRINGUP=0 dev-build
 	$(MAKE) ARCH=x86_64 BOARD=qemu-virt-x86_64 ABI=both BRINGUP=0 \
+		GUI_FAT32_IMAGE_MB=$(GUI_FAT32_IMAGE_MB) \
 		.kernel-build/x86_64-qemu-virt-x86_64-both-dev/gui-fat32.img
 	$(PYTHON) tools/smoke_qemu_gui.py \
 		--arch x86_64 \
@@ -130,6 +131,7 @@ smoke-qemu-gui-x86_64:
 smoke-qemu-gui-riscv64:
 	$(MAKE) ARCH=riscv64 BOARD=qemu-virt-riscv64 ABI=both BRINGUP=0 dev-build
 	$(MAKE) ARCH=riscv64 BOARD=qemu-virt-riscv64 ABI=both BRINGUP=0 \
+		GUI_FAT32_IMAGE_MB=$(GUI_FAT32_IMAGE_MB) \
 		.kernel-build/riscv64-qemu-virt-riscv64-both-dev/gui-fat32.img
 	$(PYTHON) tools/smoke_qemu_gui.py \
 		--arch riscv64 \
@@ -142,6 +144,7 @@ smoke-qemu-gui-riscv64:
 smoke-qemu-gui-aarch64:
 	$(MAKE) ARCH=aarch64 BOARD=qemu-virt-aarch64 ABI=both BRINGUP=0 dev-build
 	$(MAKE) ARCH=aarch64 BOARD=qemu-virt-aarch64 ABI=both BRINGUP=0 \
+		GUI_FAT32_IMAGE_MB=$(GUI_FAT32_IMAGE_MB) \
 		.kernel-build/aarch64-qemu-virt-aarch64-both-dev/gui-fat32.img
 	$(PYTHON) tools/smoke_qemu_gui.py --arch aarch64 --qemu qemu-system-aarch64 \
 		--kernel .kernel-build/aarch64-qemu-virt-aarch64-both-dev/kernel.elf \
@@ -151,6 +154,7 @@ smoke-qemu-gui-aarch64:
 smoke-qemu-gui-arm32:
 	$(MAKE) ARCH=arm32 BOARD=qemu-virt-arm32 ABI=both BRINGUP=0 dev-build
 	$(MAKE) ARCH=arm32 BOARD=qemu-virt-arm32 ABI=both BRINGUP=0 \
+		GUI_FAT32_IMAGE_MB=$(GUI_FAT32_IMAGE_MB) \
 		.kernel-build/arm32-qemu-virt-arm32-both-dev/gui-fat32.img
 	$(PYTHON) tools/smoke_qemu_gui.py --arch arm32 --qemu qemu-system-arm \
 		--kernel .kernel-build/arm32-qemu-virt-arm32-both-dev/kernel.elf \
@@ -160,6 +164,7 @@ smoke-qemu-gui-arm32:
 smoke-qemu-gui-loongarch64:
 	$(MAKE) ARCH=loongarch64 BOARD=qemu-virt-loongarch64 ABI=both BRINGUP=0 dev-build
 	$(MAKE) ARCH=loongarch64 BOARD=qemu-virt-loongarch64 ABI=both BRINGUP=0 \
+		GUI_FAT32_IMAGE_MB=$(GUI_FAT32_IMAGE_MB) \
 		.kernel-build/loongarch64-qemu-virt-loongarch64-both-dev/gui-fat32.img
 	$(PYTHON) tools/smoke_qemu_gui.py --arch loongarch64 --qemu qemu-system-loongarch64 \
 		--kernel .kernel-build/loongarch64-qemu-virt-loongarch64-both-dev/kernel.elf \
