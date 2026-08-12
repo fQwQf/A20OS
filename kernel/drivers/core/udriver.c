@@ -59,6 +59,20 @@ static int udriver_mmio_allowed(uint64_t phys, uint64_t size)
     return 0;
 }
 
+/* The GUI QEMU profile has a virtio-gpu at MMIO slot 7 and uses both
+ * virtio-input devices through the kernel evdev mux.  The text/dual-input
+ * profile has no GPU and keeps slot 5 reserved for uinputd. */
+static int udriver_gui_kernel_input(void)
+{
+#ifdef CONFIG_BOARD_QEMU_VIRT_RISCV64
+    uintptr_t base = PAGE_OFFSET + 0x10008000ULL;
+    return readl((const volatile void *)base) == 0x74726976U &&
+           readl((const volatile void *)(base + 0x008)) == 16U;
+#else
+    return 0;
+#endif
+}
+
 /* Board device enumeration consults this before binding a kernel driver
  * to a device that belongs to a user-space driver. */
 int udriver_mmio_user_owned(uint64_t phys)
@@ -66,8 +80,11 @@ int udriver_mmio_user_owned(uint64_t phys)
     for (unsigned i = 0; i < UDRIVER_MMIO_WINDOWS_NR; i++)
         if (g_mmio_windows[i].user_owned &&
             phys >= g_mmio_windows[i].base &&
-            phys < g_mmio_windows[i].base + g_mmio_windows[i].size)
+            phys < g_mmio_windows[i].base + g_mmio_windows[i].size) {
+            if (phys == 0x10006000ULL && udriver_gui_kernel_input())
+                return 0;
             return 1;
+        }
     return 0;
 }
 
@@ -80,6 +97,8 @@ int udriver_window_present(uint64_t phys)
         if (phys >= g_mmio_windows[i].base &&
             phys < g_mmio_windows[i].base + g_mmio_windows[i].size) {
             if (strncmp(g_mmio_windows[i].name, "virtio-", 7) == 0) {
+                if (phys == 0x10006000ULL && udriver_gui_kernel_input())
+                    return 0;
                 uintptr_t base = PAGE_OFFSET + g_mmio_windows[i].base;
                 uint32_t magic = readl((const volatile void *)base);
                 uint32_t dev_id = readl((const volatile void *)(base + 0x008));
