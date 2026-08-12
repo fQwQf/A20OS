@@ -1,5 +1,6 @@
 #include "fs/ext4.h"
 #include "fs/ext4_internal.h"
+#include "fs/page_cache.h"
 #include "fs/vfs/stat_perm.h"
 #include "fs/file.h"
 #include "fs/vfs.h"
@@ -232,7 +233,13 @@ int ext4_inode_remove(ext4_sb_info_t *sb, mount_t *mnt,
     if (live) {
         ext4_vnode_priv_t *vp = (ext4_vnode_priv_t *)live->fs_data;
         if (vp)
-            vp->unlinked = 1;
+            __atomic_store_n(&vp->unlinked, 1, __ATOMIC_RELEASE);
+        /* The final link is gone, but open descriptors must retain dirty data
+         * until their last close.  With no open descriptor, discard unpinned
+         * pages so deleted temporary files do not consume writeback bandwidth;
+         * pinned pages (for example an mmap) remain attached. */
+        if (!vp || __atomic_load_n(&vp->open_count, __ATOMIC_ACQUIRE) == 0)
+            page_cache_discard_unlinked(live);
         if (deferred_put)
             *deferred_put = live;
         return 0;
@@ -286,10 +293,14 @@ int ext4_lookup_unlocked(vnode_t *dir, const char *name, vnode_t **out) {
 int ext4_stat(vnode_t *vn, kstat_t *st) {
     ext4_vnode_priv_t *p = (ext4_vnode_priv_t *)vn->fs_data;
     uint64_t sz = p->file_size;
+    if (vn->size > sz)
+        sz = vn->size;
     ext4_inode_t dinode;
     memset(&dinode, 0, sizeof(dinode));
     if (ext4_read_inode(p->sb, p->inode_num, &dinode) == 0) {
-        sz = ext4_inode_size(&dinode);
+        uint64_t disk_size = ext4_inode_size(&dinode);
+        if (disk_size > sz)
+            sz = disk_size;
         p->file_size = sz;
         vn->size = sz;
     }

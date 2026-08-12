@@ -33,6 +33,7 @@ int mm_mprotect_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
     if (prot & 4) vm_prot |= VM_EXEC;
     vaddr_t end = addr + len;
     if (end < addr || end > USER_VA_LIMIT) return -ENOMEM;
+    mm_vma_index_invalidate(mm);
 #ifndef CONFIG_NOMMU
     int touched = 0;
 #endif
@@ -92,6 +93,20 @@ int mm_mprotect_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
                 }
                 uint64_t old_flags = arch_pte_flags(*pte);
                 uint64_t flags = mm_pte_flags_apply_prot(*pte, ptef);
+                if ((ptef & PTE_W) &&
+                    (v->vm_flags & VM_FILE) &&
+                    !(v->vm_flags & VM_SHARED)) {
+                    pfn_t pfn = phys_to_pfn(arch_pte_addr(*pte));
+                    page_cache_page_t *page =
+                        mm_file_cache_mapping_get(v, va, pfn);
+                    if (page) {
+                        /* Keep the canonical cache page read-only.  The first
+                         * store will copy it in handle_cow_fault(). */
+                        flags &= ~(uint64_t)(PTE_W | PTE_D);
+                        flags |= PTE_COW;
+                        page_cache_put(page);
+                    }
+                }
                 if ((flags & PTE_X) && !(old_flags & PTE_X)) {
                     paddr_t pa = arch_pte_addr(*pte);
                     pfn_t pfn = phys_to_pfn(pa);

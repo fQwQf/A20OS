@@ -18,8 +18,11 @@ void vma_release(vm_area_t *vma);
 int  vma_ref_file(vm_area_t *vma);
 int  vma_ref_fork(vm_area_t *vma);
 int  vma_ref_aux(vm_area_t *vma);
+void mm_vma_index_invalidate(mm_struct_t *mm);
 vm_area_t *vma_split(vm_area_t *vma, vaddr_t split);
 vm_area_t *vma_try_merge(mm_struct_t *mm, vm_area_t *vma);
+struct page_cache_page *mm_file_cache_mapping_get(vm_area_t *vma,
+                                                   vaddr_t va, pfn_t pfn);
 
 void free_vma_pages(mm_struct_t *mm, vm_area_t *vma);
 

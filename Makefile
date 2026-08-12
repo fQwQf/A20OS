@@ -494,7 +494,11 @@ endif
 endif
 
 # Compiler flags
-CONFIG_UBSAN ?= $(if $(filter 1,$(BRINGUP)),0,1)
+# Benchmark/final-submission kernels are production builds.  Keeping UBSAN
+# enabled there instruments the VFS/MM/syscall hot paths and makes the contest
+# score measure diagnostics rather than the kernel.  Development profiles keep
+# the sanitizer by default; bring-up and benchmark profiles opt out explicitly.
+CONFIG_UBSAN ?= $(if $(filter 1,$(BRINGUP)),0,$(if $(filter benchmark,$(PROFILE)),0,1))
 CFLAGS = -Wall -Wextra $(OPT) -ffreestanding -nostdlib \
          -fno-builtin -fno-common -std=gnu99 \
          -MMD -MP \

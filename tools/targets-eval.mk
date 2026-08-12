@@ -265,6 +265,22 @@ final-stage7-la-shebang:
 final-stage7-rv-rustc-j8:
 	$(call RUN_FINAL_EVAL,riscv64,buildstorm-probe,8,stage7-rustc-j8,3600)
 
+# Diagnostic only: put the 32-rustc output directory on guest tmpfs to
+# isolate process/MM cost from ext4 allocation and writeback serialization.
+final-stage7-rv-rustc-j8-tmpfs:
+	$(call RUN_FINAL_EVAL,riscv64,buildstorm-probe,8,stage7-rustc-j8-tmpfs,3600)
+
+final-stage7-rv-rustc-j8-profile:
+	$(call RUN_FINAL_EVAL,riscv64,buildstorm-probe,8,stage7-rustc-j8-profile,1200)
+
+.PHONY: final-stage7-rv-buildstorm-rustc-j8-cache-profile
+final-stage7-rv-buildstorm-rustc-j8-cache-profile:
+	$(call RUN_FINAL_EVAL,riscv64,buildstorm-probe,8,stage7-rustc-j8-cache-profile,1800)
+
+.PHONY: final-stage7-rv-writeback-256m
+final-stage7-rv-writeback-256m:
+	$(call RUN_FINAL_EVAL,riscv64,buildstorm-probe,8,stage7-writeback-256m,1200)
+
 final-stage7-la-rustc-j8:
 	$(call RUN_FINAL_EVAL,loongarch64,buildstorm-probe,8,stage7-rustc-j8,3600)
 
@@ -309,6 +325,12 @@ final-stage7-rv-8c-default:
 
 final-stage7-la-8c-default:
 	$(call RUN_FINAL_EVAL,loongarch64,buildstorm-probe,8,stage7-full-default,3000)
+
+# Diagnostic only: keep the official source/toolchain and full cargo command,
+# but place the architecture-specific output tree on tmpfs to separate kernel
+# compute/MM cost from ext4 writeback cost.  This is never a formal judge path.
+final-stage7-rv-8c-default-tmpfs:
+	$(call RUN_FINAL_EVAL,riscv64,buildstorm-probe,8,stage7-full-default-tmpfs,3000)
 
 final-stage9-rv-1c-perf:
 	$(call RUN_FINAL_EVAL,riscv64,buildstorm-probe,1,stage9-perf-feedback,1200)

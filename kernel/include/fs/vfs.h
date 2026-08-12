@@ -140,8 +140,19 @@ typedef struct vnode_ops {
     int     (*truncate)(struct vnode *vn, size_t size);
     int     (*readpage)(struct vnode *vn, uint64_t index,
                         void *data, size_t len);
+    /* Optional contiguous read used by private file fault-around.  The
+     * destination is linear even though page-cache frames are not, allowing
+     * a filesystem to merge adjacent disk blocks into one device request. */
+    int     (*readpages)(struct vnode *vn, uint64_t index,
+                         void *data, size_t len);
     int     (*writepage)(struct vnode *vn, uint64_t index,
                          const void *data, size_t len);
+    /* Optional contiguous writeback used by the buffered page cache.  The
+     * input is a linear window beginning at @index, so filesystems can update
+     * one inode/extent snapshot and submit a bounded multi-block request
+     * instead of repeating the complete writepage path for every 4 KiB. */
+    int     (*writepages)(struct vnode *vn, uint64_t index,
+                          const void *data, size_t len);
     int     (*chmod)(struct vnode *vn, int mode);
     int     (*chown)(struct vnode *vn, int uid, int gid);
     struct vfile *(*open)(struct vnode *vn, int flags);
@@ -193,6 +204,7 @@ typedef struct vnode {
     vnode_ops_t    *ops;
     struct page_cache_page *cache_pages;
     struct page_cache_page *cache_dirty_pages;
+    struct page_cache_page *cache_dirty_tail;
 } vnode_t;
 
 /*
