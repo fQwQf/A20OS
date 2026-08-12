@@ -131,27 +131,19 @@ int mm_fork_clone_leaf(mm_struct_t *child, mm_struct_t *parent,
     }
 
     vm_area_t *vma = parent ? mm_find_vma(parent, va) : NULL;
-    int shared_file = vma &&
-        (vma->vm_flags & (VM_FILE | VM_SHARED)) == (VM_FILE | VM_SHARED);
-    page_cache_page_t *pcp = NULL;
+    page_cache_page_t *pcp =
+        mm_file_cache_mapping_get(vma, va, pfn);
 
-    if (shared_file && vma->file_vnode) {
-        uint64_t idx = vma->file_offset + (va - vma->start);
-        idx /= PAGE_SIZE;
-        pcp = page_cache_get(vma->file_vnode, idx, 0);
-        if (!pcp)
-            return -ENOMEM;
-    } else if (!shared_file) {
+    if (!pcp)
         frame_get(pfn);
-    }
 
     pte_t flags = shared ? arch_pte_flags(*src_pte) : mm_cow_flags(*src_pte);
     int r = (level > 0) ? pt_map_huge(child->pgdir, va, pa, flags)
                         : pt_map(child->pgdir, va, pa, flags);
     if (r < 0) {
-        if (shared_file && pcp) {
+        if (pcp) {
             page_cache_put(pcp);
-        } else if (!shared_file) {
+        } else {
             frame_put(pfn);
         }
         return r;

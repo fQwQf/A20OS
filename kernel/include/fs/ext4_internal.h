@@ -31,8 +31,14 @@ static inline void ext4_inode_set_size(ext4_inode_t *in, uint64_t size) {
 int ext4_vn_writepage(vnode_t *vn, uint64_t index,
                              const void *data, size_t len)
 ;
+int ext4_vn_writepages(vnode_t *vn, uint64_t index,
+                              const void *data, size_t len)
+;
 int ext4_vn_readpage(vnode_t *vn, uint64_t index,
                             void *data, size_t len)
+;
+int ext4_vn_readpages(vnode_t *vn, uint64_t index,
+                             void *data, size_t len)
 ;
 ext4_inode_t *ext4_fctx_inode(ext4_fctx_t *fc) ;
 void ext4_fctx_inode_dirty(ext4_fctx_t *fc) ;
@@ -49,6 +55,10 @@ int ext4_bitmap_alloc(ext4_sb_info_t *sb, uint64_t bm_blk, uint32_t max,
                       uint32_t start) ;
 int ext4_bitmap_free(ext4_sb_info_t *sb, uint64_t bm_blk, uint32_t bit) ;
 uint64_t ext4_alloc_block(ext4_sb_info_t *sb) ;
+/* Allocate one physically contiguous run without zeroing it.  This is only
+ * for callers that immediately overwrite every returned block in full. */
+size_t ext4_alloc_blocks_uninitialized(ext4_sb_info_t *sb, size_t wanted,
+                                       uint64_t *first_phys) ;
 void ext4_free_block(ext4_sb_info_t *sb, uint64_t phys) ;
 uint32_t ext4_alloc_inode(ext4_sb_info_t *sb) ;
 void ext4_free_inode(ext4_sb_info_t *sb, uint32_t ino) ;

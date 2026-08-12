@@ -14,7 +14,6 @@ int anonfd_free_priv_close(vfile_t *vf)
     }
     return 0;
 }
-
 int anonfd_install_vfile(vfile_t *vf, int flags)
 {
     int gfd = vfs_alloc_fd(vf);
@@ -139,4 +138,3 @@ int anonfd_create(int flags)
     vf->priv = ab;
     return anonfd_install_vfile(vf, flags);
 }
-

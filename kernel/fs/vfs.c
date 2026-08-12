@@ -601,8 +601,6 @@ static void vfs_release_file_final(int fd, vfile_t *vf)
         return;
     vnode_t *vn = vf->vnode;
     vfs_release_open_file_locks(vf, fd);
-    if (vn && (vn->mode & S_IFMT) == S_IFREG)
-        page_cache_writeback_vnode(vn, NULL, NULL);
     if (vf->ops && vf->ops->close)
         vf->ops->close(vf);
     vfile_free(vf);

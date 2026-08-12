@@ -488,7 +488,8 @@ int proc_alloc_user_image(uintptr_t entry, vaddr_t sp, pt_root_t *pgdir,
     TRAP_CTX_SP(trap)   = sp;
     TRAP_CTX_TP(trap)    = tls_tp;
     TRAP_CTX_STATUS(trap) = arch_user_initial_status();
-    TRAP_CTX_KScratch0(trap) = pgdir ? arch_make_addr_space_token(pgdir) : 0;
+    uint64_t user_as = pgdir ? arch_make_addr_space_token(pgdir) : 0;
+    TRAP_CTX_KScratch0(trap) = user_as;
     trap->kernel_tp = (uintptr_t)t;
     arch_trap_ctx_set_kernel_stack(trap, (uint64_t)ks_top);
 
@@ -510,6 +511,7 @@ int proc_alloc_user_image(uintptr_t entry, vaddr_t sp, pt_root_t *pgdir,
         spin_set_debug(&mm->lock, "mm", mm);
         mutex_init(&mm->tlb_lock);
         mm->tlb_holds = NULL;
+        mm_arch_context_init(mm);
         refcount_set(&mm->refcount, 1);
         mm->mmap        = mmap;
 #ifdef CONFIG_NOMMU
@@ -527,6 +529,8 @@ int proc_alloc_user_image(uintptr_t entry, vaddr_t sp, pt_root_t *pgdir,
 #endif
         ktrace_mm("[MMDBG] mm=%p lock=%p\n", (void *)mm, (void *)&mm->lock);
         t->mm = mm;
+        user_as = mm_address_space_token(mm);
+        TRAP_CTX_KScratch0(trap) = user_as;
     }
 
     /*
@@ -541,7 +545,7 @@ int proc_alloc_user_image(uintptr_t entry, vaddr_t sp, pt_root_t *pgdir,
     ctx->ra   = (uintptr_t)proc_task_first_entry;
     ctx->tp   = (uintptr_t)t;
     arch_task_context_set_user_tp(ctx, tls_tp);
-    TASK_CTX_PAGE_TABLE(ctx) = pgdir ? arch_make_addr_space_token(pgdir) : 0;
+    TASK_CTX_PAGE_TABLE(ctx) = user_as;
     TASK_CTX_STATUS(ctx) = arch_task_user_resume_status();
     arch_task_context_set_initial_sp(ctx, trap, ks_top);
     t->kstack = (uintptr_t)ctx;

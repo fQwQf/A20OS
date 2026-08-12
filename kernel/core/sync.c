@@ -465,6 +465,148 @@ void mutex_unlock(mutex_t *m) {
     wait_queue_wake_one(&m->waiters, 0, PROC_WAKE_EVENT);
 }
 
+void rw_mutex_init(rw_mutex_t *rw)
+{
+    if (!rw)
+        return;
+    spin_init(&rw->lock);
+    rw->readers = 0;
+    rw->waiting_writers = 0;
+    rw->writer = 0;
+    rw->owner = NULL;
+    wait_queue_init(&rw->reader_waiters);
+    wait_queue_init(&rw->writer_waiters);
+}
+
+void rw_mutex_read_lock(rw_mutex_t *rw)
+{
+    if (!rw)
+        return;
+
+    task_t *cur = proc_current();
+    for (;;) {
+        uint64_t flags = spin_lock_irqsave(&rw->lock);
+        if (!rw->writer && rw->waiting_writers == 0) {
+            rw->readers++;
+            spin_unlock_irqrestore(&rw->lock, flags);
+            return;
+        }
+        spin_unlock_irqrestore(&rw->lock, flags);
+
+        if (!cur) {
+            proc_yield();
+            continue;
+        }
+        proc_wait_token_t token =
+            proc_park_prepare(PROC_WAIT_UNINTERRUPTIBLE, 0);
+        if (!token.task) {
+            proc_yield();
+            continue;
+        }
+        wait_queue_entry_t entry = {0};
+        flags = spin_lock_irqsave(&rw->lock);
+        if (!rw->writer && rw->waiting_writers == 0) {
+            rw->readers++;
+            spin_unlock_irqrestore(&rw->lock, flags);
+            (void)proc_park_cancel(token);
+            proc_park_finish(token);
+            return;
+        }
+        bool linked = wait_queue_link(&rw->reader_waiters, &entry, token, 0);
+        spin_unlock_irqrestore(&rw->lock, flags);
+        if (linked)
+            (void)proc_park_commit(token);
+        else
+            (void)proc_park_cancel(token);
+        wait_queue_unlink(&rw->reader_waiters, &entry);
+        proc_park_finish(token);
+    }
+}
+
+void rw_mutex_read_unlock(rw_mutex_t *rw)
+{
+    if (!rw)
+        return;
+    int wake_writer = 0;
+    uint64_t flags = spin_lock_irqsave(&rw->lock);
+    if (rw->readers > 0)
+        rw->readers--;
+    if (rw->readers == 0 && rw->waiting_writers > 0)
+        wake_writer = 1;
+    spin_unlock_irqrestore(&rw->lock, flags);
+    if (wake_writer)
+        wait_queue_wake_one(&rw->writer_waiters, 0, PROC_WAKE_EVENT);
+}
+
+void rw_mutex_write_lock(rw_mutex_t *rw)
+{
+    if (!rw)
+        return;
+
+    task_t *cur = proc_current();
+    uint64_t flags = spin_lock_irqsave(&rw->lock);
+    rw->waiting_writers++;
+    spin_unlock_irqrestore(&rw->lock, flags);
+
+    for (;;) {
+        flags = spin_lock_irqsave(&rw->lock);
+        if (!rw->writer && rw->readers == 0) {
+            rw->waiting_writers--;
+            rw->writer = 1;
+            rw->owner = cur;
+            spin_unlock_irqrestore(&rw->lock, flags);
+            return;
+        }
+        spin_unlock_irqrestore(&rw->lock, flags);
+
+        if (!cur) {
+            proc_yield();
+            continue;
+        }
+        proc_wait_token_t token =
+            proc_park_prepare(PROC_WAIT_UNINTERRUPTIBLE, 0);
+        if (!token.task) {
+            proc_yield();
+            continue;
+        }
+        wait_queue_entry_t entry = {0};
+        flags = spin_lock_irqsave(&rw->lock);
+        if (!rw->writer && rw->readers == 0) {
+            rw->waiting_writers--;
+            rw->writer = 1;
+            rw->owner = cur;
+            spin_unlock_irqrestore(&rw->lock, flags);
+            (void)proc_park_cancel(token);
+            proc_park_finish(token);
+            return;
+        }
+        bool linked = wait_queue_link(&rw->writer_waiters, &entry, token, 0);
+        spin_unlock_irqrestore(&rw->lock, flags);
+        if (linked)
+            (void)proc_park_commit(token);
+        else
+            (void)proc_park_cancel(token);
+        wait_queue_unlink(&rw->writer_waiters, &entry);
+        proc_park_finish(token);
+    }
+}
+
+void rw_mutex_write_unlock(rw_mutex_t *rw)
+{
+    if (!rw)
+        return;
+    int wake_writer;
+    uint64_t flags = spin_lock_irqsave(&rw->lock);
+    rw->writer = 0;
+    rw->owner = NULL;
+    wake_writer = rw->waiting_writers > 0;
+    spin_unlock_irqrestore(&rw->lock, flags);
+    if (wake_writer)
+        wait_queue_wake_one(&rw->writer_waiters, 0, PROC_WAKE_EVENT);
+    else
+        wait_queue_wake_all(&rw->reader_waiters, 0, PROC_WAKE_EVENT);
+}
+
 void completion_init(completion_t *c) {
     if (!c)
         return;

@@ -612,6 +612,17 @@ void signal_deliver_user(trap_context_t *ctx) {
     if (!t || !t->signals || !t->pgdir) return;
 
     signal_state_t *ss = (signal_state_t *)t->signals;
+    /* Signal producers publish pending bits before waking the target.  The
+     * overwhelmingly common no-signal return path does not need the signal
+     * state lock or a full NSIG scan.  A signal racing after this snapshot is
+     * accompanied by a wake/reschedule request and is handled at the next
+     * user-return boundary. */
+    uint64_t process_pending =
+        __atomic_load_n(&ss->pending, __ATOMIC_ACQUIRE);
+    uint64_t thread_pending =
+        __atomic_load_n(&t->thread_pending, __ATOMIC_ACQUIRE);
+    if (((process_pending | thread_pending) & ~t->sig_blocked) == 0)
+        return;
     for (;;) {
         uint64_t flags = spin_lock_irqsave(&ss->lock);
         uint64_t deliverable = signal_deliverable_locked(t, ss);
@@ -682,6 +693,7 @@ void signal_deliver_user(trap_context_t *ctx) {
         if (action.sa_flags & SA_RESETHAND)
             ss->actions[sig].sa_handler = SIG_DFL;
 
+        ARCH_TRAP_FAST_RETURN_DISARM(ctx);
         t->sig_saved_ctx = *ctx;
         uint64_t old_blocked = t->sigsuspend_active ?
                                t->sigsuspend_old_blocked : t->sig_blocked;
@@ -766,6 +778,7 @@ int64_t sys_rt_sigreturn_impl(trap_context_t *ctx) {
 
     arch_signal_restore_mcontext(ctx, &arch_sigframe_ucontext_ptr(&frame)->uc_mcontext);
     arch_signal_restore_frame_extra(ctx, arch_sigframe_extra_ptr(&frame));
+    ARCH_TRAP_FAST_RETURN_DISARM(ctx);
     return 0;
 }
 

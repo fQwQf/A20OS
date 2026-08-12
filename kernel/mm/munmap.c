@@ -25,6 +25,7 @@ int mm_munmap_locked(mm_struct_t *mm, vaddr_t addr, size_t len) {
     if (len == 0) return 0;
     vaddr_t end = addr + len;
     if (end < addr || end > USER_VA_LIMIT) return -EINVAL;
+    mm_vma_index_invalidate(mm);
 
     for (vm_area_t *v = mm->mmap; v; v = v->next) {
         if (v->start >= end)
@@ -89,13 +90,10 @@ int mm_munmap_locked(mm_struct_t *mm, vaddr_t addr, size_t len) {
             pfn_t held_pfn = PFN_NONE;
             if (*pte & PTE_V) {
                 held_pfn = phys_to_pfn(arch_pte_addr(*pte));
-                if (shared_file_vma && vma->file_vnode) {
-                    uint64_t idx = vma->file_offset + (va - vma->start);
-                    idx /= PAGE_SIZE;
-                    held_pcp = page_cache_get(vma->file_vnode, idx, 0);
-                    if (!held_pcp || mm_tlb_hold_page(mm, held_pcp) < 0) {
-                        if (held_pcp)
-                            page_cache_put(held_pcp);
+                held_pcp = mm_file_cache_mapping_get(vma, va, held_pfn);
+                if (held_pcp) {
+                    if (mm_tlb_hold_page(mm, held_pcp) < 0) {
+                        page_cache_put(held_pcp);
                         return -ENOMEM;
                     }
                 } else if (!(vma->vm_flags & (VM_PFNMAP | VM_VMO))) {
@@ -109,7 +107,7 @@ int mm_munmap_locked(mm_struct_t *mm, vaddr_t addr, size_t len) {
                 mm_tlb_note_change(mm, base, size);
                 if (pa) {
                     pfn_t pfn = phys_to_pfn(pa);
-                    if (shared_file_vma && vma->file_vnode) {
+                    if (held_pcp) {
                         /* Drop the temporary lookup and the mapping's pin.
                          * mm_tlb_hold_page() retains the final reference until
                          * every CPU has invalidated the old PTE. */

@@ -113,6 +113,27 @@ int  mutex_trylock(mutex_t *m);
 void mutex_lock(mutex_t *m);
 void mutex_unlock(mutex_t *m);
 
+/* Sleeping reader/writer mutex.  Waiting writers stop new readers so a
+ * sustained read stream cannot starve writeback or eviction. */
+typedef struct rw_mutex {
+    spinlock_t lock;
+    unsigned readers;
+    unsigned waiting_writers;
+    int writer;
+    void *owner;
+    wait_queue_t reader_waiters;
+    wait_queue_t writer_waiters;
+} rw_mutex_t;
+
+#define RW_MUTEX_INIT \
+    { SPINLOCK_INIT, 0, 0, 0, NULL, WAIT_QUEUE_INIT, WAIT_QUEUE_INIT }
+
+void rw_mutex_init(rw_mutex_t *rw);
+void rw_mutex_read_lock(rw_mutex_t *rw);
+void rw_mutex_read_unlock(rw_mutex_t *rw);
+void rw_mutex_write_lock(rw_mutex_t *rw);
+void rw_mutex_write_unlock(rw_mutex_t *rw);
+
 typedef struct completion {
     spinlock_t lock;
     unsigned done;

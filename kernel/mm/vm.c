@@ -27,6 +27,22 @@ enum {
     MM_TLB_HOLD_PAGE = 2,
 };
 
+void mm_arch_context_init(mm_struct_t *mm)
+{
+    if (!mm)
+        return;
+    mm->arch_asid = arch_mm_context_alloc();
+    mm->tlb_generation = 1;
+    memset(mm->tlb_cpu_generation, 0, sizeof(mm->tlb_cpu_generation));
+}
+
+uint64_t mm_address_space_token(const mm_struct_t *mm)
+{
+    if (!mm || !mm->pgdir)
+        return 0;
+    return arch_mm_address_space_token(mm->pgdir, mm->arch_asid);
+}
+
 void mm_tlb_invalidate_begin(mm_struct_t *mm)
 {
     if (mm) {
@@ -64,6 +80,23 @@ void mm_context_enter(mm_struct_t *mm, unsigned cpu)
         /* The active bit must be globally visible before the architecture can
          * install this mm's page-table token. */
         arch_mb();
+        if (mm->arch_asid && cpu < CONFIG_NR_CPUS) {
+            for (;;) {
+                uint64_t generation = __atomic_load_n(
+                    &mm->tlb_generation, __ATOMIC_ACQUIRE);
+                uint64_t seen = __atomic_load_n(
+                    &mm->tlb_cpu_generation[cpu], __ATOMIC_ACQUIRE);
+                if (seen == generation)
+                    break;
+                arch_tlb_flush_asid_local(mm->arch_asid);
+                __atomic_store_n(&mm->tlb_cpu_generation[cpu], generation,
+                                 __ATOMIC_RELEASE);
+                arch_mb();
+                if (__atomic_load_n(&mm->tlb_generation,
+                                    __ATOMIC_ACQUIRE) == generation)
+                    break;
+            }
+        }
     }
 }
 
@@ -133,6 +166,14 @@ void mm_tlb_invalidate_finish(mm_struct_t *mm)
 
     int transaction_flushed = 0;
 
+    uint64_t generation = __atomic_load_n(&mm->tlb_generation,
+                                           __ATOMIC_RELAXED);
+    uint32_t flushed_cpus = 0;
+    if (mm->tlb_pending) {
+        generation = __atomic_add_fetch(&mm->tlb_generation, 1,
+                                        __ATOMIC_RELEASE);
+    }
+
     if (mm->tlb_pending && smp_remote_tlb_flush_supported()) {
         /* Publish PTE changes before sampling active CPUs. A CPU which enters
          * after this snapshot flushes locally while switching page tables. */
@@ -149,20 +190,30 @@ void mm_tlb_invalidate_finish(mm_struct_t *mm)
             else
                 arch_tlb_flush_local();
             transaction_flushed = 1;
+            flushed_cpus |= 1U << current;
             targets &= ~(1U << current);
         }
         if (targets) {
+            uint32_t remote_targets = targets;
             transaction_flushed = 1;
             a20_perf_add(A20_PERF_MM_TLB_REMOTE_CPUS,
                          (uint64_t)__builtin_popcount(targets));
             if (smp_remote_tlb_flush(targets, start, size) < 0)
                 panic("mm: targeted remote TLB flush failed");
+            flushed_cpus |= remote_targets;
         }
     } else if (mm->tlb_pending) {
         /* Keep the pre-Batch-B behavior on architectures or boards without
          * synchronous targeted shootdown support. */
         arch_tlb_flush();
         transaction_flushed = 1;
+        flushed_cpus = smp_online_cpu_mask();
+    }
+
+    for (unsigned cpu = 0; cpu < CONFIG_NR_CPUS && cpu < 32; cpu++) {
+        if (flushed_cpus & (1U << cpu))
+            __atomic_store_n(&mm->tlb_cpu_generation[cpu], generation,
+                             __ATOMIC_RELEASE);
     }
 
     /* Count one transaction if it requested any local, global, or remote
@@ -341,6 +392,7 @@ mm_struct_t *mm_create(void) {
     mutex_init(&mm->tlb_lock);
     mm->tlb_holds = NULL;
     mm->active_cpus = 0;
+    mm_arch_context_init(mm);
     refcount_set(&mm->refcount, 1);
     ktrace_mm("[MMDBG] mm=%p lock=%p\n", (void *)mm, (void *)&mm->lock);
     return mm;
@@ -365,7 +417,8 @@ void mm_destroy(mm_struct_t *mm) {
     mm_tlb_invalidate_begin(mm);
     /* The final mm cannot be entered again. Flush stale translations before
      * free_vma_pages() or deferred VMA release can return backing storage. */
-    arch_tlb_flush();
+    if (!mm->arch_asid)
+        arch_tlb_flush();
 
     /* Reap Linux AIO contexts owned by this address space before the VMA
      * list and page table are torn down. */
@@ -395,6 +448,7 @@ void mm_destroy(mm_struct_t *mm) {
     /* Drain any huge-page demotion holds before page-table frames are freed. */
     mm_tlb_invalidate_finish(mm);
     if (mm->pgdir) pt_destroy_user(mm->pgdir);
+    arch_mm_context_release(mm->arch_asid);
     kfree(mm);
 }
 
@@ -484,6 +538,11 @@ mm_struct_t *mm_fork(mm_struct_t *parent) {
     }
 
     *child = *parent;
+    /* The copied index points at the parent's VMA nodes.  Child metadata is
+     * cloned into distinct nodes below, so force a lazy rebuild on first use. */
+    child->vma_index_state = 0;
+    child->vma_index_count = 0;
+    memset(child->vma_index, 0, sizeof(child->vma_index));
     spin_init(&child->lock);
     spin_set_debug(&child->lock, "mm", child);
     mutex_init(&child->tlb_lock);
@@ -507,6 +566,7 @@ mm_struct_t *mm_fork(mm_struct_t *parent) {
     child->tlb_pending = 0;
     child->tlb_start = 0;
     child->tlb_end = 0;
+    mm_arch_context_init(child);
     refcount_set(&child->refcount, 1);
     child->rss = 0;
     child->total_vm = 0;

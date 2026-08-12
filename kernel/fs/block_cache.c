@@ -9,7 +9,7 @@
 static bcache_t *g_bcache_list[8];
 static int g_bcache_count;
 
-#define BCACHE_SYNC_BATCH_PAGES 16
+#define BCACHE_SYNC_BATCH_PAGES 256
 
 /* Cooldown after a failed device write before flush is attempted again. */
 #define BCACHE_WRITE_QUARANTINE_TICKS (TICKS_PER_SEC * 30)
@@ -172,12 +172,20 @@ bcache_t *bcache_create(block_dev_t *dev) {
     spin_init(&bc->lock);
     for (int i = 0; i < PCACHE_FILL_LOCKS; i++)
         mutex_init(&bc->fill_locks[i]);
-    mutex_init(&bc->writeback_lock);
+    rw_mutex_init(&bc->writeback_lock);
     bc->pool = (bcache_entry_t *)kmalloc(sizeof(bcache_entry_t) * bc->pool_size);
     if (!bc->pool) { kfree(bc); return NULL; }
     bc->page_pool_size = PCACHE_MAX_PAGES;
     bc->page_pool = (pcache_entry_t *)kmalloc(sizeof(pcache_entry_t) * bc->page_pool_size);
     if (!bc->page_pool) { kfree(bc->pool); kfree(bc); return NULL; }
+    bc->writeback_buffer =
+        (char *)kmalloc(PCACHE_PAGE_SIZE * BCACHE_SYNC_BATCH_PAGES);
+    if (!bc->writeback_buffer) {
+        kfree(bc->page_pool);
+        kfree(bc->pool);
+        kfree(bc);
+        return NULL;
+    }
 
     // 初始化 LRU 链表（头尾哨兵节点）
     bc->lru_head.prev = NULL;
@@ -231,6 +239,7 @@ void bcache_destroy(bcache_t *bc) {
         }
     }
     if (bc->page_pool) kfree(bc->page_pool);
+    if (bc->writeback_buffer) kfree(bc->writeback_buffer);
     if (bc->pool) kfree(bc->pool);
     kfree(bc);
 }
@@ -312,7 +321,7 @@ bcache_entry_t *bcache_get(bcache_t *bc, uint64_t lba) {
     }
 
     spin_unlock_irqrestore(&bc->lock, flags);
-    mutex_lock(&bc->writeback_lock);
+    rw_mutex_write_lock(&bc->writeback_lock);
     flags = spin_lock_irqsave(&bc->lock);
 
     /* A concurrent miss may have populated this LBA while we waited. */
@@ -322,7 +331,7 @@ bcache_entry_t *bcache_get(bcache_t *bc, uint64_t lba) {
         lru_remove(e);
         lru_insert_front(bc, e);
         spin_unlock_irqrestore(&bc->lock, flags);
-        mutex_unlock(&bc->writeback_lock);
+        rw_mutex_write_unlock(&bc->writeback_lock);
         return e;
     }
 
@@ -330,7 +339,7 @@ bcache_entry_t *bcache_get(bcache_t *bc, uint64_t lba) {
     e = bcache_evict(bc);
     if (!e) {
         spin_unlock_irqrestore(&bc->lock, flags);
-        mutex_unlock(&bc->writeback_lock);
+        rw_mutex_write_unlock(&bc->writeback_lock);
         kdebug("[BCACHE] no evictable block lba=%lu\n", (unsigned long)lba);
         return NULL;
     }
@@ -351,11 +360,11 @@ bcache_entry_t *bcache_get(bcache_t *bc, uint64_t lba) {
             bcache_hash_insert(bc, e);
             lru_insert_front(bc, e);
             spin_unlock_irqrestore(&bc->lock, flags);
-            mutex_unlock(&bc->writeback_lock);
+            rw_mutex_write_unlock(&bc->writeback_lock);
             return NULL;
         }
     }
-    mutex_unlock(&bc->writeback_lock);
+    rw_mutex_write_unlock(&bc->writeback_lock);
 
     // 从磁盘读取数据
     if (bc->dev) {
@@ -438,7 +447,7 @@ int bcache_sync_checked(bcache_t *bc) {
     /* Preserve write ordering for mutable metadata pages.  Without this,
      * concurrent fsync and eviction can write an older bitmap snapshot after
      * a newer one and make allocated blocks appear free again. */
-    mutex_lock(&bc->writeback_lock);
+    rw_mutex_write_lock(&bc->writeback_lock);
 
     for (int i = 0; i < bc->page_pool_size; i++) {
         uint64_t flags = spin_lock_irqsave(&bc->lock);
@@ -552,7 +561,7 @@ int bcache_sync_checked(bcache_t *bc) {
             break;
         }
     }
-    mutex_unlock(&bc->writeback_lock);
+    rw_mutex_write_unlock(&bc->writeback_lock);
     return first_error;
 }
 
@@ -582,12 +591,54 @@ static pcache_entry_t *pcache_find(bcache_t *bc, uint64_t page_no) {
     return NULL;
 }
 
-static int pcache_flush_page(bcache_t *bc, pcache_entry_t *e) {
-    if (!bc->dev || !e->dirty)
+static int pcache_flush_run(bcache_t *bc, pcache_entry_t *first)
+{
+    if (!bc->dev || !first || !first->dirty)
         return 0;
-    uint64_t lba = (e->page_no * PCACHE_PAGE_SIZE) / BCACHE_BLOCK_SIZE;
-    int r = bc->dev->write_sector(bc->dev, lba, e->data,
-                                  PCACHE_PAGE_SIZE / BCACHE_BLOCK_SIZE);
+
+    pcache_entry_t *entries[BCACHE_SYNC_BATCH_PAGES];
+    uint64_t page_nos[BCACHE_SYNC_BATCH_PAGES];
+    uint64_t page_gens[BCACHE_SYNC_BATCH_PAGES];
+    uint64_t flags = spin_lock_irqsave(&bc->lock);
+    if (!first->valid || !first->dirty) {
+        spin_unlock_irqrestore(&bc->lock, flags);
+        return 0;
+    }
+
+    entries[0] = first;
+    page_nos[0] = first->page_no;
+    page_gens[0] = first->dirty_gen;
+    memcpy(bc->writeback_buffer, first->data, PCACHE_PAGE_SIZE);
+    int pages = 1;
+    while (pages < BCACHE_SYNC_BATCH_PAGES) {
+        pcache_entry_t *next = pcache_find(bc, page_nos[pages - 1] + 1);
+        if (!next || !next->valid || !next->dirty)
+            break;
+        entries[pages] = next;
+        page_nos[pages] = next->page_no;
+        page_gens[pages] = next->dirty_gen;
+        memcpy(bc->writeback_buffer + (size_t)pages * PCACHE_PAGE_SIZE,
+               next->data, PCACHE_PAGE_SIZE);
+        pages++;
+    }
+    spin_unlock_irqrestore(&bc->lock, flags);
+
+    uint64_t lba = (page_nos[0] * PCACHE_PAGE_SIZE) / BCACHE_BLOCK_SIZE;
+    int r = bc->dev->write_sector(
+        bc->dev, lba, bc->writeback_buffer,
+        (size_t)pages * PCACHE_PAGE_SIZE / BCACHE_BLOCK_SIZE);
+    if (r >= 0) {
+        flags = spin_lock_irqsave(&bc->lock);
+        for (int i = 0; i < pages; i++) {
+            pcache_entry_t *entry = entries[i];
+            if (entry->valid && entry->page_no == page_nos[i] &&
+                entry->dirty_gen == page_gens[i])
+                bcache_set_page_dirty_locked(bc, entry, 0);
+        }
+        spin_unlock_irqrestore(&bc->lock, flags);
+    }
+    a20_perf_count(A20_PERF_PCACHE_WRITEBACK_IOS);
+    a20_perf_add(A20_PERF_PCACHE_WRITEBACK_PAGES, (uint64_t)pages);
     return r;
 }
 
@@ -652,7 +703,7 @@ static pcache_entry_t *pcache_get(bcache_t *bc, uint64_t page_no,
     }
 
     spin_unlock_irqrestore(&bc->lock, flags);
-    mutex_lock(&bc->writeback_lock);
+    rw_mutex_write_lock(&bc->writeback_lock);
     flags = spin_lock_irqsave(&bc->lock);
 
     e = pcache_find(bc, page_no);
@@ -661,7 +712,7 @@ static pcache_entry_t *pcache_get(bcache_t *bc, uint64_t page_no,
         page_lru_remove(e);
         page_lru_insert_front(bc, e);
         spin_unlock_irqrestore(&bc->lock, flags);
-        mutex_unlock(&bc->writeback_lock);
+        rw_mutex_write_unlock(&bc->writeback_lock);
         mutex_unlock(fill_lock);
         return e;
     }
@@ -693,19 +744,18 @@ static pcache_entry_t *pcache_get(bcache_t *bc, uint64_t page_no,
                (unsigned long)page_no, (unsigned long)valid,
                (unsigned long)dirty, (unsigned long)referenced,
                (unsigned long)total_refs, max_refs);
-        mutex_unlock(&bc->writeback_lock);
+        rw_mutex_write_unlock(&bc->writeback_lock);
         mutex_unlock(fill_lock);
         return NULL;
     }
 
     uint64_t old_page = e->page_no;
     int old_dirty = e->dirty && e->valid;
-    e->valid = 0;
     spin_unlock_irqrestore(&bc->lock, flags);
 
     int flush_ret = 0;
     if (old_dirty)
-        flush_ret = pcache_flush_page(bc, e);
+        flush_ret = pcache_flush_run(bc, e);
     if (old_dirty && flush_ret < 0) {
         bcache_note_write_error(bc);
         flags = spin_lock_irqsave(&bc->lock);
@@ -716,11 +766,15 @@ static pcache_entry_t *pcache_get(bcache_t *bc, uint64_t page_no,
         pcache_hash_insert(bc, e);
         page_lru_insert_front(bc, e);
         spin_unlock_irqrestore(&bc->lock, flags);
-        mutex_unlock(&bc->writeback_lock);
+        rw_mutex_write_unlock(&bc->writeback_lock);
         mutex_unlock(fill_lock);
         return NULL;
     }
-    mutex_unlock(&bc->writeback_lock);
+    flags = spin_lock_irqsave(&bc->lock);
+    e->valid = 0;
+    bcache_set_page_dirty_locked(bc, e, 0);
+    spin_unlock_irqrestore(&bc->lock, flags);
+    rw_mutex_write_unlock(&bc->writeback_lock);
 
     if (full_overwrite) {
         /* Initialize the miss before publishing it in the hash table.  This
@@ -781,6 +835,63 @@ static pcache_entry_t *pcache_get(bcache_t *bc, uint64_t page_no,
 static void pcache_release(pcache_entry_t *e) {
     if (!e) return;
     cache_ref_put(&e->ref);
+}
+
+/*
+ * Read 2..16 aligned file-data pages with one device request.
+ *
+ * Clean file data already lives in the VFS page cache, so inserting the same
+ * bytes into the block cache creates a second 4 KiB copy and another cache
+ * lookup for every fault-around page.  Read cold data straight into the
+ * caller's linear window instead.  Existing block-cache pages are overlaid
+ * afterwards because they may contain a newer dirty version than the disk.
+ *
+ * The writeback mutex prevents a dirty entry from disappearing between the
+ * device read and the coherent overlay.  Writers that update an existing page
+ * publish under bc->lock, so the overlay observes either the version before or
+ * after a genuinely concurrent write without ever exposing stale disk data in
+ * place of a cache version that was already published.
+ */
+int bcache_read_bytes_batch(bcache_t *bc, uint64_t byte_off, void *buf,
+                            size_t len) {
+    if (!bc || !buf || len == 0)
+        return len == 0 ? 0 : -EINVAL;
+    if ((byte_off % PCACHE_PAGE_SIZE) != 0 ||
+        (len % PCACHE_PAGE_SIZE) != 0) {
+        return bcache_read_bytes(bc, byte_off, buf, len);
+    }
+
+    size_t page_count = len / PCACHE_PAGE_SIZE;
+    if (page_count < 2 || page_count > BCACHE_READ_BATCH_MAX_PAGES)
+        return bcache_read_bytes(bc, byte_off, buf, len);
+
+    uint64_t first_page = byte_off / PCACHE_PAGE_SIZE;
+    a20_perf_add(A20_PERF_PCACHE_FILL_MISSES, page_count);
+    rw_mutex_read_lock(&bc->writeback_lock);
+    int result = 0;
+    if (bc->dev) {
+        uint64_t lba = byte_off / BCACHE_BLOCK_SIZE;
+        size_t sectors = len / BCACHE_BLOCK_SIZE;
+        result = bc->dev->read_sector(bc->dev, lba, buf, sectors);
+    } else {
+        memset(buf, 0, len);
+    }
+
+    if (result >= 0) {
+        uint64_t flags = spin_lock_irqsave(&bc->lock);
+        for (size_t i = 0; i < page_count; i++) {
+            pcache_entry_t *entry = pcache_find(bc, first_page + i);
+            if (entry) {
+                memcpy((char *)buf + i * PCACHE_PAGE_SIZE, entry->data,
+                       PCACHE_PAGE_SIZE);
+                page_lru_remove(entry);
+                page_lru_insert_front(bc, entry);
+            }
+        }
+        spin_unlock_irqrestore(&bc->lock, flags);
+    }
+    rw_mutex_read_unlock(&bc->writeback_lock);
+    return result < 0 ? result : 0;
 }
 
 // 读取字节数据（可能跨多个块）

@@ -182,16 +182,16 @@ static int user_sync_signal_is_handled(task_t *task, int sig) {
 }
 
 static void user_trap_handler(trap_context_t *ctx) {
+    ARCH_TRAP_FAST_RETURN_DISARM(ctx);
     reg_t scause = arch_read_cause();
-    vaddr_t stval = arch_read_tval();
-    vaddr_t sepc = arch_read_epc();
-
-    TRAP_CTX_KScratch0(ctx) = arch_read_addr_space_token();
     task_t *current = proc_current();
     if (current && current->pgdir)
         current->trap_ctx = ctx;
 
     if (scause & CAUSE_INTR_MASK) {
+#ifndef ARCH_TRAP_PRESERVES_ADDR_SPACE_TOKEN
+        TRAP_CTX_KScratch0(ctx) = arch_read_addr_space_token();
+#endif
         arch_handle_irq(scause & CAUSE_CODE_MASK, 1);
         if (current && current->pid >= 4)
             ktrace_trap("[TRAP] irq done: pid=%d sig_deliver...\n", current->pid);
@@ -200,10 +200,13 @@ static void user_trap_handler(trap_context_t *ctx) {
         proc_check_exit_pending();
     } else {
         reg_t code = scause & CAUSE_CODE_MASK;
-        task_t *cur = proc_current();
+        task_t *cur = current;
         uint32_t user_insn = 0;
-        int have_user_insn = fetch_user_insn(cur, sepc, &user_insn);
         if (code == CAUSE_ECALL_U) {
+#ifndef ARCH_TRAP_PRESERVES_ADDR_SPACE_TOKEN
+            TRAP_CTX_KScratch0(ctx) = arch_read_addr_space_token();
+#endif
+            ARCH_TRAP_FAST_RETURN_ARM(ctx);
             arch_advance_syscall_epc(ctx);
             arch_syscall_dispatch_enter();
             syscall_dispatch(ctx);
@@ -211,6 +214,16 @@ static void user_trap_handler(trap_context_t *ctx) {
             proc_check_exit_pending();
             return;
         }
+        /* stval has no syscall or interrupt semantics.  sepc is already in
+         * the saved frame.  Delay both until a synchronous non-ecall trap so
+         * successful syscalls avoid two emulated CSR reads under QEMU TCG. */
+        vaddr_t stval = arch_read_tval();
+        vaddr_t sepc = TRAP_CTX_EPC(ctx);
+        TRAP_CTX_KScratch0(ctx) = arch_read_addr_space_token();
+        /* Instruction bytes are only diagnostic input for fault/illegal
+         * paths.  Looking up and copying sepc on every successful ecall made
+         * the syscall hot path perform an unrelated page-table walk. */
+        int have_user_insn = fetch_user_insn(cur, sepc, &user_insn);
         if (code == CAUSE_LOAD_PAGE_FAULT || code == CAUSE_STORE_PAGE_FAULT || code == CAUSE_INSN_PAGE_FAULT) {
             if (code == CAUSE_STORE_PAGE_FAULT) {
                 if (handle_cow_fault(cur, stval) == 0) {
@@ -226,7 +239,7 @@ static void user_trap_handler(trap_context_t *ctx) {
                 signal_deliver_user(ctx);
                 return;
             }
-            if (handle_demand_fault(cur, stval) == 0) {
+            if (handle_demand_fault_access(cur, stval, access) == 0) {
                 signal_deliver_user(ctx);
                 return;
             }
@@ -419,7 +432,7 @@ void kernel_trap_handler(trap_context_t *ctx) {
                 if (handle_present_page_fault(cur, stval, access) == 0) {
                     return;
                 }
-                if (handle_demand_fault(cur, stval) == 0) {
+                if (handle_demand_fault_access(cur, stval, access) == 0) {
                     return;
                 }
                 if (handle_present_page_fault(cur, stval, access) == 0) {

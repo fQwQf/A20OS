@@ -180,7 +180,8 @@ typedef struct bus_type {
  */
 void driver_core_init(void);
 /* Format registered drivers for /proc/drivers. */
-int  driver_core_list_drivers(char *buf, size_t sz);int  driver_register(driver_t *drv);
+int  driver_core_list_drivers(char *buf, size_t sz);
+int  driver_register(driver_t *drv);
 int  driver_unregister(driver_t *drv);
 int  device_register(device_t *dev);
 void device_unregister(device_t *dev);

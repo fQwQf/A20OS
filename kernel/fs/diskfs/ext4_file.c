@@ -3,6 +3,7 @@
 #include "fs/file.h"
 #include "fs/vfs.h"
 #include "fs/block_cache.h"
+#include "fs/page_cache.h"
 #include "mm/mm.h"
 #include "mm/frame.h"
 #include "core/string.h"
@@ -66,7 +67,10 @@ int ext4_fread(vfile_t *vf, char *buf, size_t count) {
         ext4_fctx_inode_dirty(fc);
     ext4_inode_t *inode = ext4_fctx_inode(fc);
     if (!inode) return -EIO;
-    ext4_fctx_set_size(vf, fc, ext4_inode_size(inode));
+    uint64_t logical_size = ext4_inode_size(inode);
+    if (vf->vnode && vf->vnode->size > logical_size)
+        logical_size = vf->vnode->size;
+    ext4_fctx_set_size(vf, fc, logical_size);
     if (fc->file_off >= fc->file_size) return 0;
 
     size_t remaining = fc->file_size - fc->file_off;
@@ -104,14 +108,20 @@ int ext4_fwrite(vfile_t *vf, const char *buf, size_t count) {
     if (fc->is_dir) return -EISDIR;
     if (count == 0) return 0;
 
+    uint64_t logical_size = fc->file_size;
+    if (vf->vnode && vf->vnode->size > logical_size)
+        logical_size = vf->vnode->size;
     if (vf->vnode && vf->vnode->size != fc->file_size)
         ext4_fctx_inode_dirty(fc);
     ext4_inode_t *inode = ext4_fctx_inode(fc);
     if (!inode) return -EIO;
-    ext4_fctx_set_size(vf, fc, ext4_inode_size(inode));
+    if (ext4_inode_size(inode) > logical_size)
+        logical_size = ext4_inode_size(inode);
+    ext4_fctx_set_size(vf, fc, logical_size);
 
     uint32_t bs = fc->sb->block_size;
     size_t done = 0;
+    int inode_dirty = 0;
 
     while (done < count) {
         size_t foff = fc->file_off + done;
@@ -121,17 +131,52 @@ int ext4_fwrite(vfile_t *vf, const char *buf, size_t count) {
         if (chunk > count - done) chunk = count - done;
 
         uint64_t phys = ext4_block_map_cached(fc, inode, lblk);
+        if (!phys && loff == 0 && chunk == bs) {
+            /* Page-cache writeback supplies an aligned, full-overwrite
+             * window.  Reserve and publish a bounded physical run at once;
+             * this replaces hundreds of bitmap scans and group-descriptor
+             * rewrites while preserving the existing extent grow contract. */
+            size_t wanted = (count - done) / bs;
+            if (wanted > 256)
+                wanted = 256;
+            uint64_t first_phys = 0;
+            size_t allocated = ext4_alloc_blocks_uninitialized(
+                fc->sb, wanted, &first_phys);
+            if (allocated != 0) {
+                size_t grown = 0;
+                while (grown < allocated) {
+                    int gr = ext4_block_grow(fc->sb, inode,
+                                             lblk + (uint32_t)grown,
+                                             first_phys + grown);
+                    if (gr < 0)
+                        break;
+                    grown++;
+                }
+                for (size_t i = grown; i < allocated; i++)
+                    ext4_free_block(fc->sb, first_phys + i);
+                if (grown == 0)
+                    break;
+
+                fc->ext_valid = 0;
+                inode_dirty = 1;
+                size_t bytes = grown * bs;
+                if (bcache_write_bytes(fc->sb->bc, first_phys * bs,
+                                       buf + done, bytes) < 0)
+                    break;
+                done += bytes;
+                if (grown != allocated)
+                    break;
+                continue;
+            }
+        }
         if (!phys) {
             uint64_t nb = ext4_alloc_block(fc->sb);
             if (!nb) break;
             int gr = ext4_block_grow(fc->sb, inode, lblk, nb);
             if (gr < 0) { ext4_free_block(fc->sb, nb); break; }
-            if (ext4_write_inode(fc->sb, fc->inode_num, inode) < 0) {
-                ext4_free_block(fc->sb, nb);
-                break;
-            }
             phys = nb;
             fc->ext_valid = 0;
+            inode_dirty = 1;
         }
 
         int r = bcache_write_bytes(fc->sb->bc, phys * bs + loff, buf + done, chunk);
@@ -141,18 +186,28 @@ int ext4_fwrite(vfile_t *vf, const char *buf, size_t count) {
 
     if (done > 0) {
         fc->file_off += done;
-        if (fc->file_off > fc->file_size) {
-            fc->file_size = fc->file_off;
+        uint64_t final_size = fc->file_size;
+        if (fc->file_off > final_size)
+            final_size = fc->file_off;
+        if (ext4_inode_size(inode) != final_size) {
+            fc->file_size = final_size;
             ext4_inode_set_size(inode, fc->file_size);
-            ext4_write_inode(fc->sb, fc->inode_num, inode);
-            if (vf->vnode && vf->vnode->fs_data) {
-                ext4_vnode_priv_t *fp = (ext4_vnode_priv_t *)vf->vnode->fs_data;
-                fp->file_size = fc->file_size;
-                vf->vnode->size = fc->file_size;
-            }
+            inode_dirty = 1;
+        }
+        if (vf->vnode && vf->vnode->fs_data) {
+            ext4_vnode_priv_t *fp = (ext4_vnode_priv_t *)vf->vnode->fs_data;
+            fp->file_size = final_size;
+            vf->vnode->size = final_size;
         }
         vf->offset = fc->file_off;
     }
+    /* A contiguous page-cache batch may allocate many adjacent blocks.  The
+     * inode image contains the complete merged extent, so publish it once per
+     * write call instead of rewriting the same inode-table page for every
+     * 4 KiB block. */
+    if (inode_dirty &&
+        ext4_write_inode(fc->sb, fc->inode_num, inode) < 0)
+        return -EIO;
     return (int)done;
 }
 
@@ -167,10 +222,13 @@ int ext4_vn_readpage(vnode_t *vn, uint64_t index,
         return -EISDIR;
 
     memset(data, 0, len);
+    uint64_t logical_size = vn->size;
+    if (logical_size > fp->file_size)
+        fp->file_size = logical_size;
     uint64_t off = index * PAGE_SIZE;
-    if (off >= fp->file_size)
+    if (off >= logical_size)
         return 0;
-    size_t n = fp->file_size - (size_t)off;
+    size_t n = logical_size - (size_t)off;
     if (n > len)
         n = len;
 
@@ -193,15 +251,19 @@ int ext4_vn_readpage(vnode_t *vn, uint64_t index,
 }
 
 
-int ext4_vn_writepage(vnode_t *vn, uint64_t index,
-                             const void *data, size_t len)
+/* Read a contiguous file-page window while preserving sparse extents and the
+ * block cache's dirty-page authority.  Physically adjacent cold 4 KiB cache
+ * pages are merged by bcache_read_bytes_batch() into one VirtIO request. */
+int ext4_vn_readpages(vnode_t *vn, uint64_t index,
+                             void *data, size_t len)
 {
-    if (!vn || !vn->fs_data || !data)
+    if (!vn || !vn->fs_data || !data || len == 0)
         return -EINVAL;
     ext4_vnode_priv_t *fp = (ext4_vnode_priv_t *)vn->fs_data;
     if (fp->type == VFS_FT_DIR)
         return -EISDIR;
 
+    memset(data, 0, len);
     uint64_t off = index * PAGE_SIZE;
     if (off >= fp->file_size)
         return 0;
@@ -214,7 +276,121 @@ int ext4_vn_writepage(vnode_t *vn, uint64_t index,
     fc.sb = fp->sb;
     fc.inode_num = fp->inode_num;
     fc.file_size = fp->file_size;
+    fc.file_off = (size_t)off;
+    ext4_inode_t *inode = ext4_fctx_inode(&fc);
+    if (!inode)
+        return -EIO;
+
+    uint32_t bs = fc.sb->block_size;
+    size_t done = 0;
+    while (done < n) {
+        uint64_t foff = off + done;
+        uint32_t lblk = (uint32_t)(foff / bs);
+        uint32_t loff = (uint32_t)(foff % bs);
+        size_t first = bs - loff;
+        if (first > n - done)
+            first = n - done;
+
+        uint64_t phys = ext4_block_map_cached(&fc, inode, lblk);
+        if (!phys) {
+            done += first;
+            continue;
+        }
+
+        /* Partial blocks cannot use the aligned batch interface. */
+        if (loff != 0 || first != bs) {
+            if (bcache_read_bytes(fc.sb->bc, phys * bs + loff,
+                                  (char *)data + done, first) < 0)
+                return -EIO;
+            done += first;
+            continue;
+        }
+
+        size_t remaining_blocks = (n - done) / bs;
+        size_t run_blocks = 1;
+        while (run_blocks < remaining_blocks) {
+            uint64_t next = ext4_block_map_cached(
+                &fc, inode, lblk + (uint32_t)run_blocks);
+            if (!next || next != phys + run_blocks)
+                break;
+            run_blocks++;
+        }
+        size_t run_bytes = run_blocks * bs;
+        int r = bcache_read_bytes_batch(fc.sb->bc, phys * bs,
+                                        (char *)data + done, run_bytes);
+        if (r < 0)
+            return r;
+        done += run_bytes;
+    }
+    return (int)n;
+}
+
+
+int ext4_vn_writepage(vnode_t *vn, uint64_t index,
+                             const void *data, size_t len)
+{
+    if (!vn || !vn->fs_data || !data)
+        return -EINVAL;
+    ext4_vnode_priv_t *fp = (ext4_vnode_priv_t *)vn->fs_data;
+    if (fp->type == VFS_FT_DIR)
+        return -EISDIR;
+
+    uint64_t logical_size = vn->size;
+    if (logical_size > fp->file_size)
+        fp->file_size = logical_size;
+    uint64_t off = index * PAGE_SIZE;
+    if (off >= logical_size)
+        return 0;
+    size_t n = logical_size - (size_t)off;
+    if (n > len)
+        n = len;
+
+    ext4_fctx_t fc;
+    memset(&fc, 0, sizeof(fc));
+    fc.sb = fp->sb;
+    fc.inode_num = fp->inode_num;
+    fc.file_size = logical_size;
     fc.is_dir = (fp->type == VFS_FT_DIR);
+    fc.file_off = (size_t)off;
+
+    vfile_t vf;
+    memset(&vf, 0, sizeof(vf));
+    vf.vnode = vn;
+    vf.flags = O_RDWR;
+    vf.offset = (size_t)off;
+    vf.priv = &fc;
+
+    int r = ext4_fwrite(&vf, (const char *)data, n);
+    if (r < 0)
+        return r;
+    return (size_t)r == n ? 0 : -EIO;
+}
+
+int ext4_vn_writepages(vnode_t *vn, uint64_t index,
+                       const void *data, size_t len)
+{
+    if (!vn || !vn->fs_data || !data || len == 0)
+        return len == 0 ? 0 : -EINVAL;
+    ext4_vnode_priv_t *fp = (ext4_vnode_priv_t *)vn->fs_data;
+    if (fp->type == VFS_FT_DIR)
+        return -EISDIR;
+
+    uint64_t logical_size = vn->size;
+    if (logical_size > fp->file_size)
+        fp->file_size = logical_size;
+    uint64_t off = index * PAGE_SIZE;
+    if (off >= logical_size)
+        return 0;
+    size_t n = logical_size - (size_t)off;
+    if (n > len)
+        n = len;
+
+    ext4_fctx_t fc;
+    memset(&fc, 0, sizeof(fc));
+    fc.sb = fp->sb;
+    fc.inode_num = fp->inode_num;
+    fc.file_size = logical_size;
+    fc.is_dir = 0;
     fc.file_off = (size_t)off;
 
     vfile_t vf;
@@ -238,8 +414,8 @@ long ext4_flseek(vfile_t *vf, long offset, int whence) {
         case SEEK_SET: new_off = offset; break;
         case SEEK_CUR: new_off = (long)vf->offset + offset; break;
         case SEEK_END:
-            ext4_fctx_inode_dirty(fc);
-            ext4_fctx_inode(fc);
+            if (vf->vnode && vf->vnode->size > fc->file_size)
+                fc->file_size = vf->vnode->size;
             new_off = (long)fc->file_size + offset;
             break;
         default: return -EINVAL;
@@ -309,6 +485,15 @@ out:
 
 
 int ext4_fclose(vfile_t *vf) {
+    if (vf && vf->vnode && vf->vnode->fs_data) {
+        ext4_vnode_priv_t *fp =
+            (ext4_vnode_priv_t *)vf->vnode->fs_data;
+        uint32_t previous = __atomic_fetch_sub(&fp->open_count, 1,
+                                               __ATOMIC_ACQ_REL);
+        if (previous == 1 &&
+            __atomic_load_n(&fp->unlinked, __ATOMIC_ACQUIRE))
+            page_cache_discard_unlinked(vf->vnode);
+    }
     if (vf->priv) { kfree(vf->priv); vf->priv = NULL; }
     return 0;
 }
@@ -322,8 +507,12 @@ vfile_t *ext4_open_vnode(vnode_t *vn, int flags) {
     fc->sb        = fp->sb;
     fc->inode_num = fp->inode_num;
     uint64_t current_size = fp->file_size;
+    if (vn->size > current_size)
+        current_size = vn->size;
     if (ext4_read_inode(fp->sb, fp->inode_num, &fc->inode) == 0) {
-        current_size = ext4_inode_size(&fc->inode);
+        uint64_t disk_size = ext4_inode_size(&fc->inode);
+        if (disk_size > current_size)
+            current_size = disk_size;
         fp->file_size = current_size;
         vn->size = current_size;
         fc->inode_valid = 1;
@@ -342,6 +531,7 @@ vfile_t *ext4_open_vnode(vnode_t *vn, int flags) {
     vfile_ref_init(vf, 1);
     vf->ops       = &g_ext4_fops;
     vf->priv      = fc;
+    __atomic_fetch_add(&fp->open_count, 1, __ATOMIC_RELEASE);
     return vf;
 }
 

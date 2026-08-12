@@ -635,6 +635,9 @@ static int exec_install_process(task_t *t,
     proc_exec_terminate_siblings(t);
     fdtable_close_on_exec(t);
 
+    mm_arch_context_init(new_mm);
+    uint64_t user_as = mm_address_space_token(new_mm);
+
     /* ---- 3. Atomically swap mm ---- */
     uint64_t mm_swap_flags = spin_lock_irqsave(&proc_lock);
     mm_struct_t *old_mm    = t->mm;
@@ -670,7 +673,7 @@ static int exec_install_process(task_t *t,
         new_ctx->tp = (uint64_t)(uintptr_t)t;
         arch_task_context_set_user_tp(new_ctx, info->tls_tp);
         TASK_CTX_STATUS(new_ctx) = arch_task_user_resume_status();
-        TASK_CTX_PAGE_TABLE(new_ctx) = arch_make_addr_space_token(info->pgdir);
+        TASK_CTX_PAGE_TABLE(new_ctx) = user_as;
         arch_task_context_set_initial_sp(new_ctx, trap, ks_top);
         t->trap_ctx = trap;
         t->kstack   = (uint64_t)new_ctx;
@@ -680,7 +683,7 @@ static int exec_install_process(task_t *t,
         trap_context_t *trap = t->trap_ctx;
         saved_kernel_sp = arch_trap_ctx_get_kernel_stack(trap, (uint64_t)(uintptr_t)trap);
         memset(trap, 0, sizeof(*trap));
-        TRAP_CTX_KScratch0(trap) = arch_make_addr_space_token(info->pgdir);
+        TRAP_CTX_KScratch0(trap) = user_as;
         arch_trap_ctx_set_user_entry(trap, info->entry);
         TRAP_CTX_SP(trap)        = sp;
         TRAP_CTX_TP(trap)        = info->tls_tp;
@@ -703,8 +706,7 @@ static int exec_install_process(task_t *t,
     /* ---- 7. Switch page tables, destroy old address space ---- */
     unsigned cpu = cpu_current_id();
     mm_context_enter(new_mm, cpu);
-    arch_write_addr_space_token(arch_make_addr_space_token(info->pgdir));
-    arch_tlb_flush_local();
+    arch_switch_addr_space_token(user_as);
     if (old_mm && old_mm != new_mm)
         mm_context_leave(old_mm, cpu);
 

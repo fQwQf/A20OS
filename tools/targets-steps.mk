@@ -136,9 +136,11 @@ _step35_smoke: dev-build
 	stamp=$$(date -u +%Y%m%dT%H%M%SZ); \
 	log="$(STEP35_LOG_DIR)/step35-$(STEP35_LABEL)-$$stamp.log"; \
 	status=0; \
-	{ sleep $(STEP35_INPUT_DELAY); \
-	  printf 'lifetime_stress\ncat /proc/a20/task_lifetime\npoweroff\n'; } | \
-	$(TIMEOUT) $(STEP35_TIMEOUT) $(QEMU) $(QEMU_FLAGS_NO_SDCARD) \
+	$(TIMEOUT) --expect 'mksh main starting!' --expect '# ' \
+		--send-line 'lifetime_stress' \
+		--send-line 'cat /proc/a20/task_lifetime' \
+		--send-line 'poweroff' \
+		$(STEP35_TIMEOUT) $(QEMU) $(QEMU_FLAGS_NO_SDCARD) \
 		-kernel $(KERNEL_ELF) \
 		-append 'a20.ip=10.0.2.15 a20.netmask=255.255.255.0 a20.gateway=10.0.2.2 a20.dns=10.0.2.3 a20.hostname=a20os' \
 		> "$$log" 2>&1 || status=$$?; \

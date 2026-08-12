@@ -31,6 +31,11 @@ struct page_cache_page;
 #define VM_SYSV_SHM  (1UL << 16)
 #define VM_PFNMAP    (1UL << 17)
 
+/* Typical compiler processes have O(100) VMAs.  Keep a compact secondary
+ * pointer index for binary-search lookup while retaining the linked list as
+ * the ownership and mutation representation. */
+#define MM_VMA_INDEX_CAPACITY 256
+
 #ifdef CONFIG_NOMMU
 #define NOMMU_ALLOC_MAX    32
 #define NOMMU_ALLOC_IMAGE  0
@@ -48,7 +53,7 @@ typedef struct vm_area {
     uint64_t        file_offset;
     struct vmo     *vmo;
     uint64_t        vmo_offset;
-    struct vnode   *file_vnode;     /* referenced vnode for VM_FILE+VM_SHARED */
+    struct vnode   *file_vnode;     /* referenced vnode for every VM_FILE */
 #ifdef CONFIG_NOMMU
     void           *nommu_alloc;     /* raw allocation backing this VMA */
 #endif
@@ -96,12 +101,12 @@ typedef struct mm_tlb_hold {
  *   reference it replaces and must flush the affected TLB range before returning
  *   to user mode. Permission relax/tighten, unmap, demote, demand fault, file
  *   mmap, COW, and dirty-bit updates are all page-table writes.
- * - File VMAs own one fd reference and, for shared mappings, a referenced vnode
- *   in file_vnode. Private file faults copy from page cache; shared file faults
- *   map the canonical page-cache page directly and pin it for the lifetime of
- *   the mapping. Dirty PTEs are synced to the page cache before fsync/msync
- *   writeback so shared mmap writes are visible through read(), fsync(), and
- *   fork-shared cloning.
+ * - File VMAs own one fd and vnode reference. Shared file faults map the
+ *   canonical page-cache page directly. Read-only private faults do the same
+ *   and retain a mapping pin; if permission is later made writable, the first
+ *   store copies to an anonymous page. Dirty PTEs are synced to the page cache
+ *   before fsync/msync writeback so shared mmap writes are visible through
+ *   read(), fsync(), and fork-shared cloning.
  * - OOM/reclaim must not free frames still reachable from task->mm, VMA lists,
  *   page tables, page cache refs, VMO refs, or Native handles. Reclaim may only
  *   choose unpinned cache/slab objects or kill a task and let normal exit/mm
@@ -117,11 +122,18 @@ typedef struct mm_struct {
      */
     mutex_t tlb_lock;
     uint32_t active_cpus;    /* CPUs whose hardware context currently uses mm */
+    uint32_t arch_asid;      /* nonzero tagged user address-space id */
     uint8_t tlb_pending;     /* transaction cleared/replaced at least one PTE */
     uint8_t _pad_tlb[3];
+    uint64_t tlb_generation;
+    uint64_t tlb_cpu_generation[CONFIG_NR_CPUS];
     vaddr_t tlb_start;
     vaddr_t tlb_end;
     vm_area_t *mmap;
+    vm_area_t *vma_index[MM_VMA_INDEX_CAPACITY];
+    uint16_t vma_index_count;
+    uint8_t vma_index_state; /* 0=dirty, 1=valid, 2=capacity overflow */
+    uint8_t _pad_vma_index;
     vm_area_t *deferred_vma;  /* freed after mm->lock is dropped */
     mm_tlb_hold_t *tlb_holds; /* released only after remote TLB shootdown */
     pt_root_t *pgdir;
@@ -149,6 +161,8 @@ mm_struct_t *mm_create(void);
 mm_struct_t *mm_get(mm_struct_t *mm);
 void         mm_destroy(mm_struct_t *mm);
 mm_struct_t *mm_fork(mm_struct_t *parent_mm);
+void         mm_arch_context_init(mm_struct_t *mm);
+uint64_t     mm_address_space_token(const mm_struct_t *mm);
 
 vm_area_t *mm_find_vma(mm_struct_t *mm, vaddr_t addr);
 void mm_vma_defer(mm_struct_t *mm, vm_area_t *vma);
