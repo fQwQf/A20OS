@@ -17,6 +17,9 @@ enum mm_fault_access {
     MM_FAULT_ACCESS_EXEC,
 };
 
+int handle_demand_fault_access(struct task_t *t, uint64_t stval,
+                               enum mm_fault_access access);
+
 /*
  * A concurrent fault on another CPU may have installed the PTE after this CPU
  * cached a non-present translation. Validate the completed mapping and flush

@@ -151,6 +151,7 @@ typedef struct kep_point {
 /* Syscall-filter entry point (kernel/ext/kep_syscall_filter.c). */
 void kep_syscall_filter_init(void);
 int kep_syscall_filter_check(uint64_t nr, const uint64_t *args, int abi);
+int kep_syscall_filter_active(void);
 
 /* Register the extension point; called by the owning subsystem at init. */
 int kep_register_point(kep_point_t *pt);

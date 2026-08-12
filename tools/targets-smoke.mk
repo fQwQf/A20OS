@@ -484,8 +484,9 @@ smoke-mm-fork-exec-race:
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/mm-fork-exec-race-riscv64.log"; \
 	status=0; \
-	{ sleep $(SMOKE_INPUT_DELAY); printf 'mm_stress --vma-fork-exec-only\npoweroff\n'; } | \
-	$(TIMEOUT) $(SMOKE_TIMEOUT_MM_FORK_EXEC) qemu-system-riscv64 \
+	$(TIMEOUT) --expect 'mksh main starting!' --expect '# ' \
+		--send-line 'mm_stress --vma-fork-exec-only' --send-line 'poweroff' \
+		$(SMOKE_TIMEOUT_MM_FORK_EXEC) qemu-system-riscv64 \
 		-machine virt -m 1G -nographic -smp 8 -bios default \
 		-global virtio-mmio.force-legacy=false \
 		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev-smp8/fat32.img,if=none,format=raw,id=x0 \
@@ -508,8 +509,9 @@ smoke-vfs-stress:
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/vfs-stress-riscv64.log"; \
 	status=0; \
-	{ sleep $(SMOKE_INPUT_DELAY); printf 'vfs_stress\npoweroff\n'; } | \
-	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
+	$(TIMEOUT) --expect 'mksh main starting!' --expect '# ' \
+		--send-line 'vfs_stress' --send-line 'poweroff' \
+		$(SMOKE_TIMEOUT) qemu-system-riscv64 \
 		-machine virt -m 1G -nographic -smp 1 -bios default \
 		-global virtio-mmio.force-legacy=false \
 		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \

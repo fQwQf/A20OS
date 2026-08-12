@@ -48,6 +48,24 @@ void frame_trace_dump_pfn(pfn_t pfn)
 
 pfa_t pfa;
 
+/*
+ * Order-0 pages dominate user faults, page-table growth, and slab refills.
+ * Taking the single buddy lock for every one of those allocations makes eight
+ * rustc processes serialize in the kernel.  Refill a small CPU-local reserve
+ * while holding the buddy lock once, then satisfy subsequent allocations with
+ * only local IRQ exclusion.  Reserved pages keep their normal allocated
+ * metadata/refcount until handed to a caller, so the existing free/refcount
+ * paths remain the sole authority when they are eventually released.
+ */
+#define PFA_CPU_BATCH_PAGES 32
+typedef struct pfa_cpu_page_batch {
+    pfn_t pages[PFA_CPU_BATCH_PAGES - 1];
+    uint16_t count;
+    uint8_t _pad[2];
+} __attribute__((aligned(64))) pfa_cpu_page_batch_t;
+
+static pfa_cpu_page_batch_t g_pfa_cpu_batches[CONFIG_NR_CPUS];
+
 int __popcountdi2(unsigned long long a) {
     int count = 0;
     while (a) {
@@ -317,6 +335,47 @@ static pfn_t pfa_alloc_from_buddy(int order)
 
 pfn_t pfa_alloc_flags(int order, int can_reclaim) {
     if (order < 0 || order > MAX_ORDER) return PFN_NONE;
+
+    if (order == 0) {
+        int retries = 0;
+        while (retries < 2) {
+            uint64_t irq_flags = arch_irqs_enabled() ? 1 : 0;
+            arch_local_irq_disable();
+            unsigned cpu = arch_current_cpu_id();
+            if (cpu >= CONFIG_NR_CPUS)
+                cpu = 0;
+            pfa_cpu_page_batch_t *batch = &g_pfa_cpu_batches[cpu];
+            if (batch->count) {
+                pfn_t result = batch->pages[--batch->count];
+                if (irq_flags)
+                    arch_local_irq_enable();
+                return result;
+            }
+
+            spin_lock(&pfa.lock);
+            pfn_t result = pfa_alloc_from_buddy(0);
+            if (result != PFN_NONE) {
+                while (batch->count < PFA_CPU_BATCH_PAGES - 1) {
+                    pfn_t extra = pfa_alloc_from_buddy(0);
+                    if (extra == PFN_NONE)
+                        break;
+                    batch->pages[batch->count++] = extra;
+                }
+            }
+            spin_unlock(&pfa.lock);
+            if (irq_flags)
+                arch_local_irq_enable();
+            if (result != PFN_NONE)
+                return result;
+
+            if (retries == 0 && can_reclaim && oom_try_reclaim()) {
+                retries++;
+                continue;
+            }
+            break;
+        }
+        return PFN_NONE;
+    }
 
     int retries = 0;
     while (retries < 2) {

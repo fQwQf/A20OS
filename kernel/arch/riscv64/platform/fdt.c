@@ -45,6 +45,74 @@ extern uint64_t __boot_dtb_ptr;
 static paddr_t riscv64_ram_base = PHYS_MEMORY_BASE;
 static paddr_t riscv64_ram_end = PHYS_MEMORY_END;
 
+static int fdt_isa_has_token(const uint8_t *value, uint32_t len,
+                             const char *extension)
+{
+    size_t ext_len = strlen(extension);
+    if (!value || ext_len == 0 || ext_len > len)
+        return 0;
+
+    for (uint32_t off = 0; off + ext_len <= len; off++) {
+        int left_ok = off == 0 || value[off - 1] == '_';
+        int right_ok = off + ext_len == len ||
+                       value[off + ext_len] == '_' ||
+                       value[off + ext_len] == '\0';
+        if (left_ok && right_ok &&
+            memcmp(value + off, extension, ext_len) == 0)
+            return 1;
+    }
+    return 0;
+}
+
+int riscv64_fdt_has_isa_extension(const char *extension)
+{
+    const uint8_t *base = (const uint8_t *)(uintptr_t)__boot_dtb_ptr;
+    if (!base || !extension || read_be32(base) != FDT_MAGIC)
+        return 0;
+
+    uint32_t totalsize = read_be32(base + 4);
+    uint32_t off_struct = read_be32(base + 8);
+    uint32_t off_strings = read_be32(base + 12);
+    if (totalsize < 40 || off_struct >= totalsize || off_strings >= totalsize)
+        return 0;
+
+    const uint8_t *p = base + off_struct;
+    const uint8_t *endp = base + totalsize;
+    const uint8_t *stringsp = base + off_strings;
+    while (p + 4 <= endp) {
+        uint32_t token = read_be32(p);
+        p += 4;
+        if (token == FDT_END)
+            break;
+        if (token == FDT_BEGIN_NODE) {
+            const char *name_end = (const char *)p;
+            while ((const uint8_t *)name_end < endp && *name_end)
+                name_end++;
+            if ((const uint8_t *)name_end >= endp)
+                return 0;
+            p = (const uint8_t *)(((uintptr_t)(name_end + 1) + 3) & ~3UL);
+            continue;
+        }
+        if (token == FDT_END_NODE || token == FDT_NOP)
+            continue;
+        if (token != FDT_PROP || p + 8 > endp)
+            return 0;
+
+        uint32_t len = read_be32(p);
+        uint32_t nameoff = read_be32(p + 4);
+        p += 8;
+        uint32_t padded = (len + 3U) & ~3U;
+        if (p + padded > endp || off_strings + nameoff >= totalsize)
+            return 0;
+        const char *propname = (const char *)(stringsp + nameoff);
+        if (strcmp(propname, "riscv,isa") == 0 &&
+            fdt_isa_has_token(p, len, extension))
+            return 1;
+        p += padded;
+    }
+    return 0;
+}
+
 size_t arch_ram_range_count(void)
 {
     return 1;
