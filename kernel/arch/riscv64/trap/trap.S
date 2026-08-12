@@ -69,7 +69,16 @@ __trap_from_user:
     sd      t0, 32*8(sp)
     sd      t1, 33*8(sp)
 
-    /* FP loads/stores require FS != Off. */
+    /* FS=Off has no user FP state.  FS=Clean already has an identical trusted
+     * copy in this task's persistent trap frame, so only Initial/Dirty state
+     * needs to be written back on entry.  The return side remains conservative
+     * and reloads any non-Off state in case the syscall scheduled another
+     * task. */
+    li      t1, (3 << 13)
+    and     t1, t0, t1
+    beqz    t1, .Luser_fp_save_done
+    li      t2, (2 << 13)
+    beq     t1, t2, .Luser_fp_save_done
     li      t1, (3 << 13)
     csrs    sstatus, t1
     .set n, 0
@@ -79,6 +88,23 @@ __trap_from_user:
     .endr
     frcsr   t1
     sd      t1, 68*8(sp)
+    /* The register image is now synchronized with this task's persistent
+     * trap frame.  Return with FS=Clean so a following syscall can retain the
+     * live FPRs without saving and restoring all 32 registers again.  Any
+     * later user FP instruction makes FS Dirty in hardware automatically. */
+    ld      t0, 32*8(sp)
+    li      t1, (3 << 13)
+    not     t1, t1
+    and     t0, t0, t1
+    li      t1, (2 << 13)
+    or      t0, t0, t1
+    sd      t0, 32*8(sp)
+.Luser_fp_save_done:
+    /* The kernel is compiled for the integer lp64 ABI.  Keep FS disabled in C
+     * so an accidental kernel FP instruction traps instead of corrupting live
+     * user state retained by the fast-return path. */
+    li      t1, (3 << 13)
+    csrc    sstatus, t1
 
     /* Read user stack from sscratch and save it as x[2] */
     csrr    t2, sscratch
@@ -104,8 +130,77 @@ __trap_from_user:
     /* Call C trap handler */
     call    trap_handler
 
-    /* After handler returns, restore user context */
+    /* C arms reserved=1 only for an ordinary user ecall.  Any context switch,
+     * signal delivery, ptrace/context rewrite, or exec clears it. */
+    ld      t0, 69*8(sp)
+    li      t1, 1
+    beq     t0, t1, __return_to_user_fast
+
+    /* Complex paths retain the original full-context restore. */
     j       __return_to_user
+
+/*
+ * Fast return for a syscall which neither switched tasks nor rewrote the user
+ * frame.  The C ABI preserved s0-s11, while caller-saved GPRs are reloaded
+ * below.  Clean FP state remains live because FS stayed disabled in kernel C;
+ * Initial/Dirty state was saved on entry and is conservatively restored.
+ */
+	.align 2
+__return_to_user_fast:
+    la      t0, __trap_from_user
+    csrw    stvec, t0
+
+    ld      t0, 32*8(sp)
+    ld      t1, 33*8(sp)
+    ld      t2, 2*8(sp)
+
+    li      t3, (3 << 13)
+    and     t3, t0, t3
+    beqz    t3, .Lfast_fp_restore_done
+    li      t4, (2 << 13)
+    beq     t3, t4, .Lfast_fp_restore_done
+    li      t3, (3 << 13)
+    csrs    sstatus, t3
+    .set n, 0
+    .rept 32
+        LOAD_FP %n
+        .set n, n+1
+    .endr
+    ld      t3, 68*8(sp)
+    fscsr   t3
+.Lfast_fp_restore_done:
+
+    csrw    sstatus, t0
+    csrw    sepc, t1
+    csrw    sscratch, t2
+
+    /* C may clobber caller-saved integer registers. */
+    ld      x1, 1*8(sp)
+    ld      x3, 3*8(sp)
+    ld      x5, 5*8(sp)
+    ld      x6, 6*8(sp)
+    ld      x7, 7*8(sp)
+    ld      x10, 10*8(sp)
+    ld      x11, 11*8(sp)
+    ld      x12, 12*8(sp)
+    ld      x13, 13*8(sp)
+    ld      x14, 14*8(sp)
+    ld      x15, 15*8(sp)
+    ld      x16, 16*8(sp)
+    ld      x17, 17*8(sp)
+    ld      x28, 28*8(sp)
+    ld      x29, 29*8(sp)
+    ld      x30, 30*8(sp)
+    ld      x31, 31*8(sp)
+
+    /* Preserve the kernel task pointer for the next entry, then restore the
+     * user tp and return through the same stack/sscratch exchange. */
+    sd      x4, 35*8(sp)
+    ld      x4, 4*8(sp)
+    addi    sp, sp, 70*8
+    csrrw   sp, sscratch, sp
+    csrc    sstatus, 8
+    sret
 
 /*
  * __return_to_user
@@ -123,6 +218,9 @@ __return_to_user:
     csrr    t1, satp
     beq     t0, t1, .Lskip_satp
     csrw    satp, t0
+    la      t2, riscv64_asid_mask
+    ld      t2, 0(t2)
+    bnez    t2, .Lskip_satp
     sfence.vma
 .Lskip_satp:
 #endif

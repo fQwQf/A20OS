@@ -53,6 +53,56 @@
 # define arch_tlb_flush_local() arch_tlb_flush()
 #endif
 
+/* Architectures without tagged TLBs retain the conservative full-flush
+ * behavior.  Tagged architectures override both hooks in their cpu header. */
+#ifndef ARCH_HAS_LOCAL_ASID_TLB_FLUSH
+static inline void arch_tlb_flush_asid_local(uint64_t asid)
+{
+    (void)asid;
+    arch_tlb_flush_local();
+}
+#endif
+
+#ifndef ARCH_HAS_ADDR_SPACE_SWITCH
+static inline void arch_switch_addr_space_token(uint64_t token)
+{
+    if (arch_read_addr_space_token() == token)
+        return;
+    arch_write_addr_space_token(token);
+    arch_tlb_flush_local();
+}
+#endif
+
+/* Optional tagged-address-space lifecycle hooks. Architectures with ASIDs
+ * override these macros in their master arch header; all others keep the
+ * historical untagged address-space token and full-flush behavior. */
+#ifndef ARCH_MM_CONTEXT_ALLOC
+# define ARCH_MM_CONTEXT_ALLOC() 0U
+#endif
+#ifndef ARCH_MM_CONTEXT_RELEASE
+# define ARCH_MM_CONTEXT_RELEASE(context_id) do { (void)(context_id); } while (0)
+#endif
+#ifndef ARCH_MM_ADDRESS_SPACE_TOKEN
+# define ARCH_MM_ADDRESS_SPACE_TOKEN(pgdir, context_id) \
+    ((void)(context_id), arch_make_addr_space_token(pgdir))
+#endif
+
+static inline uint32_t arch_mm_context_alloc(void)
+{
+    return ARCH_MM_CONTEXT_ALLOC();
+}
+
+static inline void arch_mm_context_release(uint32_t context_id)
+{
+    ARCH_MM_CONTEXT_RELEASE(context_id);
+}
+
+static inline uint64_t arch_mm_address_space_token(void *pgdir,
+                                                    uint32_t context_id)
+{
+    return ARCH_MM_ADDRESS_SPACE_TOKEN(pgdir, context_id);
+}
+
 /*
  * Optional architecture capabilities.  Architecture headers opt in by
  * defining the corresponding ARCH_* macro; shared scheduler/process code
@@ -166,6 +216,13 @@ static inline int arch_syscall_resched_allowed(void)
     return 1;
 #endif
 }
+
+#ifndef ARCH_TRAP_FAST_RETURN_ARM
+# define ARCH_TRAP_FAST_RETURN_ARM(ctx) do { (void)(ctx); } while (0)
+#endif
+#ifndef ARCH_TRAP_FAST_RETURN_DISARM
+# define ARCH_TRAP_FAST_RETURN_DISARM(ctx) do { (void)(ctx); } while (0)
+#endif
 
 /* Arch name string (for uname, procfs, etc.) */
 #if defined(CONFIG_RISCV64)

@@ -64,6 +64,21 @@ static int proc_switch_complete_locked(unsigned cpu)
 
 task_t *proc_current(void)
 {
+#if defined(CONFIG_RISCV64)
+    /*
+     * RISC-V keeps the task which owns the currently executing kernel stack
+     * in tp.  Returning it directly avoids the former hot-path round trip
+     * through arch_current_cpu_id() (tp -> cpu_id -> g_cpu_current[]) on
+     * every syscall helper.  The per-CPU array remains the publication point
+     * for remote observers and for proc_current_on_cpu().
+     *
+     * Early boot is the only interval in which tp need not contain a task;
+     * retain the indexed fallback for that case.
+     */
+    task_t *current = (task_t *)arch_get_task_pointer();
+    if (current && arch_is_kernel_address(current))
+        return current;
+#endif
     return g_cpu_current[cpu_current_id()];
 }
 
