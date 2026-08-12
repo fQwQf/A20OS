@@ -659,7 +659,7 @@ LVGL_DIR := external/gui/lvgl
 # export); keep the find silent and let BUILD_DESKTOP=0 builds proceed.
 LVGL_SRCS := $(shell find $(LVGL_DIR)/src -type f -name '*.c' 2>/dev/null)
 LVGL_OBJS := $(patsubst $(LVGL_DIR)/%.c,$(OBJ_DIR)/lvgl/%.o,$(LVGL_SRCS))
-LVGL_CFLAGS := $(CFLAGS) -I$(LVGL_DIR) -Iexternal -Idesktop -DLV_CONF_INCLUDE_SIMPLE
+LVGL_CFLAGS := $(CFLAGS) -I$(LVGL_DIR) -Iexternal -Idesktop -DLV_CONF_INCLUDE_SIMPLE -DLV_LVGL_H_INCLUDE_SIMPLE
 ifeq ($(NOMMU),1)
 LVGL_CFLAGS += -DA20OS_NOMMU
 endif
