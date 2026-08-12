@@ -26,6 +26,127 @@ enum {
     MM_TLB_HOLD_PAGE = 2,
 };
 
+#ifdef CONFIG_RISCV64
+#define RISCV64_ASID_BITS 16U
+#define RISCV64_ASID_COUNT (1U << RISCV64_ASID_BITS)
+#define RISCV64_ASID_WORD_BITS 64U
+#define RISCV64_ASID_WORDS (RISCV64_ASID_COUNT / RISCV64_ASID_WORD_BITS)
+
+uint64_t riscv64_asid_mask;
+static mutex_t g_riscv64_asid_lock = MUTEX_INIT;
+static uint64_t g_riscv64_asid_live[RISCV64_ASID_WORDS];
+static uint64_t g_riscv64_asid_eligible[RISCV64_ASID_WORDS];
+static uint32_t g_riscv64_asid_cursor = 1;
+static uint8_t g_riscv64_asid_initialized;
+
+static void riscv64_asid_allocator_init_locked(void)
+{
+    if (g_riscv64_asid_initialized)
+        return;
+
+    uint64_t old_satp = arch_read_satp();
+    arch_write_satp(old_satp | (0xffffUL << 44));
+    uint64_t implemented = (arch_read_satp() >> 44) & 0xffffUL;
+    arch_write_satp(old_satp);
+    arch_tlb_flush_local();
+
+    riscv64_asid_mask = implemented;
+    if (implemented) {
+        for (uint32_t asid = 1; asid <= implemented; asid++)
+            g_riscv64_asid_eligible[asid / RISCV64_ASID_WORD_BITS] |=
+                1UL << (asid % RISCV64_ASID_WORD_BITS);
+    }
+    __atomic_store_n(&g_riscv64_asid_initialized, 1, __ATOMIC_RELEASE);
+    kinfo("[MM] RISC-V ASID mask=0x%lx bits=%u\n",
+          (unsigned long)implemented,
+          implemented ? (unsigned)__builtin_popcountll(implemented) : 0);
+}
+
+static uint32_t riscv64_asid_alloc(void)
+{
+    mutex_lock(&g_riscv64_asid_lock);
+    riscv64_asid_allocator_init_locked();
+    uint32_t max_asid = (uint32_t)riscv64_asid_mask;
+    if (!max_asid) {
+        mutex_unlock(&g_riscv64_asid_lock);
+        return 0;
+    }
+
+    for (unsigned pass = 0; pass < 2; pass++) {
+        for (uint32_t scanned = 0; scanned < max_asid; scanned++) {
+            uint32_t asid = g_riscv64_asid_cursor++;
+            if (g_riscv64_asid_cursor > max_asid)
+                g_riscv64_asid_cursor = 1;
+            uint64_t bit = 1UL << (asid % RISCV64_ASID_WORD_BITS);
+            uint32_t word = asid / RISCV64_ASID_WORD_BITS;
+            if (!(g_riscv64_asid_eligible[word] & bit))
+                continue;
+            g_riscv64_asid_eligible[word] &= ~bit;
+            g_riscv64_asid_live[word] |= bit;
+            mutex_unlock(&g_riscv64_asid_lock);
+            return asid;
+        }
+
+        /* Only ASIDs which were already free at this global-flush boundary
+         * become eligible. An ASID freed later remains quarantined until the
+         * next boundary, so stale translations can never alias a new mm. */
+        arch_tlb_flush();
+        for (uint32_t word = 0; word < RISCV64_ASID_WORDS; word++)
+            g_riscv64_asid_eligible[word] = ~g_riscv64_asid_live[word];
+        g_riscv64_asid_eligible[0] &= ~1UL;
+        if (max_asid != 0xffffU) {
+            for (uint32_t asid = max_asid + 1; asid < RISCV64_ASID_COUNT;
+                 asid++)
+                g_riscv64_asid_eligible[asid / RISCV64_ASID_WORD_BITS] &=
+                    ~(1UL << (asid % RISCV64_ASID_WORD_BITS));
+        }
+    }
+
+    mutex_unlock(&g_riscv64_asid_lock);
+    panic("RISC-V ASID space exhausted (%u concurrent address spaces)",
+          max_asid);
+}
+
+static void riscv64_asid_release(uint32_t asid)
+{
+    if (!asid)
+        return;
+    mutex_lock(&g_riscv64_asid_lock);
+    uint32_t word = asid / RISCV64_ASID_WORD_BITS;
+    uint64_t bit = 1UL << (asid % RISCV64_ASID_WORD_BITS);
+    if (!(g_riscv64_asid_live[word] & bit)) {
+        mutex_unlock(&g_riscv64_asid_lock);
+        panic("RISC-V ASID double release: %u", asid);
+    }
+    g_riscv64_asid_live[word] &= ~bit;
+    mutex_unlock(&g_riscv64_asid_lock);
+}
+#endif
+
+void mm_arch_context_init(mm_struct_t *mm)
+{
+    if (!mm)
+        return;
+#ifdef CONFIG_RISCV64
+    mm->arch_asid = riscv64_asid_alloc();
+#else
+    mm->arch_asid = 0;
+#endif
+    mm->tlb_generation = 1;
+    memset(mm->tlb_cpu_generation, 0, sizeof(mm->tlb_cpu_generation));
+}
+
+uint64_t mm_address_space_token(const mm_struct_t *mm)
+{
+    if (!mm || !mm->pgdir)
+        return 0;
+#ifdef CONFIG_RISCV64
+    return arch_make_satp_asid(mm->pgdir, mm->arch_asid);
+#else
+    return arch_make_addr_space_token(mm->pgdir);
+#endif
+}
+
 void mm_tlb_invalidate_begin(mm_struct_t *mm)
 {
     if (mm) {
@@ -63,6 +184,23 @@ void mm_context_enter(mm_struct_t *mm, unsigned cpu)
         /* The active bit must be globally visible before the architecture can
          * install this mm's page-table token. */
         arch_mb();
+        if (mm->arch_asid && cpu < CONFIG_NR_CPUS) {
+            for (;;) {
+                uint64_t generation = __atomic_load_n(
+                    &mm->tlb_generation, __ATOMIC_ACQUIRE);
+                uint64_t seen = __atomic_load_n(
+                    &mm->tlb_cpu_generation[cpu], __ATOMIC_ACQUIRE);
+                if (seen == generation)
+                    break;
+                arch_tlb_flush_asid_local(mm->arch_asid);
+                __atomic_store_n(&mm->tlb_cpu_generation[cpu], generation,
+                                 __ATOMIC_RELEASE);
+                arch_mb();
+                if (__atomic_load_n(&mm->tlb_generation,
+                                    __ATOMIC_ACQUIRE) == generation)
+                    break;
+            }
+        }
     }
 }
 
@@ -132,6 +270,14 @@ void mm_tlb_invalidate_finish(mm_struct_t *mm)
 
     int transaction_flushed = 0;
 
+    uint64_t generation = __atomic_load_n(&mm->tlb_generation,
+                                           __ATOMIC_RELAXED);
+    uint32_t flushed_cpus = 0;
+    if (mm->tlb_pending) {
+        generation = __atomic_add_fetch(&mm->tlb_generation, 1,
+                                        __ATOMIC_RELEASE);
+    }
+
     if (mm->tlb_pending && smp_remote_tlb_flush_supported()) {
         /* Publish PTE changes before sampling active CPUs. A CPU which enters
          * after this snapshot flushes locally while switching page tables. */
@@ -148,20 +294,30 @@ void mm_tlb_invalidate_finish(mm_struct_t *mm)
             else
                 arch_tlb_flush_local();
             transaction_flushed = 1;
+            flushed_cpus |= 1U << current;
             targets &= ~(1U << current);
         }
         if (targets) {
+            uint32_t remote_targets = targets;
             transaction_flushed = 1;
             a20_perf_add(A20_PERF_MM_TLB_REMOTE_CPUS,
                          (uint64_t)__builtin_popcount(targets));
             if (smp_remote_tlb_flush(targets, start, size) < 0)
                 panic("mm: targeted remote TLB flush failed");
+            flushed_cpus |= remote_targets;
         }
     } else if (mm->tlb_pending) {
         /* Keep the pre-Batch-B behavior on architectures or boards without
          * synchronous targeted shootdown support. */
         arch_tlb_flush();
         transaction_flushed = 1;
+        flushed_cpus = smp_online_cpu_mask();
+    }
+
+    for (unsigned cpu = 0; cpu < CONFIG_NR_CPUS && cpu < 32; cpu++) {
+        if (flushed_cpus & (1U << cpu))
+            __atomic_store_n(&mm->tlb_cpu_generation[cpu], generation,
+                             __ATOMIC_RELEASE);
     }
 
     /* Count one transaction if it requested any local, global, or remote
@@ -340,6 +496,7 @@ mm_struct_t *mm_create(void) {
     mutex_init(&mm->tlb_lock);
     mm->tlb_holds = NULL;
     mm->active_cpus = 0;
+    mm_arch_context_init(mm);
     refcount_set(&mm->refcount, 1);
     ktrace_mm("[MMDBG] mm=%p lock=%p\n", (void *)mm, (void *)&mm->lock);
     return mm;
@@ -364,7 +521,8 @@ void mm_destroy(mm_struct_t *mm) {
     mm_tlb_invalidate_begin(mm);
     /* The final mm cannot be entered again. Flush stale translations before
      * free_vma_pages() or deferred VMA release can return backing storage. */
-    arch_tlb_flush();
+    if (!mm->arch_asid)
+        arch_tlb_flush();
 
     // 释放所有 VMA 及其物理页面
     mm_vma_flush_deferred(mm);
@@ -390,6 +548,9 @@ void mm_destroy(mm_struct_t *mm) {
     /* Drain any huge-page demotion holds before page-table frames are freed. */
     mm_tlb_invalidate_finish(mm);
     if (mm->pgdir) pt_destroy_user(mm->pgdir);
+#ifdef CONFIG_RISCV64
+    riscv64_asid_release(mm->arch_asid);
+#endif
     kfree(mm);
 }
 
@@ -479,6 +640,11 @@ mm_struct_t *mm_fork(mm_struct_t *parent) {
     }
 
     *child = *parent;
+    /* The copied index points at the parent's VMA nodes.  Child metadata is
+     * cloned into distinct nodes below, so force a lazy rebuild on first use. */
+    child->vma_index_state = 0;
+    child->vma_index_count = 0;
+    memset(child->vma_index, 0, sizeof(child->vma_index));
     spin_init(&child->lock);
     spin_set_debug(&child->lock, "mm", child);
     mutex_init(&child->tlb_lock);
@@ -502,6 +668,7 @@ mm_struct_t *mm_fork(mm_struct_t *parent) {
     child->tlb_pending = 0;
     child->tlb_start = 0;
     child->tlb_end = 0;
+    mm_arch_context_init(child);
     refcount_set(&child->refcount, 1);
     child->rss = 0;
     child->total_vm = 0;

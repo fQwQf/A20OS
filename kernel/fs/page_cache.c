@@ -8,12 +8,23 @@
 #include "core/string.h"
 
 static spinlock_t g_page_cache_lock = SPINLOCK_INIT;
-static page_cache_page_t *g_pages;
+static mutex_t g_page_cache_grow_lock;
+static mutex_t g_page_cache_writeback_lock;
+#define PAGE_CACHE_CHUNKS \
+    (PAGE_CACHE_MAX_PAGES / PAGE_CACHE_CHUNK_PAGES)
+static page_cache_page_t *g_page_chunks[PAGE_CACHE_CHUNKS];
+static size_t g_allocated_pages;
+static size_t g_page_limit;
+static page_cache_page_t *g_free_pages;
 static page_cache_page_t g_lru_head;
 static page_cache_page_t g_lru_tail;
 static page_cache_page_t *g_hash[PAGE_CACHE_HASH_BUCKETS];
 static page_cache_page_t *g_dirty_pages;
 static int g_initialized;
+
+#define PAGE_CACHE_PRESSURE_WRITEBACK_PAGES 1024U
+
+static int page_cache_writeback_some(size_t max_pages);
 
 static inline void page_cache_account_scan(size_t entries)
 {
@@ -42,6 +53,41 @@ static void lru_insert_front(page_cache_page_t *page)
     page->prev = &g_lru_head;
     g_lru_head.next->prev = page;
     g_lru_head.next = page;
+}
+
+static void lru_insert_tail(page_cache_page_t *page)
+{
+    page->prev = g_lru_tail.prev;
+    page->next = &g_lru_tail;
+    g_lru_tail.prev->next = page;
+    g_lru_tail.prev = page;
+}
+
+static page_cache_page_t *page_cache_page_at(size_t index)
+{
+    if (index >= g_allocated_pages)
+        return NULL;
+    return &g_page_chunks[index / PAGE_CACHE_CHUNK_PAGES]
+                         [index % PAGE_CACHE_CHUNK_PAGES];
+}
+
+static void free_insert_locked(page_cache_page_t *page)
+{
+    page->hnext = g_free_pages;
+    g_free_pages = page;
+}
+
+static page_cache_page_t *free_take_locked(void)
+{
+    page_cache_page_t *page = g_free_pages;
+    if (!page)
+        return NULL;
+    g_free_pages = page->hnext;
+    page->hnext = NULL;
+    refcount_set(&page->ref_count, 1);
+    lru_remove(page);
+    lru_insert_front(page);
+    return page;
 }
 
 static void hash_insert(page_cache_page_t *page)
@@ -113,11 +159,36 @@ static void dirty_insert_locked(page_cache_page_t *page)
     if (page->dirty || !page->vnode)
         return;
     vnode_t *vn = page->vnode;
-    page->dirty_prev = NULL;
-    page->dirty_next = vn->cache_dirty_pages;
-    if (vn->cache_dirty_pages)
-        vn->cache_dirty_pages->dirty_prev = page;
-    vn->cache_dirty_pages = page;
+    /* Keep the per-vnode list in descending page-index order.  Sequential
+     * append inserts at the head in O(1), while writeback consumes the tail
+     * (lowest offset) so extent allocation sees monotonically increasing
+     * logical blocks. */
+    page_cache_page_t *head = vn->cache_dirty_pages;
+    page_cache_page_t *tail = vn->cache_dirty_tail;
+    if (!head) {
+        page->dirty_prev = NULL;
+        page->dirty_next = NULL;
+        vn->cache_dirty_pages = page;
+        vn->cache_dirty_tail = page;
+    } else if (page->index >= head->index) {
+        page->dirty_prev = NULL;
+        page->dirty_next = head;
+        head->dirty_prev = page;
+        vn->cache_dirty_pages = page;
+    } else if (page->index <= tail->index) {
+        page->dirty_prev = tail;
+        page->dirty_next = NULL;
+        tail->dirty_next = page;
+        vn->cache_dirty_tail = page;
+    } else {
+        page_cache_page_t *at = head;
+        while (at->dirty_next && at->dirty_next->index > page->index)
+            at = at->dirty_next;
+        page->dirty_prev = at;
+        page->dirty_next = at->dirty_next;
+        at->dirty_next->dirty_prev = page;
+        at->dirty_next = page;
+    }
 
     page->global_dirty_prev = NULL;
     page->global_dirty_next = g_dirty_pages;
@@ -138,6 +209,8 @@ static void dirty_remove_locked(page_cache_page_t *page)
         vn->cache_dirty_pages = page->dirty_next;
     if (page->dirty_next)
         page->dirty_next->dirty_prev = page->dirty_prev;
+    else if (vn)
+        vn->cache_dirty_tail = page->dirty_prev;
 
     if (page->global_dirty_prev)
         page->global_dirty_prev->global_dirty_next = page->global_dirty_next;
@@ -193,29 +266,85 @@ static page_cache_page_t *evict_locked(vnode_t **deferred_put)
     return NULL;
 }
 
+/* Allocate descriptors and frames in bounded chunks.  The old fixed cache
+ * reserved 8 MiB at boot and thrashed on every large compiler image.  Lazy
+ * chunks retain a large clean-file working set when memory is available while
+ * leaving untouched systems at the old initial footprint. */
+static int page_cache_grow(void)
+{
+    mutex_lock(&g_page_cache_grow_lock);
+    uint64_t cache_flags = spin_lock_irqsave(&g_page_cache_lock);
+    int growth_unneeded = g_allocated_pages >= g_page_limit ||
+                          (g_initialized && g_free_pages != NULL);
+    spin_unlock_irqrestore(&g_page_cache_lock, cache_flags);
+    if (growth_unneeded) {
+        mutex_unlock(&g_page_cache_grow_lock);
+        return 0;
+    }
+
+    page_cache_page_t *chunk =
+        kcalloc(PAGE_CACHE_CHUNK_PAGES, sizeof(page_cache_page_t));
+    if (!chunk) {
+        mutex_unlock(&g_page_cache_grow_lock);
+        return -ENOMEM;
+    }
+
+    size_t initialized = 0;
+    for (; initialized < PAGE_CACHE_CHUNK_PAGES; initialized++) {
+        chunk[initialized].pfn = pfa_alloc_page();
+        if (chunk[initialized].pfn == PFN_NONE)
+            break;
+        chunk[initialized].data = pfn_to_virt(chunk[initialized].pfn);
+        refcount_set(&chunk[initialized].ref_count, 0);
+        mutex_init(&chunk[initialized].fill_lock);
+    }
+    if (initialized != PAGE_CACHE_CHUNK_PAGES) {
+        for (size_t i = 0; i < initialized; i++)
+            frame_put(chunk[i].pfn);
+        kfree(chunk);
+        mutex_unlock(&g_page_cache_grow_lock);
+        return -ENOMEM;
+    }
+
+    uint64_t flags = spin_lock_irqsave(&g_page_cache_lock);
+    size_t chunk_index = g_allocated_pages / PAGE_CACHE_CHUNK_PAGES;
+    g_page_chunks[chunk_index] = chunk;
+    for (size_t i = 0; i < PAGE_CACHE_CHUNK_PAGES; i++) {
+        lru_insert_tail(&chunk[i]);
+        free_insert_locked(&chunk[i]);
+    }
+    g_allocated_pages += PAGE_CACHE_CHUNK_PAGES;
+    spin_unlock_irqrestore(&g_page_cache_lock, flags);
+    mutex_unlock(&g_page_cache_grow_lock);
+    return 0;
+}
+
 int page_cache_init(void)
 {
     if (g_initialized)
         return 0;
 
     spin_init(&g_page_cache_lock);
-    g_pages = kcalloc(PAGE_CACHE_MAX_PAGES, sizeof(page_cache_page_t));
-    if (!g_pages)
-        return -ENOMEM;
+    mutex_init(&g_page_cache_grow_lock);
+    mutex_init(&g_page_cache_writeback_lock);
+    /* Keep the cache bounded to one eighth of RAM on small normal boots while
+     * retaining MyGO's 1 GiB ceiling in the official 8 GiB evaluator. */
+    g_page_limit = pfa.total_frames / 8;
+    if (g_page_limit < PAGE_CACHE_INITIAL_PAGES)
+        g_page_limit = PAGE_CACHE_INITIAL_PAGES;
+    if (g_page_limit > PAGE_CACHE_MAX_PAGES)
+        g_page_limit = PAGE_CACHE_MAX_PAGES;
+    g_page_limit -= g_page_limit % PAGE_CACHE_CHUNK_PAGES;
 
     g_lru_head.prev = NULL;
     g_lru_head.next = &g_lru_tail;
     g_lru_tail.prev = &g_lru_head;
     g_lru_tail.next = NULL;
 
-    for (int i = 0; i < PAGE_CACHE_MAX_PAGES; i++) {
-        g_pages[i].pfn = pfa_alloc_page();
-        if (g_pages[i].pfn == PFN_NONE)
+    for (size_t i = 0; i < PAGE_CACHE_INITIAL_PAGES;
+         i += PAGE_CACHE_CHUNK_PAGES) {
+        if (page_cache_grow() < 0)
             return -ENOMEM;
-        g_pages[i].data = pfn_to_virt(g_pages[i].pfn);
-        refcount_set(&g_pages[i].ref_count, 0);
-        mutex_init(&g_pages[i].fill_lock);
-        lru_insert_front(&g_pages[i]);
     }
     g_initialized = 1;
     return 0;
@@ -226,6 +355,7 @@ page_cache_page_t *page_cache_get(vnode_t *vn, uint64_t index, int create)
     if (!g_initialized || !vn)
         return NULL;
 
+retry:
     uint64_t flags = spin_lock_irqsave(&g_page_cache_lock);
     page_cache_page_t *page = find_locked(vn, index);
     if (page) {
@@ -242,9 +372,35 @@ page_cache_page_t *page_cache_get(vnode_t *vn, uint64_t index, int create)
     }
 
     vnode_t *deferred_put = NULL;
-    page = evict_locked(&deferred_put);
+    page = free_take_locked();
+    if (!page && g_allocated_pages < g_page_limit) {
+        spin_unlock_irqrestore(&g_page_cache_lock, flags);
+        if (page_cache_grow() == 0)
+            goto retry;
+        flags = spin_lock_irqsave(&g_page_cache_lock);
+        page = find_locked(vn, index);
+        if (page) {
+            refcount_inc(&page->ref_count);
+            lru_remove(page);
+            lru_insert_front(page);
+            spin_unlock_irqrestore(&g_page_cache_lock, flags);
+            return page;
+        }
+    }
+    if (!page)
+        page = evict_locked(&deferred_put);
     if (!page) {
         spin_unlock_irqrestore(&g_page_cache_lock, flags);
+        /* Buffered writers are allowed to retain dirty data across close(),
+         * so a large build can eventually consume every cache descriptor.
+         * Make bounded forward progress under pressure: write a small batch,
+         * then retry so evict_locked() can reclaim one of the newly clean
+         * mappings.  fsync/sync remain the only explicit durability barriers;
+         * this path is purely cache-pressure writeback. */
+        int written = page_cache_writeback_some(
+            PAGE_CACHE_PRESSURE_WRITEBACK_PAGES);
+        if (written > 0)
+            goto retry;
         return NULL;
     }
     page->vnode = vn;
@@ -390,6 +546,126 @@ retry:
     return r;
 }
 
+/* Fill an ascending, contiguous private-file fault window.  Filesystems with
+ * readpages support receive a linear buffer and can merge physical disk I/O;
+ * the data is scattered into the pinned cache pages only after the read. */
+int page_cache_fill_vfile_pages(vfile_t *vf, page_cache_page_t **pages,
+                                size_t count)
+{
+    if (!vf || !vf->vnode || !pages || count == 0 ||
+        count > PAGE_CACHE_FAULT_AROUND_PAGES)
+        return -EINVAL;
+    for (size_t i = 0; i < count; i++) {
+        if (!pages[i] || pages[i]->vnode != vf->vnode ||
+            (i > 0 && pages[i]->index != pages[i - 1]->index + 1))
+            return -EINVAL;
+    }
+
+    if (!vf->vnode->ops || !vf->vnode->ops->readpages) {
+        for (size_t i = 0; i < count; i++) {
+            if (!page_cache_is_uptodate(pages[i])) {
+                int r = page_cache_fill_vfile_page(vf, pages[i]);
+                if (r < 0)
+                    return r;
+            }
+        }
+        return 0;
+    }
+
+    char *buffer = (char *)kmalloc(count * PAGE_SIZE);
+    if (!buffer) {
+        /* Allocation pressure must not turn readahead into a fault failure. */
+        return page_cache_fill_vfile_page(vf, pages[0]);
+    }
+
+    /* All callers build windows in increasing page-index order.  Taking the
+     * per-page locks in that order prevents overlap deadlocks. */
+    for (size_t i = 0; i < count; i++)
+        mutex_lock(&pages[i]->fill_lock);
+
+    int result = 0;
+    for (;;) {
+        int retry = 0;
+        size_t cursor = 0;
+        while (cursor < count) {
+            while (cursor < count && page_cache_is_uptodate(pages[cursor]))
+                cursor++;
+            if (cursor == count)
+                break;
+
+            size_t start = cursor;
+            while (cursor < count &&
+                   !page_cache_is_uptodate(pages[cursor]))
+                cursor++;
+            size_t run = cursor - start;
+            uint64_t generations[PAGE_CACHE_FAULT_AROUND_PAGES];
+            for (size_t i = 0; i < run; i++)
+                generations[i] = snapshot_invalidate_gen(pages[start + i]);
+
+            size_t bytes = run * PAGE_SIZE;
+            memset(buffer, 0, bytes);
+            int r = vf->vnode->ops->readpages(
+                vf->vnode, pages[start]->index, buffer, bytes);
+            if (r < 0) {
+                result = r;
+                goto out;
+            }
+            if ((size_t)r < bytes)
+                memset(buffer + r, 0, bytes - (size_t)r);
+
+            for (size_t i = 0; i < run; i++) {
+                memcpy(page_cache_data(pages[start + i]),
+                       buffer + i * PAGE_SIZE, PAGE_SIZE);
+                if (!publish_uptodate(pages[start + i], generations[i]))
+                    retry = 1;
+            }
+        }
+        if (!retry)
+            break;
+    }
+
+out:
+    for (size_t i = count; i > 0; i--)
+        mutex_unlock(&pages[i - 1]->fill_lock);
+    kfree(buffer);
+    return result;
+}
+
+/*
+ * Ordinary read(2) used to fill one 4 KiB page at a time even when the
+ * filesystem provided readpages().  Compiler inputs are predominantly
+ * sequential and the ext4 implementation can merge a contiguous 64 KiB
+ * window into one block request, so populate the forward window on the first
+ * cold page.  The caller already pins pages[0]; pins acquired here are dropped
+ * before returning and all publication remains protected by the existing
+ * per-page fill locks.
+ */
+static int page_cache_readahead_vfile(vfile_t *vf,
+                                      page_cache_page_t *first,
+                                      size_t file_size)
+{
+    page_cache_page_t *pages[PAGE_CACHE_FAULT_AROUND_PAGES];
+    uint64_t file_pages = (file_size + PAGE_SIZE - 1) / PAGE_SIZE;
+    size_t count = 1;
+
+    pages[0] = first;
+    while (count < PAGE_CACHE_FAULT_AROUND_PAGES &&
+           first->index + count < file_pages) {
+        pages[count] = page_cache_get(vf->vnode, first->index + count, 1);
+        if (!pages[count])
+            break;
+        count++;
+    }
+
+    a20_perf_count(A20_PERF_PAGE_CACHE_READAHEAD_CALLS);
+    a20_perf_add(A20_PERF_PAGE_CACHE_READAHEAD_PAGES, count);
+    int result = page_cache_fill_vfile_pages(vf, pages, count);
+
+    while (count > 1)
+        page_cache_put(pages[--count]);
+    return result;
+}
+
 pfn_t page_cache_pfn(page_cache_page_t *page)
 {
     return page ? page->pfn : PFN_NONE;
@@ -432,7 +708,11 @@ int page_cache_read_vfile(vfile_t *vf, char *buf, size_t count)
             break;
 
         if (!page_cache_is_uptodate(page)) {
-            int r = page_cache_fill_vfile_page(vf, page);
+            int r;
+            if (vf->vnode->ops && vf->vnode->ops->readpages)
+                r = page_cache_readahead_vfile(vf, page, file_size);
+            else
+                r = page_cache_fill_vfile_page(vf, page);
             if (r < 0) {
                 page_cache_put(page);
                 if (done == 0)
@@ -454,62 +734,207 @@ int page_cache_read_vfile(vfile_t *vf, char *buf, size_t count)
     return (int)done;
 }
 
-static page_cache_page_t *find_dirty_locked(vnode_t *vn)
+int page_cache_write_vfile(vfile_t *vf, const char *buf, size_t count)
 {
-    page_cache_page_t *page = vn ? vn->cache_dirty_pages : g_dirty_pages;
+    if (!vf || !vf->vnode || !buf)
+        return -EINVAL;
+    if (!vf->ops || !vf->ops->lseek ||
+        !vf->vnode->ops || !vf->vnode->ops->writepage)
+        return -ENOSYS;
+    if (vf->vnode->type != VFS_FT_REGULAR)
+        return -EINVAL;
+    if (count == 0)
+        return 0;
+
+    size_t start = vf->offset;
+    size_t old_size = vf->vnode->size;
+    size_t done = 0;
+    size_t updated = 0;
+    while (done < count) {
+        uint64_t pos = start + done;
+        uint64_t index = pos / PAGE_SIZE;
+        uint64_t page_start = index * PAGE_SIZE;
+        size_t page_off = (size_t)(pos - page_start);
+        size_t chunk = PAGE_SIZE - page_off;
+        if (chunk > count - done)
+            chunk = count - done;
+
+        page_cache_page_t *page = page_cache_get(vf->vnode, index, 1);
+        if (!page)
+            break;
+        if (!page_cache_is_uptodate(page) &&
+            page_start < old_size &&
+            !(page_off == 0 && chunk == PAGE_SIZE)) {
+            int r = page_cache_fill_vfile_page(vf, page);
+            if (r < 0) {
+                page_cache_put(page);
+                if (done == 0)
+                    return r;
+                break;
+            }
+        }
+
+        mutex_lock(&page->fill_lock);
+        if (!page_cache_is_uptodate(page)) {
+            memset(page_cache_data(page), 0, PAGE_SIZE);
+            page_cache_mark_uptodate(page);
+        }
+        memcpy((char *)page_cache_data(page) + page_off,
+               buf + done, chunk);
+        page_cache_mark_dirty(page);
+        mutex_unlock(&page->fill_lock);
+        page_cache_put(page);
+        done += chunk;
+        updated++;
+    }
+
+    if (done != 0) {
+        size_t end = start + done;
+        if (end > vf->vnode->size)
+            vf->vnode->size = end;
+        long seek_r = vf->ops->lseek(vf, (long)end, SEEK_SET);
+        if (seek_r < 0)
+            vf->offset = end;
+    }
+    a20_perf_count(A20_PERF_PCACHE_WRITE_UPDATES);
+    a20_perf_add(A20_PERF_PCACHE_WRITE_UPDATE_PAGES, updated);
+    return (int)done;
+}
+
+static size_t collect_dirty_batch_locked(vnode_t *vn,
+                                         page_cache_page_t **pages,
+                                         size_t max_pages)
+{
+    page_cache_page_t *page = NULL;
+    if (vn) {
+        page = vn->cache_dirty_tail;
+    } else if (g_dirty_pages && g_dirty_pages->vnode) {
+        /* The global list is ordered by dirtied time, not file offset.  Pick
+         * its vnode, then consume that vnode from the lowest dirty offset so
+         * ext4 sees monotonically increasing logical blocks. */
+        page = g_dirty_pages->vnode->cache_dirty_tail;
+    }
     page_cache_account_scan(page ? 1 : 0);
-    if (!page)
-        return NULL;
-    refcount_inc(&page->ref_count);
-    return page;
+    if (!page || max_pages == 0)
+        return 0;
+
+    vnode_t *batch_vn = page->vnode;
+    uint64_t next_index = page->index;
+    size_t count = 0;
+    while (page && count < max_pages && page->vnode == batch_vn &&
+           page->index == next_index) {
+        refcount_inc(&page->ref_count);
+        pages[count++] = page;
+        next_index++;
+        /* Per-vnode dirty pages are descending from head to tail, so the
+         * predecessor of the tail is the next higher file offset. */
+        page = page->dirty_prev;
+    }
+    return count;
 }
 
 static int page_cache_writeback_common(vnode_t *vn,
                                        page_cache_writepage_t writepage,
-                                       void *ctx)
+                                       void *ctx, size_t max_pages,
+                                       size_t *written_pages)
 {
     if (!g_initialized)
         return 0;
 
+    page_cache_page_t *pages[PAGE_CACHE_WRITEBACK_BATCH_PAGES];
+    uint64_t dirty_gens[PAGE_CACHE_WRITEBACK_BATCH_PAGES];
+    void *linear = NULL;
+    size_t written = 0;
+    int result = 0;
+    mutex_lock(&g_page_cache_writeback_lock);
     for (;;) {
+        size_t batch_limit = PAGE_CACHE_WRITEBACK_BATCH_PAGES;
+        if (max_pages != 0 && max_pages - written < batch_limit)
+            batch_limit = max_pages - written;
         uint64_t flags = spin_lock_irqsave(&g_page_cache_lock);
-        page_cache_page_t *page = find_dirty_locked(vn);
-        if (!page) {
+        size_t count = collect_dirty_batch_locked(vn, pages, batch_limit);
+        if (count == 0) {
             spin_unlock_irqrestore(&g_page_cache_lock, flags);
-            return 0;
+            break;
         }
 
-        vnode_t *page_vn = page->vnode;
-        uint64_t index = page->index;
-        void *data = page->data;
-        uint64_t dirty_gen = __atomic_load_n(&page->dirty_gen,
-                                             __ATOMIC_ACQUIRE);
+        vnode_t *page_vn = pages[0]->vnode;
+        uint64_t index = pages[0]->index;
         spin_unlock_irqrestore(&g_page_cache_lock, flags);
 
-        page_cache_writepage_t cb = writepage;
+        /* A caller-supplied legacy callback describes one page only.  Native
+         * vnode writepages may consume the whole bounded contiguous batch. */
+        int use_batch = writepage == NULL && page_vn && page_vn->ops &&
+                        page_vn->ops->writepages && count > 1;
+        if (!use_batch) {
+            for (size_t i = 1; i < count; i++)
+                page_cache_put(pages[i]);
+            count = 1;
+        }
+
+        for (size_t i = 0; i < count; i++)
+            mutex_lock(&pages[i]->fill_lock);
+        for (size_t i = 0; i < count; i++)
+            dirty_gens[i] = __atomic_load_n(&pages[i]->dirty_gen,
+                                             __ATOMIC_ACQUIRE);
+
         int r = 0;
-        if (cb) {
-            r = cb(page_vn, index, data, PAGE_SIZE, ctx);
+        if (use_batch) {
+            if (!linear)
+                linear = kmalloc(PAGE_CACHE_WRITEBACK_BATCH_PAGES * PAGE_SIZE);
+            if (!linear) {
+                r = -ENOMEM;
+            } else {
+                for (size_t i = 0; i < count; i++)
+                    memcpy((char *)linear + i * PAGE_SIZE,
+                           pages[i]->data, PAGE_SIZE);
+                r = page_vn->ops->writepages(page_vn, index, linear,
+                                              count * PAGE_SIZE);
+            }
+        } else if (writepage) {
+            r = writepage(page_vn, index, pages[0]->data, PAGE_SIZE, ctx);
         } else if (page_vn && page_vn->ops && page_vn->ops->writepage) {
             (void)ctx;
-            r = page_vn->ops->writepage(page_vn, index, data, PAGE_SIZE);
+            r = page_vn->ops->writepage(page_vn, index, pages[0]->data,
+                                         PAGE_SIZE);
         } else {
-            page_cache_put(page);
-            return -ENOSYS;
+            r = -ENOSYS;
         }
 
         flags = spin_lock_irqsave(&g_page_cache_lock);
-        /* Only clear dirty if nobody re-dirtied this page during I/O. */
-        if (r >= 0 && page->valid && page->vnode == page_vn &&
-            page->index == index &&
-            __atomic_load_n(&page->dirty_gen, __ATOMIC_ACQUIRE) == dirty_gen)
-            dirty_remove_locked(page);
+        /* Only clear dirty pages whose exact snapshot reached storage. */
+        if (r >= 0) {
+            for (size_t i = 0; i < count; i++) {
+                page_cache_page_t *page = pages[i];
+                if (page->valid && page->vnode == page_vn &&
+                    page->index == index + i &&
+                    __atomic_load_n(&page->dirty_gen, __ATOMIC_ACQUIRE) ==
+                        dirty_gens[i])
+                    dirty_remove_locked(page);
+            }
+        }
         spin_unlock_irqrestore(&g_page_cache_lock, flags);
 
-        page_cache_put(page);
-        if (r < 0)
-            return r;
+        for (size_t i = count; i > 0; i--)
+            mutex_unlock(&pages[i - 1]->fill_lock);
+        for (size_t i = 0; i < count; i++)
+            page_cache_put(pages[i]);
+        if (r < 0) {
+            result = r;
+            break;
+        }
+        written += count;
+        a20_perf_count(A20_PERF_PAGE_CACHE_WRITEBACK_BATCHES);
+        a20_perf_add(A20_PERF_PAGE_CACHE_WRITEBACK_PAGES, count);
+        if (written_pages)
+            *written_pages = written;
+        if (max_pages != 0 && written >= max_pages)
+            break;
     }
+    if (linear)
+        kfree(linear);
+    mutex_unlock(&g_page_cache_writeback_lock);
+    return result;
 }
 
 int page_cache_writeback_vnode(vnode_t *vn, page_cache_writepage_t writepage,
@@ -517,12 +942,75 @@ int page_cache_writeback_vnode(vnode_t *vn, page_cache_writepage_t writepage,
 {
     if (!vn)
         return -EINVAL;
-    return page_cache_writeback_common(vn, writepage, ctx);
+    return page_cache_writeback_common(vn, writepage, ctx, 0, NULL);
 }
 
 int page_cache_writeback_all(page_cache_writepage_t writepage, void *ctx)
 {
-    return page_cache_writeback_common(NULL, writepage, ctx);
+    return page_cache_writeback_common(NULL, writepage, ctx, 0, NULL);
+}
+
+static int page_cache_writeback_some(size_t max_pages)
+{
+    size_t written = 0;
+    int r = page_cache_writeback_common(NULL, NULL, NULL, max_pages,
+                                        &written);
+    if (r < 0)
+        return r;
+    a20_perf_count(A20_PERF_PAGE_CACHE_PRESSURE_BATCHES);
+    a20_perf_add(A20_PERF_PAGE_CACHE_PRESSURE_PAGES, written);
+    return (int)written;
+}
+
+/* Keep normal buffered writes visible in the clean page cache after the
+ * filesystem has committed them to its block cache.  This is deliberately a
+ * write-through population path rather than writeback: compiler/linker output
+ * is commonly reopened and executed immediately, and invalidating it forced a
+ * second complete disk read.  Partial overwrites populate only when the old
+ * bytes are already authoritative or the page lies wholly beyond old EOF. */
+void page_cache_update_after_write(vnode_t *vn, uint64_t start,
+                                   uint64_t old_size, const void *data,
+                                   size_t len)
+{
+    if (!g_initialized || !vn || !data || len == 0)
+        return;
+
+    const char *src = (const char *)data;
+    size_t done = 0;
+    size_t updated = 0;
+    while (done < len) {
+        uint64_t pos = start + done;
+        uint64_t index = pos / PAGE_SIZE;
+        uint64_t page_start = index * PAGE_SIZE;
+        size_t page_off = (size_t)(pos - page_start);
+        size_t chunk = PAGE_SIZE - page_off;
+        if (chunk > len - done)
+            chunk = len - done;
+        int full_page = page_off == 0 && chunk == PAGE_SIZE;
+        int beyond_old_eof = page_start >= old_size;
+
+        page_cache_page_t *page = page_cache_get(vn, index, 0);
+        if (!page && (full_page || beyond_old_eof))
+            page = page_cache_get(vn, index, 1);
+        if (page) {
+            mutex_lock(&page->fill_lock);
+            int authoritative = page_cache_is_uptodate(page);
+            if (full_page || beyond_old_eof || authoritative) {
+                if (!authoritative && !full_page)
+                    memset(page_cache_data(page), 0, PAGE_SIZE);
+                memcpy((char *)page_cache_data(page) + page_off,
+                       src + done, chunk);
+                page_cache_mark_uptodate(page);
+                page_cache_mark_clean(page);
+                updated++;
+            }
+            mutex_unlock(&page->fill_lock);
+            page_cache_put(page);
+        }
+        done += chunk;
+    }
+    a20_perf_count(A20_PERF_PCACHE_WRITE_UPDATES);
+    a20_perf_add(A20_PERF_PCACHE_WRITE_UPDATE_PAGES, updated);
 }
 
 void page_cache_invalidate(vnode_t *vn)
@@ -535,13 +1023,43 @@ void page_cache_invalidate(vnode_t *vn)
     for (page_cache_page_t *page = vn->cache_pages, *next; page; page = next) {
         visited++;
         next = page->mapping_next;
-        if (refcount_read(&page->ref_count) == 0) {
+        if (refcount_read(&page->ref_count) == 0 && !page->dirty) {
             detach_mapping_deferred_locked(page);
+            free_insert_locked(page);
             detached++;
         }
     }
     page_cache_account_scan(visited);
     spin_unlock_irqrestore(&g_page_cache_lock, flags);
+    for (size_t i = 0; i < detached; i++)
+        vnode_put(vn);
+}
+
+void page_cache_discard_unlinked(vnode_t *vn)
+{
+    if (!g_initialized || !vn)
+        return;
+    uint64_t flags = spin_lock_irqsave(&g_page_cache_lock);
+    size_t detached = 0;
+    size_t discarded_dirty = 0;
+    size_t visited = 0;
+    for (page_cache_page_t *page = vn->cache_pages, *next; page; page = next) {
+        visited++;
+        next = page->mapping_next;
+        if (refcount_read(&page->ref_count) != 0)
+            continue;
+        if (page->dirty)
+            discarded_dirty++;
+        detach_mapping_deferred_locked(page);
+        free_insert_locked(page);
+        detached++;
+    }
+    page_cache_account_scan(visited);
+    spin_unlock_irqrestore(&g_page_cache_lock, flags);
+    a20_perf_add(A20_PERF_PAGE_CACHE_DISCARDED_DIRTY, discarded_dirty);
+    /* The unlink path retains the transferred ext4 vnode-cache reference
+     * until after its metadata lock is released, so dropping mapping-owned
+     * references here cannot run ext4_release_vn() under that lock. */
     for (size_t i = 0; i < detached; i++)
         vnode_put(vn);
 }
@@ -563,6 +1081,7 @@ void page_cache_invalidate_range(vnode_t *vn, uint64_t start_byte,
             continue;
         if (refcount_read(&page->ref_count) == 0) {
             detach_mapping_deferred_locked(page);
+            free_insert_locked(page);
             detached++;
         }
     }
@@ -589,6 +1108,7 @@ void page_cache_invalidate_uptodate_range(vnode_t *vn, uint64_t start_byte,
             continue;
         if (refcount_read(&page->ref_count) == 0) {
             detach_mapping_deferred_locked(page);
+            free_insert_locked(page);
             detached++;
         } else {
             page->invalidate_gen++;
@@ -618,6 +1138,7 @@ void page_cache_truncate(vnode_t *vn, uint64_t new_size)
         int partial_eof_page = eof_offset && page->index == eof_index;
         if (refcount_read(&page->ref_count) == 0) {
             detach_mapping_deferred_locked(page);
+            free_insert_locked(page);
             detached++;
         } else if (partial_eof_page) {
             memset((char *)page->data + eof_offset, 0,
@@ -650,12 +1171,12 @@ size_t page_cache_drop_clean(void)
     size_t dropped = 0;
     size_t visited = 0;
     int cursor = 0;
-    while (cursor < PAGE_CACHE_MAX_PAGES) {
+    while ((size_t)cursor < g_allocated_pages) {
         vnode_t *held[64];
         int held_count = 0;
         uint64_t flags = spin_lock_irqsave(&g_page_cache_lock);
-        while (cursor < PAGE_CACHE_MAX_PAGES && held_count < 64) {
-            page_cache_page_t *page = &g_pages[cursor++];
+        while ((size_t)cursor < g_allocated_pages && held_count < 64) {
+            page_cache_page_t *page = page_cache_page_at((size_t)cursor++);
             visited++;
             if (!page->valid || page->dirty ||
                 refcount_read(&page->ref_count) != 0 ||
@@ -663,8 +1184,10 @@ size_t page_cache_drop_clean(void)
                 pfa.meta[page->pfn].refcount > 1)
                 continue;
             vnode_t *vn = detach_mapping_deferred_locked(page);
-            if (vn)
+            if (vn) {
+                free_insert_locked(page);
                 held[held_count++] = vn;
+            }
             dropped++;
         }
         spin_unlock_irqrestore(&g_page_cache_lock, flags);
@@ -684,14 +1207,15 @@ void page_cache_get_stats(page_cache_stats_t *stats)
     if (!stats)
         return;
     memset(stats, 0, sizeof(*stats));
-    stats->capacity = PAGE_CACHE_MAX_PAGES;
-    stats->bytes = (size_t)PAGE_CACHE_MAX_PAGES * PAGE_SIZE;
+    stats->capacity = g_page_limit;
+    stats->bytes = g_page_limit * PAGE_SIZE;
     if (!g_initialized)
         return;
 
     uint64_t flags = spin_lock_irqsave(&g_page_cache_lock);
-    for (int i = 0; i < PAGE_CACHE_MAX_PAGES; i++) {
-        page_cache_page_t *page = &g_pages[i];
+    stats->allocated = g_allocated_pages;
+    for (size_t i = 0; i < g_allocated_pages; i++) {
+        page_cache_page_t *page = page_cache_page_at(i);
         if (!page->valid)
             continue;
         stats->valid++;

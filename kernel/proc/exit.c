@@ -132,8 +132,7 @@ static void proc_release_exiting_mm(task_t *t)
     uint64_t kernel_as = kernel_pgdir ? arch_make_addr_space_token(kernel_pgdir) : 0;
 
     if (t == proc_current() && kernel_as) {
-        arch_write_addr_space_token(kernel_as);
-        arch_tlb_flush_local();
+        arch_switch_addr_space_token(kernel_as);
         mm_context_leave(t->mm, cpu_current_id());
     }
 

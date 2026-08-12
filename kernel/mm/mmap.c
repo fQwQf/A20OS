@@ -234,15 +234,16 @@ vaddr_t mm_mmap_file_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
     vma->nommu_alloc = nommu_raw;
 #endif
 
-    if ((vmf & (VM_FILE | VM_SHARED)) == (VM_FILE | VM_SHARED)) {
-        vfile_t *vf = vfs_get_file_ref(file_fd);
-        if (vf && vf->vnode) {
-            vnode_get(vf->vnode);
-            vma->file_vnode = vf->vnode;
-        }
-        if (vf)
-            vfs_put_file_ref(file_fd, vf);
+    /* Every file VMA retains its vnode.  MAP_SHARED needs it for dirty-page
+     * writeback; read-only MAP_PRIVATE additionally uses it to distinguish a
+     * direct page-cache leaf from an anonymous COW leaf during teardown. */
+    vfile_t *vf = vfs_get_file_ref(file_fd);
+    if (vf && vf->vnode) {
+        vnode_get(vf->vnode);
+        vma->file_vnode = vf->vnode;
     }
+    if (vf)
+        vfs_put_file_ref(file_fd, vf);
 
     if (mm->def_flags & VM_LOCKED) {
         task_t *cur = proc_current();
