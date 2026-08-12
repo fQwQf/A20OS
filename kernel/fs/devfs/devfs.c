@@ -59,6 +59,10 @@ static devfs_node_t g_nodes[] = {
     STATIC_NODE(DEVFS_LOOP, "loop2", 0x702),
     STATIC_NODE(DEVFS_FB, "fb0", 0x1d00),
     STATIC_NODE(DEVFS_INPUT, "event0", 0x1d01),
+    /* Linux-compatible evdev location: libseat/seatd only accepts input
+     * devices under /dev/input/event*, so expose the same multiplexer there
+     * (the root-level alias above stays for existing scripts). */
+    STATIC_NODE(DEVFS_INPUT_DIR, "input", 0),
     STATIC_NODE(DEVFS_LOOP, "loop3", 0x703),
     STATIC_NODE(DEVFS_LOOP, "loop4", 0x704),
     STATIC_NODE(DEVFS_LOOP, "loop5", 0x705),
@@ -108,6 +112,7 @@ static int devfs_dir_readdir(vfile_t *vf, void *dirp, size_t count) {
         { "dri", DT_DIR },
         { "snd", DT_DIR },
         { "shm", DT_DIR },
+        { "input", DT_DIR },
     };
     static const struct {
         const char *name;
@@ -132,6 +137,12 @@ static int devfs_dir_readdir(vfile_t *vf, void *dirp, size_t count) {
     static const struct {
         const char *name;
         uint8_t type;
+    } input_entries[] = {
+        { ".", DT_DIR }, { "..", DT_DIR }, { "event0", DT_CHR },
+    };
+    static const struct {
+        const char *name;
+        uint8_t type;
     } snd_entries[] = {
         { ".", DT_DIR }, { "..", DT_DIR },
         { "controlC0", DT_CHR }, { "pcmC0D0p", DT_CHR }, { "pcmC0D0c", DT_CHR },
@@ -152,6 +163,9 @@ static int devfs_dir_readdir(vfile_t *vf, void *dirp, size_t count) {
     } else if (kind == DEVFS_DRI_DIR) {
         entries_void = dri_entries;
         nentries = sizeof(dri_entries) / sizeof(dri_entries[0]);
+    } else if (kind == DEVFS_INPUT_DIR) {
+        entries_void = input_entries;
+        nentries = sizeof(input_entries) / sizeof(input_entries[0]);
     } else if (kind == DEVFS_SND_DIR) {
         entries_void = snd_entries;
         nentries = sizeof(snd_entries) / sizeof(snd_entries[0]);
@@ -554,6 +568,13 @@ static int devfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
                 return 0;
             }
         }
+    } else if (node->kind == DEVFS_INPUT_DIR) {
+        for (size_t i = 1; i < sizeof(g_nodes) / sizeof(g_nodes[0]); i++) {
+            if (g_nodes[i].kind == DEVFS_INPUT && strcmp(name, g_nodes[i].name) == 0) {
+                *out = node_to_vnode(i);
+                return 0;
+            }
+        }
     } else if (node->kind == DEVFS_SND_DIR) {
         for (size_t i = 1; i < sizeof(g_nodes) / sizeof(g_nodes[0]); i++) {
             if ((g_nodes[i].kind == DEVFS_ALSA_CTL ||
@@ -583,7 +604,8 @@ static int devfs_stat(vnode_t *vn, kstat_t *st) {
     memset(st, 0, sizeof(*st));
     if (node->kind == DEVFS_ROOT || node->kind == DEVFS_MISC ||
         node->kind == DEVFS_SHM_DIR || node->kind == DEVFS_PTS_DIR ||
-        node->kind == DEVFS_DRI_DIR || node->kind == DEVFS_SND_DIR) {
+        node->kind == DEVFS_DRI_DIR || node->kind == DEVFS_SND_DIR ||
+        node->kind == DEVFS_INPUT_DIR) {
         st->st_mode = S_IFDIR | 0555;
         st->st_uid = 0;
         st->st_gid = 0;
@@ -686,6 +708,9 @@ static vfile_t *devfs_open_vnode(vnode_t *vn, int flags) {
         vf->ops = &g_devfs_dir_ops;
         break;
     case DEVFS_DRI_DIR:
+        vf->ops = &g_devfs_dir_ops;
+        break;
+    case DEVFS_INPUT_DIR:
         vf->ops = &g_devfs_dir_ops;
         break;
     case DEVFS_SND_DIR:
@@ -825,7 +850,8 @@ vnode_t *devfs_mount(void) {
         g_vnodes[i].ino = i + 1;
     g_vnodes[i].type = (g_nodes[i].kind == DEVFS_ROOT || g_nodes[i].kind == DEVFS_MISC
                          || g_nodes[i].kind == DEVFS_SHM_DIR || g_nodes[i].kind == DEVFS_PTS_DIR
-                         || g_nodes[i].kind == DEVFS_DRI_DIR || g_nodes[i].kind == DEVFS_SND_DIR)
+                         || g_nodes[i].kind == DEVFS_DRI_DIR || g_nodes[i].kind == DEVFS_SND_DIR
+                         || g_nodes[i].kind == DEVFS_INPUT_DIR)
                      ? VFS_FT_DIR : VFS_FT_REGULAR;
         g_vnodes[i].mode = (g_vnodes[i].type == VFS_FT_DIR) ? (S_IFDIR | 0555) : (S_IFCHR | 0666);
         vnode_ref_init(&g_vnodes[i], 1);

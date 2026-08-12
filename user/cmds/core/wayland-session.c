@@ -24,7 +24,7 @@ static void configure_environment(void)
     setenv("XCURSOR_PATH", "/bin/share/icons", 1);
     setenv("XCURSOR_THEME", "Breeze", 1);
     unsetenv("WESTON_LIBINPUT_UDEV");
-    setenv("WESTON_LIBINPUT_DEVICE", "/dev/event0", 1);
+    setenv("WESTON_LIBINPUT_DEVICE", "/dev/input/event0", 1);
     setenv("WESTON_MODULE_MAP",
            "fbdev-backend.so=/bin/lib/libweston-9/fbdev-backend.so;"
            "kiosk-shell.so=/bin/lib/weston/kiosk-shell.so;"
@@ -40,16 +40,15 @@ static void configure_environment(void)
     setenv("XDG_CURRENT_DESKTOP", "XFCE", 1);
     setenv("XFSM_VERBOSE", "1", 1);
     setenv("WLR_BACKENDS", "drm,libinput", 1);
-    setenv("A20OS_NO_UDEV", "1", 1);
-    setenv("A20OS_LIBINPUT_DEVICE", "/dev/event0", 1);
     setenv("WLR_RENDERER", "pixman", 1);
     setenv("WLR_DRM_NO_ATOMIC", "1", 1);
     setenv("WLR_NO_HARDWARE_CURSORS", "1", 1);
     setenv("WLR_DRM_DEVICES", "/dev/dri/card0", 1);
     setenv("GBM_BACKENDS_PATH", "/bin/lib/gbm", 1);
     setenv("SEATD_VTBOUND", "0", 1);
-    setenv("A20OS_NO_SYSTEMD", "1", 1);
-    setenv("A20OS_NO_HEADLESS", "1", 1);
+    /* A20OS has no systemd user manager; tell stock labwc to skip the
+     * dbus-update-activation-environment / systemctl session helpers. */
+    setenv("LABWC_UPDATE_ACTIVATION_ENV", "0", 1);
     setenv("DBUS_SESSION_BUS_ADDRESS", "unix:path=/tmp/dbus-session", 1);
 }
 
