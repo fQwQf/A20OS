@@ -430,10 +430,22 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval) {
 }
 
 #ifndef CONFIG_NOMMU
+static uint64_t fault_file_size(vnode_t *vn)
+{
+    if (vn && vn->ops && vn->ops->stat) {
+        kstat_t st;
+        if (vn->ops->stat(vn, &st) == 0) {
+            vn->size = st.st_size;
+            return st.st_size;
+        }
+    }
+    return vn ? vn->size : 0;
+}
+
 static int handle_file_fault(task_t *t, uint64_t page_va, int file_fd,
                              uint64_t file_pos, int shared, vfile_t *vf)
 {
-    if (file_pos >= vf->vnode->size) {
+    if (file_pos >= fault_file_size(vf->vnode)) {
         signal_send(t->pid, SIGBUS);
         vfs_put_file_ref(file_fd, vf);
         return -1;
@@ -457,7 +469,7 @@ static int handle_file_fault(task_t *t, uint64_t page_va, int file_fd,
         vfs_put_file_ref(file_fd, vf);
         return -1;
     }
-    if (file_pos >= vf->vnode->size) {
+    if (file_pos >= fault_file_size(vf->vnode)) {
         signal_send(t->pid, SIGBUS);
         page_cache_put(pcp);
         vfs_put_file_ref(file_fd, vf);

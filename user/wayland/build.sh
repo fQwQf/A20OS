@@ -672,7 +672,9 @@ if want libxfce4util && ! stamp libxfce4util; then
     mark libxfce4util
 fi
 
-if want libxfce4windowing && ! stamp libxfce4windowing; then
+if want libxfce4windowing && { ! stamp libxfce4windowing || \
+    [ "$USER_DIR/external/gui/libxfce4windowing/libxfce4windowing/xfw-workspace-group-wayland.c" -nt "$B/stamp/libxfce4windowing" ] || \
+    [ "$USER_DIR/external/gui/libxfce4windowing/libxfce4windowing/xfw-screen-wayland.c" -nt "$B/stamp/libxfce4windowing" ]; }; then
     echo "=== libxfce4windowing ==="
     meson_pkg libxfce4windowing "$USER_DIR/external/gui/libxfce4windowing" \
         -Dgtk-doc=false -Dintrospection=false -Dtests=false \
@@ -732,7 +734,8 @@ if want xfce4-panel && ! stamp xfce4-panel; then
     mark xfce4-panel
 fi
 
-if want xfdesktop && ! stamp xfdesktop; then
+if want xfdesktop && { ! stamp xfdesktop || \
+    [ "$B/stamp/libxfce4windowing" -nt "$B/stamp/xfdesktop" ]; }; then
     echo "=== xfdesktop ==="
     # Wayland build: skip the XSMP session-management option group (an X11
     # feature; libxfce4ui's xfce-sm-client symbol is not exported here).

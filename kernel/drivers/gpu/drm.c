@@ -5,6 +5,7 @@
 #include "core/string.h"
 #include "core/stdio.h"
 #include "core/klog.h"
+#include "core/poll.h"
 #include "drivers/core/driver_class.h"
 #include "drivers/gpu/gpu_core.h"
 #include "fs/anonfd.h"
@@ -29,6 +30,7 @@
  */
 
 #define DRM_MAX_BUFFERS 16
+#define DRM_EVENT_FLIP_COMPLETE 0x02
 
 typedef struct drm_buffer {
     int used;
@@ -45,6 +47,8 @@ typedef struct drm_context {
     uint32_t next_handle;
     uint32_t magic;
     int is_master;
+    uint8_t event[32];
+    size_t event_len;
 } drm_context_t;
 
 /* DRM dumb buffers are global to the device, so a handle created by one open
@@ -73,6 +77,70 @@ static gpu_dev_ops_t *drm_gpu_ops(void)
     if (!dev || !dev->drv || !dev->drv->class_ops)
         return NULL;
     return (gpu_dev_ops_t *)dev->drv->class_ops;
+}
+
+/*
+ * A20OS exposes a minimal KMS interface while virtio-gpu owns a separate
+ * scanout allocation.  Copy a wlroots dumb buffer into that allocation before
+ * asking the GPU to transfer it to the host.  Without this bridge, SETCRTC
+ * and PAGE_FLIP acknowledge the commit but the host keeps displaying the
+ * untouched black primary resource.
+ */
+static int drm_present_buffer(drm_buffer_t *b)
+{
+    static unsigned int present_count;
+    if (!b || !b->vmo)
+        return -EINVAL;
+
+    struct device *dev = drm_gpu_device();
+    gpu_dev_ops_t *ops = drm_gpu_ops();
+    if (!dev || !ops || !ops->get_info || !ops->get_fb || !ops->flush)
+        return -ENODEV;
+
+    uint32_t width = 0, height = 0, bpp = 0;
+    uintptr_t fb_phys = 0;
+    size_t fb_size = 0;
+    if (ops->get_info(dev, &width, &height, &bpp) < 0 ||
+        ops->get_fb(dev, &fb_phys, &fb_size) < 0 ||
+        bpp != 32 || b->width != width || b->height != height ||
+        b->pitch < width * 4 || fb_size < (size_t)height * width * 4)
+        return -EINVAL;
+
+    uint8_t *dst = (uint8_t *)pfn_to_virt(phys_to_pfn(fb_phys));
+    if (!dst)
+        return -EFAULT;
+
+    for (uint32_t y = 0; y < height; y++) {
+        size_t src_offset = (size_t)y * b->pitch;
+        size_t dst_offset = (size_t)y * width * 4;
+        size_t remaining = (size_t)width * 4;
+        while (remaining > 0) {
+            uint32_t page_index = (uint32_t)(src_offset / PAGE_SIZE);
+            size_t page_offset = src_offset & (PAGE_SIZE - 1);
+            size_t count = PAGE_SIZE - page_offset;
+            if (count > remaining)
+                count = remaining;
+
+            pfn_t pfn = vmo_peek_page(b->vmo, page_index);
+            if (pfn == PFN_NONE)
+                memset(dst + dst_offset, 0, count);
+            else
+                memcpy(dst + dst_offset,
+                       (uint8_t *)pfn_to_virt(pfn) + page_offset, count);
+            src_offset += count;
+            dst_offset += count;
+            remaining -= count;
+        }
+    }
+
+    int ret = ops->flush(dev, 0, 0, width, height);
+    if (present_count < 4) {
+        kinfo("[DRM] present handle=%u pages=%lu flush=%d\n",
+              b->handle, (unsigned long)((b->size + PAGE_SIZE - 1) / PAGE_SIZE),
+              ret);
+        present_count++;
+    }
+    return ret;
 }
 
 /* ---- DRM wire structs (Linux ABI) ---- */
@@ -235,6 +303,16 @@ struct drm_mode_crtc_page_flip {
     uint64_t user_data;
 };
 
+struct drm_event_vblank {
+    uint32_t type;
+    uint32_t length;
+    uint64_t user_data;
+    uint32_t tv_sec;
+    uint32_t tv_usec;
+    uint32_t sequence;
+    uint32_t crtc_id;
+};
+
 struct drm_mode_create_dumb {
     uint32_t height;
     uint32_t width;
@@ -280,6 +358,28 @@ struct drm_mode_crtc_lut {
 
 struct drm_mode_dpms {
     uint32_t dpms;
+};
+
+struct drm_mode_cursor {
+    uint32_t flags;
+    uint32_t crtc_id;
+    int32_t x;
+    int32_t y;
+    uint32_t width;
+    uint32_t height;
+    uint32_t handle;
+};
+
+struct drm_mode_cursor2 {
+    uint32_t flags;
+    uint32_t crtc_id;
+    int32_t x;
+    int32_t y;
+    uint32_t width;
+    uint32_t height;
+    uint32_t handle;
+    int32_t hot_x;
+    int32_t hot_y;
 };
 
 struct drm_mode_atomic {
@@ -524,14 +624,10 @@ static int drm_mode_setcrtc(drm_context_t *ctx, void *arg)
         drm_buffer_t *b = drm_find_buffer(ctx, c.fb_id);
         if (!b)
             return -ENOENT;
-        /* Flip the scanout to this buffer: the GPU scanout is the primary
-         * framebuffer, so a real driver would reprogram CRTC.  We accept the
-         * request and flush the target buffer. */
-        gpu_dev_ops_t *ops = drm_gpu_ops();
-        if (ops && ops->flush) {
-            struct device *dev = drm_gpu_device();
-            (void)ops->flush(dev, 0, 0, b->width, b->height);
-        }
+        /* The minimal KMS implementation presents by copying into the GPU's
+         * primary scanout resource before issuing TRANSFER_TO_HOST_2D. */
+        if (drm_present_buffer(b) < 0)
+            return -EIO;
     }
     return 0;
 }
@@ -679,19 +775,31 @@ static int drm_mode_rmfb(drm_context_t *ctx, void *arg)
 
 static int drm_mode_pageflip(drm_context_t *ctx, void *arg)
 {
+    static unsigned int pageflip_count;
     struct drm_mode_crtc_page_flip pf;
     if (copy_from_user(&pf, arg, sizeof(pf)) < 0)
         return -EFAULT;
     drm_buffer_t *b = drm_find_buffer(ctx, pf.fb_id);
     if (!b)
         return -ENOENT;
-    gpu_dev_ops_t *ops = drm_gpu_ops();
-    if (ops && ops->flush) {
-        struct device *dev = drm_gpu_device();
-        (void)ops->flush(dev, 0, 0, b->width, b->height);
+    if (drm_present_buffer(b) < 0)
+        return -EIO;
+    if (pf.flags & 0x1) { /* DRM_MODE_PAGE_FLIP_EVENT */
+        struct drm_event_vblank event;
+        memset(&event, 0, sizeof(event));
+        event.type = DRM_EVENT_FLIP_COMPLETE;
+        event.length = sizeof(event);
+        event.user_data = pf.user_data;
+        event.sequence = 0;
+        event.crtc_id = pf.crtc_id;
+        memcpy(ctx->event, &event, sizeof(event));
+        ctx->event_len = sizeof(event);
     }
-    if (pf.flags & 0x1) /* DRM_MODE_PAGE_FLIP_EVENT */
-        return 0;
+    if (pageflip_count < 4) {
+        kinfo("[DRM] pageflip flags=%x event_len=%lu\n",
+              pf.flags, (unsigned long)ctx->event_len);
+        pageflip_count++;
+    }
     return 0;
 }
 
@@ -702,6 +810,20 @@ static int drm_mode_dpms(drm_context_t *ctx, void *arg)
     if (copy_from_user(&d, arg, sizeof(d)) < 0)
         return -EFAULT;
     (void)d.dpms;
+    return 0;
+}
+
+static int drm_mode_cursor(drm_context_t *ctx, void *arg)
+{
+    (void)ctx;
+    /* A20OS virtio-gpu has no hardware cursor plane; accept the request so
+     * wlroots' legacy page-flip path can proceed. */
+    return 0;
+}
+
+static int drm_mode_cursor2(drm_context_t *ctx, void *arg)
+{
+    (void)ctx;
     return 0;
 }
 
@@ -906,10 +1028,18 @@ static int drm_prime_fd_to_handle(drm_context_t *ctx, void *arg)
 
 static int drm_read(vfile_t *vf, char *buf, size_t count)
 {
-    (void)vf;
-    (void)buf;
-    (void)count;
-    return 0;
+    drm_context_t *ctx = vf ? vf->priv : NULL;
+    if (!ctx || !buf)
+        return -EBADF;
+    if (ctx->event_len == 0)
+        return (vf->flags & O_NONBLOCK) ? -EAGAIN : -EAGAIN;
+    if (count < ctx->event_len)
+        return -EINVAL;
+    memcpy(buf, ctx->event, ctx->event_len);
+    int ret = (int)ctx->event_len;
+    ctx->event_len = 0;
+    kinfo("[DRM] read event bytes=%d\n", ret);
+    return ret;
 }
 
 static int drm_write(vfile_t *vf, const char *buf, size_t count)
@@ -925,6 +1055,22 @@ static long drm_lseek(vfile_t *vf, long offset, int whence)
     (void)offset;
     (void)whence;
     return 0;
+}
+
+static int drm_poll(vfile_t *vf, short events)
+{
+    drm_context_t *ctx = vf ? vf->priv : NULL;
+    if (!ctx)
+        return POLLNVAL;
+    short revents = 0;
+    /* KMS commits are acknowledged synchronously by virtio-gpu.  A page-flip
+     * ioctl queues its completion before wlroots returns to poll(), so report
+     * the fd readable only while that completion is pending.  Advertising
+     * unconditional readability makes libdrm call drmHandleEvent() on an
+     * empty fd forever, starving Wayland clients and input dispatch. */
+    if ((events & POLLIN) && ctx->event_len != 0)
+        revents |= POLLIN;
+    return revents;
 }
 
 static int drm_close(vfile_t *vf)
@@ -991,6 +1137,10 @@ static int drm_ioctl(vfile_t *vf, unsigned long req, void *arg)
         return drm_mode_pageflip(ctx, arg);
     case DRM_IOCTL_MODE_DPMS:
         return drm_mode_dpms(ctx, arg);
+    case DRM_IOCTL_MODE_CURSOR:
+        return drm_mode_cursor(ctx, arg);
+    case DRM_IOCTL_MODE_CURSOR2:
+        return drm_mode_cursor2(ctx, arg);
     case DRM_IOCTL_MODE_GETGAMMA:
         return drm_mode_getgamma(ctx, arg);
     case DRM_IOCTL_MODE_GETPROPERTY:
@@ -1027,6 +1177,7 @@ static vfile_ops_t g_drm_ops = {
     .write = drm_write,
     .lseek = drm_lseek,
     .ioctl = drm_ioctl,
+    .poll = drm_poll,
     .close = drm_close,
 };
 

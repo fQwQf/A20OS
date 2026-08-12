@@ -176,18 +176,14 @@ int net_unix_socket_connect(net_socket_t *s, const void *addr, size_t addrlen)
         child->domain = AF_UNIX;
         child->type = SOCK_STREAM;
         child->protocol = s->protocol;
+        /* Linux inherits SO_PASSCRED on accepted AF_UNIX sockets.  D-Bus
+         * enables it on the listener and expects the initial NUL byte on the
+         * accepted connection to carry SCM_CREDENTIALS. */
+        child->passcred = listener->passcred;
         child->bound = 1;
         child->connected = 1;
         child->peer = s;
         s->peer = child;
-        /* Channel bridge (internal IPC): one channel pair per connection,
-         * plain data flows through it; SCM_RIGHTS messages fall back to
-         * the legacy queue exactly as for socketpair. */
-        a20_channel_ep_t *cep = a20_channel_create(0, NULL);
-        if (cep) {
-            s->ch_ep = cep;
-            child->ch_ep = cep->peer;
-        }
         memcpy(child->local, listener->local, listener->local_len);
         child->local_len = listener->local_len;
         memcpy(child->peer_addr, s->local, s->local_len);
@@ -370,6 +366,41 @@ int unix_ch_recv(net_socket_t *s, void *buf, size_t len)
         s->ch_len = cap;
     }
     return (int)total;
+}
+
+int unix_ch_peek(net_socket_t *s, void *buf, size_t len)
+{
+    if (!s || !s->ch_ep || (!buf && len != 0))
+        return -EINVAL;
+    if (len == 0)
+        return 0;
+
+    /* Keep one channel message staged in the socket's stream buffer.  recv
+     * will consume it later; MSG_PEEK must not dequeue it. */
+    if (s->ch_len == 0) {
+        if (!s->ch_buf) {
+            s->ch_buf = kmalloc(A20_CH_MAX_DATA);
+            if (!s->ch_buf)
+                return -ENOMEM;
+        }
+        uint32_t cap = A20_CH_MAX_DATA;
+        int64_t r = a20_channel_recv(s->ch_ep, s->ch_buf, &cap,
+                                     NULL, NULL, NULL, A20_MSG_NONBLOCK);
+        if (r < 0) {
+            if (r == -A20_ERR_WOULD_BLOCK)
+                return -EAGAIN;
+            if (r == -A20_ERR_CANCELED)
+                return 0;
+            if (r == -A20_ERR_INTERRUPTED)
+                return -EINTR;
+            return -EIO;
+        }
+        s->ch_len = cap;
+    }
+
+    size_t n = s->ch_len < len ? s->ch_len : len;
+    memcpy(buf, s->ch_buf, n);
+    return (int)n;
 }
 
 int net_unix_socket_sendto(net_socket_t *s, const void *buf, size_t len,

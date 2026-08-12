@@ -17,6 +17,8 @@ static int net_vfile_read(vfile_t *vf, char *buf, size_t count) {
         return -ENOTSOCK;
     if (s->domain == AF_ALG)
         return net_alg_socket_recv(s, buf, count);
+    if (s->ch_ep)
+        return net_recvfrom_socket_meta(s, buf, count, 0, NULL, NULL, NULL);
     uint64_t start = timer_get_ticks();
     for (;;) {
         a20_lwip_poll();
@@ -117,6 +119,8 @@ static int net_vfile_write(vfile_t *vf, const char *buf, size_t count) {
     if ((s->domain == AF_INET || s->domain == AF_INET6) &&
         (s->udp || s->raw || s->tcp))
         return net_inet_sendto(s, buf, count, 0, NULL, 0);
+    if (s->domain == AF_UNIX)
+        return net_unix_socket_sendto(s, buf, count, NULL, 0);
 
     uint64_t irq = spin_lock_irqsave(&g_net_lock);
     if (s->closed || s->shut_wr) {

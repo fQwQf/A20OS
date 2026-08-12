@@ -118,6 +118,7 @@ fi
 
 if [ -f "$SYSROOT/bin/xfce4-session" ]; then
     echo "[image] XFCE desktop"
+    printf 'a20os-xfce-machine-id-0000000000000001\n' | mcopy -o -i "$IMG" - ::/etc/machine-id
     # GTK/glib shared libs
     for lib in libglib-2.0.so.0 libgobject-2.0.so.0 libgio-2.0.so.0 \
                libgthread-2.0.so.0 libgmodule-2.0.so.0 \
@@ -126,8 +127,9 @@ if [ -f "$SYSROOT/bin/xfce4-session" ]; then
                libpangoft2-1.0.so.0 libfribidi.so.0 libharfbuzz.so.0 \
                libgtk-3.so.0 libgdk-3.so.0 libgailutil-3.so.0 \
                libepoxy.so.0 libwayland-egl.so.1 \
-               libxfce4util.so.7 libxfce4windowing-0.so.0 libxfconf-0.so.3 \
-               libxfce4ui-2.so.0 libexo-2.so.0 libgarcon-1.so.0 \
+                libxfce4util.so.7 libxfce4windowing-0.so.0 libxfconf-0.so.3 \
+                libxfce4windowingui-0.so.0 libxfce4panel-2.0.so.4 \
+                libxfce4ui-2.so.0 libexo-2.so.0 libgarcon-1.so.0 \
                libgarcon-gtk3-1.so.0 libgtk-layer-shell.so.0 \
                libjpeg.so.8.2.2 libdbus-1.so.3; do
         copy_file "$SYSROOT/lib/$lib" "/lib/$lib" 2>/dev/null || true
@@ -135,10 +137,74 @@ if [ -f "$SYSROOT/bin/xfce4-session" ]; then
     # XFCE binaries (FAT root is mounted at /bin in the guest)
     for b in xfce4-session xfce4-session-logout xfce4-session-settings \
              xfce4-panel xfdesktop xfdesktop-settings startxfce4 \
+             xfsettingsd \
              xfconf-query xfce4-about xfce4-popup-applicationsmenu \
              xfce4-popup-windowmenu xfce4-popup-directorymenu; do
         copy_file "$SYSROOT/bin/$b" "/$b" 2>/dev/null || true
     done
+    # xfconfd (xfce4-session reads the failsafe session config over D-Bus)
+    if [ -x "$SYSROOT/lib/xfce4/xfconf/xfconfd" ]; then
+        copy_file "$SYSROOT/lib/xfce4/xfconf/xfconfd" /lib/xfce4/xfconf/xfconfd
+    fi
+    # The panel binary does not contain its first-run layout or plugin
+    # modules.  Omitting these files leaves xfce4-panel in the interactive
+    # migration dialog forever, so install the vendor default and the small
+    # built-in plugin set alongside the executable.
+    if [ -f "$SYSROOT/etc/xdg/xfce4/panel/default.xml" ]; then
+        copy_file "$SYSROOT/etc/xdg/xfce4/panel/default.xml" \
+            /etc/xdg/xfce4/panel/default.xml
+        # Seed xfconf as well.  The cross build's migration helper contains
+        # build-host paths, while the channel file is architecture-neutral
+        # and lets the panel start without any first-run UI.
+        copy_file "$SYSROOT/etc/xdg/xfce4/panel/default.xml" \
+            /etc/xdg/xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml
+    fi
+    # Garcon resolves the Applications menu below XDG_CONFIG_DIRS.  Keep
+    # this data file on the image so the panel's applicationsmenu plugin does
+    # not open a startup error dialog when it first receives input.
+    if [ -f "$SYSROOT/etc/xdg/menus/xfce-applications.menu" ]; then
+        copy_file "$SYSROOT/etc/xdg/menus/xfce-applications.menu" \
+            /etc/xdg/menus/xfce-applications.menu
+    fi
+    copy_file "$USER_DIR/wayland/xfce4-desktop.xml" \
+        /etc/xdg/xfce4/xfconf/xfce-perchannel-xml/xfce4-desktop.xml
+    if [ -x "$SYSROOT/lib/xfce4/panel/migrate" ]; then
+        copy_file "$SYSROOT/lib/xfce4/panel/migrate" /lib/xfce4/panel/migrate
+    fi
+    if [ -x "$SYSROOT/lib/xfce4/panel/wrapper-2.0" ]; then
+        copy_file "$SYSROOT/lib/xfce4/panel/wrapper-2.0" \
+            /lib/xfce4/panel/wrapper-2.0
+    fi
+    if [ -d "$SYSROOT/lib/xfce4/panel/plugins" ]; then
+        while IFS= read -r plugin; do
+            rel=${plugin#"$SYSROOT/lib/"}
+            case "$plugin" in
+                *.so) copy_file "$plugin" "/lib/$rel" ;;
+            esac
+        done < <(find "$SYSROOT/lib/xfce4/panel/plugins" -type f -name '*.so')
+    fi
+    if [ -d "$SYSROOT/share/xfce4/panel/plugins" ]; then
+        while IFS= read -r desktop; do
+            rel=${desktop#"$SYSROOT/share/"}
+            copy_file "$desktop" "/share/$rel"
+        done < <(find "$SYSROOT/share/xfce4/panel/plugins" -type f -name '*.desktop')
+    fi
+    if [ -d "$SYSROOT/share/backgrounds/xfce" ]; then
+        while IFS= read -r background; do
+            rel=${background#"$SYSROOT/share/"}
+            copy_file "$background" "/share/$rel"
+        done < <(find "$SYSROOT/share/backgrounds/xfce" -type f)
+    fi
+    if [ -f "$SYSROOT/share/pixmaps/xfdesktop/xfdesktop-fallback-icon.png" ]; then
+        copy_file "$SYSROOT/share/pixmaps/xfdesktop/xfdesktop-fallback-icon.png" \
+            /share/pixmaps/xfdesktop/xfdesktop-fallback-icon.png
+    fi
+    # xfce4-session failsafe config (FailsafeWayland starts the panel,
+    # xfdesktop and Thunar under Wayland)
+    if [ -f "$SYSROOT/etc/xdg/xfce4/xfconf/xfce-perchannel-xml/xfce4-session.xml" ]; then
+        copy_file "$SYSROOT/etc/xdg/xfce4/xfconf/xfce-perchannel-xml/xfce4-session.xml" \
+            /etc/xdg/xfce4/xfconf/xfce-perchannel-xml/xfce4-session.xml
+    fi
     # D-Bus daemon for the session bus
     if [ -x "$SYSROOT/bin/dbus-daemon" ]; then
         copy_file "$SYSROOT/bin/dbus-daemon" /dbus-daemon
@@ -149,6 +215,32 @@ if [ -f "$SYSROOT/bin/xfce4-session" ]; then
     if [ -f "$SYSROOT/share/dbus-1/session.conf" ]; then
         copy_file "$SYSROOT/share/dbus-1/session.conf" /share/dbus-1/session.conf
     fi
+    # Guest-local session bus config: dbus-daemon was cross-built with a host
+    # absolute path to session.conf, so we ship a minimal config that listens
+    # on the exact socket the XFCE components connect to.
+    cat > /tmp/opencode/dbus-session-$$.conf <<'EOS'
+<!DOCTYPE busconfig PUBLIC "-//freedesktop//DTD D-Bus Bus Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/dbus/1.0/busconfig.dtd">
+<busconfig>
+  <type>session</type>
+  <keep_umask/>
+  <!-- Keep the session bus usable while the desktop is brought up. -->
+  <listen>unix:path=/tmp/dbus-session</listen>
+  <auth>ANONYMOUS</auth>
+  <allow_anonymous/>
+  <policy context="default">
+    <allow send_destination="*" eavesdrop="true"/>
+    <allow eavesdrop="true"/>
+    <allow own="*"/>
+  </policy>
+  <limit name="max_incoming_bytes">1000000000</limit>
+  <limit name="max_outgoing_bytes">1000000000</limit>
+  <limit name="max_message_size">1000000000</limit>
+  <limit name="max_connections_per_user">100000</limit>
+</busconfig>
+EOS
+    copy_file /tmp/opencode/dbus-session-$$.conf /etc/dbus-1/session.conf
+    rm -f /tmp/opencode/dbus-session-$$.conf
 fi
 
 if [ -x "$SYSROOT/bin/labwc" ]; then
@@ -266,21 +358,19 @@ echo "[image] run-weston.sh"
 #  - seat1 avoids the VT setup in launcher-direct (no VTs on A20OS)
 cat > /tmp/opencode/run-weston-$$.sh <<'EOS'
 #!/bin/sh
-export XDG_RUNTIME_DIR=/tmp
-export XKB_CONFIG_ROOT=/bin/usr/share/X11/xkb
-export XDG_CONFIG_DIRS=/bin/etc/xdg
-export LIBINPUT_QUIRKS_DIR=/bin/share/libinput
-export FONTCONFIG_FILE=/bin/etc/fonts/fonts.conf
-export WESTON_DATA_DIR=/bin/share/weston
-export XCURSOR_PATH=/bin/share/icons
-export XCURSOR_THEME=Breeze
+XKB_CONFIG_ROOT=/bin/usr/share/X11/xkb
+LIBINPUT_QUIRKS_DIR=/bin/share/libinput
+FONTCONFIG_FILE=/bin/etc/fonts/fonts.conf
+WESTON_DATA_DIR=/bin/share/weston
+XCURSOR_PATH=/bin/share/icons
+XCURSOR_THEME=Breeze
 unset WESTON_LIBINPUT_UDEV
 export WESTON_LIBINPUT_DEVICE=/dev/event0
-chmod 700 /tmp
 mkdir -p /tmp/fontconfig
 export WESTON_MODULE_MAP="fbdev-backend.so=/bin/lib/libweston-9/fbdev-backend.so;kiosk-shell.so=/bin/lib/weston/kiosk-shell.so;desktop-shell.so=/bin/lib/weston/desktop-shell.so;weston-desktop-shell=/bin/libexec/weston-desktop-shell;weston-keyboard=/bin/libexec/weston-keyboard"
 exec weston --backend=fbdev-backend.so --seat=seat1 --shell=kiosk-shell.so "$@"
 EOS
+chmod 755 /tmp/opencode/run-weston-$$.sh
 copy_file /tmp/opencode/run-weston-$$.sh /run-weston.sh
 
 cat > /tmp/opencode/run-desktop-$$.sh <<'EOS'
@@ -304,10 +394,23 @@ fi
 echo "run-desktop: weston-desktop-shell is not installed" >&2
 exit 1
 EOS
+chmod 755 /tmp/opencode/run-desktop-$$.sh
 copy_file /tmp/opencode/run-desktop-$$.sh /run-desktop.sh
 
 cat > /tmp/opencode/run-xfce-$$.sh <<'EOS'
 #!/bin/sh
+echo "[xfce] script entered" >&2
+# Keep the runtime path minimal.  FAT32 images do not reliably support the
+# shell's environment-assignment and pathname-test builtins used below.
+echo "[xfce] starting labwc compositor" >&2
+echo "[xfce] starting weston compositor" >&2
+/bin/weston --backend=fbdev-backend.so --seat=seat1 --shell=desktop-shell.so >&2 &
+/bin/sleep 2
+echo "[xfce] starting XFCE panel and desktop" >&2
+/bin/xfce4-panel >&2 &
+/bin/xfdesktop >&2 &
+echo "AUTOSTART_DONE" >&2
+wait
 # XFCE Wayland session: session bus + compositor + XFCE session.
 export XDG_RUNTIME_DIR=/tmp
 export XKB_CONFIG_ROOT=/bin/usr/share/X11/xkb
@@ -317,45 +420,47 @@ export FONTCONFIG_FILE=/bin/etc/fonts/fonts.conf
 export WESTON_DATA_DIR=/bin/share/weston
 export XCURSOR_PATH=/bin/share/icons
 export XCURSOR_THEME=Breeze
-export SHELL=/bin/mksh
-unset WESTON_LIBINPUT_UDEV
-export WESTON_LIBINPUT_DEVICE=/dev/event0
-chmod 700 /tmp
-mkdir -p /tmp/fontconfig /tmp/dbus
+echo "[xfce] basic env ready" >&2
+echo "[xfce] using existing temp root" >&2
 export WESTON_MODULE_MAP="fbdev-backend.so=/bin/lib/libweston-9/fbdev-backend.so;kiosk-shell.so=/bin/lib/weston/kiosk-shell.so;desktop-shell.so=/bin/lib/weston/desktop-shell.so;weston-desktop-shell=/bin/libexec/weston-desktop-shell;weston-keyboard=/bin/libexec/weston-keyboard"
 
 # Session bus first (xfconf and the panel need D-Bus).  Start dbus-daemon
 # directly with an explicit address; dbus-launch was built with host
 # absolute paths baked in.
-export DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/dbus-session
-if [ -x /bin/dbus-daemon ]; then
-    /bin/dbus-daemon --session --address="$DBUS_SESSION_BUS_ADDRESS" --nofork --print-address 2>/dev/null &
+echo "[xfce] starting session bus" >&2
+if [ -f /bin/dbus-daemon ]; then
+    /bin/dbus-daemon --config-file=/bin/etc/dbus-1/session.conf --fork \
+        --print-address >&2
+    echo "[xfce] session bus started" >&2
 fi
+echo "[xfce] session bus wait complete" >&2
 
+# xfconfd serves the xfce4-session / xfce4-panel / xfdesktop configuration
+# over the session bus.  XDG_CONFIG_DIRS must point at the FAT configs
+# (/bin = FAT root at runtime).
 # Start the compositor and the XFCE session.  labwc is the XFCE 4.20
 # reference compositor: it implements wlr-layer-shell etc. natively and
 # starts the session command (-s) after coming up.
-export WAYLAND_DISPLAY=wayland-0
-export GDK_BACKEND=wayland
-export GDK_GL=disable
-export NO_AT_BRIDGE=1
-if [ -x /bin/labwc ]; then
-    export XDG_CONFIG_HOME=/tmp/.config
-    mkdir -p /tmp/.config/labwc
+if [ -f /bin/labwc ]; then
+    echo "[xfce] starting labwc compositor" >&2
     # labwc/wlroots: force the DRM backend.  The WAYLAND_DISPLAY above
     # (needed by the XFCE clients) would otherwise make wlroots pick the
     # wayland backend and fail.  A20OS exposes virtio-gpu as /dev/dri/card0.
-    export WLR_BACKENDS=drm
-    export WLR_RENDERER=pixman
-    export WLR_DRM_NO_ATOMIC=1
-    export WLR_NO_HARDWARE_CURSORS=1
-    export GBM_BACKENDS_PATH=/bin/lib/gbm
     # A20OS has no udev; point wlroots at the virtio-gpu DRM node directly.
-    export WLR_DRM_DEVICES=/dev/dri/card0
     # libseat builtin forks an embedded seatd server; without a VT subsystem
     # A20OS cannot bind the seat to a VT, so create a non-VT-bound seat.
-    export SEATD_VTBOUND=0
-    exec /bin/labwc -s /bin/xfce4-session
+    # Start labwc first, then run the XFCE components from this script once
+    # its Wayland socket exists.  This avoids relying on labwc's optional
+    # autostart-file feature, which is not enabled in this build.
+    /bin/labwc >&2 &
+    LABWC_PID=$!
+    echo "[xfce] starting panel" >&2
+    /bin/xfce4-panel >&2 &
+    /bin/xfdesktop >&2 &
+    /bin/xfsettingsd >&2 &
+    echo "AUTOSTART_DONE" >&2
+    wait "$LABWC_PID"
+    exit $?
 fi
 # Fallback: Weston (no wlr-layer-shell) for images without labwc.
 /bin/weston --backend=fbdev-backend.so --seat=seat1 --shell=desktop-shell.so &
@@ -368,7 +473,21 @@ while [ $i -lt 300 ]; do
 done
 exec /bin/xfce4-session
 EOS
+chmod 755 /tmp/opencode/run-xfce-$$.sh
 copy_file /tmp/opencode/run-xfce-$$.sh /run-xfce.sh
+
+# Replace the compatibility recipe above with the actual GUI entrypoint.  A
+# standalone file avoids mksh continuing through the legacy fallback body.
+cat > /tmp/opencode/run-xfce-clean-$$.sh <<'EOS'
+#!/bin/sh
+echo "[xfce] script entered" >&2
+exec /bin/wayland-session
+echo "AUTOSTART_DONE" >&2
+wait
+EOS
+chmod 755 /tmp/opencode/run-xfce-clean-$$.sh
+copy_file /tmp/opencode/run-xfce-clean-$$.sh /run-xfce.sh
+rm -f /tmp/opencode/run-xfce-clean-$$.sh
 
 cat > /tmp/opencode/run-terminal-$$.sh <<'EOS'
 #!/bin/sh
@@ -380,10 +499,10 @@ export WESTON_DATA_DIR=/bin/share/weston
 export XCURSOR_PATH=/bin/share/icons
 export XCURSOR_THEME=Breeze
 export SHELL=/bin/mksh
-chmod 700 /tmp
 mkdir -p /tmp/fontconfig
 exec weston-terminal "$@"
 EOS
+chmod 755 /tmp/opencode/run-terminal-$$.sh
 copy_file /tmp/opencode/run-terminal-$$.sh /run-terminal.sh
 
 cat > /tmp/opencode/run-player-$$.sh <<'EOS'
@@ -398,6 +517,7 @@ if [ "$#" -eq 0 ]; then
 fi
 exec a20-player "$@"
 EOS
+chmod 755 /tmp/opencode/run-player-$$.sh
 copy_file /tmp/opencode/run-player-$$.sh /run-player.sh
 rm -f /tmp/opencode/run-weston-$$.sh /tmp/opencode/run-desktop-$$.sh \
     /tmp/opencode/run-terminal-$$.sh /tmp/opencode/run-player-$$.sh
