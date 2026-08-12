@@ -365,7 +365,7 @@ WESTON_DATA_DIR=/bin/share/weston
 XCURSOR_PATH=/bin/share/icons
 XCURSOR_THEME=Breeze
 unset WESTON_LIBINPUT_UDEV
-export WESTON_LIBINPUT_DEVICE=/dev/event0
+export WESTON_LIBINPUT_DEVICE=/dev/input/event0
 mkdir -p /tmp/fontconfig
 export WESTON_MODULE_MAP="fbdev-backend.so=/bin/lib/libweston-9/fbdev-backend.so;kiosk-shell.so=/bin/lib/weston/kiosk-shell.so;desktop-shell.so=/bin/lib/weston/desktop-shell.so;weston-desktop-shell=/bin/libexec/weston-desktop-shell;weston-keyboard=/bin/libexec/weston-keyboard"
 exec weston --backend=fbdev-backend.so --seat=seat1 --shell=kiosk-shell.so "$@"
@@ -384,7 +384,7 @@ export WESTON_DATA_DIR=/bin/share/weston
 export XCURSOR_PATH=/bin/share/icons
 export XCURSOR_THEME=Breeze
 unset WESTON_LIBINPUT_UDEV
-export WESTON_LIBINPUT_DEVICE=/dev/event0
+export WESTON_LIBINPUT_DEVICE=/dev/input/event0
 chmod 700 /tmp
 mkdir -p /tmp/fontconfig
 export WESTON_MODULE_MAP="fbdev-backend.so=/bin/lib/libweston-9/fbdev-backend.so;kiosk-shell.so=/bin/lib/weston/kiosk-shell.so;desktop-shell.so=/bin/lib/weston/desktop-shell.so;weston-desktop-shell=/bin/libexec/weston-desktop-shell;weston-keyboard=/bin/libexec/weston-keyboard"
