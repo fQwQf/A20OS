@@ -39,6 +39,7 @@ static inline int arch_irqs_enabled(void) {
 }
 
 void riscv64_remote_tlb_flush(uint64_t addr, uint64_t size);
+extern uint64_t riscv64_asid_mask;
 
 static inline void arch_tlb_flush(void) {
     __asm__ __volatile__("sfence.vma" ::: "memory");
@@ -61,6 +62,12 @@ static inline void arch_tlb_flush_page_local(uint64_t addr) {
 /* Local-only full flush. */
 static inline void arch_tlb_flush_local(void) {
     __asm__ __volatile__("sfence.vma" ::: "memory");
+}
+#define ARCH_HAS_LOCAL_ASID_TLB_FLUSH 1
+static inline void arch_tlb_flush_asid_local(uint64_t asid) {
+    /* rs2 is a normal register even when its value is zero; this therefore
+     * targets ASID 0 rather than using x0's all-ASID encoding. */
+    __asm__ __volatile__("sfence.vma zero, %0" :: "r"(asid) : "memory");
 }
 
 static inline void arch_set_task_pointer(void *task) {
@@ -111,6 +118,20 @@ static inline void arch_write_addr_space_token(uint64_t v) {
     (void)v;
 #else
     arch_write_satp(v);
+#endif
+}
+#define ARCH_HAS_ADDR_SPACE_SWITCH 1
+static inline void arch_switch_addr_space_token(uint64_t token) {
+#ifdef CONFIG_NOMMU
+    (void)token;
+#else
+    if (arch_read_satp() == token)
+        return;
+    arch_write_satp(token);
+    /* Without implemented satp.ASID bits every root aliases ASID 0 and a
+     * switch must retain the historical full-flush behavior. */
+    if (!__atomic_load_n(&riscv64_asid_mask, __ATOMIC_ACQUIRE))
+        arch_tlb_flush_local();
 #endif
 }
 static inline uint64_t arch_read_sstatus(void) {

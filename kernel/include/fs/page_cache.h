@@ -6,8 +6,12 @@
 #include "fs/vfs.h"
 #include "mm/frame.h"
 
-#define PAGE_CACHE_MAX_PAGES   2048
-#define PAGE_CACHE_HASH_BUCKETS 8192
+#define PAGE_CACHE_MAX_PAGES   262144
+#define PAGE_CACHE_INITIAL_PAGES 2048
+#define PAGE_CACHE_CHUNK_PAGES 1024
+#define PAGE_CACHE_HASH_BUCKETS 262144
+#define PAGE_CACHE_FAULT_AROUND_PAGES 16
+#define PAGE_CACHE_WRITEBACK_BATCH_PAGES 256
 
 /*
  * FILE_MMAP_PAGE_CACHE_CONTRACT:
@@ -46,6 +50,7 @@ typedef struct page_cache_page {
 
 typedef struct page_cache_stats {
     size_t capacity;
+    size_t allocated;
     size_t valid;
     size_t dirty;
     size_t pinned;
@@ -65,12 +70,22 @@ void page_cache_mark_dirty(page_cache_page_t *page);
 void page_cache_mark_clean(page_cache_page_t *page);
 int  page_cache_is_uptodate(page_cache_page_t *page);
 int  page_cache_read_vfile(vfile_t *vf, char *buf, size_t count);
+int  page_cache_write_vfile(vfile_t *vf, const char *buf, size_t count);
 int  page_cache_fill_vfile_page(vfile_t *vf, page_cache_page_t *page);
+int  page_cache_fill_vfile_pages(vfile_t *vf, page_cache_page_t **pages,
+                                 size_t count);
 pfn_t page_cache_pfn(page_cache_page_t *page);
 int  page_cache_writeback_vnode(vnode_t *vn, page_cache_writepage_t writepage,
                                 void *ctx);
 int  page_cache_writeback_all(page_cache_writepage_t writepage, void *ctx);
+void page_cache_update_after_write(vnode_t *vn, uint64_t start,
+                                   uint64_t old_size, const void *data,
+                                   size_t len);
 void page_cache_invalidate(vnode_t *vn);
+/* Discard unpinned cached contents without writing dirty data.  Callers may
+ * use this only after the final directory link has been removed, when the
+ * bytes can no longer become persistent filesystem contents. */
+void page_cache_discard_unlinked(vnode_t *vn);
 void page_cache_invalidate_range(vnode_t *vn, uint64_t start_byte, uint64_t end_byte);
 void page_cache_invalidate_uptodate_range(vnode_t *vn, uint64_t start_byte, uint64_t end_byte);
 void page_cache_truncate(vnode_t *vn, uint64_t new_size);

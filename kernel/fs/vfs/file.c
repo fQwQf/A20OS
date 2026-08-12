@@ -9,6 +9,17 @@
 #include "fs/inotify.h"
 #include "mm/vm.h"
 
+#define VFS_WRITE_LOCK_COUNT 64U
+static mutex_t g_vfs_write_locks[VFS_WRITE_LOCK_COUNT] = {
+    [0 ... VFS_WRITE_LOCK_COUNT - 1] = MUTEX_INIT,
+};
+
+static mutex_t *vfs_write_lock_for(vnode_t *vn)
+{
+    uintptr_t key = (uintptr_t)vn >> 4;
+    return &g_vfs_write_locks[key & (VFS_WRITE_LOCK_COUNT - 1)];
+}
+
 int vfs_is_pipe_vfile(vfile_t *vf)
 {
     return pipe_vfile_is(vf);
@@ -44,6 +55,13 @@ static int vfs_file_uses_page_cache(vnode_t *vn)
          mnt->type == FS_TYPE_SYSFS))
         return 0;
     return 1;
+}
+
+static int vfs_file_uses_buffered_write(vnode_t *vn)
+{
+    return vfs_file_uses_page_cache(vn) && vn->mnt &&
+           vn->mnt->type == FS_TYPE_EXT4 && vn->ops &&
+           vn->ops->readpage && vn->ops->writepage;
 }
 
 int vfs_read_file(vfile_t *vf, char *buf, size_t count)
@@ -95,6 +113,8 @@ int vfs_write_file(vfile_t *vf, const char *buf, size_t count)
     int use_page_cache = vfs_file_uses_page_cache(vf->vnode);
     int has_mmap_cache = vf->vnode && vf->vnode->ops &&
                          vf->vnode->ops->readpage;
+    int buffered_write = !(vf->flags & O_DIRECT) &&
+                         vfs_file_uses_buffered_write(vf->vnode);
     if ((vf->flags & O_DIRECT) && use_page_cache) {
         page_cache_writeback_vnode(vf->vnode, NULL, NULL);
         long cur_off = (long)vf->offset;
@@ -102,20 +122,33 @@ int vfs_write_file(vfile_t *vf, const char *buf, size_t count)
                                               (uint64_t)(cur_off + count));
     }
     if (vf->ops && vf->ops->write) {
+        mutex_t *write_lock =
+            use_page_cache && !(vf->flags & O_DIRECT)
+                ? vfs_write_lock_for(vf->vnode) : NULL;
+        if (write_lock)
+            mutex_lock(write_lock);
         if ((vf->flags & O_APPEND) && vf->vnode)
             vf->offset = vf->vnode->size;
         size_t write_start = vf->offset;
-        int r = vf->ops->write(vf, buf, count);
+        size_t old_size = vf->vnode ? vf->vnode->size : 0;
+        int r = buffered_write
+            ? page_cache_write_vfile(vf, buf, count)
+            : vf->ops->write(vf, buf, count);
         if (r > 0 && vf->vnode) {
             if ((vf->flags & O_DIRECT) && use_page_cache)
                 page_cache_invalidate_uptodate_range(vf->vnode, write_start,
                                                       write_start + (size_t)r);
-            else if (use_page_cache || has_mmap_cache)
+            else if (use_page_cache && !buffered_write)
+                page_cache_update_after_write(vf->vnode, write_start,
+                                              old_size, buf, (size_t)r);
+            else if (!use_page_cache && has_mmap_cache)
                 page_cache_invalidate_uptodate_range(vf->vnode, write_start,
                                                       write_start + (size_t)r);
             vfs_touch_mtime(vf->vnode);
             inotify_vnode_event(vf->vnode, NULL, IN_MODIFY);
         }
+        if (write_lock)
+            mutex_unlock(write_lock);
         return r;
     }
     return -EBADF;
