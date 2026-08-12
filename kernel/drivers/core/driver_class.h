@@ -120,6 +120,10 @@ typedef struct gpu_dev_ops {
     int     (*get_fb)(struct device *dev, uintptr_t *fb_paddr, size_t *fb_size);
     int     (*flush)(struct device *dev, uint32_t x, uint32_t y, uint32_t w, uint32_t h);
     int     (*ioctl)(struct device *dev, unsigned long req, void *arg);
+    /* Copy up to cap bytes of the display's base EDID block into buf.
+     * Returns the EDID length (>=128) or a negative errno when the device
+     * has no EDID source. */
+    int     (*get_edid)(struct device *dev, uint8_t *buf, size_t cap);
 } gpu_dev_ops_t;
 
 typedef struct audio_dev_ops audio_dev_ops_t;

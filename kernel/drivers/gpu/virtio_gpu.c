@@ -48,6 +48,9 @@ typedef struct {
     int                valid;
     int                virgl;   /* VIRTIO_GPU_F_VIRGL negotiated */
     int                context_init; /* VIRTIO_GPU_F_CONTEXT_INIT negotiated */
+    int                has_edid;   /* VIRTIO_GPU_F_EDID negotiated */
+    int                edid_valid;
+    uint8_t            edid[128];
     /* Device-owned staging.  Lifecycle and ioctl callers often provide stack
      * objects, which must never be exposed directly to DMA: after a timeout
      * the device may still access them after the caller returns. */
@@ -421,6 +424,38 @@ static int gpu_get_fb(struct device *dev, uintptr_t *fb_paddr, size_t *fb_size) 
     return 0;
 }
 
+static int gpu_get_edid(struct device *dev, uint8_t *buf, size_t cap) {
+    virtio_gpu_inst_t *inst = dev->drv_priv;
+    if (!inst || !inst->valid || !inst->edid_valid)
+        return -ENODEV;
+    if (cap < sizeof(inst->edid))
+        return -EINVAL;
+    memcpy(buf, inst->edid, sizeof(inst->edid));
+    return (int)sizeof(inst->edid);
+}
+
+/* Fetch the scanout-0 EDID block from the device (VIRTIO_GPU_F_EDID).  The
+ * response exceeds the fixed 128-byte command slot, so it goes through the
+ * large-command path.  Caches the 128-byte base block on success. */
+static void virtio_gpu_fetch_edid(virtio_gpu_inst_t *inst) {
+    if (!inst->has_edid)
+        return;
+    struct virtio_gpu_resp_edid *resp = kmalloc(sizeof(*resp));
+    if (!resp)
+        return;
+    struct virtio_gpu_get_edid req;
+    memset(&req, 0, sizeof(req));
+    req.hdr.type = VIRTIO_GPU_CMD_GET_EDID;
+    req.scanout = 0;
+    memset(resp, 0, sizeof(*resp));
+    if (virtio_gpu_send_cmd_big(inst, &req, sizeof(req), resp, sizeof(*resp)) == 0 &&
+        resp->hdr.type == VIRTIO_GPU_RESP_OK_EDID && resp->size >= 128) {
+        memcpy(inst->edid, resp->edid, sizeof(inst->edid));
+        inst->edid_valid = 1;
+    }
+    kfree(resp);
+}
+
 static int gpu_flush(struct device *dev, uint32_t x, uint32_t y, uint32_t w, uint32_t h) {
     virtio_gpu_inst_t *inst = dev->drv_priv;
     
@@ -746,6 +781,7 @@ static const gpu_dev_ops_t gpu_ops = {
     .get_fb   = gpu_get_fb,
     .flush    = gpu_flush,
     .ioctl    = gpu_ioctl,
+    .get_edid = gpu_get_edid,
 };
 
 static int virtio_gpu_init_transport(device_t *dev, const virtio_transport_t *transport) {
@@ -784,6 +820,7 @@ static int virtio_gpu_init_transport(device_t *dev, const virtio_transport_t *tr
     vt->write32(vt, VIRTIO_MMIO_DRIVER_FEATURES, driver_lo);
     inst->virgl = (features_lo & (1U << VIRTIO_GPU_F_VIRGL)) != 0;
     inst->context_init = (features_lo & (1U << VIRTIO_GPU_F_CONTEXT_INIT)) != 0;
+    inst->has_edid = (features_lo & (1U << VIRTIO_GPU_F_EDID)) != 0;
     
     vt->write32(vt, VIRTIO_MMIO_DEVICE_FEATURES_SEL, 1);
     uint32_t features_hi = vt->read32(vt, VIRTIO_MMIO_DEVICE_FEATURES);
@@ -914,7 +951,9 @@ static int virtio_gpu_init_transport(device_t *dev, const virtio_transport_t *tr
     if (virtio_gpu_send_cmd(inst, &scanout, sizeof(scanout), &resp, sizeof(resp)) < 0 ||
         resp.type != VIRTIO_GPU_RESP_OK_NODATA)
         goto fail;
-    
+
+    virtio_gpu_fetch_edid(inst);
+
     dev->drv_priv = inst;
 
     // Initial FLUSH to transfer data and trigger QEMU window resize
