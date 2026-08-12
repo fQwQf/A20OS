@@ -256,6 +256,9 @@ int      net_dequeue_msg_locked_meta(net_socket_t *s, void *buf, size_t len,
                                      net_recv_meta_t *meta);
 int      net_recvfrom_meta(int gfd, void *buf, size_t len, int flags,
                            void *addr, size_t *addrlen, net_recv_meta_t *meta);
+int      net_recvfrom_socket_meta(net_socket_t *s, void *buf, size_t len,
+                                  int flags, void *addr, size_t *addrlen,
+                                  net_recv_meta_t *meta);
 int      net_accept_queue_push_locked(net_socket_t *listener,
                                       net_socket_t *child);
 net_socket_t *net_accept_queue_pop_locked(net_socket_t *listener);
@@ -318,4 +321,5 @@ void net_tcp_recved(net_socket_t *s, size_t len);
  * internal channel; SCM_RIGHTS messages fall back to the legacy queue.
  * Implemented in socket_unix.c, used by net/socket.c recv path. */
 int unix_ch_recv(net_socket_t *s, void *buf, size_t len);
+int unix_ch_peek(net_socket_t *s, void *buf, size_t len);
 int unix_ch_send(net_socket_t *s, net_socket_t *dst, const void *buf, size_t len);

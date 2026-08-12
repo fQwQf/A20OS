@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<channel name="xfce4-desktop" version="1.0">
+  <property name="desktop-icons" type="empty">
+    <!-- Keep the desktop surface and context menu, but avoid file-icon
+         backends that depend on an unavailable desktop directory. -->
+    <property name="style" type="int" value="0"/>
+    <property name="icon-size" type="uint" value="48"/>
+    <property name="show-hidden-files" type="bool" value="false"/>
+    <property name="show-tooltips" type="bool" value="true"/>
+    <property name="file-icons" type="empty">
+      <property name="show-home" type="bool" value="true"/>
+      <property name="show-trash" type="bool" value="true"/>
+      <property name="show-filesystem" type="bool" value="true"/>
+      <property name="show-removable" type="bool" value="true"/>
+    </property>
+  </property>
+</channel>

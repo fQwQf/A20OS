@@ -79,7 +79,7 @@ ifeq ($(BRINGUP),1)
 else
 	$(MAKE) ARCH=$(ARCH) BRINGUP=$(BRINGUP) dev-build
 endif
-	$(MAKE) ARCH=$(ARCH) BRINGUP=$(BRINGUP) FAT32_IMAGE_MB=256 $(GUI_FAT32_IMG)
+	$(MAKE) ARCH=$(ARCH) BRINGUP=$(BRINGUP) GUI_FAT32_IMAGE_MB=$(GUI_FAT32_IMAGE_MB) $(GUI_FAT32_IMG)
 	@test -s $(KERNEL_ELF) || (echo "ERROR: kernel ELF missing or empty: $(KERNEL_ELF)" ; exit 1)
 	$(QEMU) $(subst $(FAT32_IMG),$(GUI_FAT32_IMG),$(patsubst -nographic,-display $(QEMU_GUI_DISPLAY) $(QEMU_GUI_DEVICES) $(QEMU_GUI_AUDIO) -serial stdio,$(QEMU_FLAGS))) -kernel $(KERNEL_ELF)
 

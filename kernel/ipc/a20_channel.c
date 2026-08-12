@@ -664,10 +664,19 @@ int a20_channel_readable(a20_channel_ep_t *ep)
 
 int a20_channel_writable(a20_channel_ep_t *ep)
 {
-    if (!ep) return 0;
-    spin_lock(&ep->lock);
-    int r = !ep->peer_closed && ep->msg_count < ep->msg_cap;
-    spin_unlock(&ep->lock);
+    if (!ep)
+        return 0;
+
+    /* Sending on an endpoint enqueues into its peer.  Readiness therefore
+     * depends on the peer queue, not this endpoint's inbound queue. */
+    spin_lock(&g_ch_lock);
+    a20_channel_ep_t *peer = ep->peer;
+    if (peer)
+        spin_lock(&peer->lock);
+    int r = peer && !peer->peer_closed && peer->msg_count < peer->msg_cap;
+    if (peer)
+        spin_unlock(&peer->lock);
+    spin_unlock(&g_ch_lock);
     return r;
 }
 
