@@ -69,6 +69,12 @@ void ext4_indirect_truncate(ext4_sb_info_t *sb, ext4_inode_t *inode) ;
 void ext4_indirect_truncate_at(ext4_sb_info_t *sb, ext4_inode_t *inode,
                                       uint32_t lblk) ;
 uint64_t ext4_block_map(ext4_sb_info_t *sb, ext4_inode_t *inode, uint32_t lblk) ;
+/* ext4_journal_recover return convention: 0 = journal fully cleaned on disk,
+ * EXT4_JOURNAL_DEFERRED = replay succeeded into the block cache but the
+ * device refused the flush, so journal cleanup is deferred (the on-disk
+ * journal is left untouched and the next mount replays it idempotently),
+ * <0 = the journal could not be replayed even in memory; refuse the mount. */
+#define EXT4_JOURNAL_DEFERRED 1
 int ext4_journal_recover(ext4_sb_info_t *sb, ext4_superblock_t *disk_sb) ;
 int ext4_dir_entry_check(const ext4_dir_entry_t *de, uint32_t off,
                          uint32_t block_size, uint16_t *actual_len) ;
