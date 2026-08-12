@@ -47,6 +47,8 @@
 		final-stage6-rv-helper final-stage6-la-helper \
 		final-stage7-rv-shebang final-stage7-la-shebang \
 		final-stage7-rv-rustc-j8 final-stage7-la-rustc-j8 \
+		final-stage7-rv-rustc-j8-tmpfs \
+		final-stage7-rv-rustc-j8-profile \
 		final-stage7-rv-rustc-llvm-j8 final-stage7-la-rustc-llvm-j8 \
 		final-stage7-rv-1c-j1 final-stage7-la-1c-j1 \
 		final-stage7-rv-8c-j1 final-stage7-la-8c-j1 \
@@ -54,6 +56,7 @@
 		final-stage7-rv-8c-j4 final-stage7-la-8c-j4 \
 		final-stage7-rv-8c-j8 final-stage7-la-8c-j8 \
 		final-stage7-rv-8c-default final-stage7-la-8c-default \
+		final-stage7-rv-8c-default-tmpfs \
 		final-stage9-rv-1c-perf final-stage9-rv-8c-perf \
 		final-stage9-la-1c-perf final-stage9-la-8c-perf
 

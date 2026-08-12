@@ -70,6 +70,9 @@ extern void user_trap_return(void);
 #define TRAP_CTX_STATUS(ctx)         ((ctx)->sstatus)
 #define TRAP_CTX_LAST_A0(ctx)      ((ctx)->last_a0)
 #define TRAP_CTX_KScratch0(ctx)    ((ctx)->x[0])
+#define ARCH_TRAP_PRESERVES_ADDR_SPACE_TOKEN 1
+#define ARCH_TRAP_FAST_RETURN_ARM(ctx)    do { (ctx)->reserved = 1; } while (0)
+#define ARCH_TRAP_FAST_RETURN_DISARM(ctx) do { (ctx)->reserved = 0; } while (0)
 
 #define TASK_CTX_PAGE_TABLE(ctx)   ((ctx)->satp)
 #define TASK_CTX_STATUS(ctx)       ((ctx)->sstatus)

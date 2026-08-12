@@ -94,6 +94,10 @@ static inline uint64_t arch_make_satp(void *pgdir) {
     return (0x8UL << 60) | (((uint64_t)(uintptr_t)pgdir - PAGE_OFFSET) >> 12);
 }
 
+static inline uint64_t arch_make_satp_asid(void *pgdir, uint64_t asid) {
+    return arch_make_satp(pgdir) | ((asid & 0xffffUL) << 44);
+}
+
 static inline uint64_t arch_make_addr_space_token(void *pgdir) {
 #ifdef CONFIG_NOMMU
     (void)pgdir;

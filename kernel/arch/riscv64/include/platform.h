@@ -19,6 +19,7 @@
 size_t arch_ram_range_count(void);
 int arch_ram_range(size_t idx, paddr_t *base, paddr_t *end);
 void riscv64_memory_init(void);
+int riscv64_fdt_has_isa_extension(const char *extension);
 
 /* MMIO base addresses */
 #define UART0_BASE         (0x10000000UL + PAGE_OFFSET)

@@ -271,6 +271,7 @@ typedef struct ext4_vnode_priv {
     uint64_t        file_size;
     int             type;
     int             unlinked;   /* dirent removed; free blocks+inode on release */
+    uint32_t        open_count;  /* live vfiles sharing this canonical vnode */
 } ext4_vnode_priv_t;
 
 typedef struct ext4_fctx {

@@ -66,8 +66,8 @@ uint64_t ext4_block_map_cached(ext4_fctx_t *fc, ext4_inode_t *inode,
  * reference to the caller, who must vnode_put it after dropping the lock.
  * ================================================================ */
 
-#define EXT4_VCACHE_MAX 4096
-#define EXT4_VCACHE_HASH_BITS 11
+#define EXT4_VCACHE_MAX 65536
+#define EXT4_VCACHE_HASH_BITS 16
 #define EXT4_VCACHE_HASH_SIZE (1U << EXT4_VCACHE_HASH_BITS)
 #define EXT4_VCACHE_HASH_MASK (EXT4_VCACHE_HASH_SIZE - 1)
 typedef struct {
@@ -159,10 +159,12 @@ vnode_t *ext4_vnode_cache_lookup(ext4_sb_info_t *sb, uint32_t ino) {
              * entry is protected.  Cache pruning can therefore never turn
              * a successful lookup into a stale pointer. */
             vnode_get(vn);
+            a20_perf_count(A20_PERF_EXT4_VCACHE_HITS);
             spin_unlock_irqrestore(&g_ext4_vcache_lock, flags);
             return vn;
         }
     }
+    a20_perf_count(A20_PERF_EXT4_VCACHE_MISSES);
     spin_unlock_irqrestore(&g_ext4_vcache_lock, flags);
     return NULL;
 }
@@ -187,9 +189,11 @@ void ext4_vnode_cache_insert(ext4_sb_info_t *sb, uint32_t ino, vnode_t *vn) {
         g_ext4_vcache[slot].vn = vn;
         g_ext4_vcache[slot].free_next = -1;
         ext4_vcache_link_hash_locked(slot, hash);
+        a20_perf_count(A20_PERF_EXT4_VCACHE_INSERTS);
         spin_unlock_irqrestore(&g_ext4_vcache_lock, flags);
         return;
     }
+    a20_perf_count(A20_PERF_EXT4_VCACHE_FULL);
     spin_unlock_irqrestore(&g_ext4_vcache_lock, flags);
 }
 
@@ -438,6 +442,106 @@ static int ext4_validate_group_counts(ext4_sb_info_t *sb)
             ext4_bg_free_inodes(&sb->group_descs[g]) > inodes)
             return -EINVAL;
     }
+    return 0;
+}
+
+/*
+ * Reserve a physically contiguous run with one bitmap read/write and one
+ * group-descriptor update.  The ordinary single-block allocator is retained
+ * for metadata and partial-block writes because those allocations must be
+ * zero initialized.  Full-page writeback already owns complete replacement
+ * data, so zeroing every block before overwriting it only doubles cache work.
+ */
+size_t ext4_alloc_blocks_uninitialized(ext4_sb_info_t *sb, size_t wanted,
+                                       uint64_t *first_phys)
+{
+    if (!sb || !first_phys || wanted == 0)
+        return 0;
+    if (wanted > 256)
+        wanted = 256;
+
+    uint8_t *bitmap = (uint8_t *)kmalloc(sb->block_size);
+    if (!bitmap)
+        return 0;
+
+    mutex_lock(&sb->alloc_lock);
+    uint64_t group_probes = 0;
+    for (uint32_t n = 0; n < sb->groups_count; n++) {
+        group_probes++;
+        uint32_t g = sb->block_group_rotor + n;
+        if (g >= sb->groups_count)
+            g -= sb->groups_count;
+        uint32_t free_blocks = ext4_bg_free_blocks(&sb->group_descs[g]);
+        if (free_blocks == 0)
+            continue;
+        uint32_t valid = ext4_group_block_count(sb, g);
+        if (!valid)
+            continue;
+        uint64_t bm = (uint64_t)sb->group_descs[g].bg_block_bitmap_lo |
+                      ((uint64_t)sb->group_descs[g].bg_block_bitmap_hi << 32);
+        if (bcache_read_bytes(sb->bc, bm * sb->block_size, bitmap,
+                              sb->block_size) < 0)
+            continue;
+
+        uint32_t hint = sb->block_alloc_hints[g] % valid;
+        uint32_t scanned = 0;
+        uint32_t first = 0;
+        size_t run = 0;
+        for (uint32_t step = 0; step < valid; step++) {
+            uint32_t bit = hint + step;
+            if (bit >= valid)
+                bit -= valid;
+            scanned++;
+            if (bitmap[bit / 8] & (1U << (bit % 8)))
+                continue;
+
+            first = bit;
+            size_t limit = wanted;
+            if (limit > free_blocks)
+                limit = free_blocks;
+            if (limit > valid - first)
+                limit = valid - first;
+            while (run < limit) {
+                uint32_t candidate = first + (uint32_t)run;
+                if (bitmap[candidate / 8] &
+                    (1U << (candidate % 8)))
+                    break;
+                run++;
+            }
+            if (run != 0)
+                break;
+        }
+        a20_perf_add(A20_PERF_EXT4_BITMAP_PROBES, scanned + run);
+        a20_perf_add(A20_PERF_EXT4_BITMAP_BYTE_LOADS, sb->block_size);
+        if (run == 0)
+            continue;
+
+        for (size_t i = 0; i < run; i++) {
+            uint32_t bit = first + (uint32_t)i;
+            bitmap[bit / 8] |= (uint8_t)(1U << (bit % 8));
+        }
+        if (bcache_write_bytes(sb->bc, bm * sb->block_size, bitmap,
+                               sb->block_size) < 0) {
+            mutex_unlock(&sb->alloc_lock);
+            kfree(bitmap);
+            return 0;
+        }
+
+        sb->block_alloc_hints[g] = (first + (uint32_t)run) % valid;
+        sb->block_group_rotor = g;
+        ext4_bg_set_free_blocks(&sb->group_descs[g],
+                                free_blocks - (uint32_t)run);
+        ext4_writeback_gd(sb, g);
+        *first_phys = (uint64_t)sb->first_data_block +
+                      (uint64_t)g * sb->blocks_per_group + first;
+        a20_perf_add(A20_PERF_EXT4_GROUP_PROBES, group_probes);
+        mutex_unlock(&sb->alloc_lock);
+        kfree(bitmap);
+        return run;
+    }
+    a20_perf_add(A20_PERF_EXT4_GROUP_PROBES, group_probes);
+    mutex_unlock(&sb->alloc_lock);
+    kfree(bitmap);
     return 0;
 }
 
@@ -1340,7 +1444,9 @@ vnode_ops_t g_ext4_vnode_ops = {
     .statfs   = ext4_vn_statfs,
     .truncate = ext4_vn_truncate,
     .readpage = ext4_vn_readpage,
+    .readpages = ext4_vn_readpages,
     .writepage = ext4_vn_writepage,
+    .writepages = ext4_vn_writepages,
     .chmod    = ext4_vn_chmod,
     .chown    = ext4_vn_chown,
     .open     = ext4_open_vnode,
@@ -1410,6 +1516,7 @@ vnode_t *ext4_make_vnode(ext4_sb_info_t *sb, uint32_t ino, uint32_t sz,
     fp->file_size = sz;
     fp->type      = type;
     fp->unlinked  = 0;
+    fp->open_count = 0;
     vn->fs_data   = fp;
 
     ext4_vnode_cache_insert(sb, ino, vn);

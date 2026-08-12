@@ -32,6 +32,11 @@ void kep_syscall_filter_init(void)
  *   1 -> deny with -EACCES, 2 -> kill the caller. */
 int kep_syscall_filter_check(uint64_t nr, const uint64_t *args, int abi)
 {
+    /* Avoid constructing and copying the eight-word context when no filter is
+     * attached, which is the normal benchmark and production configuration. */
+    if (!__atomic_load_n(&kep_syscall_filter_point.attached, __ATOMIC_ACQUIRE))
+        return KEP_SCF_ALLOW;
+
     uint64_t words[KEP_SCF_WORDS];
     for (int i = 0; i < KEP_SCF_ARGS; i++)
         words[KEP_SCF_ARG0 + i] = args[i];
@@ -43,4 +48,10 @@ int kep_syscall_filter_check(uint64_t nr, const uint64_t *args, int abi)
         .nwords = KEP_SCF_WORDS,
     };
     return (int)kep_point_run(&kep_syscall_filter_point, &ctx);
+}
+
+int kep_syscall_filter_active(void)
+{
+    return __atomic_load_n(&kep_syscall_filter_point.attached,
+                           __ATOMIC_ACQUIRE) != 0;
 }

@@ -588,6 +588,11 @@ uint32_t kep_point_run(kep_point_t *pt, kep_ctx_t *ctx)
 {
     if (!pt || !ctx)
         return 0;
+    /* Extension points are empty in the normal benchmark workload.  Attach and
+     * detach publish the list under pt->lock; an acquire observation of NULL
+     * can return without taking that global syscall-hot-path lock. */
+    if (!__atomic_load_n(&pt->attached, __ATOMIC_ACQUIRE))
+        return 0;
     uint32_t verdict = 0;
     uint64_t flags = spin_lock_irqsave(&pt->lock);
     for (kep_attached_t *a = pt->attached; a; a = a->next) {

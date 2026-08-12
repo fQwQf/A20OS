@@ -783,8 +783,13 @@ static uint32_t drvmod_apply_reloc(uint32_t machine, uint8_t *shadow,
                 }
                 uintptr_t got = load_base + got_off[i];
                 *(uint64_t *)(shadow + got_off[i]) = S + r->r_addend;
+                /* ld.d's imm12 is sign-extended.  When the GOT slot's low
+                 * 12 bits are >= 0x800, carry into pcalau12i's page delta
+                 * so the paired load still addresses the same slot. */
+                uint32_t lo = (uint32_t)got & 0xFFF;
                 uint32_t hi = ((uint32_t)(got >> 12) -
-                               (uint32_t)(P >> 12)) & 0xFFFFF;
+                               (uint32_t)(P >> 12) +
+                               (lo >= 0x800 ? 1U : 0U)) & 0xFFFFF;
                 uint32_t insn = *(uint32_t *)(shadow + sec_load_off + r->r_offset);
                 *(uint32_t *)(shadow + sec_load_off + r->r_offset) =
                     (insn & 0xFE00001F) | (hi << 5);
