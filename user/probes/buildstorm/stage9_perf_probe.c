@@ -25,6 +25,11 @@ extern int clock_gettime(int clock_id, struct probe_timespec *time);
 extern void *mmap(void *address, size_t length, int protection, int flags,
                   int fd, off_t offset);
 extern int munmap(void *address, size_t length);
+extern int getpid(void);
+extern int fork(void);
+extern int pipe(int pipefd[2]);
+extern int waitpid(int pid, int *status, int options);
+extern void _exit(int status);
 
 #define O_RDONLY 0
 #define O_WRONLY 1
@@ -42,10 +47,38 @@ extern int munmap(void *address, size_t length);
 #define IO_ROUNDS 64
 #define STAT_ROUNDS 128
 #define MMAP_ROUNDS 128
+#define SYSCALL_ROUNDS 200000
+#define FORK_ROUNDS 256
+#define PIPE_PINGPONG_ROUNDS 50000
+#define ANON_FAULT_BYTES (64UL * 1024UL * 1024UL)
+#define ANON_FAULT_ROUNDS 4
+#define FILE_FAULT_ROUNDS 8
+#define FILE_FAULT_PARALLEL_ROUNDS 2
+#define FILE_READ_BUFFER_BYTES (64UL * 1024UL)
+#define FILE_READ_HOT_ROUNDS 4
+#define CPU_FIXED_ROUNDS 50000000UL
+#define CPU_PARALLEL_WORKERS 8
 
 static const char g_base[] = "/work/a20-stage9-perf";
 static const char g_io_file[] = "/work/a20-stage9-perf/io-file";
+static const char g_fault_file[] = "/work/tgoskits/target/debug/tg-xtask";
 static char g_page[4096];
+static char g_read_buffer[FILE_READ_BUFFER_BYTES]
+    __attribute__((aligned(4096)));
+static volatile unsigned long g_fault_sink;
+
+static unsigned long cpu_fixed_work(unsigned long seed)
+{
+    unsigned long value = seed | 1UL;
+
+    for (unsigned long i = 0; i < CPU_FIXED_ROUNDS; i++) {
+        value ^= value << 13;
+        value ^= value >> 7;
+        value ^= value << 17;
+        value += i ^ 0x9e3779b97f4a7c15UL;
+    }
+    return value;
+}
 
 static size_t text_length(const char *text)
 {
@@ -143,10 +176,15 @@ static int snapshot_file(const char *label, const char *source,
 
 static int checkpoint(const char *label)
 {
+#ifdef A20_PORTABLE_DIAG
+    (void)label;
+    return 0;
+#else
     if (snapshot_file(label, "perf", "/proc/a20/perf") != 0)
         return -1;
     return snapshot_file(label, "task_lifetime",
                          "/proc/a20/task_lifetime");
+#endif
 }
 
 static void cleanup_files_best_effort(void)
@@ -284,6 +322,233 @@ static int subload_mmap(void)
     return 0;
 }
 
+static int subload_syscall_getpid(void)
+{
+    unsigned long sum = 0;
+    for (unsigned i = 0; i < SYSCALL_ROUNDS; i++)
+        sum += (unsigned)getpid();
+    g_fault_sink = sum;
+    return 0;
+}
+
+static int subload_cpu_single(void)
+{
+    g_fault_sink = cpu_fixed_work(0x243f6a8885a308d3UL);
+    return 0;
+}
+
+static int subload_cpu_parallel(void)
+{
+    int pids[CPU_PARALLEL_WORKERS];
+    unsigned started = 0;
+
+    for (unsigned worker = 0; worker < CPU_PARALLEL_WORKERS; worker++) {
+        int pid = fork();
+        if (pid < 0)
+            break;
+        if (pid == 0) {
+            g_fault_sink = cpu_fixed_work(
+                0x13198a2e03707344UL + (unsigned long)worker);
+            _exit(0);
+        }
+        pids[started++] = pid;
+    }
+
+    int failed = started != CPU_PARALLEL_WORKERS;
+    for (unsigned worker = 0; worker < started; worker++) {
+        int status = -1;
+        if (waitpid(pids[worker], &status, 0) != pids[worker] || status != 0)
+            failed = 1;
+    }
+    return failed ? -1 : 0;
+}
+
+static int subload_fork_wait(void)
+{
+    for (unsigned i = 0; i < FORK_ROUNDS; i++) {
+        int pid = fork();
+        if (pid < 0)
+            return -1;
+        if (pid == 0)
+            _exit(0);
+        int status = -1;
+        if (waitpid(pid, &status, 0) != pid || status != 0)
+            return -1;
+    }
+    return 0;
+}
+
+static int subload_pipe_pingpong(void)
+{
+    int request[2] = {-1, -1};
+    int response[2] = {-1, -1};
+    if (pipe(request) != 0 || pipe(response) != 0)
+        return -1;
+
+    int pid = fork();
+    if (pid < 0)
+        return -1;
+    if (pid == 0) {
+        char token = 0;
+        (void)close(request[1]);
+        (void)close(response[0]);
+        for (unsigned i = 0; i < PIPE_PINGPONG_ROUNDS; i++) {
+            if (read(request[0], &token, 1) != 1 ||
+                write(response[1], &token, 1) != 1)
+                _exit(1);
+        }
+        (void)close(request[0]);
+        (void)close(response[1]);
+        _exit(0);
+    }
+
+    (void)close(request[0]);
+    (void)close(response[1]);
+    char token = 1;
+    int failed = 0;
+    for (unsigned i = 0; i < PIPE_PINGPONG_ROUNDS; i++) {
+        if (write(request[1], &token, 1) != 1 ||
+            read(response[0], &token, 1) != 1) {
+            failed = 1;
+            break;
+        }
+    }
+    (void)close(request[1]);
+    (void)close(response[0]);
+    int status = -1;
+    if (waitpid(pid, &status, 0) != pid || status != 0)
+        failed = 1;
+    return failed ? -1 : 0;
+}
+
+static int subload_anon_fault(void)
+{
+    unsigned long sum = 0;
+    for (unsigned round = 0; round < ANON_FAULT_ROUNDS; round++) {
+        volatile unsigned char *mapping = mmap(
+            (void *)0, ANON_FAULT_BYTES, PROT_READ | PROT_WRITE,
+            MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if ((void *)mapping == MAP_FAILED)
+            return -1;
+        for (size_t offset = 0; offset < ANON_FAULT_BYTES; offset += 4096) {
+            mapping[offset] = (unsigned char)(offset + round);
+            sum += mapping[offset];
+        }
+        if (munmap((void *)mapping, ANON_FAULT_BYTES) != 0)
+            return -1;
+    }
+    g_fault_sink = sum;
+    return 0;
+}
+
+static int subload_file_fault(void)
+{
+    int fd = open(g_fault_file, O_RDONLY);
+    if (fd < 0)
+        return -1;
+    off_t end = lseek(fd, 0, 2);
+    if (end <= 0 || lseek(fd, 0, SEEK_SET) != 0) {
+        close(fd);
+        return -1;
+    }
+
+    size_t length = (size_t)end;
+    unsigned long sum = 0;
+    for (unsigned round = 0; round < FILE_FAULT_ROUNDS; round++) {
+        volatile const unsigned char *mapping = mmap(
+            (void *)0, length, PROT_READ, MAP_PRIVATE, fd, 0);
+        if ((void *)mapping == MAP_FAILED) {
+            close(fd);
+            return -1;
+        }
+        for (size_t offset = 0; offset < length; offset += 4096)
+            sum += mapping[offset];
+        if (munmap((void *)mapping, length) != 0) {
+            close(fd);
+            return -1;
+        }
+    }
+    g_fault_sink = sum;
+    return close(fd);
+}
+
+static int subload_file_fault_parallel(void)
+{
+    int pids[CPU_PARALLEL_WORKERS];
+    unsigned started = 0;
+
+    for (unsigned worker = 0; worker < CPU_PARALLEL_WORKERS; worker++) {
+        int pid = fork();
+        if (pid < 0)
+            break;
+        if (pid == 0) {
+            int fd = open(g_fault_file, O_RDONLY);
+            if (fd < 0)
+                _exit(1);
+            off_t end = lseek(fd, 0, 2);
+            if (end <= 0 || lseek(fd, 0, SEEK_SET) != 0)
+                _exit(1);
+            size_t length = (size_t)end;
+            unsigned long sum = 0;
+            for (unsigned round = 0;
+                 round < FILE_FAULT_PARALLEL_ROUNDS; round++) {
+                volatile const unsigned char *mapping = mmap(
+                    (void *)0, length, PROT_READ, MAP_PRIVATE, fd, 0);
+                if ((void *)mapping == MAP_FAILED)
+                    _exit(1);
+                for (size_t offset = 0; offset < length; offset += 4096)
+                    sum += mapping[offset];
+                if (munmap((void *)mapping, length) != 0)
+                    _exit(1);
+            }
+            g_fault_sink = sum;
+            _exit(close(fd) == 0 ? 0 : 1);
+        }
+        pids[started++] = pid;
+    }
+
+    int failed = started != CPU_PARALLEL_WORKERS;
+    for (unsigned worker = 0; worker < started; worker++) {
+        int status = -1;
+        if (waitpid(pids[worker], &status, 0) != pids[worker] || status != 0)
+            failed = 1;
+    }
+    return failed ? -1 : 0;
+}
+
+/* Measure the regular read(2) path after the mmap fault probes have populated
+ * the canonical file page cache.  rustc and Cargo repeatedly scan large input
+ * files through read/readv; this separates that VFS + user-buffer path from
+ * storage latency and from executable mmap faults. */
+static int subload_file_read_hot(void)
+{
+    int fd = open(g_fault_file, O_RDONLY);
+    if (fd < 0)
+        return -1;
+
+    unsigned long sum = 0;
+    for (unsigned round = 0; round < FILE_READ_HOT_ROUNDS; round++) {
+        if (lseek(fd, 0, SEEK_SET) != 0) {
+            close(fd);
+            return -1;
+        }
+        for (;;) {
+            ssize_t count = read(fd, g_read_buffer,
+                                 sizeof(g_read_buffer));
+            if (count < 0) {
+                close(fd);
+                return -1;
+            }
+            if (count == 0)
+                break;
+            for (size_t offset = 0; offset < (size_t)count; offset += 4096)
+                sum += (unsigned char)g_read_buffer[offset];
+        }
+    }
+    g_fault_sink = sum;
+    return close(fd);
+}
+
 static int subload_sync_cleanup(void)
 {
     return cleanup_files_strict();
@@ -340,10 +605,19 @@ int probe_main(void)
         run_subload("ext4-create-allocation", subload_ext4_create) != 0 ||
         run_subload("overwrite", subload_overwrite) != 0 ||
         run_subload("mmap-munmap", subload_mmap) != 0 ||
+        run_subload("cpu-fixed-single", subload_cpu_single) != 0 ||
+        run_subload("cpu-fixed-parallel-8", subload_cpu_parallel) != 0 ||
+        run_subload("syscall-getpid", subload_syscall_getpid) != 0 ||
+        run_subload("fork-wait", subload_fork_wait) != 0 ||
+        run_subload("pipe-pingpong", subload_pipe_pingpong) != 0 ||
+        run_subload("anon-fault", subload_anon_fault) != 0 ||
+        run_subload("file-fault", subload_file_fault) != 0 ||
+        run_subload("file-fault-parallel-8", subload_file_fault_parallel) != 0 ||
+        run_subload("file-read-hot", subload_file_read_hot) != 0 ||
         run_subload("sync-cleanup", subload_sync_cleanup) != 0)
         goto fail;
 
-    print_text("BUILDSTORM_STAGE9_PERF ok subloads=7 snapshots=8\n");
+    print_text("BUILDSTORM_STAGE9_PERF ok subloads=16 snapshots=17\n");
     return 0;
 
 fail:

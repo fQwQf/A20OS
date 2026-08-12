@@ -90,6 +90,9 @@ __switch:
     csrr    t1, satp
     beq     t0, t1, .Lskip_switch_satp
     csrw    satp, t0
+    la      t2, riscv64_asid_mask
+    ld      t2, 0(t2)
+    bnez    t2, .Lskip_switch_satp
     sfence.vma
 .Lskip_switch_satp:
 #endif

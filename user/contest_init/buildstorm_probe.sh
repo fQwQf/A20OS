@@ -393,19 +393,24 @@ probe_stage7_shebang_exec() {
 }
 
 probe_stage7_parallel_rustc() {
-    typeset base=/tmp/a20-stage7-rustc-j8
+    typeset base=${1:-/tmp/a20-stage7-rustc-j8}
+    typeset -i max_rounds=${2:-4}
     typeset source="$base/hello.rs"
     typeset pids=
     typeset -i round=1
     typeset -i worker=1
     typeset -i rc=0
+    typeset round_t0=
+    typeset round_t1=
+    typeset round_elapsed=
 
     rm -rf -- "$base" || return
     mkdir -p "$base" || return
     print 'fn main() { println!("stage7 rustc parallel probe"); }' >"$source" || return
-    print "STAGE7_RUSTC_META cores=$(/usr/bin/nproc) workers=8 rounds=4"
+    print "STAGE7_RUSTC_META cores=$(/usr/bin/nproc) workers=8 rounds=$max_rounds"
 
-    while (( round <= 4 )); do
+    while (( round <= max_rounds )); do
+        round_t0=$(/usr/bin/cut -d' ' -f1 /proc/uptime) || return
         pids=
         worker=1
         while (( worker <= 8 )); do
@@ -435,12 +440,117 @@ probe_stage7_parallel_rustc() {
             (( worker++ ))
         done
         rm -f -- "$base"/hello-* "$base"/rustc-*.log || return
-        print "BUILDSTORM_STAGE7_RUSTC_J8 progress=$round/4"
+        round_t1=$(/usr/bin/cut -d' ' -f1 /proc/uptime) || return
+        round_elapsed=$(/usr/bin/awk \
+            "BEGIN{printf \"%.2f\", (\"$round_t1\"+0)-(\"$round_t0\"+0)}") || return
+        print "BUILDSTORM_STAGE7_RUSTC_J8 progress=$round/$max_rounds elapsed_s=$round_elapsed"
+        print "STAGE7_RUSTC_CACHE round=$round/$max_rounds"
+        cat /proc/a20/page_cache || return
         (( round++ ))
     done
 
-    print "BUILDSTORM_STAGE7_RUSTC_J8 ok compiles=32"
+    print "BUILDSTORM_STAGE7_RUSTC_J8 ok compiles=$((max_rounds * 8))"
     rm -rf -- "$base" || return
+}
+
+probe_stage7_parallel_rustc_profile() {
+    print "STAGE7_RUSTC_PROFILE before"
+    cat /proc/a20/perf || return
+    probe_stage7_parallel_rustc /tmp/a20-stage7-rustc-j8-profile 1 || return
+    print "STAGE7_RUSTC_PROFILE after"
+    cat /proc/a20/perf || return
+}
+
+probe_stage7_parallel_rustc_cache_profile() {
+    print "STAGE7_RUSTC_CACHE_PROFILE before"
+    cat /proc/a20/perf || return
+    cat /proc/a20/page_cache || return
+    probe_stage7_parallel_rustc /tmp/a20-stage7-rustc-j8-cache-profile 4 || return
+    print "STAGE7_RUSTC_CACHE_PROFILE after"
+    cat /proc/a20/perf || return
+    cat /proc/a20/page_cache || return
+}
+
+probe_stage7_writeback_256m() {
+    typeset base=/work/a20-stage7-writeback-256m
+    typeset path=
+    typeset t0=
+    typeset t1=
+    typeset write_elapsed=
+    typeset sync_elapsed=
+    typeset -i part=0
+    typeset -i dd_rc=0
+
+    rm -f -- "$base".* || return
+    print "BUILDSTORM_WRITEBACK_256M phase=before"
+    cat /proc/a20/perf || return
+    cat /proc/a20/page_cache || return
+    cat /proc/a20/bcache || return
+
+    t0=$(/usr/bin/cut -d' ' -f1 /proc/uptime) || return
+    while (( part < 4 )); do
+        path="$base.$part"
+        # A20OS intentionally bounds a single read/write syscall to 64 KiB;
+        # match that ABI instead of letting coreutils count short 1 MiB writes
+        # as completed input records.
+        /usr/bin/dd if=/dev/zero of="$path" bs=65536 count=1024 status=none
+        dd_rc=$?
+        typeset bytes=$(/usr/bin/wc -c <"$path" 2>/dev/null)
+        print "BUILDSTORM_WRITEBACK_256M part=$part dd_rc=$dd_rc bytes=${bytes:-missing}"
+        (( dd_rc == 0 )) || return 1
+        [[ $bytes == 67108864 ]] || return 1
+        (( part++ ))
+    done
+    t1=$(/usr/bin/cut -d' ' -f1 /proc/uptime) || return
+    write_elapsed=$(/usr/bin/awk \
+        "BEGIN{printf \"%.2f\", (\"$t1\"+0)-(\"$t0\"+0)}") || return
+    print "BUILDSTORM_WRITEBACK_256M phase=written elapsed_s=$write_elapsed"
+    cat /proc/a20/perf || return
+    cat /proc/a20/page_cache || return
+    cat /proc/a20/bcache || return
+
+    t0=$(/usr/bin/cut -d' ' -f1 /proc/uptime) || return
+    sync || return
+    t1=$(/usr/bin/cut -d' ' -f1 /proc/uptime) || return
+    sync_elapsed=$(/usr/bin/awk \
+        "BEGIN{printf \"%.2f\", (\"$t1\"+0)-(\"$t0\"+0)}") || return
+    print "BUILDSTORM_WRITEBACK_256M phase=synced elapsed_s=$sync_elapsed"
+    cat /proc/a20/perf || return
+    cat /proc/a20/page_cache || return
+    cat /proc/a20/bcache || return
+
+    print 3 >/proc/sys/vm/drop_caches || return
+    part=0
+    while (( part < 4 )); do
+        path="$base.$part"
+        [[ $(/usr/bin/wc -c <"$path") == 67108864 ]] || return
+        rm -f -- "$path" || return
+        (( part++ ))
+    done
+    sync || return
+    print "BUILDSTORM_WRITEBACK_256M ok"
+}
+
+probe_stage7_parallel_rustc_tmpfs() {
+    typeset mountpoint=/tmp/a20-stage7-rustc-j8-tmpfs
+    typeset -i rc=1
+
+    rm -rf -- "$mountpoint" || return
+    mkdir -p "$mountpoint" || return
+    mount -t tmpfs tmpfs "$mountpoint" || {
+        print "STAGE7_RUSTC_META tmpfs_mount=failed"
+        return 1
+    }
+    print "STAGE7_RUSTC_META output_fs=tmpfs mountpoint=$mountpoint"
+    probe_stage7_parallel_rustc "$mountpoint/work"
+    rc=$?
+    umount "$mountpoint" || {
+        print "STAGE7_RUSTC_META tmpfs_unmount=failed"
+        return 1
+    }
+    rmdir "$mountpoint" || return
+    print "STAGE7_RUSTC_META tmpfs_unmount=ok"
+    return $rc
 }
 
 probe_stage7_parallel_llvm() {
@@ -537,6 +647,7 @@ probe_stage7_full_build() {
     typeset jobs_label=
     typeset artifact=
     typeset artifact_sha=missing
+    typeset target_mount=
     typeset t0=
     typeset t1=
     typeset helper_elapsed=0
@@ -545,6 +656,7 @@ probe_stage7_full_build() {
     typeset -i jobs=0
     typeset -i helper_rc=1
     typeset -i compile_rc=1
+    typeset -i use_target_tmpfs=0
 
     case "$name" in
     stage7-full-j1) jobs=1; jobs_label=1 ;;
@@ -552,6 +664,11 @@ probe_stage7_full_build() {
     stage7-full-j4) jobs=4; jobs_label=4 ;;
     stage7-full-j8) jobs=8; jobs_label=8 ;;
     stage7-full-default) jobs=0; jobs_label=default ;;
+    stage7-full-default-tmpfs)
+        jobs=0
+        jobs_label=default
+        use_target_tmpfs=1
+        ;;
     *) return 2 ;;
     esac
     case "$arch" in
@@ -573,6 +690,7 @@ probe_stage7_full_build() {
     print "STAGE7_META stage7_cargo_jobs=$jobs_label"
     print "STAGE7_META stage7_guest_nproc=$(/usr/bin/nproc)"
     print "STAGE7_META stage7_compile_command=cargo_xtask_arceos_build"
+    print "STAGE7_META stage7_target_fs=$([[ $use_target_tmpfs == 1 ]] && print tmpfs || print ext4)"
 
     unset RUSTC LD_LIBRARY_PATH CARGO_BUILD_JOBS
     /root/.cargo/bin/rustc --version || return
@@ -603,6 +721,19 @@ probe_stage7_full_build() {
         return 1
     fi
     print "STAGE7_META stage7_target_cleanup=$worktree/target/$axtgt"
+
+    if (( use_target_tmpfs )); then
+        target_mount="$worktree/target/$axtgt"
+        mkdir -p -- "$target_mount" || return
+        mount -t tmpfs tmpfs "$target_mount" || {
+            print "STAGE7_META stage7_target_tmpfs_mount=failed"
+            return 1
+        }
+        print "STAGE7_META stage7_target_tmpfs_mount=$target_mount"
+        /usr/bin/awk -v target="$target_mount" \
+            '$2 == target { print "STAGE7_META stage7_target_mount=" $0; found=1 } END { exit !found }' \
+            /proc/mounts || return
+    fi
 
     rm -f -- "$helper_output" "$compile_output" || return
     t0=$(/usr/bin/cut -d' ' -f1 /proc/uptime 2>/dev/null) || return
@@ -671,6 +802,14 @@ probe_stage7_full_build() {
         return 1
     fi
     sync || return
+    if [[ -n $target_mount ]]; then
+        umount "$target_mount" || {
+            print "STAGE7_META stage7_target_tmpfs_unmount=failed"
+            return 1
+        }
+        rm -rf -- "$target_mount" || return
+        print "STAGE7_META stage7_target_tmpfs_unmount=ok"
+    fi
     print "BUILDSTORM_COMPILE mode=stage7 ok=true elapsed_s=$compile_elapsed cores=$(/usr/bin/nproc) jobs=$jobs_label bytes=$bytes arch=$axarch"
     print "BUILDSTORM_STAGE7_COMPILE ok"
 }
@@ -784,10 +923,14 @@ run_named_case() {
     stage6-precompiled-helper) probe_stage6_precompiled_helper ;;
     stage7-shebang-exec) probe_stage7_shebang_exec ;;
     stage7-rustc-j8) probe_stage7_parallel_rustc ;;
+    stage7-rustc-j8-profile) probe_stage7_parallel_rustc_profile ;;
+    stage7-rustc-j8-cache-profile) probe_stage7_parallel_rustc_cache_profile ;;
+    stage7-writeback-256m) probe_stage7_writeback_256m ;;
+    stage7-rustc-j8-tmpfs) probe_stage7_parallel_rustc_tmpfs ;;
     stage7-rustc-llvm-j8) probe_stage7_parallel_llvm ;;
     stage9-perf-feedback) probe_stage9_feedback ;;
     stage9-block-io-stress) probe_stage9_block_io_stress ;;
-    stage7-full-j1|stage7-full-j2|stage7-full-j4|stage7-full-j8|stage7-full-default)
+    stage7-full-j1|stage7-full-j2|stage7-full-j4|stage7-full-j8|stage7-full-default|stage7-full-default-tmpfs)
         probe_stage7_full_build "$1"
         ;;
     *)
