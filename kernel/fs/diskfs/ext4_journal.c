@@ -549,8 +549,16 @@ int ext4_journal_recover(ext4_sb_info_t *fs, ext4_superblock_t *disk_sb)
         if (ret < 0)
             goto out;
         ret = bcache_sync_checked(fs->bc);
-        if (ret < 0)
+        if (ret < 0) {
+            /* Deferral is safe here: the on-disk journal still holds the
+             * uncommitted transactions (mark_empty has not run), so the next
+             * mount replays them again.  Replay is full-block blind writes,
+             * therefore idempotent over any partially flushed prefix. */
+            printf("[EXT4/JBD2] replay flush failed (%d); keeping replayed "
+                   "blocks in cache and deferring journal cleanup\n", ret);
+            ret = EXT4_JOURNAL_DEFERRED;
             goto out;
+        }
         printf("[EXT4/JBD2] replay complete transactions=%u blocks=%u "
                "revokes=%u hits=%u head=%u\n",
                j.end_sequence - j.sequence, j.replayed_blocks,
@@ -561,14 +569,28 @@ int ext4_journal_recover(ext4_sb_info_t *fs, ext4_superblock_t *disk_sb)
     if (ret < 0)
         goto out;
     ret = bcache_sync_checked(fs->bc);
-    if (ret < 0)
+    if (ret < 0) {
+        /* All replayed blocks are already durable (the post-replay sync
+         * succeeded), so the emptied journal superblock may reach the disk
+         * at any later time without risking inconsistency.  If it never
+         * does, the next mount simply replays the same transactions. */
+        printf("[EXT4/JBD2] mark-empty flush failed (%d); deferring\n", ret);
+        ret = EXT4_JOURNAL_DEFERRED;
         goto out;
+    }
     ret = ext4_clear_recover_feature(&j, disk_sb);
     if (ret < 0)
         goto out;
     ret = bcache_sync_checked(fs->bc);
-    if (ret < 0)
+    if (ret < 0) {
+        /* Worst case on disk: empty journal with the recover flag still
+         * set, which the next mount handles through the already-empty
+         * path. */
+        printf("[EXT4/JBD2] recover-flag flush failed (%d); deferring\n",
+               ret);
+        ret = EXT4_JOURNAL_DEFERRED;
         goto out;
+    }
     printf("[EXT4/JBD2] journal marked empty and recover flag cleared\n");
 
 out:
