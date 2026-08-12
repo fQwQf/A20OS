@@ -34,6 +34,7 @@ enum {
     DEVFS_SHM_DIR,
     DEVFS_FB,
     DEVFS_INPUT,
+    DEVFS_INPUT_DIR,
     DEVFS_CLASS,
     DEVFS_DRI_DIR,
     DEVFS_DRM,

@@ -1,0 +1,12 @@
+diff --git a/configure.ac b/configure.ac
+--- a/configure.ac
++++ b/configure.ac
+@@ -151,7 +151,7 @@
+ dnl *********************
+ dnl *** Check for X11 ***
+ dnl *********************
+-XDT_CHECK_LIBX11_REQUIRE()
++XDT_CHECK_LIBX11()
+ 
+ dnl *************************
+ dnl *** Check for gtk-doc ***

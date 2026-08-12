@@ -6,6 +6,10 @@
 #include "core/stdio.h"
 #include "core/klog.h"
 #include "core/poll.h"
+#include "core/lock.h"
+#include "core/sync.h"
+#include "core/timer.h"
+#include "core/timekeeping.h"
 #include "drivers/core/driver_class.h"
 #include "drivers/gpu/gpu_core.h"
 #include "fs/anonfd.h"
@@ -31,6 +35,7 @@
 
 #define DRM_MAX_BUFFERS 16
 #define DRM_EVENT_FLIP_COMPLETE 0x02
+#define DRM_CTX_EVENT_MAX 16
 
 typedef struct drm_buffer {
     int used;
@@ -47,9 +52,49 @@ typedef struct drm_context {
     uint32_t next_handle;
     uint32_t magic;
     int is_master;
-    uint8_t event[32];
-    size_t event_len;
+    /* FIFO of completed DRM events (fixed 32-byte drm_event_vblank records)
+     * destined for this open file.  Linux never overwrites a queued event,
+     * so neither do we: wlroots matches page-flip completions to pending
+     * flips and a lost event wedges its frame scheduler for good. */
+    uint8_t events[DRM_CTX_EVENT_MAX][32];
+    unsigned ev_head;
+    unsigned ev_tail;
 } drm_context_t;
+
+/*
+ * Simulated vblank machinery.  A20OS scanout presents synchronously inside
+ * the PAGE_FLIP ioctl, and the flip completion event is made visible to
+ * poll/read immediately afterwards — matching how the virtio-gpu command
+ * completes before the ioctl returns.  What this layer adds over the naive
+ * approach is Linux-compatible *event semantics*: a per-file FIFO that
+ * never drops completions (a lost page-flip event wedges wlroots' frame
+ * scheduler permanently), real monotonic timestamps, a monotonically
+ * increasing vblank sequence, EBUSY when a flip is still pending, and a
+ * blocking read for libdrm.
+ */
+static struct {
+    mutex_t lock;
+    wait_queue_t waiters;
+    int initialized;
+    int flip_pending;
+    drm_context_t *flip_ctx;
+    uint64_t flip_user_data;
+    uint32_t flip_crtc_id;
+    uint32_t sequence;
+} g_vblank;
+
+static void drm_vblank_init_once(void)
+{
+    if (__sync_bool_compare_and_swap(&g_vblank.initialized, 0, 1)) {
+        mutex_init(&g_vblank.lock);
+        wait_queue_init(&g_vblank.waiters);
+        __sync_synchronize();
+        g_vblank.initialized = 2;
+        return;
+    }
+    while (*(volatile int *)&g_vblank.initialized != 2)
+        ;
+}
 
 /* DRM dumb buffers are global to the device, so a handle created by one open
  * (the wlroots dumb allocator) is visible to another (the wlroots backend),
@@ -259,6 +304,12 @@ struct drm_mode_get_property {
     uint32_t count_enum_blobs;
 };
 
+struct drm_mode_get_blob {
+    uint32_t blob_id;
+    uint32_t length;
+    uint64_t data;
+};
+
 struct drm_mode_obj_get_properties {
     uint64_t props_ptr;
     uint64_t prop_values_ptr;
@@ -312,6 +363,35 @@ struct drm_event_vblank {
     uint32_t sequence;
     uint32_t crtc_id;
 };
+
+/* Move a pending flip into its owner's event FIFO once the present has
+ * completed (which, on this hardware, is before the ioctl returns).
+ * Caller holds g_vblank.lock. */
+static void drm_vblank_deliver_due_locked(void)
+{
+    if (!g_vblank.flip_pending)
+        return;
+
+    drm_context_t *ctx = g_vblank.flip_ctx;
+    unsigned next = (ctx->ev_tail + 1) % DRM_CTX_EVENT_MAX;
+    if (next != ctx->ev_head) {
+        struct drm_event_vblank event;
+        memset(&event, 0, sizeof(event));
+        uint64_t ts[2] = { 0, 0 };
+        timekeeping_get_monotonic(ts);
+        event.type = DRM_EVENT_FLIP_COMPLETE;
+        event.length = sizeof(event);
+        event.user_data = g_vblank.flip_user_data;
+        event.tv_sec = (uint32_t)ts[0];
+        event.tv_usec = (uint32_t)(ts[1] / 1000);
+        event.sequence = ++g_vblank.sequence;
+        event.crtc_id = g_vblank.flip_crtc_id;
+        memcpy(ctx->events[ctx->ev_tail], &event, sizeof(event));
+        ctx->ev_tail = next;
+    }
+    g_vblank.flip_pending = 0;
+    g_vblank.flip_ctx = NULL;
+}
 
 struct drm_mode_create_dumb {
     uint32_t height;
@@ -429,6 +509,135 @@ static void drm_mode_fill(struct drm_mode_modeinfo *m, uint32_t w, uint32_t h,
     m->vrefresh = vrefresh;
     m->type = 0x40; /* DRM_MODE_TYPE_DRIVER */
     strncpy(m->name, "a20", sizeof(m->name) - 1);
+}
+
+/* ---- connector EDID ---- */
+
+#define DRM_EDID_PROP_ID 1u
+#define DRM_EDID_BLOB_ID 1u
+
+static uint8_t g_edid[128];
+static int g_edid_ready;
+
+static int drm_edid_valid(const uint8_t *e)
+{
+    static const uint8_t header[8] = { 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00 };
+    if (memcmp(e, header, sizeof(header)) != 0)
+        return 0;
+    uint8_t sum = 0;
+    for (int i = 0; i < 128; i++)
+        sum = (uint8_t)(sum + e[i]);
+    return sum == 0;
+}
+
+/*
+ * Build a standards-compliant base EDID block for the virtual display.
+ * wlroots parses make/model/physical size through libdisplay-info, which
+ * rejects malformed blocks, so every field (including the checksum) must be
+ * genuinely valid.  Used when the GPU device offers no EDID of its own.
+ */
+static void drm_edid_synthesize(uint8_t *e, uint32_t w, uint32_t h)
+{
+    memset(e, 0, 128);
+    static const uint8_t header[8] = { 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00 };
+    memcpy(e, header, sizeof(header));
+
+    /* Vendor/product: manufacturer PNP id "AOS", product 1, serial 1. */
+    e[8] = 0x05;  /* 'A'<<2 | 'O'>>3 */
+    e[9] = 0xF3;  /* 'O'<<5 | 'S' */
+    e[10] = 0x01; /* product code (LE) */
+    e[12] = 0x01; /* serial (LE) */
+    e[16] = 1;    /* week of manufacture */
+    e[17] = 36;   /* year 2026 - 1990 */
+    e[18] = 1;    /* EDID version 1.4 */
+    e[19] = 4;
+
+    /* Basic display parameters: digital input, physical size, gamma 2.2. */
+    e[20] = 0xA5; /* digital, 8 bpc, DisplayPort-agnostic */
+    uint32_t cm_w = (w * 254 + 4800) / 9600; /* ~96 dpi estimate, cm */
+    uint32_t cm_h = (h * 254 + 4800) / 9600;
+    if (cm_w == 0 || cm_w > 255) cm_w = 27;
+    if (cm_h == 0 || cm_h > 255) cm_h = 20;
+    e[21] = (uint8_t)cm_w;
+    e[22] = (uint8_t)cm_h;
+    e[23] = 120;  /* gamma 2.20 */
+    e[24] = 0x06; /* sRGB default, preferred timing in first DTD */
+
+    /* sRGB chromaticity coordinates. */
+    static const uint8_t chroma[10] = {
+        0xA6, 0x55, 0x48, 0x9B, 0x26, 0x12, 0x50, 0x54, 0x00, 0x00
+    };
+    memcpy(&e[25], chroma, sizeof(chroma));
+
+    /* Established + standard timings: none beyond the DTD below. */
+    for (int i = 38; i < 54; i++)
+        e[i] = 0x01;
+
+    /* Detailed timing descriptor: 1024x768@60-style mode matching the
+     * fabricated KMS mode (hsync+160, vsync+40). */
+    uint32_t clock_10khz = (w * (h + 40) * 60 + 5000) / 10000;
+    uint32_t hblank = 160, vblank = 40;
+    uint32_t hso = 24, hsw = 96, vso = 3, vsw = 4;
+    uint8_t *d = &e[54];
+    d[0] = (uint8_t)(clock_10khz & 0xff);
+    d[1] = (uint8_t)(clock_10khz >> 8);
+    d[2] = (uint8_t)w;
+    d[3] = (uint8_t)hblank;
+    d[4] = (uint8_t)(((w >> 8) << 4) | (hblank >> 8));
+    d[5] = (uint8_t)h;
+    d[6] = (uint8_t)vblank;
+    d[7] = (uint8_t)(((h >> 8) << 4) | (vblank >> 8));
+    d[8] = (uint8_t)hso;
+    d[9] = (uint8_t)hsw;
+    d[10] = (uint8_t)((vso << 4) | vsw);
+    d[11] = 0;
+    d[12] = (uint8_t)((cm_w * 10) & 0xff); /* image width, mm */
+    d[13] = (uint8_t)((cm_h * 10) & 0xff); /* image height, mm */
+    d[14] = 0;
+    d[15] = 0;
+    d[16] = 0;
+    d[17] = 0x1E; /* digital separate sync, +hsync/+vsync */
+
+    /* Monitor name descriptor: becomes the wayland output model. */
+    static const char name[] = "A20OS Display";
+    d = &e[72];
+    d[3] = 0xFC;
+    for (int i = 0; i < 13; i++)
+        d[5 + i] = (i < (int)sizeof(name) - 1) ? (uint8_t)name[i]
+                   : (i == (int)sizeof(name) - 1) ? '\n' : ' ';
+
+    /* Two dummy descriptors keep parsers that expect four happy. */
+    e[90 + 3] = 0x10;
+    e[108 + 3] = 0x10;
+
+    uint8_t sum = 0;
+    for (int i = 0; i < 127; i++)
+        sum = (uint8_t)(sum + e[i]);
+    e[127] = (uint8_t)(256 - sum);
+}
+
+static const uint8_t *drm_edid_get(void)
+{
+    if (!g_edid_ready) {
+        int done = 0;
+        gpu_dev_ops_t *ops = drm_gpu_ops();
+        if (ops && ops->get_edid) {
+            uint8_t buf[128];
+            int n = ops->get_edid(drm_gpu_device(), buf, sizeof(buf));
+            if (n >= 128 && drm_edid_valid(buf)) {
+                memcpy(g_edid, buf, sizeof(g_edid));
+                done = 1;
+            }
+        }
+        if (!done) {
+            uint32_t w = 1024, h = 768, bpp = 32;
+            if (ops && ops->get_info)
+                (void)ops->get_info(drm_gpu_device(), &w, &h, &bpp);
+            drm_edid_synthesize(g_edid, w, h);
+        }
+        g_edid_ready = 1;
+    }
+    return g_edid;
 }
 
 /* ---- ioctl handlers ---- */
@@ -658,14 +867,23 @@ static int drm_mode_getconnector(drm_context_t *ctx, void *arg)
     con.subpixel = 0;
     con.encoder_id = 1;
     con.count_modes = 1;
-    con.count_props = 0;
+    con.count_props = 1;
     con.count_encoders = 1;
 
+    (void)drm_edid_get();
     if (con.modes_ptr && copy_to_user((void *)(uintptr_t)con.modes_ptr,
                                       &mode, sizeof(mode)) < 0)
         return -EFAULT;
     if (con.encoders_ptr && copy_to_user((void *)(uintptr_t)con.encoders_ptr,
                                          &(uint32_t){ 1 }, sizeof(uint32_t)) < 0)
+        return -EFAULT;
+    if (con.props_ptr && copy_to_user((void *)(uintptr_t)con.props_ptr,
+                                      &(uint32_t){ DRM_EDID_PROP_ID },
+                                      sizeof(uint32_t)) < 0)
+        return -EFAULT;
+    if (con.prop_values_ptr &&
+        copy_to_user((void *)(uintptr_t)con.prop_values_ptr,
+                     &(uint64_t){ DRM_EDID_BLOB_ID }, sizeof(uint64_t)) < 0)
         return -EFAULT;
     return copy_to_user(arg, &con, sizeof(con)) < 0 ? -EFAULT : 0;
 }
@@ -775,30 +993,50 @@ static int drm_mode_rmfb(drm_context_t *ctx, void *arg)
 
 static int drm_mode_pageflip(drm_context_t *ctx, void *arg)
 {
-    static unsigned int pageflip_count;
     struct drm_mode_crtc_page_flip pf;
     if (copy_from_user(&pf, arg, sizeof(pf)) < 0)
         return -EFAULT;
     drm_buffer_t *b = drm_find_buffer(ctx, pf.fb_id);
     if (!b)
         return -ENOENT;
-    if (drm_present_buffer(b) < 0)
-        return -EIO;
-    if (pf.flags & 0x1) { /* DRM_MODE_PAGE_FLIP_EVENT */
-        struct drm_event_vblank event;
-        memset(&event, 0, sizeof(event));
-        event.type = DRM_EVENT_FLIP_COMPLETE;
-        event.length = sizeof(event);
-        event.user_data = pf.user_data;
-        event.sequence = 0;
-        event.crtc_id = pf.crtc_id;
-        memcpy(ctx->event, &event, sizeof(event));
-        ctx->event_len = sizeof(event);
+
+    drm_vblank_init_once();
+    int wants_event = (pf.flags & 0x1) != 0; /* DRM_MODE_PAGE_FLIP_EVENT */
+    if (wants_event) {
+        /* Reserve the single pending-flip slot up front; real hardware
+         * rejects a second flip with EBUSY until the first completes. */
+        mutex_lock(&g_vblank.lock);
+        if (g_vblank.flip_pending) {
+            mutex_unlock(&g_vblank.lock);
+            return -EBUSY;
+        }
+        g_vblank.flip_pending = 1;
+        g_vblank.flip_ctx = ctx;
+        g_vblank.flip_user_data = pf.user_data;
+        g_vblank.flip_crtc_id = pf.crtc_id;
+        mutex_unlock(&g_vblank.lock);
     }
-    if (pageflip_count < 4) {
-        kinfo("[DRM] pageflip flags=%x event_len=%lu\n",
-              pf.flags, (unsigned long)ctx->event_len);
-        pageflip_count++;
+
+    if (drm_present_buffer(b) < 0) {
+        if (wants_event) {
+            mutex_lock(&g_vblank.lock);
+            g_vblank.flip_pending = 0;
+            g_vblank.flip_ctx = NULL;
+            mutex_unlock(&g_vblank.lock);
+        }
+        return -EIO;
+    }
+
+    if (wants_event) {
+        /* Wake any blocking readers so they can re-park on the flip's
+         * vblank deadline instead of sleeping without one. */
+        proc_wake_q_t wake_q;
+        proc_wake_q_init(&wake_q);
+        mutex_lock(&g_vblank.lock);
+        (void)wait_queue_collect_all(&g_vblank.waiters, 0, PROC_WAKE_EVENT,
+                                     &wake_q, NULL);
+        mutex_unlock(&g_vblank.lock);
+        (void)proc_wake_q_flush(&wake_q);
     }
     return 0;
 }
@@ -839,10 +1077,34 @@ static int drm_mode_getproperty(drm_context_t *ctx, void *arg)
     struct drm_mode_get_property p;
     if (copy_from_user(&p, arg, sizeof(p)) < 0)
         return -EFAULT;
-    /* Report no properties for now. */
-    p.count_values = 0;
+    if (p.prop_id != DRM_EDID_PROP_ID)
+        return -ENOENT;
+    memset(p.name, 0, sizeof(p.name));
+    strncpy(p.name, "EDID", sizeof(p.name) - 1);
+    p.flags = 0x10 | 0x04; /* DRM_MODE_PROP_BLOB | DRM_MODE_PROP_IMMUTABLE */
+    p.count_values = 1;
     p.count_enum_blobs = 0;
+    if (p.values_ptr && copy_to_user((void *)(uintptr_t)p.values_ptr,
+                                     &(uint64_t){ DRM_EDID_BLOB_ID },
+                                     sizeof(uint64_t)) < 0)
+        return -EFAULT;
     return copy_to_user(arg, &p, sizeof(p)) < 0 ? -EFAULT : 0;
+}
+
+static int drm_mode_getpropblob(drm_context_t *ctx, void *arg)
+{
+    (void)ctx;
+    struct drm_mode_get_blob b;
+    if (copy_from_user(&b, arg, sizeof(b)) < 0)
+        return -EFAULT;
+    if (b.blob_id != DRM_EDID_BLOB_ID)
+        return -ENOENT;
+    const uint8_t *edid = drm_edid_get();
+    if (b.data && b.length >= 128 &&
+        copy_to_user((void *)(uintptr_t)b.data, edid, 128) < 0)
+        return -EFAULT;
+    b.length = 128;
+    return copy_to_user(arg, &b, sizeof(b)) < 0 ? -EFAULT : 0;
 }
 
 static int drm_mode_setproperty(drm_context_t *ctx, void *arg)
@@ -857,10 +1119,26 @@ static int drm_mode_obj_getproperties(drm_context_t *ctx, void *arg)
     struct drm_mode_obj_get_properties o;
     if (copy_from_user(&o, arg, sizeof(o)) < 0)
         return -EFAULT;
-    /* A20OS exposes no KMS object properties.  Report an empty set for any
-     * valid object id.  (wlroots queries per-object properties to build its
-     * atomic state; an empty set is valid for a minimal display.) */
-    o.count_props = 0;
+    /* The connector carries a single immutable EDID blob property (wlroots
+     * discovers it via object properties); other objects expose none.
+     * DRM_MODE_OBJECT_ANY (0) queries must also match: wlroots reads the
+     * current blob-id value that way. */
+    if ((o.obj_type == 0xc0c0c0c0 || o.obj_type == 0) &&
+        o.obj_id == 1) { /* DRM_MODE_OBJECT_CONNECTOR / DRM_MODE_OBJECT_ANY */
+        o.count_props = 1;
+        (void)drm_edid_get();
+        if (o.props_ptr && copy_to_user((void *)(uintptr_t)o.props_ptr,
+                                        &(uint32_t){ DRM_EDID_PROP_ID },
+                                        sizeof(uint32_t)) < 0)
+            return -EFAULT;
+        if (o.prop_values_ptr &&
+            copy_to_user((void *)(uintptr_t)o.prop_values_ptr,
+                         &(uint64_t){ DRM_EDID_BLOB_ID },
+                         sizeof(uint64_t)) < 0)
+            return -EFAULT;
+    } else {
+        o.count_props = 0;
+    }
     return copy_to_user(arg, &o, sizeof(o)) < 0 ? -EFAULT : 0;
 }
 
@@ -1031,15 +1309,51 @@ static int drm_read(vfile_t *vf, char *buf, size_t count)
     drm_context_t *ctx = vf ? vf->priv : NULL;
     if (!ctx || !buf)
         return -EBADF;
-    if (ctx->event_len == 0)
-        return (vf->flags & O_NONBLOCK) ? -EAGAIN : -EAGAIN;
-    if (count < ctx->event_len)
+    if (count < 32)
         return -EINVAL;
-    memcpy(buf, ctx->event, ctx->event_len);
-    int ret = (int)ctx->event_len;
-    ctx->event_len = 0;
-    kinfo("[DRM] read event bytes=%d\n", ret);
-    return ret;
+
+    drm_vblank_init_once();
+    for (;;) {
+        mutex_lock(&g_vblank.lock);
+        drm_vblank_deliver_due_locked();
+        if (ctx->ev_head != ctx->ev_tail) {
+            /* libdrm reads with a large buffer and handles several events
+             * per read; drain as many complete records as fit. */
+            size_t n = 0;
+            while (ctx->ev_head != ctx->ev_tail && n + 32 <= count) {
+                memcpy(buf + n, ctx->events[ctx->ev_head], 32);
+                ctx->ev_head = (ctx->ev_head + 1) % DRM_CTX_EVENT_MAX;
+                n += 32;
+            }
+            mutex_unlock(&g_vblank.lock);
+            return (int)n;
+        }
+        uint64_t deadline = 0;
+        mutex_unlock(&g_vblank.lock);
+
+        if (vf->flags & O_NONBLOCK)
+            return -EAGAIN;
+
+        /* Block until a future page flip posts an event to this file and
+         * wakes the queue. */
+        proc_wait_token_t token =
+            proc_park_prepare(PROC_WAIT_INTERRUPTIBLE, deadline);
+        if (!token.task)
+            return -EAGAIN;
+        wait_queue_entry_t entry = {0};
+        bool linked = wait_queue_link(&g_vblank.waiters, &entry, token, 0);
+        proc_wake_reason_t reason;
+        if (linked)
+            reason = proc_park_commit(token);
+        else {
+            (void)proc_park_cancel(token);
+            reason = PROC_WAKE_CANCEL;
+        }
+        wait_queue_unlink(&g_vblank.waiters, &entry);
+        proc_park_finish(token);
+        if (proc_wake_reason_is_task_interrupt(reason))
+            return -ERESTARTSYS;
+    }
 }
 
 static int drm_write(vfile_t *vf, const char *buf, size_t count)
@@ -1063,13 +1377,15 @@ static int drm_poll(vfile_t *vf, short events)
     if (!ctx)
         return POLLNVAL;
     short revents = 0;
-    /* KMS commits are acknowledged synchronously by virtio-gpu.  A page-flip
-     * ioctl queues its completion before wlroots returns to poll(), so report
-     * the fd readable only while that completion is pending.  Advertising
-     * unconditional readability makes libdrm call drmHandleEvent() on an
-     * empty fd forever, starving Wayland clients and input dispatch. */
-    if ((events & POLLIN) && ctx->event_len != 0)
+    /* A page-flip completion becomes visible at its vblank deadline; report
+     * the fd readable only while a completed event is actually queued, or
+     * libdrm spins in drmHandleEvent() on an empty fd. */
+    drm_vblank_init_once();
+    mutex_lock(&g_vblank.lock);
+    drm_vblank_deliver_due_locked();
+    if ((events & POLLIN) && ctx->ev_head != ctx->ev_tail)
         revents |= POLLIN;
+    mutex_unlock(&g_vblank.lock);
     return revents;
 }
 
@@ -1080,6 +1396,13 @@ static int drm_close(vfile_t *vf)
         /* Buffers are global; they are reclaimed by DESTROY_DUMB / GEM_CLOSE.
          * Do not free them on close (a compositor may close the allocator fd
          * while buffers are still referenced by the backend). */
+        drm_vblank_init_once();
+        mutex_lock(&g_vblank.lock);
+        if (g_vblank.flip_ctx == ctx) {
+            g_vblank.flip_pending = 0;
+            g_vblank.flip_ctx = NULL;
+        }
+        mutex_unlock(&g_vblank.lock);
         kfree(ctx);
         vf->priv = NULL;
     }
@@ -1145,6 +1468,8 @@ static int drm_ioctl(vfile_t *vf, unsigned long req, void *arg)
         return drm_mode_getgamma(ctx, arg);
     case DRM_IOCTL_MODE_GETPROPERTY:
         return drm_mode_getproperty(ctx, arg);
+    case DRM_IOCTL_MODE_GETPROPBLOB:
+        return drm_mode_getpropblob(ctx, arg);
     case DRM_IOCTL_MODE_SETPROPERTY:
         return drm_mode_setproperty(ctx, arg);
     case DRM_IOCTL_MODE_OBJ_GETPROPERTIES:
