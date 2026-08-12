@@ -3,7 +3,7 @@ OPT ?= -O3
 PROFILE ?= full
 NPROC ?= $(or $(shell getconf _NPROCESSORS_ONLN 2>/dev/null),$(shell sysctl -n hw.logicalcpu 2>/dev/null),4)
 NOMMU ?= 0
-PYTHON ?= conda run -n a20os --no-capture-output python
+PYTHON ?= $(if $(shell command -v conda 2>/dev/null),conda run -n a20os --no-capture-output python,python3)
 
 .DEFAULT_GOAL := all
 
@@ -614,7 +614,7 @@ musl_prepare:
 			--prefix=/opt/musl-$(ARCH) \
 			--disable-shared \
 			--disable-wrapper \
-			CC=$(CC) CROSS_COMPILE=$(CROSS_COMPILE) \
+			'CC=$(CC)' 'CROSS_COMPILE=$(CROSS_COMPILE)' \
 			CFLAGS='$(MUSL_CONFIG_CFLAGS)' \
 			LDFLAGS='$(MUSL_CONFIG_LDFLAGS)'); \
 		env -u ARCH $(MAKE) -C "$(MUSL_BUILD)" $(MUSL_MAKE_JOBS); \

@@ -58,19 +58,19 @@
 	url = https://gitlab.freedesktop.org/mesa/mesa.git
 [submodule "user/external/gui/glib"]
 	path = user/external/gui/glib
-	url = //gitlab.gnome.org/GNOME/glib.git
+	url = https://gitlab.gnome.org/GNOME/glib.git
 [submodule "user/external/gui/pango"]
 	path = user/external/gui/pango
-	url = //gitlab.gnome.org/GNOME/pango.git
+	url = https://gitlab.gnome.org/GNOME/pango.git
 [submodule "user/external/gui/gdk-pixbuf"]
 	path = user/external/gui/gdk-pixbuf
-	url = //gitlab.gnome.org/GNOME/gdk-pixbuf.git
+	url = https://gitlab.gnome.org/GNOME/gdk-pixbuf.git
 [submodule "user/external/gui/gtk3"]
 	path = user/external/gui/gtk3
-	url = //gitlab.gnome.org/GNOME/gtk.git
+	url = https://gitlab.gnome.org/GNOME/gtk.git
 [submodule "user/external/gui/dbus"]
 	path = user/external/gui/dbus
-	url = //gitlab.freedesktop.org/dbus/dbus.git
+	url = https://gitlab.freedesktop.org/dbus/dbus.git
 [submodule "user/external/gui/atk"]
 	path = user/external/gui/atk
 	url = https://gitlab.gnome.org/GNOME/atk.git
@@ -79,34 +79,34 @@
 	url = https://gitlab.freedesktop.org/cairo/cairo.git
 [submodule "user/external/gui/libxfce4util"]
 	path = user/external/gui/libxfce4util
-	url = //gitlab.xfce.org/xfce/libxfce4util.git
+	url = https://gitlab.xfce.org/xfce/libxfce4util.git
 [submodule "user/external/gui/libxfce4windowing"]
 	path = user/external/gui/libxfce4windowing
-	url = //gitlab.xfce.org/xfce/libxfce4windowing.git
+	url = https://gitlab.xfce.org/xfce/libxfce4windowing.git
 [submodule "user/external/gui/exo"]
 	path = user/external/gui/exo
-	url = //gitlab.xfce.org/xfce/exo.git
+	url = https://gitlab.xfce.org/xfce/exo.git
 [submodule "user/external/gui/libxfce4ui"]
 	path = user/external/gui/libxfce4ui
-	url = //gitlab.xfce.org/xfce/libxfce4ui.git
+	url = https://gitlab.xfce.org/xfce/libxfce4ui.git
 [submodule "user/external/gui/xfconf"]
 	path = user/external/gui/xfconf
-	url = //gitlab.xfce.org/xfce/xfconf.git
+	url = https://gitlab.xfce.org/xfce/xfconf.git
 [submodule "user/external/gui/garcon"]
 	path = user/external/gui/garcon
-	url = //gitlab.xfce.org/xfce/garcon.git
+	url = https://gitlab.xfce.org/xfce/garcon.git
 [submodule "user/external/gui/xfce4-panel"]
 	path = user/external/gui/xfce4-panel
-	url = //gitlab.xfce.org/xfce/xfce4-panel.git
+	url = https://gitlab.xfce.org/xfce/xfce4-panel.git
 [submodule "user/external/gui/xfdesktop"]
 	path = user/external/gui/xfdesktop
-	url = //gitlab.xfce.org/xfce/xfdesktop.git
+	url = https://gitlab.xfce.org/xfce/xfdesktop.git
 [submodule "user/external/gui/xfce4-session"]
 	path = user/external/gui/xfce4-session
-	url = //gitlab.xfce.org/xfce/xfce4-session.git
+	url = https://gitlab.xfce.org/xfce/xfce4-session.git
 [submodule "user/external/gui/thunar"]
 	path = user/external/gui/thunar
-	url = //gitlab.xfce.org/xfce/thunar.git
+	url = https://gitlab.xfce.org/xfce/thunar.git
 [submodule "user/external/gui/gtk-layer-shell"]
 	path = user/external/gui/gtk-layer-shell
 	url = https://github.com/wmww/gtk-layer-shell.git
