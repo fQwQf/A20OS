@@ -470,8 +470,11 @@ net_inet_bottom_half_process_socket_locked(net_socket_t *s,
         int err = __atomic_load_n(&s->bh_err_code, __ATOMIC_RELAXED);
         s->tcp_connecting = 0;
         s->tcp_err = err;
-        if (err == ERR_OK)
+        if (err == ERR_OK) {
             s->connected = 1;
+            net_event_notify(s, A20_EVENT_CONNECTION, 0, 0);
+            net_event_notify(s, A20_EVENT_WRITABLE, 0, 0);
+        }
         if (net_wait_queue_collect_all_locked(
                 &s->read_waitq, PROC_WAKE_EVENT, wake_q))
             drain |= NET_BH_DRAIN_READ;
@@ -481,6 +484,8 @@ net_inet_bottom_half_process_socket_locked(net_socket_t *s,
         s->tcp_connecting = 0;
         s->tcp_err = __atomic_load_n(&s->bh_err_code, __ATOMIC_RELAXED);
         s->closed = 1;
+        net_event_notify(s, A20_EVENT_ERROR, (uint64_t)s->tcp_err, 0);
+        net_event_notify(s, A20_EVENT_CLOSED, 0, 0);
         if (net_wait_queue_collect_all_locked(
                 &s->read_waitq, PROC_WAKE_EVENT, wake_q))
             drain |= NET_BH_DRAIN_READ;
@@ -491,6 +496,7 @@ net_inet_bottom_half_process_socket_locked(net_socket_t *s,
 
     if (__atomic_exchange_n(&s->bh_closed, 0, __ATOMIC_ACQUIRE)) {
         s->closed = 1;
+        net_event_notify(s, A20_EVENT_CLOSED, 0, 0);
         if (net_wait_queue_collect_all_locked(
                 &s->read_waitq, PROC_WAKE_EVENT, wake_q))
             drain |= NET_BH_DRAIN_READ;
@@ -508,6 +514,7 @@ net_inet_bottom_half_process_socket_locked(net_socket_t *s,
                 s, e->data, e->len,
                 e->addrlen ? e->addr : NULL, e->addrlen, e);
             if (queued >= 0) {
+                net_event_notify(s, A20_EVENT_READABLE, 0, 0);
                 if (wake_q->count >= PROC_WAKE_Q_CAPACITY)
                     drain |= NET_BH_DRAIN_READ;
                 else
@@ -519,6 +526,7 @@ net_inet_bottom_half_process_socket_locked(net_socket_t *s,
     }
 
     if (__atomic_exchange_n(&s->bh_tx_wake, 0, __ATOMIC_ACQUIRE)) {
+        net_event_notify(s, A20_EVENT_WRITABLE, 0, 0);
         if (net_wait_queue_collect_all_locked(
                 &s->write_waitq, PROC_WAKE_EVENT, wake_q))
             drain |= NET_BH_DRAIN_WRITE;
@@ -760,6 +768,7 @@ static int net_inet_connect_stream(net_socket_t *s, const void *addr, size_t add
             return qr;
         }
         ktrace_net("[NET] connect: pushed child to listener accept queue\n");
+        net_event_notify(listener, A20_EVENT_ACCEPT_READY, 0, 0);
         (void)wait_queue_collect_one(
             &listener->accept_waitq, 0, PROC_WAKE_EVENT, &wake_q);
         spin_unlock_irqrestore(&g_net_lock, irq);
