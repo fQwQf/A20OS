@@ -28,6 +28,7 @@ kernel-rv
 kernel-la
 .DS_Store
 .kernel-build/
+/build/
 .tmp/
 *.dtb
 .eval-state

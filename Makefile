@@ -246,6 +246,13 @@ comma := ,
 NET_HOSTFWD ?= hostfwd=tcp::5555-:5555,hostfwd=udp::5555-:5555
 NETDEV_USER = -netdev user,id=net$(if $(strip $(NET_HOSTFWD)),$(comma)$(NET_HOSTFWD),)
 SMOKE_TIMEOUT ?= 20s
+# Full XFCE desktop bring-up under TCG software rendering is slow; the fixed
+# 15s scanout window in smoke_qemu_gui.py is not enough for the riscv64 image
+# to finish its first frame.  Allow each GUI smoke target to size the window.
+GUI_FRAME_WINDOW ?= 15
+# riscv64 software rendering in TCG needs substantially longer than the
+# default to complete the XFCE desktop's first scanout.
+GUI_FRAME_WINDOW_RV64 ?= 45
 # TCG boot can take longer than two seconds after a full image rebuild.  Wait
 # until the interactive mksh has had time to print its prompt before injecting
 # smoke commands; PASS markers and clean poweroff still decide the result.
@@ -796,6 +803,8 @@ include tools/targets-dev.mk
 include tools/stm32.mk
 include tools/run-targets.mk
 include tools/targets-images.mk
+include tools/targets-rootfs.mk
+include tools/targets-distro.mk
 include tools/targets-extra.mk
 include tools/targets-native.mk
 include tools/targets-native-smoke.mk
