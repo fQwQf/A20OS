@@ -1,12 +1,6 @@
 # Linux ABI 兼容性说明
 
-`kernel/abi/linux` 为 A20OS 用户态实现了一组 Linux-compatible syscall 子集。
-它是兼容层，不是完整的 Linux kernel personality。
-`syscall_table.def` 当前登记 258 个入口（含 2 个 A20OS 扩展）。登记表示分派表
-覆盖，不表示每项都达到 Linux 语义完整性；已登记的 syscall 可能只支持部分命令、
-flag、对象类型或并发边界。表中不再有固定返回 `-ENOSYS` 的显式占位符；仅存的
-`-ENOSYS` 返回是架构/版本正确的 Linux 语义（nfsservctl 已在 Linux 4.19 移除、
-map_shadow_stack 是 x86 CET、riscv_* 与 arch_prctl 是架构专属）。
+`kernel/abi/linux` 为 A20OS 用户态实现了一组 Linux-compatible syscall 子集。 它是兼容层，不是完整的 Linux kernel personality。 `syscall_table.def` 当前登记 258 个入口（含 2 个 A20OS 扩展）。登记表示分派表 覆盖，不表示每项都达到 Linux 语义完整性；已登记的 syscall 可能只支持部分命令、 flag、对象类型或并发边界。表中不再有固定返回 `-ENOSYS` 的显式占位符；仅存的 `-ENOSYS` 返回是架构/版本正确的 Linux 语义（nfsservctl 已在 Linux 4.19 移除、 map_shadow_stack 是 x86 CET、riscv_* 与 arch_prctl 是架构专属）。
 
 ## 兼容等级
 
