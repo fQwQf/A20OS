@@ -8,8 +8,8 @@
  * clock_gettime/gettimeofday from user space, reading the same time CSR
  * the kernel timekeeping uses, with a seqlock-protected realtime base.
  *
- * Currently implemented for riscv64; other architectures get stubs that
- * keep the syscall path (correct, just slower).
+ * Currently implemented for riscv64; other architectures fall back to the
+ * syscall path for time queries (correct, just slower).
  */
 #ifndef _MM_VDSO_H
 #define _MM_VDSO_H
