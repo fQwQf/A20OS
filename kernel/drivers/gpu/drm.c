@@ -515,6 +515,16 @@ static void drm_mode_fill(struct drm_mode_modeinfo *m, uint32_t w, uint32_t h,
 
 #define DRM_EDID_PROP_ID 1u
 #define DRM_EDID_BLOB_ID 1u
+#define DRM_PLANE_TYPE_PROP_ID 2u
+#define DRM_MODE_OBJECT_PLANE 0xeeeeeeeeu
+#define DRM_PLANE_TYPE_PRIMARY 1u
+/* KMS object IDs must be unique across all object types (like real DRM
+ * drivers, which allocate them from a single IDR): wlroots reads object
+ * properties with DRM_MODE_OBJECT_ANY and resolves the object purely by ID. */
+#define DRM_CONN_ID 1u
+#define DRM_ENC_ID 2u
+#define DRM_CRTC_ID 3u
+#define DRM_PLANE_ID 4u
 
 static uint8_t g_edid[128];
 static int g_edid_ready;
@@ -674,6 +684,28 @@ static int drm_version(drm_context_t *ctx, void *arg)
     v.desc_len = desc_len;
     return copy_to_user(arg, &v, sizeof(v)) < 0 ? -EFAULT : 0;
 }
+/* DRM_CLIENT_CAP_UNIVERSAL_PLANES: the single-plane KMS model is exposed
+ * both through the legacy interface and as a universal PRIMARY plane, so the
+ * cap is accepted (like Linux, which stores it and changes GETPLANE).  The
+ * legacy plane is already the universal primary plane, so nothing changes. */
+static int drm_set_client_cap(drm_context_t *ctx, void *arg)
+{
+    (void)ctx;
+    struct drm_set_client_cap {
+        uint64_t capability;
+        uint64_t value;
+    } cap;
+    if (copy_from_user(&cap, arg, sizeof(cap)) < 0)
+        return -EFAULT;
+    /* DRM_CLIENT_CAP_STEREO_3D=1, DRM_CLIENT_CAP_UNIVERSAL_PLANES=2,
+     * DRM_CLIENT_CAP_ATOMIC=3.  The single-plane KMS model is exposed both
+     * through the legacy interface and as a universal PRIMARY plane, so the
+     * caps are accepted (like Linux, which stores them and changes the
+     * object-query behaviour). */
+    if (cap.capability == 2 || cap.capability == 3)
+        return 0;
+    return -EINVAL;
+}
 
 static int drm_get_cap(drm_context_t *ctx, void *arg)
 {
@@ -694,8 +726,10 @@ static int drm_get_cap(drm_context_t *ctx, void *arg)
     case 0x4: /* DRM_CAP_DUMB_PREFER_SHADOW */
         c.value = 0;
         break;
-    case 0x5: /* DRM_CAP_PRIME */
-        c.value = 0;
+    case 0x5: /* DRM_CAP_PRIME: single-GPU virtio-gpu exports/imports its
+               * dumb buffers through the PRIME handle<->fd mapping, so both
+               * the IMPORT and EXPORT caps are set. */
+        c.value = 3; /* DRM_PRIME_CAP_IMPORT | DRM_PRIME_CAP_EXPORT */
         break;
     case 0x6: /* DRM_CAP_TIMESTAMP_MONOTONIC */
         c.value = 1;
@@ -770,9 +804,9 @@ static int drm_mode_getresources(drm_context_t *ctx, void *arg)
             nfbs++;
 
     uint32_t fbs[DRM_MAX_BUFFERS];
-    uint32_t crtcs[1] = { 1 };
-    uint32_t conns[1] = { 1 };
-    uint32_t encs[1] = { 1 };
+    uint32_t crtcs[1] = { DRM_CRTC_ID };
+    uint32_t conns[1] = { DRM_CONN_ID };
+    uint32_t encs[1] = { DRM_ENC_ID };
     int fi = 0;
     for (int i = 0; i < g_buffer_count; i++)
         if (g_buffers[i].used)
@@ -817,7 +851,7 @@ static int drm_mode_getcrtc(drm_context_t *ctx, void *arg)
         struct device *dev = drm_gpu_device();
         (void)ops->get_info(dev, &w, &h, &bpp);
     }
-    c.crtc_id = 1;
+    c.crtc_id = DRM_CRTC_ID;
     c.mode_valid = 1;
     c.gamma_size = 0;
     drm_mode_fill(&c.mode, w, h, 60);
@@ -858,14 +892,14 @@ static int drm_mode_getconnector(drm_context_t *ctx, void *arg)
     struct drm_mode_modeinfo mode;
     drm_mode_fill(&mode, w, h, 60);
 
-    con.connector_id = 1;
+    con.connector_id = DRM_CONN_ID;
     con.connector_type = 15; /* DRM_MODE_CONNECTOR_VIRTUAL */
     con.connector_type_id = 1;
     con.connection = 1;      /* connected */
     con.mm_width = 0;
     con.mm_height = 0;
     con.subpixel = 0;
-    con.encoder_id = 1;
+    con.encoder_id = DRM_ENC_ID;
     con.count_modes = 1;
     con.count_props = 1;
     con.count_encoders = 1;
@@ -875,7 +909,8 @@ static int drm_mode_getconnector(drm_context_t *ctx, void *arg)
                                       &mode, sizeof(mode)) < 0)
         return -EFAULT;
     if (con.encoders_ptr && copy_to_user((void *)(uintptr_t)con.encoders_ptr,
-                                         &(uint32_t){ 1 }, sizeof(uint32_t)) < 0)
+                                         &(uint32_t){ DRM_ENC_ID },
+                                         sizeof(uint32_t)) < 0)
         return -EFAULT;
     if (con.props_ptr && copy_to_user((void *)(uintptr_t)con.props_ptr,
                                       &(uint32_t){ DRM_EDID_PROP_ID },
@@ -894,9 +929,9 @@ static int drm_mode_getencoder(drm_context_t *ctx, void *arg)
     struct drm_mode_get_encoder e;
     if (copy_from_user(&e, arg, sizeof(e)) < 0)
         return -EFAULT;
-    e.encoder_id = 1;
+    e.encoder_id = DRM_ENC_ID;
     e.encoder_type = 4; /* DRM_MODE_ENCODER_VIRTUAL */
-    e.crtc_id = 1;
+    e.crtc_id = DRM_CRTC_ID;
     e.possible_crtcs = 1;
     e.possible_clones = 0;
     return copy_to_user(arg, &e, sizeof(e)) < 0 ? -EFAULT : 0;
@@ -908,8 +943,8 @@ static int drm_mode_getplane(drm_context_t *ctx, void *arg)
     struct drm_mode_get_plane p;
     if (copy_from_user(&p, arg, sizeof(p)) < 0)
         return -EFAULT;
-    p.plane_id = 1;
-    p.crtc_id = 1;
+    p.plane_id = DRM_PLANE_ID;
+    p.crtc_id = DRM_CRTC_ID;
     p.fb_id = 0;
     p.possible_crtcs = 1;
     p.gamma_size = 0;
@@ -929,7 +964,8 @@ static int drm_mode_getplaneres(drm_context_t *ctx, void *arg)
         return -EFAULT;
     r.count_planes = 1;
     if (r.plane_id_ptr && copy_to_user((void *)(uintptr_t)r.plane_id_ptr,
-                                       &(uint32_t){ 1 }, sizeof(uint32_t)) < 0)
+                                       &(uint32_t){ DRM_PLANE_ID },
+                                       sizeof(uint32_t)) < 0)
         return -EFAULT;
     return copy_to_user(arg, &r, sizeof(r)) < 0 ? -EFAULT : 0;
 }
@@ -1028,11 +1064,16 @@ static int drm_mode_pageflip(drm_context_t *ctx, void *arg)
     }
 
     if (wants_event) {
-        /* Wake any blocking readers so they can re-park on the flip's
-         * vblank deadline instead of sleeping without one. */
+        /* Deliver the completion synchronously, exactly as the hardware
+         * completes: the virtio-gpu command has already returned, so the
+         * flip IS complete the moment the ioctl is about to return.  A
+         * deferred delivery would leave the event invisible to wlroots'
+         * poll until some other activity wakes its event loop, stalling
+         * the frame pipeline on an idle desktop. */
         proc_wake_q_t wake_q;
         proc_wake_q_init(&wake_q);
         mutex_lock(&g_vblank.lock);
+        drm_vblank_deliver_due_locked();
         (void)wait_queue_collect_all(&g_vblank.waiters, 0, PROC_WAKE_EVENT,
                                      &wake_q, NULL);
         mutex_unlock(&g_vblank.lock);
@@ -1077,17 +1118,26 @@ static int drm_mode_getproperty(drm_context_t *ctx, void *arg)
     struct drm_mode_get_property p;
     if (copy_from_user(&p, arg, sizeof(p)) < 0)
         return -EFAULT;
-    if (p.prop_id != DRM_EDID_PROP_ID)
-        return -ENOENT;
     memset(p.name, 0, sizeof(p.name));
-    strncpy(p.name, "EDID", sizeof(p.name) - 1);
-    p.flags = 0x10 | 0x04; /* DRM_MODE_PROP_BLOB | DRM_MODE_PROP_IMMUTABLE */
-    p.count_values = 1;
-    p.count_enum_blobs = 0;
-    if (p.values_ptr && copy_to_user((void *)(uintptr_t)p.values_ptr,
-                                     &(uint64_t){ DRM_EDID_BLOB_ID },
-                                     sizeof(uint64_t)) < 0)
-        return -EFAULT;
+    if (p.prop_id == DRM_EDID_PROP_ID) {
+        strncpy(p.name, "EDID", sizeof(p.name) - 1);
+        p.flags = 0x10 | 0x04; /* DRM_MODE_PROP_BLOB | DRM_MODE_PROP_IMMUTABLE */
+        p.count_values = 1;
+        p.count_enum_blobs = 0;
+        if (p.values_ptr && copy_to_user((void *)(uintptr_t)p.values_ptr,
+                                         &(uint64_t){ DRM_EDID_BLOB_ID },
+                                         sizeof(uint64_t)) < 0)
+            return -EFAULT;
+    } else if (p.prop_id == DRM_PLANE_TYPE_PROP_ID) {
+        /* wlroots reads the plane "type" property (by name) to classify the
+         * plane; only the name and prop_id are needed for that match. */
+        strncpy(p.name, "type", sizeof(p.name) - 1);
+        p.flags = 0x08 | 0x04; /* DRM_MODE_PROP_ENUM | DRM_MODE_PROP_IMMUTABLE */
+        p.count_values = 0;
+        p.count_enum_blobs = 0;
+    } else {
+        return -ENOENT;
+    }
     return copy_to_user(arg, &p, sizeof(p)) < 0 ? -EFAULT : 0;
 }
 
@@ -1119,12 +1169,11 @@ static int drm_mode_obj_getproperties(drm_context_t *ctx, void *arg)
     struct drm_mode_obj_get_properties o;
     if (copy_from_user(&o, arg, sizeof(o)) < 0)
         return -EFAULT;
-    /* The connector carries a single immutable EDID blob property (wlroots
-     * discovers it via object properties); other objects expose none.
-     * DRM_MODE_OBJECT_ANY (0) queries must also match: wlroots reads the
-     * current blob-id value that way. */
-    if ((o.obj_type == 0xc0c0c0c0 || o.obj_type == 0) &&
-        o.obj_id == 1) { /* DRM_MODE_OBJECT_CONNECTOR / DRM_MODE_OBJECT_ANY */
+    /* Object IDs are unique across types, so resolve purely by obj_id.  This
+     * handles both specific obj_type queries and DRM_MODE_OBJECT_ANY (which
+     * wlroots' get_drm_prop uses to read a property value by object ID). */
+    if (o.obj_id == DRM_CONN_ID) {
+        /* The connector carries a single immutable EDID blob property. */
         o.count_props = 1;
         (void)drm_edid_get();
         if (o.props_ptr && copy_to_user((void *)(uintptr_t)o.props_ptr,
@@ -1134,6 +1183,20 @@ static int drm_mode_obj_getproperties(drm_context_t *ctx, void *arg)
         if (o.prop_values_ptr &&
             copy_to_user((void *)(uintptr_t)o.prop_values_ptr,
                          &(uint64_t){ DRM_EDID_BLOB_ID },
+                         sizeof(uint64_t)) < 0)
+            return -EFAULT;
+    } else if (o.obj_id == DRM_PLANE_ID) {
+        /* The single plane exposes an immutable "type" property set to
+         * DRM_PLANE_TYPE_PRIMARY so universal-plane clients (wlroots) find a
+         * primary plane. */
+        o.count_props = 1;
+        if (o.props_ptr && copy_to_user((void *)(uintptr_t)o.props_ptr,
+                                        &(uint32_t){ DRM_PLANE_TYPE_PROP_ID },
+                                        sizeof(uint32_t)) < 0)
+            return -EFAULT;
+        if (o.prop_values_ptr &&
+            copy_to_user((void *)(uintptr_t)o.prop_values_ptr,
+                         &(uint64_t){ DRM_PLANE_TYPE_PRIMARY },
                          sizeof(uint64_t)) < 0)
             return -EFAULT;
     } else {
@@ -1428,6 +1491,8 @@ static int drm_ioctl(vfile_t *vf, unsigned long req, void *arg)
         return drm_drop_master(ctx, arg);
     case DRM_IOCTL_GET_CAP:
         return drm_get_cap(ctx, arg);
+    case DRM_IOCTL_SET_CLIENT_CAP:
+        return drm_set_client_cap(ctx, arg);
     case DRM_IOCTL_GEM_CLOSE:
         return drm_gem_close(ctx, arg);
     case DRM_IOCTL_PRIME_HANDLE_TO_FD:
