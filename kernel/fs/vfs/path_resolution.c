@@ -203,6 +203,14 @@ vnode_t *vnode_lookup_path_openat2(const char *path,
 
             vnode_t *next = vfs_dcache_lookup(cur, p);
             if (!next) {
+                if (resolve & RESOLVE_CACHED) {
+                    /* RESOLVE_CACHED: only succeed when every component is
+                     * already in the dentry cache; otherwise fail so the
+                     * caller can retry without the flag. */
+                    vnode_put(cur);
+                    *lookup_err = -EAGAIN;
+                    return NULL;
+                }
                 int r = cur->ops->lookup(cur, p, &next);
                 if (r < 0 || !next) {
                     vnode_put(cur);
@@ -216,10 +224,8 @@ vnode_t *vnode_lookup_path_openat2(const char *path,
             cur = next;
 
             if (cur->type == VFS_FT_SYMLINK) {
-                int is_final = (sep == NULL);
                 int follow = 1;
                 if (resolve & RESOLVE_NO_SYMLINKS) follow = 0;
-                else if ((resolve & RESOLVE_NO_TRAILING_SYMLINKS) && is_final) follow = 0;
 
                 if (!follow) {
                     vnode_put(parent);

@@ -27,8 +27,7 @@
 #define RESOLVE_NO_SYMLINKS        0x04
 #define RESOLVE_BENEATH            0x08
 #define RESOLVE_IN_ROOT            0x10
-#define RESOLVE_NO_TRAILING_SYMLINKS 0x20
-#define RESOLVE_CACHED             0x40
+#define RESOLVE_CACHED             0x20
 
 /* renameat2 flags */
 #define RENAME_NOREPLACE           0x01
