@@ -1,10 +1,11 @@
 /*
  * A20OS DW SDIO host driver.
  *
- * LOCK_ORDER: This driver uses no private spinlock. All command/data
- * transfers are synchronous busy-polls against a single global sdio_priv_t
- * instance (g_sdio). Future concurrent or IRQ-driven versions must add a
- * private lock and document it in docs/drivers/lock-order.md.
+ * LOCK_ORDER: all command/data transfers are synchronous busy-polls against a
+ * single global sdio_priv_t instance (g_sdio); a private spinlock serializes
+ * concurrent command/data paths so the block layer can issue parallel I/O
+ * safely.  IRQ-driven completion is not implemented; keep the poll path and
+ * document any change in docs/drivers/lock-order.md.
  */
 #include "drivers/block/dw_sdio.h"
 #include "drivers/bus/platform_bus.h"
@@ -15,6 +16,7 @@
 #include "core/defs.h"
 #include "core/stdio.h"
 #include "core/klog.h"
+#include "core/lock.h"
 #include "core/timer.h"
 
 #define SDIO_CTRL     0x00
@@ -148,6 +150,7 @@ typedef struct {
     uint32_t  rca;
     int       ready;
     uint64_t  sectors;
+    spinlock_t lock;
 } sdio_priv_t;
 
 static sdio_priv_t g_sdio;
@@ -179,6 +182,7 @@ int dw_sdio_init_dev(uintptr_t base) {
     g_sdio.base = base;
     g_sdio.ready = 0;
     g_sdio.sectors = 0;
+    spin_init(&g_sdio.lock);
 
     sdio_reset(base);
 
@@ -261,19 +265,24 @@ int dw_sdio_init_dev(uintptr_t base) {
 
 static int sdio_xfer_block(uintptr_t base, uint32_t cmd_idx, uint32_t arg,
                            void *buf, int write) {
-    if (!g_sdio.ready)
+    uint64_t flags = spin_lock_irqsave(&g_sdio.lock);
+    if (!g_sdio.ready) {
+        spin_unlock_irqrestore(&g_sdio.lock, flags);
         return -1;
+    }
 
     sdio_wait_data_idle(base);
 
     sdio_reg_write(base, SDIO_BLKSIZ, DW_SDIO_SECTOR_SIZE);
     sdio_reg_write(base, SDIO_BYTCNT, DW_SDIO_SECTOR_SIZE);
 
-    uint32_t flags = CMD_FLAG_DATA_EXPECTED;
-    if (write) flags |= CMD_FLAG_WRITE;
+    uint32_t cmd_flags = CMD_FLAG_DATA_EXPECTED;
+    if (write) cmd_flags |= CMD_FLAG_WRITE;
 
-    if (sdio_send_cmd_raw(base, cmd_idx, arg, flags | CMD_FLAG_RESP_EXPECT) != 0)
+    if (sdio_send_cmd_raw(base, cmd_idx, arg, cmd_flags | CMD_FLAG_RESP_EXPECT) != 0) {
+        spin_unlock_irqrestore(&g_sdio.lock, flags);
         return -1;
+    }
 
     uint32_t *fifo = (uint32_t *)(base + SDIO_FIFO);
     uint32_t words = DW_SDIO_SECTOR_SIZE / 4;
@@ -297,11 +306,14 @@ static int sdio_xfer_block(uintptr_t base, uint32_t cmd_idx, uint32_t arg,
     /* wait for data transfer over */
     uint64_t start = timer_get_ticks();
     while (!(sdio_reg_read(base, SDIO_RINTSTS) & INT_DTO)) {
-        if (timer_get_ticks() - start > clock_ticks_per_sec())
+        if (timer_get_ticks() - start > clock_ticks_per_sec()) {
+            spin_unlock_irqrestore(&g_sdio.lock, flags);
             return -1;
+        }
     }
     sdio_reg_write(base, SDIO_RINTSTS, INT_DTO);
 
+    spin_unlock_irqrestore(&g_sdio.lock, flags);
     return 0;
 }
 
@@ -337,13 +349,6 @@ int dw_sdio_card_ready(uintptr_t base) {
  * driver_t integration
  * ============================================================ */
 
-typedef struct {
-    sdio_priv_t    sdio;
-    block_dev_ops_t ops;
-} dw_sdio_drv_t;
-
-static dw_sdio_drv_t g_drv;
-
 static int dw_sdio_driver_probe(device_t *dev) {
     resource_t *res = device_get_resource(dev, RES_MMIO, 0);
     if (!res) return -1;
@@ -353,32 +358,29 @@ static int dw_sdio_driver_probe(device_t *dev) {
         return -1;
     }
 
-    /* The low-level transfer code tracks its state in g_sdio; mirror it
-     * into the driver instance so the class ops use a live base address. */
-    g_drv.sdio = g_sdio;
-    dev->drv_priv = &g_drv;
+    dev->drv_priv = &g_sdio;
     kinfo("[DW-SDIO] Probed '%s' at 0x%lx\n", dev->name, (unsigned long)res->start);
     return 0;
 }
 
 static int dw_sdio_driver_remove(device_t *dev) {
-    (void)dev;
+    sdio_priv_t *priv = (sdio_priv_t *)dev->drv_priv;
+    if (priv)
+        priv->ready = 0;
+    dev->drv_priv = NULL;
     return 0;
 }
 
 static int dw_sdio_class_read(struct device *dev, uint64_t lba, void *buf, size_t count) {
-    dw_sdio_drv_t *priv = (dw_sdio_drv_t *)dev->drv_priv;
-    return dw_sdio_read_sector(priv->sdio.base, lba, buf, count);
+    return dw_sdio_read_sector(g_sdio.base, lba, buf, count);
 }
 
 static int dw_sdio_class_write(struct device *dev, uint64_t lba, const void *buf, size_t count) {
-    dw_sdio_drv_t *priv = (dw_sdio_drv_t *)dev->drv_priv;
-    return dw_sdio_write_sector(priv->sdio.base, lba, buf, count);
+    return dw_sdio_write_sector(g_sdio.base, lba, buf, count);
 }
 
 static uint64_t dw_sdio_class_capacity(struct device *dev) {
-    dw_sdio_drv_t *priv = (dw_sdio_drv_t *)dev->drv_priv;
-    return dw_sdio_capacity(priv->sdio.base);
+    return dw_sdio_capacity(g_sdio.base);
 }
 
 static uint32_t dw_sdio_class_sector_size(struct device *dev) {
