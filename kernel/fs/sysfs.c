@@ -48,6 +48,12 @@ typedef enum {
     SF_CLASS_TYPE,
     SF_CLASS_DEVICE,
     SF_CLASS_DEVICE_DEV,
+    SF_DEVICES,          /* /sys/devices */
+    SF_DEVICES_VIRTUAL,  /* /sys/devices/virtual */
+    SF_DEVICES_VSUB,     /* /sys/devices/virtual/<subsystem> */
+    SF_DEVICES_VDEV,     /* /sys/devices/virtual/<subsystem>/<name> */
+    SF_DEVICES_VDEV_UEVENT, /* .../<name>/uevent */
+    SF_DEVICES_VDEV_DEV,    /* .../<name>/dev */
     SF_DEV,             /* /sys/dev */
     SF_DEV_CHAR,        /* /sys/dev/char */
     SF_DEV_CHAR_ENTRY,  /* /sys/dev/char/<maj>:<min> */
@@ -247,6 +253,26 @@ static sysfs_priv_t *sysfs_priv_create(sf_type_t type, int loop_idx,
         } else {
             p->content_len = 0;
         }
+    } else if (type == SF_DEVICES_VDEV_DEV) {
+        int n = snprintf(p->content, sizeof(p->content), "%lu:%lu\n",
+                         (unsigned long)((devt >> 8) & 0xffU),
+                         (unsigned long)(devt & 0xffU));
+        p->content_len = (size_t)(n > 0 ? n : 0);
+    } else if (type == SF_DEVICES_VDEV_UEVENT) {
+        const char *devname = NULL, *subsystem = NULL;
+        if (sysfs_devchar_name(devt, &devname, &subsystem) == 0) {
+            int n = snprintf(p->content, sizeof(p->content),
+                             "MAJOR=%lu\nMINOR=%lu\nDEVNAME=%s\nSUBSYSTEM=%s\n"
+                             "DEVPATH=/devices/virtual/%s/%s\n",
+                             (unsigned long)((devt >> 8) & 0xffU),
+                             (unsigned long)(devt & 0xffU),
+                             devname, subsystem, subsystem,
+                             strrchr(devname, '/') ? strrchr(devname, '/') + 1
+                                                   : devname);
+            p->content_len = (size_t)(n > 0 ? n : 0);
+        } else {
+            p->content_len = 0;
+        }
     } else {
         p->content_len = 0;
     }
@@ -255,6 +281,18 @@ static sysfs_priv_t *sysfs_priv_create(sf_type_t type, int loop_idx,
 }
 
 /* ---- vnode operations ---- */
+
+/* Map a subsystem name ("input", "drm", ...) to its device class, or
+ * DEV_CLASS_NONE if unknown. */
+static uint32_t sysfs_class_type_by_subsystem(const char *name)
+{
+    for (uint32_t type = 1; type <= DEV_CLASS_AUDIO; type++) {
+        const char *sub = class_device_subsystem(type);
+        if (sub && strcmp(sub, name) == 0)
+            return type;
+    }
+    return DEV_CLASS_NONE;
+}
 
 static int sysfs_lookup(vnode_t *dir, const char *name, vnode_t **out)
 {
@@ -274,6 +312,35 @@ static int sysfs_lookup(vnode_t *dir, const char *name, vnode_t **out)
         child_type = SF_CLASS;
     } else if (dm->type == SF_ROOT && strcmp(name, "dev") == 0) {
         child_type = SF_DEV;
+    } else if (dm->type == SF_ROOT && strcmp(name, "devices") == 0) {
+        child_type = SF_DEVICES;
+    } else if (dm->type == SF_DEVICES && strcmp(name, "virtual") == 0) {
+        child_type = SF_DEVICES_VIRTUAL;
+    } else if (dm->type == SF_DEVICES_VIRTUAL) {
+        uint32_t ct = sysfs_class_type_by_subsystem(name);
+        if (ct == DEV_CLASS_NONE)
+            return -ENOENT;
+        child_type = SF_DEVICES_VSUB;
+        dynamic_class = ct;
+    } else if (dm->type == SF_DEVICES_VSUB) {
+        class_device_t *cdev = class_device_get_by_name(name);
+        if (!cdev || cdev->class_type != dm->class_type) {
+            class_device_put(cdev);
+            return -ENOENT;
+        }
+        child_type = SF_DEVICES_VDEV;
+        dynamic_class = dm->class_type;
+        dynamic_cdev = cdev;
+    } else if (dm->type == SF_DEVICES_VDEV && strcmp(name, "uevent") == 0) {
+        child_type = SF_DEVICES_VDEV_UEVENT;
+        dynamic_class = dm->class_type;
+        dynamic_cdev = dm->class_dev;
+        class_device_get(dynamic_cdev);
+    } else if (dm->type == SF_DEVICES_VDEV && strcmp(name, "dev") == 0) {
+        child_type = SF_DEVICES_VDEV_DEV;
+        dynamic_class = dm->class_type;
+        dynamic_cdev = dm->class_dev;
+        class_device_get(dynamic_cdev);
     } else if (dm->type == SF_DEV && strcmp(name, "char") == 0) {
         child_type = SF_DEV_CHAR;
     } else if (dm->type == SF_DEV_CHAR) {
@@ -399,6 +466,8 @@ static int sysfs_lookup(vnode_t *dir, const char *name, vnode_t **out)
                   child_type == SF_DRM || child_type == SF_DRM_CARD ||
                   child_type == SF_DRM_CONNECTOR || child_type == SF_DRM_CARD_DEVICE ||
                   child_type == SF_CLASS_TYPE || child_type == SF_CLASS_DEVICE ||
+                  child_type == SF_DEVICES || child_type == SF_DEVICES_VIRTUAL ||
+                  child_type == SF_DEVICES_VSUB || child_type == SF_DEVICES_VDEV ||
                   child_type == SF_DEV || child_type == SF_DEV_CHAR ||
                   child_type == SF_DEV_CHAR_ENTRY ||
                   child_type == SF_DEV_CHAR_DEVICE ||
@@ -443,6 +512,10 @@ static int sysfs_lookup(vnode_t *dir, const char *name, vnode_t **out)
             vn->size = 2;
         } else if (child_type == SF_CLASS_DEVICE_DEV) {
             vn->size = 16;
+        } else if (child_type == SF_DEVICES_VDEV_DEV) {
+            vn->size = 16;
+        } else if (child_type == SF_DEVICES_VDEV_UEVENT) {
+            vn->size = 96;
         } else if (child_type == SF_DEV_CHAR_UEVENT) {
             vn->size = 64;
         }
@@ -637,6 +710,8 @@ static int sysfs_freaddir(vfile_t *vf, void *dirp, size_t count)
     if (!dm) return -ENOENT;
     if (dm->type == SF_CLASS_TYPE)
         return sysfs_class_readdir(vf, dm, dirp, count);
+    if (dm->type == SF_DEVICES_VSUB)
+        return sysfs_class_readdir(vf, dm, dirp, count);
     if (dm->type == SF_DEV_CHAR)
         return sysfs_devchar_dir_readdir(vf, dirp, count);
     if (dm->type == SF_DEV_CHAR_ENTRY)
@@ -656,6 +731,20 @@ static int sysfs_freaddir(vfile_t *vf, void *dirp, size_t count)
         entries[nent].name = "block"; entries[nent].dtype = 4; nent++;
         entries[nent].name = "class"; entries[nent].dtype = 4; nent++;
         entries[nent].name = "dev"; entries[nent].dtype = 4; nent++;
+        entries[nent].name = "devices"; entries[nent].dtype = 4; nent++;
+    } else if (dm->type == SF_DEVICES) {
+        entries[nent].name = "virtual"; entries[nent].dtype = 4; nent++;
+    } else if (dm->type == SF_DEVICES_VIRTUAL) {
+        entries[nent].name = "drm"; entries[nent].dtype = 4; nent++;
+        entries[nent].name = "char"; entries[nent].dtype = 4; nent++;
+        entries[nent].name = "block"; entries[nent].dtype = 4; nent++;
+        entries[nent].name = "net"; entries[nent].dtype = 4; nent++;
+        entries[nent].name = "input"; entries[nent].dtype = 4; nent++;
+        entries[nent].name = "display"; entries[nent].dtype = 4; nent++;
+        entries[nent].name = "audio"; entries[nent].dtype = 4; nent++;
+    } else if (dm->type == SF_DEVICES_VDEV) {
+        entries[nent].name = "uevent"; entries[nent].dtype = 8; nent++;
+        entries[nent].name = "dev"; entries[nent].dtype = 8; nent++;
     } else if (dm->type == SF_DEV) {
         entries[nent].name = "char"; entries[nent].dtype = 4; nent++;
     } else if (dm->type == SF_CLASS) {
