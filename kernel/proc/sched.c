@@ -8,6 +8,7 @@
 #include "core/stdio.h"
 #include "core/smp.h"
 #include "core/progress.h"
+#include "core/perf.h"
 #include "core/panic.h"
 #include "proc/signal.h"
 #include "mm/vm.h"
@@ -651,6 +652,15 @@ void proc_sched_tick(int from_user)
         slice = 1;
     if (now - cur->exec_start >= slice)
         proc_sched_request_cpu(cpu_current_id(), 0);
+}
+
+/* Sum of runnable tasks across online runqueues (used by the PSI tracker). */
+uint64_t proc_runq_load_sum(void)
+{
+    uint64_t sum = 0;
+    for (unsigned cpu = 0; cpu < CONFIG_NR_CPUS; cpu++)
+        sum += __atomic_load_n(&sched_runq[cpu].nr_running, __ATOMIC_RELAXED);
+    return sum;
 }
 
 int proc_sched_safe_point(void)
@@ -1439,6 +1449,10 @@ void context_switch(task_t *next) {
     if (had_dispatch_ref)
         proc_put(next);
     spin_unlock_irqrestore(&proc_lock, flags);
+    if (prev && prev->pid != 0) {
+        __atomic_fetch_add(&prev->perf_switches, 1, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&g_perf_sw_context_switches, 1, __ATOMIC_RELAXED);
+    }
     if (prev && prev->pid >= 4 && next->pid >= 4)
         ktrace_sched("[SCHED] ctxsw: %d -> %d\n", prev->pid, next->pid);
     if (old)

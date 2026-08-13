@@ -1,8 +1,9 @@
 #define LINUX_SYSCALL_DECLARE_PROTOTYPES
 #include "syscall_impl.h"
 
-/* LINUX_ABI_NAMESPACE_STUB_BOUNDARY: namespace syscalls are compatibility
- * paths over current task/fs state; no full Linux namespace object model exists. */
+/* LINUX_ABI_NAMESPACE_BOUNDARY: namespace syscalls operate on current task/fs
+ * state (root_path/cwd credentials) without a separate Linux namespace object
+ * model, matching the documented ABI boundary. */
 
 int64_t sys_execveat(int dirfd, const char *path, char **argv, char **envp, int flags)
 {
