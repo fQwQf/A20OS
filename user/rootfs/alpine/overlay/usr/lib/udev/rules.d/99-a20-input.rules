@@ -1,0 +1,7 @@
+# A20OS input devices: the kernel publishes /dev/input/event* (evdev) and the
+# matching /sys/devices/virtual/input/* nodes, but Alpine's eudev ruleset does
+# not ship 60-input-id.rules, so nothing sets ID_INPUT_* and libinput skips the
+# devices.  Tag them here; libinput re-reads the evdev capability bits itself
+# to refine the exact device type.
+SUBSYSTEM=="input", ENV{ID_INPUT}="1"
+SUBSYSTEM=="input", ENV{ID_INPUT_KEYBOARD}="1", ENV{ID_INPUT_MOUSE}="1"
