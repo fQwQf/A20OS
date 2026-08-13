@@ -30,7 +30,7 @@ only a subset of Linux commands, flags, object types, or concurrency semantics.
 | path and metadata | partial | openat/stat/chmod/chown/link/symlink/xattr coverage exists; path resolution and permissions need cleanup. |
 | process lifecycle | partial | fork/clone/exec/wait/exit work for current userland; SMP/thread edge semantics remain limited. |
 | signals | partial | common delivery paths exist; Linux edge behavior is not complete. |
-| memory management | partial | brk/mmap/munmap/mprotect/mremap and COW exist; userfaultfd MISSING mode parks faults on registered ranges; file mmap/page cache semantics need work. |
+| memory management | partial | brk/mmap/munmap/mprotect/mremap and COW exist; mseal enforces VM_SEALED against layout/protection changes; userfaultfd MISSING mode parks faults on registered ranges; file mmap/page cache semantics need work. |
 | scheduler | partial | APIs map onto the per-CPU EEVDF/SMP scheduler, but Linux policy/priority/affinity, RT, deadline, cgroup, and topology semantics remain bounded. |
 | futex | partial | all standard commands implemented, including bounded PI variants; no priority boost. |
 | poll/epoll/select | partial | fd readiness works for common objects; wait infrastructure should move to formal wait queues. |
@@ -140,6 +140,7 @@ only a subset of Linux commands, flags, object types, or concurrency semantics.
 | `mkdirat` | path/fs | `partial` | `smoke-vfs-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `unlinkat` | path/fs | `partial` | `smoke-vfs-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `renameat2` | path/fs | `partial` | `smoke-vfs-stress` | implemented subset; Linux edge semantics remain documented gaps |
+| `renameat` | path/fs | `partial` | `smoke-vfs-stress` | renameat(2) is renameat2(2) with flags=0; complete entry for glibc, which calls it directly |
 | `chdir` | path/fs | `partial` | `smoke-vfs-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `fchdir` | path/fs | `partial` | `smoke-vfs-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `getcwd` | path/fs | `partial` | `smoke-vfs-stress` | implemented subset; Linux edge semantics remain documented gaps |
@@ -317,8 +318,8 @@ only a subset of Linux commands, flags, object types, or concurrency semantics.
 | `setns` | namespaces | `partial` | `smoke-abi-linux` | compatibility paths only; no full namespace model |
 | `pivot_root` | namespaces | `partial` | `smoke-abi-linux` | compatibility paths only; no full namespace model |
 | `get_mempolicy` | memory | `partial` | `smoke-mm-stress` | implemented subset; Linux edge semantics remain documented gaps |
-| `sched_setattr` | scheduler | `partial` | `smoke-proc-stress` | policy/priority/affinity compatibility is bounded by current scheduler state |
-| `sched_getattr` | scheduler | `partial` | `smoke-proc-stress` | policy/priority/affinity compatibility is bounded by current scheduler state |
+| `sched_setattr` | scheduler | `partial` | `smoke-proc-stress` | full struct sched_attr wire layout; validates policy/flags/nice/priority and routes through proc_sched_set; no util-clamp or deadline fields |
+| `sched_getattr` | scheduler | `partial` | `smoke-proc-stress` | full struct sched_attr wire layout; reports policy/flags/nice/priority; no util-clamp or deadline fields |
 | `clone3` | process | `partial` | `smoke-proc-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `openat2` | path/fs | `partial` | `smoke-vfs-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `inotify_init` | path/fs | `partial` | `smoke-vfs-stress` | implemented subset; Linux edge semantics remain documented gaps |
@@ -386,7 +387,7 @@ only a subset of Linux commands, flags, object types, or concurrency semantics.
 | `pkey_free` | memory | `partial` | `smoke-mm-stress` | frees a protection key slot |
 | `pkey_mprotect` | memory | `partial` | `smoke-mm-stress` | mprotect with a valid allocated pkey |
 | `mlock2` | memory | `partial` | `smoke-mm-stress` | mlock with flags (only 0 supported) |
-| `mseal` | memory | `partial` | `smoke-mm-stress` | accepts VMA sealing as a no-op (no seal tracking yet) |
+| `mseal` | memory | `partial` | `smoke-mm-stress` | real VMA seal semantics: core MM enforces VM_SEALED against mmap-FIXED overwrite, mprotect, munmap, mremap, brk shrink and madvise DONTNEED/FREE/REMOVE with -EPERM; inherited by fork; no /proc/smaps Sealed reporting or userfaultfd interplay |
 | `seccomp` | system | `partial` | `smoke-abi-linux` | no seccomp engine; reports unsupported rather than faking |
 | `kexec_load` | system | `partial` | `smoke-abi-linux` | refuses kexec (no image handoff support) |
 | `kexec_file_load` | system | `partial` | `smoke-abi-linux` | refuses kexec (no image handoff support) |

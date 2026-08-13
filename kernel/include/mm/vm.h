@@ -30,6 +30,13 @@ struct page_cache_page;
 #define VM_LOCKED    (1UL << 15)
 #define VM_SYSV_SHM  (1UL << 16)
 #define VM_PFNMAP    (1UL << 17)
+/* mseal(2): the VMA is sealed against subsequent mmap-FIXED overwrite,
+ * mprotect, munmap, mremap, madvise(DONTNEED/FREE/REMOVE) and unmap-then-
+ * remap across its range.  Sealing is one-way for the life of the VMA and is
+ * inherited by fork children sharing or copying the address space.  Enforced
+ * in the core MM mutation paths (mm_mmap_locked / mm_mprotect_locked /
+ * mm_munmap_locked / mm_mremap_locked), not in the ABI layer. */
+#define VM_SEALED    (1UL << 18)
 
 /* Typical compiler processes have O(100) VMAs.  Keep a compact secondary
  * pointer index for binary-search lookup while retaining the linked list as
@@ -208,6 +215,14 @@ int     mm_mprotect(mm_struct_t *mm, vaddr_t addr, size_t len, int prot);
 int     mm_mremap(mm_struct_t *mm, vaddr_t old_addr, size_t old_size,
                   size_t new_size, int flags, vaddr_t new_addr,
                   vaddr_t *out_addr);
+int     mm_mseal(mm_struct_t *mm, vaddr_t addr, size_t len);
+/* Non-mutating check: returns 1 if any VMA overlapping [addr, addr+len) is
+ * sealed.  Used by ABI syscalls whose Linux contract requires -EPERM when a
+ * covered VMA is sealed (madvise DONTNEED/FREE/REMOVE, etc.). */
+int     mm_mseal_range_is_sealed(mm_struct_t *mm, vaddr_t addr, size_t len);
+/* Locked variant of mm_mseal_range_is_sealed; caller holds mm->lock. */
+int     mm_mseal_range_is_sealed_locked(mm_struct_t *mm, vaddr_t addr,
+                                        size_t len);
 int     mm_demote_huge_page(mm_struct_t *mm, vaddr_t addr);
 
 /*
