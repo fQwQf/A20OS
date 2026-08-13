@@ -253,6 +253,8 @@ static inline int64_t a20_syscall6(uint64_t nr, uint64_t a0, uint64_t a1,
 #define A20_SYS_device_claim      0x0C07
 #define A20_SYS_device_release    0x0C08
 #define A20_SYS_device_alloc_dma  0x0C09
+#define A20_SYS_device_free_dma   0x0C0A
+#define A20_SYS_device_get_info   0x0C0B
 #define A20_SYS_ext_prog_load      0x0E00
 #define A20_SYS_ext_prog_attach    0x0E01
 #define A20_SYS_ext_prog_detach    0x0E02

@@ -671,6 +671,26 @@ typedef struct a20_device_vmo_phys_args {
     uint32_t       out_count;
 } a20_device_vmo_phys_args_t;
 
+#define A20_DEVICE_INFO_F_IOMMU   (1u << 0)
+#define A20_DEVICE_INFO_F_BLOCKED (1u << 1)
+
+typedef struct a20_device_info_args {
+    uint32_t       size;
+    uint32_t       version;
+    uint32_t       bus;
+    uint32_t       vendor;
+    uint32_t       device;
+    uint32_t       index;
+    uint32_t       out_flags;
+    uint32_t       out_devid;
+    uint32_t       out_irq;
+    uint32_t       out_fault_cause;
+    uint64_t       out_mmio_base;
+    uint64_t       out_mmio_size;
+    uint64_t       out_fault_count;
+    uint64_t       out_fault_iova;
+} a20_device_info_args_t;
+
 /* ---- Message flags (channel_send / channel_recv) ---- */
 
 

@@ -140,6 +140,8 @@ int64_t sys_a20_device_block_complete(const a20_syscall_args_t *args);
 int64_t sys_a20_device_claim(const a20_syscall_args_t *args);
 int64_t sys_a20_device_release(const a20_syscall_args_t *args);
 int64_t sys_a20_device_alloc_dma(const a20_syscall_args_t *args);
+int64_t sys_a20_device_free_dma(const a20_syscall_args_t *args);
+int64_t sys_a20_device_get_info(const a20_syscall_args_t *args);
 
 /* Generate handler stubs from .def */
 #define A20_NATIVE_SYSCALL(name, ...) \
