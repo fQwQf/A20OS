@@ -18,6 +18,7 @@
 #include "core/string.h"
 #include "cg/cgroup.h"
 #include "mm/swap.h"
+#include "ipc/userfaultfd.h"
 
 /*
  * COW_FAULT_TLB_CONTRACT:
@@ -260,6 +261,10 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval,
         cg_mem_swap_uncharge(t, 1);
         t->mm->rss++;
         arch_tlb_flush_page_local(stval);
+        __atomic_fetch_add(&t->perf_page_faults, 1, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&t->perf_page_faults_maj, 1, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&g_perf_sw_page_faults, 1, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&g_perf_sw_page_faults_maj, 1, __ATOMIC_RELAXED);
         return 0;
     }
 #endif
@@ -745,6 +750,9 @@ int handle_cow_fault(task_t *t, uint64_t stval)
         page_cache_put(old_page);
         page_cache_put(old_page);
     }
+    if (r == 0 && t)
+        __atomic_fetch_add(&t->perf_page_faults, 1, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&g_perf_sw_page_faults, 1, __ATOMIC_RELAXED);
     return r;
 #endif
 }
@@ -785,6 +793,22 @@ int handle_demand_fault_access(task_t *t, uint64_t stval,
         return -1;
     }
     vm_area_t *vma = mm_find_vma(mm, page_va);
+    /*
+     * USERFAULTFD_MISSING_HOOK: anonymous private ranges registered with a
+     * userfaultfd hand the fault to the handler before the kernel fabricates
+     * a zero page.  The mm lock is dropped before the handler parks so the
+     * faulter can sleep; when the handler resolves the page (COPY/ZEROPAGE)
+     * or the range is unregistered, the fault is retried from the top.
+     */
+    if (vma &&
+        (vma->vm_flags & (VM_ANON | VM_FILE | VM_VMO | VM_SHARED)) == VM_ANON &&
+        userfaultfd_range_present(mm, page_va)) {
+        spin_unlock(&mm->lock);
+        if (userfaultfd_handle_fault(t, mm, page_va,
+                                     access == MM_FAULT_ACCESS_WRITE) < 0)
+            return -1;
+        return handle_demand_fault_access(t, stval, access);
+    }
     if (vma && (vma->vm_flags & VM_FILE) && vma->file_fd >= 0) {
         if (!mm_pte_flags_allow_access(vma->pte_flags)) {
             spin_unlock(&mm->lock);
@@ -813,6 +837,9 @@ int handle_demand_fault_access(task_t *t, uint64_t stval,
         if (r == 0) {
             a20_perf_count(A20_PERF_MM_DEMAND_FAULTS);
             a20_perf_count(A20_PERF_MM_FILE_FAULTS);
+            __atomic_fetch_add(&t->perf_page_faults, 1, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&g_perf_sw_page_faults, 1, __ATOMIC_RELAXED);
+            t->perf_page_faults_maj++;
         }
         return r;
     }
@@ -823,8 +850,11 @@ int handle_demand_fault_access(task_t *t, uint64_t stval,
         cg_mem_oom_kill(t->cgroup);
         return -1;
     }
-    if (r == 0)
+    if (r == 0) {
         a20_perf_count(A20_PERF_MM_DEMAND_FAULTS);
+        __atomic_fetch_add(&t->perf_page_faults, 1, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&g_perf_sw_page_faults, 1, __ATOMIC_RELAXED);
+    }
     return r;
 #endif
 }

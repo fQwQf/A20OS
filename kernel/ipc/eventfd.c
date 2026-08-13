@@ -148,6 +148,11 @@ static vfile_ops_t g_eventfd_ops = {
     .close = anonfd_free_priv_close,
 };
 
+int eventfd_vfile_is(vfile_t *vf)
+{
+    return vf && vf->ops == &g_eventfd_ops;
+}
+
 int eventfd_create(unsigned initval, int flags)
 {
     if (flags & ~(O_CLOEXEC | O_NONBLOCK | 1)) return -EINVAL;

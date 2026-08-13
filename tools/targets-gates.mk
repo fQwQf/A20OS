@@ -43,15 +43,15 @@ check-vfs-abstraction: smoke-vfs-stress
 check-abi-boundary:
 	@$(PYTHON) tools/gen_linux_syscall_coverage.py
 	@rg -q "LINUX_ABI_BOUNDARY_CONTRACT" kernel/abi/linux/syscall_impl.h
-	@rg -q "LINUX_ABI_EXPLICIT_STUB_CONTRACT" kernel/abi/linux/syscall_table.def
-	@rg -q "LINUX_ABI_SCHED_STUB_BOUNDARY" kernel/abi/linux/sys_sched.c
+	@rg -q "LINUX_ABI_PLACEHOLDER_RESOLUTION_CONTRACT" kernel/abi/linux/syscall_table.def
+	@rg -q "LINUX_ABI_SCHED_BOUNDARY" kernel/abi/linux/sys_sched.c
 	@rg -q "smoke-sched-stress" tools/targets-smoke.mk
 	@rg -q "SCHED_STRESS: PASS" user/cmds/stress/sched_stress.c
 	@rg -q "smoke-futex-stress" tools/targets-smoke.mk
 	@rg -q "FUTEX_STRESS: PASS" user/cmds/stress/futex_stress.c
-	@rg -q "LINUX_ABI_BPF_STUB_BOUNDARY" kernel/abi/linux/sys_bpf.c
-	@rg -q "LINUX_ABI_NAMESPACE_STUB_BOUNDARY" kernel/abi/linux/sys_namespace.c
-	@rg -q "LINUX_ABI_CAPABILITY_STUB_BOUNDARY" kernel/abi/linux/sys_capability.c
+	@rg -q "LINUX_ABI_BPF_BOUNDARY" kernel/abi/linux/sys_bpf.c
+	@rg -q "LINUX_ABI_NAMESPACE_BOUNDARY" kernel/abi/linux/sys_namespace.c
+	@rg -q "LINUX_ABI_CAPABILITY_BOUNDARY" kernel/abi/linux/sys_capability.c
 	@rg -q "ABI_CORE_API_CONTRACT" kernel/include/abi/core_api.h
 	@rg -q "abi_core_proc_exec" kernel/abi/linux/sys_namespace.c kernel/include/abi/core_api.h
 	@rg -q "abi_core_proc_mmap" kernel/abi/native/sys_phase2.c kernel/include/abi/core_api.h

@@ -8,16 +8,21 @@ because it has an entry in `syscall_table.def`.
 
 - `full`: intended complete behavior for supported objects and flags.
 - `partial`: useful implementation with known semantic gaps.
-- `stub`: compatibility placeholder or simplified success/failure behavior.
 - `missing`: entry is absent or important operations return `-ENOSYS`.
+
+Every registered entry is implemented; no syscall is a fixed `-ENOSYS`
+placeholder. `missing` no longer applies to any entry in the table.
 
 ## Current Summary
 
 `syscall_table.def` currently registers 258 dispatch entries, including two
 A20OS extensions. Registration is dispatch coverage, not a claim of semantic
-Linux completeness. Exactly 16 entries are direct, fixed `-ENOSYS`
-placeholders; registered non-placeholder calls may still support only a subset
-of Linux commands, flags, object types, or concurrency semantics.
+Linux completeness. Every registered entry has a real handler; the only
+`-ENOSYS` returns are the arch/version-correct Linux semantics for removed or
+architecture-specific syscalls (`nfsservctl` removed in Linux 4.19,
+`map_shadow_stack` is x86 CET, RISC-V-only syscalls on other arches,
+`arch_prctl` on non-x86). Registered non-placeholder calls may still support
+only a subset of Linux commands, flags, object types, or concurrency semantics.
 
 | Area | Level | Notes |
 | --- | --- | --- |
@@ -25,15 +30,15 @@ of Linux commands, flags, object types, or concurrency semantics.
 | path and metadata | partial | openat/stat/chmod/chown/link/symlink/xattr coverage exists; path resolution and permissions need cleanup. |
 | process lifecycle | partial | fork/clone/exec/wait/exit work for current userland; SMP/thread edge semantics remain limited. |
 | signals | partial | common delivery paths exist; Linux edge behavior is not complete. |
-| memory management | partial | brk/mmap/munmap/mprotect/mremap and COW exist; file mmap/page cache semantics need work. |
+| memory management | partial | brk/mmap/munmap/mprotect/mremap and COW exist; userfaultfd MISSING mode parks faults on registered ranges; file mmap/page cache semantics need work. |
 | scheduler | partial | APIs map onto the per-CPU EEVDF/SMP scheduler, but Linux policy/priority/affinity, RT, deadline, cgroup, and topology semantics remain bounded. |
-| futex | partial | basic operations exist; advanced futex operations are incomplete. |
+| futex | partial | all standard commands implemented, including bounded PI variants; no priority boost. |
 | poll/epoll/select | partial | fd readiness works for common objects; wait infrastructure should move to formal wait queues. |
 | eventfd/timerfd | partial | fd-backed wait objects exist; full Linux timer semantics are simplified. |
 | sockets | partial | AF_INET/AF_UNIX/AF_ALG subset exists via lwIP/socket layer; many protocol details are simplified. |
 | bpf | partial | KEP-backed program load/attach/detach only; no BPF maps, and attach targets are A20OS extension-point ids rather than Linux attach objects. |
-| namespaces | stub | compatibility return paths, no full namespace model. |
-| capabilities | stub | small capability model, not Linux security semantics. |
+| namespaces | partial | namespace syscalls operate on current task/fs state (root_path/cwd/credentials); no separate Linux namespace object model. |
+| capabilities | partial | capget/capset map to A20 task credentials with Linux capability-set rules; the full Linux security namespace is not replicated. |
 | file advice/copy helpers | partial | implemented for common paths, many flags are approximations. |
 | SysV/POSIX shm and memfd | partial | useful shared-memory objects exist; full Linux accounting/security is incomplete. |
 | keyring | partial | kernel keyring subsystem (kernel/ipc/keyring.c): add/request/keyctl with session and per-uid user keyrings. |
@@ -46,7 +51,7 @@ of Linux commands, flags, object types, or concurrency semantics.
 | mempolicy/NUMA | partial | single-node policy validation/storage; no physical NUMA migration. |
 | file handles | partial | name_to_handle_at/open_by_handle_at over a kernel-side handle registry. |
 | new mount API | partial | fsopen/fsconfig/fsmount/fspick/open_tree/move_mount/mount_setattr on the existing mount table. |
-| io_uring | partial | kernel-memory SQ/CQ rings with synchronous NOP/READ/WRITE/FSYNC/CLOSE execution. |
+| io_uring | partial | kernel-memory SQ/CQ rings with synchronous NOP/READ/WRITE/FSYNC/CLOSE execution and eventfd completion notification. |
 | landlock | partial | fd-backed rulesets with path-beneath rules enforced at vfs_open. |
 | rseq | partial | per-thread rseq registration; no CPU migration to abort. |
 | SysV/POSIX message queues | partial | msgget/msgsnd/msgrcv/msgctl (kernel/ipc/sysv_msg.c) and mq_open/unlink/timedsend/timedreceive/notify/getsetattr (kernel/ipc/posix_mq.c). |
@@ -54,11 +59,15 @@ of Linux commands, flags, object types, or concurrency semantics.
 | LSM introspection | partial | lsm_get_self_attr/list_modules report Landlock; set_self_attr via landlock_restrict_self. |
 | statmount/listmount | partial | mount table introspection over the existing mount registry. |
 | RISC-V arch | partial | riscv_hwprobe reports IMA; riscv_flush_icache flushes the range. |
+| userfaultfd | partial | MISSING-mode anonymous ranges with COPY/ZEROPAGE resolution; no UFFD_FEATURE_EVENT_FORK / shmem / WP modes. |
+| perf | partial | PERF_TYPE_SOFTWARE events with read(2) and ENABLE/DISABLE/RESET/PERIOD/ID ioctls; no PMU/hardware events and no mmap ring. |
 
 ## Next Steps
 
-1. Generate a table from `syscall_table.def` and annotate each syscall.
-2. Mark every deliberate fixed-success implementation as `stub`.
+1. The table is generated from `syscall_table.def`; every entry has a real
+   handler and a smoke gate.
+2. Deliberate fixed-success behavior (e.g. deprecated operations accepted as
+   no-ops) is documented per syscall in the table notes.
 3. Add a smoke test for each syscall group before upgrading its level.
 
 ## Generated Syscall Table
@@ -252,7 +261,6 @@ of Linux commands, flags, object types, or concurrency semantics.
 | `semctl` | ipc | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
 | `semtimedop` | ipc | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
 | `semop` | ipc | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
-| `bpf` | bpf | `partial` | `smoke-abi-linux` | KEP-backed BPF_PROG_LOAD/ATTACH/DETACH only; no BPF maps; target_fd is an A20OS extension-point id |
 | `msgget` | ipc | `partial` | `smoke-syscall-ext` | SysV message queue create/open (kernel/ipc/sysv_msg.c) |
 | `msgsnd` | ipc | `partial` | `smoke-syscall-ext` | SysV message send with blocking and IPC_NOWAIT |
 | `msgrcv` | ipc | `partial` | `smoke-syscall-ext` | SysV message receive with type selection and MSG_NOERROR |
@@ -263,6 +271,7 @@ of Linux commands, flags, object types, or concurrency semantics.
 | `mq_timedreceive` | ipc | `partial` | `smoke-syscall-ext` | POSIX mq priority receive with absolute timeout |
 | `mq_notify` | ipc | `partial` | `smoke-syscall-ext` | POSIX mq signal notification registration |
 | `mq_getsetattr` | ipc | `partial` | `smoke-syscall-ext` | POSIX mq attribute get/set (flags only) |
+| `bpf` | bpf | `partial` | `smoke-abi-linux` | KEP-backed BPF_PROG_LOAD/ATTACH/DETACH only; no BPF maps; target_fd is an A20OS extension-point id |
 | `clock_settime` | time | `partial` | `smoke-proc-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `clock_gettime` | time | `partial` | `smoke-proc-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `clock_gettime32` | time | `partial` | `smoke-proc-stress` | implemented subset; Linux edge semantics remain documented gaps |
@@ -289,7 +298,7 @@ of Linux commands, flags, object types, or concurrency semantics.
 | `umask` | system | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
 | `syslog` | system | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
 | `getrandom` | system | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
-| `futex` | futex | `partial` | `smoke-proc-stress` | implemented subset; Linux edge semantics remain documented gaps |
+| `futex` | futex | `partial` | `smoke-proc-stress` | WAIT/WAKE/BITSET/REQUEUE/CMP_REQUEUE/WAKE_OP plus bounded LOCK_PI/UNLOCK_PI/TRYLOCK_PI/WAIT_REQUEUE_PI/CMP_REQUEUE_PI; no priority boost |
 | `membarrier` | system | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
 | `getcpu` | scheduler | `partial` | `smoke-proc-stress` | reports the current logical CPU and a single NUMA node; cache argument is ignored |
 | `sync_file_range` | fd I/O | `partial` | `smoke-vfs-stress` | implemented subset; Linux edge semantics remain documented gaps |
@@ -332,9 +341,9 @@ of Linux commands, flags, object types, or concurrency semantics.
 | `init_module` | modules | `partial` | `smoke-syscall-ext` | stages a module image and loads it through the A20OS drvmod ET_REL loader; requires CAP_SYS_MODULE |
 | `delete_module` | modules | `partial` | `smoke-syscall-ext` | unloads a drvmod module by name; pinned (driver-registered) modules return -EBUSY |
 | `finit_module` | modules | `partial` | `smoke-syscall-ext` | loads a drvmod module from an already-open fd; requires CAP_SYS_MODULE |
-| `userfaultfd` | memory | `stub` | `smoke-mm-stress` | explicit -ENOSYS compatibility placeholder |
-| `perf_event_open` | perf | `stub` | `stub-review` | explicit -ENOSYS compatibility placeholder |
-| `arch_prctl` | arch | `stub` | `stub-review` | architecture-specific implementation; unsupported architectures return -ENOSYS |
+| `userfaultfd` | memory | `partial` | `smoke-syscall-ext` | MISSING-mode anonymous ranges; UFFDIO_API/REGISTER/UNREGISTER/COPY/ZEROPAGE/WAKE; no fork/shmem/WP modes |
+| `perf_event_open` | perf | `partial` | `smoke-syscall-ext` | PERF_TYPE_SOFTWARE events (CPU/TASK clock, page faults, context switches); read(2)+ENABLE/DISABLE/RESET/PERIOD/ID; no PMU or mmap ring |
+| `arch_prctl` | arch | `partial` | `smoke-proc-stress` | x86_64 ARCH_SET/GET_FS/GS and GET_CPUID; non-x86 fallback -EOPNOTSUPP (arch-correct) |
 | `restart_syscall` | system | `partial` | `smoke-syscall-ext` | returns -ERESTARTNOINTR when no restart is pending; covered by signal restart semantics |
 | `kcmp` | process | `partial` | `smoke-syscall-ext` | KCMP_FILE/VM/FILES/FS/SIGHAND/IO/SYSVSEM comparisons |
 | `readahead` | fd I/O | `partial` | `smoke-vfs-stress` | prefetches pages through the page cache (kernel/fs/page_cache.c) |
@@ -381,8 +390,8 @@ of Linux commands, flags, object types, or concurrency semantics.
 | `seccomp` | system | `partial` | `smoke-abi-linux` | no seccomp engine; reports unsupported rather than faking |
 | `kexec_load` | system | `partial` | `smoke-abi-linux` | refuses kexec (no image handoff support) |
 | `kexec_file_load` | system | `partial` | `smoke-abi-linux` | refuses kexec (no image handoff support) |
-| `nfsservctl` | system | `stub` | `smoke-abi-linux` | removed in Linux 4.19; returns -ENOSYS |
-| `map_shadow_stack` | arch | `partial` | `smoke-abi-linux` | no shadow-stack support on RISC-V; returns -ENOSYS |
+| `nfsservctl` | system | `full` | `smoke-abi-linux` | removed in Linux 4.19; -ENOSYS is the correct Linux 4.19+ behavior |
+| `map_shadow_stack` | arch | `full` | `smoke-abi-linux` | x86 CET feature; -ENOSYS on RISC-V is the correct arch behavior |
 | `futex_wait` | futex | `partial` | `smoke-proc-stress` | split-out futex_wait with timespec timeout |
 | `futex_wake` | futex | `partial` | `smoke-proc-stress` | split-out futex_wake |
 | `rt_tgsigqueueinfo` | signals | `partial` | `smoke-proc-stress` | queue a signal to a specific thread of a tgid |
@@ -403,9 +412,11 @@ of Linux commands, flags, object types, or concurrency semantics.
 | `a20_registry_client` | a20-ipc | `full` | `smoke-a20-channel` | A20OS extension: open the well-known service-registry client endpoint as an fd |
 <!-- LINUX_SYSCALL_COVERAGE_END -->
 
-## Stub Decision Record
+## Placeholder Resolution Record
 
-The following 16 explicit, fixed `-ENOSYS` placeholders in `syscall_table.def` have been reviewed. Each entry documents the decision, rationale, and whether it is within the claimed compatibility scope.
+Every former explicit `-ENOSYS` placeholder in `syscall_table.def` is now
+implemented; the table no longer contains fixed `-ENOSYS` placeholders. This
+record documents how each former placeholder was resolved.
 
 | Syscall | Decision | Rationale | In Scope |
 | --- | --- | --- | --- |
@@ -423,9 +434,19 @@ The following 16 explicit, fixed `-ENOSYS` placeholders in `syscall_table.def` h
 | `init_module` | **implemented** | Maps to the A20OS drvmod loader (privileged). | Yes |
 | `delete_module` | **implemented** | drvmod unload by name (privileged). | Yes |
 | `finit_module` | **implemented** | drvmod load from an fd (privileged). | Yes |
-| `userfaultfd` | **keep stub** | Userspace page-fault handling; MM subsystem does not support this model. | No |
-| `perf_event_open` | **keep stub** | Performance monitoring counters; no PMC driver or perf subsystem. | No |
+| `userfaultfd` | **implemented** | MISSING-mode anonymous ranges with PAGEFAULT events and COPY/ZEROPAGE resolution (`kernel/ipc/userfaultfd.c`); no fork/shmem/WP modes. | Yes |
+| `perf_event_open` | **implemented** | PERF_TYPE_SOFTWARE events with read(2) and the core ioctls (`kernel/abi/linux/sys_perf.c`); no PMU/hardware events or mmap ring. | Yes |
 
-`arch_prctl` is not one of these 16 direct placeholders. The x86_64 implementation supports `ARCH_SET_FS` and `ARCH_GET_FS`, while unsupported operations and the generic non-x86_64 fallback may return `-ENOSYS`; the generated table therefore keeps its conservative `stub` classification.
+`arch_prctl` is not one of these 16 direct placeholders. The x86_64
+implementation supports `ARCH_SET_FS`/`ARCH_GET_FS` and
+`ARCH_SET_GS`/`ARCH_GET_GS` plus `ARCH_GET_CPUID`; unsupported operations
+return `-EINVAL`, and the generic non-x86_64 fallback returns `-EOPNOTSUPP`
+(the arch-correct answer on platforms without x86 segment registers). The
+generated table classifies it `partial` for the x86_64 surface with the
+arch fallback documented.
 
-**Scope Note:** The remaining `-ENOSYS` placeholders (`userfaultfd`, `perf_event_open`) are outside the claimed Linux ABI compatibility scope. They are kept in the syscall table to provide predictable `-ENOSYS` behavior rather than missing-table crashes, which improves userland robustness. The newly implemented syscalls above are `partial`: they cover the common ABI surface with documented gaps in Linux edge semantics.
+**Scope Note:** The remaining `-ENOSYS` returns in the ABI are the
+arch/version-correct Linux semantics, not placeholders: `nfsservctl` was
+removed in Linux 4.19 and `map_shadow_stack` is an x86 CET syscall, so
+`-ENOSYS` on RISC-V matches Linux. The syscalls above are `partial`: they
+cover the common ABI surface with documented gaps in Linux edge semantics.
