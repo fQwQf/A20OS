@@ -12,3 +12,33 @@ index 9cb2436..3adfccf 100644
  
      ret = g_application_run(G_APPLICATION(app), argc, argv);
  
+diff --git a/src/xfce-desktop.c b/src/xfce-desktop.c
+index 906a915..cf96ae3 100644
+--- a/src/xfce-desktop.c
++++ b/src/xfce-desktop.c
+@@ -578,6 +578,10 @@ xfce_desktop_constructed(GObject *obj)
+     }
+ 
+     desktop->xfw_screen = xfw_screen_get_default();
++    if (desktop->xfw_screen == NULL) {
++        g_critical("No default GdkScreen available; cannot construct the desktop");
++        return;
++    }
+     workspace_manager = xfw_screen_get_workspace_manager(desktop->xfw_screen);
+     desktop->workspace_manager = workspace_manager;
+ 
+diff --git a/src/xfdesktop-application.c b/src/xfdesktop-application.c
+index 4958e8c..3d04906 100644
+--- a/src/xfdesktop-application.c
++++ b/src/xfdesktop-application.c
+@@ -1027,6 +1027,10 @@ xfdesktop_application_start(XfdesktopApplication *app)
+     }
+ 
+     app->screen = xfw_screen_get_default();
++    if (app->screen == NULL) {
++        g_critical("No default GdkScreen available; cannot start the desktop");
++        return;
++    }
+ 
+     settings = gtk_settings_get_default();
+     g_signal_connect (settings, "notify::gtk-theme-name", G_CALLBACK (xfdesktop_application_theme_changed), NULL);

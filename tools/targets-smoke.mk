@@ -154,6 +154,7 @@ smoke-qemu-gui-x86_64:
 		--qemu qemu-system-x86_64 \
 		--kernel .kernel-build/x86_64-qemu-virt-x86_64-both-dev/kernel.elf \
 		--disk .kernel-build/x86_64-qemu-virt-x86_64-both-dev/gui-fat32.img \
+		--frame-window $(GUI_FRAME_WINDOW) \
 		--timeout $(SMOKE_TIMEOUT)
 
 smoke-qemu-gui-riscv64:
@@ -167,6 +168,7 @@ smoke-qemu-gui-riscv64:
 		--kernel .kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf \
 		--disk .kernel-build/riscv64-qemu-virt-riscv64-both-dev/gui-fat32.img \
 		--artifacts .kernel-build/smoke/qemu-gui-riscv64 \
+		--frame-window $(GUI_FRAME_WINDOW_RV64) \
 		--timeout $(SMOKE_TIMEOUT)
 
 smoke-qemu-gui-aarch64:
@@ -177,7 +179,8 @@ smoke-qemu-gui-aarch64:
 	$(PYTHON) tools/smoke_qemu_gui.py --arch aarch64 --qemu qemu-system-aarch64 \
 		--kernel .kernel-build/aarch64-qemu-virt-aarch64-both-dev/kernel.elf \
 		--disk .kernel-build/aarch64-qemu-virt-aarch64-both-dev/gui-fat32.img \
-		--artifacts .kernel-build/smoke/qemu-gui-aarch64 --timeout $(SMOKE_TIMEOUT)
+		--artifacts .kernel-build/smoke/qemu-gui-aarch64 \
+		--frame-window $(GUI_FRAME_WINDOW) --timeout $(SMOKE_TIMEOUT)
 
 smoke-qemu-gui-arm32:
 	$(MAKE) ARCH=arm32 BOARD=qemu-virt-arm32 ABI=both BRINGUP=0 dev-build
@@ -187,7 +190,8 @@ smoke-qemu-gui-arm32:
 	$(PYTHON) tools/smoke_qemu_gui.py --arch arm32 --qemu qemu-system-arm \
 		--kernel .kernel-build/arm32-qemu-virt-arm32-both-dev/kernel.elf \
 		--disk .kernel-build/arm32-qemu-virt-arm32-both-dev/gui-fat32.img \
-		--artifacts .kernel-build/smoke/qemu-gui-arm32 --timeout $(SMOKE_TIMEOUT)
+		--artifacts .kernel-build/smoke/qemu-gui-arm32 \
+		--frame-window $(GUI_FRAME_WINDOW) --timeout $(SMOKE_TIMEOUT)
 
 smoke-qemu-gui-loongarch64:
 	$(MAKE) ARCH=loongarch64 BOARD=qemu-virt-loongarch64 ABI=both BRINGUP=0 dev-build
@@ -197,7 +201,8 @@ smoke-qemu-gui-loongarch64:
 	$(PYTHON) tools/smoke_qemu_gui.py --arch loongarch64 --qemu qemu-system-loongarch64 \
 		--kernel .kernel-build/loongarch64-qemu-virt-loongarch64-both-dev/kernel.elf \
 		--disk .kernel-build/loongarch64-qemu-virt-loongarch64-both-dev/gui-fat32.img \
-		--artifacts .kernel-build/smoke/qemu-gui-loongarch64 --timeout $(SMOKE_TIMEOUT)
+		--artifacts .kernel-build/smoke/qemu-gui-loongarch64 \
+		--frame-window $(GUI_FRAME_WINDOW) --timeout $(SMOKE_TIMEOUT)
 
 smoke-arm32:
 	$(MAKE) ARCH=arm32 ABI=linux BRINGUP=1 kernel-only

@@ -208,7 +208,10 @@ int net_socket_create(int domain, int type, int protocol) {
         ((domain != AF_INET && domain != AF_INET6) || protocol < 0 || protocol > 255))
         return -EPROTONOSUPPORT;
     if (domain == AF_NETLINK &&
-        (base_type != SOCK_RAW || protocol != NETLINK_SOCK_DIAG))
+        (base_type != SOCK_RAW ||
+         (protocol != NETLINK_SOCK_DIAG &&
+          protocol != NETLINK_KOBJECT_UEVENT &&
+          protocol != NETLINK_GENERIC)))
         return -EPROTONOSUPPORT;
 
     if (domain == AF_INET || domain == AF_INET6) {
@@ -462,8 +465,14 @@ int net_sendto(int gfd, const void *buf, size_t len, int flags,
     int dontwait = s->nonblock || ((flags & MSG_DONTWAIT) != 0);
     if (s->domain == AF_ALG)
         return net_alg_socket_send(s, buf, len);
-    if (s->domain == AF_NETLINK)
-        return net_netlink_diag_request(s, buf, len, addr, addrlen);
+    if (s->domain == AF_NETLINK) {
+        if (s->protocol == NETLINK_SOCK_DIAG)
+            return net_netlink_diag_request(s, buf, len, addr, addrlen);
+        if (s->protocol == NETLINK_KOBJECT_UEVENT ||
+            s->protocol == NETLINK_GENERIC)
+            return net_netlink_uevent_send(s, buf, len, addr, addrlen);
+        return -EPROTONOSUPPORT;
+    }
     if (s->domain == AF_INET6 && s->type == SOCK_RAW)
         return net_sendto_raw_ipv6(s, (void *)buf, len, addr, addrlen);
     if ((s->domain == AF_INET || s->domain == AF_INET6) &&

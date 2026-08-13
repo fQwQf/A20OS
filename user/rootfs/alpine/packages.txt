@@ -1,0 +1,54 @@
+# A20OS distro rootfs: Alpine Linux + XFCE4 (Wayland, labwc/wlroots)
+#
+# Base userspace
+alpine-base
+bash
+coreutils
+util-linux
+libcrypto3
+libmount
+busybox-static
+busybox-extras
+iputils
+net-tools
+sudo
+musl-locales
+ncurses
+tzdata
+which
+shadow
+grep
+elfutils
+curl
+ca-certificates
+
+# Device, login and session services (the layer the from-source path stubs out)
+seatd
+seatd-launch
+eudev
+dbus
+dbus-x11
+elogind
+polkit
+
+# XFCE desktop + Wayland compositor
+xfce4
+xfce4-terminal
+thunar
+labwc
+xwayland
+xrandr
+xkeyboard-config
+gdk-pixbuf
+gdk-pixbuf-loaders
+librsvg
+shared-mime-info
+hicolor-icon-theme
+adwaita-icon-theme
+font-noto-cjk
+font-dejavu
+
+# Graphics (DRM/mesa) + software rendering fallback
+mesa
+mesa-dri-gallium
+mesa-demos
