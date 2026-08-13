@@ -200,6 +200,16 @@ int64_t sys_madvise(uint64_t addr, size_t len, int advice) {
     case MADV_REMOVE:
     case MADV_COLD:
     case MADV_PAGEOUT:
+        /* mseal(2): the page-releasing advices are refused on sealed ranges.
+         * MADV_COLD and MADV_PAGEOUT are hints and are allowed by Linux even
+         * on sealed ranges; the releasing advices are not. */
+        if (advice == MADV_DONTNEED || advice == MADV_FREE ||
+            advice == MADV_REMOVE) {
+            if (mm_mseal_range_is_sealed_locked(t->mm, start, end - start)) {
+                ret = -EPERM;
+                goto out;
+            }
+        }
         for (uint64_t va = start; va < end; ) {
             int level = 0;
             vaddr_t base = 0;
