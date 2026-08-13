@@ -61,6 +61,8 @@ mksh 不能归并为单一 MirBSD 许可证：多数源文件携带 MirBSD/MirOS
 
 RocketOS 边界尚未解决：`kernel/fs/vfs.c` 写有设计启发说明，`kernel/platform/{visionfive2,ls2k1000}/board.c` 和 `kernel/drivers/net/{starfive_gmac,ls2k_gmac}.c` 写有 RocketOS porting/bring-up reference，但仓库没有记录所参考的精确 RocketOS revision、该 revision 的许可证文本、逐文件来源对照或单独授权。在取得这些证据前，不能把注释中的“MIT”、“inspired”或“reference”升级为已验证许可证，也不能断言相关文件未包含复制或改写代码。应对精确 revision 做 provenance/license 审计，或取得覆盖相关代码的单独授权。
 
+两块物理板 bring-up 的硬件细节（JH7110 SYS_CRG 时钟偏移、YT8531 PHY、LS2K1000 GMAC0 基址 0x40040000 与 PCI 配置窗口 0xfe00001800 等）也参考了 RocketOS 的 StarFive `drivers/net/starfive/` 与 la2000 `drivers/net/la2000/` 驱动，并在 `docs/platforms/physical-boards.md` 中逐项标注"未核实"；该文档不等同于来源对照或授权记录。
+
 ---
 
 ## 3. 设计思路参考（design inspiration）

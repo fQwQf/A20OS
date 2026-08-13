@@ -173,42 +173,42 @@ g_lwip_lock -> virtio-net nonblocking send/recv paths only
 
 ### DW SDIO
 
-**锁：** 无。
+**锁：** `g_sdio.lock`（spinlock），保护命令/数据寄存器序列与 `g_sdio` 的 `ready/rca/sectors`。
 
 - 该驱动使用单个全局 `sdio_priv_t` 实例（`g_sdio`）。
-- 所有命令和数据传输都是同步 busy-poll。
-- 当前实现一次只允许一个 in-flight 请求，且不支持并发调用者，因此不需要私有 spinlock。
+- 所有命令和数据传输都是同步 busy-poll；`sdio_xfer_block()` 在 spinlock 下执行一次阻塞传输。
+- 短轮询（`sdio_wait_cmd`/`sdio_wait_data_idle`）有超时上限，不会无限自旋。
 
 **规则：**
 
-- 未来的并发版本或 IRQ 驱动版本必须增加私有锁，并在本文档中记录。
-- 在此之前，调用者通过单实例进行串行化。
+- 锁内只做寄存器轮询与数据搬运，不分配、不调用 VFS、不睡眠。
+- IRQ 驱动的完成路径若未来加入，必须复用同一锁并在本文档记录单向顺序。
 
 ### StarFive GMAC
 
-**锁：** 无。
+**锁：** 每实例 `starfive_gmac_priv_t.lock`（spinlock），保护 TX/RX descriptor ring 与 `tx_busy/rx_busy`。
 
-- 该驱动使用单个全局 `gmac_priv_t` 实例（`g_gmac`）。
-- `starfive_gmac_send()` 和 `starfive_gmac_recv()` 是寄存器轮询路径，会检查 descriptor ownership bit。
-- 当前实现没有用私有 spinlock 保护 descriptor ring。
+- 实例池 `g_gmac_insts[]`（最多 4 个）按 MMIO 基址查找，probe 时分配。
+- `starfive_gmac_send()`、`starfive_gmac_recv()`、`starfive_gmac_poll()` 在锁内完成寄存器轮询路径并检查 descriptor ownership bit。
+- 锁内不做分配、VFS 或回调网络栈；`mdelay()` 只出现在 init/PHY 阶段（锁外）。
 
 **规则：**
 
-- 未来的 IRQ 驱动版本或 SMP-safe 版本必须增加私有锁，并在本文档中记录。
-- 今天的并发 send/recv 调用存在竞争；调用者必须在外部串行化。
+- IRQ 驱动的完成路径必须复用同一锁并在此记录顺序。
+- 多实例已支持，但数据面仍是轮询，未接 IRQ。
 
 ### Loongson-2K GMAC
 
-**锁：** 无。
+**锁：** 每实例 `ls2k_gmac_priv_t.lock`（spinlock），保护 TX/RX descriptor ring 与 `tx_busy/rx_busy`。
 
-- 该驱动使用单个全局 `ls2k_gmac_priv_t` 实例（`g_ls2k_gmac`）。
-- `ls2k_gmac_send()` 和 `ls2k_gmac_recv()` 是寄存器轮询路径，会检查 descriptor ownership bit。
-- 当前实现没有用私有 spinlock 保护 descriptor ring。
+- 实例池 `g_ls2k_gmac_insts[]`（最多 4 个）按 MMIO 基址查找，probe 时分配。
+- `ls2k_gmac_send()`、`ls2k_gmac_recv()`、`ls2k_gmac_poll()` 在锁内完成寄存器轮询路径并检查 descriptor ownership bit。
+- 锁内不做分配、VFS 或回调网络栈。
 
 **规则：**
 
-- 未来的 IRQ 驱动版本或 SMP-safe 版本必须增加私有锁，并在本文档中记录。
-- 今天的并发 send/recv 调用存在竞争；调用者必须在外部串行化。
+- IRQ 驱动的完成路径必须复用同一锁并在此记录顺序。
+- 数据面仍是轮询，未接 IRQ。
 
 ### AHCI
 
@@ -281,6 +281,7 @@ read/poll 在 `h->lock` 下调用 HCD `poll`，但 `usb_hid_complete()` 自身�
 - `kernel/drivers/char/uart.c`：`rx_lock` 和 Ctrl-C signal 路径。
 - `kernel/drivers/char/pty.c`：`g_pty_alloc_lock` 和 per-pair `lock`。
 - `kernel/drivers/block/loop.c`：per-device loop lock。
-- `kernel/drivers/block/dw_sdio.c`：无锁 SDIO 实现。
-- `kernel/drivers/net/starfive_gmac.c`：无锁 StarFive GMAC 实现。
-- `kernel/drivers/net/ls2k_gmac.c`：无锁 Loongson-2K GMAC 实现。
+- `kernel/drivers/block/dw_sdio.c`：`g_sdio.lock` 串行化轮询传输。
+- `kernel/drivers/net/starfive_gmac.c`：per-instance lock 串行化 descriptor ring。
+- `kernel/drivers/net/ls2k_gmac.c`：per-instance lock 串行化 descriptor ring。
+- `kernel/platform/visionfive2/board.c`、`kernel/platform/ls2k1000/board.c`：物理板适配，见 [物理开发板移植](../platforms/physical-boards.md)。

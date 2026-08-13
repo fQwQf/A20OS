@@ -68,4 +68,15 @@ void arch_handle_irq(uint64_t irq, int from_user) {
     }
 }
 
+#ifdef CONFIG_SMP
+/* Weak default so a RISC-V board that does not implement generation-based TLB
+ * shootdowns (or does not enable SMP) still links; such a board must not set
+ * smp_platform_ops.remote_tlb_flush unless its handler publishes acks. */
+__attribute__((weak))
+void rv64_ipi_tlb_flush_handler(void)
+{
+    __asm__ __volatile__("sfence.vma" ::: "memory");
+}
+#endif /* CONFIG_SMP */
+
 #endif /* CONFIG_RISCV64 */
