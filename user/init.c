@@ -77,6 +77,45 @@ static void reap_children(void)
         ;
 }
 
+/*
+ * Distro rootfs boot mode.  When a compatible distro image (Alpine + the
+ * stage-2 init overlay) is mounted at /test, A20OS stops acting as a
+ * self-contained userspace and becomes just the kernel underneath that
+ * distro: we chroot(2) into /test and exec /sbin/init, which brings up the
+ * login/device services (dbus / elogind / seatd / udevd) and the XFCE
+ * Wayland session.  The kernel only provides the Linux ABI + /dev + /proc +
+ * /sys; the distro owns the userspace.
+ */
+static void do_shutdown(void);
+
+static int detect_distro_rootfs(void)
+{
+    struct stat st;
+    if (access("/test/etc/a20-distro", F_OK) != 0)
+        return 0;
+    if (stat("/test/sbin/init", &st) != 0 || !S_ISREG(st.st_mode))
+        return 0;
+    return 1;
+}
+
+static void enter_distro_rootfs(void)
+{
+    printf("[init] distro mode: entering rootfs at /test\n");
+    if (chdir("/test") != 0 || chroot("/test") != 0) {
+        perror("chroot distro rootfs");
+        do_shutdown();
+    }
+    char *distro_argv[] = { "/sbin/init", NULL };
+    char *distro_envp[] = {
+        "PATH=/usr/sbin:/usr/bin:/sbin:/bin",
+        "HOME=/root", "SHELL=/bin/bash", "TERM=linux",
+        "XDG_RUNTIME_DIR=/run/user/0", NULL
+    };
+    execve("/sbin/init", distro_argv, distro_envp);
+    perror("execve /sbin/init");
+    do_shutdown();
+}
+
 static void do_shutdown(void)
 {
     sync();
@@ -92,6 +131,9 @@ int main(void)
     setvbuf(stdout, NULL, _IONBF, 0);
     setvbuf(stderr, NULL, _IONBF, 0);
     setup_signals();
+
+    if (detect_distro_rootfs())
+        enter_distro_rootfs();
 
 #if defined(__powerpc64__)
     char *argv[] = {"mksh", NULL};
