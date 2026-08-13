@@ -204,6 +204,7 @@ NATIVE_HELLO_BIN       := $(NATIVE_BUILD_DIR)/native-hello-$(NATIVE_TAG)
 NATIVE_HANDLE_BIN      := $(NATIVE_BUILD_DIR)/native-handle-$(NATIVE_TAG)
 NATIVE_LIBC_BIN        := $(NATIVE_BUILD_DIR)/native-libc-$(NATIVE_TAG)
 NATIVE_FUTEX_BIN       := $(NATIVE_BUILD_DIR)/native-futex-$(NATIVE_TAG)
+NATIVE_DEEPEN_BIN      := $(NATIVE_BUILD_DIR)/native-deepen-$(NATIVE_TAG)
 NATIVE_DEBUG_BIN       := $(NATIVE_BUILD_DIR)/native-debug-$(NATIVE_TAG)
 NATIVE_EXT_BIN         := $(NATIVE_BUILD_DIR)/native-ext-$(NATIVE_TAG)
 NATIVE_MM_BIN          := $(NATIVE_BUILD_DIR)/native-mm-$(NATIVE_TAG)
@@ -225,7 +226,7 @@ NATIVE_UINPUTD_BIN     := $(NATIVE_BUILD_DIR)/uinputd-$(NATIVE_TAG).a20drv
 NATIVE_PERSONALITY_BIN := $(NATIVE_BUILD_DIR)/native-personality-$(NATIVE_TAG)
 NATIVE_LINUX_BIN       := $(NATIVE_BUILD_DIR)/native-linux-$(NATIVE_TAG)
 NATIVE_OUTPUTS         := $(NATIVE_HELLO_BIN) $(NATIVE_HANDLE_BIN) \
-                          $(NATIVE_LIBC_BIN) $(NATIVE_FUTEX_BIN) \
+                          $(NATIVE_LIBC_BIN) $(NATIVE_FUTEX_BIN) $(NATIVE_DEEPEN_BIN) \
                           $(NATIVE_MM_BIN) $(NATIVE_SIGNAL_BIN) \
                           $(NATIVE_IPC_BIN) $(NATIVE_CONTRACT_BIN) \
                           $(NATIVE_SVCMAN_BIN) $(NATIVE_ECHOD_BIN) \

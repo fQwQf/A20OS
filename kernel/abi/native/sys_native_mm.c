@@ -95,8 +95,9 @@ static uint32_t a20_vm_prot_eff(uint32_t prot, a20_rights_t rights)
         eff |= A20_PROT_READ;
     if ((prot & A20_PROT_WRITE) && (rights & A20_RIGHT_WRITE))
         eff |= A20_PROT_WRITE;
-    /* No EXEC right exists for MEMORY/FILE handles; EXEC passes through. */
-    if (prot & A20_PROT_EXEC)
+    /* EXEC is tightened against the handle's EXEC right (04-memory §4.4):
+     * no handle right, no execute mapping. */
+    if ((prot & A20_PROT_EXEC) && (rights & A20_RIGHT_EXEC))
         eff |= A20_PROT_EXEC;
     return eff;
 }
@@ -187,7 +188,6 @@ int64_t sys_a20_vm_share(const a20_syscall_args_t *args)
     a20_handle_t vmo_h = (a20_handle_t)A20_ARG(0);
     a20_handle_t target_h = (a20_handle_t)A20_ARG(1);
     a20_rights_t rights = (a20_rights_t)A20_ARG(2);
-
     task_t *cur = proc_current();
     struct a20_ht_internal *ht = task_get_a20_ht(cur);
     if (!ht) return -A20_ERR_BAD_HANDLE;
@@ -254,6 +254,68 @@ out_vmo:
     return r;
 }
 
+/*
+ * vm_share_region — export an address range of the caller's own address space
+ * as a new MEMORY handle (docs/native-abi/09-… §7).  The range must be fully
+ * covered by a single VM_VMO VMA (a VMO-backed mapping created by vm_map /
+ * vm_alloc); the exported handle references the same canonical VMO frames.
+ */
+int64_t sys_a20_vm_share_region(const a20_syscall_args_t *args)
+{
+    a20_vm_share_args_t *uargs = (a20_vm_share_args_t *)A20_ARG(0);
+    if (!uargs) return -A20_ERR_FAULT;
+
+    a20_vm_share_args_t kargs;
+    A20_VALIDATE_AND_COPY(uargs, kargs);
+
+    if (kargs.length == 0 || (kargs.addr & (PAGE_SIZE - 1)) ||
+        (kargs.length & (PAGE_SIZE - 1)))
+        return -A20_ERR_INVALID_ARGUMENT;
+
+    task_t *cur = proc_current();
+    if (!cur || !cur->mm) return -A20_ERR_BAD_HANDLE;
+    if (kargs.addr >= USER_VA_LIMIT ||
+        kargs.length > USER_VA_LIMIT - kargs.addr)
+        return -A20_ERR_INVALID_ARGUMENT;
+
+    uint64_t flags = spin_lock_irqsave(&cur->mm->lock);
+    vm_area_t *vma = mm_find_vma(cur->mm, kargs.addr);
+    if (!vma || (uint64_t)vma->start > kargs.addr ||
+        (uint64_t)vma->end < kargs.addr + kargs.length ||
+        !(vma->vm_flags & VM_VMO) || !vma->vmo) {
+        spin_unlock_irqrestore(&cur->mm->lock, flags);
+        return -A20_ERR_NOT_SUPPORTED;
+    }
+    struct vmo *vmo = vma->vmo;
+    vmo_ref(vmo);
+    uint32_t prot = mm_pte_flags_to_prot(vma->pte_flags);
+    spin_unlock_irqrestore(&cur->mm->lock, flags);
+
+    a20_rights_t rights = 0;
+    if (prot & A20_PROT_READ)  rights |= A20_RIGHT_READ;
+    if (prot & A20_PROT_WRITE) rights |= A20_RIGHT_WRITE;
+    if (prot & A20_PROT_EXEC)  rights |= A20_RIGHT_EXEC;
+    rights |= A20_RIGHT_MAP | A20_RIGHT_STAT | A20_RIGHT_DUP |
+              A20_RIGHT_TRANSFER | A20_RIGHT_CONTROL;
+    rights &= kargs.rights;
+    if (rights == 0) {
+        vmo_release(vmo);
+        return -A20_ERR_ACCESS;
+    }
+
+    struct a20_ht_internal *ht = task_get_a20_ht(cur);
+    if (!ht) { vmo_release(vmo); return -A20_ERR_BAD_HANDLE; }
+    int64_t h = a20_handle_install(ht, vmo, A20_OBJ_MEMORY, rights);
+    if (h < 0) { vmo_release(vmo); return h; }
+
+    kargs.out_handle = (a20_handle_t)h;
+    if (a20_copy_struct_to_user(uargs, &kargs, sizeof(kargs)) < 0) {
+        a20_handle_remove(ht, (a20_handle_t)h);
+        return -A20_ERR_FAULT;
+    }
+    return A20_OK;
+}
+
 
 int64_t sys_a20_vm_flush(const a20_syscall_args_t *args)
 {
@@ -273,6 +335,12 @@ int64_t sys_a20_vm_flush(const a20_syscall_args_t *args)
 
     if (flags & A20_FLUSH_SYNC)
         return vfs_sync();
+    if (flags & A20_FLUSH_CLEAN) {
+        /* Range writeback for file-backed mappings; VMO frames are owned by
+         * the VMO and have no per-range writeback path, so a full cache sync
+         * covers the file range (docs/native-abi/09-… §7). */
+        return vfs_sync();
+    }
     if (flags & A20_FLUSH_INVALIDATE)
         arch_tlb_flush();
     return A20_OK;
@@ -427,7 +495,13 @@ int64_t sys_a20_vm_create_object(const a20_syscall_args_t *args)
 
     if (size == 0) return -A20_ERR_INVALID_ARGUMENT;
 
-    struct vmo *vmo = vmo_create(VMO_ANONYMOUS, size, options);
+    uint32_t vmo_type = VMO_ANONYMOUS;
+    if (options & A20_VMO_PAGED)
+        vmo_type = VMO_PAGED;
+    if (options & ~(A20_VMO_PAGED))
+        return -A20_ERR_INVALID_ARGUMENT;
+
+    struct vmo *vmo = vmo_create(vmo_type, size, options);
     if (!vmo) return -A20_ERR_NO_MEMORY;
 
     task_t *cur = proc_current();
@@ -436,6 +510,7 @@ int64_t sys_a20_vm_create_object(const a20_syscall_args_t *args)
 
     int64_t h = a20_handle_install(ht, vmo, A20_OBJ_MEMORY,
                                     A20_RIGHT_READ | A20_RIGHT_WRITE |
+                                    A20_RIGHT_EXEC |
                                     A20_RIGHT_MAP | A20_RIGHT_STAT | A20_RIGHT_DUP |
                                     A20_RIGHT_TRANSFER | A20_RIGHT_CONTROL);
     if (h < 0) vmo_release(vmo);

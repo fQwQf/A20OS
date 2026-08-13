@@ -340,5 +340,21 @@ int net_socket_install_file(net_socket_t *s, int flags) {
         vfile_free(vf);
         return gfd;
     }
+    s->gfd = gfd;
     return gfd;
+}
+
+/*
+ * Push an event to every event queue watching this socket's global fd
+ * (Native ABI event source wiring, docs/native-abi/09-… §5).  Cheap when no
+ * Native process watches the socket.  Called from the net core; safe with
+ * g_net_lock held (a20_event_notify takes its own IRQ-safe locks).
+ */
+void net_event_notify(net_socket_t *s, uint32_t event, uint64_t data0,
+                      uint64_t data1)
+{
+    if (!s || s->gfd < 0)
+        return;
+    a20_event_notify((void *)(uintptr_t)s->gfd, A20_OBJ_SOCKET, event,
+                     data0, data1);
 }

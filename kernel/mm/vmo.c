@@ -16,6 +16,10 @@
 #include "mm/vmo.h"
 #include "cg/cgroup.h"
 #include "ipc/objstats.h"
+#include "ipc/ipc.h"
+#include "proc/proc.h"
+#include "proc/signal.h"
+#include "proc/park.h"
 
 struct vmo *vmo_create(uint32_t type, uint64_t size, uint32_t options)
 {
@@ -40,11 +44,13 @@ struct vmo *vmo_create(uint32_t type, uint64_t size, uint32_t options)
     vmo->type = type;
     vmo->options = options;
     spin_init(&vmo->lock);
+    wait_queue_init(&vmo->faulters);
     vmo->page_count = npages;
     /* Must be zeroed: vmo_destroy uncharges charge_cg whenever it is
      * non-NULL, and tasks without a cgroup never overwrite the field. */
     vmo->charge_cg = NULL;
     vmo->charged_pages = 0;
+    vmo->pager = NULL;
     a20_objstat_add(&g_a20_objstats.vmos, 1);
     return vmo;
 }
@@ -52,6 +58,8 @@ struct vmo *vmo_create(uint32_t type, uint64_t size, uint32_t options)
 static void vmo_destroy(struct vmo *vmo)
 {
     if (!vmo) return;
+    if (vmo->pager)
+        a20_pager_detach_vmo(vmo);
     a20_objstat_add(&g_a20_objstats.vmos, -1);
     a20_objstat_add(&g_a20_objstats.vmo_pages,
                     -(int64_t)(vmo->phys_size / PAGE_SIZE));
@@ -99,7 +107,19 @@ pfn_t vmo_get_page(struct vmo *vmo, uint32_t index)
         spin_unlock(&vmo->lock);
         return pfn;
     }
+    int paged = (vmo->type == VMO_PAGED && vmo->pager);
+    spin_unlock(&vmo->lock);
 
+    if (paged) {
+        if (vmo_paged_fault(vmo, index, 1) != 0)
+            return PFN_NONE;
+        spin_lock(&vmo->lock);
+        pfn_t pfn = vmo->pages[index];
+        spin_unlock(&vmo->lock);
+        return pfn;
+    }
+
+    spin_lock(&vmo->lock);
     pfn_t pfn = pfa_alloc_page();
     if (pfn == PFN_NONE) {
         spin_unlock(&vmo->lock);
@@ -136,6 +156,82 @@ pfn_t vmo_peek_page(struct vmo *vmo, uint32_t index)
     return pfn;
 }
 
+/*
+ * PAGED-VMO fault: request the page from the user-space pager and park until
+ * a20_pager_supply_pages() materializes it.  Caller holds no vmo->lock.
+ * Returns:
+ *   0         page is now materialized (caller re-reads ->pages[index])
+ *   -EAGAIN   no pager / pager gone / request could not be queued: caller
+ *             should run the normal zero-fill path
+ *   -EINTR    killed while parked (fault path delivers a fatal signal)
+ *   -EIO      pager request peer closed: page can never be supplied
+ */
+int vmo_paged_fault(struct vmo *vmo, uint32_t index, int write_access)
+{
+    task_t *t = proc_current();
+
+    for (;;) {
+        spin_lock(&vmo->lock);
+        if (vmo->pages[index] != PFN_NONE) {
+            spin_unlock(&vmo->lock);
+            return 0;
+        }
+        a20_pager_t *pager = vmo->pager;
+        spin_unlock(&vmo->lock);
+
+        if (!pager)
+            return -EAGAIN;
+
+        if (a20_channel_peer_closed(pager->requests)) {
+            /* Pager disconnected: faulters can never be satisfied. */
+            wait_queue_wake_all(&vmo->faulters, index, PROC_WAKE_EVENT);
+            return -EIO;
+        }
+
+        int rq = a20_pager_request_page(vmo, index, write_access);
+        if (rq != A20_OK)
+            return -EIO;
+
+        if (!t)
+            return -EINTR;
+
+        proc_wait_token_t token = proc_park_prepare(PROC_WAIT_KILLABLE, 0);
+        if (!token.task)
+            return -EINTR;
+
+        wait_queue_entry_t entry = {0};
+        spin_lock(&vmo->lock);
+        /* Re-check before linking so a supply that lands between the request
+         * and the link cannot be missed. */
+        if (vmo->pages[index] != PFN_NONE) {
+            spin_unlock(&vmo->lock);
+            (void)proc_park_cancel(token);
+            proc_park_finish(token);
+            return 0;
+        }
+        bool linked = wait_queue_link(&vmo->faulters, &entry, token, index);
+        spin_unlock(&vmo->lock);
+
+        proc_wake_reason_t reason;
+        if (linked)
+            reason = proc_park_commit(token);
+        else {
+            (void)proc_park_cancel(token);
+            reason = PROC_WAKE_CANCEL;
+        }
+        wait_queue_unlink(&vmo->faulters, &entry);
+        proc_park_finish(token);
+
+        if (reason == PROC_WAKE_FATAL_SIGNAL ||
+            reason == PROC_WAKE_TASK_EXIT)
+            return -EINTR;
+        if (proc_wake_reason_is_task_interrupt(reason) &&
+            signal_task_has_fatal(t))
+            return -EINTR;
+        /* Loop: page may now be materialized, or the request needs retry. */
+    }
+}
+
 int vmo_get_page_charged(struct vmo *vmo, uint32_t index,
                          struct cg_node *cg, pfn_t *out)
 {
@@ -148,7 +244,28 @@ int vmo_get_page_charged(struct vmo *vmo, uint32_t index,
         spin_unlock(&vmo->lock);
         return 0;
     }
+    int paged = (vmo->type == VMO_PAGED && vmo->pager);
+    spin_unlock(&vmo->lock);
 
+    if (paged) {
+        /* PAGED: request the page from the user-space pager.  On -EAGAIN the
+         * pager went away and we fall back to the zero-fill path below. */
+        int pf = vmo_paged_fault(vmo, index, 1);
+        if (pf == 0) {
+            spin_lock(&vmo->lock);
+            pfn_t pfn = vmo->pages[index];
+            spin_unlock(&vmo->lock);
+            if (pfn != PFN_NONE) {
+                *out = pfn;
+                return 0;
+            }
+        } else if (pf != -EAGAIN) {
+            /* pager closed or killed: fail the fault */
+            return -EIO;
+        }
+    }
+
+    spin_lock(&vmo->lock);
     if (cg && cg_mem_charge(cg, 1) != 0) {
         spin_unlock(&vmo->lock);
         return -ENOMEM;

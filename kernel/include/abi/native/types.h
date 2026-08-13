@@ -839,6 +839,76 @@ typedef struct a20_futex_wake_args {
     uint32_t       reserved;
 } a20_futex_wake_args_t;
 
+/* ---- Pager structures (docs/native-abi/09-native-abi-deepening.md §2) ---- */
+
+typedef struct a20_pager_create_args {
+    uint32_t       size;
+    uint32_t       version;
+    uint32_t       flags;
+    uint32_t       reserved;
+    a20_handle_t   out_pager;          /* A20_OBJ_PAGER */
+    a20_handle_t   out_requests;       /* A20_OBJ_CHANNEL_ENDPOINT */
+} a20_pager_create_args_t;
+
+typedef struct a20_pager_vmo_args {
+    uint32_t       size;
+    uint32_t       version;
+    a20_handle_t   pager;              /* A20_RIGHT_CONTROL */
+    a20_handle_t   vmo;                /* A20_OBJ_MEMORY (PAGED), CONTROL */
+} a20_pager_vmo_args_t;
+
+typedef struct a20_pager_supply_args {
+    uint32_t       size;
+    uint32_t       version;
+    a20_handle_t   pager;              /* A20_RIGHT_WRITE */
+    a20_handle_t   vmo;                /* A20_RIGHT_WRITE */
+    a20_handle_t   source;             /* A20_OBJ_MEMORY, A20_RIGHT_READ */
+    uint64_t       vmo_offset;
+    uint64_t       source_offset;
+    uint64_t       len;
+    uint64_t       out_supplied;
+} a20_pager_supply_args_t;
+
+/* ---- Monitor structures (docs/native-abi/09-native-abi-deepening.md §3) ----
+ * A20_MONITOR_* kind constants are defined in ipc/ipc.h (core, ABI-free). */
+
+typedef struct a20_monitor_create_args {
+    uint32_t       size;
+    uint32_t       version;
+    a20_handle_t   target;             /* TASK handle or A20_HANDLE_NULL */
+    uint32_t       kind;               /* A20_MONITOR_* */
+    uint32_t       flags;
+    a20_handle_t   queue;              /* optional EventQ or A20_HANDLE_NULL */
+    uint64_t       period_ns;
+    a20_handle_t   out_monitor;
+} a20_monitor_create_args_t;
+
+typedef struct a20_monitor_value {
+    uint32_t       size;
+    uint32_t       version;
+    uint32_t       kind;
+    uint32_t       flags;
+    uint64_t       count;
+    uint64_t       time_active_ns;
+    uint64_t       prev;
+} a20_monitor_value_t;
+
+/* ---- Task memory structures (docs/native-abi/09-native-abi-deepening.md §4) ---- */
+
+typedef struct a20_task_mem_args {
+    uint32_t       size;
+    uint32_t       version;
+    a20_handle_t   task;
+    uint32_t       flags;              /* 0; reserved */
+    uint64_t       local_iov;          /* a20_iovec_t[] */
+    uint32_t       local_iov_count;
+    uint32_t       _pad;
+    uint64_t       remote_iov;         /* a20_iovec_t[] (target address space) */
+    uint32_t       remote_iov_count;
+    uint32_t       _pad2;
+    uint64_t       out_transferred;
+} a20_task_mem_args_t;
+
 /* ---- System info ---- */
 
 typedef struct a20_system_info {

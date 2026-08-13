@@ -844,6 +844,33 @@ int handle_demand_fault_access(task_t *t, uint64_t stval,
         return r;
     }
 
+    /*
+     * PAGED-VMO hook: a VM_VMO mapping backed by a VMO_PAGED vmo with a
+     * pager hands unmaterialized faults to the user-space pager.  The mm
+     * lock is dropped before parking (mirrors the userfaultfd hook above);
+     * vmo_paged_fault() loops until the pager supplies the page or the
+     * pager disappears.
+     */
+    if (vma && (vma->vm_flags & VM_VMO) && vma->vmo &&
+        vma->vmo->type == VMO_PAGED) {
+        uint64_t voff = vma->vmo_offset + (page_va - vma->start);
+        uint32_t pg_idx = (uint32_t)(voff / PAGE_SIZE);
+        int paged_miss = 0;
+        spin_lock(&vma->vmo->lock);
+        if (pg_idx < vma->vmo->page_count &&
+            vma->vmo->pages[pg_idx] == PFN_NONE && vma->vmo->pager)
+            paged_miss = 1;
+        spin_unlock(&vma->vmo->lock);
+        if (paged_miss) {
+            spin_unlock(&mm->lock);
+            int pr = vmo_paged_fault(vma->vmo, pg_idx,
+                                     access == MM_FAULT_ACCESS_WRITE);
+            if (pr < 0)
+                return -1;
+            return handle_demand_fault_access(t, stval, access);
+        }
+    }
+
     int r = handle_demand_fault_locked(t, stval, access);
     spin_unlock(&mm->lock);
     if (r == -ENOMEM) {
