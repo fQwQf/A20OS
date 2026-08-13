@@ -507,7 +507,8 @@ Linux 的 `get_signal()` 在 per-task/shared pending queue 上选择和消费
 RISC-V64 有 seqlock vvar/vDSO clock_gettime/gettimeofday/getcpu。Linux ABI 当前把 process/
 thread CPU time、RAW、coarse、boottime 等多个 clock ID 归并到同一 monotonic/realtime，
 语义是近似的。POSIX timer 是全局固定 32 项，每 tick 全扫；`timer_getoverrun()` 固定 0，
-`SIGEV_THREAD_ID` 未实现
+`SIGEV_SIGNAL`/`SIGEV_NONE`/`SIGEV_THREAD_ID` 通知已实现，`SIGEV_THREAD` 因需要执行用户
+线程函数而明确拒绝
 （[`timekeeping.c`](../../kernel/core/timekeeping.c)、
 [`vdso.c`](../../kernel/mm/vdso.c)、[`sys_time.c`](../../kernel/abi/linux/sys_time.c)、
 [`sys_timer_posix.c`](../../kernel/abi/linux/sys_timer_posix.c)）。
