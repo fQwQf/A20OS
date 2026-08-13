@@ -72,11 +72,19 @@ static int swap_out_victim_pages(int target_pages)
         return 0;
     }
 
+    /*
+     * SWAP_OUT_IO_LOCKING:
+     * Each candidate page is first pinned and a swap slot reserved under
+     * mm->lock; the block I/O (swap_write_page) then runs with mm->lock
+     * dropped so the IRQ-disabling spinlock is never held across a device
+     * request.  After the I/O the PTE is re-validated under mm->lock: it is
+     * only replaced with the swap entry if it still maps the same page.  A
+     * concurrent fault sees the still-present PTE and does not reallocate;
+     * the mm_tlb_hold keeps the frame alive until the remote shootdown in
+     * mm_tlb_invalidate_finish() completes.
+     */
     int reclaimed = 0;
     mm_tlb_invalidate_begin(mm);
-    uint64_t flags = spin_lock_irqsave(&mm->lock);
-
-    /* TODO: install a busy swap PTE and drop mm->lock before block I/O. */
     for (vm_area_t *vma = mm->mmap;
          vma && reclaimed < target_pages && reclaimed < MAX_SWAP_RECLAIM;
          vma = vma->next) {
@@ -86,54 +94,82 @@ static int swap_out_victim_pages(int target_pages)
         for (vaddr_t va = vma->start;
              va < vma->end && reclaimed < target_pages && reclaimed < MAX_SWAP_RECLAIM;
              va += PAGE_SIZE) {
+            pfn_t pfn = PFN_NONE;
+            swap_entry_t entry = 0;
+
+            uint64_t flags = spin_lock_irqsave(&mm->lock);
             int level = 0;
             vaddr_t base = 0;
             size_t size = 0;
             pte_t *pte = pt_lookup_leaf(mm->pgdir, va, &level, &base, &size);
             if (!pte || !pte_present(*pte) || !arch_pte_is_leaf(*pte) ||
-                !(*pte & PTE_U) || level != 0 || base != va || size != PAGE_SIZE)
+                !(*pte & PTE_U) || level != 0 || base != va || size != PAGE_SIZE) {
+                spin_unlock_irqrestore(&mm->lock, flags);
                 continue;
+            }
 
-            pfn_t pfn = phys_to_pfn(arch_pte_addr(*pte));
-            if (!pfn_valid(pfn))
+            pfn = phys_to_pfn(arch_pte_addr(*pte));
+            if (!pfn_valid(pfn)) {
+                spin_unlock_irqrestore(&mm->lock, flags);
                 continue;
+            }
 
             uint64_t pfa_flags = spin_lock_irqsave(&pfa.lock);
             uint16_t refs = pfa.meta[pfn].refcount;
             spin_unlock_irqrestore(&pfa.lock, pfa_flags);
-            if (refs > 1)
+            if (refs > 1) {
+                spin_unlock_irqrestore(&mm->lock, flags);
                 continue;
+            }
 
-            swap_entry_t entry = get_swap_page();
-            if (!entry)
-                continue;
-            if (swap_write_page(entry, pfn_to_virt(pfn)) < 0) {
-                swap_free(entry);
+            entry = get_swap_page();
+            if (!entry) {
+                spin_unlock_irqrestore(&mm->lock, flags);
                 continue;
             }
             if (cg_mem_swap_charge(victim, 1) < 0) {
                 swap_free(entry);
+                spin_unlock_irqrestore(&mm->lock, flags);
                 continue;
             }
             if (mm_tlb_hold_frame(mm, pfn) < 0) {
                 cg_mem_swap_uncharge(victim, 1);
                 swap_free(entry);
+                spin_unlock_irqrestore(&mm->lock, flags);
                 continue;
             }
+            frame_get(pfn); /* pin for the I/O window */
+            spin_unlock_irqrestore(&mm->lock, flags);
 
-            *pte = swp_entry_to_pte(entry);
-            mm_tlb_note_change(mm, va, PAGE_SIZE);
-            frame_put(pfn);
-            cg_mem_uncharge(victim->cgroup, 1);
-            mm->rss = mm->rss ? mm->rss - 1 : 0;
-            reclaimed++;
+            int written = swap_write_page(entry, pfn_to_virt(pfn));
+
+            flags = spin_lock_irqsave(&mm->lock);
+            pte = pt_lookup_leaf(mm->pgdir, va, &level, &base, &size);
+            int still_maps = written >= 0 && pte &&
+                             pte_present(*pte) && arch_pte_is_leaf(*pte) &&
+                             level == 0 && base == va && size == PAGE_SIZE &&
+                             phys_to_pfn(arch_pte_addr(*pte)) == pfn;
+            if (still_maps) {
+                *pte = swp_entry_to_pte(entry);
+                mm_tlb_note_change(mm, va, PAGE_SIZE);
+                frame_put(pfn); /* release the I/O pin; the mapping ref is
+                                 * held for the TLB flush and dropped by
+                                 * mm_tlb_invalidate_finish() */
+                cg_mem_uncharge(victim->cgroup, 1);
+                mm->rss = mm->rss ? mm->rss - 1 : 0;
+                reclaimed++;
+            } else {
+                frame_put(pfn);
+                cg_mem_swap_uncharge(victim, 1);
+                swap_free(entry);
+            }
+            spin_unlock_irqrestore(&mm->lock, flags);
 
             if (pfa_free_count() >= OOM_MIN_FREE_PAGES)
                 break;
         }
     }
 
-    spin_unlock_irqrestore(&mm->lock, flags);
     mm_tlb_invalidate_finish(mm);
     mm_destroy(mm);
     proc_put(victim);
