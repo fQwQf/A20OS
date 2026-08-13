@@ -42,6 +42,10 @@ void smp_send_reschedule(unsigned cpu);
 int smp_remote_tlb_flush(uint32_t logical_mask, uint64_t addr, uint64_t size);
 int smp_remote_tlb_flush_supported(void);
 
+/* membarrier(2) support: full memory barrier on every online CPU. */
+int smp_membarrier_sync_all(void);
+void smp_membarrier_ipi_ack(unsigned cpu);
+
 /* Discover topology after proc_init(). */
 void smp_init(void);
 
