@@ -42,6 +42,11 @@
 #define A20_SYS_thread_get_cpu    0x020E
 #define A20_SYS_signal_check      0x020F
 #define A20_SYS_signal_mask       0x0210
+#define A20_SYS_task_mem_read     0x0211
+#define A20_SYS_task_mem_write    0x0212
+#define A20_SYS_task_clone        0x0213
+#define A20_SYS_execve            0x0214
+#define A20_SYS_task_adopt        0x0216
 
 /* Memory (0x0300) */
 #define A20_SYS_vm_alloc          0x0300
@@ -54,6 +59,7 @@
 #define A20_SYS_vm_remap          0x0307
 #define A20_SYS_vm_lock           0x0308
 #define A20_SYS_vm_create_object  0x0309
+#define A20_SYS_vm_share_region   0x030A
 
 /* Path / Filesystem (0x0400) */
 #define A20_SYS_path_open         0x0400
@@ -161,6 +167,15 @@
 #define A20_SYS_ext_prog_release   0x0E03
 #define A20_SYS_ext_point_info     0x0E04
 
-#define A20_NATIVE_SYSCALL_COUNT  131
+/* Pager (0x0D00) */
+#define A20_SYS_pager_create       0x0D00
+#define A20_SYS_pager_vmo_attach   0x0D01
+#define A20_SYS_pager_supply_pages 0x0D02
+
+/* Monitor (0x0D10) */
+#define A20_SYS_monitor_create     0x0D10
+#define A20_SYS_monitor_query      0x0D11
+
+#define A20_NATIVE_SYSCALL_COUNT  135
 
 #endif

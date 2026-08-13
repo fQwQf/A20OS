@@ -372,6 +372,9 @@ void sched_scan_timers(uint64_t now)
 
 #ifdef CONFIG_ABI_NATIVE
     a20_timer_tick();
+    /* Periodic monitor sampling (Native ABI perf-style counters). */
+    extern void a20_monitor_tick(void);
+    a20_monitor_tick();
 #endif
 
 }
