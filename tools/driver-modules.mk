@@ -169,7 +169,8 @@ $(FAT32_IMG): drvmod-examples $(addprefix $(USER_BUILD_DIR)/,$(RUNTIME_DRVMOD_MO
 
 DRIVER_STORE_USER_PACKAGES = $(notdir $(NATIVE_RTCDD_BIN)) \
                              $(notdir $(NATIVE_UBDD_BIN)) \
-                             $(notdir $(NATIVE_UINPUTD_BIN))
+                             $(notdir $(NATIVE_UINPUTD_BIN)) \
+                             $(notdir $(NATIVE_UEDUD_BIN))
 
 smoke-drvmod-riscv64:
 	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 DRIVER_DEPLOYMENT=generic dev-build

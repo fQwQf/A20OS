@@ -417,7 +417,9 @@ static void manager_activate_path(const char *path, const char *name,
         }
         int present = 0;
         for (uint32_t i = 0; i < desc.match_count; i++)
-            if (udriver_window_present(desc.match[i].vendor)) {
+            if (udriver_match_present(desc.match[i].bus,
+                                      desc.match[i].vendor,
+                                      desc.match[i].device)) {
                 present = 1;
                 break;
             }
