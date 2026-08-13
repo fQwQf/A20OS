@@ -2,16 +2,16 @@
 
 `kernel/abi/linux` 为 A20OS 用户态实现了一组 Linux-compatible syscall 子集。
 它是兼容层，不是完整的 Linux kernel personality。
-`syscall_table.def` 当前登记 258 个入口（含 2 个 A20OS 扩展），但登记只表示
-分派表覆盖，不表示 258 项都达到 Linux 语义完整性。其中 16 个入口是表中直接
-固定返回 `-ENOSYS` 的显式占位符；其他已登记 syscall 仍可能只支持部分命令、
-flag、对象类型或并发边界。
+`syscall_table.def` 当前登记 258 个入口（含 2 个 A20OS 扩展）。登记表示分派表
+覆盖，不表示每项都达到 Linux 语义完整性；已登记的 syscall 可能只支持部分命令、
+flag、对象类型或并发边界。表中不再有固定返回 `-ENOSYS` 的显式占位符；仅存的
+`-ENOSYS` 返回是架构/版本正确的 Linux 语义（nfsservctl 已在 Linux 4.19 移除、
+map_shadow_stack 是 x86 CET、riscv_* 与 arch_prctl 是架构专属）。
 
 ## 兼容等级
 
 - `full`：目标是在已支持的 flag 和对象类型范围内匹配 Linux 语义。
 - `partial`：足够支撑当前用户态和测试，但已知边界语义缺失或被简化。
-- `stub`：主要用于让软件探测能力或继续运行；行为固定、简化，或者在没有完整内核语义的情况下返回成功。
 - `missing`：syscall 未实现，或者关键操作返回 `-ENOSYS`。
 
 ## 当前高风险 Partial 区域
@@ -32,7 +32,10 @@ flag、对象类型或并发边界。
 - mempolicy/NUMA：单 NUMA 节点，`set_mempolicy/mbind/migrate_pages/move_pages` 只做策略校验与存储，不移动物理页。
 - 文件句柄：`name_to_handle_at/open_by_handle_at` 基于内核句柄注册表（`kernel/fs/file_handle.c`），不是 filesystem export 操作。
 - 新 mount API：`fsopen/fsconfig/fsmount/fspick/open_tree/move_mount/mount_setattr` 建立在现有 mount 表之上；`mount_setattr` 不支持逐 mount 属性。
-- io_uring：SQ/CQ 环在内核内存（`kernel/fs/io_uring.c`）并映射进调用者；`io_uring_enter` 同步执行 NOP/READ/WRITE/FSYNC/CLOSE，没有真正的后台异步完成。
+- io_uring：SQ/CQ 环在内核内存（`kernel/fs/io_uring.c`）并映射进调用者；`io_uring_enter` 同步执行 NOP/READ/WRITE/FSYNC/CLOSE，没有真正的后台异步完成；`IORING_REGISTER_EVENTFD` 在完成时通知已注册的 eventfd。
+- userfaultfd（`kernel/ipc/userfaultfd.c`）：MISSING 模式匿名私有区间，UFFDIO_API/REGISTER/UNREGISTER/COPY/ZEROPAGE/WAKE，read/poll 投递 PAGEFAULT 事件，缺页线程 park 直到 handler 用 COPY/ZEROPAGE 解析；不支持 UFFD_FEATURE_EVENT_FORK、shmem 与 WP 模式。
+- perf_event_open（`kernel/abi/linux/sys_perf.c`）：PERF_TYPE_SOFTWARE 事件（CPU/TASK clock、page faults、context switches 及无源的软件事件），read(2) 输出 count/time/id，支持 ENABLE/DISABLE/RESET/PERIOD/ID；无 PMU，硬件/raw/breakpoint 事件返回 -EINVAL，无 mmap 采样环。
+- futex：全部标准命令（含有边界的 PI 变体 LOCK_PI/UNLOCK_PI/TRYLOCK_PI/WAIT_REQUEUE_PI/CMP_REQUEUE_PI），不携带优先级继承提升；FUTEX_FD（Linux 5.4 移除）返回 -EINVAL。
 - Landlock：fd-backed ruleset + path-beneath 规则，在 `vfs_open` 强制；没有完整 LSM 框架。
 - rseq：注册/注销每线程 rseq 区域；A20OS 不做跨 CPU 迁移，因此内核从不中止序列。
 - `restart_syscall` 返回 `-ERESTARTNOINTR`；`remap_file_pages` 是接受式 no-op；`memfd_secret` 退化为普通 memfd。
@@ -40,7 +43,7 @@ flag、对象类型或并发边界。
 - POSIX 消息队列（`kernel/ipc/posix_mq.c`）：命名队列 + per-fd mqd，优先级 FIFO，绝对超时（timedsend/timedreceive），mq_notify 用信号投递。
 - ioprio/pkey：每任务 I/O 优先级与 16 槽保护键位图（`kernel/proc/sched_compat.c`），pkey_mprotect 等价 mprotect。
 - `mseal` 是接受式 no-op（无逐 VMA seal 跟踪）；`seccomp` 明确返回不支持而非假装过滤；kexec 明确拒绝。
-- `nfsservctl` 返回 -ENOSYS（Linux 4.19 已移除）；`map_shadow_stack` 在 RISC-V 返回 -ENOSYS。
+- `nfsservctl` 返回 -ENOSYS（Linux 4.19 已移除该 syscall，这是正确语义）；`map_shadow_stack` 是 x86 CET 特性，在 RISC-V 返回 -ENOSYS（架构正确）。
 - LSM 自省：`lsm_get_self_attr`/`lsm_list_modules` 报告 Landlock；`lsm_set_self_attr` 由 `landlock_restrict_self` 覆盖。
 - `statmount`/`listmount`/`listns`/`open_tree_attr` 提供 mount 表自省，`setxattrat` 系列提供 dirfd 相对 xattr。
 - RISC-V 专用：`riscv_hwprobe` 报告 IMA 基础行为；`riscv_flush_icache` 刷新范围 icache；`rt_tgsigqueueinfo` 按 tid 投递。
