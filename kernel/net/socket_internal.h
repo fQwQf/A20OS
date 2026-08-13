@@ -310,6 +310,7 @@ int      net_inet_sendto(net_socket_t *s, const void *buf, size_t len,
 void     net_inet_accept_child_ready(net_socket_t *s);
 
 net_socket_t *net_socket_from_file(int gfd);
+int net_poll_file(vfile_t *vf, short events);
 int      net_socket_install_file(net_socket_t *s, int flags);
 int      net_socket_close_file(vfile_t *vf);
 

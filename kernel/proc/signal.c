@@ -131,6 +131,7 @@ void signal_init(signal_state_t *ss) {
     refcount_set(&ss->refcount, 1);
     spin_init(&ss->lock);
     spin_set_debug(&ss->lock, "signal_state", ss);
+    wait_queue_init(&ss->readiness_waiters);
 }
 
 // 复制信号状态（用于 fork 时继承父进程的信号处理函数）
@@ -247,6 +248,8 @@ static int signal_queue_task(task_t *t, int signum, const void *info,
     sigwait_match = t->sigwait_active &&
                     (t->sigwait_mask & signal_mask_bit(signum));
     spin_unlock_irqrestore(&ss->lock, flags);
+
+    wait_queue_wake_all(&ss->readiness_waiters, 0, PROC_WAKE_EVENT);
 
     if (immediate_kernel_exit) {
         proc_force_exit(t, -signal_wait_status(signum));
