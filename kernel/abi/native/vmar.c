@@ -87,5 +87,22 @@ int64_t a20_vmar_protect(uint64_t addr, uint64_t length, uint32_t new_prot)
     task_t *cur = proc_current();
     if (!cur || !cur->mm) return -A20_ERR_BAD_HANDLE;
 
+    /* Native VMAR capability (docs/native-abi/04-memory.md §4.2): the
+     * requested protection must not exceed the creation-time cap of any VMA
+     * in the range.  VMAs created outside the Native ABI record no cap and
+     * are not restricted here. */
+    uint64_t start = addr;
+    uint64_t end = addr + length;
+    if (end < start) return -A20_ERR_INVALID_ARGUMENT;
+    for (uint64_t va = start; va < end; ) {
+        vm_area_t *vma = mm_find_vma(cur->mm, va);
+        if (!vma || va >= vma->end) return -A20_ERR_NO_MEMORY;
+        if (vma->vmar_cap != 0) {
+            if ((new_prot & ~vma->vmar_cap) != 0)
+                return -A20_ERR_ACCESS;
+        }
+        va = vma->end;
+    }
+
     return mm_mprotect(cur->mm, addr, length, a20_prot_to_mmap(new_prot));
 }

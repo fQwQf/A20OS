@@ -183,6 +183,7 @@ typedef struct net_socket {
     int accept_count;
     int in_registry;
     int reg_idx;
+    int gfd;                       /* global fd carrying this socket vfile */
     net_bh_ring_t bh_ring;
     volatile int bh_connected;
     volatile int bh_closed;
@@ -316,6 +317,8 @@ void     net_inet_accept_child_ready(net_socket_t *s);
 net_socket_t *net_socket_from_file(int gfd);
 int net_poll_file(vfile_t *vf, short events);
 int      net_socket_install_file(net_socket_t *s, int flags);
+void     net_event_notify(net_socket_t *s, uint32_t event, uint64_t data0,
+                          uint64_t data1);
 int      net_socket_close_file(vfile_t *vf);
 
 #endif /* _NET_SOCKET_INTERNAL_H */

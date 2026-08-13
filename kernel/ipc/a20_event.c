@@ -464,6 +464,57 @@ void a20_event_notify(void *target_object, uint16_t target_type,
     spin_unlock_irqrestore(&g_evq_hash_lock, hash_flags);
 }
 
+/*
+ * Filesystem watch event (docs/native-abi/09-native-abi-deepening.md §6).
+ * Fires A20_EVENT_FS_* on every event queue watching @vn (a directory vnode)
+ * and carries the changed entry name in the event's fs_name field.  @name
+ * may be NULL (e.g. self-delete); the name is truncated to 31 bytes.
+ */
+void a20_fs_notify(void *vn, uint32_t event_type, const char *name,
+                   uint64_t data0, uint64_t data1)
+{
+    evq_hash_init();
+    uint32_t idx = evq_hash_ptr(vn);
+
+    uint64_t hash_flags = spin_lock_irqsave(&g_evq_hash_lock);
+    a20_obj_watch_node_t *node = g_evq_hash[idx];
+    while (node) {
+        if (node->entry->target_object == vn &&
+            node->entry->target_type == A20_OBJ_DIRECTORY &&
+            (node->entry->event_mask & ((uint64_t)1u << event_type))) {
+            a20_watch_entry_t *we = node->entry;
+            a20_eventq_t *eq = we->owner_queue;
+            int should_wake = 0;
+            uint64_t eq_flags = spin_lock_irqsave(&eq->lock);
+            if (eq->ring_count < eq->ring_cap) {
+                a20_pending_event_t ev;
+                memset(&ev, 0, sizeof(ev));
+                ev.source = we->target_handle;
+                ev.type = event_type;
+                ev.events = (uint64_t)1u << event_type;
+                ev.user_data = we->user_data;
+                ev.data0 = data0;
+                ev.data1 = data1;
+                if (name) {
+                    size_t n = strlen(name);
+                    if (n >= sizeof(ev.fs_name))
+                        n = sizeof(ev.fs_name) - 1;
+                    memcpy(ev.fs_name, name, n);
+                }
+                evq_ring_put(eq, &ev);
+                should_wake = 1;
+            } else {
+                should_wake = 1;
+            }
+            spin_unlock_irqrestore(&eq->lock, eq_flags);
+            if (should_wake)
+                wait_queue_wake_one(&eq->waiters, 0, PROC_WAKE_EVENT);
+        }
+        node = node->next;
+    }
+    spin_unlock_irqrestore(&g_evq_hash_lock, hash_flags);
+}
+
 void a20_eventq_on_object_destroy(void *object, uint16_t object_type)
 {
     evq_hash_init();

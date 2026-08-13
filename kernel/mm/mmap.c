@@ -134,6 +134,7 @@ vaddr_t mm_mmap_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
     vma->end       = addr + len;
     vma->vm_flags  = vmf;
     vma->pte_flags = ptef;
+    vma->vmar_cap  = (uint32_t)mm_pte_flags_to_prot(ptef);
     vma->file_fd   = -1;
 #ifdef CONFIG_NOMMU
     vma->nommu_alloc = nommu_raw;
@@ -228,6 +229,7 @@ vaddr_t mm_mmap_file_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
     vma->end         = addr + len;
     vma->vm_flags    = vmf;
     vma->pte_flags   = mm_prot_to_pte_flags(prot);
+    vma->vmar_cap    = (uint32_t)prot;
     vma->file_fd     = file_fd;
     vma->file_offset = file_offset;
 #ifdef CONFIG_NOMMU
@@ -322,6 +324,7 @@ vaddr_t mm_mmap_vmo_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
     vma->end         = addr + len;
     vma->vm_flags    = vmf;
     vma->pte_flags   = mm_prot_to_pte_flags(prot);
+    vma->vmar_cap    = (uint32_t)prot;   /* Native VMAR capability at creation */
     vma->file_fd     = -1;
     vma->vmo         = vmo;
     vma->vmo_offset  = vmo_offset;

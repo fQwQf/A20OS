@@ -19,7 +19,15 @@
 #define IPI_RESCHEDULE         (1U << IPI_RESCHEDULE_VECTOR)
 #define IPI_TLB_FLUSH          (1U << IPI_TLB_FLUSH_VECTOR)
 
-extern void loongarch64_ipi_tlb_flush_handler(void);
+/* Default IPI TLB-flush handler.  Boards that implement generation-based
+ * shootdowns (see kernel/platform/qemu-virt-loongarch64/board.c) provide a
+ * strong override; a board that does not enable SMP uses this local
+ * invtlb, which keeps the arch build independent of any single board. */
+__attribute__((weak))
+void loongarch64_ipi_tlb_flush_handler(void)
+{
+    __asm__ __volatile__("invtlb 0, $zero, $zero" ::: "memory");
+}
 static inline uint32_t iocsr_read32(uint32_t reg)
 {
     uint32_t value;

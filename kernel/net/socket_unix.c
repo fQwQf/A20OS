@@ -200,6 +200,7 @@ int net_unix_socket_connect(net_socket_t *s, const void *addr, size_t addrlen)
         }
         (void)wait_queue_collect_one(
             &listener->accept_waitq, 0, PROC_WAKE_EVENT, &wake_q);
+        net_event_notify(listener, A20_EVENT_ACCEPT_READY, 0, 0);
     } else {
         s->peer = listener;
     }
@@ -268,8 +269,10 @@ static int net_unix_socket_sendto_impl(net_socket_t *s, const void *buf,
     if (dst->ch_ep && !(files && nfiles > 0)) {
         spin_unlock_irqrestore(&g_net_lock, irq);
         int cr = unix_ch_send(s, dst, buf, len);
-        if (cr >= 0)
+        if (cr >= 0) {
+            net_event_notify(dst, A20_EVENT_READABLE, 0, 0);
             wait_queue_wake_all(&dst->read_waitq, 0, PROC_WAKE_EVENT);
+        }
         return cr;
     }
     /*
@@ -280,9 +283,11 @@ static int net_unix_socket_sendto_impl(net_socket_t *s, const void *buf,
                                        files, nfiles);
     proc_wake_q_t wake_q;
     proc_wake_q_init(&wake_q);
-    if (r >= 0)
+    if (r >= 0) {
+        net_event_notify(dst, A20_EVENT_READABLE, 0, 0);
         (void)wait_queue_collect_one(
             &dst->read_waitq, 0, PROC_WAKE_EVENT, &wake_q);
+    }
     spin_unlock_irqrestore(&g_net_lock, irq);
     (void)proc_wake_q_flush(&wake_q);
     return r;

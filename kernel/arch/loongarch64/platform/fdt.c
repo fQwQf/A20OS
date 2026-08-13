@@ -5,6 +5,7 @@
 #include "core/string.h"
 #include "core/types.h"
 #include "platform.h"
+#include "drivers/core/driver_core.h"
 
 #define FDT_MAGIC       0xd00dfeedU
 #define FDT_BEGIN_NODE  1U
@@ -95,9 +96,25 @@ int arch_ram_range(size_t idx, paddr_t *base, paddr_t *end)
 
 void loongarch64_memory_init(void)
 {
+    /* A physical board without a firmware FDT falls back to the physical
+     * window the board declares (e.g. LS2K1000: DDR at 0x0..0x40000000),
+     * instead of the QEMU-virt-only defaults below.  A usable DTB still wins
+     * because the parse below replaces these ranges on success. */
+    if (current_board &&
+        current_board->ram_end > current_board->ram_base) {
+        ram_ranges[0].base = current_board->ram_base;
+        ram_ranges[0].end = current_board->ram_end;
+        ram_range_count = 1;
+    }
+
     const uint8_t *fdt = (const uint8_t *)(uintptr_t)__boot_dtb_ptr;
     if (!fdt || read_be32(fdt) != FDT_MAGIC) {
-        printf("[FDT] LoongArch memory map unavailable, using 512 MiB fallback\n");
+        printf("[FDT] LoongArch memory map unavailable, using board window "
+               "0x%lx..0x%lx (%lu MiB)\n",
+               (unsigned long)ram_ranges[0].base,
+               (unsigned long)ram_ranges[0].end,
+               (unsigned long)((ram_ranges[0].end -
+                                ram_ranges[0].base) >> 20));
         return;
     }
 
@@ -105,7 +122,7 @@ void loongarch64_memory_init(void)
     uint32_t off_struct = read_be32(fdt + 8);
     uint32_t off_strings = read_be32(fdt + 12);
     if (totalsize < 40 || off_struct >= totalsize || off_strings >= totalsize) {
-        printf("[FDT] malformed LoongArch FDT, using 512 MiB fallback\n");
+        printf("[FDT] malformed LoongArch FDT, using board window fallback\n");
         return;
     }
 
@@ -171,7 +188,7 @@ void loongarch64_memory_init(void)
 
     if (!discovered_count ||
         validate_and_sort_ranges(discovered, discovered_count) < 0) {
-        printf("[FDT] invalid LoongArch RAM ranges, using 512 MiB fallback\n");
+        printf("[FDT] invalid LoongArch RAM ranges, using board window fallback\n");
         return;
     }
 
