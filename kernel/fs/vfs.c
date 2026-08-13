@@ -357,6 +357,7 @@ int vfs_open(const char *path, int flags, int mode) {    /* Resolve cwd from cur
         if (r == 0) {
             inotify_vnode_event(parent, fname, IN_CREATE);
             vfs_dcache_invalidate(parent, fname);
+            vfs_dcache_insert(parent, fname, vn);
         }
         vnode_put(parent);
         if (r < 0) { kdebug("[VFS] open '%s': create failed r=%d\n", resolved, r); return r; }
