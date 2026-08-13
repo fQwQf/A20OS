@@ -225,7 +225,7 @@ P1 保留全局 RAM xattr 表，并收紧 ABI 表面：
 | `kernel/fs/vfs_stat.c` | `vfs_faccessat2` 与 `vfs_chmodat` flag 校验 |
 | `kernel/fs/vfs/path_resolution.c` | `RESOLVE_*`、`MAX_SYMLINKS`、mount `..` crossing、chroot root |
 | `kernel/fs/vfs/mount.c` | mount-parent lookup helper |
-| `kernel/fs/vfs/dcache.c` | 普通 lookup 优化缓存；没有 `RESOLVE_CACHED` 权威查询接口 |
+| `kernel/fs/vfs/dcache.c` | 普通 lookup 优化缓存；`RESOLVE_CACHED` 通过 dcache 命中检查实现（未命中 `-EAGAIN`） |
 | `kernel/fs/vfs/stat_perm.c` | `vfs_vnode_stat`、permission 与 RAM time-meta |
 | `kernel/fs/xattr.c` | namespace validation helper |
 | `kernel/fs/diskfs/ramfs.c` | `RENAME_NOREPLACE` / `RENAME_EXCHANGE` |

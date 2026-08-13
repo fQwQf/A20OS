@@ -472,9 +472,10 @@ timeout 映射做得可审计，且有 lifetime counters。**扩展风险。** �
 
 **A20OS 源码事实。** futex 有 64 bucket、动态 waiter、WAIT/WAIT_BITSET/WAKE/
 WAKE_BITSET/REQUEUE/CMP_REQUEUE/WAKE_OP，wait 侧在 `mm->lock -> bucket lock` 下重检
-用户值避免 lost wake；robust list 已有。PI futex、WAIT_REQUEUE_PI、futex2 等落到
-`-ENOSYS`。bucket 按 virtual address hash，物理 key 只在 bucket 内比较；因此同一
-shared page 映射到不同 VA 时可能落入不同 bucket，源码明确记录该限制
+用户值避免 lost wake；robust list 已有；PI futex 族（LOCK_PI/UNLOCK_PI/TRYLOCK_PI/
+WAIT_REQUEUE_PI/CMP_REQUEUE_PI）以有边界的实现提供（无优先级继承提升）。bucket 按
+virtual address hash，物理 key 只在 bucket 内比较；因此同一 shared page 映射到不同 VA
+时可能落入不同 bucket，源码明确记录该限制
 （[`sys_futex.c`](../../kernel/abi/linux/sys_futex.c)）。
 
 Linux futex 同样以 hash bucket 和 wait/wake linearization 为核心，但 key 能稳定标识
