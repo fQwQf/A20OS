@@ -48,6 +48,7 @@ typedef struct vm_area {
     vaddr_t         end;
     uint64_t        vm_flags;
     pte_t           pte_flags;
+    uint32_t        vmar_cap;       /* Native VMAR capability (PROT bits) at creation */
     int             file_fd;
     int             sysv_shmid;
     uint64_t        file_offset;
