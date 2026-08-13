@@ -217,6 +217,8 @@ typedef struct task_t {
     proc_policy_t policy;
     int       clone_flags;
     int       exit_signal;
+    int       pdeathsig;       /* PR_SET_PDEATHSIG: one-shot signal delivered
+                                * when the parent exits (0 = none) */
     int      *clear_child_tid;
     uintptr_t robust_list_head;
 

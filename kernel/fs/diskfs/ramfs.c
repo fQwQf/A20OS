@@ -54,6 +54,62 @@ static int g_ramfs_ready = 0;
  */
 static mutex_t g_ramfs_meta_lock = MUTEX_INIT;
 
+/*
+ * Vnode cache: open(2)/shm_open(2) of the same ramfs inode must return the
+ * same vnode, otherwise each open gets its own page cache and MAP_SHARED
+ * writes (e.g. the wlroots XKB keymap file) are invisible to a second open
+ * made before background writeback runs.  Guarded by g_ramfs_meta_lock; the
+ * cache itself holds no reference, entries are removed when the vnode dies.
+ */
+typedef struct ramfs_vnode_cache {
+    uint64_t inum;
+    vnode_t *vn;
+    struct ramfs_vnode_cache *next;
+} ramfs_vnode_cache_t;
+
+static ramfs_vnode_cache_t *g_ramfs_vnode_cache;
+
+static vnode_t *ramfs_vnode_cache_get_locked(uint64_t inum)
+{
+    for (ramfs_vnode_cache_t *e = g_ramfs_vnode_cache; e; e = e->next) {
+        if (e->inum == inum && e->vn && vnode_ref_read(e->vn) > 0) {
+            vnode_get(e->vn);
+            return e->vn;
+        }
+    }
+    return NULL;
+}
+
+static void ramfs_vnode_cache_put_locked(vnode_t *vn)
+{
+    if (!vn)
+        return;
+    ramfs_vnode_cache_t **pp = &g_ramfs_vnode_cache;
+    while (*pp) {
+        if ((*pp)->vn == vn) {
+            ramfs_vnode_cache_t *dead = *pp;
+            *pp = dead->next;
+            kfree(dead);
+            return;
+        }
+        pp = &(*pp)->next;
+    }
+}
+
+static vnode_t *ramfs_vnode_cache_add_locked(vnode_t *vn)
+{
+    if (!vn)
+        return NULL;
+    ramfs_vnode_cache_t *e = kmalloc(sizeof(*e));
+    if (!e)
+        return NULL;
+    e->inum = vn->ino;
+    e->vn = vn;
+    e->next = g_ramfs_vnode_cache;
+    g_ramfs_vnode_cache = e;
+    return vn;
+}
+
 static vnode_ops_t g_ramfs_vnode_ops;
 static vfile_ops_t g_ramfs_fops;
 static vfile_t *ramfs_open_vnode(vnode_t *vn, int flags);
@@ -343,6 +399,14 @@ static ramfs_inode_t *ramfs_get_root_locked(void) {
 static vnode_t *ramfs_make_vnode_locked(mount_t *mnt, ramfs_inode_t *inode) {
     if (!inode) return NULL;
 
+    /* Reuse a live vnode for the same inode so every open shares one page
+     * cache.  shm_open() creates a file and immediately re-opens it
+     * read-only; splitting the vnode makes the second open read stale
+     * (zero) contents written through the first one's mmap. */
+    vnode_t *cached = ramfs_vnode_cache_get_locked((uint64_t)inode->inum);
+    if (cached)
+        return cached;
+
     vnode_t *vn = (vnode_t *)kmalloc(sizeof(vnode_t));
     if (!vn) return NULL;
     inode->ref_count++;
@@ -362,7 +426,7 @@ static vnode_t *ramfs_make_vnode_locked(mount_t *mnt, ramfs_inode_t *inode) {
     vn->mnt = mnt;
     vn->fs_data = (void *)inode;
     vn->ops = &g_ramfs_vnode_ops;
-    return vn;
+    return ramfs_vnode_cache_add_locked(vn);
 }
 
 static int ramfs_vnode_lookup(vnode_t *dir, const char *name, vnode_t **out) {
@@ -378,8 +442,10 @@ static int ramfs_vnode_lookup(vnode_t *dir, const char *name, vnode_t **out) {
     *out = ramfs_make_vnode_locked(dir->mnt, found);
     mutex_unlock(&g_ramfs_meta_lock);
     if (*out) {
-        (*out)->parent = dir;
-        vnode_get(dir);
+        if (!(*out)->parent) {
+            (*out)->parent = dir;
+            vnode_get(dir);
+        }
     }
     return (*out) ? 0 : -ENOMEM;
 }
@@ -492,13 +558,14 @@ static int ramfs_vnode_create(vnode_t *dir, const char *name, int mode,
 
 static void ramfs_vnode_release(vnode_t *vn) {
     ramfs_inode_t *inode = vn ? (ramfs_inode_t *)vn->fs_data : NULL;
-    vnode_put(vn->parent);
     mutex_lock(&g_ramfs_meta_lock);
+    ramfs_vnode_cache_put_locked(vn);
     if (inode && inode->ref_count > 1) {
         inode->ref_count--;
         ramfs_maybe_free_unlinked_inode(vn->mnt, inode);
     }
     mutex_unlock(&g_ramfs_meta_lock);
+    vnode_put(vn->parent);
     kfree(vn);
 }
 

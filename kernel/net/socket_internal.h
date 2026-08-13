@@ -292,9 +292,13 @@ int      net_unix_socket_sendto_fds(net_socket_t *s, const void *buf,
                                     size_t len, const void *addr,
                                     size_t addrlen,
                                     vfile_t **files, int nfiles);
-int      net_netlink_bind(net_socket_t *s, const void *addr, size_t addrlen);
-int      net_netlink_diag_request(net_socket_t *s, const void *buf, size_t len,
+ int      net_netlink_bind(net_socket_t *s, const void *addr, size_t addrlen);
+ int      net_netlink_diag_request(net_socket_t *s, const void *buf, size_t len,
+                                   const void *addr, size_t addrlen);
+ int      net_netlink_uevent_send(net_socket_t *s, const void *buf, size_t len,
                                   const void *addr, size_t addrlen);
+ void     netlink_uevent_emit(const char *action, const char *subsystem,
+                              const char *name, uint64_t devt);
 
 void     net_tcp_close_pcb(net_socket_t *s);
 void     net_tcp_drop_pcb(net_socket_t *s);
