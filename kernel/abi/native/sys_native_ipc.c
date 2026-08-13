@@ -779,9 +779,24 @@ int64_t sys_a20_event_watch_fs(const a20_syscall_args_t *args)
         return r;
     }
 
+    /* FS watches are keyed on the directory vnode so every handle referencing
+     * the same directory receives the same change events (docs/native-abi/
+     * 09-native-abi-deepening.md §6).  The vnode is referenced by the fd
+     * throughout the watch; vnode_put() cleans up the watch on release. */
+    int gfd = (int)(uintptr_t)dir_entry.object;
+    vfile_t *vf = vfs_get_file_ref(gfd);
+    if (!vf || !vf->vnode) {
+        if (vf) vfs_put_file_ref(gfd, vf);
+        a20_object_release(eq_entry.object, eq_entry.type);
+        a20_object_release(dir_entry.object, dir_entry.type);
+        return -A20_ERR_BAD_HANDLE;
+    }
+    vnode_t *vn = vf->vnode;
+
     a20_eventq_t *eq = (a20_eventq_t *)eq_entry.object;
-    r = a20_eventq_watch(eq, dir_h, dir_entry.object,
-                         dir_entry.type, event_mask, user_data);
+    r = a20_eventq_watch(eq, dir_h, vn, A20_OBJ_DIRECTORY,
+                         (uint64_t)event_mask, user_data);
+    vfs_put_file_ref(gfd, vf);
     a20_object_release(eq_entry.object, eq_entry.type);
     a20_object_release(dir_entry.object, dir_entry.type);
     return r;

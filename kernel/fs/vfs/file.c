@@ -7,6 +7,7 @@
 #include "fs/block_cache.h"
 #include "fs/page_cache.h"
 #include "fs/inotify.h"
+#include "ipc/ipc.h"
 #include "mm/vm.h"
 
 #define VFS_WRITE_LOCK_COUNT 64U
@@ -146,6 +147,7 @@ int vfs_write_file(vfile_t *vf, const char *buf, size_t count)
                                                       write_start + (size_t)r);
             vfs_touch_mtime(vf->vnode);
             inotify_vnode_event(vf->vnode, NULL, IN_MODIFY);
+            a20_fs_notify(vf->vnode, A20_EVENT_FS_MODIFY, NULL, 0, 0);
         }
         if (write_lock)
             mutex_unlock(write_lock);

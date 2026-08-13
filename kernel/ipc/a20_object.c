@@ -53,6 +53,12 @@ void a20_object_ref(void *object, uint16_t type)
     case A20_OBJ_NAMESPACE:
         refcount_inc(&((struct a20_namespace *)object)->refcount);
         break;
+    case A20_OBJ_PAGER:
+        a20_pager_ref((a20_pager_t *)object);
+        break;
+    case A20_OBJ_MONITOR:
+        a20_monitor_ref((a20_monitor_t *)object);
+        break;
     default:
         /* TASK/THREAD/DEBUG store integer pids — no backing object. */
         break;
@@ -97,6 +103,12 @@ void a20_object_release(void *object, uint16_t type)
             a20_eventq_on_object_destroy(object, A20_OBJ_NAMESPACE);
             kfree(object);
         }
+        break;
+    case A20_OBJ_PAGER:
+        a20_pager_put((a20_pager_t *)object);
+        break;
+    case A20_OBJ_MONITOR:
+        a20_monitor_release((a20_monitor_t *)object);
         break;
     case A20_OBJ_EXT_PROG:
         /* Dropping the last handle releases the extension program; the

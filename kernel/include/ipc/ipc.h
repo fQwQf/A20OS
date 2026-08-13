@@ -39,6 +39,8 @@ typedef enum a20_object_type {
     A20_OBJ_NAMESPACE        = 12,
     A20_OBJ_DEBUG            = 13,
     A20_OBJ_EXT_PROG         = 14,
+    A20_OBJ_PAGER            = 15,  /* user-space pager (docs/native-abi/09) */
+    A20_OBJ_MONITOR          = 16,  /* perf-style counter object */
 } a20_object_type_t;
 
 /* 14 capability rights bits (docs/native-abi/06-security.md §1) */
@@ -108,7 +110,17 @@ typedef enum a20_object_type {
 #define A20_EVENT_PEER_CLOSED     9u   /* channel: peer endpoint closed     */
 #define A20_EVENT_SIGNALED       10u   /* device: irq/signaled (udriver)    */
 
+/* Filesystem watch events (docs/native-abi/09-native-abi-deepening.md §6). */
+#define A20_EVENT_FS_CREATE      16u
+#define A20_EVENT_FS_DELETE      17u
+#define A20_EVENT_FS_MODIFY      18u
+#define A20_EVENT_FS_RENAME      19u
+
 #define A20_EVENT_MASK(ev)        (1ull << (ev))
+
+/* Pager page-request message kinds (data0 = vmo byte offset, data1 = 0). */
+#define A20_PAGE_REQ_READ        0u
+#define A20_PAGE_REQ_WRITE       1u
 
 /* ---- Message flags ---- */
 
@@ -157,6 +169,7 @@ typedef struct a20_pending_event {
     uint64_t       events;
     uint64_t       user_data;
     uint64_t       data0, data1, data2;
+    char           fs_name[32];   /* FS watch: changed entry name (NUL-padded) */
 } a20_pending_event_t;
 
 /* Handle info carried inside a channel message; preserves temporal
@@ -256,6 +269,47 @@ typedef struct a20_debug {
     uint32_t    options;
 } a20_debug_t;
 
+/* User-space pager: owns the request channel fed by PAGED-VMO page faults.
+ * A PAGED VMO holds one reference to its pager while attached; the pager
+ * holds no VMO reference (fault requests are resolved by the pager task).
+ * See docs/native-abi/09-native-abi-deepening.md §2. */
+typedef struct a20_pager {
+    refcount_t            refcount;
+    spinlock_t            lock;
+    struct a20_channel_ep *requests;   /* page-request sink (one endpoint) */
+    struct vmo           **vmos;       /* attached PAGED VMOs (weak)       */
+    uint32_t              vmo_count;
+    uint32_t              vmo_cap;
+} a20_pager_t;
+
+/* Monitor: perf-style software-event counter object.
+ * Kind constants live here (core, ABI-free); the syscall layer re-exports
+ * them to userspace via the ABI type header. */
+#define A20_MONITOR_TASK_CPU_TIME     1
+#define A20_MONITOR_TASK_SYS_TIME     2
+#define A20_MONITOR_TASK_PAGE_FAULTS  3
+#define A20_MONITOR_TASK_CTX_SWITCH   4
+#define A20_MONITOR_TASK_MIGRATIONS   5
+#define A20_MONITOR_SYS_PAGE_FAULTS   6
+#define A20_MONITOR_SYS_CTX_SWITCH    7
+
+struct task_t;
+typedef struct a20_monitor {
+    refcount_t  refcount;
+    spinlock_t  lock;
+    uint32_t    kind;
+    uint32_t    flags;
+    int         target_pid;            /* task scope; 0 = system-wide */
+    struct task_t *target;             /* referenced while alive */
+    uint64_t    count;
+    uint64_t    time_start_ns;
+    uint64_t    period_ns;
+    struct a20_eventq *queue;          /* optional periodic notify sink */
+    uint64_t    last_sample;
+    int         registered;            /* in the global periodic registry */
+    struct a20_monitor *next_registered;
+} a20_monitor_t;
+
 /* ---- Object lifetime (type-aware ref/release) ---- */
 
 int  a20_object_is_vfile_backed(uint16_t type);
@@ -299,10 +353,39 @@ void a20_eventq_release(a20_eventq_t *eq);
 
 void a20_event_notify(void *target_object, uint16_t target_type,
                       uint32_t event_type, uint64_t data0, uint64_t data1);
+void a20_fs_notify(void *vn, uint32_t event_type, const char *name,
+                   uint64_t data0, uint64_t data1);
 void a20_eventq_on_object_destroy(void *object, uint16_t object_type);
 
 /* Native timer backend (drives timer object expiries). */
 void a20_timer_tick(void);
+
+/* ---- Pager core (kernel/ipc/a20_pager.c) ---- */
+
+a20_pager_t *a20_pager_create(struct a20_channel_ep *requests);
+void a20_pager_ref(a20_pager_t *pager);
+void a20_pager_put(a20_pager_t *pager);
+int  a20_pager_attach_vmo(a20_pager_t *pager, struct vmo *vmo);
+void a20_pager_detach_vmo(struct vmo *vmo);
+int64_t a20_pager_supply_pages(a20_pager_t *pager, struct vmo *vmo,
+                               struct vmo *src, uint64_t vmo_offset,
+                               uint64_t src_offset, uint64_t len);
+/* Enqueue a page-request for @vmo page @index; returns 0 if the request was
+ * queued or the page is already materialized.  Called under the fault path. */
+int  a20_pager_request_page(struct vmo *vmo, uint32_t index, int write_access);
+
+/* ---- Monitor core (kernel/ipc/a20_monitor.c) ---- */
+
+a20_monitor_t *a20_monitor_create(uint32_t kind, uint32_t flags,
+                                  struct task_t *target,
+                                  uint64_t period_ns);
+void a20_monitor_ref(a20_monitor_t *m);
+void a20_monitor_put(a20_monitor_t *m);
+void a20_monitor_release(a20_monitor_t *m);
+void a20_monitor_register(a20_monitor_t *m);
+void a20_monitor_unregister(a20_monitor_t *m);
+int64_t a20_monitor_sample(a20_monitor_t *m);
+void    a20_monitor_tick(void);   /* scheduler/fault tick hook (periodic notify) */
 
 /* Channel state helpers for poll/backpressure consumers (Linux ABI
  * socket bridge uses these). */

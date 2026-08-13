@@ -594,6 +594,84 @@ typedef struct a20_vm_object_args {
 #define A20_VMO_PHYSICAL   1
 #define A20_VMO_PAGED      2
 
+/* ---- Pager structures (docs/native-abi/09-native-abi-deepening.md §2) ---- */
+
+typedef struct a20_pager_create_args {
+    uint32_t       size;
+    uint32_t       version;
+    uint32_t       flags;
+    uint32_t       reserved;
+    a20_handle_t   out_pager;
+    a20_handle_t   out_requests;
+} a20_pager_create_args_t;
+
+typedef struct a20_pager_vmo_args {
+    uint32_t       size;
+    uint32_t       version;
+    a20_handle_t   pager;
+    a20_handle_t   vmo;
+} a20_pager_vmo_args_t;
+
+typedef struct a20_pager_supply_args {
+    uint32_t       size;
+    uint32_t       version;
+    a20_handle_t   pager;
+    a20_handle_t   vmo;
+    a20_handle_t   source;
+    uint64_t       vmo_offset;
+    uint64_t       source_offset;
+    uint64_t       len;
+    uint64_t       out_supplied;
+} a20_pager_supply_args_t;
+
+/* ---- Monitor structures (docs/native-abi/09-native-abi-deepening.md §3) ---- */
+
+#define A20_MONITOR_TASK_CPU_TIME     1
+#define A20_MONITOR_TASK_SYS_TIME     2
+#define A20_MONITOR_TASK_PAGE_FAULTS  3
+#define A20_MONITOR_TASK_CTX_SWITCH   4
+#define A20_MONITOR_TASK_MIGRATIONS   5
+#define A20_MONITOR_SYS_PAGE_FAULTS   6
+#define A20_MONITOR_SYS_CTX_SWITCH    7
+
+typedef struct a20_monitor_create_args {
+    uint32_t       size;
+    uint32_t       version;
+    a20_handle_t   target;
+    uint32_t       kind;
+    uint32_t       flags;
+    a20_handle_t   queue;
+    uint64_t       period_ns;
+    a20_handle_t   out_monitor;
+} a20_monitor_create_args_t;
+
+typedef struct a20_monitor_value {
+    uint32_t       size;
+    uint32_t       version;
+    uint32_t       kind;
+    uint32_t       flags;
+    uint64_t       count;
+    uint64_t       time_active_ns;
+    uint64_t       prev;
+} a20_monitor_value_t;
+
+/* ---- Task memory structures (docs/native-abi/09-native-abi-deepening.md §4) ---- */
+
+typedef struct a20_task_mem_args {
+    uint32_t       size;
+    uint32_t       version;
+    a20_handle_t   task;
+    uint32_t       flags;
+    uint64_t       local_iov;
+    uint32_t       local_iov_count;
+    uint32_t       _pad;
+    uint64_t       remote_iov;
+    uint32_t       remote_iov_count;
+    uint32_t       _pad2;
+    uint64_t       out_transferred;
+} a20_task_mem_args_t;
+#define A20_VMO_PAGED      2
+
 /* ========================================================================
  * Path / Filesystem structures (kernel/include/abi/native/types.h)
  * ======================================================================== */
@@ -746,6 +824,7 @@ typedef struct a20_pending_event {
     uint64_t       events;
     uint64_t       user_data;
     uint64_t       data0, data1, data2;
+    char           fs_name[32];   /* FS watch: changed entry name (NUL-padded) */
 } a20_pending_event_t;
 
 /* ---- Observable event types (docs/native-abi/05-ipc.md §3.3) ---- */
@@ -761,6 +840,12 @@ typedef struct a20_pending_event {
 #define A20_EVENT_MESSAGE_READY   8u
 #define A20_EVENT_PEER_CLOSED     9u
 #define A20_EVENT_SIGNALED       10u
+
+/* Filesystem watch events (docs/native-abi/09-native-abi-deepening.md §6). */
+#define A20_EVENT_FS_CREATE      16u
+#define A20_EVENT_FS_DELETE      17u
+#define A20_EVENT_FS_MODIFY      18u
+#define A20_EVENT_FS_RENAME      19u
 
 #define A20_EVENT_MASK(ev)        (1ull << (ev))
 

@@ -23,6 +23,7 @@
 #include "fs/page_cache.h"
 #include "fs/inotify.h"
 #include "ipc/landlock.h"
+#include "ipc/ipc.h"
 #include "fs/pipe.h"
 #include "fs/ramfs.h"
 #include "fs/devfs.h"
@@ -356,6 +357,7 @@ int vfs_open(const char *path, int flags, int mode) {    /* Resolve cwd from cur
         int r = parent->ops->create(parent, fname, cmode, &vn);
         if (r == 0) {
             inotify_vnode_event(parent, fname, IN_CREATE);
+            a20_fs_notify(parent, A20_EVENT_FS_CREATE, fname, 0, 0);
             vfs_dcache_invalidate(parent, fname);
             vfs_dcache_insert(parent, fname, vn);
         }
@@ -687,6 +689,7 @@ int vfs_mkdir(const char *path, int mode) {
     int r = parent->ops->mkdir(parent, name, cmode);
     if (r == 0) {
         inotify_vnode_event(parent, name, IN_CREATE | IN_ISDIR);
+        a20_fs_notify(parent, A20_EVENT_FS_CREATE, name, 0, 0);
         vfs_dcache_invalidate(parent, name);
     }
     vnode_put(parent);
@@ -740,6 +743,7 @@ int vfs_unlink(const char *path) {
     int r = parent->ops->unlink(parent, name);
     if (r == 0) {
         inotify_vnode_event(parent, name, IN_DELETE);
+        a20_fs_notify(parent, A20_EVENT_FS_DELETE, name, 0, 0);
         if (victim)
             inotify_vnode_event(victim, NULL, IN_DELETE_SELF);
         vfs_dcache_invalidate(parent, name);
@@ -869,7 +873,9 @@ int vfs_rename_flags(const char *old, const char *newpath, unsigned int flags) {
     int r = old_dir->ops->rename(old_dir, old_name, new_dir, new_name, flags);
     if (r == 0) {
         inotify_vnode_event(old_dir, old_name, IN_MOVED_FROM);
+        a20_fs_notify(old_dir, A20_EVENT_FS_RENAME, old_name, 0, 0);
         inotify_vnode_event(new_dir, new_name, IN_MOVED_TO);
+        a20_fs_notify(new_dir, A20_EVENT_FS_RENAME, new_name, 0, 0);
         int ramfs_dir_reparent = old_dir->mnt &&
             old_dir->mnt->type == FS_TYPE_RAMFS &&
             old_dir->ino != new_dir->ino &&
@@ -940,6 +946,7 @@ int vfs_rmdir(const char *path) {
     int r = parent->ops->rmdir(parent, name);
     if (r == 0) {
         inotify_vnode_event(parent, name, IN_DELETE | IN_ISDIR);
+        a20_fs_notify(parent, A20_EVENT_FS_DELETE, name, 0, 0);
         if (victim)
             inotify_vnode_event(victim, NULL, IN_DELETE_SELF);
         vfs_dcache_invalidate(parent, name);
@@ -1230,6 +1237,7 @@ int vfs_link(const char *oldpath, const char *newpath) {
     int r = parent->ops->link(parent, name, target);
     if (r == 0) {
         inotify_vnode_event(parent, name, IN_CREATE);
+        a20_fs_notify(parent, A20_EVENT_FS_CREATE, name, 0, 0);
         vfs_dcache_invalidate(parent, name);
     }
     vnode_put(parent);
@@ -1270,6 +1278,7 @@ int vfs_symlink(const char *target, const char *linkpath) {
     int r = parent->ops->symlink(parent, name, target);
     if (r == 0) {
         inotify_vnode_event(parent, name, IN_CREATE);
+        a20_fs_notify(parent, A20_EVENT_FS_CREATE, name, 0, 0);
         vfs_dcache_invalidate(parent, name);
     }
     vnode_put(parent);

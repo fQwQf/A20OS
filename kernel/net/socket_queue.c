@@ -140,9 +140,11 @@ int net_enqueue_msg_blocking(net_socket_t *s, net_socket_t *dst, const void *buf
         }
         int r = net_enqueue_msg_locked(dst, buf, len, addr, addrlen);
         if (r != -EAGAIN || dontwait) {
-            if (r >= 0)
+            if (r >= 0) {
+                net_event_notify(dst, A20_EVENT_READABLE, 0, 0);
                 (void)wait_queue_collect_one(
                     &dst->read_waitq, 0, PROC_WAKE_EVENT, &wake_q);
+            }
             spin_unlock_irqrestore(&g_net_lock, irq);
             (void)proc_wake_q_flush(&wake_q);
             return r;
@@ -198,9 +200,11 @@ int net_enqueue_msg_blocking(net_socket_t *s, net_socket_t *dst, const void *buf
         }
         r = net_enqueue_msg_locked(dst, buf, len, addr, addrlen);
         if (r != -EAGAIN) {
-            if (r >= 0)
+            if (r >= 0) {
+                net_event_notify(dst, A20_EVENT_READABLE, 0, 0);
                 (void)wait_queue_collect_one(
                     &dst->read_waitq, 0, PROC_WAKE_EVENT, &wake_q);
+            }
             spin_unlock_irqrestore(&g_net_lock, irq);
             (void)proc_park_cancel(token);
             proc_park_finish(token);

@@ -132,6 +132,9 @@ static inline int64_t a20_syscall6(uint64_t nr, uint64_t a0, uint64_t a1,
 /* ===== Task / Thread (0x0200) ===== */
 #define A20_SYS_task_exit         0x0200
 #define A20_SYS_task_spawn        0x0201
+#define A20_SYS_task_clone        0x0213
+#define A20_SYS_execve            0x0214
+#define A20_SYS_task_adopt        0x0216
 #define A20_SYS_task_wait         0x0202
 #define A20_SYS_task_kill         0x0203
 #define A20_SYS_task_info         0x0204
@@ -147,6 +150,8 @@ static inline int64_t a20_syscall6(uint64_t nr, uint64_t a0, uint64_t a1,
 #define A20_SYS_thread_get_cpu    0x020E
 #define A20_SYS_signal_check      0x020F
 #define A20_SYS_signal_mask       0x0210
+#define A20_SYS_task_mem_read     0x0211
+#define A20_SYS_task_mem_write    0x0212
 
 /* ===== Memory (0x0300) ===== */
 #define A20_SYS_vm_alloc          0x0300
@@ -159,6 +164,7 @@ static inline int64_t a20_syscall6(uint64_t nr, uint64_t a0, uint64_t a1,
 #define A20_SYS_vm_remap          0x0307
 #define A20_SYS_vm_lock           0x0308
 #define A20_SYS_vm_create_object  0x0309
+#define A20_SYS_vm_share_region   0x030A
 
 /* ===== Path / Filesystem (0x0400) ===== */
 #define A20_SYS_path_open         0x0400
@@ -255,6 +261,15 @@ static inline int64_t a20_syscall6(uint64_t nr, uint64_t a0, uint64_t a1,
 #define A20_SYS_device_alloc_dma  0x0C09
 #define A20_SYS_device_free_dma   0x0C0A
 #define A20_SYS_device_get_info   0x0C0B
+
+/* ===== Pager (0x0D00) ===== */
+#define A20_SYS_pager_create       0x0D00
+#define A20_SYS_pager_vmo_attach   0x0D01
+#define A20_SYS_pager_supply_pages 0x0D02
+
+/* ===== Monitor (0x0D10) ===== */
+#define A20_SYS_monitor_create     0x0D10
+#define A20_SYS_monitor_query      0x0D11
 #define A20_SYS_ext_prog_load      0x0E00
 #define A20_SYS_ext_prog_attach    0x0E01
 #define A20_SYS_ext_prog_detach    0x0E02

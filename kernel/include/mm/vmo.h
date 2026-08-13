@@ -4,6 +4,7 @@
 #include "core/types.h"
 #include "core/lock.h"
 #include "core/refcount.h"
+#include "core/sync.h"
 #include "mm/frame.h"
 
 /*
@@ -26,11 +27,20 @@
  *   This mirrors page-cache frames: the canonical frame outlives any single
  *   mapping.
  * - All VMO frames are zero-initialized on first materialization.
+ *
+ * PAGED VMOs (VMO_PAGED) with ->pager set hand unmaterialized-page faults to
+ * the user-space pager (kernel/ipc/a20_pager.c): the faulting thread enqueues
+ * a page-request message on the pager's request channel, then parks on
+ * ->faulters until a20_pager_supply_pages() materializes the page and wakes
+ * it.  ->pager is a reference to an a20_pager object, so it stays valid as
+ * long as the VMO is alive.  Faulters must never hold ->lock while parked.
  */
 
 #define VMO_ANONYMOUS 0
 #define VMO_PHYSICAL  1
 #define VMO_PAGED     2
+
+struct a20_pager;
 
 struct vmo {
     refcount_t  refcount;
@@ -43,6 +53,8 @@ struct vmo {
     uint32_t    page_count;
     struct cg_node *charge_cg; /* cgroup charged for materialized pages */
     uint64_t    charged_pages;
+    struct a20_pager *pager;   /* PAGED: user-space pager (ref'ed) */
+    wait_queue_t faulters;     /* PAGED: parked faulter wait queue */
 };
 
 struct vmo *vmo_create(uint32_t type, uint64_t size, uint32_t options);
@@ -59,5 +71,12 @@ pfn_t       vmo_peek_page(struct vmo *vmo, uint32_t index);
  * Returns 0 on success (pfn in *out), -ENOMEM on charge/alloc failure. */
 int         vmo_get_page_charged(struct vmo *vmo, uint32_t index,
                                  struct cg_node *cg, pfn_t *out);
+
+/* PAGED-VMO fault: request the page from the user-space pager and park until
+ * a20_pager_supply_pages() materializes it.  Caller must NOT hold the VMO's
+ * mm->lock (parking under it would deadlock the pager).  Returns 0 when the
+ * page is now materialized, -EAGAIN (no pager, run the zero-fill path),
+ * -EINTR (killed), or -EIO (pager request peer closed). */
+int         vmo_paged_fault(struct vmo *vmo, uint32_t index, int write_access);
 
 #endif /* _MM_VMO_H */
