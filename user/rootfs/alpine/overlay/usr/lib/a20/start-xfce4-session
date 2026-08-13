@@ -24,10 +24,11 @@ export WLR_DRM_NO_ATOMIC=1
 export WLR_NO_HARDWARE_CURSORS=1
 export WLR_RENDERER=pixman
 
-# A20OS exposes a single evdev multiplexer at /dev/input/event0, but it is not
-# yet modelled as a udev input device (no /sys/class/input + ID_INPUT_* tags),
-# so libinput's udev backend finds no devices.  Tell wlroots to start without
-# input devices for now; the desktop renders and input wiring is a follow-up.
+# Input devices are published as /dev/input/event* with /sys/devices/virtual/
+# input/* nodes and a coldplug uevent replay, but eudev does not yet persist
+# them into its device database, so libinput's udev backend finds none.  Start
+# without input devices so the desktop still renders; drop this once the udev
+# db carries ID_INPUT_* for the event nodes.
 export WLR_LIBINPUT_NO_DEVICES=1
 
 mkdir -p "$XDG_RUNTIME_DIR"
