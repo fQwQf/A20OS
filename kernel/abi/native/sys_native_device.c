@@ -124,8 +124,8 @@ int64_t sys_a20_device_irq_unlisten(const a20_syscall_args_t *args)
  * sys_a20_device_vmo_phys — DMA contract (M4): a user driver never
  * supplies raw physical addresses; it allocates a VMO through the normal
  * memory syscalls, materializes the pages, and asks the kernel for their
- * physical addresses here.  VMO pages are never paged out, which provides
- * the pin guarantee for DMA descriptors.
+ * device-visible addresses here.  An isolated owner receives IOVAs only;
+ * legacy devices retain the physical-address behavior.
  */int64_t sys_a20_device_vmo_phys(const a20_syscall_args_t *args)
 {
     a20_device_vmo_phys_args_t *uargs =
@@ -150,8 +150,16 @@ int64_t sys_a20_device_irq_unlisten(const a20_syscall_args_t *args)
     if (n > kargs.max_pages)
         n = kargs.max_pages;
     for (uint32_t i = 0; i < n; i++) {
-        pfn_t pfn = vmo_peek_page(v, i);
-        uint64_t pa = (pfn == PFN_NONE) ? 0 : (uint64_t)pfn_to_phys(pfn);
+        uint64_t pa = 0;
+        int dr = udriver_dma_address(v, cur->pid, i, &pa);
+        if (dr < 0) {
+            a20_object_release(entry.object, entry.type);
+            return -A20_ERR_ACCESS;
+        }
+        if (dr > 0) {
+            pfn_t pfn = vmo_peek_page(v, i);
+            pa = (pfn == PFN_NONE) ? 0 : (uint64_t)pfn_to_phys(pfn);
+        }
         if (copy_to_user((void *)(kargs.out_paddrs +
                                   (uint64_t)i * sizeof(uint64_t)),
                          &pa, sizeof(pa)) < 0) {
@@ -252,6 +260,10 @@ int64_t sys_a20_device_release(const a20_syscall_args_t *args)
     task_t *cur = proc_current();
     if (!cur)
         return -A20_ERR_BAD_HANDLE;
+    if (udriver_claim_owner(phys) != cur->pid)
+        return -A20_ERR_PERM;
+    /* Revoke register access before disabling and detaching the device. */
+    udriver_revoke_mmio(cur->mm, phys);
     extern int udriver_release(uint64_t phys, int pid);
     int r = udriver_release(phys, cur->pid);
     if (r == -2)
@@ -296,8 +308,16 @@ int64_t sys_a20_device_alloc_dma(const a20_syscall_args_t *args)
     spin_unlock(&vmo->lock);
 
     task_t *cur = proc_current();
+    uint64_t iova = 0;
+    int dma_map = udriver_dma_map(vmo, cur ? cur->pid : -1, &iova);
+    if (dma_map < 0) {
+        vmo_release(vmo);
+        return -A20_ERR_ACCESS;
+    }
     struct a20_ht_internal *ht = task_get_a20_ht(cur);
     if (!ht) {
+        if (dma_map == 0)
+            udriver_dma_unmap(vmo, cur->pid);
         vmo_release(vmo);
         return -A20_ERR_BAD_HANDLE;
     }
@@ -306,7 +326,57 @@ int64_t sys_a20_device_alloc_dma(const a20_syscall_args_t *args)
                                    A20_RIGHT_READ | A20_RIGHT_WRITE |
                                    A20_RIGHT_MAP | A20_RIGHT_STAT | A20_RIGHT_DUP |
                                    A20_RIGHT_TRANSFER | A20_RIGHT_CONTROL);
-    if (h < 0)
+    if (h < 0) {
+        if (dma_map == 0)
+            udriver_dma_unmap(vmo, cur->pid);
         vmo_release(vmo);
+    }
     return h;
+}
+
+int64_t sys_a20_device_free_dma(const a20_syscall_args_t *args)
+{
+    a20_handle_t handle = (a20_handle_t)A20_ARG(0);
+    task_t *cur = proc_current();
+    if (!cur)
+        return -A20_ERR_BAD_HANDLE;
+    struct a20_ht_internal *ht = task_get_a20_ht(cur);
+    if (!ht)
+        return -A20_ERR_BAD_HANDLE;
+    a20_handle_entry_t entry;
+    int64_t r = a20_handle_lookup_ref_internal(ht, handle, A20_OBJ_MEMORY,
+                                                A20_RIGHT_CONTROL, &entry);
+    if (r < 0)
+        return r;
+    r = udriver_dma_unmap((struct vmo *)entry.object, cur->pid);
+    a20_object_release(entry.object, entry.type);
+    return r < 0 ? -A20_ERR_ACCESS : A20_OK;
+}
+
+int64_t sys_a20_device_get_info(const a20_syscall_args_t *args)
+{
+    a20_device_info_args_t *uargs =
+        (a20_device_info_args_t *)A20_ARG(0);
+    if (!uargs)
+        return -A20_ERR_FAULT;
+    a20_device_info_args_t kargs;
+    A20_VALIDATE_AND_COPY(uargs, kargs);
+    task_t *cur = proc_current();
+    if (!cur)
+        return -A20_ERR_BAD_HANDLE;
+    udriver_device_info_t info;
+    if (udriver_device_get_info(kargs.bus, kargs.vendor, kargs.device,
+                                kargs.index, cur->pid, &info) < 0)
+        return -A20_ERR_NOT_FOUND;
+    kargs.out_flags = info.flags;
+    kargs.out_devid = info.devid;
+    kargs.out_irq = info.irq;
+    kargs.out_fault_cause = info.fault_cause;
+    kargs.out_mmio_base = info.mmio_base;
+    kargs.out_mmio_size = info.mmio_size;
+    kargs.out_fault_count = info.fault_count;
+    kargs.out_fault_iova = info.fault_iova;
+    if (a20_copy_struct_to_user(uargs, &kargs, sizeof(kargs)) < 0)
+        return -A20_ERR_FAULT;
+    return A20_OK;
 }

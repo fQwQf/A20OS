@@ -102,18 +102,12 @@ static inline void drv_mmio_write8(uint64_t base, uint32_t off, uint8_t val)
     *(volatile uint8_t *)(uintptr_t)(base + off) = val;
 }
 
-/* ---- DMA buffers (page-granular; trust model until IOMMU lands) ----
+/* ---- DMA buffers (page-granular) ----
  *
  * Identical contract on both sides: allocate @npages of DMA-capable
- * memory, query each page's device-visible physical address.  Caveats
- * that keep this honest:
- *  - kernel placement hands out physically contiguous frames; user
- *    placement gets a VMO whose pages may be non-contiguous, so
- *    protocols requiring multi-page contiguous DMA must stay
- *    single-page until the DMA-heap/IOMMU work (04-dual-placement.md);
- *  - without IOMMU there is no hardware enforcement: user placement
- *    is protected only by the udriver contract (kernel allocates,
- *    pins and translates); do not widen what the op promises.
+ * memory and query each page's device-visible address.  The isolated PCI
+ * path returns IOVAs; existing MMIO and kernel/module placements keep their
+ * physical-address contract.
  */
 #define DRV_PAGE_SIZE 4096u
 typedef struct drv_dma {
@@ -203,6 +197,7 @@ static inline void drv_dma_free(drv_dma_t *d)
 {
     if (!d || !d->va0)
         return;
+    (void)a20_device_free_dma((a20_handle_t)d->cookie);
     a20_vm_unmap(d->va0, (uint64_t)d->npages * DRV_PAGE_SIZE);
     a20_hdl_close((a20_handle_t)d->cookie);
     d->va0 = d->cookie = 0;
