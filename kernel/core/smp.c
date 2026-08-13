@@ -224,6 +224,90 @@ int smp_remote_tlb_flush_supported(void)
     return ops && ops->remote_tlb_flush;
 }
 
+/*
+ * membarrier(2) expedited barrier support.
+ *
+ * A membarrier GLOBAL/PRIVATE_EXPEDITED barrier must reach every online CPU
+ * so that threads on remote CPUs observe all prior stores.  A20OS reuses the
+ * scheduler reschedule IPI as the barrier transport: the remote handler
+ * (proc_sched_handle_reschedule_ipi) executes an acquire fence, so a CPU
+ * which acknowledged the request has crossed a barrier after the requesting
+ * CPU published its stores.
+ *
+ * The caller must not hold a spinlock with interrupts disabled, because the
+ * wait loop re-enables interrupts to service inbound IPIs (same constraint as
+ * the remote TLB flush).
+ */
+static _Atomic uint32_t mb_request[CONFIG_NR_CPUS];
+static _Atomic uint32_t mb_ack[CONFIG_NR_CPUS];
+static _Atomic uint32_t mb_seq;
+
+/* Called by the reschedule-IPI handler after it has executed the acquire
+ * fence.  Advances the acknowledgment only up to the request the caller
+ * published, so the initiator's wait loop cannot be satisfied by a stale ack
+ * from an unrelated reschedule IPI. */
+void smp_membarrier_ipi_ack(unsigned cpu)
+{
+    if (cpu >= CONFIG_NR_CPUS)
+        return;
+    uint32_t req = __atomic_load_n(&mb_request[cpu], __ATOMIC_ACQUIRE);
+    uint32_t ack = __atomic_load_n(&mb_ack[cpu], __ATOMIC_RELAXED);
+    if (ack != req)
+        __atomic_store_n(&mb_ack[cpu], req, __ATOMIC_RELEASE);
+}
+
+/* Issue a full memory barrier on every online CPU.  On uniprocessor
+ * builds this is a single compiler/CPU fence. */
+int smp_membarrier_sync_all(void)
+{
+    uint32_t seq = __atomic_add_fetch(&mb_seq, 1, __ATOMIC_ACQ_REL);
+    unsigned self = arch_current_cpu_id();
+    uint32_t target = smp_online_cpu_mask() & ~(1U << self);
+
+    if (!target) {
+        __atomic_thread_fence(__ATOMIC_SEQ_CST);
+        return 0;
+    }
+
+    for (unsigned cpu = 0; cpu < CONFIG_NR_CPUS; cpu++) {
+        if (!(target & (1U << cpu)))
+            continue;
+        uint64_t hw_id;
+        if (smp_logical_to_hw(cpu, &hw_id) < 0)
+            continue;
+        uint32_t expected = __atomic_add_fetch(&mb_request[cpu], 1,
+                                               __ATOMIC_ACQ_REL);
+        (void)seq;
+        const smp_platform_ops_t *ops = platform_ops();
+        if (ops && ops->send_ipi && smp_cpu_is_online(cpu))
+            ops->send_ipi(&cpu_descs[cpu], SMP_IPI_RESCHEDULE);
+    }
+
+    int irqs_were_off = !arch_irqs_enabled();
+    if (irqs_were_off)
+        arch_local_irq_enable();
+    for (unsigned cpu = 0; cpu < CONFIG_NR_CPUS; cpu++) {
+        if (!(target & (1U << cpu)))
+            continue;
+        uint64_t wait_start = timer_get_ticks();
+        uint32_t expected = mb_request[cpu];
+        while ((int32_t)(__atomic_load_n(&mb_ack[cpu], __ATOMIC_ACQUIRE) -
+                         (int32_t)expected) < 0) {
+            if (timer_get_ticks() - wait_start > 5UL * ARCH_TIMER_FREQ) {
+                printf("[SMP membarrier] timeout self=%u target=%u\n", self,
+                       cpu);
+                return -EIO;
+            }
+            arch_cpu_relax();
+        }
+    }
+    if (irqs_were_off)
+        arch_local_irq_disable();
+
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    return 0;
+}
+
 void smp_secondary_init(unsigned cpu_id)
 {
     const smp_platform_ops_t *ops = platform_ops();
