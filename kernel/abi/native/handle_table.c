@@ -181,7 +181,7 @@ static const a20_rights_t a20_type_rights[A20_OBJ_MONITOR + 1] = {
     [A20_OBJ_INVALID]          = 0,
     [A20_OBJ_TASK]             = A20_RIGHT_WAIT | A20_RIGHT_SIGNAL | A20_RIGHT_STAT |
                                  A20_RIGHT_DUP | A20_RIGHT_TRANSFER | A20_RIGHT_CONTROL |
-                                 A20_RIGHT_ADMIN,
+                                 A20_RIGHT_ADMIN | A20_RIGHT_READ | A20_RIGHT_WRITE,
     [A20_OBJ_THREAD]           = A20_RIGHT_STAT | A20_RIGHT_DUP | A20_RIGHT_TRANSFER |
                                  A20_RIGHT_CONTROL,
     [A20_OBJ_FILE]             = A20_RIGHT_READ | A20_RIGHT_WRITE | A20_RIGHT_STAT |
