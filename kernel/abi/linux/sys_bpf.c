@@ -4,11 +4,11 @@
 #include "fs/memfd.h"
 
 /*
- * LINUX_ABI_BPF_STUB_BOUNDARY: the Linux bpf(2) syscall is a thin wrapper
- * over the ABI-agnostic KEP extension engine (kernel/ext/kep.c).  Only
- * program operations are supported (BPF_PROG_LOAD / BPF_PROG_ATTACH /
- * BPF_PROG_DETACH); the map commands of the former placeholder bpf
- * implementation are intentionally not provided.
+ * LINUX_ABI_BPF_BOUNDARY: the Linux bpf(2) syscall is a thin wrapper over
+ * the ABI-agnostic KEP extension engine (kernel/ext/kep.c).  Program
+ * operations are supported (BPF_PROG_LOAD / BPF_PROG_ATTACH /
+ * BPF_PROG_DETACH); the Linux map commands are not provided and return
+ * -EOPNOTSUPP.
  *
  * A20-specific adaptation: BPF_PROG_ATTACH's target_fd argument carries
  * the KEP extension-point id (Linux attaches to sockets instead).  The

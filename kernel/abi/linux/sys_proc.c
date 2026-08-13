@@ -116,7 +116,10 @@ int64_t sys_arch_prctl(int op, uint64_t addr) __attribute__((weak));
 int64_t sys_arch_prctl(int op, uint64_t addr) {
     (void)op;
     (void)addr;
-    return -ENOSYS;
+    /* arch_prctl is an x86-only syscall; the x86_64 arch port provides the
+     * strong definition.  Other platforms have no x86 TLS/segment registers
+     * to configure. */
+    return -EOPNOTSUPP;
 }
 
 int64_t sys_get_robust_list(int pid, void *head_ptr, size_t *len_ptr) {
