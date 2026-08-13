@@ -25,6 +25,7 @@
 #include <sys/syscall.h>
 #include <sys/types.h>
 #include <sys/uio.h>
+#include <time.h>
 #include <unistd.h>
 
 #define KEY_SPEC_PROCESS_KEYRING (-2)
@@ -870,6 +871,73 @@ static int test_perf(void)
     return 0;
 }
 
+/* ---- POSIX timer notification (kernel/abi/linux/sys_timer_posix.c) ---- */
+
+static volatile sig_atomic_t g_timer_sig;
+
+static void timer_sig_handler(int sig)
+{
+    (void)sig;
+    g_timer_sig = 1;
+}
+
+/* Exercises SIGEV_SIGNAL (default process-wide signo path) and
+ * SIGEV_THREAD_ID (thread-targeted delivery). */
+static int test_timer_sigevent(void)
+{
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = timer_sig_handler;
+    sigemptyset(&sa.sa_mask);
+    if (sigaction(SIGUSR1, &sa, NULL) != 0)
+        return fail("timer sigaction", errno);
+
+    /* SIGEV_SIGNAL with a custom signo. */
+    struct sigevent sev;
+    memset(&sev, 0, sizeof(sev));
+    sev.sigev_notify = SIGEV_SIGNAL;
+    sev.sigev_signo = SIGUSR1;
+    timer_t tid;
+    if (timer_create(CLOCK_MONOTONIC, &sev, &tid) != 0)
+        return fail("timer_create signal", errno);
+
+    struct itimerspec its;
+    memset(&its, 0, sizeof(its));
+    its.it_value.tv_nsec = 30000000; /* 30 ms one-shot */
+    if (timer_settime(tid, 0, &its, NULL) != 0)
+        return fail("timer_settime signal", errno);
+
+    g_timer_sig = 0;
+    for (int i = 0; i < 1000 && !g_timer_sig; i++)
+        usleep(1000);
+    if (!g_timer_sig) {
+        timer_delete(tid);
+        return fail("timer signal delivery", ETIMEDOUT);
+    }
+    timer_delete(tid);
+
+    /* SIGEV_THREAD_ID targeting the calling thread. */
+    memset(&sev, 0, sizeof(sev));
+    sev.sigev_notify = SIGEV_THREAD_ID;
+    sev.sigev_signo = SIGUSR1;
+    sev.sigev_notify_thread_id = (pid_t)syscall(SYS_gettid);
+    if (timer_create(CLOCK_MONOTONIC, &sev, &tid) != 0)
+        return fail("timer_create thread-id", errno);
+
+    memset(&its, 0, sizeof(its));
+    its.it_value.tv_nsec = 30000000;
+    if (timer_settime(tid, 0, &its, NULL) != 0)
+        return fail("timer_settime thread-id", errno);
+
+    g_timer_sig = 0;
+    for (int i = 0; i < 1000 && !g_timer_sig; i++)
+        usleep(1000);
+    timer_delete(tid);
+    if (!g_timer_sig)
+        return fail("timer thread-id delivery", ETIMEDOUT);
+    return 0;
+}
+
 int main(void)
 {
     printf("SYSCALL_EXT: start\n");
@@ -896,6 +964,8 @@ int main(void)
     if (test_userfaultfd() < 0)
         return 1;
     if (test_perf() < 0)
+        return 1;
+    if (test_timer_sigevent() < 0)
         return 1;
     printf("SYSCALL_EXT: PASS\n");
     return 0;
