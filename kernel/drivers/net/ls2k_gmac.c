@@ -1,14 +1,18 @@
 /*
- * A20OS Loongson-2K GMAC driver.
+ * A20OS Loongson-2K GMAC driver (DesignWare stmmac-class, "snps,dwmac-3.710").
  *
  * Developed for the Loongson LS2K1000 board, referencing RocketOS (MIT)
- * board/driver bring-up.  See docs/ACKNOWLEDGMENTS.md.
+ * board/driver bring-up.  See docs/ACKNOWLEDGMENTS.md and
+ * docs/platforms/physical-boards.md.
  *
- * LOCK_ORDER: This driver uses no private spinlock. send/recv are register-
- * polling paths against a single global ls2k_gmac_priv_t instance
- * (g_ls2k_gmac). Future IRQ-driven or SMP-safe versions must add a private
- * lock and document it in docs/drivers/lock-order.md.
+ * LOCK_ORDER: each instance owns a private spinlock (g_ls2k_gmac_insts[i].lock)
+ * serializing descriptor-ring access in send/recv/poll.  The data path is
+ * poll-driven; the MMIO base is the identity-mapped physical address the board
+ * provides (0x40040000 on the LS2K1000).  The descriptor bit layout follows
+ * the pre-existing A20OS port and must be confirmed against the 2K1000's
+ * stmmac variant before any IRQ-driven rework.
  */
+
 #include "drivers/net/ls2k_gmac.h"
 #include "drivers/bus/platform_bus.h"
 #include "drivers/core/driver_core.h"
@@ -20,6 +24,7 @@
 #include "core/stdio.h"
 #include "core/string.h"
 #include "core/klog.h"
+#include "core/lock.h"
 #include "core/timer.h"
 
 #define GMAC_MAC_BASE  0x0000
@@ -96,9 +101,12 @@ typedef struct {
 #define DESC_LS  (1U << 8)
 #define DESC_FS  (1U << 9)
 
+#define GMAC_MAX_INSTANCES 4
+
 typedef struct {
     uintptr_t base;
     int       valid;
+    spinlock_t lock;
     gmac_desc_t tx_desc[GMAC_DESC_NUM] ALIGNED(16);
     gmac_desc_t rx_desc[GMAC_DESC_NUM] ALIGNED(16);
     uint8_t     tx_buf[GMAC_DESC_NUM][GMAC_BUF_SIZE] ALIGNED(64);
@@ -108,7 +116,34 @@ typedef struct {
     uint8_t     mac[6];
 } ls2k_gmac_priv_t;
 
-static ls2k_gmac_priv_t g_ls2k_gmac;
+static ls2k_gmac_priv_t g_ls2k_gmac_insts[GMAC_MAX_INSTANCES];
+
+static ls2k_gmac_priv_t *gmac_instance(uintptr_t base)
+{
+    for (int i = 0; i < GMAC_MAX_INSTANCES; i++) {
+        if (g_ls2k_gmac_insts[i].valid && g_ls2k_gmac_insts[i].base == base)
+            return &g_ls2k_gmac_insts[i];
+    }
+    return NULL;
+}
+
+static ls2k_gmac_priv_t *gmac_alloc_instance(uintptr_t base)
+{
+    ls2k_gmac_priv_t *inst = gmac_instance(base);
+    if (inst)
+        return inst;
+    for (int i = 0; i < GMAC_MAX_INSTANCES; i++) {
+        if (!g_ls2k_gmac_insts[i].valid) {
+            inst = &g_ls2k_gmac_insts[i];
+            memset(inst, 0, sizeof(*inst));
+            inst->base = base;
+            inst->valid = 1;
+            spin_init(&inst->lock);
+            return inst;
+        }
+    }
+    return NULL;
+}
 
 static inline uint32_t gmac_read(uintptr_t base, uint32_t off) {
     return readl((volatile void *)(base + off));
@@ -167,6 +202,8 @@ static void ls2k_gmac_init_desc(uintptr_t base, ls2k_gmac_priv_t *priv) {
         priv->rx_desc[i].length = (1 << 16) | GMAC_BUF_SIZE;
         priv->rx_desc[i].buffer1 = (uint32_t)rx_buf_pa;
     }
+    dma_sync_for_device(priv->tx_desc, sizeof(priv->tx_desc));
+    dma_sync_for_device(priv->rx_desc, sizeof(priv->rx_desc));
 
     gmac_write(base, DMA_TX_BASE_ADDR, (uint32_t)tx_desc_pa);
     gmac_write(base, DMA_RX_BASE_ADDR, (uint32_t)rx_desc_pa);
@@ -175,13 +212,27 @@ static void ls2k_gmac_init_desc(uintptr_t base, ls2k_gmac_priv_t *priv) {
     priv->rx_busy = 0;
 }
 
-static int ls2k_gmac_phy_init(uintptr_t base) {
-    int phy_addr = 0;
+static int ls2k_gmac_phy_init(uintptr_t base, ls2k_gmac_priv_t *priv) {
+    int phy_addr = -1;
+    uint16_t id1, id2;
+    uint32_t phy_id;
 
-    uint16_t id1 = gmac_mdio_read(base, phy_addr, 2);
-    uint16_t id2 = gmac_mdio_read(base, phy_addr, 3);
-    uint32_t phy_id = ((uint32_t)id1 << 16) | id2;
-    kinfo("[LS2K-GMAC] PHY ID: 0x%08X\n", phy_id);
+    for (int i = 0; i < 32; i++) {
+        id1 = gmac_mdio_read(base, i, 2);
+        id2 = gmac_mdio_read(base, i, 3);
+        if (id1 == 0xFFFF && id2 == 0xFFFF)
+            continue;
+        phy_id = ((uint32_t)id1 << 16) | id2;
+        if ((phy_id & 0x1FFFFFFF) == 0x1FFFFFFF)
+            continue;
+        phy_addr = i;
+        kinfo("[LS2K-GMAC] PHY 0x%02x id 0x%08x\n", i, phy_id);
+        break;
+    }
+    if (phy_addr < 0) {
+        kinfo("[LS2K-GMAC] no PHY on MDIO\n");
+        return -1;
+    }
 
     gmac_mdio_write(base, phy_addr, 0, 0x8000);
     uint64_t start = timer_get_ticks();
@@ -208,32 +259,33 @@ static int ls2k_gmac_phy_init(uintptr_t base) {
         mdelay(10);
     }
 
-    kinfo("[LS2K-GMAC] PHY link up\n");
+    kinfo("[LS2K-GMAC] PHY link up at addr %d\n", phy_addr);
     return 0;
 }
 
 int ls2k_gmac_init(uintptr_t base) {
-    g_ls2k_gmac.base = base;
-    g_ls2k_gmac.valid = 0;
-    memcpy(g_ls2k_gmac.mac, (uint8_t[]){0x00, 0x55, 0x7B, 0xB5, 0x7D, 0xF7}, 6);
+    ls2k_gmac_priv_t *priv = gmac_alloc_instance(base);
+    if (!priv)
+        return -1;
+    memcpy(priv->mac, (uint8_t[]){0x00, 0x55, 0x7B, 0xB5, 0x7D, 0xF7}, 6);
 
     gmac_write(base, DMA_BUS_MODE, DMA_BUS_MODE_SWR);
     while (gmac_read(base, DMA_BUS_MODE) & DMA_BUS_MODE_SWR);
     mdelay(10);
 
     gmac_write(base, MAC_CONFIGURATION, 0);
-    ls2k_gmac_init_desc(base, &g_ls2k_gmac);
+    ls2k_gmac_init_desc(base, priv);
 
     gmac_write(base, MAC_FRAME_FILTER, 0x80000001);
     gmac_write(base, MAC_FLOW_CTRL, 0);
 
-    uint32_t high = (g_ls2k_gmac.mac[5] << 8) | g_ls2k_gmac.mac[4] | (1U << 31);
-    uint32_t low  = (g_ls2k_gmac.mac[3] << 24) | (g_ls2k_gmac.mac[2] << 16) |
-                    (g_ls2k_gmac.mac[1] << 8)  | g_ls2k_gmac.mac[0];
+    uint32_t high = (priv->mac[5] << 8) | priv->mac[4] | (1U << 31);
+    uint32_t low  = (priv->mac[3] << 24) | (priv->mac[2] << 16) |
+                    (priv->mac[1] << 8)  | priv->mac[0];
     gmac_write(base, MAC_ADDR0_HIGH, high);
     gmac_write(base, MAC_ADDR0_LOW, low);
 
-    if (ls2k_gmac_phy_init(base) != 0)
+    if (ls2k_gmac_phy_init(base, priv) != 0)
         return -1;
 
     gmac_write(base, MAC_CONFIGURATION,
@@ -242,68 +294,100 @@ int ls2k_gmac_init(uintptr_t base) {
     gmac_write(base, DMA_CONTROL, 0x00202000);
     gmac_write(base, DMA_INTR_ENABLE, 0x00010043);
 
-    g_ls2k_gmac.valid = 1;
     kinfo("[LS2K-GMAC] Initialized at 0x%lx\n", (unsigned long)base);
     return 0;
 }
 
 int ls2k_gmac_send(uintptr_t base, const void *pkt, size_t len) {
-    if (!g_ls2k_gmac.valid || len > GMAC_BUF_SIZE - 4) return -1;
+    ls2k_gmac_priv_t *priv = gmac_instance(base);
+    if (!priv || len > GMAC_BUF_SIZE - 4)
+        return -1;
 
-    uint32_t idx = g_ls2k_gmac.tx_busy;
-    gmac_desc_t *desc = &g_ls2k_gmac.tx_desc[idx];
+    uint64_t flags = spin_lock_irqsave(&priv->lock);
+    uint32_t idx = priv->tx_busy;
+    gmac_desc_t *desc = &priv->tx_desc[idx];
 
-    if (desc->status & DESC_OWN) return -1;
-
-    memcpy(g_ls2k_gmac.tx_buf[idx], pkt, len);
-    if (len < 60) {
-        memset(g_ls2k_gmac.tx_buf[idx] + len, 0, 60 - len);
-        len = 60;
+    if (desc->status & DESC_OWN) {
+        spin_unlock_irqrestore(&priv->lock, flags);
+        return -1;
     }
 
+    memcpy(priv->tx_buf[idx], pkt, len);
+    if (len < 60) {
+        memset(priv->tx_buf[idx] + len, 0, 60 - len);
+        len = 60;
+    }
+    dma_sync_for_device(priv->tx_buf[idx], len);
+
     desc->length = (1 << 16) | (uint32_t)len;
+    __sync_synchronize();
     desc->status = DESC_OWN | DESC_IOC | DESC_FD | DESC_LD | DESC_FS | DESC_LS;
+    dma_sync_for_device(desc, sizeof(*desc));
 
     gmac_write(base, DMA_TX_POLL_DEMAND, 1);
 
-    g_ls2k_gmac.tx_busy = (idx + 1) % GMAC_DESC_NUM;
+    priv->tx_busy = (idx + 1) % GMAC_DESC_NUM;
+    spin_unlock_irqrestore(&priv->lock, flags);
     return 0;
 }
 
 int ls2k_gmac_recv(uintptr_t base, void *buf, size_t maxlen) {
-    if (!g_ls2k_gmac.valid) return -1;
+    ls2k_gmac_priv_t *priv = gmac_instance(base);
+    if (!priv)
+        return -1;
 
-    uint32_t idx = g_ls2k_gmac.rx_busy;
-    gmac_desc_t *desc = &g_ls2k_gmac.rx_desc[idx];
+    uint64_t flags = spin_lock_irqsave(&priv->lock);
+    uint32_t idx = priv->rx_busy;
+    gmac_desc_t *desc = &priv->rx_desc[idx];
 
-    if (desc->status & DESC_OWN) return -1;
+    if (desc->status & DESC_OWN) {
+        spin_unlock_irqrestore(&priv->lock, flags);
+        return -1;
+    }
+
+    dma_sync_for_cpu(desc, sizeof(*desc));
+    dma_sync_for_cpu(priv->rx_buf[idx], GMAC_BUF_SIZE);
 
     if (desc->status & DESC_ES) {
         desc->status = DESC_OWN | DESC_IOC | DESC_FD | DESC_LD;
-        g_ls2k_gmac.rx_busy = (idx + 1) % GMAC_DESC_NUM;
+        desc->length = (1 << 16) | GMAC_BUF_SIZE;
+        dma_sync_for_device(desc, sizeof(*desc));
+        priv->rx_busy = (idx + 1) % GMAC_DESC_NUM;
+        gmac_write(base, DMA_RX_POLL_DEMAND, 1);
+        spin_unlock_irqrestore(&priv->lock, flags);
         return -1;
     }
 
     uint32_t len = ((desc->status >> 16) & 0x3FFF) - 4;
     if (len > maxlen) len = maxlen;
-    if (len > 0) memcpy(buf, g_ls2k_gmac.rx_buf[idx], len);
+    if (len > 0) memcpy(buf, priv->rx_buf[idx], len);
 
     desc->status = DESC_OWN | DESC_IOC | DESC_FD | DESC_LD;
     desc->length = (1 << 16) | GMAC_BUF_SIZE;
+    dma_sync_for_device(desc, sizeof(*desc));
     gmac_write(base, DMA_RX_POLL_DEMAND, 1);
 
-    g_ls2k_gmac.rx_busy = (idx + 1) % GMAC_DESC_NUM;
+    priv->rx_busy = (idx + 1) % GMAC_DESC_NUM;
+    spin_unlock_irqrestore(&priv->lock, flags);
     return (int)len;
 }
 
 void ls2k_gmac_get_mac(uintptr_t base, uint8_t *mac) {
-    (void)base;
-    memcpy(mac, g_ls2k_gmac.mac, 6);
+    ls2k_gmac_priv_t *priv = gmac_instance(base);
+    if (priv)
+        memcpy(mac, priv->mac, 6);
 }
 
 int ls2k_gmac_poll(uintptr_t base) {
+    ls2k_gmac_priv_t *priv = gmac_instance(base);
+    if (!priv)
+        return -1;
+
+    uint64_t flags = spin_lock_irqsave(&priv->lock);
     uint32_t status = gmac_read(base, DMA_STATUS);
-    if (status) gmac_write(base, DMA_STATUS, status);
+    if (status)
+        gmac_write(base, DMA_STATUS, status);
+    spin_unlock_irqrestore(&priv->lock, flags);
     return 0;
 }
 
@@ -311,52 +395,53 @@ int ls2k_gmac_poll(uintptr_t base) {
  * driver_t integration
  * ============================================================ */
 
-typedef struct {
-    ls2k_gmac_priv_t gmac;
-    net_dev_ops_t    ops;
-} ls2k_gmac_drv_t;
-
-static ls2k_gmac_drv_t g_ls2k_drv;
-
 static int ls2k_gmac_driver_probe(device_t *dev) {
     resource_t *res = device_get_resource(dev, RES_MMIO, 0);
-    if (!res) return -1;
+    if (!res)
+        return -1;
 
     if (ls2k_gmac_init(res->start) != 0) {
         kinfo("[LS2K-GMAC] Failed to init at 0x%lx\n", (unsigned long)res->start);
         return -1;
     }
 
-    /* Mirror the low-level global so the class ops see a live base. */
-    g_ls2k_drv.gmac = g_ls2k_gmac;
-    dev->drv_priv = &g_ls2k_drv;
+    ls2k_gmac_priv_t *priv = gmac_instance(res->start);
+    dev->drv_priv = priv;
     kinfo("[LS2K-GMAC] Probed '%s' at 0x%lx\n", dev->name, (unsigned long)res->start);
     return 0;
 }
 
 static int ls2k_gmac_driver_remove(device_t *dev) {
-    (void)dev;
+    ls2k_gmac_priv_t *priv = (ls2k_gmac_priv_t *)dev->drv_priv;
+    if (priv)
+        priv->valid = 0;
+    dev->drv_priv = NULL;
     return 0;
 }
 
 static int ls2k_gmac_class_send(struct device *dev, const void *pkt, size_t len) {
-    ls2k_gmac_drv_t *priv = (ls2k_gmac_drv_t *)dev->drv_priv;
-    return ls2k_gmac_send(priv->gmac.base, pkt, len);
+    ls2k_gmac_priv_t *priv = (ls2k_gmac_priv_t *)dev->drv_priv;
+    if (!priv)
+        return -1;
+    return ls2k_gmac_send(priv->base, pkt, len);
 }
 
 static int ls2k_gmac_class_recv(struct device *dev, void *buf, size_t maxlen) {
-    ls2k_gmac_drv_t *priv = (ls2k_gmac_drv_t *)dev->drv_priv;
-    return ls2k_gmac_recv(priv->gmac.base, buf, maxlen);
+    ls2k_gmac_priv_t *priv = (ls2k_gmac_priv_t *)dev->drv_priv;
+    if (!priv)
+        return -1;
+    return ls2k_gmac_recv(priv->base, buf, maxlen);
 }
 
 static const uint8_t *ls2k_gmac_class_mac(struct device *dev) {
-    ls2k_gmac_drv_t *priv = (ls2k_gmac_drv_t *)dev->drv_priv;
-    return priv->gmac.mac;
+    ls2k_gmac_priv_t *priv = (ls2k_gmac_priv_t *)dev->drv_priv;
+    return priv ? priv->mac : NULL;
 }
 
 static void ls2k_gmac_class_poll(struct device *dev) {
-    ls2k_gmac_drv_t *priv = (ls2k_gmac_drv_t *)dev->drv_priv;
-    ls2k_gmac_poll(priv->gmac.base);
+    ls2k_gmac_priv_t *priv = (ls2k_gmac_priv_t *)dev->drv_priv;
+    if (priv)
+        ls2k_gmac_poll(priv->base);
 }
 
 static net_dev_ops_t ls2k_gmac_net_ops = {
