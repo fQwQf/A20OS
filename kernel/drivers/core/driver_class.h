@@ -45,6 +45,8 @@ int class_device_call_begin(class_device_t *cdev);
 void class_device_call_end(class_device_t *cdev);
 int class_device_has_devnode(const class_device_t *cdev);
 uint8_t class_device_dirent_type(const class_device_t *cdev);
+const char *class_device_subsystem(uint32_t type);
+void class_device_emit_uevents(const char *action);
 
 /* ============================================================
  * Block device operations

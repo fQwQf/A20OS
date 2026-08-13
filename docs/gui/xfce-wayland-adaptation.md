@@ -154,3 +154,33 @@ make smoke-qemu-gui-riscv64 SMOKE_TIMEOUT=240 PYTHON=python3
 # 4. 确认 submodule 全部干净
 git submodule foreach 'git status --short | wc -l'
 ```
+
+## 发行版 rootfs 运行（`make distro-run`）
+
+单条命令构建内核 + 用 `apk.static` 拉取 Alpine 发行版（含 dbus/elogind/polkit/seatd/eudev + XFCE4 + mesa）为 ext4 根镜像，再以 GUI 显示启动 QEMU。A20OS init 检测到 `/test/etc/a20-distro` 标记后 `chroot("/test")` 并 `exec /sbin/init`，由发行版自身的 stage-2 init 编排服务与 XFCE Wayland 会话，内核只提供 Linux ABI + /dev + /proc + /sys。
+
+```sh
+# riscv64（默认）或 x86_64
+make distro-run
+make distro-run-riscv64
+make distro-run-x86_64
+
+# 无显示器环境可用 none 显示后端跑无头
+make distro-run ARCH=x86_64 QEMU_GUI_DISPLAY=none
+```
+
+相关新增文件：
+- `user/rootfs/alpine/`（build.sh / packages.txt / overlay，含 stage-2 init 编排）
+- `user/init.c`（distro rootfs 检测 + chroot 进入）
+- `tools/targets-rootfs.mk`（`make rootfs-alpine`）、`tools/targets-distro.mk`（`make distro-run`）
+
+### 发行版路径修复的两个内核 DRM bug（`kernel/drivers/gpu/drm.c`）
+
+1. **`drm_mode_get_plane` 结构体越界**：此前给该结构加了 3 个非 UAPI 字段（`possible_crtcs_mask`/`possible_clones_mask`/`type`），`copy_to_user` 按 44 字节写回，溢出 libdrm 栈上 32 字节的 `struct drm_mode_get_plane`，踩掉栈 canary，labwc 启动即在 `drmModeGetPlane` 触发 `__stack_chk_fail`（musl `a_crash`，空写 SIGSEGV）。已改回标准 32 字节 UAPI 结构，plane 的 type 改由属性暴露。
+2. **KMS 对象 ID 冲突**：plane/crtc/connector/encoder 此前都用 id=1。wlroots 的 `get_drm_prop` 用 `DRM_MODE_OBJECT_ANY` 按 ID 反查对象属性，ID 冲突导致它查 plane 时拿到 connector 的 EDID，找不到 plane 的 `type`/`IN_FORMATS`，于是 `Failed to create DRM backend`。已为四类对象分配唯一 ID（connector=1/encoder=2/crtc=3/plane=4），`OBJ_GETPROPERTIES` 改为按唯一 ID 解析（同时兼容 ANY 与具体类型查询），并新增 plane 的 `type=PRIMARY` 属性。
+
+修复后发行版路径实测（riscv64 QEMU）：合成器不再崩溃，DRM 后端创建成功，`Virtual-1` modeset 1024x768，`WAYLAND_DISPLAY=wayland-0` 起来，labwc autostart 拉起 XFCE 会话（Xfconf/xfsettingsd 激活，窗口 `wlr_surface` 陆续映射）。
+
+已知待办（均为既有内核短板，非本次引入）：
+- 高 I/O 下 `read_into_user` 持 `vf->offset_lock` 跨越会缺页的拷贝路径，task 重入同一把锁导致 LOCK-STALL 挂死（`kernel/abi/linux/sys_fs.c`）。
+- libinput 因 `/dev/input/event0` 未建模为 udev 输入设备（缺 `/sys/class/input` + `ID_INPUT_*` 标签）找不到输入设备；暂以 `WLR_LIBINPUT_NO_DEVICES=1` 让桌面先渲染。

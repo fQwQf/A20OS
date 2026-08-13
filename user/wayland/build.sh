@@ -760,7 +760,16 @@ fi
 
 if want xfce4-panel && ! stamp xfce4-panel; then
     echo "=== xfce4-panel ==="
-    autotools_pkg xfce4-panel "$USER_DIR/external/gui/xfce4-panel"
+    # The panel's external-plugin wrapper path (HELPERDIR, default $libdir)
+    # is compiled into the binary.  $libdir is the build host's absolute
+    # sysroot path, which does not exist inside the guest where the FAT root
+    # is mounted at /bin.  The guest-visible wrapper is
+    # /bin/lib/xfce4/panel/wrapper-2.0 (image path /lib/xfce4/panel/wrapper-2.0),
+    # so HELPERDIR must be /bin/lib.  Without this, every spawn of an
+    # external panel plugin fails with "Failed to spawn the
+    # xfce4-panel-wrapper".
+    autotools_pkg xfce4-panel "$USER_DIR/external/gui/xfce4-panel" \
+        --with-helper-path-prefix=/bin/lib
     mark xfce4-panel
 fi
 

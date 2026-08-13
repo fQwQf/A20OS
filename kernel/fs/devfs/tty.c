@@ -168,8 +168,11 @@ static void tty_drain_pending_locked(void) {
             progress = 1;
             for (size_t j = 0; j < n; j++)
                 tty_write_owned_char(pid, tmp[j]);
-            if (g_tty_line_owner >= 0)
-                return;
+            /* A buffered fragment that does not end in '\n' (e.g. a shell
+             * prompt) must not keep the line owner claimed: that would stop
+             * the drain here and park every other pending buffer forever,
+             * silently dropping their console output. */
+            g_tty_line_owner = -1;
         }
     }
 }
@@ -207,12 +210,16 @@ int tty_console_write(vfile_t *vf, const char *buf, size_t count) {
         char c = buf[i];
         if (pid < 0 || g_tty_line_owner < 0 || g_tty_line_owner == pid) {
             tty_write_owned_char(pid, c);
-            if (g_tty_line_owner < 0)
-                tty_drain_pending_locked();
         } else {
             tty_buffer_pending_char(pid, c);
         }
     }
+    /* Ownership is per write() call, not per '\n': a newline-less write
+     * (a shell prompt, a progress spinner) must not leave the line claimed
+     * forever, otherwise every other task's console output is parked in the
+     * pending buffers and the drain is never reached. */
+    g_tty_line_owner = -1;
+    tty_drain_pending_locked();
     mutex_unlock(&g_tty_write_lock);
     return (int)count;
 }

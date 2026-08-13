@@ -162,10 +162,11 @@ static int deliver_user_sync_signal(trap_context_t *ctx, int sig, int fatal_code
     }
 
     if (!signal_task_user_handler_available(cur, sig)) {
-        printf("FATAL: pid=%d signal=%d abi=%d pc=0x%lx sp=0x%lx\n",
+        printf("FATAL: pid=%d signal=%d abi=%d pc=0x%lx sp=0x%lx comm=%s path=%s\n",
                cur->pid, sig, cur->abi_mode,
                (unsigned long)TRAP_CTX_EPC(ctx),
-               (unsigned long)TRAP_CTX_SP(ctx));
+               (unsigned long)TRAP_CTX_SP(ctx),
+               cur->name, cur->exec_path);
         proc_exit_group(fatal_code);
     }
 

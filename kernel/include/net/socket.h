@@ -33,6 +33,8 @@ struct vfile;
 #define SCM_CREDENTIALS 2
 #define SOL_ALG      279
 #define NETLINK_SOCK_DIAG 4
+#define NETLINK_KOBJECT_UEVENT 15
+#define NETLINK_GENERIC        16
 #define IPPROTO_IP   0
 #define IPPROTO_ICMP 1
 #define IPPROTO_TCP  6
