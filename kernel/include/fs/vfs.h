@@ -61,6 +61,7 @@ struct vfs_ops;
 struct vnode_ops;
 struct mount;
 struct page_cache_page;
+struct readiness_source;
 
 struct bcache;
 struct block_dev;
@@ -175,6 +176,8 @@ typedef struct vfile_ops {
     int     (*readdir)(struct vfile *vf, void *dirp, size_t count);
     int     (*ioctl)(struct vfile *vf, unsigned long req, void *arg);
     int     (*poll)(struct vfile *vf, short events);
+    size_t  (*poll_sources)(struct vfile *vf, short events,
+                            struct readiness_source *sources, size_t max);
     int     (*close)(struct vfile *vf);
 } vfile_ops_t;
 
@@ -222,6 +225,7 @@ typedef struct vnode {
  */
 typedef struct vfile {
     vnode_t        *vnode;
+    uint64_t        identity;
     int             flags;
     size_t          offset;
     mutex_t         offset_lock;
@@ -327,6 +331,7 @@ int      vfs_sync(void);
 int      vfs_fsync(int fd);
 int      vfs_fdatasync(int fd);
 int      vfs_poll_events(int fd, short events);
+int      vfs_poll_file(vfile_t *vf, short events);
 
 /* Directory operations */
 int      vfs_mkdir(const char *path, int mode);
