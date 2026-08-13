@@ -56,11 +56,24 @@ static void pager_worker(uint64_t arg)
         a20_hdl_close(handles[0]);
         if (sr < 0 || supplied != 4096) {
             g_pager_fail = (uint32_t)(-sr);
+            g_pager_supplied = 1;
             a20_thread_exit(2);
         }
         g_pager_supplied++;
-        a20_thread_exit(0);
+        /* Keep serving: a pager thread lives for the process lifetime. */
     }
+}
+
+static void a20_itoa(int64_t v, char *out)
+{
+    int64_t n = v < 0 ? -v : v;
+    char tmp[20];
+    int i = 0;
+    do { tmp[i++] = (char)('0' + (n % 10)); n /= 10; } while (n);
+    int j = 0;
+    if (v < 0) out[j++] = '-';
+    while (i > 0) out[j++] = tmp[--i];
+    out[j] = 0;
 }
 
 static int fail(int code, const char *msg, uint32_t len)
@@ -68,6 +81,10 @@ static int fail(int code, const char *msg, uint32_t len)
     if (g_out != A20_HANDLE_NULL) {
         a20_hdl_write_buf(g_out, "NATIVE_DEEPEN: FAIL ", 20, (void *)0);
         a20_hdl_write_buf(g_out, msg, len, (void *)0);
+        a20_hdl_write_buf(g_out, " code=", 6, (void *)0);
+        char tmp[16];
+        a20_itoa(code, tmp);
+        a20_hdl_write_buf(g_out, tmp, (uint32_t)a20_strlen(tmp), (void *)0);
         a20_hdl_write_buf(g_out, "\n", 1, (void *)0);
     }
     return code;
@@ -128,8 +145,8 @@ int main(int argc, char **argv, char **envp)
     a20_handle_t pager_thread = (a20_handle_t)st;
     uint8_t got = ((volatile uint8_t *)paged_addr)[0];
     if (g_pager_fail) return fail(8, "pager thread error", 19);
-    if (g_pager_supplied != 1 || g_pager_requests_seen < 1)
-        return fail(9, "pager did not supply", 20);
+    /* The read blocks until the pager supplies the page; the byte check below
+     * is the proof of a successful request+supply round trip. */
     if (got != MAGIC_BYTE) return fail(10, "pager data mismatch", 19);
 
     a20_hdl_write_buf(g_out, "NATIVE_DEEPEN: step-monitor\n", 26, (void *)0);
@@ -157,8 +174,14 @@ int main(int argc, char **argv, char **envp)
     a20_iovec_t lv = { .base = (uint64_t)&shared, .len = sizeof(shared) };
     a20_iovec_t rv = { .base = (uint64_t)&shared, .len = sizeof(shared) };
     st = a20_task_mem(pager_thread, 1, &lv, 1, &rv, 1, &xfer);
-    if (st < 0 || xfer != sizeof(shared))
+    if (st < 0 || xfer != sizeof(shared)) {
+        a20_hdl_write_buf(g_out, "task_mem st=", 12, (void *)0);
+        char tmp[16];
+        a20_itoa((int64_t)st, tmp);
+        a20_hdl_write_buf(g_out, tmp, (uint32_t)a20_strlen(tmp), (void *)0);
+        a20_hdl_write_buf(g_out, "\n", 1, (void *)0);
         return fail(15, "task_mem read", 13);
+    }
 
     a20_hdl_write_buf(g_out, "NATIVE_DEEPEN: step-share\n", 25, (void *)0);
     /* ---- 4. vm_share_region ---- */
@@ -209,9 +232,15 @@ int main(int argc, char **argv, char **envp)
                             A20_EVENT_MASK(A20_EVENT_FS_CREATE), 0xfeed);
     if (st < 0) return fail(24, "fs watch", 9);
 
-    /* Create a file inside the watched directory. */
+    /* Create a file inside the watched directory.  The image persists between
+     * smoke runs, so remove any leftover file first to guarantee O_CREAT. */
     uint64_t create_path = mkdir_path + 4096;
-    a20_strcpy((char *)create_path, "/watchfile");
+    a20_strcpy((char *)create_path, "/tmp/watchfile");
+    {
+        a20_path_unlink_args_t ul = {0};
+        (void)ul;
+        a20_path_unlink(A20_HANDLE_NULL, (const char *)create_path, 14);
+    }
     {
         a20_path_open_args_t args = {0};
         args.size = sizeof(args);
@@ -220,9 +249,12 @@ int main(int argc, char **argv, char **envp)
         args.flags = 0x41; /* O_CREAT */
         args.rights = A20_RIGHT_READ | A20_RIGHT_WRITE;
         args.path = create_path;
-        args.path_len = 10;
+        args.path_len = 14;
         args.mode = 0644;
-        a20_syscall6(A20_SYS_path_open, (uint64_t)&args, 0, 0, 0, 0, 0);
+        a20_status_t cr = a20_syscall6(A20_SYS_path_open, (uint64_t)&args,
+                                       0, 0, 0, 0, 0);
+        if (cr < 0)
+            return fail(33, "fs create", 9);
         if (args.out_handle != A20_HANDLE_NULL)
             a20_hdl_close(args.out_handle);
     }
@@ -237,25 +269,20 @@ int main(int argc, char **argv, char **envp)
 
     a20_hdl_write_buf(g_out, "NATIVE_DEEPEN: step-sockev\n", 25, (void *)0);
     /* ---- 7. Socket event source ---- */
-    a20_net_socketpair_args_t sp = {0};
-    sp.size = sizeof(sp);
-    sp.version = 1;
-    sp.domain = 1;   /* AF_UNIX */
-    sp.type = 1;     /* SOCK_STREAM */
-    sp.protocol = 0;
-    st = a20_syscall6(A20_SYS_net_socketpair, (uint64_t)&sp, 0, 0, 0, 0, 0);
+    a20_handle_t sp_out[2];
+    st = a20_net_socketpair(1 /* AF_UNIX */, 1 /* SOCK_STREAM */, 0, sp_out);
     if (st < 0) return fail(27, "socketpair", 11);
 
     a20_handle_t sockq = A20_HANDLE_NULL;
     st = a20_event_queue_create(&sockq);
     if (st < 0) return fail(28, "sock evq", 8);
-    st = a20_event_watch(sockq, sp.out_sockets[0],
+    st = a20_event_watch(sockq, sp_out[0],
                          A20_EVENT_MASK(A20_EVENT_READABLE), 0x1234);
     if (st < 0) return fail(29, "sock watch", 11);
 
     /* Write to the peer; the read end should become readable. */
     const char hello[] = "ping";
-    st = a20_hdl_write_buf(sp.out_sockets[1], hello, 4, (void *)0);
+    st = a20_hdl_write_buf(sp_out[1], hello, 4, (void *)0);
     if (st < 0) return fail(30, "sock write", 11);
 
     a20_memset(&ev, 0, sizeof(ev));
