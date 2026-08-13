@@ -35,6 +35,10 @@ int mm_munmap_locked(mm_struct_t *mm, vaddr_t addr, size_t len) {
         if ((v->vm_flags & VM_SYSV_SHM) &&
             (addr > v->start || end < v->end))
             return -EINVAL;
+        /* mseal(2): unmap (including MAP_FIXED overwrite via mm_mmap_locked)
+         * of a sealed VMA is refused before any page is released. */
+        if (v->vm_flags & VM_SEALED)
+            return -EPERM;
     }
 
     vm_area_t *vma = mm->mmap;
@@ -198,6 +202,15 @@ vaddr_t mm_brk_locked(mm_struct_t *mm, vaddr_t newbrk) {
     }
 
     if (newbrk < mm->brk) {
+        /* mseal(2): refuse to shrink the heap into a sealed VMA. */
+        for (vm_area_t *v = mm->mmap; v; v = v->next) {
+            if (v->start >= old_brk_page)
+                break;
+            if (v->end <= new_brk_page)
+                continue;
+            if (v->vm_flags & VM_SEALED)
+                return mm->brk;
+        }
         // 缩小堆，释放多余的物理页面
         for (uint64_t va = new_brk_page; va < old_brk_page; ) {
             int level = 0;

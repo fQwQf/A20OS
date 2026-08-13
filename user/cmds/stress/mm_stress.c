@@ -30,6 +30,95 @@ static volatile int vma_fork_exec_start;
 static volatile int vma_fork_exec_stop;
 static volatile int vma_fork_exec_failed;
 
+#ifndef MAP_FIXED_NOREPLACE
+#define MAP_FIXED_NOREPLACE 0x100000
+#endif
+
+/* mseal(2): sealing is one-way and forbids later layout/protection changes on
+ * the sealed range, while leaving unsealed neighbours fully mutable. */
+static int mseal_semantics(void)
+{
+#ifndef SYS_mseal
+#define SYS_mseal 462
+#endif
+    void *mem = mmap(NULL, 8 * 4096, PROT_READ | PROT_WRITE,
+                     MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (mem == MAP_FAILED)
+        return fail("mseal-mmap");
+
+    /* Seal the middle 4 pages only. */
+    if (syscall(SYS_mseal, (uintptr_t)mem + 2 * 4096, 4 * 4096, 0) != 0)
+        return fail("mseal-seal");
+
+    /* mprotect over the sealed range must be refused with EPERM. */
+    errno = 0;
+    if (mprotect(mem + 2 * 4096, 4 * 4096, PROT_READ) == 0 ||
+        errno != EPERM)
+        return fail("mseal-mprotect");
+
+    /* munmap over the sealed range must be refused. */
+    errno = 0;
+    if (munmap(mem + 2 * 4096, 4096) == 0 || errno != EPERM)
+        return fail("mseal-munmap");
+
+    /* mremap (shrink/move) over the sealed range must be refused. */
+    errno = 0;
+    void *r = mremap(mem + 2 * 4096, 4 * 4096, 4 * 4096, MREMAP_MAYMOVE);
+    if (r != MAP_FAILED || errno != EPERM)
+        return fail("mseal-mremap");
+
+    /* MAP_FIXED overwrite of the sealed range must be refused. */
+    errno = 0;
+    void *ov = mmap(mem + 2 * 4096, 4096, PROT_READ,
+                    MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+    if (ov != MAP_FAILED || errno != EPERM)
+        return fail("mseal-mapfixed");
+
+    /* madvise DONTNEED over the sealed range must be refused. */
+    errno = 0;
+    if (madvise(mem + 2 * 4096, 4096, MADV_DONTNEED) == 0 || errno != EPERM)
+        return fail("mseal-madvise");
+
+    /* Unsealed neighbours stay fully mutable. */
+    if (mprotect(mem, 4096, PROT_READ) < 0)
+        return fail("mseal-neighbour-mprotect");
+    if (munmap(mem, 4096) < 0)
+        return fail("mseal-neighbour-munmap");
+
+    /* The remaining unsealed tail can still be released. */
+    if (munmap(mem + 6 * 4096, 2 * 4096) < 0)
+        return fail("mseal-tail-munmap");
+
+    /* Sealing is inherited by fork children. */
+    void *cmem = mmap(NULL, 4 * 4096, PROT_READ | PROT_WRITE,
+                      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (cmem == MAP_FAILED)
+        return fail("mseal-fork-mmap");
+    if (syscall(SYS_mseal, (uintptr_t)cmem, 4 * 4096, 0) != 0)
+        return fail("mseal-fork-seal");
+
+    pid_t pid = fork();
+    if (pid < 0)
+        return fail("mseal-fork");
+    if (pid == 0) {
+        errno = 0;
+        int r = mprotect(cmem, 4 * 4096, PROT_READ);
+        if (r == 0 || errno != EPERM)
+            _exit(1);
+        _exit(0);
+    }
+    int status = 0;
+    if (waitpid(pid, &status, 0) < 0 || !WIFEXITED(status) ||
+        WEXITSTATUS(status) != 0)
+        return fail("mseal-fork-inherit");
+    /* The seal persists in the parent too: munmap stays refused.  The VMA is
+     * released by exit teardown, which is not blocked by seals. */
+    errno = 0;
+    if (munmap(cmem, 4 * 4096) == 0 || errno != EPERM)
+        return fail("mseal-fork-parent-still-sealed");
+    return 0;
+}
+
 static void *vma_deferred_race_worker(void *arg)
 {
     (void)arg;
@@ -1607,6 +1696,9 @@ int main(int argc, char **argv)
         return 1;
     printf("MM_STRESS: huge-prot start\n");
     if (huge_page_mprotect() != 0)
+        return 1;
+    printf("MM_STRESS: mseal start\n");
+    if (mseal_semantics() != 0)
         return 1;
     printf("MM_STRESS: PASS\n");
     return 0;

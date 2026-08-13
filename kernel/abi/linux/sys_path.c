@@ -35,6 +35,13 @@ int64_t sys_unlinkat(int dirfd, const char *path, int flags) {
     return ret;
 }
 
+int64_t sys_renameat(int olddir, const char *oldpath,
+                     int newdir, const char *newpath) {
+    /* renameat(2) is renameat2(2) with flags == 0.  Keep a separate entry so
+     * the ABI is complete for glibc, which calls renameat directly. */
+    return sys_renameat2(olddir, oldpath, newdir, newpath, 0);
+}
+
 int64_t sys_renameat2(int olddir, const char *oldpath,
                        int newdir, const char *newpath, int flags) {
     if (flags & ~(RENAME_NOREPLACE | RENAME_EXCHANGE))

@@ -99,7 +99,9 @@ vaddr_t mm_mmap_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
 
     // 处理 MAP_FIXED 标志
     if ((flags & MAP_FIXED) && addr != 0) {
-        mm_munmap_locked(mm, addr, len);
+        int mr = mm_munmap_locked(mm, addr, len);
+        if (mr < 0)
+            return (uint64_t)mr;
     } else if (addr != 0) {
         vm_area_t *existing = mm_find_vma(mm, addr);
         if (existing && existing->start < addr + len && existing->end > addr)
@@ -184,7 +186,9 @@ vaddr_t mm_mmap_file_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
     }
 
     if ((flags & MAP_FIXED) && addr != 0) {
-        mm_munmap_locked(mm, addr, len);
+        int mr = mm_munmap_locked(mm, addr, len);
+        if (mr < 0)
+            return (uint64_t)mr;
     } else if (addr != 0) {
         vm_area_t *existing = mm_find_vma(mm, addr);
         if (existing && existing->start < addr + len && existing->end > addr)
@@ -293,7 +297,9 @@ vaddr_t mm_mmap_vmo_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
     }
 
     if ((flags & MAP_FIXED) && addr != 0) {
-        mm_munmap_locked(mm, addr, len);
+        int mr = mm_munmap_locked(mm, addr, len);
+        if (mr < 0)
+            return (uint64_t)mr;
     } else if (addr != 0) {
         vm_area_t *existing = mm_find_vma(mm, addr);
         if (existing && existing->start < addr + len && existing->end > addr)

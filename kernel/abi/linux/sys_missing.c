@@ -255,13 +255,23 @@ int64_t sys_mlock2(uint64_t addr, size_t len, int flags)
 
 int64_t sys_mseal(uint64_t addr, size_t len, unsigned flags)
 {
-    (void)addr;
-    (void)len;
-    (void)flags;
-    /* mseal seals a VMA against further modification.  A20OS does not track
-     * per-VMA seal state yet; accept the call as a no-op so probing tools
-     * work. */
-    return 0;
+    if (flags)
+        return -EINVAL;
+    if (addr & (PAGE_SIZE - 1))
+        return -EINVAL;
+    if (len == 0)
+        return 0;
+    if (addr + len < addr)
+        return -EINVAL;
+
+    task_t *t = proc_current();
+    if (!t || !t->mm)
+        return -EINVAL;
+
+    /* mseal(2): seal [addr, addr+len) against later layout/protection
+     * changes.  The core MM owns the VM_SEALED flag and enforces it in every
+     * mutation path; this ABI wrapper only validates the wire format. */
+    return mm_mseal(t->mm, addr, len);
 }
 
 int64_t sys_seccomp(unsigned op, unsigned flags, const void *uargs)
