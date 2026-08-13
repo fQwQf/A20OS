@@ -86,6 +86,9 @@ def main():
     parser.add_argument("--kernel", required=True)
     parser.add_argument("--disk", required=True)
     parser.add_argument("--timeout", type=float, default=60.0)
+    parser.add_argument("--frame-window", type=float, default=15.0,
+                        help="seconds to wait for a non-blank framebuffer scanout "
+                             "after the drivers report ready")
     parser.add_argument("--settle", type=float, default=0.0,
                         help="seconds to keep the session alive after first frame")
     parser.add_argument("--artifacts", default=".kernel-build/smoke/qemu-gui-x86_64")
@@ -173,7 +176,7 @@ def main():
                 except (FileNotFoundError, RuntimeError):
                     return False
 
-            wait_for(visible_scanout, 15, "non-blank framebuffer scanout")
+            wait_for(visible_scanout, args.frame_window, "non-blank framebuffer scanout")
             if args.settle > 0:
                 time.sleep(args.settle)
                 # Exercise the same relative mouse path used by the GTK QEMU
