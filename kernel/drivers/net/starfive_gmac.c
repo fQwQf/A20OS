@@ -1,14 +1,18 @@
 /*
  * A20OS StarFive EQOS GMAC driver.
  *
- * Developed for the StarFive VisionFive 2 board, referencing RocketOS
- * (MIT) board/driver bring-up.  See docs/ACKNOWLEDGMENTS.md.
+ * Developed for the StarFive VisionFive 2 board, referencing RocketOS (MIT)
+ * board/driver bring-up.  See docs/ACKNOWLEDGMENTS.md and
+ * docs/platforms/physical-boards.md.
  *
- * LOCK_ORDER: This driver uses no private spinlock. send/recv are register-
- * polling paths against a single global gmac_priv_t instance (g_gmac).
- * Future IRQ-driven or SMP-safe versions must add a private lock and
- * document it in docs/drivers/lock-order.md.
+ * LOCK_ORDER: each instance owns a private spinlock (g_gmac_insts[i].lock)
+ * serializing descriptor-ring access in send/recv/poll.  The board enables
+ * the GMAC1 clocks/reset in early_init() (SoC clock gating is a board-level
+ * fact), so this driver only programs the EQOS interface.  The data path is
+ * still poll-driven; IRQ-driven TX/RX can reuse the same lock but must be
+ * added deliberately and documented in docs/drivers/lock-order.md.
  */
+
 #include "drivers/net/starfive_gmac.h"
 #include "drivers/bus/platform_bus.h"
 #include "drivers/core/driver_core.h"
@@ -20,6 +24,7 @@
 #include "core/stdio.h"
 #include "core/string.h"
 #include "core/klog.h"
+#include "core/lock.h"
 #include "core/timer.h"
 
 /* ============================================================
@@ -37,7 +42,6 @@
 #define MAC_MII_ADDR             (MAC_BASE + 0x0020)
 #define MAC_MII_DATA             (MAC_BASE + 0x0024)
 #define MAC_FLOW_CTRL            (MAC_BASE + 0x0048)
-#define MAC_VLAN_TAG             (MAC_BASE + 0x0050)
 #define MAC_DEBUG                (MAC_BASE + 0x005C)
 #define MAC_HW_FEATURE0          (MAC_BASE + 0x011C)
 #define MAC_HW_FEATURE1          (MAC_BASE + 0x0120)
@@ -55,7 +59,7 @@
 /* DMA registers */
 #define DMA_MODE                 (DMA_BASE + 0x0000)
 #define DMA_SYSBUS_MODE          (DMA_BASE + 0x0004)
-#define DMA_STATUS               (DMA_BASE + 0x0008)
+#define DMA_STATUS                (DMA_BASE + 0x0008)
 #define DMA_CH0_CONTROL          (DMA_BASE + 0x0100)
 #define DMA_CH0_TX_CONTROL       (DMA_BASE + 0x0104)
 #define DMA_CH0_RX_CONTROL       (DMA_BASE + 0x0108)
@@ -128,7 +132,9 @@
 #define DMA_CH0_STATUS_AIS (1U << 14)
 #define DMA_CH0_STATUS_NIS (1U << 15)
 
-/* Descriptor bits */
+/* Descriptor bits.  For EQOS ring descriptors the TX length is programmed in
+ * des2 (with the IOC bit) and des3 carries OWN/FD/LD plus the frame length,
+ * matching the RocketOS reference that runs on the VisionFive 2. */
 #define DESC3_OWN     (1U << 31)
 #define DESC3_IOC     (1U << 30)
 #define DESC3_FD      (1U << 29)
@@ -146,9 +152,12 @@ typedef struct {
     uint32_t des3;
 } dma_desc_t;
 
+#define GMAC_MAX_INSTANCES 4
+
 typedef struct {
     uintptr_t base;
     int       valid;
+    spinlock_t lock;
 
     dma_desc_t tx_desc[GMAC_DESC_NUM] ALIGNED(16);
     dma_desc_t rx_desc[GMAC_DESC_NUM] ALIGNED(16);
@@ -158,9 +167,36 @@ typedef struct {
     uint32_t   tx_busy;
     uint32_t   rx_busy;
     uint8_t    mac[6];
-} gmac_priv_t;
+} starfive_gmac_priv_t;
 
-static gmac_priv_t g_gmac;
+static starfive_gmac_priv_t g_gmac_insts[GMAC_MAX_INSTANCES];
+
+static starfive_gmac_priv_t *gmac_instance(uintptr_t base)
+{
+    for (int i = 0; i < GMAC_MAX_INSTANCES; i++) {
+        if (g_gmac_insts[i].valid && g_gmac_insts[i].base == base)
+            return &g_gmac_insts[i];
+    }
+    return NULL;
+}
+
+static starfive_gmac_priv_t *gmac_alloc_instance(uintptr_t base)
+{
+    starfive_gmac_priv_t *inst = gmac_instance(base);
+    if (inst)
+        return inst;
+    for (int i = 0; i < GMAC_MAX_INSTANCES; i++) {
+        if (!g_gmac_insts[i].valid) {
+            inst = &g_gmac_insts[i];
+            memset(inst, 0, sizeof(*inst));
+            inst->base = base;
+            inst->valid = 1;
+            spin_init(&inst->lock);
+            return inst;
+        }
+    }
+    return NULL;
+}
 
 static inline uint32_t gmac_read(uintptr_t base, uint32_t off) {
     return readl((volatile void *)(base + off));
@@ -207,7 +243,7 @@ static void gmac_mdio_write(uintptr_t base, int phy_addr, int reg, uint16_t data
 /* ============================================================
  * DMA Descriptor Management
  * ============================================================ */
-static void gmac_init_desc(uintptr_t base, gmac_priv_t *priv) {
+static void gmac_init_desc(uintptr_t base, starfive_gmac_priv_t *priv) {
     memset(priv->tx_desc, 0, sizeof(priv->tx_desc));
     memset(priv->rx_desc, 0, sizeof(priv->rx_desc));
 
@@ -226,6 +262,8 @@ static void gmac_init_desc(uintptr_t base, gmac_priv_t *priv) {
         priv->rx_desc[i].des2 = 0;
         priv->rx_desc[i].des3 = DESC3_OWN | DESC3_BUF1V | DESC3_IOC | DESC3_FD | DESC3_LD;
     }
+    dma_sync_for_device(priv->tx_desc, sizeof(priv->tx_desc));
+    dma_sync_for_device(priv->rx_desc, sizeof(priv->rx_desc));
 
     gmac_write(base, DMA_CH0_TXDESC_LIST_ADDR, (uint32_t)tx_desc_pa);
     gmac_write(base, DMA_CH0_TXDESC_LIST_HADDR, (uint32_t)(tx_desc_pa >> 32));
@@ -235,6 +273,7 @@ static void gmac_init_desc(uintptr_t base, gmac_priv_t *priv) {
     gmac_write(base, DMA_CH0_TXDESC_RING_LEN, GMAC_DESC_NUM - 1);
     gmac_write(base, DMA_CH0_RXDESC_RING_LEN, GMAC_DESC_NUM - 1);
 
+    /* Point the ring tail at the last descriptor (EQOS ring mode). */
     gmac_write(base, DMA_CH0_RXDESC_TAIL_PTR, (uint32_t)(rx_desc_pa +
                sizeof(dma_desc_t) * (GMAC_DESC_NUM - 1)));
 
@@ -243,10 +282,29 @@ static void gmac_init_desc(uintptr_t base, gmac_priv_t *priv) {
 }
 
 /* ============================================================
- * PHY Initialization (Generic RGMII)
+ * PHY Initialization (generic; the VisionFive 2 carries a Motorcomm
+ * YT8531 PHY.  A scan across 0..31 mirrors the RocketOS reference instead of
+ * trusting a fixed address.)
  * ============================================================ */
-static int gmac_phy_init(uintptr_t base) {
-    int phy_addr = 1; /* VisionFive2 PHY address */
+static int gmac_phy_init(uintptr_t base, starfive_gmac_priv_t *priv) {
+    int phy_addr = -1;
+
+    for (int i = 0; i < 32; i++) {
+        uint16_t id1 = gmac_mdio_read(base, i, 2);
+        uint16_t id2 = gmac_mdio_read(base, i, 3);
+        uint32_t phy_id = ((uint32_t)id1 << 16) | id2;
+        if (id1 == 0xFFFF && id2 == 0xFFFF)
+            continue;
+        if ((phy_id & 0x1FFFFFFF) == 0x1FFFFFFF)
+            continue;
+        phy_addr = i;
+        kinfo("[StarFive-GMAC] PHY 0x%02x id 0x%08x\n", i, phy_id);
+        break;
+    }
+    if (phy_addr < 0) {
+        kinfo("[StarFive-GMAC] no PHY on MDIO\n");
+        return -1;
+    }
 
     /* Reset PHY */
     gmac_mdio_write(base, phy_addr, 0, 0x8000);
@@ -255,7 +313,7 @@ static int gmac_phy_init(uintptr_t base) {
         uint16_t val = gmac_mdio_read(base, phy_addr, 0);
         if (!(val & 0x8000)) break;
         if (timer_get_ticks() - start > clock_ticks_per_sec() * 2) {
-            kinfo("[GMAC] PHY reset timeout\n");
+            kinfo("[StarFive-GMAC] PHY reset timeout\n");
             return -1;
         }
     }
@@ -270,13 +328,13 @@ static int gmac_phy_init(uintptr_t base) {
         uint16_t val = gmac_mdio_read(base, phy_addr, 1);
         if (val & 0x0004) break;
         if (timer_get_ticks() - start > clock_ticks_per_sec() * 5) {
-            kinfo("[GMAC] PHY link up timeout\n");
+            kinfo("[StarFive-GMAC] PHY link up timeout\n");
             return -1;
         }
         mdelay(10);
     }
 
-    kinfo("[GMAC] PHY link up\n");
+    kinfo("[StarFive-GMAC] PHY link up at addr %d\n", phy_addr);
     return 0;
 }
 
@@ -284,9 +342,10 @@ static int gmac_phy_init(uintptr_t base) {
  * GMAC Initialization
  * ============================================================ */
 int starfive_gmac_init(uintptr_t base) {
-    g_gmac.base = base;
-    g_gmac.valid = 0;
-    memcpy(g_gmac.mac, (uint8_t[]){0x00, 0x55, 0x7B, 0xB5, 0x7D, 0xF7}, 6);
+    starfive_gmac_priv_t *priv = gmac_alloc_instance(base);
+    if (!priv)
+        return -1;
+    memcpy(priv->mac, (uint8_t[]){0x00, 0x55, 0x7B, 0xB5, 0x7D, 0xF7}, 6);
 
     /* DMA reset */
     gmac_write(base, DMA_MODE, DMA_MODE_SWR);
@@ -304,7 +363,7 @@ int starfive_gmac_init(uintptr_t base) {
                DMA_SYSBUS_MODE_BLEN16);
 
     /* Initialize descriptors */
-    gmac_init_desc(base, &g_gmac);
+    gmac_init_desc(base, priv);
 
     /* MTL configuration */
     gmac_write(base, MTL_OPERATION_MODE, MTL_OP_MODE_DTXSTS | MTL_OP_MODE_RAA_SP);
@@ -321,14 +380,14 @@ int starfive_gmac_init(uintptr_t base) {
     gmac_write(base, MAC_FLOW_CTRL, 0);
 
     /* Set MAC address */
-    uint32_t high = (g_gmac.mac[5] << 8) | g_gmac.mac[4] | (1U << 31);
-    uint32_t low  = (g_gmac.mac[3] << 24) | (g_gmac.mac[2] << 16) |
-                    (g_gmac.mac[1] << 8)  | g_gmac.mac[0];
+    uint32_t high = (priv->mac[5] << 8) | priv->mac[4] | (1U << 31);
+    uint32_t low  = (priv->mac[3] << 24) | (priv->mac[2] << 16) |
+                    (priv->mac[1] << 8)  | priv->mac[0];
     gmac_write(base, MAC_ADDR0_HIGH, high);
     gmac_write(base, MAC_ADDR0_LOW, low);
 
     /* PHY init */
-    if (gmac_phy_init(base) != 0)
+    if (gmac_phy_init(base, priv) != 0)
         return -1;
 
     /* Enable MAC TX/RX */
@@ -345,7 +404,6 @@ int starfive_gmac_init(uintptr_t base) {
                ((GMAC_BUF_SIZE << DMA_CH0_RX_CONTROL_RBSZ_SHIFT) & DMA_CH0_RX_CONTROL_RBSZ_MASK) |
                (16 << DMA_CH0_RX_CONTROL_RXPBL_SHIFT));
 
-    g_gmac.valid = 1;
     kinfo("[StarFive-GMAC] Initialized at 0x%lx\n", (unsigned long)base);
     return 0;
 }
@@ -354,62 +412,89 @@ int starfive_gmac_init(uintptr_t base) {
  * Packet TX/RX
  * ============================================================ */
 int starfive_gmac_send(uintptr_t base, const void *pkt, size_t len) {
-    if (!g_gmac.valid || len > GMAC_BUF_SIZE - 4) return -1;
+    starfive_gmac_priv_t *priv = gmac_instance(base);
+    if (!priv || len > GMAC_BUF_SIZE - 4)
+        return -1;
 
-    uint32_t idx = g_gmac.tx_busy;
-    dma_desc_t *desc = &g_gmac.tx_desc[idx];
+    uint64_t flags = spin_lock_irqsave(&priv->lock);
+    uint32_t idx = priv->tx_busy;
+    dma_desc_t *desc = &priv->tx_desc[idx];
 
-    if (desc->des3 & DESC3_OWN) return -1; /* DMA still owns it */
-
-    memcpy(g_gmac.tx_buf[idx], pkt, len);
-    if (len < 60) {
-        memset(g_gmac.tx_buf[idx] + len, 0, 60 - len);
-        len = 60;
+    if (desc->des3 & DESC3_OWN) {   /* DMA still owns it */
+        spin_unlock_irqrestore(&priv->lock, flags);
+        return -1;
     }
 
-    desc->des2 = (uint32_t)len;
-    desc->des3 = DESC3_OWN | DESC3_FD | DESC3_LD | DESC2_IOC_BIT | (uint32_t)len;
+    memcpy(priv->tx_buf[idx], pkt, len);
+    if (len < 60) {
+        memset(priv->tx_buf[idx] + len, 0, 60 - len);
+        len = 60;
+    }
+    dma_sync_for_device(priv->tx_buf[idx], len);
 
-    /* Update tail pointer to wake DMA */
+    desc->des2 = (uint32_t)len | DESC2_IOC_BIT;
+    __sync_synchronize();
+    desc->des3 = DESC3_OWN | DESC3_FD | DESC3_LD | (uint32_t)len;
+    dma_sync_for_device(desc, sizeof(*desc));
+
+    /* Wake DMA: writing the tail pointer is a write barrier for the ring. */
     paddr_t desc_pa = va_to_pa((const void *)desc);
     gmac_write(base, DMA_CH0_TXDESC_TAIL_PTR, (uint32_t)desc_pa);
 
-    g_gmac.tx_busy = (idx + 1) % GMAC_DESC_NUM;
+    priv->tx_busy = (idx + 1) % GMAC_DESC_NUM;
+    spin_unlock_irqrestore(&priv->lock, flags);
     return 0;
 }
 
 int starfive_gmac_recv(uintptr_t base, void *buf, size_t maxlen) {
-    if (!g_gmac.valid) return -1;
+    starfive_gmac_priv_t *priv = gmac_instance(base);
+    if (!priv)
+        return -1;
 
-    uint32_t idx = g_gmac.rx_busy;
-    dma_desc_t *desc = &g_gmac.rx_desc[idx];
+    uint64_t flags = spin_lock_irqsave(&priv->lock);
+    uint32_t idx = priv->rx_busy;
+    dma_desc_t *desc = &priv->rx_desc[idx];
 
-    if (desc->des3 & DESC3_OWN) return -1; /* No packet ready */
+    if (desc->des3 & DESC3_OWN) {   /* No packet ready */
+        spin_unlock_irqrestore(&priv->lock, flags);
+        return -1;
+    }
+
+    dma_sync_for_cpu(desc, sizeof(*desc));
+    dma_sync_for_cpu(priv->rx_buf[idx], GMAC_BUF_SIZE);
 
     uint32_t len = (desc->des3 & 0x7FFF) - 4; /* strip FCS */
     if (len > maxlen) len = maxlen;
-    if (len > 0) memcpy(buf, g_gmac.rx_buf[idx], len);
+    if (len > 0) memcpy(buf, priv->rx_buf[idx], len);
 
     /* Return descriptor to DMA */
     desc->des3 = DESC3_OWN | DESC3_BUF1V | DESC3_IOC | DESC3_FD | DESC3_LD;
+    dma_sync_for_device(desc, sizeof(*desc));
 
-    paddr_t tail_pa = va_to_pa((const void *)&g_gmac.rx_desc[(idx + GMAC_DESC_NUM - 1) % GMAC_DESC_NUM]);
+    paddr_t tail_pa = va_to_pa((const void *)&priv->rx_desc[(idx + GMAC_DESC_NUM - 1) % GMAC_DESC_NUM]);
     gmac_write(base, DMA_CH0_RXDESC_TAIL_PTR, (uint32_t)tail_pa);
 
-    g_gmac.rx_busy = (idx + 1) % GMAC_DESC_NUM;
+    priv->rx_busy = (idx + 1) % GMAC_DESC_NUM;
+    spin_unlock_irqrestore(&priv->lock, flags);
     return (int)len;
 }
 
 void starfive_gmac_get_mac(uintptr_t base, uint8_t *mac) {
-    (void)base;
-    memcpy(mac, g_gmac.mac, 6);
+    starfive_gmac_priv_t *priv = gmac_instance(base);
+    if (priv)
+        memcpy(mac, priv->mac, 6);
 }
 
 int starfive_gmac_poll(uintptr_t base) {
+    starfive_gmac_priv_t *priv = gmac_instance(base);
+    if (!priv)
+        return -1;
+
+    uint64_t flags = spin_lock_irqsave(&priv->lock);
     uint32_t status = gmac_read(base, DMA_CH0_STATUS);
-    if (status) {
+    if (status)
         gmac_write(base, DMA_CH0_STATUS, status);
-    }
+    spin_unlock_irqrestore(&priv->lock, flags);
     return 0;
 }
 
@@ -417,52 +502,53 @@ int starfive_gmac_poll(uintptr_t base) {
  * driver_t integration
  * ============================================================ */
 
-typedef struct {
-    gmac_priv_t    gmac;
-    net_dev_ops_t  ops;
-} starfive_gmac_drv_t;
-
-static starfive_gmac_drv_t g_gmac_drv;
-
 static int starfive_gmac_driver_probe(device_t *dev) {
     resource_t *res = device_get_resource(dev, RES_MMIO, 0);
-    if (!res) return -1;
+    if (!res)
+        return -1;
 
     if (starfive_gmac_init(res->start) != 0) {
         kinfo("[StarFive-GMAC] Failed to init at 0x%lx\n", (unsigned long)res->start);
         return -1;
     }
 
-    /* Mirror the low-level global so the class ops see a live base. */
-    g_gmac_drv.gmac = g_gmac;
-    dev->drv_priv = &g_gmac_drv;
+    starfive_gmac_priv_t *priv = gmac_instance(res->start);
+    dev->drv_priv = priv;
     kinfo("[StarFive-GMAC] Probed '%s' at 0x%lx\n", dev->name, (unsigned long)res->start);
     return 0;
 }
 
 static int starfive_gmac_driver_remove(device_t *dev) {
-    (void)dev;
+    starfive_gmac_priv_t *priv = (starfive_gmac_priv_t *)dev->drv_priv;
+    if (priv)
+        priv->valid = 0;
+    dev->drv_priv = NULL;
     return 0;
 }
 
 static int starfive_gmac_class_send(struct device *dev, const void *pkt, size_t len) {
-    starfive_gmac_drv_t *priv = (starfive_gmac_drv_t *)dev->drv_priv;
-    return starfive_gmac_send(priv->gmac.base, pkt, len);
+    starfive_gmac_priv_t *priv = (starfive_gmac_priv_t *)dev->drv_priv;
+    if (!priv)
+        return -1;
+    return starfive_gmac_send(priv->base, pkt, len);
 }
 
 static int starfive_gmac_class_recv(struct device *dev, void *buf, size_t maxlen) {
-    starfive_gmac_drv_t *priv = (starfive_gmac_drv_t *)dev->drv_priv;
-    return starfive_gmac_recv(priv->gmac.base, buf, maxlen);
+    starfive_gmac_priv_t *priv = (starfive_gmac_priv_t *)dev->drv_priv;
+    if (!priv)
+        return -1;
+    return starfive_gmac_recv(priv->base, buf, maxlen);
 }
 
 static const uint8_t *starfive_gmac_class_mac(struct device *dev) {
-    starfive_gmac_drv_t *priv = (starfive_gmac_drv_t *)dev->drv_priv;
-    return priv->gmac.mac;
+    starfive_gmac_priv_t *priv = (starfive_gmac_priv_t *)dev->drv_priv;
+    return priv ? priv->mac : NULL;
 }
 
 static void starfive_gmac_class_poll(struct device *dev) {
-    starfive_gmac_drv_t *priv = (starfive_gmac_drv_t *)dev->drv_priv;
-    starfive_gmac_poll(priv->gmac.base);
+    starfive_gmac_priv_t *priv = (starfive_gmac_priv_t *)dev->drv_priv;
+    if (priv)
+        starfive_gmac_poll(priv->base);
 }
 
 static net_dev_ops_t starfive_gmac_net_ops = {
