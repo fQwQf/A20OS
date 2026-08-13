@@ -62,6 +62,12 @@
 - [net/network-lock-contract.md](net/network-lock-contract.md)：网络栈锁契约
 - [net/network-config-design.md](net/network-config-design.md)：网络配置设计
 
+### Linux ABI 兼容层
+
+- `kernel/abi/linux/syscall_coverage.md`：343 个 syscall 的逐项兼容等级（全部登记、保守 `partial`，含四主线架构编号覆盖说明）
+- `kernel/abi/linux/compat_notes.md`：Linux ABI 兼容性说明（高风险 partial 区域、文件化接口、占位符决策记录）
+- [OS-Design.md](OS-Design.md)：ABI 分层原则（核心实现、ABI 薄包装）与两套 ABI 对比
+
 ## 赛事、研究与项目背景
 
 如果你关注赛事设计、研究思路或工程路线图：
