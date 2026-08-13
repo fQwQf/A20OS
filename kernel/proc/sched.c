@@ -632,6 +632,7 @@ void proc_sched_handle_reschedule_ipi(void)
     }
     __atomic_fetch_add(&sched_cpu[cpu].ipi_acks, 1, __ATOMIC_RELAXED);
     __atomic_thread_fence(__ATOMIC_ACQUIRE);
+    smp_membarrier_ipi_ack(cpu);
 }
 
 void proc_sched_tick(int from_user)

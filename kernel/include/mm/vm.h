@@ -154,6 +154,8 @@ typedef struct mm_struct {
     size_t     rss;
     size_t     locked_vm;
     uint32_t   def_flags;
+    uint8_t    membarrier_registered; /* MEMBARRIER_CMD_REGISTER_* state */
+    uint8_t    _pad_membarrier[3];
     uint8_t    has_vdso;   /* vDSO/vvar fixed mappings present (mm/vdso.h) */
     uint8_t    _pad_vdso[3];
     refcount_t refcount;
