@@ -1,6 +1,37 @@
 # Linux ABI 兼容性说明
 
-`kernel/abi/linux` 为 A20OS 用户态实现了一组 Linux-compatible syscall 子集。 它是兼容层，不是完整的 Linux kernel personality。 `syscall_table.def` 当前登记 258 个入口（含 2 个 A20OS 扩展）。登记表示分派表 覆盖，不表示每项都达到 Linux 语义完整性；已登记的 syscall 可能只支持部分命令、 flag、对象类型或并发边界。表中不再有固定返回 `-ENOSYS` 的显式占位符；仅存的 `-ENOSYS` 返回是架构/版本正确的 Linux 语义（nfsservctl 已在 Linux 4.19 移除、 map_shadow_stack 是 x86 CET、riscv_* 与 arch_prctl 是架构专属）。
+`kernel/abi/linux` 为 A20OS 用户态实现了一组 Linux-compatible syscall 子集。
+它是兼容层，不是完整的 Linux kernel personality。
+`syscall_table.def` 当前登记 343 个入口（含 2 个 A20OS 扩展与 5 个 x86_64-only
+备用槽位 `time`/`pause`/`utime`/`utimes`/`get_thread_area`）。登记表示分派表
+覆盖，不表示每项都达到 Linux 语义完整性；已登记的 syscall 可能只支持部分命令、
+flag、对象类型或并发边界。表中不再有固定返回 `-ENOSYS` 的显式占位符；仅存的
+`-ENOSYS` 返回是架构/版本正确的 Linux 语义（nfsservctl 已在 Linux 4.19 移除、
+map_shadow_stack 是 x86 CET、riscv_* 与 arch_prctl 是架构专属）。
+
+## 四主线架构编号覆盖
+
+- **riscv64 / aarch64**：asm-generic 编号 100% 覆盖（仅 `244 arch_specific`
+  占位，非真实 syscall）。
+- **loongarch64**：补齐 LoongArch 私有 `file_getattr(468)`/`file_setattr(469)`
+  （`kernel/fs/vfs/fileattr.c` 核心 + `sys_fileattr.c` 包装）；编号覆盖与
+  Linux 一致。
+- **x86_64**：`syscall_nr_x86_64.h` 映射表扩展至 463 槽（0–462），修正 ~64 个
+  陈旧 `-1` 映射（msgget/msgsnd/msgrcv/msgctl、quotactl、gettid、readahead、
+  tkill、set_thread_area、lookup_dcookie、remap_file_pages、restart_syscall、
+  fadvise64、utimes、mbind/set_mempolicy/get_mempolicy、mq_*、kexec_load、
+  ioprio_*、migrate_pages/move_pages、eventfd→eventfd2、rt_tgsigqueueinfo、
+  name_to_handle_at/open_by_handle_at、process_vm_*、kcmp、kexec_file_load、
+  mlock2、pkey_*、io_pgetevents、rseq、io_uring_*、open_tree/move_mount/
+  fsopen/fsconfig/fsmount/fspick、pidfd_open/pidfd_getfd、process_madvise/
+  process_mrelease、epoll_pwait2、mount_setattr、quotactl_fd、landlock_*、
+  memfd_secret、futex_waitv、set_mempolicy_home_node、cachestat），并补
+  453–462（map_shadow_stack、futex_wake/wait/requeue、statmount、listmount、
+  lsm_*、mseal）。新增 x86-only 处理器：`sys_time`（已存在，现注册）、
+  `sys_pause`（park 直到信号）、`sys_utime`/`sys_utimes`（vfs_utimensat 的
+  timeval/utimbuf 包装）、`sys_get_thread_area`（trap frame 的 FS-base TLS）。
+  剩余 `-1` 均为已废弃或 x86-only 遗留（uselib/_sysctl/create_module/
+  nfsservctl/iopl/ioperm/modify_ldt/getpmsg 等），返回 `-ENOSYS` 与 Linux 一致。
 
 ## 兼容等级
 
@@ -36,7 +67,8 @@
 - SysV 消息队列（`kernel/ipc/sysv_msg.c`）：固定 32 队列表，支持 msgget/msgsnd/msgrcv/msgctl，含阻塞 park/wake 与 IPC_NOWAIT/MSG_NOERROR。
 - POSIX 消息队列（`kernel/ipc/posix_mq.c`）：命名队列 + per-fd mqd，优先级 FIFO，绝对超时（timedsend/timedreceive），mq_notify 用信号投递。
 - ioprio/pkey：每任务 I/O 优先级与 16 槽保护键位图（`kernel/proc/sched_compat.c`），pkey_mprotect 等价 mprotect。
-- `mseal` 是接受式 no-op（无逐 VMA seal 跟踪）；`seccomp` 明确返回不支持而非假装过滤；kexec 明确拒绝。
+- `mseal` 是真实 VMA seal 语义：核心 MM 在 `mm_mmap_locked`/`mm_mprotect_locked`/`mm_munmap_locked`/`mm_mremap_locked`/brk shrink 与 `madvise(DONTNEED/FREE/REMOVE)` 中强制 `VM_SEALED`（覆盖 MAP_FIXED 覆写、mprotect、munmap、mremap 均返回 -EPERM），fork 继承 seal；尚无 `/proc/smaps` 的 Sealed 统计与 userfaultfd 交互。`seccomp` 明确返回不支持而非假装过滤；kexec 明确拒绝。
+- `renameat` 已补注册（编号 38，glibc 直接调用）：实现为 `renameat2` 的 flags=0 包装。`sched_setattr`/`sched_getattr` 改为完整 `struct sched_attr` 线格式：校验 policy/flags/nice/priority 并经 `proc_sched_set` 落调度器，支持 `SCHED_FLAG_RESET_ON_FORK`；不应用 util-clamp/deadline 字段。
 - `nfsservctl` 返回 -ENOSYS（Linux 4.19 已移除该 syscall，这是正确语义）；`map_shadow_stack` 是 x86 CET 特性，在 RISC-V 返回 -ENOSYS（架构正确）。
 - LSM 自省：`lsm_get_self_attr`/`lsm_list_modules` 报告 Landlock；`lsm_set_self_attr` 由 `landlock_restrict_self` 覆盖。
 - `statmount`/`listmount`/`listns`/`open_tree_attr` 提供 mount 表自省，`setxattrat` 系列提供 dirfd 相对 xattr。

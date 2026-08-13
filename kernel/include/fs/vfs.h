@@ -349,6 +349,24 @@ int      vfs_chownat(int dirfd, const char *path, int uid, int gid, int flags);
 int      vfs_fchown(int fd, int uid, int gid);
 int      vfs_utimensat(int dirfd, const char *path, const uint64_t times[4], int flags);
 int      vfs_futimens(int fd, const uint64_t times[4]);
+
+/* fileattr (LoongArch file_getattr/file_setattr core).  The opaque 10-word
+ * layout matches Linux struct fileattr (uapi/linux/fs.h). */
+typedef struct a20_fileattr {
+    uint32_t valid;
+    uint32_t flags;
+    uint32_t fsx_xflags;
+    uint32_t fspare;
+    uint32_t gfs2_acl;
+    uint32_t version;
+    uint32_t flags_mask;
+    uint32_t flags_ro;
+    uint32_t xflags_mask;
+    uint32_t xflags_ro;
+} a20_fileattr_t;
+void     vfs_fileattr_init(a20_fileattr_t *fa);
+void     vfs_fileattr_get(a20_fileattr_t *fa);
+int      vfs_fileattr_set(const a20_fileattr_t *fa);
 int      vfs_readlinkat(int dirfd, const char *path, char *buf, size_t sz);
 int      vfs_link(const char *oldpath, const char *newpath);
 int      vfs_symlink(const char *target, const char *linkpath);

@@ -12,7 +12,16 @@ Every registered entry is implemented; no syscall is a fixed `-ENOSYS` placehold
 
 ## Current Summary
 
-`syscall_table.def` currently registers 258 dispatch entries, including two A20OS extensions. Registration is dispatch coverage, not a claim of semantic Linux completeness. Every registered entry has a real handler; the only `-ENOSYS` returns are the arch/version-correct Linux semantics for removed or architecture-specific syscalls (`nfsservctl` removed in Linux 4.19, `map_shadow_stack` is x86 CET, RISC-V-only syscalls on other arches, `arch_prctl` on non-x86). Registered non-placeholder calls may still support only a subset of Linux commands, flags, object types, or concurrency semantics.
+`syscall_table.def` currently registers 343 dispatch entries, including two
+A20OS extensions and five x86_64-only legacy entries on spare slots
+(`time`/`pause`/`utime`/`utimes`/`get_thread_area`). Registration is dispatch
+coverage, not a claim of semantic Linux completeness. Every registered entry
+has a real handler; the only `-ENOSYS` returns are the arch/version-correct
+Linux semantics for removed or architecture-specific syscalls (`nfsservctl`
+removed in Linux 4.19, `map_shadow_stack` is x86 CET, RISC-V-only syscalls on
+other arches, `arch_prctl` on non-x86). Registered non-placeholder calls may
+still support only a subset of Linux commands, flags, object types, or
+concurrency semantics.
 
 | Area | Level | Notes |
 | --- | --- | --- |
@@ -20,7 +29,7 @@ Every registered entry is implemented; no syscall is a fixed `-ENOSYS` placehold
 | path and metadata | partial | openat/stat/chmod/chown/link/symlink/xattr coverage exists; path resolution and permissions need cleanup. |
 | process lifecycle | partial | fork/clone/exec/wait/exit work for current userland; SMP/thread edge semantics remain limited. |
 | signals | partial | common delivery paths exist; Linux edge behavior is not complete. |
-| memory management | partial | brk/mmap/munmap/mprotect/mremap and COW exist; userfaultfd MISSING mode parks faults on registered ranges; file mmap/page cache semantics need work. |
+| memory management | partial | brk/mmap/munmap/mprotect/mremap and COW exist; mseal enforces VM_SEALED against layout/protection changes; userfaultfd MISSING mode parks faults on registered ranges; file mmap/page cache semantics need work. |
 | scheduler | partial | APIs map onto the per-CPU EEVDF/SMP scheduler, but Linux policy/priority/affinity, RT, deadline, cgroup, and topology semantics remain bounded. |
 | futex | partial | all standard commands implemented, including bounded PI variants; no priority boost. |
 | poll/epoll/select | partial | fd readiness works for common objects; wait infrastructure should move to formal wait queues. |
@@ -128,6 +137,7 @@ Every registered entry is implemented; no syscall is a fixed `-ENOSYS` placehold
 | `mkdirat` | path/fs | `partial` | `smoke-vfs-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `unlinkat` | path/fs | `partial` | `smoke-vfs-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `renameat2` | path/fs | `partial` | `smoke-vfs-stress` | implemented subset; Linux edge semantics remain documented gaps |
+| `renameat` | path/fs | `partial` | `smoke-vfs-stress` | renameat(2) is renameat2(2) with flags=0; complete entry for glibc, which calls it directly |
 | `chdir` | path/fs | `partial` | `smoke-vfs-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `fchdir` | path/fs | `partial` | `smoke-vfs-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `getcwd` | path/fs | `partial` | `smoke-vfs-stress` | implemented subset; Linux edge semantics remain documented gaps |
@@ -165,6 +175,11 @@ Every registered entry is implemented; no syscall is a fixed `-ENOSYS` placehold
 | `swapoff` | memory | `partial` | `smoke-mm-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `mkswap` | memory | `partial` | `smoke-mm-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `utimensat` | path/fs | `partial` | `smoke-vfs-stress` | implemented subset; Linux edge semantics remain documented gaps |
+| `time` | time | `partial` | `smoke-proc-stress` | x86_64-only legacy entry (spare slot 1003); sys_time reads the realtime clock into a time_t |
+| `pause` | signals | `partial` | `smoke-proc-stress` | x86_64-only legacy entry (spare slot 1004); parks the task until a signal arrives, returning -EINTR |
+| `utime` | path/fs | `partial` | `smoke-vfs-stress` | x86_64-only legacy entry (spare slot 1005); struct utimbuf wrapper over vfs_utimensat |
+| `utimes` | path/fs | `partial` | `smoke-vfs-stress` | x86_64-only legacy entry (spare slot 1006); struct timeval[2] wrapper over vfs_utimensat |
+| `get_thread_area` | arch | `partial` | `smoke-abi-linux` | x86_64-only legacy entry (spare slot 1007); reports the FS-base TLS pointer from the trap frame |
 | `chroot` | path/fs | `partial` | `smoke-vfs-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `mknodat` | path/fs | `partial` | `smoke-vfs-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `set_thread_area` | arch | `partial` | `smoke-abi-linux` | implemented subset; architecture-specific semantics remain bounded |
@@ -305,8 +320,8 @@ Every registered entry is implemented; no syscall is a fixed `-ENOSYS` placehold
 | `setns` | namespaces | `partial` | `smoke-abi-linux` | compatibility paths only; no full namespace model |
 | `pivot_root` | namespaces | `partial` | `smoke-abi-linux` | compatibility paths only; no full namespace model |
 | `get_mempolicy` | memory | `partial` | `smoke-mm-stress` | implemented subset; Linux edge semantics remain documented gaps |
-| `sched_setattr` | scheduler | `partial` | `smoke-proc-stress` | policy/priority/affinity compatibility is bounded by current scheduler state |
-| `sched_getattr` | scheduler | `partial` | `smoke-proc-stress` | policy/priority/affinity compatibility is bounded by current scheduler state |
+| `sched_setattr` | scheduler | `partial` | `smoke-proc-stress` | full struct sched_attr wire layout; validates policy/flags/nice/priority and routes through proc_sched_set; no util-clamp or deadline fields |
+| `sched_getattr` | scheduler | `partial` | `smoke-proc-stress` | full struct sched_attr wire layout; reports policy/flags/nice/priority; no util-clamp or deadline fields |
 | `clone3` | process | `partial` | `smoke-proc-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `openat2` | path/fs | `partial` | `smoke-vfs-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `inotify_init` | path/fs | `partial` | `smoke-vfs-stress` | implemented subset; Linux edge semantics remain documented gaps |
@@ -374,7 +389,7 @@ Every registered entry is implemented; no syscall is a fixed `-ENOSYS` placehold
 | `pkey_free` | memory | `partial` | `smoke-mm-stress` | frees a protection key slot |
 | `pkey_mprotect` | memory | `partial` | `smoke-mm-stress` | mprotect with a valid allocated pkey |
 | `mlock2` | memory | `partial` | `smoke-mm-stress` | mlock with flags (only 0 supported) |
-| `mseal` | memory | `partial` | `smoke-mm-stress` | accepts VMA sealing as a no-op (no seal tracking yet) |
+| `mseal` | memory | `partial` | `smoke-mm-stress` | real VMA seal semantics: core MM enforces VM_SEALED against mmap-FIXED overwrite, mprotect, munmap, mremap, brk shrink and madvise DONTNEED/FREE/REMOVE with -EPERM; inherited by fork; no /proc/smaps Sealed reporting or userfaultfd interplay |
 | `seccomp` | system | `partial` | `smoke-abi-linux` | no seccomp engine; reports unsupported rather than faking |
 | `kexec_load` | system | `partial` | `smoke-abi-linux` | refuses kexec (no image handoff support) |
 | `kexec_file_load` | system | `partial` | `smoke-abi-linux` | refuses kexec (no image handoff support) |
@@ -393,6 +408,8 @@ Every registered entry is implemented; no syscall is a fixed `-ENOSYS` placehold
 | `listmount` | path/fs | `partial` | `smoke-vfs-stress` | lists mount ids in the mount table |
 | `listns` | namespaces | `partial` | `smoke-abi-linux` | reports the single kernel namespace id |
 | `open_tree_attr` | path/fs | `partial` | `smoke-vfs-stress` | open_tree with attribute query |
+| `file_getattr` | path/fs | `partial` | `smoke-syscall-ext` | LoongArch-only fileattr syscall (468); VFS core reports an empty attribute set (flags=0, masks=0) |
+| `file_setattr` | path/fs | `partial` | `smoke-syscall-ext` | LoongArch-only fileattr syscall (469); refuses non-empty flag requests with -EOPNOTSUPP |
 | `lsm_get_self_attr` | security | `partial` | `smoke-syscall-ext` | reports Landlock restriction state |
 | `lsm_set_self_attr` | security | `partial` | `smoke-syscall-ext` | returns -EOPNOTSUPP (restrict via landlock_restrict_self) |
 | `lsm_list_modules` | security | `partial` | `smoke-syscall-ext` | lists capability + landlock modules |
