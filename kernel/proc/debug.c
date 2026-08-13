@@ -194,6 +194,66 @@ int proc_debug_attach(int pid)
     return 0;
 }
 
+int proc_debug_seize(int pid)
+{
+    task_t *caller = proc_current();
+    task_t *t = proc_find_get(pid);
+    if (!t)
+        return -ESRCH;
+    if (t == caller || t == proc_idle_task()) {
+        proc_put(t);
+        return -EPERM;
+    }
+
+    if (!proc_task_may_access(caller, t)) {
+        proc_put(t);
+        return -EPERM;
+    }
+
+    uint64_t flags = spin_lock_irqsave(&proc_lock);
+    if (t->state == PROC_UNUSED || t->state == PROC_ZOMBIE ||
+        proc_debug_is_traced(t)) {
+        spin_unlock_irqrestore(&proc_lock, flags);
+        proc_put(t);
+        return t->state == PROC_ZOMBIE ? -ESRCH : -EPERM;
+    }
+
+    /* PTRACE_SEIZE attaches without stopping the tracee first; the first
+     * stop happens at the next signal/syscall boundary. */
+    t->ptracer = caller;
+    t->ptrace_flags |= PT_DEBUG_FLAG_TRACED | PT_DEBUG_FLAG_ATTACHED |
+                       PT_DEBUG_FLAG_SEIZED;
+    t->ptrace_orig_parent_pid = t->parent ? t->parent->pid : 0;
+    if (t->parent && t->parent->state != PROC_UNUSED)
+        t->ppid = caller->pid;
+    t->parent = caller;
+    spin_unlock_irqrestore(&proc_lock, flags);
+    proc_put(t);
+    return 0;
+}
+
+int proc_debug_interrupt(int pid)
+{
+    task_t *caller = proc_current();
+    task_t *t = proc_find_get(pid);
+    if (!t)
+        return -ESRCH;
+    if (t->ptracer != caller) {
+        proc_put(t);
+        return -EPERM;
+    }
+    if (t->ptrace_stop_active) {
+        /* Already stopped; nothing to interrupt. */
+        proc_put(t);
+        return 0;
+    }
+    /* Queue a stop at the next boundary; the stop is reported as a ptrace
+     * stop with SIGSTOP. */
+    (void)signal_send_task(t, SIGSTOP);
+    proc_put(t);
+    return 0;
+}
+
 static void ptrace_reparent_to_original(task_t *t, int orig_pid)
 {
     task_t *reaper = NULL;

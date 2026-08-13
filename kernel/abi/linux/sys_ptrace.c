@@ -39,6 +39,8 @@
 #define PTRACE_SETSIGINFO   0x4203
 #define PTRACE_GETREGSET    0x4204
 #define PTRACE_SETREGSET    0x4205
+#define PTRACE_SEIZE        0x4206
+#define PTRACE_INTERRUPT    0x4207
 
 #define PTRACE_O_TRACESYSGOOD 0x00000001
 #define PTRACE_O_TRACEEXEC    0x00000010
@@ -124,6 +126,14 @@ int64_t sys_ptrace(int request, int pid, void *addr, void *data)
 
     case PTRACE_ATTACH:
         return proc_debug_attach(pid);
+
+    case PTRACE_SEIZE:
+        /* PTRACE_SEIZE attaches without stopping the tracee first. */
+        return proc_debug_seize(pid);
+
+    case PTRACE_INTERRUPT:
+        /* Request a stop from a running seized tracee. */
+        return proc_debug_interrupt(pid);
 
     case PTRACE_DETACH:
         return proc_debug_detach(pid, (int)(long)data);
