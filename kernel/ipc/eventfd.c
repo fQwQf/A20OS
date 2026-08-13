@@ -17,7 +17,6 @@ typedef struct {
     wait_queue_t  writers;
     uint64_t      counter;
     int           semaphore;
-    int           nonblock;
 } eventfd_t;
 
 static int eventfd_read(vfile_t *vf, char *buf, size_t count)
@@ -28,7 +27,7 @@ static int eventfd_read(vfile_t *vf, char *buf, size_t count)
 
     spin_lock(&efd->lock);
     while (efd->counter == 0) {
-        if (efd->nonblock) {
+        if (vf->flags & O_NONBLOCK) {
             spin_unlock(&efd->lock);
             return -EAGAIN;
         }
@@ -84,7 +83,7 @@ static int eventfd_write(vfile_t *vf, const char *buf, size_t count)
 
     spin_lock(&efd->lock);
     while (efd->counter + val > ~0ULL - 1) {
-        if (efd->nonblock) {
+        if (vf->flags & O_NONBLOCK) {
             spin_unlock(&efd->lock);
             return -EAGAIN;
         }
@@ -185,7 +184,6 @@ int eventfd_create(unsigned initval, int flags)
     wait_queue_init(&efd->writers);
     efd->counter = initval;
     efd->semaphore = (flags & 1) != 0;
-    efd->nonblock = (flags & O_NONBLOCK) != 0;
     vf->flags = O_RDWR | (flags & O_NONBLOCK);
     refcount_set(&vf->ref_count, 1);
     vf->ops = &g_eventfd_ops;

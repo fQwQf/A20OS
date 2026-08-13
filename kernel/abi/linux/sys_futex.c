@@ -633,6 +633,10 @@ static int futex_pi_release(int *uaddr)
 int64_t sys_futex(int *uaddr, int op, int val, void *timeout, int *uaddr2, int val3)
 {
     int opc = op & FUTEX_CMD_MASK;
+    /* FUTEX_CLOCK_REALTIME is only meaningful with FUTEX_WAIT_BITSET; Linux
+     * rejects it on every other command (including plain FUTEX_WAIT). */
+    if ((op & FUTEX_CLOCK_REALTIME) && opc != FUTEX_WAIT_BITSET)
+        return -EINVAL;
     switch (opc) {
     case FUTEX_WAIT:
         return futex_wait_on(uaddr, val, timeout, FUTEX_BITSET_MATCH_ANY, 0, 0);
