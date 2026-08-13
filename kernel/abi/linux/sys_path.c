@@ -527,3 +527,49 @@ int64_t sys_utimensat(int dirfd, const char *path, void *times, int flags) {
     if (pr < 0) return pr;
     return vfs_utimensat(AT_FDCWD, full, ptimes, flags);
 }
+
+/* utime(2): legacy struct utimbuf { time_t actime; time_t modtime; }. */
+int64_t sys_utime(const char *path, const void *times) {
+    if (!path) return -EFAULT;
+    char kpath[MAX_PATH_LEN];
+    if (user_strncpy(kpath, path, MAX_PATH_LEN) < 0) return -EFAULT;
+    char full[MAX_PATH_LEN];
+    int pr = syscall_path_at(AT_FDCWD, kpath, full, sizeof(full));
+    if (pr < 0) return pr;
+
+    uint64_t ktimes[4];
+    uint64_t *ptimes = NULL;
+    if (times) {
+        long tb[2];
+        if (copy_from_user(tb, times, sizeof(tb)) < 0) return -EFAULT;
+        ktimes[0] = (uint64_t)tb[0];       /* atime sec */
+        ktimes[1] = 0;                     /* atime nsec */
+        ktimes[2] = (uint64_t)tb[1];       /* mtime sec */
+        ktimes[3] = 0;                     /* mtime nsec */
+        ptimes = ktimes;
+    }
+    return vfs_utimensat(AT_FDCWD, full, ptimes, 0);
+}
+
+/* utimes(2): legacy struct timeval times[2]. */
+int64_t sys_utimes(const char *path, const void *times) {
+    if (!path) return -EFAULT;
+    char kpath[MAX_PATH_LEN];
+    if (user_strncpy(kpath, path, MAX_PATH_LEN) < 0) return -EFAULT;
+    char full[MAX_PATH_LEN];
+    int pr = syscall_path_at(AT_FDCWD, kpath, full, sizeof(full));
+    if (pr < 0) return pr;
+
+    uint64_t ktimes[4];
+    uint64_t *ptimes = NULL;
+    if (times) {
+        long tv[4];
+        if (copy_from_user(tv, times, sizeof(tv)) < 0) return -EFAULT;
+        ktimes[0] = (uint64_t)tv[0];              /* atime sec */
+        ktimes[1] = (uint64_t)tv[1] * 1000;       /* atime usec -> nsec */
+        ktimes[2] = (uint64_t)tv[2];              /* mtime sec */
+        ktimes[3] = (uint64_t)tv[3] * 1000;       /* mtime usec -> nsec */
+        ptimes = ktimes;
+    }
+    return vfs_utimensat(AT_FDCWD, full, ptimes, 0);
+}

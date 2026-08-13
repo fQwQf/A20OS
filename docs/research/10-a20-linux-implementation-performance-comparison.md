@@ -116,7 +116,7 @@ judge 结果。因此 `d5/Linux` 是受控历史参考，`f973/Linux` 与 `d5/f9
 ### 3.1 内核组织
 
 **源码事实（A20OS）。** A20OS 把调度、MM、VFS、cache、网络和关键驱动放在同一
-特权地址空间，以直接 C 调用连接；同时提供 Linux ABI（258 个登记入口）和
+特权地址空间，以直接 C 调用连接；同时提供 Linux ABI（343 个登记入口）和
 Native ABI（126 个登记入口）。登记数只表示分发表面积，不表示 Linux 语义完整性。
 Native ABI 使用 handle/rights、VMO/VMAR、
 channel/EventQ；generic 驱动可作为 `.a20drv` 内核模块或用户服务部署
@@ -384,7 +384,7 @@ A20OS 曾因 packed 16-bit used index 撕裂和旧 bitmap 晚写而产生持久�
 
 ### 7.1 Linux ABI 覆盖
 
-**源码事实。** Linux syscall table 登记 258 项，但登记只证明可分派，不证明 Linux
+**源码事实。** Linux syscall table 登记 343 项，但登记只证明可分派，不证明 Linux
 语义完整。项目自己的 coverage 表保守地把 fd/path/process/signal/MM/socket、scheduler
 和 BPF 等标为 `partial`，namespaces/capabilities 的总体兼容面为 `partial`。其中 scheduler
 wrapper 连接的是 per-CPU EEVDF/SMP 调度器，但 Linux policy/priority/affinity 边界仍不完整；

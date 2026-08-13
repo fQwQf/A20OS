@@ -277,6 +277,11 @@
 #define SYS_arch_prctl      1000
 #define SYS_set_thread_area 1001
 #define SYS_poll            1002
+#define SYS_time            1003
+#define SYS_pause           1004
+#define SYS_utime           1005
+#define SYS_utimes          1006
+#define SYS_get_thread_area 1007
 #define SYS_clock_gettime32 1023
 
 /* RISC-V 64-bit Linux syscall numbers for the syscalls completed in the
@@ -354,6 +359,8 @@
 #define SYS_listxattrat        465
 #define SYS_removexattrat      466
 #define SYS_open_tree_attr     467
+#define SYS_file_getattr       468
+#define SYS_file_setattr       469
 #define SYS_listns             470
 #define SYS_rt_tgsigqueueinfo  240
 #define SYS_riscv_hwprobe      258

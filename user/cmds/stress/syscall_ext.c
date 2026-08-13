@@ -870,6 +870,94 @@ static int test_perf(void)
     return 0;
 }
 
+#ifndef SYS_file_getattr
+#define SYS_file_getattr 468
+#endif
+#ifndef SYS_file_setattr
+#define SYS_file_setattr 469
+#endif
+/* time/utimes/pause are x86_64-only in Linux; A20OS registers them in the
+ * generic table at spare slots 1003/1006/1004 for the asm-generic arches, so
+ * pick the number the running arch actually dispatches. */
+#if defined(__x86_64__) && !defined(__riscv)
+#ifndef SYS_time
+#define SYS_time 201
+#endif
+#ifndef SYS_utimes
+#define SYS_utimes 235
+#endif
+#else
+#ifndef SYS_time
+#define SYS_time 1003
+#endif
+#ifndef SYS_utimes
+#define SYS_utimes 1006
+#endif
+#endif
+
+struct fileattr_test {
+    unsigned int valid;
+    unsigned int flags;
+    unsigned int fsx_xflags;
+    unsigned int fspare;
+    unsigned int gfs2_acl;
+    unsigned int version;
+    unsigned int flags_mask;
+    unsigned int flags_ro;
+    unsigned int xflags_mask;
+    unsigned int xflags_ro;
+};
+
+/* file_getattr/file_setattr (LoongArch), time/utime/utimes/pause (x86_64). */
+static int test_fileattr_and_time(void)
+{
+    int fd = open("/tmp/ext.txt", O_CREAT | O_TRUNC | O_RDWR, 0644);
+    if (fd < 0)
+        return fail("fileattr open", errno);
+
+    /* file_getattr: empty attribute set with the flags field valid. */
+    struct fileattr_test fa;
+    memset(&fa, 0, sizeof(fa));
+    if (syscall(SYS_file_getattr, fd, &fa) < 0) {
+        if (errno == ENOSYS) {
+            close(fd);
+            return 0; /* arch without these syscalls: skip */
+        }
+        return fail("file_getattr", errno);
+    }
+    if (!(fa.valid & 1) || fa.flags != 0)
+        return fail("file_getattr shape", 0);
+
+    /* file_setattr: setting any flag is refused (no supported flags). */
+    memset(&fa, 0, sizeof(fa));
+    fa.valid = 1;
+    fa.flags = 0x20; /* FS_APPEND_FL */
+    errno = 0;
+    if (syscall(SYS_file_setattr, fd, &fa) == 0 || errno != EOPNOTSUPP)
+        return fail("file_setattr append", errno);
+    close(fd);
+    unlink("/tmp/ext.txt");
+
+    /* time(2): reads back a plausible epoch. */
+    long tnow = syscall(SYS_time, NULL);
+    if (tnow < 1500000000L)
+        return fail("time", (int)errno);
+
+    /* utimes(2): set both times and verify via stat. */
+    if (write(open("/tmp/utimes.txt", O_CREAT | O_TRUNC | O_RDWR, 0644),
+              "x", 1) != 1)
+        return fail("utimes create", errno);
+    long tv[4] = { 1700000000L, 0, 1700000001L, 0 };
+    errno = 0;
+    if (syscall(SYS_utimes, "/tmp/utimes.txt", tv) < 0 && errno != ENOSYS)
+        return fail("utimes", errno);
+    struct stat st;
+    if (stat("/tmp/utimes.txt", &st) == 0 && st.st_mtime < 1699999999L)
+        return fail("utimes mtime", 0);
+    unlink("/tmp/utimes.txt");
+    return 0;
+}
+
 int main(void)
 {
     printf("SYSCALL_EXT: start\n");
@@ -896,6 +984,8 @@ int main(void)
     if (test_userfaultfd() < 0)
         return 1;
     if (test_perf() < 0)
+        return 1;
+    if (test_fileattr_and_time() < 0)
         return 1;
     printf("SYSCALL_EXT: PASS\n");
     return 0;
