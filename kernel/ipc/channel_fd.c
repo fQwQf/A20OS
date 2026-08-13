@@ -16,6 +16,7 @@
 #include "core/fcntl.h"
 #include "core/poll.h"
 #include "fs/file.h"
+#include "fs/readiness.h"
 #include "fs/vfs.h"
 #include "fs/anonfd.h"
 #include "ipc/ipc.h"
@@ -102,6 +103,24 @@ static int a20_ch_fd_poll(vfile_t *vf, short events)
     return rev;
 }
 
+static size_t a20_ch_fd_poll_sources(vfile_t *vf, short events,
+                                     readiness_source_t *sources, size_t max)
+{
+    a20_channel_ep_t *ep = vf ? vf->priv : NULL;
+    if (!ep || !sources)
+        return 0;
+    size_t count = 0;
+    if (((events & POLLIN) || !(events & (POLLIN | POLLOUT))) && count < max)
+        sources[count++] = (readiness_source_t){
+            &ep->waiters, A20_CH_WAIT_RECV, 0
+        };
+    if ((events & POLLOUT) && count < max)
+        sources[count++] = (readiness_source_t){
+            &ep->waiters, A20_CH_WAIT_SEND, 0
+        };
+    return count;
+}
+
 static int a20_ch_fd_close(vfile_t *vf)
 {
     a20_channel_ep_t *ep = vf ? (a20_channel_ep_t *)vf->priv : NULL;
@@ -116,6 +135,7 @@ static vfile_ops_t a20_ch_fd_ops = {
     .read  = a20_ch_fd_read,
     .write = a20_ch_fd_write,
     .poll  = a20_ch_fd_poll,
+    .poll_sources = a20_ch_fd_poll_sources,
     .close = a20_ch_fd_close,
 };
 

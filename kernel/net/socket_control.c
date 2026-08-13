@@ -653,9 +653,9 @@ int net_set_nonblock(int gfd, int nonblock)
     return 0;
 }
 
-int net_poll_events(int gfd, short events)
+int net_poll_file(vfile_t *vf, short events)
 {
-    net_socket_t *s = net_socket_from_file(gfd);
+    net_socket_t *s = vf && net_is_socket_vfile(vf) ? vf->priv : NULL;
     if (!s)
         return -ENOTSOCK;
     short revents = 0;
@@ -700,5 +700,15 @@ int net_poll_events(int gfd, short events)
             revents |= POLLOUT;
     }
     spin_unlock_irqrestore(&g_net_lock, irq);
+    return revents;
+}
+
+int net_poll_events(int gfd, short events)
+{
+    vfile_t *vf = vfs_get_file_ref(gfd);
+    if (!vf)
+        return -ENOTSOCK;
+    int revents = net_poll_file(vf, events);
+    vfs_put_file_ref(gfd, vf);
     return revents;
 }

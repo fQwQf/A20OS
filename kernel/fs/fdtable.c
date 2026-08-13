@@ -19,6 +19,7 @@ static files_struct_t *fdtable_alloc_files(void)
         panic("fdtable: no memory");
     spin_init(&files->lock);
     spin_set_debug(&files->lock, "files", files);
+    wait_queue_init(&files->readiness_waiters);
     memset(files->fd, 0xff, sizeof(files->fd));
     memset(files->cloexec, 0, sizeof(files->cloexec));
     memset(files->open_mask, 0, sizeof(files->open_mask));
@@ -326,6 +327,8 @@ void fdtable_close_on_exec(task_t *task)
         }
     }
     spin_unlock_irqrestore(&files->lock, flags);
+    if (close_count)
+        wait_queue_wake_all(&files->readiness_waiters, 0, PROC_WAKE_EVENT);
     for (int i = 0; i < close_count; i++) {
         vfs_release_process_file_locks(to_close[i], task->pid);
         vfs_close(to_close[i]);
@@ -351,6 +354,23 @@ int fdtable_get(task_t *task, int fd)
 int fdtable_get_current(int fd)
 {
     return fdtable_get(proc_current(), fd);
+}
+
+wait_queue_t *fdtable_current_readiness_queue(void)
+{
+    task_t *task = proc_current();
+    return task && task->files ?
+        &((files_struct_t *)task->files)->readiness_waiters : NULL;
+}
+
+bool fdtable_current_matches_file(int fd, int gfd, uint64_t identity)
+{
+    int current_gfd = -1;
+    vfile_t *vf = fdtable_get_current_file_ref(fd, &current_gfd);
+    bool matches = vf && current_gfd == gfd && vf->identity == identity;
+    if (vf)
+        vfs_put_file_ref(current_gfd, vf);
+    return matches;
 }
 
 struct vfile *fdtable_get_file_ref(task_t *task, int fd, int *gfd_out,
@@ -405,6 +425,7 @@ int fdtable_install(task_t *task, int gfd, int flags)
         files->cloexec[fd] = (flags & O_CLOEXEC) ? 1 : 0;
         fdtable_note_alloc(files, fd);
         spin_unlock_irqrestore(&files->lock, lock_flags);
+        wait_queue_wake_all(&files->readiness_waiters, 0, PROC_WAKE_EVENT);
         return fd;
     }
     spin_unlock_irqrestore(&files->lock, lock_flags);
@@ -432,6 +453,7 @@ int fdtable_close(task_t *task, int fd)
     files->cloexec[fd] = 0;
     fdtable_note_free(files, fd);
     spin_unlock_irqrestore(&files->lock, flags);
+    wait_queue_wake_all(&files->readiness_waiters, 0, PROC_WAKE_EVENT);
     ktrace_fd("[FD] close: pid=%d lfd=%d gfd=%d\n", task->pid, fd, gfd);
     vfs_release_process_file_locks(gfd, task->pid);
     return vfs_close(gfd);
@@ -478,6 +500,7 @@ int fdtable_dup(task_t *task, int oldfd, int minfd, int flags)
         files->cloexec[fd] = (flags & O_CLOEXEC) ? 1 : 0;
         fdtable_note_alloc(files, fd);
         spin_unlock_irqrestore(&files->lock, lock_flags);
+        wait_queue_wake_all(&files->readiness_waiters, 0, PROC_WAKE_EVENT);
         return fd;
     }
     spin_unlock_irqrestore(&files->lock, lock_flags);
@@ -522,6 +545,7 @@ int fdtable_dup_to(task_t *task, int oldfd, int newfd, int flags)
     files->cloexec[newfd] = (flags & O_CLOEXEC) ? 1 : 0;
     fdtable_note_alloc(files, newfd);
     spin_unlock_irqrestore(&files->lock, lock_flags);
+    wait_queue_wake_all(&files->readiness_waiters, 0, PROC_WAKE_EVENT);
     if (old_new_gfd >= 0) {
         vfs_release_process_file_locks(old_new_gfd, task->pid);
         vfs_close(old_new_gfd);

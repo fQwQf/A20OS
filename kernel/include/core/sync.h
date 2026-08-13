@@ -19,9 +19,10 @@ typedef struct wait_queue_entry {
 typedef struct wait_queue {
     spinlock_t lock;
     wait_queue_entry_t *head;
+    uint64_t generation;
 } wait_queue_t;
 
-#define WAIT_QUEUE_INIT { SPINLOCK_INIT, NULL }
+#define WAIT_QUEUE_INIT { SPINLOCK_INIT, NULL, 0 }
 
 /*
  * WAIT_QUEUE_PARK_PROTOCOL:
@@ -38,6 +39,7 @@ typedef struct wait_queue {
  */
 
 void wait_queue_init(wait_queue_t *q);
+uint64_t wait_queue_generation(wait_queue_t *q);
 bool wait_queue_link(wait_queue_t *q, wait_queue_entry_t *entry,
                      proc_wait_token_t token, uintptr_t key);
 void wait_queue_unlink(wait_queue_t *q, wait_queue_entry_t *entry);

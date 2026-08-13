@@ -5,6 +5,7 @@
 #include "core/consts.h"
 #include "core/lock.h"
 #include "core/refcount.h"
+#include "core/sync.h"
 #include "core/trap.h"
 #include <signal_abi.h>
 
@@ -50,6 +51,7 @@ typedef struct signal_state {
      * proc_lock -> signal_state.lock.
      */
     spinlock_t lock;
+    wait_queue_t readiness_waiters;
     sigaction_t actions[NSIG];
     uint64_t    pending;     /* bitmask of pending signals */
     uint8_t     pending_has_info[NSIG];

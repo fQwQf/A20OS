@@ -1316,34 +1316,18 @@ int vfs_getcwd(char *buf, size_t size) {
     return 0;
 }
 
-int vfs_poll_events(int fd, short events) {
-    vfile_t *vf = vfs_get_file_ref(fd);
+int vfs_poll_file(vfile_t *vf, short events) {
     if (!vf) return POLLNVAL;
-
-    int nr = net_poll_events(fd, events);
-    if (nr >= 0) {
-        vfs_put_file_ref(fd, vf);
-        return nr;
-    }
-
     int sr = signalfd_poll_events(vf, events);
-    if (sr >= 0) {
-        vfs_put_file_ref(fd, vf);
+    if (sr >= 0)
         return sr;
-    }
 
-    if (vf->ops && vf->ops->poll) {
-        int revents = vf->ops->poll(vf, events);
-        vfs_put_file_ref(fd, vf);
-        return revents;
-    }
+    if (vf->ops && vf->ops->poll)
+        return vf->ops->poll(vf, events);
 
     short revents = 0;
-    if (vfs_is_pipe_vfile(vf)) {
-        revents = pipe_poll_events(vf, events);
-        vfs_put_file_ref(fd, vf);
-        return revents;
-    }
+    if (vfs_is_pipe_vfile(vf))
+        return pipe_poll_events(vf, events);
 
     if (vfs_is_char_device_vfile(vf)) {
         extern int uart_has_input(void);
@@ -1356,7 +1340,6 @@ int vfs_poll_events(int fd, short events) {
         }
         if (events & POLLOUT)
             revents |= POLLOUT;
-        vfs_put_file_ref(fd, vf);
         return revents;
     }
 
@@ -1365,12 +1348,18 @@ int vfs_poll_events(int fd, short events) {
             revents |= POLLIN;
         if (events & POLLOUT)
             revents |= POLLOUT;
-        vfs_put_file_ref(fd, vf);
         return revents;
     }
 
-    vfs_put_file_ref(fd, vf);
     return POLLNVAL;
+}
+
+int vfs_poll_events(int fd, short events) {
+    vfile_t *vf = vfs_get_file_ref(fd);
+    if (!vf) return POLLNVAL;
+    int revents = vfs_poll_file(vf, events);
+    vfs_put_file_ref(fd, vf);
+    return revents;
 }
 
 int vfs_pipe(int pipefd[2]) {

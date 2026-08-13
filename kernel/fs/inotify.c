@@ -7,6 +7,7 @@
 #include "core/sync.h"
 #include "fs/anonfd.h"
 #include "fs/file.h"
+#include "fs/readiness.h"
 #include "fs/vfs.h"
 #include "mm/slab.h"
 #include "proc/proc.h"
@@ -301,6 +302,16 @@ static int inotify_ops_poll(vfile_t *vf, short events)
     return revents;
 }
 
+static size_t inotify_poll_sources(vfile_t *vf, short events,
+                                   readiness_source_t *sources, size_t max)
+{
+    inotify_instance_t *inst = vf ? vf->priv : NULL;
+    if (!inst || !sources || max == 0 || !(events & POLLIN))
+        return 0;
+    sources[0] = (readiness_source_t){ &inst->readers, 0, 0 };
+    return 1;
+}
+
 static int inotify_ops_close(vfile_t *vf)
 {
     inotify_instance_t *inst = vf ? vf->priv : NULL;
@@ -331,6 +342,7 @@ static int inotify_ops_close(vfile_t *vf)
 static vfile_ops_t g_inotify_ops = {
     .read = inotify_ops_read,
     .poll = inotify_ops_poll,
+    .poll_sources = inotify_poll_sources,
     .close = inotify_ops_close,
 };
 

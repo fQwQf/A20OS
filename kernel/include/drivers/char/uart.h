@@ -2,6 +2,7 @@
 #define _UART_H
 
 #include "core/types.h"
+#include "core/sync.h"
 
 void uart_init(void);
 void uart_putc(char c);
@@ -9,6 +10,7 @@ void uart_receive_char(char c);
 int  uart_getc(void);
 int  uart_try_getc(void);
 int  uart_has_input(void);
+wait_queue_t *uart_read_wait_queue(void);
 void uart_puts(const char *s);
 void uart_flush(void);
 void uart_handle_irq(void);
