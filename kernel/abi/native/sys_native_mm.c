@@ -23,6 +23,7 @@
 #include "fs/xattr.h"
 #include "net/socket.h"
 #include "sys/usercopy.h"
+#include "core/klog.h"
 
 #include "abi/native/types.h"
 #include "abi/native/errno.h"
