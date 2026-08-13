@@ -3,12 +3,12 @@
 #include "core/sync.h"
 #include "drivers/char/uart.h"
 #include "fs/pipe.h"
+#include "fs/readiness.h"
 #include "fs/vfs/file.h"
+#include "mm/slab.h"
 #include "proc/proc_internal.h"
 
 #define LINUX_POLL_WAIT_TICKS (MS_TO_TICKS(1) ? MS_TO_TICKS(1) : 1)
-#define LINUX_POLL_ACTIVE_YIELDS 2
-
 static uint64_t linux_poll_wait_quantum(void)
 {
     uint64_t ticks = LINUX_POLL_WAIT_TICKS;
@@ -82,6 +82,55 @@ static void linux_poll_defer_sigmask_restore(task_t *t,
     if (!t || !saved_ss)
         return;
     signal_task_defer_mask_restore(t, saved_blocked);
+}
+
+struct linux_pollfd {
+    int fd;
+    short events;
+    short revents;
+};
+
+static int linux_poll_wait_fds(void *fds, int nfds,
+                               uint64_t deadline, bool has_deadline)
+{
+    if (nfds < 0 || nfds > MAX_FILES)
+        return -EINVAL;
+    if (!fds && nfds)
+        return -EFAULT;
+
+    struct linux_pollfd *user = fds;
+    readiness_interest_t *items = nfds ?
+        kcalloc((size_t)nfds, sizeof(*items)) : NULL;
+    if (nfds && !items)
+        return -ENOMEM;
+
+    for (int i = 0; i < nfds; i++) {
+        struct linux_pollfd pfd;
+        if (copy_from_user(&pfd, &user[i], sizeof(pfd)) < 0) {
+            kfree(items);
+            return -EFAULT;
+        }
+        items[i].fd = pfd.fd;
+        items[i].events = pfd.events;
+    }
+
+    int result;
+    do {
+        result = readiness_wait_once(items, (size_t)nfds, NULL, 0, 0,
+                                     deadline, has_deadline);
+    } while (result == READINESS_RETRY);
+
+    if (result >= 0) {
+        for (int i = 0; i < nfds; i++) {
+            if (copy_to_user(&user[i].revents, &items[i].revents,
+                             sizeof(items[i].revents)) < 0) {
+                result = -EFAULT;
+                break;
+            }
+        }
+    }
+    kfree(items);
+    return result;
 }
 
 static int64_t read_into_user(vfile_t *vf, char *buf, size_t count)
@@ -631,8 +680,6 @@ int64_t sys_sendfile(int out_fd, int in_fd, long *off, size_t count) {
 }
 
 int64_t sys_ppoll(void *fds, int nfds, void *tmo, void *sigmask) {
-    struct pollfd { int fd; short events; short revents; };
-    struct pollfd *pfds = (struct pollfd *)fds;
     if (nfds < 0) return -EINVAL;
     task_t *t = proc_current();
     signal_state_t *saved_ss = NULL;
@@ -665,7 +712,7 @@ int64_t sys_ppoll(void *fds, int nfds, void *tmo, void *sigmask) {
             (void)linux_poll_sleep_until(0, 0, 0);
         }
     }
-    if (!pfds) PPOLL_RETURN(-EFAULT);
+    if (!fds) PPOLL_RETURN(-EFAULT);
 
     uint64_t timeout_ticks = 0;
     int has_timeout = tmo != NULL;
@@ -677,43 +724,16 @@ int64_t sys_ppoll(void *fds, int nfds, void *tmo, void *sigmask) {
         if ((ts[0] || ts[1]) && timeout_ticks == 0)
             timeout_ticks = 1;
     }
-    uint64_t deadline = timer_get_ticks() + (timeout_ticks ? timeout_ticks : 1);
-
-    int yield_budget = LINUX_POLL_ACTIVE_YIELDS;
-    for (;;) {
-        int ready = 0;
-        for (int i = 0; i < nfds; i++) {
-            struct pollfd pfd;
-            if (copy_from_user(&pfd, &pfds[i], sizeof(pfd)) < 0) PPOLL_RETURN(-EFAULT);
-            pfd.revents = 0;
-            if (pfd.fd >= 0) {
-                int64_t gfd = fdtable_get_current(pfd.fd);
-                pfd.revents = gfd < 0 ? POLLNVAL : (short)vfs_poll_events((int)gfd, pfd.events);
-                if (pfd.revents) ready++;
-            }
-            if (copy_to_user(&pfds[i].revents, &pfd.revents, sizeof(short)) < 0)
-                PPOLL_RETURN(-EFAULT);
-        }
-        if (ready > 0) {
-            PPOLL_RETURN(ready);
-        }
-        if (has_timeout && timeout_ticks == 0) PPOLL_RETURN(0);
-        if (has_timeout && timer_get_ticks() >= deadline) PPOLL_RETURN(0);
-        if (signal_task_has_unblocked(t)) PPOLL_SIGNAL_RETURN(-EINTR);
-        if (linux_poll_sleep_until(deadline, has_timeout,
-                                   yield_budget > 0) ==
-            PROC_WAKE_TIMEOUT_CAPACITY)
-            PPOLL_RETURN(-EAGAIN);
-        if (yield_budget > 0)
-            yield_budget--;
-    }
+    uint64_t deadline = timer_get_ticks() + timeout_ticks;
+    int result = linux_poll_wait_fds(fds, nfds, deadline, has_timeout);
+    if (result == -EINTR)
+        PPOLL_SIGNAL_RETURN(-EINTR);
+    PPOLL_RETURN(result);
 #undef PPOLL_RETURN
 #undef PPOLL_SIGNAL_RETURN
 }
 
 int64_t sys_poll(void *fds, int nfds, int timeout) {
-    struct pollfd { int fd; short events; short revents; };
-    struct pollfd *pfds = (struct pollfd *)fds;
     task_t *t = proc_current();
     if (nfds < 0) return -EINVAL;
     if (nfds == 0) {
@@ -737,7 +757,7 @@ int64_t sys_poll(void *fds, int nfds, int timeout) {
             (void)linux_poll_sleep_until(0, 0, 0);
         }
     }
-    if (!pfds) return -EFAULT;
+    if (!fds) return -EFAULT;
 
     int has_timeout = timeout >= 0;
     uint64_t timeout_ticks = 0;
@@ -747,34 +767,8 @@ int64_t sys_poll(void *fds, int nfds, int timeout) {
             timeout_ticks = 1;
     }
     uint64_t deadline = timer_get_ticks() + timeout_ticks;
-    int yield_budget = LINUX_POLL_ACTIVE_YIELDS;
-    for (;;) {
-        int ready = 0;
-        for (int i = 0; i < nfds; i++) {
-            struct pollfd pfd;
-            if (copy_from_user(&pfd, &pfds[i], sizeof(pfd)) < 0) return -EFAULT;
-            pfd.revents = 0;
-            if (pfd.fd >= 0) {
-                int64_t gfd = fdtable_get_current(pfd.fd);
-                pfd.revents = gfd < 0 ? POLLNVAL : (short)vfs_poll_events((int)gfd, pfd.events);
-                if (pfd.revents) ready++;
-            }
-            if (copy_to_user(&pfds[i].revents, &pfd.revents, sizeof(short)) < 0)
-                return -EFAULT;
-        }
-        if (ready > 0) {
-            return ready;
-        }
-        if (has_timeout && timeout == 0) return 0;
-        if (has_timeout && timer_get_ticks() >= deadline) return 0;
-        if (signal_task_has_unblocked(t)) return -ERESTARTSYS;
-        if (linux_poll_sleep_until(deadline, has_timeout,
-                                   yield_budget > 0) ==
-            PROC_WAKE_TIMEOUT_CAPACITY)
-            return -EAGAIN;
-        if (yield_budget > 0)
-            yield_budget--;
-    }
+    int result = linux_poll_wait_fds(fds, nfds, deadline, has_timeout);
+    return result == -EINTR ? -ERESTARTSYS : result;
 }
 
 /* ============================================================
@@ -794,48 +788,91 @@ static int fd_clear_user(int f, void *s) {
     return copy_to_user(slot, &mask, sizeof(long)) < 0 ? -EFAULT : 0;
 }
 
-static int select_filter_user(task_t *t, int nfds, void *readfds,
-                              void *writefds, void *exceptfds)
-{
-    for (int i = 0; i < nfds; i++) {
-        int rg = fdtable_get(t, i);
+#define SELECT_INTEREST_READ   1u
+#define SELECT_INTEREST_WRITE  2u
+#define SELECT_INTEREST_EXCEPT 3u
 
-        if (readfds && fd_isset_user(i, readfds)) {
-            int keep = 0;
-            if (rg >= 0) {
-                int rev = vfs_poll_events(rg, POLLIN);
-                keep = (rev & (POLLIN | POLLHUP | POLLERR)) != 0;
-            }
-            if (!keep && fd_clear_user(i, readfds) < 0)
-                return -EFAULT;
+static int linux_select_wait(task_t *task, int nfds, void *readfds,
+                             void *writefds, void *exceptfds,
+                             uint64_t deadline, bool has_deadline)
+{
+    if (!task || nfds < 0 || nfds > MAX_FILES)
+        return nfds < 0 ? -EINVAL : -EBADF;
+    size_t capacity = (size_t)nfds * 3;
+    readiness_interest_t *items = capacity ?
+        kcalloc(capacity, sizeof(*items)) : NULL;
+    if (capacity && !items)
+        return -ENOMEM;
+
+    size_t count = 0;
+    for (int fd = 0; fd < nfds; fd++) {
+        bool want_read = readfds && fd_isset_user(fd, readfds);
+        bool want_write = writefds && fd_isset_user(fd, writefds);
+        bool want_except = exceptfds && fd_isset_user(fd, exceptfds);
+        if (!(want_read || want_write || want_except))
+            continue;
+        if (fdtable_get(task, fd) < 0) {
+            kfree(items);
+            return -EBADF;
         }
-        if (writefds && fd_isset_user(i, writefds)) {
-            int keep = 0;
-            if (rg >= 0) {
-                int rev = vfs_poll_events(rg, POLLOUT);
-                keep = (rev & (POLLOUT | POLLERR | POLLHUP)) != 0;
-            }
-            if (!keep && fd_clear_user(i, writefds) < 0)
-                return -EFAULT;
+        if (want_read)
+            items[count++] = (readiness_interest_t){
+                .fd = fd, .events = POLLIN, .cookie = SELECT_INTEREST_READ
+            };
+        if (want_write)
+            items[count++] = (readiness_interest_t){
+                .fd = fd, .events = POLLOUT, .cookie = SELECT_INTEREST_WRITE
+            };
+        if (want_except)
+            items[count++] = (readiness_interest_t){
+                .fd = fd, .events = POLLPRI, .cookie = SELECT_INTEREST_EXCEPT
+            };
+    }
+
+    int result;
+    do {
+        result = readiness_wait_once(items, count, NULL, 0, 0,
+                                     deadline, has_deadline);
+    } while (result == READINESS_RETRY);
+    if (result < 0) {
+        kfree(items);
+        return result;
+    }
+
+    int ready = 0;
+    for (size_t i = 0; i < count; i++) {
+        readiness_interest_t *item = &items[i];
+        if (item->revents & POLLNVAL) {
+            kfree(items);
+            return -EBADF;
         }
-        if (exceptfds && fd_isset_user(i, exceptfds)) {
-            int keep = 0;
-            if (rg >= 0) {
-                int rev = vfs_poll_events(rg, POLLPRI);
-                keep = (rev & (POLLPRI | POLLERR | POLLHUP)) != 0;
-            }
-            if (!keep && fd_clear_user(i, exceptfds) < 0)
-                return -EFAULT;
+        void *set;
+        short mask;
+        if (item->cookie == SELECT_INTEREST_READ) {
+            set = readfds;
+            mask = POLLIN | POLLHUP | POLLERR;
+        } else if (item->cookie == SELECT_INTEREST_WRITE) {
+            set = writefds;
+            mask = POLLOUT | POLLHUP | POLLERR;
+        } else {
+            set = exceptfds;
+            mask = POLLPRI | POLLHUP | POLLERR;
+        }
+        if (item->revents & mask)
+            ready++;
+        else if (fd_clear_user(item->fd, set) < 0) {
+            kfree(items);
+            return -EFAULT;
         }
     }
-    return 0;
+    kfree(items);
+    return ready;
 }
 
 int64_t sys_select(int nfds, void *readfds, void *writefds,
                    void *exceptfds, void *timeout) {
     task_t *t = proc_current();
     if (!t) return -ESRCH;
-    (void)exceptfds;
 
     if (nfds < 0) return -EINVAL;
     uint64_t timeout_ticks = 0;
@@ -848,53 +885,10 @@ int64_t sys_select(int nfds, void *readfds, void *writefds,
         if ((tv[0] || tv[1]) && timeout_ticks == 0)
             timeout_ticks = 1;
     }
-    uint64_t deadline = timer_get_ticks() + (timeout_ticks ? timeout_ticks : 1);
-
-    int yield_budget = LINUX_POLL_ACTIVE_YIELDS;
-    for (;;) {
-        int ready_count = 0;
-
-        for (int i = 0; i < nfds; i++) {
-            int rg = fdtable_get(t, i);
-
-            if (readfds && fd_isset_user(i, readfds)) {
-                if (rg < 0) return -EBADF;
-                int rev = vfs_poll_events(rg, POLLIN);
-                if (rev & (POLLIN | POLLHUP | POLLERR)) ready_count++;
-            }
-            if (writefds && fd_isset_user(i, writefds)) {
-                if (rg < 0) return -EBADF;
-                int rev = vfs_poll_events(rg, POLLOUT);
-                if (rev & (POLLOUT | POLLERR | POLLHUP)) ready_count++;
-            }
-            if (exceptfds && fd_isset_user(i, exceptfds)) {
-                if (rg < 0) return -EBADF;
-                int rev = vfs_poll_events(rg, POLLPRI);
-                if (rev & (POLLPRI | POLLERR | POLLHUP)) ready_count++;
-            }
-        }
-
-        if (ready_count > 0) {
-            int fr = select_filter_user(t, nfds, readfds, writefds, exceptfds);
-            return fr < 0 ? fr : ready_count;
-        }
-        if (has_timeout && timeout_ticks == 0) {
-            int fr = select_filter_user(t, nfds, readfds, writefds, exceptfds);
-            return fr < 0 ? fr : 0;
-        }
-        if (has_timeout && timer_get_ticks() >= deadline) {
-            int fr = select_filter_user(t, nfds, readfds, writefds, exceptfds);
-            return fr < 0 ? fr : 0;
-        }
-        if (signal_task_has_unblocked(t))
-            return -ERESTARTSYS;
-        if (linux_poll_sleep_until(deadline, has_timeout,
-                                   yield_budget > 0) ==
-            PROC_WAKE_TIMEOUT_CAPACITY)
-            return -EAGAIN;
-        if (yield_budget > 0)
-            yield_budget--;
-    }
+    uint64_t deadline = timer_get_ticks() + timeout_ticks;
+    int result = linux_select_wait(t, nfds, readfds, writefds, exceptfds,
+                                   deadline, has_timeout);
+    return result == -EINTR ? -ERESTARTSYS : result;
 }
 
 int64_t sys_pselect6(int nfds, void *readfds, void *writefds,
@@ -913,8 +907,6 @@ int64_t sys_pselect6(int nfds, void *readfds, void *writefds,
         if ((ts[0] || ts[1]) && timeout_ticks == 0)
             timeout_ticks = 1;
     }
-    uint64_t deadline = timer_get_ticks() + (timeout_ticks ? timeout_ticks : 1);
-
     signal_state_t *saved_ss = NULL;
     uint64_t saved_blocked = 0;
     if (sigmask) {
@@ -940,51 +932,12 @@ int64_t sys_pselect6(int nfds, void *readfds, void *writefds,
     if (saved_ss) signal_task_defer_mask_restore(t, saved_blocked); \
     return (v); \
 } while (0)
-    int yield_budget = LINUX_POLL_ACTIVE_YIELDS;
-    for (;;) {
-        int ready_count = 0;
-
-        for (int i = 0; i < nfds; i++) {
-            int rg = fdtable_get(t, i);
-
-            if (readfds && fd_isset_user(i, readfds)) {
-                if (rg < 0) PSELECT_RETURN(-EBADF);
-                int rev = vfs_poll_events(rg, POLLIN);
-                if (rev & (POLLIN | POLLHUP | POLLERR)) ready_count++;
-            }
-            if (writefds && fd_isset_user(i, writefds)) {
-                if (rg < 0) PSELECT_RETURN(-EBADF);
-                int rev = vfs_poll_events(rg, POLLOUT);
-                if (rev & (POLLOUT | POLLERR | POLLHUP)) ready_count++;
-            }
-            if (exceptfds && fd_isset_user(i, exceptfds)) {
-                if (rg < 0) PSELECT_RETURN(-EBADF);
-                int rev = vfs_poll_events(rg, POLLPRI);
-                if (rev & (POLLPRI | POLLERR | POLLHUP)) ready_count++;
-            }
-        }
-
-        if (ready_count > 0) {
-            int fr = select_filter_user(t, nfds, readfds, writefds, exceptfds);
-            PSELECT_RETURN(fr < 0 ? fr : ready_count);
-        }
-        if (has_timeout && timeout_ticks == 0) {
-            int fr = select_filter_user(t, nfds, readfds, writefds, exceptfds);
-            PSELECT_RETURN(fr < 0 ? fr : 0);
-        }
-        if (has_timeout && timer_get_ticks() >= deadline) {
-            int fr = select_filter_user(t, nfds, readfds, writefds, exceptfds);
-            PSELECT_RETURN(fr < 0 ? fr : 0);
-        }
-        if (signal_task_has_unblocked(t))
-            PSELECT_SIGNAL_RETURN(-EINTR);
-        if (linux_poll_sleep_until(deadline, has_timeout,
-                                   yield_budget > 0) ==
-            PROC_WAKE_TIMEOUT_CAPACITY)
-            PSELECT_RETURN(-EAGAIN);
-        if (yield_budget > 0)
-            yield_budget--;
-    }
+    uint64_t deadline = timer_get_ticks() + timeout_ticks;
+    int result = linux_select_wait(t, nfds, readfds, writefds, exceptfds,
+                                   deadline, has_timeout);
+    if (result == -EINTR)
+        PSELECT_SIGNAL_RETURN(-EINTR);
+    PSELECT_RETURN(result);
 #undef PSELECT_RETURN
 #undef PSELECT_SIGNAL_RETURN
 }

@@ -357,6 +357,22 @@ static int eventq_semantics(void)
         return fail("evqc-peer-closed");
     tx = A20_HANDLE_NULL;
 
+    /* Vfile readiness uses the same EventQ wait path as channel events. */
+    a20_handle_t file = open_file("/proc/a20/objects", A20_PATH_OPEN_RDONLY,
+                                  A20_RIGHT_READ);
+    if (file == A20_HANDLE_NULL ||
+        a20_status_is_err(a20_event_watch(
+            q, file, A20_EVENT_MASK(A20_EVENT_READABLE), 0xDDDD)))
+        return fail("evqc-file-watch");
+    r = a20_event_wait(q, t0, &ev);
+    if (r != 1 || ev.source != file ||
+        !(ev.events & A20_EVENT_MASK(A20_EVENT_READABLE)) ||
+        ev.user_data != 0xDDDD)
+        return fail("evqc-file-ready");
+    if (a20_status_is_err(a20_event_cancel(q, file)))
+        return fail("evqc-file-cancel");
+    a20_hdl_close(file);
+
     a20_hdl_close(q);
     a20_hdl_close(rx);
     return 0;
