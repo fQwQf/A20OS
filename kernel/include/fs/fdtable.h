@@ -4,6 +4,7 @@
 #include "core/types.h"
 #include "core/refcount.h"
 #include "core/lock.h"
+#include "core/sync.h"
 #include "proc/proc.h"
 
 typedef struct vfile vfile_t;
@@ -21,6 +22,7 @@ typedef struct vfile vfile_t;
  */
 typedef struct files_struct {
     spinlock_t lock;
+    wait_queue_t readiness_waiters;
     refcount_t refcount;
     int     owners;
     int     release_owner_pid;
@@ -53,5 +55,7 @@ int  fdtable_dup(task_t *task, int oldfd, int minfd, int flags);
 int  fdtable_dup_to(task_t *task, int oldfd, int newfd, int flags);
 int  fdtable_get_cloexec(task_t *task, int fd);
 int  fdtable_set_cloexec(task_t *task, int fd, int cloexec);
+wait_queue_t *fdtable_current_readiness_queue(void);
+bool fdtable_current_matches_file(int fd, int gfd, uint64_t identity);
 
 #endif /* _FDTABLE_H */

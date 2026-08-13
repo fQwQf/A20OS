@@ -5,6 +5,7 @@
 #include "core/klog.h"
 #include "core/string.h"
 #include "fs/file.h"
+#include "fs/readiness.h"
 #include "mm/slab.h"
 
 #include "lwip/udp.h"
@@ -303,10 +304,37 @@ int net_socket_close_file(vfile_t *vf) {
     return 0;
 }
 
+static size_t net_vfile_poll_sources(vfile_t *vf, short events,
+                                     readiness_source_t *sources, size_t max)
+{
+    net_socket_t *s = vf ? vf->priv : NULL;
+    if (!s || !sources)
+        return 0;
+    size_t count = 0;
+    if (((events & POLLIN) || !(events & (POLLIN | POLLOUT))) && count < max) {
+        wait_queue_t *queue = s->listening ? &s->accept_waitq : &s->read_waitq;
+        sources[count++] = (readiness_source_t){ queue, 0, 0 };
+        if (s->ch_ep && count < max)
+            sources[count++] = (readiness_source_t){
+                &s->ch_ep->waiters, A20_CH_WAIT_RECV, 0
+            };
+    }
+    if ((events & POLLOUT) && count < max) {
+        sources[count++] = (readiness_source_t){ &s->write_waitq, 0, 0 };
+        if (s->ch_ep && count < max)
+            sources[count++] = (readiness_source_t){
+                &s->ch_ep->waiters, A20_CH_WAIT_SEND, 0
+            };
+    }
+    return count;
+}
+
 static vfile_ops_t g_net_ops = {
     .read = net_vfile_read,
     .write = net_vfile_write,
     .lseek = net_vfile_lseek,
+    .poll = net_poll_file,
+    .poll_sources = net_vfile_poll_sources,
     .close = net_socket_close_file,
 };
 
