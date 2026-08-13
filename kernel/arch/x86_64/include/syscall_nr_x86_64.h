@@ -246,7 +246,7 @@
 #define X86_SYS_sync_file_range 277
 #define X86_SYS_vmsplice        278
 #define X86_SYS_utimensat       280
-#define X86_SYS_epoll_pwait2    (X86_SYSCALL_TABLE_SIZE-1)
+#define X86_SYS_epoll_pwait2    441
 #define X86_SYS_signalfd        282
 #define X86_SYS_timerfd_create  283
 #define X86_SYS_eventfd         284
@@ -307,7 +307,7 @@
 #define X86_SYS_fchmodat2       452
 #define X86_SYS_mkswap          1020
 
-#define X86_SYSCALL_TABLE_SIZE  453
+#define X86_SYSCALL_TABLE_SIZE  463
 
 /* Map x86_64 syscall nr -> kernel internal syscall nr */
 static inline uint32_t x86_syscall_to_kernel_nr(uint32_t x86_nr)
@@ -348,7 +348,7 @@ static inline uint32_t x86_syscall_to_kernel_nr(uint32_t x86_nr)
         /* 31 */ SYS_shmctl,
         /* 32 */ SYS_dup,
         /* 33 */ SYS_dup3,          /* dup2 -> dup3 */
-        /* 34 */ (uint16_t)-1,      /* pause - not impl */
+        /* 34 */ SYS_pause,      /* pause */
         /* 35 */ SYS_nanosleep,
         /* 36 */ SYS_getitimer,
         /* 37 */ SYS_alarm,
@@ -382,10 +382,10 @@ static inline uint32_t x86_syscall_to_kernel_nr(uint32_t x86_nr)
         /* 65 */ SYS_semop,
         /* 66 */ SYS_semctl,
         /* 67 */ SYS_shmdt,
-        /* 68 */ (uint16_t)-1,      /* msgget */
-        /* 69 */ (uint16_t)-1,      /* msgsnd */
-        /* 70 */ (uint16_t)-1,      /* msgrcv */
-        /* 71 */ (uint16_t)-1,      /* msgctl */
+        /*  68 */ SYS_msgget,  /* msgget */
+        /*  69 */ SYS_msgsnd,  /* msgsnd */
+        /*  70 */ SYS_msgrcv,  /* msgrcv */
+        /*  71 */ SYS_msgctl,  /* msgctl */
         /* 72 */ SYS_fcntl,
         /* 73 */ SYS_flock,
         /* 74 */ SYS_fsync,
@@ -446,7 +446,7 @@ static inline uint32_t x86_syscall_to_kernel_nr(uint32_t x86_nr)
         /* 129 */ SYS_rt_sigqueueinfo,
         /* 130 */ SYS_sigsuspend,
         /* 131 */ SYS_sigaltstack,
-        /* 132 */ (uint16_t)-1,     /* utime */
+        /* 132 */ SYS_utime,        /* utime */
         /* 133 */ SYS_mknodat,      /* mknod -> mknodat */
         /* 134 */ (uint16_t)-1,     /* uselib */
         /* 135 */ SYS_personality,
@@ -493,15 +493,15 @@ static inline uint32_t x86_syscall_to_kernel_nr(uint32_t x86_nr)
         /* 176 */ SYS_delete_module,
         /* 177 */ (uint16_t)-1,     /* get_kernel_syms */
         /* 178 */ (uint16_t)-1,     /* query_module */
-        /* 179 */ (uint16_t)-1,     /* quotactl */
+        /* 179 */ SYS_quotactl,  /* quotactl */
         /* 180 */ (uint16_t)-1,     /* nfsservctl */
         /* 181 */ (uint16_t)-1,
         /* 182 */ (uint16_t)-1,
         /* 183 */ (uint16_t)-1,
         /* 184 */ (uint16_t)-1,
         /* 185 */ (uint16_t)-1,
-        /* 186 */ (uint16_t)-1,
-        /* 187 */ (uint16_t)-1,
+        /* 186 */ SYS_gettid,
+        /* 187 */ SYS_readahead,
         /* 188 */ SYS_setxattr,
         /* 189 */ SYS_lsetxattr,
         /* 190 */ SYS_fsetxattr,
@@ -514,28 +514,28 @@ static inline uint32_t x86_syscall_to_kernel_nr(uint32_t x86_nr)
         /* 197 */ SYS_removexattr,
         /* 198 */ SYS_lremovexattr,
         /* 199 */ SYS_fremovexattr,
-        /* 200 */ (uint16_t)-1,     /* tkill */
-        /* 201 */ (uint16_t)-1,     /* time: no generic handler (musl uses clock_gettime) */
+        /* 200 */ SYS_tkill,  /* tkill */
+        /* 201 */ SYS_time,         /* time */
         /* 202 */ SYS_futex,
         /* 203 */ SYS_sched_setaffinity,
         /* 204 */ SYS_sched_getaffinity,
-        /* 205 */ (uint16_t)-1,     /* set_thread_area */
+        /* 205 */ SYS_set_thread_area,  /* set_thread_area */
         /* 206 */ SYS_io_setup,
         /* 207 */ SYS_io_destroy,
         /* 208 */ SYS_io_getevents,
         /* 209 */ SYS_io_submit,
         /* 210 */ SYS_io_cancel,
-        /* 211 */ (uint16_t)-1,     /* get_thread_area */
-        /* 212 */ (uint16_t)-1,     /* lookup_dcookie */
+        /* 211 */ SYS_get_thread_area,  /* get_thread_area */
+        /* 212 */ SYS_lookup_dcookie,  /* lookup_dcookie */
         /* 213 */ SYS_epoll_create1, /* epoll_create -> epoll_create1 */
         /* 214 */ (uint16_t)-1,
         /* 215 */ (uint16_t)-1,
-        /* 216 */ (uint16_t)-1,
+        /* 216 */ SYS_remap_file_pages,
         /* 217 */ SYS_getdents64,
         /* 218 */ SYS_set_tid_address,
-        /* 219 */ (uint16_t)-1,     /* restart_syscall */
+        /* 219 */ SYS_restart_syscall,  /* restart_syscall */
         /* 220 */ SYS_semtimedop,
-        /* 221 */ (uint16_t)-1,     /* fadvise64 */
+        /* 221 */ SYS_fadvise64,  /* fadvise64 */
         /* 222 */ SYS_timer_create,
         /* 223 */ SYS_timer_settime,
         /* 224 */ SYS_timer_gettime,
@@ -549,28 +549,28 @@ static inline uint32_t x86_syscall_to_kernel_nr(uint32_t x86_nr)
         /* 232 */ SYS_epoll_pwait,  /* epoll_wait -> epoll_pwait */
         /* 233 */ SYS_epoll_ctl,
         /* 234 */ SYS_tgkill,
-        /* 235 */ (uint16_t)-1,
-        /* 236 */ (uint16_t)-1,
-        /* 237 */ (uint16_t)-1,
-        /* 238 */ (uint16_t)-1,
-        /* 239 */ (uint16_t)-1,
-        /* 240 */ (uint16_t)-1,
+        /* 235 */ SYS_utimes,
+        /* 236 */ (uint16_t)-1,     /* vserver */
+        /* 237 */ SYS_mbind,
+        /* 238 */ SYS_set_mempolicy,
+        /* 239 */ SYS_get_mempolicy,
+        /* 240 */ SYS_mq_open,
         /* 241 */ SYS_perf_event_open,
-        /* 242 */ (uint16_t)-1,
-        /* 243 */ (uint16_t)-1,
-        /* 244 */ (uint16_t)-1,
-        /* 245 */ (uint16_t)-1,
-        /* 246 */ (uint16_t)-1,
+        /* 242 */ SYS_mq_timedsend,
+        /* 243 */ SYS_mq_timedreceive,
+        /* 244 */ SYS_mq_notify,
+        /* 245 */ SYS_mq_getsetattr,
+        /* 246 */ SYS_kexec_load,
         /* 247 */ SYS_waitid,
         /* 248 */ SYS_add_key,
         /* 249 */ SYS_request_key,
         /* 250 */ SYS_keyctl,
-        /* 251 */ (uint16_t)-1,     /* ioprio_set */
-        /* 252 */ (uint16_t)-1,     /* ioprio_get */
+        /* 251 */ SYS_ioprio_set,  /* ioprio_set */
+        /* 252 */ SYS_ioprio_get,  /* ioprio_get */
         /* 253 */ SYS_inotify_init1,
         /* 254 */ SYS_inotify_add_watch,
         /* 255 */ SYS_inotify_rm_watch,
-        /* 256 */ (uint16_t)-1,     /* migrate_pages */
+        /* 256 */ SYS_migrate_pages,  /* migrate_pages */
         /* 257 */ SYS_openat,
         /* 258 */ SYS_mkdirat,
         /* 259 */ SYS_mknodat,
@@ -593,12 +593,12 @@ static inline uint32_t x86_syscall_to_kernel_nr(uint32_t x86_nr)
         /* 276 */ SYS_tee,
         /* 277 */ SYS_sync_file_range,
         /* 278 */ SYS_vmsplice,
-        /* 279 */ (uint16_t)-1,     /* move_pages */
+        /* 279 */ SYS_move_pages,  /* move_pages */
         /* 280 */ SYS_utimensat,
         /* 281 */ SYS_epoll_pwait,
         /* 282 */ SYS_signalfd4,    /* signalfd -> signalfd4 */
         /* 283 */ SYS_timerfd_create,
-        /* 284 */ (uint16_t)-1,     /* eventfd -> eventfd2 */
+        /* 284 */ SYS_eventfd2,  /* eventfd -> eventfd2 */
         /* 285 */ SYS_fallocate,
         /* 286 */ SYS_timerfd_settime,
         /* 287 */ SYS_timerfd_gettime,
@@ -611,22 +611,22 @@ static inline uint32_t x86_syscall_to_kernel_nr(uint32_t x86_nr)
         /* 294 */ SYS_inotify_init1,
         /* 295 */ SYS_preadv,
         /* 296 */ SYS_pwritev,
-        /* 297 */ (uint16_t)-1,     /* rt_tgsigqueueinfo */
+        /* 297 */ SYS_rt_tgsigqueueinfo,  /* rt_tgsigqueueinfo */
         /* 298 */ SYS_perf_event_open,
         /* 299 */ SYS_recvmmsg,
         /* 300 */ SYS_fanotify_init,
         /* 301 */ SYS_fanotify_mark,
         /* 302 */ SYS_prlimit64,
-        /* 303 */ (uint16_t)-1,     /* name_to_handle_at */
-        /* 304 */ (uint16_t)-1,     /* open_by_handle_at */
+        /* 303 */ SYS_name_to_handle_at,  /* name_to_handle_at */
+        /* 304 */ SYS_open_by_handle_at,  /* open_by_handle_at */
         /* 305 */ SYS_clock_adjtime,
         /* 306 */ SYS_syncfs,
         /* 307 */ SYS_sendmmsg,
         /* 308 */ SYS_setns,
         /* 309 */ SYS_getcpu,
-        /* 310 */ (uint16_t)-1,     /* process_vm_readv */
-        /* 311 */ (uint16_t)-1,     /* process_vm_writev */
-        /* 312 */ (uint16_t)-1,     /* kcmp */
+        /* 310 */ SYS_process_vm_readv,  /* process_vm_readv */
+        /* 311 */ SYS_process_vm_writev,  /* process_vm_writev */
+        /* 312 */ SYS_kcmp,  /* kcmp */
         /* 313 */ SYS_finit_module,
         /* 314 */ SYS_sched_setattr,
         /* 315 */ SYS_sched_getattr,
@@ -634,22 +634,22 @@ static inline uint32_t x86_syscall_to_kernel_nr(uint32_t x86_nr)
         /* 317 */ SYS_membarrier,
         /* 318 */ SYS_getrandom,
         /* 319 */ SYS_memfd_create,
-        /* 320 */ (uint16_t)-1,     /* kexec_file_load */
+        /* 320 */ SYS_kexec_file_load,  /* kexec_file_load */
         /* 321 */ SYS_bpf,
         /* 322 */ SYS_execveat,
         /* 323 */ SYS_userfaultfd,
         /* 324 */ SYS_membarrier,
-        /* 325 */ (uint16_t)-1,     /* mlock2 */
+        /* 325 */ SYS_mlock2,  /* mlock2 */
         /* 326 */ SYS_copy_file_range,
         /* 327 */ SYS_preadv2,
         /* 328 */ SYS_pwritev2,
-        /* 329 */ (uint16_t)-1,     /* pkey_mprotect */
-        /* 330 */ (uint16_t)-1,     /* pkey_alloc */
-        /* 331 */ (uint16_t)-1,     /* pkey_free */
+        /* 329 */ SYS_pkey_mprotect,  /* pkey_mprotect */
+        /* 330 */ SYS_pkey_alloc,  /* pkey_alloc */
+        /* 331 */ SYS_pkey_free,  /* pkey_free */
         /* 332 */ SYS_statx,
-        /* 333 */ (uint16_t)-1,
-        /* 334 */ (uint16_t)-1,
-        /* 335 */ (uint16_t)-1,
+        /* 333 */ SYS_io_pgetevents,
+        /* 334 */ SYS_rseq,
+        /* 335 */ (uint16_t)-1,      /* uretprobe */
         /* 336 */ (uint16_t)-1,
         /* 337 */ (uint16_t)-1,
         /* 338 */ (uint16_t)-1,
@@ -739,34 +739,44 @@ static inline uint32_t x86_syscall_to_kernel_nr(uint32_t x86_nr)
         /* 422 */ (uint16_t)-1,
         /* 423 */ (uint16_t)-1,
         /* 424 */ SYS_pidfd_send_signal,
-        /* 425 */ (uint16_t)-1,
-        /* 426 */ (uint16_t)-1,
-        /* 427 */ (uint16_t)-1,
-        /* 428 */ (uint16_t)-1,
-        /* 429 */ (uint16_t)-1,
-        /* 430 */ (uint16_t)-1,
-        /* 431 */ (uint16_t)-1,
-        /* 432 */ (uint16_t)-1,
-        /* 433 */ (uint16_t)-1,
-        /* 434 */ (uint16_t)-1,
+        /* 425 */ SYS_io_uring_setup,
+        /* 426 */ SYS_io_uring_enter,
+        /* 427 */ SYS_io_uring_register,
+        /* 428 */ SYS_open_tree,
+        /* 429 */ SYS_move_mount,
+        /* 430 */ SYS_fsopen,
+        /* 431 */ SYS_fsconfig,
+        /* 432 */ SYS_fsmount,
+        /* 433 */ SYS_fspick,
+        /* 434 */ SYS_pidfd_open,
         /* 435 */ SYS_clone3,
         /* 436 */ SYS_close_range,
         /* 437 */ SYS_openat2,
-        /* 438 */ (uint16_t)-1,     /* pidfd_getfd */
+        /* 438 */ SYS_pidfd_getfd,  /* pidfd_getfd */
         /* 439 */ SYS_faccessat2,
-        /* 440 */ (uint16_t)-1,
-        /* 441 */ (uint16_t)-1,
-        /* 442 */ (uint16_t)-1,
-        /* 443 */ (uint16_t)-1,
-        /* 444 */ (uint16_t)-1,
-        /* 445 */ (uint16_t)-1,
-        /* 446 */ (uint16_t)-1,
-        /* 447 */ (uint16_t)-1,     /* memfd_secret */
-        /* 448 */ (uint16_t)-1,
-        /* 449 */ (uint16_t)-1,
-        /* 450 */ (uint16_t)-1,
-        /* 451 */ (uint16_t)-1,
+        /* 440 */ SYS_process_madvise,
+        /* 441 */ SYS_epoll_pwait2,
+        /* 442 */ SYS_mount_setattr,
+        /* 443 */ SYS_quotactl_fd,
+        /* 444 */ SYS_landlock_create_ruleset,
+        /* 445 */ SYS_landlock_add_rule,
+        /* 446 */ SYS_landlock_restrict_self,
+        /* 447 */ SYS_memfd_secret,  /* memfd_secret */
+        /* 448 */ SYS_process_mrelease,
+        /* 449 */ SYS_futex_waitv,
+        /* 450 */ SYS_set_mempolicy_home_node,
+        /* 451 */ SYS_cachestat,
         /* 452 */ SYS_fchmodat,     /* fchmodat2 -> fchmodat (approx) */
+        /* 453 */ SYS_map_shadow_stack,
+        /* 454 */ SYS_futex_wake,
+        /* 455 */ SYS_futex_wait,
+        /* 456 */ SYS_futex_requeue,
+        /* 457 */ SYS_statmount,
+        /* 458 */ SYS_listmount,
+        /* 459 */ SYS_lsm_get_self_attr,
+        /* 460 */ SYS_lsm_set_self_attr,
+        /* 461 */ SYS_lsm_list_modules,
+        /* 462 */ SYS_mseal,
     };
 
     if (x86_nr == X86_SYS_mkswap)

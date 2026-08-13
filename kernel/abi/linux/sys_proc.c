@@ -15,6 +15,37 @@ __attribute__((weak)) int64_t sys_set_thread_area(void *ptr) {
     TRAP_CTX_TP(t->trap_ctx) = (uint64_t)(uintptr_t)ptr;
     return 0;
 }
+
+__attribute__((weak)) int64_t sys_get_thread_area(void *ptr) {
+    task_t *t = proc_current();
+    if (!t || !t->trap_ctx)
+        return -ESRCH;
+    if (!ptr)
+        return -EFAULT;
+    /* x86_64 get_thread_area(2): report the FS-base TLS pointer carried in
+     * the trap frame.  Linux returns -EINVAL when no descriptor is set;
+     * A20OS always has the base available. */
+    uint64_t base = TRAP_CTX_TP(t->trap_ctx);
+    if (copy_to_user(ptr, &base, sizeof(uint64_t)) < 0)
+        return -EFAULT;
+    return 0;
+}
+
+__attribute__((weak)) int64_t sys_pause(void) {
+    task_t *t = proc_current();
+    if (!t)
+        return -EINTR;
+    /* pause(2): block until a signal arrives.  The park is interruptible;
+     * any delivered signal wakes it and pause returns -EINTR (or the signal
+     * handler runs first, mirroring Linux). */
+    for (;;) {
+        if (signal_task_has_unblocked(t))
+            return -EINTR;
+        if (proc_park_wait(PROC_WAIT_INTERRUPTIBLE, 0) ==
+            PROC_WAKE_TIMEOUT_CAPACITY)
+            return -EAGAIN;
+    }
+}
 #define CLD_EXITED     1
 #define CLD_KILLED     2
 #define CLD_DUMPED     3

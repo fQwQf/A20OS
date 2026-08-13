@@ -1,6 +1,12 @@
 # Linux ABI 兼容性说明
 
-`kernel/abi/linux` 为 A20OS 用户态实现了一组 Linux-compatible syscall 子集。 它是兼容层，不是完整的 Linux kernel personality。 `syscall_table.def` 当前登记 258 个入口（含 2 个 A20OS 扩展）。登记表示分派表 覆盖，不表示每项都达到 Linux 语义完整性；已登记的 syscall 可能只支持部分命令、 flag、对象类型或并发边界。表中不再有固定返回 `-ENOSYS` 的显式占位符；仅存的 `-ENOSYS` 返回是架构/版本正确的 Linux 语义（nfsservctl 已在 Linux 4.19 移除、 map_shadow_stack 是 x86 CET、riscv_* 与 arch_prctl 是架构专属）。
+`kernel/abi/linux` 为 A20OS 用户态实现了一组 Linux-compatible syscall 子集。 它是兼容层，不是完整的 Linux kernel personality。 `syscall_table.def` 当前登记 343 个入口（含 2 个 A20OS 扩展与 5 个 x86_64-only 备用槽位 `time`/`pause`/`utime`/`utimes`/`get_thread_area`）。登记表示分派表 覆盖，不表示每项都达到 Linux 语义完整性；已登记的 syscall 可能只支持部分命令、 flag、对象类型或并发边界。表中不再有固定返回 `-ENOSYS` 的显式占位符；仅存的 `-ENOSYS` 返回是架构/版本正确的 Linux 语义（nfsservctl 已在 Linux 4.19 移除、 map_shadow_stack 是 x86 CET、riscv_* 与 arch_prctl 是架构专属）。
+
+## 四主线架构编号覆盖
+
+- **riscv64 / aarch64**：asm-generic 编号 100% 覆盖（仅 `244 arch_specific` 占位，非真实 syscall）。
+- **loongarch64**：补齐 LoongArch 私有 `file_getattr(468)`/`file_setattr(469)` （`kernel/fs/vfs/fileattr.c` 核心 + `sys_fileattr.c` 包装）；编号覆盖与 Linux 一致。
+- **x86_64**：`syscall_nr_x86_64.h` 映射表扩展至 463 槽（0–462），修正 ~64 个 陈旧 `-1` 映射（msgget/msgsnd/msgrcv/msgctl、quotactl、gettid、readahead、 tkill、set_thread_area、lookup_dcookie、remap_file_pages、restart_syscall、 fadvise64、utimes、mbind/set_mempolicy/get_mempolicy、mq_*、kexec_load、 ioprio_*、migrate_pages/move_pages、eventfd→eventfd2、rt_tgsigqueueinfo、 name_to_handle_at/open_by_handle_at、process_vm_*、kcmp、kexec_file_load、 mlock2、pkey_*、io_pgetevents、rseq、io_uring_*、open_tree/move_mount/ fsopen/fsconfig/fsmount/fspick、pidfd_open/pidfd_getfd、process_madvise/ process_mrelease、epoll_pwait2、mount_setattr、quotactl_fd、landlock_*、 memfd_secret、futex_waitv、set_mempolicy_home_node、cachestat），并补 453–462（map_shadow_stack、futex_wake/wait/requeue、statmount、listmount、 lsm_*、mseal）。新增 x86-only 处理器：`sys_time`（已存在，现注册）、 `sys_pause`（park 直到信号）、`sys_utime`/`sys_utimes`（vfs_utimensat 的 timeval/utimbuf 包装）、`sys_get_thread_area`（trap frame 的 FS-base TLS）。 剩余 `-1` 均为已废弃或 x86-only 遗留（uselib/_sysctl/create_module/ nfsservctl/iopl/ioperm/modify_ldt/getpmsg 等），返回 `-ENOSYS` 与 Linux 一致。
 
 ## 兼容等级
 
@@ -31,7 +37,10 @@
 - perf_event_open（`kernel/abi/linux/sys_perf.c`）：PERF_TYPE_SOFTWARE 事件（CPU/TASK clock、page faults、context switches 及无源的软件事件），read(2) 输出 count/time/id，支持 ENABLE/DISABLE/RESET/PERIOD/ID；无 PMU，硬件/raw/breakpoint 事件返回 -EINVAL，无 mmap 采样环。
 - futex：全部标准命令（含有边界的 PI 变体 LOCK_PI/UNLOCK_PI/TRYLOCK_PI/WAIT_REQUEUE_PI/CMP_REQUEUE_PI），不携带优先级继承提升；FUTEX_FD（Linux 5.4 移除）返回 -EINVAL。
 - Landlock：fd-backed ruleset + path-beneath 规则，在 `vfs_open` 强制；没有完整 LSM 框架。
-- rseq：注册/注销每线程 rseq 区域；A20OS 不做跨 CPU 迁移，因此内核从不中止序列。
+- rseq：注册/注销每线程 rseq 区域；调度器存在跨 CPU 偷取迁移，但 rseq 尚无内核迁移中止（`rseq_ip_fixup`），这是登记语义（Linux 会写 cpu_id 并回绕到 abort_ip），后续深化方向。
+- `splice`/`vmsplice`/`tee` 是真实语义（核心 `kernel/fs/splice.c` + pipe peek）：file↔pipe、pipe↔pipe、tee 不消耗源；`SPLICE_F_*` 校验、pipe 端点非空 offset 返回 `-ESPIPE`、无 pipe 端点返回 `-EINVAL`；传输基于拷贝（等价 Linux 非页对齐回退路径）。
+- `membarrier` 实现完整命令集：QUERY/GLOBAL/GLOBAL_EXPEDITED/REGISTER_GLOBAL_EXPEDITED/PRIVATE_EXPEDITED(+SYNC_CORE/RSEQ)/REGISTER_PRIVATE_EXPEDITED(+SYNC_CORE/RSEQ)；`PRIVATE_EXPEDITED` 要求先注册（否则 `-EPERM`），真正的跨 CPU 屏障复用 reschedule IPI（远端处理函数执行 acquire fence 并回 ack）。未知命令与非法 flags 返回 `-EINVAL`。
+- `eventfd` 的 `O_NONBLOCK` 改为实时读取 `vf->flags`，因此 `fcntl(F_SETFL, O_NONBLOCK)` 之后 read/write 按管道语义立即 `-EAGAIN`（与 pipe 一致）。
 - `restart_syscall` 返回 `-ERESTARTNOINTR`；`remap_file_pages` 是接受式 no-op；`memfd_secret` 退化为普通 memfd。
 - SysV 消息队列（`kernel/ipc/sysv_msg.c`）：固定 32 队列表，支持 msgget/msgsnd/msgrcv/msgctl，含阻塞 park/wake 与 IPC_NOWAIT/MSG_NOERROR。
 - POSIX 消息队列（`kernel/ipc/posix_mq.c`）：命名队列 + per-fd mqd，优先级 FIFO，绝对超时（timedsend/timedreceive），mq_notify 用信号投递。
