@@ -4,6 +4,7 @@
 #include "core/string.h"
 #include "core/sync.h"
 #include "fs/file.h"
+#include "fs/readiness.h"
 #include "mm/slab.h"
 #include "proc/proc.h"
 #include "proc/signal.h"
@@ -324,8 +325,31 @@ static int pipe_write_close(vfile_t *vf)
     return 0;
 }
 
-static vfile_ops_t g_pipe_read_ops  = { .read = pipe_read,       .write = pipe_null_write, .close = pipe_read_close  };
-static vfile_ops_t g_pipe_write_ops = { .read = pipe_null_read,  .write = pipe_write,      .close = pipe_write_close };
+static vfile_ops_t g_pipe_read_ops;
+static vfile_ops_t g_pipe_write_ops;
+
+static size_t pipe_poll_sources(vfile_t *vf, short events,
+                                readiness_source_t *sources, size_t max)
+{
+    (void)events;
+    pipe_buf_t *pb = vf ? vf->priv : NULL;
+    if (!pb || !sources || max == 0)
+        return 0;
+    sources[0].queue = vf->ops == &g_pipe_read_ops ?
+                       &pb->read_waiters : &pb->write_waiters;
+    sources[0].key = 0;
+    sources[0].deadline = 0;
+    return 1;
+}
+
+static vfile_ops_t g_pipe_read_ops  = {
+    .read = pipe_read, .write = pipe_null_write, .poll = pipe_poll_events,
+    .poll_sources = pipe_poll_sources, .close = pipe_read_close
+};
+static vfile_ops_t g_pipe_write_ops = {
+    .read = pipe_null_read, .write = pipe_write, .poll = pipe_poll_events,
+    .poll_sources = pipe_poll_sources, .close = pipe_write_close
+};
 
 int pipe_vfile_is(vfile_t *vf)
 {

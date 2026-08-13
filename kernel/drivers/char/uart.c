@@ -244,6 +244,10 @@ int uart_has_input(void) {
     return has;
 }
 
+wait_queue_t *uart_read_wait_queue(void) {
+    return &rx_waiters;
+}
+
 // 发送字符串
 void uart_puts(const char *s) {
     while (*s) uart_putc(*s++);
