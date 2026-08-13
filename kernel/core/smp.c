@@ -240,7 +240,6 @@ int smp_remote_tlb_flush_supported(void)
  */
 static _Atomic uint32_t mb_request[CONFIG_NR_CPUS];
 static _Atomic uint32_t mb_ack[CONFIG_NR_CPUS];
-static _Atomic uint32_t mb_seq;
 
 /* Called by the reschedule-IPI handler after it has executed the acquire
  * fence.  Advances the acknowledgment only up to the request the caller
@@ -260,9 +259,9 @@ void smp_membarrier_ipi_ack(unsigned cpu)
  * builds this is a single compiler/CPU fence. */
 int smp_membarrier_sync_all(void)
 {
-    uint32_t seq = __atomic_add_fetch(&mb_seq, 1, __ATOMIC_ACQ_REL);
     unsigned self = arch_current_cpu_id();
     uint32_t target = smp_online_cpu_mask() & ~(1U << self);
+    uint32_t expected[CONFIG_NR_CPUS] = {0};
 
     if (!target) {
         __atomic_thread_fence(__ATOMIC_SEQ_CST);
@@ -275,9 +274,8 @@ int smp_membarrier_sync_all(void)
         uint64_t hw_id;
         if (smp_logical_to_hw(cpu, &hw_id) < 0)
             continue;
-        uint32_t expected = __atomic_add_fetch(&mb_request[cpu], 1,
-                                               __ATOMIC_ACQ_REL);
-        (void)seq;
+        expected[cpu] = __atomic_add_fetch(&mb_request[cpu], 1,
+                                           __ATOMIC_ACQ_REL);
         const smp_platform_ops_t *ops = platform_ops();
         if (ops && ops->send_ipi && smp_cpu_is_online(cpu))
             ops->send_ipi(&cpu_descs[cpu], SMP_IPI_RESCHEDULE);
@@ -290,9 +288,8 @@ int smp_membarrier_sync_all(void)
         if (!(target & (1U << cpu)))
             continue;
         uint64_t wait_start = timer_get_ticks();
-        uint32_t expected = mb_request[cpu];
         while ((int32_t)(__atomic_load_n(&mb_ack[cpu], __ATOMIC_ACQUIRE) -
-                         (int32_t)expected) < 0) {
+                         (int32_t)expected[cpu]) < 0) {
             if (timer_get_ticks() - wait_start > 5UL * ARCH_TIMER_FREQ) {
                 printf("[SMP membarrier] timeout self=%u target=%u\n", self,
                        cpu);
