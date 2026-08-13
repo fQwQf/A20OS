@@ -19,6 +19,9 @@ int64_t sys_a20_handle_close_many(const a20_syscall_args_t *args);
 int64_t sys_a20_handle_seek(const a20_syscall_args_t *args);
 int64_t sys_a20_task_exit(const a20_syscall_args_t *args);
 int64_t sys_a20_task_spawn(const a20_syscall_args_t *args);
+int64_t sys_a20_task_clone(const a20_syscall_args_t *args);
+int64_t sys_a20_execve(const a20_syscall_args_t *args);
+int64_t sys_a20_task_adopt(const a20_syscall_args_t *args);
 int64_t sys_a20_task_wait(const a20_syscall_args_t *args);
 int64_t sys_a20_vm_alloc(const a20_syscall_args_t *args);
 int64_t sys_a20_vm_unmap(const a20_syscall_args_t *args);
@@ -58,6 +61,7 @@ int64_t sys_a20_vm_advise(const a20_syscall_args_t *args);
 int64_t sys_a20_vm_remap(const a20_syscall_args_t *args);
 int64_t sys_a20_vm_lock(const a20_syscall_args_t *args);
 int64_t sys_a20_vm_create_object(const a20_syscall_args_t *args);
+int64_t sys_a20_vm_share_region(const a20_syscall_args_t *args);
 int64_t sys_a20_path_create(const a20_syscall_args_t *args);
 int64_t sys_a20_path_unlink(const a20_syscall_args_t *args);
 int64_t sys_a20_path_rename(const a20_syscall_args_t *args);
@@ -142,6 +146,13 @@ int64_t sys_a20_device_release(const a20_syscall_args_t *args);
 int64_t sys_a20_device_alloc_dma(const a20_syscall_args_t *args);
 int64_t sys_a20_device_free_dma(const a20_syscall_args_t *args);
 int64_t sys_a20_device_get_info(const a20_syscall_args_t *args);
+int64_t sys_a20_pager_create(const a20_syscall_args_t *args);
+int64_t sys_a20_pager_vmo_attach(const a20_syscall_args_t *args);
+int64_t sys_a20_pager_supply_pages(const a20_syscall_args_t *args);
+int64_t sys_a20_monitor_create(const a20_syscall_args_t *args);
+int64_t sys_a20_monitor_query(const a20_syscall_args_t *args);
+int64_t sys_a20_task_mem_read(const a20_syscall_args_t *args);
+int64_t sys_a20_task_mem_write(const a20_syscall_args_t *args);
 
 /* Generate handler stubs from .def */
 #define A20_NATIVE_SYSCALL(name, ...) \

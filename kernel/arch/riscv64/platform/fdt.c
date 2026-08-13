@@ -6,6 +6,7 @@
 #include "core/stdio.h"
 #include "firmware.h"
 #include "platform.h"
+#include "drivers/core/driver_core.h"
 
 #define FDT_MAGIC       0xd00dfeedU
 #define FDT_BEGIN_NODE  1U
@@ -44,6 +45,19 @@ extern uint64_t __boot_dtb_ptr;
 
 static paddr_t riscv64_ram_base = PHYS_MEMORY_BASE;
 static paddr_t riscv64_ram_end = PHYS_MEMORY_END;
+
+/* The selected board declares the physical window the kernel may use.  The
+ * FDT memory node then narrows that window to the RAM actually populated, so
+ * the same memory discovery works for QEMU virt (0x80000000..) and for the
+ * StarFive VisionFive 2 (0x40000000..) without hard-coding one board here. */
+static void riscv64_window_from_board(void)
+{
+    if (current_board &&
+        current_board->ram_end > current_board->ram_base) {
+        riscv64_ram_base = current_board->ram_base;
+        riscv64_ram_end = current_board->ram_end;
+    }
+}
 
 static int fdt_isa_has_token(const uint8_t *value, uint32_t len,
                              const char *extension)
@@ -113,6 +127,57 @@ int riscv64_fdt_has_isa_extension(const char *extension)
     return 0;
 }
 
+/* Read the RISC-V timer timebase-frequency from the DTB (/cpus).  Returns 0
+ * when no usable value is published, so boards can fall back to a known
+ * constant (QEMU virt = 10 MHz, StarFive JH7110 = 24 MHz). */
+uint64_t riscv64_fdt_timebase_freq(void)
+{
+    const uint8_t *base = (const uint8_t *)(uintptr_t)__boot_dtb_ptr;
+    if (!base || read_be32(base) != FDT_MAGIC)
+        return 0;
+
+    uint32_t totalsize = read_be32(base + 4);
+    uint32_t off_struct = read_be32(base + 8);
+    uint32_t off_strings = read_be32(base + 12);
+    if (totalsize < 40 || off_struct >= totalsize || off_strings >= totalsize)
+        return 0;
+
+    const uint8_t *p = base + off_struct;
+    const uint8_t *endp = base + totalsize;
+    const uint8_t *stringsp = base + off_strings;
+    while (p + 4 <= endp) {
+        uint32_t token = read_be32(p);
+        p += 4;
+        if (token == FDT_END)
+            break;
+        if (token == FDT_BEGIN_NODE) {
+            const char *name = (const char *)p;
+            while ((const uint8_t *)name < endp && *name)
+                name++;
+            if ((const uint8_t *)name >= endp)
+                return 0;
+            p = (const uint8_t *)(((uintptr_t)(name + 1) + 3) & ~3UL);
+            continue;
+        }
+        if (token == FDT_END_NODE || token == FDT_NOP)
+            continue;
+        if (token != FDT_PROP || p + 8 > endp)
+            return 0;
+
+        uint32_t len = read_be32(p);
+        uint32_t nameoff = read_be32(p + 4);
+        p += 8;
+        uint32_t padded = (len + 3U) & ~3U;
+        if (p + padded > endp || off_strings + nameoff >= totalsize)
+            return 0;
+        const char *propname = (const char *)(stringsp + nameoff);
+        if (strcmp(propname, "timebase-frequency") == 0 && len >= 4)
+            return read_be32(p);
+        p += padded;
+    }
+    return 0;
+}
+
 size_t arch_ram_range_count(void)
 {
     return 1;
@@ -129,9 +194,14 @@ int arch_ram_range(size_t idx, paddr_t *base, paddr_t *end)
 
 void riscv64_memory_init(void)
 {
+    riscv64_window_from_board();
+
     const uint8_t *base = (const uint8_t *)(uintptr_t)__boot_dtb_ptr;
     if (!base || read_be32(base) != FDT_MAGIC) {
-        printf("[FDT] memory node unavailable, using 1 GiB fallback\n");
+        printf("[FDT] memory node unavailable, using board window "
+               "0x%lx..0x%lx\n",
+               (unsigned long)riscv64_ram_base,
+               (unsigned long)riscv64_ram_end);
         return;
     }
 
@@ -139,7 +209,10 @@ void riscv64_memory_init(void)
     uint32_t off_struct = read_be32(base + 8);
     uint32_t off_strings = read_be32(base + 12);
     if (totalsize < 40 || off_struct >= totalsize || off_strings >= totalsize) {
-        printf("[FDT] malformed header, using 1 GiB fallback\n");
+        printf("[FDT] malformed header, using board window "
+               "0x%lx..0x%lx\n",
+               (unsigned long)riscv64_ram_base,
+               (unsigned long)riscv64_ram_end);
         return;
     }
 
@@ -198,14 +271,21 @@ void riscv64_memory_init(void)
             uint64_t ram_end = ram_base + ram_size;
             if (ram_end < ram_base)
                 break;
-            if (ram_base <= PHYS_MEMORY_BASE && ram_end > KERNEL_ENTRY) {
-                if (ram_end > PHYS_MEMORY_MAX_END) {
-                    printf("[FDT] RAM end 0x%lx exceeds boot map, clamping to 0x%lx\n",
-                           (unsigned long)ram_end,
-                           (unsigned long)PHYS_MEMORY_MAX_END);
-                    ram_end = PHYS_MEMORY_MAX_END;
-                }
-                riscv64_ram_base = PHYS_MEMORY_BASE;
+            if (ram_end > PHYS_MEMORY_MAX_END) {
+                printf("[FDT] RAM end 0x%lx exceeds boot map, clamping to 0x%lx\n",
+                       (unsigned long)ram_end,
+                       (unsigned long)PHYS_MEMORY_MAX_END);
+                ram_end = PHYS_MEMORY_MAX_END;
+            }
+            /* Accept the first memory range that overlaps the board's usable
+             * physical window and clamp it to that window. */
+            if (ram_end > (uint64_t)riscv64_ram_base &&
+                ram_base < (uint64_t)riscv64_ram_end) {
+                if (ram_base < (uint64_t)riscv64_ram_base)
+                    ram_base = riscv64_ram_base;
+                if (ram_end > (uint64_t)riscv64_ram_end)
+                    ram_end = riscv64_ram_end;
+                riscv64_ram_base = (paddr_t)(ram_base & ~(PAGE_SIZE - 1));
                 riscv64_ram_end = (paddr_t)(ram_end & ~(PAGE_SIZE - 1));
                 printf("[FDT] RAM range 0x%lx..0x%lx (%lu MiB)\n",
                        (unsigned long)riscv64_ram_base,
@@ -218,7 +298,10 @@ void riscv64_memory_init(void)
         p += (len + 3U) & ~3U;
     }
 
-    printf("[FDT] memory node parse failed, using 1 GiB fallback\n");
+    printf("[FDT] memory node parse failed, using board window "
+           "0x%lx..0x%lx\n",
+           (unsigned long)riscv64_ram_base,
+           (unsigned long)riscv64_ram_end);
 }
 
 static int fdt_extract_bootargs(uint64_t dtb_pa, char *out, size_t outsz)
