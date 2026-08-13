@@ -5,6 +5,10 @@
 uint32_t g_a20_perf_enabled;
 a20_perf_cpu_counters_t g_a20_perf_percpu[A20_PERF_MAX_CPUS];
 
+uint64_t g_perf_sw_page_faults;
+uint64_t g_perf_sw_page_faults_maj;
+uint64_t g_perf_sw_context_switches;
+
 static const char *const g_a20_perf_names[A20_PERF_COUNTER_COUNT] = {
     [A20_PERF_VMA_LOOKUPS] = "vma_lookups",
     [A20_PERF_VMA_LOOKUP_STEPS] = "vma_lookup_steps",
