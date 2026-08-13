@@ -39,6 +39,15 @@ void mm_sync_shared_dirty_for_vnode(vnode_t *vn)
     if (!vn)
         return;
 
+    /*
+     * Fast path: no MAP_SHARED file VMA references this vnode, so there is
+     * nothing to harvest.  The full scan below visits every task, every VMA
+     * and every page table, so the common case (build inputs read through
+     * the page cache but never mmap'd shared) must not pay it per read.
+     */
+    if (__atomic_load_n(&vn->shared_file_maps, __ATOMIC_ACQUIRE) == 0)
+        return;
+
     uint64_t proc_flags = spin_lock_irqsave(&proc_lock);
     for (task_t *t = proc_first_task_locked(); t; t = proc_next_task_locked(t)) {
         if (t->state == PROC_UNUSED || !t->mm)
@@ -265,6 +274,9 @@ vaddr_t mm_mmap_file_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
         vma->vm_flags |= VM_LOCKED;
         mm->locked_vm += len;
     }
+
+    if ((vma->vm_flags & VM_SHARED) && vma->file_vnode)
+        vnode_shared_map_inc(vma->file_vnode);
 
     mm_insert_vma(mm, vma);
     mm->total_vm += len / PAGE_SIZE;
