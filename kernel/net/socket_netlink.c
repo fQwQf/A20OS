@@ -2,11 +2,14 @@
 
 #include "core/string.h"
 #include "proc/proc.h"
+#include "drivers/core/driver_class.h"
 
 #define NLMSG_DONE              3
 #define NLM_F_MULTI             0x2
 #define SOCK_DIAG_BY_FAMILY     20
 #define TCPDIAG_GETSOCK         18
+
+#define UEVENT_GROUP           1
 
 #define TCP_ESTABLISHED         1
 #define TCP_CLOSE               7
@@ -209,4 +212,85 @@ int net_netlink_diag_request(net_socket_t *requester, const void *buf,
                                    &kernel_addr, sizeof(kernel_addr));
     spin_unlock_irqrestore(&g_net_lock, irq);
     return r < 0 ? r : (int)len;
+}
+
+/* ------------------------------------------------------------------ */
+/* NETLINK_KOBJECT_UEVENT (udev)                                       */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Broadcast a uevent to every netlink socket bound to KOBJECT_UEVENT with
+ * multicast group 1 (the udev listener group).  The uevent datagram is the
+ * raw "ACTION@DEVPATH" plus NUL-terminated KEY=VALUE pairs terminated by an
+ * extra NUL, exactly the format libudev/udevd parse.  Caller holds g_net_lock.
+ */
+static int netlink_uevent_broadcast_locked(const char *action,
+                                           const char *subsystem,
+                                           const char *name, uint64_t devt)
+{
+    unsigned major = (unsigned)((devt >> 8) & 0xffU);
+    unsigned minor = (unsigned)(devt & 0xffU);
+    char buf[256];
+    int n = snprintf(buf, sizeof(buf),
+        "%s@/devices/virtual/%s/%s%c"
+        "ACTION=%s%c"
+        "DEVPATH=/devices/virtual/%s/%s%c"
+        "SUBSYSTEM=%s%c"
+        "MAJOR=%u%c"
+        "MINOR=%u%c"
+        "DEVNAME=%s/%s%c%c",
+        action, subsystem, name, 0,
+        action, 0,
+        subsystem, name, 0,
+        subsystem, 0,
+        major, 0,
+        minor, 0,
+        subsystem, name, 0, 0);
+    if (n <= 0 || (size_t)n >= sizeof(buf))
+        return -EMSGSIZE;
+
+    net_sockaddr_nl_t src = {
+        .nl_family = AF_NETLINK, .nl_pid = 0, .nl_groups = UEVENT_GROUP,
+    };
+    for (int i = 0; i < NET_MAX_SOCKETS; i++) {
+        net_socket_t *s = g_sockets[i];
+        if (!s || s->domain != AF_NETLINK ||
+            s->protocol != NETLINK_KOBJECT_UEVENT || !s->bound)
+            continue;
+        net_sockaddr_nl_t *nl = (net_sockaddr_nl_t *)s->local;
+        if (!nl || !(nl->nl_groups & UEVENT_GROUP))
+            continue;
+        int r = net_enqueue_msg_locked(s, buf, (size_t)n, &src, sizeof(src));
+        if (r < 0)
+            return r;
+    }
+    return 0;
+}
+
+/* Public entry: a kernel-side event for a published class device. */
+void netlink_uevent_emit(const char *action, const char *subsystem,
+                         const char *name, uint64_t devt)
+{
+    uint64_t irq = spin_lock_irqsave(&g_net_lock);
+    (void)netlink_uevent_broadcast_locked(action, subsystem, name, devt);
+    spin_unlock_irqrestore(&g_net_lock, irq);
+}
+
+/*
+ * Handle send() on a KOBJECT_UEVENT socket.  udevadm trigger asks the kernel
+ * to re-emit the current device set; the udevd startup "bind" notification is
+ * accepted without action.  The trigger payload's contents are ignored and we
+ * simply replay every published class device as an add uevent.
+ */
+int net_netlink_uevent_send(net_socket_t *requester, const void *buf,
+                            size_t len, const void *addr, size_t addrlen)
+{
+    if (!requester || requester->domain != AF_NETLINK ||
+        requester->protocol != NETLINK_KOBJECT_UEVENT)
+        return -EPROTONOSUPPORT;
+    (void)buf;
+    (void)addr;
+    (void)addrlen;
+    class_device_emit_uevents("add");
+    return (int)len;
 }

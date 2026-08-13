@@ -48,6 +48,12 @@ typedef enum {
     SF_CLASS_TYPE,
     SF_CLASS_DEVICE,
     SF_CLASS_DEVICE_DEV,
+    SF_DEV,             /* /sys/dev */
+    SF_DEV_CHAR,        /* /sys/dev/char */
+    SF_DEV_CHAR_ENTRY,  /* /sys/dev/char/<maj>:<min> */
+    SF_DEV_CHAR_UEVENT, /* /sys/dev/char/<maj>:<min>/uevent */
+    SF_DEV_CHAR_DEVICE, /* /sys/dev/char/<maj>:<min>/device */
+    SF_DEV_CHAR_DEVICE_DRM, /* /sys/dev/char/<maj>:<min>/device/drm */
 } sf_type_t;
 
 /* Metadata stored in vnode->fs_data */
@@ -76,6 +82,93 @@ typedef struct {
 #define LOOP_MAJOR    7
 
 /* ---- helpers ---- */
+
+#define DRM_MAJOR 226
+
+/* Find the class device whose devt matches devt; returns its subsystem and a
+ * DEVNAME (path under /dev) derived from the class.  DRM card0 (226:0) is
+ * special-cased because it is a static devfs node, not a class device. */
+static int sysfs_devchar_name(uint64_t devt, const char **devname_out,
+                              const char **subsystem_out)
+{
+    unsigned maj = (unsigned)((devt >> 8) & 0xffU);
+    unsigned min = (unsigned)(devt & 0xffU);
+    static char devname[64];
+    const char *subsystem = NULL;
+
+    if (maj == DRM_MAJOR && min == 0) {
+        subsystem = "drm";
+        snprintf(devname, sizeof(devname), "dri/card0");
+        *devname_out = devname;
+        *subsystem_out = subsystem;
+        return 0;
+    }
+
+    for (uint32_t type = 1; type <= DEV_CLASS_AUDIO; type++) {
+        const char *sub = class_device_subsystem(type);
+        if (!sub)
+            continue;
+        for (unsigned index = 0; index < 256; index++) {
+            class_device_t *cdev = class_device_get_by_type(type, index);
+            if (!cdev)
+                break;
+            uint64_t cdevt = cdev->devt;
+            class_device_put(cdev);
+            if (cdevt != devt)
+                continue;
+            subsystem = sub;
+            if (type == DEV_CLASS_INPUT)
+                snprintf(devname, sizeof(devname), "input/%s", cdev->name);
+            else if (type == DEV_CLASS_DISPLAY)
+                snprintf(devname, sizeof(devname), "%s", cdev->name);
+            else if (type == DEV_CLASS_AUDIO)
+                snprintf(devname, sizeof(devname), "snd/%s", cdev->name);
+            else
+                snprintf(devname, sizeof(devname), "%s", cdev->name);
+            *devname_out = devname;
+            *subsystem_out = subsystem;
+            return 0;
+        }
+    }
+    return -ENOENT;
+}
+
+/* Absolute index (after "." and "..") into /sys/dev/char: 0 is the DRM card,
+ * then every published class device in (type, index) order. */
+static int sysfs_devchar_entry_at(unsigned idx, char *name, size_t name_sz)
+{
+    if (idx == 0) {
+        snprintf(name, name_sz, "226:0");
+        return 0;
+    }
+    unsigned remaining = idx - 1;
+    for (uint32_t type = 1; type <= DEV_CLASS_AUDIO; type++) {
+        const char *sub = class_device_subsystem(type);
+        if (!sub)
+            continue;
+        unsigned count = 0;
+        for (unsigned i = 0; i < 256; i++) {
+            class_device_t *c = class_device_get_by_type(type, i);
+            if (!c)
+                break;
+            count++;
+            class_device_put(c);
+        }
+        if (remaining < count) {
+            class_device_t *c = class_device_get_by_type(type, remaining);
+            if (!c)
+                return -1;
+            uint64_t devt = c->devt;
+            class_device_put(c);
+            snprintf(name, name_sz, "%lu:%lu",
+                     (unsigned long)((devt >> 8) & 0xffU),
+                     (unsigned long)(devt & 0xffU));
+            return 0;
+        }
+        remaining -= count;
+    }
+    return -1;
+}
 
 static void sysfs_display_size(uint32_t *width, uint32_t *height)
 {
@@ -142,6 +235,18 @@ static sysfs_priv_t *sysfs_priv_create(sf_type_t type, int loop_idx,
                          (unsigned long)(devt >> 8),
                          (unsigned long)(devt & 0xffU));
         p->content_len = (size_t)(n > 0 ? n : 0);
+    } else if (type == SF_DEV_CHAR_UEVENT) {
+        const char *devname = NULL, *subsystem = NULL;
+        if (sysfs_devchar_name(devt, &devname, &subsystem) == 0) {
+            int n = snprintf(p->content, sizeof(p->content),
+                             "MAJOR=%lu\nMINOR=%lu\nDEVNAME=%s\nSUBSYSTEM=%s\n",
+                             (unsigned long)((devt >> 8) & 0xffU),
+                             (unsigned long)(devt & 0xffU),
+                             devname, subsystem);
+            p->content_len = (size_t)(n > 0 ? n : 0);
+        } else {
+            p->content_len = 0;
+        }
     } else {
         p->content_len = 0;
     }
@@ -167,6 +272,43 @@ static int sysfs_lookup(vnode_t *dir, const char *name, vnode_t **out)
         child_type = SF_BLOCK;
     } else if (dm->type == SF_ROOT && strcmp(name, "class") == 0) {
         child_type = SF_CLASS;
+    } else if (dm->type == SF_ROOT && strcmp(name, "dev") == 0) {
+        child_type = SF_DEV;
+    } else if (dm->type == SF_DEV && strcmp(name, "char") == 0) {
+        child_type = SF_DEV_CHAR;
+    } else if (dm->type == SF_DEV_CHAR) {
+        /* /sys/dev/char/<maj>:<min>: accept only existing devices */
+        const char *p = name;
+        unsigned maj = 0, min = 0;
+        while (*p >= '0' && *p <= '9') {
+            maj = maj * 10 + (unsigned)(*p - '0');
+            p++;
+        }
+        if (*p != ':')
+            return -ENOENT;
+        p++;
+        while (*p >= '0' && *p <= '9') {
+            min = min * 10 + (unsigned)(*p - '0');
+            p++;
+        }
+        if (*p != '\0')
+            return -ENOENT;
+        uint64_t devt = ((uint64_t)(maj & 0xffU) << 8) | (min & 0xffU);
+        const char *devname = NULL, *subsystem = NULL;
+        if (sysfs_devchar_name(devt, &devname, &subsystem) < 0)
+            return -ENOENT;
+        child_type = SF_DEV_CHAR_ENTRY;
+        child_idx = (int)(devt & 0xffffU);
+        dynamic_class = DEV_CLASS_NONE;
+    } else if (dm->type == SF_DEV_CHAR_ENTRY && strcmp(name, "uevent") == 0) {
+        child_type = SF_DEV_CHAR_UEVENT;
+        child_idx = dm->loop_idx;
+    } else if (dm->type == SF_DEV_CHAR_ENTRY && strcmp(name, "device") == 0) {
+        child_type = SF_DEV_CHAR_DEVICE;
+        child_idx = dm->loop_idx;
+    } else if (dm->type == SF_DEV_CHAR_DEVICE && strcmp(name, "drm") == 0) {
+        child_type = SF_DEV_CHAR_DEVICE_DRM;
+        child_idx = dm->loop_idx;
     } else if (dm->type == SF_CLASS && strcmp(name, "drm") == 0) {
         child_type = SF_DRM;
     } else if (dm->type == SF_CLASS) {
@@ -256,7 +398,11 @@ static int sysfs_lookup(vnode_t *dir, const char *name, vnode_t **out)
                   child_type == SF_BLOCK_LOOP || child_type == SF_CLASS ||
                   child_type == SF_DRM || child_type == SF_DRM_CARD ||
                   child_type == SF_DRM_CONNECTOR || child_type == SF_DRM_CARD_DEVICE ||
-                  child_type == SF_CLASS_TYPE || child_type == SF_CLASS_DEVICE);
+                  child_type == SF_CLASS_TYPE || child_type == SF_CLASS_DEVICE ||
+                  child_type == SF_DEV || child_type == SF_DEV_CHAR ||
+                  child_type == SF_DEV_CHAR_ENTRY ||
+                  child_type == SF_DEV_CHAR_DEVICE ||
+                  child_type == SF_DEV_CHAR_DEVICE_DRM);
 
     vn->ino = (uint64_t)((child_type << 8) | ((child_idx + 1) & 0xFF));
     vn->type = is_dir ? VFS_FT_DIR : VFS_FT_REGULAR;
@@ -271,6 +417,10 @@ static int sysfs_lookup(vnode_t *dir, const char *name, vnode_t **out)
         meta->class_type = dynamic_class;
         meta->class_dev = dynamic_cdev;
         meta->devt = dynamic_cdev ? dynamic_cdev->devt : 0;
+        if (child_type == SF_DEV_CHAR_ENTRY || child_type == SF_DEV_CHAR_UEVENT ||
+            child_type == SF_DEV_CHAR_DEVICE ||
+            child_type == SF_DEV_CHAR_DEVICE_DRM)
+            meta->devt = (uint64_t)((uint32_t)child_idx & 0xffffU);
         if (dm->type == SF_DRM_CONNECTOR) {
             meta->width = dm->width;
             meta->height = dm->height;
@@ -293,6 +443,8 @@ static int sysfs_lookup(vnode_t *dir, const char *name, vnode_t **out)
             vn->size = 2;
         } else if (child_type == SF_CLASS_DEVICE_DEV) {
             vn->size = 16;
+        } else if (child_type == SF_DEV_CHAR_UEVENT) {
+            vn->size = 64;
         }
     } else {
         class_device_put(dynamic_cdev);
@@ -408,6 +560,76 @@ static int sysfs_class_readdir(vfile_t *vf, sysfs_meta_t *dm,
     return (int)written;
 }
 
+/* /sys/dev/char/<maj>:<min> directory listing (a vnode holds one devt). */
+static int sysfs_devchar_readdir(vfile_t *vf, sysfs_meta_t *dm,
+                                 void *dirp, size_t count)
+{
+    (void)dm;
+    size_t pos = vf->offset;
+    size_t written = 0;
+    char *out = dirp;
+    for (;;) {
+        const char *name;
+        uint8_t dtype;
+        if (pos == 0) { name = "."; dtype = 4; }
+        else if (pos == 1) { name = ".."; dtype = 4; }
+        else if (pos == 2) { name = "device"; dtype = 4; }
+        else if (pos == 3) { name = "uevent"; dtype = 8; }
+        else break;
+
+        size_t nlen = strlen(name);
+        size_t reclen = (offsetof(vfs_dirent64_t, d_name) + nlen + 1 + 7) & ~7UL;
+        if (written + reclen > count)
+            break;
+        vfs_dirent64_t *de = (vfs_dirent64_t *)(out + written);
+        memset(de, 0, reclen);
+        de->d_ino = pos + 1;
+        de->d_off = (int64_t)(pos + 1);
+        de->d_reclen = (uint16_t)reclen;
+        de->d_type = dtype;
+        memcpy(de->d_name, name, nlen + 1);
+        written += reclen;
+        pos++;
+    }
+    vf->offset = pos;
+    return (int)written;
+}
+
+/* /sys/dev/char listing: DRM card0 followed by every published class device. */
+static int sysfs_devchar_dir_readdir(vfile_t *vf, void *dirp, size_t count)
+{
+    size_t pos = vf->offset;
+    size_t written = 0;
+    char *out = dirp;
+    for (;;) {
+        const char *name;
+        char scratch[32];
+        if (pos == 0) name = ".";
+        else if (pos == 1) name = "..";
+        else {
+            if (sysfs_devchar_entry_at((unsigned)(pos - 2), scratch,
+                                       sizeof(scratch)) < 0)
+                break;
+            name = scratch;
+        }
+        size_t nlen = strlen(name);
+        size_t reclen = (offsetof(vfs_dirent64_t, d_name) + nlen + 1 + 7) & ~7UL;
+        if (written + reclen > count)
+            break;
+        vfs_dirent64_t *de = (vfs_dirent64_t *)(out + written);
+        memset(de, 0, reclen);
+        de->d_ino = pos + 1;
+        de->d_off = (int64_t)(pos + 1);
+        de->d_reclen = (uint16_t)reclen;
+        de->d_type = 4;
+        memcpy(de->d_name, name, nlen + 1);
+        written += reclen;
+        pos++;
+    }
+    vf->offset = pos;
+    return (int)written;
+}
+
 static int sysfs_freaddir(vfile_t *vf, void *dirp, size_t count)
 {
     if (!vf || !vf->vnode) return -EBADF;
@@ -415,6 +637,10 @@ static int sysfs_freaddir(vfile_t *vf, void *dirp, size_t count)
     if (!dm) return -ENOENT;
     if (dm->type == SF_CLASS_TYPE)
         return sysfs_class_readdir(vf, dm, dirp, count);
+    if (dm->type == SF_DEV_CHAR)
+        return sysfs_devchar_dir_readdir(vf, dirp, count);
+    if (dm->type == SF_DEV_CHAR_ENTRY)
+        return sysfs_devchar_readdir(vf, dm, dirp, count);
 
     /* Build list of entries for this directory */
     struct {
@@ -429,6 +655,9 @@ static int sysfs_freaddir(vfile_t *vf, void *dirp, size_t count)
     if (dm->type == SF_ROOT) {
         entries[nent].name = "block"; entries[nent].dtype = 4; nent++;
         entries[nent].name = "class"; entries[nent].dtype = 4; nent++;
+        entries[nent].name = "dev"; entries[nent].dtype = 4; nent++;
+    } else if (dm->type == SF_DEV) {
+        entries[nent].name = "char"; entries[nent].dtype = 4; nent++;
     } else if (dm->type == SF_CLASS) {
         entries[nent].name = "drm"; entries[nent].dtype = 4; nent++;
         entries[nent].name = "char"; entries[nent].dtype = 4; nent++;

@@ -382,8 +382,7 @@ key_serial_t keyring_add_key(const char *type, const char *desc,
         return -ENOSPC;
     }
     /* ref_count starts at 0; keyring_link_locked() takes the single owning
-     * reference on success (matching task_key_object_get_locked in the
-     * na-kernel reference).  The serial-map membership does not hold a
+     * reference on success.  The serial-map membership does not hold a
      * reference. */
     new_key->next = g_serial_map;
     g_serial_map = new_key;
