@@ -320,7 +320,6 @@ int vfs_open(const char *path, int flags, int mode) {    /* Resolve cwd from cur
 
     const char *rel = vfs_strip_mount_prefix(resolved, mnt);
     vnode_t *vn = vnode_lookup_path(mnt->root, rel);
-
     if (!vn) {
         if (g_lookup_errno && !(flags & O_CREAT))
             return g_lookup_errno;
@@ -538,6 +537,8 @@ int vfs_openat2(int dirfd, const char *path, int flags, int mode, uint64_t resol
                 vnode_put(parent);
                 return cr;
             }
+            inotify_vnode_event(parent, fname, IN_CREATE);
+            a20_fs_notify(parent, A20_EVENT_FS_CREATE, fname, 0, 0);
             vfs_dcache_invalidate(parent, fname);
             vfs_dcache_insert(parent, fname, vn);
             /* Keep the vnode returned by create canonical for subsequent

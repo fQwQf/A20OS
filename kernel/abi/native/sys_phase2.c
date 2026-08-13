@@ -136,7 +136,8 @@ int64_t sys_a20_thread_create(const a20_syscall_args_t *args)
     int64_t h = a20_handle_install(ht, (void *)(uintptr_t)pid, A20_OBJ_TASK,
                                     A20_RIGHT_WAIT | A20_RIGHT_SIGNAL |
                                     A20_RIGHT_STAT | A20_RIGHT_CONTROL | A20_RIGHT_DUP |
-                                    A20_RIGHT_TRANSFER | A20_RIGHT_ADMIN);
+                                    A20_RIGHT_TRANSFER | A20_RIGHT_ADMIN |
+                                    A20_RIGHT_READ | A20_RIGHT_WRITE);
     if (h < 0) return h;
 
     kargs.out_thread = (a20_handle_t)h;

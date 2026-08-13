@@ -7,7 +7,7 @@
 | 组件 | 路径 | 状态 | 说明 |
 |------|------|------|------|
 | Linux ABI 兼容层 | `kernel/abi/linux/` | 活跃 | 当前主用户态运行时接口。系统启动后实际运行的用户态程序基于 Linux ABI。 |
-| Native ABI 内核入口 | `kernel/abi/native/` | 已登记 | `syscall_table.def` 有 126 条，覆盖 core、handle、task、memory、path、ipc、net、time、security、debug、system info、sync、device、kernel-ext 等分区；部分入口仍是受限语义，登记数不等于完整实现。 |
+| Native ABI 内核入口 | `kernel/abi/native/` | 已登记 | `syscall_table.def` 有 134 条，覆盖 core、handle、task、memory、path、ipc、net、time、security、debug、system info、sync、device、pager、monitor、kernel-ext 等分区；部分入口仍是受限语义，登记数不等于完整实现。 |
 | Typed channel | `kernel/ipc/a20_channel.c` | 已接入 | `channel_create` 接受 `a20_channel_type_t` 类型签名（每端点一份拷贝），send/recv 路径强制执行 handle 类型 bitmask 与 `max_data_size`/`max_handles` 上限，违例返回 `TYPE_MISMATCH`。 |
 | 时态能力 | `kernel/abi/native/handle_table.c` | 已接入 | `handle_control` 提供 `SET_TEMPORAL`/`GET_TEMPORAL`/`SET_LABEL` 入口（仅可增强不可减弱）；sweeper 以 deadline 驱动周期运行（约 100ms），`AUTO_CLOSE` 过期自动回收；channel 传递保留时态约束与安全标签（不可刷新）。 |
 | 阻塞 IPC | `kernel/ipc/a20_channel.c`、`kernel/ipc/a20_event.c` | 已实现 | `channel_send`（队列满）/`channel_recv`（队列空）/`event_wait`（无事件）默认阻塞，`A20_MSG_NONBLOCK`/`timeout_ns=0` 为非阻塞；`event_wait` 支持相对超时与多事件返回，基于 tokenized Park/Wake（见 `docs/process-scheduler.md`）。 |
@@ -110,11 +110,19 @@ Linux ABI 侧已有 PT_INTERP 加载，内核也已有 `elf_setup_stack_a20_dyna
 ### 7. 仍存在的差距（未实现）
 
 > 2026-08 更新：VMO 已迁入核心 MM 层（`kernel/mm/vmo.c`、`kernel/include/mm/vmo.h`），VMAR 改为核心 `mm_mmap_vmo`/`mm_munmap`/`mm_mprotect` 的薄包装（`kernel/abi/native/vmar.c`），因此核心 fault 路径不再依赖任何 ABI 头文件，两套 ABI 也不互相包装依赖。
+>
+> 2026-08（Native ABI 增添与深化，见 [09-native-abi-deepening.md](09-native-abi-deepening.md)）已收口：
+> - **file/socket/pipe 事件源接线**：socket 收包→READABLE、发送缓冲释放/connect 完成→WRITABLE、connect→CONNECTION、accept 就绪→ACCEPT_READY、对端关闭→ERROR/CLOSED（`net_event_notify`，`kernel/net/`）；pipe 写→读端 READABLE、读→写端 WRITABLE（`kernel/fs/pipe.c`）。
+> - **event_watch_fs 深化**：vnode-keyed FS 事件（CREATE/DELETE/MODIFY/RENAME）经 EventQ 投递，`event` 的 `fs_name` 字段携带变更名（`a20_fs_notify`，VFS create/unlink/rename/write/link/symlink 路径接线，`vnode_put` 清理 watch）。
+> - **Pager**（`0x0D00`）：PAGED VMO + pager channel 页供给；缺页经 channel 消息请求、`pager_supply_pages` 回填并唤醒（`kernel/ipc/a20_pager.c`、`kernel/mm/vmo.c`）。
+> - **monitor**（`0x0D10`）：perf 式软件事件计数对象（task CPU/缺页/切换、系统级缺页/切换），可周期经 EventQ 上报（`kernel/ipc/a20_monitor.c`）。
+> - **task_mem_read/write**（`0x0211/0x0212`）：TASK handle + READ/WRITE right 的跨进程内存访问（复用 `process_vm_*`）。
+> - **vm_share_region**（`0x030A`）：地址区间反查导出 MEMORY handle；`vm_protect` 按 VMA 创建时 cap（`vmar_cap`）收紧；`vm_flush(CLEAN)` 范围写回。
 
-- file/socket/pipe 的 `READABLE`/`WRITABLE`/`ERROR`/`CONNECTION` 事件源尚未接入 VFS/网络栈（event queue 目前只对 channel、timer、task 退出产生事件）。
-- `event_watch_fs` 仍是目录级 watch 的壳，不支持路径过滤、不产生 FS 事件。
+- file/socket/pipe 事件源已接线（见上），但事件为边沿触发，`handle_poll` 仍是电平快照。
+- `event_watch_fs` 的路径前缀过滤（`path` 字段）未实现，仅目录级 watch。
 - VMO 映射已是**按需调页**：`vmar_map` 只建立 `VM_VMO` VMA，页面在首次 fault 时经核心 `handle_demand_fault_locked` 的 VMO 分支按 `vmo_get_page()` 物化；VMO 帧由 VMO 自身持有（类比 page-cache 帧），fork 时父子共享同一批 canonical 帧而非 COW。文件映射走核心 `mm_mmap_file`，经 page cache 需求填充。
-- 仍缺：VMAR 不是层级模型；`vm_share` 尚未提供"按地址区间反查 VMO 并导出"的结构化 `a20_vm_share_args_t` 形式；`vm_protect` 不保存/校验原 VMAR capability，EXEC 映射也未按 source handle rights 收紧；`vm_flush(CLEAN)` 没有范围写回实现。VMO 页分配已接入 cgroup 记账（fault 时对首个触页任务记账、destroy 时返还；`vmo_get_page_charged`）。
+- 仍缺：VMAR 不是层级模型；`vm_protect` 的 `vmar_cap` 已落地但完整 VMAR 树未做；`vm_lock` 仍只是 VMA flag；`vm_share` 的旧三参形式保留（新结构化形式为 `vm_share_region`）。
 - 性能未实测（研究文档 05 的 G1–G7 阈值仍待验证）；静态能力流分析工具未实现。
 
 ## 路线图

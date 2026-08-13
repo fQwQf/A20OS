@@ -22,6 +22,7 @@
 
 #include "drvmod/drvmod.h"
 
+#include "core/kallsyms.h"
 #include "core/klog.h"
 #include "core/string.h"
 #include "core/stdio.h"
@@ -384,6 +385,8 @@ const struct drv_export drv_export_table[] = {
     { "proc_task_pid",       (void *)proc_task_pid },
     { "printf",              (void *)printf },
     { "panic",               (void *)panic },
+    /* kallsyms debug name lookup (spinlock self-acquire diagnostics) */
+    { "kallsyms_lookup",     (void *)kallsyms_lookup },
     { "arch_virtio_blk_probe", (void *)arch_virtio_blk_probe },
     { "arch_virtio_net_probe", (void *)arch_virtio_net_probe },
 #if defined(CONFIG_X86_64)

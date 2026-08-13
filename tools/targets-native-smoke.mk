@@ -480,7 +480,7 @@ smoke-native-deepen:
 	log="$(SMOKE_LOG_DIR)/native-deepen-riscv64.log"; \
 	status=0; \
 	{ sleep $(SMOKE_INPUT_DELAY); printf '/bin/native-deepen-rv\npoweroff\n'; } | \
-	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
+	$(TIMEOUT) $(SMOKE_TIMEOUT_DEEPEN) qemu-system-riscv64 \
 		-machine virt -m 1G -nographic -smp 1 -bios default \
 		-global virtio-mmio.force-legacy=false \
 		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-both-dev/fat32.img,if=none,format=raw,id=x0 \
