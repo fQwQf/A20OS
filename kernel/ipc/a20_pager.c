@@ -142,11 +142,8 @@ int a20_pager_request_page(struct vmo *vmo, uint32_t index, int write_access)
     task_t *t = proc_current();
     hinfo.security_label = t ? a20_ht_get_label(task_get_a20_ht(t)) : 0;
 
-    int rc = a20_channel_send_dwc(pager->requests, &req, sizeof(req), &hinfo, 1,
-                                  NULL, A20_MSG_NONBLOCK, 1);
-    klog("[PAGER] request_page vmo=%p idx=%u write=%d -> %d\n", (void *)vmo,
-         index, write_access, rc);
-    return rc;
+    return a20_channel_send_dwc(pager->requests, &req, sizeof(req), &hinfo, 1,
+                                NULL, A20_MSG_NONBLOCK, 1);
 }
 
 /*
@@ -172,8 +169,6 @@ int64_t a20_pager_supply_pages(a20_pager_t *pager, struct vmo *vmo,
 
     spin_lock(&vmo->lock);
     if (vmo->pager != pager) {
-        klog("[PAGER] supply: vmo %p not attached to pager %p\n", (void *)vmo,
-             (void *)pager);
         spin_unlock(&vmo->lock);
         return -A20_ERR_BAD_HANDLE;
     }
@@ -199,9 +194,6 @@ int64_t a20_pager_supply_pages(a20_pager_t *pager, struct vmo *vmo,
     }
     spin_unlock(&vmo->lock);
 
-    klog("[PAGER] supply vmo=%p off=%llu len=%llu -> %llu\n", (void *)vmo,
-         (unsigned long long)vmo_offset, (unsigned long long)len,
-         (unsigned long long)supplied);
     if (supplied > 0) {
         for (uint64_t off = 0; off < supplied; off += PAGE_SIZE)
             wait_queue_wake_all(&vmo->faulters, (vmo_offset + off) / PAGE_SIZE,

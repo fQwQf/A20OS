@@ -757,10 +757,20 @@ out_ep:
 
 int64_t sys_a20_event_watch_fs(const a20_syscall_args_t *args)
 {
-    a20_handle_t dir_h = (a20_handle_t)A20_ARG(0);
-    a20_handle_t queue_h = (a20_handle_t)A20_ARG(1);
-    uint32_t event_mask = (uint32_t)A20_ARG(2);
-    uint64_t user_data = A20_ARG(3);
+    a20_event_watch_fs_args_t *uargs =
+        (a20_event_watch_fs_args_t *)A20_ARG(0);
+    if (!uargs) return -A20_ERR_FAULT;
+
+    a20_event_watch_fs_args_t kargs;
+    A20_VALIDATE_AND_COPY(uargs, kargs);
+
+    if (kargs.event_mask == 0)
+        return -A20_ERR_INVALID_ARGUMENT;
+
+    a20_handle_t dir_h = kargs.dir;
+    a20_handle_t queue_h = kargs.queue;
+    uint32_t event_mask = kargs.event_mask;
+    uint64_t user_data = kargs.user_data;
 
     task_t *cur = proc_current();
     struct a20_ht_internal *ht = task_get_a20_ht(cur);

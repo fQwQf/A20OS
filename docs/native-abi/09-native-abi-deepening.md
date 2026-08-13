@@ -8,6 +8,11 @@
 > 同时收口现有接口的壳/受限语义。Syscall 编号沿用 [03-handle.md §6](03-handle.md)
 > 的分区约定（0x0000-0x0FFF 稳定区）；结构体演进遵循
 > [01-types.md §2](01-types.md) 的 E-APPEND / E-DEPRECATE / E-RESERVED 规则。
+>
+> **实现状态（2026-08）**：§2-§7 的应包装项与深化项均已实现并通过
+> `smoke-native-deepen`（Pager、monitor、task_mem、vm_share_region、
+> vm_protect capability、FS 事件、socket 事件源）；`check-abi-boundary` 与
+> `check-doc-drift` 通过。§8 的其余深化项为后续演进。
 
 ## 1. 机制三分清单
 
