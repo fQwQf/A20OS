@@ -11,6 +11,8 @@
  * Prints SYSCALL_EXT: PASS when every group succeeds.
  */
 
+#define _GNU_SOURCE
+
 #include <errno.h>
 #include <fcntl.h>
 #include <mqueue.h>
@@ -21,6 +23,7 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <sys/eventfd.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/types.h>
@@ -1026,6 +1029,216 @@ static int test_fileattr_and_time(void)
     return 0;
 }
 
+/* ---- splice/tee/vmsplice (kernel/fs/splice.c) ---- */
+
+static int test_splice_tee(void)
+{
+    /* splice between two regular files must fail with -EINVAL (Linux
+     * requires at least one pipe endpoint). */
+    int f1 = open("/tmp/sp_in.txt", O_CREAT | O_TRUNC | O_RDWR, 0644);
+    int f2 = open("/tmp/sp_out.txt", O_CREAT | O_TRUNC | O_RDWR, 0644);
+    if (f1 < 0 || f2 < 0)
+        return fail("splice open", errno);
+    if (write(f1, "hello-splice", 12) != 12)
+        return fail("splice write src", errno);
+    errno = 0;
+    if (splice(f1, NULL, f2, NULL, 12, 0) >= 0 || errno != EINVAL)
+        return fail("splice file-file", errno);
+
+    /* A non-NULL offset on a pipe endpoint is -ESPIPE. */
+    int p[2];
+    if (pipe(p) != 0)
+        return fail("splice pipe", errno);
+    long off = 0;
+    errno = 0;
+    if (splice(p[0], &off, f2, NULL, 1, 0) >= 0 || errno != ESPIPE)
+        return fail("splice pipe offset", errno);
+
+    /* file -> pipe, then pipe -> file. */
+    lseek(f1, 0, SEEK_SET);
+    long in_off = 0, out_off = 0;
+    ssize_t n = splice(f1, &in_off, p[1], NULL, 12, 0);
+    if (n != 12)
+        return fail("splice file->pipe", (int)n);
+    if (in_off != 12)
+        return fail("splice in_off advance", (int)in_off);
+    n = splice(p[0], NULL, f2, &out_off, 12, 0);
+    if (n != 12)
+        return fail("splice pipe->file", (int)n);
+    if (out_off != 12)
+        return fail("splice out_off advance", (int)out_off);
+
+    lseek(f2, 0, SEEK_SET);
+    char buf[16];
+    memset(buf, 0, sizeof(buf));
+    if (read(f2, buf, 16) != 12 || memcmp(buf, "hello-splice", 12) != 0)
+        return fail("splice content", errno);
+
+    /* splice pipe->pipe consumes the source. */
+    if (write(p[1], "abcdef", 6) != 6)
+        return fail("splice p2p write", errno);
+    n = splice(p[0], NULL, p[1], NULL, 6, 0);
+    if (n != 6)
+        return fail("splice p2p", (int)n);
+    char rb[8];
+    memset(rb, 0, sizeof(rb));
+    if (read(p[0], rb, 8) != 6 || memcmp(rb, "abcdef", 6) != 0)
+        return fail("splice p2p content", errno);
+
+    /* tee pipe->pipe does NOT consume the source. */
+    if (write(p[1], "xyz", 3) != 3)
+        return fail("tee write", errno);
+    n = tee(p[0], p[1], 3, 0);
+    if (n != 3)
+        return fail("tee", (int)n);
+    /* The pipe now holds the original 3 bytes plus the 3 duplicated ones. */
+    memset(rb, 0, sizeof(rb));
+    if (read(p[0], rb, 8) != 6 || memcmp(rb, "xyzxyz", 6) != 0)
+        return fail("tee source intact", errno);
+
+    /* vmsplice requires a pipe. */
+    struct iovec iov = { .iov_base = "vwxyz", .iov_len = 5 };
+    errno = 0;
+    if (vmsplice(f1, &iov, 1, 0) >= 0 || errno != EINVAL)
+        return fail("vmsplice non-pipe", errno);
+    errno = 0;
+    n = vmsplice(p[1], &iov, 1, SPLICE_F_GIFT);
+    if (n != 5)
+        return fail("vmsplice", n < 0 ? errno : (int)n);
+    memset(rb, 0, sizeof(rb));
+    if (read(p[0], rb, 8) != 5 || memcmp(rb, "vwxyz", 5) != 0)
+        return fail("vmsplice content", errno);
+
+    /* Invalid splice flags are rejected. */
+    errno = 0;
+    if (splice(p[0], NULL, p[1], NULL, 1, 0x10) >= 0 || errno != EINVAL)
+        return fail("splice bad flag", errno);
+
+    close(f1);
+    close(f2);
+    close(p[0]);
+    close(p[1]);
+    return 0;
+}
+
+/* ---- membarrier (kernel/abi/linux/sys_membarrier.c) ---- */
+
+#define MEMBARRIER_CMD_QUERY 0
+#define MEMBARRIER_CMD_GLOBAL 1
+#define MEMBARRIER_CMD_GLOBAL_EXPEDITED 2
+#define MEMBARRIER_CMD_REGISTER_GLOBAL_EXPEDITED 4
+#define MEMBARRIER_CMD_PRIVATE_EXPEDITED 8
+#define MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED 16
+#define MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE 32
+#define MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_SYNC_CORE 64
+
+static int test_membarrier(void)
+{
+    long q = syscall(SYS_membarrier, MEMBARRIER_CMD_QUERY, 0, 0);
+    if (q < 0)
+        return fail("membarrier query", (int)q);
+    /* The query mask must at least advertise GLOBAL and the register
+     * commands, and must not advertise unknown bits. */
+    if (!(q & MEMBARRIER_CMD_GLOBAL) ||
+        !(q & MEMBARRIER_CMD_REGISTER_GLOBAL_EXPEDITED) ||
+        !(q & MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED))
+        return fail("membarrier query bits", (int)q);
+    if (q & ~((1L << 9) - 1))
+        return fail("membarrier query range", (int)q);
+
+    /* GLOBAL barrier succeeds without registration. */
+    if (syscall(SYS_membarrier, MEMBARRIER_CMD_GLOBAL, 0, 0) != 0)
+        return fail("membarrier global", errno);
+    if (syscall(SYS_membarrier, MEMBARRIER_CMD_GLOBAL_EXPEDITED, 0, 0) != 0)
+        return fail("membarrier global expedited", errno);
+
+    /* PRIVATE_EXPEDITED before registration is -EPERM. */
+    errno = 0;
+    if (syscall(SYS_membarrier, MEMBARRIER_CMD_PRIVATE_EXPEDITED, 0, 0) >= 0 ||
+        errno != EPERM)
+        return fail("membarrier private unregistered", errno);
+
+    /* After registration the private barrier succeeds. */
+    if (syscall(SYS_membarrier, MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED,
+                0, 0) != 0)
+        return fail("membarrier register", errno);
+    if (syscall(SYS_membarrier, MEMBARRIER_CMD_PRIVATE_EXPEDITED, 0, 0) != 0)
+        return fail("membarrier private", errno);
+    if (syscall(SYS_membarrier, MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE,
+                0, 0) != 0)
+        return fail("membarrier sync-core", errno);
+
+    /* Unknown command and nonzero flags are rejected. */
+    errno = 0;
+    if (syscall(SYS_membarrier, 0x40000000, 0, 0) >= 0 || errno != EINVAL)
+        return fail("membarrier unknown cmd", errno);
+    errno = 0;
+    if (syscall(SYS_membarrier, MEMBARRIER_CMD_GLOBAL, 1, 0) >= 0 ||
+        errno != EINVAL)
+        return fail("membarrier bad flags", errno);
+    return 0;
+}
+
+/* ---- eventfd O_NONBLOCK toggled via fcntl(F_SETFL) ---- */
+
+static int test_eventfd_fcntl_nonblock(void)
+{
+    int efd = eventfd(0, 0);
+    if (efd < 0)
+        return fail("eventfd create", errno);
+
+    /* Blocking by default: read with no value would hang; use a short
+     * nonblocking probe first via fcntl, then confirm blocking flag off. */
+    if (fcntl(efd, F_SETFL, O_NONBLOCK) != 0)
+        return fail("eventfd F_SETFL", errno);
+    errno = 0;
+    uint64_t v = 0;
+    if (read(efd, &v, sizeof(v)) >= 0 || errno != EAGAIN)
+        return fail("eventfd nonblock read", errno);
+
+    /* Clear O_NONBLOCK; the fd must behave as a blocking fd again (we only
+     * verify the flag is actually cleared via F_GETFL). */
+    if (fcntl(efd, F_SETFL, 0) != 0)
+        return fail("eventfd F_SETFL clear", errno);
+    int fl = fcntl(efd, F_GETFL);
+    if (fl < 0 || (fl & O_NONBLOCK))
+        return fail("eventfd F_GETFL", fl < 0 ? errno : 0);
+
+    /* Write then read succeeds in blocking mode. */
+    if (write(efd, &(uint64_t){1}, sizeof(v)) != sizeof(v))
+        return fail("eventfd write", errno);
+    if (read(efd, &v, sizeof(v)) != sizeof(v) || v != 1)
+        return fail("eventfd blocking read", errno);
+    close(efd);
+    return 0;
+}
+
+/* ---- futex FUTEX_WAIT|FUTEX_CLOCK_REALTIME must be rejected ---- */
+
+#define FUTEX_WAIT 0
+#define FUTEX_WAKE 1
+#define FUTEX_CLOCK_REALTIME 256
+
+static int test_futex_clock_realtime_reject(void)
+{
+    static int futex_word;
+    futex_word = 0;
+    struct timespec ts = { .tv_sec = 0, .tv_nsec = 1000000 };
+
+    /* FUTEX_WAIT|FUTEX_CLOCK_REALTIME is -EINVAL in Linux. */
+    errno = 0;
+    if (syscall(SYS_futex, &futex_word, FUTEX_WAIT | FUTEX_CLOCK_REALTIME,
+                0, &ts, NULL, 0) >= 0 || errno != EINVAL)
+        return fail("futex wait clock-realtime", errno);
+
+    /* Plain FUTEX_WAIT still works (times out cleanly). */
+    errno = 0;
+    if (syscall(SYS_futex, &futex_word, FUTEX_WAIT, 0, &ts, NULL, 0) >= 0 ||
+        errno != ETIMEDOUT)
+        return fail("futex wait", errno);
+    return 0;
+}
+
 int main(void)
 {
     printf("SYSCALL_EXT: start\n");
@@ -1056,6 +1269,14 @@ int main(void)
     if (test_timer_sigevent() < 0)
         return 1;
     if (test_fileattr_and_time() < 0)
+        return 1;
+    if (test_splice_tee() < 0)
+        return 1;
+    if (test_membarrier() < 0)
+        return 1;
+    if (test_eventfd_fcntl_nonblock() < 0)
+        return 1;
+    if (test_futex_clock_realtime_reject() < 0)
         return 1;
     printf("SYSCALL_EXT: PASS\n");
     return 0;
