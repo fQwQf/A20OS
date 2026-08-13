@@ -12,7 +12,7 @@ Every registered entry is implemented; no syscall is a fixed `-ENOSYS` placehold
 
 ## Current Summary
 
-`syscall_table.def` currently registers 258 dispatch entries, including two A20OS extensions. Registration is dispatch coverage, not a claim of semantic Linux completeness. Every registered entry has a real handler; the only `-ENOSYS` returns are the arch/version-correct Linux semantics for removed or architecture-specific syscalls (`nfsservctl` removed in Linux 4.19, `map_shadow_stack` is x86 CET, RISC-V-only syscalls on other arches, `arch_prctl` on non-x86). Registered non-placeholder calls may still support only a subset of Linux commands, flags, object types, or concurrency semantics.
+`syscall_table.def` currently registers 343 dispatch entries, including two A20OS extensions and five x86_64-only legacy entries on spare slots (`time`/`pause`/`utime`/`utimes`/`get_thread_area`). Registration is dispatch coverage, not a claim of semantic Linux completeness. Every registered entry has a real handler; the only `-ENOSYS` returns are the arch/version-correct Linux semantics for removed or architecture-specific syscalls (`nfsservctl` removed in Linux 4.19, `map_shadow_stack` is x86 CET, RISC-V-only syscalls on other arches, `arch_prctl` on non-x86). Registered non-placeholder calls may still support only a subset of Linux commands, flags, object types, or concurrency semantics.
 
 | Area | Level | Notes |
 | --- | --- | --- |
@@ -25,6 +25,7 @@ Every registered entry is implemented; no syscall is a fixed `-ENOSYS` placehold
 | futex | partial | all standard commands implemented, including bounded PI variants; no priority boost. |
 | poll/epoll/select | partial | fd readiness works for common objects; wait infrastructure should move to formal wait queues. |
 | eventfd/timerfd | partial | fd-backed wait objects exist; full Linux timer semantics are simplified. |
+| fd I/O and splice | partial | read/write/ioctl core plus real splice/tee/vmsplice (kernel/fs/splice.c) with SPLICE_F_* validation; remaining Linux edge semantics are documented per syscall. |
 | sockets | partial | AF_INET/AF_UNIX/AF_ALG subset exists via lwIP/socket layer; many protocol details are simplified. |
 | bpf | partial | KEP-backed program load/attach/detach only; no BPF maps, and attach targets are A20OS extension-point ids rather than Linux attach objects. |
 | namespaces | partial | namespace syscalls operate on current task/fs state (root_path/cwd/credentials); no separate Linux namespace object model. |
@@ -44,6 +45,7 @@ Every registered entry is implemented; no syscall is a fixed `-ENOSYS` placehold
 | io_uring | partial | kernel-memory SQ/CQ rings with synchronous NOP/READ/WRITE/FSYNC/CLOSE execution and eventfd completion notification. |
 | landlock | partial | fd-backed rulesets with path-beneath rules enforced at vfs_open. |
 | rseq | partial | per-thread rseq registration; no CPU migration to abort. |
+| membarrier | partial | full command set with per-mm registration and a real cross-CPU barrier via the reschedule IPI. |
 | SysV/POSIX message queues | partial | msgget/msgsnd/msgrcv/msgctl (kernel/ipc/sysv_msg.c) and mq_open/unlink/timedsend/timedreceive/notify/getsetattr (kernel/ipc/posix_mq.c). |
 | ioprio / pkeys | partial | per-task I/O priority storage; 16-slot protection-key bitmap. |
 | LSM introspection | partial | lsm_get_self_attr/list_modules report Landlock; set_self_attr via landlock_restrict_self. |
@@ -90,9 +92,9 @@ Every registered entry is implemented; no syscall is a fixed `-ENOSYS` placehold
 | `fallocate` | fd I/O | `partial` | `smoke-vfs-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `fadvise64` | fd I/O | `partial` | `smoke-vfs-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `copy_file_range` | fd I/O | `partial` | `smoke-vfs-stress` | implemented subset; Linux edge semantics remain documented gaps |
-| `splice` | fd I/O | `partial` | `smoke-vfs-stress` | implemented subset; Linux edge semantics remain documented gaps |
-| `vmsplice` | fd I/O | `partial` | `smoke-vfs-stress` | implemented subset; Linux edge semantics remain documented gaps |
-| `tee` | fd I/O | `partial` | `smoke-vfs-stress` | implemented subset; Linux edge semantics remain documented gaps |
+| `splice` | fd I/O | `partial` | `smoke-syscall-ext` | real pipe/file engine (kernel/fs/splice.c): file-to-pipe, pipe-to-file, pipe-to-pipe with SPLICE_F_MOVE/NONBLOCK/MORE validation, -ESPIPE on pipe offsets, -EINVAL without a pipe endpoint; copy-based like Linux non-page-aligned paths |
+| `vmsplice` | fd I/O | `partial` | `smoke-syscall-ext` | requires a pipe (else -EINVAL); copies user iov into the pipe, SPLICE_F_GIFT/NONBLOCK validated |
+| `tee` | fd I/O | `partial` | `smoke-syscall-ext` | pipe-to-pipe duplicate without consuming the source; SPLICE_F_NONBLOCK/MORE validated |
 | `close_range` | fd I/O | `partial` | `smoke-vfs-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `sendfile` | fd I/O | `partial` | `smoke-vfs-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `select` | poll | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
@@ -102,7 +104,7 @@ Every registered entry is implemented; no syscall is a fixed `-ENOSYS` placehold
 | `epoll_ctl` | poll | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
 | `epoll_pwait` | poll | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
 | `epoll_pwait2` | poll | `partial` | `smoke-syscall-ext` | epoll_pwait with a timespec64 timeout; Linux edge semantics remain documented gaps |
-| `eventfd2` | poll | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
+| `eventfd2` | poll | `partial` | `smoke-syscall-ext` | read/write/semaphore semantics; O_NONBLOCK honored live via fcntl(F_SETFL) like pipes |
 | `timerfd_create` | time | `partial` | `smoke-proc-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `timerfd_settime` | time | `partial` | `smoke-proc-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `timerfd_gettime` | time | `partial` | `smoke-proc-stress` | implemented subset; Linux edge semantics remain documented gaps |
@@ -166,6 +168,11 @@ Every registered entry is implemented; no syscall is a fixed `-ENOSYS` placehold
 | `swapoff` | memory | `partial` | `smoke-mm-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `mkswap` | memory | `partial` | `smoke-mm-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `utimensat` | path/fs | `partial` | `smoke-vfs-stress` | implemented subset; Linux edge semantics remain documented gaps |
+| `time` | time | `partial` | `smoke-proc-stress` | x86_64-only legacy entry (spare slot 1003); sys_time reads the realtime clock into a time_t |
+| `pause` | signals | `partial` | `smoke-proc-stress` | x86_64-only legacy entry (spare slot 1004); parks the task until a signal arrives, returning -EINTR |
+| `utime` | path/fs | `partial` | `smoke-vfs-stress` | x86_64-only legacy entry (spare slot 1005); struct utimbuf wrapper over vfs_utimensat |
+| `utimes` | path/fs | `partial` | `smoke-vfs-stress` | x86_64-only legacy entry (spare slot 1006); struct timeval[2] wrapper over vfs_utimensat |
+| `get_thread_area` | arch | `partial` | `smoke-abi-linux` | x86_64-only legacy entry (spare slot 1007); reports the FS-base TLS pointer from the trap frame |
 | `chroot` | path/fs | `partial` | `smoke-vfs-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `mknodat` | path/fs | `partial` | `smoke-vfs-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `set_thread_area` | arch | `partial` | `smoke-abi-linux` | implemented subset; architecture-specific semantics remain bounded |
@@ -288,7 +295,7 @@ Every registered entry is implemented; no syscall is a fixed `-ENOSYS` placehold
 | `syslog` | system | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
 | `getrandom` | system | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
 | `futex` | futex | `partial` | `smoke-proc-stress` | WAIT/WAKE/BITSET/REQUEUE/CMP_REQUEUE/WAKE_OP plus bounded LOCK_PI/UNLOCK_PI/TRYLOCK_PI/WAIT_REQUEUE_PI/CMP_REQUEUE_PI; no priority boost |
-| `membarrier` | system | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
+| `membarrier` | system | `partial` | `smoke-syscall-ext` | full command set (QUERY/GLOBAL/GLOBAL_EXPEDITED/REGISTER_*/PRIVATE_EXPEDITED/SYNC_CORE/RSEQ) with per-mm registration and a real cross-CPU barrier via reschedule IPI |
 | `getcpu` | scheduler | `partial` | `smoke-proc-stress` | reports the current logical CPU and a single NUMA node; cache argument is ignored |
 | `sync_file_range` | fd I/O | `partial` | `smoke-vfs-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `getsid` | credentials | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
@@ -394,6 +401,8 @@ Every registered entry is implemented; no syscall is a fixed `-ENOSYS` placehold
 | `listmount` | path/fs | `partial` | `smoke-vfs-stress` | lists mount ids in the mount table |
 | `listns` | namespaces | `partial` | `smoke-abi-linux` | reports the single kernel namespace id |
 | `open_tree_attr` | path/fs | `partial` | `smoke-vfs-stress` | open_tree with attribute query |
+| `file_getattr` | path/fs | `partial` | `smoke-syscall-ext` | LoongArch-only fileattr syscall (468); VFS core reports an empty attribute set (flags=0, masks=0) |
+| `file_setattr` | path/fs | `partial` | `smoke-syscall-ext` | LoongArch-only fileattr syscall (469); refuses non-empty flag requests with -EOPNOTSUPP |
 | `lsm_get_self_attr` | security | `partial` | `smoke-syscall-ext` | reports Landlock restriction state |
 | `lsm_set_self_attr` | security | `partial` | `smoke-syscall-ext` | returns -EOPNOTSUPP (restrict via landlock_restrict_self) |
 | `lsm_list_modules` | security | `partial` | `smoke-syscall-ext` | lists capability + landlock modules |
