@@ -51,7 +51,7 @@
 | AHCI、DW SDIO、virtio-scsi | 已迁移 | `ahci.a20drv`（x86_64 Early）、`dw-sdio.a20drv`（riscv64 Early）、`virtio-scsi.a20drv`（四架构 Early）经 Early DriverStore 在根盘挂载前加载，与 virtio-blk 一起解决根设备 bootstrap |
 | E1000、virtio-net、virtio-gpu、vmsvga、virtio-snd、xHCI、USB HID、USB storage | `.a20drv` | 设备实现仅在 `tools/driver-modules.mk` 为目标架构列出时由 generic DriverStore 提供；其 transport、framebuffer 和 class 服务仍由内核提供 |
 | TPM 2.0 | 已迁移 | `tpm.a20drv`（x86_64）：`firmware_acpi_tpm2` 导出 + TIS FIFO，无设备优雅失败 |
-| GMAC、SDIO | 板级 platform | StarFive/LS2K GMAC 与 DW SDIO 通过 `platform_bus` + `hardware_id` 注册绑定。DW SDIO 有 riscv64 generic Early 模块；两个 GMAC 当前只在 embedded 的显式静态账本中，没有 generic 包 |
+| GMAC、SDIO | 板级 platform | StarFive/LS2K GMAC 与 DW SDIO 通过 `platform_bus` + `hardware_id` 注册绑定。DW SDIO 有 riscv64 generic Early 模块；两个 GMAC 当前只在 embedded 的显式静态账本中，没有 generic 包。板级 bring-up 细节（时钟、地址、IRQ、缺项）见 [物理开发板移植](../../platforms/physical-boards.md) |
 
 迁移细节与顺序见 [kernel-modules.md](../guide/kernel-modules.md)。
 
@@ -76,7 +76,7 @@
 | Intel HDA | AUDIO | 架构无关 PCI class 驱动；x86_64 与 LoongArch64 QEMU 通过 BDL DMA smoke，x86_64 用户态 tone 到 QEMU WAV 验证，RISC-V64 已完成完整 Wayland/FFmpeg/PulseAudio 播放；三个 `run-gui` 目标连接宿主音频；支持 48 kHz 双声道 S16_LE、环形 DMA、stop/drain、完整 remove 和用户态 WAV/raw/tone 播放器 |
 | STM32 SDIO | BLOCK | 统一类 + MCU bridge；板级 bus 仍用名称匹配 |
 | STM32 简单外设 | 允许例外 | 板级轮询轻量 API，不强制统一对象；扩展到多实例/用户 ABI 时必须迁移 |
-| StarFive/LS2K GMAC、DW SDIO | 有条件 | 单实例轮询并依赖外部串行化，SMP/IRQ 化前必须增加实例锁；GMAC 当前还要求 embedded 部署 |
+| StarFive/LS2K GMAC、DW SDIO | 有条件 | 已增加 per-instance 私有锁（GMAC）与 `g_sdio.lock`（SDIO），send/recv/poll 在锁内轮询，多实例池按 MMIO 基址分配；数据面仍未接 IRQ（VF2 GMAC 线号未核实，LS2K1000 缺 PIC 路由），GMAC 当前要求 embedded 部署，真机未复现 |
 
 ## VirtualBox 平台
 
