@@ -4,7 +4,8 @@
  * These inline functions avoid function-call overhead for the most
  * performance-critical operations: handle lookup and basic I/O.
  *
- * See Phase 5.1 in IMPLEMENTATION_TODO.md.
+ * Design reference: docs/native-abi/03-handle.md (handle fast-path) and
+ * docs/hybrid-kernel/05-idl-and-personality.md (ABI hot-path placement).
  */
 
 #ifndef _A20_FASTPATH_H

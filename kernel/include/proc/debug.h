@@ -28,6 +28,7 @@
 #define PT_DEBUG_FLAG_EXITKILL  (1U << 6)  /* kill tracee when tracer dies */
 #define PT_DEBUG_FLAG_SYSCALL   (1U << 7)  /* syscall-stop mode active */
 #define PT_DEBUG_FLAG_STEP      (1U << 8)  /* one-shot single step pending */
+#define PT_DEBUG_FLAG_SEIZED    (1U << 9)  /* tracing began with PTRACE_SEIZE */
 
 /* Stop kinds. */
 enum {
@@ -63,6 +64,12 @@ int proc_debug_traceme(void);
 
 /* Attach to pid: reparent to caller and stop it at the next boundary. */
 int proc_debug_attach(int pid);
+
+/* PTRACE_SEIZE equivalent: attach without stopping the tracee first. */
+int proc_debug_seize(int pid);
+
+/* PTRACE_INTERRUPT equivalent: request a stop from a running tracee. */
+int proc_debug_interrupt(int pid);
 
 /* Detach from pid; optionally deliver sig when resuming. */
 int proc_debug_detach(int pid, int sig);
