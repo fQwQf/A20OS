@@ -36,7 +36,8 @@
 - SysV 消息队列（`kernel/ipc/sysv_msg.c`）：固定 32 队列表，支持 msgget/msgsnd/msgrcv/msgctl，含阻塞 park/wake 与 IPC_NOWAIT/MSG_NOERROR。
 - POSIX 消息队列（`kernel/ipc/posix_mq.c`）：命名队列 + per-fd mqd，优先级 FIFO，绝对超时（timedsend/timedreceive），mq_notify 用信号投递。
 - ioprio/pkey：每任务 I/O 优先级与 16 槽保护键位图（`kernel/proc/sched_compat.c`），pkey_mprotect 等价 mprotect。
-- `mseal` 是接受式 no-op（无逐 VMA seal 跟踪）；`seccomp` 明确返回不支持而非假装过滤；kexec 明确拒绝。
+- `mseal` 是真实 VMA seal 语义：核心 MM 在 `mm_mmap_locked`/`mm_mprotect_locked`/`mm_munmap_locked`/`mm_mremap_locked`/brk shrink 与 `madvise(DONTNEED/FREE/REMOVE)` 中强制 `VM_SEALED`（覆盖 MAP_FIXED 覆写、mprotect、munmap、mremap 均返回 -EPERM），fork 继承 seal；尚无 `/proc/smaps` 的 Sealed 统计与 userfaultfd 交互。`seccomp` 明确返回不支持而非假装过滤；kexec 明确拒绝。
+- `renameat` 已补注册（编号 38，glibc 直接调用）：实现为 `renameat2` 的 flags=0 包装。`sched_setattr`/`sched_getattr` 改为完整 `struct sched_attr` 线格式：校验 policy/flags/nice/priority 并经 `proc_sched_set` 落调度器，支持 `SCHED_FLAG_RESET_ON_FORK`；不应用 util-clamp/deadline 字段。
 - `nfsservctl` 返回 -ENOSYS（Linux 4.19 已移除该 syscall，这是正确语义）；`map_shadow_stack` 是 x86 CET 特性，在 RISC-V 返回 -ENOSYS（架构正确）。
 - LSM 自省：`lsm_get_self_attr`/`lsm_list_modules` 报告 Landlock；`lsm_set_self_attr` 由 `landlock_restrict_self` 覆盖。
 - `statmount`/`listmount`/`listns`/`open_tree_attr` 提供 mount 表自省，`setxattrat` 系列提供 dirfd 相对 xattr。
