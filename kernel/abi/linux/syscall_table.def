@@ -63,6 +63,7 @@ LINUX_SYSCALL(recvmmsg, 0, sys_recvmmsg((int)A(0), (void *)A(1), (unsigned)A(2),
 LINUX_SYSCALL(mkdirat, 0, sys_mkdirat((int)A(0), (const char *)A(1), (int)A(2)))
 LINUX_SYSCALL(unlinkat, 0, sys_unlinkat((int)A(0), (const char *)A(1), (int)A(2)))
 LINUX_SYSCALL(renameat2, 0, sys_renameat2((int)A(0), (const char *)A(1), (int)A(2), (const char *)A(3), (int)A(4)))
+LINUX_SYSCALL(renameat, 0, sys_renameat((int)A(0), (const char *)A(1), (int)A(2), (const char *)A(3)))
 LINUX_SYSCALL(chdir, 0, sys_chdir((const char *)A(0)))
 LINUX_SYSCALL(fchdir, 0, sys_fchdir((int)A(0)))
 LINUX_SYSCALL(getcwd, 0, sys_getcwd((char *)A(0), (size_t)A(1)))

@@ -56,6 +56,29 @@ int main(void)
     struct stat st;
     if (stat(path, &st) < 0 || st.st_size != (off_t)strlen(msg))
         return fail("stat");
+
+    /* renameat(2): glibc calls it directly; verify the rename + new path. */
+#ifndef SYS_renameat
+#define SYS_renameat 38
+#endif
+    char oldpath[64], newpath[64];
+    snprintf(oldpath, sizeof(oldpath), "%s.old", path);
+    snprintf(newpath, sizeof(newpath), "%s.new", path);
+    int ofd = open(oldpath, O_CREAT | O_TRUNC | O_RDWR, 0644);
+    if (ofd < 0)
+        return fail("renameat-create");
+    if (write(ofd, msg, strlen(msg)) != (ssize_t)strlen(msg))
+        return fail("renameat-write");
+    close(ofd);
+    if (syscall(SYS_renameat, AT_FDCWD, oldpath, AT_FDCWD, newpath) < 0)
+        return fail("renameat");
+    if (stat(newpath, &st) < 0 || st.st_size != (off_t)strlen(msg))
+        return fail("renameat-stat");
+    if (stat(oldpath, &st) == 0)
+        return fail("renameat-old-exists");
+    if (unlink(newpath) < 0)
+        return fail("renameat-unlink");
+
     if (unlink(path) < 0)
         return fail("unlink");
 

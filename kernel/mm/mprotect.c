@@ -48,6 +48,14 @@ int mm_mprotect_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
     if (covered < end)
         return -ENOMEM;
 
+    /* mseal(2): mprotect over a sealed VMA is refused. */
+    for (vm_area_t *v = mm_find_vma(mm, addr); v && v->start < end; v = v->next) {
+        if (v->start >= end || v->end <= addr)
+            continue;
+        if (v->vm_flags & VM_SEALED)
+            return -EPERM;
+    }
+
 #ifdef CONFIG_NOMMU
     /* NOMMU has no page tables. We only update the VMA permission bits without splitting. */
     for (vm_area_t *v = mm_find_vma(mm, addr); v && v->start < end; ) {
