@@ -125,6 +125,14 @@ int net_netlink_bind(net_socket_t *s, const void *addr, size_t addrlen)
     s->local_len = sizeof(local);
     s->bound = 1;
     spin_unlock_irqrestore(&g_net_lock, irq);
+
+    /* udevd subscribes to the uevent multicast group when it starts; devices
+     * registered before udevd ran had no listener, so their "add" uevents were
+     * dropped.  Replay the current device set now that a listener exists so
+     * coldplug works even though sysfs uevent files are read-only here. */
+    if (s->protocol == NETLINK_KOBJECT_UEVENT &&
+        (local.nl_groups & UEVENT_GROUP))
+        class_device_emit_uevents("add");
     return 0;
 }
 
