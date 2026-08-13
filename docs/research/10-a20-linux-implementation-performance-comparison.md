@@ -472,9 +472,10 @@ timeout 映射做得可审计，且有 lifetime counters。**扩展风险。** �
 
 **A20OS 源码事实。** futex 有 64 bucket、动态 waiter、WAIT/WAIT_BITSET/WAKE/
 WAKE_BITSET/REQUEUE/CMP_REQUEUE/WAKE_OP，wait 侧在 `mm->lock -> bucket lock` 下重检
-用户值避免 lost wake；robust list 已有。PI futex、WAIT_REQUEUE_PI、futex2 等落到
-`-ENOSYS`。bucket 按 virtual address hash，物理 key 只在 bucket 内比较；因此同一
-shared page 映射到不同 VA 时可能落入不同 bucket，源码明确记录该限制
+用户值避免 lost wake；robust list 已有；PI futex 族（LOCK_PI/UNLOCK_PI/TRYLOCK_PI/
+WAIT_REQUEUE_PI/CMP_REQUEUE_PI）以有边界的实现提供（无优先级继承提升）。bucket 按
+virtual address hash，物理 key 只在 bucket 内比较；因此同一 shared page 映射到不同 VA
+时可能落入不同 bucket，源码明确记录该限制
 （[`sys_futex.c`](../../kernel/abi/linux/sys_futex.c)）。
 
 Linux futex 同样以 hash bucket 和 wait/wake linearization 为核心，但 key 能稳定标识
@@ -507,7 +508,8 @@ Linux 的 `get_signal()` 在 per-task/shared pending queue 上选择和消费
 RISC-V64 有 seqlock vvar/vDSO clock_gettime/gettimeofday/getcpu。Linux ABI 当前把 process/
 thread CPU time、RAW、coarse、boottime 等多个 clock ID 归并到同一 monotonic/realtime，
 语义是近似的。POSIX timer 是全局固定 32 项，每 tick 全扫；`timer_getoverrun()` 固定 0，
-`SIGEV_THREAD_ID` 未实现
+`SIGEV_SIGNAL`/`SIGEV_NONE`/`SIGEV_THREAD_ID` 通知已实现，`SIGEV_THREAD` 因需要执行用户
+线程函数而明确拒绝
 （[`timekeeping.c`](../../kernel/core/timekeeping.c)、
 [`vdso.c`](../../kernel/mm/vdso.c)、[`sys_time.c`](../../kernel/abi/linux/sys_time.c)、
 [`sys_timer_posix.c`](../../kernel/abi/linux/sys_timer_posix.c)）。
