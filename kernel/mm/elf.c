@@ -171,8 +171,11 @@ static void elf_discard_vmas(mm_struct_t *mm)
     while (vma) {
         vm_area_t *next = vma->next;
         if ((vma->vm_flags & VM_FILE) && vma->file_fd >= 0) {
-            if (vma->file_vnode)
+            if (vma->file_vnode) {
+                if (vma->vm_flags & VM_SHARED)
+                    vnode_shared_map_dec(vma->file_vnode);
                 vnode_put(vma->file_vnode);
+            }
             vfs_close(vma->file_fd);
         }
         kfree(vma);

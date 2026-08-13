@@ -207,7 +207,25 @@ typedef struct vnode {
     struct page_cache_page *cache_pages;
     struct page_cache_page *cache_dirty_pages;
     struct page_cache_page *cache_dirty_tail;
+    /* Number of live MAP_SHARED file VMAs backing this vnode.  The VFS read
+     * and fsync paths use this to skip the global dirty-bit harvest scan
+     * entirely when the vnode has no shared file mappings.  Updated with
+     * release semantics from VMA create/fork/split (vnode_get sites) and
+     * VMA teardown (vma_release_file/vnode_put); readers use acquire loads. */
+    int             shared_file_maps;
 } vnode_t;
+
+static inline void vnode_shared_map_inc(vnode_t *vn)
+{
+    if (vn)
+        __atomic_fetch_add(&vn->shared_file_maps, 1, __ATOMIC_RELEASE);
+}
+
+static inline void vnode_shared_map_dec(vnode_t *vn)
+{
+    if (vn)
+        __atomic_fetch_sub(&vn->shared_file_maps, 1, __ATOMIC_RELEASE);
+}
 
 /*
  * vfile lifetime invariants:
