@@ -1,6 +1,14 @@
 #define LINUX_SYSCALL_DECLARE_PROTOTYPES
 #include "syscall_impl.h"
 
+#include "fs/pipe.h"
+#include "fs/splice.h"
+
+#define SPLICE_F_MOVE       0x01
+#define SPLICE_F_NONBLOCK   0x02
+#define SPLICE_F_MORE       0x04
+#define SPLICE_F_GIFT       0x08
+
 static int64_t vectored_pread_at(int fd, const void *iov, int iovcnt, long off)
 {
     if (iovcnt < 0 || iovcnt > 1024) return -EINVAL;
@@ -92,25 +100,79 @@ int64_t sys_copy_file_range(int fd_in, long *off_in, int fd_out, long *off_out, 
 
 int64_t sys_splice(int fd_in, long *off_in, int fd_out, long *off_out, size_t len, unsigned flags)
 {
-    (void)flags;
-    return sys_copy_file_range(fd_in, off_in, fd_out, off_out, len, 0);
+    if (flags & ~(SPLICE_F_MOVE | SPLICE_F_NONBLOCK | SPLICE_F_MORE))
+        return -EINVAL;
+
+    int64_t in_gfd = fdtable_get_current(fd_in);
+    int64_t out_gfd = fdtable_get_current(fd_out);
+    if (in_gfd < 0) return in_gfd;
+    if (out_gfd < 0) return out_gfd;
+
+    vfile_t *in_vf = vfs_get_file_ref((int)in_gfd);
+    if (!in_vf) return -EBADF;
+    vfile_t *out_vf = vfs_get_file_ref((int)out_gfd);
+    if (!out_vf) {
+        vfs_put_file_ref((int)in_gfd, in_vf);
+        return -EBADF;
+    }
+    int in_pipe = pipe_vfile_is(in_vf);
+    int out_pipe = pipe_vfile_is(out_vf);
+    vfs_put_file_ref((int)in_gfd, in_vf);
+    vfs_put_file_ref((int)out_gfd, out_vf);
+
+    /* Linux requires at least one endpoint to be a pipe. */
+    if (!in_pipe && !out_pipe)
+        return -EINVAL;
+    /* A pipe has no seekable offset; a non-NULL offset on a pipe is -ESPIPE. */
+    if (in_pipe && off_in)
+        return -ESPIPE;
+    if (out_pipe && off_out)
+        return -ESPIPE;
+
+    long in_off = 0, out_off = 0;
+    if (off_in && copy_from_user(&in_off, off_in, sizeof(in_off)) < 0)
+        return -EFAULT;
+    if (off_out && copy_from_user(&out_off, off_out, sizeof(out_off)) < 0)
+        return -EFAULT;
+
+    int nonblock = (flags & SPLICE_F_NONBLOCK) != 0;
+    int r = splice_do((int)in_gfd, off_in ? &in_off : NULL,
+                      (int)out_gfd, off_out ? &out_off : NULL, len, nonblock);
+    if (r < 0)
+        return r;
+    if (off_in) {
+        if (copy_to_user(off_in, &in_off, sizeof(in_off)) < 0)
+            return -EFAULT;
+    }
+    if (off_out) {
+        if (copy_to_user(off_out, &out_off, sizeof(out_off)) < 0)
+            return -EFAULT;
+    }
+    return r;
 }
 
 int64_t sys_vmsplice(int fd, const void *iov, unsigned long nr_segs, unsigned flags)
 {
-    (void)flags;
-    return sys_writev(fd, iov, (int)nr_segs);
+    if (flags & ~(SPLICE_F_GIFT | SPLICE_F_NONBLOCK))
+        return -EINVAL;
+    int64_t gfd = fdtable_get_current(fd);
+    if (gfd < 0) return gfd;
+    int nonblock = (flags & SPLICE_F_NONBLOCK) != 0;
+    return vmsplice_do((int)gfd, iov, (int)nr_segs, nonblock);
 }
 
 int64_t sys_tee(int fd_in, int fd_out, size_t len, unsigned flags)
 {
-    (void)flags;
+    if (flags & ~(SPLICE_F_NONBLOCK | SPLICE_F_MORE))
+        return -EINVAL;
+
     int64_t in_gfd = fdtable_get_current(fd_in);
+    int64_t out_gfd = fdtable_get_current(fd_out);
     if (in_gfd < 0) return in_gfd;
-    long saved = vfs_lseek((int)in_gfd, 0, SEEK_CUR);
-    int64_t r = sys_copy_file_range(fd_in, NULL, fd_out, NULL, len, 0);
-    if (saved >= 0) vfs_lseek((int)in_gfd, saved, SEEK_SET);
-    return r;
+    if (out_gfd < 0) return out_gfd;
+
+    int nonblock = (flags & SPLICE_F_NONBLOCK) != 0;
+    return tee_do((int)in_gfd, (int)out_gfd, len, nonblock);
 }
 
 int64_t sys_fallocate(int fd, int mode, long off, long len)
