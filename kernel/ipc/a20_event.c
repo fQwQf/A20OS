@@ -10,6 +10,8 @@
 #include "ipc/ipc.h"
 #include "proc/proc.h"
 #include "ipc/objstats.h"
+#include "fs/readiness.h"
+#include "core/poll.h"
 
 #define A20_EVQ_HASH_BITS  8
 #define A20_EVQ_HASH_SIZE  (1u << A20_EVQ_HASH_BITS)
@@ -117,6 +119,7 @@ int64_t a20_eventq_watch(a20_eventq_t *eq, a20_handle_t target_h, void *target_o
             spin_unlock_irqrestore(&g_evq_hash_lock, hash_flags);
             kfree(node);
             kfree(w);
+            wait_queue_wake_all(&eq->waiters, 0, PROC_WAKE_EVENT);
             return A20_OK;
         }
         old = old->next;
@@ -128,6 +131,7 @@ int64_t a20_eventq_watch(a20_eventq_t *eq, a20_handle_t target_h, void *target_o
     eq->watch_count++;
     spin_unlock_irqrestore(&eq->lock, eq_flags);
     spin_unlock_irqrestore(&g_evq_hash_lock, hash_flags);
+    wait_queue_wake_all(&eq->waiters, 0, PROC_WAKE_EVENT);
     return A20_OK;
 }
 
@@ -155,6 +159,76 @@ static uint64_t evq_ns_to_deadline(uint64_t timeout_ns)
     if (ticks > UINT64_MAX - now) return UINT64_MAX / 2;
     uint64_t deadline = now + ticks;
     return deadline ? deadline : 1; /* 0 is reserved for "no deadline" */
+}
+
+typedef struct evq_readiness_watch {
+    a20_handle_t handle;
+    uint16_t type;
+    uint64_t event_mask;
+    uint64_t user_data;
+} evq_readiness_watch_t;
+
+static uint64_t evq_readiness_mask(void)
+{
+    return A20_EVENT_MASK(A20_EVENT_READABLE) |
+           A20_EVENT_MASK(A20_EVENT_WRITABLE) |
+           A20_EVENT_MASK(A20_EVENT_ERROR) |
+           A20_EVENT_MASK(A20_EVENT_CLOSED) |
+           A20_EVENT_MASK(A20_EVENT_ACCEPT_READY) |
+           A20_EVENT_MASK(A20_EVENT_MESSAGE_READY);
+}
+
+static short evq_mask_to_poll(uint64_t mask)
+{
+    short events = 0;
+    if (mask & (A20_EVENT_MASK(A20_EVENT_READABLE) |
+                A20_EVENT_MASK(A20_EVENT_ACCEPT_READY) |
+                A20_EVENT_MASK(A20_EVENT_MESSAGE_READY)))
+        events |= POLLIN;
+    if (mask & A20_EVENT_MASK(A20_EVENT_WRITABLE))
+        events |= POLLOUT;
+    if (!events)
+        events = POLLIN | POLLOUT;
+    return events;
+}
+
+static uint64_t evq_poll_to_mask(short events)
+{
+    uint64_t mask = 0;
+    if (events & (POLLIN | POLLPRI))
+        mask |= A20_EVENT_MASK(A20_EVENT_READABLE) |
+                A20_EVENT_MASK(A20_EVENT_ACCEPT_READY) |
+                A20_EVENT_MASK(A20_EVENT_MESSAGE_READY);
+    if (events & POLLOUT)
+        mask |= A20_EVENT_MASK(A20_EVENT_WRITABLE);
+    if (events & POLLERR)
+        mask |= A20_EVENT_MASK(A20_EVENT_ERROR);
+    if (events & (POLLHUP | POLLNVAL))
+        mask |= A20_EVENT_MASK(A20_EVENT_CLOSED);
+    return mask;
+}
+
+typedef struct evq_wait_probe {
+    a20_eventq_t *eq;
+    uint64_t generation;
+} evq_wait_probe_t;
+
+static bool evq_wait_changed(void *arg)
+{
+    evq_wait_probe_t *probe = arg;
+    a20_eventq_t *eq = probe->eq;
+    uint64_t flags = spin_lock_irqsave(&eq->lock);
+    bool ready = eq->ring_count != 0;
+    spin_unlock_irqrestore(&eq->lock, flags);
+    return ready || wait_queue_generation(&eq->waiters) != probe->generation;
+}
+
+static uint32_t evq_first_event(uint64_t events)
+{
+    for (uint32_t event = 0; event < 64; event++)
+        if (events & (1ULL << event))
+            return event;
+    return 0;
 }
 
 /*
@@ -187,45 +261,97 @@ int64_t a20_eventq_wait(a20_eventq_t *eq, a20_pending_event_t *out,
             result = (int64_t)n;
             break;
         }
-        if (timeout_ns == 0) {
-            spin_unlock_irqrestore(&eq->lock, flags);
-            result = -A20_ERR_WOULD_BLOCK;
-            break;
-        }
+        uint32_t watch_cap = eq->watch_count;
         spin_unlock_irqrestore(&eq->lock, flags);
 
-        proc_wait_token_t token = proc_park_prepare(PROC_WAIT_INTERRUPTIBLE,
-                                                    deadline);
-        if (!token.task) { result = -A20_ERR_WOULD_BLOCK; break; }
+        readiness_interest_t *interests = watch_cap ?
+            kcalloc(watch_cap, sizeof(*interests)) : NULL;
+        evq_readiness_watch_t *watches = watch_cap ?
+            kcalloc(watch_cap, sizeof(*watches)) : NULL;
+        if (watch_cap && (!interests || !watches)) {
+            kfree(interests);
+            kfree(watches);
+            result = -A20_ERR_NO_MEMORY;
+            break;
+        }
 
-        wait_queue_entry_t entry = {0};
+        size_t count = 0;
+        evq_wait_probe_t probe = { .eq = eq };
         flags = spin_lock_irqsave(&eq->lock);
-        if (eq->ring_count == 0) {
-            bool linked = wait_queue_link(&eq->waiters, &entry, token, 0);
+        if (eq->ring_count) {
             spin_unlock_irqrestore(&eq->lock, flags);
-            proc_wake_reason_t reason;
-            if (linked)
-                reason = proc_park_commit(token);
-            else {
-                (void)proc_park_cancel(token);
-                reason = PROC_WAKE_CANCEL;
+            kfree(interests);
+            kfree(watches);
+            continue;
+        }
+        for (a20_watch_entry_t *watch = eq->watches;
+             watch && count < watch_cap; watch = watch->next) {
+            uint64_t mask = watch->event_mask & evq_readiness_mask();
+            if (!mask || !a20_object_is_vfile_backed(watch->target_type))
+                continue;
+            interests[count] = (readiness_interest_t){
+                .fd = (int)(uintptr_t)watch->target_object,
+                .events = evq_mask_to_poll(mask),
+                .flags = READINESS_F_GLOBAL_FD,
+                .cookie = count,
+            };
+            watches[count] = (evq_readiness_watch_t){
+                .handle = watch->target_handle,
+                .type = watch->target_type,
+                .event_mask = watch->event_mask,
+                .user_data = watch->user_data,
+            };
+            count++;
+        }
+        probe.generation = wait_queue_generation(&eq->waiters);
+        spin_unlock_irqrestore(&eq->lock, flags);
+
+        readiness_extra_t queue_event = {
+            .source = { &eq->waiters, 0, 0 },
+            .ready = evq_wait_changed,
+            .arg = &probe,
+        };
+        int wait_result = readiness_wait_once(
+            interests, count, &queue_event, 1, max_events,
+            deadline, timeout_ns != A20_TIMEOUT_INFINITE);
+        if (wait_result > 0) {
+            uint32_t n = 0;
+            for (size_t i = 0; i < count && n < max_events; i++) {
+                uint64_t active = evq_poll_to_mask(interests[i].revents) &
+                                  watches[i].event_mask;
+                if (!active)
+                    continue;
+                memset(&out[n], 0, sizeof(out[n]));
+                out[n].source = watches[i].handle;
+                out[n].type = evq_first_event(active);
+                out[n].events = active;
+                out[n].user_data = watches[i].user_data;
+                n++;
             }
-            wait_queue_unlink(&eq->waiters, &entry);
-            proc_park_finish(token);
-            if (reason == PROC_WAKE_TIMEOUT ||
-                reason == PROC_WAKE_TIMEOUT_CAPACITY) {
-                result = -A20_ERR_TIMED_OUT;
-                break;
-            }
-            if (proc_wake_reason_is_task_interrupt(reason)) {
-                result = -A20_ERR_INTERRUPTED;
+            kfree(interests);
+            kfree(watches);
+            if (n) {
+                result = n;
                 break;
             }
             continue;
         }
-        spin_unlock_irqrestore(&eq->lock, flags);
-        (void)proc_park_cancel(token);
-        proc_park_finish(token);
+        kfree(interests);
+        kfree(watches);
+        if (wait_result == READINESS_RETRY)
+            continue;
+        if (wait_result == -EINTR) {
+            result = -A20_ERR_INTERRUPTED;
+            break;
+        }
+        if (wait_result < 0) {
+            result = wait_result == -ENOMEM ?
+                     -A20_ERR_NO_MEMORY : -A20_ERR_WOULD_BLOCK;
+            break;
+        }
+        result = timeout_ns == 0 ?
+                 -A20_ERR_WOULD_BLOCK : -A20_ERR_TIMED_OUT;
+        break;
     }
 
     a20_eventq_release(eq);
@@ -249,6 +375,7 @@ int64_t a20_eventq_cancel(a20_eventq_t *eq, a20_handle_t target_h)
             spin_unlock_irqrestore(&eq->lock, eq_flags);
             spin_unlock_irqrestore(&g_evq_hash_lock, hash_flags);
             kfree(del);
+            wait_queue_wake_all(&eq->waiters, 0, PROC_WAKE_EVENT);
             return A20_OK;
         }
         pp = &(*pp)->next;
@@ -363,6 +490,7 @@ void a20_eventq_on_object_destroy(void *object, uint16_t object_type)
                 wpp = &(*wpp)->next;
             }
             spin_unlock_irqrestore(&eq->lock, eq_flags);
+            wait_queue_wake_all(&eq->waiters, 0, PROC_WAKE_EVENT);
             kfree(we);
             continue;
         }

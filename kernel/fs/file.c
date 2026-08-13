@@ -18,6 +18,7 @@ static int g_file_next = 3;
 static spinlock_t g_file_lock = SPINLOCK_INIT;
 static obj_cache_t g_vfile_cache = OBJ_CACHE_INIT("vfile", vfile_t, 256);
 static size_t g_vfile_live;
+static uint64_t g_vfile_next_identity;
 
 extern void a20_eventq_on_vfile_destroy(int fd);
 
@@ -82,6 +83,7 @@ void file_table_init(void)
     memset(g_file_mask, 0, sizeof(g_file_mask));
     g_file_next = 3;
     g_vfile_live = 0;
+    g_vfile_next_identity = 0;
 }
 
 size_t file_open_fd_count(void)
@@ -103,6 +105,11 @@ vfile_t *vfile_alloc(void)
 {
     vfile_t *vf = (vfile_t *)obj_cache_alloc_zero(&g_vfile_cache);
     if (vf) {
+        vf->identity = __atomic_add_fetch(&g_vfile_next_identity, 1,
+                                          __ATOMIC_RELAXED);
+        if (!vf->identity)
+            vf->identity = __atomic_add_fetch(&g_vfile_next_identity, 1,
+                                              __ATOMIC_RELAXED);
         __atomic_fetch_add(&g_vfile_live, 1, __ATOMIC_RELAXED);
         a20_objstat_add(&g_a20_objstats.vfiles, 1);
         mutex_init(&vf->offset_lock);
