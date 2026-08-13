@@ -65,6 +65,12 @@ typedef struct a20_perf_cpu_counters {
 extern uint32_t g_a20_perf_enabled;
 extern a20_perf_cpu_counters_t g_a20_perf_percpu[A20_PERF_MAX_CPUS];
 
+/* System-wide software counters backing perf_event_open(2)
+ * PERF_COUNT_SW_{PAGE_FAULTS,PAGE_FAULTS_MAJ,CONTEXT_SWITCHES}. */
+extern uint64_t g_perf_sw_page_faults;
+extern uint64_t g_perf_sw_page_faults_maj;
+extern uint64_t g_perf_sw_context_switches;
+
 static inline void a20_perf_add(a20_perf_counter_t counter, uint64_t value)
 {
     if (__builtin_expect(

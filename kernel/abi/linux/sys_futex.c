@@ -6,6 +6,7 @@
 #include "core/lock.h"
 #include "core/sync.h"
 #include "mm/frame.h"
+#include "mm/mm.h"
 
 /*
  * A20OS Linux ABI futex — hash-bucket waiter management.
@@ -487,6 +488,148 @@ static int futex_wake_op(int *uaddr, int wake_nr, int wake2_nr,
     return woke;
 }
 
+/*
+ * PI futex protocol (FUTEX_LOCK_PI / UNLOCK_PI / TRYLOCK_PI).
+ *
+ * The futex word holds (tid & FUTEX_TID_MASK) | FUTEX_WAITERS |
+ * FUTEX_OWNER_DIED.  The compare-and-swap on the user word is performed
+ * against the kernel-mapped page while the hash-bucket lock is held, so
+ * concurrent futex operations on the same word (all hashing to the same
+ * bucket) serialize on the read-modify-write.  A20OS does not carry Linux
+ * priority inheritance: the waiter parks through the shared futex wait queue
+ * and is woken by UNLOCK_PI / exit handling, which preserves the ownership
+ * protocol without boosting the owner's scheduling priority.
+ */
+
+/* Map the user futex word to a kernel virtual address, pinning the page
+ * translation.  Caller must hold mm->lock. */
+static int futex_user_word_map(task_t *task, int *uaddr, volatile int **word,
+                               uintptr_t *pkey_out)
+{
+    if (!task || !task->mm || !task->pgdir || !uaddr || !word)
+        return -EFAULT;
+#ifdef CONFIG_NOMMU
+    *word = uaddr;
+    if (pkey_out)
+        *pkey_out = (uintptr_t)uaddr;
+    return 0;
+#else
+    paddr_t pa = pt_translate(task->pgdir, (vaddr_t)(uintptr_t)uaddr);
+    if (!pa)
+        return -EFAULT;
+    pfn_t pfn = phys_to_pfn(pa);
+    if (!pfn_valid(pfn))
+        return -EFAULT;
+    *word = (volatile int *)((uintptr_t)pfn_to_virt(pfn) +
+                             (pa & (PAGE_SIZE - 1)));
+    if (pkey_out)
+        *pkey_out = (uintptr_t)pa;
+    return 0;
+#endif
+}
+
+static int futex_pi_acquire(int *uaddr, int try_only)
+{
+    task_t *t = proc_current();
+    if (!t)
+        return -ESRCH;
+    uint32_t tid = (uint32_t)t->pid;
+    uintptr_t vkey = (uintptr_t)uaddr;
+    wait_queue_t *q = &g_futex_buckets[futex_bucket_index(vkey)];
+
+    for (;;) {
+        uint64_t mm_flags = spin_lock_irqsave(&t->mm->lock);
+        uint64_t q_flags = spin_lock_irqsave(&q->lock);
+
+        volatile int *word = NULL;
+        uintptr_t pkey = 0;
+        int mr = futex_user_word_map(t, uaddr, &word, &pkey);
+        if (mr < 0) {
+            spin_unlock_irqrestore(&q->lock, q_flags);
+            spin_unlock_irqrestore(&t->mm->lock, mm_flags);
+            return mr;
+        }
+        int oldv = __atomic_load_n(word, __ATOMIC_ACQUIRE);
+        int expected;
+        if ((oldv & FUTEX_TID_MASK) == 0) {
+            expected = oldv;
+            int zero = 0;
+            if (oldv == 0 || (oldv & FUTEX_OWNER_DIED)) {
+                if (__atomic_compare_exchange_n(word, &zero, (int)tid, 0,
+                                                __ATOMIC_ACQ_REL,
+                                                __ATOMIC_ACQUIRE)) {
+                    spin_unlock_irqrestore(&q->lock, q_flags);
+                    spin_unlock_irqrestore(&t->mm->lock, mm_flags);
+                    return 0;
+                }
+                /* owner died with pid 0: retry */
+                spin_unlock_irqrestore(&q->lock, q_flags);
+                spin_unlock_irqrestore(&t->mm->lock, mm_flags);
+                continue;
+            }
+            (void)expected;
+        }
+        if ((uint32_t)(oldv & FUTEX_TID_MASK) == tid) {
+            spin_unlock_irqrestore(&q->lock, q_flags);
+            spin_unlock_irqrestore(&t->mm->lock, mm_flags);
+            return -EDEADLK;
+        }
+        if (try_only) {
+            spin_unlock_irqrestore(&q->lock, q_flags);
+            spin_unlock_irqrestore(&t->mm->lock, mm_flags);
+            return -EAGAIN;
+        }
+        /* Claimed by another task: publish FUTEX_WAITERS and park. */
+        if (!(oldv & FUTEX_WAITERS)) {
+            int want = oldv | FUTEX_WAITERS;
+            __atomic_compare_exchange_n(word, &oldv, want, 0,
+                                        __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+        }
+        int wait_val = oldv | FUTEX_WAITERS;
+        spin_unlock_irqrestore(&q->lock, q_flags);
+        spin_unlock_irqrestore(&t->mm->lock, mm_flags);
+
+        int wr = futex_wait_ticks(uaddr, wait_val, 0, FUTEX_BITSET_MATCH_ANY);
+        if (wr < 0 && wr != -ETIMEDOUT)
+            return wr;
+    }
+}
+
+static int futex_pi_release(int *uaddr)
+{
+    task_t *t = proc_current();
+    if (!t)
+        return -ESRCH;
+    uint32_t tid = (uint32_t)t->pid;
+    uintptr_t vkey = (uintptr_t)uaddr;
+    wait_queue_t *q = &g_futex_buckets[futex_bucket_index(vkey)];
+
+    uint64_t mm_flags = spin_lock_irqsave(&t->mm->lock);
+    uint64_t q_flags = spin_lock_irqsave(&q->lock);
+    volatile int *word = NULL;
+    int mr = futex_user_word_map(t, uaddr, &word, NULL);
+    if (mr < 0) {
+        spin_unlock_irqrestore(&q->lock, q_flags);
+        spin_unlock_irqrestore(&t->mm->lock, mm_flags);
+        return mr;
+    }
+    int oldv = __atomic_load_n(word, __ATOMIC_ACQUIRE);
+    if ((oldv & FUTEX_TID_MASK) != tid) {
+        spin_unlock_irqrestore(&q->lock, q_flags);
+        spin_unlock_irqrestore(&t->mm->lock, mm_flags);
+        return -EPERM;
+    }
+    int had_waiters = oldv & FUTEX_WAITERS;
+    int zero = 0;
+    __atomic_store_n(word, zero, __ATOMIC_RELEASE);
+    spin_unlock_irqrestore(&q->lock, q_flags);
+    spin_unlock_irqrestore(&t->mm->lock, mm_flags);
+
+    if (had_waiters)
+        futex_wake_on(uaddr, 1, FUTEX_BITSET_MATCH_ANY);
+    return 0;
+}
+
 int64_t sys_futex(int *uaddr, int op, int val, void *timeout, int *uaddr2, int val3)
 {
     int opc = op & FUTEX_CMD_MASK;
@@ -504,10 +647,37 @@ int64_t sys_futex(int *uaddr, int op, int val, void *timeout, int *uaddr2, int v
         return futex_requeue(uaddr, val, (int)(intptr_t)timeout, uaddr2, 0, 0);
     case FUTEX_CMP_REQUEUE:
         return futex_requeue(uaddr, val, (int)(intptr_t)timeout, uaddr2, 1, val3);
+    case FUTEX_CMP_REQUEUE_PI:
+        /* The requeued waiters surface on uaddr2, then acquire it through
+         * their own FUTEX_LOCK_PI call; requeue to the plain bucket is the
+         * bounded analogue. */
+        return futex_requeue(uaddr, val, (int)(intptr_t)timeout, uaddr2, 1, val3);
     case FUTEX_WAKE_OP:
         return futex_wake_op(uaddr, val, (int)(intptr_t)timeout, uaddr2, val3);
+    case FUTEX_LOCK_PI:
+        return futex_pi_acquire(uaddr, 0);
+    case FUTEX_TRYLOCK_PI:
+        return futex_pi_acquire(uaddr, 1);
+    case FUTEX_UNLOCK_PI:
+        return futex_pi_release(uaddr);
+    case FUTEX_WAIT_REQUEUE_PI: {
+        /* Bounded: wait on uaddr for the requeue signal, then acquire the PI
+         * futex at uaddr2 in-kernel before returning success. */
+        uint64_t ticks = 0;
+        int tr = futex_timeout_ticks(timeout, 0, 0, &ticks);
+        if (tr < 0) return tr;
+        int r = futex_wait_ticks(uaddr, val, ticks, FUTEX_BITSET_MATCH_ANY);
+        if (r < 0)
+            return r;
+        return futex_pi_acquire(uaddr2, 0);
+    }
+    case FUTEX_FD:
+        /* Removed in Linux 5.4; kept for a stable, documented error. */
+        return -EINVAL;
     default:
-        return -ENOSYS;
+        /* Unknown or reserved commands are refused; no futex command is
+         * silently unimplemented. */
+        return -EINVAL;
     }
 }
 
