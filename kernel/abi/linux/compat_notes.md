@@ -12,7 +12,7 @@ map_shadow_stack 是 x86 CET、riscv_* 与 arch_prctl 是架构专属）。
 
 - `full`：目标是在已支持的 flag 和对象类型范围内匹配 Linux 语义。
 - `partial`：足够支撑当前用户态和测试，但已知边界语义缺失或被简化。
-- `missing`：syscall 未实现，或者关键操作返回 `-ENOSYS`。
+- `missing`：syscall 未实现，或者关键操作返回 `-ENOSYS`。当前表没有 `missing` 条目；仅存的 `-ENOSYS` 是架构/版本正确的 Linux 语义。
 
 ## 当前高风险 Partial 区域
 
@@ -77,4 +77,4 @@ map_shadow_stack 是 x86 CET、riscv_* 与 arch_prctl 是架构专属）。
 1. 新增 Linux syscall 实现必须登记到 `syscall_coverage.md`。
 2. 兼容性捷径应在实现里用简短注释标明，并同步反映到本文档。
 3. ABI 文件只应负责转换用户参数并调用内部子系统 API；不应拥有子系统全局状态。
-4. 如果某个 syscall 为了兼容而故意对未支持特性返回成功，应登记为 `stub`，不能登记为 `full`。
+4. 如果某个 syscall 为了兼容而故意对未支持特性返回成功，应登记为 `partial` 并在覆盖表注释中说明固定成功行为，不能登记为 `full`。
