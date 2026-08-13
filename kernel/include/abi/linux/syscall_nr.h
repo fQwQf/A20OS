@@ -11,6 +11,7 @@
 #define SYS_flock          32
 #define SYS_unlinkat       35
 #define SYS_linkat         37
+#define SYS_renameat       38
 #define SYS_inotify_init1  26
 #define SYS_mknodat        33
 #define SYS_umount2        39
