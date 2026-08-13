@@ -368,7 +368,7 @@ anonfd 是把匿名 vfile 安装到当前 fd table 的 helper。它不是文件�
 
 ### 4.4 Dcache
 
-- dcache 只对 ramfs、FAT32、ext4 启用；它是 512 项 lookup 优化层，不是权威 namespace，也不能实现 `RESOLVE_CACHED`。
+- dcache 只对 ramfs、FAT32、ext4 启用；它是 512 项 lookup 优化层，不是权威 namespace。`RESOLVE_CACHED` 通过 dcache 命中检查实现：任意组件未缓存即返回 `-EAGAIN`，由调用方去 flag 重试。
 - create、unlink、rmdir、rename、link、symlink 等路径多数按 `(parent, name)` 定点失效；mount/umount、部分全局状态变更和无法安全定点的情况仍调用 `vfs_dcache_invalidate_all`。
 
 ### 4.5 xattr
@@ -382,7 +382,7 @@ anonfd 是把匿名 vfile 安装到当前 fd table 的 helper。它不是文件�
 
 | 领域 | 当前行为 | 期望的 Linux 行为 |
 |------|------------------|-------------------------|
-| openat2 resolve flag | `NO_XDEV`/`NO_SYMLINKS`/`BENEATH`/`IN_ROOT` 有实现；`NO_MAGICLINKS` 被接受但未执行检查；`RESOLVE_CACHED` 未实现；A20OS 自定义 `NO_TRAILING=0x20` 与 Linux `CACHED=0x20` 冲突 | Linux 编号和可扩展 `open_how` size 语义 |
+| openat2 resolve flag | `NO_XDEV`/`NO_SYMLINKS`/`BENEATH`/`IN_ROOT`/`CACHED` 有实现（`CACHED` 未命中返回 `-EAGAIN`，编号 `0x20` 与 Linux 一致）；`NO_MAGICLINKS` 被接受但未执行检查 | Linux 编号和可扩展 `open_how` size 语义 |
 | renameat2 flag | VFS 接受 `NOREPLACE/EXCHANGE`；ramfs/ext4 支持两者，FAT32/NTFS 只支持 `NOREPLACE`，whiteout 不支持 | 后端一致支持与 overlay whiteout |
 | statx | 不是 requested-only：实现总把 `STATX_BASIC_STATS` 加入 `stx_mask` 并返回基础元数据，再按请求追加 `STATX_BTIME` 等可选字段；支持 sync type 子集 | 完整遵守 `AT_STATX_*`/`STATX_*` 及字段可用性语义 |
 | fchmodat2 | 带 flags 分发到 `sys_fchmodat`（`kernel/abi/linux/syscall_table.def`） | 独立 syscall，完整处理 `AT_*` flag |

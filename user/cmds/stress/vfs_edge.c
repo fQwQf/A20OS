@@ -26,8 +26,7 @@
 #define RESOLVE_NO_SYMLINKS    0x04
 #define RESOLVE_BENEATH        0x08
 #define RESOLVE_IN_ROOT        0x10
-#define RESOLVE_NO_TRAILING_SYMLINKS 0x20
-#define RESOLVE_CACHED         0x40
+#define RESOLVE_CACHED         0x20
 #endif
 
 #ifndef RENAME_NOREPLACE
@@ -386,6 +385,46 @@ static int openat2_no_symlinks(void)
     unlink(lpath);
     unlink(tpath);
     rmdir(dir);
+    return 0;
+}
+
+/* RESOLVE_CACHED: only succeed when every component is already in the dentry
+ * cache; a never-cached path must fail with -EAGAIN, and a cached one must
+ * succeed. */
+static int openat2_cached(void)
+{
+    char path[64];
+    snprintf(path, sizeof(path), "/tmp/vfs_cache_%d.txt", getpid());
+    unlink(path);
+
+    struct open_how how = { .flags = O_RDWR, .mode = 0600,
+                            .resolve = RESOLVE_CACHED };
+    errno = 0;
+    long r = syscall(SYS_openat2, AT_FDCWD, path, &how, sizeof(how));
+    if (r >= 0) {
+        close((int)r);
+        unlink(path);
+        return fail("cached-should-fail");
+    }
+    if (errno != EAGAIN) {
+        unlink(path);
+        return fail("cached-errno");
+    }
+
+    /* A normal create populates the dentry cache. */
+    int fd = open(path, O_CREAT | O_RDWR, 0600);
+    if (fd < 0)
+        return fail("cached-open");
+    close(fd);
+
+    errno = 0;
+    r = syscall(SYS_openat2, AT_FDCWD, path, &how, sizeof(how));
+    if (r < 0) {
+        unlink(path);
+        return fail("cached-now-cached");
+    }
+    close((int)r);
+    unlink(path);
     return 0;
 }
 
@@ -776,6 +815,8 @@ int main(void)
     if (openat2_beneath_symlink_escape() != 0)
         return 1;
     if (openat2_no_symlinks() != 0)
+        return 1;
+    if (openat2_cached() != 0)
         return 1;
     if (renameat2_flags() != 0)
         return 1;
