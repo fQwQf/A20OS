@@ -6,6 +6,7 @@
 #include "core/string.h"
 #include "fs/anonfd.h"
 #include "fs/file.h"
+#include "fs/readiness.h"
 #include "fs/vfs.h"
 #include "mm/slab.h"
 #include "proc/proc.h"
@@ -141,10 +142,25 @@ static int eventfd_poll(vfile_t *vf, short events)
     return revents;
 }
 
+static size_t eventfd_poll_sources(vfile_t *vf, short events,
+                                   readiness_source_t *sources, size_t max)
+{
+    eventfd_t *efd = vf ? vf->priv : NULL;
+    if (!efd || !sources)
+        return 0;
+    size_t count = 0;
+    if ((events & POLLIN) && count < max)
+        sources[count++] = (readiness_source_t){ &efd->readers, 0, 0 };
+    if ((events & POLLOUT) && count < max)
+        sources[count++] = (readiness_source_t){ &efd->writers, 0, 0 };
+    return count;
+}
+
 static vfile_ops_t g_eventfd_ops = {
     .read = eventfd_read,
     .write = eventfd_write,
     .poll = eventfd_poll,
+    .poll_sources = eventfd_poll_sources,
     .close = anonfd_free_priv_close,
 };
 

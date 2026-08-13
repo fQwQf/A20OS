@@ -12,6 +12,14 @@ void wait_queue_init(wait_queue_t *q) {
     spin_init(&q->lock);
     spin_set_debug(&q->lock, "wait_queue", q);
     q->head = NULL;
+    q->generation = 0;
+}
+
+uint64_t wait_queue_generation(wait_queue_t *q)
+{
+    if (!q)
+        return 0;
+    return __atomic_load_n(&q->generation, __ATOMIC_ACQUIRE);
 }
 
 static void wait_queue_entry_clear(wait_queue_entry_t *entry)
@@ -170,6 +178,7 @@ unsigned wait_queue_collect_one(wait_queue_t *q, uintptr_t key,
         return 0;
 
     uint64_t flags = spin_lock_irqsave(&q->lock);
+    __atomic_add_fetch(&q->generation, 1, __ATOMIC_RELEASE);
     wait_queue_entry_t *entry = q->head;
     while (entry && key && entry->key != key)
         entry = entry->next;
@@ -197,6 +206,7 @@ unsigned wait_queue_collect_all(wait_queue_t *q, uintptr_t key,
     unsigned collected = 0;
     bool drained = true;
     uint64_t flags = spin_lock_irqsave(&q->lock);
+    __atomic_add_fetch(&q->generation, 1, __ATOMIC_RELEASE);
     wait_queue_entry_t *entry = q->head;
     while (entry) {
         wait_queue_entry_t *next = entry->next;

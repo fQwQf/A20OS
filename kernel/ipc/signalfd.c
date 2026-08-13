@@ -5,6 +5,7 @@
 #include "core/sync.h"
 #include "fs/anonfd.h"
 #include "fs/file.h"
+#include "fs/readiness.h"
 #include "fs/fdtable.h"
 #include "mm/slab.h"
 #include "proc/proc.h"
@@ -170,9 +171,23 @@ static int signalfd_write(vfile_t *vf, const char *buf, size_t count)
     return -EINVAL;
 }
 
+static size_t signalfd_poll_sources(vfile_t *vf, short events,
+                                    readiness_source_t *sources, size_t max)
+{
+    if (!signalfd_is_ops(vf) || !sources || max == 0 || !(events & POLLIN))
+        return 0;
+    task_t *task = proc_current();
+    if (!task || !task->signals)
+        return 0;
+    signal_state_t *ss = (signal_state_t *)task->signals;
+    sources[0] = (readiness_source_t){ &ss->readiness_waiters, 0, 0 };
+    return 1;
+}
+
 static vfile_ops_t g_signalfd_ops = {
     .read = signalfd_read,
     .write = signalfd_write,
+    .poll_sources = signalfd_poll_sources,
     .close = anonfd_free_priv_close,
 };
 
@@ -217,6 +232,12 @@ int signalfd_create(int ufd, uint64_t kernel_mask, int flags)
         }
         signalfd_t *sfd = vf->priv;
         sfd->mask = kernel_mask;
+        task_t *task = proc_current();
+        if (task && task->signals) {
+            signal_state_t *ss = task->signals;
+            wait_queue_wake_all(&ss->readiness_waiters, 0,
+                                PROC_WAKE_EVENT);
+        }
         vfs_put_file_ref((int)gfd, vf);
         return ufd;
     }

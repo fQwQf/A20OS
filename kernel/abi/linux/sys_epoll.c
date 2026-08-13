@@ -2,7 +2,9 @@
 #include "syscall_impl.h"
 #include "proc/proc_internal.h"
 #include "fs/vfs/file.h"
+#include "fs/readiness.h"
 #include "core/timer.h"
+#include "mm/slab.h"
 #include "proc/proc.h"
 #include "proc/signal.h"
 
@@ -39,13 +41,26 @@ epoll_event_t;
 typedef struct epoll_item {
     int fd;
     int registered;
+    uint64_t identity;
     epoll_event_t ev;
+    readiness_state_t state;
 } epoll_item_t;
 
 typedef struct {
+    spinlock_t lock;
     int count;
+    wait_queue_t control_waiters;
+    uint64_t change_seq;
     epoll_item_t items[EPOLL_MAX_FDS];
 } epoll_t;
+
+typedef struct {
+    int index;
+    int fd;
+    uint64_t identity;
+    epoll_event_t ev;
+    readiness_state_t state;
+} epoll_wait_item_t;
 
 static short epoll_events_to_poll(uint32_t events);
 static uint32_t poll_events_to_epoll(short pe, uint32_t orig_events);
@@ -57,15 +72,26 @@ static int epoll_poll(vfile_t *vf, short events)
     if (!(events & POLLIN)) return 0;
 
     for (int i = 0; i < EPOLL_MAX_FDS; i++) {
-        if (!ep->items[i].registered)
+        uint64_t flags = spin_lock_irqsave(&ep->lock);
+        if (!ep->items[i].registered || !ep->items[i].state.enabled) {
+            spin_unlock_irqrestore(&ep->lock, flags);
             continue;
-        int64_t gfd = fdtable_get_current(ep->items[i].fd);
-        if (gfd < 0)
+        }
+        int fd = ep->items[i].fd;
+        uint64_t identity = ep->items[i].identity;
+        epoll_event_t ev = ep->items[i].ev;
+        spin_unlock_irqrestore(&ep->lock, flags);
+
+        int gfd = -1;
+        vfile_t *target = fdtable_get_current_file_ref(fd, &gfd);
+        if (!target)
             continue;
-        short requested = epoll_events_to_poll(ep->items[i].ev.events);
-        int ready = vfs_poll_events((int)gfd, requested);
+        short requested = epoll_events_to_poll(ev.events);
+        int ready = target->identity == identity ?
+                    vfs_poll_file(target, requested) : 0;
+        vfs_put_file_ref(gfd, target);
         if (ready > 0 &&
-            poll_events_to_epoll((short)ready, ep->items[i].ev.events))
+            poll_events_to_epoll((short)ready, ev.events))
             return POLLIN;
     }
     return 0;
@@ -85,26 +111,6 @@ static vfile_ops_t g_epoll_ops = {
 static int vfile_is_epoll(vfile_t *vf)
 {
     return vf && vf->ops == &g_epoll_ops;
-}
-
-/*
- * Acquire a reference to the epoll instance behind epfd.
- * Returns the epoll_t pointer on success (caller must NOT free it).
- * On failure returns NULL.
- */
-static epoll_t *epoll_get(int epfd)
-{
-    int64_t gfd = fdtable_get_current(epfd);
-    if (gfd < 0) return NULL;
-    vfile_t *vf = vfs_get_file_ref((int)gfd);
-    if (!vf) return NULL;
-    if (!vfile_is_epoll(vf)) {
-        vfs_put_file_ref((int)gfd, vf);
-        return NULL;
-    }
-    epoll_t *ep = (epoll_t *)vf->priv;
-    vfs_put_file_ref((int)gfd, vf);
-    return ep;
 }
 
 /*
@@ -150,15 +156,23 @@ static int epoll_check_cycle(int root_fd, int target_fd, int depth)
     if (root_fd == target_fd)
         return -ELOOP;
 
-    epoll_t *target_ep = epoll_get(target_fd);
+    int target_gfd = -1;
+    vfile_t *target_vf = NULL;
+    epoll_t *target_ep = epoll_get_ref(target_fd, &target_gfd, &target_vf);
     if (!target_ep)
         return 0;
 
     for (int i = 0; i < EPOLL_MAX_FDS; i++) {
-        if (!target_ep->items[i].registered) continue;
+        uint64_t flags = spin_lock_irqsave(&target_ep->lock);
+        int registered = target_ep->items[i].registered;
         int watched_fd = target_ep->items[i].fd;
-        if (watched_fd == root_fd)
+        spin_unlock_irqrestore(&target_ep->lock, flags);
+        if (!registered)
+            continue;
+        if (watched_fd == root_fd) {
+            epoll_put_ref(target_gfd, target_vf);
             return -ELOOP;
+        }
 
         int64_t gfd = fdtable_get_current(watched_fd);
         if (gfd < 0) continue;
@@ -169,9 +183,12 @@ static int epoll_check_cycle(int root_fd, int target_fd, int depth)
         if (!is_ep) continue;
 
         int r = epoll_check_cycle(root_fd, watched_fd, depth + 1);
-        if (r < 0)
+        if (r < 0) {
+            epoll_put_ref(target_gfd, target_vf);
             return r;
+        }
     }
+    epoll_put_ref(target_gfd, target_vf);
     return 0;
 }
 
@@ -205,12 +222,46 @@ static short epoll_events_to_poll(uint32_t events)
 
 static uint32_t poll_events_to_epoll(short pe, uint32_t orig_events)
 {
-    uint32_t ev = orig_events & ~((uint32_t)(EPOLLIN | EPOLLOUT | EPOLLERR | EPOLLHUP));
+    uint32_t ev = 0;
     if (pe & POLLIN)  ev |= EPOLLIN;
     if (pe & POLLOUT) ev |= EPOLLOUT;
     if (pe & POLLERR) ev |= EPOLLERR;
     if (pe & POLLHUP) ev |= EPOLLHUP;
+    if ((pe & POLLHUP) && (orig_events & EPOLLRDHUP))
+        ev |= EPOLLRDHUP;
     return ev;
+}
+
+static uint32_t epoll_readiness_mode(uint32_t events)
+{
+    uint32_t mode = 0;
+    if (events & EPOLLET)
+        mode |= READINESS_MODE_EDGE;
+    if (events & EPOLLONESHOT)
+        mode |= READINESS_MODE_ONESHOT;
+    return mode;
+}
+
+static void epoll_change_locked(epoll_t *ep)
+{
+    __atomic_add_fetch(&ep->change_seq, 1, __ATOMIC_RELEASE);
+}
+
+static void epoll_wake_changed(epoll_t *ep)
+{
+    wait_queue_wake_all(&ep->control_waiters, 0, PROC_WAKE_EVENT);
+}
+
+typedef struct {
+    epoll_t *ep;
+    uint64_t sequence;
+} epoll_change_probe_t;
+
+static bool epoll_change_pending(void *arg)
+{
+    epoll_change_probe_t *probe = arg;
+    return __atomic_load_n(&probe->ep->change_seq, __ATOMIC_ACQUIRE) !=
+           probe->sequence;
 }
 
 int64_t sys_epoll_create1(int flags)
@@ -222,6 +273,8 @@ int64_t sys_epoll_create1(int flags)
     epoll_t *ep = (epoll_t *)kmalloc(sizeof(*ep));
     if (!ep) { vfile_free(vf); return -ENOMEM; }
     memset(ep, 0, sizeof(*ep));
+    spin_init(&ep->lock);
+    wait_queue_init(&ep->control_waiters);
 
     refcount_set(&vf->ref_count, 1);
     vf->priv = ep;
@@ -247,75 +300,108 @@ int64_t sys_epoll_ctl(int epfd, int op, int fd, void *event)
     int err = check_epfd(epfd);
     if (err < 0) return err;
 
-    epoll_t *ep = epoll_get(epfd);
+    int ep_gfd = -1;
+    vfile_t *ep_vf = NULL;
+    epoll_t *ep = epoll_get_ref(epfd, &ep_gfd, &ep_vf);
     if (!ep) return -EBADF;
+#define EPOLL_CTL_RETURN(v) do { epoll_put_ref(ep_gfd, ep_vf); return (v); } while (0)
 
-    if (epfd == fd) return -EINVAL;
+    if (epfd == fd) EPOLL_CTL_RETURN(-EINVAL);
 
-    int64_t target_gfd = fdtable_get_current(fd);
-    if (target_gfd < 0) return -EBADF;
+    int target_gfd = -1;
+    vfile_t *target_vf = fdtable_get_current_file_ref(fd, &target_gfd);
+    if (!target_vf) EPOLL_CTL_RETURN(-EBADF);
+    uint64_t target_identity = target_vf->identity;
+#undef EPOLL_CTL_RETURN
+#define EPOLL_CTL_RETURN(v) do { \
+    vfs_put_file_ref(target_gfd, target_vf); \
+    epoll_put_ref(ep_gfd, ep_vf); \
+    return (v); \
+} while (0)
 
     if (op != EPOLL_CTL_DEL) {
-        if (!event) return -EFAULT;
+        if (!event) EPOLL_CTL_RETURN(-EFAULT);
     }
 
     epoll_event_t ev;
     memset(&ev, 0, sizeof(ev));
     if (event && copy_from_user(&ev, event, sizeof(ev)) < 0)
-        return -EFAULT;
+        EPOLL_CTL_RETURN(-EFAULT);
 
     switch (op) {
     case EPOLL_CTL_ADD: {
-        if (epoll_find(ep, fd) >= 0)
-            return -EEXIST;
-
-        {
-            vfile_t *vf_check = vfs_get_file_ref((int)target_gfd);
-            if (vf_check && vfile_is_epoll(vf_check)) {
-                int cyc_err = epoll_check_cycle(epfd, fd, 0);
-                if (cyc_err < 0) {
-                    vfs_put_file_ref((int)target_gfd, vf_check);
-                    return cyc_err;
-                }
-            }
-            if (vf_check && vf_check->vnode &&
-                vf_check->vnode->type == VFS_FT_DIR) {
-                vfs_put_file_ref((int)target_gfd, vf_check);
-                return -EPERM;
-            }
-            if (vf_check) vfs_put_file_ref((int)target_gfd, vf_check);
+        if (vfile_is_epoll(target_vf)) {
+            int cyc_err = epoll_check_cycle(epfd, fd, 0);
+            if (cyc_err < 0)
+                EPOLL_CTL_RETURN(cyc_err);
         }
+        if (target_vf->vnode && target_vf->vnode->type == VFS_FT_DIR)
+            EPOLL_CTL_RETURN(-EPERM);
 
-        int idx = epoll_find_free(ep);
-        if (idx < 0) return -ENOSPC;
+        uint64_t flags = spin_lock_irqsave(&ep->lock);
+        int idx = epoll_find(ep, fd);
+        if (idx >= 0 && ep->items[idx].identity == target_identity) {
+            spin_unlock_irqrestore(&ep->lock, flags);
+            EPOLL_CTL_RETURN(-EEXIST);
+        }
+        if (idx < 0)
+            idx = epoll_find_free(ep);
+        if (idx < 0) {
+            spin_unlock_irqrestore(&ep->lock, flags);
+            EPOLL_CTL_RETURN(-ENOSPC);
+        }
+        bool replacing = ep->items[idx].registered;
         ep->items[idx].fd = fd;
+        ep->items[idx].identity = target_identity;
         ep->items[idx].ev = ev;
         ep->items[idx].registered = 1;
-        ep->count++;
-        return 0;
+        readiness_state_init(&ep->items[idx].state,
+                             epoll_readiness_mode(ev.events));
+        if (!replacing)
+            ep->count++;
+        epoll_change_locked(ep);
+        spin_unlock_irqrestore(&ep->lock, flags);
+        epoll_wake_changed(ep);
+        EPOLL_CTL_RETURN(0);
     }
 
     case EPOLL_CTL_MOD: {
+        uint64_t flags = spin_lock_irqsave(&ep->lock);
         int idx = epoll_find(ep, fd);
-        if (idx < 0)
-            return -ENOENT;
+        if (idx < 0 || ep->items[idx].identity != target_identity) {
+            spin_unlock_irqrestore(&ep->lock, flags);
+            EPOLL_CTL_RETURN(-ENOENT);
+        }
         ep->items[idx].ev = ev;
-        return 0;
+        readiness_state_rearm(&ep->items[idx].state,
+                              epoll_readiness_mode(ev.events));
+        epoll_change_locked(ep);
+        spin_unlock_irqrestore(&ep->lock, flags);
+        epoll_wake_changed(ep);
+        EPOLL_CTL_RETURN(0);
     }
 
     case EPOLL_CTL_DEL: {
+        uint64_t flags = spin_lock_irqsave(&ep->lock);
         int idx = epoll_find(ep, fd);
-        if (idx < 0)
-            return -ENOENT;
+        if (idx < 0 || ep->items[idx].identity != target_identity) {
+            spin_unlock_irqrestore(&ep->lock, flags);
+            EPOLL_CTL_RETURN(-ENOENT);
+        }
         ep->items[idx].registered = 0;
         ep->items[idx].fd = -1;
+        ep->items[idx].identity = 0;
         ep->count--;
-        return 0;
+        epoll_change_locked(ep);
+        spin_unlock_irqrestore(&ep->lock, flags);
+        epoll_wake_changed(ep);
+        EPOLL_CTL_RETURN(0);
     }
 
     default:
-        return -EINVAL;
+        EPOLL_CTL_RETURN(-EINVAL);
     }
+#undef EPOLL_CTL_RETURN
 }
 
 static int epoll_do_wait(int epfd, void *events, int maxevents,
@@ -361,107 +447,141 @@ static int epoll_do_wait(int epfd, void *events, int maxevents,
     int has_timeout = timeout_ms >= 0;
     uint64_t deadline = 0;
     if (has_timeout) {
-        uint64_t ticks = (uint64_t)timeout_ms * TICKS_PER_SEC / 1000ULL;
-        deadline = timer_get_ticks() + (ticks ? ticks : 1);
+        uint64_t ticks = timeout_ms > 0 ?
+            (uint64_t)timeout_ms * TICKS_PER_SEC / 1000ULL : 0;
+        if (timeout_ms > 0 && ticks == 0)
+            ticks = 1;
+        deadline = timer_get_ticks() + ticks;
+    }
+
+    readiness_interest_t *interests =
+        kcalloc(EPOLL_MAX_FDS, sizeof(*interests));
+    epoll_wait_item_t *snapshots =
+        kcalloc(EPOLL_MAX_FDS, sizeof(*snapshots));
+    if (!interests || !snapshots) {
+        if (sigmask && saved_ss)
+            signal_task_restore_mask(t, saved_blocked);
+        kfree(interests);
+        kfree(snapshots);
+        epoll_put_ref(ep_gfd, ep_vf);
+        return -ENOMEM;
     }
 
     int total_ready = 0;
-    int first_pass = 1;
-
     for (;;) {
+        memset(interests, 0, EPOLL_MAX_FDS * sizeof(*interests));
+        memset(snapshots, 0, EPOLL_MAX_FDS * sizeof(*snapshots));
+        size_t interest_count = 0;
+        uint64_t lock_flags = spin_lock_irqsave(&ep->lock);
+        epoll_change_probe_t probe = { .ep = ep, .sequence = ep->change_seq };
+        for (int i = 0; i < EPOLL_MAX_FDS; i++) {
+            if (!ep->items[i].registered || !ep->items[i].state.enabled)
+                continue;
+            snapshots[interest_count] = (epoll_wait_item_t){
+                .index = i,
+                .fd = ep->items[i].fd,
+                .identity = ep->items[i].identity,
+                .ev = ep->items[i].ev,
+                .state = ep->items[i].state,
+            };
+            interests[interest_count++] = (readiness_interest_t){
+                .fd = ep->items[i].fd,
+                .events = epoll_events_to_poll(ep->items[i].ev.events),
+                .cookie = interest_count - 1,
+                .expected_identity = ep->items[i].identity,
+                .state = &snapshots[interest_count - 1].state,
+            };
+        }
+        spin_unlock_irqrestore(&ep->lock, lock_flags);
+        readiness_extra_t control = {
+            .source = { &ep->control_waiters, 0, 0 },
+            .ready = epoll_change_pending,
+            .arg = &probe,
+        };
+        int wait_result = readiness_wait_once(
+            interests, interest_count, &control, 1, (size_t)maxevents,
+            deadline, has_timeout);
+
+        bool pruned = false;
+        lock_flags = spin_lock_irqsave(&ep->lock);
+        if (ep->change_seq != probe.sequence) {
+            spin_unlock_irqrestore(&ep->lock, lock_flags);
+            continue;
+        }
+        for (size_t j = 0; j < interest_count; j++) {
+            epoll_wait_item_t *snapshot = &snapshots[j];
+            epoll_item_t *item = &ep->items[snapshot->index];
+            if (!item->registered || item->fd != snapshot->fd ||
+                item->identity != snapshot->identity)
+                continue;
+            item->state = snapshot->state;
+            if (interests[j].revents & POLLNVAL) {
+                item->registered = 0;
+                item->fd = -1;
+                item->identity = 0;
+                ep->count--;
+                pruned = true;
+            }
+        }
+        if (pruned)
+            epoll_change_locked(ep);
+        spin_unlock_irqrestore(&ep->lock, lock_flags);
+        if (pruned)
+            epoll_wake_changed(ep);
+
+        if (wait_result == READINESS_RETRY)
+            continue;
+        if (wait_result < 0) {
+            total_ready = wait_result;
+            break;
+        }
+        if (wait_result == 0) {
+            total_ready = 0;
+            break;
+        }
+
         int n = 0;
-        for (int i = 0; i < EPOLL_MAX_FDS && n < maxevents; i++) {
-            if (!ep->items[i].registered) continue;
-
-            int fd = ep->items[i].fd;
-            int64_t gfd = fdtable_get_current(fd);
-            if (gfd < 0) continue;
-
-            short poll_events = epoll_events_to_poll(ep->items[i].ev.events);
-            int revents = vfs_poll_events((int)gfd, poll_events);
-            if (revents <= 0) continue;
+        for (size_t j = 0; j < interest_count && n < maxevents; j++) {
+            readiness_interest_t *interest = &interests[j];
+            if (!interest->revents)
+                continue;
+            if (interest->revents & POLLNVAL)
+                continue;
+            epoll_wait_item_t *snapshot =
+                &snapshots[(size_t)interest->cookie];
             epoll_event_t out_ev;
-            out_ev.events = poll_events_to_epoll((short)revents,
-                                                  ep->items[i].ev.events);
+            out_ev.events = poll_events_to_epoll(interest->revents,
+                                                  snapshot->ev.events);
             if (!out_ev.events)
                 continue;
-            out_ev.data = ep->items[i].ev.data;
+            out_ev.data = snapshot->ev.data;
 
             if (copy_to_user((char *)events + (size_t)n * sizeof(epoll_event_t),
                              &out_ev, sizeof(epoll_event_t)) < 0) {
                 if (sigmask && saved_ss)
                     signal_task_restore_mask(t, saved_blocked);
+                kfree(interests);
+                kfree(snapshots);
                 epoll_put_ref(ep_gfd, ep_vf);
                 return -EFAULT;
             }
             n++;
-
-            if (ep->items[i].ev.events & EPOLLONESHOT) {
-                ep->items[i].registered = 0;
-                ep->count--;
-            }
         }
-
         if (n > 0) {
             total_ready = n;
             break;
         }
-
-        if (!first_pass) {
-            if (has_timeout && timer_get_ticks() >= deadline) {
-                total_ready = 0;
-                break;
-            }
-            if (t && signal_task_has_unblocked(t)) {
-                if (sigmask && saved_ss) {
-                    signal_task_defer_mask_restore(t, saved_blocked);
-                }
-                epoll_put_ref(ep_gfd, ep_vf);
-                return -EINTR;
-            }
-        }
-        first_pass = 0;
-
-        if (has_timeout && timeout_ms == 0) {
-            total_ready = 0;
-            break;
-        }
-
-        if (has_timeout && timer_get_ticks() >= deadline) {
-            total_ready = 0;
-            break;
-        }
-
-        if (t) {
-#if defined(CONFIG_X86_64)
-            proc_yield();
-#else
-            uint64_t now = timer_get_ticks();
-            uint64_t sleep_until = now + MS_TO_TICKS(20);
-            if (has_timeout && deadline < sleep_until)
-                sleep_until = deadline;
-            proc_wake_reason_t reason =
-                proc_park_wait(PROC_WAIT_INTERRUPTIBLE, sleep_until);
-            if (reason == PROC_WAKE_TIMEOUT_CAPACITY) {
-                if (sigmask && saved_ss)
-                    signal_task_restore_mask(t, saved_blocked);
-                epoll_put_ref(ep_gfd, ep_vf);
-                return -EAGAIN;
-            }
-#endif
-        } else {
-            /*
-             * No task context — cannot sleep.  For infinite timeout
-             * this would busy-loop forever, so just return 0.
-             */
-            if (!has_timeout)
-                break;
-        }
     }
 
-    if (sigmask && saved_ss)
-        signal_task_restore_mask(t, saved_blocked);
+    if (sigmask && saved_ss) {
+        if (total_ready == -EINTR)
+            signal_task_defer_mask_restore(t, saved_blocked);
+        else
+            signal_task_restore_mask(t, saved_blocked);
+    }
 
+    kfree(interests);
+    kfree(snapshots);
     epoll_put_ref(ep_gfd, ep_vf);
     return total_ready;
 }
