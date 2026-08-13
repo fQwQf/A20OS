@@ -113,6 +113,8 @@ int64_t sys_mkdirat(int dirfd, const char *path, int mode);
 int64_t sys_unlinkat(int dirfd, const char *path, int flags);
 int64_t sys_renameat2(int olddir, const char *oldpath,
                        int newdir, const char *newpath, int flags);
+int64_t sys_renameat(int olddir, const char *oldpath,
+                     int newdir, const char *newpath);
 int64_t sys_chdir(const char *path);
 int64_t sys_fchdir(int fd);
 int64_t sys_getcwd(char *buf, size_t size);
