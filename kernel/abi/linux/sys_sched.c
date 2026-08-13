@@ -3,8 +3,9 @@
 #include "proc/proc_internal.h"
 #include "cg/cgroup_impl.h"
 
-/* LINUX_ABI_SCHED_STUB_BOUNDARY: policy APIs expose bounded compatibility for
- * current scheduler fields; they do not claim full Linux RT/cgroup semantics. */
+/* LINUX_ABI_SCHED_BOUNDARY: policy/priority/affinity APIs map onto the
+ * per-CPU EEVDF scheduler fields (policy, nice weight, affinity mask);
+ * full Linux RT/deadline/cgroup semantics are not claimed. */
 
 static task_t *sched_task_for_pid(int pid)
 {
