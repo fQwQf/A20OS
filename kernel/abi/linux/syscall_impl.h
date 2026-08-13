@@ -159,6 +159,10 @@ int64_t sys_mknod(const char *path, int mode, unsigned dev);
 int64_t sys_mknodat(int dirfd, const char *path, int mode, unsigned dev);
 
 int64_t sys_set_thread_area(void *ptr);
+int64_t sys_get_thread_area(void *ptr);
+int64_t sys_pause(void);
+int64_t sys_utime(const char *path, const void *times);
+int64_t sys_utimes(const char *path, const void *times);
 int64_t sys_exit(int code);
 int64_t sys_exit_group(int code);
 int64_t sys_getpid(void);
@@ -502,6 +506,10 @@ int64_t sys_listmount(uint64_t mnt_id, uint64_t last_mnt_id, uint64_t *list,
 int64_t sys_listns(unsigned int nstype, uint64_t *nsids, size_t nr);
 int64_t sys_open_tree_attr(int dfd, const char *path, unsigned int flags,
                            unsigned int attr_mask, void *attr, size_t size);
+
+/* LoongArch fileattr (sys_fileattr.c). */
+int64_t sys_file_getattr(int fd, void *attr);
+int64_t sys_file_setattr(int fd, void *attr);
 
 /* LSM introspection (sys_lsm.c). */
 int64_t sys_lsm_get_self_attr(unsigned int attr, void *ctx, size_t *size,

@@ -41,6 +41,18 @@ A20OS 是一款探索现代操作系统架构边界的高级混合内核 (Hybrid
 
 在架构选型上，A20OS 兼具宏内核与微内核的双重优势：从运行空间视角，驱动、网络栈与文件系统均在单一特权空间执行，保留了极速的函数调用性能；而在内核逻辑抽象层面，系统深度融合了微内核理念，引入了面向能力的 Handle、VMO/VMAR 内存容器以及 Channel 通信机制。
 
+## Linux ABI 兼容性
+
+A20OS 提供一套完整的 Linux 兼容层，让未修改的 musl 程序（以及 Linux 生态工具链）直接运行在内核机制之上：
+
+* **双 ABI 架构**：`abi/linux`（Linux syscall，运行 musl 生态）与 `abi/native`（面向能力、句柄与事件的 A20 原生接口）共享同一套对象/等待/IPC 底座；Linux 侧只是线格式翻译（`syscall_table.def` 当前登记 343 个入口）。
+* **实现全部有效 Linux syscall，覆盖比 Linux 更全面**：riscv64 / aarch64 / loongarch64 / x86_64 四条主线架构完整实现各自的 Linux syscall 编号表——`x86_64` 463 槽全表映射、LoongArch 私有 `file_getattr/file_setattr`、以及 `mseal`/`io_uring`/`landlock`/`pidfd` 等现代 syscall，一应俱全；甚至覆盖了 Linux 编号表中的内部占位槽，无任何未实现的空位。
+* **核心实现、ABI 薄包装**：调度、MM/VMA、VFS、页缓存等状态归属内核子系统，ABI 层只做参数翻译——例如 `mseal` 的 VMA 封禁、fileattr 属性模型、`utime`/`utimes` 时间戳写入都落在核心层。
+* **运行真实用户态**：可引导 stock Alpine + XFCE Wayland rootfs，直接运行 git、vim、fastfetch、mksh 等静态链接 musl 程序；`vDSO` 提供 `clock_gettime`/`gettimeofday`/`getcpu` 零陷入快路径。
+* **验证门禁**：`make smoke-abi-linux`、`smoke-syscall-ext`、`smoke-mm-stress` 等在 QEMU 中逐组验证 syscall 语义。
+
+> 逐项兼容等级详见 [kernel/abi/linux/syscall_coverage.md](kernel/abi/linux/syscall_coverage.md)。
+
 ## 支持的硬件平台
 A20OS 具备优秀的跨平台移植性，硬件抽象层 (HAL) 目前官方支持和维护以下目标：
 * **虚拟机环境 (QEMU)**：`qemu-virt-riscv64`, `qemu-virt-aarch64`, `qemu-virt-x86_64`, `qemu-virt-loongarch64`、`qemu-virt-ppc64le`（pSeries）
@@ -108,7 +120,7 @@ make CCACHE= ...
 ## 测试与质量保证
 作为一个严肃的底层项目，A20OS 建立了一套完备的测试门禁。开发者在提交代码前可通过 `Makefile` 目标进行本地校验：
 * **基础 bring-up**：`make smoke-riscv64` 只启动 `BRINGUP=1` 内核，并把 watchdog timeout 视为可接受结果；它不验证系统调用。
-* **系统调用测试**：运行 `make smoke-abi-linux`，在 QEMU 中验证 Linux ABI syscall smoke。
+* **系统调用测试**：运行 `make smoke-abi-linux`，在 QEMU 中验证 Linux ABI syscall smoke；`smoke-syscall-ext` 覆盖 keyring/AIO/acct/fanotify/pidfd/io_uring/landlock/userfaultfd/perf/fileattr 等扩展 syscall。
 * **高负载压力测试**：包含 `smoke-sched-stress`、`smoke-vfs-stress` 等并发压力校验，用于捕获隐蔽的死锁或崩溃。
 * **架构合规性验证**：例如 `make check-concurrency-foundation`，在编译期严格审查代码是否符合 SMP 锁模型契约。
 
