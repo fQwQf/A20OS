@@ -22,12 +22,21 @@
  */
 
 /* Set or clear O_NONBLOCK on a pipe vfile for the duration of a transfer so
- * SPLICE_F_NONBLOCK controls the pipe side independently of the fd flags. */
-static void splice_pipe_set_nonblock(vfile_t *vf, int nonblock)
+ * SPLICE_F_NONBLOCK controls the pipe side independently of the fd flags.
+ * Returns the previous O_NONBLOCK state so the caller can restore it. */
+static int splice_pipe_set_nonblock(vfile_t *vf, int nonblock)
 {
-    if (!vf)
-        return;
+    int saved = vf->flags & O_NONBLOCK;
     if (nonblock)
+        vf->flags |= O_NONBLOCK;
+    else
+        vf->flags &= ~O_NONBLOCK;
+    return saved;
+}
+
+static void splice_pipe_restore_nonblock(vfile_t *vf, int saved)
+{
+    if (saved)
         vf->flags |= O_NONBLOCK;
     else
         vf->flags &= ~O_NONBLOCK;
@@ -100,6 +109,8 @@ int splice_do(int fd_in, long *off_in, int fd_out, long *off_out, size_t len,
 
     int in_pipe = pipe_vfile_is(in_vf);
     int out_pipe = pipe_vfile_is(out_vf);
+    int in_nb = in_pipe ? (in_vf->flags & O_NONBLOCK) : 0;
+    int out_nb = out_pipe ? (out_vf->flags & O_NONBLOCK) : 0;
 
     long in_saved = -1, out_saved = -1;
     if (!in_pipe) {
@@ -146,6 +157,10 @@ int splice_do(int fd_in, long *off_in, int fd_out, long *off_out, size_t len,
         splice_seek_restore(in_vf, in_saved);
     if (out_saved >= 0)
         splice_seek_restore(out_vf, out_saved);
+    if (in_pipe)
+        splice_pipe_restore_nonblock(in_vf, in_nb);
+    if (out_pipe)
+        splice_pipe_restore_nonblock(out_vf, out_nb);
 
     vfs_put_file_ref(fd_in, in_vf);
     vfs_put_file_ref(fd_out, out_vf);
@@ -181,6 +196,7 @@ int tee_do(int fd_in, int fd_out, size_t len, int nonblock)
         vfs_put_file_ref(fd_out, out_vf);
         return -EINVAL;
     }
+    int out_nb = out_vf->flags & O_NONBLOCK;
 
     char *buf = proc_scratch_buffer(SPLICE_CHUNK_SIZE);
     if (!buf) {
@@ -209,6 +225,7 @@ int tee_do(int fd_in, int fd_out, size_t len, int nonblock)
             break;
     }
 
+    splice_pipe_restore_nonblock(out_vf, out_nb);
     vfs_put_file_ref(fd_in, in_vf);
     vfs_put_file_ref(fd_out, out_vf);
 
@@ -230,6 +247,8 @@ int vmsplice_do(int fd, const void *iov, int nr_segs, int nonblock)
         vfs_put_file_ref(fd, vf);
         return -EINVAL;
     }
+    int saved_nb = vf->flags & O_NONBLOCK;
+    splice_pipe_set_nonblock(vf, nonblock);
     vfs_put_file_ref(fd, vf);
 
     struct splice_iov {
@@ -238,16 +257,25 @@ int vmsplice_do(int fd, const void *iov, int nr_segs, int nonblock)
     };
 
     char *kbuf = proc_scratch_buffer(SPLICE_CHUNK_SIZE);
-    if (!kbuf)
+    if (!kbuf) {
+        vfile_t *rf = vfs_get_file_ref(fd);
+        if (rf)
+            splice_pipe_restore_nonblock(rf, saved_nb);
+        if (rf)
+            vfs_put_file_ref(fd, rf);
         return -ENOMEM;
+    }
 
     size_t total = 0;
+    int r = 0;
     for (int i = 0; i < nr_segs; i++) {
         struct splice_iov v;
         if (copy_from_user(&v, (const char *)iov +
                                  (size_t)i * sizeof(struct splice_iov),
-                           sizeof(v)) < 0)
-            return total > 0 ? (int)total : -EFAULT;
+                           sizeof(v)) < 0) {
+            r = total > 0 ? (int)total : -EFAULT;
+            break;
+        }
         if (!v.base || v.len == 0)
             continue;
         size_t done = 0;
@@ -255,19 +283,32 @@ int vmsplice_do(int fd, const void *iov, int nr_segs, int nonblock)
             size_t chunk = v.len - done;
             if (chunk > SPLICE_CHUNK_SIZE)
                 chunk = SPLICE_CHUNK_SIZE;
-            if (copy_from_user(kbuf, v.base + done, chunk) < 0)
-                return total > 0 ? (int)total : -EFAULT;
+            if (copy_from_user(kbuf, v.base + done, chunk) < 0) {
+                r = total > 0 ? (int)total : -EFAULT;
+                break;
+            }
             vfile_t *wf = vfs_get_file_ref(fd);
-            if (!wf)
-                return total > 0 ? (int)total : -EBADF;
-            splice_pipe_set_nonblock(wf, nonblock);
+            if (!wf) {
+                r = total > 0 ? (int)total : -EBADF;
+                break;
+            }
             int w = vfs_write_file(wf, kbuf, chunk);
             vfs_put_file_ref(fd, wf);
-            if (w < 0)
-                return total > 0 ? (int)total : w;
+            if (w < 0) {
+                r = total > 0 ? (int)total : w;
+                break;
+            }
             done += (size_t)w;
         }
+        if (r != 0)
+            break;
         total += v.len;
     }
-    return (int)total;
+
+    vfile_t *rf = vfs_get_file_ref(fd);
+    if (rf) {
+        splice_pipe_restore_nonblock(rf, saved_nb);
+        vfs_put_file_ref(fd, rf);
+    }
+    return r != 0 ? r : (int)total;
 }
