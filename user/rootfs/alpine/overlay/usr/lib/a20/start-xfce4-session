@@ -1,0 +1,36 @@
+#!/bin/sh
+# A20OS XFCE Wayland session: dbus session bus + labwc compositor.  labwc's
+# autostart file (root/.config/labwc/autostart) launches xfsettingsd,
+# xfdesktop, xfce4-panel and thunar once the compositor is up.
+
+export XDG_SESSION_TYPE=wayland
+export XDG_CONFIG_DIRS=/etc/xdg
+export NO_AT_BRIDGE=1
+export XCURSOR_THEME=Adwaita
+export XCURSOR_SIZE=24
+export XCURSOR_PATH=/usr/share/icons:/usr/share/pixmaps
+export SDL_VIDEODRIVER=wayland
+export SDL_AUDIODRIVER=dummy
+export SEATD_VTBOUND=0
+export XDG_RUNTIME_DIR=/run/user/0
+
+# A20OS exposes virtio-gpu as /dev/dri/card0 via its kernel devfs; the udev
+# database does not describe it, so pin the KMS device explicitly (wlroots
+# opens WLR_DRM_DEVICES directly instead of relying on udev enumeration).
+# Software rendering: no virgl userspace yet, and pixman keeps the desktop
+# up under plain TCG.
+export WLR_DRM_DEVICES=/dev/dri/card0
+export WLR_DRM_NO_ATOMIC=1
+export WLR_NO_HARDWARE_CURSORS=1
+export WLR_RENDERER=pixman
+
+# A20OS exposes a single evdev multiplexer at /dev/input/event0, but it is not
+# yet modelled as a udev input device (no /sys/class/input + ID_INPUT_* tags),
+# so libinput's udev backend finds no devices.  Tell wlroots to start without
+# input devices for now; the desktop renders and input wiring is a follow-up.
+export WLR_LIBINPUT_NO_DEVICES=1
+
+mkdir -p "$XDG_RUNTIME_DIR"
+chmod 0700 "$XDG_RUNTIME_DIR"
+
+exec dbus-run-session -- labwc -d
