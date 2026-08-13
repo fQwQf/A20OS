@@ -196,6 +196,8 @@ Linux ABI 的 Futex 实现在 `kernel/abi/linux/sys_futex.c`，支持 wait、wak
 
 Linux ABI 兼容层实现了高复杂度的边界语义，包括 `openat2` 解析标志、`renameat2` 的 `RENAME_NOREPLACE`/`RENAME_EXCHANGE`、`statx` mask，以及 `faccessat2`/`fchmodat2` 的 flag 校验。
 
+四条主线架构（riscv64、aarch64、loongarch64、x86_64）的 Linux syscall 编号覆盖均达 Linux 水平：riscv64/aarch64 覆盖 asm-generic 全表；loongarch64 补齐私有 `file_getattr(468)`/`file_setattr(469)`；x86_64 的映射表（`kernel/arch/x86_64/include/syscall_nr_x86_64.h`）扩展至 463 槽，包含 `io_uring`/`landlock`/`pidfd`/`mseal` 等现代 syscall。编号覆盖不等于语义完整——兼容层按 `partial` 保守记录（见 `kernel/abi/linux/syscall_coverage.md`），仅在支持的 flag/对象范围内主张 Linux 语义。
+
 ### 网络栈（`kernel/net/`）
 
 网络栈以 `NO_SYS=1` 模式集成 lwIP：lwIP 自带的线程和信号量被禁用，所有 lwIP 核心调用在 `g_lwip_lock` 保护下由内核主动推进。
