@@ -46,6 +46,8 @@ void vma_release_file(vm_area_t *vma)
 {
     if (vma && (vma->vm_flags & VM_FILE) && vma->file_fd >= 0) {
         if (vma->file_vnode) {
+            if (vma->vm_flags & VM_SHARED)
+                vnode_shared_map_dec(vma->file_vnode);
             vnode_put(vma->file_vnode);
             vma->file_vnode = NULL;
         }
@@ -75,8 +77,11 @@ int vma_ref_file(vm_area_t *vma)
 {
     if (!vma || !(vma->vm_flags & VM_FILE) || vma->file_fd < 0)
         return 0;
-    if (vma->file_vnode)
+    if (vma->file_vnode) {
         vnode_get(vma->file_vnode);
+        if (vma->vm_flags & VM_SHARED)
+            vnode_shared_map_inc(vma->file_vnode);
+    }
     return vfs_ref_fd(vma->file_fd);
 }
 

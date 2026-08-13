@@ -66,6 +66,8 @@ static int mm_clone_shared_mapping(mm_struct_t *mm, vm_area_t *src_vma,
     if (vma_ref_file(dst_vma) < 0) {
         dst_vma->file_fd = -1;
         if (dst_vma->file_vnode) {
+            if (dst_vma->vm_flags & VM_SHARED)
+                vnode_shared_map_dec(dst_vma->file_vnode);
             vnode_put(dst_vma->file_vnode);
             dst_vma->file_vnode = NULL;
         }
@@ -308,6 +310,8 @@ int mm_mremap_locked(mm_struct_t *mm, vaddr_t old_addr, size_t old_size,
     if (vma_ref_file(dst_vma) < 0) {
         dst_vma->file_fd = -1;
         if (dst_vma->file_vnode) {
+            if (dst_vma->vm_flags & VM_SHARED)
+                vnode_shared_map_dec(dst_vma->file_vnode);
             vnode_put(dst_vma->file_vnode);
             dst_vma->file_vnode = NULL;
         }
