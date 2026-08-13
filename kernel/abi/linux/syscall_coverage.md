@@ -1,8 +1,6 @@
 # Linux Syscall Coverage
 
-This file tracks the intended compatibility level of the Linux syscall subset.
-It is deliberately conservative: a syscall should not be marked `full` merely
-because it has an entry in `syscall_table.def`.
+This file tracks the intended compatibility level of the Linux syscall subset. It is deliberately conservative: a syscall should not be marked `full` merely because it has an entry in `syscall_table.def`.
 
 ## Coverage Legend
 
@@ -10,19 +8,11 @@ because it has an entry in `syscall_table.def`.
 - `partial`: useful implementation with known semantic gaps.
 - `missing`: entry is absent or important operations return `-ENOSYS`.
 
-Every registered entry is implemented; no syscall is a fixed `-ENOSYS`
-placeholder. `missing` no longer applies to any entry in the table.
+Every registered entry is implemented; no syscall is a fixed `-ENOSYS` placeholder. `missing` no longer applies to any entry in the table.
 
 ## Current Summary
 
-`syscall_table.def` currently registers 258 dispatch entries, including two
-A20OS extensions. Registration is dispatch coverage, not a claim of semantic
-Linux completeness. Every registered entry has a real handler; the only
-`-ENOSYS` returns are the arch/version-correct Linux semantics for removed or
-architecture-specific syscalls (`nfsservctl` removed in Linux 4.19,
-`map_shadow_stack` is x86 CET, RISC-V-only syscalls on other arches,
-`arch_prctl` on non-x86). Registered non-placeholder calls may still support
-only a subset of Linux commands, flags, object types, or concurrency semantics.
+`syscall_table.def` currently registers 258 dispatch entries, including two A20OS extensions. Registration is dispatch coverage, not a claim of semantic Linux completeness. Every registered entry has a real handler; the only `-ENOSYS` returns are the arch/version-correct Linux semantics for removed or architecture-specific syscalls (`nfsservctl` removed in Linux 4.19, `map_shadow_stack` is x86 CET, RISC-V-only syscalls on other arches, `arch_prctl` on non-x86). Registered non-placeholder calls may still support only a subset of Linux commands, flags, object types, or concurrency semantics.
 
 | Area | Level | Notes |
 | --- | --- | --- |
@@ -64,10 +54,8 @@ only a subset of Linux commands, flags, object types, or concurrency semantics.
 
 ## Next Steps
 
-1. The table is generated from `syscall_table.def`; every entry has a real
-   handler and a smoke gate.
-2. Deliberate fixed-success behavior (e.g. deprecated operations accepted as
-   no-ops) is documented per syscall in the table notes.
+1. The table is generated from `syscall_table.def`; every entry has a real handler and a smoke gate.
+2. Deliberate fixed-success behavior (e.g. deprecated operations accepted as no-ops) is documented per syscall in the table notes.
 3. Add a smoke test for each syscall group before upgrading its level.
 
 ## Generated Syscall Table
@@ -414,9 +402,7 @@ only a subset of Linux commands, flags, object types, or concurrency semantics.
 
 ## Placeholder Resolution Record
 
-Every former explicit `-ENOSYS` placeholder in `syscall_table.def` is now
-implemented; the table no longer contains fixed `-ENOSYS` placeholders. This
-record documents how each former placeholder was resolved.
+Every former explicit `-ENOSYS` placeholder in `syscall_table.def` is now implemented; the table no longer contains fixed `-ENOSYS` placeholders. This record documents how each former placeholder was resolved.
 
 | Syscall | Decision | Rationale | In Scope |
 | --- | --- | --- | --- |
@@ -437,16 +423,6 @@ record documents how each former placeholder was resolved.
 | `userfaultfd` | **implemented** | MISSING-mode anonymous ranges with PAGEFAULT events and COPY/ZEROPAGE resolution (`kernel/ipc/userfaultfd.c`); no fork/shmem/WP modes. | Yes |
 | `perf_event_open` | **implemented** | PERF_TYPE_SOFTWARE events with read(2) and the core ioctls (`kernel/abi/linux/sys_perf.c`); no PMU/hardware events or mmap ring. | Yes |
 
-`arch_prctl` is not one of these 16 direct placeholders. The x86_64
-implementation supports `ARCH_SET_FS`/`ARCH_GET_FS` and
-`ARCH_SET_GS`/`ARCH_GET_GS` plus `ARCH_GET_CPUID`; unsupported operations
-return `-EINVAL`, and the generic non-x86_64 fallback returns `-EOPNOTSUPP`
-(the arch-correct answer on platforms without x86 segment registers). The
-generated table classifies it `partial` for the x86_64 surface with the
-arch fallback documented.
+`arch_prctl` is not one of these 16 direct placeholders. The x86_64 implementation supports `ARCH_SET_FS`/`ARCH_GET_FS` and `ARCH_SET_GS`/`ARCH_GET_GS` plus `ARCH_GET_CPUID`; unsupported operations return `-EINVAL`, and the generic non-x86_64 fallback returns `-EOPNOTSUPP` (the arch-correct answer on platforms without x86 segment registers). The generated table classifies it `partial` for the x86_64 surface with the arch fallback documented.
 
-**Scope Note:** The remaining `-ENOSYS` returns in the ABI are the
-arch/version-correct Linux semantics, not placeholders: `nfsservctl` was
-removed in Linux 4.19 and `map_shadow_stack` is an x86 CET syscall, so
-`-ENOSYS` on RISC-V matches Linux. The syscalls above are `partial`: they
-cover the common ABI surface with documented gaps in Linux edge semantics.
+**Scope Note:** The remaining `-ENOSYS` returns in the ABI are the arch/version-correct Linux semantics, not placeholders: `nfsservctl` was removed in Linux 4.19 and `map_shadow_stack` is an x86 CET syscall, so `-ENOSYS` on RISC-V matches Linux. The syscalls above are `partial`: they cover the common ABI surface with documented gaps in Linux edge semantics.
