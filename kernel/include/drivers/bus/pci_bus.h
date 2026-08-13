@@ -5,6 +5,18 @@
 
 extern bus_type_t pci_bus;
 
+/* Narrow PCI view used by the user-driver isolation layer.  The private PCI
+ * enumeration record stays private; only an explicitly matched function and
+ * its BAR0/requester ID cross the boundary. */
+typedef struct pci_user_device_info {
+    uint16_t vendor;
+    uint16_t device;
+    uint16_t devid;       /* requester ID: bus << 8 | device << 3 | function */
+    uint16_t irq;
+    uint64_t bar0_phys;
+    uint64_t bar0_size;
+} pci_user_device_info_t;
+
 bus_type_t *get_pci_bus(void);
 int pci_enable_and_assign_bars(device_t *dev);
 /* Packed class/subclass/prog-if (class << 16 | subclass << 8 | prog-if). */
@@ -20,6 +32,9 @@ resource_t *pci_get_bar_resource(device_t *dev, unsigned int bar);
  * Drivers must keep their polling fallback for the -1 case and must NOT
  * treat the legacy IRQ Line register as a usable interrupt identifier. */
 int pci_intx_irq(const device_t *dev);
+int pci_user_device_find(uint16_t vendor, uint16_t device,
+                         pci_user_device_info_t *out);
+int pci_user_device_bus_master(uint16_t devid, int enable);
 void pci_enumerate(uintptr_t ecam_base, int bus_start, int bus_end);
 /* Reconcile ECAM with the published PCI device set.  Call only from process
  * context; additions probe immediately and vanished functions are removed. */
