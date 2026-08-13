@@ -27,7 +27,18 @@ all-architectures: all
 
 check-kernel-build: $(DEFAULT_KERNEL_CHECK_TARGETS)
 
-check-kernel-build-all: check-riscv64-bringup check-loongarch64-bringup check-aarch64-bringup check-x86_64-bringup check-arm32-bringup check-riscv32-bringup check-ppc64le-bringup
+check-kernel-build-all: check-riscv64-bringup check-loongarch64-bringup check-aarch64-bringup check-x86_64-bringup check-arm32-bringup check-riscv32-bringup check-ppc64le-bringup check-visionfive2-build check-ls2k1000-build
+
+# Physical-board build gates: keep the VisionFive 2 and LS2K1000 sources
+# building on every commit.  The generic profile is the boot substrate; the
+# embedded profile additionally compiles the board GMAC/SDIO drivers.
+check-visionfive2-build:
+	$(MAKE) ARCH=riscv64 BOARD=visionfive2 ABI=$(ABI) BRINGUP=1 kernel-only
+	$(MAKE) ARCH=riscv64 BOARD=visionfive2 ABI=$(ABI) BRINGUP=1 DRIVER_DEPLOYMENT=embedded kernel-only
+
+check-ls2k1000-build:
+	$(MAKE) ARCH=loongarch64 BOARD=ls2k1000 ABI=$(ABI) BRINGUP=1 kernel-only
+	$(MAKE) ARCH=loongarch64 BOARD=ls2k1000 ABI=$(ABI) BRINGUP=1 DRIVER_DEPLOYMENT=embedded kernel-only
 
 check-riscv64-bringup:
 	$(MAKE) ARCH=riscv64 ABI=$(ABI) BRINGUP=1 kernel-only
