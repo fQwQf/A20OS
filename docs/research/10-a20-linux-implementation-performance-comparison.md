@@ -386,11 +386,14 @@ A20OS 曾因 packed 16-bit used index 撕裂和旧 bitmap 晚写而产生持久�
 
 **源码事实。** Linux syscall table 登记 258 项，但登记只证明可分派，不证明 Linux
 语义完整。项目自己的 coverage 表保守地把 fd/path/process/signal/MM/socket、scheduler
-和 BPF 等标为 `partial`，namespaces/capabilities 的总体兼容面标为 `stub`。其中 scheduler
+和 BPF 等标为 `partial`，namespaces/capabilities 的总体兼容面为 `partial`。其中 scheduler
 wrapper 连接的是 per-CPU EEVDF/SMP 调度器，但 Linux policy/priority/affinity 边界仍不完整；
 BPF 只支持 KEP-backed `BPF_PROG_LOAD`、`BPF_PROG_ATTACH`、`BPF_PROG_DETACH`，没有 map
-命令。当前表另有 16 个直接固定 `-ENOSYS` placeholder，包括 legacy AIO、kernel module、
-keyring、fanotify、userfaultfd、`perf_event_open` 等
+命令。表中不再有直接固定 `-ENOSYS` 的 placeholder：legacy AIO、kernel module、
+keyring、fanotify、userfaultfd（MISSING 模式匿名区间）与 `perf_event_open`
+（PERF_TYPE_SOFTWARE 软件事件）均已实现；仅存的 `-ENOSYS` 是架构/版本正确的
+Linux 语义（nfsservctl 在 Linux 4.19 移除、map_shadow_stack 是 x86 CET、riscv_* 与
+arch_prctl 架构专属）
 （[`syscall_coverage.md`](../../kernel/abi/linux/syscall_coverage.md)、
 [`syscall_table.def`](../../kernel/abi/linux/syscall_table.def)）。
 
@@ -556,7 +559,8 @@ transaction、VirtIO poll/completion、idle wait，首次读取才开启，正�
 
 这是 A20OS 的真实工程优势：计数器直接围绕已发生的生命周期/缓存故障，开销边界清楚。
 但 Linux 有 perf events、ftrace/tracepoints、eBPF、lockdep、KASAN/KCSAN、BPF profiler 和
-更完整 proc/sysfs；A20 的 `perf_event_open` 仍是 `-ENOSYS`，BPF 只是 KEP 的受限、A20-specific
+更完整 proc/sysfs；A20 的 `perf_event_open` 只提供 PERF_TYPE_SOFTWARE 软件事件
+（无 PMU 硬件事件、无 mmap 采样环），BPF 只是 KEP 的受限、A20-specific
 程序接口
 （[Linux ftrace](https://docs.kernel.org/trace/ftrace.html)、
 [Linux BPF](https://docs.kernel.org/bpf/)、
@@ -566,7 +570,7 @@ transaction、VirtIO poll/completion、idle wait，首次读取才开启，正�
 ### 11.2 安全模型
 
 **A20OS 源码事实。** Linux ABI 有 uid/gid、mode、xattr、有限 capabilities/chroot；coverage
-表明确 capabilities 与 namespaces 只是 stub 范围。Native ABI 有 object type、rights、
+表把 capabilities 与 namespaces 标为 `partial`。Native ABI 有 object type、rights、
 temporal limits 和 3-level security label；KEP verifier 只允许 bounded instructions、
 forward jump、受限 context memory，规模小且易审计。驱动可移入用户服务、IOMMU 已有发现/
 基础 domain，但不完整
@@ -640,8 +644,8 @@ injection 仍需补层。性能路线必须把已有端到端矩阵保留为最�
    对齐 + DMA barrier；block-cache dirty generation；ext4 dirent/JBD2 checksum/revoke；
    Park/Wake wait_seq。为每项加 fault injection 或模型化最小测试。
 3. 修复明显语义/安全债：runtime ext4 crash-consistency 边界必须清楚暴露；shared futex
-   key；realtime signal queue；clock ID；CSPRNG/entropy；Linux capability/namespace stub 不得
-   冒充隔离。启用并验证 stack protector/FORTIFY/NX/W^X 等低风险 hardening。
+   key；realtime signal queue；clock ID；CSPRNG/entropy；Linux capability/namespace 兼容层
+   不得冒充隔离。启用并验证 stack protector/FORTIFY/NX/W^X 等低风险 hardening。
 
 ### P1：建立“时间去哪了”的低开销分解
 

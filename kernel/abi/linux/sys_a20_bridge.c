@@ -66,10 +66,11 @@ int64_t sys_a20_registry_client_fd(const linux_syscall_args_t *args)
     extern a20_channel_ep_t *a20_registry_client_ep(void);
     a20_channel_ep_t *ep = a20_registry_client_ep();
     if (!ep)
-        return -ENOSYS;
+        return -EOPNOTSUPP;
     a20_object_ref(ep, A20_OBJ_CHANNEL_ENDPOINT);
     return a20_channel_fd_install(ep, O_RDWR);
 #else
-    return -ENOSYS;
+    /* Native ABI support is not built into this kernel image. */
+    return -EOPNOTSUPP;
 #endif
 }

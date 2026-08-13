@@ -6,6 +6,7 @@
 #include "fs/fdtable.h"
 #include "fs/file.h"
 #include "fs/vfs.h"
+#include "ipc/eventfd.h"
 #include "mm/frame.h"
 #include "mm/mm.h"
 #include "mm/slab.h"
@@ -80,6 +81,7 @@ typedef struct io_uring_ring {
     unsigned cq_head;
     unsigned cq_tail;
     spinlock_t lock;
+    int eventfd_fd;             /* registered notification fd, -1 = none */
 } io_uring_ring_t;
 
 static io_uring_ring_t *g_rings[IORING_MAX_RINGS];
@@ -382,21 +384,63 @@ long io_uring_enter(int gfd, unsigned to_submit, unsigned min_complete,
         cq[processed] = cqe;
         processed++;
     }
+
+    /* IORING_REGISTER_EVENTFD: notify the registered eventfd once when new
+     * completions land, so userland can wake on the fd instead of polling. */
+    if (processed > 0 && ring->eventfd_fd >= 0) {
+        int64_t egfd = fdtable_get_current(ring->eventfd_fd);
+        if (egfd >= 0) {
+            vfile_t *evf = vfs_get_file_ref((int)egfd);
+            if (evf) {
+                if (eventfd_vfile_is(evf)) {
+                    uint64_t one = 1;
+                    (void)vfs_write_file(evf, (const char *)&one, sizeof(one));
+                }
+                vfs_put_file_ref((int)egfd, evf);
+            }
+        }
+    }
     return processed;
 }
 
 int io_uring_register(int gfd, unsigned opcode, const void *arg,
                       unsigned nr_args)
 {
-    (void)arg;
     switch (opcode) {
     case IORING_REGISTER_FILES:
         /* File registration is a fast-path hint; the executor resolves fds
          * through the fd table anyway, so accept the registration. */
+        (void)arg;
+        (void)nr_args;
         return 0;
-    case IORING_REGISTER_EVENTFD:
-        /* eventfd notification is not implemented; accept with nr_args==0. */
-        return nr_args == 0 ? 0 : -EINVAL;
+    case IORING_REGISTER_EVENTFD: {
+        if (!arg || nr_args == 0)
+            return -EINVAL;
+        int eventfd_fd = 0;
+        if (copy_from_user(&eventfd_fd, arg, sizeof(eventfd_fd)) < 0)
+            return -EFAULT;
+        vfile_t *vf = vfs_get_file_ref(gfd);
+        if (!vf || vf->ops != &g_io_uring_ops || !vf->priv) {
+            if (vf) vfs_put_file_ref(gfd, vf);
+            return -EBADF;
+        }
+        io_uring_ring_t *ring = vf->priv;
+        int64_t efd = fdtable_get_current(eventfd_fd);
+        if (efd < 0) {
+            vfs_put_file_ref(gfd, vf);
+            return -EBADF;
+        }
+        vfile_t *evf = vfs_get_file_ref((int)efd);
+        if (!evf || !eventfd_vfile_is(evf)) {
+            if (evf) vfs_put_file_ref((int)efd, evf);
+            vfs_put_file_ref(gfd, vf);
+            return -EINVAL;
+        }
+        vfs_put_file_ref((int)efd, evf);
+        ring->eventfd_fd = eventfd_fd;
+        vfs_put_file_ref(gfd, vf);
+        return 0;
+    }
     default:
         return -EINVAL;
     }

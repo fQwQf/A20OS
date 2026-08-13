@@ -14,11 +14,13 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <mqueue.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/types.h>
@@ -662,6 +664,212 @@ alsa_skipped:
     return 0;
 }
 
+/* ---- userfaultfd (kernel/ipc/userfaultfd.c) ---- */
+
+/* Linux asm-generic wire ioctl numbers (type 0xAA). */
+#define UFFDIO_API         0x4017aa3fUL
+#define UFFDIO_REGISTER    0xc01faa00UL
+#define UFFDIO_UNREGISTER  0x400faa01UL
+#define UFFDIO_COPY        0xc027aa03UL
+
+#define UFFD_API_VERSION 0xAAUL
+#define UFFD_EVENT_PAGEFAULT 0x12
+#define UFFDIO_REGISTER_MODE_MISSING (1ULL << 0)
+
+struct uffdio_range { uint64_t start; uint64_t len; };
+struct uffdio_api { uint64_t api; uint64_t features; uint64_t ioctls; };
+struct uffdio_register {
+    struct uffdio_range range; uint64_t mode; uint64_t ioctls;
+};
+struct uffdio_copy {
+    uint64_t dst; uint64_t src; uint64_t len; uint64_t mode; int64_t copy;
+};
+struct uffd_msg {
+    uint8_t event; uint8_t r1; uint16_t r2; uint32_t r3;
+    union {
+        struct {
+            uint64_t flags; uint64_t address; uint32_t ptid; uint32_t r4;
+        } pagefault;
+        uint64_t reserved[3];
+    } arg;
+};
+
+static char g_uffd_payload[4096] __attribute__((aligned(4096)));
+static volatile int g_uffd_read_byte = -1;
+
+static void *uffd_fault_worker(void *arg)
+{
+    volatile char *p = (volatile char *)arg;
+    g_uffd_read_byte = *p; /* read fault on the registered page */
+    return NULL;
+}
+
+static int test_userfaultfd(void)
+{
+    long fd = syscall(SYS_userfaultfd, O_CLOEXEC);
+    if (fd < 0)
+        return fail("userfaultfd create", (int)fd);
+
+    struct uffdio_api api;
+    memset(&api, 0, sizeof(api));
+    api.api = UFFD_API_VERSION;
+    if (ioctl(fd, UFFDIO_API, &api) != 0)
+        return fail("uffdio_api", errno);
+    if (api.ioctls == 0)
+        return fail("uffdio_api ioctls", 0);
+
+    void *page = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
+                      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (page == MAP_FAILED)
+        return fail("uffd mmap", errno);
+
+    struct uffdio_register reg;
+    memset(&reg, 0, sizeof(reg));
+    reg.range.start = (uint64_t)(uintptr_t)page;
+    reg.range.len = 4096;
+    reg.mode = UFFDIO_REGISTER_MODE_MISSING;
+    if (ioctl(fd, UFFDIO_REGISTER, &reg) != 0)
+        return fail("uffdio_register", errno);
+
+    pthread_t th;
+    if (pthread_create(&th, NULL, uffd_fault_worker, page) != 0)
+        return fail("uffd pthread_create", errno);
+
+    /* The worker's read faults the registered page; the blocking read returns
+     * as soon as the faulting thread enqueues the PAGEFAULT event. */
+    struct uffd_msg msg;
+    ssize_t n = read(fd, &msg, sizeof(msg));
+    if (n != (ssize_t)sizeof(msg) || msg.event != UFFD_EVENT_PAGEFAULT)
+        return fail("uffd read event", errno);
+    if (msg.arg.pagefault.address != (uint64_t)(uintptr_t)page)
+        return fail("uffd event address", 0);
+
+    for (int i = 0; i < 4096; i++)
+        g_uffd_payload[i] = (char)(0x40 + (i % 16));
+
+    struct uffdio_copy cp;
+    memset(&cp, 0, sizeof(cp));
+    cp.dst = (uint64_t)(uintptr_t)page;
+    cp.src = (uint64_t)(uintptr_t)g_uffd_payload;
+    cp.len = 4096;
+    if (ioctl(fd, UFFDIO_COPY, &cp) != 0)
+        return fail("uffdio_copy", errno);
+    if (cp.copy != 4096)
+        return fail("uffdio_copy len", 0);
+
+    pthread_join(th, NULL);
+
+    /* The worker read byte 0 after resolution, so it must equal the payload. */
+    if (g_uffd_read_byte != g_uffd_payload[0])
+        return fail("uffd content", 0);
+    if (memcmp(page, g_uffd_payload, 4096) != 0)
+        return fail("uffd page payload", 0);
+
+    struct uffdio_range ur;
+    memset(&ur, 0, sizeof(ur));
+    ur.start = (uint64_t)(uintptr_t)page;
+    ur.len = 4096;
+    if (ioctl(fd, UFFDIO_UNREGISTER, &ur) != 0)
+        return fail("uffdio_unregister", errno);
+
+    munmap(page, 4096);
+    close(fd);
+    return 0;
+}
+
+/* ---- perf_event_open (kernel/abi/linux/sys_perf.c) ---- */
+
+#define PERF_TYPE_SOFTWARE 1
+#define PERF_COUNT_SW_CPU_CLOCK 0
+#define PERF_COUNT_SW_PAGE_FAULTS 2
+#define PERF_FORMAT_ID (1ULL << 2)
+#define PERF_FLAG_FD_CLOEXEC (1UL << 3)
+#define PERF_EVENT_IOC_ENABLE 0x2400
+#define PERF_EVENT_IOC_DISABLE 0x2401
+#define PERF_EVENT_IOC_RESET 0x2403
+#define PERF_EVENT_IOC_ID 0x40072407UL
+
+struct perf_event_attr_test {
+    uint32_t type;
+    uint32_t size;
+    uint64_t config;
+    uint64_t sample_period;
+    uint64_t sample_type;
+    uint64_t read_format;
+    uint64_t flags;
+    uint64_t reserved[10]; /* pads to the Linux 128-byte wire layout */
+};
+
+static int test_perf(void)
+{
+    struct perf_event_attr_test attr;
+    memset(&attr, 0, sizeof(attr));
+    attr.type = PERF_TYPE_SOFTWARE;
+    attr.size = (uint32_t)sizeof(attr);
+    attr.config = PERF_COUNT_SW_CPU_CLOCK;
+    attr.read_format = PERF_FORMAT_ID;
+
+    int fd = syscall(SYS_perf_event_open, &attr, 0, -1, -1, 0);
+    if (fd < 0)
+        return fail("perf_event_open", errno);
+
+    uint64_t vals[2];
+    memset(vals, 0, sizeof(vals));
+    ssize_t n = read(fd, vals, sizeof(vals));
+    if (n != (ssize_t)sizeof(vals))
+        return fail("perf read", (int)n);
+    if (vals[1] == 0)
+        return fail("perf id zero", 0);
+    uint64_t c0 = vals[0];
+
+    for (volatile int i = 0; i < 1000000; i++)
+        ;
+    n = read(fd, vals, sizeof(vals));
+    if (n != (ssize_t)sizeof(vals))
+        return fail("perf read2", (int)n);
+    if (vals[0] <= c0)
+        return fail("perf clock not advancing", 0);
+
+    if (ioctl(fd, PERF_EVENT_IOC_RESET, 0) != 0)
+        return fail("perf reset", errno);
+    uint64_t id = 0;
+    if (ioctl(fd, PERF_EVENT_IOC_ID, &id) != 0)
+        return fail("perf id ioctl", errno);
+    if (id == 0)
+        return fail("perf id ioctl zero", 0);
+    if (ioctl(fd, PERF_EVENT_IOC_DISABLE, 0) != 0)
+        return fail("perf disable", errno);
+    if (ioctl(fd, PERF_EVENT_IOC_ENABLE, 0) != 0)
+        return fail("perf enable", errno);
+    close(fd);
+
+    /* PERF_COUNT_SW_PAGE_FAULTS: a fresh fault must advance the counter. */
+    memset(&attr, 0, sizeof(attr));
+    attr.type = PERF_TYPE_SOFTWARE;
+    attr.size = (uint32_t)sizeof(attr);
+    attr.config = PERF_COUNT_SW_PAGE_FAULTS;
+    fd = syscall(SYS_perf_event_open, &attr, 0, -1, -1, 0);
+    if (fd < 0)
+        return fail("perf pf open", errno);
+
+    uint64_t v1 = 0;
+    if (read(fd, &v1, sizeof(v1)) != (ssize_t)sizeof(v1))
+        return fail("perf pf read1", (int)n);
+    void *pg = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
+                    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (pg == MAP_FAILED)
+        return fail("perf pf mmap", errno);
+    *(volatile char *)pg = 1; /* demand fault */
+    uint64_t v2 = 0;
+    if (read(fd, &v2, sizeof(v2)) != (ssize_t)sizeof(v2))
+        return fail("perf pf read2", (int)n);
+    if (v2 <= v1)
+        return fail("perf pf not counted", 0);
+    munmap(pg, 4096);
+    close(fd);
+    return 0;
+}
+
 int main(void)
 {
     printf("SYSCALL_EXT: start\n");
@@ -684,6 +892,10 @@ int main(void)
     if (test_msg_and_compat() < 0)
         return 1;
     if (test_file_interfaces() < 0)
+        return 1;
+    if (test_userfaultfd() < 0)
+        return 1;
+    if (test_perf() < 0)
         return 1;
     printf("SYSCALL_EXT: PASS\n");
     return 0;

@@ -310,7 +310,9 @@ int64_t sys_nfsservctl(int cmd, const void *arg, void *res)
     (void)cmd;
     (void)arg;
     (void)res;
-    /* nfsservctl was removed in Linux 4.19; keep a predictable ENOSYS. */
+    /* nfsservctl(2) was removed in Linux 4.19; the register number still
+     * exists in the syscall table and -ENOSYS is the correct Linux 4.19+
+     * behavior for it. */
     return -ENOSYS;
 }
 
@@ -319,6 +321,8 @@ int64_t sys_map_shadow_stack(uint64_t addr, uint64_t size, unsigned flags)
     (void)addr;
     (void)size;
     (void)flags;
-    /* shadow stacks are an x86 CET feature; RISC-V has no shadow-stack syscall. */
+    /* map_shadow_stack(2) is an x86_64 CET feature.  On the RISC-V asm-generic
+     * table it is registered for number parity and -ENOSYS is the correct
+     * arch behavior (no shadow-stack syscall on this platform). */
     return -ENOSYS;
 }

@@ -71,11 +71,11 @@
   - 当前证据：`kernel/abi/linux/syscall_coverage.md` 仍将 scheduler 标为 partial，RT/deadline/cgroup/topology 语义有边界。
   - 完成条件：sched policy、priority、affinity 和 cgroup cpuset 行为被 LTP 风格测试覆盖。
 - [ ] 完成高级 futex 操作和内存顺序边界语义。
-  - 当前证据：`kernel/abi/linux/syscall_coverage.md` 将 futex 标记为 partial；`kernel/abi/linux/sys_futex.c` 仍有不支持路径。
-  - 完成条件：basic、requeue、private/shared、timeout 和 robust-list 场景都有覆盖。
-- [ ] 决定哪些显式 `-ENOSYS` Linux syscall 占位符仍在范围外，哪些应该实现。
-  - 证据：`kernel/abi/linux/syscall_table.def` 包含 fanotify、AIO、module、userfaultfd、perf 等 `-ENOSYS` 占位符；`signalfd4`（`sys_signalfd4`）与 `arch_prctl`（`sys_arch_prctl`）已实现，不再是占位符。
-  - 完成条件：每个占位符都有记录在案的 owner 决策：实现、保留 stub，或从声明的兼容范围中移除。当前覆盖表列出了占位符，但没有为每项完成 owner 决策。
+  - 当前证据：`kernel/abi/linux/syscall_coverage.md` 将 futex 标记为 partial；全部标准命令已实现（WAIT/WAKE/BITSET/REQUEUE/CMP_REQUEUE/WAKE_OP 及有边界的 PI 变体），但优先级继承提升与完整内存顺序边界仍有缺口。
+  - 完成条件：basic、requeue、private/shared、timeout、PI 和 robust-list 场景都有覆盖。
+- [x] 决定哪些显式 `-ENOSYS` Linux syscall 占位符仍在范围外，哪些应该实现。
+  - 证据：`kernel/abi/linux/syscall_table.def` 不再有固定 `-ENOSYS` 占位符；fanotify、acct、keyring、AIO、module、userfaultfd、perf_event_open、arch_prctl 均已实现，仅存的 `-ENOSYS` 是架构/版本正确的 Linux 语义（nfsservctl、map_shadow_stack、riscv_*、arch_prctl 非 x86 fallback）。
+  - 完成条件：每个占位符都有记录在案的 owner 决策，见 `kernel/abi/linux/syscall_coverage.md` 的 "Placeholder Resolution Record"。
 
 ## P0：MM、Page Cache 与文件映射
 

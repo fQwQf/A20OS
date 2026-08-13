@@ -462,6 +462,13 @@ int64_t sys_kexec_file_load(int kernel_fd, int initrd_fd,
 int64_t sys_nfsservctl(int cmd, const void *arg, void *res);
 int64_t sys_map_shadow_stack(uint64_t addr, uint64_t size, unsigned flags);
 
+/* userfaultfd(2): user-space page-fault handling (kernel/ipc/userfaultfd.c). */
+int64_t sys_userfaultfd(unsigned flags);
+
+/* perf_event_open(2): software events (kernel/abi/linux/sys_perf.c). */
+int64_t sys_perf_event_open(const void *attr, int pid, int cpu, int group_fd,
+                            unsigned long flags);
+
 /* futex_wait / futex_wake split syscalls (sys_futex.c). */
 int64_t sys_futex_wait(void *uaddr, uint32_t val, const void *timeout,
                        uint32_t flags);

@@ -366,6 +366,10 @@ void sched_scan_timers(uint64_t now)
     posix_timer_tick();
 #endif
 
+    /* PSI stall accounting sample (kernel/core/psi.c). */
+    extern void psi_tick(void);
+    psi_tick();
+
 #ifdef CONFIG_ABI_NATIVE
     a20_timer_tick();
 #endif
