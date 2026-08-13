@@ -66,6 +66,7 @@ $(NATIVE_BUILD_STAMP): $(USER_BUILD_STAMP) force_native_build
 	     [ ! -x "$(NATIVE_REGISTRY_BIN)" ] || [ ! -x "$(NATIVE_SVCMGR_BIN)" ] || \
 	     [ ! -x "$(NATIVE_ISOLATION_BIN)" ] || \
 	     [ ! -x "$(NATIVE_UBDD_BIN)" ] || [ ! -x "$(NATIVE_UINPUTD_BIN)" ] || \
+	     [ ! -x "$(NATIVE_UEDUD_BIN)" ] || \
 	     [ ! -x "$(NATIVE_PERSONALITY_BIN)" ] || \
 	     [ ! -x "$(NATIVE_LINUX_BIN)" ] || \
 	     [ ! -x "$(NATIVE_RTCD_BIN)" ] || [ ! -x "$(NATIVE_RTCDD_BIN)" ]; then \
@@ -82,4 +83,3 @@ $(NATIVE_BUILD_STAMP): $(USER_BUILD_STAMP) force_native_build
 	fi
 
 fs_img: $(FS_TEST_IMG)
-

@@ -227,7 +227,7 @@ static uint64_t pci_bar_address(const pci_dev_info_t *info, int bar,
     return address;
 }
 
-int pci_enable_and_assign_bars(device_t *dev) {
+static int pci_assign_bars(device_t *dev, int bus_master) {
     pci_dev_info_t *info = dev ? dev->plat_data : NULL;
     if (!info)
         return -1;
@@ -317,7 +317,11 @@ int pci_enable_and_assign_bars(device_t *dev) {
             bar++;
     }
 
-    command |= 0x6U; /* PCI_COMMAND_MEMORY | PCI_COMMAND_BUS_MASTER */
+    command |= 0x2U; /* PCI_COMMAND_MEMORY */
+    if (bus_master)
+        command |= 0x4U;
+    else
+        command &= ~0x4U;
     pci_ecam_write(info->bus, info->dev, info->func, 0x04, command);
     /* Keep the interrupt line visible to drivers after rebuilding the BAR
      * resources.  Modern virtio currently polls, but legacy PCI users may
@@ -333,6 +337,10 @@ int pci_enable_and_assign_bars(device_t *dev) {
     return 0;
 }
 
+int pci_enable_and_assign_bars(device_t *dev) {
+    return pci_assign_bars(dev, 1);
+}
+
 resource_t *pci_get_bar_resource(device_t *dev, unsigned int bar) {
     pci_dev_info_t *info = dev ? (pci_dev_info_t *)dev->plat_data : NULL;
     if (!info || bar >= ARRAY_SIZE(info->bar_resource))
@@ -341,6 +349,53 @@ resource_t *pci_get_bar_resource(device_t *dev, unsigned int bar) {
     if (resource < 0 || resource >= dev->res_count)
         return NULL;
     return &dev->res[resource];
+}
+
+int pci_user_device_find(uint16_t vendor, uint16_t device,
+                         pci_user_device_info_t *out)
+{
+    if (!out)
+        return -1;
+    for (int i = 0; i < PCI_MAX_PUBLISHED_DEVICES; i++) {
+        pci_dev_info_t *info = &g_pci_infos[i];
+        if (!g_pci_in_use[i] || info->vendor != vendor ||
+            info->device != device)
+            continue;
+        if (pci_assign_bars(&g_pci_devs[i], 0) != 0 ||
+            !info->bar[0] || !info->bar_size[0])
+            return -1;
+        out->vendor = vendor;
+        out->device = device;
+        out->devid = ((uint16_t)info->bus << 8) |
+                     ((uint16_t)info->dev << 3) | info->func;
+        int irq = pci_intx_irq(&g_pci_devs[i]);
+        out->irq = irq < 0 ? 0xffffu : (uint16_t)irq;
+        out->bar0_phys = info->bar[0];
+        out->bar0_size = info->bar_size[0];
+        return 0;
+    }
+    return -1;
+}
+
+int pci_user_device_bus_master(uint16_t devid, int enable)
+{
+    uint8_t bus = (uint8_t)(devid >> 8);
+    uint8_t dev = (uint8_t)((devid >> 3) & 0x1f);
+    uint8_t func = (uint8_t)(devid & 0x7);
+    for (int i = 0; i < PCI_MAX_PUBLISHED_DEVICES; i++) {
+        pci_dev_info_t *info = &g_pci_infos[i];
+        if (!g_pci_in_use[i] || info->bus != bus || info->dev != dev ||
+            info->func != func)
+            continue;
+        uint32_t command = pci_ecam_read(bus, dev, func, 0x04) & 0xffffu;
+        if (enable)
+            command |= 0x4u;
+        else
+            command &= ~0x4u;
+        pci_ecam_write(bus, dev, func, 0x04, command);
+        return 0;
+    }
+    return -1;
 }
 
 static uint32_t pci_virtio_read32(virtio_transport_t *transport, uint32_t off) {

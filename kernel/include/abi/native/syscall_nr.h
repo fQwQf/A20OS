@@ -151,6 +151,8 @@
 #define A20_SYS_device_claim      0x0C07
 #define A20_SYS_device_release    0x0C08
 #define A20_SYS_device_alloc_dma  0x0C09
+#define A20_SYS_device_free_dma   0x0C0A
+#define A20_SYS_device_get_info   0x0C0B
 
 /* Kernel extension points (0x0E00) */
 #define A20_SYS_ext_prog_load      0x0E00
@@ -159,6 +161,6 @@
 #define A20_SYS_ext_prog_release   0x0E03
 #define A20_SYS_ext_point_info     0x0E04
 
-#define A20_NATIVE_SYSCALL_COUNT  129
+#define A20_NATIVE_SYSCALL_COUNT  131
 
 #endif

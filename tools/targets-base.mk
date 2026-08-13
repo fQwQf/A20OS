@@ -23,6 +23,7 @@
 		native-ipc-arch native-ipc-rv native-ipc-la smoke-native-ipc \
 		native-contract-arch native-contract-rv native-contract-la smoke-native-contract \
 		native-uinputd-arch native-uinputd-rv smoke-dual-input \
+		native-uedud-arch native-uedud-rv smoke-iommu-udriver-isolation \
 		native-personality-arch native-personality-rv smoke-native-personality \
 		native-linux-arch native-linux-rv smoke-native-linux \
 		check-a20-idl \

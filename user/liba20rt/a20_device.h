@@ -55,8 +55,8 @@ static inline a20_status_t a20_device_irq_unlisten(uint32_t irq)
     return a20_syscall6(A20_SYS_device_irq_unlisten, irq, 0, 0, 0, 0, 0);
 }
 
-/* DMA contract (M4): materialize a VMO, then ask the kernel for its
- * physical addresses.  Returns page count (>= 0) or a negative error. */
+/* DMA contract: this returns device-visible addresses.  They are IOVAs for
+ * an IOMMU-isolated owner and physical addresses for legacy devices. */
 static inline a20_status_t a20_device_vmo_phys(a20_handle_t vmo,
                                                uint64_t *out_paddrs,
                                                uint32_t max_pages,
@@ -119,6 +119,22 @@ static inline a20_status_t a20_device_release(uint64_t phys_base)
 static inline a20_status_t a20_device_alloc_dma(uint64_t size)
 {
     return a20_syscall6(A20_SYS_device_alloc_dma, size, 0, 0, 0, 0, 0);
+}
+
+/* Remove the device mapping before closing the VMO handle. */
+static inline a20_status_t a20_device_free_dma(a20_handle_t vmo)
+{
+    return a20_syscall6(A20_SYS_device_free_dma, vmo, 0, 0, 0, 0, 0);
+}
+
+static inline a20_status_t a20_device_get_info(a20_device_info_args_t *info)
+{
+    if (!info)
+        return -A20_ERR_INVALID_ARGUMENT;
+    info->size = sizeof(*info);
+    info->version = 1;
+    return a20_syscall6(A20_SYS_device_get_info,
+                        (uint64_t)info, 0, 0, 0, 0, 0);
 }
 
 #endif

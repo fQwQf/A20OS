@@ -10,8 +10,12 @@
 #include "mm/mm.h"
 #include "mm/vm.h"
 #include "mm/slab.h"
+#include "mm/vmo.h"
 #include "drivers/core/driver_hwapi.h"
+#include "drivers/core/riscv_iommu.h"
 #include "drivers/core/udriver.h"
+#include "drivers/bus/pci_bus.h"
+#include "drivers/driver_descriptor.h"
 #include "ipc/ipc.h"
 #include "ipc/objstats.h"
 
@@ -46,6 +50,27 @@ static const udriver_mmio_window_t g_mmio_windows[] = {
 #define UDRIVER_MMIO_WINDOWS_NR 0
 #endif
 
+#define UDRIVER_EDU_VENDOR 0x1234u
+#define UDRIVER_EDU_DEVICE 0x11e8u
+
+static pci_user_device_info_t g_edu;
+static int g_edu_present;
+
+static int udriver_edu_prepare(void)
+{
+    if (g_edu_present)
+        return 1;
+    if (pci_user_device_find(UDRIVER_EDU_VENDOR, UDRIVER_EDU_DEVICE,
+                             &g_edu) < 0)
+        return 0;
+    /* Enumeration assigns the BAR and enables decoding.  Keep DMA disabled
+     * until a process owns an attached IOMMU domain. */
+    if (pci_user_device_bus_master(g_edu.devid, 0) < 0)
+        return 0;
+    g_edu_present = 1;
+    return 1;
+}
+
 static int udriver_mmio_allowed(uint64_t phys, uint64_t size)
 {
     if (size == 0 || phys + size < phys)
@@ -56,6 +81,9 @@ static int udriver_mmio_allowed(uint64_t phys, uint64_t size)
         if (phys >= wb && phys + size <= we)
             return 1;
     }
+    if (g_edu_present && phys >= g_edu.bar0_phys &&
+        phys + size <= g_edu.bar0_phys + g_edu.bar0_size)
+        return 1;
     return 0;
 }
 
@@ -85,6 +113,9 @@ int udriver_mmio_user_owned(uint64_t phys)
                 return 0;
             return 1;
         }
+    if (g_edu_present && phys >= g_edu.bar0_phys &&
+        phys < g_edu.bar0_phys + g_edu.bar0_size)
+        return 1;
     return 0;
 }
 
@@ -107,6 +138,16 @@ int udriver_window_present(uint64_t phys)
             return 1;   /* declared board device (goldfish-rtc) */
         }
     }
+    return 0;
+}
+
+int udriver_match_present(uint32_t bus, uint32_t vendor, uint32_t device)
+{
+    if (bus == A20_DRIVER_BUS_MMIO)
+        return udriver_window_present(vendor);
+    if (bus == A20_DRIVER_BUS_PCI && vendor == UDRIVER_EDU_VENDOR &&
+        device == UDRIVER_EDU_DEVICE)
+        return udriver_edu_prepare();
     return 0;
 }
 
@@ -156,19 +197,67 @@ fail:
     return -1;
 }
 
+void udriver_revoke_mmio(mm_struct_t *mm, uint64_t phys)
+{
+#ifndef CONFIG_NOMMU
+    if (!mm || !mm->pgdir)
+        return;
+    for (;;) {
+        vaddr_t start = 0;
+        size_t length = 0;
+        uint64_t flags = spin_lock_irqsave(&mm->lock);
+        for (vm_area_t *vma = mm->mmap; vma; vma = vma->next) {
+            if (!(vma->vm_flags & VM_PFNMAP))
+                continue;
+            int level = 0;
+            vaddr_t base = 0;
+            size_t leaf_size = 0;
+            pte_t *pte = pt_lookup_leaf(mm->pgdir, vma->start, &level,
+                                        &base, &leaf_size);
+            if (pte && (*pte & PTE_V) && arch_pte_addr(*pte) == phys) {
+                start = vma->start;
+                length = vma->end - vma->start;
+                break;
+            }
+        }
+        spin_unlock_irqrestore(&mm->lock, flags);
+        if (!start)
+            break;
+        if (mm_munmap(mm, start, length) < 0)
+            break;
+    }
+#else
+    (void)mm;
+    (void)phys;
+#endif
+}
+
 /* ---- Device ownership claims (docs/hybrid-kernel/04-dual-placement.md) ----
  *
  * A user task may exclusively claim a whitelisted user-owned window.
  * Claims are per-window, idempotent for the owner, and auto-released
  * when the owner dies (udriver_task_cleanup).  Kernel-side read-only
  * probes (e.g. vinput-probe) do not claim; destructive init
- * belongs to the claimant.  Mapping is not yet gated on claiming
- * (rtcd/ubd predate claims); exclusivity is enforced between claimants.
+ * belongs to the claimant.  The PCI pilot additionally couples ownership to
+ * bus mastering, an IOMMU domain and every DMA mapping.
  */
 #define UDRIVER_CLAIM_MAX 8
+#define UDRIVER_DMA_MAX 8
+#define UDRIVER_EDU_INDEX ((int)UDRIVER_MMIO_WINDOWS_NR)
 
 static spinlock_t g_udr_lock = SPINLOCK_INIT;
 static int g_window_claim_pid[UDRIVER_CLAIM_MAX]; /* 0 = unclaimed */
+
+typedef struct {
+    struct vmo *vmo;
+    uint64_t iova;
+    uint32_t npages;
+    uint16_t devid;
+    int owner_pid;
+    int active;
+} udriver_dma_entry_t;
+
+static udriver_dma_entry_t g_udr_dma[UDRIVER_DMA_MAX];
 
 static int udriver_window_index(uint64_t phys)
 {
@@ -177,7 +266,26 @@ static int udriver_window_index(uint64_t phys)
             phys >= g_mmio_windows[i].base &&
             phys < g_mmio_windows[i].base + g_mmio_windows[i].size)
             return (int)i;
+    if (g_edu_present && phys >= g_edu.bar0_phys &&
+        phys < g_edu.bar0_phys + g_edu.bar0_size)
+        return UDRIVER_EDU_INDEX;
     return -1;
+}
+
+static void udriver_dma_drop_all(int pid)
+{
+    struct vmo *dead[UDRIVER_DMA_MAX];
+    unsigned n = 0;
+    uint64_t flags = spin_lock_irqsave(&g_udr_lock);
+    for (unsigned i = 0; i < UDRIVER_DMA_MAX; i++) {
+        if (g_udr_dma[i].active && g_udr_dma[i].owner_pid == pid) {
+            dead[n++] = g_udr_dma[i].vmo;
+            memset(&g_udr_dma[i], 0, sizeof(g_udr_dma[i]));
+        }
+    }
+    spin_unlock_irqrestore(&g_udr_lock, flags);
+    for (unsigned i = 0; i < n; i++)
+        vmo_release(dead[i]);
 }
 
 int udriver_claim(uint64_t phys, int pid)
@@ -186,11 +294,32 @@ int udriver_claim(uint64_t phys, int pid)
     if (idx < 0)
         return -2; /* not a user-claimable window */
     uint64_t flags = spin_lock_irqsave(&g_udr_lock);
-    int r = 0;
-    if (g_window_claim_pid[idx] == 0 || g_window_claim_pid[idx] == pid)
+    if (g_window_claim_pid[idx] == pid) {
+        spin_unlock_irqrestore(&g_udr_lock, flags);
+        return 0;
+    }
+    if (g_window_claim_pid[idx] != 0) {
+        spin_unlock_irqrestore(&g_udr_lock, flags);
+        return -1;
+    }
+    if (idx != UDRIVER_EDU_INDEX) {
         g_window_claim_pid[idx] = pid;
-    else
-        r = -1; /* claimed by another task */
+        spin_unlock_irqrestore(&g_udr_lock, flags);
+        return 0;
+    }
+    g_window_claim_pid[idx] = -pid; /* reserve while hardware is fail-closed */
+    spin_unlock_irqrestore(&g_udr_lock, flags);
+
+    int r = -1;
+    if (pci_user_device_bus_master(g_edu.devid, 0) == 0 &&
+        riscv_iommu_domain_claim(g_edu.devid, pid) == 0) {
+        if (pci_user_device_bus_master(g_edu.devid, 1) == 0)
+            r = 0;
+        else
+            riscv_iommu_domain_release(g_edu.devid, pid);
+    }
+    flags = spin_lock_irqsave(&g_udr_lock);
+    g_window_claim_pid[idx] = r == 0 ? pid : 0;
     spin_unlock_irqrestore(&g_udr_lock, flags);
     return r;
 }
@@ -201,13 +330,25 @@ int udriver_release(uint64_t phys, int pid)
     if (idx < 0)
         return -2;
     uint64_t flags = spin_lock_irqsave(&g_udr_lock);
-    int r = 0;
-    if (g_window_claim_pid[idx] == pid)
+    if (g_window_claim_pid[idx] != pid) {
+        spin_unlock_irqrestore(&g_udr_lock, flags);
+        return -1;
+    }
+    if (idx != UDRIVER_EDU_INDEX) {
         g_window_claim_pid[idx] = 0;
-    else
-        r = -1;
+        spin_unlock_irqrestore(&g_udr_lock, flags);
+        return 0;
+    }
     spin_unlock_irqrestore(&g_udr_lock, flags);
-    return r;
+
+    pci_user_device_bus_master(g_edu.devid, 0);
+    if (riscv_iommu_domain_release(g_edu.devid, pid) < 0)
+        return -1;
+    udriver_dma_drop_all(pid);
+    flags = spin_lock_irqsave(&g_udr_lock);
+    g_window_claim_pid[idx] = 0;
+    spin_unlock_irqrestore(&g_udr_lock, flags);
+    return 0;
 }
 
 /* Owner pid of the window containing @phys, 0 if unclaimed, -1 if not
@@ -221,6 +362,152 @@ int udriver_claim_owner(uint64_t phys)
     int owner = g_window_claim_pid[idx];
     spin_unlock_irqrestore(&g_udr_lock, flags);
     return owner;
+}
+
+int udriver_device_get_info(uint32_t bus, uint32_t vendor, uint32_t device,
+                            uint32_t index, int pid,
+                            udriver_device_info_t *out)
+{
+    if (!out || index != 0 || bus != A20_DRIVER_BUS_PCI ||
+        vendor != UDRIVER_EDU_VENDOR || device != UDRIVER_EDU_DEVICE ||
+        !udriver_edu_prepare())
+        return -1;
+    memset(out, 0, sizeof(*out));
+    out->flags = UDRIVER_DEVICE_F_IOMMU;
+    out->devid = g_edu.devid;
+    out->irq = g_edu.irq;
+    out->mmio_base = g_edu.bar0_phys;
+    out->mmio_size = g_edu.bar0_size;
+
+    if (udriver_claim_owner(g_edu.bar0_phys) == pid) {
+        int blocked = 0;
+        if (riscv_iommu_domain_fault(g_edu.devid, pid, &out->fault_count,
+                                     &out->fault_cause, &out->fault_iova,
+                                     &blocked) < 0)
+            return -1;
+        if (blocked) {
+            out->flags |= UDRIVER_DEVICE_F_BLOCKED;
+            pci_user_device_bus_master(g_edu.devid, 0);
+        }
+    }
+    return 0;
+}
+
+/* Return 1 when the caller has no isolated device (legacy physical-DMA
+ * semantics), 0 when an IOVA was installed, and -1 on a fail-closed error. */
+int udriver_dma_map(struct vmo *vmo, int pid, uint64_t *out_iova)
+{
+    if (!vmo || !out_iova)
+        return -1;
+    uint64_t flags = spin_lock_irqsave(&g_udr_lock);
+    int isolated = g_edu_present &&
+                   g_window_claim_pid[UDRIVER_EDU_INDEX] == pid;
+    if (!isolated) {
+        spin_unlock_irqrestore(&g_udr_lock, flags);
+        return 1;
+    }
+    int slot = -1;
+    for (unsigned i = 0; i < UDRIVER_DMA_MAX; i++) {
+        if (g_udr_dma[i].active && g_udr_dma[i].vmo == vmo) {
+            *out_iova = g_udr_dma[i].iova;
+            spin_unlock_irqrestore(&g_udr_lock, flags);
+            return 0;
+        }
+        if (!g_udr_dma[i].active && slot < 0)
+            slot = (int)i;
+    }
+    if (slot < 0 || !vmo->page_count) {
+        spin_unlock_irqrestore(&g_udr_lock, flags);
+        return -1;
+    }
+    pfn_t first = vmo_peek_page(vmo, 0);
+    if (first == PFN_NONE) {
+        spin_unlock_irqrestore(&g_udr_lock, flags);
+        return -1;
+    }
+    for (uint32_t i = 1; i < vmo->page_count; i++) {
+        if (vmo_peek_page(vmo, i) != first + i) {
+            spin_unlock_irqrestore(&g_udr_lock, flags);
+            return -1;
+        }
+    }
+    g_udr_dma[slot].active = -1;
+    g_udr_dma[slot].owner_pid = pid;
+    spin_unlock_irqrestore(&g_udr_lock, flags);
+
+    uint64_t iova = 0;
+    if (riscv_iommu_domain_map(g_edu.devid, pid, pfn_to_phys(first),
+                               vmo->page_count, &iova) < 0) {
+        flags = spin_lock_irqsave(&g_udr_lock);
+        memset(&g_udr_dma[slot], 0, sizeof(g_udr_dma[slot]));
+        spin_unlock_irqrestore(&g_udr_lock, flags);
+        return -1;
+    }
+    vmo_ref(vmo); /* pin until explicit unmap or owner teardown */
+    flags = spin_lock_irqsave(&g_udr_lock);
+    g_udr_dma[slot].vmo = vmo;
+    g_udr_dma[slot].iova = iova;
+    g_udr_dma[slot].npages = vmo->page_count;
+    g_udr_dma[slot].devid = g_edu.devid;
+    g_udr_dma[slot].active = 1;
+    spin_unlock_irqrestore(&g_udr_lock, flags);
+    *out_iova = iova;
+    return 0;
+}
+
+int udriver_dma_address(struct vmo *vmo, int pid, uint32_t page,
+                        uint64_t *out_addr)
+{
+    if (!vmo || !out_addr)
+        return -1;
+    uint64_t flags = spin_lock_irqsave(&g_udr_lock);
+    for (unsigned i = 0; i < UDRIVER_DMA_MAX; i++) {
+        if (g_udr_dma[i].active == 1 && g_udr_dma[i].owner_pid == pid &&
+            g_udr_dma[i].vmo == vmo && page < g_udr_dma[i].npages) {
+            *out_addr = g_udr_dma[i].iova + (uint64_t)page * PAGE_SIZE;
+            spin_unlock_irqrestore(&g_udr_lock, flags);
+            return 0;
+        }
+    }
+    int isolated = g_edu_present &&
+                   g_window_claim_pid[UDRIVER_EDU_INDEX] == pid;
+    spin_unlock_irqrestore(&g_udr_lock, flags);
+    return isolated ? -1 : 1;
+}
+
+int udriver_dma_unmap(struct vmo *vmo, int pid)
+{
+    if (!vmo)
+        return -1;
+    uint64_t flags = spin_lock_irqsave(&g_udr_lock);
+    int slot = -1;
+    for (unsigned i = 0; i < UDRIVER_DMA_MAX; i++)
+        if (g_udr_dma[i].active == 1 && g_udr_dma[i].owner_pid == pid &&
+            g_udr_dma[i].vmo == vmo) {
+            slot = (int)i;
+            break;
+        }
+    if (slot < 0) {
+        int isolated = g_edu_present &&
+                       g_window_claim_pid[UDRIVER_EDU_INDEX] == pid;
+        spin_unlock_irqrestore(&g_udr_lock, flags);
+        return isolated ? -1 : 1;
+    }
+    udriver_dma_entry_t entry = g_udr_dma[slot];
+    g_udr_dma[slot].active = -1;
+    spin_unlock_irqrestore(&g_udr_lock, flags);
+    if (riscv_iommu_domain_unmap(entry.devid, pid, entry.iova,
+                                 entry.npages) < 0) {
+        flags = spin_lock_irqsave(&g_udr_lock);
+        g_udr_dma[slot].active = 1;
+        spin_unlock_irqrestore(&g_udr_lock, flags);
+        return -1;
+    }
+    flags = spin_lock_irqsave(&g_udr_lock);
+    memset(&g_udr_dma[slot], 0, sizeof(g_udr_dma[slot]));
+    spin_unlock_irqrestore(&g_udr_lock, flags);
+    vmo_release(entry.vmo);
+    return 0;
 }
 
 /* ---- IRQ → event queue delivery ---- */
@@ -335,9 +622,15 @@ void udriver_task_cleanup(int pid)
     void *privs[UDRIVER_IRQ_MAX];
     unsigned n = 0;
 
+    /* Stop DMA and tear down translations before dropping the VMO pins. */
+    if (g_edu_present &&
+        udriver_claim_owner(g_edu.bar0_phys) == pid)
+        (void)udriver_release(g_edu.bar0_phys, pid);
+
     uint64_t flags = spin_lock_irqsave(&g_udr_lock);
     for (unsigned i = 0; i < UDRIVER_CLAIM_MAX; i++)
-        if (g_window_claim_pid[i] == pid)
+        if ((!g_edu_present || (int)i != UDRIVER_EDU_INDEX) &&
+            g_window_claim_pid[i] == pid)
             g_window_claim_pid[i] = 0;
     for (unsigned i = 0; i < UDRIVER_IRQ_MAX; i++) {
         if (g_udr_irq[i].active && g_udr_irq[i].owner_pid == pid) {

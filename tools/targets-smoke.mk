@@ -52,6 +52,34 @@ smoke-iommu-discovery:
 		tail -n 80 "$$log"; exit 1; \
 	fi
 
+smoke-iommu-udriver-isolation:
+	$(MAKE) -j1 ARCH=riscv64 ABI=both BRINGUP=0 PROFILE=benchmark dev-build
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/iommu-udriver-isolation-riscv64.log"; \
+	status=0; \
+	{ sleep $(SMOKE_INPUT_DELAY); printf 'poweroff\n'; } | \
+	$(TIMEOUT) 30s qemu-system-riscv64 \
+		-machine virt -m 1G -nographic -smp 1 -bios default \
+		-global virtio-mmio.force-legacy=false \
+		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-both-dev/fat32.img,if=none,format=raw,id=x0 \
+		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+		-device riscv-iommu-pci,bus=pcie.0,addr=1.0 \
+		-device edu,bus=pcie.0,addr=2.0,dma_mask=0xffffffffffffffff \
+		-kernel .kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf \
+		> "$$log" 2>&1 || status=$$?; \
+	if grep -q 'UEDUD: mapped DMA ok' "$$log" && \
+	   grep -q 'UEDUD: unmapped DMA fault' "$$log" && \
+	   grep -q '\[IOMMU\] DMA fault blocked did=16 cause=15' "$$log" && \
+	   grep -q 'UEDUD: recovered' "$$log" && \
+	   grep -q 'UEDUD: PASS' "$$log" && \
+	   grep -q 'System is going down for power-off' "$$log"; then \
+		echo "smoke-iommu-udriver-isolation: PASS; log saved to $$log"; \
+	else \
+		echo "smoke-iommu-udriver-isolation: failed with status $$status; tail of $$log:"; \
+		tail -n 120 "$$log"; exit 1; \
+	fi
+
 smoke-loongarch64:
 	$(MAKE) ARCH=loongarch64 ABI=linux BRINGUP=1 kernel-only
 	@mkdir -p $(SMOKE_LOG_DIR)
