@@ -612,8 +612,8 @@ smoke-syscall-ext:
 	fi
 
 smoke-sched-stress:
-		$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
-		@mkdir -p $(SMOKE_LOG_DIR)
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
+	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/sched-stress-riscv64.log"; \
 	status=0; \
@@ -626,7 +626,6 @@ smoke-sched-stress:
 		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
 		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
 		> "$$log" 2>&1 || status=$$?; \
-
 	if grep -q 'SCHED_STRESS: PASS' "$$log"; then \
 		echo "smoke-sched-stress: PASS; log saved to $$log"; \
 	else \
