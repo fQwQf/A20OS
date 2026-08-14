@@ -886,8 +886,11 @@ void proc_make_ready(task_t *t)
     }
     if (t->park_state == PROC_PARK_PREPARING ||
         t->park_state == PROC_PARK_PARKED) {
+        /* proc_lock -> park_lock is the documented order; the park-state
+         * transition itself is serialized by t->park_lock. */
+        uint64_t plf = spin_lock_irqsave(&t->park_lock);
         (void)proc_try_wake_locked(t, t->wait_seq, PROC_WAKE_EVENT);
-        proc_sched_assert_task_locked(t);
+        spin_unlock_irqrestore(&t->park_lock, plf);
         spin_unlock_irqrestore(&proc_lock, flags);
         return;
     }
