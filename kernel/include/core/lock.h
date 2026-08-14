@@ -57,9 +57,27 @@ typedef struct spinlock {
     uintptr_t owner_ra;
     const char *name;   /* debug name, NULL unless spin_set_debug() */
     void *container;
+    /* Contention telemetry: incremented only when an acquire actually finds
+     * the lock held, so the uncontended fast path is unchanged.  Read via
+     * /proc/a20/lock_contention. */
+    uint64_t contended_acquires;
+    uint64_t contended_spins;
+    /* Non-NULL only for locks registered for callsite sampling (see
+     * lock_counters_enable_callsite()); the contended path records the
+     * caller's return address so the audit can attribute contention. */
+    struct lock_callsite_sample *samples;
 } spinlock_t;
 
-#define SPINLOCK_INIT { 0, NULL, 0, NULL, NULL }
+/* Per-callsite contention record.  Only the contended path touches the sample
+ * table, so uncontended acquires never pay for it. */
+#define LOCK_CALLSITE_SAMPLES 32
+typedef struct lock_callsite_sample {
+    uintptr_t ra;
+    uint64_t contended;
+    uint64_t spins;
+} lock_callsite_sample_t;
+
+#define SPINLOCK_INIT { 0, NULL, 0, NULL, NULL, 0, 0, NULL }
 
 static inline void spin_init(spinlock_t *lock) {
     lock->locked = 0;
@@ -67,6 +85,9 @@ static inline void spin_init(spinlock_t *lock) {
     lock->owner_ra = 0;
     lock->name = NULL;
     lock->container = NULL;
+    lock->contended_acquires = 0;
+    lock->contended_spins = 0;
+    lock->samples = NULL;
 }
 
 static inline void spin_set_debug(spinlock_t *lock, const char *name, void *container) {
@@ -83,7 +104,31 @@ static inline void spin_lock_at(spinlock_t *lock, uintptr_t caller_ra) {
     struct task_t *cur = proc_current();
     uintptr_t waiter_ra = caller_ra ? caller_ra
                                     : (uintptr_t)__builtin_return_address(0);
+    /* The exchange must be retried after the owner releases the lock: an
+     * acquire that waits and then falls through without re-acquiring would
+     * enter the critical section unlocked (two CPUs both believing they hold
+     * the lock).  The counters are only touched when the lock is contended,
+     * so the uncontended fast path stays a single exchange. */
     while (__atomic_exchange_n(&lock->locked, 1, __ATOMIC_ACQUIRE)) {
+        __atomic_fetch_add(&lock->contended_acquires, 1, __ATOMIC_RELAXED);
+        if (lock->samples) {
+            /* Hash the caller's return address into the fixed sample table
+             * and accumulate, so the audit can attribute contention to the
+             * exact call site without any shared bookkeeping lock. */
+            uintptr_t ra = waiter_ra;
+            unsigned slot = (unsigned)((ra >> 4) ^ (ra >> 20)) &
+                            (LOCK_CALLSITE_SAMPLES - 1);
+            lock_callsite_sample_t *s = &lock->samples[slot];
+            if (__atomic_load_n(&s->ra, __ATOMIC_RELAXED) != ra) {
+                uintptr_t expect = 0;
+                __atomic_compare_exchange_n(&s->ra, &expect, ra, 0,
+                                            __ATOMIC_RELAXED, __ATOMIC_RELAXED);
+            }
+            if (__atomic_load_n(&s->ra, __ATOMIC_RELAXED) == ra) {
+                __atomic_fetch_add(&s->contended, 1, __ATOMIC_RELAXED);
+                __atomic_fetch_add(&s->spins, 1, __ATOMIC_RELAXED);
+            }
+        }
         while (__atomic_load_n(&lock->locked, __ATOMIC_RELAXED)) {
             if ((++spins & ((1UL << 20) - 1)) == 0) {
                 uint64_t elapsed = timer_get_ticks() - stall_start;
@@ -103,6 +148,8 @@ static inline void spin_lock_at(spinlock_t *lock, uintptr_t caller_ra) {
             arch_cpu_relax();
         }
     }
+    if (spins)
+        __atomic_fetch_add(&lock->contended_spins, spins, __ATOMIC_RELAXED);
     lock->owner = cur;
     lock->owner_ra = waiter_ra;
 }

@@ -17,6 +17,7 @@
 #include "mm/swap.h"
 #include "core/timer.h"
 #include "core/perf.h"
+#include "core/lock_counters.h"
 #include "core/string.h"
 #include "core/stdio.h"
 #include "core/version.h"
@@ -585,6 +586,8 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
         return (int)proc_lifetime_format(buf, bufsz);
     case PF_A20_PERF:
         return (int)a20_perf_format(buf, bufsz);
+    case PF_A20_LOCK_CONTENTION:
+        return (int)lock_counters_format(buf, bufsz);
     case PF_A20_OBJECTS:
         snprintf(buf, bufsz,
             "handles: %lu\n"
