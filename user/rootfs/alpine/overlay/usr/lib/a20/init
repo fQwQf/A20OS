@@ -52,11 +52,11 @@ while [ ! -S /run/seatd.sock ]; do
     sleep 0.1
 done
 
-# Device enumeration.  On A20OS netlink/uevent support is partial, so the
-# udev queue may never drain; bound every waiting step so a missing or stuck
-# udevd cannot block the desktop session forever.  labwc/libinput degrade to
-# whatever /dev already exposes (devfs provides /dev/dri/card0 and
-# /dev/input/event0 regardless of udev).
+# Device enumeration.  The A20OS kernel broadcasts KOBJECT_UEVENT with a real
+# per-event SEQNUM, so eudev's workers actually run the rules and persist
+# ID_INPUT_* for the input nodes; libinput's udev backend then enumerates
+# /dev/input/event*.  Every wait is still bounded so a stuck udevd can never
+# block the desktop session.
 if [ -x /sbin/udevd ] || [ -x /usr/sbin/udevd ]; then
     udevd 2>/dev/null &
     i=0

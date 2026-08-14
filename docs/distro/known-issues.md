@@ -1,60 +1,103 @@
 # 已知问题与排查笔记
 
-桌面现在能起来、能渲染，但还差两件事才算"完全可用"：键鼠（输入）和一个偶发的 死锁。两个都做了大量排查，本文档把已经确认的结论、还没解决的点、以及下一步 怎么走写清楚，省得下次从零开始。
+桌面目前能起来、能渲染、键鼠可用。本文档记录每个已解决的问题（含根因与修法）和
+尚存的小问题，供后续继续排查时参考。
 
-## 一、输入：libinput 枚举不到设备
+## 一、输入：libinput 枚举不到设备（已解决）
 
-### 现象
+### 现象（修复前）
 
-桌面以 `WLR_LIBINPUT_NO_DEVICES=1` 起（无输入），因为 libinput 的 udev 后端 报 "no input devices"。
+桌面以 `WLR_LIBINPUT_NO_DEVICES=1` 起（无输入），libinput 的 udev 后端报
+"no input devices"。
 
-### 已经做到哪一步
+### 根因（两个独立的 ABI 缺口叠加）
 
-整个 /sys 到 udev 数据库的链条大部分已经打通：
+1. **netlink uevent 没有 `SEQNUM=`**。eudev 的 `event_queue_insert` /
+   `is_devpath_busy` 依赖每个事件有严格递增的 seqnum 排序。A20OS 之前不发
+   SEQNUM，所有事件的 seqnum 都是 0，于是**第一个入队的事件被误判为
+   "busy"**（`delaying_seqnum 0 == seqnum 0`），worker 永远不会 spawn，规则
+   不执行、db 只剩骨架。`udevadm test`（前台进程内跑规则）能出 ID_INPUT，
+   正是因为它不经过 worker 队列——之前因此误判成"udevd 运行期规则引擎坏了"。
+   修复：内核 netlink uevent 广播加全局递增的 `SEQNUM=`（`kernel/net/socket_netlink.c`）。
 
-- `/sys/devices/virtual/input/event0`、`/sys/class/input/event0/{uevent,dev,subsystem}` 都在（提交 `693282f`、`2ea932a2`）；
-- 输入 class device 的 devt 已经对齐 devfs 节点：`/dev/input/event0` 是 29:1， `class_devt` 对 INPUT 返回 `0x1d01+index`，udev 数据库里也是 MAJOR=29 MINOR=1， 不再对不上；
-- netlink uevent 广播、udevd bind 时的整组重放、sysfs uevent 文件可写（冷插拔） 都验证过——串口能看到 `[UEVENT] add input/event0 -> delivered=1`，说明 udevd 确实收到了；
-- 规则 `usr/lib/udev/rules.d/99-a20-input.rules`（`SUBSYSTEM=="input"` → `ID_INPUT` / `ID_INPUT_KEYBOARD` / `ID_INPUT_MOUSE`）本身没问题： `udevadm test /class/input/event0` 能正确产出这三个变量。
+2. **`/dev/input/eventN` 与 `/sys/dev/char/<maj>:<min>` 的 syspath 不一致**。
+   libinput 的 `evdev_device_have_same_syspath()` 打开设备后，用
+   `udev_device_new_from_devnum()`（走 `/sys/dev/char/29:1`）创建的 syspath
+   与 enumerate（走 `/sys/class/input/event0`）的 syspath **逐字节比较**，
+   不等就拒收设备。Linux 里两者都是 symlink 到同一个 `/sys/devices/...`
+   真实路径；A20OS 之前没有统一路径。修复：
+   - devfs 的 `/dev/input/` 动态列出并解析每个发布的 input class device
+     （之前硬编码只有 event0），`/dev/input/event1+` 因此存在；
+   - `/sys/dev/char/<maj>:<min>` 保持目录（libdrm 要 `device/drm` 子路径），
+     同时 `readlink()` 返回**相对** class 路径（`../../class/input/event0`，
+     与 Linux 一致）；`vfs_readlinkat()` 允许带 readlink 实现的目录节点响应。
+     libudev 的 `util_resolve_sys_link()` 解析后 syspath 与 `/sys/class`
+     enumerate 一致，设备被接受。
 
-### 卡点：udevd 运行期不跑规则引擎
+### 验证
 
-`udevadm test` 是进程内模拟，能跑出 ID_INPUT。但 udevd **运行期**收到 uevent、 也建了数据库条目，条目却只是骨架——只有 uevent 文件自带的 MAJOR/MINOR/DEVNAME/SUBSYSTEM/DEVPATH，没有任何规则产物（连 50-udev-default 的 TAGS 都没有）。也就是说规则引擎在 daemon 的运行时处理路径上没有真正执行。
+`udevadm info --export-db` 显示 event0/event1 带 `E: ID_INPUT=1`、
+`ID_INPUT_KEYBOARD=1`、`ID_INPUT_MOUSE=1`；labwc 日志出现
+`Adding A20OS evdev mux` 和 `configuring input device A20OS evdev mux
+(event0/event1)`；会话不再需要 `WLR_LIBINPUT_NO_DEVICES`。
 
-eudev 的 udevd 用 worker 子进程处理事件再回写数据库，所以下一步的第一怀疑对象 是 worker 路径：fork/exec 是否失败、事件处理是否根本没走到规则、数据库写入是否 被某个 syscall 卡住。给 udevd 加 `-d`/`--debug`，盯 `/run/udev/data/` 是否出现 规则产物，应该能定位到具体是哪一步断了。
+## 二、间歇性读路径自死锁（已解决）
 
-### 备选路线
+### 现象（修复前）
 
-- 如果确认是 worker 机制在 A20OS 上有问题，可以看看 wlroots/labwc 是否暴露 libinput 的 path 后端开关，直接指定设备文件绕过 udev；
-- 或者先在 init 里直接往 `/run/udev/data/` 写带 ID_INPUT 的条目，仅作验证 "udev 数据库有 ID_INPUT 之后 libinput 就认"这一环。
+桌面在高 I/O 阶段偶发整体挂死。串口 `LOCK-STALL` 显示 `owner==waiter`
+（同一 task）且 `owner_ra==waiter_ra`，即**同一把自旋锁被同一 task 递归获取**。
+命中率约三到五成。
 
-验证信号：`udevadm info --export-db | grep -A15 'input/event0'` 里出现 `E: ID_INPUT=1`；然后去掉 `start-xfce4-session` 里的 `WLR_LIBINPUT_NO_DEVICES=1`，labwc 日志出现 "New input device"。
+### 根因
 
-## 二、偶发死锁：读路径上的自死锁
+`sys_read`/`sys_write` 持有 `vf->offset_lock`（mutex）时，直接向**用户页**
+读写（`read_into_user` 用 `user_buffer_segment` 拿用户页 kaddr 交给
+`vfs_read_file`）。若该用户页未映射，memcpy 在**持锁路径内**触发缺页；缺页
+处理（写文件映射页等）可能重新进入同一条文件读路径，递归获取同一把锁——
+mutex 内部的 spinlock 永久自旋。`addr2line` 把 ra 解析到 `read_into_user`/
+`sys_read`（尾调用+内联掩盖了真正的持锁点），静态反查不到确切锁名，所以一直
+是"间歇性死锁，抓不到现场"。
 
-### 现象
+### 修复
 
-桌面在高 I/O 阶段偶尔整个挂死。串口的 LOCK-STALL 显示 `owner==waiter`（同一个 task）且 `owner_ra==waiter_ra`，也就是**同一把自旋锁被 同一个任务递归获取**。命中率大概三到五成，属于间歇性，最难抓的那种。
+`read_into_user` / `write_from_user` 对**所有**文件类型统一经过内核 scratch
+buffer（`proc_scratch_buffer`）：先在持锁区内读/写到内核缓冲，再在锁外
+`copy_to_user`/`copy_from_user`，保证用户页缺页永远不在持锁路径内发生。
+另外给 `spin_lock_at` 的 LOCK-STALL 报告加了 `owner==waiter` 时的调用栈打印，
+下次再出现能直接拿到递归点。
 
-### 已经确认的锁特征
+### 验证
 
-- 锁在堆上（slab 分配，周围能看到 0xcafebabe canary）；
-- 不是 `spin_init` 注册的锁——是某个结构体里零初始化/复合初始化的自旋锁字段， 所以常规的"给锁起名"调试手段对它无效；
-- 字段偏移约 +0x18；
-- `addr2line`/`kallsyms` 把 ra 解析到 `read_into_user`/`vfs_read_file` 一带， 但那是尾调用（`vfs_read_file` 尾部 `return vf->ops->read(...)`），真正的持锁点 在尾调用的 fs/缓存读取里，被内联掩盖，静态反查不到确切那把锁。
+连续多次桌面 boot 均无 `LOCK-STALL`（修复前每次都会触发）。
 
-已排除的候选：page_cache 全局锁、bcache、mm->lock、fdtable files->lock、 proc_lock（这些要么已命名、要么在 .data 段，地址都对不上）。
+## 三、遗留小问题：dbus 同步调用偶发超时
 
-### 下一步
+会话里偶发 `dbus-update-activation-environment: ... NoReply: Did not receive a
+reply`，伴随 xfsettingsd/xfce4-panel 的 Xfconf CRITICAL（"Failed to initialize
+Xfconf: Timeout"）。xfconfd 通过 dbus activation 能激活（串口可见
+`Successfully activated service 'org.xfce.Xfconf'`），但**某些 dbus 同步方法
+调用会偶发超时**（约 30s 无回复），组件随后降级。不是每次必现。
 
-1. 在 `spin_lock_at` 入口加一句自检：`lock->locked && lock->owner == cur` 说明同一 任务在重复获取，立刻把 lock 地址、`owner_ra`、本次 `waiter_ra`（都过 `kallsyms_lookup`）打出来。这是唯一能稳定抓到递归点的手段，代价是要多跑几次。
-2. 抓到递归点之后，修法通常是"持锁期间不做可能缺页/嵌套进同一路径的操作"： 读路径先把数据读进内核 bounce buffer，再在锁外 copy_to_user。
-3. 这个自检建议做成受 `CONFIG_DEBUG_LOCKS` 控制的常驻检测，而不是一次性 printk。
+怀疑方向：dbus 的某个机制（fd 传递、大消息、synchronous reply 与 event loop
+的交互）在 A20OS 上偶发不完整。后续可给 dbus-daemon / xfconfd 加 debug，或
+在内核侧观察 dbus 使用的 AF_UNIX SOCK_SEQPACKET 通道在大消息下的行为。
 
-## 三、测试环境注意事项
+## 四、测试环境注意事项
 
-- **rootfs 构建**：直接 `apk add` 走官方 CDN 会慢到像卡死；用预置的 `a20rootfs-builder` docker 镜像（apk 源已指 USTC），约 2 分钟一个镜像。 详见 [`build.md`](build.md)。
-- **改 overlay 必须重建镜像**：debugfs 对 8GiB 的 metadata_csum ext4 打不开 rw， 别想直接改镜像里的文件。
-- **QEMU 串口日志在后台跑时的坑**：镜像被 QEMU 以 RW 打开，重复启动前要清掉 占用进程。判断占用者要看 `/proc/*/fd` 里谁持有 fat32.img/rootfs.img， **不要用 `pgrep -f`**——它会匹配到 grep 命令自己。
-- **宿主噪音**：宿主机会偶发刷 `Failed to write 'change' to '/sys/devices/.../uevent': Permission denied`，那是宿主 systemd-udevd 在 trigger 整机 /sys，跟 A20OS 无关。
-- 排查期间曾遇到 main 上有并行内核开发（userfaultfd/perf/PI-futex/native-ABI pager），工作区一度处于不可编译、启动偶发挂死的中间态，当时误判成"distro 启动被改挂了"。事后用更长的验证窗确认那是间歇死锁加 WIP 中间态的叠加， 并行提交本身能进桌面。
+- **rootfs 构建**：直接 `apk add` 走官方 CDN 会慢到像卡死；用预置的
+  `a20rootfs-builder` docker 镜像（apk 源已指 USTC），约 2 分钟一个镜像。
+  详见 [`build.md`](build.md)。
+- **改 overlay 必须重建镜像**：debugfs 对 8GiB 的 metadata_csum ext4 打不开
+  rw，别想直接改镜像里的文件。
+- **QEMU 串口日志在后台跑时的坑**：镜像被 QEMU 以 RW 打开，重复启动前要清掉
+  占用进程。判断占用者要看 `/proc/*/fd` 里谁持有 fat32.img/rootfs.img，
+  **不要用 `pgrep -f`**——它会匹配到命令自己。
+- **GUI 设备的 QEMU 参数**：桌面 boot 必须带
+  `-device virtio-keyboard-device,bus=virtio-mmio-bus.5 -device
+  virtio-mouse-device,bus=virtio-mmio-bus.6 -device
+  virtio-gpu-device,bus=virtio-mmio-bus.7`。缺了这些设备，内核没有 input/gpu
+  class device，`/sys/class/input/` 为空，曾一度被误判成"sysfs 没建 input"。
+- **宿主噪音**：宿主机会偶发刷 `Failed to write 'change' to
+  '/sys/devices/.../uevent': Permission denied`，那是宿主 systemd-udevd 在
+  trigger 整机 /sys，跟 A20OS 无关。

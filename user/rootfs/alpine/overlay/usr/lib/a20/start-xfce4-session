@@ -25,11 +25,9 @@ export WLR_NO_HARDWARE_CURSORS=1
 export WLR_RENDERER=pixman
 
 # Input devices are published as /dev/input/event* with /sys/devices/virtual/
-# input/* nodes and a coldplug uevent replay, but eudev does not yet persist
-# them into its device database, so libinput's udev backend finds none.  Start
-# without input devices so the desktop still renders; drop this once the udev
-# db carries ID_INPUT_* for the event nodes.
-export WLR_LIBINPUT_NO_DEVICES=1
+# input/* nodes, and the uevent stream carries a real per-event SEQNUM so
+# eudev's worker runs the rules and persists ID_INPUT_* into its database.
+# libinput's udev backend now enumerates the evdev nodes through seatd.
 
 mkdir -p "$XDG_RUNTIME_DIR"
 chmod 0700 "$XDG_RUNTIME_DIR"
