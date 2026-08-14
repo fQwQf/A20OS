@@ -643,7 +643,7 @@ int page_cache_fill_vfile_pages(vfile_t *vf, page_cache_page_t **pages,
                                 size_t count)
 {
     if (!vf || !vf->vnode || !pages || count == 0 ||
-        count > PAGE_CACHE_FAULT_AROUND_PAGES)
+        count > PAGE_CACHE_READAHEAD_PAGES)
         return -EINVAL;
     for (size_t i = 0; i < count; i++) {
         if (!pages[i] || pages[i]->vnode != vf->vnode ||
@@ -688,7 +688,7 @@ int page_cache_fill_vfile_pages(vfile_t *vf, page_cache_page_t **pages,
                    !page_cache_is_uptodate(pages[cursor]))
                 cursor++;
             size_t run = cursor - start;
-            uint64_t generations[PAGE_CACHE_FAULT_AROUND_PAGES];
+            uint64_t generations[PAGE_CACHE_READAHEAD_PAGES];
             for (size_t i = 0; i < run; i++)
                 generations[i] = snapshot_invalidate_gen(pages[start + i]);
 
@@ -724,7 +724,7 @@ out:
 /*
  * Ordinary read(2) used to fill one 4 KiB page at a time even when the
  * filesystem provided readpages().  Compiler inputs are predominantly
- * sequential and the ext4 implementation can merge a contiguous 64 KiB
+ * sequential and the ext4 implementation can merge a contiguous 128 KiB
  * window into one block request, so populate the forward window on the first
  * cold page.  The caller already pins pages[0]; pins acquired here are dropped
  * before returning and all publication remains protected by the existing
@@ -734,12 +734,12 @@ static int page_cache_readahead_vfile(vfile_t *vf,
                                       page_cache_page_t *first,
                                       size_t file_size)
 {
-    page_cache_page_t *pages[PAGE_CACHE_FAULT_AROUND_PAGES];
+    page_cache_page_t *pages[PAGE_CACHE_READAHEAD_PAGES];
     uint64_t file_pages = (file_size + PAGE_SIZE - 1) / PAGE_SIZE;
     size_t count = 1;
 
     pages[0] = first;
-    while (count < PAGE_CACHE_FAULT_AROUND_PAGES &&
+    while (count < PAGE_CACHE_READAHEAD_PAGES &&
            first->index + count < file_pages) {
         pages[count] = page_cache_get(vf->vnode, first->index + count, 1);
         if (!pages[count])

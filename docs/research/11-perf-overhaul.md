@@ -99,6 +99,24 @@ proc: 33335 16191822
   不做的高风险核心协议重写"；本分支提供 callsite 归因工具，让该重写在正式 BuildStorm 前可先量化
   收益，而不是靠猜测。
 
+### 3.1 后续回合：切换路径两次 proc_lock 获取合并（已在 `fqwqf/performance-overhaul` 实现）
+
+`sched()` 先为抢占检查取一次 `proc_lock`，随后 `context_switch` 再取一次用于发布 `on_cpu` 状态。
+拆成 `context_switch_locked()`（假定调用方已持锁、用同一 irqsave flags 释放）后，`sched()` 在
+抢占检查后不再释放锁，直接进入发布段，每次上下文切换只取一次 `proc_lock`。锁序不变（
+`proc_lock -> mm_struct.lock`；`mm_context_enter` 实际只用原子操作），并且发布期间锁全程持有，
+"neither selected nor owned" 的观测窗口被完全消除（比原来更严）。
+
+SMP8（`sched_stress + mm_stress`）测量：`proc` 竞争从 `33335/16191822` 降到
+`16750/9024345`（约减半），mm/sched/vfs stress 全部 PASS。
+
+### 3.2 后续回合：顺序读 readahead 窗口 64 KiB → 128 KiB
+
+readahead 突发与 demand-fault 的 fault-around 共用同一个 16 页（64 KiB）常量。编译器输入以顺序读
+为主，把 readahead 独立为 `PAGE_CACHE_READAHEAD_PAGES=32`（128 KiB）后，ext4 可以把一段连续
+extent 合并成一次块设备请求而不是两次 64 KiB 往返；匿名/文件 fault-around 保持 16 页，以限制
+每次缺页的内存承诺。低风险常量改动，`vfs_stress`/`mm_stress` 在单核与 SMP8 均 PASS。
+
 ## 4. 明确不做/暂缓（以及原因）
 
 - **`proc_lock` 拆分（park/wake 按对象分锁 + 切换路径合并获取）**：测量证明它是唯一剩余热点，
