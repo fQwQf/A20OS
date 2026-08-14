@@ -34,8 +34,7 @@ QEMU 目标使用 pSeries 固件提供的虚拟终端、RTAS、PCI 配置访问�
 
 - **用户态 shell 已跑通**（`mksh` 交互 + `fork/exec` 外部命令），关键 PPC64LE 架构修复如下：
   1. **低向量布局**：`0x300/0x380/0x400/0x480` Book3S 槽只有 0x80 字节， 完整异常体不再直接覆盖；改为 4 字节绝对跳转 stub，完整 DSI/DSEG/ISI trampoline 复制到 scratch 页内的 `0x1100/0x1200/0x1300`。旧版把完整 向量直接复制进窄槽，导致向量互相覆盖（DSI 串入后续槽并最终被写到 `0x500`），这是之前误判为“QEMU 0x500 破坏 SRR0”的真实根因。
-  2. **VMX/VPU 上下文**：musl/GCC 的 `__setjmp_toc` 会执行 `stvx` 保存 v20-v31。新增 `0xf20` VPU-unavailable stub（`0x1400` trampoline）， `trap_bridge.c` 在首次 VPU trap 时设置 `MSR_VEC`（lazy enable）；
-     `trap_context_t` 扩到 848 字节并在 trap 入口/返回按 `MSR_VEC` 保存/ 恢复 v0-v31（`trap.S`）。此前没有 VPU 支持，首个 `stvx` 立即死于 `0xf24`。
+  2. **VMX/VPU 上下文**：musl/GCC 的 `__setjmp_toc` 会执行 `stvx` 保存 v20-v31。新增 `0xf20` VPU-unavailable stub（`0x1400` trampoline）， `trap_bridge.c` 在首次 VPU trap 时设置 `MSR_VEC`（lazy enable）； `trap_context_t` 扩到 848 字节并在 trap 入口/返回按 `MSR_VEC` 保存/ 恢复 v0-v31（`trap.S`）。此前没有 VPU 支持，首个 `stvx` 立即死于 `0xf24`。
   3. **上下文切换丢失地址空间**：`__switch` 保存 `task_context_t` 时未写 偏移 176 的 `pgdir`，恢复时 `switch.S` 把未初始化栈内容装进 PID 1 process-table entry，切回被 park 的任务后用户页表根被破坏，`read` syscall 的下一条指令（如 `0x73590`）无限 ISI。修复：切出时把 `ppc64_current_addr_space` 存入 `pgdir` 槽。
   4. **DSI 未区分 load/store**：DSI 向量把所有数据页故障标成 `CAUSE_LOAD_PAGE_FAULT`，fork 后的 COW 写故障（`std` 到只读页）不会 走 store/COW 修复，原指令无限重试。修复：按 DSISR 的 ISSTORE 位 （`andis. 0x0200`）把 store 故障动态标成 `0x380`。
   5. **powerpc64 `struct stat` 布局**：musl powerpc64 的 `nlink_t` 为 64 位， `st_nlink@16`、`st_mode@24`、结构总长 144 字节；此前误用 asm-generic 64LE 布局（`st_mode@16`、128 字节），导致 `[[ -f ]]`/`[[ -x ]]` 判错、 `exec` 报 `EACCES`。修复：`stat_abi.c` 改为 144 字节 PPC64 专用布局。
