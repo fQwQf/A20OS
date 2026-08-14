@@ -46,9 +46,13 @@ int ext4_dir_find(ext4_sb_info_t *sb, ext4_inode_t *di, uint64_t dsz,
     uint32_t bs = sb->block_size, nb = (dsz + bs - 1) / bs;
     size_t nl = strlen(name);
     if (nl > 255) return -ENAMETOOLONG;
+    /* One scratch buffer reused for every block of the directory: a per-block
+     * kmalloc here is on the shared slab lock that eight parallel rustc
+     * processes all pay on each cold directory miss. */
+    char *blk = (char *)kmalloc(bs);
+    if (!blk) return -ENOMEM;
     for (uint32_t b = 0; b < nb; b++) {
         uint64_t p = ext4_block_map(sb, di, b); if (!p) continue;
-        char *blk = (char *)kmalloc(bs); if (!blk) return -ENOMEM;
         if (bcache_read_bytes(sb->bc, p * bs, blk, bs) < 0) { kfree(blk); return -EIO; }
         uint32_t off = 0;
         while (off < bs) {
@@ -63,8 +67,8 @@ int ext4_dir_find(ext4_sb_info_t *sb, ext4_inode_t *di, uint64_t dsz,
             }
             off += de->rec_len;
         }
-        kfree(blk);
     }
+    kfree(blk);
     return -ENOENT;
 }
 
@@ -79,9 +83,10 @@ int ext4_dir_add(ext4_sb_info_t *sb, ext4_inode_t *di, uint64_t *dsz,
     if (need > bs) return -ENAMETOOLONG;
     uint32_t nb = (*dsz + bs - 1) / bs;
 
+    char *blk = (char *)kmalloc(bs);
+    if (!blk) return -ENOMEM;
     for (uint32_t b = 0; b < nb; b++) {
         uint64_t p = ext4_block_map(sb, di, b); if (!p) continue;
-        char *blk = (char *)kmalloc(bs); if (!blk) return -ENOMEM;
         if (bcache_read_bytes(sb->bc, p * bs, blk, bs) < 0) { kfree(blk); return -EIO; }
         uint32_t off = 0;
         while (off < bs) {
@@ -120,12 +125,10 @@ int ext4_dir_add(ext4_sb_info_t *sb, ext4_inode_t *di, uint64_t *dsz,
             }
             off += de->rec_len;
         }
-        kfree(blk);
     }
-    uint64_t nb_blk = ext4_alloc_block(sb); if (!nb_blk) return -ENOSPC;
+    uint64_t nb_blk = ext4_alloc_block(sb); if (!nb_blk) { kfree(blk); return -ENOSPC; }
     int gr = ext4_block_grow(sb, di, nb, nb_blk);
-    if (gr < 0) { ext4_free_block(sb, nb_blk); return gr; }
-    char *blk = (char *)kmalloc(bs); if (!blk) return -ENOMEM;
+    if (gr < 0) { ext4_free_block(sb, nb_blk); kfree(blk); return gr; }
     memset(blk, 0, bs);
     ext4_dir_entry_t *de = (ext4_dir_entry_t *)blk;
     de->inode = ino; de->name_len = (uint8_t)nl; de->file_type = ft;
@@ -148,9 +151,9 @@ int ext4_dir_remove(ext4_sb_info_t *sb, ext4_inode_t *di, uint64_t dsz,
     uint32_t bs = sb->block_size, nb = (dsz + bs - 1) / bs;
     size_t nl = strlen(name);
     if (nl > 255) return -ENAMETOOLONG;
+    char *blk = (char *)kmalloc(bs); if (!blk) return -ENOMEM;
     for (uint32_t b = 0; b < nb; b++) {
         uint64_t p = ext4_block_map(sb, di, b); if (!p) continue;
-        char *blk = (char *)kmalloc(bs); if (!blk) return -ENOMEM;
         if (bcache_read_bytes(sb->bc, p * bs, blk, bs) < 0) { kfree(blk); return -EIO; }
         uint32_t off = 0, prev = 0; int hp = 0;
         while (off < bs) {
@@ -166,8 +169,8 @@ int ext4_dir_remove(ext4_sb_info_t *sb, ext4_inode_t *di, uint64_t dsz,
             }
             prev = off; hp = 1; off += de->rec_len;
         }
-        kfree(blk);
     }
+    kfree(blk);
     return -ENOENT;
 }
 
@@ -178,11 +181,11 @@ int ext4_dir_update_entry(ext4_sb_info_t *sb, ext4_inode_t *di, uint64_t *dsz,
     size_t nl = strlen(name);
     if (nl > 255) return -ENAMETOOLONG;
     uint32_t nb = (*dsz + bs - 1) / bs;
+    char *blk = (char *)kmalloc(bs);
+    if (!blk) return -ENOMEM;
     for (uint32_t b = 0; b < nb; b++) {
         uint64_t p = ext4_block_map(sb, di, b);
         if (!p) continue;
-        char *blk = (char *)kmalloc(bs);
-        if (!blk) return -ENOMEM;
         if (bcache_read_bytes(sb->bc, p * bs, blk, bs) < 0) { kfree(blk); return -EIO; }
         uint32_t off = 0;
         while (off < bs) {
@@ -199,8 +202,8 @@ int ext4_dir_update_entry(ext4_sb_info_t *sb, ext4_inode_t *di, uint64_t *dsz,
             }
             off += de->rec_len;
         }
-        kfree(blk);
     }
+    kfree(blk);
     return -ENOENT;
 }
 
