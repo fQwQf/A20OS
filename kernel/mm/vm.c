@@ -226,14 +226,28 @@ void mm_tlb_invalidate_finish(mm_struct_t *mm)
     mm->tlb_holds = NULL;
     spin_unlock_irqrestore(&mm->lock, flags);
 
-    while (hold) {
-        mm_tlb_hold_t *next = hold->next;
-        if (hold->kind == MM_TLB_HOLD_FRAME)
-            frame_put(hold->frame);
-        else if (hold->kind == MM_TLB_HOLD_PAGE)
-            page_cache_put(hold->page);
-        kfree(hold);
-        hold = next;
+    /* Drain the deferred frame frees in batches so one munmap/exit of a
+     * large arena takes pfa.lock once per chunk instead of once per page
+     * (frame_put_many).  Page-cache holds keep their per-page release. */
+    {
+        pfn_t frame_chunk[64];
+        size_t frame_count = 0;
+        while (hold) {
+            mm_tlb_hold_t *next = hold->next;
+            if (hold->kind == MM_TLB_HOLD_FRAME) {
+                if (frame_count == sizeof(frame_chunk) / sizeof(frame_chunk[0])) {
+                    frame_put_many(frame_chunk, frame_count);
+                    frame_count = 0;
+                }
+                frame_chunk[frame_count++] = hold->frame;
+            } else if (hold->kind == MM_TLB_HOLD_PAGE) {
+                page_cache_put(hold->page);
+            }
+            kfree(hold);
+            hold = next;
+        }
+        if (frame_count)
+            frame_put_many(frame_chunk, frame_count);
     }
 
     /* VMA release may drop the final VMO or page-cache owner and therefore
