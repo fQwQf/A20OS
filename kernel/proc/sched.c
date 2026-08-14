@@ -1390,7 +1390,18 @@ void proc_sched_note_zombie(void)
     __atomic_store_n(&sched_zombies_pending, 1, __ATOMIC_RELEASE);
 }
 
-void context_switch(task_t *next) {
+/*
+ * Publish the switch of the CPU from prev to @next.  The locked variant
+ * assumes proc_lock is already held with the irqsave @flags from the caller's
+ * acquire and releases it at the same points as the wrapper; the wrapper only
+ * supplies the acquire.  sched() uses the locked variant so a context switch
+ * takes proc_lock once instead of twice (once for the preemption check and
+ * again here).  Holding proc_lock through the publication also closes the
+ * window in which a remote observer could see @next neither selected nor
+ * owned.  Lock order is unchanged: proc_lock -> mm_struct.lock is the
+ * documented order and mm_context_enter() only uses atomics.
+ */
+static void context_switch_locked(task_t *next, uint64_t flags) {
     if (!next || !next->kstack)
         return;
 
@@ -1410,7 +1421,6 @@ void context_switch(task_t *next) {
 
     next->cg_cpu_start = now;
 
-    uint64_t flags = spin_lock_irqsave(&proc_lock);
     unsigned cpu = cpu_current_id();
     if (next == proc_current()) {
         int had_dispatch_ref = next->dispatching;
@@ -1468,6 +1478,13 @@ void context_switch(task_t *next) {
     proc_switch_complete();
 }
 
+void context_switch(task_t *next) {
+    if (!next || !next->kstack)
+        return;
+    uint64_t flags = spin_lock_irqsave(&proc_lock);
+    context_switch_locked(next, flags);
+}
+
 void sched(void) {
     task_t *sched_owner = proc_current();
     ARCH_SCHED_ENTER(sched_owner);
@@ -1512,14 +1529,18 @@ void sched(void) {
     }
     if (next)
         proc_sched_assert_task_locked(next);
-    spin_unlock_irqrestore(&proc_lock, flags);
-
     if (next) {
         next->exec_start = now;
         next->eevdf_last_account = now;
-        context_switch(next);
+        /* Keep proc_lock held across the publication: context_switch_locked()
+         * releases it at the same point context_switch() would.  One acquire
+         * per switch instead of two halves proc_lock pressure in
+         * switch-heavy builds and closes the "neither selected nor owned"
+         * observation window entirely. */
+        context_switch_locked(next, flags);
         goto out;
     }
+    spin_unlock_irqrestore(&proc_lock, flags);
 
     /*
      * A wake can race after the empty runqueue pick while the blocked task is
