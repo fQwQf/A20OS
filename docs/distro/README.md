@@ -25,4 +25,4 @@ make rootfs-alpine ARCH=riscv64
 - [`build.md`](build.md)：rootfs 是怎么构建出来的，以及构建环境里踩过的坑。
 - [`boot.md`](boot.md)：从 A20OS init 到 XFCE 桌面的一整条启动链路。
 - [`kernel-requirements.md`](kernel-requirements.md)：发行版对内核提出了哪些 要求、内核分别在哪里满足。
-- [`known-issues.md`](known-issues.md)：当前桌面还差什么（输入、偶发死锁）， 已经排查到什么程度，继续往哪个方向走。
+- [`known-issues.md`](known-issues.md)：已解决的问题（输入、读路径自死锁）的 根因与修法，以及遗留的 dbus 偶发超时怎么排查。
