@@ -1,5 +1,5 @@
 # A20OS input devices: tag the evdev event nodes so libinput's udev backend
 # enumerates them.  libinput re-reads the evdev capability bits itself to
 # refine the exact device type.
-SUBSYSTEM=="input", KERNEL=="event*", ENV{ID_INPUT}="1"
-SUBSYSTEM=="input", KERNEL=="event*", ENV{ID_INPUT_KEYBOARD}="1", ENV{ID_INPUT_MOUSE}="1"
+SUBSYSTEM=="input", ENV{ID_INPUT}="1"
+SUBSYSTEM=="input", ENV{ID_INPUT_KEYBOARD}="1", ENV{ID_INPUT_MOUSE}="1"
