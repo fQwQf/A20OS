@@ -473,22 +473,26 @@ void frame_get(pfn_t pfn) {
     spin_unlock_irqrestore(&pfa.lock, flags);
 }
 
-void frame_put(pfn_t pfn) {
-    if (!pfn_valid(pfn)) return;
-    uint64_t flags = spin_lock_irqsave(&pfa.lock);
+/*
+ * frame_put_locked — the refcount decrement and buddy merge core.  The
+ * caller already holds pfa.lock with IRQs disabled.  Split out so batched
+ * frees (mm_tlb_invalidate_finish's deferred-frame drain and munmap) take
+ * the global lock once per batch instead of once per page: under BuildStorm,
+ * munmap/exit of large arenas frees thousands of pages and the per-page
+ * lock acquisition serialized all vCPUs.
+ */
+static void frame_put_locked(pfn_t pfn) {
     if (pfa.meta[pfn].refcount > 0 && --pfa.meta[pfn].refcount == 0) {
         frame_trace(pfn);
         /* refcount 归零，直接在此释放（内联 pfa_free 核心逻辑），
          * 避免先解锁再调 pfa_free 的竞态窗口 */
         int actual_order = (int)pfa.meta[pfn].order;
         if (actual_order < 0 || actual_order > MAX_ORDER) {
-            spin_unlock_irqrestore(&pfa.lock, flags);
             return;
         }
         pfa.free_frames += (1u << actual_order);
         const pfa_range_t *range = pfa_range_for_pfn(pfn);
         if (!range) {
-            spin_unlock_irqrestore(&pfa.lock, flags);
             return;
         }
         while (actual_order < MAX_ORDER) {
@@ -522,8 +526,23 @@ void frame_put(pfn_t pfn) {
             pfa.meta[i].next     = PFN_NONE;
         }
         fl_push_clean(pfn, actual_order);
-        spin_unlock_irqrestore(&pfa.lock, flags);
         return;
+    }
+}
+
+void frame_put(pfn_t pfn) {
+    if (!pfn_valid(pfn)) return;
+    uint64_t flags = spin_lock_irqsave(&pfa.lock);
+    frame_put_locked(pfn);
+    spin_unlock_irqrestore(&pfa.lock, flags);
+}
+
+void frame_put_many(const pfn_t *pfns, size_t count) {
+    if (!pfns) return;
+    uint64_t flags = spin_lock_irqsave(&pfa.lock);
+    for (size_t i = 0; i < count; i++) {
+        if (pfn_valid(pfns[i]))
+            frame_put_locked(pfns[i]);
     }
     spin_unlock_irqrestore(&pfa.lock, flags);
 }
