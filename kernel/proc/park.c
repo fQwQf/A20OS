@@ -231,6 +231,23 @@ int proc_park_cancel(proc_wait_token_t token)
     return cancelled;
 }
 
+/*
+ * Read the wake reason that resumed @task without any lock.  Valid only
+ * after sched() returned (i.e. this task is running again): the waker
+ * published wake_reason and the runqueue entry under the target's park_lock
+ * and we are ordered after that publication.  task->wait_seq has no writer
+ * other than this task's own prepare(), so the sequence check is consistent,
+ * and a stale wake on an already-running task hits the default (no-op) case.
+ */
+static proc_wake_reason_t proc_park_wake_reason_unlocked(task_t *task,
+                                                         uint64_t seq)
+{
+    if (__atomic_load_n(&task->wait_seq, __ATOMIC_ACQUIRE) != seq)
+        return PROC_WAKE_CANCEL;
+    return (proc_wake_reason_t)__atomic_load_n(&task->wake_reason,
+                                               __ATOMIC_ACQUIRE);
+}
+
 proc_wake_reason_t proc_park_commit(proc_wait_token_t token)
 {
     task_t *task = token.task;
@@ -266,11 +283,14 @@ proc_wake_reason_t proc_park_commit(proc_wait_token_t token)
      */
     sched();
 
-    flags = spin_lock_irqsave(&proc_lock);
-    proc_wake_reason_t reason =
-        task->wait_seq == token.seq ? task->wake_reason : PROC_WAKE_CANCEL;
-    spin_unlock_irqrestore(&proc_lock, flags);
-    return reason;
+    /*
+     * Lock-free read of the wake reason: the waker published wake_reason
+     * under the target's park_lock (and the runqueue entry) before we were
+     * resumed, so an acquire load is ordered after it.  task->wait_seq has
+     * no writer other than this task's own prepare().  Kept out of proc_lock
+     * unless measurement shows the lock-free read regresses contention.
+     */
+    return proc_park_wake_reason_unlocked(task, token.seq);
 }
 
 void proc_park_finish(proc_wait_token_t token)
