@@ -18,7 +18,8 @@ proc_wait_token_none(proc_park_prepare_error_t prepare_error)
     return token;
 }
 
-static int proc_try_wake_locked_common(task_t *task, uint64_t seq,
+/* Assumes task->park_lock is held by the caller. */
+int proc_try_wake_locked_common(task_t *task, uint64_t seq,
                                        proc_wake_reason_t reason,
                                        uint64_t *remote_cpus,
                                        uint64_t *priority_cpus)
@@ -38,7 +39,7 @@ static int proc_try_wake_locked_common(task_t *task, uint64_t seq,
 
     switch (task->park_state) {
     case PROC_PARK_PREPARING:
-        proc_wait_timer_cancel_locked(task, seq);
+        proc_wait_timer_cancel(task, seq);
         task->park_state = PROC_PARK_WOKEN;
         task->wake_reason = reason;
         task->wait_deadline = 0;
@@ -50,7 +51,7 @@ static int proc_try_wake_locked_common(task_t *task, uint64_t seq,
         unsigned target_cpu =
             (task->on_cpu || task->dispatching)
                 ? task->owner_cpu : task->cpu_id;
-        proc_wait_timer_cancel_locked(task, seq);
+        proc_wait_timer_cancel(task, seq);
         task->park_state = PROC_PARK_WOKEN;
         task->wake_reason = reason;
         task->wait_deadline = 0;
@@ -117,7 +118,7 @@ proc_wait_token_t proc_park_prepare_locked(proc_wait_mode_t mode,
     task->wake_reason = PROC_WAKE_NONE;
     task->park_state = PROC_PARK_PREPARING;
     int timer_result = deadline
-        ? proc_wait_timer_register_locked(task, deadline, task->wait_seq)
+        ? proc_wait_timer_register(task, deadline, task->wait_seq)
         : PROC_PARK_PREPARE_OK;
     if (timer_result != PROC_PARK_PREPARE_OK) {
         task->wait_deadline = 0;
@@ -163,9 +164,12 @@ proc_wait_token_t proc_park_prepare_locked(proc_wait_mode_t mode,
 proc_wait_token_t proc_park_prepare(proc_wait_mode_t mode,
                                     uint64_t deadline)
 {
-    uint64_t flags = spin_lock_irqsave(&proc_lock);
+    task_t *task = proc_current();
+    if (!task)
+        return proc_wait_token_none(PROC_PARK_PREPARE_INVALID);
+    uint64_t flags = spin_lock_irqsave(&task->park_lock);
     proc_wait_token_t token = proc_park_prepare_locked(mode, deadline);
-    spin_unlock_irqrestore(&proc_lock, flags);
+    spin_unlock_irqrestore(&task->park_lock, flags);
     return token;
 }
 
@@ -178,12 +182,14 @@ int proc_try_wake_locked(task_t *task, uint64_t seq,
 int proc_try_wake(task_t *task, uint64_t seq,
                   proc_wake_reason_t reason)
 {
+    if (!task)
+        return 0;
     uint64_t remote_cpus = 0;
     uint64_t priority_cpus = 0;
-    uint64_t flags = spin_lock_irqsave(&proc_lock);
+    uint64_t flags = spin_lock_irqsave(&task->park_lock);
     int woke = proc_try_wake_locked_common(
         task, seq, reason, &remote_cpus, &priority_cpus);
-    spin_unlock_irqrestore(&proc_lock, flags);
+    spin_unlock_irqrestore(&task->park_lock, flags);
     for (unsigned cpu = 0; cpu < CONFIG_NR_CPUS && cpu < 64; cpu++) {
         if (remote_cpus & (1ULL << cpu)) {
             proc_sched_request_cpu(
@@ -197,9 +203,9 @@ int proc_interrupt_wait(task_t *task, proc_wake_reason_t reason)
 {
     if (!task)
         return 0;
-    uint64_t flags = spin_lock_irqsave(&proc_lock);
+    uint64_t flags = spin_lock_irqsave(&task->park_lock);
     int woke = proc_try_wake_locked(task, task->wait_seq, reason);
-    spin_unlock_irqrestore(&proc_lock, flags);
+    spin_unlock_irqrestore(&task->park_lock, flags);
     return woke;
 }
 
@@ -209,11 +215,11 @@ int proc_park_cancel(proc_wait_token_t token)
     if (!task || !token.seq)
         return 0;
 
-    uint64_t flags = spin_lock_irqsave(&proc_lock);
+    uint64_t flags = spin_lock_irqsave(&task->park_lock);
     int cancelled = 0;
     if (task == proc_current() && task->wait_seq == token.seq &&
         task->park_state == PROC_PARK_PREPARING) {
-        proc_wait_timer_cancel_locked(task, token.seq);
+        proc_wait_timer_cancel(task, token.seq);
         task->wait_deadline = 0;
         task->wake_time = 0;
         task->wake_reason = PROC_WAKE_CANCEL;
@@ -221,7 +227,7 @@ int proc_park_cancel(proc_wait_token_t token)
         proc_sched_assert_task_locked(task);
         cancelled = 1;
     }
-    spin_unlock_irqrestore(&proc_lock, flags);
+    spin_unlock_irqrestore(&task->park_lock, flags);
     return cancelled;
 }
 
@@ -231,26 +237,26 @@ proc_wake_reason_t proc_park_commit(proc_wait_token_t token)
     if (!task || !token.seq)
         return PROC_WAKE_CANCEL;
 
-    uint64_t flags = spin_lock_irqsave(&proc_lock);
+    uint64_t flags = spin_lock_irqsave(&task->park_lock);
     if (task != proc_current() || task->wait_seq != token.seq) {
-        spin_unlock_irqrestore(&proc_lock, flags);
+        spin_unlock_irqrestore(&task->park_lock, flags);
         return PROC_WAKE_CANCEL;
     }
 
     if (task->park_state == PROC_PARK_WOKEN) {
         proc_wake_reason_t reason = task->wake_reason;
-        spin_unlock_irqrestore(&proc_lock, flags);
+        spin_unlock_irqrestore(&task->park_lock, flags);
         return reason;
     }
     if (task->park_state != PROC_PARK_PREPARING) {
-        spin_unlock_irqrestore(&proc_lock, flags);
+        spin_unlock_irqrestore(&task->park_lock, flags);
         return PROC_WAKE_CANCEL;
     }
 
     task->park_state = PROC_PARK_PARKED;
     task->state = PROC_BLOCKED;
     proc_sched_assert_task_locked(task);
-    spin_unlock_irqrestore(&proc_lock, flags);
+    spin_unlock_irqrestore(&task->park_lock, flags);
 
     /*
      * sched() is mandatory even if a wake races immediately after the unlock.
@@ -293,15 +299,15 @@ void proc_park_finish(proc_wait_token_t token)
      * concurrent stale wake on a WOKEN/IDLE task is a no-op.
      */
     if (__atomic_load_n(&task->wait_timer_index, __ATOMIC_ACQUIRE) >= 0) {
-        uint64_t flags = spin_lock_irqsave(&proc_lock);
-        proc_wait_timer_cancel_locked(task, token.seq);
+        uint64_t flags = spin_lock_irqsave(&task->park_lock);
+        proc_wait_timer_cancel(task, token.seq);
         task->wait_deadline = 0;
         task->wake_time = 0;
         task->wait_mode = PROC_WAIT_UNINTERRUPTIBLE;
         task->wake_reason = PROC_WAKE_NONE;
         task->park_state = PROC_PARK_IDLE;
         proc_sched_assert_task_locked(task);
-        spin_unlock_irqrestore(&proc_lock, flags);
+        spin_unlock_irqrestore(&task->park_lock, flags);
         return;
     }
 
@@ -333,19 +339,19 @@ proc_wake_reason_t proc_park_commit_donate(proc_wait_token_t token,
     if (!task || !token.seq)
         return PROC_WAKE_CANCEL;
 
-    uint64_t flags = spin_lock_irqsave(&proc_lock);
+    uint64_t flags = spin_lock_irqsave(&task->park_lock);
     if (task != proc_current() || task->wait_seq != token.seq) {
-        spin_unlock_irqrestore(&proc_lock, flags);
+        spin_unlock_irqrestore(&task->park_lock, flags);
         return PROC_WAKE_CANCEL;
     }
 
     if (task->park_state == PROC_PARK_WOKEN) {
         proc_wake_reason_t reason = task->wake_reason;
-        spin_unlock_irqrestore(&proc_lock, flags);
+        spin_unlock_irqrestore(&task->park_lock, flags);
         return reason;
     }
     if (task->park_state != PROC_PARK_PREPARING) {
-        spin_unlock_irqrestore(&proc_lock, flags);
+        spin_unlock_irqrestore(&task->park_lock, flags);
         return PROC_WAKE_CANCEL;
     }
 
@@ -360,20 +366,27 @@ proc_wake_reason_t proc_park_commit_donate(proc_wait_token_t token,
         !donate_to->on_cpu && !donate_to->on_rq &&
         !donate_to->dispatching &&
         donate_to->cpu_id == cur_cpu;
+    spin_unlock_irqrestore(&task->park_lock, flags);
 
     if (!can_donate) {
-        proc_sched_assert_task_locked(task);
-        spin_unlock_irqrestore(&proc_lock, flags);
         sched();
         goto out_reason;
     }
 
-    /* Manual wake mirroring proc_try_wake_locked_common's PARKED branch,
-     * then hand over the CPU with a dispatch reference as if the target
-     * had been picked from the runqueue. */
+    /* Re-validate and wake the target under its own park_lock; the first
+     * snapshot above was only a cheap filter. */
+    flags = spin_lock_irqsave(&donate_to->park_lock);
+    if (!(donate_to->park_state == PROC_PARK_PARKED &&
+          donate_to->state == PROC_BLOCKED &&
+          !donate_to->on_cpu && !donate_to->on_rq &&
+          !donate_to->dispatching && donate_to->cpu_id == cur_cpu)) {
+        spin_unlock_irqrestore(&donate_to->park_lock, flags);
+        sched();
+        goto out_reason;
+    }
     {
         uint64_t now = timer_get_ticks();
-        proc_wait_timer_cancel_locked(donate_to, donate_to->wait_seq);
+        proc_wait_timer_cancel(donate_to, donate_to->wait_seq);
         donate_to->park_state = PROC_PARK_WOKEN;
         donate_to->wake_reason = PROC_WAKE_EVENT;
         donate_to->wait_deadline = 0;
@@ -386,9 +399,9 @@ proc_wake_reason_t proc_park_commit_donate(proc_wait_token_t token,
         proc_get(donate_to); /* dispatch ref, consumed by context_switch */
         donate_to->dispatching = 1;
         donate_to->owner_cpu = cur_cpu;
-        spin_unlock_irqrestore(&proc_lock, flags);
-        context_switch(donate_to);
     }
+    spin_unlock_irqrestore(&donate_to->park_lock, flags);
+    context_switch(donate_to);
 
 out_reason:
     flags = spin_lock_irqsave(&proc_lock);
@@ -438,14 +451,16 @@ unsigned proc_wake_q_flush(proc_wake_q_t *wake_q)
     unsigned woke = 0;
     uint64_t remote_cpus = 0;
     uint64_t priority_cpus = 0;
-    uint64_t flags = spin_lock_irqsave(&proc_lock);
     for (unsigned i = 0; i < wake_q->count; i++) {
         proc_wake_q_item_t *item = &wake_q->items[i];
+        if (!item->task)
+            continue;
+        uint64_t flags = spin_lock_irqsave(&item->task->park_lock);
         if (proc_try_wake_locked_common(item->task, item->seq, item->reason,
                                         &remote_cpus, &priority_cpus))
             woke++;
+        spin_unlock_irqrestore(&item->task->park_lock, flags);
     }
-    spin_unlock_irqrestore(&proc_lock, flags);
 
     for (unsigned i = 0; i < wake_q->count; i++) {
         proc_put(wake_q->items[i].task);
