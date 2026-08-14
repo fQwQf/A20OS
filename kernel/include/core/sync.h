@@ -102,11 +102,12 @@ unsigned wait_queue_purge_task(wait_queue_t *q, struct task_t *task);
 typedef struct mutex {
     spinlock_t lock;
     int locked;
+    int depth;
     void *owner;
     wait_queue_t waiters;
 } mutex_t;
 
-#define MUTEX_INIT { SPINLOCK_INIT, 0, NULL, WAIT_QUEUE_INIT }
+#define MUTEX_INIT { SPINLOCK_INIT, 0, 0, NULL, WAIT_QUEUE_INIT }
 
 void mutex_init(mutex_t *m);
 int  mutex_trylock(mutex_t *m);

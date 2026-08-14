@@ -385,6 +385,7 @@ void mutex_init(mutex_t *m) {
         return;
     spin_init(&m->lock);
     m->locked = 0;
+    m->depth = 0;
     m->owner = NULL;
     wait_queue_init(&m->waiters);
 }
@@ -397,6 +398,7 @@ int mutex_trylock(mutex_t *m) {
     uint64_t flags = spin_lock_irqsave(&m->lock);
     if (!m->locked) {
         m->locked = 1;
+        m->depth = 1;
         m->owner = cur;
         spin_unlock_irqrestore(&m->lock, flags);
         return 1;
@@ -417,9 +419,24 @@ void mutex_lock(mutex_t *m) {
     }
 
     for (;;) {
+        /* Recursive acquisition by the same task: offset_lock (and other
+         * kernel mutexes) can be re-entered when a filesystem read/write
+         * path (e.g. writeback, /proc rendering) touches the same vfile.
+         * Allow it by counting depth instead of self-deadlocking. */
+        if (__atomic_load_n(&m->locked, __ATOMIC_ACQUIRE) &&
+            m->owner == cur) {
+            uint64_t flags = spin_lock_irqsave(&m->lock);
+            if (m->locked && m->owner == cur) {
+                m->depth++;
+                spin_unlock_irqrestore(&m->lock, flags);
+                return;
+            }
+            spin_unlock_irqrestore(&m->lock, flags);
+        }
         uint64_t flags = spin_lock_irqsave(&m->lock);
         if (!m->locked) {
             m->locked = 1;
+            m->depth = 1;
             m->owner = cur;
             spin_unlock_irqrestore(&m->lock, flags);
             return;
@@ -436,6 +453,7 @@ void mutex_lock(mutex_t *m) {
         flags = spin_lock_irqsave(&m->lock);
         if (!m->locked) {
             m->locked = 1;
+            m->depth = 1;
             m->owner = cur;
             spin_unlock_irqrestore(&m->lock, flags);
             (void)proc_park_cancel(token);
@@ -459,7 +477,13 @@ void mutex_unlock(mutex_t *m) {
         return;
 
     uint64_t flags = spin_lock_irqsave(&m->lock);
+    if (m->depth > 1) {
+        m->depth--;
+        spin_unlock_irqrestore(&m->lock, flags);
+        return;
+    }
     m->locked = 0;
+    m->depth = 0;
     m->owner = NULL;
     spin_unlock_irqrestore(&m->lock, flags);
     wait_queue_wake_one(&m->waiters, 0, PROC_WAKE_EVENT);
