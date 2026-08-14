@@ -77,6 +77,7 @@ pfn_t  pfa_alloc_page(void);
 void   pfa_free_page(pfn_t pfn);
 void   frame_get(pfn_t pfn);
 void   frame_put(pfn_t pfn);
+void   frame_put_many(const pfn_t *pfns, size_t count);
 size_t pfa_free_count(void);
 void   pfa_get_huge_stats(pfa_huge_stats_t *stats);
 
