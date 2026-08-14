@@ -23,6 +23,7 @@
 #include "mm/mm.h"
 #include "core/errno.h"
 #include "drivers/core/driver_class.h"
+#include "net/socket_internal.h"
 #include "drivers/gpu/gpu_core.h"
 #include "drivers/core/driver_core.h"
 #include "drivers/core/driver_class.h"
@@ -48,6 +49,8 @@ typedef enum {
     SF_CLASS_TYPE,
     SF_CLASS_DEVICE,
     SF_CLASS_DEVICE_DEV,
+    SF_CLASS_DEVICE_UEVENT, /* /sys/class/<sub>/<name>/uevent */
+    SF_CLASS_DEVICE_SUBSYS, /* /sys/class/<sub>/<name>/subsystem (symlink) */
     SF_DEVICES,          /* /sys/devices */
     SF_DEVICES_VIRTUAL,  /* /sys/devices/virtual */
     SF_DEVICES_VSUB,     /* /sys/devices/virtual/<subsystem> */
@@ -241,6 +244,21 @@ static sysfs_priv_t *sysfs_priv_create(sf_type_t type, int loop_idx,
                          (unsigned long)(devt >> 8),
                          (unsigned long)(devt & 0xffU));
         p->content_len = (size_t)(n > 0 ? n : 0);
+    } else if (type == SF_CLASS_DEVICE_UEVENT) {
+        const char *devname = NULL, *subsystem = NULL;
+        if (sysfs_devchar_name(devt, &devname, &subsystem) == 0) {
+            const char *base = strrchr(devname, '/');
+            base = base ? base + 1 : devname;
+            int n = snprintf(p->content, sizeof(p->content),
+                             "MAJOR=%lu\nMINOR=%lu\nDEVNAME=%s\nSUBSYSTEM=%s\n"
+                             "DEVPATH=/class/%s/%s\n",
+                             (unsigned long)((devt >> 8) & 0xffU),
+                             (unsigned long)(devt & 0xffU),
+                             devname, subsystem, subsystem, base);
+            p->content_len = (size_t)(n > 0 ? n : 0);
+        } else {
+            p->content_len = 0;
+        }
     } else if (type == SF_DEV_CHAR_UEVENT) {
         const char *devname = NULL, *subsystem = NULL;
         if (sysfs_devchar_name(devt, &devname, &subsystem) == 0) {
@@ -406,6 +424,16 @@ static int sysfs_lookup(vnode_t *dir, const char *name, vnode_t **out)
         dynamic_class = dm->class_type;
         dynamic_cdev = dm->class_dev;
         class_device_get(dynamic_cdev);
+    } else if (dm->type == SF_CLASS_DEVICE && strcmp(name, "uevent") == 0) {
+        child_type = SF_CLASS_DEVICE_UEVENT;
+        dynamic_class = dm->class_type;
+        dynamic_cdev = dm->class_dev;
+        class_device_get(dynamic_cdev);
+    } else if (dm->type == SF_CLASS_DEVICE && strcmp(name, "subsystem") == 0) {
+        child_type = SF_CLASS_DEVICE_SUBSYS;
+        dynamic_class = dm->class_type;
+        dynamic_cdev = dm->class_dev;
+        class_device_get(dynamic_cdev);
     } else if (dm->type == SF_DRM && strcmp(name, "card0") == 0) {
         child_type = SF_DRM_CARD;
     } else if (dm->type == SF_DRM && strcmp(name, "card0-Virtual-1") == 0) {
@@ -474,8 +502,17 @@ static int sysfs_lookup(vnode_t *dir, const char *name, vnode_t **out)
                   child_type == SF_DEV_CHAR_DEVICE_DRM);
 
     vn->ino = (uint64_t)((child_type << 8) | ((child_idx + 1) & 0xFF));
-    vn->type = is_dir ? VFS_FT_DIR : VFS_FT_REGULAR;
-    vn->mode = is_dir ? (S_IFDIR | 0555) : (S_IFREG | 0444);
+    if (child_type == SF_CLASS_DEVICE_SUBSYS) {
+        vn->type = VFS_FT_SYMLINK;
+        vn->mode = S_IFLNK | 0777;
+    } else if (child_type == SF_CLASS_DEVICE_UEVENT) {
+        /* uevent files are writable so udevadm trigger can coldplug. */
+        vn->type = VFS_FT_REGULAR;
+        vn->mode = S_IFREG | 0644;
+    } else {
+        vn->type = is_dir ? VFS_FT_DIR : VFS_FT_REGULAR;
+        vn->mode = is_dir ? (S_IFDIR | 0555) : (S_IFREG | 0444);
+    }
     vnode_ref_init(vn, 1);
     vn->parent = dir;
     vnode_get(dir);
@@ -512,6 +549,8 @@ static int sysfs_lookup(vnode_t *dir, const char *name, vnode_t **out)
             vn->size = 2;
         } else if (child_type == SF_CLASS_DEVICE_DEV) {
             vn->size = 16;
+        } else if (child_type == SF_CLASS_DEVICE_UEVENT) {
+            vn->size = 96;
         } else if (child_type == SF_DEVICES_VDEV_DEV) {
             vn->size = 16;
         } else if (child_type == SF_DEVICES_VDEV_UEVENT) {
@@ -556,11 +595,26 @@ static void sysfs_release(vnode_t *vn)
 
 static vfile_t *sysfs_open_vnode(vnode_t *vn, int flags);
 
+static int sysfs_readlink(vnode_t *vn, char *buf, size_t sz)
+{
+    if (!vn || !buf || sz == 0)
+        return -EINVAL;
+    sysfs_meta_t *dm = (sysfs_meta_t *)vn->fs_data;
+    if (!dm || dm->type != SF_CLASS_DEVICE_SUBSYS)
+        return -EINVAL;
+    const char *sub = class_device_subsystem(dm->class_type);
+    if (!sub)
+        return -ENOENT;
+    int n = snprintf(buf, sz, "/sys/class/%s", sub);
+    return (n > 0 && (size_t)n < sz) ? n : -ENAMETOOLONG;
+}
+
 static vnode_ops_t g_sysfs_vnode_ops = {
     .lookup  = sysfs_lookup,
     .stat    = sysfs_stat,
     .open    = sysfs_open_vnode,
     .release = sysfs_release,
+    .readlink = sysfs_readlink,
 };
 
 /* ---- file operations ---- */
@@ -757,6 +811,8 @@ static int sysfs_freaddir(vfile_t *vf, void *dirp, size_t count)
         entries[nent].name = "audio"; entries[nent].dtype = 4; nent++;
     } else if (dm->type == SF_CLASS_DEVICE) {
         entries[nent].name = "dev"; entries[nent].dtype = 8; nent++;
+        entries[nent].name = "uevent"; entries[nent].dtype = 8; nent++;
+        entries[nent].name = "subsystem"; entries[nent].dtype = 10; nent++;
     } else if (dm->type == SF_DRM) {
         entries[nent].name = "card0"; entries[nent].dtype = 4; nent++;
         entries[nent].name = "card0-Virtual-1"; entries[nent].dtype = 4; nent++;
@@ -819,8 +875,35 @@ static int sysfs_fclose(vfile_t *vf)
     return 0;
 }
 
+/* Coldplug: writing an action ("add") to a uevent file re-broadcasts the
+ * device's uevent so udevd processes it (runs rules) — the standard trigger
+ * path that udevadm trigger relies on. */
+static int sysfs_fwrite(vfile_t *vf, const char *buf, size_t count)
+{
+    if (!vf || !vf->priv) return -EBADF;
+    sysfs_priv_t *p = (sysfs_priv_t *)vf->priv;
+    if (p->type != SF_CLASS_DEVICE_UEVENT && p->type != SF_DEVICES_VDEV_UEVENT)
+        return -EINVAL;
+    char action[16];
+    size_t n = count < sizeof(action) - 1 ? count : sizeof(action) - 1;
+    memcpy(action, buf, n);
+    action[n] = 0;
+    char *nl = strchr(action, '\n');
+    if (nl) *nl = 0;
+    if (action[0] == 0)
+        return -EINVAL;
+    const char *devname = NULL, *subsystem = NULL;
+    if (sysfs_devchar_name(p->devt, &devname, &subsystem) < 0)
+        return -ENOENT;
+    const char *base = strrchr(devname, '/');
+    base = base ? base + 1 : devname;
+    netlink_uevent_emit(action, subsystem, base, p->devt);
+    return (int)count;
+}
+
 static vfile_ops_t g_sysfs_fops = {
     .read    = sysfs_fread,
+    .write   = sysfs_fwrite,
     .lseek   = sysfs_flseek,
     .readdir = sysfs_freaddir,
     .close   = sysfs_fclose,

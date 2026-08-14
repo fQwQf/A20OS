@@ -68,6 +68,11 @@ void class_device_emit_uevents(const char *action)
 static uint64_t class_devt(uint32_t type, uint32_t index)
 {
     static const uint16_t majors[] = { 0, 240, 8, 0, 13, 29, 116 };
+    /* The input class device must report the devt of the devfs evdev node it
+     * backs (/dev/input/eventN is 29:N+1), otherwise udev/libinput cannot
+     * associate the /sys device with the device node. */
+    if (type == DEV_CLASS_INPUT)
+        return 0x1d01 + (index & 0xffU);
     return ((uint64_t)majors[type] << 8) | (index & 0xffU);
 }
 

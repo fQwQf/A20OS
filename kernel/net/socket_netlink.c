@@ -240,9 +240,9 @@ static int netlink_uevent_broadcast_locked(const char *action,
     unsigned minor = (unsigned)(devt & 0xffU);
     char buf[256];
     int n = snprintf(buf, sizeof(buf),
-        "%s@/devices/virtual/%s/%s%c"
+        "%s@/class/%s/%s%c"
         "ACTION=%s%c"
-        "DEVPATH=/devices/virtual/%s/%s%c"
+        "DEVPATH=/class/%s/%s%c"
         "SUBSYSTEM=%s%c"
         "MAJOR=%u%c"
         "MINOR=%u%c"
