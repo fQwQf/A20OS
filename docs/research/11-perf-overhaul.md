@@ -117,6 +117,17 @@ readahead 突发与 demand-fault 的 fault-around 共用同一个 16 页（64 Ki
 extent 合并成一次块设备请求而不是两次 64 KiB 往返；匿名/文件 fault-around 保持 16 页，以限制
 每次缺页的内存承诺。低风险常量改动，`vfs_stress`/`mm_stress` 在单核与 SMP8 均 PASS。
 
+### 3.4 后续回合：`proc_park_finish` 唤醒后无锁化
+
+每次 park 周期里 `proc_park_finish` 只为复位唤醒后任务的状态就取一次 `proc_lock`。所有唤醒路径
+（`proc_try_wake` 与定时器到期）都会先把 `wait_timer_index` 置回 -1，任务重新运行后这些字段没有
+并发写者，且对 WOKEN/IDLE 任务的过期唤醒是 no-op。因此当没有待处理 timer 索引时跳过 `proc_lock`，
+用原子写复位；仅有残留索引才回退到堆锁。
+
+SMP8 mm_stress 测量：`proc` 竞争从 16-30K 区间降到 12-20K（中位数约 28K→16K）。
+**测量教训**：曾同时把 `proc_park_commit` 在 `sched()` 返回后的 `wake_reason` 读取也无锁化，结果竞争
+不降反升——这次获取实际上充当了 park/wake 循环的自然背压点。已回退该部分，只保留 finish 快路径。
+
 ### 3.3 后续回合：page cache 写回按 vnode 分锁
 
 单一 `g_page_cache_writeback_lock` 互斥锁让 8 个并发进程的每次 fsync / 缓存压力写回都互相排队，

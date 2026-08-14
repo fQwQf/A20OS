@@ -273,9 +273,27 @@ void proc_park_finish(proc_wait_token_t token)
     if (!task || !token.seq)
         return;
 
-    uint64_t flags = spin_lock_irqsave(&proc_lock);
-    if (task->wait_seq == token.seq &&
-        task->park_state == PROC_PARK_WOKEN) {
+    if (__atomic_load_n(&task->wait_seq, __ATOMIC_ACQUIRE) != token.seq)
+        return;
+#if defined(CONFIG_DEBUG_KERNEL) && CONFIG_DEBUG_KERNEL
+    if (__atomic_load_n(&task->park_state, __ATOMIC_ACQUIRE) ==
+        PROC_PARK_PREPARING)
+        panic("park: finish without cancel/commit pid=%d seq=%lu",
+              task->pid, (unsigned long)token.seq);
+#endif
+    if (__atomic_load_n(&task->park_state, __ATOMIC_ACQUIRE) != PROC_PARK_WOKEN)
+        return;
+
+    /*
+     * The wake that resumed this task already cancelled its timer
+     * (proc_try_wake_locked_common and the timer expiry both reset
+     * wait_timer_index to -1), so the common case needs no proc_lock at all.
+     * Only a stale pending index falls back to the heap lock.  The reset
+     * fields have no writer other than this task once it is running, and a
+     * concurrent stale wake on a WOKEN/IDLE task is a no-op.
+     */
+    if (__atomic_load_n(&task->wait_timer_index, __ATOMIC_ACQUIRE) >= 0) {
+        uint64_t flags = spin_lock_irqsave(&proc_lock);
         proc_wait_timer_cancel_locked(task, token.seq);
         task->wait_deadline = 0;
         task->wake_time = 0;
@@ -283,14 +301,16 @@ void proc_park_finish(proc_wait_token_t token)
         task->wake_reason = PROC_WAKE_NONE;
         task->park_state = PROC_PARK_IDLE;
         proc_sched_assert_task_locked(task);
-#if defined(CONFIG_DEBUG_KERNEL) && CONFIG_DEBUG_KERNEL
-    } else if (task->wait_seq == token.seq &&
-               task->park_state == PROC_PARK_PREPARING) {
-        panic("park: finish without cancel/commit pid=%d seq=%lu",
-              task->pid, (unsigned long)token.seq);
-#endif
+        spin_unlock_irqrestore(&proc_lock, flags);
+        return;
     }
-    spin_unlock_irqrestore(&proc_lock, flags);
+
+    __atomic_store_n(&task->wait_deadline, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&task->wake_time, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&task->wait_mode, PROC_WAIT_UNINTERRUPTIBLE,
+                     __ATOMIC_RELAXED);
+    __atomic_store_n(&task->wake_reason, PROC_WAKE_NONE, __ATOMIC_RELAXED);
+    __atomic_store_n(&task->park_state, PROC_PARK_IDLE, __ATOMIC_RELEASE);
 }
 
 /*
