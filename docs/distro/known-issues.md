@@ -61,15 +61,27 @@ mutex 内部的 spinlock 永久自旋。`addr2line` 把 ra 解析到 `read_into_
 
 ### 修复
 
-`read_into_user` / `write_from_user` 对**所有**文件类型统一经过内核 scratch
-buffer（`proc_scratch_buffer`）：先在持锁区内读/写到内核缓冲，再在锁外
-`copy_to_user`/`copy_from_user`，保证用户页缺页永远不在持锁路径内发生。
-另外给 `spin_lock_at` 的 LOCK-STALL 报告加了 `owner==waiter` 时的调用栈打印，
-下次再出现能直接拿到递归点。
+两层修复：
+
+1. **用户拷贝移出锁内**。`read_into_user` / `write_from_user` 对**所有**文件类型
+   统一经过内核 scratch buffer（`proc_scratch_buffer`）：先在持锁区内读/写到
+   内核缓冲，再在锁外 `copy_to_user`/`copy_from_user`，保证用户页缺页永远不在
+   持锁路径内发生。
+2. **`mutex` 支持同 task 递归**。实测抓到递归点：一个文件系统的 read/write
+   路径（写回、`/proc/<pid>/fdinfo` 渲染等）在 `vf->offset_lock` 已被同 task
+   持有时会再次进入它——这是 offset_lock 的**合法重入**，不是竞争。`mutex_lock`
+   / `mutex_unlock` 现在记录 per-owner depth，同 task 递归获取 depth+1 直接返回，
+   而不是在 mutex 内部的 spinlock 上自死锁。`procfs` 文件则完全跳过 offset_lock
+   （`vfs_is_procfs_vfile`），因为渲染 `/proc/<pid>/fdinfo` 要锁别的 vfile 的
+   offset_lock，不能在持此锁时进行。
+
+另外给 `spin_lock_at` 的 LOCK-STALL 报告加了 `owner==waiter` 时的 32 帧调用栈
++ IRQ 状态打印，递归 mutex 路径也短暂打印过命中次数，确保复现时可定位。
 
 ### 验证
 
-连续多次桌面 boot 均无 `LOCK-STALL`（修复前每次都会触发）。
+修复前高负载下几乎每次必现 `LOCK-STALL`；修复后连续多次桌面 boot（含 I/O 压力
+复现、完整 5 分钟窗口）均无 `LOCK-STALL`，桌面、输入、Xfconf 激活全部正常。
 
 ## 三、遗留小问题：dbus 同步调用偶发超时
 
