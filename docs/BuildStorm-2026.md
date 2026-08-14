@@ -33,7 +33,53 @@ BuildStorm 的主要成本不是单一系统调用，而是 Cargo/rustc 对大�
 5. 去除 VirtIO poll-only 等待中的重复扫描和重复 progress callback，以指数退避 降低空轮询；block page-cache fill 使用 hash shard，并跳过 ext4 bitmap 中连续 的已占用字节；
 6. ext4 vnode cache 改为 bucket 索引和 free list，扩大 block page-cache 与 VFS dcache 的元数据工作集容量，并保留既有写回、dirty generation 和淘汰边界。
 
-所有性能改动都保留真实 `/proc/uptime` 计时，不跳过编译、不伪造核心数、产物或 输出。正式计时只覆盖官方的 `cargo xtask arceos build -p arceos-helloworld --arch <arch>`。
+### 3.1 后续热区优化（`fqwqf/perf-optimizations` 分支，待完整 BuildStorm 验证）
+
+该分支在提交 `eeaf18fa` 之后增加以下实现。每项均保留真实计时，且已在 QEMU
+TCG 多线程 SMP 下用 `mm_stress`、`futex_stress`、`sched_stress`、
+`proc_stress`、`vfs_stress` 和 `clock_bench` 全组验证通过；正式 BuildStorm
+完整平台运行尚未执行，不将任何数字外推到 `e33c3219` 审计基线：
+
+1. **每 read/fsync 的全局脏页收割扫描改为 per-vnode 开关**：`mm_sync_shared_
+   dirty_for_vnode` 原先在每次页缓存 read 与 fsync 时持有 `proc_lock` 遍历
+   *全部* 任务、VMA 与页表。新增 `vnode.shared_file_maps` 计数（随 VMA 的
+   `vnode_get`/`vnode_put` 同步增减，覆盖 mmap、fork、split、mremap、exec
+   与 teardown 全部路径），无 MAP_SHARED 文件映射时一次 acquire load 即返回，
+   消除编译器输入这种"只读文件从不共享映射"场景下的全局串行扫描。
+2. **LoongArch64 用户 vDSO**：`clock_gettime`/`gettimeofday` 从每次完整
+   816 字节 trap（32 GPR + 32 LSX 向量寄存器 + 约 16 次 CSR）改为零陷阱用户态
+   路径。新增 `kernel/vdso/loongarch64/`，通过 `AT_SYSINFO_EHDR` 导出，musl
+   loongarch64 的 `VDSO_USEFUL` 自动接管。`clock_bench` 实测 LA vDSO 单次约
+   1780 ns，同进程系统调用约 3160 ns。
+3. **COW 页错误 TLB shootdown 从广播改为 active CPU 定向**：原先每次 COW 都向
+   *全部* 在线 CPU 发送 SBI/IPI 并自旋等待 ack（内核最贵操作）。改为
+   `mm_tlb_shootdown_page`：提升 per-mm `tlb_generation` 以覆盖 ASID 硬件下的
+   重入（`mm_context_enter` 检查），再只向 `mm->active_cpus` 定向失效；旧 frame
+   仍在 shootdown 完成后才释放，保持既有同步正确性。
+4. **页错误分发去掉冗余 present 检查**：非 present 叶子（rustc/LLVM 竞技场分配
+   的主路径）不再在 demand-fault 之前多付一次 `mm->lock` 加页表遍历；present
+   页的权限/引用位修复由原有重试检查承担，所有架构行为不变。
+5. **PRIVATE futex 唤醒跳过页表遍历**：`futex_phys_key` 只在跨进程 SHARED
+   匹配时使用；把 `FUTEX_PRIVATE_FLAG` 传入 wake/requeue/wake_op，PRIVATE 时
+   直接以 `pkey=0` 匹配 `(mm, vkey)`（与 Linux 键语义一致，且避免按物理页别名
+   误唤醒其他 mm）。共享 futex 的 `wait_wake_shared` 用例仍通过。
+6. **延迟 frame 释放批量归还**：`mm_tlb_invalidate_finish` 的 TLB hold 排空
+   原先每帧单独取一次全局 `pfa.lock`；抽出 `frame_put_locked`（持锁核心）并新增
+   `frame_put_many`，按 64 帧一批只取一次锁。大 munmap/exit 释放数万页时，
+   vCPU 的全局锁竞争与 IRQ 保存/恢复次数同步下降，TLB shootdown 与 refcount
+   语义不变。
+7. **ext4 命名空间锁改为读写锁**：全文件系统单一 `metadata_lock` 互斥锁曾使
+   8 个 rustc 的每次 dcache 未命中查找都互相排队并与 create/unlink 互斥。
+   `ext4_lookup` 只读访问 block cache 与自带锁的 vnode cache，改为读模式；
+   全部变更操作保持写模式。变更与查找仍互斥，锁序（metadata → vcache）与
+   文档化约束不变，写路径不调用 `ext4_lookup` 故不会自我死锁。
+8. **VMA 索引容量 256 → 1024**：rustc/LLVM 地址空间常超 256 个 VMA，超过后
+   每次页错误退化为线性扫描；扩大后编译器进程保持 O(log n) 二分查找
+   （每 mm 仅增加 8 KiB）。
+
+所有性能改动都保留真实 `/proc/uptime` 计时，不跳过编译、不伪造核心数、产物或
+输出。正式计时只覆盖官方的
+`cargo xtask arceos build -p arceos-helloworld --arch <arch>`。
 
 ## 4. 实验结果
 
