@@ -1661,7 +1661,7 @@ vnode_t *ext4_mount(bcache_t *bc) {
     }
     memset(esi, 0, sizeof(*esi));
     mutex_init(&esi->alloc_lock);
-    mutex_init(&esi->metadata_lock);
+    rw_mutex_init(&esi->metadata_lock);
 
     esi->inodes_count = sb.s_inodes_count;
 
@@ -1773,7 +1773,7 @@ void ext4_unmount(vnode_t *root) {
     int held_count;
     do {
         held_count = 0;
-        mutex_lock(&esi->metadata_lock);
+        rw_mutex_write_lock(&esi->metadata_lock);
         uint64_t cache_flags = spin_lock_irqsave(&g_ext4_vcache_lock);
         ext4_vcache_init_locked();
         for (int i = 0; i < EXT4_VCACHE_MAX && held_count < 64; i++) {
@@ -1783,7 +1783,7 @@ void ext4_unmount(vnode_t *root) {
             }
         }
         spin_unlock_irqrestore(&g_ext4_vcache_lock, cache_flags);
-        mutex_unlock(&esi->metadata_lock);
+        rw_mutex_write_unlock(&esi->metadata_lock);
         for (int i = 0; i < held_count; i++)
             vnode_put(held[i]);
     } while (held_count != 0);
