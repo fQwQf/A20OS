@@ -1179,7 +1179,14 @@ int vfs_readlinkat(int dirfd, const char *path, char *buf, size_t sz) {
     }
     vnode_put(parent);
 
-    if (vn->type != VFS_FT_SYMLINK || !vn->ops || !vn->ops->readlink) {
+    /* Allow readlink() on a vnode whose ops implement it even when the
+     * vnode is a directory: A20OS sysfs exposes /sys/dev/char/<maj>:<min>
+     * as a real directory (libdrm walks device/drm beneath it) that also
+     * answers readlink() with the class-device path.  On Linux the two are
+     * symlinks to the same /sys/devices path; this keeps both views
+     * consistent so libudev's udev_device_new_from_devnum() and an
+     * enumerate from /sys/class produce the same syspath. */
+    if (!vn->ops || !vn->ops->readlink) {
         vnode_put(vn);
         return -EINVAL;
     }
