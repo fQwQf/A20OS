@@ -298,5 +298,7 @@ typedef struct ext4_fctx {
 vnode_t *ext4_mount(bcache_t *bc);
 void     ext4_unmount(vnode_t *root);
 void     ext4_vnode_cache_prune_all(void);
+/* Scoped fsync: flush only this vnode's data and allocation metadata. */
+int      ext4_vn_sync(vnode_t *vn);
 
 #endif
