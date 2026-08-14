@@ -10,6 +10,7 @@
 #include "core/progress.h"
 #include "core/perf.h"
 #include "core/panic.h"
+#include "core/lock_counters.h"
 #include "proc/signal.h"
 #include "mm/vm.h"
 #include "cg/cgroup.h"
@@ -292,8 +293,10 @@ static void sched_runq_eevdf_del_weight(proc_runq_t *rq, task_t *t)
 void proc_sched_runq_init(void) {
     memset(sched_runq, 0, sizeof(sched_runq));
     memset(sched_cpu, 0, sizeof(sched_cpu));
-    for (unsigned i = 0; i < CONFIG_NR_CPUS; i++)
+    for (unsigned i = 0; i < CONFIG_NR_CPUS; i++) {
         spin_init(&sched_runq[i].lock);
+        lock_counters_register(&sched_runq[i].lock, "runq");
+    }
     sched_runqueue_migrations = 0;
     sched_violations = 0;
     sched_local_picks = 0;
