@@ -11,7 +11,16 @@
 static spinlock_t g_page_cache_lock = SPINLOCK_INIT;
 static spinlock_t g_page_cache_bucket_locks[PAGE_CACHE_BUCKET_LOCKS];
 static mutex_t g_page_cache_grow_lock;
+/* Writeback serialization.  A single mutex made every fsync (and cache
+ * pressure writeback) from eight parallel processes serialize, even when they
+ * flush disjoint vnodes.  The global mutex is kept for whole-cache writeback
+ * (vn == NULL); per-vnode writeback takes a hashed per-vnode mutex so
+ * concurrent fsyncs of different files proceed in parallel.  Two writebacks
+ * of the same vnode still serialize and the dirty-gen publish/clear path is
+ * unchanged. */
+#define PAGE_CACHE_WRITEBACK_LOCKS 64
 static mutex_t g_page_cache_writeback_lock;
+static mutex_t g_page_cache_writeback_locks[PAGE_CACHE_WRITEBACK_LOCKS];
 #define PAGE_CACHE_CHUNKS \
     (PAGE_CACHE_MAX_PAGES / PAGE_CACHE_CHUNK_PAGES)
 static page_cache_page_t *g_page_chunks[PAGE_CACHE_CHUNKS];
@@ -396,6 +405,8 @@ int page_cache_init(void)
         spin_init(&g_page_cache_bucket_locks[i]);
     mutex_init(&g_page_cache_grow_lock);
     mutex_init(&g_page_cache_writeback_lock);
+    for (size_t i = 0; i < PAGE_CACHE_WRITEBACK_LOCKS; i++)
+        mutex_init(&g_page_cache_writeback_locks[i]);
     lock_counters_register(&g_page_cache_lock, "page_cache");
     /* Keep the cache bounded to one eighth of RAM on small normal boots while
      * retaining MyGO's 1 GiB ceiling in the official 8 GiB evaluator. */
@@ -936,7 +947,11 @@ static int page_cache_writeback_common(vnode_t *vn,
     void *linear = NULL;
     size_t written = 0;
     int result = 0;
-    mutex_lock(&g_page_cache_writeback_lock);
+    mutex_t *wb_lock = &g_page_cache_writeback_lock;
+    if (vn)
+        wb_lock = &g_page_cache_writeback_locks[
+            ((uintptr_t)vn >> 4) & (PAGE_CACHE_WRITEBACK_LOCKS - 1)];
+    mutex_lock(wb_lock);
     for (;;) {
         size_t batch_limit = PAGE_CACHE_WRITEBACK_BATCH_PAGES;
         if (max_pages != 0 && max_pages - written < batch_limit)
@@ -1023,7 +1038,7 @@ static int page_cache_writeback_common(vnode_t *vn,
     }
     if (linear)
         kfree(linear);
-    mutex_unlock(&g_page_cache_writeback_lock);
+    mutex_unlock(wb_lock);
     return result;
 }
 
