@@ -112,6 +112,7 @@ static pf_type_t name_to_type(const char *name, int *out_pid) {
     if (strcmp(name, "oom") == 0) return PF_A20_OOM;
     if (strcmp(name, "task_lifetime") == 0) return PF_A20_TASK_LIFETIME;
     if (strcmp(name, "perf") == 0) return PF_A20_PERF;
+    if (strcmp(name, "lock_contention") == 0) return PF_A20_LOCK_CONTENTION;
     if (strcmp(name, "driver_lifecycle") == 0) return PF_A20_DRIVER_LIFECYCLE;
     if (strcmp(name, "objects") == 0) return PF_A20_OBJECTS;
     if (strcmp(name, "cmdline") == 0) return PF_CMDLINE;
@@ -415,6 +416,10 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
     } else if (dp && dp->type == PF_A20 && strcmp(name, "perf") == 0) {
         child = new_entry(name, PF_A20_PERF, 0);
         type = PF_A20_PERF;
+    } else if (dp && dp->type == PF_A20 &&
+               strcmp(name, "lock_contention") == 0) {
+        child = new_entry(name, PF_A20_LOCK_CONTENTION, 0);
+        type = PF_A20_LOCK_CONTENTION;
     } else if (dp && dp->type == PF_A20 && strcmp(name, "driver_lifecycle") == 0) {
         child = new_entry(name, PF_A20_DRIVER_LIFECYCLE, 0);
         type = PF_A20_DRIVER_LIFECYCLE;
