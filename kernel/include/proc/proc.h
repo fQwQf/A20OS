@@ -302,7 +302,13 @@ typedef struct task_t {
 
     completion_t vfork_done;
 
-    /* Scheduler-private A20 park/wake state. */
+    /* Scheduler-private A20 park/wake state.  park_lock serializes the
+     * transitions between PREPARING/PARKED/WOKEN and IDLE plus the timer
+     * register/cancel (park_lock -> timer_heap lock) and the runqueue
+     * enqueue in the wake path (park_lock -> runq lock).  It must never be
+     * held while acquiring proc_lock; proc_lock protects the task list,
+     * fork/exit/wait and the context-switch publication, not this state. */
+    spinlock_t         park_lock;
     uint64_t           wait_seq;
     uint64_t           wait_deadline;
     int                wait_timer_index;
