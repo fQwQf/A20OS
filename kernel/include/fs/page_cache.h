@@ -15,6 +15,11 @@
  * concurrent buffered readers on different buckets do not serialize. */
 #define PAGE_CACHE_BUCKET_LOCKS 1024
 #define PAGE_CACHE_FAULT_AROUND_PAGES 16
+/* Sequential-read prefetch window used by page_cache_readahead_vfile().
+ * Deliberately larger than the demand-fault window: compiler inputs are read
+ * sequentially, so a 128 KiB burst lets ext4 merge one contiguous block
+ * request instead of several 64 KiB round trips. */
+#define PAGE_CACHE_READAHEAD_PAGES 32
 #define PAGE_CACHE_WRITEBACK_BATCH_PAGES 256
 
 /*
