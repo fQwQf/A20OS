@@ -39,10 +39,7 @@
 | `make check-user-build` | 编译主机默认集合的 hosted 用户态（Linux 为七架构，macOS 为 RISC-V64） | 常规提交前检查 |
 | `make check-build-matrix-all` | 显式编译七个 hosted 架构的内核 bring-up 和用户态 | 完整跨架构构建检查 |
 
-STM32 固件、QEMU 和烧录目标使用同一套 `BUILD_DIR` 命名。QEMU 运行和实板烧录
-仍分别依赖宿主机的 `qemu-system-arm`、OpenOCD 与实际调试硬件；缺少这些环境时可
-只运行 `make check-stm32f103` 验证编译。准确产物路径见
-[STM32F103 移植说明](platforms/stm32f103-port.md)。
+STM32 固件、QEMU 和烧录目标使用同一套 `BUILD_DIR` 命名。QEMU 运行和实板烧录 仍分别依赖宿主机的 `qemu-system-arm`、OpenOCD 与实际调试硬件；缺少这些环境时可 只运行 `make check-stm32f103` 验证编译。准确产物路径见 [STM32F103 移植说明](platforms/stm32f103-port.md)。
 
 ## 发布与调试模式
 
