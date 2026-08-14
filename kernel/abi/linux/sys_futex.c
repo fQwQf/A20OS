@@ -298,7 +298,7 @@ int futex_wait_user_ns(int *uaddr, int expected, uint64_t timeout_ns)
     return futex_wait_ticks(uaddr, expected, ticks, FUTEX_BITSET_MATCH_ANY);
 }
 
-static int futex_wake_on(int *uaddr, int nr, uint32_t bitset)
+static int futex_wake_on(int *uaddr, int nr, uint32_t bitset, int private)
 {
     task_t *cur = proc_current();
     if (!uaddr) return -EFAULT;
@@ -306,7 +306,14 @@ static int futex_wake_on(int *uaddr, int nr, uint32_t bitset)
     if (nr < 0) return -EINVAL;
 
     uintptr_t vkey = (uintptr_t)uaddr;
-    uintptr_t pkey = futex_phys_key(uaddr);
+    /*
+     * PRIVATE futexes key only on (mm, vaddr); the physical address is used
+     * solely for cross-process SHARED matching, so the page-table walk in
+     * futex_phys_key() is pure overhead for them (cargo's jobserver and most
+     * libc locks are PRIVATE).  Passing pkey=0 also stops a PRIVATE wake from
+     * ever matching a foreign mm by physical page alias.
+     */
+    uintptr_t pkey = private ? 0 : futex_phys_key(uaddr);
     mm_struct_t *mm = cur ? cur->mm : NULL;
     wait_queue_t *q = &g_futex_buckets[futex_bucket_index(vkey)];
     futex_wake_arg_t arg = { mm, vkey, pkey, bitset };
@@ -333,11 +340,11 @@ static int futex_wake_on(int *uaddr, int nr, uint32_t bitset)
 
 int futex_wake_user(int *uaddr, int nr)
 {
-    return futex_wake_on(uaddr, nr, FUTEX_BITSET_MATCH_ANY);
+    return futex_wake_on(uaddr, nr, FUTEX_BITSET_MATCH_ANY, 0);
 }
 
 static int futex_requeue(int *uaddr, int wake_nr, int requeue_nr, int *uaddr2,
-                         int check_cmp, int cmpval)
+                         int check_cmp, int cmpval, int private)
 {
     if (!uaddr || !uaddr2) return -EFAULT;
     if (wake_nr < 0 || requeue_nr < 0) return -EINVAL;
@@ -350,9 +357,9 @@ static int futex_requeue(int *uaddr, int wake_nr, int requeue_nr, int *uaddr2,
     task_t *cur = proc_current();
     mm_struct_t *mm = cur ? cur->mm : NULL;
     uintptr_t vkey1 = (uintptr_t)uaddr;
-    uintptr_t pkey1 = futex_phys_key(uaddr);
+    uintptr_t pkey1 = private ? 0 : futex_phys_key(uaddr);
     uintptr_t vkey2 = (uintptr_t)uaddr2;
-    uintptr_t pkey2 = futex_phys_key(uaddr2);
+    uintptr_t pkey2 = private ? 0 : futex_phys_key(uaddr2);
     unsigned b1 = futex_bucket_index(vkey1);
     unsigned b2 = futex_bucket_index(vkey2);
     wait_queue_t *q1 = &g_futex_buckets[b1];
@@ -416,7 +423,7 @@ static int futex_wake_op_new_value(int oldval, int op, int oparg, int *out)
 }
 
 static int futex_wake_op(int *uaddr, int wake_nr, int wake2_nr,
-                         int *uaddr2, int encoded_op)
+                         int *uaddr2, int encoded_op, int private)
 {
     if (!uaddr || !uaddr2) return -EFAULT;
     if (wake_nr < 0 || wake2_nr < 0) return -EINVAL;
@@ -444,9 +451,9 @@ static int futex_wake_op(int *uaddr, int wake_nr, int wake2_nr,
     task_t *cur = proc_current();
     mm_struct_t *mm = cur ? cur->mm : NULL;
     uintptr_t vkey1 = (uintptr_t)uaddr;
-    uintptr_t pkey1 = futex_phys_key(uaddr);
+    uintptr_t pkey1 = private ? 0 : futex_phys_key(uaddr);
     uintptr_t vkey2 = (uintptr_t)uaddr2;
-    uintptr_t pkey2 = futex_phys_key(uaddr2);
+    uintptr_t pkey2 = private ? 0 : futex_phys_key(uaddr2);
     wait_queue_t *q1 = &g_futex_buckets[futex_bucket_index(vkey1)];
     wait_queue_t *q2 = &g_futex_buckets[futex_bucket_index(vkey2)];
 
@@ -626,7 +633,7 @@ static int futex_pi_release(int *uaddr)
     spin_unlock_irqrestore(&t->mm->lock, mm_flags);
 
     if (had_waiters)
-        futex_wake_on(uaddr, 1, FUTEX_BITSET_MATCH_ANY);
+        futex_wake_on(uaddr, 1, FUTEX_BITSET_MATCH_ANY, 0);
     return 0;
 }
 
@@ -637,6 +644,7 @@ int64_t sys_futex(int *uaddr, int op, int val, void *timeout, int *uaddr2, int v
      * rejects it on every other command (including plain FUTEX_WAIT). */
     if ((op & FUTEX_CLOCK_REALTIME) && opc != FUTEX_WAIT_BITSET)
         return -EINVAL;
+    int private = (op & FUTEX_PRIVATE_FLAG) != 0;
     switch (opc) {
     case FUTEX_WAIT:
         return futex_wait_on(uaddr, val, timeout, FUTEX_BITSET_MATCH_ANY, 0, 0);
@@ -644,20 +652,24 @@ int64_t sys_futex(int *uaddr, int op, int val, void *timeout, int *uaddr2, int v
         return futex_wait_on(uaddr, val, timeout, (uint32_t)val3, 1,
                              (op & FUTEX_CLOCK_REALTIME) != 0);
     case FUTEX_WAKE:
-        return futex_wake_on(uaddr, val, FUTEX_BITSET_MATCH_ANY);
+        return futex_wake_on(uaddr, val, FUTEX_BITSET_MATCH_ANY, private);
     case FUTEX_WAKE_BITSET:
-        return futex_wake_on(uaddr, val, (uint32_t)val3);
+        return futex_wake_on(uaddr, val, (uint32_t)val3, private);
     case FUTEX_REQUEUE:
-        return futex_requeue(uaddr, val, (int)(intptr_t)timeout, uaddr2, 0, 0);
+        return futex_requeue(uaddr, val, (int)(intptr_t)timeout, uaddr2, 0, 0,
+                             private);
     case FUTEX_CMP_REQUEUE:
-        return futex_requeue(uaddr, val, (int)(intptr_t)timeout, uaddr2, 1, val3);
+        return futex_requeue(uaddr, val, (int)(intptr_t)timeout, uaddr2, 1, val3,
+                             private);
     case FUTEX_CMP_REQUEUE_PI:
         /* The requeued waiters surface on uaddr2, then acquire it through
          * their own FUTEX_LOCK_PI call; requeue to the plain bucket is the
          * bounded analogue. */
-        return futex_requeue(uaddr, val, (int)(intptr_t)timeout, uaddr2, 1, val3);
+        return futex_requeue(uaddr, val, (int)(intptr_t)timeout, uaddr2, 1, val3,
+                             private);
     case FUTEX_WAKE_OP:
-        return futex_wake_op(uaddr, val, (int)(intptr_t)timeout, uaddr2, val3);
+        return futex_wake_op(uaddr, val, (int)(intptr_t)timeout, uaddr2, val3,
+                             private);
     case FUTEX_LOCK_PI:
         return futex_pi_acquire(uaddr, 0);
     case FUTEX_TRYLOCK_PI:
@@ -813,10 +825,10 @@ int64_t sys_futex_waitv(const void *waiters, unsigned nr_futexes,
 int64_t sys_futex_requeue(int *uaddr, int *uaddr2, int nr_wake, int nr_requeue,
                           uint32_t flags)
 {
-    (void)flags;
     /* The standalone futex_requeue syscall is equivalent to the legacy
      * FUTEX_REQUEUE command. */
-    return futex_requeue(uaddr, nr_wake, nr_requeue, uaddr2, 0, 0);
+    return futex_requeue(uaddr, nr_wake, nr_requeue, uaddr2, 0, 0,
+                         (flags & FUTEX_PRIVATE_FLAG) != 0);
 }
 
 /* futex_wait(2) / futex_wake(2): the split-out syscalls (Linux 6.7+).
@@ -837,6 +849,6 @@ int64_t sys_futex_wait(void *uaddr, uint32_t val, const void *timeout,
 
 int64_t sys_futex_wake(void *uaddr, uint32_t nr, uint32_t flags)
 {
-    (void)flags;
-    return futex_wake_on((int *)uaddr, (int)nr, FUTEX_BITSET_MATCH_ANY);
+    return futex_wake_on((int *)uaddr, (int)nr, FUTEX_BITSET_MATCH_ANY,
+                         (flags & FUTEX_PRIVATE_FLAG) != 0);
 }
