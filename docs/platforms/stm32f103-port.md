@@ -48,9 +48,7 @@ make check-stm32f103
 .kernel-build/armv7m-stm32f103-both-bringup-nommu-stm32f103-f512k-r64k/kernel.bin
 ```
 
-`STM32_XUANWU_ELF`、`flash-stm32f103-xuanwu` 和 `run-stm32f103-qemu`
-均使用包含 `BOARD` 的当前 `BUILD_DIR` 命名。目标存在和固件编译通过不等于 QEMU
-或实板已经验证；运行结论仍须来自具备对应环境的一次实际执行。
+`STM32_XUANWU_ELF`、`flash-stm32f103-xuanwu` 和 `run-stm32f103-qemu` 均使用包含 `BOARD` 的当前 `BUILD_DIR` 命名。目标存在和固件编译通过不等于 QEMU 或实板已经验证；运行结论仍须来自具备对应环境的一次实际执行。
 
 `flash-stm32f103-xuanwu` recipe 的目标流程使用 `interface/cmsis-dap.cfg`、SWD 1 MHz，并允许通过 `STM32_OPENOCD_ADAPTER_KHZ` 和 `STM32_CMSIS_DAP_SERIAL` 选择速率和 probe。recipe 会读取上述 Xuanwu `BUILD_DIR` 中的 ELF。
 
