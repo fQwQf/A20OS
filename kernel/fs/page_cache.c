@@ -11,7 +11,16 @@
 static spinlock_t g_page_cache_lock = SPINLOCK_INIT;
 static spinlock_t g_page_cache_bucket_locks[PAGE_CACHE_BUCKET_LOCKS];
 static mutex_t g_page_cache_grow_lock;
+/* Writeback serialization.  A single mutex made every fsync (and cache
+ * pressure writeback) from eight parallel processes serialize, even when they
+ * flush disjoint vnodes.  The global mutex is kept for whole-cache writeback
+ * (vn == NULL); per-vnode writeback takes a hashed per-vnode mutex so
+ * concurrent fsyncs of different files proceed in parallel.  Two writebacks
+ * of the same vnode still serialize and the dirty-gen publish/clear path is
+ * unchanged. */
+#define PAGE_CACHE_WRITEBACK_LOCKS 64
 static mutex_t g_page_cache_writeback_lock;
+static mutex_t g_page_cache_writeback_locks[PAGE_CACHE_WRITEBACK_LOCKS];
 #define PAGE_CACHE_CHUNKS \
     (PAGE_CACHE_MAX_PAGES / PAGE_CACHE_CHUNK_PAGES)
 static page_cache_page_t *g_page_chunks[PAGE_CACHE_CHUNKS];
@@ -396,6 +405,8 @@ int page_cache_init(void)
         spin_init(&g_page_cache_bucket_locks[i]);
     mutex_init(&g_page_cache_grow_lock);
     mutex_init(&g_page_cache_writeback_lock);
+    for (size_t i = 0; i < PAGE_CACHE_WRITEBACK_LOCKS; i++)
+        mutex_init(&g_page_cache_writeback_locks[i]);
     lock_counters_register(&g_page_cache_lock, "page_cache");
     /* Keep the cache bounded to one eighth of RAM on small normal boots while
      * retaining MyGO's 1 GiB ceiling in the official 8 GiB evaluator. */
@@ -643,7 +654,7 @@ int page_cache_fill_vfile_pages(vfile_t *vf, page_cache_page_t **pages,
                                 size_t count)
 {
     if (!vf || !vf->vnode || !pages || count == 0 ||
-        count > PAGE_CACHE_FAULT_AROUND_PAGES)
+        count > PAGE_CACHE_READAHEAD_PAGES)
         return -EINVAL;
     for (size_t i = 0; i < count; i++) {
         if (!pages[i] || pages[i]->vnode != vf->vnode ||
@@ -688,7 +699,7 @@ int page_cache_fill_vfile_pages(vfile_t *vf, page_cache_page_t **pages,
                    !page_cache_is_uptodate(pages[cursor]))
                 cursor++;
             size_t run = cursor - start;
-            uint64_t generations[PAGE_CACHE_FAULT_AROUND_PAGES];
+            uint64_t generations[PAGE_CACHE_READAHEAD_PAGES];
             for (size_t i = 0; i < run; i++)
                 generations[i] = snapshot_invalidate_gen(pages[start + i]);
 
@@ -724,7 +735,7 @@ out:
 /*
  * Ordinary read(2) used to fill one 4 KiB page at a time even when the
  * filesystem provided readpages().  Compiler inputs are predominantly
- * sequential and the ext4 implementation can merge a contiguous 64 KiB
+ * sequential and the ext4 implementation can merge a contiguous 128 KiB
  * window into one block request, so populate the forward window on the first
  * cold page.  The caller already pins pages[0]; pins acquired here are dropped
  * before returning and all publication remains protected by the existing
@@ -734,12 +745,12 @@ static int page_cache_readahead_vfile(vfile_t *vf,
                                       page_cache_page_t *first,
                                       size_t file_size)
 {
-    page_cache_page_t *pages[PAGE_CACHE_FAULT_AROUND_PAGES];
+    page_cache_page_t *pages[PAGE_CACHE_READAHEAD_PAGES];
     uint64_t file_pages = (file_size + PAGE_SIZE - 1) / PAGE_SIZE;
     size_t count = 1;
 
     pages[0] = first;
-    while (count < PAGE_CACHE_FAULT_AROUND_PAGES &&
+    while (count < PAGE_CACHE_READAHEAD_PAGES &&
            first->index + count < file_pages) {
         pages[count] = page_cache_get(vf->vnode, first->index + count, 1);
         if (!pages[count])
@@ -936,7 +947,11 @@ static int page_cache_writeback_common(vnode_t *vn,
     void *linear = NULL;
     size_t written = 0;
     int result = 0;
-    mutex_lock(&g_page_cache_writeback_lock);
+    mutex_t *wb_lock = &g_page_cache_writeback_lock;
+    if (vn)
+        wb_lock = &g_page_cache_writeback_locks[
+            ((uintptr_t)vn >> 4) & (PAGE_CACHE_WRITEBACK_LOCKS - 1)];
+    mutex_lock(wb_lock);
     for (;;) {
         size_t batch_limit = PAGE_CACHE_WRITEBACK_BATCH_PAGES;
         if (max_pages != 0 && max_pages - written < batch_limit)
@@ -1023,7 +1038,7 @@ static int page_cache_writeback_common(vnode_t *vn,
     }
     if (linear)
         kfree(linear);
-    mutex_unlock(&g_page_cache_writeback_lock);
+    mutex_unlock(wb_lock);
     return result;
 }
 
