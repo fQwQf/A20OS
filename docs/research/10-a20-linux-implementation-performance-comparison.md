@@ -67,6 +67,7 @@ Linux、`d5ae5a16` 与 `f9732348` 均使用官方 BuildStorm workload、8 GiB、
 
 <<<<<<< HEAD
 <<<<<<< HEAD
+<<<<<<< HEAD
 **源码事实（A20OS）。** A20OS 把调度、MM、VFS、cache、网络和关键驱动放在同一 特权地址空间，以直接 C 调用连接；同时提供 Linux ABI（258 个登记入口）和 Native ABI（126 个登记入口）。登记数只表示分发表面积，不表示 Linux 语义完整性。 Native ABI 使用 handle/rights、VMO/VMAR、 channel/EventQ；generic 驱动可作为 `.a20drv` 内核模块或用户服务部署 （[`OS-Design.md`](../OS-Design.md)、 [`syscall_table.def`](../../kernel/abi/linux/syscall_table.def)、 [`deployment-profiles.md`](../drivers/guide/deployment-profiles.md)）。
 =======
 =======
@@ -83,6 +84,9 @@ channel/EventQ；generic 驱动可作为 `.a20drv` 内核模块或用户服务�
 >>>>>>> 38c53637 (linux abi: complete syscall breadth on all four mainline architectures)
 =======
 >>>>>>> 0779cfdf (Merge branch 'fqwqf/linux-abi-depth')
+=======
+**源码事实（A20OS）。** A20OS 把调度、MM、VFS、cache、网络和关键驱动放在同一 特权地址空间，以直接 C 调用连接；同时提供 Linux ABI（343 个登记入口）和 Native ABI（126 个登记入口）。登记数只表示分发表面积，不表示 Linux 语义完整性。 Native ABI 使用 handle/rights、VMO/VMAR、 channel/EventQ；generic 驱动可作为 `.a20drv` 内核模块或用户服务部署 （[`OS-Design.md`](../OS-Design.md)、 [`syscall_table.def`](../../kernel/abi/linux/syscall_table.def)、 [`deployment-profiles.md`](../drivers/guide/deployment-profiles.md)）。
+>>>>>>> ee4f852a (docs: add distro-rootfs run docs; unwrap mid-sentence hard line breaks)
 
 **源码事实（Linux）。** Linux 同样是宏内核，但其内部子系统具有更成熟的模块边界： VFS 对 filesystem、driver model 对 bus/device、networking 对 protocol/qdisc、LSM 对安全策略提供长期稳定接口；配置与模块体系由 Kconfig/Kbuild 管理 （[Linux VFS 官方文档](https://docs.kernel.org/filesystems/vfs.html)、 [Linux driver model](https://docs.kernel.org/driver-api/driver-model/index.html)、 [Linux Kbuild](https://docs.kernel.org/kbuild/index.html)）。
 
@@ -190,6 +194,7 @@ Linux ext4 有 delayed allocation、multiblock allocator、extent tree、HTree d
 
 <<<<<<< HEAD
 <<<<<<< HEAD
+<<<<<<< HEAD
 **源码事实。** Linux syscall table 登记 258 项，但登记只证明可分派，不证明 Linux 语义完整。项目自己的 coverage 表保守地把 fd/path/process/signal/MM/socket、scheduler 和 BPF 等标为 `partial`，namespaces/capabilities 的总体兼容面为 `partial`。其中 scheduler wrapper 连接的是 per-CPU EEVDF/SMP 调度器，但 Linux policy/priority/affinity 边界仍不完整； BPF 只支持 KEP-backed `BPF_PROG_LOAD`、`BPF_PROG_ATTACH`、`BPF_PROG_DETACH`，没有 map 命令。表中不再有直接固定 `-ENOSYS` 的 placeholder：legacy AIO、kernel module、 keyring、fanotify、userfaultfd（MISSING 模式匿名区间）与 `perf_event_open` （PERF_TYPE_SOFTWARE 软件事件）均已实现；仅存的 `-ENOSYS` 是架构/版本正确的 Linux 语义（nfsservctl 在 Linux 4.19 移除、map_shadow_stack 是 x86 CET、riscv_* 与 arch_prctl 架构专属） （[`syscall_coverage.md`](../../kernel/abi/linux/syscall_coverage.md)、 [`syscall_table.def`](../../kernel/abi/linux/syscall_table.def)）。
 =======
 =======
@@ -210,6 +215,9 @@ arch_prctl 架构专属）
 >>>>>>> 38c53637 (linux abi: complete syscall breadth on all four mainline architectures)
 =======
 >>>>>>> 0779cfdf (Merge branch 'fqwqf/linux-abi-depth')
+=======
+**源码事实。** Linux syscall table 登记 343 项，但登记只证明可分派，不证明 Linux 语义完整。项目自己的 coverage 表保守地把 fd/path/process/signal/MM/socket、scheduler 和 BPF 等标为 `partial`，namespaces/capabilities 的总体兼容面为 `partial`。其中 scheduler wrapper 连接的是 per-CPU EEVDF/SMP 调度器，但 Linux policy/priority/affinity 边界仍不完整； BPF 只支持 KEP-backed `BPF_PROG_LOAD`、`BPF_PROG_ATTACH`、`BPF_PROG_DETACH`，没有 map 命令。表中不再有直接固定 `-ENOSYS` 的 placeholder：legacy AIO、kernel module、 keyring、fanotify、userfaultfd（MISSING 模式匿名区间）与 `perf_event_open` （PERF_TYPE_SOFTWARE 软件事件）均已实现；仅存的 `-ENOSYS` 是架构/版本正确的 Linux 语义（nfsservctl 在 Linux 4.19 移除、map_shadow_stack 是 x86 CET、riscv_* 与 arch_prctl 架构专属） （[`syscall_coverage.md`](../../kernel/abi/linux/syscall_coverage.md)、 [`syscall_table.def`](../../kernel/abi/linux/syscall_table.def)）。
+>>>>>>> ee4f852a (docs: add distro-rootfs run docs; unwrap mid-sentence hard line breaks)
 
 Linux ABI 本身持续演进，语义不仅是 syscall number，还包括 flags、错误码、race、 restart、namespace、credentials、memory ordering 和 filesystem edge cases。A20OS 薄 ABI wrapper/内部 API 分层清楚，是维护优势；“有 entry”绝不能当成 full compatibility。
 
