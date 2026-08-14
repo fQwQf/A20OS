@@ -5,6 +5,7 @@
 
 int vfs_is_pipe_vfile(vfile_t *vf);
 int vfs_is_char_device_vfile(vfile_t *vf);
+int vfs_is_procfs_vfile(const vfile_t *vf);
 int vfs_should_read(int flags);
 int vfs_should_write(int flags);
 
