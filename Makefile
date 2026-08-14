@@ -757,16 +757,23 @@ KERNEL_OBJ = $(patsubst $(KERNEL_DIR)/%.c,$(BUILD_DIR)/%.o,$(filter-out user/% $
               $(patsubst $(KERNEL_DIR)/external/lwip/src/%.c,$(BUILD_DIR)/external/lwip/src/%.o,$(LWIP_KERNEL_SRC))
 KERNEL_OBJ += $(EARLY_DRIVER_BLOBS)
 
-# vDSO user image (riscv64): built out-of-tree of ASM_SRC on purpose, it is
-# user code linked with its own script.  The vdso.elf FILE is embedded
-# verbatim: p_offset == p_vaddr makes file layout == memory layout, ELF
-# header included (objcopy -O binary would strip the header and break
+# vDSO user image (riscv64/loongarch64): built out-of-tree of ASM_SRC on
+# purpose, it is user code linked with its own script.  The vdso.elf FILE is
+# embedded verbatim: p_offset == p_vaddr makes file layout == memory layout,
+# ELF header included (objcopy -O binary would strip the header and break
 # musl's vDSO parser).
-VDSO_CC   ?= $(CCACHE_PREFIX)$(RISCV_GNU_CC)
+VDSO_CC_riscv64       ?= $(CCACHE_PREFIX)$(RISCV_GNU_CC)
+VDSO_CC_loongarch64   ?= $(CCACHE_PREFIX)loongarch64-linux-gnu-gcc
+VDSO_CC               ?= $(VDSO_CC_$(ARCH))
+VDSO_OBJCOPY_riscv64     := -O elf64-littleriscv -B riscv:rv64
+VDSO_OBJCOPY_loongarch64 := -O elf64-loongarch -B loongarch
 VDSO_SRC_DIR := $(KERNEL_DIR)/vdso/$(ARCH)
 VDSO_ELF  := $(BUILD_DIR)/vdso/vdso.elf
 VDSO_BLOB := $(BUILD_DIR)/vdso/vdso_blob.o
 ifeq ($(ARCH),riscv64)
+KERNEL_OBJ += $(VDSO_BLOB)
+endif
+ifeq ($(ARCH),loongarch64)
 KERNEL_OBJ += $(VDSO_BLOB)
 endif
 
@@ -778,8 +785,8 @@ $(VDSO_ELF): $(VDSO_SRC_DIR)/vdso.S $(VDSO_SRC_DIR)/vdso.ld \
 	    -Wl,--hash-style=sysv -T $(VDSO_SRC_DIR)/vdso.ld -o $@ $<
 
 $(VDSO_BLOB): $(VDSO_ELF)
-	cd $(BUILD_DIR)/vdso && $(OBJCOPY) -I binary -O elf64-littleriscv \
-	    -B riscv:rv64 vdso.elf vdso_blob.o
+	cd $(BUILD_DIR)/vdso && $(OBJCOPY) -I binary $(VDSO_OBJCOPY_$(ARCH)) \
+	    vdso.elf vdso_blob.o
 
 # ASM sources
 ASM_SRC = $(shell find $(KERNEL_DIR)/arch/$(ARCH) -type f -name '*.S' | sort)

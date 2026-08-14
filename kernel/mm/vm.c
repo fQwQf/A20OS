@@ -226,14 +226,28 @@ void mm_tlb_invalidate_finish(mm_struct_t *mm)
     mm->tlb_holds = NULL;
     spin_unlock_irqrestore(&mm->lock, flags);
 
-    while (hold) {
-        mm_tlb_hold_t *next = hold->next;
-        if (hold->kind == MM_TLB_HOLD_FRAME)
-            frame_put(hold->frame);
-        else if (hold->kind == MM_TLB_HOLD_PAGE)
-            page_cache_put(hold->page);
-        kfree(hold);
-        hold = next;
+    /* Drain the deferred frame frees in batches so one munmap/exit of a
+     * large arena takes pfa.lock once per chunk instead of once per page
+     * (frame_put_many).  Page-cache holds keep their per-page release. */
+    {
+        pfn_t frame_chunk[64];
+        size_t frame_count = 0;
+        while (hold) {
+            mm_tlb_hold_t *next = hold->next;
+            if (hold->kind == MM_TLB_HOLD_FRAME) {
+                if (frame_count == sizeof(frame_chunk) / sizeof(frame_chunk[0])) {
+                    frame_put_many(frame_chunk, frame_count);
+                    frame_count = 0;
+                }
+                frame_chunk[frame_count++] = hold->frame;
+            } else if (hold->kind == MM_TLB_HOLD_PAGE) {
+                page_cache_put(hold->page);
+            }
+            kfree(hold);
+            hold = next;
+        }
+        if (frame_count)
+            frame_put_many(frame_chunk, frame_count);
     }
 
     /* VMA release may drop the final VMO or page-cache owner and therefore
@@ -241,6 +255,58 @@ void mm_tlb_invalidate_finish(mm_struct_t *mm)
     mm_vma_flush_deferred(mm);
     mm->tlb_pending = 0;
     mutex_unlock(&mm->tlb_lock);
+}
+
+/*
+ * mm_tlb_shootdown_page — remote shootdown for a single PTE change made
+ * outside the mm_tlb_* transaction machinery (COW faults).
+ *
+ * The faulting CPU already flushed the page locally inside the fault path.
+ * Publish the PTE change with a tlb_generation bump so a CPU that left this
+ * address space and re-enters it (ASID hardware) flushes on the way in via
+ * mm_context_enter, then invalidate only the CPUs currently running this
+ * address space (mm->active_cpus) instead of broadcasting to every online
+ * CPU.  On QEMU (no ASID) a CPU that is not active flushed its whole TLB on
+ * the satp switch, so it cannot hold a stale translation.
+ */
+void mm_tlb_shootdown_page(mm_struct_t *mm, vaddr_t addr)
+{
+    if (!mm)
+        return;
+
+    __atomic_add_fetch(&mm->tlb_generation, 1, __ATOMIC_RELEASE);
+    arch_mb();
+
+    uint32_t targets =
+        __atomic_load_n(&mm->active_cpus, __ATOMIC_ACQUIRE) &
+        smp_online_cpu_mask();
+    unsigned current = cpu_current_id();
+    uint32_t flushed = 0;
+    if (current < 32) {
+        /* The faulting CPU already flushed this page locally. */
+        targets &= ~(1U << current);
+        flushed |= 1U << current;
+    }
+
+    if (targets) {
+        if (smp_remote_tlb_flush_supported()) {
+            a20_perf_add(A20_PERF_MM_TLB_REMOTE_CPUS,
+                         (uint64_t)__builtin_popcount(targets));
+            if (smp_remote_tlb_flush(targets, addr, PAGE_SIZE) < 0)
+                panic("mm: targeted COW TLB shootdown failed");
+            flushed |= targets;
+        } else {
+            arch_tlb_flush();
+            flushed = smp_online_cpu_mask();
+        }
+    }
+
+    uint64_t generation = __atomic_load_n(&mm->tlb_generation,
+                                          __ATOMIC_RELAXED);
+    for (unsigned cpu = 0; cpu < CONFIG_NR_CPUS && cpu < 32; cpu++)
+        if (flushed & (1U << cpu))
+            __atomic_store_n(&mm->tlb_cpu_generation[cpu], generation,
+                             __ATOMIC_RELEASE);
 }
 
 /*
