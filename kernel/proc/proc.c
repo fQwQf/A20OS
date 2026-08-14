@@ -21,6 +21,7 @@
 #include "mm/frame.h"
 #include "mm/vm.h"
 #include "core/cpu.h"
+#include "core/lock_counters.h"
 #include "core/perf.h"
 #include "core/trap.h"
 #include "core/stdio.h"
@@ -268,6 +269,8 @@ void proc_init(void) {
     proc_sched_runq_init();
     spin_init(&proc_lock);
     spin_set_debug(&proc_lock, "proc", NULL);
+    lock_counters_register(&proc_lock, "proc");
+    lock_counters_enable_callsite(&proc_lock);
 
     task_t *idle = &idle_tasks[0];
     proc_link_task_locked(idle);
