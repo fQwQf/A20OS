@@ -88,34 +88,28 @@ static int64_t read_into_user(vfile_t *vf, char *buf, size_t count)
 {
     if (!vf)
         return -EBADF;
-    int short_read_ok = vfs_is_pipe_vfile(vf) ||
-                        vfs_is_char_device_vfile(vf) ||
-                        net_is_socket_vfile(vf);
-    if (short_read_ok && count > 0) {
-        /* A user-page boundary must not turn one syscall into two reads. */
-        size_t chunk = count;
+
+    /*
+     * Always bounce through a kernel buffer and copy to user afterwards.
+     * Writing directly into a user page while a filesystem read path holds a
+     * spinlock can fault in the missing page inside the lock; the fault path
+     * can re-enter the same filesystem read and self-deadlock (LOCK-STALL
+     * owner == waiter).  The bounce copy keeps every user access outside the
+     * locked region.
+     */
+    int64_t total = 0;
+    while ((size_t)total < count) {
+        size_t chunk = count - (size_t)total;
         if (chunk > LINUX_IO_CHUNK_SIZE)
             chunk = LINUX_IO_CHUNK_SIZE;
         char *kbuf = proc_scratch_buffer(chunk);
         if (!kbuf)
-            return -ENOMEM;
+            return total > 0 ? total : -ENOMEM;
         int64_t n = vfs_read_file(vf, kbuf, chunk);
-        if (n > 0 && copy_to_user(buf, kbuf, (size_t)n) < 0)
-            return -EFAULT;
-        return n;
-    }
-
-    int64_t total = 0;
-    while ((size_t)total < count) {
-        void *kaddr;
-        size_t chunk;
-        if (user_buffer_segment(buf + total, count - (size_t)total, 1, &kaddr, &chunk) < 0)
-            return -EFAULT;
-        if (chunk > LINUX_IO_CHUNK_SIZE)
-            chunk = LINUX_IO_CHUNK_SIZE;
-        int64_t n = vfs_read_file(vf, kaddr, chunk);
         if (n <= 0)
             return total > 0 ? total : n;
+        if (copy_to_user(buf + total, kbuf, (size_t)n) < 0)
+            return total > 0 ? total : -EFAULT;
         total += n;
         if ((size_t)n < chunk)
             break;
@@ -158,13 +152,15 @@ static int64_t write_from_user(vfile_t *vf, const char *buf, size_t count)
 
     int64_t total = 0;
     while ((size_t)total < count) {
-        void *kaddr;
-        size_t chunk;
-        if (user_buffer_segment(buf + total, count - (size_t)total, 0, &kaddr, &chunk) < 0)
-            return -EFAULT;
+        size_t chunk = count - (size_t)total;
         if (chunk > LINUX_IO_CHUNK_SIZE)
             chunk = LINUX_IO_CHUNK_SIZE;
-        int64_t n = vfs_write_file(vf, kaddr, chunk);
+        char *kbuf = proc_scratch_buffer(chunk);
+        if (!kbuf)
+            return total > 0 ? total : -ENOMEM;
+        if (copy_from_user(kbuf, buf + total, chunk) < 0)
+            return total > 0 ? total : -EFAULT;
+        int64_t n = vfs_write_file(vf, kbuf, chunk);
         if (n <= 0)
             return total > 0 ? total : n;
         total += n;
