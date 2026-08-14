@@ -751,7 +751,7 @@ int handle_cow_fault(task_t *t, uint64_t stval)
     spin_unlock(&mm->lock);
     if (r == 0) {
         a20_perf_count(A20_PERF_MM_COW_FAULTS);
-        arch_tlb_flush_page(stval);
+        mm_tlb_shootdown_page(mm, stval);
     }
     if (old_pfn != PFN_NONE)
         frame_put(old_pfn);
