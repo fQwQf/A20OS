@@ -99,12 +99,14 @@ static inline void spin_lock_at(spinlock_t *lock, uintptr_t caller_ra) {
                            (unsigned long)(elapsed * 1000 / TICKS_PER_SEC));
                     if (owner == cur) {
                         extern void kallsyms_print(uintptr_t addr);
-                        struct backtrace_frame frames[16];
+                        struct backtrace_frame frames[32];
                         uint64_t fp = (uint64_t)__builtin_frame_address(0);
-                        int n = arch_unwind_frames(fp, frames, 16);
-                        printf("  self-deadlock backtrace (%d frames):\n", n);
-                        for (int i = 0; i < n && i < 16; i++) {
-                            printf("    [%d] pc=", i);
+                        int n = arch_unwind_frames(fp, frames, 32);
+                        printf("  self-deadlock backtrace irq=%d (%d frames):\n",
+                               arch_irqs_enabled() ? 1 : 0, n);
+                        for (int i = 0; i < n && i < 32; i++) {
+                            printf("    [%d] pc=0x%lx ", i,
+                                   (unsigned long)frames[i].pc);
                             kallsyms_print(frames[i].pc);
                             printf("\n");
                         }
