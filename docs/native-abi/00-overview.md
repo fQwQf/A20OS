@@ -14,8 +14,7 @@ kernel/abi/native/   A20OS native ABI（126 个登记入口，部分功能仍有
 user/external/mlibc/sysdeps/a20/  活跃的 Native 完整 libc 移植（当前仅 riscv64 构建/运行入口）
 ```
 
-Debug 分区（0x0900）实现完整的停止/恢复/观察语义：`debug_attach/traceme/detach/ resume`、`debug_wait/event` 停止报告（含退出事件）、`debug_read/write` 地址空间访问、寄存器读写，底层复用 ABI 无关的内核调试接口 `proc_debug_*` （`kernel/proc/debug.c`），与 Linux ABI 的 ptrace(2) 共享同一状态机。
-（历史阶段标记：Debug 分区受限实现——NATIVE_DEBUG_LIMITED_CONTRACT—— 已于 sys_native_debug.c 落地后结束。）
+Debug 分区（0x0900）实现完整的停止/恢复/观察语义：`debug_attach/traceme/detach/ resume`、`debug_wait/event` 停止报告（含退出事件）、`debug_read/write` 地址空间访问、寄存器读写，底层复用 ABI 无关的内核调试接口 `proc_debug_*` （`kernel/proc/debug.c`），与 Linux ABI 的 ptrace(2) 共享同一状态机。 （历史阶段标记：Debug 分区受限实现——NATIVE_DEBUG_LIMITED_CONTRACT—— 已于 sys_native_debug.c 落地后结束。）
 
 ## 核心原则
 
