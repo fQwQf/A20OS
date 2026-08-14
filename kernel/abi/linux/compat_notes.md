@@ -62,7 +62,10 @@ map_shadow_stack 是 x86 CET、riscv_* 与 arch_prctl 是架构专属）。
 - perf_event_open（`kernel/abi/linux/sys_perf.c`）：PERF_TYPE_SOFTWARE 事件（CPU/TASK clock、page faults、context switches 及无源的软件事件），read(2) 输出 count/time/id，支持 ENABLE/DISABLE/RESET/PERIOD/ID；无 PMU，硬件/raw/breakpoint 事件返回 -EINVAL，无 mmap 采样环。
 - futex：全部标准命令（含有边界的 PI 变体 LOCK_PI/UNLOCK_PI/TRYLOCK_PI/WAIT_REQUEUE_PI/CMP_REQUEUE_PI），不携带优先级继承提升；FUTEX_FD（Linux 5.4 移除）返回 -EINVAL。
 - Landlock：fd-backed ruleset + path-beneath 规则，在 `vfs_open` 强制；没有完整 LSM 框架。
-- rseq：注册/注销每线程 rseq 区域；A20OS 不做跨 CPU 迁移，因此内核从不中止序列。
+- rseq：注册/注销每线程 rseq 区域；调度器存在跨 CPU 偷取迁移，但 rseq 尚无内核迁移中止（`rseq_ip_fixup`），这是登记语义（Linux 会写 cpu_id 并回绕到 abort_ip），后续深化方向。
+- `splice`/`vmsplice`/`tee` 是真实语义（核心 `kernel/fs/splice.c` + pipe peek）：file↔pipe、pipe↔pipe、tee 不消耗源；`SPLICE_F_*` 校验、pipe 端点非空 offset 返回 `-ESPIPE`、无 pipe 端点返回 `-EINVAL`；传输基于拷贝（等价 Linux 非页对齐回退路径）。
+- `membarrier` 实现完整命令集：QUERY/GLOBAL/GLOBAL_EXPEDITED/REGISTER_GLOBAL_EXPEDITED/PRIVATE_EXPEDITED(+SYNC_CORE/RSEQ)/REGISTER_PRIVATE_EXPEDITED(+SYNC_CORE/RSEQ)；`PRIVATE_EXPEDITED` 要求先注册（否则 `-EPERM`），真正的跨 CPU 屏障复用 reschedule IPI（远端处理函数执行 acquire fence 并回 ack）。未知命令与非法 flags 返回 `-EINVAL`。
+- `eventfd` 的 `O_NONBLOCK` 改为实时读取 `vf->flags`，因此 `fcntl(F_SETFL, O_NONBLOCK)` 之后 read/write 按管道语义立即 `-EAGAIN`（与 pipe 一致）。
 - `restart_syscall` 返回 `-ERESTARTNOINTR`；`remap_file_pages` 是接受式 no-op；`memfd_secret` 退化为普通 memfd。
 - SysV 消息队列（`kernel/ipc/sysv_msg.c`）：固定 32 队列表，支持 msgget/msgsnd/msgrcv/msgctl，含阻塞 park/wake 与 IPC_NOWAIT/MSG_NOERROR。
 - POSIX 消息队列（`kernel/ipc/posix_mq.c`）：命名队列 + per-fd mqd，优先级 FIFO，绝对超时（timedsend/timedreceive），mq_notify 用信号投递。
