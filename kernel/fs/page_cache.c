@@ -6,8 +6,10 @@
 #include "core/lock.h"
 #include "core/perf.h"
 #include "core/string.h"
+#include "core/lock_counters.h"
 
 static spinlock_t g_page_cache_lock = SPINLOCK_INIT;
+static spinlock_t g_page_cache_bucket_locks[PAGE_CACHE_BUCKET_LOCKS];
 static mutex_t g_page_cache_grow_lock;
 static mutex_t g_page_cache_writeback_lock;
 #define PAGE_CACHE_CHUNKS \
@@ -39,6 +41,26 @@ static unsigned page_cache_hash_key(vnode_t *vn, uint64_t index)
         : (uintptr_t)vn;
     return (unsigned)((v >> 4) ^ index ^ (index >> 32)) &
            (PAGE_CACHE_HASH_BUCKETS - 1);
+}
+
+/* Lock ordering: a caller may hold g_page_cache_lock and then acquire a bucket
+ * lock, but must never acquire g_page_cache_lock while holding a bucket lock.
+ * The warm hit path acquires only the bucket lock. */
+static inline unsigned page_cache_bucket(unsigned hash_idx)
+{
+    return hash_idx & (PAGE_CACHE_BUCKET_LOCKS - 1);
+}
+
+static inline uint64_t page_cache_bucket_lock_irqsave(unsigned hash_idx)
+{
+    return spin_lock_irqsave(&g_page_cache_bucket_locks[page_cache_bucket(hash_idx)]);
+}
+
+static inline void page_cache_bucket_unlock_irqrestore(unsigned hash_idx,
+                                                       uint64_t flags)
+{
+    spin_unlock_irqrestore(&g_page_cache_bucket_locks[page_cache_bucket(hash_idx)],
+                           flags);
 }
 
 static void lru_remove(page_cache_page_t *page)
@@ -92,14 +114,17 @@ static page_cache_page_t *free_take_locked(void)
     return page;
 }
 
-static void hash_insert(page_cache_page_t *page)
+/* The following hash helpers require the page's bucket lock to be held by the
+ * caller (the same lock that guards the bucket chain and the refcount/valid
+ * transition for a page found in it). */
+static void hash_insert_locked(page_cache_page_t *page)
 {
     unsigned idx = page_cache_hash_key(page->vnode, page->index);
     page->hnext = g_hash[idx];
     g_hash[idx] = page;
 }
 
-static void hash_remove(page_cache_page_t *page)
+static void hash_remove_locked(page_cache_page_t *page)
 {
     unsigned idx = page_cache_hash_key(page->vnode, page->index);
     page_cache_page_t **pp = &g_hash[idx];
@@ -121,7 +146,8 @@ static void hash_remove(page_cache_page_t *page)
 static page_cache_page_t *find_locked(vnode_t *vn, uint64_t index)
 {
     size_t visited = 0;
-    for (page_cache_page_t *p = g_hash[page_cache_hash_key(vn, index)];
+    unsigned idx = page_cache_hash_key(vn, index);
+    for (page_cache_page_t *p = g_hash[idx];
          p; p = p->hnext) {
         visited++;
         if (p->valid && p->vnode == vn && p->index == index) {
@@ -228,13 +254,17 @@ static void dirty_remove_locked(page_cache_page_t *page)
     page->dirty = 0;
 }
 
+/* Caller holds g_page_cache_lock AND the page's bucket lock.  Removing the
+ * mapping pins and unlinks the page from hash, per-vnode mapping and dirty
+ * lists in one critical section so a concurrent bucket-lock hit can neither
+ * observe a half-detached page nor pin a page we are about to reclaim. */
 static vnode_t *detach_mapping_deferred_locked(page_cache_page_t *page)
 {
     if (!page->valid)
         return NULL;
     dirty_remove_locked(page);
     mapping_remove_locked(page);
-    hash_remove(page);
+    hash_remove_locked(page);
     vnode_t *vn = page->vnode;
     page->vnode = NULL;
     page->index = 0;
@@ -246,6 +276,13 @@ static vnode_t *detach_mapping_deferred_locked(page_cache_page_t *page)
     return vn;
 }
 
+/*
+ * Caller holds g_page_cache_lock.  Second-chance eviction: the global LRU
+ * gives a rough insertion order; a candidate's bucket lock makes the
+ * refcount/detach decision atomic against a concurrent warm hit, and the
+ * accessed bit lets recently-used pages survive one eviction sweep without
+ * any per-hit global LRU mutation.
+ */
 static page_cache_page_t *evict_locked(vnode_t **deferred_put)
 {
     page_cache_page_t *page = g_lru_tail.prev;
@@ -254,8 +291,35 @@ static page_cache_page_t *evict_locked(vnode_t **deferred_put)
         visited++;
         if (refcount_read(&page->ref_count) == 0 && !page->dirty &&
             pfn_valid(page->pfn) && pfa.meta[page->pfn].refcount <= 1) {
-            if (page->valid)
-                *deferred_put = detach_mapping_deferred_locked(page);
+            if (page->valid) {
+                unsigned idx = page_cache_hash_key(page->vnode, page->index);
+                unsigned blk = page_cache_bucket(idx);
+                uint64_t bflags = spin_lock_irqsave(&g_page_cache_bucket_locks[blk]);
+                /* Re-check under the bucket lock: a warm hit may have pinned
+                 * this page between the outer scan and here. */
+                if (page->valid &&
+                    refcount_read(&page->ref_count) == 0 && !page->dirty) {
+                    if (page->accessed) {
+                        page->accessed = 0;
+                        page = page->prev;
+                        spin_unlock_irqrestore(&g_page_cache_bucket_locks[blk], bflags);
+                        continue;
+                    }
+                    *deferred_put = detach_mapping_deferred_locked(page);
+                }
+                spin_unlock_irqrestore(&g_page_cache_bucket_locks[blk], bflags);
+                if (!page->valid) {
+                    refcount_set(&page->ref_count, 1);
+                    lru_remove(page);
+                    lru_insert_front(page);
+                    page_cache_account_scan(visited);
+                    return page;
+                }
+                page = page->prev;
+                continue;
+            }
+            /* A free descriptor: not in any hash chain, no bucket lock needed.
+             * (When the free stack is empty no such page is on the LRU.) */
             refcount_set(&page->ref_count, 1);
             lru_remove(page);
             lru_insert_front(page);
@@ -312,6 +376,7 @@ static int page_cache_grow(void)
     size_t chunk_index = g_allocated_pages / PAGE_CACHE_CHUNK_PAGES;
     g_page_chunks[chunk_index] = chunk;
     for (size_t i = 0; i < PAGE_CACHE_CHUNK_PAGES; i++) {
+        chunk[i].accessed = 0;
         lru_insert_tail(&chunk[i]);
         free_insert_locked(&chunk[i]);
     }
@@ -327,8 +392,11 @@ int page_cache_init(void)
         return 0;
 
     spin_init(&g_page_cache_lock);
+    for (size_t i = 0; i < PAGE_CACHE_BUCKET_LOCKS; i++)
+        spin_init(&g_page_cache_bucket_locks[i]);
     mutex_init(&g_page_cache_grow_lock);
     mutex_init(&g_page_cache_writeback_lock);
+    lock_counters_register(&g_page_cache_lock, "page_cache");
     /* Keep the cache bounded to one eighth of RAM on small normal boots while
      * retaining peer kernels's 1 GiB ceiling in the official 8 GiB evaluator. */
     g_page_limit = pfa.total_frames / 8;
@@ -357,37 +425,52 @@ page_cache_page_t *page_cache_get(vnode_t *vn, uint64_t index, int create)
     if (!g_initialized || !vn)
         return NULL;
 
-retry:
-    uint64_t flags = spin_lock_irqsave(&g_page_cache_lock);
+    unsigned idx = page_cache_hash_key(vn, index);
+
+    /* Warm hit fast path: only the bucket lock is taken.  No global LRU
+     * mutation; the accessed bit feeds the second-chance evictor. */
+    uint64_t bflags = page_cache_bucket_lock_irqsave(idx);
     page_cache_page_t *page = find_locked(vn, index);
     if (page) {
         refcount_inc(&page->ref_count);
-        lru_remove(page);
-        lru_insert_front(page);
-        spin_unlock_irqrestore(&g_page_cache_lock, flags);
+        page->accessed = 1;
+        page_cache_bucket_unlock_irqrestore(idx, bflags);
         return page;
     }
+    page_cache_bucket_unlock_irqrestore(idx, bflags);
 
-    if (!create) {
-        spin_unlock_irqrestore(&g_page_cache_lock, flags);
+    if (!create)
         return NULL;
+
+retry:
+    bflags = page_cache_bucket_lock_irqsave(idx);
+    page = find_locked(vn, index);
+    if (page) {
+        refcount_inc(&page->ref_count);
+        page->accessed = 1;
+        page_cache_bucket_unlock_irqrestore(idx, bflags);
+        return page;
     }
+    page_cache_bucket_unlock_irqrestore(idx, bflags);
 
     vnode_t *deferred_put = NULL;
+    uint64_t flags = spin_lock_irqsave(&g_page_cache_lock);
     page = free_take_locked();
     if (!page && g_allocated_pages < g_page_limit) {
         spin_unlock_irqrestore(&g_page_cache_lock, flags);
         if (page_cache_grow() == 0)
             goto retry;
         flags = spin_lock_irqsave(&g_page_cache_lock);
+        bflags = page_cache_bucket_lock_irqsave(idx);
         page = find_locked(vn, index);
         if (page) {
             refcount_inc(&page->ref_count);
-            lru_remove(page);
-            lru_insert_front(page);
+            page->accessed = 1;
+            page_cache_bucket_unlock_irqrestore(idx, bflags);
             spin_unlock_irqrestore(&g_page_cache_lock, flags);
             return page;
         }
+        page_cache_bucket_unlock_irqrestore(idx, bflags);
     }
     if (!page)
         page = evict_locked(&deferred_put);
@@ -412,10 +495,15 @@ retry:
     page->dirty_gen = 0;
     page->invalidate_gen++;
     page->uptodate = 0;
+    page->accessed = 0;
     memset(page->data, 0, PAGE_SIZE);
     vnode_get(vn);
-    hash_insert(page);
+    /* Global lock held: publish the mapping and the hash entry under the
+     * bucket lock so warm hits observe fully-initialised fields. */
+    bflags = page_cache_bucket_lock_irqsave(idx);
+    hash_insert_locked(page);
     mapping_insert_locked(page);
+    page_cache_bucket_unlock_irqrestore(idx, bflags);
     spin_unlock_irqrestore(&g_page_cache_lock, flags);
     if (deferred_put)
         vnode_put(deferred_put);
@@ -1026,9 +1114,15 @@ void page_cache_invalidate(vnode_t *vn)
         visited++;
         next = page->mapping_next;
         if (refcount_read(&page->ref_count) == 0 && !page->dirty) {
-            detach_mapping_deferred_locked(page);
-            free_insert_locked(page);
-            detached++;
+            unsigned idx = page_cache_hash_key(page->vnode, page->index);
+            uint64_t bflags = page_cache_bucket_lock_irqsave(idx);
+            if (page->valid && page->vnode == vn &&
+                refcount_read(&page->ref_count) == 0 && !page->dirty) {
+                detach_mapping_deferred_locked(page);
+                free_insert_locked(page);
+                detached++;
+            }
+            page_cache_bucket_unlock_irqrestore(idx, bflags);
         }
     }
     page_cache_account_scan(visited);
@@ -1052,9 +1146,15 @@ void page_cache_discard_unlinked(vnode_t *vn)
             continue;
         if (page->dirty)
             discarded_dirty++;
-        detach_mapping_deferred_locked(page);
-        free_insert_locked(page);
-        detached++;
+        unsigned idx = page_cache_hash_key(page->vnode, page->index);
+        uint64_t bflags = page_cache_bucket_lock_irqsave(idx);
+        if (page->valid && page->vnode == vn &&
+            refcount_read(&page->ref_count) == 0) {
+            detach_mapping_deferred_locked(page);
+            free_insert_locked(page);
+            detached++;
+        }
+        page_cache_bucket_unlock_irqrestore(idx, bflags);
     }
     page_cache_account_scan(visited);
     spin_unlock_irqrestore(&g_page_cache_lock, flags);
@@ -1082,9 +1182,16 @@ void page_cache_invalidate_range(vnode_t *vn, uint64_t start_byte,
         if (page->index < first_idx || page->index > last_idx)
             continue;
         if (refcount_read(&page->ref_count) == 0) {
-            detach_mapping_deferred_locked(page);
-            free_insert_locked(page);
-            detached++;
+            unsigned idx = page_cache_hash_key(page->vnode, page->index);
+            uint64_t bflags = page_cache_bucket_lock_irqsave(idx);
+            if (page->valid && page->vnode == vn &&
+                page->index >= first_idx && page->index <= last_idx &&
+                refcount_read(&page->ref_count) == 0) {
+                detach_mapping_deferred_locked(page);
+                free_insert_locked(page);
+                detached++;
+            }
+            page_cache_bucket_unlock_irqrestore(idx, bflags);
         }
     }
     page_cache_account_scan(visited);
@@ -1109,9 +1216,16 @@ void page_cache_invalidate_uptodate_range(vnode_t *vn, uint64_t start_byte,
         if (page->index < first_idx || page->index > last_idx)
             continue;
         if (refcount_read(&page->ref_count) == 0) {
-            detach_mapping_deferred_locked(page);
-            free_insert_locked(page);
-            detached++;
+            unsigned idx = page_cache_hash_key(page->vnode, page->index);
+            uint64_t bflags = page_cache_bucket_lock_irqsave(idx);
+            if (page->valid && page->vnode == vn &&
+                page->index >= first_idx && page->index <= last_idx &&
+                refcount_read(&page->ref_count) == 0) {
+                detach_mapping_deferred_locked(page);
+                free_insert_locked(page);
+                detached++;
+            }
+            page_cache_bucket_unlock_irqrestore(idx, bflags);
         }
     }
     page_cache_account_scan(visited);
@@ -1147,9 +1261,16 @@ void page_cache_truncate(vnode_t *vn, uint64_t new_size)
             if (page->dirty)
                 __atomic_add_fetch(&page->dirty_gen, 1, __ATOMIC_RELEASE);
         } else if (refcount_read(&page->ref_count) == 0) {
-            detach_mapping_deferred_locked(page);
-            free_insert_locked(page);
-            detached++;
+            unsigned idx = page_cache_hash_key(page->vnode, page->index);
+            uint64_t bflags = page_cache_bucket_lock_irqsave(idx);
+            if (page->valid && page->vnode == vn &&
+                page->index >= eof_index &&
+                refcount_read(&page->ref_count) == 0) {
+                detach_mapping_deferred_locked(page);
+                free_insert_locked(page);
+                detached++;
+            }
+            page_cache_bucket_unlock_irqrestore(idx, bflags);
         } else {
             /*
              * Page is pinned by a concurrent reader/writer.  We cannot
@@ -1189,12 +1310,20 @@ size_t page_cache_drop_clean(void)
                 !pfn_valid(page->pfn) ||
                 pfa.meta[page->pfn].refcount > 1)
                 continue;
-            vnode_t *vn = detach_mapping_deferred_locked(page);
-            if (vn) {
-                free_insert_locked(page);
-                held[held_count++] = vn;
+            unsigned idx = page_cache_hash_key(page->vnode, page->index);
+            uint64_t bflags = page_cache_bucket_lock_irqsave(idx);
+            if (page->valid && !page->dirty &&
+                refcount_read(&page->ref_count) == 0 &&
+                pfn_valid(page->pfn) &&
+                pfa.meta[page->pfn].refcount <= 1) {
+                vnode_t *vn = detach_mapping_deferred_locked(page);
+                if (vn) {
+                    free_insert_locked(page);
+                    held[held_count++] = vn;
+                }
+                dropped++;
             }
-            dropped++;
+            page_cache_bucket_unlock_irqrestore(idx, bflags);
         }
         spin_unlock_irqrestore(&g_page_cache_lock, flags);
 
