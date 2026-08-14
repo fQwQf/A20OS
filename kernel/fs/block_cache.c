@@ -5,6 +5,7 @@
 #include "core/perf.h"
 #include "core/errno.h"
 #include "core/timer.h"
+#include "core/lock_counters.h"
 
 static bcache_t *g_bcache_list[8];
 static int g_bcache_count;
@@ -83,13 +84,33 @@ static unsigned bcache_hash_key(uint64_t lba) {
     return (unsigned)((lba ^ (lba >> 32)) & (BCACHE_HASH_BUCKETS - 1));
 }
 
-static void bcache_hash_insert(bcache_t *bc, bcache_entry_t *e) {
+/* Bucket lock helpers.  Ordering rule: a caller may hold bc->lock and then a
+ * bucket lock, but never acquire bc->lock while holding a bucket lock.  The
+ * warm-hit path acquires only the bucket lock. */
+static inline unsigned bcache_bucket_key(uint64_t lba)
+{
+    return bcache_hash_key(lba) & (BCACHE_BUCKET_LOCKS - 1);
+}
+
+static inline uint64_t bcache_bucket_lock_irqsave(bcache_t *bc, uint64_t lba)
+{
+    return spin_lock_irqsave(&bc->bucket_locks[bcache_bucket_key(lba)]);
+}
+
+static inline void bcache_bucket_unlock_irqrestore(bcache_t *bc, uint64_t lba,
+                                                   uint64_t flags)
+{
+    spin_unlock_irqrestore(&bc->bucket_locks[bcache_bucket_key(lba)], flags);
+}
+
+/* Raw helpers: caller holds the entry's bucket lock. */
+static void bcache_hash_insert_locked(bcache_t *bc, bcache_entry_t *e) {
     unsigned idx = bcache_hash_key(e->lba);
     e->hnext = bc->hash[idx];
     bc->hash[idx] = e;
 }
 
-static void bcache_hash_remove(bcache_t *bc, bcache_entry_t *e) {
+static void bcache_hash_remove_locked(bcache_t *bc, bcache_entry_t *e) {
     unsigned idx = bcache_hash_key(e->lba);
     bcache_entry_t **pp = &bc->hash[idx];
     while (*pp) {
@@ -103,17 +124,64 @@ static void bcache_hash_remove(bcache_t *bc, bcache_entry_t *e) {
     e->hnext = NULL;
 }
 
+static bcache_entry_t *bcache_find_locked(bcache_t *bc, uint64_t lba) {
+    for (bcache_entry_t *e = bc->hash[bcache_hash_key(lba)]; e; e = e->hnext) {
+        if (e->valid && e->lba == lba)
+            return e;
+    }
+    return NULL;
+}
+
+/* Self-locking wrappers for callers that do not already hold the bucket lock
+ * (used under bc->lock by paths that are not the warm-hit fast path). */
+static void bcache_hash_insert(bcache_t *bc, bcache_entry_t *e) {
+    uint64_t bf = bcache_bucket_lock_irqsave(bc, e->lba);
+    bcache_hash_insert_locked(bc, e);
+    bcache_bucket_unlock_irqrestore(bc, e->lba, bf);
+}
+
+static void bcache_hash_remove(bcache_t *bc, bcache_entry_t *e) {
+    uint64_t bf = bcache_bucket_lock_irqsave(bc, e->lba);
+    bcache_hash_remove_locked(bc, e);
+    bcache_bucket_unlock_irqrestore(bc, e->lba, bf);
+}
+
+static bcache_entry_t *bcache_find(bcache_t *bc, uint64_t lba) {
+    uint64_t bf = bcache_bucket_lock_irqsave(bc, lba);
+    bcache_entry_t *e = bcache_find_locked(bc, lba);
+    bcache_bucket_unlock_irqrestore(bc, lba, bf);
+    return e;
+}
+
 static unsigned pcache_hash_key(uint64_t page_no) {
     return (unsigned)((page_no ^ (page_no >> 32)) & (PCACHE_HASH_BUCKETS - 1));
 }
 
-static void pcache_hash_insert(bcache_t *bc, pcache_entry_t *e) {
+static inline unsigned pcache_bucket_key(uint64_t page_no)
+{
+    return pcache_hash_key(page_no) & (BCACHE_BUCKET_LOCKS - 1);
+}
+
+static inline uint64_t pcache_bucket_lock_irqsave(bcache_t *bc, uint64_t page_no)
+{
+    return spin_lock_irqsave(&bc->bucket_locks[pcache_bucket_key(page_no)]);
+}
+
+static inline void pcache_bucket_unlock_irqrestore(bcache_t *bc,
+                                                   uint64_t page_no,
+                                                   uint64_t flags)
+{
+    spin_unlock_irqrestore(&bc->bucket_locks[pcache_bucket_key(page_no)],
+                           flags);
+}
+
+static void pcache_hash_insert_locked(bcache_t *bc, pcache_entry_t *e) {
     unsigned idx = pcache_hash_key(e->page_no);
     e->hnext = bc->page_hash[idx];
     bc->page_hash[idx] = e;
 }
 
-static void pcache_hash_remove(bcache_t *bc, pcache_entry_t *e) {
+static void pcache_hash_remove_locked(bcache_t *bc, pcache_entry_t *e) {
     unsigned idx = pcache_hash_key(e->page_no);
     pcache_entry_t **pp = &bc->page_hash[idx];
     while (*pp) {
@@ -125,6 +193,34 @@ static void pcache_hash_remove(bcache_t *bc, pcache_entry_t *e) {
         pp = &(*pp)->hnext;
     }
     e->hnext = NULL;
+}
+
+static pcache_entry_t *pcache_find_locked(bcache_t *bc, uint64_t page_no) {
+    for (pcache_entry_t *e = bc->page_hash[pcache_hash_key(page_no)];
+         e; e = e->hnext) {
+        if (e->valid && e->page_no == page_no)
+            return e;
+    }
+    return NULL;
+}
+
+static void pcache_hash_insert(bcache_t *bc, pcache_entry_t *e) {
+    uint64_t bf = pcache_bucket_lock_irqsave(bc, e->page_no);
+    pcache_hash_insert_locked(bc, e);
+    pcache_bucket_unlock_irqrestore(bc, e->page_no, bf);
+}
+
+static void pcache_hash_remove(bcache_t *bc, pcache_entry_t *e) {
+    uint64_t bf = pcache_bucket_lock_irqsave(bc, e->page_no);
+    pcache_hash_remove_locked(bc, e);
+    pcache_bucket_unlock_irqrestore(bc, e->page_no, bf);
+}
+
+static pcache_entry_t *pcache_find(bcache_t *bc, uint64_t page_no) {
+    uint64_t bf = pcache_bucket_lock_irqsave(bc, page_no);
+    pcache_entry_t *e = pcache_find_locked(bc, page_no);
+    pcache_bucket_unlock_irqrestore(bc, page_no, bf);
+    return e;
 }
 
 static void bcache_set_block_dirty_locked(bcache_t *bc, bcache_entry_t *e,
@@ -170,6 +266,9 @@ bcache_t *bcache_create(block_dev_t *dev) {
     bc->dev = dev;  // 绑定底层块设备
     bc->pool_size = BCACHE_MAX_BLOCKS;
     spin_init(&bc->lock);
+    lock_counters_register(&bc->lock, "block_cache");
+    for (int i = 0; i < BCACHE_BUCKET_LOCKS; i++)
+        spin_init(&bc->bucket_locks[i]);
     for (int i = 0; i < PCACHE_FILL_LOCKS; i++)
         mutex_init(&bc->fill_locks[i]);
     rw_mutex_init(&bc->writeback_lock);
@@ -204,6 +303,7 @@ bcache_t *bcache_create(block_dev_t *dev) {
         bc->pool[i].dirty = 0;
         bc->pool[i].dirty_gen = 0;
         bc->pool[i].ref   = 0;
+        bc->pool[i].accessed = 0;
         bc->pool[i].lba   = (uint64_t)-1;
         lru_insert_front(bc, &bc->pool[i]);
     }
@@ -213,6 +313,7 @@ bcache_t *bcache_create(block_dev_t *dev) {
         bc->page_pool[i].dirty = 0;
         bc->page_pool[i].dirty_gen = 0;
         bc->page_pool[i].ref = 0;
+        bc->page_pool[i].accessed = 0;
         bc->page_pool[i].page_no = (uint64_t)-1;
         page_lru_insert_front(bc, &bc->page_pool[i]);
     }
@@ -276,15 +377,7 @@ void bcache_get_stats(bcache_stats_t *stats)
     }
 }
 
-static bcache_entry_t *bcache_find(bcache_t *bc, uint64_t lba) {
-    for (bcache_entry_t *e = bc->hash[bcache_hash_key(lba)]; e; e = e->hnext) {
-        if (e->valid && e->lba == lba)
-            return e;
-    }
-    return NULL;
-}
-
-// 驱逐一个块（LRU 淘汰算法：从尾部找最久未使用的块）
+// 驱逐一个块（第二机会 LRU：从尾部找最久未使用的块，accessed 位可留一次）
 static bcache_entry_t *bcache_evict(bcache_t *bc) {
     int quarantined = bcache_write_quarantined(bc);
     bcache_entry_t *e = bc->lru_tail.prev;  // 从最久未使用的开始
@@ -296,9 +389,27 @@ static bcache_entry_t *bcache_evict(bcache_t *bc) {
                 e = e->prev;
                 continue;
             }
+            if (e->valid) {
+                uint64_t bf = bcache_bucket_lock_irqsave(bc, e->lba);
+                if (cache_ref_read(&e->ref) == 0 && e->valid &&
+                    !(quarantined && e->dirty)) {
+                    if (e->accessed) {
+                        e->accessed = 0;
+                        bcache_bucket_unlock_irqrestore(bc, e->lba, bf);
+                        e = e->prev;
+                        continue;
+                    }
+                    lru_remove(e);
+                    bcache_hash_remove_locked(bc, e);
+                    e->ref = 1;
+                    bcache_bucket_unlock_irqrestore(bc, e->lba, bf);
+                    return e;
+                }
+                bcache_bucket_unlock_irqrestore(bc, e->lba, bf);
+                e = e->prev;
+                continue;
+            }
             lru_remove(e);
-            if (e->valid)
-                bcache_hash_remove(bc, e);
             e->ref = 1;
             return e;
         }
@@ -309,8 +420,21 @@ static bcache_entry_t *bcache_evict(bcache_t *bc) {
 
 // 获取一个块（从缓存或从磁盘读取）
 bcache_entry_t *bcache_get(bcache_t *bc, uint64_t lba) {
+    /* Warm hit fast path: only the bucket lock is taken; the accessed bit
+     * feeds the second-chance evictor instead of a per-hit global LRU move. */
+    uint64_t bf = bcache_bucket_lock_irqsave(bc, lba);
+    bcache_entry_t *e = bcache_find_locked(bc, lba);
+    if (e) {
+        // 命中缓存，增加引用计数
+        cache_ref_get(&e->ref);
+        e->accessed = 1;
+        bcache_bucket_unlock_irqrestore(bc, lba, bf);
+        return e;
+    }
+    bcache_bucket_unlock_irqrestore(bc, lba, bf);
+
     uint64_t flags = spin_lock_irqsave(&bc->lock);
-    bcache_entry_t *e = bcache_find(bc, lba);
+    e = bcache_find(bc, lba);
     if (e) {
         // 命中缓存，增加引用计数并移到 LRU 头部
         cache_ref_get(&e->ref);
@@ -430,7 +554,34 @@ void bcache_mark_dirty(bcache_entry_t *e) {
  * timed-out VirtIO request merely because older callers used a void sync
  * interface.
  */
-int bcache_sync_checked(bcache_t *bc) {
+/* Sorted-array membership for bcache_sync_scoped().  NULL page_nos means
+ * "include every page" (full sync). */
+static int bcache_sync_page_selected(const uint64_t *page_nos, size_t count,
+                                     uint64_t page_no)
+{
+    if (!page_nos)
+        return 1;
+    size_t lo = 0, hi = count;
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        if (page_nos[mid] == page_no)
+            return 1;
+        if (page_nos[mid] < page_no)
+            lo = mid + 1;
+        else
+            hi = mid;
+    }
+    return 0;
+}
+
+/*
+ * Flush every dirty page selected by @page_nos (sorted ascending, or NULL for
+ * all) and report whether the storage device accepted all writes.  Journal
+ * recovery must not claim success after a timed-out VirtIO request merely
+ * because older callers used a void sync interface.
+ */
+static int bcache_sync_common(bcache_t *bc, const uint64_t *page_nos,
+                              size_t page_count) {
     if (!bc || !bc->dev)
         return -EINVAL;
     /* A recently failed write means the device is still wedged; fail fast
@@ -440,7 +591,7 @@ int bcache_sync_checked(bcache_t *bc) {
     char tmp[BCACHE_BLOCK_SIZE];
     char *page_tmp = NULL;
     int page_indices[BCACHE_SYNC_BATCH_PAGES];
-    uint64_t page_nos[BCACHE_SYNC_BATCH_PAGES];
+    uint64_t sync_nos[BCACHE_SYNC_BATCH_PAGES];
     uint64_t page_gens[BCACHE_SYNC_BATCH_PAGES];
     int first_error = 0;
 
@@ -455,7 +606,9 @@ int bcache_sync_checked(bcache_t *bc) {
             spin_unlock_irqrestore(&bc->lock, flags);
             break;
         }
-        if (!bc->page_pool[i].valid || !bc->page_pool[i].dirty) {
+        if (!bc->page_pool[i].valid || !bc->page_pool[i].dirty ||
+            !bcache_sync_page_selected(page_nos, page_count,
+                                       bc->page_pool[i].page_no)) {
             spin_unlock_irqrestore(&bc->lock, flags);
             continue;
         }
@@ -468,7 +621,7 @@ int bcache_sync_checked(bcache_t *bc) {
             break;
         }
         page_indices[0] = i;
-        page_nos[0] = bc->page_pool[i].page_no;
+        sync_nos[0] = bc->page_pool[i].page_no;
         page_gens[0] = bc->page_pool[i].dirty_gen;
         memcpy(page_tmp, bc->page_pool[i].data, PCACHE_PAGE_SIZE);
         spin_unlock_irqrestore(&bc->lock, flags);
@@ -476,9 +629,9 @@ int bcache_sync_checked(bcache_t *bc) {
         /* Fresh ext4 blocks and inode-table pages are normally allocated in
          * ascending physical order, and fresh cache entries follow that same
          * order in the page pool.  Merge only adjacent pool entries whose
-         * physical page numbers are exactly contiguous.  Each page keeps its
-         * own dirty generation so a concurrent writer cannot be cleared by an
-         * older batched snapshot. */
+         * physical page numbers are exactly contiguous and are both selected.
+         * Each page keeps its own dirty generation so a concurrent writer
+         * cannot be cleared by an older batched snapshot. */
         int batch_pages = 1;
         while (batch_pages < BCACHE_SYNC_BATCH_PAGES &&
                i + batch_pages < bc->page_pool_size) {
@@ -486,12 +639,14 @@ int bcache_sync_checked(bcache_t *bc) {
             flags = spin_lock_irqsave(&bc->lock);
             pcache_entry_t *candidate = &bc->page_pool[index];
             if (!candidate->valid || !candidate->dirty ||
-                candidate->page_no != page_nos[batch_pages - 1] + 1) {
+                !bcache_sync_page_selected(page_nos, page_count,
+                                           candidate->page_no) ||
+                candidate->page_no != sync_nos[batch_pages - 1] + 1) {
                 spin_unlock_irqrestore(&bc->lock, flags);
                 break;
             }
             page_indices[batch_pages] = index;
-            page_nos[batch_pages] = candidate->page_no;
+            sync_nos[batch_pages] = candidate->page_no;
             page_gens[batch_pages] = candidate->dirty_gen;
             memcpy(page_tmp + (size_t)batch_pages * PCACHE_PAGE_SIZE,
                    candidate->data, PCACHE_PAGE_SIZE);
@@ -500,7 +655,7 @@ int bcache_sync_checked(bcache_t *bc) {
         }
 
         uint64_t lba =
-            (page_nos[0] * PCACHE_PAGE_SIZE) / BCACHE_BLOCK_SIZE;
+            (sync_nos[0] * PCACHE_PAGE_SIZE) / BCACHE_BLOCK_SIZE;
         int write_ret = bc->dev->write_sector(
             bc->dev, lba, page_tmp,
             (size_t)batch_pages * PCACHE_PAGE_SIZE / BCACHE_BLOCK_SIZE);
@@ -509,7 +664,7 @@ int bcache_sync_checked(bcache_t *bc) {
             for (int page = 0; page < batch_pages; page++) {
                 pcache_entry_t *entry =
                     &bc->page_pool[page_indices[page]];
-                if (entry->valid && entry->page_no == page_nos[page] &&
+                if (entry->valid && entry->page_no == sync_nos[page] &&
                     entry->dirty_gen == page_gens[page])
                     bcache_set_page_dirty_locked(bc, entry, 0);
             }
@@ -565,6 +720,21 @@ int bcache_sync_checked(bcache_t *bc) {
     return first_error;
 }
 
+int bcache_sync_checked(bcache_t *bc) {
+    return bcache_sync_common(bc, NULL, 0);
+}
+
+/*
+ * fsync() scope: flush only the dirty 4 KiB pages whose page_no appears in
+ * @page_nos (sorted ascending, deduplicated), plus any dirty 512-byte
+ * metadata blocks.  Everything else dirty is left for its own fsync or a full
+ * sync, so one file's fsync no longer writes the whole mount's block cache.
+ * Ordering (writeback_lock + per-page dirty_gen) is identical to a full sync.
+ */
+int bcache_sync_scoped(bcache_t *bc, const uint64_t *page_nos, size_t count) {
+    return bcache_sync_common(bc, page_nos, count);
+}
+
 // 兼容不需要向上传播错误的历史 fsync/unmount 调用点。
 void bcache_sync(bcache_t *bc) {
     (void)bcache_sync_checked(bc);
@@ -581,14 +751,6 @@ void bcache_invalidate(bcache_t *bc, uint64_t lba) {
         bcache_set_block_dirty_locked(bc, e, 0);
     }
     spin_unlock_irqrestore(&bc->lock, flags);
-}
-
-static pcache_entry_t *pcache_find(bcache_t *bc, uint64_t page_no) {
-    for (pcache_entry_t *e = bc->page_hash[pcache_hash_key(page_no)]; e; e = e->hnext) {
-        if (e->valid && e->page_no == page_no)
-            return e;
-    }
-    return NULL;
 }
 
 static int pcache_flush_run(bcache_t *bc, pcache_entry_t *first)
@@ -653,9 +815,27 @@ static pcache_entry_t *pcache_evict_locked(bcache_t *bc) {
                 e = e->prev;
                 continue;
             }
+            if (e->valid) {
+                uint64_t bf = pcache_bucket_lock_irqsave(bc, e->page_no);
+                if (cache_ref_read(&e->ref) == 0 && e->valid &&
+                    !(quarantined && e->dirty)) {
+                    if (e->accessed) {
+                        e->accessed = 0;
+                        pcache_bucket_unlock_irqrestore(bc, e->page_no, bf);
+                        e = e->prev;
+                        continue;
+                    }
+                    page_lru_remove(e);
+                    pcache_hash_remove_locked(bc, e);
+                    e->ref = 1;
+                    pcache_bucket_unlock_irqrestore(bc, e->page_no, bf);
+                    return e;
+                }
+                pcache_bucket_unlock_irqrestore(bc, e->page_no, bf);
+                e = e->prev;
+                continue;
+            }
             page_lru_remove(e);
-            if (e->valid)
-                pcache_hash_remove(bc, e);
             e->ref = 1;
             return e;
         }
@@ -666,8 +846,19 @@ static pcache_entry_t *pcache_evict_locked(bcache_t *bc) {
 
 static pcache_entry_t *pcache_get(bcache_t *bc, uint64_t page_no,
                                   const void *full_overwrite) {
+    /* Warm hit fast path: bucket lock only. */
+    uint64_t bf = pcache_bucket_lock_irqsave(bc, page_no);
+    pcache_entry_t *e = pcache_find_locked(bc, page_no);
+    if (e) {
+        cache_ref_get(&e->ref);
+        e->accessed = 1;
+        pcache_bucket_unlock_irqrestore(bc, page_no, bf);
+        return e;
+    }
+    pcache_bucket_unlock_irqrestore(bc, page_no, bf);
+
     uint64_t flags = spin_lock_irqsave(&bc->lock);
-    pcache_entry_t *e = pcache_find(bc, page_no);
+    e = pcache_find(bc, page_no);
     if (e) {
         cache_ref_get(&e->ref);
         page_lru_remove(e);
