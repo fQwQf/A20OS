@@ -147,11 +147,14 @@ int proc_wait4(int pid, int *status, int options)
         }
 
         t->waiting_for_child = 1;
+        /* proc_lock -> park_lock is the documented order. */
+        uint64_t plf = spin_lock_irqsave(&t->park_lock);
         proc_wait_token_t token =
             proc_park_prepare_locked(PROC_WAIT_INTERRUPTIBLE, 0);
         int sig = signal_task_has_unblocked(t);
         if (sig)
             (void)proc_try_wake_locked(t, token.seq, PROC_WAKE_SIGNAL);
+        spin_unlock_irqrestore(&t->park_lock, plf);
         spin_unlock_irqrestore(&proc_lock, lock_flags);
 
         proc_wake_reason_t reason = proc_park_commit(token);
