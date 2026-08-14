@@ -335,7 +335,7 @@ void ext4_release_vn(vnode_t *vn) {
          * and the inode itself now that the last reference is gone. */
         ext4_sb_info_t *sb = p->sb;
         p->unlinked = 0;
-        mutex_lock(&sb->metadata_lock);
+        rw_mutex_write_lock(&sb->metadata_lock);
         ext4_inode_t victim;
         if (ext4_read_inode(sb, p->inode_num, &victim) == 0) {
             ext4_block_truncate(sb, &victim);
@@ -345,7 +345,7 @@ void ext4_release_vn(vnode_t *vn) {
         }
         vfs_drop_time_meta_identity(vn->mnt, p->inode_num);
         ext4_free_inode(sb, p->inode_num);
-        mutex_unlock(&sb->metadata_lock);
+        rw_mutex_write_unlock(&sb->metadata_lock);
     }
     if (vn->fs_data) { kfree(vn->fs_data); vn->fs_data = NULL; }
     if (vn->parent && vn->parent != vn) vnode_put(vn->parent);
@@ -561,9 +561,9 @@ int ext4_vn_link_unlocked(vnode_t *dir, const char *name, vnode_t *target) {
 
 int ext4_vn_link(vnode_t *dir, const char *name, vnode_t *target) {
     ext4_sb_info_t *sb = ((ext4_vnode_priv_t *)dir->fs_data)->sb;
-    mutex_lock(&sb->metadata_lock);
+    rw_mutex_write_lock(&sb->metadata_lock);
     int r = ext4_vn_link_unlocked(dir, name, target);
-    mutex_unlock(&sb->metadata_lock);
+    rw_mutex_write_unlock(&sb->metadata_lock);
     return r;
 }
 
@@ -863,9 +863,13 @@ int ext4_vn_chown(vnode_t *vn, int uid, int gid) {
 int ext4_lookup(vnode_t *dir, const char *name, vnode_t **out)
 {
     ext4_sb_info_t *sb = ((ext4_vnode_priv_t *)dir->fs_data)->sb;
-    mutex_lock(&sb->metadata_lock);
+    /* Read mode: lookup is read-only through the block cache and the
+     * independently locked vnode cache, so cold lookups on different
+     * directories (or names) may run concurrently across CPUs.  It remains
+     * mutually exclusive with every namespace mutation below. */
+    rw_mutex_read_lock(&sb->metadata_lock);
     int r = ext4_lookup_unlocked(dir, name, out);
-    mutex_unlock(&sb->metadata_lock);
+    rw_mutex_read_unlock(&sb->metadata_lock);
     return r;
 }
 
@@ -874,9 +878,9 @@ int ext4_vn_create(vnode_t *dir, const char *name, int mode,
                           vnode_t **out)
 {
     ext4_sb_info_t *sb = ((ext4_vnode_priv_t *)dir->fs_data)->sb;
-    mutex_lock(&sb->metadata_lock);
+    rw_mutex_write_lock(&sb->metadata_lock);
     int r = ext4_vn_create_unlocked(dir, name, mode, out);
-    mutex_unlock(&sb->metadata_lock);
+    rw_mutex_write_unlock(&sb->metadata_lock);
     return r;
 }
 
@@ -884,9 +888,9 @@ int ext4_vn_create(vnode_t *dir, const char *name, int mode,
 int ext4_vn_mkdir(vnode_t *dir, const char *name, int mode)
 {
     ext4_sb_info_t *sb = ((ext4_vnode_priv_t *)dir->fs_data)->sb;
-    mutex_lock(&sb->metadata_lock);
+    rw_mutex_write_lock(&sb->metadata_lock);
     int r = ext4_vn_mkdir_unlocked(dir, name, mode);
-    mutex_unlock(&sb->metadata_lock);
+    rw_mutex_write_unlock(&sb->metadata_lock);
     return r;
 }
 
@@ -895,9 +899,9 @@ int ext4_vn_unlink(vnode_t *dir, const char *name)
 {
     ext4_sb_info_t *sb = ((ext4_vnode_priv_t *)dir->fs_data)->sb;
     vnode_t *deferred = NULL;
-    mutex_lock(&sb->metadata_lock);
+    rw_mutex_write_lock(&sb->metadata_lock);
     int r = ext4_vn_unlink_unlocked(dir, name, &deferred);
-    mutex_unlock(&sb->metadata_lock);
+    rw_mutex_write_unlock(&sb->metadata_lock);
     if (deferred)
         vnode_put(deferred);
     return r;
@@ -908,9 +912,9 @@ int ext4_vn_rmdir(vnode_t *dir, const char *name)
 {
     ext4_sb_info_t *sb = ((ext4_vnode_priv_t *)dir->fs_data)->sb;
     vnode_t *deferred = NULL;
-    mutex_lock(&sb->metadata_lock);
+    rw_mutex_write_lock(&sb->metadata_lock);
     int r = ext4_vn_rmdir_unlocked(dir, name, &deferred);
-    mutex_unlock(&sb->metadata_lock);
+    rw_mutex_write_unlock(&sb->metadata_lock);
     if (deferred)
         vnode_put(deferred);
     return r;
@@ -925,12 +929,12 @@ int ext4_vn_rename(vnode_t *old_dir, const char *old_name,
     ext4_sb_info_t *new_sb = ((ext4_vnode_priv_t *)new_dir->fs_data)->sb;
     if (sb != new_sb)
         return -EXDEV;
-    mutex_lock(&sb->metadata_lock);
+    rw_mutex_write_lock(&sb->metadata_lock);
     vnode_t *deferred = NULL;
     vnode_t *deferred_parent = NULL;
     int r = ext4_vn_rename_unlocked(old_dir, old_name, new_dir, new_name,
                                     flags, &deferred, &deferred_parent);
-    mutex_unlock(&sb->metadata_lock);
+    rw_mutex_write_unlock(&sb->metadata_lock);
     if (deferred)
         vnode_put(deferred);
     if (deferred_parent)
@@ -943,9 +947,9 @@ int ext4_vn_symlink(vnode_t *dir, const char *name,
                            const char *target)
 {
     ext4_sb_info_t *sb = ((ext4_vnode_priv_t *)dir->fs_data)->sb;
-    mutex_lock(&sb->metadata_lock);
+    rw_mutex_write_lock(&sb->metadata_lock);
     int r = ext4_vn_symlink_unlocked(dir, name, target);
-    mutex_unlock(&sb->metadata_lock);
+    rw_mutex_write_unlock(&sb->metadata_lock);
     return r;
 }
 
@@ -953,9 +957,9 @@ int ext4_vn_symlink(vnode_t *dir, const char *name,
 int ext4_vn_truncate(vnode_t *vn, size_t size)
 {
     ext4_sb_info_t *sb = ((ext4_vnode_priv_t *)vn->fs_data)->sb;
-    mutex_lock(&sb->metadata_lock);
+    rw_mutex_write_lock(&sb->metadata_lock);
     int r = ext4_vn_truncate_unlocked(vn, size);
-    mutex_unlock(&sb->metadata_lock);
+    rw_mutex_write_unlock(&sb->metadata_lock);
     return r;
 }
 

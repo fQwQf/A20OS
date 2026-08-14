@@ -41,7 +41,10 @@ struct page_cache_page;
 /* Typical compiler processes have O(100) VMAs.  Keep a compact secondary
  * pointer index for binary-search lookup while retaining the linked list as
  * the ownership and mutation representation. */
-#define MM_VMA_INDEX_CAPACITY 256
+/* rustc/LLVM address spaces routinely exceed the old 256-VMA cutoff; below
+ * that the lookup degraded to a linear scan on every page fault.  1024 keeps
+ * binary search for realistic compiler processes (8 KiB per mm_struct). */
+#define MM_VMA_INDEX_CAPACITY 1024
 
 #ifdef CONFIG_NOMMU
 #define NOMMU_ALLOC_MAX    32
