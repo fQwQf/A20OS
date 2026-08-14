@@ -1,5 +1,7 @@
 #include "net/socket_internal.h"
 
+#include "core/klog.h"
+#include "core/stdio.h"
 #include "core/string.h"
 #include "proc/proc.h"
 #include "drivers/core/driver_class.h"
@@ -238,9 +240,19 @@ static int netlink_uevent_broadcast_locked(const char *action,
 {
     unsigned major = (unsigned)((devt >> 8) & 0xffU);
     unsigned minor = (unsigned)(devt & 0xffU);
+
+    /* Linux assigns every uevent a globally unique, strictly increasing
+     * sequence number.  udevd's event ordering (event_queue_insert,
+     * is_devpath_busy) relies on it: with all-seqnum-zero events the first
+     * queued event is misjudged as "busy" (delaying_seqnum 0 == seqnum 0)
+     * and no worker is ever spawned. */
+    static uint64_t g_uevent_seq;
+    uint64_t seqnum = ++g_uevent_seq;
+
     char buf[256];
     int n = snprintf(buf, sizeof(buf),
         "%s@/class/%s/%s%c"
+        "SEQNUM=%llu%c"
         "ACTION=%s%c"
         "DEVPATH=/class/%s/%s%c"
         "SUBSYSTEM=%s%c"
@@ -248,6 +260,7 @@ static int netlink_uevent_broadcast_locked(const char *action,
         "MINOR=%u%c"
         "DEVNAME=%s/%s%c%c",
         action, subsystem, name, 0,
+        (unsigned long long)seqnum, 0,
         action, 0,
         subsystem, name, 0,
         subsystem, 0,
@@ -260,6 +273,7 @@ static int netlink_uevent_broadcast_locked(const char *action,
     net_sockaddr_nl_t src = {
         .nl_family = AF_NETLINK, .nl_pid = 0, .nl_groups = UEVENT_GROUP,
     };
+    int delivered = 0;
     for (int i = 0; i < NET_MAX_SOCKETS; i++) {
         net_socket_t *s = g_sockets[i];
         if (!s || s->domain != AF_NETLINK ||
@@ -271,7 +285,13 @@ static int netlink_uevent_broadcast_locked(const char *action,
         int r = net_enqueue_msg_locked(s, buf, (size_t)n, &src, sizeof(src));
         if (r < 0)
             return r;
+        delivered++;
     }
+    klog(KLOG_INFO,
+         "[UEVENT] %s %s/%s devt=%u:%u delivered=%d\n",
+         action, subsystem, name,
+         (unsigned)((devt >> 8) & 0xffU), (unsigned)(devt & 0xffU),
+         delivered);
     return 0;
 }
 

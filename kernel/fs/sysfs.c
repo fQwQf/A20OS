@@ -600,13 +600,40 @@ static int sysfs_readlink(vnode_t *vn, char *buf, size_t sz)
     if (!vn || !buf || sz == 0)
         return -EINVAL;
     sysfs_meta_t *dm = (sysfs_meta_t *)vn->fs_data;
-    if (!dm || dm->type != SF_CLASS_DEVICE_SUBSYS)
+    if (!dm)
         return -EINVAL;
-    const char *sub = class_device_subsystem(dm->class_type);
-    if (!sub)
-        return -ENOENT;
-    int n = snprintf(buf, sz, "/sys/class/%s", sub);
-    return (n > 0 && (size_t)n < sz) ? n : -ENAMETOOLONG;
+
+    if (dm->type == SF_CLASS_DEVICE_SUBSYS) {
+        const char *sub = class_device_subsystem(dm->class_type);
+        if (!sub)
+            return -ENOENT;
+        int n = snprintf(buf, sz, "/sys/class/%s", sub);
+        return (n > 0 && (size_t)n < sz) ? n : -ENAMETOOLONG;
+    }
+
+    if (dm->type == SF_DEV_CHAR_ENTRY) {
+        /* /sys/dev/char/<maj>:<min> is a relative symlink to the class
+         * device path, matching the Linux layout where both are links to
+         * the same real /sys/devices path.  libudev's
+         * udev_device_new_from_devnum() resolves this symlink via
+         * util_resolve_sys_link(), and the resulting syspath must equal the
+         * one an enumerate from /sys/class yields — libinput's
+         * evdev_device_have_same_syspath() compares them exactly. */
+        const char *devname = NULL, *subsystem = NULL;
+        uint64_t devt = dm->devt;
+        if (devt == 0)
+            devt = (uint64_t)((uint32_t)dm->loop_idx & 0xffffU);
+        if (sysfs_devchar_name(devt, &devname, &subsystem) < 0)
+            return -ENOENT;
+        if (!devname || !subsystem)
+            return -ENOENT;
+        const char *base = strrchr(devname, '/');
+        base = base ? base + 1 : devname;
+        int n = snprintf(buf, sz, "../../class/%s/%s", subsystem, base);
+        return (n > 0 && (size_t)n < sz) ? n : -ENAMETOOLONG;
+    }
+
+    return -EINVAL;
 }
 
 static vnode_ops_t g_sysfs_vnode_ops = {
