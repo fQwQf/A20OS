@@ -9,6 +9,10 @@
 #include "proc/proc_internal.h"
 
 #define LINUX_POLL_WAIT_TICKS (MS_TO_TICKS(1) ? MS_TO_TICKS(1) : 1)
+#define LINUX_POLL_ACTIVE_YIELDS 2
+
+static int linux_vfile_uses_shared_offset(vfile_t *vf);
+
 static uint64_t linux_poll_wait_quantum(void)
 {
     uint64_t ticks = LINUX_POLL_WAIT_TICKS;
@@ -133,19 +137,21 @@ static int linux_poll_wait_fds(void *fds, int nfds,
     return result;
 }
 
-static int64_t read_into_user(vfile_t *vf, char *buf, size_t count)
+static int64_t read_into_user(vfile_t *vf, char *buf, size_t count, int locked)
 {
     if (!vf)
         return -EBADF;
 
     /*
-     * Always bounce through a kernel buffer and copy to user afterwards.
-     * Writing directly into a user page while a filesystem read path holds a
-     * spinlock can fault in the missing page inside the lock; the fault path
-     * can re-enter the same filesystem read and self-deadlock (LOCK-STALL
-     * owner == waiter).  The bounce copy keeps every user access outside the
-     * locked region.
+     * Read through a kernel buffer and copy to user afterwards, releasing the
+     * shared-offset lock between the two.  copy_to_user() can fault in a
+     * missing page, and if that page backs a mapping of the same file the
+     * fault handler may re-enter the file read and take vf->offset_lock again
+     * - a self-deadlock (LOCK-STALL owner == waiter in sys_read).  The lock
+     * therefore never covers a user access.  `locked` is set when the caller
+     * (pread64) already holds offset_lock for a fixed-offset read.
      */
+    int lock_offset = !locked && linux_vfile_uses_shared_offset(vf);
     int64_t total = 0;
     while ((size_t)total < count) {
         size_t chunk = count - (size_t)total;
@@ -154,7 +160,11 @@ static int64_t read_into_user(vfile_t *vf, char *buf, size_t count)
         char *kbuf = proc_scratch_buffer(chunk);
         if (!kbuf)
             return total > 0 ? total : -ENOMEM;
+        if (lock_offset)
+            mutex_lock(&vf->offset_lock);
         int64_t n = vfs_read_file(vf, kbuf, chunk);
+        if (lock_offset)
+            mutex_unlock(&vf->offset_lock);
         if (n <= 0)
             return total > 0 ? total : n;
         if (copy_to_user(buf + total, kbuf, (size_t)n) < 0)
@@ -166,7 +176,8 @@ static int64_t read_into_user(vfile_t *vf, char *buf, size_t count)
     return total;
 }
 
-static int64_t write_from_user(vfile_t *vf, const char *buf, size_t count)
+static int64_t write_from_user(vfile_t *vf, const char *buf, size_t count,
+                               int locked)
 {
     if (!vf)
         return -EBADF;
@@ -199,6 +210,7 @@ static int64_t write_from_user(vfile_t *vf, const char *buf, size_t count)
         return total;
     }
 
+    int lock_offset = !locked && linux_vfile_uses_shared_offset(vf);
     int64_t total = 0;
     while ((size_t)total < count) {
         size_t chunk = count - (size_t)total;
@@ -209,7 +221,11 @@ static int64_t write_from_user(vfile_t *vf, const char *buf, size_t count)
             return total > 0 ? total : -ENOMEM;
         if (copy_from_user(kbuf, buf + total, chunk) < 0)
             return total > 0 ? total : -EFAULT;
+        if (lock_offset)
+            mutex_lock(&vf->offset_lock);
         int64_t n = vfs_write_file(vf, kbuf, chunk);
+        if (lock_offset)
+            mutex_unlock(&vf->offset_lock);
         if (n <= 0)
             return total > 0 ? total : n;
         total += n;
@@ -221,7 +237,14 @@ static int64_t write_from_user(vfile_t *vf, const char *buf, size_t count)
 
 static int linux_vfile_uses_shared_offset(vfile_t *vf)
 {
-    return vf && vf->vnode && vf->ops && vf->ops->lseek;
+    if (!vf || !vf->vnode || !vf->ops || !vf->ops->lseek)
+        return 0;
+    /* procfs files are excluded: rendering /proc/<pid>/fdinfo locks the
+     * target vfile's offset_lock, and taking vf->offset_lock here first
+     * could recurse on the same lock through that path. */
+    if (vfs_is_procfs_vfile(vf))
+        return 0;
+    return 1;
 }
 
 static int o_direct_check(vfile_t *vf, const char *buf, size_t count)
@@ -250,12 +273,7 @@ int64_t sys_read(int fd, char *buf, size_t count) {
     vfile_t *vf = vfs_get_file_ref((int)gfd);
     int ar = o_direct_check(vf, buf, count);
     if (ar < 0) { vfs_put_file_ref((int)gfd, vf); return ar; }
-    int lock_offset = linux_vfile_uses_shared_offset(vf);
-    if (lock_offset)
-        mutex_lock(&vf->offset_lock);
-    int64_t r = read_into_user(vf, buf, count);
-    if (lock_offset)
-        mutex_unlock(&vf->offset_lock);
+    int64_t r = read_into_user(vf, buf, count, 0);
     vfs_put_file_ref((int)gfd, vf);
     return r;
 }
@@ -268,12 +286,7 @@ int64_t sys_write(int fd, const char *buf, size_t count) {
     vfile_t *vf = vfs_get_file_ref((int)gfd);
     int ar = o_direct_check(vf, buf, count);
     if (ar < 0) { vfs_put_file_ref((int)gfd, vf); return ar; }
-    int lock_offset = linux_vfile_uses_shared_offset(vf);
-    if (lock_offset)
-        mutex_lock(&vf->offset_lock);
-    int64_t r = write_from_user(vf, buf, count);
-    if (lock_offset)
-        mutex_unlock(&vf->offset_lock);
+    int64_t r = write_from_user(vf, buf, count, 0);
     vfs_put_file_ref((int)gfd, vf);
     return r;
 }
@@ -321,7 +334,7 @@ int64_t sys_pread64(int fd, char *buf, size_t count, long off) {
         vfs_put_file_ref((int)gfd, vf);
         return seek_r;
     }
-    int64_t total = read_into_user(vf, buf, count);
+    int64_t total = read_into_user(vf, buf, count, 1);
     long restore_r = vf->ops->lseek(vf, saved, SEEK_SET);
     mutex_unlock(&vf->offset_lock);
     vfs_put_file_ref((int)gfd, vf);
@@ -375,7 +388,7 @@ int64_t sys_pwrite64(int fd, char *buf, size_t count, long off) {
     }
     int saved_flags = vf->flags;
     vf->flags &= ~O_APPEND;
-    int64_t total = write_from_user(vf, buf, count);
+    int64_t total = write_from_user(vf, buf, count, 1);
     vf->flags = saved_flags;
     long restore_r = vf->ops->lseek(vf, saved, SEEK_SET);
     mutex_unlock(&vf->offset_lock);
@@ -386,6 +399,7 @@ int64_t sys_pwrite64(int fd, char *buf, size_t count, long off) {
 }
 
 int64_t sys_writev(int fd, const void *iov, int iovcnt) {
+    if (iovcnt < 0 || iovcnt > 1024) return -EINVAL;
     int64_t gfd = fdtable_get_current(fd);
     if (gfd < 0) return gfd;
     vfile_t *vf = vfs_get_file_ref((int)gfd);
@@ -400,7 +414,7 @@ int64_t sys_writev(int fd, const void *iov, int iovcnt) {
         if (!v.base || v.len == 0) continue;
         int ar = o_direct_check(vf, v.base, v.len);
         if (ar < 0) { total = ar; break; }
-        int64_t n = write_from_user(vf, v.base, v.len);
+        int64_t n = write_from_user(vf, v.base, v.len, 0);
         if (n < 0) { total = n; break; }
         total += n;
         if ((size_t)n < v.len) break;
@@ -412,6 +426,7 @@ int64_t sys_writev(int fd, const void *iov, int iovcnt) {
 }
 
 int64_t sys_readv(int fd, const void *iov, int iovcnt) {
+    if (iovcnt < 0 || iovcnt > 1024) return -EINVAL;
     int64_t gfd = fdtable_get_current(fd);
     if (gfd < 0) return gfd;
     vfile_t *vf = vfs_get_file_ref((int)gfd);
@@ -426,7 +441,7 @@ int64_t sys_readv(int fd, const void *iov, int iovcnt) {
         if (!v.base || v.len == 0) continue;
         int ar = o_direct_check(vf, v.base, v.len);
         if (ar < 0) { total = ar; break; }
-        int64_t n = read_into_user(vf, v.base, v.len);
+        int64_t n = read_into_user(vf, v.base, v.len, 0);
         if (n <= 0) { total = total > 0 ? total : n; break; }
         total += n;
         if ((size_t)n < v.len) break;
@@ -439,7 +454,8 @@ int64_t sys_readv(int fd, const void *iov, int iovcnt) {
 int64_t sys_openat(int dirfd, const char *path, int flags, int mode) {
     if (!path) return -EFAULT;
     char kpath[MAX_PATH_LEN];
-    if (user_strncpy(kpath, path, MAX_PATH_LEN) < 0) return -EFAULT;
+    long pr0 = user_path_strncpy(kpath, path, MAX_PATH_LEN);
+    if (pr0 < 0) return pr0;
     char full[MAX_PATH_LEN];
     int pr = syscall_path_at(dirfd, kpath, full, sizeof(full));
     if (pr < 0) {
@@ -538,10 +554,18 @@ int64_t sys_pipe2(int *pipefd, int flags) {
 }
 
 int64_t sys_ioctl(int fd, unsigned long req, void *arg) {
-    req &= 0xffffffffUL;
-
     int64_t gfd = fdtable_get_current(fd);
     if (gfd < 0) return gfd;
+    return sys_ioctl_gfd(gfd, req, arg);
+}
+
+/* ioctl on an already-resolved global vfile fd.  Shared by the Linux ABI
+ * (sys_ioctl) and the Native ABI (sys_a20_ioctl, which resolves the native
+ * handle to a gfd first). */
+int64_t sys_ioctl_gfd(int64_t gfd, unsigned long req, void *arg)
+{
+    req &= 0xffffffffUL;
+
     if (req == TIOCGPGRP || req == PPC64_TIOCGPGRP) {
         int pgid = uart_get_foreground_pgid();
         return copy_to_user(arg, &pgid, sizeof(pgid)) < 0 ? -EFAULT : 0;
@@ -630,7 +654,8 @@ int64_t sys_truncate(const char *path, long length) {
     if (length < 0) return -EINVAL;
     if (!path) return -EFAULT;
     char kpath[MAX_PATH_LEN];
-    if (user_strncpy(kpath, path, MAX_PATH_LEN) < 0) return -EFAULT;
+    long pr0 = user_path_strncpy(kpath, path, MAX_PATH_LEN);
+    if (pr0 < 0) return pr0;
     return vfs_truncate(kpath, (size_t)length);
 }
 
