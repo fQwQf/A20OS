@@ -153,6 +153,11 @@ typedef struct vnode_ops {
      * instead of repeating the complete writepage path for every 4 KiB. */
     int     (*writepages)(struct vnode *vn, uint64_t index,
                           const void *data, size_t len);
+    /* Optional per-vnode durable flush.  A filesystem provides this to scope
+     * fsync() to its own data and metadata instead of flushing the whole
+     * mount's block cache.  NULL means the VFS falls back to a full mount
+     * block-cache sync. */
+    int     (*sync_vnode)(struct vnode *vn);
     int     (*chmod)(struct vnode *vn, int mode);
     int     (*chown)(struct vnode *vn, int uid, int gid);
     struct vfile *(*open)(struct vnode *vn, int flags);

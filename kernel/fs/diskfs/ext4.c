@@ -1447,6 +1447,7 @@ vnode_ops_t g_ext4_vnode_ops = {
     .readpages = ext4_vn_readpages,
     .writepage = ext4_vn_writepage,
     .writepages = ext4_vn_writepages,
+    .sync_vnode = ext4_vn_sync,
     .chmod    = ext4_vn_chmod,
     .chown    = ext4_vn_chown,
     .open     = ext4_open_vnode,
