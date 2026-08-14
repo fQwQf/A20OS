@@ -117,6 +117,13 @@ readahead 突发与 demand-fault 的 fault-around 共用同一个 16 页（64 Ki
 extent 合并成一次块设备请求而不是两次 64 KiB 往返；匿名/文件 fault-around 保持 16 页，以限制
 每次缺页的内存承诺。低风险常量改动，`vfs_stress`/`mm_stress` 在单核与 SMP8 均 PASS。
 
+### 3.3 后续回合：page cache 写回按 vnode 分锁
+
+单一 `g_page_cache_writeback_lock` 互斥锁让 8 个并发进程的每次 fsync / 缓存压力写回都互相排队，
+即使它们写的是互不相干的文件。`page_cache_writeback_vnode` 改取 64 把按 vnode 哈希的互斥锁
+（同一 vnode 仍串行），全局锁保留给整盘写回（`vn == NULL`）。页级 `fill_lock` 与 dirty-gen
+发布/清除路径不变，block-cache 写序不变量保留。SMP8 `mm_stress`+`vfs_stress` 连续两轮 PASS。
+
 ## 4. 明确不做/暂缓（以及原因）
 
 - **`proc_lock` 拆分（park/wake 按对象分锁 + 切换路径合并获取）**：测量证明它是唯一剩余热点，
