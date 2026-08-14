@@ -424,11 +424,7 @@ proc_wake_reason_t proc_park_commit_donate(proc_wait_token_t token,
     context_switch(donate_to);
 
 out_reason:
-    flags = spin_lock_irqsave(&proc_lock);
-    proc_wake_reason_t reason =
-        task->wait_seq == token.seq ? task->wake_reason : PROC_WAKE_CANCEL;
-    spin_unlock_irqrestore(&proc_lock, flags);
-    return reason;
+    return proc_park_wake_reason_unlocked(task, token.seq);
 }
 
 proc_wake_reason_t proc_park_wait(proc_wait_mode_t mode, uint64_t deadline)

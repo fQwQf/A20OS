@@ -5,7 +5,11 @@
 > 的前提下消除 park/wake 路径的全局锁竞争。
 > 状态：**已实现并验证**（riscv64 单核 smoke 全组 + `-smp 8 thread=multi` 下
 > futex/proc/sched/vfs/mm 压力连续多轮 PASS；loongarch64 编译通过；网络套件与基线逐字节一致）。
-> SMP8 mm_stress 测量：`proc` 竞争从基线 16-30K 区间降到 8.7-19K（中位数约 28K→14K，约 2 倍改善）。
+> **`kernel/proc/park.c` 已完全不再取 `proc_lock`**：prepare/commit/cancel/interrupt/wake/
+> `proc_wake_q_flush`/donate 全部走 `task->park_lock`，`sched()` 返回后的 wake_reason 读取用
+> 无锁原子读（带归因实验证明：park 状态迁出 proc_lock 后，该读的无锁化是净收益，不再是旧代码
+> 里充当背压的负优化）。SMP8 mm_stress 测量：`proc` 竞争从基线 16-30K 降到 5.6-6.7K
+> （futex+proc+mm 合跑约 17-21K），较最初 51K 改善约 4 倍。
 
 ## 1. 现状：为什么所有 park/wake 都挤在 `proc_lock` 上
 
@@ -155,8 +159,17 @@ for each (task, seq):
 - **正确性**：riscv64 单核 smoke 全组 + `-smp 8 thread=multi` 下 `futex_stress`/`proc_stress`/
   `sched_stress`/`mm_stress`/`vfs_stress` 连续多轮 PASS（无丢唤醒导致的挂起）；网络套件与基线
   逐字节一致（DNS/TIMEOUT 两项失败为既有环境/语义问题）；`check-concurrency-foundation` PASS。
-- **性能**：`/proc/a20/lock_contention` 的 `proc` 竞争从 16-30K 降到 8.7-19K。
+- **已知未复现的罕见 flake（非本分支引入的判断）**：约 9 轮组合压力中出现 1 次
+  `vfs_rename_flags` 内 `vnode_put` 的 128B slab 双释放（`cache_idx=2`）。该路径在 vfs/ext4
+  vnode 生命周期层，本分支未触碰 vnode 引用计数；单独 `vfs_stress` 与其余组合轮均通过，385a
+  基线同样未复现。判断为 vfs_rename 的既有罕见 vnode 引用竞态，可能被调度/锁时序扰动暴露；
+  因样本太小无法严格归因，记录在案并建议后续用 fault-injection/长时 vfs 压力单独追查。
+- **性能**：`/proc/a20/lock_contention` 的 `proc` 竞争从 16-30K 降到 5.6-6.7K（mm 单跑）。
 - **架构**：通用代码，loongarch64 编译通过。
 - **风险**：这是全项目最核心的协议；任何一步不满足 §2 不变量都会造成隐藏丢唤醒。已用 A/B 确认
   网络/时间测试无回归，且 `proc_park_finish` 与 `proc_park_commit` 的读路径保留了此前测量得到的
   正确取舍。
+- **剩余 `proc_lock` 来源（测量归因）**：切换发布（`sched()` 内联的 `spin_lock(&proc_lock)`，
+  每次上下文切换 1 次，结构性且移动有损 "neither selected nor owned" 不变量）与 fork/exit 的任务表
+  扫描（O(tasks)，但按进程生命周期触发、频率低）。per-parent 子进程链表与切换发布无锁化均评估为
+  高复杂度/高风险且当前测量价值低，留待正式 BuildStorm 证据再定。
