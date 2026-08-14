@@ -119,6 +119,7 @@ void proc_task_init_common(task_t *t, task_t *parent, uint64_t clone_flags)
     t->park_state = PROC_PARK_IDLE;
     t->wait_mode = PROC_WAIT_UNINTERRUPTIBLE;
     t->wake_reason = PROC_WAKE_NONE;
+    spin_init(&t->park_lock);
     completion_init(&t->vfork_done);
     t->alarm_expire = 0;
     t->itimer_real_interval = 0;
