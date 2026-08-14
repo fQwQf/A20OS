@@ -120,7 +120,10 @@ void proc_wake_child_waiters_locked(task_t *parent)
             continue;
         if (proc_task_tgid(t) != parent_tgid)
             continue;
+        /* proc_lock -> park_lock is the documented order. */
+        uint64_t plf = spin_lock_irqsave(&t->park_lock);
         (void)proc_try_wake_locked(t, t->wait_seq, PROC_WAKE_EVENT);
+        spin_unlock_irqrestore(&t->park_lock, plf);
     }
 }
 
@@ -453,8 +456,10 @@ void proc_force_exit(task_t *t, int exit_code)
              * next syscall/trap boundary.  Uninterruptible waits are left
              * blocked until their resource event; there is no READY fallback.
              */
+            uint64_t plf = spin_lock_irqsave(&t->park_lock);
             (void)proc_try_wake_locked(
                 t, t->wait_seq, PROC_WAKE_TASK_EXIT);
+            spin_unlock_irqrestore(&t->park_lock, plf);
         } else if (t->state == PROC_STOPPED) {
             resume_stopped = 1;
         }

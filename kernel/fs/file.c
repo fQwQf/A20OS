@@ -3,6 +3,7 @@
 
 #include "core/consts.h"
 #include "core/lock.h"
+#include "core/lock_counters.h"
 #include "core/sync.h"
 #include "core/string.h"
 #include "mm/objcache.h"
@@ -76,6 +77,7 @@ static void file_note_free(int fd)
 void file_table_init(void)
 {
     spin_init(&g_file_lock);
+    lock_counters_register(&g_file_lock, "vfile_table");
     obj_cache_init(&g_vfile_cache, "vfile", sizeof(vfile_t), 256);
     memset(g_files, 0, sizeof(g_files));
     memset(g_file_slot_refs, 0, sizeof(g_file_slot_refs));
