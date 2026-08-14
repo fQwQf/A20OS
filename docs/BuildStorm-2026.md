@@ -100,6 +100,19 @@ TCG 多线程 SMP 下用 `mm_stress`、`futex_stress`、`sched_stress`、
    匹配时使用；把 `FUTEX_PRIVATE_FLAG` 传入 wake/requeue/wake_op，PRIVATE 时
    直接以 `pkey=0` 匹配 `(mm, vkey)`（与 Linux 键语义一致，且避免按物理页别名
    误唤醒其他 mm）。共享 futex 的 `wait_wake_shared` 用例仍通过。
+6. **延迟 frame 释放批量归还**：`mm_tlb_invalidate_finish` 的 TLB hold 排空
+   原先每帧单独取一次全局 `pfa.lock`；抽出 `frame_put_locked`（持锁核心）并新增
+   `frame_put_many`，按 64 帧一批只取一次锁。大 munmap/exit 释放数万页时，
+   vCPU 的全局锁竞争与 IRQ 保存/恢复次数同步下降，TLB shootdown 与 refcount
+   语义不变。
+7. **ext4 命名空间锁改为读写锁**：全文件系统单一 `metadata_lock` 互斥锁曾使
+   8 个 rustc 的每次 dcache 未命中查找都互相排队并与 create/unlink 互斥。
+   `ext4_lookup` 只读访问 block cache 与自带锁的 vnode cache，改为读模式；
+   全部变更操作保持写模式。变更与查找仍互斥，锁序（metadata → vcache）与
+   文档化约束不变，写路径不调用 `ext4_lookup` 故不会自我死锁。
+8. **VMA 索引容量 256 → 1024**：rustc/LLVM 地址空间常超 256 个 VMA，超过后
+   每次页错误退化为线性扫描；扩大后编译器进程保持 O(log n) 二分查找
+   （每 mm 仅增加 8 KiB）。
 
 所有性能改动都保留真实 `/proc/uptime` 计时，不跳过编译、不伪造核心数、产物或
 输出。正式计时只覆盖官方的
