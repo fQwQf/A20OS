@@ -244,6 +244,58 @@ void mm_tlb_invalidate_finish(mm_struct_t *mm)
 }
 
 /*
+ * mm_tlb_shootdown_page — remote shootdown for a single PTE change made
+ * outside the mm_tlb_* transaction machinery (COW faults).
+ *
+ * The faulting CPU already flushed the page locally inside the fault path.
+ * Publish the PTE change with a tlb_generation bump so a CPU that left this
+ * address space and re-enters it (ASID hardware) flushes on the way in via
+ * mm_context_enter, then invalidate only the CPUs currently running this
+ * address space (mm->active_cpus) instead of broadcasting to every online
+ * CPU.  On QEMU (no ASID) a CPU that is not active flushed its whole TLB on
+ * the satp switch, so it cannot hold a stale translation.
+ */
+void mm_tlb_shootdown_page(mm_struct_t *mm, vaddr_t addr)
+{
+    if (!mm)
+        return;
+
+    __atomic_add_fetch(&mm->tlb_generation, 1, __ATOMIC_RELEASE);
+    arch_mb();
+
+    uint32_t targets =
+        __atomic_load_n(&mm->active_cpus, __ATOMIC_ACQUIRE) &
+        smp_online_cpu_mask();
+    unsigned current = cpu_current_id();
+    uint32_t flushed = 0;
+    if (current < 32) {
+        /* The faulting CPU already flushed this page locally. */
+        targets &= ~(1U << current);
+        flushed |= 1U << current;
+    }
+
+    if (targets) {
+        if (smp_remote_tlb_flush_supported()) {
+            a20_perf_add(A20_PERF_MM_TLB_REMOTE_CPUS,
+                         (uint64_t)__builtin_popcount(targets));
+            if (smp_remote_tlb_flush(targets, addr, PAGE_SIZE) < 0)
+                panic("mm: targeted COW TLB shootdown failed");
+            flushed |= targets;
+        } else {
+            arch_tlb_flush();
+            flushed = smp_online_cpu_mask();
+        }
+    }
+
+    uint64_t generation = __atomic_load_n(&mm->tlb_generation,
+                                          __ATOMIC_RELAXED);
+    for (unsigned cpu = 0; cpu < CONFIG_NR_CPUS && cpu < 32; cpu++)
+        if (flushed & (1U << cpu))
+            __atomic_store_n(&mm->tlb_cpu_generation[cpu], generation,
+                             __ATOMIC_RELEASE);
+}
+
+/*
  * MM_VMA_PTE_AUDIT:
  * - VMA write paths live in mm_mmap(), mm_mmap_file(), mm_munmap(),
  *   mm_mprotect(), mm_mremap(), mm_brk(), exec loaders, fork(), and exit
