@@ -14,6 +14,10 @@
 #define PCACHE_HASH_BUCKETS 512
 #define PCACHE_FILL_LOCKS   64
 #define BCACHE_READ_BATCH_MAX_PAGES 16
+/* Per-hash-group spinlocks for both the 512-byte and 4 KiB pools.  A warm hit
+ * only takes its bucket lock, never bc->lock, so concurrent metadata lookups
+ * in different buckets do not serialize on the mount-wide lock. */
+#define BCACHE_BUCKET_LOCKS 256
 
 typedef struct bcache_entry {
     uint64_t    lba;
@@ -21,6 +25,9 @@ typedef struct bcache_entry {
     uint64_t    dirty_gen;
     int         ref;
     int         valid;
+    /* Second-chance reference, set on hit under the bucket lock and cleared
+     * by eviction, so hits need not mutate the global LRU. */
+    unsigned char accessed;
     char        data[BCACHE_BLOCK_SIZE];
     struct bcache_entry *prev, *next;
     struct bcache_entry *hnext;
@@ -32,6 +39,7 @@ typedef struct pcache_entry {
     uint64_t dirty_gen;
     int      ref;
     int      valid;
+    unsigned char accessed;
     char     data[PCACHE_PAGE_SIZE];
     struct pcache_entry *prev, *next;
     struct pcache_entry *hnext;
@@ -69,6 +77,7 @@ typedef struct bcache {
     pcache_entry_t   page_lru_tail;
     bcache_entry_t  *hash[BCACHE_HASH_BUCKETS];
     pcache_entry_t  *page_hash[PCACHE_HASH_BUCKETS];
+    spinlock_t       bucket_locks[BCACHE_BUCKET_LOCKS];
 } bcache_t;
 
 typedef struct bcache_stats {
@@ -88,6 +97,11 @@ bcache_entry_t *bcache_get(bcache_t *bc, uint64_t lba);
 void      bcache_release(bcache_entry_t *e);
 void      bcache_mark_dirty(bcache_entry_t *e);
 int       bcache_sync_checked(bcache_t *bc);
+/* Flush only the dirty 4 KiB pages listed in @page_nos (sorted ascending,
+ * deduplicated) plus any dirty 512-byte metadata blocks.  Used by fsync so a
+ * single file's flush does not write the whole mount's dirty block cache. */
+int       bcache_sync_scoped(bcache_t *bc, const uint64_t *page_nos,
+                             size_t count);
 void      bcache_sync(bcache_t *bc);
 void      bcache_invalidate(bcache_t *bc, uint64_t lba);
 
