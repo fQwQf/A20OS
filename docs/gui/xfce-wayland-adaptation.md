@@ -126,6 +126,6 @@ make distro-run ARCH=x86_64 QEMU_GUI_DISPLAY=none
 1. **`drm_mode_get_plane` 结构体越界**：此前给该结构加了 3 个非 UAPI 字段（`possible_crtcs_mask`/`possible_clones_mask`/`type`），`copy_to_user` 按 44 字节写回，溢出 libdrm 栈上 32 字节的 `struct drm_mode_get_plane`，踩掉栈 canary，labwc 启动即在 `drmModeGetPlane` 触发 `__stack_chk_fail`（musl `a_crash`，空写 SIGSEGV）。已改回标准 32 字节 UAPI 结构，plane 的 type 改由属性暴露。
 2. **KMS 对象 ID 冲突**：plane/crtc/connector/encoder 此前都用 id=1。wlroots 的 `get_drm_prop` 用 `DRM_MODE_OBJECT_ANY` 按 ID 反查对象属性，ID 冲突导致它查 plane 时拿到 connector 的 EDID，找不到 plane 的 `type`/`IN_FORMATS`，于是 `Failed to create DRM backend`。已为四类对象分配唯一 ID（connector=1/encoder=2/crtc=3/plane=4），`OBJ_GETPROPERTIES` 改为按唯一 ID 解析（同时兼容 ANY 与具体类型查询），并新增 plane 的 `type=PRIMARY` 属性。
 
-修复后发行版路径实测（riscv64 QEMU）：合成器不再崩溃，DRM 后端创建成功，`Virtual-1` modeset 1024x768，`WAYLAND_DISPLAY=wayland-0` 起来，labwc autostart 拉起 XFCE 会话（Xfconf/xfsettingsd 激活，窗口 `wlr_surface` 陆续映射）。
+修复后发行版路径实测（riscv64 QEMU）：合成器不再崩溃，DRM 后端创建成功，`Virtual-1` modeset 1024x768，`WAYLAND_DISPLAY=wayland-0` 起来，labwc autostart 拉起 XFCE 会话（Xfconf/xfsettingsd 激活，窗口 `wlr_surface` 陆续映射）。输入已打通：eudev 把 `ID_INPUT_*` 写进数据库，libinput 枚举到 event0/event1 并配置成键盘鼠标。
 
-发行版路径的**未完成事项、根因定位与继续排查笔记**（输入设备 udev 规则引擎、 间歇性读路径自死锁、测试环境注意点）统一维护在 [`docs/distro/known-issues.md`](../distro/known-issues.md)，本文档不再重复。
+发行版路径的**已知问题与排查笔记**（含已解决的输入 ABI 缺口与读路径自死锁的 根因、遗留的 dbus 偶发超时、测试环境注意点）统一维护在 [`docs/distro/known-issues.md`](../distro/known-issues.md)，本文档不再重复。
