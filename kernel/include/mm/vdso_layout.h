@@ -1,5 +1,6 @@
 /*
- * RISC-V64 vDSO fixed user-VA layout.
+ * vDSO fixed user-VA layout (riscv64 and loongarch64; both keep a 64-bit
+ * user address space so the same addresses fit below their stack limits).
  *
  * Keep this header preprocessor-only: it is shared by kernel C and the
  * user-space vDSO assembly image.  The vDSO area sits below the lowest
