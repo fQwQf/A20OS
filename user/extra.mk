@@ -50,6 +50,15 @@ MCM_OUTPUT   := $(USER_DIR)/external/toolchain/musl-cross-make/output
 RUST_INSTALL := $(OBJ_DIR)/rust
 RUST_STAMP   := $(STAMP_DIR)/.rust-built
 RUST_SYSROOT := $(RUST_INSTALL)/a20-sysroot
+LAMINA_SRC         := $(USER_DIR)/external/toolchain/Lamina1
+LAMINA_BUILD       := $(OBJ_DIR)/lamina
+LAMINA_WORK_SRC    := $(LAMINA_BUILD)/src
+LAMINA_TOOLCHAIN   := $(EXTRA_DIR)/lamina-toolchain-riscv64.cmake
+LAMINA_CROSS_CC    := riscv64-linux-gnu-gcc
+LAMINA_CROSS_CXX   := riscv64-linux-gnu-g++
+LAMINA_CROSS_STRIP := riscv64-linux-gnu-strip
+LAMINA_BIN         := $(BUILD_DIR)/lamina
+LAMINA_STAMP       := $(STAMP_DIR)/.lamina-built
 
 # ----------------------------------------------------------------
 # Toolchain (mirrors user/Makefile)
@@ -134,7 +143,7 @@ GCC_AVAILABLE := $(if $(and $(filter riscv64,$(ARCH)), \
                             $(wildcard $(GCC_SRC)/configure), \
                             $(wildcard $(MCM_OUTPUT)/bin/riscv64-linux-musl-gcc)),1)
 
-VALID_PACKAGES := vim git gcc cc rust rustc cargo rustfmt
+VALID_PACKAGES := vim git gcc cc rust rustc cargo rustfmt lamina
 UNKNOWN_PACKAGES := $(filter-out $(VALID_PACKAGES),$(PACKAGES))
 ifneq ($(strip $(UNKNOWN_PACKAGES)),)
 $(error Unknown extra package(s): $(UNKNOWN_PACKAGES); expected: $(VALID_PACKAGES))
@@ -144,7 +153,8 @@ REQUESTED_TARGETS := $(sort \
   $(if $(filter vim,$(PACKAGES)),vim) \
   $(if $(filter git,$(PACKAGES)),git) \
   $(if $(filter gcc cc,$(PACKAGES)),gcc) \
-  $(if $(and $(filter riscv64,$(ARCH)),$(filter rust rustc cargo rustfmt,$(PACKAGES))),rust))
+  $(if $(and $(filter riscv64,$(ARCH)),$(filter rust rustc cargo rustfmt,$(PACKAGES))),rust) \
+  $(if $(filter lamina,$(PACKAGES)),lamina))
 
 # ================================================================
 # vim
@@ -341,6 +351,80 @@ cargo: rust
 rustfmt: rust
 
 # ================================================================
+# lamina (Lamina1 language toolchain: compiler + register VM)
+# ================================================================
+# Lamina1 is a C++23/CMake project (compiler/ + runtime/ plus the dyncall
+# and LMCAS submodules) providing the `lamina` CLI.  There is no musl C++
+# standard library in the build environment, so we cross-build with the
+# host Debian riscv64 glibc toolchain (riscv64-linux-gnu-g++).
+#
+# lamina is shipped as a DYNAMIC executable: its runtime loads the stdlib
+# module "laminaCore" through dlopen() at runtime, which cannot work in a
+# fully static binary (glibc >= 2.34 rejects dlopen in static binaries).
+# The executable and its four shared libraries (laminaCore, lmcas, lmmc,
+# LammpCore) are therefore copied together into $(BUILD_DIR) and installed
+# side by side on the extra disk; the glibc runtime itself is already
+# staged for the rust package (see tools/targets-extra.mk).
+#
+# The toolchain file (lamina-toolchain-riscv64.cmake) links every object
+# with -Wl,--disable-new-dtags so rpaths become DT_RPATH, which glibc's
+# dlopen() honors — the ModuleLoader then finds liblaminaCore.so in the
+# same directory as the lamina binary via $ORIGIN.
+#
+# The upstream Release block injects '-march=native' (rejected by the
+# riscv64 backend), so we build with MinSizeRel.  Sources are copied to
+# the obj dir first, keeping the vendored tree pristine (same pattern as
+# the vim/git recipes).  The build is serial: the LMCAS/LAMMP C++ TU
+# chain is memory-hungry and parallel jobs OOM the build host.
+#
+# Currently supported only on riscv64 (glibc cross C++ toolchain); other
+# architectures skip lamina gracefully so the extra image still builds.
+LAMINA_AVAILABLE := $(if $(and $(filter riscv64,$(ARCH)), \
+                               $(wildcard $(LAMINA_SRC)/CMakeLists.txt), \
+                               $(wildcard $(LAMINA_SRC)/external/LMCAS/CMakeLists.txt), \
+                               $(wildcard $(LAMINA_SRC)/external/dyncall/CMakeLists.txt), \
+                               $(shell command -v $(LAMINA_CROSS_CXX) 2>/dev/null)),1)
+
+$(LAMINA_BIN): $(LAMINA_STAMP)
+	@mkdir -p $(BUILD_DIR)
+	cp $(LAMINA_BUILD)/lamina $@
+	@for so in $$(find $(LAMINA_BUILD) \( -name 'liblaminaCore.so*' -o -name 'liblmcas.so*' -o -name 'liblmmc.so*' -o -name 'libLammpCore.so*' \)); do \
+		cp -P "$$so" "$(BUILD_DIR)/$$(basename "$$so")"; \
+	done
+	@for so in /usr/riscv64-linux-gnu/lib/libstdc++.so.6*; do \
+		cp -P "$$so" "$(BUILD_DIR)/$$(basename "$$so")"; \
+	done
+	@find $(BUILD_DIR) -maxdepth 1 \( -name 'liblaminaCore.so*' -o -name 'liblmcas.so*' -o -name 'liblmmc.so*' -o -name 'libLammpCore.so*' -o -name 'libstdc++.so*' \) -type f -exec $(LAMINA_CROSS_STRIP) {} \; 2>/dev/null || true
+	$(LAMINA_CROSS_STRIP) $@ 2>/dev/null || true
+	@echo "[EXTRA] lamina + shared libs -> $(BUILD_DIR)"
+
+$(LAMINA_STAMP): $(EXTRA_MAKEFILE) $(LAMINA_TOOLCHAIN)
+ifeq ($(LAMINA_AVAILABLE),)
+	@echo "[EXTRA] lamina unavailable: needs ARCH=riscv64, $(LAMINA_CROSS_CXX) and the Lamina1 tree with dyncall/LMCAS submodules; skipping lamina"
+	@mkdir -p $(STAMP_DIR)
+	@touch $@
+else
+	@mkdir -p $(LAMINA_BUILD) $(STAMP_DIR)
+	@echo "[EXTRA] Building lamina for $(ARCH)..."
+	@rm -rf $(LAMINA_WORK_SRC)
+	@mkdir -p $(LAMINA_WORK_SRC)
+	@cp -a $(LAMINA_SRC)/. $(LAMINA_WORK_SRC)/
+	cd $(LAMINA_BUILD) && cmake -S $(LAMINA_WORK_SRC) -B . \
+	  -DCMAKE_TOOLCHAIN_FILE=$(LAMINA_TOOLCHAIN) \
+	  -DCMAKE_BUILD_TYPE=MinSizeRel \
+	  -DLMX_BUILD_TESTS=OFF \
+	  -DLMCAS_BUILD_STANDALONE_TESTS=OFF -DLMCAS_BUILD_BENCHMARKS=OFF \
+	  -DLMMC_BUILD_TESTS=OFF -DLMMC_BUILD_EXAMPLES=OFF \
+	  -DDYNCALL_BUILD_TESTS=OFF -DDYNCALL_BUILD_EXAMPLES=OFF
+	cmake --build $(LAMINA_BUILD) --target lamina
+	@for so in liblaminaCore.so liblmcas.so.2 liblmmc.so libLammpCore.so.1; do \
+		[ -n "$$(find $(LAMINA_BUILD) -name "$$so" | head -1)" ] || \
+		{ echo "[EXTRA] ERROR: $$so not produced by the Lamina1 build" >&2; exit 1; }; \
+	done
+	@touch $@
+endif
+
+# ================================================================
 # Top-level targets
 # ================================================================
 all: $(REQUESTED_TARGETS)
@@ -348,8 +432,9 @@ all: $(REQUESTED_TARGETS)
 vim: $(if $(VIM_AVAILABLE),$(VIM_BIN))
 git: $(if $(GIT_AVAILABLE),$(GIT_BIN))
 gcc: $(if $(GCC_AVAILABLE),$(GCC_BIN) $(CC_BIN))
+lamina: $(if $(LAMINA_AVAILABLE),$(LAMINA_BIN))
 
 clean:
 	rm -rf $(BUILD_ROOT)
 
-.PHONY: all vim git gcc rust rustc cargo rustfmt clean musl_check
+.PHONY: all vim git gcc rust rustc cargo rustfmt lamina clean musl_check

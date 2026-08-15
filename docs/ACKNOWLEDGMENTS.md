@@ -39,6 +39,7 @@ A20OS 使用并参考了许多开源项目与公开标准。本文档集中记�
 | [binutils](https://www.gnu.org/software/binutils/) | 二进制工具 | GPL-3.0-or-later / LGPL-3.0-or-later 等，按组件文件核验 | `user/external/toolchain/binutils` |
 | [Rust 工具链](https://www.rust-lang.org/) | Rust 用户态编译 | 由实际取得的工具链分发确定 | `user/external/rust`（审计基线 `e33c3219` 未跟踪该工具链内容） |
 | [musl-cross-make](https://github.com/richfelker/musl-cross-make) | 交叉编译工具链构建 | MIT | `user/external/toolchain/musl-cross-make` |
+| [Lamina1](https://github.com/Lamina-dev/Lamina1) | 数学 DSL 语言工具链（编译器 + 寄存器 VM） | 根目录暂无 LICENSE 文本，按实际取得源码核验；子模块 LMCAS/LAMMP 为 LGPL-2.1，dyncall 为逐文件 BSD 风格 | `user/external/toolchain/Lamina1` |
 | [zlib](https://github.com/madler/zlib) | 压缩库 | Zlib | `user/external/libs/zlib` |
 | [Breeze](https://invent.kde.org/plasma/breeze) | 桌面图标/主题资源 | 多种 GPL/LGPL 版本，按资源文件核验 | `user/external/gui/breeze` |
 
