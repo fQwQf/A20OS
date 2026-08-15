@@ -36,8 +36,9 @@ typedef struct arch_ucontext {
     uintptr_t         uc_link;
     arch_stack_t      uc_stack;
     arch_sigset_t     uc_sigmask;
+    uint64_t          uc_sigmask_pad[15]; /* 8 + 120 = 128 bytes, matches sigset_t */
     uint64_t          uc_pad;
-    arch_sigcontext_t uc_mcontext;
+    arch_sigcontext_t uc_mcontext;        /* offset 176, matches musl ucontext_t */
 } __attribute__((aligned(16))) arch_ucontext_t;
 
 typedef struct {
