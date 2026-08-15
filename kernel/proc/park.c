@@ -67,6 +67,7 @@ int proc_try_wake_locked_common(task_t *task, uint64_t seq,
          */
         proc_runq_enqueue_locked(task);
         if (task->on_rq) {
+            target_cpu = task->cpu_id;
             int priority_preempt =
                 proc_sched_should_preempt_locked(task, target_cpu);
             if (target_cpu != cpu_current_id()) {

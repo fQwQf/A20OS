@@ -478,9 +478,11 @@ void proc_exec_terminate_siblings(task_t *self)
     int self_tgid = proc_task_tgid(self);
     int pids[128];
     int pid_count;
+    int active;
 
     do {
         pid_count = 0;
+        active = 0;
         uint64_t flags = spin_lock_irqsave(&proc_lock);
         for (task_t *t = proc_first_task_locked(); t;
              t = proc_next_task_locked(t)) {
@@ -489,6 +491,7 @@ void proc_exec_terminate_siblings(task_t *self)
                 continue;
             if (proc_task_tgid(t) != self_tgid)
                 continue;
+            active = 1;
             if (__atomic_load_n(&t->exit_pending, __ATOMIC_ACQUIRE))
                 continue;
             if (pid_count == (int)(sizeof(pids) / sizeof(pids[0])))
@@ -504,7 +507,9 @@ void proc_exec_terminate_siblings(task_t *self)
                 proc_put(sibling);
             }
         }
-    } while (pid_count == (int)(sizeof(pids) / sizeof(pids[0])));
+        if (active)
+            proc_yield();
+    } while (active);
 }
 
 void proc_exit_group(int exit_code)

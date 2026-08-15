@@ -391,6 +391,10 @@ const struct drv_export drv_export_table[] = {
      * exported or the loader rejects the module with an unresolved symbol. */
     { "kallsyms_lookup",     (void *)kallsyms_lookup },
     { "kallsyms_print",      (void *)kallsyms_print },
+#if defined(CONFIG_LOONGARCH64)
+    { "arch_ram_range_count", (void *)arch_ram_range_count },
+    { "arch_ram_range",       (void *)arch_ram_range },
+#endif
     { "arch_virtio_blk_probe", (void *)arch_virtio_blk_probe },
     { "arch_virtio_net_probe", (void *)arch_virtio_net_probe },
 #if defined(CONFIG_X86_64)

@@ -224,7 +224,7 @@ check-timeout-ownership-boundary:
 	@rg -q "PROC_PARK_PREPARE_TIMEOUT_CAPACITY" \
 		kernel/include/proc/park.h kernel/proc/park.c kernel/proc/timer_heap.c
 	@rg -q "wait_timer_duplicate_rejections" kernel/proc/timer_heap.c
-	@rg -Uq 'proc_try_wake_locked\(timer\.task,[[:space:]]*timer\.wait_seq' \
+	@rg -Uq 'proc_try_wake_locked_common\([[:space:]]*t,[[:space:]]*expired\[i\]\.seq' \
 		kernel/proc/timer_heap.c
 	@rg -q "timeout_heap_violations" \
 		kernel/include/proc/lifetime.h kernel/proc/lifetime.c
