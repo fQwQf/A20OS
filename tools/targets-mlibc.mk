@@ -42,7 +42,7 @@ $(MLIBC_CHILD_BIN): $(MLIBC_SYSROOT)/lib/libc.a user/tests/test_mlibc_child.c us
 mlibc-hello-rv: $(MLIBC_HELLO_BIN) $(MLIBC_CHILD_BIN)
 
 smoke-mlibc:
-	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
 	$(MAKE) ARCH=riscv64 NOMMU=0 mlibc-hello-rv
 	mcopy -o -i $(FAT32_IMG) $(MLIBC_HELLO_BIN) ::/mlibc-hello-rv
 	mcopy -o -i $(FAT32_IMG) $(MLIBC_CHILD_BIN) ::/mlibc-child-rv
@@ -68,7 +68,7 @@ smoke-mlibc:
 	fi
 
 smoke-native-libc:
-	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/native-libc-riscv64.log"; \

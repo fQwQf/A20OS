@@ -7,10 +7,10 @@
 
 % ==================== 基本信息 ====================
 \title{A20OS：高性能混合内核操作系统}
-\subtitle{2026 全国大学生计算机系统能力大赛 \\ OS 内核实现赛道 · 初赛进展汇报}
+\subtitle{2026 全国大学生计算机系统能力大赛 \\ OS 内核实现赛道 · 参赛汇报}
 \author{AAAAAAAAAAAAAAAAAAAA}
 \institute{武汉大学}
-\date{2026/6/30}
+\date{2026/8}
 
 % ==================== WHU-Beamer 模板 ====================
 \usepackage[
@@ -69,12 +69,13 @@
             \begin{itemize}
                 \item \high{混合内核}：宏内核执行效率 + 微内核逻辑抽象
                 \item \high{双重 ABI}：高保真 Linux 兼容 + 面向未来的 Native ABI
-                \item \high{跨平台}：QEMU 四架构 + VisionFive 2 / LS2K1000
-                \item \high{工程化}：严格的锁契约、压力测试与多架构构建门禁
+                \item \high{八大平台}：7 个 hosted 架构 + ARMv7-M MCU，VisionFive 2 / LS2K1000
+                \item \high{完整桌面}：XFCE Wayland 桌面 + LVGL 桌面 + 3D 图形
+                \item \high{工程化}：严格锁契约、并发门禁与多架构构建矩阵
             \end{itemize}
             \vspace{0.5em}
             \begin{block}{核心目标}
-                探索现代操作系统架构边界，在兼容性、并发安全与内存效率上取得平衡。
+                探索现代操作系统架构边界，在兼容性、并发安全与内存效率上取得平衡——从 MCU 到完整桌面。
             \end{block}
         \end{column}
         \begin{column}{0.42\textwidth}
@@ -87,13 +88,15 @@
                     mm/.style={box, fill=ThemeColor!30}
                 ]
                     \node[hybrid] (hybrid) at (0,0) {Hybrid Kernel};
-                    \node[abi] (linux) at (-2.1,-1.5) {Linux ABI};
-                    \node[abi] (native) at (2.1,-1.5) {Native ABI};
+                    \node[abi] (linux) at (-2.1,-1.5) {Linux ABI\\343 syscalls};
+                    \node[abi] (native) at (2.1,-1.5) {Native ABI\\134 syscalls};
                     \node[mm] (mm) at (0,-3) {VMO/VMAR + Page Cache};
+                    \node[mm] (sched) at (0,-4.5) {EEVDF 调度器};
                     \draw[-{Stealth}, thick, ThemeColor] (hybrid) -- (linux);
                     \draw[-{Stealth}, thick, ThemeColor] (hybrid) -- (native);
                     \draw[-{Stealth}, thick, ThemeColor] (linux) -- (mm);
                     \draw[-{Stealth}, thick, ThemeColor] (native) -- (mm);
+                    \draw[-{Stealth}, thick, ThemeColor] (mm) -- (sched);
                 \end{tikzpicture}
             \end{center}
         \end{column}
@@ -101,7 +104,35 @@
 \end{frame}
 
 \begin{frame}
-    \frametitle{初赛完成度速览}
+    \frametitle{从初赛到现在：能力跃迁}
+    \begin{table}
+        \centering
+        \footnotesize
+        \renewcommand{\arraystretch}{1.2}
+        \begin{tabular}{lcc}
+            \toprule
+            \textbf{维度} & \textbf{初赛} & \textbf{当前} \\
+            \midrule
+            内核规模 & 约 18 万行 / 800+ 文件 & \high{约 21.6 万行 / 950+ 文件} \\
+            支持架构 & 4 个 & \high{7 hosted + ARMv7-M MCU} \\
+            Linux ABI & 部分 syscall & \high{343 全表覆盖 + 现代 syscall} \\
+            Native ABI & 90 syscall & \high{134 syscall + 深化} \\
+            调度器 & 8 级 MLFQ & \high{EEVDF + 空闲窃取} \\
+            桌面 & -- & \high{XFCE Wayland + LVGL + 3D} \\
+            发行版引导 & -- & \high{Alpine rootfs 直跑} \\
+            混合内核服务 & -- & \high{svcmgr / 用户态驱动 / KEP} \\
+            决赛 BuildStorm & -- & \high{RISC-V 1483s / LoongArch 1399s} \\
+            \bottomrule
+        \end{tabular}
+    \end{table}
+    \vspace{0.3em}
+    \begin{center}
+        \small 从“能启动、能跑几个程序”进化到\high{可跑完整桌面与发行版、可跑决赛高性能负载}的通用内核。
+    \end{center}
+\end{frame}
+
+\begin{frame}
+    \frametitle{完成度速览}
     \begin{table}
         \centering
         \renewcommand{\arraystretch}{1.25}
@@ -110,18 +141,20 @@
             \toprule
             \textbf{维度} & \textbf{状态} & \textbf{关键指标} \\
             \midrule
-            内核代码规模 & 完成 & \high{约 18 万行} / 800 余个源文件 \\
-            支持架构 & 完成 & \high{RISC-V / ARM64 / x86\_64 / LoongArch} \\
-            Linux ABI 兼容 & 基本完成 & musl / git / vim / gcc / fastfetch / mksh \\
-            SMP 并发 & 完成 & NR\_CPUS $>$ 1 通过压力门禁 \\
-            Native ABI & 完成 & \high{109 个原生 syscall} 入口 \\
-            网络栈 & 完成 & lwIP + virtio-net 事件驱动 \\
+            内核代码规模 & 完成 & \high{约 21.6 万行} / 950 余个源文件 \\
+            支持架构 & 完成 & \high{7 个 hosted 架构} + ARMv7-M MCU \\
+            Linux ABI 兼容 & 完成 & \high{343 个 syscall} 全表覆盖，无未实现空位 \\
+            SMP 并发 & 完成 & per-CPU EEVDF + 锁契约，8 核压力门禁 \\
+            Native ABI & 完成 & \high{134 个原生 syscall} + Pager/monitor 深化 \\
+            桌面环境 & 完成 & XFCE Wayland + LVGL 桌面 + 3D (virgl) \\
+            网络栈 & 完成 & lwIP + virtio-net 事件驱动 + DHCP \\
+            混合内核服务 & 完成 & 服务监管者 / 用户态驱动 / 资源隔离 \\
             \bottomrule
         \end{tabular}
     \end{table}
     \vspace{0.3em}
     \begin{center}
-        \small 核心原创代码位于 \code{kernel/}，用户态工具与第三方协议栈已明确区分。
+        \small 核心原创代码位于 \code{kernel/}，第三方协议栈（musl/lwIP）明确隔离在 \code{user/external/}。
     \end{center}
 \end{frame}
 
@@ -137,14 +170,15 @@
                     \toprule
                     \textbf{模块} & \textbf{代码行数} \\
                     \midrule
-                    arch / HAL & 30k+ \\
-                    mm / 内存管理 & 22k+ \\
-                    fs / 文件系统 & 18k+ \\
-                    proc / 调度 & 15k+ \\
-                    abi / 系统调用 & 14k+ \\
-                    drivers / 驱动 & 12k+ \\
-                    net / 网络 & 8k+ \\
-                    core / 基础设施 & 6k+ \\
+                    fs / 文件系统 & 28k+ \\
+                    drivers+drvmod / 驱动 & 30k+ \\
+                    arch+HAL / platform & 24k+ \\
+                    abi / 系统调用 & 20k+ \\
+                    mm / 内存管理 & 9k+ \\
+                    proc / 调度 & 8k+ \\
+                    ipc / Channel/EventQ & 6k+ \\
+                    net / 网络 & 6k+ \\
+                    core / 基础设施 & 3k+ \\
                     \bottomrule
                 \end{tabular}
             \end{table}
@@ -152,46 +186,144 @@
         \begin{column}{0.42\textwidth}
             \begin{block}{工程亮点}
                 \begin{itemize}
-                    \item 统一 \code{Makefile} 跨架构构建矩阵
+                    \item 统一 \code{Makefile} 七架构构建矩阵
                     \item 文档化锁契约与并发门禁
                     \item 内核/外部代码严格目录隔离
+                    \item 可选 \code{ccache} 透明加速
                 \end{itemize}
             \end{block}
         \end{column}
     \end{columns}
 \end{frame}
 
+\begin{frame}
+    \frametitle{跨平台硬件矩阵}
+    \begin{columns}
+        \begin{column}{0.5\textwidth}
+            \begin{block}{QEMU 虚拟平台（8 个）}
+                \begin{itemize}
+                    \item \high{RISC-V 64} / \high{LoongArch 64}（决赛双架构）
+                    \item ARM64 / x86\_64 / ARM32 / RISC-V 32 / PPC64LE
+                    \item ARMv7-M（STM32 模拟）
+                    \item 全架构 SMP 子集已验证
+                \end{itemize}
+            \end{block}
+        \end{column}
+        \begin{column}{0.47\textwidth}
+            \begin{block}{真实硬件与虚拟机}
+                \begin{itemize}
+                    \item 星光 2（StarFive VisionFive 2）
+                    \item 龙芯 LS2K1000
+                    \item 普中玄武 STM32F103ZET6（NOMMU MCU）
+                    \item \high{VirtualBox}（x86\_64 / aarch64，UEFI + ACPI）
+                \end{itemize}
+            \end{block}
+            \begin{alertblock}{NOMMU 支持}
+                riscv64 / riscv32 / aarch64 / arm32 / armv7m 均支持 NOMMU 构建，验证矩阵 \code{smoke-arch-mmu-matrix}。
+            \end{alertblock}
+        \end{column}
+    \end{columns}
+    \vspace{0.3em}
+    \begin{center}
+        \small 决赛提交 \code{make all} 直接产出 \code{kernel-rv} / \code{kernel-la} / \code{disk.img} / \code{disk-la.img}。
+    \end{center}
+\end{frame}
+
 % ==================== 核心架构 ====================
 \section{核心架构}
 
 \begin{frame}
-    \frametitle{双重 ABI 架构}
+    \frametitle{双重 ABI：一个内核、两套接口}
     \begin{columns}
         \begin{column}{0.48\textwidth}
-            \begin{alertblock}{Linux ABI 兼容层}
-                \code{kernel/abi/linux/}
+            \begin{alertblock}{Linux ABI 兼容层 \code{kernel/abi/linux/}}
                 \begin{itemize}
-                    \item 高保真 POSIX/Linux 系统调用
-                    \item \code{openat2}、\code{renameat2} 复杂边界语义
-                    \item 高级 Futex、调度策略与亲和性
+                    \item \high{343 个 syscall}，四条主线架构编号全表覆盖
+                    \item 覆盖现代 syscall：\code{mseal}、\code{io\_uring}、\code{landlock}、\code{pidfd}、\code{userfaultfd}、\code{perf\_event\_open}
+                    \item 直接运行 musl 生态与完整发行版
                 \end{itemize}
             \end{alertblock}
         \end{column}
         \begin{column}{0.48\textwidth}
-            \begin{exampleblock}{Native ABI 能力层}
-                \code{kernel/abi/native/}
+            \begin{exampleblock}{Native ABI 能力层 \code{kernel/abi/native/}}
                 \begin{itemize}
-                    \item 基于 Capability 的对象句柄
-                    \item VMO/VMAR、Channel、EventQ
-                    \item \high{109 个}原生 syscall 入口
+                    \item \high{134 个原生 syscall}，基于 Capability 的对象句柄
+                    \item VMO/VMAR、Channel、EventQ、Pager
+                    \item 面向下一代安全内核 API
                 \end{itemize}
             \end{exampleblock}
         \end{column}
     \end{columns}
     \vspace{0.5em}
     \begin{block}{设计价值}
-        既保留 Linux 用户态生态（musl、git、vim），又为下一代安全内核 API 提供演进底座。
+        既有 Linux 用户态生态（musl、git、vim、gcc、Alpine），又为下一代安全内核 API 提供演进底座。
     \end{block}
+\end{frame}
+
+\begin{frame}
+    \frametitle{混合内核架构形态}
+    \begin{center}
+        \begin{tikzpicture}[
+            scale=0.78, transform shape,
+            layer/.style={draw, rounded corners, minimum width=11.6cm, font=\small, align=center},
+            usr/.style={layer, fill=ThemeColor!12},
+            ker/.style={layer, fill=ThemeColor!28},
+            com/.style={layer, fill=ThemeColor!8}
+        ]
+            \node[usr] (usr) at (0,0.9) {用户态服务层（可崩溃、可重启）\\
+                svcmgr（监管）· rtcd（RTC）· ubd（virtio-blk）· uinputd（virtio-input）· shmringd};
+            \node[ker] (ker) at (0,-1.1) {混合内核层（性能关键路径）\\
+                EEVDF 调度 · MM（VMO·VMAR·缺页）· VFS 核心 · Page Cache · Channel·EventQ · lwIP TCP 数据面};
+            \node[com] (com) at (0,-3.1) {兼容层：Linux ABI（343 syscall）+ vDSO 零陷入快路径};
+            \draw[<->, thick, ThemeColor] (usr) -- (ker);
+            \draw[<->, thick, ThemeColor] (ker) -- (com);
+        \end{tikzpicture}
+    \end{center}
+    \vspace{0.3em}
+    \begin{center}
+        \small 判定规则：\high{高频 / 延迟敏感路径留在内核}；\high{崩溃频繁、协议解析类工作迁到用户态服务}。
+    \end{center}
+\end{frame}
+
+\begin{frame}
+    \frametitle{分层原则：内部实现 $\otimes$ ABI 薄包装}
+    \begin{columns}
+        \begin{column}{0.55\textwidth}
+            \begin{itemize}
+                \item 调度、MM/VMA、VFS、页缓存等状态归属\high{内部核心层}，与 ABI 无关
+                \item ABI 层只做\high{线格式翻译}，内部 API 单向依赖
+                \item 内部 IPC 头位于 \code{kernel/include/ipc/}，不包含任何 \code{abi/} 内容
+                \item Linux 线格式常量由 \code{kernel/include/core/*.h} 自持
+            \end{itemize}
+            \vspace{0.4em}
+            \begin{block}{收益}
+                任意新 ABI（含 Linux）直接包装内部机制即可受益，无需复制实现。
+            \end{block}
+        \end{column}
+        \begin{column}{0.42\textwidth}
+            \begin{center}
+                \begin{tikzpicture}[
+                    scale=0.63, transform shape,
+                    box/.style={draw, rounded corners, minimum height=0.9cm, font=\tiny, align=center},
+                    a/.style={box, fill=ThemeColor!10},
+                    b/.style={box, fill=ThemeColor!25}
+                ]
+                    \node[a] (u) at (0,0) {用户态\\syscall};
+                    \node[b] (abi) at (3.0,0) {ABI 层\\薄包装};
+                    \node[b] (core) at (6.0,0) {内部实现\\自包含};
+                    \draw[-{Stealth}, thick, ThemeColor] (u) -- (abi)
+                        node[midway, above, font=\tiny] {线格式};
+                    \draw[-{Stealth}, thick, ThemeColor] (abi) -- (core)
+                        node[midway, above, font=\tiny] {内部 API};
+                    \node[a] (ex1) at (0,-1.5) {openat() $\rightarrow$ fd};
+                    \node[a] (ex2) at (3.0,-1.5) {path\_open() $\rightarrow$ handle};
+                    \node[b] (ex3) at (6.0,-1.5) {同一 VFS 底座};
+                    \draw[-{Stealth}, thick, gray] (ex1) -- (ex3);
+                    \draw[-{Stealth}, thick, gray] (ex2) -- (ex3);
+                \end{tikzpicture}
+            \end{center}
+        \end{column}
+    \end{columns}
 \end{frame}
 
 \begin{frame}
@@ -199,8 +331,8 @@
     \begin{center}
         \begin{tikzpicture}[
             scale=0.72, transform shape,
-            node distance=0.25cm,
-            box/.style={draw, rounded corners, minimum width=1.6cm, minimum height=0.55cm, font=\tiny, align=center},
+            node distance=0.22cm,
+            box/.style={draw, rounded corners, minimum width=1.55cm, minimum height=0.55cm, font=\tiny, align=center},
             arch/.style={box, fill=ThemeColor!15},
             core/.style={box, fill=ThemeColor!25},
             fs/.style={box, fill=ThemeColor!10},
@@ -210,15 +342,18 @@
             net/.style={box, fill=ThemeColor!18}
         ]
             \node[arch] (arch) at (0,0) {arch\\HAL};
-            \node[core, right=of arch] (abi) {abi\\Linux/Native};
+            \node[core, right=of arch] (syscall) {syscall\\dispatch};
+            \node[core, right=of syscall] (abi) {abi\\Linux/Native};
             \node[mm, right=of abi] (mm) {mm\\VMO/VMAR};
-            \node[proc, right=of mm] (proc) {proc\\Scheduler};
-            \node[fs, below=of abi] (fs) {fs\\VFS/PageCache};
+            \node[proc, right=of mm] (proc) {proc\\EEVDF};
+            \node[fs, below=of syscall] (fs) {fs\\VFS/PageCache};
             \node[net, below=of mm] (net) {net\\lwIP/Socket};
             \node[drv, below=of proc] (drv) {drivers\\virtio};
             \node[core, below=of fs] (core) {core\\Locks/Progress};
             \node[core, below=of net] (ipc) {ipc\\Channel/Event};
-            \draw[-{Stealth}, gray] (arch) -- (abi);
+            \node[drv, below=of drv] (drvmod) {drvmod\\KEP};
+            \draw[-{Stealth}, gray] (arch) -- (syscall);
+            \draw[-{Stealth}, gray] (syscall) -- (abi);
             \draw[-{Stealth}, gray] (abi) -- (fs);
             \draw[-{Stealth}, gray] (abi) -- (mm);
             \draw[-{Stealth}, gray] (mm) -- (proc);
@@ -226,12 +361,14 @@
             \draw[-{Stealth}, gray] (mm) -- (net);
             \draw[-{Stealth}, gray] (proc) -- (drv);
             \draw[-{Stealth}, gray] (fs) -- (ipc);
+            \draw[-{Stealth}, gray] (net) -- (ipc);
+            \draw[-{Stealth}, gray] (drv) -- (drvmod);
         \end{tikzpicture}
     \end{center}
-    \vspace{0.5em}
+    \vspace{0.4em}
     \begin{itemize}
         \item \code{kernel/core/}：锁层级契约、时间keeping、panic 与 progress 机制
-        \item \code{kernel/include/core/lock.h}：全局锁顺序 \code{cg\_node.lock -> proc\_lock -> runq\_lock}
+        \item \code{kernel/vdso/}：riscv64 / loongarch64 用户态零陷入时钟快路径
     \end{itemize}
 \end{frame}
 
@@ -241,8 +378,11 @@
         \begin{column}{0.48\textwidth}
             \begin{lstlisting}[basicstyle=\ttfamily\tiny]
 /* Global lock order contract */
-cg_node.lock -> proc_lock -> runq_lock
+cg_node.lock -> proc_lock -> runq.lock
+                             -> pfa.lock
+proc_lock -> signal_state.lock
 proc_lock -> files_struct.lock
+             -> VFS locks
 proc_lock -> mm_struct.lock
 proc_lock -> a20_handle_table.lock
 g_lwip_lock -> g_net_lock
@@ -252,7 +392,7 @@ g_lwip_lock -> g_net_lock
             \footnotesize
             \begin{itemize}
                 \item 摒弃全局大锁，确立严格局部锁层级
-                \item \code{CONFIG\_DEBUG\_LOCKS} 记录 owner/spinner 信息
+                \item 本地 picker 只持本 CPU runqueue 锁（唯一例外）
                 \item 新锁必须在 \code{docs/drivers/lock-order.md} 文档化
             \end{itemize}
         \end{column}
@@ -264,117 +404,501 @@ g_lwip_lock -> g_net_lock
     \end{block}
 \end{frame}
 
-% ==================== 技术特色 ====================
-\section{技术特色}
+% ==================== 并发与调度 ====================
+\section{并发与调度}
 
-\begin{frame}[fragile]
-    \frametitle{特色一：Capability-based Handle 能力系统}
+\begin{frame}
+    \frametitle{EEVDF 调度器：公平与延迟的统一}
     \begin{columns}
-        \begin{column}{0.52\textwidth}
+        \begin{column}{0.5\textwidth}
             \begin{itemize}
-                \item 所有底层资源统一为 \high{对象句柄}
-                \item 每个 Handle 附带细粒度 \code{rights} 掩码
-                \item 支持 \high{时间到期} 与 \high{操作次数限制}
-                \item 集成 \high{Bell-LaPadula} 多级安全标签
-                \item 防止 IPC 传递中的能力逃逸
-            \end{itemize}
-            \vspace{0.3em}
-            \small 关键文件：\code{kernel/abi/native/handle\_table.c}
-        \end{column}
-        \begin{column}{0.45\textwidth}
-            \begin{lstlisting}[basicstyle=\ttfamily\tiny]
-typedef struct a20_handle_entry {
-    void           *object;
-    uint16_t        type;
-    a20_rights_t    rights;
-    uint64_t        expiry_tick;
-    uint32_t        remaining_ops;
-    uint8_t         security_label;
-    uint8_t         state;
-} a20_handle_entry_t;
-            \end{lstlisting}
-        \end{column}
-    \end{columns}
-\end{frame}
-
-\begin{frame}[fragile]
-    \frametitle{特色二：VMO/VMAR 对象化内存模型}
-    \begin{itemize}
-        \item \high{VMO}（Virtual Memory Object）：物理页容器，可被 resize、共享、按页 fault
-        \item \high{VMAR}（Virtual Memory Address Region）：地址空间布局，负责映射与权限
-        \item 将物理内存与虚拟地址布局 \high{解耦}，为零拷贝 IPC 提供底座
-    \end{itemize}
-    \vspace{0.3em}
-    \begin{columns}
-        \begin{column}{0.48\textwidth}
-            \small 关键文件：\code{kernel/mm/a20\_vmo.c}、\code{kernel/mm/a20\_vmar.c}
-            \begin{lstlisting}[basicstyle=\ttfamily\tiny]
-typedef struct a20_vm_object_args {
-    uint32_t size;
-    uint32_t version;
-    uint64_t size_bytes;
-    uint32_t flags;
-    a20_handle_t out_handle;
-} a20_vm_object_args_t;
-            \end{lstlisting}
-        \end{column}
-        \begin{column}{0.48\textwidth}
-            \begin{lstlisting}[basicstyle=\ttfamily\tiny]
-a20_vmo_create(size, &vmo);
-a20_vmar_map(vmar, vmo, addr,
-             len, prot, &mapped);
-a20_vmar_protect(vmar, addr, len, prot);
-            \end{lstlisting}
-        \end{column}
-    \end{columns}
-\end{frame}
-
-\begin{frame}[fragile]
-    \frametitle{特色三：SMP 分级调度器}
-    \begin{itemize}
-        \item \high{Per-CPU} 独立运行队列，消除全局调度锁
-        \item \high{8 级优先级} + bitmap \code{O(1)} 快速选任务
-        \item 支持 \high{老化提升}（aging promotion）与 \code{SCHED\_FIFO/RR}
-        \item 与 cgroup CPU quota 联动，实现 \high{限流调度}
-    \end{itemize}
-    \vspace{0.3em}
-    \small 关键文件：\code{kernel/proc/sched.c}、\code{kernel/proc/cg\_cpu.c}
-    \begin{lstlisting}[basicstyle=\ttfamily\scriptsize]
-proc_runq_t rq[NR_CPUS];
-uint8_t bitmap[SCHED_LEVELS];
-sched_promote_aged_locked(rq);
-    \end{lstlisting}
-\end{frame}
-
-\begin{frame}[fragile]
-    \frametitle{特色四：大页降级、COW 与 MAP\_SHARED 一致性}
-    \begin{columns}
-        \begin{column}{0.55\textwidth}
-            \begin{itemize}
-                \item \code{mm\_demote\_huge\_page()}：将 2 MiB 大页安全拆分为 4 KiB 页
-                \item \code{mm\_fork\_clone\_present\_level()}：fork 时建立 \high{写时复制} 映射
-                \item \code{mm\_sync\_shared\_dirty\_for\_vnode()}：维护 \code{MAP\_SHARED} 脏页生命周期
-                \item \code{mm->lock} 锁模型保证多核 \code{mmap/munmap/fault} 并发安全
+                \item \high{按权记账}：nice 真实控制 CPU 份额
+                \item \high{系统虚拟时间}资格门控 + 虚拟截止时间
+                \item RT（级 0，\code{SCHED\_FIFO/RR}）恒优先于 EEVDF
+                \item \high{空闲窃取}：本地队列空时拉取远端富余任务
+                \item sleeper bonus + \code{EEVDF\_MAX\_LAG} 钳制
+                \item \code{/proc/a20/sched\_base\_slice} 运行时切换桌面/HPC
             \end{itemize}
         \end{column}
-        \begin{column}{0.42\textwidth}
-            \begin{lstlisting}[basicstyle=\ttfamily\tiny]
-typedef struct mm_struct {
-    spinlock_t lock;
-    vm_area_t *mmap;
-    uint64_t  *pgdir;
-    refcount_t refcount;
-    size_t total_vm, rss;
-} mm_struct_t;
-            \end{lstlisting}
+        \begin{column}{0.48\textwidth}
+            \begin{block}{EEVDF 核心公式}
+                \footnotesize
+                \begin{align*}
+                    vruntime &\mathrel{+}= dt \times \tfrac{NICE0\_LOAD}{weight} \\
+                    vtime &\mathrel{+}= dt \times \tfrac{NICE0\_LOAD}{queued\_weight} \\
+                    \text{eligible}:\quad & vruntime \le vtime \\
+                    deadline &= vruntime + \tfrac{base\_slice \cdot NICE0\_LOAD}{weight}
+                \end{align*}
+            \end{block}
         \end{column}
     \end{columns}
     \vspace{0.3em}
-    \small 关键文件：\code{kernel/mm/vm.c}、\code{kernel/include/mm/vm.h}
+    \small 关键文件：\code{kernel/proc/sched.c}；设计：\code{docs/eevdf-scheduler.md}。nice -20/19 权重 43020/88（约 489:1）。
 \end{frame}
 
 \begin{frame}
-    \frametitle{特色五：事件驱动网络栈}
+    \frametitle{Tokenized Park/Wake 与任务所有权}
+    \begin{columns}
+        \begin{column}{0.5\textwidth}
+            \footnotesize
+            \begin{itemize}
+                \item 三个\high{相互独立}的状态维度：语义状态 / 调度所有权 / Park
+                \item \code{(task, wait\_seq)} token 消除\high{丢失唤醒窗口}
+                \item \code{on\_rq -> dispatching -> on\_cpu} 显式所有权交接
+                \item timeout 最小堆：O(log n) 取消，\high{唯一摘除}
+                \item 唤醒原因显式区分 event / timeout / signal / exit / cancel
+            \end{itemize}
+        \end{column}
+        \begin{column}{0.48\textwidth}
+            \begin{center}
+                \begin{tikzpicture}[
+                    scale=0.68, transform shape,
+                    state/.style={draw, rounded corners, minimum width=1.5cm, minimum height=0.6cm, font=\tiny, align=center},
+                    s0/.style={state, fill=ThemeColor!10},
+                    s1/.style={state, fill=ThemeColor!25}
+                ]
+                    \node[s0] (idle) at (0,0) {IDLE};
+                    \node[s1] (prep) at (2.3,0) {PREPARING};
+                    \node[s1] (park) at (4.6,0) {PARKED};
+                    \node[s1] (woke) at (6.9,0) {WOKEN};
+                    \draw[-{Stealth}, thick, ThemeColor] (idle) -- (prep);
+                    \draw[-{Stealth}, thick, ThemeColor] (prep) -- (park);
+                    \draw[-{Stealth}, thick, ThemeColor] (park) -- (woke);
+                    \draw[-{Stealth}, thick, ThemeColor] (woke) to[out=70,in=110] (idle);
+                    \draw[-{Stealth}, thick, dashed, gray] (prep) to[out=-40,in=-140]
+                        node[below, font=\tiny, text=gray] {事件先到} (woke);
+                \end{tikzpicture}
+            \end{center}
+            \vspace{0.3em}
+            \footnotesize
+            \begin{center}
+                \code{wait\_seq} 每次 prepare 递增；延迟事件必须同时匹配 task 与 wait\_seq，否则视为旧 token。
+            \end{center}
+        \end{column}
+    \end{columns}
+    \vspace{0.3em}
+    \small 关键文件：\code{kernel/proc/park.c}、\code{kernel/proc/sched.c}、\code{kernel/include/core/sync.h}
+\end{frame}
+
+\begin{frame}
+    \frametitle{SMP 负载均衡与持久抢占}
+    \begin{itemize}
+        \item \high{Per-CPU 运行队列}：消除全局调度锁
+        \item 空闲窃取只发生在本地队列空时，\high{只窃 EEVDF 任务、远端 \code{nr\_running} $\geq$ 2、尊重 affinity}
+        \item 跨队列迁移按\high{CPU 编号升序}锁定，runqueue 引用全程有效
+        \item \high{持久 \code{need\_resched}}：远程唤醒先发布状态，再置标志
+        \item IPI 只负责\high{通知}，不在任意中断上下文直接切换；请求在 syscall/trap/timer 返回等安全点消费
+        \item 远程唤醒统一走 priority-preempt 快路径，\high{两个 ABI 共享}（pipe/AF\_UNIX/futex/channel）
+    \end{itemize}
+    \vspace{0.3em}
+    \small 关键文件：\code{kernel/proc/sched.c}、\code{kernel/include/proc/proc.h}；8 核压力门禁 \code{make smoke-sched-stress}
+\end{frame}
+
+% ==================== 内存管理 ====================
+\section{内存管理}
+
+\begin{frame}[fragile]
+    \frametitle{VMO/VMAR：解耦物理页与地址空间}
+    \begin{itemize}
+        \item \high{VMO}（Virtual Memory Object）：物理页容器，可 resize、共享、按页 fault
+        \item \high{VMAR}（Virtual Memory Address Region）：地址空间布局，负责映射与权限
+        \item 保护公式：\code{effective\_prot = vmo\_prot $\cap$ vmar\_prot $\cap$ map\_prot}
+        \item 共享映射：多个 VMAR 映射同一 VMO，实现\high{零拷贝共享内存}
+    \end{itemize}
+    \vspace{0.3em}
+    \begin{columns}
+        \begin{column}{0.5\textwidth}
+            \begin{lstlisting}[basicstyle=\ttfamily\tiny]
+// VMO resize / commit / decommit
+a20_vmo_set_size(h, new_size);
+a20_vmo_op_range(h, COMMIT, off, len);
+a20_vmo_op_range(h, DECOMMIT, off, len);
+            \end{lstlisting}
+        \end{column}
+        \begin{column}{0.48\textwidth}
+            \begin{lstlisting}[basicstyle=\ttfamily\tiny]
+// Shared zero-copy IPC
+a20_vmo_create(PAGE_SIZE, 0, &vmo);
+a20_vmar_map(sender, vmo, ...);
+a20_channel_write(ch, ..., &vmo, 1);
+a20_vmar_map(receiver, vmo, ...);
+            \end{lstlisting}
+        \end{column}
+    \end{columns}
+    \vspace{0.3em}
+    \small 关键文件：\code{kernel/mm/a20\_vmo.c}、\code{kernel/abi/native/vmar.c}
+\end{frame}
+
+\begin{frame}
+    \frametitle{大页降级、COW 与 MAP\_SHARED 一致性}
+    \begin{itemize}
+        \item \code{mm\_demote\_huge\_page()}：将 2 MiB 大页安全拆分为 4 KiB 页
+        \item \code{mm\_fork\_clone\_present\_level()}：fork 时建立\high{写时复制}映射
+        \item \code{mm\_sync\_shared\_dirty\_for\_vnode()}：维护 \code{MAP\_SHARED} 脏页生命周期
+        \item \code{mm->lock} 锁模型保证多核 \code{mmap/munmap/fault} 并发安全
+        \item \code{mseal}：VMA 封禁，禁止后续布局/权限修改
+    \end{itemize}
+    \vspace{0.3em}
+    \begin{columns}
+        \begin{column}{0.55\textwidth}
+            \small 关键文件：\code{kernel/mm/vm.c}、\code{kernel/fs/page\_cache.c}、\code{kernel/include/mm/vm.h}
+        \end{column}
+        \begin{column}{0.42\textwidth}
+            \footnotesize
+            压力门禁：\code{make smoke-mm-stress}（write/read、fsync、truncate、fork、remap、eviction）
+        \end{column}
+    \end{columns}
+\end{frame}
+
+\begin{frame}
+    \frametitle{Pager：用户态驱动的按需分页}
+    \begin{columns}
+        \begin{column}{0.55\textwidth}
+            \begin{itemize}
+                \item \high{PAGED VMO} 缺页不静默填零，而是把页请求作为 channel 消息交给 \high{pager 线程}
+                \item pager 用 \code{pager\_supply\_pages} 回填后唤醒 faulting 线程
+                \item 对齐 Zircon \code{zx\_pager\_*}，去掉 fd/ioctl 面
+                \item 页供给不跨越 BLP 标签（源 label $\le$ VMO label）
+            \end{itemize}
+            \vspace{0.3em}
+            \small 关键文件：\code{kernel/mm/vmo.c}（PAGED 分支）、\code{kernel/abi/native/sys\_native\_ipc.c}
+        \end{column}
+        \begin{column}{0.42\textwidth}
+            \begin{block}{页请求消息}
+                \footnotesize
+                类型 \code{READ/WRITE}（缺页访问类型），\code{data0} = 缺失页在 vmo 内字节偏移；pager 回填后唤醒该页的 waiters。
+            \end{block}
+            \vspace{0.2em}
+            \begin{block}{适用场景}
+                \footnotesize
+                持久化内存、用户态 swap pager、虚拟化内存后端、快照 / 迁移。
+            \end{block}
+        \end{column}
+    \end{columns}
+    \vspace{0.3em}
+    \small 验证：\code{make smoke-native-deepen}
+\end{frame}
+
+% ==================== Linux ABI ====================
+\section{Linux ABI 兼容}
+
+\begin{frame}
+    \frametitle{全量 syscall 覆盖：比 Linux 更全面}
+    \begin{columns}
+        \begin{column}{0.52\textwidth}
+            \footnotesize
+            \begin{itemize}
+                \item \high{343 个 syscall}入口，四条主线架构编号\high{全表覆盖}
+                \item x86\_64 表扩展至 \high{463 槽}；LoongArch 私有 \code{file\_getattr/setattr}
+                \item 覆盖内部占位槽，\high{无任何未实现空位}
+                \item 现代 syscall 一应俱全：\code{io\_uring}、\code{landlock}、\code{pidfd}、\code{mseal}、\code{userfaultfd}、\code{perf\_event\_open}
+            \end{itemize}
+        \end{column}
+        \begin{column}{0.45\textwidth}
+            \begin{block}{已实现的高复杂度机制}
+                \footnotesize
+                \begin{itemize}
+                    \item \code{openat2}（RESOLVE\_CACHED）、\code{renameat2}、\code{statx}
+                    \item \code{futex} PI + robust、\code{membarrier}
+                    \item \code{splice/tee/vmsplice}、\code{eventfd/timerfd/signalfd}
+                    \item \code{ptrace} SEIZE/INTERRUPT、\code{fanotify}、\code{keyring}、AIO
+                    \item \code{mseal} VMA 封禁、\code{sched\_attr} 完整解析
+                \end{itemize}
+            \end{block}
+        \end{column}
+    \end{columns}
+    \vspace{0.3em}
+    \begin{center}
+        \small 验证门禁：\code{make smoke-abi-linux}、\code{smoke-syscall-ext}；逐项等级见 \code{kernel/abi/linux/syscall\_coverage.md}
+    \end{center}
+\end{frame}
+
+\begin{frame}
+    \frametitle{动态链接与发行版引导}
+    \begin{columns}
+        \begin{column}{0.55\textwidth}
+            \footnotesize
+            \begin{itemize}
+                \item \code{exec} 正确处理 \code{shebang} 与 ELF interpreter（\code{/lib/ld-musl-*.so.1}）
+                \item \code{MAP\_PRIVATE / MAP\_FIXED}、TLS（\code{tp} 寄存器）正确建立
+                \item 全部 musl 动态链接的 Alpine 二进制可直接运行
+                \item 用户指针边界显式处理（identity-mapped 架构下不误判 argv/envp 来源）
+            \end{itemize}
+        \end{column}
+        \begin{column}{0.42\textwidth}
+            \begin{block}{用户态生态}
+                \footnotesize
+                musl · git · vim · gcc · fastfetch · mksh · coreutils · rustc (Cargo) · FFmpeg
+            \end{block}
+            \vspace{0.2em}
+            \begin{alertblock}{地基}
+                这是发行版桌面能起来的基础；早期 musl 加载期空指针崩溃即从 exec/mmap 语义修正而来。
+            \end{alertblock}
+        \end{column}
+    \end{columns}
+    \vspace{0.3em}
+    \small 关键文件：\code{kernel/proc/exec.c}、\code{kernel/fs/vfs/path\_resolution.c}
+\end{frame}
+
+\begin{frame}
+    \frametitle{vDSO：零陷入时钟快路径}
+    \begin{columns}
+        \begin{column}{0.52\textwidth}
+            \begin{itemize}
+                \item \code{clock\_gettime} / \code{gettimeofday} / \code{getcpu} 用户态零陷入
+                \item riscv64 与 \high{loongarch64} 均实现，经 \code{AT\_SYSINFO\_EHDR} 导出
+                \item vvar 数据页与内核 timekeeping 位级一致，seqlock 保护
+                \item loongarch64 实测：vDSO $\approx$ 1780 ns vs 系统调用 $\approx$ 3160 ns
+            \end{itemize}
+            \vspace{0.3em}
+            \small 关键文件：\code{kernel/vdso/}；验证：\code{make smoke-clock-vdso}
+        \end{column}
+        \begin{column}{0.45\textwidth}
+            \begin{block}{Linux ABI 透明获益}
+                \footnotesize
+                vDSO、priority-preempt 唤醒快路径、AF\_UNIX 桥接、channel fd 表面——Linux 程序零改动直接受益于 Native 机制。
+            \end{block}
+        \end{column}
+    \end{columns}
+\end{frame}
+
+% ==================== Native ABI ====================
+\section{Native ABI}
+
+\begin{frame}
+    \frametitle{Native ABI 设计哲学}
+    \begin{itemize}
+        \item \high{系统调用压缩}：343 个 Linux syscall $\rightarrow$ 134 个 Native syscall（约 2.6 倍压缩）
+        \item \high{统一抽象}：\code{handle\_set\_meta} 替代 chmod/chown/utimes/truncate；\code{handle\_transfer} 统一 splice/sendfile/copy\_file\_range/tee
+        \item \high{版本化 ABI}：每个复杂结构以 \code{size + version} 开头，支持运行时协商
+        \item 无 fork/exec/signal/ioctl；以 \code{task\_spawn}、Channel、EventQ 替代
+        \item syscall 编号稳定分区（0x0000--0x0FFF），演进遵循 E-APPEND / E-DEPRECATE 规则
+    \end{itemize}
+    \vspace{0.3em}
+    \small 关键文件：\code{kernel/abi/native/syscall\_table.def}、\code{kernel/include/abi/native/types.h}
+\end{frame}
+
+\begin{frame}
+    \frametitle{Native ABI 深化：对象化 Linux 机制}
+    \begin{columns}
+        \begin{column}{0.52\textwidth}
+            \footnotesize
+            \begin{itemize}
+                \item \high{Pager (0x0D00)}：userfaultfd 的对象化——PAGED VMO + channel 页供给
+                \item \high{monitor (0x0D10)}：perf 软件事件的对象化——计数对象可订阅 EventQ
+                \item \high{task\_mem\_read/write (0x0211/12)}：process\_vm 的能力化随机访问
+                \item \high{vm\_share\_region (0x030A)}：按区间导出 VMO 句柄
+                \item \high{EventQ FS/网络事件源}：vnode-keyed FS 事件 + socket/pipe 就绪边沿
+            \end{itemize}
+        \end{column}
+        \begin{column}{0.45\textwidth}
+            \begin{block}{设计原则（按 A20 原则三分）}
+                \footnotesize
+                \begin{itemize}
+                    \item \high{应包装}：以更干净对象接口表达
+                    \item \high{应拒绝}：SysV/IPC、io\_uring、Landlock 等保持 Linux-only，用 capability 替代
+                    \item \high{已有等价物}：pidfd$\rightarrow$TASK handle、memfd$\rightarrow$MEMORY handle
+                \end{itemize}
+            \end{block}
+        \end{column}
+    \end{columns}
+    \vspace{0.3em}
+    \small 关键文件：\code{docs/native-abi/09-native-abi-deepening.md}；验证：\code{make smoke-native-deepen}
+\end{frame}
+
+\begin{frame}
+    \frametitle{Handle 生命周期与安全模型}
+    \begin{columns}
+        \begin{column}{0.52\textwidth}
+            \footnotesize
+            \begin{itemize}
+                \item \high{14 位权利掩码}：READ/WRITE/EXEC/STAT/DUP/TRANSFER/MAP/WAIT/CONNECT/ACCEPT/CONTROL/ADMIN/SIGNAL
+                \item \high{权利单调递减}：\code{handle\_dup} 与 IPC 转移只能缩小权利
+                \item \high{Bell-LaPadula} 多级安全标签 \{L, M, H\}：no-read-up / no-write-down
+                \item \high{Temporal capability}：到期时间 + 操作次数限制，自动失效
+            \end{itemize}
+        \end{column}
+        \begin{column}{0.45\textwidth}
+            \begin{block}{Handle 不变式}
+                \footnotesize
+                同一 Handle 在一个进程表中只存在一份有效引用；IPC 共享传递是原子的，不存在“悬挂引用”。接收方空间不足时整体返回 \code{NO\_SPACE}，杜绝 partial delivery。
+            \end{block}
+        \end{column}
+    \end{columns}
+    \vspace{0.3em}
+    \small 关键文件：\code{kernel/abi/native/handle\_table.c}、\code{docs/native-abi/06-security.md}
+\end{frame}
+
+% ==================== 混合内核服务与 IPC ====================
+\section{混合内核服务与 IPC}
+
+\begin{frame}
+    \frametitle{Channel / EventQ：异步 IPC 协议}
+    \begin{columns}
+        \begin{column}{0.52\textwidth}
+            \footnotesize
+            \begin{itemize}
+                \item \high{两阶段写入}：reserve $\rightarrow$ 拷贝 $\rightarrow$ commit；失败可 abort
+                \item 单条消息最多\high{64 KiB 数据 + 8 个 Handle}
+                \item Handle 共享语义：发送方保留原 handle，对象引用计数递增
+                \item \code{channel\_call}（0x0508）\high{一次陷入完成请求 + 回复}，单次句柄查找
+                \item 时间片捐赠：同步 IPC 绕过 runqueue，直接切换（UP）
+                \item \high{统一等待对象层}：futex/EventQ/channel/pipe/socket/mutex 共用 \code{wait\_queue\_t}
+            \end{itemize}
+        \end{column}
+        \begin{column}{0.45\textwidth}
+            \begin{block}{SPSC 共享内存环}
+                \footnotesize
+                全相对偏移布局（跨进程可用）；Dekker futex 门铃（物理页为 key）；\high{非满非空路径零 syscall}；16 MiB 跨进程完整性验证。
+            \end{block}
+            \vspace{0.2em}
+            \begin{block}{保证}
+                \footnotesize
+                消息要么完整交付（数据 + 所有 Handle），要么完全不交付。
+            \end{block}
+        \end{column}
+    \end{columns}
+    \vspace{0.3em}
+    \small 关键文件：\code{kernel/ipc/a20\_channel.c}、\code{a20\_event.c}、\code{user/liba20rt/a20\_shmring.h}；验证：\code{make smoke-native-ipc}
+\end{frame}
+
+\begin{frame}
+    \frametitle{服务监管者、注册表与健康探针}
+    \begin{columns}
+        \begin{column}{0.52\textwidth}
+            \footnotesize
+            \begin{itemize}
+                \item \high{服务监管者}（svcmgr）：声明式清单 + 依赖 + \high{崩溃自动重启}（指数退避 + flap 预算）
+                \item \high{服务注册表}：按名解析 + 崩溃后自动重绑（CAS claim）
+                \item \high{健康探针}：ping + 超时强杀，pong 通道随重启重注册
+                \item \high{资源硬隔离}：句柄配额（4096）+ 对象计数审计（\code{/proc/a20/objects}），崩溃循环零漂移
+            \end{itemize}
+        \end{column}
+        \begin{column}{0.45\textwidth}
+            \begin{block}{Linux ABI 透明获益}
+                \footnotesize
+                Linux 程序经 \code{SYS\_a20\_channel\_pair(900)} / \code{SYS\_a20\_registry\_client(901)} 以 fd 表面消费同一 channel 机制与服务注册表。
+            \end{block}
+        \end{column}
+    \end{columns}
+    \vspace{0.3em}
+    \small 验证：\code{smoke-native-svc}、\code{smoke-native-registry}、\code{smoke-native-isolation}、\code{smoke-a20-channel}
+\end{frame}
+
+\begin{frame}
+    \frametitle{用户态驱动：能力化设备访问}
+    \begin{columns}
+        \begin{column}{0.52\textwidth}
+            \footnotesize
+            \begin{itemize}
+                \item \high{MMIO 白名单授权 + IRQ$\rightarrow$EventQ}：goldfish RTC 整体用户态化（\code{rtcd}）
+                \item \high{virtio-blk 用户态驱动}：零拷贝 DMA，FAT32 挂载（\code{ubd}）
+                \item \high{驱动崩溃恢复}：在飞请求失败传导 + 自动重挂载（\code{ubd\_recover}）
+                \item \high{动态设备所有权}：\code{device\_claim/release}，任务退出自动释放
+                \item DMA 缓冲只能来自内核 VMO（\code{device\_alloc\_dma} 预物化连续堆）
+                \item 内核块代理 udisk：页缓存留内核，块请求经共享环转发
+            \end{itemize}
+        \end{column}
+        \begin{column}{0.45\textwidth}
+            \begin{block}{IOMMU 硬件隔离}
+                \footnotesize
+                \code{riscv-iommu-pci} bring-up：DDT/CQ/FQ 编程使能，devid 0 SV39 静态翻译域，TR\_REQ 验证已映射 / 未映射 IOVA。
+            \end{block}
+            \vspace{0.2em}
+            \begin{block}{设备身份}
+                \footnotesize
+                \code{*.a20drv} 描述段声明 \code{placement} / 设备类型 / 稳定名 / 匹配表；一个设备一个 owner。
+            \end{block}
+        \end{column}
+    \end{columns}
+    \vspace{0.3em}
+    \small 验证：\code{smoke-native-rtcd}、\code{smoke-native-ubd}、\code{smoke-native-shmring}、\code{smoke-iommu-discovery}
+\end{frame}
+
+\begin{frame}
+    \frametitle{KEP：内核扩展点}
+    \begin{columns}
+        \begin{column}{0.55\textwidth}
+            \footnotesize
+            \begin{itemize}
+                \item 与 Linux LKM 本质不同：\high{受限字节码程序}，非任意原生代码
+                \item 标准 eBPF 指令编码（\code{struct bpf\_insn}），\high{同一份字节码}经 Native（\code{ext\_prog\_load}）或 Linux（\code{bpf(2)}）加载
+                \item 无指针、无任意内存访问、无循环（严格向前跳转，\high{结构性终止}）
+                \item 线性扫描\high{验证器}逐条检查，非法即拒绝
+                \item 扩展点 = 类型化上下文；进程退出自动清理
+            \end{itemize}
+        \end{column}
+        \begin{column}{0.42\textwidth}
+            \begin{block}{第一个扩展点：syscall-filter}
+                \footnotesize
+                上下文 8 字：\code{nr, arg0..5, abi}。附着于每次系统调用入口，R0 判定放行 / 拒绝 / 终止。
+            \end{block}
+            \vspace{0.2em}
+            \begin{block}{验证}
+                \footnotesize
+                \code{make smoke-native-ext}、\code{make bpf\_smoke}
+            \end{block}
+        \end{column}
+    \end{columns}
+    \vspace{0.3em}
+    \small 关键文件：\code{kernel/drvmod/}、\code{kernel/abi/native/sys\_native\_ext.c}、\code{docs/extensions.md}
+\end{frame}
+
+% ==================== 文件系统 ====================
+\section{文件系统}
+
+\begin{frame}
+    \frametitle{高兼容 VFS 与路径解析}
+    \begin{itemize}
+        \item \code{openat2} 语义：\code{RESOLVE\_NO\_XDEV}、\code{BENEATH}、\code{NO\_SYMLINKS}、\code{RESOLVE\_CACHED}
+        \item \code{renameat2}：\code{RENAME\_EXCHANGE}、\code{RENAME\_NOREPLACE}、跨 mount 拒绝
+        \item 正确处理 mount root、\code{..} 穿越、符号链接深度限制（\code{MAX\_SYMLINKS=40}）
+        \item Page Cache 与 block cache 统一，保证多核一致性
+        \item \code{dcache} 目录项缓存 + 模块化 \code{vfs/*.c} 单元
+    \end{itemize}
+    \vspace{0.3em}
+    \begin{columns}
+        \begin{column}{0.55\textwidth}
+            \small 关键文件：\code{kernel/fs/vfs/path\_resolution.c}、\code{dcache.c}、\code{mount\_ops.c}、\code{stat\_perm.c}
+        \end{column}
+        \begin{column}{0.42\textwidth}
+            \footnotesize
+            \begin{block}{关键不变式}
+                \code{lookup} 必须持有父目录引用；\code{rename} 原子更新目录项与 inode nlink；跨后端操作返回 \code{-EXDEV}。
+            \end{block}
+        \end{column}
+    \end{columns}
+\end{frame}
+
+\begin{frame}
+    \frametitle{文件系统后端契约矩阵}
+    \begin{table}
+        \centering
+        \footnotesize
+        \renewcommand{\arraystretch}{1.1}
+        \begin{tabular}{lcccc}
+            \toprule
+            \textbf{后端} & \textbf{rename} & \textbf{link} & \textbf{symlink} & \textbf{关键能力/限制} \\
+            \midrule
+            FAT32 & \texttimes & \texttimes & \texttimes & 元数据仅存 RAM \\
+            ext4 & \checkmark & \checkmark & 快链$\le$60B & \high{JBD2 journal 恢复}，64 位文件 \\
+            NTFS & \checkmark & \texttimes & \texttimes & 索引无 B-tree 分裂 \\
+            ISO9660 & \texttimes & \texttimes & \texttimes & 只读 CD-ROM \\
+            ramfs & \checkmark & \checkmark & \checkmark & max inodes 4096 \\
+            pipe & -- & -- & -- & \code{PIPE\_BUF} 原子写 \\
+            \bottomrule
+        \end{tabular}
+    \end{table}
+    \vspace{0.3em}
+    \small 伪文件系统：\code{devfs}（动态 class 设备）、\code{procfs}（快照文件）、\code{sysfs}（\code{/sys/class/\{char,block,net,input,display,audio\}}）、\code{cgroupfs}。\newline
+    关键文件：\code{docs/fs/fs-consistency-model.md}、\code{docs/fs/vfs-edge-semantics.md}
+\end{frame}
+
+% ==================== 网络 ====================
+\section{网络}
+
+\begin{frame}
+    \frametitle{事件驱动网络栈}
     \begin{itemize}
         \item \code{lwIP} 以 \code{NO\_SYS=1} 模式集成，避免多线程轮询
         \item \code{kernel/core/progress.c} 提供统一的 \high{bottom-half} 进展机制
@@ -382,489 +906,302 @@ typedef struct mm_struct {
         \item 调度器切任务前运行 bottom-half，降低上下文切换开销
     \end{itemize}
     \vspace{0.3em}
-    \small 关键文件：\code{kernel/net/lwip\_stack.c}、\code{kernel/core/progress.c}
-    \begin{block}{调用路径}
-        \footnotesize
-        网卡中断 $\rightarrow$ \code{a20\_lwip\_poll()} $\rightarrow$ \code{progress\_run()} $\rightarrow$ socket bottom-half $\rightarrow$ 唤醒等待任务
-    \end{block}
-\end{frame}
-
-\begin{frame}
-    \frametitle{特色六：高兼容 VFS 与路径解析}
-    \begin{itemize}
-        \item 实现 \code{openat2} 语义：\code{RESOLVE\_NO\_XDEV}、\code{BENEATH}、\code{NO\_SYMLINKS}
-        \item 正确处理 mount root、\code{..} 穿越、符号链接深度限制
-        \item 支持 \code{ramfs/devfs/procfs/sysfs/cgroupfs} 等伪文件系统
-        \item Page Cache 与 block cache 统一，保证多核一致性
-    \end{itemize}
-    \vspace{0.3em}
-    \small 关键文件：\code{kernel/fs/vfs/path\_resolution.c}、\code{kernel/fs/page\_cache.c}
-\end{frame}
-
-\begin{frame}[fragile]
-    \frametitle{特色七：Native IPC — Channel 与 EventQ}
     \begin{columns}
-        \begin{column}{0.48\textwidth}
-            \begin{itemize}
-                \item \code{a20\_channel\_create} 创建双向消息通道
-                \item 单次消息最多携带 \high{64 KiB 数据 + 8 个 Handle}
-                \item \code{a20\_event\_wait} 实现异步事件多路复用
-                \item Handle 共享语义原子化，避免能力逃逸
-            \end{itemize}
+        \begin{column}{0.55\textwidth}
+            \small 关键文件：\code{kernel/net/lwip\_stack.c}、\code{kernel/core/progress.c}、\code{kernel/drivers/net/virtio\_net.c}
         \end{column}
-        \begin{column}{0.48\textwidth}
-            \begin{lstlisting}[basicstyle=\ttfamily\tiny]
-#define A20_CH_MAX_DATA    65536
-#define A20_CH_MAX_HANDLES 8
-
-typedef struct a20_msg_send_args {
-    a20_handle_t channel;
-    uint64_t     data;
-    uint32_t     data_len;
-    uint64_t     handles;
-    uint32_t     handle_count;
-    uint64_t     transfer_rights;
-} a20_msg_send_args_t;
-            \end{lstlisting}
+        \begin{column}{0.42\textwidth}
+            \begin{block}{调用路径}
+                \footnotesize
+                网卡中断 $\rightarrow$ \code{a20\_lwip\_poll()} $\rightarrow$ \code{progress\_run()} $\rightarrow$ socket bottom-half $\rightarrow$ 唤醒等待任务
+            \end{block}
         \end{column}
     \end{columns}
     \vspace{0.3em}
-    \small 关键文件：\code{kernel/ipc/a20\_channel.c}、\code{kernel/ipc/a20\_event.c}
+    \small 网络套件：TCP/UDP/ICMP、DNS、AF\_UNIX、AF\_ALG、SCM\_CREDENTIALS/SO\_PASSCRED；netlink uevent（带全局递增 \code{SEQNUM}）
 \end{frame}
 
 \begin{frame}
-    \frametitle{特色八：用户态生态与关键应用移植}
+    \frametitle{运行时网络配置}
+    \begin{itemize}
+        \item \high{无编译期网络默认值}：旧硬编码 QEMU 地址已移除
+        \item 内核命令行：\code{a20.ip}、\code{a20.netmask}、\code{a20.gateway}、\code{a20.dns}、\code{a20.dhcp}、\code{a20.hostname}
+        \item 运行时暴露：\code{/proc/net/config} 只读展示当前生效配置
+        \item DHCP 更新生效值；缺失配置时 socket 返回 \code{-ENETUNREACH}，而非静默使用开发默认值
+    \end{itemize}
+    \vspace{0.3em}
+    \small 关键文件：\code{kernel/net/net\_config.c}、\code{docs/network-config-design.md}；锁契约见 \code{docs/net/network-lock-contract.md}
+\end{frame}
+
+% ==================== 图形与桌面 ====================
+\section{图形与桌面}
+
+\begin{frame}
+    \frametitle{XFCE Wayland 桌面：内核原生支持}
     \begin{columns}
         \begin{column}{0.55\textwidth}
             \footnotesize
             \begin{itemize}
-                \item \high{vim 9.2.0433}：静态链接，termcap stub 替代 ncurses
-                \item \high{git 2.54.0}：关闭 SSL/CURL/ICONV/PTHREADS，纯静态构建
-                \item \high{gcc 14.2.0}：基于 musl-cross-make 的交叉/宿主工具链
-                \item \high{fastfetch 2.62+}：无 CMake 手写 config header，禁用 dlopen
+                \item 从源码\high{移植} wlroots / labwc / xfce 4.20 组件，构建完整 Wayland 桌面
+                \item \high{内核补齐}而非改组件绕行：submodule 全部保持纯净，少量用户态补丁构建期临时应用并还原
+                \item 原生 libinput udev 后端经 libseat 打开 \code{/dev/input/event*}
+                \item labwc 帧调度链完整：commit $\rightarrow$ frame $\rightarrow$ render $\rightarrow$ pageflip $\rightarrow$ vblank
             \end{itemize}
             \vspace{0.3em}
-            \small 运行基础：Linux ABI + musl libc + lp64
+            \begin{block}{LVGL 桌面}
+                基于 LVGL 的\high{自研桌面应用}（\code{user/desktop}）：仪表盘、终端、文件、网络、进程监控。
+            \end{block}
         \end{column}
         \begin{column}{0.42\textwidth}
-            \footnotesize
-            \begin{block}{构建入口}
-                \code{make -C user ARCH=riscv64}\\
-                \code{make -C user ARCH=riscv64 fastfetch}\\
-                \code{make -f user/extra.mk ARCH=riscv64}\\
-                \code{make ARCH=riscv64 run-riscv64-extra}
+            \begin{block}{内核 DRM 强化}
+                \footnotesize
+                \begin{itemize}
+                    \item \high{唯一 KMS 对象 ID}，plane/crtc/connector/encoder 互不冲突
+                    \item 页翻转事件：FIFO 不覆盖、seq 单调、时间戳单调钟、\code{EBUSY} 语义
+                    \item 标准 32 字节 UAPI 结构，杜绝栈溢出
+                    \item EDID blob property（含合成合规 EDID）
+                \end{itemize}
+            \end{block}
+        \end{column}
+    \end{columns}
+    \vspace{0.3em}
+    \small 关键文件：\code{kernel/drivers/gpu/drm.c}、\code{docs/gui/xfce-wayland-adaptation.md}；验证：\code{make smoke-qemu-gui-riscv64}
+\end{frame}
+
+\begin{frame}
+    \frametitle{3D 图形加速：virtio-gpu virgl}
+    \begin{itemize}
+        \item \high{内核 3D 命令路径完整}：feature 协商、capset 查询、context/resource/submit 透传
+        \item 渲染计算在宿主机，guest 内核只负责搬运命令与资源
+        \item A20 私有 ioctl（\code{A20\_GPU\_IOCTL\_*}）经 \code{/dev/dri/card0} 暴露
+        \item 与 2D fbdev 路径互不干扰，无 virgl 时自动回退
+    \end{itemize}
+    \vspace{0.3em}
+    \begin{columns}
+        \begin{column}{0.55\textwidth}
+            \small 关键文件：\code{kernel/drivers/gpu/virtio\_gpu.c}、\code{drm.c}、\code{kernel/include/drivers/gpu/virtio\_gpu.h}；自测工具 \code{gpu3d\_test}
+        \end{column}
+        \begin{column}{0.42\textwidth}
+            \begin{block}{3D 链路}
+                \footnotesize
+                用户态 $\rightarrow$ \code{ioctl(/dev/dri/card0)} $\rightarrow$ \code{drm\_ioctl} $\rightarrow$ \code{gpu\_ioctl} $\rightarrow$ \code{SUBMIT\_3D} $\rightarrow$ virglrenderer $\rightarrow$ 宿主 GPU
             \end{block}
         \end{column}
     \end{columns}
 \end{frame}
 
 \begin{frame}
-    \frametitle{特色九：Native ABI 设计哲学}
-    \begin{itemize}
-        \item \high{系统调用压缩}：223 个 Linux 系统调用 $\rightarrow$ 109 个 Native syscall（约 2 倍压缩）
-        \item \high{统一抽象}：\code{handle\_set\_meta} 替代 chmod/chown/utimes/truncate；\code{handle\_transfer} 统一 splice/sendfile/copy\_file\_range/tee
-        \item \high{版本化 ABI}：每个复杂结构以 \code{size + version} 开头，支持运行时协商
-        \item 无 fork/exec/signal/ioctl；以 \code{task\_spawn}、Channel、EventQ 替代
-    \end{itemize}
-    \vspace{0.3em}
-    \small 关键文件：\code{kernel/abi/native/syscall\_table.def}、\code{kernel/include/abi/native/types.h}
-\end{frame}
-
-\begin{frame}[fragile]
-    \frametitle{特色十：Native 启动协议与运行时}
+    \frametitle{发行版 rootfs 直跑：内核当发行版的内核}
     \begin{columns}
-        \begin{column}{0.48\textwidth}
+        \begin{column}{0.55\textwidth}
             \footnotesize
             \begin{itemize}
-                \item 内核通过寄存器传递 \code{a20\_start\_info\_t}
-                \item 初始 Handle 显式声明：root\_dir、cwd\_dir、stdio、self\_task、event\_queue
-                \item 三层运行时：Kernel $\rightarrow$ liba20rt $\rightarrow$ liba20c $\rightarrow$ POSIX shim
-                \item musl 移植：仅替换 arch 层与 syscall ops，复用 $\sim$45K 行代码
+                \item \code{make distro-run}：构建内核 + 用包管理器拉取\high{原生 Alpine} rootfs + 启动 QEMU(GUI)
+                \item 磁盘布局：\code{fat32.img}（自研用户态）+ \code{rootfs.img}（发行版）
+                \item init 检测 \code{a20-distro} 标记后 \code{chroot} 进入发行版，由\high{发行版自身的 stage-2 init} 编排 XFCE 会话
+                \item 内核补齐发行版需要的全部行为：netlink uevent、\code{PR\_SET\_PDEATHSIG}、\code{/sys/dev/char}、DRM 能力位、evdev ABI
             \end{itemize}
         \end{column}
-        \begin{column}{0.48\textwidth}
-            \begin{lstlisting}[basicstyle=\ttfamily\tiny]
-// liba20c: fd <-> handle mapping
-#define A20_FD_INIT_SIZE 32
-#define A20_FD_MAX_SIZE  1024
-
-// musl target triple
-aarch64-unknown-a20elf
-            \end{lstlisting}
+        \begin{column}{0.42\textwidth}
+            \begin{alertblock}{理念}
+                “优先在内核实现，而不是删依赖”——distro 路径没有改组件的自由，内核要么行为到位，要么桌面起不来。
+            \end{alertblock}
         \end{column}
     \end{columns}
     \vspace{0.3em}
-    \small 关键文件：\code{user/liba20rt/crt0\_*.S}、\code{docs/native-abi/07-startup.md}
+    \small 关键文件：\code{user/rootfs/alpine/}、\code{user/init.c}；文档：\code{docs/distro/}
 \end{frame}
 
+% ==================== 性能 ====================
+\section{性能}
+
 \begin{frame}
-    \frametitle{特色十一：安全模型 — rights lattice}
-    \begin{itemize}
-        \item \high{14 位权利掩码}：READ / WRITE / EXEC / STAT / DUP / TRANSFER / MAP / WAIT / CONNECT / ACCEPT / CONTROL / ADMIN / SIGNAL
-        \item \high{权利单调递减}：\code{handle\_dup} 与 IPC 转移只能缩小权利，不能扩大
-        \item \high{Bell-LaPadula} 多级安全标签 \{L, M, H\}：no-read-up / no-write-down
-        \item \high{Temporal capability}：到期时间与操作次数限制，自动回收或惰性失效
-    \end{itemize}
+    \frametitle{性能优化体系（面向 BuildStorm 热区）}
+    \begin{columns}
+        \begin{column}{0.55\textwidth}
+            \footnotesize
+            \begin{itemize}
+                \item \high{用户 vDSO}：riscv64 / loongarch64 \code{clock\_gettime} 零陷阱
+                \item \high{COW 页错误 TLB 定向失效}：广播 SBI/IPI $\rightarrow$ 只向 \code{mm->active\_cpus} 定向
+                \item \high{批量延迟 frame 释放}：\code{frame\_put\_many} 每 64 帧只取一次 \code{pfa.lock}
+                \item \high{ext4 命名空间读写锁}：8 个 rustc 的 dcache 查找不再互斥
+                \item \high{VMA 索引 256$\rightarrow$1024}：编译器进程保持 O(log n) 二分查找
+                \item \high{PRIVATE futex 跳过页表遍历}；fault 去冗余 present 检查
+                \item per-vnode 共享映射开关，消除全局脏页收割扫描
+            \end{itemize}
+        \end{column}
+        \begin{column}{0.42\textwidth}
+            \begin{block}{设计原则}
+                \footnotesize
+                每项均保留真实计时；性能数字只按干净提交固定，不做无证据外推。
+            \end{block}
+        \end{column}
+    \end{columns}
     \vspace{0.3em}
-    \small 关键文件：\code{docs/native-abi/06-security.md}、\code{kernel/abi/native/handle\_table.c}
+    \small 文档：\code{docs/BuildStorm-2026.md}；验证：QEMU TCG 多线程 SMP 下 mm/futex/sched/proc/vfs/clock 全组压力
 \end{frame}
 
 \begin{frame}
-    \frametitle{特色十二：文件系统后端契约矩阵}
+    \frametitle{决赛 BuildStorm 完整平台样本}
     \begin{table}
         \centering
         \footnotesize
-        \renewcommand{\arraystretch}{1.1}
-        \begin{tabular}{lcccc}
+        \renewcommand{\arraystretch}{1.25}
+        \begin{tabular}{lcc}
             \toprule
-            \textbf{后端} & \textbf{rename} & \textbf{link} & \textbf{symlink} & \textbf{关键限制} \\
+            \textbf{指标} & \textbf{RISC-V64} & \textbf{LoongArch64} \\
             \midrule
-            FAT32 & \texttimes & \texttimes & \texttimes & 元数据仅存 RAM \\
-            ext4 & \checkmark & \texttimes & 快链$\le$60B & 无日志，nlink=1 \\
-            ramfs & \checkmark & \checkmark & \checkmark & max inodes 4096 \\
-            pipe & -- & -- & -- & PIPE\_BUF 原子写 \\
+            BuildStorm elapsed & \high{1483.00 s} & \high{1399.13 s} \\
+            BuildStorm 用例 & 180/180 & 180/180 \\
+            CAgent & 10/10（199.10/200） & 10/10（199.10/200） \\
+            编译产物 & 1,681,000 B & 1,714,568 B \\
+            QEMU & 10.0.2 · 8 vCPU · TCG multi & 同左 \\
+            退出 & exit 0，主动关机 & exit 0，主动关机 \\
             \bottomrule
         \end{tabular}
     \end{table}
-    \vspace{0.3em}
-    \small 关键文件：\code{docs/fs-consistency-model.md}、\code{docs/vfs-edge-semantics.md}
+    \vspace{0.4em}
+    \begin{center}
+        \small 完整样本来自干净提交 \code{f9732348}，覆盖 rustc/Cargo 大规模并行编译、JBD2 journal 恢复与持久化正确性修复。
+    \end{center}
 \end{frame}
 
-\begin{frame}
-    \frametitle{特色十三：运行时网络配置}
-    \begin{itemize}
-        \item \high{无编译期网络默认值}：旧硬编码 QEMU 地址已移除
-        \item 内核命令行：\code{a20.ip}、\code{a20.netmask}、\code{a20.gateway}、\code{a20.dns}、\code{a20.dhcp}、\code{a20.hostname}
-        \item 运行时暴露：\code{/proc/net/config} 只读展示当前生效配置
-        \item 缺失配置时 socket 返回 \code{-ENETUNREACH}，而非静默使用开发默认值
-    \end{itemize}
-    \vspace{0.3em}
-    \small 关键文件：\code{kernel/net/net\_config.c}、\code{docs/network-config-design.md}
-\end{frame}
+% ==================== 驱动与设备 ====================
+\section{驱动与设备}
 
 \begin{frame}
-    \frametitle{特色十四：混合驱动模型}
+    \frametitle{混合驱动模型}
     \begin{itemize}
         \item \high{零开销 MMIO}：板级地址用宏内联，\code{readl/writel} 编译为单条 load/store
         \item \high{统一 hwapi}：\code{request\_irq}、\code{dma\_alloc}、\code{clock\_get\_cycles} 跨架构抽象
         \item \high{类 ops vtable}：\code{block\_dev\_ops\_t}、\code{net\_dev\_ops\_t}、\code{char\_dev\_ops\_t}
         \item 编译期注册：\code{DRIVER\_REGISTER} / \code{BOARD\_REGISTER} 放入 \code{.driver\_init} linker section
+        \item 双部署 profile：\code{generic}（DriverStore + \code{.a20drv}）/ \code{embedded}（静态链接）
+        \item drvmod：ET\_REL 装载 + \code{.a20drv} 描述段 + veneer/GOT，\high{~80 个导出符号}唯一 API 面
     \end{itemize}
     \vspace{0.3em}
-    \small 关键文件：\code{docs/drivers/README.md}、\code{kernel/include/drivers/hwapi.h}
-\end{frame}
-
-% ==================== 设计文档详解 ====================
-\section{设计文档详解}
-
-\begin{frame}
-    \frametitle{Native ABI：从 223 到 90 的系统调用压缩}
-    \begin{columns}
-        \begin{column}{0.55\textwidth}
-            \footnotesize
-            \begin{itemize}
-                \item 保留 POSIX 语义核心：\code{open/read/write/close}、\code{mmap/munmap}、\code{clone/wait/exit}
-                \item 用对象句柄统一替换 fd 语义：\code{handle\_set\_meta} 替代 chmod/chown/utimes/truncate
-                \item 用 \code{handle\_transfer} 统一 splice/sendfile/copy\_file\_range/tee
-                \item 取消 fork/exec/signal/ioctl，以 \code{task\_spawn} + Channel + EventQ 替代
-            \end{itemize}
-        \end{column}
-        \begin{column}{0.42\textwidth}
-            \footnotesize
-            \begin{table}
-                \centering
-                \renewcommand{\arraystretch}{1.1}
-                \begin{tabular}{lr}
-                    \toprule
-                    \textbf{类别} & \textbf{Native syscall 数} \\
-                    \midrule
-                    Task \& Process & 12 \\
-                    Memory (VMO/VMAR) & 14 \\
-                    IPC (Channel/EventQ) & 16 \\
-                    IO \& Handle & 22 \\
-                    Time \& Sync & 10 \\
-                    Misc & 16 \\
-                    \midrule
-                    \textbf{Total} & \textbf{90} \\
-                    \bottomrule
-                \end{tabular}
-            \end{table}
-        \end{column}
-    \end{columns}
-    \vspace{0.3em}
-    \small 关键文件：\code{docs/native-abi/01-overview.md}、\code{kernel/abi/native/syscall\_table.def}
-\end{frame}
-
-\begin{frame}[fragile]
-    \frametitle{Handle 生命周期：从创建到回收}
-    \begin{columns}
-        \begin{column}{0.52\textwidth}
-            \footnotesize
-            \begin{itemize}
-                \item \textbf{创建}：对象构造 $\rightarrow$ 分配 entry $\rightarrow$ 初始化 rights / expiry / label
-                \item \textbf{共享传递}：IPC \code{msg\_send} 时源表保留、目标表新增，对象引用计数递增，权利只能缩小
-                \item \textbf{复制}：\code{handle\_dup} 可在同进程内复制，rights 子集
-                \item \textbf{回收}：关闭引用 $\rightarrow$ entry 置空 $\rightarrow$ 对象引用计数归零后释放
-            \end{itemize}
-        \end{column}
-        \begin{column}{0.45\textwidth}
-            \begin{lstlisting}[basicstyle=\ttfamily\tiny]
-typedef enum {
-    HANDLE_STATE_EMPTY   = 0,
-    HANDLE_STATE_ALLOC   = 1,
-    HANDLE_STATE_VALID   = 2,
-    HANDLE_STATE_EXPIRED = 3
-} a20_handle_state_t;
-            \end{lstlisting}
-        \end{column}
-    \end{columns}
-    \vspace{0.3em}
-    \begin{block}{不变式}
-        \footnotesize
-        任意时刻，一个 Handle 在同一进程 Handle Table 中只存在一份有效引用；IPC 共享传递是原子的，不存在“悬挂引用”。接收方 HT 空间不足时整体返回 \code{NO\_SPACE}，消息留在队列中，杜绝 partial delivery。
-    \end{block}
-    \small 关键文件：\code{docs/native-abi/03-handles.md}、\code{kernel/abi/native/handle\_table.c}
-\end{frame}
-
-\begin{frame}[fragile]
-    \frametitle{VMO/VMAR：解耦物理页与地址空间}
-    \begin{columns}
-        \begin{column}{0.52\textwidth}
-            \footnotesize
-            \begin{itemize}
-                \item \code{a20\_vmo\_create(size, flags, \&h)}：创建物理页容器
-                \item \code{a20\_vmar\_map(vmar, h, offset, len, prot, \&addr)}：将 VMO 映射到地址空间
-                \item 保护公式：\code{effective\_prot = vmo\_prot $\cap$ vmar\_prot $\cap$ map\_prot}
-                \item 共享映射：多个 VMAR 映射同一 VMO，实现零拷贝共享内存
-            \end{itemize}
-        \end{column}
-        \begin{column}{0.45\textwidth}
-            \begin{lstlisting}[basicstyle=\ttfamily\tiny]
-// VMO resize / commit / decommit
-a20_vmo_set_size(h, new_size);
-a20_vmo_op_range(h, COMMIT, off, len);
-a20_vmo_op_range(h, DECOMMIT, off, len);
-
-// Shared zero-copy IPC
-a20_vmo_create(PAGE_SIZE, 0, &vmo);
-a20_vmar_map(sender_vmar, vmo, ...);
-a20_channel_write(channel, ..., &vmo, 1);
-a20_vmar_map(receiver_vmar, vmo, ...);
-            \end{lstlisting}
-        \end{column}
-    \end{columns}
-    \vspace{0.3em}
-    \small 关键文件：\code{docs/native-abi/04-memory.md}、\code{kernel/mm/a20\_vmo.c}、\code{kernel/mm/a20\_vmar.c}
-\end{frame}
-
-\begin{frame}[fragile]
-    \frametitle{Channel/EventQ：异步 IPC 协议}
-    \begin{columns}
-        \begin{column}{0.52\textwidth}
-            \footnotesize
-            \begin{itemize}
-                \item \textbf{两阶段写入}：reserve 槽位 $\rightarrow$ 拷贝数据 $\rightarrow$ commit；失败可 abort
-                \item \textbf{Handle 共享传递}：消息 commit 后源进程仍保留 Handle，对象引用计数递增
-                \item \textbf{EventQ}：每个进程一个，Channel 就绪时通过 \code{a20\_event\_signal} 通知
-                \item \textbf{等待}：\code{a20\_event\_wait} 多路复用，支持 deadline 和可中断
-            \end{itemize}
-        \end{column}
-        \begin{column}{0.45\textwidth}
-            \begin{lstlisting}[basicstyle=\ttfamily\tiny]
-// Two-phase channel write
-a20_channel_call_args_t args = {
-    .channel = ch,
-    .data = buf, .data_len = n,
-    .handles = &h, .handle_count = 1,
-};
-a20_channel_call(&args, &reply);
-            \end{lstlisting}
-        \end{column}
-    \end{columns}
-    \vspace{0.3em}
-    \begin{block}{保证}
-        \footnotesize
-        消息要么完整交付（数据 + 所有 Handle），要么完全不交付；不存在半包或 Handle 重复。
-    \end{block}
-    \small 关键文件：\code{docs/native-abi/05-ipc.md}、\code{kernel/ipc/a20\_channel.c}
+    \small 关键文件：\code{docs/drivers/README.md}、\code{kernel/include/drivers/hwapi.h}；验证 \code{make smoke-drvmod}
 \end{frame}
 
 \begin{frame}
-    \frametitle{安全模型：rights lattice 与 MLS}
+    \frametitle{设备生态：音频 / USB / PCI / 虚拟机}
     \begin{columns}
-        \begin{column}{0.52\textwidth}
-            \footnotesize
-            \begin{itemize}
-                \item 14 位权利掩码构成格，\code{ADMIN} 为最大元，空权利为最小元
-                \item \textbf{单调性}：\code{rights(child)} $\subseteq$ \code{rights(parent)}
-                \item \textbf{Bell-LaPadula}：低密级主体不可读高密级对象（no-read-up），高密级主体不可写低密级对象（no-write-down）
-                \item \textbf{Temporal}：\code{expiry\_tick} 与 \code{remaining\_ops} 提供自动失效
-            \end{itemize}
+        \begin{column}{0.5\textwidth}
+            \begin{block}{音频子系统}
+                \footnotesize
+                virtio-snd · Intel HDA（PCI class 驱动，CODEC 拓扑发现）· PC Speaker；\code{/dev/audioN} + capability/format 校验；\code{audioplay} 与 FFmpeg 播放器
+            \end{block}
+            \begin{block}{USB 协议栈}
+                \footnotesize
+                host / class / core 分层；xHCI；HID / 存储类；\code{make smoke-usb-x86\_64}
+            \end{block}
         \end{column}
-        \begin{column}{0.45\textwidth}
-            \footnotesize
-            \begin{table}
-                \centering
-                \renewcommand{\arraystretch}{1.1}
-                \begin{tabular}{cl}
-                    \toprule
-                    \textbf{标签} & \textbf{语义} \\
-                    \midrule
-                    L (Low) & 普通用户数据 \\
-                    M (Medium) & 系统服务中间层 \\
-                    H (High) & 内核关键资源 \\
-                    \bottomrule
-                \end{tabular}
-            \end{table}
+        \begin{column}{0.47\textwidth}
+            \begin{block}{PCI 与平台设备}
+                \footnotesize
+                ECAM 枚举 · \high{e1000 真 PCI 网卡} · ahci · virtio-scsi · 平台网卡（starfive\_gmac / ls2k\_gmac）· dw\_sdio
+            \end{block}
+            \begin{block}{VirtualBox}
+                \footnotesize
+                x86\_64 / aarch64 经 \high{UEFI + ACPI + ECAM} 引导；VMSVGA / E1000 / VirtIO-SCSI
+            \end{block}
         \end{column}
     \end{columns}
-    \vspace{0.3em}
-    \small 关键文件：\code{docs/native-abi/06-security.md}
 \end{frame}
 
 \begin{frame}
-    \frametitle{Native 启动协议与 musl 移植}
+    \frametitle{嵌入式与 MCU}
     \begin{columns}
-        \begin{column}{0.52\textwidth}
-            \footnotesize
-            \begin{itemize}
-                \item 内核通过 \code{a0} 寄存器传递 \code{a20\_start\_info\_t *}，包含初始 Handle 和配置
-                \item 初始 Handle：\code{root\_dir}、\code{cwd\_dir}、\code{stdin/stdout/stderr}、\code{self\_task}、\code{event\_queue}
-                \item 运行时分层：\code{liba20rt}（syscall 封装）$\rightarrow$ \code{liba20c}（fd 映射、pthread shim）$\rightarrow$ musl
-                \item musl 移植：新增 arch 层 \code{a20elf}，替换 syscall 入口，复用 stdio/string/malloc 等 $\sim$45K 行
-            \end{itemize}
+        \begin{column}{0.5\textwidth}
+            \begin{block}{STM32F103（ARMv7-M / NOMMU）}
+                \begin{itemize}
+                    \item 64 KiB Flash / 20 KiB SRAM bring-up（QEMU 验证）
+                    \item 普中玄武 ZET6：512 KiB Flash / 64 KiB SRAM
+                    \item 外设：LCD 显示、舵机/执行器、DHT11 传感器、蓝牙、ESP8266、背光
+                \end{itemize}
+            \end{block}
         \end{column}
-        \begin{column}{0.45\textwidth}
-            \footnotesize
-            \begin{block}{目标三元组}
-                \code{aarch64-unknown-a20elf}\\
-                \code{riscv64-unknown-a20elf}\\
-                \code{x86\_64-unknown-a20elf}\\
-                \code{loongarch64-unknown-a20elf}
+        \begin{column}{0.47\textwidth}
+            \begin{block}{PPC64LE}
+                QEMU pSeries 固件，MMU 单核边界
+            \end{block}
+            \begin{block}{跨平台工程}
+                统一的 arch/HAL 抽象、七架构构建矩阵，物理板与虚拟平台同构验证。
             \end{block}
         \end{column}
     \end{columns}
     \vspace{0.3em}
-    \small 关键文件：\code{docs/native-abi/07-startup.md}、\code{user/liba20rt/crt0\_*.S}
+    \small 入口：\code{make stm32f103-bringup}、\code{make stm32f103-xuanwu}、\code{make run-stm32f103-qemu}、\code{make ARCH=ppc64le run}
 \end{frame}
 
-\begin{frame}
-    \frametitle{VFS 边界语义与一致性契约}
-    \begin{columns}
-        \begin{column}{0.52\textwidth}
-            \footnotesize
-            \begin{itemize}
-                \item \code{openat2} 标志：\code{RESOLVE\_NO\_XDEV}、\code{RESOLVE\_BENEATH}、\code{RESOLVE\_NO\_SYMLINKS}
-                \item \code{renameat2}：\code{RENAME\_EXCHANGE}、\code{RENAME\_NOREPLACE}、跨 mount 拒绝
-                \item 路径解析：处理 mount root、\code{..} 穿越、符号链接深度 \code{MAX\_SYMLINKS=40}
-                \item Page Cache：\code{writeback} 与 \code{invalidate} 保证 \code{MAP\_SHARED} 多核一致
-            \end{itemize}
-        \end{column}
-        \begin{column}{0.45\textwidth}
-            \footnotesize
-            \begin{block}{关键不变式}
-                \code{lookup} 必须持有父目录引用；\\
-                \code{rename} 原子更新目录项与 inode nlink；\\
-                跨后端操作返回 \code{-EXDEV}。
-            \end{block}
-        \end{column}
-    \end{columns}
-    \vspace{0.3em}
-    \small 关键文件：\code{docs/vfs-edge-semantics.md}、\code{docs/fs-consistency-model.md}
-\end{frame}
+% ==================== 工程化与验证 ====================
+\section{工程化与验证}
 
 \begin{frame}
-    \frametitle{网络配置与驱动接口设计}
-    \begin{columns}
-        \begin{column}{0.52\textwidth}
-            \footnotesize
-            \begin{itemize}
-                \item 无编译期默认网络参数，全部通过内核命令行注入
-                \item 命令行参数：\code{a20.ip=10.0.2.15}、\code{a20.netmask=255.255.255.0}、\code{a20.gateway=10.0.2.2}、\code{a20.dns=10.0.2.3}、\code{a20.dhcp=off}、\code{a20.hostname=a20os}
-                \item \code{/proc/net/config} 只读暴露当前配置
-                \item 驱动接口：\code{hwapi.h} 统一 \code{request\_irq}、\code{dma\_alloc}、\code{clock\_get\_cycles}
-            \end{itemize}
-        \end{column}
-        \begin{column}{0.45\textwidth}
-            \footnotesize
-            \begin{block}{设计原则}
-                静默默认值是隐蔽 bug 的温床；缺失配置时 socket 显式返回 \code{-ENETUNREACH}。
-            \end{block}
-        \end{column}
-    \end{columns}
-    \vspace{0.3em}
-    \small 关键文件：\code{docs/network-config-design.md}、\code{docs/drivers/README.md}
-\end{frame}
-
-% ==================== 测试与验证 ====================
-\section{测试验证}
-
-\begin{frame}
-    \frametitle{测试门禁与初赛成绩}
+    \frametitle{测试门禁体系}
     \begin{table}
         \centering
         \footnotesize
         \renewcommand{\arraystretch}{1.2}
         \begin{tabular}{lll}
             \toprule
-            \textbf{测试目标} & \textbf{命令示例} & \textbf{状态} \\
+            \textbf{测试目标} & \textbf{命令示例} & \textbf{覆盖} \\
             \midrule
-            多架构内核构建 & \code{make check-kernel-build} & \high{通过} \\
-            调度并发压力 & \code{make smoke-sched-stress} & \high{通过} \\
-            Futex 并发压力 & \code{make smoke-futex-stress} & \high{通过} \\
-            VFS 并发压力 & \code{make smoke-vfs-stress} & \high{通过} \\
-            MM 压力与 COW & \code{make smoke-mm-stress} & \high{通过} \\
-            Linux ABI smoke & \code{make smoke-riscv64} & \high{通过} \\
-            并发基础门禁 & \code{make check-concurrency-foundation} & \high{通过} \\
+            Linux ABI smoke & \code{make smoke-abi-linux} & syscall 语义逐组验证 \\
+            扩展 syscall & \code{make smoke-syscall-ext} & keyring/AIO/fanotify/pidfd/io\_uring/landlock/userfaultfd/perf \\
+            并发压力 & \code{smoke-sched/futex/vfs/mm/proc-stress} & 死锁与崩溃捕获 \\
+            网络套件 & \code{make smoke-network-suite} & TCP/UDP/ICMP/DNS/AF\_UNIX \\
+            多架构构建 & \code{make check-build-matrix-all} & 七架构内核+用户态 \\
+            并发基础 & \code{make check-concurrency-foundation} & SMP 锁模型编译期审查 \\
+            GUI & \code{make smoke-qemu-gui-riscv64} & XFCE Wayland 桌面启动 \\
             \bottomrule
         \end{tabular}
     \end{table}
     \vspace{0.3em}
     \begin{center}
-        \small 测试日志位于 \code{test-results/}，记录构建与运行时回归结果。
+        \small Native 侧 16+ 个 \code{smoke-native-*}：contract/ipc/svc/registry/isolation/rtcd/ubd/shmring/deepen/ext/personality/linux。\newline
+        调度压力矩阵：\code{make check-proc-step8-local}（双架构 1 核/8 核累计）。
     \end{center}
 \end{frame}
 
 \begin{frame}
-    \frametitle{P0 完成情况}
+    \frametitle{文档即事实 + 可观测性}
     \begin{columns}
-        \begin{column}{0.48\textwidth}
-            \begin{block}{已完成的 P0 方向}
+        \begin{column}{0.52\textwidth}
+            \footnotesize
+            \begin{itemize}
+                \item \code{DOCS\_AS\_FACT\_CONTRACT}：架构文档描述\high{当前实现}，未来设计放规划材料
+                \item 15+ 静态/运行时门禁：\code{check-mm-lock-model}、\code{check-abi-boundary}、\code{check-io-progress-model}、\code{check-doc-drift} 等
+                \item 外部依赖边界审查（musl / lwIP / 用户态工具）
+                \item Docker 交叉编译环境 + 可选 \code{ccache}
+            \end{itemize}
+        \end{column}
+        \begin{column}{0.45\textwidth}
+            \begin{block}{\code{/proc/a20/} 运行时状态面}
+                \footnotesize
                 \begin{itemize}
-                    \item SMP 并发与锁契约
-                    \item Linux ABI 正确性
-                    \item 高级 Futex 与内存序
-                    \item MM / Page Cache / \code{MAP\_SHARED}
-                    \item Huge-page demotion / COW
-                    \item OOM reclaim 安全策略
-                    \item vim / git / gcc / fastfetch 移植与静态构建
+                    \item \code{objects}：7 项实时对象计数 + 句柄硬配额审计
+                    \item \code{task\_lifetime}：task/ref、runqueue、wait/wake、timeout、migration、IPI、violation 计数
+                    \item \code{sched\_base\_slice}：EEVDF 虚拟 slice 旋钮
                 \end{itemize}
             \end{block}
         \end{column}
-        \begin{column}{0.48\textwidth}
-            \begin{alertblock}{Remaining P1/P2}
-                \begin{itemize}
-                    \item 块/网络设备完全事件驱动唤醒
-                    \item \code{g\_lwip\_lock} 竞争优化
-                    \item VFS 边界语义持续收紧
-                    \item 更多 LTP 风格压力测试
-                \end{itemize}
-            \end{alertblock}
-        \end{column}
     \end{columns}
+    \vspace{0.3em}
+    \small 崩溃/重启循环后对象计数回归基线，泄漏审计可重复验证。
 \end{frame}
 
-% ==================== 未来计划 ====================
-\section{未来计划}
+% ==================== 未来工作 ====================
+\section{未来工作}
 
 \begin{frame}
     \frametitle{下一步工作}
     \begin{enumerate}
-        \item \high{I/O 完全事件驱动}：替换块/网络设备中的兼容轮询路径
-        \item \high{网络栈深化}：扩展 socket 并发测试，降低 lwIP 全局锁竞争
-        \item \high{VFS 语义收紧}：完整 \code{renameat2}、\code{statx}、xattr 等边界行为
-        \item \high{测试强化}：将静态文档门禁转化为可执行的行为测试
-        \item \high{架构探索}：在 \code{riir} 分支继续 Rust 重写实验（研究性质）
+        \item \high{I/O 完全事件驱动}：收敛块/网络设备最后的轮询 fallback 路径
+        \item \high{网络栈深化}：降低 \code{g\_lwip\_lock} 竞争，扩展 socket 并发测试
+        \item \high{VFS/Linux ABI 语义收紧}：\code{partial} $\rightarrow$ \code{full} 逐组提升
+        \item \high{IOMMU 动态 DMA}：per-device domain 与 fault 队列消费，端到端硬件隔离
+        \item \high{Native 多架构矩阵}：将 16+ 原生测试扩展至全架构 CI-like 运行
     \end{enumerate}
     \vspace{0.5em}
     \begin{block}{核心追求}
@@ -880,7 +1217,7 @@ a20_channel_call(&args, &reply);
     \begin{center}
         \vspace{2em}
         {\Large 感谢全国大学生计算机系统能力大赛平台}\\[0.8em]
-        {\Large 感谢指导教师与开源社区的支持}\\[0.8em]
+        {\Large 感谢开源社区AOSC，plos-clan的支持}\\[0.8em]
         \vspace{1em}
         {\Large\high{Q \& A}}
         \vspace{2em}
