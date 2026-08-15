@@ -31,12 +31,22 @@ typedef struct {
     uint64_t  mask;
 } arch_user_sigaction_t;
 
+/*
+ * Linux RISC-V signal ABI: struct ucontext keeps uc_sigmask (kernel sigset,
+ * 8 bytes) followed by explicit padding to the user-space sigset_t size
+ * (128 bytes), so uc_mcontext sits at the exact offset musl/glibc and
+ * signal handlers that modify the saved PC (e.g. SIGILL feature probes in
+ * qemu) expect.  Without the padding the kernel frame and the userspace
+ * ucontext_t disagree, and a handler's PC advance is silently discarded on
+ * rt_sigreturn (infinite SIGILL loop / canary corruption).
+ */
 typedef struct arch_ucontext {
     uint64_t          uc_flags;
     uintptr_t         uc_link;
     arch_stack_t      uc_stack;
     arch_sigset_t     uc_sigmask;
-    arch_sigcontext_t uc_mcontext;
+    uint64_t          uc_sigmask_pad[15]; /* 8 + 120 = 128 bytes, matches sigset_t */
+    arch_sigcontext_t uc_mcontext;        /* offset 176, matches musl ucontext_t */
 } __attribute__((aligned(16))) arch_ucontext_t;
 
 typedef struct {
