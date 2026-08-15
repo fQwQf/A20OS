@@ -173,7 +173,7 @@ DRIVER_STORE_USER_PACKAGES = $(notdir $(NATIVE_RTCDD_BIN)) \
                              $(notdir $(NATIVE_UEDUD_BIN))
 
 smoke-drvmod-riscv64:
-	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 DRIVER_DEPLOYMENT=generic dev-build
+	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 DRIVER_DEPLOYMENT=generic USER_BUILD_DESKTOP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/drvmod-riscv64.log"; \
@@ -197,7 +197,7 @@ smoke-drvmod-riscv64:
 	fi
 
 smoke-drvmod-aarch64:
-	$(MAKE) ARCH=aarch64 ABI=both BRINGUP=0 DRIVER_DEPLOYMENT=generic dev-build
+	$(MAKE) ARCH=aarch64 ABI=both BRINGUP=0 DRIVER_DEPLOYMENT=generic USER_BUILD_DESKTOP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/drvmod-aarch64.log"; \
@@ -219,7 +219,7 @@ smoke-drvmod-aarch64:
 	fi
 
 smoke-drvmod-loongarch64:
-	$(MAKE) ARCH=loongarch64 ABI=both BRINGUP=0 DRIVER_DEPLOYMENT=generic dev-build
+	$(MAKE) ARCH=loongarch64 ABI=both BRINGUP=0 DRIVER_DEPLOYMENT=generic USER_BUILD_DESKTOP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/drvmod-loongarch64.log"; \
@@ -241,7 +241,7 @@ smoke-drvmod-loongarch64:
 	fi
 
 smoke-drvmod-x86_64:
-	$(MAKE) ARCH=x86_64 ABI=both BRINGUP=0 DRIVER_DEPLOYMENT=generic dev-build
+	$(MAKE) ARCH=x86_64 ABI=both BRINGUP=0 DRIVER_DEPLOYMENT=generic USER_BUILD_DESKTOP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/drvmod-x86_64.log"; \
