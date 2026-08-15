@@ -182,8 +182,11 @@ RISCV_GLIBC_LIB_DIR ?= $(patsubst %/ld-linux-riscv64-lp64d.so.1,%,$(firstword \
 RISCV_GLIBC_LOCAL_ROOT ?= user/external/riscv64-glibc-sysroot
 RISCV_GLIBC_LOCAL_LIB_DIR = $(RISCV_GLIBC_LOCAL_ROOT)/lib
 FEDORA_RISCV_RELEASE ?=
-USER_BUILD_ID = $(ARCH):$(NOMMU):$(USER_OPT):$(PROFILE)
 USER_BUILD_DESKTOP = $(if $(filter benchmark,$(PROFILE)),0,1)
+# The desktop (LVGL) binary is only produced when USER_BUILD_DESKTOP=1; include
+# it in the build signature so text-mode and GUI builds never share a stamp
+# (and thus never leave a stale desktop binary in the image).
+USER_BUILD_ID = $(ARCH):$(NOMMU):$(USER_OPT):$(PROFILE):$(USER_BUILD_DESKTOP)
 # $(wildcard) drops uninitialized git submodules (lvgl, fastfetch).  The
 # benchmark build must not fail when a tarball export or a non-recursive clone
 # leaves those directories absent entirely.

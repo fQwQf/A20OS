@@ -164,6 +164,20 @@ for each (task, seq):
   vnode 生命周期层，本分支未触碰 vnode 引用计数；单独 `vfs_stress` 与其余组合轮均通过，385a
   基线同样未复现。判断为 vfs_rename 的既有罕见 vnode 引用竞态，可能被调度/锁时序扰动暴露；
   因样本太小无法严格归因，记录在案并建议后续用 fault-injection/长时 vfs 压力单独追查。
+
+- **排查续报（合并后）**：修复 drvmod 的 `kallsyms_print` 导出（见下）使 dev 构建恢复可 boot 后，
+  用 8 vCPU 组合压力再次复现该 flake（3 轮中 1 轮：`vfs_rename_flags` 内 `vnode_put` 双释放，
+  ra 指向 `vfs_dcache_invalidate` 附近）。静态分析未找到平衡破坏点：`old_victim`/`new_victim`
+  （VFS lookup ref + dcache ref）与 `ext4_inode_remove` 的 `deferred_put`（ext4 vnode cache ref）
+  各成对 put；dcache per-bucket 重构未改变"锁内摘链、锁外 vnode_put"的既有模式。最可能仍是
+  vfs/ext4 vnode 缓存与并发 rename 之间的既有罕见竞态，建议后续用 vnode refcount 断言/
+  fault-injection 专案定位。
+
+- **drvmod 模块 ABI 修复（dev 构建可 boot）**：main 的 `b29d6691` 在 `core/lock.h` 内联
+  `spin_lock_at` 的 stall 报告里新增 `kallsyms_print()` 调用，任何包含 lock.h 的 `.a20drv`
+  模块都产生该外部引用；drvmod 白名单只导出 `kallsyms_lookup`，导致 `virtio-blk.a20drv`/
+  `dw-sdio.a20drv` 加载 -22、generic 部署 dev 构建找不到 FAT32 根而 boot panic。已在
+  `drvmod/framework.c` 白名单补导出 `kallsyms_print`，dev 构建恢复 boot，全部压力门禁通过。
 - **性能**：`/proc/a20/lock_contention` 的 `proc` 竞争从 16-30K 降到 5.6-6.7K（mm 单跑）。
 - **架构**：通用代码，loongarch64 编译通过。
 - **风险**：这是全项目最核心的协议；任何一步不满足 §2 不变量都会造成隐藏丢唤醒。已用 A/B 确认

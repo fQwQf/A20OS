@@ -289,7 +289,7 @@ check-proc-step5: check-proc-step5-local \
 	@echo "check-proc-step5: PASS"
 
 smoke-socket-stress:
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/socket-stress-riscv64.log"; \
@@ -345,7 +345,7 @@ smoke-driver-lifecycle:
 smoke-hda:
 	rm -f $(USER_BUILD_DIR)/hda.a20drv
 	$(MAKE) ARCH=x86_64 BOARD=qemu-virt-x86_64 ABI=both BRINGUP=0 \
-		CONFIG_HDA_SMOKE_TEST=y DRVMOD_SMOKE=1 dev-build
+		CONFIG_HDA_SMOKE_TEST=y DRVMOD_SMOKE=1 USER_BUILD_DESKTOP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/hda-x86_64.log"; \
@@ -370,7 +370,7 @@ smoke-hda:
 	fi
 
 smoke-audio-userspace:
-	$(MAKE) ARCH=x86_64 BOARD=qemu-virt-x86_64 ABI=linux BRINGUP=0 dev-build
+	$(MAKE) ARCH=x86_64 BOARD=qemu-virt-x86_64 ABI=linux BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/audio-userspace-x86_64.log"; \
@@ -428,7 +428,7 @@ smoke-usb-x86_64:
 	fi
 
 smoke-virtio-sound:
-	$(MAKE) ARCH=x86_64 BOARD=qemu-virt-x86_64 ABI=linux BRINGUP=0 dev-build
+	$(MAKE) ARCH=x86_64 BOARD=qemu-virt-x86_64 ABI=linux BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/virtio-sound-x86_64.log"; \
@@ -462,7 +462,7 @@ smoke-virtio-sound:
 smoke-pci-portability:
 	rm -f $(USER_BUILD_DIR)/nvme.a20drv
 	$(MAKE) ARCH=loongarch64 BOARD=qemu-virt-loongarch64 ABI=both BRINGUP=0 \
-		CONFIG_HDA_SMOKE_TEST=y DRVMOD_SMOKE=1 dev-build
+		CONFIG_HDA_SMOKE_TEST=y DRVMOD_SMOKE=1 USER_BUILD_DESKTOP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/pci-portability-loongarch64.log"; \
@@ -494,7 +494,7 @@ smoke-pci-portability:
 	fi
 
 smoke-native-handle:
-	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/native-handle-riscv64.log"; \
