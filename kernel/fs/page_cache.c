@@ -466,6 +466,21 @@ retry:
 
     vnode_t *deferred_put = NULL;
     uint64_t flags = spin_lock_irqsave(&g_page_cache_lock);
+
+    /* Serialize the miss-to-create transition.  A mapping may have been
+     * published after the optimistic bucket lookup but before this creator
+     * acquired the global allocation lock. */
+    bflags = page_cache_bucket_lock_irqsave(idx);
+    page = find_locked(vn, index);
+    if (page) {
+        refcount_inc(&page->ref_count);
+        page->accessed = 1;
+        page_cache_bucket_unlock_irqrestore(idx, bflags);
+        spin_unlock_irqrestore(&g_page_cache_lock, flags);
+        return page;
+    }
+    page_cache_bucket_unlock_irqrestore(idx, bflags);
+
     page = free_take_locked();
     if (!page && g_allocated_pages < g_page_limit) {
         spin_unlock_irqrestore(&g_page_cache_lock, flags);
