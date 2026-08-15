@@ -33,6 +33,8 @@
 # include "arch/riscv32/include/arch.h"
 #elif defined(CONFIG_LOONGARCH64)
 # include "arch/loongarch64/include/arch.h"
+#elif defined(CONFIG_LOONGARCH32)
+# include "arch/loongarch32/include/arch.h"
 #elif defined(CONFIG_AARCH64)
 # include "arch/aarch64/include/arch.h"
 #elif defined(CONFIG_ARM32)
@@ -44,7 +46,7 @@
 #elif defined(CONFIG_X86_64)
 # include "arch/x86_64/include/arch.h"
 #else
-# error "No architecture defined. Set ARCH=riscv64, ARCH=riscv32, ARCH=loongarch64, ARCH=aarch64, ARCH=arm32, ARCH=armv7m, ARCH=ppc64le or ARCH=x86_64."
+# error "No architecture defined. Set ARCH=riscv64, ARCH=riscv32, ARCH=loongarch64, ARCH=loongarch32, ARCH=aarch64, ARCH=arm32, ARCH=armv7m, ARCH=ppc64le or ARCH=x86_64."
 #endif
 
 /* Keep the conservative global behavior on architectures without a
@@ -231,6 +233,8 @@ static inline int arch_syscall_resched_allowed(void)
 # define ARCH_NAME "riscv32"
 #elif defined(CONFIG_LOONGARCH64)
 # define ARCH_NAME "loongarch64"
+#elif defined(CONFIG_LOONGARCH32)
+# define ARCH_NAME "loongarch32"
 #elif defined(CONFIG_AARCH64)
 # define ARCH_NAME "aarch64"
 #elif defined(CONFIG_ARM32)

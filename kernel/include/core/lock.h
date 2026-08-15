@@ -143,7 +143,7 @@ static inline void spin_lock_at(spinlock_t *lock, uintptr_t caller_ra) {
                            (unsigned long)waiter_ra, spins,
                            (unsigned long)(elapsed * 1000 / TICKS_PER_SEC));
                     if (owner == cur) {
-                        extern void kallsyms_print(uintptr_t addr);
+                        extern void kallsyms_print(uint64_t addr);
                         struct backtrace_frame frames[32];
                         uint64_t fp = (uint64_t)__builtin_frame_address(0);
                         int n = arch_unwind_frames(fp, frames, 32);
