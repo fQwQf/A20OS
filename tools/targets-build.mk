@@ -46,6 +46,9 @@ check-riscv64-bringup:
 check-loongarch64-bringup:
 	$(MAKE) ARCH=loongarch64 ABI=$(ABI) BRINGUP=1 kernel-only
 
+check-loongarch32-bringup:
+	$(MAKE) ARCH=loongarch32 BOARD=nailoong ABI=$(ABI) BRINGUP=1 kernel-only
+
 check-aarch64-bringup:
 	$(MAKE) ARCH=aarch64 ABI=$(ABI) BRINGUP=1 kernel-only
 

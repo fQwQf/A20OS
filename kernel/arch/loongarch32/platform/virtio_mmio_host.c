@@ -1,0 +1,11 @@
+#include "drivers/bus/virtio_mmio_hal.h"
+
+/* No virtio-mmio slots on the NaiLoong SoC; keep the HAL linkable. */
+
+uintptr_t arch_virtio_mmio_slot_base(uintptr_t base, int slot) {
+    return base + (uintptr_t)slot * 0x1000UL;
+}
+
+uintptr_t arch_virtio_mmio_slot_size(void) {
+    return 0x1000UL;
+}

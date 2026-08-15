@@ -195,6 +195,7 @@ USER_BUILD_CHECK_DIRS = $(wildcard user/init.c user/cmds user/init_common user/d
                         user/external/tlse user/external/apps/fastfetch)
 NATIVE_TAG_riscv64     := rv
 NATIVE_TAG_loongarch64 := la
+NATIVE_TAG_loongarch32 := la32
 NATIVE_TAG_aarch64     := aarch64
 NATIVE_TAG_x86_64      := x86_64
 NATIVE_TAG_arm32       := arm32
@@ -306,6 +307,7 @@ RISCV_ELF_RV32_MULTIDIR := $(shell if command -v $(RISCV_ELF_PREFIX)gcc >/dev/nu
 fi)
 CROSS_PREFIX_riscv64     := $(RISCV_ELF_PREFIX)
 CROSS_PREFIX_loongarch64 := loongarch64-linux-gnu-
+CROSS_PREFIX_loongarch32 := $(if $(shell command -v loongarch32-linux-gnu-gcc 2>/dev/null),loongarch32-linux-gnu-,loongarch32-unknown-elf-)
 CROSS_PREFIX_aarch64     := aarch64-linux-gnu-
 CROSS_PREFIX_x86_64      := x86_64-linux-gnu-
 CROSS_PREFIX_arm32       := $(if $(shell command -v arm-linux-gnueabihf-gcc 2>/dev/null),arm-linux-gnueabihf-,$(if $(shell command -v arm-none-eabi-gcc 2>/dev/null),arm-none-eabi-,arm-linux-gnueabihf-))
@@ -315,6 +317,7 @@ CROSS_PREFIX_ppc64le     := powerpc64le-linux-gnu-
 
 ARCH_CFLAGS_riscv64     := -march=rv64imafdc_zicsr_zifencei -mabi=lp64 -mcmodel=medany
 ARCH_CFLAGS_loongarch64 := -march=loongarch64 -mabi=lp64d -mcmodel=normal -fno-pic -static
+ARCH_CFLAGS_loongarch32 := -march=la32v1.0 -mabi=ilp32s -mcmodel=normal -fno-pic -static -fno-store-merging
 ARCH_CFLAGS_aarch64     := -march=armv8-a -mgeneral-regs-only -fno-pic -mcmodel=large -mno-outline-atomics
 ARCH_CFLAGS_x86_64      := -m64 -mcmodel=large -mno-red-zone -fno-pic -fno-pie -mgeneral-regs-only -fno-omit-frame-pointer
 ARCH_CFLAGS_arm32       := -march=armv7-a -marm -mfpu=vfpv3-d16 -mfloat-abi=hard -fno-pic -static -mno-unaligned-access
@@ -332,6 +335,7 @@ PHYS_BASE_riscv32     := 0x80200000
 PHYS_BASE_riscv64     := 0x80200000
 PHYS_BASE_x86_64      := 0x00200000
 PHYS_BASE_loongarch64 := 0x9000000000000000
+PHYS_BASE_loongarch32 := 0x80000000
 
 ifeq ($(NOMMU),1)
 LDFLAGS_NOMMU := -Wl,--defsym=VIRT_BASE=$(PHYS_BASE_$(ARCH))
@@ -340,6 +344,7 @@ endif
 
 ARCH_LDFLAGS_riscv64     :=
 ARCH_LDFLAGS_loongarch64 := -static -no-pie
+ARCH_LDFLAGS_loongarch32 := -static -no-pie
 ARCH_LDFLAGS_aarch64     := -static -no-pie
 ARCH_LDFLAGS_x86_64      := -static -no-pie
 ARCH_LDFLAGS_arm32       := -static -no-pie
@@ -349,6 +354,7 @@ ARCH_LDFLAGS_ppc64le     := -static -no-pie
 
 ARCH_LIBS_riscv64     :=
 ARCH_LIBS_loongarch64 :=
+ARCH_LIBS_loongarch32 := $(shell $(CROSS_PREFIX_loongarch32)gcc $(ARCH_CFLAGS_loongarch32) -print-libgcc-file-name 2>/dev/null)
 ARCH_LIBS_aarch64     :=
 ARCH_LIBS_x86_64      :=
 ARCH_LIBS_arm32       := $(shell $(CROSS_PREFIX_arm32)gcc $(ARCH_CFLAGS_arm32) -print-libgcc-file-name 2>/dev/null)
@@ -571,6 +577,7 @@ CFLAGS += -DCONFIG_TRAP_ESR_DIAG
 endif
 ELF_MACHINE_riscv64     := 243
 ELF_MACHINE_loongarch64 := 258
+ELF_MACHINE_loongarch32 := 258
 ELF_MACHINE_aarch64     := 183
 ELF_MACHINE_x86_64      := 62
 ELF_MACHINE_arm32       := 40
@@ -578,6 +585,7 @@ ELF_MACHINE_riscv32     := 243
 ELF_MACHINE_ppc64le     := 21
 ELF_CLASS_riscv64       := 2
 ELF_CLASS_loongarch64   := 2
+ELF_CLASS_loongarch32   := 1
 ELF_CLASS_aarch64       := 2
 ELF_CLASS_x86_64        := 2
 ELF_CLASS_arm32         := 1
@@ -619,7 +627,7 @@ ifeq ($(STM32_QEMU),1)
 CFLAGS += -DCONFIG_STM32_QEMU
 endif
 endif
-ifeq ($(filter $(ARCH),arm32 armv7m riscv32),)
+ifeq ($(filter $(ARCH),arm32 armv7m riscv32 loongarch32),)
 CFLAGS += -DCONFIG_64BIT
 else
 CFLAGS += -DCONFIG_32BIT
