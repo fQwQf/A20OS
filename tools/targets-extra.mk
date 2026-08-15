@@ -41,19 +41,28 @@ $(EXTRA_IMAGE_STAMP): force_extra_image_stamp
 			case "$$name" in *.o|*.a|*.so|*.d) continue ;; esac; \
 			find -H "$$f" -maxdepth 0 -printf 'user %f %s %T@\n'; \
 		done; \
-		for f in user/build/extra/$(ARCH)/*; do \
-			[ -f "$$f" ] || continue; \
-			name=$$(basename "$$f"); \
-			case " $(EXTRA_PACKAGES) " in *" $$name "*) \
-				find -H "$$f" -maxdepth 0 -printf 'extra %f %s %T@\n' ;; \
-			esac; \
+	for f in user/build/extra/$(ARCH)/*; do \
+		[ -f "$$f" ] || continue; \
+		name=$$(basename "$$f"); \
+		case " $(EXTRA_PACKAGES) " in *" $$name "*) \
+			find -H "$$f" -maxdepth 0 -printf 'extra %f %s %T@\n' ;; \
+		esac; \
+	done; \
+	if [ -n "$(filter lamina,$(EXTRA_PACKAGES))" ]; then \
+		for pat in 'liblaminaCore.so*' 'liblmcas.so*' 'liblmmc.so*' 'libLammpCore.so*' 'libstdc++.so*'; do \
+			for f in user/build/extra/$(ARCH)/$$pat; do \
+				[ -f "$$f" ] || continue; \
+				find -H "$$f" -maxdepth 0 -printf 'extra %f %s %T@\n'; \
+			done; \
 		done; \
+	fi; \
 		for package in $(sort $(EXTRA_PACKAGES)); do \
 			case "$$package" in \
 				vim) stamp=.vim-built ;; \
 				git) stamp=.git-built ;; \
 				gcc|cc) stamp=.gcc-built ;; \
 				rust|rustc|cargo|rustfmt) stamp=.rust-built ;; \
+				lamina) stamp=.lamina-built ;; \
 				*) continue ;; \
 			esac; \
 			f="user/build/extra/$(ARCH)/stamp/$$stamp"; \
@@ -109,7 +118,14 @@ $(EXTRA_IMG): $(EXTRA_IMAGE_STAMP)
 		[ -f "$$f" ] || continue; \
 		name=$$(basename "$$f"); \
 		case " $(EXTRA_PACKAGES) " in *" $$name "*) cp "$$f" "$(EXTRA_STAGING_DIR)/bin/$$name" ;; esac; \
-	done
+	done; \
+	if [ -n "$(filter lamina,$(EXTRA_PACKAGES))" ]; then \
+		for pat in 'liblaminaCore.so*' 'liblmcas.so*' 'liblmmc.so*' 'libLammpCore.so*' 'libstdc++.so*'; do \
+			for f in user/build/extra/$(ARCH)/$$pat; do \
+				[ -f "$$f" ] && cp -P "$$f" "$(EXTRA_STAGING_DIR)/bin/$$(basename "$$f")"; \
+			done; \
+		done; \
+	fi
 	@set -e; \
 	if [ -n "$(filter gcc cc,$(EXTRA_PACKAGES))" ] && [ -d user/build/extra/$(ARCH)/obj/gcc-install ]; then \
 		cp -a user/build/extra/$(ARCH)/obj/gcc-install/libexec "$(EXTRA_STAGING_DIR)/libexec"; \
