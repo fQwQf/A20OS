@@ -68,7 +68,9 @@ _run_impl:
 ifeq ($(BRINGUP),1)
 	$(MAKE) ARCH=$(ARCH) BRINGUP=1 kernel-only
 else
-	$(MAKE) ARCH=$(ARCH) BRINGUP=$(BRINGUP) dev-build
+	# Text-mode boots never launch the LVGL desktop; skip building it so the
+	# dev-build does not compile lvgl for a console run.
+	$(MAKE) ARCH=$(ARCH) BRINGUP=$(BRINGUP) USER_BUILD_DESKTOP=0 dev-build
 endif
 	@test -s $(KERNEL_ELF) || (echo "ERROR: kernel ELF missing or empty: $(KERNEL_ELF)" ; exit 1)
 	$(QEMU) $(QEMU_FLAGS) -kernel $(KERNEL_ELF)
@@ -101,7 +103,7 @@ _debug_impl:
 ifeq ($(BRINGUP),1)
 	$(MAKE) ARCH=$(ARCH) BRINGUP=1 OPT="-O0 -g -DDEBUG" kernel-only
 else
-	$(MAKE) ARCH=$(ARCH) BRINGUP=$(BRINGUP) OPT="-O0 -g -DDEBUG" dev-build
+	$(MAKE) ARCH=$(ARCH) BRINGUP=$(BRINGUP) OPT="-O0 -g -DDEBUG" USER_BUILD_DESKTOP=0 dev-build
 endif
 	@echo "Waiting for GDB connection on port 1234..."
 	@echo "=========================================================="
