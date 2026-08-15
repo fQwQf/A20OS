@@ -58,6 +58,7 @@ A20OS 仓库不能预先限定下游只分发源码。`fat32.img`、`ext4.img`�
 | vim | Vim License | `user/external/apps/vim` | 独立可执行文件 |
 | GCC | 应按实际取得源码的许可证与 GCC Runtime Library Exception 核验 | `user/external/gcc`（审计基线 `e33c3219` 未跟踪该目录） | `user/extra.mk` 仅在 `configure` 存在时启用可选工具链构建 |
 | binutils | GPL-3.0 / LGPL-3.0 | `user/external/toolchain/binutils` | 独立工具链 |
+| lamina (Lamina1) | 根目录暂无 LICENSE 文本，按实际取得源码核验；子模块 LMCAS/LAMMP 为 LGPL-2.1，dyncall 为逐文件 BSD 风格 | `user/external/toolchain/Lamina1` | 独立可执行文件 + 4 个共享库（laminaCore/lmcas/lmmc/LammpCore，含版本化 SONAME 文件）与 libstdc++.so.6，动态链接 glibc（运行库与 rust 包共用） |
 | FFmpeg | LGPL-2.1-or-later（以固定 revision 配置为准） | `user/external/libs/ffmpeg` | `user/wayland/build.sh` 构建共享库，非 `user/extra.mk` 独立程序 |
 | Breeze | 多种 GPL/LGPL 版本，按资源文件核验 | `user/external/gui/breeze` | 资源/图标 |
 
