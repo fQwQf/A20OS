@@ -62,11 +62,11 @@ EVAL_NETDEV_RV = -netdev user,id=net$(if $(strip $(EVAL_NET_HOSTFWD_RV)),$(comma
 EVAL_NETDEV_LA = -netdev user,id=net$(if $(strip $(EVAL_NET_HOSTFWD_LA)),$(comma)$(EVAL_NET_HOSTFWD_LA),)
 
 eval-dev-build-rv:
-	$(MAKE) ARCH=riscv64 FAT32_IMAGE_MB=128 dev-build
+	$(MAKE) ARCH=riscv64 FAT32_IMAGE_MB=128 USER_BUILD_DESKTOP=0 dev-build
 	@printf 'auto\n' | mcopy -o -i $(EVAL_FAT32_RV) - ::/etc/contest-mode
 
 eval-dev-build-la:
-	$(MAKE) ARCH=loongarch64 FAT32_IMAGE_MB=128 dev-build
+	$(MAKE) ARCH=loongarch64 FAT32_IMAGE_MB=128 USER_BUILD_DESKTOP=0 dev-build
 	@printf 'auto\n' | mcopy -o -i $(EVAL_FAT32_LA) - ::/etc/contest-mode
 
 # --- QEMU launch ---
