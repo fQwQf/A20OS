@@ -212,7 +212,7 @@ static void rv64_enumerate_devices(void) {
 static const board_config_t qemu_virt_rv64 = {
     .name              = "qemu-virt-rv64",
     .ram_base          = PHYS_MEMORY_BASE,
-    .ram_end           = PHYS_MEMORY_END,
+    .ram_end           = PHYS_MEMORY_MAX_END,
     .irqchip           = &rv64_plic_ops,
     .timer             = &rv64_sbi_timer_ops,
     .smp               = &rv64_smp_ops,
