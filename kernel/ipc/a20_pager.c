@@ -143,7 +143,7 @@ int a20_pager_request_page(struct vmo *vmo, uint32_t index, int write_access)
     hinfo.security_label = t ? a20_ht_get_label(task_get_a20_ht(t)) : 0;
 
     return a20_channel_send_dwc(pager->requests, &req, sizeof(req), &hinfo, 1,
-                                NULL, A20_MSG_NONBLOCK, 1);
+                                NULL, A20_MSG_NONBLOCK, 0);
 }
 
 /*
