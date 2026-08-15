@@ -13,9 +13,11 @@
 #include "mm/slab.h"
 #include "mm/vm.h"
 #include "mm/oom.h"
+#include "core/psi.h"
 #include "mm/swap.h"
 #include "core/timer.h"
 #include "core/perf.h"
+#include "core/lock_counters.h"
 #include "core/string.h"
 #include "core/stdio.h"
 #include "core/version.h"
@@ -584,6 +586,8 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
         return (int)proc_lifetime_format(buf, bufsz);
     case PF_A20_PERF:
         return (int)a20_perf_format(buf, bufsz);
+    case PF_A20_LOCK_CONTENTION:
+        return (int)lock_counters_format(buf, bufsz);
     case PF_A20_OBJECTS:
         snprintf(buf, bufsz,
             "handles: %lu\n"
@@ -897,10 +901,33 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
         snprintf(buf, bufsz, "%d\n", MAX_FILES);
         break;
     case PF_PRESSURE:
-        /* /proc/pressure/{cpu,memory,io}: expose the stub (no PSI
-         * accounting) with the documented "some" line format. */
-        if (bufsz < 4) return 0;
-        snprintf(buf, bufsz, "some avg10=0.00 avg60=0.00 avg300=0.00 total=0\n");
+        /* /proc/pressure: real CPU PSI from scheduler contention (psi.c);
+         * memory and I/O stall sources are not instrumented, so those lines
+         * report the accounted zero-stall baseline in the same "some" format. */
+        if (bufsz < 128) return 0;
+        {
+            char tmp[64];
+            psi_render_cpu(tmp, sizeof(tmp));
+            size_t off = 0;
+            size_t n = strlen(tmp);
+            if (n < bufsz - 1) {
+                memcpy(buf, tmp, n);
+                off = n;
+            }
+            psi_render_memio(tmp, sizeof(tmp));
+            n = strlen(tmp);
+            if (off + n < bufsz - 1) {
+                memcpy(buf + off, tmp, n);
+                off += n;
+            }
+            psi_render_memio(tmp, sizeof(tmp));
+            n = strlen(tmp);
+            if (off + n < bufsz - 1) {
+                memcpy(buf + off, tmp, n);
+                off += n;
+            }
+            buf[off] = '\0';
+        }
         break;
     case PF_UID_MAP:
     case PF_GID_MAP: {

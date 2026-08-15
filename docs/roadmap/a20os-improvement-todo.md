@@ -4,8 +4,7 @@
 
 ## P0：混合内核改造（Native ABI 本体化）
 
-改造定位、边界原则与阶段验收标准见 [../hybrid-kernel/03-refactor-plan.md](../hybrid-kernel/03-refactor-plan.md)。
-本节只跟踪各阶段的工程完成度。
+改造定位、边界原则与阶段验收标准见 [../hybrid-kernel/03-refactor-plan.md](../hybrid-kernel/03-refactor-plan.md)。 本节只跟踪各阶段的工程完成度。
 
 - [x] 阶段一：核心原语契约化（句柄 rights 代数、channel 背压、EventQ 语义、VMO 生命周期）。
   - 源码证据：`user/tests/test_native_contract.c` 覆盖 rights、channel、EventQ 和 VMO 生命周期分区；`kernel/abi/native/handle_table.c` 的 `CHANNEL_ENDPOINT`/`EVENT_QUEUE` 类型掩码包含 STAT，handle query 可用。
@@ -30,12 +29,10 @@
   - 证据：`kernel/include/proc/park.h` 的 `A20_PARK_WAKE_PROTOCOL` 与 `kernel/include/core/sync.h` 的 `WAIT_QUEUE_PARK_PROTOCOL`；wait queue、 futex、timeout 和 wake queue 都保存 task 引用及 `wait_seq`。
   - 验证：`make check-blocking-point-boundary`。
 - [x] 收口 task 引用与异步所有权。
-  - 证据：PID 查询使用 `proc_find_get()`；task list、PID table、runqueue、 dispatch/current、wait/wake 和 timeout owner 都有显式引用交接；
-    `/proc/a20/task_lifetime` 提供基线与错误计数。
+  - 证据：PID 查询使用 `proc_find_get()`；task list、PID table、runqueue、 dispatch/current、wait/wake 和 timeout owner 都有显式引用交接； `/proc/a20/task_lifetime` 提供基线与错误计数。
   - 验证：`make check-task-lifetime-boundary` 和 `make check-proc-step35-local`。
 - [x] 统一信号、停止态和远程退出协议。
-  - 证据：`signal_state.lock` 保护共享 action/pending 与 task mask 交接；
-    `PROC_STOPPED` 使用显式 resume；远程退出发布 `exit_pending`，不再把任意 blocked task 直接改为 READY。
+  - 证据：`signal_state.lock` 保护共享 action/pending 与 task mask 交接； `PROC_STOPPED` 使用显式 resume；远程退出发布 `exit_pending`，不再把任意 blocked task 直接改为 READY。
   - 验证：`make check-signal-exit-boundary` 和 `make check-proc-step5-local`。
 - [x] 关闭 timeout heap 的引用、取消、过期和容量边界。
   - 证据：heap entry 保存 `(deadline, task, wait_seq)`；cancel/expiry 唯一摘除；容量失败向 syscall 传播；压力测试覆盖 capacity±1 和 stale timeout isolation。
@@ -44,12 +41,14 @@
   - 证据：`on_rq -> dispatching -> on_cpu` 所有权链；跨队列迁移按 CPU 编号升序锁定；per-CPU `need_resched` 由安全点消费，IPI 只负责通知。
   - 验证：`make check-smp-runqueue-boundary` 和 `make check-proc-step7-local`。
 - [x] 从本地 pick 热路径移除全局 `proc_lock`。
-  - 证据：`proc_runq_pick_local()` 只持本 CPU runqueue 锁完成 `on_rq -> dispatching`，释放队列锁后调用者才获取 `proc_lock`；
-    `/proc/a20/task_lifetime` 暴露 pick、争用和并行峰值。
+  - 证据：`proc_runq_pick_local()` 只持本 CPU runqueue 锁完成 `on_rq -> dispatching`，释放队列锁后调用者才获取 `proc_lock`； `/proc/a20/task_lifetime` 暴露 pick、争用和并行峰值。
   - 验证：`make check-process-lock-split-boundary` 和 `make check-proc-step8-local`。
+  - 新测量（`fqwqf/performance-overhaul`，`-smp 8 thread=multi` mm_stress）：`proc_lock` 仍是唯一显著
+    热点（约 3.3 万次竞争/1600 万自旋），callsite 归因显示竞争集中于**互斥量 park/wake 协议**与
+    **切换发布路径**；把 pick 拆出只是第一步，完整消除需按等待对象分锁并合并切换路径的两次获取，
+    见 `docs/research/11-perf-overhaul.md` §3。
 - [x] 修复低地址用户 `execve` 参数在 identity-mapped 架构上的来源误判。
-  - 证据：`proc_exec()` 始终按用户指针复制 `argv/envp`；
-    `proc_stress` 在 `0x02000000` 构造参数数组。
+  - 证据：`proc_exec()` 始终按用户指针复制 `argv/envp`； `proc_stress` 在 `0x02000000` 构造参数数组。
   - 历史验证：`f9732348` 平台记录包含双架构 `PROC_STRESS: low-user-argv PASS` 和正式 CAgent 10/10；`e33c3219` 未重跑。
 - [ ] 将仍依赖单线程执行的 MM 路径改为在 VMA 和页表修改期间持有 `mm->lock`。
   - 当前证据：`kernel/include/mm/vm.h` 仍明确说明部分路径依赖单线程执行或更窄的局部锁；现有 gate 包含 MM smoke/fork-exec race，但不等于所有列举竞争已覆盖。
@@ -71,11 +70,11 @@
   - 当前证据：`kernel/abi/linux/syscall_coverage.md` 仍将 scheduler 标为 partial，RT/deadline/cgroup/topology 语义有边界。
   - 完成条件：sched policy、priority、affinity 和 cgroup cpuset 行为被 LTP 风格测试覆盖。
 - [ ] 完成高级 futex 操作和内存顺序边界语义。
-  - 当前证据：`kernel/abi/linux/syscall_coverage.md` 将 futex 标记为 partial；`kernel/abi/linux/sys_futex.c` 仍有不支持路径。
-  - 完成条件：basic、requeue、private/shared、timeout 和 robust-list 场景都有覆盖。
-- [ ] 决定哪些显式 `-ENOSYS` Linux syscall 占位符仍在范围外，哪些应该实现。
-  - 证据：`kernel/abi/linux/syscall_table.def` 包含 fanotify、AIO、module、userfaultfd、perf 等 `-ENOSYS` 占位符；`signalfd4`（`sys_signalfd4`）与 `arch_prctl`（`sys_arch_prctl`）已实现，不再是占位符。
-  - 完成条件：每个占位符都有记录在案的 owner 决策：实现、保留 stub，或从声明的兼容范围中移除。当前覆盖表列出了占位符，但没有为每项完成 owner 决策。
+  - 当前证据：`kernel/abi/linux/syscall_coverage.md` 将 futex 标记为 partial；全部标准命令已实现（WAIT/WAKE/BITSET/REQUEUE/CMP_REQUEUE/WAKE_OP 及有边界的 PI 变体），但优先级继承提升与完整内存顺序边界仍有缺口。
+  - 完成条件：basic、requeue、private/shared、timeout、PI 和 robust-list 场景都有覆盖。
+- [x] 决定哪些显式 `-ENOSYS` Linux syscall 占位符仍在范围外，哪些应该实现。
+  - 证据：`kernel/abi/linux/syscall_table.def` 不再有固定 `-ENOSYS` 占位符；fanotify、acct、keyring、AIO、module、userfaultfd、perf_event_open、arch_prctl 均已实现，仅存的 `-ENOSYS` 是架构/版本正确的 Linux 语义（nfsservctl、map_shadow_stack、riscv_*、arch_prctl 非 x86 fallback）。
+  - 完成条件：每个占位符都有记录在案的 owner 决策，见 `kernel/abi/linux/syscall_coverage.md` 的 "Placeholder Resolution Record"。
 
 ## P0：MM、Page Cache 与文件映射
 
@@ -114,7 +113,7 @@
 
 - [ ] 收紧 path resolution、symlink、permission、mount 和文件系统特定的 Linux 边界语义。
   - 证据：`kernel/abi/linux/syscall_coverage.md` 将 path 和 metadata 标记为 partial，并要求清理。
-  - 设计：`docs/fs/vfs-edge-semantics.md`、`docs/fs/fs-consistency-model.md`。当前并非完整 Linux `openat2`：`RESOLVE_CACHED` 未实现，A20OS 自定义 `NO_TRAILING=0x20` 与 Linux `CACHED=0x20` 冲突。
+  - 设计：`docs/fs/vfs-edge-semantics.md`、`docs/fs/fs-consistency-model.md`。`RESOLVE_CACHED` 已实现（dentry 未命中返回 `-EAGAIN`，`0x20` 与 Linux 一致），A20OS 自定义 `NO_TRAILING` flag 已移除、不再与 Linux 冲突；剩余缺口是 `RESOLVE_NO_MAGICLINKS` 被接受但无检查。
   - 完成条件：openat、renameat2、link/symlink、chmod/chown、statx、mount、umount 和 chroot 都有聚焦测试（`user/cmds/stress/vfs_stress.c` / `vfs_edge.c`），同时覆盖 openat2、xattr 和文件系统特定边界测试。
 - [x] 将大型 VFS 实现重构为更小的 ownership、path、mount、fd 和 syscall-facing 单元。
   - 源码证据：path resolution、path、mount、file/vnode、dcache 和 stat/permission 已拆到 `kernel/fs/vfs/*.c`，并由 `kernel/include/fs/vfs/*.h` 提供窄接口；`kernel/fs/vfs.c` 仍保留 open/close、初始化及兼容入口，后续还可继续缩小。

@@ -18,6 +18,7 @@
 #include "core/string.h"
 #include "cg/cgroup.h"
 #include "mm/swap.h"
+#include "ipc/userfaultfd.h"
 
 /*
  * COW_FAULT_TLB_CONTRACT:
@@ -260,6 +261,10 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval,
         cg_mem_swap_uncharge(t, 1);
         t->mm->rss++;
         arch_tlb_flush_page_local(stval);
+        __atomic_fetch_add(&t->perf_page_faults, 1, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&t->perf_page_faults_maj, 1, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&g_perf_sw_page_faults, 1, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&g_perf_sw_page_faults_maj, 1, __ATOMIC_RELAXED);
         return 0;
     }
 #endif
@@ -746,7 +751,7 @@ int handle_cow_fault(task_t *t, uint64_t stval)
     spin_unlock(&mm->lock);
     if (r == 0) {
         a20_perf_count(A20_PERF_MM_COW_FAULTS);
-        arch_tlb_flush_page(stval);
+        mm_tlb_shootdown_page(mm, stval);
     }
     if (old_pfn != PFN_NONE)
         frame_put(old_pfn);
@@ -756,6 +761,9 @@ int handle_cow_fault(task_t *t, uint64_t stval)
         page_cache_put(old_page);
         page_cache_put(old_page);
     }
+    if (r == 0 && t)
+        __atomic_fetch_add(&t->perf_page_faults, 1, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&g_perf_sw_page_faults, 1, __ATOMIC_RELAXED);
     return r;
 #endif
 }
@@ -796,6 +804,22 @@ int handle_demand_fault_access(task_t *t, uint64_t stval,
         return -1;
     }
     vm_area_t *vma = mm_find_vma(mm, page_va);
+    /*
+     * USERFAULTFD_MISSING_HOOK: anonymous private ranges registered with a
+     * userfaultfd hand the fault to the handler before the kernel fabricates
+     * a zero page.  The mm lock is dropped before the handler parks so the
+     * faulter can sleep; when the handler resolves the page (COPY/ZEROPAGE)
+     * or the range is unregistered, the fault is retried from the top.
+     */
+    if (vma &&
+        (vma->vm_flags & (VM_ANON | VM_FILE | VM_VMO | VM_SHARED)) == VM_ANON &&
+        userfaultfd_range_present(mm, page_va)) {
+        spin_unlock(&mm->lock);
+        if (userfaultfd_handle_fault(t, mm, page_va,
+                                     access == MM_FAULT_ACCESS_WRITE) < 0)
+            return -1;
+        return handle_demand_fault_access(t, stval, access);
+    }
     if (vma && (vma->vm_flags & VM_FILE) && vma->file_fd >= 0) {
         if (!mm_pte_flags_allow_access(vma->pte_flags)) {
             spin_unlock(&mm->lock);
@@ -825,8 +849,38 @@ int handle_demand_fault_access(task_t *t, uint64_t stval,
         if (r == 0) {
             a20_perf_count(A20_PERF_MM_DEMAND_FAULTS);
             a20_perf_count(A20_PERF_MM_FILE_FAULTS);
+            __atomic_fetch_add(&t->perf_page_faults, 1, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&g_perf_sw_page_faults, 1, __ATOMIC_RELAXED);
+            t->perf_page_faults_maj++;
         }
         return r;
+    }
+
+    /*
+     * PAGED-VMO hook: a VM_VMO mapping backed by a VMO_PAGED vmo with a
+     * pager hands unmaterialized faults to the user-space pager.  The mm
+     * lock is dropped before parking (mirrors the userfaultfd hook above);
+     * vmo_paged_fault() loops until the pager supplies the page or the
+     * pager disappears.
+     */
+    if (vma && (vma->vm_flags & VM_VMO) && vma->vmo &&
+        vma->vmo->type == VMO_PAGED) {
+        uint64_t voff = vma->vmo_offset + (page_va - vma->start);
+        uint32_t pg_idx = (uint32_t)(voff / PAGE_SIZE);
+        int paged_miss = 0;
+        spin_lock(&vma->vmo->lock);
+        if (pg_idx < vma->vmo->page_count &&
+            vma->vmo->pages[pg_idx] == PFN_NONE && vma->vmo->pager)
+            paged_miss = 1;
+        spin_unlock(&vma->vmo->lock);
+        if (paged_miss) {
+            spin_unlock(&mm->lock);
+            int pr = vmo_paged_fault(vma->vmo, pg_idx,
+                                     access == MM_FAULT_ACCESS_WRITE);
+            if (pr < 0)
+                return -1;
+            return handle_demand_fault_access(t, stval, access);
+        }
     }
 
     int r = handle_demand_fault_locked(t, stval, access);
@@ -835,8 +889,11 @@ int handle_demand_fault_access(task_t *t, uint64_t stval,
         cg_mem_oom_kill(t->cgroup);
         return -1;
     }
-    if (r == 0)
+    if (r == 0) {
         a20_perf_count(A20_PERF_MM_DEMAND_FAULTS);
+        __atomic_fetch_add(&t->perf_page_faults, 1, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&g_perf_sw_page_faults, 1, __ATOMIC_RELAXED);
+    }
     return r;
 #endif
 }

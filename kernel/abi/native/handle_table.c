@@ -177,11 +177,11 @@ static int ht_grow(struct a20_ht_internal *ht)
     return 0;
 }
 
-static const a20_rights_t a20_type_rights[A20_OBJ_EXT_PROG + 1] = {
+static const a20_rights_t a20_type_rights[A20_OBJ_MONITOR + 1] = {
     [A20_OBJ_INVALID]          = 0,
     [A20_OBJ_TASK]             = A20_RIGHT_WAIT | A20_RIGHT_SIGNAL | A20_RIGHT_STAT |
                                  A20_RIGHT_DUP | A20_RIGHT_TRANSFER | A20_RIGHT_CONTROL |
-                                 A20_RIGHT_ADMIN,
+                                 A20_RIGHT_ADMIN | A20_RIGHT_READ | A20_RIGHT_WRITE,
     [A20_OBJ_THREAD]           = A20_RIGHT_STAT | A20_RIGHT_DUP | A20_RIGHT_TRANSFER |
                                  A20_RIGHT_CONTROL,
     [A20_OBJ_FILE]             = A20_RIGHT_READ | A20_RIGHT_WRITE | A20_RIGHT_STAT |
@@ -200,7 +200,8 @@ static const a20_rights_t a20_type_rights[A20_OBJ_EXT_PROG + 1] = {
                                  A20_RIGHT_CONTROL,
     [A20_OBJ_TIMER]            = A20_RIGHT_STAT | A20_RIGHT_DUP | A20_RIGHT_TRANSFER |
                                  A20_RIGHT_CONTROL,
-    [A20_OBJ_MEMORY]           = A20_RIGHT_READ | A20_RIGHT_WRITE | A20_RIGHT_MAP |
+    [A20_OBJ_MEMORY]           = A20_RIGHT_READ | A20_RIGHT_WRITE | A20_RIGHT_EXEC |
+                                 A20_RIGHT_MAP |
                                  A20_RIGHT_STAT | A20_RIGHT_DUP | A20_RIGHT_TRANSFER |
                                  A20_RIGHT_CONTROL,
     [A20_OBJ_DEVICE]           = A20_RIGHT_READ | A20_RIGHT_WRITE | A20_RIGHT_MAP |
@@ -215,11 +216,15 @@ static const a20_rights_t a20_type_rights[A20_OBJ_EXT_PROG + 1] = {
                                  A20_RIGHT_ADMIN,
     [A20_OBJ_EXT_PROG]         = A20_RIGHT_READ | A20_RIGHT_DUP |
                                  A20_RIGHT_TRANSFER | A20_RIGHT_CONTROL,
+    [A20_OBJ_PAGER]            = A20_RIGHT_READ | A20_RIGHT_WRITE | A20_RIGHT_STAT |
+                                 A20_RIGHT_DUP | A20_RIGHT_TRANSFER | A20_RIGHT_CONTROL,
+    [A20_OBJ_MONITOR]          = A20_RIGHT_READ | A20_RIGHT_STAT | A20_RIGHT_DUP |
+                                 A20_RIGHT_TRANSFER | A20_RIGHT_CONTROL,
 };
 
 a20_rights_t a20_type_valid_rights(uint16_t type)
 {
-    if (type > A20_OBJ_EXT_PROG) return 0;
+    if (type > A20_OBJ_MONITOR) return 0;
     return a20_type_rights[type];
 }
 

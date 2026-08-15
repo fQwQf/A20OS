@@ -27,8 +27,7 @@
 #define RESOLVE_NO_SYMLINKS        0x04
 #define RESOLVE_BENEATH            0x08
 #define RESOLVE_IN_ROOT            0x10
-#define RESOLVE_NO_TRAILING_SYMLINKS 0x20
-#define RESOLVE_CACHED             0x40
+#define RESOLVE_CACHED             0x20
 
 /* renameat2 flags */
 #define RENAME_NOREPLACE           0x01
@@ -154,6 +153,11 @@ typedef struct vnode_ops {
      * instead of repeating the complete writepage path for every 4 KiB. */
     int     (*writepages)(struct vnode *vn, uint64_t index,
                           const void *data, size_t len);
+    /* Optional per-vnode durable flush.  A filesystem provides this to scope
+     * fsync() to its own data and metadata instead of flushing the whole
+     * mount's block cache.  NULL means the VFS falls back to a full mount
+     * block-cache sync. */
+    int     (*sync_vnode)(struct vnode *vn);
     int     (*chmod)(struct vnode *vn, int mode);
     int     (*chown)(struct vnode *vn, int uid, int gid);
     struct vfile *(*open)(struct vnode *vn, int flags);
@@ -208,7 +212,25 @@ typedef struct vnode {
     struct page_cache_page *cache_pages;
     struct page_cache_page *cache_dirty_pages;
     struct page_cache_page *cache_dirty_tail;
+    /* Number of live MAP_SHARED file VMAs backing this vnode.  The VFS read
+     * and fsync paths use this to skip the global dirty-bit harvest scan
+     * entirely when the vnode has no shared file mappings.  Updated with
+     * release semantics from VMA create/fork/split (vnode_get sites) and
+     * VMA teardown (vma_release_file/vnode_put); readers use acquire loads. */
+    int             shared_file_maps;
 } vnode_t;
+
+static inline void vnode_shared_map_inc(vnode_t *vn)
+{
+    if (vn)
+        __atomic_fetch_add(&vn->shared_file_maps, 1, __ATOMIC_RELEASE);
+}
+
+static inline void vnode_shared_map_dec(vnode_t *vn)
+{
+    if (vn)
+        __atomic_fetch_sub(&vn->shared_file_maps, 1, __ATOMIC_RELEASE);
+}
 
 /*
  * vfile lifetime invariants:
@@ -355,6 +377,24 @@ int      vfs_chownat(int dirfd, const char *path, int uid, int gid, int flags);
 int      vfs_fchown(int fd, int uid, int gid);
 int      vfs_utimensat(int dirfd, const char *path, const uint64_t times[4], int flags);
 int      vfs_futimens(int fd, const uint64_t times[4]);
+
+/* fileattr (LoongArch file_getattr/file_setattr core).  The opaque 10-word
+ * layout matches Linux struct fileattr (uapi/linux/fs.h). */
+typedef struct a20_fileattr {
+    uint32_t valid;
+    uint32_t flags;
+    uint32_t fsx_xflags;
+    uint32_t fspare;
+    uint32_t gfs2_acl;
+    uint32_t version;
+    uint32_t flags_mask;
+    uint32_t flags_ro;
+    uint32_t xflags_mask;
+    uint32_t xflags_ro;
+} a20_fileattr_t;
+void     vfs_fileattr_init(a20_fileattr_t *fa);
+void     vfs_fileattr_get(a20_fileattr_t *fa);
+int      vfs_fileattr_set(const a20_fileattr_t *fa);
 int      vfs_readlinkat(int dirfd, const char *path, char *buf, size_t sz);
 int      vfs_link(const char *oldpath, const char *newpath);
 int      vfs_symlink(const char *target, const char *linkpath);

@@ -63,6 +63,7 @@ LINUX_SYSCALL(recvmmsg, 0, sys_recvmmsg((int)A(0), (void *)A(1), (unsigned)A(2),
 LINUX_SYSCALL(mkdirat, 0, sys_mkdirat((int)A(0), (const char *)A(1), (int)A(2)))
 LINUX_SYSCALL(unlinkat, 0, sys_unlinkat((int)A(0), (const char *)A(1), (int)A(2)))
 LINUX_SYSCALL(renameat2, 0, sys_renameat2((int)A(0), (const char *)A(1), (int)A(2), (const char *)A(3), (int)A(4)))
+LINUX_SYSCALL(renameat, 0, sys_renameat((int)A(0), (const char *)A(1), (int)A(2), (const char *)A(3)))
 LINUX_SYSCALL(chdir, 0, sys_chdir((const char *)A(0)))
 LINUX_SYSCALL(fchdir, 0, sys_fchdir((int)A(0)))
 LINUX_SYSCALL(getcwd, 0, sys_getcwd((char *)A(0), (size_t)A(1)))
@@ -100,6 +101,16 @@ LINUX_SYSCALL(swapon, 0, sys_swapon((const char *)A(0), (int)A(1)))
 LINUX_SYSCALL(swapoff, 0, sys_swapoff((const char *)A(0)))
 LINUX_SYSCALL(mkswap, 0, sys_mkswap((const char *)A(0), (int)A(1)))
 LINUX_SYSCALL(utimensat, 0, sys_utimensat((int)A(0), (const char *)A(1), (void *)A(2), (int)A(3)))
+/* x86_64-only legacy syscalls (not in the asm-generic table).  Spare slots
+ * 1003-1007 keep them reachable through the x86 mapping table without
+ * colliding with asm-generic numbers.  time/utime/utimes are thin wire-format
+ * wrappers over the timekeeping/VFS core; pause parks until a signal arrives;
+ * get_thread_area reports the FS-base TLS pointer carried in the trap frame. */
+LINUX_SYSCALL(time, 0, sys_time((long *)A(0)))
+LINUX_SYSCALL(pause, 0, sys_pause())
+LINUX_SYSCALL(utime, 0, sys_utime((const char *)A(0), (const void *)A(1)))
+LINUX_SYSCALL(utimes, 0, sys_utimes((const char *)A(0), (const void *)A(1)))
+LINUX_SYSCALL(get_thread_area, 0, sys_get_thread_area((void *)A(0)))
 LINUX_SYSCALL(chroot, 0, sys_chroot((const char *)A(0)))
 LINUX_SYSCALL(mknodat, 0, sys_mknodat((int)A(0), (const char *)A(1), (int)A(2), (unsigned)A(3)))
 LINUX_SYSCALL(set_thread_area, 0, sys_set_thread_area((void *)A(0)))
@@ -248,12 +259,14 @@ LINUX_SYSCALL(inotify_init, 0, sys_inotify_init((int)A(0)))
 LINUX_SYSCALL(inotify_add_watch, 0, sys_inotify_add_watch((int)A(0), (const char *)A(1), (uint32_t)A(2)))
 LINUX_SYSCALL(inotify_rm_watch, 0, sys_inotify_rm_watch((int)A(0), (int)A(1)))
 LINUX_SYSCALL(syncfs, 0, sys_syncfs((int)A(0)))
-/* LINUX_ABI_EXPLICIT_STUB_CONTRACT: the entries below were originally
- * deliberate Linux-compatibility placeholders returning fixed -ENOSYS.  Most
- * are now real implementations (fanotify, acct, keyring, AIO, modules) backed
- * by kernel subsystems; only userfaultfd and perf_event_open remain explicit
- * -ENOSYS placeholders.  See kernel/abi/linux/syscall_coverage.md "Stub
- * Decision Record" for the current owner decisions. */
+/* LINUX_ABI_PLACEHOLDER_RESOLUTION_CONTRACT: the entries below were originally
+ * deliberate Linux-compatibility placeholders returning fixed -ENOSYS.
+ * They are now real implementations backed by kernel subsystems (fanotify,
+ * acct, keyring, AIO, modules, userfaultfd, perf software events); the
+ * remaining -ENOSYS returns are the arch/version-correct Linux semantics
+ * (nfsservctl removed in 4.19, map_shadow_stack is x86-only, riscv_*
+ * syscalls are RISC-V-only, arch_prctl is x86-only).  See
+ * kernel/abi/linux/syscall_coverage.md "Placeholder Resolution Record". */
 LINUX_SYSCALL(fanotify_init, 0, sys_fanotify_init((unsigned)A(0), (unsigned)A(1)))
 LINUX_SYSCALL(fanotify_mark, 0, sys_fanotify_mark((int)A(0), (unsigned)A(1), (uint64_t)A(2), (int)A(3), (const char *)A(4)))
 LINUX_SYSCALL(signalfd4, 0, sys_signalfd4((int)A(0), (const void *)A(1), (size_t)A(2), (int)A(3)))
@@ -270,8 +283,8 @@ LINUX_SYSCALL(io_cancel, 0, sys_io_cancel(A(0), (const void *)A(1), (void *)A(2)
 LINUX_SYSCALL(init_module, 0, sys_init_module((const void *)A(0), (unsigned long)A(1), (const char *)A(2)))
 LINUX_SYSCALL(delete_module, 0, sys_delete_module((const char *)A(0), (unsigned)A(1)))
 LINUX_SYSCALL(finit_module, 0, sys_finit_module((int)A(0), (const char *)A(1), (int)A(2)))
-LINUX_SYSCALL(userfaultfd, 0, -ENOSYS)
-LINUX_SYSCALL(perf_event_open, 0, -ENOSYS)
+LINUX_SYSCALL(userfaultfd, 0, sys_userfaultfd((unsigned)A(0)))
+LINUX_SYSCALL(perf_event_open, 0, sys_perf_event_open((const void *)A(0), (int)A(1), (int)A(2), (int)A(3), (unsigned long)A(4)))
 LINUX_SYSCALL(arch_prctl, 0, sys_arch_prctl((int)A(0), A(1)))
 
 /* Completed in the "finish the Linux ABI" work: small compatibility group */
@@ -352,6 +365,10 @@ LINUX_SYSCALL(statmount, 0, sys_statmount(A(0), A(1), (void *)A(2), (size_t)A(3)
 LINUX_SYSCALL(listmount, 0, sys_listmount(A(0), A(1), (uint64_t *)A(2), (size_t)A(3), (unsigned)A(4)))
 LINUX_SYSCALL(listns, 0, sys_listns((unsigned)A(0), (uint64_t *)A(1), (size_t)A(2)))
 LINUX_SYSCALL(open_tree_attr, 0, sys_open_tree_attr((int)A(0), (const char *)A(1), (unsigned)A(2), (unsigned)A(3), (void *)A(4), (size_t)A(5)))
+/* LoongArch-only fileattr syscalls (Linux 6.9+); also present in the generic
+ * table at loongarch numbers 468/469.  The VFS core owns the attribute model. */
+LINUX_SYSCALL(file_getattr, 0, sys_file_getattr((int)A(0), (void *)A(1)))
+LINUX_SYSCALL(file_setattr, 0, sys_file_setattr((int)A(0), (void *)A(1)))
 LINUX_SYSCALL(lsm_get_self_attr, 0, sys_lsm_get_self_attr((unsigned)A(0), (void *)A(1), (size_t *)A(2), (unsigned)A(3)))
 LINUX_SYSCALL(lsm_set_self_attr, 0, sys_lsm_set_self_attr((unsigned)A(0), (const void *)A(1), (size_t)A(2), (unsigned)A(3)))
 LINUX_SYSCALL(lsm_list_modules, 0, sys_lsm_list_modules((uint64_t *)A(0), (size_t *)A(1), (unsigned)A(2)))

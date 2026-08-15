@@ -162,10 +162,11 @@ static int deliver_user_sync_signal(trap_context_t *ctx, int sig, int fatal_code
     }
 
     if (!signal_task_user_handler_available(cur, sig)) {
-        printf("FATAL: pid=%d signal=%d abi=%d pc=0x%lx sp=0x%lx\n",
+        printf("FATAL: pid=%d signal=%d abi=%d pc=0x%lx sp=0x%lx comm=%s path=%s\n",
                cur->pid, sig, cur->abi_mode,
                (unsigned long)TRAP_CTX_EPC(ctx),
-               (unsigned long)TRAP_CTX_SP(ctx));
+               (unsigned long)TRAP_CTX_SP(ctx),
+               cur->name, cur->exec_path);
         proc_exit_group(fatal_code);
     }
 
@@ -235,10 +236,16 @@ static void user_trap_handler(trap_context_t *ctx) {
                 code == CAUSE_STORE_PAGE_FAULT ? MM_FAULT_ACCESS_WRITE :
                 code == CAUSE_INSN_PAGE_FAULT ? MM_FAULT_ACCESS_EXEC :
                                                 MM_FAULT_ACCESS_READ;
-            if (handle_present_page_fault(cur, stval, access) == 0) {
-                signal_deliver_user(ctx);
-                return;
-            }
+            /*
+             * No separate present-PTE pass before demand paging: for a not-
+             * present leaf (the dominant rustc/LLVM arena case) that pass only
+             * repeated the mm lock + page walk that handle_cow_fault and
+             * handle_demand_fault_access already pay.  A present leaf that
+             * needs a permission/accessed fix is caught by the second present
+             * check below, which also covers the race where another thread
+             * completes the same mapping while demand paging dropped the lock
+             * for file I/O.
+             */
             if (handle_demand_fault_access(cur, stval, access) == 0) {
                 signal_deliver_user(ctx);
                 return;

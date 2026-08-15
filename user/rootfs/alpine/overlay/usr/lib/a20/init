@@ -1,0 +1,76 @@
+#!/bin/sh
+# A20OS stage-2 init for the Alpine rootfs.  Brings up the runtime
+# filesystems, then the login/device service layer (dbus -> elogind -> seatd
+# -> udevd), and finally hands off to the XFCE Wayland session.
+
+export HOME=/root
+export SHELL=/bin/bash
+export LANG=en_US.UTF-8
+export PATH=/bin:/usr/bin:/usr/sbin:/sbin:/usr/local/bin:/usr/local/sbin
+export XDG_RUNTIME_DIR=/run/user/0
+
+# A20OS' devfs already populates /dev, so only mount devtmpfs when the
+# kernel did not do it for us (keeps the script compatible with a future
+# devtmpfs-backed boot).
+if [ ! -d /dev/input ] && [ ! -e /dev/console ]; then
+    mkdir -p /dev
+    mount -t devtmpfs devtmpfs /dev 2>/dev/null || true
+fi
+
+mkdir -p /dev/shm
+mount -t tmpfs tmpfs /dev/shm 2>/dev/null || true
+mkdir -p /dev/pts 2>/dev/null || true
+mount -t devpts devpts /dev/pts 2>/dev/null || true
+mkdir -p /run
+
+mkdir -p /tmp/.X11-unix /tmp/.ICE-unix "$HOME/.config/dconf" \
+    /run/dbus /var/lib/dbus "$XDG_RUNTIME_DIR"
+chmod 01777 /tmp/.X11-unix
+chmod 0777 /tmp/.ICE-unix
+chmod 0700 "$XDG_RUNTIME_DIR"
+
+# apk.static skips post-install scripts; regenerate the caches they would.
+if [ ! -f /usr/lib/gdk-pixbuf-2.0/2.10.0/loaders.cache ]; then
+    gdk-pixbuf-query-loaders --update-cache 2>/dev/null || true
+fi
+if [ ! -f /usr/share/mime/mime.cache ]; then
+    update-mime-database /usr/share/mime 2>/dev/null || true
+fi
+
+dbus-uuidgen --ensure 2>/dev/null || true
+dbus-daemon --system --fork
+
+# Session/login daemon: XFCE's session manager and polkit talk to it over the
+# org.freedesktop.login1 D-Bus interface.
+if [ -x /usr/libexec/elogind/elogind ]; then
+    /usr/libexec/elogind/elogind --daemon 2>/dev/null || true
+fi
+
+# Seat management (libseat backend used by labwc/wlroots).
+SEATD_VTBOUND=0 seatd 2>/dev/null &
+while [ ! -S /run/seatd.sock ]; do
+    sleep 0.1
+done
+
+# Device enumeration.  The A20OS kernel broadcasts KOBJECT_UEVENT with a real
+# per-event SEQNUM, so eudev's workers actually run the rules and persist
+# ID_INPUT_* for the input nodes; libinput's udev backend then enumerates
+# /dev/input/event*.  Every wait is still bounded so a stuck udevd can never
+# block the desktop session.
+if [ -x /sbin/udevd ] || [ -x /usr/sbin/udevd ]; then
+    udevd 2>/dev/null &
+    i=0
+    while [ ! -e /run/udev/control ] && [ "$i" -lt 50 ]; do
+        sleep 0.1
+        i=$((i + 1))
+    done
+    udevadm trigger --action=add 2>/dev/null || true
+    timeout 5 udevadm settle 2>/dev/null || true
+fi
+
+# polkit authorization daemon (optional but expected by some XFCE helpers).
+if [ -x /usr/lib/polkit-1/polkitd ]; then
+    /usr/lib/polkit-1/polkitd 2>/dev/null &
+fi
+
+exec runuser -l root -c /usr/lib/a20/start-xfce4-session

@@ -188,6 +188,11 @@ typedef struct task_t {
     uint64_t child_stime;
     uint64_t exec_start;
     uint64_t ready_since;
+    uint64_t perf_page_faults;     /* perf_event_open PERF_COUNT_SW_PAGE_FAULTS */
+    uint64_t perf_page_faults_maj; /* faults that performed backing I/O */
+    uint64_t perf_switches;        /* PERF_COUNT_SW_CONTEXT_SWITCHES */
+    uint64_t user_gs_base;         /* x86_64 ARCH_SET_GS value (kernel GS is
+                                    * reserved for per-CPU data) */
     uint32_t cfs_weight;
     uint64_t eevdf_vruntime;     /* weighted virtual run time (ticks) */
     uint64_t eevdf_deadline;     /* virtual deadline: vruntime + virtual slice */
@@ -217,6 +222,8 @@ typedef struct task_t {
     proc_policy_t policy;
     int       clone_flags;
     int       exit_signal;
+    int       pdeathsig;       /* PR_SET_PDEATHSIG: one-shot signal delivered
+                                * when the parent exits (0 = none) */
     int      *clear_child_tid;
     uintptr_t robust_list_head;
 
@@ -295,7 +302,13 @@ typedef struct task_t {
 
     completion_t vfork_done;
 
-    /* Scheduler-private A20 park/wake state. */
+    /* Scheduler-private A20 park/wake state.  park_lock serializes the
+     * transitions between PREPARING/PARKED/WOKEN and IDLE plus the timer
+     * register/cancel (park_lock -> timer_heap lock) and the runqueue
+     * enqueue in the wake path (park_lock -> runq lock).  It must never be
+     * held while acquiring proc_lock; proc_lock protects the task list,
+     * fork/exit/wait and the context-switch publication, not this state. */
+    spinlock_t         park_lock;
     uint64_t           wait_seq;
     uint64_t           wait_deadline;
     int                wait_timer_index;
@@ -344,6 +357,7 @@ void     proc_sleep_until(uint64_t wake_time);
  */
 void     proc_sched_handle_reschedule_ipi(void);
 void     proc_sched_tick(int from_user);
+uint64_t proc_runq_load_sum(void);
 void     proc_sched_request_current(void);
 int      proc_sched_safe_point(void);
 /*

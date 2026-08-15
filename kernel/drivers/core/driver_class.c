@@ -5,6 +5,7 @@
 #include "core/stdio.h"
 #include "core/string.h"
 #include "mm/slab.h"
+#include "net/socket_internal.h"
 
 #define CLASS_DEVICE_INITIAL_CAP 32
 
@@ -27,9 +28,51 @@ static const char *class_prefix(uint32_t type)
     }
 }
 
+/* /sys/class/<subsystem> name for a device class (used by udev uevents). */
+const char *class_device_subsystem(uint32_t type)
+{
+    switch (type) {
+    case DEV_CLASS_CHAR: return "char";
+    case DEV_CLASS_BLOCK: return "block";
+    case DEV_CLASS_NET: return "net";
+    case DEV_CLASS_INPUT: return "input";
+    case DEV_CLASS_DISPLAY: return "display";
+    case DEV_CLASS_AUDIO: return "audio";
+    default: return NULL;
+    }
+}
+
+/*
+ * Replay a uevent for every currently published class device.  Called by the
+ * netlink layer when udevadm trigger asks for a fresh enumeration, so udevd
+ * sees the same device set devfs/sysfs already expose.
+ */
+void class_device_emit_uevents(const char *action)
+{
+    if (!action)
+        return;
+    for (uint32_t type = 1; type <= DEV_CLASS_AUDIO; type++) {
+        const char *subsystem = class_device_subsystem(type);
+        if (!subsystem)
+            continue;
+        for (unsigned index = 0; index < 256; index++) {
+            class_device_t *cdev = class_device_get_by_type(type, index);
+            if (!cdev)
+                break;
+            netlink_uevent_emit(action, subsystem, cdev->name, cdev->devt);
+            class_device_put(cdev);
+        }
+    }
+}
+
 static uint64_t class_devt(uint32_t type, uint32_t index)
 {
     static const uint16_t majors[] = { 0, 240, 8, 0, 13, 29, 116 };
+    /* The input class device must report the devt of the devfs evdev node it
+     * backs (/dev/input/eventN is 29:N+1), otherwise udev/libinput cannot
+     * associate the /sys device with the device node. */
+    if (type == DEV_CLASS_INPUT)
+        return 0x1d01 + (index & 0xffU);
     return ((uint64_t)majors[type] << 8) | (index & 0xffU);
 }
 
@@ -108,6 +151,12 @@ int class_device_publish(struct device *dev)
     g_class_devices[g_class_count++] = cdev;
     dev->class_dev = cdev;
     spin_unlock_irqrestore(&g_class_lock, flags);
+
+    /* Notify udev listeners (NETLINK_KOBJECT_UEVENT) that the device exists;
+     * udevd uses this to run its rules and create /dev symlinks/permissions. */
+    const char *subsystem = class_device_subsystem(cdev->class_type);
+    if (subsystem)
+        netlink_uevent_emit("add", subsystem, cdev->name, cdev->devt);
     return 0;
 }
 

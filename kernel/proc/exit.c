@@ -120,7 +120,10 @@ void proc_wake_child_waiters_locked(task_t *parent)
             continue;
         if (proc_task_tgid(t) != parent_tgid)
             continue;
+        /* proc_lock -> park_lock is the documented order. */
+        uint64_t plf = spin_lock_irqsave(&t->park_lock);
         (void)proc_try_wake_locked(t, t->wait_seq, PROC_WAKE_EVENT);
+        spin_unlock_irqrestore(&t->park_lock, plf);
     }
 }
 
@@ -212,6 +215,9 @@ static void proc_reparent_children(task_t *dead, task_t *reaper)
 
     int child_pids[64];
     int child_pid_count = 0;
+    int pdeathsig_pids[64];
+    int pdeathsig_signals[64];
+    int pdeathsig_count = 0;
 
     for (task_t *child = proc_first_task_locked(); child; ) {
         task_t *next = proc_next_task_locked(child);
@@ -223,6 +229,18 @@ static void proc_reparent_children(task_t *dead, task_t *reaper)
             (child->ppid != dead->pid && child->parent != dead)) {
             child = next;
             continue;
+        }
+
+        /* PR_SET_PDEATHSIG: when the parent dies, the child receives the
+         * recorded signal exactly once (the field is then cleared).  Deliver
+         * it after the lock is dropped, like the force-kill list below. */
+        if (child->state != PROC_ZOMBIE && child->pdeathsig != 0 &&
+            pdeathsig_count < (int)(sizeof(pdeathsig_pids) /
+                                    sizeof(pdeathsig_pids[0]))) {
+            pdeathsig_pids[pdeathsig_count] = child->pid;
+            pdeathsig_signals[pdeathsig_count] = child->pdeathsig;
+            child->pdeathsig = 0;
+            pdeathsig_count++;
         }
 
         if (!thread_reaper &&
@@ -280,6 +298,13 @@ static void proc_reparent_children(task_t *dead, task_t *reaper)
         task_t *child = proc_find_get(child_pids[i]);
         if (child && child->state != PROC_UNUSED && child->state != PROC_ZOMBIE)
             proc_force_exit(child, dead->exit_code);
+        proc_put(child);
+    }
+
+    for (int i = 0; i < pdeathsig_count; i++) {
+        task_t *child = proc_find_get(pdeathsig_pids[i]);
+        if (child && child->state != PROC_UNUSED && child->state != PROC_ZOMBIE)
+            signal_send(child->pid, pdeathsig_signals[i]);
         proc_put(child);
     }
 }
@@ -431,8 +456,10 @@ void proc_force_exit(task_t *t, int exit_code)
              * next syscall/trap boundary.  Uninterruptible waits are left
              * blocked until their resource event; there is no READY fallback.
              */
+            uint64_t plf = spin_lock_irqsave(&t->park_lock);
             (void)proc_try_wake_locked(
                 t, t->wait_seq, PROC_WAKE_TASK_EXIT);
+            spin_unlock_irqrestore(&t->park_lock, plf);
         } else if (t->state == PROC_STOPPED) {
             resume_stopped = 1;
         }

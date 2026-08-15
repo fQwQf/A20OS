@@ -22,6 +22,7 @@
 
 #include "drvmod/drvmod.h"
 
+#include "core/kallsyms.h"
 #include "core/klog.h"
 #include "core/string.h"
 #include "core/stdio.h"
@@ -384,6 +385,12 @@ const struct drv_export drv_export_table[] = {
     { "proc_task_pid",       (void *)proc_task_pid },
     { "printf",              (void *)printf },
     { "panic",               (void *)panic },
+    /* kallsyms debug name lookup (spinlock self-acquire diagnostics).
+     * kallsyms_print is referenced by the inline spin_lock_at stall reporter
+     * (core/lock.h), so any .a20drv module that includes lock.h needs it
+     * exported or the loader rejects the module with an unresolved symbol. */
+    { "kallsyms_lookup",     (void *)kallsyms_lookup },
+    { "kallsyms_print",      (void *)kallsyms_print },
     { "arch_virtio_blk_probe", (void *)arch_virtio_blk_probe },
     { "arch_virtio_net_probe", (void *)arch_virtio_net_probe },
 #if defined(CONFIG_X86_64)

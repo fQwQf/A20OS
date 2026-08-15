@@ -39,6 +39,7 @@ A20OS 使用并参考了许多开源项目与公开标准。本文档集中记�
 | [binutils](https://www.gnu.org/software/binutils/) | 二进制工具 | GPL-3.0-or-later / LGPL-3.0-or-later 等，按组件文件核验 | `user/external/toolchain/binutils` |
 | [Rust 工具链](https://www.rust-lang.org/) | Rust 用户态编译 | 由实际取得的工具链分发确定 | `user/external/rust`（审计基线 `e33c3219` 未跟踪该工具链内容） |
 | [musl-cross-make](https://github.com/richfelker/musl-cross-make) | 交叉编译工具链构建 | MIT | `user/external/toolchain/musl-cross-make` |
+| [Lamina1](https://github.com/Lamina-dev/Lamina1) | 数学 DSL 语言工具链（编译器 + 寄存器 VM） | 根目录暂无 LICENSE 文本，按实际取得源码核验；子模块 LMCAS/LAMMP 为 LGPL-2.1，dyncall 为逐文件 BSD 风格 | `user/external/toolchain/Lamina1` |
 | [zlib](https://github.com/madler/zlib) | 压缩库 | Zlib | `user/external/libs/zlib` |
 | [Breeze](https://invent.kde.org/plasma/breeze) | 桌面图标/主题资源 | 多种 GPL/LGPL 版本，按资源文件核验 | `user/external/gui/breeze` |
 
@@ -60,6 +61,8 @@ mksh 不能归并为单一 MirBSD 许可证：多数源文件携带 MirBSD/MirOS
 | [RocketOS](https://gitlab.eduxiji.net/T202510213995926/oskernel2025-rocketos) | **未核实**；当前 A20OS 源码注释称 MIT | VFS 设计启发；VisionFive 2 与 LS2K1000 的 board/GMAC bring-up 参考 | VFS、两个 board 文件与两个 GMAC 驱动；注释没有界定逐行来源 |
 
 RocketOS 边界尚未解决：`kernel/fs/vfs.c` 写有设计启发说明，`kernel/platform/{visionfive2,ls2k1000}/board.c` 和 `kernel/drivers/net/{starfive_gmac,ls2k_gmac}.c` 写有 RocketOS porting/bring-up reference，但仓库没有记录所参考的精确 RocketOS revision、该 revision 的许可证文本、逐文件来源对照或单独授权。在取得这些证据前，不能把注释中的“MIT”、“inspired”或“reference”升级为已验证许可证，也不能断言相关文件未包含复制或改写代码。应对精确 revision 做 provenance/license 审计，或取得覆盖相关代码的单独授权。
+
+两块物理板 bring-up 的硬件细节（JH7110 SYS_CRG 时钟偏移、YT8531 PHY、LS2K1000 GMAC0 基址 0x40040000 与 PCI 配置窗口 0xfe00001800 等）也参考了 RocketOS 的 StarFive `drivers/net/starfive/` 与 la2000 `drivers/net/la2000/` 驱动，并在 `docs/platforms/physical-boards.md` 中逐项标注"未核实"；该文档不等同于来源对照或授权记录。
 
 ---
 

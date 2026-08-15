@@ -262,7 +262,12 @@ typedef struct ext4_sb_info {
     uint32_t inode_group_rotor;
     bcache_t *bc;
     mutex_t alloc_lock;
-    mutex_t metadata_lock;
+    /* Namespace lock: read mode for lookups (concurrent cold lookups through
+     * the block cache and the independently locked vnode cache), write mode
+     * for namespace mutations.  Previously a single mutex serialized every
+     * lookup against every other lookup, which eight parallel rustc processes
+     * paid on each dcache miss. */
+    rw_mutex_t metadata_lock;
 } ext4_sb_info_t;
 
 typedef struct ext4_vnode_priv {
@@ -293,5 +298,7 @@ typedef struct ext4_fctx {
 vnode_t *ext4_mount(bcache_t *bc);
 void     ext4_unmount(vnode_t *root);
 void     ext4_vnode_cache_prune_all(void);
+/* Scoped fsync: flush only this vnode's data and allocation metadata. */
+int      ext4_vn_sync(vnode_t *vn);
 
 #endif

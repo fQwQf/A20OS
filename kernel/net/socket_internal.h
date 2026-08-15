@@ -183,6 +183,7 @@ typedef struct net_socket {
     int accept_count;
     int in_registry;
     int reg_idx;
+    int gfd;                       /* global fd carrying this socket vfile */
     net_bh_ring_t bh_ring;
     volatile int bh_connected;
     volatile int bh_closed;
@@ -292,9 +293,13 @@ int      net_unix_socket_sendto_fds(net_socket_t *s, const void *buf,
                                     size_t len, const void *addr,
                                     size_t addrlen,
                                     vfile_t **files, int nfiles);
-int      net_netlink_bind(net_socket_t *s, const void *addr, size_t addrlen);
-int      net_netlink_diag_request(net_socket_t *s, const void *buf, size_t len,
+ int      net_netlink_bind(net_socket_t *s, const void *addr, size_t addrlen);
+ int      net_netlink_diag_request(net_socket_t *s, const void *buf, size_t len,
+                                   const void *addr, size_t addrlen);
+ int      net_netlink_uevent_send(net_socket_t *s, const void *buf, size_t len,
                                   const void *addr, size_t addrlen);
+ void     netlink_uevent_emit(const char *action, const char *subsystem,
+                              const char *name, uint64_t devt);
 
 void     net_tcp_close_pcb(net_socket_t *s);
 void     net_tcp_drop_pcb(net_socket_t *s);
@@ -312,6 +317,8 @@ void     net_inet_accept_child_ready(net_socket_t *s);
 net_socket_t *net_socket_from_file(int gfd);
 int net_poll_file(vfile_t *vf, short events);
 int      net_socket_install_file(net_socket_t *s, int flags);
+void     net_event_notify(net_socket_t *s, uint32_t event, uint64_t data0,
+                          uint64_t data1);
 int      net_socket_close_file(vfile_t *vf);
 
 #endif /* _NET_SOCKET_INTERNAL_H */

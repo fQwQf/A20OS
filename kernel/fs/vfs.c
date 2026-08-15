@@ -23,6 +23,7 @@
 #include "fs/page_cache.h"
 #include "fs/inotify.h"
 #include "ipc/landlock.h"
+#include "ipc/ipc.h"
 #include "fs/pipe.h"
 #include "fs/ramfs.h"
 #include "fs/devfs.h"
@@ -319,7 +320,6 @@ int vfs_open(const char *path, int flags, int mode) {    /* Resolve cwd from cur
 
     const char *rel = vfs_strip_mount_prefix(resolved, mnt);
     vnode_t *vn = vnode_lookup_path(mnt->root, rel);
-
     if (!vn) {
         if (g_lookup_errno && !(flags & O_CREAT))
             return g_lookup_errno;
@@ -356,7 +356,9 @@ int vfs_open(const char *path, int flags, int mode) {    /* Resolve cwd from cur
         int r = parent->ops->create(parent, fname, cmode, &vn);
         if (r == 0) {
             inotify_vnode_event(parent, fname, IN_CREATE);
+            a20_fs_notify(parent, A20_EVENT_FS_CREATE, fname, 0, 0);
             vfs_dcache_invalidate(parent, fname);
+            vfs_dcache_insert(parent, fname, vn);
         }
         vnode_put(parent);
         if (r < 0) { kdebug("[VFS] open '%s': create failed r=%d\n", resolved, r); return r; }
@@ -535,6 +537,8 @@ int vfs_openat2(int dirfd, const char *path, int flags, int mode, uint64_t resol
                 vnode_put(parent);
                 return cr;
             }
+            inotify_vnode_event(parent, fname, IN_CREATE);
+            a20_fs_notify(parent, A20_EVENT_FS_CREATE, fname, 0, 0);
             vfs_dcache_invalidate(parent, fname);
             vfs_dcache_insert(parent, fname, vn);
             /* Keep the vnode returned by create canonical for subsequent
@@ -686,6 +690,7 @@ int vfs_mkdir(const char *path, int mode) {
     int r = parent->ops->mkdir(parent, name, cmode);
     if (r == 0) {
         inotify_vnode_event(parent, name, IN_CREATE | IN_ISDIR);
+        a20_fs_notify(parent, A20_EVENT_FS_CREATE, name, 0, 0);
         vfs_dcache_invalidate(parent, name);
     }
     vnode_put(parent);
@@ -739,6 +744,7 @@ int vfs_unlink(const char *path) {
     int r = parent->ops->unlink(parent, name);
     if (r == 0) {
         inotify_vnode_event(parent, name, IN_DELETE);
+        a20_fs_notify(parent, A20_EVENT_FS_DELETE, name, 0, 0);
         if (victim)
             inotify_vnode_event(victim, NULL, IN_DELETE_SELF);
         vfs_dcache_invalidate(parent, name);
@@ -868,7 +874,9 @@ int vfs_rename_flags(const char *old, const char *newpath, unsigned int flags) {
     int r = old_dir->ops->rename(old_dir, old_name, new_dir, new_name, flags);
     if (r == 0) {
         inotify_vnode_event(old_dir, old_name, IN_MOVED_FROM);
+        a20_fs_notify(old_dir, A20_EVENT_FS_RENAME, old_name, 0, 0);
         inotify_vnode_event(new_dir, new_name, IN_MOVED_TO);
+        a20_fs_notify(new_dir, A20_EVENT_FS_RENAME, new_name, 0, 0);
         int ramfs_dir_reparent = old_dir->mnt &&
             old_dir->mnt->type == FS_TYPE_RAMFS &&
             old_dir->ino != new_dir->ino &&
@@ -939,6 +947,7 @@ int vfs_rmdir(const char *path) {
     int r = parent->ops->rmdir(parent, name);
     if (r == 0) {
         inotify_vnode_event(parent, name, IN_DELETE | IN_ISDIR);
+        a20_fs_notify(parent, A20_EVENT_FS_DELETE, name, 0, 0);
         if (victim)
             inotify_vnode_event(victim, NULL, IN_DELETE_SELF);
         vfs_dcache_invalidate(parent, name);
@@ -1170,7 +1179,14 @@ int vfs_readlinkat(int dirfd, const char *path, char *buf, size_t sz) {
     }
     vnode_put(parent);
 
-    if (vn->type != VFS_FT_SYMLINK || !vn->ops || !vn->ops->readlink) {
+    /* Allow readlink() on a vnode whose ops implement it even when the
+     * vnode is a directory: A20OS sysfs exposes /sys/dev/char/<maj>:<min>
+     * as a real directory (libdrm walks device/drm beneath it) that also
+     * answers readlink() with the class-device path.  On Linux the two are
+     * symlinks to the same /sys/devices path; this keeps both views
+     * consistent so libudev's udev_device_new_from_devnum() and an
+     * enumerate from /sys/class produce the same syspath. */
+    if (!vn->ops || !vn->ops->readlink) {
         vnode_put(vn);
         return -EINVAL;
     }
@@ -1229,6 +1245,7 @@ int vfs_link(const char *oldpath, const char *newpath) {
     int r = parent->ops->link(parent, name, target);
     if (r == 0) {
         inotify_vnode_event(parent, name, IN_CREATE);
+        a20_fs_notify(parent, A20_EVENT_FS_CREATE, name, 0, 0);
         vfs_dcache_invalidate(parent, name);
     }
     vnode_put(parent);
@@ -1269,6 +1286,7 @@ int vfs_symlink(const char *target, const char *linkpath) {
     int r = parent->ops->symlink(parent, name, target);
     if (r == 0) {
         inotify_vnode_event(parent, name, IN_CREATE);
+        a20_fs_notify(parent, A20_EVENT_FS_CREATE, name, 0, 0);
         vfs_dcache_invalidate(parent, name);
     }
     vnode_put(parent);

@@ -39,6 +39,15 @@ void mm_sync_shared_dirty_for_vnode(vnode_t *vn)
     if (!vn)
         return;
 
+    /*
+     * Fast path: no MAP_SHARED file VMA references this vnode, so there is
+     * nothing to harvest.  The full scan below visits every task, every VMA
+     * and every page table, so the common case (build inputs read through
+     * the page cache but never mmap'd shared) must not pay it per read.
+     */
+    if (__atomic_load_n(&vn->shared_file_maps, __ATOMIC_ACQUIRE) == 0)
+        return;
+
     uint64_t proc_flags = spin_lock_irqsave(&proc_lock);
     for (task_t *t = proc_first_task_locked(); t; t = proc_next_task_locked(t)) {
         if (t->state == PROC_UNUSED || !t->mm)
@@ -99,7 +108,9 @@ vaddr_t mm_mmap_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
 
     // 处理 MAP_FIXED 标志
     if ((flags & MAP_FIXED) && addr != 0) {
-        mm_munmap_locked(mm, addr, len);
+        int mr = mm_munmap_locked(mm, addr, len);
+        if (mr < 0)
+            return (uint64_t)mr;
     } else if (addr != 0) {
         vm_area_t *existing = mm_find_vma(mm, addr);
         if (existing && existing->start < addr + len && existing->end > addr)
@@ -134,6 +145,7 @@ vaddr_t mm_mmap_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
     vma->end       = addr + len;
     vma->vm_flags  = vmf;
     vma->pte_flags = ptef;
+    vma->vmar_cap  = (uint32_t)mm_pte_flags_to_prot(ptef);
     vma->file_fd   = -1;
 #ifdef CONFIG_NOMMU
     vma->nommu_alloc = nommu_raw;
@@ -183,7 +195,9 @@ vaddr_t mm_mmap_file_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
     }
 
     if ((flags & MAP_FIXED) && addr != 0) {
-        mm_munmap_locked(mm, addr, len);
+        int mr = mm_munmap_locked(mm, addr, len);
+        if (mr < 0)
+            return (uint64_t)mr;
     } else if (addr != 0) {
         vm_area_t *existing = mm_find_vma(mm, addr);
         if (existing && existing->start < addr + len && existing->end > addr)
@@ -228,6 +242,7 @@ vaddr_t mm_mmap_file_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
     vma->end         = addr + len;
     vma->vm_flags    = vmf;
     vma->pte_flags   = mm_prot_to_pte_flags(prot);
+    vma->vmar_cap    = (uint32_t)prot;
     vma->file_fd     = file_fd;
     vma->file_offset = file_offset;
 #ifdef CONFIG_NOMMU
@@ -260,6 +275,9 @@ vaddr_t mm_mmap_file_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
         mm->locked_vm += len;
     }
 
+    if ((vma->vm_flags & VM_SHARED) && vma->file_vnode)
+        vnode_shared_map_inc(vma->file_vnode);
+
     mm_insert_vma(mm, vma);
     mm->total_vm += len / PAGE_SIZE;
     return addr;
@@ -291,7 +309,9 @@ vaddr_t mm_mmap_vmo_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
     }
 
     if ((flags & MAP_FIXED) && addr != 0) {
-        mm_munmap_locked(mm, addr, len);
+        int mr = mm_munmap_locked(mm, addr, len);
+        if (mr < 0)
+            return (uint64_t)mr;
     } else if (addr != 0) {
         vm_area_t *existing = mm_find_vma(mm, addr);
         if (existing && existing->start < addr + len && existing->end > addr)
@@ -322,6 +342,7 @@ vaddr_t mm_mmap_vmo_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
     vma->end         = addr + len;
     vma->vm_flags    = vmf;
     vma->pte_flags   = mm_prot_to_pte_flags(prot);
+    vma->vmar_cap    = (uint32_t)prot;   /* Native VMAR capability at creation */
     vma->file_fd     = -1;
     vma->vmo         = vmo;
     vma->vmo_offset  = vmo_offset;

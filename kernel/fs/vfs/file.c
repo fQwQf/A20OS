@@ -7,6 +7,7 @@
 #include "fs/block_cache.h"
 #include "fs/page_cache.h"
 #include "fs/inotify.h"
+#include "ipc/ipc.h"
 #include "mm/vm.h"
 
 #define VFS_WRITE_LOCK_COUNT 64U
@@ -146,6 +147,7 @@ int vfs_write_file(vfile_t *vf, const char *buf, size_t count)
                                                       write_start + (size_t)r);
             vfs_touch_mtime(vf->vnode);
             inotify_vnode_event(vf->vnode, NULL, IN_MODIFY);
+            a20_fs_notify(vf->vnode, A20_EVENT_FS_MODIFY, NULL, 0, 0);
         }
         if (write_lock)
             mutex_unlock(write_lock);
@@ -271,6 +273,7 @@ int vfs_fsync(int fd)
     vfile_t *vf = vfs_get_file_ref(fd);
     if (!vf)
         return -EBADF;
+    int r = 0;
     if (vf->vnode) {
         mm_sync_shared_dirty_for_vnode(vf->vnode);
         int pc_r = page_cache_writeback_vnode(vf->vnode, NULL, NULL);
@@ -278,11 +281,19 @@ int vfs_fsync(int fd)
             vfs_put_file_ref(fd, vf);
             return pc_r;
         }
+        /* A filesystem-provided sync scopes the block-cache flush to this
+         * vnode's own data and allocation metadata instead of flushing the
+         * whole mount (which makes one fsync pay for every concurrent
+         * writer's dirty pages).  Filesystems without the op fall back to
+         * the full mount sync. */
+        if (vf->vnode->ops && vf->vnode->ops->sync_vnode) {
+            r = vf->vnode->ops->sync_vnode(vf->vnode);
+        } else if (vf->vnode->mnt && vf->vnode->mnt->fs_data) {
+            r = bcache_sync_checked((bcache_t *)vf->vnode->mnt->fs_data);
+        }
     }
-    if (vf->vnode && vf->vnode->mnt && vf->vnode->mnt->fs_data)
-        bcache_sync((bcache_t *)vf->vnode->mnt->fs_data);
     vfs_put_file_ref(fd, vf);
-    return 0;
+    return r;
 }
 
 int vfs_fdatasync(int fd)

@@ -9,7 +9,8 @@
  *
  * These entries are only meaningful on RISC-V64/RISC-V32.  On other arches
  * the syscall table still registers them (they never execute), so the
- * implementations are guarded at build time by the arch macros.
+ * implementations are guarded at build time by the arch macros and the
+ * fallbacks report -EOPNOTSUPP for the platform that lacks the operations.
  */
 
 #if defined(CONFIG_RISCV64) || defined(CONFIG_RISCV32)
@@ -97,7 +98,9 @@ int64_t sys_riscv_hwprobe(const void *pairs, size_t pair_count,
     (void)cpu_size;
     (void)cpus;
     (void)flags;
-    return -ENOSYS;
+    /* riscv_hwprobe is a RISC-V-only syscall; non-RISC-V platforms have no
+     * RISC-V hardware to probe. */
+    return -EOPNOTSUPP;
 }
 
 int64_t sys_riscv_flush_icache(uint64_t start, uint64_t end, uint64_t flags)
@@ -105,7 +108,9 @@ int64_t sys_riscv_flush_icache(uint64_t start, uint64_t end, uint64_t flags)
     (void)start;
     (void)end;
     (void)flags;
-    return -ENOSYS;
+    /* riscv_flush_icache is a RISC-V-only syscall; the icache is managed by
+     * the arch port on other platforms. */
+    return -EOPNOTSUPP;
 }
 
 #endif

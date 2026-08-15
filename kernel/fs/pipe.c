@@ -8,6 +8,7 @@
 #include "mm/slab.h"
 #include "proc/proc.h"
 #include "proc/signal.h"
+#include "ipc/ipc.h"
 
 #define PIPE_DEFAULT_SIZE (16 * PIPE_BUF_SIZE)
 
@@ -20,6 +21,8 @@ typedef struct pipe_buf {
     int             writer_closed;
     int             reader_closed;
     int             ref;
+    int             read_fd;        /* global fd of the read endpoint */
+    int             write_fd;       /* global fd of the write endpoint */
     wait_queue_t    read_waiters;
     wait_queue_t    write_waiters;
 } pipe_buf_t;
@@ -27,11 +30,17 @@ typedef struct pipe_buf {
 static void pipe_wake_readers(pipe_buf_t *pb)
 {
     wait_queue_wake_all(&pb->read_waiters, 0, PROC_WAKE_EVENT);
+    if (pb->read_fd >= 0)
+        a20_event_notify((void *)(uintptr_t)pb->read_fd,
+                         A20_OBJ_PIPE_ENDPOINT, A20_EVENT_READABLE, 0, 0);
 }
 
 static void pipe_wake_writers(pipe_buf_t *pb)
 {
     wait_queue_wake_all(&pb->write_waiters, 0, PROC_WAKE_EVENT);
+    if (pb->write_fd >= 0)
+        a20_event_notify((void *)(uintptr_t)pb->write_fd,
+                         A20_OBJ_PIPE_ENDPOINT, A20_EVENT_WRITABLE, 0, 0);
 }
 
 static int pipe_wait_interruptible_locked(pipe_buf_t *pb, wait_queue_t *wq,
@@ -351,6 +360,46 @@ static vfile_ops_t g_pipe_write_ops = {
     .poll_sources = pipe_poll_sources, .close = pipe_write_close
 };
 
+/* Peek up to count bytes from a pipe without consuming them.  Blocks while
+ * the pipe is empty and the writer is open, unless the read end is
+ * O_NONBLOCK.  Returns the number of bytes copied, 0 when the writer has
+ * closed, or a negative error.  Used by tee(2). */
+int pipe_peek(vfile_t *vf, char *buf, size_t count)
+{
+    pipe_buf_t *pb = vf ? (pipe_buf_t *)vf->priv : NULL;
+    if (!pb || !pipe_vfile_is(vf))
+        return -EINVAL;
+    if (count == 0)
+        return 0;
+
+    spin_lock(&pb->lock);
+    while (pb->used == 0) {
+        if (pb->writer_closed) {
+            spin_unlock(&pb->lock);
+            return 0;
+        }
+        if (vf->flags & O_NONBLOCK) {
+            spin_unlock(&pb->lock);
+            return -EAGAIN;
+        }
+        int wr = pipe_wait_interruptible_locked(pb, &pb->read_waiters, 1);
+        if (wr < 0) {
+            spin_unlock(&pb->lock);
+            return wr;
+        }
+    }
+    size_t n = pb->used < count ? pb->used : count;
+    size_t first = pb->capacity - pb->tail;
+    if (first > n)
+        first = n;
+    memcpy(buf, pb->data + pb->tail, first);
+    size_t second = n - first;
+    if (second)
+        memcpy(buf + first, pb->data, second);
+    spin_unlock(&pb->lock);
+    return (int)n;
+}
+
 int pipe_vfile_is(vfile_t *vf)
 {
     return vf && (vf->ops == &g_pipe_read_ops || vf->ops == &g_pipe_write_ops);
@@ -450,5 +499,7 @@ int pipe_create(int pipefd[2])
     }
     pipefd[0] = fdrd;
     pipefd[1] = fdwr;
+    pb->read_fd = fdrd;
+    pb->write_fd = fdwr;
     return 0;
 }

@@ -3,6 +3,7 @@
 #include "abi/linux/futex.h"
 #include "abi/linux/fcntl.h"
 #include "sys/usercopy.h"
+#include "proc/proc_internal.h"
 
 __attribute__((weak)) int64_t sys_set_thread_area(void *ptr) {
     task_t *t = proc_current();
@@ -13,6 +14,37 @@ __attribute__((weak)) int64_t sys_set_thread_area(void *ptr) {
      * table still contains set_thread_area. */
     TRAP_CTX_TP(t->trap_ctx) = (uint64_t)(uintptr_t)ptr;
     return 0;
+}
+
+__attribute__((weak)) int64_t sys_get_thread_area(void *ptr) {
+    task_t *t = proc_current();
+    if (!t || !t->trap_ctx)
+        return -ESRCH;
+    if (!ptr)
+        return -EFAULT;
+    /* x86_64 get_thread_area(2): report the FS-base TLS pointer carried in
+     * the trap frame.  Linux returns -EINVAL when no descriptor is set;
+     * A20OS always has the base available. */
+    uint64_t base = TRAP_CTX_TP(t->trap_ctx);
+    if (copy_to_user(ptr, &base, sizeof(uint64_t)) < 0)
+        return -EFAULT;
+    return 0;
+}
+
+__attribute__((weak)) int64_t sys_pause(void) {
+    task_t *t = proc_current();
+    if (!t)
+        return -EINTR;
+    /* pause(2): block until a signal arrives.  The park is interruptible;
+     * any delivered signal wakes it and pause returns -EINTR (or the signal
+     * handler runs first, mirroring Linux). */
+    for (;;) {
+        if (signal_task_has_unblocked(t))
+            return -EINTR;
+        if (proc_park_wait(PROC_WAIT_INTERRUPTIBLE, 0) ==
+            PROC_WAKE_TIMEOUT_CAPACITY)
+            return -EAGAIN;
+    }
 }
 #define CLD_EXITED     1
 #define CLD_KILLED     2
@@ -115,7 +147,10 @@ int64_t sys_arch_prctl(int op, uint64_t addr) __attribute__((weak));
 int64_t sys_arch_prctl(int op, uint64_t addr) {
     (void)op;
     (void)addr;
-    return -ENOSYS;
+    /* arch_prctl is an x86-only syscall; the x86_64 arch port provides the
+     * strong definition.  Other platforms have no x86 TLS/segment registers
+     * to configure. */
+    return -EOPNOTSUPP;
 }
 
 int64_t sys_get_robust_list(int pid, void *head_ptr, size_t *len_ptr) {
@@ -563,7 +598,7 @@ int64_t sys_openat2(int dirfd, const char *pathname, const void *how, size_t siz
     }
     if (khow.resolve & ~(RESOLVE_NO_SYMLINKS | RESOLVE_BENEATH | RESOLVE_IN_ROOT |
                          RESOLVE_NO_MAGICLINKS | RESOLVE_NO_XDEV |
-                         RESOLVE_NO_TRAILING_SYMLINKS))
+                         RESOLVE_CACHED))
         return -EINVAL;
 
     int flags = (int)khow.flags;
@@ -717,6 +752,34 @@ int64_t sys_reboot(uint64_t magic1, uint64_t magic2, uint64_t cmd) {
 
 int64_t sys_prctl(int op, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
     task_t *t = proc_current();
+    if (op == PR_SET_PDEATHSIG) {
+        /* One-shot signal delivered to the child when its parent dies.  A
+         * signal number >= _NSIG is rejected; a parent that is already gone
+         * is reported with -ESRCH (Linux semantics). */
+        if (!t)
+            return -ESRCH;
+        if (a1 >= 64)
+            return -EINVAL;
+        uint64_t pf = spin_lock_irqsave(&proc_lock);
+        task_t *parent = t->parent;
+        int parent_dead = (!parent || parent->state == PROC_ZOMBIE ||
+                           parent->state == PROC_UNUSED);
+        if (parent_dead) {
+            spin_unlock_irqrestore(&proc_lock, pf);
+            return -ESRCH;
+        }
+        t->pdeathsig = (int)a1;
+        spin_unlock_irqrestore(&proc_lock, pf);
+        return 0;
+    }
+    if (op == PR_GET_PDEATHSIG) {
+        if (!t)
+            return -ESRCH;
+        int sig = t->pdeathsig;
+        if (copy_to_user((void *)a1, &sig, sizeof(sig)) < 0)
+            return -EFAULT;
+        return 0;
+    }
     if (op == PR_SET_NAME) {
         task_t *t = proc_current();
         if (t) {

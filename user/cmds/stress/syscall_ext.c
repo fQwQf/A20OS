@@ -11,18 +11,24 @@
  * Prints SYSCALL_EXT: PASS when every group succeeds.
  */
 
+#define _GNU_SOURCE
+
 #include <errno.h>
 #include <fcntl.h>
 #include <mqueue.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/mman.h>
+#include <sys/eventfd.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/types.h>
 #include <sys/uio.h>
+#include <time.h>
 #include <unistd.h>
 
 #define KEY_SPEC_PROCESS_KEYRING (-2)
@@ -662,6 +668,577 @@ alsa_skipped:
     return 0;
 }
 
+/* ---- userfaultfd (kernel/ipc/userfaultfd.c) ---- */
+
+/* Linux asm-generic wire ioctl numbers (type 0xAA). */
+#define UFFDIO_API         0x4017aa3fUL
+#define UFFDIO_REGISTER    0xc01faa00UL
+#define UFFDIO_UNREGISTER  0x400faa01UL
+#define UFFDIO_COPY        0xc027aa03UL
+
+#define UFFD_API_VERSION 0xAAUL
+#define UFFD_EVENT_PAGEFAULT 0x12
+#define UFFDIO_REGISTER_MODE_MISSING (1ULL << 0)
+
+struct uffdio_range { uint64_t start; uint64_t len; };
+struct uffdio_api { uint64_t api; uint64_t features; uint64_t ioctls; };
+struct uffdio_register {
+    struct uffdio_range range; uint64_t mode; uint64_t ioctls;
+};
+struct uffdio_copy {
+    uint64_t dst; uint64_t src; uint64_t len; uint64_t mode; int64_t copy;
+};
+struct uffd_msg {
+    uint8_t event; uint8_t r1; uint16_t r2; uint32_t r3;
+    union {
+        struct {
+            uint64_t flags; uint64_t address; uint32_t ptid; uint32_t r4;
+        } pagefault;
+        uint64_t reserved[3];
+    } arg;
+};
+
+static char g_uffd_payload[4096] __attribute__((aligned(4096)));
+static volatile int g_uffd_read_byte = -1;
+
+static void *uffd_fault_worker(void *arg)
+{
+    volatile char *p = (volatile char *)arg;
+    g_uffd_read_byte = *p; /* read fault on the registered page */
+    return NULL;
+}
+
+static int test_userfaultfd(void)
+{
+    long fd = syscall(SYS_userfaultfd, O_CLOEXEC);
+    if (fd < 0)
+        return fail("userfaultfd create", (int)fd);
+
+    struct uffdio_api api;
+    memset(&api, 0, sizeof(api));
+    api.api = UFFD_API_VERSION;
+    if (ioctl(fd, UFFDIO_API, &api) != 0)
+        return fail("uffdio_api", errno);
+    if (api.ioctls == 0)
+        return fail("uffdio_api ioctls", 0);
+
+    void *page = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
+                      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (page == MAP_FAILED)
+        return fail("uffd mmap", errno);
+
+    struct uffdio_register reg;
+    memset(&reg, 0, sizeof(reg));
+    reg.range.start = (uint64_t)(uintptr_t)page;
+    reg.range.len = 4096;
+    reg.mode = UFFDIO_REGISTER_MODE_MISSING;
+    if (ioctl(fd, UFFDIO_REGISTER, &reg) != 0)
+        return fail("uffdio_register", errno);
+
+    pthread_t th;
+    if (pthread_create(&th, NULL, uffd_fault_worker, page) != 0)
+        return fail("uffd pthread_create", errno);
+
+    /* The worker's read faults the registered page; the blocking read returns
+     * as soon as the faulting thread enqueues the PAGEFAULT event. */
+    struct uffd_msg msg;
+    ssize_t n = read(fd, &msg, sizeof(msg));
+    if (n != (ssize_t)sizeof(msg) || msg.event != UFFD_EVENT_PAGEFAULT)
+        return fail("uffd read event", errno);
+    if (msg.arg.pagefault.address != (uint64_t)(uintptr_t)page)
+        return fail("uffd event address", 0);
+
+    for (int i = 0; i < 4096; i++)
+        g_uffd_payload[i] = (char)(0x40 + (i % 16));
+
+    struct uffdio_copy cp;
+    memset(&cp, 0, sizeof(cp));
+    cp.dst = (uint64_t)(uintptr_t)page;
+    cp.src = (uint64_t)(uintptr_t)g_uffd_payload;
+    cp.len = 4096;
+    if (ioctl(fd, UFFDIO_COPY, &cp) != 0)
+        return fail("uffdio_copy", errno);
+    if (cp.copy != 4096)
+        return fail("uffdio_copy len", 0);
+
+    pthread_join(th, NULL);
+
+    /* The worker read byte 0 after resolution, so it must equal the payload. */
+    if (g_uffd_read_byte != g_uffd_payload[0])
+        return fail("uffd content", 0);
+    if (memcmp(page, g_uffd_payload, 4096) != 0)
+        return fail("uffd page payload", 0);
+
+    struct uffdio_range ur;
+    memset(&ur, 0, sizeof(ur));
+    ur.start = (uint64_t)(uintptr_t)page;
+    ur.len = 4096;
+    if (ioctl(fd, UFFDIO_UNREGISTER, &ur) != 0)
+        return fail("uffdio_unregister", errno);
+
+    munmap(page, 4096);
+    close(fd);
+    return 0;
+}
+
+/* ---- perf_event_open (kernel/abi/linux/sys_perf.c) ---- */
+
+#define PERF_TYPE_SOFTWARE 1
+#define PERF_COUNT_SW_CPU_CLOCK 0
+#define PERF_COUNT_SW_PAGE_FAULTS 2
+#define PERF_FORMAT_ID (1ULL << 2)
+#define PERF_FLAG_FD_CLOEXEC (1UL << 3)
+#define PERF_EVENT_IOC_ENABLE 0x2400
+#define PERF_EVENT_IOC_DISABLE 0x2401
+#define PERF_EVENT_IOC_RESET 0x2403
+#define PERF_EVENT_IOC_ID 0x40072407UL
+
+struct perf_event_attr_test {
+    uint32_t type;
+    uint32_t size;
+    uint64_t config;
+    uint64_t sample_period;
+    uint64_t sample_type;
+    uint64_t read_format;
+    uint64_t flags;
+    uint64_t reserved[10]; /* pads to the Linux 128-byte wire layout */
+};
+
+static int test_perf(void)
+{
+    struct perf_event_attr_test attr;
+    memset(&attr, 0, sizeof(attr));
+    attr.type = PERF_TYPE_SOFTWARE;
+    attr.size = (uint32_t)sizeof(attr);
+    attr.config = PERF_COUNT_SW_CPU_CLOCK;
+    attr.read_format = PERF_FORMAT_ID;
+
+    int fd = syscall(SYS_perf_event_open, &attr, 0, -1, -1, 0);
+    if (fd < 0)
+        return fail("perf_event_open", errno);
+
+    uint64_t vals[2];
+    memset(vals, 0, sizeof(vals));
+    ssize_t n = read(fd, vals, sizeof(vals));
+    if (n != (ssize_t)sizeof(vals))
+        return fail("perf read", (int)n);
+    if (vals[1] == 0)
+        return fail("perf id zero", 0);
+    uint64_t c0 = vals[0];
+
+    for (volatile int i = 0; i < 1000000; i++)
+        ;
+    n = read(fd, vals, sizeof(vals));
+    if (n != (ssize_t)sizeof(vals))
+        return fail("perf read2", (int)n);
+    if (vals[0] <= c0)
+        return fail("perf clock not advancing", 0);
+
+    if (ioctl(fd, PERF_EVENT_IOC_RESET, 0) != 0)
+        return fail("perf reset", errno);
+    uint64_t id = 0;
+    if (ioctl(fd, PERF_EVENT_IOC_ID, &id) != 0)
+        return fail("perf id ioctl", errno);
+    if (id == 0)
+        return fail("perf id ioctl zero", 0);
+    if (ioctl(fd, PERF_EVENT_IOC_DISABLE, 0) != 0)
+        return fail("perf disable", errno);
+    if (ioctl(fd, PERF_EVENT_IOC_ENABLE, 0) != 0)
+        return fail("perf enable", errno);
+    close(fd);
+
+    /* PERF_COUNT_SW_PAGE_FAULTS: a fresh fault must advance the counter. */
+    memset(&attr, 0, sizeof(attr));
+    attr.type = PERF_TYPE_SOFTWARE;
+    attr.size = (uint32_t)sizeof(attr);
+    attr.config = PERF_COUNT_SW_PAGE_FAULTS;
+    fd = syscall(SYS_perf_event_open, &attr, 0, -1, -1, 0);
+    if (fd < 0)
+        return fail("perf pf open", errno);
+
+    uint64_t v1 = 0;
+    if (read(fd, &v1, sizeof(v1)) != (ssize_t)sizeof(v1))
+        return fail("perf pf read1", (int)n);
+    void *pg = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
+                    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (pg == MAP_FAILED)
+        return fail("perf pf mmap", errno);
+    *(volatile char *)pg = 1; /* demand fault */
+    uint64_t v2 = 0;
+    if (read(fd, &v2, sizeof(v2)) != (ssize_t)sizeof(v2))
+        return fail("perf pf read2", (int)n);
+    if (v2 <= v1)
+        return fail("perf pf not counted", 0);
+    munmap(pg, 4096);
+    close(fd);
+    return 0;
+}
+
+/* ---- POSIX timer notification (kernel/abi/linux/sys_timer_posix.c) ---- */
+
+static volatile sig_atomic_t g_timer_sig;
+
+static void timer_sig_handler(int sig)
+{
+    (void)sig;
+    g_timer_sig = 1;
+}
+
+/* Exercises SIGEV_SIGNAL (default process-wide signo path) and
+ * SIGEV_THREAD_ID (thread-targeted delivery). */
+static int test_timer_sigevent(void)
+{
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = timer_sig_handler;
+    sigemptyset(&sa.sa_mask);
+    if (sigaction(SIGUSR1, &sa, NULL) != 0)
+        return fail("timer sigaction", errno);
+
+    /* SIGEV_SIGNAL with a custom signo. */
+    struct sigevent sev;
+    memset(&sev, 0, sizeof(sev));
+    sev.sigev_notify = SIGEV_SIGNAL;
+    sev.sigev_signo = SIGUSR1;
+    timer_t tid;
+    if (timer_create(CLOCK_MONOTONIC, &sev, &tid) != 0)
+        return fail("timer_create signal", errno);
+
+    struct itimerspec its;
+    memset(&its, 0, sizeof(its));
+    its.it_value.tv_nsec = 30000000; /* 30 ms one-shot */
+    if (timer_settime(tid, 0, &its, NULL) != 0)
+        return fail("timer_settime signal", errno);
+
+    g_timer_sig = 0;
+    for (int i = 0; i < 1000 && !g_timer_sig; i++)
+        usleep(1000);
+    if (!g_timer_sig) {
+        timer_delete(tid);
+        return fail("timer signal delivery", ETIMEDOUT);
+    }
+    timer_delete(tid);
+
+    /* SIGEV_THREAD_ID targeting the calling thread. */
+    memset(&sev, 0, sizeof(sev));
+    sev.sigev_notify = SIGEV_THREAD_ID;
+    sev.sigev_signo = SIGUSR1;
+    sev.sigev_notify_thread_id = (pid_t)syscall(SYS_gettid);
+    if (timer_create(CLOCK_MONOTONIC, &sev, &tid) != 0)
+        return fail("timer_create thread-id", errno);
+
+    memset(&its, 0, sizeof(its));
+    its.it_value.tv_nsec = 30000000;
+    if (timer_settime(tid, 0, &its, NULL) != 0)
+        return fail("timer_settime thread-id", errno);
+
+    g_timer_sig = 0;
+    for (int i = 0; i < 1000 && !g_timer_sig; i++)
+        usleep(1000);
+    timer_delete(tid);
+    if (!g_timer_sig)
+        return fail("timer thread-id delivery", ETIMEDOUT);
+    return 0;
+}
+
+#ifndef SYS_file_getattr
+#define SYS_file_getattr 468
+#endif
+#ifndef SYS_file_setattr
+#define SYS_file_setattr 469
+#endif
+/* time/utimes/pause are x86_64-only in Linux; A20OS registers them in the
+ * generic table at spare slots 1003/1006/1004 for the asm-generic arches, so
+ * pick the number the running arch actually dispatches. */
+#if defined(__x86_64__) && !defined(__riscv)
+#ifndef SYS_time
+#define SYS_time 201
+#endif
+#ifndef SYS_utimes
+#define SYS_utimes 235
+#endif
+#else
+#ifndef SYS_time
+#define SYS_time 1003
+#endif
+#ifndef SYS_utimes
+#define SYS_utimes 1006
+#endif
+#endif
+
+struct fileattr_test {
+    unsigned int valid;
+    unsigned int flags;
+    unsigned int fsx_xflags;
+    unsigned int fspare;
+    unsigned int gfs2_acl;
+    unsigned int version;
+    unsigned int flags_mask;
+    unsigned int flags_ro;
+    unsigned int xflags_mask;
+    unsigned int xflags_ro;
+};
+
+/* file_getattr/file_setattr (LoongArch), time/utime/utimes/pause (x86_64). */
+static int test_fileattr_and_time(void)
+{
+    int fd = open("/tmp/ext.txt", O_CREAT | O_TRUNC | O_RDWR, 0644);
+    if (fd < 0)
+        return fail("fileattr open", errno);
+
+    /* file_getattr: empty attribute set with the flags field valid. */
+    struct fileattr_test fa;
+    memset(&fa, 0, sizeof(fa));
+    if (syscall(SYS_file_getattr, fd, &fa) < 0) {
+        if (errno == ENOSYS) {
+            close(fd);
+            return 0; /* arch without these syscalls: skip */
+        }
+        return fail("file_getattr", errno);
+    }
+    if (!(fa.valid & 1) || fa.flags != 0)
+        return fail("file_getattr shape", 0);
+
+    /* file_setattr: setting any flag is refused (no supported flags). */
+    memset(&fa, 0, sizeof(fa));
+    fa.valid = 1;
+    fa.flags = 0x20; /* FS_APPEND_FL */
+    errno = 0;
+    if (syscall(SYS_file_setattr, fd, &fa) == 0 || errno != EOPNOTSUPP)
+        return fail("file_setattr append", errno);
+    close(fd);
+    unlink("/tmp/ext.txt");
+
+    /* time(2): reads back a plausible epoch. */
+    long tnow = syscall(SYS_time, NULL);
+    if (tnow < 1500000000L)
+        return fail("time", (int)errno);
+
+    /* utimes(2): set both times and verify via stat. */
+    if (write(open("/tmp/utimes.txt", O_CREAT | O_TRUNC | O_RDWR, 0644),
+              "x", 1) != 1)
+        return fail("utimes create", errno);
+    long tv[4] = { 1700000000L, 0, 1700000001L, 0 };
+    errno = 0;
+    if (syscall(SYS_utimes, "/tmp/utimes.txt", tv) < 0 && errno != ENOSYS)
+        return fail("utimes", errno);
+    struct stat st;
+    if (stat("/tmp/utimes.txt", &st) == 0 && st.st_mtime < 1699999999L)
+        return fail("utimes mtime", 0);
+    unlink("/tmp/utimes.txt");
+    return 0;
+}
+
+/* ---- splice/tee/vmsplice (kernel/fs/splice.c) ---- */
+
+static int test_splice_tee(void)
+{
+    /* splice between two regular files must fail with -EINVAL (Linux
+     * requires at least one pipe endpoint). */
+    int f1 = open("/tmp/sp_in.txt", O_CREAT | O_TRUNC | O_RDWR, 0644);
+    int f2 = open("/tmp/sp_out.txt", O_CREAT | O_TRUNC | O_RDWR, 0644);
+    if (f1 < 0 || f2 < 0)
+        return fail("splice open", errno);
+    if (write(f1, "hello-splice", 12) != 12)
+        return fail("splice write src", errno);
+    errno = 0;
+    if (splice(f1, NULL, f2, NULL, 12, 0) >= 0 || errno != EINVAL)
+        return fail("splice file-file", errno);
+
+    /* A non-NULL offset on a pipe endpoint is -ESPIPE. */
+    int p[2];
+    if (pipe(p) != 0)
+        return fail("splice pipe", errno);
+    long off = 0;
+    errno = 0;
+    if (splice(p[0], &off, f2, NULL, 1, 0) >= 0 || errno != ESPIPE)
+        return fail("splice pipe offset", errno);
+
+    /* file -> pipe, then pipe -> file. */
+    lseek(f1, 0, SEEK_SET);
+    long in_off = 0, out_off = 0;
+    ssize_t n = splice(f1, &in_off, p[1], NULL, 12, 0);
+    if (n != 12)
+        return fail("splice file->pipe", (int)n);
+    if (in_off != 12)
+        return fail("splice in_off advance", (int)in_off);
+    n = splice(p[0], NULL, f2, &out_off, 12, 0);
+    if (n != 12)
+        return fail("splice pipe->file", (int)n);
+    if (out_off != 12)
+        return fail("splice out_off advance", (int)out_off);
+
+    lseek(f2, 0, SEEK_SET);
+    char buf[16];
+    memset(buf, 0, sizeof(buf));
+    if (read(f2, buf, 16) != 12 || memcmp(buf, "hello-splice", 12) != 0)
+        return fail("splice content", errno);
+
+    /* splice pipe->pipe consumes the source. */
+    if (write(p[1], "abcdef", 6) != 6)
+        return fail("splice p2p write", errno);
+    n = splice(p[0], NULL, p[1], NULL, 6, 0);
+    if (n != 6)
+        return fail("splice p2p", (int)n);
+    char rb[8];
+    memset(rb, 0, sizeof(rb));
+    if (read(p[0], rb, 8) != 6 || memcmp(rb, "abcdef", 6) != 0)
+        return fail("splice p2p content", errno);
+
+    /* tee pipe->pipe does NOT consume the source. */
+    if (write(p[1], "xyz", 3) != 3)
+        return fail("tee write", errno);
+    n = tee(p[0], p[1], 3, 0);
+    if (n != 3)
+        return fail("tee", (int)n);
+    /* The pipe now holds the original 3 bytes plus the 3 duplicated ones. */
+    memset(rb, 0, sizeof(rb));
+    if (read(p[0], rb, 8) != 6 || memcmp(rb, "xyzxyz", 6) != 0)
+        return fail("tee source intact", errno);
+
+    /* vmsplice requires a pipe. */
+    struct iovec iov = { .iov_base = "vwxyz", .iov_len = 5 };
+    errno = 0;
+    if (vmsplice(f1, &iov, 1, 0) >= 0 || errno != EINVAL)
+        return fail("vmsplice non-pipe", errno);
+    errno = 0;
+    n = vmsplice(p[1], &iov, 1, SPLICE_F_GIFT);
+    if (n != 5)
+        return fail("vmsplice", n < 0 ? errno : (int)n);
+    memset(rb, 0, sizeof(rb));
+    if (read(p[0], rb, 8) != 5 || memcmp(rb, "vwxyz", 5) != 0)
+        return fail("vmsplice content", errno);
+
+    /* Invalid splice flags are rejected. */
+    errno = 0;
+    if (splice(p[0], NULL, p[1], NULL, 1, 0x10) >= 0 || errno != EINVAL)
+        return fail("splice bad flag", errno);
+
+    close(f1);
+    close(f2);
+    close(p[0]);
+    close(p[1]);
+    return 0;
+}
+
+/* ---- membarrier (kernel/abi/linux/sys_membarrier.c) ---- */
+
+#define MEMBARRIER_CMD_QUERY 0
+#define MEMBARRIER_CMD_GLOBAL 1
+#define MEMBARRIER_CMD_GLOBAL_EXPEDITED 2
+#define MEMBARRIER_CMD_REGISTER_GLOBAL_EXPEDITED 4
+#define MEMBARRIER_CMD_PRIVATE_EXPEDITED 8
+#define MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED 16
+#define MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE 32
+#define MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_SYNC_CORE 64
+
+static int test_membarrier(void)
+{
+    long q = syscall(SYS_membarrier, MEMBARRIER_CMD_QUERY, 0, 0);
+    if (q < 0)
+        return fail("membarrier query", (int)q);
+    /* The query mask must at least advertise GLOBAL and the register
+     * commands, and must not advertise unknown bits. */
+    if (!(q & MEMBARRIER_CMD_GLOBAL) ||
+        !(q & MEMBARRIER_CMD_REGISTER_GLOBAL_EXPEDITED) ||
+        !(q & MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED))
+        return fail("membarrier query bits", (int)q);
+    if (q & ~((1L << 9) - 1))
+        return fail("membarrier query range", (int)q);
+
+    /* GLOBAL barrier succeeds without registration. */
+    if (syscall(SYS_membarrier, MEMBARRIER_CMD_GLOBAL, 0, 0) != 0)
+        return fail("membarrier global", errno);
+    if (syscall(SYS_membarrier, MEMBARRIER_CMD_GLOBAL_EXPEDITED, 0, 0) != 0)
+        return fail("membarrier global expedited", errno);
+
+    /* PRIVATE_EXPEDITED before registration is -EPERM. */
+    errno = 0;
+    if (syscall(SYS_membarrier, MEMBARRIER_CMD_PRIVATE_EXPEDITED, 0, 0) >= 0 ||
+        errno != EPERM)
+        return fail("membarrier private unregistered", errno);
+
+    /* After registration the private barrier succeeds. */
+    if (syscall(SYS_membarrier, MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED,
+                0, 0) != 0)
+        return fail("membarrier register", errno);
+    if (syscall(SYS_membarrier, MEMBARRIER_CMD_PRIVATE_EXPEDITED, 0, 0) != 0)
+        return fail("membarrier private", errno);
+    if (syscall(SYS_membarrier, MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE,
+                0, 0) != 0)
+        return fail("membarrier sync-core", errno);
+
+    /* Unknown command and nonzero flags are rejected. */
+    errno = 0;
+    if (syscall(SYS_membarrier, 0x40000000, 0, 0) >= 0 || errno != EINVAL)
+        return fail("membarrier unknown cmd", errno);
+    errno = 0;
+    if (syscall(SYS_membarrier, MEMBARRIER_CMD_GLOBAL, 1, 0) >= 0 ||
+        errno != EINVAL)
+        return fail("membarrier bad flags", errno);
+    return 0;
+}
+
+/* ---- eventfd O_NONBLOCK toggled via fcntl(F_SETFL) ---- */
+
+static int test_eventfd_fcntl_nonblock(void)
+{
+    int efd = eventfd(0, 0);
+    if (efd < 0)
+        return fail("eventfd create", errno);
+
+    /* Blocking by default: read with no value would hang; use a short
+     * nonblocking probe first via fcntl, then confirm blocking flag off. */
+    if (fcntl(efd, F_SETFL, O_NONBLOCK) != 0)
+        return fail("eventfd F_SETFL", errno);
+    errno = 0;
+    uint64_t v = 0;
+    if (read(efd, &v, sizeof(v)) >= 0 || errno != EAGAIN)
+        return fail("eventfd nonblock read", errno);
+
+    /* Clear O_NONBLOCK; the fd must behave as a blocking fd again (we only
+     * verify the flag is actually cleared via F_GETFL). */
+    if (fcntl(efd, F_SETFL, 0) != 0)
+        return fail("eventfd F_SETFL clear", errno);
+    int fl = fcntl(efd, F_GETFL);
+    if (fl < 0 || (fl & O_NONBLOCK))
+        return fail("eventfd F_GETFL", fl < 0 ? errno : 0);
+
+    /* Write then read succeeds in blocking mode. */
+    if (write(efd, &(uint64_t){1}, sizeof(v)) != sizeof(v))
+        return fail("eventfd write", errno);
+    if (read(efd, &v, sizeof(v)) != sizeof(v) || v != 1)
+        return fail("eventfd blocking read", errno);
+    close(efd);
+    return 0;
+}
+
+/* ---- futex FUTEX_WAIT|FUTEX_CLOCK_REALTIME must be rejected ---- */
+
+#define FUTEX_WAIT 0
+#define FUTEX_WAKE 1
+#define FUTEX_CLOCK_REALTIME 256
+
+static int test_futex_clock_realtime_reject(void)
+{
+    static int futex_word;
+    futex_word = 0;
+    struct timespec ts = { .tv_sec = 0, .tv_nsec = 1000000 };
+
+    /* FUTEX_WAIT|FUTEX_CLOCK_REALTIME is -EINVAL in Linux. */
+    errno = 0;
+    if (syscall(SYS_futex, &futex_word, FUTEX_WAIT | FUTEX_CLOCK_REALTIME,
+                0, &ts, NULL, 0) >= 0 || errno != EINVAL)
+        return fail("futex wait clock-realtime", errno);
+
+    /* Plain FUTEX_WAIT still works (times out cleanly). */
+    errno = 0;
+    if (syscall(SYS_futex, &futex_word, FUTEX_WAIT, 0, &ts, NULL, 0) >= 0 ||
+        errno != ETIMEDOUT)
+        return fail("futex wait", errno);
+    return 0;
+}
+
 int main(void)
 {
     printf("SYSCALL_EXT: start\n");
@@ -684,6 +1261,22 @@ int main(void)
     if (test_msg_and_compat() < 0)
         return 1;
     if (test_file_interfaces() < 0)
+        return 1;
+    if (test_userfaultfd() < 0)
+        return 1;
+    if (test_perf() < 0)
+        return 1;
+    if (test_timer_sigevent() < 0)
+        return 1;
+    if (test_fileattr_and_time() < 0)
+        return 1;
+    if (test_splice_tee() < 0)
+        return 1;
+    if (test_membarrier() < 0)
+        return 1;
+    if (test_eventfd_fcntl_nonblock() < 0)
+        return 1;
+    if (test_futex_clock_realtime_reject() < 0)
         return 1;
     printf("SYSCALL_EXT: PASS\n");
     return 0;

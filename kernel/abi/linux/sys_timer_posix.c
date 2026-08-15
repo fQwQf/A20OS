@@ -6,6 +6,7 @@ typedef struct {
     int used;
     int owner_pid;
     int signo;
+    int target_tid;      /* SIGEV_THREAD_ID delivery target, 0 = process-wide */
     uint64_t interval[2];
     uint64_t value[2];
     uint64_t expire_tick;
@@ -226,23 +227,48 @@ int64_t sys_alarm(unsigned seconds)
     return old;
 }
 
+/* Linux ABI struct sigevent wire layout (uapi/asm-generic/siginfo.h):
+ *   union sigval sigev_value;   // 0..7
+ *   int sigev_signo;            // 8
+ *   int sigev_notify;           // 12
+ *   union { int _tid; ... } ;   // 16
+ * SIGEV_SIGNAL == 0, SIGEV_NONE == 1, SIGEV_THREAD == 2, SIGEV_THREAD_ID == 4.
+ */
+typedef struct {
+    uint64_t sigev_value;
+    int32_t  sigev_signo;
+    int32_t  sigev_notify;
+    union {
+        int32_t pad[12];
+        int32_t tid;
+    } un;
+} kernel_sigevent_t;
+
 int64_t sys_timer_create(int clockid, void *sevp, int *timerid)
 {
     if (clockid != 0 && clockid != 1 && clockid != 7) return -EINVAL;
     if (!timerid) return -EFAULT;
 
     int signo = SIGALRM;
+    int target_tid = 0;
     if (sevp) {
-        int notify = 0;
-        if (copy_from_user(&notify, sevp, sizeof(int)) < 0) return -EFAULT;
-        if (notify == 0) {
+        kernel_sigevent_t sev;
+        if (copy_from_user(&sev, sevp, sizeof(sev)) < 0) return -EFAULT;
+        if (sev.sigev_notify == 0) {
+            /* SIGEV_SIGNAL — deliver sigev_signo process-wide */
+            signo = sev.sigev_signo;
+        } else if (sev.sigev_notify == 1) {
             /* SIGEV_NONE — no notification */
             signo = 0;
-        } else if (notify == 1) {
-            /* SIGEV_SIGNAL — read sigev_signo */
-            if (copy_from_user(&signo, (char *)sevp + 4, sizeof(int)) < 0) return -EFAULT;
+        } else if (sev.sigev_notify == 4) {
+            /* SIGEV_THREAD_ID — deliver sigev_signo to a specific thread */
+            signo = sev.sigev_signo;
+            target_tid = sev.un.tid;
+            if (target_tid <= 0)
+                return -EINVAL;
         }
-        /* SIGEV_THREAD_ID (4) would need thread-targeted delivery — skip */
+        /* SIGEV_THREAD (2) needs a user function+attribute to spawn a thread;
+         * it is refused rather than silently ignored. */
     }
 
     task_t *cur = proc_current();
@@ -252,6 +278,7 @@ int64_t sys_timer_create(int clockid, void *sevp, int *timerid)
             g_posix_timers[i].used = 1;
             g_posix_timers[i].owner_pid = cur ? cur->pid : 0;
             g_posix_timers[i].signo = signo;
+            g_posix_timers[i].target_tid = target_tid;
             if (copy_to_user(timerid, &i, sizeof(i)) < 0) return -EFAULT;
             return 0;
         }
@@ -412,6 +439,7 @@ int64_t sys_clock_adjtime(int clk, void *buf)
 }
 
 extern int signal_send(int pid, int signum);
+extern int signal_send_task(void *task, int signum);
 
 void posix_timer_tick(void)
 {
@@ -420,7 +448,16 @@ void posix_timer_tick(void)
         if (!g_posix_timers[i].used || g_posix_timers[i].signo == 0)
             continue;
         if (g_posix_timers[i].expire_tick > 0 && now >= g_posix_timers[i].expire_tick) {
-            signal_send(g_posix_timers[i].owner_pid, g_posix_timers[i].signo);
+            if (g_posix_timers[i].target_tid > 0) {
+                /* SIGEV_THREAD_ID: deliver to the specific thread. */
+                task_t *target = proc_find_get(g_posix_timers[i].target_tid);
+                if (target) {
+                    (void)signal_send_task(target, g_posix_timers[i].signo);
+                    proc_put(target);
+                }
+            } else {
+                signal_send(g_posix_timers[i].owner_pid, g_posix_timers[i].signo);
+            }
             if (g_posix_timers[i].interval[0] || g_posix_timers[i].interval[1]) {
                 uint64_t interval_ticks = posix_timer_timespec_to_ticks(
                     g_posix_timers[i].interval[0], g_posix_timers[i].interval[1]);

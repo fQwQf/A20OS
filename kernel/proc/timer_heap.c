@@ -14,9 +14,12 @@
 
 /*
  * Tokenized deadline min-heap and timer/alarm scan machinery, split out of
- * proc/sched.c.  The heap is protected by proc_lock; the two next-scan
- * deadlines are updated atomically and consumed by proc_next_timer_interval()
- * (arch timer rearm) and sched_scan_timers() (sched()/idle).
+ * proc/sched.c.  The wait-timer heap is protected by g_wait_timer_lock, and
+ * the two next-scan deadlines are updated atomically and consumed by
+ * proc_next_timer_interval() (arch timer rearm) and sched_scan_timers()
+ * (sched()/idle).  Lock order: park_lock -> g_wait_timer_lock; the timer scan
+ * collects expired entries under g_wait_timer_lock, releases it, then wakes
+ * each target under its park_lock (never holding both).
  */
 
 typedef struct wait_timer {
@@ -35,7 +38,9 @@ typedef struct wait_timer {
 #define WAIT_TIMER_HEAP_MAX CONFIG_WAIT_TIMER_HEAP_MAX
 #endif
 
-/* Tokenized deadline min-heap, protected by proc_lock. */
+/* Tokenized deadline min-heap.  Protected by g_wait_timer_lock; the *_locked
+ * accessors require it to be held (callers hold the target's park_lock first). */
+static spinlock_t g_wait_timer_lock = SPINLOCK_INIT;
 static wait_timer_t wait_timer_heap[WAIT_TIMER_HEAP_MAX];
 static unsigned wait_timer_count;
 static unsigned long wait_timer_full_failures;
@@ -265,6 +270,23 @@ void proc_wait_timer_cancel_locked(task_t *t, uint64_t wait_seq)
     proc_put(removed.task);
 }
 
+/* Public wrappers: acquire g_wait_timer_lock around the *_locked helpers.
+ * Callers typically hold the target's park_lock (park_lock -> timer lock). */
+int proc_wait_timer_register(task_t *t, uint64_t deadline, uint64_t wait_seq)
+{
+    uint64_t flags = spin_lock_irqsave(&g_wait_timer_lock);
+    int r = proc_wait_timer_register_locked(t, deadline, wait_seq);
+    spin_unlock_irqrestore(&g_wait_timer_lock, flags);
+    return r;
+}
+
+void proc_wait_timer_cancel(task_t *t, uint64_t wait_seq)
+{
+    uint64_t flags = spin_lock_irqsave(&g_wait_timer_lock);
+    proc_wait_timer_cancel_locked(t, wait_seq);
+    spin_unlock_irqrestore(&g_wait_timer_lock, flags);
+}
+
 void proc_set_alarm_expire(task_t *t, uint64_t alarm_expire)
 {
     if (!t)
@@ -295,18 +317,41 @@ void sched_scan_timers(uint64_t now)
         __atomic_exchange_n(&next_alarm_scan, SCHED_NO_DEADLINE,
                             __ATOMIC_RELAXED);
 
-    uint64_t flags = spin_lock_irqsave(&proc_lock);
-    while (wait_timer_count && wait_timer_heap[0].deadline <= now) {
-        wait_timer_t timer = wait_timer_remove_index_locked(0);
-        if (timer.task && timer.wait_seq) {
-            timer.task->sched_level = 0;
-            if (!proc_try_wake_locked(timer.task, timer.wait_seq,
-                                      PROC_WAKE_TIMEOUT))
-                wait_timer_stale_expirations++;
+    struct { task_t *task; uint64_t seq; } expired[128];
+    unsigned expired_count;
+    uint64_t flags;
+    do {
+        expired_count = 0;
+        flags = spin_lock_irqsave(&g_wait_timer_lock);
+        while (wait_timer_count && wait_timer_heap[0].deadline <= now &&
+               expired_count < 128) {
+            wait_timer_t timer = wait_timer_remove_index_locked(0);
+            if (timer.task && timer.wait_seq) {
+                expired[expired_count].task = timer.task;
+                expired[expired_count].seq = timer.wait_seq;
+                expired_count++;
+            } else if (timer.task) {
+                proc_put(timer.task);
+            }
         }
-        proc_put(timer.task);
-    }
-    spin_unlock_irqrestore(&proc_lock, flags);
+        spin_unlock_irqrestore(&g_wait_timer_lock, flags);
+
+        for (unsigned i = 0; i < expired_count; i++) {
+            task_t *t = expired[i].task;
+            /* park_lock serializes the timeout wake against a concurrent
+             * signal wake; the removed timer entry makes the cancel inside
+             * the wake a no-op.  A task already woken (WOKEN/IDLE) is left
+             * alone. */
+            uint64_t plf = spin_lock_irqsave(&t->park_lock);
+            t->sched_level = 0;
+            int woke = proc_try_wake_locked_common(
+                t, expired[i].seq, PROC_WAKE_TIMEOUT, NULL, NULL);
+            spin_unlock_irqrestore(&t->park_lock, plf);
+            if (!woke)
+                wait_timer_stale_expirations++;
+            proc_put(t);
+        }
+    } while (expired_count == 128);
 
     if (scan_alarms) {
         uint64_t next_alarm = SCHED_NO_DEADLINE;
@@ -366,8 +411,15 @@ void sched_scan_timers(uint64_t now)
     posix_timer_tick();
 #endif
 
+    /* PSI stall accounting sample (kernel/core/psi.c). */
+    extern void psi_tick(void);
+    psi_tick();
+
 #ifdef CONFIG_ABI_NATIVE
     a20_timer_tick();
+    /* Periodic monitor sampling (Native ABI perf-style counters). */
+    extern void a20_monitor_tick(void);
+    a20_monitor_tick();
 #endif
 
 }

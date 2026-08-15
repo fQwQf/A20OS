@@ -113,6 +113,8 @@ int64_t sys_mkdirat(int dirfd, const char *path, int mode);
 int64_t sys_unlinkat(int dirfd, const char *path, int flags);
 int64_t sys_renameat2(int olddir, const char *oldpath,
                        int newdir, const char *newpath, int flags);
+int64_t sys_renameat(int olddir, const char *oldpath,
+                     int newdir, const char *newpath);
 int64_t sys_chdir(const char *path);
 int64_t sys_fchdir(int fd);
 int64_t sys_getcwd(char *buf, size_t size);
@@ -157,6 +159,10 @@ int64_t sys_mknod(const char *path, int mode, unsigned dev);
 int64_t sys_mknodat(int dirfd, const char *path, int mode, unsigned dev);
 
 int64_t sys_set_thread_area(void *ptr);
+int64_t sys_get_thread_area(void *ptr);
+int64_t sys_pause(void);
+int64_t sys_utime(const char *path, const void *times);
+int64_t sys_utimes(const char *path, const void *times);
 int64_t sys_exit(int code);
 int64_t sys_exit_group(int code);
 int64_t sys_getpid(void);
@@ -462,6 +468,13 @@ int64_t sys_kexec_file_load(int kernel_fd, int initrd_fd,
 int64_t sys_nfsservctl(int cmd, const void *arg, void *res);
 int64_t sys_map_shadow_stack(uint64_t addr, uint64_t size, unsigned flags);
 
+/* userfaultfd(2): user-space page-fault handling (kernel/ipc/userfaultfd.c). */
+int64_t sys_userfaultfd(unsigned flags);
+
+/* perf_event_open(2): software events (kernel/abi/linux/sys_perf.c). */
+int64_t sys_perf_event_open(const void *attr, int pid, int cpu, int group_fd,
+                            unsigned long flags);
+
 /* futex_wait / futex_wake split syscalls (sys_futex.c). */
 int64_t sys_futex_wait(void *uaddr, uint32_t val, const void *timeout,
                        uint32_t flags);
@@ -493,6 +506,10 @@ int64_t sys_listmount(uint64_t mnt_id, uint64_t last_mnt_id, uint64_t *list,
 int64_t sys_listns(unsigned int nstype, uint64_t *nsids, size_t nr);
 int64_t sys_open_tree_attr(int dfd, const char *path, unsigned int flags,
                            unsigned int attr_mask, void *attr, size_t size);
+
+/* LoongArch fileattr (sys_fileattr.c). */
+int64_t sys_file_getattr(int fd, void *attr);
+int64_t sys_file_setattr(int fd, void *attr);
 
 /* LSM introspection (sys_lsm.c). */
 int64_t sys_lsm_get_self_attr(unsigned int attr, void *ctx, size_t *size,

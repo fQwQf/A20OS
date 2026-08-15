@@ -243,6 +243,30 @@ native-futex-arch: $(NATIVE_FUTEX_BIN)
 native-futex-rv:
 	$(MAKE) ARCH=riscv64 NOMMU=$(NOMMU) native-futex-arch
 
+define NATIVE_DEEPEN_RECIPE
+@mkdir -p $(dir $(4))
+$(1) -ffreestanding -nostdlib -static \
+    $(2) \
+    -Iuser -Iuser/liba20rt \
+    -T$(NATIVE_LD) \
+    $(3) \
+    $(NATIVE_SDK_SRC) \
+    $(NATIVE_COMPILER_RT_SRC) \
+    $(NATIVE_ARCH_SRC) \
+    user/tests/test_native_deepen.c \
+    $(NATIVE_LIBS) \
+    -o $(4)
+endef
+
+$(NATIVE_DEEPEN_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) user/tests/test_native_deepen.c \
+		user/liba20rt/a20-generic.ld user/liba20rt/crt0_a20.h user/liba20rt/a20_syscall.h user/liba20rt/a20_pager.h
+	$(call NATIVE_DEEPEN_RECIPE,$(NATIVE_CC),$(NATIVE_CFLAGS),$(NATIVE_CRT0),$@)
+
+native-deepen-arch: $(NATIVE_DEEPEN_BIN)
+
+native-deepen-rv:
+	$(MAKE) ARCH=riscv64 NOMMU=$(NOMMU) native-deepen-arch
+
 define NATIVE_DEBUG_RECIPE
 @mkdir -p $(dir $(4))
 $(1) -ffreestanding -nostdlib -static \

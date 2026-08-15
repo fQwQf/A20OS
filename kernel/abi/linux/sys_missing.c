@@ -255,13 +255,23 @@ int64_t sys_mlock2(uint64_t addr, size_t len, int flags)
 
 int64_t sys_mseal(uint64_t addr, size_t len, unsigned flags)
 {
-    (void)addr;
-    (void)len;
-    (void)flags;
-    /* mseal seals a VMA against further modification.  A20OS does not track
-     * per-VMA seal state yet; accept the call as a no-op so probing tools
-     * work. */
-    return 0;
+    if (flags)
+        return -EINVAL;
+    if (addr & (PAGE_SIZE - 1))
+        return -EINVAL;
+    if (len == 0)
+        return 0;
+    if (addr + len < addr)
+        return -EINVAL;
+
+    task_t *t = proc_current();
+    if (!t || !t->mm)
+        return -EINVAL;
+
+    /* mseal(2): seal [addr, addr+len) against later layout/protection
+     * changes.  The core MM owns the VM_SEALED flag and enforces it in every
+     * mutation path; this ABI wrapper only validates the wire format. */
+    return mm_mseal(t->mm, addr, len);
 }
 
 int64_t sys_seccomp(unsigned op, unsigned flags, const void *uargs)
@@ -310,7 +320,9 @@ int64_t sys_nfsservctl(int cmd, const void *arg, void *res)
     (void)cmd;
     (void)arg;
     (void)res;
-    /* nfsservctl was removed in Linux 4.19; keep a predictable ENOSYS. */
+    /* nfsservctl(2) was removed in Linux 4.19; the register number still
+     * exists in the syscall table and -ENOSYS is the correct Linux 4.19+
+     * behavior for it. */
     return -ENOSYS;
 }
 
@@ -319,6 +331,8 @@ int64_t sys_map_shadow_stack(uint64_t addr, uint64_t size, unsigned flags)
     (void)addr;
     (void)size;
     (void)flags;
-    /* shadow stacks are an x86 CET feature; RISC-V has no shadow-stack syscall. */
+    /* map_shadow_stack(2) is an x86_64 CET feature.  On the RISC-V asm-generic
+     * table it is registered for number parity and -ENOSYS is the correct
+     * arch behavior (no shadow-stack syscall on this platform). */
     return -ENOSYS;
 }

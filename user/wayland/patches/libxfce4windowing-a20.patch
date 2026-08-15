@@ -88,3 +88,20 @@ index a7701e9..6cafda8 100644
          case WORKSPACE_GROUP_PROP_SCREEN:
              g_value_set_object(value, group->priv->screen);
              break;
+diff --git a/libxfce4windowing/xfw-screen.c b/libxfce4windowing/xfw-screen.c
+index ce972f6..830ad67 100644
+--- a/libxfce4windowing/xfw-screen.c
++++ b/libxfce4windowing/xfw-screen.c
+@@ -575,6 +575,12 @@ screen_destroyed(GdkScreen *gdk_screen, XfwScreen *screen) {
+ 
+ static XfwScreen *
+ xfw_screen_get(GdkScreen *gdk_screen) {
++    /* Under the Wayland backend the default GdkScreen can be NULL before the
++     * display is fully realized or after a monitor reconfiguration.  Guard
++     * against it here so callers receive NULL instead of dereferencing it. */
++    if (gdk_screen == NULL)
++        return NULL;
++
+     XfwScreen *screen = XFW_SCREEN(g_object_get_data(G_OBJECT(gdk_screen), GDK_SCREEN_XFW_SCREEN_KEY));
+ 
+     if (screen == NULL) {

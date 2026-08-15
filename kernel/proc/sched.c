@@ -8,7 +8,9 @@
 #include "core/stdio.h"
 #include "core/smp.h"
 #include "core/progress.h"
+#include "core/perf.h"
 #include "core/panic.h"
+#include "core/lock_counters.h"
 #include "proc/signal.h"
 #include "mm/vm.h"
 #include "cg/cgroup.h"
@@ -291,8 +293,10 @@ static void sched_runq_eevdf_del_weight(proc_runq_t *rq, task_t *t)
 void proc_sched_runq_init(void) {
     memset(sched_runq, 0, sizeof(sched_runq));
     memset(sched_cpu, 0, sizeof(sched_cpu));
-    for (unsigned i = 0; i < CONFIG_NR_CPUS; i++)
+    for (unsigned i = 0; i < CONFIG_NR_CPUS; i++) {
         spin_init(&sched_runq[i].lock);
+        lock_counters_register(&sched_runq[i].lock, "runq");
+    }
     sched_runqueue_migrations = 0;
     sched_violations = 0;
     sched_local_picks = 0;
@@ -631,6 +635,7 @@ void proc_sched_handle_reschedule_ipi(void)
     }
     __atomic_fetch_add(&sched_cpu[cpu].ipi_acks, 1, __ATOMIC_RELAXED);
     __atomic_thread_fence(__ATOMIC_ACQUIRE);
+    smp_membarrier_ipi_ack(cpu);
 }
 
 void proc_sched_tick(int from_user)
@@ -651,6 +656,15 @@ void proc_sched_tick(int from_user)
         slice = 1;
     if (now - cur->exec_start >= slice)
         proc_sched_request_cpu(cpu_current_id(), 0);
+}
+
+/* Sum of runnable tasks across online runqueues (used by the PSI tracker). */
+uint64_t proc_runq_load_sum(void)
+{
+    uint64_t sum = 0;
+    for (unsigned cpu = 0; cpu < CONFIG_NR_CPUS; cpu++)
+        sum += __atomic_load_n(&sched_runq[cpu].nr_running, __ATOMIC_RELAXED);
+    return sum;
 }
 
 int proc_sched_safe_point(void)
@@ -872,8 +886,11 @@ void proc_make_ready(task_t *t)
     }
     if (t->park_state == PROC_PARK_PREPARING ||
         t->park_state == PROC_PARK_PARKED) {
+        /* proc_lock -> park_lock is the documented order; the park-state
+         * transition itself is serialized by t->park_lock. */
+        uint64_t plf = spin_lock_irqsave(&t->park_lock);
         (void)proc_try_wake_locked(t, t->wait_seq, PROC_WAKE_EVENT);
-        proc_sched_assert_task_locked(t);
+        spin_unlock_irqrestore(&t->park_lock, plf);
         spin_unlock_irqrestore(&proc_lock, flags);
         return;
     }
@@ -1376,7 +1393,18 @@ void proc_sched_note_zombie(void)
     __atomic_store_n(&sched_zombies_pending, 1, __ATOMIC_RELEASE);
 }
 
-void context_switch(task_t *next) {
+/*
+ * Publish the switch of the CPU from prev to @next.  The locked variant
+ * assumes proc_lock is already held with the irqsave @flags from the caller's
+ * acquire and releases it at the same points as the wrapper; the wrapper only
+ * supplies the acquire.  sched() uses the locked variant so a context switch
+ * takes proc_lock once instead of twice (once for the preemption check and
+ * again here).  Holding proc_lock through the publication also closes the
+ * window in which a remote observer could see @next neither selected nor
+ * owned.  Lock order is unchanged: proc_lock -> mm_struct.lock is the
+ * documented order and mm_context_enter() only uses atomics.
+ */
+static void context_switch_locked(task_t *next, uint64_t flags) {
     if (!next || !next->kstack)
         return;
 
@@ -1396,7 +1424,6 @@ void context_switch(task_t *next) {
 
     next->cg_cpu_start = now;
 
-    uint64_t flags = spin_lock_irqsave(&proc_lock);
     unsigned cpu = cpu_current_id();
     if (next == proc_current()) {
         int had_dispatch_ref = next->dispatching;
@@ -1439,6 +1466,10 @@ void context_switch(task_t *next) {
     if (had_dispatch_ref)
         proc_put(next);
     spin_unlock_irqrestore(&proc_lock, flags);
+    if (prev && prev->pid != 0) {
+        __atomic_fetch_add(&prev->perf_switches, 1, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&g_perf_sw_context_switches, 1, __ATOMIC_RELAXED);
+    }
     if (prev && prev->pid >= 4 && next->pid >= 4)
         ktrace_sched("[SCHED] ctxsw: %d -> %d\n", prev->pid, next->pid);
     if (old)
@@ -1448,6 +1479,13 @@ void context_switch(task_t *next) {
     ARCH_SCHED_SWITCH(next);
     __switch(next->kstack);
     proc_switch_complete();
+}
+
+void context_switch(task_t *next) {
+    if (!next || !next->kstack)
+        return;
+    uint64_t flags = spin_lock_irqsave(&proc_lock);
+    context_switch_locked(next, flags);
 }
 
 void sched(void) {
@@ -1494,14 +1532,18 @@ void sched(void) {
     }
     if (next)
         proc_sched_assert_task_locked(next);
-    spin_unlock_irqrestore(&proc_lock, flags);
-
     if (next) {
         next->exec_start = now;
         next->eevdf_last_account = now;
-        context_switch(next);
+        /* Keep proc_lock held across the publication: context_switch_locked()
+         * releases it at the same point context_switch() would.  One acquire
+         * per switch instead of two halves proc_lock pressure in
+         * switch-heavy builds and closes the "neither selected nor owned"
+         * observation window entirely. */
+        context_switch_locked(next, flags);
         goto out;
     }
+    spin_unlock_irqrestore(&proc_lock, flags);
 
     /*
      * A wake can race after the empty runqueue pick while the blocked task is

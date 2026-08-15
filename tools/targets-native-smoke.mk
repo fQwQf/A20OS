@@ -107,7 +107,7 @@ $(UBD_SCRATCH_IMG): $(UBD_SCRATCH_BIG)
 	mcopy -o -i $@ $(UBD_SCRATCH_BIG) ::/big.bin
 
 smoke-dual-input:
-	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/dual-input-riscv64.log"; \
@@ -141,7 +141,7 @@ smoke-dual-input:
 	fi
 
 smoke-native-ubd:
-	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
 	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 $(UBD_SCRATCH_IMG)
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
@@ -167,7 +167,7 @@ smoke-native-ubd:
 	fi
 
 smoke-native-isolation:
-	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/native-isolation-riscv64.log"; \
@@ -190,7 +190,7 @@ smoke-native-isolation:
 	fi
 
 smoke-native-registry:
-	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/native-registry-riscv64.log"; \
@@ -213,7 +213,7 @@ smoke-native-registry:
 	fi
 
 smoke-native-rtcd:
-	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/native-rtcd-riscv64.log"; \
@@ -236,7 +236,7 @@ smoke-native-rtcd:
 	fi
 
 smoke-native-shmring:
-	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/native-shmring-riscv64.log"; \
@@ -259,7 +259,7 @@ smoke-native-shmring:
 	fi
 
 smoke-clock-vdso:
-	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/clock-vdso-riscv64.log"; \
@@ -282,7 +282,7 @@ smoke-clock-vdso:
 	fi
 
 smoke-native-svc:
-	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/native-svc-riscv64.log"; \
@@ -305,7 +305,7 @@ smoke-native-svc:
 	fi
 
 smoke-native-contract:
-	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/native-contract-riscv64.log"; \
@@ -331,7 +331,7 @@ smoke-native-contract:
 	fi
 
 smoke-native-personality:
-	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/native-personality-riscv64.log"; \
@@ -355,7 +355,7 @@ smoke-native-personality:
 	fi
 
 smoke-native-linux:
-	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/native-linux-riscv64.log"; \
@@ -381,7 +381,7 @@ smoke-native-linux:
 	fi
 
 smoke-native-ipc:
-	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/native-ipc-riscv64.log"; \
@@ -404,7 +404,7 @@ smoke-native-ipc:
 	fi
 
 smoke-native-signal:
-	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/native-signal-riscv64.log"; \
@@ -427,7 +427,7 @@ smoke-native-signal:
 	fi
 
 smoke-native-mm:
-	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/native-mm-riscv64.log"; \
@@ -450,7 +450,7 @@ smoke-native-mm:
 	fi
 
 smoke-native-futex:
-	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/native-futex-riscv64.log"; \
@@ -472,8 +472,32 @@ smoke-native-futex:
 		exit 1; \
 	fi
 
+smoke-native-deepen:
+	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 native-deepen-rv
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/native-deepen-riscv64.log"; \
+	status=0; \
+	{ sleep $(SMOKE_INPUT_DELAY); printf '/bin/native-deepen-rv\npoweroff\n'; } | \
+	$(TIMEOUT) $(SMOKE_TIMEOUT_DEEPEN) qemu-system-riscv64 \
+		-machine virt -m 1G -nographic -smp 1 -bios default \
+		-global virtio-mmio.force-legacy=false \
+		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-both-dev/fat32.img,if=none,format=raw,id=x0 \
+		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		-kernel .kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf \
+		> "$$log" 2>&1 || status=$$?; \
+	if grep -q 'NATIVE_DEEPEN: PASS' "$$log" && grep -q 'System is going down for power-off NOW' "$$log"; then \
+		echo "smoke-native-deepen: PASS; log saved to $$log"; \
+	else \
+		echo "smoke-native-deepen: failed with status $$status; tail of $$log:"; \
+		tail -n 100 "$$log"; \
+		exit 1; \
+	fi
+
 smoke-native-ext:
-	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/native-ext-riscv64.log"; \
@@ -496,7 +520,7 @@ smoke-native-ext:
 	fi
 
 smoke-native-debug:
-	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/native-debug-riscv64.log"; \

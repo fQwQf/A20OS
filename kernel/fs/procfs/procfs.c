@@ -112,6 +112,7 @@ static pf_type_t name_to_type(const char *name, int *out_pid) {
     if (strcmp(name, "oom") == 0) return PF_A20_OOM;
     if (strcmp(name, "task_lifetime") == 0) return PF_A20_TASK_LIFETIME;
     if (strcmp(name, "perf") == 0) return PF_A20_PERF;
+    if (strcmp(name, "lock_contention") == 0) return PF_A20_LOCK_CONTENTION;
     if (strcmp(name, "driver_lifecycle") == 0) return PF_A20_DRIVER_LIFECYCLE;
     if (strcmp(name, "objects") == 0) return PF_A20_OBJECTS;
     if (strcmp(name, "cmdline") == 0) return PF_CMDLINE;
@@ -415,6 +416,10 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
     } else if (dp && dp->type == PF_A20 && strcmp(name, "perf") == 0) {
         child = new_entry(name, PF_A20_PERF, 0);
         type = PF_A20_PERF;
+    } else if (dp && dp->type == PF_A20 &&
+               strcmp(name, "lock_contention") == 0) {
+        child = new_entry(name, PF_A20_LOCK_CONTENTION, 0);
+        type = PF_A20_LOCK_CONTENTION;
     } else if (dp && dp->type == PF_A20 && strcmp(name, "driver_lifecycle") == 0) {
         child = new_entry(name, PF_A20_DRIVER_LIFECYCLE, 0);
         type = PF_A20_DRIVER_LIFECYCLE;
@@ -1060,6 +1065,15 @@ static vfile_ops_t g_procfs_fops = {
     .readdir = procfs_freaddir,
     .close   = procfs_fclose,
 };
+
+/* Report whether a vfile belongs to procfs.  Used by the Linux ABI read/write
+ * path: procfs files must not take vf->offset_lock, because rendering a file
+ * (e.g. /proc/<pid>/fdinfo) can lock another task's vfile offset_lock and a
+ * procfs read under the shared-offset mutex could recurse on the same lock. */
+int vfs_is_procfs_vfile(const vfile_t *vf)
+{
+    return vf && vf->ops == &g_procfs_fops;
+}
 
 // 挂载 procfs 文件系统
 vnode_t *procfs_mount(void) {

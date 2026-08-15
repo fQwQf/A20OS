@@ -10,7 +10,16 @@
 #define PAGE_CACHE_INITIAL_PAGES 2048
 #define PAGE_CACHE_CHUNK_PAGES 1024
 #define PAGE_CACHE_HASH_BUCKETS 262144
+/* Independent per-hash-group spinlocks.  A warm hit only takes this bucket
+ * lock (plus an atomic refcount), never the global page-cache lock, so
+ * concurrent buffered readers on different buckets do not serialize. */
+#define PAGE_CACHE_BUCKET_LOCKS 1024
 #define PAGE_CACHE_FAULT_AROUND_PAGES 16
+/* Sequential-read prefetch window used by page_cache_readahead_vfile().
+ * Deliberately larger than the demand-fault window: compiler inputs are read
+ * sequentially, so a 128 KiB burst lets ext4 merge one contiguous block
+ * request instead of several 64 KiB round trips. */
+#define PAGE_CACHE_READAHEAD_PAGES 32
 #define PAGE_CACHE_WRITEBACK_BATCH_PAGES 256
 
 /*
@@ -34,6 +43,10 @@ typedef struct page_cache_page {
     uint64_t dirty_gen;
     uint64_t invalidate_gen;
     int uptodate;
+    /* Second-chance reference: set on hit under the bucket lock, cleared by
+     * eviction.  Lets eviction approximate LRU without touching a global list
+     * on every warm hit. */
+    unsigned char accessed;
     mutex_t fill_lock;
     pfn_t pfn;
     void *data;

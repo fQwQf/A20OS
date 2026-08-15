@@ -171,7 +171,7 @@ GUI_WAYLAND_DEPS = $(if $(filter 1,$(WAYLAND_GUI)),$(WAYLAND_PLAYER_STAMP) user/
 EXTRA_IMG = $(BUILD_DIR)/extra.img
 EXTRA_STAGING_DIR = $(BUILD_DIR)/extra-staging
 EXTRA_IMAGE_STAMP = $(BUILD_DIR)/.extra-image-id
-EXTRA_PACKAGES ?= vim git gcc rust
+EXTRA_PACKAGES ?= vim git gcc rust lamina
 RISCV_GNU_CC ?= riscv64-linux-gnu-gcc
 RISCV_GLIBC_SYSROOT ?= $(shell $(RISCV_GNU_CC) -print-sysroot 2>/dev/null)
 RISCV_GLIBC_LIB_CANDIDATES := $(RISCV_GLIBC_SYSROOT)/lib \
@@ -182,8 +182,11 @@ RISCV_GLIBC_LIB_DIR ?= $(patsubst %/ld-linux-riscv64-lp64d.so.1,%,$(firstword \
 RISCV_GLIBC_LOCAL_ROOT ?= user/external/riscv64-glibc-sysroot
 RISCV_GLIBC_LOCAL_LIB_DIR = $(RISCV_GLIBC_LOCAL_ROOT)/lib
 FEDORA_RISCV_RELEASE ?=
-USER_BUILD_ID = $(ARCH):$(NOMMU):$(USER_OPT):$(PROFILE)
 USER_BUILD_DESKTOP = $(if $(filter benchmark,$(PROFILE)),0,1)
+# The desktop (LVGL) binary is only produced when USER_BUILD_DESKTOP=1; include
+# it in the build signature so text-mode and GUI builds never share a stamp
+# (and thus never leave a stale desktop binary in the image).
+USER_BUILD_ID = $(ARCH):$(NOMMU):$(USER_OPT):$(PROFILE):$(USER_BUILD_DESKTOP)
 # $(wildcard) drops uninitialized git submodules (lvgl, fastfetch).  The
 # contest build must not fail when a tarball export or a non-recursive clone
 # leaves those directories absent entirely.
@@ -204,6 +207,7 @@ NATIVE_HELLO_BIN       := $(NATIVE_BUILD_DIR)/native-hello-$(NATIVE_TAG)
 NATIVE_HANDLE_BIN      := $(NATIVE_BUILD_DIR)/native-handle-$(NATIVE_TAG)
 NATIVE_LIBC_BIN        := $(NATIVE_BUILD_DIR)/native-libc-$(NATIVE_TAG)
 NATIVE_FUTEX_BIN       := $(NATIVE_BUILD_DIR)/native-futex-$(NATIVE_TAG)
+NATIVE_DEEPEN_BIN      := $(NATIVE_BUILD_DIR)/native-deepen-$(NATIVE_TAG)
 NATIVE_DEBUG_BIN       := $(NATIVE_BUILD_DIR)/native-debug-$(NATIVE_TAG)
 NATIVE_EXT_BIN         := $(NATIVE_BUILD_DIR)/native-ext-$(NATIVE_TAG)
 NATIVE_MM_BIN          := $(NATIVE_BUILD_DIR)/native-mm-$(NATIVE_TAG)
@@ -226,7 +230,7 @@ NATIVE_UEDUD_BIN       := $(NATIVE_BUILD_DIR)/uedud-$(NATIVE_TAG).a20drv
 NATIVE_PERSONALITY_BIN := $(NATIVE_BUILD_DIR)/native-personality-$(NATIVE_TAG)
 NATIVE_LINUX_BIN       := $(NATIVE_BUILD_DIR)/native-linux-$(NATIVE_TAG)
 NATIVE_OUTPUTS         := $(NATIVE_HELLO_BIN) $(NATIVE_HANDLE_BIN) \
-                          $(NATIVE_LIBC_BIN) $(NATIVE_FUTEX_BIN) \
+                          $(NATIVE_LIBC_BIN) $(NATIVE_FUTEX_BIN) $(NATIVE_DEEPEN_BIN) \
                           $(NATIVE_MM_BIN) $(NATIVE_SIGNAL_BIN) \
                           $(NATIVE_IPC_BIN) $(NATIVE_CONTRACT_BIN) \
                           $(NATIVE_SVCMAN_BIN) $(NATIVE_ECHOD_BIN) \
@@ -248,6 +252,13 @@ comma := ,
 NET_HOSTFWD ?= hostfwd=tcp::5555-:5555,hostfwd=udp::5555-:5555
 NETDEV_USER = -netdev user,id=net$(if $(strip $(NET_HOSTFWD)),$(comma)$(NET_HOSTFWD),)
 SMOKE_TIMEOUT ?= 20s
+# Full XFCE desktop bring-up under TCG software rendering is slow; the fixed
+# 15s scanout window in smoke_qemu_gui.py is not enough for the riscv64 image
+# to finish its first frame.  Allow each GUI smoke target to size the window.
+GUI_FRAME_WINDOW ?= 15
+# riscv64 software rendering in TCG needs substantially longer than the
+# default to complete the XFCE desktop's first scanout.
+GUI_FRAME_WINDOW_RV64 ?= 45
 # TCG boot can take longer than two seconds after a full image rebuild.  Wait
 # until the interactive mksh has had time to print its prompt before injecting
 # smoke commands; PASS markers and clean poweroff still decide the result.
@@ -256,6 +267,9 @@ SMOKE_INPUT_DELAY ?= 8
 # page coverage under TCG; it is the heaviest smoke and needs a longer budget.
 SMOKE_TIMEOUT_MM_ST ?= 45s
 SMOKE_TIMEOUT_MM_FORK_EXEC ?= 120s
+# smoke-native-deepen runs several blocking waits (FS event + socket event) plus
+# a user-space pager round trip under TCG; it needs more than the 20s default.
+SMOKE_TIMEOUT_DEEPEN ?= 60s
 SMOKE_LOG_DIR ?= .kernel-build/smoke
 STEP35_TIMEOUT ?= 300s
 STEP35_INPUT_DELAY ?= 8
@@ -748,16 +762,23 @@ KERNEL_OBJ = $(patsubst $(KERNEL_DIR)/%.c,$(BUILD_DIR)/%.o,$(filter-out user/% $
               $(patsubst $(KERNEL_DIR)/external/lwip/src/%.c,$(BUILD_DIR)/external/lwip/src/%.o,$(LWIP_KERNEL_SRC))
 KERNEL_OBJ += $(EARLY_DRIVER_BLOBS)
 
-# vDSO user image (riscv64): built out-of-tree of ASM_SRC on purpose, it is
-# user code linked with its own script.  The vdso.elf FILE is embedded
-# verbatim: p_offset == p_vaddr makes file layout == memory layout, ELF
-# header included (objcopy -O binary would strip the header and break
+# vDSO user image (riscv64/loongarch64): built out-of-tree of ASM_SRC on
+# purpose, it is user code linked with its own script.  The vdso.elf FILE is
+# embedded verbatim: p_offset == p_vaddr makes file layout == memory layout,
+# ELF header included (objcopy -O binary would strip the header and break
 # musl's vDSO parser).
-VDSO_CC   ?= $(CCACHE_PREFIX)$(RISCV_GNU_CC)
+VDSO_CC_riscv64       ?= $(CCACHE_PREFIX)$(RISCV_GNU_CC)
+VDSO_CC_loongarch64   ?= $(CCACHE_PREFIX)loongarch64-linux-gnu-gcc
+VDSO_CC               ?= $(VDSO_CC_$(ARCH))
+VDSO_OBJCOPY_riscv64     := -O elf64-littleriscv -B riscv:rv64
+VDSO_OBJCOPY_loongarch64 := -O elf64-loongarch -B loongarch
 VDSO_SRC_DIR := $(KERNEL_DIR)/vdso/$(ARCH)
 VDSO_ELF  := $(BUILD_DIR)/vdso/vdso.elf
 VDSO_BLOB := $(BUILD_DIR)/vdso/vdso_blob.o
 ifeq ($(ARCH),riscv64)
+KERNEL_OBJ += $(VDSO_BLOB)
+endif
+ifeq ($(ARCH),loongarch64)
 KERNEL_OBJ += $(VDSO_BLOB)
 endif
 
@@ -769,8 +790,8 @@ $(VDSO_ELF): $(VDSO_SRC_DIR)/vdso.S $(VDSO_SRC_DIR)/vdso.ld \
 	    -Wl,--hash-style=sysv -T $(VDSO_SRC_DIR)/vdso.ld -o $@ $<
 
 $(VDSO_BLOB): $(VDSO_ELF)
-	cd $(BUILD_DIR)/vdso && $(OBJCOPY) -I binary -O elf64-littleriscv \
-	    -B riscv:rv64 vdso.elf vdso_blob.o
+	cd $(BUILD_DIR)/vdso && $(OBJCOPY) -I binary $(VDSO_OBJCOPY_$(ARCH)) \
+	    vdso.elf vdso_blob.o
 
 # ASM sources
 ASM_SRC = $(shell find $(KERNEL_DIR)/arch/$(ARCH) -type f -name '*.S' | sort)
@@ -798,6 +819,8 @@ include tools/targets-dev.mk
 include tools/stm32.mk
 include tools/run-targets.mk
 include tools/targets-images.mk
+include tools/targets-rootfs.mk
+include tools/targets-distro.mk
 include tools/targets-extra.mk
 include tools/targets-native.mk
 include tools/targets-native-smoke.mk
