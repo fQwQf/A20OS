@@ -32,7 +32,7 @@
 
 **高性能、高兼容性的混合内核操作系统**
 
-[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](#) [![Architecture](https://img.shields.io/badge/Arch-RISC--V%20%7C%20ARM64%20%7C%20x86__64%20%7C%20LoongArch%20%7C%20PPC64LE%20%7C%20ARMv7-orange.svg)](#)
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](#) [![Architecture](https://img.shields.io/badge/Arch-RISC--V%20%7C%20ARM64%20%7C%20x86__64%20%7C%20LoongArch64%20%7C%20LoongArch32%20%7C%20PPC64LE%20%7C%20ARMv7-orange.svg)](#)
 
 </div>
 
@@ -58,6 +58,7 @@ A20OS 具备优秀的跨平台移植性，硬件抽象层 (HAL) 目前官方支�
 * **虚拟机环境 (QEMU)**：`qemu-virt-riscv64`, `qemu-virt-aarch64`, `qemu-virt-x86_64`, `qemu-virt-loongarch64`、`qemu-virt-ppc64le`（pSeries）
 * **物理开发板**：星光 2 (StarFive VisionFive 2)、龙芯 (Loongson LS2K1000)
 * **MCU bring-up**：STM32F103（ARMv7-M/Cortex-M3，NOMMU；当前提供启动、USART1、SysTick 与基础堆）
+* **LoongArch32 (LA32R) bring-up**：`ARCH=loongarch32 BOARD=nailoong` 面向NaiLoong  SoC / NaiLoong Core（软件 TLB refill，无 FPU/IOCSR，单核）；已在 LA32R 全系统模拟器上验证到 `init_kthread`，详见 [docs/platforms/loongarch32.md](docs/platforms/loongarch32.md)
 
 ## 构建与运行
 
@@ -85,6 +86,10 @@ make ARCH=aarch64 BOARD=qemu-virt-aarch64 run
 
 # QEMU pSeries 上运行 PPC64LE（MMU、单核）
 make ARCH=ppc64le BOARD=qemu-virt-ppc64le run
+
+# LoongArch32 (LA32R) 内核 bring-up（NaiLoong Core / NaiLoong SoC，需 LA32R 工具链，
+# 无 QEMU 目标；验证走 cemu 模拟器，见 docs/platforms/loongarch32.md）
+make ARCH=loongarch32 BOARD=nailoong BRINGUP=1 kernel-only
 
 # 带 GUI 的 QEMU 运行
 make run-gui-x86_64

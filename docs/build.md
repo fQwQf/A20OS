@@ -49,7 +49,7 @@ STM32 固件、QEMU 和烧录目标使用同一套 `BUILD_DIR` 命名。QEMU 运
 
 ## 常用变量
 
-- `ARCH`: 目标架构，如 `riscv64`、`aarch64`、`x86_64`、`loongarch64`、`ppc64le`、`arm32`、`riscv32`、`armv7m`。
+- `ARCH`: 目标架构，如 `riscv64`、`aarch64`、`x86_64`、`loongarch64`、`loongarch32`、`ppc64le`、`arm32`、`riscv32`、`armv7m`。
 - `BOARD`: 默认 `qemu-virt-<ARCH>`；STM32 时为 `stm32f103`。
 - `BRINGUP`: `1` 只编译内核，`0` 编译完整用户态。
 - `ABI`: `linux` / `native` / `both`，默认 `both`。
