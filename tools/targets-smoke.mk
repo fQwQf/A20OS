@@ -28,7 +28,7 @@ check-a20-idl: user/svc/a20_services_idl.h
 	echo "check-a20-idl: PASS"
 
 smoke-iommu-discovery:
-	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/iommu-discovery-riscv64.log"; \
@@ -233,7 +233,7 @@ smoke-arch-mmu-matrix:
 		log=".kernel-build/smoke/$$variant-shell.log"; \
 		mkdir -p .kernel-build/smoke; \
 		echo "=== smoke-arch-mmu-matrix: $$variant ==="; \
-		$(MAKE) ARCH=$$arch ABI=both BRINGUP=0 NOMMU=$$nommu dev-build >/dev/null; \
+		$(MAKE) ARCH=$$arch ABI=both BRINGUP=0 NOMMU=$$nommu USER_BUILD_DESKTOP=0 dev-build >/dev/null; \
 		case "$$arch" in \
 		arm32) qemu=qemu-system-arm; base="-machine virt -cpu cortex-a15" ;; \
 		aarch64) qemu=qemu-system-aarch64; base="-machine virt -cpu cortex-a57 -global virtio-mmio.force-legacy=false" ;; \
@@ -279,7 +279,7 @@ smoke-ppc64le:
 	fi
 
 smoke-abi-linux:
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/abi-linux-riscv64.log"; \
@@ -306,7 +306,7 @@ smoke-abi-linux:
 	fi
 
 smoke-a20-channel:
-	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/a20-channel-riscv64.log"; \
@@ -333,7 +333,7 @@ smoke-a20-channel:
 	fi
 
 smoke-ptrace:
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/ptrace-riscv64.log"; \
@@ -360,7 +360,7 @@ smoke-ptrace:
 	fi
 
 smoke-network-suite:
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/network-suite-riscv64.log"; \
@@ -388,7 +388,7 @@ smoke-network-suite:
 	fi
 
 smoke-proc-a20:
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/proc-a20-riscv64.log"; \
@@ -411,7 +411,7 @@ smoke-proc-a20:
 	fi
 
 smoke-proc-stress:
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/proc-stress-riscv64.log"; \
@@ -437,7 +437,7 @@ smoke-proc-stress:
 	fi
 
 smoke-procfs-stress:
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/procfs-stress-riscv64.log"; \
@@ -460,7 +460,7 @@ smoke-procfs-stress:
 	fi
 
 smoke-mm-stress:
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/mm-stress-riscv64.log"; \
@@ -484,7 +484,7 @@ smoke-mm-stress:
 	fi
 
 smoke-mm-fork-exec-race:
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 NR_CPUS=8 dev-build
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 NR_CPUS=8 USER_BUILD_DESKTOP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/mm-fork-exec-race-riscv64.log"; \
@@ -508,7 +508,7 @@ smoke-mm-fork-exec-race:
 	fi
 
 smoke-vfs-stress:
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
 	$(MAKE) -s ARCH=riscv64 ABI=linux BRINGUP=0 .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/isofs.img
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
@@ -537,7 +537,7 @@ smoke-vfs-stress:
 		fi
 
 smoke-vfs-edge:
-		$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
+		$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
 		@mkdir -p $(SMOKE_LOG_DIR)
 		@set -e; \
 		log="$(SMOKE_LOG_DIR)/vfs-edge-riscv64.log"; \
@@ -561,7 +561,7 @@ smoke-vfs-edge:
 		fi
 
 smoke-io-event:
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/io-event-riscv64.log"; \
@@ -589,7 +589,7 @@ smoke-io-event:
 	fi
 
 smoke-syscall-ext:
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/syscall-ext-riscv64.log"; \
@@ -612,7 +612,7 @@ smoke-syscall-ext:
 	fi
 
 smoke-sched-stress:
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/sched-stress-riscv64.log"; \
@@ -635,7 +635,7 @@ smoke-sched-stress:
 	fi
 
 smoke-futex-stress:
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/futex-stress-riscv64.log"; \
@@ -658,7 +658,7 @@ smoke-futex-stress:
 	fi
 
 smoke-scm-stress:
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/scm-stress-riscv64.log"; \
@@ -681,7 +681,7 @@ smoke-scm-stress:
 	fi
 
 smoke-evdev-stress:
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/evdev-stress-riscv64.log"; \
@@ -704,7 +704,7 @@ smoke-evdev-stress:
 	fi
 
 smoke-signalfd-stress:
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/signalfd-stress-riscv64.log"; \
