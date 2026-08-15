@@ -344,10 +344,11 @@ void sched_scan_timers(uint64_t now)
              * alone. */
             uint64_t plf = spin_lock_irqsave(&t->park_lock);
             t->sched_level = 0;
+            int stale = t->wait_seq != expired[i].seq;
             int woke = proc_try_wake_locked_common(
                 t, expired[i].seq, PROC_WAKE_TIMEOUT, NULL, NULL);
             spin_unlock_irqrestore(&t->park_lock, plf);
-            if (!woke)
+            if (!woke && stale)
                 wait_timer_stale_expirations++;
             proc_put(t);
         }
