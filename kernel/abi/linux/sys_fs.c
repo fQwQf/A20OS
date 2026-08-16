@@ -454,7 +454,8 @@ int64_t sys_readv(int fd, const void *iov, int iovcnt) {
 int64_t sys_openat(int dirfd, const char *path, int flags, int mode) {
     if (!path) return -EFAULT;
     char kpath[MAX_PATH_LEN];
-    if (user_strncpy(kpath, path, MAX_PATH_LEN) < 0) return -EFAULT;
+    long pr0 = user_path_strncpy(kpath, path, MAX_PATH_LEN);
+    if (pr0 < 0) return pr0;
     char full[MAX_PATH_LEN];
     int pr = syscall_path_at(dirfd, kpath, full, sizeof(full));
     if (pr < 0) {
@@ -645,7 +646,8 @@ int64_t sys_truncate(const char *path, long length) {
     if (length < 0) return -EINVAL;
     if (!path) return -EFAULT;
     char kpath[MAX_PATH_LEN];
-    if (user_strncpy(kpath, path, MAX_PATH_LEN) < 0) return -EFAULT;
+    long pr0 = user_path_strncpy(kpath, path, MAX_PATH_LEN);
+    if (pr0 < 0) return pr0;
     return vfs_truncate(kpath, (size_t)length);
 }
 
