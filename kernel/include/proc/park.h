@@ -80,6 +80,7 @@ typedef struct proc_wake_q {
  */
 proc_wait_token_t proc_park_prepare(proc_wait_mode_t mode,
                                     uint64_t deadline);
+/* Caller holds proc_current()->park_lock. */
 proc_wait_token_t proc_park_prepare_locked(proc_wait_mode_t mode,
                                            uint64_t deadline);
 int proc_park_cancel(proc_wait_token_t token);
