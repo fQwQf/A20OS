@@ -45,11 +45,6 @@ int64_t sys_inotify_init1(int flags)
     return inotify_create_file(flags);
 }
 
-int64_t sys_inotify_init(int flags)
-{
-    return inotify_create_file(flags);
-}
-
 int64_t sys_inotify_add_watch(int fd, const char *pathname, uint32_t mask)
 {
     int64_t gfd = fdtable_get_current(fd);

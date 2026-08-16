@@ -343,7 +343,7 @@ smoke-driver-lifecycle:
 	fi
 
 smoke-hda:
-	rm -f $(USER_BUILD_DIR)/hda.a20drv
+	rm -f user/build/x86_64/hda.a20drv
 	$(MAKE) ARCH=x86_64 BOARD=qemu-virt-x86_64 ABI=both BRINGUP=0 \
 		CONFIG_HDA_SMOKE_TEST=y DRVMOD_SMOKE=1 USER_BUILD_DESKTOP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)

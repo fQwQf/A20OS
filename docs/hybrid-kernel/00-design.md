@@ -4,7 +4,7 @@
 
 ## 设计定位
 
-A20OS 同时提供两套用户接口：`abi/linux`（`kernel/abi/linux/syscall_table.def` 登记 362 个 syscall，运行 musl 程序，是当前主用户态运行时）与 `abi/native`（`kernel/abi/native/syscall_table.def` 登记 136 个 syscall，面向能力、句柄与事件的新接口）。混合内核是这两套接口共享的执行底座：**把性能关键路径留在内核态，把可崩溃、可重启的用户态服务作为系统组成部分**。
+A20OS 同时提供两套用户接口：`abi/linux`（`kernel/abi/linux/syscall_table.def` 登记 361 个 syscall，运行 musl 程序，是当前主用户态运行时）与 `abi/native`（`kernel/abi/native/syscall_table.def` 登记 136 个 syscall，面向能力、句柄与事件的新接口）。混合内核是这两套接口共享的执行底座：**把性能关键路径留在内核态，把可崩溃、可重启的用户态服务作为系统组成部分**。
 
 划分依据是一条判定规则：
 
@@ -26,7 +26,7 @@ A20OS 同时提供两套用户接口：`abi/linux`（`kernel/abi/linux/syscall_t
 │  内核态驱动（lwIP 网络、virtio-blk 数据面）           │
 ├────────────────────────────────────────────────────┤
 │ 兼容层                                               │
-│  Linux ABI(362 syscall) + vDSO 快路径                 │
+│  Linux ABI(361 syscall) + vDSO 快路径                 │
 └────────────────────────────────────────────────────┘
 ```
 
