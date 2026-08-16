@@ -31,6 +31,7 @@
 #include "proc/proc_internal.h"
 #include "mm/mm.h"
 #include "mm/elf.h"
+#include "mm/vm.h"
 #include "fs/vfs.h"
 #include "fs/fdtable.h"
 #include "sys/usercopy.h"
@@ -1002,7 +1003,8 @@ int64_t sys_a20_vm_alloc(const a20_syscall_args_t *args)
     uint64_t addr = proc_mmap(kargs.addr_hint, (size_t)kargs.length,
                               (int)kargs.prot, 0x20 /* MAP_ANONYMOUS */,
                               -1, 0);
-    if (addr == 0) return -A20_ERR_NO_MEMORY;
+    if (addr == 0 || mm_addr_is_error((vaddr_t)addr))
+        return -A20_ERR_NO_MEMORY;
 
     kargs.out_addr = addr;
     if (a20_copy_struct_to_user(uargs, &kargs, sizeof(kargs)) < 0)
