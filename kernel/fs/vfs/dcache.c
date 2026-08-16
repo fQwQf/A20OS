@@ -212,10 +212,9 @@ vnode_t *vfs_dcache_lookup(vnode_t *dir, const char *name)
     for (int i = g_dcache_hash[h]; i >= 0; i = g_dcache[i].hash_next) {
         vfs_dcache_entry_t *e = &g_dcache[i];
         if (e->used && e->mnt == dir->mnt && e->parent_ino == dir->ino &&
-            strcmp(e->name, name) == 0 && e->vn && vnode_ref_read(e->vn) > 0) {
+            strcmp(e->name, name) == 0 && vnode_get_unless_zero(e->vn)) {
             e->age = ++g_dcache_age;
             e->accessed = 1;
-            vnode_get(e->vn);
             vnode_t *vn = e->vn;
             dcache_bucket_unlock_irqrestore(h, bf);
             return vn;
