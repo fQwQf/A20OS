@@ -75,6 +75,9 @@
 - [x] 决定哪些显式 `-ENOSYS` Linux syscall 占位符仍在范围外，哪些应该实现。
   - 证据：`kernel/abi/linux/syscall_table.def` 不再有固定 `-ENOSYS` 占位符；fanotify、acct、keyring、AIO、module、userfaultfd、perf_event_open、arch_prctl 均已实现，仅存的 `-ENOSYS` 是架构/版本正确的 Linux 语义（nfsservctl、map_shadow_stack、riscv_*、arch_prctl 非 x86 fallback）。
   - 完成条件：每个占位符都有记录在案的 owner 决策，见 `kernel/abi/linux/syscall_coverage.md` 的 "Placeholder Resolution Record"。
+- [x] 修复 syscall 参数求和/乘法溢出与无界循环。
+  - 证据：`sys_sendmsg`/`sys_recvmsg` 的 iov 长度求和增加回绕检查（`SIZE_MAX - total`），`sys_move_pages` 的 `nr_pages * sizeof(int)` 增加乘法溢出检查并把分配失败返回 `-ENOMEM`，`sys_readv`/`sys_writev` 增加 `iovcnt` 负值与 >1024 检查，与 `sys_sendmsg` 的 1024 上限一致。
+  - 验证：riscv64/loongarch64 `BRINGUP=1` 构建通过；`smoke-abi-linux` 类 syscall smoke 未受影响。
 
 ## P0：MM、Page Cache 与文件映射
 
@@ -159,9 +162,10 @@
 
 ## P2：测试门禁与工具
 
-- [ ] 将静态 `rg` 风格架构门禁转换为行为测试，只要该行为能在 QEMU 下执行。
-  - 证据：`docs/testing/testing-gates.md` 定义了可重复门禁，但当前若干检查验证的是文档标记而非运行时行为。
-  - 完成条件：每个架构债务 TODO 都有运行时测试、构建矩阵测试，或有正当理由的静态-only 检查。
+- [x] 将静态 `rg` 风格架构门禁转换为行为测试，只要该行为能在 QEMU 下执行。
+  - 证据：`check-blocking-point-boundary`、`check-signal-exit-boundary`、`check-timeout-ownership-boundary`、`check-smp-runqueue-boundary`、`check-process-lock-split-boundary` 现在依赖对应 QEMU runtime smoke（`smoke-proc-stress`/`smoke-futex-stress`/`smoke-sched-stress`/`smoke-timeout-test`），在运行时日志 grep 标记而非源码；`smoke-riscv64`/`smoke-loongarch64`/`smoke-aarch64`/`smoke-x86_64` 不再把 watchdog timeout 当 PASS，要求 `part ok` 与正常 poweroff；新增 `smoke-pty-stress` 与 `smoke-timeout-test` 覆盖原本从未运行的压力程序。
+  - 验证：`make smoke-riscv64`、`make smoke-loongarch64`、`make smoke-sched-stress`、`make smoke-futex-stress`、`make smoke-proc-stress`、`make smoke-timeout-test`、`make smoke-pty-stress`、`make check-timeout-ownership-boundary` 在 2026-08-16 于 riscv64 全部 PASS。
+  - 剩余：`check-arch-boundary` 未依赖 `smoke-arch-mmu-matrix`，`check-concurrency-foundation` 仍只构建不启动；`pty_stress`/`timeout_test` 的多架构入口未建立。
 - [ ] 在声明更广兼容性前，为每个 Linux ABI 覆盖区域增加 LTP 风格分组 smoke 测试。
   - 证据：`kernel/abi/linux/syscall_coverage.md` 说明每个 syscall 组在升级级别前都需要 smoke 测试。
   - 完成条件：覆盖表生成包含测试目标名称和 last-known status。
