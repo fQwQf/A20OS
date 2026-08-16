@@ -12,7 +12,7 @@ Every registered entry is implemented; no syscall is a fixed `-ENOSYS` placehold
 
 ## Current Summary
 
-`syscall_table.def` currently registers 343 dispatch entries, including two A20OS extensions and five x86_64-only legacy entries on spare slots (`time`/`pause`/`utime`/`utimes`/`get_thread_area`). Registration is dispatch coverage, not a claim of semantic Linux completeness. Every registered entry has a real handler; the only `-ENOSYS` returns are the arch/version-correct Linux semantics for removed or architecture-specific syscalls (`nfsservctl` removed in Linux 4.19, `map_shadow_stack` is x86 CET, RISC-V-only syscalls on other arches, `arch_prctl` on non-x86). Registered non-placeholder calls may still support only a subset of Linux commands, flags, object types, or concurrency semantics.
+`syscall_table.def` currently registers 362 dispatch entries, including two A20OS extensions and five x86_64-only legacy entries on spare slots (`time`/`pause`/`utime`/`utimes`/`get_thread_area`). Registration is dispatch coverage, not a claim of semantic Linux completeness. Every registered entry has a real handler; the only `-ENOSYS` returns are the arch/version-correct Linux semantics for removed or architecture-specific syscalls (`nfsservctl` removed in Linux 4.19, `map_shadow_stack` is x86 CET, RISC-V-only syscalls on other arches, `arch_prctl` on non-x86). Registered non-placeholder calls may still support only a subset of Linux commands, flags, object types, or concurrency semantics.
 
 | Area | Level | Notes |
 | --- | --- | --- |
